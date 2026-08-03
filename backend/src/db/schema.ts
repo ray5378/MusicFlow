@@ -25,6 +25,7 @@ export const artists = sqliteTable("artists", {
   country: text("country"),
   birthDate: text("birth_date"),
   albumCount: integer("album_count").default(0),
+  scrapeMissing: integer("scrape_missing").default(0),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

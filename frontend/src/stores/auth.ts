@@ -20,6 +20,9 @@ export const useAuthStore = defineStore("auth", () => {
     localStorage.setItem("username", data.username);
     localStorage.setItem("isAdmin", String(data.isAdmin));
     localStorage.setItem("userSalt", data.subsonicToken);
+    // Preload homepage data in the background (playlists, favorites, first pages...)
+    const { usePreloadStore } = await import("@/stores/preload");
+    usePreloadStore().preloadHome();
     return data;
   }
 
@@ -32,6 +35,17 @@ export const useAuthStore = defineStore("auth", () => {
     localStorage.removeItem("username");
     localStorage.removeItem("isAdmin");
     localStorage.removeItem("userSalt");
+    // Release memory: clear player queue/audio, favorites, cached preload data
+    // (dynamic imports avoid circular dependency at module load time)
+    import("@/stores/player").then(({ usePlayerStore }) => {
+      usePlayerStore().clearQueue();
+    }).catch(() => {});
+    import("@/stores/favorites").then(({ useFavoritesStore }) => {
+      useFavoritesStore().clearFavorites();
+    }).catch(() => {});
+    import("@/stores/preload").then(({ usePreloadStore }) => {
+      usePreloadStore().reset();
+    }).catch(() => {});
   }
 
   return { token, username, isAdmin, userSalt, isLoggedIn, login, logout };

@@ -5,6 +5,7 @@ import { eq, like, sql, or, and } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
+import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 
 export const restRoutes = new Hono();
 
@@ -507,8 +508,8 @@ restRoutes.get("/getSimilarSongs2", (c) => c.json(ok({ similarSongs2: { song: []
 restRoutes.get("/getPlaylists", (c) => {
   const user = c.get("user");
   const allPlaylists = db.select().from(playlists).all();
-  const visible = allPlaylists.filter(p => p.ownerId === user?.id || p.isPublic);
-  return c.json(ok({ playlists: { playlist: visible.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: p.coverArt ? `pl-${p.id}` : undefined, comment: p.comment || "" })) } }));
+  const visible = allPlaylists.filter(p => p.isPublic || p.ownerId === user?.id || user?.isAdmin);
+  return c.json(ok({ playlists: { playlist: visible.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
 restRoutes.get("/getPlaylist", (c) => {
@@ -516,14 +517,32 @@ restRoutes.get("/getPlaylist", (c) => {
   const user = c.get("user");
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json(ok({ error: { code: 70, message: "Playlist not found" } }));
+  // Private playlists are only visible to the owner (admins can view all)
+  if (!playlist.isPublic && playlist.ownerId !== user?.id && !user?.isAdmin) {
+    return c.json(ok({ error: { code: 50, message: "Playlist is private" } }));
+  }
   const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlist.id)).all();
   const starredSet = getStarredSet(user?.id);
+  // OpenSubsonic clients can only play library-matched tracks. Unmatched remote
+  // stubs are NOT exposed to third-party clients (they cannot be streamed);
+  // the web UI uses /rest/api/v1/playlists/:id/tracks to see the full list.
+  const playableEntries = entries.filter(e => e.playable && e.songId);
+  const entryChildren = playableEntries.map(e => {
+    const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
+    return song ? { ...songToChild(song, starredSet), playable: true } : null;
+  }).filter(Boolean);
   return c.json(ok({ playlist: {
     id: playlist.id, name: playlist.name, owner: playlist.ownerId, public: !!playlist.isPublic,
     created: playlist.createdAt || new Date().toISOString(), changed: playlist.updatedAt || new Date().toISOString(),
-    songCount: playlist.songCount || 0, duration: playlist.duration || 0,
-    coverArt: playlist.coverArt ? `pl-${playlist.id}` : undefined, comment: playlist.comment || "",
-    entry: entries.filter(e => e.playable && e.songId).map(e => { const song = db.select().from(songs).where(eq(songs.id, e.songId!)).get(); return song ? songToChild(song, starredSet) : { id: e.songId, isDir: false, title: e.externalTitle || "", artist: e.externalArtist || "", album: e.externalAlbum || "", duration: e.externalDuration || 0 }; }),
+    songCount: playableEntries.length, duration: playableEntries.reduce((sum, e) => {
+      const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
+      return sum + (song?.duration || 0);
+    }, 0),
+    coverArt: `pl-${playlist.id}`, comment: playlist.comment || "",
+    sourcePlatform: playlist.sourcePlatform || "",
+    isImported: !!playlist.sourceUrl,
+    syncEnabled: !!playlist.syncEnabled,
+    entry: entryChildren,
   } }));
 });
 
@@ -575,12 +594,26 @@ restRoutes.all("/createPlaylist", async (c) => {
 });
 
 restRoutes.all("/updatePlaylist", async (c) => {
+  const user = c.get("user");
   const body = await parseBody(c);
   const playlistId = (body.playlistId as string) || (body.id as string) || "";
   if (!playlistId) return c.json(ok({ error: { code: 10, message: "Missing playlistId" } }));
+  const playlist = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
+  if (!playlist) return c.json(ok({ error: { code: 70, message: "Playlist not found" } }));
+  // Only owner (or admin) can modify a playlist; others' public playlists are read-only
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) {
+    return c.json(ok({ error: { code: 50, message: "Not authorized to modify this playlist" } }));
+  }
+  const isImported = !!playlist.sourceUrl;
+  // Imported playlists are read-only for tracks: track list follows the platform, sync via /sync
+  const wantsTrackEdit = toIdArray(body.songIdToAdd).length > 0 || toIdArray(body.songIdToRemove).length > 0 || toIdArray(body.songIndexToRemove).length > 0;
+  if (isImported && wantsTrackEdit) {
+    return c.json(ok({ error: { code: 50, message: "导入歌单的曲目只读,请在原平台修改后同步" } }));
+  }
   if (body.name) db.update(playlists).set({ name: body.name as string, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
   if (body.comment !== undefined) db.update(playlists).set({ comment: String(body.comment), updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
   if (body.public !== undefined) db.update(playlists).set({ isPublic: body.public ? 1 : 0, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
+  if (body.syncEnabled !== undefined) db.update(playlists).set({ syncEnabled: body.syncEnabled ? 1 : 0, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
 
   // Remove by song index (OpenSubsonic: songIndexToRemove, zero-based positions)
   const indicesToRemove: number[] = toIdArray(body.songIndexToRemove).map(x => parseInt(x)).filter(n => !isNaN(n));
@@ -608,16 +641,28 @@ restRoutes.all("/updatePlaylist", async (c) => {
       if (!exists) db.insert(playlistSongs).values({ playlistId, songId: sid, position: count + i, playable: 1 }).run();
     });
   }
+  // Track list changed -> the self-built cover (first song's album cover) may need refresh
+  if (idsToAdd.length > 0 || indicesToRemove.length > 0 || idsToRemove.length > 0) {
+    clearPlaylistCoverCache(playlistId);
+  }
   refreshPlaylistCounts(playlistId);
   return c.json(ok());
 });
 
 restRoutes.all("/deletePlaylist", async (c) => {
+  const user = c.get("user");
   const body = await parseBody(c);
   const id = (body.id as string) || (body.playlistId as string) || "";
   if (!id) return c.json(ok({ error: { code: 10, message: "Missing id" } }));
+  const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
+  if (!playlist) return c.json(ok({ error: { code: 70, message: "Playlist not found" } }));
+  // Only owner (or admin) can delete; others' public playlists are read-only
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) {
+    return c.json(ok({ error: { code: 50, message: "Not authorized to delete this playlist" } }));
+  }
   db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run();
   db.delete(playlists).where(eq(playlists.id, id)).run();
+  clearPlaylistCoverCache(id);
   return c.json(ok());
 });
 
@@ -628,6 +673,9 @@ function refreshPlaylistCounts(playlistId: string) {
     if (e.playable && e.songId) {
       const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
       if (song) { duration += song.duration || 0; count++; }
+    } else if (e.externalTitle) {
+      duration += (e.externalDuration || 0) / 1000;
+      count++;
     }
   }
   db.update(playlists).set({ songCount: count, duration, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
@@ -903,8 +951,22 @@ restRoutes.get("/getCoverArt", async (c) => {
   } else if (id.startsWith("ar-")) {
     const artist = db.select().from(artists).where(eq(artists.id, id.slice(3))).get();
     if (artist) {
-      const firstAlbum = db.select().from(albums).where(eq(albums.artistId, artist.id)).get();
-      coverRef = firstAlbum?.coverArt || artist.coverArt || null;
+      // Prefer the scraped artist avatar (ar-<id>.jpg); fall back to the artist's first album cover
+      coverRef = artist.coverArt || null;
+      if (!coverRef) {
+        const firstAlbum = db.select().from(albums).where(eq(albums.artistId, artist.id)).get();
+        coverRef = firstAlbum?.coverArt || null;
+      }
+    }
+  } else if (id.startsWith("pl-")) {
+    // Playlist cover: plain local image (imported platform cover or first song's album cover)
+    const playlistCover = getPlaylistCover(id.slice(3));
+    if (playlistCover) {
+      const filePath = path.join(process.cwd(), "data", "covers", playlistCover.file);
+      if (fs.existsSync(filePath)) {
+        const data = fs.readFileSync(filePath);
+        return new Response(data, { headers: { "Content-Type": playlistCover.mime, "Cache-Control": "public, max-age=86400" } });
+      }
     }
   } else {
     coverRef = id;
@@ -925,8 +987,9 @@ restRoutes.get("/getCoverArt", async (c) => {
     }
   }
 
+  // Placeholder: no cache so the cover updates as soon as a real one is available
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300"><rect fill="#1a1a2e" width="300" height="300"/><circle cx="150" cy="130" r="50" fill="#16213e"/><circle cx="150" cy="130" r="20" fill="#0f3460"/><rect x="135" y="160" width="30" height="60" rx="4" fill="#e94560" opacity="0.8"/></svg>`;
-  return new Response(svg, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" } });
+  return new Response(svg, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" } });
 });
 
 // libopensonic/MA uses use_views=True by default, appending .view to every endpoint.

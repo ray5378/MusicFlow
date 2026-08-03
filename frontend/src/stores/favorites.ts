@@ -44,5 +44,11 @@ export const useFavoritesStore = defineStore("favorites", () => {
     try { await api.get(`/rest/unstar?id=${songId}`); } catch { favoriteSongIds.value.add(songId); throw new Error("操作失败"); }
   }
 
-  return { favoriteSongIds, loaded, loading, loadFavorites, isFavorite, toggleFavorite, removeFavorite };
+  // Clear all cached favorites (called on logout to free memory)
+  function clearFavorites() {
+    favoriteSongIds.value = new Set();
+    loaded.value = false;
+  }
+
+  return { favoriteSongIds, loaded, loading, loadFavorites, isFavorite, toggleFavorite, removeFavorite, clearFavorites };
 });

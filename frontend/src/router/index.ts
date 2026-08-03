@@ -15,6 +15,7 @@ const routes = [
     children: [
       { path: "", redirect: "/songs" },
       { path: "songs", name: "Songs", component: () => import("@/views/Music/index.vue") },
+      { path: "genres", name: "Genres", component: () => import("@/views/Genres/index.vue") },
       { path: "albums", name: "Albums", component: () => import("@/views/Albums/index.vue") },
       { path: "albums/:id", name: "AlbumDetail", component: () => import("@/views/Albums/Detail.vue") },
       { path: "artists", name: "Artists", component: () => import("@/views/Artists/index.vue") },

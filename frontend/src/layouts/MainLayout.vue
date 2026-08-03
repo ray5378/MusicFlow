@@ -7,6 +7,7 @@
       </div>
       <el-menu :default-active="activeMenu" :collapse="sidebarCollapsed" router class="sidebar-menu">
         <el-menu-item index="/songs"><el-icon><Headset /></el-icon><template #title>音乐</template></el-menu-item>
+        <el-menu-item index="/genres"><el-icon><Collection /></el-icon><template #title>风格</template></el-menu-item>
         <el-menu-item index="/albums"><el-icon><Service /></el-icon><template #title>专辑</template></el-menu-item>
         <el-menu-item index="/artists"><el-icon><User /></el-icon><template #title>艺术家</template></el-menu-item>
         <el-menu-item index="/playlists"><el-icon><List /></el-icon><template #title>歌单</template></el-menu-item>
@@ -245,7 +246,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, Avatar, ChatDotRound, Setting, Close, Plus, Loading } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, Avatar, ChatDotRound, Setting, Close, Plus, Loading, Collection } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -368,8 +369,12 @@ async function toggleCurrentFavorite() {
   } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
 }
 
-// Load favorites once on mount
-nextTick(() => { favoritesStore.loadFavorites(); });
+// Load favorites + preload homepage data once on mount (refresh-page scenario)
+nextTick(() => {
+  if (!authStore.isLoggedIn) return; // not logged in: avoid fetching any data
+  favoritesStore.loadFavorites();
+  import("@/stores/preload").then(({ usePreloadStore }) => usePreloadStore().preloadHome()).catch(() => {});
+});
 
 // Auto-scroll lyrics to the active line in play mode (waits for DOM update)
 watch(() => playerStore.currentLyricIndex, async (idx) => {

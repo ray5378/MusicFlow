@@ -71,6 +71,7 @@ export function initDatabase() {
       country TEXT,
       birth_date TEXT,
       album_count INTEGER DEFAULT 0,
+      scrape_missing INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -264,6 +265,10 @@ export function initDatabase() {
   // Migration: add pass_enc column to existing users table (older DBs)
   try {
     sqlite.exec("ALTER TABLE users ADD COLUMN pass_enc TEXT");
+  } catch {}
+  // Migration: add scrape_missing column to artists table (older DBs)
+  try {
+    sqlite.exec("ALTER TABLE artists ADD COLUMN scrape_missing INTEGER DEFAULT 0");
   } catch {}
   // Backfill pass_enc for the default admin (admin/admin) if missing
   try {
