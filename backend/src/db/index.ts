@@ -328,15 +328,20 @@ export function initDatabase() {
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_retention", "7");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
-  // Default candidate pool: a handful of stable, high-quality NetEase + QQ editorial playlists.
-  // URLs use the same share-link form importPlaylistFromUrl already understands, so no new fetcher is needed.
+  // Default candidate pool: NetEase official editorial charts. These IDs are
+  // long-lived and maintained by NetEase itself (verified 2026-08). Each day the
+  // scheduler picks one via `dayOfYear(today) % pool.length`, so the daily mix
+  // rotates across charts. Replace with your own favorites via the admin API
+  // (PUT /rest/api/v1/daily-recommend/candidates) — both QQ and NetEase share
+  // URLs work.
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_candidates", JSON.stringify([
-    { platform: "netease", url: "https://music.163.com/playlist?id=60198", name: "华语流行榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=60131", name: "云音乐热歌榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=2409164866", name: "欧美流行" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=7234914606", name: "电子精选" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=2409164866", name: "民谣合集" },
-    { platform: "qq", url: "https://y.qq.com/n/ryqq/playlist/7148888319", name: "QQ 流行榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=3778678", name: "网易热歌榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=19723756", name: "网易飙升榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=3779629", name: "网易新歌榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易原创榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=60198", name: "美国Billboard榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=60131", name: "日本Oricon榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=180106", name: "英国UK榜" },
   ]));
 
   console.log("Database initialized successfully");
