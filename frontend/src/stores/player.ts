@@ -81,11 +81,10 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function playQueue(songs: Song[], index: number = 0) {
-    if (playMode.value === "shuffle") {
-      const shuffled = [...songs];
-      for (let i = shuffled.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
-      queue.value = shuffled;
-    } else { queue.value = [...songs]; }
+    // Keep the queue in its original order — shuffle is handled per-skip in
+    // next()/prev() via randomIndex(), not by reordering the array. This keeps
+    // the queue panel display stable and currentIndex pointing at the right song.
+    queue.value = [...songs];
     currentIndex.value = index;
     startPlayback();
   }
@@ -153,11 +152,22 @@ export const usePlayerStore = defineStore("player", () => {
     if (!howl) return; if (isPlaying.value) howl.pause(); else howl.play();
   }
 
+  // Pick a random index different from the current one (for shuffle mode).
+  // Keeps the next pick unpredictable without repeating the playing track.
+  function randomIndex(): number {
+    const n = queue.value.length;
+    if (n <= 1) return currentIndex.value;
+    let idx = currentIndex.value;
+    while (idx === currentIndex.value) idx = Math.floor(Math.random() * n);
+    return idx;
+  }
+
   function next() {
     if (queue.value.length === 0) return;
     if (playMode.value === "one") { startPlayback(); return; }
+    if (playMode.value === "shuffle") { currentIndex.value = randomIndex(); startPlayback(); return; }
     if (currentIndex.value < queue.value.length - 1) currentIndex.value++;
-    else if (playMode.value === "all" || playMode.value === "shuffle") currentIndex.value = 0;
+    else if (playMode.value === "all") currentIndex.value = 0;
     else {
       // Reached the end in "order" mode — stop. In cast mode, also stop the
       // device so it doesn't keep idle-playing the last track.
@@ -170,8 +180,9 @@ export const usePlayerStore = defineStore("player", () => {
   function prev() {
     if (queue.value.length === 0) return;
     if (currentTime.value > 3) { seek(0); return; }
+    if (playMode.value === "shuffle") { currentIndex.value = randomIndex(); startPlayback(); return; }
     if (currentIndex.value > 0) currentIndex.value--;
-    else if (playMode.value === "all" || playMode.value === "shuffle") currentIndex.value = queue.value.length - 1;
+    else if (playMode.value === "all") currentIndex.value = queue.value.length - 1;
     startPlayback();
   }
 
