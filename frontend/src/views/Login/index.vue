@@ -2,7 +2,7 @@
   <div class="login-page">
     <div class="login-card">
       <div class="login-header">
-        <img src="/favicon.svg" alt="MusicFlow" class="login-logo" />
+        <img src="/favicon.png" alt="MusicFlow" class="login-logo" />
         <h1>MusicFlow</h1>
         <p>自托管音乐库</p>
       </div>

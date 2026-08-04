@@ -2,7 +2,7 @@
   <div class="main-layout">
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="logo" @click="sidebarCollapsed = !sidebarCollapsed">
-        <img src="/favicon.svg" alt="MusicFlow" class="logo-img" />
+        <img src="/favicon.png" alt="MusicFlow" class="logo-img" />
         <span v-if="!sidebarCollapsed" class="logo-text">MusicFlow</span>
       </div>
       <el-menu :default-active="activeMenu" :collapse="sidebarCollapsed" router class="sidebar-menu">
