@@ -1,7 +1,6 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import fs from "fs";
 import path from "path";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -19,7 +18,14 @@ import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
 const app = new Hono();
 
-app.use("*", logger());
+// Log only failed requests (4xx/5xx) so routine traffic stays quiet.
+app.use("*", async (c, next) => {
+  await next();
+  const status = c.res.status;
+  if (status >= 400) {
+    console.log(`[${new Date().toISOString()}] ${c.req.method} ${c.req.path} -> ${status}`);
+  }
+});
 
 // Same-origin requests (the frontend proxies /api and /rest through Vite) never
 // trigger CORS, so the default allowlist only needs to cover localhost. Direct
