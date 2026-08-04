@@ -492,7 +492,6 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   return c.json({
     enabled: getBool("daily_recommend_enabled", true),
     hour: parseInt(get("daily_recommend_hour", "3"), 10) || 3,
-    localEnabled: getBool("daily_recommend_local_enabled", true),
     candidates,
     pickedToday: picked,
     today,
@@ -503,7 +502,7 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   });
 });
 
-// Update daily-recommend config (master switch, hour, local switch).
+// Update daily-recommend config (master switch, hour).
 // Note: retention is no longer used — the rename mechanism ("今日推荐" →
 // "昨日推荐") inherently keeps only two playlists at any time.
 apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
@@ -517,7 +516,6 @@ apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
     if (Number.isFinite(h) && h >= 0 && h <= 23) set("daily_recommend_hour", String(h));
     else return c.json({ error: "hour 必须是 0-23 的整数" }, 400);
   }
-  if (typeof body.localEnabled === "boolean") set("daily_recommend_local_enabled", body.localEnabled ? "true" : "false");
   return c.json({ success: true });
 });
 

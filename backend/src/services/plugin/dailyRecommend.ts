@@ -1,23 +1,21 @@
 // Daily-recommend playlist generator — combined edition.
 //
 // Each day at the configured hour, this builds a SINGLE combined "今日推荐"
-// playlist by merging songs from FOUR sources (all in ONE playlist):
+// playlist by merging songs from THREE sources (all in ONE playlist):
 //
 //   1. Remote charts (QQ + NetEase): fetch EVERY candidate in the configured
 //      pool (not just one), match against the local library. Matched songs
 //      become playable entries; unmatched ones become stubs + wish entries,
 //      exactly like a manual playlist import.
-//   2. User recommend pool (recommend_pool table): for each pool member
-//      (a user playlist or the user's favorites), randomly pick up to 50
-//      PLAYABLE songs (so they're guaranteed to be in the library).
-//   3. Local history mix (from localRecommend.ts): based on play-history taste
-//      profile, picks up to 50 candidate songs from the local library.
-//   4. Full-library random: picks up to 50 random playable songs from the
-//      entire local library (date-seeded so the same day yields the same set).
+//   2. User recommend pool (recommend_pool table): all pool members (every
+//      user's favorites + playlists manually added to the pool). Randomly
+//      picks 50 PLAYABLE songs (guaranteed in the library).
+//   3. Full-library random: picks 50 random playable songs from the entire
+//      local library (date-seeded so the same day yields the same set).
 //
-// Dedup: pool songs, local-history songs and full-library random songs are all
-// deduplicated against the remote-matched songs already in the playlist (and
-// against each other) so the same track never appears twice.
+// Dedup: pool songs and full-library random songs are deduplicated against
+// the remote-matched songs already in the playlist (and against each other)
+// so the same track never appears twice.
 //
 // Naming / retention (only TWO playlists ever exist):
 //   - "今日推荐"    — today's combined playlist
@@ -31,7 +29,7 @@ import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
-import { pickLocalRecommendSongs, pickRandomLibrarySongs } from "./localRecommend.js";
+import { pickRandomLibrarySongs } from "./localRecommend.js";
 
 export interface DailyCandidate {
   platform: "qq" | "netease";
@@ -45,14 +43,12 @@ export interface DailyRecommendResult {
   name: string;
   picked: DailyCandidate[];          // all candidates fetched this run
   platform: string;                   // "mixed"
-  total: number;                      // total entries (matched + stubs + pool + local)
+  total: number;                      // total entries (matched + stubs + pool + random)
   matched: number;                    // remote songs matched to local library
   unmatched: number;                  // remote songs that became stubs
   wishAdded: number;
   poolSongsAdded: number;             // songs added from user recommend pool
   poolMembers: number;                // how many pool members contributed
-  localSongsAdded: number;            // songs added from local history mix
-  localFallback: boolean;             // true if local mix fell back to random sample
   randomSongsAdded: number;           // songs added from full-library random pick
   skipped: boolean;
 }
@@ -63,10 +59,15 @@ export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 const NAME_TODAY = "今日推荐";
 const NAME_YESTERDAY = "昨日推荐";
 
-// How many random playable songs to pull from each user-pool member.
-const POOL_SAMPLE_SIZE = 50;
+// How many random playable songs to pull from each user-pool member as
+// CANDIDATES (before the final pool-wide pick).
+const POOL_MEMBER_CANDIDATE_SIZE = 200;
+// Final size of the user-recommend-pool contribution to the daily playlist.
+// Candidates from all pool members are merged, deduped, then this many are
+// picked with a date-seeded shuffle.
+const POOL_FINAL_SIZE = 50;
 // How many random songs to pull from the entire local library (in addition to
-// the history-based local mix and the user pool).
+// the user pool).
 const RANDOM_LIBRARY_SAMPLE_SIZE = 50;
 
 function todayStr(d = new Date()): string {
@@ -247,16 +248,27 @@ function pickSongsFromPoolMember(entry: RecommendPoolEntry, date: Date, limit: n
   return rows.slice(0, limit).map(r => r.id);
 }
 
-// Collect all playable song ids from every enabled pool member (deduped).
+// Collect playable song ids from every enabled pool member, merge+dedupe, then
+// pick POOL_FINAL_SIZE with a date-seeded shuffle so the whole pool contributes
+// a fixed number of songs to the daily playlist.
 function collectPoolSongs(date: Date): { songIds: string[]; members: number } {
   const pool = listRecommendPool();
   if (pool.length === 0) return { songIds: [], members: 0 };
   const all = new Set<string>();
   for (const entry of pool) {
-    const ids = pickSongsFromPoolMember(entry, date, POOL_SAMPLE_SIZE);
+    // Pull candidates (up to POOL_MEMBER_CANDIDATE_SIZE) from each member.
+    const ids = pickSongsFromPoolMember(entry, date, POOL_MEMBER_CANDIDATE_SIZE);
     for (const id of ids) all.add(id);
   }
-  return { songIds: Array.from(all), members: pool.length };
+  if (all.size === 0) return { songIds: [], members: pool.length };
+  // Date-seeded shuffle of the merged pool, then take POOL_FINAL_SIZE.
+  const arr = Array.from(all);
+  const rng = mulberry32(dayOfYear(date) * 2654435761 + 99991);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return { songIds: arr.slice(0, POOL_FINAL_SIZE), members: pool.length };
 }
 
 // ==================== Main generation ====================
@@ -275,7 +287,6 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
       platform: "mixed",
       total: 0, matched: 0, unmatched: 0, wishAdded: 0,
       poolSongsAdded: 0, poolMembers: 0,
-      localSongsAdded: 0, localFallback: false,
       randomSongsAdded: 0,
       skipped: true,
     };
@@ -297,17 +308,15 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     }
   }
 
-  // Step 3: collect user pool songs + local recommend songs + full-library random.
+  // Step 3: collect user pool songs + full-library random.
   const { songIds: poolSongIds, members: poolMembers } = collectPoolSongs(date);
-  const { songIds: localSongIds, fallback: localFallback } = pickLocalRecommendSongs(date);
   const randomLibraryIds = pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
 
-  // If we have nothing at all (no remote, no pool, no local, no random), bail
-  // out without touching existing playlists — better to keep yesterday's than
-  // to have an empty today.
+  // If we have nothing at all (no remote, no pool, no random), bail out without
+  // touching existing playlists — better to keep yesterday's than to have an empty today.
   const totalRemoteTracks = remoteImports.reduce((n, imp) => n + imp.tracks.length, 0);
-  if (totalRemoteTracks === 0 && poolSongIds.length === 0 && localSongIds.length === 0 && randomLibraryIds.length === 0) {
-    throw new Error("今日推荐生成失败:所有远程榜单抓取失败且用户推荐池、本地推荐和曲库随机均为空");
+  if (totalRemoteTracks === 0 && poolSongIds.length === 0 && randomLibraryIds.length === 0) {
+    throw new Error("今日推荐生成失败:所有远程榜单抓取失败且用户推荐池和曲库随机均为空");
   }
 
   // Step 4: rename/delete.
@@ -342,7 +351,6 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   const sourceLabel = remoteImports.map(i => i.name).filter(Boolean).join(" + ") || "用户推荐池";
   const extraParts: string[] = [];
   if (poolMembers > 0) extraParts.push(`${poolMembers}个用户推荐池`);
-  if (localSongIds.length > 0) extraParts.push("本地推荐");
   if (randomLibraryIds.length > 0) extraParts.push("曲库随机");
   sqlite.prepare(`
     INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
@@ -417,43 +425,7 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
       .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now, playlistId);
   }
 
-  // Step 5c: append local recommend songs, DEDUPED against remote + pool songs.
-  let localSongsAdded = 0;
-  const dedupedLocalIds = localSongIds.filter(id => !existingSongIds.has(id));
-  if (dedupedLocalIds.length > 0) {
-    const maxPosRow = sqlite.prepare("SELECT MAX(position) AS m FROM playlist_songs WHERE playlist_id = ?").get(playlistId) as any;
-    let nextPos = (maxPosRow?.m ?? -1) + 1;
-
-    const idToDuration = new Map<string, number>();
-    for (let i = 0; i < dedupedLocalIds.length; i += 500) {
-      const batch = dedupedLocalIds.slice(i, i + 500);
-      const placeholders = batch.map(() => "?").join(",");
-      const rows = sqlite.prepare(`SELECT id, duration FROM songs WHERE id IN (${placeholders})`).all(...batch) as { id: string; duration: number }[];
-      for (const r of rows) idToDuration.set(r.id, r.duration || 0);
-    }
-
-    const now = new Date().toISOString();
-    const insertStmt = sqlite.prepare(`
-      INSERT INTO playlist_songs (playlist_id, song_id, position, playable, created_at)
-      VALUES (?, ?, ?, 1, ?)
-    `);
-    let addedDuration = 0;
-    const tx = sqlite.transaction((ids: string[]) => {
-      for (const id of ids) {
-        insertStmt.run(playlistId, id, nextPos++, now);
-        addedDuration += idToDuration.get(id) || 0;
-        localSongsAdded++;
-        existingSongIds.add(id);
-      }
-    });
-    tx(dedupedLocalIds);
-
-    const plRow = sqlite.prepare("SELECT song_count, duration FROM playlists WHERE id = ?").get(playlistId) as any;
-    sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
-      .run((plRow?.song_count || 0) + localSongsAdded, (plRow?.duration || 0) + addedDuration, now, playlistId);
-  }
-
-  // Step 5d: append full-library random songs, DEDUPED against everything above.
+  // Step 5c: append full-library random songs, DEDUPED against everything above.
   let randomSongsAdded = 0;
   const dedupedRandomIds = randomLibraryIds.filter(id => !existingSongIds.has(id));
   if (dedupedRandomIds.length > 0) {
@@ -494,14 +466,12 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     name: NAME_TODAY,
     picked: candidates,
     platform: "mixed",
-    total: matched + unmatched + poolSongsAdded + localSongsAdded + randomSongsAdded,
+    total: matched + unmatched + poolSongsAdded + randomSongsAdded,
     matched,
     unmatched,
     wishAdded,
     poolSongsAdded,
     poolMembers,
-    localSongsAdded,
-    localFallback,
     randomSongsAdded,
     skipped: false,
   };
@@ -512,7 +482,7 @@ export async function runDailyRecommendJob(): Promise<DailyRecommendResult | nul
   try {
     const result = await generateDailyPlaylist();
     if (!result.skipped) {
-      console.log(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members + ${result.localSongsAdded} local + ${result.randomSongsAdded} random -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool${result.localFallback ? " (local fallback)" : ""}`);
+      console.log(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members + ${result.randomSongsAdded} random -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool`);
     }
     return result;
   } catch (e: any) {
