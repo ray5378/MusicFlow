@@ -43,6 +43,4 @@ COPY backend/entrypoint.sh ./entrypoint.sh
 RUN chmod +x entrypoint.sh \
  && mkdir -p /app/backend/data && chown -R musicflow:musicflow /app/backend
 EXPOSE 46400
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:46400/ping || exit 1
 ENTRYPOINT ["/app/backend/entrypoint.sh"]

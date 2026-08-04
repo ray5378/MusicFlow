@@ -11,14 +11,8 @@ services:
       # keep the same secret when reusing an existing data dir.
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
-      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-180}
+      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
     volumes:
       - ./data:/app/backend/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:46400/ping"]
-      interval: 30s
-      timeout: 3s
-      start_period: 10s
-      retries: 3

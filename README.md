@@ -39,17 +39,11 @@ services:
       # 如需手动指定:openssl rand -hex 32
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
-      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-180}
+      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
     volumes:
       - ./data:/app/backend/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:46400/ping"]
-      interval: 30s
-      timeout: 3s
-      start_period: 10s
-      retries: 3
 ```
 
 环境变量:
@@ -58,7 +52,7 @@ services:
 |---|---|---|---|
 | `JWT_SECRET` | 否 | 自动生成 | JWT 签名密钥(≥32 字符)。不填则首次启动自动生成并保存到数据卷 `data/.jwt-secret`;手动填可自定义 |
 | `CORS_ORIGINS` | 否 | `*` | 允许的跨域来源(逗号分隔)。Web UI 同源无需配置,仅影响直接跨域调用 API 的客户端 |
-| `PLAY_HISTORY_RETENTION_DAYS` | 否 | `180` | 播放历史保留天数 |
+| `PLAY_HISTORY_RETENTION_DAYS` | 否 | `3` | 播放历史保留天数 |
 
 > 注意:`JWT_SECRET` 会自动持久化在 `./data/.jwt-secret`,重启、更新镜像都不变。若**删掉 data 卷重新开始**,会自动生成新密钥,旧密码的加密凭据会重新加密,只需重新登录。
 

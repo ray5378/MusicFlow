@@ -55,5 +55,5 @@ export function getPlayHistoryRetentionDays(): number {
   loadDotEnv();
   const raw = process.env.PLAY_HISTORY_RETENTION_DAYS;
   const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 180;
+  return Number.isFinite(n) && n >= 0 ? n : 3;
 }
