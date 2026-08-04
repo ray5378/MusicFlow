@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import type { Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
 import fs from "fs";
@@ -13,11 +14,14 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-const sqlite = new Database(path.join(dataDir, "musicflow.db"));
+const sqlite: DatabaseType = new Database(path.join(dataDir, "musicflow.db"));
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
 
 export const db = drizzle(sqlite, { schema });
+// Export the raw sqlite handle so services can run lightweight key/value
+// lookups on the `settings` table without going through drizzle each time.
+export { sqlite };
 
 const ENC_KEY = crypto.createHash("sha256").update(JWT_SECRET).digest();
 
@@ -314,6 +318,26 @@ export function initDatabase() {
     sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("write_back_tags", "false");
     sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("fingerprint_enabled", "false");
   }
+  // Daily-recommend default config (idempotent — only fills keys that don't exist)
+  // daily_recommend_enabled: master switch ("true"/"false")
+  // daily_recommend_hour:    local hour (0-23) to run, default 3 (off-peak)
+  // daily_recommend_retention: how many days of past daily playlists to keep
+  // daily_recommend_candidates: JSON array of {platform, url, name} pool to rotate
+  // daily_recommend_local_enabled: also build a local-history-based playlist ("true"/"false")
+  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_enabled", "true");
+  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
+  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_retention", "7");
+  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
+  // Default candidate pool: a handful of stable, high-quality NetEase + QQ editorial playlists.
+  // URLs use the same share-link form importPlaylistFromUrl already understands, so no new fetcher is needed.
+  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_candidates", JSON.stringify([
+    { platform: "netease", url: "https://music.163.com/playlist?id=60198", name: "华语流行榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=60131", name: "云音乐热歌榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=2409164866", name: "欧美流行" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=7234914606", name: "电子精选" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=2409164866", name: "民谣合集" },
+    { platform: "qq", url: "https://y.qq.com/n/ryqq/playlist/7148888319", name: "QQ 流行榜" },
+  ]));
 
   console.log("Database initialized successfully");
 }

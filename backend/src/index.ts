@@ -8,9 +8,11 @@ import { authRoutes } from "./routes/auth/index.js";
 import { restRoutes } from "./routes/rest/index.js";
 import { apiRoutes } from "./routes/api/index.js";
 import { navidromeRoutes } from "./routes/navidrome/index.js";
-import { initDatabase, cleanupPlayHistory } from "./db/index.js";
+import { initDatabase, cleanupPlayHistory, sqlite } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
+import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
+import { runLocalDailyRecommendJob } from "./services/plugin/localRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
@@ -89,7 +91,62 @@ initDatabase();
 // Retention cleanup for play history (play_history grows with every play).
 cleanupPlayHistory(getPlayHistoryRetentionDays());
 
-// Auto-sync imported playlists with syncEnabled=true every 6 hours
+// ==================== Daily-recommend scheduler (Plan A + Plan B) ====================
+// Runs at a fixed local hour every day (configurable via the `daily_recommend_hour`
+// setting). Uses setTimeout-recursive scheduling (not setInterval) so:
+//   - restarts recompute the next target time correctly (no drift accumulation)
+//   - it can hit a precise wall-clock hour instead of "every N ms"
+// On boot we also run a one-shot check: if today's daily playlist is missing
+// (e.g. the server was off at the scheduled time), generate it now.
+function getDailyHour(): number {
+  const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_hour") as any;
+  const h = parseInt(row?.value ?? "3", 10);
+  return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 3;
+}
+
+function getDailyMasterEnabled(): boolean {
+  const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_enabled") as any;
+  const v = row?.value ?? "true";
+  return v === "true" || v === "1";
+}
+
+async function runDailyJobs() {
+  // Master switch gates both A and B. (Plan B has its own sub-switch read inside.)
+  if (!getDailyMasterEnabled()) return;
+  await runDailyRecommendJob();
+  await runLocalDailyRecommendJob();
+}
+
+function scheduleNextDailyRun() {
+  const hour = getDailyHour();
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(hour, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1); // already past today's slot -> tomorrow
+  const delay = next.getTime() - now.getTime();
+  setTimeout(async () => {
+    await runDailyJobs();
+    scheduleNextDailyRun(); // re-arm for the next day
+  }, delay);
+  console.log(`[DAILY-SCHEDULER] next daily-recommend run at ${next.toLocaleString("zh-CN", { hour12: false })} (in ${Math.round(delay / 60000)} min)`);
+}
+
+// Boot-time catch-up: if today's daily playlist is missing (server was off at
+// the scheduled hour), generate it now. Idempotent — generate*() also checks
+// internally, so this is safe to call every boot.
+(async () => {
+  try {
+    await runDailyJobs();
+  } catch (e: any) {
+    console.error("[DAILY-SCHEDULER] boot catch-up error:", e.message || e);
+  }
+  scheduleNextDailyRun();
+})();
+
+// ==================== Regular maintenance loop (every 6h) ====================
+// Re-fetch imported playlists with syncEnabled=true, scrape recent uncovered
+// artists, and trim play history. Kept as setInterval because these are not
+// time-of-day sensitive and benefit from running shortly after boot too.
 const AUTO_SYNC_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 setInterval(async () => {
   cleanupPlayHistory(getPlayHistoryRetentionDays());

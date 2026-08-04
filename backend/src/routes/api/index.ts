@@ -9,6 +9,12 @@ import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack } from "../../services/plugin/playlistImport.js";
 import { checkImportCooldown, rebuildPlaylistEntries, syncPlaylist, refreshPlaylistCounts } from "../../services/plugin/playlistSync.js";
+import {
+  generateDailyPlaylist, loadCandidates, saveCandidates, pickDailyCandidate,
+  purgeOldDailyPlaylists, DAILY_TAG,
+} from "../../services/plugin/dailyRecommend.js";
+import { generateLocalDailyPlaylist, DAILY_TAG_LOCAL } from "../../services/plugin/localRecommend.js";
+import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 
@@ -445,6 +451,115 @@ apiRoutes.get("/v1/artists/missing-info-count", (c) => {
 
 // ==================== Settings ====================
 apiRoutes.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
+
+// ==================== Daily recommend (Plan A: remote rotation, Plan B: local history) ====================
+//
+// These admin endpoints let you inspect / reconfigure / manually trigger the
+// daily-recommend system. The actual generation logic lives in
+// services/plugin/dailyRecommend.ts and localRecommend.ts; the scheduler that
+// fires them daily lives in index.ts.
+
+// Snapshot of the current daily-recommend config + state, for the admin UI.
+apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
+  const get = (k: string, def: string) => {
+    const r = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get(k) as any;
+    return r?.value ?? def;
+  };
+  const getBool = (k: string, def: boolean) => {
+    const v = get(k, def ? "true" : "false");
+    return v === "true" || v === "1";
+  };
+  const candidates = loadCandidates();
+  const picked = pickDailyCandidate();
+
+  // Find today's existing daily playlists (if any) so the UI can show "已生成".
+  const today = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const remoteName = `每日推荐 ${today}`;
+  const localName = `每日推荐(本地) ${today}`;
+  const remoteRow = sqlite.prepare("SELECT id, name, song_count, comment FROM playlists WHERE name = ? AND comment LIKE ?").get(remoteName, `%${DAILY_TAG}%`) as any;
+  const localRow = sqlite.prepare("SELECT id, name, song_count, comment FROM playlists WHERE name = ? AND comment LIKE ?").get(localName, `%${DAILY_TAG_LOCAL}%`) as any;
+
+  return c.json({
+    enabled: getBool("daily_recommend_enabled", true),
+    hour: parseInt(get("daily_recommend_hour", "3"), 10) || 3,
+    retention: parseInt(get("daily_recommend_retention", "7"), 10) || 7,
+    localEnabled: getBool("daily_recommend_local_enabled", true),
+    candidates,
+    pickedToday: picked,
+    today: {
+      date: today,
+      remotePlaylist: remoteRow ? { id: remoteRow.id, name: remoteRow.name, songCount: remoteRow.song_count || 0 } : null,
+      localPlaylist: localRow ? { id: localRow.id, name: localRow.name, songCount: localRow.song_count || 0 } : null,
+    },
+  });
+});
+
+// Update daily-recommend config (master switch, hour, retention, local switch).
+apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const set = (k: string, v: string) =>
+    sqlite.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(k, v, new Date().toISOString());
+  if (typeof body.enabled === "boolean") set("daily_recommend_enabled", body.enabled ? "true" : "false");
+  if (body.hour !== undefined) {
+    const h = parseInt(body.hour, 10);
+    if (Number.isFinite(h) && h >= 0 && h <= 23) set("daily_recommend_hour", String(h));
+    else return c.json({ error: "hour 必须是 0-23 的整数" }, 400);
+  }
+  if (body.retention !== undefined) {
+    const r = parseInt(body.retention, 10);
+    if (Number.isFinite(r) && r >= 0) set("daily_recommend_retention", String(r));
+    else return c.json({ error: "retention 必须是非负整数" }, 400);
+  }
+  if (typeof body.localEnabled === "boolean") set("daily_recommend_local_enabled", body.localEnabled ? "true" : "false");
+  return c.json({ success: true });
+});
+
+// Update the candidate pool (Plan A). Body: { candidates: [{platform, url, name?}] }
+apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const arr = Array.isArray(body.candidates) ? body.candidates : null;
+  if (!arr) return c.json({ error: "candidates 必须是数组" }, 400);
+  const clean = arr
+    .filter((x: any) => x && typeof x.url === "string" && typeof x.platform === "string" && (x.platform === "qq" || x.platform === "netease"))
+    .map((x: any) => ({ platform: x.platform, url: x.url.trim(), name: typeof x.name === "string" ? x.name : undefined }));
+  if (clean.length === 0) return c.json({ error: "候选池不能为空,且每项需要 platform (qq/netease) + url" }, 400);
+  saveCandidates(clean);
+  return c.json({ success: true, count: clean.length });
+});
+
+// Manually trigger today's daily-recommend generation (Plan A + Plan B).
+// Idempotent: if today's playlists already exist, returns skipped=true.
+// Plan A and Plan B run independently — a failure in one does NOT block the
+// other (e.g. a dead NetEase API shouldn't prevent the local-history mix).
+apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
+  let remote: any = null;
+  let remoteError: string | null = null;
+  let local: any = null;
+  let localError: string | null = null;
+  try {
+    remote = await generateDailyPlaylist();
+  } catch (e: any) {
+    remoteError = e.message || "Plan A 生成失败";
+    console.error("[DAILY-RECOMMEND] trigger Plan A error:", remoteError);
+  }
+  try {
+    local = await generateLocalDailyPlaylist();
+  } catch (e: any) {
+    localError = e.message || "Plan B 生成失败";
+    console.error("[LOCAL-RECOMMEND] trigger Plan B error:", localError);
+  }
+  // Run a purge pass so manually triggering also cleans old daily playlists.
+  const retention = parseInt((sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_retention") as any)?.value || "7", 10) || 7;
+  const purged = purgeOldDailyPlaylists(retention);
+  // success=true if at least one plan produced something; partial failure is
+  // surfaced via the *_error fields so the UI can show what went wrong.
+  const success = !!remote || !!local;
+  return c.json({ success, remote, remoteError, local, localError, purged }, success ? 200 : 500);
+});
 
 // ==================== Playlist import (built-in plugins: QQ / NetEase) ====================
 apiRoutes.post("/v1/playlists/import", async (c) => {
