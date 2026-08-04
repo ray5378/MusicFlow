@@ -801,6 +801,15 @@ apiRoutes.get("/v1/history", (c) => {
   return c.json({ total, page, pageSize, items });
 });
 
+// Clear the current user's play history. Does not touch playCount on songs
+// (that's a historical counter, not a history record).
+apiRoutes.delete("/v1/history", (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ deleted: 0 });
+  const result = db.delete(playHistory).where(eq(playHistory.userId, user.id)).run();
+  return c.json({ deleted: result.changes || 0 });
+});
+
 // ==================== DLNA cast ====================
 const DLNA_MIME: Record<string, string> = {
   mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",

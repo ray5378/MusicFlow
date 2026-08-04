@@ -1,6 +1,19 @@
 <template>
   <div class="history-page">
-    <div class="page-header"><h2>播放历史</h2></div>
+    <div class="page-header">
+      <h2>播放历史</h2>
+      <el-popconfirm
+        title="确定清空所有播放历史？此操作不可恢复"
+        confirm-button-text="清空"
+        cancel-button-text="取消"
+        @confirm="clearAllHistory"
+        width="220"
+      >
+        <template #reference>
+          <el-button type="danger" :icon="Delete" :loading="clearing" plain :disabled="total === 0">清空历史</el-button>
+        </template>
+      </el-popconfirm>
+    </div>
     <el-table :data="songs" stripe @row-dblclick="playSong" highlight-current-row v-loading="loading">
       <el-table-column type="index" width="60" label="#" :index="indexMethod" />
       <el-table-column label="" width="60">
@@ -41,13 +54,15 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
-import { VideoPlay as Play, Headset } from "@element-plus/icons-vue";
+import { VideoPlay as Play, Headset, Delete } from "@element-plus/icons-vue";
 import api from "@/api";
 
 const playerStore = usePlayerStore();
 const songs = ref<any[]>([]);
 const loading = ref(false);
+const clearing = ref(false);
 const currentPage = ref(1);
 const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("historyPageSize") || "25"));
@@ -84,12 +99,27 @@ function onSizeChange(size: number) {
   loadHistory();
 }
 
+async function clearAllHistory() {
+  clearing.value = true;
+  try {
+    await api.delete("/rest/api/v1/history");
+    currentPage.value = 1;
+    songs.value = [];
+    total.value = 0;
+    ElMessage.success("播放历史已清空");
+  } catch {
+    ElMessage.error("清空失败,请重试");
+  } finally {
+    clearing.value = false;
+  }
+}
+
 onMounted(loadHistory);
 </script>
 
 <style lang="scss" scoped>
 .history-page { padding: 24px; }
-.page-header { margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
+.page-header { margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; h2 { font-size: 24px; font-weight: 600; } }
 .song-cover { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; }
 .cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: #e5e7eb; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 18px; }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
