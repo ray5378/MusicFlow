@@ -1,17 +1,22 @@
 // DLNA/UPnP device discovery via SSDP (Simple Service Discovery Protocol).
 //
-// Uses Node's native `dgram` module — zero external dependencies. Sends an
-// M-SEARCH multicast for MediaRenderer devices, collects responses, then fetches
-// each device's description.xml to extract friendly name, UDN and service
-// control URLs (AVTransport + RenderingControl).
+// Two complementary mechanisms, mirroring Music Assistant's SsdpListener:
+//   1. M-SEARCH multicast — actively query for MediaRenderers on demand.
+//   2. Continuous NOTIFY listener — passively receive device announcements
+//      (ssdp:alive / ssdp:byebye / ssdp:update) so we learn about devices
+//      coming online or going offline without re-sending M-SEARCH.
 //
-// Reference: Music Assistant's DLNA provider uses the same flow (SSDP →
-// description.xml → SCPD parsing) but via Python's async_upnp_client.
+// Each device's `lastSeen` timestamp is updated on every message; devices
+// not heard from within the staleness window are marked unavailable so the
+// UI can grey them out and the poller can skip them.
+//
+// Uses Node's native `dgram` module — zero external dependencies.
 import dgram from "dgram";
 
 const SSDP_ADDR = "239.255.255.250";
 const SSDP_PORT = 1900;
 const MR_ST = "urn:schemas-upnp-org:device:MediaRenderer:1";
+const STALENESS_MS = 10 * 60 * 1000; // 10 min without any SSDP message → unavailable
 
 export interface DlnaServiceInfo {
   serviceType: string;
@@ -26,6 +31,8 @@ export interface DlnaDevice {
   model?: string;
   avTransportUrl?: string;
   renderingControlUrl?: string;
+  lastSeen: number;      // ms epoch — updated on every SSDP message from this device
+  available: boolean;    // false when byebye received or staleness exceeded
 }
 
 // Make a relative control URL absolute against the description base.
@@ -72,17 +79,75 @@ async function fetchDescription(location: string): Promise<DlnaDevice | null> {
     }
     // A device without AVTransport can't be cast to — skip it.
     if (!avTransportUrl) return null;
-    return { id, name: friendlyName, location, manufacturer, model, avTransportUrl, renderingControlUrl };
+    return { id, name: friendlyName, location, manufacturer, model, avTransportUrl, renderingControlUrl, lastSeen: Date.now(), available: true };
   } catch {
     return null;
   }
 }
 
-// Discover MediaRenderer devices on the LAN via SSDP M-SEARCH.
-// Waits up to `timeoutMs` for responses, then resolves the de-duplicated list.
+// ==================== Continuous SSDP listener ====================
+// A long-lived UDP socket that joins the SSDP multicast group and listens for
+// NOTIFY messages from devices. MA's SsdpListener does the same. We keep a
+// registry of all announced devices (by USN/UDN) so the active M-SEARCH
+// result can be merged with passively-discovered ones.
+let listenerSocket: dgram.Socket | null = null;
+const announced = new Map<string, { location: string; lastSeen: number; usn: string }>();
+
+function startListener() {
+  if (listenerSocket) return;
+  const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  sock.on("error", () => {}); // never crash on socket errors
+  sock.on("message", (msg) => {
+    const text = msg.toString();
+    const isNotify = /^NOTIFY \* HTTP\/1\.1/i.test(text);
+    if (!isNotify) return;
+    const loc = text.match(/^LOCATION:\s*(.+)$/im)?.[1].trim();
+    const nts = text.match(/^NTS:\s*(.+)$/im)?.[1].trim();
+    const usn = text.match(/^USN:\s*(.+)$/im)?.[1].trim() || "";
+    if (!loc) return;
+    // ssdp:byebye → device is going offline
+    if (nts === "ssdp:byebye") {
+      announced.delete(usn);
+      return;
+    }
+    // ssdp:alive / ssdp:update → device is (re)announcing itself
+    if (nts === "ssdp:alive" || nts === "ssdp:update") {
+      announced.set(usn, { location: loc, lastSeen: Date.now(), usn });
+    }
+  });
+  sock.bind(SSDP_PORT, () => {
+    try { sock.addMembership(SSDP_ADDR); } catch {}
+  });
+  listenerSocket = sock;
+}
+
+// Merge actively discovered devices (from M-SEARCH responses) with passively
+// announced ones (from the NOTIFY listener) and refresh lastSeen.
+async function mergeAndFetch(searchLocations: string[]): Promise<DlnaDevice[]> {
+  const allLocations = new Set<string>(searchLocations);
+  const now = Date.now();
+  for (const [, info] of announced) {
+    if (now - info.lastSeen < STALENESS_MS) allLocations.add(info.location);
+  }
+  const devices = await Promise.all(Array.from(allLocations).map(fetchDescription));
+  // Deduplicate by id (a device may appear via both M-SEARCH and NOTIFY).
+  const byId = new Map<string, DlnaDevice>();
+  for (const d of devices) {
+    if (!d) continue;
+    const existing = byId.get(d.id);
+    if (!existing || d.lastSeen > existing.lastSeen) byId.set(d.id, d);
+  }
+  return Array.from(byId.values());
+}
+
+// Discover MediaRenderer devices on the LAN via SSDP M-SEARCH, merged with
+// any devices the passive listener has seen. Waits up to `timeoutMs` for
+// M-SEARCH responses, then resolves the de-duplicated list.
 export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
+  // Ensure the passive listener is running so we catch NOTIFY announcements.
+  startListener();
   return new Promise((resolve) => {
-    const locations = new Map<string, string>(); // location → (for dedup)
+    const locations = new Set<string>();
     const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
     let settled = false;
 
@@ -90,10 +155,10 @@ export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
       if (settled) return;
       settled = true;
       try { socket.close(); } catch {}
-      // Fetch descriptions for all discovered locations in parallel.
-      const uniq = Array.from(locations.keys());
-      const devices = await Promise.all(uniq.map(fetchDescription));
-      resolve(devices.filter(Boolean) as DlnaDevice[]);
+      // Merge M-SEARCH results with passively-announced devices, fetch all
+      // descriptions in parallel.
+      const devices = await mergeAndFetch(Array.from(locations));
+      resolve(devices);
     };
 
     socket.on("error", () => {
@@ -106,7 +171,7 @@ export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
       const locMatch = text.match(/^LOCATION:\s*(.+)$/im);
       if (!locMatch) return;
       const location = locMatch[1].trim();
-      if (!locations.has(location)) locations.set(location, location);
+      locations.add(location);
     });
 
     // Bind first (required to receive on some platforms), then send M-SEARCH.
@@ -126,4 +191,14 @@ export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
 
     setTimeout(finish, timeoutMs);
   });
+}
+
+// Mark a device unavailable if it hasn't been heard from in a while. Called
+// by the background poller to keep the cached list fresh.
+export function markStaleDevices(devices: DlnaDevice[]): DlnaDevice[] {
+  const now = Date.now();
+  for (const d of devices) {
+    if (now - d.lastSeen > STALENESS_MS) d.available = false;
+  }
+  return devices;
 }

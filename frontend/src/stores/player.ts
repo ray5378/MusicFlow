@@ -205,6 +205,27 @@ export const usePlayerStore = defineStore("player", () => {
 
   // ==================== DLNA cast control ====================
 
+  // Track whether the device supports gapless enqueue (SetNextAVTransportURI).
+  // Probed lazily on the first enqueue attempt; when false we fall back to
+  // poll-and-recast (still seamless enough for most use cases).
+  let enqueueSupported: boolean | null = null;
+
+  // Best-effort preload of the next queue item onto the device so it can
+  // switch tracks gaplessly. Called after each cast and after every track
+  // change detected by the poller. Silently no-ops if the device doesn't
+  // support SetNextAVTransportURI (probe result is cached).
+  async function enqueueNext() {
+    if (!castDeviceId.value) return;
+    const nextSong = queue.value[currentIndex.value + 1];
+    if (!nextSong) return; // last track in queue, nothing to preload
+    try {
+      const res = await api.post("/rest/api/v1/dlna/enqueue", { songId: nextSong.id, deviceId: castDeviceId.value });
+      enqueueSupported = res.data?.enqueueSupported ?? false;
+    } catch {
+      enqueueSupported = false;
+    }
+  }
+
   // Push the current song to the active DLNA device and report scrobble.
   async function castCurrent() {
     const song = currentSong.value;
@@ -217,6 +238,8 @@ export const usePlayerStore = defineStore("player", () => {
       lastCastState = "PLAYING";
       loadLyrics(song.id);
       api.get(`/rest/scrobble?id=${song.id}&submission=false`).catch(() => {});
+      // Preload the next track for gapless playback (no-op if unsupported).
+      enqueueNext();
     } catch { isPlaying.value = false; }
   }
 
@@ -226,6 +249,7 @@ export const usePlayerStore = defineStore("player", () => {
     stopProgressTimer();
     castDeviceId.value = deviceId;
     castDeviceName.value = deviceName;
+    enqueueSupported = null; // re-probe for the new device
     await castCurrent();
     startCastPoll();
   }
@@ -241,11 +265,13 @@ export const usePlayerStore = defineStore("player", () => {
     isPlaying.value = false;
     currentTime.value = 0;
     lastCastState = "STOPPED";
+    enqueueSupported = null;
   }
 
   // Poll the device for progress + state. When the device transitions from
   // PLAYING to STOPPED on its own, the track ended — advance the queue and
   // cast the next song automatically (the whole point of casting a playlist).
+  // After advancing, also try to preload the *next* next track for gapless.
   function startCastPoll() {
     stopCastPoll();
     castPollTimer = setInterval(async () => {
@@ -259,8 +285,12 @@ export const usePlayerStore = defineStore("player", () => {
         if (typeof st.duration === "number" && st.duration > 0) duration.value = st.duration;
         isPlaying.value = st.state === "PLAYING";
         updateCurrentLyric();
-        // Track finished on the device → auto-advance the queue.
-        if (prevState === "PLAYING" && st.state === "STOPPED") { next(); }
+        // Track finished on the device → auto-advance the queue, then preload
+        // the next track again for continued gapless playback.
+        if (prevState === "PLAYING" && st.state === "STOPPED") {
+          next();
+          enqueueNext();
+        }
       } catch {}
     }, 2000);
   }

@@ -20,7 +20,10 @@ import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInf
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
+  enqueueNextTrack,
 } from "../../services/dlna/control.js";
+import { markStaleDevices } from "../../services/dlna/discovery.js";
+import { getEventManager } from "../../services/dlna/eventing.js";
 
 export const apiRoutes = new Hono();
 
@@ -819,9 +822,10 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
   if (shouldRefreshDevices() || getCachedDevices().length === 0) {
     await refreshDevices();
   }
-  const devices = getCachedDevices().map(d => ({
+  const devices = markStaleDevices(getCachedDevices()).map(d => ({
     id: d.id, name: d.name, manufacturer: d.manufacturer, model: d.model,
     hasVolumeControl: !!d.renderingControlUrl,
+    available: d.available,
   }));
   return c.json({ devices });
 });
@@ -832,6 +836,7 @@ apiRoutes.post("/v1/dlna/scan", async (c) => {
   return c.json({ devices: devices.map(d => ({
     id: d.id, name: d.name, manufacturer: d.manufacturer, model: d.model,
     hasVolumeControl: !!d.renderingControlUrl,
+    available: d.available,
   })) });
 });
 
@@ -851,10 +856,37 @@ apiRoutes.post("/v1/dlna/cast", async (c) => {
       album: song.album || undefined,
       mime,
       baseUrl: getDlnaBaseUrl(c),
+      coverArt: song.coverArt || undefined,
     });
     return c.json({ success: true, message: `已投屏到设备` });
   } catch (e: any) {
     return c.json({ error: e.message || "投屏失败" }, 500);
+  }
+});
+
+// Preload the next track on the device for gapless playback (SetNextAVTransportURI).
+// The frontend calls this after a successful cast, and again whenever the
+// device finishes a track, so the next song is ready before the current one ends.
+apiRoutes.post("/v1/dlna/enqueue", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { songId, deviceId } = body;
+  if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  const song = db.select().from(songs).where(eq(songs.id, songId)).get();
+  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  const mime = DLNA_MIME[song.suffix || ""] || "audio/mpeg";
+  try {
+    const supported = await enqueueNextTrack({
+      songId, deviceId,
+      title: song.title || "未知",
+      artist: song.artist || undefined,
+      album: song.album || undefined,
+      mime,
+      baseUrl: getDlnaBaseUrl(c),
+      coverArt: song.coverArt || undefined,
+    });
+    return c.json({ success: true, enqueueSupported: supported });
+  } catch (e: any) {
+    return c.json({ error: e.message || "预加载失败" }, 500);
   }
 });
 
@@ -889,8 +921,23 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/volume", async (c) => {
 });
 
 // Query device status (state / position / duration / volume).
+// Merges the freshest GENA event state (if any) with a live SOAP snapshot so
+// the frontend gets low-latency updates from event push + a periodic SOAP
+// ground-truth to correct any drift.
 apiRoutes.get("/v1/dlna/devices/:deviceId/status", async (c) => {
-  try { const status = await getDeviceStatus(c.req.param("deviceId")); return c.json(status); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  try {
+    const deviceId = c.req.param("deviceId");
+    const status = await getDeviceStatus(deviceId);
+    const evt = getEventManager().getEventState(deviceId);
+    if (evt) {
+      // Event state is fresher for the fields it carries; prefer it over SOAP
+      // when available, but keep SOAP as the fallback (events may lag).
+      if (evt.state) status.state = evt.state;
+      if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
+      if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
+      if (typeof evt.volume === "number") status.volume = evt.volume;
+    }
+    return c.json(status);
+  } catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 
