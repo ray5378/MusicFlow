@@ -265,7 +265,9 @@ export const usePlayerStore = defineStore("player", () => {
       lastCastState = "PLAYING";
       loadLyrics(song.id);
       // Submit a real scrobble when casting starts (submission=true, the
-      // default) — submission=false is "now playing" and doesn't write history.
+      // default). This is the ONLY scrobble for this track — the cast poll
+      // below intentionally does NOT scrobble again on STOPPED, otherwise
+      // each cast song would be recorded twice (start + finish).
       api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       // Preload the next track for gapless playback (no-op if unsupported).
       enqueueNext();
@@ -314,12 +316,11 @@ export const usePlayerStore = defineStore("player", () => {
         if (typeof st.duration === "number" && st.duration > 0) duration.value = st.duration;
         isPlaying.value = st.state === "PLAYING";
         updateCurrentLyric();
-        // Track finished on the device → submit a real scrobble for the
-        // just-finished song, then auto-advance the queue and preload the
-        // next track again for continued gapless playback.
+        // Track finished on the device → auto-advance the queue and preload
+        // the next track for continued gapless playback. No scrobble here:
+        // the track was already recorded when casting started (castCurrent),
+        // scrobbling again would double-count every cast song.
         if (prevState === "PLAYING" && st.state === "STOPPED") {
-          const finished = currentSong.value;
-          if (finished) api.get(`/rest/scrobble?id=${finished.id}`).catch(() => {});
           next();
           enqueueNext();
         }
