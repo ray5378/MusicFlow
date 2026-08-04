@@ -263,30 +263,14 @@ function getSettingBool(key: string, def: boolean): boolean {
   return v === "true" || v === "1";
 }
 
-// Build today's local daily playlist.
-// Idempotent: if "今日推荐(本地)" was already created today, returns skipped=true.
-// Otherwise: delete old "昨日推荐(本地)" → rename "今日推荐(本地)" to "昨日推荐(本地)" → create new.
-// Returns null when disabled or when the library is empty.
-export async function generateLocalDailyPlaylist(date = new Date()): Promise<LocalRecommendResult | null> {
-  if (!getSettingBool("daily_recommend_local_enabled", true)) return null;
-
-  const dateStr = todayStr(date);
-
-  // Step 1: idempotency check.
-  const todayPl = findPlaylistByName(NAME_TODAY, DAILY_TAG_LOCAL);
-  if (todayPl && isCreatedToday(todayPl, dateStr)) {
-    return {
-      date: dateStr,
-      playlistId: todayPl.id,
-      name: NAME_TODAY,
-      total: todayPl.song_count || 0,
-      sourceUsers: 0,
-      fallback: false,
-      skipped: true,
-    };
+// Pick local-recommend song ids based on play-history taste profile.
+// Extracted so the main daily-recommend generator can merge these into the
+// SAME "今日推荐" playlist instead of creating a separate "(本地)" one.
+// Returns { songIds, sourceUsers, fallback }.
+export function pickLocalRecommendSongs(date: Date): { songIds: string[]; sourceUsers: number; fallback: boolean } {
+  if (!getSettingBool("daily_recommend_local_enabled", true)) {
+    return { songIds: [], sourceUsers: 0, fallback: false };
   }
-
-  // Step 2: build candidate list (no fetch needed — all local).
   const profile = buildTasteProfile();
   let songIds = pickCandidateSongs(profile, date);
   let fallback = false;
@@ -294,86 +278,19 @@ export async function generateLocalDailyPlaylist(date = new Date()): Promise<Loc
     songIds = pickRandomSample(date);
     fallback = true;
   }
-  if (songIds.length === 0) return null;
+  return { songIds, sourceUsers: profile.userCount, fallback };
+}
 
-  // Step 3: delete old "昨日推荐(本地)".
-  const oldYesterday = findPlaylistByName(NAME_YESTERDAY, DAILY_TAG_LOCAL);
-  if (oldYesterday) {
-    deletePlaylist(oldYesterday.id);
-  }
-
-  // Step 4: rename existing "今日推荐(本地)" → "昨日推荐(本地)".
-  if (todayPl) {
-    renamePlaylist(todayPl.id, NAME_YESTERDAY);
-  }
-
-  // Step 5: create new "今日推荐(本地)".
-  const playlistId = `pl-${Date.now()}`;
-  const ownerId = pickSystemOwnerId();
-
-  sqlite.prepare(`
-    INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
-    VALUES (?, ?, ?, 1, ?, NULL, NULL, 'local', NULL, 0, ?, ?)
-  `).run(
-    playlistId, NAME_TODAY, ownerId,
-    `${DAILY_TAG_LOCAL} ${dateStr} 基于本地播放历史${fallback ? "(随机采样)" : ""}`,
-    new Date().toISOString(), new Date().toISOString()
-  );
-
-  // Insert all entries as playable (they all come from the local library).
-  const insertStmt = sqlite.prepare(`
-    INSERT INTO playlist_songs (playlist_id, song_id, position, playable, created_at)
-    VALUES (?, ?, ?, 1, ?)
-  `);
-  const now = new Date().toISOString();
-  let totalDuration = 0;
-  let total = 0;
-  const tx = sqlite.transaction((rows: { id: string; duration: number }[]) => {
-    rows.forEach((s, i) => {
-      insertStmt.run(playlistId, s.id, i, now);
-      totalDuration += s.duration || 0;
-      total++;
-    });
-    sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
-      .run(total, totalDuration, now, playlistId);
-  });
-
-  // Fetch durations in the same order as songIds.
-  const songs: { id: string; duration: number }[] = [];
-  const idToSong = new Map<string, { id: string; duration: number }>();
-  for (let i = 0; i < songIds.length; i += 500) {
-    const batch = songIds.slice(i, i + 500);
-    const placeholders = batch.map(() => "?").join(",");
-    const rows = sqlite.prepare(`SELECT id, duration FROM songs WHERE id IN (${placeholders})`).all(...batch) as { id: string; duration: number }[];
-    for (const r of rows) idToSong.set(r.id, r);
-  }
-  for (const id of songIds) {
-    const s = idToSong.get(id);
-    if (s) songs.push(s);
-  }
-  tx(songs);
-
-  return {
-    date: dateStr,
-    playlistId,
-    name: NAME_TODAY,
-    total,
-    sourceUsers: profile.userCount,
-    fallback,
-    skipped: false,
-  };
+// Build today's local daily playlist.
+// DEPRECATED: local songs are now merged into the main "今日推荐" playlist by
+// generateDailyPlaylist(). This function is kept only for backward compat and
+// returns null (no separate "(本地)" playlist is created anymore).
+export async function generateLocalDailyPlaylist(date = new Date()): Promise<LocalRecommendResult | null> {
+  return null;
 }
 
 // Top-level entry for the scheduler. Never throws.
+// Now a no-op — local songs are merged into the main daily playlist.
 export async function runLocalDailyRecommendJob(): Promise<LocalRecommendResult | null> {
-  try {
-    const result = await generateLocalDailyPlaylist();
-    if (result && !result.skipped) {
-      console.log(`[LOCAL-RECOMMEND] ${result.date}: ${result.total} songs${result.fallback ? " (fallback random sample)" : ` from ${result.sourceUsers} user(s)`}`);
-    }
-    return result;
-  } catch (e: any) {
-    console.error("[LOCAL-RECOMMEND] error:", e.message || e);
-    return null;
-  }
+  return null;
 }

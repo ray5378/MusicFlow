@@ -12,7 +12,6 @@ import { initDatabase, cleanupPlayHistory, sqlite } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
-import { runLocalDailyRecommendJob } from "./services/plugin/localRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
@@ -111,10 +110,9 @@ function getDailyMasterEnabled(): boolean {
 }
 
 async function runDailyJobs() {
-  // Master switch gates both A and B. (Plan B has its own sub-switch read inside.)
+  // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
   await runDailyRecommendJob();
-  await runLocalDailyRecommendJob();
 }
 
 function scheduleNextDailyRun() {
