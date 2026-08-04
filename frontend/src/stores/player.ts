@@ -108,15 +108,19 @@ export const usePlayerStore = defineStore("player", () => {
       src: [getStreamUrl(song.id)],
       volume: volume.value,
       html5: true,
-      onplay: () => { isPlaying.value = true; duration.value = howl?.duration() || 0; startProgressTimer(); api.get(`/rest/scrobble?id=${song.id}&submission=false`).catch(() => {}); },
-      onpause: () => { isPlaying.value = false; stopProgressTimer(); },
-      onend: () => {
-        // Song finished naturally → submit a real scrobble (submission=true)
-        // so it lands in play_history. The now-playing ping on onplay uses
-        // submission=false and does not write history.
+      onplay: () => {
+        isPlaying.value = true;
+        duration.value = howl?.duration() || 0;
+        startProgressTimer();
+        // Submit a real scrobble on play start (submission=true, the default).
+        // Backend dedupes within 10s so Howl's repeated onplay (e.g. after
+        // seek) won't create duplicate history rows. We intentionally do NOT
+        // use submission=false here — that's "now playing" and doesn't write
+        // play_history, which left the Web frontend with no history at all.
         api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
-        next();
       },
+      onpause: () => { isPlaying.value = false; stopProgressTimer(); },
+      onend: () => { next(); },
       onload: () => { duration.value = howl?.duration() || 0; },
     });
     howl.play();
@@ -260,7 +264,9 @@ export const usePlayerStore = defineStore("player", () => {
       duration.value = song.duration || 0;
       lastCastState = "PLAYING";
       loadLyrics(song.id);
-      api.get(`/rest/scrobble?id=${song.id}&submission=false`).catch(() => {});
+      // Submit a real scrobble when casting starts (submission=true, the
+      // default) — submission=false is "now playing" and doesn't write history.
+      api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       // Preload the next track for gapless playback (no-op if unsupported).
       enqueueNext();
     } catch { isPlaying.value = false; }
