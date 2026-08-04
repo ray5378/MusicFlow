@@ -110,7 +110,13 @@ export const usePlayerStore = defineStore("player", () => {
       html5: true,
       onplay: () => { isPlaying.value = true; duration.value = howl?.duration() || 0; startProgressTimer(); api.get(`/rest/scrobble?id=${song.id}&submission=false`).catch(() => {}); },
       onpause: () => { isPlaying.value = false; stopProgressTimer(); },
-      onend: () => { next(); },
+      onend: () => {
+        // Song finished naturally → submit a real scrobble (submission=true)
+        // so it lands in play_history. The now-playing ping on onplay uses
+        // submission=false and does not write history.
+        api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
+        next();
+      },
       onload: () => { duration.value = howl?.duration() || 0; },
     });
     howl.play();
@@ -302,9 +308,12 @@ export const usePlayerStore = defineStore("player", () => {
         if (typeof st.duration === "number" && st.duration > 0) duration.value = st.duration;
         isPlaying.value = st.state === "PLAYING";
         updateCurrentLyric();
-        // Track finished on the device → auto-advance the queue, then preload
-        // the next track again for continued gapless playback.
+        // Track finished on the device → submit a real scrobble for the
+        // just-finished song, then auto-advance the queue and preload the
+        // next track again for continued gapless playback.
         if (prevState === "PLAYING" && st.state === "STOPPED") {
+          const finished = currentSong.value;
+          if (finished) api.get(`/rest/scrobble?id=${finished.id}`).catch(() => {});
           next();
           enqueueNext();
         }
