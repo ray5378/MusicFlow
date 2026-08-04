@@ -55,8 +55,9 @@ app.use("/rest/*", async (c, next) => {
   //    have no way to authenticate; access is gated by a short-lived cast
   //    token that maps to a songId inside the route handler itself.
   const p = c.req.path;
+  // c.req.path 是完整路径(含 /rest 前缀),所以用 includes/endsWith 匹配
   if (p === "/getCoverArt" || p.endsWith("/getCoverArt")) return next();
-  if (p.startsWith("/dlna/stream/")) return next();
+  if (p.includes("/dlna/stream/")) return next();
   return authMiddleware(c, next);
 });
 app.route("/rest", restRoutes);
