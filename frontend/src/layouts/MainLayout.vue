@@ -72,6 +72,9 @@
           <el-tooltip content="添加到歌单" placement="top">
             <el-button :icon="Plus" circle size="small" @click="openAddToPlaylist" />
           </el-tooltip>
+          <el-tooltip content="DLNA 投屏" placement="top">
+            <el-button :icon="Monitor" circle size="small" @click="openDlnaDialog" :type="dlnaActive ? 'primary' : ''" />
+          </el-tooltip>
           <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
             <el-button
               circle
@@ -96,6 +99,16 @@
         <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :show-tooltip="false" class="volume-slider" />
       </div>
     </footer>
+
+    <!-- ===== DLNA cast status bar ===== -->
+    <div class="dlna-status-bar" v-if="dlnaActive">
+      <span class="dlna-status-label"><el-icon><Monitor /></el-icon> 投屏中:{{ dlnaDeviceName }}</span>
+      <el-button size="small" circle @click="dlnaPlay" :disabled="dlnaState === 'PLAYING'"><PlaybackIcon name="play" :size="14" /></el-button>
+      <el-button size="small" circle @click="dlnaPause" :disabled="dlnaState === 'PAUSED_PLAYBACK' || dlnaState === 'STOPPED'"><PlaybackIcon name="pause" :size="14" /></el-button>
+      <el-button size="small" circle :icon="VideoPause" @click="dlnaStop" />
+      <el-slider :model-value="dlnaVolume" @input="dlnaSetVolume" :show-tooltip="false" class="dlna-volume" size="small" />
+      <el-button size="small" text @click="openDlnaDialog">切换设备</el-button>
+    </div>
 
     <!-- ===== Queue panel ===== -->
     <transition name="slide-right">
@@ -234,6 +247,36 @@
         <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">新建并添加</el-button>
       </div>
     </el-dialog>
+
+    <!-- ===== DLNA device dialog ===== -->
+    <el-dialog v-model="showDlnaDialog" title="DLNA 投屏" width="440px">
+      <div class="dlna-dialog-song" v-if="playerStore.currentSong">
+        将「{{ playerStore.currentSong.title }}」投屏到：
+      </div>
+      <div class="playlist-list" v-loading="dlnaScanning">
+        <div
+          v-for="dev in dlnaDevices"
+          :key="dev.id"
+          class="playlist-item"
+          :class="{ active: dlnaActiveDevice === dev.id }"
+          @click="castTo(dev)"
+        >
+          <el-icon class="pl-icon"><Monitor /></el-icon>
+          <div class="pl-info">
+            <div class="pl-name">{{ dev.name }}</div>
+            <div class="pl-meta">{{ dev.manufacturer || dev.model || 'DLNA 设备' }}</div>
+          </div>
+          <el-icon v-if="dlnaCastingDevice === dev.id" class="el-icon is-loading"><Loading /></el-icon>
+        </div>
+        <div v-if="dlnaDevices.length === 0 && !dlnaScanning" class="empty-tip">
+          未发现 DLNA 设备,请确认设备在同一局域网且已开启 DLNA
+        </div>
+      </div>
+      <div class="create-playlist-row">
+        <el-button :loading="dlnaScanning" @click="scanDlnaDevices"><el-icon><Refresh /></el-icon>重新扫描</el-button>
+        <span v-if="dlnaActive" class="dlna-current-tip">当前: {{ dlnaDeviceName }}</span>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -243,7 +286,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, VideoPause } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -364,6 +407,92 @@ async function toggleCurrentFavorite() {
     const fav = await favoritesStore.toggleFavorite(song.id);
     ElMessage.success(fav ? "已添加到我喜欢的音乐" : "已从我喜欢的音乐移除");
   } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
+}
+
+// ===== DLNA cast =====
+const showDlnaDialog = ref(false);
+const dlnaDevices = ref<any[]>([]);
+const dlnaScanning = ref(false);
+const dlnaCastingDevice = ref("");
+const dlnaActiveDevice = ref("");
+const dlnaDeviceName = ref("");
+const dlnaState = ref("STOPPED");
+const dlnaVolume = ref(50);
+let dlnaPollTimer: ReturnType<typeof setInterval> | null = null;
+
+const dlnaActive = computed(() => !!dlnaActiveDevice.value);
+
+async function openDlnaDialog() {
+  if (!playerStore.currentSong) { ElMessage.warning("请先选择一首歌曲"); return; }
+  showDlnaDialog.value = true;
+  await scanDlnaDevices();
+}
+
+async function scanDlnaDevices() {
+  dlnaScanning.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/dlna/scan");
+    dlnaDevices.value = res.data.devices || [];
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "扫描失败");
+    dlnaDevices.value = [];
+  } finally { dlnaScanning.value = false; }
+}
+
+async function castTo(dev: any) {
+  const song = playerStore.currentSong;
+  if (!song) { ElMessage.warning("请先选择一首歌曲"); return; }
+  dlnaCastingDevice.value = dev.id;
+  try {
+    await api.post("/rest/api/v1/dlna/cast", { songId: song.id, deviceId: dev.id });
+    dlnaActiveDevice.value = dev.id;
+    dlnaDeviceName.value = dev.name;
+    showDlnaDialog.value = false;
+    ElMessage.success(`已投屏到「${dev.name}」`);
+    startDlnaPoll();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "投屏失败");
+  } finally { dlnaCastingDevice.value = ""; }
+}
+
+async function dlnaPlay() {
+  if (!dlnaActiveDevice.value) return;
+  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/play`); } catch {}
+}
+async function dlnaPause() {
+  if (!dlnaActiveDevice.value) return;
+  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/pause`); } catch {}
+}
+async function dlnaStop() {
+  if (!dlnaActiveDevice.value) return;
+  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/stop`); } catch {}
+  stopDlnaPoll();
+  dlnaActiveDevice.value = "";
+  dlnaDeviceName.value = "";
+  dlnaState.value = "STOPPED";
+}
+async function dlnaSetVolume(v: number) {
+  if (!dlnaActiveDevice.value) return;
+  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/volume`, { volume: v }); } catch {}
+}
+
+function startDlnaPoll() {
+  stopDlnaPoll();
+  dlnaPollTimer = setInterval(async () => {
+    if (!dlnaActiveDevice.value) { stopDlnaPoll(); return; }
+    try {
+      const res = await api.get(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/status`);
+      dlnaState.value = res.data.state || "STOPPED";
+      if (typeof res.data.volume === "number") dlnaVolume.value = res.data.volume;
+      if (res.data.state === "STOPPED" && dlnaState.value === "STOPPED") {
+        // Device stopped on its own (track ended) — keep device active so user can recast.
+      }
+    } catch {}
+  }, 3000);
+}
+
+function stopDlnaPoll() {
+  if (dlnaPollTimer) { clearInterval(dlnaPollTimer); dlnaPollTimer = null; }
 }
 
 // Load favorites + preload homepage data once on mount (refresh-page scenario)
@@ -535,4 +664,16 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
 }
 .create-playlist-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
 .empty-tip { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
+
+/* ===== DLNA cast ===== */
+.dlna-status-bar {
+  position: fixed; bottom: var(--player-height); left: var(--sidebar-width); right: 0;
+  height: 36px; background: #f0f7ff; border-top: 1px solid #d6e8ff;
+  display: flex; align-items: center; gap: 8px; padding: 0 20px; z-index: 99;
+  font-size: 13px; color: #409eff;
+  .dlna-status-label { display: flex; align-items: center; gap: 4px; font-weight: 500; margin-right: auto; }
+  .dlna-volume { width: 80px; }
+}
+.dlna-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
+.dlna-current-tip { color: #999; font-size: 12px; margin-left: auto; }
 </style>

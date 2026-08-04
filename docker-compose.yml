@@ -3,8 +3,11 @@ services:
     image: docker.io/ray5378/musicflow:latest
     container_name: musicflow
     restart: unless-stopped
-    ports:
-      - "46400:46400"
+    # network_mode: host is REQUIRED for DLNA discovery (SSDP multicast).
+    # Without it, the container cannot send/receive UDP multicast to the LAN.
+    # Note: host networking is supported on Linux only. On Docker Desktop
+    # (macOS/Windows) DLNA discovery will not work — run natively instead.
+    network_mode: host
     environment:
       # Optional: auto-generated and persisted in ./data/.jwt-secret on first
       # start when left empty (stable across restarts). Set it explicitly to
@@ -14,5 +17,9 @@ services:
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
+      # Optional: override the base URL DLNA renderers use to pull the stream.
+      # Auto-detected from the request Host header by default. Set this if
+      # the auto-detected IP is wrong (e.g. behind a reverse proxy).
+      # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
       - ./data:/app/backend/data

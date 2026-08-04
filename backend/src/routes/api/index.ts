@@ -17,6 +17,10 @@ import {
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
+import {
+  refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
+  playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
+} from "../../services/dlna/control.js";
 
 export const apiRoutes = new Hono();
 
@@ -789,5 +793,104 @@ apiRoutes.get("/v1/history", (c) => {
     };
   }).filter(Boolean);
   return c.json({ total, page, pageSize, items });
+});
+
+// ==================== DLNA cast ====================
+const DLNA_MIME: Record<string, string> = {
+  mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
+  ogg: "audio/ogg", m4a: "audio/mp4", wma: "audio/x-ms-wma", ape: "audio/ape",
+  aiff: "audio/aiff", opus: "audio/opus",
+};
+
+// Derive the LAN base URL the DLNA renderer should use to pull the stream.
+// Uses the request Host header's hostname + the backend's actual listening
+// port (so it works even when fronted by a dev proxy on a different port).
+function getDlnaBaseUrl(c: any): string {
+  const envBase = process.env.DLNA_BASE_URL;
+  if (envBase) return envBase.replace(/\/+$/, "");
+  const host = c.req.header("host") || "";
+  const hostname = host.split(":")[0] || "0.0.0.0";
+  const port = process.env.PORT || "46400";
+  return `http://${hostname}:${port}`;
+}
+
+// List discovered DLNA renderers (refreshes cache if stale).
+apiRoutes.get("/v1/dlna/devices", async (c) => {
+  if (shouldRefreshDevices() || getCachedDevices().length === 0) {
+    await refreshDevices();
+  }
+  const devices = getCachedDevices().map(d => ({
+    id: d.id, name: d.name, manufacturer: d.manufacturer, model: d.model,
+    hasVolumeControl: !!d.renderingControlUrl,
+  }));
+  return c.json({ devices });
+});
+
+// Force a fresh SSDP discovery scan.
+apiRoutes.post("/v1/dlna/scan", async (c) => {
+  const devices = await refreshDevices();
+  return c.json({ devices: devices.map(d => ({
+    id: d.id, name: d.name, manufacturer: d.manufacturer, model: d.model,
+    hasVolumeControl: !!d.renderingControlUrl,
+  })) });
+});
+
+// Cast a song to a DLNA renderer.
+apiRoutes.post("/v1/dlna/cast", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { songId, deviceId } = body;
+  if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  const song = db.select().from(songs).where(eq(songs.id, songId)).get();
+  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  const mime = DLNA_MIME[song.suffix || ""] || "audio/mpeg";
+  try {
+    await castToDevice({
+      songId, deviceId,
+      title: song.title || "未知",
+      artist: song.artist || undefined,
+      album: song.album || undefined,
+      mime,
+      baseUrl: getDlnaBaseUrl(c),
+    });
+    return c.json({ success: true, message: `已投屏到设备` });
+  } catch (e: any) {
+    return c.json({ error: e.message || "投屏失败" }, 500);
+  }
+});
+
+// Transport controls.
+apiRoutes.post("/v1/dlna/devices/:deviceId/play", async (c) => {
+  try { await playDevice(c.req.param("deviceId")); return c.json({ success: true }); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.post("/v1/dlna/devices/:deviceId/pause", async (c) => {
+  try { await pauseDevice(c.req.param("deviceId")); return c.json({ success: true }); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.post("/v1/dlna/devices/:deviceId/stop", async (c) => {
+  try { await stopDevice(c.req.param("deviceId")); return c.json({ success: true }); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.post("/v1/dlna/devices/:deviceId/seek", async (c) => {
+  const { seconds } = await c.req.json().catch(() => ({}));
+  if (typeof seconds !== "number") return c.json({ error: "需要 seconds" }, 400);
+  try { await seekDevice(c.req.param("deviceId"), seconds); return c.json({ success: true }); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.post("/v1/dlna/devices/:deviceId/volume", async (c) => {
+  const { volume } = await c.req.json().catch(() => ({}));
+  if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+  try { await setDeviceVolume(c.req.param("deviceId"), volume); return c.json({ success: true }); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+// Query device status (state / position / duration / volume).
+apiRoutes.get("/v1/dlna/devices/:deviceId/status", async (c) => {
+  try { const status = await getDeviceStatus(c.req.param("deviceId")); return c.json(status); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 

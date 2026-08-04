@@ -7,6 +7,7 @@ import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
+import { resolveCastToken } from "../../services/dlna/control.js";
 
 export const restRoutes = new Hono();
 
@@ -917,6 +918,82 @@ restRoutes.get("/stream", async (c) => {
     }
   } catch (e: any) {
     return c.json(ok({ error: { code: 0, message: e.message || "Stream failed" } }));
+  }
+});
+
+// ==================== DLNA stream (token-auth-free) ====================
+// DLNA renderers pull bytes via a plain HTTP GET and cannot send auth headers.
+// This endpoint resolves a cast token (created by castToDevice) to a songId,
+// then streams the file exactly like /rest/stream. Registered without auth.
+restRoutes.get("/dlna/stream/:token", async (c) => {
+  const token = c.req.param("token");
+  const songId = resolveCastToken(token);
+  if (!songId) return c.text("Invalid or expired cast token", 403);
+
+  const song = db.select().from(songs).where(eq(songs.id, songId)).get();
+  if (!song) return c.text("Song not found", 404);
+
+  const parsed = parseSongPath(song.path);
+  if (!parsed) return c.text("Invalid song path", 400);
+
+  const rangeHeader = c.req.header("range");
+  try {
+    if (parsed.type === "w") {
+      const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
+      if (!source) return c.text("Source not found", 404);
+      const config = JSON.parse(source.config || "{}");
+      const downloadUrl = getWebDAVUrl(config, parsed.filePath);
+      const headers: Record<string, string> = {};
+      if (config.username && config.password) {
+        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+      }
+      if (rangeHeader) headers["Range"] = rangeHeader;
+      const upstream = await fetch(downloadUrl, { headers });
+      const respHeaders: Record<string, string> = {
+        "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-cache",
+      };
+      const ct = upstream.headers.get("content-type");
+      if (ct) respHeaders["Content-Type"] = ct;
+      const cl = upstream.headers.get("content-length");
+      if (cl) respHeaders["Content-Length"] = cl;
+      const cr = upstream.headers.get("content-range");
+      if (cr) respHeaders["Content-Range"] = cr;
+      return c.body(upstream.body as any, upstream.status as any, respHeaders);
+    } else {
+      const fs = await import("fs");
+      const filePath = parsed.filePath;
+      if (!fs.existsSync(filePath)) return c.text("File not found", 404);
+      const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
+      const mime = MIME_MAP[song.suffix || ""] || "application/octet-stream";
+      if (rangeHeader) {
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (match) {
+          const start = parseInt(match[1]);
+          const end = match[2] ? parseInt(match[2]) : fileSize - 1;
+          const chunkSize = end - start + 1;
+          const stream = fs.createReadStream(filePath, { start, end });
+          return new Response(stream as any, {
+            status: 206,
+            headers: {
+              "Content-Type": mime,
+              "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+              "Content-Length": String(chunkSize),
+              "Accept-Ranges": "bytes",
+            },
+          });
+        }
+      }
+      const stream = fs.createReadStream(filePath);
+      return new Response(stream as any, {
+        status: 200,
+        headers: { "Content-Type": mime, "Content-Length": String(fileSize), "Accept-Ranges": "bytes" },
+      });
+    }
+  } catch (e: any) {
+    return c.text(e.message || "Stream failed", 500);
   }
 });
 
