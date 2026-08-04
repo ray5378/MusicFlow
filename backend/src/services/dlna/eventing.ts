@@ -18,6 +18,7 @@
 // keep returning true and the frontend falls back to SOAP polling — exactly
 // the resilience MA has (force_poll=True on UpnpError).
 import http from "http";
+import { EventEmitter } from "events";
 import { DlnaDevice } from "./discovery.js";
 import { notifyTrackChanged } from "./control.js";
 
@@ -54,12 +55,24 @@ interface Subscription {
   renewTimer?: ReturnType<typeof setTimeout>;
 }
 
-class EventManager {
+class EventManager extends EventEmitter {
   private subs = new Map<string, Subscription>(); // key: deviceId|service
   private states = new Map<string, DeviceEventState>(); // key: deviceId
   private server?: http.Server;
   private listenPort = 0;
   private callbackBase = "";
+
+  constructor() {
+    super();
+    // WS clients + queue manager + control layer may all subscribe; avoid
+    // Node's default 10-listener warning.
+    this.setMaxListeners(50);
+  }
+
+  /** Emit a device_list_changed event (called by control.ts refreshDevices). */
+  emitDeviceListChanged(deviceCount: number): void {
+    this.emit("device_list_changed", deviceCount);
+  }
 
   // Lazily start the HTTP server that receives NOTIFY messages. Bound to the
   // same port as the Hono app would be ideal, but to keep this self-contained
@@ -134,6 +147,15 @@ class EventManager {
         if (vol) st.volume = parseInt(vol, 10) || 0;
       }
       this.states.set(deviceId, st);
+      // Notify subscribers (WebSocket layer) of the new state.
+      const prevState = prev.state;
+      this.emit("state_changed", deviceId, st);
+      // Detect a natural track end: transport transitioned to STOPPED from
+      // PLAYING (not from PAUSED, which would be a user pause). The queue
+      // manager subscribes to advance to the next track in this case.
+      if (st.state === "STOPPED" && prevState === "PLAYING") {
+        this.emit("track_ended", deviceId, st);
+      }
     } catch {
       // Malformed NOTIFY — ignore, we'll get the next one.
     }

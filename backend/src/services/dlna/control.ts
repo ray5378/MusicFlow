@@ -116,12 +116,22 @@ let lastDiscovery = 0;
 // Per-device runtime state: whether it supports gapless enqueue, whether the
 // next track is already preloaded, and an availability flag used by the
 // background poller. Mirrors MA's DLNAPlayer attributes.
+export interface CurrentMedia {
+  songId: string;
+  title: string;
+  artist?: string;
+  album?: string;
+  coverArt?: string;
+}
+
 interface DeviceRuntime {
   supportsEnqueue?: boolean;   // device advertises SetNextAVTransportURI
   nextEnqueued?: boolean;      // a next track is already set on the device
   available: boolean;          // last SOAP call succeeded
   forcePoll: boolean;          // GENA subscription failed → fall back to polling
   lastSeen: number;            // ms epoch of last successful contact
+  currentMedia?: CurrentMedia; // track currently loaded on the device
+  suppressAutoNext?: boolean;  // set by stop()/queue.clear to avoid auto-advance
 }
 const runtimes = new Map<string, DeviceRuntime>();
 
@@ -136,6 +146,8 @@ function runtimeOf(deviceId: string): DeviceRuntime {
 export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
   cachedDevices = await discoverDlnaDevices(timeoutMs);
   lastDiscovery = Date.now();
+  // Notify subscribers (WS layer) that the device list may have changed.
+  getEventManager().emitDeviceListChanged(cachedDevices.length);
   return cachedDevices;
 }
 
@@ -289,9 +301,27 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
   await soapCall(device.avTransportUrl, AV_TRANSPORT, "Play", { InstanceID: "0", Speed: "1" });
   markOk(opts.deviceId);
 
+  // Record the currently-loaded media so getDeviceStatus / WS pushes can
+  // report title/artist/album/coverArt without a fresh SOAP round-trip.
+  const rt = runtimeOf(opts.deviceId);
+  rt.currentMedia = {
+    songId: opts.songId,
+    title: opts.title,
+    artist: opts.artist,
+    album: opts.album,
+    coverArt: opts.coverArt,
+  };
+  rt.suppressAutoNext = false;
+  getEventManager().emit("media_changed", opts.deviceId, rt.currentMedia);
+
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
   getEventManager().subscribe(device).catch(() => {});
+}
+
+/** Read the media currently loaded on a device (set by castToDevice). */
+export function getCurrentMedia(deviceId: string): CurrentMedia | undefined {
+  return runtimes.get(deviceId)?.currentMedia;
 }
 
 // Preload the next track on the device via SetNextAVTransportURI so the
@@ -366,7 +396,11 @@ export async function pauseDevice(deviceId: string): Promise<void> {
 export async function stopDevice(deviceId: string): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到");
-  runtimeOf(deviceId).nextEnqueued = false;
+  const rt = runtimeOf(deviceId);
+  rt.nextEnqueued = false;
+  // Suppress queue auto-advance — this Stop came from an explicit user action,
+  // not a natural track end.
+  rt.suppressAutoNext = true;
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
     markOk(deviceId);
@@ -407,6 +441,7 @@ export interface DeviceStatus {
   position: number;   // seconds
   duration: number;   // seconds
   volume: number;     // 0-100
+  media?: CurrentMedia; // currently loaded track (set by castToDevice)
 }
 
 // Query current transport state + position + volume via SOAP.
