@@ -18,11 +18,12 @@ import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
 const app = new Hono();
 
-// Log only failed requests (4xx/5xx) so routine traffic stays quiet.
+// Log only real server errors (5xx) so routine traffic and client-side
+// auth failures stay quiet.
 app.use("*", async (c, next) => {
   await next();
   const status = c.res.status;
-  if (status >= 400) {
+  if (status >= 500) {
     console.log(`[${new Date().toISOString()}] ${c.req.method} ${c.req.path} -> ${status}`);
   }
 });
