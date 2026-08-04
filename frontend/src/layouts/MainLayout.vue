@@ -110,10 +110,11 @@
             <el-button size="small" text @click="playerStore.togglePlaylistPanel">关闭</el-button>
           </div>
         </div>
-        <div class="queue-list">
+        <div class="queue-list" ref="queueListEl">
           <div
             v-for="(song, idx) in playerStore.queue"
             :key="song.id"
+            ref="queueItemEls"
             class="queue-item"
             :class="{ active: idx === playerStore.currentIndex }"
             @click="playFromQueue(idx)"
@@ -301,6 +302,10 @@ const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
 const sidebarCollapsed = ref(false);
 const lyricsContainer = ref<HTMLElement | null>(null);
+// Queue panel scroll tracking — queueListEl is the scroll container, queueItemEls
+// collects all rendered queue-item DOM nodes (Vue 3 ref array on v-for).
+const queueListEl = ref<HTMLElement | null>(null);
+const queueItemEls = ref<HTMLElement[]>([]);
 
 // Add-to-playlist dialog state
 const showPlaylistDialog = ref(false);
@@ -486,6 +491,28 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
   // Center the active line inside the scrollable container
   const targetTop = active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
   container.scrollTo({ top: targetTop, behavior: "smooth" });
+});
+
+// Auto-scroll the queue panel so the currently playing song stays in view.
+// Applies to ALL play modes (order/one/all/shuffle) — the active item may
+// jump anywhere in the list under shuffle, so we must follow it.
+// Skips auto-scroll if the queue panel is closed (no DOM) or the user is
+// actively hovering the list (don't fight manual scrolling).
+watch(() => playerStore.currentIndex, async (idx) => {
+  if (idx < 0) return;
+  await nextTick();
+  const list = queueListEl.value;
+  if (!list) return; // panel closed
+  if (list.matches(":hover")) return; // user is scrolling manually
+  const active = queueItemEls.value[idx];
+  if (!active) return;
+  // Bring the active item into view without forcing it to the top — if it's
+  // already visible, do nothing; otherwise scroll just enough to reveal it.
+  const listRect = list.getBoundingClientRect();
+  const itemRect = active.getBoundingClientRect();
+  if (itemRect.top >= listRect.top && itemRect.bottom <= listRect.bottom) return;
+  const targetTop = active.offsetTop - list.clientHeight / 2 + active.clientHeight / 2;
+  list.scrollTo({ top: targetTop, behavior: "smooth" });
 });
 </script>
 
