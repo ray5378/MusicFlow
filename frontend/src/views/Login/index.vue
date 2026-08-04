@@ -2,7 +2,7 @@
   <div class="login-page">
     <div class="login-card">
       <div class="login-header">
-        <el-icon :size="48" color="#c35f33"><Headset /></el-icon>
+        <img src="/favicon.svg" alt="MusicFlow" class="login-logo" />
         <h1>MusicFlow</h1>
         <p>自托管音乐库</p>
       </div>
@@ -40,7 +40,6 @@
 import { ref, reactive } from "vue";
 import { useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
-import { Headset } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
@@ -89,7 +88,9 @@ async function submitPassword() {
 <style lang="scss" scoped>
 .login-page { display: flex; align-items: center; justify-content: center; height: 100vh; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); }
 .login-card { background: #fff; border-radius: 12px; padding: 48px 40px; width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-  .login-header { text-align: center; margin-bottom: 32px; h1 { margin: 12px 0 4px; font-size: 28px; color: #333; } p { color: #999; font-size: 14px; } }
+  .login-header { text-align: center; margin-bottom: 32px;
+    .login-logo { width: 64px; height: 64px; border-radius: 14px; box-shadow: 0 6px 16px rgba(26,26,46,0.35); }
+    h1 { margin: 12px 0 4px; font-size: 28px; color: #333; } p { color: #999; font-size: 14px; } }
   .login-btn { width: 100%; margin-top: 8px; }
 }
 .pwd-alert { margin-bottom: 20px; }

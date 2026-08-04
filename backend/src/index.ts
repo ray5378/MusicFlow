@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import fs from "fs";
 import path from "path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { authRoutes } from "./routes/auth/index.js";
@@ -60,6 +61,16 @@ app.use("/assets/*", async (c, next) => {
 app.get("/assets/*", serveStatic({ root: staticDir }));
 app.get("*", async (c, next) => {
   if (c.req.path.startsWith("/rest") || c.req.path.startsWith("/api") || c.req.path === "/ping") return next();
+  // Serve real static files first (e.g. /favicon.svg), then fall back to the
+  // SPA shell so client-side routes like /songs still render index.html.
+  // (Pre-check with fs: serveStatic's own "not found" path calls next(), which
+  // finalizes a 404 response that the subsequent fallback can no longer override.)
+  const rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
+  const filePath = path.resolve(staticDir, rel);
+  const inside = filePath === staticDir || filePath.startsWith(staticDir + path.sep);
+  if (rel && inside && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    return serveStatic({ root: staticDir })(c, next);
+  }
   return serveStatic({ path: "index.html", root: staticDir })(c, next);
 });
 

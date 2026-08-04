@@ -2,7 +2,7 @@
   <div class="main-layout">
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="logo" @click="sidebarCollapsed = !sidebarCollapsed">
-        <el-icon :size="28" color="#c35f33"><Headset /></el-icon>
+        <img src="/favicon.svg" alt="MusicFlow" class="logo-img" />
         <span v-if="!sidebarCollapsed" class="logo-text">MusicFlow</span>
       </div>
       <el-menu :default-active="activeMenu" :collapse="sidebarCollapsed" router class="sidebar-menu">
@@ -394,6 +394,7 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
   width: var(--sidebar-width); background: #1a1a2e; color: #fff; display: flex; flex-direction: column; transition: width 0.3s; flex-shrink: 0;
   &.collapsed { width: var(--sidebar-collapsed-width); }
   .logo { display: flex; align-items: center; padding: 16px; cursor: pointer; gap: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); height: var(--header-height);
+    .logo-img { width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0; }
     .logo-text { font-size: 18px; font-weight: 600; white-space: nowrap; }
   }
   .sidebar-menu { flex: 1; overflow-y: auto; border-right: none !important; background: transparent;
