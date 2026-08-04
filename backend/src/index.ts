@@ -18,13 +18,16 @@ import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
 const app = new Hono();
 
-// Log only real server errors (5xx) so routine traffic and client-side
-// auth failures stay quiet.
+// Log only what's useful: auth failures get a readable Chinese hint, real
+// server errors (5xx) keep a bare record; everything else stays quiet.
 app.use("*", async (c, next) => {
   await next();
   const status = c.res.status;
-  if (status >= 500) {
-    console.log(`[${new Date().toISOString()}] ${c.req.method} ${c.req.path} -> ${status}`);
+  const ts = new Date().toLocaleString("zh-CN", { hour12: false });
+  if (status === 401) {
+    console.log(`[${ts}] 认证失败,请检查账号密码: ${c.req.method} ${c.req.path}`);
+  } else if (status >= 500) {
+    console.log(`[${ts}] ${c.req.method} ${c.req.path} -> ${status}`);
   }
 });
 
