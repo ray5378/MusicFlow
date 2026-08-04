@@ -27,22 +27,34 @@ export async function authMiddleware(c: Context, next: Next) {
     if (user) { c.set("user", user); return next(); }
   }
 
+  // Bearer token: first try JWT, then fall back to a long-lived API key.
+  // The API-key fallback lets the Home Assistant integration present the
+  // user's apiKey here (HA integrations conventionally use Authorization:
+  // Bearer) and also covers /rest/* OpenSubsonic calls from the integration.
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.substring(7);
+    let user: AuthUser | null = null;
     try {
-      const payload = jwt.verify(authHeader.substring(7), JWT_SECRET) as any;
-      const user = await getUserById(payload.uid || payload.sub);
-      if (user) { c.set("user", user); return next(); }
-    } catch {}
+      const payload = jwt.verify(token, JWT_SECRET) as any;
+      user = await getUserById(payload.uid || payload.sub);
+    } catch {
+      // Not a valid JWT — fall through to API-key check below.
+    }
+    if (!user) user = await authenticateApiKey(token);
+    if (user) { c.set("user", user); return next(); }
   }
 
   const ndAuth = c.req.header("X-ND-Authorization");
   if (ndAuth?.startsWith("Bearer ")) {
+    const token = ndAuth.substring(7);
+    let user: AuthUser | null = null;
     try {
-      const payload = jwt.verify(ndAuth.substring(7), JWT_SECRET) as any;
-      const user = await getUserById(payload.uid || payload.sub);
-      if (user) { c.set("user", user); return next(); }
+      const payload = jwt.verify(token, JWT_SECRET) as any;
+      user = await getUserById(payload.uid || payload.sub);
     } catch {}
+    if (!user) user = await authenticateApiKey(token);
+    if (user) { c.set("user", user); return next(); }
   }
 
   // Read OpenSubsonic auth params from query string OR form body (MA/libopensonic POSTs form data)
