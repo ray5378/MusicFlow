@@ -266,6 +266,15 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_play_history_user ON play_history(user_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
     CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist ON playlist_songs(playlist_id);
+
+    CREATE TABLE IF NOT EXISTS device_queues (
+      device_id TEXT PRIMARY KEY,
+      items_json TEXT NOT NULL DEFAULT '[]',
+      current_index INTEGER NOT NULL DEFAULT -1,
+      play_mode TEXT NOT NULL DEFAULT 'order',
+      is_active INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)

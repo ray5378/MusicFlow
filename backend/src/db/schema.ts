@@ -201,3 +201,15 @@ export const recommendPool = sqliteTable("recommend_pool", {
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
+
+// Per-DLNA-device persisted playback queue. Survives backend restarts and
+// Web-client disconnects so the device keeps playing (auto-advance runs in
+// the backend, not the frontend). HA and Web share the same queue.
+export const deviceQueues = sqliteTable("device_queues", {
+  deviceId: text("device_id").primaryKey(),
+  itemsJson: text("items_json").notNull().default("[]"), // QueueItem[] serialized
+  currentIndex: integer("current_index").notNull().default(-1),
+  playMode: text("play_mode").notNull().default("order"), // order|one|all|shuffle
+  isActive: integer("is_active").notNull().default(0),     // 1 = currently casting
+  updatedAt: text("updated_at").default(""),
+});
