@@ -49,8 +49,14 @@ app.route("/rest", authRoutes);
 app.get("/rest/ping", (c) => c.json({ "subsonic-response": { status: "ok", version: "1.16.1", serverVersion: "1.0.0", openSubsonic: true, type: "MusicFlow" } }));
 
 app.use("/rest/*", async (c, next) => {
-  // Cover art is loaded via <img> tags which cannot send auth headers — make it public
-  if (c.req.path === "/getCoverArt" || c.req.path.endsWith("/getCoverArt")) return next();
+  // Public endpoints under /rest/* that cannot send auth headers:
+  //  - getCoverArt: loaded via <img> tags
+  //  - dlna/stream/:token: pulled by DLNA renderers (TVs, speakers) which
+  //    have no way to authenticate; access is gated by a short-lived cast
+  //    token that maps to a songId inside the route handler itself.
+  const p = c.req.path;
+  if (p === "/getCoverArt" || p.endsWith("/getCoverArt")) return next();
+  if (p.startsWith("/dlna/stream/")) return next();
   return authMiddleware(c, next);
 });
 app.route("/rest", restRoutes);
