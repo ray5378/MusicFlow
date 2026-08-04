@@ -31,6 +31,11 @@ export const HISTORY_WINDOW_DAYS = 30;
 export const TOP_ARTISTS = 12;
 export const TOP_ALBUMS = 8;
 export const TOP_GENRES = 6;
+// Max number of local-recommend songs merged into the daily "今日推荐" playlist.
+// The candidates are already deterministically shuffled by date seed, so we
+// simply slice to this size — keeps the daily mix focused instead of dumping
+// the entire library into it.
+export const LOCAL_SAMPLE_SIZE = 50;
 
 export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 
@@ -266,6 +271,7 @@ function getSettingBool(key: string, def: boolean): boolean {
 // Pick local-recommend song ids based on play-history taste profile.
 // Extracted so the main daily-recommend generator can merge these into the
 // SAME "今日推荐" playlist instead of creating a separate "(本地)" one.
+// Capped at LOCAL_SAMPLE_SIZE (candidates are already date-seeded shuffled).
 // Returns { songIds, sourceUsers, fallback }.
 export function pickLocalRecommendSongs(date: Date): { songIds: string[]; sourceUsers: number; fallback: boolean } {
   if (!getSettingBool("daily_recommend_local_enabled", true)) {
@@ -277,6 +283,11 @@ export function pickLocalRecommendSongs(date: Date): { songIds: string[]; source
   if (songIds.length < 5) {
     songIds = pickRandomSample(date);
     fallback = true;
+  }
+  // Cap to LOCAL_SAMPLE_SIZE — candidates are already deterministically
+  // shuffled, so slicing keeps the daily mix focused (not the whole library).
+  if (songIds.length > LOCAL_SAMPLE_SIZE) {
+    songIds = songIds.slice(0, LOCAL_SAMPLE_SIZE);
   }
   return { songIds, sourceUsers: profile.userCount, fallback };
 }
