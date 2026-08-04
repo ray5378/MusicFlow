@@ -33,14 +33,16 @@ ENV NODE_ENV=production \
     TZ=Asia/Shanghai \
     UV_USE_IO_URING=0
 WORKDIR /app/backend
-RUN addgroup -S musicflow && adduser -S musicflow -G musicflow
+RUN apk add --no-cache su-exec \
+ && addgroup -S musicflow && adduser -S musicflow -G musicflow
 COPY --from=backend-build /app/backend/package.json /app/backend/package-lock.json ./
 COPY --from=backend-build /app/backend/node_modules ./node_modules
 COPY --from=backend-build /app/backend/dist ./dist
 COPY --from=frontend-build /app/frontend/dist ./public
-RUN mkdir -p /app/backend/data && chown -R musicflow:musicflow /app/backend
-USER musicflow
+COPY backend/entrypoint.sh ./entrypoint.sh
+RUN chmod +x entrypoint.sh \
+ && mkdir -p /app/backend/data && chown -R musicflow:musicflow /app/backend
 EXPOSE 46400
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:46400/ping || exit 1
-CMD ["node", "dist/index.js"]
+ENTRYPOINT ["/app/backend/entrypoint.sh"]
