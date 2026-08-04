@@ -40,6 +40,10 @@ export const usePlayerStore = defineStore("player", () => {
   const currentLyricLine = ref("");
   const currentLyricIndex = ref(-1);
   let howl: Howl | null = null;
+  // 记录本机 Howl 当前正在播放的歌曲 ID。切换播放器到 DLNA 期间,本机 Howl
+  // 可能仍在播(或已播完停住);切回本机时用这个 ID 在队列里定位真实索引,
+  // 而不是盲信后端快照(后端快照可能滞后于 Howl 的实际播放进度)。
+  let howlSongId = "";
 
   // ==================== DLNA cast mode ====================
   // When castDeviceId is set, the backend is the single source of truth for
@@ -176,6 +180,7 @@ export const usePlayerStore = defineStore("player", () => {
     if (howl) { howl.unload(); howl = null; }
     const song = currentSong.value;
     if (!song) return;
+    howlSongId = song.id;
     loadLyrics(song.id);
     howl = new Howl({
       src: [getStreamUrl(song.id)],
@@ -193,7 +198,18 @@ export const usePlayerStore = defineStore("player", () => {
         api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       },
       onpause: () => { isPlaying.value = false; stopProgressTimer(); },
-      onend: () => { next(); },
+      onend: () => {
+        // 本机 Howl 播完一首。如果当前 UI 控制目标是 DLNA(切换播放器场景),
+        // 绝不触发 DLNA 的 next —— 本机播放器事件只影响本机。本机停止,
+        // 等用户切回本机后手动继续。这样也避免本机队列在后台偷偷前进导致
+        // 与后端快照/DLNA 队列状态错乱。
+        if (castActive.value) {
+          isPlaying.value = false;
+          stopProgressTimer();
+          return;
+        }
+        next();
+      },
       onload: () => { duration.value = howl?.duration() || 0; },
     });
     howl.play();
@@ -655,10 +671,16 @@ export const usePlayerStore = defineStore("player", () => {
       // a switch back from DLNA shows the user's last local queue.
       await restoreLocalPeer();
       // 切回本机时,本机 Howl 可能一直在后台播放(切换到 DLNA 时我们没有
-      // pause 它)。从 Howl 重新同步 isPlaying/currentTime/duration 到 UI ——
-      // 因为切到 DLNA 期间这几个值被 castPoll 用 DLNA 的状态覆盖了。如果
-      // Howl 正在播,重启进度计时器让进度条继续走。
-      if (howl) {
+      // pause 它),也可能已播完停住(onend 在 castActive 时不自动 next)。
+      // 以 Howl 实际播放的歌曲为准:在队列里定位它的索引,加载歌词,并从
+      // Howl 同步 isPlaying/currentTime/duration 到 UI(切到 DLNA 期间这几
+      // 个值被 castPoll 用 DLNA 状态覆盖了)。后端快照可能滞后,所以不能
+      // 盲信 restoreLocalPeer 恢复的 currentIndex。
+      if (howl && howlSongId) {
+        const idx = queue.value.findIndex(s => s.id === howlSongId);
+        if (idx >= 0) currentIndex.value = idx;
+        const song = currentSong.value;
+        if (song) loadLyrics(song.id);
         isPlaying.value = howl.playing();
         duration.value = howl.duration() || 0;
         currentTime.value = (howl.seek() as number) || 0;
