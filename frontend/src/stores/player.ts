@@ -23,66 +23,120 @@ export interface LyricLine {
   text: string;
 }
 
+// Convert a frontend Song to the QueueItem shape the backend expects.
+// Kept in sync with backend's songsToQueueItems().
+function songToQueueItem(song: Song): any {
+  const SUFFIX_MIME: Record<string, string> = {
+    mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
+    ogg: "audio/ogg", m4a: "audio/mp4", opus: "audio/opus",
+    wma: "audio/x-ms-wma", ape: "audio/ape",
+  };
+  return {
+    songId: song.id,
+    title: song.title || "未知",
+    artist: song.artist || undefined,
+    album: song.album || undefined,
+    mime: SUFFIX_MIME[(song.suffix || "").toLowerCase()] || "audio/mpeg",
+    coverArt: song.coverArt || undefined,
+    duration: song.duration || undefined,
+  };
+}
+
+// Convert a backend QueueItem back to the frontend Song shape for display.
+function queueItemToSong(it: any): Song {
+  return {
+    id: it.songId,
+    title: it.title || "未知",
+    artist: it.artist || "",
+    album: it.album || "",
+    duration: it.duration || 0,
+    coverArt: it.coverArt,
+  };
+}
+
 export const usePlayerStore = defineStore("player", () => {
-  const queue = ref<Song[]>([]);
-  const currentIndex = ref(-1);
-  const isPlaying = ref(false);
-  const volume = ref(parseFloat(localStorage.getItem("volume") || "0.8"));
-  // NetEase-style play mode: order -> repeat one -> repeat all -> shuffle
   type PlayMode = "order" | "one" | "all" | "shuffle";
-  const playMode = ref<PlayMode>((localStorage.getItem("playMode") as PlayMode) || "order");
-  const currentTime = ref(0);
-  const duration = ref(0);
+
+  // ==================== Shared UI state ====================
+  const volume = ref(parseFloat(localStorage.getItem("volume") || "0.8"));
   const showLyrics = ref(false);
   const showPlaylist = ref(false);
   const playModeVisible = ref(false); // fullscreen play mode overlay
-  const lyrics = ref<LyricLine[]>([]);
-  const currentLyricLine = ref("");
-  const currentLyricIndex = ref(-1);
-  let howl: Howl | null = null;
-  // 记录本机 Howl 当前正在播放的歌曲 ID。切换播放器到 DLNA 期间,本机 Howl
-  // 可能仍在播(或已播完停住);切回本机时用这个 ID 在队列里定位真实索引,
-  // 而不是盲信后端快照(后端快照可能滞后于 Howl 的实际播放进度)。
-  let howlSongId = "";
 
-  // ==================== DLNA cast mode ====================
-  // When castDeviceId is set, the backend is the single source of truth for
-  // the playback queue: the queue lives in the device_queues table, and the
-  // backend auto-advances tracks on its own (via GENA track_ended events).
-  // This means the queue keeps playing even if the Web tab is closed or the
-  // backend restarts. The frontend only mirrors state via polling + REST.
+  // ==================== Local (本机) state machine ====================
+  // Completely independent from DLNA. Howl's onend only calls localNext,
+  // never touching the DLNA state machine. The user can switch the UI to
+  // control a DLNA device while本机 keeps playing on its own.
+  const localQueue = ref<Song[]>([]);
+  const localIndex = ref(-1);
+  const localIsPlaying = ref(false);
+  const localCurrentTime = ref(0);
+  const localDuration = ref(0);
+  const localPlayMode = ref<PlayMode>((localStorage.getItem("playMode") as PlayMode) || "order");
+  const localLyrics = ref<LyricLine[]>([]);
+  const localCurrentLyricLine = ref("");
+  const localCurrentLyricIndex = ref(-1);
+  let howl: Howl | null = null;
+
+  // ==================== DLNA (cast) state machine ====================
+  // The backend device_queues table is the single source of truth. The
+  // backend auto-advances tracks on its own (GENA track_ended). The
+  // frontend only mirrors state via polling + REST.
   const castDeviceId = ref("");
   const castDeviceName = ref("");
+  const castQueue = ref<Song[]>([]);
+  const castIndex = ref(-1);
+  const castIsPlaying = ref(false);
+  const castCurrentTime = ref(0);
+  const castDuration = ref(0);
+  const castPlayMode = ref<PlayMode>("order");
+  const castLyrics = ref<LyricLine[]>([]);
+  const castCurrentLyricLine = ref("");
+  const castCurrentLyricIndex = ref(-1);
   let castPollTimer: ReturnType<typeof setInterval> | null = null;
   let lastCastState = "STOPPED";
-  const castActive = computed(() => !!castDeviceId.value);
+  let lastScrobbledSongId = "";
 
   // ==================== Unified peer system ====================
-  // A "peer" is any playback target the UI can switch between and control:
-  //   local:<userId>  → this Web client (Howl audio + backend-stored queue)
-  //   dlna:<deviceId> → a DLNA renderer (backend-owned queue + auto-advance)
-  // currentPeerId drives which peer the player bar + queue panel show and
-  // control. Switching peers does not stop the other peer — it just changes
-  // which one the UI is bound to (per the confirmed "本机不受影响" requirement).
+  // currentPeerId drives which state machine the UI shows/controls.
+  //   local:<userId>  → 本机 state machine (Howl audio + backend-stored queue)
+  //   dlna:<deviceId> → DLNA state machine (backend-owned queue + auto-advance)
+  // switchPeer only changes currentPeerId — it never touches either state
+  // machine. Both devices keep playing independently.
   const currentPeerId = ref<string>("");
   const peers = ref<any[]>([]);
   const localPeerId = computed(() => `local:${useAuthStore().userId}`);
+  const isDlnaPeer = computed(() => currentPeerId.value.startsWith("dlna:"));
+  const castActive = computed(() => !!castDeviceId.value);
   const currentPeer = computed(() => peers.value.find(p => p.peerId === currentPeerId.value));
   const currentPeerName = computed(() => {
     const p = currentPeer.value;
-    if (!p) return currentPeerId.value.startsWith("dlna:") ? castDeviceName.value : "本机";
+    if (!p) return isDlnaPeer.value ? castDeviceName.value : "本机";
     return p.kind === "local" ? "本机" : p.name;
   });
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let peerWs: WebSocket | null = null;
 
+  // ==================== UI-routed computed properties ====================
+  // These pick the active state machine based on currentPeerId. The UI
+  // (MainLayout) binds to these, so it automatically shows/controls the
+  // right device when the user switches peers.
+  const queue = computed(() => isDlnaPeer.value ? castQueue.value : localQueue.value);
+  const currentIndex = computed(() => isDlnaPeer.value ? castIndex.value : localIndex.value);
+  const isPlaying = computed(() => isDlnaPeer.value ? castIsPlaying.value : localIsPlaying.value);
+  const currentTime = computed(() => isDlnaPeer.value ? castCurrentTime.value : localCurrentTime.value);
+  const duration = computed(() => isDlnaPeer.value ? castDuration.value : localDuration.value);
+  const playMode = computed(() => isDlnaPeer.value ? castPlayMode.value : localPlayMode.value);
+  const lyrics = computed(() => isDlnaPeer.value ? castLyrics.value : localLyrics.value);
+  const currentLyricLine = computed(() => isDlnaPeer.value ? castCurrentLyricLine.value : localCurrentLyricLine.value);
+  const currentLyricIndex = computed(() => isDlnaPeer.value ? castCurrentLyricIndex.value : localCurrentLyricIndex.value);
+
   const currentSong = computed(() => {
-    if (currentIndex.value >= 0 && currentIndex.value < queue.value.length) {
-      return queue.value[currentIndex.value];
-    }
+    const q = queue.value;
+    const idx = currentIndex.value;
+    if (idx >= 0 && idx < q.length) return q[idx];
     return null;
   });
-
   const progress = computed(() => duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0);
 
   function getStreamUrl(id: string) {
@@ -92,355 +146,396 @@ export const usePlayerStore = defineStore("player", () => {
   }
   function getCoverUrl(id: string | undefined) { if (!id) return ""; return `/rest/getCoverArt?id=${id}&size=300`; }
 
-  function playSong(song: Song) {
-    const idx = queue.value.findIndex(s => s.id === song.id);
-    if (idx >= 0) { currentIndex.value = idx; } else { queue.value.push(song); currentIndex.value = queue.value.length - 1; }
-    startPlayback();
+  // ==================== Local playback (本机) ====================
+
+  function localPlaySong(song: Song) {
+    const idx = localQueue.value.findIndex(s => s.id === song.id);
+    if (idx >= 0) { localIndex.value = idx; } else { localQueue.value.push(song); localIndex.value = localQueue.value.length - 1; }
+    startLocalPlayback();
   }
 
-  function addToQueue(song: Song) {
-    if (queue.value.findIndex(s => s.id === song.id) >= 0) return;
-    queue.value.push(song);
-    // In cast mode the backend queue is authoritative — mirror the append so
-    // the persisted queue matches what the user sees in the queue panel.
-    if (castActive.value) {
-      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue/enqueue`, {
-        items: [songToQueueItem(song)],
-      }).catch(() => {});
+  function localAddToQueue(song: Song) {
+    if (localQueue.value.findIndex(s => s.id === song.id) >= 0) return;
+    localQueue.value.push(song);
+    syncLocalQueueToBackend();
+  }
+
+  function localPlayQueue(songs: Song[], index: number = 0) {
+    localQueue.value = [...songs];
+    if (localPlayMode.value === "shuffle" && songs.length > 1) {
+      localIndex.value = Math.floor(Math.random() * songs.length);
     } else {
-      // Local mode: persist to backend so the queue survives tab close.
-      syncLocalQueueToBackend();
+      localIndex.value = index;
     }
+    startLocalPlayback();
+    syncLocalQueueToBackend();
   }
 
-  // Convert a frontend Song to the QueueItem shape the backend expects.
-  // Kept in sync with backend's songsToQueueItems().
-  function songToQueueItem(song: Song): any {
-    const SUFFIX_MIME: Record<string, string> = {
-      mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
-      ogg: "audio/ogg", m4a: "audio/mp4", opus: "audio/opus",
-      wma: "audio/x-ms-wma", ape: "audio/ape",
-    };
-    return {
-      songId: song.id,
-      title: song.title || "未知",
-      artist: song.artist || undefined,
-      album: song.album || undefined,
-      mime: SUFFIX_MIME[(song.suffix || "").toLowerCase()] || "audio/mpeg",
-      coverArt: song.coverArt || undefined,
-      duration: song.duration || undefined,
-    };
-  }
-
-  function playQueue(songs: Song[], index: number = 0) {
-    // Keep the queue in its original order — shuffle is handled per-skip in
-    // next()/prev() via randomIndex(), not by reordering the array. This keeps
-    // the queue panel display stable and currentIndex pointing at the right song.
-    queue.value = [...songs];
-    // In shuffle mode, start from a random track instead of always the first —
-    // the user picked "shuffle", so the entry point should be random too.
-    if (playMode.value === "shuffle" && songs.length > 1) {
-      currentIndex.value = Math.floor(Math.random() * songs.length);
-    } else {
-      currentIndex.value = index;
-    }
-    startPlayback();
-    // Persist the local queue so it survives tab close/reopen. (Cast mode is
-    // owned by the backend already — pushQueueToBackend handles it.)
-    if (!castActive.value) syncLocalQueueToBackend();
-  }
-
-  // Push the current frontend queue + index + play mode to the backend's
+  // Push the current local queue + index + play mode to the backend's
   // local_queues store (peerId = local:<userId>). Called after every queue
-  // mutation in local mode so reopening the tab restores the exact state.
-  // Best-effort: failures are logged but never block playback.
+  // mutation so reopening the tab restores the exact state. Best-effort.
   function syncLocalQueueToBackend(): void {
-    if (castActive.value) return; // backend owns the queue in cast mode
     const pid = localPeerId.value;
     if (!pid || !useAuthStore().userId) return;
-    const items = queue.value.map(songToQueueItem);
+    const items = localQueue.value.map(songToQueueItem);
     api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue/play`, {
       items,
-      startIndex: currentIndex.value >= 0 ? currentIndex.value : 0,
+      startIndex: localIndex.value >= 0 ? localIndex.value : 0,
     }).catch(() => {});
-    // Also sync the play mode so restore matches.
     api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/play-mode`, {
-      mode: playMode.value,
+      mode: localPlayMode.value,
     }).catch(() => {});
   }
 
-  function startPlayback() {
-    // In cast mode the backend owns the queue. "Play this song/album" means
-    // push the (possibly updated) frontend queue to the backend and let it
-    // cast from the current index. The local Howl stays paused.
-    if (castActive.value) {
-      pushQueueToBackend(currentIndex.value >= 0 ? currentIndex.value : 0);
-      return;
-    }
+  function startLocalPlayback() {
     if (howl) { howl.unload(); howl = null; }
-    const song = currentSong.value;
+    const song = localQueue.value[localIndex.value];
     if (!song) return;
-    howlSongId = song.id;
-    loadLyrics(song.id);
+    loadLocalLyrics(song.id);
     howl = new Howl({
       src: [getStreamUrl(song.id)],
       volume: volume.value,
       html5: true,
       onplay: () => {
-        isPlaying.value = true;
-        duration.value = howl?.duration() || 0;
-        startProgressTimer();
-        // Submit a real scrobble on play start (submission=true, the default).
-        // Backend dedupes within 10s so Howl's repeated onplay (e.g. after
-        // seek) won't create duplicate history rows. We intentionally do NOT
-        // use submission=false here — that's "now playing" and doesn't write
-        // play_history, which left the Web frontend with no history at all.
+        localIsPlaying.value = true;
+        localDuration.value = howl?.duration() || 0;
+        startLocalProgressTimer();
         api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       },
-      onpause: () => { isPlaying.value = false; stopProgressTimer(); },
-      onend: () => {
-        // 本机 Howl 播完一首。如果当前 UI 控制目标是 DLNA(切换播放器场景),
-        // 绝不触发 DLNA 的 next —— 本机播放器事件只影响本机。本机停止,
-        // 等用户切回本机后手动继续。这样也避免本机队列在后台偷偷前进导致
-        // 与后端快照/DLNA 队列状态错乱。
-        if (castActive.value) {
-          isPlaying.value = false;
-          stopProgressTimer();
-          return;
-        }
-        next();
-      },
-      onload: () => { duration.value = howl?.duration() || 0; },
+      onpause: () => { localIsPlaying.value = false; stopLocalProgressTimer(); },
+      onend: () => { localNext(); },
+      onload: () => { localDuration.value = howl?.duration() || 0; },
     });
     howl.play();
   }
 
-  // ==================== Lyrics ====================
-
-  async function loadLyrics(songId: string) {
-    lyrics.value = [];
-    currentLyricLine.value = "";
-    currentLyricIndex.value = -1;
+  async function loadLocalLyrics(songId: string) {
+    localLyrics.value = [];
+    localCurrentLyricLine.value = "";
+    localCurrentLyricIndex.value = -1;
     try {
       const res = await api.get(`/rest/getLyricsBySongId?id=${songId}&f=json`);
       const structured = res.data["subsonic-response"]?.lyricsList?.structuredLyrics || [];
       const first = structured.find((l: any) => l.synced) || structured[0];
       if (!first || !first.line) return;
-      lyrics.value = first.line
+      localLyrics.value = first.line
         .filter((l: any) => l.start !== undefined && l.start !== null)
         .map((l: any) => ({ time: Number(l.start) / 1000, text: l.value }))
         .sort((a: LyricLine, b: LyricLine) => a.time - b.time);
-    } catch { lyrics.value = []; }
+    } catch { localLyrics.value = []; }
   }
 
-  function updateCurrentLyric() {
-    if (lyrics.value.length === 0) { currentLyricLine.value = ""; currentLyricIndex.value = -1; return; }
-    const t = currentTime.value;
+  function updateLocalLyric() {
+    if (localLyrics.value.length === 0) { localCurrentLyricLine.value = ""; localCurrentLyricIndex.value = -1; return; }
+    const t = localCurrentTime.value;
     let idx = -1;
-    for (let i = 0; i < lyrics.value.length; i++) {
-      if (lyrics.value[i].time <= t) idx = i;
+    for (let i = 0; i < localLyrics.value.length; i++) {
+      if (localLyrics.value[i].time <= t) idx = i;
       else break;
     }
-    if (idx !== currentLyricIndex.value) {
-      currentLyricIndex.value = idx;
-      currentLyricLine.value = idx >= 0 ? lyrics.value[idx].text : "";
+    if (idx !== localCurrentLyricIndex.value) {
+      localCurrentLyricIndex.value = idx;
+      localCurrentLyricLine.value = idx >= 0 ? localLyrics.value[idx].text : "";
     }
   }
 
-  function togglePlay() {
-    if (castActive.value) {
-      const id = castDeviceId.value;
-      if (isPlaying.value) { api.post(`/rest/api/v1/dlna/devices/${id}/pause`).catch(() => {}); isPlaying.value = false; }
-      else { api.post(`/rest/api/v1/dlna/devices/${id}/play`).catch(() => {}); isPlaying.value = true; }
-      return;
-    }
-    if (!howl) return; if (isPlaying.value) howl.pause(); else howl.play();
+  function localTogglePlay() {
+    if (!howl) return;
+    if (localIsPlaying.value) howl.pause(); else howl.play();
   }
 
   // Pick a random index different from the current one (for shuffle mode).
-  // Keeps the next pick unpredictable without repeating the playing track.
-  function randomIndex(): number {
-    const n = queue.value.length;
-    if (n <= 1) return currentIndex.value;
-    let idx = currentIndex.value;
-    while (idx === currentIndex.value) idx = Math.floor(Math.random() * n);
+  function localRandomIndex(): number {
+    const n = localQueue.value.length;
+    if (n <= 1) return localIndex.value;
+    let idx = localIndex.value;
+    while (idx === localIndex.value) idx = Math.floor(Math.random() * n);
     return idx;
   }
 
-  function next() {
-    if (queue.value.length === 0) return;
-    // In cast mode the backend owns the queue — ask it to advance. The poller
-    // will pick up the new track + index from the next /status response, and
-    // the WS queue_changed event keeps the queue panel in sync.
-    if (castActive.value) {
-      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/next`).catch(() => {});
-      return;
-    }
-    if (playMode.value === "one") { startPlayback(); syncLocalIndex(); return; }
-    if (playMode.value === "shuffle") { currentIndex.value = randomIndex(); startPlayback(); syncLocalIndex(); return; }
-    if (currentIndex.value < queue.value.length - 1) currentIndex.value++;
-    else if (playMode.value === "all") currentIndex.value = 0;
-    else {
-      // Reached the end in "order" mode — stop.
-      isPlaying.value = false; syncLocalIndex(); return;
-    }
-    startPlayback();
+  function localNext() {
+    if (localQueue.value.length === 0) return;
+    if (localPlayMode.value === "one") { startLocalPlayback(); syncLocalIndex(); return; }
+    if (localPlayMode.value === "shuffle") { localIndex.value = localRandomIndex(); startLocalPlayback(); syncLocalIndex(); return; }
+    if (localIndex.value < localQueue.value.length - 1) localIndex.value++;
+    else if (localPlayMode.value === "all") localIndex.value = 0;
+    else { localIsPlaying.value = false; syncLocalIndex(); return; }
+    startLocalPlayback();
     syncLocalIndex();
   }
 
-  function prev() {
-    if (queue.value.length === 0) return;
-    if (castActive.value) {
-      if (currentTime.value > 3) {
-        // Within first 3s fallback: seek to start instead of going to prev.
-        seek(0);
-        return;
-      }
-      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/prev`).catch(() => {});
-      return;
-    }
-    if (currentTime.value > 3) { seek(0); return; }
-    if (playMode.value === "shuffle") { currentIndex.value = randomIndex(); startPlayback(); syncLocalIndex(); return; }
-    if (currentIndex.value > 0) currentIndex.value--;
-    else if (playMode.value === "all") currentIndex.value = queue.value.length - 1;
-    startPlayback();
+  function localPrev() {
+    if (localQueue.value.length === 0) return;
+    if (localCurrentTime.value > 3) { localSeek(0); return; }
+    if (localPlayMode.value === "shuffle") { localIndex.value = localRandomIndex(); startLocalPlayback(); syncLocalIndex(); return; }
+    if (localIndex.value > 0) localIndex.value--;
+    else if (localPlayMode.value === "all") localIndex.value = localQueue.value.length - 1;
+    startLocalPlayback();
     syncLocalIndex();
   }
 
-  // Report the current track index to the backend so the local peer's stored
-  // queue stays in sync with what's actually playing (used by HA + restore).
   function syncLocalIndex(): void {
-    if (castActive.value) return;
     const pid = localPeerId.value;
     if (!pid || !useAuthStore().userId) return;
     api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue/index`, {
-      index: currentIndex.value,
+      index: localIndex.value,
     }).catch(() => {});
   }
 
-  function seek(time: number) {
-    if (castActive.value) {
-      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/seek`, { seconds: time }).catch(() => {});
-      currentTime.value = time; updateCurrentLyric();
-      return;
-    }
-    if (howl) { howl.seek(time); currentTime.value = time; }
+  function localSeek(time: number) {
+    if (howl) { howl.seek(time); localCurrentTime.value = time; }
   }
-  function seekPercent(percent: number) { if (duration.value > 0) seek((percent / 100) * duration.value); }
-  function setVolume(v: number) {
-    volume.value = v; localStorage.setItem("volume", String(v));
-    if (castActive.value) { api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/volume`, { volume: Math.round(v * 100) }).catch(() => {}); return; }
-    if (howl) howl.volume(v);
-  }
-  // NetEase-style: order -> repeat one -> repeat all -> shuffle -> order
-  function cyclePlayMode() {
-    const modes: PlayMode[] = ["order", "one", "all", "shuffle"];
-    playMode.value = modes[(modes.indexOf(playMode.value) + 1) % modes.length];
-    localStorage.setItem("playMode", playMode.value);
-    // In cast mode the backend also needs the new mode so its auto-advance
-    // logic (repeat-one / repeat-all / shuffle) matches the frontend UI.
-    if (castActive.value) {
-      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/play-mode`, { mode: playMode.value }).catch(() => {});
-    } else {
-      // Local mode: persist the mode so restore matches.
-      const pid = localPeerId.value;
-      if (pid && useAuthStore().userId) {
-        api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/play-mode`, { mode: playMode.value }).catch(() => {});
-      }
-    }
-  }
-  function toggleLyrics() { showLyrics.value = !showLyrics.value; }
-  function togglePlaylistPanel() { showPlaylist.value = !showPlaylist.value; }
-  function togglePlayMode() { playModeVisible.value = !playModeVisible.value; }
-  function removeFromQueue(index: number) {
-    // In cast mode the backend owns the queue — removing is delegated so the
-    // persisted queue + current playback stay coherent (the backend plays the
-    // next song if you remove the currently-playing one).
-    if (castActive.value) {
-      api.delete(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue/${index}`).catch(() => {});
-      return;
-    }
-    queue.value.splice(index, 1);
-    if (index < currentIndex.value) currentIndex.value--;
-    else if (index === currentIndex.value) startPlayback();
-    // Persist the local queue change.
+
+  function localRemoveFromQueue(index: number) {
+    localQueue.value.splice(index, 1);
+    if (index < localIndex.value) localIndex.value--;
+    else if (index === localIndex.value) startLocalPlayback();
     syncLocalQueueToBackend();
   }
-  let progressTimer: ReturnType<typeof setInterval> | null = null;
-  function startProgressTimer() { stopProgressTimer(); progressTimer = setInterval(() => { if (howl && isPlaying.value) { currentTime.value = howl.seek() as number || 0; updateCurrentLyric(); } }, 250); }
-  function stopProgressTimer() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } }
 
-  // ==================== DLNA cast control ====================
-  //
-  // Architecture (after the backend-queue refactor):
-  //   - The backend device_queues table is the single source of truth for the
-  //     cast queue. The backend auto-advances tracks on its own (GENA
-  //     track_ended → queue.onTrackEnded), so playback continues even when
-  //     this Web tab is closed or the backend restarts.
-  //   - The frontend only mirrors state: a poller syncs progress + current
-  //     track from /status, and periodically re-syncs the queue snapshot from
-  //     /queue so the queue panel reflects backend-driven changes (auto-next,
-  //     HA-initiated next/prev, etc.).
-  //   - User actions (next/prev/add/remove/play-mode) are sent to the backend
-  //     via REST; the poller picks up the resulting state change.
+  function localClearQueue() {
+    if (howl) { howl.unload(); howl = null; }
+    stopLocalProgressTimer();
+    localQueue.value = []; localIndex.value = -1; localIsPlaying.value = false;
+    localCurrentTime.value = 0; localDuration.value = 0;
+    localLyrics.value = []; localCurrentLyricLine.value = ""; localCurrentLyricIndex.value = -1;
+    const pid = localPeerId.value;
+    if (pid && useAuthStore().userId) {
+      api.delete(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue`).catch(() => {});
+    }
+  }
 
-  // Push the current frontend queue to the backend as the authoritative
-  // queue and start playing from the current index. Called by startCast().
-  // After this call the frontend queue is just a mirror — the backend owns it.
-  async function pushQueueToBackend(startIndex: number): Promise<void> {
+  function localCyclePlayMode() {
+    const modes: PlayMode[] = ["order", "one", "all", "shuffle"];
+    localPlayMode.value = modes[(modes.indexOf(localPlayMode.value) + 1) % modes.length];
+    localStorage.setItem("playMode", localPlayMode.value);
+    const pid = localPeerId.value;
+    if (pid && useAuthStore().userId) {
+      api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/play-mode`, { mode: localPlayMode.value }).catch(() => {});
+    }
+  }
+
+  let localProgressTimer: ReturnType<typeof setInterval> | null = null;
+  function startLocalProgressTimer() {
+    stopLocalProgressTimer();
+    localProgressTimer = setInterval(() => {
+      if (howl && localIsPlaying.value) {
+        localCurrentTime.value = howl.seek() as number || 0;
+        updateLocalLyric();
+      }
+    }, 250);
+  }
+  function stopLocalProgressTimer() { if (localProgressTimer) { clearInterval(localProgressTimer); localProgressTimer = null; } }
+
+  // ==================== DLNA (cast) playback ====================
+
+  function castPlaySong(song: Song) {
+    const idx = castQueue.value.findIndex(s => s.id === song.id);
+    if (idx >= 0) { castIndex.value = idx; } else { castQueue.value.push(song); castIndex.value = castQueue.value.length - 1; }
+    startCastPlayback();
+  }
+
+  function castAddToQueue(song: Song) {
+    if (castQueue.value.findIndex(s => s.id === song.id) >= 0) return;
+    castQueue.value.push(song);
+    api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue/enqueue`, {
+      items: [songToQueueItem(song)],
+    }).catch(() => {});
+  }
+
+  function castPlayQueue(songs: Song[], index: number = 0) {
+    castQueue.value = [...songs];
+    if (castPlayMode.value === "shuffle" && songs.length > 1) {
+      castIndex.value = Math.floor(Math.random() * songs.length);
+    } else {
+      castIndex.value = index;
+    }
+    startCastPlayback();
+  }
+
+  // Push the current cast queue to the backend as the authoritative queue
+  // and start playing from the current index.
+  async function pushCastQueueToBackend(startIndex: number): Promise<void> {
     if (!castDeviceId.value) return;
-    const items = queue.value.map(songToQueueItem);
+    const items = castQueue.value.map(songToQueueItem);
     try {
       await api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue/play`, {
         items,
         startIndex,
       });
-      // Sync the backend's play mode so its auto-advance matches the UI.
       await api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/play-mode`, {
-        mode: playMode.value,
+        mode: castPlayMode.value,
       }).catch(() => {});
     } catch (e: any) {
-      console.error("pushQueueToBackend failed:", e?.message || e);
+      console.error("pushCastQueueToBackend failed:", e?.message || e);
     }
   }
 
-  // Enter cast mode: pause local playback, push the queue to the backend, and
-  // start polling for state. If the frontend queue is empty but the backend
-  // already has an active queue for this device (e.g. user reopened the tab),
-  // restore from the backend snapshot instead of pushing an empty queue.
+  function startCastPlayback() {
+    pushCastQueueToBackend(castIndex.value >= 0 ? castIndex.value : 0);
+  }
+
+  async function loadCastLyrics(songId: string) {
+    castLyrics.value = [];
+    castCurrentLyricLine.value = "";
+    castCurrentLyricIndex.value = -1;
+    try {
+      const res = await api.get(`/rest/getLyricsBySongId?id=${songId}&f=json`);
+      const structured = res.data["subsonic-response"]?.lyricsList?.structuredLyrics || [];
+      const first = structured.find((l: any) => l.synced) || structured[0];
+      if (!first || !first.line) return;
+      castLyrics.value = first.line
+        .filter((l: any) => l.start !== undefined && l.start !== null)
+        .map((l: any) => ({ time: Number(l.start) / 1000, text: l.value }))
+        .sort((a: LyricLine, b: LyricLine) => a.time - b.time);
+    } catch { castLyrics.value = []; }
+  }
+
+  function updateCastLyric() {
+    if (castLyrics.value.length === 0) { castCurrentLyricLine.value = ""; castCurrentLyricIndex.value = -1; return; }
+    const t = castCurrentTime.value;
+    let idx = -1;
+    for (let i = 0; i < castLyrics.value.length; i++) {
+      if (castLyrics.value[i].time <= t) idx = i;
+      else break;
+    }
+    if (idx !== castCurrentLyricIndex.value) {
+      castCurrentLyricIndex.value = idx;
+      castCurrentLyricLine.value = idx >= 0 ? castLyrics.value[idx].text : "";
+    }
+  }
+
+  function castTogglePlay() {
+    if (!castDeviceId.value) return;
+    const id = castDeviceId.value;
+    if (castIsPlaying.value) {
+      api.post(`/rest/api/v1/dlna/devices/${id}/pause`).catch(() => {});
+      castIsPlaying.value = false;
+    } else {
+      api.post(`/rest/api/v1/dlna/devices/${id}/play`).catch(() => {});
+      castIsPlaying.value = true;
+    }
+  }
+
+  function castNext() {
+    if (!castDeviceId.value || castQueue.value.length === 0) return;
+    api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/next`).catch(() => {});
+  }
+
+  function castPrev() {
+    if (!castDeviceId.value || castQueue.value.length === 0) return;
+    if (castCurrentTime.value > 3) { castSeek(0); return; }
+    api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/prev`).catch(() => {});
+  }
+
+  function castSeek(time: number) {
+    if (!castDeviceId.value) return;
+    api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/seek`, { seconds: time }).catch(() => {});
+    castCurrentTime.value = time; updateCastLyric();
+  }
+
+  function castRemoveFromQueue(index: number) {
+    if (!castDeviceId.value) return;
+    api.delete(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue/${index}`).catch(() => {});
+  }
+
+  function castClearQueue() {
+    if (!castDeviceId.value) return;
+    api.delete(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue`).catch(() => {});
+    castDeviceId.value = "";
+    castDeviceName.value = "";
+    stopCastPoll();
+    castQueue.value = []; castIndex.value = -1; castIsPlaying.value = false;
+    castCurrentTime.value = 0; castDuration.value = 0;
+    castLyrics.value = []; castCurrentLyricLine.value = ""; castCurrentLyricIndex.value = -1;
+    lastCastState = "STOPPED";
+  }
+
+  function castCyclePlayMode() {
+    const modes: PlayMode[] = ["order", "one", "all", "shuffle"];
+    castPlayMode.value = modes[(modes.indexOf(castPlayMode.value) + 1) % modes.length];
+    if (castDeviceId.value) {
+      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/play-mode`, { mode: castPlayMode.value }).catch(() => {});
+    }
+  }
+
+  // Poll the backend for device transport state + the authoritative queue
+  // snapshot. The backend handles auto-advance on its own; the poller just
+  // mirrors that state into the cast state machine so the UI stays in sync.
+  function startCastPoll() {
+    stopCastPoll();
+    castPollTimer = setInterval(async () => {
+      if (!castDeviceId.value) { stopCastPoll(); return; }
+      try {
+        const res = await api.get(`/rest/api/v1/dlna/devices/${castDeviceId.value}/status`);
+        const st = res.data || {};
+        lastCastState = st.state || "STOPPED";
+        if (typeof st.position === "number") castCurrentTime.value = st.position;
+        if (typeof st.duration === "number" && st.duration > 0) castDuration.value = st.duration;
+        castIsPlaying.value = st.state === "PLAYING";
+
+        const media = st.media;
+        if (media && media.songId && media.songId !== lastScrobbledSongId) {
+          lastScrobbledSongId = media.songId;
+          api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
+          loadCastLyrics(media.songId);
+        }
+        updateCastLyric();
+        syncCastQueueFromBackend();
+      } catch {}
+    }, 2000);
+  }
+  function stopCastPoll() { if (castPollTimer) { clearInterval(castPollTimer); castPollTimer = null; } }
+
+  // Pull the backend's authoritative queue snapshot into the cast state.
+  async function syncCastQueueFromBackend(): Promise<void> {
+    if (!castDeviceId.value) return;
+    try {
+      const res = await api.get(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue`);
+      const snap = res.data || {};
+      if (Array.isArray(snap.items)) {
+        castQueue.value = snap.items.map(queueItemToSong);
+      }
+      if (typeof snap.currentIndex === "number") castIndex.value = snap.currentIndex;
+      if (typeof snap.playMode === "string") castPlayMode.value = snap.playMode as PlayMode;
+    } catch {}
+  }
+
+  // Enter cast mode: push the queue to the backend and start polling.
+  // This is the "投屏" operation — it pushes the current本机 queue to the
+  // DLNA device and switches the UI to control that device. 本机 Howl is
+  // paused because投屏 means "play on the remote device instead of here".
+  // (This is distinct from switchPeer, which only changes the UI view.)
   async function startCast(deviceId: string, deviceName: string) {
     if (howl) { howl.pause(); }
-    stopProgressTimer();
+    stopLocalProgressTimer();
     castDeviceId.value = deviceId;
     castDeviceName.value = deviceName;
-    // Keep the peer switcher in sync: casting = viewing the dlna peer.
     currentPeerId.value = `dlna:${deviceId}`;
 
-    // If the frontend has a queue, push it (this is the normal "cast current
-    // playlist" flow). Otherwise pull the backend's existing queue so the UI
-    // reflects what's already playing on the device.
-    if (queue.value.length > 0) {
-      await pushQueueToBackend(currentIndex.value >= 0 ? currentIndex.value : 0);
+    if (localQueue.value.length > 0) {
+      castQueue.value = [...localQueue.value];
+      castIndex.value = localIndex.value >= 0 ? localIndex.value : 0;
+      castPlayMode.value = localPlayMode.value;
+      await pushCastQueueToBackend(castIndex.value);
     } else {
-      await syncQueueFromBackend();
+      await syncCastQueueFromBackend();
     }
 
-    // Scrobble the track that's about to play (once per cast start; the poller
-    // never re-scrobbles, matching the Web onplay semantics).
-    const song = currentSong.value;
+    const song = castQueue.value[castIndex.value];
     if (song) {
       api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
-      loadLyrics(song.id);
+      loadCastLyrics(song.id);
     }
 
-    isPlaying.value = true;
+    castIsPlaying.value = true;
     lastCastState = "PLAYING";
+    lastScrobbledSongId = song?.id || "";
     startCastPoll();
   }
 
   // Exit cast mode: tell the backend to mark this device's queue inactive
-  // (the queue is preserved in DB for later restore, not cleared) and stop
-  // the device's transport. The frontend returns to local-Howl mode.
+  // (preserved in DB for later restore) and stop the device's transport.
   async function stopCast() {
     if (castDeviceId.value) {
       try {
@@ -450,147 +545,102 @@ export const usePlayerStore = defineStore("player", () => {
     }
     castDeviceId.value = "";
     castDeviceName.value = "";
-    // Return the switcher to the local peer.
     currentPeerId.value = localPeerId.value;
     stopCastPoll();
-    isPlaying.value = false;
-    currentTime.value = 0;
+    castIsPlaying.value = false;
+    castCurrentTime.value = 0;
     lastCastState = "STOPPED";
   }
 
-  // Poll the backend for device transport state + the authoritative queue
-  // snapshot. The backend handles auto-advance on its own; the poller's job
-  // is just to mirror that state into the frontend so the UI stays in sync.
-  // Scrobbling is intentionally NOT done here — it's done once per track
-  // change (see the media-changed detection below) to avoid double-counting.
-  let lastScrobbledSongId = "";
-  function startCastPoll() {
-    stopCastPoll();
-    castPollTimer = setInterval(async () => {
-      if (!castDeviceId.value) { stopCastPoll(); return; }
-      try {
-        const res = await api.get(`/rest/api/v1/dlna/devices/${castDeviceId.value}/status`);
-        const st = res.data || {};
-        lastCastState = st.state || "STOPPED";
-        if (typeof st.position === "number") currentTime.value = st.position;
-        if (typeof st.duration === "number" && st.duration > 0) duration.value = st.duration;
-        isPlaying.value = st.state === "PLAYING";
-
-        // Detect track changes via the media info embedded in /status, and
-        // scrobble + reload lyrics exactly once per new track. This replaces
-        // the old "scrobble on castCurrent + scrobble on STOPPED" double path.
-        const media = st.media;
-        if (media && media.songId && media.songId !== lastScrobbledSongId) {
-          lastScrobbledSongId = media.songId;
-          api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
-          loadLyrics(media.songId);
-        }
-
-        updateCurrentLyric();
-        // Sync the queue snapshot so auto-advance / HA-initiated changes show
-        // up in the queue panel. Cheaper than a WS subscription for now.
-        syncQueueFromBackend();
-      } catch {}
-    }, 2000);
-  }
-  function stopCastPoll() { if (castPollTimer) { clearInterval(castPollTimer); castPollTimer = null; } }
-
-  // Pull the backend's authoritative queue snapshot into the frontend mirror.
-  // Used by startCast (restore), the poller (keep in sync), and restoreCast
-  // (on tab reopen). Updates queue + currentIndex + playMode + currentMedia.
-  async function syncQueueFromBackend(): Promise<void> {
-    if (!castDeviceId.value) return;
-    try {
-      const res = await api.get(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue`);
-      const snap = res.data || {};
-      if (Array.isArray(snap.items)) {
-        // Convert QueueItem back to the frontend Song shape for display.
-        queue.value = snap.items.map((it: any) => ({
-          id: it.songId,
-          title: it.title || "未知",
-          artist: it.artist || "",
-          album: it.album || "",
-          duration: it.duration || 0,
-          coverArt: it.coverArt,
-        }));
-      }
-      if (typeof snap.currentIndex === "number") currentIndex.value = snap.currentIndex;
-      if (typeof snap.playMode === "string") {
-        playMode.value = snap.playMode as PlayMode;
-        localStorage.setItem("playMode", playMode.value);
-      }
-    } catch {}
-  }
-
   // On Web tab reopen: if the backend has an active cast queue, restore the
-  // cast state so the user sees what's playing. Called once from the player
-  // view's onMounted (or app init). Safe to call multiple times.
+  // cast state machine so the user sees what's playing on the DLNA device.
   async function restoreCast(): Promise<void> {
-    if (castActive.value) return; // already in cast mode
+    if (castActive.value) return;
     try {
       const res = await api.get("/rest/api/v1/dlna/active");
       const active = res.data?.active || [];
       if (active.length === 0) return;
-      // Restore the first active device. (Multi-device restore is a future
-      // enhancement; for now one active cast at a time matches typical use.)
       const { deviceId, snapshot } = active[0];
       if (!deviceId || !snapshot || !snapshot.isActive) return;
-      // Look up the device's friendly name from the device list.
       let name = "DLNA 设备";
       try {
         const devRes = await api.get("/rest/api/v1/dlna/devices");
         const dev = (devRes.data?.devices || []).find((d: any) => d.id === deviceId);
         if (dev?.name) name = dev.name;
       } catch {}
-      // Set cast mode WITHOUT pushing the queue (the backend already has it).
       castDeviceId.value = deviceId;
       castDeviceName.value = name;
       currentPeerId.value = `dlna:${deviceId}`;
-      await syncQueueFromBackend();
-      // Load lyrics for the current track so the lyrics view works post-restore.
-      const song = currentSong.value;
-      if (song) loadLyrics(song.id);
+      await syncCastQueueFromBackend();
+      const song = castQueue.value[castIndex.value];
+      if (song) loadCastLyrics(song.id);
       lastScrobbledSongId = song?.id || "";
       startCastPoll();
     } catch {}
   }
 
-  function clearQueue() {
-    if (howl) { howl.unload(); howl = null; }
-    stopProgressTimer();
-    if (castDeviceId.value) {
-      // Clear the backend queue too so the device stops and the persisted
-      // state is wiped (not just deactivated).
-      api.delete(`/rest/api/v1/dlna/devices/${castDeviceId.value}/queue`).catch(() => {});
-      castDeviceId.value = "";
-      castDeviceName.value = "";
-      stopCastPoll();
-      lastCastState = "STOPPED";
-    } else {
-      // Local mode: clear the persisted local queue too.
-      const pid = localPeerId.value;
-      if (pid && useAuthStore().userId) {
-        api.delete(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue`).catch(() => {});
-      }
+  // ==================== UI-routed control functions ====================
+  // These route to the active state machine based on currentPeerId. The UI
+  // calls these, so a single button works for whichever device is selected.
+
+  function playSong(song: Song) {
+    if (isDlnaPeer.value) castPlaySong(song); else localPlaySong(song);
+  }
+  function addToQueue(song: Song) {
+    if (isDlnaPeer.value) castAddToQueue(song); else localAddToQueue(song);
+  }
+  function playQueue(songs: Song[], index: number = 0) {
+    if (isDlnaPeer.value) castPlayQueue(songs, index); else localPlayQueue(songs, index);
+  }
+  function togglePlay() {
+    if (isDlnaPeer.value) castTogglePlay(); else localTogglePlay();
+  }
+  function next() {
+    if (isDlnaPeer.value) castNext(); else localNext();
+  }
+  function prev() {
+    if (isDlnaPeer.value) castPrev(); else localPrev();
+  }
+  function seek(time: number) {
+    if (isDlnaPeer.value) castSeek(time); else localSeek(time);
+  }
+  function seekPercent(percent: number) { if (duration.value > 0) seek((percent / 100) * duration.value); }
+  function setVolume(v: number) {
+    volume.value = v; localStorage.setItem("volume", String(v));
+    if (isDlnaPeer.value && castDeviceId.value) {
+      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/volume`, { volume: Math.round(v * 100) }).catch(() => {});
+      return;
     }
-    queue.value = []; currentIndex.value = -1; isPlaying.value = false; currentTime.value = 0; duration.value = 0; lyrics.value = []; currentLyricLine.value = ""; currentLyricIndex.value = -1; showPlaylist.value = false; playModeVisible.value = false;
+    if (howl) howl.volume(v);
+  }
+  function cyclePlayMode() {
+    if (isDlnaPeer.value) castCyclePlayMode(); else localCyclePlayMode();
+  }
+  function removeFromQueue(index: number) {
+    if (isDlnaPeer.value) castRemoveFromQueue(index); else localRemoveFromQueue(index);
+  }
+  function clearQueue() {
+    if (isDlnaPeer.value) castClearQueue(); else localClearQueue();
+    showPlaylist.value = false;
+    playModeVisible.value = false;
+  }
+
+  function toggleLyrics() { showLyrics.value = !showLyrics.value; }
+  function togglePlaylistPanel() { showPlaylist.value = !showPlaylist.value; }
+  function togglePlayMode() { playModeVisible.value = !playModeVisible.value; }
+  function loadLyrics(songId: string) {
+    if (isDlnaPeer.value) loadCastLyrics(songId); else loadLocalLyrics(songId);
+  }
+  function updateCurrentLyric() {
+    if (isDlnaPeer.value) updateCastLyric(); else updateLocalLyric();
   }
 
   // ==================== Peer management ====================
-  //
-  // The player switcher lets the user flip the player bar + queue panel
-  // between the local Web client and any DLNA renderer. Switching does NOT
-  // stop the other peer — it just rebinds the UI. Local audio (Howl) is
-  // paused when switching to a DLNA peer to avoid double audio; resuming it
-  // is the user's choice when they switch back.
 
-  // Fetch the full peer list (with queue snapshots) from the backend.
   async function refreshPeers(): Promise<void> {
     try {
       const res = await api.get("/rest/api/v1/peers");
       peers.value = res.data?.peers || [];
-      // Ensure the local peer is always present in the list even before the
-      // backend registers it (so the switcher shows "本机" immediately).
       if (!peers.value.find(p => p.peerId === localPeerId.value)) {
         peers.value.unshift({
           peerId: localPeerId.value,
@@ -603,7 +653,6 @@ export const usePlayerStore = defineStore("player", () => {
     } catch {}
   }
 
-  // Register this Web client as a local peer + start the heartbeat loop.
   async function registerLocalPeer(): Promise<void> {
     const authStore = useAuthStore();
     if (!authStore.userId) return;
@@ -613,13 +662,10 @@ export const usePlayerStore = defineStore("player", () => {
     startHeartbeat();
   }
 
-  // Heartbeat every 30s so the backend's 10-min inactivity cleanup doesn't
-  // purge this tab's local queue while it's still open.
   function startHeartbeat(): void {
     stopHeartbeat();
     const pid = localPeerId.value;
     if (!pid || !useAuthStore().userId) return;
-    // Immediate beat + interval.
     api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/heartbeat`).catch(() => {});
     heartbeatTimer = setInterval(() => {
       api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/heartbeat`).catch(() => {});
@@ -630,69 +676,43 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   // Switch the player bar + queue panel to a different peer.
-  //   - local peer: leave cast mode, restore the local queue (Howl stays as-is)
-  //   - dlna peer:  rebind the UI to that device's backend queue; the local
-  //                 Howl keeps playing on its own (切换只换控制目标,不停本机)
+  // This is a PURE UI operation: it only changes currentPeerId. Neither
+  // state machine is touched — 本机 keeps playing, DLNA keeps playing. The
+  // UI computed properties (queue/isPlaying/currentTime/...) automatically
+  // re-route to the newly selected peer's state machine.
   async function switchPeer(peerId: string): Promise<void> {
     if (peerId === currentPeerId.value) return;
-    const isDlna = peerId.startsWith("dlna:");
-    if (isDlna) {
+    if (peerId.startsWith("dlna:")) {
+      // Switching UI to control a DLNA device. If we're not already casting
+      // to it (e.g. it's a device HA started playing on), pull its queue so
+      // the UI mirrors what's playing. 本机 Howl is NOT touched.
       const deviceId = peerId.slice(5);
-      // 切换播放器只改变 UI 控制目标,绝不动本机 Howl —— 本机继续按原状态
-      // 播放出声。这里只停掉本机进度计时器,因为切到 DLNA 后 currentTime/
-      // duration 由 castPoll 负责更新(显示 DLNA 的进度);本机 Howl 仍在后台
-      // 播放,只是它的进度不再写 UI。切回本机时再从 Howl 重新同步进度。
-      stopProgressTimer();
-      // Resolve the device's friendly name for the player bar label.
-      let name = "DLNA 设备";
-      try {
-        const devRes = await api.get("/rest/api/v1/dlna/devices");
-        const dev = (devRes.data?.devices || []).find((d: any) => d.id === deviceId);
-        if (dev?.name) name = dev.name;
-      } catch {}
-      castDeviceId.value = deviceId;
-      castDeviceName.value = name;
-      currentPeerId.value = peerId;
-      // Pull the backend's authoritative queue so the UI mirrors the device.
-      await syncQueueFromBackend();
-      const song = currentSong.value;
-      if (song) loadLyrics(song.id);
-      lastScrobbledSongId = song?.id || "";
-      startCastPoll();
-    } else {
-      // Switching to local: stop mirroring the DLNA device (the device keeps
-      // playing on its own — the backend owns its queue). Just rebind to local.
-      stopCastPoll();
-      castDeviceId.value = "";
-      castDeviceName.value = "";
-      currentPeerId.value = peerId;
-      lastCastState = "STOPPED";
-      // Restore the local queue from the backend so a freshly reopened tab or
-      // a switch back from DLNA shows the user's last local queue.
-      await restoreLocalPeer();
-      // 切回本机时,本机 Howl 可能一直在后台播放(切换到 DLNA 时我们没有
-      // pause 它),也可能已播完停住(onend 在 castActive 时不自动 next)。
-      // 以 Howl 实际播放的歌曲为准:在队列里定位它的索引,加载歌词,并从
-      // Howl 同步 isPlaying/currentTime/duration 到 UI(切到 DLNA 期间这几
-      // 个值被 castPoll 用 DLNA 状态覆盖了)。后端快照可能滞后,所以不能
-      // 盲信 restoreLocalPeer 恢复的 currentIndex。
-      if (howl && howlSongId) {
-        const idx = queue.value.findIndex(s => s.id === howlSongId);
-        if (idx >= 0) currentIndex.value = idx;
-        const song = currentSong.value;
-        if (song) loadLyrics(song.id);
-        isPlaying.value = howl.playing();
-        duration.value = howl.duration() || 0;
-        currentTime.value = (howl.seek() as number) || 0;
-        if (howl.playing()) startProgressTimer();
+      if (castDeviceId.value !== deviceId) {
+        let name = "DLNA 设备";
+        try {
+          const devRes = await api.get("/rest/api/v1/dlna/devices");
+          const dev = (devRes.data?.devices || []).find((d: any) => d.id === deviceId);
+          if (dev?.name) name = dev.name;
+        } catch {}
+        castDeviceId.value = deviceId;
+        castDeviceName.value = name;
+        await syncCastQueueFromBackend();
+        const song = castQueue.value[castIndex.value];
+        if (song) loadCastLyrics(song.id);
+        lastScrobbledSongId = song?.id || "";
+        startCastPoll();
       }
+      currentPeerId.value = peerId;
+    } else {
+      // Switching UI back to本机. DLNA keeps playing on its own. 本机 state
+      // is already intact (Howl kept playing if it was playing). Just flip
+      // the UI pointer — the computed properties will show本机 state again.
+      currentPeerId.value = peerId;
     }
   }
 
   // Restore the local queue + index + play mode from the backend's
-  // local_queues store. Called on tab reopen (initLocalPeer) and when
-  // switching back to the local peer. Does NOT auto-resume playback — the
-  // user pressed pause/close, so we leave Howl stopped until they hit play.
+  // local_queues store. Called on tab reopen. Does NOT auto-resume playback.
   async function restoreLocalPeer(): Promise<void> {
     const pid = localPeerId.value;
     if (!pid || !useAuthStore().userId) return;
@@ -700,31 +720,20 @@ export const usePlayerStore = defineStore("player", () => {
       const res = await api.get(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue`);
       const snap = res.data || {};
       if (Array.isArray(snap.items) && snap.items.length > 0) {
-        queue.value = snap.items.map((it: any) => ({
-          id: it.songId,
-          title: it.title || "未知",
-          artist: it.artist || "",
-          album: it.album || "",
-          duration: it.duration || 0,
-          coverArt: it.coverArt,
-        }));
-        if (typeof snap.currentIndex === "number") currentIndex.value = snap.currentIndex;
+        localQueue.value = snap.items.map(queueItemToSong);
+        if (typeof snap.currentIndex === "number") localIndex.value = snap.currentIndex;
         if (typeof snap.playMode === "string") {
-          playMode.value = snap.playMode as PlayMode;
-          localStorage.setItem("playMode", playMode.value);
+          localPlayMode.value = snap.playMode as PlayMode;
+          localStorage.setItem("playMode", localPlayMode.value);
         }
-        // Load lyrics for the restored track so the lyrics view works.
-        const song = currentSong.value;
-        if (song) loadLyrics(song.id);
+        const song = localQueue.value[localIndex.value];
+        if (song) loadLocalLyrics(song.id);
       }
     } catch {}
   }
 
   // One-shot init for the local peer: register, restore queue, connect WS,
   // fetch the peer list. Called once from MainLayout onMounted after login.
-  // If restoreCast() already bound the UI to an active DLNA session, leave
-  // currentPeerId on the dlna peer — only default to local when nothing is
-  // casting.
   async function initLocalPeer(): Promise<void> {
     const authStore = useAuthStore();
     if (!authStore.userId) return;
@@ -735,9 +744,6 @@ export const usePlayerStore = defineStore("player", () => {
     connectPeerWs();
   }
 
-  // WebSocket subscription for live peer updates (registration, availability,
-  // queue changes). Replaces polling /v1/peers; falls back to refreshPeers()
-  // on reconnect.
   function connectPeerWs(): void {
     disconnectPeerWs();
     const authStore = useAuthStore();
@@ -752,7 +758,6 @@ export const usePlayerStore = defineStore("player", () => {
       switch (msg.type) {
         case "peer_snapshot":
           peers.value = msg.peers || [];
-          // Ensure local peer is always listed.
           if (!peers.value.find(p => p.peerId === localPeerId.value)) {
             peers.value.unshift({ peerId: localPeerId.value, kind: "local", name: "本机", available: true, lastActiveAt: Date.now() });
           }
@@ -768,7 +773,6 @@ export const usePlayerStore = defineStore("player", () => {
           break;
         }
         case "peer_queue_changed": {
-          // Update the queue snapshot cached on the peer entry.
           const idx = peers.value.findIndex(x => x.peerId === msg.peer_id);
           if (idx >= 0) peers.value[idx].queue = msg.queue;
           break;
@@ -781,8 +785,6 @@ export const usePlayerStore = defineStore("player", () => {
       }
     };
     peerWs.onclose = () => {
-      // Reconnect after a short delay so a transient drop doesn't leave the
-      // switcher stale.
       setTimeout(() => { if (currentPeerId.value) connectPeerWs(); }, 3000);
     };
     peerWs.onerror = () => { try { peerWs?.close(); } catch {} };
@@ -795,7 +797,6 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  // Tear down everything (called on logout).
   function teardownPeer(): void {
     stopHeartbeat();
     stopCastPoll();
@@ -803,14 +804,23 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   return {
-    queue, currentIndex, isPlaying, volume, playMode, currentTime, duration, showLyrics, showPlaylist,
-    playModeVisible, lyrics, currentLyricLine, currentLyricIndex,
-    currentSong, progress, castActive, castDeviceName,
+    // UI-routed computed (auto-switch based on currentPeerId)
+    queue, currentIndex, isPlaying, currentTime, duration, playMode,
+    lyrics, currentLyricLine, currentLyricIndex,
+    currentSong, progress,
+    // shared UI state
+    volume, showLyrics, showPlaylist, playModeVisible,
+    // cast indicators
+    castActive, castDeviceName,
     // peer system
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
     switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,
-    playSong, addToQueue, playQueue, togglePlay, next, prev, seek, seekPercent, setVolume, cyclePlayMode, toggleLyrics, togglePlaylistPanel, togglePlayMode,
+    // UI-routed controls
+    playSong, addToQueue, playQueue, togglePlay, next, prev,
+    seek, seekPercent, setVolume, cyclePlayMode,
     removeFromQueue, clearQueue, getCoverUrl, loadLyrics, updateCurrentLyric,
+    toggleLyrics, togglePlaylistPanel, togglePlayMode,
+    // cast lifecycle (投屏)
     startCast, stopCast, restoreCast,
   };
 });
