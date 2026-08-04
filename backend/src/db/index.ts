@@ -247,6 +247,18 @@ export function initDatabase() {
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
 
+    CREATE TABLE IF NOT EXISTS recommend_pool (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_name TEXT DEFAULT '',
+      user_id TEXT NOT NULL,
+      enabled INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_recommend_pool_unique ON recommend_pool(source_type, source_id);
+
     CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist_id);
     CREATE INDEX IF NOT EXISTS idx_songs_album ON songs(album_id);
     CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
@@ -337,13 +349,10 @@ export function initDatabase() {
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_candidates", JSON.stringify([
     { platform: "netease", url: "https://music.163.com/playlist?id=6723173524", name: "网易云·网络热歌榜" },
     { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/26", name: "QQ音乐·巅峰榜热歌" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=3779629", name: "网易云·新歌榜" },
-    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/27", name: "QQ音乐·巅峰榜新歌" },
     { platform: "netease", url: "https://music.163.com/playlist?id=19723756", name: "网易云·飙升榜" },
     { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/62", name: "QQ音乐·飙升榜" },
     { platform: "netease", url: "https://music.163.com/playlist?id=3778678", name: "网易云·热歌榜" },
     { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/4", name: "QQ音乐·巅峰榜流行指数" },
-    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/3", name: "QQ音乐·巅峰榜欧美" },
     { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
   ]));
 

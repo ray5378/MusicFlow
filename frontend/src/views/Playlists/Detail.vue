@@ -16,6 +16,7 @@
           <el-button type="primary" @click="playAll">播放全部</el-button>
           <el-button @click="showRenameDialog = true"><el-icon><Edit /></el-icon>重命名</el-button>
           <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><el-icon><Refresh /></el-icon>同步</el-button>
+          <el-button :icon="MagicStick" @click="togglePool">{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
           <el-button type="danger" plain @click="deletePlaylist"><el-icon><Delete /></el-icon>删除歌单</el-button>
         </div>
         <div class="settings" v-if="playlist.isImported">
@@ -98,7 +99,7 @@
 import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
-import { List, Delete, Headset, Edit, VideoPlay as Play, Warning, Refresh } from "@element-plus/icons-vue";
+import { List, Delete, Headset, Edit, VideoPlay as Play, Warning, Refresh, MagicStick } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 
@@ -106,6 +107,8 @@ const route = useRoute();
 const router = useRouter();
 const playerStore = usePlayerStore();
 const playlist = ref<any>(null);
+// Whether this playlist is in the daily-recommend pool.
+const inPool = ref(false);
 const songs = ref<any[]>([]);
 const loading = ref(false);
 const syncing = ref(false);
@@ -140,8 +143,34 @@ async function loadPlaylist() {
     playlist.value = res.data.playlist;
     songs.value = res.data.items || [];
     total.value = res.data.total || 0;
+    loadPoolStatus();
   } catch {}
   finally { loading.value = false; }
+}
+
+async function loadPoolStatus() {
+  if (!playlist.value?.id) return;
+  try {
+    const res = await api.get(`/rest/api/v1/recommend-pool/playlist/${playlist.value.id}/status`);
+    inPool.value = !!res.data.inPool;
+  } catch { inPool.value = false; }
+}
+
+async function togglePool() {
+  if (!playlist.value?.id) return;
+  try {
+    if (inPool.value) {
+      await api.delete(`/rest/api/v1/recommend-pool/playlist/${playlist.value.id}`);
+      inPool.value = false;
+      ElMessage.success(`已将「${playlist.value.name}」移出每日推荐池`);
+    } else {
+      const res = await api.post(`/rest/api/v1/recommend-pool/playlist/${playlist.value.id}`);
+      inPool.value = true;
+      ElMessage.success(res.data.message || `已将「${playlist.value.name}」加入每日推荐池`);
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
+  }
 }
 
 function onPageChange(page: number) { currentPage.value = page; loadPlaylist(); }

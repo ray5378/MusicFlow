@@ -10,6 +10,7 @@
         <div class="info">{{ songs.length }}首 · 喜欢的音乐都在这里</div>
         <div class="actions">
           <el-button type="primary" @click="playAll" :disabled="songs.length === 0">播放全部</el-button>
+          <el-button :icon="MagicStick" @click="togglePool">{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
         </div>
       </div>
     </div>
@@ -72,7 +73,7 @@
 import { ref, onMounted } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { VideoPlay as Play, List, Plus, Headset, Loading } from "@element-plus/icons-vue";
+import { VideoPlay as Play, List, Plus, Headset, Loading, MagicStick } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
@@ -87,6 +88,31 @@ const playlists = ref<any[]>([]);
 const playlistsLoading = ref(false);
 const addingPlaylistId = ref("");
 const newPlaylistName = ref("");
+// Whether "我喜欢的音乐" is in the daily-recommend pool.
+const inPool = ref(false);
+
+async function loadPoolStatus() {
+  try {
+    const res = await api.get("/rest/api/v1/recommend-pool/favorites/status");
+    inPool.value = !!res.data.inPool;
+  } catch { inPool.value = false; }
+}
+
+async function togglePool() {
+  try {
+    if (inPool.value) {
+      await api.delete("/rest/api/v1/recommend-pool/favorites");
+      inPool.value = false;
+      ElMessage.success("已将「我喜欢的音乐」移出每日推荐池");
+    } else {
+      const res = await api.post("/rest/api/v1/recommend-pool/favorites");
+      inPool.value = true;
+      ElMessage.success(res.data.message || "已将「我喜欢的音乐」加入每日推荐池");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
+  }
+}
 
 function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
 function playSong(song: any) { playerStore.playSong(song); }
@@ -143,7 +169,7 @@ async function createAndAdd() {
   finally { addingPlaylistId.value = ""; }
 }
 
-onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); });
+onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); loadPoolStatus(); });
 </script>
 
 <style lang="scss" scoped>

@@ -15,6 +15,17 @@
           <div class="playlist-name">我喜欢的音乐</div>
           <div class="playlist-meta">喜欢的音乐都在这里</div>
         </div>
+        <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleFavCommand(cmd)">
+          <el-button size="small" circle :icon="MoreFilled" @click.stop />
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="play"><el-icon><VideoPlay /></el-icon>播放全部</el-dropdown-item>
+              <el-dropdown-item command="addToDaily" divided>
+                <el-icon><MagicStick /></el-icon>{{ favInPool ? '移出每日推荐池' : '加入每日推荐池' }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
       <!-- User playlists -->
       <div class="playlist-card" v-for="pl in playlists" :key="pl.id" @click="router.push(`/playlists/${pl.id}`)">
@@ -37,6 +48,9 @@
               <el-dropdown-item command="play"><el-icon><VideoPlay /></el-icon>播放全部</el-dropdown-item>
               <el-dropdown-item v-if="pl.isImported" command="sync"><el-icon><Refresh /></el-icon>同步</el-dropdown-item>
               <el-dropdown-item command="rename"><el-icon><Edit /></el-icon>重命名</el-dropdown-item>
+              <el-dropdown-item command="addToDaily" divided>
+                <el-icon><MagicStick /></el-icon>{{ pl._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
+              </el-dropdown-item>
               <el-dropdown-item command="delete" divided><el-icon><Delete /></el-icon>删除歌单</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -100,7 +114,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { List, Plus, MoreFilled, Edit, Delete, VideoPlay, Download, Refresh } from "@element-plus/icons-vue";
+import { List, Plus, MoreFilled, Edit, Delete, VideoPlay, Download, Refresh, MagicStick } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
@@ -123,6 +137,10 @@ const importName = ref("");
 const importAutoSync = ref(true);
 const importing = ref(false);
 const syncingId = ref("");
+// Recommend-pool membership state, so the dropdown item can toggle between
+// "加入每日推荐池" / "移出每日推荐池".
+const favInPool = ref(false);
+const poolPlaylistIds = ref<Set<string>>(new Set());
 
 function formatDuration(sec: number) { const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`; }
 
@@ -134,8 +152,30 @@ async function loadPlaylists() {
     });
     playlists.value = res.data.items || [];
     total.value = res.data.total || 0;
+    // Annotate each playlist with its recommend-pool membership so the
+    // dropdown item label can toggle.
+    await loadPoolStatus();
+    for (const pl of playlists.value) {
+      pl._inPool = poolPlaylistIds.value.has(pl.id);
+    }
   } catch { playlists.value = []; total.value = 0; }
   finally { loading.value = false; }
+}
+
+// Fetch the full recommend-pool list once, then derive both the playlist-id
+// set and the favorites membership flag from it (saves N+1 requests).
+async function loadPoolStatus() {
+  try {
+    const res = await api.get("/rest/api/v1/recommend-pool");
+    const pool = res.data.pool || [];
+    poolPlaylistIds.value = new Set(
+      pool.filter((p: any) => p.source_type === "playlist").map((p: any) => p.source_id)
+    );
+    favInPool.value = pool.some((p: any) => p.source_type === "favorites");
+  } catch {
+    poolPlaylistIds.value = new Set();
+    favInPool.value = false;
+  }
 }
 
 function onPageChange(page: number) { currentPage.value = page; loadPlaylists(); }
@@ -202,7 +242,59 @@ function handleCardCommand(cmd: string, pl: any) {
     case "play": playAll(pl); break;
     case "sync": syncPlaylist(pl); break;
     case "rename": openRename(pl); break;
+    case "addToDaily": togglePlaylistPool(pl); break;
     case "delete": deletePlaylist(pl); break;
+  }
+}
+
+// "我喜欢的音乐" 卡片菜单
+function handleFavCommand(cmd: string) {
+  if (cmd === "play") playFavorites();
+  else if (cmd === "addToDaily") toggleFavPool();
+}
+
+async function playFavorites() {
+  try {
+    const res = await api.get("/rest/getStarred?f=json");
+    const songs = res.data["subsonic-response"]?.starred?.song || [];
+    if (songs.length > 0) { const { usePlayerStore } = await import("@/stores/player"); usePlayerStore().playQueue(songs); }
+    else ElMessage.warning("我喜欢的音乐为空");
+  } catch { ElMessage.error("播放失败"); }
+}
+
+// Toggle a playlist in / out of the daily-recommend pool.
+async function togglePlaylistPool(pl: any) {
+  try {
+    if (pl._inPool) {
+      await api.delete(`/rest/api/v1/recommend-pool/playlist/${pl.id}`);
+      pl._inPool = false;
+      poolPlaylistIds.value.delete(pl.id);
+      ElMessage.success(`已将「${pl.name}」移出每日推荐池`);
+    } else {
+      const res = await api.post(`/rest/api/v1/recommend-pool/playlist/${pl.id}`);
+      pl._inPool = true;
+      poolPlaylistIds.value.add(pl.id);
+      ElMessage.success(res.data.message || `已将「${pl.name}」加入每日推荐池`);
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
+  }
+}
+
+// Toggle "我喜欢的音乐" in / out of the daily-recommend pool.
+async function toggleFavPool() {
+  try {
+    if (favInPool.value) {
+      await api.delete("/rest/api/v1/recommend-pool/favorites");
+      favInPool.value = false;
+      ElMessage.success("已将「我喜欢的音乐」移出每日推荐池");
+    } else {
+      const res = await api.post("/rest/api/v1/recommend-pool/favorites");
+      favInPool.value = true;
+      ElMessage.success(res.data.message || "已将「我喜欢的音乐」加入每日推荐池");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
   }
 }
 

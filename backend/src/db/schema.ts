@@ -184,3 +184,20 @@ export const settings = sqliteTable("settings", {
   value: text("value").notNull(),
   updatedAt: text("updated_at").default(""),
 });
+
+// User-curated recommend pool: when a user clicks "加入每日推荐池" on a playlist
+// (or on "我喜欢的音乐"), that source is recorded here. Each daily-recommend
+// generation picks 50 random playable songs from each pool member and merges
+// them into the day's combined playlist.
+// sourceType: "playlist" (a real playlists row) | "favorites" (user's starred songs)
+// sourceId:   playlist id for "playlist"; user id for "favorites"
+export const recommendPool = sqliteTable("recommend_pool", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sourceType: text("source_type").notNull(), // "playlist" | "favorites"
+  sourceId: text("source_id").notNull(),     // playlist id OR user id
+  sourceName: text("source_name").default(""), // denormalized for display
+  userId: text("user_id").notNull(),         // who added it
+  enabled: integer("enabled").default(1),
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+});

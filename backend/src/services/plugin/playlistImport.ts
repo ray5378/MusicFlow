@@ -11,7 +11,7 @@ export interface ImportedTrack {
 
 export interface ImportedPlaylist {
   name: string;
-  platform: "qq" | "netease";
+  platform: "qq" | "netease" | "mixed";
   coverUrl?: string;
   tracks: ImportedTrack[];
 }

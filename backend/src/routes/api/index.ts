@@ -11,7 +11,7 @@ import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack } from "../../se
 import { checkImportCooldown, rebuildPlaylistEntries, syncPlaylist, refreshPlaylistCounts } from "../../services/plugin/playlistSync.js";
 import {
   generateDailyPlaylist, loadCandidates, saveCandidates, pickDailyCandidate,
-  DAILY_TAG,
+  DAILY_TAG, listRecommendPool, addToRecommendPool, removeFromRecommendPool, isInRecommendPool,
 } from "../../services/plugin/dailyRecommend.js";
 import { generateLocalDailyPlaylist, DAILY_TAG_LOCAL } from "../../services/plugin/localRecommend.js";
 import { sqlite } from "../../db/index.js";
@@ -563,6 +563,65 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
   // surfaced via the *_error fields so the UI can show what went wrong.
   const success = !!remote || !!local;
   return c.json({ success, remote, remoteError, local, localError }, success ? 200 : 500);
+});
+
+// ==================== User recommend pool ====================
+// A user can click "加入每日推荐池" on any playlist (or on "我喜欢的音乐")
+// to add that source to the pool. Each daily-recommend run picks up to 50
+// random playable songs from every pool member and merges them into the
+// day's combined "今日推荐" playlist.
+
+// List all pool members (for an admin management page if desired).
+apiRoutes.get("/v1/recommend-pool", (c) => {
+  const pool = listRecommendPool();
+  return c.json({ pool });
+});
+
+// Add a playlist to the pool. Any logged-in user can do this (not admin-only)
+// since it's a personalization feature, not a system config.
+apiRoutes.post("/v1/recommend-pool/playlist/:playlistId", async (c) => {
+  const user = c.get("user");
+  const playlistId = c.req.param("playlistId");
+  const row = sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(playlistId) as any;
+  if (!row) return c.json({ success: false, error: "歌单不存在" }, 404);
+  const added = addToRecommendPool("playlist", playlistId, row.name || "", user?.id || "");
+  return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "该歌单已在推荐池中" });
+});
+
+// Remove a playlist from the pool.
+apiRoutes.delete("/v1/recommend-pool/playlist/:playlistId", (c) => {
+  const playlistId = c.req.param("playlistId");
+  const removed = removeFromRecommendPool("playlist", playlistId);
+  return c.json({ success: true, removed });
+});
+
+// Check if a playlist is in the pool (for the UI to show toggle state).
+apiRoutes.get("/v1/recommend-pool/playlist/:playlistId/status", (c) => {
+  const playlistId = c.req.param("playlistId");
+  return c.json({ inPool: isInRecommendPool("playlist", playlistId) });
+});
+
+// Add the current user's favorites ("我喜欢的音乐") to the pool.
+apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
+  const user = c.get("user");
+  if (!user?.id) return c.json({ success: false, error: "未登录" }, 401);
+  const added = addToRecommendPool("favorites", user.id, "我喜欢的音乐", user.id);
+  return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "我喜欢的音乐已在推荐池中" });
+});
+
+// Remove the current user's favorites from the pool.
+apiRoutes.delete("/v1/recommend-pool/favorites", (c) => {
+  const user = c.get("user");
+  if (!user?.id) return c.json({ success: false, error: "未登录" }, 401);
+  const removed = removeFromRecommendPool("favorites", user.id);
+  return c.json({ success: true, removed });
+});
+
+// Check if the current user's favorites are in the pool.
+apiRoutes.get("/v1/recommend-pool/favorites/status", (c) => {
+  const user = c.get("user");
+  if (!user?.id) return c.json({ inPool: false });
+  return c.json({ inPool: isInRecommendPool("favorites", user.id) });
 });
 
 // ==================== Playlist import (built-in plugins: QQ / NetEase) ====================
