@@ -328,18 +328,23 @@ export function initDatabase() {
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_retention", "7");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
-  // Default candidate pool: NetEase official editorial charts (user-curated).
-  // Each day the scheduler picks one via `dayOfYear(today) % pool.length`, so
-  // the daily mix rotates across charts. Replace via the admin API
-  // (PUT /rest/api/v1/daily-recommend/candidates) if you want different ones.
+  // Default candidate pool: a mix of NetEase editorial charts + QQ Music
+  // official toplists. Each day the scheduler picks one via
+  // `dayOfYear(today) % pool.length`, so the daily mix rotates across charts.
+  // Replace via the admin API (PUT /rest/api/v1/daily-recommend/candidates).
+  // QQ toplist URLs use the form https://y.qq.com/n/ryqq/toplist/<id> and are
+  // routed to a dedicated toplist fetcher (different API from QQ playlists).
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_candidates", JSON.stringify([
-    { platform: "netease", url: "https://music.163.com/playlist?id=6723173524", name: "网络热歌榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=7785123708", name: "黑胶VIP新歌榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=7785066739", name: "黑胶VIP热歌榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "原创榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=3779629", name: "新歌榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=19723756", name: "飙升榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=3778678", name: "热歌榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=6723173524", name: "网易云·网络热歌榜" },
+    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/26", name: "QQ音乐·巅峰榜热歌" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=3779629", name: "网易云·新歌榜" },
+    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/27", name: "QQ音乐·巅峰榜新歌" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=19723756", name: "网易云·飙升榜" },
+    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/62", name: "QQ音乐·飙升榜" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=3778678", name: "网易云·热歌榜" },
+    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/4", name: "QQ音乐·巅峰榜流行指数" },
+    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/3", name: "QQ音乐·巅峰榜欧美" },
+    { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
   ]));
 
   console.log("Database initialized successfully");

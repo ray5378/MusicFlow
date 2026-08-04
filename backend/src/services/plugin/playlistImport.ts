@@ -85,6 +85,47 @@ async function fetchQQPlaylist(id: string): Promise<ImportedPlaylist> {
   };
 }
 
+// ==================== QQ Music Official Toplists ====================
+
+// Extract toplist id from QQ music chart URLs like:
+//   https://y.qq.com/n/ryqq/toplist/26
+//   https://y.qq.com/wk_toplist/index.html?topid=26
+export function extractQQToplistId(url: string): string | null {
+  const m = url.match(/[?&]topid=(\d+)/) || url.match(/toplist\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Fetch a QQ Music official chart (巅峰榜/飙升榜/热歌榜 etc.).
+// These use a different API endpoint from user playlists (disstid) — the
+// toplist endpoint takes a `topid` instead. The song data structure is
+// identical, so parsing is shared with fetchQQPlaylist.
+async function fetchQQToplist(id: string): Promise<ImportedPlaylist> {
+  const api = "https://c.y.qq.com/v8/fcg-bin/fcg_v8_toplist_cp.fcg";
+  const params = new URLSearchParams({
+    tpl: "3", page: "detail", type: "top", topid: id, format: "json",
+  });
+  const data = await fetchJson(`${api}?${params}`, { Referer: "https://y.qq.com/" });
+  const info = data?.topinfo;
+  if (!info) throw new Error("QQ 榜单不存在或无法访问");
+  // Song entries in toplist responses are nested under a `data` key.
+  const tracks: ImportedTrack[] = (data?.songlist || []).map((entry: any) => {
+    const s = entry?.data || entry;
+    return {
+      externalId: String(s.songmid || s.songid || ""),
+      title: s.songname || "",
+      artist: (s.singer || []).map((x: any) => x.name).filter(Boolean).join("/"),
+      album: s.albumname || "",
+      duration: s.interval ? s.interval * 1000 : undefined,
+    };
+  }).filter((t: any) => t.title);
+  return {
+    name: info.ListName || `QQ 榜单 ${id}`,
+    platform: "qq",
+    coverUrl: info.pic_v12 || info.pic || undefined,
+    tracks,
+  };
+}
+
 // ==================== NetEase Cloud Music ====================
 
 export function extractNeteasePlaylistId(url: string): string | null {
@@ -147,6 +188,10 @@ export async function importPlaylistFromUrl(url: string): Promise<ImportedPlayli
   if (/y\.qq\.com|i2\.y\.qq\.com|c\.y\.qq\.com|qq\.com.*playlist/i.test(trimmed)) {
     // QQ short links (c6.y.qq.com/base/fcgi-bin/u?__=xxx) need a redirect to reveal the playlist id
     const resolved = await resolveQQShortLink(trimmed);
+    // Official toplists (https://y.qq.com/n/ryqq/toplist/<id>) use a separate API.
+    const topid = extractQQToplistId(resolved);
+    if (topid) return fetchQQToplist(topid);
+    // Regular user/editorial playlists use the disstid API.
     const id = extractQQPlaylistId(resolved);
     if (!id) throw new Error("无法从链接中识别 QQ 歌单 ID");
     return fetchQQPlaylist(id);
