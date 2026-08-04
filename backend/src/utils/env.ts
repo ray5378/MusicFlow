@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 // Lazily load a backend/.env file if present (no dotenv dependency).
 // Real env vars always take precedence; existing vars are never overwritten.
@@ -15,17 +16,31 @@ function loadDotEnv() {
   } catch {}
 }
 
+function getDataDir(): string {
+  return process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), "data");
+}
+
 export function getJwtSecret(): string {
   loadDotEnv();
   const secret = process.env.JWT_SECRET;
-  if (!secret || secret.length < 32) {
-    console.error("[FATAL] 环境变量 JWT_SECRET 未设置或长度不足 32 字符,拒绝启动。");
-    console.error("       该密钥用于 JWT 签名和 pass_enc 密码加密,必须为每台部署随机生成。");
-    console.error("       生成: openssl rand -hex 32");
-    console.error("       并在 backend/.env 写入 JWT_SECRET=<值> 后重新启动。");
+  if (secret && secret.length >= 32) return secret;
+  // JWT_SECRET is optional: auto-generate one and persist it next to the DB so
+  // restarts keep the same secret without any configuration.
+  const secretFile = path.join(getDataDir(), ".jwt-secret");
+  try {
+    if (fs.existsSync(secretFile)) {
+      const stored = fs.readFileSync(secretFile, "utf8").trim();
+      if (stored.length >= 32) return stored;
+    }
+    const generated = crypto.randomBytes(32).toString("hex");
+    fs.mkdirSync(getDataDir(), { recursive: true });
+    fs.writeFileSync(secretFile, generated, { mode: 0o600 });
+    console.log(`[SECRET] JWT_SECRET 未配置,已自动生成并保存到 ${secretFile}`);
+    return generated;
+  } catch (e: any) {
+    console.error("[FATAL] 无法生成 JWT_SECRET:", e.message);
     process.exit(1);
   }
-  return secret;
 }
 
 export const JWT_SECRET = getJwtSecret();

@@ -6,7 +6,10 @@ services:
     ports:
       - "46400:46400"
     environment:
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required (openssl rand -hex 32)}
+      # Optional: auto-generated and persisted in ./data/.jwt-secret on first
+      # start when left empty (stable across restarts). Set it explicitly to
+      # keep the same secret when reusing an existing data dir.
+      - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-180}
       - TZ=Asia/Shanghai
