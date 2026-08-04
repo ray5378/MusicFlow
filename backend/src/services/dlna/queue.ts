@@ -321,16 +321,24 @@ class QueueManager extends EventEmitter {
     const q = this.get(deviceId);
     const item = q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
     if (!item) return;
-    await castToDevice({
-      songId: item.songId,
-      title: item.title,
-      artist: item.artist,
-      album: item.album,
-      mime: item.mime,
-      deviceId,
-      baseUrl,
-      coverArt: item.coverArt,
-    });
+    // Cast errors (device offline, SOAP failure) must NOT abort the queue
+    // bookkeeping — the queue metadata is still correct and should be
+    // persisted + emitted so the UI/HA stay in sync. The device will pick up
+    // the current track on resume once it's reachable again.
+    try {
+      await castToDevice({
+        songId: item.songId,
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        mime: item.mime,
+        deviceId,
+        baseUrl,
+        coverArt: item.coverArt,
+      });
+    } catch (e: any) {
+      console.warn(`[queue] cast to ${deviceId} failed (queue state preserved):`, e?.message || e);
+    }
   }
 }
 

@@ -1015,6 +1015,42 @@ apiRoutes.delete("/v1/dlna/devices/:deviceId/queue", (c) => {
   return c.json({ success: true });
 });
 
+// List all devices that currently have an active queue. The Web frontend
+// calls this on load to restore the cast state (which device was playing,
+// what queue, what index) after the tab was closed or the backend restarted.
+apiRoutes.get("/v1/dlna/active", (c) => {
+  return c.json({ active: getQueueManager().activeDevices() });
+});
+
+// Set the play mode (order | one | all | shuffle) for a device's queue.
+// Body: { mode: PlayMode }
+apiRoutes.post("/v1/dlna/devices/:deviceId/play-mode", async (c) => {
+  const { mode } = await c.req.json().catch(() => ({} as any));
+  if (!["order", "one", "all", "shuffle"].includes(mode)) {
+    return c.json({ error: "无效的 mode" }, 400);
+  }
+  getQueueManager().setPlayMode(c.req.param("deviceId")!, mode);
+  return c.json({ success: true });
+});
+
+// Remove a single item from the queue by index. Playback stays coherent:
+// if the removed item was current, the next one starts playing.
+apiRoutes.delete("/v1/dlna/devices/:deviceId/queue/:index", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const index = parseInt(c.req.param("index")!, 10);
+  if (Number.isNaN(index)) return c.json({ error: "无效的 index" }, 400);
+  getQueueManager().removeAt(deviceId, index, getDlnaBaseUrl(c));
+  return c.json({ success: true });
+});
+
+// Mark a device's queue inactive without clearing it (used when the user
+// stops cast from the Web client — the queue stays in DB for reuse, but the
+// device is no longer considered "actively casting" for restore purposes).
+apiRoutes.post("/v1/dlna/devices/:deviceId/deactivate", (c) => {
+  getQueueManager().deactivate(c.req.param("deviceId")!);
+  return c.json({ success: true });
+});
+
 // Convenience: convert song rows into QueueItem objects (shared by the
 // album/playlist play endpoints above). Exported so the HA integration's
 // play_media flow can reuse the same shape if it ever needs to.
@@ -1026,6 +1062,7 @@ export function songsToQueueItems(rows: any[]): any[] {
     album: s.album || undefined,
     mime: suffixToMime(s.suffix || ""),
     coverArt: s.coverArt || undefined,
+    duration: typeof s.duration === "number" ? s.duration : undefined,
   }));
 }
 

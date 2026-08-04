@@ -284,7 +284,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
@@ -300,6 +300,15 @@ const router = useRouter();
 const authStore = useAuthStore();
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
+
+// On layout mount (i.e. after login), restore any active DLNA cast session
+// from the backend so the UI reflects what's still playing on the device
+// after the tab was closed or the backend restarted.
+onMounted(() => {
+  if (authStore.isLoggedIn) {
+    playerStore.restoreCast().catch(() => {});
+  }
+});
 const sidebarCollapsed = ref(false);
 const lyricsContainer = ref<HTMLElement | null>(null);
 // Queue panel scroll tracking — queueListEl is the scroll container, queueItemEls

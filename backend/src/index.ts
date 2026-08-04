@@ -208,6 +208,9 @@ const server = createServer(getRequestListener(app.fetch));
 
 initWebSocketServer(server);
 
+// Load persisted device queues from DB so cast state survives backend restart.
+getQueueManager().loadFromDb();
+
 // Auto-advance the queue when a track ends naturally (GENA PLAYING → STOPPED).
 // stop() sets a suppress flag so explicit stops don't trigger advance.
 getEventManager().on("track_ended", (deviceId: string) => {
@@ -219,6 +222,20 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
   // Broadcast via mDNS so the HA integration can auto-discover this instance.
   startMdnsBroadcast(port);
+  // Resume active queues after a short delay so SSDP discovery has time to
+  // populate the device cache — resumeActive() needs the device to be known.
+  // Best-effort: if the device is offline, the resume silently no-ops.
+  setTimeout(() => {
+    const baseUrl = process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`;
+    const active = getQueueManager().activeDevices();
+    if (active.length === 0) return;
+    console.log(`[queue] resuming ${active.length} active device queue(s) after restart`);
+    for (const { deviceId } of active) {
+      getQueueManager().resumeActive(deviceId, baseUrl).catch((e) => {
+        console.warn(`[queue] resume failed for ${deviceId}:`, e?.message || e);
+      });
+    }
+  }, 8000);
 });
 
 // Clean shutdown: stop mDNS so the service record disappears promptly.
