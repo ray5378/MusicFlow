@@ -13,6 +13,7 @@ import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
+import { refreshDevices } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
@@ -178,6 +179,16 @@ setInterval(async () => {
     console.error("[ARTIST-SCRAPE] error:", e.message);
   }
 }, AUTO_SYNC_INTERVAL);
+
+// ==================== DLNA background discovery ====================
+// Keep the device cache warm so the cast dialog can show devices instantly
+// without making the user wait for a fresh SSDP sweep every time. Runs once
+// shortly after boot (give the network stack a moment) then every 5 min.
+const DLNA_SCAN_INTERVAL = 5 * 60 * 1000;
+setTimeout(() => {
+  refreshDevices().catch(() => {});
+  setInterval(() => { refreshDevices().catch(() => {}); }, DLNA_SCAN_INTERVAL);
+}, 8000);
 
 const port = parseInt(process.env.PORT || "46400", 10);
 serve({ fetch: app.fetch, port }, () => {

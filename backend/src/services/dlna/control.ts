@@ -205,9 +205,13 @@ export interface DeviceStatus {
 }
 
 // Query current transport state + position + volume via SOAP.
+// Returns a default STOPPED status when the device is not in cache (e.g.
+// right after a server restart, before background discovery repopulates it)
+// instead of throwing — the frontend polls this every few seconds and a 500
+// would spam the logs and break the cast UI.
 export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const device = getDevice(deviceId);
-  if (!device?.avTransportUrl) throw new Error("设备未找到");
+  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0 };
   const state = { state: "STOPPED", position: 0, duration: 0, volume: 0 };
 
   // GetTransportInfo — state.

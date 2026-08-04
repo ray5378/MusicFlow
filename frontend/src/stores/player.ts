@@ -41,6 +41,18 @@ export const usePlayerStore = defineStore("player", () => {
   const currentLyricIndex = ref(-1);
   let howl: Howl | null = null;
 
+  // ==================== DLNA cast mode ====================
+  // When castDeviceId is set, all transport controls (play/pause/next/prev/
+  // seek/volume) are proxied to the DLNA renderer via HTTP instead of driving
+  // the local Howl. The local player is paused so only the device produces
+  // sound. A poller syncs progress from the device and auto-advances the queue
+  // when the device finishes a track.
+  const castDeviceId = ref("");
+  const castDeviceName = ref("");
+  let castPollTimer: ReturnType<typeof setInterval> | null = null;
+  let lastCastState = "STOPPED";
+  const castActive = computed(() => !!castDeviceId.value);
+
   const currentSong = computed(() => {
     if (currentIndex.value >= 0 && currentIndex.value < queue.value.length) {
       return queue.value[currentIndex.value];
@@ -79,6 +91,10 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function startPlayback() {
+    // In cast mode, "play this song" means push it to the DLNA device — the
+    // local Howl stays paused. This keeps every entry point (playSong,
+    // playQueue, queue click, prev/next) working without cast-specific forks.
+    if (castActive.value) { castCurrent(); return; }
     if (howl) { howl.unload(); howl = null; }
     const song = currentSong.value;
     if (!song) return;
@@ -127,14 +143,27 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  function togglePlay() { if (!howl) return; if (isPlaying.value) howl.pause(); else howl.play(); }
+  function togglePlay() {
+    if (castActive.value) {
+      const id = castDeviceId.value;
+      if (isPlaying.value) { api.post(`/rest/api/v1/dlna/devices/${id}/pause`).catch(() => {}); isPlaying.value = false; }
+      else { api.post(`/rest/api/v1/dlna/devices/${id}/play`).catch(() => {}); isPlaying.value = true; }
+      return;
+    }
+    if (!howl) return; if (isPlaying.value) howl.pause(); else howl.play();
+  }
 
   function next() {
     if (queue.value.length === 0) return;
     if (playMode.value === "one") { startPlayback(); return; }
     if (currentIndex.value < queue.value.length - 1) currentIndex.value++;
     else if (playMode.value === "all" || playMode.value === "shuffle") currentIndex.value = 0;
-    else { isPlaying.value = false; return; }
+    else {
+      // Reached the end in "order" mode — stop. In cast mode, also stop the
+      // device so it doesn't keep idle-playing the last track.
+      if (castActive.value) { stopCast(); return; }
+      isPlaying.value = false; return;
+    }
     startPlayback();
   }
 
@@ -146,9 +175,20 @@ export const usePlayerStore = defineStore("player", () => {
     startPlayback();
   }
 
-  function seek(time: number) { if (howl) { howl.seek(time); currentTime.value = time; } }
-  function seekPercent(percent: number) { if (howl && duration.value > 0) seek((percent / 100) * duration.value); }
-  function setVolume(v: number) { volume.value = v; localStorage.setItem("volume", String(v)); if (howl) howl.volume(v); }
+  function seek(time: number) {
+    if (castActive.value) {
+      api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/seek`, { seconds: time }).catch(() => {});
+      currentTime.value = time; updateCurrentLyric();
+      return;
+    }
+    if (howl) { howl.seek(time); currentTime.value = time; }
+  }
+  function seekPercent(percent: number) { if (duration.value > 0) seek((percent / 100) * duration.value); }
+  function setVolume(v: number) {
+    volume.value = v; localStorage.setItem("volume", String(v));
+    if (castActive.value) { api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/volume`, { volume: Math.round(v * 100) }).catch(() => {}); return; }
+    if (howl) howl.volume(v);
+  }
   // NetEase-style: order -> repeat one -> repeat all -> shuffle -> order
   function cyclePlayMode() {
     const modes: PlayMode[] = ["order", "one", "all", "shuffle"];
@@ -163,13 +203,82 @@ export const usePlayerStore = defineStore("player", () => {
   function startProgressTimer() { stopProgressTimer(); progressTimer = setInterval(() => { if (howl && isPlaying.value) { currentTime.value = howl.seek() as number || 0; updateCurrentLyric(); } }, 250); }
   function stopProgressTimer() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } }
 
-  function clearQueue() { if (howl) { howl.unload(); howl = null; } stopProgressTimer(); queue.value = []; currentIndex.value = -1; isPlaying.value = false; currentTime.value = 0; duration.value = 0; lyrics.value = []; currentLyricLine.value = ""; currentLyricIndex.value = -1; showPlaylist.value = false; playModeVisible.value = false; }
+  // ==================== DLNA cast control ====================
+
+  // Push the current song to the active DLNA device and report scrobble.
+  async function castCurrent() {
+    const song = currentSong.value;
+    if (!song || !castDeviceId.value) return;
+    try {
+      await api.post("/rest/api/v1/dlna/cast", { songId: song.id, deviceId: castDeviceId.value });
+      isPlaying.value = true;
+      currentTime.value = 0;
+      duration.value = song.duration || 0;
+      lastCastState = "PLAYING";
+      loadLyrics(song.id);
+      api.get(`/rest/scrobble?id=${song.id}&submission=false`).catch(() => {});
+    } catch { isPlaying.value = false; }
+  }
+
+  // Enter cast mode: pause local playback, switch all controls to the device.
+  async function startCast(deviceId: string, deviceName: string) {
+    if (howl) { howl.pause(); }
+    stopProgressTimer();
+    castDeviceId.value = deviceId;
+    castDeviceName.value = deviceName;
+    await castCurrent();
+    startCastPoll();
+  }
+
+  // Exit cast mode: stop the device, resume local control (does not auto-play).
+  async function stopCast() {
+    if (castDeviceId.value) {
+      try { await api.post(`/rest/api/v1/dlna/devices/${castDeviceId.value}/stop`); } catch {}
+    }
+    castDeviceId.value = "";
+    castDeviceName.value = "";
+    stopCastPoll();
+    isPlaying.value = false;
+    currentTime.value = 0;
+    lastCastState = "STOPPED";
+  }
+
+  // Poll the device for progress + state. When the device transitions from
+  // PLAYING to STOPPED on its own, the track ended — advance the queue and
+  // cast the next song automatically (the whole point of casting a playlist).
+  function startCastPoll() {
+    stopCastPoll();
+    castPollTimer = setInterval(async () => {
+      if (!castDeviceId.value) { stopCastPoll(); return; }
+      try {
+        const res = await api.get(`/rest/api/v1/dlna/devices/${castDeviceId.value}/status`);
+        const st = res.data || {};
+        const prevState = lastCastState;
+        lastCastState = st.state || "STOPPED";
+        if (typeof st.position === "number") currentTime.value = st.position;
+        if (typeof st.duration === "number" && st.duration > 0) duration.value = st.duration;
+        isPlaying.value = st.state === "PLAYING";
+        updateCurrentLyric();
+        // Track finished on the device → auto-advance the queue.
+        if (prevState === "PLAYING" && st.state === "STOPPED") { next(); }
+      } catch {}
+    }, 2000);
+  }
+  function stopCastPoll() { if (castPollTimer) { clearInterval(castPollTimer); castPollTimer = null; } }
+
+  function clearQueue() {
+    if (howl) { howl.unload(); howl = null; }
+    stopProgressTimer();
+    if (castDeviceId.value) { stopCast(); }
+    queue.value = []; currentIndex.value = -1; isPlaying.value = false; currentTime.value = 0; duration.value = 0; lyrics.value = []; currentLyricLine.value = ""; currentLyricIndex.value = -1; showPlaylist.value = false; playModeVisible.value = false;
+  }
 
   return {
     queue, currentIndex, isPlaying, volume, playMode, currentTime, duration, showLyrics, showPlaylist,
     playModeVisible, lyrics, currentLyricLine, currentLyricIndex,
-    currentSong, progress,
+    currentSong, progress, castActive, castDeviceName,
     playSong, addToQueue, playQueue, togglePlay, next, prev, seek, seekPercent, setVolume, cyclePlayMode, toggleLyrics, togglePlaylistPanel, togglePlayMode,
     removeFromQueue, clearQueue, getCoverUrl, loadLyrics, updateCurrentLyric,
+    startCast, stopCast,
   };
 });

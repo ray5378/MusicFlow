@@ -72,8 +72,8 @@
           <el-tooltip content="添加到歌单" placement="top">
             <el-button :icon="Plus" circle size="small" @click="openAddToPlaylist" />
           </el-tooltip>
-          <el-tooltip content="DLNA 投屏" placement="top">
-            <el-button :icon="Monitor" circle size="small" @click="openDlnaDialog" :type="dlnaActive ? 'primary' : ''" />
+          <el-tooltip :content="playerStore.castActive ? `投屏中: ${playerStore.castDeviceName}` : 'DLNA 投屏'" placement="top">
+            <el-button :icon="Monitor" circle size="small" @click="openDlnaDialog" :type="playerStore.castActive ? 'primary' : ''" />
           </el-tooltip>
           <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
             <el-button
@@ -99,16 +99,6 @@
         <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :show-tooltip="false" class="volume-slider" />
       </div>
     </footer>
-
-    <!-- ===== DLNA cast status bar ===== -->
-    <div class="dlna-status-bar" v-if="dlnaActive">
-      <span class="dlna-status-label"><el-icon><Monitor /></el-icon> 投屏中:{{ dlnaDeviceName }}</span>
-      <el-button size="small" circle @click="dlnaPlay" :disabled="dlnaState === 'PLAYING'"><PlaybackIcon name="play" :size="14" /></el-button>
-      <el-button size="small" circle @click="dlnaPause" :disabled="dlnaState === 'PAUSED_PLAYBACK' || dlnaState === 'STOPPED'"><PlaybackIcon name="pause" :size="14" /></el-button>
-      <el-button size="small" circle :icon="VideoPause" @click="dlnaStop" />
-      <el-slider :model-value="dlnaVolume" @input="dlnaSetVolume" :show-tooltip="false" class="dlna-volume" size="small" />
-      <el-button size="small" text @click="openDlnaDialog">切换设备</el-button>
-    </div>
 
     <!-- ===== Queue panel ===== -->
     <transition name="slide-right">
@@ -253,12 +243,24 @@
       <div class="dlna-dialog-song" v-if="playerStore.currentSong">
         将「{{ playerStore.currentSong.title }}」投屏到：
       </div>
-      <div class="playlist-list" v-loading="dlnaScanning">
+      <div class="playlist-list">
+        <!-- Local playback: stop casting, sound comes from this device instead -->
+        <div
+          class="playlist-item"
+          :class="{ active: !playerStore.castActive }"
+          @click="castToLocal"
+        >
+          <el-icon class="pl-icon"><Headset /></el-icon>
+          <div class="pl-info">
+            <div class="pl-name">本地播放</div>
+            <div class="pl-meta">在此设备上播放,不投屏</div>
+          </div>
+        </div>
         <div
           v-for="dev in dlnaDevices"
           :key="dev.id"
           class="playlist-item"
-          :class="{ active: dlnaActiveDevice === dev.id }"
+          :class="{ active: playerStore.castActive }"
           @click="castTo(dev)"
         >
           <el-icon class="pl-icon"><Monitor /></el-icon>
@@ -269,12 +271,12 @@
           <el-icon v-if="dlnaCastingDevice === dev.id" class="el-icon is-loading"><Loading /></el-icon>
         </div>
         <div v-if="dlnaDevices.length === 0 && !dlnaScanning" class="empty-tip">
-          未发现 DLNA 设备,请确认设备在同一局域网且已开启 DLNA
+          未发现 DLNA 设备,正在后台扫描,请稍后再试或确认设备在同一局域网且已开启 DLNA
         </div>
       </div>
       <div class="create-playlist-row">
         <el-button :loading="dlnaScanning" @click="scanDlnaDevices"><el-icon><Refresh /></el-icon>重新扫描</el-button>
-        <span v-if="dlnaActive" class="dlna-current-tip">当前: {{ dlnaDeviceName }}</span>
+        <span v-if="playerStore.castActive" class="dlna-current-tip">当前: {{ playerStore.castDeviceName }}</span>
       </div>
     </el-dialog>
   </div>
@@ -286,7 +288,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, VideoPause } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -410,22 +412,25 @@ async function toggleCurrentFavorite() {
 }
 
 // ===== DLNA cast =====
+// The backend keeps a warm device cache (refreshed every 5 min in the
+// background), so opening the dialog shows devices instantly from the cache.
+// A silent re-scan is fired in the background to pick up newly powered-on
+// devices without blocking the UI.
 const showDlnaDialog = ref(false);
 const dlnaDevices = ref<any[]>([]);
 const dlnaScanning = ref(false);
 const dlnaCastingDevice = ref("");
-const dlnaActiveDevice = ref("");
-const dlnaDeviceName = ref("");
-const dlnaState = ref("STOPPED");
-const dlnaVolume = ref(50);
-let dlnaPollTimer: ReturnType<typeof setInterval> | null = null;
-
-const dlnaActive = computed(() => !!dlnaActiveDevice.value);
 
 async function openDlnaDialog() {
   if (!playerStore.currentSong) { ElMessage.warning("请先选择一首歌曲"); return; }
   showDlnaDialog.value = true;
-  await scanDlnaDevices();
+  // Instant: pull whatever the backend already has cached.
+  try {
+    const res = await api.get("/rest/api/v1/dlna/devices");
+    dlnaDevices.value = res.data.devices || [];
+  } catch { dlnaDevices.value = []; }
+  // Silent background refresh — does not block, just updates the list when done.
+  scanDlnaDevices();
 }
 
 async function scanDlnaDevices() {
@@ -434,65 +439,32 @@ async function scanDlnaDevices() {
     const res = await api.post("/rest/api/v1/dlna/scan");
     dlnaDevices.value = res.data.devices || [];
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "扫描失败");
-    dlnaDevices.value = [];
+    // Don't toast on the silent background refresh — only on explicit retry
+    // failures where the list is already empty.
+    if (dlnaDevices.value.length === 0) ElMessage.error(e.response?.data?.error || "扫描失败");
   } finally { dlnaScanning.value = false; }
 }
 
+// Cast to a DLNA device — hands all transport control over to the player
+// store's cast mode (play/pause/next/prev/seek/volume all proxy to the device).
 async function castTo(dev: any) {
-  const song = playerStore.currentSong;
-  if (!song) { ElMessage.warning("请先选择一首歌曲"); return; }
+  if (!playerStore.currentSong) { ElMessage.warning("请先选择一首歌曲"); return; }
   dlnaCastingDevice.value = dev.id;
   try {
-    await api.post("/rest/api/v1/dlna/cast", { songId: song.id, deviceId: dev.id });
-    dlnaActiveDevice.value = dev.id;
-    dlnaDeviceName.value = dev.name;
+    await playerStore.startCast(dev.id, dev.name);
     showDlnaDialog.value = false;
     ElMessage.success(`已投屏到「${dev.name}」`);
-    startDlnaPoll();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "投屏失败");
   } finally { dlnaCastingDevice.value = ""; }
 }
 
-async function dlnaPlay() {
-  if (!dlnaActiveDevice.value) return;
-  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/play`); } catch {}
-}
-async function dlnaPause() {
-  if (!dlnaActiveDevice.value) return;
-  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/pause`); } catch {}
-}
-async function dlnaStop() {
-  if (!dlnaActiveDevice.value) return;
-  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/stop`); } catch {}
-  stopDlnaPoll();
-  dlnaActiveDevice.value = "";
-  dlnaDeviceName.value = "";
-  dlnaState.value = "STOPPED";
-}
-async function dlnaSetVolume(v: number) {
-  if (!dlnaActiveDevice.value) return;
-  try { await api.post(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/volume`, { volume: v }); } catch {}
-}
-
-function startDlnaPoll() {
-  stopDlnaPoll();
-  dlnaPollTimer = setInterval(async () => {
-    if (!dlnaActiveDevice.value) { stopDlnaPoll(); return; }
-    try {
-      const res = await api.get(`/rest/api/v1/dlna/devices/${dlnaActiveDevice.value}/status`);
-      dlnaState.value = res.data.state || "STOPPED";
-      if (typeof res.data.volume === "number") dlnaVolume.value = res.data.volume;
-      if (res.data.state === "STOPPED" && dlnaState.value === "STOPPED") {
-        // Device stopped on its own (track ended) — keep device active so user can recast.
-      }
-    } catch {}
-  }, 3000);
-}
-
-function stopDlnaPoll() {
-  if (dlnaPollTimer) { clearInterval(dlnaPollTimer); dlnaPollTimer = null; }
+// Switch back to local playback: stop the device, sound resumes on this machine.
+async function castToLocal() {
+  if (!playerStore.castActive) { showDlnaDialog.value = false; return; }
+  await playerStore.stopCast();
+  showDlnaDialog.value = false;
+  ElMessage.success("已切换到本地播放");
 }
 
 // Load favorites + preload homepage data once on mount (refresh-page scenario)
@@ -666,14 +638,6 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
 .empty-tip { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
 
 /* ===== DLNA cast ===== */
-.dlna-status-bar {
-  position: fixed; bottom: var(--player-height); left: var(--sidebar-width); right: 0;
-  height: 36px; background: #f0f7ff; border-top: 1px solid #d6e8ff;
-  display: flex; align-items: center; gap: 8px; padding: 0 20px; z-index: 99;
-  font-size: 13px; color: #409eff;
-  .dlna-status-label { display: flex; align-items: center; gap: 4px; font-weight: 500; margin-right: auto; }
-  .dlna-volume { width: 80px; }
-}
 .dlna-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
 .dlna-current-tip { color: #999; font-size: 12px; margin-left: auto; }
 </style>
