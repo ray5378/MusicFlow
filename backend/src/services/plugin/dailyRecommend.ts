@@ -3,7 +3,16 @@
 // Every day at the configured hour, pick ONE candidate from the configured pool
 // using a date-based seed (so the same day always picks the same one, and the
 // pick rotates across days), import it via the existing playlist importer, and
-// persist it as a "每日推荐 YYYY-MM-DD" playlist.
+// persist it as a "今日推荐" playlist.
+//
+// Naming / retention model (only TWO playlists ever exist):
+//   - "今日推荐"  — today's playlist
+//   - "昨日推荐"  — yesterday's playlist
+// On each generation:
+//   1. If "今日推荐" was already created today → skip (idempotent).
+//   2. Delete the old "昨日推荐" (it's now 2 days old).
+//   3. Rename "今日推荐" → "昨日推荐".
+//   4. Generate a new "今日推荐".
 //
 // Crucially, we reuse `rebuildPlaylistEntries` from playlistSync — that's the
 // routine that already knows how to deal with the local library not matching
@@ -36,14 +45,16 @@ export interface DailyRecommendResult {
   skipped: boolean; // true if today's playlist already existed
 }
 
-// Mark used to recognize daily playlists so we can clean them up later without
-// touching user-created ones. Stored in the playlists.comment field to avoid a
-// schema migration.
+// Mark stored in playlists.comment so we can find daily-recommend playlists
+// without touching user-created ones that happen to share the name.
 export const DAILY_TAG = "[daily-recommend]";
 export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 
+// Fixed playlist names.
+const NAME_TODAY = "今日推荐";
+const NAME_YESTERDAY = "昨日推荐";
+
 function todayStr(d = new Date()): string {
-  // Use local date (server TZ) — daily rotation is a local-time concept.
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
@@ -57,8 +68,7 @@ function dayOfYear(d: Date): number {
   return Math.floor((d.getTime() - start.getTime()) / 86400000);
 }
 
-// Read & parse the candidate pool from settings. Returns [] on any error so a
-// corrupted config can't crash the scheduler.
+// Read & parse the candidate pool from settings. Returns [] on any error.
 export function loadCandidates(): DailyCandidate[] {
   const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_candidates") as any;
   if (!row?.value) return [];
@@ -96,34 +106,29 @@ export function pickDailyCandidate(date = new Date()): DailyCandidate | null {
   return pool[seed % pool.length];
 }
 
-// Find a daily playlist for a given date by its naming convention.
-function findDailyPlaylist(dateStr: string, tag: string = DAILY_TAG): any | null {
-  const name = `每日推荐 ${dateStr}`;
+// Find a playlist by its exact name + comment tag.
+function findPlaylistByName(name: string, tag: string): any | null {
   const rows = sqlite.prepare("SELECT * FROM playlists WHERE name = ? AND comment LIKE ?").all(name, `%${tag}%`) as any[];
   return rows[0] || null;
 }
 
-// Delete playlists whose name matches "每日推荐 YYYY-MM-DD" and whose date is
-// older than `retentionDays`. We tag daily playlists in `comment` so this can
-// never delete a user-created playlist that happens to share the prefix.
-export function purgeOldDailyPlaylists(retentionDays: number): number {
-  if (retentionDays <= 0) return 0;
-  const cutoff = new Date(Date.now() - retentionDays * 86400000);
-  const cutoffStr = todayStr(cutoff);
-  const all = sqlite.prepare("SELECT id, name, comment FROM playlists WHERE comment LIKE ? OR comment LIKE ?")
-    .all(`%${DAILY_TAG}%`, `%${DAILY_TAG_LOCAL}%`) as any[];
-  let deleted = 0;
-  for (const p of all) {
-    const m = p.name?.match(/每日推荐\s+(\d{4}-\d{2}-\d{2})/);
-    if (!m) continue;
-    if (m[1] < cutoffStr) {
-      sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(p.id);
-      clearPlaylistCoverCache(p.id);
-      sqlite.prepare("DELETE FROM playlists WHERE id = ?").run(p.id);
-      deleted++;
-    }
-  }
-  return deleted;
+// Check if a playlist's created_at date matches today's date string.
+function isCreatedToday(playlist: any, dateStr: string): boolean {
+  const created = playlist.created_at || "";
+  return created.startsWith(dateStr);
+}
+
+// Delete a playlist and all its entries + cover cache.
+function deletePlaylist(playlistId: string): void {
+  sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
+  clearPlaylistCoverCache(playlistId);
+  sqlite.prepare("DELETE FROM playlists WHERE id = ?").run(playlistId);
+}
+
+// Rename a playlist (just the name field; keep everything else).
+function renamePlaylist(playlistId: string, newName: string): void {
+  sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
+    .run(newName, new Date().toISOString(), playlistId);
 }
 
 // Pick a system owner for auto-generated playlists. We use the first admin so
@@ -133,18 +138,23 @@ function pickSystemOwnerId(): string {
   return admin?.id || "";
 }
 
-// Build today's daily playlist. Idempotent: if today's playlist already exists,
-// returns immediately with skipped=true. Throws on fetch errors.
+// Build today's daily playlist.
+//
+// Idempotent: if "今日推荐" was already created today, returns skipped=true.
+// Otherwise: delete old "昨日推荐" → rename "今日推荐" to "昨日推荐" → create new "今日推荐".
+// Throws on fetch errors (caller should catch).
 export async function generateDailyPlaylist(date = new Date()): Promise<DailyRecommendResult> {
   const dateStr = todayStr(date);
-  const existing = findDailyPlaylist(dateStr, DAILY_TAG);
-  if (existing) {
+
+  // Step 1: idempotency check — if "今日推荐" exists and was created today, skip.
+  const todayPl = findPlaylistByName(NAME_TODAY, DAILY_TAG);
+  if (todayPl && isCreatedToday(todayPl, dateStr)) {
     return {
       date: dateStr,
-      playlistId: existing.id,
-      name: existing.name,
-      picked: { platform: existing.source_platform || "", url: existing.source_url || "" },
-      platform: existing.source_platform || "",
+      playlistId: todayPl.id,
+      name: NAME_TODAY,
+      picked: { platform: todayPl.source_platform || "", url: todayPl.source_url || "" },
+      platform: todayPl.source_platform || "",
       total: 0, matched: 0, unmatched: 0, wishAdded: 0,
       skipped: true,
     };
@@ -153,11 +163,24 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   const picked = pickDailyCandidate(date);
   if (!picked) throw new Error("每日推荐候选池为空,请在设置中配置 daily_recommend_candidates");
 
+  // Step 2: fetch the remote playlist FIRST (before any DB mutation), so that
+  // if the network fails we don't end up with a missing "今日推荐" and a lost
+  // "昨日推荐".
   const imported = await importPlaylistFromUrl(picked.url);
-  const playlistId = `pl-${Date.now()}`;
-  const name = `每日推荐 ${dateStr}`;
 
-  // Cache the remote cover locally (best-effort; falls back to collage later).
+  // Step 3: delete old "昨日推荐" (it's now 2 days old).
+  const oldYesterday = findPlaylistByName(NAME_YESTERDAY, DAILY_TAG);
+  if (oldYesterday) {
+    deletePlaylist(oldYesterday.id);
+  }
+
+  // Step 4: rename existing "今日推荐" → "昨日推荐" (it becomes yesterday's).
+  if (todayPl) {
+    renamePlaylist(todayPl.id, NAME_YESTERDAY);
+  }
+
+  // Step 5: create new "今日推荐".
+  const playlistId = `pl-${Date.now()}`;
   let coverRef: string | undefined;
   if (imported.coverUrl) {
     const cached = await cacheRemoteCover(imported.coverUrl, `pl-${playlistId}`);
@@ -169,25 +192,24 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
     VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(
-    playlistId, name, ownerId,
-    `${DAILY_TAG} 来自「${picked.name || picked.url}」`,
+    playlistId, NAME_TODAY, ownerId,
+    `${DAILY_TAG} ${dateStr} 来自「${picked.name || picked.url}」`,
     coverRef || null,
     picked.url, imported.platform, picked.url,
     new Date().toISOString(), new Date().toISOString()
   );
 
   // Reuse the exact same matching/stub/wish pipeline as a manual import.
-  // Matched -> playable=1 + songId; unmatched -> playable=0 stub + wish entry.
   const result = await rebuildPlaylistEntries(playlistId, imported, {
     userId: ownerId,
     autoWish: true,
-    notes: `来自每日推荐「${name}」`,
+    notes: `来自今日推荐「${picked.name || picked.url}」`,
   });
 
   return {
     date: dateStr,
     playlistId,
-    name,
+    name: NAME_TODAY,
     picked,
     platform: imported.platform,
     total: result.total,
@@ -198,21 +220,25 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   };
 }
 
-// Top-level entry for the scheduler: respects the master switch, runs the
-// generator, purges old daily playlists, and never throws (logs errors instead).
+// Top-level entry for the scheduler: respects the master switch, never throws.
 export async function runDailyRecommendJob(): Promise<DailyRecommendResult | null> {
   if (!getSettingBool("daily_recommend_enabled", true)) return null;
   try {
-    const retention = parseInt(getSetting("daily_recommend_retention", "7"), 10) || 7;
     const result = await generateDailyPlaylist();
     if (!result.skipped) {
       console.log(`[DAILY-RECOMMEND] ${result.date}: picked ${result.picked.platform} "${result.picked.name || result.picked.url}" -> ${result.matched}/${result.total} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes`);
     }
-    const purged = purgeOldDailyPlaylists(retention);
-    if (purged > 0) console.log(`[DAILY-RECOMMEND] purged ${purged} old daily playlists (retention ${retention}d)`);
     return result;
   } catch (e: any) {
     console.error("[DAILY-RECOMMEND] error:", e.message || e);
     return null;
   }
+}
+
+// --- Backward-compat: purgeOldDailyPlaylists is kept as a no-op stub so the
+// --- admin API (which still calls it) doesn't break. The rename mechanism
+// --- above already guarantees only "今日推荐" + "昨日推荐" exist, so there's
+// --- nothing to purge by date anymore.
+export function purgeOldDailyPlaylists(_retentionDays: number): number {
+  return 0;
 }
