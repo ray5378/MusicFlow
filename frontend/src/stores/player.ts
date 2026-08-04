@@ -615,16 +615,17 @@ export const usePlayerStore = defineStore("player", () => {
 
   // Switch the player bar + queue panel to a different peer.
   //   - local peer: leave cast mode, restore the local queue (Howl stays as-is)
-  //   - dlna peer:  enter cast mode for that device, load its backend queue,
-  //                 pause local Howl to avoid double audio
+  //   - dlna peer:  rebind the UI to that device's backend queue; the local
+  //                 Howl keeps playing on its own (切换只换控制目标,不停本机)
   async function switchPeer(peerId: string): Promise<void> {
     if (peerId === currentPeerId.value) return;
     const isDlna = peerId.startsWith("dlna:");
     if (isDlna) {
       const deviceId = peerId.slice(5);
-      // Pause local Howl so this device doesn't double-play while we view/control
-      // the DLNA renderer. The local queue is preserved; switching back restores it.
-      if (howl) howl.pause();
+      // 切换播放器只改变 UI 控制目标,绝不动本机 Howl —— 本机继续按原状态
+      // 播放出声。这里只停掉本机进度计时器,因为切到 DLNA 后 currentTime/
+      // duration 由 castPoll 负责更新(显示 DLNA 的进度);本机 Howl 仍在后台
+      // 播放,只是它的进度不再写 UI。切回本机时再从 Howl 重新同步进度。
       stopProgressTimer();
       // Resolve the device's friendly name for the player bar label.
       let name = "DLNA 设备";
@@ -653,6 +654,16 @@ export const usePlayerStore = defineStore("player", () => {
       // Restore the local queue from the backend so a freshly reopened tab or
       // a switch back from DLNA shows the user's last local queue.
       await restoreLocalPeer();
+      // 切回本机时,本机 Howl 可能一直在后台播放(切换到 DLNA 时我们没有
+      // pause 它)。从 Howl 重新同步 isPlaying/currentTime/duration 到 UI ——
+      // 因为切到 DLNA 期间这几个值被 castPoll 用 DLNA 的状态覆盖了。如果
+      // Howl 正在播,重启进度计时器让进度条继续走。
+      if (howl) {
+        isPlaying.value = howl.playing();
+        duration.value = howl.duration() || 0;
+        currentTime.value = (howl.seek() as number) || 0;
+        if (howl.playing()) startProgressTimer();
+      }
     }
   }
 
