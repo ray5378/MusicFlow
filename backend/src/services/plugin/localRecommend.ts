@@ -264,15 +264,25 @@ function pickRandomSample(date: Date): string[] {
 
 // Pick `limit` random song ids from the ENTIRE local library (playable only),
 // deterministically seeded by date so the same day yields the same set.
-// Uses a date-seeded offset + stride to avoid loading the whole library into
-// memory when it's large (e.g. 19000+ songs). Falls back to ORDER BY RANDOM()
-// when the library is smaller than `limit`.
+//
+// Resource strategy (O(limit) — never loads the whole library):
+//   1. One COUNT(*) + one MAX(rowid) to know the rowid range.
+//   2. Generate `limit * 2` random rowids in [1, maxRowid] with the date-seeded
+//      PRNG (over-sampling absorbs rowid gaps from deletes).
+//   3. Fetch by `rowid IN (...)` — uses the rowid primary index, so each batch
+//      is ~O(log N) per row, total O(limit log N). No full-table scan.
+//   4. If we still don't have `limit` hits (rare, very sparse table), top up
+//      with one more over-sampled batch.
+// This avoids both `ORDER BY RANDOM()` (full scan + sort) and loading all ids
+// into memory.
 export function pickRandomLibrarySongs(date: Date, limit: number): string[] {
-  const total = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number };
-  if (!total.n) return [];
+  const meta = sqlite.prepare("SELECT COUNT(*) AS n, MAX(rowid) AS maxR FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number; maxR: number | null };
+  if (!meta.n || !meta.maxR) return [];
   const rng = mulberry32(dayOfYear(date) * 774631 + 7);
-  if (total.n <= limit) {
-    // Library smaller than limit — return everything, shuffled.
+  const maxRowid = meta.maxR;
+
+  // Small library: just return everything shuffled (cheap enough).
+  if (meta.n <= limit) {
     const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").all() as { id: string }[];
     for (let i = rows.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
@@ -280,33 +290,40 @@ export function pickRandomLibrarySongs(date: Date, limit: number): string[] {
     }
     return rows.map(r => r.id);
   }
-  // Pick `limit` distinct indices spread across the library, deterministically
-  // offset by the date seed so each day lands on a different slice.
-  const stride = total.n / limit;
-  const startOffset = Math.floor(rng() * stride);
-  const indices = new Set<number>();
-  for (let i = 0; i < limit; i++) {
-    const base = Math.floor(startOffset + i * stride);
-    // Add a small deterministic jitter within the stride window so it doesn't
-    // always pick the exact k-th song.
-    const jitter = Math.floor(rng() * Math.max(1, Math.floor(stride)));
-    indices.add(Math.min(total.n - 1, base + jitter));
+
+  const ids = new Set<string>();
+  let attempt = 0;
+  while (ids.size < limit && attempt < 4) {
+    attempt++;
+    // Over-sample 2x to absorb rowid gaps from deletes.
+    const want = (limit - ids.size) * 2;
+    const rowids = new Set<number>();
+    for (let i = 0; i < want; i++) {
+      // random rowid in [1, maxRowid]
+      rowids.add(1 + Math.floor(rng() * maxRowid));
+    }
+    if (rowids.size === 0) break;
+    const idArr = Array.from(rowids);
+    for (let i = 0; i < idArr.length; i += 500) {
+      const batch = idArr.slice(i, i + 500);
+      const placeholders = batch.map(() => "?").join(",");
+      const rows = sqlite.prepare(
+        `SELECT id FROM songs WHERE rowid IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL`
+      ).all(...batch) as { id: string }[];
+      for (const r of rows) {
+        if (ids.size < limit) ids.add(r.id);
+      }
+      if (ids.size >= limit) break;
+    }
   }
-  // Fetch by rowid for efficiency (rowid ~ 1..N for WITHOUT ROWID-less tables).
-  const ids: string[] = [];
-  const idArr = Array.from(indices);
-  for (let i = 0; i < idArr.length; i += 500) {
-    const batch = idArr.slice(i, i + 500);
-    const placeholders = batch.map(() => "?").join(",");
-    const rows = sqlite.prepare(`SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND rowid IN (${placeholders})`).all(...batch) as { id: string }[];
-    for (const r of rows) ids.push(r.id);
-  }
-  // Shuffle the result so the order isn't a boring ascending sequence.
-  for (let i = ids.length - 1; i > 0; i--) {
+
+  // Deterministic shuffle of the final set.
+  const out = Array.from(ids);
+  for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
-    [ids[i], ids[j]] = [ids[j], ids[i]];
+    [out[i], out[j]] = [out[j], out[i]];
   }
-  return ids;
+  return out;
 }
 
 function getSettingBool(key: string, def: boolean): boolean {
