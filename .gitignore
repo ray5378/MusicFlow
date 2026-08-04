@@ -1,35 +1,14 @@
-# Dependencies
+# dependencies
 node_modules/
-
-# Build output
 dist/
-build/
 
-# Database & data (contains credentials, passwords, WebDAV config)
+# runtime data (DB, cover cache) - never commit
 backend/data/
+data/
 *.db
 *.db-wal
 *.db-shm
-backend/data.db
 
-# Env files
+# secrets
 .env
-.env.*
-!.env.example
-
-# Logs
-*.log
-logs/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# Coverage / misc
-coverage/
-.tmp/
+backend/.env

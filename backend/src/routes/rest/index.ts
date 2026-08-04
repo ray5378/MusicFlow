@@ -12,7 +12,7 @@ export const restRoutes = new Hono();
 // OpenSubsonic clients (libopensonic/MA) POST form-encoded params with .view suffixes.
 // Parse the form body once and merge into query params via c.set(), mirroring
 // Navidrome's postFormToQueryParams middleware. getParam() reads merged values.
-const paramKey = "mergedParams";
+const paramKey = "mergedParams" as const;
 restRoutes.use("*", async (c, next) => {
   try {
     const merged: Record<string, any> = {};
@@ -528,14 +528,14 @@ restRoutes.get("/getPlaylist", (c) => {
   // the web UI uses /rest/api/v1/playlists/:id/tracks to see the full list.
   const playableEntries = entries.filter(e => e.playable && e.songId);
   const entryChildren = playableEntries.map(e => {
-    const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
+    const song = db.select().from(songs).where(eq(songs.id, e.songId!)).get();
     return song ? { ...songToChild(song, starredSet), playable: true } : null;
   }).filter(Boolean);
   return c.json(ok({ playlist: {
     id: playlist.id, name: playlist.name, owner: playlist.ownerId, public: !!playlist.isPublic,
     created: playlist.createdAt || new Date().toISOString(), changed: playlist.updatedAt || new Date().toISOString(),
     songCount: playableEntries.length, duration: playableEntries.reduce((sum, e) => {
-      const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
+      const song = db.select().from(songs).where(eq(songs.id, e.songId!)).get();
       return sum + (song?.duration || 0);
     }, 0),
     coverArt: `pl-${playlist.id}`, comment: playlist.comment || "",

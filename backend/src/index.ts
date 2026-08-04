@@ -2,24 +2,39 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import path from "path";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { authRoutes } from "./routes/auth/index.js";
 import { restRoutes } from "./routes/rest/index.js";
 import { apiRoutes } from "./routes/api/index.js";
 import { navidromeRoutes } from "./routes/navidrome/index.js";
-import { initDatabase } from "./db/index.js";
+import { initDatabase, cleanupPlayHistory } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
+import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
 const app = new Hono();
 
 app.use("*", logger());
-app.use("*", cors({ origin: "*" }));
+
+// Same-origin requests (the frontend proxies /api and /rest through Vite) never
+// trigger CORS, so the default allowlist only needs to cover localhost. Direct
+// cross-origin callers must be whitelisted via CORS_ORIGINS (comma separated),
+// or set CORS_ORIGINS=* to allow all origins (previous behavior).
+const allowedOrigins = getCorsOrigins();
+app.use("*", cors({
+  origin: (origin) => {
+    if (!origin) return origin;
+    if (allowedOrigins.includes("*")) return origin;
+    return allowedOrigins.includes(origin) ? origin : undefined;
+  },
+}));
 
 app.route("/rest", authRoutes);
-app.get("/rest/ping", (c) => c.json({ "subsonic-response": { status: "ok", version: "1.16.1", serverVersion: "1.0.0", openSubsonic: true, type: "MusicFree" } }));
+app.get("/rest/ping", (c) => c.json({ "subsonic-response": { status: "ok", version: "1.16.1", serverVersion: "1.0.0", openSubsonic: true, type: "MusicFlow" } }));
 
 app.use("/rest/*", async (c, next) => {
   // Cover art is loaded via <img> tags which cannot send auth headers — make it public
@@ -33,11 +48,30 @@ app.use("/api/*", authMiddleware);
 app.route("/api", navidromeRoutes);
 app.get("/ping", (c) => c.json({ status: "ok" }));
 
+// ==================== Static frontend (production build) ====================
+// In production the built frontend lives in ./public next to the backend;
+// API paths below are already registered, so the SPA fallback only serves
+// index.html for unknown non-API routes.
+const staticDir = process.env.STATIC_DIR ? path.resolve(process.env.STATIC_DIR) : path.resolve(process.cwd(), "public");
+app.use("/assets/*", async (c, next) => {
+  await next();
+  c.header("Cache-Control", "public, max-age=31536000, immutable");
+});
+app.get("/assets/*", serveStatic({ root: staticDir }));
+app.get("*", async (c, next) => {
+  if (c.req.path.startsWith("/rest") || c.req.path.startsWith("/api") || c.req.path === "/ping") return next();
+  return serveStatic({ path: "index.html", root: staticDir })(c, next);
+});
+
 initDatabase();
+
+// Retention cleanup for play history (play_history grows with every play).
+cleanupPlayHistory(getPlayHistoryRetentionDays());
 
 // Auto-sync imported playlists with syncEnabled=true every 6 hours
 const AUTO_SYNC_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 setInterval(async () => {
+  cleanupPlayHistory(getPlayHistoryRetentionDays());
   try {
     const result = await syncAllEnabledPlaylists();
     if (result.synced > 0 || result.errors.length > 0) {
@@ -62,7 +96,7 @@ setInterval(async () => {
   }
 }, AUTO_SYNC_INTERVAL);
 
-const port = 3002;
+const port = parseInt(process.env.PORT || "46400", 10);
 serve({ fetch: app.fetch, port }, () => {
   console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
 });

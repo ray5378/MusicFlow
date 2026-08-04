@@ -339,8 +339,8 @@ async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSi
     let bitRate = Math.round((format.bitrate || 0) / 1000);
     let genre = common.genre?.[0] || "";
     let year = common.year || 0;
-    let track = common.track?.[0] || 0;
-    let discNumber = common.disk?.[0] || 1;
+    let track = common.track?.no || 0;
+    let discNumber = common.disk?.no || 1;
 
     // For MP3: estimate duration from file size and bitrate if not parsed
     if (ext === ".mp3" && duration === 0 && bitRate > 0) {
@@ -413,7 +413,7 @@ async function extractMetadataLocal(filePath: string): Promise<MusicMetadata> {
       title: common.title || nameWithoutExt, artist: common.artist || "Unknown Artist",
       album: common.album || "Unknown Album", duration, bitRate,
       genre: common.genre?.[0] || "", year: common.year || 0,
-      track: common.track?.[0] || 0, discNumber: common.disk?.[0] || 1,
+      track: common.track?.no || 0, discNumber: common.disk?.no || 1,
       contentType: mimeFromExt(ext), suffix: ext.replace(".", ""), size: stat.size,
       picture: extractPicture(common),
     };

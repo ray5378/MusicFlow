@@ -11,13 +11,48 @@
           </el-descriptions>
         </div>
       </div>
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">修改用户名</div><div class="desc">修改后使用新用户名登录</div></div>
+        <div class="setting-value">
+          <el-button type="primary" plain @click="showNameDialog = true">修改用户名</el-button>
+        </div>
+      </div>
     </el-card>
+
+    <el-dialog v-model="showNameDialog" title="修改用户名" width="400px">
+      <el-form label-width="80px">
+        <el-form-item label="新用户名"><el-input v-model="newName" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showNameDialog = false">取消</el-button>
+        <el-button type="primary" @click="changeUsername">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
+import { ref } from "vue";
+import { ElMessage } from "element-plus";
+import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 const authStore = useAuthStore();
+
+const showNameDialog = ref(false);
+const newName = ref("");
+
+async function changeUsername() {
+  const name = newName.value.trim();
+  if (!name) { ElMessage.warning("请输入新用户名"); return; }
+  try {
+    const res = await api.put(`/rest/api/v1/users/${authStore.userId}/username`, { username: name });
+    authStore.setUsername(res.data.username);
+    showNameDialog.value = false;
+    ElMessage.success("用户名已修改");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "修改失败");
+  }
+}
 </script>
 
 <style lang="scss" scoped>

@@ -5,8 +5,7 @@ import { db } from "../db/index.js";
 import { users } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { decryptPassword } from "../db/index.js";
-
-const JWT_SECRET = process.env.JWT_SECRET || "music-free-secret-key";
+import { JWT_SECRET } from "../utils/env.js";
 
 export interface AuthUser {
   id: string;
@@ -17,6 +16,7 @@ export interface AuthUser {
 declare module "hono" {
   interface ContextVariableMap {
     user: AuthUser;
+    mergedParams?: Record<string, any>;
   }
 }
 

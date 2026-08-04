@@ -20,13 +20,12 @@ authRoutes.post("/api/v1/auth/login", async (c) => {
   const passwordHash = md5Hash(password + user.subsonicSalt);
   if (passwordHash !== user.password) return c.json({ error: "Invalid credentials" }, 401);
 
-  // Ensure pass_enc is stored (needed for OpenSubsonic token auth)
-  if (!user.passEnc) {
-    db.update(users).set({ passEnc: encryptPassword(password), updatedAt: new Date().toISOString() }).where(eq(users.id, user.id)).run();
-  }
+  // Always re-encrypt pass_enc with the current key so that rotating
+  // JWT_SECRET (which derives the AES key) self-heals on next login.
+  db.update(users).set({ passEnc: encryptPassword(password), updatedAt: new Date().toISOString() }).where(eq(users.id, user.id)).run();
 
   const token = generateToken(user.id, user.username, !!user.isAdmin);
-  return c.json({ id: user.id, username: user.username, isAdmin: !!user.isAdmin, subsonicSalt: user.subsonicSalt, subsonicToken: md5Hash(password + user.subsonicSalt), token });
+  return c.json({ id: user.id, username: user.username, isAdmin: !!user.isAdmin, subsonicSalt: user.subsonicSalt, subsonicToken: md5Hash(password + user.subsonicSalt), mustChangePassword: !!user.mustChangePassword, token });
 });
 
 authRoutes.post("/auth/login", async (c) => {
@@ -36,9 +35,7 @@ authRoutes.post("/auth/login", async (c) => {
   if (!user || !user.isActive) return c.json({ error: "Invalid credentials" }, 401);
   const passwordHash = md5Hash(password + user.subsonicSalt);
   if (passwordHash !== user.password) return c.json({ error: "Invalid credentials" }, 401);
-  if (!user.passEnc) {
-    db.update(users).set({ passEnc: encryptPassword(password), updatedAt: new Date().toISOString() }).where(eq(users.id, user.id)).run();
-  }
+  db.update(users).set({ passEnc: encryptPassword(password), updatedAt: new Date().toISOString() }).where(eq(users.id, user.id)).run();
   const token = generateToken(user.id, user.username, !!user.isAdmin);
-  return c.json({ id: user.id, username: user.username, isAdmin: !!user.isAdmin, subsonicSalt: user.subsonicSalt, subsonicToken: md5Hash(password + user.subsonicSalt), token });
+  return c.json({ id: user.id, username: user.username, isAdmin: !!user.isAdmin, subsonicSalt: user.subsonicSalt, subsonicToken: md5Hash(password + user.subsonicSalt), mustChangePassword: !!user.mustChangePassword, token });
 });

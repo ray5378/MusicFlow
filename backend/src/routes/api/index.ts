@@ -28,16 +28,51 @@ apiRoutes.post("/v1/users", adminMiddleware, async (c) => {
   return c.json({ id, username });
 });
 
-apiRoutes.put("/v1/users/:id/password", adminMiddleware, async (c) => {
-  const id = c.req.param("id");
+apiRoutes.put("/v1/users/:id/password", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  if (id !== user?.id && !user?.isAdmin) return c.json({ error: "无权修改该用户密码" }, 403);
   const body = await c.req.json();
+  if (!body.newPassword) return c.json({ error: "新密码不能为空" }, 400);
   const newSubsonicSalt = Math.random().toString(16).substring(2, 10);
-  db.update(users).set({ password: md5(body.newPassword + newSubsonicSalt), subsonicSalt: newSubsonicSalt, passEnc: encryptPassword(body.newPassword), apiKey: null, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
+  db.update(users).set({ password: md5(body.newPassword + newSubsonicSalt), subsonicSalt: newSubsonicSalt, passEnc: encryptPassword(body.newPassword), mustChangePassword: 0, apiKey: null, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
+  return c.json({ success: true });
+});
+
+apiRoutes.put("/v1/users/:id/username", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  if (id !== user?.id && !user?.isAdmin) return c.json({ error: "无权修改该用户名" }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const name = String(body.username || "").trim();
+  if (!name) return c.json({ error: "用户名不能为空" }, 400);
+  const existing = db.select().from(users).where(eq(users.username, name)).get();
+  if (existing && existing.id !== id) return c.json({ error: "用户名已被占用" }, 409);
+  db.update(users).set({ username: name, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
+  return c.json({ success: true, username: name });
+});
+
+apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  if (id === user?.id) return c.json({ error: "不能删除当前登录账号" }, 400);
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return c.json({ error: "用户不存在" }, 404);
+  const owned = db.select().from(playlists).where(eq(playlists.ownerId, id)).all();
+  if (owned.length > 0) {
+    db.delete(playlistSongs).where(inArray(playlistSongs.playlistId, owned.map(p => p.id))).run();
+    owned.forEach(p => clearPlaylistCoverCache(p.id));
+    db.delete(playlists).where(inArray(playlists.id, owned.map(p => p.id))).run();
+  }
+  db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.userId, id)).run();
+  db.delete(playHistory).where(eq(playHistory.userId, id)).run();
+  db.delete(wishes).where(eq(wishes.userId, id)).run();
+  db.delete(users).where(eq(users.id, id)).run();
   return c.json({ success: true });
 });
 
 // ==================== Sources ====================
-apiRoutes.get("/v1/sources", (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, config: JSON.parse(s.config || "{}") }))));
+apiRoutes.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, config: JSON.parse(s.config || "{}") }))));
 
 apiRoutes.post("/v1/sources", adminMiddleware, async (c) => {
   const body = await c.req.json();
@@ -47,7 +82,7 @@ apiRoutes.post("/v1/sources", adminMiddleware, async (c) => {
 });
 
 apiRoutes.put("/v1/sources/:id", adminMiddleware, async (c) => {
-  const id = c.req.param("id");
+  const id = c.req.param("id")!;
   const body = await c.req.json();
   const existing = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
   if (!existing) return c.json({ error: "Source not found" }, 404);
@@ -61,7 +96,7 @@ apiRoutes.put("/v1/sources/:id", adminMiddleware, async (c) => {
 });
 
 apiRoutes.delete("/v1/sources/:id", adminMiddleware, (c) => {
-  const id = c.req.param("id");
+  const id = c.req.param("id")!;
   // Find all songs belonging to this source (webdav: w:<id>:, local: l:<id>:)
   const sourceSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`w:${id}:`) || s.path.startsWith(`l:${id}:`));
   const songIds = sourceSongs.map(s => s.id);
@@ -79,7 +114,7 @@ apiRoutes.delete("/v1/sources/:id", adminMiddleware, (c) => {
 
 // Test connection
 apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
-  const id = c.req.param("id");
+  const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
   if (!source) return c.json({ success: false, error: "媒体源不存在" });
 
@@ -197,13 +232,13 @@ apiRoutes.get("/v1/sources/:id/scan-status", adminMiddleware, (c) => {
 });
 
 // ==================== Plugins ====================
-apiRoutes.get("/v1/plugins", (c) => c.json(db.select().from(plugins).all()));
+apiRoutes.get("/v1/plugins", adminMiddleware, (c) => c.json(db.select().from(plugins).all()));
 apiRoutes.post("/v1/plugins", adminMiddleware, async (c) => { const body = await c.req.json(); const id = uuidv4(); db.insert(plugins).values({ id, name: body.name, version: body.version || "", description: body.description || "", manifest: JSON.stringify(body.manifest || {}), enabled: body.enabled ? 1 : 0, config: JSON.stringify(body.config || {}) }).run(); return c.json({ id }); });
-apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id"))).get(); if (p) db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
+apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (p) db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
 
 // ==================== Wish ====================
 // ==================== Wish (paginated) ====================
-apiRoutes.get("/v1/wish", (c) => {
+apiRoutes.get("/v1/wish", adminMiddleware, (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
@@ -218,10 +253,10 @@ apiRoutes.get("/v1/wish", (c) => {
   const items = all.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice((page - 1) * pageSize, page * pageSize);
   return c.json({ total, page, pageSize, items });
 });
-apiRoutes.post("/v1/wish", async (c) => { const user = c.get("user"); const body = await c.req.json(); const id = uuidv4(); db.insert(wishes).values({ id, userId: user?.id || "", songTitle: body.songTitle, artist: body.artist || "", album: body.album || "", status: "pending" }).run(); return c.json({ id }); });
+apiRoutes.post("/v1/wish", adminMiddleware, async (c) => { const user = c.get("user"); const body = await c.req.json(); const id = uuidv4(); db.insert(wishes).values({ id, userId: user?.id || "", songTitle: body.songTitle, artist: body.artist || "", album: body.album || "", status: "pending" }).run(); return c.json({ id }); });
 
 // Export ALL wishes as "artist songTitle" lines (for copying to import into download tools)
-apiRoutes.get("/v1/wish/export", (c) => {
+apiRoutes.get("/v1/wish/export", adminMiddleware, (c) => {
   const all = db.select().from(wishes).all()
     .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   const text = all.map(w => [w.artist, w.songTitle].filter(Boolean).join(" ")).filter(Boolean).join("\n");
@@ -409,7 +444,7 @@ apiRoutes.get("/v1/artists/missing-info-count", (c) => {
 });
 
 // ==================== Settings ====================
-apiRoutes.get("/v1/settings", (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
+apiRoutes.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
 
 // ==================== Playlist import (built-in plugins: QQ / NetEase) ====================
 apiRoutes.post("/v1/playlists/import", async (c) => {
@@ -507,7 +542,7 @@ apiRoutes.get("/v1/playlists", (c) => {
 // ==================== Navidrome compatible ====================
 apiRoutes.get("/playlist", (c) => { const user = c.get("user"); return c.json(db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic)); });
 apiRoutes.get("/playlist/:id/tracks", (c) => c.json(db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, c.req.param("id"))).all().filter(e => e.playable && e.songId)));
-apiRoutes.delete("/playlist/:id", adminMiddleware, (c) => { const id = c.req.param("id")!; db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
+apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权删除该歌单" }, 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
 
 // ==================== Playlist tracks (paginated) ====================
 apiRoutes.get("/v1/playlists/:id/tracks", (c) => {

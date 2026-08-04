@@ -1,0 +1,21 @@
+services:
+  musicflow:
+    image: docker.io/ray5378/musicflow:latest
+    container_name: musicflow
+    restart: unless-stopped
+    ports:
+      - "46400:46400"
+    environment:
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required (openssl rand -hex 32)}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-180}
+      - TZ=Asia/Shanghai
+      - UV_USE_IO_URING=0
+    volumes:
+      - ./data:/app/backend/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:46400/ping"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3

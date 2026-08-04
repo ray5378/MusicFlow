@@ -3,7 +3,7 @@
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="logo" @click="sidebarCollapsed = !sidebarCollapsed">
         <el-icon :size="28" color="#c35f33"><Headset /></el-icon>
-        <span v-if="!sidebarCollapsed" class="logo-text">Music Free</span>
+        <span v-if="!sidebarCollapsed" class="logo-text">MusicFlow</span>
       </div>
       <el-menu :default-active="activeMenu" :collapse="sidebarCollapsed" router class="sidebar-menu">
         <el-menu-item index="/songs"><el-icon><Headset /></el-icon><template #title>音乐</template></el-menu-item>
@@ -12,16 +12,13 @@
         <el-menu-item index="/artists"><el-icon><User /></el-icon><template #title>艺术家</template></el-menu-item>
         <el-menu-item index="/playlists"><el-icon><List /></el-icon><template #title>歌单</template></el-menu-item>
         <el-menu-item index="/history"><el-icon><Clock /></el-icon><template #title>播放历史</template></el-menu-item>
-        <template v-if="authStore.isAdmin">
-          <el-divider />
-          <el-menu-item index="/admin/music"><el-icon><Search /></el-icon><template #title>音乐管理</template></el-menu-item>
-          <el-menu-item index="/admin/plugins"><el-icon><Connection /></el-icon><template #title>插件管理</template></el-menu-item>
-          <el-menu-item index="/admin/sources"><el-icon><FolderOpened /></el-icon><template #title>媒体源</template></el-menu-item>
-          <el-menu-item index="/admin/users"><el-icon><UserFilled /></el-icon><template #title>用户管理</template></el-menu-item>
-          <el-menu-item index="/admin/artists"><el-icon><Avatar /></el-icon><template #title>艺术家管理</template></el-menu-item>
-          <el-menu-item index="/admin/wish"><el-icon><ChatDotRound /></el-icon><template #title>许愿</template></el-menu-item>
-          <el-menu-item index="/admin/settings"><el-icon><Setting /></el-icon><template #title>系统设置</template></el-menu-item>
-        </template>
+        <el-divider v-if="authStore.isAdmin" />
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/music"><el-icon><Search /></el-icon><template #title>音乐管理</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><el-icon><Connection /></el-icon><template #title>插件管理</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><el-icon><FolderOpened /></el-icon><template #title>媒体源</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><el-icon><UserFilled /></el-icon><template #title>用户管理</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/wish"><el-icon><ChatDotRound /></el-icon><template #title>许愿</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/settings"><el-icon><Setting /></el-icon><template #title>系统设置</template></el-menu-item>
       </el-menu>
       <div class="sidebar-footer">
         <el-dropdown @command="handleCommand">
@@ -246,7 +243,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, Avatar, ChatDotRound, Setting, Close, Plus, Loading, Collection } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";

@@ -13,6 +13,7 @@ export const users = sqliteTable("users", {
   apiKey: text("api_key"),
   apiKeyHash: text("api_key_hash"),
   apiKeyExpiresAt: text("api_key_expires_at"),
+  mustChangePassword: integer("must_change_password").default(0),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
@@ -72,7 +73,9 @@ export const albumArtists = sqliteTable("album_artists", {
   albumId: text("album_id").notNull(),
   artistId: text("artist_id").notNull(),
   role: text("role").default("participant"),
-});
+}, (t) => ({
+  pk: primaryKey({ columns: [t.albumId, t.artistId] }),
+}));
 
 export const playlists = sqliteTable("playlists", {
   id: text("id").primaryKey(),
@@ -110,7 +113,9 @@ export const userFavoriteSongs = sqliteTable("user_favorite_songs", {
   userId: text("user_id").notNull(),
   songId: text("song_id").notNull(),
   createdAt: text("created_at").default(""),
-});
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.songId] }),
+}));
 
 export const playHistory = sqliteTable("play_history", {
   id: integer("id").primaryKey(),
