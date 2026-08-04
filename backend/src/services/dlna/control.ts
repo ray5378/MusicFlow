@@ -324,6 +324,28 @@ export function getCurrentMedia(deviceId: string): CurrentMedia | undefined {
   return runtimes.get(deviceId)?.currentMedia;
 }
 
+/**
+ * Consume the one-shot "suppress auto-next" flag. Called by the queue manager
+ * when a track_ended event arrives — returns true if the natural end should
+ * advance the queue, false if a stop()/queue.clear() suppressed it. The flag
+ * is reset on the next castToDevice() call.
+ */
+export function consumeAutoAdvanceFlag(deviceId: string): boolean {
+  const rt = runtimes.get(deviceId);
+  if (!rt) return true;
+  if (rt.suppressAutoNext) {
+    rt.suppressAutoNext = false;
+    return false;
+  }
+  return true;
+}
+
+/** Clear the currently-loaded media (e.g. when the queue is cleared). */
+export function clearCurrentMedia(deviceId: string): void {
+  const rt = runtimes.get(deviceId);
+  if (rt) rt.currentMedia = undefined;
+}
+
 // Preload the next track on the device via SetNextAVTransportURI so the
 // device can switch to it gaplessly when the current track ends.
 // Only call this if probeEnqueueSupport returned true and we haven't already
@@ -451,8 +473,8 @@ export interface DeviceStatus {
 // would spam the logs and break the cast UI.
 export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const device = getDevice(deviceId);
-  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0 };
-  const state = { state: "STOPPED", position: 0, duration: 0, volume: 0 };
+  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, media: getCurrentMedia(deviceId) };
+  const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, media: getCurrentMedia(deviceId) };
 
   // GetTransportInfo — state.
   try {

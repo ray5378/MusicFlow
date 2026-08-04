@@ -24,6 +24,7 @@ import {
 } from "../../services/dlna/control.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
+import { getQueueManager, suffixToMime } from "../../services/dlna/queue.js";
 
 export const apiRoutes = new Hono();
 
@@ -82,6 +83,13 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
   db.delete(wishes).where(eq(wishes.userId, id)).run();
   db.delete(users).where(eq(users.id, id)).run();
   return c.json({ success: true });
+});
+
+// ==================== Current user (HA integration health check) ====================
+// Used by the hass-musicflow config flow to verify the API key works.
+apiRoutes.get("/v1/users/me", (c) => {
+  const user = c.get("user");
+  return c.json({ id: user?.id, username: user?.username, isAdmin: user?.isAdmin });
 });
 
 // ==================== Sources ====================
@@ -919,8 +927,11 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/stop", async (c) => {
 });
 
 apiRoutes.post("/v1/dlna/devices/:deviceId/seek", async (c) => {
-  const { seconds } = await c.req.json().catch(() => ({}));
-  if (typeof seconds !== "number") return c.json({ error: "需要 seconds" }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  // Accept either `seconds` (frontend) or `position` (HA integration) for
+  // the seek target, in seconds.
+  const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
+  if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
   try { await seekDevice(c.req.param("deviceId"), seconds); return c.json({ success: true }); }
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
@@ -952,4 +963,69 @@ apiRoutes.get("/v1/dlna/devices/:deviceId/status", async (c) => {
     return c.json(status);
   } catch (e: any) { return c.json({ error: e.message }, 500); }
 });
+
+// ==================== Queue management ====================
+// Per-device playback queue. Used by the HA integration's play_media (album /
+// playlist) and next/prev track commands. baseUrl is resolved from the
+// request host so DLNA renderers can pull the stream back from this server.
+apiRoutes.get("/v1/dlna/devices/:deviceId/queue", (c) => {
+  return c.json(getQueueManager().snapshot(c.req.param("deviceId")!));
+});
+
+// Replace the queue and start playing from `startIndex` (default 0).
+// Body: { items: QueueItem[], startIndex?: number }
+apiRoutes.post("/v1/dlna/devices/:deviceId/queue/play", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const { items, startIndex } = await c.req.json().catch(() => ({} as any));
+  if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
+  try {
+    await getQueueManager().playFrom(deviceId, items, startIndex || 0, getDlnaBaseUrl(c));
+    return c.json({ success: true });
+  } catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+// Append items to the queue without switching playback.
+// Body: { items: QueueItem[] }
+apiRoutes.post("/v1/dlna/devices/:deviceId/queue/enqueue", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const { items } = await c.req.json().catch(() => ({} as any));
+  if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
+  try {
+    await getQueueManager().enqueue(deviceId, items, getDlnaBaseUrl(c));
+    return c.json({ success: true });
+  } catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.post("/v1/dlna/devices/:deviceId/next", async (c) => {
+  try {
+    await getQueueManager().next(c.req.param("deviceId")!, getDlnaBaseUrl(c));
+    return c.json({ success: true });
+  } catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.post("/v1/dlna/devices/:deviceId/prev", async (c) => {
+  try {
+    await getQueueManager().prev(c.req.param("deviceId")!, getDlnaBaseUrl(c));
+    return c.json({ success: true });
+  } catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
+apiRoutes.delete("/v1/dlna/devices/:deviceId/queue", (c) => {
+  getQueueManager().clear(c.req.param("deviceId")!);
+  return c.json({ success: true });
+});
+
+// Convenience: convert song rows into QueueItem objects (shared by the
+// album/playlist play endpoints above). Exported so the HA integration's
+// play_media flow can reuse the same shape if it ever needs to.
+export function songsToQueueItems(rows: any[]): any[] {
+  return rows.map((s) => ({
+    songId: s.id,
+    title: s.title || "未知",
+    artist: s.artist || undefined,
+    album: s.album || undefined,
+    mime: suffixToMime(s.suffix || ""),
+    coverArt: s.coverArt || undefined,
+  }));
+}
 

@@ -1,4 +1,5 @@
-import { serve } from "@hono/node-server";
+import { getRequestListener } from "@hono/node-server";
+import { createServer } from "http";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import fs from "fs";
@@ -191,6 +192,35 @@ setTimeout(() => {
 }, 8000);
 
 const port = parseInt(process.env.PORT || "46400", 10);
-serve({ fetch: app.fetch, port }, () => {
-  console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
+
+// ==================== HA integration: WebSocket + mDNS + queue auto-next ====================
+// We run Hono on a manually-created http.Server (instead of serve()'s built-in
+// one) so we can attach a WebSocket upgrade handler. @hono/node-server's
+// `serve()` doesn't expose the underlying server in a stable way, but it
+// accepts an `override.fetch` hook — here we just bypass it and use the
+// adaptor's request handler directly.
+import { initWebSocketServer } from "./services/ws/index.js";
+import { startMdnsBroadcast, stopMdnsBroadcast } from "./services/discovery/mdns.js";
+import { getEventManager } from "./services/dlna/eventing.js";
+import { getQueueManager } from "./services/dlna/queue.js";
+
+const server = createServer(getRequestListener(app.fetch));
+
+initWebSocketServer(server);
+
+// Auto-advance the queue when a track ends naturally (GENA PLAYING → STOPPED).
+// stop() sets a suppress flag so explicit stops don't trigger advance.
+getEventManager().on("track_ended", (deviceId: string) => {
+  const baseUrl = process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`;
+  getQueueManager().onTrackEnded(deviceId, baseUrl).catch(() => {});
 });
+
+server.listen(port, "0.0.0.0", () => {
+  console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
+  // Broadcast via mDNS so the HA integration can auto-discover this instance.
+  startMdnsBroadcast(port);
+});
+
+// Clean shutdown: stop mDNS so the service record disappears promptly.
+process.on("SIGTERM", () => { stopMdnsBroadcast(); server.close(); });
+process.on("SIGINT", () => { stopMdnsBroadcast(); server.close(); });
