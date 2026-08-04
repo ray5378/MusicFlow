@@ -203,6 +203,7 @@ import { initWebSocketServer } from "./services/ws/index.js";
 import { startMdnsBroadcast, stopMdnsBroadcast } from "./services/discovery/mdns.js";
 import { getEventManager } from "./services/dlna/eventing.js";
 import { getQueueManager } from "./services/dlna/queue.js";
+import { getPeerManager } from "./services/peer.js";
 
 const server = createServer(getRequestListener(app.fetch));
 
@@ -210,6 +211,10 @@ initWebSocketServer(server);
 
 // Load persisted device queues from DB so cast state survives backend restart.
 getQueueManager().loadFromDb();
+
+// Start the unified peer manager: registers DLNA peers from discovery, runs
+// the 10-min inactivity cleanup for stale local + offline dlna peers.
+getPeerManager().startCleanup();
 
 // Auto-advance the queue when a track ends naturally (GENA PLAYING → STOPPED).
 // stop() sets a suppress flag so explicit stops don't trigger advance.

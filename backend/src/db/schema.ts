@@ -213,3 +213,20 @@ export const deviceQueues = sqliteTable("device_queues", {
   isActive: integer("is_active").notNull().default(0),     // 1 = currently casting
   updatedAt: text("updated_at").default(""),
 });
+
+// Per-Web-client persisted playback queue (one local peer per user —
+// peerId = "local:<userId>"). Lets the user close the tab and reopen it to
+// find their queue again, and lets HA browse the same queue. The actual
+// audio playback runs on the Web client (Howl); the backend only stores the
+// queue metadata. lastActiveAt is updated by heartbeats and drives the
+// 10-minute inactivity cleanup (peer becomes unavailable → queue cleared).
+export const localQueues = sqliteTable("local_queues", {
+  peerId: text("peer_id").primaryKey(),
+  userId: text("user_id").notNull(),
+  itemsJson: text("items_json").notNull().default("[]"),
+  currentIndex: integer("current_index").notNull().default(-1),
+  playMode: text("play_mode").notNull().default("order"),
+  isActive: integer("is_active").notNull().default(0),
+  lastActiveAt: text("last_active_at").notNull(),
+  updatedAt: text("updated_at").default(""),
+});

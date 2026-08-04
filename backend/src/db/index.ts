@@ -275,6 +275,19 @@ export function initDatabase() {
       is_active INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
+
+    CREATE TABLE IF NOT EXISTS local_queues (
+      peer_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      items_json TEXT NOT NULL DEFAULT '[]',
+      current_index INTEGER NOT NULL DEFAULT -1,
+      play_mode TEXT NOT NULL DEFAULT 'order',
+      is_active INTEGER NOT NULL DEFAULT 0,
+      last_active_at TEXT NOT NULL,
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_queues_user ON local_queues(user_id);
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)

@@ -58,6 +58,7 @@ export const useAuthStore = defineStore("auth", () => {
     // Release memory: clear player queue/audio, favorites, cached preload data
     // (dynamic imports avoid circular dependency at module load time)
     import("@/stores/player").then(({ usePlayerStore }) => {
+      usePlayerStore().teardownPeer();
       usePlayerStore().clearQueue();
     }).catch(() => {});
     import("@/stores/favorites").then(({ useFavoritesStore }) => {

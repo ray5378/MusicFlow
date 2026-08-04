@@ -35,9 +35,9 @@
 
     <main class="main-content"><router-view /></main>
 
-    <!-- ===== Player bar ===== -->
-    <footer class="player-bar" v-if="playerStore.currentSong">
-      <div class="player-left" @click="playerStore.togglePlayMode">
+    <!-- ===== Player bar (always visible) ===== -->
+    <footer class="player-bar">
+      <div class="player-left" v-if="playerStore.currentSong" @click="playerStore.togglePlayMode">
         <img v-if="coverUrl" :src="coverUrl" class="player-cover" />
         <div v-else class="player-cover-placeholder"><el-icon :size="24"><Headset /></el-icon></div>
         <div class="player-song-info">
@@ -46,6 +46,13 @@
             <span v-if="playerStore.currentLyricLine" class="player-lyric">{{ playerStore.currentLyricLine }}</span>
             <span v-else>{{ playerStore.currentSong.artist }}</span>
           </div>
+        </div>
+      </div>
+      <div class="player-left" v-else>
+        <div class="player-cover-placeholder"><el-icon :size="24"><Headset /></el-icon></div>
+        <div class="player-song-info">
+          <div class="player-title player-title-empty">未在播放</div>
+          <div class="player-artist">选择一首歌曲开始播放</div>
         </div>
       </div>
       <div class="player-center">
@@ -93,8 +100,60 @@
         </div>
       </div>
       <div class="player-right">
+        <!-- Player switcher: opens a popup above the button listing all peers
+             (local + DLNA). Clicking a peer rebinds the player bar + queue
+             panel to it. Distinct from the cast button — this only switches
+             which player the UI shows/controls; it does not push audio. -->
+        <el-popover
+          placement="top-start"
+          :width="280"
+          trigger="click"
+          v-model:visible="peerSwitcherVisible"
+          popper-class="peer-switcher-popover"
+        >
+          <template #reference>
+            <el-button class="peer-switch-btn" size="small" :title="`切换播放器: ${playerStore.currentPeerName}`">
+              <el-icon class="peer-switch-icon"><Connection /></el-icon>
+              <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
+              <el-icon class="peer-switch-arrow"><ArrowUp /></el-icon>
+            </el-button>
+          </template>
+          <div class="peer-switcher">
+            <div class="peer-switcher-title">选择播放器</div>
+            <div class="peer-switcher-list">
+              <div
+                v-for="p in playerStore.peers"
+                :key="p.peerId"
+                class="peer-switcher-item"
+                :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
+                @click="onSwitchPeer(p.peerId)"
+              >
+                <el-icon class="psi-icon">
+                  <Headset v-if="p.kind === 'local'" />
+                  <Monitor v-else />
+                </el-icon>
+                <div class="psi-info">
+                  <div class="psi-name">
+                    {{ p.kind === 'local' ? '本机' : p.name }}
+                    <span v-if="!p.available" class="psi-offline">离线</span>
+                  </div>
+                  <div class="psi-meta">
+                    <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
+                      {{ p.queue.items.length }} 首
+                      <span v-if="p.queue.isActive">· 播放中</span>
+                    </span>
+                    <span v-else>空闲</span>
+                  </div>
+                </div>
+                <el-icon v-if="p.peerId === playerStore.currentPeerId" class="psi-check"><Check /></el-icon>
+              </div>
+              <div v-if="playerStore.peers.length === 0" class="peer-switcher-empty">暂无可用播放器</div>
+            </div>
+            <div class="peer-switcher-tip">切换播放器仅改变当前控制目标,不会停止其他播放器</div>
+          </div>
+        </el-popover>
         <el-tooltip content="全屏播放" placement="top">
-          <el-button :icon="ChatDotRound" circle size="small" @click="playerStore.togglePlayMode" :type="playerStore.playModeVisible ? 'primary' : ''" />
+          <el-button :icon="ChatDotRound" circle size="small" @click="playerStore.togglePlayMode" :type="playerStore.playModeVisible ? 'primary' : ''" :disabled="!playerStore.currentSong" />
         </el-tooltip>
         <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :show-tooltip="false" class="volume-slider" />
       </div>
@@ -289,7 +348,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -303,11 +362,12 @@ const favoritesStore = useFavoritesStore();
 
 // On layout mount (i.e. after login), restore any active DLNA cast session
 // from the backend so the UI reflects what's still playing on the device
-// after the tab was closed or the backend restarted.
-onMounted(() => {
-  if (authStore.isLoggedIn) {
-    playerStore.restoreCast().catch(() => {});
-  }
+// after the tab was closed or the backend restarted. Then init the local
+// peer (register + heartbeat + WS + restore local queue).
+onMounted(async () => {
+  if (!authStore.isLoggedIn) return;
+  await playerStore.restoreCast().catch(() => {});
+  await playerStore.initLocalPeer().catch(() => {});
 });
 const sidebarCollapsed = ref(false);
 const lyricsContainer = ref<HTMLElement | null>(null);
@@ -434,6 +494,15 @@ const showDlnaDialog = ref(false);
 const dlnaDevices = ref<any[]>([]);
 const dlnaScanning = ref(false);
 const dlnaCastingDevice = ref("");
+
+// ===== Player switcher (peer popup) =====
+const peerSwitcherVisible = ref(false);
+async function onSwitchPeer(peerId: string) {
+  peerSwitcherVisible.value = false;
+  await playerStore.switchPeer(peerId);
+  // Refresh the peer list so queue counts reflect the new state.
+  playerStore.refreshPeers();
+}
 
 async function openDlnaDialog() {
   if (!playerStore.currentSong) { ElMessage.warning("请先选择一首歌曲"); return; }
@@ -563,9 +632,18 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       .progress-slider { flex: 1; }
     }
   }
-  .player-right { display: flex; align-items: center; gap: 8px; width: 220px; flex-shrink: 0; justify-content: flex-end;
-    .volume-slider { width: 100px; }
+  .player-right { display: flex; align-items: center; gap: 8px; width: 320px; flex-shrink: 0; justify-content: flex-end;
+    .volume-slider { width: 90px; }
   }
+  .player-title-empty { color: #bbb; }
+}
+
+/* Player switcher button (lives in the always-visible player bar) */
+.peer-switch-btn {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 160px; padding: 0 10px; height: 30px;
+  .peer-switch-icon { font-size: 14px; }
+  .peer-switch-label { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
+  .peer-switch-arrow { font-size: 10px; color: #999; }
 }
 
 /* Standard playback control buttons: icon vertically centered */
@@ -681,4 +759,28 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 /* ===== DLNA cast ===== */
 .dlna-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
 .dlna-current-tip { color: #999; font-size: 12px; margin-left: auto; }
+</style>
+
+<!-- Non-scoped: el-popover teleports the popper to <body>, so scoped styles
+     won't reach it. These rules style the player-switcher popup content. -->
+<style lang="scss">
+.peer-switcher-popover.el-popover.el-popper { padding: 0 !important; }
+.peer-switcher { width: 100%; }
+.peer-switcher-title { font-size: 13px; font-weight: 600; color: #333; padding: 10px 12px 6px; }
+.peer-switcher-list { max-height: 320px; overflow-y: auto; padding: 0 6px; }
+.peer-switcher-item {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
+  &:hover { background: #f5f7fa; }
+  &.active { background: #fdf0ea; .psi-name { color: #c35f33; } .psi-icon { color: #c35f33; } }
+  &.unavailable { opacity: 0.55; }
+  .psi-icon { font-size: 18px; color: #909399; flex-shrink: 0; }
+  .psi-info { flex: 1; min-width: 0;
+    .psi-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .psi-offline { font-size: 11px; color: #fff; background: #c0c4cc; border-radius: 8px; padding: 0 6px; }
+    .psi-meta { font-size: 12px; color: #999; margin-top: 2px; }
+  }
+  .psi-check { color: #c35f33; font-size: 16px; flex-shrink: 0; }
+}
+.peer-switcher-empty { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
+.peer-switcher-tip { font-size: 11px; color: #bbb; padding: 8px 12px 10px; border-top: 1px solid #f5f5f5; line-height: 1.5; }
 </style>

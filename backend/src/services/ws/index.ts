@@ -10,6 +10,14 @@
 //   { type: "queue_changed",        device_id, queue: <QueueSnapshot> }
 //   { type: "device_list_changed",  deviceCount: number }
 //
+// Peer events (unified player switcher):
+//   { type: "peer_snapshot",        peers: <PeerWithQueue[]> }
+//   { type: "peer_registered",      peer: <Peer> }
+//   { type: "peer_available",       peer: <Peer> }
+//   { type: "peer_unavailable",     peer: <Peer> }
+//   { type: "peer_queue_changed",   peer_id, queue: <QueueSnapshot> }
+//   { type: "peer_queue_cleared",   peer_id }
+//
 // Auth: ?token=<apiKey|jwt> on the upgrade URL. The same Bearer logic as
 // auth.ts (JWT first, then API key) applies, so HA integrations present the
 // user's long-lived apiKey here.
@@ -24,6 +32,7 @@ import {
   getDeviceStatus,
   getCurrentMedia,
 } from "../dlna/control.js";
+import { getPeerManager } from "../peer.js";
 import { authenticateWsToken } from "./auth.js";
 
 let wss: WebSocketServer | null = null;
@@ -50,6 +59,7 @@ export function initWebSocketServer(server: import("http").Server): void {
   wss.on("connection", (ws) => {
     // Initial snapshot so the client has full state before any delta events.
     sendSnapshot(ws).catch(() => {});
+    sendPeerSnapshot(ws);
     const unsub = subscribeAndForward(ws);
     ws.on("close", unsub);
     ws.on("error", unsub);
@@ -71,10 +81,17 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
   send(ws, { type: "snapshot", devices });
 }
 
+// Send the current peer list (with queue snapshots) so a freshly connected
+// client can populate the player switcher immediately.
+function sendPeerSnapshot(ws: WebSocket): void {
+  send(ws, { type: "peer_snapshot", peers: getPeerManager().listWithQueues() });
+}
+
 // Subscribe to all relevant event emitters and forward as WS messages.
 function subscribeAndForward(ws: WebSocket): () => void {
   const em = getEventManager();
   const qm = getQueueManager();
+  const pm = getPeerManager();
   const unsubs: Array<() => void> = [];
 
   const onState = (deviceId: string, st: any) => {
@@ -91,15 +108,33 @@ function subscribeAndForward(ws: WebSocket): () => void {
     send(ws, { type: "device_list_changed", deviceCount });
   };
 
+  // Peer events: forward registration/availability/queue changes so the Web
+  // client's player switcher stays live without polling /v1/peers.
+  const onPeerRegistered = (peer: any) => send(ws, { type: "peer_registered", peer });
+  const onPeerAvailable = (peer: any) => send(ws, { type: "peer_available", peer });
+  const onPeerUnavailable = (peer: any) => send(ws, { type: "peer_unavailable", peer });
+  const onPeerQueue = (peerId: string, queue: any) => send(ws, { type: "peer_queue_changed", peer_id: peerId, queue });
+  const onPeerQueueCleared = (peerId: string) => send(ws, { type: "peer_queue_cleared", peer_id: peerId });
+
   em.on("state_changed", onState);
   em.on("media_changed", onMedia);
   em.on("device_list_changed", onDeviceList);
   qm.on("queue_changed", onQueue);
+  pm.on("peer_registered", onPeerRegistered);
+  pm.on("peer_available", onPeerAvailable);
+  pm.on("peer_unavailable", onPeerUnavailable);
+  pm.on("peer_queue_changed", onPeerQueue);
+  pm.on("peer_queue_cleared", onPeerQueueCleared);
 
   unsubs.push(() => em.off("state_changed", onState));
   unsubs.push(() => em.off("media_changed", onMedia));
   unsubs.push(() => em.off("device_list_changed", onDeviceList));
   unsubs.push(() => qm.off("queue_changed", onQueue));
+  unsubs.push(() => pm.off("peer_registered", onPeerRegistered));
+  unsubs.push(() => pm.off("peer_available", onPeerAvailable));
+  unsubs.push(() => pm.off("peer_unavailable", onPeerUnavailable));
+  unsubs.push(() => pm.off("peer_queue_changed", onPeerQueue));
+  unsubs.push(() => pm.off("peer_queue_cleared", onPeerQueueCleared));
 
   return () => unsubs.forEach((u) => u());
 }
