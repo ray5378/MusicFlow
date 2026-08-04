@@ -85,7 +85,13 @@ export const usePlayerStore = defineStore("player", () => {
     // next()/prev() via randomIndex(), not by reordering the array. This keeps
     // the queue panel display stable and currentIndex pointing at the right song.
     queue.value = [...songs];
-    currentIndex.value = index;
+    // In shuffle mode, start from a random track instead of always the first —
+    // the user picked "shuffle", so the entry point should be random too.
+    if (playMode.value === "shuffle" && songs.length > 1) {
+      currentIndex.value = Math.floor(Math.random() * songs.length);
+    } else {
+      currentIndex.value = index;
+    }
     startPlayback();
   }
 

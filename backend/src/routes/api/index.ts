@@ -326,15 +326,18 @@ function idToCoverArt(id: string | null, prefix: string): string | undefined {
 }
 
 // ==================== Genres (with song counts) ====================
+// Use a GROUP BY query instead of loading the whole songs table into memory.
+// Backed by idx_songs_genre (created in initDatabase) for fast aggregation.
 apiRoutes.get("/v1/genres", (c) => {
-  const genreMap = new Map<string, number>();
-  for (const s of db.select().from(songs).all()) {
-    if (!s.genre) continue;
-    genreMap.set(s.genre, (genreMap.get(s.genre) || 0) + 1);
-  }
-  const items = Array.from(genreMap.entries())
-    .map(([name, songCount]) => ({ name, songCount }))
-    .sort((a, b) => b.songCount - a.songCount);
+  const rows = db.select({
+    name: songs.genre,
+    songCount: sql<number>`count(*)`,
+  }).from(songs)
+    .where(sql`genre != ''`)
+    .groupBy(songs.genre)
+    .orderBy(sql`count(*) DESC`)
+    .all();
+  const items = rows.map(r => ({ name: r.name, songCount: r.songCount }));
   return c.json({ total: items.length, items });
 });
 

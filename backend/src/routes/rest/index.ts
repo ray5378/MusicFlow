@@ -779,14 +779,31 @@ restRoutes.get("/getStarred2", (c) => {
 
 // ==================== Scrobble ====================
 
+// Dedupe window: some Subsonic clients (and the web frontend's onplay +
+// external clients used simultaneously) send submission=true twice for the
+// same track within a few seconds. Drop the duplicate so play_history stays
+// clean — keep only the first submission per (user, song) within 10s.
+const SCROBBLE_DEDUPE_MS = 10_000;
+const recentScrobbles = new Map<string, number>(); // key: userId|songId → ms epoch
+
 restRoutes.get("/scrobble", (c) => {
   const user = c.get("user");
   const id = getParam(c, "id");
   if (!user || !id) return c.json(ok());
   const submission = (getParam(c, "submission") || "true") !== "false";
   if (submission) {
-    db.insert(playHistory).values({ userId: user.id, songId: id, playedAt: new Date().toISOString() }).run();
-    db.update(songs).set({ playCount: sql`${songs.playCount} + 1` }).where(eq(songs.id, id)).run();
+    const key = `${user.id}|${id}`;
+    const now = Date.now();
+    const last = recentScrobbles.get(key) || 0;
+    // Opportunistic cleanup of stale dedupe entries (keep map small).
+    if (recentScrobbles.size > 200) {
+      for (const [k, t] of recentScrobbles) if (now - t > SCROBBLE_DEDUPE_MS) recentScrobbles.delete(k);
+    }
+    if (now - last > SCROBBLE_DEDUPE_MS) {
+      recentScrobbles.set(key, now);
+      db.insert(playHistory).values({ userId: user.id, songId: id, playedAt: new Date().toISOString() }).run();
+      db.update(songs).set({ playCount: sql`${songs.playCount} + 1` }).where(eq(songs.id, id)).run();
+    }
   }
   return c.json(ok());
 });

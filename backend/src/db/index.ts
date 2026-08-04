@@ -261,6 +261,7 @@ export function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist_id);
     CREATE INDEX IF NOT EXISTS idx_songs_album ON songs(album_id);
+    CREATE INDEX IF NOT EXISTS idx_songs_genre ON songs(genre);
     CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_user ON play_history(user_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);

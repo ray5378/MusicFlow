@@ -498,7 +498,8 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
 // jump anywhere in the list under shuffle, so we must follow it.
 // Skips auto-scroll if the queue panel is closed (no DOM) or the user is
 // actively hovering the list (don't fight manual scrolling).
-watch(() => playerStore.currentIndex, async (idx) => {
+async function scrollQueueToCurrent() {
+  const idx = playerStore.currentIndex;
   if (idx < 0) return;
   await nextTick();
   const list = queueListEl.value;
@@ -513,7 +514,11 @@ watch(() => playerStore.currentIndex, async (idx) => {
   if (itemRect.top >= listRect.top && itemRect.bottom <= listRect.bottom) return;
   const targetTop = active.offsetTop - list.clientHeight / 2 + active.clientHeight / 2;
   list.scrollTo({ top: targetTop, behavior: "smooth" });
-});
+}
+watch(() => playerStore.currentIndex, scrollQueueToCurrent);
+// Also scroll when the panel is freshly opened — the list DOM only exists
+// after the panel renders, so we wait a tick before measuring positions.
+watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent(); });
 </script>
 
 <style lang="scss" scoped>
