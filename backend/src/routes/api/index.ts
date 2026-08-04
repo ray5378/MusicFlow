@@ -692,7 +692,19 @@ apiRoutes.get("/v1/playlists", (c) => {
     all = all.filter(p => (p.name || "").toLowerCase().includes(q));
   }
   const total = all.length;
-  const items = all.sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "")).slice((page - 1) * pageSize, page * pageSize).map(p => ({
+  // Sort: daily-recommend playlists ("今日推荐"/"昨日推荐") first (today before
+  // yesterday), then the rest by updated_at desc.
+  const dailyRank = (p: any) => {
+    const c = p.comment || "";
+    if (c.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
+    if (c.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
+    return 2;
+  };
+  const items = all.sort((a, b) => {
+    const ra = dailyRank(a), rb = dailyRank(b);
+    if (ra !== rb) return ra - rb;
+    return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
+  }).slice((page - 1) * pageSize, page * pageSize).map(p => ({
     id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic,
     songCount: p.songCount || 0, duration: p.duration || 0,
     // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
@@ -704,7 +716,21 @@ apiRoutes.get("/v1/playlists", (c) => {
 });
 
 // ==================== Navidrome compatible ====================
-apiRoutes.get("/playlist", (c) => { const user = c.get("user"); return c.json(db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic)); });
+apiRoutes.get("/playlist", (c) => {
+  const user = c.get("user");
+  const all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic);
+  const dailyRank = (p: any) => {
+    const c = p.comment || "";
+    if (c.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
+    if (c.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
+    return 2;
+  };
+  return c.json(all.sort((a, b) => {
+    const ra = dailyRank(a), rb = dailyRank(b);
+    if (ra !== rb) return ra - rb;
+    return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
+  }));
+});
 apiRoutes.get("/playlist/:id/tracks", (c) => c.json(db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, c.req.param("id"))).all().filter(e => e.playable && e.songId)));
 apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权删除该歌单" }, 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
 

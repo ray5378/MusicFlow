@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
+import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
 
 export const restRoutes = new Hono();
 
@@ -509,6 +510,18 @@ restRoutes.get("/getPlaylists", (c) => {
   const user = c.get("user");
   const allPlaylists = db.select().from(playlists).all();
   const visible = allPlaylists.filter(p => p.isPublic || p.ownerId === user?.id || user?.isAdmin);
+  // Sort: "今日推荐" > "昨日推荐" > others by updated_at desc.
+  const dailyRank = (p: any) => {
+    const cm = p.comment || "";
+    if (cm.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
+    if (cm.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
+    return 2;
+  };
+  visible.sort((a, b) => {
+    const ra = dailyRank(a), rb = dailyRank(b);
+    if (ra !== rb) return ra - rb;
+    return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
+  });
   return c.json(ok({ playlists: { playlist: visible.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
