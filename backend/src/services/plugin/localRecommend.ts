@@ -262,6 +262,53 @@ function pickRandomSample(date: Date): string[] {
   return rows.map(r => r.id);
 }
 
+// Pick `limit` random song ids from the ENTIRE local library (playable only),
+// deterministically seeded by date so the same day yields the same set.
+// Uses a date-seeded offset + stride to avoid loading the whole library into
+// memory when it's large (e.g. 19000+ songs). Falls back to ORDER BY RANDOM()
+// when the library is smaller than `limit`.
+export function pickRandomLibrarySongs(date: Date, limit: number): string[] {
+  const total = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number };
+  if (!total.n) return [];
+  const rng = mulberry32(dayOfYear(date) * 774631 + 7);
+  if (total.n <= limit) {
+    // Library smaller than limit — return everything, shuffled.
+    const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").all() as { id: string }[];
+    for (let i = rows.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [rows[i], rows[j]] = [rows[j], rows[i]];
+    }
+    return rows.map(r => r.id);
+  }
+  // Pick `limit` distinct indices spread across the library, deterministically
+  // offset by the date seed so each day lands on a different slice.
+  const stride = total.n / limit;
+  const startOffset = Math.floor(rng() * stride);
+  const indices = new Set<number>();
+  for (let i = 0; i < limit; i++) {
+    const base = Math.floor(startOffset + i * stride);
+    // Add a small deterministic jitter within the stride window so it doesn't
+    // always pick the exact k-th song.
+    const jitter = Math.floor(rng() * Math.max(1, Math.floor(stride)));
+    indices.add(Math.min(total.n - 1, base + jitter));
+  }
+  // Fetch by rowid for efficiency (rowid ~ 1..N for WITHOUT ROWID-less tables).
+  const ids: string[] = [];
+  const idArr = Array.from(indices);
+  for (let i = 0; i < idArr.length; i += 500) {
+    const batch = idArr.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(",");
+    const rows = sqlite.prepare(`SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND rowid IN (${placeholders})`).all(...batch) as { id: string }[];
+    for (const r of rows) ids.push(r.id);
+  }
+  // Shuffle the result so the order isn't a boring ascending sequence.
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids;
+}
+
 function getSettingBool(key: string, def: boolean): boolean {
   const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get(key) as any;
   const v = row?.value ?? (def ? "true" : "false");
