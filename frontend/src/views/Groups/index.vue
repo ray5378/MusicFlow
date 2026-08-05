@@ -300,6 +300,14 @@ onMounted(loadGroups);
   }
   .group-actions { display: flex; gap: 8px; }
 }
+@media (max-width: 768px) {
+  .group-list { grid-template-columns: 1fr; }
+  .group-card { padding: 12px; }
+  .group-card-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .group-actions { flex-wrap: wrap; }
+  .group-actions .el-button { margin-left: 0; }
+  .groups-tip { padding: 8px 10px; }
+}
 .dialog-field { margin-bottom: 16px;
   .dialog-label { font-size: 13px; font-weight: 500; color: #606266; margin-bottom: 8px; }
 }

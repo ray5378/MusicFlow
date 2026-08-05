@@ -12,6 +12,8 @@ html, body, #app {
   color: #333;
 }
 
+body { overflow-x: hidden; }
+
 :root {
   --primary-color: #c35f33;
   --primary-hover: #d4704a;
@@ -39,4 +41,86 @@ a {
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* ============================================================
+   Responsive (mobile / tablet) base rules
+   Breakpoint: < 768px is treated as phone-style layout.
+   ============================================================ */
+@media (max-width: 768px) {
+  :root {
+    --player-height: 56px;
+  }
+
+  /* Pagination: wrap and drop the size/jumper controls on small screens */
+  .el-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+  }
+  .el-pagination__sizes,
+  .el-pagination__jump {
+    display: none;
+  }
+
+  /* Keep dialogs near full width on phones */
+  .el-dialog {
+    width: auto !important;
+    max-width: 94vw;
+    margin: 6vh auto 0;
+  }
+
+  /* Slightly smaller input/button density reads better on touch */
+  .el-input__inner,
+  .el-textarea__inner { font-size: 15px; }
+
+  /* Shared page-header: always stack vertically on phones */
+  .page-header {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px;
+  }
+  .page-header .header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .page-header .header-actions .el-input,
+  .page-header .header-actions > .el-input,
+  .page-header > .el-input { width: 100% !important; max-width: none; }
+
+  .pagination-bar { overflow-x: auto; }
+
+  /* Page padding: tighter on phones */
+  .songs-page, .genres-page, .albums-page, .artists-page, .playlists-page,
+  .groups-page, .history-page, .favorites-page, .settings-page,
+  .admin-settings, .admin-music, .admin-plugins, .admin-sources,
+  .admin-users, .admin-wish, .album-detail, .artist-detail, .playlist-detail {
+    padding: 16px 12px;
+  }
+
+  /* Detail headers (album / playlist / artist / favorites): stack vertically */
+  .album-header, .playlist-header, .artist-header, .fav-header {
+    flex-direction: column !important;
+    align-items: center !important;
+    text-align: center;
+    gap: 16px;
+  }
+  .album-header .album-cover,
+  .playlist-header .playlist-cover,
+  .artist-header .artist-avatar,
+  .fav-header .fav-cover { width: 160px !important; height: 160px !important; }
+  .album-header .album-meta,
+  .playlist-header .playlist-meta,
+  .artist-header .artist-meta,
+  .fav-header .fav-meta { width: 100%; align-items: center; }
+  .playlist-header .actions,
+  .playlist-header .settings { flex-wrap: wrap; justify-content: center; }
+  .playlist-header .actions .el-button { margin-left: 0; }
+
+  /* Card grids: denser 2-column layout on phones */
+  .album-grid, .artist-grid, .playlist-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 12px; }
+  .album-card .album-info, .playlist-card .playlist-info { padding: 8px; }
+
+  /* Standalone search inputs (e.g. admin music search) */
+  .search-section .el-input { width: 100% !important; max-width: none; }
 }

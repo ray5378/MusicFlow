@@ -1,11 +1,25 @@
 <template>
   <div class="main-layout">
-    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
-      <div class="logo" @click="sidebarCollapsed = !sidebarCollapsed">
+    <!-- ===== Mobile top bar ===== -->
+    <header class="mobile-header" v-if="isMobile">
+      <button type="button" class="mobile-hamburger" aria-label="菜单" @click="mobileNavOpen = !mobileNavOpen">
+        <el-icon :size="22"><Menu /></el-icon>
+      </button>
+      <img src="/favicon.png" alt="MusicFlow" class="mobile-brand-logo" @click="mobileNavOpen = false" />
+      <span class="mobile-brand" @click="mobileNavOpen = false">MusicFlow</span>
+    </header>
+
+    <!-- ===== Mobile drawer overlay ===== -->
+    <transition name="fade">
+      <div class="sidebar-overlay" v-if="isMobile && mobileNavOpen" @click="mobileNavOpen = false"></div>
+    </transition>
+
+    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed, mobile: isMobile, 'mobile-open': isMobile && mobileNavOpen }">
+      <div class="logo" @click="onLogoClick">
         <img src="/favicon.png" alt="MusicFlow" class="logo-img" />
-        <span v-if="!sidebarCollapsed" class="logo-text">MusicFlow</span>
+        <span v-if="!sidebarCollapsed || isMobile" class="logo-text">MusicFlow</span>
       </div>
-      <el-menu :default-active="activeMenu" :collapse="sidebarCollapsed" router class="sidebar-menu">
+      <el-menu :default-active="activeMenu" :collapse="!isMobile && sidebarCollapsed" router class="sidebar-menu" @select="closeMobileNav">
         <el-menu-item index="/songs"><el-icon><Headset /></el-icon><template #title>音乐</template></el-menu-item>
         <el-menu-item index="/genres"><el-icon><Collection /></el-icon><template #title>风格</template></el-menu-item>
         <el-menu-item index="/albums"><el-icon><Service /></el-icon><template #title>专辑</template></el-menu-item>
@@ -23,7 +37,7 @@
       </el-menu>
       <div class="sidebar-footer">
         <el-dropdown @command="handleCommand">
-          <span class="user-info"><el-icon><UserFilled /></el-icon><span v-if="!sidebarCollapsed">{{ authStore.username }}</span></span>
+          <span class="user-info"><el-icon><UserFilled /></el-icon><span v-if="!sidebarCollapsed || isMobile">{{ authStore.username }}</span></span>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="settings">设置</el-dropdown-item>
@@ -36,8 +50,33 @@
 
     <main class="main-content"><router-view /></main>
 
+    <!-- ===== Mobile player bar (compact) ===== -->
+    <footer class="player-bar-mobile" v-if="isMobile">
+      <div class="mp-cover" @click="playerStore.togglePlayMode">
+        <img v-if="coverUrl" :src="coverUrl" />
+        <div v-else class="mp-cover-ph"><el-icon :size="20"><Headset /></el-icon></div>
+      </div>
+      <div class="mp-info" @click="playerStore.togglePlayMode">
+        <div class="mp-title">{{ playerStore.currentSong ? playerStore.currentSong.title : '未在播放' }}</div>
+        <div class="mp-artist">
+          <span v-if="playerStore.currentLyricLine" class="mp-lyric">{{ playerStore.currentLyricLine }}</span>
+          <span v-else>{{ playerStore.currentSong ? playerStore.currentSong.artist : '选择一首歌曲开始播放' }}</span>
+        </div>
+      </div>
+      <div class="mp-controls">
+        <button type="button" class="mp-btn" @click="playerStore.prev"><PlaybackIcon name="prev" :size="18" /></button>
+        <button type="button" class="mp-btn mp-play" :class="{ active: playerStore.isPlaying }" @click="playerStore.togglePlay">
+          <PlaybackIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="24" />
+        </button>
+        <button type="button" class="mp-btn" @click="playerStore.next"><PlaybackIcon name="next" :size="18" /></button>
+        <button type="button" class="mp-btn mp-list" :class="{ active: playerStore.showPlaylist }" @click="playerStore.togglePlaylistPanel">
+          <el-icon :size="18"><List /></el-icon>
+        </button>
+      </div>
+    </footer>
+
     <!-- ===== Player bar (always visible) ===== -->
-    <footer class="player-bar">
+    <footer class="player-bar" v-if="!isMobile">
       <div class="player-left" v-if="playerStore.currentSong" @click="playerStore.togglePlayMode">
         <img v-if="coverUrl" :src="coverUrl" class="player-cover" />
         <div v-else class="player-cover-placeholder"><el-icon :size="24"><Headset /></el-icon></div>
@@ -345,12 +384,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box, Menu } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -372,6 +411,22 @@ onMounted(async () => {
   await playerStore.initLocalPeer().catch(() => {});
 });
 const sidebarCollapsed = ref(false);
+
+// ===== Responsive layout state =====
+// `isMobile` drives the drawer sidebar + compact player bar (phone layout).
+// `mobileNavOpen` controls whether the drawer is visible.
+const isMobile = ref(false);
+const mobileNavOpen = ref(false);
+function updateViewport() { isMobile.value = window.innerWidth < 768; }
+updateViewport();
+window.addEventListener("resize", updateViewport);
+onUnmounted(() => window.removeEventListener("resize", updateViewport));
+
+function onLogoClick() {
+  if (isMobile.value) mobileNavOpen.value = false;
+  else sidebarCollapsed.value = !sidebarCollapsed.value;
+}
+function closeMobileNav() { if (isMobile.value) mobileNavOpen.value = false; }
 const lyricsContainer = ref<HTMLElement | null>(null);
 // Queue panel scroll tracking — queueListEl is the scroll container, queueItemEls
 // collects all rendered queue-item DOM nodes (Vue 3 ref array on v-for).
@@ -603,6 +658,14 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 
 <style lang="scss" scoped>
 .main-layout { display: flex; height: 100vh; overflow: hidden; }
+
+/* ===== Mobile chrome (only visible < 768px) ===== */
+.mobile-header {
+  display: none;
+}
+.sidebar-overlay { display: none; }
+.player-bar-mobile { display: none; }
+
 .sidebar {
   width: var(--sidebar-width); background: #1a1a2e; color: #fff; display: flex; flex-direction: column; transition: width 0.3s; flex-shrink: 0;
   &.collapsed { width: var(--sidebar-collapsed-width); }
@@ -761,6 +824,107 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 /* ===== DLNA cast ===== */
 .dlna-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
 .dlna-current-tip { color: #999; font-size: 12px; margin-left: auto; }
+
+/* ============================================================
+   Mobile (< 768px): drawer sidebar, compact player bar,
+   stacked fullscreen play mode, full-width queue panel.
+   ============================================================ */
+@media (max-width: 768px) {
+  .main-layout { flex-direction: column; }
+
+  /* --- Top bar --- */
+  .mobile-header {
+    display: flex; align-items: center; gap: 8px;
+    height: 48px; padding: 0 12px; flex-shrink: 0;
+    background: #1a1a2e; color: #fff; z-index: 500;
+    .mobile-hamburger {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 34px; height: 34px; border: none; border-radius: 6px;
+      background: transparent; color: #fff; cursor: pointer;
+      &:active { background: rgba(255,255,255,0.15); }
+    }
+    .mobile-brand-logo { width: 26px; height: 26px; border-radius: 6px; }
+    .mobile-brand { font-size: 16px; font-weight: 600; }
+  }
+
+  /* --- Drawer sidebar --- */
+  .sidebar-overlay {
+    display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 590;
+  }
+  .sidebar.mobile {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: min(280px, 82vw); z-index: 600;
+    transform: translateX(-100%); transition: transform 0.28s ease;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.25);
+    &.mobile-open { transform: translateX(0); }
+    &.collapsed { width: min(280px, 82vw); }
+  }
+
+  /* --- Content + player layout --- */
+  .main-content {
+    flex: 1; overflow-y: auto;
+    padding-bottom: var(--player-height);
+  }
+
+  /* Desktop player bar hidden; mobile compact bar shown */
+  .player-bar { display: none; }
+  .player-bar-mobile {
+    display: flex; align-items: center; gap: 8px;
+    position: fixed; left: 0; right: 0; bottom: 0;
+    height: var(--player-height); padding: 0 10px;
+    background: #fff; border-top: 1px solid #e8e8e8; z-index: 100;
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
+    .mp-cover {
+      width: 40px; height: 40px; border-radius: 6px; overflow: hidden; flex-shrink: 0;
+      img { width: 100%; height: 100%; object-fit: cover; }
+      .mp-cover-ph { width: 100%; height: 100%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #ccc; }
+    }
+    .mp-info { flex: 1; min-width: 0; cursor: pointer;
+      .mp-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mp-artist { font-size: 12px; color: #999; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mp-lyric { color: #c35f33; }
+    }
+    .mp-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+      .mp-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 34px; height: 34px; border: none; border-radius: 50%;
+        background: transparent; color: #333; cursor: pointer;
+        &:active { background: rgba(0,0,0,0.08); }
+        &.mp-play { background: #c35f33; color: #fff; width: 40px; height: 40px; box-shadow: 0 3px 10px rgba(195,95,51,0.4); }
+        &.mp-list.active { color: #c35f33; }
+      }
+    }
+  }
+
+  /* --- Queue panel full width --- */
+  .queue-panel { width: 100%; bottom: var(--player-height); }
+
+  /* --- Fullscreen play mode: stacked single column --- */
+  .play-mode { overflow-y: auto; }
+  .play-mode .play-mode-body {
+    flex-direction: column; justify-content: flex-start;
+    gap: 12px; padding: 24px 16px 8px;
+    .pm-left { width: 100%;
+      .pm-disc { width: min(260px, 68vw); height: min(260px, 68vw); }
+      .pm-song-title { margin-top: 14px; font-size: 18px; max-width: 100%; }
+      .pm-song-artist { font-size: 14px; }
+    }
+    .pm-right { width: 100%; height: min(34vh, 300px); min-height: 120px; }
+  }
+  .play-mode .play-mode-controls { padding: 8px 16px 20px; gap: 10px;
+    .pm-progress { max-width: none; }
+    .pm-buttons { gap: 12px;
+      .pm-play-btn { width: 52px; height: 52px; min-width: 52px; min-height: 52px; }
+      .pm-nav-btn { width: 42px; height: 42px; min-width: 42px; min-height: 42px; }
+    }
+  }
+  .play-mode .play-mode-close { top: 12px; right: 12px; width: 38px; height: 38px; }
+
+  /* Dialog paddings stay compact on phones */
+  .create-playlist-row { flex-direction: column; align-items: stretch; }
+  .create-playlist-row .el-button { margin-left: 0 !important; }
+}
 </style>
 
 <!-- Non-scoped: el-popover teleports the popper to <body>, so scoped styles

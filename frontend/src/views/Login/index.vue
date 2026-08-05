@@ -95,4 +95,8 @@ async function submitPassword() {
 }
 .pwd-alert { margin-bottom: 20px; }
 .pwd-form { margin-top: 8px; }
+@media (max-width: 768px) {
+  .login-card { width: 92vw; padding: 32px 24px; }
+  .login-logo { width: 56px !important; height: 56px !important; }
+}
 </style>

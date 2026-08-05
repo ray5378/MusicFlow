@@ -121,4 +121,9 @@ onMounted(loadUsers);
 .user-card { .user-header { display: flex; justify-content: space-between;
   .user-info { h3 { margin: 0 0 8px; } .tags { display: flex; gap: 4px; } } }
 .user-actions { margin-top: 12px; display: flex; gap: 8px; } }
+@media (max-width: 768px) {
+  .user-grid { grid-template-columns: 1fr; }
+  .user-actions { flex-wrap: wrap; }
+  .user-actions .el-button { margin-left: 0; }
+}
 </style>

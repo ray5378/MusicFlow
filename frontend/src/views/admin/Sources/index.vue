@@ -314,4 +314,11 @@ onUnmounted(() => { Object.values(progressTimers).forEach(clearInterval); });
   }
   .source-actions { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
 }
+@media (max-width: 768px) {
+  .source-grid { grid-template-columns: 1fr; }
+  .source-actions { flex-wrap: wrap; }
+  .source-actions .el-button { margin-left: 0; }
+  .scan-progress .progress-header { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .scan-progress .progress-stats { flex-wrap: wrap; gap: 8px 12px; }
+}
 </style>

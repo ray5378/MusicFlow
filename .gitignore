@@ -12,3 +12,6 @@ data/
 # secrets
 .env
 backend/.env
+
+# runtime logs
+logs/
