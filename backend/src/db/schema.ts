@@ -230,3 +230,24 @@ export const localQueues = sqliteTable("local_queues", {
   lastActiveAt: text("last_active_at").notNull(),
   updatedAt: text("updated_at").default(""),
 });
+
+// 播放器群组(SyncGroup,仿 MA Sync Group):一个组聚合多台 DLNA 设备。
+// 成员只能是 DLNA 设备(裸 deviceId);一台设备最多属于一个组;组不能套组。
+// 组持有自己的持久化队列(group_queues),播放时并发向成员 cast 同一首歌。
+export const playerGroups = sqliteTable("player_groups", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  memberIds: text("member_ids").notNull().default("[]"), // dlna deviceId[] serialized
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+});
+
+// 组级持久化队列,镜像 device_queues。后端重启后组可恢复续播。
+export const groupQueues = sqliteTable("group_queues", {
+  groupId: text("group_id").primaryKey(),
+  itemsJson: text("items_json").notNull().default("[]"), // QueueItem[] serialized
+  currentIndex: integer("current_index").notNull().default(-1),
+  playMode: text("play_mode").notNull().default("order"), // order|one|all|shuffle
+  isActive: integer("is_active").notNull().default(0),     // 1 = 组当前在播
+  updatedAt: text("updated_at").default(""),
+});

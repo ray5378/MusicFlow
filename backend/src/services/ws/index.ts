@@ -33,6 +33,7 @@ import {
   getCurrentMedia,
 } from "../dlna/control.js";
 import { getPeerManager } from "../peer.js";
+import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken } from "./auth.js";
 
 let wss: WebSocketServer | null = null;
@@ -92,6 +93,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const em = getEventManager();
   const qm = getQueueManager();
   const pm = getPeerManager();
+  const gm = getGroupManager();
   const unsubs: Array<() => void> = [];
 
   const onState = (deviceId: string, st: any) => {
@@ -116,6 +118,10 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const onPeerQueue = (peerId: string, queue: any) => send(ws, { type: "peer_queue_changed", peer_id: peerId, queue });
   const onPeerQueueCleared = (peerId: string) => send(ws, { type: "peer_queue_cleared", peer_id: peerId });
 
+  // Group events: 组创建/改名/成员变更 → 前端群组页刷新;组删除 → 移除条目。
+  const onGroupChanged = (group: any) => send(ws, { type: "group_changed", group });
+  const onGroupDeleted = (id: string) => send(ws, { type: "group_deleted", id });
+
   em.on("state_changed", onState);
   em.on("media_changed", onMedia);
   em.on("device_list_changed", onDeviceList);
@@ -125,6 +131,9 @@ function subscribeAndForward(ws: WebSocket): () => void {
   pm.on("peer_unavailable", onPeerUnavailable);
   pm.on("peer_queue_changed", onPeerQueue);
   pm.on("peer_queue_cleared", onPeerQueueCleared);
+  gm.on("group_created", onGroupChanged);
+  gm.on("group_updated", onGroupChanged);
+  gm.on("group_deleted", onGroupDeleted);
 
   unsubs.push(() => em.off("state_changed", onState));
   unsubs.push(() => em.off("media_changed", onMedia));
@@ -135,6 +144,9 @@ function subscribeAndForward(ws: WebSocket): () => void {
   unsubs.push(() => pm.off("peer_unavailable", onPeerUnavailable));
   unsubs.push(() => pm.off("peer_queue_changed", onPeerQueue));
   unsubs.push(() => pm.off("peer_queue_cleared", onPeerQueueCleared));
+  unsubs.push(() => gm.off("group_created", onGroupChanged));
+  unsubs.push(() => gm.off("group_updated", onGroupChanged));
+  unsubs.push(() => gm.off("group_deleted", onGroupDeleted));
 
   return () => unsubs.forEach((u) => u());
 }

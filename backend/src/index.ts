@@ -214,6 +214,8 @@ import { startMdnsBroadcast, stopMdnsBroadcast } from "./services/discovery/mdns
 import { getQueueController, wirePlayerQueueControllers } from "./services/player/index.js";
 import { getCachedDevices } from "./services/dlna/control.js";
 import { getPeerManager } from "./services/peer.js";
+import { getGroupManager } from "./services/group/index.js";
+import { startGroupWatchdog } from "./services/group/watchdog.js";
 
 const server = createServer(getRequestListener(app.fetch));
 
@@ -221,6 +223,30 @@ initWebSocketServer(server);
 
 // Load persisted device queues from DB so cast state survives backend restart.
 getQueueController().loadFromDb();
+
+// Load persisted player groups (SyncGroup) from DB. Group queue restore +
+// playback fan-out land in phase 2 together with the group protocol player.
+getGroupManager().loadFromDb();
+// Register group players (QueueController) + group peers (PeerManager) so the
+// UI can switch to a group and its queue can resume playback after restart.
+for (const g of getGroupManager().list()) {
+  getQueueController().registerGroupPlayer(g.id, g.name);
+}
+getPeerManager().reconcileGroupPeers();
+// 组创建/改名/删除 → 注册组 player + 刷新组 peer 列表(前端经 WS group_changed 刷新)。
+getGroupManager().on("group_created", (g) => {
+  getQueueController().registerGroupPlayer(g.id, g.name);
+  getPeerManager().reconcileGroupPeers();
+});
+getGroupManager().on("group_updated", () => {
+  getPeerManager().reconcileGroupPeers();
+});
+getGroupManager().on("group_deleted", (id) => {
+  getPeerManager().removeGroup(id);
+});
+
+// 组离线 watchdog:全部成员离线时保留队列,成员回归后自动恢复播放(10s 巡检)。
+startGroupWatchdog();
 
 // Start the unified peer manager: registers DLNA peers from discovery, runs
 // the 10-min inactivity cleanup for stale local + offline dlna peers.

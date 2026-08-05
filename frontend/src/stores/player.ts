@@ -81,21 +81,27 @@ export const usePlayerStore = defineStore("player", () => {
   // ==================== Unified peer system (core refs, declared early) ====================
   // currentPeerId drives which state machine the UI shows/controls.
   //   local:<userId>  → 本机 state machine (Howl audio + backend-stored queue)
-  //   dlna:<deviceId> → that device's CastState (backend-owned queue + auto-advance)
-  // Declared here (before the cast state machine) because activeCastDeviceId
+  //   dlna:<deviceId> → that device's RemoteState (backend-owned queue + auto-advance)
+  //   group:<groupId> → that player group's RemoteState (MA SyncGroup 同款:队列/状态归组,
+  //                     播放时后端并发向在线成员 cast)
+  // Declared here (before the remote state machine) because activeRemotePeerId
   // derives from it.
   const currentPeerId = ref<string>("");
   const localPeerId = computed(() => `local:${useAuthStore().userId}`);
-  const isDlnaPeer = computed(() => currentPeerId.value.startsWith("dlna:"));
+  const isRemotePeer = computed(() => {
+    const pid = currentPeerId.value;
+    return pid.startsWith("dlna:") || pid.startsWith("group:");
+  });
 
-  // ==================== DLNA (cast) state machine ====================
-  // Multi-device: each DLNA renderer gets its own CastState, so multiple
-  // devices can play independently and the UI can switch between them
-  // without losing any device's mirrored state. The backend
-  // device_queues table is the single source of truth per device; the
-  // frontend only mirrors state via per-device polling + REST.
-  interface CastState {
-    deviceId: string;
+  // ==================== Remote (DLNA cast + player group) state machine ====================
+  // Multi-target: each remote peer (dlna:<deviceId> or group:<groupId>) gets its
+  // own RemoteState, so multiple devices/groups can play independently and the
+  // UI can switch between them without losing any target's mirrored state. The
+  // backend device_queues / group_queues tables are the single source of truth
+  // per peer; the frontend only mirrors state via per-peer polling + REST.
+  interface RemoteState {
+    peerId: string; // "dlna:<deviceId>" | "group:<groupId>"
+    kind: "dlna" | "group";
     name: string;
     queue: Song[];
     index: number;
@@ -114,18 +120,20 @@ export const usePlayerStore = defineStore("player", () => {
     lastCastState: string;
     lastScrobbledSongId: string;
   }
-  // reactive Map so Vue tracks deep changes to each device's state.
-  const castStates = reactive(new Map<string, CastState>());
+  // reactive Map so Vue tracks deep changes to each peer's state.
+  const remoteStates = reactive(new Map<string, RemoteState>());
 
-  function getCastState(deviceId: string): CastState | undefined {
-    return castStates.get(deviceId);
+  function getRemoteState(peerId: string): RemoteState | undefined {
+    return remoteStates.get(peerId);
   }
-  function ensureCastState(deviceId: string, name: string = "DLNA 设备"): CastState {
-    let st = castStates.get(deviceId);
+  function ensureRemoteState(peerId: string, name: string = ""): RemoteState {
+    let st = remoteStates.get(peerId);
     if (!st) {
-      const raw: CastState = {
-        deviceId,
-        name,
+      const kind: RemoteState["kind"] = peerId.startsWith("group:") ? "group" : "dlna";
+      const raw: RemoteState = {
+        peerId,
+        kind,
+        name: name || (kind === "group" ? "播放器群组" : "DLNA 设备"),
         queue: [],
         index: -1,
         isPlaying: false,
@@ -140,63 +148,69 @@ export const usePlayerStore = defineStore("player", () => {
         lastCastState: "STOPPED",
         lastScrobbledSongId: "",
       };
-      castStates.set(deviceId, raw);
+      remoteStates.set(peerId, raw);
       // IMPORTANT: reactive Map wraps the value in a proxy on set, so the
       // original `raw` object is NOT the reactive one. Re-fetch the proxy
       // so all subsequent mutations (st.currentTime = ..., st.isPlaying =
       // ...) go through reactivity and the UI actually updates.
-      st = castStates.get(deviceId)!;
-    } else if (name && name !== "DLNA 设备") {
+      st = remoteStates.get(peerId)!;
+    } else if (name && name !== st.name) {
       st.name = name;
     }
     return st;
   }
-  function removeCastState(deviceId: string): void {
-    const st = castStates.get(deviceId);
+  function removeRemoteState(peerId: string): void {
+    const st = remoteStates.get(peerId);
     if (st?.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
     if (st?.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
-    castStates.delete(deviceId);
+    remoteStates.delete(peerId);
   }
 
-  // The currently-active DLNA device (the one the UI is bound to, if any).
+  // The currently-active remote peer (the one the UI is bound to, if any).
   // Derived from currentPeerId so there's a single source of truth.
-  const activeCastDeviceId = computed(() => {
-    const pid = currentPeerId.value;
-    return pid.startsWith("dlna:") ? pid.slice(5) : "";
+  const activeRemotePeerId = computed(() => (isRemotePeer.value ? currentPeerId.value : ""));
+  const activeRemote = computed(() => {
+    const id = activeRemotePeerId.value;
+    return id ? remoteStates.get(id) : undefined;
   });
-  const activeCast = computed(() => {
-    const id = activeCastDeviceId.value;
-    return id ? castStates.get(id) : undefined;
+  // castActive means "at least one DLNA device is being tracked" (group peers
+  // don't count — the 投屏 button/dialog is DLNA-only).
+  const castActive = computed(() => {
+    for (const pid of remoteStates.keys()) {
+      if (pid.startsWith("dlna:")) return true;
+    }
+    return false;
   });
-  // castActive now means "at least one DLNA device is being tracked".
-  const castActive = computed(() => castStates.size > 0);
-  const castDeviceName = computed(() => activeCast.value?.name || "");
+  const castDeviceName = computed(() => {
+    const st = activeRemote.value;
+    return st && st.kind === "dlna" ? st.name : "";
+  });
 
   // ==================== Unified peer system (rest) ====================
   const peers = ref<any[]>([]);
   const currentPeer = computed(() => peers.value.find(p => p.peerId === currentPeerId.value));
   const currentPeerName = computed(() => {
     const p = currentPeer.value;
-    if (!p) return isDlnaPeer.value ? castDeviceName.value : "本机";
+    if (!p) return isRemotePeer.value ? castDeviceName.value : "本机";
     return p.kind === "local" ? "本机" : p.name;
   });
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let peerWs: WebSocket | null = null;
 
   // ==================== UI-routed computed properties ====================
-  // These pick the active state machine based on currentPeerId. For DLNA,
-  // they read from the active device's CastState. The UI (MainLayout) binds
-  // to these, so it automatically shows/controls the right device when the
-  // user switches peers.
-  const queue = computed(() => isDlnaPeer.value ? (activeCast.value?.queue ?? []) : localQueue.value);
-  const currentIndex = computed(() => isDlnaPeer.value ? (activeCast.value?.index ?? -1) : localIndex.value);
-  const isPlaying = computed(() => isDlnaPeer.value ? (activeCast.value?.isPlaying ?? false) : localIsPlaying.value);
-  const currentTime = computed(() => isDlnaPeer.value ? (activeCast.value?.currentTime ?? 0) : localCurrentTime.value);
-  const duration = computed(() => isDlnaPeer.value ? (activeCast.value?.duration ?? 0) : localDuration.value);
-  const playMode = computed(() => isDlnaPeer.value ? (activeCast.value?.playMode ?? "order") : localPlayMode.value);
-  const lyrics = computed(() => isDlnaPeer.value ? (activeCast.value?.lyrics ?? []) : localLyrics.value);
-  const currentLyricLine = computed(() => isDlnaPeer.value ? (activeCast.value?.currentLyricLine ?? "") : localCurrentLyricLine.value);
-  const currentLyricIndex = computed(() => isDlnaPeer.value ? (activeCast.value?.currentLyricIndex ?? -1) : localCurrentLyricIndex.value);
+  // These pick the active state machine based on currentPeerId. For remote
+  // peers (dlna / group), they read from the active peer's RemoteState. The
+  // UI (MainLayout) binds to these, so it automatically shows/controls the
+  // right target when the user switches peers.
+  const queue = computed(() => isRemotePeer.value ? (activeRemote.value?.queue ?? []) : localQueue.value);
+  const currentIndex = computed(() => isRemotePeer.value ? (activeRemote.value?.index ?? -1) : localIndex.value);
+  const isPlaying = computed(() => isRemotePeer.value ? (activeRemote.value?.isPlaying ?? false) : localIsPlaying.value);
+  const currentTime = computed(() => isRemotePeer.value ? (activeRemote.value?.currentTime ?? 0) : localCurrentTime.value);
+  const duration = computed(() => isRemotePeer.value ? (activeRemote.value?.duration ?? 0) : localDuration.value);
+  const playMode = computed(() => isRemotePeer.value ? (activeRemote.value?.playMode ?? "order") : localPlayMode.value);
+  const lyrics = computed(() => isRemotePeer.value ? (activeRemote.value?.lyrics ?? []) : localLyrics.value);
+  const currentLyricLine = computed(() => isRemotePeer.value ? (activeRemote.value?.currentLyricLine ?? "") : localCurrentLyricLine.value);
+  const currentLyricIndex = computed(() => isRemotePeer.value ? (activeRemote.value?.currentLyricIndex ?? -1) : localCurrentLyricIndex.value);
 
   const currentSong = computed(() => {
     const q = queue.value;
@@ -212,6 +226,13 @@ export const usePlayerStore = defineStore("player", () => {
     return `/rest/stream?id=${id}&token=${encodeURIComponent(token)}`;
   }
   function getCoverUrl(id: string | undefined) { if (!id) return ""; return `/rest/getCoverArt?id=${id}&size=300`; }
+
+  // Build a backend peer API path for a remote peer (dlna:<id> or group:<id>).
+  // The backend routes both kinds through the same unified queue controller
+  // and transport layer, so one path shape serves both.
+  function peerApi(peerId: string, suffix: string): string {
+    return `/rest/api/v1/peers/${encodeURIComponent(peerId)}${suffix}`;
+  }
 
   // ==================== Local playback (本机) ====================
 
@@ -394,25 +415,25 @@ export const usePlayerStore = defineStore("player", () => {
   }
   function stopLocalProgressTimer() { if (localProgressTimer) { clearInterval(localProgressTimer); localProgressTimer = null; } }
 
-  // ==================== DLNA (cast) playback ====================
-  // All functions operate on a specific device's CastState. The UI-routed
-  // wrappers below pass the active device's state.
+  // ==================== Remote (DLNA cast + group) playback ====================
+  // All functions operate on a specific peer's RemoteState. The UI-routed
+  // wrappers below pass the active peer's state.
 
-  function castPlaySong(st: CastState, song: Song) {
+  function castPlaySong(st: RemoteState, song: Song) {
     const idx = st.queue.findIndex(s => s.id === song.id);
     if (idx >= 0) { st.index = idx; } else { st.queue.push(song); st.index = st.queue.length - 1; }
     startCastPlayback(st);
   }
 
-  function castAddToQueue(st: CastState, song: Song) {
+  function castAddToQueue(st: RemoteState, song: Song) {
     if (st.queue.findIndex(s => s.id === song.id) >= 0) return;
     st.queue.push(song);
-    api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/queue/enqueue`, {
+    api.post(peerApi(st.peerId, "/queue/enqueue"), {
       items: [songToQueueItem(song)],
     }).catch(() => {});
   }
 
-  function castPlayQueue(st: CastState, songs: Song[], index: number = 0) {
+  function castPlayQueue(st: RemoteState, songs: Song[], index: number = 0) {
     st.queue = [...songs];
     if (st.playMode === "shuffle" && songs.length > 1) {
       st.index = Math.floor(Math.random() * songs.length);
@@ -422,16 +443,17 @@ export const usePlayerStore = defineStore("player", () => {
     startCastPlayback(st);
   }
 
-  // Push a device's queue to the backend as the authoritative queue and
-  // start playing from the current index.
-  async function pushCastQueueToBackend(st: CastState, startIndex: number): Promise<void> {
+  // Push a peer's queue to the backend as the authoritative queue and
+  // start playing from the current index (dlna: casts to the device;
+  // group: fans out to all online members).
+  async function pushCastQueueToBackend(st: RemoteState, startIndex: number): Promise<void> {
     const items = st.queue.map(songToQueueItem);
     try {
-      await api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/queue/play`, {
+      await api.post(peerApi(st.peerId, "/queue/play"), {
         items,
         startIndex,
       });
-      await api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/play-mode`, {
+      await api.post(peerApi(st.peerId, "/play-mode"), {
         mode: st.playMode,
       }).catch(() => {});
     } catch (e: any) {
@@ -439,11 +461,11 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  function startCastPlayback(st: CastState) {
+  function startCastPlayback(st: RemoteState) {
     pushCastQueueToBackend(st, st.index >= 0 ? st.index : 0);
   }
 
-  async function loadCastLyrics(st: CastState, songId: string) {
+  async function loadCastLyrics(st: RemoteState, songId: string) {
     st.lyrics = [];
     st.currentLyricLine = "";
     st.currentLyricIndex = -1;
@@ -459,7 +481,7 @@ export const usePlayerStore = defineStore("player", () => {
     } catch { st.lyrics = []; }
   }
 
-  function updateCastLyric(st: CastState) {
+  function updateCastLyric(st: RemoteState) {
     if (st.lyrics.length === 0) { st.currentLyricLine = ""; st.currentLyricIndex = -1; return; }
     const t = st.currentTime;
     let idx = -1;
@@ -473,61 +495,62 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  function castTogglePlay(st: CastState) {
+  function castTogglePlay(st: RemoteState) {
     if (st.isPlaying) {
-      api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/pause`).catch(() => {});
+      api.post(peerApi(st.peerId, "/pause")).catch(() => {});
       st.isPlaying = false;
     } else {
-      api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/play`).catch(() => {});
+      api.post(peerApi(st.peerId, "/play")).catch(() => {});
       st.isPlaying = true;
     }
   }
 
-  function castNext(st: CastState) {
+  function castNext(st: RemoteState) {
     if (st.queue.length === 0) return;
-    api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/next`).catch(() => {});
+    api.post(peerApi(st.peerId, "/next")).catch(() => {});
   }
 
-  function castPrev(st: CastState) {
+  function castPrev(st: RemoteState) {
     if (st.queue.length === 0) return;
     if (st.currentTime > 3) { castSeek(st, 0); return; }
-    api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/prev`).catch(() => {});
+    api.post(peerApi(st.peerId, "/prev")).catch(() => {});
   }
 
-  function castSeek(st: CastState, time: number) {
-    api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/seek`, { seconds: time }).catch(() => {});
+  function castSeek(st: RemoteState, time: number) {
+    api.post(peerApi(st.peerId, "/seek"), { seconds: time }).catch(() => {});
     st.currentTime = time; updateCastLyric(st);
   }
 
-  function castRemoveFromQueue(st: CastState, index: number) {
-    api.delete(`/rest/api/v1/dlna/devices/${st.deviceId}/queue/${index}`).catch(() => {});
+  function castRemoveFromQueue(st: RemoteState, index: number) {
+    api.delete(peerApi(st.peerId, `/queue/${index}`)).catch(() => {});
   }
 
-  function castClearQueue(st: CastState) {
-    api.delete(`/rest/api/v1/dlna/devices/${st.deviceId}/queue`).catch(() => {});
+  function castClearQueue(st: RemoteState) {
+    api.delete(peerApi(st.peerId, "/queue")).catch(() => {});
     stopCastPoll(st);
-    removeCastState(st.deviceId);
-    // If the cleared device was the active peer, fall back to本机.
-    if (activeCastDeviceId.value === st.deviceId) {
+    removeRemoteState(st.peerId);
+    // If the cleared peer was the active one, fall back to本机.
+    if (activeRemotePeerId.value === st.peerId) {
       currentPeerId.value = localPeerId.value;
     }
   }
 
-  function castCyclePlayMode(st: CastState) {
+  function castCyclePlayMode(st: RemoteState) {
     const modes: PlayMode[] = ["order", "one", "all", "shuffle"];
     st.playMode = modes[(modes.indexOf(st.playMode) + 1) % modes.length];
-    api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/play-mode`, { mode: st.playMode }).catch(() => {});
+    api.post(peerApi(st.peerId, "/play-mode"), { mode: st.playMode }).catch(() => {});
   }
 
-  // Per-device poll: mirrors backend transport state + queue into the
-  // device's CastState. Each device has its own timer, so multiple devices
-  // are tracked simultaneously without interfering with each other.
-  function startCastPoll(st: CastState) {
+  // Per-peer poll: mirrors backend transport state + queue into the peer's
+  // RemoteState. Each peer has its own timer, so multiple targets are tracked
+  // simultaneously without interfering with each other. For groups the status
+  // is derived from the leader by the backend (MA 同款)。
+  function startCastPoll(st: RemoteState) {
     stopCastPoll(st);
     // Backend poll (2s): ground-truth state + queue snapshot.
     st.pollTimer = setInterval(async () => {
       try {
-        const res = await api.get(`/rest/api/v1/dlna/devices/${st.deviceId}/status`);
+        const res = await api.get(peerApi(st.peerId, "/status"));
         const s = res.data || {};
         st.lastCastState = s.state || "STOPPED";
         if (typeof s.position === "number") st.currentTime = s.position;
@@ -555,15 +578,15 @@ export const usePlayerStore = defineStore("player", () => {
       }
     }, 250);
   }
-  function stopCastPoll(st: CastState) {
+  function stopCastPoll(st: RemoteState) {
     if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
     if (st.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
   }
 
-  // Pull the backend's authoritative queue snapshot into a device's state.
-  async function syncCastQueueFromBackend(st: CastState): Promise<void> {
+  // Pull the backend's authoritative queue snapshot into a peer's state.
+  async function syncCastQueueFromBackend(st: RemoteState): Promise<void> {
     try {
-      const res = await api.get(`/rest/api/v1/dlna/devices/${st.deviceId}/queue`);
+      const res = await api.get(peerApi(st.peerId, "/queue"));
       const snap = res.data || {};
       if (Array.isArray(snap.items)) {
         st.queue = snap.items.map(queueItemToSong);
@@ -581,7 +604,7 @@ export const usePlayerStore = defineStore("player", () => {
   async function startCast(deviceId: string, deviceName: string) {
     if (howl) { howl.pause(); }
     stopLocalProgressTimer();
-    const st = ensureCastState(deviceId, deviceName);
+    const st = ensureRemoteState(`dlna:${deviceId}`, deviceName);
 
     if (localQueue.value.length > 0) {
       st.queue = [...localQueue.value];
@@ -608,25 +631,25 @@ export const usePlayerStore = defineStore("player", () => {
   // Exit cast mode for the active device: tell the backend to mark its queue
   // inactive (preserved in DB for later restore) and stop its transport.
   async function stopCast() {
-    const st = activeCast.value;
+    const st = activeRemote.value;
     if (!st) return;
     try {
-      await api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/stop`);
-      await api.post(`/rest/api/v1/dlna/devices/${st.deviceId}/deactivate`);
+      await api.post(`/rest/api/v1/dlna/devices/${st.peerId.slice(5)}/stop`);
+      await api.post(`/rest/api/v1/dlna/devices/${st.peerId.slice(5)}/deactivate`);
     } catch {}
     stopCastPoll(st);
-    removeCastState(st.deviceId);
+    removeRemoteState(st.peerId);
     currentPeerId.value = localPeerId.value;
   }
 
-  // On Web tab reopen: restore all active DLNA devices from the backend so
-  // the user can see/control whatever is still playing. The first active
-  // device becomes the current peer (matches the old single-device restore).
+  // On Web tab reopen: restore all active DLNA devices (and any actively
+  // playing player groups) from the backend so the user can see/control
+  // whatever is still playing. The first restored target becomes the current
+  // peer (matches the old single-device restore).
   async function restoreCast(): Promise<void> {
     try {
       const res = await api.get("/rest/api/v1/dlna/active");
       const active = res.data?.active || [];
-      if (active.length === 0) return;
       // Resolve device names once.
       let devices: any[] = [];
       try {
@@ -636,10 +659,10 @@ export const usePlayerStore = defineStore("player", () => {
       let firstRestored = false;
       for (const { deviceId, snapshot } of active) {
         if (!deviceId || !snapshot || !snapshot.isActive) continue;
-        if (castStates.has(deviceId)) continue; // already tracked
+        if (remoteStates.has(`dlna:${deviceId}`)) continue; // already tracked
         const dev = devices.find((d: any) => d.id === deviceId);
         const name = dev?.name || "DLNA 设备";
-        const st = ensureCastState(deviceId, name);
+        const st = ensureRemoteState(`dlna:${deviceId}`, name);
         await syncCastQueueFromBackend(st);
         const song = st.queue[st.index];
         if (song) loadCastLyrics(st, song.id);
@@ -650,61 +673,84 @@ export const usePlayerStore = defineStore("player", () => {
           firstRestored = true;
         }
       }
+      // Player groups: restore any group whose queue is active (isActive) —
+      // the group peer itself is permanent and carries its queue snapshot.
+      if (!firstRestored) {
+        try {
+          const peersRes = await api.get("/rest/api/v1/peers");
+          const groupPeers = (peersRes.data?.peers || [])
+            .filter((p: any) => p.kind === "group" && p.queue && p.queue.isActive);
+          for (const p of groupPeers) {
+            if (remoteStates.has(p.peerId)) continue;
+            const st = ensureRemoteState(p.peerId, p.name || "播放器群组");
+            await syncCastQueueFromBackend(st);
+            const song = st.queue[st.index];
+            if (song) loadCastLyrics(st, song.id);
+            st.lastScrobbledSongId = song?.id || "";
+            startCastPoll(st);
+            if (!firstRestored) {
+              currentPeerId.value = p.peerId;
+              firstRestored = true;
+            }
+          }
+        } catch {}
+      }
     } catch {}
   }
 
   // ==================== UI-routed control functions ====================
   // These route to the active state machine based on currentPeerId. For
-  // DLNA, they pass the active device's CastState. The UI calls these, so a
-  // single button works for whichever device is selected.
+  // remote peers (dlna / group), they pass the active peer's RemoteState.
+  // The UI calls these, so a single button works for whichever target is
+  // selected.
 
   function playSong(song: Song) {
-    if (isDlnaPeer.value && activeCast.value) castPlaySong(activeCast.value, song);
+    if (isRemotePeer.value && activeRemote.value) castPlaySong(activeRemote.value, song);
     else localPlaySong(song);
   }
   function addToQueue(song: Song) {
-    if (isDlnaPeer.value && activeCast.value) castAddToQueue(activeCast.value, song);
+    if (isRemotePeer.value && activeRemote.value) castAddToQueue(activeRemote.value, song);
     else localAddToQueue(song);
   }
   function playQueue(songs: Song[], index: number = 0) {
-    if (isDlnaPeer.value && activeCast.value) castPlayQueue(activeCast.value, songs, index);
+    if (isRemotePeer.value && activeRemote.value) castPlayQueue(activeRemote.value, songs, index);
     else localPlayQueue(songs, index);
   }
   function togglePlay() {
-    if (isDlnaPeer.value && activeCast.value) castTogglePlay(activeCast.value);
+    if (isRemotePeer.value && activeRemote.value) castTogglePlay(activeRemote.value);
     else localTogglePlay();
   }
   function next() {
-    if (isDlnaPeer.value && activeCast.value) castNext(activeCast.value);
+    if (isRemotePeer.value && activeRemote.value) castNext(activeRemote.value);
     else localNext();
   }
   function prev() {
-    if (isDlnaPeer.value && activeCast.value) castPrev(activeCast.value);
+    if (isRemotePeer.value && activeRemote.value) castPrev(activeRemote.value);
     else localPrev();
   }
   function seek(time: number) {
-    if (isDlnaPeer.value && activeCast.value) castSeek(activeCast.value, time);
+    if (isRemotePeer.value && activeRemote.value) castSeek(activeRemote.value, time);
     else localSeek(time);
   }
   function seekPercent(percent: number) { if (duration.value > 0) seek((percent / 100) * duration.value); }
   function setVolume(v: number) {
     volume.value = v; localStorage.setItem("volume", String(v));
-    if (isDlnaPeer.value && activeCast.value) {
-      api.post(`/rest/api/v1/dlna/devices/${activeCast.value.deviceId}/volume`, { volume: Math.round(v * 100) }).catch(() => {});
+    if (isRemotePeer.value && activeRemote.value) {
+      api.post(peerApi(activeRemote.value.peerId, "/volume"), { volume: Math.round(v * 100) }).catch(() => {});
       return;
     }
     if (howl) howl.volume(v);
   }
   function cyclePlayMode() {
-    if (isDlnaPeer.value && activeCast.value) castCyclePlayMode(activeCast.value);
+    if (isRemotePeer.value && activeRemote.value) castCyclePlayMode(activeRemote.value);
     else localCyclePlayMode();
   }
   function removeFromQueue(index: number) {
-    if (isDlnaPeer.value && activeCast.value) castRemoveFromQueue(activeCast.value, index);
+    if (isRemotePeer.value && activeRemote.value) castRemoveFromQueue(activeRemote.value, index);
     else localRemoveFromQueue(index);
   }
   function clearQueue() {
-    if (isDlnaPeer.value && activeCast.value) castClearQueue(activeCast.value);
+    if (isRemotePeer.value && activeRemote.value) castClearQueue(activeRemote.value);
     else localClearQueue();
     showPlaylist.value = false;
     playModeVisible.value = false;
@@ -714,11 +760,11 @@ export const usePlayerStore = defineStore("player", () => {
   function togglePlaylistPanel() { showPlaylist.value = !showPlaylist.value; }
   function togglePlayMode() { playModeVisible.value = !playModeVisible.value; }
   function loadLyrics(songId: string) {
-    if (isDlnaPeer.value && activeCast.value) loadCastLyrics(activeCast.value, songId);
+    if (isRemotePeer.value && activeRemote.value) loadCastLyrics(activeRemote.value, songId);
     else loadLocalLyrics(songId);
   }
   function updateCurrentLyric() {
-    if (isDlnaPeer.value && activeCast.value) updateCastLyric(activeCast.value);
+    if (isRemotePeer.value && activeRemote.value) updateCastLyric(activeRemote.value);
     else updateLocalLyric();
   }
 
@@ -764,26 +810,26 @@ export const usePlayerStore = defineStore("player", () => {
 
   // Switch the player bar + queue panel to a different peer.
   // This is a PURE UI operation: it only changes currentPeerId. Neither
-  // state machine is touched — 本机 keeps playing, every DLNA device keeps
-  // playing. The UI computed properties (queue/isPlaying/currentTime/...)
-  // automatically re-route to the newly selected peer's state machine.
+  // state machine is touched — 本机 keeps playing, every DLNA device and
+  // player group keeps playing. The UI computed properties
+  // (queue/isPlaying/currentTime/...) automatically re-route to the newly
+  // selected peer's state machine.
   async function switchPeer(peerId: string): Promise<void> {
     if (peerId === currentPeerId.value) return;
-    if (peerId.startsWith("dlna:")) {
-      // Switching UI to control a DLNA device. If we don't yet have a
-      // CastState for it (e.g. it's a device HA started playing on), create
-      // one and pull its queue so the UI mirrors what's playing, and start
-      // polling it. 本机 Howl and all other DLNA devices are NOT touched.
-      const deviceId = peerId.slice(5);
-      let st = castStates.get(deviceId);
+    if (peerId.startsWith("dlna:") || peerId.startsWith("group:")) {
+      // Switching UI to control a remote peer (DLNA device or player group).
+      // If we don't yet have a RemoteState for it (e.g. it's a device HA
+      // started playing on, or a group that was playing), create one and
+      // pull its queue so the UI mirrors what's playing, and start polling
+      // it. 本机 Howl and all other peers are NOT touched.
+      let st = remoteStates.get(peerId);
       if (!st) {
-        let name = "DLNA 设备";
+        let name = peerId.startsWith("group:") ? "播放器群组" : "DLNA 设备";
         try {
-          const devRes = await api.get("/rest/api/v1/dlna/devices");
-          const dev = (devRes.data?.devices || []).find((d: any) => d.id === deviceId);
-          if (dev?.name) name = dev.name;
+          const p = peers.value.find(x => x.peerId === peerId);
+          if (p?.name) name = p.name;
         } catch {}
-        st = ensureCastState(deviceId, name);
+        st = ensureRemoteState(peerId, name);
         await syncCastQueueFromBackend(st);
         const song = st.queue[st.index];
         if (song) loadCastLyrics(st, song.id);
@@ -792,7 +838,7 @@ export const usePlayerStore = defineStore("player", () => {
       }
       currentPeerId.value = peerId;
     } else {
-      // Switching UI back to本机. Every DLNA device keeps playing on its
+      // Switching UI back to本机. Every remote peer keeps playing on its
       // own. 本机 state is already intact (Howl kept playing if it was
       // playing). Just flip the UI pointer — the computed properties will
       // show本机 state again.
@@ -826,7 +872,7 @@ export const usePlayerStore = defineStore("player", () => {
   async function initLocalPeer(): Promise<void> {
     const authStore = useAuthStore();
     if (!authStore.userId) return;
-    if (!castActive.value) currentPeerId.value = localPeerId.value;
+    if (remoteStates.size === 0) currentPeerId.value = localPeerId.value;
     await registerLocalPeer();
     await restoreLocalPeer();
     await refreshPeers();
@@ -871,6 +917,14 @@ export const usePlayerStore = defineStore("player", () => {
           if (idx >= 0) peers.value[idx].queue = { items: [], currentIndex: -1, playMode: "order", isActive: false };
           break;
         }
+        // Group events (播放器群组页 + 播放器切换器):refresh on create/rename/
+        // member change,remove on delete. Bumps groupVersion so the Groups page
+        // can reload without polling.
+        case "group_changed":
+        case "group_deleted":
+          groupVersion.value++;
+          refreshPeers();
+          break;
       }
     };
     peerWs.onclose = () => {
@@ -888,10 +942,14 @@ export const usePlayerStore = defineStore("player", () => {
 
   function teardownPeer(): void {
     stopHeartbeat();
-    // Stop polling every tracked DLNA device.
-    castStates.forEach(st => stopCastPoll(st));
+    // Stop polling every tracked remote peer.
+    remoteStates.forEach(st => stopCastPoll(st));
     disconnectPeerWs();
   }
+
+  // Bumped by the WS handler on group_changed / group_deleted so the
+  // 播放器群组 page can reactively reload.
+  const groupVersion = ref(0);
 
   return {
     // UI-routed computed (auto-switch based on currentPeerId)
@@ -905,6 +963,8 @@ export const usePlayerStore = defineStore("player", () => {
     // peer system
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
     switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,
+    // group events (播放器群组页刷新信号)
+    groupVersion,
     // UI-routed controls
     playSong, addToQueue, playQueue, togglePlay, next, prev,
     seek, seekPercent, setVolume, cyclePlayMode,

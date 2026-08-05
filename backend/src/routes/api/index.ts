@@ -26,6 +26,9 @@ import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager, suffixToMime } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
+import { getGroupManager } from "../../services/group/index.js";
+import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
+import { getQueueController } from "../../services/player/index.js";
 
 export const apiRoutes = new Hono();
 
@@ -1086,6 +1089,12 @@ function decodePeerId(c: any): string {
   return decodeURIComponent(c.req.param("peerId") || "");
 }
 
+// 可投屏/可控制 peer:dlna 设备与播放器群组(group)。两者队列都归
+// QueueController 管(内部按裸 id),传输控制一个走 control.ts、一个走组扇出。
+function isCastPeer(parsed: { kind: string }): boolean {
+  return parsed.kind === "dlna" || parsed.kind === "group";
+}
+
 // List all known peers (local + dlna) with their queue snapshots. The Web
 // client calls this to populate the player-switcher popup.
 apiRoutes.get("/v1/peers", (c) => {
@@ -1109,7 +1118,7 @@ apiRoutes.post("/v1/peers/:peerId/heartbeat", (c) => {
   return c.json({ success: ok });
 });
 
-// Get a peer's queue snapshot (local: from local_queues; dlna: from queue manager).
+// Get a peer's queue snapshot (local: from local_queues; dlna/group: from queue manager).
 apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const snap = pm.getQueueSnapshot(peerId);
@@ -1120,7 +1129,7 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   return c.json({ ...snap, currentMedia });
 });
 
-// Replace the queue and (for dlna) start playing from startIndex.
+// Replace the queue and (for dlna/group) start playing from startIndex.
 // For local peers this just persists the queue; the Web client starts Howl.
 // Body: { items: QueueItem[], startIndex?: number }
 apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
@@ -1130,7 +1139,7 @@ apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
   const start = typeof startIndex === "number" ? startIndex : 0;
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     try {
       await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
       return c.json({ success: true });
@@ -1149,7 +1158,7 @@ apiRoutes.post("/v1/peers/:peerId/queue/enqueue", async (c) => {
   if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     try {
       await getQueueManager().enqueue(parsed.id, items, getDlnaBaseUrl(c));
       return c.json({ success: true });
@@ -1164,7 +1173,7 @@ apiRoutes.delete("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     getQueueManager().clear(parsed.id);
   } else {
     pm.localClear(peerId);
@@ -1179,7 +1188,7 @@ apiRoutes.delete("/v1/peers/:peerId/queue/:index", async (c) => {
   if (Number.isNaN(index)) return c.json({ error: "无效的 index" }, 400);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     getQueueManager().removeAt(parsed.id, index, getDlnaBaseUrl(c));
   } else {
     pm.localRemoveAt(peerId, index);
@@ -1197,7 +1206,7 @@ apiRoutes.post("/v1/peers/:peerId/play-mode", async (c) => {
   }
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     getQueueManager().setPlayMode(parsed.id, mode);
   } else {
     pm.localSetPlayMode(peerId, mode);
@@ -1230,6 +1239,10 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
     try { await playDevice(parsed.id); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "group") {
+    try { await getQueueController().transport(parsed.id, "play"); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true }); // local: no-op
 });
 
@@ -1239,6 +1252,10 @@ apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
   if (parsed.kind === "dlna") {
     try { await pauseDevice(parsed.id); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "group") {
+    try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   return c.json({ success: true });
@@ -1252,6 +1269,10 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
     try { await stopDevice(parsed.id); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "group") {
+    try { await getQueueController().transport(parsed.id, "stop"); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
@@ -1259,7 +1280,7 @@ apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     try { await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
@@ -1270,7 +1291,7 @@ apiRoutes.post("/v1/peers/:peerId/prev", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
     try { await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
@@ -1288,6 +1309,13 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
     try { await seekDevice(parsed.id, seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "group") {
+    const body = await c.req.json().catch(() => ({} as any));
+    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
+    if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
+    try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
@@ -1301,11 +1329,18 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
     try { await setDeviceVolume(parsed.id, volume); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "group") {
+    const { volume } = await c.req.json().catch(() => ({} as any));
+    if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+    try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
-// Peer status: for dlna returns the device transport state; for local returns
-// the stored queue metadata (HA uses this to read the local peer's queue).
+// Peer status: for dlna returns the device transport state; for groups the
+// leader's state (MA 同款:组状态从 leader 派生);for local returns the stored
+// queue metadata (HA uses this to read the local peer's queue).
 apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
@@ -1324,8 +1359,83 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       return c.json(status);
     } catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "group") {
+    try {
+      const status = await getGroupStatus(parsed.id);
+      const evt = getEventManager().getEventState(getGroupLeaderDeviceId(parsed.id) || "");
+      if (evt) {
+        if (evt.state) status.state = evt.state;
+        if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
+        if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
+        if (typeof evt.volume === "number") status.volume = evt.volume;
+      }
+      return c.json(status);
+    } catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   // local: return queue snapshot as "status"
   return c.json(pm.getQueueSnapshot(peerId) || {});
+});
+
+// ==================== 播放器群组 API ====================
+// 一个组聚合多台 DLNA 设备(组持队列、播放时并发向成员 cast 同一首歌,
+// 仿 MA Sync Group / Universal Group)。成员勾选提交全量 memberIds(PUT)。
+// 组播放控制复用 peer API:peerId = "group:<groupId>"(阶段 2 接入)。
+const gm = getGroupManager();
+
+// 列出全部组(含成员设备信息:名称/可用性)。
+apiRoutes.get("/v1/groups", (c) => {
+  return c.json({ groups: gm.listWithMembers() });
+});
+
+// 新建组。Body: { name: string, memberIds?: string[] }
+apiRoutes.post("/v1/groups", async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const name = typeof body.name === "string" ? body.name : "";
+  const memberIds = Array.isArray(body.memberIds) ? body.memberIds : [];
+  try {
+    const g = gm.createGroup(name, memberIds);
+    return c.json({ group: gm.getWithMembers(g.id) }, 201);
+  } catch (e: any) {
+    return c.json({ error: e.message || "创建组失败" }, 400);
+  }
+});
+
+// 更新组:改名(name)和/或全量替换成员(memberIds)。Body: { name?, memberIds? }
+apiRoutes.put("/v1/groups/:id", async (c) => {
+  const id = c.req.param("id")!;
+  const body = await c.req.json().catch(() => ({} as any));
+  try {
+    if (typeof body.name === "string") {
+      const renamed = gm.renameGroup(id, body.name);
+      if (!renamed) return c.json({ error: "组不存在" }, 404);
+    }
+    if (Array.isArray(body.memberIds)) {
+      const before = gm.get(id)?.memberIds || [];
+      const updated = gm.setMembers(id, body.memberIds);
+      if (!updated) return c.json({ error: "组不存在" }, 404);
+      const after = gm.get(id)?.memberIds || [];
+      const added = after.filter(d => !before.includes(d));
+      if (added.length > 0) {
+        // 成员加入播放中的组:把当前曲 cast 给新成员并 seek 到 leader 进度
+        // (仅加入时一次,不做周期漂移校正——纯 MA 忠实策略)。
+        getQueueController().rejoinMembers(id, added).catch((e: any) => {
+          console.warn(`[group] ${id}: 成员加入对齐失败: ${e?.message || e}`);
+        });
+      }
+    }
+    const g = gm.getWithMembers(id);
+    if (!g) return c.json({ error: "组不存在" }, 404);
+    return c.json({ group: g });
+  } catch (e: any) {
+    return c.json({ error: e.message || "更新组失败" }, 400);
+  }
+});
+
+// 删除组(组队列随之删除,成员设备恢复单独控制)。
+apiRoutes.delete("/v1/groups/:id", (c) => {
+  const ok = gm.deleteGroup(c.req.param("id")!);
+  if (!ok) return c.json({ error: "组不存在" }, 404);
+  return c.json({ success: true });
 });
 
 // Convenience: convert song rows into QueueItem objects (shared by the

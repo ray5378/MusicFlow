@@ -11,6 +11,7 @@
         <el-menu-item index="/albums"><el-icon><Service /></el-icon><template #title>专辑</template></el-menu-item>
         <el-menu-item index="/artists"><el-icon><User /></el-icon><template #title>艺术家</template></el-menu-item>
         <el-menu-item index="/playlists"><el-icon><List /></el-icon><template #title>歌单</template></el-menu-item>
+        <el-menu-item index="/groups"><el-icon><Box /></el-icon><template #title>播放器群组</template></el-menu-item>
         <el-menu-item index="/history"><el-icon><Clock /></el-icon><template #title>播放历史</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/music"><el-icon><Search /></el-icon><template #title>音乐管理</template></el-menu-item>
@@ -130,6 +131,7 @@
               >
                 <el-icon class="psi-icon">
                   <Headset v-if="p.kind === 'local'" />
+                  <Box v-else-if="p.kind === 'group'" />
                   <Monitor v-else />
                 </el-icon>
                 <div class="psi-info">
@@ -348,7 +350,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";

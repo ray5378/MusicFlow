@@ -288,6 +288,23 @@ export function initDatabase() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_local_queues_user ON local_queues(user_id);
+
+    CREATE TABLE IF NOT EXISTS player_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      member_ids TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS group_queues (
+      group_id TEXT PRIMARY KEY,
+      items_json TEXT NOT NULL DEFAULT '[]',
+      current_index INTEGER NOT NULL DEFAULT -1,
+      play_mode TEXT NOT NULL DEFAULT 'order',
+      is_active INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)

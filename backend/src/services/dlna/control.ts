@@ -498,6 +498,61 @@ export async function seekDevice(deviceId: string, seconds: number): Promise<voi
   } catch (e: any) { markFailed(deviceId, "Seek", e); throw e; }
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+interface AlignOpts {
+  tries?: number;
+  intervalMs?: number;
+  toleranceSec?: number;
+  settleTries?: number;
+  settleIntervalMs?: number;
+  /** 每次 seek 前取实时目标位置(默认用固定 targetSec)。加入对齐时传 leader 的实时位置,
+   *  避免 settle 等待期间 leader 继续前进导致目标过期。 */
+  getTargetSec?: () => number | Promise<number>;
+}
+
+// 一次性"校准 seek":部分渲染器在 SetAVTransportURI/Play 后立刻接收 Seek 会静默失效
+// (实测 HiVi:cast→立即 seek 不生效,已进入稳定 PLAYING 后手动 seek 正常)。于是先等设备
+// 进入"正在播放且位置前进"的稳定态(默认最多 ~10s),再 seek+轮询设备位置收敛到目标。
+// 仅在"新成员加入对齐 / 离线恢复续播"这类一次性对齐场景使用(纯 MA 忠实,无周期校正)。
+export async function alignDeviceToPosition(
+  deviceId: string,
+  targetSec: number,
+  opts?: AlignOpts,
+): Promise<number> {
+  const tries = opts?.tries ?? 3;
+  const intervalMs = opts?.intervalMs ?? 1000;
+  const toleranceSec = opts?.toleranceSec ?? 3;
+  // 等设备进入稳定 PLAYING(位置开始前进)再 seek;超过 settle 上限也继续(尽力而为)。
+  const settleTries = opts?.settleTries ?? 10;
+  const settleIntervalMs = opts?.settleIntervalMs ?? 1000;
+  for (let i = 0; i < settleTries; i++) {
+    try {
+      const s = await getDeviceStatus(deviceId);
+      if (s.state === "PLAYING" && (s.position ?? 0) > 0) break;
+    } catch {}
+    await sleep(settleIntervalMs);
+  }
+  let lastPos = 0;
+  for (let i = 0; i < tries; i++) {
+    const target = opts?.getTargetSec ? await opts.getTargetSec() : targetSec;
+    try {
+      await seekDevice(deviceId, target);
+      await sleep(intervalMs);
+      const s = await getDeviceStatus(deviceId);
+      lastPos = s.position ?? 0;
+      if (Math.abs(lastPos - target) <= toleranceSec) break;
+    } catch {
+      // 设备偶发抖动(如 seek 期间 transport 被重置),继续重试。
+    }
+  }
+  const finalTarget = opts?.getTargetSec ? await opts.getTargetSec() : targetSec;
+  if (Math.abs(lastPos - finalTarget) > toleranceSec) {
+    console.warn(`[align] ${deviceId} 目标 ${Math.round(finalTarget)}s,校准后仍在 ${lastPos}s(设备可能不支持 seek)`);
+  }
+  return lastPos;
+}
+
 // Set volume (0-100). Requires RenderingControl service.
 export async function setDeviceVolume(deviceId: string, volume: number): Promise<void> {
   const device = getDevice(deviceId);

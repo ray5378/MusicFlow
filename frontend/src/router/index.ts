@@ -23,6 +23,7 @@ const routes = [
       { path: "playlists", name: "Playlists", component: () => import("@/views/Playlists/index.vue") },
       { path: "playlists/:id", name: "PlaylistDetail", component: () => import("@/views/Playlists/Detail.vue") },
       { path: "favorites", name: "Favorites", component: () => import("@/views/Favorites/index.vue") },
+      { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue") },
       { path: "history", name: "History", component: () => import("@/views/History/index.vue") },
       { path: "settings", name: "Settings", component: () => import("@/views/Settings/index.vue") },
       {

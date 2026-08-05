@@ -7,10 +7,13 @@
 //                       tab and find their queue again.
 //   - dlna:<deviceId> → a DLNA renderer. Audio runs on the device; the backend
 //                       owns the queue + auto-advance (see dlna/queue.ts).
+//   - group:<groupId> → a player group (SyncGroup) that aggregates DLNA devices.
+//                       It holds its own queue and fans playback out to members.
 //
-// The peer registry is in-memory and reconciled from two sources:
+// The peer registry is in-memory and reconciled from three sources:
 //   - Web clients register + heartbeat via /peers/:peerId/heartbeat
 //   - DLNA discovery (control.ts refreshDevices) registers/refreshes dlna peers
+//   - player groups (group/index.ts) register/refresh group peers
 //
 // Inactivity cleanup (10-min timeout, runs every 60s):
 //   - local peer:  no heartbeat for 10 min → mark unavailable + clear its
@@ -18,6 +21,8 @@
 //                  peer alive forever).
 //   - dlna peer:   device went offline (markDlnaUnavailable) for 10 min →
 //                  clear its device_queues row.
+//   - group peer:  permanent — never cleaned up (groups exist independent of
+//                  playback).
 // A peer that still has an active queue is kept (just marked unavailable) so
 // the UI can show "last seen" state; only the queue is cleared on timeout.
 import { EventEmitter } from "events";
@@ -27,8 +32,9 @@ import { eq } from "drizzle-orm";
 import { getQueueManager, type QueueItem, type PlayMode, type QueueSnapshot } from "./dlna/queue.js";
 import { getCachedDevices } from "./dlna/control.js";
 import { getEventManager } from "./dlna/eventing.js";
+import { getGroupManager } from "./group/index.js";
 
-export type PeerKind = "local" | "dlna";
+export type PeerKind = "local" | "dlna" | "group";
 
 export interface Peer {
   peerId: string;
@@ -38,6 +44,7 @@ export interface Peer {
   lastActiveAt: number; // ms epoch
   userId?: string;      // local peers only
   deviceId?: string;    // dlna peers only
+  groupId?: string;     // group peers only
 }
 
 export interface PeerWithQueue extends Peer {
@@ -61,12 +68,15 @@ class PeerManager extends EventEmitter {
     if (this.cleanupTimer) return;
     // Reconcile DLNA peers from the device cache on each tick so newly
     // discovered devices show up without waiting for a refreshDevices call.
+    // Group peers are reconciled from GroupManager (availability = any member
+    // online; names follow group renames).
     this.cleanupTimer = setInterval(() => {
       this.reconcileDlnaPeers();
+      this.reconcileGroupPeers();
       this.runCleanup();
     }, CLEANUP_INTERVAL_MS);
     // Run once shortly after boot so the peer list is populated immediately.
-    setTimeout(() => { this.reconcileDlnaPeers(); }, 5000);
+    setTimeout(() => { this.reconcileDlnaPeers(); this.reconcileGroupPeers(); }, 5000);
     // Bridge DLNA discovery → peer availability. Whenever the device list
     // changes (refreshDevices / SSDP sweep), re-sync the dlna peer set so the
     // switcher popup and cleanup timer see fresh availability without waiting
@@ -160,17 +170,66 @@ class PeerManager extends EventEmitter {
     }
   }
 
+  /** Register or refresh a group peer. availability = 任一成员在线。 */
+  registerGroup(groupId: string, name: string, available: boolean): Peer {
+    const peerId = `group:${groupId}`;
+    const now = Date.now();
+    let p = this.peers.get(peerId);
+    if (!p) {
+      p = { peerId, kind: "group", name, available, lastActiveAt: now, groupId };
+      this.peers.set(peerId, p);
+      this.emit("peer_registered", p);
+    } else {
+      const wasAvailable = p.available;
+      p.name = name;
+      p.available = available;
+      if (available) p.lastActiveAt = now;
+      if (available && !wasAvailable) this.emit("peer_available", p);
+      else if (!available && wasAvailable) this.emit("peer_unavailable", p);
+    }
+    return p;
+  }
+
+  /** Sync the group peer set from GroupManager (names + availability). */
+  reconcileGroupPeers(): void {
+    const groups = getGroupManager().list();
+    const seen = new Set<string>();
+    for (const g of groups) {
+      seen.add(g.id);
+      const available = g.memberIds.some(
+        d => getCachedDevices().find(x => x.id === d)?.available,
+      );
+      this.registerGroup(g.id, g.name, available);
+    }
+    // Groups that vanished → remove their peer entry entirely (permanent peers,
+    // no offline grace needed).
+    for (const p of this.peers.values()) {
+      if (p.kind !== "group" || !p.groupId) continue;
+      if (!seen.has(p.groupId)) this.removeGroup(p.groupId);
+    }
+  }
+
+  /** Remove a group peer (group deleted). */
+  removeGroup(groupId: string): void {
+    const peerId = `group:${groupId}`;
+    const p = this.peers.get(peerId);
+    if (!p) return;
+    if (p.available) this.emit("peer_unavailable", p);
+    this.peers.delete(peerId);
+  }
+
   // ==================== Queries ====================
 
   list(): Peer[] {
     return Array.from(this.peers.values());
   }
 
-  /** Peers sorted: local first, then dlna by name. Includes queue snapshot. */
+  /** Peers sorted: local first, then dlna, then group by name. Includes queue snapshot. */
   listWithQueues(): PeerWithQueue[] {
+    const KIND_RANK: Record<PeerKind, number> = { local: 0, dlna: 1, group: 2 };
     return this.list()
       .sort((a, b) => {
-        if (a.kind !== b.kind) return a.kind === "local" ? -1 : 1;
+        if (a.kind !== b.kind) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
         return a.name.localeCompare(b.name, "zh");
       })
       .map(p => ({ ...p, queue: this.getQueueSnapshot(p.peerId) }));
@@ -184,16 +243,18 @@ class PeerManager extends EventEmitter {
   static parse(peerId: string): { kind: PeerKind; id: string } | null {
     if (peerId.startsWith("local:")) return { kind: "local", id: peerId.slice(6) };
     if (peerId.startsWith("dlna:")) return { kind: "dlna", id: peerId.slice(5) };
+    if (peerId.startsWith("group:")) return { kind: "group", id: peerId.slice(6) };
     return null;
   }
 
   // ==================== Queue access (unified) ====================
 
-  /** Get the queue snapshot for a peer (local or dlna). */
+  /** Get the queue snapshot for a peer (local / dlna / group). */
   getQueueSnapshot(peerId: string): QueueSnapshot | undefined {
     const parsed = PeerManager.parse(peerId);
     if (!parsed) return undefined;
-    if (parsed.kind === "dlna") {
+    if (parsed.kind === "dlna" || parsed.kind === "group") {
+      // dlna 与 group 队列都归 QueueController 管,内部按裸 id 作 key。
       return getQueueManager().snapshot(parsed.id);
     }
     // local
@@ -339,6 +400,8 @@ class PeerManager extends EventEmitter {
   private runCleanup(): void {
     const now = Date.now();
     for (const p of this.peers.values()) {
+      // group peers are permanent (groups exist independent of playback)
+      if (p.kind === "group") continue;
       const idleMs = now - p.lastActiveAt;
       if (idleMs < INACTIVE_TIMEOUT_MS) continue;
       // Peer has been inactive past the threshold.
