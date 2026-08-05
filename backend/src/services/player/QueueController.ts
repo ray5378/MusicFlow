@@ -10,7 +10,7 @@ import { deviceQueues, songs } from "../../db/schema.js";
 import { PlayMode, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
-import { createDlnaProtocolPlayer, getEffectiveBaseUrl } from "../dlna/control.js";
+import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia } from "../dlna/control.js";
 import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
 
@@ -292,6 +292,8 @@ export class QueueController extends EventEmitter {
   clear(playerId: string): void {
     const q = this.queues.get(playerId); if (!q) return;
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;
+    // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(如设备离线清理后)。
+    clearCurrentMedia(playerId);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
   }
