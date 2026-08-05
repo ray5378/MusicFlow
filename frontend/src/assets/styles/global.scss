@@ -1,126 +1,572 @@
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* ============================================================================
+   MusicFlow Global Styles — 飞牛音乐 (FnOS) inspired theme
+   - 暗色玻璃拟态 + 极光背景
+   - 主品牌色 #f62c55（播放/喜欢/选中/进度条/FAB）
+   - 字体 Montserrat + PingFang SC / Microsoft YaHei
+   ========================================================================== */
 
-html, body, #app {
-  width: 100%;
-  height: 100%;
-  font-family: 'Noto Sans SC', 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-  background-color: #f5f5f5;
-  color: #333;
-}
-
-body { overflow-x: hidden; }
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
 
 :root {
-  --primary-color: #c35f33;
-  --primary-hover: #d4704a;
-  --bg-color: #f5f5f5;
-  --sidebar-width: 240px;
-  --sidebar-collapsed-width: 64px;
-  --header-height: 60px;
-  --player-height: 72px;
+  /* ===== Brand / accent colors (FnOS derived) ===== */
+  --fnos-red: #f62c55;
+  --fnos-red-hover: #e63954;
+  --fnos-red-soft: rgba(246, 44, 85, 0.16);
+  --fnos-red-ring: rgba(246, 44, 85, 0.42);
+  --fnos-blue: #1b73fb;
+  --fnos-yellow: #f8bf28;
+  --fnos-orange: #fc5e25;
+  --fnos-green: #6bab45;
+  --fnos-purple: #c934e1;
+  --fnos-pink: #f05672;
+
+  /* ===== Backgrounds ===== */
+  --fnos-bg-primary: #0f0f0f;            /* 登录页/极深色 */
+  --fnos-bg-secondary: #24202e;          /* 主界面深紫灰 */
+  --fnos-bg-elev: rgba(255, 255, 255, 0.04);
+  --fnos-bg-card: rgba(255, 255, 255, 0.06);
+  --fnos-bg-card-hover: rgba(255, 255, 255, 0.10);
+  --fnos-bg-input: rgba(0, 0, 0, 0.3);
+  --fnos-bg-glass: rgba(0, 0, 0, 0.6);
+  --fnos-bg-overlay: rgba(0, 0, 0, 0.7);
+  --fnos-bg-gradient-primary: linear-gradient(180deg, #2d293a 0%, #14121b 100%);
+  --fnos-bg-gradient-overlay: linear-gradient(180deg, rgba(20, 18, 27, 0.4) 0%, #14121b 70%);
+
+  /* 统一主体色调：标题栏/侧栏所在的"收敛端"。所有页面共用，
+     不同页的强调色只作用于内容区，并向上渗透、在标题栏处收敛回此色。 */
+  --fnos-unified-base: linear-gradient(180deg, #211d33 0%, #1a1728 52%, #15121f 100%);
+
+  /* ===== Text ===== */
+  --fnos-text-primary: #ffffff;
+  --fnos-text-primary-dim: rgba(255, 255, 255, 0.9);
+  --fnos-text-secondary: rgba(255, 255, 255, 0.7);
+  --fnos-text-tertiary: rgba(255, 255, 255, 0.5);
+  --fnos-text-muted: rgba(255, 255, 255, 0.35);
+  --fnos-text-on-accent: #ffffff;
+
+  /* ===== Borders ===== */
+  --fnos-border-default: rgba(255, 255, 255, 0.12);
+  --fnos-border-subtle: rgba(255, 255, 255, 0.08);
+  --fnos-border-emphasis: rgba(255, 255, 255, 0.2);
+
+  /* ===== Shadows ===== */
+  --fnos-shadow-small: 0 1px 4px rgba(0, 0, 0, 0.4);
+  --fnos-shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --fnos-shadow-large: 0 8px 32px rgba(0, 0, 0, 0.35);
+
+  /* ===== Layout ===== */
+  --fnos-sidebar-width: 240px;
+  --fnos-sidebar-collapsed: 72px;
+  --fnos-player-height: 84px;
+  --fnos-topbar-height: 64px;
+  --fnos-radius-sm: 6px;
+  --fnos-radius: 10px;
+  --fnos-radius-lg: 16px;
+  --fnos-radius-xl: 24px;
+
+  /* ===== Font stack ===== */
+  --fnos-font: 'Montserrat', Helvetica, 'Helvetica Neue', 'PingFang SC', -apple-system,
+               BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
+
+  /* ===== Element Plus overrides (dark glass) ===== */
+  --el-color-primary: var(--fnos-red);
+  --el-color-primary-light-3: #f4778e;
+  --el-color-primary-light-5: #f89aaa;
+  --el-color-primary-light-7: #fbc1cc;
+  --el-color-primary-light-9: #fde2e8;
+  --el-color-primary-dark-2: #d3254a;
+
+  --el-bg-color: transparent;
+  --el-bg-color-page: transparent;
+  --el-bg-color-overlay: #1f1c2a;
+
+  --el-text-color-primary: var(--fnos-text-primary);
+  --el-text-color-regular: var(--fnos-text-primary-dim);
+  --el-text-color-secondary: var(--fnos-text-secondary);
+  --el-text-color-placeholder: var(--fnos-text-muted);
+  --el-text-color-disabled: var(--fnos-text-muted);
+
+  --el-border-color: var(--fnos-border-default);
+  --el-border-color-light: var(--fnos-border-subtle);
+  --el-border-color-lighter: rgba(255, 255, 255, 0.05);
+  --el-border-color-extra-light: rgba(255, 255, 255, 0.04);
+
+  --el-fill-color: rgba(255, 255, 255, 0.06);
+  --el-fill-color-light: rgba(255, 255, 255, 0.04);
+  --el-fill-color-lighter: rgba(255, 255, 255, 0.03);
+  --el-fill-color-extra-light: rgba(255, 255, 255, 0.02);
+  --el-fill-color-blank: transparent;
+
+  --el-disabled-bg-color: rgba(255, 255, 255, 0.04);
+  --el-disabled-text-color: var(--fnos-text-muted);
+  --el-disabled-border-color: var(--fnos-border-subtle);
 }
 
-a {
-  text-decoration: none;
-  color: inherit;
+/* ===== Base reset ===== */
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--fnos-font);
+  color: var(--fnos-text-primary);
+  background-color: var(--fnos-bg-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+#app { min-height: 100vh; }
 
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #ccc;
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  &:hover { background: rgba(255, 255, 255, 0.28); }
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+/* ===== Selection ===== */
+::selection { background: var(--fnos-red); color: #fff; }
+
+/* ===== Glass utility ===== */
+.fnos-glass {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.fnos-glass-strong {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-/* ============================================================
-   Responsive (mobile / tablet) base rules
-   Breakpoint: < 768px is treated as phone-style layout.
-   ============================================================ */
-@media (max-width: 768px) {
-  :root {
-    --player-height: 56px;
+/* ===== Element Plus dark component overrides ===== */
+
+/* Buttons */
+.el-button {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fnos-text-primary);
+  &:hover, &:focus {
+    border-color: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.10);
+    color: var(--fnos-text-primary);
   }
+  &.is-circle { background: rgba(255, 255, 255, 0.06); }
+  &.is-circle:hover { background: rgba(255, 255, 255, 0.12); }
 
-  /* Pagination: wrap and drop the size/jumper controls on small screens */
-  .el-pagination {
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 4px;
+  &--primary {
+    background: var(--fnos-red);
+    border-color: var(--fnos-red);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(246, 44, 85, 0.35);
+    &:hover, &:focus { background: var(--fnos-red-hover); border-color: var(--fnos-red-hover); color: #fff; }
+    &.is-plain {
+      background: var(--fnos-red-soft);
+      border-color: rgba(246, 44, 85, 0.4);
+      color: var(--fnos-red);
+    }
   }
-  .el-pagination__sizes,
-  .el-pagination__jump {
-    display: none;
+  &[disabled], &.is-disabled {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    color: var(--fnos-text-muted) !important;
   }
+}
 
-  /* Keep dialogs near full width on phones */
-  .el-dialog {
-    width: auto !important;
-    max-width: 94vw;
-    margin: 6vh auto 0;
+/* Inputs */
+.el-input {
+  --el-input-bg-color: var(--fnos-bg-input);
+  --el-input-border-color: rgba(255, 255, 255, 0.12);
+  --el-input-hover-border-color: rgba(255, 255, 255, 0.25);
+  --el-input-focus-border-color: var(--fnos-red);
+  --el-input-text-color: var(--fnos-text-primary);
+  --el-input-placeholder-color: var(--fnos-text-muted);
+}
+.el-input__wrapper {
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset !important;
+  border-radius: var(--fnos-radius);
+  &:hover { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25) inset !important; }
+  &.is-focus { box-shadow: 0 0 0 1px var(--fnos-red) inset !important; }
+}
+.el-input__inner {
+  color: var(--fnos-text-primary) !important;
+  &::placeholder { color: var(--fnos-text-muted); }
+}
+.el-textarea__inner {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--fnos-text-primary);
+  &:hover, &:focus { border-color: var(--fnos-red); }
+}
+
+/* Dropdown / Popover / Tooltip */
+.el-popper, .el-popover, .el-dropdown-menu, .el-tooltip__popper {
+  background: #1f1c2a !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: var(--fnos-text-primary) !important;
+  box-shadow: var(--fnos-shadow-large) !important;
+}
+.el-popper.is-light .el-popper__arrow::before {
+  background: #1f1c2a !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+.el-dropdown-menu__item {
+  color: var(--fnos-text-primary-dim);
+  &:hover, &:focus { background: rgba(255, 255, 255, 0.08); color: var(--fnos-text-primary); }
+  &.is-divided { border-top-color: rgba(255, 255, 255, 0.08); }
+}
+
+/* Dialog */
+.el-dialog {
+  background: #1f1c2a !important;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--fnos-radius-lg) !important;
+  .el-dialog__header { padding: 20px 24px 0; }
+  .el-dialog__title { color: var(--fnos-text-primary); font-weight: 600; }
+  .el-dialog__body { color: var(--fnos-text-primary-dim); padding: 20px 24px; }
+  .el-dialog__footer { padding: 0 24px 20px; }
+}
+
+/* Drawer */
+.el-drawer { background: #1f1c2a !important; }
+.el-drawer__header { color: var(--fnos-text-primary); margin-bottom: 16px; }
+
+/* Slider (progress bar / volume) */
+.el-slider {
+  --el-slider-runway-bg-color: rgba(255, 255, 255, 0.18);
+  --el-slider-main-bg-color: var(--fnos-red);
+  --el-slider-button-size: 14px;
+  --el-slider-button-wrapper-size: 28px;
+}
+.el-slider__bar { background: var(--fnos-red) !important; }
+.el-slider__button { border: 2px solid var(--fnos-red) !important; background: #fff !important; }
+
+/* Pagination */
+.el-pagination {
+  --el-pagination-bg-color: transparent;
+  --el-pagination-button-bg-color: rgba(255, 255, 255, 0.06);
+  --el-pagination-button-color: var(--fnos-text-primary-dim);
+  --el-pagination-button-disabled-color: var(--fnos-text-muted);
+  --el-pagination-hover-color: var(--fnos-red);
+  color: var(--fnos-text-primary-dim);
+  .btn-prev, .btn-next, .el-pager li {
+    background: rgba(255, 255, 255, 0.06) !important;
+    color: var(--fnos-text-primary-dim) !important;
   }
+  .el-pager li.is-active { background: var(--fnos-red) !important; color: #fff !important; }
+  .el-pagination__sizes .el-select .el-input__wrapper { background: rgba(255, 255, 255, 0.08); }
+  .el-pagination__total, .el-pagination__jump { color: var(--fnos-text-secondary); }
+}
 
-  /* Slightly smaller input/button density reads better on touch */
-  .el-input__inner,
-  .el-textarea__inner { font-size: 15px; }
-
-  /* Shared page-header: always stack vertically on phones */
-  .page-header {
-    flex-direction: column !important;
-    align-items: stretch !important;
-    gap: 12px;
+/* Table (used in Music list, Playlists, etc.) */
+.el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(255, 255, 255, 0.04);
+  --el-table-border-color: rgba(255, 255, 255, 0.06);
+  --el-table-border: 1px solid rgba(255, 255, 255, 0.06);
+  --el-table-header-text-color: var(--fnos-text-secondary);
+  --el-table-text-color: var(--fnos-text-primary-dim);
+  --el-table-row-hover-bg-color: rgba(255, 255, 255, 0.06);
+  --el-table-current-row-bg-color: rgba(246, 44, 85, 0.12);
+  background: transparent !important;
+  color: var(--fnos-text-primary-dim);
+  &::before, &::after { background: transparent !important; }
+  th.el-table__cell {
+    background: rgba(255, 255, 255, 0.04) !important;
+    color: var(--fnos-text-secondary) !important;
+    border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+    font-weight: 500;
   }
-  .page-header .header-actions {
-    flex-wrap: wrap;
-    justify-content: flex-start;
+  td.el-table__cell {
+    background: transparent !important;
+    border-bottom-color: rgba(255, 255, 255, 0.06) !important;
   }
-  .page-header .header-actions .el-input,
-  .page-header .header-actions > .el-input,
-  .page-header > .el-input { width: 100% !important; max-width: none; }
+  tr { background: transparent !important; }
+  tr:hover > td.el-table__cell { background: rgba(255, 255, 255, 0.06) !important; }
+  tr.current-row > td.el-table__cell { background: rgba(246, 44, 85, 0.14) !important; }
+  .el-table__empty-block { background: transparent !important; }
+  .el-table__empty-text { color: var(--fnos-text-muted); }
+}
 
-  .pagination-bar { overflow-x: auto; }
+/* Loading */
+.el-loading-mask { background: rgba(0, 0, 0, 0.55) !important; }
+.el-loading-spinner .path { stroke: var(--fnos-red) !important; }
 
-  /* Page padding: tighter on phones */
-  .songs-page, .genres-page, .albums-page, .artists-page, .playlists-page,
-  .groups-page, .history-page, .favorites-page, .settings-page,
-  .admin-settings, .admin-music, .admin-plugins, .admin-sources,
-  .admin-users, .admin-wish, .album-detail, .artist-detail, .playlist-detail {
-    padding: 16px 12px;
+/* Message */
+.el-message { background: rgba(31, 28, 42, 0.95) !important; border: 1px solid rgba(255, 255, 255, 0.1) !important; color: #fff !important; }
+
+/* Checkbox / Radio */
+.el-checkbox__input.is-checked .el-checkbox__inner {
+  background-color: var(--fnos-red) !important;
+  border-color: var(--fnos-red) !important;
+}
+.el-checkbox__label { color: var(--fnos-text-secondary); }
+.el-radio__input.is-checked .el-radio__inner {
+  background-color: var(--fnos-red) !important;
+  border-color: var(--fnos-red) !important;
+}
+
+/* Menu (sidebar) */
+.el-menu {
+  background: transparent !important;
+  border-right: none !important;
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: var(--fnos-text-secondary);
+  --el-menu-hover-bg-color: rgba(255, 255, 255, 0.06);
+  --el-menu-active-color: var(--fnos-red);
+}
+.el-menu-item {
+  color: var(--fnos-text-secondary) !important;
+  &:hover { background: rgba(255, 255, 255, 0.06) !important; color: var(--fnos-text-primary) !important; }
+  &.is-active { color: var(--fnos-red) !important; background: rgba(246, 44, 85, 0.10) !important; }
+}
+
+/* Image placeholder */
+.el-image__placeholder { background: rgba(255, 255, 255, 0.06) !important; }
+.el-image__error { background: rgba(255, 255, 255, 0.04) !important; }
+
+/* Tabs */
+.el-tabs__item { color: var(--fnos-text-secondary) !important; }
+.el-tabs__item.is-active { color: var(--fnos-red) !important; }
+.el-tabs__active-bar { background-color: var(--fnos-red) !important; }
+
+/* Tag */
+.el-tag { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.15); color: var(--fnos-text-primary-dim); }
+
+/* Card */
+.el-card { background: rgba(255, 255, 255, 0.04) !important; border: 1px solid rgba(255, 255, 255, 0.08) !important; color: var(--fnos-text-primary-dim) !important; }
+
+/* ============================================================================
+   流动光影 (Flowing Aurora) + 分主题渐变背景
+   - 飞牛音乐每个功能页面有自己的渐变背景，并且光影/极光是缓慢流动的
+   - 通过 CSS 关键帧动画让模糊光斑持续漂移/呼吸
+   ========================================================================== */
+
+/* ---- Keyframes：两组不同周期/方向的漂移，制造有机的"流动"感 ---- */
+@keyframes fnos-aurora-drift-a {
+  0%   { transform: translate3d(0, 0, 0)     scale(1)    rotate(0deg); }
+  50%  { transform: translate3d(6%, -5%, 0)  scale(1.18) rotate(10deg); }
+  100% { transform: translate3d(-5%, 6%, 0)  scale(0.9)  rotate(-8deg); }
+}
+@keyframes fnos-aurora-drift-b {
+  0%   { transform: translate3d(0, 0, 0)     scale(1)    rotate(0deg); }
+  50%  { transform: translate3d(-7%, 6%, 0)  scale(1.12) rotate(-12deg); }
+  100% { transform: translate3d(5%, -7%, 0)  scale(0.95) rotate(9deg); }
+}
+@keyframes fnos-aurora-breathe {
+  0%, 100% { opacity: 0.72; }
+  50%      { opacity: 0.92; }
+}
+@keyframes fnos-aurora-breathe-soft {
+  0%, 100% { opacity: 0.42; }
+  50%      { opacity: 0.62; }
+}
+
+/* ============================================================================
+   登录页：左下角柔和流动极光（黄→粉→品红→橙向上晕染）
+   ========================================================================== */
+body.fnos-login {
+  background-color: #0d0d0f;
+  position: relative;
+  overflow: hidden;
+}
+body.fnos-login::before,
+body.fnos-login::after {
+  content: '';
+  position: fixed;
+  left: -10%; right: -10%; bottom: -20%; top: 10%;
+  pointer-events: none;
+  z-index: 0;
+  will-change: transform, opacity;
+}
+body.fnos-login::before {
+  background:
+    radial-gradient(ellipse 55% 50% at 15% 95%, #f8bf28 0%, transparent 55%),
+    radial-gradient(ellipse 50% 45% at 28% 90%, #f62c55 0%, transparent 55%),
+    radial-gradient(ellipse 40% 40% at 40% 92%, #c934e1 0%, transparent 55%);
+  filter: blur(90px);
+  animation: fnos-aurora-drift-a 22s ease-in-out infinite alternate,
+             fnos-aurora-breathe  8s ease-in-out infinite;
+}
+body.fnos-login::after {
+  background:
+    radial-gradient(ellipse 50% 45% at 55% 100%, #fc5e25 0%, transparent 55%),
+    radial-gradient(ellipse 45% 40% at 70% 95%, #f05672 0%, transparent 55%);
+  filter: blur(110px);
+  opacity: 0.7;
+  animation: fnos-aurora-drift-b 28s ease-in-out infinite alternate,
+             fnos-aurora-breathe-soft 10s ease-in-out infinite;
+}
+body.fnos-login #app { position: relative; z-index: 1; }
+
+/* ============================================================================
+   主页背景画布 —— 统一标题栏 + 向内容区发散的分主题渐变
+   - .app-bg：全屏固定层，承载统一的"主体色调"（标题栏/侧栏所在的收敛端）。
+     所有页面共用同一底色，只叠极淡的中性流动光斑，保证标题栏统一和谐。
+   - .content-aurora：仅覆盖内容区，承载各页强调色；用 mask 在靠近标题栏处
+     渐隐为透明，使内容色"向上渗透、在标题栏收敛回统一主体色"——即颜色由
+     相对统一的标题栏向不同页面的内容区逐渐发散。
+   ========================================================================== */
+.page-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* ---- 全屏统一底层（标题栏端，所有页面一致） ---- */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--fnos-unified-base);
+}
+/* 中性、统一的极淡流动光斑（同一套，不随页面变色） */
+.app-bg::before,
+.app-bg::after,
+.page-canvas::before,
+.page-canvas::after {
+  content: '';
+  position: absolute;
+  inset: -15%;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.app-bg::before,
+.page-canvas::before {
+  background:
+    radial-gradient(ellipse 50% 40% at 28% 18%, rgba(126, 110, 178, 0.10), transparent 60%),
+    radial-gradient(ellipse 40% 36% at 78% 30%, rgba(90, 110, 180, 0.08), transparent 60%);
+  filter: blur(90px);
+  animation: fnos-aurora-drift-a 30s ease-in-out infinite alternate,
+             fnos-aurora-breathe 9s ease-in-out infinite;
+}
+.app-bg::after,
+.page-canvas::after {
+  background:
+    radial-gradient(ellipse 46% 38% at 65% 82%, rgba(150, 120, 200, 0.08), transparent 60%);
+  filter: blur(120px);
+  opacity: 0.6;
+  animation: fnos-aurora-drift-b 36s ease-in-out infinite alternate,
+             fnos-aurora-breathe-soft 11s ease-in-out infinite;
+}
+
+/* ---- 内容区极光层（发散端，按路由切换强调色） ---- */
+.content-aurora {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* 关键：靠近标题栏(顶部)渐隐为透明 -> 透出统一底层；内容区(中下部)保留强调色。
+     即"颜色由相对统一的标题栏向内容区逐渐发散，在标题栏收敛回同一主体色"。 */
+  -webkit-mask-image: linear-gradient(to top,
+      rgba(0,0,0,1) 0%,
+      rgba(0,0,0,1) 38%,
+      rgba(0,0,0,0.55) 60%,
+      rgba(0,0,0,0.18) 76%,
+      transparent 88%);
+  mask-image: linear-gradient(to top,
+      rgba(0,0,0,1) 0%,
+      rgba(0,0,0,1) 38%,
+      rgba(0,0,0,0.55) 60%,
+      rgba(0,0,0,0.18) 76%,
+      transparent 88%);
+}
+.content-aurora::before,
+.content-aurora::after {
+  content: '';
+  position: absolute;
+  inset: -15%;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.content-aurora::before {
+  filter: blur(90px);
+  animation: fnos-aurora-drift-a 26s ease-in-out infinite alternate,
+             fnos-aurora-breathe 9s ease-in-out infinite;
+}
+.content-aurora::after {
+  filter: blur(120px);
+  opacity: 0.55;
+  animation: fnos-aurora-drift-b 32s ease-in-out infinite alternate,
+             fnos-aurora-breathe-soft 11s ease-in-out infinite;
+}
+
+/* ---- 主题：蓝色（首页/专辑/歌手/风格/音乐库/播放列表/设置/管理） ---- */
+.content-aurora.fnos-theme-blue {
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 0%,  rgba(45, 77, 199, 0.30), transparent 60%),
+    radial-gradient(ellipse 60% 60% at 85% 100%, rgba(126, 59, 212, 0.26), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 50% 110%, rgba(74, 141, 255, 0.20), transparent 60%),
+    linear-gradient(180deg, #1a1b2e 0%, #16172a 50%, #14152a 100%);
+}
+.content-aurora.fnos-theme-blue::before {
+  background:
+    radial-gradient(ellipse 55% 45% at 25% 30%, #2d4dc7 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 80% 70%, #7e3bd4 0%, transparent 60%);
+}
+.content-aurora.fnos-theme-blue::after {
+  background:
+    radial-gradient(ellipse 50% 45% at 70% 25%, #1b73fb 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 20% 85%, #4a8dff 0%, transparent 60%);
+}
+
+/* ---- 主题：红色/酒红（收藏 favorites）---- */
+.content-aurora.fnos-theme-red {
+  background:
+    radial-gradient(ellipse 60% 50% at 15% 0%,  rgba(246, 44, 85, 0.28), transparent 60%),
+    radial-gradient(ellipse 60% 60% at 85% 100%, rgba(252, 94, 37, 0.24), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 50% 110%, rgba(240, 86, 114, 0.18), transparent 60%),
+    linear-gradient(180deg, #2a1320 0%, #22101c 50%, #1d0d18 100%);
+}
+.content-aurora.fnos-theme-red::before {
+  background:
+    radial-gradient(ellipse 55% 45% at 25% 30%, #f62c55 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 80% 70%, #fc5e25 0%, transparent 60%);
+}
+.content-aurora.fnos-theme-red::after {
+  background:
+    radial-gradient(ellipse 50% 45% at 70% 25%, #e63954 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 20% 85%, #f05672 0%, transparent 60%);
+}
+
+/* ---- 主题：绿色/青色（最近 history）---- */
+.content-aurora.fnos-theme-green {
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 0%,  rgba(22, 163, 74, 0.28), transparent 60%),
+    radial-gradient(ellipse 60% 60% at 85% 100%, rgba(14, 165, 233, 0.24), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 50% 110%, rgba(107, 171, 69, 0.20), transparent 60%),
+    linear-gradient(180deg, #0f1f1a 0%, #0c1a18 50%, #0a1614 100%);
+}
+.content-aurora.fnos-theme-green::before {
+  background:
+    radial-gradient(ellipse 55% 45% at 25% 30%, #16a34a 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 80% 70%, #0ea5e9 0%, transparent 60%);
+}
+.content-aurora.fnos-theme-green::after {
+  background:
+    radial-gradient(ellipse 50% 45% at 70% 25%, #22c55e 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 20% 85%, #6bab45 0%, transparent 60%);
+}
+
+/* 减弱动画（用户系统偏好） */
+@media (prefers-reduced-motion: reduce) {
+  .page-canvas::before, .page-canvas::after,
+  .app-bg::before, .app-bg::after,
+  .content-aurora::before, .content-aurora::after,
+  body.fnos-login::before, body.fnos-login::after {
+    animation: none !important;
   }
-
-  /* Detail headers (album / playlist / artist / favorites): stack vertically */
-  .album-header, .playlist-header, .artist-header, .fav-header {
-    flex-direction: column !important;
-    align-items: center !important;
-    text-align: center;
-    gap: 16px;
-  }
-  .album-header .album-cover,
-  .playlist-header .playlist-cover,
-  .artist-header .artist-avatar,
-  .fav-header .fav-cover { width: 160px !important; height: 160px !important; }
-  .album-header .album-meta,
-  .playlist-header .playlist-meta,
-  .artist-header .artist-meta,
-  .fav-header .fav-meta { width: 100%; align-items: center; }
-  .playlist-header .actions,
-  .playlist-header .settings { flex-wrap: wrap; justify-content: center; }
-  .playlist-header .actions .el-button { margin-left: 0; }
-
-  /* Card grids: denser 2-column layout on phones */
-  .album-grid, .artist-grid, .playlist-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 12px; }
-  .album-card .album-info, .playlist-card .playlist-info { padding: 8px; }
-
-  /* Standalone search inputs (e.g. admin music search) */
-  .search-section .el-input { width: 100% !important; max-width: none; }
 }

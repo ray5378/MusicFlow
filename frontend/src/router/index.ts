@@ -13,7 +13,7 @@ const routes = [
     component: () => import("@/layouts/MainLayout.vue"),
     meta: { requiresAuth: true },
     children: [
-      { path: "", redirect: "/songs" },
+      { path: "", name: "Home", component: () => import("@/views/Home/index.vue") },
       { path: "songs", name: "Songs", component: () => import("@/views/Music/index.vue") },
       { path: "genres", name: "Genres", component: () => import("@/views/Genres/index.vue") },
       { path: "albums", name: "Albums", component: () => import("@/views/Albums/index.vue") },

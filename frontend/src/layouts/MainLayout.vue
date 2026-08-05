@@ -1,5 +1,7 @@
 <template>
-  <div class="main-layout">
+  <div class="main-layout" :class="pageTheme">
+    <!-- 全屏统一底层（标题栏/侧栏所在的收敛端：所有页面同一主体色调） -->
+    <div class="app-bg" aria-hidden="true"></div>
     <!-- ===== Mobile top bar ===== -->
     <header class="mobile-header" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
       <button type="button" class="mobile-hamburger" aria-label="菜单" @click="mobileNavOpen = !mobileNavOpen">
@@ -20,11 +22,13 @@
         <span v-if="!sidebarCollapsed || isMobile" class="logo-text">MusicFlow</span>
       </div>
       <el-menu :default-active="activeMenu" :collapse="!isMobile && sidebarCollapsed" router class="sidebar-menu" @select="closeMobileNav">
+        <el-menu-item index="/"><el-icon><HomeFilled /></el-icon><template #title>首页</template></el-menu-item>
         <el-menu-item index="/songs"><el-icon><Headset /></el-icon><template #title>音乐</template></el-menu-item>
         <el-menu-item index="/genres"><el-icon><Collection /></el-icon><template #title>风格</template></el-menu-item>
         <el-menu-item index="/albums"><el-icon><Service /></el-icon><template #title>专辑</template></el-menu-item>
         <el-menu-item index="/artists"><el-icon><User /></el-icon><template #title>艺术家</template></el-menu-item>
         <el-menu-item index="/playlists"><el-icon><List /></el-icon><template #title>歌单</template></el-menu-item>
+        <el-menu-item index="/favorites"><el-icon><svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M12 21s-7-4.5-9.5-9.2C.7 8.4 2.5 4.5 6 4.5c2 0 3.4 1.1 4.2 2.5C11.1 5.6 12.5 4.5 14.5 4.5c3.5 0 5.3 3.9 3.5 7.3C19 16.5 12 21 12 21z"/></svg></el-icon><template #title>我喜欢的音乐</template></el-menu-item>
         <el-menu-item index="/groups"><el-icon><Box /></el-icon><template #title>播放器群组</template></el-menu-item>
         <el-menu-item index="/history"><el-icon><Clock /></el-icon><template #title>播放历史</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
@@ -48,7 +52,12 @@
       </div>
     </aside>
 
-    <main class="main-content"><router-view /></main>
+    <main class="main-content">
+      <!-- 内容区极光层：各页强调色，向上渗透、在标题栏处收敛回统一主体色 -->
+      <div class="content-aurora" :class="pageTheme" aria-hidden="true"></div>
+      <!-- 可滚动内容 -->
+      <div class="main-scroll"><router-view /></div>
+    </main>
 
     <!-- ===== Mobile player bar (compact) ===== -->
     <footer class="player-bar-mobile" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
@@ -213,22 +222,6 @@
           <el-tooltip content="下一首" placement="top">
             <el-button circle @click="playerStore.next" class="ctrl-btn"><PlaybackIcon name="next" :size="20" /></el-button>
           </el-tooltip>
-          <el-tooltip content="播放列表" placement="top">
-            <el-button :icon="List" circle size="small" @click="playerStore.togglePlaylistPanel" :type="playerStore.showPlaylist ? 'primary' : ''" />
-          </el-tooltip>
-          <el-tooltip content="添加到歌单" placement="top">
-            <el-button :icon="Plus" circle size="small" @click="openAddToPlaylist" />
-          </el-tooltip>
-          <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
-            <el-button
-              circle
-              size="small"
-              class="fav-btn"
-              @click="toggleCurrentFavorite"
-            >
-              <HeartIcon :filled="isCurrentFavorite" :size="16" />
-            </el-button>
-          </el-tooltip>
         </div>
         <div class="player-progress">
           <span class="time">{{ formatTime(playerStore.currentTime) }}</span>
@@ -299,10 +292,42 @@
             <div class="peer-switcher-tip">切换播放器仅改变当前控制目标,不会停止其他播放器</div>
           </div>
         </el-popover>
-        <el-tooltip content="全屏播放" placement="top">
-          <el-button :icon="ChatDotRound" circle size="small" @click="playerStore.togglePlayMode" :type="playerStore.playModeVisible ? 'primary' : ''" :disabled="!playerStore.currentSong" />
+        <!-- 播放列表 -->
+        <el-tooltip content="播放列表" placement="top">
+          <el-button :icon="List" circle size="small" @click="playerStore.togglePlaylistPanel" :type="playerStore.showPlaylist ? 'primary' : ''" />
         </el-tooltip>
-        <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-slider" />
+        <!-- 添加到歌单 -->
+        <el-tooltip content="添加到歌单" placement="top">
+          <el-button :icon="Plus" circle size="small" @click="openAddToPlaylist" />
+        </el-tooltip>
+        <!-- 我喜欢的音乐 -->
+        <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
+          <el-button circle size="small" class="fav-btn" @click="toggleCurrentFavorite">
+            <HeartIcon :filled="isCurrentFavorite" :size="16" />
+          </el-button>
+        </el-tooltip>
+        <!-- 音量：点击展开控制条（去掉常驻滑块，更清爽） -->
+        <el-popover placement="top" :width="210" trigger="click" v-model:visible="volumePopoverVisible" popper-class="volume-popover">
+          <template #reference>
+            <el-button circle size="small" :class="{ 'vol-active': volumePopoverVisible }" class="vol-btn">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+                <path d="M4 9v6h4l5 5V4L8 9H4z" />
+                <template v-if="playerStore.volume > 0">
+                  <path d="M16 8.5a4.5 4.5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                  <path d="M18.5 6a8 8 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                </template>
+                <template v-else>
+                  <line x1="16" y1="9" x2="21" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                  <line x1="21" y1="9" x2="16" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                </template>
+              </svg>
+            </el-button>
+          </template>
+          <div class="volume-popover-body">
+            <span class="vol-label">音量</span>
+            <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-pop-slider" />
+          </div>
+        </el-popover>
       </div>
     </footer>
 
@@ -453,7 +478,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box, Menu, MoreFilled } from "@element-plus/icons-vue";
+import { Headset, HomeFilled, User, List, Clock, Search, Connection, FolderOpened, UserFilled, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box, Menu, MoreFilled } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -477,8 +502,6 @@ onMounted(async () => {
 const sidebarCollapsed = ref(false);
 
 // ===== Responsive layout state =====
-// `isMobile` drives the drawer sidebar + compact player bar (phone layout).
-// `mobileNavOpen` controls whether the drawer is visible.
 const isMobile = ref(false);
 const mobileNavOpen = ref(false);
 const mobileControlsVisible = ref(false);
@@ -493,8 +516,6 @@ function onLogoClick() {
 }
 function closeMobileNav() { if (isMobile.value) mobileNavOpen.value = false; }
 const lyricsContainer = ref<HTMLElement | null>(null);
-// Queue panel scroll tracking — queueListEl is the scroll container, queueItemEls
-// collects all rendered queue-item DOM nodes (Vue 3 ref array on v-for).
 const queueListEl = ref<HTMLElement | null>(null);
 const queueItemEls = ref<HTMLElement[]>([]);
 
@@ -512,12 +533,19 @@ const isCurrentFavorite = computed(() => {
 });
 
 const activeMenu = computed(() => route.path);
+
+// 按路由映射主题：favorites→红, history→绿, 其余→蓝
+const pageTheme = computed(() => {
+  const p = route.path;
+  if (p.startsWith("/favorites")) return "fnos-theme-red";
+  if (p.startsWith("/history")) return "fnos-theme-green";
+  return "fnos-theme-blue";
+});
 const coverUrl = computed(() => {
   if (!playerStore.currentSong) return "";
   return playerStore.getCoverUrl(playerStore.currentSong.coverArt || playerStore.currentSong.id);
 });
 
-// NetEase-style play mode icon + tooltip
 const playModeIconName = computed(() => {
   switch (playerStore.playMode) {
     case "one": return "loopOne";
@@ -549,7 +577,6 @@ function playFromQueue(idx: number) {
 
 function removeFromQueue(idx: number) { playerStore.removeFromQueue(idx); }
 
-// ===== Add to playlist (from player bar / play mode) =====
 async function openAddToPlaylist() {
   const song = playerStore.currentSong;
   if (!song) return;
@@ -587,7 +614,7 @@ async function createAndAdd() {
   if (addingPlaylistId.value) return;
   addingPlaylistId.value = "new";
   try {
-    await api.post("/rest/createPlaylist", { name: newPlaylistName.value, songId: playlistTargetSong.value.id });
+    const res = await api.post("/rest/createPlaylist", { name: newPlaylistName.value, songId: playlistTargetSong.value.id });
     ElMessage.success(`已创建并添加「${newPlaylistName.value}」`);
     showPlaylistDialog.value = false;
   } catch (e: any) {
@@ -597,7 +624,6 @@ async function createAndAdd() {
   }
 }
 
-// ===== Favorite current song (from play mode) =====
 async function toggleCurrentFavorite() {
   const song = playerStore.currentSong;
   if (!song) return;
@@ -607,26 +633,22 @@ async function toggleCurrentFavorite() {
   } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
 }
 
-// ===== DLNA device scan (from the player switcher popover) =====
 const dlnaScanning = ref(false);
 
-// ===== Player switcher (peer popup) =====
 const peerSwitcherVisible = ref(false);
+const volumePopoverVisible = ref(false);
 async function onSwitchPeer(peerId: string) {
   peerSwitcherVisible.value = false;
   await playerStore.switchPeer(peerId);
-  // Refresh the peer list so queue counts reflect the new state.
   playerStore.refreshPeers();
 }
 
-// Switch player from the mobile "more" controls popover, then close it.
 async function onMobileSwitchPeer(peerId: string) {
   mobileControlsVisible.value = false;
   await playerStore.switchPeer(peerId);
   playerStore.refreshPeers();
 }
 
-// Title of the currently playing song on a peer, if it is playing.
 function peerPlayingTitle(p: any): string {
   if (!p.queue || !p.queue.isActive) return "";
   const items = p.queue.items || [];
@@ -635,8 +657,6 @@ function peerPlayingTitle(p: any): string {
   return "";
 }
 
-// Manual re-scan of DLNA devices. After the backend finishes discovering,
-// refresh the peer list so newly found devices show up in the popover.
 async function scanDlnaDevices() {
   if (dlnaScanning.value) return;
   dlnaScanning.value = true;
@@ -650,47 +670,35 @@ async function scanDlnaDevices() {
   } finally { dlnaScanning.value = false; }
 }
 
-// Load favorites + preload homepage data once on mount (refresh-page scenario)
 nextTick(() => {
-  if (!authStore.isLoggedIn) return; // not logged in: avoid fetching any data
+  if (!authStore.isLoggedIn) return;
   favoritesStore.loadFavorites();
   import("@/stores/preload").then(({ usePreloadStore }) => usePreloadStore().preloadHome()).catch(() => {});
 });
 
-// Auto-scroll lyrics to the active line in play mode (waits for DOM update)
 watch(() => playerStore.currentLyricIndex, async (idx) => {
   if (idx < 0) return;
   await nextTick();
-  const container = lyricsContainer.value; // .pm-right (scrollable)
+  const container = lyricsContainer.value;
   if (!container) return;
   const lines = container.querySelectorAll(".pm-lyric-line");
   const active = lines[idx] as HTMLElement | undefined;
   if (!active) return;
-  // Center the active line inside the scrollable container. Computed from
-  // getBoundingClientRect (viewport-relative) so it stays correct regardless
-  // of where the scroll container sits in the layout / offsetParent chain.
   const cRect = container.getBoundingClientRect();
   const aRect = active.getBoundingClientRect();
   const targetTop = container.scrollTop + (aRect.top - cRect.top) - container.clientHeight / 2 + active.clientHeight / 2;
   container.scrollTo({ top: targetTop, behavior: "smooth" });
 });
 
-// Auto-scroll the queue panel so the currently playing song stays in view.
-// Applies to ALL play modes (order/one/all/shuffle) — the active item may
-// jump anywhere in the list under shuffle, so we must follow it.
-// Skips auto-scroll if the queue panel is closed (no DOM) or the user is
-// actively hovering the list (don't fight manual scrolling).
 async function scrollQueueToCurrent() {
   const idx = playerStore.currentIndex;
   if (idx < 0) return;
   await nextTick();
   const list = queueListEl.value;
-  if (!list) return; // panel closed
-  if (list.matches(":hover")) return; // user is scrolling manually
+  if (!list) return;
+  if (list.matches(":hover")) return;
   const active = queueItemEls.value[idx];
   if (!active) return;
-  // Bring the active item into view without forcing it to the top — if it's
-  // already visible, do nothing; otherwise scroll just enough to reveal it.
   const listRect = list.getBoundingClientRect();
   const itemRect = active.getBoundingClientRect();
   if (itemRect.top >= listRect.top && itemRect.bottom <= listRect.bottom) return;
@@ -698,261 +706,615 @@ async function scrollQueueToCurrent() {
   list.scrollTo({ top: targetTop, behavior: "smooth" });
 }
 watch(() => playerStore.currentIndex, scrollQueueToCurrent);
-// Also scroll when the panel is freshly opened — the list DOM only exists
-// after the panel renders, so we wait a tick before measuring positions.
 watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent(); });
 </script>
 
 <style lang="scss" scoped>
-.main-layout { display: flex; height: 100vh; overflow: hidden; }
+/* ===== Layout (CSS Grid): sidebar | main  /  player-bar ===== */
+.main-layout {
+  --current-sidebar: var(--fnos-sidebar-width);
+  display: grid;
+  grid-template-columns: var(--current-sidebar) 1fr;
+  grid-template-rows: 1fr;            /* 播放器改为悬浮退出 grid */
+  height: 100vh;
+  overflow: hidden;
+  position: relative;                 /* 是 .player-bar 绝对定位的锚点 */
+  background: transparent;            /* 背景由全屏 .app-bg 承载（平铺整个页面） */
+}
+.main-layout:has(.sidebar.collapsed) { --current-sidebar: var(--fnos-sidebar-collapsed); }
 
 /* ===== Mobile chrome (only visible < 768px) ===== */
-.mobile-header {
-  display: none;
-}
+.mobile-header { display: none; }
 .sidebar-overlay { display: none; }
 .player-bar-mobile { display: none; }
 
+/* ===== Sidebar ===== */
 .sidebar {
-  width: var(--sidebar-width); background: #1a1a2e; color: #fff; display: flex; flex-direction: column; transition: width 0.3s; flex-shrink: 0;
-  &.collapsed { width: var(--sidebar-collapsed-width); }
-  .logo { display: flex; align-items: center; padding: 16px; cursor: pointer; gap: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); height: var(--header-height);
-    .logo-img { width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0; }
-    .logo-text { font-size: 18px; font-weight: 600; white-space: nowrap; }
+  grid-column: 1;
+  grid-row: 1;
+  width: 100%;
+  margin: 14px;                /* 四周留白，使面板悬浮于全屏背景之上 */
+  border-radius: var(--fnos-radius-lg);
+  /* 浮动圆角玻璃面板：透明、悬浮于全屏极光背景之上 */
+  background: rgba(255, 255, 255, 0.045);
+  backdrop-filter: blur(26px) saturate(180%);
+  -webkit-backdrop-filter: blur(26px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: var(--fnos-text-primary);
+  display: flex;
+  flex-direction: column;
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+  flex-shrink: 0;
+  border-right: none;
+  position: relative;
+  z-index: 50;
+  overflow: hidden;
+
+  .logo {
+    display: flex;
+    align-items: center;
+    padding: 18px 18px;
+    cursor: pointer;
+    gap: 10px;
+    height: var(--fnos-topbar-height);
+    flex-shrink: 0;
+    .logo-img { width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; box-shadow: 0 4px 12px rgba(246, 44, 85, 0.35); }
+    .logo-text { font-size: 17px; font-weight: 600; white-space: nowrap; letter-spacing: 0.3px; }
   }
-  .sidebar-menu { flex: 1; overflow-y: auto; border-right: none !important; background: transparent;
-    :deep(.el-menu) { background: transparent; }
-    :deep(.el-menu-item) { color: rgba(255,255,255,0.7); &:hover, &.is-active { background: rgba(195,95,51,0.3); color: #fff; } }
-    :deep(.el-divider) { border-color: rgba(255,255,255,0.1); }
+
+  .sidebar-menu {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+    background: transparent;
+    &::-webkit-scrollbar { width: 4px; }
+    :deep(.el-menu) { background: transparent; border-right: none; }
+    :deep(.el-menu-item) {
+      height: 40px;
+      line-height: 40px;
+      margin: 2px 12px;
+      padding-left: 14px !important;
+      border-radius: 8px;
+      font-size: 14px;
+      color: var(--fnos-text-secondary) !important;
+      background: transparent !important;
+      position: relative;
+      &:hover {
+        background: rgba(255, 255, 255, 0.06) !important;
+        color: var(--fnos-text-primary) !important;
+      }
+      &.is-active {
+        background: linear-gradient(90deg, rgba(246, 44, 85, 0.22) 0%, rgba(246, 44, 85, 0.06) 100%) !important;
+        color: var(--fnos-red) !important;
+        &::before {
+          content: '';
+          position: absolute;
+          left: 0; top: 8px; bottom: 8px;
+          width: 3px;
+          background: var(--fnos-red);
+          border-radius: 0 2px 2px 0;
+          box-shadow: 0 0 12px rgba(246, 44, 85, 0.6);
+        }
+      }
+      .el-icon { font-size: 16px; }
+    }
+    :deep(.el-divider) {
+      border-color: rgba(255, 255, 255, 0.08);
+      margin: 12px 16px;
+    }
   }
-  .sidebar-footer { padding: 12px; border-top: 1px solid rgba(255,255,255,0.1);
-    .user-info { display: flex; align-items: center; gap: 8px; color: rgba(255,255,255,0.7); cursor: pointer; }
+
+  .sidebar-footer {
+    padding: 12px;
+    /* 移除 border-top —— 侧栏底部与上方菜单区是一整块连续画布 */
+    border-top: none;
+    flex-shrink: 0;
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--fnos-text-secondary);
+      cursor: pointer;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 14px;
+      &:hover { background: rgba(255, 255, 255, 0.06); color: var(--fnos-text-primary); }
+    }
   }
 }
-.main-content { flex: 1; overflow-y: auto; padding-bottom: var(--player-height); }
+
+/* ===== Main content ===== */
+.main-content {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+  overflow: hidden;
+  z-index: 1;                /* 位于全屏 .app-bg 之上 */
+  isolation: isolate;        /* 内容独立层叠上下文 */
+}
+/* 内层滚动容器，让 page-canvas 始终覆盖可视区而不随内容滚动 */
+.main-scroll {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ===== Floating player pill (overlays content; content scrolls BEHIND) ===== */
 .player-bar {
-  position: fixed; bottom: 0; left: var(--sidebar-width); right: 0; height: var(--player-height); background: #fff; border-top: 1px solid #e8e8e8; display: flex; align-items: center; padding: 0 20px; z-index: 100; box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
-  .player-left { display: flex; align-items: center; gap: 12px; width: 280px; flex-shrink: 0; cursor: pointer; overflow: hidden;
-    .player-cover { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
-    .player-cover-placeholder { width: 48px; height: 48px; border-radius: 6px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-    .player-song-info { flex: 1; min-width: 0; .player-title { font-weight: 500; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .player-artist { font-size: 12px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .player-lyric { color: #c35f33; } }
+  /* 绝对定位悬浮 —— 不再占 grid 一行、也不把内容往上推 */
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(980px, calc(100% - 32px));
+  height: 76px;
+  border-radius: 999px;
+  background: rgba(15, 14, 22, 0.55);
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  gap: 14px;
+  z-index: 50;
+
+  .player-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 230px;
+    flex-shrink: 0;
+    cursor: pointer;
+    overflow: hidden;
+    .player-cover {
+      width: 52px; height: 52px;
+      border-radius: 8px;
+      object-fit: cover;
+      flex-shrink: 0;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+    .player-cover-placeholder {
+      width: 52px; height: 52px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      display: flex; align-items: center; justify-content: center;
+      color: rgba(255, 255, 255, 0.4);
+      flex-shrink: 0;
+    }
+    .player-song-info {
+      flex: 1; min-width: 0;
+      .player-title { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .player-artist { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .player-lyric { color: var(--fnos-red); }
+    }
   }
-  .player-center { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; max-width: 600px; margin: 0 auto;
-    .player-controls { display: flex; align-items: center; gap: 8px; }
-    .player-progress { display: flex; align-items: center; gap: 8px; width: 100%;
-      .time { font-size: 12px; color: #999; min-width: 40px; }
+  .player-center {
+    flex: 1; min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    .player-controls { display: flex; align-items: center; gap: 12px; }
+    .player-progress {
+      display: flex; align-items: center; gap: 10px;
+      width: 100%;
+      margin-top: 4px;
+      .time { font-size: 11px; color: var(--fnos-text-tertiary); min-width: 40px; text-align: center; }
       .progress-slider { flex: 1; }
     }
   }
-  .player-right { display: flex; align-items: center; gap: 8px; width: 320px; flex-shrink: 0; justify-content: flex-end;
-    .volume-slider { width: 90px; }
+  .player-right {
+    display: flex; align-items: center; gap: 8px;
+    flex-shrink: 0; justify-content: flex-end;
+    .vol-btn { color: var(--fnos-text-secondary); }
+    .vol-btn.vol-active { color: var(--fnos-red); background: rgba(246, 44, 85, 0.12); }
   }
-  .player-title-empty { color: #bbb; }
+  .player-title-empty { color: var(--fnos-text-muted); }
+
+  /* 较窄的桌面宽度下，切换播放器按钮收起为纯图标，避免与下一首重叠 */
+  @media (max-width: 1000px) {
+    .peer-switch-btn {
+      max-width: 38px; padding: 0; justify-content: center;
+      .peer-switch-label, .peer-switch-arrow { display: none; }
+    }
+  }
+
+  /* 音量弹出控制条 */
+  .volume-popover-body {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 2px;
+    .vol-label { font-size: 12px; color: var(--fnos-text-secondary); white-space: nowrap; }
+    .volume-pop-slider { flex: 1; }
+  }
 }
 
-/* Player switcher button (lives in the always-visible player bar) */
+/* ===== Player switcher button ===== */
 .peer-switch-btn {
-  display: inline-flex; align-items: center; gap: 4px; max-width: 160px; padding: 0 10px; height: 30px;
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 160px; padding: 0 10px; height: 30px;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
   .peer-switch-icon { font-size: 14px; }
   .peer-switch-label { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
-  .peer-switch-arrow { font-size: 10px; color: #999; }
+  .peer-switch-arrow { font-size: 10px; color: var(--fnos-text-tertiary); }
 }
 
-/* Standard playback control buttons: icon vertically centered */
-.ctrl-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0; min-width: 36px; width: 36px; height: 36px; min-height: 36px; }
+/* ===== Transport control buttons ===== */
+.ctrl-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; min-width: 36px; width: 36px; height: 36px; min-height: 36px;
+}
 .ctrl-btn .playback-icon { display: block; }
-.ctrl-btn.play-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
+.ctrl-btn.play-btn {
+  width: 44px; height: 44px;
+  min-width: 44px; min-height: 44px;
+  background: var(--fnos-red) !important;
+  border-color: var(--fnos-red) !important;
+  box-shadow: 0 4px 16px rgba(246, 44, 85, 0.5);
+}
 
 /* ===== Queue panel ===== */
 .queue-panel {
-  position: fixed; top: 0; right: 0; bottom: var(--player-height); width: 360px; background: #fff; z-index: 200;
-  box-shadow: -2px 0 16px rgba(0,0,0,0.1); display: flex; flex-direction: column;
-  .queue-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid #f0f0f0; font-weight: 600; }
-  .queue-list { flex: 1; overflow-y: auto; padding: 8px;
-    .queue-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 8px; cursor: pointer;
-      &:hover { background: #f5f7fa; }
-      &.active { background: rgba(195,95,51,0.1); }
-      .queue-cover { position: relative; width: 40px; height: 40px; border-radius: 4px; overflow: hidden; flex-shrink: 0;
+  /* 播放器已是悬浮药丸，不再占底部空间 —— 队列面板直接贴底 */
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 360px;
+  background: rgba(31, 28, 42, 0.92);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  z-index: 200;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.45);
+  display: flex; flex-direction: column;
+  color: var(--fnos-text-primary);
+  .queue-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 18px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-weight: 600;
+    color: var(--fnos-text-primary);
+    .queue-actions .el-button { color: var(--fnos-text-secondary); }
+  }
+  .queue-list {
+    flex: 1; overflow-y: auto; padding: 8px;
+    .queue-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px; border-radius: 8px; cursor: pointer;
+      color: var(--fnos-text-primary-dim);
+      &:hover { background: rgba(255, 255, 255, 0.06); }
+      &.active {
+        background: linear-gradient(90deg, rgba(246, 44, 85, 0.22) 0%, rgba(246, 44, 85, 0.04) 100%);
+        color: var(--fnos-red);
+        .queue-artist { color: var(--fnos-red); opacity: 0.8; }
+      }
+      .queue-cover {
+        position: relative; width: 40px; height: 40px;
+        border-radius: 6px; overflow: hidden; flex-shrink: 0;
         img { width: 100%; height: 100%; object-fit: cover; }
-        .queue-cover-ph { width: 100%; height: 100%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #ccc; }
-        .playing-indicator { position: absolute; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; }
-        .playing-indicator::before { content: ''; width: 8px; height: 12px; background: linear-gradient(180deg, #fff 0 33%, transparent 33% 66%, #fff 66%); animation: eq 1s infinite; }
+        .queue-cover-ph {
+          width: 100%; height: 100%;
+          background: rgba(255, 255, 255, 0.06);
+          display: flex; align-items: center; justify-content: center;
+          color: rgba(255, 255, 255, 0.4);
+        }
+        .playing-indicator {
+          position: absolute; inset: 0;
+          background: rgba(0, 0, 0, 0.5);
+          display: flex; align-items: center; justify-content: center;
+          &::before {
+            content: ''; width: 8px; height: 12px;
+            background: linear-gradient(180deg, var(--fnos-red) 0 33%, transparent 33% 66%, var(--fnos-red) 66%);
+            animation: eq 1s infinite;
+          }
+          &.paused::before { animation: none; opacity: 0.7; }
+        }
       }
       .queue-info { flex: 1; min-width: 0;
         .queue-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .queue-artist { font-size: 12px; color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .queue-artist { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       }
-      .queue-duration { font-size: 12px; color: #999; }
-      .queue-remove { opacity: 0; transition: opacity 0.2s; }
+      .queue-duration { font-size: 12px; color: var(--fnos-text-tertiary); }
+      .queue-remove {
+        opacity: 0; transition: opacity 0.2s;
+        color: var(--fnos-text-tertiary) !important;
+        &:hover { color: var(--fnos-red) !important; }
+      }
       &:hover .queue-remove { opacity: 1; }
     }
-    .queue-empty { text-align: center; color: #999; padding: 40px 0; }
+    .queue-empty { text-align: center; color: var(--fnos-text-muted); padding: 40px 0; }
   }
 }
 
-/* ===== Fullscreen play mode ===== */
+/* ===== Fullscreen play mode (FnOS-inspired aurora) ===== */
 .play-mode {
-  position: fixed; inset: 0; z-index: 300; background: linear-gradient(160deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  position: fixed; inset: 0; z-index: 300;
+  background: linear-gradient(160deg, #1a1825 0%, #2d293a 40%, #14121b 100%);
   color: #fff; display: flex; flex-direction: column; overflow: hidden;
-  .play-mode-bg { position: absolute; inset: 0; background: radial-gradient(circle at 30% 40%, rgba(195,95,51,0.2), transparent 60%); pointer-events: none; }
-  .play-mode-close { position: absolute; top: 20px; right: 24px; z-index: 10; background: rgba(255,255,255,0.1); border: none; color: #fff; width: 44px; height: 44px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    &:hover { background: rgba(255,255,255,0.2); } }
-  .play-mode-body { flex: 1; display: flex; align-items: center; justify-content: center; gap: 120px; padding: 40px 80px; position: relative; }
-  .pm-left { display: flex; flex-direction: column; align-items: center; width: 400px; flex-shrink: 0;
-    .pm-disc { position: relative; width: 340px; height: 340px; border-radius: 50%; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  .play-mode-bg {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 70% 50% at 30% 30%, rgba(246, 44, 85, 0.22), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 75% 70%, rgba(201, 52, 225, 0.18), transparent 60%),
+      radial-gradient(ellipse 50% 40% at 50% 100%, rgba(27, 115, 251, 0.14), transparent 60%);
+    pointer-events: none;
+  }
+  .play-mode-close {
+    position: absolute; top: 20px; right: 24px; z-index: 10;
+    background: rgba(255, 255, 255, 0.1); border: none; color: #fff;
+    width: 44px; height: 44px; border-radius: 50%; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.2s;
+    &:hover { background: rgba(255, 255, 255, 0.2); }
+  }
+  .play-mode-body {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 120px;
+    padding: 40px 80px;
+    position: relative;
+  }
+  .pm-left {
+    display: flex; flex-direction: column; align-items: center;
+    width: 400px; flex-shrink: 0;
+    .pm-disc {
+      position: relative;
+      width: 340px; height: 340px;
+      border-radius: 50%; overflow: hidden;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
       .pm-disc-img { width: 100%; height: 100%; object-fit: cover; }
-      .pm-disc-ph { width: 100%; height: 100%; background: #1a1a2e; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.3); }
-      .pm-disc-hole { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 44px; height: 44px; border-radius: 50%; background: #0f3460; border: 6px solid rgba(255,255,255,0.25); }
+      .pm-disc-ph {
+        width: 100%; height: 100%;
+        background: #1a1a24;
+        display: flex; align-items: center; justify-content: center;
+        color: rgba(255, 255, 255, 0.3);
+      }
+      .pm-disc-hole {
+        position: absolute; top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: 44px; height: 44px;
+        border-radius: 50%;
+        background: #14121b;
+        border: 4px solid rgba(255, 255, 255, 0.18);
+      }
       &.spinning { animation: spin 20s linear infinite; }
     }
     .pm-song-title { margin-top: 28px; font-size: 22px; font-weight: 700; text-align: center; max-width: 380px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .pm-song-artist { margin-top: 8px; font-size: 15px; color: rgba(255,255,255,0.7); }
-    .pm-song-album { margin-top: 4px; font-size: 13px; color: rgba(255,255,255,0.4); }
+    .pm-song-artist { margin-top: 8px; font-size: 15px; color: rgba(255, 255, 255, 0.7); }
+    .pm-song-album { margin-top: 4px; font-size: 13px; color: rgba(255, 255, 255, 0.4); }
   }
-  .pm-right { width: 480px; height: 60vh; overflow-y: auto; display: flex; flex-direction: column; align-items: center; scrollbar-width: none; scroll-behavior: smooth;
+  .pm-right {
+    width: 480px; height: 60vh; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center;
+    scrollbar-width: none; scroll-behavior: smooth;
     &::-webkit-scrollbar { display: none; }
     .pm-lyrics { width: 100%; display: flex; flex-direction: column; align-items: center; padding: 45% 0; }
-    .pm-lyric-line { font-size: 15px; color: rgba(255,255,255,0.35); padding: 10px 0; text-align: center; line-height: 1.6; transition: all 0.4s ease; cursor: default;
-      &.active { color: #f5b942; font-size: 21px; font-weight: 700; text-shadow: 0 0 20px rgba(245,185,66,0.5); }
+    .pm-lyric-line {
+      font-size: 15px;
+      color: rgba(255, 255, 255, 0.35);
+      padding: 10px 0; text-align: center; line-height: 1.6;
+      transition: all 0.4s ease; cursor: default;
+      &.active {
+        color: var(--fnos-red);
+        font-size: 21px;
+        font-weight: 700;
+        text-shadow: 0 0 24px rgba(246, 44, 85, 0.5);
+      }
     }
-    .pm-lyrics-empty { color: rgba(255,255,255,0.3); font-size: 15px; padding: 60px 0; }
+    .pm-lyrics-empty { color: rgba(255, 255, 255, 0.3); font-size: 15px; padding: 60px 0; }
   }
-  .play-mode-controls { padding: 24px 80px 40px; display: flex; flex-direction: column; align-items: center; gap: 12px; position: relative;
-    .pm-progress { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 700px;
-      .time { font-size: 12px; color: rgba(255,255,255,0.6); min-width: 40px; }
+  .play-mode-controls {
+    padding: 24px 80px 40px;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    position: relative;
+    .pm-progress {
+      display: flex; align-items: center; gap: 12px;
+      width: 100%; max-width: 700px;
+      .time { font-size: 12px; color: rgba(255, 255, 255, 0.6); min-width: 40px; }
       .pm-slider { flex: 1; }
     }
-    .pm-buttons { display: flex; align-items: center; gap: 16px;
-      .pm-play-btn { width: 60px; height: 60px; min-width: 60px; min-height: 60px; }
+    .pm-buttons {
+      display: flex; align-items: center; gap: 16px;
+      .pm-play-btn { width: 60px; height: 60px; min-width: 60px; min-height: 60px; background: var(--fnos-red) !important; border-color: var(--fnos-red) !important; box-shadow: 0 4px 24px rgba(246, 44, 85, 0.55); }
       .pm-nav-btn { width: 48px; height: 48px; min-width: 48px; min-height: 48px; }
     }
   }
 }
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-@keyframes eq { 0%,100% { transform: scaleY(0.4); } 50% { transform: scaleY(1); } }
+@keyframes eq { 0%, 100% { transform: scaleY(0.4); } 50% { transform: scaleY(1); } }
 
 .slide-right-enter-active, .slide-right-leave-active { transition: transform 0.3s ease; }
 .slide-right-enter-from, .slide-right-leave-to { transform: translateX(100%); }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-:deep(.el-slider__runway) { background: rgba(0,0,0,0.1); }
-.play-mode :deep(.el-slider__runway) { background: rgba(255,255,255,0.2); }
-.play-mode :deep(.el-slider__bar) { background: #c35f33; }
-.play-mode :deep(.el-button) {
-  border-color: rgba(255,255,255,0.55);
-  color: #fff;
-  background: rgba(255,255,255,0.08);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-  &:hover { border-color: rgba(255,255,255,0.85); background: rgba(255,255,255,0.16); }
+:deep(.el-slider__runway) { background: rgba(255, 255, 255, 0.18) !important; }
+:deep(.el-slider__bar) { background: var(--fnos-red) !important; }
+:deep(.el-slider__button) {
+  border: 2px solid var(--fnos-red) !important;
+  background: #fff !important;
 }
-.play-mode :deep(.el-button--primary) { background: #c35f33; border-color: #c35f33; box-shadow: 0 4px 16px rgba(195,95,51,0.5); }
+.play-mode :deep(.el-slider__runway) { background: rgba(255, 255, 255, 0.2) !important; }
+.play-mode :deep(.el-slider__bar) { background: var(--fnos-red) !important; }
+.play-mode :deep(.el-button) {
+  border-color: rgba(255, 255, 255, 0.55) !important;
+  color: #fff !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  &:hover { border-color: rgba(255, 255, 255, 0.85) !important; background: rgba(255, 255, 255, 0.16) !important; }
+}
+.play-mode :deep(.el-button--primary) {
+  background: var(--fnos-red) !important;
+  border-color: var(--fnos-red) !important;
+  box-shadow: 0 4px 16px rgba(246, 44, 85, 0.5);
+  &:hover { background: var(--fnos-red-hover) !important; }
+}
 
 /* ===== Heart favorite button ===== */
-.fav-btn { display: inline-flex; align-items: center; justify-content: center; }
-.fav-btn .heart-icon { color: #909399; }
-.fav-btn .heart-icon .heart-fill { color: #e94560; }
-.play-mode .fav-btn { border-color: rgba(255,255,255,0.55); background: rgba(255,255,255,0.08); }
-.play-mode .fav-btn .heart-icon { color: rgba(255,255,255,0.85); }
-.play-mode .fav-btn .heart-icon .heart-fill { color: #e94560; }
+.fav-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  .heart-icon { color: var(--fnos-text-tertiary); }
+  .heart-icon .heart-fill { color: var(--fnos-red); }
+}
+.play-mode .fav-btn {
+  border-color: rgba(255, 255, 255, 0.55) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+.play-mode .fav-btn .heart-icon { color: rgba(255, 255, 255, 0.85); }
+.play-mode .fav-btn .heart-icon .heart-fill { color: var(--fnos-red); }
 
 /* ===== Add-to-playlist dialog ===== */
-.playlist-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
+.playlist-dialog-song { font-size: 13px; color: var(--fnos-text-tertiary); margin-bottom: 12px; }
 .playlist-list { max-height: 320px; overflow-y: auto; }
-.playlist-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s;
-  &:hover { background: #f5f7fa; }
-  .pl-icon { font-size: 18px; color: #909399; }
-  .pl-info { flex: 1; .pl-name { font-size: 14px; font-weight: 500; } .pl-meta { font-size: 12px; color: #999; } }
+.playlist-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 8px;
+  cursor: pointer; transition: background 0.2s;
+  &:hover { background: rgba(255, 255, 255, 0.06); }
+  .pl-icon { font-size: 18px; color: var(--fnos-text-tertiary); }
+  .pl-info {
+    flex: 1;
+    .pl-name { font-size: 14px; font-weight: 500; color: var(--fnos-text-primary); }
+    .pl-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
+  }
 }
-.create-playlist-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
-.empty-tip { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
+.create-playlist-row {
+  display: flex; gap: 8px;
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.empty-tip { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
 
 /* ============================================================
    Mobile (< 768px): drawer sidebar, compact player bar,
    stacked fullscreen play mode, full-width queue panel.
    ============================================================ */
 @media (max-width: 768px) {
-  .main-layout { flex-direction: column; }
+  .main-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
 
   /* --- Top bar --- */
   .mobile-header {
     display: flex; align-items: center; gap: 8px;
     height: 48px; padding: 0 12px; flex-shrink: 0;
-    background: #1a1a2e; color: #fff; z-index: 500;
+    /* 移除 border-bottom —— 顶栏与下方内容是一整块连续画布 */
+    background: transparent;
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    color: #fff; z-index: 500;
+    border-bottom: none;
+    grid-column: 1; grid-row: 1;
+    align-self: flex-start;
     .mobile-hamburger {
       display: inline-flex; align-items: center; justify-content: center;
       width: 34px; height: 34px; border: none; border-radius: 6px;
       background: transparent; color: #fff; cursor: pointer;
-      &:active { background: rgba(255,255,255,0.15); }
+      &:active { background: rgba(255, 255, 255, 0.15); }
     }
     .mobile-brand-logo { width: 26px; height: 26px; border-radius: 6px; }
     .mobile-brand { font-size: 16px; font-weight: 600; }
   }
 
-  /* --- Drawer sidebar --- */
+  /* --- Drawer sidebar (out of flow on mobile) --- */
   .sidebar-overlay {
-    display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: block; position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
     z-index: 590;
   }
   .sidebar.mobile {
+    grid-column: auto; grid-row: auto;
     position: fixed; top: 0; left: 0; bottom: 0;
     width: min(280px, 82vw); z-index: 600;
     transform: translateX(-100%); transition: transform 0.28s ease;
-    box-shadow: 4px 0 24px rgba(0,0,0,0.25);
+    background: rgba(31, 28, 42, 0.94);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0 18px 18px 0;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
     &.mobile-open { transform: translateX(0); }
     &.collapsed { width: min(280px, 82vw); }
   }
 
-  /* --- Content + player layout --- */
+  /* --- Main content occupies full width --- */
   .main-content {
-    flex: 1; overflow-y: auto;
-    padding-bottom: var(--player-height);
+    grid-column: 1; grid-row: 1;
+    /* mobile-header is grid-row 1 already and main-content overlaps it because
+       mobile-header is in flow at top; we add padding to account for it. */
   }
 
-  /* Desktop player bar hidden; mobile compact bar shown */
+  /* Desktop player bar hidden; mobile compact bar shown as floating pill */
   .player-bar { display: none; }
   .player-bar-mobile {
+    /* 悬浮药丸 —— 退出 grid，贴底悬浮；内容从它后面透出来 */
+    position: fixed;
+    bottom: 12px;
+    left: 12px;
+    right: 12px;
+    height: 64px;
+    border-radius: 18px;
+    background: rgba(15, 14, 22, 0.62);
+    backdrop-filter: blur(28px) saturate(180%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    /* 移除 border-top —— 播放器是悬浮的，不再是底栏 */
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    z-index: 100;
     display: flex; align-items: center; gap: 8px;
-    position: fixed; left: 0; right: 0; bottom: 0;
-    height: var(--player-height); padding: 0 10px;
-    background: #fff; border-top: 1px solid #e8e8e8; z-index: 100;
-    box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
+    padding: 0 12px;
     .mp-cover {
-      width: 40px; height: 40px; border-radius: 6px; overflow: hidden; flex-shrink: 0;
+      width: 44px; height: 44px; border-radius: 8px; overflow: hidden; flex-shrink: 0;
+      cursor: pointer;
       img { width: 100%; height: 100%; object-fit: cover; }
-      .mp-cover-ph { width: 100%; height: 100%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #ccc; }
+      .mp-cover-ph { width: 100%; height: 100%; background: rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.4); }
     }
     .mp-info { flex: 1; min-width: 0; cursor: pointer;
-      .mp-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .mp-artist { font-size: 12px; color: #999; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .mp-lyric { color: #c35f33; }
+      .mp-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mp-artist { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mp-lyric { color: var(--fnos-red); }
     }
     .mp-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0;
       .mp-btn {
         display: inline-flex; align-items: center; justify-content: center;
         width: 34px; height: 34px; border: none; border-radius: 50%;
-        background: transparent; color: #333; cursor: pointer;
-        &:active { background: rgba(0,0,0,0.08); }
-        &.mp-play { background: #c35f33; color: #fff; width: 40px; height: 40px; box-shadow: 0 3px 10px rgba(195,95,51,0.4); }
-        &.mp-more.active { color: #c35f33; }
+        background: transparent; color: #fff; cursor: pointer;
+        &:active { background: rgba(255, 255, 255, 0.1); }
+        &.mp-play {
+          background: var(--fnos-red); color: #fff;
+          width: 42px; height: 42px;
+          box-shadow: 0 4px 12px rgba(246, 44, 85, 0.5);
+        }
+        &.mp-more.active { color: var(--fnos-red); }
       }
     }
   }
 
-  /* --- Queue panel full width --- */
-  .queue-panel { width: 100%; bottom: var(--player-height); }
+  /* Mobile main-content (non-scrolling wrapper); main-scroll handles scroll + top padding */
+  .main-content { padding-top: 0; }
+
+  /* --- Main scroll container on mobile: account for mobile-header + floating player pill --- */
+  .main-scroll { padding-top: 48px; padding-bottom: 88px; }
+
+  /* --- Queue panel full width, extends to bottom (player is floating) --- */
+  .queue-panel { width: 100%; bottom: 0; }
 
   /* --- Fullscreen play mode: stacked single column --- */
   .play-mode { overflow-y: auto; z-index: 700; }
-  /* Hide the mobile top bar + compact player bar while play mode shows,
-     so they never overlap the fullscreen controls/disc/close button. */
   .mc-hidden { display: none !important; }
   .play-mode .play-mode-body {
     flex-direction: column; justify-content: flex-start;
     gap: 8px; padding: 20px 16px 6px;
     .pm-left { width: 100%;
-      .pm-disc { width: min(190px, 54vw); height: min(190px, 54vw); }
+      .pm-disc { width: min(200px, 56vw); height: min(200px, 56vw); }
       .pm-song-title { margin-top: 10px; font-size: 16px; max-width: 100%; }
       .pm-song-artist { font-size: 13px; margin-top: 4px; }
       .pm-song-album { font-size: 12px; }
@@ -982,66 +1344,107 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 <style lang="scss">
 .peer-switcher-popover.el-popover.el-popper { padding: 0 !important; }
 .peer-switcher { width: 100%; }
-.peer-switcher-title { font-size: 13px; font-weight: 600; color: #333; padding: 10px 12px 6px; }
+.peer-switcher-title { font-size: 13px; font-weight: 600; color: var(--fnos-text-primary); padding: 12px 14px 8px; }
 .peer-switcher-list { max-height: 320px; overflow-y: auto; padding: 0 6px; }
 .peer-switcher-item {
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
-  &:hover { background: #f5f7fa; }
-  &.active { background: #fdf0ea; .psi-name { color: #c35f33; } .psi-icon { color: #c35f33; } }
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 8px;
+  cursor: pointer; transition: background 0.15s;
+  color: var(--fnos-text-primary-dim);
+  &:hover { background: rgba(255, 255, 255, 0.06); }
+  &.active {
+    background: linear-gradient(90deg, rgba(246, 44, 85, 0.18) 0%, rgba(246, 44, 85, 0.04) 100%);
+    .psi-name { color: var(--fnos-red); }
+    .psi-icon { color: var(--fnos-red); }
+  }
   &.unavailable { opacity: 0.55; }
-  .psi-icon { font-size: 18px; color: #909399; flex-shrink: 0; }
+  .psi-icon { font-size: 18px; color: var(--fnos-text-tertiary); flex-shrink: 0; }
   .psi-info { flex: 1; min-width: 0;
-    .psi-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .psi-offline { font-size: 11px; color: #fff; background: #c0c4cc; border-radius: 8px; padding: 0 6px; }
-    .psi-meta { font-size: 12px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      .psi-playing-title { color: #16a34a; font-weight: 500; }
+    .psi-name {
+      font-size: 14px; font-weight: 500;
+      display: flex; align-items: center; gap: 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .psi-offline {
+      font-size: 11px; color: #fff;
+      background: var(--fnos-text-muted); border-radius: 8px;
+      padding: 0 6px;
+    }
+    .psi-meta {
+      font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      .psi-playing-title { color: var(--fnos-green); font-weight: 500; }
     }
   }
-  .psi-check { color: #c35f33; font-size: 16px; flex-shrink: 0; }
+  .psi-check { color: var(--fnos-red); font-size: 16px; flex-shrink: 0; }
 }
-.peer-switcher-empty { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
-.peer-switcher-scan { display: flex; justify-content: center; padding: 8px 12px; border-top: 1px solid #f5f5f5;
+.peer-switcher-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
+.peer-switcher-scan {
+  display: flex; justify-content: center;
+  padding: 8px 12px; border-top: 1px solid rgba(255, 255, 255, 0.06);
   .el-button { width: 100%; }
 }
-.peer-switcher-tip { font-size: 11px; color: #bbb; padding: 8px 12px 10px; border-top: 0; line-height: 1.5; }
+.peer-switcher-tip { font-size: 11px; color: var(--fnos-text-muted); padding: 8px 14px 12px; line-height: 1.5; }
 
 /* ===== Mobile "more" controls popover ===== */
 .mobile-controls-popover.el-popover.el-popper { padding: 0 !important; max-width: calc(100vw - 24px) !important; }
-.mc-body { width: 100%; max-height: 72vh; overflow-y: auto; }
-.mc-section { padding: 10px 12px; border-bottom: 1px solid #f5f5f5;
+.mc-body { width: 100%; max-height: 72vh; overflow-y: auto; color: var(--fnos-text-primary-dim); }
+.mc-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   &:last-child { border-bottom: none; }
 }
-.mc-title { font-size: 13px; font-weight: 600; color: #333; margin-bottom: 6px; }
+.mc-title { font-size: 13px; font-weight: 600; color: var(--fnos-text-primary); margin-bottom: 8px; }
 .mc-peer-list { max-height: 220px; overflow-y: auto; }
 .mc-peer-item {
-  display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: 8px; cursor: pointer;
-  &:hover { background: #f5f7fa; }
-  &.active { background: #fdf0ea; .mc-peer-name { color: #c35f33; } .mc-peer-icon { color: #c35f33; } }
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 8px; border-radius: 8px; cursor: pointer;
+  &:hover { background: rgba(255, 255, 255, 0.06); }
+  &.active {
+    background: linear-gradient(90deg, rgba(246, 44, 85, 0.18) 0%, rgba(246, 44, 85, 0.04) 100%);
+    .mc-peer-name { color: var(--fnos-red); }
+    .mc-peer-icon { color: var(--fnos-red); }
+  }
   &.unavailable { opacity: 0.55; }
-  .mc-peer-icon { font-size: 18px; color: #909399; flex-shrink: 0; }
+  .mc-peer-icon { font-size: 18px; color: var(--fnos-text-tertiary); flex-shrink: 0; }
   .mc-peer-info { flex: 1; min-width: 0;
-    .mc-peer-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .mc-peer-offline { font-size: 11px; color: #fff; background: #c0c4cc; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
-    .mc-peer-meta { font-size: 12px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      .mc-playing-title { color: #16a34a; font-weight: 500; }
+    .mc-peer-name {
+      font-size: 14px; font-weight: 500;
+      display: flex; align-items: center; gap: 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .mc-peer-offline { font-size: 11px; color: #fff; background: var(--fnos-text-muted); border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+    .mc-peer-meta {
+      font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      .mc-playing-title { color: var(--fnos-green); font-weight: 500; }
     }
   }
-  .mc-peer-check { color: #c35f33; font-size: 16px; flex-shrink: 0; }
+  .mc-peer-check { color: var(--fnos-red); font-size: 16px; flex-shrink: 0; }
 }
-.mc-peer-empty { text-align: center; color: #999; font-size: 13px; padding: 16px 0; }
+.mc-peer-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 16px 0; }
 .mc-scan { padding-top: 8px;
   .el-button { width: 100%; }
 }
-.mc-progress { display: flex; align-items: center; gap: 8px;
-  .mc-time { font-size: 12px; color: #999; min-width: 36px; }
+.mc-progress {
+  display: flex; align-items: center; gap: 8px;
+  .mc-time { font-size: 12px; color: var(--fnos-text-tertiary); min-width: 36px; }
   .mc-slider { flex: 1; }
 }
-.mc-ctrl-row { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
-  .mc-play { width: 48px; height: 48px; min-width: 48px; min-height: 48px; }
+.mc-ctrl-row {
+  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+  .mc-play {
+    width: 48px; height: 48px;
+    min-width: 48px; min-height: 48px;
+    background: var(--fnos-red) !important; border-color: var(--fnos-red) !important;
+    box-shadow: 0 4px 16px rgba(246, 44, 85, 0.5);
+  }
 }
-.mc-tools { display: flex; align-items: center; gap: 10px;
-  .mc-volume { flex: 1; display: flex; align-items: center; gap: 8px; margin-left: 4px;
-    .mc-vol-label { font-size: 12px; color: #999; white-space: nowrap; }
+.mc-tools {
+  display: flex; align-items: center; gap: 10px;
+  .mc-volume {
+    flex: 1; display: flex; align-items: center; gap: 8px; margin-left: 4px;
+    .mc-vol-label { font-size: 12px; color: var(--fnos-text-tertiary); white-space: nowrap; }
     .mc-vol-slider { flex: 1; }
   }
 }
