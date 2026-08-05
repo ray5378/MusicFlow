@@ -157,7 +157,7 @@
         <el-tooltip content="全屏播放" placement="top">
           <el-button :icon="ChatDotRound" circle size="small" @click="playerStore.togglePlayMode" :type="playerStore.playModeVisible ? 'primary' : ''" :disabled="!playerStore.currentSong" />
         </el-tooltip>
-        <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :show-tooltip="false" class="volume-slider" />
+        <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-slider" />
       </div>
     </footer>
 
