@@ -216,6 +216,44 @@ describe("MA 式链路集成测试", () => {
     expect(device.playMediaCalls.length).toBe(1); // 无 stalled 重试,无死循环
   });
 
+  // ============ 场景 3c:切歌后 tracker 重置,切歌瞬态 IDLE 不再触发 advance ============
+  //   回归测试:修复"歌曲自然结束 → 切到下一首 → 切歌瞬态又报 IDLE →
+  //   tracker.prev 仍是上一首 PLAYING → 误判 advance → 重复 cast 同一首"死循环。
+  //   对照 MA:play_index 后清空 prev_state,切歌瞬态的 IDLE 不会触发再次切歌。
+  it("场景3c:自然结束切歌后,切歌瞬态 IDLE 不再触发 advance(无死循环)", async () => {
+    const { pc, qc, device } = setup();
+    await qc.playFrom("d1", makeItems(3), 0, "http://base");
+    pc.endOptimistic("dlna:d1");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(device.playMediaCalls.length).toBe(1); // s1
+
+    // 上报 PLAYING(s1)建立 tracker.prev=PLAYING/s1
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // 自然结束:s1 播完 → IDLE → advance → 切到 s2
+    device.finishTrack();
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(device.playMediaCalls.length).toBe(2); // 已切到 s2
+    expect(device.playMediaCalls[1].songId).toBe("s2");
+
+    // 关键:切到 s2 后设备状态变为 PLAYING(s2),但紧接着设备在
+    // Stop→SetAVTransportURI→Play 过程中会短暂报 IDLE(切歌瞬态)。
+    // playCurrent 已 resetTracker,故 tracker.prev=null,IDLE 不会触发 advance。
+    device.state = PlaybackState.IDLE; // 切歌瞬态
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(device.playMediaCalls.length).toBe(2); // 不再切歌,无死循环
+
+    // 随后设备报 PLAYING(s2),正常播放
+    device.state = PlaybackState.PLAYING;
+    device.mediaUri = "http://base/stream/s2";
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(device.playMediaCalls.length).toBe(2); // 仍只有 2 次(s1 + s2)
+  });
+
   // ============ 场景 4:手动 next 与自动 advance 不并发竞争 ============
   it("场景4:手动 next 期间 GENA 触发 advance → advancing 守卫阻止重复切歌", async () => {
     const { pc, qc, device } = setup();

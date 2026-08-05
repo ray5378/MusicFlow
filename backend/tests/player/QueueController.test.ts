@@ -51,7 +51,7 @@ function makeMockPlayer(): UniversalPlayer & { calls: string[] } {
 describe("QueueController", () => {
   let qc: QueueController;
   let mockPlayer: ReturnType<typeof makeMockPlayer>;
-  let mockCtrl: { beginOptimistic: ReturnType<typeof vi.fn>; endOptimistic: ReturnType<typeof vi.fn>; reportState: ReturnType<typeof vi.fn> };
+  let mockCtrl: { beginOptimistic: ReturnType<typeof vi.fn>; endOptimistic: ReturnType<typeof vi.fn>; reportState: ReturnType<typeof vi.fn>; resetTracker: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     mockPlayer = makeMockPlayer();
@@ -59,6 +59,7 @@ describe("QueueController", () => {
       beginOptimistic: vi.fn(),
       endOptimistic: vi.fn(),
       reportState: vi.fn(),
+      resetTracker: vi.fn(),
     };
     qc = new QueueController();
     // QueueController 内部用裸 deviceId 作 key(与路由/DB 一致);

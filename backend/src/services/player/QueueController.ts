@@ -30,6 +30,8 @@ interface PlayerControllerLike {
   beginOptimistic(playerId: string, mediaUri: string): void;
   endOptimistic(playerId: string): void;
   reportState(state: any): void;
+  /** 切歌后重置 tracker,避免上一首的 PLAYING→IDLE 迁移再次触发 advance。 */
+  resetTracker(playerId: string): void;
 }
 
 export class QueueController extends EventEmitter {
@@ -180,6 +182,9 @@ export class QueueController extends EventEmitter {
     console.log(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
     try {
       const { mediaUri } = await player.playMedia(item, baseUrl);
+      // 切歌后重置 tracker:清掉上一首的 PLAYING 状态,避免切歌瞬态的
+      // PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
+      ctrl.resetTracker(playerId);
       // 乐观窗口:cast 命令已发出,屏蔽瞬态
       ctrl.beginOptimistic(playerId, mediaUri);
     } catch (e: any) {
