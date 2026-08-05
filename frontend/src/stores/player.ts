@@ -107,6 +107,10 @@ export const usePlayerStore = defineStore("player", () => {
     currentLyricLine: string;
     currentLyricIndex: number;
     pollTimer: ReturnType<typeof setInterval> | null;
+    // Smooth-progress interpolation timer: ticks every 250ms and advances
+    // currentTime locally so the progress bar moves smoothly between the
+    // slower 2s backend polls (which then correct any drift).
+    tickTimer: ReturnType<typeof setInterval> | null;
     lastCastState: string;
     lastScrobbledSongId: string;
   }
@@ -119,7 +123,7 @@ export const usePlayerStore = defineStore("player", () => {
   function ensureCastState(deviceId: string, name: string = "DLNA 设备"): CastState {
     let st = castStates.get(deviceId);
     if (!st) {
-      st = {
+      const raw: CastState = {
         deviceId,
         name,
         queue: [],
@@ -132,10 +136,16 @@ export const usePlayerStore = defineStore("player", () => {
         currentLyricLine: "",
         currentLyricIndex: -1,
         pollTimer: null,
+        tickTimer: null,
         lastCastState: "STOPPED",
         lastScrobbledSongId: "",
       };
-      castStates.set(deviceId, st);
+      castStates.set(deviceId, raw);
+      // IMPORTANT: reactive Map wraps the value in a proxy on set, so the
+      // original `raw` object is NOT the reactive one. Re-fetch the proxy
+      // so all subsequent mutations (st.currentTime = ..., st.isPlaying =
+      // ...) go through reactivity and the UI actually updates.
+      st = castStates.get(deviceId)!;
     } else if (name && name !== "DLNA 设备") {
       st.name = name;
     }
@@ -144,6 +154,7 @@ export const usePlayerStore = defineStore("player", () => {
   function removeCastState(deviceId: string): void {
     const st = castStates.get(deviceId);
     if (st?.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
+    if (st?.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
     castStates.delete(deviceId);
   }
 
@@ -513,6 +524,7 @@ export const usePlayerStore = defineStore("player", () => {
   // are tracked simultaneously without interfering with each other.
   function startCastPoll(st: CastState) {
     stopCastPoll(st);
+    // Backend poll (2s): ground-truth state + queue snapshot.
     st.pollTimer = setInterval(async () => {
       try {
         const res = await api.get(`/rest/api/v1/dlna/devices/${st.deviceId}/status`);
@@ -532,8 +544,21 @@ export const usePlayerStore = defineStore("player", () => {
         syncCastQueueFromBackend(st);
       } catch {}
     }, 2000);
+    // Smooth interpolation (250ms): advance currentTime locally while
+    // playing so the progress bar moves smoothly between the 2s polls. The
+    // next poll overwrites with the backend ground truth, correcting drift.
+    st.tickTimer = setInterval(() => {
+      if (st.isPlaying && st.duration > 0 && st.currentTime < st.duration) {
+        st.currentTime += 0.25;
+        if (st.currentTime > st.duration) st.currentTime = st.duration;
+        updateCastLyric(st);
+      }
+    }, 250);
   }
-  function stopCastPoll(st: CastState) { if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; } }
+  function stopCastPoll(st: CastState) {
+    if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
+    if (st.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
+  }
 
   // Pull the backend's authoritative queue snapshot into a device's state.
   async function syncCastQueueFromBackend(st: CastState): Promise<void> {
