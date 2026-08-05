@@ -181,12 +181,18 @@ export class QueueController extends EventEmitter {
     const playerId = `dlna:${deviceId}`;
     console.log(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
     try {
+      // 乐观窗口必须在 cast 之前开启:castToDevice 内部 Stop→SetAVTransportURI→Play
+      // 会触发 GENA STOPPED/TRANSITIONING/PLAYING 事件。若窗口在 cast 之后才开,
+      // 设备在 cast 期间上报的 PLAYING 会先于窗口开启到达 → 窗口永远等不到 PLAYING
+      // → 5s 超时 → stalled → 重播当前首 → 死循环。
+      // 对照 MA:命令发出前先把 _attr_playback_state = PLAYING(乐观设态)。
+      ctrl.beginOptimistic(playerId, "pending");
       const { mediaUri } = await player.playMedia(item, baseUrl);
-      // 切歌后重置 tracker:清掉上一首的 PLAYING 状态,避免切歌瞬态的
-      // PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
+      // cast 命令已发出,重置 tracker:清掉上一首的 prev 状态 + 残留去抖,
+      // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
+      // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。
       ctrl.resetTracker(playerId);
-      // 乐观窗口:cast 命令已发出,屏蔽瞬态
-      ctrl.beginOptimistic(playerId, mediaUri);
+      void mediaUri;
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);

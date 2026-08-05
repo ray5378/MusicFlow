@@ -115,12 +115,14 @@ export class PlayerController {
     return this.latest.get(playerId);
   }
 
-  /** 切歌后重置 tracker 的 prev 状态。对照 MA:play_index 后清空 prev_state,
+  /** 切歌后重置 tracker 的 prev 状态 + 残留去抖。对照 MA:play_index 后清空 prev_state,
    *  避免上一首的 PLAYING→IDLE 迁移在切歌瞬态再次触发 advance 决策。
-   *  仅重置 tracker + pending,不清乐观窗口(由 beginOptimistic 管理),不清 latest。 */
+   *  仅重置 tracker + pending + 去抖定时器,不清乐观窗口(由 beginOptimistic 管理),不清 latest。 */
   resetTracker(playerId: string): void {
     this.trackerOf(playerId).reset();
     this.pendingDecision.delete(playerId);
+    const d = this.debounceTimers.get(playerId); if (d) { clearTimeout(d); this.debounceTimers.delete(playerId); }
+    const f = this.forwardTimers.get(playerId); if (f) { clearTimeout(f); this.forwardTimers.delete(playerId); }
   }
 
   reset(playerId: string): void {

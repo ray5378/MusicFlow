@@ -25,9 +25,10 @@ beforeAll(() => {
 });
 
 /** 模拟 DLNA 设备状态机。
- *  - playMedia(item): 模拟 SetAVTransportURI + Play 成功,状态 → PLAYING,mediaUri = 新 URL
+ *  - playMedia(item): 模拟 castToDevice 真实时序:Stop→GENA STOPPED→
+ *    SetAVTransportURI→GENA TRANSITIONING→Play→GENA PLAYING。
+ *    关键:GENA 事件在 playMedia 返回前就上报给 PlayerController(模拟真实设备)。
  *  - 自然结束:device.finishTrack() 把状态置为 STOPPED(IDLE),模拟歌曲播完
- *  - 瞬态:device.transientStop() 短暂 STOPPED 后恢复(测试乐观窗口屏蔽)
  *  - pollState(): 返回当前状态 */
 class FakeDlnaDevice {
   state: PlaybackState = PlaybackState.IDLE;
@@ -36,6 +37,8 @@ class FakeDlnaDevice {
   duration = 100;
   readonly playerId: string;
   playMediaCalls: QueueItem[] = [];
+  /** cast 期间 GENA 事件上报回调(由 setup 注入 PlayerController.reportState)。 */
+  onGenaEvent: ((state: PlayerState) => void) | null = null;
 
   constructor(public readonly deviceId: string) {
     // 必须在构造函数里赋值:ES2022+ target 下类字段初始化早于参数属性赋值,
@@ -43,15 +46,42 @@ class FakeDlnaDevice {
     this.playerId = `dlna:${deviceId}`;
   }
 
-  /** 模拟 castToDevice 成功:状态 → PLAYING,设置新 mediaUri。 */
+  /** 模拟 castToDevice:Stop→GENA STOPPED→SetAVTransportURI→GENA TRANSITIONING→
+   *  Play→GENA PLAYING。GENA 事件在返回前就上报(模拟真实设备行为)。 */
   async playMedia(item: QueueItem, _baseUrl: string): Promise<{ mediaUri: string }> {
     this.playMediaCalls.push(item);
     const uri = `http://base/stream/${item.songId}`;
+
+    // Step 1: Stop → 设备 GENA 上报 STOPPED(IDLE)
+    this.state = PlaybackState.IDLE;
+    this.emitGena();
+
+    // Step 2: SetAVTransportURI → 设备 GENA 上报 TRANSITIONING(BUFFERING)
+    this.state = PlaybackState.BUFFERING;
     this.mediaUri = uri;
+    this.emitGena();
+
+    // Step 3: Play → 设备 GENA 上报 PLAYING
     this.state = PlaybackState.PLAYING;
     this.position = 0;
     this.duration = item.duration || 100;
+    this.emitGena();
+
     return { mediaUri: uri };
+  }
+
+  /** 模拟 GENA 事件上报给 PlayerController。 */
+  private emitGena(): void {
+    if (this.onGenaEvent) {
+      this.onGenaEvent({
+        playerId: this.playerId,
+        playbackState: this.state,
+        position: this.position,
+        duration: this.duration,
+        mediaUri: this.mediaUri,
+        updatedAt: Date.now(),
+      });
+    }
   }
 
   async stop() { this.state = PlaybackState.IDLE; }
@@ -109,6 +139,9 @@ function setup(deviceId = "d1") {
   pc.onDecision = (decision, playerId) => {
     qc.handleDecision(decision, playerId).catch(() => {});
   };
+
+  // 注入 GENA 回调:cast 期间设备 GENA 事件直接上报 PlayerController(模拟真实 eventing.ts)
+  device.onGenaEvent = (state) => pc.reportState(state);
 
   // 注册:UniversalPlayer 包裹 fake device(实现 ProtocolPlayer)
   const up = new UniversalPlayer(device.playerId, "fake");
@@ -173,18 +206,31 @@ describe("MA 式链路集成测试", () => {
   // ============ 场景 3:5s play 超时 → stalled 兜底重试 ============
   it("场景3:乐观窗口 5s 超时未确认 PLAYING → stalled → 重试当前首", async () => {
     const { pc, qc, device } = setup();
+    // 模拟卡死设备:Play 命令成功但设备实际不播,playMedia 期间不发 PLAYING(只发 IDLE/BUFFERING)
+    const origPlayMedia = device.playMedia.bind(device);
+    device.playMedia = async (item, _baseUrl) => {
+      device.playMediaCalls.push(item);
+      // Stop → IDLE(GENA 上报)
+      device.state = PlaybackState.IDLE;
+      device.onGenaEvent?.(device.snapshot());
+      // SetAV → BUFFERING(GENA 上报),但不发 PLAYING(设备卡死)
+      device.state = PlaybackState.BUFFERING;
+      device.mediaUri = `http://base/stream/${item.songId}`;
+      device.onGenaEvent?.(device.snapshot());
+      return { mediaUri: `http://base/stream/${item.songId}` };
+    };
     await qc.playFrom("d1", makeItems(2), 0, "http://base");
     expect(device.playMediaCalls.length).toBe(1);
 
-    // 设备一直报 IDLE(模拟卡死:SOAP Play 成功但设备实际没播)
-    device.state = PlaybackState.IDLE;
-    pc.reportState(device.snapshot());
+    // 乐观窗口已开启(cast 前),IDLE/BUFFERING 被屏蔽,5s 内未收到 PLAYING
     await vi.advanceTimersByTimeAsync(800); // 乐观窗口内,忽略
 
     // 超过 5s play 超时 → 触发 stalled → QueueController 重试当前首
     await vi.advanceTimersByTimeAsync(5000);
     expect(device.playMediaCalls.length).toBe(2); // 重试 s1
     expect(device.playMediaCalls[1].songId).toBe("s1");
+    // 恢复原始 playMedia(后续断言不受影响)
+    device.playMedia = origPlayMedia;
   });
 
   // ============ 场景 3b:PLAYING 上报(mediaUri 为空/不匹配)也能关闭乐观窗口 ============

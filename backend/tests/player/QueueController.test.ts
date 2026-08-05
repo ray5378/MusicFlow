@@ -75,7 +75,10 @@ describe("QueueController", () => {
   it("onDecision('advance'): 推进到下一首并 cast", async () => {
     await qc.handleDecision("advance", "dlna:d1");
     expect(mockPlayer.calls).toContain("playMedia");
-    expect(mockCtrl.beginOptimistic).toHaveBeenCalledWith("dlna:d1", "u-new");
+    // 乐观窗口在 cast 之前开启(对照 MA 乐观设态),mediaUri 为 "pending";
+    // cast 后调 resetTracker 清上一首状态。窗口保持开启等 PLAYING 确认。
+    expect(mockCtrl.beginOptimistic).toHaveBeenCalledWith("dlna:d1", "pending");
+    expect(mockCtrl.resetTracker).toHaveBeenCalledWith("dlna:d1");
   });
 
   it("onDecision('ended'): 无下一首,标记结束,不 cast", async () => {
