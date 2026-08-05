@@ -185,10 +185,20 @@ setInterval(async () => {
 // Keep the device cache warm so the cast dialog can show devices instantly
 // without making the user wait for a fresh SSDP sweep every time. Runs once
 // shortly after boot (give the network stack a moment) then every 5 min.
+// After each refresh, register newly discovered devices with QueueController
+// so they have a UniversalPlayer + DLNA ProtocolPlayer bound for playback.
 const DLNA_SCAN_INTERVAL = 5 * 60 * 1000;
+async function refreshAndRegisterDevices(): Promise<void> {
+  try {
+    await refreshDevices();
+    for (const d of getCachedDevices()) {
+      getQueueController().registerDlnaDevice(d.id, d.name);
+    }
+  } catch { /* discovery failures are non-fatal */ }
+}
 setTimeout(() => {
-  refreshDevices().catch(() => {});
-  setInterval(() => { refreshDevices().catch(() => {}); }, DLNA_SCAN_INTERVAL);
+  refreshAndRegisterDevices();
+  setInterval(() => { refreshAndRegisterDevices(); }, DLNA_SCAN_INTERVAL);
 }, 8000);
 
 const port = parseInt(process.env.PORT || "46400", 10);
@@ -201,8 +211,8 @@ const port = parseInt(process.env.PORT || "46400", 10);
 // adaptor's request handler directly.
 import { initWebSocketServer } from "./services/ws/index.js";
 import { startMdnsBroadcast, stopMdnsBroadcast } from "./services/discovery/mdns.js";
-import { getEventManager } from "./services/dlna/eventing.js";
-import { getQueueManager } from "./services/dlna/queue.js";
+import { getQueueController, wirePlayerQueueControllers } from "./services/player/index.js";
+import { getCachedDevices } from "./services/dlna/control.js";
 import { getPeerManager } from "./services/peer.js";
 
 const server = createServer(getRequestListener(app.fetch));
@@ -210,24 +220,20 @@ const server = createServer(getRequestListener(app.fetch));
 initWebSocketServer(server);
 
 // Load persisted device queues from DB so cast state survives backend restart.
-getQueueManager().loadFromDb();
+getQueueController().loadFromDb();
 
 // Start the unified peer manager: registers DLNA peers from discovery, runs
 // the 10-min inactivity cleanup for stale local + offline dlna peers.
 getPeerManager().startCleanup();
 
-// Auto-advance the queue when a track ends naturally (GENA PLAYING → STOPPED).
-// stop() sets a suppress flag so explicit stops don't trigger advance.
-getEventManager().on("track_ended", (deviceId: string) => {
-  const baseUrl = process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`;
-  getQueueManager().onTrackEnded(deviceId, baseUrl).catch(() => {});
-});
+// 接线:PlayerController 决策 → QueueController 切歌。对照 MA 上层控制器链路。
+// GENA 事件(plying→stopped)上报给 PlayerController,经双层去抖 + 状态迁移判断后,
+// 由 QueueController 决定是否切歌(替代原 track_ended 直推)。
+wirePlayerQueueControllers();
 
-// Fallback state-poll loop: when GENA subscription isn't active (many DLNA
-// renderers don't support/accept GENA), periodically SOAP-poll active
-// devices to detect PLAYING → STOPPED and trigger auto-advance. GENA is
-// still the primary path; this only kicks in for devices that need it.
-getQueueManager().startPollLoop(() => process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`);
+// Fallback poll:对照 MA force_poll,GENA 不可用时主动 poll 设备状态上报 PlayerController。
+// 由 QueueController 持有轮询,间隔 5s(MA 是 30s,本地设备事件支持差,用 5s 平衡)。
+getQueueController().startPollLoop(() => process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`);
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
@@ -238,15 +244,20 @@ server.listen(port, "0.0.0.0", () => {
   // Best-effort: if the device is offline, the resume silently no-ops.
   setTimeout(() => {
     const baseUrl = process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`;
-    const active = getQueueManager().activeDevices();
+    // Register any devices already in the cache (discovery may have run
+    // before this callback fires) so resumeActive can find their player.
+    for (const d of getCachedDevices()) {
+      getQueueController().registerDlnaDevice(d.id, d.name);
+    }
+    const active = getQueueController().activeDevices();
     if (active.length === 0) return;
     console.log(`[queue] resuming ${active.length} active device queue(s) after restart`);
     for (const { deviceId } of active) {
-      getQueueManager().resumeActive(deviceId, baseUrl).catch((e) => {
+      getQueueController().resumeActive(deviceId, baseUrl).catch((e) => {
         console.warn(`[queue] resume failed for ${deviceId}:`, e?.message || e);
       });
     }
-  }, 8000);
+  }, 10000);
 });
 
 // Clean shutdown: stop mDNS so the service record disappears promptly.

@@ -18,6 +18,7 @@
 import { randomBytes } from "crypto";
 import { discoverDlnaDevices, DlnaDevice } from "./discovery.js";
 import { getEventManager } from "./eventing.js";
+import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 
 const AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1";
@@ -232,20 +233,21 @@ async function probeEnqueueSupport(device: DlnaDevice): Promise<boolean> {
   return rt.supportsEnqueue;
 }
 
-// Wait until the device's AVTransport is no longer TRANSITIONING, i.e. the
-// SetAVTransportURI has been accepted and the transport is ready to Play.
-// MA calls this wait_for_can_play and gives it a 10s budget; we use a tighter
-// 3s since most devices settle within a few hundred milliseconds.
-async function waitForCanPlay(device: DlnaDevice, budgetMs = 3000): Promise<void> {
+// Wait until the device's AVTransport is ready to Play.对照 MA async_wait_for_can_play:
+// 检查 CurrentTransportActions 含 "play"(而非只 != TRANSITIONING),并主动 poll 兜底。
+async function waitForCanPlay(device: DlnaDevice, budgetMs = 10000): Promise<void> {
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     try {
       const xml = await soapCall(device.avTransportUrl!, AV_TRANSPORT, "GetTransportInfo", { InstanceID: "0" });
       const st = xml.match(/<CurrentTransportState>([^<]*)<\/CurrentTransportState>/i)?.[1].trim() || "";
-      if (st !== "TRANSITIONING") return;
+      const actions = xml.match(/<CurrentTransportActions>([^<]*)<\/CurrentTransportActions>/i)?.[1].trim() || "";
+      // MA: 检查 CurrentTransportActions 含 "play";空值时乐观返回 true(设备漏报)
+      if (st !== "TRANSITIONING" && (actions === "" || /play/i.test(actions))) return;
     } catch { return; }
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise(r => setTimeout(r, 250));
   }
+  console.log(`[cast] ${device.id}: waitForCanPlay 超时(10s),继续尝试 Play`);
 }
 
 // Mark a SOAP failure on the device runtime so the poller knows to keep
@@ -270,7 +272,7 @@ function markOk(deviceId: string) {
 // Flow: Stop (tolerate errors) → SetAVTransportURI → wait_for_can_play → Play.
 // Also kicks off GENA event subscription (best-effort) so we get push-based
 // state updates instead of relying solely on polling.
-export async function castToDevice(opts: CastOptions): Promise<void> {
+export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: string }> {
   const device = getDevice(opts.deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到或不可用");
   const { token, streamUrl } = createCastSession(opts.songId, opts.deviceId, opts.baseUrl);
@@ -281,20 +283,14 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
   // Reset the "next enqueued" flag — a fresh SetAVTransportURI clears the device's next slot.
   runtimeOf(opts.deviceId).nextEnqueued = false;
 
-  // Step 1: Stop (tolerate "transport not playing" errors).
+  // Step 1: Stop (tolerate errors). 对照 MA play_media: always clear queue (by sending stop) first.
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
-    console.log(`[cast] ${opts.deviceId}: Step 1 Stop OK`);
   } catch (e: any) {
     console.log(`[cast] ${opts.deviceId}: Step 1 Stop failed (ignored): ${e?.message || e}`);
   }
 
-  // Brief pause after Stop: many DLNA renderers need a moment to fully reset
-  // the transport (especially after a natural track end where the device is
-  // in STOPPED-with-media state). Without this, SetAVTransportURI may return
-  // OK at the SOAP level but the device fails to actually load+play the new
-  // media — manifesting as "progress stuck at 0" or "plays 1s then stops".
-  await new Promise(r => setTimeout(r, 300));
+  // 注:MA 在 stop 与 SetAVTransportURI 之间无固定 sleep,依赖 wait_for_can_play 等设备就绪。
 
   // Step 2: SetAVTransportURI.
   console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI`);
@@ -305,7 +301,7 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
   });
   console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI OK`);
 
-  // Step 3: wait_for_can_play — avoid 705 "transport locked" on Play.
+  // Step 3: wait_for_can_play — 检查 CurrentTransportActions 含 play。对照 MA 10s budget。
   console.log(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay`);
   await waitForCanPlay(device);
   console.log(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay OK`);
@@ -326,36 +322,18 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
     album: opts.album,
     coverArt: opts.coverArt,
   };
-  rt.suppressAutoNext = false;
   getEventManager().emit("media_changed", opts.deviceId, rt.currentMedia);
 
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
   getEventManager().subscribe(device).catch(() => {});
   console.log(`[cast] ${opts.deviceId}: END songId=${opts.songId}`);
+  return { mediaUri: streamUrl };
 }
 
 /** Read the media currently loaded on a device (set by castToDevice). */
 export function getCurrentMedia(deviceId: string): CurrentMedia | undefined {
   return runtimes.get(deviceId)?.currentMedia;
-}
-
-/**
- * Consume the one-shot "suppress auto-next" flag. Called by the queue manager
- * when a track_ended event arrives — returns true if the natural end should
- * advance the queue, false if a stop()/queue.clear() suppressed it. The flag
- * is reset on the next castToDevice() call.
- */
-export function consumeAutoAdvanceFlag(deviceId: string): boolean {
-  const rt = runtimes.get(deviceId);
-  if (!rt) return true;
-  if (rt.suppressAutoNext) {
-    console.log(`[control][autoNext] ${deviceId}: suppressed (explicit stop) → no advance`);
-    rt.suppressAutoNext = false;
-    return false;
-  }
-  console.log(`[control][autoNext] ${deviceId}: allowed → advance`);
-  return true;
 }
 
 /** Clear the currently-loaded media (e.g. when the queue is cleared). */
@@ -438,10 +416,6 @@ export async function stopDevice(deviceId: string): Promise<void> {
   if (!device?.avTransportUrl) throw new Error("设备未找到");
   const rt = runtimeOf(deviceId);
   rt.nextEnqueued = false;
-  // Suppress queue auto-advance — this Stop came from an explicit user action,
-  // not a natural track end.
-  rt.suppressAutoNext = true;
-  console.log(`[control][stop] ${deviceId}: explicit stop, suppressAutoNext=true`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
     markOk(deviceId);
@@ -527,4 +501,46 @@ function parseHms(hms: string): number {
   const m = hms.match(/(\d+):(\d+):(\d+)/);
   if (!m) return 0;
   return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]);
+}
+
+// ==================== ProtocolPlayer 适配(供 UniversalPlayer 绑定)====================
+
+/** 把 DLNA 设备状态映射为 PlayerState(PlaybackState)。对照 MA _get_playback_state。 */
+function mapTransportState(state: string): PlaybackState {
+  // TRANSITIONING → BUFFERING(屏蔽瞬态,但 PlayerController 乐观窗口已处理)
+  if (state === "PLAYING") return PlaybackState.PLAYING;
+  if (state === "PAUSED_PLAYBACK") return PlaybackState.PAUSED;
+  if (state === "TRANSITIONING") return PlaybackState.BUFFERING;
+  return PlaybackState.IDLE; // STOPPED / NO_MEDIA_PRESENT / 其他
+}
+
+/** 创建 DLNA 协议 player 适配器(实现 ProtocolPlayer 接口)。 */
+export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
+  const playerId = `dlna:${deviceId}`;
+  return {
+    playerId,
+    async playMedia(item: QueueItem, baseUrl: string) {
+      const { mediaUri } = await castToDevice({
+        songId: item.songId, title: item.title, artist: item.artist, album: item.album,
+        mime: item.mime, deviceId, baseUrl, coverArt: item.coverArt,
+      });
+      return { mediaUri };
+    },
+    async stop() { await stopDevice(deviceId); },
+    async pause() { await pauseDevice(deviceId); },
+    async resume() { await playDevice(deviceId); },
+    async seek(s: number) { await seekDevice(deviceId, s); },
+    async setVolume(v: number) { await setDeviceVolume(deviceId, v); },
+    async pollState(): Promise<PlayerState> {
+      const s = await getDeviceStatus(deviceId);
+      return {
+        playerId,
+        playbackState: mapTransportState(s.state),
+        position: s.position,
+        duration: s.duration,
+        mediaUri: undefined, // DLNA GetPositionInfo 不返回 URI;用 currentMedia.songId 间接关联
+        updatedAt: Date.now(),
+      };
+    },
+  };
 }

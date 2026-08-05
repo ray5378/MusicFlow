@@ -20,7 +20,7 @@ import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInf
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
-  enqueueNextTrack,
+  enqueueNextTrack, getCurrentMedia,
 } from "../../services/dlna/control.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
@@ -970,7 +970,9 @@ apiRoutes.get("/v1/dlna/devices/:deviceId/status", async (c) => {
 // playlist) and next/prev track commands. baseUrl is resolved from the
 // request host so DLNA renderers can pull the stream back from this server.
 apiRoutes.get("/v1/dlna/devices/:deviceId/queue", (c) => {
-  return c.json(getQueueManager().snapshot(c.req.param("deviceId")!));
+  const deviceId = c.req.param("deviceId")!;
+  // 新 QueueSnapshot 不再带 currentMedia(改为 ended);路由层补回以保持前端/HA 响应形状兼容。
+  return c.json({ ...getQueueManager().snapshot(deviceId), currentMedia: getCurrentMedia(deviceId) });
 });
 
 // Replace the queue and start playing from `startIndex` (default 0).
@@ -1020,7 +1022,12 @@ apiRoutes.delete("/v1/dlna/devices/:deviceId/queue", (c) => {
 // calls this on load to restore the cast state (which device was playing,
 // what queue, what index) after the tab was closed or the backend restarted.
 apiRoutes.get("/v1/dlna/active", (c) => {
-  return c.json({ active: getQueueManager().activeDevices() });
+  // 每个 snapshot 补 currentMedia,保持原响应形状(新 QueueSnapshot 改用 ended)。
+  const active = getQueueManager().activeDevices().map((a) => ({
+    deviceId: a.deviceId,
+    snapshot: { ...a.snapshot, currentMedia: getCurrentMedia(a.deviceId) },
+  }));
+  return c.json({ active });
 });
 
 // Set the play mode (order | one | all | shuffle) for a device's queue.
@@ -1100,7 +1107,10 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const snap = pm.getQueueSnapshot(peerId);
   if (!snap) return c.json({ error: "无效的 peerId" }, 400);
-  return c.json(snap);
+  // dlna peer:补 currentMedia(原 QueueSnapshot 字段,新 snapshot 改用 ended)。
+  const parsed = parsePeerId(peerId);
+  const currentMedia = parsed && parsed.kind === "dlna" ? getCurrentMedia(parsed.id) : undefined;
+  return c.json({ ...snap, currentMedia });
 });
 
 // Replace the queue and (for dlna) start playing from startIndex.

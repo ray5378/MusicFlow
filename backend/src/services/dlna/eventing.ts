@@ -21,6 +21,7 @@ import http from "http";
 import { EventEmitter } from "events";
 import { DlnaDevice } from "./discovery.js";
 import { notifyTrackChanged } from "./control.js";
+import { PlaybackState, type PlayerState } from "../player/types.js";
 
 const AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1";
@@ -147,19 +148,37 @@ class EventManager extends EventEmitter {
         if (vol) st.volume = parseInt(vol, 10) || 0;
       }
       this.states.set(deviceId, st);
-      // Notify subscribers (WebSocket layer) of the new state.
       const prevState = prev.state;
       this.emit("state_changed", deviceId, st);
-      // Detect a natural track end: transport transitioned to STOPPED from
-      // PLAYING (not from PAUSED, which would be a user pause). The queue
-      // manager subscribes to advance to the next track in this case.
-      if (st.state === "STOPPED" && prevState === "PLAYING") {
-        console.log(`[gena][track_ended] ${deviceId}: PLAYING→STOPPED detected via GENA event → emitting track_ended`);
-        this.emit("track_ended", deviceId, st);
-      }
+      // 不再 emit track_ended 直接触发 queue。改为上报 PlayerController,
+      // 由上层去抖 + 状态迁移判断决策切歌(对照 MA:player 上报状态 → controller 决策)。
+      this.reportToPlayerController(deviceId, st);
     } catch {
       // Malformed NOTIFY — ignore, we'll get the next one.
     }
+  }
+
+  private reportToPlayerController(deviceId: string, st: DeviceEventState): void {
+    // 懒加载 PlayerController,避免循环依赖(eventing ↔ player 互引)
+    import("../player/index.js").then(({ getPlayerController }) => {
+      const ctrl = getPlayerController();
+      const playerState: PlayerState = {
+        playerId: `dlna:${deviceId}`,
+        playbackState: this.mapState(st.state),
+        position: st.position || 0,
+        duration: st.duration || 0,
+        mediaUri: this.lastTrackUri.get(deviceId),
+        updatedAt: st.updatedAt,
+      };
+      ctrl.reportState(playerState);
+    }).catch(() => {});
+  }
+
+  private mapState(state: string | undefined): PlaybackState {
+    if (state === "PLAYING") return PlaybackState.PLAYING;
+    if (state === "PAUSED_PLAYBACK") return PlaybackState.PAUSED;
+    if (state === "TRANSITIONING") return PlaybackState.BUFFERING;
+    return PlaybackState.IDLE;
   }
 
   private lastTrackUri = new Map<string, string>();

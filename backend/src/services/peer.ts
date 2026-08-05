@@ -198,16 +198,17 @@ class PeerManager extends EventEmitter {
     }
     // local
     const row = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
-    if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false };
+    if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false };
     try {
       return {
         items: JSON.parse(row.itemsJson || "[]") as QueueItem[],
         currentIndex: row.currentIndex,
         playMode: (row.playMode as PlayMode) || "order",
         isActive: !!row.isActive,
+        ended: false,
       };
     } catch {
-      return { items: [], currentIndex: -1, playMode: "order", isActive: false };
+      return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false };
     }
   }
 
