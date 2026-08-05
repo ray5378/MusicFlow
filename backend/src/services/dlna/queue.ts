@@ -15,7 +15,8 @@ import { EventEmitter } from "events";
 import { db } from "../../db/index.js";
 import { deviceQueues } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { castToDevice, consumeAutoAdvanceFlag, clearCurrentMedia, getCurrentMedia } from "./control.js";
+import { castToDevice, consumeAutoAdvanceFlag, clearCurrentMedia, getCurrentMedia, getDeviceStatus, shouldPollDevice } from "./control.js";
+import { getEventManager } from "./eventing.js";
 
 export type PlayMode = "order" | "one" | "all" | "shuffle";
 
@@ -57,10 +58,43 @@ export function suffixToMime(suffix: string): string {
 class QueueManager extends EventEmitter {
   private queues = new Map<string, Queue>();
   private advancing = new Set<string>();
+  // Per-device poll: when GENA subscription isn't active, periodically SOAP
+  // -poll the device to detect natural track end (PLAYING → STOPPED) so
+  // auto-advance still works. GENA is the primary path; this is the fallback.
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPolledState = new Map<string, string>();
 
   constructor() {
     super();
     this.setMaxListeners(50);
+  }
+
+  /** Start the fallback state-poll loop. Called once from index.ts. */
+  startPollLoop(baseUrl: () => string): void {
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => this.pollAllDevices(baseUrl), 3000);
+  }
+
+  private async pollAllDevices(baseUrl: () => string): Promise<void> {
+    const em = getEventManager();
+    for (const [deviceId, q] of this.queues) {
+      // Only poll devices that need it: GENA not subscribed + has an active
+      // queue. Devices with GENA get track_ended via push events already.
+      if (!q.isActive || q.currentIndex < 0) continue;
+      if (em.isSubscribed(deviceId) && !shouldPollDevice(deviceId)) continue;
+      try {
+        const status = await getDeviceStatus(deviceId);
+        const prev = this.lastPolledState.get(deviceId);
+        const cur = status.state || "STOPPED";
+        this.lastPolledState.set(deviceId, cur);
+        // Detect natural track end: PLAYING → STOPPED. This mirrors the GENA
+        // logic in eventing.ts. The advancing guard + suppress flag in
+        // onTrackEnded handle the rest (explicit stops, re-entrancy).
+        if (cur === "STOPPED" && prev === "PLAYING") {
+          await this.onTrackEnded(deviceId, baseUrl());
+        }
+      } catch {}
+    }
   }
 
   /** Load all persisted queues from DB on startup. Called once from index.ts. */

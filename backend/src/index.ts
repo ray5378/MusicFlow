@@ -223,6 +223,12 @@ getEventManager().on("track_ended", (deviceId: string) => {
   getQueueManager().onTrackEnded(deviceId, baseUrl).catch(() => {});
 });
 
+// Fallback state-poll loop: when GENA subscription isn't active (many DLNA
+// renderers don't support/accept GENA), periodically SOAP-poll active
+// devices to detect PLAYING → STOPPED and trigger auto-advance. GENA is
+// still the primary path; this only kicks in for devices that need it.
+getQueueManager().startPollLoop(() => process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`);
+
 server.listen(port, "0.0.0.0", () => {
   console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
   // Broadcast via mDNS so the HA integration can auto-discover this instance.
