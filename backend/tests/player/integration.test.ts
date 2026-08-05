@@ -233,6 +233,28 @@ describe("MA 式链路集成测试", () => {
     device.playMedia = origPlayMedia;
   });
 
+  // ============ 场景 3d:5s 超时但设备实际已在播放 → 不重投,不打断 ============
+  //   回归测试:修复"乐观窗口 5s 未确认 PLAYING → stalled → 盲目重投 → 打断
+  //   已在播放的设备 → 歌曲前几秒无限重复"(真实 HiVi GENA/轮询确认晚于 5s)。
+  it("场景3d:stalled 时设备已在播放(pollState=PLAYING)→ 静默关闭窗口,不重投", async () => {
+    const { pc, qc, device } = setup();
+    // 模拟真实设备:cast 后设备实际已开始播放(PLAYING),但 GENA/轮询确认
+    // 晚于 5s 乐观窗口(轮询被 advancing 跳过) → stalled 触发时设备已在播。
+    const origPlayMedia = device.playMedia.bind(device);
+    device.playMedia = async (item, _baseUrl) => {
+      device.playMediaCalls.push(item);
+      device.state = PlaybackState.PLAYING; // 设备在播,但不发 GENA 事件
+      return { mediaUri: `http://base/stream/${item.songId}` };
+    };
+    await qc.playFrom("d1", makeItems(2), 0, "http://base");
+    expect(device.playMediaCalls.length).toBe(1);
+
+    // 超过 5s play 超时 → stalled → 验证 pollState 发现设备已在播放 → 不重投
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(device.playMediaCalls.length).toBe(1); // 未被再次 cast,不打断
+    device.playMedia = origPlayMedia;
+  });
+
   // ============ 场景 3b:PLAYING 上报(mediaUri 为空/不匹配)也能关闭乐观窗口 ============
   //   回归测试:修复 GENA/poll 上报 PLAYING 但 mediaUri=undefined 时乐观窗口
   //   永远无法关闭 → 5s 超时 → stalled → 重复 cast 同一首的死循环。

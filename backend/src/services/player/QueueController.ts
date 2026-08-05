@@ -7,7 +7,7 @@ import { EventEmitter } from "events";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { deviceQueues, songs } from "../../db/schema.js";
-import { PlayMode, QueueItem, QueueSnapshot } from "./types.js";
+import { PlayMode, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl } from "../dlna/control.js";
@@ -133,6 +133,18 @@ export class QueueController extends EventEmitter {
     if (decision === "stalled") {
       // 卡死兜底:重试当前首一次
       if (this.advancing.has(deviceId)) return;
+      // 回归修复:乐观窗口 5s 未确认 PLAYING 会触发 stalled,但 HiVi 等真实设备的
+      // PLAYING 确认(GENA 或 5s 轮询,cast 期间 advancing 还会跳过轮询)常晚于 5s。
+      // 此时盲目重投会把"已在播放"的设备打断 → 歌曲前几秒无限重复。
+      // 先轮询设备真实状态:确在播放 → 静默关闭乐观窗口并重置 tracker,绝不重投。
+      try {
+        const state = await this.players.get(deviceId)?.pollState();
+        if (state?.playbackState === PlaybackState.PLAYING) {
+          this.ctrls.get(deviceId)?.endOptimistic(`dlna:${deviceId}`);
+          this.ctrls.get(deviceId)?.resetTracker(`dlna:${deviceId}`);
+          return;
+        }
+      } catch {}
       this.advancing.add(deviceId);
       try {
         await this.playCurrent(deviceId, baseUrl);
