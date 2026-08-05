@@ -1,7 +1,7 @@
 <template>
   <div class="main-layout">
     <!-- ===== Mobile top bar ===== -->
-    <header class="mobile-header" v-if="isMobile">
+    <header class="mobile-header" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
       <button type="button" class="mobile-hamburger" aria-label="菜单" @click="mobileNavOpen = !mobileNavOpen">
         <el-icon :size="22"><Menu /></el-icon>
       </button>
@@ -51,7 +51,7 @@
     <main class="main-content"><router-view /></main>
 
     <!-- ===== Mobile player bar (compact) ===== -->
-    <footer class="player-bar-mobile" v-if="isMobile">
+    <footer class="player-bar-mobile" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
       <div class="mp-cover" @click="playerStore.togglePlayMode">
         <img v-if="coverUrl" :src="coverUrl" />
         <div v-else class="mp-cover-ph"><el-icon :size="20"><Headset /></el-icon></div>
@@ -69,9 +69,109 @@
           <PlaybackIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="24" />
         </button>
         <button type="button" class="mp-btn" @click="playerStore.next"><PlaybackIcon name="next" :size="18" /></button>
-        <button type="button" class="mp-btn mp-list" :class="{ active: playerStore.showPlaylist }" @click="playerStore.togglePlaylistPanel">
-          <el-icon :size="18"><List /></el-icon>
-        </button>
+
+        <!-- More: opens the full playback controls panel (mirrors desktop bar,
+             including the player switcher + DLNA rescan). -->
+        <el-popover
+          placement="top-end"
+          :width="340"
+          trigger="click"
+          popper-class="mobile-controls-popover"
+          v-model:visible="mobileControlsVisible"
+        >
+          <template #reference>
+            <button type="button" class="mp-btn mp-more" :class="{ active: mobileControlsVisible }">
+              <el-icon :size="18"><MoreFilled /></el-icon>
+            </button>
+          </template>
+          <div class="mc-body">
+            <!-- Player switcher (same data/actions as the desktop popover) -->
+            <div class="mc-section">
+              <div class="mc-title">选择播放器</div>
+              <div class="mc-peer-list">
+                <div
+                  v-for="p in playerStore.peers"
+                  :key="p.peerId"
+                  class="mc-peer-item"
+                  :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
+                  @click="onMobileSwitchPeer(p.peerId)"
+                >
+                  <el-icon class="mc-peer-icon">
+                    <Headset v-if="p.kind === 'local'" />
+                    <Box v-else-if="p.kind === 'group'" />
+                    <Monitor v-else />
+                  </el-icon>
+                  <div class="mc-peer-info">
+                    <div class="mc-peer-name">
+                      {{ p.kind === 'local' ? '本机' : p.name }}
+                      <span v-if="!p.available" class="mc-peer-offline">离线</span>
+                    </div>
+                    <div class="mc-peer-meta">
+                      <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
+                        {{ p.queue.items.length }} 首
+                        <span v-if="p.queue.isActive">
+                          · 播放中
+                          <span v-if="peerPlayingTitle(p)" class="mc-playing-title">· {{ peerPlayingTitle(p) }}</span>
+                        </span>
+                      </span>
+                      <span v-else>空闲</span>
+                    </div>
+                  </div>
+                  <el-icon v-if="p.peerId === playerStore.currentPeerId" class="mc-peer-check"><Check /></el-icon>
+                </div>
+                <div v-if="playerStore.peers.length === 0" class="mc-peer-empty">暂无可用播放器</div>
+              </div>
+              <div class="mc-scan">
+                <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
+                  <el-icon><Refresh /></el-icon>重新扫描DLNA设备
+                </el-button>
+              </div>
+            </div>
+
+            <!-- Progress -->
+            <div class="mc-section mc-progress">
+              <span class="mc-time">{{ formatTime(playerStore.currentTime) }}</span>
+              <el-slider :model-value="playerStore.progress" @input="playerStore.seekPercent" :show-tooltip="false" class="mc-slider" />
+              <span class="mc-time">{{ formatTime(playerStore.duration) }}</span>
+            </div>
+
+            <!-- Transport controls -->
+            <div class="mc-section mc-ctrl-row">
+              <el-tooltip :content="playModeTooltip" placement="top">
+                <el-button circle size="small" @click="playerStore.cyclePlayMode" :type="playerStore.playMode !== 'order' ? 'primary' : ''">
+                  <PlaybackIcon :name="playModeIconName" :size="16" />
+                </el-button>
+              </el-tooltip>
+              <el-button circle @click="playerStore.prev"><PlaybackIcon name="prev" :size="22" /></el-button>
+              <el-button circle type="primary" class="mc-play" @click="playerStore.togglePlay">
+                <PlaybackIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="28" />
+              </el-button>
+              <el-button circle @click="playerStore.next"><PlaybackIcon name="next" :size="22" /></el-button>
+              <el-button circle size="small" :icon="List" @click="playerStore.togglePlaylistPanel" :type="playerStore.showPlaylist ? 'primary' : ''" />
+            </div>
+
+            <!-- Tools: add to playlist, favorite, volume -->
+            <div class="mc-section mc-tools">
+              <el-tooltip content="添加到歌单" placement="top">
+                <el-button circle size="small" :icon="Plus" @click="openAddToPlaylist" />
+              </el-tooltip>
+              <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
+                <el-button circle size="small" class="fav-btn" @click="toggleCurrentFavorite">
+                  <HeartIcon :filled="isCurrentFavorite" :size="16" />
+                </el-button>
+              </el-tooltip>
+              <div class="mc-volume">
+                <span class="mc-vol-label">音量</span>
+                <el-slider
+                  :model-value="playerStore.volume * 100"
+                  @input="(v: number) => playerStore.setVolume(v / 100)"
+                  :format-tooltip="(v: number) => `${Math.round(v)}%`"
+                  class="mc-vol-slider"
+                />
+              </div>
+            </div>
+          </div>
+        </el-popover>
       </div>
     </footer>
 
@@ -119,9 +219,6 @@
           <el-tooltip content="添加到歌单" placement="top">
             <el-button :icon="Plus" circle size="small" @click="openAddToPlaylist" />
           </el-tooltip>
-          <el-tooltip :content="playerStore.castActive ? `投屏中: ${playerStore.castDeviceName}` : 'DLNA 投屏'" placement="top">
-            <el-button :icon="Monitor" circle size="small" @click="openDlnaDialog" :type="playerStore.castActive ? 'primary' : ''" />
-          </el-tooltip>
           <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
             <el-button
               circle
@@ -141,9 +238,10 @@
       </div>
       <div class="player-right">
         <!-- Player switcher: opens a popup above the button listing all peers
-             (local + DLNA). Clicking a peer rebinds the player bar + queue
-             panel to it. Distinct from the cast button — this only switches
-             which player the UI shows/controls; it does not push audio. -->
+             (local + DLNA + groups). Clicking a peer rebinds the player bar
+             + queue panel to it and starts controlling that player. For a
+             DLNA device this effectively casts to it. The popup also hosts
+             the manual "重新扫描DLNA设备" action. -->
         <el-popover
           placement="top-start"
           :width="280"
@@ -181,7 +279,10 @@
                   <div class="psi-meta">
                     <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
                       {{ p.queue.items.length }} 首
-                      <span v-if="p.queue.isActive">· 播放中</span>
+                      <span v-if="p.queue.isActive">
+                        · 播放中
+                        <span v-if="peerPlayingTitle(p)" class="psi-playing-title">· {{ peerPlayingTitle(p) }}</span>
+                      </span>
                     </span>
                     <span v-else>空闲</span>
                   </div>
@@ -189,6 +290,11 @@
                 <el-icon v-if="p.peerId === playerStore.currentPeerId" class="psi-check"><Check /></el-icon>
               </div>
               <div v-if="playerStore.peers.length === 0" class="peer-switcher-empty">暂无可用播放器</div>
+            </div>
+            <div class="peer-switcher-scan">
+              <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
+                <el-icon><Refresh /></el-icon>重新扫描DLNA设备
+              </el-button>
             </div>
             <div class="peer-switcher-tip">切换播放器仅改变当前控制目标,不会停止其他播放器</div>
           </div>
@@ -338,48 +444,6 @@
         <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">新建并添加</el-button>
       </div>
     </el-dialog>
-
-    <!-- ===== DLNA device dialog ===== -->
-    <el-dialog v-model="showDlnaDialog" title="DLNA 投屏" width="440px">
-      <div class="dlna-dialog-song" v-if="playerStore.currentSong">
-        将「{{ playerStore.currentSong.title }}」投屏到：
-      </div>
-      <div class="playlist-list">
-        <!-- Local playback: stop casting, sound comes from this device instead -->
-        <div
-          class="playlist-item"
-          :class="{ active: !playerStore.castActive }"
-          @click="castToLocal"
-        >
-          <el-icon class="pl-icon"><Headset /></el-icon>
-          <div class="pl-info">
-            <div class="pl-name">本地播放</div>
-            <div class="pl-meta">在此设备上播放,不投屏</div>
-          </div>
-        </div>
-        <div
-          v-for="dev in dlnaDevices"
-          :key="dev.id"
-          class="playlist-item"
-          :class="{ active: playerStore.castActive }"
-          @click="castTo(dev)"
-        >
-          <el-icon class="pl-icon"><Monitor /></el-icon>
-          <div class="pl-info">
-            <div class="pl-name">{{ dev.name }}</div>
-            <div class="pl-meta">{{ dev.manufacturer || dev.model || 'DLNA 设备' }}</div>
-          </div>
-          <el-icon v-if="dlnaCastingDevice === dev.id" class="el-icon is-loading"><Loading /></el-icon>
-        </div>
-        <div v-if="dlnaDevices.length === 0 && !dlnaScanning" class="empty-tip">
-          未发现 DLNA 设备,正在后台扫描,请稍后再试或确认设备在同一局域网且已开启 DLNA
-        </div>
-      </div>
-      <div class="create-playlist-row">
-        <el-button :loading="dlnaScanning" @click="scanDlnaDevices"><el-icon><Refresh /></el-icon>重新扫描</el-button>
-        <span v-if="playerStore.castActive" class="dlna-current-tip">当前: {{ playerStore.castDeviceName }}</span>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
@@ -389,7 +453,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box, Menu } from "@element-plus/icons-vue";
+import { Headset, User, List, Clock, Search, Connection, FolderOpened, UserFilled, ChatDotRound, Setting, Close, Plus, Loading, Collection, Monitor, Refresh, ArrowUp, Check, Box, Menu, MoreFilled } from "@element-plus/icons-vue";
 import HeartIcon from "@/components/HeartIcon.vue";
 import PlaybackIcon from "@/components/PlaybackIcon.vue";
 import { ElMessage } from "element-plus";
@@ -417,6 +481,7 @@ const sidebarCollapsed = ref(false);
 // `mobileNavOpen` controls whether the drawer is visible.
 const isMobile = ref(false);
 const mobileNavOpen = ref(false);
+const mobileControlsVisible = ref(false);
 function updateViewport() { isMobile.value = window.innerWidth < 768; }
 updateViewport();
 window.addEventListener("resize", updateViewport);
@@ -542,15 +607,8 @@ async function toggleCurrentFavorite() {
   } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
 }
 
-// ===== DLNA cast =====
-// The backend keeps a warm device cache (refreshed every 5 min in the
-// background), so opening the dialog shows devices instantly from the cache.
-// A silent re-scan is fired in the background to pick up newly powered-on
-// devices without blocking the UI.
-const showDlnaDialog = ref(false);
-const dlnaDevices = ref<any[]>([]);
+// ===== DLNA device scan (from the player switcher popover) =====
 const dlnaScanning = ref(false);
-const dlnaCastingDevice = ref("");
 
 // ===== Player switcher (peer popup) =====
 const peerSwitcherVisible = ref(false);
@@ -561,50 +619,35 @@ async function onSwitchPeer(peerId: string) {
   playerStore.refreshPeers();
 }
 
-async function openDlnaDialog() {
-  if (!playerStore.currentSong) { ElMessage.warning("请先选择一首歌曲"); return; }
-  showDlnaDialog.value = true;
-  // Instant: pull whatever the backend already has cached.
-  try {
-    const res = await api.get("/rest/api/v1/dlna/devices");
-    dlnaDevices.value = res.data.devices || [];
-  } catch { dlnaDevices.value = []; }
-  // Silent background refresh — does not block, just updates the list when done.
-  scanDlnaDevices();
+// Switch player from the mobile "more" controls popover, then close it.
+async function onMobileSwitchPeer(peerId: string) {
+  mobileControlsVisible.value = false;
+  await playerStore.switchPeer(peerId);
+  playerStore.refreshPeers();
 }
 
+// Title of the currently playing song on a peer, if it is playing.
+function peerPlayingTitle(p: any): string {
+  if (!p.queue || !p.queue.isActive) return "";
+  const items = p.queue.items || [];
+  const idx = p.queue.currentIndex;
+  if (idx >= 0 && items[idx]?.title) return items[idx].title;
+  return "";
+}
+
+// Manual re-scan of DLNA devices. After the backend finishes discovering,
+// refresh the peer list so newly found devices show up in the popover.
 async function scanDlnaDevices() {
+  if (dlnaScanning.value) return;
   dlnaScanning.value = true;
   try {
     const res = await api.post("/rest/api/v1/dlna/scan");
-    dlnaDevices.value = res.data.devices || [];
+    const count = (res.data.devices || []).length;
+    await playerStore.refreshPeers();
+    ElMessage.success(`扫描完成,发现 ${count} 台 DLNA 设备`);
   } catch (e: any) {
-    // Don't toast on the silent background refresh — only on explicit retry
-    // failures where the list is already empty.
-    if (dlnaDevices.value.length === 0) ElMessage.error(e.response?.data?.error || "扫描失败");
+    ElMessage.error(e.response?.data?.error || "扫描失败");
   } finally { dlnaScanning.value = false; }
-}
-
-// Cast to a DLNA device — hands all transport control over to the player
-// store's cast mode (play/pause/next/prev/seek/volume all proxy to the device).
-async function castTo(dev: any) {
-  if (!playerStore.currentSong) { ElMessage.warning("请先选择一首歌曲"); return; }
-  dlnaCastingDevice.value = dev.id;
-  try {
-    await playerStore.startCast(dev.id, dev.name);
-    showDlnaDialog.value = false;
-    ElMessage.success(`已投屏到「${dev.name}」`);
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "投屏失败");
-  } finally { dlnaCastingDevice.value = ""; }
-}
-
-// Switch back to local playback: stop the device, sound resumes on this machine.
-async function castToLocal() {
-  if (!playerStore.castActive) { showDlnaDialog.value = false; return; }
-  await playerStore.stopCast();
-  showDlnaDialog.value = false;
-  ElMessage.success("已切换到本地播放");
 }
 
 // Load favorites + preload homepage data once on mount (refresh-page scenario)
@@ -623,8 +666,12 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
   const lines = container.querySelectorAll(".pm-lyric-line");
   const active = lines[idx] as HTMLElement | undefined;
   if (!active) return;
-  // Center the active line inside the scrollable container
-  const targetTop = active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
+  // Center the active line inside the scrollable container. Computed from
+  // getBoundingClientRect (viewport-relative) so it stays correct regardless
+  // of where the scroll container sits in the layout / offsetParent chain.
+  const cRect = container.getBoundingClientRect();
+  const aRect = active.getBoundingClientRect();
+  const targetTop = container.scrollTop + (aRect.top - cRect.top) - container.clientHeight / 2 + active.clientHeight / 2;
   container.scrollTo({ top: targetTop, behavior: "smooth" });
 });
 
@@ -821,10 +868,6 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .create-playlist-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
 .empty-tip { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
 
-/* ===== DLNA cast ===== */
-.dlna-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
-.dlna-current-tip { color: #999; font-size: 12px; margin-left: auto; }
-
 /* ============================================================
    Mobile (< 768px): drawer sidebar, compact player bar,
    stacked fullscreen play mode, full-width queue panel.
@@ -892,7 +935,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
         background: transparent; color: #333; cursor: pointer;
         &:active { background: rgba(0,0,0,0.08); }
         &.mp-play { background: #c35f33; color: #fff; width: 40px; height: 40px; box-shadow: 0 3px 10px rgba(195,95,51,0.4); }
-        &.mp-list.active { color: #c35f33; }
+        &.mp-more.active { color: #c35f33; }
       }
     }
   }
@@ -901,22 +944,29 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .queue-panel { width: 100%; bottom: var(--player-height); }
 
   /* --- Fullscreen play mode: stacked single column --- */
-  .play-mode { overflow-y: auto; }
+  .play-mode { overflow-y: auto; z-index: 700; }
+  /* Hide the mobile top bar + compact player bar while play mode shows,
+     so they never overlap the fullscreen controls/disc/close button. */
+  .mc-hidden { display: none !important; }
   .play-mode .play-mode-body {
     flex-direction: column; justify-content: flex-start;
-    gap: 12px; padding: 24px 16px 8px;
+    gap: 8px; padding: 20px 16px 6px;
     .pm-left { width: 100%;
-      .pm-disc { width: min(260px, 68vw); height: min(260px, 68vw); }
-      .pm-song-title { margin-top: 14px; font-size: 18px; max-width: 100%; }
-      .pm-song-artist { font-size: 14px; }
+      .pm-disc { width: min(190px, 54vw); height: min(190px, 54vw); }
+      .pm-song-title { margin-top: 10px; font-size: 16px; max-width: 100%; }
+      .pm-song-artist { font-size: 13px; margin-top: 4px; }
+      .pm-song-album { font-size: 12px; }
     }
-    .pm-right { width: 100%; height: min(34vh, 300px); min-height: 120px; }
+    .pm-right { width: 100%; height: min(200px, 24vh); min-height: 88px; }
+    .pm-lyrics { padding: 30% 0; }
+    .pm-lyric-line { font-size: 13px; padding: 6px 0; }
+    .pm-lyric-line.active { font-size: 17px; }
   }
-  .play-mode .play-mode-controls { padding: 8px 16px 20px; gap: 10px;
+  .play-mode .play-mode-controls { padding: 6px 16px 14px; gap: 8px;
     .pm-progress { max-width: none; }
     .pm-buttons { gap: 12px;
-      .pm-play-btn { width: 52px; height: 52px; min-width: 52px; min-height: 52px; }
-      .pm-nav-btn { width: 42px; height: 42px; min-width: 42px; min-height: 42px; }
+      .pm-play-btn { width: 48px; height: 48px; min-width: 48px; min-height: 48px; }
+      .pm-nav-btn { width: 40px; height: 40px; min-width: 40px; min-height: 40px; }
     }
   }
   .play-mode .play-mode-close { top: 12px; right: 12px; width: 38px; height: 38px; }
@@ -943,10 +993,56 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .psi-info { flex: 1; min-width: 0;
     .psi-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .psi-offline { font-size: 11px; color: #fff; background: #c0c4cc; border-radius: 8px; padding: 0 6px; }
-    .psi-meta { font-size: 12px; color: #999; margin-top: 2px; }
+    .psi-meta { font-size: 12px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      .psi-playing-title { color: #16a34a; font-weight: 500; }
+    }
   }
   .psi-check { color: #c35f33; font-size: 16px; flex-shrink: 0; }
 }
 .peer-switcher-empty { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
-.peer-switcher-tip { font-size: 11px; color: #bbb; padding: 8px 12px 10px; border-top: 1px solid #f5f5f5; line-height: 1.5; }
+.peer-switcher-scan { display: flex; justify-content: center; padding: 8px 12px; border-top: 1px solid #f5f5f5;
+  .el-button { width: 100%; }
+}
+.peer-switcher-tip { font-size: 11px; color: #bbb; padding: 8px 12px 10px; border-top: 0; line-height: 1.5; }
+
+/* ===== Mobile "more" controls popover ===== */
+.mobile-controls-popover.el-popover.el-popper { padding: 0 !important; max-width: calc(100vw - 24px) !important; }
+.mc-body { width: 100%; max-height: 72vh; overflow-y: auto; }
+.mc-section { padding: 10px 12px; border-bottom: 1px solid #f5f5f5;
+  &:last-child { border-bottom: none; }
+}
+.mc-title { font-size: 13px; font-weight: 600; color: #333; margin-bottom: 6px; }
+.mc-peer-list { max-height: 220px; overflow-y: auto; }
+.mc-peer-item {
+  display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: 8px; cursor: pointer;
+  &:hover { background: #f5f7fa; }
+  &.active { background: #fdf0ea; .mc-peer-name { color: #c35f33; } .mc-peer-icon { color: #c35f33; } }
+  &.unavailable { opacity: 0.55; }
+  .mc-peer-icon { font-size: 18px; color: #909399; flex-shrink: 0; }
+  .mc-peer-info { flex: 1; min-width: 0;
+    .mc-peer-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mc-peer-offline { font-size: 11px; color: #fff; background: #c0c4cc; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+    .mc-peer-meta { font-size: 12px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      .mc-playing-title { color: #16a34a; font-weight: 500; }
+    }
+  }
+  .mc-peer-check { color: #c35f33; font-size: 16px; flex-shrink: 0; }
+}
+.mc-peer-empty { text-align: center; color: #999; font-size: 13px; padding: 16px 0; }
+.mc-scan { padding-top: 8px;
+  .el-button { width: 100%; }
+}
+.mc-progress { display: flex; align-items: center; gap: 8px;
+  .mc-time { font-size: 12px; color: #999; min-width: 36px; }
+  .mc-slider { flex: 1; }
+}
+.mc-ctrl-row { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+  .mc-play { width: 48px; height: 48px; min-width: 48px; min-height: 48px; }
+}
+.mc-tools { display: flex; align-items: center; gap: 10px;
+  .mc-volume { flex: 1; display: flex; align-items: center; gap: 8px; margin-left: 4px;
+    .mc-vol-label { font-size: 12px; color: #999; white-space: nowrap; }
+    .mc-vol-slider { flex: 1; }
+  }
+}
 </style>
