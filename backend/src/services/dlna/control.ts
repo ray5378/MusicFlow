@@ -457,6 +457,7 @@ export interface DeviceStatus {
   duration: number;   // seconds
   volume: number;     // 0-100
   media?: CurrentMedia; // currently loaded track (set by castToDevice)
+  trackUri?: string;   // 当前 TrackURI(来自 GetPositionInfo),供 poll 路径 track_changed 检测
 }
 
 // Query current transport state + position + volume via SOAP.
@@ -477,13 +478,15 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     markOk(deviceId);
   } catch (e: any) { markFailed(deviceId, "GetTransportInfo", e); }
 
-  // GetPositionInfo — position + duration.
+  // GetPositionInfo — position + duration + TrackURI(供 poll 路径 track_changed 检测)。
   try {
     const xml = await soapCall(device.avTransportUrl, AV_TRANSPORT, "GetPositionInfo", { InstanceID: "0" });
     const relTime = xml.match(/<RelTime>([^<]*)<\/RelTime>/i)?.[1].trim();
     const trackDur = xml.match(/<TrackDuration>([^<]*)<\/TrackDuration>/i)?.[1].trim();
+    const trackUri = xml.match(/<TrackURI>([^<]*)<\/TrackURI>/i)?.[1].trim();
     if (relTime && relTime !== "NOT_IMPLEMENTED") state.position = parseHms(relTime);
     if (trackDur && trackDur !== "NOT_IMPLEMENTED") state.duration = parseHms(trackDur);
+    if (trackUri && trackUri !== "") state.trackUri = trackUri;
   } catch {}
 
   // GetVolume — RenderingControl.
@@ -538,7 +541,7 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
         playbackState: mapTransportState(s.state),
         position: s.position,
         duration: s.duration,
-        mediaUri: undefined, // DLNA GetPositionInfo 不返回 URI;用 currentMedia.songId 间接关联
+        mediaUri: s.trackUri, // 来自 GetPositionInfo 的 TrackURI,供 track_changed 检测
         updatedAt: Date.now(),
       };
     },

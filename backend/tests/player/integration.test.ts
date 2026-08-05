@@ -187,6 +187,35 @@ describe("MA 式链路集成测试", () => {
     expect(device.playMediaCalls[1].songId).toBe("s1");
   });
 
+  // ============ 场景 3b:PLAYING 上报(mediaUri 为空/不匹配)也能关闭乐观窗口 ============
+  //   回归测试:修复 GENA/poll 上报 PLAYING 但 mediaUri=undefined 时乐观窗口
+  //   永远无法关闭 → 5s 超时 → stalled → 重复 cast 同一首的死循环。
+  it("场景3b:PLAYING 上报(mediaUri=undefined)关闭乐观窗口,不触发 stalled 死循环", async () => {
+    const { pc, qc, device } = setup();
+    await qc.playFrom("d1", makeItems(2), 0, "http://base");
+    // playFrom 已触发 beginOptimistic("dlna:d1", "http://base/stream/s1")
+    expect(device.playMediaCalls.length).toBe(1);
+
+    // 模拟 GENA LastChange 不含 CurrentTrackURI → mediaUri=undefined
+    // (或 poll 路径 GetPositionInfo 未返回 TrackURI)
+    device.state = PlaybackState.PLAYING;
+    const playingNoUri: PlayerState = {
+      playerId: "dlna:d1",
+      playbackState: PlaybackState.PLAYING,
+      position: 0,
+      duration: 100,
+      mediaUri: undefined, // ← 关键:URI 为空,模拟真实 GENA/poll 上报
+      updatedAt: Date.now(),
+    };
+    pc.reportState(playingNoUri);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // 乐观窗口应已关闭(PLAYING 即确认成功,不要求 URI 匹配)
+    // 推进 5s+,若乐观窗口未关闭会触发 stalled → playMediaCalls 增至 2
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(device.playMediaCalls.length).toBe(1); // 无 stalled 重试,无死循环
+  });
+
   // ============ 场景 4:手动 next 与自动 advance 不并发竞争 ============
   it("场景4:手动 next 期间 GENA 触发 advance → advancing 守卫阻止重复切歌", async () => {
     const { pc, qc, device } = setup();

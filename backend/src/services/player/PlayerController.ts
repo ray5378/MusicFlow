@@ -45,12 +45,16 @@ export class PlayerController {
     // 乐观窗口:若该 player 正在切歌,忽略 IDLE/异常上报,只接受 PLAYING(确认成功)
     const opt = this.optimistic.get(state.playerId);
     if (opt) {
-      if (state.playbackState === PlaybackState.PLAYING && state.mediaUri === opt.mediaUri) {
-        // 切歌成功,关闭乐观窗口,让正常去抖流程处理(u1→u2 = track_changed)
+      if (state.playbackState === PlaybackState.PLAYING) {
+        // 切歌成功,关闭乐观窗口,让正常去抖流程处理(u1→u2 = track_changed)。
+        // 对照 MA:收到 PLAYING 即确认成功,不要求 URI 精确匹配 ——
+        // 设备可能不上报 CurrentTrackURI(GENA LastChange 常缺此字段),
+        // 或上报的 URI 与我们的 streamUrl 不一致(设备解析/重定向),
+        // 强制 URI 匹配会导致乐观窗口永远无法关闭 → 5s 超时 → stalled 死循环。
         this.clearOptimistic(state.playerId);
         // 落入下方正常去抖逻辑(不 return)
       } else {
-        // 乐观窗口内忽略非 PLAYING 上报(屏蔽瞬态 STOPPED)
+        // 乐观窗口内忽略非 PLAYING 上报(屏蔽瞬态 STOPPED/TRANSITIONING)
         return;
       }
     }
