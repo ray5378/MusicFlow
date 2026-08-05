@@ -300,6 +300,38 @@ describe("MA 式链路集成测试", () => {
     expect(device.playMediaCalls.length).toBe(2); // 仍只有 2 次(s1 + s2)
   });
 
+  // ============ 场景 3d:真实设备自然结束带 TRANSITIONING 瞬态 ============
+  //   回归测试:HiVi 等真实 DLNA 设备播完一首常 PLAYING→TRANSITIONING→STOPPED。
+  //   旧 tracker 只认 PLAYING→IDLE,TRANSITIONING(BUFFERING) 把 prev 冲掉后
+  //   IDLE 不再触发 advance → 队列卡死 → 60s 后 stalled 重播当前首(死循环)。
+  it("场景3d:自然结束经过 TRANSITIONING(BUFFERING)→IDLE 也能自动切下一首", async () => {
+    const { pc, qc, device } = setup();
+    await qc.playFrom("d1", makeItems(2), 0, "http://base");
+    pc.endOptimistic("dlna:d1");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(device.playMediaCalls.length).toBe(1); // s1
+
+    // 稳态播放上报 PLAYING,建立 tracker 的播放记忆
+    device.state = PlaybackState.PLAYING;
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // 真实设备自然结束时序:先报 TRANSITIONING(BUFFERING),再报 STOPPED(IDLE)
+    device.state = PlaybackState.BUFFERING;
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(device.playMediaCalls.length).toBe(1); // 瞬态不切歌
+
+    device.finishTrack(); // 状态 → IDLE
+    pc.reportState(device.snapshot());
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // 必须自动切到 s2,而不是卡死等 60s stalled 重播 s1
+    expect(device.playMediaCalls.length).toBe(2);
+    expect(device.playMediaCalls[1].songId).toBe("s2");
+    expect(qc.snapshot("d1").currentIndex).toBe(1);
+  });
+
   // ============ 场景 4:手动 next 与自动 advance 不并发竞争 ============
   it("场景4:手动 next 期间 GENA 触发 advance → advancing 守卫阻止重复切歌", async () => {
     const { pc, qc, device } = setup();

@@ -14,7 +14,7 @@ import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
-import { refreshDevices } from "./services/dlna/control.js";
+import { refreshDevices, getEffectiveBaseUrl } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
@@ -233,7 +233,7 @@ wirePlayerQueueControllers();
 
 // Fallback poll:对照 MA force_poll,GENA 不可用时主动 poll 设备状态上报 PlayerController。
 // 由 QueueController 持有轮询,间隔 5s(MA 是 30s,本地设备事件支持差,用 5s 平衡)。
-getQueueController().startPollLoop(() => process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`);
+getQueueController().startPollLoop(() => getEffectiveBaseUrl());
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
@@ -243,7 +243,7 @@ server.listen(port, "0.0.0.0", () => {
   // populate the device cache — resumeActive() needs the device to be known.
   // Best-effort: if the device is offline, the resume silently no-ops.
   setTimeout(() => {
-    const baseUrl = process.env.DLNA_BASE_URL || `http://0.0.0.0:${port}`;
+    const baseUrl = getEffectiveBaseUrl();
     // Register any devices already in the cache (discovery may have run
     // before this callback fires) so resumeActive can find their player.
     for (const d of getCachedDevices()) {

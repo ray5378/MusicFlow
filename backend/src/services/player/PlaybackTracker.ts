@@ -23,40 +23,52 @@ export type TrackDecision =
 
 export class PlaybackTracker {
   private prev: CompareState | null = null;
+  // 上一次"确实在播放"的状态。BUFFERING(TRANSITIONING)/PAUSED 瞬态不覆盖它。
+  // 关键:DLNA 设备自然结束时常 PLAYING→TRANSITIONING→STOPPED。若只盯 prev,
+  // "BUFFERING→IDLE" 会被判为瞬态 → advance 丢失 → 队列卡死 → 60s 后 stalled 重播当前首。
+  // 用 lastPlaying 记住"这首歌确实在播放",之后无论经过多少瞬态,一旦落到 IDLE 即算结束。
+  private lastPlaying: CompareState | null = null;
 
   /** 注入式:调用方告诉 tracker 是否还有下一首,决定 IDLE 是 advance 还是 ended。 */
   update(neww: CompareState, hasNext = true): TrackDecision {
     let decision: TrackDecision = "none";
-    if (this.prev) {
-      const prev = this.prev;
-      const cur = neww.playbackState;
-      const psv = prev.playbackState;
+    const prev = this.prev;
+    const cur = neww.playbackState;
 
-      // 自然结束:PLAYING → IDLE
-      if (psv === PlaybackState.PLAYING && cur === PlaybackState.IDLE) {
-        decision = hasNext ? "advance" : "ended";
-      }
+    if (cur === PlaybackState.PLAYING) {
       // native gapless:同为 PLAYING 但 uri 变了
-      else if (psv === PlaybackState.PLAYING && cur === PlaybackState.PLAYING
+      if (prev && prev.playbackState === PlaybackState.PLAYING
                && prev.mediaUri && neww.mediaUri && prev.mediaUri !== neww.mediaUri) {
         decision = "track_changed";
       }
-      // 卡死兜底:IDLE 持续超 60s
-      else if (psv === PlaybackState.IDLE && cur === PlaybackState.IDLE
+      this.lastPlaying = neww;
+    } else if (cur === PlaybackState.IDLE) {
+      if (this.lastPlaying) {
+        // 上一首确实在播放(可能刚经过 TRANSITIONING/BUFFERING → 现在才落 IDLE)→ 自然结束
+        decision = hasNext ? "advance" : "ended";
+        this.lastPlaying = null;
+      } else if (prev && prev.playbackState === PlaybackState.IDLE
                && (neww.updatedAt - prev.updatedAt) > STALL_TIMEOUT_MS) {
+        // 卡死兜底:从未播放 / 已结尾,IDLE 持续超 60s
         decision = "stalled";
       }
-      // TRANSITIONING(BUFFERING)→ 任何:不当结束(瞬态屏蔽,由乐观设态保证 prev 仍是 PLAYING)
+      // 其余:无 lastPlaying 的单发 IDLE 不误判(首次 update / 纯净 IDLE)
     }
+    // BUFFERING / PAUSED:不作为结束(瞬态屏蔽)。lastPlaying 保持,便于后续 IDLE 落入上方分支。
     this.prev = neww;
     return decision;
   }
 
   reset(): void {
     this.prev = null;
+    this.lastPlaying = null;
   }
 
   getPrev(): CompareState | null {
     return this.prev;
+  }
+
+  getLastPlaying(): CompareState | null {
+    return this.lastPlaying;
   }
 }

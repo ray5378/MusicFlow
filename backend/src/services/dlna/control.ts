@@ -16,9 +16,45 @@
 // The stream URL points at this server's dedicated, token-auth-free
 // `/rest/dlna/stream/:token` endpoint so the renderer can pull bytes directly.
 import { randomBytes } from "crypto";
+import os from "os";
 import { discoverDlnaDevices, DlnaDevice } from "./discovery.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
+
+// ==================== base URL resolution (DLNA 拉流地址) ====================
+// DLNA 设备需要回连本服务的 /rest/dlna/stream/:token 拉取音频流,因此 streamUrl
+// 必须是设备在局域网内可达的地址(不能是 0.0.0.0 / localhost)。
+//
+// 两条路径产生 cast:
+//   1. HTTP 触发(首次投屏 / 手动 next/prev)—— 路由层能从请求 Host 头推导正确地址;
+//   2. 内部触发(自动切歌 / 卡死重试 / 重启续播)—— 没有 HTTP 上下文。
+//
+// 曾经内部路径直接用 `env 或 http://0.0.0.0:${PORT}` 兜底,0.0.0.0 设备无法访问
+// → 设备一直收不到流 → 乐观窗口 5s 超时 → stalled 重播当前首 → 死循环(用户看到的
+// "自动下一首等待很久且无法播放")。这里统一收敛到同一个解析函数:
+//   DLNA_BASE_URL 环境变量 > 最近一次 HTTP 请求推导的地址 > 自动探测本机 LAN IP。
+
+const CURRENT_PORT = "46400";
+
+/** 记录最近一次由 HTTP 请求(Host 头)推导出的 base URL,供内部 cast 复用。 */
+let lastSeenBaseUrl: string | undefined;
+export function recordBaseUrl(baseUrl: string): void {
+  if (baseUrl) lastSeenBaseUrl = baseUrl.replace(/\/+$/, "");
+}
+
+/** 内部 cast(handleDecision / stalled 重试 / resumeActive)使用的 LAN base URL。 */
+export function getEffectiveBaseUrl(): string {
+  const envBase = process.env.DLNA_BASE_URL;
+  if (envBase) return envBase.replace(/\/+$/, "");
+  if (lastSeenBaseUrl) return lastSeenBaseUrl;
+  const port = process.env.PORT || CURRENT_PORT;
+  for (const ifs of Object.values(os.networkInterfaces())) {
+    for (const i of ifs || []) {
+      if (i.family === "IPv4" && !i.internal) return `http://${i.address}:${port}`;
+    }
+  }
+  return `http://0.0.0.0:${port}`;
+}
 
 const AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1";

@@ -4,12 +4,14 @@
 //
 // 接管原 dlna/queue.ts 的决策职责。原 dlna/queue.ts 降级为纯数据层。
 import { EventEmitter } from "events";
+import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { deviceQueues } from "../../db/schema.js";
+import { deviceQueues, songs } from "../../db/schema.js";
 import { PlayMode, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
-import { createDlnaProtocolPlayer } from "../dlna/control.js";
+import { createDlnaProtocolPlayer, getEffectiveBaseUrl } from "../dlna/control.js";
+import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
 
 /** PlayerController 用 "dlna:<deviceId>" 作 playerId;QueueController 内部用裸 deviceId。
@@ -97,7 +99,9 @@ export class QueueController extends EventEmitter {
 
   /** 由 PlayerController.onDecision 调用。playerId 形如 "dlna:<deviceId>"。 */
   async handleDecision(decision: TrackDecision, playerId: string): Promise<void> {
-    const baseUrl = process.env.DLNA_BASE_URL || `http://0.0.0.0:${process.env.PORT || 3000}`;
+    // 内部触发路径没有 HTTP 请求上下文,用统一解析函数取 LAN 可达的 base URL
+    // (避免落入 0.0.0.0 导致设备拉不到流,见 control.ts 顶部注释)。
+    const baseUrl = getEffectiveBaseUrl();
     // PlayerController 用 "dlna:<deviceId>" 作 key;QueueController 用裸 deviceId。
     const deviceId = stripDlnaPrefix(playerId);
     const q = this.queues.get(deviceId);
@@ -177,6 +181,9 @@ export class QueueController extends EventEmitter {
     if (!q || !player || !ctrl) return;
     const item = q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
     if (!item) return;
+    // 只带 songId 的 item(HA/脚本下发)补全元数据,否则 castToDevice 的
+    // buildDidlLite/escapeXml 会因 title/mime 缺失抛错。
+    const fullItem = await this.resolveItem(item);
     // PlayerController 用 "dlna:<deviceId>" 作 key。
     const playerId = `dlna:${deviceId}`;
     console.log(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
@@ -187,7 +194,7 @@ export class QueueController extends EventEmitter {
       // → 5s 超时 → stalled → 重播当前首 → 死循环。
       // 对照 MA:命令发出前先把 _attr_playback_state = PLAYING(乐观设态)。
       ctrl.beginOptimistic(playerId, "pending");
-      const { mediaUri } = await player.playMedia(item, baseUrl);
+      const { mediaUri } = await player.playMedia(fullItem, baseUrl);
       // cast 命令已发出,重置 tracker:清掉上一首的 prev 状态 + 残留去抖,
       // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
       // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。
@@ -196,6 +203,26 @@ export class QueueController extends EventEmitter {
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);
+    }
+  }
+
+  /** 只带 songId 的 item(HA/脚本/持久化恢复)在 cast 前补全元数据。 */
+  private async resolveItem(item: QueueItem): Promise<QueueItem> {
+    if (item.title && item.mime) return item;
+    try {
+      const s = db.select().from(songs).where(eq(songs.id, item.songId)).get();
+      if (!s) return item;
+      return {
+        songId: item.songId,
+        title: item.title || s.title || "未知",
+        artist: item.artist ?? s.artist ?? undefined,
+        album: item.album ?? s.album ?? undefined,
+        mime: item.mime || suffixToMime(s.suffix || ""),
+        coverArt: item.coverArt ?? s.coverArt ?? undefined,
+        duration: typeof item.duration === "number" ? item.duration : typeof s.duration === "number" ? s.duration : undefined,
+      };
+    } catch {
+      return item;
     }
   }
 

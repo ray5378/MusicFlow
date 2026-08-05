@@ -20,7 +20,7 @@ import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInf
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
-  enqueueNextTrack, getCurrentMedia,
+  enqueueNextTrack, getCurrentMedia, recordBaseUrl,
 } from "../../services/dlna/control.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
@@ -829,13 +829,17 @@ const DLNA_MIME: Record<string, string> = {
 // Derive the LAN base URL the DLNA renderer should use to pull the stream.
 // Uses the request Host header's hostname + the backend's actual listening
 // port (so it works even when fronted by a dev proxy on a different port).
+// Also records it for the internal cast paths (auto-advance / stalled retry)
+// so they reuse the same reachable address.
 function getDlnaBaseUrl(c: any): string {
   const envBase = process.env.DLNA_BASE_URL;
-  if (envBase) return envBase.replace(/\/+$/, "");
+  if (envBase) { const u = envBase.replace(/\/+$/, ""); recordBaseUrl(u); return u; }
   const host = c.req.header("host") || "";
   const hostname = host.split(":")[0] || "0.0.0.0";
   const port = process.env.PORT || "46400";
-  return `http://${hostname}:${port}`;
+  const u = `http://${hostname}:${port}`;
+  recordBaseUrl(u);
+  return u;
 }
 
 // List discovered DLNA renderers (refreshes cache if stale).

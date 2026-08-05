@@ -17,6 +17,30 @@ describe("PlaybackTracker", () => {
     expect(r).toBe("advance");
   });
 
+  it("PLAYING→BUFFERING→IDLE 有下一首: 返回 advance(设备自然结束带 TRANSITIONING 瞬态)", () => {
+    const t = new PlaybackTracker();
+    t.update(toCompareState(st(PlaybackState.PLAYING)));
+    t.update(toCompareState(st(PlaybackState.BUFFERING)));
+    const r = t.update(toCompareState(st(PlaybackState.IDLE)));
+    expect(r).toBe("advance");
+  });
+
+  it("PLAYING→BUFFERING→IDLE 无下一首: 返回 ended", () => {
+    const t = new PlaybackTracker();
+    t.update(toCompareState(st(PlaybackState.PLAYING)));
+    t.update(toCompareState(st(PlaybackState.BUFFERING)));
+    const r = t.update(toCompareState(st(PlaybackState.IDLE)), false);
+    expect(r).toBe("ended");
+  });
+
+  it("PLAYING→BUFFERING: 返回 none(瞬态屏蔽,lastPlaying 保留)", () => {
+    const t = new PlaybackTracker();
+    t.update(toCompareState(st(PlaybackState.PLAYING)));
+    const r = t.update(toCompareState(st(PlaybackState.BUFFERING)));
+    expect(r).toBe("none");
+    expect(t.getLastPlaying()?.playbackState).toBe(PlaybackState.PLAYING);
+  });
+
   it("PLAYING→IDLE 无下一首: 返回 ended", () => {
     const t = new PlaybackTracker();
     t.update(toCompareState(st(PlaybackState.PLAYING)));
