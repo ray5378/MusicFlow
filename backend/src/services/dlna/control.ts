@@ -289,6 +289,13 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
     console.log(`[cast] ${opts.deviceId}: Step 1 Stop failed (ignored): ${e?.message || e}`);
   }
 
+  // Brief pause after Stop: many DLNA renderers need a moment to fully reset
+  // the transport (especially after a natural track end where the device is
+  // in STOPPED-with-media state). Without this, SetAVTransportURI may return
+  // OK at the SOAP level but the device fails to actually load+play the new
+  // media — manifesting as "progress stuck at 0" or "plays 1s then stops".
+  await new Promise(r => setTimeout(r, 300));
+
   // Step 2: SetAVTransportURI.
   console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI`);
   await soapCall(device.avTransportUrl, AV_TRANSPORT, "SetAVTransportURI", {

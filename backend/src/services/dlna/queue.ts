@@ -63,6 +63,10 @@ class QueueManager extends EventEmitter {
   // auto-advance still works. GENA is the primary path; this is the fallback.
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private lastPolledState = new Map<string, string>();
+  // Track the last known position+duration while PLAYING, so we can confirm
+  // a STOPPED transition was a genuine track end (position ≈ duration) and
+  // not a false positive from a transient state during cast transitions.
+  private lastPlayingPos = new Map<string, { position: number; duration: number }>();
 
   constructor() {
     super();
@@ -89,13 +93,24 @@ class QueueManager extends EventEmitter {
         const status = await getDeviceStatus(deviceId);
         const prev = this.lastPolledState.get(deviceId);
         const cur = status.state || "STOPPED";
+        const pos = typeof status.position === "number" ? status.position : 0;
+        const dur = typeof status.duration === "number" ? status.duration : 0;
+        // Track position while PLAYING so we can confirm a genuine track end.
+        if (cur === "PLAYING") {
+          this.lastPlayingPos.set(deviceId, { position: pos, duration: dur });
+        }
         this.lastPolledState.set(deviceId, cur);
         if (prev === undefined) continue; // first poll — just seed the state
-        // Detect natural track end: PLAYING → STOPPED. This mirrors the GENA
-        // logic in eventing.ts. The advancing guard + suppress flag in
-        // onTrackEnded handle the rest (explicit stops, re-entrancy).
+        // Detect natural track end: PLAYING → STOPPED. To avoid false
+        // positives from transient states during cast transitions, confirm
+        // the last known position was near the end of the track (≥90% of
+        // duration, or duration unknown so we trust the state transition).
         if (cur === "STOPPED" && prev === "PLAYING") {
-          console.log(`[queue][poll] ${deviceId}: PLAYING→STOPPED detected (idx=${q.currentIndex}, mode=${q.playMode}, items=${q.items.length}) → auto-advance`);
+          const lp = this.lastPlayingPos.get(deviceId);
+          const nearEnd = !lp || lp.duration <= 0 || lp.position >= lp.duration * 0.9;
+          console.log(`[queue][poll] ${deviceId}: PLAYING→STOPPED detected (idx=${q.currentIndex}, mode=${q.playMode}, items=${q.items.length}, lastPos=${lp?.position || 0}/${lp?.duration || 0}, nearEnd=${nearEnd})${nearEnd ? " → auto-advance" : " → IGNORED (not near end, likely false positive)"}`);
+          if (!nearEnd) continue; // false positive — device stopped mid-track, not a natural end
+          this.lastPlayingPos.delete(deviceId);
           await this.onTrackEnded(deviceId, baseUrl());
         }
       } catch (e: any) {
