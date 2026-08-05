@@ -20,7 +20,7 @@ import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInf
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
-  enqueueNextTrack, getCurrentMedia, recordBaseUrl,
+  enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isRoutableHostname,
 } from "../../services/dlna/control.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
@@ -835,8 +835,11 @@ function getDlnaBaseUrl(c: any): string {
   const envBase = process.env.DLNA_BASE_URL;
   if (envBase) { const u = envBase.replace(/\/+$/, ""); recordBaseUrl(u); return u; }
   const host = c.req.header("host") || "";
-  const hostname = host.split(":")[0] || "0.0.0.0";
+  const hostname = host.split(":")[0] || "";
   const port = process.env.PORT || "46400";
+  // localhost / 127.x / 0.0.0.0 等 Host 头(如本机浏览器 localhost 访问)设备拉不到流,
+  // 回退到自动探测的 LAN IP。
+  if (!isRoutableHostname(hostname)) return getEffectiveBaseUrl();
   const u = `http://${hostname}:${port}`;
   recordBaseUrl(u);
   return u;

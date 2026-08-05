@@ -36,10 +36,42 @@ import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } 
 
 const CURRENT_PORT = "46400";
 
+/** localhost / 0.0.0.0 / 127.x 等设备永远拉不到的主机名。 */
+const LOOPBACK_RE = /^(localhost|0\.0\.0\.0|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\])$/i;
+
+/** Host 头推导的主机名能否用于 DLNA 拉流:必须可路由(非回环 IP 或带点主机名)。 */
+export function isRoutableHostname(hostname: string): boolean {
+  if (!hostname) return false;
+  const h = hostname.replace(/^\[/, "").replace(/\]$/, "").trim();
+  if (!h || LOOPBACK_RE.test(h)) return false;
+  // 无点号的单标签名(如 "server")DLNA 设备无法保证解析,拒绝。
+  if (!h.includes(".")) return false;
+  return true;
+}
+
 /** 记录最近一次由 HTTP 请求(Host 头)推导出的 base URL,供内部 cast 复用。 */
 let lastSeenBaseUrl: string | undefined;
 export function recordBaseUrl(baseUrl: string): void {
-  if (baseUrl) lastSeenBaseUrl = baseUrl.replace(/\/+$/, "");
+  if (!baseUrl) return;
+  const hostname = baseUrl.replace(/^https?:\/\//i, "").split(":")[0];
+  // localhost/0.0.0.0 之类设备不可达,丢弃不记,让内部 cast 走自动探测。
+  if (!isRoutableHostname(hostname)) return;
+  lastSeenBaseUrl = baseUrl.replace(/\/+$/, "");
+}
+
+/** 自动探测本机 LAN IPv4(优先真实网卡,跳过 docker0/br-* 等桥接地址)。 */
+function autoDetectBaseUrl(): string {
+  const port = process.env.PORT || CURRENT_PORT;
+  const candidates: { name: string; addr: string }[] = [];
+  for (const [name, ifs] of Object.entries(os.networkInterfaces())) {
+    for (const i of ifs || []) {
+      if (i.family === "IPv4" && !i.internal) candidates.push({ name, addr: i.address });
+    }
+  }
+  const unroutableIf = /^(lo|docker\d*|br-|veth|virbr|tun|tap|tailscale)/i;
+  const pick = candidates.find((c) => !unroutableIf.test(c.name)) || candidates[0];
+  if (!pick) return `http://0.0.0.0:${port}`;
+  return `http://${pick.addr}:${port}`;
 }
 
 /** 内部 cast(handleDecision / stalled 重试 / resumeActive)使用的 LAN base URL。 */
@@ -47,13 +79,7 @@ export function getEffectiveBaseUrl(): string {
   const envBase = process.env.DLNA_BASE_URL;
   if (envBase) return envBase.replace(/\/+$/, "");
   if (lastSeenBaseUrl) return lastSeenBaseUrl;
-  const port = process.env.PORT || CURRENT_PORT;
-  for (const ifs of Object.values(os.networkInterfaces())) {
-    for (const i of ifs || []) {
-      if (i.family === "IPv4" && !i.internal) return `http://${i.address}:${port}`;
-    }
-  }
-  return `http://0.0.0.0:${port}`;
+  return autoDetectBaseUrl();
 }
 
 const AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1";
