@@ -82,18 +82,25 @@ class QueueManager extends EventEmitter {
       // queue. Devices with GENA get track_ended via push events already.
       if (!q.isActive || q.currentIndex < 0) continue;
       if (em.isSubscribed(deviceId) && !shouldPollDevice(deviceId)) continue;
+      // Skip if an auto-advance is already in flight for this device —
+      // avoids re-entering onTrackEnded while castToDevice is mid-Stop/Set/Play.
+      if (this.advancing.has(deviceId)) continue;
       try {
         const status = await getDeviceStatus(deviceId);
         const prev = this.lastPolledState.get(deviceId);
         const cur = status.state || "STOPPED";
         this.lastPolledState.set(deviceId, cur);
+        if (prev === undefined) continue; // first poll — just seed the state
         // Detect natural track end: PLAYING → STOPPED. This mirrors the GENA
         // logic in eventing.ts. The advancing guard + suppress flag in
         // onTrackEnded handle the rest (explicit stops, re-entrancy).
         if (cur === "STOPPED" && prev === "PLAYING") {
+          console.log(`[queue][poll] ${deviceId}: PLAYING→STOPPED detected (idx=${q.currentIndex}, mode=${q.playMode}, items=${q.items.length}) → auto-advance`);
           await this.onTrackEnded(deviceId, baseUrl());
         }
-      } catch {}
+      } catch (e: any) {
+        console.warn(`[queue][poll] ${deviceId}: status query failed:`, e?.message || e);
+      }
     }
   }
 
@@ -285,15 +292,24 @@ class QueueManager extends EventEmitter {
     this.emit("queue_changed", deviceId, this.snapshot(deviceId));
   }
 
-  /** Called by eventing.ts when a track ends naturally. */
+  /** Called by eventing.ts (GENA) or pollAllDevices (fallback) when a track
+   *  ends naturally. */
   async onTrackEnded(deviceId: string, baseUrl: string): Promise<void> {
-    if (this.advancing.has(deviceId)) return;
-    if (!consumeAutoAdvanceFlag(deviceId)) return;
+    const src = getEventManager().isSubscribed(deviceId) ? "gena" : "poll";
+    if (this.advancing.has(deviceId)) {
+      console.log(`[queue][onTrackEnded] ${deviceId} (${src}): skipped, advancing already in flight`);
+      return;
+    }
+    const allowed = consumeAutoAdvanceFlag(deviceId);
+    console.log(`[queue][onTrackEnded] ${deviceId} (${src}): invoked, autoAdvanceFlag=${allowed}`);
+    if (!allowed) return;
     const q = this.get(deviceId);
+    console.log(`[queue][onTrackEnded] ${deviceId}: mode=${q.playMode}, idx=${q.currentIndex}, items=${q.items.length}`);
     if (q.playMode === "one") {
       // Repeat current track.
       this.advancing.add(deviceId);
       try {
+        console.log(`[queue][onTrackEnded] ${deviceId}: repeat-one, re-casting idx=${q.currentIndex}`);
         await this.playCurrent(deviceId, baseUrl);
         this.emit("queue_changed", deviceId, this.snapshot(deviceId));
       } finally {
@@ -303,6 +319,7 @@ class QueueManager extends EventEmitter {
     }
     const nextIdx = this.pickNextIndex(q, true);
     if (nextIdx === -1) {
+      console.log(`[queue][onTrackEnded] ${deviceId}: no next track (end of queue in '${q.playMode}' mode) → stop`);
       q.currentIndex = -1;
       q.isActive = false;
       this.persist(deviceId);
@@ -311,10 +328,14 @@ class QueueManager extends EventEmitter {
     }
     this.advancing.add(deviceId);
     try {
+      console.log(`[queue][onTrackEnded] ${deviceId}: advancing idx ${q.currentIndex} → ${nextIdx}`);
       q.currentIndex = nextIdx;
       await this.playCurrent(deviceId, baseUrl);
       this.persist(deviceId);
       this.emit("queue_changed", deviceId, this.snapshot(deviceId));
+      console.log(`[queue][onTrackEnded] ${deviceId}: advance complete, now playing idx=${q.currentIndex}`);
+    } catch (e: any) {
+      console.error(`[queue][onTrackEnded] ${deviceId}: advance FAILED:`, e?.message || e);
     } finally {
       this.advancing.delete(deviceId);
     }
@@ -354,7 +375,11 @@ class QueueManager extends EventEmitter {
   private async playCurrent(deviceId: string, baseUrl: string): Promise<void> {
     const q = this.get(deviceId);
     const item = q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
-    if (!item) return;
+    if (!item) {
+      console.log(`[queue][playCurrent] ${deviceId}: no item at idx=${q.currentIndex}, skipping`);
+      return;
+    }
+    console.log(`[queue][playCurrent] ${deviceId}: casting idx=${q.currentIndex} songId=${item.songId} title="${item.title}"`);
     // Cast errors (device offline, SOAP failure) must NOT abort the queue
     // bookkeeping — the queue metadata is still correct and should be
     // persisted + emitted so the UI/HA stay in sync. The device will pick up
@@ -370,8 +395,9 @@ class QueueManager extends EventEmitter {
         baseUrl,
         coverArt: item.coverArt,
       });
+      console.log(`[queue][playCurrent] ${deviceId}: cast succeeded for idx=${q.currentIndex}`);
     } catch (e: any) {
-      console.warn(`[queue] cast to ${deviceId} failed (queue state preserved):`, e?.message || e);
+      console.warn(`[queue][playCurrent] ${deviceId}: cast FAILED (queue state preserved):`, e?.message || e);
     }
   }
 }

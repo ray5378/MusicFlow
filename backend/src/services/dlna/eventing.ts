@@ -154,6 +154,7 @@ class EventManager extends EventEmitter {
       // PLAYING (not from PAUSED, which would be a user pause). The queue
       // manager subscribes to advance to the next track in this case.
       if (st.state === "STOPPED" && prevState === "PLAYING") {
+        console.log(`[gena][track_ended] ${deviceId}: PLAYING→STOPPED detected via GENA event → emitting track_ended`);
         this.emit("track_ended", deviceId, st);
       }
     } catch {

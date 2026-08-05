@@ -277,28 +277,36 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
   const albumArtUri = opts.coverArt ? `${opts.baseUrl}/rest/getCoverArt?id=${encodeURIComponent(opts.coverArt)}&size=500` : undefined;
   const metadata = buildDidlLite({ title: opts.title, artist: opts.artist, album: opts.album, uri: streamUrl, mime: opts.mime, albumArtUri });
 
+  console.log(`[cast] ${opts.deviceId}: BEGIN songId=${opts.songId} title="${opts.title}"`);
   // Reset the "next enqueued" flag — a fresh SetAVTransportURI clears the device's next slot.
   runtimeOf(opts.deviceId).nextEnqueued = false;
 
   // Step 1: Stop (tolerate "transport not playing" errors).
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
+    console.log(`[cast] ${opts.deviceId}: Step 1 Stop OK`);
   } catch (e: any) {
-    // Ignore — device may have no active transport, returns a SOAP fault.
+    console.log(`[cast] ${opts.deviceId}: Step 1 Stop failed (ignored): ${e?.message || e}`);
   }
 
   // Step 2: SetAVTransportURI.
+  console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI`);
   await soapCall(device.avTransportUrl, AV_TRANSPORT, "SetAVTransportURI", {
     InstanceID: "0",
     CurrentURI: streamUrl,
     CurrentURIMetaData: metadata,
   });
+  console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI OK`);
 
   // Step 3: wait_for_can_play — avoid 705 "transport locked" on Play.
+  console.log(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay`);
   await waitForCanPlay(device);
+  console.log(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay OK`);
 
   // Step 4: Play.
+  console.log(`[cast] ${opts.deviceId}: Step 4 Play`);
   await soapCall(device.avTransportUrl, AV_TRANSPORT, "Play", { InstanceID: "0", Speed: "1" });
+  console.log(`[cast] ${opts.deviceId}: Step 4 Play OK`);
   markOk(opts.deviceId);
 
   // Record the currently-loaded media so getDeviceStatus / WS pushes can
@@ -317,6 +325,7 @@ export async function castToDevice(opts: CastOptions): Promise<void> {
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
   getEventManager().subscribe(device).catch(() => {});
+  console.log(`[cast] ${opts.deviceId}: END songId=${opts.songId}`);
 }
 
 /** Read the media currently loaded on a device (set by castToDevice). */
@@ -334,9 +343,11 @@ export function consumeAutoAdvanceFlag(deviceId: string): boolean {
   const rt = runtimes.get(deviceId);
   if (!rt) return true;
   if (rt.suppressAutoNext) {
+    console.log(`[control][autoNext] ${deviceId}: suppressed (explicit stop) → no advance`);
     rt.suppressAutoNext = false;
     return false;
   }
+  console.log(`[control][autoNext] ${deviceId}: allowed → advance`);
   return true;
 }
 
@@ -423,6 +434,7 @@ export async function stopDevice(deviceId: string): Promise<void> {
   // Suppress queue auto-advance — this Stop came from an explicit user action,
   // not a natural track end.
   rt.suppressAutoNext = true;
+  console.log(`[control][stop] ${deviceId}: explicit stop, suppressAutoNext=true`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
     markOk(deviceId);
