@@ -255,7 +255,7 @@
         >
           <template #reference>
             <el-button class="peer-switch-btn" size="small" :title="`切换播放器: ${playerStore.currentPeerName}`">
-              <MfIcon name="Cable" class="peer-switch-icon"  />
+              <MfIcon name="headphones" class="peer-switch-icon"  />
               <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
               <MfIcon name="ArrowUp" class="peer-switch-arrow"  />
             </el-button>
