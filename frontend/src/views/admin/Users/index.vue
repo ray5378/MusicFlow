@@ -4,7 +4,7 @@
       <h2>用户管理</h2>
       <el-button type="primary" @click="showAddDialog = true">新增用户</el-button>
     </div>
-    <div class="user-grid">
+    <div class="user-grid" v-if="users.length > 0">
       <el-card v-for="user in users" :key="user.id" class="user-card">
         <div class="user-header">
           <div class="user-info">
@@ -23,6 +23,11 @@
         </div>
       </el-card>
     </div>
+    <EmptyState v-else icon="user" title="暂无用户" description="添加用户后即可多人共享音乐库">
+      <template #action>
+        <el-button type="primary" @click="showAddDialog = true">新增用户</el-button>
+      </template>
+    </EmptyState>
 
     <el-dialog v-model="showAddDialog" title="新增用户" width="400px">
       <el-form label-width="80px">
@@ -60,6 +65,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 
@@ -115,15 +121,23 @@ onMounted(loadUsers);
 </script>
 
 <style lang="scss" scoped>
-.admin-users { padding: 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
+.admin-users { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
 .user-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.user-card { .user-header { display: flex; justify-content: space-between;
-  .user-info { h3 { margin: 0 0 8px; } .tags { display: flex; gap: 4px; } } }
-.user-actions { margin-top: 12px; display: flex; gap: 8px; } }
+.user-card {
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid rgba(255,255,255,0.07) !important;
+  border-radius: var(--fnos-radius-lg) !important;
+  color: var(--fnos-text-primary-dim);
+  .user-header { display: flex; justify-content: space-between;
+    .user-info { h3 { margin: 0 0 10px; color: var(--fnos-text-primary); font-size: 16px; } .tags { display: flex; gap: 6px; flex-wrap: wrap; } }
+  }
+  .user-actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+}
 @media (max-width: 768px) {
+  .admin-users { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
   .user-grid { grid-template-columns: 1fr; }
-  .user-actions { flex-wrap: wrap; }
   .user-actions .el-button { margin-left: 0; }
 }
 </style>

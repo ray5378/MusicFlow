@@ -3,11 +3,11 @@
     <div class="page-header">
       <h2>许愿管理</h2>
       <div class="header-actions">
-        <el-button :loading="loadingChunks" @click="openWishList"><el-icon><CopyDocument /></el-icon>许愿列表</el-button>
+        <el-button :loading="loadingChunks" @click="openWishList"><MfIcon name="Copy" />许愿列表</el-button>
         <el-input v-model="searchQuery" placeholder="搜索许愿..." prefix-icon="Search" clearable style="width: 260px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <el-table :data="wishes" stripe v-loading="loading">
+    <el-table :data="wishes" stripe v-loading="loading" v-if="wishes.length > 0">
       <el-table-column type="index" width="60" label="#" :index="indexMethod" />
       <el-table-column prop="songTitle" label="歌曲" min-width="200" />
       <el-table-column prop="artist" label="艺术家" width="150" />
@@ -26,6 +26,7 @@
         </template>
       </el-table-column>
     </el-table>
+    <EmptyState v-else icon="box" title="暂无许愿歌曲" description="导入外部歌单时未匹配的歌曲会出现在这里" compact />
     <div class="pagination-bar">
       <el-pagination
         layout="total, sizes, prev, pager, next, jumper"
@@ -57,7 +58,7 @@
             :class="{ copied: copiedIdx === idx }"
             @click="copyChunk(idx)"
           >
-            <el-icon><CopyDocument /></el-icon>
+            <MfIcon name="Copy" />
             {{ chunk.label }}（{{ chunk.end - chunk.start + 1 }}首）
           </el-button>
           <span v-if="copiedIdx === idx" class="copied-tip">已复制</span>
@@ -70,8 +71,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { CopyDocument } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
+import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
 const wishes = ref<any[]>([]);
@@ -214,14 +215,20 @@ onMounted(loadWishes);
 </script>
 
 <style lang="scss" scoped>
-.admin-wish { padding: 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } .header-actions { display: flex; align-items: center; gap: 10px; } }
+.admin-wish { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
-.wish-list-info { font-size: 13px; color: #666; margin-bottom: 12px; }
+.wish-list-info { font-size: 13px; color: var(--fnos-text-tertiary); margin-bottom: 12px; }
 .wish-chunks { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; max-height: 420px; overflow-y: auto; padding: 4px; }
 .wish-chunk-item { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .wish-chunk-btn { width: 100%; margin: 0 !important; }
-.wish-chunk-btn.copied { border-color: #16a34a; color: #16a34a; }
-.copied-tip { font-size: 12px; color: #16a34a; }
-.wish-empty { grid-column: 1 / -1; text-align: center; color: #999; padding: 30px 0; font-size: 13px; }
+.wish-chunk-btn.copied { border-color: var(--fnos-green); color: var(--fnos-green); }
+.copied-tip { font-size: 12px; color: var(--fnos-green); }
+.wish-empty { grid-column: 1 / -1; text-align: center; color: var(--fnos-text-muted); padding: 30px 0; font-size: 13px; }
+@media (max-width: 768px) {
+  .admin-wish { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
+  .header-actions .el-input { width: 100% !important; }
+  .header-actions { width: 100%; }
+}
 </style>

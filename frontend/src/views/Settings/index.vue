@@ -8,14 +8,37 @@
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="用户名">{{ authStore.username }}</el-descriptions-item>
             <el-descriptions-item label="角色">{{ authStore.isAdmin ? '管理员' : '普通用户' }}</el-descriptions-item>
+            <el-descriptions-item label="用户 ID">{{ authStore.userId || '-' }}</el-descriptions-item>
           </el-descriptions>
         </div>
       </div>
       <div class="setting-item">
-        <div class="setting-label"><div class="title">修改用户名</div><div class="desc">修改后使用新用户名登录</div></div>
+        <div class="setting-label"><div class="title">修改用户名</div><div class="desc">修改后需使用新用户名登录</div></div>
         <div class="setting-value">
           <el-button type="primary" plain @click="showNameDialog = true">修改用户名</el-button>
         </div>
+      </div>
+    </el-card>
+
+    <el-card class="mt-card">
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">主题风格</div><div class="desc">当前使用飞牛音乐暗色玻璃主题</div></div>
+        <div class="setting-value"><el-tag size="small" type="info">FnOS Dark</el-tag></div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">减少动画</div><div class="desc">开启后减弱页面动效，适合敏感人群</div></div>
+        <div class="setting-value"><el-switch v-model="reduceMotion" @change="toggleMotion" /></div>
+      </div>
+    </el-card>
+
+    <el-card class="mt-card">
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">清除缓存</div><div class="desc">重置本地设置并重新加载页面</div></div>
+        <div class="setting-value"><el-button @click="clearCache">清除缓存</el-button></div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">关于 MusicFlow</div><div class="desc">自托管音乐库播放器 · 飞牛风格重构版</div></div>
+        <div class="setting-value"><span class="version">v1.0</span></div>
       </div>
     </el-card>
 
@@ -40,6 +63,20 @@ const authStore = useAuthStore();
 
 const showNameDialog = ref(false);
 const newName = ref("");
+const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+function toggleMotion(v: boolean) {
+  document.documentElement.style.setProperty('prefers-reduced-motion', v ? 'reduce' : 'no-preference');
+  if (v) document.documentElement.classList.add('reduce-motion');
+  else document.documentElement.classList.remove('reduce-motion');
+  ElMessage.success(v ? '已开启减弱动画' : '已关闭减弱动画');
+}
+
+function clearCache() {
+  localStorage.clear();
+  ElMessage.success('本地缓存已清除，即将刷新');
+  setTimeout(() => location.reload(), 800);
+}
 
 async function changeUsername() {
   const name = newName.value.trim();
@@ -56,10 +93,23 @@ async function changeUsername() {
 </script>
 
 <style lang="scss" scoped>
-.settings-page { padding: 24px; }
-.page-header { margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
-.setting-item { display: flex; justify-content: space-between; align-items: flex-start; padding: 16px 0; border-bottom: 1px solid #f0f0f0;
+.settings-page { padding: 24px 32px 130px; max-width: 900px; margin: 0 auto; }
+.page-header { margin-bottom: 24px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+.mt-card { margin-top: 18px; }
+:deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.08) !important; border-radius: var(--fnos-radius-lg) !important; }
+:deep(.el-descriptions__body) { background: transparent !important; }
+:deep(.el-descriptions__label) { background: rgba(255,255,255,0.04) !important; color: var(--fnos-text-secondary) !important; }
+:deep(.el-descriptions__content) { background: transparent !important; color: var(--fnos-text-primary) !important; }
+.setting-item { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06);
   &:last-child { border-bottom: none; }
-  .setting-label { .title { font-weight: 500; } .desc { font-size: 12px; color: #999; margin-top: 4px; } }
+  .setting-label { .title { font-weight: 600; color: var(--fnos-text-primary); } .desc { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; } }
+  .setting-value { flex-shrink: 0; }
+  .version { font-size: 13px; color: var(--fnos-text-tertiary); }
+}
+
+@media (max-width: 768px) {
+  .settings-page { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
+  .setting-item { flex-direction: column; gap: 10px; }
 }
 </style>

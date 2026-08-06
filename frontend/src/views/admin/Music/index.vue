@@ -15,7 +15,8 @@
             <el-table-column label="时长" width="80"><template #default="{ row }">{{ formatDuration(row.durationSec) }}</template></el-table-column>
             <el-table-column label="操作" width="100"><template #default="{ row }"><el-button type="primary" size="small" @click="downloadSong(row)">下载</el-button></template></el-table-column>
           </el-table>
-          <el-empty v-else-if="!searching && searchQuery" description="暂无搜索结果" />
+          <EmptyState v-else-if="!searching && searchQuery" icon="search" title="暂无搜索结果" description="换个关键词试试" compact />
+          <EmptyState v-else-if="!searching" icon="search" title="搜索在线音乐" description="输入歌曲名、艺术家或专辑，从平台搜索并下载" />
         </div>
       </el-tab-pane>
 
@@ -30,17 +31,21 @@
             <el-table-column label="操作" width="100"><template #default="{ row }"><el-button type="danger" size="small" @click="deleteDuplicate(row)">删除</el-button></template></el-table-column>
           </el-table>
         </div>
+        <EmptyState v-else title="暂无重复歌曲" description="点击上方按钮开始检测曲库中的重复曲目" compact />
       </el-tab-pane>
 
       <el-tab-pane label="音乐清洗" name="clean">
-        <el-table :data="rules" stripe>
-          <el-table-column prop="name" label="规则名称" min-width="200" />
-          <el-table-column prop="type" label="类型" width="120" />
-          <el-table-column prop="obj" label="作用对象" width="120" />
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }"><el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="toggleRule(row)" /></template>
-          </el-table-column>
-        </el-table>
+        <div v-if="rules.length > 0">
+          <el-table :data="rules" stripe>
+            <el-table-column prop="name" label="规则名称" min-width="200" />
+            <el-table-column prop="type" label="类型" width="120" />
+            <el-table-column prop="obj" label="作用对象" width="120" />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }"><el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="toggleRule(row)" /></template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <EmptyState v-else title="暂无清洗规则" description="清洗规则用于批量规范化歌曲元数据" compact />
       </el-tab-pane>
 
       <el-tab-pane label="音乐刮削" name="scrape">
@@ -50,6 +55,7 @@
           <el-progress :percentage="scrapeTask.progress" />
           <p>已处理 {{ scrapeTask.processed }}/{{ scrapeTask.total }}</p>
         </div>
+        <EmptyState v-else title="批量刮削元数据" description="为本地曲目补全标题、封面、歌词等信息" compact />
       </el-tab-pane>
     </el-tabs>
   </div>
@@ -58,6 +64,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { ElMessage } from "element-plus";
+import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
 const activeTab = ref("search");
@@ -92,6 +99,16 @@ onMounted(async () => {
 </script>
 
 <style lang="scss" scoped>
-.admin-music { padding: 24px; }
-.page-header { margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
+.admin-music { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
+.page-header { margin-bottom: 24px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+:deep(.el-tabs__item) { font-size: 14px; }
+:deep(.el-alert) { background: rgba(27, 115, 251, 0.08) !important; border: 1px solid rgba(27, 115, 251, 0.15) !important; }
+.search-section { max-width: 100%; }
+@media (max-width: 768px) {
+  .admin-music { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
+  .search-section .el-input { width: 100% !important; }
+  :deep(.el-tabs__nav) { width: 100%; }
+  :deep(.el-tabs__item) { padding: 0 12px; }
+}
 </style>

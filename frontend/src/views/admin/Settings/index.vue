@@ -43,7 +43,16 @@ onMounted(loadSettings);
 </script>
 
 <style lang="scss" scoped>
-.admin-settings { padding: 24px; }
-.page-header { margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
-.form-tip { font-size: 12px; color: #999; margin-top: 4px; }
+.admin-settings { padding: 24px 32px 130px; max-width: 900px; margin: 0 auto; }
+.page-header { margin-bottom: 24px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+:deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; border-radius: var(--fnos-radius-lg) !important; }
+:deep(.el-descriptions__body) { background: transparent !important; }
+:deep(.el-descriptions__label) { background: rgba(255,255,255,0.04) !important; color: var(--fnos-text-secondary) !important; }
+:deep(.el-descriptions__content) { background: transparent !important; color: var(--fnos-text-primary) !important; }
+.form-tip { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; }
+@media (max-width: 768px) {
+  .admin-settings { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
+  :deep(.el-form-item__label) { text-align: left; line-height: 1.4; padding-bottom: 6px; }
+}
 </style>

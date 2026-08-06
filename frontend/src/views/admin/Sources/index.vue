@@ -4,7 +4,7 @@
       <h2>媒体源管理</h2>
       <el-button type="primary" @click="showAddDialog = true">添加媒体源</el-button>
     </div>
-    <div class="source-grid">
+    <div class="source-grid" v-if="sources.length > 0">
       <el-card v-for="source in sources" :key="source.id" class="source-card">
         <div class="source-header">
           <div class="source-info">
@@ -12,14 +12,14 @@
             <el-tag :type="source.enabled ? 'success' : 'info'" size="small">{{ source.type }}</el-tag>
           </div>
           <el-dropdown @command="(cmd: string) => handleCommand(cmd, source)">
-            <el-icon class="more-btn"><MoreFilled /></el-icon>
+            <MfIcon name="MoreHorizontal" class="more-btn"  />
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="test"><el-icon><Connection /></el-icon>测试连接</el-dropdown-item>
-                <el-dropdown-item command="scan"><el-icon><VideoPlay /></el-icon>全库扫描</el-dropdown-item>
-                <el-dropdown-item command="scan-incremental"><el-icon><Refresh /></el-icon>增量扫描</el-dropdown-item>
-                <el-dropdown-item command="edit"><el-icon><Edit /></el-icon>修改配置</el-dropdown-item>
-                <el-dropdown-item command="delete" divided><el-icon><Delete /></el-icon>删除</el-dropdown-item>
+                <el-dropdown-item command="test"><MfIcon name="Cable" />测试连接</el-dropdown-item>
+                <el-dropdown-item command="scan"><MfIcon name="Play" />全库扫描</el-dropdown-item>
+                <el-dropdown-item command="scan-incremental"><MfIcon name="RefreshCw" />增量扫描</el-dropdown-item>
+                <el-dropdown-item command="edit"><MfIcon name="Pencil" />修改配置</el-dropdown-item>
+                <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />删除</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -63,7 +63,7 @@
           </div>
           <!-- Currently scraping track -->
           <div v-if="source._scanProgress.phase === 'scanning' && source._scanProgress.currentTrack" class="progress-current">
-            <el-icon class="current-icon"><VideoPlay /></el-icon>
+            <MfIcon name="Play" class="current-icon"  />
             <span class="current-name">正在刮削: {{ source._scanProgress.currentTrack }}</span>
           </div>
           <div class="progress-stats" v-if="source._scanProgress.phase !== 'traverse'">
@@ -82,6 +82,11 @@
         </div>
       </el-card>
     </div>
+    <EmptyState v-else icon="folder-open" title="暂无媒体源" description="添加本地目录或 WebDAV 以开始管理音乐库">
+      <template #action>
+        <el-button type="primary" @click="showAddDialog = true">添加媒体源</el-button>
+      </template>
+    </EmptyState>
 
     <!-- Add dialog -->
     <el-dialog v-model="showAddDialog" title="添加媒体源" width="500px">
@@ -109,7 +114,7 @@
       </template>
     </el-dialog>
 
-    <!-- Edit dialog -->
+    <!-- Pencil dialog -->
     <el-dialog v-model="showEditDialog" title="修改媒体源配置" width="500px">
       <el-form label-width="100px">
         <el-form-item label="名称"><el-input v-model="editSource.name" /></el-form-item>
@@ -136,8 +141,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from "vue";
-import { MoreFilled, Connection, VideoPlay, Edit, Delete, Refresh } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
 const sources = ref<any[]>([]);
@@ -290,31 +295,38 @@ onUnmounted(() => { Object.values(progressTimers).forEach(clearInterval); });
 </script>
 
 <style lang="scss" scoped>
-.admin-sources { padding: 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
-.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
+.admin-sources { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
 .source-card {
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid rgba(255,255,255,0.07) !important;
+  border-radius: var(--fnos-radius-lg) !important;
+  color: var(--fnos-text-primary-dim);
   .source-header { display: flex; justify-content: space-between; align-items: center;
-    .source-info { display: flex; align-items: center; gap: 8px; h3 { margin: 0; font-size: 16px; } }
-    .more-btn { cursor: pointer; font-size: 18px; &:hover { color: var(--primary-color); } }
+    .source-info { display: flex; align-items: center; gap: 8px; h3 { margin: 0; font-size: 16px; color: var(--fnos-text-primary); } }
+    .more-btn { cursor: pointer; font-size: 18px; color: var(--fnos-text-secondary); &:hover { color: var(--fnos-red); } }
   }
-  .source-config { margin: 12px 0; color: #666; font-size: 13px; p { margin: 6px 0; } }
+  .source-config { margin: 12px 0; color: var(--fnos-text-tertiary); font-size: 13px; p { margin: 6px 0; } }
   .scan-progress {
-    margin: 12px 0; padding: 12px; background: #f0f9ff; border-radius: 8px; border: 1px solid #bae6fd;
+    margin: 12px 0; padding: 12px; background: rgba(27, 115, 251, 0.08); border-radius: 8px; border: 1px solid rgba(27, 115, 251, 0.15);
     .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
-      .progress-label { font-weight: 500; color: #0369a1; font-size: 13px; }
-      .progress-count { font-size: 12px; color: #64748b; .mode-tag { margin-right: 4px; } }
+      .progress-label { font-weight: 500; color: var(--fnos-blue); font-size: 13px; }
+      .progress-count { font-size: 12px; color: var(--fnos-text-tertiary); .mode-tag { margin-right: 4px; } }
     }
-    .dir-progress { margin-top: 8px; font-size: 12px; color: #64748b; }
-    .progress-current { display: flex; align-items: center; gap: 6px; margin-top: 10px; padding: 6px 10px; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
-      .current-icon { color: #0369a1; }
-      .current-name { font-size: 12px; color: #334155; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dir-progress { margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); }
+    .progress-current { display: flex; align-items: center; gap: 6px; margin-top: 10px; padding: 6px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px;
+      .current-icon { color: var(--fnos-blue); }
+      .current-name { font-size: 12px; color: var(--fnos-text-primary-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     }
-    .progress-stats { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: #64748b; span { &:first-child { color: #16a34a; } &:nth-child(2) { color: #16a34a; } &:nth-child(3) { color: #ea580c; } } }
+    .progress-stats { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); span { &:first-child { color: var(--fnos-green); } &:nth-child(2) { color: var(--fnos-green); } &:nth-child(3) { color: var(--fnos-orange); } } }
   }
-  .source-actions { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
+  .source-actions { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06); }
 }
+:deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; }
 @media (max-width: 768px) {
+  .admin-sources { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
   .source-grid { grid-template-columns: 1fr; }
   .source-actions { flex-wrap: wrap; }
   .source-actions .el-button { margin-left: 0; }

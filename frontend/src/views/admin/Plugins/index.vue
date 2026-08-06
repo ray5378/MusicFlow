@@ -4,7 +4,7 @@
       <h2>插件管理</h2>
       <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
     </div>
-    <el-table :data="plugins" stripe v-loading="loading">
+    <el-table :data="plugins" stripe v-loading="loading" v-if="plugins.length > 0">
       <el-table-column prop="name" label="插件名称" min-width="200" />
       <el-table-column prop="version" label="版本" width="100" />
       <el-table-column label="状态" width="100">
@@ -12,6 +12,11 @@
       </el-table-column>
       <el-table-column label="操作" width="100"><template #default="{ row }"><el-button size="small" @click="editPlugin(row)">配置</el-button></template></el-table-column>
     </el-table>
+    <EmptyState v-else icon="cable" title="暂无插件" description="插件用于扩展搜索、下载、刮削等功能">
+      <template #action>
+        <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
+      </template>
+    </EmptyState>
 
     <el-dialog v-model="showAddDialog" title="添加插件" width="500px">
       <el-form label-width="80px">
@@ -29,6 +34,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from "vue";
 import { ElMessage } from "element-plus";
+import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
 const plugins = ref<any[]>([]);
@@ -59,6 +65,11 @@ onMounted(loadPlugins);
 </script>
 
 <style lang="scss" scoped>
-.admin-plugins { padding: 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } }
+.admin-plugins { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+@media (max-width: 768px) {
+  .admin-plugins { padding: 20px 16px; }
+  .page-header h2 { font-size: 24px; }
+  :deep(.el-table) { font-size: 13px; }
+}
 </style>

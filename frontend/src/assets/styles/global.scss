@@ -177,7 +177,17 @@ body {
     border-color: rgba(255, 255, 255, 0.08) !important;
     color: var(--fnos-text-muted) !important;
   }
+
+  /* 全局按钮触感反馈 */
+  transition: transform 0.12s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  &:active:not([disabled], .is-disabled) { transform: scale(0.96); }
 }
+
+/* 链接/图标按钮统一触感 */
+button, a, [role="button"] {
+  &:active { outline: none; }
+}
+
 
 /* Inputs */
 .el-input {
@@ -343,6 +353,110 @@ body {
 
 /* Card */
 .el-card { background: rgba(255, 255, 255, 0.04) !important; border: 1px solid rgba(255, 255, 255, 0.08) !important; color: var(--fnos-text-primary-dim) !important; }
+
+/* ============================================================================
+   通用交互/动画工具类
+   ========================================================================== */
+
+/* 渐进显示（进入视图时淡入上浮） */
+.fnos-reveal {
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+.fnos-reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 骨架屏 shimmer */
+.fnos-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+    transform: translateX(-100%);
+    animation: fnos-shimmer 1.4s infinite;
+  }
+}
+@keyframes fnos-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+/* 空状态统一组件 */
+.fnos-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--fnos-text-secondary);
+  .fnos-empty-icon {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 16px;
+    color: var(--fnos-text-muted);
+    font-size: 28px;
+  }
+  .fnos-empty-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fnos-text-primary);
+    margin-bottom: 6px;
+  }
+  .fnos-empty-desc {
+    font-size: 13px;
+    color: var(--fnos-text-tertiary);
+    max-width: 320px;
+    line-height: 1.6;
+    margin-bottom: 18px;
+  }
+  .el-button { margin-top: 4px; }
+}
+
+/* 卡片 hover 光泽效果（需在卡片内包裹 cover 与 sheen 元素） */
+.fnos-card-sheen {
+  position: relative;
+  overflow: hidden;
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.12) 48%, rgba(255,255,255,0.05) 52%, transparent 70%);
+    transform: translateX(-120%);
+    transition: transform 0.55s ease;
+    pointer-events: none;
+  }
+  &:hover::after { transform: translateX(120%); }
+}
+
+/* 焦点环（键盘导航可见） */
+:focus-visible {
+  outline: 2px solid var(--fnos-red-ring);
+  outline-offset: 2px;
+}
+
+/* 减弱动画 */
+@media (prefers-reduced-motion: reduce) {
+  .fnos-reveal,
+  .fnos-card-sheen::after,
+  .el-button,
+  button, a, [role="button"] {
+    transition: none !important;
+    animation: none !important;
+  }
+  .fnos-shimmer::after { animation: none !important; }
+}
 
 /* ============================================================================
    流动光影 (Flowing Aurora) + 分主题渐变背景
@@ -569,4 +683,135 @@ body.fnos-login #app { position: relative; z-index: 1; }
   body.fnos-login::before, body.fnos-login::after {
     animation: none !important;
   }
+}
+/* =========================================================
+   封面悬浮播放按钮（全局工具类）
+   用法：封面容器加 .mf-coverwrap，内部放 <CoverPlay />
+   ========================================================= */
+.mf-coverwrap {
+  position: relative;
+  isolation: isolate;
+}
+
+.mf-cover-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  background: rgba(18, 16, 26, 0.5);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(12px) saturate(170%);
+  -webkit-backdrop-filter: blur(12px) saturate(170%);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.78);
+  transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.34, 1.4, 0.64, 1),
+              background 0.2s ease, border-color 0.2s ease;
+
+  svg { width: 46%; height: 46%; margin-left: 6%; display: block; }
+
+  &.sz-sm { width: 32px; height: 32px; }
+  &.sz-md { width: 44px; height: 44px; }
+  &.sz-lg { width: 58px; height: 58px; }
+
+  /* 角标模式：贴右下角，不遮挡封面主体 */
+  &.pos-br {
+    top: auto;
+    left: auto;
+    right: 10px;
+    bottom: 10px;
+    transform: translate(0, 6px) scale(0.85);
+  }
+
+  &.is-loading { pointer-events: none; }
+}
+
+.mf-cp-spin {
+  width: 42%;
+  height: 42%;
+  border: 2px solid rgba(255, 255, 255, 0.32);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: mf-cp-rotate 0.7s linear infinite;
+}
+@keyframes mf-cp-rotate { to { transform: rotate(360deg); } }
+
+/* 桌面端：hover 封面才出现 */
+@media (hover: hover) and (pointer: fine) {
+  .mf-coverwrap:hover .mf-cover-play,
+  .mf-coverwrap:focus-within .mf-cover-play {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+    &.pos-br { transform: translate(0, 0) scale(1); }
+  }
+  .mf-cover-play:hover {
+    background: var(--fnos-red, #f62c55);
+    border-color: rgba(255, 255, 255, 0.55);
+    transform: translate(-50%, -50%) scale(1.1);
+    &.pos-br { transform: translate(0, 0) scale(1.1); }
+  }
+  .mf-cover-play:active { transform: translate(-50%, -50%) scale(0.94); }
+  .mf-cover-play.pos-br:active { transform: translate(0, 0) scale(0.94); }
+}
+
+/* 移动端 / 触控：常驻显示小尺寸按钮 */
+@media (hover: none), (max-width: 768px) {
+  .mf-cover-play {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+    background: rgba(12, 10, 18, 0.46);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    &.pos-br { transform: translate(0, 0) scale(1); right: 7px; bottom: 7px; }
+    &.sz-lg { width: 46px; height: 46px; }
+    &.sz-md { width: 34px; height: 34px; }
+    &.sz-sm { width: 28px; height: 28px; }
+    &:active { background: var(--fnos-red, #f62c55); }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-cover-play { transition: opacity 0.15s linear; }
+}
+
+/* =========================================================
+   移动端表格：只保留最有价值的信息，其余走「长按」面板
+   ========================================================= */
+.m-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fnos-text-primary);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m-sub {
+  font-size: 11px;
+  color: var(--fnos-text-tertiary);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .el-table {
+    font-size: 12.5px;
+    /* 长按自定义面板时不要触发系统选择/放大镜 */
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .el-table .cell { padding-left: 8px; padding-right: 8px; }
+  .el-table td.el-table__cell,
+  .el-table th.el-table__cell { padding: 7px 0; }
+  .el-table .song-cover,
+  .el-table .cover-placeholder { width: 38px; height: 38px; border-radius: 6px; }
 }

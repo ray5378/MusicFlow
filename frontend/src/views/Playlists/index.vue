@@ -3,37 +3,51 @@
     <div class="page-header">
       <h2>歌单</h2>
       <div class="header-actions">
-        <el-button type="primary" @click="showCreateDialog = true"><el-icon><Plus /></el-icon>新建歌单</el-button>
-        <el-button @click="showImportDialog = true"><el-icon><Download /></el-icon>导入歌单</el-button>
+        <el-button type="primary" @click="showCreateDialog = true"><MfIcon name="Plus" />新建歌单</el-button>
+        <el-button @click="showImportDialog = true"><MfIcon name="Download" />导入歌单</el-button>
       </div>
     </div>
     <div class="playlist-grid" v-loading="loading">
       <!-- Favorites special playlist -->
-      <div class="playlist-card" @click="router.push('/favorites')">
-        <div class="playlist-cover fav-cover"><HeartIcon :filled="true" :size="48" /></div>
-        <div class="playlist-info">
+      <div
+        class="playlist-card"
+        @contextmenu="openContextMenu($event, favActions(), '我喜欢的音乐', '喜欢的音乐都在这里')"
+        v-longpress="() => openActionSheet(favActions(), '我喜欢的音乐', '喜欢的音乐都在这里')"
+      >
+        <div class="playlist-cover fav-cover mf-coverwrap" @click.stop="playFavorites()">
+          <MfIcon name="Heart" :filled="true" :size="48" />
+          <CoverPlay size="md" label="播放我喜欢的音乐" :action="() => playFavorites()" />
+        </div>
+        <div class="playlist-info" @click="goFav()">
           <div class="playlist-name">我喜欢的音乐</div>
           <div class="playlist-meta">喜欢的音乐都在这里</div>
         </div>
         <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleFavCommand(cmd)">
-          <el-button size="small" circle :icon="MoreFilled" @click.stop />
+          <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="play"><el-icon><VideoPlay /></el-icon>播放全部</el-dropdown-item>
+              <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
-                <el-icon><MagicStick /></el-icon>{{ favInPool ? '移出每日推荐池' : '加入每日推荐池' }}
+                <MfIcon name="Wand2" />{{ favInPool ? '移出每日推荐池' : '加入每日推荐池' }}
               </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
       </div>
       <!-- User playlists -->
-      <div class="playlist-card" v-for="pl in playlists" :key="pl.id" @click="router.push(`/playlists/${pl.id}`)">
-        <div class="playlist-cover">
+      <div
+        class="playlist-card"
+        v-for="pl in playlists"
+        :key="pl.id"
+        @contextmenu="openContextMenu($event, cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
+        v-longpress="() => openActionSheet(cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
+      >
+        <div class="playlist-cover mf-coverwrap" @click.stop="playAll(pl)">
           <img v-if="pl.coverArt" :src="`/rest/getCoverArt?id=${pl.coverArt}&size=300`" />
-          <div v-else class="cover-placeholder"><el-icon :size="48"><List /></el-icon></div>
+          <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
+          <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playAll(pl)" />
         </div>
-        <div class="playlist-info">
+        <div class="playlist-info" @click="open(pl)">
           <div class="playlist-name">
             {{ pl.name }}
             <el-tag v-if="pl.sourcePlatform" size="small" style="margin-left: 4px">{{ pl.sourcePlatform === 'qq' ? 'QQ' : pl.sourcePlatform === 'netease' ? '网易云' : '' }}</el-tag>
@@ -42,16 +56,16 @@
           <div class="playlist-meta">{{ pl.songCount }}首 · {{ formatDuration(pl.duration) }}</div>
         </div>
         <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleCardCommand(cmd, pl)">
-          <el-button size="small" circle :icon="MoreFilled" @click.stop />
+          <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="play"><el-icon><VideoPlay /></el-icon>播放全部</el-dropdown-item>
-              <el-dropdown-item v-if="pl.isImported" command="sync"><el-icon><Refresh /></el-icon>同步</el-dropdown-item>
-              <el-dropdown-item command="rename"><el-icon><Edit /></el-icon>重命名</el-dropdown-item>
+              <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
+              <el-dropdown-item v-if="pl.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
+              <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
-                <el-icon><MagicStick /></el-icon>{{ pl._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
+                <MfIcon name="Wand2" />{{ pl._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
               </el-dropdown-item>
-              <el-dropdown-item command="delete" divided><el-icon><Delete /></el-icon>删除歌单</el-dropdown-item>
+              <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />删除歌单</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -114,12 +128,55 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { List, Plus, MoreFilled, Edit, Delete, VideoPlay, Download, Refresh, MagicStick } from "@element-plus/icons-vue";
-import HeartIcon from "@/components/HeartIcon.vue";
+import CoverPlay from "@/components/CoverPlay.vue";
+import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2 } from "lucide-vue-next";
 import api from "@/api";
 
 const router = useRouter();
+const { openContextMenu, openActionSheet, menuGuard } = useItemActions();
+
+function open(pl: any) {
+  if (menuGuard()) return;
+  router.push(`/playlists/${pl.id}`);
+}
+function goFav() {
+  if (menuGuard()) return;
+  router.push("/favorites");
+}
+
+/** 歌单卡片的右键 / 长按操作集（复用页面已有的命令实现） */
+function cardActions(pl: any): MenuAction[] {
+  const acts: MenuAction[] = [
+    { label: "播放全部", icon: Play, onClick: () => playAll(pl) },
+    { label: "查看歌单", icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
+  ];
+  if (pl.isImported) acts.push({ label: "同步", icon: RefreshCw, onClick: () => syncPlaylist(pl) });
+  acts.push({ divider: true });
+  acts.push({ label: "重命名", icon: Pencil, onClick: () => openRename(pl) });
+  acts.push({
+    label: pl._inPool ? "移出每日推荐池" : "加入每日推荐池",
+    icon: Wand2,
+    onClick: () => togglePlaylistPool(pl),
+  });
+  acts.push({ divider: true });
+  acts.push({ label: "删除歌单", icon: Trash2, danger: true, onClick: () => deletePlaylist(pl) });
+  return acts;
+}
+
+function favActions(): MenuAction[] {
+  return [
+    { label: "播放全部", icon: Play, onClick: () => playFavorites() },
+    { label: "查看收藏", icon: Folder, onClick: () => router.push("/favorites") },
+    { divider: true },
+    {
+      label: favInPool.value ? "移出每日推荐池" : "加入每日推荐池",
+      icon: Wand2,
+      onClick: () => toggleFavPool(),
+    },
+  ];
+}
 const playlists = ref<any[]>([]);
 const loading = ref(false);
 const currentPage = ref(1);
@@ -336,23 +393,64 @@ onMounted(loadPlaylists);
 </script>
 
 <style lang="scss" scoped>
-.playlists-page { padding: 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } .header-actions { display: flex; gap: 8px; } }
-.playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
-.playlist-card { position: relative; cursor: pointer; border-radius: 8px; overflow: hidden; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.08); transition: transform 0.2s;
-  &:hover { transform: translateY(-4px); }
-  .playlist-cover { aspect-ratio: 1; overflow: hidden;
-    img { width: 100%; height: 100%; object-fit: cover; }
-    .cover-placeholder { width: 100%; height: 100%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #ccc; }
+.playlists-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+  h2 { font-size: 28px; font-weight: 700; margin: 0; }
+  .header-actions { display: flex; gap: 10px; }
+}
+.playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px; }
+.playlist-card {
+  position: relative; cursor: pointer;
+  border-radius: var(--fnos-radius-lg);
+  overflow: hidden;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.07);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  transition: transform 0.22s ease, background 0.22s ease, box-shadow 0.22s ease;
+  animation: home-card-in 0.45s ease both;
+  &:hover {
+    transform: translateY(-5px);
+    background: rgba(255,255,255,0.08);
+    box-shadow: 0 14px 34px rgba(0,0,0,0.42);
+    .playlist-cover img { transform: scale(1.06); }
+  }
+  &:active { transform: translateY(-2px) scale(0.98); }
+  .playlist-cover { position: relative; aspect-ratio: 1; overflow: hidden;
+    img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s ease; }
+    .cover-placeholder { width: 100%; height: 100%; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); }
     &.fav-cover { background: linear-gradient(135deg, #f5b942, #e94560); color: #fff; display: flex; align-items: center; justify-content: center;
       .heart-icon { color: #fff; } }
   }
-  .playlist-info { padding: 12px;
-    .playlist-name { font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .playlist-meta { font-size: 12px; color: #999; margin-top: 4px; }
+  .playlist-info {
+    position: relative;
+    padding: 12px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.25) 0%, rgba(0,0,0,0.55) 100%);
+    margin-top: -40px;
+    padding-top: 48px;
+    .playlist-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fnos-text-primary); transition: color 0.18s ease; }
+    .playlist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; }
   }
-  .playlist-menu { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 0.2s; }
+  .playlist-info:hover .playlist-name { color: var(--fnos-red); }
+  .playlist-menu { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 0.2s; z-index: 8; }
   &:hover .playlist-menu { opacity: 1; }
 }
+@keyframes home-card-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 .pagination-bar { margin-top: 24px; display: flex; justify-content: center; }
+
+@media (max-width: 768px) {
+  .playlists-page { padding: 20px 16px; }
+  .page-header { flex-direction: column; align-items: flex-start; }
+  .playlist-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .playlist-card .playlist-info {
+    padding: 10px;
+    margin-top: -32px;
+    padding-top: 36px;
+    .playlist-name { font-size: 13px; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-clamp: 2; }
+    .playlist-meta { font-size: 11px; }
+  }
+  .playlist-menu { opacity: 1; }
+}
 </style>

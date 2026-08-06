@@ -14,11 +14,11 @@ export default defineConfig({
     port: 46399,
     proxy: {
       "/rest": {
-        target: "http://localhost:46400",
+        target: "http://192.168.10.240:46400",
         changeOrigin: true,
       },
       "/api": {
-        target: "http://localhost:46400",
+        target: "http://192.168.10.240:46400",
         changeOrigin: true,
       },
     },

@@ -3,7 +3,7 @@
     <div class="playlist-header" v-if="playlist">
       <div class="playlist-cover">
         <img v-if="playlist.coverArt" :src="`/rest/getCoverArt?id=${playlist.coverArt}&size=300`" />
-        <div v-else class="cover-placeholder"><el-icon :size="64"><List /></el-icon></div>
+        <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">
         <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag></div>
@@ -14,10 +14,10 @@
         </div>
         <div class="actions">
           <el-button type="primary" @click="playAll">播放全部</el-button>
-          <el-button @click="showRenameDialog = true"><el-icon><Edit /></el-icon>重命名</el-button>
-          <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><el-icon><Refresh /></el-icon>同步</el-button>
-          <el-button :icon="MagicStick" @click="togglePool">{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
-          <el-button type="danger" plain @click="deletePlaylist"><el-icon><Delete /></el-icon>删除歌单</el-button>
+          <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />重命名</el-button>
+          <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />同步</el-button>
+          <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
+          <el-button type="danger" plain @click="deletePlaylist"><MfIcon name="Trash2" />删除歌单</el-button>
         </div>
         <div class="settings" v-if="playlist.isImported">
           <el-switch v-model="playlist.syncEnabled" @change="toggleSyncEnabled" />
@@ -27,41 +27,47 @@
         </div>
       </div>
     </div>
-    <el-table :data="songs" stripe @row-dblclick="playSong" highlight-current-row style="width: 100%" @selection-change="onSelectionChange">
-      <el-table-column type="selection" width="45" />
-      <el-table-column type="index" width="60" label="#" :index="indexMethod" />
-      <el-table-column label="" width="60">
+    <el-table :data="songs" stripe @row-dblclick="playSong" @row-contextmenu="onRowContextMenu" v-longpress="onTableLongPress" highlight-current-row style="width: 100%" @selection-change="onSelectionChange">
+      <el-table-column v-if="!isMobile" type="selection" width="45" />
+      <el-table-column v-if="!isMobile" type="index" width="60" label="#" :index="indexMethod" />
+      <el-table-column label="" :width="isMobile ? 52 : 60">
         <template #default="{ row }">
           <img v-if="row.coverArt" :src="`/rest/getCoverArt?id=${row.coverArt}&size=80`" class="song-cover" />
-          <div v-else class="cover-placeholder"><el-icon><Headset /></el-icon></div>
+          <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
         </template>
       </el-table-column>
-      <el-table-column prop="title" label="标题" min-width="200">
+      <el-table-column prop="title" label="标题" min-width="160">
         <template #default="{ row }">
-          <span>{{ row.title }}</span>
-          <el-tooltip v-if="!row.isMatched" :content="row.unavailableReason || '曲库中未找到'" placement="top">
-            <el-icon class="unmatched-icon" :size="14"><Warning /></el-icon>
-          </el-tooltip>
+          <div v-if="isMobile">
+            <div class="m-title">{{ row.title }}</div>
+            <div class="m-sub">{{ row.artist || (row.isMatched ? '可播放' : '未匹配') }}</div>
+          </div>
+          <template v-else>
+            <span>{{ row.title }}</span>
+            <el-tooltip v-if="!row.isMatched" :content="row.unavailableReason || '曲库中未找到'" placement="top">
+              <MfIcon name="TriangleAlert" class="unmatched-icon" :size="14"  />
+            </el-tooltip>
+          </template>
         </template>
       </el-table-column>
-      <el-table-column prop="artist" label="艺术家" width="180" />
-      <el-table-column label="时长" width="100">
+      <el-table-column v-if="!isMobile" prop="artist" label="艺术家" width="180" />
+      <el-table-column label="时长" :width="isMobile ? 58 : 100">
         <template #default="{ row }">{{ formatDuration(row.duration) }}</template>
       </el-table-column>
-      <el-table-column label="状态" width="110">
+      <el-table-column v-if="!isMobile" label="状态" width="110">
         <template #default="{ row }">
           <el-tag v-if="row.isMatched" type="success" size="small">可播放</el-tag>
           <el-tag v-else type="info" size="small">未匹配</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
+      <el-table-column v-if="!isMobile" label="操作" width="120" fixed="right">
         <template #default="{ row }">
           <el-button-group>
             <el-tooltip content="播放" placement="top">
-              <el-button :icon="Play" circle size="small" :disabled="!row.isMatched" @click="playSong(row)" />
+              <el-button circle size="small" :disabled="!row.isMatched" @click="playSong(row)"><MfIcon name="Play" /></el-button>
             </el-tooltip>
             <el-tooltip content="从歌单移除" placement="top">
-              <el-button :icon="Delete" circle size="small" @click="removeSong(row)" />
+              <el-button circle size="small" @click="removeSong(row)"><MfIcon name="Trash2" /></el-button>
             </el-tooltip>
           </el-button-group>
         </template>
@@ -99,9 +105,10 @@
 import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
-import { List, Delete, Headset, Edit, VideoPlay as Play, Warning, Refresh, MagicStick } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
+import { useSongTableMenu } from "@/composables/useSongTableMenu";
+import { useIsMobile } from "@/composables/useIsMobile";
 
 const route = useRoute();
 const router = useRouter();
@@ -110,6 +117,8 @@ const playlist = ref<any>(null);
 // Whether this playlist is in the daily-recommend pool.
 const inPool = ref(false);
 const songs = ref<any[]>([]);
+const isMobile = useIsMobile();
+const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 const syncing = ref(false);
 const showRenameDialog = ref(false);
@@ -255,26 +264,33 @@ onMounted(loadPlaylist);
 </script>
 
 <style lang="scss" scoped>
-.playlist-detail { padding: 24px; }
+.playlist-detail { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
 .playlist-header { display: flex; gap: 24px; margin-bottom: 24px;
-  .playlist-cover { width: 200px; height: 200px; border-radius: 8px; overflow: hidden; flex-shrink: 0;
+  .playlist-cover { width: 200px; height: 200px; border-radius: var(--fnos-radius-lg); overflow: hidden; flex-shrink: 0; box-shadow: 0 10px 30px rgba(0,0,0,0.4);
     img { width: 100%; height: 100%; object-fit: cover; }
-    .cover-placeholder { width: 100%; height: 100%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #ccc; }
+    .cover-placeholder { width: 100%; height: 100%; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); }
   }
   .playlist-meta { display: flex; flex-direction: column; justify-content: center;
-    .label { font-size: 12px; color: #999; text-transform: uppercase; display: flex; align-items: center; }
-    h1 { font-size: 28px; font-weight: 700; margin: 8px 0; }
-    .info { color: #999; font-size: 14px; }
-    .actions { margin-top: 16px; display: flex; gap: 8px; }
+    .label { font-size: 12px; color: var(--fnos-text-tertiary); text-transform: uppercase; display: flex; align-items: center; letter-spacing: 0.06em; }
+    h1 { font-size: 28px; font-weight: 700; margin: 8px 0; color: var(--fnos-text-primary); }
+    .info { color: var(--fnos-text-tertiary); font-size: 14px; }
+    .actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
     .settings { margin-top: 14px; display: flex; align-items: center; gap: 6px;
-      .setting-label { font-size: 12px; color: #999; margin-right: 4px; }
+      .setting-label { font-size: 12px; color: var(--fnos-text-tertiary); margin-right: 4px; }
     }
   }
 }
 .song-cover { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; }
-.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: #e5e7eb; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 18px; }
+.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); font-size: 18px; }
 .unmatched-icon { color: #e6a23c; margin-left: 6px; vertical-align: middle; }
-.matched-count { color: #16a34a; font-weight: 500; }
-.batch-bar { margin-top: 12px; display: flex; align-items: center; gap: 12px; font-size: 13px; color: #666; }
+.matched-count { color: var(--fnos-green); font-weight: 500; }
+.batch-bar { margin-top: 12px; display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--fnos-text-secondary); }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
+
+@media (max-width: 768px) {
+  .playlist-detail { padding: 20px 16px; }
+  .playlist-header { flex-direction: column; align-items: center; text-align: center; gap: 16px; }
+  .playlist-header .playlist-cover { width: 160px; height: 160px; }
+  .playlist-header .playlist-meta .actions { justify-content: center; }
+}
 </style>

@@ -6,7 +6,7 @@
         <div class="scrape-status" v-if="scrapeProgress">
           <el-tag :type="scrapeRunning ? 'warning' : 'success'" size="small" class="scrape-tag">
             <template v-if="scrapeRunning">
-              <span class="scrape-spin"><el-icon class="is-loading"><Loading /></el-icon></span>
+              <span class="scrape-spin"><MfIcon name="Loader2" class="is-loading"  spin /></span>
               刮削中 {{ scrapeProgress.processed }}/{{ scrapeProgress.total }}
               <span v-if="scrapeProgress.current">({{ scrapeProgress.current }})</span>
               · 成功 {{ scrapeProgress.scraped }} · 专辑兜底 {{ scrapeProgress.fallback }} · 跳过 {{ scrapeProgress.skipped }}
@@ -17,27 +17,34 @@
           </el-tag>
         </div>
         <el-tooltip content="为缺少头像的歌手刮削头像(优先 QQ 音乐,其次网易云)" placement="top">
-          <el-button :loading="scraping" @click="scrapeArtists"><el-icon><MagicStick /></el-icon>刮削歌手头像</el-button>
+          <el-button :loading="scraping" @click="scrapeArtists"><MfIcon name="Wand2" />刮削歌手头像</el-button>
         </el-tooltip>
         <el-tooltip content="重新刮削缺失歌手信息的歌手(平台有信息则更新为真实头像)" placement="top">
           <el-button :loading="scrapingMissing" :badge="missingCount" @click="scrapeMissingArtists">
-            <el-icon><RefreshLeft /></el-icon>仅刮削缺失歌手信息<template v-if="missingCount > 0">({{ missingCount }})</template>
+            <MfIcon name="RotateCcw" />仅刮削缺失歌手信息<template v-if="missingCount > 0">({{ missingCount }})</template>
           </el-button>
         </el-tooltip>
         <el-input v-model="searchQuery" placeholder="搜索艺术家..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
     <div class="artist-grid" v-loading="loading">
-      <div class="artist-card" v-for="artist in artists" :key="artist.id" @click="router.push(`/artists/${artist.id}`)">
-        <div class="artist-avatar">
+      <div
+        class="artist-card"
+        v-for="artist in artists"
+        :key="artist.id"
+        @contextmenu="openContextMenu($event, artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
+        v-longpress="() => openActionSheet(artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
+      >
+        <div class="artist-avatar mf-coverwrap" @click="playAr(artist)">
           <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" />
-          <div v-else class="avatar-placeholder"><el-icon :size="48"><User /></el-icon></div>
+          <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48"  /></div>
           <el-tooltip v-if="artist.scrapeMissing" content="缺失歌手信息(当前为专辑封面兜底)" placement="top">
             <el-tag size="small" type="warning" class="missing-tag">缺信息</el-tag>
           </el-tooltip>
+          <CoverPlay size="md" :label="`播放 ${artist.name} 的歌曲`" :action="() => playAr(artist)" />
         </div>
-        <div class="artist-name">{{ artist.name }}</div>
-        <div class="artist-meta">{{ artist.albumCount }}张专辑</div>
+        <div class="artist-name" @click="open(artist)">{{ artist.name }}</div>
+        <div class="artist-meta" @click="open(artist)">{{ formatAlbumCount(artist.albumCount) }}</div>
       </div>
     </div>
     <div class="pagination-bar">
@@ -58,11 +65,26 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
-import { User, MagicStick, RefreshLeft, Loading } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
+import CoverPlay from "@/components/CoverPlay.vue";
+import { useItemActions } from "@/composables/useItemActions";
+import { usePlayContent } from "@/composables/usePlayContent";
 import api from "@/api";
 
 const router = useRouter();
+const { openContextMenu, openActionSheet, menuGuard, artistActions } = useItemActions();
+const play = usePlayContent();
+
+function open(artist: any) {
+  if (menuGuard()) return;
+  router.push(`/artists/${artist.id}`);
+}
+async function playAr(artist: any) {
+  if (menuGuard()) return;
+  const n = await play.playArtist(artist.id);
+  if (n) ElMessage.success(`正在播放「${artist.name}」的 ${n} 首歌曲`);
+  else ElMessage.warning("该艺人暂无可播放歌曲");
+}
 const artists = ref<any[]>([]);
 const loading = ref(false);
 const scraping = ref(false);
@@ -189,22 +211,59 @@ function onSearchInput() {
 
 function onSearchClear() { currentPage.value = 1; loadArtists(); }
 
+function formatAlbumCount(n: number) {
+  if (!n || n <= 0) return '';
+  if (n === 1) return '1 张专辑';
+  return `${n} 张专辑`;
+}
+
 onMounted(() => { loadArtists(); loadMissingCount(); checkScrapeStatus(); });
 </script>
 
 <style lang="scss" scoped>
-.artists-page { padding: 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; h2 { font-size: 24px; font-weight: 600; } .header-actions { display: flex; align-items: center; gap: 10px; } }
-.artist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 20px; }
-.artist-card { cursor: pointer; text-align: center; padding: 16px; border-radius: 8px; transition: background 0.2s;
-  &:hover { background: #f5f5f5; }
-  .artist-avatar { position: relative; width: 120px; height: 120px; border-radius: 50%; overflow: hidden; margin: 0 auto 12px;
-    img { width: 100%; height: 100%; object-fit: cover; }
-    .avatar-placeholder { width: 100%; height: 100%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #ccc; border-radius: 50%; }
+.artists-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+  h2 { font-size: 28px; font-weight: 700; margin: 0; }
+  .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+}
+.artist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 18px; }
+.artist-card {
+  cursor: pointer; text-align: center; padding: 16px 12px;
+  border-radius: var(--fnos-radius-lg);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  transition: transform 0.22s ease, background 0.22s ease, box-shadow 0.22s ease;
+  animation: home-card-in 0.45s ease both;
+  &:hover {
+    transform: translateY(-5px);
+    background: rgba(255,255,255,0.08);
+    box-shadow: 0 14px 34px rgba(0,0,0,0.4);
+  }
+  &:active { transform: translateY(-2px) scale(0.98); }
+  .artist-avatar { position: relative; width: 120px; height: 120px; border-radius: 50%; overflow: hidden; margin: 0 auto 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.45s ease; }
+    .avatar-placeholder { width: 100%; height: 100%; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); border-radius: 50%; }
     .missing-tag { position: absolute; top: 4px; right: 4px; }
   }
-  .artist-name { font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .artist-meta { font-size: 12px; color: #999; margin-top: 4px; }
+  &:hover .artist-avatar img { transform: scale(1.06); }
+  .artist-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fnos-text-primary); transition: color 0.18s ease; }
+  .artist-name:hover { color: var(--fnos-red); }
+  .artist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 5px; min-height: 16px; }
 }
 .pagination-bar { margin-top: 24px; display: flex; justify-content: center; }
+@keyframes home-card-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 768px) {
+  .artists-page { padding: 20px 16px; }
+  .page-header { flex-direction: column; align-items: flex-start; }
+  .header-actions { width: 100%; }
+  .header-actions .el-input { width: 100% !important; flex: 1; }
+  .artist-grid { grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .artist-card { padding: 12px 8px; }
+  .artist-card .artist-avatar { width: 88px; height: 88px; }
+  .artist-card .artist-name { font-size: 13px; }
+}
 </style>

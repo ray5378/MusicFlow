@@ -2,7 +2,7 @@
   <div class="favorites-page" v-loading="loading">
     <div class="fav-header">
       <div class="fav-cover">
-        <HeartIcon :filled="true" :size="64" class="fav-heart" />
+        <MfIcon name="Heart" :filled="true" :size="64" class="fav-heart" />
       </div>
       <div class="fav-meta">
         <div class="label">我喜欢的音乐</div>
@@ -10,34 +10,47 @@
         <div class="info">{{ songs.length }}首 · 喜欢的音乐都在这里</div>
         <div class="actions">
           <el-button type="primary" @click="playAll" :disabled="songs.length === 0">播放全部</el-button>
-          <el-button :icon="MagicStick" @click="togglePool">{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
+          <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
         </div>
       </div>
     </div>
-    <el-table :data="songs" stripe @row-dblclick="playSong" highlight-current-row style="width: 100%">
-      <el-table-column type="index" width="60" label="#" />
-      <el-table-column label="" width="60">
+    <el-table
+      :data="songs"
+      stripe
+      @row-dblclick="playSong"
+      @row-contextmenu="onRowContextMenu"
+      v-longpress="onTableLongPress"
+      highlight-current-row
+      style="width: 100%"
+    >
+      <el-table-column v-if="!isMobile" type="index" width="60" label="#" />
+      <el-table-column label="" :width="isMobile ? 52 : 60">
         <template #default="{ row }">
           <img v-if="row.coverArt" :src="`/rest/getCoverArt?id=${row.coverArt}&size=80`" class="song-cover" />
-          <div v-else class="cover-placeholder"><el-icon><Headset /></el-icon></div>
+          <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
         </template>
       </el-table-column>
-      <el-table-column prop="title" label="标题" min-width="200" />
-      <el-table-column prop="artist" label="艺术家" width="180" />
-      <el-table-column prop="album" label="专辑" width="200" />
-      <el-table-column label="时长" width="100"><template #default="{ row }">{{ formatDuration(row.duration) }}</template></el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
+      <el-table-column prop="title" label="标题" min-width="160">
+        <template v-if="isMobile" #default="{ row }">
+          <div class="m-title">{{ row.title }}</div>
+          <div class="m-sub">{{ [row.artist, row.album].filter(Boolean).join(' · ') || '—' }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="!isMobile" prop="artist" label="艺术家" width="180" />
+      <el-table-column v-if="!isMobile" prop="album" label="专辑" width="200" />
+      <el-table-column label="时长" :width="isMobile ? 58 : 100"><template #default="{ row }">{{ formatDuration(row.duration) }}</template></el-table-column>
+      <el-table-column v-if="!isMobile" label="操作" width="140" fixed="right">
         <template #default="{ row }">
           <el-button-group>
             <el-tooltip content="播放" placement="top">
-              <el-button :icon="Play" circle size="small" @click="playSong(row)" />
+              <el-button circle size="small" @click="playSong(row)"><MfIcon name="Play" /></el-button>
             </el-tooltip>
             <el-tooltip content="添加到歌单" placement="top">
-              <el-button :icon="Plus" circle size="small" @click="openAddToPlaylist(row)" />
+              <el-button circle size="small" @click="openAddToPlaylist(row)"><MfIcon name="Plus" /></el-button>
             </el-tooltip>
             <el-tooltip content="取消喜欢" placement="top">
               <el-button circle size="small" class="fav-btn" @click="unstar(row)">
-                <HeartIcon :filled="true" :size="16" />
+                <MfIcon name="Heart" :filled="true" :size="16" />
               </el-button>
             </el-tooltip>
           </el-button-group>
@@ -52,12 +65,12 @@
       </div>
       <div class="playlist-list" v-loading="playlistsLoading">
         <div v-for="pl in playlists" :key="pl.id" class="playlist-item" :class="{ active: addingPlaylistId === pl.id }" @click="addToPlaylist(pl)">
-          <el-icon class="pl-icon"><List /></el-icon>
+          <MfIcon name="List" class="pl-icon"  />
           <div class="pl-info">
             <div class="pl-name">{{ pl.name }}</div>
             <div class="pl-meta">{{ pl.songCount }}首</div>
           </div>
-          <el-icon v-if="addingPlaylistId === pl.id" class="el-icon is-loading"><Loading /></el-icon>
+          <MfIcon name="Loader2" v-if="addingPlaylistId === pl.id" class="is-loading"  spin />
         </div>
         <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">暂无歌单，先创建一个吧</div>
       </div>
@@ -73,14 +86,16 @@
 import { ref, onMounted } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { VideoPlay as Play, List, Plus, Headset, Loading, MagicStick } from "@element-plus/icons-vue";
-import HeartIcon from "@/components/HeartIcon.vue";
+import { useSongTableMenu } from "@/composables/useSongTableMenu";
+import { useIsMobile } from "@/composables/useIsMobile";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
 const songs = ref<any[]>([]);
+const isMobile = useIsMobile();
+const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 const showPlaylistDialog = ref(false);
 const playlistTargetSong = ref<any>(null);
@@ -173,26 +188,34 @@ onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); loadPoolStatu
 </script>
 
 <style lang="scss" scoped>
-.favorites-page { padding: 24px; }
+.favorites-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
 .fav-header { display: flex; gap: 24px; margin-bottom: 24px;
-  .fav-cover { width: 200px; height: 200px; border-radius: 8px; background: linear-gradient(135deg, #f5b942, #e94560); display: flex; align-items: center; justify-content: center; color: #fff; flex-shrink: 0;
+  .fav-cover { width: 200px; height: 200px; border-radius: var(--fnos-radius-lg); background: linear-gradient(135deg, #f5b942, #e94560); display: flex; align-items: center; justify-content: center; color: #fff; flex-shrink: 0; box-shadow: 0 10px 30px rgba(233,69,96,0.35);
     .fav-heart { color: #fff; } }
   .fav-meta { display: flex; flex-direction: column; justify-content: center;
-    .label { font-size: 12px; color: #999; text-transform: uppercase; }
-    h1 { font-size: 28px; font-weight: 700; margin: 8px 0; }
-    .info { color: #999; font-size: 14px; }
+    .label { font-size: 12px; color: var(--fnos-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; }
+    h1 { font-size: 28px; font-weight: 700; margin: 8px 0; color: var(--fnos-text-primary); }
+    .info { color: var(--fnos-text-tertiary); font-size: 14px; }
     .actions { margin-top: 16px; }
   }
 }
 .song-cover { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; }
-.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: #e5e7eb; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 18px; }
-.playlist-dialog-song { font-size: 13px; color: #666; margin-bottom: 12px; }
+.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); font-size: 18px; }
+.playlist-dialog-song { font-size: 13px; color: var(--fnos-text-secondary); margin-bottom: 12px; }
 .playlist-list { max-height: 320px; overflow-y: auto; }
 .playlist-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s;
-  &:hover { background: #f5f7fa; }
-  .pl-icon { font-size: 18px; color: #909399; }
-  .pl-info { flex: 1; .pl-name { font-size: 14px; font-weight: 500; } .pl-meta { font-size: 12px; color: #999; } }
+  &:hover { background: rgba(255,255,255,0.06); }
+  &.active { background: var(--fnos-red-soft); }
+  .pl-icon { font-size: 18px; color: var(--fnos-text-tertiary); }
+  .pl-info { flex: 1; .pl-name { font-size: 14px; font-weight: 500; color: var(--fnos-text-primary); } .pl-meta { font-size: 12px; color: var(--fnos-text-tertiary); } }
 }
-.create-playlist-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
-.empty-tip { text-align: center; color: #999; font-size: 13px; padding: 20px 0; }
+.create-playlist-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); }
+.empty-tip { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
+
+@media (max-width: 768px) {
+  .favorites-page { padding: 20px 16px; }
+  .fav-header { flex-direction: column; align-items: center; text-align: center; gap: 16px; }
+  .fav-header .fav-cover { width: 160px; height: 160px; }
+  .fav-header .fav-meta .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+}
 </style>

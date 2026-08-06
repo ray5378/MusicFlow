@@ -2,7 +2,7 @@
   <div class="groups-page">
     <div class="page-header">
       <h2>播放器群组</h2>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新建群组</el-button>
+      <el-button type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
     </div>
     <div class="groups-tip">
       将多台 DLNA 设备加入一个群组,组持有自己的队列;播放时后端会并发向全部在线成员投递同一首歌(仿 Music Assistant Sync Group,不进行漂移校正)。
@@ -14,7 +14,7 @@
       <div v-for="g in groups" :key="g.id" class="group-card">
         <div class="group-card-head">
           <div class="group-name">
-            <el-icon class="group-name-icon"><Box /></el-icon>
+            <MfIcon name="Box" class="group-name-icon"  />
             <span class="group-name-text">{{ g.name }}</span>
           </div>
           <div class="group-meta">
@@ -38,9 +38,9 @@
           <span v-else class="member-empty">暂无成员,点击「编辑成员」添加设备</span>
         </div>
         <div class="group-actions">
-          <el-button size="small" :icon="Monitor" :disabled="onlineCount(g) === 0" @click="controlGroup(g)">控制</el-button>
-          <el-button size="small" :icon="Edit" @click="openEditMembers(g)">编辑成员</el-button>
-          <el-button size="small" :icon="EditPen" @click="openRename(g)">重命名</el-button>
+          <el-button size="small" :disabled="onlineCount(g) === 0" @click="controlGroup(g)"><MfIcon name="Monitor" />控制</el-button>
+          <el-button size="small" @click="openEditMembers(g)"><MfIcon name="Pencil" />编辑成员</el-button>
+          <el-button size="small" @click="openRename(g)"><MfIcon name="Pencil" />重命名</el-button>
           <el-popconfirm
             title="确定删除该群组?组队列与成员集合将一并删除"
             confirm-button-text="删除"
@@ -49,13 +49,13 @@
             @confirm="removeGroup(g)"
           >
             <template #reference>
-              <el-button size="small" type="danger" :icon="Delete" plain>删除</el-button>
+              <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
             </template>
           </el-popconfirm>
         </div>
       </div>
       <el-empty v-if="!loading && groups.length === 0" description="暂无群组">
-        <el-button type="primary" :icon="Plus" @click="openCreate">新建群组</el-button>
+        <el-button type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
       </el-empty>
     </div>
 
@@ -84,7 +84,7 @@
               @change="(v: any) => setChecked(dev.id, !!v)"
               @click.stop
             />
-            <el-icon class="device-icon" :class="{ offline: !dev.available }"><Monitor /></el-icon>
+            <MfIcon name="Monitor" class="device-icon" :class="{ offline: !dev.available }"  />
             <div class="device-info">
               <div class="device-name">
                 {{ dev.name }}
@@ -126,7 +126,6 @@
 import { ref, watch, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
-import { Box, Plus, Edit, EditPen, Delete, Monitor } from "@element-plus/icons-vue";
 import api from "@/api";
 
 const playerStore = usePlayerStore();
@@ -271,36 +270,43 @@ onMounted(loadGroups);
 </script>
 
 <style lang="scss" scoped>
-.groups-page { padding: 20px 24px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.groups-page { padding: 24px 32px 130px; max-width: 1100px; margin: 0 auto; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;
+  h2 { font-size: 28px; font-weight: 700; margin: 0; }
+}
 .groups-tip {
-  font-size: 12px; color: #909399; background: #f7f8fa; border: 1px solid #f0f0f0;
+  font-size: 12px; color: var(--fnos-text-tertiary); background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08); border-left: 3px solid var(--fnos-orange);
   border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; line-height: 1.6;
 }
 .group-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
 .group-card {
-  background: #fff; border: 1px solid #f0f0f0; border-radius: 10px; padding: 16px;
-  transition: box-shadow 0.2s; &:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--fnos-radius); padding: 16px;
+  transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+  &:hover { transform: translateY(-2px); background: rgba(255,255,255,0.07); box-shadow: 0 12px 30px rgba(0,0,0,0.4); }
+  &:active { transform: translateY(0) scale(0.99); }
   .group-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .group-name { display: flex; align-items: center; gap: 8px; min-width: 0;
-    .group-name-icon { color: #c35f33; font-size: 18px; flex-shrink: 0; }
-    .group-name-text { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .group-name-icon { color: var(--fnos-orange); font-size: 18px; flex-shrink: 0; }
+    .group-name-text { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fnos-text-primary); }
   }
-  .group-meta { font-size: 12px; color: #909399; white-space: nowrap;
+  .group-meta { font-size: 12px; color: var(--fnos-text-tertiary); white-space: nowrap;
     .meta-dot { margin: 0 4px; }
-    .online { color: #67c23a; }
+    .online { color: var(--fnos-green); }
   }
   .group-members { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; margin-bottom: 14px;
-    .member-chip { display: inline-flex; align-items: center; gap: 4px; background: #f2f3f5; border-radius: 12px;
-      padding: 3px 10px; font-size: 12px; color: #333;
-      &.offline { color: #999; }
-      .member-offline { font-size: 11px; background: #c0c4cc; color: #fff; border-radius: 8px; padding: 0 6px; }
+    .member-chip { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.08); border-radius: 12px;
+      padding: 3px 10px; font-size: 12px; color: var(--fnos-text-primary-dim);
+      &.offline { color: var(--fnos-text-muted); }
+      .member-offline { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
     }
-    .member-empty { color: #bbb; font-size: 12px; align-self: center; }
+    .member-empty { color: var(--fnos-text-muted); font-size: 12px; align-self: center; }
   }
   .group-actions { display: flex; gap: 8px; }
 }
 @media (max-width: 768px) {
+  .groups-page { padding: 20px 16px; }
   .group-list { grid-template-columns: 1fr; }
   .group-card { padding: 12px; }
   .group-card-head { flex-direction: column; align-items: flex-start; gap: 6px; }
@@ -309,23 +315,23 @@ onMounted(loadGroups);
   .groups-tip { padding: 8px 10px; }
 }
 .dialog-field { margin-bottom: 16px;
-  .dialog-label { font-size: 13px; font-weight: 500; color: #606266; margin-bottom: 8px; }
+  .dialog-label { font-size: 13px; font-weight: 500; color: var(--fnos-text-secondary); margin-bottom: 8px; }
 }
-.device-list { max-height: 300px; overflow-y: auto; border: 1px solid #f0f0f0; border-radius: 8px; padding: 4px; }
+.device-list { max-height: 300px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 4px; background: rgba(0,0,0,0.2); }
 .device-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
-  &:hover { background: #f5f7fa; }
-  &.checked { background: #fdf0ea; }
-  .device-icon { font-size: 16px; color: #c35f33;
-    &.offline { color: #c0c4cc; }
+  &:hover { background: rgba(255,255,255,0.06); }
+  &.checked { background: var(--fnos-red-soft); }
+  .device-icon { font-size: 16px; color: var(--fnos-orange);
+    &.offline { color: var(--fnos-text-muted); }
   }
   .device-info { flex: 1; min-width: 0;
-    .device-name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px;
-      .device-offline-tag { font-size: 11px; background: #c0c4cc; color: #fff; border-radius: 8px; padding: 0 6px; }
+    .device-name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; color: var(--fnos-text-primary);
+      .device-offline-tag { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
     }
-    .device-meta { font-size: 12px; color: #999; margin-top: 2px;
-      .device-group-tip { color: #909399; margin-left: 6px; }
+    .device-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px;
+      .device-group-tip { color: var(--fnos-text-secondary); margin-left: 6px; }
     }
   }
 }
-.device-empty { text-align: center; color: #999; font-size: 12px; padding: 24px 0; }
+.device-empty { text-align: center; color: var(--fnos-text-tertiary); font-size: 12px; padding: 24px 0; }
 </style>

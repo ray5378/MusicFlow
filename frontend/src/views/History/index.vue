@@ -10,29 +10,34 @@
         width="220"
       >
         <template #reference>
-          <el-button type="danger" :icon="Delete" :loading="clearing" plain :disabled="total === 0">清空历史</el-button>
+          <el-button type="danger" :loading="clearing" plain :disabled="total === 0"><MfIcon name="Trash2" />清空历史</el-button>
         </template>
       </el-popconfirm>
     </div>
-    <el-table :data="songs" stripe @row-dblclick="playSong" highlight-current-row v-loading="loading">
-      <el-table-column type="index" width="60" label="#" :index="indexMethod" />
-      <el-table-column label="" width="60">
+    <el-table :data="songs" stripe @row-dblclick="playSong" @row-contextmenu="onRowContextMenu" v-longpress="onTableLongPress" highlight-current-row v-loading="loading">
+      <el-table-column v-if="!isMobile" type="index" width="60" label="#" :index="indexMethod" />
+      <el-table-column label="" :width="isMobile ? 52 : 60">
         <template #default="{ row }">
           <img v-if="row.coverArt" :src="`/rest/getCoverArt?id=${row.coverArt}&size=80`" class="song-cover" />
-          <div v-else class="cover-placeholder"><el-icon><Headset /></el-icon></div>
+          <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
         </template>
       </el-table-column>
-      <el-table-column prop="title" label="标题" min-width="200" />
-      <el-table-column prop="artist" label="艺术家" width="180" />
-      <el-table-column prop="album" label="专辑" width="200" />
-      <el-table-column label="播放时间" width="160">
+      <el-table-column prop="title" label="标题" min-width="160">
+        <template v-if="isMobile" #default="{ row }">
+          <div class="m-title">{{ row.title }}</div>
+          <div class="m-sub">{{ [row.artist, row.album].filter(Boolean).join(' · ') || '—' }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="!isMobile" prop="artist" label="艺术家" width="180" />
+      <el-table-column v-if="!isMobile" prop="album" label="专辑" width="200" />
+      <el-table-column label="播放时间" :width="isMobile ? 96 : 160">
         <template #default="{ row }">{{ formatPlayedAt(row.playedAt) }}</template>
       </el-table-column>
-      <el-table-column label="时长" width="100"><template #default="{ row }">{{ formatDuration(row.duration) }}</template></el-table-column>
-      <el-table-column label="操作" width="80" fixed="right">
+      <el-table-column label="时长" :width="isMobile ? 58 : 100"><template #default="{ row }">{{ formatDuration(row.duration) }}</template></el-table-column>
+      <el-table-column v-if="!isMobile" label="操作" width="80" fixed="right">
         <template #default="{ row }">
           <el-tooltip content="播放" placement="top">
-            <el-button :icon="Play" circle size="small" @click="playSong(row)" />
+            <el-button circle size="small" @click="playSong(row)"><MfIcon name="Play" /></el-button>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -56,11 +61,14 @@
 import { ref, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
-import { VideoPlay as Play, Headset, Delete } from "@element-plus/icons-vue";
 import api from "@/api";
+import { useSongTableMenu } from "@/composables/useSongTableMenu";
+import { useIsMobile } from "@/composables/useIsMobile";
 
 const playerStore = usePlayerStore();
 const songs = ref<any[]>([]);
+const isMobile = useIsMobile();
+const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 const clearing = ref(false);
 const currentPage = ref(1);
@@ -118,9 +126,14 @@ onMounted(loadHistory);
 </script>
 
 <style lang="scss" scoped>
-.history-page { padding: 24px; }
-.page-header { margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; h2 { font-size: 24px; font-weight: 600; } }
+.history-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
+.page-header { margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; } }
 .song-cover { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; }
-.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: #e5e7eb; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 18px; }
+.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); font-size: 18px; }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
+
+@media (max-width: 768px) {
+  .history-page { padding: 20px 16px; }
+  .page-header { flex-direction: column; align-items: flex-start; }
+}
 </style>

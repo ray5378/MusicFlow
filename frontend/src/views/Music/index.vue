@@ -16,7 +16,7 @@
           @input="onSearchInput"
           @clear="onSearchClear"
         />
-        <el-button type="primary" :icon="VideoPlay" class="play-all-btn" @click="playAll" :disabled="songs.length === 0">
+        <el-button type="primary" class="play-all-btn" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />
           播放全部
         </el-button>
       </div>
@@ -26,22 +26,22 @@
     <div class="hero-tiles">
       <div class="tile tile-mix" @click="playAll">
         <div class="tile-glow"></div>
-        <el-icon class="tile-icon" :size="34"><Headset /></el-icon>
+        <MfIcon name="Headphones" class="tile-icon" :size="34"  />
         <span class="tile-label">混音</span>
       </div>
       <div class="tile tile-fav" @click="$router.push('/favorites')">
         <div class="tile-glow"></div>
-        <el-icon class="tile-icon" :size="34"><svg viewBox="0 0 24 24" fill="currentColor" width="34" height="34"><path d="M12 21s-7-4.5-9.5-9.2C.7 8.4 2.5 4.5 6 4.5c2 0 3.4 1.1 4.2 2.5C11.1 5.6 12.5 4.5 14.5 4.5c3.5 0 5.3 3.9 3.5 7.3C19 16.5 12 21 12 21z"/></svg></el-icon>
+        <MfIcon name="Heart" :filled="true" class="tile-icon" :size="34" />
         <span class="tile-label">收藏</span>
       </div>
       <div class="tile tile-recent" @click="$router.push('/history')">
         <div class="tile-glow"></div>
-        <el-icon class="tile-icon" :size="34"><Clock /></el-icon>
+        <MfIcon name="Clock" class="tile-icon" :size="34"  />
         <span class="tile-label">最近播放</span>
       </div>
       <div class="tile tile-added" @click="playAll">
         <div class="tile-glow"></div>
-        <el-icon class="tile-icon" :size="34"><Plus /></el-icon>
+        <MfIcon name="Plus" class="tile-icon" :size="34"  />
         <span class="tile-label">最近添加</span>
       </div>
     </div>
@@ -54,7 +54,7 @@
         <span class="col col-artist">艺术家</span>
         <span class="col col-album">专辑</span>
         <span class="col col-duration">
-          <el-icon><Clock /></el-icon>
+          <MfIcon name="Clock" />
         </span>
         <span class="col col-actions"></span>
       </div>
@@ -67,7 +67,9 @@
           active: playerStore.currentSong && playerStore.currentSong.id === song.id,
           playing: playerStore.currentSong && playerStore.currentSong.id === song.id && playerStore.isPlaying
         }"
-        @dblclick="playSong(song)"
+        @click="playSong(song)"
+        @contextmenu="openContextMenu($event, songActions(song), song.title, [song.artist, song.album].filter(Boolean).join(' · '))"
+        v-longpress="() => openActionSheet(songActions(song), song.title, [song.artist, song.album].filter(Boolean).join(' · '))"
       >
         <span class="col col-index">
           <span class="row-index">{{ (currentPage - 1) * pageSize + idx + 1 }}</span>
@@ -85,17 +87,18 @@
               lazy
             >
               <template #error>
-                <div class="cover-placeholder"><el-icon><Headset /></el-icon></div>
+                <div class="cover-placeholder"><MfIcon name="Headphones" /></div>
               </template>
             </el-image>
-            <div v-else class="cover-placeholder"><el-icon><Headset /></el-icon></div>
+            <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
             <div class="cover-play" @click.stop="playSong(song)">
-              <el-icon :size="20"><VideoPlay /></el-icon>
+              <MfIcon name="Play" :size="20"  />
             </div>
           </div>
           <div class="title-meta">
             <div class="song-title" :class="{ 'is-active': playerStore.currentSong && playerStore.currentSong.id === song.id }">{{ song.title }}</div>
             <div class="song-bitrate" v-if="song.bitRate">{{ song.bitRate }}kbps · {{ (song.suffix || '').toUpperCase() }}</div>
+            <div class="song-mobile-meta">{{ [song.artist, song.album].filter(Boolean).join(' · ') || '—' }}</div>
           </div>
         </span>
         <span class="col col-artist">{{ song.artist || '—' }}</span>
@@ -103,16 +106,23 @@
         <span class="col col-duration">{{ formatDuration(song.duration) }}</span>
         <span class="col col-actions">
           <button class="row-btn" :class="{ active: favoritesStore.isFavorite(song.id) }" @click.stop="toggleFavorite(song)" :title="favoritesStore.isFavorite(song.id) ? '取消喜欢' : '我喜欢'">
-            <HeartIcon :filled="favoritesStore.isFavorite(song.id)" :size="16" />
+            <MfIcon name="Heart" :filled="favoritesStore.isFavorite(song.id)" :size="16" />
           </button>
           <button class="row-btn" @click.stop="openAddToPlaylist(song)" title="添加到歌单">
-            <el-icon :size="16"><Plus /></el-icon>
+            <MfIcon name="Plus" :size="16"  />
+          </button>
+          <button
+            class="row-btn"
+            @click.stop="openContextMenu($event, songActions(song), song.title, [song.artist, song.album].filter(Boolean).join(' · '))"
+            title="更多操作"
+          >
+            <MfIcon name="MoreHorizontal" :size="16"  />
           </button>
         </span>
       </div>
 
       <div v-if="!loading && songs.length === 0" class="empty-state">
-        <el-icon :size="48"><Headset /></el-icon>
+        <MfIcon name="Headphones" :size="48"  />
         <p>暂无歌曲</p>
       </div>
     </div>
@@ -130,47 +140,20 @@
       />
     </div>
 
-    <!-- ===== 添加到歌单对话框 ===== -->
-    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px">
-      <div class="playlist-dialog-song" v-if="playlistTargetSong">
-        将「{{ playlistTargetSong.title }} - {{ playlistTargetSong.artist }}」添加到：
-      </div>
-      <div class="playlist-list" v-loading="playlistsLoading">
-        <div
-          v-for="pl in playlists"
-          :key="pl.id"
-          class="playlist-item"
-          :class="{ active: addingPlaylistId === pl.id }"
-          @click="addToPlaylist(pl)"
-        >
-          <el-icon class="pl-icon"><List /></el-icon>
-          <div class="pl-info">
-            <div class="pl-name">{{ pl.name }}</div>
-            <div class="pl-meta">{{ pl.songCount }}首</div>
-          </div>
-          <el-icon v-if="addingPlaylistId === pl.id" class="el-icon is-loading"><Loading /></el-icon>
-        </div>
-        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">暂无歌单，先创建一个吧</div>
-      </div>
-      <div class="create-playlist-row">
-        <el-input v-model="newPlaylistName" placeholder="新建歌单名称..." clearable @keyup.enter="createAndAdd" />
-        <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">新建并添加</el-button>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import { usePlayerStore, Song } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { VideoPlay, Plus, Headset, List, Loading, Clock } from "@element-plus/icons-vue";
-import HeartIcon from "@/components/HeartIcon.vue";
+import { useItemActions } from "@/composables/useItemActions";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
+const { openContextMenu, openActionSheet, menuGuard, songActions, openAddToPlaylist } = useItemActions();
 const songs = ref<Song[]>([]);
 const loading = ref(false);
 const searchQuery = ref("");
@@ -178,13 +161,6 @@ const currentPage = ref(1);
 const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("songsPageSize") || "25"));
 if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
-
-const showPlaylistDialog = ref(false);
-const playlistTargetSong = ref<Song | null>(null);
-const playlists = ref<any[]>([]);
-const playlistsLoading = ref(false);
-const addingPlaylistId = ref("");
-const newPlaylistName = ref("");
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -218,58 +194,16 @@ function onSearchInput() {
 
 function onSearchClear() { currentPage.value = 1; loadSongs(); }
 
-function playSong(song: Song) { playerStore.playSong(song); }
+function playSong(song: Song) {
+  if (menuGuard()) return;
+  playerStore.playSong(song);
+}
 function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
 async function toggleFavorite(song: Song) {
   try {
     const fav = await favoritesStore.toggleFavorite(song.id);
     ElMessage.success(fav ? "已添加到我喜欢的音乐" : "已从我喜欢的音乐移除");
   } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
-}
-
-async function openAddToPlaylist(song: Song) {
-  playlistTargetSong.value = song;
-  showPlaylistDialog.value = true;
-  newPlaylistName.value = "";
-  await loadPlaylists();
-}
-
-async function loadPlaylists() {
-  playlistsLoading.value = true;
-  try {
-    const res = await api.get("/rest/getPlaylists?f=json");
-    playlists.value = res.data["subsonic-response"]?.playlists?.playlist || [];
-  } catch { playlists.value = []; }
-  finally { playlistsLoading.value = false; }
-}
-
-async function addToPlaylist(pl: any) {
-  if (!playlistTargetSong.value || addingPlaylistId.value) return;
-  addingPlaylistId.value = pl.id;
-  try {
-    await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: playlistTargetSong.value.id });
-    ElMessage.success(`已添加到「${pl.name}」`);
-    showPlaylistDialog.value = false;
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "添加失败");
-  } finally {
-    addingPlaylistId.value = "";
-  }
-}
-
-async function createAndAdd() {
-  if (!newPlaylistName.value || !playlistTargetSong.value) return;
-  if (addingPlaylistId.value) return;
-  addingPlaylistId.value = "new";
-  try {
-    await api.post("/rest/createPlaylist", { name: newPlaylistName.value, songId: playlistTargetSong.value.id });
-    ElMessage.success(`已创建并添加「${newPlaylistName.value}」`);
-    showPlaylistDialog.value = false;
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "创建失败");
-  } finally {
-    addingPlaylistId.value = "";
-  }
 }
 
 onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
@@ -306,6 +240,7 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
   transform: translateY(-4px);
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
+.tile:active { transform: translateY(-1px) scale(0.98); }
 .tile .tile-glow {
   position: absolute;
   inset: -40%;
@@ -541,6 +476,7 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
       color: var(--fnos-text-primary);
       &.is-active { color: var(--fnos-red); font-weight: 600; }
     }
+    .song-mobile-meta { display: none; }
     .song-bitrate {
       font-size: 11px;
       color: var(--fnos-text-muted);
@@ -601,26 +537,6 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
   justify-content: center;
 }
 
-.playlist-dialog-song { font-size: 13px; color: var(--fnos-text-tertiary); margin-bottom: 12px; }
-.playlist-list { max-height: 320px; overflow-y: auto; }
-.playlist-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px; border-radius: 8px;
-  cursor: pointer; transition: background 0.2s;
-  &:hover { background: rgba(255, 255, 255, 0.06); }
-  .pl-icon { font-size: 18px; color: var(--fnos-text-tertiary); }
-  .pl-info { flex: 1;
-    .pl-name { font-size: 14px; font-weight: 500; color: var(--fnos-text-primary); }
-    .pl-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
-  }
-}
-.create-playlist-row {
-  display: flex; gap: 8px;
-  margin-top: 12px; padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-.empty-tip { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
-
 @media (max-width: 1100px) {
   .list-header, .song-row {
     grid-template-columns: 48px 1fr 80px 90px;
@@ -630,7 +546,77 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
 }
 @media (max-width: 768px) {
   .songs-page { padding: 20px 16px; }
-  .page-header .page-title h2 { font-size: 24px; }
-  .page-header .header-actions .search-input { width: 200px; }
+  .page-header {
+    flex-direction: column; align-items: flex-start; gap: 12px;
+    .page-title h2 { font-size: 24px; }
+    .header-actions { width: 100%; }
+    .header-actions .search-input { width: 100%; flex: 1; }
+    .header-actions .play-all-btn { flex-shrink: 0; }
+  }
+
+  /* 移动端歌曲列表改为卡片式行 */
+  .list-header { display: none; }
+  .song-row {
+    position: relative;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    height: auto;
+    min-height: 64px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    margin: 6px 0;
+  }
+  .song-row .col-index { display: none; }
+  .song-row .col-title {
+    flex-direction: row;
+    gap: 10px;
+    .song-cover-wrap { width: 46px; height: 46px; }
+    .title-meta {
+      .song-title {
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        line-clamp: 2;
+        font-size: 13px;
+      }
+      .song-bitrate { display: none; }
+      /* 在标题下追加艺术家/专辑信息 */
+      .song-mobile-meta {
+        display: block;
+        font-size: 11px;
+        color: var(--fnos-text-tertiary);
+        margin-top: 3px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+  }
+  .song-row .col-artist,
+  .song-row .col-album { display: none; }
+  .song-row .col-duration {
+    font-size: 11px;
+    color: var(--fnos-text-tertiary);
+    align-self: center;
+  }
+  /* 移动端只保留最有价值的信息：封面 / 标题 / 艺术家·专辑 / 时长
+     其余操作全部收进「长按」面板，避免小屏被按钮塞满 */
+  .song-row .col-actions { display: none !important; }
+
+  /* 封面上常驻一个半透明小播放键 */
+  .song-row .col-title .song-cover-wrap .cover-play {
+    opacity: 1;
+    transform: scale(1);
+    inset: auto 0 0 auto;
+    width: 20px; height: 20px;
+    margin: 0 3px 3px 0;
+    border-radius: 50%;
+    background: rgba(10, 8, 16, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .song-row .col-title .song-cover-wrap .cover-play:active { background: var(--fnos-red); }
 }
 </style>
