@@ -20,7 +20,7 @@ import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInf
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
-  enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isRoutableHostname,
+  enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isPrivateLanHostname,
 } from "../../services/dlna/control.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
@@ -834,15 +834,19 @@ const DLNA_MIME: Record<string, string> = {
 // port (so it works even when fronted by a dev proxy on a different port).
 // Also records it for the internal cast paths (auto-advance / stalled retry)
 // so they reuse the same reachable address.
+//
+// 关键:只信任「局域网可达」的 Host(私有 IP / .local)。通过公网域名访问时,Host 头是
+// 公网域名,设备在同一 LAN 内无法解析回连 → 直接回退到自动探测的 LAN IP,确保推给 DLNA
+// 设备的永远是局域网地址。DLNA_BASE_URL 环境变量优先级最高,可显式覆盖。
 function getDlnaBaseUrl(c: any): string {
   const envBase = process.env.DLNA_BASE_URL;
   if (envBase) { const u = envBase.replace(/\/+$/, ""); recordBaseUrl(u); return u; }
   const host = c.req.header("host") || "";
   const hostname = host.split(":")[0] || "";
   const port = process.env.PORT || "46400";
-  // localhost / 127.x / 0.0.0.0 等 Host 头(如本机浏览器 localhost 访问)设备拉不到流,
-  // 回退到自动探测的 LAN IP。
-  if (!isRoutableHostname(hostname)) return getEffectiveBaseUrl();
+  // 仅当 Host 是局域网可达地址(私有 IP / .local)时才直接复用;公网域名与回环地址
+  // 一律回退到自动探测的 LAN IP,避免把公网域名推给设备。
+  if (!isPrivateLanHostname(hostname)) return getEffectiveBaseUrl();
   const u = `http://${hostname}:${port}`;
   recordBaseUrl(u);
   return u;

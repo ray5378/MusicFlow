@@ -49,13 +49,37 @@ export function isRoutableHostname(hostname: string): boolean {
   return true;
 }
 
+/**
+ * 主机名是否为「局域网可达」地址——即 DLNA 设备能在同一 LAN 内解析回连的地址。
+ * 覆盖:私有 IPv4(10/172.16-31/192.168/169.254)、IPv6 ULA/链路本地(fc/fd/fe8)、
+ * 以及 .local mDNS 主机名。公网域名(如 music.example.com)返回 false。
+ * 这是「通过公网域名访问时仍推局域网地址给 DLNA 设备」的关键判定。
+ */
+export function isPrivateLanHostname(hostname: string): boolean {
+  if (!hostname) return false;
+  const h = hostname.replace(/^\[/, "").replace(/\]$/, "").trim().toLowerCase();
+  if (!h || LOOPBACK_RE.test(h)) return false;
+  // 私有 IPv4 段
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  // 私有/链路本地 IPv6
+  if (/^(fc|fd|fe[89ab])/.test(h)) return true;
+  // mDNS 本地主机名
+  if (h.endsWith(".local")) return true;
+  return false;
+}
+
 /** 记录最近一次由 HTTP 请求(Host 头)推导出的 base URL,供内部 cast 复用。 */
 let lastSeenBaseUrl: string | undefined;
 export function recordBaseUrl(baseUrl: string): void {
   if (!baseUrl) return;
   const hostname = baseUrl.replace(/^https?:\/\//i, "").split(":")[0];
-  // localhost/0.0.0.0 之类设备不可达,丢弃不记,让内部 cast 走自动探测。
-  if (!isRoutableHostname(hostname)) return;
+  // 只缓存「局域网可达」地址(私有 IP / .local)。公网域名与回环地址设备拉不到流,
+  // 丢弃不记,让内部 cast 走自动探测的 LAN IP;否则公网域名会被缓存进 lastSeenBaseUrl,
+  // 毒害后续自动切歌/卡死重试等内部投屏(设备收到公网域名永远拉不到流)。
+  if (!isPrivateLanHostname(hostname)) return;
   lastSeenBaseUrl = baseUrl.replace(/\/+$/, "");
 }
 
