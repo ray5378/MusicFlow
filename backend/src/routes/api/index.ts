@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory } from "../../db/schema.js";
-import { eq, like, inArray, or, and, sql } from "drizzle-orm";
+import { eq, like, inArray, or, and, sql, desc } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { adminMiddleware } from "../../middleware/auth.js";
@@ -303,6 +303,9 @@ apiRoutes.get("/v1/songs", (c) => {
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
   const genre = (c.req.query("genre") || "").trim();
+  // sort=recentAdded: 最新添加入库的歌曲（按入库时间倒序，封顶 500 首，新入库自动进入列表）
+  const sort = (c.req.query("sort") || "").trim();
+  const recentAdded = sort === "recentAdded";
   // SQL-level filtering + pagination (avoids loading the whole table into memory)
   const conds = [];
   if (genre) conds.push(eq(songs.genre, genre));
@@ -311,16 +314,25 @@ apiRoutes.get("/v1/songs", (c) => {
     conds.push(or(like(songs.title, q), like(songs.artist, q), like(songs.album, q)));
   }
   const where = conds.length > 0 ? (conds.length === 1 ? conds[0] : and(...conds)) : undefined;
+  // 最近添加模式最多只取 500 首（超出部分不算在总数内）
+  const RECENT_ADDED_CAP = 500;
   const start = (page - 1) * pageSize;
   // Fast SQL count for the total
   const totalRow = where
     ? db.select({ n: sql<number>`count(*)` }).from(songs).where(where).get()
     : db.select({ n: sql<number>`count(*)` }).from(songs).get();
-  const total = totalRow?.n ?? 0;
-  // SQL-level pagination: load only the requested page (ordered by title)
-  const pageSongs = (where
-    ? db.select().from(songs).where(where).orderBy(songs.title).limit(pageSize).offset(start).all()
-    : db.select().from(songs).orderBy(songs.title).limit(pageSize).offset(start).all());
+  const rawTotal = totalRow?.n ?? 0;
+  const total = recentAdded ? Math.min(RECENT_ADDED_CAP, rawTotal) : rawTotal;
+  // 最近添加模式的分页不超出 500 首范围
+  const safeStart = recentAdded ? Math.min(start, Math.max(0, total - pageSize)) : start;
+  // SQL-level pagination
+  const pageSongs = recentAdded
+    ? (where
+        ? db.select().from(songs).where(where).orderBy(desc(songs.createdAt)).limit(pageSize).offset(safeStart).all()
+        : db.select().from(songs).orderBy(desc(songs.createdAt)).limit(pageSize).offset(safeStart).all())
+    : (where
+        ? db.select().from(songs).where(where).orderBy(songs.title).limit(pageSize).offset(start).all()
+        : db.select().from(songs).orderBy(songs.title).limit(pageSize).offset(start).all());
   const items = pageSongs.map(s => ({
     id: s.id, title: s.title, artist: s.artist, album: s.album, artistId: s.artistId,
     albumId: s.albumId, duration: s.duration, bitRate: s.bitRate, suffix: s.suffix,

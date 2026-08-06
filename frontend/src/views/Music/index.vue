@@ -3,7 +3,7 @@
     <!-- ===== 页头 ===== -->
     <div class="page-header">
       <div class="page-title">
-        <h2>音乐</h2>
+        <h2>{{ recentMode ? "最近添加" : "音乐" }}</h2>
         <span class="song-count">{{ total }} 首</span>
       </div>
       <div class="header-actions">
@@ -24,25 +24,25 @@
 
     <!-- ===== 彩色磁贴（飞牛首页风格） ===== -->
     <div class="hero-tiles">
-      <div class="tile tile-mix" @click="playAll">
+      <div class="tile tile-added" @click="goRecent">
         <div class="tile-glow"></div>
-        <MfIcon name="Headphones" class="tile-icon" :size="34"  />
-        <span class="tile-label">混音</span>
-      </div>
-      <div class="tile tile-fav" @click="$router.push('/favorites')">
-        <div class="tile-glow"></div>
-        <MfIcon name="Heart" :filled="true" class="tile-icon" :size="34" />
-        <span class="tile-label">收藏</span>
+        <MfIcon name="Plus" class="tile-icon" :size="34"  />
+        <span class="tile-label">最近添加</span>
       </div>
       <div class="tile tile-recent" @click="$router.push('/history')">
         <div class="tile-glow"></div>
         <MfIcon name="Clock" class="tile-icon" :size="34"  />
         <span class="tile-label">最近播放</span>
       </div>
-      <div class="tile tile-added" @click="playAll">
+      <div class="tile tile-fav" @click="$router.push('/favorites')">
         <div class="tile-glow"></div>
-        <MfIcon name="Plus" class="tile-icon" :size="34"  />
-        <span class="tile-label">最近添加</span>
+        <MfIcon name="Heart" :filled="true" class="tile-icon" :size="34" />
+        <span class="tile-label">我喜欢的音乐</span>
+      </div>
+      <div class="tile tile-mix" @click="$router.push('/genres')">
+        <div class="tile-glow"></div>
+        <MfIcon name="Library" class="tile-icon" :size="34"  />
+        <span class="tile-label">风格</span>
       </div>
     </div>
 
@@ -144,7 +144,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
@@ -153,6 +154,8 @@ import api from "@/api";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
+const route = useRoute();
+const router = useRouter();
 const { openContextMenu, openActionSheet, menuGuard, songActions, openAddToPlaylist } = useItemActions();
 const songs = ref<Song[]>([]);
 const loading = ref(false);
@@ -162,6 +165,9 @@ const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("songsPageSize") || "25"));
 if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
 
+// 最近添加模式：/songs?recent=1 → 展示最新入库的 500 首（后端 sort=recentAdded）
+const recentMode = computed(() => route.query.recent === "1");
+
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
 function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
@@ -170,13 +176,32 @@ async function loadSongs() {
   loading.value = true;
   try {
     const res = await api.get(`/rest/api/v1/songs`, {
-      params: { page: currentPage.value, pageSize: pageSize.value, query: searchQuery.value },
+      params: {
+        page: currentPage.value,
+        pageSize: pageSize.value,
+        query: searchQuery.value,
+        ...(recentMode.value ? { sort: "recentAdded" } : {}),
+      },
     });
     songs.value = res.data.items || [];
     total.value = res.data.total || 0;
   } catch { songs.value = []; total.value = 0; }
   finally { loading.value = false; }
 }
+
+function goRecent() {
+  if (recentMode.value) return;
+  currentPage.value = 1;
+  searchQuery.value = "";
+  router.push({ path: "/songs", query: { recent: "1" } });
+}
+
+// recent 模式切换（进入/退出）时重置并重新加载
+watch(() => route.query.recent, () => {
+  currentPage.value = 1;
+  searchQuery.value = "";
+  loadSongs();
+});
 
 function onPageChange(page: number) { currentPage.value = page; loadSongs(); }
 
@@ -188,6 +213,8 @@ function onSizeChange(size: number) {
 }
 
 function onSearchInput() {
+  // 搜索时退出最近添加模式，回到全部音乐
+  if (recentMode.value) { router.replace({ path: "/songs", query: {} }); return; }
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { currentPage.value = 1; loadSongs(); }, 300);
 }
