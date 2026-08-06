@@ -828,6 +828,8 @@ body.fnos-login #app { position: relative; z-index: 1; }
     width: auto !important;
     max-width: none !important;
     transform: none !important;         /* 覆盖 popperjs 定位，使用固定 inset */
+    transition: none !important;        /* 禁用 el-zoom-in-top 半透明缩放过渡，避免底层页面透出闪烁 */
+    animation: none !important;
     border-radius: 18px 18px 0 0 !important;
     z-index: 3000 !important;           /* 高于所有内容层（play-mode 700/queue 200/header 500 等） */
     max-height: min(72vh, calc(100vh - 100px)) !important;

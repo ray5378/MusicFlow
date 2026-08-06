@@ -48,16 +48,7 @@
       </div>
     </div>
     <div class="pagination-bar">
-      <el-pagination
-        layout="total, sizes, prev, pager, next, jumper"
-        :total="total"
-        :page-size="pageSize"
-        :page-sizes="[15, 25, 50, 100]"
-        :current-page="currentPage"
-        background
-        @current-change="onPageChange"
-        @size-change="onSizeChange"
-      />
+      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="artistsPageSize" @change="onPageChange" />
     </div>
   </div>
 </template>
@@ -67,6 +58,7 @@ import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
+import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import api from "@/api";
@@ -195,12 +187,9 @@ async function scrapeMissingArtists() {
   }
 }
 
-function onPageChange(page: number) { currentPage.value = page; loadArtists(); }
-
-function onSizeChange(size: number) {
-  pageSize.value = size;
-  localStorage.setItem("artistsPageSize", String(size));
-  currentPage.value = 1;
+function onPageChange(page: number, size?: number) {
+  currentPage.value = page;
+  if (size) pageSize.value = size;
   loadArtists();
 }
 

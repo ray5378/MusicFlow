@@ -65,16 +65,7 @@
         </el-table-column>
       </el-table>
       <div class="pagination-bar">
-        <el-pagination
-          layout="total, sizes, prev, pager, next, jumper"
-          :total="total"
-          :page-size="pageSize"
-          :page-sizes="[15, 25, 50, 100]"
-          :current-page="currentPage"
-          background
-          @current-change="onPageChange"
-          @size-change="onSizeChange"
-        />
+        <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="genresPageSize" @change="onPageChange" />
       </div>
     </template>
 
@@ -105,6 +96,7 @@ import { ref, onMounted } from "vue";
 import { usePlayerStore, Song } from "@/stores/player";
 import { ElMessage } from "element-plus";
 import api from "@/api";
+import PagePagination from "@/components/PagePagination.vue";
 import { useSongTableMenu } from "@/composables/useSongTableMenu";
 import { useIsMobile } from "@/composables/useIsMobile";
 
@@ -169,12 +161,9 @@ async function loadSongs() {
   finally { loading.value = false; }
 }
 
-function onPageChange(page: number) { currentPage.value = page; loadSongs(); }
-
-function onSizeChange(size: number) {
-  pageSize.value = size;
-  localStorage.setItem("genresPageSize", String(size));
-  currentPage.value = 1;
+function onPageChange(page: number, size?: number) {
+  currentPage.value = page;
+  if (size) pageSize.value = size;
   loadSongs();
 }
 

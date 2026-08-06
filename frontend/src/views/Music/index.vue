@@ -128,16 +128,7 @@
     </div>
 
     <div class="pagination-bar" v-if="total > 0">
-      <el-pagination
-        layout="total, sizes, prev, pager, next, jumper"
-        :total="total"
-        :page-size="pageSize"
-        :page-sizes="[15, 25, 50, 100]"
-        :current-page="currentPage"
-        background
-        @current-change="onPageChange"
-        @size-change="onSizeChange"
-      />
+      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="songsPageSize" @change="onPageChange" />
     </div>
 
   </div>
@@ -151,6 +142,7 @@ import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
 import { ElMessage } from "element-plus";
 import api from "@/api";
+import PagePagination from "@/components/PagePagination.vue";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
@@ -203,12 +195,9 @@ watch(() => route.query.recent, () => {
   loadSongs();
 });
 
-function onPageChange(page: number) { currentPage.value = page; loadSongs(); }
-
-function onSizeChange(size: number) {
-  pageSize.value = size;
-  localStorage.setItem("songsPageSize", String(size));
-  currentPage.value = 1;
+function onPageChange(page: number, size?: number) {
+  currentPage.value = page;
+  if (size) pageSize.value = size;
   loadSongs();
 }
 
@@ -238,7 +227,7 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
 
 <style lang="scss" scoped>
 .songs-page {
-  padding: 32px 36px;
+  padding: 32px 36px 130px;   /* 底部 130px 为悬浮播放条让位，避免分页被遮挡 */
   max-width: 1400px;
   margin: 0 auto;
 }

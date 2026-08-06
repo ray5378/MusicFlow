@@ -15,7 +15,7 @@
       </div>
     </div>
     <el-table
-      :data="songs"
+      :data="pagedSongs"
       stripe
       @row-dblclick="playSong"
       @row-contextmenu="onRowContextMenu"
@@ -58,6 +58,10 @@
       </el-table-column>
     </el-table>
 
+    <div class="pagination-bar" v-if="songs.length > 0">
+      <PagePagination :total="songs.length" :page="currentPage" :page-size="pageSize" storage-key="favPageSize" @change="onPageChange" />
+    </div>
+
     <!-- Add to playlist dialog -->
     <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px">
       <div class="playlist-dialog-song" v-if="playlistTargetSong">
@@ -83,13 +87,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { useSongTableMenu } from "@/composables/useSongTableMenu";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { ElMessage } from "element-plus";
 import api from "@/api";
+import PagePagination from "@/components/PagePagination.vue";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
@@ -97,6 +102,14 @@ const songs = ref<any[]>([]);
 const isMobile = useIsMobile();
 const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
+// 前端分页（getStarred 一次性返回全部收藏，本地切片展示）
+const currentPage = ref(1);
+const pageSize = ref(parseInt(localStorage.getItem("favPageSize") || "25"));
+if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
+const pagedSongs = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  return songs.value.slice(start, start + pageSize.value);
+});
 const showPlaylistDialog = ref(false);
 const playlistTargetSong = ref<any>(null);
 const playlists = ref<any[]>([]);
@@ -147,6 +160,11 @@ async function loadFavorites() {
     songs.value = res.data["subsonic-response"]?.starred?.song || [];
   } catch { songs.value = []; }
   finally { loading.value = false; }
+}
+
+function onPageChange(page: number, size?: number) {
+  currentPage.value = page;
+  if (size) pageSize.value = size;
 }
 
 async function openAddToPlaylist(song: any) {

@@ -43,16 +43,7 @@
       </el-table-column>
     </el-table>
     <div class="pagination-bar">
-      <el-pagination
-        layout="total, sizes, prev, pager, next, jumper"
-        :total="total"
-        :page-size="pageSize"
-        :page-sizes="[15, 25, 50, 100]"
-        :current-page="currentPage"
-        background
-        @current-change="onPageChange"
-        @size-change="onSizeChange"
-      />
+      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="historyPageSize" @change="onPageChange" />
     </div>
   </div>
 </template>
@@ -62,6 +53,7 @@ import { ref, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import api from "@/api";
+import PagePagination from "@/components/PagePagination.vue";
 import { useSongTableMenu } from "@/composables/useSongTableMenu";
 import { useIsMobile } from "@/composables/useIsMobile";
 
@@ -98,12 +90,9 @@ async function loadHistory() {
   finally { loading.value = false; }
 }
 
-function onPageChange(page: number) { currentPage.value = page; loadHistory(); }
-
-function onSizeChange(size: number) {
-  pageSize.value = size;
-  localStorage.setItem("historyPageSize", String(size));
-  currentPage.value = 1;
+function onPageChange(page: number, size?: number) {
+  currentPage.value = page;
+  if (size) pageSize.value = size;
   loadHistory();
 }
 
