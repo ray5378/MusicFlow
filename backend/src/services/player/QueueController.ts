@@ -293,7 +293,7 @@ export class QueueController extends EventEmitter {
   /** 仅设数据,不触发播放(供测试 + playFrom 复用)。 */
   setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): void {
     let q = this.queues.get(playerId);
-    if (!q) { q = { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false }; this.queues.set(playerId, q); }
+    if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.items = items;
     q.currentIndex = Math.max(-1, Math.min(items.length - 1, startIndex));
     q.isActive = true;
@@ -359,7 +359,7 @@ export class QueueController extends EventEmitter {
     return {
       items: q?.items || [],
       currentIndex: q?.currentIndex ?? -1,
-      playMode: q?.playMode || "order",
+      playMode: q?.playMode || "shuffle",
       isActive: q?.isActive || false,
       ended: q?.ended || false,
     };
@@ -370,7 +370,7 @@ export class QueueController extends EventEmitter {
   async enqueue(playerId: string, items: QueueItem[], baseUrl: string): Promise<void> {
     let q = this.queues.get(playerId);
     if (!q) {
-      q = { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false };
+      q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false };
       this.queues.set(playerId, q);
     }
     q.items.push(...items);
@@ -489,7 +489,7 @@ export class QueueController extends EventEmitter {
         this.queues.set(r.deviceId, {
           items,
           currentIndex: r.currentIndex,
-          playMode: (r.playMode as PlayMode) || "order",
+          playMode: (r.playMode as PlayMode) || "shuffle",
           isActive: !!r.isActive,
           ended: false,
         });
@@ -502,7 +502,7 @@ export class QueueController extends EventEmitter {
         this.queues.set(r.groupId, {
           items,
           currentIndex: r.currentIndex,
-          playMode: (r.playMode as PlayMode) || "order",
+          playMode: (r.playMode as PlayMode) || "shuffle",
           isActive: !!r.isActive,
           ended: false,
         });

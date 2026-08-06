@@ -4,7 +4,7 @@
       <h2>风格</h2>
       <div class="header-actions" v-if="currentGenre">
         <el-button type="primary" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />播放全部</el-button>
-        <el-button :disabled="selectedSongs.length === 0" @click="showPlaylistDialog = true"><MfIcon name="Plus" />添加到歌单({{ selectedSongs.length }})</el-button>
+        <el-button :disabled="selectedSongs.length === 0" @click="openAddToPlaylistDialog"><MfIcon name="Plus" />添加到歌单({{ selectedSongs.length }})</el-button>
         <el-button @click="clearGenre"><MfIcon name="X" />返回</el-button>
       </div>
     </div>
@@ -26,44 +26,14 @@
 
     <!-- Songs of selected genre -->
     <template v-if="currentGenre">
-      <el-table
-        :data="songs"
-        stripe
-        @row-dblclick="playSong"
-        @row-contextmenu="onRowContextMenu"
-        v-longpress="onTableLongPress"
-        highlight-current-row
-        v-loading="loading"
-        style="width: 100%"
-        @selection-change="onSelectionChange"
-      >
-        <el-table-column v-if="!isMobile" type="selection" width="45" />
-        <el-table-column v-if="!isMobile" type="index" width="60" label="#" :index="indexMethod" />
-        <el-table-column label="" :width="isMobile ? 52 : 60">
-          <template #default="{ row }">
-            <img v-if="row.coverArt" :src="`/rest/getCoverArt?id=${row.coverArt}&size=80`" class="song-cover" />
-            <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="title" label="标题" min-width="160">
-          <template v-if="isMobile" #default="{ row }">
-            <div class="m-title">{{ row.title }}</div>
-            <div class="m-sub">{{ [row.artist, row.album].filter(Boolean).join(' · ') || '—' }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="!isMobile" prop="artist" label="艺术家" width="180" />
-        <el-table-column v-if="!isMobile" prop="album" label="专辑" width="200" />
-        <el-table-column label="时长" :width="isMobile ? 58 : 100">
-          <template #default="{ row }">{{ formatDuration(row.duration) }}</template>
-        </el-table-column>
-        <el-table-column v-if="!isMobile" label="操作" width="80" fixed="right">
-          <template #default="{ row }">
-            <el-tooltip content="播放" placement="top">
-              <el-button circle size="small" @click="playSong(row)"><MfIcon name="Play" /></el-button>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-      </el-table>
+      <SongTable
+        :songs="songs"
+        :offset="(currentPage - 1) * pageSize"
+        :selectable="!isMobile"
+        :loading="loading"
+        @play="playSong"
+        @select="onSelectionChange"
+      />
       <div class="pagination-bar">
         <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="genresPageSize" @change="onPageChange" />
       </div>
@@ -97,8 +67,8 @@ import { usePlayerStore, Song } from "@/stores/player";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
-import { useSongTableMenu } from "@/composables/useSongTableMenu";
 import { useIsMobile } from "@/composables/useIsMobile";
+import SongTable from "@/components/SongTable.vue";
 
 const playerStore = usePlayerStore();
 const genres = ref<any[]>([]);
@@ -106,7 +76,6 @@ const genresLoading = ref(false);
 const currentGenre = ref("");
 const songs = ref<Song[]>([]);
 const isMobile = useIsMobile();
-const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 const currentPage = ref(1);
 const total = ref(0);
@@ -121,8 +90,6 @@ const playlistsLoading = ref(false);
 const addingPlaylistId = ref("");
 const newPlaylistName = ref("");
 
-function indexMethod(index: number) { return (currentPage.value - 1) * pageSize.value + index + 1; }
-function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
 function playSong(song: Song) { playerStore.playSong(song); }
 function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
 function onSelectionChange(rows: Song[]) { selectedSongs.value = rows; }
@@ -167,7 +134,7 @@ function onPageChange(page: number, size?: number) {
   loadSongs();
 }
 
-async function openAddToPlaylist() {
+async function openAddToPlaylistDialog() {
   showPlaylistDialog.value = true;
   newPlaylistName.value = "";
   playlistsLoading.value = true;
@@ -232,8 +199,6 @@ onMounted(loadGenres);
   .genre-count { font-size: 11px; color: var(--fnos-text-tertiary); }
 }
 .genre-empty { width: 100%; text-align: center; color: var(--fnos-text-muted); padding: 30px 0; font-size: 13px; }
-.song-cover { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; }
-.cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); font-size: 18px; }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
 .playlist-dialog-song { font-size: 13px; color: var(--fnos-text-secondary); margin-bottom: 12px; }
 .playlist-list { max-height: 320px; overflow-y: auto; }

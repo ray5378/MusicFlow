@@ -47,85 +47,7 @@
     </div>
 
     <!-- ===== 歌曲列表 ===== -->
-    <div class="song-list" v-loading="loading">
-      <div class="list-header">
-        <span class="col col-index">#</span>
-        <span class="col col-title">标题</span>
-        <span class="col col-artist">艺术家</span>
-        <span class="col col-album">专辑</span>
-        <span class="col col-duration">
-          <MfIcon name="Clock" />
-        </span>
-        <span class="col col-actions"></span>
-      </div>
-
-      <div
-        v-for="(song, idx) in songs"
-        :key="song.id"
-        class="song-row"
-        :class="{
-          active: playerStore.currentSong && playerStore.currentSong.id === song.id,
-          playing: playerStore.currentSong && playerStore.currentSong.id === song.id && playerStore.isPlaying
-        }"
-        @click="playSong(song)"
-        @contextmenu="openContextMenu($event, songActions(song), song.title, [song.artist, song.album].filter(Boolean).join(' · '))"
-        v-longpress="() => openActionSheet(songActions(song), song.title, [song.artist, song.album].filter(Boolean).join(' · '))"
-      >
-        <span class="col col-index">
-          <span class="row-index">{{ (currentPage - 1) * pageSize + idx + 1 }}</span>
-          <span class="row-playing">
-            <span></span><span></span><span></span>
-          </span>
-        </span>
-        <span class="col col-title">
-          <div class="song-cover-wrap">
-            <el-image
-              v-if="song.coverArt"
-              :src="`/rest/getCoverArt?id=${song.coverArt}&size=120`"
-              class="song-cover"
-              fit="cover"
-              lazy
-            >
-              <template #error>
-                <div class="cover-placeholder"><MfIcon name="Headphones" /></div>
-              </template>
-            </el-image>
-            <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
-            <div class="cover-play" @click.stop="playSong(song)">
-              <MfIcon name="Play" :size="20"  />
-            </div>
-          </div>
-          <div class="title-meta">
-            <div class="song-title" :class="{ 'is-active': playerStore.currentSong && playerStore.currentSong.id === song.id }">{{ song.title }}</div>
-            <div class="song-bitrate" v-if="song.bitRate">{{ song.bitRate }}kbps · {{ (song.suffix || '').toUpperCase() }}</div>
-            <div class="song-mobile-meta">{{ [song.artist, song.album].filter(Boolean).join(' · ') || '—' }}</div>
-          </div>
-        </span>
-        <span class="col col-artist">{{ song.artist || '—' }}</span>
-        <span class="col col-album">{{ song.album || '—' }}</span>
-        <span class="col col-duration">{{ formatDuration(song.duration) }}</span>
-        <span class="col col-actions">
-          <button class="row-btn" :class="{ active: favoritesStore.isFavorite(song.id) }" @click.stop="toggleFavorite(song)" :title="favoritesStore.isFavorite(song.id) ? '取消喜欢' : '我喜欢'">
-            <MfIcon name="Heart" :filled="favoritesStore.isFavorite(song.id)" :size="16" />
-          </button>
-          <button class="row-btn" @click.stop="openAddToPlaylist(song)" title="添加到歌单">
-            <MfIcon name="Plus" :size="16"  />
-          </button>
-          <button
-            class="row-btn"
-            @click.stop="openContextMenu($event, songActions(song), song.title, [song.artist, song.album].filter(Boolean).join(' · '))"
-            title="更多操作"
-          >
-            <MfIcon name="MoreHorizontal" :size="16"  />
-          </button>
-        </span>
-      </div>
-
-      <div v-if="!loading && songs.length === 0" class="empty-state">
-        <MfIcon name="Headphones" :size="48"  />
-        <p>暂无歌曲</p>
-      </div>
-    </div>
+    <SongTable :songs="songs" :offset="(currentPage - 1) * pageSize" :loading="loading" @play="playSong" />
 
     <div class="pagination-bar" v-if="total > 0">
       <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="songsPageSize" @change="onPageChange" />
@@ -138,17 +60,15 @@
 import { ref, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
-import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
-import { ElMessage } from "element-plus";
 import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
+import SongTable from "@/components/SongTable.vue";
 
 const playerStore = usePlayerStore();
-const favoritesStore = useFavoritesStore();
 const route = useRoute();
 const router = useRouter();
-const { openContextMenu, openActionSheet, menuGuard, songActions, openAddToPlaylist } = useItemActions();
+const { menuGuard } = useItemActions();
 const songs = ref<Song[]>([]);
 const loading = ref(false);
 const searchQuery = ref("");
@@ -161,8 +81,6 @@ if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
 const recentMode = computed(() => route.query.recent === "1");
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
-
-function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
 
 async function loadSongs() {
   loading.value = true;
@@ -215,14 +133,8 @@ function playSong(song: Song) {
   playerStore.playSong(song);
 }
 function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
-async function toggleFavorite(song: Song) {
-  try {
-    const fav = await favoritesStore.toggleFavorite(song.id);
-    ElMessage.success(fav ? "已添加到我喜欢的音乐" : "已从我喜欢的音乐移除");
-  } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
-}
 
-onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
+onMounted(() => { loadSongs(); });
 </script>
 
 <style lang="scss" scoped>
@@ -370,183 +282,7 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
   }
 }
 
-/* ===== Song list ===== */
-.song-list {
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.list-header {
-  display: grid;
-  grid-template-columns: 56px 1fr 180px 200px 80px 90px;
-  align-items: center;
-  padding: 0 16px;
-  height: 40px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  color: var(--fnos-text-tertiary);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  background: rgba(255, 255, 255, 0.02);
-  .col { padding: 0 8px; }
-  .col-duration { text-align: center; }
-  .col-actions { text-align: right; }
-}
-
-.song-row {
-  display: grid;
-  grid-template-columns: 56px 1fr 180px 200px 80px 90px;
-  align-items: center;
-  padding: 0 16px;
-  height: 64px;
-  border-radius: 8px;
-  margin: 2px 0;
-  cursor: pointer;
-  transition: background 0.18s ease;
-  color: var(--fnos-text-primary-dim);
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.06);
-    .col-actions .row-btn { opacity: 1; }
-    .song-cover-wrap .cover-play { opacity: 1; transform: scale(1); }
-    .row-index { display: none; }
-    .row-hover-play { display: inline-flex; }
-  }
-  &.active {
-    background: linear-gradient(90deg, rgba(246, 44, 85, 0.14) 0%, rgba(246, 44, 85, 0.02) 100%);
-    .row-index { display: none; }
-    .row-playing { display: inline-flex; }
-    .song-title { color: var(--fnos-red); }
-  }
-
-  .col { padding: 0 8px; min-width: 0; }
-  .col-index {
-    text-align: center;
-    font-size: 14px;
-    color: var(--fnos-text-tertiary);
-    .row-index { font-variant-numeric: tabular-nums; }
-    .row-playing {
-      display: none;
-      align-items: flex-end;
-      justify-content: center;
-      gap: 2px;
-      height: 16px;
-      span {
-        display: block;
-        width: 3px;
-        background: var(--fnos-red);
-        border-radius: 1px;
-        animation: bar 0.9s ease-in-out infinite;
-        &:nth-child(1) { height: 8px; animation-delay: -0.3s; }
-        &:nth-child(2) { height: 14px; animation-delay: 0s; }
-        &:nth-child(3) { height: 8px; animation-delay: -0.6s; }
-      }
-    }
-    .row-hover-play {
-      display: none;
-      color: var(--fnos-text-primary);
-      font-size: 16px;
-    }
-  }
-  &:hover .row-hover-play { display: inline-flex; }
-  .col-title {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    min-width: 0;
-    .song-cover-wrap {
-      position: relative;
-      width: 44px; height: 44px;
-      flex-shrink: 0;
-      border-radius: 6px;
-      overflow: hidden;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-      .song-cover, .cover-placeholder {
-        width: 100%; height: 100%;
-        object-fit: cover;
-        border-radius: 6px;
-      }
-      .cover-placeholder {
-        background: rgba(255, 255, 255, 0.06);
-        display: flex; align-items: center; justify-content: center;
-        color: rgba(255, 255, 255, 0.4);
-      }
-      .cover-play {
-        position: absolute; inset: 0;
-        background: rgba(0, 0, 0, 0.55);
-        display: flex; align-items: center; justify-content: center;
-        color: #fff;
-        opacity: 0;
-        transform: scale(0.8);
-        transition: opacity 0.18s ease, transform 0.18s ease;
-        cursor: pointer;
-      }
-    }
-    .title-meta { min-width: 0; flex: 1; }
-    .song-title {
-      font-size: 14px;
-      font-weight: 500;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: var(--fnos-text-primary);
-      &.is-active { color: var(--fnos-red); font-weight: 600; }
-    }
-    .song-mobile-meta { display: none; }
-    .song-bitrate {
-      font-size: 11px;
-      color: var(--fnos-text-muted);
-      margin-top: 2px;
-      letter-spacing: 0.3px;
-    }
-  }
-  .col-artist, .col-album {
-    font-size: 13px;
-    color: var(--fnos-text-tertiary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .col-duration {
-    text-align: center;
-    font-size: 12px;
-    color: var(--fnos-text-tertiary);
-    font-variant-numeric: tabular-nums;
-  }
-  .col-actions {
-    display: flex;
-    gap: 4px;
-    justify-content: flex-end;
-    .row-btn {
-      width: 32px; height: 32px;
-      border: none; background: transparent;
-      color: var(--fnos-text-tertiary);
-      border-radius: 8px;
-      cursor: pointer;
-      display: inline-flex; align-items: center; justify-content: center;
-      opacity: 0;
-      transition: opacity 0.18s, color 0.18s, background 0.18s;
-      &:hover { color: var(--fnos-text-primary); background: rgba(255, 255, 255, 0.08); }
-      &.active { color: var(--fnos-red); opacity: 1; }
-      &.active:hover { color: var(--fnos-red-hover); }
-    }
-  }
-  &.active .col-actions .row-btn { opacity: 1; }
-}
-
-@keyframes bar {
-  0%, 100% { transform: scaleY(0.4); }
-  50% { transform: scaleY(1); }
-}
-
-.empty-state {
-  display: flex; flex-direction: column; align-items: center;
-  gap: 12px;
-  padding: 80px 0;
-  color: var(--fnos-text-muted);
-  p { margin: 0; font-size: 14px; }
-}
+/* ===== Song list (SongTable component) ===== */
 
 .pagination-bar {
   margin-top: 24px;
@@ -554,13 +290,6 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
   justify-content: center;
 }
 
-@media (max-width: 1100px) {
-  .list-header, .song-row {
-    grid-template-columns: 48px 1fr 80px 90px;
-  }
-  .col-artist, .col-album { display: none; }
-  .col-actions { display: none !important; }
-}
 @media (max-width: 768px) {
   .songs-page { padding: 20px 16px; }
   .page-header {
@@ -570,69 +299,5 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
     .header-actions .search-input { width: 100%; flex: 1; }
     .header-actions .play-all-btn { flex-shrink: 0; }
   }
-
-  /* 移动端歌曲列表改为卡片式行 */
-  .list-header { display: none; }
-  .song-row {
-    position: relative;
-    grid-template-columns: auto 1fr auto;
-    gap: 10px;
-    height: auto;
-    min-height: 64px;
-    padding: 10px 12px;
-    border-radius: 10px;
-    margin: 6px 0;
-  }
-  .song-row .col-index { display: none; }
-  .song-row .col-title {
-    flex-direction: row;
-    gap: 10px;
-    .song-cover-wrap { width: 46px; height: 46px; }
-    .title-meta {
-      .song-title {
-        white-space: normal;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        line-clamp: 2;
-        font-size: 13px;
-      }
-      .song-bitrate { display: none; }
-      /* 在标题下追加艺术家/专辑信息 */
-      .song-mobile-meta {
-        display: block;
-        font-size: 11px;
-        color: var(--fnos-text-tertiary);
-        margin-top: 3px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-    }
-  }
-  .song-row .col-artist,
-  .song-row .col-album { display: none; }
-  .song-row .col-duration {
-    font-size: 11px;
-    color: var(--fnos-text-tertiary);
-    align-self: center;
-  }
-  /* 移动端只保留最有价值的信息：封面 / 标题 / 艺术家·专辑 / 时长
-     其余操作全部收进「长按」面板，避免小屏被按钮塞满 */
-  .song-row .col-actions { display: none !important; }
-
-  /* 封面上常驻一个半透明小播放键 */
-  .song-row .col-title .song-cover-wrap .cover-play {
-    opacity: 1;
-    transform: scale(1);
-    inset: auto 0 0 auto;
-    width: 20px; height: 20px;
-    margin: 0 3px 3px 0;
-    border-radius: 50%;
-    background: rgba(10, 8, 16, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.28);
-    /* 去 backdrop-filter —— 提升合成层，旧 Chromium（华为浏览器）会穿透 fixed 弹窗 */
-  }
-  .song-row .col-title .song-cover-wrap .cover-play:active { background: var(--fnos-red); }
 }
 </style>

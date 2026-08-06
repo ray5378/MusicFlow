@@ -14,75 +14,11 @@
         </div>
       </div>
     </div>
-    <el-table
-      :data="pagedSongs"
-      stripe
-      @row-dblclick="playSong"
-      @row-contextmenu="onRowContextMenu"
-      v-longpress="onTableLongPress"
-      highlight-current-row
-      style="width: 100%"
-    >
-      <el-table-column v-if="!isMobile" type="index" width="60" label="#" />
-      <el-table-column label="" :width="isMobile ? 52 : 60">
-        <template #default="{ row }">
-          <img v-if="row.coverArt" :src="`/rest/getCoverArt?id=${row.coverArt}&size=80`" class="song-cover" />
-          <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
-        </template>
-      </el-table-column>
-      <el-table-column prop="title" label="标题" min-width="160">
-        <template v-if="isMobile" #default="{ row }">
-          <div class="m-title">{{ row.title }}</div>
-          <div class="m-sub">{{ [row.artist, row.album].filter(Boolean).join(' · ') || '—' }}</div>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" prop="artist" label="艺术家" width="180" />
-      <el-table-column v-if="!isMobile" prop="album" label="专辑" width="200" />
-      <el-table-column label="时长" :width="isMobile ? 58 : 100"><template #default="{ row }">{{ formatDuration(row.duration) }}</template></el-table-column>
-      <el-table-column v-if="!isMobile" label="操作" width="140" fixed="right">
-        <template #default="{ row }">
-          <el-button-group>
-            <el-tooltip content="播放" placement="top">
-              <el-button circle size="small" @click="playSong(row)"><MfIcon name="Play" /></el-button>
-            </el-tooltip>
-            <el-tooltip content="添加到歌单" placement="top">
-              <el-button circle size="small" @click="openAddToPlaylist(row)"><MfIcon name="Plus" /></el-button>
-            </el-tooltip>
-            <el-tooltip content="取消喜欢" placement="top">
-              <el-button circle size="small" class="fav-btn" @click="unstar(row)">
-                <MfIcon name="Heart" :filled="true" :size="16" />
-              </el-button>
-            </el-tooltip>
-          </el-button-group>
-        </template>
-      </el-table-column>
-    </el-table>
+    <SongTable :songs="pagedSongs" :offset="(currentPage - 1) * pageSize" show-bitrate @play="playSong" />
 
     <div class="pagination-bar" v-if="songs.length > 0">
       <PagePagination :total="songs.length" :page="currentPage" :page-size="pageSize" storage-key="favPageSize" @change="onPageChange" />
     </div>
-
-    <!-- Add to playlist dialog -->
-    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px">
-      <div class="playlist-dialog-song" v-if="playlistTargetSong">
-        将「{{ playlistTargetSong.title }} - {{ playlistTargetSong.artist }}」添加到：
-      </div>
-      <div class="playlist-list" v-loading="playlistsLoading">
-        <div v-for="pl in playlists" :key="pl.id" class="playlist-item" :class="{ active: addingPlaylistId === pl.id }" @click="addToPlaylist(pl)">
-          <MfIcon name="List" class="pl-icon"  />
-          <div class="pl-info">
-            <div class="pl-name">{{ pl.name }}</div>
-            <div class="pl-meta">{{ pl.songCount }}首</div>
-          </div>
-          <MfIcon name="Loader2" v-if="addingPlaylistId === pl.id" class="is-loading"  spin />
-        </div>
-        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">暂无歌单，先创建一个吧</div>
-      </div>
-      <div class="create-playlist-row">
-        <el-input v-model="newPlaylistName" placeholder="新建歌单名称..." clearable @keyup.enter="createAndAdd" />
-        <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">新建并添加</el-button>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
@@ -90,17 +26,14 @@
 import { ref, computed, onMounted } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { useSongTableMenu } from "@/composables/useSongTableMenu";
-import { useIsMobile } from "@/composables/useIsMobile";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
+import SongTable from "@/components/SongTable.vue";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
 const songs = ref<any[]>([]);
-const isMobile = useIsMobile();
-const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 // 前端分页（getStarred 一次性返回全部收藏，本地切片展示）
 const currentPage = ref(1);
@@ -110,12 +43,6 @@ const pagedSongs = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value;
   return songs.value.slice(start, start + pageSize.value);
 });
-const showPlaylistDialog = ref(false);
-const playlistTargetSong = ref<any>(null);
-const playlists = ref<any[]>([]);
-const playlistsLoading = ref(false);
-const addingPlaylistId = ref("");
-const newPlaylistName = ref("");
 // Whether "我喜欢的音乐" is in the daily-recommend pool.
 const inPool = ref(false);
 
@@ -142,16 +69,8 @@ async function togglePool() {
   }
 }
 
-function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
 function playSong(song: any) { playerStore.playSong(song); }
 function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
-async function unstar(song: any) {
-  try {
-    await favoritesStore.removeFavorite(song.id);
-    ElMessage.success("已取消收藏");
-    loadFavorites();
-  } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
-}
 
 async function loadFavorites() {
   loading.value = true;
@@ -165,41 +84,6 @@ async function loadFavorites() {
 function onPageChange(page: number, size?: number) {
   currentPage.value = page;
   if (size) pageSize.value = size;
-}
-
-async function openAddToPlaylist(song: any) {
-  playlistTargetSong.value = song;
-  showPlaylistDialog.value = true;
-  newPlaylistName.value = "";
-  playlistsLoading.value = true;
-  try {
-    const res = await api.get("/rest/getPlaylists?f=json");
-    playlists.value = res.data["subsonic-response"]?.playlists?.playlist || [];
-  } catch { playlists.value = []; }
-  finally { playlistsLoading.value = false; }
-}
-
-async function addToPlaylist(pl: any) {
-  if (!playlistTargetSong.value || addingPlaylistId.value) return;
-  addingPlaylistId.value = pl.id;
-  try {
-    await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: playlistTargetSong.value.id });
-    ElMessage.success(`已添加到「${pl.name}」`);
-    showPlaylistDialog.value = false;
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "添加失败"); }
-  finally { addingPlaylistId.value = ""; }
-}
-
-async function createAndAdd() {
-  if (!newPlaylistName.value || !playlistTargetSong.value) return;
-  if (addingPlaylistId.value) return;
-  addingPlaylistId.value = "new";
-  try {
-    await api.post("/rest/createPlaylist", { name: newPlaylistName.value, songId: playlistTargetSong.value.id });
-    ElMessage.success(`已创建并添加「${newPlaylistName.value}」`);
-    showPlaylistDialog.value = false;
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "创建失败"); }
-  finally { addingPlaylistId.value = ""; }
 }
 
 onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); loadPoolStatus(); });
@@ -219,17 +103,6 @@ onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); loadPoolStatu
 }
 .song-cover { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; }
 .cover-placeholder { width: 40px; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); font-size: 18px; }
-.playlist-dialog-song { font-size: 13px; color: var(--fnos-text-secondary); margin-bottom: 12px; }
-.playlist-list { max-height: 320px; overflow-y: auto; }
-.playlist-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s;
-  &:hover { background: rgba(255,255,255,0.06); }
-  &.active { background: var(--fnos-red-soft); }
-  .pl-icon { font-size: 18px; color: var(--fnos-text-tertiary); }
-  .pl-info { flex: 1; .pl-name { font-size: 14px; font-weight: 500; color: var(--fnos-text-primary); } .pl-meta { font-size: 12px; color: var(--fnos-text-tertiary); } }
-}
-.create-playlist-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); }
-.empty-tip { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
-
 @media (max-width: 768px) {
   .favorites-page { padding: 20px 16px; }
   .fav-header { flex-direction: column; align-items: center; text-align: center; gap: 16px; }

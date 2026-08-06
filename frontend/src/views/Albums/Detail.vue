@@ -15,28 +15,7 @@
         </div>
       </div>
     </div>
-    <el-table v-if="songs.length > 0" :data="songs" stripe @row-dblclick="playSong" @row-contextmenu="onRowContextMenu" v-longpress="onTableLongPress" highlight-current-row style="width: 100%">
-      <el-table-column v-if="!isMobile" type="index" width="60" label="#" />
-      <el-table-column prop="title" label="标题" min-width="160">
-        <template v-if="isMobile" #default="{ row }">
-          <div class="m-title">{{ row.title }}</div>
-          <div class="m-sub">{{ row.bitRate ? `${row.bitRate}kbps` : '—' }}</div>
-        </template>
-      </el-table-column>
-      <el-table-column label="时长" :width="isMobile ? 58 : 100">
-        <template #default="{ row }">{{ formatDuration(row.duration) }}</template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" label="码率" width="100">
-        <template #default="{ row }">{{ row.bitRate ? `${row.bitRate}kbps` : '-' }}</template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" label="操作" width="80">
-        <template #default="{ row }">
-          <el-tooltip content="播放" placement="top">
-            <el-button circle size="small" @click="playSong(row)"><MfIcon name="Play" /></el-button>
-          </el-tooltip>
-        </template>
-      </el-table-column>
-    </el-table>
+    <SongTable v-if="songs.length > 0" :songs="songs" :show-artist="false" show-bitrate @play="playSong" />
     <EmptyState v-else icon="headphones" title="专辑暂无歌曲" description="该专辑下还没有可播放的曲目" compact />
   </div>
 </template>
@@ -47,16 +26,13 @@ import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
-import { useSongTableMenu } from "@/composables/useSongTableMenu";
-import { useIsMobile } from "@/composables/useIsMobile";
+import SongTable from "@/components/SongTable.vue";
 
 const route = useRoute();
 const router = useRouter();
 const playerStore = usePlayerStore();
 const album = ref<any>(null);
 const songs = ref<Song[]>([]);
-const isMobile = useIsMobile();
-const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 
 function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }

@@ -72,7 +72,7 @@ export const usePlayerStore = defineStore("player", () => {
   const localIsPlaying = ref(false);
   const localCurrentTime = ref(0);
   const localDuration = ref(0);
-  const localPlayMode = ref<PlayMode>((localStorage.getItem("playMode") as PlayMode) || "order");
+  const localPlayMode = ref<PlayMode>((localStorage.getItem("playMode") as PlayMode) || "shuffle");
   const localLyrics = ref<LyricLine[]>([]);
   const localCurrentLyricLine = ref("");
   const localCurrentLyricIndex = ref(-1);
@@ -139,7 +139,7 @@ export const usePlayerStore = defineStore("player", () => {
         isPlaying: false,
         currentTime: 0,
         duration: 0,
-        playMode: "order" as PlayMode,
+        playMode: "shuffle" as PlayMode,
         lyrics: [],
         currentLyricLine: "",
         currentLyricIndex: -1,
@@ -207,7 +207,7 @@ export const usePlayerStore = defineStore("player", () => {
   const isPlaying = computed(() => isRemotePeer.value ? (activeRemote.value?.isPlaying ?? false) : localIsPlaying.value);
   const currentTime = computed(() => isRemotePeer.value ? (activeRemote.value?.currentTime ?? 0) : localCurrentTime.value);
   const duration = computed(() => isRemotePeer.value ? (activeRemote.value?.duration ?? 0) : localDuration.value);
-  const playMode = computed(() => isRemotePeer.value ? (activeRemote.value?.playMode ?? "order") : localPlayMode.value);
+  const playMode = computed(() => isRemotePeer.value ? (activeRemote.value?.playMode ?? "shuffle") : localPlayMode.value);
   const lyrics = computed(() => isRemotePeer.value ? (activeRemote.value?.lyrics ?? []) : localLyrics.value);
   const currentLyricLine = computed(() => isRemotePeer.value ? (activeRemote.value?.currentLyricLine ?? "") : localCurrentLyricLine.value);
   const currentLyricIndex = computed(() => isRemotePeer.value ? (activeRemote.value?.currentLyricIndex ?? -1) : localCurrentLyricIndex.value);
@@ -914,7 +914,7 @@ export const usePlayerStore = defineStore("player", () => {
         }
         case "peer_queue_cleared": {
           const idx = peers.value.findIndex(x => x.peerId === msg.peer_id);
-          if (idx >= 0) peers.value[idx].queue = { items: [], currentIndex: -1, playMode: "order", isActive: false };
+          if (idx >= 0) peers.value[idx].queue = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false };
           break;
         }
         // Group events (播放器群组页 + 播放器切换器):refresh on create/rename/

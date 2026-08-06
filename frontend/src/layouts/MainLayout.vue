@@ -167,7 +167,7 @@
                 <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
               </el-tooltip>
               <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
-                <el-button circle size="small" class="fav-btn" @click="toggleCurrentFavorite">
+                <el-button circle size="small" class="fav-btn" :class="{ active: isCurrentFavorite }" @click="toggleCurrentFavorite">
                   <MfIcon name="Heart" :filled="isCurrentFavorite" :size="16" />
                 </el-button>
               </el-tooltip>
@@ -254,7 +254,7 @@
           popper-class="peer-switcher-popover"
         >
           <template #reference>
-            <el-button class="peer-switch-btn" size="small" :title="`切换播放器: ${playerStore.currentPeerName}`">
+            <el-button class="peer-switch-btn" size="small">
               <MfIcon name="headphones" class="peer-switch-icon"  />
               <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
               <MfIcon name="ArrowUp" class="peer-switch-arrow"  />
@@ -309,7 +309,7 @@
         </el-tooltip>
         <!-- 我喜欢的音乐 -->
         <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
-          <el-button circle size="small" class="fav-btn" @click="toggleCurrentFavorite">
+          <el-button circle size="small" class="fav-btn" :class="{ active: isCurrentFavorite }" @click="toggleCurrentFavorite">
             <MfIcon name="Heart" :filled="isCurrentFavorite" :size="16" />
           </el-button>
         </el-tooltip>
@@ -429,6 +429,7 @@
                 circle
                 size="small"
                 class="fav-btn pm-fav-btn"
+                :class="{ active: isCurrentFavorite }"
                 @click="toggleCurrentFavorite"
               >
                 <MfIcon name="Heart" :filled="isCurrentFavorite" :size="18" />
@@ -1184,9 +1185,9 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       color: var(--fnos-text-primary-dim);
       &:hover { background: rgba(255, 255, 255, 0.06); }
       &.active {
-        background: linear-gradient(90deg, rgba(246, 44, 85, 0.22) 0%, rgba(246, 44, 85, 0.04) 100%);
-        color: var(--fnos-red);
-        .queue-artist { color: var(--fnos-red); opacity: 0.8; }
+        background: linear-gradient(90deg, rgba(255, 197, 45, 0.22) 0%, rgba(255, 197, 45, 0.04) 100%);
+        color: #ffc52d;
+        .queue-artist { color: #ffc52d; opacity: 0.8; }
       }
       .queue-cover {
         position: relative; width: 40px; height: 40px;
@@ -1204,7 +1205,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
           display: flex; align-items: center; justify-content: center;
           &::before {
             content: ''; width: 8px; height: 12px;
-            background: linear-gradient(180deg, var(--fnos-red) 0 33%, transparent 33% 66%, var(--fnos-red) 66%);
+            background: linear-gradient(180deg, #ffc52d 0 33%, transparent 33% 66%, #ffc52d 66%);
             animation: eq 1s infinite;
           }
           &.paused::before { animation: none; opacity: 0.7; }
@@ -1384,17 +1385,15 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 }
 
 /* ===== Heart favorite button ===== */
+/* 点亮的心形必须是红色。容器(.player-right/.mc-body/.play-mode)里高优先级的
+   `color: … !important` 会强制按钮颜色，但按钮色只影响图标继承；这里直接给图标元素
+   本体设色即可越过所有继承（MfIcon 根节点同时带本组件 scope，能命中） */
 .fav-btn {
   display: inline-flex; align-items: center; justify-content: center;
-  .heart-icon { color: var(--fnos-text-tertiary); }
-  .heart-icon .heart-fill { color: var(--fnos-red); }
+  &.active { color: var(--fnos-red); }
+  &.active .mf-icon { color: var(--fnos-red); }
+  &.active:hover .mf-icon { color: var(--fnos-red-hover); }
 }
-.play-mode .fav-btn {
-  border-color: transparent !important;
-  background: transparent !important;
-}
-.play-mode .fav-btn .heart-icon { color: rgba(255, 255, 255, 0.85); }
-.play-mode .fav-btn .heart-icon .heart-fill { color: var(--fnos-red); }
 
 /* ===== Add-to-playlist dialog ===== */
 .playlist-dialog-song { font-size: 13px; color: var(--fnos-text-tertiary); margin-bottom: 12px; }
@@ -1731,4 +1730,12 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     .mc-vol-slider { flex: 1; }
   }
 }
+</style>
+
+<style lang="scss">
+/* 全局兜底：点亮的心形强制红色。
+   容器（.player-right/.mc-body/.play-mode）里 `color: … !important` 只作用于按钮本身，
+   此处直接给图标本体设色，优先级高于 MfIcon 的 `color: currentColor`，且不依赖 scope 属性。 */
+.fav-btn.active .mf-icon { color: var(--fnos-red); }
+.fav-btn.active:hover .mf-icon { color: var(--fnos-red-hover); }
 </style>

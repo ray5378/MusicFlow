@@ -252,6 +252,8 @@ button, a, [role="button"] {
   background: #1f1c2a !important;
   border-color: rgba(255, 255, 255, 0.12) !important;
 }
+/* 提示框只要一个框,去掉下沿的菱形箭头 */
+.el-tooltip .el-popper__arrow { display: none !important; }
 .el-dropdown-menu__item {
   color: var(--fnos-text-primary-dim);
   &:hover, &:focus { background: rgba(255, 255, 255, 0.08); color: var(--fnos-text-primary); }

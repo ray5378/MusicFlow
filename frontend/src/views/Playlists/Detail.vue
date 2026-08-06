@@ -27,52 +27,21 @@
         </div>
       </div>
     </div>
-    <el-table :data="songs" stripe @row-dblclick="playSong" @row-contextmenu="onRowContextMenu" v-longpress="onTableLongPress" highlight-current-row style="width: 100%" @selection-change="onSelectionChange">
-      <el-table-column v-if="!isMobile" type="selection" width="45" />
-      <el-table-column v-if="!isMobile" type="index" width="60" label="#" :index="indexMethod" />
-      <el-table-column label="" :width="isMobile ? 52 : 60">
-        <template #default="{ row }">
-          <img v-if="row.coverArt" :src="`/rest/getCoverArt?id=${row.coverArt}&size=80`" class="song-cover" />
-          <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
-        </template>
-      </el-table-column>
-      <el-table-column prop="title" label="标题" min-width="160">
-        <template #default="{ row }">
-          <div v-if="isMobile">
-            <div class="m-title">{{ row.title }}</div>
-            <div class="m-sub">{{ row.artist || (row.isMatched ? '可播放' : '未匹配') }}</div>
-          </div>
-          <template v-else>
-            <span>{{ row.title }}</span>
-            <el-tooltip v-if="!row.isMatched" :content="row.unavailableReason || '曲库中未找到'" placement="top">
-              <MfIcon name="TriangleAlert" class="unmatched-icon" :size="14"  />
-            </el-tooltip>
-          </template>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" prop="artist" label="艺术家" width="180" />
-      <el-table-column label="时长" :width="isMobile ? 58 : 100">
-        <template #default="{ row }">{{ formatDuration(row.duration) }}</template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" label="状态" width="110">
-        <template #default="{ row }">
-          <el-tag v-if="row.isMatched" type="success" size="small">可播放</el-tag>
-          <el-tag v-else type="info" size="small">未匹配</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" label="操作" width="120" fixed="right">
-        <template #default="{ row }">
-          <el-button-group>
-            <el-tooltip content="播放" placement="top">
-              <el-button circle size="small" :disabled="!row.isMatched" @click="playSong(row)"><MfIcon name="Play" /></el-button>
-            </el-tooltip>
-            <el-tooltip content="从歌单移除" placement="top">
-              <el-button circle size="small" @click="removeSong(row)"><MfIcon name="Trash2" /></el-button>
-            </el-tooltip>
-          </el-button-group>
-        </template>
-      </el-table-column>
-    </el-table>
+    <SongTable
+      :songs="songs"
+      :offset="(currentPage - 1) * pageSize"
+      :selectable="!isMobile"
+      :loading="loading"
+      :extra-actions="playlistRowActions"
+      @play="playSong"
+      @select="onSelectionChange"
+    >
+      <template #row-actions="{ row }">
+        <button class="row-btn" @click.stop="removeSong(row)" title="从歌单移除">
+          <MfIcon name="Trash2" :size="16" />
+        </button>
+      </template>
+    </SongTable>
     <div class="batch-bar" v-if="selectedSongs.length > 0">
       <span>已选 {{ selectedSongs.length }} 首</span>
       <el-button size="small" type="danger" plain @click="removeSelected">批量移除</el-button>
@@ -107,8 +76,9 @@ import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
-import { useSongTableMenu } from "@/composables/useSongTableMenu";
 import { useIsMobile } from "@/composables/useIsMobile";
+import SongTable from "@/components/SongTable.vue";
+import { Trash2 } from "lucide-vue-next";
 
 const route = useRoute();
 const router = useRouter();
@@ -118,7 +88,6 @@ const playlist = ref<any>(null);
 const inPool = ref(false);
 const songs = ref<any[]>([]);
 const isMobile = useIsMobile();
-const { onRowContextMenu, onTableLongPress } = useSongTableMenu(songs);
 const loading = ref(false);
 const syncing = ref(false);
 const showRenameDialog = ref(false);
@@ -129,18 +98,25 @@ const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("playlistTracksPageSize") || "50"));
 if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 50;
 
-function indexMethod(index: number) { return (currentPage.value - 1) * pageSize.value + index + 1; }
-function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
-// Total playlist duration in hours/minutes, e.g. "117小时39分钟"
+function playlistRowActions(row: any) {
+  return [
+    {
+      label: "从歌单移除",
+      icon: Trash2,
+      danger: true,
+      onClick: () => removeSong(row),
+    },
+  ];
+}
 function formatTotalDuration(sec: number) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   if (h > 0) return m > 0 ? `${h}小时${m}分钟` : `${h}小时`;
   return `${m}分钟`;
 }
-function playSong(song: any) { if (song.isMatched) playerStore.playSong(song); }
-function playAll() { const playable = songs.value.filter(s => s.isMatched); if (playable.length > 0) playerStore.playQueue(playable); }
-function playSelected() { const playable = selectedSongs.value.filter(s => s.isMatched); if (playable.length > 0) playerStore.playQueue(playable); }
+function playSong(song: any) { if (song.isMatched !== false) playerStore.playSong(song); }
+function playAll() { const playable = songs.value.filter(s => s.isMatched !== false); if (playable.length > 0) playerStore.playQueue(playable); }
+function playSelected() { const playable = selectedSongs.value.filter(s => s.isMatched !== false); if (playable.length > 0) playerStore.playQueue(playable); }
 function onSelectionChange(rows: any[]) { selectedSongs.value = rows; }
 
 async function loadPlaylist() {

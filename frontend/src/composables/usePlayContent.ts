@@ -8,10 +8,20 @@ function sub(albumRes: any): any[] {
 export function usePlayContent() {
   const player = usePlayerStore();
   async function fetchPlaylistSongs(id: string): Promise<any[]> {
-    const res = await api.get(`/rest/api/v1/playlists/${id}/tracks`, {
-      params: { pageSize: 300 },
-    });
-    return (res.data?.items || []).filter((s: any) => s.playable);
+    const songs: any[] = [];
+    const pageSize = 100;
+    let total = Infinity;
+    for (let page = 1; (page - 1) * pageSize < total; page++) {
+      const res = await api.get(`/rest/api/v1/playlists/${id}/tracks`, {
+        params: { page, pageSize },
+      });
+      const data = res.data || {};
+      total = data.total || 0;
+      const items = (data.items || []).filter((s: any) => s.playable);
+      if (songs.length + items.length >= total) { songs.push(...items); break; }
+      songs.push(...items);
+    }
+    return songs;
   }
 
   async function fetchAlbumSongs(id: string): Promise<any[]> {
