@@ -766,7 +766,10 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     overflow-y: auto;
     padding: 8px 0;
     background: transparent;
-    &::-webkit-scrollbar { width: 4px; }
+    /* 标题栏展开时空间充足，隐藏滚动条（仍保留滚动能力，避免矮屏内容裁切） */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    &::-webkit-scrollbar { display: none; }
     :deep(.el-menu) { background: transparent; border-right: none; }
     :deep(.el-menu-item) {
       height: 40px;
@@ -778,6 +781,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       color: var(--fnos-text-secondary) !important;
       background: transparent !important;
       position: relative;
+      /* 图标与文字间距统一为 8px，与底部用户名区 (user-info gap: 8px) 一致 */
+      gap: 8px;
       &:hover {
         background: rgba(255, 255, 255, 0.06) !important;
         color: var(--fnos-text-primary) !important;
