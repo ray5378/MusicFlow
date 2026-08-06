@@ -1001,17 +1001,49 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 }
 
 /* ===== Transport control buttons ===== */
+/* 所有可点击的播放控件按钮统一为无边框透明（对齐手机端默认 4 按钮），
+   仅 hover 淡白反馈；主播放按钮与选中态保留红色实心 */
 .ctrl-btn {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 0; min-width: 36px; width: 36px; height: 36px; min-height: 36px;
+  border: none !important;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+  &:hover, &:focus {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #fff !important;
+  }
 }
 .ctrl-btn .playback-icon { display: block; }
+/* 主播放按钮：保留红色实心（无边框） */
 .ctrl-btn.play-btn {
   width: 44px; height: 44px;
   min-width: 44px; min-height: 44px;
   background: var(--fnos-red) !important;
   border-color: var(--fnos-red) !important;
   box-shadow: 0 4px 16px rgba(246, 44, 85, 0.5);
+}
+/* 选中态（如播放模式/歌单面板激活）：保留红色实心提示 */
+.ctrl-btn.el-button--primary {
+  background: var(--fnos-red) !important;
+  border-color: var(--fnos-red) !important;
+  color: #fff !important;
+  &:hover { background: var(--fnos-red-hover) !important; }
+}
+/* 音量按钮：同样无边框透明 */
+.vol-btn.el-button {
+  border: none !important;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+  &:hover, &:focus { background: rgba(255, 255, 255, 0.1) !important; color: #fff !important; }
+}
+.vol-btn.vol-active.el-button {
+  background: rgba(246, 44, 85, 0.12) !important;
+  color: var(--fnos-red) !important;
+}
+/* 切换播放器按钮：去外边框，保留淡背景 */
+.peer-switch-btn {
+  border-color: transparent !important;
 }
 
 /* ===== Queue panel ===== */
@@ -1033,7 +1065,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     font-weight: 600;
     color: var(--fnos-text-primary);
-    .queue-actions .el-button { color: var(--fnos-text-secondary); }
+    .queue-actions .el-button { color: var(--fnos-text-secondary); border: none !important; background: transparent !important; }
   }
   .queue-list {
     flex: 1; overflow-y: auto; padding: 8px;
@@ -1228,11 +1260,11 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .play-mode :deep(.el-slider__runway) { background: rgba(255, 255, 255, 0.2) !important; }
 .play-mode :deep(.el-slider__bar) { background: var(--fnos-red) !important; }
 .play-mode :deep(.el-button) {
-  border-color: rgba(255, 255, 255, 0.55) !important;
+  border-color: transparent !important;
   color: #fff !important;
   background: rgba(255, 255, 255, 0.08) !important;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  &:hover { border-color: rgba(255, 255, 255, 0.85) !important; background: rgba(255, 255, 255, 0.16) !important; }
+  &:hover { border-color: transparent !important; background: rgba(255, 255, 255, 0.16) !important; }
 }
 .play-mode :deep(.el-button--primary) {
   background: var(--fnos-red) !important;
@@ -1534,6 +1566,24 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     background: var(--fnos-red) !important; border-color: var(--fnos-red) !important;
     box-shadow: 0 4px 16px rgba(246, 44, 85, 0.5);
   }
+}
+/* 更多弹窗内所有可点击按钮：无边框透明（对齐手机端默认 4 按钮），hover 淡白 */
+.mc-body .el-button {
+  border: none !important;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+  &:hover, &:focus {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #fff !important;
+  }
+}
+/* 更多弹窗主播放按钮 / 选中态：保留红色实心 */
+.mc-body .el-button.mc-play,
+.mc-body .el-button.el-button--primary {
+  background: var(--fnos-red) !important;
+  border-color: var(--fnos-red) !important;
+  color: #fff !important;
+  &:hover, &:focus { background: var(--fnos-red-hover) !important; border-color: var(--fnos-red-hover) !important; }
 }
 .mc-tools {
   display: flex; align-items: center; gap: 10px;
