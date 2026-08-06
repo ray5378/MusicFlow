@@ -1050,6 +1050,21 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .player-right {
     display: flex; align-items: center; gap: 8px;
     flex-shrink: 0; justify-content: flex-end;
+    /* 工具按钮（播放列表/添加歌单/我喜欢的音乐/音量）：无边框透明，hover 淡白
+       这些裸 el-button circle 没有 .ctrl-btn 类，需单独去 global 默认边框+淡背景 */
+    :deep(.el-button.is-circle:not(.play-btn):not(.el-button--primary)) {
+      border: none !important;
+      background: transparent !important;
+      color: rgba(255, 255, 255, 0.85) !important;
+      outline: none !important;
+      box-shadow: none !important;
+      &:hover, &:focus {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: #fff !important;
+        outline: none !important;
+        box-shadow: none !important;
+      }
+    }
     .vol-btn { color: var(--fnos-text-secondary); }
     .vol-btn.vol-active { color: var(--fnos-red); background: rgba(246, 44, 85, 0.12); }
   }

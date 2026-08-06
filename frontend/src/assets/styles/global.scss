@@ -183,6 +183,24 @@ body {
   &:active:not([disabled], .is-disabled) { transform: scale(0.96); }
 }
 
+/* ===== 播放控件工具按钮：全局兜底无边框透明 =====
+   覆盖桌面/移动播放条、播放模式面板、更多弹窗内所有圆形工具按钮
+   （播放列表/添加歌单/我喜欢的音乐/音量等）。排除选中态(primary 红)与主播放按钮。 */
+.player-bar .el-button.is-circle:not(.el-button--primary),
+.player-bar-mobile .el-button.is-circle:not(.el-button--primary),
+.play-mode .el-button.is-circle:not(.el-button--primary),
+.mobile-controls-popover .el-button.is-circle:not(.el-button--primary) {
+  border: none !important;
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+  &:hover, &:focus {
+    background: rgba(255, 255, 255, 0.1) !important;
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+
 /* 链接/图标按钮统一触感 */
 button, a, [role="button"] {
   &:active { outline: none; }
