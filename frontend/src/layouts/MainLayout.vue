@@ -111,7 +111,7 @@
                   :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
                   @click="onMobileSwitchPeer(p.peerId)"
                 >
-                  <MfIcon :name="p.kind === 'local' ? 'headphones' : (p.kind === 'group' ? 'box' : 'monitor')" class="mc-peer-icon" />
+                  <MfIcon :name="p.kind === 'group' ? 'box' : 'headphones'" class="mc-peer-icon" />
                   <div class="mc-peer-info">
                     <div class="mc-peer-name">
                       {{ p.kind === 'local' ? '本机' : p.name }}
@@ -270,7 +270,7 @@
                 :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
                 @click="onSwitchPeer(p.peerId)"
               >
-                <MfIcon :name="p.kind === 'local' ? 'headphones' : (p.kind === 'group' ? 'box' : 'monitor')" class="psi-icon" />
+                <MfIcon :name="p.kind === 'group' ? 'box' : 'headphones'" class="psi-icon" />
                 <div class="psi-info">
                   <div class="psi-name">
                     {{ p.kind === 'local' ? '本机' : p.name }}
@@ -1345,9 +1345,10 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .play-mode :deep(.el-button) {
   border-color: transparent !important;
   color: #fff !important;
-  background: rgba(255, 255, 255, 0.08) !important;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  &:hover { border-color: transparent !important; background: rgba(255, 255, 255, 0.16) !important; }
+  background: transparent !important;   /* 播放模式面板按钮统一透明（无圆形淡白"外框"） */
+  box-shadow: none !important;
+  outline: none !important;
+  &:hover { border-color: transparent !important; background: rgba(255, 255, 255, 0.1) !important; box-shadow: none !important; outline: none !important; }
 }
 .play-mode :deep(.el-button--primary) {
   background: var(--fnos-red) !important;
@@ -1363,8 +1364,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .heart-icon .heart-fill { color: var(--fnos-red); }
 }
 .play-mode .fav-btn {
-  border-color: rgba(255, 255, 255, 0.55) !important;
-  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: transparent !important;
+  background: transparent !important;
 }
 .play-mode .fav-btn .heart-icon { color: rgba(255, 255, 255, 0.85); }
 .play-mode .fav-btn .heart-icon .heart-fill { color: var(--fnos-red); }
@@ -1478,7 +1479,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     border: 1px solid rgba(255, 255, 255, 0.08);
     /* 移除 border-top —— 播放器是悬浮的，不再是底栏 */
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-    z-index: 100;
+    z-index: 520;   /* 始终在最前：高于内容页与顶栏(500)，低于弹窗层(queue 550 / sidebar 600 / playmode 700) */
     display: flex; align-items: center; gap: 8px;
     padding: 0 12px;
     .mp-cover {
@@ -1514,9 +1515,21 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   /* --- Main scroll container on mobile: account for mobile-header + floating player pill --- */
   .main-scroll { padding-top: 48px; padding-bottom: 88px; }
 
-  /* --- Queue panel full width, extends to bottom (player is floating) --- */
-  /* z-index 提到 mobile-header(500) 之上，避免头部标题/清空/关闭行被顶栏遮挡 */
-  .queue-panel { width: 100%; bottom: 0; z-index: 550; }
+  /* --- Queue panel: 移动端卡片式浮层（不全宽不全高）---
+     左右留边距、底部在播放条上方留空隙截断；想看更多在面板内滚动下拉。
+     z-index 550：高于播放条(520)/顶栏(500)，低于侧边栏(600)。 */
+  .queue-panel {
+    width: calc(100% - 24px);
+    left: 12px; right: 12px;
+    top: auto;
+    bottom: 88px;               /* 播放条(76)上方留 12px 空隙 */
+    height: min(58vh, 460px);
+    max-height: 62vh;
+    border-radius: 18px;
+    border-left: none;
+    z-index: 550;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  }
 
   /* --- Fullscreen play mode: stacked single column --- */
   .play-mode { overflow-y: auto; z-index: 700; }
@@ -1656,9 +1669,13 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   border: none !important;
   background: transparent !important;
   color: rgba(255, 255, 255, 0.85) !important;
+  outline: none !important;
+  box-shadow: none !important;
   &:hover, &:focus {
     background: rgba(255, 255, 255, 0.1) !important;
     color: #fff !important;
+    outline: none !important;
+    box-shadow: none !important;
   }
 }
 /* 更多弹窗主播放按钮 / 选中态：保留红色实心 */
