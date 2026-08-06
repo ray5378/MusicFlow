@@ -134,8 +134,11 @@ async function playAl(al: any) {
   else ElMessage.warning("该专辑暂无可播放歌曲");
 }
 
-// 今日推荐：固定为后端每日自动生成的名为「今日推荐」的歌单
-const featured = computed(() => playlists.value.find((p) => p.name === "今日推荐") || null);
+// 今日推荐：固定为后端每日自动生成的名为「今日推荐」的歌单，
+// 先决条件：必须匹配到本地库歌曲数 > 30 首才作为今日推荐展示（不足 30 首不显示大卡）
+const featured = computed(() =>
+  playlists.value.find((p) => p.name === "今日推荐" && (p.songCount || 0) > 30) || null
+);
 // 并排随机：从全部歌单里随机抽 6 张（排除今日推荐大卡）
 // 桌面 = 1 大 + 6 小（3 列 × 2 行）；移动端由 CSS 截断到 1 大 + 4 小
 const sidePlaylists = computed(() => {
