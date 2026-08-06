@@ -847,6 +847,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .sidebar-menu {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;   /* 禁止横向滚动（选中高亮/菜单项导致的 30px 级超宽不再可左右滑动） */
     padding: 8px 0;
     background: transparent;
     /* 标题栏展开时空间充足，隐藏滚动条（仍保留滚动能力，避免矮屏内容裁切） */
