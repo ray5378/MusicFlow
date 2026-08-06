@@ -126,12 +126,14 @@ import api from "@/api";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
+import { usePlayContent } from "@/composables/usePlayContent";
 
 const router = useRouter();
 const {
   openContextMenu, openActionSheet, menuGuard,
   playlistActions, albumActions,
 } = useItemActions();
+const play = usePlayContent();
 
 const playlists = ref<any[]>([]);
 const albums = ref<any[]>([]);
@@ -143,6 +145,21 @@ function cover(id: string) {
 function go(path: string) {
   if (menuGuard()) return;
   router.push(path);
+}
+
+/** CoverPlay 悬浮按钮：播放整张歌单 */
+async function playPl(pl: any) {
+  if (menuGuard() || !pl) return;
+  const n = await play.playPlaylist(pl.id);
+  if (n) ElMessage.success(`正在播放「${pl.name}」`);
+  else ElMessage.warning("该歌单暂无可播放歌曲");
+}
+/** CoverPlay 悬浮按钮：播放整张专辑 */
+async function playAl(al: any) {
+  if (menuGuard() || !al) return;
+  const n = await play.playAlbum(al.id);
+  if (n) ElMessage.success(`正在播放「${al.name || al.title}」`);
+  else ElMessage.warning("该专辑暂无可播放歌曲");
 }
 
 // 今日推荐：固定为后端每日自动生成的名为「今日推荐」的歌单
