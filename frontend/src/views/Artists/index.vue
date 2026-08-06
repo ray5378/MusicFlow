@@ -222,7 +222,7 @@ onMounted(() => { loadArtists(); loadMissingCount(); checkScrapeStatus(); });
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.06);
   transition: transform 0.22s ease, background 0.22s ease, box-shadow 0.22s ease;
-  animation: home-card-in 0.45s ease both;
+  animation: home-card-in 0.45s ease backwards;  /* backwards: 动画结束后回退到元素常态（无 transform 残留），both 会保持 translateY(0) 终态形成永久 stacking context，旧 Chromium 上可能穿透 fixed 弹窗 */
   &:hover {
     transform: translateY(-5px);
     background: rgba(255,255,255,0.08);

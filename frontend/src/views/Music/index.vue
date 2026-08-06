@@ -261,21 +261,22 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
   position: absolute;
   inset: -40%;
   pointer-events: none;
-  filter: blur(40px);
-  opacity: 0.7;
-  animation: fnos-aurora-drift-b 18s ease-in-out infinite alternate;
+  /* 去掉 filter:blur(40px) 与 transform 无限动画 —— 两者都会把元素永久提升为
+     合成层；华为等旧 Chromium 浏览器对嵌套 stacking context 的合成顺序有 bug，
+     会把这些合成层提升到 fixed 弹窗(z=3000)之上，造成卡片穿透弹窗的"闪烁"。
+     柔光效果用大半径 radial-gradient 的透明过渡近似，视觉几乎无差。 */
+  opacity: 0.55;
   z-index: -1;
 }
 .tile .tile-icon {
   align-self: flex-start;
   color: rgba(255, 255, 255, 0.92);
-  background: rgba(255, 255, 255, 0.18);
+  /* backdrop-filter 同样提升合成层，改略不透明的纯色圆底即可（视觉几乎无差） */
+  background: rgba(255, 255, 255, 0.22);
   border-radius: 50%;
   padding: 8px;
   width: 50px; height: 50px;
   display: inline-flex; align-items: center; justify-content: center;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
 .tile .tile-label {
   font-size: 16px;
@@ -630,8 +631,7 @@ onMounted(() => { loadSongs(); favoritesStore.loadFavorites(); });
     border-radius: 50%;
     background: rgba(10, 8, 16, 0.6);
     border: 1px solid rgba(255, 255, 255, 0.28);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    /* 去 backdrop-filter —— 提升合成层，旧 Chromium（华为浏览器）会穿透 fixed 弹窗 */
   }
   .song-row .col-title .song-cover-wrap .cover-play:active { background: var(--fnos-red); }
 }
