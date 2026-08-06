@@ -158,7 +158,7 @@
                 <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="28" />
               </el-button>
               <el-button circle @click="playerStore.next"><MfIcon name="SkipForward" :size="22" /></el-button>
-              <el-button circle size="small" @click="playerStore.togglePlaylistPanel" :type="playerStore.showPlaylist ? 'primary' : ''"><MfIcon name="List" /></el-button>
+              <el-button circle size="small" @click="openMobileQueue" :type="playerStore.showPlaylist ? 'primary' : ''"><MfIcon name="List" /></el-button>
             </div>
 
             <!-- Tools: add to playlist, favorite, volume -->
@@ -635,6 +635,89 @@ const dlnaScanning = ref(false);
 
 const peerSwitcherVisible = ref(false);
 const volumePopoverVisible = ref(false);
+
+/* ===== 手机端滑动/系统返回关闭所有弹窗 =====
+   思路：任一弹窗（播放模式/播放列表/更多/音量/侧边栏）打开时 history.pushState
+   占位（URL 不变），系统返回手势触发 popstate 时按优先级关闭最上层弹窗并重新
+   占位；全部弹窗关闭后 back() 消费占位，使下一次返回恢复正常路由后退。 */
+const overlaySources = [
+  () => playerStore.playModeVisible,
+  () => playerStore.showPlaylist,
+  () => mobileControlsVisible.value,
+  () => volumePopoverVisible.value,
+  () => mobileNavOpen.value,
+];
+function closeTopOverlay(): boolean {
+  if (playerStore.playModeVisible) { playerStore.playModeVisible = false; return true; }
+  if (playerStore.showPlaylist) { playerStore.showPlaylist = false; return true; }
+  if (mobileControlsVisible.value) { mobileControlsVisible.value = false; return true; }
+  if (volumePopoverVisible.value) { volumePopoverVisible.value = false; return true; }
+  if (mobileNavOpen.value) { mobileNavOpen.value = false; return true; }
+  return false;
+}
+/* ===== 手机端滑动返回关闭所有弹窗 =====
+   左缘右滑手势（iOS 风格）→ 关闭最上层弹窗（播放模式/播放列表/更多/音量/侧边栏）。
+   纯应用内手势，不触碰 history，避免与 vue-router 的 history state 冲突。 */
+let overlayPrevOpen = false;
+watch(overlaySources, (now) => {
+  if (!isMobile.value) { overlayPrevOpen = now.some(Boolean); return; }
+  overlayPrevOpen = now.some(Boolean);
+}, { flush: "sync" });
+function anyOverlayOpen(): boolean {
+  return playerStore.playModeVisible || playerStore.showPlaylist ||
+    mobileControlsVisible.value || volumePopoverVisible.value || mobileNavOpen.value;
+}
+// 手势状态
+let swipeStartX = 0;
+let swipeStartY = 0;
+let swipeStartT = 0;
+let swipeActive = false;
+function onSwipeTouchStart(e: TouchEvent) {
+  if (!isMobile.value) return;
+  const t = e.touches[0];
+  if (t.clientX > 44) return;             // 仅从左缘开始的手势
+  swipeStartX = t.clientX;
+  swipeStartY = t.clientY;
+  swipeStartT = Date.now();
+  swipeActive = true;
+}
+function onSwipeTouchMove(e: TouchEvent) {
+  if (!swipeActive) return;
+  const t = e.touches[0];
+  const dx = t.clientX - swipeStartX;
+  const dy = t.clientY - swipeStartY;
+  // 判定为右滑手势后阻止默认（避免触发浏览器边缘返回/滚动冲突）
+  if (dx > 10 && Math.abs(dy) < 40) e.preventDefault();
+}
+function onSwipeTouchEnd(e: TouchEvent) {
+  if (!swipeActive) { swipeActive = false; return; }
+  swipeActive = false;
+  if (!isMobile.value) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - swipeStartX;
+  const dy = t.clientY - swipeStartY;
+  const dt = Date.now() - swipeStartT;
+  // 右滑 > 70px、水平为主、快速滑动
+  if (dx > 70 && Math.abs(dy) < 60 && dt < 600) {
+    if (anyOverlayOpen()) closeTopOverlay();
+    else history.back();                  // 无弹窗：放行系统返回
+  }
+}
+window.addEventListener("touchstart", onSwipeTouchStart, { passive: false });
+window.addEventListener("touchmove", onSwipeTouchMove, { passive: false });
+window.addEventListener("touchend", onSwipeTouchEnd, { passive: false });
+onUnmounted(() => {
+  window.removeEventListener("touchstart", onSwipeTouchStart);
+  window.removeEventListener("touchmove", onSwipeTouchMove);
+  window.removeEventListener("touchend", onSwipeTouchEnd);
+});
+
+/** 手机端更多弹窗内打开播放列表：先打开队列面板，再关闭更多弹窗 */
+function openMobileQueue() {
+  playerStore.showPlaylist = true;
+  mobileControlsVisible.value = false;
+}
+
 async function onSwitchPeer(peerId: string) {
   peerSwitcherVisible.value = false;
   await playerStore.switchPeer(peerId);
@@ -1432,7 +1515,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .main-scroll { padding-top: 48px; padding-bottom: 88px; }
 
   /* --- Queue panel full width, extends to bottom (player is floating) --- */
-  .queue-panel { width: 100%; bottom: 0; }
+  /* z-index 提到 mobile-header(500) 之上，避免头部标题/清空/关闭行被顶栏遮挡 */
+  .queue-panel { width: 100%; bottom: 0; z-index: 550; }
 
   /* --- Fullscreen play mode: stacked single column --- */
   .play-mode { overflow-y: auto; z-index: 700; }
