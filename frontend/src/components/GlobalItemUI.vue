@@ -181,9 +181,9 @@ function fmt(sec: number) {
 .action-sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 4001;
   border-radius: 20px 20px 0 0; padding: 10px 12px calc(14px + env(safe-area-inset-bottom));
-  animation: sheet-in 0.22s ease;
+  /* 滑入/滑出动画由外层 <transition name="sheet"> 统一驱动（enter/leave 双向），
+     不再叠加 CSS animation —— 两套动画竞争 transform 会产生抖动/回闪。 */
 }
-@keyframes sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
 .sheet-grip { width: 40px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.25); margin: 4px auto 10px; }
 .sheet-head {
   padding: 2px 14px 12px; text-align: center;

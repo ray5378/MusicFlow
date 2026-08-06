@@ -330,7 +330,7 @@
 
     <!-- ===== Queue panel ===== -->
     <transition name="slide-right">
-      <div class="queue-panel" v-if="playerStore.showPlaylist && playerStore.currentSong">
+      <div class="queue-panel" v-if="playerStore.showPlaylist">
         <div class="queue-header">
           <span>播放队列 ({{ playerStore.queue.length }})</span>
           <div class="queue-actions">
@@ -717,6 +717,13 @@ function openMobileQueue() {
   playerStore.showPlaylist = true;
   mobileControlsVisible.value = false;
 }
+
+/** 弹窗互斥：更多弹窗一打开就关闭播放列表面板。
+ *  用 watch 而非按钮 @click —— el-popover 的 reference 插槽对原生 click 监听
+ *  的合并在部分场景不触发（实测点击到达按钮但 @click 未执行）。 */
+watch(() => mobileControlsVisible.value, (v) => {
+  if (v && playerStore.showPlaylist) playerStore.showPlaylist = false;
+});
 
 async function onSwitchPeer(peerId: string) {
   peerSwitcherVisible.value = false;
@@ -1149,8 +1156,9 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 
 /* ===== Queue panel ===== */
 .queue-panel {
-  /* 播放器已是悬浮药丸，不再占底部空间 —— 队列面板直接贴底 */
-  position: fixed; top: 0; right: 0; bottom: 0;
+  /* 播放器已是悬浮药丸（bottom:18px height:84px，占底部约 102px）——
+     队列面板底部避让播放条，不再贴底盖住播放条右端的控制按钮 */
+  position: fixed; top: 0; right: 0; bottom: 112px;
   width: 360px;
   background: rgba(31, 28, 42, 0.92);
   backdrop-filter: blur(28px) saturate(180%);
@@ -1433,6 +1441,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     border-bottom: none;
     grid-column: 1; grid-row: 1;
     align-self: flex-start;
+    /* 与 .play-mode 的 fade(0.3s) 同步交叉淡化，避免 display:none 瞬切造成闪烁 */
+    transition: opacity 0.3s ease, visibility 0.3s ease;
     .mobile-hamburger {
       display: inline-flex; align-items: center; justify-content: center;
       width: 34px; height: 34px; border: none; border-radius: 6px;
@@ -1455,7 +1465,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     grid-column: auto; grid-row: auto;
     position: fixed; top: 0; left: 0; bottom: 0;
     width: min(280px, 82vw); z-index: 600;
-    transform: translateX(-100%); transition: transform 0.28s ease;
+    transform: translateX(-100%); transition: transform 0.3s ease;   /* 与 sidebar-overlay fade(0.3s) 时长对齐，避免微差不同步 */
     background: rgba(31, 28, 42, 0.94);
     backdrop-filter: blur(22px) saturate(180%);
     -webkit-backdrop-filter: blur(22px) saturate(180%);
@@ -1500,6 +1510,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     z-index: 520;   /* 始终在最前：高于内容页与顶栏(500)，低于弹窗层(queue 550 / sidebar 600 / playmode 700) */
     display: flex; align-items: center; gap: 8px;
     padding: 0 12px;
+    /* 与 .play-mode 的 fade(0.3s) 同步交叉淡化，避免 display:none 瞬切造成闪烁 */
+    transition: opacity 0.3s ease, visibility 0.3s ease;
     .mp-cover {
       width: 44px; height: 44px; border-radius: 8px; overflow: hidden; flex-shrink: 0;
       cursor: pointer;
@@ -1551,7 +1563,14 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 
   /* --- Fullscreen play mode: stacked single column --- */
   .play-mode { overflow-y: auto; z-index: 700; }
-  .mc-hidden { display: none !important; }
+  /* 播放模式打开时隐藏顶栏/播放条：用 opacity+visibility 过渡（与 play-mode
+     的 fade 0.3s 同步交叉淡化），不再用 display:none 瞬切 —— 瞬切会让
+     顶栏/播放条瞬间消失而 play-mode 还在半透明淡入，造成强烈闪烁。 */
+  .mc-hidden {
+    opacity: 0 !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
   .play-mode .play-mode-body {
     flex-direction: column; justify-content: flex-start;
     gap: 8px; padding: 20px 16px 6px;

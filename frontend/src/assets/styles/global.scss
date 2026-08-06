@@ -235,6 +235,13 @@ button, a, [role="button"] {
 }
 
 /* Dropdown / Popover / Tooltip */
+/* 全局禁用 el-popover 的 el-zoom-in-top 半透明缩放过渡 —— 动画期间弹窗半透明
+   透出底层页面，用户感知为"底层闪上来"的闪烁。弹窗改为瞬时出现。 */
+.el-popper.el-popover,
+.el-popper.is-light {
+  transition: none !important;
+  animation: none !important;
+}
 .el-popper, .el-popover, .el-dropdown-menu, .el-tooltip__popper {
   background: #1f1c2a !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
