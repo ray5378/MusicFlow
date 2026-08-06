@@ -88,34 +88,6 @@
         </div>
       </div>
     </section>
-
-    <!-- ===== 底部：快捷方式 ===== -->
-    <section class="section">
-      <div class="section-title"><span>快捷方式</span></div>
-      <div class="shortcut-row">
-        <div class="shortcut fnos-reveal" :style="{ '--stagger': 0 }" @click="go('/favorites')">
-          <div class="shortcut-icon fav"><MfIcon name="Heart" :filled="true" :size="22" /></div>
-          <div class="shortcut-text">
-            <div class="shortcut-title">我喜欢的音乐</div>
-            <div class="shortcut-sub">你收藏的宝藏</div>
-          </div>
-        </div>
-        <div class="shortcut fnos-reveal" :style="{ '--stagger': 1 }" @click="go('/history')">
-          <div class="shortcut-icon hist"><MfIcon name="Clock" :size="22"  /></div>
-          <div class="shortcut-text">
-            <div class="shortcut-title">播放历史</div>
-            <div class="shortcut-sub">最近听过的歌</div>
-          </div>
-        </div>
-        <div class="shortcut fnos-reveal" :style="{ '--stagger': 2 }" @click="go('/songs')">
-          <div class="shortcut-icon added"><MfIcon name="Plus" :size="22"  /></div>
-          <div class="shortcut-text">
-            <div class="shortcut-title">最近添加</div>
-            <div class="shortcut-sub">最近新加入的歌</div>
-          </div>
-        </div>
-      </div>
-    </section>
   </div>
 </template>
 
@@ -286,38 +258,6 @@ onMounted(async () => {
   gap: 16px;
 }
 
-/* 底部：快捷方式 */
-.shortcut-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-}
-.shortcut {
-  display: flex; align-items: center; gap: 14px;
-  padding: 18px 20px;
-  border-radius: var(--fnos-radius-lg);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  cursor: pointer;
-  transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
-  animation: home-card-in 0.45s ease both;
-  animation-delay: calc(var(--stagger, 0) * 80ms + 200ms);
-  &:hover { transform: translateY(-4px); background: rgba(255, 255, 255, 0.08); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4); }
-  &:active { transform: translateY(-1px) scale(0.98); }
-  .shortcut-icon {
-    width: 46px; height: 46px; border-radius: 13px; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center; color: #fff;
-    /* 统一图标视觉中心 */
-    line-height: 1;
-    > * { display: flex; align-items: center; justify-content: center; }
-  }
-  .shortcut-icon.fav { background: linear-gradient(135deg, #f62c55, #c934e1); }
-  .shortcut-icon.hist { background: linear-gradient(135deg, #1b73fb, #16a34a); }
-  .shortcut-icon.added { background: linear-gradient(135deg, #f8bf28, #fc5e25); }
-  .shortcut-title { font-size: 15px; font-weight: 600; }
-  .shortcut-sub { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; }
-}
-
 @media (max-width: 1100px) {
   /* 平板：1 大（通栏）+ 4 小；行高改为自适应，避免小卡被大卡撑高 */
   .top-row { grid-template-columns: 1fr 1fr; grid-auto-rows: auto; }
@@ -335,11 +275,9 @@ onMounted(async () => {
   .card.featured { grid-column: span 2; grid-row: auto; }
   .top-row > *:nth-child(n + 6) { display: none; }
   .grid-row { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-  .shortcut-row { grid-template-columns: 1fr; gap: 10px; }
   .card-body { padding: 8px 10px 10px; }
   .card-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card-sub { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .shortcut { padding: 14px 16px; }
   .badge { font-size: 11px; padding: 2px 8px; }
 }
 </style>
