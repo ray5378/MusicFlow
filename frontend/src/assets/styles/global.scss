@@ -816,4 +816,22 @@ body.fnos-login #app { position: relative; z-index: 1; }
   .el-table th.el-table__cell { padding: 7px 0; }
   .el-table .song-cover,
   .el-table .cover-placeholder { width: 38px; height: 38px; border-radius: 6px; }
+
+  /* 移动端"更多"弹窗：贴底 bottom sheet，确保始终在页面最低端（z 最高），
+     不再悬浮中部与上下内容页抢显示空间 */
+  .mobile-controls-popover.el-popper.el-popover {
+    position: fixed !important;
+    top: auto !important;
+    left: 8px !important;
+    right: 8px !important;
+    bottom: 84px !important;            /* 播放条 (12+64=76) 上方留 8px 缝 */
+    width: auto !important;
+    max-width: none !important;
+    transform: none !important;         /* 覆盖 popperjs 定位，使用固定 inset */
+    border-radius: 18px 18px 0 0 !important;
+    z-index: 3000 !important;           /* 高于所有内容层（play-mode 700/queue 200/header 500 等） */
+    max-height: min(72vh, calc(100vh - 100px)) !important;
+  }
+  /* 底部贴底后 arrow 位置与新位置不匹配，隐藏 */
+  .mobile-controls-popover.el-popper .el-popper__arrow { display: none !important; }
 }

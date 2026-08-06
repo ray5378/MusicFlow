@@ -903,7 +903,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       flex: 1; min-width: 0;
       .player-title { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .player-artist { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .player-lyric { color: var(--fnos-red); }
+      .player-lyric { color: var(--fnos-yellow); }
     }
     /* 默认：仅一根可视细线（不显示时间、不可拖） */
     .np-progress-thin {
@@ -1156,10 +1156,10 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       padding: 10px 0; text-align: center; line-height: 1.6;
       transition: all 0.4s ease; cursor: default;
       &.active {
-        color: var(--fnos-red);
+        color: var(--fnos-yellow);
         font-size: 21px;
         font-weight: 700;
-        text-shadow: 0 0 24px rgba(246, 44, 85, 0.5);
+        text-shadow: 0 0 24px rgba(248, 191, 40, 0.5);
       }
     }
     .pm-lyrics-empty { color: rgba(255, 255, 255, 0.3); font-size: 15px; padding: 60px 0; }
@@ -1330,6 +1330,14 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
     &.mobile-open { transform: translateX(0); }
     &.collapsed { width: min(280px, 82vw); }
+    /* 移动端侧边栏同样隐藏滚动条（含 Element Plus 内部滚动容器） */
+    .sidebar-menu,
+    :deep(.el-menu),
+    :deep(.el-menu--popup) {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      &::-webkit-scrollbar { display: none; }
+    }
   }
 
   /* --- Main content occupies full width --- */
@@ -1367,7 +1375,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     .mp-info { flex: 1; min-width: 0; cursor: pointer;
       .mp-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .mp-artist { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .mp-lyric { color: var(--fnos-red); }
+      .mp-lyric { color: var(--fnos-yellow); }
     }
     .mp-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0;
       .mp-btn {
