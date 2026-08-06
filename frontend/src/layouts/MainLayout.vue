@@ -1088,11 +1088,17 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 }
 
 /* ===== Player switcher button ===== */
+/* 与其他播放控件按钮一致：无边框透明，hover 淡白（去掉原矩形淡底色"框"） */
 .peer-switch-btn {
   display: inline-flex; align-items: center; gap: 4px;
   max-width: 160px; padding: 0 10px; height: 30px;
-  background: rgba(255, 255, 255, 0.06) !important;
-  border-color: rgba(255, 255, 255, 0.12) !important;
+  border: none !important;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+  &:hover, &:focus {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #fff !important;
+  }
   .peer-switch-icon { font-size: 14px; }
   .peer-switch-label { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
   .peer-switch-arrow { font-size: 10px; color: var(--fnos-text-tertiary); }
@@ -1138,10 +1144,6 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .vol-btn.vol-active.el-button {
   background: rgba(246, 44, 85, 0.12) !important;
   color: var(--fnos-red) !important;
-}
-/* 切换播放器按钮：去外边框，保留淡背景 */
-.peer-switch-btn {
-  border-color: transparent !important;
 }
 
 /* ===== Queue panel ===== */
