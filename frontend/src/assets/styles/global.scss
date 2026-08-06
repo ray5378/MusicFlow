@@ -702,18 +702,18 @@ body.fnos-login #app { position: relative; z-index: 1; }
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.45);
   border-radius: 50%;
-  background: rgba(18, 16, 26, 0.5);
+  background: rgba(20, 18, 30, 0.42);
   color: #fff;
   cursor: pointer;
-  backdrop-filter: blur(12px) saturate(170%);
-  -webkit-backdrop-filter: blur(12px) saturate(170%);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38), 0 0 12px rgba(255, 255, 255, 0.10);
   opacity: 0;
   transform: translate(-50%, -50%) scale(0.78);
   transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.34, 1.4, 0.64, 1),
-              background 0.2s ease, border-color 0.2s ease;
+              background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 
   svg { width: 46%; height: 46%; margin-left: 6%; display: block; }
 
@@ -721,13 +721,13 @@ body.fnos-login #app { position: relative; z-index: 1; }
   &.sz-md { width: 44px; height: 44px; }
   &.sz-lg { width: 58px; height: 58px; }
 
-  /* 角标模式：贴右下角，不遮挡封面主体 */
+  /* 角标模式：贴右下角，距封面底边/侧边各 30px，不遮挡封面主体 */
   &.pos-br {
     top: auto;
     left: auto;
-    right: 10px;
-    bottom: 10px;
-    transform: translate(0, 6px) scale(0.85);
+    right: 30px;
+    bottom: 30px;
+    transform: translate(0, 8px) scale(0.9);
   }
 
   &.is-loading { pointer-events: none; }
@@ -752,10 +752,12 @@ body.fnos-login #app { position: relative; z-index: 1; }
     &.pos-br { transform: translate(0, 0) scale(1); }
   }
   .mf-cover-play:hover {
-    background: var(--fnos-red, #f62c55);
-    border-color: rgba(255, 255, 255, 0.55);
-    transform: translate(-50%, -50%) scale(1.1);
-    &.pos-br { transform: translate(0, 0) scale(1.1); }
+    /* 去除填充高亮：保持磨砂透明，仅加强亮边与光晕 */
+    background: rgba(34, 30, 46, 0.55);
+    border-color: rgba(255, 255, 255, 0.75);
+    box-shadow: 0 0 18px rgba(255, 255, 255, 0.30), 0 10px 24px rgba(0, 0, 0, 0.45);
+    transform: translate(-50%, -50%) scale(1.08);
+    &.pos-br { transform: translate(0, 0) scale(1.08); }
   }
   .mf-cover-play:active { transform: translate(-50%, -50%) scale(0.94); }
   .mf-cover-play.pos-br:active { transform: translate(0, 0) scale(0.94); }
@@ -768,11 +770,11 @@ body.fnos-login #app { position: relative; z-index: 1; }
     transform: translate(-50%, -50%) scale(1);
     background: rgba(12, 10, 18, 0.46);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-    &.pos-br { transform: translate(0, 0) scale(1); right: 7px; bottom: 7px; }
+    &.pos-br { transform: translate(0, 0) scale(1); right: 12px; bottom: 12px; }
     &.sz-lg { width: 46px; height: 46px; }
     &.sz-md { width: 34px; height: 34px; }
     &.sz-sm { width: 28px; height: 28px; }
-    &:active { background: var(--fnos-red, #f62c55); }
+    &:active { background: rgba(40, 36, 54, 0.6); border-color: rgba(255, 255, 255, 0.7); }
   }
 }
 

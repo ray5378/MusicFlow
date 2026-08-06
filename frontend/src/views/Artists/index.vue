@@ -35,7 +35,7 @@
         @contextmenu="openContextMenu($event, artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
         v-longpress="() => openActionSheet(artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
       >
-        <div class="artist-avatar mf-coverwrap" @click="playAr(artist)">
+        <div class="artist-avatar mf-coverwrap" @click="open(artist)">
           <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" />
           <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48"  /></div>
           <el-tooltip v-if="artist.scrapeMissing" content="缺失歌手信息(当前为专辑封面兜底)" placement="top">

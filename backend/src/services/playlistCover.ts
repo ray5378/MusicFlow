@@ -49,6 +49,23 @@ function mimeFor(name: string): string {
   return ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : "image/jpeg";
 }
 
+// Copy an existing cover file (e.g. an album's cover_art) to a new ref name.
+// Used to give a playlist a self-contained cover that is independent of the
+// source entity (so it survives rename / source deletion). Returns the dest
+// ref on success, or null if the source file is missing.
+export function copyCoverToFile(destRef: string, srcCoverRef: string): string | null {
+  if (!srcCoverRef) return null;
+  const src = path.join(COVERS_DIR, srcCoverRef);
+  if (!fs.existsSync(src)) return null;
+  try {
+    ensureDir();
+    fs.copyFileSync(src, path.join(COVERS_DIR, destRef));
+    return destRef;
+  } catch {
+    return null;
+  }
+}
+
 // Clear the cached cover file for a playlist (called after sync / track changes)
 export function clearPlaylistCoverCache(playlistId: string) {
   try {

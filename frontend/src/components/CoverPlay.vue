@@ -27,7 +27,7 @@ const props = withDefaults(
     /** 异步播放动作，组件自动管理 loading 状态 */
     action?: () => any | Promise<any>;
   }>(),
-  { size: "md", corner: false, label: "播放" }
+  { size: "md", corner: true, label: "播放" }
 );
 
 const emit = defineEmits<{ (e: "play"): void }>();

@@ -14,7 +14,7 @@
         @contextmenu="openContextMenu($event, favActions(), '我喜欢的音乐', '喜欢的音乐都在这里')"
         v-longpress="() => openActionSheet(favActions(), '我喜欢的音乐', '喜欢的音乐都在这里')"
       >
-        <div class="playlist-cover fav-cover mf-coverwrap" @click.stop="playFavorites()">
+        <div class="playlist-cover fav-cover mf-coverwrap" @click.stop="goFav()">
           <MfIcon name="Heart" :filled="true" :size="48" />
           <CoverPlay size="md" label="播放我喜欢的音乐" :action="() => playFavorites()" />
         </div>
@@ -42,7 +42,7 @@
         @contextmenu="openContextMenu($event, cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
         v-longpress="() => openActionSheet(cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
       >
-        <div class="playlist-cover mf-coverwrap" @click.stop="playAll(pl)">
+        <div class="playlist-cover mf-coverwrap" @click.stop="open(pl)">
           <img v-if="pl.coverArt" :src="`/rest/getCoverArt?id=${pl.coverArt}&size=300`" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playAll(pl)" />

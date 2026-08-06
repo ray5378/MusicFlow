@@ -16,7 +16,7 @@
           @contextmenu="openContextMenu($event, playlistActions(featured), featured.name, '歌单')"
           v-longpress="() => openActionSheet(playlistActions(featured), featured.name, '歌单')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="playPl(featured)">
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featured.id)">
             <img v-if="featured.coverArt" :src="cover(featured.coverArt)" class="card-cover" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="48"  /></div>
             <span class="badge">今日推荐</span>
@@ -37,7 +37,7 @@
           @contextmenu="openContextMenu($event, playlistActions(pl), pl.name, '歌单')"
           v-longpress="() => openActionSheet(playlistActions(pl), pl.name, '歌单')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="playPl(pl)">
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
             <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
             <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
@@ -72,7 +72,7 @@
           @contextmenu="openContextMenu($event, albumActions(al), al.name || al.title, al.artist || '专辑')"
           v-longpress="() => openActionSheet(albumActions(al), al.name || al.title, al.artist || '专辑')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="playAl(al)">
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/albums/' + al.id)">
             <img v-if="al.coverArt" :src="cover(al.coverArt)" class="card-cover" />
             <div v-else class="card-cover-ph"><MfIcon name="Disc3" :size="28"  /></div>
             <CoverPlay size="md" :label="`播放 ${al.name || al.title}`" :action="() => playAl(al)" />
@@ -126,17 +126,14 @@ import api from "@/api";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
-import { usePlayContent } from "@/composables/usePlayContent";
 
 const router = useRouter();
 const {
   openContextMenu, openActionSheet, menuGuard,
   playlistActions, albumActions,
 } = useItemActions();
-const play = usePlayContent();
 
 const playlists = ref<any[]>([]);
-const recommendedIds = ref<Set<string>>(new Set());
 const albums = ref<any[]>([]);
 const loading = ref(false);
 
@@ -148,26 +145,8 @@ function go(path: string) {
   router.push(path);
 }
 
-/** 封面点击：直接播放整张歌单 */
-async function playPl(pl: any) {
-  if (menuGuard() || !pl) return;
-  const n = await play.playPlaylist(pl.id);
-  if (n) ElMessage.success(`正在播放「${pl.name}」`);
-  else ElMessage.warning("该歌单暂无可播放歌曲");
-}
-/** 封面点击：直接播放整张专辑 */
-async function playAl(al: any) {
-  if (menuGuard() || !al) return;
-  const n = await play.playAlbum(al.id);
-  if (n) ElMessage.success(`正在播放「${al.name || al.title}」`);
-  else ElMessage.warning("该专辑暂无可播放歌曲");
-}
-
-// 今日推荐：优先取推荐池中的歌单，否则取列表第一个
-const featured = computed(() => {
-  const rec = playlists.value.find((p) => recommendedIds.value.has(p.id));
-  return rec || playlists.value[0] || null;
-});
+// 今日推荐：固定为后端每日自动生成的名为「今日推荐」的歌单
+const featured = computed(() => playlists.value.find((p) => p.name === "今日推荐") || null);
 // 并排随机：从全部歌单里随机抽 6 张（排除今日推荐大卡）
 // 桌面 = 1 大 + 6 小（3 列 × 2 行）；移动端由 CSS 截断到 1 大 + 4 小
 const sidePlaylists = computed(() => {
@@ -196,15 +175,6 @@ async function loadPlaylists() {
     playlists.value = [];
   }
 }
-async function loadPool() {
-  try {
-    const res = await api.get("/rest/api/v1/recommend-pool");
-    const pool = res.data.pool || [];
-    recommendedIds.value = new Set(pool.filter((p: any) => p.source_type === "playlist").map((p: any) => p.source_id));
-  } catch {
-    recommendedIds.value = new Set();
-  }
-}
 async function loadAlbums() {
   try {
     const res = await api.get("/rest/api/v1/albums", { params: { page: 1, pageSize: 30 } });
@@ -216,7 +186,7 @@ async function loadAlbums() {
 
 onMounted(async () => {
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadPool(), loadAlbums()]);
+  await Promise.all([loadPlaylists(), loadAlbums()]);
   loading.value = false;
 });
 </script>

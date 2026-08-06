@@ -28,7 +28,7 @@
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
-import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
+import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
 
 export interface DailyCandidate {
@@ -174,6 +174,23 @@ function deletePlaylist(playlistId: string): void {
 function renamePlaylist(playlistId: string, newName: string): void {
   sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
     .run(newName, new Date().toISOString(), playlistId);
+}
+
+// Pick a random local-library song's album cover file ref. Used as the daily
+// playlist cover so it always reflects real local music (not a remote chart
+// cover). Returns null if the library has no songs with album covers yet.
+function pickRandomLibraryAlbumCoverRef(date: Date): string | null {
+  const rows = sqlite.prepare(`
+    SELECT a.cover_art AS cover
+    FROM songs s
+    JOIN albums a ON s.album_id = a.id
+    WHERE s.path IS NOT NULL
+      AND a.cover_art IS NOT NULL
+      AND a.cover_art <> ''
+    ORDER BY RANDOM()
+    LIMIT 1
+  `).all() as { cover: string }[];
+  return rows[0]?.cover || null;
 }
 
 function pickSystemOwnerId(): string {
@@ -328,12 +345,15 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   const playlistId = `pl-${Date.now()}`;
   const ownerId = pickSystemOwnerId();
 
-  // Use the first successful remote cover (or fallback to collage later).
+  // Cover = a RANDOM local-library song's album cover (per product要求).
+  // Copied to pl-<playlistId>.jpg so it is self-contained and survives the
+  // later rename to "昨日推荐" (playlistId is unchanged on rename, only the
+  // name column changes), so the cover stays put.
   let coverRef: string | undefined;
-  const firstCover = remoteImports.find(i => i.coverUrl)?.coverUrl;
-  if (firstCover) {
-    const cached = await cacheRemoteCover(firstCover, `pl-${playlistId}`);
-    if (cached) coverRef = cached;
+  const albumCoverRef = pickRandomLibraryAlbumCoverRef(date);
+  if (albumCoverRef) {
+    const copied = copyCoverToFile(`pl-${playlistId}.jpg`, albumCoverRef);
+    if (copied) coverRef = copied;
   }
 
   // Build a merged "ImportedPlaylist" from all remote tracks so we can reuse
