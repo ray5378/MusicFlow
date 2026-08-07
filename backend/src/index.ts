@@ -7,9 +7,10 @@ import path from "path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { authRoutes } from "./routes/auth/index.js";
 import { restRoutes } from "./routes/rest/index.js";
-import { apiRoutes } from "./routes/api/index.js";
+import { apiRoutes, getDlnaBaseUrl } from "./routes/api/index.js";
 import { navidromeRoutes } from "./routes/navidrome/index.js";
-import { initDatabase, cleanupPlayHistory, sqlite } from "./db/index.js";
+import { getFlowByToken, executeFlow, isFlowRunning } from "./services/flows/index.js";
+import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
@@ -69,6 +70,24 @@ app.use("/api/*", authMiddleware);
 app.route("/api", navidromeRoutes);
 app.get("/ping", (c) => c.json({ status: "ok" }));
 
+// ==================== 音流 Webhook(免鉴权,凭 token 触发) ====================
+// 注册在 /rest、/api 鉴权中间件之外,外部工具(GET 或 POST)直接打开链接即可触发:
+// 后台异步持续扫描 DLNA → 任一目标设备/组上线后依次 设音量 → 播放模式 → 播歌单。
+app.all("/webhooks/flows/:token", async (c) => {
+  const token = c.req.param("token") || "";
+  const flow = getFlowByToken(token);
+  if (!flow) return c.json({ success: false, error: "无效的 webhook token" }, 404);
+  if (!flow.enabled) return c.json({ success: false, error: "该音流已停用" }, 409);
+  const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
+  return c.json({
+    success: true,
+    flowId: flow.id,
+    name: flow.name,
+    started: started === "started",
+    running: isFlowRunning(flow.id),
+  });
+});
+
 // ==================== Static frontend (production build) ====================
 // In production the built frontend lives in ./public next to the backend;
 // API paths below are already registered, so the SPA fallback only serves
@@ -95,6 +114,7 @@ app.get("*", async (c, next) => {
 });
 
 initDatabase();
+backfillGenres();
 
 // Retention cleanup for play history (play_history grows with every play).
 cleanupPlayHistory(getPlayHistoryRetentionDays());

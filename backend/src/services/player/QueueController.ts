@@ -303,7 +303,10 @@ export class QueueController extends EventEmitter {
   }
 
   async playFrom(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): Promise<void> {
-    this.setQueue(playerId, items, startIndex, baseUrl);
+    const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
+    // 随机播放模式下首曲也应随机而非固定队首。
+    const idx = mode === "shuffle" && items.length > 1 ? Math.floor(Math.random() * items.length) : startIndex;
+    this.setQueue(playerId, items, idx, baseUrl);
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
     try { await this.playCurrent(playerId, baseUrl); }

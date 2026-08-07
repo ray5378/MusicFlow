@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
-import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory } from "../../db/schema.js";
+import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
@@ -24,8 +24,10 @@ import {
 } from "../../services/dlna/control.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
-import { getQueueManager, suffixToMime } from "../../services/dlna/queue.js";
+import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
+import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";
+import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
@@ -349,10 +351,22 @@ function idToCoverArt(id: string | null, prefix: string): string | undefined {
   return album && album.coverArt ? `${prefix}-${album.id}` : undefined;
 }
 
-// ==================== Genres (with song counts) ====================
-// Use a GROUP BY query instead of loading the whole songs table into memory.
-// Backed by idx_songs_genre (created in initDatabase) for fast aggregation.
+// ==================== Genres (with unique ids + song counts) ====================
+// 风格 ID 由 genres 表分配(启动时 backfillGenres 回填;此处兜底按需补建)。
+function genreIdFor(name: string): string {
+  const row = sqlite.prepare("SELECT id FROM genres WHERE name = ?").get(name) as any;
+  if (row?.id) return row.id;
+  const id = uuidv4();
+  const now = new Date().toISOString();
+  sqlite.prepare("INSERT OR IGNORE INTO genres (id, name, song_count, created_at, updated_at) VALUES (?, ?, 0, ?, ?)").run(id, name, now, now);
+  const re = sqlite.prepare("SELECT id FROM genres WHERE name = ?").get(name) as any;
+  return re?.id || id;
+}
+
 apiRoutes.get("/v1/genres", (c) => {
+  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const query = (c.req.query("query") || "").trim();
   const rows = db.select({
     name: songs.genre,
     songCount: sql<number>`count(*)`,
@@ -361,8 +375,11 @@ apiRoutes.get("/v1/genres", (c) => {
     .groupBy(songs.genre)
     .orderBy(sql`count(*) DESC`)
     .all();
-  const items = rows.map(r => ({ name: r.name, songCount: r.songCount }));
-  return c.json({ total: items.length, items });
+  const mapped = rows.filter((r) => r.name).map(r => ({ id: genreIdFor(r.name as string), name: r.name, songCount: r.songCount }));
+  const filtered = query ? mapped.filter(g => (g.name || "").toLowerCase().includes(query.toLowerCase())) : mapped;
+  const total = filtered.length;
+  const start = (page - 1) * pageSize;
+  return c.json({ total, page, pageSize, items: filtered.slice(start, start + pageSize) });
 });
 
 // ==================== Albums (paginated + searchable) ====================
@@ -850,7 +867,7 @@ const DLNA_MIME: Record<string, string> = {
 // 关键:只信任「局域网可达」的 Host(私有 IP / .local)。通过公网域名访问时,Host 头是
 // 公网域名,设备在同一 LAN 内无法解析回连 → 直接回退到自动探测的 LAN IP,确保推给 DLNA
 // 设备的永远是局域网地址。DLNA_BASE_URL 环境变量优先级最高,可显式覆盖。
-function getDlnaBaseUrl(c: any): string {
+export function getDlnaBaseUrl(c: any): string {
   const envBase = process.env.DLNA_BASE_URL;
   if (envBase) { const u = envBase.replace(/\/+$/, ""); recordBaseUrl(u); return u; }
   const host = c.req.header("host") || "";
@@ -1357,6 +1374,13 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
 // Peer status: for dlna returns the device transport state; for groups the
 // leader's state (MA 同款:组状态从 leader 派生);for local returns the stored
 // queue metadata (HA uses this to read the local peer's queue).
+apiRoutes.get("/v1/peers/:peerId", (c) => {
+  const peerId = decodePeerId(c);
+  const p = getPeerManager().get(peerId);
+  if (!p) return c.json({ error: "无效的 peerId" }, 400);
+  return c.json({ peer: { ...p, queue: getPeerManager().getQueueSnapshot(peerId) } });
+});
+
 apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
@@ -1454,18 +1478,104 @@ apiRoutes.delete("/v1/groups/:id", (c) => {
   return c.json({ success: true });
 });
 
-// Convenience: convert song rows into QueueItem objects (shared by the
-// album/playlist play endpoints above). Exported so the HA integration's
-// play_media flow can reuse the same shape if it ever needs to.
-export function songsToQueueItems(rows: any[]): any[] {
-  return rows.map((s) => ({
-    songId: s.id,
-    title: s.title || "未知",
-    artist: s.artist || undefined,
-    album: s.album || undefined,
-    mime: suffixToMime(s.suffix || ""),
-    coverArt: s.coverArt || undefined,
-    duration: typeof s.duration === "number" ? s.duration : undefined,
-  }));
+// ==================== 统一内容点播(webhook / 外部 API) ====================
+// POST /v1/play { peerId, type: playlist|artist|album|genre, id, startIndex?, playMode?, enqueue? }
+// 服务器端把内容 ID 解析成歌曲队列并投递到指定播放器:
+//   - dlna / group → 直接开始播放(后端控制音频,无需浏览器)
+//   - local → 注入队列(音频仍由 Web 客户端 Howl 驱动)
+
+apiRoutes.post("/v1/play", async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const { peerId, type, id, startIndex, playMode, enqueue } = body || {};
+  if (typeof peerId !== "string" || typeof type !== "string" || typeof id !== "string") {
+    return c.json({ error: "需要 peerId / type / id" }, 400);
+  }
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  const resolved = resolveContentSongs(type, id);
+  if (!resolved) return c.json({ error: `无效的 ${type} id` }, 404);
+  const items = songsToQueueItems(resolved.rows);
+  if (items.length === 0) return c.json({ error: `「${resolved.name}」没有可播放的歌曲` }, 422);
+  const start = typeof startIndex === "number" && startIndex >= 0 && startIndex < items.length ? Math.floor(startIndex) : 0;
+  const baseUrl = getDlnaBaseUrl(c);
+  if (isCastPeer(parsed)) {
+    try {
+      if (enqueue) await getQueueManager().enqueue(parsed.id, items, baseUrl);
+      else await getQueueManager().playFrom(parsed.id, items, start, baseUrl);
+    } catch (e: any) { return c.json({ error: e.message || "播放失败" }, 500); }
+  } else {
+    if (enqueue) pm.localEnqueue(peerId, c.get("user")?.id, items);
+    else pm.localPlayFrom(peerId, c.get("user")?.id, items, start);
+  }
+  if (typeof playMode === "string" && ["order", "one", "all", "shuffle"].includes(playMode)) {
+    const mode = playMode as "order" | "one" | "all" | "shuffle";
+    if (isCastPeer(parsed)) getQueueManager().setPlayMode(parsed.id, mode);
+    else pm.localSetPlayMode(peerId, mode);
+  }
+  return c.json({ success: true, peerId, type, id, name: resolved.name, queued: items.length, startIndex: enqueue ? undefined : start });
+});
+
+// ==================== 音流(MusicFlow) ====================
+// 每条音流 = 目标设备/组(多选) + 等上线 + 音量 + 播放模式 + 播歌单,
+// 通过唯一 token 的公开 webhook 链接(/api/v1/webhooks/flows/:token)异步触发。
+
+const DEFAULT_DEFINITION = {
+  targets: [],
+  waitTimeoutSec: 0,
+  scanIntervalSec: 5,
+  volume: { enabled: true, value: 80 },
+  playmode: { enabled: true, mode: "shuffle" },
+  content: { enabled: true, type: "playlist", id: "", startIndex: 0 },
+};
+
+// 对外可复制链接:用局域网可达 base,保证外部 webhook 能命中。/rest、/api 均受鉴权,
+// 音流链接悬停在 /webhooks/... 路径上(免鉴权)。
+function flowWithWebhook(flow: any) {
+  return { ...flow, webhookUrl: `${getEffectiveBaseUrl()}/webhooks/flows/${flow.token}` };
 }
+
+apiRoutes.get("/v1/flows", (c) => {
+  const items = listFlows().map(flowWithWebhook);
+  return c.json({ total: items.length, items });
+});
+
+apiRoutes.get("/v1/flows/:id", (c) => {
+  const flow = getFlow(c.req.param("id")!);
+  if (!flow) return c.json({ error: "流程不存在" }, 404);
+  return c.json({ flow: flowWithWebhook(flow) });
+});
+
+apiRoutes.post("/v1/flows", async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) return c.json({ error: "需要 name" }, 400);
+  const flow = createFlow(name, body.definition || { ...DEFAULT_DEFINITION });
+  return c.json({ flow: flowWithWebhook(flow) });
+});
+
+apiRoutes.put("/v1/flows/:id", async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const flow = updateFlow(c.req.param("id")!, {
+    name: typeof body.name === "string" ? body.name : undefined,
+    definition: body.definition,
+    enabled: body.enabled === undefined ? undefined : !!body.enabled,
+  });
+  if (!flow) return c.json({ error: "流程不存在" }, 404);
+  return c.json({ flow: flowWithWebhook(flow) });
+});
+
+apiRoutes.delete("/v1/flows/:id", (c) => {
+  const ok = deleteFlow(c.req.param("id")!);
+  if (!ok) return c.json({ error: "流程不存在" }, 404);
+  return c.json({ success: true });
+});
+
+// UI 手动触发(异步执行,返回当前运行状态)。
+apiRoutes.post("/v1/flows/:id/run", async (c) => {
+  const flow = getFlow(c.req.param("id")!);
+  if (!flow) return c.json({ error: "流程不存在" }, 404);
+  if (!flow.enabled) return c.json({ error: "流程已停用" }, 409);
+  const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
+  return c.json({ success: true, started: started === "started", running: isFlowRunning(flow.id) });
+});
 

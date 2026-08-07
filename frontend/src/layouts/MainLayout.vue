@@ -32,6 +32,7 @@
         <el-menu-item index="/playlists"><MfIcon name="List" /><template #title>歌单</template></el-menu-item>
         <el-menu-item index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>我喜欢的音乐</template></el-menu-item>
         <el-menu-item index="/groups"><MfIcon name="Box" /><template #title>播放器群组</template></el-menu-item>
+        <el-menu-item index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
         <el-menu-item index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/music"><MfIcon name="Search" /><template #title>音乐管理</template></el-menu-item>

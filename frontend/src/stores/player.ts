@@ -36,8 +36,9 @@ function songToQueueItem(song: Song): any {
     title: song.title || "未知",
     artist: song.artist || undefined,
     album: song.album || undefined,
+    albumId: song.albumId || undefined,
     mime: SUFFIX_MIME[(song.suffix || "").toLowerCase()] || "audio/mpeg",
-    coverArt: song.coverArt || undefined,
+    coverArt: song.coverArt || (song.albumId ? `al-${song.albumId}` : undefined),
     duration: song.duration || undefined,
   };
 }
@@ -49,8 +50,9 @@ function queueItemToSong(it: any): Song {
     title: it.title || "未知",
     artist: it.artist || "",
     album: it.album || "",
+    albumId: it.albumId,
     duration: it.duration || 0,
-    coverArt: it.coverArt,
+    coverArt: it.coverArt || (it.albumId ? `al-${it.albumId}` : undefined),
   };
 }
 

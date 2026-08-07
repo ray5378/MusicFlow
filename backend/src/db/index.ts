@@ -306,6 +306,27 @@ export function initDatabase() {
       is_active INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
+
+    CREATE TABLE IF NOT EXISTS genres (
+      id TEXT PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      song_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS flows (
+      id TEXT PRIMARY KEY,
+      token TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      definition_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT DEFAULT '',
+      last_run_status TEXT DEFAULT '',
+      last_run_error TEXT DEFAULT '',
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)
@@ -398,6 +419,19 @@ export function initDatabase() {
   ]));
 
   console.log("Database initialized successfully");
+}
+
+// 风格表回填:从 songs.genre 全量同步(幂等,启动时调用)。
+// 每个风格名只分配一次 uuid,之后保持不变;同步最新计数。
+export function backfillGenres(): void {
+  const rows = sqlite.prepare("SELECT genre AS name, COUNT(*) AS n FROM songs WHERE genre != '' GROUP BY genre").all() as any[];
+  const now = new Date().toISOString();
+  const insert = sqlite.prepare("INSERT OR IGNORE INTO genres (id, name, song_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+  const update = sqlite.prepare("UPDATE genres SET song_count = ?, updated_at = ? WHERE name = ?");
+  for (const r of rows) {
+    insert.run(uuidv4(), r.name, r.n, now, now);
+    update.run(r.n, now, r.name);
+  }
 }
 
 // Delete play history rows older than the retention window (ISO comparison is

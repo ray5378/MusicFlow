@@ -45,6 +45,7 @@ export interface QueueItem {
   title: string;
   artist?: string;
   album?: string;
+  albumId?: string;
   mime: string;
   coverArt?: string;
   duration?: number;

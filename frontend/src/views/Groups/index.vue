@@ -23,6 +23,9 @@
             <span :class="{ 'online': onlineCount(g) > 0 }">{{ onlineCount(g) }} 台在线</span>
           </div>
         </div>
+        <div class="group-id-row">
+          <IdBadge :id="`group:${g.id}`" copy-label="群组 ID" />
+        </div>
         <div class="group-members">
           <template v-if="g.members.length > 0">
             <span
@@ -30,8 +33,11 @@
               :key="m.deviceId"
               class="member-chip"
               :class="{ offline: !m.available }"
+              @click="copyPeer(`dlna:${m.deviceId}`, m.name)"
+              :title="`点击复制设备 ID:dlna:${m.deviceId}`"
             >
               {{ m.name }}
+              <MfIcon name="CopyDocument" class="member-copy-icon"  />
               <span v-if="!m.available" class="member-offline">离线</span>
             </span>
           </template>
@@ -127,6 +133,14 @@ import { ref, watch, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import api from "@/api";
+import IdBadge from "@/components/IdBadge.vue";
+import { useCopy } from "@/composables/useCopy";
+
+const { copy } = useCopy();
+
+function copyPeer(peerId: string, name: string) {
+  copy(peerId, `设备 ID(${name})`);
+}
 
 const playerStore = usePlayerStore();
 
@@ -295,9 +309,13 @@ onMounted(loadGroups);
     .meta-dot { margin: 0 4px; }
     .online { color: var(--fnos-green); }
   }
+  .group-id-row { display: flex; margin-bottom: 12px; }
   .group-members { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; margin-bottom: 14px;
     .member-chip { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.08); border-radius: 12px;
-      padding: 3px 10px; font-size: 12px; color: var(--fnos-text-primary-dim);
+      padding: 3px 10px; font-size: 12px; color: var(--fnos-text-primary-dim); cursor: pointer;
+      transition: background 0.15s;
+      &:hover { background: rgba(255,255,255,0.14); }
+      .member-copy-icon { font-size: 11px; color: var(--fnos-text-tertiary); opacity: 0.6; }
       &.offline { color: var(--fnos-text-muted); }
       .member-offline { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
     }

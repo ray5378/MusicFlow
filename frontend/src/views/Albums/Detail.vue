@@ -10,6 +10,7 @@
         <h1>{{ album.name }}</h1>
         <div class="artist" v-if="album.artist" @click="router.push(`/artists/${album.artistId}`)">{{ album.artist }}</div>
         <div class="info">{{ album.year || '' }} · {{ album.songCount }}首 · {{ formatDuration(album.duration) }}</div>
+        <IdBadge :id="album.id" copy-label="专辑 ID" style="margin-top: 6px" />
         <div class="actions">
           <el-button type="primary" @click="playAll">播放全部</el-button>
         </div>
@@ -25,6 +26,7 @@ import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import EmptyState from "@/components/EmptyState.vue";
+import IdBadge from "@/components/IdBadge.vue";
 import api from "@/api";
 import SongTable from "@/components/SongTable.vue";
 

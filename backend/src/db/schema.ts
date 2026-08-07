@@ -251,3 +251,28 @@ export const groupQueues = sqliteTable("group_queues", {
   isActive: integer("is_active").notNull().default(0),     // 1 = 组当前在播
   updatedAt: text("updated_at").default(""),
 });
+
+// 风格(Genre):给每个风格名分配唯一 ID(供外部 API/webhook 引用)。
+// 歌曲/专辑仍保留自由文本 genre 字段,查询时按 name 关联,避免大规模迁移。
+export const genres = sqliteTable("genres", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  songCount: integer("song_count").default(0),
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+});
+
+// 音流(MusicFlow):一条可复用的自动播放流程(等设备上线→音量→播放模式→播歌单)。
+// 每个流程持有一个唯一 token,对外暴露免登录的 webhook 链接。
+export const flows = sqliteTable("flows", {
+  id: text("id").primaryKey(),
+  token: text("token").notNull().unique(),
+  name: text("name").notNull(),
+  definitionJson: text("definition_json").notNull().default("{}"), // FlowDefinition
+  enabled: integer("enabled").notNull().default(1), // 1 = 可被 webhook/UI 触发
+  lastRunAt: text("last_run_at").default(""),
+  lastRunStatus: text("last_run_status").default(""), // waiting|playing|success|error|timeout
+  lastRunError: text("last_run_error").default(""),
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+});
