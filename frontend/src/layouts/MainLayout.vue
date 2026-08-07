@@ -254,13 +254,12 @@
           v-model:visible="peerSwitcherVisible"
           popper-class="peer-switcher-popover"
         >
-          <template #reference>
-            <el-button class="peer-switch-btn" size="small">
-              <MfIcon name="headphones" class="peer-switch-icon"  />
-              <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
-              <MfIcon name="ArrowUp" class="peer-switch-arrow"  />
-            </el-button>
-          </template>
+<template #reference>
+              <el-button class="peer-switch-btn" size="small" data-tip="切换播放器">
+                <MfIcon name="headphones" class="peer-switch-icon"  />
+                <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
+              </el-button>
+            </template>
           <div class="peer-switcher">
             <div class="peer-switcher-title">选择播放器</div>
             <div class="peer-switcher-list">
@@ -317,10 +316,10 @@
         <!-- 音量：点击展开控制条（去掉常驻滑块，更清爽） -->
         <el-popover placement="top" :width="210" trigger="click" v-model:visible="volumePopoverVisible" popper-class="volume-popover">
           <template #reference>
-            <el-button circle size="small" :class="{ 'vol-active': volumePopoverVisible }" class="vol-btn">
-              <MfIcon :name="playerStore.volume > 0 ? 'volume-2' : 'volume-x'" :size="16" />
-            </el-button>
-          </template>
+              <el-button circle size="small" :class="{ 'vol-active': volumePopoverVisible }" class="vol-btn" data-tip="音量">
+                <MfIcon :name="playerStore.volume > 0 ? 'volume-2' : 'volume-x'" :size="16" />
+              </el-button>
+            </template>
           <div class="volume-popover-body">
             <span class="vol-label">音量</span>
             <el-slider :model-value="playerStore.volume * 100" @input="(v: number) => playerStore.setVolume(v / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-pop-slider" />
@@ -1113,6 +1112,18 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   .peer-switch-label { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
   .peer-switch-arrow { font-size: 10px; color: var(--fnos-text-tertiary); }
 }
+
+/* -- 通用 CSS tooltip：顶部显示，不干扰 popover 触发 -- */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%) scale(0.96);
+  background: rgba(20, 20, 28, 0.92); color: #fff; font-size: 12px; line-height: 1;
+  padding: 5px 9px; border-radius: 4px; white-space: nowrap;
+  opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .15s, transform .15s, visibility .15s;
+  z-index: 1000; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+[data-tip]:hover::after { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
 
 /* ===== Transport control buttons ===== */
 /* 所有可点击的播放控件按钮统一为无边框透明（对齐手机端默认 4 按钮），
