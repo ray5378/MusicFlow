@@ -5,7 +5,6 @@
       <div class="header-actions" v-if="currentGenre">
         <el-button type="primary" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />播放全部</el-button>
         <el-button :disabled="selectedSongs.length === 0" @click="openAddToPlaylistDialog"><MfIcon name="Plus" />添加到歌单({{ selectedSongs.length }})</el-button>
-        <IdBadge :id="currentGenreId" copy-label="风格 ID" />
         <el-button @click="clearGenre"><MfIcon name="X" />返回</el-button>
       </div>
     </div>
@@ -70,13 +69,10 @@ import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
-import IdBadge from "@/components/IdBadge.vue";
-
 const playerStore = usePlayerStore();
 const genres = ref<any[]>([]);
 const genresLoading = ref(false);
 const currentGenre = ref("");
-const currentGenreId = ref("");
 const songs = ref<Song[]>([]);
 const isMobile = useIsMobile();
 const loading = ref(false);
@@ -108,14 +104,12 @@ async function loadGenres() {
 
 function selectGenre(g: any) {
   currentGenre.value = g.name;
-  currentGenreId.value = g.id || "";
   currentPage.value = 1;
   loadSongs();
 }
 
 function clearGenre() {
   currentGenre.value = "";
-  currentGenreId.value = "";
   songs.value = [];
   total.value = 0;
 }

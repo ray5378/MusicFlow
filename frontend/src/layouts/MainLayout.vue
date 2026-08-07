@@ -1162,9 +1162,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
      队列面板底部避让播放条，不再贴底盖住播放条右端的控制按钮 */
   position: fixed; top: 0; right: 0; bottom: 112px;
   width: 360px;
-  background: rgba(31, 28, 42, 0.92);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  background: rgba(31, 28, 42, 0.96);
   border-left: 1px solid rgba(255, 255, 255, 0.08);
   z-index: 200;
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.45);
@@ -1501,9 +1499,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     right: 12px;
     height: 64px;
     border-radius: 18px;
-    background: rgba(15, 14, 22, 0.62);
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    background: rgba(15, 14, 22, 0.82);
     border: 1px solid rgba(255, 255, 255, 0.08);
     /* 移除 border-top —— 播放器是悬浮的，不再是底栏 */
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
@@ -1648,7 +1644,13 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .peer-switcher-tip { font-size: 11px; color: var(--fnos-text-muted); padding: 8px 14px 12px; line-height: 1.5; }
 
 /* ===== Mobile "more" controls popover ===== */
-.mobile-controls-popover.el-popover.el-popper { padding: 0 !important; max-width: calc(100vw - 24px) !important; }
+.mobile-controls-popover.el-popover.el-popper {
+  padding: 0 !important;
+  max-width: calc(100vw - 24px) !important;
+  background: rgba(24, 22, 33, 0.98) !important;
+  backdrop-filter: none !important;
+  isolation: isolate;
+}
 .mc-body { width: 100%; max-height: 72vh; overflow-y: auto; color: var(--fnos-text-primary-dim); }
 .mc-section {
   padding: 12px 14px;

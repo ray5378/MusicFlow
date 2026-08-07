@@ -93,8 +93,6 @@
         <div class="info-row"><span class="info-k">专辑</span><span class="info-v">{{ infoDlg.song.album || '—' }}</span></div>
         <div class="info-row"><span class="info-k">时长</span><span class="info-v">{{ fmt(infoDlg.song.duration) }}</span></div>
         <div class="info-row" v-if="infoDlg.song.bitRate"><span class="info-k">码率</span><span class="info-v">{{ infoDlg.song.bitRate }}kbps · {{ (infoDlg.song.suffix || '').toUpperCase() }}</span></div>
-        <div class="info-row" v-if="infoDlg.song.albumId"><span class="info-k">专辑ID</span><span class="info-v mono">{{ infoDlg.song.albumId }}</span></div>
-        <div class="info-row" v-if="infoDlg.song.artistId"><span class="info-k">艺人ID</span><span class="info-v mono">{{ infoDlg.song.artistId }}</span></div>
       </div>
     </el-dialog>
   </div>

@@ -9,7 +9,6 @@
         <div class="label">艺术家</div>
         <h1>{{ artist.name }}</h1>
         <div class="info">{{ formatAlbumCount(artist.albumCount) }}</div>
-        <IdBadge :id="artist.id" copy-label="艺术家 ID" style="margin-top: 6px" />
         <div class="actions">
           <el-button type="primary" @click="playAllSongs">播放全部歌曲</el-button>
         </div>
@@ -45,7 +44,6 @@ import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
-import IdBadge from "@/components/IdBadge.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import api from "@/api";

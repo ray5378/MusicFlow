@@ -9,7 +9,6 @@
         <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag></div>
         <h1>{{ playlist.name }}</h1>
         <div class="info">{{ playlist.songCount }}首 · {{ formatTotalDuration(playlist.duration) }}</div>
-        <IdBadge :id="playlist.id" copy-label="歌单 ID" style="margin-top: 6px" />
         <div class="info" v-if="playlist.isImported && playlist.matched !== undefined">
           <span class="matched-count">已匹配 {{ playlist.matched }} / {{ playlist.songCount }}</span>
         </div>
@@ -79,7 +78,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
-import IdBadge from "@/components/IdBadge.vue";
 import { Trash2 } from "lucide-vue-next";
 
 const route = useRoute();
