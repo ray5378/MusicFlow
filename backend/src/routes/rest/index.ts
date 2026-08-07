@@ -1116,8 +1116,10 @@ restRoutes.get("/getCoverArt", async (c) => {
   } else if (id.startsWith("so-")) {
     const song = db.select().from(songs).where(eq(songs.id, id.slice(3))).get();
     if (song?.albumId) {
+      // Prefer album cover; fall back to the song's own cover (web/online songs
+      // cache their cover on the song row, not on the album).
       const album = db.select().from(albums).where(eq(albums.id, song.albumId)).get();
-      coverRef = album?.coverArt || null;
+      coverRef = album?.coverArt || song.coverArt || null;
     } else coverRef = song?.coverArt || null;
   } else if (id.startsWith("ar-")) {
     const artist = db.select().from(artists).where(eq(artists.id, id.slice(3))).get();

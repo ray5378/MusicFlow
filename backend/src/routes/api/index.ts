@@ -347,7 +347,7 @@ apiRoutes.get("/v1/songs", (c) => {
     albumId: s.albumId, duration: s.duration, bitRate: s.bitRate, suffix: s.suffix,
     contentType: s.contentType, size: s.size, playCount: s.playCount, genre: s.genre,
     track: s.track, discNumber: s.discNumber,
-    coverArt: s.albumId ? idToCoverArt(s.albumId, "al") : undefined,
+    coverArt: s.albumId ? idToCoverArt(s.albumId, "al") : (s.coverArt ? `so-${s.id}` : undefined),
   }));
   return c.json({ total, page, pageSize, items });
 });
@@ -883,7 +883,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
           id: song.id, title: song.title, artist: song.artist, album: song.album,
           artistId: song.artistId, albumId: song.albumId, duration: song.duration || 0,
           bitRate: song.bitRate, suffix: song.suffix, contentType: song.contentType,
-          coverArt: album?.coverArt ? `al-${album.id}` : undefined,
+          coverArt: album?.coverArt ? `al-${album.id}` : (song.coverArt ? `so-${song.id}` : undefined),
           playable: true, isMatched: true,
         };
       }
@@ -914,7 +914,7 @@ apiRoutes.get("/v1/history", (c) => {
       id: song.id, title: song.title, artist: song.artist, album: song.album,
       artistId: song.artistId, albumId: song.albumId, duration: song.duration || 0,
       bitRate: song.bitRate, suffix: song.suffix, contentType: song.contentType,
-      coverArt: album?.coverArt ? `al-${album.id}` : undefined,
+      coverArt: album?.coverArt ? `al-${album.id}` : (song.coverArt ? `so-${song.id}` : undefined),
       playedAt: h.playedAt || "",
     };
   }).filter(Boolean);
