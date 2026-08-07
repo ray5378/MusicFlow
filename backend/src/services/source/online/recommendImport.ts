@@ -132,14 +132,33 @@ export async function importRecommendPlaylist(
   };
 }
 
-/** Re-import every locally-imported daily-recommend playlist (full-replace each). */
+export interface SyncRecommendResult {
+  synced: number;
+  created: number;
+  failed: number;
+  errors: string[];
+  playlists: { id: string; name: string; trackCount: number }[];
+}
+
+/**
+ * Re-import every locally-imported daily-recommend playlist (full-replace each).
+ *
+ * Handles missing-channel seeding: after refreshing whatever is already imported,
+ * we also fetch the provider's per-channel recommendations and auto-create a local
+ * playlist for any channel that has no imported playlist yet. This makes the whole
+ * flow hands-free — a daily automatic run keeps each channel's 每日推荐 in sync
+ * without a manual first import.
+ */
 export async function syncAllRecommendPlaylists(
   providerId: string,
   opts?: { userId?: string },
-): Promise<{ synced: number; failed: number; errors: string[]; playlists: { id: string; name: string; trackCount: number }[] }> {
-  const all = db.select().from(playlists).all().filter((p) => isDailyRecommendPlaylist(p));
+): Promise<SyncRecommendResult> {
   const out: { id: string; name: string; trackCount: number }[] = [];
   const errors: string[] = [];
+  let created = 0;
+  const visitedRemoteIds = new Set<string>();
+
+  const all = db.select().from(playlists).all().filter((p) => isDailyRecommendPlaylist(p));
   for (const pl of all) {
     try {
       const result = await importRecommendPlaylist(providerId, {
@@ -151,11 +170,42 @@ export async function syncAllRecommendPlaylists(
         trackCount: "",
         link: "",
       }, opts);
-      if (result.success) out.push({ id: pl.id, name: pl.name, trackCount: result.trackCount });
+      if (result.success) {
+        out.push({ id: pl.id, name: pl.name, trackCount: result.trackCount });
+        if (pl.externalId) visitedRemoteIds.add(String(pl.externalId));
+      }
       else errors.push(`${pl.name}: 导入失败`);
     } catch (e: any) {
       errors.push(`${pl.name}: ${e.message || "同步失败"}`);
     }
   }
-  return { synced: out.length, failed: errors.length, errors, playlists: out };
+
+  // Seed channels that have no imported playlist yet (auto-create on first sync).
+  const configured = getConfiguredProvider(providerId);
+  if (configured?.provider.recommend) {
+    try {
+      const res = await configured.provider.recommend(configured.config);
+      for (const ch of res.channels) {
+        const chHasImport = all.some((p) => p.sourcePlatform === ch.source);
+        const candidate = ch.playlists.find((p: any) => !visitedRemoteIds.has(String(p.id)));
+        if (!chHasImport && candidate) {
+          try {
+            const r = await importRecommendPlaylist(providerId, candidate, opts);
+            if (r.success && r.playlistId) {
+              created++;
+              out.push({ id: r.playlistId, name: r.name, trackCount: r.trackCount });
+              visitedRemoteIds.add(String(candidate.id));
+            } else {
+              errors.push(`${ch.source}: 自动创建失败`);
+            }
+          } catch (e: any) {
+            errors.push(`${ch.source}: ${e.message || "自动创建失败"}`);
+          }
+        }
+      }
+    } catch (e: any) {
+      errors.push(`获取渠道推荐失败: ${e.message || e}`);
+    }
+  }
+  return { synced: out.length, created, failed: errors.length, errors, playlists: out };
 }
