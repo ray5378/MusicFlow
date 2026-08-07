@@ -301,7 +301,7 @@
         </el-popover>
         <!-- 播放列表 -->
         <el-tooltip content="播放列表" placement="top">
-          <el-button circle size="small" @click="playerStore.togglePlaylistPanel" :type="playerStore.showPlaylist ? 'primary' : ''"><MfIcon name="List" /></el-button>
+          <el-button circle size="small" @click="playerStore.togglePlaylistPanel"><MfIcon name="List" /></el-button>
         </el-tooltip>
         <!-- 添加到歌单 -->
         <el-tooltip content="添加到歌单" placement="top">
@@ -331,11 +331,11 @@
     <!-- ===== Queue panel ===== -->
     <transition name="slide-right">
       <div class="queue-panel" v-if="playerStore.showPlaylist">
+        <button class="queue-hide-btn" @click="playerStore.togglePlaylistPanel" title="收起播放队列"><MfIcon name="ChevronRight" :size="16" /></button>
         <div class="queue-header">
           <span>播放队列 ({{ playerStore.queue.length }})</span>
           <div class="queue-actions">
             <el-button size="small" text @click="playerStore.clearQueue">清空</el-button>
-            <el-button size="small" text @click="playerStore.togglePlaylistPanel">关闭</el-button>
           </div>
         </div>
         <div class="queue-list" ref="queueListEl">
@@ -363,6 +363,11 @@
         </div>
       </div>
     </transition>
+
+    <!-- ===== Queue expand button (shown when the panel is hidden) ===== -->
+    <button v-if="!playerStore.showPlaylist" class="queue-expand-btn" @click="playerStore.togglePlaylistPanel" title="展开播放队列">
+      <MfIcon name="List" :size="16" /><span class="queue-expand-count">{{ playerStore.queue.length }}</span>
+    </button>
 
     <!-- ===== Fullscreen play mode (NetEase style) ===== -->
     <transition name="fade">
@@ -1171,7 +1176,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .queue-panel {
   /* 播放器已是悬浮药丸（bottom:18px height:84px，占底部约 102px）——
      队列面板底部避让播放条，不再贴底盖住播放条右端的控制按钮 */
-  position: fixed; top: 0; right: 0; bottom: 112px;
+  position: fixed; top: 112px; right: 0; bottom: 112px;
   width: 360px;
   background: rgba(31, 28, 42, 0.96);
   border-left: 1px solid rgba(255, 255, 255, 0.08);
@@ -1179,6 +1184,19 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.45);
   display: flex; flex-direction: column;
   color: var(--fnos-text-primary);
+  .queue-hide-btn {
+    position: absolute; top: 50%; left: 0; transform: translate(-50%, -50%);
+    width: 26px; height: 48px; border-radius: 0 12px 12px 0;
+    border: none; cursor: pointer; z-index: 5;
+    background: rgba(31, 28, 42, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-left: none;
+    color: var(--fnos-text-secondary);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+    transition: color 0.18s, background 0.18s;
+    &:hover { color: #fff; background: rgba(45, 41, 58, 0.98); }
+  }
   .queue-header {
     display: flex; justify-content: space-between; align-items: center;
     padding: 18px 18px 14px;
@@ -1235,6 +1253,19 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     }
     .queue-empty { text-align: center; color: var(--fnos-text-muted); padding: 40px 0; }
   }
+}
+
+/* 队列收起时右缘中部的展开按钮（独立于 .queue-panel，面板隐藏时仍显示） */
+.queue-expand-btn {
+  position: fixed; top: 50%; right: 0; transform: translateY(-50%);
+  height: 48px; padding: 0 8px; border-radius: 12px 0 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08); border-right: none;
+  background: rgba(31, 28, 42, 0.96); color: var(--fnos-text-secondary);
+  cursor: pointer; z-index: 210; display: flex; align-items: center; gap: 6px;
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
+  transition: color 0.18s, background 0.18s;
+  &:hover { color: #fff; background: rgba(45, 41, 58, 0.98); }
+  .queue-expand-count { font-size: 12px; font-weight: 600; }
 }
 
 /* ===== Fullscreen play mode (FnOS-inspired aurora) ===== */
@@ -1566,7 +1597,9 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     border-left: none;
     z-index: 550;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    .queue-hide-btn { display: none; }
   }
+  .queue-expand-btn { display: none; }
 
   /* --- Fullscreen play mode: stacked single column --- */
   .play-mode { overflow-y: auto; z-index: 700; }

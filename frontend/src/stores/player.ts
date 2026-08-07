@@ -3,6 +3,7 @@ import { ref, computed, reactive } from "vue";
 import { Howl } from "howler";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
+import { useIsMobile } from "@/composables/useIsMobile";
 
 export interface Song {
   id: string;
@@ -64,6 +65,12 @@ export const usePlayerStore = defineStore("player", () => {
   const showLyrics = ref(false);
   const showPlaylist = ref(false);
   const playModeVisible = ref(false); // fullscreen play mode overlay
+
+  // Desktop: automatically open the queue panel when playback starts, or when
+  // switching to a player that is already playing. Mobile has its own bottom
+  // sheet, so this only applies to ≥769px viewports.
+  const isMobile = useIsMobile();
+  function autoshowQueue() { if (!isMobile.value) showPlaylist.value = true; }
 
   // ==================== Local (本机) state machine ====================
   // Completely independent from DLNA. Howl's onend only calls localNext,
@@ -296,7 +303,8 @@ export const usePlayerStore = defineStore("player", () => {
       onend: () => { localNext(); },
       onload: () => { localDuration.value = howl?.duration() || 0; },
     });
-    howl.play();
+howl.play();
+    autoshowQueue();
   }
 
   async function loadLocalLyrics(songId: string) {
@@ -465,6 +473,7 @@ export const usePlayerStore = defineStore("player", () => {
 
   function startCastPlayback(st: RemoteState) {
     pushCastQueueToBackend(st, st.index >= 0 ? st.index : 0);
+    autoshowQueue();
   }
 
   async function loadCastLyrics(st: RemoteState, songId: string) {
@@ -843,12 +852,15 @@ export const usePlayerStore = defineStore("player", () => {
         startCastPoll(st);
       }
       currentPeerId.value = peerId;
+      // If the player we switched to is already playing, mirror the queue panel.
+      if (isRemotePeer.value && activeRemote.value?.isPlaying) autoshowQueue();
     } else {
       // Switching UI back to本机. Every remote peer keeps playing on its
       // own. 本机 state is already intact (Howl kept playing if it was
       // playing). Just flip the UI pointer — the computed properties will
       // show本机 state again.
       currentPeerId.value = peerId;
+      if (localIsPlaying.value) autoshowQueue();
     }
   }
 
