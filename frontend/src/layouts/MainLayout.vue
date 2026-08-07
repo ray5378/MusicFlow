@@ -55,6 +55,100 @@
       </div>
     </aside>
 
+    <!-- ===== Mobile "播放控制" drawer: same chrome as the nav sidebar ===== -->
+    <transition name="fade">
+      <div class="sidebar-overlay" v-if="isMobile && controlsDrawerOpen" @click="controlsDrawerOpen = false"></div>
+    </transition>
+    <aside v-if="isMobile" class="sidebar mobile" :class="{ 'mobile-open': isMobile && controlsDrawerOpen }">
+      <div class="logo controls-logo">
+        <span class="logo-text">播放控制</span>
+      </div>
+      <div class="controls-scroll">
+        <!-- 选择播放器 -->
+        <div class="csec">
+          <div class="ctitle">选择播放器</div>
+          <div class="controls-peer-list">
+            <div
+              v-for="p in playerStore.peers"
+              :key="p.peerId"
+              class="controls-peer-item"
+              :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
+              @click="onControlsSwitchPeer(p.peerId)"
+            >
+              <MfIcon :name="p.kind === 'group' ? 'box' : 'headphones'" class="controls-peer-icon" />
+              <div class="controls-peer-info">
+                <div class="controls-peer-name">
+                  {{ p.kind === 'local' ? '本机' : p.name }}
+                  <span v-if="!p.available" class="controls-peer-offline">离线</span>
+                </div>
+                <div class="controls-peer-meta">
+                  <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
+                    {{ p.queue.items.length }} 首
+                    <span v-if="p.queue.isActive">
+                      · 播放中
+                      <span v-if="peerPlayingTitle(p)" class="controls-playing-title">· {{ peerPlayingTitle(p) }}</span>
+                    </span>
+                  </span>
+                  <span v-else>空闲</span>
+                </div>
+              </div>
+              <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId" class="controls-peer-check" />
+            </div>
+            <div v-if="playerStore.peers.length === 0" class="controls-peer-empty">暂无可用播放器</div>
+          </div>
+          <div class="controls-scan">
+            <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
+              <MfIcon name="RefreshCw" />重新扫描DLNA设备
+            </el-button>
+          </div>
+        </div>
+
+        <!-- 播放进度 -->
+        <div class="csec">
+          <div class="cprogress">
+            <span class="ctime">{{ formatTime(playerStore.currentTime) }}</span>
+            <el-slider :model-value="playerStore.progress" @input="playerStore.seekPercent" :show-tooltip="false" class="cslider" />
+            <span class="ctime">{{ formatTime(playerStore.duration) }}</span>
+          </div>
+        </div>
+
+        <!-- 传输控制 -->
+        <div class="csec cctrl">
+          <el-tooltip :content="playModeTooltip" placement="top">
+            <el-button circle size="small" @click="playerStore.cyclePlayMode" :type="playerStore.playMode !== 'order' ? 'primary' : ''">
+              <MfIcon :name="playModeIconName" :size="16" />
+            </el-button>
+          </el-tooltip>
+          <el-button circle @click="playerStore.prev"><MfIcon name="SkipBack" :size="22" /></el-button>
+          <el-button circle type="primary" class="cplay" @click="playerStore.togglePlay">
+            <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="28" />
+          </el-button>
+          <el-button circle @click="playerStore.next"><MfIcon name="SkipForward" :size="22" /></el-button>
+        </div>
+
+        <!-- 工具：添加到歌单、喜欢、音量 -->
+        <div class="csec ctools">
+          <el-tooltip content="添加到歌单" placement="top">
+            <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
+          </el-tooltip>
+          <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
+            <el-button circle size="small" class="fav-btn" :class="{ active: isCurrentFavorite }" @click="toggleCurrentFavorite">
+              <MfIcon name="Heart" :filled="isCurrentFavorite" :size="16" />
+            </el-button>
+          </el-tooltip>
+          <div class="cvolume">
+            <span class="cvol-label">音量</span>
+            <el-slider
+              :model-value="playerStore.volume * 100"
+              @input="(v: number) => playerStore.setVolume(v / 100)"
+              :format-tooltip="(v: number) => `${Math.round(v)}%`"
+              class="cvol-slider"
+            />
+          </div>
+        </div>
+      </div>
+    </aside>
+
     <main class="main-content">
       <!-- 可滚动内容 -->
       <div class="main-scroll">
@@ -85,105 +179,9 @@
           <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="24" />
         </button>
         <button type="button" class="mp-btn" @click="playerStore.next"><MfIcon name="SkipForward" :size="18" /></button>
-
-        <!-- More: opens the full playback controls panel (mirrors desktop bar,
-             including the player switcher + DLNA rescan). -->
-        <el-popover
-          placement="top"
-          :width="340"
-          trigger="click"
-          popper-class="mobile-controls-popover"
-          transition="more-pop"
-          v-model:visible="mobileControlsVisible"
-        >
-          <template #reference>
-            <button type="button" class="mp-btn mp-more" :class="{ active: mobileControlsVisible }">
-              <MfIcon name="MoreHorizontal" :size="18"  />
-            </button>
-          </template>
-          <div class="mc-body">
-            <!-- Player switcher (same data/actions as the desktop popover) -->
-            <div class="mc-section">
-              <div class="mc-title">选择播放器</div>
-              <div class="mc-peer-list">
-                <div
-                  v-for="p in playerStore.peers"
-                  :key="p.peerId"
-                  class="mc-peer-item"
-                  :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
-                  @click="onMobileSwitchPeer(p.peerId)"
-                >
-                  <MfIcon :name="p.kind === 'group' ? 'box' : 'headphones'" class="mc-peer-icon" />
-                  <div class="mc-peer-info">
-                    <div class="mc-peer-name">
-                      {{ p.kind === 'local' ? '本机' : p.name }}
-                      <span v-if="!p.available" class="mc-peer-offline">离线</span>
-                    </div>
-                    <div class="mc-peer-meta">
-                      <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
-                        {{ p.queue.items.length }} 首
-                        <span v-if="p.queue.isActive">
-                          · 播放中
-                          <span v-if="peerPlayingTitle(p)" class="mc-playing-title">· {{ peerPlayingTitle(p) }}</span>
-                        </span>
-                      </span>
-                      <span v-else>空闲</span>
-                    </div>
-                  </div>
-                  <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId" class="mc-peer-check"  />
-                </div>
-                <div v-if="playerStore.peers.length === 0" class="mc-peer-empty">暂无可用播放器</div>
-              </div>
-              <div class="mc-scan">
-                <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
-                  <MfIcon name="RefreshCw" />重新扫描DLNA设备
-                </el-button>
-              </div>
-            </div>
-
-            <!-- Progress -->
-            <div class="mc-section mc-progress">
-              <span class="mc-time">{{ formatTime(playerStore.currentTime) }}</span>
-              <el-slider :model-value="playerStore.progress" @input="playerStore.seekPercent" :show-tooltip="false" class="mc-slider" />
-              <span class="mc-time">{{ formatTime(playerStore.duration) }}</span>
-            </div>
-
-            <!-- Transport controls -->
-            <div class="mc-section mc-ctrl-row">
-              <el-tooltip :content="playModeTooltip" placement="top">
-                <el-button circle size="small" @click="playerStore.cyclePlayMode" :type="playerStore.playMode !== 'order' ? 'primary' : ''">
-                  <MfIcon :name="playModeIconName" :size="16" />
-                </el-button>
-              </el-tooltip>
-              <el-button circle @click="playerStore.prev"><MfIcon name="SkipBack" :size="22" /></el-button>
-              <el-button circle type="primary" class="mc-play" @click="playerStore.togglePlay">
-                <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="28" />
-              </el-button>
-              <el-button circle @click="playerStore.next"><MfIcon name="SkipForward" :size="22" /></el-button>
-            </div>
-
-            <!-- Tools: add to playlist, favorite, volume -->
-            <div class="mc-section mc-tools">
-              <el-tooltip content="添加到歌单" placement="top">
-                <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
-              </el-tooltip>
-              <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
-                <el-button circle size="small" class="fav-btn" :class="{ active: isCurrentFavorite }" @click="toggleCurrentFavorite">
-                  <MfIcon name="Heart" :filled="isCurrentFavorite" :size="16" />
-                </el-button>
-              </el-tooltip>
-              <div class="mc-volume">
-                <span class="mc-vol-label">音量</span>
-                <el-slider
-                  :model-value="playerStore.volume * 100"
-                  @input="(v: number) => playerStore.setVolume(v / 100)"
-                  :format-tooltip="(v: number) => `${Math.round(v)}%`"
-                  class="mc-vol-slider"
-                />
-              </div>
-            </div>
-          </div>
-        </el-popover>
+        <button type="button" class="mp-btn" :class="{ active: controlsDrawerOpen }" @click="controlsDrawerOpen = !controlsDrawerOpen" title="播放控制">
+          <MfIcon name="Headphones" :size="18" />
+        </button>
       </div>
     </footer>
 
@@ -505,14 +503,14 @@ const sidebarCollapsed = ref(false);
 // ===== Responsive layout state =====
 const isMobile = ref(false);
 const mobileNavOpen = ref(false);
-const mobileControlsVisible = ref(false);
+const controlsDrawerOpen = ref(false);
 /** 展开/收起动画：按位移宽度换算时长（px/s），宽度越大时长越长，体感速度一致 */
 const SLIDE_SPEED = 600;
 const rootStyle = () => document.documentElement.style;
 function applyMotionDurations(w: number) {
   const isM = w < 768;
   const queueW = isM ? Math.min(240, (w - 48) * 2 / 3) : 360;  // 队列面板宽度=滑入位移
-  const popW = Math.min(280, w * 0.82);                     // 播放控件抽屉宽度
+  const popW = Math.min(280, w * 0.82);                     // 播放控件弹窗宽度
   rootStyle().setProperty('--queue-slide-dur', `${Math.round(queueW / SLIDE_SPEED * 1000)}ms`);
   rootStyle().setProperty('--pop-expand-dur', `${Math.round(popW / SLIDE_SPEED * 1000)}ms`);
 }
@@ -656,16 +654,16 @@ const volumePopoverVisible = ref(false);
 const overlaySources = [
   () => playerStore.playModeVisible,
   () => playerStore.showPlaylist,
-  () => mobileControlsVisible.value,
   () => volumePopoverVisible.value,
   () => mobileNavOpen.value,
+  () => controlsDrawerOpen.value,
 ];
 function closeTopOverlay(): boolean {
   if (playerStore.playModeVisible) { playerStore.playModeVisible = false; return true; }
   if (playerStore.showPlaylist) { playerStore.showPlaylist = false; return true; }
-  if (mobileControlsVisible.value) { mobileControlsVisible.value = false; return true; }
   if (volumePopoverVisible.value) { volumePopoverVisible.value = false; return true; }
   if (mobileNavOpen.value) { mobileNavOpen.value = false; return true; }
+  if (controlsDrawerOpen.value) { controlsDrawerOpen.value = false; return true; }
   return false;
 }
 /* ===== 手机端滑动返回关闭所有弹窗 =====
@@ -678,7 +676,7 @@ watch(overlaySources, (now) => {
 }, { flush: "sync" });
 function anyOverlayOpen(): boolean {
   return playerStore.playModeVisible || playerStore.showPlaylist ||
-    mobileControlsVisible.value || volumePopoverVisible.value || mobileNavOpen.value;
+    volumePopoverVisible.value || mobileNavOpen.value || controlsDrawerOpen.value;
 }
 // 手势状态
 let swipeStartX = 0;
@@ -725,21 +723,14 @@ onUnmounted(() => {
   window.removeEventListener("touchend", onSwipeTouchEnd);
 });
 
-/** 弹窗互斥：更多弹窗一打开就关闭播放列表面板。
- *  用 watch 而非按钮 @click —— el-popover 的 reference 插槽对原生 click 监听
- *  的合并在部分场景不触发（实测点击到达按钮但 @click 未执行）。 */
-watch(() => mobileControlsVisible.value, (v) => {
-  if (v && playerStore.showPlaylist) playerStore.showPlaylist = false;
-});
-
 async function onSwitchPeer(peerId: string) {
   peerSwitcherVisible.value = false;
   await playerStore.switchPeer(peerId);
   playerStore.refreshPeers();
 }
 
-async function onMobileSwitchPeer(peerId: string) {
-  mobileControlsVisible.value = false;
+async function onControlsSwitchPeer(peerId: string) {
+  controlsDrawerOpen.value = false;
   await playerStore.switchPeer(peerId);
   playerStore.refreshPeers();
 }
@@ -1710,122 +1701,72 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 }
 .peer-switcher-tip { font-size: 11px; color: var(--fnos-text-muted); padding: 8px 14px 12px; line-height: 1.5; }
 
-/* ===== Mobile "more" controls popover ===== */
-/* 新的抽屉侧边栏：靠近播放控件、底部锚定向上展开，玻璃模糊/描边/阴影与侧边栏一致，顶部两角圆角 */
-.mobile-controls-popover.el-popover.el-popper {
-  padding: 0 !important;
-  width: min(280px, 82vw) !important;
-  background: rgba(31, 28, 42, 0.94) !important;
-  backdrop-filter: blur(22px) saturate(180%);
-  -webkit-backdrop-filter: blur(22px) saturate(180%);
-  isolation: isolate;
-  position: fixed !important;
-  top: auto !important;
-  bottom: 88px !important;   /* 播放条(12+64=76)上方留 12px */
-  left: 12px !important;
-  right: auto !important;
-  height: min(68vh, 520px);
-  border-radius: 20px 20px 0 0;   /* 顶部两角圆角，底部贴近播放条 */
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-bottom: none;
-  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.4);
-  transform: translateY(0) !important;   /* 可见态原位；进出由过渡弹出/收回 */
-  display: flex; flex-direction: column;
-  overflow: hidden;
+/* ===== Mobile "播放控制" drawer (同款侧边栏样式) ===== */
+.controls-logo { justify-content: flex-start; }
+.controls-scroll {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  scrollbar-width: none; -ms-overflow-style: none;
+  &::-webkit-scrollbar { display: none; }
+  color: var(--fnos-text-primary-dim);
 }
-/* 从播放条边缘自下而上弹出 / 收回 */
-.more-pop-enter-active,
-.more-pop-leave-active {
-  transition: transform var(--pop-expand-dur, 0.3s) cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.3s ease !important;
-  transform-origin: bottom center !important;
-}
-.more-pop-enter-from,
-.more-pop-leave-to {
-  transform: translateY(28px) !important;
-  opacity: 0 !important;
-}
-.mc-body { width: 100%; color: var(--fnos-text-primary-dim); overflow-y: auto; flex: 1; min-height: 0; }
-.mc-section {
+.csec {
   padding: 12px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   &:last-child { border-bottom: none; }
 }
-.mc-title { font-size: 13px; font-weight: 600; color: var(--fnos-text-primary); margin-bottom: 8px; }
-.mc-peer-list { max-height: 220px; overflow-y: auto; }
-.mc-peer-item {
+.ctitle { font-size: 13px; font-weight: 600; color: var(--fnos-text-primary); margin-bottom: 8px; }
+.controls-peer-list { max-height: 220px; overflow-y: auto; }
+.controls-peer-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 8px; border-radius: 8px; cursor: pointer;
+  padding: 8px; border-radius: 8px; cursor: pointer;
   &:hover { background: rgba(255, 255, 255, 0.06); }
   &.active {
     background: linear-gradient(90deg, rgba(246, 44, 85, 0.18) 0%, rgba(246, 44, 85, 0.04) 100%);
-    .mc-peer-name { color: var(--fnos-red); }
-    .mc-peer-icon { color: var(--fnos-red); }
+    .controls-peer-name { color: var(--fnos-red); }
+    .controls-peer-icon { color: var(--fnos-red); }
   }
   &.unavailable { opacity: 0.55; }
-  .mc-peer-icon { font-size: 18px; color: var(--fnos-text-tertiary); flex-shrink: 0; }
-  .mc-peer-info { flex: 1; min-width: 0;
-    .mc-peer-name {
-      font-size: 14px; font-weight: 500;
+  .controls-peer-icon { font-size: 18px; color: var(--fnos-text-tertiary); flex-shrink: 0; }
+  .controls-peer-info { flex: 1; min-width: 0;
+    .controls-peer-name {
+      font-size: 14px; font-weight: 500; color: var(--fnos-text-primary);
       display: flex; align-items: center; gap: 6px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .mc-peer-offline { font-size: 11px; color: #fff; background: var(--fnos-text-muted); border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
-    .mc-peer-meta {
-      font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      .mc-playing-title { color: var(--fnos-green); font-weight: 500; }
-    }
+    .controls-peer-offline { font-size: 11px; color: #fff; background: var(--fnos-text-muted); border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+    .controls-peer-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .controls-playing-title { color: var(--fnos-yellow); }
   }
-  .mc-peer-check { color: var(--fnos-red); font-size: 16px; flex-shrink: 0; }
+  .controls-peer-check { color: var(--fnos-red); font-size: 16px; flex-shrink: 0; }
 }
-.mc-peer-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 16px 0; }
-.mc-scan { padding-top: 8px;
+.controls-peer-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 16px 0; }
+.controls-scan { padding-top: 8px;
   .el-button { width: 100%; }
 }
-.mc-progress {
-  display: flex; align-items: center; gap: 8px;
-  .mc-time { font-size: 12px; color: var(--fnos-text-tertiary); min-width: 36px; }
-  .mc-slider { flex: 1; }
+.cprogress { display: flex; align-items: center; gap: 10px;
+  .ctime { font-size: 12px; color: var(--fnos-text-tertiary); min-width: 36px; }
+  .cslider { flex: 1; }
 }
-.mc-ctrl-row {
-  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
-  .mc-play {
+.cctrl { display: flex; align-items: center; justify-content: space-around; gap: 8px;
+  .cplay {
+    background: var(--fnos-red); border-color: var(--fnos-red); color: #fff;
     width: 48px; height: 48px;
-    min-width: 48px; min-height: 48px;
-    background: var(--fnos-red) !important; border-color: var(--fnos-red) !important;
-    box-shadow: 0 4px 16px rgba(246, 44, 85, 0.5);
+    &:hover { background: var(--fnos-red-hover); border-color: var(--fnos-red-hover); }
   }
 }
-/* 更多弹窗内所有可点击按钮：无边框透明（对齐手机端默认 4 按钮），hover 淡白 */
-.mc-body .el-button {
-  border: none !important;
-  background: transparent !important;
-  color: rgba(255, 255, 255, 0.85) !important;
-  outline: none !important;
-  box-shadow: none !important;
-  &:hover, &:focus {
-    background: rgba(255, 255, 255, 0.1) !important;
-    color: #fff !important;
-    outline: none !important;
-    box-shadow: none !important;
+.ctools { display: flex; align-items: center; gap: 10px;
+  .cvolume { flex: 1; display: flex; align-items: center; gap: 8px; margin-left: 4px;
+    .cvol-label { font-size: 12px; color: var(--fnos-text-tertiary); white-space: nowrap; }
+    .cvol-slider { flex: 1; }
   }
 }
-/* 更多弹窗主播放按钮 / 选中态：保留红色实心 */
-.mc-body .el-button.mc-play,
-.mc-body .el-button.el-button--primary {
-  background: var(--fnos-red) !important;
-  border-color: var(--fnos-red) !important;
-  color: #fff !important;
-  &:hover, &:focus { background: var(--fnos-red-hover) !important; border-color: var(--fnos-red-hover) !important; }
+/* 按钮用透明描边圆角按钮，与播放控件观感一致 */
+.csec .el-button { border-radius: 50%; }
+.controls-scroll .el-button:not(.cplay) {
+  border: none; background: transparent; color: rgba(255, 255, 255, 0.85);
+  &:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
 }
-.mc-tools {
-  display: flex; align-items: center; gap: 10px;
-  .mc-volume {
-    flex: 1; display: flex; align-items: center; gap: 8px; margin-left: 4px;
-    .mc-vol-label { font-size: 12px; color: var(--fnos-text-tertiary); white-space: nowrap; }
-    .mc-vol-slider { flex: 1; }
-  }
-}
+
 </style>
 
 <style lang="scss">
