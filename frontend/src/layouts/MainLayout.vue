@@ -93,7 +93,7 @@
           :width="340"
           trigger="click"
           popper-class="mobile-controls-popover"
-          transition="pop-expand-up"
+          transition="more-pop"
           v-model:visible="mobileControlsVisible"
         >
           <template #reference>
@@ -512,7 +512,7 @@ const rootStyle = () => document.documentElement.style;
 function applyMotionDurations(w: number) {
   const isM = w < 768;
   const queueW = isM ? Math.min(240, (w - 48) * 2 / 3) : 360;  // 队列面板宽度=滑入位移
-  const popW = w - 24;                                          // 播放控件弹窗宽度
+  const popW = Math.min(280, w * 0.82);                     // 播放控件抽屉宽度
   rootStyle().setProperty('--queue-slide-dur', `${Math.round(queueW / SLIDE_SPEED * 1000)}ms`);
   rootStyle().setProperty('--pop-expand-dur', `${Math.round(popW / SLIDE_SPEED * 1000)}ms`);
 }
@@ -1711,35 +1711,40 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .peer-switcher-tip { font-size: 11px; color: var(--fnos-text-muted); padding: 8px 14px 12px; line-height: 1.5; }
 
 /* ===== Mobile "more" controls popover ===== */
+/* 新的抽屉侧边栏：靠近播放控件、底部锚定向上展开，玻璃模糊/描边/阴影与侧边栏一致，顶部两角圆角 */
 .mobile-controls-popover.el-popover.el-popper {
   padding: 0 !important;
-  max-width: calc(100vw - 24px) !important;
-  background: rgba(24, 22, 33, 0.98) !important;
-  backdrop-filter: none !important;
+  width: min(280px, 82vw) !important;
+  background: rgba(31, 28, 42, 0.94) !important;
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
   isolation: isolate;
-  /* 与播放条对齐：宽度一致、左右与播放条(12px 边距)对齐、紧贴其上方自下而上展开 */
   position: fixed !important;
-  left: 12px !important;
-  right: 12px !important;
-  width: auto !important;
-  bottom: 88px !important;   /* 播放条 bottom12+高64=76，上方留 12px */
   top: auto !important;
-  transform: none !important;
-  max-height: calc(100vh - 176px);
+  bottom: 88px !important;   /* 播放条(12+64=76)上方留 12px */
+  left: 12px !important;
+  right: auto !important;
+  height: min(68vh, 520px);
+  border-radius: 20px 20px 0 0;   /* 顶部两角圆角，底部贴近播放条 */
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: none;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.4);
+  transform: translateY(0) !important;   /* 可见态原位；进出由过渡弹出/收回 */
   display: flex; flex-direction: column;
+  overflow: hidden;
 }
-/* 从播放条边缘自下而上展开 / 收起从上往下（origin 底部） */
-.pop-expand-up-enter-active,
-.pop-expand-up-leave-active {
+/* 从播放条边缘自下而上弹出 / 收回 */
+.more-pop-enter-active,
+.more-pop-leave-active {
   transition: transform var(--pop-expand-dur, 0.3s) cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.3s ease !important;
   transform-origin: bottom center !important;
 }
-.pop-expand-up-enter-from,
-.pop-expand-up-leave-to {
-  transform: translateY(24px) scale(0.98) !important;
+.more-pop-enter-from,
+.more-pop-leave-to {
+  transform: translateY(28px) !important;
   opacity: 0 !important;
 }
-.mc-body { width: 100%; max-height: 72vh; overflow-y: auto; color: var(--fnos-text-primary-dim); flex: 1; min-height: 0; }
+.mc-body { width: 100%; color: var(--fnos-text-primary-dim); overflow-y: auto; flex: 1; min-height: 0; }
 .mc-section {
   padding: 12px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
