@@ -89,10 +89,11 @@
         <!-- More: opens the full playback controls panel (mirrors desktop bar,
              including the player switcher + DLNA rescan). -->
         <el-popover
-          placement="top-end"
+          placement="top"
           :width="340"
           trigger="click"
           popper-class="mobile-controls-popover"
+          transition="pop-expand-up"
           v-model:visible="mobileControlsVisible"
         >
           <template #reference>
@@ -159,7 +160,6 @@
                 <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="28" />
               </el-button>
               <el-button circle @click="playerStore.next"><MfIcon name="SkipForward" :size="22" /></el-button>
-              <el-button circle size="small" @click="openMobileQueue" :type="playerStore.showPlaylist ? 'primary' : ''"><MfIcon name="List" /></el-button>
             </div>
 
             <!-- Tools: add to playlist, favorite, volume -->
@@ -299,10 +299,6 @@
             <div class="peer-switcher-tip">切换播放器仅改变当前控制目标,不会停止其他播放器</div>
           </div>
         </el-popover>
-        <!-- 播放列表 -->
-        <el-tooltip content="播放列表" placement="top">
-          <el-button circle size="small" @click="playerStore.togglePlaylistPanel"><MfIcon name="List" /></el-button>
-        </el-tooltip>
         <!-- 添加到歌单 -->
         <el-tooltip content="添加到歌单" placement="top">
           <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
@@ -335,6 +331,7 @@
         <div class="queue-header">
           <span>播放队列 ({{ playerStore.queue.length }})</span>
           <div class="queue-actions">
+            <el-button size="small" text class="queue-collapse-mobile" @click="playerStore.togglePlaylistPanel"><MfIcon name="ChevronDown" />收起</el-button>
             <el-button size="small" text @click="playerStore.clearQueue">清空</el-button>
           </div>
         </div>
@@ -509,7 +506,17 @@ const sidebarCollapsed = ref(false);
 const isMobile = ref(false);
 const mobileNavOpen = ref(false);
 const mobileControlsVisible = ref(false);
-function updateViewport() { isMobile.value = window.innerWidth < 768; }
+/** 展开/收起动画：按位移宽度换算时长（px/s），宽度越大时长越长，体感速度一致 */
+const SLIDE_SPEED = 600;
+const rootStyle = () => document.documentElement.style;
+function applyMotionDurations(w: number) {
+  const isM = w < 768;
+  const queueW = isM ? Math.min(240, (w - 48) * 2 / 3) : 360;  // 队列面板宽度=滑入位移
+  const popW = w - 24;                                          // 播放控件弹窗宽度
+  rootStyle().setProperty('--queue-slide-dur', `${Math.round(queueW / SLIDE_SPEED * 1000)}ms`);
+  rootStyle().setProperty('--pop-expand-dur', `${Math.round(popW / SLIDE_SPEED * 1000)}ms`);
+}
+function updateViewport() { isMobile.value = window.innerWidth < 768; applyMotionDurations(window.innerWidth); }
 updateViewport();
 window.addEventListener("resize", updateViewport);
 onUnmounted(() => window.removeEventListener("resize", updateViewport));
@@ -717,12 +724,6 @@ onUnmounted(() => {
   window.removeEventListener("touchmove", onSwipeTouchMove);
   window.removeEventListener("touchend", onSwipeTouchEnd);
 });
-
-/** 手机端更多弹窗内打开播放列表：先打开队列面板，再关闭更多弹窗 */
-function openMobileQueue() {
-  playerStore.showPlaylist = true;
-  mobileControlsVisible.value = false;
-}
 
 /** 弹窗互斥：更多弹窗一打开就关闭播放列表面板。
  *  用 watch 而非按钮 @click —— el-popover 的 reference 插槽对原生 click 监听
@@ -1204,6 +1205,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     font-weight: 600;
     color: var(--fnos-text-primary);
     .queue-actions .el-button { color: var(--fnos-text-secondary); border: none !important; background: transparent !important; }
+    /* 移动端「收起」按钮仅手机显示；桌面端用左缘收起按钮 */
+    .queue-collapse-mobile { display: none; }
   }
   .queue-list {
     flex: 1; overflow-y: auto; padding: 8px;
@@ -1368,8 +1371,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes eq { 0%, 100% { transform: scaleY(0.4); } 50% { transform: scaleY(1); } }
 
-.slide-right-enter-active, .slide-right-leave-active { transition: transform 0.3s ease; }
-.slide-right-enter-from, .slide-right-leave-to { transform: translateX(100%); }
+.slide-right-enter-active, .slide-right-leave-active { transition: transform var(--queue-slide-dur, 0.3s) cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.3s ease; }
+.slide-right-enter-from, .slide-right-leave-to { transform: translateX(100%); opacity: 0; }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
@@ -1482,7 +1485,14 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     grid-column: 1; grid-row: 1;
     align-self: flex-start;
     /* 与 .play-mode 的 fade(0.3s) 同步交叉淡化，避免 display:none 瞬切造成闪烁 */
-    transition: opacity 0.3s ease, visibility 0.3s ease;
+    transition: opacity 0.3s ease, visibility 0.3s ease, transform 0.3s cubic-bezier(0.22, 0.61, 0.36, 1);
+    /* 收起时整体滑出左侧完全隐藏（不残留） */
+    &.mc-hidden {
+      transform: translateX(-100%);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
     .mobile-hamburger {
       display: inline-flex; align-items: center; justify-content: center;
       width: 34px; height: 34px; border: none; border-radius: 6px;
@@ -1505,14 +1515,16 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     grid-column: auto; grid-row: auto;
     position: fixed; top: 0; left: 0; bottom: 0;
     width: min(280px, 82vw); z-index: 600;
-    transform: translateX(-100%); transition: transform 0.3s ease;   /* 与 sidebar-overlay fade(0.3s) 时长对齐，避免微差不同步 */
+    transform: translateX(-102%);   /* 完全滑出左侧（超出自身宽度，杜绝残留边条） */
+    visibility: hidden;
+    transition: transform 0.3s ease, visibility 0.3s;   /* 与 sidebar-overlay fade(0.3s) 时长对齐 */
     background: rgba(31, 28, 42, 0.94);
     backdrop-filter: blur(22px) saturate(180%);
     -webkit-backdrop-filter: blur(22px) saturate(180%);
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 0 18px 18px 0;
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
-    &.mobile-open { transform: translateX(0); }
+    &.mobile-open { transform: translateX(0); visibility: visible; }
     &.collapsed { width: min(280px, 82vw); }
     /* 移动端侧边栏同样隐藏滚动条（含 Element Plus 内部滚动容器） */
     .sidebar-menu,
@@ -1583,23 +1595,34 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   /* --- Main scroll container on mobile: account for mobile-header + floating player pill --- */
   .main-scroll { padding-top: 48px; padding-bottom: 88px; }
 
-  /* --- Queue panel: 移动端卡片式浮层（不全宽不全高）---
-     左右留边距、底部在播放条上方留空隙截断；想看更多在面板内滚动下拉。
+  /* --- Queue panel: 移动端改为与桌面一致的右侧抽屉 ---
+     紧贴右缘、从右缘滑入展开；左侧让出空间露出页面。
+     顶栏高 48px、悬浮播放条底部 12+64=76px。
+     上场：面板上下各留 24px 空白（底部为播放条高度的 2 倍间距），不贴标题栏。
      z-index 550：高于播放条(520)/顶栏(500)，低于侧边栏(600)。 */
   .queue-panel {
-    width: calc(100% - 24px);
-    left: 12px; right: 12px;
-    top: auto;
-    bottom: 88px;               /* 播放条(76)上方留 12px 空隙 */
-    height: min(58vh, 460px);
-    max-height: 62vh;
-    border-radius: 18px;
-    border-left: none;
+    top: 72px;                    /* 顶栏(48)下方留 24px */
+    left: auto; right: 0;
+    width: min(240px, calc((100vw - 48px) * 2 / 3));  /* 缩至原来的三分之二 */
+    height: auto; max-height: none;
+    bottom: 100px;               /* 播放条(76)上方留 2×12px 间距 */
+    border-radius: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
     z-index: 550;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
-    .queue-hide-btn { display: none; }
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
+    .queue-hide-btn { display: flex; }                    /* 左缘中部收起按钮，同桌面 */
+    .queue-collapse-mobile { display: none !important; }  /* 收起统一用左缘按钮 */
+    .queue-duration { display: none; }                    /* 移动端隐藏时长 */
+    .queue-hide-btn,
+    .queue-hide-btn:hover {
+      background: rgba(15, 14, 22, 0.82);                 /* 与播放控件一致 */
+    }
   }
-  .queue-expand-btn { display: none; }
+  /* 移动端展开按钮：背景/透明度与播放控件一致 */
+  .queue-expand-btn,
+  .queue-expand-btn:hover {
+    background: rgba(15, 14, 22, 0.82);
+  }
 
   /* --- Fullscreen play mode: stacked single column --- */
   .play-mode { overflow-y: auto; z-index: 700; }
@@ -1694,8 +1717,29 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   background: rgba(24, 22, 33, 0.98) !important;
   backdrop-filter: none !important;
   isolation: isolate;
+  /* 与播放条对齐：宽度一致、左右与播放条(12px 边距)对齐、紧贴其上方自下而上展开 */
+  position: fixed !important;
+  left: 12px !important;
+  right: 12px !important;
+  width: auto !important;
+  bottom: 88px !important;   /* 播放条 bottom12+高64=76，上方留 12px */
+  top: auto !important;
+  transform: none !important;
+  max-height: calc(100vh - 176px);
+  display: flex; flex-direction: column;
 }
-.mc-body { width: 100%; max-height: 72vh; overflow-y: auto; color: var(--fnos-text-primary-dim); }
+/* 从播放条边缘自下而上展开 / 收起从上往下（origin 底部） */
+.pop-expand-up-enter-active,
+.pop-expand-up-leave-active {
+  transition: transform var(--pop-expand-dur, 0.3s) cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.3s ease !important;
+  transform-origin: bottom center !important;
+}
+.pop-expand-up-enter-from,
+.pop-expand-up-leave-to {
+  transform: translateY(24px) scale(0.98) !important;
+  opacity: 0 !important;
+}
+.mc-body { width: 100%; max-height: 72vh; overflow-y: auto; color: var(--fnos-text-primary-dim); flex: 1; min-height: 0; }
 .mc-section {
   padding: 12px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
