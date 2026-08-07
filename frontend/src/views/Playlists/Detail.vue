@@ -14,6 +14,7 @@
         </div>
         <div class="actions">
           <el-button type="primary" @click="playAll">播放全部</el-button>
+          <el-button v-if="hasOnlineSource" :loading="matchingAll" @click="matchAllPlaylist"><MfIcon name="Search" />在线匹配未匹配</el-button>
           <el-button @click="exportPlaylist"><MfIcon name="Download" />导出</el-button>
           <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />重命名</el-button>
           <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />同步</el-button>
@@ -33,6 +34,7 @@
       :offset="(currentPage - 1) * pageSize"
       :selectable="!isMobile"
       :loading="loading"
+      allow-unmatched-play
       :extra-actions="playlistRowActions"
       @play="playSong"
       @select="onSelectionChange"
@@ -68,11 +70,26 @@
         <el-button type="primary" @click="renamePlaylist">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showMatchDialog" title="在线匹配" width="480px" :close-on-click-modal="false">
+      <div v-if="matchRunning" class="match-progress">
+        <el-progress :percentage="matchPercent" />
+        <p class="match-hint">正在通过 go-music-dl 匹配「{{ playlist?.name }}」中未收录的 {{ matchTotal }} 首...<br>已匹配 {{ matchDone }} / {{ matchTotal }} 首(耗时较长,可稍后查看)</p>
+      </div>
+      <div v-else-if="matchResult">
+        <p class="match-result">匹配完成: 成功 {{ matchResult.matched }} 首,未找到 {{ matchResult.noMatch }} 首,出错 {{ matchResult.error }} 首</p>
+      </div>
+      <p v-else class="match-hint">将对该歌单中所有「曲库中未找到」的歌曲,通过 go-music-dl 在线源自动匹配并导入,匹配成功后即可直接播放。</p>
+      <template #footer>
+        <el-button @click="showMatchDialog = false" :disabled="matchRunning">关闭</el-button>
+        <el-button v-if="matchResult" type="primary" @click="closeMatchAndReload">完成</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -97,6 +114,14 @@ const selectedSongs = ref<any[]>([]);
 const currentPage = ref(1);
 const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("playlistTracksPageSize") || "50"));
+const onlineSourceId = ref("");
+const matchingAll = ref(false);
+const showMatchDialog = ref(false);
+const matchRunning = ref(false);
+const matchTotal = ref(0);
+const matchDone = ref(0);
+const matchResult = ref<any>(null);
+const hasOnlineSource = computed(() => !!onlineSourceId.value);
 if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 50;
 
 function playlistRowActions(row: any) {
@@ -115,9 +140,119 @@ function formatTotalDuration(sec: number) {
   if (h > 0) return m > 0 ? `${h}小时${m}分钟` : `${h}小时`;
   return `${m}分钟`;
 }
-function playSong(song: any) { if (song.isMatched !== false) playerStore.playSong(song); }
-function playAll() { const playable = songs.value.filter(s => s.isMatched !== false); if (playable.length > 0) playerStore.playQueue(playable); }
-function playSelected() { const playable = selectedSongs.value.filter(s => s.isMatched !== false); if (playable.length > 0) playerStore.playQueue(playable); }
+async function playSong(song: any) {
+  if (song.isMatched !== false) { playerStore.playSong(song); return; }
+  await matchAndPlay(song);
+}
+async function playAll() {
+  const playable = songs.value.filter(s => s.isMatched !== false);
+  const unmatched = songs.value.filter(s => s.isMatched === false);
+  if (unmatched.length > 0) {
+    const matched = await matchBeforePlay(unmatched);
+    if (matched.length > 0) playerStore.playQueue([...playable, ...matched]);
+    else if (playable.length > 0) playerStore.playQueue(playable);
+    return;
+  }
+  if (playable.length > 0) playerStore.playQueue(playable);
+}
+async function playSelected() {
+  const playable = selectedSongs.value.filter(s => s.isMatched !== false);
+  const unmatched = selectedSongs.value.filter(s => s.isMatched === false);
+  if (unmatched.length > 0) {
+    const matched = await matchBeforePlay(unmatched);
+    if (matched.length > 0) playerStore.playQueue([...playable, ...matched]);
+    else if (playable.length > 0) playerStore.playQueue(playable);
+    return;
+  }
+  if (playable.length > 0) playerStore.playQueue(playable);
+}
+
+// Auto-match an unmatched track via the online source, then play it.
+async function matchAndPlay(song: any) {
+  const pid = onlineSourceId.value;
+  if (!pid || !song.entryId) { ElMessage.warning("未配置在线源,无法匹配该歌曲"); return; }
+  matchingAll.value = true;
+  try {
+    const res = await api.post(`/rest/api/v1/online/${pid}/match-track`, { entryId: song.entryId });
+    if (res.data?.success && res.data.songId) {
+      ElMessage.success(`已匹配「${song.title}」`);
+      await loadPlaylist();
+      const updated = songs.value.find(s => s.id === res.data.songId);
+      if (updated) playerStore.playSong(updated);
+    } else {
+      ElMessage.warning(`未匹配「${song.title}」: ${res.data?.message || "未找到可靠结果"}`);
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "匹配失败");
+  } finally { matchingAll.value = false; }
+}
+
+// Auto-match a batch of unmatched tracks before queueing them for playback.
+async function matchBeforePlay(unmatched: any[]) {
+  const pid = onlineSourceId.value;
+  if (!pid) return [];
+  const ok: any[] = [];
+  for (const song of unmatched) {
+    if (!song.entryId) continue;
+    try {
+      const res = await api.post(`/rest/api/v1/online/${pid}/match-track`, { entryId: song.entryId });
+      if (res.data?.success && res.data.songId) {
+        const updated = songs.value.find(s => s.id === res.data.songId) || { ...song, id: res.data.songId, playable: true, isMatched: true };
+        ok.push(updated);
+      }
+    } catch {}
+  }
+  if (ok.length > 0) await loadPlaylist();
+  return ok;
+}
+
+// Batch-match all unmatched tracks of this playlist as a background job, with progress.
+async function matchAllPlaylist() {
+  const pid = onlineSourceId.value;
+  if (!pid) return;
+  showMatchDialog.value = true;
+  matchRunning.value = true;
+  matchResult.value = null;
+  matchDone.value = 0;
+  matchingAll.value = true;
+  try {
+    const res = await api.post(`/rest/api/v1/online/${pid}/match-playlist`, { playlistId: route.params.id });
+    if (res.data?.success) {
+      if (res.data.jobId) {
+        matchTotal.value = res.data.progress?.total || 0;
+        const poll = async () => {
+          const s = await api.get(`/rest/api/v1/online/${pid}/match-playlist/status`, { params: { jobId: res.data.jobId } });
+          if (s.data?.progress) matchDone.value = s.data.progress.done || 0;
+          if (s.data?.status === "completed" || s.data?.status === "failed") {
+            matchRunning.value = false;
+            matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
+            if (s.data.error) ElMessage.warning(s.data.error);
+            return;
+          }
+          setTimeout(poll, 2000);
+        };
+        poll();
+      } else {
+        matchTotal.value = res.data.total || 0;
+        matchDone.value = matchTotal.value;
+        matchResult.value = res.data;
+        matchRunning.value = false;
+      }
+    } else {
+      matchRunning.value = false;
+      ElMessage.warning(res.data?.error || "在线源未配置或未启用");
+    }
+  } catch (e: any) {
+    matchRunning.value = false;
+    ElMessage.error(e.response?.data?.error || "匹配启动失败");
+  } finally { matchingAll.value = false; }
+}
+const matchPercent = computed(() => (matchTotal.value > 0 ? Math.min(100, Math.round((matchDone.value / matchTotal.value) * 100)) : 0));
+async function closeMatchAndReload() {
+  showMatchDialog.value = false;
+  await loadPlaylist();
+  ElMessage.success("匹配完成,未匹配歌曲已刷新");
+}
 function onSelectionChange(rows: any[]) { selectedSongs.value = rows; }
 async function exportPlaylist() {
   if (!playlist.value?.id) return;
@@ -139,6 +274,15 @@ async function exportPlaylist() {
   }
 }
 
+async function loadOnlineSource() {
+  if (onlineSourceId.value) return;
+  try {
+    const res = await api.get("/rest/api/v1/plugins");
+    const source = (res.data || []).find((p: any) => p.enabled && p.config?.baseUrl && (p.manifest?.type === "source" || p.manifest?.provider === "go-music-dl"));
+    if (source) onlineSourceId.value = source.id || source.manifest?.provider || "go-music-dl";
+  } catch { onlineSourceId.value = ""; }
+}
+
 async function loadPlaylist() {
   loading.value = true;
   try {
@@ -149,6 +293,7 @@ async function loadPlaylist() {
     songs.value = res.data.items || [];
     total.value = res.data.total || 0;
     loadPoolStatus();
+    loadOnlineSource();
   } catch {}
   finally { loading.value = false; }
 }
@@ -281,6 +426,9 @@ onMounted(loadPlaylist);
 .unmatched-icon { color: #e6a23c; margin-left: 6px; vertical-align: middle; }
 .matched-count { color: var(--fnos-green); font-weight: 500; }
 .batch-bar { margin-top: 12px; display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--fnos-text-secondary); }
+.match-progress { padding: 8px 0; }
+.match-hint { color: var(--fnos-text-secondary); font-size: 13px; line-height: 1.8; }
+.match-result { color: var(--fnos-green); font-size: 14px; line-height: 1.8; }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
 
 @media (max-width: 768px) {

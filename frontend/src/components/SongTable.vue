@@ -100,6 +100,8 @@ const props = withDefaults(
     emptyText?: string;
     /** 追加到歌曲右键菜单/操作面板的页面级操作 */
     extraActions?: (row: any) => any[];
+    /** 允许点击「曲库中未找到」的行触发 play(由页面自行处理转在线匹配) */
+    allowUnmatchedPlay?: boolean;
   }>(),
   {
     songs: () => [],
@@ -112,6 +114,7 @@ const props = withDefaults(
     loading: false,
     emptyText: "",
     extraActions: undefined,
+    allowUnmatchedPlay: false,
   }
 );
 
@@ -199,7 +202,7 @@ function onRowClick(song: any) {
   emitPlay(song);
 }
 function emitPlay(song: any) {
-  if (song.isMatched === false) return;
+  if (song.isMatched === false && !props.allowUnmatchedPlay) return;
   emit("play", song);
 }
 

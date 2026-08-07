@@ -889,7 +889,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
       }
     }
     return {
-      id: e.externalSongId || `ext-${e.id}`, title: e.externalTitle || "", artist: e.externalArtist || "",
+      id: e.externalSongId || `ext-${e.id}`, entryId: e.id, title: e.externalTitle || "", artist: e.externalArtist || "",
       album: e.externalAlbum || "", duration: Math.round((e.externalDuration || 0) / 1000),
       playable: false, isMatched: false, unavailableReason: e.unavailableReason || "曲库中未找到",
     };

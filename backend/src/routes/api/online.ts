@@ -10,10 +10,18 @@
 
 import { Hono } from "hono";
 import { adminMiddleware } from "../../middleware/auth.js";
+import { db } from "../../db/index.js";
+import { playlistSongs, playlists } from "../../db/schema.js";
+import { eq } from "drizzle-orm";
 import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "../../services/source/online/index.js";
 import { importOnlineSongs } from "../../services/source/online/service.js";
+import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
 
 export const onlineRoutes = new Hono();
+
+// Background match jobs (large playlists). In-memory like scanJobs in api/index.ts.
+const matchJobs = new Map<string, { status: string; playlistId: string; startedAt: string; finishedAt?: string; progress: { done: number; total: number }; result: any; error: string | null }>();
+const INLINE_MATCH_LIMIT = 30;
 
 // Connectivity test for an admin-configured provider instance.
 onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
@@ -56,7 +64,112 @@ onlineRoutes.post("/v1/online/:providerId/search", async (c) => {
   }
 });
 
-// Persist chosen search results as online DB songs.
+// Auto-match a playlist's "曲库中未找到" tracks through the online source.
+// For each unmatched entry: search go-music-dl, import best hit as an online
+// DB song, and link it back so the track becomes playable.
+// Body: { playlistId: string }
+//
+// For large playlists this runs as a background job:
+//   POST  .../match-playlist -> { success, started, jobId, total, running }
+//   GET   .../match-playlist/status?jobId=  -> { status, progress, result?, error? }
+onlineRoutes.post("/v1/online/:providerId/match-playlist", async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  const configured = getConfiguredProvider(providerId);
+  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+
+  const body = await c.req.json().catch(() => ({}));
+  const playlistId = typeof body.playlistId === "string" ? body.playlistId : null;
+  if (!playlistId) return c.json({ success: false, error: "缺少歌单 id" });
+
+  const pl = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
+  if (!pl) return c.json({ success: false, error: "歌单不存在" }, 404);
+
+  const entryCount = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all()
+    .filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim()).length;
+  if (entryCount === 0) return c.json({ success: true, total: 0, matched: 0, noMatch: 0, error: 0, results: [], alreadyMatched: true });
+
+  // Small playlists match inline; large ones run in the background for the UI.
+  if (entryCount <= INLINE_MATCH_LIMIT) {
+    try {
+      const result = await matchUnmatchedPlaylistEntries(providerId, configured.config, configured.provider, playlistId);
+      return c.json({ success: true, jobId: null, ...result });
+    } catch (e: any) {
+      return c.json({ success: false, error: e.message || "匹配失败" });
+    }
+  }
+
+  const jobId = `match-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  matchJobs.set(jobId, { status: "running", playlistId, startedAt: new Date().toISOString(), progress: { done: 0, total: entryCount }, result: null, error: null });
+  (async () => {
+    try {
+      const result = await matchUnmatchedPlaylistEntries(
+        providerId, configured.config, configured.provider, playlistId,
+        (done, total) => { matchJobs.get(jobId)!.progress = { done, total }; },
+      );
+      matchJobs.set(jobId, { status: "completed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: { done: entryCount, total: entryCount }, result, error: null });
+    } catch (e: any) {
+      matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: e.message || "匹配失败" });
+    }
+  })();
+  return c.json({ success: true, jobId, running: true, progress: { done: 0, total: entryCount } });
+});
+
+// Poll status of a background match job.
+onlineRoutes.get("/v1/online/:providerId/match-playlist/status", (c) => {
+  const jobId = c.req.query("jobId");
+  if (!jobId) return c.json({ success: false, error: "缺少 jobId" });
+  const job = matchJobs.get(jobId);
+  if (!job) return c.json({ success: false, error: "任务不存在" }, 404);
+  return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, progress: job.progress, result: job.result, error: job.error });
+});
+
+// Auto-match a single unmatched playlist entry before playing it.
+// Body: { entryId }
+onlineRoutes.post("/v1/online/:providerId/match-track", async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  const configured = getConfiguredProvider(providerId);
+  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+
+  const body = await c.req.json().catch(() => ({}));
+  const entryId = Number(body.entryId);
+  if (!Number.isInteger(entryId) || entryId <= 0) return c.json({ success: false, error: "缺少条目 id" });
+
+  const entry = db.select().from(playlistSongs).where(eq(playlistSongs.id, entryId)).get();
+  if (!entry) return c.json({ success: false, error: "条目不存在" }, 404);
+  if (entry.playable && entry.songId) return c.json({ success: true, alreadyPlayable: true });
+
+  try {
+    const result = await matchToOnlineSong(providerId, configured.config, configured.provider, entry.playlistId, {
+      entryId,
+      title: entry.externalTitle || "",
+      artist: entry.externalArtist || "",
+      album: entry.externalAlbum || undefined,
+      duration: entry.externalDuration || undefined,
+    });
+    return c.json({ success: result.status === "matched", ...result });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "匹配失败" });
+  }
+});
+
+// Convenience count of unmatched entries in a playlist.
+// GET /v1/online/:providerId/unmatched?playlistId=
+onlineRoutes.get("/v1/online/:providerId/unmatched", async (c) => {
+  const providerId = c.req.param("providerId");
+  const playlistId = c.req.query("playlistId");
+  if (!providerId || !playlistId) return c.json({ success: false, error: "缺少参数" });
+  try {
+    const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
+    const unmatched = entries.filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim());
+    return c.json({ success: true, count: unmatched.length, entries: unmatched.map((e) => ({
+      id: e.id, title: e.externalTitle, artist: e.externalArtist, album: e.externalAlbum, duration: e.externalDuration,
+    })) });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "查询失败" });
+  }
+});
 // Body: { songs: OnlineSongResult[], playlistId?: string }
 // Returns per-song DB ids (deduped rows are reported too).
 onlineRoutes.post("/v1/online/:providerId/import", async (c) => {
