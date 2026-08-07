@@ -85,7 +85,7 @@
         <div class="playlist-info" @click="open(pl)">
           <div class="playlist-name">
             {{ pl.name }}
-            <el-tag v-if="pl.sourcePlatform" size="small" style="margin-left: 4px">{{ pl.sourcePlatform === 'qq' ? 'QQ' : pl.sourcePlatform === 'netease' ? '网易云' : '' }}</el-tag>
+            <el-tag v-if="pl.sourcePlatform" size="small" style="margin-left: 4px">{{ pl.sourcePlatform === 'qq' ? 'QQ' : pl.sourcePlatform === 'netease' ? '网易云' : pl.sourcePlatform === 'kugou' ? '酷狗' : pl.sourcePlatform === 'kuwo' ? '酷我' : '' }}</el-tag>
             <el-tag v-if="pl.public" size="small" type="success" style="margin-left: 4px">公开</el-tag>
           </div>
           <div class="playlist-meta">{{ pl.songCount }}首 · {{ formatDuration(pl.duration) }}</div>
