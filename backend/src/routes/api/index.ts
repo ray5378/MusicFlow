@@ -35,8 +35,10 @@ import {
 import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
+import { onlineRoutes } from "./online.js";
 
 export const apiRoutes = new Hono();
+apiRoutes.route("/", onlineRoutes);
 
 // ==================== Users ====================
 apiRoutes.get("/v1/users", adminMiddleware, (c) => {
@@ -265,6 +267,7 @@ apiRoutes.get("/v1/sources/:id/scan-status", adminMiddleware, (c) => {
 // ==================== Plugins ====================
 apiRoutes.get("/v1/plugins", adminMiddleware, (c) => c.json(db.select().from(plugins).all()));
 apiRoutes.post("/v1/plugins", adminMiddleware, async (c) => { const body = await c.req.json(); const id = uuidv4(); db.insert(plugins).values({ id, name: body.name, version: body.version || "", description: body.description || "", manifest: JSON.stringify(body.manifest || {}), enabled: body.enabled ? 1 : 0, config: JSON.stringify(body.config || {}) }).run(); return c.json({ id }); });
+apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (!p) return c.json({ error: "插件不存在" }, 404); const body = await c.req.json().catch(() => ({})); db.update(plugins).set({ config: body.config !== undefined ? JSON.stringify(body.config) : p.config, enabled: body.enabled !== undefined ? (body.enabled ? 1 : 0) : p.enabled, description: typeof body.description === "string" ? body.description : p.description, version: typeof body.version === "string" ? body.version : p.version, name: typeof body.name === "string" ? body.name : p.name, updatedAt: new Date().toISOString() }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (p) db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
 
 // ==================== Wish ====================
