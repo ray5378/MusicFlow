@@ -558,6 +558,10 @@ export const usePlayerStore = defineStore("player", () => {
         if (typeof s.position === "number") st.currentTime = s.position;
         if (typeof s.duration === "number" && s.duration > 0) st.duration = s.duration;
         st.isPlaying = s.state === "PLAYING";
+        // 同步设备真实音量(含 外部 webhook / 其它端 改的)。仅当当前正控制该 peer。
+        if (typeof s.volume === "number" && currentPeerId.value === st.peerId) {
+          volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
+        }
 
         const media = s.media;
         if (media && media.songId && media.songId !== st.lastScrobbledSongId) {

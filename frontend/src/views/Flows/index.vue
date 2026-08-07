@@ -296,11 +296,27 @@ async function loadCtlTargets() {
 }
 
 async function onCopyUrl() {
+  const text = urlText.value;
   try {
-    await navigator.clipboard.writeText(urlText.value);
+    await navigator.clipboard.writeText(text);
     ElMessage.success("已复制链接");
+    return;
+  } catch { /* fall through to legacy copy */ }
+  // 旧浏览器/非安全上下文:clipboard API 不可用,退回 execCommand。
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    ta.readOnly = true;
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (ok) { ElMessage.success("已复制链接"); return; }
+    ElMessage.warning("复制失败,请手动选择复制");
   } catch {
-    ElMessage.error("复制失败,请手动选择复制");
+    ElMessage.warning("复制失败,请手动选择复制");
   }
 }
 
