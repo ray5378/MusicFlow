@@ -10,6 +10,10 @@ import { restRoutes } from "./routes/rest/index.js";
 import { apiRoutes, getDlnaBaseUrl } from "./routes/api/index.js";
 import { navidromeRoutes } from "./routes/navidrome/index.js";
 import { getFlowByToken, executeFlow, isFlowRunning } from "./services/flows/index.js";
+import {
+  validatePlayerWebhookToken, listPlayerWebhookTokens,
+  resolvePlayerDevicePeers, handlePlayerWebhook,
+} from "./services/player/playerWebhook.js";
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
@@ -85,6 +89,57 @@ app.all("/webhooks/flows/:token", async (c) => {
     name: flow.name,
     started: started === "started",
     running: isFlowRunning(flow.id),
+  });
+});
+
+// ==================== 通用播放器控制 Webhook(免鉴权,凭 token 执行) ====================
+// 与音流(flow)流程解耦:URL 参数即配置,不依赖内部流程。
+// 例:
+//   /webhook/player?token=xxx&device=meet&mode=order&next=1&favorite=1&volume=59
+//   on执行顺序:mode → play/pause/stop/next/prev → volume(0-100 或 +N/-N)→ favorite(收藏当前曲)。
+app.all("/webhook/player", async (c) => {
+  const q = c.req.queries();
+  const flat: Record<string, string> = {};
+  for (const [k, v] of Object.entries(q)) {
+    if (v && v[0] !== undefined) flat[k] = String(v[0]);
+  }
+  if (!flat.token) {
+    return c.json({ success: false, error: "缺少 token 参数" }, 401);
+  }
+  const auth = validatePlayerWebhookToken(flat.token);
+  if (!auth) {
+    const t = listPlayerWebhookTokens();
+    if (t.some(x => x.token === flat.token)) return c.json({ success: false, error: "该渠道 token 已停用" }, 403);
+    return c.json({ success: false, error: "无效的 token" }, 401);
+  }
+  let peers: string[];
+  try {
+    peers = resolvePlayerDevicePeers(flat.device || "");
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || String(e) }, 400);
+  }
+  const baseUrl = getDlnaBaseUrl(c);
+  const allResults: any[] = [];
+  const songs: any[] = [];
+  let anyFailed = false;
+  for (const peerId of peers) {
+    try {
+      const r = await handlePlayerWebhook(peerId, flat, baseUrl, auth.ownerUserId);
+      allResults.push(...r.results);
+      if (r.song?.songId) songs.push(r.song);
+      if (!r.success) anyFailed = true;
+    } catch (e: any) {
+      anyFailed = true;
+      allResults.push({ device: peerId, op: "device", ok: false, detail: e?.message || String(e) });
+    }
+  }
+  return c.json({
+    success: !anyFailed,
+    devices: peers,
+    count: allResults.length,
+    failed: allResults.filter((r) => !r.ok).length,
+    results: allResults,
+    songs,
   });
 });
 

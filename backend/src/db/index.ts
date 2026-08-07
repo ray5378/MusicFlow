@@ -327,6 +327,16 @@ export function initDatabase() {
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
+
+    CREATE TABLE IF NOT EXISTS player_webhook_tokens (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      token TEXT UNIQUE NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      owner_user_id TEXT DEFAULT '',
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)

@@ -276,3 +276,15 @@ export const flows = sqliteTable("flows", {
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
+
+// 通用播放器控制渠道 Token:支持多条独立 token,各自启用/停用。
+// 「我喜欢」收藏归属各自的 owner_user_id;enable 由用户自行管理。
+export const playerWebhookTokens = sqliteTable("player_webhook_tokens", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().default(""),
+  token: text("token").notNull().unique(),
+  enabled: integer("enabled").notNull().default(1), // 1 = 可被 webhook 执行
+  ownerUserId: text("owner_user_id").default(""),
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+});

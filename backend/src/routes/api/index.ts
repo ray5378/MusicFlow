@@ -28,6 +28,10 @@ import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";
 import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
+import {
+  listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
+  setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName,
+} from "../../services/player/playerWebhook.js";
 import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
@@ -1577,5 +1581,39 @@ apiRoutes.post("/v1/flows/:id/run", async (c) => {
   if (!flow.enabled) return c.json({ error: "流程已停用" }, 409);
   const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
   return c.json({ success: true, started: started === "started", running: isFlowRunning(flow.id) });
+});
+
+// ==================== 通用播放器控制渠道 token(独立管理,可多条) ====================
+// 每条渠道 token 可独立启用/停用/删除;「我喜欢」收藏归属各自 owner(创建者)。
+// 免鉴权端点 /webhook/player 凭任一启用的 token 执行。与音流(flow)流程完全解耦。
+
+apiRoutes.get("/v1/player-webhook/tokens", (c) => {
+  const items = listPlayerWebhookTokens().map(t => ({
+    id: t.id, name: t.name, token: t.token, enabled: t.enabled,
+    ownerName: resolvePlayerWebhookOwnerName(t.ownerUserId),
+    createdAt: t.createdAt, updatedAt: t.updatedAt,
+  }));
+  return c.json({ items, templateUrl: `${getEffectiveBaseUrl()}/webhook/player` });
+});
+
+apiRoutes.post("/v1/player-webhook/tokens", async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const name = (body && typeof body.name === "string" && body.name.trim()) || "渠道 " + (listPlayerWebhookTokens().length + 1);
+  const token = createPlayerWebhookToken(c.get("user")!.id, name);
+  return c.json({ token, name });
+});
+
+apiRoutes.put("/v1/player-webhook/tokens/:id", async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const enabled = !!(body && body.enabled);
+  const ok = setPlayerWebhookTokenEnabled(c.req.param("id")!, enabled);
+  if (!ok) return c.json({ error: "token 不存在" }, 404);
+  return c.json({ success: true });
+});
+
+apiRoutes.delete("/v1/player-webhook/tokens/:id", (c) => {
+  const ok = deletePlayerWebhookToken(c.req.param("id")!);
+  if (!ok) return c.json({ error: "token 不存在" }, 404);
+  return c.json({ success: true });
 });
 
