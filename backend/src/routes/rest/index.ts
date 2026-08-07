@@ -8,6 +8,7 @@ import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
+import { findFallbackStream } from "../../services/source/online/streamFallback.js";
 
 export const restRoutes = new Hono();
 
@@ -902,7 +903,24 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
     const headers: Record<string, string> = {};
     try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
     if (rangeHeader) headers["Range"] = rangeHeader;
-    const upstream = await fetch(song.url, { headers });
+
+    let url = song.url;
+    let upstream = await fetch(url, { headers });
+
+    // If the original platform could not resolve this song, try an automatic
+    // multi-source fallback (search the same provider for a working alternative).
+    if ((upstream.status === 404 || upstream.status >= 500) && song.pluginEntry && song.sourceData) {
+      try {
+        await upstream.body?.cancel();
+        const sd = JSON.parse(song.sourceData || "{}");
+        const fb = await findFallbackStream(
+          song.id, song.title || sd?.title || "", song.artist || sd?.artist || "", song.album || "",
+          song.pluginEntry, sd?.source || "",
+        );
+        if (fb) { url = fb.url; upstream = await fetch(url, { headers }); }
+      } catch { /* keep original upstream result */ }
+    }
+
     const respHeaders: Record<string, string> = {
       "Content-Type": upstream.headers.get("content-type") || MIME_MAP[song.suffix || ""] || "application/octet-stream",
       "Accept-Ranges": "bytes",
