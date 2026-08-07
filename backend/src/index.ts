@@ -17,6 +17,7 @@ import {
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
+import { syncAllRecommendPlaylists } from "./services/source/online/recommendImport.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl } from "./services/dlna/control.js";
@@ -197,6 +198,19 @@ async function runDailyJobs() {
   // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
   await runDailyRecommendJob();
+  // Also refresh any go-music-dl 每日推荐歌单 imported into local playlists
+  // (full-replace each with today's content). Gated by its own setting.
+  try {
+    const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("gmdl_recommend_sync_enabled") as any;
+    if ((row?.value ?? "true") !== "false") {
+      const r = await syncAllRecommendPlaylists("go-music-dl", {});
+      if (r.synced > 0 || r.failed > 0) {
+        console.log(`[DAILY-SCHEDULER] refreshed ${r.synced} gmdl daily-recommend playlists, errors: ${r.failed}`);
+      }
+    }
+  } catch (e: any) {
+    console.error("[DAILY-SCHEDULER] gmdl recommend sync error:", e.message || e);
+  }
 }
 
 function scheduleNextDailyRun() {

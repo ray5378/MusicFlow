@@ -16,6 +16,7 @@ import { eq } from "drizzle-orm";
 import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "../../services/source/online/index.js";
 import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
+import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist, syncAllRecommendPlaylists } from "../../services/source/online/recommendImport.js";
 
 export const onlineRoutes = new Hono();
 
@@ -186,5 +187,71 @@ onlineRoutes.post("/v1/online/:providerId/import", async (c) => {
     return c.json({ success: true, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "导入失败" });
+  }
+});
+
+// ==================== Daily-recommend playlists (按渠道查看各平台推荐) ====================
+
+// Fetch go-music-dl's /music/recommend, grouped by channel (netease/qq/kugou/kuwo).
+// GET /v1/online/:providerId/recommend
+onlineRoutes.get("/v1/online/:providerId/recommend", async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  const configured = getConfiguredProvider(providerId);
+  if (!configured || !configured.provider.recommend) return c.json({ success: false, error: "在线源不支持推荐歌单" });
+  try {
+    const result = await configured.provider.recommend(configured.config);
+    // Annotate each playlist with whether it's already imported locally.
+    for (const ch of result.channels) {
+      for (const pl of ch.playlists) {
+        pl["imported"] = !!findRecommendPlaylist(pl.id);
+      }
+    }
+    return c.json({ success: true, ...result });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "获取推荐歌单失败" });
+  }
+});
+
+// List local daily-recommend playlists that were imported from the provider.
+// GET /v1/online/:providerId/recommend/local
+onlineRoutes.get("/v1/online/:providerId/recommend/local", (c) => {
+  const all = db.select().from(playlists).all();
+  const list = all.filter((p) => isDailyRecommendPlaylist(p)).map((p) => ({
+    id: p.id, name: p.name, source: p.sourcePlatform || "", imported: true, coverArt: p.coverArt ? `pl-${p.id}` : null, songCount: p.songCount || 0,
+    _remoteId: p.externalId || "",
+  }));
+  return c.json({ success: true, playlists: list });
+});
+
+// Import (or full-replace) one recommended playlist into a local playlist.
+// POST /v1/online/:providerId/recommend/import { source, id, name, cover, creator, trackCount }
+onlineRoutes.post("/v1/online/:providerId/recommend/import", async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  const configured = getConfiguredProvider(providerId);
+  if (!configured?.provider.playlistSongs) return c.json({ success: false, error: "在线源未启用或未配置" });
+  const user = c.get("user");
+  const body = await c.req.json().catch(() => ({}));
+  if (!body.source || !body.id) return c.json({ success: false, error: "缺少推荐歌单 source/id" });
+  const info = { id: String(body.id), source: String(body.source), name: String(body.name || ""), creator: String(body.creator || ""), cover: String(body.cover || ""), trackCount: String(body.trackCount || ""), link: String(body.link || "") };
+  try {
+    const result = await importRecommendPlaylist(providerId, info, { userId: user?.id });
+    return c.json(result);
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "导入推荐歌单失败" });
+  }
+});
+
+// Re-import all locally-imported daily-recommend playlists (full-replace each).
+// POST /v1/online/:providerId/recommend/sync-all
+onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  try {
+    const result = await syncAllRecommendPlaylists(providerId, { userId: c.get("user")?.id });
+    return c.json({ success: true, ...result });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "同步失败" });
   }
 });

@@ -33,6 +33,30 @@ export interface OnlineSearchResult {
   songs: OnlineSongResult[];
 }
 
+/** A playlist recommended by a source channel on go-music-dl's /music/recommend. */
+export interface OnlinePlaylistInfo {
+  id: string;          // platform playlist id
+  name: string;
+  source: string;      // platform slug: netease / qq / kugou / kuwo
+  creator: string;
+  cover: string;       // remote cover URL
+  trackCount: string;  // "589" (as displayed)
+  link: string;        // redirect /music/playlist?source=..&id=..  (relative)
+  imported?: boolean;  // whether this playlist is already imported locally
+}
+
+/** A recommended channel on the recommend page (one tab = one platform). */
+export interface OnlineRecommendChannel {
+  source: string;
+  name: string; // display name e.g. "网易云音乐"
+  count: number;
+  playlists: OnlinePlaylistInfo[];
+}
+
+export interface OnlineRecommendResult {
+  channels: OnlineRecommendChannel[];
+}
+
 /** A configured, instantiated online source provider. */
 export interface OnlineProvider {
   readonly id: string;
@@ -41,6 +65,10 @@ export interface OnlineProvider {
   test(config: Record<string, any>): Promise<{ success: boolean; message?: string }>;
   /** Search the aggregated online catalog. */
   search(config: Record<string, any>, params: OnlineSearchParams): Promise<OnlineSearchResult>;
+  /** Fetch the daily-recommend playlist channels (/music/recommend). */
+  recommend?(config: Record<string, any>): Promise<OnlineRecommendResult>;
+  /** Fetch a single remote playlist's songs (/music/playlist?source=..id=..). */
+  playlistSongs?(config: Record<string, any>, source: string, id: string): Promise<{ songs: OnlineSongResult[]; name: string }>;
   /** Build the audio proxy URL for a song (go-music-dl /download?stream=1). */
   streamUrl(config: Record<string, any>, song: OnlineSongResult, range?: string): string;
 }

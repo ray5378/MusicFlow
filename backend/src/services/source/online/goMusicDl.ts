@@ -8,7 +8,7 @@
 // Streaming: we reuse go-music-dl's /music/download?stream=1 which is a raw
 // audio proxy that honours Range requests — matching /rest/stream's needs.
 
-import { OnlineProvider, OnlineSongResult, registerOnlineProvider } from "./types.js";
+import { OnlineProvider, OnlineSongResult, OnlineRecommendChannel, OnlinePlaylistInfo, registerOnlineProvider } from "./types.js";
 
 function baseUrl(config: Record<string, any>): string {
   return String(config?.baseUrl || "").replace(/\/+$/, "");
@@ -23,6 +23,56 @@ function decodeAttr(v: string): string {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .trim();
+}
+
+/** Parse the per-channel playlist tabs + cards out of /music/recommend HTML. */
+export function parseRecommendPlaylists(html: string): OnlineRecommendChannel[] {
+  const channels: OnlineRecommendChannel[] = [];
+
+  // Each channel is a <button class="category-source-tab" data-target="...recommend-<src>"
+  // containing <span class="category-source-tab-name">Name</span> and
+  // <span class="category-source-tab-count">N</span>.
+  const tabRe = /<button[^>]*class="category-source-tab[^"]*"[^>]*data-target="([^"]*recommend-([a-z]+))"[^>]*>([\s\S]*?)<\/button>/g;
+  let tm: RegExpExecArray | null;
+  while ((tm = tabRe.exec(html)) !== null) {
+    const source = tm[2].toLowerCase();
+    const inner = tm[3];
+    const nameM = /category-source-tab-name"[^>]*>\s*([^<]+?)\s*</.exec(inner);
+    const countM = /category-source-tab-count"[^>]*>\s*(\d+)\s*</.exec(inner);
+    channels.push({
+      source,
+      name: nameM ? decodeAttr(nameM[1]) : source,
+      count: countM ? parseInt(countM[1], 10) || 0 : 0,
+      playlists: [],
+    });
+  }
+
+  // Playlist cards: <div class="playlist-card" onclick="navigateTo('/music/playlist?source=..&id=..&name=..&creator=..&cover=..&track_count=..&link=..')">
+  const cardRe = /<div\s+class="playlist-card"[^>]*onclick="navigateTo\(\s*['"](.*?)['"]\s*\)"/g;
+  let cm: RegExpExecArray | null;
+  while ((cm = cardRe.exec(html)) !== null) {
+    let path = decodeAttr(cm[1]).replace(/\\\//g, "/").replace(/\\u0026/gi, "&");
+    if (!path.startsWith("/music/playlist")) continue;
+    const p = path.split("?")[1] || "";
+    if (!p) continue;
+    const params = new URLSearchParams(p);
+    const source = params.get("source") || "";
+    const id = params.get("id") || "";
+    if (!source || !id) continue;
+    const info: OnlinePlaylistInfo = {
+      id,
+      source,
+      name: params.get("name") || "",
+      creator: params.get("creator") || "",
+      cover: params.get("cover") || "",
+      trackCount: params.get("track_count") || "",
+      link: params.get("link") || "",
+    };
+    const ch = channels.find(c => c.source === source) || channels.find(c => c.source.toLowerCase() === source.toLowerCase());
+    if (ch) ch.playlists.push(info);
+    else channels.push({ source, name: source, count: 0, playlists: [info] });
+  }
+  return channels;
 }
 
 function parseSongExtra(raw: string | null | undefined): Record<string, string> | null {
@@ -103,6 +153,36 @@ const goMusicDlProvider: OnlineProvider = {
     if (!res.ok) throw new Error(`go-music-dl 搜索失败: HTTP ${res.status}`);
     const html = await res.text();
     return { songs: parseSongCards(html) };
+  },
+
+  async recommend(config) {
+    const url = `${baseUrl(config)}/music/recommend`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) throw new Error(`go-music-dl 获取推荐歌单失败: HTTP ${res.status}`);
+    const html = await res.text();
+    return { channels: parseRecommendPlaylists(html) };
+  },
+
+  async playlistSongs(config, source, id) {
+    const base = baseUrl(config);
+    // go-music-dl paginates song-card rendering server-side (page_size capped at 500).
+    const totalRe = /data-total-count="(\d+)"/;
+    let page = 1;
+    let total = 0;
+    const all: OnlineSongResult[] = [];
+    do {
+      const qs = new URLSearchParams({ source, id, page: String(page), page_size: "500" });
+      const res = await fetch(`${base}/music/playlist?${qs.toString()}`, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) throw new Error(`go-music-dl 获取歌单详情失败: HTTP ${res.status}`);
+      const html = await res.text();
+      if (page === 1) {
+        const m = totalRe.exec(html);
+        if (m) total = parseInt(m[1], 10) || 0;
+      }
+      all.push(...parseSongCards(html));
+      page++;
+    } while (total > 0 && all.length < total && page <= 50); // hard cap pages
+    return { songs: all, name: "" };
   },
 
   streamUrl(config, song, range) {
