@@ -7,8 +7,8 @@ import md5 from "md5";
 import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
-import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack } from "../../services/plugin/playlistImport.js";
-import { checkImportCooldown, rebuildPlaylistEntries, syncPlaylist, refreshPlaylistCounts } from "../../services/plugin/playlistSync.js";
+import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parseNativePlaylists, NATIVE_APP } from "../../services/plugin/playlistImport.js";
+import { checkImportCooldown, rebuildPlaylistEntries, syncPlaylist, refreshPlaylistCounts, exportPlaylistEntries } from "../../services/plugin/playlistSync.js";
 import {
   generateDailyPlaylist, loadCandidates, saveCandidates, pickDailyCandidate,
   isCandidateBlocked,
@@ -665,28 +665,68 @@ apiRoutes.get("/v1/recommend-pool/favorites/status", (c) => {
   return c.json({ inPool: isInRecommendPool("favorites", user.id) });
 });
 
-// ==================== Playlist import (built-in plugins: QQ / NetEase) ====================
+// ==================== Playlist import (built-in plugins: QQ / NetEase / MusicFlow native file) ====================
 apiRoutes.post("/v1/playlists/import", async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
-  if (!url) return c.json({ success: false, error: "请输入歌单链接" });
+  const native = body.native; // MusicFlow-exported JSON (object) for native files
+  if (!url && !native) return c.json({ success: false, error: "请输入歌单链接或选择歌单文件" });
   try {
+    if (native) {
+      // Native MusicFlow file — may contain one playlist or a whole export-all file
+      const nativeList = parseNativePlaylists(native);
+      const created: { id: string; name: string }[] = [];
+      const totals = { total: 0, matched: 0, unmatched: 0, wishAdded: 0 };
+      for (let i = 0; i < nativeList.length; i++) {
+        const imp = nativeList[i];
+        const name = imp.name.trim() || "导入歌单";
+        const id = `pl-${Date.now()}-${i}`;
+        db.insert(playlists).values({
+          id, name, ownerId: user?.id || "",
+          sourceUrl: null, sourcePlatform: imp.platform, externalId: null,
+          syncEnabled: 0,
+        }).run();
+        const result = await rebuildPlaylistEntries(id, imp, {
+          userId: user?.id,
+          notes: `从本地歌单文件导入「${name}」`,
+        });
+        totals.total += result.total;
+        totals.matched += result.matched;
+        totals.unmatched += result.unmatched;
+        totals.wishAdded += result.wishAdded;
+        created.push({ id, name });
+      }
+      return c.json({
+        success: true,
+        playlistId: created[0]?.id,
+        name: created[0]?.name || "导入歌单",
+        platform: "local",
+        trackCount: totals.total,
+        matched: totals.matched,
+        unmatched: totals.unmatched,
+        wishAdded: totals.wishAdded,
+        created: created.length,
+      });
+    }
     if (checkImportCooldown(user?.id || "", url)) {
       return c.json({ success: false, error: "相同歌单刚导入过,请稍候再试" });
     }
     const imported = await importPlaylistFromUrl(url);
     const name = (body.name || imported.name || "导入歌单").trim();
     const id = `pl-${Date.now()}`;
-    // Cache the remote platform cover locally (fallback to collage if download fails)
+    // Cache the remote platform cover locally (native files carry no cover URL)
     let coverRef: string | undefined = undefined;
     if (imported.coverUrl) {
       const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);
       if (cached) coverRef = cached;
     }
     db.insert(playlists).values({
-      id, name, ownerId: user?.id || "", sourceUrl: url, sourcePlatform: imported.platform,
-      externalId: url, coverArt: coverRef,
+      id, name, ownerId: user?.id || "",
+      sourceUrl: url,
+      sourcePlatform: imported.platform,
+      externalId: url,
+      coverArt: coverRef,
       syncEnabled: body.autoSync ? 1 : 0,
     }).run();
     const result = await rebuildPlaylistEntries(id, imported, {
@@ -701,6 +741,38 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "导入失败" });
   }
+});
+
+// Export a playlist as a MusicFlow-native JSON file that round-trips back
+// through the import endpoint.
+apiRoutes.get("/v1/playlists/:id/export", (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
+  if (!playlist) return c.json({ error: "歌单不存在" }, 404);
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权导出该歌单" }, 403);
+  const { name, tracks } = exportPlaylistEntries(id);
+  const payload = { app: NATIVE_APP, version: 1, exportedAt: new Date().toISOString(), name, tracks };
+  const filename = `${(name || "歌单").replace(/[\\/:*?"<>|]/g, "_")}.json`;
+  c.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  return c.json(payload);
+});
+
+// Export ALL of the current user's playlists into a single MusicFlow-native
+// file (raw.playlists array). Re-imports through the same /import endpoint,
+// which recreates each playlist.
+apiRoutes.get("/v1/playlists/export-all", (c) => {
+  const user = c.get("user");
+  const mine = db.select().from(playlists)
+    .where(eq(playlists.ownerId, user?.id || ""))
+    .all();
+  const playlistsOut = mine.map((p) => {
+    const { name, tracks } = exportPlaylistEntries(p.id);
+    return { name, tracks };
+  });
+  const filename = `MusicFlow全部歌单_${new Date().toISOString().slice(0, 10)}.json`;
+  c.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  return c.json({ app: NATIVE_APP, version: 1, exportedAt: new Date().toISOString(), exportAll: true, playlists: playlistsOut });
 });
 
 // ==================== Playlist sync ====================

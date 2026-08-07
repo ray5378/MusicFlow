@@ -11,9 +11,53 @@ export interface ImportedTrack {
 
 export interface ImportedPlaylist {
   name: string;
-  platform: "qq" | "netease" | "mixed";
+  platform: "qq" | "netease" | "mixed" | "local";
   coverUrl?: string;
   tracks: ImportedTrack[];
+}
+
+// Native MusicFlow playlist file identity (produced by this project's import).
+export const NATIVE_APP = "MusicFlow";
+
+// Parse a MusicFlow-exported playlist JSON (as produced by /v1/playlists/:id/export).
+// Tracks carry title/artist/album/duration so the same library-matching logic
+// in rebuildPlaylistEntries can be reused for a full round-trip.
+export function parseNativePlaylist(raw: any): ImportedPlaylist {
+  return parseNativePlaylists(raw)[0];
+}
+
+// Parse a MusicFlow-exported playlist JSON (as produced by /v1/playlists/:id/export).
+// Tracks carry title/artist/album/duration so the same library-matching logic
+// in rebuildPlaylistEntries can be reused for a full round-trip. An "export all"
+// file (raw.playlists) is expanded into one ImportedPlaylist per playlist.
+export function parseNativePlaylists(raw: any): ImportedPlaylist[] {
+  if (!raw || typeof raw !== "object" || raw.app !== NATIVE_APP) {
+    throw new Error("不是 MusicFlow 导出的歌单文件");
+  }
+  const blocks = Array.isArray(raw.playlists) && raw.playlists.length > 0 ? raw.playlists : [raw];
+  const imported: ImportedPlaylist[] = [];
+  for (const block of blocks) {
+    const tracks: ImportedTrack[] = (Array.isArray(block?.tracks) ? block.tracks : [])
+      .map((t: any) => {
+        const title = t && t.title != null ? String(t.title).trim() : "";
+        if (!title) return null;
+        return {
+          externalId: t?.externalId != null ? String(t.externalId) : "",
+          title,
+          artist: t?.artist != null ? String(t.artist) : "",
+          album: t?.album != null ? String(t.album) : undefined,
+          duration: typeof t?.duration === "number" && t.duration > 0 ? t.duration : undefined,
+        };
+      })
+      .filter((t: ImportedTrack | null): t is ImportedTrack => t !== null);
+    if (tracks.length === 0) throw new Error("歌单文件里没有可用曲目");
+    imported.push({
+      name: (block && block.name && String(block.name).trim()) || "导入歌单",
+      platform: "local",
+      tracks,
+    });
+  }
+  return imported;
 }
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";

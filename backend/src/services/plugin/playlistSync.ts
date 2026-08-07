@@ -184,3 +184,35 @@ export function refreshPlaylistCounts(playlistId: string) {
   }
   db.update(playlists).set({ songCount: count, duration, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
 }
+
+// Export a playlist's ordered tracks as MusicFlow-native ImportedTrack[], so
+// the resulting JSON can be imported back (into this or another instance) via
+// parseNativePlaylist + rebuildPlaylistEntries. Prefers external track metadata
+// (kept from a platform import) for the richest re-match, else falls back to the
+// matched local song's fields.
+export function exportPlaylistEntries(playlistId: string): { name: string; tracks: ImportedTrack[] } {
+  const playlist = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
+  if (!playlist) throw new Error("歌单不存在");
+  const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all()
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const tracks: ImportedTrack[] = [];
+  for (const e of entries) {
+    let title = e.externalTitle || "";
+    let artist = e.externalArtist || "";
+    let album = e.externalAlbum || undefined;
+    let duration = e.externalDuration || undefined;
+    let extId = e.externalSongId || "";
+    if (!title && e.songId) {
+      const s = db.select().from(songs).where(eq(songs.id, e.songId)).get();
+      if (s) {
+        title = s.title || "";
+        artist = s.artist || "";
+        album = s.album || undefined;
+        duration = (s.duration || 0) * 1000;
+        extId = s.id;
+      }
+    }
+    if (title) tracks.push({ externalId: extId, title, artist, album, duration });
+  }
+  return { name: playlist.name, tracks };
+}

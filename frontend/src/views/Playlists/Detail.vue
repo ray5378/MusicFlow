@@ -14,6 +14,7 @@
         </div>
         <div class="actions">
           <el-button type="primary" @click="playAll">播放全部</el-button>
+          <el-button @click="exportPlaylist"><MfIcon name="Download" />导出</el-button>
           <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />重命名</el-button>
           <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />同步</el-button>
           <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
@@ -118,6 +119,25 @@ function playSong(song: any) { if (song.isMatched !== false) playerStore.playSon
 function playAll() { const playable = songs.value.filter(s => s.isMatched !== false); if (playable.length > 0) playerStore.playQueue(playable); }
 function playSelected() { const playable = selectedSongs.value.filter(s => s.isMatched !== false); if (playable.length > 0) playerStore.playQueue(playable); }
 function onSelectionChange(rows: any[]) { selectedSongs.value = rows; }
+async function exportPlaylist() {
+  if (!playlist.value?.id) return;
+  try {
+    const res = await api.get(`/rest/api/v1/playlists/${playlist.value.id}/export`, { responseType: "blob" });
+    const blob = new Blob([res.data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const cd = (res.headers["content-disposition"] as string) || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? decodeURIComponent(m[1]) : `${playlist.value.name}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.message || "导出失败");
+  }
+}
 
 async function loadPlaylist() {
   loading.value = true;

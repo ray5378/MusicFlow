@@ -4,7 +4,8 @@
       <h2>歌单</h2>
       <div class="header-actions">
         <el-button type="primary" @click="showCreateDialog = true"><MfIcon name="Plus" />新建歌单</el-button>
-        <el-button @click="showImportDialog = true"><MfIcon name="Download" />导入歌单</el-button>
+        <el-button @click="exportAllPlaylists"><MfIcon name="Download" />导出全部歌单</el-button>
+        <el-button @click="showImportDialog = true"><MfIcon name="Upload" />导入歌单</el-button>
       </div>
     </div>
     <div class="playlist-grid" v-loading="loading">
@@ -62,6 +63,7 @@
               <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
               <el-dropdown-item v-if="pl.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
               <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
+              <el-dropdown-item command="export"><MfIcon name="Download" />导出</el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
                 <MfIcon name="Wand2" />{{ pl._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
               </el-dropdown-item>
@@ -92,18 +94,33 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showImportDialog" title="导入歌单" width="520px">
+    <el-dialog v-model="showImportDialog" title="导入歌单" width="560px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-        支持 QQ 音乐、网易云音乐歌单分享链接。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入许愿清单
+        支持 QQ 音乐、网易云音乐歌单分享链接，或本项目「导出」生成的 .json 歌单文件。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入许愿清单
       </el-alert>
       <el-form label-width="80px">
         <el-form-item label="歌单链接">
-          <el-input v-model="importUrl" placeholder="粘贴 QQ 音乐 / 网易云音乐歌单分享链接..." type="textarea" :rows="3" />
+          <el-input v-model="importUrl" placeholder="粘贴 QQ 音乐 / 网易云音乐歌单分享链接..." type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="或选择文件">
+          <el-upload
+            drag
+            :auto-upload="false"
+            :limit="1"
+            accept=".json,application/json"
+            :on-change="onNativeFileChange"
+            :on-remove="clearNativeFile"
+            :file-list="nativeFileList"
+            style="width: 100%"
+          >
+            <el-icon class="el-icon--upload"><MfIcon name="Upload" :size="36" /></el-icon>
+            <div class="el-upload__text">拖拽本项目的歌单 .json 文件到此处，或<em>点击选择</em></div>
+          </el-upload>
         </el-form-item>
         <el-form-item label="歌单名称">
           <el-input v-model="importName" placeholder="留空则使用原歌单名" />
         </el-form-item>
-        <el-form-item label="自动同步">
+        <el-form-item label="自动同步" v-if="!nativeFile">
           <el-switch v-model="importAutoSync" />
           <span style="margin-left: 8px; font-size: 12px; color: #999">每 6 小时自动同步(需手动同步时也可在详情页操作)</span>
         </el-form-item>
@@ -123,7 +140,7 @@ import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2 } from "lucide-vue-next";
+import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download } from "lucide-vue-next";
 import api from "@/api";
 
 const router = useRouter();
@@ -147,6 +164,7 @@ function cardActions(pl: any): MenuAction[] {
   if (pl.isImported) acts.push({ label: "同步", icon: RefreshCw, onClick: () => syncPlaylist(pl) });
   acts.push({ divider: true });
   acts.push({ label: "重命名", icon: Pencil, onClick: () => openRename(pl) });
+  acts.push({ label: "导出歌单", icon: Download, onClick: () => exportPlaylist(pl) });
   acts.push({
     label: pl._inPool ? "移出每日推荐池" : "加入每日推荐池",
     icon: Wand2,
@@ -185,6 +203,8 @@ const importUrl = ref("");
 const importName = ref("");
 const importAutoSync = ref(true);
 const importing = ref(false);
+const nativeFile = ref<any>(null);        // parsed MusicFlow JSON (or null)
+const nativeFileList = ref<any[]>([]);    // el-upload file list (for display/remove)
 const syncingId = ref("");
 // Recommend-pool membership state, so the dropdown item can toggle between
 // "加入每日推荐池" / "移出每日推荐池".
@@ -246,15 +266,26 @@ async function createPlaylist() {
 }
 
 async function importPlaylist() {
-  if (!importUrl.value.trim()) { ElMessage.warning("请输入歌单链接"); return; }
+  const hasUrl = importUrl.value.trim();
+  const hasFile = !!nativeFile.value;
+  if (!hasUrl && !hasFile) { ElMessage.warning("请输入歌单链接或选择歌单文件"); return; }
   importing.value = true;
   try {
-    const res = await api.post("/rest/api/v1/playlists/import", { url: importUrl.value, name: importName.value, autoSync: importAutoSync.value });
+    const body: any = hasFile
+      ? { native: nativeFile.value, name: importName.value }
+      : { url: importUrl.value, name: importName.value, autoSync: importAutoSync.value };
+    const res = await api.post("/rest/api/v1/playlists/import", body);
     if (res.data.success) {
-      ElMessage.success(`导入成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入许愿清单)`);
+      if (res.data.created && res.data.created > 1) {
+        ElMessage.success(`导入 ${res.data.created} 个歌单成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入许愿清单)`);
+      } else {
+        ElMessage.success(`导入成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入许愿清单)`);
+      }
       showImportDialog.value = false;
       importUrl.value = "";
       importName.value = "";
+      nativeFile.value = null;
+      nativeFileList.value = [];
       loadPlaylists();
     } else {
       ElMessage.error(res.data.error || "导入失败");
@@ -263,6 +294,67 @@ async function importPlaylist() {
     ElMessage.error(e.response?.data?.error || "导入失败");
   } finally {
     importing.value = false;
+  }
+}
+
+// Read a selected MusicFlow .json playlist file as text, then parse it for import.
+function onNativeFileChange(file: any) {
+  nativeFileList.value = file?.fileList?.length ? [file.fileList[file.fileList.length - 1]] : [];
+  const raw = file?.raw;
+  if (!raw) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      nativeFile.value = JSON.parse(reader.result as string);
+    } catch {
+      nativeFile.value = null;
+      ElMessage.error("无效的歌单文件，请选择本项目导出的 .json 歌单");
+    }
+  };
+  reader.readAsText(raw);
+}
+function clearNativeFile() {
+  nativeFile.value = null;
+  nativeFileList.value = [];
+}
+
+// Download a playlist as a MusicFlow-native .json export file.
+async function exportPlaylist(pl: any) {
+  try {
+    const res = await api.get(`/rest/api/v1/playlists/${pl.id}/export`, { responseType: "blob" });
+    const blob = new Blob([res.data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const cd = (res.headers["content-disposition"] as string) || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? decodeURIComponent(m[1]) : `${pl.name}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.message || "导出失败");
+  }
+}
+
+// Download every one of the user's playlists as a single MusicFlow-native .json file.
+async function exportAllPlaylists() {
+  try {
+    const res = await api.get("/rest/api/v1/playlists/export-all", { responseType: "blob" });
+    const blob = new Blob([res.data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const cd = (res.headers["content-disposition"] as string) || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = m ? decodeURIComponent(m[1]) : `MusicFlow全部歌单_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.message || "导出失败");
   }
 }
 
@@ -288,6 +380,7 @@ function handleCardCommand(cmd: string, pl: any) {
     case "play": playAll(pl); break;
     case "sync": syncPlaylist(pl); break;
     case "rename": openRename(pl); break;
+    case "export": exportPlaylist(pl); break;
     case "addToDaily": togglePlaylistPool(pl); break;
     case "delete": deletePlaylist(pl); break;
   }
