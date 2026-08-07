@@ -65,6 +65,12 @@ export const songs = sqliteTable("songs", {
   genre: text("genre").default(""),
   size: integer("size").default(0),
   fingerprint: text("fingerprint"),
+  type: text("type").default("local"),
+  url: text("url"),
+  streamHeaders: text("stream_headers"),
+  sourceData: text("source_data"),
+  pluginEntry: text("plugin_entry"),
+  cachePath: text("cache_path"),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

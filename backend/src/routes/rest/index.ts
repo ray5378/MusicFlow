@@ -859,17 +859,81 @@ function getWebDAVUrl(sourceConfig: any, filePath: string): string {
   return origin + filePath;
 }
 
+// Stream an online/plugin song. Serves the local cache file if present, otherwise
+// proxies the song's remote `url` applying its `streamHeaders` (e.g. Referer) + Range.
+async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null) {
+  try {
+    const fs = await import("fs");
+    if (song.cachePath && fs.existsSync(song.cachePath)) {
+      const filePath = song.cachePath;
+      const fileSize = fs.statSync(filePath).size;
+      if (rangeHeader) {
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (match) {
+          const start = parseInt(match[1]);
+          const end = match[2] ? parseInt(match[2]) : fileSize - 1;
+          const chunkSize = end - start + 1;
+          const stream = fs.createReadStream(filePath, { start, end });
+          return new Response(stream as any, {
+            status: 206,
+            headers: {
+              "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
+              "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+              "Content-Length": String(chunkSize),
+              "Accept-Ranges": "bytes",
+            },
+          });
+        }
+      }
+      const stream = fs.createReadStream(filePath);
+      return new Response(stream as any, {
+        status: 200,
+        headers: {
+          "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
+          "Content-Length": String(fileSize),
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "public, max-age=3600",
+        },
+      });
+    }
+
+    // Remote proxy with per-song headers (e.g. Bilibili requires Referer).
+    if (!song.url) return c.json(ok({ error: { code: 0, message: "No stream url" } }));
+    const headers: Record<string, string> = {};
+    try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
+    if (rangeHeader) headers["Range"] = rangeHeader;
+    const upstream = await fetch(song.url, { headers });
+    const respHeaders: Record<string, string> = {
+      "Content-Type": upstream.headers.get("content-type") || MIME_MAP[song.suffix || ""] || "application/octet-stream",
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "public, max-age=3600",
+    };
+    const cl = upstream.headers.get("content-length");
+    if (cl) respHeaders["Content-Length"] = cl;
+    const cr = upstream.headers.get("content-range");
+    if (cr) respHeaders["Content-Range"] = cr;
+    return c.body(upstream.body as any, upstream.status as any, respHeaders);
+  } catch (e: any) {
+    return c.json(ok({ error: { code: 0, message: e.message || "Stream failed" } }));
+  }
+}
+
 restRoutes.get("/stream", async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
   if (!song) return c.json(ok({ error: { code: 70, message: "Song not found" } }));
 
-  const parsed = parseSongPath(song.path);
-  if (!parsed) return c.json(ok({ error: { code: 0, message: "Invalid song path" } }));
-
   const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
   const format = getParam(c, "format"); // "raw" = no transcode; other formats unsupported
+
+  // Online song (built-in source plugin): serve local cache first, else proxy `url` with its headers.
+  if ((song.type || "local") === "web") {
+    return serveWebSongStream(c, song, rangeHeader);
+  }
+
+  const parsed = parseSongPath(song.path);
+  if (!parsed) return c.json(ok({ error: { code: 0, message: "Invalid song path" } }));
 
   try {
     if (parsed.type === "w") {

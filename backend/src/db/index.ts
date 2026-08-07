@@ -351,6 +351,17 @@ export function initDatabase() {
   try {
     sqlite.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0");
   } catch {}
+  // Online-song columns (built-in source plugins: go-music-dl etc.)
+  for (const col of [
+    "type TEXT DEFAULT 'local'",
+    "url TEXT",
+    "stream_headers TEXT",
+    "source_data TEXT",
+    "plugin_entry TEXT",
+    "cache_path TEXT",
+  ]) {
+    try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
+  }
 
   // Insert default admin if no users exist
   const userCount = sqlite.prepare("SELECT COUNT(*) as count FROM users").get() as any;
