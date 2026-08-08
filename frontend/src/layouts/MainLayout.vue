@@ -1588,10 +1588,10 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     right: 12px;
     height: 64px;
     border-radius: 18px;
-    background: rgba(15, 14, 22, 0.82);
+    background: rgba(18, 17, 26, 0.96);   /* 接近不透明：减少悬浮条与下方滚动内容的 alpha 混合，降低切标签/滚动时 surface 的逐帧合成开销 */
     border: 1px solid rgba(255, 255, 255, 0.08);
     /* 移除 border-top —— 播放器是悬浮的，不再是底栏 */
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);   /* 调轻大阴影：缩小模糊半径，降低该合成层的栅格/合成成本 */
     z-index: 520;   /* 始终在最前：高于内容页与顶栏(500)，低于弹窗层(queue 550 / sidebar 600 / playmode 700) */
     display: flex; align-items: center; gap: 8px;
     padding: 0 12px;
