@@ -17,7 +17,7 @@
           v-longpress="() => openActionSheet(playlistActions(featured), featured.name, '歌单')"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featured.id)">
-            <img v-if="featured.coverArt" :src="cover(featured.coverArt)" class="card-cover" />
+            <img v-if="featured.coverArt" :src="cover(featured.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="48"  /></div>
             <span class="badge">今日推荐</span>
             <CoverPlay size="lg" :label="`播放 ${featured.name}`" :action="() => playPl(featured)" />
@@ -38,7 +38,7 @@
           v-longpress="() => openActionSheet(playlistActions(pl), pl.name, '歌单')"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
-            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" />
+            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
             <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
           </div>
@@ -72,7 +72,7 @@
           v-longpress="() => openActionSheet(playlistActions(pl), pl.name, '歌单')"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
-            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" />
+            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28"  /></div>
             <PlatformBadge :source="group.source" />
             <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
@@ -226,7 +226,7 @@ onMounted(async () => {
   from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.card-cover-wrap { position: relative; overflow: hidden; border-radius: var(--fnos-radius-lg) var(--fnos-radius-lg) 0 0; }
+.card-cover-wrap { position: relative; overflow: hidden; border-radius: var(--fnos-radius-lg) var(--fnos-radius-lg) 0 0; background: rgba(255,255,255,0.04); }
 .card-cover { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; transition: transform 0.5s ease; }
 .card-cover-ph {
   width: 100%; aspect-ratio: 1;

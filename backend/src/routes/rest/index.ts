@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
+import { readCoverFile } from "../../services/coverCache.js";
 import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
@@ -1164,8 +1165,10 @@ restRoutes.get("/getCoverArt", async (c) => {
     if (playlistCover) {
       const filePath = resolveCoverFile(playlistCover.file);
       if (filePath) {
-        const data = fs.readFileSync(filePath);
-        return new Response(data, { headers: { "Content-Type": playlistCover.mime, "Cache-Control": "public, max-age=86400" } });
+        try {
+          const data = await readCoverFile(filePath);
+          return new Response(data, { headers: { "Content-Type": playlistCover.mime, "Cache-Control": "public, max-age=86400" } });
+        } catch { /* fall through to placeholder */ }
       }
     }
   } else {
@@ -1180,7 +1183,7 @@ restRoutes.get("/getCoverArt", async (c) => {
         try {
           const ext = path.extname(fname).toLowerCase();
           const mime = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : "image/jpeg";
-          const data = fs.readFileSync(filePath);
+          const data = await readCoverFile(filePath);
           return new Response(data, { headers: { "Content-Type": mime, "Cache-Control": "public, max-age=86400" } });
         } catch { /* try next */ }
       }

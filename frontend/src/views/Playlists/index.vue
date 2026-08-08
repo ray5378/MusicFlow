@@ -46,7 +46,7 @@
       >
         <div class="playlist-cover mf-coverwrap" @click.stop="open(pl)">
           <PlatformBadge :source="pl.sourcePlatform" />
-          <img v-if="pl.coverArt" :src="`/rest/getCoverArt?id=${pl.coverArt}&size=300`" />
+          <img v-if="pl.coverArt" :src="`/rest/getCoverArt?id=${pl.coverArt}&size=300`" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playAll(pl)" />
         </div>
@@ -534,7 +534,7 @@ onMounted(() => { loadPlaylists(); detectDailySource(); });
     .playlist-cover img { transform: scale(1.06); }
   }
   &:active { transform: translateY(-2px) scale(0.98); }
-  .playlist-cover { position: relative; aspect-ratio: 1; overflow: hidden;
+  .playlist-cover { position: relative; aspect-ratio: 1; overflow: hidden; background: rgba(255,255,255,0.04);
     img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s ease; }
     .cover-placeholder { width: 100%; height: 100%; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); }
     &.fav-cover { background: linear-gradient(135deg, #f5b942, #e94560); color: #fff; display: flex; align-items: center; justify-content: center;

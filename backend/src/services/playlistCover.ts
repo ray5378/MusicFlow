@@ -17,6 +17,14 @@ const COVERS_DIR = path.join(process.cwd(), "data", "covers");
 const MUSICDL_COVERS_DIR = path.join(process.cwd(), "data", "musildl-covers");
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
+// Resolved-path cache: probing both dirs costs a stat syscall per candidate on
+// slow storage, and the same cover filename is looked up by every page that
+// renders it. Cache the resolved absolute path (or null for a miss) per ref, so
+// each ref is probed only once while the server stays up. Invalidated on write
+// (cacheRemoteCover / deleteCover) so new downloads are seen immediately.
+const resolveCache = new Map<string, string | null>();
+const RESOLVE_CACHE_MAX = 2000;
+
 function ensureDir() {
   if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
   if (!fs.existsSync(MUSICDL_COVERS_DIR)) fs.mkdirSync(MUSICDL_COVERS_DIR, { recursive: true });
@@ -34,11 +42,24 @@ export function platformCoverPath(ref: string): string {
  */
 export function resolveCoverFile(ref: string): string | null {
   if (!ref) return null;
+  const cached = resolveCache.get(ref);
+  if (cached !== undefined) return cached;
+  let resolved: string | null = null;
   for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
     const p = path.join(dir, ref);
-    try { if (fs.existsSync(p)) return p; } catch { /* keep probing */ }
+    try { if (fs.existsSync(p)) { resolved = p; break; } } catch { /* keep probing */ }
   }
-  return null;
+  if (resolveCache.size >= RESOLVE_CACHE_MAX) {
+    const first = resolveCache.keys().next().value;
+    if (first) resolveCache.delete(first);
+  }
+  resolveCache.set(ref, resolved);
+  return resolved;
+}
+
+/** Invalidate a cached path resolution (called by cover writes/deletes). */
+export function invalidateCoverResolve(ref: string): void {
+  resolveCache.delete(ref);
 }
 
 // Download a remote (platform) cover image and cache it locally. Returns the
@@ -64,6 +85,7 @@ export async function cacheRemoteCover(url: string, ref: string, force = false):
     if (buf.length < 100) return null;
     ensureDir();
     fs.writeFileSync(filePath, buf);
+    invalidateCoverResolve(fileName);
     return fileName;
   } catch {
     return null;
@@ -86,6 +108,7 @@ export function copyCoverToFile(destRef: string, srcCoverRef: string): string | 
   try {
     ensureDir();
     fs.copyFileSync(src, path.join(COVERS_DIR, destRef));
+    invalidateCoverResolve(destRef);
     return destRef;
   } catch {
     return null;
@@ -97,7 +120,7 @@ export function clearPlaylistCoverCache(playlistId: string) {
   for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
     try {
       const filePath = path.join(dir, `pl-${playlistId}.jpg`);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); invalidateCoverResolve(`pl-${playlistId}.jpg`); }
     } catch { /* ignore */ }
   }
   // Remove the stored ref so the cover is regenerated on next request
