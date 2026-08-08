@@ -86,6 +86,10 @@ export const usePlayerStore = defineStore("player", () => {
   const localCurrentLyricLine = ref("");
   const localCurrentLyricIndex = ref(-1);
   let howl: Howl | null = null;
+  // Consecutive load/play failures; reaching MAX stops auto-skipping to avoid an
+  // infinite loop when the whole queue is unplayable.
+  let localFailStreak = 0;
+  const LOCAL_MAX_FAIL_STREAK = 5;
 
   // ==================== Unified peer system (core refs, declared early) ====================
   // currentPeerId drives which state machine the UI shows/controls.
@@ -294,6 +298,7 @@ export const usePlayerStore = defineStore("player", () => {
       volume: volume.value,
       html5: true,
       onplay: () => {
+        localFailStreak = 0;
         localIsPlaying.value = true;
         localDuration.value = howl?.duration() || 0;
         startLocalProgressTimer();
@@ -302,9 +307,28 @@ export const usePlayerStore = defineStore("player", () => {
       onpause: () => { localIsPlaying.value = false; stopLocalProgressTimer(); },
       onend: () => { localNext(); },
       onload: () => { localDuration.value = howl?.duration() || 0; },
+      onloaderror: () => { localHandlePlaybackError(song.id); },
+      onplayerror: () => { localHandlePlaybackError(song.id); },
     });
 howl.play();
     autoshowQueue();
+  }
+
+  // Auto-skip when a song can't be fetched/played (e.g. no stream available on
+  // any source). Stops after LOCAL_MAX_FAIL_STREAK consecutive failures so a
+  // fully-unplayable queue doesn't spin forever.
+  function localHandlePlaybackError(songId: string) {
+    try { howl?.unload(); } catch {}
+    howl = null;
+    localFailStreak++;
+    console.warn(`[player] 播放失败(${localFailStreak}) songId=${songId}, 自动跳过`);
+    if (localFailStreak >= LOCAL_MAX_FAIL_STREAK) {
+      console.warn("[player] 连续失败过多,停止自动跳过");
+      localFailStreak = 0;
+      localIsPlaying.value = false;
+      return;
+    }
+    localNext();
   }
 
   async function loadLocalLyrics(songId: string) {

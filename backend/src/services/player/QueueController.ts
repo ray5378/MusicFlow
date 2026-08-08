@@ -11,6 +11,7 @@ import { PlayMode, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
+import { ensurePlayableStream } from "../source/online/streamFallback.js";
 import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from "../group/protocolPlayer.js";
 import { getGroupManager } from "../group/index.js";
 import { suffixToMime } from "../dlna/queue.js";
@@ -46,6 +47,8 @@ export class QueueController extends EventEmitter {
   private players = new Map<string, UniversalPlayer>();
   private ctrls = new Map<string, PlayerControllerLike>();
   private advancing = new Set<string>();
+  // Per-player consecutive unplayable skips; reset on a successful cast.
+  private skipCounters = new Map<string, number>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() { super(); this.setMaxListeners(50); }
@@ -247,6 +250,27 @@ export class QueueController extends EventEmitter {
     // 只带 songId 的 item(HA/脚本下发)补全元数据,否则 castToDevice 的
     // buildDidlLite/escapeXml 会因 title/mime 缺失抛错。
     const fullItem = await this.resolveItem(item);
+    // Web 歌曲(在线源)在 cast 前预检流是否真的可播:原 URL 探测失败但
+    // 多源兜底命中则写回 songs.url;两头皆空(streamFallback 也找不到替代)
+    // 则判定不可播 → 从队列移除并跳过,继续下一首。避免设备卡在拉不到流。
+    const songRow = db.select().from(songs).where(eq(songs.id, item.songId)).get();
+    if (songRow?.pluginEntry && typeof songRow.pluginEntry === "string") {
+      const playable = await ensurePlayableStream(songRow as any);
+      if (!playable) {
+        // 连续失败保护:整队列都不可播时停止,避免无限循环。
+        const skips = (this.skipCounters.get(deviceId) || 0) + 1;
+        this.skipCounters.set(deviceId, skips);
+        if (skips >= Math.max(3, q.items.length + 1)) {
+          console.warn(`[QueueController][playCurrent] ${deviceId}: 连续 ${skips} 首不可播,停止`);
+          this.skipCounters.delete(deviceId);
+          this.markEnded(deviceId);
+          return;
+        }
+        console.warn(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过并移除 (${skips})`);
+        this.removeAt(deviceId, q.currentIndex, baseUrl);
+        return;
+      }
+    }
     // PlayerController 的 key 取 player 自身完整 id(dlna:<id> 或 group:<gid>)。
     const playerId = player.playerId;
     console.log(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
@@ -258,6 +282,7 @@ export class QueueController extends EventEmitter {
       // 对照 MA:命令发出前先把 _attr_playback_state = PLAYING(乐观设态)。
       ctrl.beginOptimistic(playerId, "pending");
       const { mediaUri } = await player.playMedia(fullItem, baseUrl);
+      this.skipCounters.delete(deviceId);
       // cast 命令已发出,重置 tracker:清掉上一首的 prev 状态 + 残留去抖,
       // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
       // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。

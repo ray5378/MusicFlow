@@ -11,6 +11,9 @@
 
 import { getConfiguredProvider } from "./index.js";
 import { OnlineSongResult } from "./types.js";
+import { db } from "../../../db/index.js";
+import { songs } from "../../../db/schema.js";
+import { eq } from "drizzle-orm";
 
 // Search result ordering: prefer platforms that resolve reliably.
 const SOURCE_PREFERENCE = ["netease", "kuwo", "kugou", "qq"];
@@ -81,6 +84,8 @@ async function probe(url: string): Promise<boolean> {
   }
 }
 
+export { probe as probeStream };
+
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[（(].*?[)）]/g, "").replace(/[\s·\-:_~]+/g, "").trim();
 }
@@ -88,4 +93,61 @@ function normalize(s: string): string {
 export function clearFallbackCache(songId?: string) {
   if (songId) fallbackCache.delete(songId);
   else fallbackCache.clear();
+}
+
+// songId -> true once we confirmed the original url plays (independent of the
+// fallback cache, which only stores fallback hits / misses).
+const playableCache = new Set<string>();
+
+/**
+ * Ensure a web song has a streamable URL before casting it to a renderer.
+ *   - If the original URL probes OK, returns it (cached per songId).
+ *   - Otherwise tries findFallbackStream (multi-source) and, on a hit,
+ *     persists the replacement URL back into songs.url so future casts and
+ *     /rest/stream proxies use it directly.
+ *   - Returns null when no source is playable (caller should skip the track).
+ */
+export async function ensurePlayableStream(
+  song: { id: string; title?: string | null; artist?: string | null; album?: string | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
+): Promise<string | null> {
+  if (!song?.id) return null;
+  if (playableCache.has(song.id)) return song.url || null;
+  if (fallbackCache.has(song.id)) {
+    const cached = fallbackCache.get(song.id)!;
+    if (cached) {
+      playableCache.add(song.id);
+      // Persist the previously-discovered replacement URL if the song still
+      // carries the failing original (keeps /rest/stream fast on later plays).
+      if (song.url && cached !== song.url) updateSongUrl(song.id, cached);
+    }
+    return cached;
+  }
+
+  // Original already missing → nothing to probe.
+  if (!song.url) return null;
+
+  if (await probe(song.url)) {
+    playableCache.add(song.id);
+    return song.url;
+  }
+
+  // Original fails → try the multi-source fallback.
+  let sd: any = null;
+  try { sd = JSON.parse(song.sourceData || "{}"); } catch {}
+  const fb = await findFallbackStream(
+    song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
+    song.album || "", song.pluginEntry || "go-music-dl", sd?.source || "",
+  );
+  if (fb) {
+    playableCache.add(song.id);
+    updateSongUrl(song.id, fb.url);
+    return fb.url;
+  }
+  return null;
+}
+
+function updateSongUrl(songId: string, url: string): void {
+  try {
+    db.update(songs).set({ url }).where(eq(songs.id, songId)).run();
+  } catch {}
 }
