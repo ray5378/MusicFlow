@@ -11,9 +11,9 @@
     <div class="daily-recommend" v-if="dailySourceId">
       <div class="daily-header">
         <h3><MfIcon name="Fire" />每日推荐</h3>
-        <span class="daily-hint">go-music-dl 按渠道为你推荐 · 导入后每天自动更新</span>
+        <span class="daily-hint">go-music-dl 按渠道为你推荐 · 手动同步将删除旧平台歌单并全量导入当天最新</span>
         <div class="daily-actions">
-          <el-button size="small" :loading="syncingDaily" @click="syncDailyAll">更新全部</el-button>
+          <el-button size="small" type="primary" :loading="syncingDaily" @click="syncDailyAll"><MfIcon name="RefreshCw" :size="14" />同步平台歌单</el-button>
           <el-button size="small" @click="loadDaily">刷新</el-button>
         </div>
       </div>
@@ -25,6 +25,7 @@
           <div class="daily-grid" v-loading="dailyLoading">
             <div class="daily-card" v-for="pl in ch.playlists" :key="pl.id" :class="{ imported: pl.imported }">
               <div class="daily-card-cover" @click="openDaily(pl)">
+                <PlatformBadge :source="ch.source" />
                 <img v-if="pl.cover" :src="pl.cover" loading="lazy" />
                 <div v-else class="cover-placeholder"><MfIcon name="List" :size="24" /></div>
                 <span class="daily-track-count">{{ pl.trackCount }}首</span>
@@ -78,6 +79,7 @@
         v-longpress="() => openActionSheet(cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
       >
         <div class="playlist-cover mf-coverwrap" @click.stop="open(pl)">
+          <PlatformBadge :source="pl.sourcePlatform" />
           <img v-if="pl.coverArt" :src="`/rest/getCoverArt?id=${pl.coverArt}&size=300`" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playAll(pl)" />

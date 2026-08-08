@@ -8,6 +8,7 @@ import App from "./App.vue";
 import router from "./router";
 import { longpress } from "./directives/longpress";
 import MfIcon from "./components/MfIcon.vue";
+import PlatformBadge from "./components/PlatformBadge.vue";
 import "./assets/styles/global.scss";
 
 const app = createApp(App);
@@ -28,5 +29,6 @@ for (const [key, component] of Object.entries(Lucide)) {
 
 app.directive("longpress", longpress);
 app.component("MfIcon", MfIcon);
+app.component("PlatformBadge", PlatformBadge);
 
 app.mount("#app");

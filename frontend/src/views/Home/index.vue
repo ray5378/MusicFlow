@@ -56,33 +56,33 @@
       </div>
     </section>
 
-    <!-- ===== 中间：随机专辑 ===== -->
-    <section class="section">
+    <!-- ===== 各平台精选歌单 ===== -->
+    <section class="section" v-for="group in platformGroups" :key="group.source">
       <div class="section-title">
-        <span>随机专辑</span>
-        <span class="section-sub">随便听听</span>
-        <span class="more" @click="go('/albums')">查看全部专辑 ›</span>
+        <span>{{ group.name }}精选</span>
+        <span class="section-sub">为你精选的 {{ group.name }} 歌单</span>
+        <span class="more" @click="go('/playlists')">查看全部歌单 ›</span>
       </div>
       <div class="grid-row">
         <div
-          v-for="(al, idx) in randomAlbums"
-          :key="al.id"
+          v-for="pl in group.playlists"
+          :key="pl.id"
           class="card fnos-card-sheen"
-          :style="{ '--stagger': idx }"
-          @contextmenu="openContextMenu($event, albumActions(al), al.name || al.title, al.artist || '专辑')"
-          v-longpress="() => openActionSheet(albumActions(al), al.name || al.title, al.artist || '专辑')"
+          @contextmenu="openContextMenu($event, playlistActions(pl), pl.name, '歌单')"
+          v-longpress="() => openActionSheet(playlistActions(pl), pl.name, '歌单')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="go('/albums/' + al.id)">
-            <img v-if="al.coverArt" :src="cover(al.coverArt)" class="card-cover" />
-            <div v-else class="card-cover-ph"><MfIcon name="Disc3" :size="28"  /></div>
-            <CoverPlay size="md" :label="`播放 ${al.name || al.title}`" :action="() => playAl(al)" />
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
+            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" />
+            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28"  /></div>
+            <PlatformBadge :source="group.source" />
+            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
           </div>
-          <div class="card-body" @click="go(`/albums/${al.id}`)">
-            <div class="card-title">{{ al.name || al.title }}</div>
-            <div class="card-sub">{{ al.artist || '' }}</div>
+          <div class="card-body" @click="go(`/playlists/${pl.id}`)">
+            <div class="card-title">{{ pl.name }}</div>
+            <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
           </div>
         </div>
-        <div v-for="n in placeholderCount(null, randomAlbums, 8)" :key="'ph-al-' + n" class="card placeholder fnos-shimmer">
+        <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + n" class="card placeholder fnos-shimmer">
           <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
           <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
         </div>
@@ -103,12 +103,11 @@ import { usePlayContent } from "@/composables/usePlayContent";
 const router = useRouter();
 const {
   openContextMenu, openActionSheet, menuGuard,
-  playlistActions, albumActions,
+  playlistActions,
 } = useItemActions();
 const play = usePlayContent();
 
 const playlists = ref<any[]>([]);
-const albums = ref<any[]>([]);
 const loading = ref(false);
 
 function cover(id: string) {
@@ -126,13 +125,6 @@ async function playPl(pl: any) {
   if (n) ElMessage.success(`正在播放「${pl.name}」`);
   else ElMessage.warning("该歌单暂无可播放歌曲");
 }
-/** CoverPlay 悬浮按钮：播放整张专辑 */
-async function playAl(al: any) {
-  if (menuGuard() || !al) return;
-  const n = await play.playAlbum(al.id);
-  if (n) ElMessage.success(`正在播放「${al.name || al.title}」`);
-  else ElMessage.warning("该专辑暂无可播放歌曲");
-}
 
 // 今日推荐：固定为后端每日自动生成的名为「今日推荐」的歌单，
 // 先决条件：必须匹配到本地库歌曲数 > 30 首才作为今日推荐展示（不足 30 首不显示大卡）
@@ -146,11 +138,23 @@ const sidePlaylists = computed(() => {
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, 6);
 });
-// 随机专辑：洗牌后取前 8
-const randomAlbums = computed(() => {
-  const shuffled = [...albums.value].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 8);
-});
+
+// 各平台精选：按 sourcePlatform 分组，每个平台随机抽 6 张歌单在首页分类展示。
+const PLATFORM_META: Array<{ source: string; name: string }> = [
+  { source: "netease", name: "网易云" },
+  { source: "qq", name: "QQ音乐" },
+  { source: "kugou", name: "酷狗" },
+  { source: "kuwo", name: "酷我" },
+];
+const platformGroups = computed(() =>
+  PLATFORM_META.map((meta) => {
+    const pool = playlists.value.filter((p) => (p.sourcePlatform || "") === meta.source);
+    return {
+      ...meta,
+      playlists: [...pool].sort(() => Math.random() - 0.5).slice(0, 6),
+    };
+  }).filter((g) => g.playlists.length > 0)
+);
 
 // 无数据时补齐占位卡，保证版式可见
 function placeholderCount(featuredItem: any, list: any[], want: number) {
@@ -161,24 +165,18 @@ function placeholderCount(featuredItem: any, list: any[], want: number) {
 
 async function loadPlaylists() {
   try {
-    const res = await api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 30 } });
+    // 拉全量歌单(含各平台导入歌单)以便按平台分组;后台每日同步会产生 60+ 平台歌单。
+    const res = await api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 200 } });
     playlists.value = res.data.items || [];
+    // 首页无专辑区块,不再拉专辑。
   } catch {
     playlists.value = [];
-  }
-}
-async function loadAlbums() {
-  try {
-    const res = await api.get("/rest/api/v1/albums", { params: { page: 1, pageSize: 30 } });
-    albums.value = res.data.items || [];
-  } catch {
-    albums.value = [];
   }
 }
 
 onMounted(async () => {
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadAlbums()]);
+  await loadPlaylists();
   loading.value = false;
 });
 </script>
