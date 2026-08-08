@@ -2,6 +2,7 @@ import { getRequestListener } from "@hono/node-server";
 import { createServer } from "http";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { compress } from "hono/compress";
 import fs from "fs";
 import path from "path";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -53,6 +54,11 @@ app.use("*", cors({
     return allowedOrigins.includes(origin) ? origin : undefined;
   },
 }));
+
+// Compress JSON/HTML responses (gzip) so list payloads over a phone's mobile
+// link are much smaller. Pure transport-layer win — response bytes are
+// identical after decompression, so behaviour is unchanged.
+app.use("*", compress());
 
 app.route("/rest", authRoutes);
 app.get("/rest/ping", (c) => c.json({ "subsonic-response": { status: "ok", version: "1.16.1", serverVersion: "1.0.0", openSubsonic: true, type: "MusicFlow" } }));

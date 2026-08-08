@@ -343,12 +343,18 @@ apiRoutes.get("/v1/songs", (c) => {
     : (where
         ? db.select().from(songs).where(where).orderBy(songs.title).limit(pageSize).offset(start).all()
         : db.select().from(songs).orderBy(songs.title).limit(pageSize).offset(start).all());
+  // Batch album cover lookups for songs without their own cover (avoids N+1
+  // album queries on every page). Logic identical to idToCoverArt().
+  const coverAlbumIds = [...new Set(pageSongs.filter((s) => !s.coverArt && s.albumId).map((s) => s.albumId as string))];
+  const coverMap = coverAlbumIds.length
+    ? new Map(db.select().from(albums).where(inArray(albums.id, coverAlbumIds)).all().map((a) => [a.id, a.coverArt ? `al-${a.id}` : undefined as string | undefined]))
+    : new Map<string, string | undefined>();
   const items = pageSongs.map(s => ({
     id: s.id, title: s.title, artist: s.artist, album: s.album, artistId: s.artistId,
     albumId: s.albumId, duration: s.duration, bitRate: s.bitRate, suffix: s.suffix,
     contentType: s.contentType, size: s.size, playCount: s.playCount, genre: s.genre,
     track: s.track, discNumber: s.discNumber,
-    coverArt: s.coverArt ? `so-${s.id}` : (s.albumId ? idToCoverArt(s.albumId, "al") : undefined),
+    coverArt: s.coverArt ? `so-${s.id}` : (s.albumId ? coverMap.get(s.albumId) : undefined),
   }));
   return c.json({ total, page, pageSize, items });
 });
@@ -406,16 +412,20 @@ apiRoutes.get("/v1/albums", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
-  const allAlbums = db.select().from(albums).all();
-  const filtered = query
-    ? allAlbums.filter(a => {
-        const q = query.toLowerCase();
-        return (a.name || "").toLowerCase().includes(q) || (a.artist || "").toLowerCase().includes(q);
-      })
-    : allAlbums;
-  const total = filtered.length;
+  // SQL-level filter (name/artist LIKE) + ORDER BY created_at DESC + pagination,
+  // so we no longer load the whole albums table into memory on every request.
+  const where = query
+    ? or(like(albums.name, `%${query}%`), like(albums.artist, `%${query}%`))
+    : undefined;
+  const totalRow = where
+    ? db.select({ n: sql<number>`count(*)` }).from(albums).where(where).get()
+    : db.select({ n: sql<number>`count(*)` }).from(albums).get();
+  const total = totalRow?.n ?? 0;
   const start = (page - 1) * pageSize;
-  const items = filtered.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(start, start + pageSize).map(a => ({
+  const rows = where
+    ? db.select().from(albums).where(where).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all()
+    : db.select().from(albums).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all();
+  const items = rows.map(a => ({
     id: a.id, name: a.name, artist: a.artist, artistId: a.artistId, year: a.year,
     songCount: a.songCount, duration: a.duration, playCount: a.playCount,
     coverArt: albumCoverRef(a),
@@ -428,13 +438,14 @@ apiRoutes.get("/v1/artists", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
-  const allArtists = db.select().from(artists).all();
-  const filtered = query
-    ? allArtists.filter(a => (a.name || "").toLowerCase().includes(query.toLowerCase()))
-    : allArtists;
-  const total = filtered.length;
+  // Push the name search to SQL to shrink the working set; the final sort stays
+  // in JS (localeCompare) so Chinese/locale ordering is preserved exactly.
+  const rows = query
+    ? db.select().from(artists).where(like(artists.name, `%${query}%`)).all()
+    : db.select().from(artists).all();
+  const total = rows.length;
   const start = (page - 1) * pageSize;
-  const items = filtered.sort((a, b) => (a.name || "").localeCompare(b.name || "")).slice(start, start + pageSize).map(a => ({
+  const items = rows.sort((a, b) => (a.name || "").localeCompare(b.name || "")).slice(start, start + pageSize).map(a => ({
     id: a.id, name: a.name, albumCount: a.albumCount, coverArt: a.coverArt ? `ar-${a.id}` : undefined,
     scrapeMissing: a.scrapeMissing === 1,
   }));
@@ -854,12 +865,20 @@ apiRoutes.get("/v1/playlists", (c) => {
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
   const user = c.get("user");
-  let all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic || user?.isAdmin);
-  if (query) {
-    const q = query.toLowerCase();
-    all = all.filter(p => (p.name || "").toLowerCase().includes(q));
-  }
-  const total = all.length;
+  // Push the ownership/visibility filter + name search to SQL (no behavioural
+  // change: admin still sees all, others see their own + public). The custom
+  // daily-recommend-first ordering is intentionally kept in JS below because it
+  // cannot be expressed as a plain ORDER BY.
+  const visibility = user?.isAdmin
+    ? undefined
+    : or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1));
+  const where = query
+    ? (visibility ? and(visibility, like(playlists.name, `%${query}%`)) : like(playlists.name, `%${query}%`))
+    : visibility;
+  const rows = where
+    ? db.select().from(playlists).where(where).all()
+    : db.select().from(playlists).all();
+  const total = rows.length;
   // Sort: daily-recommend playlists ("今日推荐"/"昨日推荐") first (today before
   // yesterday), then the rest by updated_at desc.
   const dailyRank = (p: any) => {
@@ -868,7 +887,7 @@ apiRoutes.get("/v1/playlists", (c) => {
     if (c.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
     return 2;
   };
-  const items = all.sort((a, b) => {
+  const items = rows.sort((a, b) => {
     const ra = dailyRank(a), rb = dailyRank(b);
     if (ra !== rb) return ra - rb;
     return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
@@ -913,11 +932,23 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
   const allEntries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, id)).all();
   const total = allEntries.length;
   const matched = allEntries.filter(e => e.playable && e.songId).length;
-  const items = allEntries.slice((page - 1) * pageSize, page * pageSize).map(e => {
+  const pageEntries = allEntries.slice((page - 1) * pageSize, page * pageSize);
+  // Batch song + album lookups (was N+1: one songs query + one albums query
+  // per track). Order is preserved by mapping back through pageEntries.
+  const songIds = pageEntries.filter((e) => e.playable && e.songId).map((e) => e.songId as string);
+  const songMap = songIds.length
+    ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map((s) => [s.id, s]))
+    : new Map<string, any>();
+  const albumIds: string[] = [];
+  for (const s of songMap.values()) if (s.albumId) albumIds.push(s.albumId as string);
+  const albumMap = albumIds.length
+    ? new Map(db.select().from(albums).where(inArray(albums.id, albumIds)).all().map((a) => [a.id, a]))
+    : new Map<string, any>();
+  const items = pageEntries.map((e) => {
     if (e.playable && e.songId) {
-      const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
+      const song = songMap.get(e.songId);
       if (song) {
-        const album = song.albumId ? db.select().from(albums).where(eq(albums.id, song.albumId)).get() : undefined;
+        const album = song.albumId ? albumMap.get(song.albumId) : undefined;
         return {
           id: song.id, title: song.title, artist: song.artist, album: song.album,
           artistId: song.artistId, albumId: song.albumId, duration: song.duration || 0,
@@ -942,13 +973,24 @@ apiRoutes.get("/v1/history", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   if (!user) return c.json({ total: 0, page, pageSize, items: [] });
-  const all = db.select().from(playHistory).where(eq(playHistory.userId, user.id)).all()
-    .sort((a, b) => (b.playedAt || "").localeCompare(a.playedAt || ""));
+  // Push the playedAt DESC sort to SQL (covered by idx_play_history_played_at),
+  // then batch song + album lookups instead of N+1 per history row.
+  const all = db.select().from(playHistory).where(eq(playHistory.userId, user.id)).orderBy(desc(playHistory.playedAt)).all();
   const total = all.length;
-  const items = all.slice((page - 1) * pageSize, page * pageSize).map(h => {
-    const song = db.select().from(songs).where(eq(songs.id, h.songId)).get();
+  const pageRows = all.slice((page - 1) * pageSize, page * pageSize);
+  const songIds = pageRows.map((h) => h.songId).filter((x): x is string => !!x);
+  const songMap = songIds.length
+    ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map((s) => [s.id, s]))
+    : new Map<string, any>();
+  const albumIds: string[] = [];
+  for (const s of songMap.values()) if (s.albumId) albumIds.push(s.albumId as string);
+  const albumMap = albumIds.length
+    ? new Map(db.select().from(albums).where(inArray(albums.id, albumIds)).all().map((a) => [a.id, a]))
+    : new Map<string, any>();
+  const items = pageRows.map((h) => {
+    const song = songMap.get(h.songId);
     if (!song) return null;
-    const album = song.albumId ? db.select().from(albums).where(eq(albums.id, song.albumId)).get() : undefined;
+    const album = song.albumId ? albumMap.get(song.albumId) : undefined;
     return {
       id: song.id, title: song.title, artist: song.artist, album: song.album,
       artistId: song.artistId, albumId: song.albumId, duration: song.duration || 0,

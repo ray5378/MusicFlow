@@ -27,10 +27,15 @@ export function resolveContentSongs(type: string, id: string): { rows: any[]; na
   if (type === "playlist") {
     const pl = db.select().from(playlists).where(eq(playlists.id, id)).get();
     if (!pl) return null;
-    const rows = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, id)).all()
-      .filter(e => e.playable && e.songId)
-      .map(e => db.select().from(songs).where(eq(songs.id, e.songId!)).get())
-      .filter(Boolean);
+    // Batch-load the playlist's songs in one query instead of N+1 (was one
+    // songs query per entry). Order preserved via the id->row Map.
+    const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, id)).all()
+      .filter(e => e.playable && e.songId);
+    const songIds = entries.map(e => e.songId!);
+    const songMap = songIds.length
+      ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map((s) => [s.id, s]))
+      : new Map();
+    const rows = entries.map(e => songMap.get(e.songId!)).filter(Boolean);
     return { rows, name: pl.name };
   }
   if (type === "album") {
