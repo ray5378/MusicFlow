@@ -791,10 +791,25 @@ howl.play();
     else localRemoveFromQueue(index);
   }
   function clearQueue() {
+    // 记住被清空的 peer,便于同步播放器切换器列表的队列状态。
+    const clearedPeerId = isRemotePeer.value && activeRemote.value
+      ? activeRemote.value.peerId
+      : localPeerId.value;
     if (isRemotePeer.value && activeRemote.value) castClearQueue(activeRemote.value);
     else localClearQueue();
+    if (clearedPeerId) markPeerQueueEmpty(clearedPeerId);
     showPlaylist.value = false;
     playModeVisible.value = false;
+  }
+
+  // 立即清空 peers 列表中对应播放器的队列显示(切换器无需手动刷新)。
+  function markPeerQueueEmpty(peerId: string): void {
+    const idx = peers.value.findIndex(p => p.peerId === peerId);
+    if (idx < 0) return;
+    peers.value[idx] = {
+      ...peers.value[idx],
+      queue: { items: [], currentIndex: -1, playMode: "shuffle", isActive: false },
+    };
   }
 
   function toggleLyrics() { showLyrics.value = !showLyrics.value; }
@@ -959,6 +974,15 @@ howl.play();
         case "peer_queue_cleared": {
           const idx = peers.value.findIndex(x => x.peerId === msg.peer_id);
           if (idx >= 0) peers.value[idx].queue = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false };
+          break;
+        }
+        case "queue_changed": {
+          // DLNA 设备 / 播放器群组的队列变更(src 发裸 device_id=裸 id):
+          // 同步播放器切换器列表中的队列显示,无需手动刷新。
+          const devId = msg.device_id;
+          const idx = peers.value.findIndex(x =>
+            (x.peerId === `dlna:${devId}` || x.peerId === `group:${devId}`));
+          if (idx >= 0) peers.value[idx].queue = msg.queue;
           break;
         }
         // Group events (播放器群组页 + 播放器切换器):refresh on create/rename/

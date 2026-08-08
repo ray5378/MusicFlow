@@ -250,4 +250,36 @@ describe("QueueController 组集成", () => {
     await qc.handleDecision("advance", "dlna:d1");
     expect(h.memberCalls["d1"]).toContain("playMedia:s2"); // 正常切歌
   });
+
+  it("clear: 清组队列停播组(dlna 成员收到 stop);组播放期间清成员个人队列不打断组", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d2"] });
+    h.groupOfDevice.set("d1", ["g1"]);
+    const pc = new PlayerController();
+    const qc = new QueueController();
+    pc.onDecision = (d, pid) => { qc.handleDecision(d, pid).catch(() => {}); };
+
+    const gup = new UniversalPlayer("group:g1", "组");
+    gup.attachProtocol(createGroupProtocolPlayer("g1"));
+    qc.registerPlayer("g1", gup, pc);
+    const d1up = new UniversalPlayer("dlna:d1", "d1");
+    d1up.attachProtocol(h.fakeDlnaProtocol("d1") as unknown as ProtocolPlayer);
+    qc.registerPlayer("d1", d1up, pc);
+
+    // 组激活(setQueue 设 isActive=true,不触发 playCurrent,避开 songs 表依赖)
+    qc.setQueue("g1", makeItems(2), 0, "http://base");
+    expect(qc.snapshot("g1").isActive).toBe(true);
+
+    // 组播放期间清成员 d1 的个人队列 → 不 stop(d1 属于激活中的组)
+    const stopsBefore = (h.memberCalls["d1"] ?? []).filter(c => c === "stop").length;
+    qc.setQueue("d1", makeItems(1), 0, "http://base");
+    qc.clear("d1");
+    expect(h.memberCalls["d1"].filter(c => c === "stop").length).toBe(stopsBefore);
+
+    // 清组自身队列 → stop 扇出到在线成员
+    qc.clear("g1");
+    expect(qc.snapshot("g1").items).toHaveLength(0);
+    expect(qc.snapshot("g1").isActive).toBe(false);
+    expect(h.memberCalls["d1"]).toContain("stop");
+    expect(h.memberCalls["d2"] ?? []).toEqual([]); // d2 离线,不扇出
+  });
 });

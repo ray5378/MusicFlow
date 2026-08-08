@@ -370,6 +370,11 @@ export class QueueController extends EventEmitter {
 
   clear(playerId: string): void {
     const q = this.queues.get(playerId); if (!q) return;
+    // 清空队列同时停止实际播放(dlna=stopDevice,group=扇出各成员)。
+    // 成员设备个人清空不打断归属的进行中群组播放。
+    if (!this.isMemberOfActiveGroup(playerId)) {
+      this.players.get(playerId)?.stop().catch(() => {});
+    }
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;
     // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(组场景清各成员)。
     const group = getGroupManager().get(playerId);

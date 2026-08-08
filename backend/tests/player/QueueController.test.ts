@@ -97,4 +97,30 @@ describe("QueueController", () => {
     await qc.handleDecision("advance", "dlna:d1");
     expect(mockPlayer.calls).toContain("playMedia");
   });
+
+  it("clear: 清空队列同时 best-effort stop 设备播放", () => {
+    qc.clear("d1");
+    expect(mockPlayer.calls).toContain("stop");
+    const snap = qc.snapshot("d1");
+    expect(snap.items).toHaveLength(0);
+    expect(snap.currentIndex).toBe(-1);
+    expect(snap.isActive).toBe(false);
+    expect(snap.ended).toBe(false);
+  });
+
+  it("clear: stop 失败(设备离线)静默,不影响清空", () => {
+    const bad = makeMockPlayer();
+    bad.stop = async () => { throw new Error("device offline"); };
+    qc.registerPlayer("d2", bad, mockCtrl as any);
+    qc.setQueue("d2", [{ songId: "s1", title: "t1", mime: "audio/mpeg" }], 0, "http://base");
+    expect(() => qc.clear("d2")).not.toThrow();
+    expect(qc.snapshot("d2").items).toHaveLength(0);
+  });
+
+  it("clear: emit queue_changed(空快照)", () => {
+    const listener = vi.fn();
+    qc.on("queue_changed", listener);
+    qc.clear("d1");
+    expect(listener).toHaveBeenCalledWith("d1", { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false });
+  });
 });
