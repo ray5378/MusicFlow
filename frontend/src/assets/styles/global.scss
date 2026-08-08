@@ -711,24 +711,27 @@ body.fnos-login #app { position: relative; z-index: 1; }
   }
 }
 
-/* ---- 移动端性能：停掉全屏极光的无限动画，并减小 blur 半径 ----
-   全屏 layer 上 blur(90-120px) + 每帧 transform/opacity 动画会持续占用
-   合成器/GPU，即使标签页切到后台也在重算模糊，导致手机浏览器其它页面变卡。
-   手机上极光动画体感差别很小，直接停更安全。 */
+/* ---- 移动端性能：停掉全屏极光的无限动画、降 blur 半径、并清掉 will-change ----
+   全屏 layer 上 blur(90-120px) + will-change + 每帧 transform/opacity 动画会持续占用
+   合成器/GPU，使页面合成 surface 变重；浏览器切换标签的系统动画要逐帧合成整张
+   surface，华为等弱 GPU 会被常驻的大模糊层吃满而掉帧。手机上极光动画体感差别很小，
+   停动画、降 blur 到 10px（与 .tab-hidden 后台态一致）、并取消 will-change 让浏览器
+   按需合成，可显著减轻 surface 重量且视觉几乎无差。 */
 @media (max-width: 768px) {
   .app-bg::before, .app-bg::after,
   .page-canvas::before, .page-canvas::after,
   .content-aurora::before, .content-aurora::after,
   body.fnos-login::before, body.fnos-login::after {
     animation: none !important;
+    will-change: auto !important;   /* 不再永久提升为合成层，避免切标签 surface 动画时 GPU 被常驻大模糊层吃满 */
   }
   .app-bg::before, .page-canvas::before,
   .content-aurora::before, body.fnos-login::before {
-    filter: blur(40px);
+    filter: blur(10px);
   }
   .app-bg::after, .page-canvas::after,
   .content-aurora::after, body.fnos-login::after {
-    filter: blur(50px);
+    filter: blur(10px);
   }
 }
 

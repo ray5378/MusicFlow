@@ -522,11 +522,30 @@ window.addEventListener("resize", updateViewport);
 function syncTabVisibility() {
   document.documentElement.classList.toggle("tab-hidden", document.visibilityState === "hidden");
 }
+// 更早降负载：浏览器切换标签的滑动动画发生时页面仍 visible，但 window 往往会先
+// blur（或触发 pagehide/freeze）。借这些时机提前挂 .tab-hidden，让切换动画开始时
+// 那几层全屏模糊已经 demote，避免在华为等弱 GPU 上掉帧。回到前台(且仍可见)再还原。
+function pauseForGesture() {
+  document.documentElement.classList.add("tab-hidden");
+}
+function resumeFromGesture() {
+  if (document.visibilityState === "visible") {
+    document.documentElement.classList.remove("tab-hidden");
+  }
+}
 document.addEventListener("visibilitychange", syncTabVisibility);
+window.addEventListener("blur", pauseForGesture);
+window.addEventListener("focus", resumeFromGesture);
+window.addEventListener("pagehide", pauseForGesture);
+window.addEventListener("freeze", pauseForGesture);
 syncTabVisibility();
 onUnmounted(() => {
   window.removeEventListener("resize", updateViewport);
   document.removeEventListener("visibilitychange", syncTabVisibility);
+  window.removeEventListener("blur", pauseForGesture);
+  window.removeEventListener("focus", resumeFromGesture);
+  window.removeEventListener("pagehide", pauseForGesture);
+  window.removeEventListener("freeze", pauseForGesture);
   document.documentElement.classList.remove("tab-hidden");
 });
 
