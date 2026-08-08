@@ -5,7 +5,6 @@
     <!-- 边角装饰文字 -->
     <div class="corner corner-tl">PERSONAL MUSIC ARCHIVE</div>
     <div class="corner corner-bl">TRACKS // ALBUMS // ARTISTS</div>
-    <div class="corner corner-tr">FNOS · MUSIC</div>
     <div class="corner corner-br">© 2026</div>
 
     <!-- 登录卡片（玻璃拟态） -->
@@ -18,7 +17,6 @@
           </div>
           <h1>MusicFlow</h1>
         </div>
-        <p class="subtitle">home</p>
       </div>
 
       <el-form @submit.prevent="handleLogin" :model="form" class="login-form">
