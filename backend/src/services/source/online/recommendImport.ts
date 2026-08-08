@@ -110,6 +110,11 @@ export async function importRecommendPlaylist(
       comment: COMMENT_PREFIX + info.source,
       updatedAt: new Date().toISOString(),
     }).where(eq(playlists.id, existing.id)).run();
+    // Existing local playlist: still refresh the cached platform cover (the
+    // song-list fetch above could have failed early on last import, leaving the
+    // local playlist without a cover even though the remote one exists).
+    const playlistCover = await cacheRemoteCover(info.cover, `pl-${existing.id}`, true);
+    if (playlistCover) db.update(playlists).set({ coverArt: playlistCover, updatedAt: new Date().toISOString() }).where(eq(playlists.id, existing.id)).run();
     return {
       success: true, playlistId: existing.id, created: false, name: displayName,
       platform: info.source, trackCount: imp.songs.length, added: imp.added, deduped: imp.deduped, failed: imp.failed,

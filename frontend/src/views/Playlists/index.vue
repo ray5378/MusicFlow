@@ -3,45 +3,11 @@
     <div class="page-header">
       <h2>歌单</h2>
       <div class="header-actions">
-        <el-button type="primary" @click="showCreateDialog = true"><MfIcon name="Plus" />新建歌单</el-button>
+        <el-button @click="showCreateDialog = true"><MfIcon name="Plus" />新建歌单</el-button>
         <el-button @click="exportAllPlaylists"><MfIcon name="Download" />导出全部歌单</el-button>
         <el-button @click="showImportDialog = true"><MfIcon name="Upload" />导入歌单</el-button>
+        <el-button type="primary" :loading="syncingDaily" @click="syncDailyAll"><MfIcon name="RefreshCw" />同步所有平台</el-button>
       </div>
-    </div>
-    <div class="daily-recommend" v-if="dailySourceId">
-      <div class="daily-header">
-        <h3><MfIcon name="Fire" />每日推荐</h3>
-        <span class="daily-hint">go-music-dl 按渠道为你推荐 · 手动同步将删除旧平台歌单并全量导入当天最新</span>
-        <div class="daily-actions">
-          <el-button size="small" type="primary" :loading="syncingDaily" @click="syncDailyAll"><MfIcon name="RefreshCw" :size="14" />同步平台歌单</el-button>
-          <el-button size="small" @click="loadDaily">刷新</el-button>
-        </div>
-      </div>
-      <el-tabs v-model="dailyChannel" class="daily-tabs">
-        <el-tab-pane v-for="ch in dailyChannels" :key="ch.source" :name="ch.source">
-          <template #label>
-            <span class="daily-tab-label">{{ ch.name }}<span v-if="ch.count" class="daily-tab-count">{{ ch.count }}</span></span>
-          </template>
-          <div class="daily-grid" v-loading="dailyLoading">
-            <div class="daily-card" v-for="pl in ch.playlists" :key="pl.id" :class="{ imported: pl.imported }">
-              <div class="daily-card-cover" @click="openDaily(pl)">
-                <PlatformBadge :source="ch.source" />
-                <img v-if="pl.cover" :src="pl.cover" loading="lazy" />
-                <div v-else class="cover-placeholder"><MfIcon name="List" :size="24" /></div>
-                <span class="daily-track-count">{{ pl.trackCount }}首</span>
-              </div>
-              <div class="daily-card-info">
-                <div class="daily-card-name" :title="pl.name">{{ pl.name }}</div>
-                <div class="daily-card-meta">{{ pl.creator }}</div>
-                <el-button size="small" :type="pl.imported ? 'default' : 'primary'" :loading="importingId === pl.id" @click="importDaily(pl)">
-                  <MfIcon :name="pl.imported ? 'RefreshCw' : 'Plus'" :size="14" />{{ pl.imported ? '已导入·更新' : '导入本地' }}
-                </el-button>
-              </div>
-            </div>
-            <div v-if="ch.playlists.length === 0" class="daily-empty">该渠道暂无推荐歌单</div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
     </div>
     <div class="playlist-grid" v-loading="loading">
       <!-- Favorites special playlist -->
@@ -247,77 +213,39 @@ const syncingId = ref("");
 const favInPool = ref(false);
 const poolPlaylistIds = ref<Set<string>>(new Set());
 
-// go-music-dl 每日推荐(按渠道查看各平台推荐歌单)
+// go-music-dl 在线源(用于同步所有平台的每日推荐歌单)
 const dailySourceId = ref("");
-const dailyLoading = ref(false);
-const dailyChannels = ref<any[]>([]);
-const dailyChannel = ref("");
-const importingId = ref("");
 const syncingDaily = ref(false);
 
-async function loadDaily() {
-  if (!dailySourceId.value) return;
-  dailyLoading.value = true;
-  try {
-    const [res, local] = await Promise.all([
-      api.get(`/rest/api/v1/online/${dailySourceId.value}/recommend`),
-      api.get(`/rest/api/v1/online/${dailySourceId.value}/recommend/local`).catch(() => null),
-    ]);
-    const localMap = new Map<string, string>();
-    (local?.data?.playlists || []).forEach((p: any) => localMap.set(`${p.source}:${p._remoteId}`, p.id));
-    if (res.data?.success) {
-      dailyChannels.value = res.data.channels || [];
-      for (const ch of dailyChannels.value) {
-        for (const pl of ch.playlists) {
-          pl._localId = localMap.get(`${pl.source}:${pl.id}`);
-          pl.imported = !!pl._localId || !!pl.imported;
-        }
-      }
-      if (!dailyChannel.value && dailyChannels.value.length > 0) dailyChannel.value = dailyChannels.value[0].source;
-    }
-  } catch {} finally { dailyLoading.value = false; }
-}
 async function detectDailySource() {
   if (dailySourceId.value) return;
   try {
     const res = await api.get("/rest/api/v1/plugins");
-    const src = (res.data || []).find((p: any) => p.enabled && p.config?.baseUrl && (p.manifest?.type === "source" || p.manifest?.provider === "go-music-dl"));
-    if (src) { dailySourceId.value = src.id || src.manifest?.provider || "go-music-dl"; loadDaily(); }
+    const parseCfg = (v: any) => { try { return typeof v === "string" ? JSON.parse(v || "{}") : v || {}; } catch { return {}; } };
+    const parseManifest = (v: any) => { try { return typeof v === "string" ? JSON.parse(v || "{}") : v || {}; } catch { return {}; } };
+    const src = (res.data || []).find((p: any) => {
+      const cfg = parseCfg(p.config);
+      const manifest = parseManifest(p.manifest);
+      return p.enabled && cfg?.baseUrl && (manifest?.type === "source" || manifest?.provider === "go-music-dl");
+    });
+    if (src) dailySourceId.value = src.id || parseManifest(src.manifest)?.provider || "go-music-dl";
   } catch {}
 }
-async function importDaily(pl: any) {
-  if (!dailySourceId.value) return;
-  importingId.value = pl.id;
-  try {
-    const res = await api.post(`/rest/api/v1/online/${dailySourceId.value}/recommend/import`, pl);
-    if (res.data?.success) {
-      pl.imported = true;
-      pl._localId = res.data.playlistId;
-      ElMessage.success(`已${res.data.created ? '导入' : '更新'}「${pl.name}」${res.data.trackCount}首`);
-      loadPlaylists();
-      loadDaily();
-    } else ElMessage.error(res.data?.error || "导入失败");
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "导入失败"); }
-  finally { importingId.value = ""; }
-}
 async function syncDailyAll() {
-  if (!dailySourceId.value) return;
+  if (!dailySourceId.value) await detectDailySource(); // 未探测到源,先尝试探测
+  if (!dailySourceId.value) {
+    ElMessage.warning("未检测到 go-music-dl 在线源,请先在「插件」页配置并启用后再同步");
+    return;
+  }
   syncingDaily.value = true;
   try {
     const res = await api.post(`/rest/api/v1/online/${dailySourceId.value}/recommend/sync-all`);
     if (res.data?.success) {
-      ElMessage.success(res.data.errors.length ? `已更新 ${res.data.synced} 个,失败 ${res.data.failed} 个` : `已更新 ${res.data.synced} 个每日推荐歌单`);
+      ElMessage.success(res.data.errors?.length ? `已更新 ${res.data.synced} 个,失败 ${res.data.failed} 个` : `已更新 ${res.data.synced} 个每日推荐歌单`);
       loadPlaylists();
-      loadDaily();
     } else ElMessage.error(res.data?.error || "更新失败");
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "更新失败"); }
   finally { syncingDaily.value = false; }
-}
-function openDaily(pl: any) {
-  if (pl.imported) {
-    const local = playlists.value.find((x: any) => x.id === pl._localId);
-    if (local) open(local);
-  }
 }
 
 function formatDuration(sec: number) { const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`; }
@@ -585,30 +513,6 @@ onMounted(() => { loadPlaylists(); detectDailySource(); });
 
 <style lang="scss" scoped>
 .playlists-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
-.daily-recommend { margin: 20px 0 28px; padding: 18px 20px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); border-radius: var(--fnos-radius-lg);
-  .daily-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;
-    h3 { margin: 0; font-size: 16px; font-weight: 700; color: var(--fnos-text-primary); display: flex; align-items: center; gap: 6px; }
-    .daily-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
-    .daily-actions { margin-left: auto; display: flex; gap: 8px; }
-  }
-  .daily-tab-label { display: inline-flex; align-items: center; gap: 6px; }
-  .daily-tab-count { font-size: 11px; color: var(--fnos-text-tertiary); }
-  .daily-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; min-height: 40px; }
-  .daily-card { border-radius: var(--fnos-radius-md); overflow: hidden; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); transition: transform 0.2s ease; opacity: 1;
-    &:hover { transform: translateY(-3px); }
-    &.imported { opacity: 0.95; border-color: rgba(245,185,66,0.4); }
-    .daily-card-cover { position: relative; aspect-ratio: 1; cursor: pointer;
-      img { width: 100%; height: 100%; object-fit: cover; }
-      .cover-placeholder { width: 100%; height: 100%; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); }
-      .daily-track-count { position: absolute; right: 6px; bottom: 6px; font-size: 11px; padding: 2px 6px; border-radius: 8px; background: rgba(0,0,0,0.55); color: #fff; }
-    }
-    .daily-card-info { padding: 8px 10px 10px;
-      .daily-card-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fnos-text-primary); }
-      .daily-card-meta { font-size: 11px; color: var(--fnos-text-tertiary); margin: 3px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    }
-  }
-  .daily-empty { grid-column: 1 / -1; color: var(--fnos-text-tertiary); font-size: 13px; padding: 20px 0; text-align: center; }
-}
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
   h2 { font-size: 28px; font-weight: 700; margin: 0; }
   .header-actions { display: flex; gap: 10px; }

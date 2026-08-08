@@ -1032,10 +1032,16 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return c.text("Song not found", 404);
 
+  const rangeHeader = c.req.header("range");
+  // Online/plugin song (type="web", path like "web:provider:source"): proxy the
+  // song's remote url (with per-song headers + Range), same as /rest/stream.
+  if (song.type === "web") {
+    return serveWebSongStream(c, song, rangeHeader);
+  }
+
   const parsed = parseSongPath(song.path);
   if (!parsed) return c.text("Invalid song path", 400);
 
-  const rangeHeader = c.req.header("range");
   try {
     if (parsed.type === "w") {
       const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();

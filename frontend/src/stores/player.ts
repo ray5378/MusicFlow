@@ -293,8 +293,10 @@ export const usePlayerStore = defineStore("player", () => {
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song.id);
+    const fmt = (song.suffix || "").toLowerCase();
     howl = new Howl({
       src: [getStreamUrl(song.id)],
+      format: fmt ? [fmt] : [],
       volume: volume.value,
       html5: true,
       onplay: () => {
