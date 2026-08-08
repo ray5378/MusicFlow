@@ -2,6 +2,7 @@
   <div class="playlists-page">
     <div class="page-header">
       <h2>歌单</h2>
+      <el-input v-model="searchQuery" placeholder="搜索歌单..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       <div class="header-actions">
         <el-button @click="showCreateDialog = true"><MfIcon name="Plus" />新建歌单</el-button>
         <el-button @click="exportAllPlaylists"><MfIcon name="Download" />导出全部歌单</el-button>
@@ -191,10 +192,12 @@ function favActions(): MenuAction[] {
 }
 const playlists = ref<any[]>([]);
 const loading = ref(false);
+const searchQuery = ref("");
 const currentPage = ref(1);
 const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("playlistsPageSize") || "20"));
 if (![15, 20, 50, 100].includes(pageSize.value)) pageSize.value = 20;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showCreateDialog = ref(false);
 const showRenameDialog = ref(false);
 const newPlaylistName = ref("");
@@ -254,7 +257,7 @@ async function loadPlaylists() {
   loading.value = true;
   try {
     const res = await api.get("/rest/api/v1/playlists", {
-      params: { page: currentPage.value, pageSize: pageSize.value },
+      params: { page: currentPage.value, pageSize: pageSize.value, query: searchQuery.value },
     });
     playlists.value = res.data.items || [];
     total.value = res.data.total || 0;
@@ -289,6 +292,13 @@ function onPageChange(page: number, size?: number) {
   if (size) pageSize.value = size;
   loadPlaylists();
 }
+
+function onSearchInput() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { currentPage.value = 1; loadPlaylists(); }, 300);
+}
+
+function onSearchClear() { currentPage.value = 1; loadPlaylists(); }
 
 async function createPlaylist() {
   if (!newPlaylistName.value) { ElMessage.warning("请输入歌单名称"); return; }
