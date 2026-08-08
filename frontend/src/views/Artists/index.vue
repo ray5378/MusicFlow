@@ -258,9 +258,9 @@ onUnmounted(() => {
   .page-header { flex-direction: column; align-items: flex-start; }
   .header-actions { width: 100%; }
   .header-actions .el-input { width: 100% !important; flex: 1; }
-  .artist-grid { grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .artist-grid { grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .artist-card { padding: 12px 8px; }
-  .artist-card .artist-avatar { width: 88px; height: 88px; }
+  .artist-card .artist-avatar { width: 100%; max-width: 160px; aspect-ratio: 1; height: auto; }
   .artist-card .artist-name { font-size: 13px; }
 }
 </style>
