@@ -281,6 +281,7 @@ button, a, [role="button"] {
   --el-slider-main-bg-color: var(--fnos-red);
   --el-slider-button-size: 14px;
   --el-slider-button-wrapper-size: 28px;
+  --el-slider-button-wrapper-offset: -11px; /* 28px wrapper + 6px 轨道:居中需要 -15+(28-36)/2=-11 */
 }
 .el-slider__bar { background: var(--fnos-red) !important; }
 .el-slider__button { border: 2px solid var(--fnos-red) !important; background: #fff !important; }

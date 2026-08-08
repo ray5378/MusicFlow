@@ -377,17 +377,19 @@ async function convertToLocal() {
   }
 }
 
-async function toggleSyncEnabled(val: boolean) {
+async function toggleSyncEnabled(val: string | number | boolean) {
+  const v = Boolean(val);
   try {
-    await api.put(`/rest/api/v1/playlists/${route.params.id}`, { syncEnabled: val });
-    ElMessage.success(val ? "已启用自动同步" : "已关闭自动同步");
+    await api.put(`/rest/api/v1/playlists/${route.params.id}`, { syncEnabled: v });
+    ElMessage.success(v ? "已启用自动同步" : "已关闭自动同步");
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "操作失败"); }
 }
 
-async function togglePublic(val: boolean) {
+async function togglePublic(val: string | number | boolean) {
+  const v = Boolean(val);
   try {
-    await api.put(`/rest/api/v1/playlists/${route.params.id}`, { isPublic: val });
-    ElMessage.success(val ? "歌单已设为公开" : "歌单已设为私有");
+    await api.put(`/rest/api/v1/playlists/${route.params.id}`, { isPublic: v });
+    ElMessage.success(v ? "歌单已设为公开" : "歌单已设为私有");
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "操作失败"); }
 }
 

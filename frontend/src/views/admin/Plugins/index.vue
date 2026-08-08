@@ -70,7 +70,7 @@
       </el-form>
       <template #footer>
         <el-button @click="showConfigDialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveConfig">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="() => saveConfig()">保存</el-button>
       </template>
     </el-dialog>
   </div>

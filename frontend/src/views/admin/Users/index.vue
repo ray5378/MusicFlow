@@ -10,7 +10,7 @@
           <div class="user-info">
             <h3>{{ user.username }}</h3>
             <div class="tags">
-              <el-tag :type="user.isAdmin ? 'danger' : ''" size="small">{{ user.isAdmin ? '管理员' : '普通用户' }}</el-tag>
+              <el-tag :type="user.isAdmin ? 'danger' : undefined" size="small">{{ user.isAdmin ? '管理员' : '普通用户' }}</el-tag>
               <el-tag :type="user.isActive ? 'success' : 'info'" size="small">{{ user.isActive ? '启用' : '失效' }}</el-tag>
               <el-tag v-if="user.apiKeySet" type="warning" size="small">API Key</el-tag>
             </div>

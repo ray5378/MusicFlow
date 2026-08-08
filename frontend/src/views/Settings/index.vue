@@ -65,11 +65,12 @@ const showNameDialog = ref(false);
 const newName = ref("");
 const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-function toggleMotion(v: boolean) {
-  document.documentElement.style.setProperty('prefers-reduced-motion', v ? 'reduce' : 'no-preference');
-  if (v) document.documentElement.classList.add('reduce-motion');
+function toggleMotion(v: string | number | boolean) {
+  const on = Boolean(v);
+  document.documentElement.style.setProperty('prefers-reduced-motion', on ? 'reduce' : 'no-preference');
+  if (on) document.documentElement.classList.add('reduce-motion');
   else document.documentElement.classList.remove('reduce-motion');
-  ElMessage.success(v ? '已开启减弱动画' : '已关闭减弱动画');
+  ElMessage.success(on ? '已开启减弱动画' : '已关闭减弱动画');
 }
 
 function clearCache() {
