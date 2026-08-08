@@ -14,7 +14,11 @@ export default defineConfig({
       dts: "src/auto-imports.d.ts",
     }),
     Components({
-      resolvers: [ElementPlusResolver()],
+      resolvers: [
+        // Element Plus 组件 JS 按需导入；组件样式不按需注入（走全局 index.css），
+        // 避免运行时动态 <style> 晚于 global.scss 加载而覆盖自定义主题底色。
+        ElementPlusResolver({ importStyle: false }),
+      ],
       dts: "src/components.d.ts",
     }),
   ],

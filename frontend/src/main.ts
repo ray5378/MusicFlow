@@ -6,6 +6,9 @@ import router from "./router";
 import { longpress } from "./directives/longpress";
 import MfIcon from "./components/MfIcon.vue";
 import PlatformBadge from "./components/PlatformBadge.vue";
+// Element Plus 组件基础样式以静态方式整体引入，保证加载顺序先于 global.scss 的主题覆盖，
+// 避免 on-demand 动态注入的组件默认样式覆盖自定义主题变量（如输入框底色）。
+import "element-plus/dist/index.css";
 import "./assets/styles/global.scss";
 
 const app = createApp(App);
