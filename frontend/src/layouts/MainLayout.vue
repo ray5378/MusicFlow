@@ -1402,6 +1402,30 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   border: 2px solid var(--fnos-red) !important;
   background: #fff !important;
 }
+
+/* 音量条:Windows 10 风格 —— 白色竖线贯穿轨道,悬停高亮
+   (仅音量条,进度条 cslider/np-slider/pm-slider 保持白色圆点) */
+.cvol-slider,
+.volume-pop-slider {
+  --el-slider-button-wrapper-offset: -11px; /* 28px 把手区垂直居中包裹 6px 轨道 */
+  :deep(.el-slider__button) {
+    width: 4px;
+    height: 16px;
+    border: none !important;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.85) !important;
+    box-shadow: none !important;
+    transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+  }
+  :deep(.el-slider__button-wrapper:hover),
+  :deep(.el-slider__button-wrapper.dragging) {
+    .el-slider__button {
+      background: #fff !important;
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.9) !important;
+    }
+  }
+}
+
 .play-mode :deep(.el-slider__runway) { background: rgba(255, 255, 255, 0.2) !important; }
 .play-mode :deep(.el-slider__bar) { background: var(--fnos-red) !important; }
 .play-mode :deep(.el-button) {
