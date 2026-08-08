@@ -131,17 +131,15 @@ body {
 /* ===== Selection ===== */
 ::selection { background: var(--fnos-red); color: #fff; }
 
-/* ===== Glass utility ===== */
+/* ===== Glass utility =====
+   (移除了 backdrop-filter：它会把元素永久提升为合成层并持续重算背景模糊，
+   手机/后台标签开销大。改用略不透明的纯色底近似，视觉几乎无差) */
 .fnos-glass {
-  background: rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  background: rgba(30, 28, 42, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 .fnos-glass-strong {
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  background: rgba(0, 0, 0, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
@@ -766,11 +764,9 @@ html.tab-hidden body.fnos-login::before, html.tab-hidden body.fnos-login::after 
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.45);
   border-radius: 50%;
-  background: rgba(20, 18, 30, 0.42);
+  background: rgba(20, 18, 30, 0.88);
   color: #fff;
   cursor: pointer;
-  backdrop-filter: blur(14px) saturate(180%);
-  -webkit-backdrop-filter: blur(14px) saturate(180%);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38), 0 0 12px rgba(255, 255, 255, 0.10);
   opacity: 0;
   transform: translate(-50%, -50%) scale(0.78);

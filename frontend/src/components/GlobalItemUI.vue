@@ -140,11 +140,9 @@ function fmt(sec: number) {
 
 <style lang="scss" scoped>
 .fnos-glass {
-  background: rgba(28, 26, 38, 0.92);
+  background: rgba(28, 26, 38, 0.97);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(22px) saturate(180%);
-  -webkit-backdrop-filter: blur(22px) saturate(180%);
   border-radius: 14px;
 }
 

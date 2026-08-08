@@ -136,9 +136,7 @@ async function submitPassword() {
   width: 420px;
   padding: 44px 40px 36px;
   border-radius: 20px;
-  background: rgba(0, 0, 0, 0.42);
-  backdrop-filter: blur(28px) saturate(160%);
-  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  background: rgba(0, 0, 0, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   color: #fff;

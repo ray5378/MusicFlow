@@ -832,10 +832,8 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   width: 100%;
   margin: 14px;                /* 恢复原始悬浮卡片样式：四周留白 */
   border-radius: var(--fnos-radius-lg);
-  /* 浮动圆角玻璃面板：透明、悬浮于全屏极光背景之上 */
-  background: rgba(255, 255, 255, 0.045);
-  backdrop-filter: blur(26px) saturate(180%);
-  -webkit-backdrop-filter: blur(26px) saturate(180%);
+  /* 浮动圆角面板：略不透明纯色底近似玻璃（去 backdrop-filter，免合成层/重算模糊） */
+  background: rgba(24, 22, 34, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.07);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   color: var(--fnos-text-primary);
@@ -954,9 +952,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   width: min(870px, calc(100% - 200px));
   height: 84px;
   border-radius: 999px;
-  background: rgba(15, 14, 22, 0.55);
-  backdrop-filter: blur(32px) saturate(180%);
-  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  background: rgba(15, 14, 22, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   overflow: hidden;
@@ -1037,9 +1033,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       gap: 10px;
       padding: 0 12px;
       border-radius: inherit;
-      background: rgba(18, 16, 24, 0.5);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
+      background: rgba(18, 16, 24, 0.92);
       transform: translateY(110%);
       opacity: 0;
       transition: transform 0.3s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.3s ease;
@@ -1503,9 +1497,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     display: flex; align-items: center; gap: 8px;
     height: 48px; padding: 0 12px; flex-shrink: 0;
     /* 移除 border-bottom —— 顶栏与下方内容是一整块连续画布 */
-    background: transparent;
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    background: rgba(24, 22, 34, 0.92);
     color: #fff; z-index: 500;
     border-bottom: none;
     grid-column: 1; grid-row: 1;
@@ -1532,9 +1524,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
   /* --- Drawer sidebar (out of flow on mobile) --- */
   .sidebar-overlay {
     display: block; position: fixed; inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
+    background: rgba(0, 0, 0, 0.6);
     z-index: 590;
   }
   .sidebar.mobile {
@@ -1544,9 +1534,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
     transform: translateX(-102%);   /* 完全滑出左侧（超出自身宽度，杜绝残留边条） */
     visibility: hidden;
     transition: transform 0.3s ease, visibility 0.3s;   /* 与 sidebar-overlay fade(0.3s) 时长对齐 */
-    background: rgba(31, 28, 42, 0.94);
-    backdrop-filter: blur(22px) saturate(180%);
-    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    background: rgba(31, 28, 42, 0.98);
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 0 18px 18px 0;
     box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
