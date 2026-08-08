@@ -159,13 +159,14 @@ export interface SyncRecommendResult {
 /**
  * Daily full-sync of go-music-dl 每日推荐歌单.
  *
- * Every scheduled run: deletes yesterday's imported channel playlists, then
- * re-imports ALL of today's recommended playlists from every channel
- * (netease/qq/kugou/kuwo). This keeps the local daily-recommend set identical
- * to go-music-dl's current recommendations — old ones from the previous run are
- * always removed, today's full set is always imported. Some providers (e.g.
- * kugou) only return non-empty recommendations after a few warm-up calls, so we
- * retry fetching per channel until a non-empty list arrives.
+ * Safety-first ordering: fetch today's recommendations first, then import them
+ * (upsert by remote id — existing playlists are updated in place, new ones are
+ * created), and only afterwards delete yesterday's playlists that are no longer
+ * in today's set. This way a flaky network that prevents fetching a channel
+ * keeps that channel's old playlists untouched instead of deleting them first
+ * and then failing to pull replacements. Some providers (e.g. kugou) only
+ * return non-empty recommendations after a few warm-up calls, so fetching is
+ * retried until every channel returns a non-empty list.
  */
 export async function syncAllRecommendPlaylists(
   providerId: string,
@@ -180,17 +181,7 @@ export async function syncAllRecommendPlaylists(
     return { synced: 0, created: 0, failed: 1, errors: ["在线源未启用或缺少 recommend/playlistSongs"], playlists: [] };
   }
 
-  // 1. Drop yesterday's imported channel playlists (full rebuild each run).
-  const old = db.select().from(playlists).all().filter((p) => isDailyRecommendPlaylist(p));
-  for (const pl of old) {
-    try {
-      removePlaylistRows(pl.id);
-    } catch (e: any) {
-      errors.push(`删除旧歌单 ${pl.name}: ${e.message || "失败"}`);
-    }
-  }
-
-  // 2. Fetch today's recommendations per channel (retry until non-empty).
+  // 1. Fetch today's recommendations per channel (retry until non-empty).
   let channels: { source: string; playlists: OnlinePlaylistInfo[] }[] = [];
   for (let attempt = 0; attempt < 5; attempt++) {
     const res = await configured.provider.recommend(configured.config);
@@ -201,10 +192,16 @@ export async function syncAllRecommendPlaylists(
     if (attempt < 4) await new Promise((r) => setTimeout(r, 2500));
   }
 
-  // 3. Import every playlist of every channel.
+  // Channels that came back empty this run — their local playlists are NOT
+  // touched (avoid deleting old ones we failed to refresh).
+  const emptyChannels = new Set<string>(channels.filter((ch) => ch.playlists.length === 0).map((ch) => ch.source));
+
+  // 2. Import every playlist of every channel (upsert: new ones created,
+  //    existing ones updated in place).
+  const importedKeys = new Set<{ source: string; id: string }>();
   for (const ch of channels) {
     if (ch.playlists.length === 0) {
-      errors.push(`${ch.source}: 该渠道无推荐歌单`);
+      errors.push(`${ch.source}: 该渠道无推荐歌单,保留原有歌单`);
       continue;
     }
     for (const pl of ch.playlists) {
@@ -212,12 +209,46 @@ export async function syncAllRecommendPlaylists(
         const r = await importRecommendPlaylist(providerId, pl, opts);
         if (r.success && r.playlistId) {
           created++;
+          importedKeys.add({ source: ch.source, id: String(pl.id) });
           out.push({ id: r.playlistId, name: r.name, trackCount: r.trackCount });
         } else {
           errors.push(`[${ch.source}] ${pl.name}: 导入失败`);
         }
       } catch (e: any) {
         errors.push(`[${ch.source}] ${pl.name}: ${e.message || "导入失败"}`);
+      }
+    }
+  }
+
+  // 3. Cleanup: delete local daily-recommend playlists that are NOT part of
+  //    today's freshly-imported set, per channel. Channels that came back empty
+  //    (or that failed to import everything) keep their old playlists.
+  //    Additionally, only prune a channel when today's import count >= the old
+  //    count — if we imported fewer than we had before (e.g. a flaky fetch
+  //    returned a partial list), we keep the old playlists rather than deleting
+  //    good playlists we then can't replace.
+  const old = db.select().from(playlists).all().filter((p) => isDailyRecommendPlaylist(p));
+  const oldByChannel = new Map<string, number>();
+  for (const p of old) {
+    const src = p.sourcePlatform || "";
+    oldByChannel.set(src, (oldByChannel.get(src) || 0) + 1);
+  }
+  const importedForChannel = (source: string) => new Set(
+    [...importedKeys].filter((k) => k.source === source).map((k) => k.id),
+  );
+  for (const pl of old) {
+    const src = pl.sourcePlatform || "";
+    if (emptyChannels.has(src)) continue; // couldn't refresh this channel → keep old
+    const current = importedForChannel(src);
+    const remoteId = String(pl.externalId || pl.sourceUrl!.replace(RECOMMEND_URL_PREFIX, ""));
+    // Safety: only delete stale playlists when today's import is at least as
+    // complete as what we previously had (partial-fetch suspects are kept).
+    if (current.size > 0 && current.size >= (oldByChannel.get(src) || 0) && !current.has(remoteId)) {
+      try {
+        removePlaylistRows(pl.id);
+        console.log(`[recommend-sync] 清理旧歌单 ${pl.name} (${src}/${remoteId})`);
+      } catch (e: any) {
+        errors.push(`删除旧歌单 ${pl.name}: ${e.message || "失败"}`);
       }
     }
   }
