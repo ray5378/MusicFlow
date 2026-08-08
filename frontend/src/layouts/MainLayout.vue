@@ -107,7 +107,7 @@
         <div class="csec">
           <div class="cprogress">
             <span class="ctime">{{ formatTime(playerStore.currentTime) }}</span>
-            <el-slider :model-value="playerStore.progress" @input="(v) => playerStore.seekPercent(Array.isArray(v) ? v[0] : v)" :show-tooltip="false" class="cslider" />
+            <el-slider :model-value="playerStore.progress" @input="(v: number | number[]) => playerStore.seekPercent(Array.isArray(v) ? v[0] : v)" :show-tooltip="false" class="cslider" />
             <span class="ctime">{{ formatTime(playerStore.duration) }}</span>
           </div>
         </div>
@@ -140,7 +140,7 @@
             <span class="cvol-label">音量</span>
             <el-slider
               :model-value="playerStore.volume * 100"
-              @input="(v) => playerStore.setVolume((Array.isArray(v) ? v[0] : v) / 100)"
+              @input="(v: number | number[]) => playerStore.setVolume((Array.isArray(v) ? v[0] : v) / 100)"
               :format-tooltip="(v: number) => `${Math.round(v)}%`"
               class="cvol-slider"
             />
@@ -206,7 +206,7 @@
         </div>
         <div class="np-progress-panel">
           <span class="np-time">{{ formatTime(playerStore.currentTime) }}</span>
-          <el-slider :model-value="playerStore.progress" @input="(v) => playerStore.seekPercent(Array.isArray(v) ? v[0] : v)" :show-tooltip="false" class="np-slider" />
+          <el-slider :model-value="playerStore.progress" @input="(v: number | number[]) => playerStore.seekPercent(Array.isArray(v) ? v[0] : v)" :show-tooltip="false" class="np-slider" />
           <span class="np-time">{{ formatTime(playerStore.duration) }}</span>
         </div>
       </div>
@@ -316,7 +316,7 @@
             </template>
           <div class="volume-popover-body">
             <span class="vol-label">音量</span>
-            <el-slider :model-value="playerStore.volume * 100" @input="(v) => playerStore.setVolume((Array.isArray(v) ? v[0] : v) / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-pop-slider" />
+            <el-slider :model-value="playerStore.volume * 100" @input="(v: number | number[]) => playerStore.setVolume((Array.isArray(v) ? v[0] : v) / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-pop-slider" />
           </div>
         </el-popover>
       </div>
@@ -401,7 +401,7 @@
         <div class="play-mode-controls">
           <div class="pm-progress">
             <span class="time">{{ formatTime(playerStore.currentTime) }}</span>
-            <el-slider :model-value="playerStore.progress" @input="(v) => playerStore.seekPercent(Array.isArray(v) ? v[0] : v)" :show-tooltip="false" class="pm-slider" />
+            <el-slider :model-value="playerStore.progress" @input="(v: number | number[]) => playerStore.seekPercent(Array.isArray(v) ? v[0] : v)" :show-tooltip="false" class="pm-slider" />
             <span class="time">{{ formatTime(playerStore.duration) }}</span>
           </div>
           <div class="pm-buttons">
