@@ -78,7 +78,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, useSlots } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
@@ -130,6 +130,11 @@ const { openContextMenu, openActionSheet, menuGuard, songActions, openAddToPlayl
 
 const isCurrent = (song: any) => !!playerStore.currentSong && playerStore.currentSong.id === song.id;
 
+const slots = useSlots();
+// Playlist detail injects an extra "remove" row action via #row-actions; widen
+// the actions column so those buttons never overlap the duration column.
+const hasExtraRowActions = computed(() => !!slots["row-actions"]);
+
 const gridColumns = computed(() => {
   const cols: string[] = [];
   if (props.selectable) cols.push("44px");
@@ -139,7 +144,7 @@ const gridColumns = computed(() => {
   if (props.showAlbum) cols.push("200px");
   if (props.showPlayedAt) cols.push("160px");
   cols.push("80px");
-  cols.push("90px");
+  cols.push(hasExtraRowActions.value ? "180px" : "90px");
   return cols.join(" ");
 });
 
