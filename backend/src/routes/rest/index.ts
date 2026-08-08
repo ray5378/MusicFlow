@@ -5,7 +5,7 @@ import { eq, like, sql, or, and } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
-import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
+import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
@@ -1162,8 +1162,8 @@ restRoutes.get("/getCoverArt", async (c) => {
     // Playlist cover: plain local image (imported platform cover or first song's album cover)
     const playlistCover = getPlaylistCover(id.slice(3));
     if (playlistCover) {
-      const filePath = path.join(process.cwd(), "data", "covers", playlistCover.file);
-      if (fs.existsSync(filePath)) {
+      const filePath = resolveCoverFile(playlistCover.file);
+      if (filePath) {
         const data = fs.readFileSync(filePath);
         return new Response(data, { headers: { "Content-Type": playlistCover.mime, "Cache-Control": "public, max-age=86400" } });
       }
@@ -1175,15 +1175,15 @@ restRoutes.get("/getCoverArt", async (c) => {
   if (coverRef) {
     const candidates = [coverRef, coverRef.replace(/\.jpg$/, ".png"), coverRef.replace(/\.png$/, ".jpg"), coverRef.replace(/\.(?:jpg|png|gif)$/, ".webp")];
     for (const fname of candidates) {
-      const filePath = path.join(process.cwd(), "data", "covers", fname);
-      try {
-        if (fs.existsSync(filePath)) {
+      const filePath = resolveCoverFile(fname);
+      if (filePath) {
+        try {
           const ext = path.extname(fname).toLowerCase();
           const mime = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : "image/jpeg";
           const data = fs.readFileSync(filePath);
           return new Response(data, { headers: { "Content-Type": mime, "Cache-Control": "public, max-age=86400" } });
-        }
-      } catch { /* try next */ }
+        } catch { /* try next */ }
+      }
     }
   }
 

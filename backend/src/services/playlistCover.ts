@@ -1,9 +1,12 @@
-// Playlist cover generation:
-//   - imported playlists: download the platform cover and cache it as a local image
-//   - self-built playlists: copy the FIRST playable song's album cover to a local
-//     image file (pl-<playlistId>.jpg) and serve it directly
-// Both paths produce a plain image file served by /rest/getCoverArt — identical
-// behavior, no SVG wrappers, works in every client (MA, Feishin, browsers...).
+// Cover storage:
+//   - LOCAL covers (embedded artwork from scanned files, artist avatars from the
+//     local album scrape) live in data/covers.
+//   - PLATFORM covers (downloaded from online/music-dl providers via
+//     cacheRemoteCover: web song covers, imported go-music-dl playlist covers)
+//     live in data/musildl-covers, a separate directory that can be mounted to
+//     a different volume in docker-compose without touching the local covers.
+// Reads always probe both directories so legacy covers stored under
+// data/covers keep working after the split.
 import { db } from "../db/index.js";
 import { songs, albums, playlists, playlistSongs } from "../db/schema.js";
 import { eq } from "drizzle-orm";
@@ -11,19 +14,42 @@ import fs from "fs";
 import path from "path";
 
 const COVERS_DIR = path.join(process.cwd(), "data", "covers");
+const MUSICDL_COVERS_DIR = path.join(process.cwd(), "data", "musildl-covers");
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
 function ensureDir() {
   if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
+  if (!fs.existsSync(MUSICDL_COVERS_DIR)) fs.mkdirSync(MUSICDL_COVERS_DIR, { recursive: true });
 }
 
-// Download a remote cover image and cache it locally. Returns the local file ref or null.
+/** Absolute path of `ref` inside the platform covers dir (if it exists there). */
+export function platformCoverPath(ref: string): string {
+  return path.join(MUSICDL_COVERS_DIR, ref);
+}
+
+/**
+ * Locate a cover file by its bare filename, probing the platform dir first then
+ * the local dir (legacy covers may still be under data/covers). Returns the
+ * absolute path, or null if the file exists in neither directory.
+ */
+export function resolveCoverFile(ref: string): string | null {
+  if (!ref) return null;
+  for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
+    const p = path.join(dir, ref);
+    try { if (fs.existsSync(p)) return p; } catch { /* keep probing */ }
+  }
+  return null;
+}
+
+// Download a remote (platform) cover image and cache it locally. Returns the
+// local file ref or null. Stored under data/musildl-covers so it can be
+// mounted on a separate volume; reads resolve both dirs.
 // force=true ignores the TTL and re-downloads (used on manual playlist sync).
 export async function cacheRemoteCover(url: string, ref: string, force = false): Promise<string | null> {
   if (!url || !/^https?:\/\//i.test(url)) return null;
   const ext = url.includes(".png") ? "png" : "jpg";
   const fileName = `${ref}.${ext}`;
-  const filePath = path.join(COVERS_DIR, fileName);
+  const filePath = path.join(MUSICDL_COVERS_DIR, fileName);
   if (!force && fs.existsSync(filePath)) {
     const stat = fs.statSync(filePath);
     if (Date.now() - stat.mtimeMs < CACHE_TTL) return fileName;
@@ -55,8 +81,8 @@ function mimeFor(name: string): string {
 // ref on success, or null if the source file is missing.
 export function copyCoverToFile(destRef: string, srcCoverRef: string): string | null {
   if (!srcCoverRef) return null;
-  const src = path.join(COVERS_DIR, srcCoverRef);
-  if (!fs.existsSync(src)) return null;
+  const src = resolveCoverFile(srcCoverRef);
+  if (!src) return null;
   try {
     ensureDir();
     fs.copyFileSync(src, path.join(COVERS_DIR, destRef));
@@ -68,10 +94,12 @@ export function copyCoverToFile(destRef: string, srcCoverRef: string): string | 
 
 // Clear the cached cover file for a playlist (called after sync / track changes)
 export function clearPlaylistCoverCache(playlistId: string) {
-  try {
-    const filePath = path.join(COVERS_DIR, `pl-${playlistId}.jpg`);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch { /* ignore */ }
+  for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
+    try {
+      const filePath = path.join(dir, `pl-${playlistId}.jpg`);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch { /* ignore */ }
+  }
   // Remove the stored ref so the cover is regenerated on next request
   try {
     db.update(playlists).set({ coverArt: null }).where(eq(playlists.id, playlistId)).run();
@@ -87,8 +115,7 @@ function firstAlbumCoverFile(playlistId: string): string | null {
     if (!song?.albumId) continue;
     const album = db.select().from(albums).where(eq(albums.id, song.albumId)).get();
     if (!album?.coverArt) continue;
-    const src = path.join(COVERS_DIR, album.coverArt);
-    if (fs.existsSync(src)) return album.coverArt;
+    if (resolveCoverFile(album.coverArt)) return album.coverArt;
   }
   return null;
 }
@@ -100,10 +127,9 @@ export function getPlaylistCover(playlistId: string): { file: string; mime: stri
   const playlist = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
   if (!playlist) return null;
 
-  // 1. A cached local cover image already exists -> serve it
+  // 1. A cached local cover image already exists -> serve it (probe both dirs)
   if (playlist.coverArt && /\.(jpg|jpeg|png|gif)$/i.test(playlist.coverArt)) {
-    const cached = path.join(COVERS_DIR, playlist.coverArt);
-    if (fs.existsSync(cached)) {
+    if (resolveCoverFile(playlist.coverArt)) {
       return { file: playlist.coverArt, mime: mimeFor(playlist.coverArt) };
     }
   }
@@ -114,9 +140,11 @@ export function getPlaylistCover(playlistId: string): { file: string; mime: stri
   if (!srcFile) return null;
 
   const coverFile = `pl-${playlistId}.jpg`;
+  const src = resolveCoverFile(srcFile);
+  if (!src) return null;
   try {
     ensureDir();
-    fs.copyFileSync(path.join(COVERS_DIR, srcFile), path.join(COVERS_DIR, coverFile));
+    fs.copyFileSync(src, path.join(COVERS_DIR, coverFile));
     db.update(playlists).set({ coverArt: coverFile, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
     return { file: coverFile, mime: mimeFor(coverFile) };
   } catch {
