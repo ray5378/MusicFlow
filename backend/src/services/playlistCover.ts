@@ -147,13 +147,17 @@ export function clearPlaylistCoverCache(playlistId: string) {
   } catch { /* ignore */ }
 }
 
-// Find the first playable song's album cover file name (albums.cover_art), or null
+// Find the first playable song's cover file name. Prefers the song's album
+// cover (albums.cover_art); web/online-imported albums keep artwork on the
+// song rows instead, so fall back to the song's own cover. Returns the ref or null.
 function firstAlbumCoverFile(playlistId: string): string | null {
   const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
   for (const e of entries) {
     if (!e.playable || !e.songId) continue;
     const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
-    if (!song?.albumId) continue;
+    if (!song) continue;
+    if (song.coverArt && resolveCoverFile(song.coverArt)) return song.coverArt;
+    if (!song.albumId) continue;
     const album = db.select().from(albums).where(eq(albums.id, song.albumId)).get();
     if (!album?.coverArt) continue;
     if (resolveCoverFile(album.coverArt)) return album.coverArt;

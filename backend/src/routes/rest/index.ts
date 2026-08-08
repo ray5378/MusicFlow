@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources } from "../../db/schema.js";
-import { eq, like, sql, or, and } from "drizzle-orm";
+import { eq, like, sql, or, and, isNotNull } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
@@ -97,6 +97,24 @@ function resolveAlbumCover(albumId: string | null): string | undefined {
   return album?.coverArt ? `al-${album.id}` : undefined;
 }
 
+// Web/online-imported albums (go-music-dl etc.) cache their artwork on the
+// song rows (songs.cover_art), not on the album row. Find the first song of an
+// album that carries a cover so album pages can inherit that artwork.
+function firstSongWithCover(albumId: string): string | undefined {
+  const song = db.select({ id: songs.id }).from(songs)
+    .where(and(eq(songs.albumId, albumId), isNotNull(songs.coverArt)))
+    .limit(1).get();
+  return song?.id;
+}
+
+// Resolve the displayable cover ref for an album: its own cover (al-<id>), or
+// the first song-with-cover's ref (so-<id>) so imported albums aren't blank.
+function albumCoverRef(a: any): string | undefined {
+  if (a?.coverArt) return `al-${a.id}`;
+  const songId = firstSongWithCover(a?.id);
+  return songId ? `so-${songId}` : undefined;
+}
+
 // OpenSubsonic Child for a song
 function songToChild(s: any, starredSet?: Set<string>): any {
   const starred = starredSet?.has(s.id);
@@ -141,7 +159,7 @@ function albumToID3(a: any, starredSet?: Set<string>): any {
     name: a.name,
     artist: a.artist || "",
     artistId: a.artistId || undefined,
-    coverArt: a.coverArt ? `al-${a.id}` : undefined,
+    coverArt: albumCoverRef(a),
     songCount: a.songCount || 0,
     duration: a.duration || 0,
     playCount: a.playCount || 0,
@@ -180,7 +198,7 @@ function albumToChild(a: any, starredSet?: Set<string>): any {
     artist: a.artist || "",
     year: a.year || 0,
     genre: a.genre || "",
-    coverArt: a.coverArt ? `al-${a.id}` : undefined,
+    coverArt: albumCoverRef(a),
     duration: a.duration || 0,
     songCount: a.songCount || 0,
     playCount: a.playCount || 0,
@@ -340,14 +358,16 @@ restRoutes.get("/getAlbumInfo", (c) => {
   const id = getParam(c, "id");
   const album = db.select().from(albums).where(eq(albums.id, id || "")).get();
   if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
-  return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: album.coverArt ? `/rest/getCoverArt?id=al-${album.id}&size=200` : "", mediumImageUrl: album.coverArt ? `/rest/getCoverArt?id=al-${album.id}&size=500` : "", largeImageUrl: album.coverArt ? `/rest/getCoverArt?id=al-${album.id}&size=1200` : "" } }));
+  const coverRef = albumCoverRef(album);
+  return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=200` : "", mediumImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=500` : "", largeImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=1200` : "" } }));
 });
 
 restRoutes.get("/getAlbumInfo2", (c) => {
   const id = getParam(c, "id");
   const album = db.select().from(albums).where(eq(albums.id, id || "")).get();
   if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
-  return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: album.coverArt ? `/rest/getCoverArt?id=al-${album.id}&size=200` : "", mediumImageUrl: album.coverArt ? `/rest/getCoverArt?id=al-${album.id}&size=500` : "", largeImageUrl: album.coverArt ? `/rest/getCoverArt?id=al-${album.id}&size=1200` : "" } }));
+  const coverRef = albumCoverRef(album);
+  return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=200` : "", mediumImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=500` : "", largeImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=1200` : "" } }));
 });
 
 restRoutes.get("/getSong", (c) => {
@@ -1141,6 +1161,14 @@ restRoutes.get("/getCoverArt", async (c) => {
   if (id.startsWith("al-")) {
     const album = db.select().from(albums).where(eq(albums.id, id.slice(3))).get();
     coverRef = album?.coverArt || null;
+    if (!coverRef && album) {
+      // Web/online albums store artwork on their songs; fall back to the first
+      // song-with-cover so direct al-<id> requests aren't blank.
+      const song = db.select({ coverArt: songs.coverArt }).from(songs)
+        .where(and(eq(songs.albumId, album.id), isNotNull(songs.coverArt)))
+        .limit(1).get();
+      coverRef = song?.coverArt || null;
+    }
   } else if (id.startsWith("so-")) {
     const song = db.select().from(songs).where(eq(songs.id, id.slice(3))).get();
     if (song?.albumId) {

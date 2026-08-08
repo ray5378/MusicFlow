@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres } from "../../db/schema.js";
-import { eq, like, inArray, or, and, sql, desc } from "drizzle-orm";
+import { eq, like, inArray, or, and, sql, desc, isNotNull } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { adminMiddleware } from "../../middleware/auth.js";
@@ -358,6 +358,17 @@ function idToCoverArt(id: string | null, prefix: string): string | undefined {
   return album && album.coverArt ? `${prefix}-${album.id}` : undefined;
 }
 
+// Web/online-imported albums (go-music-dl etc.) cache artwork on the song rows
+// (songs.cover_art), not the album row. Fall back to the first song-with-cover
+// so imported albums aren't blank everywhere (grid, detail, artist pages).
+function albumCoverRef(a: any): string | undefined {
+  if (a?.coverArt) return `al-${a.id}`;
+  const song = db.select({ id: songs.id }).from(songs)
+    .where(and(eq(songs.albumId, a?.id), isNotNull(songs.coverArt)))
+    .limit(1).get();
+  return song ? `so-${song.id}` : undefined;
+}
+
 // ==================== Genres (with unique ids + song counts) ====================
 // 风格 ID 由 genres 表分配(启动时 backfillGenres 回填;此处兜底按需补建)。
 function genreIdFor(name: string): string {
@@ -406,7 +417,7 @@ apiRoutes.get("/v1/albums", (c) => {
   const items = filtered.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(start, start + pageSize).map(a => ({
     id: a.id, name: a.name, artist: a.artist, artistId: a.artistId, year: a.year,
     songCount: a.songCount, duration: a.duration, playCount: a.playCount,
-    coverArt: a.coverArt ? `al-${a.id}` : undefined,
+    coverArt: albumCoverRef(a),
   }));
   return c.json({ total, page, pageSize, items });
 });
