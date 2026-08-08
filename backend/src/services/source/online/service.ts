@@ -9,9 +9,15 @@
 import { v4 as uuidv4 } from "uuid";
 import { db } from "../../../db/index.js";
 import { songs, artists, albums } from "../../../db/schema.js";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { cacheRemoteCover } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
+
+// Bounded parallelism for cover downloads/network work during a bulk import.
+// Keeps resource usage low (a handful of in-flight upstream requests) while
+// letting serialized upstream latency overlap slightly — a balance between the
+// old one-song-at-a-time loop and a full unbounded Promise.all.
+const BULK_IMPORT_CONCURRENCY = 4;
 
 /** Import a provider search result as an online DB song. Skips if already present. */
 export async function importOnlineSong(
@@ -19,17 +25,44 @@ export async function importOnlineSong(
   song: OnlineSongResult,
   opts?: { playlistId?: string; userId?: string },
 ): Promise<{ success: boolean; songId?: string; deduped?: boolean; error?: string; cover?: string }> {
+  const core = await importOnlineSongCore(providerId, song, opts, new Map());
+  if (core.success && core.songId) {
+    // Single-song call site: refresh counts immediately (importOnlineSongs
+    // batches them instead for cheaper bulk imports).
+    const inserted = core.inserted;
+    if (inserted?.albumId) updateAlbumCounts(inserted.albumId);
+    if (inserted?.artistId) updateArtistAlbumCount(inserted.artistId);
+  }
+  return core;
+}
+
+interface OnlineSongImportCore {
+  success: boolean;
+  songId?: string;
+  deduped?: boolean;
+  error?: string;
+  cover?: string;
+  inserted?: { albumId?: string | null; artistId?: string };
+}
+
+// Core import logic (no count refresh). `existingFingerprints` lets a bulk
+// caller resolve dedup in one query instead of one SELECT per song; new rows
+// insert their fingerprint into the map so duplicate tracks in one list collapse.
+async function importOnlineSongCore(
+  providerId: string,
+  song: OnlineSongResult,
+  opts: { playlistId?: string; userId?: string } | undefined,
+  existingFingerprints: Map<string, string>,
+): Promise<OnlineSongImportCore> {
   const configured = getSourcePluginConfig(providerId);
   const provider = getOnlineProvider(providerId);
   if (!configured || !provider) return { success: false, error: "在线源未启用或未配置" };
 
   const streamUrl = provider.streamUrl(configured, song);
-
-  // Dedup: same (provider, source, id) -> reuse the existing online row.
   const fingerprint = `${providerId}:${song.source}:${song.id}`;
-  const existing = db.select().from(songs).where(eq(songs.fingerprint, fingerprint)).get();
+  const existing = existingFingerprints.get(fingerprint);
   if (existing) {
-    return { success: true, songId: existing.id, deduped: true, cover: existing.coverArt || undefined };
+    return { success: true, songId: existing, deduped: true };
   }
 
   const now = new Date().toISOString();
@@ -84,10 +117,24 @@ export async function importOnlineSong(
     updatedAt: now,
   }).run();
 
-  if (albumId) updateAlbumCounts(albumId);
-  if (artistId) updateArtistAlbumCount(artistId);
+  existingFingerprints.set(fingerprint, songId);
+  return { success: true, songId, deduped: false, cover: coverArt || undefined, inserted: { albumId, artistId } };
+}
 
-  return { success: true, songId, deduped: false, cover: coverArt || undefined };
+// Run async workers over a list, bounding the number in flight at once. The
+// loop is pull-based (shared index counter) so workers stay busy without
+// launching all promises upfront.
+async function workerLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<(R | null)[]> {
+  const results = new Array(items.length).fill(null) as (R | null)[];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export async function importOnlineSongs(
@@ -95,21 +142,47 @@ export async function importOnlineSongs(
   songList: OnlineSongResult[],
   opts?: { playlistId?: string; userId?: string },
 ): Promise<{ added: number; deduped: number; failed: number; songs: { id: string; title: string }[] }> {
+  // One batched dedup query instead of one SELECT per song.
+  const existingFingerprints = new Map<string, string>();
+  try {
+    const fingerprints = songList.map(s => `${providerId}:${s.source}:${s.id}`);
+    for (const row of db.select().from(songs).where(inArray(songs.fingerprint, fingerprints)).all()) {
+      if (row.fingerprint) existingFingerprints.set(row.fingerprint, row.id);
+    }
+  } catch {
+    // fall through (e.g. over-parameterized); dedup still works per-core.
+  }
+
+  const insertedAlbums = new Set<string>();
+  const insertedArtists = new Set<string>();
+
   let added = 0, deduped = 0, failed = 0;
   const songsOut: { id: string; title: string }[] = [];
-  for (const s of songList) {
+
+  const results = await workerLimit(songList, BULK_IMPORT_CONCURRENCY, async (s) => {
     try {
-      const r = await importOnlineSong(providerId, s, opts);
+      const r = await importOnlineSongCore(providerId, s, opts, existingFingerprints);
       if (r.success && r.songId) {
         if (r.deduped) deduped++; else added++;
-        songsOut.push({ id: r.songId, title: s.name });
-      } else {
-        failed++;
+        if (r.inserted?.albumId) insertedAlbums.add(r.inserted.albumId);
+        if (r.inserted?.artistId) insertedArtists.add(r.inserted.artistId);
+        return { id: r.songId, title: s.name };
       }
+      failed++;
+      return null;
     } catch {
       failed++;
+      return null;
     }
-  }
+  });
+
+  for (const r of results) if (r) songsOut.push(r);
+
+  // Refresh counts as a batch (one scan per touched album/artist) instead of
+  // re-scanning the whole album on every single-song insert.
+  for (const albumId of insertedAlbums) updateAlbumCounts(albumId);
+  for (const artistId of insertedArtists) updateArtistAlbumCount(artistId);
+
   return { added, deduped, failed, songs: songsOut };
 }
 
