@@ -17,6 +17,7 @@ import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, Online
 import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist, syncAllRecommendPlaylists } from "../../services/source/online/recommendImport.js";
+import { purgeExpiredWebSongs } from "../../services/source/online/purge.js";
 
 export const onlineRoutes = new Hono();
 
@@ -253,5 +254,20 @@ onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
     return c.json({ success: true, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "同步失败" });
+  }
+});
+
+// Manually purge expired unreferenced web songs for a provider (admin).
+// Honors the plugin's webSongsMode/webSongsRetentionDays config.
+// POST /v1/online/:providerId/purge-web-songs
+onlineRoutes.post("/v1/online/:providerId/purge-web-songs", adminMiddleware, async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!getConfiguredProvider(providerId)) return c.json({ success: false, error: "在线源未启用或未配置" });
+  try {
+    const result = purgeExpiredWebSongs(providerId);
+    return c.json({ success: true, ...result });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "清理失败" });
   }
 });

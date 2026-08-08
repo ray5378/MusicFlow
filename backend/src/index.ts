@@ -18,6 +18,7 @@ import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/i
 import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { syncAllRecommendPlaylists } from "./services/source/online/recommendImport.js";
+import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl } from "./services/dlna/control.js";
@@ -210,6 +211,17 @@ async function runDailyJobs() {
     }
   } catch (e: any) {
     console.error("[DAILY-SCHEDULER] gmdl recommend sync error:", e.message || e);
+  }
+  // Purge expired unreferenced web songs once per daily run, right after the
+  // recommend sync (so yesterday's dropped tracks get cleaned up with their
+  // covers). No-op unless the go-music-dl plugin enables rotation.
+  try {
+    const r = purgeExpiredWebSongs("go-music-dl");
+    if (r.purged > 0 || r.errors > 0) {
+      console.log(`[DAILY-SCHEDULER] web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
+    }
+  } catch (e: any) {
+    console.error("[DAILY-SCHEDULER] web-song purge error:", e.message || e);
   }
 }
 

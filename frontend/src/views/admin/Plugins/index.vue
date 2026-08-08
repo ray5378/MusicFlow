@@ -45,8 +45,19 @@
               <el-option v-for="p in sourceOptions" :key="p.value" :label="p.label" :value="p.value" />
             </el-select>
           </el-form-item>
+          <el-form-item label="web 歌曲">
+            <el-radio-group v-model="editConfig.webSongsMode">
+              <el-radio value="keep">永不过期</el-radio>
+              <el-radio value="rotate">定期清理</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="editConfig.webSongsMode === 'rotate'" label="保留天数">
+            <el-input-number v-model="editConfig.webSongsRetentionDays" :min="0" :max="3650" :step="1" controls-position="right" style="width: 150px" />
+            <span class="field-hint">超过该天数且不再被任何歌单/收藏引用的在线歌曲会被自动清理(含封面);仍在歌单或收藏中的不受影响。保留 0 天 = 下架即清。</span>
+          </el-form-item>
           <el-form-item>
             <el-button type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
+            <el-button type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
             <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
           </el-form-item>
           <el-alert type="info" :closable="false" show-icon
@@ -78,9 +89,10 @@ const newPlugin = reactive({ name: "", description: "" });
 
 const showConfigDialog = ref(false);
 const editing = ref<any>(null);
-const editConfig = reactive<any>({ baseUrl: "", sources: [] });
+const editConfig = reactive<any>({ baseUrl: "", sources: [], webSongsMode: "keep", webSongsRetentionDays: 7 });
 const testing = ref(false);
 const saving = ref(false);
+const purging = ref(false);
 const testResult = ref<any>(null);
 
 const sourceOptions = [
@@ -129,6 +141,9 @@ function editPlugin(plugin: any) {
   const cfg = parseConfig(plugin);
   editConfig.baseUrl = cfg.baseUrl || "";
   editConfig.sources = Array.isArray(cfg.sources) ? cfg.sources : [];
+  editConfig.webSongsMode = cfg.webSongsMode === "rotate" ? "rotate" : "keep";
+  const days = Number(cfg.webSongsRetentionDays);
+  editConfig.webSongsRetentionDays = Number.isFinite(days) && days >= 0 ? Math.floor(days) : 7;
   testResult.value = null;
   showConfigDialog.value = true;
 }
@@ -158,6 +173,9 @@ async function saveConfig(opts?: { silent?: boolean }) {
   try {
     const cfg: any = { baseUrl: (editConfig.baseUrl || "").trim() };
     if (editConfig.sources.length > 0) cfg.sources = editConfig.sources;
+    cfg.webSongsMode = editConfig.webSongsMode === "rotate" ? "rotate" : "keep";
+    const days = Number(editConfig.webSongsRetentionDays);
+    cfg.webSongsRetentionDays = Number.isFinite(days) && days >= 0 ? Math.floor(days) : 7;
     await api.put(`/rest/api/v1/plugins/${editing.value.id}`, { config: cfg });
     if (!opts?.silent) {
       ElMessage.success("已保存");
@@ -179,6 +197,27 @@ async function addPlugin() {
   loadPlugins();
 }
 
+async function purgeWebSongs() {
+  if (!editing.value) return;
+  purging.value = true;
+  try {
+    // Persist the current config first so the backend uses the latest retention settings.
+    await saveConfig({ silent: true });
+    const res = await api.post(`/rest/api/v1/online/${providerId(editing.value)}/purge-web-songs`, {});
+    if (res.data.success) {
+      if (res.data.mode === "rotate") {
+        ElMessage.success(`已清理 ${res.data.purged} 首歌曲,${res.data.covers} 张封面`);
+      } else {
+        ElMessage.info("当前为「永不过期」模式,未清理任何歌曲");
+      }
+    } else {
+      ElMessage.warning(res.data.error || "清理失败");
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || e.message || "清理失败");
+  } finally { purging.value = false; }
+}
+
 onMounted(loadPlugins);
 </script>
 
@@ -186,6 +225,7 @@ onMounted(loadPlugins);
 .admin-plugins { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
 .test-result { margin-left: 12px; font-size: 13px; color: var(--el-color-danger); &.ok { color: var(--el-color-success); } }
+.field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; }
 @media (max-width: 768px) {
   .admin-plugins { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }

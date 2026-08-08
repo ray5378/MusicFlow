@@ -115,6 +115,24 @@ export function copyCoverToFile(destRef: string, srcCoverRef: string): string | 
   }
 }
 
+// Delete a song's cached cover file(s). Online/web songs cache their remote
+// cover under <songId>.jpg (.png), so removing the song must remove its cover
+// file too, otherwise orphaned covers accumulate in data/musicdl-covers.
+// Returns how many files were actually removed.
+export function deleteSongCover(songId: string): number {
+  if (!songId) return 0;
+  let removed = 0;
+  for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
+    for (const name of [`${songId}.jpg`, `${songId}.png`, `${songId}.gif`]) {
+      try {
+        const filePath = path.join(dir, name);
+        if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); invalidateCoverResolve(name); removed++; }
+      } catch { /* ignore */ }
+    }
+  }
+  return removed;
+}
+
 // Clear the cached cover file for a playlist (called after sync / track changes)
 export function clearPlaylistCoverCache(playlistId: string) {
   for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
