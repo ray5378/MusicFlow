@@ -4,7 +4,6 @@ import { eq, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
 import { parseBuffer } from "music-metadata";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
