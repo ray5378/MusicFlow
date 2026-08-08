@@ -109,7 +109,10 @@ function songToChild(s: any, starredSet?: Set<string>): any {
     track: s.track || 0,
     year: 0,
     genre: s.genre || "",
-    coverArt: resolveAlbumCover(s.albumId),
+    // Web/online songs cache their cover on the song row (songs.cover_art);
+    // local songs rely on the album cover. Prefer the song's own cover so
+    // imported platform songs always show artwork.
+    coverArt: s.coverArt ? `so-${s.id}` : resolveAlbumCover(s.albumId),
     size: s.size || 0,
     contentType: s.contentType || "audio/mpeg",
     suffix: s.suffix || "mp3",

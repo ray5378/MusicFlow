@@ -347,7 +347,7 @@ apiRoutes.get("/v1/songs", (c) => {
     albumId: s.albumId, duration: s.duration, bitRate: s.bitRate, suffix: s.suffix,
     contentType: s.contentType, size: s.size, playCount: s.playCount, genre: s.genre,
     track: s.track, discNumber: s.discNumber,
-    coverArt: s.albumId ? idToCoverArt(s.albumId, "al") : (s.coverArt ? `so-${s.id}` : undefined),
+    coverArt: s.coverArt ? `so-${s.id}` : (s.albumId ? idToCoverArt(s.albumId, "al") : undefined),
   }));
   return c.json({ total, page, pageSize, items });
 });
