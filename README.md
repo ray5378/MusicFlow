@@ -32,8 +32,7 @@ services:
     image: docker.io/ray5378/musicflow:latest
     container_name: musicflow
     restart: unless-stopped
-    ports:
-      - "46400:46400"
+    network_mode: host
     environment:
       # 可选:留空则首次启动自动生成,并持久化在 ./data/.jwt-secret(重启不变)
       # 如需手动指定:openssl rand -hex 32
@@ -44,6 +43,7 @@ services:
       - UV_USE_IO_URING=0
     volumes:
       - ./data:/app/backend/data
+      - ./musicdl-covers:/app/backend/data/musicdl-covers
 ```
 
 环境变量:
@@ -62,6 +62,7 @@ services:
 docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
   -v $(pwd)/data:/app/backend/data \
+  -v $(pwd)/musicdl-covers:/app/backend/data/musicdl-covers \
   docker.io/ray5378/musicflow:latest
 ```
 
@@ -71,6 +72,8 @@ docker run -d --name musicflow --restart unless-stopped \
 
 - `./data/` 挂载卷:SQLite 数据库 + 封面缓存 + 自动生成的密钥文件,备份/迁移只需复制该目录
 - 封面缓存可随时删除,会自动按需重建
+- `./musicdl-covers/` 挂载卷:go-music-dl 下载的在线歌曲封面单独存放(容器内 `data/musicdl-covers`),
+  可单独挂到大容量磁盘以免占用主数据卷。无需时可不挂,封面会回退存到主数据卷
 
 ## 本地开发
 

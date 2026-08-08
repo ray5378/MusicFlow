@@ -3,7 +3,7 @@
 //     local album scrape) live in data/covers.
 //   - PLATFORM covers (downloaded from online/music-dl providers via
 //     cacheRemoteCover: web song covers, imported go-music-dl playlist covers)
-//     live in data/musildl-covers, a separate directory that can be mounted to
+//     live in data/musicdl-covers, a separate directory that can be mounted to
 //     a different volume in docker-compose without touching the local covers.
 // Reads always probe both directories so legacy covers stored under
 // data/covers keep working after the split.
@@ -14,7 +14,7 @@ import fs from "fs";
 import path from "path";
 
 const COVERS_DIR = path.join(process.cwd(), "data", "covers");
-const MUSICDL_COVERS_DIR = path.join(process.cwd(), "data", "musildl-covers");
+const MUSICDL_COVERS_DIR = path.join(process.cwd(), "data", "musicdl-covers");
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
 // Resolved-path cache: probing both dirs costs a stat syscall per candidate on
@@ -63,7 +63,7 @@ export function invalidateCoverResolve(ref: string): void {
 }
 
 // Download a remote (platform) cover image and cache it locally. Returns the
-// local file ref or null. Stored under data/musildl-covers so it can be
+// local file ref or null. Stored under data/musicdl-covers so it can be
 // mounted on a separate volume; reads resolve both dirs.
 // force=true ignores the TTL and re-downloads (used on manual playlist sync).
 export async function cacheRemoteCover(url: string, ref: string, force = false): Promise<string | null> {
