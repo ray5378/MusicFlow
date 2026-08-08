@@ -1650,7 +1650,7 @@ apiRoutes.delete("/v1/groups/:id", (c) => {
 });
 
 // ==================== 统一内容点播(webhook / 外部 API) ====================
-// POST /v1/play { peerId, type: playlist|artist|album|genre, id, startIndex?, playMode?, enqueue? }
+// POST /v1/play { peerId, type: song|playlist|artist|album|genre, id, startIndex?, playMode?, enqueue? }
 // 服务器端把内容 ID 解析成歌曲队列并投递到指定播放器:
 //   - dlna / group → 直接开始播放(后端控制音频,无需浏览器)
 //   - local → 注入队列(音频仍由 Web 客户端 Howl 驱动)

@@ -75,6 +75,24 @@ docker run -d --name musicflow --restart unless-stopped \
 - `./musicdl-covers/` 挂载卷:go-music-dl 下载的在线歌曲封面单独存放(容器内 `data/musicdl-covers`),
   可单独挂到大容量磁盘以免占用主数据卷。无需时可不挂,封面会回退存到主数据卷
 
+## Home Assistant 接入
+
+MusicFlow 提供两个配套仓库,可以把播放能力接进 HA:
+
+| 仓库 | 作用 |
+|---|---|
+| [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项,把 MusicFlow 服务端跑在 Supervisor 下(数据落在 `/share/musicflow`) |
+| [hass-musicflow](https://github.com/ray5378/hass-musicflow) | HA 自定义集成(HACS),把 DLNA 设备与播放组变成 `media_player` 实体 |
+
+集成通过下面三条链路与本服务通信,不需要额外端口:
+
+- `GET/POST /rest/api/v1/...` —— peer 列表、播放状态、队列与播放控制
+- `GET /rest/...` —— OpenSubsonic 曲库浏览与封面(`/rest/getCoverArt` 免鉴权)
+- `WS /ws` —— 播放状态实时推送
+
+服务端会通过 mDNS 广播 `_musicflow._tcp.local.`,HA 侧可自动发现,无需手填地址。
+在 HA 里可以浏览歌单/专辑/艺术家/流派,并对每个 DLNA 设备或播放组做完整的传输控制。
+
 ## 本地开发
 
 ```bash

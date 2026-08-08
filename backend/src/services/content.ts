@@ -21,9 +21,17 @@ export function songsToQueueItems(rows: any[]): any[] {
   });
 }
 
-// Resolve a content reference (playlist / artist / album / genre) into song
-// rows + a display name. Mirrors the frontend usePlayContent behavior.
+// Resolve a content reference (song / playlist / artist / album / genre) into
+// song rows + a display name. Mirrors the frontend usePlayContent behavior.
 export function resolveContentSongs(type: string, id: string): { rows: any[]; name: string } | null {
+  if (type === "song") {
+    // Single track. Kept here (rather than making callers hand-build a
+    // QueueItem) so the mime/coverArt derivation stays in one place — the HA
+    // integration plays a single song through the same /v1/play endpoint.
+    const s = db.select().from(songs).where(eq(songs.id, id)).get();
+    if (!s) return null;
+    return { rows: [s], name: s.title || "未知" };
+  }
   if (type === "playlist") {
     const pl = db.select().from(playlists).where(eq(playlists.id, id)).get();
     if (!pl) return null;
