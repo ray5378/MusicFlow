@@ -499,6 +499,14 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
 
 export async function runDailyRecommendJob(): Promise<DailyRecommendResult | null> {
   if (!getSettingBool("daily_recommend_enabled", true)) return null;
+  // Fresh installs have no local library yet; generating "今日推荐" from empty
+  // would only create a playlist full of non-playable remote stubs. Skip until
+  // the user actually has songs.
+  const localCount = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number };
+  if (!localCount || localCount.n === 0) {
+    console.log("[DAILY-RECOMMEND] local library empty, skipping today's recommendation");
+    return null;
+  }
   try {
     const result = await generateDailyPlaylist();
     if (!result.skipped) {
