@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres } from "../../db/schema.js";
-import { eq, like, inArray, or, and, sql, desc, isNotNull } from "drizzle-orm";
+import { eq, like, inArray, or, and, sql, desc, isNotNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { adminMiddleware } from "../../middleware/auth.js";
@@ -866,32 +866,30 @@ apiRoutes.get("/v1/playlists", (c) => {
   const query = (c.req.query("query") || "").trim();
   const user = c.get("user");
   // Push the ownership/visibility filter + name search to SQL (no behavioural
-  // change: admin still sees all, others see their own + public). The custom
-  // daily-recommend-first ordering is intentionally kept in JS below because it
-  // cannot be expressed as a plain ORDER BY.
+  // change: admin still sees all, others see their own + public).
   const visibility = user?.isAdmin
     ? undefined
     : or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1));
   const where = query
     ? (visibility ? and(visibility, like(playlists.name, `%${query}%`)) : like(playlists.name, `%${query}%`))
     : visibility;
-  const rows = where
-    ? db.select().from(playlists).where(where).all()
-    : db.select().from(playlists).all();
-  const total = rows.length;
-  // Sort: daily-recommend playlists ("今日推荐"/"昨日推荐") first (today before
-  // yesterday), then the rest by updated_at desc.
-  const dailyRank = (p: any) => {
-    const c = p.comment || "";
-    if (c.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
-    if (c.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
-    return 2;
-  };
-  const items = rows.sort((a, b) => {
-    const ra = dailyRank(a), rb = dailyRank(b);
-    if (ra !== rb) return ra - rb;
-    return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
-  }).slice((page - 1) * pageSize, page * pageSize).map(p => ({
+  // Daily-recommend-first ordering (今日推荐 > 昨日推荐 > others) expressed as a
+  // CASE, with recency as the secondary sort. Pushed to SQL together with
+  // LIMIT/OFFSET so we never load the whole table into JS just to slice it.
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '昨日推荐' THEN 1 ELSE 2 END`;
+  const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
+  const rows = (where
+    ? db.select().from(playlists).where(where)
+    : db.select().from(playlists))
+    .orderBy(dailyOrder, desc(recency))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize)
+    .all();
+  const total = (where
+    ? db.select({ c: count() }).from(playlists).where(where)
+    : db.select({ c: count() }).from(playlists))
+    .get()?.c ?? 0;
+  const items = rows.map(p => ({
     id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic,
     songCount: p.songCount || 0, duration: p.duration || 0,
     // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
@@ -929,10 +927,23 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json({ error: "Playlist not found" }, 404);
-  const allEntries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, id)).all();
-  const total = allEntries.length;
-  const matched = allEntries.filter(e => e.playable && e.songId).length;
-  const pageEntries = allEntries.slice((page - 1) * pageSize, page * pageSize);
+  // Push total / matched counts + the page slice to SQL instead of pulling
+  // every entry and slicing in JS. orderBy(position, id) keeps pagination
+  // stable and follows the playlist's intended track order.
+  const baseWhere = eq(playlistSongs.playlistId, id);
+  const total = (db.select({ c: count() }).from(playlistSongs).where(baseWhere).get()?.c) ?? 0;
+  const matchedWhere = and(
+    baseWhere,
+    eq(playlistSongs.playable, 1),
+    sql`${playlistSongs.songId} IS NOT NULL AND ${playlistSongs.songId} != ''`,
+  );
+  const matched = (db.select({ c: count() }).from(playlistSongs).where(matchedWhere).get()?.c) ?? 0;
+  const pageEntries = db.select().from(playlistSongs)
+    .where(baseWhere)
+    .orderBy(playlistSongs.position, playlistSongs.id)
+    .limit(pageSize)
+    .offset((page - 1) * pageSize)
+    .all();
   // Batch song + album lookups (was N+1: one songs query + one albums query
   // per track). Order is preserved by mapping back through pageEntries.
   const songIds = pageEntries.filter((e) => e.playable && e.songId).map((e) => e.songId as string);

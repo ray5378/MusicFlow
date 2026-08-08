@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources } from "../../db/schema.js";
-import { eq, like, sql, or, and, isNotNull } from "drizzle-orm";
+import { eq, like, sql, or, and, isNotNull, inArray, desc } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
@@ -534,20 +534,18 @@ restRoutes.get("/getSimilarSongs2", (c) => c.json(ok({ similarSongs2: { song: []
 
 restRoutes.get("/getPlaylists", (c) => {
   const user = c.get("user");
-  const allPlaylists = db.select().from(playlists).all();
-  const visible = allPlaylists.filter(p => p.isPublic || p.ownerId === user?.id || user?.isAdmin);
-  // Sort: "今日推荐" > "昨日推荐" > others by updated_at desc.
-  const dailyRank = (p: any) => {
-    const cm = p.comment || "";
-    if (cm.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
-    if (cm.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
-    return 2;
-  };
-  visible.sort((a, b) => {
-    const ra = dailyRank(a), rb = dailyRank(b);
-    if (ra !== rb) return ra - rb;
-    return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
-  });
+  // Visibility: admin sees all; others see their own + public. Pushed to SQL,
+  // and the daily-recommend-first ordering is expressed as a CASE + recency.
+  const where = user?.isAdmin
+    ? undefined
+    : or(eq(playlists.isPublic, 1), eq(playlists.ownerId, user?.id ?? ""));
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '昨日推荐' THEN 1 ELSE 2 END`;
+  const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
+  const visible = (where
+    ? db.select().from(playlists).where(where)
+    : db.select().from(playlists))
+    .orderBy(dailyOrder, desc(recency))
+    .all();
   return c.json(ok({ playlists: { playlist: visible.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
@@ -566,17 +564,25 @@ restRoutes.get("/getPlaylist", (c) => {
   // stubs are NOT exposed to third-party clients (they cannot be streamed);
   // the web UI uses /rest/api/v1/playlists/:id/tracks to see the full list.
   const playableEntries = entries.filter(e => e.playable && e.songId);
+  // Batch song lookups ONCE (was N+1: a songs query per entry, plus a second
+  // pass inside the duration reducer). Map keeps id -> row for both passes.
+  const songIds = playableEntries.map(e => e.songId!).filter(Boolean);
+  const songMap = songIds.length
+    ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map(s => [s.id, s]))
+    : new Map<string, any>();
   const entryChildren = playableEntries.map(e => {
-    const song = db.select().from(songs).where(eq(songs.id, e.songId!)).get();
+    const song = e.songId ? songMap.get(e.songId) : null;
     return song ? { ...songToChild(song, starredSet), playable: true } : null;
   }).filter(Boolean);
+  let duration = 0;
+  for (const e of playableEntries) {
+    const song = e.songId ? songMap.get(e.songId) : null;
+    duration += song?.duration || 0;
+  }
   return c.json(ok({ playlist: {
     id: playlist.id, name: playlist.name, owner: playlist.ownerId, public: !!playlist.isPublic,
     created: playlist.createdAt || new Date().toISOString(), changed: playlist.updatedAt || new Date().toISOString(),
-    songCount: playableEntries.length, duration: playableEntries.reduce((sum, e) => {
-      const song = db.select().from(songs).where(eq(songs.id, e.songId!)).get();
-      return sum + (song?.duration || 0);
-    }, 0),
+    songCount: playableEntries.length, duration,
     coverArt: `pl-${playlist.id}`, comment: playlist.comment || "",
     sourcePlatform: playlist.sourcePlatform || "",
     isImported: !!playlist.sourceUrl,
