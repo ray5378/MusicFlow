@@ -517,7 +517,18 @@ function applyMotionDurations(w: number) {
 function updateViewport() { isMobile.value = window.innerWidth < 768; applyMotionDurations(window.innerWidth); }
 updateViewport();
 window.addEventListener("resize", updateViewport);
-onUnmounted(() => window.removeEventListener("resize", updateViewport));
+// 切到后台标签页时给 <html> 挂 .tab-hidden，配合 CSS 停掉全屏极光动画/模糊，
+// 避免后台标签持续占用 GPU 合成器拖慢浏览器其它页面；回到前台时还原。
+function syncTabVisibility() {
+  document.documentElement.classList.toggle("tab-hidden", document.visibilityState === "hidden");
+}
+document.addEventListener("visibilitychange", syncTabVisibility);
+syncTabVisibility();
+onUnmounted(() => {
+  window.removeEventListener("resize", updateViewport);
+  document.removeEventListener("visibilitychange", syncTabVisibility);
+  document.documentElement.classList.remove("tab-hidden");
+});
 
 function onLogoClick() {
   if (isMobile.value) mobileNavOpen.value = false;

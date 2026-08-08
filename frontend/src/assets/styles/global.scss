@@ -733,6 +733,19 @@ body.fnos-login #app { position: relative; z-index: 1; }
     filter: blur(50px);
   }
 }
+
+/* ---- 后台标签页性能：切换离开本页时停掉全屏极光动画并把 blur 降至最小 ----
+   浏览器对后台标签的 setInterval 会节流，但 CSS 动画与 backdrop-filter 仍会
+   持续驱动合成器重算；<html>.tab-hidden 由 JS visibilitychange 挂载，离开时
+   立刻停帧，切回时恢复，避免后台页一直吃 GPU 拖慢浏览器其它标签页。 */
+html.tab-hidden .app-bg::before, html.tab-hidden .app-bg::after,
+html.tab-hidden .page-canvas::before, html.tab-hidden .page-canvas::after,
+html.tab-hidden .content-aurora::before, html.tab-hidden .content-aurora::after,
+html.tab-hidden body.fnos-login::before, html.tab-hidden body.fnos-login::after {
+  animation: none !important;
+  filter: blur(10px) !important;
+  will-change: auto !important;
+}
 /* =========================================================
    封面悬浮播放按钮（全局工具类）
    用法：封面容器加 .mf-coverwrap，内部放 <CoverPlay />
