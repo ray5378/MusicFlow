@@ -16,6 +16,7 @@ import {
 } from "../../services/plugin/dailyRecommend.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
+import { isDailyRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
@@ -821,6 +822,32 @@ apiRoutes.put("/v1/playlists/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// Convert a platform-imported playlist (go-music-dl daily-recommend etc.) into a
+// permanent local playlist: detach its source link so the daily rotation neither
+// replaces its contents nor deletes it. Entries/cover/name are kept as-is.
+apiRoutes.post("/v1/playlists/:id/convert-to-local", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
+  if (!playlist) return c.json({ success: false, error: "歌单不存在" });
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权修改该歌单" });
+  if (!playlist.sourceUrl) return c.json({ success: false, error: "该歌单已是本地歌单,无需转换" });
+  const update: any = {
+    sourceUrl: null,
+    externalId: null,
+    sourcePlatform: "",
+    syncEnabled: 0,
+    updatedAt: new Date().toISOString(),
+  };
+  // Daily-recommend imports carry a "每日推荐歌单·<source>" comment — clear it so
+  // the converted playlist isn't mistaken for a rotating daily-recommend playlist.
+  if (playlist.comment && playlist.comment.startsWith("每日推荐歌单·")) {
+    update.comment = "";
+  }
+  db.update(playlists).set(update).where(eq(playlists.id, id)).run();
+  return c.json({ success: true });
+});
+
 // ==================== Playlists (paginated) ====================
 apiRoutes.get("/v1/playlists", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
@@ -851,6 +878,7 @@ apiRoutes.get("/v1/playlists", (c) => {
     // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
     coverArt: `pl-${p.id}`, sourcePlatform: p.sourcePlatform || "",
     isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled,
+    isDaily: isDailyRecommendPlaylist(p),
     created: p.createdAt, changed: p.updatedAt,
   }));
   return c.json({ total, page, pageSize, items });
@@ -905,7 +933,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
       playable: false, isMatched: false, unavailableReason: e.unavailableReason || "曲库中未找到",
     };
   });
-  return c.json({ total, matched, page, pageSize, items, playlist: { id: playlist.id, name: playlist.name, songCount: playlist.songCount || 0, matched, duration: playlist.duration || 0, coverArt: `pl-${playlist.id}`, sourcePlatform: playlist.sourcePlatform || "", isImported: !!playlist.sourceUrl, syncEnabled: !!playlist.syncEnabled, public: !!playlist.isPublic, owner: playlist.ownerId } });
+  return c.json({ total, matched, page, pageSize, items, playlist: { id: playlist.id, name: playlist.name, songCount: playlist.songCount || 0, matched, duration: playlist.duration || 0, coverArt: `pl-${playlist.id}`, sourcePlatform: playlist.sourcePlatform || "", isImported: !!playlist.sourceUrl, syncEnabled: !!playlist.syncEnabled, public: !!playlist.isPublic, owner: playlist.ownerId, isDaily: isDailyRecommendPlaylist(playlist) } });
 });
 
 // ==================== Play history (paginated) ====================

@@ -18,6 +18,7 @@
           <el-button @click="exportPlaylist"><MfIcon name="Download" />导出</el-button>
           <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />重命名</el-button>
           <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />同步</el-button>
+          <el-button v-if="playlist.isDaily" @click="convertToLocal"><MfIcon name="Pin" />转成本地永久歌单</el-button>
           <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
           <el-button type="danger" plain @click="deletePlaylist"><MfIcon name="Trash2" />删除歌单</el-button>
         </div>
@@ -353,6 +354,26 @@ async function syncPlaylist() {
     ElMessage.error(e.response?.data?.error || "同步失败");
   } finally {
     syncing.value = false;
+  }
+}
+
+// Convert a daily-recommend imported playlist into a permanent local playlist.
+async function convertToLocal() {
+  await ElMessageBox.confirm(
+    `确定将「${playlist.value?.name}」转成本地永久歌单？转换后将不再作为每日推荐被轮换,但歌曲内容保持不变。`,
+    "转成本地歌单",
+    { type: "warning", confirmButtonText: "转换", cancelButtonText: "取消" },
+  );
+  try {
+    const res = await api.post(`/rest/api/v1/playlists/${route.params.id}/convert-to-local`);
+    if (res.data.success) {
+      ElMessage.success(`「${playlist.value?.name}」已转为本地永久歌单`);
+      loadPlaylist();
+    } else {
+      ElMessage.error(res.data.error || "转换失败");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "转换失败");
   }
 }
 

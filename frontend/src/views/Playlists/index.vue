@@ -65,6 +65,7 @@
             <el-dropdown-menu>
               <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
               <el-dropdown-item v-if="pl.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
+              <el-dropdown-item v-if="pl.isDaily" command="convertLocal"><MfIcon name="Pin" />转成本地永久歌单</el-dropdown-item>
               <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
               <el-dropdown-item command="export"><MfIcon name="Download" />导出</el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
@@ -143,7 +144,7 @@ import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download } from "lucide-vue-next";
+import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin } from "lucide-vue-next";
 import api from "@/api";
 
 const router = useRouter();
@@ -165,6 +166,8 @@ function cardActions(pl: any): MenuAction[] {
     { label: "查看歌单", icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
   ];
   if (pl.isImported) acts.push({ label: "同步", icon: RefreshCw, onClick: () => syncPlaylist(pl) });
+  if (pl.isDaily)
+    acts.push({ label: "转成本地永久歌单", icon: Pin, onClick: () => convertToLocal(pl) });
   acts.push({ divider: true });
   acts.push({ label: "重命名", icon: Pencil, onClick: () => openRename(pl) });
   acts.push({ label: "导出歌单", icon: Download, onClick: () => exportPlaylist(pl) });
@@ -422,10 +425,33 @@ async function syncPlaylist(pl: any) {
   }
 }
 
+// Convert a daily-recommend imported playlist into a permanent local playlist.
+// After conversion it is detached from the platform source and won't be rotated
+// (replaced/deleted) by the daily recommend sync anymore.
+async function convertToLocal(pl: any) {
+  await ElMessageBox.confirm(
+    `确定将「${pl.name}」转成本地永久歌单？转换后将不再作为每日推荐被轮换,但歌曲内容保持不变。`,
+    "转成本地歌单",
+    { type: "warning", confirmButtonText: "转换", cancelButtonText: "取消" },
+  );
+  try {
+    const res = await api.post(`/rest/api/v1/playlists/${pl.id}/convert-to-local`);
+    if (res.data.success) {
+      ElMessage.success(`「${pl.name}」已转为本地永久歌单`);
+      loadPlaylists();
+    } else {
+      ElMessage.error(res.data.error || "转换失败");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "转换失败");
+  }
+}
+
 function handleCardCommand(cmd: string, pl: any) {
   switch (cmd) {
     case "play": playAll(pl); break;
     case "sync": syncPlaylist(pl); break;
+    case "convertLocal": convertToLocal(pl); break;
     case "rename": openRename(pl); break;
     case "export": exportPlaylist(pl); break;
     case "addToDaily": togglePlaylistPool(pl); break;
