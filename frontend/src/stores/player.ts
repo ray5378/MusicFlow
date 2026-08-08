@@ -4,6 +4,7 @@ import { Howl } from "howler";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 import { useIsMobile } from "@/composables/useIsMobile";
+import { coverUrl } from "@/utils/cover";
 
 export interface Song {
   id: string;
@@ -238,7 +239,7 @@ export const usePlayerStore = defineStore("player", () => {
     const token = authStore.token || "";
     return `/rest/stream?id=${id}&token=${encodeURIComponent(token)}`;
   }
-  function getCoverUrl(id: string | undefined) { if (!id) return ""; return `/rest/getCoverArt?id=${id}&size=300`; }
+  function getCoverUrl(id: string | undefined) { return coverUrl(id, 300); }
 
   // Build a backend peer API path for a remote peer (dlna:<id> or group:<id>).
   // The backend routes both kinds through the same unified queue controller

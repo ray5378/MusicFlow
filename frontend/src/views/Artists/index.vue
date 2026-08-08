@@ -36,7 +36,7 @@
         v-longpress="() => openActionSheet(artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
       >
         <div class="artist-avatar mf-coverwrap" @click="open(artist)">
-          <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" loading="lazy" decoding="async" />
+          <img v-if="artist.coverArt" :src="coverUrl(artist.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48"  /></div>
           <el-tooltip v-if="artist.scrapeMissing" content="缺失歌手信息(当前为专辑封面兜底)" placement="top">
             <el-tag size="small" type="warning" class="missing-tag">缺信息</el-tag>
@@ -61,6 +61,7 @@ import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
+import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 
 const router = useRouter();

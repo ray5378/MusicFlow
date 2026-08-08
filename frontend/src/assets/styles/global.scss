@@ -3,9 +3,8 @@
    - 暗色玻璃拟态 + 极光背景
    - 主品牌色 #f62c55（播放/喜欢/选中/进度条/FAB）
    - 字体 Montserrat + PingFang SC / Microsoft YaHei
+     （Montserrat 改为在 index.html 中以「非阻塞 <link>」加载，避免 CSS @import 渲染阻塞首屏）
    ========================================================================== */
-
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
 
 :root {
   /* ===== Brand / accent colors (FnOS derived) ===== */

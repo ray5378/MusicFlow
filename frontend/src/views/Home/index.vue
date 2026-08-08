@@ -99,6 +99,7 @@ import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
+import { coverUrl } from "@/utils/cover";
 
 const router = useRouter();
 const {
@@ -111,7 +112,7 @@ const playlists = ref<any[]>([]);
 const loading = ref(false);
 
 function cover(id: string) {
-  return `/rest/getCoverArt?id=${id}&size=300`;
+  return coverUrl(id);
 }
 function go(path: string) {
   if (menuGuard()) return;

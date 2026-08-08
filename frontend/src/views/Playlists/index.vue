@@ -47,7 +47,7 @@
       >
         <div class="playlist-cover mf-coverwrap" @click.stop="open(pl)">
           <PlatformBadge :source="pl.sourcePlatform" />
-          <img v-if="pl.coverArt" :src="`/rest/getCoverArt?id=${pl.coverArt}&size=300`" loading="lazy" decoding="async" />
+          <img v-if="pl.coverArt" :src="coverUrl(pl.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playAll(pl)" />
         </div>
@@ -145,6 +145,7 @@ import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin } from "lucide-vue-next";
+import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 
 const router = useRouter();

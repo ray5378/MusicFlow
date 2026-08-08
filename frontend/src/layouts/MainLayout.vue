@@ -726,6 +726,10 @@ function onSwipeTouchStart(e: TouchEvent) {
   swipeStartY = t.clientY;
   swipeStartT = Date.now();
   swipeActive = true;
+  // 仅在确认是左缘手势后才挂上 move/end（且为 passive:false 以便按需 preventDefault）。
+  // 平时不挂载全局 touchmove 监听，避免每帧 touchmove 都阻塞滚动（低端安卓卡顿源）。
+  window.addEventListener("touchmove", onSwipeTouchMove, { passive: false });
+  window.addEventListener("touchend", onSwipeTouchEnd, { passive: false });
 }
 function onSwipeTouchMove(e: TouchEvent) {
   if (!swipeActive) return;
@@ -736,6 +740,9 @@ function onSwipeTouchMove(e: TouchEvent) {
   if (dx > 10 && Math.abs(dy) < 40) e.preventDefault();
 }
 function onSwipeTouchEnd(e: TouchEvent) {
+  // 手势结束即卸载 move/end，避免遗留阻塞滚动的全局监听
+  window.removeEventListener("touchmove", onSwipeTouchMove);
+  window.removeEventListener("touchend", onSwipeTouchEnd);
   if (!swipeActive) { swipeActive = false; return; }
   swipeActive = false;
   if (!isMobile.value) return;
@@ -749,9 +756,7 @@ function onSwipeTouchEnd(e: TouchEvent) {
     else history.back();                  // 无弹窗：放行系统返回
   }
 }
-window.addEventListener("touchstart", onSwipeTouchStart, { passive: false });
-window.addEventListener("touchmove", onSwipeTouchMove, { passive: false });
-window.addEventListener("touchend", onSwipeTouchEnd, { passive: false });
+window.addEventListener("touchstart", onSwipeTouchStart, { passive: true });
 onUnmounted(() => {
   window.removeEventListener("touchstart", onSwipeTouchStart);
   window.removeEventListener("touchmove", onSwipeTouchMove);

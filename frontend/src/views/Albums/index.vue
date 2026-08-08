@@ -14,7 +14,7 @@
         v-longpress="() => openActionSheet(albumActions(album), album.name, albumMeta(album))"
       >
         <div class="album-cover mf-coverwrap" @click="open(album)">
-          <img v-if="album.coverArt" :src="`/rest/getCoverArt?id=${album.coverArt}&size=300`" loading="lazy" decoding="async" />
+          <img v-if="album.coverArt" :src="coverUrl(album.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${album.name}`" :action="() => playAl(album)" />
         </div>
@@ -40,6 +40,7 @@ import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import api from "@/api";
+import { coverUrl } from "@/utils/cover";
 
 const router = useRouter();
 const { openContextMenu, openActionSheet, menuGuard, albumActions } = useItemActions();
