@@ -154,7 +154,12 @@
       <div class="main-scroll">
         <router-view v-slot="{ Component, route }">
           <transition name="page" mode="out-in">
-            <component :is="Component" :key="route.path" />
+            <!-- keep-alive: 切走的页面保留在内存，返回时直接命中缓存、无需整页
+                 重建/重新拉数据/重渲染大列表，消除应用内切页的卡顿与空白闪烁。
+                 max=10 限制缓存实例数，避免长期浏览占用过多内存。 -->
+            <keep-alive max="10">
+              <component :is="Component" :key="route.path" />
+            </keep-alive>
           </transition>
         </router-view>
       </div>
@@ -1391,18 +1396,15 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-/* 页面切换过渡 */
+/* 页面切换过渡：keep-alive 下命中缓存是瞬时的，过渡只需轻量淡入淡出。
+   去掉 translateY 位移以避免主线程重排/重绘，缩短时长减少切换体感延迟。 */
 .page-enter-active,
 .page-leave-active {
-  transition: opacity 0.25s ease, transform 0.25s ease;
+  transition: opacity 0.18s ease;
 }
-.page-enter-from {
-  opacity: 0;
-  transform: translateY(8px);
-}
+.page-enter-from,
 .page-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
 }
 
 /* 按钮/控件点击触感反馈 */
