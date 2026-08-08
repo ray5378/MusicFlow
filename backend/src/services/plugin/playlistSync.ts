@@ -113,7 +113,52 @@ export async function rebuildPlaylistEntries(
   });
 
   refreshPlaylistCounts(playlistId);
+
+  // Any entries that couldn't be matched to the local library are auto-matched
+  // against the configured online source (go-music-dl) in the background, so
+  // these playlists become playable even without the track being in the local
+  // library. Fire-and-forget: the match runs off this request's hot path.
+  if (unmatched > 0) {
+    queueAutoMatch(playlistId).catch((e) => {
+      console.error(`[auto-match] playlist ${playlistId} 自动匹配失败:`, e?.message || e);
+    });
+  }
+
   return { total: imported.tracks.length, matched, unmatched, wishAdded, platform: imported.platform };
+}
+
+// Per-playlist auto-match guard: only one background match at a time per playlist.
+const autoMatchLocks = new Set<string>();
+
+// Match a playlist's unmatched entries ("曲库中未找到") through the configured
+// online source provider. Loaded lazily via dynamic import to avoid a static
+// cycle (match.ts imports this module for normalizeKey).
+async function queueAutoMatch(playlistId: string): Promise<void> {
+  if (autoMatchLocks.has(playlistId)) return;
+  autoMatchLocks.add(playlistId);
+  const started = Date.now();
+  try {
+    const [{ getConfiguredProvider }, { matchUnmatchedPlaylistEntries }] = await Promise.all([
+      import("../source/online/index.js"),
+      import("../source/online/match.js"),
+    ]);
+    const configured = getConfiguredProvider("go-music-dl");
+    if (!configured) return; // no online source configured -> nothing to do
+
+    const result = await matchUnmatchedPlaylistEntries(
+      configured.provider.id,
+      configured.config,
+      configured.provider,
+      playlistId,
+    );
+    if (result.total > 0) {
+      console.log(
+        `[auto-match] ${playlistId}: ${result.matched} matched, ${result.noMatch} no-match, ${result.error} errors in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+      );
+    }
+  } finally {
+    autoMatchLocks.delete(playlistId);
+  }
 }
 
 // Sync a playlist: re-fetch remote data and rebuild entries.

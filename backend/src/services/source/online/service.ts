@@ -60,8 +60,16 @@ async function importOnlineSongCore(
 
   const streamUrl = provider.streamUrl(configured, song);
   const fingerprint = `${providerId}:${song.source}:${song.id}`;
-  const existing = existingFingerprints.get(fingerprint);
+  let existing = existingFingerprints.get(fingerprint);
+  if (!existing) {
+    // Single-song call sites (e.g. match.ts) pass an empty map. Look the
+    // fingerprint up in the DB so repeated matches return the SAME song row
+    // instead of inserting a duplicate web song every time.
+    const row = db.select().from(songs).where(eq(songs.fingerprint, fingerprint)).get();
+    if (row) existing = row.id;
+  }
   if (existing) {
+    existingFingerprints.set(fingerprint, existing);
     return { success: true, songId: existing, deduped: true };
   }
 
