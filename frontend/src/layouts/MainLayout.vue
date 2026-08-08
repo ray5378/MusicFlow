@@ -18,7 +18,8 @@
       <div class="sidebar-overlay" v-if="isMobile && mobileNavOpen" @click="mobileNavOpen = false"></div>
     </transition>
 
-    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed, mobile: isMobile, 'mobile-open': isMobile && mobileNavOpen }">
+    <transition name="fade">
+    <aside v-if="!isMobile || mobileNavOpen" class="sidebar" :class="{ collapsed: sidebarCollapsed, mobile: isMobile, 'mobile-open': isMobile && mobileNavOpen }">
       <div class="logo" @click="onLogoClick">
         <img src="/favicon.png" loading="lazy" decoding="async" alt="MusicFlow" class="logo-img" />
         <span v-if="!sidebarCollapsed || isMobile" class="logo-text">MusicFlow</span>
@@ -54,12 +55,14 @@
         </el-dropdown>
       </div>
     </aside>
+    </transition>
 
     <!-- ===== Mobile "播放控制" drawer: same chrome as the nav sidebar ===== -->
     <transition name="fade">
       <div class="sidebar-overlay" v-if="isMobile && controlsDrawerOpen" @click="controlsDrawerOpen = false"></div>
     </transition>
-    <aside v-if="isMobile" class="sidebar mobile" :class="{ 'mobile-open': isMobile && controlsDrawerOpen }">
+    <transition name="fade">
+    <aside v-if="isMobile && controlsDrawerOpen" class="sidebar mobile" :class="{ 'mobile-open': isMobile && controlsDrawerOpen }">
       <div class="logo controls-logo">
         <span class="logo-text">播放控制</span>
       </div>
@@ -148,6 +151,7 @@
         </div>
       </div>
     </aside>
+    </transition>
 
     <main class="main-content">
       <!-- 可滚动内容 -->
@@ -365,7 +369,7 @@
     </transition>
 
     <!-- ===== Queue expand button (shown when the panel is hidden) ===== -->
-    <button v-if="!playerStore.showPlaylist" class="queue-expand-btn" @click="playerStore.togglePlaylistPanel" title="展开播放队列">
+    <button v-if="!playerStore.showPlaylist && playerStore.currentSong" class="queue-expand-btn" @click="playerStore.togglePlaylistPanel" title="展开播放队列">
       <MfIcon name="List" :size="16" /><span class="queue-expand-count">{{ playerStore.queue.length }}</span>
     </button>
 
