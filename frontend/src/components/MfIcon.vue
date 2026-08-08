@@ -13,7 +13,15 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import * as Lucide from "lucide-vue-next";
+import {
+  ArrowLeft, Box, Cable, Check, ChevronDown, ChevronRight, CircleCheck, CircleSlash,
+  Clock, Copy, Disc3, Download, FolderOpen, Headphones, Heart, Home, Info, KeyRound,
+  Library, List, ListMusic, ListOrdered, Loader2, Menu, MessageCircle, Monitor,
+  MoreHorizontal, Pause, Pencil, Play, Plus, Radar, RefreshCw, Repeat, Repeat1,
+  RotateCcw, Search, Settings, Shuffle, SkipBack, SkipForward, SlidersHorizontal,
+  Speaker, Trash2, TriangleAlert, Upload, User, Volume2, VolumeX, Wand2, Workflow, X,
+  Zap,
+} from "lucide-vue-next";
 
 const props = withDefaults(
   defineProps<{
@@ -58,6 +66,19 @@ const ALIAS: Record<string, string> = {
   Close: "X",
 };
 
+// Curated lucide icon set (only the names referenced across the app). Keeping
+// this as an explicit map lets the bundler tree-shake lucide-vue-next instead of
+// pulling in every icon like the old `import * from lucide-vue-next`.
+const ICONS: Record<string, any> = {
+  ArrowLeft, Box, Cable, Check, ChevronDown, ChevronRight, CircleCheck, CircleSlash,
+  Clock, Copy, Disc3, Download, FolderOpen, Headphones, Heart, Home, Info, KeyRound,
+  Library, List, ListMusic, ListOrdered, Loader2, Menu, MessageCircle, Monitor,
+  MoreHorizontal, Pause, Pencil, Play, Plus, Radar, RefreshCw, Repeat, Repeat1,
+  RotateCcw, Search, Settings, Shuffle, SkipBack, SkipForward, SlidersHorizontal,
+  Speaker, Trash2, TriangleAlert, Upload, User, Volume2, VolumeX, Wand2, Workflow, X,
+  Zap,
+};
+
 function toPascal(s: string): string {
   return s
     .split(/[-_\s]+/)
@@ -68,12 +89,11 @@ function toPascal(s: string): string {
 const resolved = computed(() => {
   if (props.icon) return props.icon;
   if (!props.name) return null;
-  const L = Lucide as Record<string, any>;
   return (
-    L[props.name] ||
-    L[toPascal(props.name)] ||
-    (ALIAS[props.name] && L[ALIAS[props.name]]) ||
-    (ALIAS[toPascal(props.name)] && L[ALIAS[toPascal(props.name)]]) ||
+    ICONS[props.name] ||
+    ICONS[toPascal(props.name)] ||
+    (ALIAS[props.name] && ICONS[ALIAS[props.name]]) ||
+    (ALIAS[toPascal(props.name)] && ICONS[ALIAS[toPascal(props.name)]]) ||
     null
   );
 });

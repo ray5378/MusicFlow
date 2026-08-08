@@ -2,7 +2,7 @@
   <div class="artist-detail" v-loading="loading">
     <div class="artist-header" v-if="artist">
       <div class="artist-avatar">
-        <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" />
+        <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" loading="lazy" decoding="async" />
         <div v-else class="avatar-placeholder"><MfIcon name="User" :size="64"  /></div>
       </div>
       <div class="artist-meta">
@@ -25,7 +25,7 @@
         v-longpress="() => openActionSheet(albumActions(album), album.name, albumMeta(album))"
       >
         <div class="album-cover mf-coverwrap" @click="open(album)">
-          <img v-if="album.coverArt" :src="`/rest/getCoverArt?id=${album.coverArt}&size=300`" />
+          <img v-if="album.coverArt" :src="`/rest/getCoverArt?id=${album.coverArt}&size=300`" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="32"  /></div>
           <CoverPlay size="md" :label="`播放 ${album.name}`" :action="() => playAl(album)" />
         </div>

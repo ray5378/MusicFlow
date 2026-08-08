@@ -17,6 +17,9 @@ if (!fs.existsSync(dataDir)) {
 const sqlite: DatabaseType = new Database(path.join(dataDir, "musicflow.db"));
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
+sqlite.pragma("busy_timeout = 5000");
+sqlite.pragma("synchronous = NORMAL");
+sqlite.pragma("cache_size = -20000");
 
 export const db = drizzle(sqlite, { schema });
 // Export the raw sqlite handle so services can run lightweight key/value
@@ -263,7 +266,11 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_songs_album ON songs(album_id);
     CREATE INDEX IF NOT EXISTS idx_songs_genre ON songs(genre);
     CREATE INDEX IF NOT EXISTS idx_songs_created_at ON songs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_songs_path ON songs(path);
+    CREATE INDEX IF NOT EXISTS idx_songs_fingerprint ON songs(fingerprint);
     CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
+    CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
+    CREATE INDEX IF NOT EXISTS idx_albums_name ON albums(name);
     CREATE INDEX IF NOT EXISTS idx_play_history_user ON play_history(user_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
     CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist ON playlist_songs(playlist_id);

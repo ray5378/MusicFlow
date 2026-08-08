@@ -14,7 +14,7 @@
         v-longpress="() => openActionSheet(albumActions(album), album.name, albumMeta(album))"
       >
         <div class="album-cover mf-coverwrap" @click="open(album)">
-          <img v-if="album.coverArt" :src="`/rest/getCoverArt?id=${album.coverArt}&size=300`" />
+          <img v-if="album.coverArt" :src="`/rest/getCoverArt?id=${album.coverArt}&size=300`" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${album.name}`" :action="() => playAl(album)" />
         </div>

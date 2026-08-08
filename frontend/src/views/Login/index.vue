@@ -13,7 +13,7 @@
         <!-- 图标 + 品牌名 横向并列 -->
         <div class="brand-row">
           <div class="login-logo-wrap">
-            <img src="/favicon.png" alt="MusicFlow" class="login-logo" />
+            <img src="/favicon.png" loading="lazy" decoding="async" alt="MusicFlow" class="login-logo" />
           </div>
           <h1>MusicFlow</h1>
         </div>

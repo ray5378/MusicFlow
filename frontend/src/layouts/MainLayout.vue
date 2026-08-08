@@ -9,7 +9,7 @@
       <button type="button" class="mobile-hamburger" aria-label="菜单" @click="mobileNavOpen = !mobileNavOpen">
         <MfIcon name="Menu" :size="22"  />
       </button>
-      <img src="/favicon.png" alt="MusicFlow" class="mobile-brand-logo" @click="mobileNavOpen = false" />
+      <img src="/favicon.png" loading="lazy" decoding="async" alt="MusicFlow" class="mobile-brand-logo" @click="mobileNavOpen = false" />
       <span class="mobile-brand" @click="mobileNavOpen = false">MusicFlow</span>
     </header>
 
@@ -20,7 +20,7 @@
 
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed, mobile: isMobile, 'mobile-open': isMobile && mobileNavOpen }">
       <div class="logo" @click="onLogoClick">
-        <img src="/favicon.png" alt="MusicFlow" class="logo-img" />
+        <img src="/favicon.png" loading="lazy" decoding="async" alt="MusicFlow" class="logo-img" />
         <span v-if="!sidebarCollapsed || isMobile" class="logo-text">MusicFlow</span>
       </div>
       <el-menu :default-active="activeMenu" :collapse="!isMobile && sidebarCollapsed" router class="sidebar-menu" @select="closeMobileNav">
@@ -163,7 +163,7 @@
     <!-- ===== Mobile player bar (compact) ===== -->
     <footer class="player-bar-mobile" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
       <div class="mp-cover" @click="playerStore.togglePlayMode">
-        <img v-if="coverUrl" :src="coverUrl" />
+        <img v-if="coverUrl" :src="coverUrl" loading="lazy" decoding="async" />
         <div v-else class="mp-cover-ph"><MfIcon name="Headphones" :size="20"  /></div>
       </div>
       <div class="mp-info" @click="playerStore.togglePlayMode">
@@ -189,7 +189,7 @@
     <footer class="player-bar" v-if="!isMobile">
       <div class="player-left" v-if="playerStore.currentSong">
         <div class="np-main" @click="playerStore.togglePlayMode">
-          <img v-if="coverUrl" :src="coverUrl" class="player-cover" />
+          <img v-if="coverUrl" :src="coverUrl" class="player-cover" decoding="async" />
           <div v-else class="player-cover-placeholder"><MfIcon name="Headphones" :size="24"  /></div>
           <div class="player-song-info">
             <div class="player-title">{{ playerStore.currentSong.title }}</div>
@@ -343,7 +343,7 @@
             @click="playFromQueue(idx)"
           >
             <div class="queue-cover">
-              <img v-if="song.coverArt" :src="`/rest/getCoverArt?id=${song.coverArt}&size=80`" />
+              <img v-if="song.coverArt" :src="`/rest/getCoverArt?id=${song.coverArt}&size=80`" loading="lazy" decoding="async" />
               <div v-else class="queue-cover-ph"><MfIcon name="Headphones" /></div>
               <span v-if="idx === playerStore.currentIndex" class="playing-indicator" :class="{ paused: !playerStore.isPlaying }"></span>
             </div>
@@ -374,7 +374,7 @@
           <!-- Left: rotating disc -->
           <div class="pm-left">
             <div class="pm-disc" :class="{ spinning: playerStore.isPlaying }">
-              <img v-if="coverUrl" :src="coverUrl" class="pm-disc-img" />
+              <img v-if="coverUrl" :src="coverUrl" class="pm-disc-img" loading="lazy" decoding="async" />
               <div v-else class="pm-disc-ph"><MfIcon name="Headphones" :size="80"  /></div>
               <div class="pm-disc-hole"></div>
             </div>

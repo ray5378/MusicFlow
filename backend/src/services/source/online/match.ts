@@ -89,17 +89,23 @@ function linkPlaylistEntry(playlistId: string, entryId: number, songId: string) 
 }
 
 export function refreshPlaylistCounts(playlistId: string) {
-  const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
-  let duration = 0, count = 0;
-  for (const e of entries) {
-    if (e.playable && e.songId) {
-      const s = sqlite.prepare("SELECT duration FROM songs WHERE id = ?").get(e.songId) as any;
-      if (s) { duration += s.duration || 0; count++; }
-    } else if (e.externalTitle) {
-      duration += (e.externalDuration || 0) / 1000;
-      count++;
-    }
-  }
+  const row = sqlite.prepare(`
+    SELECT
+      SUM(CASE
+        WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END
+        WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN 1
+        ELSE 0 END) AS cnt,
+      COALESCE(SUM(
+        CASE WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN s.duration ELSE 0 END
+             WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN e.external_duration / 1000.0
+             ELSE 0 END
+      ), 0) AS duration
+    FROM playlist_songs e
+    LEFT JOIN songs s ON s.id = e.song_id
+    WHERE e.playlist_id = ?
+  `).get(playlistId) as any;
+  const count = Number(row?.cnt || 0);
+  const duration = Math.round(Number(row?.duration || 0));
   sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
     .run(count, duration, new Date().toISOString(), playlistId);
 }

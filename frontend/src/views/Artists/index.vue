@@ -36,7 +36,7 @@
         v-longpress="() => openActionSheet(artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
       >
         <div class="artist-avatar mf-coverwrap" @click="open(artist)">
-          <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" />
+          <img v-if="artist.coverArt" :src="`/rest/getCoverArt?id=${artist.coverArt}&size=300`" loading="lazy" decoding="async" />
           <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48"  /></div>
           <el-tooltip v-if="artist.scrapeMissing" content="缺失歌手信息(当前为专辑封面兜底)" placement="top">
             <el-tag size="small" type="warning" class="missing-tag">缺信息</el-tag>
@@ -207,6 +207,13 @@ function formatAlbumCount(n: number) {
 }
 
 onMounted(() => { loadArtists(); loadMissingCount(); checkScrapeStatus(); });
+
+// Stop the scrape-progress poll when leaving the page so the 1.5s interval
+// doesn't keep running (and issuing requests) in the background.
+onUnmounted(() => {
+  if (scrapeTimer) { clearInterval(scrapeTimer); scrapeTimer = null; }
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+});
 </script>
 
 <style lang="scss" scoped>

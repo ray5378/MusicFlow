@@ -18,8 +18,21 @@ import { eq } from "drizzle-orm";
 // Search result ordering: prefer platforms that resolve reliably.
 const SOURCE_PREFERENCE = ["netease", "kuwo", "kugou", "qq"];
 
+// Bounded in-memory caches. Both grow with every web song played, so enforce a
+// FIFO cap to keep memory usage bounded on long-running servers.
+const FALLBACK_CACHE_MAX = 2000;
+const PLAYABLE_CACHE_MAX = 5000;
+
 // songId -> working stream URL (or null once we know there's no alternative).
 const fallbackCache = new Map<string, string | null>();
+
+function setFallback(key: string, value: string | null) {
+  fallbackCache.set(key, value);
+  if (fallbackCache.size > FALLBACK_CACHE_MAX) {
+    const oldest = fallbackCache.keys().next().value;
+    if (oldest !== undefined) fallbackCache.delete(oldest);
+  }
+}
 
 export async function findFallbackStream(
   songId: string,
@@ -34,10 +47,10 @@ export async function findFallbackStream(
     if (cached) return { url: cached, source: "" };
     return null;
   }
-  if (!title) { fallbackCache.set(songId, null); return null; }
+  if (!title) { setFallback(songId, null); return null; }
 
   const configured = getConfiguredProvider(providerId);
-  if (!configured?.provider.search) { fallbackCache.set(songId, null); return null; }
+  if (!configured?.provider.search) { setFallback(songId, null); return null; }
 
   const query = [title, artist].filter(Boolean).join(" ");
   let results: OnlineSongResult[];
@@ -45,7 +58,7 @@ export async function findFallbackStream(
     const r = await configured.provider.search(configured.config, { query });
     results = r.songs || [];
   } catch {
-    fallbackCache.set(songId, null);
+    setFallback(songId, null);
     return null;
   }
 
@@ -61,12 +74,12 @@ export async function findFallbackStream(
   for (const cand of ranked) {
     const url = configured.provider.streamUrl(configured.config, cand);
     if (await probe(url)) {
-      fallbackCache.set(songId, url);
+      setFallback(songId, url);
       return { url, source: cand.source };
     }
   }
 
-  fallbackCache.set(songId, null);
+  setFallback(songId, null);
   return null;
 }
 
@@ -99,6 +112,14 @@ export function clearFallbackCache(songId?: string) {
 // fallback cache, which only stores fallback hits / misses).
 const playableCache = new Set<string>();
 
+function addPlayable(songId: string) {
+  playableCache.add(songId);
+  if (playableCache.size > PLAYABLE_CACHE_MAX) {
+    const oldest = playableCache.values().next().value;
+    if (oldest !== undefined) playableCache.delete(oldest);
+  }
+}
+
 /**
  * Ensure a web song has a streamable URL before casting it to a renderer.
  *   - If the original URL probes OK, returns it (cached per songId).
@@ -115,7 +136,7 @@ export async function ensurePlayableStream(
   if (fallbackCache.has(song.id)) {
     const cached = fallbackCache.get(song.id)!;
     if (cached) {
-      playableCache.add(song.id);
+      addPlayable(song.id);
       // Persist the previously-discovered replacement URL if the song still
       // carries the failing original (keeps /rest/stream fast on later plays).
       if (song.url && cached !== song.url) updateSongUrl(song.id, cached);
@@ -127,7 +148,7 @@ export async function ensurePlayableStream(
   if (!song.url) return null;
 
   if (await probe(song.url)) {
-    playableCache.add(song.id);
+    addPlayable(song.id);
     return song.url;
   }
 
@@ -139,7 +160,7 @@ export async function ensurePlayableStream(
     song.album || "", song.pluginEntry || "go-music-dl", sd?.source || "",
   );
   if (fb) {
-    playableCache.add(song.id);
+    addPlayable(song.id);
     updateSongUrl(song.id, fb.url);
     return fb.url;
   }

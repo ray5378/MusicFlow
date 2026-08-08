@@ -2,7 +2,7 @@
   <div class="playlist-detail" v-loading="loading">
     <div class="playlist-header" v-if="playlist">
       <div class="playlist-cover">
-        <img v-if="playlist.coverArt" :src="`/rest/getCoverArt?id=${playlist.coverArt}&size=300`" />
+        <img v-if="playlist.coverArt" :src="`/rest/getCoverArt?id=${playlist.coverArt}&size=300`" loading="lazy" decoding="async" />
         <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">
@@ -89,7 +89,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -220,17 +220,24 @@ async function matchAllPlaylist() {
     if (res.data?.success) {
       if (res.data.jobId) {
         matchTotal.value = res.data.progress?.total || 0;
+        let pollTimer: ReturnType<typeof setTimeout> | null = null;
         const poll = async () => {
-          const s = await api.get(`/rest/api/v1/online/${pid}/match-playlist/status`, { params: { jobId: res.data.jobId } });
-          if (s.data?.progress) matchDone.value = s.data.progress.done || 0;
-          if (s.data?.status === "completed" || s.data?.status === "failed") {
-            matchRunning.value = false;
-            matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
-            if (s.data.error) ElMessage.warning(s.data.error);
-            return;
-          }
-          setTimeout(poll, 2000);
+          if (matchPollCancelled) return;
+          try {
+            const s = await api.get(`/rest/api/v1/online/${pid}/match-playlist/status`, { params: { jobId: res.data.jobId } });
+            if (matchPollCancelled) return;
+            if (s.data?.progress) matchDone.value = s.data.progress.done || 0;
+            if (s.data?.status === "completed" || s.data?.status === "failed") {
+              matchRunning.value = false;
+              matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
+              if (s.data.error) ElMessage.warning(s.data.error);
+              return;
+            }
+          } catch { /* keep polling */ }
+          if (matchPollCancelled) return;
+          pollTimer = setTimeout(poll, 2000);
         };
+        matchPollCancelled = false;
         poll();
       } else {
         matchTotal.value = res.data.total || 0;
@@ -402,6 +409,12 @@ async function deletePlaylist() {
 }
 
 onMounted(loadPlaylist);
+
+// Cancel any in-flight match-progress poll when the page is left. Without this,
+// the recursive setTimeout keeps issuing /match-playlist/status requests after
+// the component has been unmounted.
+let matchPollCancelled = false;
+onUnmounted(() => { matchPollCancelled = true; });
 </script>
 
 <style lang="scss" scoped>

@@ -233,6 +233,14 @@ function runtimeOf(deviceId: string): DeviceRuntime {
 export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
   cachedDevices = await discoverDlnaDevices(timeoutMs);
   lastDiscovery = Date.now();
+  // Prune per-device runtime state for devices that no longer respond, so the
+  // in-memory `runtimes` map doesn't grow without bound on long-running servers.
+  if (runtimes.size > cachedDevices.length) {
+    const live = new Set(cachedDevices.map(d => d.id));
+    for (const [deviceId] of runtimes) {
+      if (!live.has(deviceId)) runtimes.delete(deviceId);
+    }
+  }
   // Notify subscribers (WS layer) that the device list may have changed.
   getEventManager().emitDeviceListChanged(cachedDevices.length);
   return cachedDevices;

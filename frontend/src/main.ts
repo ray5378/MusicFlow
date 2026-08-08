@@ -1,9 +1,6 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
-import ElementPlus from "element-plus";
-import "element-plus/dist/index.css";
-import * as ElementPlusIconsVue from "@element-plus/icons-vue";
-import * as Lucide from "lucide-vue-next";
+import { Search, User, Lock } from "@element-plus/icons-vue";
 import App from "./App.vue";
 import router from "./router";
 import { longpress } from "./directives/longpress";
@@ -15,17 +12,13 @@ const app = createApp(App);
 
 app.use(createPinia());
 app.use(router);
-app.use(ElementPlus);
 
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component);
-}
-// Unified line-icon set (registered after EP so it wins on name collisions).
-for (const [key, component] of Object.entries(Lucide)) {
-  if (key === "createLucideIcon") continue;
-  if (typeof component !== "function" && typeof component !== "object") continue;
-  app.component(key, component as any);
-}
+// Element Plus components/icons are auto-imported on demand (unplugin-vue-components).
+// Only these three icons are used by string prop (prefix-icon etc.), so they must stay
+// registered globally — nothing else is pulled in from the icon set.
+app.component("Search", Search);
+app.component("User", User);
+app.component("Lock", Lock);
 
 app.directive("longpress", longpress);
 app.component("MfIcon", MfIcon);

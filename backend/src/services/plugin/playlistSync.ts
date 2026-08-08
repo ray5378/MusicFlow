@@ -1,5 +1,5 @@
 // Playlist sync service: re-fetch remote playlist, rebuild entries with library matching
-import { db } from "../../db/index.js";
+import { db, sqlite } from "../../db/index.js";
 import { songs, playlists, playlistSongs, wishes } from "../../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
@@ -216,17 +216,27 @@ export async function syncAllEnabledPlaylists(opts: RebuildOptions = {}): Promis
 
 // Recompute a playlist's songCount and duration
 export function refreshPlaylistCounts(playlistId: string) {
-  const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
-  let duration = 0, count = 0;
-  for (const e of entries) {
-    if (e.playable && e.songId) {
-      const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
-      if (song) { duration += song.duration || 0; count++; }
-    } else if (e.externalTitle) {
-      duration += (e.externalDuration || 0) / 1000;
-      count++;
-    }
-  }
+  // Single aggregate query (LEFT JOIN song durations) instead of one SELECT per
+  // entry. Mirrors the old per-entry logic:
+  //   - playable+linked entry counts when its song exists → contributes s.duration
+  //   - loose external entry counts when it has an external title → ext duration / 1000
+  const row = sqlite.prepare(`
+    SELECT
+      SUM(CASE
+        WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END
+        WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN 1
+        ELSE 0 END) AS cnt,
+      COALESCE(SUM(
+        CASE WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN s.duration ELSE 0 END
+             WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN e.external_duration / 1000.0
+             ELSE 0 END
+      ), 0) AS duration
+    FROM playlist_songs e
+    LEFT JOIN songs s ON s.id = e.song_id
+    WHERE e.playlist_id = ?
+  `).get(playlistId) as any;
+  const count = Number(row?.cnt || 0);
+  const duration = Math.round(Number(row?.duration || 0));
   db.update(playlists).set({ songCount: count, duration, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
 }
 

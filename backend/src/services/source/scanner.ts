@@ -1,4 +1,4 @@
-import { db } from "../../db/index.js";
+import { db, sqlite } from "../../db/index.js";
 import { songs, albums, artists, mediaSources, albumArtists } from "../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
@@ -491,12 +491,12 @@ function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fin
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   }).run();
   if (albumId) {
-    const albumSongs = db.select().from(songs).where(eq(songs.albumId, albumId)).all();
-    db.update(albums).set({ songCount: albumSongs.length, duration: albumSongs.reduce((s, a) => s + (a.duration || 0), 0) }).where(eq(albums.id, albumId)).run();
+    const agg = sqlite.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(duration), 0) AS dur FROM songs WHERE album_id = ?").get(albumId) as any;
+    db.update(albums).set({ songCount: agg?.cnt ?? 0, duration: agg?.dur ?? 0 }).where(eq(albums.id, albumId)).run();
   }
   if (artistId) {
-    const artistAlbums = db.select().from(albums).where(eq(albums.artistId, artistId)).all();
-    db.update(artists).set({ albumCount: artistAlbums.length }).where(eq(artists.id, artistId)).run();
+    const agg = sqlite.prepare("SELECT COUNT(*) AS cnt FROM albums WHERE artist_id = ?").get(artistId) as any;
+    db.update(artists).set({ albumCount: agg?.cnt ?? 0 }).where(eq(artists.id, artistId)).run();
   }
   return "added";
 }
@@ -508,27 +508,25 @@ function buildFingerprint(entry: { size: number; lastModified?: string; etag?: s
 
 // Remove albums/artists that no longer have any songs
 export function cleanupOrphans() {
-  const allAlbums = db.select().from(albums).all();
-  const deadAlbums: string[] = [];
-  for (const a of allAlbums) {
-    const count = db.select().from(songs).where(eq(songs.albumId, a.id)).all().length;
-    if (count === 0) deadAlbums.push(a.id);
-  }
+  // Albums with no songs (single NOT EXISTS pass instead of one count query per album)
+  const deadAlbums = sqlite.prepare(
+    "SELECT id FROM albums a WHERE NOT EXISTS (SELECT 1 FROM songs s WHERE s.album_id = a.id)"
+  ).all() as { id: string }[];
   if (deadAlbums.length > 0) {
-    db.delete(albumArtists).where(inArray(albumArtists.albumId, deadAlbums)).run();
-    db.delete(albums).where(inArray(albums.id, deadAlbums)).run();
+    const ids = deadAlbums.map(a => a.id);
+    db.delete(albumArtists).where(inArray(albumArtists.albumId, ids)).run();
+    db.delete(albums).where(inArray(albums.id, ids)).run();
   }
-  const allArtists = db.select().from(artists).all();
-  const deadArtists: string[] = [];
-  for (const a of allArtists) {
-    const count = db.select().from(albums).where(eq(albums.artistId, a.id)).all().length;
-    if (count === 0) deadArtists.push(a.id);
-  }
+  // Artists with no albums (excluding the empty-name placeholder used by online songs)
+  const deadArtists = sqlite.prepare(
+    "SELECT id FROM artists a WHERE NOT EXISTS (SELECT 1 FROM albums al WHERE al.artist_id = a.id)"
+  ).all() as { id: string }[];
   if (deadArtists.length > 0) {
+    const ids = deadArtists.map(a => a.id);
     // Songs may still reference the artist (artists are shared across sources) — clear those refs first
-    db.update(songs).set({ artistId: null }).where(inArray(songs.artistId, deadArtists)).run();
-    db.delete(albumArtists).where(inArray(albumArtists.artistId, deadArtists)).run();
-    db.delete(artists).where(inArray(artists.id, deadArtists)).run();
+    db.update(songs).set({ artistId: null }).where(inArray(songs.artistId, ids)).run();
+    db.delete(albumArtists).where(inArray(albumArtists.artistId, ids)).run();
+    db.delete(artists).where(inArray(artists.id, ids)).run();
   }
 }
 
@@ -544,6 +542,11 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
 
   let added = 0, updated = 0, skipped = 0;
   const seenPaths = new Set<string>();
+  // Incremental mode: load existing l:<sourceId>:* paths once, then check in memory
+  // instead of running one SELECT per file.
+  const existingByPath = mode === "incremental"
+    ? new Map((sqlite.prepare("SELECT path, fingerprint, size, id FROM songs WHERE path LIKE ?").all(`l:${sourceId}:%`) as any[]).map(s => [s.path, s]))
+    : new Map<string, any>();
   for (let i = 0; i < allFiles.length; i++) {
     if (signal?.aborted) break;
     const filePath = allFiles[i];
@@ -555,7 +558,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
       const fp = `${stat.size}|${stat.mtimeMs}`;
       // Incremental: skip if unchanged
       if (mode === "incremental") {
-        const existing = db.select().from(songs).where(eq(songs.path, songKey)).get();
+        const existing = existingByPath.get(songKey);
         if (existing) {
           const matches = existing.fingerprint ? existing.fingerprint === fp : (existing.size || 0) === stat.size;
           if (matches) { skipped++; continue; }
@@ -581,11 +584,13 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
     if (onProgress) onProgress({ ...progress });
     return { added, updated, removed: 0, skipped, aborted: true };
   }
-  const existingSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`l:${sourceId}:`));
+  // Fetch only this source's songs via LIKE (instead of loading the whole library)
+  const existingSongs = sqlite.prepare("SELECT id, path FROM songs WHERE path LIKE ?").all(`l:${sourceId}:%`) as { id: string; path: string }[];
   let removed = 0;
+  const deleteStmt = sqlite.prepare("DELETE FROM songs WHERE id = ?");
   for (const s of existingSongs) {
     if (!seenPaths.has(s.path)) {
-      db.delete(songs).where(eq(songs.id, s.id)).run();
+      deleteStmt.run(s.id);
       removed++;
     }
   }
