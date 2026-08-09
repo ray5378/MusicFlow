@@ -1731,8 +1731,9 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       const evt = getEventManager().getEventState(deviceId);
       if (evt) {
         if (evt.state) status.state = evt.state;
-        if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
-        if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
+        // NOTE: position/duration 一律用 SOAP 实时值(status 已含)。GENA 事件在播放中
+        // 不会持续上报 RelTime,evt.position 会停在上次 seek/切歌的旧值;用它覆盖 SOAP 的真实
+        // 递增 position 会把前端进度每轮询周期打回旧值,表现为进度不前进。故此处不覆盖 position/duration。
         if (typeof evt.volume === "number") status.volume = evt.volume;
         if (typeof evt.muted === "boolean") status.muted = evt.muted;
         // 事件驱动下 position 是 GENA 推送时的采样,updatedAt(EventState)比 SOAP 轮询时刻更贴近。
@@ -1747,8 +1748,9 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       const evt = getEventManager().getEventState(getGroupLeaderDeviceId(parsed.id) || "");
       if (evt) {
         if (evt.state) status.state = evt.state;
-        if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
-        if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
+        // NOTE: position/duration 一律用 SOAP 实时值(status 已含)。GENA 事件在播放中
+        // 不会持续上报 RelTime,evt.position 会停在上次 seek/切歌的旧值;用它覆盖 SOAP 的真实
+        // 递增 position 会把前端进度每轮询周期打回旧值,表现为进度不前进。故此处不覆盖 position/duration。
         if (typeof evt.volume === "number") status.volume = evt.volume;
         if (typeof evt.muted === "boolean") status.muted = evt.muted;
         if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
