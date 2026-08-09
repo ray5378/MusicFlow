@@ -417,6 +417,9 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
     coverArt: opts.coverArt,
   };
   getEventManager().emit("media_changed", opts.deviceId, rt.currentMedia);
+  // 新歌开始即清空位置基线(与上面 songId 检测双保险),确保 position 从 0 起算,
+  // 不会把上一首的进度带进新歌。
+  positionEstimates.delete(opts.deviceId);
 
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
@@ -695,6 +698,12 @@ export interface DeviceStatus {
 const positionEstimates = new Map<string, { pos: number; at: number; dur: number; trackUri?: string }>();
 const POSITION_ESTIMATE_MAX_AGE_MS = 30_000; // 超过此时长不再外推,避免暂停久后跳变
 
+// 记录每台设备"当前已加载曲目"的 songId,用于在不依赖 TrackURI 的情况下检测换歌,
+// 从而重置上面的单调位置基线(某些 DLNA 设备 GetPositionInfo 不回传 TrackURI,
+// 导致下面的 TrackURI 分支永不触发,position 会跨歌累加)。currentMedia 在
+// castToDevice 加载新歌时即更新,对比上一首即可精准重置。
+const positionEstimateSong = new Map<string, string | undefined>();
+
 // Query current transport state + position + volume via SOAP.
 // Returns a default STOPPED status when the device is not in cache (e.g.
 // right after a server restart, before background discovery repopulates it)
@@ -743,6 +752,17 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
       }
     } catch {}
   }
+
+  // ---- 换歌检测:用 currentMedia.songId 兜底重置位置基线 ----
+  // 比 TrackURI 更可靠——部分设备 GetPositionInfo 不回传 TrackURI,导致下面的
+  // TrackURI 分支永不触发,position 会跨歌累加。currentMedia 在 castToDevice
+  // 加载新歌时即更新,这里对比上一首即可精准重置(详见 positionEstimateSong)。
+  const curSong = getCurrentMedia(deviceId)?.songId;
+  const lastSong = positionEstimateSong.get(deviceId);
+  if (curSong && lastSong && curSong !== lastSong) {
+    positionEstimates.delete(deviceId);
+  }
+  positionEstimateSong.set(deviceId, curSong);
 
   // ---- 单调位置估计(修 DLNA 进度不前进) ----
   // 切歌(TrackURI 变化)则重置基线,避免用上一首的进度外推。
