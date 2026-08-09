@@ -77,12 +77,35 @@ docker run -d --name musicflow --restart unless-stopped \
 
 ## Home Assistant 接入
 
-MusicFlow 提供两个配套仓库,可以把播放能力接进 HA:
+MusicFlow 提供两个配套仓库,构成完整的 Home Assistant 生态:
 
-| 仓库 | 作用 |
-|---|---|
-| [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项,把 MusicFlow 服务端跑在 Supervisor 下(数据落在 `/share/musicflow`) |
-| [hass-musicflow](https://github.com/ray5378/hass-musicflow) | HA 自定义集成(HACS),把 DLNA 设备与播放组变成 `media_player` 实体 |
+| 仓库 | 类型 | 作用 |
+|---|---|---|
+| [hass-musicflow](https://github.com/ray5378/hass-musicflow) | HACS 自定义集成 | 把 DLNA 设备与播放组变成 `media_player` 实体,并接入 HA 全局「媒体」标签页 |
+| [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项 | 把 MusicFlow 服务端直接跑在 Supervisor 下(数据落在 `/share/musicflow`) |
+
+### HACS 集成(推荐)
+
+[hass-musicflow](https://github.com/ray5378/hass-musicflow) 是官方维护的 HACS 自定义集成,安装后:
+
+1. **HACS → 集成 → 右上角「⋮」→ 自定义仓库**,仓库地址填 `https://github.com/ray5378/hass-musicflow`,类别选 **集成**;
+2. 在 HACS 里搜索并安装 **MusicFlow**,安装完重启 HA;
+3. **设置 → 设备与服务 → 添加集成 → MusicFlow**,填服务器地址与 API Key(见下方「鉴权」),即可自动发现。
+
+接入后,你能在 Home Assistant 里获得:
+
+- **曲库浏览**:歌单 / 专辑 / 艺术家 / 流派,支持搜索;
+- **完整传输控制**:播放 / 暂停 / 停止 / 上一首 / 下一首 / 拖动进度 / 播放模式(顺序·单曲·循环·随机);
+- **双向实时同步**:在 HA 或设备侧调音量、切歌、播放/暂停,另一侧即时反映,无需手动刷新;
+- **音量 · 静音 · 输出设备切换**(SELECT_SOURCE)· **软开关机**(TURN_ON/OFF);
+- **多房间分组**(GROUPING):把多台 DLNA 设备编为一组同步播放,单设备入组后控制自动转发到组;
+- **全局「媒体」标签页**:MusicFlow 曲库出现在 HA 的「媒体」里,任何播放器(Chromecast / Sonos / 其他 DLNA)都能直接播放,不止 MusicFlow 自己的实体;
+- **TTS 播报**(MEDIA_ANNOUNCE):播报外部语音后自动回到原曲原进度;
+- **封面代理**:即使 HA 与 MusicFlow 不在同一网段,也能正常显示专辑封面。
+
+> 集成版本请保持与主服务配套:服务端升级后,在 HACS 里同步更新集成(当前集成最新 `v1.2.0`,对应服务端 `v1.1.7`)。
+
+### 通信链路
 
 集成通过下面三条链路与本服务通信,不需要额外端口:
 
@@ -91,7 +114,8 @@ MusicFlow 提供两个配套仓库,可以把播放能力接进 HA:
 - `WS /ws` —— 播放状态实时推送
 
 服务端会通过 mDNS 广播 `_musicflow._tcp.local.`,HA 侧可自动发现,无需手填地址。
-在 HA 里可以浏览歌单/专辑/艺术家/流派,并对每个 DLNA 设备或播放组做完整的传输控制。
+
+### 鉴权
 
 集成使用 API Key 鉴权(登录 Token 24h 过期,不适合常驻客户端)。
 在 **设置 → API Key** 生成后填入 HA 即可,可随时重新生成或撤销。
