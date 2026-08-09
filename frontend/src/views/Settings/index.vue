@@ -64,7 +64,7 @@
       </div>
       <div class="setting-item">
         <div class="setting-label"><div class="title">关于 MusicFlow</div><div class="desc">自托管音乐库播放器 · 飞牛风格重构版</div></div>
-        <div class="setting-value"><span class="version">v1.0</span></div>
+        <div class="setting-value"><span class="version">{{ serverVersion }}</span></div>
       </div>
     </el-card>
 
@@ -89,6 +89,19 @@ const authStore = useAuthStore();
 
 const showNameDialog = ref(false);
 const newName = ref("");
+
+// ---------- 服务端版本 ----------
+// 来自镜像构建时注入的 APP_VERSION，用于确认当前跑的到底是哪个构建。
+const serverVersion = ref("—");
+async function loadVersion() {
+  try {
+    const res = await api.get("/ping");
+    const v = res.data?.version;
+    serverVersion.value = v ? (v === "dev" ? "dev" : `v${v}`) : "未知";
+  } catch {
+    serverVersion.value = "未知";
+  }
+}
 
 // ---------- API Key ----------
 const apiKey = ref("");
@@ -159,7 +172,7 @@ async function copyApiKey() {
   }
 }
 
-onMounted(loadApiKey);
+onMounted(() => { loadApiKey(); loadVersion(); });
 const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 function toggleMotion(v: string | number | boolean) {

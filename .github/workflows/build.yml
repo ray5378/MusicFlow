@@ -44,11 +44,14 @@ jobs:
           GHCR=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           DH=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           TAGS="$GHCR:latest,$DH:latest"
+          VERSION="main-$(echo "$GITHUB_SHA" | cut -c1-7)"
           if [ "${{ github.ref_type }}" = "tag" ]; then
             V=${GITHUB_REF#refs/tags/v}
             TAGS="$TAGS,$GHCR:$V,$DH:$V"
+            VERSION="$V"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -58,5 +61,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

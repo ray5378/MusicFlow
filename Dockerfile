@@ -28,10 +28,14 @@ RUN npm run build && npm cache clean --force
 
 # ---------- stage 3: runtime ----------
 FROM node:22-alpine AS runtime
+# Injected by CI from the git tag; surfaces in /ping and the settings page so
+# users can tell which build they are actually running.
+ARG APP_VERSION=dev
 ENV NODE_ENV=production \
     PORT=46400 \
     TZ=Asia/Shanghai \
-    UV_USE_IO_URING=0
+    UV_USE_IO_URING=0 \
+    APP_VERSION=${APP_VERSION}
 WORKDIR /app/backend
 RUN apk add --no-cache su-exec \
  && addgroup -S musicflow && adduser -S musicflow -G musicflow

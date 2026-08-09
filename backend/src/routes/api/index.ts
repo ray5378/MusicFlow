@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc, isNotNull, count } from "drizzle-orm";
@@ -143,6 +144,50 @@ apiRoutes.delete("/v1/users/me/api-key", (c) => {
   db.update(users)
     .set({ apiKey: null, apiKeyExpiresAt: null, updatedAt: new Date().toISOString() })
     .where(eq(users.id, user!.id))
+    .run();
+  return c.json({ success: true });
+});
+
+// Per-user variants, used by the admin user list so an admin can issue a key for
+// a dedicated service account (e.g. a "homeassistant" user) without logging in
+// as them. Declared after the /me routes so "me" is not captured by :id.
+// Self-service is allowed too, mirroring the password/username endpoints.
+function assertKeyAccess(c: Context, id: string) {
+  const user = c.get("user");
+  return id === user?.id || user?.isAdmin;
+}
+
+apiRoutes.get("/v1/users/:id/api-key", (c) => {
+  const id = c.req.param("id")!;
+  if (!assertKeyAccess(c, id)) return c.json({ error: "无权查看该用户的 API Key" }, 403);
+  const row = db.select().from(users).where(eq(users.id, id)).get();
+  if (!row) return c.json({ error: "用户不存在" }, 404);
+  return c.json({ apiKey: row.apiKey || null, expiresAt: row.apiKeyExpiresAt || null });
+});
+
+// body: { expiresInDays?: number }  — omit or 0 for a key that never expires
+apiRoutes.post("/v1/users/:id/api-key", async (c) => {
+  const id = c.req.param("id")!;
+  if (!assertKeyAccess(c, id)) return c.json({ error: "无权签发该用户的 API Key" }, 403);
+  const row = db.select().from(users).where(eq(users.id, id)).get();
+  if (!row) return c.json({ error: "用户不存在" }, 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const days = Number(body?.expiresInDays) || 0;
+  const apiKey = `mf_${randomBytes(24).toString("base64url")}`;
+  const expiresAt = days > 0 ? new Date(Date.now() + days * 86400_000).toISOString() : null;
+  db.update(users)
+    .set({ apiKey, apiKeyExpiresAt: expiresAt, updatedAt: new Date().toISOString() })
+    .where(eq(users.id, id))
+    .run();
+  return c.json({ apiKey, expiresAt });
+});
+
+apiRoutes.delete("/v1/users/:id/api-key", (c) => {
+  const id = c.req.param("id")!;
+  if (!assertKeyAccess(c, id)) return c.json({ error: "无权撤销该用户的 API Key" }, 403);
+  db.update(users)
+    .set({ apiKey: null, apiKeyExpiresAt: null, updatedAt: new Date().toISOString() })
+    .where(eq(users.id, id))
     .run();
   return c.json({ success: true });
 });

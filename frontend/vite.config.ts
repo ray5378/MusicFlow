@@ -39,6 +39,10 @@ export default defineConfig({
         target: "http://127.0.0.1:46400",
         changeOrigin: true,
       },
+      "/ping": {
+        target: "http://127.0.0.1:46400",
+        changeOrigin: true,
+      },
     },
   },
 });
