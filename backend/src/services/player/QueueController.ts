@@ -6,7 +6,7 @@
 import { EventEmitter } from "events";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { deviceQueues, groupQueues, songs } from "../../db/schema.js";
+import { albums, deviceQueues, groupQueues, songs } from "../../db/schema.js";
 import { PlayMode, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
@@ -300,14 +300,24 @@ export class QueueController extends EventEmitter {
     try {
       const s = db.select().from(songs).where(eq(songs.id, item.songId)).get();
       if (!s) return item;
+      // 专辑艺术家/年份在 albums 表。单曲解析,一次点查即可。
+      const al = s.albumId ? db.select().from(albums).where(eq(albums.id, s.albumId)).get() : undefined;
       return {
         songId: item.songId,
         title: item.title || s.title || "未知",
         artist: item.artist ?? s.artist ?? undefined,
         album: item.album ?? s.album ?? undefined,
+        albumId: item.albumId ?? s.albumId ?? undefined,
         mime: item.mime || suffixToMime(s.suffix || ""),
         coverArt: item.coverArt ?? s.coverArt ?? undefined,
         duration: typeof item.duration === "number" ? item.duration : typeof s.duration === "number" ? s.duration : undefined,
+        // 0 / 空串在库里代表"未知",归一成 undefined —— 否则 HA 会老老实实
+        // 显示出「第 0 轨」「0 年」。
+        track: item.track ?? (s.track || undefined),
+        discNumber: item.discNumber ?? (s.discNumber || undefined),
+        albumArtist: item.albumArtist ?? (al?.artist || s.artist || undefined),
+        year: item.year ?? (al?.year || undefined),
+        genre: item.genre ?? (s.genre || al?.genre || undefined),
       };
     } catch {
       return item;

@@ -425,6 +425,56 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   return { mediaUri: streamUrl };
 }
 
+/** 在设备上直接播放任意外部 URL(不经过 cast session / 曲库)。
+ *
+ *  castToDevice 强绑 songId —— 它要先 createCastSession 换一个本地流地址。
+ *  播报(TTS)放的是 HA 生成的外链,库里没有对应歌曲,所以单开这条路径。
+ *  刻意不写 runtimeOf().currentMedia:播报是瞬时插播,不该污染"正在播放"的
+ *  曲目信息,否则播报期间 HA/前端会把 TTS 显示成当前歌曲。 */
+export async function playUriOnDevice(
+  deviceId: string,
+  uri: string,
+  opts: { title?: string; mime?: string } = {},
+): Promise<void> {
+  const device = getDevice(deviceId);
+  if (!device?.avTransportUrl) throw new Error("设备未找到或不可用");
+  const metadata = buildDidlLite({
+    title: opts.title || "Announcement",
+    uri,
+    mime: opts.mime || "audio/mpeg",
+  });
+  try { await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" }); } catch {}
+  await soapCall(device.avTransportUrl, AV_TRANSPORT, "SetAVTransportURI", {
+    InstanceID: "0",
+    CurrentURI: uri,
+    CurrentURIMetaData: metadata,
+  });
+  await waitForCanPlay(device);
+  await soapCall(device.avTransportUrl, AV_TRANSPORT, "Play", { InstanceID: "0", Speed: "1" });
+  markOk(deviceId);
+}
+
+/** 轮询设备传输状态,直到不再处于 PLAYING/TRANSITIONING(即播完)或超时。
+ *  播报时长未知(TTS 长度取决于文本),所以只能轮询收敛。 */
+export async function waitUntilStopped(deviceId: string, budgetMs = 300000): Promise<void> {
+  const device = getDevice(deviceId);
+  if (!device?.avTransportUrl) return;
+  const deadline = Date.now() + budgetMs;
+  // 起播本身要时间,先给 1.5s 缓冲再开始判定,否则会立刻读到尚未变成 PLAYING
+  // 的旧状态,误判成"已经播完"。
+  await new Promise(r => setTimeout(r, 1500));
+  while (Date.now() < deadline) {
+    try {
+      const xml = await soapCall(device.avTransportUrl, AV_TRANSPORT, "GetTransportInfo", { InstanceID: "0" });
+      const st = xml.match(/<CurrentTransportState>([^<]*)<\/CurrentTransportState>/i)?.[1].trim();
+      if (st && st !== "PLAYING" && st !== "TRANSITIONING") return;
+    } catch {
+      return; // 设备失联,别把调用方永远吊着
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
 /** Read the media currently loaded on a device (set by castToDevice). */
 export function getCurrentMedia(deviceId: string): CurrentMedia | undefined {
   return runtimes.get(deviceId)?.currentMedia;
@@ -610,11 +660,28 @@ export async function setDeviceVolume(deviceId: string, volume: number): Promise
   } catch (e: any) { markFailed(deviceId, "SetVolume", e); throw e; }
 }
 
+/** 静音开关(RenderingControl SetMute)。与音量相互独立:静音不改变 Volume 值,
+ *  取消静音后设备恢复原音量,所以不能用 "音量设 0" 来冒充静音。 */
+export async function setDeviceMute(deviceId: string, muted: boolean): Promise<void> {
+  const device = getDevice(deviceId);
+  if (!device?.renderingControlUrl) throw new Error("设备不支持静音控制");
+  try {
+    await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetMute", {
+      InstanceID: "0",
+      Channel: "Master",
+      DesiredMute: muted ? "1" : "0",
+    });
+    markOk(deviceId);
+    getEventManager().setMuted(deviceId, muted);
+  } catch (e: any) { markFailed(deviceId, "SetMute", e); throw e; }
+}
+
 export interface DeviceStatus {
   state: string;      // PLAYING / PAUSED_PLAYBACK / STOPPED / TRANSITIONING / NO_MEDIA_PRESENT
   position: number;   // seconds
   duration: number;   // seconds
   volume: number;     // 0-100
+  muted: boolean;     // RenderingControl Mute
   media?: CurrentMedia; // currently loaded track (set by castToDevice)
   trackUri?: string;   // 当前 TrackURI(来自 GetPositionInfo),供 poll 路径 track_changed 检测
 }
@@ -626,8 +693,8 @@ export interface DeviceStatus {
 // would spam the logs and break the cast UI.
 export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const device = getDevice(deviceId);
-  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, media: getCurrentMedia(deviceId) };
-  const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, media: getCurrentMedia(deviceId) };
+  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId) };
+  const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId) };
 
   // GetTransportInfo — state.
   try {
@@ -654,6 +721,16 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
       const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetVolume", { InstanceID: "0", Channel: "Master" });
       const vm = xml.match(/<CurrentVolume>([^<]*)<\/CurrentVolume>/i);
       if (vm) state.volume = parseInt(vm[1].trim(), 10) || 0;
+    } catch {}
+    // GetMute —— 单独一次调用。部分设备实现了 GetVolume 却没实现 GetMute,
+    // 所以独立 try,失败只当作"未静音",不影响音量读数。
+    try {
+      const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetMute", { InstanceID: "0", Channel: "Master" });
+      const mm = xml.match(/<CurrentMute>([^<]*)<\/CurrentMute>/i);
+      if (mm) {
+        const v = mm[1].trim().toLowerCase();
+        state.muted = v === "1" || v === "true" || v === "yes";
+      }
     } catch {}
   }
   return state;

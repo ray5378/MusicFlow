@@ -85,9 +85,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
 /** 组状态(路由层 /v1/peers/group:<id>/status 用):直接取 leader 的设备状态。
  *  组无在线成员时返回 STOPPED 默认值。 */
 export async function getGroupStatus(groupId: string): Promise<{
-  state: string; position: number; duration: number; volume: number; media?: unknown;
+  state: string; position: number; duration: number; volume: number; muted: boolean; media?: unknown;
 }> {
   const leader = getGroupLeaderDeviceId(groupId);
-  if (!leader) return { state: "STOPPED", position: 0, duration: 0, volume: 0 };
+  if (!leader) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false };
   return getDeviceStatus(leader);
 }

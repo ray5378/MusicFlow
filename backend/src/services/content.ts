@@ -6,8 +6,16 @@ import { suffixToMime } from "./dlna/queue.js";
 // Convert song rows into QueueItem objects (shared by the album/playlist play
 // endpoints and the flow runner).
 export function songsToQueueItems(rows: any[]): any[] {
+  // 专辑艺术家与年份只存在于 albums 表。整批一次 IN 查询取回,不要在 map 里
+  // 逐行查——播放整张专辑/大歌单时那就是几百次 N+1。
+  const albumIds = Array.from(new Set(rows.map(s => s.albumId).filter(Boolean))) as string[];
+  const albumMap = albumIds.length
+    ? new Map(db.select().from(albums).where(inArray(albums.id, albumIds)).all().map(a => [a.id, a]))
+    : new Map<string, any>();
+
   return rows.map((s) => {
     const coverArt = s.coverArt || (s.albumId ? `al-${s.albumId}` : undefined);
+    const al = s.albumId ? albumMap.get(s.albumId) : undefined;
     return {
       songId: s.id,
       title: s.title || "未知",
@@ -17,6 +25,13 @@ export function songsToQueueItems(rows: any[]): any[] {
       mime: suffixToMime(s.suffix || ""),
       coverArt,
       duration: typeof s.duration === "number" ? s.duration : undefined,
+      // 扩展元数据。0 / 空串在库里表示"未知",统一归一成 undefined,免得
+      // 客户端把「第 0 轨」「0 年」当成真实值显示出来。
+      track: s.track || undefined,
+      discNumber: s.discNumber || undefined,
+      albumArtist: al?.artist || s.artist || undefined,
+      year: al?.year || undefined,
+      genre: s.genre || al?.genre || undefined,
     };
   });
 }

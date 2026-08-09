@@ -45,7 +45,14 @@ export interface DeviceEventState {
   position?: number;
   duration?: number;
   volume?: number;
+  muted?: boolean;      // RenderingControl Mute(设备侧静音,与 volume 相互独立)
   updatedAt: number;
+}
+
+/** UPnP 布尔量解析。标准写 "0"/"1",实测也有设备写 "false"/"true"(甚至带大小写)。 */
+function parseUpnpBool(raw: string): boolean {
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 interface Subscription {
@@ -159,6 +166,16 @@ class EventManager extends EventEmitter {
           volMatch = inner.match(/<Volume\b[^>]*?(?:val|value)="(\d+)"/i);
         }
         if (volMatch) st.volume = parseInt(volMatch[1], 10) || 0;
+
+        // Mute —— 与 Volume 完全同构的解析(同样的 val/value、同样的 channel 顺序问题)。
+        // 取值设备间不统一:标准是 "0"/"1",但也见过 "false"/"true"。
+        let muteMatch =
+          inner.match(/<Mute\b[^>]*?\bchannel="Master"[^>]*?(?:val|value)="([^"]*)"/i) ||
+          inner.match(/<Mute\b[^>]*?(?:val|value)="([^"]*)"[^>]*?\bchannel="Master"/i);
+        if (!muteMatch) {
+          muteMatch = inner.match(/<Mute\b[^>]*?(?:val|value)="([^"]*)"/i);
+        }
+        if (muteMatch) st.muted = parseUpnpBool(muteMatch[1]);
       }
       this.states.set(deviceId, st);
       const prevState = prev.state;
@@ -305,6 +322,14 @@ class EventManager extends EventEmitter {
   setTransportState(deviceId: string, state: string): void {
     const prev = this.states.get(deviceId) || { updatedAt: 0 };
     const st: DeviceEventState = { ...prev, state, updatedAt: Date.now() };
+    this.states.set(deviceId, st);
+    this.emit("state_changed", deviceId, st);
+  }
+
+  /** 后端主动设静音后,立刻更新缓存并推 WS(与 setVolume 同机制)。 */
+  setMuted(deviceId: string, muted: boolean): void {
+    const prev = this.states.get(deviceId) || { updatedAt: 0 };
+    const st: DeviceEventState = { ...prev, muted, updatedAt: Date.now() };
     this.states.set(deviceId, st);
     this.emit("state_changed", deviceId, st);
   }

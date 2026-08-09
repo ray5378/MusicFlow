@@ -22,9 +22,10 @@ import { isDailyRecommendPlaylist } from "../../services/source/online/recommend
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
-  playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, getDeviceStatus,
+  playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, setDeviceMute, getDeviceStatus,
   enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isPrivateLanHostname,
 } from "../../services/dlna/control.js";
+import { announceOnPeer, isAnnouncing } from "../../services/dlna/announce.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
@@ -1245,6 +1246,13 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/volume", async (c) => {
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 
+apiRoutes.post("/v1/dlna/devices/:deviceId/mute", async (c) => {
+  const { muted } = await c.req.json().catch(() => ({}));
+  if (typeof muted !== "boolean") return c.json({ error: "需要 muted(boolean)" }, 400);
+  try { await setDeviceMute(c.req.param("deviceId"), muted); return c.json({ success: true }); }
+  catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
 // Query device status (state / position / duration / volume).
 // Merges the freshest GENA event state (if any) with a live SOAP snapshot so
 // the frontend gets low-latency updates from event push + a periodic SOAP
@@ -1261,6 +1269,7 @@ apiRoutes.get("/v1/dlna/devices/:deviceId/status", async (c) => {
       if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
       if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
       if (typeof evt.volume === "number") status.volume = evt.volume;
+      if (typeof evt.muted === "boolean") status.muted = evt.muted;
     }
     return c.json(status);
   } catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -1629,6 +1638,62 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
   return c.json({ success: true });
 });
 
+// 播报(TTS)。Body: { url: string, volume?: number, blocking?: boolean }
+// 打断当前播放放一段外链音频,播完自动回到原曲原进度(详见 dlna/announce.ts)。
+// 默认非阻塞:立刻 202 返回,播报在后台跑完 —— HA 的 play_media 调用不该被一段
+// 30 秒的语音卡在那里。blocking=true 时才等播报全程结束再响应。
+apiRoutes.post("/v1/peers/:peerId/announce", async (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  const url = typeof body.url === "string" ? body.url : "";
+  if (!url) return c.json({ error: "需要 url" }, 400);
+  const volume = typeof body.volume === "number" ? body.volume : undefined;
+
+  if (body.blocking === true) {
+    try {
+      const r = await announceOnPeer({ peerId, url, volume });
+      return c.json({ success: true, ...r });
+    } catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (isAnnouncing(peerId)) return c.json({ error: "该播放器正在播报中" }, 409);
+  announceOnPeer({ peerId, url, volume }).catch((e: any) => {
+    console.warn(`[announce] ${peerId}: ${e?.message || e}`);
+  });
+  return c.json({ success: true, accepted: true }, 202);
+});
+
+// 静音开关。Body: { muted: boolean }
+// 与音量是两条独立的 RenderingControl 状态量:静音不动 Volume,取消静音后设备
+// 自己恢复原音量。因此不能用"音量设 0 / 存旧值再还原"来模拟——那样设备侧物理
+// 调音量时会把我们存的旧值弄脏。
+apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  const { muted } = await c.req.json().catch(() => ({} as any));
+  if (typeof muted !== "boolean") return c.json({ error: "需要 muted(boolean)" }, 400);
+  if (parsed.kind === "dlna") {
+    try { await setDeviceMute(parsed.id, muted); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "group") {
+    // 组没有自己的渲染器,静音要逐台成员下发。个别成员不支持静音时不应连累
+    // 其余设备,所以全部并发执行后再汇总——只有全员失败才算失败。
+    const members = gm.get(parsed.id)?.memberIds || [];
+    if (members.length === 0) return c.json({ error: "组内无成员" }, 400);
+    const results = await Promise.allSettled(members.map(d => setDeviceMute(d, muted)));
+    const ok = results.filter(r => r.status === "fulfilled").length;
+    if (ok === 0) {
+      const reason = results[0].status === "rejected" ? (results[0] as PromiseRejectedResult).reason : null;
+      return c.json({ error: reason?.message || "组内设备均不支持静音" }, 500);
+    }
+    return c.json({ success: true, applied: ok, total: members.length });
+  }
+  return c.json({ success: true });
+});
+
 // Peer status: for dlna returns the device transport state; for groups the
 // leader's state (MA 同款:组状态从 leader 派生);for local returns the stored
 // queue metadata (HA uses this to read the local peer's queue).
@@ -1653,6 +1718,7 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
         if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
         if (typeof evt.volume === "number") status.volume = evt.volume;
+        if (typeof evt.muted === "boolean") status.muted = evt.muted;
       }
       return c.json(status);
     } catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -1666,6 +1732,7 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.position === "number" && evt.position > 0) status.position = evt.position;
         if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
         if (typeof evt.volume === "number") status.volume = evt.volume;
+        if (typeof evt.muted === "boolean") status.muted = evt.muted;
       }
       return c.json(status);
     } catch (e: any) { return c.json({ error: e.message }, 500); }

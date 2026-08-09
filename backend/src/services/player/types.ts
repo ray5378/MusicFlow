@@ -49,6 +49,14 @@ export interface QueueItem {
   mime: string;
   coverArt?: string;
   duration?: number;
+  // 以下为展示用扩展元数据(HA 的 media_track / media_album_artist 等需要)。
+  // 全部可选:只带 songId 的精简队列项(HA 点播 / flow / 持久化恢复)会在 cast 前
+  // 由 QueueController.resolveItem 补齐。
+  track?: number;        // 曲目号
+  discNumber?: number;   // 碟号
+  albumArtist?: string;  // 专辑艺术家(取自 albums 表,缺失时退化为 artist)
+  year?: number;         // 发行年份(取自 albums 表)
+  genre?: string;        // 流派
 }
 
 /** 协议端点接口:DLNA / 未来 Cast 都实现这个。对照 MA 协议 player 契约。 */

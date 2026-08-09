@@ -76,7 +76,10 @@ export async function authMiddleware(c: Context, next: Next) {
     if (user) { c.set("user", user); return next(); }
   }
 
-  // JWT token via query param (for audio streaming)
+  // token via query param (for audio streaming). Accepts a JWT first, then falls
+  // back to a long-lived API key — same order as the Bearer header branch above,
+  // and the same contract the WebSocket upgrade already uses (?token=<apiKey|jwt>).
+  // Needed because播放器/HA media_source 只能把凭据带在 URL 里(不能加请求头)。
   const tokenParam = getParam("token");
   if (tokenParam) {
     try {
@@ -84,6 +87,8 @@ export async function authMiddleware(c: Context, next: Next) {
       const user = await getUserById(payload.uid || payload.sub);
       if (user) { c.set("user", user); return next(); }
     } catch {}
+    const user = await authenticateApiKey(tokenParam);
+    if (user) { c.set("user", user); return next(); }
   }
 
   return c.json({ "subsonic-response": { status: "failed", error: { code: 40, message: "Unauthorized" }, version: "1.16.1", type: "MusicFree" } }, 401);
