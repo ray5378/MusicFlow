@@ -22,6 +22,32 @@
 
     <el-card class="mt-card">
       <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">API Key</div>
+          <div class="desc">
+            供 Home Assistant 集成等第三方客户端长期使用。登录 Token 24 小时过期，常驻客户端请用这里的 Key。
+            <span v-if="apiKeyExpiresAt" class="expire">（到期：{{ apiKeyExpiresAt.slice(0, 10) }}）</span>
+          </div>
+          <div v-if="apiKey" class="apikey-box">
+            <el-input v-model="apiKey" readonly size="small" :type="apiKeyVisible ? 'text' : 'password'">
+              <template #append>
+                <el-button @click="apiKeyVisible = !apiKeyVisible">{{ apiKeyVisible ? '隐藏' : '显示' }}</el-button>
+                <el-button @click="copyApiKey">复制</el-button>
+              </template>
+            </el-input>
+          </div>
+        </div>
+        <div class="setting-value apikey-actions">
+          <el-button type="primary" plain :loading="apiKeyLoading" @click="generateApiKey">
+            {{ apiKey ? '重新生成' : '生成' }}
+          </el-button>
+          <el-button v-if="apiKey" type="danger" plain :loading="apiKeyLoading" @click="revokeApiKey">撤销</el-button>
+        </div>
+      </div>
+    </el-card>
+
+    <el-card class="mt-card">
+      <div class="setting-item">
         <div class="setting-label"><div class="title">主题风格</div><div class="desc">当前使用飞牛音乐暗色玻璃主题</div></div>
         <div class="setting-value"><el-tag size="small" type="info">FnOS Dark</el-tag></div>
       </div>
@@ -55,14 +81,85 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ref, onMounted } from "vue";
+import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 const authStore = useAuthStore();
 
 const showNameDialog = ref(false);
 const newName = ref("");
+
+// ---------- API Key ----------
+const apiKey = ref("");
+const apiKeyExpiresAt = ref<string | null>(null);
+const apiKeyVisible = ref(false);
+const apiKeyLoading = ref(false);
+
+async function loadApiKey() {
+  try {
+    const res = await api.get("/rest/api/v1/users/me/api-key");
+    apiKey.value = res.data.apiKey || "";
+    apiKeyExpiresAt.value = res.data.expiresAt || null;
+  } catch { /* 静默：不影响页面其他部分 */ }
+}
+
+async function generateApiKey() {
+  if (apiKey.value) {
+    try {
+      await ElMessageBox.confirm(
+        "重新生成会立即让旧 Key 失效，所有使用旧 Key 的客户端（如 Home Assistant）都需要重新填写。",
+        "重新生成 API Key",
+        { type: "warning", confirmButtonText: "确认生成", cancelButtonText: "取消" },
+      );
+    } catch { return; }
+  }
+  apiKeyLoading.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/users/me/api-key", {});
+    apiKey.value = res.data.apiKey;
+    apiKeyExpiresAt.value = res.data.expiresAt || null;
+    apiKeyVisible.value = true;
+    ElMessage.success("API Key 已生成");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "生成失败");
+  } finally {
+    apiKeyLoading.value = false;
+  }
+}
+
+async function revokeApiKey() {
+  try {
+    await ElMessageBox.confirm("撤销后使用该 Key 的客户端会立即失去访问权限。", "撤销 API Key", {
+      type: "warning", confirmButtonText: "确认撤销", cancelButtonText: "取消",
+    });
+  } catch { return; }
+  apiKeyLoading.value = true;
+  try {
+    await api.delete("/rest/api/v1/users/me/api-key");
+    apiKey.value = "";
+    apiKeyExpiresAt.value = null;
+    apiKeyVisible.value = false;
+    ElMessage.success("API Key 已撤销");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "撤销失败");
+  } finally {
+    apiKeyLoading.value = false;
+  }
+}
+
+async function copyApiKey() {
+  try {
+    await navigator.clipboard.writeText(apiKey.value);
+    ElMessage.success("已复制到剪贴板");
+  } catch {
+    // 非 HTTPS 下 clipboard API 不可用,退回手动选中
+    apiKeyVisible.value = true;
+    ElMessage.warning("当前环境不支持自动复制，请手动选中复制");
+  }
+}
+
+onMounted(loadApiKey);
 const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 function toggleMotion(v: string | number | boolean) {
@@ -107,6 +204,9 @@ async function changeUsername() {
   .setting-value { flex-shrink: 0; }
   .version { font-size: 13px; color: var(--fnos-text-tertiary); }
 }
+.setting-label .expire { color: var(--fnos-text-secondary); }
+.apikey-box { margin-top: 10px; max-width: 460px; }
+.apikey-actions { display: flex; gap: 8px; }
 
 @media (max-width: 768px) {
   .settings-page { padding: 20px 16px; }

@@ -3,6 +3,7 @@ import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc, isNotNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
+import { randomBytes } from "node:crypto";
 import md5 from "md5";
 import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
@@ -103,6 +104,47 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
 apiRoutes.get("/v1/users/me", (c) => {
   const user = c.get("user");
   return c.json({ id: user?.id, username: user?.username, isAdmin: user?.isAdmin });
+});
+
+// ==================== API Key (long-lived token for third-party clients) ====================
+// JWT expires in 24h, which is useless for an always-on client like the Home
+// Assistant integration. middleware/auth.ts already accepts users.api_key as a
+// Bearer fallback — this is the missing management surface for it.
+// Stored in plaintext because authenticateApiKey() compares it directly; that
+// also lets the user re-read the key later instead of it being show-once.
+
+apiRoutes.get("/v1/users/me/api-key", (c) => {
+  const user = c.get("user");
+  const row = db.select().from(users).where(eq(users.id, user!.id)).get();
+  return c.json({
+    apiKey: row?.apiKey || null,
+    expiresAt: row?.apiKeyExpiresAt || null,
+  });
+});
+
+// body: { expiresInDays?: number }  — omit or 0 for a key that never expires
+apiRoutes.post("/v1/users/me/api-key", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json().catch(() => ({} as any));
+  const days = Number(body?.expiresInDays) || 0;
+  const apiKey = `mf_${randomBytes(24).toString("base64url")}`;
+  const expiresAt = days > 0
+    ? new Date(Date.now() + days * 86400_000).toISOString()
+    : null;
+  db.update(users)
+    .set({ apiKey, apiKeyExpiresAt: expiresAt, updatedAt: new Date().toISOString() })
+    .where(eq(users.id, user!.id))
+    .run();
+  return c.json({ apiKey, expiresAt });
+});
+
+apiRoutes.delete("/v1/users/me/api-key", (c) => {
+  const user = c.get("user");
+  db.update(users)
+    .set({ apiKey: null, apiKeyExpiresAt: null, updatedAt: new Date().toISOString() })
+    .where(eq(users.id, user!.id))
+    .run();
+  return c.json({ success: true });
 });
 
 // ==================== Sources ====================
