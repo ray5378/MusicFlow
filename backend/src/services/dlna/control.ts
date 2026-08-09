@@ -493,6 +493,8 @@ export async function playDevice(deviceId: string): Promise<void> {
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Play", { InstanceID: "0", Speed: "1" });
     markOk(deviceId);
+    // 立刻把新传输状态写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    getEventManager().setTransportState(deviceId, "PLAYING");
   } catch (e: any) { markFailed(deviceId, "Play", e); throw e; }
 }
 
@@ -502,6 +504,8 @@ export async function pauseDevice(deviceId: string): Promise<void> {
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Pause", { InstanceID: "0" });
     markOk(deviceId);
+    // 立刻把新传输状态写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    getEventManager().setTransportState(deviceId, "PAUSED_PLAYBACK");
   } catch (e: any) { markFailed(deviceId, "Pause", e); throw e; }
 }
 
@@ -513,6 +517,8 @@ export async function stopDevice(deviceId: string): Promise<void> {
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
     markOk(deviceId);
+    // 立刻把新传输状态写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    getEventManager().setTransportState(deviceId, "STOPPED");
   } catch (e: any) { markFailed(deviceId, "Stop", e); throw e; }
 }
 
@@ -527,6 +533,8 @@ export async function seekDevice(deviceId: string, seconds: number): Promise<voi
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Seek", { InstanceID: "0", Unit: "REL_TIME", Target: target });
     markOk(deviceId);
+    // 立刻把新进度写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    getEventManager().setPosition(deviceId, seconds);
   } catch (e: any) { markFailed(deviceId, "Seek", e); throw e; }
 }
 

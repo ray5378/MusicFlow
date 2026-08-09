@@ -127,11 +127,17 @@ class EventManager extends EventEmitter {
       const prev = this.states.get(deviceId) || { updatedAt: 0 };
       const st: DeviceEventState = { ...prev, updatedAt: Date.now() };
       if (svcIdx === "0") {
-        // AVTransport
-        const transportState = inner.match(/<TransportState[^>]*value="([^"]*)"/i)?.[1];
-        const relTime = inner.match(/<RelTime[^>]*value="([^"]*)"/i)?.[1];
-        const trackDur = inner.match(/<TrackDuration[^>]*value="([^"]*)"/i)?.[1];
-        const currentTrack = inner.match(/<CurrentTrackURI[^>]*value="([^"]*)"/i)?.[1];
+        // AVTransport —— 传输状态/进度/曲目。
+        // UPnP 标准里这些标签用 `val="..."`(同 RenderingControl 的音量),
+        // 但部分设备用 `value=`,两种写法都兼容(优先匹配 val=)。
+        const pick = (tag: string): string | undefined => {
+          const m = inner.match(new RegExp(`<${tag}\\b[^>]*?(?:val|value)="([^"]*)"`, "i"));
+          return m?.[1];
+        };
+        const transportState = pick("TransportState");
+        const relTime = pick("RelTime");
+        const trackDur = pick("TrackDuration");
+        const currentTrack = pick("CurrentTrackURI");
         if (transportState) st.state = transportState;
         if (relTime && relTime !== "NOT_IMPLEMENTED") st.position = parseHms(relTime);
         if (trackDur && trackDur !== "NOT_IMPLEMENTED") st.duration = parseHms(trackDur);
@@ -289,6 +295,24 @@ class EventManager extends EventEmitter {
   setVolume(deviceId: string, volume: number): void {
     const prev = this.states.get(deviceId) || { updatedAt: 0 };
     const st: DeviceEventState = { ...prev, volume, updatedAt: Date.now() };
+    this.states.set(deviceId, st);
+    this.emit("state_changed", deviceId, st);
+  }
+
+  /** 后端主动下发传输控制(play/pause/stop/seek,HA→MusicFlow 方向)后,
+   * 立刻更新缓存并推 WS,让集成零延迟同步(与 setVolume 同机制,双向同步)。
+   * state 取值与 GENA/UPnP 一致: PLAYING / PAUSED_PLAYBACK / STOPPED 等。 */
+  setTransportState(deviceId: string, state: string): void {
+    const prev = this.states.get(deviceId) || { updatedAt: 0 };
+    const st: DeviceEventState = { ...prev, state, updatedAt: Date.now() };
+    this.states.set(deviceId, st);
+    this.emit("state_changed", deviceId, st);
+  }
+
+  /** 定位进度即时推送(seek 后)。 */
+  setPosition(deviceId: string, position: number): void {
+    const prev = this.states.get(deviceId) || { updatedAt: 0 };
+    const st: DeviceEventState = { ...prev, position, updatedAt: Date.now() };
     this.states.set(deviceId, st);
     this.emit("state_changed", deviceId, st);
   }
