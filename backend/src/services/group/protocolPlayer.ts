@@ -86,8 +86,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
  *  组无在线成员时返回 STOPPED 默认值。 */
 export async function getGroupStatus(groupId: string): Promise<{
   state: string; position: number; duration: number; volume: number; muted: boolean; media?: unknown;
+  updatedAt: number;
 }> {
   const leader = getGroupLeaderDeviceId(groupId);
-  if (!leader) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false };
+  if (!leader) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, updatedAt: Date.now() };
   return getDeviceStatus(leader);
 }

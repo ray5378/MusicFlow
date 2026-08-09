@@ -684,6 +684,7 @@ export interface DeviceStatus {
   muted: boolean;     // RenderingControl Mute
   media?: CurrentMedia; // currently loaded track (set by castToDevice)
   trackUri?: string;   // 当前 TrackURI(来自 GetPositionInfo),供 poll 路径 track_changed 检测
+  updatedAt: number;  // ms epoch,本次 position 采样的时刻(供 HA 插值对齐)
 }
 
 // Query current transport state + position + volume via SOAP.
@@ -693,8 +694,9 @@ export interface DeviceStatus {
 // would spam the logs and break the cast UI.
 export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const device = getDevice(deviceId);
-  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId) };
-  const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId) };
+  const sampledAt = Date.now();
+  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
+  const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
 
   // GetTransportInfo — state.
   try {

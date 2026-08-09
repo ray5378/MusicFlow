@@ -1735,6 +1735,8 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
         if (typeof evt.volume === "number") status.volume = evt.volume;
         if (typeof evt.muted === "boolean") status.muted = evt.muted;
+        // 事件驱动下 position 是 GENA 推送时的采样,updatedAt(EventState)比 SOAP 轮询时刻更贴近。
+        if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
       }
       return c.json(status);
     } catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -1749,6 +1751,7 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.duration === "number" && evt.duration > 0) status.duration = evt.duration;
         if (typeof evt.volume === "number") status.volume = evt.volume;
         if (typeof evt.muted === "boolean") status.muted = evt.muted;
+        if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
       }
       return c.json(status);
     } catch (e: any) { return c.json({ error: e.message }, 500); }
