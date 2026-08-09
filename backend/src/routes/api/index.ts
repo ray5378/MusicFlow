@@ -1536,11 +1536,19 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
   if (parsed.kind === "dlna") {
-    try { await playDevice(parsed.id); return c.json({ success: true }); }
+    try {
+      getQueueController().resumePlayback(parsed.id);
+      await playDevice(parsed.id);
+      return c.json({ success: true });
+    }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
-    try { await getQueueController().transport(parsed.id, "play"); return c.json({ success: true }); }
+    try {
+      getQueueController().resumePlayback(parsed.id);
+      await getQueueController().transport(parsed.id, "play");
+      return c.json({ success: true });
+    }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   return c.json({ success: true }); // local: no-op
@@ -1566,11 +1574,19 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
   if (parsed.kind === "dlna") {
-    try { await stopDevice(parsed.id); return c.json({ success: true }); }
+    try {
+      getQueueController().stopPlayback(parsed.id);
+      await stopDevice(parsed.id);
+      return c.json({ success: true });
+    }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
-    try { await getQueueController().transport(parsed.id, "stop"); return c.json({ success: true }); }
+    try {
+      getQueueController().stopPlayback(parsed.id);
+      await getQueueController().transport(parsed.id, "stop");
+      return c.json({ success: true });
+    }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   return c.json({ success: true });

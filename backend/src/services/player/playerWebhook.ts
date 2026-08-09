@@ -199,10 +199,12 @@ export async function handlePlayerWebhook(
       if (op === "next") { await qm.next(id, baseUrl); }
       else if (op === "prev") { await qm.prev(id, baseUrl); }
       else if (parsed.kind === "dlna") {
-        if (op === "play") await playDevice(id);
+        if (op === "play") { qc.resumePlayback(id); await playDevice(id); }
         else if (op === "pause") await pauseDevice(id);
-        else if (op === "stop") await stopDevice(id);
+        else if (op === "stop") { qc.stopPlayback(id); await stopDevice(id); }
       } else {
+        if (op === "play") qc.resumePlayback(id);
+        else if (op === "stop") qc.stopPlayback(id);
         await qc.transport(id, op as "play" | "pause" | "stop");
       }
       results.push({ device: peerId, op, ok: true });

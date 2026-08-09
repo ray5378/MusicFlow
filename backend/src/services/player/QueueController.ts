@@ -81,6 +81,7 @@ export class QueueController extends EventEmitter {
 
   /** 对注册播放器下发传输控制(dlna=单设备,group=扇出)。 */
   async transport(playerId: string, op: "play" | "pause" | "stop" | "seek" | "volume", arg?: number): Promise<void> {
+    playerId = stripPlayerPrefix(playerId);
     const player = this.players.get(playerId);
     if (!player) throw new Error(`未注册的播放器: ${playerId}`);
     if (op === "play") await player.resume();
@@ -114,6 +115,7 @@ export class QueueController extends EventEmitter {
 
   /** 重启后恢复:对照原 QueueManager.resumeActive。设备有活跃队列时续播当前首。 */
   async resumeActive(deviceId: string, baseUrl: string): Promise<void> {
+    deviceId = stripPlayerPrefix(deviceId);
     const q = this.queues.get(deviceId);
     if (!q || !q.isActive || q.currentIndex < 0) return;
     if (!this.players.has(deviceId)) return; // 设备未注册(可能离线)
@@ -199,6 +201,7 @@ export class QueueController extends EventEmitter {
    *  IDLE 时,若 lastPlaying 还在,tracker 会误判"曲目结束"而 deactivate 队列(此时成员已在线,
    *  shouldSuppressGroupEnd 拦不住),看门狗将无法续播。清空后单发 IDLE 不触发 ended。 */
   resetGroupTracker(groupId: string): void {
+    groupId = stripPlayerPrefix(groupId);
     this.ctrls.get(groupId)?.resetTracker(`group:${groupId}`);
   }
 
@@ -327,6 +330,7 @@ export class QueueController extends EventEmitter {
   // ==================== 公共 API(供路由调用,保持原 QueueManager 形状)====================
   /** 仅设数据,不触发播放(供测试 + playFrom 复用)。 */
   setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): void {
+    playerId = stripPlayerPrefix(playerId);
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.items = items;
@@ -338,6 +342,7 @@ export class QueueController extends EventEmitter {
   }
 
   async playFrom(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): Promise<void> {
+    playerId = stripPlayerPrefix(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
     // 随机播放模式下首曲也应随机而非固定队首。
     const idx = mode === "shuffle" && items.length > 1 ? Math.floor(Math.random() * items.length) : startIndex;
@@ -349,6 +354,7 @@ export class QueueController extends EventEmitter {
   }
 
   setPlayMode(playerId: string, mode: PlayMode): void {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     q.playMode = mode;
     this.persist(playerId);
@@ -356,20 +362,23 @@ export class QueueController extends EventEmitter {
   }
 
   async next(playerId: string, baseUrl: string): Promise<void> {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     const idx = this.pickNext(q, false);
     if (idx === -1) { this.markEnded(playerId); return; }
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
-    try { q.currentIndex = idx; q.ended = false; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); }
+    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); }
     finally { this.advancing.delete(playerId); }
   }
 
   async prev(playerId: string, baseUrl: string): Promise<void> {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
     try {
+      q.isActive = true; q.ended = false;
       if (q.playMode === "one") { await this.playCurrent(playerId, baseUrl); }
       else if (q.playMode === "shuffle") { q.currentIndex = this.randomIndex(q); await this.playCurrent(playerId, baseUrl); }
       else if (q.currentIndex > 0) { q.currentIndex--; await this.playCurrent(playerId, baseUrl); }
@@ -379,6 +388,7 @@ export class QueueController extends EventEmitter {
   }
 
   clear(playerId: string): void {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     // 清空队列同时停止实际播放(dlna=stopDevice,group=扇出各成员)。
     // 成员设备个人清空不打断归属的进行中群组播放。
@@ -398,6 +408,7 @@ export class QueueController extends EventEmitter {
   }
 
   snapshot(playerId: string): QueueSnapshot {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId);
     return {
       items: q?.items || [],
@@ -411,6 +422,7 @@ export class QueueController extends EventEmitter {
   /** Append items without switching playback. If the queue was empty, start
    *  playing from the first appended item. 对照原 QueueManager.enqueue。 */
   async enqueue(playerId: string, items: QueueItem[], baseUrl: string): Promise<void> {
+    playerId = stripPlayerPrefix(playerId);
     let q = this.queues.get(playerId);
     if (!q) {
       q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false };
@@ -430,6 +442,7 @@ export class QueueController extends EventEmitter {
   /** Remove a single item by index and keep playback coherent. 对照原
    *  QueueManager.removeAt:删的是当前项则续播同 index 的下一首。 */
   removeAt(playerId: string, index: number, baseUrl: string): void {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     if (index < 0 || index >= q.items.length) return;
     q.items.splice(index, 1);
@@ -451,8 +464,40 @@ export class QueueController extends EventEmitter {
 
   /** Mark a device inactive without clearing the queue. 对照原 QueueManager.deactivate。 */
   deactivate(playerId: string): void {
+    playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     q.isActive = false;
+    this.persist(playerId);
+    this.emit("queue_changed", playerId, this.snapshot(playerId));
+  }
+
+  /** 用户主动停止(HA 的 turn_off / media_stop,Web 的停止按钮)。
+   *
+   *  必须冻结队列自动推进,否则:设备收到 Stop 后进入 STOPPED,PlaybackTracker
+   *  看到 PLAYING→IDLE 且队列还有下一首,会判定"这首自然放完了"从而 advance,
+   *  于是用户刚停下就自动蹦出下一首。对照 announce 的处理(见 announce.ts 注释 2)。
+   *
+   *  与 markEnded 的区别:这里 ended 保持 false —— 队列是被用户按停的,不是播完的,
+   *  items 与 currentIndex 原样保留,随后 resumePlayback() 可原地续上。
+   *  resetTracker 清掉 prev 状态,避免冻结前后的残留迁移在下次播放时再触发 advance。 */
+  stopPlayback(playerId: string): void {
+    playerId = stripPlayerPrefix(playerId);
+    const q = this.queues.get(playerId);
+    this.ctrls.get(playerId)?.resetTracker(this.players.get(playerId)?.playerId ?? playerId);
+    if (!q || !q.isActive) return;
+    q.isActive = false;
+    this.persist(playerId);
+    this.emit("queue_changed", playerId, this.snapshot(playerId));
+  }
+
+  /** 停止后再次点播放:解冻自动推进,让这首播完还能续下一首。
+   *  仅在队列"被按停"(有当前曲且未播完)时恢复;自然播完的队列不复活。 */
+  resumePlayback(playerId: string): void {
+    playerId = stripPlayerPrefix(playerId);
+    const q = this.queues.get(playerId); if (!q) return;
+    if (q.isActive || q.ended) return;
+    if (q.currentIndex < 0 || q.items.length === 0) return;
+    q.isActive = true;
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
   }
@@ -464,6 +509,7 @@ export class QueueController extends EventEmitter {
    *  - 组处于暂停 → 新成员对齐后同步暂停(镜像组播放态)
    *  - 新成员若有个人激活队列 → 标记不激活(组激活期间成员不可单独播放,保留 items) */
   async rejoinMembers(groupId: string, newMemberIds: string[]): Promise<void> {
+    groupId = stripPlayerPrefix(groupId);
     const q = this.queues.get(groupId);
     if (!q || !q.isActive || q.currentIndex < 0) return;
     const item = q.items[q.currentIndex];
