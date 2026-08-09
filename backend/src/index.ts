@@ -47,10 +47,15 @@ app.use("*", async (c, next) => {
 // cross-origin callers must be whitelisted via CORS_ORIGINS (comma separated),
 // or set CORS_ORIGINS=* to allow all origins (previous behavior).
 const allowedOrigins = getCorsOrigins();
+// 默认(白名单为空)即"反射请求方 Origin"——恢复 previous behavior,让浏览器侧
+// 的跨域客户端(如 Home Assistant Lovelace 卡片,其源与后端不同)能直接调用 REST/WS。
+// 鉴权是 token-in-URL 而非 cookie,因此 CORS 在此并非安全边界。如需锁死到具体
+// 来源,显式设置 CORS_ORIGINS(逗号分隔)即可。
+const reflectAllOrigins = allowedOrigins.length === 0 || allowedOrigins.includes("*");
 app.use("*", cors({
   origin: (origin) => {
     if (!origin) return origin;
-    if (allowedOrigins.includes("*")) return origin;
+    if (reflectAllOrigins) return origin;
     return allowedOrigins.includes(origin) ? origin : undefined;
   },
 }));
