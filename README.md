@@ -86,7 +86,8 @@ MusicFlow 提供两个配套仓库,构成完整的 Home Assistant 生态:
 
 ### HACS 集成(推荐)
 
-[hass-musicflow](https://github.com/ray5378/hass-musicflow) 是官方维护的 HACS 自定义集成,安装后:
+[hass-musicflow](https://github.com/ray5378/hass-musicflow) 是官方维护的 HACS 自定义集成
+([中文说明](https://github.com/ray5378/hass-musicflow/blob/main/README.zh-CN.md)),安装后:
 
 1. **HACS → 集成 → 右上角「⋮」→ 自定义仓库**,仓库地址填 `https://github.com/ray5378/hass-musicflow`,类别选 **集成**;
 2. 在 HACS 里搜索并安装 **MusicFlow**,安装完重启 HA;
