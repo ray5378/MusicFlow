@@ -93,8 +93,21 @@ MusicFlow 提供两个配套仓库,构成完整的 Home Assistant 生态:
 | 仓库 | 类型 | 作用 |
 |---|---|---|
 | [hass-musicflow](https://github.com/ray5378/hass-musicflow) | HACS 自定义集成 | 把 DLNA 设备与播放组变成 `media_player` 实体,并接入 HA 全局「媒体」标签页 |
-| [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | HACS 前端卡片 | 完整播放控件:喜欢 / 添加到歌单 / 滚动歌词 / 切换输出设备(需集成 1.2.6+) |
+| [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | HACS 前端卡片 | 复刻 HA 官方 `media-control` 卡片样式,叠加 MusicFlow 能力(切换播放器 / 喜欢 / 媒体库入口) |
 | [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项 | 把 MusicFlow 服务端直接跑在 Supervisor 下(数据落在 `/share/musicflow`) |
+
+### 各项目实现目标
+
+这 4 个仓库共同构成一套「自托管音乐服务 + Home Assistant 原生体验」:
+
+| 项目 | 实现目标 |
+|---|---|
+| **MusicFlow(本仓库)** | 自托管音乐服务端:接入 WebDAV/本地音乐来源,DLNA 发现与播放、多房间同步组、歌单/收藏/歌词、OpenSubsonic 兼容 API(`/rest/*`)、对 HA 生态(集成/卡片/加载项)提供 REST + WebSocket 通信基础。**HA 侧的每个播放器(设备/组)都是服务器上的一个 peer,状态与队列以服务器为准。** |
+| **hass-musicflow(集成)** | 把 MusicFlow 的 DLNA 设备与播放组镜像成 HA `media_player` 实体;WebSocket 实时状态同步(local_push);媒体浏览/搜索接入 HA 全局「媒体」;提供 `like_track` / `add_to_playlist` 等服务与 `musicflow/lyrics` / `musicflow/playlists` WebSocket 命令;**「切换播放器」遵循服务器 `switchPeer` 语义——纯 UI 切换控制目标,旧播放器播放队列与状态完全不变**;服务器上的播放群组在 HA 里是只读镜像,集成不提供分组编辑。 |
+| **hass-musicflow-card(前端卡片)** | **以 HA 官方 `media-control` 卡片(`type: media-control`,文档见 https://www.home-assistant.io/dashboards/media-control/ )为基线完整复刻,再在其基础上做 MusicFlow 增强**——保持官方外观与交互,叠加 MusicFlow 特有的能力(如点击 DLNA 图标切换播放器)。开发目标与踩坑记录见该仓库 `docs/DEVELOPMENT.md`。 |
+| **hassio-addons(加载项)** | 让 MusicFlow 服务端以 Supervisor 加载项形式一键运行在 HAOS 上,数据与配置落在 `/share/musicflow`,与 HA 集成/卡片开箱即用。 |
+
+> 版本配套:服务端升级后,在 HACS 里同步更新集成(当前集成最新 `v1.2.6`,对应服务端 `v1.1.8`);卡片依赖集成的 `like_track` / `add_to_playlist` 服务与 `musicflow/*` WebSocket 命令。
 
 ### HACS 集成(推荐)
 
