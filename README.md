@@ -124,8 +124,9 @@ MusicFlow 提供两个配套仓库,构成完整的 Home Assistant 生态:
 集成自带的原生卡片只覆盖基础控制。要获得**喜欢(心形)、添加到歌单、实时滚动歌词、切换输出设备**的完整播放控件,可以再装一张 Lovelace 自定义卡片
 [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card)([中文说明](https://github.com/ray5378/hass-musicflow-card/blob/main/README.zh-CN.md)):
 
-1. **HACS → 前端 → 右上角「⋮」→ 自定义仓库**,仓库地址填 `https://github.com/ray5378/hass-musicflow-card`,类别选 **Lovelace**;
-2. 在 **MusicFlow Card** 上点**下载**,刷新仪表盘;
+1. HACS 右上角 **⋮ → 自定义存储库**,仓库地址填 `https://github.com/ray5378/hass-musicflow-card`,
+   类别选 **Dashboard**(HACS UI 下拉里没有 "Lovelace",前端卡片统一选 Dashboard);
+2. 进入 **HACS → 前端**,在 **MusicFlow Card** 上点**下载**,刷新仪表盘;
 3. 仪表盘添加卡片,YAML:`type: custom:musicflow-player-card`,`entity: media_player.<你的播放器>`。
 
 > 卡片依赖集成的 `like_track` / `add_to_playlist` 服务与 `musicflow/lyrics` / `musicflow/playlists` WebSocket 命令,请先把集成升级到 **1.2.6+**。
