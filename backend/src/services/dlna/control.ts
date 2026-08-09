@@ -597,6 +597,8 @@ export async function setDeviceVolume(deviceId: string, volume: number): Promise
       DesiredVolume: String(vol),
     });
     markOk(deviceId);
+    // 立刻把新音量写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    getEventManager().setVolume(deviceId, vol);
   } catch (e: any) { markFailed(deviceId, "SetVolume", e); throw e; }
 }
 

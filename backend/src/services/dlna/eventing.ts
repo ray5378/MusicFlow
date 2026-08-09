@@ -142,10 +142,17 @@ class EventManager extends EventEmitter {
           notifyTrackChanged(deviceId);
         }
       } else {
-        // RenderingControl
-        const vol = inner.match(/<Volume[^>]*value="([^"]*)"[^>]*channel="Master"/i)?.[1]
-          || inner.match(/<Volume[^>]*channel="Master"[^>]*value="([^"]*)"/i)?.[1];
-        if (vol) st.volume = parseInt(vol, 10) || 0;
+        // RenderingControl —— 音量。
+        // UPnP 标准用 `val="50"`(RenderingControl LastChange),但部分设备用 `value="50"`,
+        // 且 `channel` 可能出现在 `val` 前或后,也可能省略。这里两种写法、两种顺序都兼容,
+        // 优先匹配 channel="Master",否则取第一个 Volume 标签。
+        let volMatch =
+          inner.match(/<Volume\b[^>]*?\bchannel="Master"[^>]*?(?:val|value)="(\d+)"/i) ||
+          inner.match(/<Volume\b[^>]*?(?:val|value)="(\d+)"[^>]*?\bchannel="Master"/i);
+        if (!volMatch) {
+          volMatch = inner.match(/<Volume\b[^>]*?(?:val|value)="(\d+)"/i);
+        }
+        if (volMatch) st.volume = parseInt(volMatch[1], 10) || 0;
       }
       this.states.set(deviceId, st);
       const prevState = prev.state;
@@ -274,6 +281,16 @@ class EventManager extends EventEmitter {
   // so the frontend gets fresher-than-poll data when events are flowing.
   getEventState(deviceId: string): DeviceEventState | undefined {
     return this.states.get(deviceId);
+  }
+
+  /** 后端主动设音量后(HA→MusicFlow 方向),更新缓存并立刻发 WS 推送,
+   * 让集成侧即时同步,不必等下一轮轮询。device 侧物理调音量由 GENA 事件驱动,
+   * 走的是 parseLastChange 同一条路径。 */
+  setVolume(deviceId: string, volume: number): void {
+    const prev = this.states.get(deviceId) || { updatedAt: 0 };
+    const st: DeviceEventState = { ...prev, volume, updatedAt: Date.now() };
+    this.states.set(deviceId, st);
+    this.emit("state_changed", deviceId, st);
   }
 
   unsubscribeAll(deviceId: string) {
