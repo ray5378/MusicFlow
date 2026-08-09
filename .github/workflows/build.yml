@@ -9,6 +9,11 @@ on:
 env:
   IMAGE_NAME: musicflow
 
+# Superseded main builds are pointless; tag builds must never be cancelled.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -43,15 +48,23 @@ jobs:
         run: |
           GHCR=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           DH=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
-          TAGS="$GHCR:latest,$DH:latest"
-          VERSION="main-$(echo "$GITHUB_SHA" | cut -c1-7)"
+          # `git push && git push --tags` fires two runs at once. Both used to
+          # publish :latest, so whichever finished last won — and when that was
+          # the branch run, :latest shipped APP_VERSION=main-<sha>, which is
+          # exactly the bogus version users saw on the settings page.
+          # Fix: only tag runs may move :latest; main builds get their own
+          # rolling :main tag.
           if [ "${{ github.ref_type }}" = "tag" ]; then
             V=${GITHUB_REF#refs/tags/v}
-            TAGS="$TAGS,$GHCR:$V,$DH:$V"
             VERSION="$V"
+            TAGS="$GHCR:$V,$DH:$V,$GHCR:latest,$DH:latest"
+          else
+            VERSION="main-$(echo "$GITHUB_SHA" | cut -c1-7)"
+            TAGS="$GHCR:main,$DH:main"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "resolved: version=$VERSION tags=$TAGS"
 
       - name: Build and push
         uses: docker/build-push-action@v6

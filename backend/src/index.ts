@@ -165,8 +165,23 @@ app.use("/assets/*", async (c, next) => {
   c.header("Cache-Control", "public, max-age=31536000, immutable");
 });
 app.get("/assets/*", serveStatic({ root: staticDir }));
+// The SPA shell must always be revalidated. Without an explicit header the
+// browser applies heuristic caching and keeps serving a stale index.html after
+// an image upgrade — it then references asset hashes that no longer exist
+// (blank page), or silently renders the previous build (e.g. an outdated
+// version string on the settings page). Hashed assets above stay immutable.
+app.use("*", async (c, next) => {
+  await next();
+  if ((c.res.headers.get("Content-Type") || "").includes("text/html")) {
+    c.header("Cache-Control", "no-cache, must-revalidate");
+  }
+});
 app.get("*", async (c, next) => {
   if (c.req.path.startsWith("/rest") || c.req.path.startsWith("/api") || c.req.path === "/ping") return next();
+  // A missing hashed asset means the client is running a stale index.html.
+  // Falling through to the SPA shell would answer a .js request with HTML and
+  // surface as an opaque MIME error, so fail loudly with a 404 instead.
+  if (c.req.path.startsWith("/assets/")) return c.notFound();
   // Serve real static files first (e.g. /favicon.svg), then fall back to the
   // SPA shell so client-side routes like /songs still render index.html.
   // (Pre-check with fs: serveStatic's own "not found" path calls next(), which
