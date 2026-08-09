@@ -23,3 +23,9 @@ services:
       # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
       - ./data:/app/backend/data
+      # Optional: separate directory for covers of online tracks/playlists
+      # fetched by the music-dl plugin (QQ / NetEase / Kugou / ...).
+      # The container path is fixed at data/musicdl-covers; the host path is
+      # yours to choose (e.g. a large disk). Leave this line commented out to
+      # use the default, i.e. keep those covers inside the ./data volume above.
+      # - ./musicdl-covers:/app/backend/data/musicdl-covers

@@ -43,6 +43,9 @@ services:
       - UV_USE_IO_URING=0
     volumes:
       - ./data:/app/backend/data
+      # 可选:music-dl 插件从在线平台(QQ/网易/酷狗等)拉取的歌曲、歌单封面的存放目录。
+      # 可自行指定为任意路径(如挂到大容量磁盘);不写这行就走默认,
+      # 封面直接落在上面的 ./data 卷内的 musicdl-covers 子目录里。
       - ./musicdl-covers:/app/backend/data/musicdl-covers
 ```
 
@@ -59,6 +62,8 @@ services:
 ### 直接 docker run
 
 ```bash
+# 第二个 -v 是可选的:music-dl 插件从在线平台拉取的封面单独存放目录,
+# 路径可自行指定;整行删掉即走默认,封面存进 data 卷内的 musicdl-covers 子目录。
 docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
   -v $(pwd)/data:/app/backend/data \
@@ -72,8 +77,14 @@ docker run -d --name musicflow --restart unless-stopped \
 
 - `./data/` 挂载卷:SQLite 数据库 + 封面缓存 + 自动生成的密钥文件,备份/迁移只需复制该目录
 - 封面缓存可随时删除,会自动按需重建
-- `./musicdl-covers/` 挂载卷:go-music-dl 下载的在线歌曲封面单独存放(容器内 `data/musicdl-covers`),
-  可单独挂到大容量磁盘以免占用主数据卷。无需时可不挂,封面会回退存到主数据卷
+- `./musicdl-covers/` 挂载卷(**可选**):music-dl 插件对接的在线平台(QQ/网易/酷狗等)歌曲、
+  歌单封面的存放目录,容器内固定为 `data/musicdl-covers`。
+  - **可自行设置**:宿主机侧路径随意指定(如 `/mnt/disk2/musicdl-covers`),
+    适合封面量大、想单独放到大容量磁盘、不占用主数据卷的场景;
+  - **也可以不设置**:删掉这条挂载即走默认,封面仍写入 `data/musicdl-covers`,
+    也就是随主数据卷 `./data/` 一起存放和备份;
+  - 两种方式对功能没有影响,读取时会同时探测 `data/musicdl-covers` 与 `data/covers`,
+    改配置前已下载的旧封面不会失效
 
 ## Home Assistant 接入
 
