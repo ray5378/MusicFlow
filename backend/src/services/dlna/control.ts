@@ -687,6 +687,14 @@ export interface DeviceStatus {
   updatedAt: number;  // ms epoch,本次 position 采样的时刻(供 HA 插值对齐)
 }
 
+// Monotonic position estimate per device. Some DLNA renderers don't report
+// RelTime on every GetPositionInfo (or return 0 / "NOT_IMPLEMENTED"), which
+// would make the Web/HA progress bar snap back to 0 on each 2s poll. We cache
+// the last credible SOAP sample and, while PLAYING, advance it by wall-clock
+// elapsed so the reported position keeps increasing smoothly between polls.
+const positionEstimates = new Map<string, { pos: number; at: number; dur: number; trackUri?: string }>();
+const POSITION_ESTIMATE_MAX_AGE_MS = 30_000; // 超过此时长不再外推,避免暂停久后跳变
+
 // Query current transport state + position + volume via SOAP.
 // Returns a default STOPPED status when the device is not in cache (e.g.
 // right after a server restart, before background discovery repopulates it)
@@ -735,6 +743,37 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
       }
     } catch {}
   }
+
+  // ---- 单调位置估计(修 DLNA 进度不前进) ----
+  // 切歌(TrackURI 变化)则重置基线,避免用上一首的进度外推。
+  const cachedBaseline = positionEstimates.get(deviceId);
+  if (cachedBaseline && state.trackUri && cachedBaseline.trackUri && cachedBaseline.trackUri !== state.trackUri) {
+    positionEstimates.delete(deviceId);
+  }
+  const base = positionEstimates.get(deviceId);
+  if (state.state === "PLAYING") {
+    if (state.position > 0) {
+      // 本次 SOAP 采样可信 -> 作为新基线(顺带记下 duration 用于封顶/兜底)。
+      positionEstimates.set(deviceId, { pos: state.position, at: sampledAt, dur: state.duration, trackUri: state.trackUri });
+    } else {
+      // 设备本次未上报 position(返回 0/未实现) -> 用上次基线 + 墙上时钟外推。
+      if (base && base.pos > 0 && Date.now() - base.at < POSITION_ESTIMATE_MAX_AGE_MS) {
+        let adv = base.pos + (Date.now() - base.at) / 1000;
+        if (base.dur > 0) adv = Math.min(adv, base.dur);
+        state.position = adv;
+        // 刷新基线时间戳,让外推持续前进(下一次若仍 0 继续接力)。
+        positionEstimates.set(deviceId, { pos: adv, at: Date.now(), dur: base.dur, trackUri: base.trackUri });
+      }
+      // 否则从未拿到过可信 position -> 保持 0
+    }
+    // duration 缺失(设备不报 TrackDuration)时用基线里记住的 duration 兜底,
+    // 否则前端 tickTimer 因 duration<=0 不本地插值,进度只能靠 2s 轮询跳进。
+    if (state.duration <= 0 && base && base.dur > 0) state.duration = base.dur;
+  } else {
+    // 非播放态不外推,清掉基线,下次播放从 0 重新起算。
+    positionEstimates.delete(deviceId);
+  }
+
   return state;
 }
 
