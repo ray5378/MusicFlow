@@ -353,6 +353,28 @@ export class QueueController extends EventEmitter {
     finally { this.advancing.delete(playerId); }
   }
 
+  /** 用户从媒体库点某首歌 → 加入队列后"跳播"到该曲。即使处于随机模式也严格尊重
+   *  指定索引(随机只作用于后续自动续播,显式"播这首歌"不应被随机化)。
+   *  与 playFrom 的区别:playFrom 在 shuffle 下会随机挑首起播,本方法跳到 index。 */
+  async jumpTo(playerId: string, index: number, baseUrl: string): Promise<void> {
+    playerId = stripPlayerPrefix(playerId);
+    const q = this.queues.get(playerId);
+    if (!q) return;
+    if (!Number.isInteger(index) || index < 0 || index >= q.items.length) return;
+    if (this.advancing.has(playerId)) return;
+    this.advancing.add(playerId);
+    try {
+      q.currentIndex = index;
+      q.isActive = true;
+      q.ended = false;
+      await this.playCurrent(playerId, baseUrl);
+      this.persist(playerId);
+      this.emit("queue_changed", playerId, this.snapshot(playerId));
+    } finally {
+      this.advancing.delete(playerId);
+    }
+  }
+
   setPlayMode(playerId: string, mode: PlayMode): void {
     playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;

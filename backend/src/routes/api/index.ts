@@ -1453,6 +1453,27 @@ apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
   return c.json({ success: true });
 });
 
+// 跳播到指定索引并立即播放。即使随机模式也尊重 index(随机仅作用于后续自动续播)。
+// Body: { index: number }
+apiRoutes.post("/v1/peers/:peerId/queue/jump", async (c) => {
+  const peerId = decodePeerId(c);
+  const { index } = await c.req.json().catch(() => ({} as any));
+  if (typeof index !== "number" || !Number.isInteger(index)) {
+    return c.json({ error: "需要整数 index" }, 400);
+  }
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (isCastPeer(parsed)) {
+    try {
+      await getQueueManager().jumpTo(parsed.id, index, getDlnaBaseUrl(c));
+      return c.json({ success: true });
+    } catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  // local: 直接设当前索引,Web 客户端 Howl 跟进播放
+  pm.localSetIndex(peerId, index);
+  return c.json({ success: true });
+});
+
 // Append items to the queue without switching playback.
 // Body: { items: QueueItem[] }
 apiRoutes.post("/v1/peers/:peerId/queue/enqueue", async (c) => {
