@@ -3,10 +3,10 @@ import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc } from "drizzle-orm";
 import fs from "fs";
-import path from "path";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { readCoverFile } from "../../services/coverCache.js";
+import { loadAndRenderCover } from "../../services/coverImage.js";
 import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
@@ -349,9 +349,13 @@ restRoutes.get("/getAlbum", (c) => {
   if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
   const albumSongs = db.select().from(songs).where(eq(songs.albumId, id)).all();
   const starredSet = getStarredSet(user?.id);
-  const songsArr = albumSongs.map(s => songToChild(s, starredSet));
+  const songTotal = albumSongs.length;
+  const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
+  const size = parseInt(getParam(c, "size") || "0", 10) || 0;
+  const shown = size > 0 ? albumSongs.slice(offset, offset + size) : albumSongs;
+  const songsArr = shown.map(s => songToChild(s, starredSet));
   const totalDuration = albumSongs.reduce((sum, s) => sum + (s.duration || 0), 0);
-  return c.json(ok({ album: { ...albumToID3(album, getAlbumStarredSet(user?.id)), songCount: songsArr.length, duration: totalDuration, song: songsArr } }));
+  return c.json(ok({ album: { ...albumToID3(album, getAlbumStarredSet(user?.id)), songCount: songsArr.length, songTotal, duration: totalDuration, song: songsArr } }));
 });
 
 restRoutes.get("/getAlbumInfo", (c) => {
@@ -564,13 +568,17 @@ restRoutes.get("/getPlaylist", (c) => {
   // stubs are NOT exposed to third-party clients (they cannot be streamed);
   // the web UI uses /rest/api/v1/playlists/:id/tracks to see the full list.
   const playableEntries = entries.filter(e => e.playable && e.songId);
+  const songTotal = playableEntries.length;
+  const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
+  const size = parseInt(getParam(c, "size") || "0", 10) || 0;
+  const pageEntries = size > 0 ? playableEntries.slice(offset, offset + size) : playableEntries;
   // Batch song lookups ONCE (was N+1: a songs query per entry, plus a second
   // pass inside the duration reducer). Map keeps id -> row for both passes.
-  const songIds = playableEntries.map(e => e.songId!).filter(Boolean);
+  const songIds = pageEntries.map(e => e.songId!).filter(Boolean);
   const songMap = songIds.length
     ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map(s => [s.id, s]))
     : new Map<string, any>();
-  const entryChildren = playableEntries.map(e => {
+  const entryChildren = pageEntries.map(e => {
     const song = e.songId ? songMap.get(e.songId) : null;
     return song ? { ...songToChild(song, starredSet), playable: true } : null;
   }).filter(Boolean);
@@ -582,7 +590,7 @@ restRoutes.get("/getPlaylist", (c) => {
   return c.json(ok({ playlist: {
     id: playlist.id, name: playlist.name, owner: playlist.ownerId, public: !!playlist.isPublic,
     created: playlist.createdAt || new Date().toISOString(), changed: playlist.updatedAt || new Date().toISOString(),
-    songCount: playableEntries.length, duration,
+    songCount: entryChildren.length, songTotal, duration,
     coverArt: `pl-${playlist.id}`, comment: playlist.comment || "",
     sourcePlatform: playlist.sourcePlatform || "",
     isImported: !!playlist.sourceUrl,
@@ -795,17 +803,23 @@ restRoutes.get("/getStarred", (c) => {
 
 restRoutes.get("/getStarred2", (c) => {
   const user = c.get("user");
-  if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [] } }));
+  if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [], songTotal: 0 } }));
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
+  const songTotal = favs.length;
   const starredSet = new Set(favs.map(f => f.songId));
-  const favSongs = favs.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
+  const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
+  const size = parseInt(getParam(c, "size") || "0", 10) || 0;
+  const slice = size > 0 ? favs.slice(offset, offset + size) : favs;
+  // Only fetch the songs on the requested page (not the whole favorite list),
+  // so a library with thousands of starred tracks doesn't pull them all at once.
+  const favSongs = slice.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
   const starredAlbumIds = new Set<string>();
   for (const f of favs) {
     const song = db.select().from(songs).where(eq(songs.id, f.songId)).get();
     if (song?.albumId) starredAlbumIds.add(song.albumId);
   }
   const favAlbums = Array.from(starredAlbumIds).map(id => { const a = db.select().from(albums).where(eq(albums.id, id)).get(); return a ? albumToID3(a) : null; }).filter(Boolean);
-  return c.json(ok({ starred2: { song: favSongs, album: favAlbums, artist: [] } }));
+  return c.json(ok({ starred2: { song: favSongs, album: favAlbums, artist: [], songTotal } }));
 });
 
 // ==================== Scrobble ====================
@@ -1163,10 +1177,31 @@ restRoutes.get("/download", async (c) => {
 
 restRoutes.get("/getCoverArt", async (c) => {
   const id = getParam(c, "id") || "";
-  let coverRef: string | null = null;
+  const size = Number(getParam(c, "size") || "300") || 300;
+  const accept = c.req.header("Accept") || "";
+  const wantWebp = accept.toLowerCase().includes("image/webp");
+
+  // Resolve a cover ref to an on-disk file, trying the same extension
+  // fallbacks the old handler used (jpg<->png, plus a webp variant).
+  const resolveCandidates = (ref: string | null): string | null => {
+    if (!ref) return null;
+    const candidates = [
+      ref,
+      ref.replace(/\.jpg$/i, ".png"),
+      ref.replace(/\.png$/i, ".jpg"),
+      ref.replace(/\.(?:jpg|png|gif)$/i, ".webp"),
+    ];
+    for (const cand of candidates) {
+      const fp = resolveCoverFile(cand);
+      if (fp) return fp;
+    }
+    return null;
+  };
+
+  let filePath: string | null = null;
   if (id.startsWith("al-")) {
     const album = db.select().from(albums).where(eq(albums.id, id.slice(3))).get();
-    coverRef = album?.coverArt || null;
+    let coverRef = album?.coverArt || null;
     if (!coverRef && album) {
       // Web/online albums store artwork on their songs; fall back to the first
       // song-with-cover so direct al-<id> requests aren't blank.
@@ -1175,52 +1210,50 @@ restRoutes.get("/getCoverArt", async (c) => {
         .limit(1).get();
       coverRef = song?.coverArt || null;
     }
+    filePath = resolveCandidates(coverRef);
   } else if (id.startsWith("so-")) {
     const song = db.select().from(songs).where(eq(songs.id, id.slice(3))).get();
+    let coverRef: string | null = null;
     if (song?.albumId) {
       // Prefer album cover; fall back to the song's own cover (web/online songs
       // cache their cover on the song row, not on the album).
       const album = db.select().from(albums).where(eq(albums.id, song.albumId)).get();
       coverRef = album?.coverArt || song.coverArt || null;
     } else coverRef = song?.coverArt || null;
+    filePath = resolveCandidates(coverRef);
   } else if (id.startsWith("ar-")) {
     const artist = db.select().from(artists).where(eq(artists.id, id.slice(3))).get();
     if (artist) {
       // Prefer the scraped artist avatar (ar-<id>.jpg); fall back to the artist's first album cover
-      coverRef = artist.coverArt || null;
+      let coverRef = artist.coverArt || null;
       if (!coverRef) {
         const firstAlbum = db.select().from(albums).where(eq(albums.artistId, artist.id)).get();
         coverRef = firstAlbum?.coverArt || null;
       }
+      filePath = resolveCandidates(coverRef);
     }
   } else if (id.startsWith("pl-")) {
     // Playlist cover: plain local image (imported platform cover or first song's album cover)
     const playlistCover = getPlaylistCover(id.slice(3));
-    if (playlistCover) {
-      const filePath = resolveCoverFile(playlistCover.file);
-      if (filePath) {
-        try {
-          const data = await readCoverFile(filePath);
-          return new Response(data, { headers: { "Content-Type": playlistCover.mime, "Cache-Control": "public, max-age=86400" } });
-        } catch { /* fall through to placeholder */ }
-      }
-    }
+    if (playlistCover) filePath = resolveCoverFile(playlistCover.file);
   } else {
-    coverRef = id;
+    filePath = resolveCandidates(id);
   }
 
-  if (coverRef) {
-    const candidates = [coverRef, coverRef.replace(/\.jpg$/, ".png"), coverRef.replace(/\.png$/, ".jpg"), coverRef.replace(/\.(?:jpg|png|gif)$/, ".webp")];
-    for (const fname of candidates) {
-      const filePath = resolveCoverFile(fname);
-      if (filePath) {
-        try {
-          const ext = path.extname(fname).toLowerCase();
-          const mime = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : "image/jpeg";
-          const data = await readCoverFile(filePath);
-          return new Response(data, { headers: { "Content-Type": mime, "Cache-Control": "public, max-age=86400" } });
-        } catch { /* try next */ }
+  if (filePath) {
+    const out = await loadAndRenderCover(filePath, size, wantWebp);
+    if (out) {
+      const inm = c.req.header("If-None-Match");
+      const headers: Record<string, string> = {
+        "Content-Type": out.contentType,
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "ETag": out.etag,
+        "Vary": "Accept",
+      };
+      if (inm && inm === out.etag) {
+        return new Response(null, { status: 304, headers });
       }
+      return new Response(out.data as unknown as BodyInit, { headers });
     }
   }
 
