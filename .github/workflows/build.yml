@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -48,23 +50,23 @@ jobs:
         run: |
           GHCR=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           DH=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
-          # `git push && git push --tags` fires two runs at once. Both used to
-          # publish :latest, so whichever finished last won — and when that was
-          # the branch run, :latest shipped APP_VERSION=main-<sha>, which is
-          # exactly the bogus version users saw on the settings page.
-          # Fix: only tag runs may move :latest; main builds get their own
-          # rolling :main tag.
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          # 每次构建(无论 tag 还是 main 推送)都移动 :latest,保证
+          # docker pull musicflow:latest 永远是最新代码。
+          # 版本号用 git describe 生成(最近 tag + 提交数 + sha, 如
+          # 1.1.17-3-gabc1234),既真实可溯源,也不再显示无意义的 main-<sha>。
           if [ "${{ github.ref_type }}" = "tag" ]; then
             V=${GITHUB_REF#refs/tags/v}
             VERSION="$V"
             TAGS="$GHCR:$V,$DH:$V,$GHCR:latest,$DH:latest"
           else
-            VERSION="main-$(echo "$GITHUB_SHA" | cut -c1-7)"
-            TAGS="$GHCR:main,$DH:main"
+            VERSION=$(git describe --tags --abbrev=7 2>/dev/null || echo "main-$SHORT_SHA")
+            TAGS="$GHCR:main,$DH:main,$GHCR:latest,$DH:latest"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "resolved: version=$VERSION tags=$TAGS"
+          echo "commit=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "resolved: version=$VERSION commit=$SHORT_SHA tags=$TAGS"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -76,5 +78,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.version }}
+            GIT_COMMIT=${{ steps.meta.outputs.commit }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

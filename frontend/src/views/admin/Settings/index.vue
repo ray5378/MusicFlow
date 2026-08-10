@@ -18,8 +18,9 @@
     <el-card style="margin-top: 16px">
       <h3>系统信息</h3>
       <el-descriptions :column="1" border size="small">
-        <el-descriptions-item label="版本">1.0.0</el-descriptions-item>
-        <el-descriptions-item label="服务器版本">1.0.0</el-descriptions-item>
+        <el-descriptions-item label="版本">{{ frontendVersion }}</el-descriptions-item>
+        <el-descriptions-item label="服务器版本">{{ serverVersion }}</el-descriptions-item>
+        <el-descriptions-item label="哈希版本号">{{ gitCommit }}</el-descriptions-item>
         <el-descriptions-item label="OpenSubsonic">1.16.1</el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -27,11 +28,28 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, onMounted } from "vue";
+import { reactive, ref, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
 const settings = reactive({ writeBackTags: false, fingerprintEnabled: false });
+
+// 前端版本:构建时由 Vite 从 CI 注入(import.meta.env.VITE_APP_VERSION)
+const frontendVersion = ref(import.meta.env.VITE_APP_VERSION || "—");
+// 服务器版本 / 哈希版本号:运行时经 /ping 取后端真实值(APP_VERSION / APP_COMMIT)
+const serverVersion = ref("—");
+const gitCommit = ref("—");
+async function loadVersion() {
+  try {
+    const res = await api.get("/ping");
+    const v = res.data?.version;
+    serverVersion.value = v ? (v === "dev" ? "dev" : `v${v}`) : "未知";
+    gitCommit.value = res.data?.commit || "未知";
+  } catch {
+    serverVersion.value = "未知";
+    gitCommit.value = "未知";
+  }
+}
 
 async function loadSettings() {
   try { const res = await api.get("/rest/api/v1/settings"); Object.assign(settings, res.data); } catch {}
@@ -39,7 +57,7 @@ async function loadSettings() {
 
 function saveSettings() { ElMessage.success("设置已保存"); }
 
-onMounted(loadSettings);
+onMounted(() => { loadSettings(); loadVersion(); });
 </script>
 
 <style lang="scss" scoped>

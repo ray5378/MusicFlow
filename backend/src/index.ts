@@ -66,9 +66,10 @@ app.use("*", cors({
 app.use("*", compress());
 
 app.route("/rest", authRoutes);
-// Baked in at image build time (Dockerfile ARG APP_VERSION, fed by CI from the
-// git tag). "dev" means a local/unversioned build.
+// Baked in at image build time (Dockerfile ARG APP_VERSION / APP_COMMIT, fed by
+// CI from the git tag / commit). "dev" / "" means a local/unversioned build.
 const APP_VERSION = process.env.APP_VERSION || "dev";
+const APP_COMMIT = process.env.APP_COMMIT || "";
 
 app.get("/rest/ping", (c) => c.json({ "subsonic-response": { status: "ok", version: "1.16.1", serverVersion: APP_VERSION, openSubsonic: true, type: "MusicFlow" } }));
 
@@ -89,7 +90,7 @@ app.use("/rest/api/*", authMiddleware);
 app.route("/rest/api", apiRoutes);
 app.use("/api/*", authMiddleware);
 app.route("/api", navidromeRoutes);
-app.get("/ping", (c) => c.json({ status: "ok", version: APP_VERSION }));
+app.get("/ping", (c) => c.json({ status: "ok", version: APP_VERSION, commit: APP_COMMIT }));
 
 // ==================== 音流 Webhook(免鉴权,凭 token 触发) ====================
 // 注册在 /rest、/api 鉴权中间件之外,外部工具(GET 或 POST)直接打开链接即可触发:
