@@ -29,12 +29,26 @@
             <span v-if="apiKeyExpiresAt" class="expire">（到期：{{ apiKeyExpiresAt.slice(0, 10) }}）</span>
           </div>
           <div v-if="apiKey" class="apikey-box">
-            <el-input v-model="apiKey" readonly size="small" :type="apiKeyVisible ? 'text' : 'password'">
+            <el-input
+              v-model="apiKey"
+              readonly
+              size="small"
+              class="apikey-input"
+              :type="apiKeyVisible ? 'text' : 'password'"
+            >
               <template #append>
                 <el-button @click="apiKeyVisible = !apiKeyVisible">{{ apiKeyVisible ? '隐藏' : '显示' }}</el-button>
-                <el-button @click="copyApiKey">复制</el-button>
               </template>
             </el-input>
+            <el-button
+              class="apikey-copy"
+              type="primary"
+              plain
+              size="small"
+              @click="copyApiKey"
+            >
+              复制
+            </el-button>
           </div>
         </div>
         <div class="setting-value apikey-actions">
@@ -85,6 +99,7 @@ import { ref, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
+import { copyText } from "@/utils/clipboard";
 const authStore = useAuthStore();
 
 const showNameDialog = ref(false);
@@ -162,14 +177,7 @@ async function revokeApiKey() {
 }
 
 async function copyApiKey() {
-  try {
-    await navigator.clipboard.writeText(apiKey.value);
-    ElMessage.success("已复制到剪贴板");
-  } catch {
-    // 非 HTTPS 下 clipboard API 不可用,退回手动选中
-    apiKeyVisible.value = true;
-    ElMessage.warning("当前环境不支持自动复制，请手动选中复制");
-  }
+  await copyText(apiKey.value);
 }
 
 onMounted(() => { loadApiKey(); loadVersion(); });
@@ -218,12 +226,15 @@ async function changeUsername() {
   .version { font-size: 13px; color: var(--fnos-text-tertiary); }
 }
 .setting-label .expire { color: var(--fnos-text-secondary); }
-.apikey-box { margin-top: 10px; max-width: 460px; }
+.apikey-box { margin-top: 10px; max-width: 560px; display: flex; gap: 8px; align-items: stretch; }
+.apikey-box .apikey-input { flex: 1 1 auto; min-width: 0; }
+.apikey-box .apikey-copy { flex: 0 0 auto; }
 .apikey-actions { display: flex; gap: 8px; }
 
 @media (max-width: 768px) {
   .settings-page { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
   .setting-item { flex-direction: column; gap: 10px; }
+  .apikey-box { max-width: 100%; }
 }
 </style>

@@ -67,12 +67,24 @@
           供 Home Assistant 集成等常驻客户端使用的长期凭据。登录用的 JWT 24 小时过期，第三方客户端要用这里的 Key。
         </p>
         <div v-if="keyForm.apiKey" class="key-box">
-          <el-input v-model="keyForm.apiKey" readonly :type="keyForm.visible ? 'text' : 'password'">
+          <el-input
+            v-model="keyForm.apiKey"
+            readonly
+            class="key-input"
+            :type="keyForm.visible ? 'text' : 'password'"
+          >
             <template #append>
               <el-button @click="keyForm.visible = !keyForm.visible">{{ keyForm.visible ? '隐藏' : '显示' }}</el-button>
-              <el-button @click="copyKey">复制</el-button>
             </template>
           </el-input>
+          <el-button
+            class="key-copy"
+            type="primary"
+            plain
+            @click="copyKey"
+          >
+            复制
+          </el-button>
           <div class="key-meta">
             有效期：{{ keyForm.expiresAt ? keyForm.expiresAt.slice(0, 10) + ' 到期' : '永不过期' }}
           </div>
@@ -111,6 +123,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
+import { copyText } from "@/utils/clipboard";
 
 const authStore = useAuthStore();
 const users = ref<any[]>([]);
@@ -233,13 +246,7 @@ async function revokeKey() {
 }
 
 async function copyKey() {
-  try {
-    await navigator.clipboard.writeText(keyForm.apiKey);
-    ElMessage.success("已复制到剪贴板");
-  } catch {
-    keyForm.visible = true;
-    ElMessage.warning("当前环境不支持自动复制，请手动选中复制");
-  }
+  await copyText(keyForm.apiKey);
 }
 
 async function deleteUser(user: any) {
@@ -270,8 +277,10 @@ onMounted(loadUsers);
 }
 .key-dialog {
   .key-desc { margin: 0 0 14px; font-size: 13px; line-height: 1.6; color: var(--fnos-text-secondary); }
-  .key-box { margin-bottom: 8px; }
-  .key-meta { margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); }
+  .key-box { margin-bottom: 8px; display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  .key-box .key-input { flex: 1 1 auto; min-width: 0; }
+  .key-box .key-copy { flex: 0 0 auto; }
+  .key-meta { flex-basis: 100%; margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); }
   .key-form { margin-top: 12px; :deep(.el-form-item) { margin-bottom: 12px; } }
 }
 @media (max-width: 768px) {
