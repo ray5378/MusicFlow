@@ -17,7 +17,7 @@
 // `/rest/dlna/stream/:token` endpoint so the renderer can pull bytes directly.
 import { randomBytes } from "crypto";
 import os from "os";
-import { discoverDlnaDevices, DlnaDevice } from "./discovery.js";
+import { discoverDlnaDevices, fetchDeviceAtLocation, onSsdpEvent, DlnaDevice } from "./discovery.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 
@@ -248,6 +248,42 @@ export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
 
 export function getCachedDevices(): DlnaDevice[] {
   return cachedDevices;
+}
+
+// ==================== Real-time SSDP wiring ====================
+// The passive SSDP listener (discovery.ts) sees ssdp:alive / ssdp:byebye the
+// moment a device comes online / goes offline. Without this wiring those
+// announcements only landed in the listener's internal map and the cache was
+// refreshed solely by the 5-min M-SEARCH sweep — so a device that had just
+// powered on stayed invisible to clients (Web/App/HA card) for minutes.
+// Here we: fetch its description immediately, upsert the cache, and emit
+// device_list_changed → peer reconcile → WS peer_registered/peer_available →
+// the HA card / Web switcher show (or dim) the device in real time.
+let ssdpRealtimeWired = false;
+export function wireSsdpRealtime(): void {
+  if (ssdpRealtimeWired) return;
+  ssdpRealtimeWired = true;
+  onSsdpEvent(async (e) => {
+    try {
+      if (e.type === "alive") {
+        const d = await fetchDeviceAtLocation(e.location);
+        if (!d) return;
+        const idx = cachedDevices.findIndex((x) => x.id === d.id);
+        const wasAvailable = idx >= 0 ? cachedDevices[idx].available : false;
+        if (idx >= 0) cachedDevices[idx] = { ...cachedDevices[idx], ...d, available: true };
+        else cachedDevices.push(d);
+        // 只在「新设备」或「离线→上线」时广播,避免周期性通告反复刷屏。
+        if (idx < 0 || !wasAvailable) getEventManager().emitDeviceListChanged(cachedDevices.length);
+      } else {
+        // byebye:立即标记离线(USN 首段即 UDN,与设备 id 一致)。
+        const d = cachedDevices.find((x) => x.id === e.udn);
+        if (d && d.available) {
+          d.available = false;
+          getEventManager().emitDeviceListChanged(cachedDevices.length);
+        }
+      }
+    } catch { /* realtime update failures are non-fatal */ }
+  });
 }
 
 export function shouldRefreshDevices(): boolean {

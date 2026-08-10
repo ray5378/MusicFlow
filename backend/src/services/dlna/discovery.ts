@@ -93,6 +93,29 @@ async function fetchDescription(location: string): Promise<DlnaDevice | null> {
 let listenerSocket: dgram.Socket | null = null;
 const announced = new Map<string, { location: string; lastSeen: number; usn: string }>();
 
+// ==================== Real-time SSDP events ====================
+// Subscribers (control.ts) are fired the moment a device (re)announces itself
+// (ssdp:alive/update) or goes offline (ssdp:byebye), so the device cache +
+// peer registry + WS push update in real time instead of waiting for the
+// next 5-minute M-SEARCH sweep.
+export type SsdpEvent =
+  | { type: "alive"; location: string }
+  | { type: "byebye"; udn: string };
+const ssdpEventCbs = new Set<(e: SsdpEvent) => void>();
+export function onSsdpEvent(cb: (e: SsdpEvent) => void): void { ssdpEventCbs.add(cb); }
+function emitSsdpEvent(e: SsdpEvent): void {
+  for (const cb of ssdpEventCbs) { try { cb(e); } catch { /* subscriber errors are non-fatal */ } }
+}
+// A device re-announces itself periodically; debounce "alive" per location so
+// we only treat it as a (re)appearance once per minute.
+const lastAliveEmitAt = new Map<string, number>();
+const ALIVE_EMIT_DEBOUNCE_MS = 60 * 1000;
+
+/** Fetch a single device's description by its SSDP location URL. */
+export function fetchDeviceAtLocation(location: string): Promise<DlnaDevice | null> {
+  return fetchDescription(location);
+}
+
 function startListener() {
   if (listenerSocket) return;
   const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
@@ -108,11 +131,18 @@ function startListener() {
     // ssdp:byebye → device is going offline
     if (nts === "ssdp:byebye") {
       announced.delete(usn);
+      const m = usn.match(/uuid:([^:]+)/i);
+      if (m) emitSsdpEvent({ type: "byebye", udn: m[1] });
       return;
     }
     // ssdp:alive / ssdp:update → device is (re)announcing itself
     if (nts === "ssdp:alive" || nts === "ssdp:update") {
       announced.set(usn, { location: loc, lastSeen: Date.now(), usn });
+      const last = lastAliveEmitAt.get(loc) || 0;
+      if (Date.now() - last > ALIVE_EMIT_DEBOUNCE_MS) {
+        lastAliveEmitAt.set(loc, Date.now());
+        emitSsdpEvent({ type: "alive", location: loc });
+      }
     }
   });
   sock.bind(SSDP_PORT, () => {

@@ -22,7 +22,7 @@ import { syncAllRecommendPlaylists } from "./services/source/online/recommendImp
 import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
-import { refreshDevices, getEffectiveBaseUrl } from "./services/dlna/control.js";
+import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
@@ -332,6 +332,16 @@ setTimeout(() => {
   setInterval(() => { refreshAndRegisterDevices(); }, DLNA_SCAN_INTERVAL);
 }, 8000);
 
+// 实时 SSDP:设备一上线/下线立即更新缓存并广播 device_list_changed
+// (-> peer reconcile -> WS peer_registered/available 推送),卡片/Web 即时看到。
+wireSsdpRealtime();
+// 新发现的设备即时注册 QueueController(幂等),上线即可播,不必等下一轮扫描。
+getEventManager().on("device_list_changed", () => {
+  for (const d of getCachedDevices()) {
+    getQueueController().registerDlnaDevice(d.id, d.name);
+  }
+});
+
 const port = parseInt(process.env.PORT || "46400", 10);
 
 // ==================== HA integration: WebSocket + mDNS + queue auto-next ====================
@@ -344,6 +354,7 @@ import { initWebSocketServer } from "./services/ws/index.js";
 import { startMdnsBroadcast, stopMdnsBroadcast } from "./services/discovery/mdns.js";
 import { getQueueController, wirePlayerQueueControllers } from "./services/player/index.js";
 import { getCachedDevices } from "./services/dlna/control.js";
+import { getEventManager } from "./services/dlna/eventing.js";
 import { getPeerManager } from "./services/peer.js";
 import { getGroupManager } from "./services/group/index.js";
 import { startGroupWatchdog } from "./services/group/watchdog.js";
