@@ -655,7 +655,10 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
 
   const plInfo = (row: any) => row ? {
     id: row.id, name: row.name, songCount: row.song_count || 0,
-    createdToday: (row.created_at || "").startsWith(today),
+    // The daily generator stamps the generation date into the playlist's
+    // comment (created_at is now fixed, since the playlist row is reused), so
+    // "generated today" is detected from the comment, not created_at.
+    createdToday: (row.comment || "").includes(today),
   } : null;
 
   return c.json({

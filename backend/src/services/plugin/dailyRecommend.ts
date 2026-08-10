@@ -17,18 +17,24 @@
 // the remote-matched songs already in the playlist (and against each other)
 // so the same track never appears twice.
 //
-// Naming / retention (only TWO playlists ever exist):
-//   - "今日推荐"    — today's combined playlist
-//   - "昨日推荐"    — yesterday's combined playlist
-// On each run: old "昨日推荐" is deleted, "今日推荐" is renamed to "昨日推荐",
-// new "今日推荐" is created.
+// STABLE IDs (only TWO playlists ever exist, with FIXED ids):
+//   - "今日推荐"    — today's combined playlist    (id: pl-daily-today)
+//   - "昨日推荐"    — yesterday's combined playlist (id: pl-daily-yesterday)
+//
+// Both ids are FIXED and never change across days. Each run:
+//   - moves today's song rows to the yesterday playlist in ONE UPDATE
+//     (playlist_id reassignment — no row rewrite, cheap even for huge playlists),
+//   - rebuilds today's content fresh into the same fixed "今日推荐" row.
+// This keeps clients (web/app/HA/card) able to reference the two playlists by
+// a constant id, and avoids the daily CREATE+DELETE of playlist rows and the
+// daily create+delete of cover files (the cover file name is now stable too).
 //
 // Failure safety: remote fetches happen BEFORE any DB mutation, so if all
 // networks are down, existing playlists are untouched.
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
-import { rebuildPlaylistEntries } from "./playlistSync.js";
-import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
+import { rebuildPlaylistEntries, refreshPlaylistCounts } from "./playlistSync.js";
+import { copyCoverToFile } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
 
 export interface DailyCandidate {
@@ -55,6 +61,11 @@ export interface DailyRecommendResult {
 
 export const DAILY_TAG = "[daily-recommend]";
 export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
+
+// Fixed playlist ids — these NEVER change, so clients can reference the two
+// daily playlists by a stable id.
+export const FIXED_TODAY_ID = "pl-daily-today";
+export const FIXED_YESTERDAY_ID = "pl-daily-yesterday";
 
 const NAME_TODAY = "今日推荐";
 const NAME_YESTERDAY = "昨日推荐";
@@ -161,36 +172,81 @@ function findPlaylistByName(name: string, tag: string): any | null {
   return rows[0] || null;
 }
 
-function isCreatedToday(playlist: any, dateStr: string): boolean {
-  return (playlist.created_at || "").startsWith(dateStr);
+// True once today's combined playlist has already been (re)generated today.
+// We stamp the generation date into the playlist's comment, so idempotency no
+// longer depends on created_at (which is now fixed, since the row is reused).
+function isGeneratedToday(playlist: any, dateStr: string): boolean {
+  return !!(playlist && (playlist.comment || "").includes(dateStr));
 }
 
-function deletePlaylist(playlistId: string): void {
-  sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
-  clearPlaylistCoverCache(playlistId);
-  sqlite.prepare("DELETE FROM playlists WHERE id = ?").run(playlistId);
-}
+// Ensure the two fixed-id daily playlists exist. On first run (or after an
+// upgrade from the old rename-based scheme) this:
+//   - adopts any existing "[daily-recommend]" tagged playlists into the fixed
+//     ids (so no content is lost and no duplicate playlists appear), then
+//   - deletes any leftover legacy dynamic-id daily playlists, and
+//   - creates the fixed rows if they're still missing.
+function ensureDailyPlaylists(): void {
+  const todayFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
+  const yestFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_YESTERDAY_ID) as any;
+  if (todayFixed && yestFixed) return;
 
-function renamePlaylist(playlistId: string, newName: string): void {
-  sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
-    .run(newName, new Date().toISOString(), playlistId);
+  const ownerId = pickSystemOwnerId();
+  const now = new Date().toISOString();
+
+  const adopt = (fixedId: string, name: string, legacy: any | null) => {
+    if (legacy) {
+      sqlite.prepare("UPDATE playlists SET id = ?, name = ?, comment = ? WHERE id = ?")
+        .run(fixedId, name, `${DAILY_TAG} (migrated)`, legacy.id);
+    } else {
+      sqlite.prepare(`
+        INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, NULL, NULL, 'mixed', NULL, 0, ?, ?)
+      `).run(fixedId, name, ownerId, `${DAILY_TAG}`, now, now);
+    }
+  };
+
+  if (!todayFixed) adopt(FIXED_TODAY_ID, NAME_TODAY, findPlaylistByName(NAME_TODAY, DAILY_TAG));
+  if (!yestFixed) adopt(FIXED_YESTERDAY_ID, NAME_YESTERDAY, findPlaylistByName(NAME_YESTERDAY, DAILY_TAG));
+
+  // Clean up any remaining legacy dynamic-id daily playlists (combined OR the
+  // deprecated "(本地)" variant) so the user never sees duplicates.
+  const tagPattern = `%${DAILY_TAG}%`;
+  const localPattern = `%${DAILY_TAG_LOCAL}%`;
+  sqlite.prepare(`
+    DELETE FROM playlist_songs WHERE playlist_id IN (
+      SELECT id FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id NOT IN (?, ?)
+    )
+  `).run(tagPattern, localPattern, FIXED_TODAY_ID, FIXED_YESTERDAY_ID);
+  sqlite.prepare(`
+    DELETE FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id NOT IN (?, ?)
+  `).run(tagPattern, localPattern, FIXED_TODAY_ID, FIXED_YESTERDAY_ID);
 }
 
 // Pick a random local-library song's album cover file ref. Used as the daily
 // playlist cover so it always reflects real local music (not a remote chart
 // cover). Returns null if the library has no songs with album covers yet.
+//
+// Resource note: uses rowid over-sampling instead of `ORDER BY RANDOM()`, so
+// it never sorts the entire songs table (cheap even with a huge library).
 function pickRandomLibraryAlbumCoverRef(date: Date): string | null {
-  const rows = sqlite.prepare(`
-    SELECT a.cover_art AS cover
-    FROM songs s
-    JOIN albums a ON s.album_id = a.id
-    WHERE s.path IS NOT NULL
-      AND a.cover_art IS NOT NULL
-      AND a.cover_art <> ''
-    ORDER BY RANDOM()
-    LIMIT 1
-  `).all() as { cover: string }[];
-  return rows[0]?.cover || null;
+  const meta = sqlite.prepare(`
+    SELECT COUNT(*) AS n, MAX(rowid) AS maxR
+    FROM songs WHERE path IS NOT NULL AND cover_art IS NOT NULL AND cover_art <> ''
+  `).get() as { n: number; maxR: number | null };
+  if (!meta.n || !meta.maxR) return null;
+  const rng = mulberry32(dayOfYear(date) * 91331 + 3);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const rowids = new Set<number>();
+    for (let i = 0; i < 3; i++) rowids.add(1 + Math.floor(rng() * meta.maxR));
+    const arr = Array.from(rowids);
+    const ph = arr.map(() => "?").join(",");
+    const rows = sqlite.prepare(`
+      SELECT cover_art FROM songs
+      WHERE rowid IN (${ph}) AND path IS NOT NULL AND cover_art IS NOT NULL AND cover_art <> ''
+    `).all(...arr) as { cover_art: string }[];
+    if (rows.length) return rows[0].cover_art;
+  }
+  return null;
 }
 
 function pickSystemOwnerId(): string {
@@ -239,30 +295,91 @@ export function isInRecommendPool(sourceType: string, sourceId: string): boolean
 // Pick up to `limit` random playable song ids from a pool member.
 // For "playlist": from playlist_songs joined to songs where playable=1.
 // For "favorites": from user_favorite_songs joined to songs.
+//
+// Resource strategy (O(limit) — never loads the whole member playlist):
+//   - One COUNT(*) + MAX(rowid) to know the rowid range of qualifying rows.
+//   - Over-sample random rowids (bounded by 2x the deficit) and fetch only
+//     those, so even a pool member with thousands of songs only ever pulls a
+//     few hundred candidate ids into memory.
 // Uses a date-seeded PRNG so the same day picks the same set (deterministic).
 function pickSongsFromPoolMember(entry: RecommendPoolEntry, date: Date, limit: number): string[] {
   const rng = mulberry32(dayOfYear(date) * 2654435761 + entry.id * 40503);
-  let rows: { id: string }[] = [];
+  let candidateIds: string[] = [];
   if (entry.source_type === "playlist") {
-    rows = sqlite.prepare(`
-      SELECT s.id FROM playlist_songs ps
-      JOIN songs s ON ps.song_id = s.id
-      WHERE ps.playlist_id = ? AND ps.playable = 1 AND s.path IS NOT NULL
-    `).all(entry.source_id) as { id: string }[];
+    candidateIds = samplePlayablePlaylistSongIds(entry.source_id, rng, limit);
   } else if (entry.source_type === "favorites") {
-    rows = sqlite.prepare(`
-      SELECT s.id FROM user_favorite_songs uf
-      JOIN songs s ON uf.song_id = s.id
-      WHERE uf.user_id = ? AND s.path IS NOT NULL
-    `).all(entry.source_id) as { id: string }[];
+    candidateIds = sampleFavoriteSongIds(entry.source_id, rng, limit);
   }
-  if (rows.length === 0) return [];
-  // Fisher-Yates shuffle with the seeded RNG, then take first `limit`.
-  for (let i = rows.length - 1; i > 0; i--) {
+  if (candidateIds.length === 0) return [];
+  // Deterministic shuffle of the sampled set (same day -> same order).
+  for (let i = candidateIds.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
-    [rows[i], rows[j]] = [rows[j], rows[i]];
+    [candidateIds[i], candidateIds[j]] = [candidateIds[j], candidateIds[i]];
   }
-  return rows.slice(0, limit).map(r => r.id);
+  return candidateIds.slice(0, limit);
+}
+
+// Bounded sampler over a playlist member's playable songs. Uses rowid
+// over-sampling so it never loads the entire (possibly huge) playlist.
+function samplePlayablePlaylistSongIds(playlistId: string, rng: () => number, limit: number): string[] {
+  const meta = sqlite.prepare(`
+    SELECT COUNT(*) AS n, MAX(rowid) AS maxR
+    FROM playlist_songs WHERE playlist_id = ? AND playable = 1 AND song_id IS NOT NULL
+  `).get(playlistId) as { n: number; maxR: number | null };
+  if (!meta.n || !meta.maxR) return [];
+  const ids = new Set<string>();
+  let attempt = 0;
+  while (ids.size < limit && attempt < 6) {
+    attempt++;
+    const want = (limit - ids.size) * 2 + 1;
+    const rowids = new Set<number>();
+    for (let i = 0; i < want; i++) rowids.add(1 + Math.floor(rng() * meta.maxR!));
+    if (rowids.size === 0) break;
+    const arr = Array.from(rowids);
+    for (let i = 0; i < arr.length; i += 500) {
+      const batch = arr.slice(i, i + 500);
+      const ph = batch.map(() => "?").join(",");
+      const rows = sqlite.prepare(`
+        SELECT song_id FROM playlist_songs
+        WHERE rowid IN (${ph}) AND playlist_id = ? AND playable = 1 AND song_id IS NOT NULL
+      `).all(...batch, playlistId) as { song_id: string }[];
+      for (const r of rows) { if (ids.size < limit) ids.add(r.song_id); }
+      if (ids.size >= limit) break;
+    }
+  }
+  return Array.from(ids);
+}
+
+// Bounded sampler over a user's favorites. Same rowid over-sampling technique.
+function sampleFavoriteSongIds(userId: string, rng: () => number, limit: number): string[] {
+  const meta = sqlite.prepare(`
+    SELECT COUNT(*) AS n, MAX(uf.rowid) AS maxR
+    FROM user_favorite_songs uf JOIN songs s ON uf.song_id = s.id
+    WHERE uf.user_id = ? AND s.path IS NOT NULL
+  `).get(userId) as { n: number; maxR: number | null };
+  if (!meta.n || !meta.maxR) return [];
+  const ids = new Set<string>();
+  let attempt = 0;
+  while (ids.size < limit && attempt < 6) {
+    attempt++;
+    const want = (limit - ids.size) * 2 + 1;
+    const rowids = new Set<number>();
+    for (let i = 0; i < want; i++) rowids.add(1 + Math.floor(rng() * meta.maxR!));
+    if (rowids.size === 0) break;
+    const arr = Array.from(rowids);
+    for (let i = 0; i < arr.length; i += 500) {
+      const batch = arr.slice(i, i + 500);
+      const ph = batch.map(() => "?").join(",");
+      const rows = sqlite.prepare(`
+        SELECT uf.song_id AS song_id FROM user_favorite_songs uf
+        JOIN songs s ON uf.song_id = s.id
+        WHERE uf.rowid IN (${ph}) AND uf.user_id = ? AND s.path IS NOT NULL
+      `).all(...batch, userId) as { song_id: string }[];
+      for (const r of rows) { if (ids.size < limit) ids.add(r.song_id); }
+      if (ids.size >= limit) break;
+    }
+  }
+  return Array.from(ids);
 }
 
 // Collect playable song ids from every enabled pool member, merge+dedupe, then
@@ -292,13 +409,13 @@ function collectPoolSongs(date: Date): { songIds: string[]; members: number } {
 
 export async function generateDailyPlaylist(date = new Date()): Promise<DailyRecommendResult> {
   const dateStr = todayStr(date);
+  ensureDailyPlaylists();
 
-  // Step 1: idempotency check.
-  const todayPl = findPlaylistByName(NAME_TODAY, DAILY_TAG);
-  if (todayPl && isCreatedToday(todayPl, dateStr)) {
+  const todayRow = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
+  if (isGeneratedToday(todayRow, dateStr)) {
     return {
       date: dateStr,
-      playlistId: todayPl.id,
+      playlistId: FIXED_TODAY_ID,
       name: NAME_TODAY,
       picked: [],
       platform: "mixed",
@@ -310,8 +427,9 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   }
 
   const candidates = loadCandidates();
+  const ownerId = pickSystemOwnerId();
 
-  // Step 2: fetch ALL remote playlists FIRST (before any DB mutation).
+  // Step 1: fetch ALL remote playlists FIRST (before any DB mutation).
   // Collect tracks from every successful fetch; failures are logged but don't
   // abort the whole run — we still want pool songs + local mix to work.
   const remoteImports: { name: string; platform: string; coverUrl?: string; tracks: any[] }[] = [];
@@ -325,7 +443,7 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     }
   }
 
-  // Step 3: collect user pool songs + full-library random.
+  // Step 2: collect user pool songs + full-library random.
   const { songIds: poolSongIds, members: poolMembers } = collectPoolSongs(date);
   const randomLibraryIds = pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
 
@@ -336,19 +454,26 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     throw new Error("今日推荐生成失败:所有远程榜单抓取失败且用户推荐池和曲库随机均为空");
   }
 
-  // Step 4: rename/delete.
-  const oldYesterday = findPlaylistByName(NAME_YESTERDAY, DAILY_TAG);
-  if (oldYesterday) deletePlaylist(oldYesterday.id);
-  if (todayPl) renamePlaylist(todayPl.id, NAME_YESTERDAY);
+  // ============ Stable-ID swap (cheap even for huge playlists) ============
+  // Yesterday becomes the PREVIOUS day's "今日推荐" content. Move today's song
+  // rows to the yesterday playlist in a SINGLE UPDATE (reassign playlist_id) —
+  // no row rewrite, so even a playlist with thousands of songs costs one indexed
+  // update. Yesterday also inherits today's current cover.
+  const prevTodayCover = todayRow?.cover_art || null;
+  const now = new Date().toISOString();
+  sqlite.prepare("UPDATE playlist_songs SET playlist_id = ? WHERE playlist_id = ?")
+    .run(FIXED_YESTERDAY_ID, FIXED_TODAY_ID);
+  sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?")
+    .run(prevTodayCover, now, FIXED_YESTERDAY_ID);
+  refreshPlaylistCounts(FIXED_YESTERDAY_ID);
 
-  // Step 5: create new "今日推荐".
-  const playlistId = `pl-${Date.now()}`;
-  const ownerId = pickSystemOwnerId();
+  // Today is rebuilt fresh into the FIXED id. rebuildPlaylistEntries clears the
+  // (now empty) today rows and inserts the new remote-matched tracks.
+  const playlistId = FIXED_TODAY_ID;
 
   // Cover = a RANDOM local-library song's album cover (per product要求).
-  // Copied to pl-<playlistId>.jpg so it is self-contained and survives the
-  // later rename to "昨日推荐" (playlistId is unchanged on rename, only the
-  // name column changes), so the cover stays put.
+  // Copied to pl-daily-today.jpg so it is self-contained and survives daily
+  // regeneration (the playlist id is fixed, so the cover file name is stable).
   let coverRef: string | undefined;
   const albumCoverRef = pickRandomLibraryAlbumCoverRef(date);
   if (albumCoverRef) {
@@ -372,17 +497,8 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   const extraParts: string[] = [];
   if (poolMembers > 0) extraParts.push(`${poolMembers}个用户推荐池`);
   if (randomLibraryIds.length > 0) extraParts.push("曲库随机");
-  sqlite.prepare(`
-    INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
-    VALUES (?, ?, ?, 1, ?, ?, NULL, 'mixed', NULL, 0, ?, ?)
-  `).run(
-    playlistId, NAME_TODAY, ownerId,
-    `${DAILY_TAG} ${dateStr} 组合自「${sourceLabel}」${extraParts.length > 0 ? ` + ${extraParts.join(" + ")}` : ""}`,
-    coverRef || null,
-    new Date().toISOString(), new Date().toISOString()
-  );
 
-  // Step 5a: insert remote tracks via rebuildPlaylistEntries (matching + stubs + wishes).
+  // Seed remote tracks via rebuildPlaylistEntries (matching + stubs + wishes).
   let matched = 0, unmatched = 0, wishAdded = 0;
   if (dedupedTracks.length > 0) {
     const result = await rebuildPlaylistEntries(playlistId, {
@@ -399,14 +515,14 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     wishAdded = result.wishAdded;
   }
 
-  // Step 5b: collect song_ids already in the playlist (from remote matching)
+  // Collect song_ids already in the playlist (from remote matching)
   // so we can dedup pool songs and local songs against them.
   const existingSongIds = new Set<string>(
     sqlite.prepare("SELECT song_id FROM playlist_songs WHERE playlist_id = ?").all(playlistId)
       .map((r: any) => r.song_id as string)
   );
 
-  // Step 5b: append pool songs as playable entries, DEDUPED against remote-matched songs.
+  // Append pool songs as playable entries, DEDUPED against remote-matched songs.
   let poolSongsAdded = 0;
   const dedupedPoolIds = poolSongIds.filter(id => !existingSongIds.has(id));
   if (dedupedPoolIds.length > 0) {
@@ -423,7 +539,7 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
       for (const r of rows) idToDuration.set(r.id, r.duration || 0);
     }
 
-    const now = new Date().toISOString();
+    const now2 = new Date().toISOString();
     const insertStmt = sqlite.prepare(`
       INSERT INTO playlist_songs (playlist_id, song_id, position, playable, created_at)
       VALUES (?, ?, ?, 1, ?)
@@ -431,7 +547,7 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     let addedDuration = 0;
     const tx = sqlite.transaction((ids: string[]) => {
       for (const id of ids) {
-        insertStmt.run(playlistId, id, nextPos++, now);
+        insertStmt.run(playlistId, id, nextPos++, now2);
         addedDuration += idToDuration.get(id) || 0;
         poolSongsAdded++;
         existingSongIds.add(id);
@@ -442,10 +558,10 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     // Update counts.
     const plRow = sqlite.prepare("SELECT song_count, duration FROM playlists WHERE id = ?").get(playlistId) as any;
     sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
-      .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now, playlistId);
+      .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
   }
 
-  // Step 5c: append full-library random songs, DEDUPED against everything above.
+  // Append full-library random songs, DEDUPED against everything above.
   let randomSongsAdded = 0;
   const dedupedRandomIds = randomLibraryIds.filter(id => !existingSongIds.has(id));
   if (dedupedRandomIds.length > 0) {
@@ -460,7 +576,7 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
       for (const r of rows) idToDuration.set(r.id, r.duration || 0);
     }
 
-    const now = new Date().toISOString();
+    const now2 = new Date().toISOString();
     const insertStmt = sqlite.prepare(`
       INSERT INTO playlist_songs (playlist_id, song_id, position, playable, created_at)
       VALUES (?, ?, ?, 1, ?)
@@ -468,7 +584,7 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     let addedDuration = 0;
     const tx = sqlite.transaction((ids: string[]) => {
       for (const id of ids) {
-        insertStmt.run(playlistId, id, nextPos++, now);
+        insertStmt.run(playlistId, id, nextPos++, now2);
         addedDuration += idToDuration.get(id) || 0;
         randomSongsAdded++;
       }
@@ -477,8 +593,18 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
 
     const plRow = sqlite.prepare("SELECT song_count, duration FROM playlists WHERE id = ?").get(playlistId) as any;
     sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
-      .run((plRow?.song_count || 0) + randomSongsAdded, (plRow?.duration || 0) + addedDuration, now, playlistId);
+      .run((plRow?.song_count || 0) + randomSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
   }
+
+  // Finalize the TODAY row: stamp the generation date into the comment (for
+  // idempotency), set the new cover, and refresh timestamps.
+  sqlite.prepare("UPDATE playlists SET cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")
+    .run(
+      coverRef || null,
+      `${DAILY_TAG} ${dateStr} 组合自「${sourceLabel}」${extraParts.length > 0 ? ` + ${extraParts.join(" + ")}` : ""}`,
+      now,
+      playlistId
+    );
 
   return {
     date: dateStr,
