@@ -64,6 +64,15 @@ export function initWebSocketServer(server: import("http").Server): void {
     const unsub = subscribeAndForward(ws);
     ws.on("close", unsub);
     ws.on("error", unsub);
+    // App-level keepalive: clients (HA card) send {"type":"ping"} every 25s to
+    // keep the WS busy so proxies/firewalls don't kill it for idleness when no
+    // DLNA device is playing (no events flowing). Reply with a pong.
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(String(data));
+        if (msg && msg.type === "ping") send(ws, { type: "pong" });
+      } catch { /* ignore malformed frames */ }
+    });
   });
 }
 
