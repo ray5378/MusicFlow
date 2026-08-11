@@ -142,8 +142,9 @@ const sidePlaylists = computed(() => {
   return shuffled.slice(0, 6);
 });
 
-// 各平台精选：按 sourcePlatform 分组，每个平台随机抽 6 张歌单在首页分类展示
-//（只抽音乐 ≥30 首的歌单）。
+// 各平台精选：按 sourcePlatform 分组，每个平台随机抽 6 张歌单在首页分类展示。
+// 优先取音乐 ≥30 首的歌单;若不足 6 张,用该平台全部歌单(不限首数)随机补足,
+// 保证分区尽量满 6 张(该平台歌单总数不足 6 张则按实际显示)。
 const PLATFORM_META: Array<{ source: string; name: string }> = [
   { source: "netease", name: "网易云" },
   { source: "qq", name: "QQ音乐" },
@@ -152,9 +153,9 @@ const PLATFORM_META: Array<{ source: string; name: string }> = [
 ];
 const platformGroups = computed(() =>
   PLATFORM_META.map((meta) => {
-    const pool = playlists.value.filter(
-      (p) => (p.sourcePlatform || "") === meta.source && (p.songCount || 0) >= 30
-    );
+    const all = playlists.value.filter((p) => (p.sourcePlatform || "") === meta.source);
+    const eligible = all.filter((p) => (p.songCount || 0) >= 30);
+    const pool = eligible.length >= 6 ? eligible : all;
     return {
       ...meta,
       playlists: [...pool].sort(() => Math.random() - 0.5).slice(0, 6),
