@@ -4,6 +4,18 @@
       <h2>歌单</h2>
       <el-input v-model="searchQuery" placeholder="搜索歌单..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       <div class="header-actions">
+        <el-dropdown trigger="click" @command="onPlatformCommand">
+          <el-button><MfIcon name="Library" />平台歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item :command="''">全部歌单</el-dropdown-item>
+              <el-dropdown-item command="netease">网易云</el-dropdown-item>
+              <el-dropdown-item command="qq">QQ音乐</el-dropdown-item>
+              <el-dropdown-item command="kugou">酷狗</el-dropdown-item>
+              <el-dropdown-item command="kuwo">酷我</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-popover placement="bottom-end" :width="200" trigger="click" v-model:visible="showManageMenu">
           <template #reference>
             <el-button type="primary"><MfIcon name="Settings" />歌单管理</el-button>
@@ -17,6 +29,10 @@
           </div>
         </el-popover>
       </div>
+    </div>
+    <div v-if="activePlatform" class="platform-filter-bar">
+      <span class="platform-filter-label"><MfIcon name="Library" />平台筛选：{{ platformName(activePlatform) }}</span>
+      <el-button size="small" text @click="clearPlatform"><MfIcon name="X" />清除</el-button>
     </div>
     <div class="playlist-grid" v-loading="loading">
       <!-- Favorites special playlist -->
@@ -213,6 +229,19 @@ const pageSize = ref(parseInt(localStorage.getItem("playlistsPageSize") || "20")
 if (![15, 20, 50, 100].includes(pageSize.value)) pageSize.value = 20;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showManageMenu = ref(false);
+const activePlatform = ref(""); // "" = 全部歌单
+const PLATFORM_NAMES: Record<string, string> = { netease: "网易云", qq: "QQ音乐", kugou: "酷狗", kuwo: "酷我" };
+function platformName(p: string) { return PLATFORM_NAMES[p] || p; }
+function onPlatformCommand(platform: string) {
+  activePlatform.value = platform;
+  currentPage.value = 1;
+  loadPlaylists();
+}
+function clearPlatform() {
+  activePlatform.value = "";
+  currentPage.value = 1;
+  loadPlaylists();
+}
 const showCreateDialog = ref(false);
 const showRenameDialog = ref(false);
 const newPlaylistName = ref("");
@@ -272,7 +301,12 @@ async function loadPlaylists() {
   loading.value = true;
   try {
     const res = await api.get("/rest/api/v1/playlists", {
-      params: { page: currentPage.value, pageSize: pageSize.value, query: searchQuery.value },
+      params: {
+        page: currentPage.value,
+        pageSize: pageSize.value,
+        query: searchQuery.value,
+        platform: activePlatform.value || undefined,
+      },
     });
     playlists.value = res.data.items || [];
     total.value = res.data.total || 0;
@@ -576,6 +610,12 @@ onMounted(() => { loadPlaylists(); detectDailySource(); });
   .header-actions { display: flex; gap: 10px; }
 }
 .manage-menu { display: flex; flex-direction: column; gap: 2px; }
+.platform-filter-bar {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  padding: 8px 14px; border-radius: 8px; font-size: 13px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+  .platform-filter-label { display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
+}
 .manage-item {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px;
   cursor: pointer; font-size: 13px; color: var(--fnos-text-primary); transition: background 0.18s ease, color 0.18s ease;

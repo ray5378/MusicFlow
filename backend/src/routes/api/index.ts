@@ -953,15 +953,18 @@ apiRoutes.get("/v1/playlists", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
+  const platform = (c.req.query("platform") || "").trim();
   const user = c.get("user");
-  // Push the ownership/visibility filter + name search to SQL (no behavioural
-  // change: admin still sees all, others see their own + public).
-  const visibility = user?.isAdmin
-    ? undefined
-    : or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1));
-  const where = query
-    ? (visibility ? and(visibility, like(playlists.name, `%${query}%`)) : like(playlists.name, `%${query}%`))
-    : visibility;
+  // Push the ownership/visibility filter + name search + platform filter to SQL
+  // (no behavioural change: admin still sees all, others see their own + public).
+  // and() skips undefined conditions, so any subset works.
+  const where = and(
+    user?.isAdmin
+      ? undefined
+      : or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1)),
+    query ? like(playlists.name, `%${query}%`) : undefined,
+    platform ? eq(playlists.sourcePlatform, platform) : undefined,
+  );
   // Daily-recommend-first ordering (今日推荐 > others) expressed as a
   // CASE, with recency as the secondary sort. Pushed to SQL together with
   // LIMIT/OFFSET so we never load the whole table into JS just to slice it.
