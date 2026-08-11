@@ -4,7 +4,7 @@
 // registry by *capability* / *type* — never by a concrete plugin name. Plugins
 // are registered at boot (built-ins) and, in Phase 3, from data/plugins/*.
 
-import { db } from "../db/index.js";
+import { db, onDatabaseReady } from "../db/index.js";
 import { plugins } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import type { PluginManifest, PluginType, PluginCapability, LyricSongInput } from "./types.js";
@@ -28,22 +28,44 @@ export function registerOnlineProvider(p: { manifest: PluginManifest; [k: string
   registerPlugin(p.manifest, p);
 }
 
-/** Boot all built-in plugins: register them and seed their DB rows (once).
- *  Called once at startup (from online/index.ts). Seeding is manifest-driven
- *  so adding a built-in plugin needs no core change and no hardcoded names. */
+/** Register all built-in plugins into the in-memory registry.
+ *
+ *  PURE: touches no database. This runs at *module load* time (from
+ *  online/index.ts), which happens before `initDatabase()` in the entry file
+ *  and in unit tests — so doing DB work here would hit "no such table".
+ *  DB row seeding is a separate, explicitly-ordered step: seedBuiltinPluginRows(). */
 export function registerBuiltinPlugins() {
+  for (const { manifest, impl } of BUILTIN_PLUGINS) {
+    registerPlugin(manifest, impl);
+  }
+  // Seed rows as soon as the schema is ready (now, if it already is).
+  onDatabaseReady(seedBuiltinPluginRows);
+}
+
+/** Default config object derived from a manifest's configSchema. */
+function defaultConfigFor(manifest: PluginManifest): Record<string, any> {
+  const cfg: Record<string, any> = {};
+  for (const f of manifest.configSchema) {
+    if (f.default !== undefined) cfg[f.key] = f.default;
+  }
+  if (!("baseUrl" in cfg)) cfg.baseUrl = "";
+  return cfg;
+}
+
+/** Seed DB rows for every registered plugin that doesn't have one yet.
+ *
+ *  MUST be called after the schema exists (i.e. after `initDatabase()`).
+ *  Manifest-driven: adding a built-in plugin needs no core change and no
+ *  hardcoded plugin name. Idempotent — existing rows are left untouched so
+ *  user config/enabled state survives restarts. */
+export function seedBuiltinPluginRows(): number {
   const now = new Date().toISOString();
+  let inserted = 0;
   const existing = new Set(
     (db.select({ name: plugins.name }).from(plugins).all() as any[]).map((r: any) => r.name),
   );
-  for (const { manifest, impl } of BUILTIN_PLUGINS) {
-    registerPlugin(manifest, impl);
+  for (const { manifest } of listRegistered()) {
     if (existing.has(manifest.id)) continue;
-    const defaultConfig: Record<string, any> = {};
-    for (const f of manifest.configSchema) {
-      if (f.default !== undefined) defaultConfig[f.key] = f.default;
-    }
-    if (!("baseUrl" in defaultConfig)) defaultConfig.baseUrl = "";
     db.insert(plugins)
       .values({
         id: manifest.id,
@@ -52,12 +74,14 @@ export function registerBuiltinPlugins() {
         description: manifest.description || "",
         manifest: JSON.stringify(manifest),
         enabled: 0,
-        config: JSON.stringify(defaultConfig),
+        config: JSON.stringify(defaultConfigFor(manifest)),
         createdAt: now,
         updatedAt: now,
       })
       .run();
+    inserted++;
   }
+  return inserted;
 }
 
 export function getPlugin(id: string): RegisteredPlugin | undefined {

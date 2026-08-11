@@ -148,6 +148,14 @@ function setup(deviceId = "d1") {
   up.attachProtocol(device as unknown as ProtocolPlayer);
   qc.registerPlayer(deviceId, up, pc);
 
+  // 队列默认 playMode 是 "shuffle",而 playFrom 在 shuffle 下会**忽略 startIndex
+  // 随机挑首曲**(QueueController.playFrom),pickNext 也会随机选下一首 —— 这是
+  // 有意的产品行为,但会让本文件的链路断言(首曲 s1 → 自动切 s2)变成随机通过。
+  // 本文件测的是 GENA 状态机 / 乐观窗口 / 自动切歌,与随机无关,故先建队列再把
+  // 模式钉成 "order",保证顺序确定。
+  qc.setQueue(deviceId, [], -1, "http://base");
+  qc.setPlayMode(deviceId, "order");
+
   return { pc, qc, device };
 }
 

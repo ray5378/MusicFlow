@@ -26,6 +26,36 @@ export const db = drizzle(sqlite, { schema });
 // lookups on the `settings` table without going through drizzle each time.
 export { sqlite };
 
+// ==================== DB-ready hooks ====================
+//
+// Modules that need to write rows right after the schema exists (e.g. the
+// plugin registry seeding its manifest-driven rows) subscribe here instead of
+// being imported by this file. That keeps the dependency one-directional
+// (plugins -> db, never db -> plugins) and avoids an ESM load-time cycle.
+type DbReadyHook = () => void;
+const dbReadyHooks: DbReadyHook[] = [];
+let dbReady = false;
+
+/** Run `hook` once the schema is initialized. If the DB is already
+ *  initialized, the hook runs immediately (so import order can't lose it). */
+export function onDatabaseReady(hook: DbReadyHook): void {
+  dbReadyHooks.push(hook);
+  if (dbReady) runHook(hook);
+}
+
+function runHook(hook: DbReadyHook): void {
+  try {
+    hook();
+  } catch (e: any) {
+    console.error("[db] db-ready hook failed:", e?.message || e);
+  }
+}
+
+function seedRegisteredPlugins(): void {
+  dbReady = true;
+  for (const hook of dbReadyHooks) runHook(hook);
+}
+
 const ENC_KEY = crypto.createHash("sha256").update(JWT_SECRET).digest();
 
 // AES-256-GCM encrypt the plaintext password (needed to verify OpenSubsonic token auth:
@@ -465,6 +495,12 @@ export function initDatabase() {
     { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/4", name: "QQ音乐·巅峰榜流行指数" },
     { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
   ]));
+
+  // Seed DB rows for every registered plugin (manifest-driven, idempotent).
+  // Deferred require-style import: the registry imports `db` from this module,
+  // so a static import here would create a load-time cycle. Doing it *inside*
+  // initDatabase() guarantees the schema already exists.
+  seedRegisteredPlugins();
 
   console.log("Database initialized successfully");
 }

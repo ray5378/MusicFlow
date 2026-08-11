@@ -117,6 +117,11 @@ function setup(): { qc: QueueController; pc: PlayerController } {
   const up = new UniversalPlayer("group:g1", "组");
   up.attachProtocol(createGroupProtocolPlayer("g1"));
   qc.registerPlayer("g1", up, pc);
+  // 队列默认 playMode="shuffle",playFrom 在 shuffle 下会忽略 startIndex 随机挑
+  // 首曲(QueueController.playFrom),会让"首曲必须是 s1"的断言随机失败。本文件
+  // 测的是组悬挂/恢复/对齐,与随机无关 → 钉成 order 保证确定性。
+  qc.setQueue("g1", [], -1, "http://base");
+  qc.setPlayMode("g1", "order");
   return { qc, pc };
 }
 

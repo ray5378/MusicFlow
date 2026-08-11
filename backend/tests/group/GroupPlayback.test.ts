@@ -209,6 +209,12 @@ describe("QueueController 组集成", () => {
     d1up.attachProtocol(h.fakeDlnaProtocol("d1") as unknown as ProtocolPlayer);
     qc.registerPlayer("d1", d1up, pc);
 
+    // 队列默认 playMode="shuffle",playFrom 在 shuffle 下会忽略 startIndex 随机
+    // 挑首曲,导致"首曲 s1 → advance 到 s2"的断言随机失败。本用例测扇出/压制/
+    // 持久化,与随机无关 → 钉成 order。
+    qc.setQueue("g1", [], -1, "http://base");
+    qc.setPlayMode("g1", "order");
+
     // 组播放 → 扇出到在线成员 d1
     await qc.playFrom("g1", makeItems(2), 0, "http://base");
     expect(h.memberCalls["d1"]).toContain("playMedia:s1");
