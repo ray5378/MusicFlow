@@ -1422,6 +1422,8 @@ apiRoutes.post("/v1/peers/:peerId/heartbeat", (c) => {
 });
 
 // Get a peer's queue snapshot (local: from local_queues; dlna/group: from queue manager).
+// offset/size 分页:items 只含当前页,total 为完整队列长度(currentIndex 恒为绝对下标)。
+// 缺省 offset/size 返回全量(向后兼容)。
 apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const snap = pm.getQueueSnapshot(peerId);
@@ -1429,7 +1431,12 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   // dlna peer:补 currentMedia(原 QueueSnapshot 字段,新 snapshot 改用 ended)。
   const parsed = parsePeerId(peerId);
   const currentMedia = parsed && parsed.kind === "dlna" ? getCurrentMedia(parsed.id) : undefined;
-  return c.json({ ...snap, currentMedia });
+  const items = Array.isArray(snap.items) ? snap.items : [];
+  const total = items.length;
+  const offset = Math.max(0, parseInt(c.req.query("offset") || "0", 10) || 0);
+  const size = parseInt(c.req.query("size") || "0", 10) || 0;
+  const pagedItems = size > 0 ? items.slice(offset, offset + size) : items;
+  return c.json({ ...snap, items: pagedItems, total, currentMedia });
 });
 
 // Replace the queue and (for dlna/group) start playing from startIndex.
@@ -1516,6 +1523,24 @@ apiRoutes.delete("/v1/peers/:peerId/queue/:index", async (c) => {
     getQueueManager().removeAt(parsed.id, index, getDlnaBaseUrl(c));
   } else {
     pm.localRemoveAt(peerId, index);
+  }
+  return c.json({ success: true });
+});
+
+// Reorder a queue item (drag & drop). Body: { from: number, to: number }
+apiRoutes.post("/v1/peers/:peerId/queue/reorder", async (c) => {
+  const peerId = decodePeerId(c);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { from, to } = body;
+  if (typeof from !== "number" || typeof to !== "number" || !Number.isInteger(from) || !Number.isInteger(to)) {
+    return c.json({ error: "需要整数 from/to" }, 400);
+  }
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (isCastPeer(parsed)) {
+    getQueueManager().reorder(parsed.id, from, to);
+  } else {
+    pm.localReorder(peerId, from, to);
   }
   return c.json({ success: true });
 });

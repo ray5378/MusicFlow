@@ -85,8 +85,8 @@
                   <span v-if="!p.available" class="controls-peer-offline">离线</span>
                 </div>
                 <div class="controls-peer-meta">
-                  <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
-                    {{ p.queue.items.length }} 首
+                  <span v-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
+                    {{ p.queue.total ?? p.queue.items?.length }} 首
                     <span v-if="p.queue.isActive">
                       · 播放中
                       <span v-if="peerPlayingTitle(p)" class="controls-playing-title">· {{ peerPlayingTitle(p) }}</span>
@@ -284,8 +284,8 @@
                     <span v-if="!p.available" class="psi-offline">离线</span>
                   </div>
                   <div class="psi-meta">
-                    <span v-if="p.queue && p.queue.items && p.queue.items.length > 0">
-                      {{ p.queue.items.length }} 首
+                    <span v-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
+                      {{ p.queue.total ?? p.queue.items?.length }} 首
                       <span v-if="p.queue.isActive">
                         · 播放中
                         <span v-if="peerPlayingTitle(p)" class="psi-playing-title">· {{ peerPlayingTitle(p) }}</span>

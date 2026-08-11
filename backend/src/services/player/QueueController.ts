@@ -484,6 +484,20 @@ export class QueueController extends EventEmitter {
     this.emit("queue_changed", playerId, this.snapshot(playerId));
   }
 
+  /** 拖拽排序:搬移一条,当前播放曲目下标跟随到新位置(不打断播放)。 */
+  reorder(playerId: string, from: number, to: number): void {
+    playerId = stripPlayerPrefix(playerId);
+    const q = this.queues.get(playerId); if (!q) return;
+    if (from < 0 || from >= q.items.length || to < 0 || to >= q.items.length || from === to) return;
+    const moved = q.items[from];
+    q.items.splice(from, 1);
+    q.items.splice(to, 0, moved);
+    // 当前播放曲目跟随移动(对象引用定位新下标)
+    q.currentIndex = q.items.indexOf(moved);
+    this.persist(playerId);
+    this.emit("queue_changed", playerId, this.snapshot(playerId));
+  }
+
   /** Mark a device inactive without clearing the queue. 对照原 QueueManager.deactivate。 */
   deactivate(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);

@@ -357,6 +357,28 @@ class PeerManager extends EventEmitter {
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
+  /** 拖拽排序:搬移一条本地队列曲目,当前曲目下标跟随到新位置。 */
+  localReorder(peerId: string, from: number, to: number): void {
+    const snap = this.getQueueSnapshot(peerId);
+    if (!snap) return;
+    if (from < 0 || from >= snap.items.length || to < 0 || to >= snap.items.length || from === to) return;
+    const items = [...snap.items];
+    const moved = items[from];
+    items.splice(from, 1);
+    items.splice(to, 0, moved);
+    // 当前播放曲目跟随移动(对象引用定位新下标)
+    let currentIndex = items.indexOf(snap.items[snap.currentIndex]);
+    if (currentIndex < 0) currentIndex = Math.max(0, Math.min(to, items.length - 1));
+    const now = new Date().toISOString();
+    db.update(localQueues).set({
+      itemsJson: JSON.stringify(items),
+      currentIndex,
+      lastActiveAt: now,
+      updatedAt: now,
+    }).where(eq(localQueues.peerId, peerId)).run();
+    this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
+  }
+
   /** Clear a local queue. */
   localClear(peerId: string): void {
     const now = new Date().toISOString();

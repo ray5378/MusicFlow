@@ -94,7 +94,19 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
 // Send the current peer list (with queue snapshots) so a freshly connected
 // client can populate the player switcher immediately.
 function sendPeerSnapshot(ws: WebSocket): void {
-  send(ws, { type: "peer_snapshot", peers: getPeerManager().listWithQueues() });
+  send(ws, { type: "peer_snapshot", peers: getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) })) });
+}
+
+// 大队列摘要:items 超过阈值时 WS 只推元数据(total/currentIndex/playMode),
+// 客户端(卡片/Web)按需走 /v1/peers/:peerId/queue?offset=&size= 分块拉取。
+// 阈值与卡片 CHUNK 一致;小队列保持全量推送(兼容旧客户端)。所有模式都带 total,
+// 客户端统一用 total ?? items.length。
+const QUEUE_WS_CAP = 200;
+function summarizeQueue(q: any): any {
+  if (!q || !Array.isArray(q.items)) return q;
+  const total = q.items.length;
+  if (total <= QUEUE_WS_CAP) return { ...q, total };
+  return { ...q, total, items: [] };
 }
 
 // Subscribe to all relevant event emitters and forward as WS messages.
@@ -113,7 +125,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
     send(ws, { type: "media_changed", device_id: deviceId, media });
   };
   const onQueue = (deviceId: string, queue: any) => {
-    send(ws, { type: "queue_changed", device_id: deviceId, queue });
+    send(ws, { type: "queue_changed", device_id: deviceId, queue: summarizeQueue(queue) });
   };
   const onDeviceList = (deviceCount: number) => {
     send(ws, { type: "device_list_changed", deviceCount });
@@ -124,7 +136,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const onPeerRegistered = (peer: any) => send(ws, { type: "peer_registered", peer });
   const onPeerAvailable = (peer: any) => send(ws, { type: "peer_available", peer });
   const onPeerUnavailable = (peer: any) => send(ws, { type: "peer_unavailable", peer });
-  const onPeerQueue = (peerId: string, queue: any) => send(ws, { type: "peer_queue_changed", peer_id: peerId, queue });
+  const onPeerQueue = (peerId: string, queue: any) => send(ws, { type: "peer_queue_changed", peer_id: peerId, queue: summarizeQueue(queue) });
   const onPeerQueueCleared = (peerId: string) => send(ws, { type: "peer_queue_cleared", peer_id: peerId });
 
   // Group events: 组创建/改名/成员变更 → 前端群组页刷新;组删除 → 移除条目。
