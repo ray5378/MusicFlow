@@ -51,10 +51,46 @@ interface SongRow {
   path: string;
   title: string;
   artist: string | null;
+  url?: string | null;
+  type?: string | null;
+  duration?: number | null;
 }
 
 const lrcCache = new Map<string, { content: string | null; at: number }>();
 const CACHE_TTL = 10 * 60 * 1000; // 10 min
+
+// Periodically evict expired entries so the in-memory cache doesn't grow
+// unbounded (the TTL above is otherwise only enforced lazily on read).
+const lrcCacheSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of lrcCache) {
+    if (now - v.at >= CACHE_TTL) lrcCache.delete(k);
+  }
+}, 5 * 60 * 1000);
+// Don't keep the process alive just for cache sweeping.
+(lrcCacheSweep as any).unref?.();
+
+// Build the go-music-dl /music/download_lrc URL from a /music/download stream URL.
+// Keeps id/source/name/artist/album/extra; drops streaming-only params; adds
+// duration + format=auto so go-music-dl reuses its own per-source lyric logic.
+function deriveGmdlLrcUrl(downloadUrl: string, durationSec: number): string | null {
+  try {
+    const u = new URL(downloadUrl);
+    if (!u.pathname.endsWith("/music/download")) return null;
+    u.pathname = u.pathname.slice(0, -"/music/download".length) + "/music/download_lrc";
+    u.searchParams.delete("stream");
+    u.searchParams.delete("range");
+    u.searchParams.delete("cover");
+    u.searchParams.delete("embed");
+    u.searchParams.set("format", "auto");
+    if (durationSec > 0 && !u.searchParams.has("duration")) {
+      u.searchParams.set("duration", String(durationSec));
+    }
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
 
 // Fetch the .lrc file next to a song (WebDAV or local)
 export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
@@ -62,6 +98,27 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   if (cached && Date.now() - cached.at < CACHE_TTL) return cached.content;
 
   let content: string | null = null;
+
+  // go-music-dl web songs: derive the /music/download_lrc URL from the stored
+  // stream URL and fetch the LRC in-memory (never written to disk).
+  if (song.type === "web" && song.url && song.url.includes("/music/download")) {
+    const lrcUrl = deriveGmdlLrcUrl(song.url, song.duration || 0);
+    if (lrcUrl) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch(lrcUrl, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const text = await res.text();
+          if (text && !text.startsWith("Lyric not found")) content = text;
+        }
+      } catch { content = null; }
+      lrcCache.set(song.id, { content, at: Date.now() });
+      return content;
+    }
+  }
+
   try {
     const colon1 = song.path.indexOf(":");
     const prefix = song.path.slice(0, colon1);
