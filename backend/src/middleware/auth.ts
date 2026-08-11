@@ -91,7 +91,7 @@ export async function authMiddleware(c: Context, next: Next) {
     if (user) { c.set("user", user); return next(); }
   }
 
-  return c.json({ "subsonic-response": { status: "failed", error: { code: 40, message: "Unauthorized" }, version: "1.16.1", type: "MusicFree" } }, 401);
+  return c.json({ "subsonic-response": { status: "failed", error: { code: 40, message: "Unauthorized" }, version: "1.16.1", type: "MusicFlow" } }, 401);
 }
 
 async function getUserById(id: string): Promise<AuthUser | null> {
@@ -145,7 +145,7 @@ async function authenticateLegacy(username: string, p: string): Promise<AuthUser
 export async function adminMiddleware(c: Context, next: Next) {
   const user = c.get("user");
   if (!user?.isAdmin) {
-    return c.json({ "subsonic-response": { status: "failed", error: { code: 50, message: "Admin required" }, version: "1.16.1", type: "MusicFree" } }, 403);
+    return c.json({ "subsonic-response": { status: "failed", error: { code: 50, message: "Admin required" }, version: "1.16.1", type: "MusicFlow" } }, 403);
   }
   return next();
 }

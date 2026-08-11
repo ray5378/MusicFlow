@@ -218,6 +218,27 @@ export function initDatabase() {
       FOREIGN KEY (song_id) REFERENCES songs(id)
     );
 
+    CREATE TABLE IF NOT EXISTS user_ratings (
+      user_id TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      rating INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (user_id, item_type, item_id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_play_queues (
+      user_id TEXT PRIMARY KEY,
+      entry_ids_json TEXT NOT NULL DEFAULT '[]',
+      current_id TEXT,
+      position INTEGER NOT NULL DEFAULT 0,
+      changed_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      changed_by TEXT DEFAULT '',
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
     CREATE TABLE IF NOT EXISTS media_sources (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

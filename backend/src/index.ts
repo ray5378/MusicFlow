@@ -443,7 +443,7 @@ wirePlayerQueueControllers();
 getQueueController().startPollLoop(() => getEffectiveBaseUrl());
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`MusicFree backend listening on http://0.0.0.0:${port}`);
+  console.log(`MusicFlow backend listening on http://0.0.0.0:${port}`);
   // Broadcast via mDNS so the HA integration can auto-discover this instance.
   startMdnsBroadcast(port);
   // Resume active queues after a short delay so SSDP discovery has time to

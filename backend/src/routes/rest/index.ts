@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
-import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources } from "../../db/schema.js";
+import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
@@ -67,7 +67,7 @@ function getParams(c: any, name: string): string[] {
 }
 
 const API_VERSION = "1.16.1";
-const SERVER_VERSION = "1.0.0";
+const SERVER_VERSION = process.env.APP_VERSION || "1.0.0";
 const MIME_MAP: Record<string, string> = {
   mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
   ogg: "audio/ogg", m4a: "audio/mp4", wma: "audio/x-ms-wma", ape: "audio/ape",
@@ -77,11 +77,18 @@ const MIME_MAP: Record<string, string> = {
 // ==================== Helpers ====================
 
 function ok(data: any = {}) {
-  return { "subsonic-response": { status: "ok", version: API_VERSION, serverVersion: SERVER_VERSION, type: "MusicFree", openSubsonic: true, ...data } };
+  return { "subsonic-response": { status: "ok", version: API_VERSION, serverVersion: SERVER_VERSION, type: "MusicFlow", openSubsonic: true, ...data } };
 }
 
 function err(code: number, message: string) {
-  return (c: any) => c.json({ "subsonic-response": { status: "failed", version: API_VERSION, serverVersion: SERVER_VERSION, type: "MusicFree", openSubsonic: true, error: { code, message } } });
+  return (c: any) => c.json({ "subsonic-response": { status: "failed", version: API_VERSION, serverVersion: SERVER_VERSION, type: "MusicFlow", openSubsonic: true, error: { code, message } } });
+}
+
+// Response body for a failed request. Subsonic clients inspect the body's
+// status field, so a failed lookup MUST return status:"failed" — not
+// ok({error}) which masks the failure behind a success envelope.
+function fail(code: number, message: string) {
+  return { "subsonic-response": { status: "failed", version: API_VERSION, serverVersion: SERVER_VERSION, type: "MusicFlow", openSubsonic: true, error: { code, message } } };
 }
 
 const ERR_NOT_FOUND = (what: string) => err(70, `${what} not found`);
@@ -90,6 +97,15 @@ function getStarredSet(userId?: string): Set<string> {
   if (!userId) return new Set();
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, userId)).all();
   return new Set(favs.map(f => f.songId));
+}
+
+// OpenSubsonic setRating 的读取端:单条查询,用于单实体端点(getSong/getAlbum/getArtist)
+// 回填 userRating。列表端点保持 0(客户端普遍忽略),避免逐条 N+1。
+function getRatingValue(userId: string | undefined, itemType: string, itemId: string): number {
+  if (!userId) return 0;
+  return db.select({ rating: userRatings.rating }).from(userRatings)
+    .where(and(eq(userRatings.userId, userId), eq(userRatings.itemType, itemType), eq(userRatings.itemId, itemId)))
+    .get()?.rating ?? 0;
 }
 
 function resolveAlbumCover(albumId: string | null): string | undefined {
@@ -117,7 +133,7 @@ function albumCoverRef(a: any): string | undefined {
 }
 
 // OpenSubsonic Child for a song
-function songToChild(s: any, starredSet?: Set<string>): any {
+function songToChild(s: any, starredSet?: Set<string>, rating?: number): any {
   const starred = starredSet?.has(s.id);
   return {
     id: s.id,
@@ -146,14 +162,14 @@ function songToChild(s: any, starredSet?: Set<string>): any {
     artistId: s.artistId || undefined,
     type: "music",
     starred: starred ? new Date().toISOString() : undefined,
-    userRating: 0,
+    userRating: rating ?? 0,
     isVideo: false,
     mediaType: "song",
   };
 }
 
 // OpenSubsonic AlbumID3
-function albumToID3(a: any, starredSet?: Set<string>): any {
+function albumToID3(a: any, starredSet?: Set<string>, rating?: number): any {
   const starred = starredSet?.has(a.id);
   return {
     id: a.id,
@@ -168,12 +184,13 @@ function albumToID3(a: any, starredSet?: Set<string>): any {
     starred: starred ? new Date().toISOString() : undefined,
     year: a.year || 0,
     genre: a.genre || "",
+    userRating: rating ?? 0,
     mediaType: "album",
   };
 }
 
 // OpenSubsonic ArtistID3
-function artistToID3(a: any, starredSet?: Set<string>): any {
+function artistToID3(a: any, starredSet?: Set<string>, rating?: number): any {
   const starred = starredSet?.has(a.id);
   return {
     id: a.id,
@@ -182,7 +199,7 @@ function artistToID3(a: any, starredSet?: Set<string>): any {
     artistImageUrl: a.coverArt ? `/rest/getCoverArt?id=ar-${a.id}&size=600` : undefined,
     albumCount: a.albumCount || 0,
     starred: starred ? new Date().toISOString() : undefined,
-    userRating: 0,
+    userRating: rating ?? 0,
     mediaType: "artist",
   };
 }
@@ -237,7 +254,6 @@ restRoutes.get("/getOpenSubsonicExtensions", (c) => c.json(ok({
     { name: "formPost", versions: [1] },
     { name: "songLyrics", versions: [1, 2] },
     { name: "indexBasedQueue", versions: [1] },
-    { name: "transcoding", versions: [1] },
     { name: "playbackReport", versions: [1] },
     { name: "topSongsByArtistId", versions: [1] },
   ],
@@ -247,8 +263,40 @@ restRoutes.all("/startScan", (c) => c.json(ok({ scanStatus: { scanning: false, c
 restRoutes.get("/getBookmarks", (c) => c.json(ok({ bookmarks: { bookmark: [] } })));
 restRoutes.all("/createBookmark", (c) => c.json(ok()));
 restRoutes.all("/deleteBookmark", (c) => c.json(ok()));
-restRoutes.get("/getPlayQueue", (c) => c.json(ok({ playQueue: { entry: [], username: c.get("user")?.username || "", changed: new Date().toISOString(), changedBy: "MusicFree" } })));
-restRoutes.all("/savePlayQueue", (c) => c.json(ok({ playQueue: { entry: [], username: c.get("user")?.username || "", changed: new Date().toISOString(), changedBy: "MusicFree" } })));
+restRoutes.get("/getPlayQueue", (c) => {
+  const user = c.get("user");
+  const empty = { entry: [], username: user?.username || "", changed: new Date().toISOString(), changedBy: "MusicFlow" };
+  if (!user) return c.json(ok({ playQueue: empty }));
+  const row = db.select().from(userPlayQueues).where(eq(userPlayQueues.userId, user.id)).get();
+  if (!row) return c.json(ok({ playQueue: empty }));
+  const ids = JSON.parse(row.entryIdsJson || "[]") as string[];
+  const starredSet = getStarredSet(user.id);
+  const songMap = ids.length
+    ? new Map(db.select().from(songs).where(inArray(songs.id, ids)).all().map(s => [s.id, s]))
+    : new Map<string, any>();
+  const entry = ids.map(id => songMap.get(id)).filter(Boolean).map(s => songToChild(s, starredSet));
+  return c.json(ok({ playQueue: {
+    entry,
+    current: row.currentId || undefined,
+    position: row.position || 0,
+    username: user.username,
+    changed: row.changedAt || new Date().toISOString(),
+    changedBy: "MusicFlow",
+  } }));
+});
+
+restRoutes.all("/savePlayQueue", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json(fail(40, "Unauthorized"));
+  const body = await parseBody(c);
+  const ids = toIdArray(body.id);
+  const current = String(body.current || "");
+  const position = parseInt(String(body.position ?? "0"), 10) || 0;
+  const now = new Date().toISOString();
+  db.insert(userPlayQueues).values({ userId: user.id, entryIdsJson: JSON.stringify(ids), currentId: current || null, position, changedAt: now, changedBy: "MusicFlow" })
+    .onConflictDoUpdate({ target: userPlayQueues.userId, set: { entryIdsJson: JSON.stringify(ids), currentId: current || null, position, changedAt: now, changedBy: "MusicFlow" } }).run();
+  return c.json(ok());
+});
 restRoutes.get("/getInternetRadioStations", (c) => c.json(ok({ internetRadioStations: { internetRadioStation: [] } })));
 restRoutes.get("/getPodcasts", (c) => c.json(ok({ podcasts: { channel: [] } })));
 restRoutes.get("/getNewestPodcasts", (c) => c.json(ok({ newestPodcasts: { episode: [] } })));
@@ -259,7 +307,7 @@ restRoutes.get("/getCaptions", (c) => c.json(ok()));
 restRoutes.get("/getUser", (c) => {
   const username = getParam(c, "username") || c.get("user")?.username;
   const user = db.select().from(users).where(eq(users.username, username || "")).get();
-  if (!user) return c.json(ok({ error: { code: 70, message: "User not found" } }));
+  if (!user) return c.json(fail(70, "User not found"));
   const roles = (b: boolean) => b;
   return c.json(ok({ user: {
     username: user.username,
@@ -284,6 +332,17 @@ restRoutes.get("/getUser", (c) => {
 restRoutes.get("/getUsers", (c) => {
   const all = db.select().from(users).all();
   return c.json(ok({ users: { user: all.map(u => ({ username: u.username, email: u.email || "", scrobblingEnabled: true, adminRole: !!u.isAdmin, settingsRole: true, downloadRole: true, uploadRole: false, playlistRole: true, coverArtRole: true, commentRole: false, podcastRole: false, streamRole: true, jukeboxRole: false, shareRole: false, videoConversionRole: false, folder: [0] })) } }));
+});
+
+// MusicFlow 不存用户头像:对存在的用户返回品牌占位图(与 coverArt 占位同风格),
+// 避免客户端(如 MA 设置页)因 404 报错;未知用户返回标准 70 失败体。
+restRoutes.get("/getAvatar", (c) => {
+  const username = getParam(c, "username") || c.get("user")?.username || "";
+  const user = username ? db.select().from(users).where(eq(users.username, username)).get() : undefined;
+  if (!user) return c.json(fail(70, "User not found"));
+  const initial = (user.username || "?").slice(0, 1).toUpperCase().replace(/[<>&'"]/g, "");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300"><rect fill="#1a1a2e" width="300" height="300"/><circle cx="150" cy="115" r="48" fill="#16213e"/><rect x="95" y="180" width="110" height="80" rx="40" fill="#16213e"/><text x="150" y="130" text-anchor="middle" font-family="sans-serif" font-size="46" fill="#e94560">${initial}</text></svg>`;
+  return new Response(svg, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" } });
 });
 
 // ==================== Browsing ====================
@@ -323,23 +382,23 @@ restRoutes.get("/getArtist", (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const artist = db.select().from(artists).where(eq(artists.id, id)).get();
-  if (!artist) return c.json(ok({ error: { code: 70, message: "Artist not found" } }));
+  if (!artist) return c.json(fail(70, "Artist not found"));
   const artistAlbums = db.select().from(albums).where(eq(albums.artistId, id)).all();
   const starredSet = getAlbumStarredSet(user?.id);
-  return c.json(ok({ artist: { ...artistToID3(artist, getArtistStarredSet(user?.id)), album: artistAlbums.map(al => albumToID3(al, starredSet)) } }));
+  return c.json(ok({ artist: { ...artistToID3(artist, getArtistStarredSet(user?.id), getRatingValue(user?.id, "artist", id)), album: artistAlbums.map(al => albumToID3(al, starredSet)) } }));
 });
 
 restRoutes.get("/getArtistInfo", (c) => {
   const id = getParam(c, "id");
   const artist = db.select().from(artists).where(eq(artists.id, id || "")).get();
-  if (!artist) return c.json(ok({ error: { code: 70, message: "Artist not found" } }));
+  if (!artist) return c.json(fail(70, "Artist not found"));
   return c.json(ok({ artistInfo: { biography: artist.bio || "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=200` : "", mediumImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=500` : "", largeImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=1200` : "", similarArtist: { artist: [] } } }));
 });
 
 restRoutes.get("/getArtistInfo2", (c) => {
   const id = getParam(c, "id");
   const artist = db.select().from(artists).where(eq(artists.id, id || "")).get();
-  if (!artist) return c.json(ok({ error: { code: 70, message: "Artist not found" } }));
+  if (!artist) return c.json(fail(70, "Artist not found"));
   return c.json(ok({ artistInfo2: { biography: artist.bio || "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=200` : "", mediumImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=500` : "", largeImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=1200` : "", similarArtist: { artist: [] } } }));
 });
 
@@ -347,7 +406,7 @@ restRoutes.get("/getAlbum", (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const album = db.select().from(albums).where(eq(albums.id, id)).get();
-  if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
+  if (!album) return c.json(fail(70, "Album not found"));
   // Server-side paging: only the requested page is pulled from SQL (was: load the
   // whole album into memory then slice). A huge compilation album never spikes memory.
   const whereAlbum = eq(songs.albumId, id);
@@ -361,13 +420,13 @@ restRoutes.get("/getAlbum", (c) => {
   const totalDuration = db.select({ s: sql<number>`COALESCE(SUM(${songs.duration}), 0)` }).from(songs).where(whereAlbum).get()?.s ?? 0;
   const starredSet = getStarredSet(user?.id);
   const songsArr = pageSongs.map(s => songToChild(s, starredSet));
-  return c.json(ok({ album: { ...albumToID3(album, getAlbumStarredSet(user?.id)), songCount: songsArr.length, songTotal, duration: totalDuration, song: songsArr } }));
+  return c.json(ok({ album: { ...albumToID3(album, getAlbumStarredSet(user?.id), getRatingValue(user?.id, "album", id)), songCount: songsArr.length, songTotal, duration: totalDuration, song: songsArr } }));
 });
 
 restRoutes.get("/getAlbumInfo", (c) => {
   const id = getParam(c, "id");
   const album = db.select().from(albums).where(eq(albums.id, id || "")).get();
-  if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
+  if (!album) return c.json(fail(70, "Album not found"));
   const coverRef = albumCoverRef(album);
   return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=200` : "", mediumImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=500` : "", largeImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=1200` : "" } }));
 });
@@ -375,7 +434,7 @@ restRoutes.get("/getAlbumInfo", (c) => {
 restRoutes.get("/getAlbumInfo2", (c) => {
   const id = getParam(c, "id");
   const album = db.select().from(albums).where(eq(albums.id, id || "")).get();
-  if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
+  if (!album) return c.json(fail(70, "Album not found"));
   const coverRef = albumCoverRef(album);
   return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=200` : "", mediumImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=500` : "", largeImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=1200` : "" } }));
 });
@@ -384,8 +443,8 @@ restRoutes.get("/getSong", (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
-  if (!song) return c.json(ok({ error: { code: 70, message: "Song not found" } }));
-  return c.json(ok({ song: songToChild(song, getStarredSet(user?.id)) }));
+  if (!song) return c.json(fail(70, "Song not found"));
+  return c.json(ok({ song: songToChild(song, getStarredSet(user?.id), getRatingValue(user?.id, "song", id)) }));
 });
 
 restRoutes.get("/getMusicDirectory", (c) => {
@@ -530,7 +589,13 @@ restRoutes.get("/getGenres", (c) => {
 });
 
 restRoutes.get("/getTopSongs", (c) => {
-  const artistName = getParam(c, "artist") || "";
+  const artistId = getParam(c, "artistId");
+  let artistName = getParam(c, "artist") || "";
+  if (!artistName && artistId) {
+    // OpenSubsonic topSongsByArtistId 扩展:按 artistId 解析歌手名
+    const a = db.select().from(artists).where(eq(artists.id, artistId)).get();
+    artistName = a?.name || "";
+  }
   const count = parseInt(getParam(c, "count") || "50") || 50;
   const user = c.get("user");
   const allSongs = db.select().from(songs).where(eq(songs.artist, artistName)).all().slice(0, count);
@@ -568,10 +633,10 @@ restRoutes.get("/getPlaylist", (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(ok({ error: { code: 70, message: "Playlist not found" } }));
+  if (!playlist) return c.json(fail(70, "Playlist not found"));
   // Private playlists are only visible to the owner (admins can view all)
   if (!playlist.isPublic && playlist.ownerId !== user?.id && !user?.isAdmin) {
-    return c.json(ok({ error: { code: 50, message: "Playlist is private" } }));
+    return c.json(fail(50, "Playlist is private"));
   }
   // Server-side paging: only the requested page of playable entries is pulled
   // from SQL (was: read the whole playlist into memory, slice, then O(N) scan).
@@ -669,18 +734,18 @@ restRoutes.all("/updatePlaylist", async (c) => {
   const user = c.get("user");
   const body = await parseBody(c);
   const playlistId = (body.playlistId as string) || (body.id as string) || "";
-  if (!playlistId) return c.json(ok({ error: { code: 10, message: "Missing playlistId" } }));
+  if (!playlistId) return c.json(fail(10, "Missing playlistId"));
   const playlist = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
-  if (!playlist) return c.json(ok({ error: { code: 70, message: "Playlist not found" } }));
+  if (!playlist) return c.json(fail(70, "Playlist not found"));
   // Only owner (or admin) can modify a playlist; others' public playlists are read-only
   if (playlist.ownerId !== user?.id && !user?.isAdmin) {
-    return c.json(ok({ error: { code: 50, message: "Not authorized to modify this playlist" } }));
+    return c.json(fail(50, "Not authorized to modify this playlist"));
   }
   const isImported = !!playlist.sourceUrl;
   // Imported playlists are read-only for tracks: track list follows the platform, sync via /sync
   const wantsTrackEdit = toIdArray(body.songIdToAdd).length > 0 || toIdArray(body.songIdToRemove).length > 0 || toIdArray(body.songIndexToRemove).length > 0;
   if (isImported && wantsTrackEdit) {
-    return c.json(ok({ error: { code: 50, message: "导入歌单的曲目只读,请在原平台修改后同步" } }));
+    return c.json(fail(50, "导入歌单的曲目只读,请在原平台修改后同步"));
   }
   if (body.name) db.update(playlists).set({ name: body.name as string, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
   if (body.comment !== undefined) db.update(playlists).set({ comment: String(body.comment), updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
@@ -725,12 +790,12 @@ restRoutes.all("/deletePlaylist", async (c) => {
   const user = c.get("user");
   const body = await parseBody(c);
   const id = (body.id as string) || (body.playlistId as string) || "";
-  if (!id) return c.json(ok({ error: { code: 10, message: "Missing id" } }));
+  if (!id) return c.json(fail(10, "Missing id"));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(ok({ error: { code: 70, message: "Playlist not found" } }));
+  if (!playlist) return c.json(fail(70, "Playlist not found"));
   // Only owner (or admin) can delete; others' public playlists are read-only
   if (playlist.ownerId !== user?.id && !user?.isAdmin) {
-    return c.json(ok({ error: { code: 50, message: "Not authorized to delete this playlist" } }));
+    return c.json(fail(50, "Not authorized to delete this playlist"));
   }
   db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run();
   db.delete(playlists).where(eq(playlists.id, id)).run();
@@ -763,7 +828,7 @@ function parseStarIds(raw: string | undefined): string[] {
 
 restRoutes.get("/star", (c) => {
   const user = c.get("user");
-  if (!user) return c.json(ok({ error: { code: 40, message: "Unauthorized" } }));
+  if (!user) return c.json(fail(40, "Unauthorized"));
   const ids = parseStarIds(getParam(c, "id"));
   const albumIds = parseStarIds(getParam(c, "albumId"));
   const artistIds = parseStarIds(getParam(c, "artistId"));
@@ -791,7 +856,7 @@ restRoutes.get("/star", (c) => {
 
 restRoutes.get("/unstar", (c) => {
   const user = c.get("user");
-  if (!user) return c.json(ok({ error: { code: 40, message: "Unauthorized" } }));
+  if (!user) return c.json(fail(40, "Unauthorized"));
   const ids = parseStarIds(getParam(c, "id"));
   const albumIds = parseStarIds(getParam(c, "albumId"));
   const artistIds = parseStarIds(getParam(c, "artistId"));
@@ -807,6 +872,30 @@ restRoutes.get("/unstar", (c) => {
         db.delete(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, s.id))).run();
       }
     }
+  }
+  return c.json(ok());
+});
+
+// OpenSubsonic setRating:id 支持歌曲/专辑/歌手(均为 uuid,无前缀),rating 0–5;
+// rating=0 等价删除评分。GET/POST/.view 由底部兼容垫片统一补全。
+restRoutes.all("/setRating", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json(fail(40, "Unauthorized"));
+  const body = await parseBody(c);
+  const id = String(body.id || getParam(c, "id") || "");
+  const rating = Math.max(0, Math.min(5, parseInt(String(body.rating ?? getParam(c, "rating") ?? "0"), 10) || 0));
+  if (!id) return c.json(fail(10, "Missing id"));
+  let itemType: string | null = null;
+  if (db.select({ id: songs.id }).from(songs).where(eq(songs.id, id)).get()) itemType = "song";
+  else if (db.select({ id: albums.id }).from(albums).where(eq(albums.id, id)).get()) itemType = "album";
+  else if (db.select({ id: artists.id }).from(artists).where(eq(artists.id, id)).get()) itemType = "artist";
+  if (!itemType) return c.json(fail(70, "Item not found"));
+  const now = new Date().toISOString();
+  if (rating === 0) {
+    db.delete(userRatings).where(and(eq(userRatings.userId, user.id), eq(userRatings.itemType, itemType), eq(userRatings.itemId, id))).run();
+  } else {
+    db.insert(userRatings).values({ userId: user.id, itemType, itemId: id, rating, createdAt: now, updatedAt: now })
+      .onConflictDoUpdate({ target: [userRatings.userId, userRatings.itemType, userRatings.itemId], set: { rating, updatedAt: now } }).run();
   }
   return c.json(ok());
 });
@@ -987,7 +1076,7 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
     }
 
     // Remote proxy with per-song headers (e.g. Bilibili requires Referer).
-    if (!song.url) return c.json(ok({ error: { code: 0, message: "No stream url" } }));
+    if (!song.url) return c.json(fail(0, "No stream url"));
     const headers: Record<string, string> = {};
     try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
     if (rangeHeader) headers["Range"] = rangeHeader;
@@ -1020,14 +1109,14 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
     if (cr) respHeaders["Content-Range"] = cr;
     return c.body(upstream.body as any, upstream.status as any, respHeaders);
   } catch (e: any) {
-    return c.json(ok({ error: { code: 0, message: e.message || "Stream failed" } }));
+    return c.json(fail(0, e.message || "Stream failed"));
   }
 }
 
 restRoutes.get("/stream", async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
-  if (!song) return c.json(ok({ error: { code: 70, message: "Song not found" } }));
+  if (!song) return c.json(fail(70, "Song not found"));
 
   const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
@@ -1039,12 +1128,12 @@ restRoutes.get("/stream", async (c) => {
   }
 
   const parsed = parseSongPath(song.path);
-  if (!parsed) return c.json(ok({ error: { code: 0, message: "Invalid song path" } }));
+  if (!parsed) return c.json(fail(0, "Invalid song path"));
 
   try {
     if (parsed.type === "w") {
       const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-      if (!source) return c.json(ok({ error: { code: 0, message: "Source not found" } }));
+      if (!source) return c.json(fail(0, "Source not found"));
       const config = JSON.parse(source.config || "{}");
       const downloadUrl = getWebDAVUrl(config, parsed.filePath);
       const headers: Record<string, string> = {};
@@ -1069,7 +1158,7 @@ restRoutes.get("/stream", async (c) => {
     } else {
       const fs = await import("fs");
       const filePath = parsed.filePath;
-      if (!fs.existsSync(filePath)) return c.json(ok({ error: { code: 70, message: "File not found" } }));
+      if (!fs.existsSync(filePath)) return c.json(fail(70, "File not found"));
       const stat = fs.statSync(filePath);
       const fileSize = stat.size;
 
@@ -1104,7 +1193,7 @@ restRoutes.get("/stream", async (c) => {
       });
     }
   } catch (e: any) {
-    return c.json(ok({ error: { code: 0, message: e.message || "Stream failed" } }));
+    return c.json(fail(0, e.message || "Stream failed"));
   }
 });
 
@@ -1193,13 +1282,13 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
 restRoutes.get("/download", async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
-  if (!song) return c.json(ok({ error: { code: 70, message: "Song not found" } }));
+  if (!song) return c.json(fail(70, "Song not found"));
   const parsed = parseSongPath(song.path);
-  if (!parsed) return c.json(ok({ error: { code: 0, message: "Invalid song path" } }));
+  if (!parsed) return c.json(fail(0, "Invalid song path"));
   try {
     if (parsed.type === "w") {
       const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-      if (!source) return c.json(ok({ error: { code: 0, message: "Source not found" } }));
+      if (!source) return c.json(fail(0, "Source not found"));
       const config = JSON.parse(source.config || "{}");
       const downloadUrl = getWebDAVUrl(config, parsed.filePath);
       const headers: Record<string, string> = {};
@@ -1213,9 +1302,9 @@ restRoutes.get("/download", async (c) => {
       };
       return c.body(upstream.body as any, upstream.status as any, respHeaders);
     }
-    return c.json(ok({ error: { code: 0, message: "Not supported" } }));
+    return c.json(fail(0, "Not supported"));
   } catch (e: any) {
-    return c.json(ok({ error: { code: 0, message: e.message || "Download failed" } }));
+    return c.json(fail(0, e.message || "Download failed"));
   }
 });
 

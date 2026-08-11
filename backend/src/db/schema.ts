@@ -131,6 +131,30 @@ export const playHistory = sqliteTable("play_history", {
   playedAt: text("played_at").default(""),
 });
 
+// OpenSubsonic 评分(setRating):按用户 × 条目类型(song|album|artist) × 条目 id
+// 存储 0–5 星;rating=0 表示删除评分。列表响应里的 userRating 来自这里。
+export const userRatings = sqliteTable("user_ratings", {
+  userId: text("user_id").notNull(),
+  itemType: text("item_type").notNull(), // "song" | "album" | "artist"
+  itemId: text("item_id").notNull(),
+  rating: integer("rating").notNull().default(0),
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.itemType, t.itemId] }),
+}));
+
+// OpenSubsonic 播放队列持久化(getPlayQueue/savePlayQueue):每个用户一份,
+// 存第三方客户端(如 Symfonik/DSub)的排队现场,换设备/重开客户端可恢复。
+export const userPlayQueues = sqliteTable("user_play_queues", {
+  userId: text("user_id").primaryKey(),
+  entryIdsJson: text("entry_ids_json").notNull().default("[]"), // songId[] serialized
+  currentId: text("current_id"),
+  position: integer("position").notNull().default(0),
+  changedAt: text("changed_at").default(""),
+  changedBy: text("changed_by").default(""),
+});
+
 export const mediaSources = sqliteTable("media_sources", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
