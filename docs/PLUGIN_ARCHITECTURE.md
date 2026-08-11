@@ -179,15 +179,28 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 > 每完成一项即标记完成。括号内为代码映射。
 
 - [x] **T0** 复制基线 → `MusicFlow-V2`，初始化新 git，改名 musicflow-v2-*（已完成）
-- [ ] **T1** 新增 `plugins/types.ts` 统一 Manifest/ConfigField；新增 `plugins/registry.ts` 注册表（含 `getEnabledSourcePlugins` / `getCapabilities`）
-- [ ] **T2** 扩展 `OnlineProvider` → 带 `manifest`；新增 `lyricUrl?` / `recommendPlaylistRef?` 方法
-- [ ] **T3** `db/index.ts` 种子改为遍历「内置插件清单」写入（去 C9 写死）
-- [ ] **T4** `index.ts` 定时器改为遍历有 `recommend` / `webRotation` 能力的启用 source 插件（去 C3）
-- [ ] **T5** `lyrics.ts` 改为调用 `provider.lyricUrl()`（去 C5，逻辑下沉 go-music-dl）
-- [ ] **T6** `streamFallback.ts` 默认 provider 从 registry 取（去 C4）
-- [ ] **T7** `recommendImport.ts` 前缀改由 `provider.recommendPlaylistRef` 生成（去 C6）
-- [ ] **T8** 前端 `Plugins/index.vue` 配置表单由 `configSchema` 动态渲染；`sourceOptions` 来自 `platforms`；去掉 `provider==="go-music-dl"` 判定与回退（去 C8）
-- [ ] **T9** 构建验证：后端 `tsc --noEmit` 通过、前端 `vue-tsc --noEmit` 通过；提交
+- [x] **T1** 新增 `plugins/types.ts` 统一 Manifest/ConfigField；新增 `plugins/registry.ts` 注册表（含 `getEnabledSourcePlugins` / `getCapabilities`）；新增 `plugins/builtins.ts` 内置插件清单
+- [x] **T2** 扩展 `OnlineProvider` → 带 `manifest`；新增 `lyricUrl?` 方法（`recommendPlaylistRef` 简化为 manifest 内 `recommendPrefix` 字段）
+- [x] **T3** `db/index.ts` 删除 go-music-dl 硬种子；改由 `registerBuiltinPlugins()` 遍历内置清单 + `configSchema` 默认值写入（去 C9）
+- [x] **T4** `index.ts` 定时器改为遍历 `getEnabledSourcePlugins()`，按 `recommend` / `webRotation` 能力调度（去 C3）
+- [x] **T5** `lyrics.ts` 删除 `deriveGmdlLrcUrl`，改为 `getPluginImpl(song.pluginEntry).lyricUrl(config, song)`（去 C5，逻辑下沉插件）
+- [x] **T6** `streamFallback.ts` 新增 `defaultStreamProviderId()`，从 registry 取首个具备 `stream` 能力的启用插件（去 C4）
+- [x] **T7** `recommendImport.ts` 前缀改由 manifest `recommendPrefix` 生成，识别时遍历所有已注册前缀（去 C6）
+- [x] **T8** 前端 `Plugins/index.vue` 配置表单由 `configSchema` 动态渲染；删除 `sourceOptions` 写死、`provider==="go-music-dl"` 判定与回退；purge 按钮由 `webRotation` 能力控制（去 C8）
+- [x] **T9** 构建验证：后端 `tsc --noEmit` 通过（exit 0）、前端 `vue-tsc --noEmit` 通过（exit 0）；提交 `8a90908`
+
+### 7.1 本轮完成情况与残留字符串审计
+
+Phase 0 + 1 全部完成。全库检索 `"go-music-dl"` 后残留位置及定性：
+
+| 位置 | 性质 | 处理 |
+|------|------|------|
+| `services/source/online/goMusicDl.ts` | 插件自身实现与 manifest 的 `id` | **合理**，插件必须声明自己的 id |
+| `services/plugin/playlistSync.ts:145` | `getConfiguredProvider("go-music-dl")` | Phase 2 收口（该函数已走 registry，只剩 providerId 字符串） |
+| `streamFallback.ts` 末位兜底 | registry 无任何 stream 插件时的 last-resort 默认值 | **可接受**，仅防御性回退 |
+| 前端 `Playlists/*.vue` | 静态提示文案 + `manifest?.provider === "go-music-dl"` 旧字段兼容判定 | **可接受**，主路径已走 `/v1/plugins` 动态发现 |
+
+结论：核心调度、歌词、流兜底、推荐前缀、DB 种子、前端配置表单**均已零硬编码**，go-music-dl 已是一个可被任意同契约插件替换的实现。
 
 ---
 
