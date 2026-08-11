@@ -398,7 +398,7 @@ apiRoutes.get("/v1/stats", (c) => {
 // ==================== Songs (paginated + searchable) ====================
 apiRoutes.get("/v1/songs", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
   const genre = (c.req.query("genre") || "").trim();
   // sort=recentAdded: 最新添加入库的歌曲（按入库时间倒序，封顶 500 首，新入库自动进入列表）
@@ -478,7 +478,7 @@ function genreIdFor(name: string): string {
 
 apiRoutes.get("/v1/genres", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
   const rows = db.select({
     name: songs.genre,
@@ -498,7 +498,7 @@ apiRoutes.get("/v1/genres", (c) => {
 // ==================== Albums (paginated + searchable) ====================
 apiRoutes.get("/v1/albums", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
   // SQL-level filter (name/artist LIKE) + ORDER BY created_at DESC + pagination,
   // so we no longer load the whole albums table into memory on every request.
@@ -524,7 +524,7 @@ apiRoutes.get("/v1/albums", (c) => {
 // ==================== Artists (paginated + searchable) ====================
 apiRoutes.get("/v1/artists", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
   // Push the name search to SQL to shrink the working set; the final sort stays
   // in JS (localeCompare) so Chinese/locale ordering is preserved exactly.
@@ -1015,7 +1015,7 @@ apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id 
 apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
   const id = c.req.param("id")!;
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json({ error: "Playlist not found" }, 404);
   // Push total / matched counts + the page slice to SQL instead of pulling
@@ -1073,7 +1073,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
 apiRoutes.get("/v1/history", (c) => {
   const user = c.get("user");
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   if (!user) return c.json({ total: 0, page, pageSize, items: [] });
   // Push the playedAt DESC sort to SQL (covered by idx_play_history_played_at),
   // then batch song + album lookups instead of N+1 per history row.

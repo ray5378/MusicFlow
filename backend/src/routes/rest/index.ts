@@ -347,14 +347,19 @@ restRoutes.get("/getAlbum", (c) => {
   const user = c.get("user");
   const album = db.select().from(albums).where(eq(albums.id, id)).get();
   if (!album) return c.json(ok({ error: { code: 70, message: "Album not found" } }));
-  const albumSongs = db.select().from(songs).where(eq(songs.albumId, id)).all();
-  const starredSet = getStarredSet(user?.id);
-  const songTotal = albumSongs.length;
+  // Server-side paging: only the requested page is pulled from SQL (was: load the
+  // whole album into memory then slice). A huge compilation album never spikes memory.
+  const whereAlbum = eq(songs.albumId, id);
   const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
   const size = parseInt(getParam(c, "size") || "0", 10) || 0;
-  const shown = size > 0 ? albumSongs.slice(offset, offset + size) : albumSongs;
-  const songsArr = shown.map(s => songToChild(s, starredSet));
-  const totalDuration = albumSongs.reduce((sum, s) => sum + (s.duration || 0), 0);
+  const songTotal = db.select({ n: sql<number>`count(*)` }).from(songs).where(whereAlbum).get()?.n ?? 0;
+  const pageSongs = size > 0
+    ? db.select().from(songs).where(whereAlbum).orderBy(sql`rowid`).limit(size).offset(offset).all()
+    : db.select().from(songs).where(whereAlbum).orderBy(sql`rowid`).all();
+  // Duration aggregated in SQL (SUM), not by iterating every album row in JS.
+  const totalDuration = db.select({ s: sql<number>`COALESCE(SUM(${songs.duration}), 0)` }).from(songs).where(whereAlbum).get()?.s ?? 0;
+  const starredSet = getStarredSet(user?.id);
+  const songsArr = pageSongs.map(s => songToChild(s, starredSet));
   return c.json(ok({ album: { ...albumToID3(album, getAlbumStarredSet(user?.id)), songCount: songsArr.length, songTotal, duration: totalDuration, song: songsArr } }));
 });
 
@@ -545,12 +550,17 @@ restRoutes.get("/getPlaylists", (c) => {
     : or(eq(playlists.isPublic, 1), eq(playlists.ownerId, user?.id ?? ""));
   const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '昨日推荐' THEN 1 ELSE 2 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
-  const visible = (where
-    ? db.select().from(playlists).where(where)
-    : db.select().from(playlists))
-    .orderBy(dailyOrder, desc(recency))
-    .all();
-  return c.json(ok({ playlists: { playlist: visible.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, sourcePlatform: p.sourcePlatform || "" })) } }));
+  // Server-side paging + name search: cards scroll the whole library, so the
+  // response carries a total and only the requested page (offset/size).
+  const q = (getParam(c, "query") || "").trim();
+  const nameWhere = q ? like(playlists.name, `%${q}%`) : undefined;
+  const whereAll = where && nameWhere ? and(where, nameWhere) : (where || nameWhere);
+  const total = db.select({ n: sql<number>`count(*)` }).from(playlists).where(whereAll).get()?.n ?? 0;
+  const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
+  const size = parseInt(getParam(c, "size") || "0", 10) || 0;
+  const base = db.select().from(playlists).where(whereAll).orderBy(dailyOrder, desc(recency));
+  const page = size > 0 ? base.limit(size).offset(offset).all() : base.all();
+  return c.json(ok({ playlists: { total, playlist: page.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
 restRoutes.get("/getPlaylist", (c) => {
@@ -562,16 +572,23 @@ restRoutes.get("/getPlaylist", (c) => {
   if (!playlist.isPublic && playlist.ownerId !== user?.id && !user?.isAdmin) {
     return c.json(ok({ error: { code: 50, message: "Playlist is private" } }));
   }
-  const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlist.id)).all();
-  const starredSet = getStarredSet(user?.id);
+  // Server-side paging: only the requested page of playable entries is pulled
+  // from SQL (was: read the whole playlist into memory, slice, then O(N) scan).
   // OpenSubsonic clients can only play library-matched tracks. Unmatched remote
   // stubs are NOT exposed to third-party clients (they cannot be streamed);
   // the web UI uses /rest/api/v1/playlists/:id/tracks to see the full list.
-  const playableEntries = entries.filter(e => e.playable && e.songId);
-  const songTotal = playableEntries.length;
+  const playableWhere = and(
+    eq(playlistSongs.playlistId, playlist.id),
+    eq(playlistSongs.playable, 1),
+    isNotNull(playlistSongs.songId),
+  );
+  const songTotal = db.select({ n: sql<number>`count(*)` }).from(playlistSongs).where(playableWhere).get()?.n ?? 0;
   const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
   const size = parseInt(getParam(c, "size") || "0", 10) || 0;
-  const pageEntries = size > 0 ? playableEntries.slice(offset, offset + size) : playableEntries;
+  const pageEntries = size > 0
+    ? db.select().from(playlistSongs).where(playableWhere).orderBy(playlistSongs.id).limit(size).offset(offset).all()
+    : db.select().from(playlistSongs).where(playableWhere).orderBy(playlistSongs.id).all();
+  const starredSet = getStarredSet(user?.id);
   // Batch song lookups ONCE (was N+1: a songs query per entry, plus a second
   // pass inside the duration reducer). Map keeps id -> row for both passes.
   const songIds = pageEntries.map(e => e.songId!).filter(Boolean);
@@ -582,8 +599,9 @@ restRoutes.get("/getPlaylist", (c) => {
     const song = e.songId ? songMap.get(e.songId) : null;
     return song ? { ...songToChild(song, starredSet), playable: true } : null;
   }).filter(Boolean);
+  // Duration over the returned page only (bounded by LIMIT, no full-list scan).
   let duration = 0;
-  for (const e of playableEntries) {
+  for (const e of pageEntries) {
     const song = e.songId ? songMap.get(e.songId) : null;
     duration += song?.duration || 0;
   }
@@ -805,18 +823,30 @@ restRoutes.get("/getStarred2", (c) => {
   const user = c.get("user");
   if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [], songTotal: 0 } }));
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
-  const songTotal = favs.length;
-  const starredSet = new Set(favs.map(f => f.songId));
+  const favIds = favs.map(f => f.songId);
+  const q = (getParam(c, "query") || "").trim().toLowerCase();
+  // 搜索:在整份最爱 ID 集上做 SQL 过滤(title/artist/album),再分页,保证 total 正确。
+  let matched: Set<string> | null = null;
+  if (q && favIds.length) {
+    const rows = db.select({ id: songs.id }).from(songs)
+      .where(and(inArray(songs.id, favIds),
+        or(like(songs.title, `%${q}%`), like(songs.artist, `%${q}%`), like(songs.album, `%${q}%`)))).all();
+    matched = new Set(rows.map(r => r.id));
+  }
+  const ordered = matched ? favs.filter(f => matched!.has(f.songId)) : favs;
+  const songTotal = ordered.length;
+  const starredSet = new Set(favIds);
   const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
   const size = parseInt(getParam(c, "size") || "0", 10) || 0;
-  const slice = size > 0 ? favs.slice(offset, offset + size) : favs;
+  const slice = size > 0 ? ordered.slice(offset, offset + size) : ordered;
   // Only fetch the songs on the requested page (not the whole favorite list),
   // so a library with thousands of starred tracks doesn't pull them all at once.
   const favSongs = slice.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
+  // Starred album ids in ONE batched query (was N+1: a songs query per favorite).
   const starredAlbumIds = new Set<string>();
-  for (const f of favs) {
-    const song = db.select().from(songs).where(eq(songs.id, f.songId)).get();
-    if (song?.albumId) starredAlbumIds.add(song.albumId);
+  if (favIds.length) {
+    const rows = db.select({ albumId: songs.albumId }).from(songs).where(inArray(songs.id, favIds)).all();
+    for (const r of rows) if (r.albumId) starredAlbumIds.add(r.albumId);
   }
   const favAlbums = Array.from(starredAlbumIds).map(id => { const a = db.select().from(albums).where(eq(albums.id, id)).get(); return a ? albumToID3(a) : null; }).filter(Boolean);
   return c.json(ok({ starred2: { song: favSongs, album: favAlbums, artist: [], songTotal } }));
