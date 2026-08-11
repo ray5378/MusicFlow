@@ -641,8 +641,8 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   const candidates = loadCandidates();
   const picked = pickDailyCandidate();
 
-  // Only TWO playlists ever exist: "今日推荐" and "昨日推荐" (combined:
-  // remote charts + user pool + local history mix, all merged into one).
+  // Only ONE playlist ever exists: "今日推荐" (combined: remote charts + user
+  // pool + local history mix, all merged into one).
   const today = (() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -651,7 +651,6 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
     sqlite.prepare("SELECT id, name, song_count, created_at, comment FROM playlists WHERE name = ? AND comment LIKE ?").get(name, `%${tag}%`) as any;
 
   const todayPl = findPl("今日推荐", DAILY_TAG);
-  const yesterdayPl = findPl("昨日推荐", DAILY_TAG);
 
   const plInfo = (row: any) => row ? {
     id: row.id, name: row.name, songCount: row.song_count || 0,
@@ -669,14 +668,13 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
     today,
     playlists: {
       today: plInfo(todayPl),
-      yesterday: plInfo(yesterdayPl),
     },
   });
 });
 
 // Update daily-recommend config (master switch, hour).
-// Note: retention is no longer used — the rename mechanism ("今日推荐" →
-// "昨日推荐") inherently keeps only two playlists at any time.
+// Note: retention is no longer used — only one "今日推荐" playlist exists and
+// each run rebuilds it in place.
 apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const set = (k: string, v: string) =>
@@ -964,10 +962,10 @@ apiRoutes.get("/v1/playlists", (c) => {
   const where = query
     ? (visibility ? and(visibility, like(playlists.name, `%${query}%`)) : like(playlists.name, `%${query}%`))
     : visibility;
-  // Daily-recommend-first ordering (今日推荐 > 昨日推荐 > others) expressed as a
+  // Daily-recommend-first ordering (今日推荐 > others) expressed as a
   // CASE, with recency as the secondary sort. Pushed to SQL together with
   // LIMIT/OFFSET so we never load the whole table into JS just to slice it.
-  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '昨日推荐' THEN 1 ELSE 2 END`;
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
   const rows = (where
     ? db.select().from(playlists).where(where)
@@ -999,8 +997,7 @@ apiRoutes.get("/playlist", (c) => {
   const dailyRank = (p: any) => {
     const c = p.comment || "";
     if (c.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
-    if (c.includes(DAILY_TAG) && p.name === "昨日推荐") return 1;
-    return 2;
+    return 1;
   };
   return c.json(all.sort((a, b) => {
     const ra = dailyRank(a), rb = dailyRank(b);

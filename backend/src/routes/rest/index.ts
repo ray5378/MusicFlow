@@ -548,7 +548,7 @@ restRoutes.get("/getPlaylists", (c) => {
   const where = user?.isAdmin
     ? undefined
     : or(eq(playlists.isPublic, 1), eq(playlists.ownerId, user?.id ?? ""));
-  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '昨日推荐' THEN 1 ELSE 2 END`;
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
   // Server-side paging + name search: cards scroll the whole library, so the
   // response carries a total and only the requested page (offset/size).

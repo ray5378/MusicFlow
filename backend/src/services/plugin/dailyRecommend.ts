@@ -17,24 +17,23 @@
 // the remote-matched songs already in the playlist (and against each other)
 // so the same track never appears twice.
 //
-// STABLE IDs (only TWO playlists ever exist, with FIXED ids):
-//   - "今日推荐"    — today's combined playlist    (id: pl-daily-today)
-//   - "昨日推荐"    — yesterday's combined playlist (id: pl-daily-yesterday)
+// STABLE ID (only ONE playlist ever exists, with a FIXED id):
+//   - "今日推荐"  — today's combined playlist (id: pl-daily-today)
 //
-// Both ids are FIXED and never change across days. Each run:
-//   - moves today's song rows to the yesterday playlist in ONE UPDATE
-//     (playlist_id reassignment — no row rewrite, cheap even for huge playlists),
-//   - rebuilds today's content fresh into the same fixed "今日推荐" row.
-// This keeps clients (web/app/HA/card) able to reference the two playlists by
-// a constant id, and avoids the daily CREATE+DELETE of playlist rows and the
+// The id is FIXED and never changes across days. Each run rebuilds today's
+// content fresh into the same fixed "今日推荐" row (rebuildPlaylistEntries
+// clears the old entries first); the previous day's content is simply
+// discarded — no "昨日推荐" archive is kept anymore.
+// This keeps clients (web/app/HA/card) able to reference the playlist by a
+// constant id, and avoids the daily CREATE+DELETE of playlist rows and the
 // daily create+delete of cover files (the cover file name is now stable too).
 //
 // Failure safety: remote fetches happen BEFORE any DB mutation, so if all
 // networks are down, existing playlists are untouched.
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
-import { rebuildPlaylistEntries, refreshPlaylistCounts } from "./playlistSync.js";
-import { copyCoverToFile } from "../playlistCover.js";
+import { rebuildPlaylistEntries } from "./playlistSync.js";
+import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
 
 export interface DailyCandidate {
@@ -62,13 +61,11 @@ export interface DailyRecommendResult {
 export const DAILY_TAG = "[daily-recommend]";
 export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 
-// Fixed playlist ids — these NEVER change, so clients can reference the two
-// daily playlists by a stable id.
+// Fixed playlist id — this NEVER changes, so clients can reference the daily
+// playlist by a stable id.
 export const FIXED_TODAY_ID = "pl-daily-today";
-export const FIXED_YESTERDAY_ID = "pl-daily-yesterday";
 
 const NAME_TODAY = "今日推荐";
-const NAME_YESTERDAY = "昨日推荐";
 
 // How many random playable songs to pull from each user-pool member as
 // CANDIDATES (before the final pool-wide pick).
@@ -179,47 +176,46 @@ function isGeneratedToday(playlist: any, dateStr: string): boolean {
   return !!(playlist && (playlist.comment || "").includes(dateStr));
 }
 
-// Ensure the two fixed-id daily playlists exist. On first run (or after an
-// upgrade from the old rename-based scheme) this:
-//   - adopts any existing "[daily-recommend]" tagged playlists into the fixed
-//     ids (so no content is lost and no duplicate playlists appear), then
-//   - deletes any leftover legacy dynamic-id daily playlists, and
-//   - creates the fixed rows if they're still missing.
+// Ensure the fixed-id daily playlist exists. On first run (or after an upgrade
+// from the old two-playlist scheme) this:
+//   - adopts any existing "[daily-recommend]" tagged "今日推荐" playlist into
+//     the fixed id (so no content is lost and no duplicate playlists appear),
+//   - deletes any leftover legacy daily playlists (dynamic-id rows, the old
+//     fixed "昨日推荐" row, and the deprecated "(本地)" variants) so the user
+//     never sees stale duplicates, and
+//   - creates the fixed row if it's still missing.
 function ensureDailyPlaylists(): void {
   const todayFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
-  const yestFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_YESTERDAY_ID) as any;
-  if (todayFixed && yestFixed) return;
-
-  const ownerId = pickSystemOwnerId();
-  const now = new Date().toISOString();
-
-  const adopt = (fixedId: string, name: string, legacy: any | null) => {
+  if (!todayFixed) {
+    const ownerId = pickSystemOwnerId();
+    const now = new Date().toISOString();
+    const legacy = findPlaylistByName(NAME_TODAY, DAILY_TAG);
     if (legacy) {
       sqlite.prepare("UPDATE playlists SET id = ?, name = ?, comment = ? WHERE id = ?")
-        .run(fixedId, name, `${DAILY_TAG} (migrated)`, legacy.id);
+        .run(FIXED_TODAY_ID, NAME_TODAY, `${DAILY_TAG} (migrated)`, legacy.id);
     } else {
       sqlite.prepare(`
         INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
         VALUES (?, ?, ?, 1, ?, NULL, NULL, 'mixed', NULL, 0, ?, ?)
-      `).run(fixedId, name, ownerId, `${DAILY_TAG}`, now, now);
+      `).run(FIXED_TODAY_ID, NAME_TODAY, ownerId, `${DAILY_TAG}`, now, now);
     }
-  };
+  }
 
-  if (!todayFixed) adopt(FIXED_TODAY_ID, NAME_TODAY, findPlaylistByName(NAME_TODAY, DAILY_TAG));
-  if (!yestFixed) adopt(FIXED_YESTERDAY_ID, NAME_YESTERDAY, findPlaylistByName(NAME_YESTERDAY, DAILY_TAG));
-
-  // Clean up any remaining legacy dynamic-id daily playlists (combined OR the
-  // deprecated "(本地)" variant) so the user never sees duplicates.
+  // "昨日推荐" is no longer generated — remove any daily-recommend playlists
+  // other than today's (legacy dynamic-id rows, the old fixed "昨日推荐" row,
+  // and the deprecated "(本地)" variants) together with their songs and covers.
   const tagPattern = `%${DAILY_TAG}%`;
   const localPattern = `%${DAILY_TAG_LOCAL}%`;
-  sqlite.prepare(`
-    DELETE FROM playlist_songs WHERE playlist_id IN (
-      SELECT id FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id NOT IN (?, ?)
-    )
-  `).run(tagPattern, localPattern, FIXED_TODAY_ID, FIXED_YESTERDAY_ID);
-  sqlite.prepare(`
-    DELETE FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id NOT IN (?, ?)
-  `).run(tagPattern, localPattern, FIXED_TODAY_ID, FIXED_YESTERDAY_ID);
+  const stale = sqlite.prepare(
+    `SELECT id FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id <> ?`
+  ).all(tagPattern, localPattern, FIXED_TODAY_ID) as { id: string }[];
+  for (const row of stale) clearPlaylistCoverCache(row.id);
+  sqlite.prepare(
+    `DELETE FROM playlist_songs WHERE playlist_id IN (SELECT id FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id <> ?)`
+  ).run(tagPattern, localPattern, FIXED_TODAY_ID);
+  sqlite.prepare(
+    `DELETE FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id <> ?`
+  ).run(tagPattern, localPattern, FIXED_TODAY_ID);
 }
 
 // Pick a random local-library song's album cover file ref. Used as the daily
@@ -448,27 +444,18 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   const randomLibraryIds = pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
 
   // If we have nothing at all (no remote, no pool, no random), bail out without
-  // touching existing playlists — better to keep yesterday's than to have an empty today.
+  // touching the existing playlist — better to keep today's previous content
+  // than to have an empty one.
   const totalRemoteTracks = remoteImports.reduce((n, imp) => n + imp.tracks.length, 0);
   if (totalRemoteTracks === 0 && poolSongIds.length === 0 && randomLibraryIds.length === 0) {
     throw new Error("今日推荐生成失败:所有远程榜单抓取失败且用户推荐池和曲库随机均为空");
   }
 
-  // ============ Stable-ID swap (cheap even for huge playlists) ============
-  // Yesterday becomes the PREVIOUS day's "今日推荐" content. Move today's song
-  // rows to the yesterday playlist in a SINGLE UPDATE (reassign playlist_id) —
-  // no row rewrite, so even a playlist with thousands of songs costs one indexed
-  // update. Yesterday also inherits today's current cover.
-  const prevTodayCover = todayRow?.cover_art || null;
+  // ============ Rebuild today's fixed-id playlist ============
+  // rebuildPlaylistEntries clears today's existing entries and inserts the new
+  // remote-matched tracks. The previous day's content is simply discarded —
+  // there is no "昨日推荐" archive anymore.
   const now = new Date().toISOString();
-  sqlite.prepare("UPDATE playlist_songs SET playlist_id = ? WHERE playlist_id = ?")
-    .run(FIXED_YESTERDAY_ID, FIXED_TODAY_ID);
-  sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?")
-    .run(prevTodayCover, now, FIXED_YESTERDAY_ID);
-  refreshPlaylistCounts(FIXED_YESTERDAY_ID);
-
-  // Today is rebuilt fresh into the FIXED id. rebuildPlaylistEntries clears the
-  // (now empty) today rows and inserts the new remote-matched tracks.
   const playlistId = FIXED_TODAY_ID;
 
   // Cover = a RANDOM local-library song's album cover (per product要求).
