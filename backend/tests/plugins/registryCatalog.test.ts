@@ -17,6 +17,8 @@ import {
   findFile,
   findTopDir,
   installPlugin,
+  seedDefaultRegistry,
+  officialRegistryUrl,
 } from "../../src/plugins/registryCatalog.js";
 
 beforeAll(() => {
@@ -121,6 +123,33 @@ describe("extraction helpers", () => {
     fs.mkdirSync(path.join(root, "b"));
     expect(findTopDir(root)).toBeNull();
     fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+// Kept last: it mutates the shared registry table (and sets the seeded flag),
+// so running it after the marketplace tests avoids perturbing their fixtures.
+describe("official registry seeding", () => {
+  const url = officialRegistryUrl();
+
+  afterAll(() => {
+    for (const r of listRegistries()) if (r.url === url) removeRegistry(r.id);
+  });
+
+  it("seeds the official registry once, then is a no-op", () => {
+    expect(url).toMatch(/^https:\/\/.+registry\.json$/);
+    expect(seedDefaultRegistry()).toBe(true);
+    expect(listRegistries().filter((r) => r.url === url).length).toBe(1);
+    // Re-running (i.e. every subsequent boot) must not duplicate the row.
+    expect(seedDefaultRegistry()).toBe(false);
+    expect(listRegistries().filter((r) => r.url === url).length).toBe(1);
+  });
+
+  it("does not re-add a registry the admin deliberately removed", () => {
+    for (const r of listRegistries()) if (r.url === url) removeRegistry(r.id);
+    expect(listRegistries().some((r) => r.url === url)).toBe(false);
+    // The seeded flag survives the removal, so boot must leave it removed.
+    expect(seedDefaultRegistry()).toBe(false);
+    expect(listRegistries().some((r) => r.url === url)).toBe(false);
   });
 });
 

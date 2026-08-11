@@ -23,6 +23,7 @@ import { getEnabledSourcePlugins, getEnabledByCapability } from "./plugins/regis
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
+import { seedDefaultRegistry } from "./plugins/registryCatalog.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
@@ -209,6 +210,12 @@ app.get("*", async (c, next) => {
 registerBuiltinPlugins();
 initDatabase();
 backfillGenres();
+
+// Seed the official plugin registry once, so a fresh install has a working
+// marketplace without an admin pasting the URL by hand. Called here (not via the
+// db-ready hook in builtins.ts) because builtins -> registryCatalog would close
+// the cycle builtins -> registryCatalog -> discovery -> builtins.
+seedDefaultRegistry();
 
 // Phase 3: scan data/plugins for drop-in plugins, validate + register them, and
 // seed their rows (DB is already ready, so the re-seed only adds the new ids).

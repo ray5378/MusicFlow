@@ -20,7 +20,7 @@ import { eq } from "drizzle-orm";
 import { promisify } from "util";
 import { getDataDir } from "../utils/env.js";
 import { db } from "../db/index.js";
-import { pluginRegistries } from "../db/schema.js";
+import { pluginRegistries, settings } from "../db/schema.js";
 import { discoverExternalPlugins } from "./discovery.js";
 import { validateManifest } from "./discovery.js";
 import type { PluginManifest } from "./types.js";
@@ -65,6 +65,66 @@ export function addRegistry(url: string): string {
 
 export function removeRegistry(id: string): void {
   db.delete(pluginRegistries).where(eq(pluginRegistries.id, id)).run();
+}
+
+// ==================== Official registry bootstrap ====================
+//
+// With no registry configured the marketplace page is simply empty, so every
+// fresh install would need an admin to hand-paste the official URL before they
+// could install anything. We seed it once on first boot instead.
+//
+// Seeding is guarded by a *settings flag*, not by "is this URL already there?".
+// That distinction matters: an admin who deliberately removes the official
+// registry must not have it silently re-added on the next restart.
+//
+// Overridable via env:
+//   MUSICFLOW_OFFICIAL_REGISTRY=https://my-mirror/registry.json   (internal mirror)
+//   MUSICFLOW_OFFICIAL_REGISTRY=                                   (empty = opt out)
+const OFFICIAL_REGISTRY_URL =
+  process.env.MUSICFLOW_OFFICIAL_REGISTRY ??
+  "https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json";
+
+const OFFICIAL_REGISTRY_SEEDED_KEY = "official_registry_seeded";
+
+/** Add the official plugin registry on first boot so the marketplace works out
+ *  of the box. Idempotent, and never re-adds a registry the admin removed.
+ *
+ *  MUST run after `initDatabase()` (needs the schema). Returns true only when a
+ *  row was actually inserted, so callers/tests can assert on the first run. */
+export function seedDefaultRegistry(): boolean {
+  const url = OFFICIAL_REGISTRY_URL.trim();
+  if (!url) return false; // explicitly opted out (air-gapped deployments)
+  try {
+    const flag = db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, OFFICIAL_REGISTRY_SEEDED_KEY))
+      .get() as any;
+    if (flag?.value === "1") return false; // already seeded once — respect removals
+
+    const already = (db.select().from(pluginRegistries).all() as any[]).some((r) => r.url === url);
+    if (!already) {
+      addRegistry(url);
+      console.log(`[REGISTRY] 已添加官方插件注册表: ${url}`);
+    }
+
+    const now = new Date().toISOString();
+    db.insert(settings)
+      .values({ key: OFFICIAL_REGISTRY_SEEDED_KEY, value: "1", updatedAt: now })
+      .onConflictDoUpdate({ target: settings.key, set: { value: "1", updatedAt: now } })
+      .run();
+    return !already;
+  } catch (e: any) {
+    // A failed seed must never block boot — the admin can still add the URL by hand.
+    console.warn(`[REGISTRY] 官方注册表种子写入失败: ${e?.message || e}`);
+    return false;
+  }
+}
+
+/** The official registry URL in effect (empty string when seeding is opted out).
+ *  Exported for diagnostics + tests. */
+export function officialRegistryUrl(): string {
+  return OFFICIAL_REGISTRY_URL.trim();
 }
 
 /** Fetch a single registry manifest. Supports either a bare array of plugin
