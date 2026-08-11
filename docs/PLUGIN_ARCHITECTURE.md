@@ -3,6 +3,14 @@
 > 版本：基于 MusicFlow 复制基线（v1.1.29）重构
 > 目标：把内置的 `go-music-dl` 从「深度耦合」改造成「真正的插件」，核心代码不再写死任何具体在线源实现；并搭建一套可扩展的统一插件框架，为后续把「歌单导入 / 每日推荐 / 歌单同步」也插件化预留接口。
 
+> **北向目标（2026-08-12 明确）**：**V2 完整实现 MusicFlow 的功能与逻辑，只是解耦成插件版**。
+> 即：V2 不是 V1 的子集或实验品，而是 V1 功能/API 的完整复刻 + 插件化重构，并作为 HA
+> 加载项（addon）+ 集成（hass-musicflow）+ 卡片（hass-musicflow-card）这条主链路的新内核。
+> 已核实的兼容性基线：
+> - 原生 `/v1` API：V2 ⊇ V1（V2 独有 8 个插件端点，V1 独有 0 个）
+> - OpenSubsonic `/rest`：46 端点 V1/V2 集合完全一致（2026-08-12 起 V2 额外补齐合规：品牌、失败体、getAvatar/setRating/savePlayQueue）
+> - HA 链路：addon 1.2.0 构建自 `ghcr.io/ray5378/musicflow-v2:1.2.0`；集成/卡片契约逐项 e2e 通过
+
 ---
 
 ## 0. 范围说明（本次交付）
@@ -290,3 +298,44 @@ Phase 0 + 1 全部完成。全库检索 `"go-music-dl"` 后残留位置及定性
    - 流播放兜底（原曲失效→多源）仍工作；
    - 全文检索后端源码，确认无残留字符串 `"go-music-dl"`（除插件自身实现与 manifest）。
 3. **边界**：禁用 go-music-dl 插件后，定时器不再调度其任务（registry 交集过滤生效）。
+
+---
+
+## 9. OpenSubsonic 服务端与 HA 主链路（2026-08-12 收口）
+
+### 9.1 OpenSubsonic 服务端（`routes/rest/index.ts`，46+ 端点）
+
+MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenSubsonic 扩展），
+第三方客户端（Symfonik / DSub / MA / libopensonic）可直接连接播放曲库。本轮（v1.2.0）完整化：
+
+- **品牌合规**：所有 `subsonic-response.type` 由复制残留的 `MusicFree` 改为 `MusicFlow`；
+  `serverVersion` 取 `APP_VERSION`（不再写死 1.0.0）。
+- **失败体合规**：全部 `ok({error})` 改为标准 `status:"failed"` + 错误码（70 not found / 50 权限 /
+  40 未认证 / 10 缺参 / 0 通用），客户端能真正感知失败。
+- **补齐标准端点**：`getAvatar`（SVG 占位）、`setRating`（`user_ratings` 表，0–5 星，
+  `getSong/getAlbum/getArtist` 回填 `userRating`）、`getPlayQueue/savePlayQueue` 真实持久化
+  （`user_play_queues` 表，按用户一份）。
+- **扩展声明诚实化**：`getOpenSubsonicExtensions` 移除未实现的 `transcoding`；
+  `getTopSongs` 支持 `artistId`（topSongsByArtistId 扩展）。
+- **测试**：`tests/rest/opensubsonic.test.ts` 29 用例，挂真实 `authMiddleware` + `u/t/s` 认证，
+  覆盖品牌/失败体/浏览/搜索/歌单 CRUD/收藏/评分/scrobble 去重/队列/头像。
+  全量 vitest 185 用例绿。
+
+### 9.2 HA 主链路（addon + integration + card 全部对接 V2）
+
+| 环节 | 仓库 | 状态 |
+|---|---|---|
+| 镜像 | `MusicFlow-V2`（ghcr.io/ray5378/**musicflow-v2**:1.2.0，仅 amd64） | ✅ 已发布 |
+| 加载项 | `hassio-addons/musicflow`（version 1.2.0，build_from 钉 V2 镜像，arch 仅 amd64） | ✅ 已对接 |
+| 集成 | `hass-musicflow` 1.3.7（契约 = `/v1/peers*`、`/v1/groups`、`/v1/play`、`/rest/*` + `/rest/api/*` 代理、`/ws?token=`） | ✅ e2e 12/12 通过，零改动 |
+| 卡片 | `hass-musicflow-card` v1.6.51（`/api/v1/peers`、`/api/v1/users/me`、代理 fallback、`/ws`） | ✅ API 面兼容，零改动 |
+
+验证方式（无 Docker 环境的 e2e 套路）：`cd backend && npm run build` →
+`DATA_DIR=<tmp> PORT=46401 node dist/index.js` → 登录拿 JWT → 按集成契约逐项 curl。
+官方注册表种子（§7.4）在启动日志中确认生效。
+
+### 9.3 CI 与发版
+
+- `MusicFlow-V2/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow-v2:<版本>` + `:latest`
+  （workflow_dispatch 手动构建打 `:master`）；镜像仅 amd64（账号无 ARM runner）。
+- 发版流程：V2 打新 tag → addon 的 `build.yaml` build_from + `config.yaml` version 同步 → addon 仓库发版。
