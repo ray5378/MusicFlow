@@ -1,23 +1,28 @@
 name: build-and-push
 
+# MusicFlow-V2 镜像发布(仅 GHCR,避免与 V1 的 musicflow 镜像同名冲突)。
+#
+# 触发:打 v* tag 时发布 ghcr.io/ray5378/musicflow-v2:<版本> + :latest;
+# workflow_dispatch 手动触发时发布 :master(用于预发布验证)。
+# 不在 push 分支时自动发版——加载项钉的是具体版本号,避免 master 提交悄悄
+# 漂移 :latest,出问题无从回滚。
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: musicflow
+  IMAGE_NAME: musicflow-v2
 
-# Superseded main builds are pointless; tag builds must never be cancelled.
+# 手动构建可被新触发打断;tag 构建必须跑完(发版不可取消)。
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   # Single-arch (amd64) build. No QEMU, no multi-arch manifest — the image is
-  # pushed directly to :latest / :main / <version>. ARM devices will not be
-  # able to run this image.
+  # pushed directly to <version> / :latest. ARM devices cannot run this image
+  # (账号没有 ARM runner,与 V1 一致)。
   build:
     runs-on: ubuntu-latest
     permissions:
@@ -39,27 +44,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Compute tags
         id: meta
         run: |
           GHCR=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
-          DH=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
           if [ "${{ github.ref_type }}" = "tag" ]; then
             V=${GITHUB_REF#refs/tags/v}
             VERSION="$V"
-            TAGS="$GHCR:$V,$DH:$V,$GHCR:latest,$DH:latest"
+            TAGS="$GHCR:$V,$GHCR:latest"
           else
-            # 版本号用 git describe 生成(最近 tag + 提交数 + sha, 如
-            # 1.1.17-3-gabc1234),既真实可溯源,也不再显示无意义的 main-<sha>。
-            VERSION=$(git describe --tags --abbrev=7 2>/dev/null || echo "main-$SHORT_SHA")
-            TAGS="$GHCR:main,$DH:main,$GHCR:latest,$DH:latest"
+            # 手动构建:版本号用 git describe 生成,镜像只打 :master,不动 :latest。
+            VERSION=$(git describe --tags --abbrev=7 2>/dev/null || echo "master-$SHORT_SHA")
+            TAGS="$GHCR:master"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "commit=$SHORT_SHA" >> "$GITHUB_OUTPUT"
