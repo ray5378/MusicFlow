@@ -12,7 +12,7 @@
 - Phase 0：统一插件注册表 + 统一 Manifest 类型 + DB 种子改由 manifest 驱动；go-music-dl 改为通过 registry 注册，删除编译期硬 import。
 - Phase 1：核心调度 / 歌词 / 流兜底 / 推荐前缀全部改为「遍历有能力的启用插件」，不再出现字符串 `"go-music-dl"`。
 
-**非本次目标（已在 §6 记录为下一里程碑）**：把 `playlistImport` / `dailyRecommend` / `localRecommend` / `playlistSync` 这些「名为插件、实为硬编码模块」的功能也注册成 plugin 类型（Phase 2），以及允许社区写外置 drop-in 插件（Phase 3）。这些模块当前仍会调用 `getConfiguredProvider("go-music-dl")`，由于该函数本身走 registry，Phase 1 后它们已不再「写死实现细节」，只是仍写死了 providerId 字符串——归 Phase 2 收口。
+**后续进度**：Phase 2（把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册成 plugin 类型，并彻底去掉 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死）已在 §7.2 全部完成；`localRecommend` 因价值低保持为内置模块、不强制插件化。Phase 3（社区外置 drop-in 插件）见 §6 仍为待实现里程碑。
 
 ---
 
@@ -167,10 +167,10 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 
 ---
 
-## 6. 后续里程碑（本次不实现，仅记录）
+## 6. 后续里程碑
 
-- **Phase 2（全量插件化）**：定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `localRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts:145` 的 `getConfiguredProvider("go-music-dl")`。
-- **Phase 3（外置插件）**：boot 扫描 `data/plugins/<id>/index.js` 动态 `import`，加 manifest 校验 + 路径白名单 + `minAppVersion` 校验；出插件开发文档。
+- **Phase 2（全量插件化）**：✅ 已完成（见 §7.2）。定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts` 的 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死；`localRecommend` 保留为内置模块（价值低，不强行插件化）。
+- **Phase 3（外置插件）**：⏳ 待实现。boot 扫描 `data/plugins/<id>/index.js` 动态 `import`，加 manifest 校验 + 路径白名单 + `minAppVersion` 校验；出插件开发文档 `PLUGIN_DEV.md`。
 
 ---
 
@@ -201,6 +201,25 @@ Phase 0 + 1 全部完成。全库检索 `"go-music-dl"` 后残留位置及定性
 | 前端 `Playlists/*.vue` | 静态提示文案 + `manifest?.provider === "go-music-dl"` 旧字段兼容判定 | **可接受**，主路径已走 `/v1/plugins` 动态发现 |
 
 结论：核心调度、歌词、流兜底、推荐前缀、DB 种子、前端配置表单**均已零硬编码**，go-music-dl 已是一个可被任意同契约插件替换的实现。
+
+### 7.2 Phase 2（全量插件化：importer / recommender / sync）
+
+> 目标：把 `playlistImport` / `dailyRecommend` / `playlistSync` 这些「名为插件、实为硬编码模块」的功能真正注册成 plugin 类型，核心只按能力遍历；并彻底删除最后一处 `go-music-dl` / `gmdl://` 字面量。
+
+- [x] **T10** 新增 `plugins/types.ts` 的 `ImporterPlugin` / `PlaylistFilePlugin` / `RecommenderPlugin` / `SyncPlugin` 契约（含 `canHandle` / `canHandleFile` / `runDailyJob` / `runSyncJob`）
+- [x] **T11** 把 `playlistImport.ts` 拆成三个独立 `importer` 插件：`qq-playlist-importer` / `netease-playlist-importer` / `musicflow-file-importer`（共享 `importers/http.ts` 的 `fetchJson` / `resolveRedirect`）；核心 `playlistImport.ts` 收敛为「能力分发器」（`getEnabledByCapability("playlistImport"|"playlistFile")` + `canHandle`/`canHandleFile` 路由）
+- [x] **T12** `playlistSync.ts` 去耦合：`queueAutoMatch` 改用 `firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search")`；`syncAllEnabledPlaylists` 跳过判断改用 `findUrlImporter(url)`（取代 `gmdl://` 前缀）；文件末尾新增 `playlistSync` 类型插件（`runSyncJob` → `syncAllEnabledPlaylists`）
+- [x] **T13** `dailyRecommend.ts` 注册为 `recommender` 插件（`dailyPlaylist` 能力，`runDailyJob` → `runDailyRecommendJob`）
+- [x] **T14** 解环重构：原 `registry.ts` 反向 import `builtins` 的三角循环，把 `registerBuiltinPlugins` / `seedBuiltinPluginRows` 下沉到 `builtins.ts`；`registry.ts` 不再 import `builtins`，依赖图变无环
+- [x] **T15** DB-ready 钩子：`builtins.ts` 的 `registerBuiltinPlugins()` 在 `onDatabaseReady(seedBuiltinPluginRows)` 中播种，确保种子在 schema 之后；种子策略 `defaultEnabled`——source 插件 OFF（需 baseUrl），importer/recommender/sync 内置插件 ON（替代原硬编码核心路径）
+- [x] **T16** 入口 `index.ts` 调度改写：`registerBuiltinPlugins()` 在 `initDatabase()` 前调用；`runDailyJobs` 遍历 `getEnabledByCapability("dailyPlaylist")` 调 `runDailyJob`；维护定时器遍历 `getEnabledByCapability("playlistSync")` 调 `runSyncJob`
+- [x] **T17** `routes/api/index.ts` 导入改用 `parsePlaylistFile(raw)`（re-export自 `playlistImport`）
+- [x] **T18** 前端 `admin/Plugins/index.vue` 四类插件可视化：类型标签（`typeLabel`/`typeTagColor`）+ 能力标签（`capabilityList`/`capLabel`）+ 按类型显示操作（source 显示测试/清理，其余显示配置/详情）；`configSchema` 动态表单不变
+- [x] **T19** 前端 `Playlists/index.vue` 导入弹窗提示动态化：`importHint` / `importPlaceholder` 计算属性依据已启用 `playlistImport` 插件的 `platforms` 生成（停用导入插件后文案同步变化）；去除 `detectDailySource` 的 `go-music-dl` 硬编码（改 `manifest?.type === "source"`，无回退字符串）；`Detail.vue` 同步去硬编码
+- [x] **T20** 新增 `tests/plugins/registry.test.ts`（20 用例）：注册幂等、四类型齐全、种子 enabled 策略、能力查找/启用过滤、`runDailyJob`/`runSyncJob` 存在、import 分发路由、disabled 停止路由、file 解析；`vitest.config.ts` 设 `fileParallelism:false` + `pool:"forks"`（修同 SQLite 文件行污染 + better-sqlite3 退出段错误 exit 139）
+- [x] **T21** 构建验证：后端 `tsc --noEmit` 通过、前端 `vue-tsc --noEmit` 通过、测试 `87 passed (87)`（9 个测试文件）
+
+**Phase 2 收口后残留 `go-music-dl` 字符串审计**：仅剩 `services/source/online/goMusicDl.ts` 插件自身实现与 manifest `id`（合理）；其余核心/前端均已零硬编码，可被任意同契约 source/importer 插件替换。
 
 ---
 

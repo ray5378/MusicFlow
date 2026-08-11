@@ -17,11 +17,10 @@ import {
 } from "./services/player/playerWebhook.js";
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
-import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { syncAllRecommendPlaylists } from "./services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
-import { getEnabledSourcePlugins } from "./plugins/registry.js";
-import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
+import { getEnabledSourcePlugins, getEnabledByCapability } from "./plugins/registry.js";
+import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
@@ -202,6 +201,10 @@ app.get("*", async (c, next) => {
   return serveStatic({ path: "index.html", root: staticDir })(c, next);
 });
 
+// Plugins first (pure, in-memory), then the schema. initDatabase() fires the
+// db-ready hook that seeds a `plugins` row for anything registered above, so the
+// order here is what makes built-ins show up in the admin Plugins page.
+registerBuiltinPlugins();
 initDatabase();
 backfillGenres();
 
@@ -230,7 +233,17 @@ function getDailyMasterEnabled(): boolean {
 async function runDailyJobs() {
   // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
-  await runDailyRecommendJob();
+  // Every enabled `recommender` plugin builds its own playlist. Core iterates by
+  // capability — it doesn't know that "每日推荐" exists, let alone import it.
+  for (const { manifest, impl } of getEnabledByCapability("dailyPlaylist")) {
+    if (typeof impl?.runDailyJob !== "function") continue;
+    try {
+      const summary = await impl.runDailyJob();
+      if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+    } catch (e: any) {
+      console.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error:`, e.message || e);
+    }
+  }
   // Refresh every enabled source plugin that supports daily-recommend playlists
   // and/or web-song rotation. Core iterates by *capability* — no hardcoded
   // provider name.
@@ -292,13 +305,15 @@ function scheduleNextDailyRun() {
 const AUTO_SYNC_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 setInterval(async () => {
   cleanupPlayHistory(getPlayHistoryRetentionDays());
-  try {
-    const result = await syncAllEnabledPlaylists();
-    if (result.synced > 0 || result.errors.length > 0) {
-      console.log(`[AUTO-SYNC] synced ${result.synced} playlists, errors: ${result.errors.length}`);
+  // Every enabled `sync` plugin re-syncs what it owns (imported playlists today).
+  for (const { manifest, impl } of getEnabledByCapability("playlistSync")) {
+    if (typeof impl?.runSyncJob !== "function") continue;
+    try {
+      const summary = await impl.runSyncJob();
+      if (summary) console.log(`[AUTO-SYNC] ${manifest.id}: ${summary}`);
+    } catch (e: any) {
+      console.error(`[AUTO-SYNC] ${manifest.id} error:`, e.message || e);
     }
-  } catch (e: any) {
-    console.error("[AUTO-SYNC] error:", e.message);
   }
   // Auto-scrape artist info for artists added in the last 7 days that still
   // have no cover (QQ first, NetEase fallback). Older artists are left alone

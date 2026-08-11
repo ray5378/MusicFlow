@@ -35,6 +35,7 @@ import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { copyCoverToFile } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
+import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 
 export interface DailyCandidate {
   platform: "qq" | "netease";
@@ -621,3 +622,32 @@ export async function runDailyRecommendJob(): Promise<DailyRecommendResult | nul
 export function purgeOldDailyPlaylists(_retentionDays: number): number {
   return 0;
 }
+
+// ==================== Plugin (recommender) ====================
+//
+// Registered as a `recommender` plugin so the daily scheduler picks it up by
+// capability ("dailyPlaylist") instead of importing runDailyRecommendJob
+// directly. localRecommend is NOT a separate plugin: its output is merged into
+// this playlist (see generateDailyPlaylist), so it stays an internal helper.
+
+export const DAILY_RECOMMEND_PLUGIN_ID = "daily-recommend";
+
+export const dailyRecommendManifest: PluginManifest = {
+  id: DAILY_RECOMMEND_PLUGIN_ID,
+  name: "每日推荐",
+  version: "1.0.0",
+  type: "recommender",
+  description: "每天生成「今日推荐」歌单:平台榜单候选 + 推荐池成员 + 本地曲库随机补充",
+  capabilities: ["dailyPlaylist"],
+  defaultEnabled: true,
+  configSchema: [],
+};
+
+export const dailyRecommendPlugin: RecommenderPlugin = {
+  manifest: dailyRecommendManifest,
+  async runDailyJob(): Promise<string | null> {
+    const r = await runDailyRecommendJob();
+    if (!r || r.skipped) return null;
+    return `${r.date}: ${r.matched} matched, ${r.unmatched} stubs, ${r.poolSongsAdded} pool, ${r.randomSongsAdded} random`;
+  },
+};

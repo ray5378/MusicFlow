@@ -5,15 +5,27 @@
       <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
     </div>
     <el-table :data="plugins" stripe v-loading="loading" v-if="plugins.length > 0">
-      <el-table-column prop="name" label="插件名称" min-width="200" />
-      <el-table-column prop="version" label="版本" width="100" />
+      <el-table-column label="插件名称" min-width="200">
+        <template #default="{ row }">
+          <div class="plugin-name">{{ displayName(row) }}</div>
+          <div class="plugin-id">{{ row.name }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="类型" width="110">
+        <template #default="{ row }">
+          <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="version" label="版本" width="90" />
       <el-table-column prop="description" label="说明" min-width="240" show-overflow-tooltip />
       <el-table-column label="状态" width="100">
         <template #default="{ row }"><el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" /></template>
       </el-table-column>
       <el-table-column label="操作" width="140">
         <template #default="{ row }">
-          <el-button size="small" type="primary" plain @click="editPlugin(row)">配置</el-button>
+          <el-button size="small" type="primary" plain @click="editPlugin(row)">
+            {{ hasConfig(row) ? "配置" : "详情" }}
+          </el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -71,19 +83,23 @@
           <span v-if="f.help" class="field-hint">{{ f.help }}</span>
         </el-form-item>
 
-        <el-form-item>
-          <el-button type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
+        <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
+        <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
+          <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
           <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
           <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
         </el-form-item>
         <el-alert
-          v-if="isSourcePlugin(editing)"
           type="info"
           :closable="false"
           show-icon
-          title="说明"
-          :description="editing.manifest?.description || '填写在线源服务地址后,即可在「在线音乐搜索」中搜索并导入为在线歌曲。'"
+          :title="`${typeLabel(editing)}插件`"
+          :description="pluginHint(editing)"
         />
+        <div v-if="capabilityList(editing).length > 0" class="cap-row">
+          <span class="cap-label">能力</span>
+          <el-tag v-for="cap in capabilityList(editing)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="showConfigDialog = false">取消</el-button>
@@ -136,6 +152,73 @@ const hasWebRotation = computed<boolean>(() =>
 
 function isSourcePlugin(plugin: any) {
   return parseManifest(plugin).type === "source";
+}
+
+/** Manifest display name, falling back to the stored row name (= plugin id). */
+function displayName(plugin: any): string {
+  return parseManifest(plugin).name || plugin?.name || "";
+}
+
+function hasConfig(plugin: any): boolean {
+  return (parseManifest(plugin).configSchema || []).length > 0;
+}
+
+// Plugin taxonomy — labels only. The backend decides what each type can do via
+// manifest capabilities; the UI just renders whatever it declares.
+const TYPE_LABELS: Record<string, string> = {
+  source: "在线源",
+  importer: "歌单导入",
+  recommender: "推荐",
+  sync: "同步",
+};
+const TYPE_COLORS: Record<string, string> = {
+  source: "primary",
+  importer: "success",
+  recommender: "warning",
+  sync: "info",
+};
+const CAP_LABELS: Record<string, string> = {
+  search: "在线搜索",
+  recommend: "平台推荐歌单",
+  playlistSongs: "远程歌单曲目",
+  stream: "音频流",
+  lyrics: "在线歌词",
+  webRotation: "在线歌曲轮换清理",
+  playlistImport: "分享链接导入",
+  playlistFile: "歌单文件导入",
+  dailyPlaylist: "每日歌单生成",
+  playlistSync: "歌单定时同步",
+  autoMatch: "条目自动匹配",
+};
+
+function typeLabel(plugin: any): string {
+  const t = parseManifest(plugin).type;
+  return TYPE_LABELS[t] || t || "未知";
+}
+
+function typeTagColor(plugin: any): any {
+  return TYPE_COLORS[parseManifest(plugin).type] || "info";
+}
+
+function capabilityList(plugin: any): string[] {
+  return parseManifest(plugin).capabilities || [];
+}
+
+function capLabel(cap: string): string {
+  return CAP_LABELS[cap] || cap;
+}
+
+const TYPE_HINTS: Record<string, string> = {
+  source: "填写在线源服务地址后,即可在「在线音乐搜索」中搜索并导入为在线歌曲。",
+  importer: "停用后,对应平台的歌单分享链接 / 歌单文件将无法导入。",
+  recommender: "停用后,不再自动生成对应的推荐歌单。",
+  sync: "停用后,不再自动重新拉取已开启同步的歌单(手动同步仍可用)。",
+};
+
+function pluginHint(plugin: any): string {
+  const m = parseManifest(plugin);
+  const extra = hasConfig(plugin) ? "" : "该插件无需额外配置,用开关启用/停用即可。";
+  return [m.description, TYPE_HINTS[m.type], extra].filter(Boolean).join(" ");
 }
 
 function providerId(plugin: any): string {
@@ -256,6 +339,10 @@ onMounted(loadPlugins);
 .admin-plugins { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
 .test-result { margin-left: 12px; font-size: 13px; color: var(--el-color-danger); &.ok { color: var(--el-color-success); } }
+.plugin-name { font-weight: 600; line-height: 1.35; }
+.plugin-id { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.35; }
+.cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
+.cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
 @media (max-width: 768px) {
   .admin-plugins { padding: 20px 16px; }

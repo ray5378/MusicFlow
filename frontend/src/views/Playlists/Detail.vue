@@ -75,12 +75,12 @@
     <el-dialog v-model="showMatchDialog" title="在线匹配" width="480px" :close-on-click-modal="false">
       <div v-if="matchRunning" class="match-progress">
         <el-progress :percentage="matchPercent" />
-        <p class="match-hint">正在通过 go-music-dl 匹配「{{ playlist?.name }}」中未收录的 {{ matchTotal }} 首...<br>已匹配 {{ matchDone }} / {{ matchTotal }} 首(耗时较长,可稍后查看)</p>
+        <p class="match-hint">正在通过在线源匹配「{{ playlist?.name }}」中未收录的 {{ matchTotal }} 首...<br>已匹配 {{ matchDone }} / {{ matchTotal }} 首(耗时较长,可稍后查看)</p>
       </div>
       <div v-else-if="matchResult">
         <p class="match-result">匹配完成: 成功 {{ matchResult.matched }} 首,未找到 {{ matchResult.noMatch }} 首,出错 {{ matchResult.error }} 首</p>
       </div>
-      <p v-else class="match-hint">将对该歌单中所有「曲库中未找到」的歌曲,通过 go-music-dl 在线源自动匹配并导入,匹配成功后即可直接播放。</p>
+      <p v-else class="match-hint">将对该歌单中所有「曲库中未找到」的歌曲,通过在线源自动匹配并导入,匹配成功后即可直接播放。</p>
       <template #footer>
         <el-button @click="showMatchDialog = false" :disabled="matchRunning">关闭</el-button>
         <el-button v-if="matchResult" type="primary" @click="closeMatchAndReload">完成</el-button>
@@ -286,8 +286,8 @@ async function loadOnlineSource() {
   if (onlineSourceId.value) return;
   try {
     const res = await api.get("/rest/api/v1/plugins");
-    const source = (res.data || []).find((p: any) => p.enabled && p.config?.baseUrl && (p.manifest?.type === "source" || p.manifest?.provider === "go-music-dl"));
-    if (source) onlineSourceId.value = source.id || source.manifest?.provider || "go-music-dl";
+    const source = (res.data || []).find((p: any) => p.enabled && p.config?.baseUrl && p.manifest?.type === "source");
+    if (source) onlineSourceId.value = source.id;
   } catch { onlineSourceId.value = ""; }
 }
 

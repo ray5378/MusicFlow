@@ -9,7 +9,7 @@ import md5 from "md5";
 import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
-import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parseNativePlaylists, NATIVE_APP } from "../../services/plugin/playlistImport.js";
+import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { checkImportCooldown, rebuildPlaylistEntries, syncPlaylist, refreshPlaylistCounts, exportPlaylistEntries } from "../../services/plugin/playlistSync.js";
 import {
   generateDailyPlaylist, loadCandidates, saveCandidates, pickDailyCandidate,
@@ -789,8 +789,9 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
   if (!url && !native) return c.json({ success: false, error: "请输入歌单链接或选择歌单文件" });
   try {
     if (native) {
-      // Native MusicFlow file — may contain one playlist or a whole export-all file
-      const nativeList = parseNativePlaylists(native);
+      // Uploaded playlist file — routed to whichever enabled importer plugin
+      // recognizes the payload (built-in: MusicFlow export, one or many playlists).
+      const nativeList = parsePlaylistFile(native);
       const created: { id: string; name: string }[] = [];
       const totals = { total: 0, matched: 0, unmatched: 0, wishAdded: 0 };
       for (let i = 0; i < nativeList.length; i++) {

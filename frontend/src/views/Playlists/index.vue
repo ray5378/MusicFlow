@@ -125,12 +125,14 @@
     </el-dialog>
 
     <el-dialog v-model="showImportDialog" title="导入歌单" width="560px">
+      <!-- 支持的平台来自「已启用的导入插件」,不再写死:在插件页停用某个导入插件后
+           这里的提示会同步变化。 -->
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-        支持 QQ 音乐、网易云音乐歌单分享链接，或本项目「导出」生成的 .json 歌单文件。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入未命中音乐
+        {{ importHint }}
       </el-alert>
       <el-form label-width="80px">
         <el-form-item label="歌单链接">
-          <el-input v-model="importUrl" placeholder="粘贴 QQ 音乐 / 网易云音乐歌单分享链接..." type="textarea" :rows="2" />
+          <el-input v-model="importUrl" :placeholder="importPlaceholder" type="textarea" :rows="2" />
         </el-form-item>
         <el-form-item label="或选择文件">
           <el-upload
@@ -164,7 +166,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
@@ -273,7 +275,37 @@ const syncingId = ref("");
 const favInPool = ref(false);
 const poolPlaylistIds = ref<Set<string>>(new Set());
 
-// go-music-dl 在线源(用于同步所有平台的每日推荐歌单)
+// 已启用「歌单链接导入」插件覆盖的平台(来自插件清单,不再写死 QQ/网易云)。
+// 停用某个导入插件后,导入弹窗的提示文案会同步变化。
+const importPlatforms = ref<string[]>([]);
+const enabledImportPlatformLabels = computed(() =>
+  importPlatforms.value.map((p) => PLATFORM_NAMES[p] || p).join(" / "),
+);
+const importHint = computed(() => {
+  const links = enabledImportPlatformLabels.value;
+  const head = links ? `支持 ${links} 歌单分享链接` : "支持已启用导入插件对应的歌单分享链接";
+  return `${head},或本项目「导出」生成的 .json 歌单文件。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入未命中音乐`;
+});
+const importPlaceholder = computed(() =>
+  importPlatforms.value.length ? `粘贴 ${enabledImportPlatformLabels.value} 歌单分享链接...` : "粘贴歌单分享链接...",
+);
+async function loadImportPlatforms() {
+  try {
+    const res = await api.get("/rest/api/v1/plugins");
+    const parseManifest = (v: any) => { try { return typeof v === "string" ? JSON.parse(v || "{}") : v || {}; } catch { return {}; } };
+    const plats = new Set<string>();
+    for (const p of (res.data || []) as any[]) {
+      if (!p.enabled) continue;
+      const m = parseManifest(p.manifest);
+      if (m?.capabilities?.includes("playlistImport")) for (const pl of m.platforms || []) plats.add(pl);
+    }
+    importPlatforms.value = [...plats];
+  } catch {
+    importPlatforms.value = [];
+  }
+}
+
+// 在线源插件(用于同步所有平台的每日推荐歌单):只认 type==="source" 且已配置 baseUrl,不再写死 go-music-dl
 const dailySourceId = ref("");
 const syncingDaily = ref(false);
 
@@ -286,15 +318,15 @@ async function detectDailySource() {
     const src = (res.data || []).find((p: any) => {
       const cfg = parseCfg(p.config);
       const manifest = parseManifest(p.manifest);
-      return p.enabled && cfg?.baseUrl && (manifest?.type === "source" || manifest?.provider === "go-music-dl");
+      return p.enabled && cfg?.baseUrl && manifest?.type === "source";
     });
-    if (src) dailySourceId.value = src.id || parseManifest(src.manifest)?.provider || "go-music-dl";
+    if (src) dailySourceId.value = src.id;
   } catch {}
 }
 async function syncDailyAll() {
   if (!dailySourceId.value) await detectDailySource(); // 未探测到源,先尝试探测
   if (!dailySourceId.value) {
-    ElMessage.warning("未检测到 go-music-dl 在线源,请先在「插件」页配置并启用后再同步");
+    ElMessage.warning("未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件后再同步");
     return;
   }
   syncingDaily.value = true;
@@ -368,7 +400,7 @@ function onSearchClear() { currentPage.value = 1; loadPlaylists(); }
 function openManage(action: string) {
   showManageMenu.value = false;
   if (action === "create") showCreateDialog.value = true;
-  else if (action === "import") showImportDialog.value = true;
+  else if (action === "import") { showImportDialog.value = true; loadImportPlatforms(); }
   else if (action === "export") exportAllPlaylists();
   else if (action === "sync") syncDailyAll();
   else if (action === "wish") router.push("/admin/wish");
@@ -635,7 +667,7 @@ async function deletePlaylist(pl: any) {
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
 }
 
-onMounted(() => { loadPlaylists(); detectDailySource(); });
+onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); });
 </script>
 
 <style lang="scss" scoped>

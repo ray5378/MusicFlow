@@ -3,8 +3,10 @@ import { db, sqlite } from "../../db/index.js";
 import { songs, playlists, playlistSongs, wishes } from "../../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack } from "./playlistImport.js";
+import { importPlaylistFromUrl, findUrlImporter, ImportedPlaylist, ImportedTrack } from "./playlistImport.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
+import { firstEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
+import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
 
 export interface SyncResult {
   total: number;
@@ -115,7 +117,7 @@ export async function rebuildPlaylistEntries(
   refreshPlaylistCounts(playlistId);
 
   // Any entries that couldn't be matched to the local library are auto-matched
-  // against the configured online source (go-music-dl) in the background, so
+  // against whichever enabled source plugin can do it, in the background, so
   // these playlists become playable even without the track being in the local
   // library. Fire-and-forget: the match runs off this request's hot path.
   if (unmatched > 0) {
@@ -130,25 +132,27 @@ export async function rebuildPlaylistEntries(
 // Per-playlist auto-match guard: only one background match at a time per playlist.
 const autoMatchLocks = new Set<string>();
 
-// Match a playlist's unmatched entries ("曲库中未找到") through the configured
-// online source provider. Loaded lazily via dynamic import to avoid a static
-// cycle (match.ts imports this module for normalizeKey).
+// Match a playlist's unmatched entries ("曲库中未找到") through whichever enabled
+// plugin declares the ability to do it. Capability-driven: a plugin that says it
+// can `autoMatch` wins, otherwise any plugin that can `search` is good enough.
+// match.ts is loaded lazily via dynamic import to avoid a static cycle (it
+// imports this module for normalizeKey).
 async function queueAutoMatch(playlistId: string): Promise<void> {
   if (autoMatchLocks.has(playlistId)) return;
   autoMatchLocks.add(playlistId);
   const started = Date.now();
   try {
-    const [{ getConfiguredProvider }, { matchUnmatchedPlaylistEntries }] = await Promise.all([
-      import("../source/online/index.js"),
-      import("../source/online/match.js"),
-    ]);
-    const configured = getConfiguredProvider("go-music-dl");
-    if (!configured) return; // no online source configured -> nothing to do
+    const matcher = firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search");
+    if (!matcher) return; // no capable plugin enabled -> nothing to do
+    const config = getPluginConfig(matcher.manifest.id);
+    if (!config) return; // plugin disabled between lookup and read
+    if (typeof matcher.impl?.search !== "function") return; // can't actually match
 
+    const { matchUnmatchedPlaylistEntries } = await import("../source/online/match.js");
     const result = await matchUnmatchedPlaylistEntries(
-      configured.provider.id,
-      configured.config,
-      configured.provider,
+      matcher.manifest.id,
+      config,
+      matcher.impl,
       playlistId,
     );
     if (result.total > 0) {
@@ -204,9 +208,11 @@ export async function syncAllEnabledPlaylists(opts: RebuildOptions = {}): Promis
   let synced = 0;
   for (const pl of enabled) {
     if (syncLocks.has(pl.id)) continue;
-    // gmdl 每日推荐歌单由每日推荐同步任务(syncAllRecommendPlaylists)管理,
-    // 不走通用 http 同步(importPlaylistFromUrl 不支持 gmdl:// URL)。
-    if (pl.sourceUrl?.startsWith("gmdl://")) continue;
+    // Playlists whose sourceUrl no importer plugin claims are owned by someone
+    // else — e.g. a source plugin's own recommend playlists (its manifest
+    // `recommendPrefix` ref), refreshed by syncAllRecommendPlaylists instead.
+    // Capability-driven skip: no hardcoded URL scheme.
+    if (!pl.sourceUrl || !findUrlImporter(pl.sourceUrl)) continue;
     try {
       results.push(await syncPlaylist(pl.id, opts));
       synced++;
@@ -274,3 +280,32 @@ export function exportPlaylistEntries(playlistId: string): { name: string; track
   }
   return { name: playlist.name, tracks };
 }
+
+// ==================== Plugin (sync) ====================
+//
+// Registered as a `sync` plugin so the maintenance loop schedules it by
+// capability instead of importing syncAllEnabledPlaylists directly. Disabling
+// this plugin in the admin UI turns automatic playlist re-sync off; manual
+// per-playlist sync (POST /v1/playlists/:id/sync) keeps working.
+
+export const PLAYLIST_SYNC_PLUGIN_ID = "playlist-sync";
+
+export const playlistSyncManifest: PluginManifest = {
+  id: PLAYLIST_SYNC_PLUGIN_ID,
+  name: "歌单自动同步",
+  version: "1.0.0",
+  type: "sync",
+  description: "定期重新拉取已开启同步的导入歌单,按曲库重建条目并自动匹配在线源",
+  capabilities: ["playlistSync"],
+  defaultEnabled: true,
+  configSchema: [],
+};
+
+export const playlistSyncPlugin: SyncPlugin = {
+  manifest: playlistSyncManifest,
+  async runSyncJob(): Promise<string | null> {
+    const r = await syncAllEnabledPlaylists();
+    if (r.synced === 0 && r.errors.length === 0) return null;
+    return `synced ${r.synced} playlists, errors: ${r.errors.length}`;
+  },
+};

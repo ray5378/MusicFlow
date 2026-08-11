@@ -1,0 +1,214 @@
+// Unit tests for the unified plugin registry + capability-driven dispatch.
+//
+// These are the guard-rails for the V2 refactor: the core must resolve plugins by
+// *capability* and honour the DB `enabled` flag, and importer routing must come
+// from the plugins themselves (no URL if-chain left in the core).
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
+import { initDatabase, sqlite } from "../../src/db/index.js";
+import { registerBuiltinPlugins, seedBuiltinPluginRows, BUILTIN_PLUGINS } from "../../src/plugins/builtins.js";
+import {
+  listRegistered,
+  getEnabledByCapability,
+  firstEnabledByCapability,
+  getEnabledPlugins,
+  getPluginConfig,
+} from "../../src/plugins/registry.js";
+import {
+  importPlaylistFromUrl,
+  parsePlaylistFile,
+  findUrlImporter,
+  supportedImportPlatforms,
+  NATIVE_APP,
+} from "../../src/services/plugin/playlistImport.js";
+
+const QQ_URL = "https://y.qq.com/n/ryqq/playlist/8802318711";
+const QQ_TOPLIST_URL = "https://y.qq.com/n/ryqq/toplist/26";
+const NETEASE_URL = "https://music.163.com/playlist?id=3778678";
+
+function setEnabled(id: string, enabled: 0 | 1) {
+  sqlite.prepare("UPDATE plugins SET enabled = ? WHERE name = ?").run(enabled, id);
+}
+
+function enabledFlag(id: string): number | undefined {
+  const row = sqlite.prepare("SELECT enabled FROM plugins WHERE name = ?").get(id) as any;
+  return row?.enabled;
+}
+
+let seededCount = 0;
+
+beforeAll(() => {
+  registerBuiltinPlugins();
+  initDatabase(); // fires the db-ready hook -> seeds a row per registered plugin
+  // The test DB is shared with the other test files, so a plugin row may already
+  // exist with whatever state they left behind. Drop the built-in rows and let
+  // the seeder rebuild them, so the seeding assertions below test the seeder
+  // rather than leftover state.
+  for (const { manifest } of BUILTIN_PLUGINS) {
+    sqlite.prepare("DELETE FROM plugins WHERE name = ?").run(manifest.id);
+  }
+  seededCount = seedBuiltinPluginRows();
+});
+
+afterEach(() => {
+  // Restore each plugin's seeded default so tests stay independent.
+  for (const { manifest } of BUILTIN_PLUGINS) {
+    setEnabled(manifest.id, manifest.defaultEnabled ? 1 : 0);
+  }
+});
+
+describe("plugin registry", () => {
+  it("registers every built-in plugin exactly once (idempotent)", () => {
+    registerBuiltinPlugins();
+    registerBuiltinPlugins();
+    const ids = listRegistered().map((p) => p.manifest.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const { manifest } of BUILTIN_PLUGINS) {
+      expect(ids).toContain(manifest.id);
+    }
+  });
+
+  it("covers all four plugin types", () => {
+    const types = new Set(listRegistered().map((p) => p.manifest.type));
+    expect([...types].sort()).toEqual(["importer", "recommender", "source", "sync"]);
+  });
+
+  it("seeds exactly one row per registered plugin", () => {
+    expect(seededCount).toBe(BUILTIN_PLUGINS.length);
+  });
+
+  it("seeds source plugins disabled and built-in helper plugins enabled", () => {
+    // A source plugin is useless until the user supplies a baseUrl.
+    expect(enabledFlag("go-music-dl")).toBe(0);
+    // These replaced hardcoded core paths — they must be on, or importing a
+    // playlist / daily recommend would silently stop working after upgrade.
+    expect(enabledFlag("qq-playlist-importer")).toBe(1);
+    expect(enabledFlag("netease-playlist-importer")).toBe(1);
+    expect(enabledFlag("musicflow-file-importer")).toBe(1);
+    expect(enabledFlag("daily-recommend")).toBe(1);
+    expect(enabledFlag("playlist-sync")).toBe(1);
+  });
+
+  it("re-seeding never duplicates or resets existing rows", () => {
+    setEnabled("qq-playlist-importer", 0);
+    const inserted = seedBuiltinPluginRows();
+    expect(inserted).toBe(0);
+    expect(enabledFlag("qq-playlist-importer")).toBe(0); // user state survives
+    const rows = sqlite.prepare("SELECT COUNT(*) AS n FROM plugins WHERE name = ?")
+      .get("qq-playlist-importer") as any;
+    expect(rows.n).toBe(1);
+  });
+
+  it("resolves plugins by capability and respects the enabled flag", () => {
+    const ids = () => getEnabledByCapability("playlistImport").map((p) => p.manifest.id);
+    expect(ids()).toEqual(expect.arrayContaining(["qq-playlist-importer", "netease-playlist-importer"]));
+
+    setEnabled("qq-playlist-importer", 0);
+    expect(ids()).not.toContain("qq-playlist-importer");
+    expect(ids()).toContain("netease-playlist-importer");
+  });
+
+  it("exposes scheduler capabilities as impls the core can call blindly", () => {
+    const daily = firstEnabledByCapability("dailyPlaylist");
+    expect(daily?.manifest.type).toBe("recommender");
+    expect(typeof daily?.impl.runDailyJob).toBe("function");
+
+    const sync = firstEnabledByCapability("playlistSync");
+    expect(sync?.manifest.type).toBe("sync");
+    expect(typeof sync?.impl.runSyncJob).toBe("function");
+  });
+
+  it("returns nothing for a capability no enabled plugin declares", () => {
+    // go-music-dl is the only search/stream plugin and it is seeded disabled.
+    expect(firstEnabledByCapability("search")).toBeUndefined();
+    expect(firstEnabledByCapability("stream")).toBeUndefined();
+    expect(getEnabledByCapability("webRotation")).toEqual([]);
+  });
+
+  it("getEnabledPlugins filters by type", () => {
+    expect(getEnabledPlugins("source")).toEqual([]); // seeded disabled
+    expect(getEnabledPlugins("importer").length).toBe(3);
+    expect(getEnabledPlugins("sync").map((p) => p.manifest.id)).toEqual(["playlist-sync"]);
+  });
+
+  it("getPluginConfig returns null for a disabled plugin", () => {
+    expect(getPluginConfig("go-music-dl")).toBeNull();
+    setEnabled("go-music-dl", 1);
+    expect(getPluginConfig("go-music-dl")).toMatchObject({ baseUrl: "" });
+  });
+});
+
+describe("playlist import dispatch", () => {
+  it("routes share URLs to the plugin that claims them", () => {
+    expect(findUrlImporter(QQ_URL)?.manifest.id).toBe("qq-playlist-importer");
+    expect(findUrlImporter(QQ_TOPLIST_URL)?.manifest.id).toBe("qq-playlist-importer");
+    expect(findUrlImporter(NETEASE_URL)?.manifest.id).toBe("netease-playlist-importer");
+    expect(findUrlImporter("https://example.com/playlist/1")).toBeUndefined();
+  });
+
+  it("stops routing to a disabled importer", () => {
+    setEnabled("qq-playlist-importer", 0);
+    expect(findUrlImporter(QQ_URL)).toBeUndefined();
+  });
+
+  it("reports the platforms enabled importers cover", () => {
+    expect(supportedImportPlatforms().sort()).toEqual(["netease", "qq"]);
+    setEnabled("netease-playlist-importer", 0);
+    expect(supportedImportPlatforms()).toEqual(["qq"]);
+  });
+
+  it("rejects an unsupported link without hitting the network", async () => {
+    await expect(importPlaylistFromUrl("https://example.com/playlist/1"))
+      .rejects.toThrow(/不支持的音乐平台链接/);
+  });
+
+  it("reports missing importers instead of silently doing nothing", async () => {
+    setEnabled("qq-playlist-importer", 0);
+    setEnabled("netease-playlist-importer", 0);
+    await expect(importPlaylistFromUrl(QQ_URL)).rejects.toThrow(/没有启用的歌单导入插件/);
+  });
+});
+
+describe("playlist file dispatch", () => {
+  const single = {
+    app: NATIVE_APP,
+    version: 1,
+    name: "我的歌单",
+    tracks: [
+      { externalId: "1", title: "歌曲A", artist: "歌手A", album: "专辑A", duration: 210000 },
+      { externalId: "2", title: "歌曲B", artist: "歌手B" },
+    ],
+  };
+
+  it("parses a MusicFlow single-playlist export", () => {
+    const out = parsePlaylistFile(single);
+    expect(out.length).toBe(1);
+    expect(out[0]).toMatchObject({ name: "我的歌单", platform: "local" });
+    expect(out[0].tracks.map((t) => t.title)).toEqual(["歌曲A", "歌曲B"]);
+    expect(out[0].tracks[1].duration).toBeUndefined(); // absent duration stays absent
+  });
+
+  it("expands an export-all file into one playlist per block", () => {
+    const out = parsePlaylistFile({
+      app: NATIVE_APP,
+      version: 1,
+      exportAll: true,
+      playlists: [single, { name: "第二个", tracks: [{ title: "歌曲C" }] }],
+    });
+    expect(out.map((p) => p.name)).toEqual(["我的歌单", "第二个"]);
+  });
+
+  it("rejects a payload no importer recognizes", () => {
+    expect(() => parsePlaylistFile({ app: "SomethingElse", tracks: [] }))
+      .toThrow(/无法识别该歌单文件格式/);
+  });
+
+  it("rejects an empty MusicFlow file", () => {
+    expect(() => parsePlaylistFile({ app: NATIVE_APP, version: 1, name: "空", tracks: [] }))
+      .toThrow(/没有可用曲目/);
+  });
+
+  it("reports missing file importers when the plugin is disabled", () => {
+    setEnabled("musicflow-file-importer", 0);
+    expect(() => parsePlaylistFile(single)).toThrow(/没有启用的歌单文件导入插件/);
+  });
+});

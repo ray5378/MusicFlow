@@ -8,9 +8,11 @@ import { db } from "../../../db/index.js";
 import { plugins } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getOnlineProvider, OnlineProvider, OnlineSongResult } from "./types.js";
-import { registerBuiltinPlugins } from "../../../plugins/registry.js";
+import { registerBuiltinPlugins } from "../../../plugins/builtins.js";
 
-// Register all built-in source plugins into the unified registry at boot.
+// Make sure the built-in catalog is in the registry before any lookup happens.
+// The entry file calls this explicitly too; registerBuiltinPlugins() is
+// idempotent, and this keeps unit tests that only import the online layer working.
 registerBuiltinPlugins();
 
 export { getOnlineProvider };
