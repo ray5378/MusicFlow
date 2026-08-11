@@ -1,0 +1,203 @@
+# MusicFlow-V2 插件化架构与开发文档
+
+> 版本：基于 MusicFlow 复制基线（v1.1.29）重构
+> 目标：把内置的 `go-music-dl` 从「深度耦合」改造成「真正的插件」，核心代码不再写死任何具体在线源实现；并搭建一套可扩展的统一插件框架，为后续把「歌单导入 / 每日推荐 / 歌单同步」也插件化预留接口。
+
+---
+
+## 0. 范围说明（本次交付）
+
+本版（V2 Phase 0 + 1）聚焦 **在线音乐源（Source）的插件化**，这是用户原始诉求「go-music-dl 不再和项目深度耦合」的完整答案：
+
+- Phase 0：统一插件注册表 + 统一 Manifest 类型 + DB 种子改由 manifest 驱动；go-music-dl 改为通过 registry 注册，删除编译期硬 import。
+- Phase 1：核心调度 / 歌词 / 流兜底 / 推荐前缀全部改为「遍历有能力的启用插件」，不再出现字符串 `"go-music-dl"`。
+
+**非本次目标（已在 §6 记录为下一里程碑）**：把 `playlistImport` / `dailyRecommend` / `localRecommend` / `playlistSync` 这些「名为插件、实为硬编码模块」的功能也注册成 plugin 类型（Phase 2），以及允许社区写外置 drop-in 插件（Phase 3）。这些模块当前仍会调用 `getConfiguredProvider("go-music-dl")`，由于该函数本身走 registry，Phase 1 后它们已不再「写死实现细节」，只是仍写死了 providerId 字符串——归 Phase 2 收口。
+
+---
+
+## 1. 现状调研结论（耦合点清单）
+
+| # | 位置 | 耦合表现 | 类型 |
+|---|------|---------|------|
+| C1 | `services/source/online/index.ts:13` | `initOnlineProviders()` 在模块加载时直接 `import goMusicDl.ts` 并 `register` | 编译期硬注册 |
+| C2 | `routes/api/online.ts` / `index.ts:15` | 导出常量 `GO_MUSIC_DL_PROVIDER_ID` 并被各处引用 | 名字常量泄漏 |
+| C3 | `index.ts:238 / 250` | 定时器 `runDailyJobs` 直接 `syncAllRecommendPlaylists("go-music-dl")` / `purgeExpiredWebSongs("go-music-dl")` | 调度写死字符串 |
+| C4 | `services/source/online/streamFallback.ts:160` | 兜底默认 provider 写死 `song.pluginEntry \|\| "go-music-dl"` | 默认值写死 |
+| C5 | `services/lyrics.ts:76-96 / 107` | `deriveGmdlLrcUrl()` 硬编码 `/music/download`→`/music/download_lrc` 推导 | gmdl 专属逻辑混在核心 |
+| C6 | `services/source/online/recommendImport.ts:24` | `RECOMMEND_URL_PREFIX = "gmdl://recommend/"` 写死前缀 | 前缀写死 |
+| C7 | `services/plugin/playlistSync.ts:145` | `getConfiguredProvider("go-music-dl")` 直调 | providerId 写死 |
+| C8 | `frontend/.../Plugins/index.vue:98-111 / 117 / 167` | `sourceOptions` 平台列表写死；`isSourcePlugin` 判定 `provider==="go-music-dl"`；`providerId` 缺省回退 `"go-music-dl"` | 前端语义写死 |
+| C9 | `db/index.ts:391-407` | DB 种子把 `go-music-dl` 作为唯一内置插件写死 INSERT | 种子写死 |
+
+**已具备的插件化基础（保留，不推翻）**：
+
+- `plugins` 表（manifest / config / enabled）+ `OnlineProvider` 接口 + 运行时 `Map` 注册表（`types.ts:78`）。
+- `/v1/online/:providerId/*` 参数化路由；`baseUrl` 等配置存于 `plugins.config`。
+- 前端 `Playlists/Detail.vue`、`Playlists/index.vue` 已通过 `/v1/plugins` 动态发现首个启用的 source 插件做搜索/匹配（**不写死** go-music-dl）。
+- 管理员插件页支持启停 / 配 baseUrl / test / purge。
+
+结论：Source 已有 70% 插件骨架，缺的是「统一 Manifest 契约 + 编译期去硬注册 + 核心去字符串 + 配置 schema 化」。
+
+---
+
+## 2. 目标架构（统一插件框架）
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                         Core (核心)                            │
+│  timers · lyrics · stream · recommend-sync · router (/v1/...) │
+│  只认「能力(capabilities)」，绝不认具体插件名                  │
+└───────────────┬──────────────────────────────────────────────┘
+                │  getEnabledPlugins(type) / getPlugin(id)
+                ▼
+┌──────────────────────────────────────────────────────────────┐
+│                   Plugin Registry (运行时 Map)                  │
+│  boot: 各内置插件 export manifest + 实现 → register()          │
+│  （Phase 3 可选：boot 扫描 data/plugins/<id>/index.js 动态加载）│
+└───────────────┬──────────────────────────────────────────────┘
+                │
+   ┌────────────┼───────────────┬───────────────┬──────────────┐
+   ▼            ▼               ▼               ▼              ▼
+ Source      Importer       Recommender       Sync           (Lyrics/Sink…)
+ (go-music-   (QQ/网易      (每日推荐/       (歌单自动       Phase 2/3
+  dl = 唯一    『导入』)      本地推荐)        同步)           扩展点
+  实现)                                                      
+```
+
+**关键原则**：
+
+1. 核心永不直接引用 `go-music-dl` 或任何具体实现；只通过 `registry` 拿「带某能力的启用插件」。
+2. 插件能力由 `manifest.capabilities` 声明，核心按能力遍历调用对应方法。
+3. 插件配置由 `manifest.configSchema` 描述，前端按 schema 动态渲染表单（不再写死 baseUrl/sources 字段）。
+4. 数据模型复用现有 `songs.pluginEntry + sourceData`，不变。
+
+---
+
+## 3. 数据模型
+
+不加新表、不改 `songs` 结构。沿用：
+
+- `plugins` 表：`id, name, version, description, manifest(JSON), enabled, config(JSON), created_at, updated_at`。
+- `songs.pluginEntry`：存 provider id（如 `go-music-dl`），用于回溯「这首歌由哪个在线源来」。
+- `songs.sourceData`：存原始元数据（title/artist/source 等）。
+
+`manifest` 字段扩展为统一结构（见 §4）。DB 种子改为「遍历内置插件清单 → 不存在则 INSERT」，去掉写死的 `go-music-dl` 字符串（C9）。
+
+---
+
+## 4. 统一契约（类型与接口）
+
+### 4.1 `plugins/types.ts`（新增，统一 Manifest）
+
+```ts
+export type PluginType = "source" | "importer" | "recommender" | "sync";
+
+export type PluginCapability =
+  | "search"          // 支持在线搜索
+  | "recommend"       // 支持每日推荐歌单
+  | "playlistSongs"   // 支持拉取单个远程歌单的歌曲
+  | "stream"          // 支持构造音频流地址
+  | "lyrics"          // 支持在线歌词
+  | "webRotation";    // 支持在线歌曲过期清理（每日推荐轮换）
+
+export interface ConfigField {
+  key: string;
+  label: string;
+  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch";
+  required?: boolean;
+  default?: unknown;
+  options?: { label: string; value: string }[];
+  help?: string;
+}
+
+export interface PluginManifest {
+  id: string;                 // 唯一，如 "go-music-dl"
+  name: string;               // 展示名
+  version: string;
+  type: PluginType;
+  description?: string;
+  capabilities: PluginCapability[];
+  platforms?: string[];       // source 类可用：支持的平台 slug
+  minAppVersion?: string;
+  configSchema: ConfigField[];
+}
+```
+
+### 4.2 `SourcePlugin` 契约（扩展现有 `OnlineProvider`）
+
+在 `services/source/online/types.ts` 的 `OnlineProvider` 基础上：
+
+- 新增 `manifest: PluginManifest`（插件自描述，含 capabilities / configSchema / platforms）。
+- 新增可选方法 `lyricUrl?(config, song): string | null`（替代 C5 的 `deriveGmdlLrcUrl`，逻辑下沉到插件）。
+- 新增可选方法 `recommendPlaylistRef?(channel: string, id: string): string`（替代 C6 的 `RECOMMEND_URL_PREFIX`）。
+- `recommend?` / `playlistSongs?` / `streamUrl` / `search` / `test` 保持，但仅当对应 capability 存在时由核心调用。
+
+> 其余 `importer / recommender / sync` 类型在 Phase 2 再定义各自接口；Phase 0+1 先只落地 `source`。
+
+### 4.3 注册表 `plugins/registry.ts`（新增）
+
+```ts
+const registry = new Map<string, { manifest: PluginManifest; impl: any }>();
+
+export function registerPlugin(manifest: PluginManifest, impl: any) { registry.set(manifest.id, { manifest, impl }); }
+export function getPlugin(id: string) { return registry.get(id); }
+export function getEnabledPlugins(type?: PluginType) { /* 读 plugins 表 enabled + registry 交集 */ }
+export function getEnabledSourcePlugins() { return getEnabledPlugins("source"); }
+export function getCapabilities(id: string): PluginCapability[] { return registry.get(id)?.manifest.capabilities ?? []; }
+```
+
+> 注意：`getEnabledPlugins` 需读 DB（plugins 表 enabled 列）与 registry 求交集，避免「代码注册了但管理员停用了」仍被调度调用。
+
+---
+
+## 5. 核心解耦映射（Phase 1）
+
+| 原耦合 | 改为 |
+|--------|------|
+| C3 `syncAllRecommendPlaylists("go-music-dl")` | 遍历 `getEnabledSourcePlugins()` 中 `capabilities.includes("recommend")` 的插件，逐个 `syncAllRecommendPlaylists(providerId, config)` |
+| C3 `purgeExpiredWebSongs("go-music-dl")` | 同上，仅对 `capabilities.includes("webRotation")` 的插件调用 |
+| C4 兜底默认 `"go-music-dl"` | 默认 provider = 第一个 `capabilities.includes("stream")` 的启用 source 插件；`song.pluginEntry` 仍优先 |
+| C5 `deriveGmdlLrcUrl` | `lyrics.ts` 对 `type==="web"` 歌曲，取 `getPlugin(song.pluginEntry)?.impl.lyricUrl?.(config, song)`，无则走原 w:/l: 分支；`deriveGmdlLrcUrl` 逻辑移入 go-music-dl 插件的 `lyricUrl` |
+| C6 `RECOMMEND_URL_PREFIX` | 由 `provider.recommendPlaylistRef(channel, id)` 生成；stale 检测用 `provider.recommendPlaylistRef` 反推前缀 |
+| C2 `GO_MUSIC_DL_PROVIDER_ID` 外部引用 | 仅在 go-music-dl 插件内部定义；核心调度不再 import 该常量 |
+| C8 前端写死 | 配置表单由 `manifest.configSchema` 渲染；`providerId` 由 `manifest.provider` 给出，无回退字符串；`sourceOptions` 来自 `manifest.platforms` |
+
+行为保持：go-music-dl 用户无感，搜索/歌词/推荐/兜底照常工作。
+
+---
+
+## 6. 后续里程碑（本次不实现，仅记录）
+
+- **Phase 2（全量插件化）**：定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `localRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts:145` 的 `getConfiguredProvider("go-music-dl")`。
+- **Phase 3（外置插件）**：boot 扫描 `data/plugins/<id>/index.js` 动态 `import`，加 manifest 校验 + 路径白名单 + `minAppVersion` 校验；出插件开发文档。
+
+---
+
+## 7. 任务清单（实现进度追踪）
+
+> 每完成一项即标记完成。括号内为代码映射。
+
+- [x] **T0** 复制基线 → `MusicFlow-V2`，初始化新 git，改名 musicflow-v2-*（已完成）
+- [ ] **T1** 新增 `plugins/types.ts` 统一 Manifest/ConfigField；新增 `plugins/registry.ts` 注册表（含 `getEnabledSourcePlugins` / `getCapabilities`）
+- [ ] **T2** 扩展 `OnlineProvider` → 带 `manifest`；新增 `lyricUrl?` / `recommendPlaylistRef?` 方法
+- [ ] **T3** `db/index.ts` 种子改为遍历「内置插件清单」写入（去 C9 写死）
+- [ ] **T4** `index.ts` 定时器改为遍历有 `recommend` / `webRotation` 能力的启用 source 插件（去 C3）
+- [ ] **T5** `lyrics.ts` 改为调用 `provider.lyricUrl()`（去 C5，逻辑下沉 go-music-dl）
+- [ ] **T6** `streamFallback.ts` 默认 provider 从 registry 取（去 C4）
+- [ ] **T7** `recommendImport.ts` 前缀改由 `provider.recommendPlaylistRef` 生成（去 C6）
+- [ ] **T8** 前端 `Plugins/index.vue` 配置表单由 `configSchema` 动态渲染；`sourceOptions` 来自 `platforms`；去掉 `provider==="go-music-dl"` 判定与回退（去 C8）
+- [ ] **T9** 构建验证：后端 `tsc --noEmit` 通过、前端 `vue-tsc --noEmit` 通过；提交
+
+---
+
+## 8. 验证方式
+
+1. **类型/构建**：`cd backend && npx tsc --noEmit`；`cd frontend && npx vue-tsc --noEmit`。
+2. **行为不回归**（部署后手测）：
+   - 启用 go-music-dl 插件、填 baseUrl → 在线搜索正常；
+   - 播放任一在线歌曲歌词正常显示（V1 已修的逐字问题保持）；
+   - 每日推荐歌单同步 + web 歌曲轮换清理仍触发；
+   - 流播放兜底（原曲失效→多源）仍工作；
+   - 全文检索后端源码，确认无残留字符串 `"go-music-dl"`（除插件自身实现与 manifest）。
+3. **边界**：禁用 go-music-dl 插件后，定时器不再调度其任务（registry 交集过滤生效）。

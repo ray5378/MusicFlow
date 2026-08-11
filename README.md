@@ -1,6 +1,6 @@
-# MusicFlow
+# MusicFlow-V2
 
-自托管音乐库播放器（OpenSubsonic 兼容）。后端 Hono + SQLite（better-sqlite3），前端 Vue 3 + Element Plus。
+自托管音乐库播放器（OpenSubsonic 兼容），**插件化重构版**。后端 Hono + SQLite（better-sqlite3），前端 Vue 3 + Element Plus。在线音乐源、歌单导入、每日推荐、歌单同步等均以插件形式接入，核心不再耦合具体实现。
 单容器部署：后端直接托管前端构建产物，一个端口同时提供 Web UI 和 OpenSubsonic API。
 
 ## 当前稳定版本配套（推荐组合）
