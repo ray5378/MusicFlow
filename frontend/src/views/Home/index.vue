@@ -132,15 +132,18 @@ async function playPl(pl: any) {
 const featured = computed(() =>
   playlists.value.find((p) => p.name === "今日推荐" && (p.songCount || 0) > 30) || null
 );
-// 并排随机：从全部歌单里随机抽 6 张（排除今日推荐大卡）
+// 并排随机：从全部歌单里随机抽 6 张（排除今日推荐大卡；只抽音乐 ≥30 首的歌单）
 // 桌面 = 1 大 + 6 小（3 列 × 2 行）；移动端由 CSS 截断到 1 大 + 4 小
 const sidePlaylists = computed(() => {
-  const pool = playlists.value.filter((p) => p.id !== (featured.value && featured.value.id));
+  const pool = playlists.value.filter(
+    (p) => p.id !== (featured.value && featured.value.id) && (p.songCount || 0) >= 30
+  );
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, 6);
 });
 
-// 各平台精选：按 sourcePlatform 分组，每个平台随机抽 6 张歌单在首页分类展示。
+// 各平台精选：按 sourcePlatform 分组，每个平台随机抽 6 张歌单在首页分类展示
+//（只抽音乐 ≥30 首的歌单）。
 const PLATFORM_META: Array<{ source: string; name: string }> = [
   { source: "netease", name: "网易云" },
   { source: "qq", name: "QQ音乐" },
@@ -149,7 +152,9 @@ const PLATFORM_META: Array<{ source: string; name: string }> = [
 ];
 const platformGroups = computed(() =>
   PLATFORM_META.map((meta) => {
-    const pool = playlists.value.filter((p) => (p.sourcePlatform || "") === meta.source);
+    const pool = playlists.value.filter(
+      (p) => (p.sourcePlatform || "") === meta.source && (p.songCount || 0) >= 30
+    );
     return {
       ...meta,
       playlists: [...pool].sort(() => Math.random() - 0.5).slice(0, 6),
