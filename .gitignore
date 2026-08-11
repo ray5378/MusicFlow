@@ -16,6 +16,7 @@ backend/.env
 # runtime logs
 logs/
 *.log
+buildlog.txt
 
 # local scratch / capture artifacts (not project source)
 .workbuddy/
