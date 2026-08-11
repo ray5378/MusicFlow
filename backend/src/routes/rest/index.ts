@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources } from "../../db/schema.js";
-import { eq, like, sql, or, and, isNotNull, inArray, desc } from "drizzle-orm";
+import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
@@ -854,12 +854,10 @@ restRoutes.get("/getStarred2", (c) => {
 
 // ==================== Scrobble ====================
 
-// Dedupe window: some Subsonic clients (and the web frontend's onplay +
-// external clients used simultaneously) send submission=true twice for the
-// same track within a few seconds. Drop the duplicate so play_history stays
-// clean — keep only the first submission per (user, song) within 10s.
-const SCROBBLE_DEDUPE_MS = 10_000;
-const recentScrobbles = new Map<string, number>(); // key: userId|songId → ms epoch
+// 播放历史去重窗口:同一用户同一首歌 10 分钟内重复播放,只保留最新的一次记录
+// (UPDATE played_at 刷新,不新增行)。用 DB 查询实现,重启不丢状态,替代旧的
+// 10 秒内存 Map 去重。songs.playCount 仍按真实播放次数累加。
+const HISTORY_DEDUPE_WINDOW_MS = 10 * 60 * 1000; // 10 分钟
 
 restRoutes.get("/scrobble", (c) => {
   const user = c.get("user");
@@ -867,18 +865,18 @@ restRoutes.get("/scrobble", (c) => {
   if (!user || !id) return c.json(ok());
   const submission = (getParam(c, "submission") || "true") !== "false";
   if (submission) {
-    const key = `${user.id}|${id}`;
-    const now = Date.now();
-    const last = recentScrobbles.get(key) || 0;
-    // Opportunistic cleanup of stale dedupe entries (keep map small).
-    if (recentScrobbles.size > 200) {
-      for (const [k, t] of recentScrobbles) if (now - t > SCROBBLE_DEDUPE_MS) recentScrobbles.delete(k);
+    const nowIso = new Date().toISOString();
+    const windowStart = new Date(Date.now() - HISTORY_DEDUPE_WINDOW_MS).toISOString();
+    // 10 分钟内已有同一首歌 → 只刷新播放时间(保留最新一次);否则插入新记录。
+    const existing = db.select({ id: playHistory.id }).from(playHistory)
+      .where(and(eq(playHistory.userId, user.id), eq(playHistory.songId, id), gt(playHistory.playedAt, windowStart)))
+      .get();
+    if (existing) {
+      db.update(playHistory).set({ playedAt: nowIso }).where(eq(playHistory.id, existing.id)).run();
+    } else {
+      db.insert(playHistory).values({ userId: user.id, songId: id, playedAt: nowIso }).run();
     }
-    if (now - last > SCROBBLE_DEDUPE_MS) {
-      recentScrobbles.set(key, now);
-      db.insert(playHistory).values({ userId: user.id, songId: id, playedAt: new Date().toISOString() }).run();
-      db.update(songs).set({ playCount: sql`${songs.playCount} + 1` }).where(eq(songs.id, id)).run();
-    }
+    db.update(songs).set({ playCount: sql`${songs.playCount} + 1` }).where(eq(songs.id, id)).run();
   }
   return c.json(ok());
 });
