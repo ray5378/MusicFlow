@@ -69,8 +69,10 @@ describe("plugin registry", () => {
 
   it("covers all built-in plugin types", () => {
     const types = new Set(listRegistered().map((p) => p.manifest.type));
+    // 注意: 内置已不再含 source 类型 —— go-music-dl(全网搜索源)改为官方外置插件,
+    // 由「插件市场」安装后注册。详见 https://github.com/ray5378/MusicFlow-plugins。
     expect([...types].sort()).toEqual([
-      "cover", "importer", "lyrics", "recommender", "renderer", "source", "sync",
+      "cover", "importer", "lyrics", "recommender", "renderer", "sync",
     ]);
   });
 
@@ -78,9 +80,7 @@ describe("plugin registry", () => {
     expect(seededCount).toBe(BUILTIN_PLUGINS.length);
   });
 
-  it("seeds source plugins disabled and built-in helper plugins enabled", () => {
-    // A source plugin is useless until the user supplies a baseUrl.
-    expect(enabledFlag("go-music-dl")).toBe(0);
+  it("seeds built-in helper plugins enabled", () => {
     // These replaced hardcoded core paths — they must be on, or importing a
     // playlist / daily recommend would silently stop working after upgrade.
     expect(enabledFlag("qq-playlist-importer")).toBe(1);
@@ -125,7 +125,8 @@ describe("plugin registry", () => {
   });
 
   it("returns nothing for a capability no enabled plugin declares", () => {
-    // go-music-dl is the only search/stream plugin and it is seeded disabled.
+    // No built-in source plugin ships now (go-music-dl moved to the marketplace),
+    // so search/stream resolve to nothing until the user installs one.
     expect(firstEnabledByCapability("search")).toBeUndefined();
     expect(firstEnabledByCapability("stream")).toBeUndefined();
     expect(getEnabledByCapability("webRotation")).toEqual([]);
@@ -138,9 +139,10 @@ describe("plugin registry", () => {
   });
 
   it("getPluginConfig returns null for a disabled plugin", () => {
-    expect(getPluginConfig("go-music-dl")).toBeNull();
-    setEnabled("go-music-dl", 1);
-    expect(getPluginConfig("go-music-dl")).toMatchObject({ baseUrl: "" });
+    setEnabled("qq-playlist-importer", 0);
+    expect(getPluginConfig("qq-playlist-importer")).toBeNull();
+    setEnabled("qq-playlist-importer", 1);
+    expect(getPluginConfig("qq-playlist-importer")).toMatchObject({});
   });
 });
 

@@ -20,7 +20,9 @@ import type { PluginManifest } from "./types.js";
 import { registerPlugin, listRegistered } from "./registry.js";
 
 // ---- source ----
-import { goMusicDlManifest, goMusicDlProvider } from "../services/source/online/goMusicDl.js";
+// NOTE: go-music-dl 已改为官方外置插件(见 https://github.com/ray5378/MusicFlow-plugins),
+// 不再随后端内置。用户从「插件市场」安装后,经 discovery 自动注册,行为不变。
+// 因此 BUILTIN_SOURCE_PLUGINS 目前为空;其它核心源若需内置再加回此数组。
 // ---- importer ----
 import { qqImporterManifest, qqImporter } from "../services/plugin/importers/qq.js";
 import { neteaseImporterManifest, neteaseImporter } from "../services/plugin/importers/netease.js";
@@ -41,9 +43,7 @@ export interface BuiltinPlugin {
   impl: any;
 }
 
-export const BUILTIN_SOURCE_PLUGINS: BuiltinPlugin[] = [
-  { manifest: goMusicDlManifest, impl: goMusicDlProvider },
-];
+export const BUILTIN_SOURCE_PLUGINS: BuiltinPlugin[] = [];
 
 export const BUILTIN_IMPORTER_PLUGINS: BuiltinPlugin[] = [
   { manifest: qqImporterManifest, impl: qqImporter },
