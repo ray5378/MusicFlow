@@ -40,6 +40,12 @@ import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { onlineRoutes } from "./online.js";
+import { allHealth } from "../../plugins/health.js";
+import { getRendererPlugins, discoverRenderers } from "../../plugins/renderers.js";
+import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
+import {
+  listMarketplace, installPlugin, listRegistries, addRegistry, removeRegistry,
+} from "../../plugins/registryCatalog.js";
 
 export const apiRoutes = new Hono();
 apiRoutes.route("/", onlineRoutes);
@@ -358,6 +364,49 @@ apiRoutes.get("/v1/plugins", adminMiddleware, (c) => c.json(db.select().from(plu
 apiRoutes.post("/v1/plugins", adminMiddleware, async (c) => { const body = await c.req.json(); const id = uuidv4(); db.insert(plugins).values({ id, name: body.name, version: body.version || "", description: body.description || "", manifest: JSON.stringify(body.manifest || {}), enabled: body.enabled ? 1 : 0, config: JSON.stringify(body.config || {}) }).run(); return c.json({ id }); });
 apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (!p) return c.json({ error: "插件不存在" }, 404); const body = await c.req.json().catch(() => ({})); db.update(plugins).set({ config: body.config !== undefined ? JSON.stringify(body.config) : p.config, enabled: body.enabled !== undefined ? (body.enabled ? 1 : 0) : p.enabled, description: typeof body.description === "string" ? body.description : p.description, version: typeof body.version === "string" ? body.version : p.version, name: typeof body.name === "string" ? body.name : p.name, updatedAt: new Date().toISOString() }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (p) db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
+
+// Plugin health (green/yellow/red + failure counts) — see plugins/health.ts.
+apiRoutes.get("/v1/plugins/health", adminMiddleware, (c) => c.json({ health: allHealth() }));
+
+// Renderer plugins (device-casting capability).
+apiRoutes.get("/v1/plugins/renderers", adminMiddleware, (c) => c.json({ renderers: getRendererPlugins() }));
+apiRoutes.get("/v1/plugins/renderers/devices", adminMiddleware, async (c) => {
+  try { return c.json({ devices: await discoverRenderers() }); }
+  catch (e: any) { return c.json({ error: e.message || "发现设备失败" }, 500); }
+});
+
+// Scrobbler plugins (playback reporting).
+apiRoutes.get("/v1/plugins/scrobblers", adminMiddleware, (c) => c.json({ scrobblers: getScrobblerPlugins() }));
+
+// ==================== Plugin marketplace (distribution registry) ====================
+apiRoutes.get("/v1/plugins/registry", adminMiddleware, async (c) => {
+  try {
+    const [sources, marketplace] = await Promise.all([Promise.resolve(listRegistries()), listMarketplace()]);
+    return c.json({ registries: sources, plugins: marketplace });
+  } catch (e: any) {
+    return c.json({ error: e.message || "拉取插件市场失败" }, 500 );
+  }
+});
+apiRoutes.post("/v1/plugins/registry", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (!body?.url) return c.json({ error: "需要 registry URL" }, 400);
+  try { return c.json({ id: addRegistry(body.url) }); }
+  catch (e: any) { return c.json({ error: e.message || "添加失败" }, 400); }
+});
+apiRoutes.delete("/v1/plugins/registry/:id", adminMiddleware, (c) => {
+  removeRegistry(c.req.param("id")!);
+  return c.json({ success: true });
+});
+apiRoutes.post("/v1/plugins/registry/install", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (!body?.downloadUrl) return c.json({ error: "需要 downloadUrl" }, 400);
+  try {
+    const r = await installPlugin(body.downloadUrl);
+    return c.json({ success: true, ...r });
+  } catch (e: any) {
+    return c.json({ error: e.message || "安装失败" }, 500);
+  }
+});
 
 // ==================== Wish ====================
 // ==================== Wish (paginated) ====================

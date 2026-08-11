@@ -2,6 +2,7 @@ import { db } from "../db/index.js";
 import { songs, mediaSources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getPluginImpl, getPluginConfig } from "../plugins/registry.js";
+import { searchLyrics } from "../plugins/providers.js";
 
 export interface LrcLine {
   time: number; // seconds
@@ -78,6 +79,23 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   if (cached && Date.now() - cached.at < CACHE_TTL) return cached.content;
 
   let content: string | null = null;
+
+  // Online (web) songs: try the unified lyric-provider registry FIRST
+  // (first-match-wins across enabled lyricProvider plugins, e.g. the
+  // go-music-dl-lyrics plugin). Then fall back to the legacy source plugin
+  // lyricUrl() for any source that still implements it directly.
+  if (song.type === "web") {
+    const fromProviders = await searchLyrics({
+      url: song.url,
+      duration: song.duration,
+      title: song.title,
+      artist: song.artist,
+    });
+    if (fromProviders) {
+      lrcCache.set(song.id, { content: fromProviders, at: Date.now() });
+      return fromProviders;
+    }
+  }
 
   // Online (web) songs: delegate lyric-URL derivation to the source plugin so
   // provider-specific URL logic (e.g. go-music-dl's /music/download_lrc) lives

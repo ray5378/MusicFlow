@@ -4,6 +4,7 @@ import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSo
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
+import { notifyScrobble } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
@@ -862,10 +863,10 @@ const HISTORY_DEDUPE_WINDOW_MS = 10 * 60 * 1000; // 10 分钟
 restRoutes.get("/scrobble", (c) => {
   const user = c.get("user");
   const id = getParam(c, "id");
+  const nowIso = new Date().toISOString();
   if (!user || !id) return c.json(ok());
   const submission = (getParam(c, "submission") || "true") !== "false";
   if (submission) {
-    const nowIso = new Date().toISOString();
     const windowStart = new Date(Date.now() - HISTORY_DEDUPE_WINDOW_MS).toISOString();
     // 10 分钟内已有同一首歌 → 只刷新播放时间(保留最新一次);否则插入新记录。
     const existing = db.select({ id: playHistory.id }).from(playHistory)
@@ -878,6 +879,21 @@ restRoutes.get("/scrobble", (c) => {
     }
     db.update(songs).set({ playCount: sql`${songs.playCount} + 1` }).where(eq(songs.id, id)).run();
   }
+  // Dispatch to enabled scrobbler plugins (Last.fm / ListenBrainz / ...).
+  // Fire-and-forget: a scrobbler failure must never break the request, and the
+  // plugin layer already isolates each scrobbler's errors.
+  try {
+    const songRow: any = db.select().from(songs).where(eq(songs.id, id)).get();
+    const event = {
+      songId: id,
+      title: songRow?.title || "",
+      artist: songRow?.artist || "",
+      album: songRow?.album || undefined,
+      duration: songRow?.duration || undefined,
+      playedAt: nowIso,
+    };
+    notifyScrobble(submission ? "scrobble" : "play", event).catch(() => {});
+  } catch { /* never block the scrobble response */ }
   return c.json(ok());
 });
 

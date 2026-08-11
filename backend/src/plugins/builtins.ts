@@ -27,8 +27,14 @@ import { neteaseImporterManifest, neteaseImporter } from "../services/plugin/imp
 import { nativeImporterManifest, nativeImporter } from "../services/plugin/importers/native.js";
 // ---- recommender ----
 import { dailyRecommendManifest, dailyRecommendPlugin } from "../services/plugin/dailyRecommend.js";
+import { localRecommendManifest, localRecommendPlugin } from "../services/plugin/localRecommend.js";
 // ---- sync ----
 import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/playlistSync.js";
+// ---- lyrics / cover providers ----
+import { goMusicDlLyricsManifest, goMusicDlLyricsPlugin } from "../services/plugin/lyrics/goMusicDlLyrics.js";
+import { goMusicDlCoverManifest, goMusicDlCoverPlugin } from "../services/plugin/covers/goMusicDlCover.js";
+// ---- renderer (device casting) ----
+import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";
 
 export interface BuiltinPlugin {
   manifest: PluginManifest;
@@ -47,10 +53,23 @@ export const BUILTIN_IMPORTER_PLUGINS: BuiltinPlugin[] = [
 
 export const BUILTIN_RECOMMENDER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dailyRecommendManifest, impl: dailyRecommendPlugin },
+  { manifest: localRecommendManifest, impl: localRecommendPlugin },
 ];
 
 export const BUILTIN_SYNC_PLUGINS: BuiltinPlugin[] = [
   { manifest: playlistSyncManifest, impl: playlistSyncPlugin },
+];
+
+export const BUILTIN_LYRIC_PLUGINS: BuiltinPlugin[] = [
+  { manifest: goMusicDlLyricsManifest, impl: goMusicDlLyricsPlugin },
+];
+
+export const BUILTIN_COVER_PLUGINS: BuiltinPlugin[] = [
+  { manifest: goMusicDlCoverManifest, impl: goMusicDlCoverPlugin },
+];
+
+export const BUILTIN_RENDERER_PLUGINS: BuiltinPlugin[] = [
+  { manifest: dlnaRendererManifest, impl: dlnaRendererPlugin },
 ];
 
 /** All built-in plugins (any type). */
@@ -59,6 +78,9 @@ export const BUILTIN_PLUGINS: BuiltinPlugin[] = [
   ...BUILTIN_IMPORTER_PLUGINS,
   ...BUILTIN_RECOMMENDER_PLUGINS,
   ...BUILTIN_SYNC_PLUGINS,
+  ...BUILTIN_LYRIC_PLUGINS,
+  ...BUILTIN_COVER_PLUGINS,
+  ...BUILTIN_RENDERER_PLUGINS,
 ];
 
 let registered = false;

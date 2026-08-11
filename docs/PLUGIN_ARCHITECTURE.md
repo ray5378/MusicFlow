@@ -12,7 +12,10 @@
 - Phase 0：统一插件注册表 + 统一 Manifest 类型 + DB 种子改由 manifest 驱动；go-music-dl 改为通过 registry 注册，删除编译期硬 import。
 - Phase 1：核心调度 / 歌词 / 流兜底 / 推荐前缀全部改为「遍历有能力的启用插件」，不再出现字符串 `"go-music-dl"`。
 
-**后续进度**：Phase 2（把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册成 plugin 类型，并彻底去掉 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死）已在 §7.2 全部完成；`localRecommend` 因价值低保持为内置模块、不强制插件化。Phase 3（社区外置 drop-in 插件）见 §6 仍为待实现里程碑。
+**后续进度**：
+- Phase 2（把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册成 plugin 类型，并彻底去掉 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死）已在 §7.2 全部完成；`localRecommend` 已注册为 `recommender`（`localPlaylist` 能力），不再保持为孤立内置模块。
+- Phase 3（社区外置 drop-in 插件）已在 §7.3 全部完成。
+- **Phase 4/5/6（songloft 调研启发落地）**：在 §7.4 全部完成——`host.*` 受控上下文 + 权限模型、`lyricProvider`/`coverProvider` first-match-wins 注册表、go-music-dl 歌词/封面拆为独立 provider、DLNA `renderer` 插件化、`scrobbler` 播放上报、通用 KV `storage`、插件间 `comm`、健康追踪、`registryCatalog` 分发注册表 + 插件市场、外置插件热重载。
 
 ---
 
@@ -171,6 +174,9 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 
 - **Phase 2（全量插件化）**：✅ 已完成（见 §7.2）。定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts` 的 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死；`localRecommend` 保留为内置模块（价值低，不强行插件化）。
 - **Phase 3（外置插件）**：✅ 已完成（见 §7.3）。boot 扫描 `data/plugins/<id>/index.js` 动态 `import`（`plugins/discovery.ts`），加 manifest 校验 + 路径白名单（`safeResolve` 防穿越）+ `minAppVersion` 校验 + id 冲突保护；开发者文档见 `docs/PLUGIN_DEV.md`，参考实现见 `examples/plugins/hello-importer/index.js`。
+- **Phase 4（host.* 上下文 + Provider 注册表，P0）**：✅ 已完成（见 §7.4）。`host.*` 受控上下文取代插件直接 import 后端；`lyricProvider`/`coverProvider` 注册表 + first-match-wins；go-music-dl 歌词/封面拆为独立 provider 插件。
+- **Phase 5（能力扩展 + 权限，P1）**：✅ 已完成（见 §7.4）。`renderer`（DLNA）/`scrobbler` 插件化；声明式权限模型（`KNOWN_PERMISSIONS` + 命名空间通配 `songs.*` + 全局 `*`）；通用 KV `host.storage`；插件间 `host.comm`。
+- **Phase 6（分发与运维，P2）**：✅ 已完成（见 §7.4）。分发注册表 `plugin_registries` + `listMarketplace()`（递归 includes / 去重 / 最高版本优先）+ `installPlugin()`（下载 → 解压 `data/plugins/<id>/` → 热注册）；健康追踪 `plugin_health`（green/yellow/red）+ 管理页徽章；外置插件热重载 `hotReload.ts`（文件变更自动重发现，免重启）。
 
 ---
 
@@ -235,6 +241,42 @@ Phase 0 + 1 全部完成。全库检索 `"go-music-dl"` 后残留位置及定性
 - [x] **T29** 外置插件加载失败（语法错误/坏路径）仅 `console.warn` 跳过，绝不中断启动
 - [x] **T30** 参考实现 `examples/plugins/hello-importer/index.js` + 开发者文档 `docs/PLUGIN_DEV.md`（manifest 字段表、能力↔方法对照、安全边界、安装/启用流程、FAQ）
 - [x] **T31** 测试 `tests/plugins/discovery.test.ts`：validateManifest / compareVersion / isAppVersionCompatible / safeResolve / discoverExternalPlugins（有效加载、跳过非法/版本不符/冲突/非目录）；全量 `100 passed (10 文件)`
+
+---
+
+### 7.4 Phase 4/5/6（songloft 调研启发落地）
+
+> 来源：`docs/RESEARCH-songloft-plugin-inspiration.md`（P0–P3 行动清单）。核心结论：songloft 用 QuickJS 把插件隔在独立 VM，本仓库是 **Node/TS in-process**——所以「权限模型 / host.*」是**契约级**而非运行时隔离，外部插件等同于信任其代码。务实做法：内置插件可信；外部插件走 `data/plugins` 拖入但仅给 `host.*`、禁止 import 后端内部，UI 市场页明确风险提示。真正该抄的是 **provider 注册表（first-match-wins + 多源共存）**、**受控 host 上下文**、**健康追踪** 与 **分发注册表 / 市场 / 热重载**。
+
+**P0 — `host.*` 受控上下文 + Provider 注册表（§7.4.1）**
+
+- [x] **T32** 新增 `plugins/host.ts`：导出 `PluginHost` 接口 + `createPluginHost(manifest, config, appVersion)`；`host.log/config/version/storage/http/comm` 受控上下文。`http` 受 `net` 权限门禁、`comm` 受 `inter-plugin` 门禁、`storage` 受 `storage` 门禁。
+- [x] **T33** 权限模型 `KNOWN_PERMISSIONS`（log/storage/net/command/fs/fs:music/fs:external/songs:read/songs:write/playlists:read/playlists:write/inter-plugin）+ 通配糖（`songs.*` 命名空间通配、`*` 全局授予）。`validatePermissions`（manifest 校验阶段）与 `hasPermission`/`requirePermission`（运行时调用点）语义一致——任一未知权限即拒绝。
+- [x] **T34** 新增 `plugins/providers.ts`：`searchLyrics()` / `searchCover()` 遍历 `getEnabledByCapability("lyricProvider"|"coverProvider")`，**first-match-wins**；`hasLyricProvider()`/`hasCoverProvider()` 决定核心是否走插件路径。抛错计入健康追踪后跳过、绝不中断循环。
+- [x] **T35** 把 go-music-dl 的 `lyricUrl` / 封面能力拆为独立插件：`services/plugin/lyrics/goMusicDlLyrics.ts`（`lyricProvider`）、`services/plugin/covers/goMusicDlCover.ts`（`coverProvider`）；核心 `services/lyrics.ts` 改为「先遍历 lyricProvider，无则回退原 w:/l: 分支」。多歌词 / 多封面源可并存，用户在插件页独立开关。
+
+**P1 — 能力扩展 + KV + comm（§7.4.2）**
+
+- [x] **T36** `renderer` 插件化：`plugins/renderers.ts` 包裹 DLNA（`services/plugin/renderers/dlna.ts` 注册为 `renderer` 插件），核心只按能力遍历 `discoverRenderers/castToRenderer/controlRenderer`；Chromecast / AirPlay / Kodi 可由社区新增插件接入，核心零改动。
+- [x] **T37** `scrobbler` 插件化：`plugins/scrobblers.ts` 的 `notifyScrobble("play"|"scrobble", event)` 把播放事件分发给所有启用 `scrobbler` 插件（Last.fm / ListenBrainz 等）。
+- [x] **T38** 通用 KV `storage.ts`：`plugin_storage` 表 + `makeScopedStorage(pluginId)` 按 `plugin_id` 隔离（插件 A 读不到 B 的键）；`host.storage.get/set/delete/keys` 供缓存 / OAuth token / 限流状态。
+- [x] **T39** 插件间通信 `comm.ts`：`host.comm` 的 `send/broadcast/on/off` 事件总线，门禁 `inter-plugin` 权限；handler 异常只 `console.error` 不中断投递。
+
+**P2 — 分发与运维（§7.4.3）**
+
+- [x] **T40** 分发注册表 `registryCatalog.ts`：`plugin_registries` 表（id/url/enabled）+ `listRegistries/addRegistry/removeRegistry`；`listMarketplace()` 递归 follows `includes`、按 id 去重、最高版本优先。
+- [x] **T41** `installPlugin(downloadUrl)`：下载归档 → 解压到 `data/plugins/<id>/` → 重新 `discoverExternalPlugins()` 热注册（免重启）；Windows 上 BSD `tar` 反斜杠 / `C:` 远程主机坑用 `--force-local` + 正斜杠路径规避。
+- [x] **T42** 健康追踪 `health.ts`：`plugin_health` 表，连续失败数 0=green / 1–2=yellow / ≥3=red；`recordSuccess/recordFailure/getHealth/allHealth`；管理页「健康」列 + `GET /v1/plugins/health` 暴露。
+- [x] **T43** 外置插件热重载 `hotReload.ts`：启动 `startPluginHotReload()` 监听 `data/plugins` 变更 → 重新发现 + 重注册 + 重建 `plugins` 行，免重启。
+- [x] **T44** REST 路由补全（`routes/api/index.ts`）：`/v1/plugins/health`、`/v1/plugins/renderers`、`/v1/plugins/renderers/devices`、`/v1/plugins/scrobblers`、`/v1/plugins/registry`（GET 市场 / POST 加注册表 / DELETE 删注册表 / POST install）。前端「插件管理」新增「插件市场」标签页（注册表管理 + 一键安装）+ 权限 / 健康徽章。
+- [x] **T45** 新增测试 `host.test.ts` / `storage.test.ts` / `comm.test.ts` / `health.test.ts` / `dispatch.test.ts` / `registryCatalog.test.ts`（共 +40 用例，覆盖权限校验、通配糖、KV 隔离、comm 门禁、first-match-wins、健康状态、市场去重 / installPlugin）；全部 154 用例绿、`tsc --noEmit` 零错误、`vue-tsc --noEmit` 零错误。
+
+**Phase 4/5/6 收口后架构关键点**：
+
+- 核心调度 / 歌词 / 封面 / 投屏 / 上报 **均已零硬编码具体插件名**，只按 `getEnabledByCapability(...)` 遍历。
+- `host.*` 是插件唯一宿主入口；`KNOWN_PERMISSIONS` 是权限白名单单一真相源。
+- 分发走 `plugin_registries` + 市场，安装即热加载；运维看 `plugin_health`。
+- **沙箱差异须知**：in-process 下权限只是契约，`command/fs/net` 高风险权限对外置插件等同本机执行权，仅可信源安装。
 
 ---
 

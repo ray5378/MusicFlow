@@ -1,40 +1,110 @@
 <template>
   <div class="admin-plugins">
-    <div class="page-header">
-      <h2>插件管理</h2>
-      <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
-    </div>
-    <el-table :data="plugins" stripe v-loading="loading" v-if="plugins.length > 0">
-      <el-table-column label="插件名称" min-width="200">
-        <template #default="{ row }">
-          <div class="plugin-name">{{ displayName(row) }}</div>
-          <div class="plugin-id">{{ row.name }}</div>
-        </template>
-      </el-table-column>
-      <el-table-column label="类型" width="110">
-        <template #default="{ row }">
-          <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="version" label="版本" width="90" />
-      <el-table-column prop="description" label="说明" min-width="240" show-overflow-tooltip />
-      <el-table-column label="状态" width="100">
-        <template #default="{ row }"><el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" /></template>
-      </el-table-column>
-      <el-table-column label="操作" width="140">
-        <template #default="{ row }">
-          <el-button size="small" type="primary" plain @click="editPlugin(row)">
-            {{ hasConfig(row) ? "配置" : "详情" }}
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-    <EmptyState v-else icon="cable" title="暂无插件" description="插件用于扩展搜索、下载、刮削等功能">
-      <template #action>
-        <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
-      </template>
-    </EmptyState>
+    <el-tabs v-model="activeTab">
+      <!-- ============ Installed plugins ============ -->
+      <el-tab-pane label="已安装" name="installed">
+        <div class="page-header">
+          <h2>插件管理</h2>
+          <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
+        </div>
 
+        <el-table :data="plugins" stripe v-loading="loading" v-if="plugins.length > 0">
+          <el-table-column label="插件名称" min-width="200">
+            <template #default="{ row }">
+              <div class="plugin-name">{{ displayName(row) }}</div>
+              <div class="plugin-id">{{ row.name }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="类型" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="version" label="版本" width="90" />
+          <el-table-column label="说明" min-width="220" show-overflow-tooltip>
+            <template #default="{ row }">{{ parseManifest(row).description || row.description || "—" }}</template>
+          </el-table-column>
+          <el-table-column label="健康" width="96">
+            <template #default="{ row }">
+              <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="140">
+            <template #default="{ row }">
+              <el-button size="small" type="primary" plain @click="editPlugin(row)">
+                {{ hasConfig(row) ? "配置" : "详情" }}
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <EmptyState v-else icon="cable" title="暂无插件" description="插件用于扩展搜索、下载、刮削、歌词、封面、设备投屏等功能">
+          <template #action>
+            <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
+          </template>
+        </EmptyState>
+      </el-tab-pane>
+
+      <!-- ============ Plugin marketplace ============ -->
+      <el-tab-pane label="插件市场" name="market">
+        <div class="page-header">
+          <h2>插件市场</h2>
+          <el-button type="primary" plain @click="loadMarketplace" :loading="marketLoading">刷新</el-button>
+        </div>
+
+        <el-card class="market-card" shadow="never">
+          <template #header>
+            <div class="card-head">
+              <span>注册表来源</span>
+              <el-button size="small" type="primary" plain @click="showRegDialog = true">添加注册表</el-button>
+            </div>
+          </template>
+          <el-table :data="registries" stripe v-if="registries.length > 0" size="small">
+            <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="90">
+              <template #default="{ row }">
+                <el-button size="small" type="danger" plain @click="removeRegistry(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else description="尚未添加任何插件注册表" :image-size="60" />
+        </el-card>
+
+        <el-card class="market-card" shadow="never">
+          <template #header><span>可安装插件（按 id 去重，保留最高版本）</span></template>
+          <el-table :data="marketPlugins" stripe v-loading="marketLoading" v-if="marketPlugins.length > 0">
+            <el-table-column label="名称" min-width="180">
+              <template #default="{ row }">
+                <div class="plugin-name">{{ row.name }}</div>
+                <div class="plugin-id">{{ row.id }}@{{ row.version }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
+            <el-table-column label="作者" prop="author" width="120" show-overflow-tooltip />
+            <el-table-column label="操作" width="100">
+              <template #default="{ row }">
+                <el-button size="small" type="success" plain :loading="installing === row.id" @click="installPlugin(row)">安装</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else description="市场为空或注册表暂不可达" :image-size="60" />
+        </el-card>
+        <el-alert type="warning" :closable="false" show-icon class="market-warn"
+          title="第三方插件以当前进程权限运行"
+          description="MusicFlow-V2 的插件在当前 Node 进程内执行（无沙箱隔离），安装未知来源的插件等同于信任其代码。请仅从你信赖的注册表安装。" />
+      </el-tab-pane>
+    </el-tabs>
+
+    <!-- Add plugin dialog -->
     <el-dialog v-model="showAddDialog" title="添加插件" width="500px">
       <el-form label-width="80px">
         <el-form-item label="插件名称"><el-input v-model="newPlugin.name" /></el-form-item>
@@ -46,6 +116,20 @@
       </template>
     </el-dialog>
 
+    <!-- Add registry dialog -->
+    <el-dialog v-model="showRegDialog" title="添加插件注册表" width="500px">
+      <el-form label-width="80px">
+        <el-form-item label="URL">
+          <el-input v-model="newRegistryUrl" placeholder="https://example.com/registry.json" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showRegDialog = false">取消</el-button>
+        <el-button type="primary" :loading="addingReg" @click="addRegistry">添加</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Config / detail dialog -->
     <el-dialog v-model="showConfigDialog" :title="`配置插件 · ${editing?.name || ''}`" width="560px">
       <el-form label-width="120px" v-if="editing">
         <!-- Config form is driven entirely by the plugin manifest's configSchema.
@@ -89,6 +173,7 @@
           <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
           <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
         </el-form-item>
+
         <el-alert
           type="info"
           :closable="false"
@@ -99,6 +184,10 @@
         <div v-if="capabilityList(editing).length > 0" class="cap-row">
           <span class="cap-label">能力</span>
           <el-tag v-for="cap in capabilityList(editing)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
+        </div>
+        <div v-if="permissionList(editing).length > 0" class="cap-row">
+          <span class="cap-label">权限</span>
+          <el-tag v-for="perm in permissionList(editing)" :key="perm" size="small" type="warning" effect="plain">{{ permLabel(perm) }}</el-tag>
         </div>
       </el-form>
       <template #footer>
@@ -115,11 +204,24 @@ import { ElMessage } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
+const activeTab = ref<"installed" | "market">("installed");
+
+// ---- installed plugins ----
 const plugins = ref<any[]>([]);
 const loading = ref(false);
 const showAddDialog = ref(false);
 const newPlugin = reactive({ name: "", description: "" });
 
+// ---- marketplace ----
+const registries = ref<any[]>([]);
+const marketPlugins = ref<any[]>([]);
+const marketLoading = ref(false);
+const installing = ref<string>("");
+const showRegDialog = ref(false);
+const newRegistryUrl = ref("");
+const addingReg = ref(false);
+
+// ---- config dialog ----
 const showConfigDialog = ref(false);
 const editing = ref<any>(null);
 const editConfig = reactive<any>({});
@@ -127,6 +229,9 @@ const testing = ref(false);
 const saving = ref(false);
 const purging = ref(false);
 const testResult = ref<any>(null);
+
+// ---- health ----
+const healthMap = ref<Record<string, any>>({});
 
 function parseManifest(plugin: any): any {
   const m = plugin?.manifest;
@@ -170,12 +275,20 @@ const TYPE_LABELS: Record<string, string> = {
   importer: "歌单导入",
   recommender: "推荐",
   sync: "同步",
+  lyrics: "歌词",
+  cover: "封面",
+  renderer: "设备投屏",
+  scrobbler: "播放上报",
 };
 const TYPE_COLORS: Record<string, string> = {
   source: "primary",
   importer: "success",
   recommender: "warning",
   sync: "info",
+  lyrics: "danger",
+  cover: "danger",
+  renderer: "info",
+  scrobbler: "info",
 };
 const CAP_LABELS: Record<string, string> = {
   search: "在线搜索",
@@ -189,6 +302,24 @@ const CAP_LABELS: Record<string, string> = {
   dailyPlaylist: "每日歌单生成",
   playlistSync: "歌单定时同步",
   autoMatch: "条目自动匹配",
+  lyricProvider: "歌词提供方",
+  coverProvider: "封面提供方",
+  renderer: "设备投屏",
+  scrobbler: "播放上报",
+};
+const PERM_LABELS: Record<string, string> = {
+  log: "日志",
+  storage: "存储",
+  net: "网络",
+  command: "命令",
+  fs: "文件系统",
+  "fs:music": "音乐目录",
+  "fs:external": "外部目录",
+  "songs:read": "读取歌曲",
+  "songs:write": "写入歌曲",
+  "playlists:read": "读取歌单",
+  "playlists:write": "写入歌单",
+  "inter-plugin": "插件间通信",
 };
 
 function typeLabel(plugin: any): string {
@@ -204,8 +335,29 @@ function capabilityList(plugin: any): string[] {
   return parseManifest(plugin).capabilities || [];
 }
 
+function permissionList(plugin: any): string[] {
+  return parseManifest(plugin).permissions || [];
+}
+
 function capLabel(cap: string): string {
   return CAP_LABELS[cap] || cap;
+}
+
+function permLabel(perm: string): string {
+  return PERM_LABELS[perm] || perm;
+}
+
+// Health status -> tag color / label.
+function healthType(id: string): any {
+  const s = healthMap.value[id]?.status;
+  if (s === "green") return "success";
+  if (s === "yellow") return "warning";
+  if (s === "red" || s === "down") return "danger";
+  return "info";
+}
+function healthLabel(id: string): string {
+  const s: string = healthMap.value[id]?.status || "unknown";
+  return ({ green: "正常", yellow: "波动", red: "异常", down: "离线", unknown: "未知" } as Record<string, string>)[s] || "未知";
 }
 
 const TYPE_HINTS: Record<string, string> = {
@@ -213,6 +365,10 @@ const TYPE_HINTS: Record<string, string> = {
   importer: "停用后,对应平台的歌单分享链接 / 歌单文件将无法导入。",
   recommender: "停用后,不再自动生成对应的推荐歌单。",
   sync: "停用后,不再自动重新拉取已开启同步的歌单(手动同步仍可用)。",
+  lyrics: "作为歌词提供方参与「能力优先」调度,首个可用方胜出。",
+  cover: "作为封面提供方参与「能力优先」调度,首个可用方胜出。",
+  renderer: "提供 DLNA / 设备投屏能力,可在播放器中选择设备投放。",
+  scrobbler: "在播放 / 记录事件时上报到外部服务(如 Last.fm)。",
 };
 
 function pluginHint(plugin: any): string {
@@ -237,16 +393,27 @@ async function loadPlugins() {
   }
 }
 
+async function loadHealth() {
+  try {
+    const res = await api.get("/rest/api/v1/plugins/health");
+    const map: Record<string, any> = {};
+    for (const h of res.data?.health || []) map[h.pluginId] = h;
+    healthMap.value = map;
+  } catch {
+    healthMap.value = {};
+  }
+}
+
 async function togglePlugin(plugin: any) {
   await api.put(`/rest/api/v1/plugins/${plugin.id}/toggle`);
   ElMessage.success("已更新");
+  loadHealth();
 }
 
 function editPlugin(plugin: any) {
   editing.value = plugin;
   const cfg = parseConfig(plugin);
   const schema = parseManifest(plugin).configSchema || [];
-  // Reset and seed editConfig from the stored config, falling back to schema defaults.
   for (const key of Object.keys(editConfig)) delete editConfig[key];
   for (const f of schema) {
     let v = cfg[f.key];
@@ -332,7 +499,70 @@ async function purgeWebSongs() {
   }
 }
 
-onMounted(loadPlugins);
+// ---- marketplace ----
+async function loadMarketplace() {
+  marketLoading.value = true;
+  try {
+    const res = await api.get("/rest/api/v1/plugins/registry");
+    registries.value = res.data?.registries || [];
+    marketPlugins.value = res.data?.plugins || [];
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "拉取插件市场失败");
+    registries.value = [];
+    marketPlugins.value = [];
+  } finally {
+    marketLoading.value = false;
+  }
+}
+
+async function addRegistry() {
+  if (!/^https?:\/\//.test(newRegistryUrl.value)) {
+    ElMessage.warning("注册表 URL 必须是 http(s) 链接");
+    return;
+  }
+  addingReg.value = true;
+  try {
+    await api.post("/rest/api/v1/plugins/registry", { url: newRegistryUrl.value });
+    newRegistryUrl.value = "";
+    showRegDialog.value = false;
+    ElMessage.success("已添加");
+    loadMarketplace();
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "添加失败");
+  } finally {
+    addingReg.value = false;
+  }
+}
+
+async function removeRegistry(row: any) {
+  try {
+    await api.delete(`/rest/api/v1/plugins/registry/${row.id}`);
+    ElMessage.success("已删除");
+    loadMarketplace();
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "删除失败");
+  }
+}
+
+async function installPlugin(row: any) {
+  installing.value = row.id;
+  try {
+    await api.post("/rest/api/v1/plugins/registry/install", { downloadUrl: row.downloadUrl || row.url });
+    ElMessage.success(`已安装 ${row.name}`);
+    loadMarketplace();
+    loadPlugins();
+    loadHealth();
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "安装失败");
+  } finally {
+    installing.value = "";
+  }
+}
+
+onMounted(() => {
+  loadPlugins();
+  loadHealth();
+});
 </script>
 
 <style lang="scss" scoped>
@@ -344,6 +574,9 @@ onMounted(loadPlugins);
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
+.market-card { margin-bottom: 20px; }
+.market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
+.market-warn { margin-top: 4px; }
 @media (max-width: 768px) {
   .admin-plugins { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }

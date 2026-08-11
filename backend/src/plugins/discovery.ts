@@ -20,12 +20,18 @@ import { pathToFileURL } from "url";
 import { getDataDir } from "../utils/env.js";
 import { registerPlugin, getPlugin } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
+import { validatePermissions } from "./host.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 
-const VALID_TYPES: PluginType[] = ["source", "importer", "recommender", "sync"];
+const VALID_TYPES: PluginType[] = [
+  "source", "importer", "recommender", "sync",
+  "lyrics", "cover", "renderer", "scrobbler",
+];
 const VALID_CAPS: PluginCapability[] = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
-  "playlistImport", "playlistFile", "dailyPlaylist", "playlistSync", "autoMatch",
+  "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
+  "playlistSync", "autoMatch",
+  "lyricProvider", "coverProvider", "renderer", "scrobbler",
 ];
 
 /** Validate a plugin manifest. Returns an error string, or null when valid. Pure. */
@@ -45,6 +51,8 @@ export function validateManifest(manifest: any): string | null {
     if (!VALID_CAPS.includes(c)) return `manifest.capabilities 含非法能力: ${String(c)}`;
   }
   if (!Array.isArray(manifest.configSchema)) return "manifest.configSchema 必须是数组";
+  const permErr = validatePermissions(manifest.permissions);
+  if (permErr) return `manifest.permissions: ${permErr}`;
   return null;
 }
 

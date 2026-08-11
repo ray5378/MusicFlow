@@ -67,9 +67,11 @@ describe("plugin registry", () => {
     }
   });
 
-  it("covers all four plugin types", () => {
+  it("covers all built-in plugin types", () => {
     const types = new Set(listRegistered().map((p) => p.manifest.type));
-    expect([...types].sort()).toEqual(["importer", "recommender", "source", "sync"]);
+    expect([...types].sort()).toEqual([
+      "cover", "importer", "lyrics", "recommender", "renderer", "source", "sync",
+    ]);
   });
 
   it("seeds exactly one row per registered plugin", () => {
@@ -86,6 +88,11 @@ describe("plugin registry", () => {
     expect(enabledFlag("musicflow-file-importer")).toBe(1);
     expect(enabledFlag("daily-recommend")).toBe(1);
     expect(enabledFlag("playlist-sync")).toBe(1);
+    // New provider / renderer / recommender plugins (replacing hardcoded core paths).
+    expect(enabledFlag("go-music-dl-lyrics")).toBe(1);
+    expect(enabledFlag("go-music-dl-cover")).toBe(1);
+    expect(enabledFlag("dlna-renderer")).toBe(1);
+    expect(enabledFlag("local-recommend")).toBe(1);
   });
 
   it("re-seeding never duplicates or resets existing rows", () => {

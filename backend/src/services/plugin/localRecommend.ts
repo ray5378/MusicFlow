@@ -26,6 +26,7 @@
 // sample spread across the library so the user still gets *something* to play.
 import { sqlite } from "../../db/index.js";
 import { clearPlaylistCoverCache } from "../playlistCover.js";
+import type { LocalRecommendPlugin, PluginManifest } from "../../plugins/types.js";
 
 export const HISTORY_WINDOW_DAYS = 30;
 export const TOP_ARTISTS = 12;
@@ -369,3 +370,30 @@ export async function generateLocalDailyPlaylist(date = new Date()): Promise<Loc
 export async function runLocalDailyRecommendJob(): Promise<LocalRecommendResult | null> {
   return null;
 }
+
+// ==================== Plugin (recommender, localPlaylist) ====================
+//
+// Registered as a `recommender` plugin so the daily generator pulls the
+// local-library mix through the capability ("localPlaylist") instead of
+// importing pickLocalRecommendSongs() directly. When enabled, the taste-
+// profile mix replaces the plain full-library random sample in 今日推荐.
+
+export const LOCAL_RECOMMEND_PLUGIN_ID = "local-recommend";
+
+export const localRecommendManifest: PluginManifest = {
+  id: LOCAL_RECOMMEND_PLUGIN_ID,
+  name: "本地推荐引擎",
+  version: "1.0.0",
+  type: "recommender",
+  description: "基于播放历史与收藏口味,从本地曲库生成「今日推荐」的补充歌单",
+  capabilities: ["localPlaylist"],
+  defaultEnabled: true,
+  configSchema: [],
+};
+
+export const localRecommendPlugin: LocalRecommendPlugin = {
+  manifest: localRecommendManifest,
+  async pickSongs(date = new Date()) {
+    return pickLocalRecommendSongs(date);
+  },
+};

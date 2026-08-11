@@ -148,7 +148,7 @@ export const goMusicDlManifest: PluginManifest = {
   version: "1.0.0",
   type: "source",
   description: "通过局域网已部署的 go-music-dl 服务搜索全网音乐,并把结果作为在线歌曲保存入库",
-  capabilities: ["search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation"],
+  capabilities: ["search", "recommend", "playlistSongs", "stream", "webRotation"],
   platforms: PLATFORMS.map((p) => p.value),
   recommendPrefix: "gmdl://recommend/",
   configSchema: [

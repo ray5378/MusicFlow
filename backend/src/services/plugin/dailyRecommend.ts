@@ -35,6 +35,7 @@ import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { copyCoverToFile } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
+import { firstEnabledByCapability } from "../../plugins/registry.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 
 export interface DailyCandidate {
@@ -202,6 +203,22 @@ function ensureDailyPlaylists(): void {
       `).run(FIXED_TODAY_ID, NAME_TODAY, ownerId, `${DAILY_TAG}`, now, now);
     }
   }
+}
+
+// Pull the local-library contribution for today's daily playlist through the
+// `localPlaylist` capability. Falls back to a full-library random sample when
+// no local-recommend plugin is enabled (or one throws).
+async function pickLocalSongsForDaily(date: Date): Promise<string[]> {
+  const lp = firstEnabledByCapability("localPlaylist");
+  if (lp && typeof lp.impl?.pickSongs === "function") {
+    try {
+      const r = await lp.impl.pickSongs(date);
+      if (r && r.songIds.length) return r.songIds.slice(0, RANDOM_LIBRARY_SAMPLE_SIZE);
+    } catch (e: any) {
+      console.error("[DAILY-RECOMMEND] local-recommend plugin failed, using random sample:", e?.message || e);
+    }
+  }
+  return pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
 }
 
 // Pick a random local-library song's album cover file ref. Used as the daily
@@ -425,9 +442,11 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     }
   }
 
-  // Step 2: collect user pool songs + full-library random.
+  // Step 2: collect user pool songs + a local-library mix.
   const { songIds: poolSongIds, members: poolMembers } = collectPoolSongs(date);
-  const randomLibraryIds = pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
+  // Prefer the local-recommend plugin (taste-profile based) when enabled;
+  // fall back to a plain full-library random sample otherwise.
+  const randomLibraryIds = await pickLocalSongsForDaily(date);
 
   // If we have nothing at all (no remote, no pool, no random), bail out without
   // touching the existing playlist — better to keep today's previous content
