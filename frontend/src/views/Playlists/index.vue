@@ -4,10 +4,18 @@
       <h2>歌单</h2>
       <el-input v-model="searchQuery" placeholder="搜索歌单..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       <div class="header-actions">
-        <el-button @click="showCreateDialog = true"><MfIcon name="Plus" />新建歌单</el-button>
-        <el-button @click="exportAllPlaylists"><MfIcon name="Download" />导出全部歌单</el-button>
-        <el-button @click="showImportDialog = true"><MfIcon name="Upload" />导入歌单</el-button>
-        <el-button type="primary" :loading="syncingDaily" @click="syncDailyAll"><MfIcon name="RefreshCw" />同步所有平台</el-button>
+        <el-popover placement="bottom-end" :width="200" trigger="click" v-model:visible="showManageMenu">
+          <template #reference>
+            <el-button type="primary"><MfIcon name="Settings" />歌单管理</el-button>
+          </template>
+          <div class="manage-menu">
+            <div class="manage-item" @click="openManage('create')"><MfIcon name="Plus" />新建歌单</div>
+            <div class="manage-item" @click="openManage('import')"><MfIcon name="Upload" />导入歌单</div>
+            <div class="manage-item" @click="openManage('export')"><MfIcon name="Download" />导出全部歌单</div>
+            <div class="manage-item" @click="openManage('sync')"><MfIcon name="RefreshCw" />同步所有平台</div>
+            <div v-if="authStore.isAdmin" class="manage-item" @click="openManage('wish')"><MfIcon name="MessageCircle" />未命中音乐</div>
+          </div>
+        </el-popover>
       </div>
     </div>
     <div class="playlist-grid" v-loading="loading">
@@ -100,7 +108,7 @@
 
     <el-dialog v-model="showImportDialog" title="导入歌单" width="560px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-        支持 QQ 音乐、网易云音乐歌单分享链接，或本项目「导出」生成的 .json 歌单文件。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入许愿清单
+        支持 QQ 音乐、网易云音乐歌单分享链接，或本项目「导出」生成的 .json 歌单文件。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入未命中音乐
       </el-alert>
       <el-form label-width="80px">
         <el-form-item label="歌单链接">
@@ -147,8 +155,10 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
 import api from "@/api";
+import { useAuthStore } from "@/stores/auth";
 
 const router = useRouter();
+const authStore = useAuthStore();
 const { openContextMenu, openActionSheet, menuGuard } = useItemActions();
 
 function open(pl: any) {
@@ -202,6 +212,7 @@ const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("playlistsPageSize") || "20"));
 if (![15, 20, 50, 100].includes(pageSize.value)) pageSize.value = 20;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
+const showManageMenu = ref(false);
 const showCreateDialog = ref(false);
 const showRenameDialog = ref(false);
 const newPlaylistName = ref("");
@@ -304,6 +315,16 @@ function onSearchInput() {
 
 function onSearchClear() { currentPage.value = 1; loadPlaylists(); }
 
+// 「歌单管理」下拉菜单入口分发:新建/导入走原有对话框,导出/同步直接执行,未命中音乐跳未命中音乐页
+function openManage(action: string) {
+  showManageMenu.value = false;
+  if (action === "create") showCreateDialog.value = true;
+  else if (action === "import") showImportDialog.value = true;
+  else if (action === "export") exportAllPlaylists();
+  else if (action === "sync") syncDailyAll();
+  else if (action === "wish") router.push("/admin/wish");
+}
+
 async function createPlaylist() {
   if (!newPlaylistName.value) { ElMessage.warning("请输入歌单名称"); return; }
   try {
@@ -328,9 +349,9 @@ async function importPlaylist() {
     const res = await api.post("/rest/api/v1/playlists/import", body);
     if (res.data.success) {
       if (res.data.created && res.data.created > 1) {
-        ElMessage.success(`导入 ${res.data.created} 个歌单成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入许愿清单)`);
+        ElMessage.success(`导入 ${res.data.created} 个歌单成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入未命中音乐)`);
       } else {
-        ElMessage.success(`导入成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入许愿清单)`);
+        ElMessage.success(`导入成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入未命中音乐)`);
       }
       showImportDialog.value = false;
       importUrl.value = "";
@@ -553,6 +574,12 @@ onMounted(() => { loadPlaylists(); detectDailySource(); });
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
   h2 { font-size: 28px; font-weight: 700; margin: 0; }
   .header-actions { display: flex; gap: 10px; }
+}
+.manage-menu { display: flex; flex-direction: column; gap: 2px; }
+.manage-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px;
+  cursor: pointer; font-size: 13px; color: var(--fnos-text-primary); transition: background 0.18s ease, color 0.18s ease;
+  &:hover { background: rgba(255,255,255,0.08); color: var(--fnos-red); }
 }
 .playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px; }
 .playlist-card {

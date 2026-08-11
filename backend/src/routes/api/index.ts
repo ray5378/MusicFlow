@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
-import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres } from "../../db/schema.js";
+import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres, deviceQueues } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc, isNotNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
@@ -24,14 +24,14 @@ import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, setDeviceMute, getDeviceStatus,
   enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isPrivateLanHostname,
+  setDeviceAlias, deleteDeviceRecord,
 } from "../../services/dlna/control.js";
 import { announceOnPeer, isAnnouncing } from "../../services/dlna/announce.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
-import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";
-import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
+import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName,
@@ -1145,8 +1145,11 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
   if (shouldRefreshDevices() || getCachedDevices().length === 0) {
     await refreshDevices();
   }
+  // 返回全部设备(在线 + 离线)。离线设备保留在列表,供「播放器」页管理(改名/删除)。
   const devices = markStaleDevices(getCachedDevices()).map(d => ({
-    id: d.id, name: d.name, manufacturer: d.manufacturer, model: d.model,
+    id: d.id, name: d.name, alias: d.alias || "",
+    displayName: d.alias || d.name,
+    manufacturer: d.manufacturer, model: d.model,
     hasVolumeControl: !!d.renderingControlUrl,
     available: d.available,
   }));
@@ -1157,10 +1160,53 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
 apiRoutes.post("/v1/dlna/scan", async (c) => {
   const devices = await refreshDevices();
   return c.json({ devices: devices.map(d => ({
-    id: d.id, name: d.name, manufacturer: d.manufacturer, model: d.model,
+    id: d.id, name: d.name, alias: d.alias || "",
+    displayName: d.alias || d.name,
+    manufacturer: d.manufacturer, model: d.model,
     hasVolumeControl: !!d.renderingControlUrl,
     available: d.available,
   })) });
+});
+
+// 重命名 DLNA 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
+// alias 会同步到播放控件/HA 卡片显示(peer.name = alias || name)。
+apiRoutes.put("/v1/dlna/devices/:deviceId", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const body = await c.req.json().catch(() => ({}));
+  const alias = typeof body.alias === "string" ? body.alias.trim() : "";
+  if (alias.length > 50) return c.json({ error: "名称不能超过 50 字符" }, 400);
+  const dev = setDeviceAlias(deviceId, alias);
+  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  // 立即触发 peer reconcile,让播放控件/HA 卡片显示新名字(不等 60s tick)。
+  getPeerManager().reconcileDlnaPeers();
+  return c.json({
+    success: true,
+    device: {
+      id: dev.id, name: dev.name, alias: dev.alias || "",
+      displayName: dev.alias || dev.name,
+      manufacturer: dev.manufacturer, model: dev.model,
+      hasVolumeControl: !!dev.renderingControlUrl,
+      available: dev.available,
+    },
+  });
+});
+
+// 删除 DLNA 设备(通常删除离线的)。同时清理:群组成员、设备队列、peer、DB 记录。
+apiRoutes.delete("/v1/dlna/devices/:deviceId", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  // 1. 从所有播放器群组中移除该成员。
+  getGroupManager().removeDeviceFromAllGroups(deviceId);
+  // 2. 停止并清空设备队列(如果有),并删除持久化队列行。
+  try { getQueueController().clear(deviceId); } catch { /* ignore */ }
+  db.delete(deviceQueues).where(eq(deviceQueues.deviceId, deviceId)).run();
+  // 3. 移除 peer(播放控件/HA 卡片不再出现)。
+  getPeerManager().removeDlnaPeer(deviceId);
+  // 4. 删除缓存 + runtimes + DB 记录。
+  const existed = deleteDeviceRecord(deviceId);
+  if (!existed) return c.json({ error: "设备不存在" }, 404);
+  // 5. 广播设备列表变化(WS → 卡片/Web 刷新)。
+  getEventManager().emitDeviceListChanged(getCachedDevices().length);
+  return c.json({ success: true });
 });
 
 // Cast a song to a DLNA renderer.

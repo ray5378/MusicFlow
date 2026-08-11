@@ -31,7 +31,6 @@ const routes = [
       {
         path: "admin",
         children: [
-          { path: "music", name: "AdminMusic", component: () => import("@/views/admin/Music/index.vue"), meta: { requiresAdmin: true } },
           { path: "plugins", name: "AdminPlugins", component: () => import("@/views/admin/Plugins/index.vue"), meta: { requiresAdmin: true } },
           { path: "sources", name: "AdminSources", component: () => import("@/views/admin/Sources/index.vue"), meta: { requiresAdmin: true } },
           { path: "users", name: "AdminUsers", component: () => import("@/views/admin/Users/index.vue"), meta: { requiresAdmin: true } },

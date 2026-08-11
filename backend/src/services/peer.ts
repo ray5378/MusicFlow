@@ -53,9 +53,6 @@ export interface PeerWithQueue extends Peer {
 
 const INACTIVE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
 const CLEANUP_INTERVAL_MS = 60 * 1000;       // 1 min
-// DLNA peer 保留期:设备离线超过 30 天自动移除(下次上线重新注册),防止
-// 长时间运行后 peers 表里堆满「曾经在线但早已消失」的设备条目。
-const DLNA_PEER_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
 
 class PeerManager extends EventEmitter {
   private peers = new Map<string, Peer>();
@@ -155,13 +152,13 @@ class PeerManager extends EventEmitter {
   // ==================== Reconciliation ====================
 
   /** Sync the DLNA peer set from the device cache. New devices are registered,
-   *  missing ones are marked unavailable (cleanup will clear them later). */
+   *  missing ones are marked unavailable. Display name = alias || SSDP name. */
   reconcileDlnaPeers(): void {
     const devices = getCachedDevices();
     const seen = new Set<string>();
     for (const d of devices) {
       seen.add(d.id);
-      this.registerDlna(d.id, d.name, !!d.available);
+      this.registerDlna(d.id, d.alias || d.name, !!d.available);
     }
     // Devices that vanished from the cache → mark unavailable.
     for (const p of this.peers.values()) {
@@ -171,6 +168,15 @@ class PeerManager extends EventEmitter {
         this.emit("peer_unavailable", p);
       }
     }
+  }
+
+  /** Remove a DLNA peer entirely (device deleted by the user in 播放器页). */
+  removeDlnaPeer(deviceId: string): void {
+    const peerId = `dlna:${deviceId}`;
+    const p = this.peers.get(peerId);
+    if (!p) return;
+    if (p.available) this.emit("peer_unavailable", p);
+    this.peers.delete(peerId);
   }
 
   /** Register or refresh a group peer. availability = 任一成员在线。 */
@@ -442,17 +448,13 @@ class PeerManager extends EventEmitter {
         }
       } else {
         // dlna: only clear the device queue if the device is offline.
+        // 设备条目不再自动移除(由用户在「播放器」页手动删除)。
         if (!p.available) {
           const snap = getQueueManager().snapshot(p.deviceId!);
           if (snap && (snap.isActive || snap.items.length > 0)) {
             getQueueManager().clear(p.deviceId!);
             this.emit("peer_queue_cleared", p.peerId);
             console.log(`[peer] dlna peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
-          }
-          // 离线超过保留期(30 天)→ 彻底移除条目,下次上线重新注册。
-          if (idleMs > DLNA_PEER_RETENTION_MS) {
-            this.peers.delete(p.peerId);
-            console.log(`[peer] dlna peer ${p.peerId} offline >30d, entry removed`);
           }
         }
       }

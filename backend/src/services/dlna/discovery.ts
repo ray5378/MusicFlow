@@ -26,6 +26,7 @@ export interface DlnaServiceInfo {
 export interface DlnaDevice {
   id: string;            // UDN (uuid)
   name: string;          // friendlyName
+  alias?: string;        // 用户自定义显示名(持久化于 dlna_devices.alias),空则用 name
   location: string;      // description.xml URL
   manufacturer?: string;
   model?: string;

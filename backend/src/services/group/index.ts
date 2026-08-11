@@ -150,8 +150,21 @@ export class GroupManager extends EventEmitter {
     const cache = new Map(getCachedDevices().map(d => [d.id, d]));
     return memberIds.map(deviceId => {
       const d = cache.get(deviceId);
-      return { deviceId, name: d?.name || deviceId, available: !!d?.available };
+      return { deviceId, name: d ? (d.alias || d.name) : deviceId, available: !!d?.available };
     });
+  }
+
+  /** 从所有群组中移除一台设备(删除设备时调用),并持久化+广播。 */
+  removeDeviceFromAllGroups(deviceId: string): void {
+    for (const groupId of this.groupsOfDevice(deviceId)) {
+      const g = this.groups.get(groupId);
+      if (!g) continue;
+      g.memberIds = g.memberIds.filter(m => m !== deviceId);
+      g.updatedAt = new Date().toISOString();
+      this.removeFromIndex(deviceId, groupId);
+      this.persist(g);
+      this.emit("group_updated", g);
+    }
   }
 
   private normalizeName(name: string): string {

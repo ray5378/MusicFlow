@@ -208,6 +208,21 @@ export const recommendPool = sqliteTable("recommend_pool", {
   updatedAt: text("updated_at").default(""),
 });
 
+// 持久化的 DLNA 设备记录。发现/下线都会 upsert;离线设备保留显示(用户可在
+// 「播放器」页手动重命名或删除)。alias 为用户自定义显示名,播放控件/HA 卡片
+// 显示的设备名 = alias || name。
+export const dlnaDevices = sqliteTable("dlna_devices", {
+  id: text("id").primaryKey(),                  // UDN (uuid)
+  name: text("name").notNull().default(""),     // SSDP friendlyName(原始名)
+  alias: text("alias").notNull().default(""),   // 用户自定义显示名,空则用 name
+  manufacturer: text("manufacturer").notNull().default(""),
+  model: text("model").notNull().default(""),
+  firstSeen: text("first_seen").notNull().default(""),
+  lastSeen: text("last_seen").notNull().default(""),
+  available: integer("available").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(""),
+});
+
 // Per-DLNA-device persisted playback queue. Survives backend restarts and
 // Web-client disconnects so the device keeps playing (auto-advance runs in
 // the backend, not the frontend). HA and Web share the same queue.

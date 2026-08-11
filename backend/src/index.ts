@@ -22,7 +22,7 @@ import { syncAllRecommendPlaylists } from "./services/source/online/recommendImp
 import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
-import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime } from "./services/dlna/control.js";
+import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
 import { artists } from "./db/schema.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
@@ -324,10 +324,13 @@ async function refreshAndRegisterDevices(): Promise<void> {
   try {
     await refreshDevices();
     for (const d of getCachedDevices()) {
-      getQueueController().registerDlnaDevice(d.id, d.name);
+      // 只给在线设备注册播放器;离线设备仅展示(不绑定 UniversalPlayer)。
+      if (d.available) getQueueController().registerDlnaDevice(d.id, d.name);
     }
   } catch { /* discovery failures are non-fatal */ }
 }
+// 先恢复持久化的设备记录(离线设备也在列表,用户可手动管理),再启动发现扫描。
+loadPersistedDevices();
 setTimeout(() => {
   refreshAndRegisterDevices();
   setInterval(() => { refreshAndRegisterDevices(); }, DLNA_SCAN_INTERVAL);
@@ -339,7 +342,7 @@ wireSsdpRealtime();
 // 新发现的设备即时注册 QueueController(幂等),上线即可播,不必等下一轮扫描。
 getEventManager().on("device_list_changed", () => {
   for (const d of getCachedDevices()) {
-    getQueueController().registerDlnaDevice(d.id, d.name);
+    if (d.available) getQueueController().registerDlnaDevice(d.id, d.name);
   }
 });
 

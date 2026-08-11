@@ -1,8 +1,51 @@
 <template>
   <div class="groups-page">
     <div class="page-header">
-      <h2>播放器群组</h2>
+      <h2>播放器</h2>
       <el-button type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
+    </div>
+
+    <!-- DLNA 设备管理:在线 + 离线全部展示,可重命名 / 删除离线设备 -->
+    <div class="devices-section">
+      <div class="section-head">
+        <h3>DLNA 设备</h3>
+        <el-button size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
+      </div>
+      <div class="devices-box" v-loading="loadingDevices">
+        <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row">
+          <MfIcon name="Monitor" class="device-row-icon" :class="{ offline: !dev.available }" />
+          <div class="device-row-info">
+            <div class="device-row-name">
+              {{ dev.displayName || dev.name }}
+              <el-tag v-if="dev.alias" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
+              <span v-if="!dev.available" class="device-offline-tag">离线</span>
+            </div>
+            <div class="device-row-meta">{{ dev.manufacturer || dev.model || "DLNA 设备" }}</div>
+          </div>
+          <div class="device-row-actions">
+            <el-button size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
+            <el-popconfirm
+              v-if="!dev.available"
+              title="确定删除该设备?将同时从所有群组中移除"
+              confirm-button-text="删除"
+              cancel-button-text="取消"
+              width="240"
+              @confirm="removeDevice(dev)"
+            >
+              <template #reference>
+                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
+              </template>
+            </el-popconfirm>
+          </div>
+        </div>
+        <div v-if="!loadingDevices && dlnaDevices.length === 0" class="device-empty">
+          未发现 DLNA 设备。请确认设备已开启 DLNA 并处于同一局域网,点击「扫描」重新发现。
+        </div>
+      </div>
+    </div>
+
+    <div class="section-head group-section-head">
+      <h3>播放器群组</h3>
     </div>
     <div class="groups-tip">
       将多台 DLNA 设备加入一个群组,组持有自己的队列;播放时后端会并发向全部在线成员投递同一首歌(仿 Music Assistant Sync Group,不进行漂移校正)。
@@ -125,6 +168,16 @@
         <el-button type="primary" :loading="saving" :disabled="!renameName.trim()" @click="saveRename">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- Rename DLNA device (alias) dialog -->
+    <el-dialog v-model="showRenameDeviceDialog" title="重命名设备" width="380px">
+      <el-input v-model="renameDeviceName" placeholder="输入设备显示名(留空恢复原始名称)" maxlength="50" @keyup.enter="saveRenameDevice" />
+      <div class="form-tip">该名称会显示在播放控件和 HA 卡片上</div>
+      <template #footer>
+        <el-button @click="showRenameDeviceDialog = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="saveRenameDevice">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -158,6 +211,13 @@ const showRenameDialog = ref(false);
 const renameGroup = ref<any>(null);
 const renameName = ref("");
 
+// DLNA 设备管理(在线 + 离线)
+const loadingDevices = ref(false);
+const scanning = ref(false);
+const showRenameDeviceDialog = ref(false);
+const renameDeviceTarget = ref<any>(null);
+const renameDeviceName = ref("");
+
 function onlineCount(g: any): number {
   return (g.members || []).filter((m: any) => m.available).length;
 }
@@ -182,10 +242,56 @@ async function loadGroups(): Promise<void> {
 }
 
 async function loadDlnaDevices(): Promise<void> {
+  loadingDevices.value = true;
   try {
     const res = await api.get("/rest/api/v1/dlna/devices");
     dlnaDevices.value = res.data?.devices || [];
   } catch { dlnaDevices.value = []; }
+  finally { loadingDevices.value = false; }
+}
+
+async function scanDevices(): Promise<void> {
+  scanning.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/dlna/scan");
+    dlnaDevices.value = res.data?.devices || [];
+    ElMessage.success("扫描完成");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "扫描失败");
+  } finally { scanning.value = false; }
+}
+
+function openRenameDevice(dev: any) {
+  renameDeviceTarget.value = dev;
+  renameDeviceName.value = dev.alias || "";
+  showRenameDeviceDialog.value = true;
+}
+
+async function saveRenameDevice() {
+  const alias = renameDeviceName.value.trim();
+  if (!renameDeviceTarget.value || saving.value) return;
+  saving.value = true;
+  try {
+    const res = await api.put(`/rest/api/v1/dlna/devices/${renameDeviceTarget.value.id}`, { alias });
+    if (res.data.success) {
+      ElMessage.success(alias ? "已重命名" : "已恢复原始名称");
+      showRenameDeviceDialog.value = false;
+      await loadDlnaDevices();
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "重命名失败");
+  } finally { saving.value = false; }
+}
+
+async function removeDevice(dev: any) {
+  try {
+    await api.delete(`/rest/api/v1/dlna/devices/${dev.id}`);
+    ElMessage.success(`已删除设备「${dev.displayName || dev.name}」`);
+    await loadDlnaDevices();
+    await loadGroups();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "删除失败");
+  }
 }
 
 async function openCreate() {
@@ -280,7 +386,7 @@ function controlGroup(g: any) {
 // player store bumps groupVersion so this page reloads live (no polling).
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
-onMounted(loadGroups);
+onMounted(() => { loadGroups(); loadDlnaDevices(); });
 </script>
 
 <style lang="scss" scoped>
@@ -288,6 +394,26 @@ onMounted(loadGroups);
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;
   h2 { font-size: 28px; font-weight: 700; margin: 0; }
 }
+.section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+  h3 { font-size: 16px; font-weight: 600; margin: 0; color: var(--fnos-text-primary); }
+}
+.group-section-head { margin-top: 28px; }
+.devices-box { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 6px; background: rgba(0,0,0,0.15); min-height: 60px; }
+.device-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; transition: background 0.15s;
+  &:hover { background: rgba(255,255,255,0.05); }
+  .device-row-icon { font-size: 17px; color: var(--fnos-orange); flex-shrink: 0;
+    &.offline { color: var(--fnos-text-muted); }
+  }
+  .device-row-info { flex: 1; min-width: 0;
+    .device-row-name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; color: var(--fnos-text-primary);
+      .device-offline-tag { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
+    }
+    .device-row-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; }
+  }
+  .device-row-actions { display: flex; gap: 8px; flex-shrink: 0; }
+}
+.device-empty { text-align: center; color: var(--fnos-text-tertiary); font-size: 12px; padding: 22px 0; }
+.form-tip { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 6px; }
 .groups-tip {
   font-size: 12px; color: var(--fnos-text-tertiary); background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.08); border-left: 3px solid var(--fnos-orange);

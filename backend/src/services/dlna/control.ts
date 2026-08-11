@@ -20,6 +20,7 @@ import os from "os";
 import { discoverDlnaDevices, fetchDeviceAtLocation, onSsdpEvent, DlnaDevice } from "./discovery.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
+import { sqlite } from "../../db/index.js";
 
 // ==================== base URL resolution (DLNA 拉流地址) ====================
 // DLNA 设备需要回连本服务的 /rest/dlna/stream/:token 拉取音频流,因此 streamUrl
@@ -231,20 +232,122 @@ function runtimeOf(deviceId: string): DeviceRuntime {
 // ==================== Public API ====================
 
 export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
-  cachedDevices = await discoverDlnaDevices(timeoutMs);
+  const discovered = await discoverDlnaDevices(timeoutMs);
   lastDiscovery = Date.now();
+  const live = new Set(discovered.map(d => d.id));
+  // Upsert discovered devices into the cache + DB (online).
+  for (const d of discovered) {
+    const idx = cachedDevices.findIndex(x => x.id === d.id);
+    if (idx >= 0) {
+      cachedDevices[idx] = { ...cachedDevices[idx], ...d, available: true };
+      upsertDeviceRow(cachedDevices[idx]);
+    } else {
+      cachedDevices.push({ ...d, available: true });
+      upsertDeviceRow(cachedDevices[cachedDevices.length - 1]);
+    }
+  }
+  // Devices that vanished → keep them listed but mark unavailable (offline).
+  // Offline devices stay visible so the user can manage (rename/delete) them.
+  for (const d of cachedDevices) {
+    if (!live.has(d.id) && d.available) {
+      d.available = false;
+      markDeviceOfflineInDb(d.id);
+    }
+  }
   // Prune per-device runtime state for devices that are no longer in the
   // discovered list, so the in-memory `runtimes` map doesn't grow without
   // bound on long-running servers. Unconditional id-based sweep (no size
   // comparison): a device that went offline while another came online keeps
   // the count equal but must still be evicted.
-  const live = new Set(cachedDevices.map(d => d.id));
   for (const [deviceId] of runtimes) {
     if (!live.has(deviceId)) runtimes.delete(deviceId);
   }
   // Notify subscribers (WS layer) that the device list may have changed.
   getEventManager().emitDeviceListChanged(cachedDevices.length);
   return cachedDevices;
+}
+
+// ==================== 设备持久化(dlna_devices) ====================
+// 设备记录持久化到 DB:离线设备不删除,供「播放器」页管理(重命名/删除)。
+// alias 由用户设置;发现流程只更新原始字段,不覆盖 alias / first_seen。
+
+function isoNow(): string { return new Date().toISOString(); }
+
+function upsertDeviceRow(d: DlnaDevice): void {
+  const now = isoNow();
+  const existing = sqlite.prepare("SELECT alias, first_seen FROM dlna_devices WHERE id = ?").get(d.id) as any;
+  const alias = existing?.alias || d.alias || "";
+  const firstSeen = existing?.first_seen || now;
+  sqlite.prepare(`
+    INSERT INTO dlna_devices (id, name, alias, manufacturer, model, first_seen, last_seen, available, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      manufacturer = excluded.manufacturer,
+      model = excluded.model,
+      last_seen = excluded.last_seen,
+      available = 1,
+      updated_at = excluded.updated_at
+  `).run(d.id, d.name, alias, d.manufacturer || "", d.model || "", firstSeen, now, now);
+  // Re-attach the preserved alias to the in-memory device.
+  d.alias = alias || undefined;
+}
+
+function markDeviceOfflineInDb(deviceId: string): void {
+  sqlite.prepare("UPDATE dlna_devices SET available = 0, updated_at = ? WHERE id = ?").run(isoNow(), deviceId);
+}
+
+// 设置用户自定义显示名(alias)。空串 = 恢复使用原始名。同步 DB + 内存缓存,
+// 并通过 device_list_changed 广播触发 peer reconcile(播放控件/HA 卡片显示名更新)。
+// 返回更新后的设备(找不到返回 undefined)。
+export function setDeviceAlias(deviceId: string, alias: string): DlnaDevice | undefined {
+  if (!cachedDevices.some(d => d.id === deviceId) &&
+      !sqlite.prepare("SELECT 1 FROM dlna_devices WHERE id = ?").get(deviceId)) return undefined;
+  sqlite.prepare("UPDATE dlna_devices SET alias = ?, updated_at = ? WHERE id = ?")
+    .run(alias, isoNow(), deviceId);
+  const dev = cachedDevices.find(d => d.id === deviceId);
+  if (dev) dev.alias = alias || undefined;
+  getEventManager().emitDeviceListChanged(cachedDevices.length);
+  return dev;
+}
+
+// 彻底删除设备:DB 行 + 内存缓存 + runtimes。队列/peer/群组成员由路由层处理。
+// 返回设备之前是否存在。
+export function deleteDeviceRecord(deviceId: string): boolean {
+  const existed = cachedDevices.some(d => d.id === deviceId) ||
+    !!sqlite.prepare("SELECT 1 FROM dlna_devices WHERE id = ?").get(deviceId);
+  const idx = cachedDevices.findIndex(d => d.id === deviceId);
+  if (idx >= 0) cachedDevices.splice(idx, 1);
+  runtimes.delete(deviceId);
+  sqlite.prepare("DELETE FROM dlna_devices WHERE id = ?").run(deviceId);
+  return existed;
+}
+
+// 启动时从 DB 恢复持久化设备(离线设备也在列表中,用户可手动管理)。
+// 注意:恢复的设备没有 description 缓存(无 location/control URL),无法立即播放,
+// 因此一律按离线处理;等首次 M-SEARCH 扫描或 SSDP alive 到达后再置为在线。
+export function loadPersistedDevices(): void {
+  const rows = sqlite.prepare(
+    "SELECT id, name, alias, manufacturer, model, last_seen FROM dlna_devices"
+  ).all() as any[];
+  for (const r of rows) {
+    if (cachedDevices.some(d => d.id === r.id)) continue;
+    cachedDevices.push({
+      id: r.id,
+      name: r.name || "未知设备",
+      alias: r.alias || undefined,
+      location: "",
+      manufacturer: r.manufacturer || undefined,
+      model: r.model || undefined,
+      lastSeen: r.last_seen ? Date.parse(r.last_seen) || 0 : 0,
+      available: false,
+    });
+  }
+}
+
+// 设备显示名:alias || name(播放控件 / HA 卡片 / 群组页统一用它)。
+export function deviceDisplayName(d: DlnaDevice): string {
+  return (d.alias || d.name || d.id).trim();
 }
 
 export function getCachedDevices(): DlnaDevice[] {
@@ -271,16 +374,22 @@ export function wireSsdpRealtime(): void {
         if (!d) return;
         const idx = cachedDevices.findIndex((x) => x.id === d.id);
         const wasAvailable = idx >= 0 ? cachedDevices[idx].available : false;
-        if (idx >= 0) cachedDevices[idx] = { ...cachedDevices[idx], ...d, available: true };
-        else cachedDevices.push(d);
+        if (idx >= 0) {
+          cachedDevices[idx] = { ...cachedDevices[idx], ...d, available: true };
+          upsertDeviceRow(cachedDevices[idx]);
+        } else {
+          cachedDevices.push(d);
+          upsertDeviceRow(d);
+        }
         // 只在「新设备」或「离线→上线」时广播,避免周期性通告反复刷屏。
         if (idx < 0 || !wasAvailable) getEventManager().emitDeviceListChanged(cachedDevices.length);
       } else {
-        // byebye:立即从缓存移除(设备明确下线,不等 5min M-SEARCH 刷新),
-        // 并广播让 peer 列表与 WS 推送实时收敛。USN 首段即 UDN,与设备 id 一致。
-        const idx = cachedDevices.findIndex((x) => x.id === e.udn);
-        if (idx >= 0) {
-          cachedDevices.splice(idx, 1);
+        // byebye:设备明确下线——标记离线并保留在列表/DB(供「播放器」页管理),
+        // 不再从缓存移除。USN 首段即 UDN,与设备 id 一致。
+        const dev = cachedDevices.find((x) => x.id === e.udn);
+        if (dev && dev.available) {
+          dev.available = false;
+          markDeviceOfflineInDb(dev.id);
           getEventManager().emitDeviceListChanged(cachedDevices.length);
         }
       }

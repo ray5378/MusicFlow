@@ -1,10 +1,10 @@
 <template>
   <div class="admin-wish">
     <div class="page-header">
-      <h2>许愿管理</h2>
+      <h2>未命中音乐</h2>
       <div class="header-actions">
-        <el-button :loading="loadingChunks" @click="openWishList"><MfIcon name="Copy" />许愿列表</el-button>
-        <el-input v-model="searchQuery" placeholder="搜索许愿..." prefix-icon="Search" clearable style="width: 260px" @input="onSearchInput" @clear="onSearchClear" />
+        <el-button :loading="loadingChunks" @click="openWishList"><MfIcon name="Copy" />未命中音乐列表</el-button>
+        <el-input v-model="searchQuery" placeholder="搜索未命中音乐..." prefix-icon="Search" clearable style="width: 260px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
     <el-table :data="wishes" stripe v-loading="loading" v-if="wishes.length > 0">
@@ -16,17 +16,12 @@
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.status === 'fulfilled' ? 'success' : row.status === 'pending' ? 'warning' : 'info'" size="small">
-            {{ row.status === 'fulfilled' ? '已实现' : row.status === 'pending' ? '待处理' : row.status }}
+            {{ row.status === 'fulfilled' ? '已实现' : row.status === 'pending' ? '未适配' : row.status }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="120">
-        <template #default="{ row }">
-          <el-button size="small" @click="fulfillWish(row)">检索下载</el-button>
-        </template>
-      </el-table-column>
     </el-table>
-    <EmptyState v-else icon="box" title="暂无许愿歌曲" description="导入外部歌单时未匹配的歌曲会出现在这里" compact />
+    <EmptyState v-else icon="box" title="暂无未命中音乐" description="导入外部歌单时未匹配的歌曲会出现在这里" compact />
     <div class="pagination-bar">
       <el-pagination
         layout="total, sizes, prev, pager, next, jumper"
@@ -41,9 +36,9 @@
     </div>
 
     <!-- Wish list dialog: split into copyable chunks (<= 1000 chars) -->
-    <el-dialog v-model="showListDialog" title="许愿列表" width="620px">
+    <el-dialog v-model="showListDialog" title="未命中音乐列表" width="620px">
       <div class="wish-list-info" v-if="totalWishes > 0">
-        共 {{ totalWishes }} 首许愿歌曲,已分成 {{ chunks.length }} 段(每段不超过 1000 字符)
+        共 {{ totalWishes }} 首未命中音乐,已分成 {{ chunks.length }} 段(每段不超过 1000 字符)
       </div>
       <div class="wish-chunks" v-loading="loadingChunks">
         <div
@@ -63,7 +58,7 @@
           </el-button>
           <span v-if="copiedIdx === idx" class="copied-tip">已复制</span>
         </div>
-        <div v-if="chunks.length === 0 && !loadingChunks" class="wish-empty">暂无许愿歌曲</div>
+        <div v-if="chunks.length === 0 && !loadingChunks" class="wish-empty">暂无未命中音乐</div>
       </div>
     </el-dialog>
   </div>
@@ -107,7 +102,7 @@ async function openWishList() {
     totalWishes.value = lines.length;
     chunks.value = splitChunks(lines);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "加载许愿列表失败");
+    ElMessage.error(e.response?.data?.error || "加载未命中音乐列表失败");
     chunks.value = [];
   } finally {
     loadingChunks.value = false;
@@ -208,8 +203,6 @@ function onSearchInput() {
 }
 
 function onSearchClear() { currentPage.value = 1; loadWishes(); }
-
-function fulfillWish(wish: any) { ElMessage.info("检索下载功能需要后端插件支持"); }
 
 onMounted(loadWishes);
 </script>
