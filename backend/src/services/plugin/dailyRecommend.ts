@@ -33,7 +33,7 @@
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
-import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
+import { copyCoverToFile } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
 
 export interface DailyCandidate {
@@ -179,11 +179,12 @@ function isGeneratedToday(playlist: any, dateStr: string): boolean {
 // Ensure the fixed-id daily playlist exists. On first run (or after an upgrade
 // from the old two-playlist scheme) this:
 //   - adopts any existing "[daily-recommend]" tagged "今日推荐" playlist into
-//     the fixed id (so no content is lost and no duplicate playlists appear),
-//   - deletes any leftover legacy daily playlists (dynamic-id rows, the old
-//     fixed "昨日推荐" row, and the deprecated "(本地)" variants) so the user
-//     never sees stale duplicates, and
+//     the fixed id (so no content is lost and no duplicate playlists appear), and
 //   - creates the fixed row if it's still missing.
+//
+// Note: existing "昨日推荐" playlists are intentionally NOT deleted here — the
+// user may delete them manually. The daily generator simply stops creating or
+// updating them.
 function ensureDailyPlaylists(): void {
   const todayFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
   if (!todayFixed) {
@@ -200,22 +201,6 @@ function ensureDailyPlaylists(): void {
       `).run(FIXED_TODAY_ID, NAME_TODAY, ownerId, `${DAILY_TAG}`, now, now);
     }
   }
-
-  // "昨日推荐" is no longer generated — remove any daily-recommend playlists
-  // other than today's (legacy dynamic-id rows, the old fixed "昨日推荐" row,
-  // and the deprecated "(本地)" variants) together with their songs and covers.
-  const tagPattern = `%${DAILY_TAG}%`;
-  const localPattern = `%${DAILY_TAG_LOCAL}%`;
-  const stale = sqlite.prepare(
-    `SELECT id FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id <> ?`
-  ).all(tagPattern, localPattern, FIXED_TODAY_ID) as { id: string }[];
-  for (const row of stale) clearPlaylistCoverCache(row.id);
-  sqlite.prepare(
-    `DELETE FROM playlist_songs WHERE playlist_id IN (SELECT id FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id <> ?)`
-  ).run(tagPattern, localPattern, FIXED_TODAY_ID);
-  sqlite.prepare(
-    `DELETE FROM playlists WHERE (comment LIKE ? OR comment LIKE ?) AND id <> ?`
-  ).run(tagPattern, localPattern, FIXED_TODAY_ID);
 }
 
 // Pick a random local-library song's album cover file ref. Used as the daily
