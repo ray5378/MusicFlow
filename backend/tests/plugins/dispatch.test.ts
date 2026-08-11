@@ -63,10 +63,9 @@ function setEnabled(id: string, enabled: 0 | 1) {
 beforeAll(() => {
   registerBuiltinPlugins();
   initDatabase();
-  // Disable built-in providers/renderers so the in-memory mocks are the only
-  // enabled plugins for those capabilities (keeps first-match-wins deterministic).
-  setEnabled("go-music-dl-lyrics", 0);
-  setEnabled("go-music-dl-cover", 0);
+  // Disable the built-in renderer so the in-memory mock is the only enabled
+  // renderer (keeps first-match-wins deterministic). Lyric/cover built-ins were
+  // externalized to the marketplace, so they no longer seed rows here.
   setEnabled("dlna-renderer", 0);
   for (const m of [failLyric, okLyric, okCover, okRenderer, okScrobbler]) {
     registerPlugin(m, (m === failLyric && failLyricImpl) || (m === okLyric && okLyricImpl) || (m === okCover && okCoverImpl) || (m === okRenderer && okRendererImpl) || okScrobblerImpl);
@@ -77,8 +76,6 @@ beforeAll(() => {
 afterAll(() => {
   for (const id of MOCK_IDS) sqlite.prepare("DELETE FROM plugins WHERE name = ?").run(id);
   // restore built-in defaults
-  setEnabled("go-music-dl-lyrics", 1);
-  setEnabled("go-music-dl-cover", 1);
   setEnabled("dlna-renderer", 1);
   try { fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true }); } catch {}
 });

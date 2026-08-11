@@ -69,10 +69,11 @@ describe("plugin registry", () => {
 
   it("covers all built-in plugin types", () => {
     const types = new Set(listRegistered().map((p) => p.manifest.type));
-    // 注意: 内置已不再含 source 类型 —— go-music-dl(全网搜索源)改为官方外置插件,
-    // 由「插件市场」安装后注册。详见 https://github.com/ray5378/MusicFlow-plugins。
+    // 注意: 内置已不再含 source / lyrics / cover 类型 —— go-music-dl(全网搜索源)、
+    // go-music-dl-lyrics、go-music-dl-cover 均改为官方外置插件,由「插件市场」安装后注册。
+    // 详见 https://github.com/ray5378/MusicFlow-plugins。
     expect([...types].sort()).toEqual([
-      "cover", "importer", "lyrics", "recommender", "renderer", "sync",
+      "importer", "recommender", "renderer", "sync",
     ]);
   });
 
@@ -88,9 +89,8 @@ describe("plugin registry", () => {
     expect(enabledFlag("musicflow-file-importer")).toBe(1);
     expect(enabledFlag("daily-recommend")).toBe(1);
     expect(enabledFlag("playlist-sync")).toBe(1);
-    // New provider / renderer / recommender plugins (replacing hardcoded core paths).
-    expect(enabledFlag("go-music-dl-lyrics")).toBe(1);
-    expect(enabledFlag("go-music-dl-cover")).toBe(1);
+    // New renderer / recommender plugins (replacing hardcoded core paths).
+    // 注意: go-music-dl-lyrics / go-music-dl-cover 已外置为官方市场插件,不再内置。
     expect(enabledFlag("dlna-renderer")).toBe(1);
     expect(enabledFlag("local-recommend")).toBe(1);
   });

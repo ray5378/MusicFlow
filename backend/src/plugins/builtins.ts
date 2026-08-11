@@ -33,8 +33,8 @@ import { localRecommendManifest, localRecommendPlugin } from "../services/plugin
 // ---- sync ----
 import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/playlistSync.js";
 // ---- lyrics / cover providers ----
-import { goMusicDlLyricsManifest, goMusicDlLyricsPlugin } from "../services/plugin/lyrics/goMusicDlLyrics.js";
-import { goMusicDlCoverManifest, goMusicDlCoverPlugin } from "../services/plugin/covers/goMusicDlCover.js";
+// NOTE: go-music-dl 歌词 / 封面 已改为官方外置插件(见 MusicFlow-plugins 仓库),
+// 不再随后端内置。安装后随市场分发,行为不变。其余内置 provider 也遵循此迁移方向。
 // ---- renderer (device casting) ----
 import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";
 
@@ -60,13 +60,8 @@ export const BUILTIN_SYNC_PLUGINS: BuiltinPlugin[] = [
   { manifest: playlistSyncManifest, impl: playlistSyncPlugin },
 ];
 
-export const BUILTIN_LYRIC_PLUGINS: BuiltinPlugin[] = [
-  { manifest: goMusicDlLyricsManifest, impl: goMusicDlLyricsPlugin },
-];
-
-export const BUILTIN_COVER_PLUGINS: BuiltinPlugin[] = [
-  { manifest: goMusicDlCoverManifest, impl: goMusicDlCoverPlugin },
-];
+export const BUILTIN_LYRIC_PLUGINS: BuiltinPlugin[] = [];
+export const BUILTIN_COVER_PLUGINS: BuiltinPlugin[] = [];
 
 export const BUILTIN_RENDERER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dlnaRendererManifest, impl: dlnaRendererPlugin },
