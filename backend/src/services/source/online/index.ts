@@ -8,11 +8,12 @@ import { db } from "../../../db/index.js";
 import { plugins } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getOnlineProvider, OnlineProvider, OnlineSongResult } from "./types.js";
-import { GO_MUSIC_DL_PROVIDER_ID, initOnlineProviders } from "./goMusicDl.js";
+import { registerBuiltinPlugins } from "../../../plugins/registry.js";
 
-initOnlineProviders();
+// Register all built-in source plugins into the unified registry at boot.
+registerBuiltinPlugins();
 
-export { getOnlineProvider, GO_MUSIC_DL_PROVIDER_ID };
+export { getOnlineProvider };
 export type { OnlineSongResult };
 
 /** Load the stored config for the source plugin backing `providerId`, if enabled. */

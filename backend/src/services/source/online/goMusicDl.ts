@@ -8,7 +8,8 @@
 // Streaming: we reuse go-music-dl's /music/download?stream=1 which is a raw
 // audio proxy that honours Range requests — matching /rest/stream's needs.
 
-import { OnlineProvider, OnlineSongResult, OnlineRecommendChannel, OnlinePlaylistInfo, registerOnlineProvider } from "./types.js";
+import { OnlineProvider, OnlineSongResult, OnlineRecommendChannel, OnlinePlaylistInfo } from "./types.js";
+import type { PluginManifest, LyricSongInput } from "../../../plugins/types.js";
 
 function baseUrl(config: Record<string, any>): string {
   return String(config?.baseUrl || "").replace(/\/+$/, "");
@@ -124,11 +125,59 @@ export function parseSongCards(html: string): OnlineSongResult[] {
   return songs;
 }
 
+// Supported platform slugs (also surfaced as the "搜索平台" multi-select options).
+const PLATFORMS: { value: string; label: string }[] = [
+  { value: "netease", label: "网易云" },
+  { value: "qq", label: "QQ 音乐" },
+  { value: "kugou", label: "酷狗" },
+  { value: "kuwo", label: "酷我" },
+  { value: "migu", label: "咪咕" },
+  { value: "qianqian", label: "千千" },
+  { value: "soda", label: "汽水" },
+  { value: "fivesing", label: "5sing" },
+  { value: "jamendo", label: "Jamendo" },
+  { value: "joox", label: "JOOX" },
+  { value: "bilibili", label: "Bilibili" },
+  { value: "apple", label: "Apple Music" },
+];
+
+/** Self-describing manifest for the built-in go-music-dl source plugin. */
+export const goMusicDlManifest: PluginManifest = {
+  id: "go-music-dl",
+  name: "go-music-dl 全网聚合",
+  version: "1.0.0",
+  type: "source",
+  description: "通过局域网已部署的 go-music-dl 服务搜索全网音乐,并把结果作为在线歌曲保存入库",
+  capabilities: ["search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation"],
+  platforms: PLATFORMS.map((p) => p.value),
+  recommendPrefix: "gmdl://recommend/",
+  configSchema: [
+    { key: "baseUrl", label: "服务地址", type: "url", required: true, help: "填写你在局域网部署的 go-music-dl 网页服务地址" },
+    { key: "sources", label: "搜索平台", type: "multiselect", options: PLATFORMS },
+    {
+      key: "webSongsMode",
+      label: "web 歌曲",
+      type: "radio",
+      options: [
+        { label: "永不过期", value: "keep" },
+        { label: "定期清理", value: "rotate" },
+      ],
+    },
+    {
+      key: "webSongsRetentionDays",
+      label: "保留天数",
+      type: "number",
+      help: "超过该天数且不再被任何歌单/收藏引用的在线歌曲会被自动清理(含封面);仍在歌单或收藏中的不受影响。保留 0 天 = 下架即清。",
+    },
+  ],
+};
+
 const PROVIDER_ID = "go-music-dl";
 
-const goMusicDlProvider: OnlineProvider = {
+export const goMusicDlProvider: OnlineProvider = {
   id: PROVIDER_ID,
   name: "go-music-dl 全网聚合",
+  manifest: goMusicDlManifest,
   async test(config) {
     const url = baseUrl(config);
     if (!url) return { success: false, message: "未配置 go-music-dl 地址" };
@@ -199,10 +248,30 @@ const goMusicDlProvider: OnlineProvider = {
     if (range) qs.set("range", range);
     return `${baseUrl(config)}/music/download?${qs.toString()}`;
   },
+
+  // Build the go-music-dl /music/download_lrc URL from a stored /music/download
+  // stream URL. Keeps id/source/name/artist/album/extra; drops streaming-only
+  // params; adds duration + format=line so go-music-dl returns line-style LRC
+  // (karaoke/word-level lyrics collapsed into ordinary timed lines).
+  lyricUrl(_config, song) {
+    if (!song.url || !song.url.includes("/music/download")) return null;
+    try {
+      const u = new URL(song.url);
+      if (!u.pathname.endsWith("/music/download")) return null;
+      u.pathname = u.pathname.slice(0, -"/music/download".length) + "/music/download_lrc";
+      u.searchParams.delete("stream");
+      u.searchParams.delete("range");
+      u.searchParams.delete("cover");
+      u.searchParams.delete("embed");
+      u.searchParams.set("format", "line");
+      if ((song.duration || 0) > 0 && !u.searchParams.has("duration")) {
+        u.searchParams.set("duration", String(song.duration));
+      }
+      return u.toString();
+    } catch {
+      return null;
+    }
+  },
 };
 
 export const GO_MUSIC_DL_PROVIDER_ID = PROVIDER_ID;
-
-export function initOnlineProviders() {
-  registerOnlineProvider(goMusicDlProvider);
-}

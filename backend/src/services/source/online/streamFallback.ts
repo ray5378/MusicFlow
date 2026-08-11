@@ -14,6 +14,7 @@ import { OnlineSongResult } from "./types.js";
 import { db } from "../../../db/index.js";
 import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
+import { getEnabledSourcePlugins, getPluginManifest } from "../../../plugins/registry.js";
 
 // Search result ordering: prefer platforms that resolve reliably.
 const SOURCE_PREFERENCE = ["netease", "kuwo", "kugou", "qq"];
@@ -22,6 +23,18 @@ const SOURCE_PREFERENCE = ["netease", "kuwo", "kugou", "qq"];
 // FIFO cap to keep memory usage bounded on long-running servers.
 const FALLBACK_CACHE_MAX = 2000;
 const PLAYABLE_CACHE_MAX = 5000;
+
+// Default fallback provider: the song's own pluginEntry if known, else the first
+// enabled source plugin that declares the "stream" capability. Falls back to
+// "go-music-dl" only as a last resort (e.g. empty registry) so behaviour never
+// regresses even before any plugin is configured.
+function defaultStreamProviderId(songPluginEntry?: string | null): string {
+  if (songPluginEntry) return songPluginEntry;
+  for (const { manifest } of getEnabledSourcePlugins()) {
+    if (manifest.capabilities.includes("stream")) return manifest.id;
+  }
+  return "go-music-dl";
+}
 
 // songId -> working stream URL (or null once we know there's no alternative).
 const fallbackCache = new Map<string, string | null>();
@@ -157,7 +170,7 @@ export async function ensurePlayableStream(
   try { sd = JSON.parse(song.sourceData || "{}"); } catch {}
   const fb = await findFallbackStream(
     song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
-    song.album || "", song.pluginEntry || "go-music-dl", sd?.source || "",
+    song.album || "", defaultStreamProviderId(song.pluginEntry), sd?.source || "",
   );
   if (fb) {
     addPlayable(song.id);

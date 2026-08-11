@@ -5,8 +5,13 @@
 // as DB songs with type="web" and streams are served by proxying the provider's
 // /music/download stream URL from /rest/stream (see serveWebSongStream).
 //
-// Providers are registered here and surfaced as built-in "source" plugins in
-// the admin Plugins page. Config lives in the plugin's `config` JSON.
+// Providers implement this interface AND carry a self-describing `manifest`
+// (declaring their capabilities, supported platforms, config schema, and the
+// daily-recommend prefix). The core discovers them through the registry and
+// only ever calls methods whose capability is declared — it never names a
+// concrete provider.
+
+import type { PluginManifest, LyricSongInput } from "../../../plugins/types.js";
 
 export interface OnlineSongResult {
   // Remote identity (used to build the stream URL)
@@ -35,14 +40,14 @@ export interface OnlineSearchResult {
 
 /** A playlist recommended by a source channel on go-music-dl's /music/recommend. */
 export interface OnlinePlaylistInfo {
-  id: string;          // platform playlist id
+  id: string; // platform playlist id
   name: string;
-  source: string;      // platform slug: netease / qq / kugou / kuwo
+  source: string; // platform slug: netease / qq / kugou / kuwo
   creator: string;
-  cover: string;       // remote cover URL
-  trackCount: string;  // "589" (as displayed)
-  link: string;        // redirect /music/playlist?source=..&id=..  (relative)
-  imported?: boolean;  // whether this playlist is already imported locally
+  cover: string; // remote cover URL
+  trackCount: string; // "589" (as displayed)
+  link: string; // redirect /music/playlist?source=..&id=..  (relative)
+  imported?: boolean; // whether this playlist is already imported locally
 }
 
 /** A recommended channel on the recommend page (one tab = one platform). */
@@ -61,6 +66,8 @@ export interface OnlineRecommendResult {
 export interface OnlineProvider {
   readonly id: string;
   readonly name: string;
+  /** Self-describing manifest (capabilities, platforms, configSchema, ...). */
+  readonly manifest: PluginManifest;
   /** Test connectivity to the configured instance. */
   test(config: Record<string, any>): Promise<{ success: boolean; message?: string }>;
   /** Search the aggregated online catalog. */
@@ -71,20 +78,16 @@ export interface OnlineProvider {
   playlistSongs?(config: Record<string, any>, source: string, id: string): Promise<{ songs: OnlineSongResult[]; name: string }>;
   /** Build the audio proxy URL for a song (go-music-dl /download?stream=1). */
   streamUrl(config: Record<string, any>, song: OnlineSongResult, range?: string): string;
+  /** Build the lyrics (LRC) URL for a stored web song. Returns null if the
+   *  provider cannot supply lyrics for this song. Replaces the old core-side
+   *  deriveGmdlLrcUrl() so that gmdl-specific URL logic lives with the plugin. */
+  lyricUrl?(config: Record<string, any>, song: LyricSongInput): string | null;
 }
 
-// ==================== Registry ====================
+// ==================== Registry (delegates to the unified registry) ====================
 
-const providers = new Map<string, OnlineProvider>();
-
-export function registerOnlineProvider(p: OnlineProvider) {
-  providers.set(p.id, p);
-}
-
-export function getOnlineProvider(id: string): OnlineProvider | undefined {
-  return providers.get(id);
-}
-
-export function listOnlineProviders(): OnlineProvider[] {
-  return [...providers.values()];
-}
+export {
+  registerOnlineProvider,
+  getOnlineProvider,
+  listOnlineProviders,
+} from "../../../plugins/registry.js";

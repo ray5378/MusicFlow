@@ -19,9 +19,20 @@ import { importOnlineSongs } from "./service.js";
 import { OnlinePlaylistInfo } from "./types.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.js";
 import { refreshPlaylistCounts } from "../../plugin/playlistSync.js";
+import { getPluginManifest, listRegistered } from "../../../plugins/registry.js";
 
 export const DAILY_TAG = "每日推荐";
-const RECOMMEND_URL_PREFIX = "gmdl://recommend/";
+// The daily-recommend sourceUrl prefix is no longer hardcoded — each source
+// plugin declares its own `recommendPrefix` in its manifest, so a second
+// aggregator can be added without touching this file.
+function recommendPrefix(providerId: string): string {
+  return getPluginManifest(providerId)?.recommendPrefix ?? "gmdl://recommend/";
+}
+function allRecommendPrefixes(): string[] {
+  return listRegistered()
+    .map((p) => p.manifest.recommendPrefix)
+    .filter((p): p is string => !!p);
+}
 const COMMENT_PREFIX = "每日推荐歌单·";
 // Keep imported playlist titles short so the inline platform tag stays visible
 // in the WebUI playlist cards (names are rendered nowrap with ellipsis).
@@ -32,13 +43,13 @@ function truncateName(name: string): string {
   return chars.slice(0, MAX_NAME_LEN).join("") + "…";
 }
 
-/** Build the marker sourceUrl for a recommended playlist import. */
-export function recommendSourceUrl(id: string): string {
-  return `${RECOMMEND_URL_PREFIX}${id}`;
+/** Build the marker sourceUrl for a recommended playlist import (per provider). */
+export function recommendSourceUrl(providerId: string, id: string): string {
+  return `${recommendPrefix(providerId)}${id}`;
 }
 
 export function isDailyRecommendPlaylist(pl: any): boolean {
-  return !!pl.sourceUrl && pl.sourceUrl.startsWith(RECOMMEND_URL_PREFIX);
+  return !!pl.sourceUrl && allRecommendPrefixes().some((p) => pl.sourceUrl!.startsWith(p));
 }
 
 /** Hard-delete a playlist row plus its entries and cover cache. */
@@ -48,10 +59,15 @@ export function removePlaylistRows(playlistId: string): void {
   db.delete(playlists).where(eq(playlists.id, playlistId)).run();
 }
 
-/** Find the local playlist that already imported this recommended playlist. */
-export function findRecommendPlaylist(id: string): any | null {
-  const rows = db.select().from(playlists).where(eq(playlists.sourceUrl, recommendSourceUrl(id))).all();
-  return rows[0] || null;
+/** Find the local playlist that already imported this recommended playlist.
+ *  Without a providerId it matches any registered source plugin's prefix. */
+export function findRecommendPlaylist(id: string, providerId?: string): any | null {
+  if (providerId) {
+    const rows = db.select().from(playlists).where(eq(playlists.sourceUrl, recommendSourceUrl(providerId, id))).all();
+    return rows[0] || null;
+  }
+  const all = db.select().from(playlists).all();
+  return all.find((p) => allRecommendPrefixes().some((pref) => p.sourceUrl === `${pref}${id}`)) || null;
 }
 
 /** Update a local playlist's entry set to the given online songs (full replace). */
@@ -104,7 +120,7 @@ export async function importRecommendPlaylist(
 
   // 平台歌单音乐为 0(空歌单)→ 自动删除本地对应歌单,不保留空占位。
   if (imp.songs.length === 0) {
-    const existing = findRecommendPlaylist(info.id);
+    const existing = findRecommendPlaylist(info.id, providerId);
     if (existing) {
       removePlaylistRows(existing.id);
       console.log(`[recommend-sync] 歌单「${displayName}」音乐为 0,已自动删除`);
@@ -112,7 +128,7 @@ export async function importRecommendPlaylist(
     return { success: false, created: false, name: displayName, platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: imp.failed };
   }
 
-  const existing = findRecommendPlaylist(info.id);
+  const existing = findRecommendPlaylist(info.id, providerId);
   if (existing) {
     replacePlaylistSongs(existing.id, imp.songs);
     db.update(playlists).set({
@@ -143,7 +159,7 @@ export async function importRecommendPlaylist(
     songCount: 0,
     duration: 0,
     syncEnabled: 0,
-    sourceUrl: recommendSourceUrl(info.id),
+    sourceUrl: recommendSourceUrl(providerId, info.id),
     sourcePlatform: info.source,
     externalId: info.id,
     createdAt: now,
@@ -260,7 +276,7 @@ export async function syncAllRecommendPlaylists(
     const src = pl.sourcePlatform || "";
     if (emptyChannels.has(src)) continue; // couldn't refresh this channel → keep old
     const current = importedForChannel(src);
-    const remoteId = String(pl.externalId || pl.sourceUrl!.replace(RECOMMEND_URL_PREFIX, ""));
+    const remoteId = String(pl.externalId || pl.sourceUrl!.replace(recommendPrefix(providerId), ""));
     // Safety: only delete stale playlists when today's import is at least as
     // complete as what we previously had (partial-fetch suspects are kept).
     if (current.size > 0 && current.size >= (oldByChannel.get(src) || 0) && !current.has(remoteId)) {

@@ -1,6 +1,7 @@
 import { db } from "../db/index.js";
 import { songs, mediaSources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
+import { getPluginImpl, getPluginConfig } from "../plugins/registry.js";
 
 export interface LrcLine {
   time: number; // seconds
@@ -54,6 +55,7 @@ interface SongRow {
   url?: string | null;
   type?: string | null;
   duration?: number | null;
+  pluginEntry?: string | null;
 }
 
 const lrcCache = new Map<string, { content: string | null; at: number }>();
@@ -70,31 +72,6 @@ const lrcCacheSweep = setInterval(() => {
 // Don't keep the process alive just for cache sweeping.
 (lrcCacheSweep as any).unref?.();
 
-// Build the go-music-dl /music/download_lrc URL from a /music/download stream URL.
-// Keeps id/source/name/artist/album/extra; drops streaming-only params; adds
-// duration + format=auto so go-music-dl reuses its own per-source lyric logic.
-function deriveGmdlLrcUrl(downloadUrl: string, durationSec: number): string | null {
-  try {
-    const u = new URL(downloadUrl);
-    if (!u.pathname.endsWith("/music/download")) return null;
-    u.pathname = u.pathname.slice(0, -"/music/download".length) + "/music/download_lrc";
-    u.searchParams.delete("stream");
-    u.searchParams.delete("range");
-    u.searchParams.delete("cover");
-    u.searchParams.delete("embed");
-    // Request the "line" format so go-music-dl collapses word-level/karaoke
-    // lyrics back into ordinary timed lines. "auto" returns the raw source
-    // format, which can repeat the same full line for every timestamp.
-    u.searchParams.set("format", "line");
-    if (durationSec > 0 && !u.searchParams.has("duration")) {
-      u.searchParams.set("duration", String(durationSec));
-    }
-    return u.toString();
-  } catch {
-    return null;
-  }
-}
-
 // Fetch the .lrc file next to a song (WebDAV or local)
 export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   const cached = lrcCache.get(song.id);
@@ -102,23 +79,34 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
 
   let content: string | null = null;
 
-  // go-music-dl web songs: derive the /music/download_lrc URL from the stored
-  // stream URL and fetch the LRC in-memory (never written to disk).
-  if (song.type === "web" && song.url && song.url.includes("/music/download")) {
-    const lrcUrl = deriveGmdlLrcUrl(song.url, song.duration || 0);
-    if (lrcUrl) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch(lrcUrl, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const text = await res.text();
-          if (text && !text.startsWith("Lyric not found")) content = text;
-        }
-      } catch { content = null; }
-      lrcCache.set(song.id, { content, at: Date.now() });
-      return content;
+  // Online (web) songs: delegate lyric-URL derivation to the source plugin so
+  // provider-specific URL logic (e.g. go-music-dl's /music/download_lrc) lives
+  // with the plugin, not the core. The LRC is fetched in-memory and never
+  // written to disk.
+  if (song.type === "web" && song.pluginEntry) {
+    const impl = getPluginImpl(song.pluginEntry);
+    if (impl?.lyricUrl) {
+      const cfg = getPluginConfig(song.pluginEntry) || {};
+      const lrcUrl = impl.lyricUrl(cfg, {
+        url: song.url,
+        duration: song.duration,
+        title: song.title,
+        artist: song.artist,
+      });
+      if (lrcUrl) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 8000);
+          const res = await fetch(lrcUrl, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (res.ok) {
+            const text = await res.text();
+            if (text && !text.startsWith("Lyric not found")) content = text;
+          }
+        } catch { content = null; }
+        lrcCache.set(song.id, { content, at: Date.now() });
+        return content;
+      }
     }
   }
 

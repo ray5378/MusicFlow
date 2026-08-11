@@ -20,6 +20,7 @@ import { authMiddleware } from "./middleware/auth.js";
 import { syncAllEnabledPlaylists } from "./services/plugin/playlistSync.js";
 import { syncAllRecommendPlaylists } from "./services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
+import { getEnabledSourcePlugins } from "./plugins/registry.js";
 import { runDailyRecommendJob } from "./services/plugin/dailyRecommend.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
@@ -230,29 +231,31 @@ async function runDailyJobs() {
   // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
   await runDailyRecommendJob();
-  // Also refresh any go-music-dl 每日推荐歌单 imported into local playlists
-  // (full-replace each with today's content). Gated by its own setting.
-  try {
-    const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("gmdl_recommend_sync_enabled") as any;
-    if ((row?.value ?? "true") !== "false") {
-      const r = await syncAllRecommendPlaylists("go-music-dl", {});
-      if (r.synced > 0 || r.failed > 0) {
-        console.log(`[DAILY-SCHEDULER] refreshed ${r.synced} gmdl daily-recommend playlists, errors: ${r.failed}`);
+  // Refresh every enabled source plugin that supports daily-recommend playlists
+  // and/or web-song rotation. Core iterates by *capability* — no hardcoded
+  // provider name.
+  for (const { manifest } of getEnabledSourcePlugins()) {
+    const caps = manifest.capabilities;
+    if (caps.includes("recommend")) {
+      try {
+        const r = await syncAllRecommendPlaylists(manifest.id, {});
+        if (r.synced > 0 || r.failed > 0) {
+          console.log(`[DAILY-SCHEDULER] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
+        }
+      } catch (e: any) {
+        console.error(`[DAILY-SCHEDULER] ${manifest.id} recommend sync error:`, e.message || e);
       }
     }
-  } catch (e: any) {
-    console.error("[DAILY-SCHEDULER] gmdl recommend sync error:", e.message || e);
-  }
-  // Purge expired unreferenced web songs once per daily run, right after the
-  // recommend sync (so yesterday's dropped tracks get cleaned up with their
-  // covers). No-op unless the go-music-dl plugin enables rotation.
-  try {
-    const r = purgeExpiredWebSongs("go-music-dl");
-    if (r.purged > 0 || r.errors > 0) {
-      console.log(`[DAILY-SCHEDULER] web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
+    if (caps.includes("webRotation")) {
+      try {
+        const r = purgeExpiredWebSongs(manifest.id);
+        if (r.purged > 0 || r.errors > 0) {
+          console.log(`[DAILY-SCHEDULER] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
+        }
+      } catch (e: any) {
+        console.error(`[DAILY-SCHEDULER] ${manifest.id} web-song purge error:`, e.message || e);
+      }
     }
-  } catch (e: any) {
-    console.error("[DAILY-SCHEDULER] web-song purge error:", e.message || e);
   }
 }
 

@@ -386,25 +386,9 @@ export function initDatabase() {
     try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
   }
 
-  // Built-in online source plugin: go-music-dl (aggregated online search/stream).
-  // Seeded disabled by default; admin enables it and sets the instance baseUrl.
-  const gmdl = sqlite.prepare("SELECT id FROM plugins WHERE name = ?").get("go-music-dl") as any;
-  if (!gmdl) {
-    const now = new Date().toISOString();
-    sqlite.prepare(
-      "INSERT INTO plugins (id, name, version, description, manifest, enabled, config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(
-      "go-music-dl",
-      "go-music-dl",
-      "1.0.0",
-      "通过局域网已部署的 go-music-dl 服务搜索全网音乐,并把结果作为在线歌曲保存入库",
-      JSON.stringify({ type: "source", provider: "go-music-dl", platforms: ["netease", "qq", "kugou", "bilibili", "kuwo", "migu", "soda", "fivesing", "jamendo", "joox", "apple", "qianqian"] }),
-      JSON.stringify({ baseUrl: "" }),
-      0,
-      now,
-      now,
-    );
-  }
+  // Built-in plugins (incl. the go-music-dl source plugin) are seeded from the
+  // unified catalog at boot via registerBuiltinPlugins() — see plugins/registry.ts.
+  // No hardcoded plugin names live here.
 
   // Insert default admin if no users exist
   const userCount = sqlite.prepare("SELECT COUNT(*) as count FROM users").get() as any;
