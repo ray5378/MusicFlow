@@ -4,7 +4,7 @@
 // gets them into the registry:
 //
 //   1. registerBuiltinPlugins()   — pure, in-memory, safe at module load
-//   2. seedBuiltinPluginRows()    — DB rows, deferred until the schema exists
+//   2. seedPluginRows()    — DB rows, deferred until the schema exists
 //                                   (wired through db's onDatabaseReady hook)
 //
 // This module sits *above* plugins/registry.ts on purpose: it imports the plugin
@@ -68,7 +68,7 @@ let registered = false;
  *  PURE: touches no database. This may run at *module load* time, which happens
  *  before `initDatabase()` in the entry file and in unit tests — so doing DB
  *  work here would hit "no such table: plugins". Row seeding is deferred to
- *  seedBuiltinPluginRows() via the db-ready hook. Idempotent. */
+ *  seedPluginRows() via the db-ready hook. Idempotent. */
 export function registerBuiltinPlugins(): void {
   if (registered) return;
   registered = true;
@@ -76,7 +76,7 @@ export function registerBuiltinPlugins(): void {
     registerPlugin(manifest, impl);
   }
   // Seed rows as soon as the schema is ready (immediately, if it already is).
-  onDatabaseReady(seedBuiltinPluginRows);
+  onDatabaseReady(seedPluginRows);
 }
 
 /** Default config object derived from a manifest's configSchema. */
@@ -95,7 +95,7 @@ function defaultConfigFor(manifest: PluginManifest): Record<string, any> {
  *  Manifest-driven: adding a built-in plugin needs no core change and no
  *  hardcoded plugin name. Idempotent — existing rows are left untouched so user
  *  config/enabled state survives restarts. */
-export function seedBuiltinPluginRows(): number {
+export function seedPluginRows(): number {
   const now = new Date().toISOString();
   let inserted = 0;
   const existing = new Set(

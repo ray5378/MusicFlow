@@ -16,7 +16,7 @@ function loadDotEnv() {
   } catch {}
 }
 
-function getDataDir(): string {
+export function getDataDir(): string {
   return process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), "data");
 }
 

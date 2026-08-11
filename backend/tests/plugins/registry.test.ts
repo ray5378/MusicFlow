@@ -5,7 +5,7 @@
 // from the plugins themselves (no URL if-chain left in the core).
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { initDatabase, sqlite } from "../../src/db/index.js";
-import { registerBuiltinPlugins, seedBuiltinPluginRows, BUILTIN_PLUGINS } from "../../src/plugins/builtins.js";
+import { registerBuiltinPlugins, seedPluginRows, BUILTIN_PLUGINS } from "../../src/plugins/builtins.js";
 import {
   listRegistered,
   getEnabledByCapability,
@@ -46,7 +46,7 @@ beforeAll(() => {
   for (const { manifest } of BUILTIN_PLUGINS) {
     sqlite.prepare("DELETE FROM plugins WHERE name = ?").run(manifest.id);
   }
-  seededCount = seedBuiltinPluginRows();
+  seededCount = seedPluginRows();
 });
 
 afterEach(() => {
@@ -90,7 +90,7 @@ describe("plugin registry", () => {
 
   it("re-seeding never duplicates or resets existing rows", () => {
     setEnabled("qq-playlist-importer", 0);
-    const inserted = seedBuiltinPluginRows();
+    const inserted = seedPluginRows();
     expect(inserted).toBe(0);
     expect(enabledFlag("qq-playlist-importer")).toBe(0); // user state survives
     const rows = sqlite.prepare("SELECT COUNT(*) AS n FROM plugins WHERE name = ?")

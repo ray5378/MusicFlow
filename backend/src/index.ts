@@ -21,6 +21,7 @@ import { syncAllRecommendPlaylists } from "./services/source/online/recommendImp
 import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
 import { getEnabledSourcePlugins, getEnabledByCapability } from "./plugins/registry.js";
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
+import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
 import { db } from "./db/index.js";
@@ -207,6 +208,10 @@ app.get("*", async (c, next) => {
 registerBuiltinPlugins();
 initDatabase();
 backfillGenres();
+
+// Phase 3: scan data/plugins for drop-in plugins, validate + register them, and
+// seed their rows (DB is already ready, so the re-seed only adds the new ids).
+await discoverExternalPlugins(APP_VERSION);
 
 // Retention cleanup for play history (play_history grows with every play).
 cleanupPlayHistory(getPlayHistoryRetentionDays());

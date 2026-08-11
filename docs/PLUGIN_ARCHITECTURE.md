@@ -170,7 +170,7 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 ## 6. 后续里程碑
 
 - **Phase 2（全量插件化）**：✅ 已完成（见 §7.2）。定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts` 的 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死；`localRecommend` 保留为内置模块（价值低，不强行插件化）。
-- **Phase 3（外置插件）**：⏳ 待实现。boot 扫描 `data/plugins/<id>/index.js` 动态 `import`，加 manifest 校验 + 路径白名单 + `minAppVersion` 校验；出插件开发文档 `PLUGIN_DEV.md`。
+- **Phase 3（外置插件）**：✅ 已完成（见 §7.3）。boot 扫描 `data/plugins/<id>/index.js` 动态 `import`（`plugins/discovery.ts`），加 manifest 校验 + 路径白名单（`safeResolve` 防穿越）+ `minAppVersion` 校验 + id 冲突保护；开发者文档见 `docs/PLUGIN_DEV.md`，参考实现见 `examples/plugins/hello-importer/index.js`。
 
 ---
 
@@ -220,6 +220,21 @@ Phase 0 + 1 全部完成。全库检索 `"go-music-dl"` 后残留位置及定性
 - [x] **T21** 构建验证：后端 `tsc --noEmit` 通过、前端 `vue-tsc --noEmit` 通过、测试 `87 passed (87)`（9 个测试文件）
 
 **Phase 2 收口后残留 `go-music-dl` 字符串审计**：仅剩 `services/source/online/goMusicDl.ts` 插件自身实现与 manifest `id`（合理）；其余核心/前端均已零硬编码，可被任意同契约 source/importer 插件替换。
+
+### 7.3 Phase 3（外置插件目录发现）
+
+> 目标：让社区/高级用户把插件丢进 `data/plugins/<id>/index.js` 即被加载，核心零改动；并加足安全边界。
+
+- [x] **T22** 新增 `plugins/discovery.ts`：`discoverExternalPlugins(appVersion, rootDir?)` 扫描 `data/plugins`，对每个子目录 `await import()` 其 `index.js`
+- [x] **T23** Manifest 校验 `validateManifest()`（纯函数，可单测）：`id` 正则 / `type` 合法 / `capabilities` 非空且均合法 / `configSchema` 为数组；任一不过则跳过
+- [x] **T24** 路径白名单 `safeResolve()`：仅允许 `<root>/<id>/index.js`，`../` 穿越返回 `null`（已单测）
+- [x] **T25** `minAppVersion` 校验 `compareVersion()` / `isAppVersionCompatible()`：`dev` 构建放行，否则要求 `appVersion >= minAppVersion`（已单测）
+- [x] **T26** id 冲突保护：已注册（内置/先发现）id 胜出，重复者跳过，避免外置插件遮蔽内置
+- [x] **T27** 引导入启动序列：`index.ts` 在 `initDatabase()` 后 `await discoverExternalPlugins(APP_VERSION)`，注册后重播 `seedPluginRows()` 为外置插件建 `plugins` 行（DB 已 ready，幂等只补新 id）
+- [x] **T28** `seedBuiltinPluginRows` 重命名为 `seedPluginRows`（现播种所有已注册插件，含外置）；导出 `getDataDir()` 供 discovery 复用
+- [x] **T29** 外置插件加载失败（语法错误/坏路径）仅 `console.warn` 跳过，绝不中断启动
+- [x] **T30** 参考实现 `examples/plugins/hello-importer/index.js` + 开发者文档 `docs/PLUGIN_DEV.md`（manifest 字段表、能力↔方法对照、安全边界、安装/启用流程、FAQ）
+- [x] **T31** 测试 `tests/plugins/discovery.test.ts`：validateManifest / compareVersion / isAppVersionCompatible / safeResolve / discoverExternalPlugins（有效加载、跳过非法/版本不符/冲突/非目录）；全量 `100 passed (10 文件)`
 
 ---
 
