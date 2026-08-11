@@ -204,6 +204,9 @@ export async function syncAllEnabledPlaylists(opts: RebuildOptions = {}): Promis
   let synced = 0;
   for (const pl of enabled) {
     if (syncLocks.has(pl.id)) continue;
+    // gmdl 每日推荐歌单由每日推荐同步任务(syncAllRecommendPlaylists)管理,
+    // 不走通用 http 同步(importPlaylistFromUrl 不支持 gmdl:// URL)。
+    if (pl.sourceUrl?.startsWith("gmdl://")) continue;
     try {
       results.push(await syncPlaylist(pl.id, opts));
       synced++;

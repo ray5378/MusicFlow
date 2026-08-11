@@ -93,6 +93,7 @@ export const playlists = sqliteTable("playlists", {
   songCount: integer("song_count").default(0),
   duration: integer("duration").default(0),
   syncEnabled: integer("sync_enabled").default(0),
+  favorite: integer("favorite").default(0), // 用户收藏标记;平台歌单收藏后脱离每日推荐轮换并保留每天同步
   sourceUrl: text("source_url"),
   sourcePlatform: text("source_platform"),
   externalId: text("external_id"),

@@ -255,6 +255,8 @@ export async function syncAllRecommendPlaylists(
     [...importedKeys].filter((k) => k.source === source).map((k) => k.id),
   );
   for (const pl of old) {
+    // 用户收藏的歌单不参与轮换删除:内容每天仍随同步更新,但不会被清理。
+    if (pl.favorite) continue;
     const src = pl.sourcePlatform || "";
     if (emptyChannels.has(src)) continue; // couldn't refresh this channel → keep old
     const current = importedForChannel(src);

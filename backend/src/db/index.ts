@@ -370,6 +370,10 @@ export function initDatabase() {
   try {
     sqlite.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0");
   } catch {}
+  // Migration: add favorite column to playlists table (older DBs) — 收藏歌单标记
+  try {
+    sqlite.exec("ALTER TABLE playlists ADD COLUMN favorite INTEGER DEFAULT 0");
+  } catch {}
   // Online-song columns (built-in source plugins: go-music-dl etc.)
   for (const col of [
     "type TEXT DEFAULT 'local'",

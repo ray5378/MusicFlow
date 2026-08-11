@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres, deviceQueues } from "../../db/schema.js";
-import { eq, like, inArray, or, and, sql, desc, isNotNull, count } from "drizzle-orm";
+import { eq, like, inArray, or, and, sql, desc, isNotNull, isNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import md5 from "md5";
@@ -948,22 +948,53 @@ apiRoutes.post("/v1/playlists/:id/convert-to-local", async (c) => {
   return c.json({ success: true });
 });
 
+// 收藏 / 取消收藏歌单。Body: { favorite: boolean }。
+// 收藏平台歌单(sourceUrl 非空):保留来源信息供每天自动同步,置 favorite + syncEnabled=1
+// (每天自动同步默认打开),并脱离每日推荐轮换(不会被轮换删除)。
+// 取消收藏平台歌单:仅清标记,恢复每日推荐轮换身份(syncAll 重新管理)。
+apiRoutes.post("/v1/playlists/:id/favorite", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  const body = await c.req.json().catch(() => ({}));
+  const favorite = body.favorite === true;
+  const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
+  if (!playlist) return c.json({ error: "歌单不存在" }, 404);
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权修改该歌单" }, 403);
+
+  const now = new Date().toISOString();
+  if (favorite) {
+    const isPlatform = !!playlist.sourceUrl;
+    db.update(playlists).set({
+      favorite: 1,
+      // 平台歌单收藏后每天自动同步(默认打开);本地歌单保持原 syncEnabled 不变。
+      syncEnabled: isPlatform ? 1 : playlist.syncEnabled || 0,
+      updatedAt: now,
+    }).where(eq(playlists.id, id)).run();
+  } else {
+    db.update(playlists).set({ favorite: 0, updatedAt: now }).where(eq(playlists.id, id)).run();
+  }
+  return c.json({ success: true, favorite });
+});
+
 // ==================== Playlists (paginated) ====================
 apiRoutes.get("/v1/playlists", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
   const platform = (c.req.query("platform") || "").trim();
+  const localOnly = (c.req.query("local") || "").trim() === "1";
+  const favOnly = (c.req.query("favorite") || "").trim() === "1";
   const user = c.get("user");
-  // Push the ownership/visibility filter + name search + platform filter to SQL
-  // (no behavioural change: admin still sees all, others see their own + public).
-  // and() skips undefined conditions, so any subset works.
+  // Push the ownership/visibility filter + name search + platform/local/favorite
+  // filters to SQL. and() skips undefined conditions, so any subset works.
   const where = and(
     user?.isAdmin
       ? undefined
       : or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1)),
     query ? like(playlists.name, `%${query}%`) : undefined,
     platform ? eq(playlists.sourcePlatform, platform) : undefined,
+    localOnly ? isNull(playlists.sourceUrl) : undefined,
+    favOnly ? eq(playlists.favorite, 1) : undefined,
   );
   // Daily-recommend-first ordering (今日推荐 > others) expressed as a
   // CASE, with recency as the secondary sort. Pushed to SQL together with
@@ -986,7 +1017,7 @@ apiRoutes.get("/v1/playlists", (c) => {
     songCount: p.songCount || 0, duration: p.duration || 0,
     // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
     coverArt: `pl-${p.id}`, sourcePlatform: p.sourcePlatform || "",
-    isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled,
+    isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, favorite: !!p.favorite,
     isDaily: isDailyRecommendPlaylist(p),
     created: p.createdAt, changed: p.updatedAt,
   }));

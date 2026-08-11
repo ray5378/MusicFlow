@@ -5,8 +5,8 @@
         <MfIcon name="Heart" :filled="true" :size="64" class="fav-heart" />
       </div>
       <div class="fav-meta">
-        <div class="label">我喜欢的音乐</div>
-        <h1>我喜欢的音乐</h1>
+        <div class="label">我喜欢</div>
+        <h1>我喜欢</h1>
         <div class="info">{{ songs.length }}首 · 喜欢的音乐都在这里</div>
         <div class="actions">
           <el-button type="primary" @click="playAll" :disabled="songs.length === 0">播放全部</el-button>

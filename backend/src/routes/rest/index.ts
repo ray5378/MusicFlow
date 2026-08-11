@@ -560,7 +560,7 @@ restRoutes.get("/getPlaylists", (c) => {
   const size = parseInt(getParam(c, "size") || "0", 10) || 0;
   const base = db.select().from(playlists).where(whereAll).orderBy(dailyOrder, desc(recency));
   const page = size > 0 ? base.limit(size).offset(offset).all() : base.all();
-  return c.json(ok({ playlists: { total, playlist: page.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, sourcePlatform: p.sourcePlatform || "" })) } }));
+  return c.json(ok({ playlists: { total, playlist: page.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, favorite: !!p.favorite, sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
 restRoutes.get("/getPlaylist", (c) => {

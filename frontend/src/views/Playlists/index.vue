@@ -4,15 +4,11 @@
       <h2>歌单</h2>
       <el-input v-model="searchQuery" placeholder="搜索歌单..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       <div class="header-actions">
-        <el-dropdown trigger="click" @command="onPlatformCommand">
-          <el-button><MfIcon name="Library" />平台歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
+        <el-dropdown trigger="click" @command="onFilterCommand">
+          <el-button><MfIcon name="Library" />筛选歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item :command="''">全部歌单</el-dropdown-item>
-              <el-dropdown-item command="netease">网易云</el-dropdown-item>
-              <el-dropdown-item command="qq">QQ音乐</el-dropdown-item>
-              <el-dropdown-item command="kugou">酷狗</el-dropdown-item>
-              <el-dropdown-item command="kuwo">酷我</el-dropdown-item>
+              <el-dropdown-item v-for="f in FILTERS" :key="f.key" :command="f.key">{{ f.label }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -30,9 +26,9 @@
         </el-popover>
       </div>
     </div>
-    <div v-if="activePlatform" class="platform-filter-bar">
-      <span class="platform-filter-label"><MfIcon name="Library" />平台筛选：{{ platformName(activePlatform) }}</span>
-      <el-button size="small" text @click="clearPlatform"><MfIcon name="X" />清除</el-button>
+    <div v-if="activeFilter" class="platform-filter-bar">
+      <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
+      <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
     <div class="playlist-grid" v-loading="loading">
       <!-- Favorites special playlist -->
@@ -81,7 +77,10 @@
             <el-tag v-if="pl.sourcePlatform" size="small" style="margin-left: 4px">{{ pl.sourcePlatform === 'qq' ? 'QQ' : pl.sourcePlatform === 'netease' ? '网易云' : pl.sourcePlatform === 'kugou' ? '酷狗' : pl.sourcePlatform === 'kuwo' ? '酷我' : '' }}</el-tag>
             <el-tag v-if="pl.public" size="small" type="success" style="margin-left: 4px">公开</el-tag>
           </div>
-          <div class="playlist-meta">{{ pl.songCount }}首 · {{ formatDuration(pl.duration) }}</div>
+          <div class="playlist-meta">
+            <span>{{ pl.songCount }}首 · {{ formatDuration(pl.duration) }}</span>
+            <MfIcon v-if="pl.favorite" name="Heart" :filled="true" :size="13" class="pl-fav-heart" />
+          </div>
         </div>
         <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleCardCommand(cmd, pl)">
           <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
@@ -92,6 +91,9 @@
               <el-dropdown-item v-if="pl.isDaily" command="convertLocal"><MfIcon name="Pin" />转成本地永久歌单</el-dropdown-item>
               <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
               <el-dropdown-item command="export"><MfIcon name="Download" />导出</el-dropdown-item>
+              <el-dropdown-item command="favorite">
+                <MfIcon name="Heart" :filled="pl.favorite" :size="14" />{{ pl.favorite ? '取消收藏' : '收藏歌单' }}
+              </el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
                 <MfIcon name="Wand2" />{{ pl._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
               </el-dropdown-item>
@@ -168,7 +170,7 @@ import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin } from "lucide-vue-next";
+import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin, Heart } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
@@ -198,6 +200,7 @@ function cardActions(pl: any): MenuAction[] {
   acts.push({ divider: true });
   acts.push({ label: "重命名", icon: Pencil, onClick: () => openRename(pl) });
   acts.push({ label: "导出歌单", icon: Download, onClick: () => exportPlaylist(pl) });
+  acts.push({ label: pl.favorite ? "取消收藏" : "收藏歌单", icon: Heart, onClick: () => toggleFavorite(pl) });
   acts.push({
     label: pl._inPool ? "移出每日推荐池" : "加入每日推荐池",
     icon: Wand2,
@@ -229,16 +232,26 @@ const pageSize = ref(parseInt(localStorage.getItem("playlistsPageSize") || "20")
 if (![15, 20, 50, 100].includes(pageSize.value)) pageSize.value = 20;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showManageMenu = ref(false);
-const activePlatform = ref(""); // "" = 全部歌单
+// 歌单筛选:空=全部 | local=本地歌单 | favorite=收藏的歌单 | 平台值(netease/qq/kugou/kuwo)
+const FILTERS = [
+  { key: "", label: "全部歌单" },
+  { key: "local", label: "本地歌单" },
+  { key: "favorite", label: "收藏的歌单" },
+  { key: "netease", label: "网易云" },
+  { key: "qq", label: "QQ音乐" },
+  { key: "kugou", label: "酷狗" },
+  { key: "kuwo", label: "酷我" },
+];
 const PLATFORM_NAMES: Record<string, string> = { netease: "网易云", qq: "QQ音乐", kugou: "酷狗", kuwo: "酷我" };
-function platformName(p: string) { return PLATFORM_NAMES[p] || p; }
-function onPlatformCommand(platform: string) {
-  activePlatform.value = platform;
+const activeFilter = ref("");
+function filterName(key: string) { return FILTERS.find(f => f.key === key)?.label || PLATFORM_NAMES[key] || key || "全部"; }
+function onFilterCommand(key: string) {
+  activeFilter.value = key;
   currentPage.value = 1;
   loadPlaylists();
 }
-function clearPlatform() {
-  activePlatform.value = "";
+function clearFilter() {
+  activeFilter.value = "";
   currentPage.value = 1;
   loadPlaylists();
 }
@@ -305,7 +318,9 @@ async function loadPlaylists() {
         page: currentPage.value,
         pageSize: pageSize.value,
         query: searchQuery.value,
-        platform: activePlatform.value || undefined,
+        ...(activeFilter.value === "local" ? { local: "1" } : {}),
+        ...(activeFilter.value === "favorite" ? { favorite: "1" } : {}),
+        ...(activeFilter.value && activeFilter.value !== "local" && activeFilter.value !== "favorite" ? { platform: activeFilter.value } : {}),
       },
     });
     playlists.value = res.data.items || [];
@@ -510,8 +525,28 @@ function handleCardCommand(cmd: string, pl: any) {
     case "convertLocal": convertToLocal(pl); break;
     case "rename": openRename(pl); break;
     case "export": exportPlaylist(pl); break;
+    case "favorite": toggleFavorite(pl); break;
     case "addToDaily": togglePlaylistPool(pl); break;
     case "delete": deletePlaylist(pl); break;
+  }
+}
+
+// 收藏 / 取消收藏歌单。平台歌单收藏后转本地并开启每天自动同步(后端处理)。
+async function toggleFavorite(pl: any) {
+  try {
+    const res = await api.post(`/rest/api/v1/playlists/${pl.id}/favorite`, { favorite: !pl.favorite });
+    if (res.data.success) {
+      const nowFav = res.data.favorite === true;
+      pl.favorite = nowFav;
+      if (nowFav) {
+        ElMessage.success(pl.isImported ? `已收藏「${pl.name}」,已转本地并开启每天自动同步` : `已收藏「${pl.name}」`);
+      } else {
+        ElMessage.success(`已取消收藏「${pl.name}」`);
+      }
+      loadPlaylists();
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
   }
 }
 
@@ -651,7 +686,9 @@ onMounted(() => { loadPlaylists(); detectDailySource(); });
     margin-top: -40px;
     padding-top: 48px;
     .playlist-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fnos-text-primary); transition: color 0.18s ease; }
-    .playlist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; }
+    .playlist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; display: flex; align-items: center; justify-content: space-between; gap: 4px;
+      .pl-fav-heart { color: var(--fnos-red); flex-shrink: 0; }
+    }
   }
   .playlist-info:hover .playlist-name { color: var(--fnos-red); }
   .playlist-menu { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 0.2s; z-index: 8; }
