@@ -827,10 +827,17 @@ howl.play();
 
   // ==================== Peer management ====================
 
+  // 离线 DLNA 设备 / 成员全离线的群组不显示;local(本机)恒显示。
+  // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
+  function filterVisiblePeers(list: any[]): any[] {
+    return (list || []).filter((p) =>
+      p.available || (p.kind !== "dlna" && p.kind !== "group"));
+  }
+
   async function refreshPeers(): Promise<void> {
     try {
       const res = await api.get("/rest/api/v1/peers");
-      peers.value = res.data?.peers || [];
+      peers.value = filterVisiblePeers(res.data?.peers || []);
       if (!peers.value.find(p => p.peerId === localPeerId.value)) {
         peers.value.unshift({
           peerId: localPeerId.value,
@@ -952,19 +959,31 @@ howl.play();
       try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
         case "peer_snapshot":
-          peers.value = msg.peers || [];
+          peers.value = filterVisiblePeers(msg.peers || []);
           if (!peers.value.find(p => p.peerId === localPeerId.value)) {
             peers.value.unshift({ peerId: localPeerId.value, kind: "local", name: "本机", available: true, lastActiveAt: Date.now() });
           }
           break;
         case "peer_registered":
-        case "peer_available":
-        case "peer_unavailable": {
+        case "peer_available": {
           const p = msg.peer;
           if (!p) break;
           const idx = peers.value.findIndex(x => x.peerId === p.peerId);
           if (idx >= 0) peers.value[idx] = { ...peers.value[idx], ...p };
-          else peers.value.push(p);
+          else if (p.available !== false) peers.value.push(p);
+          break;
+        }
+        case "peer_unavailable": {
+          const p = msg.peer;
+          if (!p || p.kind === "local") break; // 本机恒在列表
+          // 离线设备从列表移除(不再置灰显示)。
+          peers.value = peers.value.filter(x => x.peerId !== p.peerId);
+          // 当前播放设备离线 → 自动切换到下一个可用设备;无可用则回本机。
+          if (currentPeerId.value === p.peerId) {
+            const next = peers.value.find(x => x.available && x.peerId !== localPeerId.value);
+            if (next) void switchPeer(next.peerId).catch(() => {});
+            else currentPeerId.value = localPeerId.value;
+          }
           break;
         }
         case "peer_queue_changed": {

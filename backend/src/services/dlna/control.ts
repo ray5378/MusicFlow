@@ -233,13 +233,14 @@ function runtimeOf(deviceId: string): DeviceRuntime {
 export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
   cachedDevices = await discoverDlnaDevices(timeoutMs);
   lastDiscovery = Date.now();
-  // Prune per-device runtime state for devices that no longer respond, so the
-  // in-memory `runtimes` map doesn't grow without bound on long-running servers.
-  if (runtimes.size > cachedDevices.length) {
-    const live = new Set(cachedDevices.map(d => d.id));
-    for (const [deviceId] of runtimes) {
-      if (!live.has(deviceId)) runtimes.delete(deviceId);
-    }
+  // Prune per-device runtime state for devices that are no longer in the
+  // discovered list, so the in-memory `runtimes` map doesn't grow without
+  // bound on long-running servers. Unconditional id-based sweep (no size
+  // comparison): a device that went offline while another came online keeps
+  // the count equal but must still be evicted.
+  const live = new Set(cachedDevices.map(d => d.id));
+  for (const [deviceId] of runtimes) {
+    if (!live.has(deviceId)) runtimes.delete(deviceId);
   }
   // Notify subscribers (WS layer) that the device list may have changed.
   getEventManager().emitDeviceListChanged(cachedDevices.length);
@@ -275,10 +276,11 @@ export function wireSsdpRealtime(): void {
         // 只在「新设备」或「离线→上线」时广播,避免周期性通告反复刷屏。
         if (idx < 0 || !wasAvailable) getEventManager().emitDeviceListChanged(cachedDevices.length);
       } else {
-        // byebye:立即标记离线(USN 首段即 UDN,与设备 id 一致)。
-        const d = cachedDevices.find((x) => x.id === e.udn);
-        if (d && d.available) {
-          d.available = false;
+        // byebye:立即从缓存移除(设备明确下线,不等 5min M-SEARCH 刷新),
+        // 并广播让 peer 列表与 WS 推送实时收敛。USN 首段即 UDN,与设备 id 一致。
+        const idx = cachedDevices.findIndex((x) => x.id === e.udn);
+        if (idx >= 0) {
+          cachedDevices.splice(idx, 1);
           getEventManager().emitDeviceListChanged(cachedDevices.length);
         }
       }

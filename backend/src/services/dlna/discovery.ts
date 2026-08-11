@@ -152,12 +152,18 @@ function startListener() {
 }
 
 // Merge actively discovered devices (from M-SEARCH responses) with passively
-// announced ones (from the NOTIFY listener) and refresh lastSeen.
+// announced ones (from the NOTIFY listener) and refresh lastSeen. Also prune
+// announced entries not heard from within the staleness window — a device that
+// powered off without sending byebye must not linger in the registry forever.
 async function mergeAndFetch(searchLocations: string[]): Promise<DlnaDevice[]> {
   const allLocations = new Set<string>(searchLocations);
   const now = Date.now();
-  for (const [, info] of announced) {
-    if (now - info.lastSeen < STALENESS_MS) allLocations.add(info.location);
+  for (const [usn, info] of announced) {
+    if (now - info.lastSeen < STALENESS_MS) {
+      allLocations.add(info.location);
+    } else {
+      announced.delete(usn);
+    }
   }
   const devices = await Promise.all(Array.from(allLocations).map(fetchDescription));
   // Deduplicate by id (a device may appear via both M-SEARCH and NOTIFY).
@@ -224,7 +230,8 @@ export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
 }
 
 // Mark a device unavailable if it hasn't been heard from in a while. Called
-// by the background poller to keep the cached list fresh.
+// by the device-list endpoint to keep the cached list fresh (devices that
+// went quiet without a byebye are still listed but flagged offline).
 export function markStaleDevices(devices: DlnaDevice[]): DlnaDevice[] {
   const now = Date.now();
   for (const d of devices) {

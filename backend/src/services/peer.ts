@@ -53,6 +53,9 @@ export interface PeerWithQueue extends Peer {
 
 const INACTIVE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
 const CLEANUP_INTERVAL_MS = 60 * 1000;       // 1 min
+// DLNA peer 保留期:设备离线超过 30 天自动移除(下次上线重新注册),防止
+// 长时间运行后 peers 表里堆满「曾经在线但早已消失」的设备条目。
+const DLNA_PEER_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
 
 class PeerManager extends EventEmitter {
   private peers = new Map<string, Peer>();
@@ -445,6 +448,11 @@ class PeerManager extends EventEmitter {
             getQueueManager().clear(p.deviceId!);
             this.emit("peer_queue_cleared", p.peerId);
             console.log(`[peer] dlna peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
+          }
+          // 离线超过保留期(30 天)→ 彻底移除条目,下次上线重新注册。
+          if (idleMs > DLNA_PEER_RETENTION_MS) {
+            this.peers.delete(p.peerId);
+            console.log(`[peer] dlna peer ${p.peerId} offline >30d, entry removed`);
           }
         }
       }
