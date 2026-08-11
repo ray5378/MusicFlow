@@ -102,6 +102,16 @@ export async function importRecommendPlaylist(
   const imp = await importOnlineSongs(providerId, list, { userId: opts?.userId });
   const displayName = truncateName(info.name);
 
+  // 平台歌单音乐为 0(空歌单)→ 自动删除本地对应歌单,不保留空占位。
+  if (imp.songs.length === 0) {
+    const existing = findRecommendPlaylist(info.id);
+    if (existing) {
+      removePlaylistRows(existing.id);
+      console.log(`[recommend-sync] 歌单「${displayName}」音乐为 0,已自动删除`);
+    }
+    return { success: false, created: false, name: displayName, platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: imp.failed };
+  }
+
   const existing = findRecommendPlaylist(info.id);
   if (existing) {
     replacePlaylistSongs(existing.id, imp.songs);
@@ -216,6 +226,9 @@ export async function syncAllRecommendPlaylists(
           created++;
           importedKeys.add({ source: ch.source, id: String(pl.id) });
           out.push({ id: r.playlistId, name: r.name, trackCount: r.trackCount });
+        } else if (r.trackCount === 0) {
+          // 空歌单(音乐为 0)已在 importRecommendPlaylist 中自动删除,不算失败。
+          console.log(`[recommend-sync] [${ch.source}] ${pl.name}: 空歌单,已自动删除`);
         } else {
           errors.push(`[${ch.source}] ${pl.name}: 导入失败`);
         }
