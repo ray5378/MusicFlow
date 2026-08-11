@@ -1,0 +1,90 @@
+// ==================== Online Source Provider Interface ====================
+//
+// A "source provider" bridges MusicFlow to an external online-music aggregator
+// (like the user-deployed go-music-dl web service). Search results are stored
+// as DB songs with type="web" and streams are served by proxying the provider's
+// /music/download stream URL from /rest/stream (see serveWebSongStream).
+//
+// Providers are registered here and surfaced as built-in "source" plugins in
+// the admin Plugins page. Config lives in the plugin's `config` JSON.
+
+export interface OnlineSongResult {
+  // Remote identity (used to build the stream URL)
+  id: string;
+  source: string; // platform slug: netease / qq / kugou / bilibili ...
+  // Display metadata (mirrors the DB `songs` columns)
+  name: string;
+  artist: string;
+  album: string;
+  duration: number; // seconds
+  cover: string; // remote cover URL
+  extra?: Record<string, string> | null;
+  // Optional details surfaced by the aggregator (may be empty)
+  sortSize?: string;
+  sortBitrate?: string;
+}
+
+export interface OnlineSearchParams {
+  query: string;
+  sources?: string[];
+}
+
+export interface OnlineSearchResult {
+  songs: OnlineSongResult[];
+}
+
+/** A playlist recommended by a source channel on go-music-dl's /music/recommend. */
+export interface OnlinePlaylistInfo {
+  id: string;          // platform playlist id
+  name: string;
+  source: string;      // platform slug: netease / qq / kugou / kuwo
+  creator: string;
+  cover: string;       // remote cover URL
+  trackCount: string;  // "589" (as displayed)
+  link: string;        // redirect /music/playlist?source=..&id=..  (relative)
+  imported?: boolean;  // whether this playlist is already imported locally
+}
+
+/** A recommended channel on the recommend page (one tab = one platform). */
+export interface OnlineRecommendChannel {
+  source: string;
+  name: string; // display name e.g. "网易云音乐"
+  count: number;
+  playlists: OnlinePlaylistInfo[];
+}
+
+export interface OnlineRecommendResult {
+  channels: OnlineRecommendChannel[];
+}
+
+/** A configured, instantiated online source provider. */
+export interface OnlineProvider {
+  readonly id: string;
+  readonly name: string;
+  /** Test connectivity to the configured instance. */
+  test(config: Record<string, any>): Promise<{ success: boolean; message?: string }>;
+  /** Search the aggregated online catalog. */
+  search(config: Record<string, any>, params: OnlineSearchParams): Promise<OnlineSearchResult>;
+  /** Fetch the daily-recommend playlist channels (/music/recommend). */
+  recommend?(config: Record<string, any>): Promise<OnlineRecommendResult>;
+  /** Fetch a single remote playlist's songs (/music/playlist?source=..id=..). */
+  playlistSongs?(config: Record<string, any>, source: string, id: string): Promise<{ songs: OnlineSongResult[]; name: string }>;
+  /** Build the audio proxy URL for a song (go-music-dl /download?stream=1). */
+  streamUrl(config: Record<string, any>, song: OnlineSongResult, range?: string): string;
+}
+
+// ==================== Registry ====================
+
+const providers = new Map<string, OnlineProvider>();
+
+export function registerOnlineProvider(p: OnlineProvider) {
+  providers.set(p.id, p);
+}
+
+export function getOnlineProvider(id: string): OnlineProvider | undefined {
+  return providers.get(id);
+}
+
+export function listOnlineProviders(): OnlineProvider[] {
+  return [...providers.values()];
+}

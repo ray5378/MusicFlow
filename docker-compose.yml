@@ -1,0 +1,31 @@
+services:
+  musicflow:
+    image: docker.io/ray5378/musicflow:latest
+    container_name: musicflow
+    restart: unless-stopped
+    # network_mode: host is REQUIRED for DLNA discovery (SSDP multicast).
+    # Without it, the container cannot send/receive UDP multicast to the LAN.
+    # Note: host networking is supported on Linux only. On Docker Desktop
+    # (macOS/Windows) DLNA discovery will not work — run natively instead.
+    network_mode: host
+    environment:
+      # Optional: auto-generated and persisted in ./data/.jwt-secret on first
+      # start when left empty (stable across restarts). Set it explicitly to
+      # keep the same secret when reusing an existing data dir.
+      - JWT_SECRET=${JWT_SECRET:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
+      - TZ=Asia/Shanghai
+      - UV_USE_IO_URING=0
+      # Optional: override the base URL DLNA renderers use to pull the stream.
+      # Auto-detected from the request Host header by default. Set this if
+      # the auto-detected IP is wrong (e.g. behind a reverse proxy).
+      # - DLNA_BASE_URL=http://192.168.1.100:46400
+    volumes:
+      - ./data:/app/backend/data
+      # Optional: separate directory for covers of online tracks/playlists
+      # fetched by the music-dl plugin (QQ / NetEase / Kugou / ...).
+      # The container path is fixed at data/musicdl-covers; the host path is
+      # yours to choose (e.g. a large disk). Leave this line commented out to
+      # use the default, i.e. keep those covers inside the ./data volume above.
+      # - ./musicdl-covers:/app/backend/data/musicdl-covers

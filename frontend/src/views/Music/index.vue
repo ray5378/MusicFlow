@@ -1,0 +1,303 @@
+<template>
+  <div class="songs-page">
+    <!-- ===== 页头 ===== -->
+    <div class="page-header">
+      <div class="page-title">
+        <h2>{{ recentMode ? "最近添加" : "音乐" }}</h2>
+        <span class="song-count">{{ total }} 首</span>
+      </div>
+      <div class="header-actions">
+        <el-input
+          v-model="searchQuery"
+          placeholder="搜索音乐..."
+          prefix-icon="Search"
+          clearable
+          class="search-input"
+          @input="onSearchInput"
+          @clear="onSearchClear"
+        />
+        <el-button type="primary" class="play-all-btn" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />
+          播放全部
+        </el-button>
+      </div>
+    </div>
+
+    <!-- ===== 彩色磁贴（飞牛首页风格） ===== -->
+    <div class="hero-tiles">
+      <div class="tile tile-added" @click="goRecent">
+        <div class="tile-glow"></div>
+        <MfIcon name="Plus" class="tile-icon" :size="34"  />
+        <span class="tile-label">最近添加</span>
+      </div>
+      <div class="tile tile-recent" @click="$router.push('/history')">
+        <div class="tile-glow"></div>
+        <MfIcon name="Clock" class="tile-icon" :size="34"  />
+        <span class="tile-label">最近播放</span>
+      </div>
+      <div class="tile tile-fav" @click="$router.push('/favorites')">
+        <div class="tile-glow"></div>
+        <MfIcon name="Heart" :filled="true" class="tile-icon" :size="34" />
+        <span class="tile-label">我喜欢的音乐</span>
+      </div>
+      <div class="tile tile-mix" @click="$router.push('/genres')">
+        <div class="tile-glow"></div>
+        <MfIcon name="Library" class="tile-icon" :size="34"  />
+        <span class="tile-label">风格</span>
+      </div>
+    </div>
+
+    <!-- ===== 歌曲列表 ===== -->
+    <SongTable :songs="songs" :offset="(currentPage - 1) * pageSize" :loading="loading" @play="playSong" />
+
+    <div class="pagination-bar" v-if="total > 0">
+      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="songsPageSize" @change="onPageChange" />
+    </div>
+
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { usePlayerStore, Song } from "@/stores/player";
+import { useItemActions } from "@/composables/useItemActions";
+import api from "@/api";
+import PagePagination from "@/components/PagePagination.vue";
+import SongTable from "@/components/SongTable.vue";
+
+const playerStore = usePlayerStore();
+const route = useRoute();
+const router = useRouter();
+const { menuGuard } = useItemActions();
+const songs = ref<Song[]>([]);
+const loading = ref(false);
+const searchQuery = ref("");
+const currentPage = ref(1);
+const total = ref(0);
+const pageSize = ref(parseInt(localStorage.getItem("songsPageSize") || "25"));
+if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
+
+// 最近添加模式：/songs?recent=1 → 展示最新入库的 500 首（后端 sort=recentAdded）
+const recentMode = computed(() => route.query.recent === "1");
+
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function loadSongs() {
+  loading.value = true;
+  try {
+    const res = await api.get(`/rest/api/v1/songs`, {
+      params: {
+        page: currentPage.value,
+        pageSize: pageSize.value,
+        query: searchQuery.value,
+        ...(recentMode.value ? { sort: "recentAdded" } : {}),
+      },
+    });
+    songs.value = res.data.items || [];
+    total.value = res.data.total || 0;
+  } catch { songs.value = []; total.value = 0; }
+  finally { loading.value = false; }
+}
+
+function goRecent() {
+  if (recentMode.value) return;
+  currentPage.value = 1;
+  searchQuery.value = "";
+  router.push({ path: "/songs", query: { recent: "1" } });
+}
+
+// recent 模式切换（进入/退出）时重置并重新加载
+watch(() => route.query.recent, () => {
+  currentPage.value = 1;
+  searchQuery.value = "";
+  loadSongs();
+});
+
+function onPageChange(page: number, size?: number) {
+  currentPage.value = page;
+  if (size) pageSize.value = size;
+  loadSongs();
+}
+
+function onSearchInput() {
+  // 搜索时退出最近添加模式，回到全部音乐
+  if (recentMode.value) { router.replace({ path: "/songs", query: {} }); return; }
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { currentPage.value = 1; loadSongs(); }, 300);
+}
+
+function onSearchClear() { currentPage.value = 1; loadSongs(); }
+
+function playSong(song: Song) {
+  if (menuGuard()) return;
+  playerStore.playSong(song);
+}
+function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
+
+onMounted(() => { loadSongs(); });
+</script>
+
+<style lang="scss" scoped>
+.songs-page {
+  padding: 32px 36px 130px;   /* 底部 130px 为悬浮播放条让位，避免分页被遮挡 */
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* ===== Hero tiles (FnOS home dashboard) ===== */
+.hero-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 36px;
+}
+.tile {
+  position: relative;
+  height: 160px;
+  border-radius: 16px;
+  overflow: hidden;
+  cursor: pointer;
+  display: flex; flex-direction: column; justify-content: space-between;
+  padding: 18px;
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  isolation: isolate;
+}
+.tile:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.tile:active { transform: translateY(-1px) scale(0.98); }
+.tile .tile-glow {
+  position: absolute;
+  inset: -40%;
+  pointer-events: none;
+  /* 去掉 filter:blur(40px) 与 transform 无限动画 —— 两者都会把元素永久提升为
+     合成层；华为等旧 Chromium 浏览器对嵌套 stacking context 的合成顺序有 bug，
+     会把这些合成层提升到 fixed 弹窗(z=3000)之上，造成卡片穿透弹窗的"闪烁"。
+     柔光效果用大半径 radial-gradient 的透明过渡近似，视觉几乎无差。 */
+  opacity: 0.55;
+  z-index: -1;
+}
+.tile .tile-icon {
+  align-self: flex-start;
+  color: rgba(255, 255, 255, 0.92);
+  /* backdrop-filter 同样提升合成层，改略不透明的纯色圆底即可（视觉几乎无差） */
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  padding: 8px;
+  width: 50px; height: 50px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.tile .tile-label {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+/* 混音：紫橙渐变 + 黑胶质感 */
+.tile-mix {
+  background:
+    radial-gradient(ellipse at 70% 50%, #1a1a1a 0%, #0a0a0a 40%, transparent 70%),
+    linear-gradient(135deg, #ff7a3d 0%, #c934e1 60%, #5b2bbf 100%);
+}
+.tile-mix .tile-glow {
+  background: radial-gradient(circle, rgba(255, 122, 61, 0.6), transparent 60%);
+}
+/* 收藏：橙红 + 心形 */
+.tile-fav {
+  background: linear-gradient(135deg, #ffb347 0%, #ff6b3d 35%, #f62c55 75%, #d11d4a 100%);
+}
+.tile-fav .tile-glow {
+  background: radial-gradient(circle, rgba(255, 107, 61, 0.7), transparent 60%);
+}
+/* 最近播放：绿 */
+.tile-recent {
+  background: linear-gradient(135deg, #6bab45 0%, #16a34a 45%, #0d8a6e 100%);
+}
+.tile-recent .tile-glow {
+  background: radial-gradient(circle, rgba(107, 171, 69, 0.7), transparent 60%);
+}
+/* 最近添加：白灰 */
+.tile-added {
+  background: linear-gradient(135deg, #f5f5f5 0%, #d8d8d8 45%, #a8a8a8 100%);
+  color: #2a2a2a;
+}
+.tile-added .tile-icon { color: #2a2a2a; background: rgba(0, 0, 0, 0.08); }
+.tile-added .tile-label { color: #2a2a2a; text-shadow: none; }
+.tile-added .tile-glow {
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.8), transparent 60%);
+}
+
+@media (max-width: 1100px) {
+  .hero-tiles { grid-template-columns: repeat(2, 1fr); }
+  .tile { height: 140px; }
+}
+@media (max-width: 768px) {
+  .hero-tiles { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .tile { height: 120px; padding: 14px; }
+  .tile .tile-icon { width: 42px; height: 42px; padding: 6px; }
+  .tile .tile-label { font-size: 14px; }
+}
+
+/* ===== Page header ===== */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 28px;
+  gap: 16px;
+  flex-wrap: wrap;
+  .page-title {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    h2 {
+      font-size: 32px;
+      font-weight: 700;
+      margin: 0;
+      letter-spacing: -0.4px;
+      color: var(--fnos-text-primary);
+    }
+    .song-count {
+      font-size: 14px;
+      color: var(--fnos-text-tertiary);
+      font-weight: 500;
+    }
+  }
+  .header-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    .search-input {
+      width: 320px;
+    }
+    .play-all-btn {
+      padding: 0 20px;
+      height: 38px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+  }
+}
+
+/* ===== Song list (SongTable component) ===== */
+
+.pagination-bar {
+  margin-top: 24px;
+  display: flex;
+  justify-content: center;
+}
+
+@media (max-width: 768px) {
+  .songs-page { padding: 20px 16px; }
+  .page-header {
+    flex-direction: column; align-items: flex-start; gap: 12px;
+    .page-title h2 { font-size: 24px; }
+    .header-actions { width: 100%; }
+    .header-actions .search-input { width: 100%; flex: 1; }
+    .header-actions .play-all-btn { flex-shrink: 0; }
+  }
+}
+</style>

@@ -1,0 +1,47 @@
+# dependencies
+node_modules/
+dist/
+
+# runtime data (DB, cover cache) - never commit
+backend/data/
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# secrets
+.env
+backend/.env
+
+# runtime logs
+logs/
+*.log
+buildlog.txt
+
+# local scratch / capture artifacts (not project source)
+.workbuddy/
+capture_*.cjs
+analyze_*.cjs
+analyze_*.py
+build_compare*.py
+replace_playerbar.py
+restructure_layout.py
+fnos_*.cjs
+mfos_*.cjs
+mfos_*.py
+compare/
+compare2/
+compare3/
+compare4/
+conv_check/
+conv_check2/
+fnos_all/
+fnos_capture/
+fnos_features/
+mfos_capture/
+mfos_features/
+mfos_v2/
+mfos_v3/
+mfos_v4/
+mfos_v5/
+player_check/

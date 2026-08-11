@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="MusicFlow - 自托管音乐库播放器" />
+    <meta name="theme-color" content="#1a1a2e" />
+    <title>MusicFlow</title>
+    <!-- 主字体 Montserrat：用非阻塞方式加载，避免 CSS @import 阻塞首屏解析。
+         preconnect 提前建链；stylesheet 以 media=print 异步加载、onload 切回 all；
+         <noscript> 兜底保证无 JS 时仍加载。字体内容（display=swap）不变，视觉一致。 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap"
+      />
+    </noscript>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
