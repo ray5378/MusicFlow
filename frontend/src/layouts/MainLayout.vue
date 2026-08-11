@@ -76,7 +76,7 @@
               :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
               @click="onControlsSwitchPeer(p.peerId)"
             >
-              <MfIcon :name="p.kind === 'group' ? 'box' : 'headphones'" class="controls-peer-icon" />
+              <MfIcon name="Speaker" class="controls-peer-icon" />
               <div class="controls-peer-info">
                 <div class="controls-peer-name">
                   {{ p.kind === 'local' ? '本机' : p.name }}
@@ -261,7 +261,7 @@
         >
 <template #reference>
               <el-button class="peer-switch-btn" size="small" data-tip="切换播放器">
-                <MfIcon name="headphones" class="peer-switch-icon"  />
+                <MfIcon name="Speaker" class="peer-switch-icon"  />
                 <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
               </el-button>
             </template>
@@ -275,7 +275,7 @@
                 :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
                 @click="onSwitchPeer(p.peerId)"
               >
-                <MfIcon :name="p.kind === 'group' ? 'box' : 'headphones'" class="psi-icon" />
+                <MfIcon name="Speaker" class="psi-icon" />
                 <div class="psi-info">
                   <div class="psi-name">
                     {{ p.kind === 'local' ? '本机' : p.name }}
@@ -1132,7 +1132,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
 /* ===== Player switcher button ===== */
 /* 与其他播放控件按钮一致：无边框透明，hover 淡白（去掉原矩形淡底色"框"） */
 .peer-switch-btn {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 10px; /* 图标与名字间隔与切换弹层(peer-switcher-item gap:10px)一致 */
   max-width: 160px; padding: 0 10px; height: 30px;
   border: none !important;
   background: transparent !important;
