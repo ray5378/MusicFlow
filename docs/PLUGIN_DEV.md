@@ -248,6 +248,8 @@ cp -r my-plugin backend/data/plugins/
 | `listenbrainz` | 1.1.0 | scrobbler | scrobbler | ListenBrainz 播放上报 |
 
 源码在 [ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)，发布前跑 `node scripts/check.mjs <id>`。
+插件目录结构、打包（`pack.sh`）、Release 资产上传与 `registry.json` 登记的**完整发布流程见该仓库的
+[README](https://github.com/ray5378/MusicFlow-plugins/blob/master/README.md)**；想贡献新插件也建议先读它。
 
 ---
 
