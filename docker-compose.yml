@@ -1,6 +1,6 @@
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow-v2:1.4.0
+    image: ghcr.io/ray5378/musicflow-v2:1.5.0
     container_name: musicflow
     restart: unless-stopped
     # network_mode: host is REQUIRED for DLNA discovery (SSDP multicast).

@@ -43,12 +43,12 @@ backend/src/
     peers.ts          # 同网段多实例发现(mDNS)
     ws/               # WS 推送服务端(/ws?token=)
     flows/            # 场景/自动化流
-    plugin/           # 内置插件实现(importer/recommender/sync/renderer 等)
+    plugin/           # 内置插件实现(importer/recommender/sync/renderer/artist 等)
     lyrics.ts / coverCache.ts / playlistCover.ts / scraper/   # 歌词/封面/歌手信息抓取
   plugins/            # 插件框架
     types.ts          # PluginManifest / 能力枚举
     registry.ts       # 插件注册表 + 按能力遍历(getEnabledByCapability)
-    builtins.ts       # 7 个内置插件(seedPluginRows 幂等落库)
+    builtins.ts       # 8 个内置插件(含 artist-info;seedPluginRows 幂等落库)
     discovery.ts      # 外置插件扫描 + 沙箱加载 + validateManifest + host.* env 构造
     sandbox.ts        # QuickJS 沙箱(host.* 全量桥接:http/storage/comm/songs/plugin/fs/command/net/ws/jsenv)
     host.ts           # 权限白名单 KNOWN_PERMISSIONS + 校验

@@ -254,7 +254,7 @@ cp -r my-plugin backend/data/plugins/
 
 | id | 版本 | type | capabilities | 说明 |
 |----|------|------|--------------|------|
-| `go-music-dl` | 1.2.0 | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
+| `go-music-dl` | 1.2.1 | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
 | `listenbrainz` | 1.1.0 | scrobbler | scrobbler | ListenBrainz 播放上报 |
 
 源码在 [ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)，发布前跑 `node scripts/check.mjs <id>`。
