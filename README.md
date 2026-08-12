@@ -53,6 +53,35 @@ docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow-v2
 
 访问 `http://<机器IP>:46400`。首次启动自动创建管理员 `admin / admin`（登录后强制改密）。
 
+完整 `docker-compose.yml` 示例（中文注释，也可直接 `curl` 上方命令拉取仓库原文件）：
+
+```yaml
+services:
+  musicflow:
+    image: ghcr.io/ray5378/musicflow-v2:1.5.0
+    container_name: musicflow
+    restart: unless-stopped
+    # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
+    # host 网络仅 Linux 支持;Docker Desktop(macOS/Windows)上多播不可用,DLNA 需原生运行。
+    network_mode: host
+    environment:
+      # 可选:JWT 签名密钥。留空则首次启动自动生成并保存到 ./data/.jwt-secret(重启稳定)。
+      - JWT_SECRET=${JWT_SECRET:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
+      - TZ=Asia/Shanghai
+      - UV_USE_IO_URING=0
+      # 可选:覆盖 DLNA 渲染器回拉流地址的基地址(反代/多网卡场景)。
+      # - DLNA_BASE_URL=http://192.168.1.100:46400
+    volumes:
+      - ./data:/app/backend/data
+      # 可选:平台歌曲/歌单封面默认下载到容器内 /app/backend/data/online-covers
+      # (即 ./data 卷内,默认开启,无需配置)。如需独立挂到宿主机大磁盘,取消注释:
+      # - ./online-covers:/app/backend/data/online-covers
+```
+
+> **平台音乐封面本地落盘默认开启**：QQ / 网易云等平台的歌曲与歌单封面，下载后会默认保存到本地 `data/online-covers/`（容器内 `/app/backend/data/online-covers`），无需任何配置；想把它独立放到其他磁盘（如大容量数据盘），取消 compose 里对应那行卷映射即可。
+
 ### 直接 docker run
 
 ```bash

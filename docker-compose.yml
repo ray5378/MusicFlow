@@ -3,29 +3,26 @@ services:
     image: ghcr.io/ray5378/musicflow-v2:1.5.0
     container_name: musicflow
     restart: unless-stopped
-    # network_mode: host is REQUIRED for DLNA discovery (SSDP multicast).
-    # Without it, the container cannot send/receive UDP multicast to the LAN.
-    # Note: host networking is supported on Linux only. On Docker Desktop
-    # (macOS/Windows) DLNA discovery will not work — run natively instead.
+    # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
+    # 否则容器无法向局域网发送/接收 UDP 多播。
+    # host 网络仅 Linux 支持;Docker Desktop(macOS/Windows)上多播不可用,
+    # DLNA 需改为在 Linux 宿主机原生运行。
     network_mode: host
     environment:
-      # Optional: auto-generated and persisted in ./data/.jwt-secret on first
-      # start when left empty (stable across restarts). Set it explicitly to
-      # keep the same secret when reusing an existing data dir.
+      # 可选:JWT 签名密钥。留空时首次启动自动生成并保存到 ./data/.jwt-secret
+      # (重启后保持稳定)。复用已有数据目录时建议显式设置,保证密钥一致。
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
-      # Optional: override the base URL DLNA renderers use to pull the stream.
-      # Auto-detected from the request Host header by default. Set this if
-      # the auto-detected IP is wrong (e.g. behind a reverse proxy).
+      # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;
+      # 反代/多网卡导致探测错误时设置此项。
       # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
       - ./data:/app/backend/data
-      # Optional: separate directory for covers of online tracks/playlists
-      # fetched by the go-music-dl plugin (QQ / NetEase / Kugou / ...).
-      # The container path is fixed at data/online-covers; the host path is
-      # yours to choose (e.g. a large disk). Leave this line commented out to
-      # use the default, i.e. keep those covers inside the ./data volume above.
+      # 可选:把平台音乐封面独立挂载到宿主机大磁盘。
+      # 平台歌曲/歌单封面默认下载到容器内 /app/backend/data/online-covers
+      # (即上面的 ./data 卷内,默认开启,无需配置)。
+      # 如需独立存放,取消注释并把宿主机路径换成你的目录:
       # - ./online-covers:/app/backend/data/online-covers
