@@ -20,9 +20,10 @@ import type { PluginManifest } from "./types.js";
 import { registerPlugin, listRegistered } from "./registry.js";
 
 // ---- source ----
-// NOTE: go-music-dl 已改为官方外置插件(见 https://github.com/ray5378/MusicFlow-plugins),
-// 不再随后端内置。用户从「插件市场」安装后,经 discovery 自动注册,行为不变。
-// 因此 BUILTIN_SOURCE_PLUGINS 目前为空;其它核心源若需内置再加回此数组。
+// NOTE: go-music-dl 三合一(源/歌词/封面)以**内置**插件形式随后端发行
+// (goMusicDlBuiltin.ts),不再走外置分发——根治 plugin.json permissions 缺失
+// 导致的沙箱权限拒绝(测试连接 HTTP undefined / 歌词拿不到 / 播放无可用音源)。
+import { goMusicDlManifest, goMusicDlPlugin } from "../services/source/online/goMusicDlBuiltin.js";
 // ---- importer ----
 import { qqImporterManifest, qqImporter } from "../services/plugin/importers/qq.js";
 import { neteaseImporterManifest, neteaseImporter } from "../services/plugin/importers/netease.js";
@@ -33,8 +34,8 @@ import { localRecommendManifest, localRecommendPlugin } from "../services/plugin
 // ---- sync ----
 import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/playlistSync.js";
 // ---- lyrics / cover providers ----
-// NOTE: go-music-dl 歌词 / 封面 已改为官方外置插件(见 MusicFlow-plugins 仓库),
-// 不再随后端内置。安装后随市场分发,行为不变。其余内置 provider 也遵循此迁移方向。
+// NOTE: go-music-dl 的歌词 / 封面能力已并入内置 source 插件(goMusicDlBuiltin.ts,
+// capabilities 含 lyricProvider/coverProvider),由核心按能力遍历调用,不再单独内置。
 // ---- renderer (device casting) ----
 import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";
 // ---- artist (artist info scraping) ----
@@ -45,7 +46,9 @@ export interface BuiltinPlugin {
   impl: any;
 }
 
-export const BUILTIN_SOURCE_PLUGINS: BuiltinPlugin[] = [];
+export const BUILTIN_SOURCE_PLUGINS: BuiltinPlugin[] = [
+  { manifest: goMusicDlManifest, impl: goMusicDlPlugin },
+];
 
 export const BUILTIN_IMPORTER_PLUGINS: BuiltinPlugin[] = [
   { manifest: qqImporterManifest, impl: qqImporter },

@@ -69,11 +69,11 @@ describe("plugin registry", () => {
 
   it("covers all built-in plugin types", () => {
     const types = new Set(listRegistered().map((p) => p.manifest.type));
-    // 注意: 内置已不再含 source / lyrics / cover 类型 —— go-music-dl(全网搜索源)、
-    // go-music-dl-lyrics、go-music-dl-cover 均改为官方外置插件,由「插件市场」安装后注册。
-    // 详见 https://github.com/ray5378/MusicFlow-plugins。
+    // 内置插件:go-music-dl 三合一(源/歌词/封面)已随后端内置(source 类型,
+    // capabilities 含 lyricProvider/coverProvider),其余为 importer/recommender/
+    // sync/renderer/artist。不再依赖外置市场分发。
     expect([...types].sort()).toEqual([
-      "artist", "importer", "recommender", "renderer", "sync",
+      "artist", "importer", "recommender", "renderer", "source", "sync",
     ]);
   });
 
@@ -125,8 +125,8 @@ describe("plugin registry", () => {
   });
 
   it("returns nothing for a capability no enabled plugin declares", () => {
-    // No built-in source plugin ships now (go-music-dl moved to the marketplace),
-    // so search/stream resolve to nothing until the user installs one.
+    // 内置 go-music-dl 声明了 search/stream/webRotation 但 defaultEnabled=false
+    // (source 插件需先配置 baseUrl),seeded 禁用 → 能力查询仍为空,直到用户启用。
     expect(firstEnabledByCapability("search")).toBeUndefined();
     expect(firstEnabledByCapability("stream")).toBeUndefined();
     expect(getEnabledByCapability("webRotation")).toEqual([]);
