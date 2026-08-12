@@ -69,11 +69,12 @@ describe("plugin registry", () => {
 
   it("covers all built-in plugin types", () => {
     const types = new Set(listRegistered().map((p) => p.manifest.type));
-    // 内置插件:go-music-dl 三合一(源/歌词/封面)已随后端内置(source 类型,
-    // capabilities 含 lyricProvider/coverProvider),其余为 importer/recommender/
-    // sync/renderer/artist。不再依赖外置市场分发。
+    // 内置插件:go-music-dl 三合一(源/歌词/封面)已改回**外置**插件
+    // (MusicFlow-plugins 仓库分发),因此内置插件已不再有 source 类型——
+    // source 类型由外置插件在市场/官方注册表安装后提供。其余内置为
+    // importer/recommender/sync/renderer/artist。
     expect([...types].sort()).toEqual([
-      "artist", "importer", "recommender", "renderer", "source", "sync",
+      "artist", "importer", "recommender", "renderer", "sync",
     ]);
   });
 
@@ -125,15 +126,16 @@ describe("plugin registry", () => {
   });
 
   it("returns nothing for a capability no enabled plugin declares", () => {
-    // 内置 go-music-dl 声明了 search/stream/webRotation 但 defaultEnabled=false
-    // (source 插件需先配置 baseUrl),seeded 禁用 → 能力查询仍为空,直到用户启用。
+    // go-music-dl 已改回外置插件,内置插件里不再有 source 类型——
+    // search/stream/webRotation 这些 source 能力需在市场安装并启用外置
+    // 插件后才可用,因此默认查询为空。
     expect(firstEnabledByCapability("search")).toBeUndefined();
     expect(firstEnabledByCapability("stream")).toBeUndefined();
     expect(getEnabledByCapability("webRotation")).toEqual([]);
   });
 
   it("getEnabledPlugins filters by type", () => {
-    expect(getEnabledPlugins("source")).toEqual([]); // seeded disabled
+    expect(getEnabledPlugins("source")).toEqual([]); // 无内置 source,需外置安装
     expect(getEnabledPlugins("importer").length).toBe(3);
     expect(getEnabledPlugins("sync").map((p) => p.manifest.id)).toEqual(["playlist-sync"]);
   });

@@ -45,6 +45,53 @@ const VALID_CAPS: PluginCapability[] = [
   "artistInfo",
 ];
 
+// 能力 → 该能力实现「必然需要」的宿主权限。
+//
+// 根因修复(P0):外置插件若漏写 plugin.json 的 permissions(尤其 `net`),
+// 沙箱里所有走 host.http / host.net 的能力(搜索/歌词/封面/推荐…)会被权限
+// 门控静默拒绝 —— 表现为「音乐能播(streamUrl 是同步纯构造不碰网络)但歌词
+// 拿不到 / 测试连接 HTTP undefined / 无可用音源」。这里按 capabilities 推导
+// 出必需权限,与 plugin.json 声明的 permissions 取并集,**无论开发者是否手写
+// 对权限,平台都自动补齐**,根除整类「漏写 permissions 静默失效」问题。
+//
+// 映射依据(backend/src/plugins/sandbox.ts 的 hostAsync 调用点):
+//   host.http → net,host.storage → storage,host.fs → fs,host.command → command,
+//   host.net → net,host.ws → websocket,host.jsenv → jsenv,host.songs → songs:read,
+//   host.comm → inter-plugin。具体能力的 impl 内部会调用哪些 host.* 由插件决定,
+// 这里取「该能力可能用到」的最小权限集(网络型能力一律 net)。
+const CAP_PERMISSIONS: Record<string, string[]> = {
+  // 源 / 在线能力:实现几乎都走 host.http 取数据 → net
+  search: ["net"],
+  recommend: ["net"],
+  playlistSongs: ["net"],
+  stream: ["net"],          // 兜底流可能走 host.http;即使仅构造 URL,补 net 也无害
+  webRotation: [],          // 核心 purge 定时器触发,插件无需权限
+  autoMatch: ["net"],
+  lyricProvider: ["net"],   // searchLyrics 走 host.http
+  coverProvider: ["net"],   // searchCover 走 host.http
+  lyrics: ["net"],          // legacy source-lyrics
+  scrobbler: ["net"],       // onPlay/onScrobble 通常上报到外部服务
+  artistInfo: ["net"],      // fetchArtistInfo 走 host.http
+  playlistImport: ["net"],  // fetchPlaylist 走 host.http
+  // 文件型:解析上传的歌单文件需要 host.fs
+  playlistFile: ["fs"],
+  // 调度型:持久化候选池 / 重新拉取需要 storage,部分实现会联网
+  dailyPlaylist: ["storage", "net"],
+  localPlaylist: ["storage"],
+  playlistSync: ["storage", "net"],
+  // 设备投射:发现/投送设备走网络
+  renderer: ["net"],
+};
+
+/** 按 capabilities 推导插件需要的权限集合(去重)。 */
+export function derivePermissions(caps: string[] | undefined): string[] {
+  const out = new Set<string>();
+  for (const c of caps || []) {
+    for (const p of CAP_PERMISSIONS[c] || []) out.add(p);
+  }
+  return [...out];
+}
+
 /** 已加载外置插件的沙箱实例(id → SandboxedPlugin),热重载/卸载时 dispose。 */
 export const pluginSandboxes = new Map<string, SandboxedPlugin>();
 
@@ -407,11 +454,16 @@ export async function discoverExternalPlugins(
         console.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${expectedManifest.minAppVersion}, 当前 ${appVersion}`);
         continue;
       }
-      const comm = createComm(id, expectedManifest?.permissions ?? []);
+      const declaredPerms = expectedManifest?.permissions ?? [];
+      // P0:按 plugin.json 的 capabilities 推导必需权限,与声明权限取并集
+      // (plugin.json 缺 capabilities 时,待沙箱加载后用 index.js manifest 再补一次)。
+      const derivedFromJson = derivePermissions(expectedManifest?.capabilities);
+      const initialPerms = [...new Set([...declaredPerms, ...derivedFromJson])];
+      const comm = createComm(id, initialPerms);
       const env = {
         version: process.env.APP_VERSION || "dev",
         getConfig: () => getPluginConfig(id) ?? {},
-        permissions: expectedManifest?.permissions ?? [],
+        permissions: initialPerms,
         http: async (input: string, init?: any) => {
           try {
             const timeout = Number(init?.timeout) > 0 ? Number(init.timeout) : 20000;
@@ -464,15 +516,18 @@ export async function discoverExternalPlugins(
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       const manifest: PluginManifest = sandbox.manifest;
-      // 权限兜底:沙箱权限原本只取 plugin.json 的 permissions;若插件目录里
-      // plugin.json 缺失/为空(旧分发包或手工放置),沙箱里所有需权限的 host
-      // 能力(如 host.http 的 net)会被拒 —— 表现为测试连接报 HTTP undefined、
-      // 歌词/封面/兜底流全部失败(而 streamUrl 是同步纯构造不受影响,音乐仍能播)。
-      // index.js 内 manifest 是权威来源,缺 permissions 时以它为准(沙箱 hasPerm
-      // 每次调用读 this.env.permissions 同一引用,此处修改即时生效)。
-      if (!env.permissions.length && manifest.permissions?.length) {
-        env.permissions = manifest.permissions;
-        console.warn(`[PLUGIN] ${id}: plugin.json 缺少 permissions,已用 index.js manifest 兜底: ${manifest.permissions.join(",")}`);
+      // P0 根因修复(权威来源 = index.js manifest.capabilities):无论 plugin.json
+      // 是否声明 permissions,凡声明了网络型能力的插件都自动获得 `net`(同理
+      // 文件型→fs、调度型→storage),与 plugin.json 声明权限、index.js 自身
+      // 声明的 permissions 三者取并集。彻底根除「漏写 permissions 静默失效」
+      // (测试连接 HTTP undefined / 歌词拿不到 / 无可用音源)整类问题。
+      // 沙箱 hasPerm 每次调用读 this.env.permissions 同一引用,此处修改即时生效。
+      const derived = derivePermissions(manifest.capabilities);
+      const merged = new Set<string>([...env.permissions, ...(manifest.permissions ?? []), ...derived]);
+      const added = [...merged].filter((p) => !env.permissions.includes(p));
+      if (added.length) {
+        env.permissions = [...merged];
+        console.warn(`[PLUGIN] ${id}: 按能力推导自动补齐权限: ${added.join(",")}`);
       }
       const reason = validateManifest(manifest);
       if (reason) { sandbox.dispose(); console.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }

@@ -8,6 +8,7 @@ import {
   isAppVersionCompatible,
   safeResolve,
   discoverExternalPlugins,
+  derivePermissions,
 } from "../../src/plugins/discovery.js";
 import { registerPlugin, getPlugin } from "../../src/plugins/registry.js";
 import { pluginSandboxes } from "../../src/plugins/discovery.js";
@@ -112,6 +113,33 @@ beforeAll(() => {
     };`,
     "utf8",
   );
+
+  // 6b) P0 根因用例:plugin.json 与 index.js **都**不声明 permissions(历史
+  //     分发事故的最坏情形——开发者漏写 net),但 capabilities 是网络型
+  //     (search/recommend/stream/lyricProvider)。discovery 必须按能力推导
+  //     自动补齐 net,否则 test/search/lyrics 会因 host.http 被拒而静默失效。
+  const derivedDir = path.join(tmp, "perm-derived");
+  fs.mkdirSync(derivedDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(derivedDir, "plugin.json"),
+    JSON.stringify({
+      id: "perm-derived", name: "Derived", version: "1.0.0", type: "source",
+      capabilities: ["search", "recommend", "stream", "lyricProvider"],
+      configSchema: [],
+    }),
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(derivedDir, "index.js"),
+    `globalThis.__mfPlugin = {
+      manifest: {
+        id: "perm-derived", name: "Derived", version: "1.0.0", type: "source",
+        capabilities: ["search", "recommend", "stream", "lyricProvider"], configSchema: [],
+      },
+      create() { return { streamUrl: () => "http://x", search: async () => ({ songs: [] }) }; },
+    };`,
+    "utf8",
+  );
 });
 
 afterAll(() => {
@@ -183,6 +211,25 @@ describe("safeResolve (path-traversal guard)", () => {
   });
 });
 
+describe("derivePermissions (P0 能力推导权限)", () => {
+  it("网络型能力一律推导 net", () => {
+    expect(derivePermissions(["search", "recommend", "stream", "lyricProvider", "coverProvider"])).toEqual(["net"]);
+  });
+  it("调度型能力推导 storage(+net 当实现联网)", () => {
+    expect(derivePermissions(["dailyPlaylist"]).sort()).toEqual(["net", "storage"]);
+    expect(derivePermissions(["localPlaylist"])).toEqual(["storage"]);
+  });
+  it("文件型能力推导 fs,无能力/纯本地能力推导为空", () => {
+    expect(derivePermissions(["playlistFile"])).toEqual(["fs"]);
+    expect(derivePermissions(["webRotation"])).toEqual([]);
+    expect(derivePermissions(undefined)).toEqual([]);
+    expect(derivePermissions([])).toEqual([]);
+  });
+  it("未知能力不参与推导", () => {
+    expect(derivePermissions(["search", "notACap"] as any)).toEqual(["net"]);
+  });
+});
+
 describe("discoverExternalPlugins", () => {
   it("loads valid plugins, skips invalid / too-old / conflicting / non-dir", async () => {
     // Pre-register a conflicting id so the conflict guard triggers.
@@ -192,7 +239,7 @@ describe("discoverExternalPlugins", () => {
     );
 
     const loaded = await discoverExternalPlugins("1.0.0", tmp);
-    expect(loaded).toBe(2); // valid-plugin + perm-fallback
+    expect(loaded).toBe(3); // valid-plugin + perm-fallback + perm-derived
     expect(getPlugin("valid-plugin")).toBeDefined();
     expect(getPlugin("badmanifest")).toBeUndefined();
     expect(getPlugin("oldversion")).toBeUndefined(); // needs 2.0.0
@@ -205,6 +252,16 @@ describe("discoverExternalPlugins", () => {
     // 沙箱权限已兜底为 ["net"] → host.http(net) 可调用;若未兜底会是空权限被拒。
     // (hasPerm 是 sandbox 内部方法,这里通过 env 权限已注入验证:直接看沙箱能访问 net 权限)
     expect((sb as any).env?.permissions).toEqual(["net"]);
+  });
+
+  it("P0:capabilities 是网络型但全程未声明 permissions → 按能力推导自动补齐 net", () => {
+    const sb = pluginSandboxes.get("perm-derived");
+    expect(sb).toBeDefined();
+    const perms = (sb as any).env?.permissions as string[];
+    // 既没在 plugin.json 也没在 index.js 写 permissions,但 capability 含
+    // search/recommend/stream/lyricProvider → 推导结果必须含 "net",
+    // 否则 host.http 会被权限门控拒绝(测试连接 HTTP undefined / 歌词拿不到)。
+    expect(perms).toContain("net");
   });
 
   it("returns 0 when the root is absent", async () => {
