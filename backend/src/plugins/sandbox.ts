@@ -372,45 +372,57 @@ export class SandboxedPlugin {
     if (h && !this.shared.has(h)) { try { h.dispose(); } catch { /* ignore */ } }
   }
 
+  /** 从在途清单移除已结算的 deferred(避免 defers 数组只增不减导致误限流)。 */
+  private removeDefer(d: QuickJSDeferredPromise): void {
+    const i = this.defers.indexOf(d);
+    if (i >= 0) this.defers.splice(i, 1);
+  }
+
   /** 宿主异步函数:deferred-promise 模式。返回 VM promise handle。 */
   private hostAsync(name: string, impl: (...args: any[]) => Promise<any>, perm: string | null): QuickJSHandle {
     const fn = this.ctx.newFunction(name, (...argHandles: QuickJSHandle[]) => {
       const args = argHandles.map((h) => this.ctx.dump(h));
       const deferred = this.ctx.newPromise();
       this.defers.push(deferred);
+      // 仅当「同时未结算」(in-flight)的 host 调用数超上限才拒绝,防御失控并发。
+      // 关键:defers 必须只统计在途请求——每次结算后由 finally 移除(见 removeDefer),
+      // 否则它会随插件整个生命周期只增不减;累计约 MAX_DEFERS 次调用后就永久误报
+      // "调用过于密集,拒绝新请求",使搜索/歌词/封面等长跑功能间歇性全部失败。
       if (this.defers.length > MAX_DEFERS) {
+        this.removeDefer(deferred);
         deferred.resolve(this.jsToHandle({ ok: false, error: { message: "沙箱:调用过于密集,拒绝新请求" } }));
-      } else {
-        Promise.resolve()
-          .then(() => {
-            if (perm && !this.hasPerm(perm)) {
-              // 权限拒绝要打日志:否则容器日志完全静默,前端只看到 HTTP undefined
-              // 之类无从排查的报错(如 plugin.json 缺 permissions 时 host.http 被拒)。
-              console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
-              return { ok: false, error: { message: `PERMISSION_DENIED: ${perm}` } };
-            }
-            return impl(...args);
-          })
-          .then((value) => {
-            if (deferred.alive) {
-              // raw-handle 通道:impl 返回 { __mfRawHandle } 时直接 resolve 该 handle
-              // (用于 tcpConnect / ws.connect 这类需要返回「含函数对象」的场景)。
-              const raw = value && (value as any).__mfRawHandle;
-              if (raw) { deferred.resolve(raw); try { raw.dispose(); } catch { /* ignore */ } }
-              else deferred.resolve(this.jsToHandle(value));
-            }
-          })
-          .catch((err) => {
-            const msg = String((err && err.message) || err);
-            // 兜底信封必须带 status 字段,否则插件读 r.status 得 undefined
-            // (表现为 "HTTP undefined" 这类无从排查的报错)。补 status:0 让
-            // 插件侧统一走 "HTTP 0" 分支并可读 r.error 看到真实原因。
-            if (deferred.alive) deferred.resolve(this.jsToHandle({ ok: false, status: 0, error: { name: "HostError", message: msg } }));
-          })
-          .finally(() => {
-            try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
-          });
+        return deferred.handle;
       }
+      Promise.resolve()
+        .then(() => {
+          if (perm && !this.hasPerm(perm)) {
+            // 权限拒绝要打日志:否则容器日志完全静默,前端只看到 HTTP undefined
+            // 之类无从排查的报错(如 plugin.json 缺 permissions 时 host.http 被拒)。
+            console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
+            return { ok: false, error: { message: `PERMISSION_DENIED: ${perm}` } };
+          }
+          return impl(...args);
+        })
+        .then((value) => {
+          if (deferred.alive) {
+            // raw-handle 通道:impl 返回 { __mfRawHandle } 时直接 resolve 该 handle
+            // (用于 tcpConnect / ws.connect 这类需要返回「含函数对象」的场景)。
+            const raw = value && (value as any).__mfRawHandle;
+            if (raw) { deferred.resolve(raw); try { raw.dispose(); } catch { /* ignore */ } }
+            else deferred.resolve(this.jsToHandle(value));
+          }
+        })
+        .catch((err) => {
+          const msg = String((err && err.message) || err);
+          // 兜底信封必须带 status 字段,否则插件读 r.status 得 undefined
+          // (表现为 "HTTP undefined" 这类无从排查的报错)。补 status:0 让
+          // 插件侧统一走 "HTTP 0" 分支并可读 r.error 看到真实原因。
+          if (deferred.alive) deferred.resolve(this.jsToHandle({ ok: false, status: 0, error: { name: "HostError", message: msg } }));
+        })
+        .finally(() => {
+          this.removeDefer(deferred);
+          try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
+        });
       return deferred.handle;
     });
     return fn;

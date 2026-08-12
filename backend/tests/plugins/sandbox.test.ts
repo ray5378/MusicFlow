@@ -198,4 +198,61 @@ describe("QuickJS 插件沙箱", () => {
     const r = await impl.test({});
     expect(r.message).toBe("url=http://ha:46400;addrs=2");
   });
+
+  it("host.http 累计调用远超 MAX_DEFERS 仍正常(不按累计次数限流)", async () => {
+    // 回归:defers 数组曾只增不减,累计 ~64 次调用后会永久误报
+    // "调用过于密集,拒绝新请求",导致搜索等长跑功能间歇性全失败。
+    // 修复后 defers 只统计在途请求,结算即移除,故顺序 120 次调用应全部成功。
+    const code = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-sandbox", name: "x", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: ["net"] },
+        create(host) {
+          return {
+            async search(config, params) {
+              let ok = 0;
+              for (let i = 0; i < 120; i++) {
+                const r = await host.http("https://demo/hit?i=" + i, {});
+                if (!r.ok) throw new Error("HTTP_FAIL:" + (r.error && r.error.message));
+                ok++;
+              }
+              return { ok };
+            }
+          };
+        }
+      };`;
+    const { impl } = await loadSandboxedPlugin("demo-sandbox", code, makeEnv());
+    const res = await impl.search({}, {});
+    expect(res.ok).toBe(120);
+  });
+
+  it("并发在途 host.http 超 MAX_DEFERS 时仍按并发维度拒绝(防御失控并发)", async () => {
+    // 验证限流仍是「并发维度」而非「累计维度」:同一时刻拉起大量未结算调用应被拒。
+    const code = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-sandbox", name: "x", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: ["net"] },
+        create(host) {
+          return {
+            async search(config, params) {
+              // 同时发出 128 个 host.http,但 env.http 永不 resolve(挂起),
+              // 制造 128 个在途 deferred,应触发限流拒绝(不崩溃)。
+              const ps = [];
+              for (let i = 0; i < 128; i++) ps.push(host.http("https://demo/h?i=" + i, {}));
+              const rs = await Promise.allSettled(ps);
+              let rejected = 0;
+              for (const r of rs) {
+                if (r.status === "rejected" && /调用过于密集/.test(String(r.reason && r.reason.message || r.reason))) rejected++;
+                else if (r.status === "fulfilled" && r.value && r.value.error && /调用过于密集/.test(String(r.value.error.message))) rejected++;
+              }
+              return { rejected };
+            }
+          };
+        }
+      };`;
+    // env.http 很快 resolve(否则在途请求永不结算,allSettled 会挂死);
+    // 关键只在「同一时刻拉起 128 个未结算调用」这一瞬间触发并发限流。
+    const env = makeEnv({ http: async () => { await new Promise((r) => setTimeout(r, 5)); return { ok: true, status: 200, body: "{}" }; } });
+    const { impl } = await loadSandboxedPlugin("demo-sandbox", code, env);
+    const res = await impl.search({}, {});
+    expect(res.rejected).toBeGreaterThan(0);
+  });
 });
