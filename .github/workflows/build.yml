@@ -35,6 +35,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # secrets 不能直接在 if 里引用,经 job 级 env 中转(未配置时为空串,登录步骤自动跳过)。
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,11 +56,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
-        if: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        if: env.DH_TOKEN != ''
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DH_USER }}
+          password: ${{ env.DH_TOKEN }}
 
       - name: Compute tags
         id: meta
