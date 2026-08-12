@@ -144,6 +144,7 @@ export interface SandboxHostEnv {
     send(targetId: string, message: any): void;
     broadcast(message: any): void;
     on(handler: (message: any) => void): void;
+    off?(handler: (message: any) => void): void;
   };
   /** host.songs:宿主曲库只读查询(需 songs:read 权限)。返回脱敏视图,不含内部字段。 */
   songs: {
@@ -223,6 +224,8 @@ export class SandboxedPlugin {
   private hTrue!: QuickJSHandle;
   private hFalse!: QuickJSHandle;
   private defers: QuickJSDeferredPromise[] = [];
+  /** host.comm.on 注册的监听器包装(注册在 env.comm 上)。dispose 时必须 off,否则 hot-reload 重载插件会累积监听器,导致同一条消息被重复投递 N 次。 */
+  private commListeners = new Map<QuickJSHandle, (message: any) => void>();
   private deadline = Date.now() + INVOKE_TIMEOUT_MS;
   private disposed = false;
 
@@ -329,6 +332,11 @@ export class SandboxedPlugin {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // 先移除 host.comm.on 注册的监听器,避免 hot-reload 累积导致消息重复投递
+    for (const listener of this.commListeners.values()) {
+      try { this.env.comm.off?.(listener); } catch { /* ignore */ }
+    }
+    this.commListeners.clear();
     for (const d of this.defers) { try { if (d.alive) d.dispose(); } catch { /* ignore */ } }
     this.defers = [];
     for (const h of [this.hTrue, this.hFalse]) { try { if (h.alive) h.dispose(); } catch { /* ignore */ } }
@@ -494,8 +502,10 @@ export class SandboxedPlugin {
     c.setProp(commObj, "broadcast", commBroadcast);
     commSend.dispose(); commBroadcast.dispose();
     // host.comm.on(handler):插件侧注册的 VM 函数 → 收到消息时经信封调用(防异常扩散)
+    // 关键:必须把注册的闭包存进 commListeners,dispose 时调 env.comm.off 移除,否则
+    // hot-reload 重载插件会累积监听器,导致同一条消息被重复投递 N 次(累计型隐患)。
     const commOn = c.newFunction("on", (handlerHandle: QuickJSHandle) => {
-      this.env.comm.on((message: any) => {
+      const listener = (message: any) => {
         if (this.disposed || !this.ctx || !this.runtime?.alive) return;
         try {
           const payload = JSON.stringify(message === undefined ? null : message);
@@ -507,12 +517,24 @@ export class SandboxedPlugin {
           rp.then(() => { try { ph.dispose(); } catch { /* ignore */ } }, () => { try { ph.dispose(); } catch { /* ignore */ } });
           if (this.runtime?.alive) this.runtime.executePendingJobs();
         } catch { /* 消息回调异常不影响宿主 */ }
-      });
+      };
+      this.env.comm.on(listener);
+      this.commListeners.set(handlerHandle, listener);
       this.ctx.setProp(this.ctx.global, "__mfCommOn", handlerHandle);
       return this.ctx.undefined;
     });
+    // host.comm.off(handler):按 VM 函数引用移除监听器(配对 on)。
+    const commOff = c.newFunction("off", (handlerHandle: QuickJSHandle) => {
+      const listener = this.commListeners.get(handlerHandle);
+      if (listener) {
+        try { this.env.comm.off?.(listener); } catch { /* ignore */ }
+        this.commListeners.delete(handlerHandle);
+      }
+      return this.ctx.undefined;
+    });
     c.setProp(commObj, "on", commOn);
-    commOn.dispose();
+    c.setProp(commObj, "off", commOff);
+    commOn.dispose(); commOff.dispose();
 
     // host.log(无需权限)
     const logFn = c.newFunction("log", (...args: QuickJSHandle[]) => {

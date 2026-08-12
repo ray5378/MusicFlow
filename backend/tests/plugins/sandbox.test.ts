@@ -302,4 +302,38 @@ describe("QuickJS 插件沙箱", () => {
     const res = await impl.search({}, {});
     expect(res.rejected).toBeGreaterThan(0);
   });
+
+  it("host.comm.on 注册的监听器在 dispose 时被移除(防 hot-reload 重复投递)", async () => {
+    // 回归:host.comm.on 把闭包注册到全局 env.comm,原实现 dispose 时从不 off,
+    // hot-reload 重载插件会累积监听器,导致同一条消息被重复投递 N 次。
+    const commListeners = new Set<(...args: any[]) => void>();
+    const env = makeEnv({
+      comm: {
+        send: () => {},
+        broadcast: () => {},
+        on: (h: any) => commListeners.add(h),
+        off: (h: any) => commListeners.delete(h),
+      },
+    });
+    const code = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-comm", name: "x", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: [] },
+        create(host) {
+          return {
+            async search() {
+              host.comm.on((m) => { globalThis.__last = m; });
+              return { ok: true };
+            }
+          };
+        }
+      };`;
+    const { sandbox, impl } = await loadSandboxedPlugin("demo-comm", code, env);
+    await impl.search({}, {});
+    // 调用 host.comm.on 后应已在 env.comm 上注册 1 个监听器
+    expect(commListeners.size).toBe(1);
+    // 模拟 hot-reload:dispose 旧实例
+    sandbox.dispose();
+    // dispose 后必须已 off,监听器清空(否则每次 reload 都 +1,消息重复投递)
+    expect(commListeners.size).toBe(0);
+  });
 });
