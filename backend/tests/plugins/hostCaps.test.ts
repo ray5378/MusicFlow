@@ -50,7 +50,8 @@ describe("host.fs(宿主实现)", () => {
     await api.writeFile("ok.txt", "x");
     await expect(api.readFile("../outside.txt")).rejects.toThrow(/路径越界/);
     await expect(api.writeFile("../../evil.txt", "x")).rejects.toThrow(/路径越界/);
-    await expect(api.readFile("C:/Windows/win.ini")).rejects.toThrow(/路径越界/);
+    const absPath = process.platform === "win32" ? "C:/Windows/win.ini" : "/etc/passwd";
+    await expect(api.readFile(absPath)).rejects.toThrow(/路径越界/);
     // 越界写入绝不能落到插件目录外
     expect(fs.existsSync(path.join(TMP, "evil.txt"))).toBe(false);
   });

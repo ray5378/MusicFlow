@@ -81,6 +81,35 @@ function makeItems(n: number): QueueItem[] {
 beforeAll(() => {
   // persist 需要 group_queues / player_groups / device_queues 表(测试不跑 initDatabase)
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS songs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      artist TEXT DEFAULT '',
+      artist_id TEXT,
+      album TEXT DEFAULT '',
+      album_id TEXT,
+      duration INTEGER DEFAULT 0,
+      bit_rate INTEGER DEFAULT 0,
+      content_type TEXT DEFAULT 'audio/mpeg',
+      suffix TEXT DEFAULT 'mp3',
+      path TEXT NOT NULL,
+      cover_art TEXT,
+      play_count INTEGER DEFAULT 0,
+      disc_number INTEGER DEFAULT 1,
+      track INTEGER DEFAULT 0,
+      genre TEXT DEFAULT '',
+      size INTEGER DEFAULT 0,
+      fingerprint TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      type TEXT DEFAULT 'local',
+      url TEXT,
+      stream_headers TEXT,
+      source_data TEXT,
+      plugin_entry TEXT,
+      cache_path TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS device_queues (
       device_id TEXT PRIMARY KEY,
       items_json TEXT NOT NULL DEFAULT '[]',
