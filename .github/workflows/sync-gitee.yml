@@ -25,6 +25,9 @@ jobs:
           git remote add gitee "https://ray5378:${GITEE_TOKEN}@gitee.com/ray5378/musicflow-v2.git"
           # 只同步 master 分支 + 全部 tags;不用 --mirror(checkout 带下的 refs/remotes/*
           # 会被 Gitee 以 "deny updating a hidden ref" 拒绝导致整体失败)。
-          git push gitee master --force
-          git push gitee --tags --force
-          echo "Gitee 镜像同步完成"
+          # GitHub runner 访问 Gitee 偶发 SSL 超时,循环重试 3 次。
+          for i in 1 2 3; do
+            echo "Gitee 同步尝试 $i/3"
+            git push gitee master --force && git push gitee --tags --force && { echo "Gitee 镜像同步完成"; break; }
+            [ "$i" -lt 3 ] && sleep 15
+          done
