@@ -313,7 +313,12 @@ export const usePlayerStore = defineStore("player", () => {
       onloaderror: () => { localHandlePlaybackError(song.id); },
       onplayerror: () => { localHandlePlaybackError(song.id); },
     });
-howl.play();
+    howl.play();
+    // 乐观置位:点击播放后立即让按钮显示"暂停",不再单纯依赖浏览器 onplay 事件。
+    // html5 自动播放策略下 onplay 偶发迟到/丢失,会导致"在播但按钮仍是播放"的偶发 bug;
+    // 后续由 onplay/onpause 与进度轮询(howl.playing())共同校正状态。
+    localIsPlaying.value = true;
+    startLocalProgressTimer();
     autoshowQueue();
   }
 
@@ -329,6 +334,7 @@ howl.play();
       console.warn("[player] 连续失败过多,停止自动跳过");
       localFailStreak = 0;
       localIsPlaying.value = false;
+      stopLocalProgressTimer();
       return;
     }
     localNext();
@@ -366,7 +372,13 @@ howl.play();
 
   function localTogglePlay() {
     if (!howl) return;
-    if (localIsPlaying.value) howl.pause(); else howl.play();
+    if (localIsPlaying.value) {
+      howl.pause();
+    } else {
+      howl.play();
+      localIsPlaying.value = true; // 乐观置位,避免 onplay 丢失导致按钮不切换
+      startLocalProgressTimer();
+    }
   }
 
   // Pick a random index different from the current one (for shuffle mode).
@@ -444,7 +456,12 @@ howl.play();
   function startLocalProgressTimer() {
     stopLocalProgressTimer();
     localProgressTimer = setInterval(() => {
-      if (howl && localIsPlaying.value) {
+      if (!howl) return;
+      // 自愈校正:onplay/onpause 偶发丢失时,以 howl.playing()(源自 <audio>.paused,权威)
+      // 为真值源修正按钮状态,避免"在播却显示播放"或"已暂停却仍显示暂停"的偶发不同步。
+      const playing = howl.playing();
+      if (playing !== localIsPlaying.value) localIsPlaying.value = playing;
+      if (playing) {
         localCurrentTime.value = howl.seek() as number || 0;
         updateLocalLyric();
       }
@@ -500,6 +517,10 @@ howl.play();
 
   function startCastPlayback(st: RemoteState) {
     pushCastQueueToBackend(st, st.index >= 0 ? st.index : 0);
+    // 乐观置位:点击播放后立刻让按钮显示"暂停",不依赖后端轮询/事件。
+    // 否则在「清空→重选设备→重新播放」场景下,GENA 事件缓存的 state 可能停在 STOPPED,
+    // 导致轮询读到的 state 一直非 PLAYING 而按钮卡在"未播放"(进度条却仍在走)。
+    st.isPlaying = true;
     autoshowQueue();
   }
 
@@ -585,6 +606,8 @@ howl.play();
   // is derived from the leader by the backend (MA 同款)。
   function startCastPoll(st: RemoteState) {
     stopCastPoll(st);
+    // 进度自愈:记录上次轮询到的真实 position,用于判断"是否真的在前进"。
+    let lastPos = -1;
     // Backend poll (2s): ground-truth state + queue snapshot.
     st.pollTimer = setInterval(async () => {
       try {
@@ -593,7 +616,16 @@ howl.play();
         st.lastCastState = s.state || "STOPPED";
         if (typeof s.position === "number") st.currentTime = s.position;
         if (typeof s.duration === "number" && s.duration > 0) st.duration = s.duration;
-        st.isPlaying = s.state === "PLAYING";
+        // 播放状态判定(自愈):
+        // 1) 后端 state 明确为 PLAYING/playing/STARTED → 在播;
+        // 2) 关键自愈:部分 DLNA 设备经「清空→重选→重新播放」后,GENA 事件缓存的
+        //    state 停留在旧值(如 STOPPED)并覆盖 SOAP 实时 PLAYING,轮询读到
+        //    state=STOPPED 却 position 仍在前进(进度条在走)。此时以"position 真实前进"
+        //    作为在播的权威证据,强制 isPlaying=true,避免按钮卡在"未播放"。
+        const statePlaying = s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
+        const advancing = st.duration > 0 && st.currentTime > lastPos && st.currentTime < st.duration;
+        st.isPlaying = statePlaying || advancing;
+        if (typeof s.position === "number") lastPos = s.position;
         // 同步设备真实音量(含 外部 webhook / 其它端 改的)。仅当当前正控制该 peer。
         if (typeof s.volume === "number" && currentPeerId.value === st.peerId) {
           volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
