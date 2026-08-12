@@ -53,10 +53,12 @@ interface SongRow {
   path: string;
   title: string;
   artist: string | null;
+  album?: string | null;
   url?: string | null;
   type?: string | null;
   duration?: number | null;
   pluginEntry?: string | null;
+  sourceData?: string | null;
 }
 
 const lrcCache = new Map<string, { content: string | null; at: number }>();
@@ -85,11 +87,18 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   // go-music-dl-lyrics plugin). Then fall back to the legacy source plugin
   // lyricUrl() for any source that still implements it directly.
   if (song.type === "web") {
+    // 把 source/album/extra 一并传给 lyric provider:插件据此优先同平台回退
+    // (go-music-dl 的搜索回退需要 source 判断"本平台优先",否则只能盲目多平台搜索)。
+    let sourceData: any = null;
+    try { sourceData = JSON.parse((song as any).sourceData || "{}"); } catch {}
     const fromProviders = await searchLyrics({
       url: song.url,
       duration: song.duration,
       title: song.title,
       artist: song.artist,
+      album: song.album,
+      source: sourceData?.source || undefined,
+      extra: sourceData?.extra || null,
     });
     if (fromProviders) {
       lrcCache.set(song.id, { content: fromProviders, at: Date.now() });
