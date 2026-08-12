@@ -425,7 +425,7 @@ export function initDatabase() {
   try {
     sqlite.exec("ALTER TABLE playlists ADD COLUMN favorite INTEGER DEFAULT 0");
   } catch {}
-  // Online-song columns (built-in source plugins: go-music-dl etc.)
+  // Online-song columns (online source plugins, e.g. the official go-music-dl)
   for (const col of [
     "type TEXT DEFAULT 'local'",
     "url TEXT",
@@ -437,8 +437,8 @@ export function initDatabase() {
     try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
   }
 
-  // Built-in plugins (incl. the go-music-dl source plugin) are seeded from the
-  // unified catalog at boot via registerBuiltinPlugins() — see plugins/registry.ts.
+  // Plugins (built-in and external drop-ins) are seeded from the unified catalog
+  // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.
 
   // Insert default admin if no users exist

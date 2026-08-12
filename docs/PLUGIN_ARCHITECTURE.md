@@ -180,7 +180,7 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 
 ## 6. 后续里程碑
 
-- **Phase 2（全量插件化）**：✅ 已完成（见 §7.2）。定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts` 的 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死；`localRecommend` 保留为内置模块（价值低，不强行插件化）。
+- **Phase 2（全量插件化）**：✅ 已完成（见 §7.2）。定义 `ImporterPlugin` / `RecommenderPlugin` / `SyncPlugin` 接口；把 `playlistImport` / `dailyRecommend` / `playlistSync` 注册进 registry，删掉 `playlistSync.ts` 的 `getConfiguredProvider("go-music-dl")` 与 `gmdl://` 写死；`localRecommend` 已注册为 `recommender`（`localPlaylist` 能力）。
 - **Phase 3（外置插件）**：✅ 已完成（见 §7.3）。boot 扫描 `data/plugins/<id>/index.js` 动态 `import`（`plugins/discovery.ts`），加 manifest 校验 + 路径白名单（`safeResolve` 防穿越）+ `minAppVersion` 校验 + id 冲突保护；开发者文档见 `docs/PLUGIN_DEV.md`，参考实现见 `examples/plugins/hello-importer/index.js`。
 - **Phase 4（host.* 上下文 + Provider 注册表，P0）**：✅ 已完成（见 §7.4）。`host.*` 受控上下文取代插件直接 import 后端；`lyricProvider`/`coverProvider` 注册表 + first-match-wins；go-music-dl 歌词/封面拆为独立 provider 插件。
 - **Phase 5（能力扩展 + 权限，P1）**：✅ 已完成（见 §7.4）。`renderer`（DLNA）/`scrobbler` 插件化；声明式权限模型（`KNOWN_PERMISSIONS` + 命名空间通配 `songs.*` + 全局 `*`）；通用 KV `host.storage`；插件间 `host.comm`。
