@@ -17,6 +17,10 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { execFile, spawn } from "child_process";
+import dgram from "dgram";
+import net from "net";
+import WebSocket from "ws";
 import { eq, like, or } from "drizzle-orm";
 import { getDataDir } from "../utils/env.js";
 import { db } from "../db/index.js";
@@ -24,7 +28,7 @@ import { songs } from "../db/schema.js";
 import { registerPlugin, getPlugin, getPluginConfig } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
-import { loadSandboxedPlugin, type SandboxedPlugin } from "./sandbox.js";
+import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { createComm } from "./comm.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
@@ -68,6 +72,235 @@ function toPluginSong(s: any): any {
     track: s.track || 0,
     type: s.type || "local",
   };
+}
+
+/** host.fs:插件专属目录文件读写(防路径穿越,只允许 <pluginDir>/files/ 内)。 */
+export function makeFsApi(pluginDir: string): any {
+  const baseDir = path.join(pluginDir, "files");
+  const resolveSafe = (p: string): string => {
+    const full = path.resolve(baseDir, String(p));
+    if (full !== baseDir && !full.startsWith(baseDir + path.sep)) {
+      throw new Error("路径越界: 只能在插件 files/ 目录内");
+    }
+    return full;
+  };
+  fs.mkdirSync(baseDir, { recursive: true });
+  return {
+    readFile: async (p: string, enc?: string) => fs.readFileSync(resolveSafe(p), (enc || "utf8") as any),
+    writeFile: async (p: string, data: string, enc?: string) => { fs.writeFileSync(resolveSafe(p), data, (enc || "utf8") as any); return null; },
+    appendFile: async (p: string, data: string, enc?: string) => { fs.appendFileSync(resolveSafe(p), data, (enc || "utf8") as any); return null; },
+    readdir: async (p: string) => { const full = resolveSafe(p); if (!fs.existsSync(full)) return []; return fs.readdirSync(full); },
+    unlink: async (p: string) => { fs.rmSync(resolveSafe(p), { force: true }); return null; },
+    exists: async (p: string) => fs.existsSync(resolveSafe(p)),
+    mkdir: async (p: string, o?: any) => { fs.mkdirSync(resolveSafe(p), { recursive: !!(o && o.recursive) }); return null; },
+    stat: async (p: string) => {
+      const full = resolveSafe(p);
+      if (!fs.existsSync(full)) return null;
+      const s = fs.statSync(full);
+      return { size: s.size, mtime: s.mtime.toISOString(), isDirectory: s.isDirectory() };
+    },
+    rename: async (a: string, b: string) => { fs.renameSync(resolveSafe(a), resolveSafe(b)); return null; },
+  };
+}
+
+/** host.command:执行外部命令(exec 走 execFile 不经 shell;start/stop 管理常驻进程)。 */
+export function makeCommandApi(): any {
+  const procs = new Map<string, any>();
+  return {
+    exec: async (program: string, args: string[], options?: any) => {
+      const timeout = Number(options?.timeout) > 0 ? Number(options.timeout) : 30000;
+      return new Promise((resolve) => {
+        execFile(program, args || [], { timeout, maxBuffer: 16 * 1024 * 1024 }, (err: any, stdout, stderr) => {
+          resolve({
+            code: err ? (err.code ?? -1) : 0,
+            stdout: String(stdout || ""),
+            stderr: String(stderr || ""),
+            timedOut: !!(err && err.killed),
+          });
+        });
+      });
+    },
+    start: async (name: string, program: string, args: string[]) => {
+      if (procs.has(name)) return { name, running: true };
+      const child = spawn(String(program), args || [], { stdio: ["ignore", "pipe", "pipe"] });
+      procs.set(name, child);
+      child.on("exit", () => procs.delete(name));
+      return { name, running: true, pid: child.pid };
+    },
+    stop: async (name: string) => { const p = procs.get(String(name)); if (p) { try { p.kill(); } catch { /* ignore */ } procs.delete(String(name)); } return null; },
+    isRunning: async (name: string) => { const p = procs.get(String(name)); return !!(p && !p.killed); },
+  };
+}
+
+/** host.net:原始 UDP/TCP socket。数据以 base64 传输(二进制安全)。 */
+export function makeNetApi(): any {
+  const udps = new Map<string, any>();
+  const udpHooks = new Map<string, (data: any) => void>();
+  const tcpSockets = new Map<string, any>();
+  const tcpDataHooks = new Map<string, (data: any) => void>();
+  const tcpCloseHooks = new Map<string, () => void>();
+  const nextId = (prefix: string) => `${prefix}${Date.now()}${Math.floor(Math.random() * 10000)}`;
+  return {
+    udpBind: async (options?: any) => {
+      const sock = dgram.createSocket({ type: options?.ipv6 ? "udp6" : "udp4", reuseAddr: !!options?.reuseAddr });
+      const id = nextId("udp");
+      sock.on("message", (msg, rinfo) => { const h = udpHooks.get(id); if (h) h({ data: msg.toString("base64"), from: rinfo.address, port: rinfo.port }); });
+      await new Promise((resolve, reject) => {
+        sock.once("error", reject);
+        sock.bind(Number(options?.port) || 0, options?.address || "0.0.0.0", () => { sock.removeListener("error", reject); resolve(null); });
+      });
+      udps.set(id, sock);
+      return { socketId: id, address: sock.address().address, port: sock.address().port };
+    },
+    udpSend: async (socketId: string, data: string, addr?: any) => {
+      const sock = udps.get(String(socketId));
+      if (!sock) throw new Error("UDP socket 不存在");
+      await new Promise((resolve, reject) => {
+        sock.send(Buffer.from(String(data)), Number(addr?.port) || 0, String(addr?.address || "127.0.0.1"), (err: any) => err ? reject(err) : resolve(null));
+      });
+      return null;
+    },
+    udpClose: async (socketId: string) => {
+      const s = udps.get(String(socketId));
+      if (s) { try { s.close(); } catch { /* ignore */ } udps.delete(String(socketId)); udpHooks.delete(String(socketId)); }
+      return null;
+    },
+    udpOnData: (socketId: string, handler: (data: any) => void) => udpHooks.set(String(socketId), handler),
+    tcpConnect: async (host: string, port: number, options?: any) => {
+      return new Promise((resolve, reject) => {
+        const sock = net.connect({ host: String(host), port: Number(port) });
+        const id = nextId("tcp");
+        const timer = setTimeout(() => { try { sock.destroy(); } catch { /* ignore */ } reject(new Error("TCP 连接超时")); }, Number(options?.timeout) || 10000);
+        sock.once("connect", () => {
+          clearTimeout(timer);
+          tcpSockets.set(id, sock);
+          resolve({ socketId: id, localAddr: `${sock.localAddress}:${sock.localPort}`, remoteAddr: `${host}:${port}` });
+        });
+        sock.once("error", (e) => { clearTimeout(timer); reject(e); });
+        sock.on("data", (buf) => { const h = tcpDataHooks.get(id); if (h) h({ data: buf.toString("base64") }); });
+        sock.on("close", () => {
+          tcpSockets.delete(id);
+          const h = tcpCloseHooks.get(id);
+          if (h) h();
+          tcpDataHooks.delete(id); tcpCloseHooks.delete(id);
+        });
+      });
+    },
+    tcpSend: async (socketId: string, data: string) => {
+      const s = tcpSockets.get(String(socketId));
+      if (!s) throw new Error("TCP socket 不存在");
+      s.write(Buffer.from(String(data)));
+      return null;
+    },
+    tcpClose: async (socketId: string) => {
+      const s = tcpSockets.get(String(socketId));
+      if (s) { try { s.end(); } catch { /* ignore */ } tcpSockets.delete(String(socketId)); }
+      return null;
+    },
+    tcpOnData: (socketId: string, handler: (data: any) => void) => tcpDataHooks.set(String(socketId), handler),
+    tcpOnClose: (socketId: string, handler: () => void) => tcpCloseHooks.set(String(socketId), handler),
+  };
+}
+
+/** host.ws:WebSocket 客户端(文本直传,二进制 base64)。 */
+export function makeWsApi(): any {
+  const sockets = new Map<string, any>();
+  const msgHooks = new Map<string, (data: any) => void>();
+  const closeHooks = new Map<string, (code: number, reason: string) => void>();
+  const nextId = () => `ws${Date.now()}${Math.floor(Math.random() * 10000)}`;
+  return {
+    connect: async (url: string, options?: any) => {
+      return new Promise((resolve, reject) => {
+        const ws = new WebSocket(String(url), options?.protocols, {
+          headers: options?.headers || {},
+          handshakeTimeout: Number(options?.timeout) || 10000,
+        });
+        const id = nextId();
+        ws.once("open", () => { sockets.set(id, ws); resolve({ socketId: id }); });
+        ws.once("error", (e) => reject(e));
+        ws.on("message", (data, isBinary) => {
+          const h = msgHooks.get(id);
+          if (h) h(isBinary ? { data: Buffer.from(data as any).toString("base64"), binary: true } : { data: String(data), binary: false });
+        });
+        ws.on("close", (code, reason) => {
+          sockets.delete(id);
+          const h = closeHooks.get(id);
+          if (h) h(code || 0, String(reason || ""));
+          msgHooks.delete(id); closeHooks.delete(id);
+        });
+      });
+    },
+    wsSend: async (socketId: string, data: string) => {
+      const ws = sockets.get(String(socketId));
+      if (!ws) throw new Error("WS 连接不存在");
+      ws.send(String(data));
+      return null;
+    },
+    wsClose: async (socketId: string) => {
+      const ws = sockets.get(String(socketId));
+      if (ws) { try { ws.close(); } catch { /* ignore */ } sockets.delete(String(socketId)); }
+      return null;
+    },
+    wsOnMessage: (socketId: string, handler: (data: any) => void) => msgHooks.set(String(socketId), handler),
+    wsOnClose: (socketId: string, handler: (code: number, reason: string) => void) => closeHooks.set(String(socketId), handler),
+  };
+}
+
+/** host.jsenv:嵌套 QuickJS 子环境(独立 context,与主沙箱共享 WASM 模块)。 */
+export function makeJsenvApi(): any {
+  const envs = new Map<string, { runtime: any; ctx: any }>();
+  const modulePromise = getSandboxModule();
+  return {
+    create: async (name: string, initCode?: string) => {
+      const n = String(name);
+      if (envs.has(n)) return n;
+      const module = await modulePromise;
+      const runtime = module.newRuntime();
+      runtime.setMemoryLimit(64 * 1024 * 1024);
+      runtime.setMaxStackSize(512 * 1024);
+      let deadline = Date.now() + 30000;
+      runtime.setInterruptHandler(() => Date.now() > deadline);
+      const ctx = runtime.newContext();
+      if (initCode) {
+        const r = ctx.evalCode(String(initCode));
+        if (r.error !== undefined) {
+          const e = ctx.dump(r.error); r.error.dispose();
+          try { ctx.dispose(); runtime.dispose(); } catch { /* ignore */ }
+          throw new Error(`jsenv init 失败: ${e}`);
+        }
+        ctx.unwrapResult(r).dispose();
+      }
+      envs.set(n, { runtime, ctx });
+      return n;
+    },
+    execute: async (name: string, code: string) => {
+      const e = envs.get(String(name));
+      if (!e) throw new Error(`jsenv 不存在: ${name}`);
+      deadlineRefresh(e, 30000);
+      const r = e.ctx.evalCode(String(code));
+      if (r.error !== undefined) {
+        const msg = e.ctx.dump(r.error); r.error.dispose();
+        return { ok: false, error: String(msg) };
+      }
+      const vh = e.ctx.unwrapResult(r);
+      const v = e.ctx.dump(vh);
+      vh.dispose();
+      return { ok: true, result: v };
+    },
+    destroy: async (name: string) => {
+      const e = envs.get(String(name));
+      if (e) {
+        try { e.ctx.dispose(); } catch { /* ignore */ }
+        try { e.runtime.dispose(); } catch { /* ignore */ }
+        envs.delete(String(name));
+      }
+      return null;
+    },
+  };
+  function deadlineRefresh(e: { runtime: any }, ms: number) {
+    const dl = Date.now() + ms;
+    try { e.runtime.setInterruptHandler(() => Date.now() > dl); } catch { /* ignore */ }
+  }
 }
 
 /** Validate a plugin manifest. Returns an error string, or null when valid. Pure. */
@@ -210,6 +443,11 @@ export async function discoverExternalPlugins(
           getHostUrl: async () => process.env.DLNA_BASE_URL || "",
           getNetworkAddresses: async () => getNetworkAddresses(),
         },
+        fs: makeFsApi(path.dirname(file)),
+        command: makeCommandApi(),
+        net: makeNetApi(),
+        ws: makeWsApi(),
+        jsenv: makeJsenvApi(),
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       const manifest: PluginManifest = sandbox.manifest;

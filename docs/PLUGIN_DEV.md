@@ -171,6 +171,11 @@ globalThis.__mfPlugin = {
 | `host.comm` | 插件间通信（`send/broadcast/on`） | `inter-plugin` |
 | `host.songs` | 宿主曲库**只读查询**（`list({limit,offset})` / `search(query,{limit})` / `getById(id)`），返回脱敏歌曲视图 `{ id, title, artist, album, duration, coverArt, playCount, genre, track, type }`（不含内部路径字段） | `songs:read` |
 | `host.plugin` | 宿主身份/地址信息（`getHostUrl()` 返回 `DLNA_BASE_URL` 配置值、`getNetworkAddresses()` 返回本机 IPv4 列表） | —（只读低敏） |
+| `host.fs` | 插件**专属目录** `<data>/plugins/<id>/files/` 内文件读写：`readFile/writeFile/appendFile/readdir/unlink/exists/mkdir/stat/rename`（**路径穿越拒绝**，任何越界路径直接抛错） | `fs` |
+| `host.command` | 执行外部命令：`exec(program, args, {timeout})`（走 `execFile` 不经 shell，默认超时 30s）、`start(name, program, args)` / `stop(name)` / `isRunning(name)` 管理常驻进程 | `command` |
+| `host.net` | 原始网络 socket：`udpBind({port,address,reuseAddr})` / `udpSend(id, data, {address,port})` / `udpClose` / `onData(id, handler)`；`tcpConnect(host, port, {timeout})` 返回 `{ send, onData, onClose, close }`。数据以 **base64** 传输（沙箱提供 `btoa/atob`），事件经回调推回 VM | `net` |
+| `host.ws` | WebSocket 客户端：`connect(url, {headers, protocols, timeout})` 返回 `{ send, onMessage, onClose, close }`（文本直传、二进制 base64） | `websocket` |
+| `host.jsenv` | 嵌套 QuickJS 子环境跑隔离脚本：`create(name, initCode)` / `execute(name, code)` / `destroy(name)`——子环境只有标准 JS，**没有 host.***，无法触达宿主 | `jsenv` |
 
 ### 5.1 权限白名单 `KNOWN_PERMISSIONS`
 
@@ -178,11 +183,12 @@ manifest 的 `permissions` 只能是白名单中的值，支持命名空间通�
 
 ```
 log  storage  net  command  fs  fs:music  fs:external
+websocket  jsenv
 songs:read  songs:write  playlists:read  playlists:write  inter-plugin
 ```
 
-> **已桥接的权限**：`log` / `storage` / `net`（`host.http`）/ `inter-plugin`（`host.comm`）/ `songs:read`（`host.songs` 只读）。
-> **挂名未桥接**（白名单校验放行，但沙箱里没有对应宿主函数——刻意保留为未来扩展位）：`command`、`fs`、`fs:music`、`fs:external`、`songs:write`、`playlists:*`。外置插件无法改宿主曲库、无法执行命令或读写文件——网络经 `host.http`、存储经 `host.storage`，天然受限。
+> **已桥接的权限**：`log` / `storage` / `net`（`host.http` + `host.net` socket）/ `inter-plugin`（`host.comm`）/ `songs:read`（`host.songs`）/ `fs`（`host.fs` 插件目录内）/ `command`（`host.command`）/ `websocket`（`host.ws`）/ `jsenv`（`host.jsenv`）。
+> **挂名未桥接**（白名单校验放行，但沙箱里没有对应宿主函数——刻意保留为未来扩展位）：`fs:music`、`fs:external`、`songs:write`、`playlists:*`。外置插件无法改宿主曲库、无法读写宿主音乐库文件；`host.fs` 被限定在插件自己的 `files/` 目录。
 
 ---
 
@@ -206,6 +212,11 @@ host.comm.broadcast({ type: "tick" });
 4. **权限执行点**：`host.http` 无 `net` 权限直接拒绝，不发起请求。
 5. **minAppVersion**：低于要求版本跳过。
 6. **id 冲突**：内置插件不可被外置遮蔽。
+7. **高风险能力的硬限制**（v1.4.0+，均经权限执行点 + 运行期限制）：
+   - `host.fs` 只能读写插件自己的 `<data>/plugins/<id>/files/`，**路径穿越（`../`、绝对路径）在宿主侧直接抛错**；
+   - `host.command.exec` 走 `execFile`（**不经 shell**，参数不可拼接注入），默认 30s 超时、16MB 输出上限；`start` 管理的常驻进程随 `stop`/退出回收；
+   - `host.net` / `host.ws` 与 `host.http` 同级（需 `net` / `websocket` 权限），socket 有连接超时；
+   - `host.jsenv` 子环境**只有标准 JS，没有 `host.*`**——嵌套脚本无法触达宿主。
 
 ---
 
@@ -341,6 +352,39 @@ globalThis.__mfPlugin = {
 ```
 
 > `host.songs.search("周杰伦")` 会模糊匹配 `title / artist / album`；`list({ limit, offset })` 支持分页（limit 上限 500）。返回的歌曲是**脱敏视图**——拿不到 `path` / `streamHeaders` / `sourceData` 等内部字段。
+
+### 10.4 高风险能力（host.fs + host.command，需 `fs` + `command` 权限）
+
+```js
+globalThis.__mfPlugin = {
+  manifest: {
+    id: "demo-fs-cmd",
+    name: "示例文件+命令",
+    version: "1.0.0",
+    type: "lyrics",
+    capabilities: ["lyricProvider"],
+    permissions: ["fs", "command"],
+    defaultEnabled: false,
+    minAppVersion: "1.4.0",
+    configSchema: [],
+  },
+  create(host) {
+    return {
+      async searchLyrics(song) {
+        // fs: 只能读写 <data>/plugins/demo-fs-cmd/files/ 内的文件(穿越直接抛错)
+        const report = "files/report.txt";
+        await host.fs.mkdir("files", { recursive: true });
+        await host.fs.writeFile(report, `title=${song.title}\ntime=${Date.now()}`);
+        // command: execFile 执行,不经 shell,默认 30s 超时
+        const r = await host.command.exec("node", ["-e", "console.log('ok')"], { timeout: 5000 });
+        return { text: `wrote=${r.code === 0} stdout=${r.stdout.trim()}` };
+      },
+    };
+  },
+};
+```
+
+> ⚠️ `command` / `fs` / `net` / `websocket` / `jsenv` 是**高风险权限**：只给可信插件声明。`host.command` 等于把该插件的代码当作可执行程序信任——虽然沙箱隔离了代码本身，但**通过 `command` 跑出的进程是宿主级的**。安装第三方插件前请确认其来源与 `plugin.json` 声明的权限。
 
 ---
 

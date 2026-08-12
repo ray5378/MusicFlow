@@ -72,6 +72,29 @@ if (typeof URL === "undefined") {
     }
   };
 }
+if (typeof btoa === "undefined") {
+  const _B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  globalThis.btoa = function (str) {
+    const b = String(str);
+    let out = "";
+    for (let i = 0; i < b.length; i += 3) {
+      const c1 = b.charCodeAt(i) & 0xff;
+      const c2 = i + 1 < b.length ? b.charCodeAt(i + 1) & 0xff : 0;
+      const c3 = i + 2 < b.length ? b.charCodeAt(i + 2) & 0xff : 0;
+      out += _B64[c1 >> 2] + _B64[((c1 & 3) << 4) | (c2 >> 4)] + (i + 1 < b.length ? _B64[((c2 & 15) << 2) | (c3 >> 6)] : "=") + (i + 2 < b.length ? _B64[c3 & 63] : "=");
+    }
+    return out;
+  };
+  globalThis.atob = function (str) {
+    const s = String(str).replace(/=+$/, "");
+    let out = "";
+    for (let i = 0; i < s.length; i += 4) {
+      const n = (_B64.indexOf(s[i]) << 18) | (_B64.indexOf(s[i + 1]) << 12) | (_B64.indexOf(s[i + 2]) << 6) | _B64.indexOf(s[i + 3]);
+      out += String.fromCharCode((n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff);
+    }
+    return out.slice(0, Math.floor(s.length * 3 / 4));
+  };
+}
 `;
 
 // 同步方法:core 同步取值(不能返回 Promise)。插件契约要求这些方法纯同步。
@@ -132,12 +155,61 @@ export interface SandboxHostEnv {
     getHostUrl(): Promise<string>;
     getNetworkAddresses(): Promise<string[]>;
   };
+  /** host.fs:插件专属目录(<data>/plugins/<id>/files)内文件读写(需 fs 权限,防路径穿越)。 */
+  fs: {
+    readFile(path: string, encoding?: string): Promise<string>;
+    writeFile(path: string, data: string, encoding?: string): Promise<null>;
+    appendFile(path: string, data: string, encoding?: string): Promise<null>;
+    readdir(path: string): Promise<string[]>;
+    unlink(path: string): Promise<null>;
+    exists(path: string): Promise<boolean>;
+    mkdir(path: string, options?: { recursive?: boolean }): Promise<null>;
+    stat(path: string): Promise<any | null>;
+    rename(oldPath: string, newPath: string): Promise<null>;
+  };
+  /** host.command:执行外部命令(需 command 权限)。exec 用 execFile 不经 shell;start/stop 管理常驻进程。 */
+  command: {
+    exec(program: string, args?: string[], options?: any): Promise<any>;
+    start(name: string, program: string, args?: string[]): Promise<any>;
+    stop(name: string): Promise<null>;
+    isRunning(name: string): Promise<boolean>;
+  };
+  /** host.net:原始 UDP/TCP socket(需 net 权限)。事件回调经 onData/onClose 推回 VM。 */
+  net: {
+    udpBind(options?: any): Promise<any>;
+    udpSend(socketId: string, data: string, addr?: any): Promise<null>;
+    udpClose(socketId: string): Promise<null>;
+    udpOnData(socketId: string, handler: (data: any) => void): void;
+    tcpConnect(host: string, port: number, options?: any): Promise<any>;
+    tcpSend(socketId: string, data: string): Promise<null>;
+    tcpClose(socketId: string): Promise<null>;
+    tcpOnData(socketId: string, handler: (data: any) => void): void;
+    tcpOnClose(socketId: string, handler: () => void): void;
+  };
+  /** host.ws:WebSocket 客户端(需 websocket 权限)。 */
+  ws: {
+    connect(url: string, options?: any): Promise<any>;
+    wsSend(socketId: string, data: string): Promise<null>;
+    wsClose(socketId: string): Promise<null>;
+    wsOnMessage(socketId: string, handler: (data: any) => void): void;
+    wsOnClose(socketId: string, handler: (code: number, reason: string) => void): void;
+  };
+  /** host.jsenv:嵌套 QuickJS 子环境跑隔离脚本(需 jsenv 权限)。 */
+  jsenv: {
+    create(name: string, initCode?: string): Promise<string>;
+    execute(name: string, code: string): Promise<any>;
+    destroy(name: string): Promise<null>;
+  };
 }
 
 let moduleSingleton: Promise<QuickJSWASMModule> | null = null;
 function getQuickJS(): Promise<QuickJSWASMModule> {
   if (!moduleSingleton) moduleSingleton = newQuickJSWASMModule();
   return moduleSingleton;
+}
+/** 共享 QuickJS WASM 模块(供 jsenv 嵌套子环境等复用,避免重复加载 WASM)。 */
+export function getSandboxModule(): Promise<QuickJSWASMModule> {
+  return getQuickJS();
 }
 
 export class SandboxedPlugin {
@@ -315,7 +387,15 @@ export class SandboxedPlugin {
             }
             return impl(...args);
           })
-          .then((value) => { if (deferred.alive) deferred.resolve(this.jsToHandle(value)); })
+          .then((value) => {
+            if (deferred.alive) {
+              // raw-handle 通道:impl 返回 { __mfRawHandle } 时直接 resolve 该 handle
+              // (用于 tcpConnect / ws.connect 这类需要返回「含函数对象」的场景)。
+              const raw = value && (value as any).__mfRawHandle;
+              if (raw) { deferred.resolve(raw); try { raw.dispose(); } catch { /* ignore */ } }
+              else deferred.resolve(this.jsToHandle(value));
+            }
+          })
           .catch((err) => {
             const msg = String((err && err.message) || err);
             if (deferred.alive) deferred.resolve(this.jsToHandle({ ok: false, error: { name: "HostError", message: msg } }));
@@ -419,6 +499,11 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "comm", commObj);
     c.setProp(hostObj, "songs", songsObj);
     c.setProp(hostObj, "plugin", pluginObj);
+    c.setProp(hostObj, "fs", this.injectFs());
+    c.setProp(hostObj, "command", this.injectCommand());
+    c.setProp(hostObj, "net", this.injectNet());
+    c.setProp(hostObj, "ws", this.injectWs());
+    c.setProp(hostObj, "jsenv", this.injectJsenv());
     c.setProp(hostObj, "log", logFn);
     c.setProp(hostObj, "version", c.newString(this.env.version || ""));
     httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); pluginObj.dispose(); logFn.dispose();
@@ -437,6 +522,173 @@ export class SandboxedPlugin {
       this.safeDispose(cfgHandle);
       hostHandle.dispose();
     } catch { /* ignore */ }
+  }
+
+  // ---------- 宿主事件 → VM handler 派发(net/ws 用) ----------
+
+  /** 把 VM 函数 handle 注册到全局槽位(宿主事件到达时派发)。 */
+  private registerVmHandler(globalKey: string, handlerHandle: QuickJSHandle): void {
+    try { this.ctx.setProp(this.ctx.global, globalKey, handlerHandle); } catch { /* ignore */ }
+  }
+
+  /** 派发事件到 VM handler(信封调用,异常不扩散宿主)。 */
+  private callVmHandler(globalKey: string, payload: any): void {
+    if (this.disposed || !this.ctx || !this.runtime?.alive) return;
+    try {
+      const code = `(async () => { try { const h = globalThis[${JSON.stringify(globalKey)}]; if (typeof h !== "function") return { ok: true }; await h(${JSON.stringify(payload)}); return { ok: true }; } catch (e) { return { ok: false, error: String(e && e.message || e) }; } })()`;
+      const r = this.ctx.evalCode(code);
+      if (r.error !== undefined) { r.error.dispose(); return; }
+      const ph = this.ctx.unwrapResult(r);
+      const rp = this.ctx.resolvePromise(ph);
+      rp.then(() => { try { ph.dispose(); } catch { /* ignore */ } }, () => { try { ph.dispose(); } catch { /* ignore */ } });
+      if (this.runtime?.alive) this.runtime.executePendingJobs();
+    } catch { /* ignore */ }
+  }
+
+  // ---------- host.* 高风险能力组注入(fs / command / net / ws / jsenv) ----------
+
+  private injectFs(): QuickJSHandle {
+    const c = this.ctx;
+    const obj = c.newObject();
+    const defs: Array<[string, (...a: any[]) => any]> = [
+      ["readFile", (p: any, enc: any) => this.env.fs.readFile(String(p), enc ? String(enc) : undefined)],
+      ["writeFile", (p: any, d: any, enc: any) => this.env.fs.writeFile(String(p), String(d), enc ? String(enc) : undefined)],
+      ["appendFile", (p: any, d: any, enc: any) => this.env.fs.appendFile(String(p), String(d), enc ? String(enc) : undefined)],
+      ["readdir", (p: any) => this.env.fs.readdir(String(p))],
+      ["unlink", (p: any) => this.env.fs.unlink(String(p))],
+      ["exists", (p: any) => this.env.fs.exists(String(p))],
+      ["mkdir", (p: any, o: any) => this.env.fs.mkdir(String(p), o || {})],
+      ["stat", (p: any) => this.env.fs.stat(String(p))],
+      ["rename", (a: any, b: any) => this.env.fs.rename(String(a), String(b))],
+    ];
+    for (const [name, impl] of defs) {
+      const fn = this.hostAsync(name, impl, "fs");
+      c.setProp(obj, name, fn);
+      fn.dispose();
+    }
+    return obj;
+  }
+
+  private injectCommand(): QuickJSHandle {
+    const c = this.ctx;
+    const obj = c.newObject();
+    const execFn = this.hostAsync("exec", (program: any, args: any, options: any) =>
+      this.env.command.exec(String(program), Array.isArray(args) ? args.map(String) : [], options || {}), "command");
+    const startFn = this.hostAsync("start", (name: any, program: any, args: any) =>
+      this.env.command.start(String(name), String(program), Array.isArray(args) ? args.map(String) : []), "command");
+    const stopFn = this.hostAsync("stop", (name: any) => this.env.command.stop(String(name)), "command");
+    const isRunningFn = this.hostAsync("isRunning", (name: any) => this.env.command.isRunning(String(name)), "command");
+    c.setProp(obj, "exec", execFn);
+    c.setProp(obj, "start", startFn);
+    c.setProp(obj, "stop", stopFn);
+    c.setProp(obj, "isRunning", isRunningFn);
+    execFn.dispose(); startFn.dispose(); stopFn.dispose(); isRunningFn.dispose();
+    return obj;
+  }
+
+  /** 构造 TCP socket 的 VM 对象(含 send/onData/onClose/close 方法)。 */
+  private buildTcpSocketHandle(info: any): QuickJSHandle {
+    const c = this.ctx;
+    const socketId = String(info.socketId);
+    const obj = c.newObject();
+    const sendFn = this.hostAsync("send", (data: any) => this.env.net.tcpSend(socketId, String(data)), "net");
+    const closeFn = this.hostAsync("close", () => this.env.net.tcpClose(socketId), "net");
+    const onDataFn = c.newFunction("onData", (handlerHandle: QuickJSHandle) => {
+      const key = "__mfNetTcp_" + socketId;
+      this.registerVmHandler(key, handlerHandle);
+      this.env.net.tcpOnData(socketId, (data: any) => this.callVmHandler(key, data));
+      return c.undefined;
+    });
+    const onCloseFn = c.newFunction("onClose", (handlerHandle: QuickJSHandle) => {
+      const key = "__mfNetTcpClose_" + socketId;
+      this.registerVmHandler(key, handlerHandle);
+      this.env.net.tcpOnClose(socketId, () => this.callVmHandler(key, null));
+      return c.undefined;
+    });
+    c.setProp(obj, "socketId", c.newString(socketId));
+    c.setProp(obj, "localAddr", info.localAddr ? c.newString(String(info.localAddr)) : c.null);
+    c.setProp(obj, "remoteAddr", info.remoteAddr ? c.newString(String(info.remoteAddr)) : c.null);
+    c.setProp(obj, "send", sendFn);
+    c.setProp(obj, "onData", onDataFn);
+    c.setProp(obj, "onClose", onCloseFn);
+    c.setProp(obj, "close", closeFn);
+    sendFn.dispose(); closeFn.dispose(); onDataFn.dispose(); onCloseFn.dispose();
+    return obj;
+  }
+
+  private injectNet(): QuickJSHandle {
+    const c = this.ctx;
+    const obj = c.newObject();
+    const udpBind = this.hostAsync("udpBind", (options: any) => this.env.net.udpBind(options || {}), "net");
+    const udpSend = this.hostAsync("udpSend", (sid: any, data: any, addr: any) => this.env.net.udpSend(String(sid), String(data), addr), "net");
+    const udpClose = this.hostAsync("udpClose", (sid: any) => this.env.net.udpClose(String(sid)), "net");
+    c.setProp(obj, "udpBind", udpBind);
+    c.setProp(obj, "udpSend", udpSend);
+    c.setProp(obj, "udpClose", udpClose);
+    udpBind.dispose(); udpSend.dispose(); udpClose.dispose();
+
+    const udpOnData = c.newFunction("onData", (sidHandle: QuickJSHandle, handlerHandle: QuickJSHandle) => {
+      const sid = String(c.dump(sidHandle));
+      const key = "__mfNetUdp_" + sid;
+      this.registerVmHandler(key, handlerHandle);
+      this.env.net.udpOnData(sid, (data: any) => this.callVmHandler(key, data));
+      return c.undefined;
+    });
+    c.setProp(obj, "onData", udpOnData);
+    udpOnData.dispose();
+
+    const tcpConnect = this.hostAsync("tcpConnect", (host: any, port: any, options: any) =>
+      this.env.net.tcpConnect(String(host), Number(port), options || {}).then((info: any) => ({ __mfRawHandle: this.buildTcpSocketHandle(info) })), "net");
+    c.setProp(obj, "tcpConnect", tcpConnect);
+    tcpConnect.dispose();
+    return obj;
+  }
+
+  private injectWs(): QuickJSHandle {
+    const c = this.ctx;
+    const obj = c.newObject();
+    const connect = this.hostAsync("connect", (url: any, options: any) =>
+      this.env.ws.connect(String(url), options || {}).then((info: any) => {
+        const socketId = String(info.socketId);
+        const sockObj = c.newObject();
+        const sendFn = this.hostAsync("send", (data: any) => this.env.ws.wsSend(socketId, String(data)), "websocket");
+        const closeFn = this.hostAsync("close", () => this.env.ws.wsClose(socketId), "websocket");
+        const onMessageFn = c.newFunction("onMessage", (handlerHandle: QuickJSHandle) => {
+          const key = "__mfWsMsg_" + socketId;
+          this.registerVmHandler(key, handlerHandle);
+          this.env.ws.wsOnMessage(socketId, (data: any) => this.callVmHandler(key, data));
+          return c.undefined;
+        });
+        const onCloseFn = c.newFunction("onClose", (handlerHandle: QuickJSHandle) => {
+          const key = "__mfWsClose_" + socketId;
+          this.registerVmHandler(key, handlerHandle);
+          this.env.ws.wsOnClose(socketId, (code: number, reason: string) => this.callVmHandler(key, { code, reason }));
+          return c.undefined;
+        });
+        c.setProp(sockObj, "socketId", c.newString(socketId));
+        c.setProp(sockObj, "send", sendFn);
+        c.setProp(sockObj, "onMessage", onMessageFn);
+        c.setProp(sockObj, "onClose", onCloseFn);
+        c.setProp(sockObj, "close", closeFn);
+        sendFn.dispose(); closeFn.dispose(); onMessageFn.dispose(); onCloseFn.dispose();
+        return sockObj;
+      }), "websocket");
+    c.setProp(obj, "connect", connect);
+    connect.dispose();
+    return obj;
+  }
+
+  private injectJsenv(): QuickJSHandle {
+    const c = this.ctx;
+    const obj = c.newObject();
+    const createFn = this.hostAsync("create", (name: any, initCode: any) => this.env.jsenv.create(String(name), initCode ? String(initCode) : ""), "jsenv");
+    const executeFn = this.hostAsync("execute", (name: any, code: any) => this.env.jsenv.execute(String(name), String(code)), "jsenv");
+    const destroyFn = this.hostAsync("destroy", (name: any) => this.env.jsenv.destroy(String(name)), "jsenv");
+    c.setProp(obj, "create", createFn);
+    c.setProp(obj, "execute", executeFn);
+    c.setProp(obj, "destroy", destroyFn);
+    createFn.dispose(); executeFn.dispose(); destroyFn.dispose();
+    return obj;
   }
 
   // ---------- 调用 ----------

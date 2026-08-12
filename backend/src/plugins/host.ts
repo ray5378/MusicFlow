@@ -41,6 +41,8 @@ export const KNOWN_PERMISSIONS: string[] = [
   "fs",
   "fs:music",
   "fs:external",
+  "websocket",
+  "jsenv",
   "songs:read",
   "songs:write",
   "playlists:read",
