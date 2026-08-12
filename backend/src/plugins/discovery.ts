@@ -524,10 +524,16 @@ export async function discoverExternalPlugins(
       // 沙箱 hasPerm 每次调用读 this.env.permissions 同一引用,此处修改即时生效。
       const derived = derivePermissions(manifest.capabilities);
       const merged = new Set<string>([...env.permissions, ...(manifest.permissions ?? []), ...derived]);
+      // 源插件按契约必然需要联网(source 的职责就是从远端取数据);
+      // 即使插件文件老旧、未声明 capabilities/permissions,也保证能联网,
+      // 兜住「HTTP undefined」整类静默失效(实测:net 未授权时 host.http 返回
+      // {ok:false,error} 无 status 字段 → 插件读 r.status 得 undefined)。
+      // 注意:仅补 net/storage/fs 这类最小必要权限,绝不动用 jsenv/command/*。
+      if (manifest.type === "source") merged.add("net");
       const added = [...merged].filter((p) => !env.permissions.includes(p));
       if (added.length) {
         env.permissions = [...merged];
-        console.warn(`[PLUGIN] ${id}: 按能力推导自动补齐权限: ${added.join(",")}`);
+        console.warn(`[PLUGIN] ${id}: 按能力/类型推导自动补齐权限: ${added.join(",")}`);
       }
       const reason = validateManifest(manifest);
       if (reason) { sandbox.dispose(); console.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }

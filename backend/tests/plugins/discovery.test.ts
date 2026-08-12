@@ -140,6 +140,26 @@ beforeAll(() => {
     };`,
     "utf8",
   );
+
+  // 6c) 最坏情形兜底:source 插件声明了「非网络型」capabilities(playlistFile→fs),
+  //     **不写任何 permissions**。靠 capabilities 自身推导只拿到 fs、拿不到 net;
+  //     但 source 类型按契约必联网 → 规则补 net,确保 test/search/lyrics 不因
+  //     host.http 被拒而静默失效(HTTP undefined)。
+  const srcNopermDir = path.join(tmp, "src-noperm");
+  fs.mkdirSync(srcNopermDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(srcNopermDir, "plugin.json"),
+    JSON.stringify({ id: "src-noperm", name: "SrcNoPerm", version: "1.0.0", type: "source", capabilities: ["playlistFile"], configSchema: [] }),
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(srcNopermDir, "index.js"),
+    `globalThis.__mfPlugin = {
+      manifest: { id: "src-noperm", name: "SrcNoPerm", version: "1.0.0", type: "source", capabilities: ["playlistFile"], configSchema: [] },
+      create() { return { streamUrl: () => "http://x", test: async () => ({ success: true }) }; },
+    };`,
+    "utf8",
+  );
 });
 
 afterAll(() => {
@@ -239,7 +259,7 @@ describe("discoverExternalPlugins", () => {
     );
 
     const loaded = await discoverExternalPlugins("1.0.0", tmp);
-    expect(loaded).toBe(3); // valid-plugin + perm-fallback + perm-derived
+    expect(loaded).toBe(4); // valid-plugin + perm-fallback + perm-derived + src-noperm
     expect(getPlugin("valid-plugin")).toBeDefined();
     expect(getPlugin("badmanifest")).toBeUndefined();
     expect(getPlugin("oldversion")).toBeUndefined(); // needs 2.0.0
@@ -261,6 +281,15 @@ describe("discoverExternalPlugins", () => {
     // 既没在 plugin.json 也没在 index.js 写 permissions,但 capability 含
     // search/recommend/stream/lyricProvider → 推导结果必须含 "net",
     // 否则 host.http 会被权限门控拒绝(测试连接 HTTP undefined / 歌词拿不到)。
+    expect(perms).toContain("net");
+  });
+
+  it("P0+:source 插件只声明非网络型 capabilities 且不写 permissions 也按契约补 net(杜绝 HTTP undefined)", () => {
+    const sb = pluginSandboxes.get("src-noperm");
+    expect(sb).toBeDefined();
+    const perms = (sb as any).env?.permissions as string[];
+    // 仅靠 capabilities 推导只能拿到 fs(playlistFile→fs);source 类型契约补 net,
+    // 确保 test/search/lyrics 不因 host.http 被拒而静默失效(HTTP undefined)。
     expect(perms).toContain("net");
   });
 

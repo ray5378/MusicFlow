@@ -402,7 +402,10 @@ export class SandboxedPlugin {
           })
           .catch((err) => {
             const msg = String((err && err.message) || err);
-            if (deferred.alive) deferred.resolve(this.jsToHandle({ ok: false, error: { name: "HostError", message: msg } }));
+            // 兜底信封必须带 status 字段,否则插件读 r.status 得 undefined
+            // (表现为 "HTTP undefined" 这类无从排查的报错)。补 status:0 让
+            // 插件侧统一走 "HTTP 0" 分支并可读 r.error 看到真实原因。
+            if (deferred.alive) deferred.resolve(this.jsToHandle({ ok: false, status: 0, error: { name: "HostError", message: msg } }));
           })
           .finally(() => {
             try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
