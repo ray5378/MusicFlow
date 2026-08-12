@@ -92,12 +92,15 @@ export function removeRegistry(id: string): void {
 // That distinction matters: an admin who deliberately removes the official
 // registry must not have it silently re-added on the next restart.
 //
-// Overridable via env:
-//   MUSICFLOW_OFFICIAL_REGISTRY=https://my-mirror/registry.json   (internal mirror)
-//   MUSICFLOW_OFFICIAL_REGISTRY=                                   (empty = opt out)
+// 官方源默认走 Gitee raw(2026-08-12 起):插件分发全链路(registry.json /
+// plugin.json / 安装包 tar.gz)的地址均指向 gitee.com,与 GitHub 完全解耦——
+// GitHub 是否可达不影响插件市场与安装;源码仍同步在 GitHub 仓库。可用
+// MUSICFLOW_OFFICIAL_REGISTRY 覆盖:
+//   MUSICFLOW_OFFICIAL_REGISTRY=https://example.com/registry.json   (自建/镜像)
+//   MUSICFLOW_OFFICIAL_REGISTRY=                                    (空 = 完全关闭)
 const OFFICIAL_REGISTRY_URL =
   process.env.MUSICFLOW_OFFICIAL_REGISTRY ??
-  "https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json";
+  "https://gitee.com/ray5378/music-flow-plugins/raw/master/registry.json";
 
 // ==================== 拉取(直连,无镜像回退) ====================
 // 2026-08-12 起取消 GitHub→Gitee 镜像回退:插件包已改 raw 仓库文件分发,
