@@ -121,6 +121,17 @@ export interface SandboxHostEnv {
     broadcast(message: any): void;
     on(handler: (message: any) => void): void;
   };
+  /** host.songs:宿主曲库只读查询(需 songs:read 权限)。返回脱敏视图,不含内部字段。 */
+  songs: {
+    list(options?: { limit?: number; offset?: number }): Promise<any[]>;
+    search(query: string, options?: { limit?: number }): Promise<any[]>;
+    getById(id: string): Promise<any | null>;
+  };
+  /** host.plugin:宿主身份/地址信息(只读,低敏感,无需权限)。 */
+  plugin: {
+    getHostUrl(): Promise<string>;
+    getNetworkAddresses(): Promise<string[]>;
+  };
 }
 
 let moduleSingleton: Promise<QuickJSWASMModule> | null = null;
@@ -383,14 +394,34 @@ export class SandboxedPlugin {
       return c.undefined;
     });
 
+    // host.songs(曲库只读查询,需 songs:read;支持 songs:* 通配)
+    const songsObj = c.newObject();
+    const songsList = this.hostAsync("list", (options: any) => this.env.songs.list(options || {}), "songs:read");
+    const songsSearch = this.hostAsync("search", (query: any, options: any) => this.env.songs.search(String(query ?? ""), options || {}), "songs:read");
+    const songsGetById = this.hostAsync("getById", (id: any) => this.env.songs.getById(String(id)), "songs:read");
+    c.setProp(songsObj, "list", songsList);
+    c.setProp(songsObj, "search", songsSearch);
+    c.setProp(songsObj, "getById", songsGetById);
+    songsList.dispose(); songsSearch.dispose(); songsGetById.dispose();
+
+    // host.plugin(宿主身份/地址,只读低敏,无需权限)
+    const pluginObj = c.newObject();
+    const pluginGetHostUrl = this.hostAsync("getHostUrl", () => this.env.plugin.getHostUrl(), null);
+    const pluginGetAddresses = this.hostAsync("getNetworkAddresses", () => this.env.plugin.getNetworkAddresses(), null);
+    c.setProp(pluginObj, "getHostUrl", pluginGetHostUrl);
+    c.setProp(pluginObj, "getNetworkAddresses", pluginGetAddresses);
+    pluginGetHostUrl.dispose(); pluginGetAddresses.dispose();
+
     // host.config(每次调用前刷新)/ host.version
     const hostObj = c.newObject();
     c.setProp(hostObj, "http", httpFn);
     c.setProp(hostObj, "storage", storageObj);
     c.setProp(hostObj, "comm", commObj);
+    c.setProp(hostObj, "songs", songsObj);
+    c.setProp(hostObj, "plugin", pluginObj);
     c.setProp(hostObj, "log", logFn);
     c.setProp(hostObj, "version", c.newString(this.env.version || ""));
-    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); logFn.dispose();
+    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); pluginObj.dispose(); logFn.dispose();
     c.setProp(c.global, "__mfHost", hostObj);
     hostObj.dispose();
   }

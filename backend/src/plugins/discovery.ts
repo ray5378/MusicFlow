@@ -15,8 +15,12 @@
 //     skipped so an external file can't shadow a first-party plugin.
 
 import fs from "fs";
+import os from "os";
 import path from "path";
+import { eq, like, or } from "drizzle-orm";
 import { getDataDir } from "../utils/env.js";
+import { db } from "../db/index.js";
+import { songs } from "../db/schema.js";
 import { registerPlugin, getPlugin, getPluginConfig } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
@@ -38,6 +42,33 @@ const VALID_CAPS: PluginCapability[] = [
 
 /** 已加载外置插件的沙箱实例(id → SandboxedPlugin),热重载/卸载时 dispose。 */
 export const pluginSandboxes = new Map<string, SandboxedPlugin>();
+
+/** 本机 IPv4 地址(非回环),供 host.plugin.getNetworkAddresses 使用。 */
+function getNetworkAddresses(): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const it of list || []) {
+      if (it.family === "IPv4" && !it.internal) out.push(it.address);
+    }
+  }
+  return out;
+}
+
+/** songs 表 → 沙箱插件可见的脱敏视图(不含 path/streamHeaders/sourceData 等内部字段)。 */
+function toPluginSong(s: any): any {
+  return {
+    id: s.id,
+    title: s.title,
+    artist: s.artist || "",
+    album: s.album || "",
+    duration: s.duration || 0,
+    coverArt: s.coverArt || "",
+    playCount: s.playCount || 0,
+    genre: s.genre || "",
+    track: s.track || 0,
+    type: s.type || "local",
+  };
+}
 
 /** Validate a plugin manifest. Returns an error string, or null when valid. Pure. */
 export function validateManifest(manifest: any): string | null {  if (!manifest || typeof manifest !== "object") return "manifest 必须是对象";
@@ -154,6 +185,30 @@ export async function discoverExternalPlugins(
           send: (targetId: string, message: any) => comm.send(targetId, message),
           broadcast: (message: any) => comm.broadcast(message),
           on: (handler: (message: any) => void) => comm.on(handler),
+        },
+        songs: {
+          list: async (options?: any) => {
+            const limit = Math.min(Math.max(Number(options?.limit) || 200, 1), 500);
+            const offset = Math.max(Number(options?.offset) || 0, 0);
+            return db.select().from(songs).limit(limit).offset(offset).all().map(toPluginSong);
+          },
+          search: async (query: string, options?: any) => {
+            const q = String(query || "").trim();
+            if (!q) return [];
+            const limit = Math.min(Math.max(Number(options?.limit) || 50, 1), 200);
+            const likeQ = `%${q}%`;
+            return db.select().from(songs).where(
+              or(like(songs.title, likeQ), like(songs.artist, likeQ), like(songs.album, likeQ)),
+            ).limit(limit).all().map(toPluginSong);
+          },
+          getById: async (songId: string) => {
+            const s = db.select().from(songs).where(eq(songs.id, String(songId))).get();
+            return s ? toPluginSong(s) : null;
+          },
+        },
+        plugin: {
+          getHostUrl: async () => process.env.DLNA_BASE_URL || "",
+          getNetworkAddresses: async () => getNetworkAddresses(),
         },
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);

@@ -33,6 +33,15 @@ function makeEnv(overrides?: Partial<SandboxHostEnv>): SandboxHostEnv {
       broadcast: () => {},
       on: () => {},
     },
+    songs: {
+      list: async () => [{ id: "so-1", title: "Demo Song" }],
+      search: async (q) => [{ id: "so-1", title: "Demo Song", artist: "Demo" }],
+      getById: async (id) => (id === "so-1" ? { id: "so-1", title: "Demo Song", artist: "Demo", album: "A", duration: 120 } : null),
+    },
+    plugin: {
+      getHostUrl: async () => "http://host:46400",
+      getNetworkAddresses: async () => ["127.0.0.1"],
+    },
     ...overrides,
   };
 }
@@ -61,6 +70,38 @@ globalThis.__mfPlugin = {
       streamUrl(config, song, range) { return "http://demo/stream?id=" + song.id + "&apiKey=" + config.apiKey; },
       async onPlay(ev) { await host.storage.set("last", ev.songId); return { success: true }; },
       async onScrobble(ev) { const last = await host.storage.get("last"); return { ok: true, last: last }; }
+    };
+  }
+};
+`;
+
+const HOST_API_PLUGIN_CODE = `
+globalThis.__mfPlugin = {
+  manifest: {
+    id: "demo-hostapi",
+    name: "host API 演示",
+    version: "1.0.0",
+    type: "source",
+    capabilities: ["search"],
+    configSchema: [],
+    permissions: ["songs:read"]
+  },
+  create(host) {
+    return {
+      async search(config, params) {
+        if (params.byId) {
+          const s = await host.songs.getById(params.byId);
+          if (s && s.ok === false) throw new Error("DENIED:" + (s.error && s.error.message));
+          return { songs: s ? [{ id: s.id, title: s.title }] : [] };
+        }
+        const list = await host.songs.search(params.query);
+        return { songs: list.map((s) => ({ id: s.id, title: s.title })) };
+      },
+      async test(config) {
+        const url = await host.plugin.getHostUrl();
+        const addrs = await host.plugin.getNetworkAddresses();
+        return { success: true, message: "url=" + url + ";addrs=" + addrs.length };
+      }
     };
   }
 };
@@ -132,5 +173,29 @@ describe("QuickJS 插件沙箱", () => {
     const { impl } = await loadSandboxedPlugin("demo-sandbox", PLUGIN_CODE, makeEnv());
     const r = await impl.test({});
     expect(r.success).toBe(true);
+  });
+
+  it("host.songs.getById / search 走 songs:read 权限查询曲库", async () => {
+    const { impl } = await loadSandboxedPlugin("demo-hostapi", HOST_API_PLUGIN_CODE, makeEnv({ permissions: ["songs:read"] }));
+    const byId = await impl.search({}, { byId: "so-1" });
+    expect(byId.songs[0].title).toBe("Demo Song");
+    const bySearch = await impl.search({}, { query: "demo" });
+    expect(bySearch.songs[0].title).toBe("Demo Song");
+  });
+
+  it("host.songs 无 songs:read 权限时拒绝(PERMISSION_DENIED)", async () => {
+    const { impl } = await loadSandboxedPlugin("demo-hostapi", HOST_API_PLUGIN_CODE, makeEnv({ permissions: ["net"] }));
+    await expect(impl.search({}, { byId: "so-1" })).rejects.toThrow(/PERMISSION_DENIED: songs:read/);
+  });
+
+  it("host.plugin.getHostUrl / getNetworkAddresses 返回宿主信息", async () => {
+    const { impl } = await loadSandboxedPlugin("demo-hostapi", HOST_API_PLUGIN_CODE, makeEnv({
+      plugin: {
+        getHostUrl: async () => "http://ha:46400",
+        getNetworkAddresses: async () => ["192.168.1.5", "10.0.0.8"],
+      },
+    }));
+    const r = await impl.test({});
+    expect(r.message).toBe("url=http://ha:46400;addrs=2");
   });
 });

@@ -169,6 +169,8 @@ globalThis.__mfPlugin = {
 | `host.storage` | 插件级 JSON KV（`get/set/delete/keys`，异步） | `storage` |
 | `host.http(input, init)` | fetch 封装：`init` 可带 `{ method, headers, body, timeout }`；返回 `{ ok, status, headers, body(text) }` | `net` |
 | `host.comm` | 插件间通信（`send/broadcast/on`） | `inter-plugin` |
+| `host.songs` | 宿主曲库**只读查询**（`list({limit,offset})` / `search(query,{limit})` / `getById(id)`），返回脱敏歌曲视图 `{ id, title, artist, album, duration, coverArt, playCount, genre, track, type }`（不含内部路径字段） | `songs:read` |
+| `host.plugin` | 宿主身份/地址信息（`getHostUrl()` 返回 `DLNA_BASE_URL` 配置值、`getNetworkAddresses()` 返回本机 IPv4 列表） | —（只读低敏） |
 
 ### 5.1 权限白名单 `KNOWN_PERMISSIONS`
 
@@ -179,7 +181,8 @@ log  storage  net  command  fs  fs:music  fs:external
 songs:read  songs:write  playlists:read  playlists:write  inter-plugin
 ```
 
-> 沙箱里 `command` / `fs` 等高风险权限**不可用**（宿主未桥接它们）——外置插件网络经 `host.http`、存储经 `host.storage`，天然受限。
+> **已桥接的权限**：`log` / `storage` / `net`（`host.http`）/ `inter-plugin`（`host.comm`）/ `songs:read`（`host.songs` 只读）。
+> **挂名未桥接**（白名单校验放行，但沙箱里没有对应宿主函数——刻意保留为未来扩展位）：`command`、`fs`、`fs:music`、`fs:external`、`songs:write`、`playlists:*`。外置插件无法改宿主曲库、无法执行命令或读写文件——网络经 `host.http`、存储经 `host.storage`，天然受限。
 
 ---
 
@@ -307,6 +310,37 @@ globalThis.__mfPlugin = {
   },
 };
 ```
+
+### 10.3 读宿主曲库（host.songs，需 `songs:read`）
+
+```js
+globalThis.__mfPlugin = {
+  manifest: {
+    id: "demo-library",
+    name: "示例曲库统计",
+    version: "1.0.0",
+    type: "lyrics",
+    capabilities: ["lyricProvider"],
+    permissions: ["songs:read"],
+    defaultEnabled: false,
+    minAppVersion: "1.3.0",
+    configSchema: [],
+  },
+  create(host) {
+    return {
+      // 示例：给歌曲补充「同名曲目数」作为歌词缓存键的一部分
+      async searchLyrics(song) {
+        const hit = await host.songs.getById(song.songId || "");
+        if (!hit) return null;
+        const sameTitle = await host.songs.search(hit.title, { limit: 20 });
+        return { text: `[${hit.title}] 曲库共 ${sameTitle.length} 首同名/相关曲目` };
+      },
+    };
+  },
+};
+```
+
+> `host.songs.search("周杰伦")` 会模糊匹配 `title / artist / album`；`list({ limit, offset })` 支持分页（limit 上限 500）。返回的歌曲是**脱敏视图**——拿不到 `path` / `streamHeaders` / `sourceData` 等内部字段。
 
 ---
 
