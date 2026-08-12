@@ -113,3 +113,15 @@ cd frontend && npm run dev     # UI :46399 (代理 /rest /api 到后端)
 ```
 
 后端测试：`cd backend && npx vitest run`（全量 218 用例，含 OpenSubsonic 路由级测试与插件沙箱专项）。
+
+## 文档导航
+
+| 文档 | 内容 | 谁需要 |
+|---|---|---|
+| `CONTRIBUTING.md` | 贡献指南：环境、跑起来、测试/检查、提交与 PR 规范 | 想给本项目提代码的开发者 |
+| `docs/DEVELOPER.md` | 架构与开发指南：目录结构、数据流、DB schema、鉴权、常见任务速查 | 想理解/扩展本项目的开发者 |
+| `docs/API.md` | API 参考：鉴权、原生 `/v1` 端点、OpenSubsonic、WS | 想对接本服务的开发者（含集成/卡片） |
+| `docs/PLUGIN_ARCHITECTURE.md` | 插件化架构：能力模型、耦合点、里程碑、北向目标 | 想深入插件框架的人 |
+| `docs/PLUGIN_DEV.md` | 插件开发：沙箱契约、host.* 全量、示例 | 想写插件的开发者 |
+| `docs/RESEARCH-songloft-plugin-inspiration.md` | songloft 插件体系调研（方案 B 已落地） | 想了解沙箱设计来源的人 |
+| [MusicFlow-plugins README](https://github.com/ray5378/MusicFlow-plugins/blob/master/README.md) | 官方插件：目录、打包、Release 发布流程 | 想发布插件的人 |
