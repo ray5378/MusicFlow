@@ -154,12 +154,18 @@ export function officialRegistryUrl(): string {
   return OFFICIAL_REGISTRY_URL.trim();
 }
 
-/** 仓库主页 → 自动补全 registry.json 候选地址(用户可只填仓库地址)。
- *  Gitee:  https://gitee.com/{owner}/{repo} → https://gitee.com/{owner}/{repo}/raw/master/registry.json
- *  GitHub: https://github.com/{owner}/{repo} → https://raw.githubusercontent.com/{owner}/{repo}/master/registry.json */
+/** 仓库主页 / blob 浏览页 → 自动补全 registry.json 候选地址(用户可只填网页地址)。
+ *  Gitee:  gitee.com/{owner}/{repo}[/blob/{branch}/{path}] → gitee.com/{owner}/{repo}/raw/{branch}/{path}
+ *  GitHub: github.com/{owner}/{repo}[/blob/{branch}/{path}] → raw.githubusercontent.com/{owner}/{repo}/{branch}/{path} */
 export function registryUrlCandidates(url: string): string[] {
   const u = String(url).trim();
-  let m = u.match(/^https?:\/\/(?:www\.)?gitee\.com\/([^/]+)\/([^/]+)\/?$/);
+  // blob 浏览页 → raw(如 .../blob/master/registry.json → .../raw/master/registry.json)
+  let m = u.match(/^https?:\/\/(?:www\.)?gitee\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/);
+  if (m) return [`https://gitee.com/${m[1]}/${m[2]}/raw/${m[3]}/${m[4]}`];
+  m = u.match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/);
+  if (m) return [`https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}/${m[4]}`];
+  // 仓库主页 → registry.json
+  m = u.match(/^https?:\/\/(?:www\.)?gitee\.com\/([^/]+)\/([^/]+)\/?$/);
   if (m) return [`https://gitee.com/${m[1]}/${m[2]}/raw/master/registry.json`];
   m = u.match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/?$/);
   if (m) return [`https://raw.githubusercontent.com/${m[1]}/${m[2]}/master/registry.json`];

@@ -131,6 +131,17 @@ describe("marketplace listing", () => {
       removeRegistry(id);
     }
   });
+
+  it("auto-completes a Gitee blob URL to its raw registry.json", async () => {
+    // 用户从 Gitee 网页复制的是 blob 浏览地址:.../blob/master/registry.json
+    const id = addRegistry("https://gitee.com/reg/repo/blob/master/registry.json");
+    try {
+      const m = await listMarketplace();
+      expect(m.find((x) => x.id === "gitee-p")).toBeTruthy();
+    } finally {
+      removeRegistry(id);
+    }
+  });
 });
 
 describe("extraction helpers", () => {
