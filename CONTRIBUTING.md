@@ -56,7 +56,7 @@ npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
 
 - **TypeScript strict**：新增代码必须类型完整（禁 `any` 滥用，确需时加注释说明）。
 - **路由分层**：`routes/` 只做参数解析/鉴权/响应；业务逻辑在 `services/`。
-- **插件化铁律**：核心代码**禁止写死任何 providerId / 平台字符串**。加平台 = 写插件（见 `docs/PLUGIN_DEV.md`）。
+- **插件化铁律**：核心代码**禁止写死任何 providerId / 平台字符串**。加平台 = 写插件（见 `docs/PLUGIN_DEV.md`）。CI 强制校验：`backend/scripts/check-core.mts`（核心不越界，新增越界零容忍）+ `check-builtins.mts`（内置插件 manifest 规范）。
 - **DB 变更**：改 `db/schema.ts`（drizzle）时，同步改 `db/index.ts` 的 `CREATE TABLE IF NOT EXISTS`（无迁移框架，旧库靠 IF NOT EXISTS 自动补齐）；两者必须一致。
 - **错误处理**：`/rest`（OpenSubsonic）失败体用 `status:"failed"` + 错误码（40/50/70/10/0）；原生 `/v1` 失败体返回 `{ error }` 字符串或 `{ success:false, error }`，不抛 500。
 

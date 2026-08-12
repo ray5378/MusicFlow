@@ -57,6 +57,8 @@ globalThis.__mfPlugin = {
 | `permissions` | ⬜ | 字符串数组，声明本插件需要的权限（见 §5）。不声明则无受控能力可用。 |
 | `platforms` | ⬜ | 字符串数组，用于前端提示（如 `["qq"]`）。 |
 | `recommendPrefix` | ⬜ | source 插件专用：每日推荐歌单 URL 前缀。 |
+| `platformLabels` | ⬜ | source 插件专用：平台 slug → 展示名 映射（如 `{ netease: "网易云", qq: "QQ 音乐" }`）。核心搜索结果据此显示平台中文名，**不再内置平台词典**——新增平台只需在插件里加一项。 |
+| `sourcePreference` | ⬜ | source 插件专用：流兜底搜索的源排序偏好数组（越靠前越优先）。核心按此对兜底候选排序，缺省按插件返回顺序。 |
 | `minAppVersion` | ⬜ | 要求的最低 App 版本；低于此版本会被跳过（沙箱运行时自 **1.3.0** 起）。 |
 | `documentation` | ⬜ | **Markdown 字符串**，插件详情页的「功能介绍 + 处理逻辑」说明（用户点「详情」看到的内容）。建议每个插件都写：功能一句话 + 处理逻辑（数据来源 / 触发时机 / 边界）。未提供时前端按能力自动生成通用说明。 |
 | `author` / `homepage` / `icon` / `license` / `updateUrl` | ⬜ | 元数据，市场页展示。 |
