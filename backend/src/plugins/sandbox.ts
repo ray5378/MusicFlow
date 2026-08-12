@@ -384,6 +384,9 @@ export class SandboxedPlugin {
         Promise.resolve()
           .then(() => {
             if (perm && !this.hasPerm(perm)) {
+              // 权限拒绝要打日志:否则容器日志完全静默,前端只看到 HTTP undefined
+              // 之类无从排查的报错(如 plugin.json 缺 permissions 时 host.http 被拒)。
+              console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
               return { ok: false, error: { message: `PERMISSION_DENIED: ${perm}` } };
             }
             return impl(...args);
@@ -414,7 +417,10 @@ export class SandboxedPlugin {
   private hostSync(name: string, impl: (...args: any[]) => any, perm: string | null): QuickJSHandle {
     const fn = this.ctx.newFunction(name, (...argHandles: QuickJSHandle[]) => {
       const args = argHandles.map((h) => this.ctx.dump(h));
-      if (perm && !this.hasPerm(perm)) return this.jsToHandle({ error: `PERMISSION_DENIED: ${perm}` });
+      if (perm && !this.hasPerm(perm)) {
+        console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
+        return this.jsToHandle({ error: `PERMISSION_DENIED: ${perm}` });
+      }
       try {
         return this.jsToHandle(impl(...args));
       } catch (e) {
