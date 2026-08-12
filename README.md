@@ -10,8 +10,8 @@
 
 | 组件 | 版本 | 仓库 |
 |---|---|---|
-| 服务端（本仓库） | **v1.3.0** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
-| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.3.0**（镜像 musicflow-v2:1.3.0） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
+| 服务端（本仓库） | **v1.4.0** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
+| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.4.0**（镜像 musicflow-v2:1.4.0） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
 | HA 集成 [hass-musicflow](https://github.com/ray5378/hass-musicflow) | **v1.3.7** | [ray5378/hass-musicflow](https://github.com/ray5378/hass-musicflow) |
 | HA 卡片 [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | **v1.6.51** | [ray5378/hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) |
 
@@ -21,7 +21,7 @@
 
 打 `v*` tag 时 CI 自动构建到（仅 **linux/amd64**）：
 
-- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.3.0`）
+- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.4.0`）
 - `ghcr.io/ray5378/musicflow-v2:latest`
 
 > **架构说明**：当前镜像仅提供 **linux/amd64**（x86_64）。arm64 / ARM 设备（如部分 ARM 架构 NAS）暂时无法运行，后续视 GitHub ARM runner 可用性再补多架构（账号暂无 ARM runner，与 V1 一致）。
@@ -29,7 +29,7 @@
 ## 插件化架构
 
 - **统一插件框架**：source / importer / recommender / sync / lyricProvider / coverProvider / renderer（DLNA）/ scrobbler 八类插件，能力由 `manifest.capabilities` 声明，核心按能力遍历分发（`docs/PLUGIN_ARCHITECTURE.md`）。
-- **外置插件沙箱（v1.3.0+）**：外置插件运行在 **QuickJS 虚拟机**（WASM）里——拿不到 Node 能力，网络只能走 `host.http`（自带超时、`net` 权限执行点强制）、存储走 `host.storage`（按插件隔离）；单插件内存 256MB / 栈 1MB / 调用超时 15s，卡死可杀、崩溃不拖垮主进程。`docs/PLUGIN_DEV.md` 有完整开发指南。
+- **外置插件沙箱（v1.3.0+，host.\* 全量 v1.4.0+）**：外置插件运行在 **QuickJS 虚拟机**（WASM）里——拿不到 Node 能力，网络只能走 `host.http` / `host.net` / `host.ws`（权限执行点强制、自带超时）、存储走 `host.storage`（按插件隔离）、文件走 `host.fs`（限插件 `files/` 目录、防穿越）、命令走 `host.command`（execFile 不经 shell）、可嵌套 `host.jsenv` 子环境（无 host）；单插件内存 256MB / 栈 1MB / 调用超时 15s，卡死可杀、崩溃不拖垮主进程。`docs/PLUGIN_DEV.md` 有完整开发指南。
 - **插件市场**：官方注册表 `https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json` 在首次启动**自动添加**（可用 `MUSICFLOW_OFFICIAL_REGISTRY` 环境变量覆盖/置空禁用）；Web UI「插件」页的市场 = **项目能力清单**——官方内置插件（标注「内置 · 已安装」，可直接启停/配置）与注册表插件（一键安装）同屏展示。每个插件点「详情」都有**功能介绍 + 处理逻辑**说明页（manifest 的 `documentation` 字段，Markdown；未提供时按能力自动生成说明）。
 - **官方插件仓库**：[ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)（go-music-dl 在线源、ListenBrainz scrobbler 等，tar 经 GitHub Release 资产分发）。
 
@@ -58,7 +58,7 @@ docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow-v2
 docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
   -v $(pwd)/data:/app/backend/data \
-  ghcr.io/ray5378/musicflow-v2:1.3.0
+  ghcr.io/ray5378/musicflow-v2:1.4.0
 ```
 
 > DLNA 发现依赖 SSDP 多播，`docker compose` 默认 `network_mode: host`；Docker Desktop（macOS/Windows）上多播不可用，DLNA 需在 Linux 宿主机运行。
@@ -112,4 +112,4 @@ cd backend && npm run dev      # API :46400
 cd frontend && npm run dev     # UI :46399 (代理 /rest /api 到后端)
 ```
 
-后端测试：`cd backend && npx vitest run`（全量 202 用例，含 OpenSubsonic 路由级测试与插件沙箱专项）。
+后端测试：`cd backend && npx vitest run`（全量 218 用例，含 OpenSubsonic 路由级测试与插件沙箱专项）。
