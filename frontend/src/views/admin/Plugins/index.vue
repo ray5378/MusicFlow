@@ -83,65 +83,54 @@
         </el-card>
 
         <el-card class="market-card" shadow="never">
-          <template #header><span>插件市场（官方内置 + 注册表，同一插件按平台分行）</span></template>
-          <el-table :data="marketRows" stripe v-loading="marketLoading" v-if="marketRows.length > 0">
-            <el-table-column label="名称" min-width="170">
-              <template #default="{ row }">
-                <div class="plugin-name">
-                  {{ row.name }}
-                  <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
-                  <el-tag v-if="row._platformLabel" size="small" effect="plain">{{ row._platformLabel }}</el-tag>
-                </div>
-                <div class="plugin-id">{{ row.id }}{{ row._platform ? "@" + row._platform : "" }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="来源" min-width="210">
-              <template #default="{ row }">
-                <template v-if="row.builtin">
-                  <span class="src-builtin">随服务端发行</span>
+          <template #header><span>插件市场（官方内置 + 注册表，按注册表分组）</span></template>
+          <div v-for="group in groupedMarket" :key="group.key" class="market-group">
+            <div class="group-head">
+              <span class="group-title">{{ group.title }}</span>
+              <el-tag v-if="group.sourceLabel" size="small" type="primary" effect="plain">{{ group.sourceLabel }}</el-tag>
+            </div>
+            <el-table :data="group.items" stripe v-loading="marketLoading" v-if="group.items.length > 0">
+              <el-table-column label="名称" min-width="200">
+                <template #default="{ row }">
+                  <div class="plugin-name">
+                    {{ row.name }}
+                    <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                  </div>
+                  <div class="plugin-id">{{ row.id }}</div>
                 </template>
-                <template v-else>
-                  <div class="src-host">{{ sourceHost(row.sourceUrl) }}</div>
-                  <div class="src-url">{{ row.sourceUrl }}</div>
+              </el-table-column>
+              <el-table-column label="类型 / 能力" min-width="200">
+                <template #default="{ row }">
+                  <div class="cap-row">
+                    <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+                    <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
+                  </div>
                 </template>
-              </template>
-            </el-table-column>
-            <el-table-column label="平台" min-width="120">
-              <template #default="{ row }">
-                <span>{{ row._platformLabel || "—" }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="类型 / 能力" min-width="200">
-              <template #default="{ row }">
-                <div class="cap-row">
-                  <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-                  <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column prop="version" label="版本" width="86" />
-            <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
-            <el-table-column label="状态" width="104">
-              <template #default="{ row }">
-                <!-- 内置核心插件不显示关闭按钮 -->
-                <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
-                <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="190">
-              <template #default="{ row }">
-                <template v-if="!row.builtin">
-                  <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
-                  <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
-                  <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+              </el-table-column>
+              <el-table-column prop="version" label="版本" width="86" />
+              <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
+              <el-table-column label="状态" width="104">
+                <template #default="{ row }">
+                  <!-- 内置核心插件不显示关闭按钮 -->
+                  <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
+                  <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                  <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                 </template>
-                <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-else description="市场为空或注册表暂不可达" :image-size="60" />
-          <p v-if="marketRows.length > 0" class="market-note">同一插件的不同平台/来源各自独立成行（安装的是该插件整体包），请按平台选择你要安装的源头。</p>
+              </el-table-column>
+              <el-table-column label="操作" width="190">
+                <template #default="{ row }">
+                  <template v-if="!row.builtin">
+                    <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
+                    <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
+                    <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+                  </template>
+                  <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else description="该注册表暂无可用插件" :image-size="50" />
+          </div>
+          <p v-if="groupedMarket.length > 0" class="market-note">同一插件可来自多个注册表，按来源分组显示（来源 github / gitee / 自建），请选择你要安装的源头。</p>
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
           title="插件运行模型与安全提示"
@@ -300,19 +289,25 @@ const showRegDialog = ref(false);
 const newRegistryUrl = ref("");
 const addingReg = ref(false);
 
-/** 市场行:同一插件的每个平台拆成独立行(用户要求"按平台区分开,不要显示成一个插件")。
- *  无平台声明的插件(内置/工具类)保持单行。 */
-const marketRows = computed<any[]>(() => {
-  const rows: any[] = [];
+/** 市场按注册表分组:内置插件独立一组,外置插件按其 registryUrl 归组
+ *  (同一插件来自多个注册表时各自出现在对应组,可独立安装/更新)。 */
+const groupedMarket = computed<any[]>(() => {
+  const groups: any[] = [];
+  const builtinItems: any[] = [];
+  const byReg = new Map<string, any[]>();
   for (const p of marketPlugins.value) {
-    const plats = platformList(p);
-    if (plats.length === 0) {
-      rows.push({ ...p, _platform: null, _platformLabel: null });
-    } else {
-      for (const pl of plats) rows.push({ ...p, _platform: pl.slug, _platformLabel: pl.label });
-    }
+    if (p.builtin) { builtinItems.push(p); continue; }
+    const key = p.registryUrl || "unknown";
+    if (!byReg.has(key)) byReg.set(key, []);
+    byReg.get(key)!.push(p);
   }
-  return rows;
+  if (builtinItems.length) {
+    groups.push({ key: "builtin", title: "官方内置（项目核心功能）", sourceLabel: "", items: builtinItems });
+  }
+  for (const [reg, items] of byReg) {
+    groups.push({ key: reg, title: reg, sourceLabel: sourceLabel(reg), items });
+  }
+  return groups;
 });
 
 // ---- config dialog ----
@@ -590,9 +585,17 @@ function sourceHost(url: string): string {
   try { return new URL(url).host; } catch { return url || "—"; }
 }
 
-/** 安装按钮的加载键:同 id 不同来源/平台也要能独立显示 loading。 */
+/** 来源标识:github / gitee / 其他 host。 */
+function sourceLabel(url: string): string {
+  if (!url) return "";
+  if (url.includes("gitee.com")) return "gitee";
+  if (url.includes("github.com") || url.includes("githubusercontent.com")) return "github";
+  return sourceHost(url);
+}
+
+/** 安装按钮的加载键:同 id 不同来源也要能独立显示 loading。 */
 function installKey(row: any): string {
-  return `${row.id}@${row.sourceUrl || "builtin"}#${row._platform || ""}`;
+  return `${row.id}@${row.sourceUrl || "builtin"}`;
 }
 
 /** 删除外置插件(确认后调 DELETE /v1/plugins/:id)。 */
@@ -791,6 +794,9 @@ onMounted(() => {
 .market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
 .market-warn { margin-top: 4px; }
 .market-note { margin: 12px 4px 0; font-size: 12px; color: var(--el-text-color-secondary); }
+.market-group { margin-bottom: 18px; }
+.market-group .group-head { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
+.market-group .group-title { font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); word-break: break-all; }
 .src-host { font-size: 13px; font-weight: 600; line-height: 1.4; }
 .src-url { font-size: 11px; color: var(--el-text-color-secondary); line-height: 1.4; word-break: break-all; }
 .src-builtin { font-size: 13px; color: var(--el-text-color-secondary); }
