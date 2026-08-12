@@ -50,13 +50,14 @@ globalThis.__mfPlugin = {
 | `id` | ✅ | 全局唯一，正则 `^[a-zA-Z0-9][a-zA-Z0-9-]*$`，且必须与目录名一致。 |
 | `name` | ✅ | 展示名（插件页显示）。 |
 | `version` | ✅ | 插件版本，语义化版本串。**必须与 plugin.json 的 version 一致**，否则拒绝加载。 |
-| `type` | ✅ | `"source" \| "importer" \| "recommender" \| "sync" \| "lyrics" \| "cover" \| "renderer" \| "scrobbler"` 之一。 |
+| `type` | ✅ | `"source" \| "importer" \| "recommender" \| "sync" \| "lyrics" \| "cover" \| "renderer" \| "scrobbler" \| "artist"` 之一。 |
 | `capabilities` | ✅ | 非空数组，声明本插件提供的能力（见 §4）。 |
 | `configSchema` | ✅ | 数组（可为空 `[]`）。描述插件配置项，自动渲染成插件页表单。 |
 | `description` | ⬜ | 描述。 |
 | `permissions` | ⬜ | 字符串数组，声明本插件需要的权限（见 §5）。不声明则无受控能力可用。 |
 | `platforms` | ⬜ | 字符串数组，用于前端提示（如 `["qq"]`）。 |
 | `recommendPrefix` | ⬜ | source 插件专用：每日推荐歌单 URL 前缀。 |
+| `dailyTag` | ⬜ | recommender 插件专用：每日推荐歌单标识 TAG（OpenSubsonic 等据此识别「今日推荐」）。 |
 | `platformLabels` | ⬜ | source 插件专用：平台 slug → 展示名 映射（如 `{ netease: "网易云", qq: "QQ 音乐" }`）。核心搜索结果据此显示平台中文名，**不再内置平台词典**——新增平台只需在插件里加一项。 |
 | `sourcePreference` | ⬜ | source 插件专用：流兜底搜索的源排序偏好数组（越靠前越优先）。核心按此对兜底候选排序，缺省按插件返回顺序。 |
 | `minAppVersion` | ⬜ | 要求的最低 App 版本；低于此版本会被跳过（沙箱运行时自 **1.3.0** 起）。 |
@@ -138,6 +139,13 @@ first-match-wins（首个返回非空结果的胜出；抛错被记入健康追�
 | `scrobbler` | 可选 `onPlay(event)` + 可选 `onScrobble(event)` |
 
 `ScrobbleEvent` = `{ songId, title, artist, album?, duration?, playedAt }`。回调抛错会记入健康面板。
+
+### 4.9 `artist`（歌手资料）
+| capability | impl 方法 |
+|------|------|
+| `artistInfo` | `fetchArtistInfo(name): Promise<{ name, platform, coverArtUrl?, bio? } \| null>` |
+
+first-match-wins（首个返回非空结果的胜出）。封面下载与数据库持久化由核心完成，插件只负责抓取返回纯数据。参考实现：内置 `artist-info`。
 
 ---
 

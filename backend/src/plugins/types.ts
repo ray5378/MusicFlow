@@ -19,7 +19,8 @@ export type PluginType =
   | "lyrics"      // supplies lyrics (lyricProvider)
   | "cover"       // supplies cover art (coverProvider)
   | "renderer"    // casts audio to a device (DLNA / Chromecast / ...)
-  | "scrobbler";  // reports plays to an external service (Last.fm / ListenBrainz)
+  | "scrobbler"   // reports plays to an external service (Last.fm / ListenBrainz)
+  | "artist";     // fetches artist info (bio / avatar) from a data source
 
 /** Optional abilities a plugin may declare. The core only calls the matching
  *  method when the capability is present. */
@@ -44,7 +45,9 @@ export type PluginCapability =
   | "lyricProvider" // supplies lyrics via searchLyrics()
   | "coverProvider" // supplies cover art via searchCover()
   | "renderer" // casts audio to a device via discover/cast/control
-  | "scrobbler"; // reports playback events via onPlay/onScrobble
+  | "scrobbler" // reports playback events via onPlay/onScrobble
+  // ---- artist plugins ----
+  | "artistInfo"; // fetches artist bio/avatar via fetchArtistInfo()
 
 export interface ConfigField {
   key: string;
@@ -71,6 +74,9 @@ export interface PluginManifest {
   /** Source plugins only: 流兜底搜索的源偏好顺序(数组,越靠前越优先)。
    *  缺失时按插件返回的原始顺序。 */
   sourcePreference?: string[];
+  /** recommender 插件专用:每日推荐歌单的标识(TAG),OpenSubsonic 等据此识别
+   *  「今日推荐」歌单(原核心直连 DAILY_TAG 常量,现已声明化)。 */
+  dailyTag?: string;
   /** Source plugins only: prefix used to tag daily-recommend imported playlists. */
   recommendPrefix?: string;
   minAppVersion?: string;
@@ -144,6 +150,16 @@ export interface RecommenderPlugin {
   /** Build/refresh this recommender's playlist. Returns a short summary line
    *  for the scheduler log, or null when nothing was done. */
   runDailyJob(): Promise<string | null>;
+  // ---- 可选:候选池/生成等参数化能力(路由经 registry 门面调用,核心不直连插件文件) ----
+  loadCandidates?(): any[];
+  saveCandidates?(candidates: any[]): void;
+  pickDailyCandidate?(date?: Date): any;
+  generateDailyPlaylist?(date?: Date): Promise<any>;
+  isCandidateBlocked?(c: any): boolean;
+  listRecommendPool?(): any[];
+  addToRecommendPool?(sourceType: string, sourceId: string, sourceName: string, userId: string): boolean;
+  removeFromRecommendPool?(sourceType: string, sourceId: string): boolean;
+  isInRecommendPool?(sourceType: string, sourceId: string): boolean;
 }
 
 /** Implemented by `sync` plugins that declare "playlistSync". Called by the
@@ -153,6 +169,12 @@ export interface SyncPlugin {
   /** Re-sync everything this plugin owns. Returns a short summary line for the
    *  scheduler log, or null when nothing was done. */
   runSyncJob(): Promise<string | null>;
+  // ---- 可选:参数化同步能力(路由经 registry 门面调用,核心不直连插件文件) ----
+  syncPlaylist?(playlistId: string, opts?: any): Promise<any>;
+  rebuildPlaylistEntries?(playlistId: string, imported: any, opts?: any): Promise<any>;
+  refreshPlaylistCounts?(playlistId: string): void;
+  exportPlaylistEntries?(playlistId: string): { name: string; tracks: any[] };
+  checkImportCooldown?(userId: string, url: string): boolean;
 }
 
 /** Implemented by `recommender` plugins that declare "localPlaylist".

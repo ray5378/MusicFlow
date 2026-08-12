@@ -205,20 +205,33 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 
 ### 7.1 本轮完成情况与残留字符串审计
 
-Phase 0 + 1 全部完成。全库检索 `"go-music-dl"` 后残留位置及定性：
+Phase 0 + 1 全部完成；**Phase 2 全量插件化已收口（v1.5.0）**。全库检索 `"go-music-dl"` 后残留位置及定性：
 
 | 位置 | 性质 | 处理 |
 |------|------|------|
-| `services/source/online/goMusicDl.ts` | 插件自身实现与 manifest 的 `id` | **合理**，插件必须声明自己的 id |
-| `services/plugin/playlistSync.ts:145` | `getConfiguredProvider("go-music-dl")` | Phase 2 收口（该函数已走 registry，只剩 providerId 字符串） |
-| `streamFallback.ts` 末位兜底 | registry 无任何 stream 插件时的 last-resort 默认值 | **可接受**，仅防御性回退 |
+| `services/plugin/artistInfo.ts` 等插件实现 | 插件自身实现与 manifest 的 `id` | **合理**，插件必须声明自己的 id |
 | 前端 `Playlists/*.vue` | 静态提示文案 + `manifest?.provider === "go-music-dl"` 旧字段兼容判定 | **可接受**，主路径已走 `/v1/plugins` 动态发现 |
 
-结论：核心调度、歌词、流兜底、推荐前缀、DB 种子、前端配置表单**均已零硬编码**，go-music-dl 已是一个可被任意同契约插件替换的实现。
+结论：核心调度、歌词、流兜底、推荐前缀、DB 种子、前端配置表单、歌手抓取、路由对内置插件的访问**均已零硬编码**——go-music-dl 已是一个可被任意同契约插件替换的实现。
 
-### 7.2 Phase 2（全量插件化：importer / recommender / sync）
+### 7.3 Phase 2 收口明细（v1.5.0）
 
-> 目标：把 `playlistImport` / `dailyRecommend` / `playlistSync` 这些「名为插件、实为硬编码模块」的功能真正注册成 plugin 类型，核心只按能力遍历；并彻底删除最后一处 `go-music-dl` / `gmdl://` 字面量。
+核心对「具体平台 / 内置插件实现」的 5 处存量耦合已全部插件化，`scripts/check-core.mts` 白名单清空（新增越界零容忍）：
+
+| 原耦合 | 收口方式 |
+|---|---|
+| 路由直连 `playlistSync.ts`（syncPlaylist/rebuild/export/cooldown） | 新增 `services/pluginAccess.ts` 门面，按 `playlistSync` 能力取 impl 调用（`SyncPlugin` 接口扩展可选方法） |
+| 路由直连 `dailyRecommend.ts`（候选/生成/推荐池） | 同上，经 `dailyPlaylist` 能力门面（`RecommenderPlugin` 接口扩展可选方法） |
+| `rest` / 路由直连 `DAILY_TAG` 常量 | manifest 新增 `dailyTag` 字段，核心经门面读 `manifest.dailyTag` |
+| `db/index.ts` 硬编码平台榜单种子 | 迁移为 `daily-recommend` 插件内部 `DEFAULT_CANDIDATES`，`loadCandidates()` 无配置时 fallback |
+| `scraper/artist.ts` 写死 QQ/网易云抓取 | 新增**内置插件 `artist-info`**（新类型 `artist`、新能力 `artistInfo`，QQ 优先网易云兜底），核心按能力遍历 |
+
+新增能力/类型：`artist`（PluginType）、`artistInfo`（capability，方法 `fetchArtistInfo`）。内置插件增至 **8 个**。
+核心访问内置插件能力的唯一路径：`getEnabledByCapability(...)` / `services/pluginAccess.ts` 门面——`check-core.mts` 规则 B 强制。
+
+### 7.2 Phase 2（全量插件化：importer / recommender / sync / artist）
+
+> 目标：把 `playlistImport` / `dailyRecommend` / `playlistSync` 这些「名为插件、实为硬编码模块」的功能真正注册成 plugin 类型，核心只按能力遍历；并彻底删除最后一处 `go-music-dl` / `gmdl://` 字面量。**v1.5.0 全部完成**。
 
 - [x] **T10** 新增 `plugins/types.ts` 的 `ImporterPlugin` / `PlaylistFilePlugin` / `RecommenderPlugin` / `SyncPlugin` 契约（含 `canHandle` / `canHandleFile` / `runDailyJob` / `runSyncJob`）
 - [x] **T11** 把 `playlistImport.ts` 拆成三个独立 `importer` 插件：`qq-playlist-importer` / `netease-playlist-importer` / `musicflow-file-importer`（共享 `importers/http.ts` 的 `fetchJson` / `resolveRedirect`）；核心 `playlistImport.ts` 收敛为「能力分发器」（`getEnabledByCapability("playlistImport"|"playlistFile")` + `canHandle`/`canHandleFile` 路由）

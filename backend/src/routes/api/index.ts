@@ -10,12 +10,7 @@ import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
-import { checkImportCooldown, rebuildPlaylistEntries, syncPlaylist, refreshPlaylistCounts, exportPlaylistEntries } from "../../services/plugin/playlistSync.js";
-import {
-  generateDailyPlaylist, loadCandidates, saveCandidates, pickDailyCandidate,
-  isCandidateBlocked,
-  DAILY_TAG, listRecommendPool, addToRecommendPool, removeFromRecommendPool, isInRecommendPool,
-} from "../../services/plugin/dailyRecommend.js";
+import { dailyRecommendApi, dailyRecommendTag, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { isDailyRecommendPlaylist } from "../../services/source/online/recommendImport.js";
@@ -47,6 +42,10 @@ import {
   listMarketplace, installPlugin, listRegistries, addRegistry, removeRegistry,
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
+
+// 每日推荐 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
+const dailyApi = () => dailyRecommendApi();
+const syncApi = () => playlistSyncApi();
 
 export const apiRoutes = new Hono();
 apiRoutes.route("/", onlineRoutes);
@@ -715,8 +714,8 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
     const v = get(k, def ? "true" : "false");
     return v === "true" || v === "1";
   };
-  const candidates = loadCandidates();
-  const picked = pickDailyCandidate();
+  const candidates = dailyApi()?.loadCandidates() ?? [];
+  const picked = dailyApi()?.pickDailyCandidate() ?? null;
 
   // Only ONE playlist ever exists: "今日推荐" (combined: remote charts + user
   // pool + local history mix, all merged into one).
@@ -727,7 +726,7 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   const findPl = (name: string, tag: string) =>
     sqlite.prepare("SELECT id, name, song_count, created_at, comment FROM playlists WHERE name = ? AND comment LIKE ?").get(name, `%${tag}%`) as any;
 
-  const todayPl = findPl("今日推荐", DAILY_TAG);
+  const todayPl = findPl("今日推荐", dailyRecommendTag() || "每日推荐");
 
   const plInfo = (row: any) => row ? {
     id: row.id, name: row.name, songCount: row.song_count || 0,
@@ -776,10 +775,10 @@ apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
   const raw = arr
     .filter((x: any) => x && typeof x.url === "string" && typeof x.platform === "string" && x.platform.trim().length > 0)
     .map((x: any) => ({ platform: x.platform, url: x.url.trim(), name: typeof x.name === "string" ? x.name : undefined }));
-  const blocked = raw.filter((x: any) => isCandidateBlocked(x));
-  const clean = raw.filter((x: any) => !isCandidateBlocked(x));
+  const blocked = raw.filter((x: any) => dailyApi()?.isCandidateBlocked(x) ?? false);
+  const clean = raw.filter((x: any) => !(dailyApi()?.isCandidateBlocked(x) ?? false));
   if (clean.length === 0) return c.json({ error: "候选池不能为空,且每项需要 platform + url" }, 400);
-  saveCandidates(clean);
+  dailyApi()?.saveCandidates(clean);
   return c.json({ success: true, count: clean.length, blocked: blocked.length, blockedItems: blocked });
 });
 
@@ -788,8 +787,9 @@ apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
 // + local history mix. Idempotent: if today's playlist already exists, returns
 // skipped=true.
 apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
+  if (!dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
   try {
-    const result = await generateDailyPlaylist();
+    const result = await dailyApi().generateDailyPlaylist();
     return c.json({ success: true, result }, 200);
   } catch (e: any) {
     const error = e.message || "今日推荐生成失败";
@@ -806,7 +806,7 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 
 // List all pool members (for an admin management page if desired).
 apiRoutes.get("/v1/recommend-pool", (c) => {
-  const pool = listRecommendPool();
+  const pool = dailyApi()?.listRecommendPool() ?? [];
   return c.json({ pool });
 });
 
@@ -817,28 +817,28 @@ apiRoutes.post("/v1/recommend-pool/playlist/:playlistId", async (c) => {
   const playlistId = c.req.param("playlistId");
   const row = sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(playlistId) as any;
   if (!row) return c.json({ success: false, error: "歌单不存在" }, 404);
-  const added = addToRecommendPool("playlist", playlistId, row.name || "", user?.id || "");
+  const added = dailyApi()?.addToRecommendPool("playlist", playlistId, row.name || "", user?.id || "") ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "该歌单已在推荐池中" });
 });
 
 // Remove a playlist from the pool.
 apiRoutes.delete("/v1/recommend-pool/playlist/:playlistId", (c) => {
   const playlistId = c.req.param("playlistId");
-  const removed = removeFromRecommendPool("playlist", playlistId);
+  const removed = dailyApi()?.removeFromRecommendPool("playlist", playlistId) ?? false;
   return c.json({ success: true, removed });
 });
 
 // Check if a playlist is in the pool (for the UI to show toggle state).
 apiRoutes.get("/v1/recommend-pool/playlist/:playlistId/status", (c) => {
   const playlistId = c.req.param("playlistId");
-  return c.json({ inPool: isInRecommendPool("playlist", playlistId) });
+  return c.json({ inPool: dailyApi()?.isInRecommendPool("playlist", playlistId) ?? false });
 });
 
 // Add the current user's favorites ("我喜欢的音乐") to the pool.
 apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
   const user = c.get("user");
   if (!user?.id) return c.json({ success: false, error: "未登录" }, 401);
-  const added = addToRecommendPool("favorites", user.id, "我喜欢的音乐", user.id);
+  const added = dailyApi()?.addToRecommendPool("favorites", user.id, "我喜欢的音乐", user.id) ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "我喜欢的音乐已在推荐池中" });
 });
 
@@ -846,7 +846,7 @@ apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
 apiRoutes.delete("/v1/recommend-pool/favorites", (c) => {
   const user = c.get("user");
   if (!user?.id) return c.json({ success: false, error: "未登录" }, 401);
-  const removed = removeFromRecommendPool("favorites", user.id);
+  const removed = dailyApi()?.removeFromRecommendPool("favorites", user.id) ?? false;
   return c.json({ success: true, removed });
 });
 
@@ -854,7 +854,7 @@ apiRoutes.delete("/v1/recommend-pool/favorites", (c) => {
 apiRoutes.get("/v1/recommend-pool/favorites/status", (c) => {
   const user = c.get("user");
   if (!user?.id) return c.json({ inPool: false });
-  return c.json({ inPool: isInRecommendPool("favorites", user.id) });
+  return c.json({ inPool: dailyApi()?.isInRecommendPool("favorites", user.id) ?? false });
 });
 
 // ==================== Playlist import (built-in plugins: QQ / NetEase / MusicFlow native file) ====================
@@ -880,7 +880,8 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
           sourceUrl: null, sourcePlatform: imp.platform, externalId: null,
           syncEnabled: 0,
         }).run();
-        const result = await rebuildPlaylistEntries(id, imp, {
+        if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+        const result = await syncApi().rebuildPlaylistEntries(id, imp, {
           userId: user?.id,
           notes: `从本地歌单文件导入「${name}」`,
         });
@@ -902,7 +903,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
         created: created.length,
       });
     }
-    if (checkImportCooldown(user?.id || "", url)) {
+    if (syncApi()?.checkImportCooldown(user?.id || "", url) ?? false) {
       return c.json({ success: false, error: "相同歌单刚导入过,请稍候再试" });
     }
     const imported = await importPlaylistFromUrl(url);
@@ -922,7 +923,8 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
       coverArt: coverRef,
       syncEnabled: body.autoSync ? 1 : 0,
     }).run();
-    const result = await rebuildPlaylistEntries(id, imported, {
+    if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+    const result = await syncApi().rebuildPlaylistEntries(id, imported, {
       userId: user?.id,
       notes: `来自歌单「${name}」导入`,
     });
@@ -944,7 +946,9 @@ apiRoutes.get("/v1/playlists/:id/export", (c) => {
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json({ error: "歌单不存在" }, 404);
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权导出该歌单" }, 403);
-  const { name, tracks } = exportPlaylistEntries(id);
+  const exported = syncApi()?.exportPlaylistEntries(id);
+  if (!exported) return c.json({ error: "歌单同步插件未启用" }, 503);
+  const { name, tracks } = exported;
   const payload = { app: NATIVE_APP, version: 1, exportedAt: new Date().toISOString(), name, tracks };
   const filename = `${(name || "歌单").replace(/[\\/:*?"<>|]/g, "_")}.json`;
   c.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
@@ -960,8 +964,8 @@ apiRoutes.get("/v1/playlists/export-all", (c) => {
     .where(eq(playlists.ownerId, user?.id || ""))
     .all();
   const playlistsOut = mine.map((p) => {
-    const { name, tracks } = exportPlaylistEntries(p.id);
-    return { name, tracks };
+    const exp = syncApi()?.exportPlaylistEntries(p.id);
+    return { name: exp?.name ?? "", tracks: exp?.tracks ?? [] };
   });
   const filename = `MusicFlow全部歌单_${new Date().toISOString().slice(0, 10)}.json`;
   c.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
@@ -977,7 +981,8 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
   // Only owner (or admin) can sync
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权同步该歌单" });
   try {
-    const result = await syncPlaylist(id, { userId: user?.id });
+    if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+    const result = await syncApi().syncPlaylist(id, { userId: user?.id });
     return c.json({ success: true, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "同步失败" });
@@ -1077,7 +1082,7 @@ apiRoutes.get("/v1/playlists", (c) => {
   // Daily-recommend-first ordering (今日推荐 > others) expressed as a
   // CASE, with recency as the secondary sort. Pushed to SQL together with
   // LIMIT/OFFSET so we never load the whole table into JS just to slice it.
-  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
   const rows = (where
     ? db.select().from(playlists).where(where)
@@ -1108,7 +1113,7 @@ apiRoutes.get("/playlist", (c) => {
   const all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic);
   const dailyRank = (p: any) => {
     const c = p.comment || "";
-    if (c.includes(DAILY_TAG) && p.name === "今日推荐") return 0;
+    if (c.includes(dailyRecommendTag() || "每日推荐") && p.name === "今日推荐") return 0;
     return 1;
   };
   return c.json(all.sort((a, b) => {

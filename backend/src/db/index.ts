@@ -507,15 +507,6 @@ export function initDatabase() {
   // Replace via the admin API (PUT /rest/api/v1/daily-recommend/candidates).
   // QQ toplist URLs use the form https://y.qq.com/n/ryqq/toplist/<id> and are
   // routed to a dedicated toplist fetcher (different API from QQ playlists).
-  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_candidates", JSON.stringify([
-    { platform: "netease", url: "https://music.163.com/playlist?id=6723173524", name: "网易云·网络热歌榜" },
-    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/26", name: "QQ音乐·巅峰榜热歌" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=19723756", name: "网易云·飙升榜" },
-    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/62", name: "QQ音乐·飙升榜" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=3778678", name: "网易云·热歌榜" },
-    { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/4", name: "QQ音乐·巅峰榜流行指数" },
-    { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
-  ]));
 
   // Seed DB rows for every registered plugin (manifest-driven, idempotent).
   // Deferred require-style import: the registry imports `db` from this module,

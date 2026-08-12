@@ -320,4 +320,20 @@ export const playlistSyncPlugin: SyncPlugin = {
     if (r.synced === 0 && r.errors.length === 0) return null;
     return `synced ${r.synced} playlists, errors: ${r.errors.length}`;
   },
+  // 参数化同步能力:路由经 registry 门面调用,核心不直连本文件。
+  async syncPlaylist(playlistId: string, opts?: RebuildOptions): Promise<SyncResult> {
+    return syncPlaylist(playlistId, opts);
+  },
+  async rebuildPlaylistEntries(playlistId: string, imported: any, opts?: RebuildOptions): Promise<any> {
+    return rebuildPlaylistEntries(playlistId, imported, opts);
+  },
+  refreshPlaylistCounts(playlistId: string): void {
+    refreshPlaylistCounts(playlistId);
+  },
+  exportPlaylistEntries(playlistId: string): { name: string; tracks: ImportedTrack[] } {
+    return exportPlaylistEntries(playlistId);
+  },
+  checkImportCooldown(userId: string, url: string): boolean {
+    return checkImportCooldown(userId, url);
+  },
 };

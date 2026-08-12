@@ -35,13 +35,14 @@ import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 
 const VALID_TYPES: PluginType[] = [
   "source", "importer", "recommender", "sync",
-  "lyrics", "cover", "renderer", "scrobbler",
+  "lyrics", "cover", "renderer", "scrobbler", "artist",
 ];
 const VALID_CAPS: PluginCapability[] = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
+  "artistInfo",
 ];
 
 /** 已加载外置插件的沙箱实例(id → SandboxedPlugin),热重载/卸载时 dispose。 */

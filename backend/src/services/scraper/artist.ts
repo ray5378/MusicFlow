@@ -7,26 +7,13 @@ import { artists, albums } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
+import { getEnabledByCapability } from "../../plugins/registry.js";
 
 const COVERS_DIR = path.join(process.cwd(), "data", "covers");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
 function ensureDir() {
   if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
-}
-
-async function fetchJson(url: string, headers: Record<string, string> = {}): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, ...headers }, signal: controller.signal });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 // Download an image to the covers dir, return file ref or null
@@ -52,50 +39,27 @@ async function downloadImage(url: string, ref: string): Promise<string | null> {
 
 export interface ArtistScrapeResult {
   name: string;
-  platform: string; // 抓取来源标记(默认网易云,见 scrapeFromNetease)
+  platform: string; // 抓取来源标记(由 artistInfo 插件返回)
   coverArt?: string;
   bio?: string;
   fallbackCover?: boolean; // used a local album cover because platforms had no info
 }
 
-// ==================== QQ Music ====================
-
-// Search songs to find the singer mid, then build the avatar CDN URL.
-async function scrapeFromQQ(name: string): Promise<ArtistScrapeResult | null> {
-  const q = encodeURIComponent(name);
-  const data = await fetchJson(
-    `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=5&w=${q}&format=json`,
-    { Referer: "https://y.qq.com/" }
-  );
-  const songList = data?.data?.song?.list || [];
-  for (const song of songList) {
-    const singers = song.singer || [];
-    const match = singers.find((s: any) => (s.name || "").toLowerCase() === name.toLowerCase());
-    const singer = match || singers[0];
-    if (singer?.mid) {
-      const picUrl = `https://y.gtimg.cn/music/photo_new/T001R300x300M000${singer.mid}.jpg`;
-      return { name: singer.name || name, platform: "qq", coverArt: picUrl };
+// 抓取歌手资料:遍历启用的 artistInfo 能力插件,首个返回非空的胜出。
+// 核心不写死任何数据源平台——新抓取源 = 新插件(参考内置 artist-info)。
+async function fetchArtistInfoByName(name: string): Promise<ArtistScrapeResult | null> {
+  for (const { impl } of getEnabledByCapability("artistInfo")) {
+    if (typeof impl?.fetchArtistInfo !== "function") continue;
+    try {
+      const r = await impl.fetchArtistInfo(name);
+      if (r) {
+        return { name: r.name, platform: r.platform, coverArt: r.coverArtUrl, bio: r.bio };
+      }
+    } catch {
+      // 插件抓取异常跳过(健康追踪记录),继续下一个
     }
   }
   return null;
-}
-
-// ==================== NetEase ====================
-
-async function scrapeFromNetease(name: string): Promise<ArtistScrapeResult | null> {
-  const q = encodeURIComponent(name);
-  const data = await fetchJson(`https://music.163.com/api/search/get?s=${q}&type=100&limit=3`);
-  const artistsList = data?.result?.artists || [];
-  const match = artistsList.find((a: any) => (a.name || "").toLowerCase() === name.toLowerCase())
-    || artistsList[0];
-  if (!match?.id) return null;
-  const result: ArtistScrapeResult = { name: match.name || name, platform: "netease" };
-  if (match.picUrl) result.coverArt = match.picUrl;
-  // Bio from artist detail
-  const detail = await fetchJson(`https://music.163.com/api/artist/${match.id}`);
-  const brief = detail?.artist?.briefDesc || "";
-  if (brief) result.bio = brief;
-  return result;
 }
 
 // ==================== Entry ====================
@@ -129,12 +93,8 @@ function useRandomAlbumCover(artistId: string): string | null {
 export async function scrapeArtist(artistName: string, artistId?: string): Promise<ArtistScrapeResult | null> {
   if (!artistName || artistName === "Unknown Artist") return null;
 
-  // 1. Prefer QQ Music
-  let result = await scrapeFromQQ(artistName);
-  // 2. Fallback to NetEase if QQ returned nothing
-  if (!result) {
-    result = await scrapeFromNetease(artistName);
-  }
+  // 按 artistInfo 能力遍历插件抓取(数据源由插件决定,核心不写死平台)
+  let result = await fetchArtistInfoByName(artistName);
 
   const id = artistId || findArtistIdByName(result?.name || artistName) || findArtistIdByName(artistName);
   if (!id) return null;

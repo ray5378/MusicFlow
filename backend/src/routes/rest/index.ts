@@ -8,7 +8,7 @@ import { notifyScrobble } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
-import { DAILY_TAG } from "../../services/plugin/dailyRecommend.js";
+import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
 
@@ -614,7 +614,8 @@ restRoutes.get("/getPlaylists", (c) => {
   const where = user?.isAdmin
     ? undefined
     : or(eq(playlists.isPublic, 1), eq(playlists.ownerId, user?.id ?? ""));
-  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${DAILY_TAG}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
+  const dailyTag = dailyRecommendTag() || "每日推荐";
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyTag}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
   // Server-side paging + name search: cards scroll the whole library, so the
   // response carries a total and only the requested page (offset/size).

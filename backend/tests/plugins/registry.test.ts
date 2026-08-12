@@ -73,7 +73,7 @@ describe("plugin registry", () => {
     // go-music-dl-lyrics、go-music-dl-cover 均改为官方外置插件,由「插件市场」安装后注册。
     // 详见 https://github.com/ray5378/MusicFlow-plugins。
     expect([...types].sort()).toEqual([
-      "importer", "recommender", "renderer", "sync",
+      "artist", "importer", "recommender", "renderer", "sync",
     ]);
   });
 

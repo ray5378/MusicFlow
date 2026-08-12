@@ -125,18 +125,32 @@ export function isCandidateBlocked(c: { platform?: string; url?: string; name?: 
   return false;
 }
 
+// 默认候选榜单(admin 未配置时使用):网易云编辑榜 + QQ 音乐官方榜混合。
+// 从 db/index.ts 的初始化种子迁移而来——候选数据属于「每日推荐」能力,由插件内部声明,
+// 核心不再写任何平台榜单 URL。
+const DEFAULT_CANDIDATES: DailyCandidate[] = [
+  { platform: "netease", url: "https://music.163.com/playlist?id=6723173524", name: "网易云·网络热歌榜" },
+  { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/26", name: "QQ音乐·巅峰榜热歌" },
+  { platform: "netease", url: "https://music.163.com/playlist?id=19723756", name: "网易云·飙升榜" },
+  { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/62", name: "QQ音乐·飙升榜" },
+  { platform: "netease", url: "https://music.163.com/playlist?id=3778678", name: "网易云·热歌榜" },
+  { platform: "qq", url: "https://y.qq.com/n/ryqq/toplist/4", name: "QQ音乐·巅峰榜流行指数" },
+  { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
+];
+
 export function loadCandidates(): DailyCandidate[] {
   const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_candidates") as any;
-  if (!row?.value) return [];
+  const raw = row?.value ? row.value : JSON.stringify(DEFAULT_CANDIDATES);
   try {
-    const arr = JSON.parse(row.value);
-    if (!Array.isArray(arr)) return [];
-    return arr
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
+    const clean = arr
       .filter((c: any) => c && typeof c.url === "string" && typeof c.platform === "string")
       .filter((c: any) => !isCandidateBlocked(c))
       .map((c: any) => ({ platform: c.platform, url: c.url, name: c.name }));
+    return clean.length > 0 ? clean : DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
   } catch {
-    return [];
+    return DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
   }
 }
 
@@ -660,6 +674,8 @@ export const dailyRecommendManifest: PluginManifest = {
   capabilities: ["dailyPlaylist"],
   defaultEnabled: true,
   configSchema: [],
+  // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「今日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
+  dailyTag: "每日推荐",
   documentation: `### 功能介绍
 每天自动生成「今日推荐」歌单（id：\`pl-daily-today\`），混合三类来源：平台榜单候选、推荐池成员（收藏的歌单 / 我喜欢的音乐）、本地曲库随机补充。
 
@@ -681,5 +697,21 @@ export const dailyRecommendPlugin: RecommenderPlugin = {
     const r = await runDailyRecommendJob();
     if (!r || r.skipped) return null;
     return `${r.date}: ${r.matched} matched, ${r.unmatched} stubs, ${r.poolSongsAdded} pool, ${r.randomSongsAdded} random`;
+  },
+  // 参数化能力:路由经 registry 门面调用,核心不直连本文件。
+  loadCandidates(): DailyCandidate[] { return loadCandidates(); },
+  saveCandidates(candidates: DailyCandidate[]): void { saveCandidates(candidates); },
+  pickDailyCandidate(date?: Date) { return pickDailyCandidate(date); },
+  generateDailyPlaylist(date?: Date) { return generateDailyPlaylist(date); },
+  isCandidateBlocked(c: { platform?: string; url?: string; name?: string }): boolean { return isCandidateBlocked(c); },
+  listRecommendPool(): RecommendPoolEntry[] { return listRecommendPool(); },
+  addToRecommendPool(sourceType: string, sourceId: string, sourceName: string, userId: string): boolean {
+    return addToRecommendPool(sourceType, sourceId, sourceName, userId);
+  },
+  removeFromRecommendPool(sourceType: string, sourceId: string): boolean {
+    return removeFromRecommendPool(sourceType, sourceId);
+  },
+  isInRecommendPool(sourceType: string, sourceId: string): boolean {
+    return isInRecommendPool(sourceType, sourceId);
   },
 };

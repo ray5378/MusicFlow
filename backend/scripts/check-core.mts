@@ -6,22 +6,20 @@
 //   规则 A：核心代码(非 plugins/、非 services/plugin/)不得出现硬编码的平台/provider 标识
 //          (gmdl / go-music-dl / kugou / kuwo / migu / netease / musicdl 等)——平台只应存在于插件里
 //   规则 B：核心代码不得 import services/plugin/ 下的具体插件实现(importers/.../dailyRecommend/...)
-//          ——应通过 plugins/registry 按能力遍历访问
+//          ——应通过 plugins/registry 按能力遍历或 services/pluginAccess 门面
 //   规则 C：getConfiguredProvider("字面量") / getPluginImpl("字面量") 的实参必须是能力名(VALID_CAPS)
 //          ——核心只能按能力分发，不得写死具体 provider id
 //
-// 存量耦合白名单(KNOWN_COUPLINGS)：已登记的核心↔内置插件直连点(带 TODO,Phase 2 收口)——
-// 新增越界一律失败(零容忍);存量只减不增。
+// 存量耦合已全部收口(Phase2 完成)：核心经 pluginAccess 门面调用内置插件能力,白名单为空。
+// 新增越界一律失败(零容忍)。
 
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src");
-// 排除插件框架目录(插件注册/加载/沙箱)与内置插件实现目录——它们是插件体系的一部分,不受核心规则约束。
-const EXCLUDED_DIRS = ["plugins", "services/plugin"];
 
-// ---- 规则 A：平台/provider 标识黑名单(核心出现即越界;若核心确实需要通用词,走白名单注释) ----
+// ---- 规则 A：平台/provider 标识黑名单(核心出现即越界) ----
 const PLATFORM_TOKENS = [
   "gmdl", "go-music-dl", "musicdl", "kugou", "kuwo", "migu", "netease",
   "qqmusic", "qianqian", "fivesing", "jamendo", "joox",
@@ -33,40 +31,12 @@ const VALID_CAPS = [
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
+  "artistInfo",
 ];
 
-// ---- 存量耦合白名单(文件 + 导入内容片段)。带 TODO,只减不增。 ----
-const KNOWN_COUPLINGS: Array<{ file: string; importFrom: string; todo: string }> = [
-  {
-    file: "routes/api/index.ts",
-    importFrom: "../../services/plugin/playlistSync.js",
-    todo: "TODO(Phase2): 歌单同步功能应经 plugins/registry 按 playlistSync 能力调用",
-  },
-  {
-    file: "routes/api/index.ts",
-    importFrom: "../../services/plugin/dailyRecommend.js",
-    todo: "TODO(Phase2): 每日推荐触发/候选应经 plugins/registry 按 dailyPlaylist 能力调用",
-  },
-  {
-    file: "routes/rest/index.ts",
-    importFrom: "../../services/plugin/dailyRecommend.js",
-    todo: "TODO(Phase2): OpenSubsonic 识别每日推荐歌单的 DAILY_TAG 应来自插件 manifest",
-  },
-];
-
-// ---- 规则 A 的内容白名单(文件内允许出现的平台标识,带 TODO,只减不增) ----
-const PLATFORM_TOKEN_ALLOW: Array<{ file: string; token: string; reason: string }> = [
-  {
-    file: "services/scraper/artist.ts",
-    token: "netease",
-    reason: "TODO: 歌手信息抓取源(网易云 API)应插件化;当前为核心默认抓取实现",
-  },
-  {
-    file: "db/index.ts",
-    token: "netease",
-    reason: "TODO: 每日推荐默认候选榜单(平台榜单 URL 种子)应改由 source 插件 recommend 提供",
-  },
-];
+// ---- 白名单：全部存量已收口(Phase2),新增越界零容忍 ----
+const KNOWN_COUPLINGS: Array<{ file: string; importFrom: string; todo: string }> = [];
+const PLATFORM_TOKEN_ALLOW: Array<{ file: string; token: string; reason: string }> = [];
 
 // 去掉注释(块注释 + 行注释)后的有效代码
 function stripComments(code: string): string {
@@ -100,7 +70,7 @@ for (const file of walk(ROOT, "")) {
   const effective = stripComments(code);
   checkedFiles++;
 
-  // 规则 A：平台/provider 标识(白名单内的存量允许,只减不增)
+  // 规则 A：平台/provider 标识
   for (const tok of PLATFORM_TOKENS) {
     const re = new RegExp(`\\b${tok.replace(/[-\/]/g, "\\$&")}\\b`, "i");
     if (!re.test(effective)) continue;
@@ -113,13 +83,13 @@ for (const file of walk(ROOT, "")) {
   }
 
   // 规则 B：import 具体插件实现
-  const importRe = /import\s+[\s\S]*?from\s+"([^"]*services\/plugin\/(?:importers|dailyRecommend|localRecommend|playlistSync|renderers)[^"]*)"/g;
+  const importRe = /import\s+[\s\S]*?from\s+"([^"]*services\/plugin\/(?:importers|dailyRecommend|localRecommend|playlistSync|renderers|artistInfo)[^"]*)"/g;
   let m: RegExpExecArray | null;
   while ((m = importRe.exec(code)) !== null) {
     const from = m[1];
     const known = KNOWN_COUPLINGS.find((k) => k.file === rel && from.includes(k.importFrom));
     if (!known) {
-      errors.push(`[规则B] ${rel}: 核心代码直接 import 内置插件实现 "${from}"(应经 plugins/registry 按能力遍历)`);
+      errors.push(`[规则B] ${rel}: 核心代码直接 import 内置插件实现 "${from}"(应经 plugins/registry 按能力遍历或 pluginAccess 门面)`);
     } else {
       console.log(`  ! ${rel}: 存量耦合(已登记,勿新增) ${from} — ${known.todo}`);
     }
@@ -144,4 +114,4 @@ if (errors.length > 0) {
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log("✓ 核心代码符合功能插件化规范(平台名只存在于插件,核心按能力遍历,无未登记直连)");
+console.log("✓ 核心代码符合功能插件化规范(平台名只存在于插件,核心按能力遍历,无存量耦合)");

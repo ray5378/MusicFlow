@@ -20,12 +20,13 @@ import path from "path";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mf-check-builtins-"));
 
 // ---- 与 backend/src/plugins/discovery.ts 保持一致 ----
-const VALID_TYPES = ["source", "importer", "recommender", "sync", "lyrics", "cover", "renderer", "scrobbler"];
+const VALID_TYPES = ["source", "importer", "recommender", "sync", "lyrics", "cover", "renderer", "scrobbler", "artist"];
 const VALID_CAPS = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
+  "artistInfo",
 ];
 // 与 backend/src/plugins/sandbox.ts 的 CAP_METHODS 保持一致（能力 → 方法映射）。
 const CAP_METHODS: Record<string, string[]> = {
@@ -39,6 +40,7 @@ const CAP_METHODS: Record<string, string[]> = {
   renderer: ["discover"],
   autoMatch: ["search"],
   scrobbler: ["onPlay", "onScrobble"],
+  artistInfo: ["fetchArtistInfo"],
   playlistImport: ["canHandle", "fetchPlaylist"],
   playlistFile: ["canHandleFile", "parseFile"],
   dailyPlaylist: ["runDailyJob"],
@@ -83,6 +85,7 @@ const BUILTINS: Array<{ id: string; file: string; exportName: string }> = [
   { id: "local-recommend", file: "../src/services/plugin/localRecommend.js", exportName: "localRecommendManifest" },
   { id: "playlist-sync", file: "../src/services/plugin/playlistSync.js", exportName: "playlistSyncManifest" },
   { id: "dlna-renderer", file: "../src/services/plugin/renderers/dlna.js", exportName: "dlnaRendererManifest" },
+  { id: "artist-info", file: "../src/services/plugin/artistInfo.js", exportName: "artistInfoManifest" },
 ];
 
 const errors: string[] = [];

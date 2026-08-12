@@ -37,6 +37,8 @@ import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/pla
 // 不再随后端内置。安装后随市场分发,行为不变。其余内置 provider 也遵循此迁移方向。
 // ---- renderer (device casting) ----
 import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";
+// ---- artist (artist info scraping) ----
+import { artistInfoManifest, artistInfoPlugin } from "../services/plugin/artistInfo.js";
 
 export interface BuiltinPlugin {
   manifest: PluginManifest;
@@ -67,6 +69,10 @@ export const BUILTIN_RENDERER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dlnaRendererManifest, impl: dlnaRendererPlugin },
 ];
 
+export const BUILTIN_ARTIST_PLUGINS: BuiltinPlugin[] = [
+  { manifest: artistInfoManifest, impl: artistInfoPlugin },
+];
+
 /** All built-in plugins (any type). */
 export const BUILTIN_PLUGINS: BuiltinPlugin[] = [
   ...BUILTIN_SOURCE_PLUGINS,
@@ -76,6 +82,7 @@ export const BUILTIN_PLUGINS: BuiltinPlugin[] = [
   ...BUILTIN_LYRIC_PLUGINS,
   ...BUILTIN_COVER_PLUGINS,
   ...BUILTIN_RENDERER_PLUGINS,
+  ...BUILTIN_ARTIST_PLUGINS,
 ];
 
 let registered = false;

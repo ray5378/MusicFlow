@@ -112,6 +112,7 @@ const CAP_METHODS: Record<string, string[]> = {
   lyricProvider: ["searchLyrics"],
   coverProvider: ["searchCover"],
   scrobbler: ["onPlay", "onScrobble"],
+  artistInfo: ["fetchArtistInfo"],
   playlistImport: ["canHandle", "fetchPlaylist"],
   playlistFile: ["canHandleFile", "parseFile"],
   dailyPlaylist: ["runDailyJob"],
