@@ -183,9 +183,55 @@ describe("QuickJS 插件沙箱", () => {
     expect(bySearch.songs[0].title).toBe("Demo Song");
   });
 
-  it("host.songs 无 songs:read 权限时拒绝(PERMISSION_DENIED)", async () => {
+  it("host.songs 无 songs:read 权限时拒绝(PERMISSION_DENIED,信封带方法名)", async () => {
     const { impl } = await loadSandboxedPlugin("demo-hostapi", HOST_API_PLUGIN_CODE, makeEnv({ permissions: ["net"] }));
-    await expect(impl.search({}, { byId: "so-1" })).rejects.toThrow(/PERMISSION_DENIED: songs:read/);
+    await expect(impl.search({}, { byId: "so-1" })).rejects.toThrow(/PERMISSION_DENIED: songs:read \(host\.getById\)/);
+  });
+
+  it("host.http 非 2xx/网络错误时插件能读到透明信封(status + 真实原因)", async () => {
+    // 验证:env.http 返回失败信封后,沙箱原样透传给插件(带 status 与 error.message),
+    // 不再出现 "HTTP undefined" 这类丢失真因的报错。
+    const code = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-sandbox", name: "x", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: ["net"] },
+        create(host) {
+          return {
+            async search(config, params) {
+              const r = await host.http("https://demo/fail", {});
+              const reason = (r.error && r.error.message) || r.error;
+              return { ok: r.ok, status: r.status, err: reason };
+            }
+          };
+        }
+      };`;
+    const env = makeEnv({ http: async () => ({ ok: false, status: 502, headers: {}, body: "", error: "Bad Gateway upstream" }) });
+    const { impl } = await loadSandboxedPlugin("demo-sandbox", code, env);
+    const r = await impl.search({}, {});
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe(502);
+    expect(String(r.err)).toContain("Bad Gateway upstream");
+  });
+
+  it("host.http 实现抛异常时沙箱兜底信封带 status:0,不泄露 undefined", async () => {
+    // 验证:env.http 自身抛异常(如编程错误)时,沙箱兜底为 { ok:false, status:0, error },
+    // 插件读到的 status 是 0 而非 undefined。
+    const code = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-sandbox", name: "x", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: ["net"] },
+        create(host) {
+          return {
+            async search(config, params) {
+              const r = await host.http("https://demo/boom", {});
+              return { status: r.status, err: r.error && r.error.message };
+            }
+          };
+        }
+      };`;
+    const env = makeEnv({ http: async () => { throw new Error("env http exploded"); } });
+    const { impl } = await loadSandboxedPlugin("demo-sandbox", code, env);
+    const r = await impl.search({}, {});
+    expect(r.status).toBe(0);
+    expect(String(r.err)).toContain("env http exploded");
   });
 
   it("host.plugin.getHostUrl / getNetworkAddresses 返回宿主信息", async () => {
@@ -239,9 +285,10 @@ describe("QuickJS 插件沙箱", () => {
               for (let i = 0; i < 128; i++) ps.push(host.http("https://demo/h?i=" + i, {}));
               const rs = await Promise.allSettled(ps);
               let rejected = 0;
+              const LIMIT_RE = /并发 host 调用过多|拒绝新请求/;
               for (const r of rs) {
-                if (r.status === "rejected" && /调用过于密集/.test(String(r.reason && r.reason.message || r.reason))) rejected++;
-                else if (r.status === "fulfilled" && r.value && r.value.error && /调用过于密集/.test(String(r.value.error.message))) rejected++;
+                if (r.status === "rejected" && LIMIT_RE.test(String(r.reason && r.reason.message || r.reason))) rejected++;
+                else if (r.status === "fulfilled" && r.value && r.value.error && LIMIT_RE.test(String(r.value.error.message))) rejected++;
               }
               return { rejected };
             }

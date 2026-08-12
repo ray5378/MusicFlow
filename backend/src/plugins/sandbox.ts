@@ -378,6 +378,12 @@ export class SandboxedPlugin {
     if (i >= 0) this.defers.splice(i, 1);
   }
 
+  /** 宿主异常兜底信封:必须带 status 字段,否则插件读 r.status 得 undefined
+   *  (表现为 "HTTP undefined" 这类无从排查的报错)。补 status:0 + 真实原因。 */
+  private hostErrorEnvelope(message: string, name = "HostError"): any {
+    return { ok: false, status: 0, error: { name, message } };
+  }
+
   /** 宿主异步函数:deferred-promise 模式。返回 VM promise handle。 */
   private hostAsync(name: string, impl: (...args: any[]) => Promise<any>, perm: string | null): QuickJSHandle {
     const fn = this.ctx.newFunction(name, (...argHandles: QuickJSHandle[]) => {
@@ -390,7 +396,11 @@ export class SandboxedPlugin {
       // "调用过于密集,拒绝新请求",使搜索/歌词/封面等长跑功能间歇性全部失败。
       if (this.defers.length > MAX_DEFERS) {
         this.removeDefer(deferred);
-        deferred.resolve(this.jsToHandle({ ok: false, error: { message: "沙箱:调用过于密集,拒绝新请求" } }));
+        const msg = `沙箱:并发 host 调用过多(在途 ${this.defers.length} > 上限 ${MAX_DEFERS}),拒绝新请求;若持续触发请反馈`;
+        deferred.resolve(this.jsToHandle({ ok: false, error: { message: msg } }));
+        // 极少触发的分支:先泵送结算,再延后一拍释放 handle,避免 VM 尚未读取就被 dispose
+        try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
+        Promise.resolve().then(() => { try { deferred.dispose(); } catch { /* ignore */ } });
         return deferred.handle;
       }
       Promise.resolve()
@@ -399,7 +409,7 @@ export class SandboxedPlugin {
             // 权限拒绝要打日志:否则容器日志完全静默,前端只看到 HTTP undefined
             // 之类无从排查的报错(如 plugin.json 缺 permissions 时 host.http 被拒)。
             console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
-            return { ok: false, error: { message: `PERMISSION_DENIED: ${perm}` } };
+            return { ok: false, error: { message: `PERMISSION_DENIED: ${perm} (host.${name})` } };
           }
           return impl(...args);
         })
@@ -414,14 +424,15 @@ export class SandboxedPlugin {
         })
         .catch((err) => {
           const msg = String((err && err.message) || err);
-          // 兜底信封必须带 status 字段,否则插件读 r.status 得 undefined
-          // (表现为 "HTTP undefined" 这类无从排查的报错)。补 status:0 让
-          // 插件侧统一走 "HTTP 0" 分支并可读 r.error 看到真实原因。
-          if (deferred.alive) deferred.resolve(this.jsToHandle({ ok: false, status: 0, error: { name: "HostError", message: msg } }));
+          // 任何宿主侧实现抛出都到此兜底:服务端记真实错误便于排查(plugin id + 方法 + 所需权限),
+          // 同时给插件一个带 status:0 的透明信封,使其能读出真实原因而非 undefined。
+          console.error(`[PLUGIN:${this.id}] host.${name} 执行异常: ${msg}${perm ? ` (需权限 ${perm})` : ""}`);
+          if (deferred.alive) deferred.resolve(this.jsToHandle(this.hostErrorEnvelope(msg)));
         })
         .finally(() => {
           this.removeDefer(deferred);
           try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
+          try { deferred.dispose(); } catch { /* ignore */ }
         });
       return deferred.handle;
     });
@@ -447,8 +458,21 @@ export class SandboxedPlugin {
 
   private injectHost(): void {
     const c = this.ctx;
-    // host.http(委托宿主 env.http,便于测试 mock 与宿主统一封装)
-    const httpFn = this.hostAsync("http", (input: any, init: any) => this.env.http(String(input), init || {}), "net");
+    // host.http(委托宿主 env.http,便于测试 mock 与宿主统一封装)。
+    // 统一在此记录失败(超时/DNS 解析失败/非 2xx),否则容器日志静默、真因无法定位。
+    const httpFn = this.hostAsync("http", async (input: any, init: any) => {
+      const url = String(input);
+      try {
+        const r = await this.env.http(url, init || {});
+        if (r.ok === false && (r.status === 0 || (typeof r.status === "number" && r.status >= 400))) {
+          console.warn(`[PLUGIN:${this.id}] host.http 失败 ${r.status} ${url}${r.error ? " (" + String(r.error) + ")" : ""}`);
+        }
+        return r;
+      } catch (e: any) {
+        console.error(`[PLUGIN:${this.id}] host.http 异常 ${url} -> ${e?.message || e}`);
+        throw e;
+      }
+    }, "net");
 
     // host.storage(异步,与 host.ts PluginStorage 同契约)
     const storageObj = c.newObject();
@@ -721,7 +745,7 @@ export class SandboxedPlugin {
     this.deadline = Date.now() + INVOKE_TIMEOUT_MS;
     const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
     const code = `(async () => { try { const v = await (${body}); return { ok: true, value: v }; } catch (e) { return { ok: false, error: { name: String(e && e.name || ""), message: String(e && e.message || String(e)), stack: String(e && e.stack || "") } }; } })()`;
-    return this.evalAsync(code);
+    return this.evalAsync(code, method);
   }
 
   /** 同步方法调用(streamUrl/lyricUrl/canHandle/canHandleFile)。插件契约:这些方法必须纯同步。 */
@@ -740,10 +764,12 @@ export class SandboxedPlugin {
     const v = this.ctx.dump(vh);
     vh.dispose();
     if (v && v.ok === true) return v.value;
-    throw new Error(`插件 ${this.id} ${method}(): ${(v && v.error && (v.error.message || v.error.name)) || "执行失败"}`);
+    const syncErrMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
+    console.error(`[PLUGIN:${this.id}] ${method}() 失败: ${syncErrMsg}`);
+    throw new Error(`插件 ${this.id} ${method}(): ${syncErrMsg}`);
   }
 
-  private async evalAsync(code: string): Promise<any> {
+  private async evalAsync(code: string, method?: string): Promise<any> {
     const result = this.ctx.evalCode(code);
     if (result.error !== undefined) {
       const e = this.ctx.dump(result.error);
@@ -759,15 +785,31 @@ export class SandboxedPlugin {
       if (this.runtime.hasPendingJob()) this.runtime.executePendingJobs();
       await new Promise((r) => setImmediate(r));
     }
-    let rr: any;
-    try { rr = await settledPromise; } catch (e) { rr = { rejected: e }; }
-    try { promiseHandle.dispose(); } catch { /* ignore */ }
-    if (rr && rr.rejected) throw new Error(`插件 ${this.id} 内部错误: ${String(rr.rejected && (rr.rejected as any).message || rr.rejected)}`);
-    const vh: any = this.ctx.unwrapResult(rr as any);
-    const v = this.ctx.dump(vh);
-    vh.dispose();
-    if (v && v.ok === true) return v.value;
-    throw new Error(`插件 ${this.id}: ${(v && v.error && (v.error.message || v.error.name)) || "执行失败"}`);
+    try {
+      // 超时(在途未结算):明确告知是超时而非笼统"执行失败",便于定位卡死/死循环。
+      if (!done) {
+        console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} 执行超时(> ${INVOKE_TIMEOUT_MS}ms),已中断`);
+        throw new Error(`插件 ${this.id}${method ? " " + method + "()" : ""} 执行超时(> ${INVOKE_TIMEOUT_MS}ms)`);
+      }
+      let rr: any;
+      try { rr = await settledPromise; } catch (e) { rr = { rejected: e }; }
+      if (rr && rr.rejected) {
+        const msg = String((rr.rejected && (rr.rejected as any).message) || rr.rejected);
+        console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内部异常: ${msg}`);
+        throw new Error(`插件 ${this.id} 内部错误: ${msg}`);
+      }
+      const vh: any = this.ctx.unwrapResult(rr as any);
+      const v = this.ctx.dump(vh);
+      vh.dispose();
+      if (v && v.ok === true) return v.value;
+      // 插件侧抛错:服务端记录完整 message + stack,便于定位真因;前端只收到精简文案。
+      const errMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
+      if (v && v.error && v.error.stack) console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`, v.error.stack);
+      else console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`);
+      throw new Error(`插件 ${this.id}: ${errMsg}`);
+    } finally {
+      try { promiseHandle.dispose(); } catch { /* ignore */ }
+    }
   }
 
   /** 生成 core 侧的 impl 门面:只暴露插件实际实现且能力要求的方法。 */
