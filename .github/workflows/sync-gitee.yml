@@ -1,0 +1,27 @@
+name: sync-to-gitee
+
+# 推送到 GitHub 后自动镜像同步到 Gitee(国内访问源)。
+# 镜像仓库: https://gitee.com/ray5378/musicflow-v2
+# 触发:master 分支 push 或任意 tag 推送(workflow_dispatch 可手动补同步)。
+on:
+  push:
+    branches: [master]
+    tags: ["*"]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push mirror to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          # Gitee access_token 可作 git push 密码(需带用户名前缀)
+          git remote add gitee "https://ray5378:${GITEE_TOKEN}@gitee.com/ray5378/musicflow-v2.git"
+          git push gitee --mirror --force
+          echo "Gitee 镜像同步完成"
