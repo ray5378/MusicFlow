@@ -433,6 +433,9 @@ export function initDatabase() {
     "source_data TEXT",
     "plugin_entry TEXT",
     "cache_path TEXT",
+    // 落库歌词(歌词补全 B 选项):在线/本地/WebDAV 拉到的 LRC 文本持久化于此,
+    // 离线也能显示、不依赖 provider 常驻。
+    "lyrics TEXT",
   ]) {
     try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
   }

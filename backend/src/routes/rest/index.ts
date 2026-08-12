@@ -6,6 +6,7 @@ import fs from "fs";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { notifyScrobble } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
+import { fetchCoverForSong } from "../../services/covers.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
@@ -1355,6 +1356,15 @@ restRoutes.get("/getCoverArt", async (c) => {
       coverRef = album?.coverArt || song.coverArt || null;
     } else coverRef = song?.coverArt || null;
     filePath = resolveCandidates(coverRef);
+    // 按需补封面(A):so- 直接请求歌曲封面、本地无文件、且歌曲本身没有
+    // cover_art 时,经 coverProvider 插件拉取(独立选源 cover.providerId)。
+    // 防风暴在 fetchCoverForSong 内(每首歌失败后短 TTL 不再自动重试)。
+    if (!filePath && song && !song.coverArt) {
+      try {
+        const ref = await fetchCoverForSong(song as any, false);
+        if (ref) filePath = resolveCandidates(ref);
+      } catch { /* ignore */ }
+    }
   } else if (id.startsWith("ar-")) {
     const artist = db.select().from(artists).where(eq(artists.id, id.slice(3))).get();
     if (artist) {

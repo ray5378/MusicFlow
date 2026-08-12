@@ -1,8 +1,9 @@
-import { db } from "../db/index.js";
+import { db, sqlite } from "../db/index.js";
 import { songs, mediaSources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getPluginImpl, getPluginConfig } from "../plugins/registry.js";
-import { searchLyrics } from "../plugins/providers.js";
+import { hasLyricProvider, searchLyrics } from "../plugins/providers.js";
+import { getSettingBool } from "./settings.js";
 
 export interface LrcLine {
   time: number; // seconds
@@ -75,18 +76,69 @@ const lrcCacheSweep = setInterval(() => {
 // Don't keep the process alive just for cache sweeping.
 (lrcCacheSweep as any).unref?.();
 
-// Fetch the .lrc file next to a song (WebDAV or local)
+// 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL)。离线优先、最准;
+// web 歌曲 path 不是 w:/l: 前缀,直接返回 null。
+async function readSidecarLrc(song: SongRow): Promise<string | null> {
+  try {
+    const colon1 = song.path.indexOf(":");
+    if (colon1 < 0) return null;
+    const prefix = song.path.slice(0, colon1);
+    if (prefix !== "w" && prefix !== "l") return null;
+    const rest = song.path.slice(colon1 + 1);
+    const colon2 = rest.indexOf(":");
+    if (colon2 < 0) return null;
+    const sourceId = rest.slice(0, colon2);
+    const filePath = rest.slice(colon2 + 1);
+    const lrcPath = filePath.replace(/\.[^.]+$/, "") + ".lrc";
+
+    const source = db.select().from(mediaSources).where(eq(mediaSources.id, sourceId)).get();
+    if (!source) return null;
+    const config = JSON.parse(source.config || "{}");
+
+    if (prefix === "w") {
+      const base = config.url?.replace(/\/+$/, "");
+      if (!base) return null;
+      const url = new URL(base).origin + lrcPath;
+      const headers: Record<string, string> = { Range: "bytes=0-65535" };
+      if (config.username && config.password) {
+        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(url, { headers, signal: controller.signal });
+        if (res.ok || res.status === 206) return await res.text();
+      } finally { clearTimeout(timeout); }
+    } else if (prefix === "l") {
+      const fs = await import("fs");
+      if (fs.existsSync(lrcPath)) return fs.readFileSync(lrcPath, "utf8");
+    }
+  } catch { /* 任何失败都当作无 sidecar */ }
+  return null;
+}
+
+// Fetch lyrics for a song, unified across ALL song types:
+//   ① 已落库歌词(songs.lyrics,离线可用)
+//   ② sidecar .lrc(本地 / WebDAV)
+//   ③ 在线按需(A 开关,默认开):lyricProvider 插件,命中且 B(persist) 开则落库
+//   ④ web 歌曲 legacy 源插件 lyricUrl
 export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   const cached = lrcCache.get(song.id);
   if (cached && Date.now() - cached.at < CACHE_TTL) return cached.content;
 
   let content: string | null = null;
 
-  // Online (web) songs: try the unified lyric-provider registry FIRST
-  // (first-match-wins across enabled lyricProvider plugins, e.g. the
-  // go-music-dl-lyrics plugin). Then fall back to the legacy source plugin
-  // lyricUrl() for any source that still implements it directly.
-  if (song.type === "web") {
+  // ① 已落库的歌词(DB):离线也能显示,不依赖 provider 常驻
+  try {
+    const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get(song.id) as any;
+    if (row?.lyrics) content = row.lyrics;
+  } catch { /* ignore */ }
+
+  // ② sidecar .lrc(离线优先、最准)
+  if (!content) content = await readSidecarLrc(song);
+
+  // ③ 在线按需(A 开关):sidecar/落库都没有时,问 lyricProvider 插件
+  if (!content && getSettingBool("lyrics.onDemand", true) && hasLyricProvider()) {
     // 把 source/album/extra 一并传给 lyric provider:插件据此优先同平台回退
     // (go-music-dl 的搜索回退需要 source 判断"本平台优先",否则只能盲目多平台搜索)。
     let sourceData: any = null;
@@ -101,16 +153,17 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
       extra: sourceData?.extra || null,
     });
     if (fromProviders) {
-      lrcCache.set(song.id, { content: fromProviders, at: Date.now() });
-      return fromProviders;
+      content = fromProviders;
+      // B 落库(默认关):命中即写 DB,拉一次永存、离线也能显示
+      if (getSettingBool("lyrics.persist", false)) {
+        try { sqlite.prepare("UPDATE songs SET lyrics = ? WHERE id = ?").run(content, song.id); } catch { /* ignore */ }
+      }
     }
   }
 
-  // Online (web) songs: delegate lyric-URL derivation to the source plugin so
-  // provider-specific URL logic (e.g. go-music-dl's /music/download_lrc) lives
-  // with the plugin, not the core. The LRC is fetched in-memory and never
-  // written to disk.
-  if (song.type === "web" && song.pluginEntry) {
+  // ④ web 歌曲 legacy 源插件 lyricUrl(仅当上面都没有):provider 特定 URL 逻辑
+  //    (如 go-music-dl 的 /music/download_lrc)留在插件侧,核心不重复实现。
+  if (!content && song.type === "web" && song.pluginEntry) {
     const impl = getPluginImpl(song.pluginEntry);
     if (impl?.lyricUrl) {
       const cfg = getPluginConfig(song.pluginEntry) || {};
@@ -131,43 +184,9 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
             if (text && !text.startsWith("Lyric not found")) content = text;
           }
         } catch { content = null; }
-        lrcCache.set(song.id, { content, at: Date.now() });
-        return content;
       }
     }
   }
-
-  try {
-    const colon1 = song.path.indexOf(":");
-    const prefix = song.path.slice(0, colon1);
-    const rest = song.path.slice(colon1 + 1);
-    const colon2 = rest.indexOf(":");
-    const sourceId = rest.slice(0, colon2);
-    const filePath = rest.slice(colon2 + 1);
-    const lrcPath = filePath.replace(/\.[^.]+$/, "") + ".lrc";
-
-    const source = db.select().from(mediaSources).where(eq(mediaSources.id, sourceId)).get();
-    if (!source) { lrcCache.set(song.id, { content: null, at: Date.now() }); return null; }
-    const config = JSON.parse(source.config || "{}");
-
-    if (prefix === "w") {
-      const base = config.url?.replace(/\/+$/, "");
-      if (!base) { lrcCache.set(song.id, { content: null, at: Date.now() }); return null; }
-      const url = new URL(base).origin + lrcPath;
-      const headers: Record<string, string> = { Range: "bytes=0-65535" };
-      if (config.username && config.password) {
-        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
-      }
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      const res = await fetch(url, { headers, signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok || res.status === 206) content = await res.text();
-    } else if (prefix === "l") {
-      const fs = await import("fs");
-      if (fs.existsSync(lrcPath)) content = fs.readFileSync(lrcPath, "utf8");
-    }
-  } catch { content = null; }
 
   lrcCache.set(song.id, { content, at: Date.now() });
   return content;

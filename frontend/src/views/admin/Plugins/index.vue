@@ -253,6 +253,61 @@
             <span v-if="f.help" class="field-hint">{{ f.help }}</span>
           </el-form-item>
 
+          <!-- 歌词/封面按需获取设置:按能力挂载(不写死插件名),设置存全局、
+               换插件不变。go-music-dl 同时声明 lyricProvider+coverProvider → 两组并列。 -->
+          <template v-if="hasLyricProvider || hasCoverProvider">
+            <el-form-item v-if="hasLyricProvider" label="歌词获取">
+              <div class="mf-media">
+                <div class="mf-media-row">
+                  <span class="mf-media-label">来源插件</span>
+                  <el-select v-model="lyricsSettings.providerId" clearable placeholder="自动" size="small" style="width: 260px" @change="saveMediaSettings('lyrics')">
+                    <el-option v-for="p in lyricProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
+                  </el-select>
+                  <span class="field-hint">选择歌词来源插件;清空 = 自动(全部启用的歌词提供方)</span>
+                </div>
+                <div class="mf-media-row">
+                  <span class="mf-media-label">按需获取 A</span>
+                  <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
+                  <span class="field-hint">本地/WebDAV 歌曲缺歌词时,播放实时向所选插件获取</span>
+                </div>
+                <div class="mf-media-row">
+                  <span class="mf-media-label">落库 B</span>
+                  <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
+                  <span class="field-hint">获取到的歌词保存到数据库,离线也能显示</span>
+                </div>
+                <div class="mf-media-row">
+                  <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全 C</el-button>
+                  <span v-if="lyricsBackfill.total > 0" class="field-hint">{{ backfillText('lyrics') }}</span>
+                </div>
+              </div>
+            </el-form-item>
+            <el-form-item v-if="hasCoverProvider" label="封面获取">
+              <div class="mf-media">
+                <div class="mf-media-row">
+                  <span class="mf-media-label">来源插件</span>
+                  <el-select v-model="coversSettings.providerId" clearable placeholder="自动" size="small" style="width: 260px" @change="saveMediaSettings('covers')">
+                    <el-option v-for="p in coverProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
+                  </el-select>
+                  <span class="field-hint">选择封面来源插件;清空 = 自动(全部启用的封面提供方)</span>
+                </div>
+                <div class="mf-media-row">
+                  <span class="mf-media-label">按需获取 A</span>
+                  <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
+                  <span class="field-hint">歌曲缺封面时,请求封面时实时向所选插件获取</span>
+                </div>
+                <div class="mf-media-row">
+                  <span class="mf-media-label">落库 B</span>
+                  <el-switch v-model="coversSettings.persist" @change="saveMediaSettings('covers')" />
+                  <span class="field-hint">下载缓存封面到本地,一次获取永久命中</span>
+                </div>
+                <div class="mf-media-row">
+                  <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">批量补全 C</el-button>
+                  <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
+                </div>
+              </div>
+            </el-form-item>
+          </template>
+
           <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
           <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
             <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
@@ -329,6 +384,12 @@ const saving = ref(false);
 const purging = ref(false);
 const testResult = ref<any>(null);
 
+// ---- 歌词/封面按需获取(全局设置 + 批量补全) ----
+const lyricsSettings = reactive({ providerId: "", onDemand: true, persist: false });
+const coversSettings = reactive({ providerId: "", onDemand: true, persist: true });
+const lyricsBackfill = reactive({ running: false, total: 0, done: 0, ok: 0, fail: 0, skipped: 0 });
+const coversBackfill = reactive({ running: false, total: 0, done: 0, ok: 0, fail: 0, skipped: 0 });
+
 // ---- health ----
 const healthMap = ref<Record<string, any>>({});
 
@@ -353,6 +414,24 @@ const configFields = computed<any[]>(() => parseManifest(editing.value).configSc
 const hasWebRotation = computed<boolean>(() =>
   (parseManifest(editing.value).capabilities || []).includes("webRotation"),
 );
+
+/** 按能力挂载歌词/封面区:任何声明 lyricProvider / coverProvider 的插件都显示,
+ *  不写死插件名(与 isSourcePlugin/hasWebRotation 同模式)。 */
+const hasLyricProvider = computed<boolean>(() =>
+  (parseManifest(editing.value).capabilities || []).includes("lyricProvider"),
+);
+const hasCoverProvider = computed<boolean>(() =>
+  (parseManifest(editing.value).capabilities || []).includes("coverProvider"),
+);
+const lyricProviderPlugins = computed<any[]>(() =>
+  plugins.value.filter((p) => (parseManifest(p).capabilities || []).includes("lyricProvider")),
+);
+const coverProviderPlugins = computed<any[]>(() =>
+  plugins.value.filter((p) => (parseManifest(p).capabilities || []).includes("coverProvider")),
+);
+function providerLabel(p: any): string {
+  return `${displayName(p)}${p.enabled ? "" : "（已停用）"}`;
+}
 
 function isSourcePlugin(plugin: any) {
   return parseManifest(plugin).type === "source";
@@ -719,6 +798,69 @@ async function purgeWebSongs() {
   }
 }
 
+// ---- 歌词/封面按需获取设置 + 批量补全 ----
+async function loadMediaSettings() {
+  try {
+    const l = await api.get("/rest/api/v1/lyrics/settings");
+    if (l.data) Object.assign(lyricsSettings, l.data);
+    const c = await api.get("/rest/api/v1/covers/settings");
+    if (c.data) Object.assign(coversSettings, c.data);
+  } catch { /* 后端旧版本无此端点时保持默认 */ }
+}
+
+async function saveMediaSettings(kind: "lyrics" | "covers") {
+  const s = kind === "lyrics" ? lyricsSettings : coversSettings;
+  try {
+    await api.put(`/rest/api/v1/${kind}/settings`, { providerId: s.providerId, onDemand: s.onDemand, persist: s.persist });
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "设置保存失败");
+  }
+}
+
+async function startBackfill(kind: "lyrics" | "covers") {
+  const st = kind === "lyrics" ? lyricsBackfill : coversBackfill;
+  if (st.running) return;
+  try {
+    const res = await api.post(`/rest/api/v1/${kind}/backfill`);
+    if (res.data.running) {
+      st.running = true;
+      if (res.data.total !== undefined) st.total = res.data.total;
+      ElMessage.success(`开始补全,共 ${st.total} 首缺${kind === "lyrics" ? "歌词" : "封面"}的歌曲`);
+      pollBackfill(kind);
+    } else if (res.data.accepted === false && res.data.error) {
+      ElMessage.error(res.data.error);
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "启动补全失败");
+  }
+}
+
+function pollBackfill(kind: "lyrics" | "covers") {
+  const st = kind === "lyrics" ? lyricsBackfill : coversBackfill;
+  const timer = window.setInterval(async () => {
+    try {
+      const res = await api.get(`/rest/api/v1/${kind}/backfill/status`);
+      if (res.data) Object.assign(st, res.data);
+      if (!res.data?.running) {
+        window.clearInterval(timer);
+        st.running = false;
+        ElMessage.success(`补全完成:成功 ${st.ok},失败 ${st.fail}${st.skipped ? `,跳过 ${st.skipped}` : ""}`);
+      }
+    } catch {
+      window.clearInterval(timer);
+      st.running = false;
+    }
+  }, 2000);
+}
+
+function backfillText(kind: "lyrics" | "covers"): string {
+  const st = kind === "lyrics" ? lyricsBackfill : coversBackfill;
+  let t = `已处理 ${st.done}/${st.total},成功 ${st.ok},失败 ${st.fail}`;
+  if (st.skipped) t += `,跳过 ${st.skipped}`;
+  t += st.running ? ",进行中…" : ",已完成";
+  return t;
+}
+
 // ---- marketplace ----
 async function loadMarketplace() {
   marketLoading.value = true;
@@ -788,6 +930,7 @@ function onTabChange(name: string | number) {
 onMounted(() => {
   loadPlugins();
   loadHealth();
+  loadMediaSettings();
 });
 </script>
 
@@ -800,6 +943,10 @@ onMounted(() => {
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
+.mf-media { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.mf-media-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mf-media-label { flex: 0 0 64px; font-size: 13px; color: var(--el-text-color-primary); }
+.mf-media .field-hint { margin-left: 0; max-width: 340px; }
 .market-card { margin-bottom: 20px; }
 .market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
 .market-warn { margin-top: 4px; }

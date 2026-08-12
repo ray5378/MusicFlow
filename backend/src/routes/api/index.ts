@@ -13,6 +13,8 @@ import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFi
 import { dailyRecommendApi, dailyRecommendTag, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
+import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
+import { startBackfill, backfillStatus } from "../../services/backfill.js";
 import { isDailyRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
@@ -745,6 +747,38 @@ apiRoutes.get("/v1/artists/missing-info-count", (c) => {
 
 // ==================== Settings ====================
 apiRoutes.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
+
+// ==================== Lyrics / covers media-fetch settings + backfill ====================
+// A(按需)/B(落库)/C(批量补全) + 独立选源(providerId)。设置存全局 settings 表:
+// 行为归核心、UI 按能力挂载(lyricProvider/coverProvider 插件配置页),与具体
+// 插件解耦——换插件设置不变,选中插件被禁用/卸载自动回退全部启用 provider。
+const setLyricsCoversSettings = async (c: Context, prefix: "lyrics" | "covers") => {
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body.providerId === "string") setSetting(`${prefix}.providerId`, body.providerId);
+  if (typeof body.onDemand === "boolean") setSetting(`${prefix}.onDemand`, body.onDemand ? "true" : "false");
+  if (typeof body.persist === "boolean") setSetting(`${prefix}.persist`, body.persist ? "true" : "false");
+  return c.json({ success: true });
+};
+
+apiRoutes.get("/v1/lyrics/settings", adminMiddleware, (c) => c.json({
+  providerId: getSetting("lyrics.providerId", ""),
+  onDemand: getSettingBool("lyrics.onDemand", true),
+  persist: getSettingBool("lyrics.persist", false),
+}));
+apiRoutes.put("/v1/lyrics/settings", adminMiddleware, (c) => setLyricsCoversSettings(c, "lyrics"));
+
+apiRoutes.get("/v1/covers/settings", adminMiddleware, (c) => c.json({
+  providerId: getSetting("cover.providerId", ""),
+  onDemand: getSettingBool("cover.onDemand", true),
+  persist: getSettingBool("cover.persist", true),
+}));
+apiRoutes.put("/v1/covers/settings", adminMiddleware, (c) => setLyricsCoversSettings(c, "covers"));
+
+// 手动批量补全(节流执行,后台运行;同种任务在跑则返回 running=true)
+apiRoutes.post("/v1/lyrics/backfill", adminMiddleware, (c) => c.json(startBackfill("lyrics")));
+apiRoutes.get("/v1/lyrics/backfill/status", adminMiddleware, (c) => c.json(backfillStatus("lyrics")));
+apiRoutes.post("/v1/covers/backfill", adminMiddleware, (c) => c.json(startBackfill("covers")));
+apiRoutes.get("/v1/covers/backfill/status", adminMiddleware, (c) => c.json(backfillStatus("covers")));
 
 // ==================== Daily recommend (combined: remote + pool + local) ====================
 //
