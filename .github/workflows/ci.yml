@@ -1,0 +1,48 @@
+name: ci
+
+# 每次 push(含 PR)验证:
+#   1. 内置插件规范校验(scripts/check-builtins.mts)——manifest 合规/documentation 必填/能力映射
+#   2. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
+# 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin-spec:
+    name: 内置插件规范校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: cd backend && npm ci
+      - name: 校验 7 个内置插件 manifest 符合开发规范
+        run: cd backend && DATA_DIR=$(mktemp -d) npx tsx scripts/check-builtins.mts
+
+  test:
+    name: 类型检查 + 全量测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: cd backend && npm ci
+      - name: TypeScript 类型检查
+        run: cd backend && npx tsc --noEmit
+      - name: 全量测试
+        run: cd backend && npx vitest run
