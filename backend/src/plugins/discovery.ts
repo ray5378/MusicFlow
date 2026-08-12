@@ -326,10 +326,13 @@ export function validateManifest(manifest: any): string | null {  if (!manifest 
 }
 
 /** Compare two semver-ish version strings.
- *  Returns <0 if a<b, 0 if equal, >0 if a>b. Missing/non-numeric segments = 0. */
+ *  Returns <0 if a<b, 0 if equal, >0 if a>b. Missing/non-numeric segments = 0.
+ *  Tolerates a leading "v"/"V" (git describe tags like "v1.5.0-8-g595a0d8" would
+ *  otherwise parse the first segment as 0 and wrongly fail minAppVersion checks). */
 export function compareVersion(a: string, b: string): number {
-  const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
-  const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
+  const clean = (s: string) => String(s).replace(/^[vV]/, "");
+  const pa = clean(a).split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = clean(b).split(".").map((x) => parseInt(x, 10) || 0);
   const n = Math.max(pa.length, pb.length);
   for (let i = 0; i < n; i++) {
     const da = pa[i] || 0;
@@ -396,6 +399,13 @@ export async function discoverExternalPlugins(
       const jsonPath = path.join(path.dirname(file), "plugin.json");
       if (fs.existsSync(jsonPath)) {
         try { expectedManifest = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as PluginManifest; } catch { /* ignore */ }
+      }
+      // 版本预检:用 plugin.json 的 manifest 提前判定,不兼容则根本不必创建 QuickJS 沙箱。
+      // 这是必须的——若等沙箱建好再 dispose,QuickJS JS_FreeRuntime 的 gc 断言
+      // (list_empty(&rt->gc_obj_list))会以 abort 终止整个进程(实测崩溃,容器退出)。
+      if (expectedManifest && !isAppVersionCompatible(expectedManifest, appVersion)) {
+        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${expectedManifest.minAppVersion}, 当前 ${appVersion}`);
+        continue;
       }
       const comm = createComm(id, expectedManifest?.permissions ?? []);
       const env = {
