@@ -63,6 +63,16 @@ describe("marketplace listing", () => {
     if (u === "https://reg.test/dead.json") {
       return { ok: false, status: 500, json: async () => ({}) };
     }
+    // 仓库主页自动补全:Gitee 主页(HTML) → /raw/master/registry.json
+    if (u === "https://gitee.com/reg/repo") {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (u === "https://gitee.com/reg/repo/raw/master/registry.json") {
+      return { ok: true, status: 200, json: async () => ({ plugins: ["https://reg.test/gitee-p.json"], includes: [] }) };
+    }
+    if (u === "https://reg.test/gitee-p.json") {
+      return { ok: true, status: 200, json: async () => ({ id: "gitee-p", name: "GiteeP", version: "1.0.0", type: "lyrics", capabilities: ["lyricProvider"], configSchema: [], downloadUrl: "https://x/gitee-p.zip" }) };
+    }
     if (u === "https://reg.test/p1.json") {
       return { ok: true, status: 200, json: async () => ({ id: "p1", name: "P1", version: "1.0.0", type: "lyrics", capabilities: ["lyricProvider"], configSchema: [], downloadUrl: "https://x/p1.zip" }) };
     }
@@ -106,6 +116,20 @@ describe("marketplace listing", () => {
   it("tolerates an unreachable registry without dropping the rest", async () => {
     const m = await listMarketplace();
     expect(m.find((x) => x.id === "p3")).toBeTruthy();
+  });
+
+  it("auto-completes a Gitee repo homepage to its registry.json", async () => {
+    // 只填仓库主页(HTML/404),应自动补全 /raw/master/registry.json 并拉到插件。
+    const id = addRegistry("https://gitee.com/reg/repo");
+    try {
+      const m = await listMarketplace();
+      const gp = m.find((x) => x.id === "gitee-p");
+      expect(gp).toBeTruthy();
+      expect(gp?.sourceUrl).toBe("https://reg.test/gitee-p.json");
+      expect(gp?.downloadUrl).toBe("https://x/gitee-p.zip");
+    } finally {
+      removeRegistry(id);
+    }
   });
 });
 

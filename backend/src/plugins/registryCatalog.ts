@@ -154,14 +154,36 @@ export function officialRegistryUrl(): string {
   return OFFICIAL_REGISTRY_URL.trim();
 }
 
+/** 仓库主页 → 自动补全 registry.json 候选地址(用户可只填仓库地址)。
+ *  Gitee:  https://gitee.com/{owner}/{repo} → https://gitee.com/{owner}/{repo}/raw/master/registry.json
+ *  GitHub: https://github.com/{owner}/{repo} → https://raw.githubusercontent.com/{owner}/{repo}/master/registry.json */
+export function registryUrlCandidates(url: string): string[] {
+  const u = String(url).trim();
+  let m = u.match(/^https?:\/\/(?:www\.)?gitee\.com\/([^/]+)\/([^/]+)\/?$/);
+  if (m) return [`https://gitee.com/${m[1]}/${m[2]}/raw/master/registry.json`];
+  m = u.match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/?$/);
+  if (m) return [`https://raw.githubusercontent.com/${m[1]}/${m[2]}/master/registry.json`];
+  return [];
+}
+
 /** Fetch a single registry manifest. Supports either a bare array of plugin
- *  JSON URLs, or an object `{ plugins: [...], includes: [...] }`. */
+ *  JSON URLs, or an object `{ plugins: [...], includes: [...] }`.
+ *  若给定地址不是有效 registry JSON(如填了仓库主页),依次尝试自动补全候选。 */
 async function fetchOneRegistry(url: string): Promise<{ plugins: string[]; includes: string[] }> {
-  const res = await fetchWithTimeout(url, 15000);
-  const data: any = await res.json();
-  if (Array.isArray(data)) return { plugins: data, includes: [] };
-  if (data && Array.isArray(data.plugins)) return { plugins: data.plugins, includes: data.includes || [] };
-  return { plugins: [], includes: [] };
+  const attempts = [url, ...registryUrlCandidates(url)];
+  let lastErr: unknown = null;
+  for (const u of attempts) {
+    try {
+      const res = await fetchWithTimeout(u, 15000);
+      const data: any = await res.json();
+      if (Array.isArray(data)) return { plugins: data, includes: [] };
+      if (data && Array.isArray(data.plugins)) return { plugins: data.plugins, includes: data.includes || [] };
+      lastErr = new Error(`${u} 不是有效的注册表 JSON`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`拉取注册表失败: ${url}`);
 }
 
 /** Recursively fetch + merge all registry plugin URLs (dedupes, follows
