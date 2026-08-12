@@ -250,6 +250,10 @@ export async function installPlugin(downloadUrl: string): Promise<{ id: string; 
     // Register + seed immediately (no restart needed).
     await discoverExternalPlugins(APP_VERSION);
     return { id: manifest.id, name: manifest.name };
+  } catch (e) {
+    // 把真实失败原因打进服务端日志(响应体只有 error message,容器日志此前看不到原因)。
+    console.error(`[PLUGIN] 安装失败(downloadUrl=${downloadUrl}):`, e);
+    throw e;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

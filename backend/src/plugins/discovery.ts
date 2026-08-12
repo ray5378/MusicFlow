@@ -380,6 +380,8 @@ export async function discoverExternalPlugins(
   let loaded = 0;
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
+    // 跳过隐藏/临时目录(如安装中的 .install-* 暂存目录),避免噪音日志。
+    if (entry.name.startsWith(".")) continue;
     const id = entry.name;
     const file = safeResolve(root, id);
     if (!file || !fs.existsSync(file)) {
