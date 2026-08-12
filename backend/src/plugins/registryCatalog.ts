@@ -5,12 +5,15 @@
 //   - registry URLs are persisted in the `plugin_registries` table.
 //   - listMarketplace() fetches + merges every enabled registry. 同一插件来自
 //     不同注册表/plugin.json 地址的来源互不合并——每个来源保留为独立条目并带
-//     sourceUrl,由前端让用户手动选择安装哪个源头。
+//     sourceUrl,由前端让用户手动选择安装哪个源头(平台也作为区分维度展示)。
 //   - installPlugin(downloadUrl) downloads the archive, extracts it into
 //     data/plugins/<id>/, and (re)discovers external plugins so it's live
 //     immediately — no restart needed.
 //
-// In-process caveat (see docs/RESEARCH-...): external plugins run in the QuickJS
+// 不做任何 GitHub→Gitee 镜像回退(2026-08-12 按用户要求取消):插件包走 raw 仓库
+// 文件分发,网络不可达时直接报错,由运维侧自行解决网络,避免镜像 404 掩盖真相。
+//
+// Security caveat (see docs/RESEARCH-...): external plugins run in the QuickJS
 // sandbox (v1.3.0+), so they have no Node process powers; still, the services a
 // plugin reaches (e.g. its baseUrl) are configured by the admin, so installing a
 // third-party plugin remains a trust decision. The UI surfaces a warning; the
@@ -96,47 +99,12 @@ const OFFICIAL_REGISTRY_URL =
   process.env.MUSICFLOW_OFFICIAL_REGISTRY ??
   "https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json";
 
-// ==================== GitHub → Gitee 镜像回退 ====================
-// 国内网络访问 GitHub 常常超时/失败(容器内尤甚)。官方插件链路的三次拉取
-// (registry.json / plugin.json / 安装包 tar.gz)一律「GitHub 优先,Gitee 镜像回退」:
-//   1. registry.json       raw.githubusercontent.com → gitee.com/.../raw/
-//   2. plugin.json(清单)   同上(registry.json 里列的仍是 GitHub raw 地址)
-//   3. 安装包 tar.gz        github.com/.../releases/download → gitee.com/.../releases/download
-// 回退对调用方透明:只影响「用哪个地址拿数据」,不改变返回结构。
-// 镜像根可用 MUSICFLOW_REGISTRY_MIRROR 覆盖(默认官方 Gitee 镜像仓库)。
-const MIRROR_REPO = (process.env.MUSICFLOW_REGISTRY_MIRROR || "https://gitee.com/ray5378/music-flow-plugins").replace(/\/+$/, "");
-const GH_BASE = "https://github.com/ray5378/MusicFlow-plugins/";
-const RAW_GH_BASE = "https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/";
-
-/** 把官方仓库的 GitHub URL 映射为镜像仓库的等价 URL;非官方仓库 URL 返回 null。 */
-export function toMirrorUrl(url: string): string | null {
-  if (url.startsWith(RAW_GH_BASE)) {
-    // raw.githubusercontent.com/<owner>/<repo>/<ref>/<path> → <mirror>/raw/<ref>/<path>
-    return `${MIRROR_REPO}/raw/${url.slice(RAW_GH_BASE.length)}`;
-  }
-  if (url.startsWith(GH_BASE)) {
-    // github.com/<owner>/<repo>/<rest> → <mirror>/<rest>
-    return `${MIRROR_REPO}/${url.slice(GH_BASE.length)}`;
-  }
-  return null;
-}
-
-/** 优先 GitHub,失败(网络错误或 HTTP 非 2xx)回退镜像;两者都失败抛错(带镜像信息)。 */
-async function fetchWithMirror(url: string, primaryTimeoutMs: number, mirrorTimeoutMs?: number): Promise<Response> {
-  let firstErr: unknown;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(primaryTimeoutMs) });
-    if (res.ok) return res;
-    firstErr = new Error(`HTTP ${res.status}`);
-    console.warn(`[REGISTRY] ${url} -> HTTP ${res.status},回退镜像`);
-  } catch (e) {
-    firstErr = e;
-    console.warn(`[REGISTRY] ${url} 不可达(${(e as Error)?.message}),回退镜像`);
-  }
-  const mirror = toMirrorUrl(url);
-  if (!mirror) throw firstErr as Error;
-  const res = await fetch(mirror, { signal: AbortSignal.timeout(mirrorTimeoutMs ?? primaryTimeoutMs) });
-  if (!res.ok) throw new Error(`下载失败: HTTP ${res.status}(镜像 ${mirror})`);
+// ==================== 拉取(直连,无镜像回退) ====================
+// 2026-08-12 起取消 GitHub→Gitee 镜像回退:插件包已改 raw 仓库文件分发,
+// 直连失败直接抛错,不再猜测镜像地址(避免镜像 404 掩盖真实问题)。
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res;
 }
 
@@ -186,8 +154,7 @@ export function officialRegistryUrl(): string {
 /** Fetch a single registry manifest. Supports either a bare array of plugin
  *  JSON URLs, or an object `{ plugins: [...], includes: [...] }`. */
 async function fetchOneRegistry(url: string): Promise<{ plugins: string[]; includes: string[] }> {
-  const res = await fetchWithMirror(url, 15000);
-  if (!res.ok) throw new Error(`拉取注册表失败: HTTP ${res.status}`);
+  const res = await fetchWithTimeout(url, 15000);
   const data: any = await res.json();
   if (Array.isArray(data)) return { plugins: data, includes: [] };
   if (data && Array.isArray(data.plugins)) return { plugins: data.plugins, includes: data.includes || [] };
@@ -227,8 +194,7 @@ export async function listMarketplace(): Promise<RegistryEntry[]> {
   const out: RegistryEntry[] = [];
   for (const url of urls) {
     try {
-      const res = await fetchWithMirror(url, 15000);
-      if (!res.ok) continue;
+      const res = await fetchWithTimeout(url, 15000);
       const m: any = await res.json();
       if (validateManifest(m)) continue;
       const entry: RegistryEntry = {
@@ -264,9 +230,8 @@ export async function installPlugin(downloadUrl: string): Promise<{ id: string; 
   const archive = path.join(tmp, "plugin.archive");
   fs.mkdirSync(tmp, { recursive: true });
   try {
-    // GitHub 优先(25s),失败回退镜像(60s)——国内网络 GitHub 常超时,镜像更快兜底。
-    const res = await fetchWithMirror(downloadUrl, 25000, 60000);
-    if (!res.ok) throw new Error(`下载失败: HTTP ${res.status}`);
+    // 直连下载(无镜像回退),失败抛错由上层转成可读错误。
+    const res = await fetchWithTimeout(downloadUrl, 25000);
     const buf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(archive, buf);
 

@@ -105,6 +105,14 @@
                 </template>
               </template>
             </el-table-column>
+            <el-table-column label="平台" min-width="150">
+              <template #default="{ row }">
+                <div v-if="platformList(row).length > 0" class="cap-row">
+                  <el-tag v-for="p in platformList(row)" :key="p.slug" size="small" effect="plain">{{ p.label }}</el-tag>
+                </div>
+                <span v-else class="src-builtin">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="类型 / 能力" min-width="200">
               <template #default="{ row }">
                 <div class="cap-row">
@@ -135,7 +143,7 @@
             </el-table-column>
           </el-table>
           <el-empty v-else description="市场为空或注册表暂不可达" :image-size="60" />
-          <p v-if="marketPlugins.length > 0" class="market-note">同一插件可能来自多个注册表（来源不同、版本不同），请选择你要安装的源头。</p>
+          <p v-if="marketPlugins.length > 0" class="market-note">同一插件可能来自多个来源（注册表不同、支持的平台/版本不同），每个来源单独一行，请按平台选择你要安装的源头。</p>
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
           title="插件运行模型与安全提示"
@@ -466,6 +474,14 @@ function capabilityList(plugin: any): string[] {
 
 function permissionList(plugin: any): string[] {
   return parseManifest(plugin).permissions || [];
+}
+
+/** 平台标签:优先 manifest.platformLabels 的中文名,缺省回退 slug。 */
+function platformList(plugin: any): { slug: string; label: string }[] {
+  const m = parseManifest(plugin);
+  const slugs: string[] = Array.isArray(m.platforms) ? m.platforms : [];
+  const labels: Record<string, string> = m.platformLabels || {};
+  return slugs.map((s) => ({ slug: s, label: labels[s] || s }));
 }
 
 function capLabel(cap: string): string {
