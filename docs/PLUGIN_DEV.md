@@ -58,7 +58,8 @@ globalThis.__mfPlugin = {
 | `platforms` | ⬜ | 字符串数组，用于前端提示（如 `["qq"]`）。 |
 | `recommendPrefix` | ⬜ | source 插件专用：每日推荐歌单 URL 前缀。 |
 | `minAppVersion` | ⬜ | 要求的最低 App 版本；低于此版本会被跳过（沙箱运行时自 **1.3.0** 起）。 |
-| `author` / `homepage` / `downloadUrl` | ⬜ | 元数据，市场页展示。 |
+| `documentation` | ⬜ | **Markdown 字符串**，插件详情页的「功能介绍 + 处理逻辑」说明（用户点「详情」看到的内容）。建议每个插件都写：功能一句话 + 处理逻辑（数据来源 / 触发时机 / 边界）。未提供时前端按能力自动生成通用说明。 |
+| `author` / `homepage` / `icon` / `license` / `updateUrl` | ⬜ | 元数据，市场页展示。 |
 | `defaultEnabled` | ⬜ | 外置插件默认 `false`（用户手动开启）。 |
 
 > 发布到官方市场的插件，`plugin.json` 与 `index.js` 里的 manifest **必须逐字段一致**（`check.mjs` 会校验 id/version/capabilities）。
