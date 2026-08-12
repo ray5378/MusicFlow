@@ -1,6 +1,6 @@
 # MusicFlow-V2 外置插件开发指南（PLUGIN_DEV）
 
-> 适用版本：MusicFlow-V2 v1.3.0+（QuickJS 沙箱运行时）
+> 适用版本：MusicFlow-V2 **v1.4.0+**（QuickJS 沙箱运行时，host.* 能力全量开放）
 > 目标：教你自己写一个 drop-in 插件，丢进 `data/plugins/<id>/` 即可被后端加载，**无需改任何核心代码**。
 
 ---
@@ -27,7 +27,7 @@
 
 ## 2. 插件 = 运行在 QuickJS 沙箱里的纯 JS
 
-外置插件**不再**是 ES Module。它在独立的 QuickJS 虚拟机（WASM）里运行，只能拿到标准 JS（外加沙箱注入的 `URL` / `URLSearchParams` 兼容层）。插件文件必须定义全局对象：
+外置插件**不再**是 ES Module。它在独立的 QuickJS 虚拟机（WASM）里运行，只能拿到标准 JS（外加沙箱注入的 `URL` / `URLSearchParams` / `btoa` / `atob` 兼容层）。插件文件必须定义全局对象：
 
 ```js
 globalThis.__mfPlugin = {
@@ -39,7 +39,7 @@ globalThis.__mfPlugin = {
 - `manifest`：告诉核心「我是谁、我会什么、需要什么配置、要什么权限」。
 - `create(host)`：核心注入受控上下文 `host`（见 §5），插件用它闭包构造 `impl`——真正干活的函数集合。
 
-**插件拿不到 Node 的任何能力**：没有 `import`/`require`/`fetch`/`fs`/`process`。网络只能走 `host.http`（自带超时），存储走 `host.storage`，日志走 `host.log`。`permissions` 在宿主函数调用点强制执行——不再只是契约，是真实的运行时边界。
+**插件拿不到 Node 的任何能力**：没有 `import`/`require`/`fetch`/`fs`/`process`。网络只能走 `host.http` / `host.net` / `host.ws`（均自带超时与权限点），存储走 `host.storage`，文件走 `host.fs`（限插件目录），日志走 `host.log`。`permissions` 在宿主函数调用点强制执行——不再只是契约，是真实的运行时边界。
 
 ---
 
@@ -230,6 +230,7 @@ cp -r my-plugin backend/data/plugins/
 ```
 
 启动日志应出现 `[PLUGIN] 已加载外置插件 my-plugin (…) [沙箱]`。打开「插件」管理页启用即可。
+插件首次使用 `host.fs` 时，宿主会自动创建它的专属目录 `<data>/plugins/<id>/files/`。
 
 **方式 B：插件市场（推荐给普通用户）**
 
@@ -241,10 +242,10 @@ cp -r my-plugin backend/data/plugins/
 
 ## 9. 官方外置插件（参考实现）
 
-| id | type | capabilities | 说明 |
-|----|------|--------------|------|
-| `go-music-dl` | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
-| `listenbrainz` | scrobbler | scrobbler | ListenBrainz 播放上报 |
+| id | 版本 | type | capabilities | 说明 |
+|----|------|------|--------------|------|
+| `go-music-dl` | 1.2.0 | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
+| `listenbrainz` | 1.1.0 | scrobbler | scrobbler | ListenBrainz 播放上报 |
 
 源码在 [ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)，发布前跑 `node scripts/check.mjs <id>`。
 
@@ -399,8 +400,8 @@ globalThis.__mfPlugin = {
 - **插件没出现？** 看启动日志里的 `[PLUGIN]` 行；被跳过会写明原因。
 - **改了插件要生效吗？** 不需要重启——`data/plugins` 变更触发热重载（释放旧沙箱、加载新代码）。
 - **能覆盖内置插件吗？** 不能。内置/先注册者优先。
-- **插件能 import 或使用 Node API 吗？** 不能。沙箱里只有标准 JS + `host.*`；`fetch`、`require`、`fs` 等一律不存在。
+- **插件能 import 或使用 Node API 吗？** 不能。沙箱里只有标准 JS + `host.*`；Node 的 `fetch`、`require`、`fs`、`process` 等一律不存在。文件操作走 `host.fs`（限插件 `files/` 目录），网络走 `host.http` / `host.net` / `host.ws`。
 - **网络超时怎么办？** `host.http(url, { timeout: 8000 })` —— 不需要 AbortController。
-- **URL / URLSearchParams 有吗？** 沙箱注入了兼容层，与浏览器行为一致。
+- **URL / URLSearchParams 有吗？** 沙箱注入了兼容层，与浏览器行为一致；另有 `btoa/atob`（`host.net` 数据通道用）。
 - **TypeScript 写的插件？** 先编译成纯 JS（无 ESM export）再放进去。
-- **外部插件安全吗？** 运行在 QuickJS 沙箱（内存/栈/超时受限、权限执行点强制、无 Node 能力）；仍建议仅从你信赖的注册表安装。
+- **外部插件安全吗？** 代码运行在 QuickJS 沙箱（内存/栈/超时受限、权限执行点强制、无 Node 能力）；但 `fs` / `command` / `net` / `websocket` / `jsenv` 是**高风险权限**——尤其 `command` 跑出的进程是宿主级的，只对可信插件开放。安装前请确认插件来源与其 `plugin.json` 声明的权限。
