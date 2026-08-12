@@ -83,15 +83,16 @@
         </el-card>
 
         <el-card class="market-card" shadow="never">
-          <template #header><span>插件市场（官方内置 + 注册表）</span></template>
-          <el-table :data="marketPlugins" stripe v-loading="marketLoading" v-if="marketPlugins.length > 0">
+          <template #header><span>插件市场（官方内置 + 注册表，同一插件按平台分行）</span></template>
+          <el-table :data="marketRows" stripe v-loading="marketLoading" v-if="marketRows.length > 0">
             <el-table-column label="名称" min-width="170">
               <template #default="{ row }">
                 <div class="plugin-name">
                   {{ row.name }}
                   <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                  <el-tag v-if="row._platformLabel" size="small" effect="plain">{{ row._platformLabel }}</el-tag>
                 </div>
-                <div class="plugin-id">{{ row.id }}</div>
+                <div class="plugin-id">{{ row.id }}{{ row._platform ? "@" + row._platform : "" }}</div>
               </template>
             </el-table-column>
             <el-table-column label="来源" min-width="210">
@@ -105,12 +106,9 @@
                 </template>
               </template>
             </el-table-column>
-            <el-table-column label="平台" min-width="150">
+            <el-table-column label="平台" min-width="120">
               <template #default="{ row }">
-                <div v-if="platformList(row).length > 0" class="cap-row">
-                  <el-tag v-for="p in platformList(row)" :key="p.slug" size="small" effect="plain">{{ p.label }}</el-tag>
-                </div>
-                <span v-else class="src-builtin">—</span>
+                <span>{{ row._platformLabel || "—" }}</span>
               </template>
             </el-table-column>
             <el-table-column label="类型 / 能力" min-width="200">
@@ -143,7 +141,7 @@
             </el-table-column>
           </el-table>
           <el-empty v-else description="市场为空或注册表暂不可达" :image-size="60" />
-          <p v-if="marketPlugins.length > 0" class="market-note">同一插件可能来自多个来源（注册表不同、支持的平台/版本不同），每个来源单独一行，请按平台选择你要安装的源头。</p>
+          <p v-if="marketRows.length > 0" class="market-note">同一插件的不同平台/来源各自独立成行（安装的是该插件整体包），请按平台选择你要安装的源头。</p>
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
           title="插件运行模型与安全提示"
@@ -301,6 +299,21 @@ const installing = ref<string>("");
 const showRegDialog = ref(false);
 const newRegistryUrl = ref("");
 const addingReg = ref(false);
+
+/** 市场行:同一插件的每个平台拆成独立行(用户要求"按平台区分开,不要显示成一个插件")。
+ *  无平台声明的插件(内置/工具类)保持单行。 */
+const marketRows = computed<any[]>(() => {
+  const rows: any[] = [];
+  for (const p of marketPlugins.value) {
+    const plats = platformList(p);
+    if (plats.length === 0) {
+      rows.push({ ...p, _platform: null, _platformLabel: null });
+    } else {
+      for (const pl of plats) rows.push({ ...p, _platform: pl.slug, _platformLabel: pl.label });
+    }
+  }
+  return rows;
+});
 
 // ---- config dialog ----
 const showConfigDialog = ref(false);
@@ -577,9 +590,9 @@ function sourceHost(url: string): string {
   try { return new URL(url).host; } catch { return url || "—"; }
 }
 
-/** 安装按钮的加载键:同 id 不同来源也要能独立显示 loading。 */
+/** 安装按钮的加载键:同 id 不同来源/平台也要能独立显示 loading。 */
 function installKey(row: any): string {
-  return `${row.id}@${row.sourceUrl || "builtin"}`;
+  return `${row.id}@${row.sourceUrl || "builtin"}#${row._platform || ""}`;
 }
 
 /** 删除外置插件(确认后调 DELETE /v1/plugins/:id)。 */
