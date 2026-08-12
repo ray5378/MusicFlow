@@ -98,8 +98,7 @@ describe("marketplace listing", () => {
 
   it("keeps every source of the same id (user picks which to install) and follows includes", async () => {
     const m = await listMarketplace();
-    // p1 有两个来源(p1.json v1.0.0 / p1-v2.json v2.0.0),都不合并;每个来源带 sourceUrl。
-    expect(m.map((x) => x.id).sort()).toEqual(["p1", "p1", "p3"]);
+    // 同一注册表(a.json)内 p1 有两个来源(p1.json v1.0.0 / p1-v2.json v2.0.0),都不合并;每个来源带 sourceUrl。
     const p1Sources = m.filter((x) => x.id === "p1");
     expect(p1Sources).toHaveLength(2);
     expect(p1Sources.map((x) => x.sourceUrl).sort()).toEqual([
@@ -110,7 +109,20 @@ describe("marketplace listing", () => {
     expect(v1?.downloadUrl).toBe("https://x/p1.zip");
     const v2 = p1Sources.find((x) => x.version === "2.0.0");
     expect(v2?.downloadUrl).toBe("https://x/p1-v2.zip");
+    // p3 同时出现在 a.json(includes b.json 展开)和独立注册的 b.json 两组里,
+    // 跨注册表不去重——这正是「同一插件可来自多个注册表、各组独立显示」的预期行为。
+    expect(m.filter((x) => x.id === "p3")).toHaveLength(2);
     expect(m.find((x) => x.id === "p3")?.sourceUrl).toBe("https://reg.test/p3.json");
+  });
+
+  it("does not de-duplicate the same plugin across different registries (each registry is its own group)", async () => {
+    // a.json includes b.json,且 b.json 本身也是独立注册的注册表:
+    // p3 应分别在两组出现一次(registryUrl 不同),而不是被全局去重成一条。
+    const m = await listMarketplace();
+    const p3Entries = m.filter((x) => x.id === "p3");
+    expect(p3Entries).toHaveLength(2);
+    const regUrls = p3Entries.map((x) => x.registryUrl).sort();
+    expect(regUrls).toEqual(["https://reg.test/a.json", "https://reg.test/b.json"]);
   });
 
   it("tolerates an unreachable registry without dropping the rest", async () => {

@@ -39,7 +39,7 @@ import { allHealth } from "../../plugins/health.js";
 import { getRendererPlugins, discoverRenderers } from "../../plugins/renderers.js";
 import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
 import {
-  listMarketplace, installPlugin, listRegistries, addRegistry, removeRegistry,
+  listMarketplace, collectRegistryGroups, installPlugin, listRegistries, addRegistry, removeRegistry,
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
@@ -442,34 +442,23 @@ apiRoutes.get("/v1/plugins/scrobblers", adminMiddleware, (c) => c.json({ scrobbl
 // ==================== Plugin marketplace (distribution registry) ====================
 apiRoutes.get("/v1/plugins/registry", adminMiddleware, async (c) => {
   try {
-    const [sources, marketplace] = await Promise.all([Promise.resolve(listRegistries()), listMarketplace()]);
-    // 市场 = 项目能力清单:官方内置插件(随服务端发行)也并入列表,标注 builtin/installed/enabled,
-    // 让用户一眼看到本项目实现了哪些能力并直接启停;注册表插件补 installed/enabled 状态。
+    const [sources, marketplace, groups] = await Promise.all([
+      Promise.resolve(listRegistries()),
+      listMarketplace(),
+      collectRegistryGroups(),
+    ]);
+    // 注册表来源:把本次拉取的错误状态(enrich)回传给前端,让"加载失败"的注册表显式可见,
+    // 而不是像以前那样整组静默消失。前端据此在市场分组里给出网络/可达性提示。
+    const regError = new Map(groups.map((g) => [g.registryUrl, g.error]));
+    const registries = sources.map((r) => ({ ...r, error: regError.get(r.url) || null }));
+    // 市场 = 注册表插件(官方内置核心插件不在此列出,只在「已安装」tab 展示)。
     const installedRows = db.select().from(plugins).all() as any[];
     const stateById = new Map(installedRows.map((p) => [p.id, p]));
-    const builtinIds = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
-    const builtinItems = BUILTIN_PLUGINS.map(({ manifest }) => {
-      return {
-        id: manifest.id,
-        name: manifest.name || manifest.id,
-        version: manifest.version,
-        description: manifest.description || "",
-        type: manifest.type,
-        capabilities: manifest.capabilities || [],
-        platforms: manifest.platforms || [],
-        manifest: JSON.stringify(manifest),
-        builtin: true,
-        installed: true,
-        enabled: 1, // 内置核心插件始终启用(前端不显示关闭按钮)
-      };
+    const merged = marketplace.map((m) => {
+      const row = stateById.get(m.id);
+      return { ...m, installed: !!row, installedVersion: row?.version, enabled: row?.enabled ?? 0 };
     });
-    const merged = marketplace
-      .filter((m) => !builtinIds.has(m.id)) // 内置优先,外部同名不重复
-      .map((m) => {
-        const row = stateById.get(m.id);
-        return { ...m, installed: !!row, installedVersion: row?.version, enabled: row?.enabled ?? 0 };
-      });
-    return c.json({ registries: sources, plugins: [...builtinItems, ...merged] });
+    return c.json({ registries, plugins: merged });
   } catch (e: any) {
     return c.json({ error: e.message || "拉取插件市场失败" }, 500);
   }

@@ -68,9 +68,10 @@
           </template>
           <el-table :data="registries" stripe v-if="registries.length > 0" size="small">
             <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
-            <el-table-column label="状态" width="90">
+            <el-table-column label="状态" width="120">
               <template #default="{ row }">
-                <el-tag size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
+                <el-tag v-if="row.error" size="small" type="danger" effect="light">加载失败</el-tag>
+                <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="90">
@@ -83,13 +84,23 @@
         </el-card>
 
         <el-card class="market-card" shadow="never">
-          <template #header><span>插件市场（官方内置 + 注册表，按注册表分组）</span></template>
+          <template #header><span>插件市场（按注册表来源分组）</span></template>
           <div v-for="group in groupedMarket" :key="group.key" class="market-group">
             <div class="group-head">
               <span class="group-title">{{ group.title }}</span>
               <el-tag v-if="group.sourceLabel" size="small" type="primary" effect="plain">{{ group.sourceLabel }}</el-tag>
+              <el-tag v-if="group.error" size="small" type="danger" effect="plain">加载失败</el-tag>
             </div>
-            <el-table :data="group.items" stripe v-loading="marketLoading" v-if="group.items.length > 0">
+            <el-alert
+              v-if="group.error && group.items.length === 0"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="market-group-err"
+              title="该注册表加载失败"
+              :description="`${group.error}。请检查该地址是否可达，或当前网络是否能访问该托管平台（例如容器内访问 raw.githubusercontent.com 常因网络不可达而失败，可改用 Gitee 源）。`"
+            />
+            <el-table v-else-if="group.items.length > 0" :data="group.items" stripe v-loading="marketLoading">
               <el-table-column label="名称" min-width="200">
                 <template #default="{ row }">
                   <div class="plugin-name">
@@ -131,6 +142,7 @@
             <el-empty v-else description="该注册表暂无可用插件" :image-size="50" />
           </div>
           <p v-if="groupedMarket.length > 0" class="market-note">同一插件可来自多个注册表，按来源分组显示（来源 github / gitee / 自建），请选择你要安装的源头。</p>
+          <el-empty v-else description="尚未添加任何插件注册表" :image-size="60" />
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
           title="插件运行模型与安全提示"
@@ -289,23 +301,21 @@ const showRegDialog = ref(false);
 const newRegistryUrl = ref("");
 const addingReg = ref(false);
 
-/** 市场按注册表分组:内置插件独立一组,外置插件按其 registryUrl 归组
- *  (同一插件来自多个注册表时各自出现在对应组,可独立安装/更新)。 */
+/** 市场按注册表分组:以「注册表来源」里每个启用的注册表为分组骨架,
+ *  确保即便某个注册表加载失败(网络不可达),也会显示为一个分组并给出错误提示,
+ *  而不是静默消失。官方内置核心插件已不在此列表(只在「已安装」tab 展示)。 */
 const groupedMarket = computed<any[]>(() => {
   const groups: any[] = [];
-  const builtinItems: any[] = [];
-  const byReg = new Map<string, any[]>();
-  for (const p of marketPlugins.value) {
-    if (p.builtin) { builtinItems.push(p); continue; }
-    const key = p.registryUrl || "unknown";
-    if (!byReg.has(key)) byReg.set(key, []);
-    byReg.get(key)!.push(p);
-  }
-  if (builtinItems.length) {
-    groups.push({ key: "builtin", title: "官方内置（项目核心功能）", sourceLabel: "", items: builtinItems });
-  }
-  for (const [reg, items] of byReg) {
-    groups.push({ key: reg, title: reg, sourceLabel: sourceLabel(reg), items });
+  for (const r of registries.value) {
+    if (!r.enabled) continue;
+    const items = marketPlugins.value.filter((p) => p.registryUrl === r.url);
+    groups.push({
+      key: r.url,
+      title: r.url,
+      sourceLabel: sourceLabel(r.url),
+      items,
+      error: r.error || null,
+    });
   }
   return groups;
 });

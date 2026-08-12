@@ -193,39 +193,53 @@ async function fetchOneRegistry(url: string): Promise<{ plugins: string[]; inclu
   throw lastErr instanceof Error ? lastErr : new Error(`拉取注册表失败: ${url}`);
 }
 
-/** 一条插件引用:plugin.json 地址 + 它归属于哪个注册表(includes 归入最外层)。 */
-export interface RegistryPluginRef {
-  pluginUrl: string;
+/** 一个注册表分组的聚合结果:用户添加的每一个启用注册表对应一个分组。
+ *  - `pluginUrls`:本注册表自身 + 其 `includes` 展开后的全部 plugin.json 地址(组内去重)。
+ *  - 跨注册表不去重:同一插件若多个注册表都有,在各组分别出现,由前端按注册表分组展示、用户手动选装。
+ *  - `error` 非空表示该注册表(顶层 URL)拉取失败,前端据此显式提示"加载失败",而不是静默消失。 */
+export interface RegistryGroup {
   registryUrl: string;
+  pluginUrls: string[];
+  error?: string;
 }
 
-/** Recursively fetch all registry plugin URLs (dedupes, follows `includes`),
- *  keeping each plugin's owning registry URL so the frontend can group by
- *  registry. Includes are attributed to the outermost (user-added) registry. */
-export async function collectRegistryEntries(): Promise<RegistryPluginRef[]> {
-  const seenRegs = new Set<string>();
-  const seenPlugins = new Set<string>();
-  const out: RegistryPluginRef[] = [];
-  const queue = listRegistries()
-    .filter((r) => r.enabled)
-    .map((r) => ({ url: r.url, registryUrl: r.url }));
-  while (queue.length) {
-    const { url, registryUrl } = queue.shift()!;
-    if (seenRegs.has(url)) continue;
-    seenRegs.add(url);
-    try {
-      const { plugins, includes } = await fetchOneRegistry(url);
-      for (const p of plugins) {
-        if (seenPlugins.has(p)) continue;
-        seenPlugins.add(p);
-        out.push({ pluginUrl: p, registryUrl });
+/** 按注册表分组聚合插件引用。
+ *
+ *  每个启用的注册表独立成组——组内去重、跨组不去重(满足"同一插件可来自多个注册表、
+ *  各组独立显示"的需求);且把拉取失败(网络不可达 / 404 / 超时等)的注册表也保留下来
+ *  (带 `error`),让前端能显式提示,而不是像以前那样整组静默跳过。 */
+export async function collectRegistryGroups(): Promise<RegistryGroup[]> {
+  const regRows = listRegistries().filter((r) => r.enabled);
+  const groups: RegistryGroup[] = [];
+  for (const reg of regRows) {
+    const registryUrl = reg.url;
+    const seenInGroup = new Set<string>();
+    const pluginUrls: string[] = [];
+    const seenUrls = new Set<string>(); // 防 includes 成环
+    let error: string | undefined;
+    const queue = [reg.url];
+    while (queue.length) {
+      const url = queue.shift()!;
+      if (seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      try {
+        const { plugins, includes } = await fetchOneRegistry(url);
+        for (const p of plugins) {
+          if (seenInGroup.has(p)) continue;
+          seenInGroup.add(p);
+          pluginUrls.push(p);
+        }
+        for (const inc of includes) {
+          if (!seenUrls.has(inc)) queue.push(inc);
+        }
+      } catch (e: any) {
+        // 顶层注册表 URL 拉取失败 → 整组失败;includes 失败仅跳过该分支。
+        if (url === reg.url) error = e?.message || String(e);
       }
-      for (const inc of includes) queue.push({ url: inc, registryUrl });
-    } catch (e: any) {
-      console.warn(`[REGISTRY] 跳过无法访问的注册表 ${url}: ${e?.message || e}`);
     }
+    groups.push({ registryUrl, pluginUrls, error });
   }
-  return out;
+  return groups;
 }
 
 /** Build the marketplace listing.
@@ -235,36 +249,40 @@ export async function collectRegistryEntries(): Promise<RegistryPluginRef[]> {
  *  手动选择安装哪个源头;同一 (id, sourceUrl) 组合去重(注册表递归 includes
  *  可能重复列出同一地址)。 */
 export async function listMarketplace(): Promise<RegistryEntry[]> {
-  const refs = await collectRegistryEntries();
+  const groups = await collectRegistryGroups();
   const seen = new Set<string>();
   const out: RegistryEntry[] = [];
-  for (const { pluginUrl: url, registryUrl } of refs) {
-    try {
-      const res = await fetchWithTimeout(url, 15000);
-      const m: any = await res.json();
-      if (validateManifest(m)) continue;
-      const entry: RegistryEntry = {
-        id: m.id,
-        name: m.name,
-        version: m.version,
-        description: m.description,
-        author: m.author,
-        homepage: m.homepage,
-        downloadUrl: m.downloadUrl || (m as any).url || url,
-        sourceUrl: url,
-        registryUrl,
-        minAppVersion: m.minAppVersion,
-        type: m.type,
-        capabilities: Array.isArray(m.capabilities) ? m.capabilities : undefined,
-        platforms: Array.isArray(m.platforms) ? m.platforms : undefined,
-        manifest: JSON.stringify(m),
-      };
-      const key = `${entry.id}::${url}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(entry);
-    } catch (e: any) {
-      console.warn(`[REGISTRY] 无法读取插件清单 ${url}: ${e?.message || e}`);
+  for (const g of groups) {
+    for (const url of g.pluginUrls) {
+      try {
+        const res = await fetchWithTimeout(url, 15000);
+        const m: any = await res.json();
+        if (validateManifest(m)) continue;
+        const entry: RegistryEntry = {
+          id: m.id,
+          name: m.name,
+          version: m.version,
+          description: m.description,
+          author: m.author,
+          homepage: m.homepage,
+          downloadUrl: m.downloadUrl || (m as any).url || url,
+          sourceUrl: url,
+          registryUrl: g.registryUrl,
+          minAppVersion: m.minAppVersion,
+          type: m.type,
+          capabilities: Array.isArray(m.capabilities) ? m.capabilities : undefined,
+          platforms: Array.isArray(m.platforms) ? m.platforms : undefined,
+          manifest: JSON.stringify(m),
+        };
+        // key 含 registryUrl:同一插件来自不同注册表时各自保留为独立条目,
+        // 前端按 registryUrl 分组即可分别展示、独立安装。
+        const key = `${m.id}::${url}::${g.registryUrl}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(entry);
+      } catch (e: any) {
+        console.warn(`[REGISTRY] 无法读取插件清单 ${url}: ${e?.message || e}`);
+      }
     }
   }
   return out;
