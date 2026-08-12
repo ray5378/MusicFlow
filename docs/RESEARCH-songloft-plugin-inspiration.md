@@ -3,6 +3,12 @@
 > 调研对象：`github.com/ray5378/songloft`（v2.x，Go + QuickJS 沙箱 JS 插件）
 > 目的：对照 songloft 的插件体系，找出 V2 还能把哪些内置能力「插件化」、以及如何「让插件充分调用后端能力」。
 > 结论：**不落代码，只给行动清单**。下文带 `songloft/...` 引用的是已核实的源码事实。
+>
+> **后续状态（2026-08-12）**：本调研建议的 **QuickJS 沙箱方案（方案 B）已落地**——V2 ≥ 1.3.0 起，
+> 外置插件运行在 QuickJS/WASM 虚拟机里（`backend/src/plugins/sandbox.ts`），无 Node 能力、
+> 网络走 `host.http`（权限执行点强制）、`host.storage` 隔离存储、单插件内存/栈/超时上限。
+> 本文档保留为设计参考（songloft 的 provider 注册表、first-match-wins 等机制供后续迭代借鉴）；
+> 现役沙箱契约见 `docs/PLUGIN_DEV.md`。
 
 ---
 

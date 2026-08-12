@@ -10,8 +10,8 @@
 
 | 组件 | 版本 | 仓库 |
 |---|---|---|
-| 服务端（本仓库） | **v1.2.0** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
-| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.2.0**（镜像 musicflow-v2:1.2.0） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
+| 服务端（本仓库） | **v1.3.0** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
+| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.3.0**（镜像 musicflow-v2:1.3.0） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
 | HA 集成 [hass-musicflow](https://github.com/ray5378/hass-musicflow) | **v1.3.7** | [ray5378/hass-musicflow](https://github.com/ray5378/hass-musicflow) |
 | HA 卡片 [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | **v1.6.51** | [ray5378/hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) |
 
@@ -21,7 +21,7 @@
 
 打 `v*` tag 时 CI 自动构建到（仅 **linux/amd64**）：
 
-- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.2.0`）
+- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.3.0`）
 - `ghcr.io/ray5378/musicflow-v2:latest`
 
 > **架构说明**：当前镜像仅提供 **linux/amd64**（x86_64）。arm64 / ARM 设备（如部分 ARM 架构 NAS）暂时无法运行，后续视 GitHub ARM runner 可用性再补多架构（账号暂无 ARM runner，与 V1 一致）。
@@ -58,7 +58,7 @@ docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow-v2
 docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
   -v $(pwd)/data:/app/backend/data \
-  ghcr.io/ray5378/musicflow-v2:1.2.0
+  ghcr.io/ray5378/musicflow-v2:1.3.0
 ```
 
 > DLNA 发现依赖 SSDP 多播，`docker compose` 默认 `network_mode: host`；Docker Desktop（macOS/Windows）上多播不可用，DLNA 需在 Linux 宿主机运行。
@@ -112,4 +112,4 @@ cd backend && npm run dev      # API :46400
 cd frontend && npm run dev     # UI :46399 (代理 /rest /api 到后端)
 ```
 
-后端测试：`cd backend && npx vitest run`（全量 185 用例，含 OpenSubsonic 路由级测试）。
+后端测试：`cd backend && npx vitest run`（全量 202 用例，含 OpenSubsonic 路由级测试与插件沙箱专项）。
