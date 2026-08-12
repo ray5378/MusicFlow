@@ -46,6 +46,7 @@ import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
 import {
   listMarketplace, installPlugin, listRegistries, addRegistry, removeRegistry,
 } from "../../plugins/registryCatalog.js";
+import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 
 export const apiRoutes = new Hono();
 apiRoutes.route("/", onlineRoutes);
@@ -382,9 +383,36 @@ apiRoutes.get("/v1/plugins/scrobblers", adminMiddleware, (c) => c.json({ scrobbl
 apiRoutes.get("/v1/plugins/registry", adminMiddleware, async (c) => {
   try {
     const [sources, marketplace] = await Promise.all([Promise.resolve(listRegistries()), listMarketplace()]);
-    return c.json({ registries: sources, plugins: marketplace });
+    // 市场 = 项目能力清单:官方内置插件(随服务端发行)也并入列表,标注 builtin/installed/enabled,
+    // 让用户一眼看到本项目实现了哪些能力并直接启停;注册表插件补 installed/enabled 状态。
+    const installedRows = db.select().from(plugins).all() as any[];
+    const stateById = new Map(installedRows.map((p) => [p.id, p]));
+    const builtinIds = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
+    const builtinItems = BUILTIN_PLUGINS.map(({ manifest }) => {
+      const row = stateById.get(manifest.id);
+      return {
+        id: manifest.id,
+        name: manifest.name || manifest.id,
+        version: manifest.version,
+        description: manifest.description || "",
+        type: manifest.type,
+        capabilities: manifest.capabilities || [],
+        platforms: manifest.platforms || [],
+        manifest: JSON.stringify(manifest),
+        builtin: true,
+        installed: true,
+        enabled: row?.enabled ?? (manifest.defaultEnabled ? 1 : 0),
+      };
+    });
+    const merged = marketplace
+      .filter((m) => !builtinIds.has(m.id)) // 内置优先,外部同名不重复
+      .map((m) => {
+        const row = stateById.get(m.id);
+        return { ...m, installed: !!row, enabled: row?.enabled ?? 0 };
+      });
+    return c.json({ registries: sources, plugins: [...builtinItems, ...merged] });
   } catch (e: any) {
-    return c.json({ error: e.message || "拉取插件市场失败" }, 500 );
+    return c.json({ error: e.message || "拉取插件市场失败" }, 500);
   }
 });
 apiRoutes.post("/v1/plugins/registry", adminMiddleware, async (c) => {

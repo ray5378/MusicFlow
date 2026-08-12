@@ -47,6 +47,13 @@ interface RegistryEntry {
   homepage?: string;
   downloadUrl: string; // archive (zip / tgz) containing index.js + manifest
   minAppVersion?: string;
+  type?: string;              // 插件类型标签(source/importer/recommender/sync/...)
+  capabilities?: string[];    // 能力清单(便于市场页展示"能干什么")
+  platforms?: string[];       // source/importer 支持的平台 slug
+  manifest?: string;          // 完整 manifest(JSON 字符串),前端配置表单/能力渲染复用
+  builtin?: boolean;          // 官方内置插件(随服务端发行,无需安装)
+  installed?: boolean;        // 本地已安装(plugins 表有行)
+  enabled?: number;           // 当前启用状态(0/1,与 plugins 表一致)
 }
 
 /** Persisted registry sources. */
@@ -178,6 +185,10 @@ export async function listMarketplace(): Promise<RegistryEntry[]> {
         homepage: m.homepage,
         downloadUrl: m.downloadUrl || (m as any).url || url,
         minAppVersion: m.minAppVersion,
+        type: m.type,
+        capabilities: Array.isArray(m.capabilities) ? m.capabilities : undefined,
+        platforms: Array.isArray(m.platforms) ? m.platforms : undefined,
+        manifest: JSON.stringify(m),
       };
       const prev = byId.get(entry.id);
       if (!prev || compareVer(entry.version, prev.version) > 0) byId.set(entry.id, entry);

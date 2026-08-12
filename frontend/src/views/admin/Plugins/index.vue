@@ -80,19 +80,36 @@
         </el-card>
 
         <el-card class="market-card" shadow="never">
-          <template #header><span>可安装插件（按 id 去重，保留最高版本）</span></template>
+          <template #header><span>插件市场（官方内置 + 注册表）</span></template>
           <el-table :data="marketPlugins" stripe v-loading="marketLoading" v-if="marketPlugins.length > 0">
             <el-table-column label="名称" min-width="180">
               <template #default="{ row }">
-                <div class="plugin-name">{{ row.name }}</div>
+                <div class="plugin-name">
+                  {{ row.name }}
+                  <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                </div>
                 <div class="plugin-id">{{ row.id }}@{{ row.version }}</div>
               </template>
             </el-table-column>
-            <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
-            <el-table-column label="作者" prop="author" width="120" show-overflow-tooltip />
-            <el-table-column label="操作" width="100">
+            <el-table-column label="类型 / 能力" min-width="210">
               <template #default="{ row }">
-                <el-button size="small" type="success" plain :loading="installing === row.id" @click="installPlugin(row)">安装</el-button>
+                <div class="cap-row">
+                  <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+                  <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="description" label="说明" min-width="230" show-overflow-tooltip />
+            <el-table-column label="状态" width="104">
+              <template #default="{ row }">
+                <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === row.id" @click="installPlugin(row)">安装</el-button>
+                <el-button v-else size="small" type="primary" plain @click="editPlugin(row)">{{ hasConfig(row) ? "配置" : "详情" }}</el-button>
               </template>
             </el-table-column>
           </el-table>
