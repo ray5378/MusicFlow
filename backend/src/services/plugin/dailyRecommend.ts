@@ -660,6 +660,19 @@ export const dailyRecommendManifest: PluginManifest = {
   capabilities: ["dailyPlaylist"],
   defaultEnabled: true,
   configSchema: [],
+  documentation: `### 功能介绍
+每天自动生成「今日推荐」歌单（id：\`pl-daily-today\`），混合三类来源：平台榜单候选、推荐池成员（收藏的歌单 / 我喜欢的音乐）、本地曲库随机补充。
+
+### 处理逻辑
+1. 定时器按 \`dailyPlaylist\` 能力调用本插件的 \`runDailyJob()\`（默认每天 03:00，可改系统时间设置）；
+2. 收集曲目：\`recommend_pool\` 表里的推荐池成员（用户在歌单或「我喜欢的音乐」上点「加入每日推荐池」写入）+ 平台榜单候选；
+3. 合并去重后随机抽取约 50 首可播放歌曲，写入 \`pl-daily-today\`（覆盖当天旧版）；
+4. 本地曲库为空时跳过并记日志，不报错。
+
+### 说明
+- 生成的歌单在首页「每日推荐」入口展示；
+- 停用本插件即关闭每日推荐，不影响其他 recommender；
+- 配合 \`local-recommend\` 插件：在线候选 + 本地口味组合成完整推荐。`,
 };
 
 export const dailyRecommendPlugin: RecommenderPlugin = {

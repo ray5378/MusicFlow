@@ -42,6 +42,18 @@ export const dlnaRendererManifest: PluginManifest = {
   capabilities: ["renderer"],
   defaultEnabled: true,
   configSchema: [],
+  documentation: `### 功能介绍
+通过 DLNA/UPnP 把音乐投屏到局域网内的音箱、电视、功放等播放设备（renderer 能力）。
+
+### 处理逻辑
+1. \`discoverRenderers()\` 通过 SSDP 多播在局域网发现 DLNA 设备，随设备上下线自动增删（Web/HA 里离线设备不显示，重上线自动找回）；
+2. 投屏时 \`castToRenderer()\` 把音频流地址 + 曲目元数据用 SOAP 控制指令发给设备，由设备自行拉流播放；
+3. \`controlRenderer()\` 转发播放 / 暂停 / 音量 / 进度等控制指令；
+4. 后端持有每台设备的持久化队列（\`device_queues\`），后端重启或浏览器断开后设备仍可继续播放，重启后可恢复续播。
+
+### 说明
+- 需要 host 网络（SSDP 多播要求）；Docker Desktop（macOS/Windows）上多播不可用；
+- 多网卡场景设备拉流地址探测错误时，在系统设置填 \`DLNA_BASE_URL\` 覆盖。`,
 };
 
 export const dlnaRendererPlugin: RendererPlugin = {

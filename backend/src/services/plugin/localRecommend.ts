@@ -389,6 +389,18 @@ export const localRecommendManifest: PluginManifest = {
   capabilities: ["localPlaylist"],
   defaultEnabled: true,
   configSchema: [],
+  documentation: `### 功能介绍
+基于播放历史与收藏口味，从本地曲库生成「今日推荐」的本地补充歌单，让每日推荐不只有在线候选，还有你常听的口味。
+
+### 处理逻辑
+1. 定时器按 \`localPlaylist\` 能力调用 \`pickSongs()\` / \`runDailyJob()\`；
+2. 统计近期播放历史与收藏（\`play_history\` / \`user_favorite_songs\`），给艺术家 / 专辑 / 风格打分（\`local_recommend_*_scores\` 表）；
+3. 按分数加权从本地曲库抽取候选曲目，生成补充歌单供 \`daily-recommend\` 合并进「今日推荐」。
+
+### 说明
+- 与 \`daily-recommend\` 配合使用：在线候选 + 本地口味组合成完整「今日推荐」；
+- 无播放历史 / 曲库为空时输出空结果，不报错；
+- 停用本插件后每日推荐只剩在线来源。`,
 };
 
 export const localRecommendPlugin: LocalRecommendPlugin = {

@@ -104,6 +104,19 @@ export const qqImporterManifest: PluginManifest = {
   defaultEnabled: true,
   urlPatterns: ["y.qq.com/**", "c6.y.qq.com/base/fcgi-bin/u?**", "*.qq.com/**playlist**"],
   configSchema: [],
+  documentation: `### 功能介绍
+解析 QQ 音乐的歌单 / 官方榜单分享链接，把曲目（歌名、歌手、专辑、时长）导入 MusicFlow 并建成本地歌单。
+
+### 处理逻辑
+1. 核心收到导入请求后，按 \`playlistImport\` 能力遍历已启用插件，逐个调用 \`canHandle(url)\` 认领链接；
+2. 本插件用域名正则（\`y.qq.com\` / \`*.qq.com/**playlist**\` 等）认领 QQ 相关链接；
+3. 从链接提取歌单 id（\`disstid\`）或榜单 id（\`topid\`），分别调用 \`fetchQQPlaylist\` / \`fetchQQToplist\` 请求 QQ 接口；
+4. 把 QQ 返回的歌单信息与曲目数组转换为统一的 \`ImportedPlaylistShape\`，交给核心建歌单、写入曲库。
+
+### 说明
+- 无需配置（configSchema 为空），默认启用；
+- 链接不被本插件认领（非 QQ 域名）时自动跳过，其他 importer 插件继续尝试；
+- 导入后的歌单可开启「自动同步」，由 \`playlist-sync\` 插件定期拉取更新。`,
 };
 
 export const qqImporter: ImporterPlugin = {

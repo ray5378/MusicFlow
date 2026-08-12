@@ -74,6 +74,19 @@ export const neteaseImporterManifest: PluginManifest = {
   defaultEnabled: true,
   urlPatterns: ["music.163.com/**", "y.music.163.com/**"],
   configSchema: [],
+  documentation: `### 功能介绍
+解析网易云音乐的歌单分享链接，把曲目（歌名、歌手、专辑、时长）导入 MusicFlow 并建成本地歌单。
+
+### 处理逻辑
+1. 核心按 \`playlistImport\` 能力遍历插件，逐个调用 \`canHandle(url)\` 认领链接；
+2. 本插件认领 \`music.163.com\` / \`y.music.163.com\` 域名链接；
+3. 从链接提取歌单 id，调用 \`fetchNeteasePlaylist\` 请求网易云接口（id 分批查询曲目详情）；
+4. 转换为统一的 \`ImportedPlaylistShape\` 交给核心建歌单、写入曲库。
+
+### 说明
+- 无需配置，默认启用；
+- 非网易域名链接自动跳过，不影响其他 importer 插件；
+- 导入后的歌单可开启「自动同步」，由 \`playlist-sync\` 插件定期拉取更新。`,
 };
 
 export const neteaseImporter: ImporterPlugin = {

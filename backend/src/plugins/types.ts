@@ -78,6 +78,9 @@ export interface PluginManifest {
   icon?: string; // URL or data-uri
   updateUrl?: string; // self-update source (zip or manifest URL)
   downloadUrl?: string; // canonical download location
+  /** Markdown 文档:功能介绍 + 处理逻辑。内置插件随服务端编写;外置插件在
+   *  plugin.json 里可选携带。前端插件详情页渲染(无则按能力自动生成说明)。 */
+  documentation?: string;
   /** Whether the plugin is enabled the first time its row is seeded.
    *
    *  Source plugins default to OFF (they need a baseUrl before they do anything

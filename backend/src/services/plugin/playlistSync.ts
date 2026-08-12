@@ -299,6 +299,18 @@ export const playlistSyncManifest: PluginManifest = {
   capabilities: ["playlistSync"],
   defaultEnabled: true,
   configSchema: [],
+  documentation: `### 功能介绍
+定期重新拉取「已开启同步」的导入歌单（QQ / 网易等），按当前曲库重建条目，并自动匹配可播放的在线源。
+
+### 处理逻辑
+1. 维护定时器按 \`playlistSync\` 能力调用 \`runSyncJob()\`（周期见系统设置）；
+2. 遍历所有带 \`sourceUrl\` 且开启同步的歌单，用 \`findUrlImporter(url)\` 反查该链接归属哪个 importer 插件；
+3. 交给对应 importer 拉取最新曲目，重建本地条目（保留已收藏 / 已匹配的歌曲，尽量不丢）；
+4. 源站失效或没有 importer 认领的歌单跳过，不中断整轮同步。
+
+### 说明
+- 只同步「导入」的歌单；手动新建 / 本地歌单不受影响；
+- 自动匹配优先用具备 \`autoMatch\` 能力的插件，退而求其次用 \`search\` 能力做匹配。`,
 };
 
 export const playlistSyncPlugin: SyncPlugin = {

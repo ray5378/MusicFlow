@@ -62,6 +62,17 @@ export const nativeImporterManifest: PluginManifest = {
   platforms: ["local"],
   defaultEnabled: true,
   configSchema: [],
+  documentation: `### 功能介绍
+导入 MusicFlow 导出的歌单文件（单个歌单导出或「全量导出」打包的 JSON），把歌单搬到当前实例。
+
+### 处理逻辑
+1. 核心按 \`playlistFile\` 能力遍历插件，调用 \`canHandleFile(raw)\` 认领上传的文件；
+2. 本插件根据文件内容特征（MusicFlow 导出 JSON 结构）认领；
+3. \`parseFile(raw)\` 解析 JSON，还原歌单名与曲目列表，返回统一结构交给核心建歌单。
+
+### 说明
+- 适用于「备份 / 迁移 / 分享」场景——把另一台 MusicFlow 的歌单搬过来；
+- 无需配置，默认启用。`,
 };
 
 export const nativeImporter: PlaylistFilePlugin = {

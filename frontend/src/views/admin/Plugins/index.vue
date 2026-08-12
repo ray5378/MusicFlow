@@ -106,10 +106,10 @@
                 <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="140">
+            <el-table-column label="操作" width="150">
               <template #default="{ row }">
                 <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === row.id" @click="installPlugin(row)">安装</el-button>
-                <el-button v-else size="small" type="primary" plain @click="editPlugin(row)">{{ hasConfig(row) ? "配置" : "详情" }}</el-button>
+                <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -146,70 +146,104 @@
       </template>
     </el-dialog>
 
-    <!-- Config / detail dialog -->
-    <el-dialog v-model="showConfigDialog" :title="`配置插件 · ${editing?.name || ''}`" width="560px">
-      <el-form label-width="120px" v-if="editing">
-        <!-- Config form is driven entirely by the plugin manifest's configSchema.
-             No field is hardcoded to go-music-dl. -->
-        <el-form-item v-for="f in configFields" :key="f.key" :label="f.label">
-          <el-input
-            v-if="f.type === 'text' || f.type === 'url'"
-            v-model="editConfig[f.key]"
-            :placeholder="f.help"
-            style="width: 100%"
-          />
-          <el-input-number
-            v-else-if="f.type === 'number'"
-            v-model="editConfig[f.key]"
-            :min="0"
-            controls-position="right"
-            style="width: 180px"
-          />
-          <el-radio-group v-else-if="f.type === 'radio'" v-model="editConfig[f.key]">
-            <el-radio v-for="o in (f.options || [])" :key="o.value" :value="o.value">{{ o.label }}</el-radio>
-          </el-radio-group>
-          <el-select v-else-if="f.type === 'select'" v-model="editConfig[f.key]" style="width: 100%">
-            <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
-          </el-select>
-          <el-select
-            v-else-if="f.type === 'multiselect'"
-            v-model="editConfig[f.key]"
-            multiple
-            collapse-tags
-            style="width: 100%"
-          >
-            <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
-          </el-select>
-          <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
-          <span v-if="f.help" class="field-hint">{{ f.help }}</span>
-        </el-form-item>
+    <!-- Plugin detail dialog: 功能介绍 / 处理逻辑 / 能力 / 权限 / 配置 -->
+    <el-dialog v-model="showConfigDialog" :title="`插件详情 · ${displayName(editing)}`" width="720px" top="6vh">
+      <div class="pd-head">
+        <span class="pd-id">{{ editing?.id }}@{{ editing?.version }}</span>
+        <el-tag size="small" :type="typeTagColor(editing)" effect="light">{{ typeLabel(editing) }}</el-tag>
+        <el-tag v-if="editing?.builtin" size="small" type="warning" effect="light">内置</el-tag>
+        <el-tag v-else-if="editing" size="small" type="info" effect="light">外置</el-tag>
+      </div>
 
-        <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
-        <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
-          <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
-          <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
-          <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
-        </el-form-item>
+      <div class="pd-section">
+        <h4>功能介绍</h4>
+        <p class="pd-desc">{{ parseManifest(editing).description || "—" }}</p>
+      </div>
 
-        <el-alert
-          type="info"
-          :closable="false"
-          show-icon
-          :title="`${typeLabel(editing)}插件`"
-          :description="pluginHint(editing)"
-        />
-        <div v-if="capabilityList(editing).length > 0" class="cap-row">
-          <span class="cap-label">能力</span>
+      <div class="pd-section">
+        <h4>处理逻辑</h4>
+        <div v-if="docMarkdown" class="pd-md" v-html="docMarkdown"></div>
+        <template v-else>
+          <ul class="pd-capdocs">
+            <li v-for="cap in capabilityList(editing)" :key="cap">{{ capLabel(cap) }}：{{ capDoc(cap) }}</li>
+          </ul>
+          <p v-if="capabilityList(editing).length" class="pd-hint">该插件未提供详细文档，以上为按能力自动生成的说明。</p>
+          <p v-else class="pd-hint">该插件未提供详细文档。</p>
+        </template>
+      </div>
+
+      <div v-if="capabilityList(editing).length > 0" class="pd-section">
+        <h4>能力清单</h4>
+        <div class="cap-row">
           <el-tag v-for="cap in capabilityList(editing)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
         </div>
-        <div v-if="permissionList(editing).length > 0" class="cap-row">
-          <span class="cap-label">权限</span>
+      </div>
+
+      <div v-if="permissionList(editing).length > 0" class="pd-section">
+        <h4>权限</h4>
+        <div class="cap-row">
           <el-tag v-for="perm in permissionList(editing)" :key="perm" size="small" type="warning" effect="plain">{{ permLabel(perm) }}</el-tag>
         </div>
-      </el-form>
+      </div>
+
+      <div v-if="canSaveConfig && configFields.length > 0" class="pd-section">
+        <h4>配置</h4>
+        <el-form label-width="120px">
+          <!-- Config form is driven entirely by the plugin manifest's configSchema.
+               No field is hardcoded to go-music-dl. -->
+          <el-form-item v-for="f in configFields" :key="f.key" :label="f.label">
+            <el-input
+              v-if="f.type === 'text' || f.type === 'url'"
+              v-model="editConfig[f.key]"
+              :placeholder="f.help"
+              style="width: 100%"
+            />
+            <el-input-number
+              v-else-if="f.type === 'number'"
+              v-model="editConfig[f.key]"
+              :min="0"
+              controls-position="right"
+              style="width: 180px"
+            />
+            <el-radio-group v-else-if="f.type === 'radio'" v-model="editConfig[f.key]">
+              <el-radio v-for="o in (f.options || [])" :key="o.value" :value="o.value">{{ o.label }}</el-radio>
+            </el-radio-group>
+            <el-select v-else-if="f.type === 'select'" v-model="editConfig[f.key]" style="width: 100%">
+              <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
+            <el-select
+              v-else-if="f.type === 'multiselect'"
+              v-model="editConfig[f.key]"
+              multiple
+              collapse-tags
+              style="width: 100%"
+            >
+              <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
+            <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
+            <span v-if="f.help" class="field-hint">{{ f.help }}</span>
+          </el-form-item>
+
+          <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
+          <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
+            <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
+            <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
+            <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
+          </el-form-item>
+
+          <el-alert
+            type="info"
+            :closable="false"
+            show-icon
+            :title="`${typeLabel(editing)}插件`"
+            :description="pluginHint(editing)"
+          />
+        </el-form>
+      </div>
+
       <template #footer>
-        <el-button @click="showConfigDialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="() => saveConfig()">保存</el-button>
+        <el-button @click="showConfigDialog = false">关闭</el-button>
+        <el-button v-if="canSaveConfig && configFields.length > 0" type="primary" :loading="saving" @click="() => saveConfig()">保存配置</el-button>
       </template>
     </el-dialog>
   </div>
@@ -285,6 +319,13 @@ function hasConfig(plugin: any): boolean {
   return (parseManifest(plugin).configSchema || []).length > 0;
 }
 
+// 详情弹窗:处理逻辑(markdown)与配置可保存性
+const docMarkdown = computed(() => {
+  const md = parseManifest(editing.value).documentation;
+  return md ? renderMarkdown(md) : "";
+});
+const canSaveConfig = computed(() => !!editing.value && editing.value.installed !== false);
+
 // Plugin taxonomy — labels only. The backend decides what each type can do via
 // manifest capabilities; the UI just renders whatever it declares.
 const TYPE_LABELS: Record<string, string> = {
@@ -338,6 +379,55 @@ const PERM_LABELS: Record<string, string> = {
   "playlists:write": "写入歌单",
   "inter-plugin": "插件间通信",
 };
+
+// 能力 → 处理逻辑说明(详情页在插件未提供 documentation 时按能力自动生成)
+const CAP_DOCS: Record<string, string> = {
+  search: "向在线源发起歌曲搜索并返回结果",
+  recommend: "生成平台每日推荐歌单并同步到本地",
+  playlistSongs: "拉取单个远程歌单的曲目列表",
+  stream: "构造歌曲的音频流地址供播放器拉流",
+  lyrics: "提供在线歌词（逐字/逐行）",
+  webRotation: "定期清理过期的在线歌曲（每日推荐轮换）",
+  playlistImport: "认领分享链接并解析成可导入的歌单",
+  playlistFile: "认领上传的歌单文件并解析",
+  dailyPlaylist: "每天定时生成「今日推荐」歌单",
+  localPlaylist: "基于播放历史与收藏口味生成本地推荐",
+  playlistSync: "定期重新拉取已导入的远程歌单",
+  autoMatch: "把歌单条目自动匹配到曲库或在线源",
+  lyricProvider: "提供在线歌词的源",
+  coverProvider: "提供在线封面的源",
+  renderer: "投屏到局域网播放设备（DLNA 等）",
+  scrobbler: "把播放事件上报到 Last.fm / ListenBrainz 等",
+};
+
+// 极简 markdown 渲染（文档为受控内容,先转义再套标签,防 XSS）
+function renderMarkdown(md: string): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let html = esc(md);
+  html = html.replace(/^```\n?([\s\S]*?)```$/gm, (_m, c) => `<pre class="md-code">${c}</pre>`);
+  html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+  html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
+  html = html.replace(/^\s*[-*] (.+)$/gm, "<li>$1</li>");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  const out: string[] = [];
+  let listOpen = false;
+  for (const line of html.split("\n")) {
+    if (line.startsWith("<li>")) {
+      if (!listOpen) { out.push("<ul>"); listOpen = true; }
+      out.push(line);
+    } else {
+      if (listOpen) { out.push("</ul>"); listOpen = false; }
+      if (line.trim()) out.push(`<p>${line}</p>`);
+    }
+  }
+  if (listOpen) out.push("</ul>");
+  return out.join("\n");
+}
+
+function capDoc(cap: string): string {
+  return CAP_DOCS[cap] || "参与对应能力的工作流";
+}
 
 function typeLabel(plugin: any): string {
   const t = parseManifest(plugin).type;
@@ -594,6 +684,23 @@ onMounted(() => {
 .market-card { margin-bottom: 20px; }
 .market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
 .market-warn { margin-top: 4px; }
+.pd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.pd-id { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--el-text-color-secondary); }
+.pd-section { margin-bottom: 18px; }
+.pd-section h4 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--el-text-color-primary); }
+.pd-desc { margin: 0; font-size: 13px; line-height: 1.7; color: var(--el-text-color-regular); }
+.pd-md { font-size: 13px; line-height: 1.75; color: var(--el-text-color-regular); }
+.pd-md h2 { font-size: 15px; margin: 14px 0 6px; }
+.pd-md h3 { font-size: 14px; margin: 12px 0 6px; }
+.pd-md p { margin: 6px 0; }
+.pd-md ul { margin: 6px 0; padding-left: 20px; }
+.pd-md li { margin: 3px 0; }
+.pd-md strong { font-weight: 600; }
+.pd-md code { font-family: var(--font-mono, monospace); font-size: 12px; background: var(--el-fill-color-light); padding: 1px 5px; border-radius: 4px; }
+.pd-md pre.md-code { background: var(--el-fill-color-light); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+.pd-capdocs { margin: 0; padding-left: 20px; }
+.pd-capdocs li { font-size: 13px; line-height: 1.8; color: var(--el-text-color-regular); }
+.pd-hint { margin: 8px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
 @media (max-width: 768px) {
   .admin-plugins { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
