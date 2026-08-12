@@ -339,3 +339,23 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
 - `MusicFlow-V2/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow-v2:<版本>` + `:latest`
   （workflow_dispatch 手动构建打 `:master`）；镜像仅 amd64（账号无 ARM runner）。
 - 发版流程：V2 打新 tag → addon 的 `build.yaml` build_from + `config.yaml` version 同步 → addon 仓库发版。
+
+### 9.4 外置插件 QuickJS 沙箱（v1.3.0）
+
+songloft 调研（`RESEARCH-songloft-plugin-inspiration.md`）的 QuickJS 隔离在本版落地：
+
+- **运行时**：外置插件（`data/plugins/<id>/index.js`）运行在 QuickJS/WASM VM（`plugins/sandbox.ts`，
+  quickjs-emscripten 0.32.0，sync 变体 + deferred-promise 宿主异步）。插件**拿不到 Node 能力**，
+  网络只能走 `host.http`（自带超时）、存储走 `host.storage`（按插件隔离）、日志走 `host.log`；
+  `permissions` 在宿主函数调用点强制（不再是契约）。
+- **防护**：单插件内存 256MB / 栈 1MB / 单次调用超时 15s / 中断处理器可切断死循环；
+  卡死可杀、崩溃不拖垮主进程；teardown 断言可捕获且不毒化模块（已实测）。
+- **契约**：插件文件定义 `globalThis.__mfPlugin = { manifest, create(host) }`；
+  调用走「信封」（guest 永远 resolve `{ok,value}|{ok,false,error}`）；沙箱注入 URL/URLSearchParams 兼容层。
+- **内置插件保持 in-process**（可信核心、直连 DB/服务，与 VSCode 内置扩展同理）；
+  **外置插件一律进沙箱**（不可信边界）。
+- **热重载**：`reload` 模式先释放旧沙箱再覆盖注册（内置不可遮蔽）。
+- **测试**：`tests/plugins/sandbox.test.ts`（8）+ `sandboxPlugins.test.ts`（9，真实 go-music-dl/listenbrainz
+  源码 + mock http）；全量 202 测试绿。文档 `docs/PLUGIN_DEV.md` 为沙箱契约版。
+- 官方外置插件已迁移：go-music-dl 1.2.0、listenbrainz 1.1.0（`MusicFlow-plugins`，Release 资产分发，
+  `minAppVersion 1.3.0`）。
