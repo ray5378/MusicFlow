@@ -22,62 +22,70 @@ function writePlugin(id: string, body: string) {
 beforeAll(() => {
   fs.mkdirSync(tmp, { recursive: true });
 
-  // 1) A fully valid importer plugin.
+  // 1) A fully valid importer plugin (QuickJS 沙箱契约)。
   writePlugin(
     "valid-plugin",
-    `export const manifest = {
-      id: "valid-plugin",
-      name: "Valid Plugin",
-      version: "1.0.0",
-      type: "importer",
-      description: "a valid test plugin",
-      capabilities: ["playlistImport"],
-      configSchema: [],
-    };
-    export const impl = { canHandle: () => false, fetchPlaylist: async () => ({}) };`,
+    `globalThis.__mfPlugin = {
+      manifest: {
+        id: "valid-plugin",
+        name: "Valid Plugin",
+        version: "1.0.0",
+        type: "importer",
+        description: "a valid test plugin",
+        capabilities: ["playlistImport"],
+        configSchema: [],
+      },
+      create() { return { canHandle: () => false, fetchPlaylist: async () => ({}) }; },
+    };`,
   );
 
   // 2) Invalid manifest (illegal capability + bad id via missing field).
   writePlugin(
     "badmanifest",
-    `export const manifest = {
-      id: "badmanifest",
-      name: "Bad",
-      version: "1.0.0",
-      type: "importer",
-      capabilities: ["notARealCapability"],
-      configSchema: [],
-    };
-    export const impl = {};`,
+    `globalThis.__mfPlugin = {
+      manifest: {
+        id: "badmanifest",
+        name: "Bad",
+        version: "1.0.0",
+        type: "importer",
+        capabilities: ["notARealCapability"],
+        configSchema: [],
+      },
+      create() { return {}; },
+    };`,
   );
 
   // 3) Requires a newer app than what we'll scan with.
   writePlugin(
     "oldversion",
-    `export const manifest = {
-      id: "oldversion",
-      name: "Old Version",
-      version: "1.0.0",
-      type: "importer",
-      capabilities: ["playlistImport"],
-      minAppVersion: "2.0.0",
-      configSchema: [],
-    };
-    export const impl = {};`,
+    `globalThis.__mfPlugin = {
+      manifest: {
+        id: "oldversion",
+        name: "Old Version",
+        version: "1.0.0",
+        type: "importer",
+        capabilities: ["playlistImport"],
+        minAppVersion: "2.0.0",
+        configSchema: [],
+      },
+      create() { return {}; },
+    };`,
   );
 
   // 4) Conflicts with an already-registered id.
   writePlugin(
     "conflict-plugin",
-    `export const manifest = {
-      id: "conflict-plugin",
-      name: "Conflict",
-      version: "1.0.0",
-      type: "importer",
-      capabilities: ["playlistImport"],
-      configSchema: [],
-    };
-    export const impl = {};`,
+    `globalThis.__mfPlugin = {
+      manifest: {
+        id: "conflict-plugin",
+        name: "Conflict",
+        version: "1.0.0",
+        type: "importer",
+        capabilities: ["playlistImport"],
+        configSchema: [],
+      },
+      create() { return {}; },
+    };`,
   );
 
   // 5) A plain file (not a directory) — discovery should skip it.

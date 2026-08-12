@@ -20,7 +20,8 @@ function scheduleReload(): void {
   timer = setTimeout(async () => {
     timer = null;
     try {
-      const loaded = await discoverExternalPlugins(APP_VERSION);
+      // reload 模式:同 id 外置插件先 dispose 旧 QuickJS VM 再覆盖注册,文件改动即时生效。
+      const loaded = await discoverExternalPlugins(APP_VERSION, undefined, { reload: true });
       if (loaded > 0) console.log(`[PLUGIN-HOTRELOAD] 重新发现 ${loaded} 个外置插件`);
     } catch (e: any) {
       console.error("[PLUGIN-HOTRELOAD] 重载失败:", e?.message || e);

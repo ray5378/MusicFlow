@@ -16,11 +16,13 @@
 
 import fs from "fs";
 import path from "path";
-import { pathToFileURL } from "url";
 import { getDataDir } from "../utils/env.js";
-import { registerPlugin, getPlugin } from "./registry.js";
+import { registerPlugin, getPlugin, getPluginConfig } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
+import { loadSandboxedPlugin, type SandboxedPlugin } from "./sandbox.js";
+import { makeScopedStorage } from "./storage.js";
+import { createComm } from "./comm.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 
 const VALID_TYPES: PluginType[] = [
@@ -34,9 +36,11 @@ const VALID_CAPS: PluginCapability[] = [
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
 ];
 
+/** 已加载外置插件的沙箱实例(id → SandboxedPlugin),热重载/卸载时 dispose。 */
+export const pluginSandboxes = new Map<string, SandboxedPlugin>();
+
 /** Validate a plugin manifest. Returns an error string, or null when valid. Pure. */
-export function validateManifest(manifest: any): string | null {
-  if (!manifest || typeof manifest !== "object") return "manifest 必须是对象";
+export function validateManifest(manifest: any): string | null {  if (!manifest || typeof manifest !== "object") return "manifest 必须是对象";
   if (typeof manifest.id !== "string" || !manifest.id) return "manifest.id 缺失";
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(manifest.id)) {
     return "manifest.id 只能含字母/数字/连字符,且不以连字符开头";
@@ -94,9 +98,16 @@ export function safeResolve(root: string, id: string): string | null {
  * @param rootDir     override the scan root (used by tests); when omitted the
  *                    real `data/plugins` directory is used and discovered plugins
  *                    are seeded into the DB immediately.
+ * @param opts.reload 热重载模式:同 id 的外置插件先 dispose 旧沙箱再覆盖注册(文件改动生效);
+ *                    内置插件仍不可被外置遮蔽。
  * @returns number of plugins successfully loaded
  */
-export async function discoverExternalPlugins(appVersion: string, rootDir?: string): Promise<number> {
+export async function discoverExternalPlugins(
+  appVersion: string,
+  rootDir?: string,
+  opts?: { reload?: boolean },
+): Promise<number> {
+  const reload = opts?.reload === true;
   const root = rootDir ?? path.join(getDataDir(), "plugins");
   if (!rootDir && !fs.existsSync(root)) return 0; // real dir absent → nothing to do
   if (rootDir && !fs.existsSync(root)) return 0;
@@ -111,26 +122,76 @@ export async function discoverExternalPlugins(appVersion: string, rootDir?: stri
       continue;
     }
     try {
-      const mod = await import(pathToFileURL(file).href);
-      const manifest: PluginManifest | undefined = mod.manifest ?? mod.default?.manifest;
-      const impl: any = mod.impl ?? mod.default?.impl ?? mod.default;
+      // 外置插件一律在 QuickJS 沙箱里运行(拿不到 Node 能力,只能用 host.*)。
+      const code = fs.readFileSync(file, "utf8");
+      // 优先用插件目录里的 plugin.json 作为 manifest(与 index.js 内 manifest 比对)。
+      let expectedManifest: PluginManifest | undefined;
+      const jsonPath = path.join(path.dirname(file), "plugin.json");
+      if (fs.existsSync(jsonPath)) {
+        try { expectedManifest = JSON.parse(fs.readFileSync(jsonPath, "utf8")) as PluginManifest; } catch { /* ignore */ }
+      }
+      const comm = createComm(id, expectedManifest?.permissions ?? []);
+      const env = {
+        version: process.env.APP_VERSION || "dev",
+        getConfig: () => getPluginConfig(id) ?? {},
+        permissions: expectedManifest?.permissions ?? [],
+        http: async (input: string, init?: any) => {
+          try {
+            const timeout = Number(init?.timeout) > 0 ? Number(init.timeout) : 20000;
+            const { timeout: _t, ...rest } = init || {};
+            const res = await fetch(String(input), { ...rest, signal: AbortSignal.timeout(timeout) });
+            const body = await res.text();
+            const headers: Record<string, string> = {};
+            res.headers.forEach((v, k) => { headers[k] = v; });
+            return { ok: res.ok, status: res.status, headers, body };
+          } catch (e: any) {
+            return { ok: false, status: 0, headers: {}, body: "", error: String(e?.message || e) };
+          }
+        },
+        storage: makeScopedStorage(id),
+        log: (...args: any[]) => console.log(`[PLUGIN:${id}]`, ...args),
+        comm: {
+          send: (targetId: string, message: any) => comm.send(targetId, message),
+          broadcast: (message: any) => comm.broadcast(message),
+          on: (handler: (message: any) => void) => comm.on(handler),
+        },
+      };
+      const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
+      const manifest: PluginManifest = sandbox.manifest;
       const reason = validateManifest(manifest);
-      if (reason) { console.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }
+      if (reason) { sandbox.dispose(); console.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }
       if (!impl || typeof impl !== "object") {
-        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 未导出 impl 对象`);
+        sandbox.dispose();
+        console.warn(`[PLUGIN] 跳过外置插件 ${id}: create() 未返回 impl 对象`);
         continue;
       }
-      if (getPlugin(manifest!.id)) {
+      if (getPlugin(manifest.id) && !reload) {
+        sandbox.dispose();
         console.warn(`[PLUGIN] 跳过外置插件 ${id}: 与已注册插件 id 冲突`);
         continue;
       }
-      if (!isAppVersionCompatible(manifest!, appVersion)) {
-        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${manifest!.minAppVersion}, 当前 ${appVersion}`);
+      if (reload) {
+        // 重载:仅允许覆盖「同 id 的外置插件」;内置插件不可被外置遮蔽。
+        const existingSandbox = pluginSandboxes.get(manifest.id);
+        if (!existingSandbox && getPlugin(manifest.id)) {
+          sandbox.dispose();
+          console.warn(`[PLUGIN] 跳过外置插件 ${id}: 与内置插件 id 冲突,不可覆盖`);
+          continue;
+        }
+        if (existingSandbox) {
+          existingSandbox.dispose();
+          pluginSandboxes.delete(manifest.id);
+        }
+      }
+      if (!isAppVersionCompatible(manifest, appVersion)) {
+        sandbox.dispose();
+        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${manifest.minAppVersion}, 当前 ${appVersion}`);
         continue;
       }
-      registerPlugin(manifest!, impl);
+      registerPlugin(manifest, impl);
+      pluginSandboxes.set(manifest.id, sandbox);
       loaded++;
-      console.log(`[PLUGIN] 已加载外置插件 ${id} (${manifest!.type}, ${manifest!.capabilities.join("/")})`);
+      console.log(`[PLUGIN] 已加载外置插件 ${id} (${manifest.type}, ${manifest.capabilities.join("/")}) [沙箱]`);
     } catch (e: any) {
       console.warn(`[PLUGIN] 加载外置插件 ${id} 失败: ${e?.message || e}`);
     }

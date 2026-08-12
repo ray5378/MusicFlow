@@ -29,7 +29,7 @@
 ## 插件化架构
 
 - **统一插件框架**：source / importer / recommender / sync / lyricProvider / coverProvider / renderer（DLNA）/ scrobbler 八类插件，能力由 `manifest.capabilities` 声明，核心按能力遍历分发（`docs/PLUGIN_ARCHITECTURE.md`）。
-- **外置插件**：`data/plugins/<id>/` 热加载、`host.*` 受控上下文 + 权限白名单、健康追踪、热重载。
+- **外置插件沙箱（v1.3.0+）**：外置插件运行在 **QuickJS 虚拟机**（WASM）里——拿不到 Node 能力，网络只能走 `host.http`（自带超时、`net` 权限执行点强制）、存储走 `host.storage`（按插件隔离）；单插件内存 256MB / 栈 1MB / 调用超时 15s，卡死可杀、崩溃不拖垮主进程。`docs/PLUGIN_DEV.md` 有完整开发指南。
 - **插件市场**：官方注册表 `https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json` 在首次启动**自动添加**（可用 `MUSICFLOW_OFFICIAL_REGISTRY` 环境变量覆盖/置空禁用）；Web UI「插件」页的市场 = **项目能力清单**——官方内置插件（标注「内置 · 已安装」，可直接启停/配置）与注册表插件（一键安装）同屏展示。每个插件点「详情」都有**功能介绍 + 处理逻辑**说明页（manifest 的 `documentation` 字段，Markdown；未提供时按能力自动生成说明）。
 - **官方插件仓库**：[ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)（go-music-dl 在线源、ListenBrainz scrobbler 等，tar 经 GitHub Release 资产分发）。
 
