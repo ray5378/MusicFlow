@@ -16,24 +16,25 @@ import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest } from "../../../plugins/registry.js";
 
-// Search result ordering: prefer platforms that resolve reliably.
-const SOURCE_PREFERENCE = ["netease", "kuwo", "kugou", "qq"];
-
 // Bounded in-memory caches. Both grow with every web song played, so enforce a
 // FIFO cap to keep memory usage bounded on long-running servers.
 const FALLBACK_CACHE_MAX = 2000;
 const PLAYABLE_CACHE_MAX = 5000;
 
+// 搜索结果的源排序偏好:由源插件 manifest.sourcePreference 声明(核心不写死平台顺序)。
+function getSourcePreference(providerId: string): string[] {
+  return getPluginManifest(providerId)?.sourcePreference || [];
+}
+
 // Default fallback provider: the song's own pluginEntry if known, else the first
-// enabled source plugin that declares the "stream" capability. Falls back to
-// "go-music-dl" only as a last resort (e.g. empty registry) so behaviour never
-// regresses even before any plugin is configured.
+// enabled source plugin that declares the "stream" capability. Returns "" when no
+// source plugin is available (no plugin → no fallback, behaviour-safe).
 function defaultStreamProviderId(songPluginEntry?: string | null): string {
   if (songPluginEntry) return songPluginEntry;
   for (const { manifest } of getEnabledSourcePlugins()) {
     if (manifest.capabilities.includes("stream")) return manifest.id;
   }
-  return "go-music-dl";
+  return "";
 }
 
 // songId -> working stream URL (or null once we know there's no alternative).
@@ -76,11 +77,12 @@ export async function findFallbackStream(
   }
 
   // Rank results: must match title (exact or contained) and not be the failing source.
+  const preference = getSourcePreference(providerId);
   const ranked = results
     .filter(s => s.source !== failingSource && s.name && normalize(s.name) === normalize(title))
     .sort((a, b) => {
-      const ar = SOURCE_PREFERENCE.indexOf(a.source);
-      const br = SOURCE_PREFERENCE.indexOf(b.source);
+      const ar = preference.indexOf(a.source);
+      const br = preference.indexOf(b.source);
       return (ar === -1 ? 99 : ar) - (br === -1 ? 99 : br);
     });
 

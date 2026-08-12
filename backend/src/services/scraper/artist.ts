@@ -52,7 +52,7 @@ async function downloadImage(url: string, ref: string): Promise<string | null> {
 
 export interface ArtistScrapeResult {
   name: string;
-  platform: "qq" | "netease" | "none";
+  platform: string; // 抓取来源标记(默认网易云,见 scrapeFromNetease)
   coverArt?: string;
   bio?: string;
   fallbackCover?: boolean; // used a local album cover because platforms had no info

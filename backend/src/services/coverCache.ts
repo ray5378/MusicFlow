@@ -1,7 +1,7 @@
 // In-memory cover image cache.
 //
 // Covers live on slow storage (e.g. a mechanical HDD mounted as data/covers or
-// data/musicdl-covers). Reads used to be synchronous and re-read the file on
+// data/online-covers). Reads used to be synchronous and re-read the file on
 // every request, which stalled the event loop and hammered the disk. This
 // module turns those reads async (fs.promises) and caches the decoded bytes so
 // repeated /getCoverArt requests (home, playlist, song list, artist pages all

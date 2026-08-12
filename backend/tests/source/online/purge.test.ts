@@ -8,7 +8,7 @@ import { initDatabase, db, sqlite } from "../../../src/db/index.js";
 import { songs, playlists, playlistSongs, users, userFavoriteSongs, playHistory } from "../../../src/db/schema.js";
 import { purgeExpiredWebSongs } from "../../../src/services/source/online/purge.js";
 
-const MUSICDL_COVERS_DIR = path.join(process.cwd(), "data", "musicdl-covers");
+const ONLINE_COVERS_DIR = path.join(process.cwd(), "data", "online-covers");
 const CWD_COVERS_DIR = path.join(process.cwd(), "data", "covers");
 
 const OLD = "2026-01-01T00:00:00.000Z"; // far older than the 7-day retention
@@ -93,7 +93,7 @@ function seed() {
 
   // Cover files for one that will be purged (old) and one that must stay (fav).
   for (const name of [`${IDS.old}.jpg`, `${IDS.fav}.jpg`]) {
-    for (const dir of [MUSICDL_COVERS_DIR, CWD_COVERS_DIR]) {
+    for (const dir of [ONLINE_COVERS_DIR, CWD_COVERS_DIR]) {
       const fp = path.join(dir, name);
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(fp, "fake-cover");
@@ -127,7 +127,7 @@ describe("purgeExpiredWebSongs", () => {
     // Old unreferenced web song + its history row + cover are gone.
     expect(db.select().from(songs).where(eq(songs.id, IDS.old)).get()).toBeUndefined();
     expect(db.select().from(playHistory).where(eq(playHistory.songId, IDS.old)).get()).toBeUndefined();
-    for (const dir of [MUSICDL_COVERS_DIR, CWD_COVERS_DIR]) {
+    for (const dir of [ONLINE_COVERS_DIR, CWD_COVERS_DIR]) {
       expect(fs.existsSync(path.join(dir, `${IDS.old}.jpg`))).toBe(false);
     }
 
@@ -135,7 +135,7 @@ describe("purgeExpiredWebSongs", () => {
     for (const id of [IDS.ref, IDS.fav, IDS.fresh, IDS.local]) {
       expect(db.select().from(songs).where(eq(songs.id, id)).get()).toBeTruthy();
     }
-    expect(fs.existsSync(path.join(MUSICDL_COVERS_DIR, `${IDS.fav}.jpg`))).toBe(true);
+    expect(fs.existsSync(path.join(ONLINE_COVERS_DIR, `${IDS.fav}.jpg`))).toBe(true);
   });
 
   it("is idempotent: a second run removes nothing", () => {

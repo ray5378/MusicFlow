@@ -18,6 +18,7 @@ import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist, syncAllRecommendPlaylists } from "../../services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "../../services/source/online/purge.js";
+import { getPluginManifest } from "../../plugins/registry.js";
 
 export const onlineRoutes = new Hono();
 
@@ -50,14 +51,11 @@ onlineRoutes.post("/v1/online/:providerId/search", async (c) => {
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
   try {
     const result = await configured.provider.search(configured.config, { query: q, sources });
-    const platformNames = new Map([
-      ["netease", "网易云"], ["qq", "QQ 音乐"], ["kugou", "酷狗"], ["kuwo", "酷我"],
-      ["migu", "咪咕"], ["qianqian", "千千"], ["soda", "汽水"], ["fivesing", "5sing"],
-      ["jamendo", "Jamendo"], ["joox", "JOOX"], ["bilibili", "Bilibili"], ["apple", "Apple Music"],
-    ]);
+    // 平台 → 展示名 映射由插件 manifest 声明(platformLabels),核心不写死平台词典。
+    const platformLabels = getPluginManifest(providerId)?.platformLabels || {};
     const songs = result.songs.map((s) => ({
       ...s,
-      platformLabel: platformNames.get(s.source) || s.source,
+      platformLabel: platformLabels[s.source] || s.source,
       streamUrl: configured.provider.streamUrl(configured.config, s),
     }));
     return c.json({ success: true, total: songs.length, songs });

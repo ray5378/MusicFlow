@@ -3,7 +3,7 @@
 //     local album scrape) live in data/covers.
 //   - PLATFORM covers (downloaded from online/music-dl providers via
 //     cacheRemoteCover: web song covers, imported go-music-dl playlist covers)
-//     live in data/musicdl-covers, a separate directory that can be mounted to
+//     live in data/online-covers, a separate directory that can be mounted to
 //     a different volume in docker-compose without touching the local covers.
 // Reads always probe both directories so legacy covers stored under
 // data/covers keep working after the split.
@@ -14,7 +14,7 @@ import fs from "fs";
 import path from "path";
 
 const COVERS_DIR = path.join(process.cwd(), "data", "covers");
-const MUSICDL_COVERS_DIR = path.join(process.cwd(), "data", "musicdl-covers");
+const ONLINE_COVERS_DIR = path.join(process.cwd(), "data", "online-covers");
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
 // Resolved-path cache: probing both dirs costs a stat syscall per candidate on
@@ -27,12 +27,12 @@ const RESOLVE_CACHE_MAX = 2000;
 
 function ensureDir() {
   if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
-  if (!fs.existsSync(MUSICDL_COVERS_DIR)) fs.mkdirSync(MUSICDL_COVERS_DIR, { recursive: true });
+  if (!fs.existsSync(ONLINE_COVERS_DIR)) fs.mkdirSync(ONLINE_COVERS_DIR, { recursive: true });
 }
 
 /** Absolute path of `ref` inside the platform covers dir (if it exists there). */
 export function platformCoverPath(ref: string): string {
-  return path.join(MUSICDL_COVERS_DIR, ref);
+  return path.join(ONLINE_COVERS_DIR, ref);
 }
 
 /**
@@ -45,7 +45,7 @@ export function resolveCoverFile(ref: string): string | null {
   const cached = resolveCache.get(ref);
   if (cached !== undefined) return cached;
   let resolved: string | null = null;
-  for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
+  for (const dir of [ONLINE_COVERS_DIR, COVERS_DIR]) {
     const p = path.join(dir, ref);
     try { if (fs.existsSync(p)) { resolved = p; break; } } catch { /* keep probing */ }
   }
@@ -63,14 +63,14 @@ export function invalidateCoverResolve(ref: string): void {
 }
 
 // Download a remote (platform) cover image and cache it locally. Returns the
-// local file ref or null. Stored under data/musicdl-covers so it can be
+// local file ref or null. Stored under data/online-covers so it can be
 // mounted on a separate volume; reads resolve both dirs.
 // force=true ignores the TTL and re-downloads (used on manual playlist sync).
 export async function cacheRemoteCover(url: string, ref: string, force = false): Promise<string | null> {
   if (!url || !/^https?:\/\//i.test(url)) return null;
   const ext = url.includes(".png") ? "png" : "jpg";
   const fileName = `${ref}.${ext}`;
-  const filePath = path.join(MUSICDL_COVERS_DIR, fileName);
+  const filePath = path.join(ONLINE_COVERS_DIR, fileName);
   if (!force && fs.existsSync(filePath)) {
     const stat = fs.statSync(filePath);
     if (Date.now() - stat.mtimeMs < CACHE_TTL) return fileName;
@@ -117,12 +117,12 @@ export function copyCoverToFile(destRef: string, srcCoverRef: string): string | 
 
 // Delete a song's cached cover file(s). Online/web songs cache their remote
 // cover under <songId>.jpg (.png), so removing the song must remove its cover
-// file too, otherwise orphaned covers accumulate in data/musicdl-covers.
+// file too, otherwise orphaned covers accumulate in data/online-covers.
 // Returns how many files were actually removed.
 export function deleteSongCover(songId: string): number {
   if (!songId) return 0;
   let removed = 0;
-  for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
+  for (const dir of [ONLINE_COVERS_DIR, COVERS_DIR]) {
     for (const name of [`${songId}.jpg`, `${songId}.png`, `${songId}.gif`]) {
       try {
         const filePath = path.join(dir, name);
@@ -135,7 +135,7 @@ export function deleteSongCover(songId: string): number {
 
 // Clear the cached cover file for a playlist (called after sync / track changes)
 export function clearPlaylistCoverCache(playlistId: string) {
-  for (const dir of [MUSICDL_COVERS_DIR, COVERS_DIR]) {
+  for (const dir of [ONLINE_COVERS_DIR, COVERS_DIR]) {
     try {
       const filePath = path.join(dir, `pl-${playlistId}.jpg`);
       if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); invalidateCoverResolve(`pl-${playlistId}.jpg`); }

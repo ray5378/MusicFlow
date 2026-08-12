@@ -26,7 +26,7 @@ export const DAILY_TAG = "每日推荐";
 // plugin declares its own `recommendPrefix` in its manifest, so a second
 // aggregator can be added without touching this file.
 function recommendPrefix(providerId: string): string {
-  return getPluginManifest(providerId)?.recommendPrefix ?? "gmdl://recommend/";
+  return getPluginManifest(providerId)?.recommendPrefix ?? ""; // 无插件声明前缀时返回空(无插件则无推荐源)
 }
 function allRecommendPrefixes(): string[] {
   return listRegistered()

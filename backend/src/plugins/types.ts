@@ -65,6 +65,12 @@ export interface PluginManifest {
   capabilities: PluginCapability[];
   /** Source plugins only: supported platform slugs (netease, qq, ...). */
   platforms?: string[];
+  /** Source plugins only: 平台 slug → 展示名 映射(核心展示层读取,不写死平台词典)。
+   *  如 { netease: "网易云", qq: "QQ 音乐" }。缺失时回退到 slug 本身。 */
+  platformLabels?: Record<string, string>;
+  /** Source plugins only: 流兜底搜索的源偏好顺序(数组,越靠前越优先)。
+   *  缺失时按插件返回的原始顺序。 */
+  sourcePreference?: string[];
   /** Source plugins only: prefix used to tag daily-recommend imported playlists. */
   recommendPrefix?: string;
   minAppVersion?: string;

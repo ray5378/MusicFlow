@@ -774,11 +774,11 @@ apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
   const arr = Array.isArray(body.candidates) ? body.candidates : null;
   if (!arr) return c.json({ error: "candidates 必须是数组" }, 400);
   const raw = arr
-    .filter((x: any) => x && typeof x.url === "string" && typeof x.platform === "string" && (x.platform === "qq" || x.platform === "netease"))
+    .filter((x: any) => x && typeof x.url === "string" && typeof x.platform === "string" && x.platform.trim().length > 0)
     .map((x: any) => ({ platform: x.platform, url: x.url.trim(), name: typeof x.name === "string" ? x.name : undefined }));
   const blocked = raw.filter((x: any) => isCandidateBlocked(x));
   const clean = raw.filter((x: any) => !isCandidateBlocked(x));
-  if (clean.length === 0) return c.json({ error: "候选池不能为空,且每项需要 platform (qq/netease) + url" }, 400);
+  if (clean.length === 0) return c.json({ error: "候选池不能为空,且每项需要 platform + url" }, 400);
   saveCandidates(clean);
   return c.json({ success: true, count: clean.length, blocked: blocked.length, blockedItems: blocked });
 });
