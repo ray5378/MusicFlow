@@ -1,6 +1,6 @@
 <template>
   <div class="admin-plugins">
-    <el-tabs v-model="activeTab">
+    <el-tabs v-model="activeTab" @tab-change="onTabChange">
       <!-- ============ Installed plugins ============ -->
       <el-tab-pane label="已安装" name="installed">
         <div class="page-header">
@@ -29,16 +29,19 @@
               <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="100">
+          <el-table-column label="状态" width="104">
             <template #default="{ row }">
-              <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+              <!-- 内置插件是核心功能:不显示关闭按钮 -->
+              <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心·启用</el-tag>
+              <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="140">
+          <el-table-column label="操作" width="210">
             <template #default="{ row }">
               <el-button size="small" type="primary" plain @click="editPlugin(row)">
                 {{ hasConfig(row) ? "配置" : "详情" }}
               </el-button>
+              <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -82,16 +85,27 @@
         <el-card class="market-card" shadow="never">
           <template #header><span>插件市场（官方内置 + 注册表）</span></template>
           <el-table :data="marketPlugins" stripe v-loading="marketLoading" v-if="marketPlugins.length > 0">
-            <el-table-column label="名称" min-width="180">
+            <el-table-column label="名称" min-width="170">
               <template #default="{ row }">
                 <div class="plugin-name">
                   {{ row.name }}
                   <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
                 </div>
-                <div class="plugin-id">{{ row.id }}@{{ row.version }}</div>
+                <div class="plugin-id">{{ row.id }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="类型 / 能力" min-width="210">
+            <el-table-column label="来源" min-width="210">
+              <template #default="{ row }">
+                <template v-if="row.builtin">
+                  <span class="src-builtin">随服务端发行</span>
+                </template>
+                <template v-else>
+                  <div class="src-host">{{ sourceHost(row.sourceUrl) }}</div>
+                  <div class="src-url">{{ row.sourceUrl }}</div>
+                </template>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型 / 能力" min-width="200">
               <template #default="{ row }">
                 <div class="cap-row">
                   <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
@@ -99,25 +113,33 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column prop="description" label="说明" min-width="230" show-overflow-tooltip />
+            <el-table-column prop="version" label="版本" width="86" />
+            <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
             <el-table-column label="状态" width="104">
               <template #default="{ row }">
-                <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <!-- 内置核心插件不显示关闭按钮 -->
+                <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
+                <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                 <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="150">
+            <el-table-column label="操作" width="190">
               <template #default="{ row }">
-                <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === row.id" @click="installPlugin(row)">安装</el-button>
+                <template v-if="!row.builtin">
+                  <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
+                  <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
+                  <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+                </template>
                 <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
               </template>
             </el-table-column>
           </el-table>
           <el-empty v-else description="市场为空或注册表暂不可达" :image-size="60" />
+          <p v-if="marketPlugins.length > 0" class="market-note">同一插件可能来自多个注册表（来源不同、版本不同），请选择你要安装的源头。</p>
         </el-card>
-        <el-alert type="warning" :closable="false" show-icon class="market-warn"
-          title="第三方插件以当前进程权限运行"
-          description="MusicFlow-V2 的插件在当前 Node 进程内执行（无沙箱隔离），安装未知来源的插件等同于信任其代码。请仅从你信赖的注册表安装。" />
+        <el-alert type="info" :closable="false" show-icon class="market-warn"
+          title="插件运行模型与安全提示"
+          description="内置插件随服务端发行,是核心功能(不可停用/删除);第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
       </el-tab-pane>
     </el-tabs>
 
@@ -251,7 +273,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
@@ -517,6 +539,55 @@ async function togglePlugin(plugin: any) {
   loadHealth();
 }
 
+/** 简单 semver 比较:<0 表示 a<b,=0 相等,>0 表示 a>b。 */
+function verCmp(a: string, b: string): number {
+  const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const da = pa[i] || 0, db = pb[i] || 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+/** 已安装且市场版本比本地更高 → 显示「更新」按钮(覆盖安装即升级)。 */
+function isUpdatable(row: any): boolean {
+  return !!row.installed && !!row.installedVersion && verCmp(row.version, row.installedVersion) > 0;
+}
+
+/** 来源 host(如 raw.githubusercontent.com),用于区分同一插件的不同源头。 */
+function sourceHost(url: string): string {
+  try { return new URL(url).host; } catch { return url || "—"; }
+}
+
+/** 安装按钮的加载键:同 id 不同来源也要能独立显示 loading。 */
+function installKey(row: any): string {
+  return `${row.id}@${row.sourceUrl || "builtin"}`;
+}
+
+/** 删除外置插件(确认后调 DELETE /v1/plugins/:id)。 */
+async function confirmDelete(row: any) {
+  try {
+    await ElMessageBox.confirm(
+      `删除「${displayName(row)}」后将移除其插件文件与记录,确定删除吗?`,
+      "删除插件",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return; // 用户取消
+  }
+  try {
+    await api.delete(`/rest/api/v1/plugins/${row.id}`);
+    ElMessage.success("已删除");
+    loadPlugins();
+    loadHealth();
+    loadMarketplace();
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "删除失败");
+  }
+}
+
 function editPlugin(plugin: any) {
   editing.value = plugin;
   const cfg = parseConfig(plugin);
@@ -652,7 +723,8 @@ async function removeRegistry(row: any) {
 }
 
 async function installPlugin(row: any) {
-  installing.value = row.id;
+  const key = installKey(row);
+  installing.value = key;
   try {
     await api.post("/rest/api/v1/plugins/registry/install", { downloadUrl: row.downloadUrl || row.url });
     ElMessage.success(`已安装 ${row.name}`);
@@ -664,6 +736,11 @@ async function installPlugin(row: any) {
   } finally {
     installing.value = "";
   }
+}
+
+/** 切到「插件市场」标签页时自动刷新一次市场(注册表/插件列表)。 */
+function onTabChange(name: string | number) {
+  if (name === "market") loadMarketplace();
 }
 
 onMounted(() => {
@@ -684,6 +761,10 @@ onMounted(() => {
 .market-card { margin-bottom: 20px; }
 .market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
 .market-warn { margin-top: 4px; }
+.market-note { margin: 12px 4px 0; font-size: 12px; color: var(--el-text-color-secondary); }
+.src-host { font-size: 13px; font-weight: 600; line-height: 1.4; }
+.src-url { font-size: 11px; color: var(--el-text-color-secondary); line-height: 1.4; word-break: break-all; }
+.src-builtin { font-size: 13px; color: var(--el-text-color-secondary); }
 .pd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .pd-id { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--el-text-color-secondary); }
 .pd-section { margin-bottom: 18px; }

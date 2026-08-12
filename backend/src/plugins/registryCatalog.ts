@@ -3,14 +3,17 @@
 // songloft distributes plugins through a remote `registry.json` (an array of
 // plugin.json URLs, with optional recursive `includes`). We mirror that:
 //   - registry URLs are persisted in the `plugin_registries` table.
-//   - listMarketplace() fetches + merges every enabled registry, dedupes by id,
-//     and keeps the highest version (mirrors registry.go's FetchAndMerge).
+//   - listMarketplace() fetches + merges every enabled registry. 同一插件来自
+//     不同注册表/plugin.json 地址的来源互不合并——每个来源保留为独立条目并带
+//     sourceUrl,由前端让用户手动选择安装哪个源头。
 //   - installPlugin(downloadUrl) downloads the archive, extracts it into
 //     data/plugins/<id>/, and (re)discovers external plugins so it's live
 //     immediately — no restart needed.
 //
-// In-process caveat (see docs/RESEARCH-...): we have no sandbox, so installing a
-// third-party plugin is a trust decision. The UI surfaces a warning; the
+// In-process caveat (see docs/RESEARCH-...): external plugins run in the QuickJS
+// sandbox (v1.3.0+), so they have no Node process powers; still, the services a
+// plugin reaches (e.g. its baseUrl) are configured by the admin, so installing a
+// third-party plugin remains a trust decision. The UI surfaces a warning; the
 // manifest is validated before it is registered.
 
 import fs from "fs";
@@ -46,6 +49,7 @@ interface RegistryEntry {
   author?: string;
   homepage?: string;
   downloadUrl: string; // archive (zip / tgz) containing index.js + manifest
+  sourceUrl: string;   // 该条目来自哪个 plugin.json 地址(同一插件不同来源据此区分)
   minAppVersion?: string;
   type?: string;              // 插件类型标签(source/importer/recommender/sync/...)
   capabilities?: string[];    // 能力清单(便于市场页展示"能干什么")
@@ -53,6 +57,7 @@ interface RegistryEntry {
   manifest?: string;          // 完整 manifest(JSON 字符串),前端配置表单/能力渲染复用
   builtin?: boolean;          // 官方内置插件(随服务端发行,无需安装)
   installed?: boolean;        // 本地已安装(plugins 表有行)
+  installedVersion?: string;  // 本地已安装版本(前端据此显示"更新"按钮)
   enabled?: number;           // 当前启用状态(0/1,与 plugins 表一致)
 }
 
@@ -210,10 +215,16 @@ export async function collectRegistryPluginUrls(): Promise<string[]> {
   return out;
 }
 
-/** Build the marketplace listing (deduped by id, highest version wins). */
+/** Build the marketplace listing.
+ *
+ *  v1.6+ : 同一插件的不同来源(不同注册表 / 不同 plugin.json 地址)不再按 id
+ *  合并成"最高版本一条"——每个来源保留为独立条目并带 sourceUrl,前端让用户
+ *  手动选择安装哪个源头;同一 (id, sourceUrl) 组合去重(注册表递归 includes
+ *  可能重复列出同一地址)。 */
 export async function listMarketplace(): Promise<RegistryEntry[]> {
   const urls = await collectRegistryPluginUrls();
-  const byId = new Map<string, RegistryEntry>();
+  const seen = new Set<string>();
+  const out: RegistryEntry[] = [];
   for (const url of urls) {
     try {
       const res = await fetchWithMirror(url, 15000);
@@ -228,30 +239,22 @@ export async function listMarketplace(): Promise<RegistryEntry[]> {
         author: m.author,
         homepage: m.homepage,
         downloadUrl: m.downloadUrl || (m as any).url || url,
+        sourceUrl: url,
         minAppVersion: m.minAppVersion,
         type: m.type,
         capabilities: Array.isArray(m.capabilities) ? m.capabilities : undefined,
         platforms: Array.isArray(m.platforms) ? m.platforms : undefined,
         manifest: JSON.stringify(m),
       };
-      const prev = byId.get(entry.id);
-      if (!prev || compareVer(entry.version, prev.version) > 0) byId.set(entry.id, entry);
+      const key = `${entry.id}::${url}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(entry);
     } catch (e: any) {
       console.warn(`[REGISTRY] 无法读取插件清单 ${url}: ${e?.message || e}`);
     }
   }
-  return [...byId.values()];
-}
-
-function compareVer(a: string, b: string): number {
-  const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
-  const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
-  const n = Math.max(pa.length, pb.length);
-  for (let i = 0; i < n; i++) {
-    const da = pa[i] || 0, dbv = pb[i] || 0;
-    if (da !== dbv) return da - dbv;
-  }
-  return 0;
+  return out;
 }
 
 /** Download + extract a plugin archive into data/plugins/<id>/ and (re)discover

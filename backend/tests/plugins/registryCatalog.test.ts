@@ -86,12 +86,21 @@ describe("marketplace listing", () => {
     for (const id of added) removeRegistry(id);
   });
 
-  it("dedupes by id (highest version wins) and follows includes", async () => {
+  it("keeps every source of the same id (user picks which to install) and follows includes", async () => {
     const m = await listMarketplace();
-    expect(m.map((x) => x.id).sort()).toEqual(["p1", "p3"]);
-    const p1 = m.find((x) => x.id === "p1");
-    expect(p1?.version).toBe("2.0.0");
-    expect(p1?.downloadUrl).toBe("https://x/p1-v2.zip");
+    // p1 有两个来源(p1.json v1.0.0 / p1-v2.json v2.0.0),都不合并;每个来源带 sourceUrl。
+    expect(m.map((x) => x.id).sort()).toEqual(["p1", "p1", "p3"]);
+    const p1Sources = m.filter((x) => x.id === "p1");
+    expect(p1Sources).toHaveLength(2);
+    expect(p1Sources.map((x) => x.sourceUrl).sort()).toEqual([
+      "https://reg.test/p1-v2.json",
+      "https://reg.test/p1.json",
+    ]);
+    const v1 = p1Sources.find((x) => x.version === "1.0.0");
+    expect(v1?.downloadUrl).toBe("https://x/p1.zip");
+    const v2 = p1Sources.find((x) => x.version === "2.0.0");
+    expect(v2?.downloadUrl).toBe("https://x/p1-v2.zip");
+    expect(m.find((x) => x.id === "p3")?.sourceUrl).toBe("https://reg.test/p3.json");
   });
 
   it("tolerates an unreachable registry without dropping the rest", async () => {

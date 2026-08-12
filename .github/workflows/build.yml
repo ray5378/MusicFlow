@@ -3,9 +3,9 @@ name: build-and-push
 # MusicFlow-V2 镜像发布(仅 GHCR,避免与 V1 的 musicflow 镜像同名冲突)。
 #
 # 触发:打 v* tag 时发布 ghcr.io/ray5378/musicflow-v2:<版本> + :latest;
-# workflow_dispatch 手动触发时发布 :master(用于预发布验证)。
-# 不在 push 分支时自动发版——加载项钉的是具体版本号,避免 master 提交悄悄
-# 漂移 :latest,出问题无从回滚。
+# workflow_dispatch 手动触发时也自动构建 :latest(版本号由 git describe 自动
+# 生成,无需手动指定升级版本),并附 :master 便于回溯手动构建来源。
+# tag 触发仍保持版本锁定的发版语义——加载项钉的是具体版本号,发布流程不变。
 on:
   push:
     tags: ["v*"]
@@ -54,9 +54,10 @@ jobs:
             VERSION="$V"
             TAGS="$GHCR:$V,$GHCR:latest"
           else
-            # 手动构建:版本号用 git describe 生成,镜像只打 :master,不动 :latest。
+            # 手动构建:版本号由 git describe 自动生成,不需要用户指定。
+            # 直接推 :latest(用户要点的是"最新镜像",不用先想好版本号),附 :master。
             VERSION=$(git describe --tags --abbrev=7 2>/dev/null || echo "master-$SHORT_SHA")
-            TAGS="$GHCR:master"
+            TAGS="$GHCR:latest,$GHCR:master"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "commit=$SHORT_SHA" >> "$GITHUB_OUTPUT"

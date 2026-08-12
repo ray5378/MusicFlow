@@ -42,6 +42,11 @@ import {
   listMarketplace, installPlugin, listRegistries, addRegistry, removeRegistry,
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
+import { pluginSandboxes } from "../../plugins/discovery.js";
+import { unregisterPlugin } from "../../plugins/registry.js";
+import fs from "node:fs";
+import path from "node:path";
+import { getDataDir } from "../../utils/env.js";
 
 // 每日推荐 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
 const dailyApi = () => dailyRecommendApi();
@@ -360,10 +365,66 @@ apiRoutes.get("/v1/sources/:id/scan-status", adminMiddleware, (c) => {
 });
 
 // ==================== Plugins ====================
-apiRoutes.get("/v1/plugins", adminMiddleware, (c) => c.json(db.select().from(plugins).all()));
+// 内置插件 = 随服务端发行的核心功能:始终启用、不可停用、不可删除、不可更新。
+const BUILTIN_IDS = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
+const isBuiltinRow = (r: any): boolean => BUILTIN_IDS.has(r?.id) || BUILTIN_IDS.has(r?.name);
+
+apiRoutes.get("/v1/plugins", adminMiddleware, (c) => {
+  const rows = db.select().from(plugins).all() as any[];
+  const now = new Date().toISOString();
+  // 内置插件是核心功能:若因历史操作被停用,这里校正为启用(DB 与视图同步)。
+  for (const r of rows) {
+    if (isBuiltinRow(r) && !r.enabled) {
+      db.update(plugins).set({ enabled: 1, updatedAt: now }).where(eq(plugins.id, r.id)).run();
+      r.enabled = 1;
+    }
+  }
+  return c.json(rows.map((r) => ({ ...r, builtin: isBuiltinRow(r) })));
+});
 apiRoutes.post("/v1/plugins", adminMiddleware, async (c) => { const body = await c.req.json(); const id = uuidv4(); db.insert(plugins).values({ id, name: body.name, version: body.version || "", description: body.description || "", manifest: JSON.stringify(body.manifest || {}), enabled: body.enabled ? 1 : 0, config: JSON.stringify(body.config || {}) }).run(); return c.json({ id }); });
-apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (!p) return c.json({ error: "插件不存在" }, 404); const body = await c.req.json().catch(() => ({})); db.update(plugins).set({ config: body.config !== undefined ? JSON.stringify(body.config) : p.config, enabled: body.enabled !== undefined ? (body.enabled ? 1 : 0) : p.enabled, description: typeof body.description === "string" ? body.description : p.description, version: typeof body.version === "string" ? body.version : p.version, name: typeof body.name === "string" ? body.name : p.name, updatedAt: new Date().toISOString() }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
-apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => { const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get(); if (p) db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run(); return c.json({ success: true }); });
+apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
+  const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
+  if (!p) return c.json({ error: "插件不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const builtin = isBuiltinRow(p);
+  db.update(plugins).set({
+    config: body.config !== undefined ? JSON.stringify(body.config) : p.config,
+    // 内置核心插件强制启用,忽略停用请求(可更新配置/描述,不可停用)。
+    enabled: builtin ? 1 : (body.enabled !== undefined ? (body.enabled ? 1 : 0) : p.enabled),
+    description: typeof body.description === "string" ? body.description : p.description,
+    version: typeof body.version === "string" ? body.version : p.version,
+    name: typeof body.name === "string" ? body.name : p.name,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(plugins.id, p.id)).run();
+  return c.json({ success: true });
+});
+apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
+  const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
+  if (!p) return c.json({ error: "插件不存在" }, 404);
+  if (isBuiltinRow(p)) return c.json({ error: "内置核心插件不可停用" }, 400);
+  db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run();
+  return c.json({ success: true });
+});
+// 删除插件(仅外置插件;内置核心插件不可删除)。删除目录 + 释放沙箱 + 反注册 + 删 DB 行。
+apiRoutes.delete("/v1/plugins/:id", adminMiddleware, (c) => {
+  const id = c.req.param("id")!;
+  const p = db.select().from(plugins).where(eq(plugins.id, id)).get() as any;
+  if (!p) return c.json({ error: "插件不存在" }, 404);
+  if (isBuiltinRow(p)) return c.json({ error: "内置核心插件不可删除" }, 400);
+  const sandbox = pluginSandboxes.get(p.id) || pluginSandboxes.get(p.name);
+  if (sandbox) {
+    try { sandbox.dispose(); } catch { /* ignore */ }
+    pluginSandboxes.delete(p.id);
+    pluginSandboxes.delete(p.name);
+  }
+  unregisterPlugin(p.id);
+  unregisterPlugin(p.name);
+  const dir = path.join(getDataDir(), "plugins", p.id);
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  db.delete(plugins).where(eq(plugins.id, p.id)).run();
+  console.log(`[PLUGIN] 已删除插件 ${p.id} (${p.name || ""})`);
+  return c.json({ success: true });
+});
 
 // Plugin health (green/yellow/red + failure counts) — see plugins/health.ts.
 apiRoutes.get("/v1/plugins/health", adminMiddleware, (c) => c.json({ health: allHealth() }));
@@ -388,7 +449,6 @@ apiRoutes.get("/v1/plugins/registry", adminMiddleware, async (c) => {
     const stateById = new Map(installedRows.map((p) => [p.id, p]));
     const builtinIds = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
     const builtinItems = BUILTIN_PLUGINS.map(({ manifest }) => {
-      const row = stateById.get(manifest.id);
       return {
         id: manifest.id,
         name: manifest.name || manifest.id,
@@ -400,14 +460,14 @@ apiRoutes.get("/v1/plugins/registry", adminMiddleware, async (c) => {
         manifest: JSON.stringify(manifest),
         builtin: true,
         installed: true,
-        enabled: row?.enabled ?? (manifest.defaultEnabled ? 1 : 0),
+        enabled: 1, // 内置核心插件始终启用(前端不显示关闭按钮)
       };
     });
     const merged = marketplace
       .filter((m) => !builtinIds.has(m.id)) // 内置优先,外部同名不重复
       .map((m) => {
         const row = stateById.get(m.id);
-        return { ...m, installed: !!row, enabled: row?.enabled ?? 0 };
+        return { ...m, installed: !!row, installedVersion: row?.version, enabled: row?.enabled ?? 0 };
       });
     return c.json({ registries: sources, plugins: [...builtinItems, ...merged] });
   } catch (e: any) {

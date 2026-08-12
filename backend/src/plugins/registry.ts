@@ -27,6 +27,12 @@ export function registerPlugin(manifest: PluginManifest, impl: any) {
   registry.set(manifest.id, { manifest, impl });
 }
 
+/** Remove a plugin from the in-memory registry (used when uninstalling an
+ *  external plugin). Callers must guard against removing built-ins. */
+export function unregisterPlugin(id: string): void {
+  registry.delete(id);
+}
+
 /** Compat shim: an OnlineProvider carries its manifest, so registering it is
  *  just registering (manifest, impl). */
 export function registerOnlineProvider(p: { manifest: PluginManifest; [k: string]: any }) {

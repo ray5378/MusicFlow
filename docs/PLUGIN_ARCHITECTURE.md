@@ -184,7 +184,7 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 - **Phase 3（外置插件）**：✅ 已完成（见 §7.3）。boot 扫描 `data/plugins/<id>/index.js` 动态 `import`（`plugins/discovery.ts`），加 manifest 校验 + 路径白名单（`safeResolve` 防穿越）+ `minAppVersion` 校验 + id 冲突保护；开发者文档见 `docs/PLUGIN_DEV.md`，参考实现见 `examples/plugins/hello-importer/index.js`。
 - **Phase 4（host.* 上下文 + Provider 注册表，P0）**：✅ 已完成（见 §7.4）。`host.*` 受控上下文取代插件直接 import 后端；`lyricProvider`/`coverProvider` 注册表 + first-match-wins；go-music-dl 歌词/封面拆为独立 provider 插件。
 - **Phase 5（能力扩展 + 权限，P1）**：✅ 已完成（见 §7.4）。`renderer`（DLNA）/`scrobbler` 插件化；声明式权限模型（`KNOWN_PERMISSIONS` + 命名空间通配 `songs.*` + 全局 `*`）；通用 KV `host.storage`；插件间 `host.comm`。
-- **Phase 6（分发与运维，P2）**：✅ 已完成（见 §7.4）。分发注册表 `plugin_registries` + `listMarketplace()`（递归 includes / 去重 / 最高版本优先）+ `installPlugin()`（下载 → 解压 `data/plugins/<id>/` → 热注册）；健康追踪 `plugin_health`（green/yellow/red）+ 管理页徽章；外置插件热重载 `hotReload.ts`（文件变更自动重发现，免重启）。
+- **Phase 6（分发与运维，P2）**：✅ 已完成（见 §7.4）。分发注册表 `plugin_registries` + `listMarketplace()`（递归 includes / 同 id 多来源各自保留并带 sourceUrl，v1.6+ 由前端让用户选择安装源头）+ `installPlugin()`（下载 → 解压 `data/plugins/<id>/` → 热注册）；健康追踪 `plugin_health`（green/yellow/red）+ 管理页徽章；外置插件热重载 `hotReload.ts`（文件变更自动重发现，免重启）。
 
 ---
 
@@ -285,7 +285,7 @@ Phase 0 + 1 全部完成；**Phase 2 全量插件化已收口（v1.5.0）**。�
 
 **P2 — 分发与运维（§7.4.3）**
 
-- [x] **T40** 分发注册表 `registryCatalog.ts`：`plugin_registries` 表（id/url/enabled）+ `listRegistries/addRegistry/removeRegistry`；`listMarketplace()` 递归 follows `includes`、按 id 去重、最高版本优先。
+- [x] **T40** 分发注册表 `registryCatalog.ts`：`plugin_registries` 表（id/url/enabled）+ `listRegistries/addRegistry/removeRegistry`；`listMarketplace()` 递归 follows `includes`、同 id 多来源各自保留（v1.6+，每个来源带 `sourceUrl`，前端据此让用户手动选择安装源头）。
 - [x] **T41** `installPlugin(downloadUrl)`：下载归档 → 解压到 `data/plugins/<id>/` → 重新 `discoverExternalPlugins()` 热注册（免重启）；Windows 上 BSD `tar` 反斜杠 / `C:` 远程主机坑用 `--force-local` + 正斜杠路径规避。
 - [x] **T42** 健康追踪 `health.ts`：`plugin_health` 表，连续失败数 0=green / 1–2=yellow / ≥3=red；`recordSuccess/recordFailure/getHealth/allHealth`；管理页「健康」列 + `GET /v1/plugins/health` 暴露。
 - [x] **T43** 外置插件热重载 `hotReload.ts`：启动 `startPluginHotReload()` 监听 `data/plugins` 变更 → 重新发现 + 重注册 + 重建 `plugins` 行，免重启。
@@ -349,8 +349,9 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
 
 ### 9.3 CI 与发版
 
-- `MusicFlow-V2/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow-v2:<版本>` + `:latest`
-  （workflow_dispatch 手动构建打 `:master`）；镜像仅 amd64（账号无 ARM runner）。
+- `MusicFlow-V2/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow-v2:<版本>` + `:latest`；
+  **workflow_dispatch 手动触发也自动构建 `:latest`**（版本号由 git describe 自动生成，
+  无需手动指定升级版本）并附 `:master` 便于回溯；镜像仅 amd64（账号无 ARM runner）。
 - 发版流程：V2 打新 tag → addon 的 `build.yaml` build_from + `config.yaml` version 同步 → addon 仓库发版。
 
 ### 9.4 外置插件 QuickJS 沙箱（v1.3.0）
