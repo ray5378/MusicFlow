@@ -464,6 +464,16 @@ export async function discoverExternalPlugins(
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       const manifest: PluginManifest = sandbox.manifest;
+      // 权限兜底:沙箱权限原本只取 plugin.json 的 permissions;若插件目录里
+      // plugin.json 缺失/为空(旧分发包或手工放置),沙箱里所有需权限的 host
+      // 能力(如 host.http 的 net)会被拒 —— 表现为测试连接报 HTTP undefined、
+      // 歌词/封面/兜底流全部失败(而 streamUrl 是同步纯构造不受影响,音乐仍能播)。
+      // index.js 内 manifest 是权威来源,缺 permissions 时以它为准(沙箱 hasPerm
+      // 每次调用读 this.env.permissions 同一引用,此处修改即时生效)。
+      if (!env.permissions.length && manifest.permissions?.length) {
+        env.permissions = manifest.permissions;
+        console.warn(`[PLUGIN] ${id}: plugin.json 缺少 permissions,已用 index.js manifest 兜底: ${manifest.permissions.join(",")}`);
+      }
       const reason = validateManifest(manifest);
       if (reason) { sandbox.dispose(); console.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }
       if (!impl || typeof impl !== "object") {

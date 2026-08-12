@@ -10,6 +10,7 @@ import {
   discoverExternalPlugins,
 } from "../../src/plugins/discovery.js";
 import { registerPlugin, getPlugin } from "../../src/plugins/registry.js";
+import { pluginSandboxes } from "../../src/plugins/discovery.js";
 
 const tmp = path.join(os.tmpdir(), `mfv2-plugins-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
 
@@ -90,6 +91,27 @@ beforeAll(() => {
 
   // 5) A plain file (not a directory) — discovery should skip it.
   fs.writeFileSync(path.join(tmp, "not-a-dir.js"), "export const x = 1;", "utf8");
+
+  // 6) plugin.json 缺失 permissions(旧分发包/手工放置)但 index.js 声明了 net。
+  //    沙箱权限必须用 index.js manifest 兜底,否则 host.http 被拒(HTTP undefined)。
+  const permDir = path.join(tmp, "perm-fallback");
+  fs.mkdirSync(permDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(permDir, "plugin.json"),
+    JSON.stringify({ id: "perm-fallback", name: "Perm", version: "1.0.0", type: "source", capabilities: ["stream"] }),
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(permDir, "index.js"),
+    `globalThis.__mfPlugin = {
+      manifest: {
+        id: "perm-fallback", name: "Perm", version: "1.0.0", type: "source",
+        capabilities: ["stream"], configSchema: [], permissions: ["net"],
+      },
+      create() { return { streamUrl: () => "http://x" }; },
+    };`,
+    "utf8",
+  );
 });
 
 afterAll(() => {
@@ -170,11 +192,19 @@ describe("discoverExternalPlugins", () => {
     );
 
     const loaded = await discoverExternalPlugins("1.0.0", tmp);
-    expect(loaded).toBe(1); // only valid-plugin
+    expect(loaded).toBe(2); // valid-plugin + perm-fallback
     expect(getPlugin("valid-plugin")).toBeDefined();
     expect(getPlugin("badmanifest")).toBeUndefined();
     expect(getPlugin("oldversion")).toBeUndefined(); // needs 2.0.0
     expect(getPlugin("conflict-plugin")).toBeDefined(); // the pre-registered builtin wins
+  });
+
+  it("plugin.json 缺 permissions 时用 index.js manifest 兜底,host.http 不被拒", () => {
+    const sb = pluginSandboxes.get("perm-fallback");
+    expect(sb).toBeDefined();
+    // 沙箱权限已兜底为 ["net"] → host.http(net) 可调用;若未兜底会是空权限被拒。
+    // (hasPerm 是 sandbox 内部方法,这里通过 env 权限已注入验证:直接看沙箱能访问 net 权限)
+    expect((sb as any).env?.permissions).toEqual(["net"]);
   });
 
   it("returns 0 when the root is absent", async () => {
