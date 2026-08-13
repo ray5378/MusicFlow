@@ -13,9 +13,10 @@
       <span class="col col-actions"></span>
     </div>
 
+    <div class="list-body" ref="listBodyEl" :style="virtualized ? { paddingTop: padTop + 'px', paddingBottom: padBottom + 'px' } : undefined">
     <div
-      v-for="(song, idx) in songs"
-      :key="song.id || `ext-${idx}`"
+      v-for="(song, i) in visibleSongs"
+      :key="song.id || `ext-${rowGlobalIdx(i)}`"
       class="song-row"
       :class="{
         active: isCurrent(song),
@@ -29,7 +30,7 @@
         <el-checkbox :model-value="isSelected(song.id)" @change="toggleOne(song, $event)" />
       </span>
       <span class="col col-index">
-        <span class="row-index">{{ (offset || 0) + idx + 1 }}</span>
+        <span class="row-index">{{ (offset || 0) + rowGlobalIdx(i) + 1 }}</span>
         <span class="row-playing"><span></span><span></span><span></span></span>
         <span class="row-hover-play"><MfIcon name="Play" :size="16" /></span>
       </span>
@@ -69,6 +70,7 @@
         </button>
       </span>
     </div>
+    </div>
 
     <div v-if="!loading && songs.length === 0" class="empty-state">
       <MfIcon name="Headphones" :size="48" />
@@ -78,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, useSlots } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount, useSlots } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
@@ -231,7 +233,96 @@ function formatPlayedAt(t: string) {
   return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-onMounted(() => fav.loadFavorites());
+// ==================== 虚拟滚动（大列表 windowing）====================
+// 桌面端行高固定(64px + margin 2*2 = 68px)才可虚拟化;移动端行高不定且列表
+// 通常较短,保持全量渲染。仅 songs > VIRTUAL_THRESHOLD 时启用,小列表零影响。
+// 方案:监听最近滚动容器,按 scrollTop 计算可见行区间,前后留 BUFFER 缓冲行,
+// 用 padding-top/bottom 占位保持滚动条范围不变(不新增依赖、不改滚动架构)。
+const ROW_HEIGHT = 68;
+const VIRTUAL_THRESHOLD = 200;
+const BUFFER = 6;
+const listBodyEl = ref<HTMLElement | null>(null);
+const scrollParentEl = ref<HTMLElement | Window | null>(null);
+const startIndex = ref(0);
+const endIndex = ref(0);
+const virtualized = computed(() => !isMobile.value && props.songs.length > VIRTUAL_THRESHOLD);
+const visibleSongs = computed(() =>
+  virtualized.value ? props.songs.slice(startIndex.value, endIndex.value) : props.songs
+);
+/** 行号/索引换算:虚拟化时加上窗口起点,保证显示的行号仍是全局序号 */
+const rowGlobalIdx = (i: number) => (virtualized.value ? startIndex.value : 0) + i;
+const padTop = computed(() => startIndex.value * ROW_HEIGHT);
+const padBottom = computed(() => (props.songs.length - endIndex.value) * ROW_HEIGHT);
+
+function findScrollParent(el: HTMLElement | null): HTMLElement | Window {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const oy = getComputedStyle(node).overflowY;
+    if (oy === "auto" || oy === "scroll") return node;
+    node = node.parentElement;
+  }
+  return window;
+}
+
+function recomputeWindow() {
+  const sp = scrollParentEl.value;
+  const body = listBodyEl.value;
+  if (!sp || !body) return;
+  const isWin = sp === window;
+  const scrollTopV = isWin ? window.scrollY : (sp as HTMLElement).scrollTop;
+  const vh = isWin ? window.innerHeight : (sp as HTMLElement).clientHeight;
+  // 列表相对滚动容器内容坐标系的顶部偏移(行位置 = listTopInSp + i*ROW_HEIGHT)。
+  const bodyRect = body.getBoundingClientRect();
+  const spTop = isWin ? 0 : (sp as HTMLElement).getBoundingClientRect().top;
+  const listTopInSp = bodyRect.top - spTop + scrollTopV;
+  const total = props.songs.length;
+  const s = Math.max(0, Math.floor((scrollTopV - listTopInSp) / ROW_HEIGHT) - BUFFER);
+  const e = Math.min(total, Math.ceil((scrollTopV + vh - listTopInSp) / ROW_HEIGHT) + BUFFER);
+  startIndex.value = s;
+  endIndex.value = Math.max(e, s);
+}
+
+let scrollBound = false;
+let scrollHandler: (() => void) | null = null;
+function bindScroll() {
+  if (scrollBound || !virtualized.value) return;
+  const sp = findScrollParent(listBodyEl.value);
+  scrollParentEl.value = sp;
+  scrollHandler = () => recomputeWindow();
+  sp.addEventListener("scroll", scrollHandler, { passive: true });
+  window.addEventListener("resize", scrollHandler);
+  scrollBound = true;
+  recomputeWindow();
+}
+function unbindScroll() {
+  if (!scrollBound) return;
+  const sp = scrollParentEl.value;
+  if (sp && scrollHandler) {
+    sp.removeEventListener("scroll", scrollHandler);
+    window.removeEventListener("resize", scrollHandler);
+  }
+  scrollHandler = null;
+  scrollParentEl.value = null;
+  scrollBound = false;
+}
+watch(virtualized, (v) => {
+  if (v) bindScroll();
+  else {
+    unbindScroll();
+    startIndex.value = 0;
+    endIndex.value = 0;
+  }
+});
+// 列表长度变化(翻页/过滤)后重算窗口,避免停留在越界区间。
+watch(() => props.songs.length, () => {
+  if (virtualized.value) recomputeWindow();
+});
+
+onMounted(() => {
+  fav.loadFavorites();
+  if (virtualized.value) bindScroll();
+});
+onBeforeUnmount(unbindScroll);
 </script>
 
 <style lang="scss" scoped>
