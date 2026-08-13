@@ -8,43 +8,70 @@
           <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
         </div>
 
-        <el-table :data="plugins" stripe v-loading="loading" v-if="plugins.length > 0">
-          <el-table-column label="插件名称" min-width="200">
-            <template #default="{ row }">
-              <div class="plugin-name">{{ displayName(row) }}</div>
-              <div class="plugin-id">{{ row.name }}</div>
-            </template>
-          </el-table-column>
-          <el-table-column label="类型" width="110">
-            <template #default="{ row }">
-              <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="version" label="版本" width="90" />
-          <el-table-column label="说明" min-width="220" show-overflow-tooltip>
-            <template #default="{ row }">{{ parseManifest(row).description || row.description || "—" }}</template>
-          </el-table-column>
-          <el-table-column label="健康" width="96">
-            <template #default="{ row }">
-              <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="104">
-            <template #default="{ row }">
-              <!-- 内置插件是核心功能:不显示关闭按钮 -->
-              <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心·启用</el-tag>
-              <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="210">
-            <template #default="{ row }">
-              <el-button size="small" type="primary" plain @click="editPlugin(row)">
-                {{ hasConfig(row) ? "配置" : "详情" }}
-              </el-button>
-              <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+        <template v-if="plugins.length > 0">
+          <el-table v-if="!isMobile" :data="plugins" stripe v-loading="loading">
+            <el-table-column label="插件名称" min-width="200">
+              <template #default="{ row }">
+                <div class="plugin-name">{{ displayName(row) }}</div>
+                <div class="plugin-id">{{ row.name }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="version" label="版本" width="90" />
+            <el-table-column label="说明" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">{{ parseManifest(row).description || row.description || "—" }}</template>
+            </el-table-column>
+            <el-table-column label="健康" width="96">
+              <template #default="{ row }">
+                <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="104">
+              <template #default="{ row }">
+                <!-- 内置插件是核心功能:不显示关闭按钮 -->
+                <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心·启用</el-tag>
+                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="210">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" plain @click="editPlugin(row)">
+                  {{ hasConfig(row) ? "配置" : "详情" }}
+                </el-button>
+                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <!-- 移动端卡片列表:保留配置/详情/删除/启停,避免 el-table 横向滚动 -->
+          <div v-else class="plugin-cards">
+            <div v-for="row in plugins" :key="row.name" class="plugin-card">
+              <div class="pc-row">
+                <div class="pc-id">
+                  <div class="plugin-name">{{ displayName(row) }}</div>
+                  <div class="plugin-id">{{ row.name }}</div>
+                </div>
+                <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+              </div>
+              <div class="pc-meta">
+                <span class="pc-ver">v{{ row.version }}</span>
+                <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
+              </div>
+              <div class="pc-desc m-sub">{{ parseManifest(row).description || row.description || "—" }}</div>
+              <div class="pc-actions">
+                <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心·启用</el-tag>
+                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <el-button size="small" type="primary" plain @click="editPlugin(row)">
+                  {{ hasConfig(row) ? "配置" : "详情" }}
+                </el-button>
+                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </template>
         <EmptyState v-else icon="cable" title="暂无插件" description="插件用于扩展搜索、下载、刮削、歌词、封面、设备投屏等功能">
           <template #action>
             <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
@@ -66,20 +93,32 @@
               <el-button size="small" type="primary" plain @click="showRegDialog = true">添加注册表</el-button>
             </div>
           </template>
-          <el-table :data="registries" stripe v-if="registries.length > 0" size="small">
-            <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
-            <el-table-column label="状态" width="120">
-              <template #default="{ row }">
-                <el-tag v-if="row.error" size="small" type="danger" effect="light">加载失败</el-tag>
-                <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="90">
-              <template #default="{ row }">
-                <el-button size="small" type="danger" plain @click="removeRegistry(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+          <template v-if="registries.length > 0">
+            <el-table v-if="!isMobile" :data="registries" stripe size="small">
+              <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
+              <el-table-column label="状态" width="120">
+                <template #default="{ row }">
+                  <el-tag v-if="row.error" size="small" type="danger" effect="light">加载失败</el-tag>
+                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="90">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div v-else class="registry-cards">
+              <div v-for="row in registries" :key="row.id" class="registry-card">
+                <div class="rc-url">{{ row.url }}</div>
+                <div class="rc-meta">
+                  <el-tag v-if="row.error" size="small" type="danger" effect="light">加载失败</el-tag>
+                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
+                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">删除</el-button>
+                </div>
+              </div>
+            </div>
+          </template>
           <el-empty v-else description="尚未添加任何插件注册表" :image-size="60" />
         </el-card>
 
@@ -100,45 +139,80 @@
               title="该注册表加载失败"
               :description="`${group.error}。请检查该地址是否可达，或当前网络是否能访问该托管平台（例如容器内访问 raw.githubusercontent.com 常因网络不可达而失败，可改用 Gitee 源）。`"
             />
-            <el-table v-else-if="group.items.length > 0" :data="group.items" stripe v-loading="marketLoading">
-              <el-table-column label="名称" min-width="200">
-                <template #default="{ row }">
-                  <div class="plugin-name">
-                    {{ row.name }}
-                    <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
-                  </div>
-                  <div class="plugin-id">{{ row.id }}</div>
-                </template>
-              </el-table-column>
-              <el-table-column label="类型 / 能力" min-width="200">
-                <template #default="{ row }">
-                  <div class="cap-row">
+            <template v-if="group.items.length > 0">
+              <el-table v-if="!isMobile" :data="group.items" stripe v-loading="marketLoading">
+                <el-table-column label="名称" min-width="200">
+                  <template #default="{ row }">
+                    <div class="plugin-name">
+                      {{ row.name }}
+                      <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                    </div>
+                    <div class="plugin-id">{{ row.id }}</div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="类型 / 能力" min-width="200">
+                  <template #default="{ row }">
+                    <div class="cap-row">
+                      <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+                      <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="version" label="版本" width="86" />
+                <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
+                <el-table-column label="状态" width="104">
+                  <template #default="{ row }">
+                    <!-- 内置核心插件不显示关闭按钮 -->
+                    <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
+                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="190">
+                  <template #default="{ row }">
+                    <template v-if="!row.builtin">
+                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
+                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
+                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+                    </template>
+                    <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <!-- 移动端卡片列表 -->
+              <div v-else class="plugin-cards">
+                <div v-for="row in group.items" :key="row.id" class="plugin-card">
+                  <div class="pc-row">
+                    <div class="pc-id">
+                      <div class="plugin-name">
+                        {{ row.name }}
+                        <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                      </div>
+                      <div class="plugin-id">{{ row.id }}</div>
+                    </div>
                     <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
+                  </div>
+                  <div class="cap-row">
                     <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
                   </div>
-                </template>
-              </el-table-column>
-              <el-table-column prop="version" label="版本" width="86" />
-              <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
-              <el-table-column label="状态" width="104">
-                <template #default="{ row }">
-                  <!-- 内置核心插件不显示关闭按钮 -->
-                  <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
-                  <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                  <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="190">
-                <template #default="{ row }">
-                  <template v-if="!row.builtin">
-                    <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
-                    <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
-                    <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
-                  </template>
-                  <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
+                  <div class="pc-desc m-sub">{{ row.description }}</div>
+                  <div class="pc-meta">
+                    <span class="pc-ver">v{{ row.version }}</span>
+                    <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
+                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
+                  </div>
+                  <div class="pc-actions">
+                    <template v-if="!row.builtin">
+                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
+                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
+                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+                    </template>
+                    <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
+                  </div>
+                </div>
+              </div>
+            </template>
             <el-empty v-else description="该注册表暂无可用插件" :image-size="50" />
           </div>
           <p v-if="groupedMarket.length > 0" class="market-note">同一插件可来自多个注册表，按来源分组显示（来源 github / gitee / 自建），请选择你要安装的源头。</p>
@@ -405,8 +479,12 @@ import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
+import { useIsMobile } from "@/composables/useIsMobile";
 
 const activeTab = ref<"installed" | "market" | "media">("installed");
+
+// 移动端(≤768)把 el-table 切换为卡片列表,避免横向滚动(见 frontend-responsive CI 守卫)。
+const isMobile = useIsMobile();
 
 // ---- installed plugins ----
 const plugins = ref<any[]>([]);
@@ -1109,9 +1187,36 @@ onMounted(() => {
 .pd-capdocs { margin: 0; padding-left: 20px; }
 .pd-capdocs li { font-size: 13px; line-height: 1.8; color: var(--el-text-color-regular); }
 .pd-hint { margin: 8px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
+/* 移动端卡片列表(替代 el-table) */
+.plugin-cards, .registry-cards { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.plugin-card, .registry-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--fnos-radius-lg);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pc-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.pc-id { min-width: 0; }
+.pc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pc-ver { font-size: 12px; color: var(--fnos-text-tertiary); }
+.pc-desc { line-height: 1.5; word-break: break-word; }
+.pc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rc-url { font-size: 13px; color: var(--fnos-text-primary); word-break: break-all; line-height: 1.5; }
+.rc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
 @media (max-width: 768px) {
   .admin-plugins { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
   :deep(.el-table) { font-size: 13px; }
+  /* 候选榜单行在窄屏换行,每个输入占满一行 */
+  .candidate-row { flex-wrap: wrap; }
+  .candidate-row .el-input,
+  .candidate-row .el-select { flex: 1 1 100% !important; width: 100% !important; }
+  .candidate-row .el-button { flex: 0 0 auto; }
+  /* 媒体获取行的固定宽控件在窄屏占满 */
+  .mf-media-row .el-select { width: 100% !important; }
 }
 </style>

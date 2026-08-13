@@ -7,20 +7,36 @@
         <el-input v-model="searchQuery" placeholder="搜索未命中音乐..." prefix-icon="Search" clearable style="width: 260px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <el-table :data="wishes" stripe v-loading="loading" v-if="wishes.length > 0">
-      <el-table-column type="index" width="60" label="#" :index="indexMethod" />
-      <el-table-column prop="songTitle" label="歌曲" min-width="200" />
-      <el-table-column prop="artist" label="艺术家" width="150" />
-      <el-table-column prop="album" label="专辑" width="150" />
-      <el-table-column prop="notes" label="来源" width="180" show-overflow-tooltip />
-      <el-table-column label="状态" width="100">
-        <template #default="{ row }">
+    <template v-if="wishes.length > 0">
+      <el-table v-if="!isMobile" :data="wishes" stripe v-loading="loading">
+        <el-table-column type="index" width="60" label="#" :index="indexMethod" />
+        <el-table-column prop="songTitle" label="歌曲" min-width="200" />
+        <el-table-column prop="artist" label="艺术家" width="150" />
+        <el-table-column prop="album" label="专辑" width="150" />
+        <el-table-column prop="notes" label="来源" width="180" show-overflow-tooltip />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.status === 'fulfilled' ? 'success' : row.status === 'pending' ? 'warning' : 'info'" size="small">
+              {{ row.status === 'fulfilled' ? '已实现' : row.status === 'pending' ? '未适配' : row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+      <!-- 移动端卡片列表 -->
+      <div v-else class="wish-cards">
+        <div v-for="(row, i) in wishes" :key="row.id ?? i" class="wish-card">
+          <div class="wc-index">{{ indexMethod(i) }}</div>
+          <div class="wc-main">
+            <div class="m-title">{{ row.songTitle }}</div>
+            <div class="m-sub">{{ row.artist }} · {{ row.album }}</div>
+            <div class="m-sub">{{ row.notes }}</div>
+          </div>
           <el-tag :type="row.status === 'fulfilled' ? 'success' : row.status === 'pending' ? 'warning' : 'info'" size="small">
             {{ row.status === 'fulfilled' ? '已实现' : row.status === 'pending' ? '未适配' : row.status }}
           </el-tag>
-        </template>
-      </el-table-column>
-    </el-table>
+        </div>
+      </div>
+    </template>
     <EmptyState v-else icon="box" title="暂无未命中音乐" description="导入外部歌单时未匹配的歌曲会出现在这里" compact />
     <div class="pagination-bar">
       <el-pagination
@@ -69,6 +85,7 @@ import { ref, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
+import { useIsMobile } from "@/composables/useIsMobile";
 
 const wishes = ref<any[]>([]);
 const loading = ref(false);
@@ -77,6 +94,9 @@ const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("wishPageSize") || "20"));
 if (![15, 20, 50, 100].includes(pageSize.value)) pageSize.value = 20;
 const searchQuery = ref("");
+
+// 移动端(≤768)把 el-table 切换为卡片列表,避免横向滚动(见 frontend-responsive CI 守卫)。
+const isMobile = useIsMobile();
 
 // Wish list dialog: chunked copy
 const showListDialog = ref(false);
@@ -218,6 +238,19 @@ onMounted(loadWishes);
 .wish-chunk-btn.copied { border-color: var(--fnos-green); color: var(--fnos-green); }
 .copied-tip { font-size: 12px; color: var(--fnos-green); }
 .wish-empty { grid-column: 1 / -1; text-align: center; color: var(--fnos-text-muted); padding: 30px 0; font-size: 13px; }
+/* 移动端卡片列表(替代 el-table) */
+.wish-cards { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.wish-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--fnos-radius-lg);
+  padding: 10px 12px;
+}
+.wc-index { flex: 0 0 22px; text-align: center; font-size: 12px; color: var(--fnos-text-tertiary); }
+.wc-main { flex: 1; min-width: 0; }
 @media (max-width: 768px) {
   .admin-wish { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }

@@ -889,3 +889,50 @@ html.tab-hidden body.fnos-login::before, html.tab-hidden body.fnos-login::after 
   /* 底部贴底后 arrow 位置与新位置不匹配，隐藏 */
   .mobile-controls-popover.el-popper .el-popper__arrow { display: none !important; }
 }
+
+/* =========================================================
+   移动端全局响应式兜底(≤768px 手机视口)
+   - 守卫 frontend/e2e/responsive.spec.ts 在 390 视口断言:页面/表格无横向溢出、弹窗不超视口。
+   - 这里统一收口两类最高频非自适应:
+       1) 固定宽弹窗(组件写死 720/620/520/500/400px)在窄屏一律被压到 92vw;
+       2) 窄屏表单 label 置顶、控件占满宽、操作按钮换行。
+   ========================================================= */
+
+/* 弹窗宽度封顶视口 92vw:组件写死的固定宽在窄屏被压到 92vw,桌面端各自宽度不受影响
+   (width < max-width 时不触发封顶)。保证 390 视口下弹窗外缘不超出视口。 */
+.el-dialog { max-width: 92vw; }
+.el-message-box { max-width: 92vw; }
+
+@media (max-width: 768px) {
+  /* 弹窗内表单:窄屏 label 置顶,避免左侧固定宽挤压内容导致挤压/溢出 */
+  .el-dialog .el-form-item,
+  .el-message-box .el-form-item {
+    display: block;
+    margin-bottom: 18px;
+  }
+  .el-dialog .el-form-item__label,
+  .el-message-box .el-form-item__label {
+    display: block;
+    width: auto !important;
+    text-align: left;
+    padding: 0 0 6px;
+    line-height: 1.4;
+  }
+  .el-dialog .el-form-item__content,
+  .el-message-box .el-form-item__content {
+    margin-left: 0 !important;
+  }
+  /* 弹窗内直接子级控件占满宽度(候选榜单等嵌套 flex 行不在直接子级,不受影响) */
+  .el-dialog .el-form-item__content > .el-input,
+  .el-dialog .el-form-item__content > .el-select,
+  .el-dialog .el-form-item__content > .el-input-number,
+  .el-dialog .el-form-item__content > .el-radio-group { width: 100% !important; }
+  /* 操作按钮区换行,不挤成一行溢出 */
+  .el-dialog__footer,
+  .el-message-box__btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+}

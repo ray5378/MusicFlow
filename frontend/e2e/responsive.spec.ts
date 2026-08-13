@@ -79,11 +79,10 @@ test("手机端(390px)各页面不应横向溢出", async ({ page }) => {
 test("插件配置/详情弹窗在手机端不超出视口宽度", async ({ page }) => {
   await page.goto("/admin/plugins", { waitUntil: "load" });
   await page.waitForTimeout(400);
-  const openBtn = page
-    .locator(".el-table .el-button")
-    .filter({ hasText: /配置|详情/ })
-    .first();
-  await expect(openBtn).toBeVisible();
+  // 已安装面板的「配置/详情」按钮:桌面端在 el-table、移动端在卡片,两种形态都要能打开弹窗。
+  // 不限定容器(兼容卡片态),用可见性等待确保插件列表已渲染。
+  const openBtn = page.getByRole("button", { name: /配置|详情/ }).first();
+  await openBtn.waitFor({ state: "visible", timeout: 10_000 });
   await openBtn.click();
   const dialog = page.locator(".el-dialog").first();
   await dialog.waitFor({ state: "visible", timeout: 5_000 });
