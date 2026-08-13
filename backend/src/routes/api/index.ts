@@ -21,7 +21,7 @@ import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, setDeviceMute, getDeviceStatus,
   enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isPrivateLanHostname,
-  setDeviceAlias, deleteDeviceRecord,
+  setDeviceAlias, deleteDeviceRecord, setDeviceDisabled, isDeviceDisabled,
 } from "../../services/dlna/control.js";
 import { announceOnPeer, isAnnouncing } from "../../services/dlna/announce.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
@@ -1352,6 +1352,7 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
     manufacturer: d.manufacturer, model: d.model,
     hasVolumeControl: !!d.renderingControlUrl,
     available: d.available,
+    disabled: !!d.disabled,
   }));
   return c.json({ devices });
 });
@@ -1365,6 +1366,7 @@ apiRoutes.post("/v1/dlna/scan", async (c) => {
     manufacturer: d.manufacturer, model: d.model,
     hasVolumeControl: !!d.renderingControlUrl,
     available: d.available,
+    disabled: !!d.disabled,
   })) });
 });
 
@@ -1407,6 +1409,38 @@ apiRoutes.delete("/v1/dlna/devices/:deviceId", async (c) => {
   // 5. 广播设备列表变化(WS → 卡片/Web 刷新)。
   getEventManager().emitDeviceListChanged(getCachedDevices().length);
   return c.json({ success: true });
+});
+
+// 禁用/启用 DLNA 设备。禁用后:从所有选择播放器的地方消失(peer 移除 + WS 不推送)、
+// 停止播放并清空队列、从所有播放器群组移除、不可投屏(castToDevice 校验);启用则恢复。
+apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const body = await c.req.json().catch(() => ({}));
+  const disabled = !!body.disabled;
+  if (disabled) {
+    // 1. 从所有播放器群组中移除该成员。
+    getGroupManager().removeDeviceFromAllGroups(deviceId);
+    // 2. 停止并清空设备队列(如果有),并删除持久化队列行。
+    try { getQueueController().clear(deviceId); } catch { /* ignore */ }
+    db.delete(deviceQueues).where(eq(deviceQueues.deviceId, deviceId)).run();
+  }
+  const dev = setDeviceDisabled(deviceId, disabled);
+  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  // 3. 立即同步 peer 列表(禁用→移除 peer 并推 peer_unavailable;启用→重新注册)。
+  getPeerManager().reconcileDlnaPeers();
+  // 4. 广播设备列表变化(WS → 卡片/Web 刷新)。
+  getEventManager().emitDeviceListChanged(getCachedDevices().length);
+  return c.json({
+    success: true, disabled,
+    device: {
+      id: dev.id, name: dev.name, alias: dev.alias || "",
+      displayName: dev.alias || dev.name,
+      manufacturer: dev.manufacturer, model: dev.model,
+      hasVolumeControl: !!dev.renderingControlUrl,
+      available: dev.available,
+      disabled: !!dev.disabled,
+    },
+  });
 });
 
 // Cast a song to a DLNA renderer.
@@ -1461,7 +1495,9 @@ apiRoutes.post("/v1/dlna/enqueue", async (c) => {
 
 // Transport controls.
 apiRoutes.post("/v1/dlna/devices/:deviceId/play", async (c) => {
-  try { await playDevice(c.req.param("deviceId")); return c.json({ success: true }); }
+  const deviceId = c.req.param("deviceId")!;
+  if (isDeviceDisabled(deviceId)) return c.json({ error: "设备已禁用" }, 403);
+  try { await playDevice(deviceId); return c.json({ success: true }); }
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 

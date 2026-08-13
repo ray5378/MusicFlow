@@ -12,17 +12,23 @@
         <el-button size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
       </div>
       <div class="devices-box" v-loading="loadingDevices">
-        <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row">
+        <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
           <MfIcon name="Monitor" class="device-row-icon" :class="{ offline: !dev.available }" />
           <div class="device-row-info">
             <div class="device-row-name">
               {{ dev.displayName || dev.name }}
               <el-tag v-if="dev.alias" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
               <span v-if="!dev.available" class="device-offline-tag">离线</span>
+              <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">已禁用</el-tag>
             </div>
             <div class="device-row-meta">{{ dev.manufacturer || dev.model || "DLNA 设备" }}</div>
           </div>
           <div class="device-row-actions">
+            <el-switch
+              :model-value="!!dev.disabled"
+              title="禁用后设备不出现在任何播放器选择中(播放器切换器 / HA 卡片 / 投屏),且不可播放"
+              @change="(v: any) => toggleDisabled(dev, !!v)"
+            />
             <el-button size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
             <el-popconfirm
               v-if="!dev.available"
@@ -122,7 +128,7 @@
         <div class="dialog-label">成员设备</div>
         <div class="device-list">
           <div
-            v-for="dev in dlnaDevices"
+            v-for="dev in selectableDevices"
             :key="dev.id"
             class="device-item"
             :class="{ checked: formMembers.includes(dev.id) }"
@@ -147,8 +153,8 @@
               </div>
             </div>
           </div>
-          <div v-if="dlnaDevices.length === 0" class="device-empty">
-            未发现 DLNA 设备。请确认设备已开启 DLNA 并处于同一局域网,稍后可在播放器管理中扫描。
+          <div v-if="selectableDevices.length === 0" class="device-empty">
+            未发现可用 DLNA 设备(禁用设备不可加入群组)。
           </div>
         </div>
       </div>
@@ -182,7 +188,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import api from "@/api";
@@ -221,6 +227,11 @@ const renameDeviceName = ref("");
 function onlineCount(g: any): number {
   return (g.members || []).filter((m: any) => m.available).length;
 }
+
+// 群组编辑对话框可选成员:排除禁用设备(禁用设备不可加入/保留在群组中)。
+const selectableDevices = computed(() =>
+  (dlnaDevices.value || []).filter((d: any) => !d.disabled)
+);
 
 // deviceId → 除当前编辑组外,还属于哪些组(仅展示提示,不阻止多组加入)。
 function otherGroupsOf(deviceId: string): string[] {
@@ -291,6 +302,21 @@ async function removeDevice(dev: any) {
     await loadGroups();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "删除失败");
+  }
+}
+
+// 禁用/启用设备:禁用后设备从所有选择播放器的地方消失(切换器/HA 卡片/投屏),
+// 后端会停止播放、清队列、移出群组并广播 peer_unavailable。
+async function toggleDisabled(dev: any, disabled: boolean) {
+  try {
+    const res = await api.put(`/rest/api/v1/dlna/devices/${dev.id}/disabled`, { disabled });
+    if (res.data.success) {
+      ElMessage.success(disabled ? `已禁用「${dev.displayName || dev.name}」` : `已启用「${dev.displayName || dev.name}」`);
+      await loadDlnaDevices();
+      await loadGroups(); // 禁用会把设备移出群组,组列表需要刷新
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
   }
 }
 
@@ -401,6 +427,7 @@ onMounted(() => { loadGroups(); loadDlnaDevices(); });
 .devices-box { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 6px; background: rgba(0,0,0,0.15); min-height: 60px; }
 .device-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; transition: background 0.15s;
   &:hover { background: rgba(255,255,255,0.05); }
+  &.is-disabled { opacity: 0.55; }
   .device-row-icon { font-size: 17px; color: var(--fnos-orange); flex-shrink: 0;
     &.offline { color: var(--fnos-text-muted); }
   }

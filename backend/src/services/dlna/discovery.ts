@@ -34,6 +34,7 @@ export interface DlnaDevice {
   renderingControlUrl?: string;
   lastSeen: number;      // ms epoch — updated on every SSDP message from this device
   available: boolean;    // false when byebye received or staleness exceeded
+  disabled?: boolean;    // 用户手动禁用(持久化于 dlna_devices.disabled):不出现在任何选择播放器的地方,不可投屏
 }
 
 // Make a relative control URL absolute against the description base.

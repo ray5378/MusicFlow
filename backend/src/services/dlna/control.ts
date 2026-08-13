@@ -275,7 +275,7 @@ function isoNow(): string { return new Date().toISOString(); }
 
 function upsertDeviceRow(d: DlnaDevice): void {
   const now = isoNow();
-  const existing = sqlite.prepare("SELECT alias, first_seen FROM dlna_devices WHERE id = ?").get(d.id) as any;
+  const existing = sqlite.prepare("SELECT alias, first_seen, disabled FROM dlna_devices WHERE id = ?").get(d.id) as any;
   const alias = existing?.alias || d.alias || "";
   const firstSeen = existing?.first_seen || now;
   sqlite.prepare(`
@@ -289,8 +289,10 @@ function upsertDeviceRow(d: DlnaDevice): void {
       available = 1,
       updated_at = excluded.updated_at
   `).run(d.id, d.name, alias, d.manufacturer || "", d.model || "", firstSeen, now, now);
-  // Re-attach the preserved alias to the in-memory device.
+  // Re-attach the preserved alias + disabled flag to the in-memory device.
+  // 发现流程永不覆盖 disabled(用户手动禁用的设备,SSDP 重发现/重启后依然禁用)。
   d.alias = alias || undefined;
+  d.disabled = !!existing?.disabled;
 }
 
 function markDeviceOfflineInDb(deviceId: string): void {
@@ -311,6 +313,34 @@ export function setDeviceAlias(deviceId: string, alias: string): DlnaDevice | un
   return dev;
 }
 
+// 禁用/启用 DLNA 设备:写 DB + 内存缓存,并通过 device_list_changed 广播触发
+// peer reconcile(禁用 → 移除 peer,启用 → 重新注册)。返回更新后的设备(找不到返回 undefined)。
+// 注意:禁用只负责状态与广播;停止播放/清队列/移除群组成员由路由层(setDisabled 端点)处理。
+export function setDeviceDisabled(deviceId: string, disabled: boolean): DlnaDevice | undefined {
+  if (!cachedDevices.some(d => d.id === deviceId) &&
+      !sqlite.prepare("SELECT 1 FROM dlna_devices WHERE id = ?").get(deviceId)) return undefined;
+  const now = isoNow();
+  // UPSERT:DB 已有行只改 disabled/updated_at(不动 name/alias 等);无行则补一行
+  // (边界:设备仅在内存缓存、尚未被发现流程持久化时,禁用动作也必须落库)。
+  sqlite.prepare(`
+    INSERT INTO dlna_devices (id, name, alias, manufacturer, model, first_seen, last_seen, available, disabled, updated_at)
+    VALUES (?, '', '', '', '', ?, ?, 0, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
+  `).run(deviceId, now, now, disabled ? 1 : 0, now);
+  const dev = cachedDevices.find(d => d.id === deviceId);
+  if (dev) dev.disabled = disabled;
+  getEventManager().emitDeviceListChanged(cachedDevices.length);
+  return dev;
+}
+
+// 设备是否被禁用(内存缓存优先,DB 兜底——用于 cast/控制链路的防绕过校验)。
+export function isDeviceDisabled(deviceId: string): boolean {
+  const dev = cachedDevices.find(d => d.id === deviceId);
+  if (dev) return !!dev.disabled;
+  const row = sqlite.prepare("SELECT disabled FROM dlna_devices WHERE id = ?").get(deviceId) as any;
+  return !!row?.disabled;
+}
+
 // 彻底删除设备:DB 行 + 内存缓存 + runtimes。队列/peer/群组成员由路由层处理。
 // 返回设备之前是否存在。
 export function deleteDeviceRecord(deviceId: string): boolean {
@@ -328,7 +358,7 @@ export function deleteDeviceRecord(deviceId: string): boolean {
 // 因此一律按离线处理;等首次 M-SEARCH 扫描或 SSDP alive 到达后再置为在线。
 export function loadPersistedDevices(): void {
   const rows = sqlite.prepare(
-    "SELECT id, name, alias, manufacturer, model, last_seen FROM dlna_devices"
+    "SELECT id, name, alias, manufacturer, model, last_seen, disabled FROM dlna_devices"
   ).all() as any[];
   for (const r of rows) {
     if (cachedDevices.some(d => d.id === r.id)) continue;
@@ -341,6 +371,7 @@ export function loadPersistedDevices(): void {
       model: r.model || undefined,
       lastSeen: r.last_seen ? Date.parse(r.last_seen) || 0 : 0,
       available: false,
+      disabled: !!r.disabled,
     });
   }
 }
@@ -514,6 +545,8 @@ function markOk(deviceId: string) {
 // Also kicks off GENA event subscription (best-effort) so we get push-based
 // state updates instead of relying solely on polling.
 export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: string }> {
+  // 禁用设备不可投屏(防绕过:不仅是 UI 不可见,直接调 API 也拒绝)。
+  if (isDeviceDisabled(opts.deviceId)) throw new Error("设备已禁用");
   const device = getDevice(opts.deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到或不可用");
   const { token, streamUrl } = createCastSession(opts.songId, opts.deviceId, opts.baseUrl);

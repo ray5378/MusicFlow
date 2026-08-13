@@ -335,6 +335,7 @@ export function initDatabase() {
       first_seen TEXT NOT NULL DEFAULT '',
       last_seen TEXT NOT NULL DEFAULT '',
       available INTEGER NOT NULL DEFAULT 0,
+      disabled INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT ''
     );
 
@@ -424,6 +425,10 @@ export function initDatabase() {
   // Migration: add favorite column to playlists table (older DBs) — 收藏歌单标记
   try {
     sqlite.exec("ALTER TABLE playlists ADD COLUMN favorite INTEGER DEFAULT 0");
+  } catch {}
+  // Migration: add disabled column to dlna_devices (older DBs) — 播放器页禁用设备
+  try {
+    sqlite.exec("ALTER TABLE dlna_devices ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0");
   } catch {}
   // Online-song columns (online source plugins, e.g. the official go-music-dl)
   for (const col of [

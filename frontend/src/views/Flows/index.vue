@@ -281,7 +281,11 @@ async function loadCtlTargets() {
   const out: any[] = [];
   try {
     const d = await api.get("/rest/api/v1/dlna/devices");
-    for (const it of d.data?.devices || []) out.push({ peerId: `dlna:${it.id}`, name: it.name || it.id, kind: "dlna", available: it.available });
+    // 禁用设备不作为控制目标(后端 peer 已过滤,这里兜底排除)。
+    for (const it of d.data?.devices || []) {
+      if (it.disabled) continue;
+      out.push({ peerId: `dlna:${it.id}`, name: it.name || it.id, kind: "dlna", available: it.available });
+    }
   } catch {}
   try {
     const g = await api.get("/rest/api/v1/groups");

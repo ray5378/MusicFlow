@@ -152,12 +152,19 @@ class PeerManager extends EventEmitter {
   // ==================== Reconciliation ====================
 
   /** Sync the DLNA peer set from the device cache. New devices are registered,
-   *  missing ones are marked unavailable. Display name = alias || SSDP name. */
+   *  missing ones are marked unavailable. Display name = alias || SSDP name.
+   *  禁用设备(disabled)不注册为 peer,也不保留已有 peer —— 它们不出现在任何
+   *  选择播放器的地方(web 切换器 / Flows / HA 卡片 REST+WS)。 */
   reconcileDlnaPeers(): void {
     const devices = getCachedDevices();
     const seen = new Set<string>();
     for (const d of devices) {
       seen.add(d.id);
+      if (d.disabled) {
+        // 禁用:从 peer 列表移除(若之前在列表中,emit peer_unavailable → 卡片实时消失)。
+        this.removeDlnaPeer(d.id);
+        continue;
+      }
       this.registerDlna(d.id, d.alias || d.name, !!d.available);
     }
     // Devices that vanished from the cache → mark unavailable.

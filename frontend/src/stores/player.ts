@@ -735,6 +735,8 @@ export const usePlayerStore = defineStore("player", () => {
         if (!deviceId || !snapshot || !snapshot.isActive) continue;
         if (remoteStates.has(`dlna:${deviceId}`)) continue; // already tracked
         const dev = devices.find((d: any) => d.id === deviceId);
+        // 禁用设备不恢复投屏会话(后端已过滤 peer,这里兜底防恢复一个已禁用的设备)。
+        if (dev && dev.disabled) continue;
         const name = dev?.name || "DLNA 设备";
         const st = ensureRemoteState(`dlna:${deviceId}`, name);
         await syncCastQueueFromBackend(st);

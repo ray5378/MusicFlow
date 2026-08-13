@@ -81,6 +81,7 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
   const devices: Record<string, any> = {};
   for (const d of getCachedDevices()) {
     if (!d.available) continue;
+    if (d.disabled) continue; // 禁用设备不推送给任何客户端(卡片/Web)
     try {
       const status = await getDeviceStatus(d.id);
       devices[d.id] = { ...status, name: d.name, available: d.available };
