@@ -3,7 +3,9 @@ name: ci
 # 每次 push(含 PR)验证:
 #   1. 内置插件规范校验(scripts/check-builtins.mts)——manifest 合规/documentation 必填/能力映射
 #   2. 框架核心插件化合规(scripts/check-core.mts)——核心不写死平台/provider、不直连内置插件实现
-#   3. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
+#   3. 前端插件隔离守卫(scripts/check-frontend-plugins.mjs)——插件配置/详情页仅渲染插件声明内容,
+#      核心全局功能(媒体获取等)不得耦合进单个插件弹窗
+#   4. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -32,6 +34,15 @@ jobs:
         run: cd backend && DATA_DIR=$(mktemp -d) npx tsx scripts/check-builtins.mts
       - name: 校验框架核心符合功能插件化规范(不越界)
         run: cd backend && npx tsx scripts/check-core.mts
+
+  frontend-plugin-isolation:
+    name: 前端插件隔离守卫(弹窗不得耦合核心功能)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 零依赖 node 脚本,无需 npm install;与后端 check-core.mts 互为前后端对称守卫。
+      - name: 校验插件管理页仅渲染插件声明内容
+        run: node backend/scripts/check-frontend-plugins.mjs
 
   test:
     name: 类型检查 + 全量测试
