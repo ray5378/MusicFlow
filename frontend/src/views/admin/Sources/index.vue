@@ -321,7 +321,9 @@ onUnmounted(() => { Object.values(progressTimers).forEach(clearInterval); });
     }
     .progress-stats { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); span { &:first-child { color: var(--fnos-green); } &:nth-child(2) { color: var(--fnos-green); } &:nth-child(3) { color: var(--fnos-orange); } } }
   }
-  .source-actions { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06); }
+  .source-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06);
+    .el-button { margin-left: 0; flex: 1 1 auto; min-width: 84px; }
+  }
 }
 :deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; }
 @media (max-width: 768px) {
