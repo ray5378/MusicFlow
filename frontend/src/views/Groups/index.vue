@@ -24,11 +24,27 @@
             <div class="device-row-meta">{{ dev.manufacturer || dev.model || "DLNA 设备" }}</div>
           </div>
           <div class="device-row-actions">
-            <el-switch
-              :model-value="!!dev.disabled"
-              title="禁用后设备不出现在任何播放器选择中(播放器切换器 / HA 卡片 / 投屏),且不可播放"
-              @change="(v: any) => toggleDisabled(dev, !!v)"
-            />
+            <el-popconfirm
+              :title="dev.disabled
+                ? `确定恢复启用「${dev.displayName || dev.name}」?`
+                : `确定禁用「${dev.displayName || dev.name}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列、移出群组`"
+              :confirm-button-text="dev.disabled ? '恢复' : '禁用'"
+              :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
+              cancel-button-text="取消"
+              width="320"
+              @confirm="toggleDisabled(dev, !dev.disabled)"
+            >
+              <template #reference>
+                <el-button
+                  size="small"
+                  :type="dev.disabled ? 'danger' : ''"
+                  :plain="!dev.disabled"
+                  class="device-disable-btn"
+                >
+                  <MfIcon name="CircleSlash" />{{ dev.disabled ? "恢复" : "禁用" }}
+                </el-button>
+              </template>
+            </el-popconfirm>
             <el-button size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
             <el-popconfirm
               v-if="!dev.available"
@@ -425,9 +441,13 @@ onMounted(() => { loadGroups(); loadDlnaDevices(); });
 }
 .group-section-head { margin-top: 28px; }
 .devices-box { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 6px; background: rgba(0,0,0,0.15); min-height: 60px; }
-.device-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; transition: background 0.15s;
+.device-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; transition: background 0.15s, border-color 0.15s; border: 1px solid transparent;
   &:hover { background: rgba(255,255,255,0.05); }
-  &.is-disabled { opacity: 0.55; }
+  &.is-disabled { opacity: 0.62; border-color: rgba(245,108,108,0.45); background: rgba(245,108,108,0.05);
+    &:hover { background: rgba(245,108,108,0.08); }
+    .device-row-icon { color: var(--fnos-text-muted); }
+  }
+  .device-disable-btn { min-width: 76px; }
   .device-row-icon { font-size: 17px; color: var(--fnos-orange); flex-shrink: 0;
     &.offline { color: var(--fnos-text-muted); }
   }
