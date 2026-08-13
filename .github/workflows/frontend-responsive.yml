@@ -1,0 +1,54 @@
+name: frontend-responsive
+
+# 前端响应式守卫:在手机视口(390×844)下启动真实前后端,遍历所有路由,
+# 断言页面与表格不横向溢出、插件配置弹窗不超视口宽度。
+# 任何非自适应页面都会让本作业失败 → 阻止合入,迫使修复(见 ci.yml 说明)。
+# 独立于 ci.yml(后端规范校验),互不阻塞。
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: frontend-responsive-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BACKEND_PORT: "46400"
+  FRONTEND_PORT: "4173"
+
+jobs:
+  responsive:
+    name: 响应式 e2e(手机端 390px 无横向溢出)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install backend deps
+        run: cd backend && npm ci
+
+      - name: Install frontend deps
+        run: cd frontend && npm install
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Install Playwright Chromium
+        run: cd frontend && npx playwright install --with-deps chromium
+
+      - name: Run responsive e2e
+        run: cd frontend && npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7

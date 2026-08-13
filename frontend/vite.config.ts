@@ -45,4 +45,22 @@ export default defineConfig({
       },
     },
   },
+  // `vite preview`(生产构建预览)复用同一套代理,供 CI 响应式 e2e 在同源下登录 + 拉取数据。
+  preview: {
+    port: 4173,
+    proxy: {
+      "/rest": {
+        target: "http://127.0.0.1:46400",
+        changeOrigin: true,
+      },
+      "/api": {
+        target: "http://127.0.0.1:46400",
+        changeOrigin: true,
+      },
+      "/ping": {
+        target: "http://127.0.0.1:46400",
+        changeOrigin: true,
+      },
+    },
+  },
 });
