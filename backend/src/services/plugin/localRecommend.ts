@@ -1,48 +1,43 @@
 // Local daily-recommend playlist generator (Plan B).
 //
-// Unlike Plan A (which pulls remote playlists from QQ/NetEase and may have lots
-// of unmatched stubs because your local library doesn't have those tracks),
-// Plan B works ENTIRELY from your local library — every track in the resulting
-// playlist is guaranteed playable.
+// 2026-08-13 起恢复独立生成并支持配置化:插件每天独立生成「每日推荐」歌单
+// (固定 id `pl-daily-local`),歌曲来源与数量均可配置:
+//   - sourcePlaylists(可多选,本地+平台歌单):从选定的歌单池抽取歌曲;
+//     留空则按播放口味(play_history + 收藏)从全库推荐。
+//   - count:生成的歌单歌曲总数(默认 50)。
+//   - excludeRecent:是否排除近期播放过的歌曲(默认开)。
 //
-// Algorithm:
-//   1. Collect each user's "taste profile" from play_history (recent N days)
-//      + user_favorite_songs. Weight recent plays higher than old ones.
-//   2. Rank artists/albums/genres by aggregated score.
-//   3. From the top-K artists/albums, pull ALL candidate songs from the local
-//      library, EXCLUDING songs the user already played recently (so the daily
-//      mix feels fresh). No artificial size cap — use everything that matches.
-//   4. Deterministically shuffle the candidates with a date seed (same day ->
-//      same order; different day -> different order).
-//   5. Persist as a "今日推荐(本地)" playlist.
-//
-// Naming / retention model (only TWO playlists ever exist):
-//   - "今日推荐(本地)"  — today's local playlist
-//   - "昨日推荐(本地)"  — yesterday's local playlist
-// Same rename mechanism as Plan A: each day, old "昨日推荐(本地)" is deleted,
-// "今日推荐(本地)" is renamed to "昨日推荐(本地)", new "今日推荐(本地)" is created.
-//
-// Falls back gracefully when there is no history at all: pulls a deterministic
-// sample spread across the library so the user still gets *something* to play.
+// 抽取算法:date-seeded 确定性随机(同一天相同顺序,不同天不同),保证每天内容
+// 稳定可复现;无口味数据且未选歌单池时全库随机兜底。
 import { sqlite } from "../../db/index.js";
-import { clearPlaylistCoverCache } from "../playlistCover.js";
 import type { LocalRecommendPlugin, PluginManifest } from "../../plugins/types.js";
 
 export const HISTORY_WINDOW_DAYS = 30;
 export const TOP_ARTISTS = 12;
 export const TOP_ALBUMS = 8;
 export const TOP_GENRES = 6;
-// Max number of local-recommend songs merged into the daily "今日推荐" playlist.
-// The candidates are already deterministically shuffled by date seed, so we
-// simply slice to this size — keeps the daily mix focused instead of dumping
-// the entire library into it.
-export const LOCAL_SAMPLE_SIZE = 50;
+// 默认生成的歌曲总数(可经插件配置 count 覆盖,1~500)。
+export const DEFAULT_SONG_COUNT = 50;
+export const MAX_SONG_COUNT = 500;
 
 export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 
-// Fixed playlist names.
-const NAME_TODAY = "今日推荐(本地)";
-const NAME_YESTERDAY = "昨日推荐(本地)";
+/** 读本插件配置:参考歌单池 / 歌曲总数 / 排除近期播放。非法或未配置回落默认。 */
+export function getLocalRecommendConfig(): { sourcePlaylists: string[]; count: number; excludeRecent: boolean } {
+  try {
+    const row = sqlite.prepare("SELECT config FROM plugins WHERE name = ? AND enabled = 1").get(LOCAL_RECOMMEND_PLUGIN_ID) as any;
+    const cfg = row?.config ? JSON.parse(row.config) : {};
+    const ids = Array.isArray(cfg.sourcePlaylists)
+      ? cfg.sourcePlaylists.filter((x: any) => typeof x === "string" && x.length > 0)
+      : [];
+    const rawCount = parseInt(String(cfg.count), 10);
+    const count = Number.isFinite(rawCount) && rawCount >= 1 ? Math.min(rawCount, MAX_SONG_COUNT) : DEFAULT_SONG_COUNT;
+    const excludeRecent = cfg.excludeRecent !== false;
+    return { sourcePlaylists: ids, count, excludeRecent };
+  } catch {
+    return { sourcePlaylists: [], count: DEFAULT_SONG_COUNT, excludeRecent: true };
+  }
+}
 
 export interface LocalRecommendResult {
   date: string;
@@ -81,28 +76,6 @@ function mulberry32(seed: number): () => number {
 function pickSystemOwnerId(): string {
   const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as any;
   return admin?.id || "";
-}
-
-// Find a playlist by its exact name + comment tag.
-function findPlaylistByName(name: string, tag: string): any | null {
-  const rows = sqlite.prepare("SELECT * FROM playlists WHERE name = ? AND comment LIKE ?").all(name, `%${tag}%`) as any[];
-  return rows[0] || null;
-}
-
-function isCreatedToday(playlist: any, dateStr: string): boolean {
-  const created = playlist.created_at || "";
-  return created.startsWith(dateStr);
-}
-
-function deletePlaylist(playlistId: string): void {
-  sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
-  clearPlaylistCoverCache(playlistId);
-  sqlite.prepare("DELETE FROM playlists WHERE id = ?").run(playlistId);
-}
-
-function renamePlaylist(playlistId: string, newName: string): void {
-  sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
-    .run(newName, new Date().toISOString(), playlistId);
 }
 
 // Aggregate the taste profile across ALL users (daily mixes are global in this
@@ -333,15 +306,53 @@ function getSettingBool(key: string, def: boolean): boolean {
   return v === "true" || v === "1";
 }
 
-// Pick local-recommend song ids based on play-history taste profile.
-// Extracted so the main daily-recommend generator can merge these into the
-// SAME "今日推荐" playlist instead of creating a separate "(本地)" one.
-// Capped at LOCAL_SAMPLE_SIZE (candidates are already date-seeded shuffled).
+/** 近期播放过的歌曲 id 集合(「排除近期播放」用)。 */
+function recentlyPlayedSongIds(): Set<string> {
+  const since = new Date(Date.now() - HISTORY_WINDOW_DAYS * 86400000).toISOString();
+  const rows = sqlite.prepare("SELECT DISTINCT song_id FROM play_history WHERE played_at >= ?").all(since) as { song_id: string }[];
+  return new Set(rows.map((r) => r.song_id));
+}
+
+/** 从用户选定的歌单池抽取 `limit` 首可播放歌曲(date-seeded 确定性随机,多歌单合并去重)。 */
+function pickFromPlaylistPool(date: Date, playlistIds: string[], limit: number, excludeRecent: boolean): string[] {
+  if (!playlistIds.length) return [];
+  const recentIds = excludeRecent ? recentlyPlayedSongIds() : new Set<string>();
+  const ph = playlistIds.map(() => "?").join(",");
+  const rows = sqlite.prepare(`
+    SELECT DISTINCT ps.song_id AS id FROM playlist_songs ps
+    JOIN songs s ON ps.song_id = s.id
+    WHERE ps.playlist_id IN (${ph}) AND ps.playable = 1 AND ps.song_id IS NOT NULL
+  `).all(...playlistIds) as { id: string }[];
+  const all = new Set<string>();
+  for (const r of rows) {
+    if (!recentIds.has(r.id)) all.add(r.id);
+  }
+  const arr = Array.from(all);
+  if (!arr.length) return [];
+  const rng = mulberry32(dayOfYear(date) * 774631 + 11);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr.slice(0, limit);
+}
+
+// Pick local-recommend song ids based on play-history taste profile (or a
+// user-selected playlist pool — see plugin config). Capped at configured count.
 // Returns { songIds, sourceUsers, fallback }.
 export function pickLocalRecommendSongs(date: Date): { songIds: string[]; sourceUsers: number; fallback: boolean } {
   if (!getSettingBool("daily_recommend_local_enabled", true)) {
     return { songIds: [], sourceUsers: 0, fallback: false };
   }
+  const { sourcePlaylists, count, excludeRecent } = getLocalRecommendConfig();
+
+  // 配置了参考歌单池 → 优先从池抽取(本地+平台歌单均可)
+  if (sourcePlaylists.length > 0) {
+    const fromPool = pickFromPlaylistPool(date, sourcePlaylists, count, excludeRecent);
+    if (fromPool.length) return { songIds: fromPool, sourceUsers: 0, fallback: false };
+    // 池内无可播放歌曲 → 回落口味推荐
+  }
+
   const profile = buildTasteProfile();
   let songIds = pickCandidateSongs(profile, date);
   let fallback = false;
@@ -349,26 +360,86 @@ export function pickLocalRecommendSongs(date: Date): { songIds: string[]; source
     songIds = pickRandomSample(date);
     fallback = true;
   }
-  // Cap to LOCAL_SAMPLE_SIZE — candidates are already deterministically
+  // Cap to configured count — candidates are already deterministically
   // shuffled, so slicing keeps the daily mix focused (not the whole library).
-  if (songIds.length > LOCAL_SAMPLE_SIZE) {
-    songIds = songIds.slice(0, LOCAL_SAMPLE_SIZE);
+  if (songIds.length > count) {
+    songIds = songIds.slice(0, count);
   }
   return { songIds, sourceUsers: profile.userCount, fallback };
 }
 
 // Build today's local daily playlist.
-// DEPRECATED: local songs are now merged into the main "今日推荐" playlist by
-// generateDailyPlaylist(). This function is kept only for backward compat and
-// returns null (no separate "(本地)" playlist is created anymore).
+//
+// 2026-08-13 起恢复独立生成(用户反馈):local-recommend 不再只是 daily-recommend
+// 的合并来源,而是独立生成「每日推荐」歌单(固定 id,本地口味歌曲)。
+// 命名/保留:固定 id `pl-daily-local` + 歌单名「每日推荐」,每天重建内容,
+// 当天幂等(created_at 前缀判断)。daily-recommend 的「今日推荐」改为纯全库随机,
+// 避免两张歌单内容重复。
+export const LOCAL_FIXED_PLAYLIST_ID = "pl-daily-local";
+const NAME_LOCAL = "每日推荐";
+
 export async function generateLocalDailyPlaylist(date = new Date()): Promise<LocalRecommendResult | null> {
-  return null;
+  const dateStr = todayStr(date);
+  const ownerId = pickSystemOwnerId();
+  const now = new Date().toISOString();
+
+  let row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(LOCAL_FIXED_PLAYLIST_ID) as any;
+  if (!row) {
+    sqlite.prepare(`
+      INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, NULL, NULL, '', NULL, 0, ?, ?)
+    `).run(LOCAL_FIXED_PLAYLIST_ID, NAME_LOCAL, ownerId, DAILY_TAG_LOCAL, now, now);
+    row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(LOCAL_FIXED_PLAYLIST_ID) as any;
+  }
+  // 当天幂等:comment 含今天日期 = 今天已生成过(与 daily-recommend 同机制;
+  // 不能用 created_at 前缀——行是固定的,created_at 始终是首次创建那天)
+  if ((row.comment || "").includes(dateStr)) {
+    return { date: dateStr, playlistId: LOCAL_FIXED_PLAYLIST_ID, name: NAME_LOCAL, total: 0, sourceUsers: 0, fallback: false, skipped: true };
+  }
+
+  const { songIds, sourceUsers, fallback } = pickLocalRecommendSongs(date);
+  if (!songIds.length) {
+    return { date: dateStr, playlistId: LOCAL_FIXED_PLAYLIST_ID, name: NAME_LOCAL, total: 0, sourceUsers, fallback, skipped: true };
+  }
+
+  // 重建内容:清空旧 entries 再插入
+  sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(LOCAL_FIXED_PLAYLIST_ID);
+  const insert = sqlite.prepare("INSERT INTO playlist_songs (playlist_id, song_id, position, playable, created_at) VALUES (?, ?, ?, 1, ?)");
+  const tx = sqlite.transaction((ids: string[]) => {
+    ids.forEach((id, pos) => insert.run(LOCAL_FIXED_PLAYLIST_ID, id, pos, now));
+  });
+  tx(songIds);
+
+  // 时长合计
+  const ph = songIds.map(() => "?").join(",");
+  const durRows = sqlite.prepare(`SELECT duration FROM songs WHERE id IN (${ph})`).all(...songIds) as { duration: number }[];
+  const totalDuration = durRows.reduce((s, r) => s + (r.duration || 0), 0);
+
+  // 封面:取本地任意一张有封面的歌(每日封面可随内容变化)
+  const coverRow = sqlite.prepare("SELECT cover_art FROM songs WHERE cover_art IS NOT NULL AND cover_art <> '' LIMIT 1").get() as any;
+
+  sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")
+    .run(songIds.length, totalDuration, coverRow?.cover_art || null, `${DAILY_TAG_LOCAL} ${dateStr} 本地口味推荐`, now, LOCAL_FIXED_PLAYLIST_ID);
+
+  return {
+    date: dateStr,
+    playlistId: LOCAL_FIXED_PLAYLIST_ID,
+    name: NAME_LOCAL,
+    total: songIds.length,
+    sourceUsers,
+    fallback,
+    skipped: false,
+  };
 }
 
 // Top-level entry for the scheduler. Never throws.
-// Now a no-op — local songs are merged into the main daily playlist.
-export async function runLocalDailyRecommendJob(): Promise<LocalRecommendResult | null> {
-  return null;
+export async function runLocalDailyRecommendJob(date = new Date()): Promise<LocalRecommendResult | null> {
+  try {
+    return await generateLocalDailyPlaylist(date);
+  } catch (e: any) {
+    console.error("[LOCAL-RECOMMEND] error:", e?.message || e);
+    return null;
+  }
 }
 
 // ==================== Plugin (recommender, localPlaylist) ====================
@@ -385,27 +456,39 @@ export const localRecommendManifest: PluginManifest = {
   name: "本地推荐引擎",
   version: "1.0.0",
   type: "recommender",
-  description: "基于播放历史与收藏口味,从本地曲库生成「今日推荐」的补充歌单",
+  description: "基于播放历史与收藏口味,每天独立生成「每日推荐」歌单(本地曲库)",
   capabilities: ["localPlaylist"],
   defaultEnabled: true,
-  configSchema: [],
+  configSchema: [
+    { key: "sourcePlaylists", label: "参考歌单", type: "playlist-multi", help: "从这些歌单中抽取歌曲生成「每日推荐」(支持本地与平台导入歌单,可多选,可搜索)。留空则按播放口味从全库推荐。" },
+    { key: "count", label: "歌曲总数", type: "number", default: 50, help: "生成的歌单歌曲总数量(1~500,默认 50)" },
+    { key: "excludeRecent", label: "排除近期播放", type: "switch", default: true, help: "从候选中排除近 30 天播放过的歌曲,让每天推荐更新鲜" },
+  ],
   documentation: `### 功能介绍
-基于播放历史与收藏口味，从本地曲库生成「今日推荐」的本地补充歌单，让每日推荐不只有在线候选，还有你常听的口味。
+基于播放历史与收藏口味，每天从本地曲库独立生成「每日推荐」歌单（固定 id：\`pl-daily-local\`），每天按你的口味更新。
 
 ### 处理逻辑
-1. 定时器按 \`localPlaylist\` 能力调用 \`pickSongs()\` / \`runDailyJob()\`；
-2. 统计近期播放历史与收藏（\`play_history\` / \`user_favorite_songs\`），给艺术家 / 专辑 / 风格打分（\`local_recommend_*_scores\` 表）；
-3. 按分数加权从本地曲库抽取候选曲目，生成补充歌单供 \`daily-recommend\` 合并进「今日推荐」。
+1. 定时器按 \`localPlaylist\` 能力调用本插件的 \`runDailyJob()\`（每天与每日推荐同步，可改系统时间设置）；
+2. 按配置抽取歌曲：
+   - 配置了「参考歌单」（本地 / 平台导入歌单，可多选）：从这些歌单的歌曲中确定性随机抽取，生成总数由「歌曲总数」控制；
+   - 未配置参考歌单：统计近期播放历史与收藏（\`play_history\` / \`user_favorite_songs\`），给艺术家 / 专辑 / 风格打分，按口味加权抽取；
+3. 写入「每日推荐」歌单（覆盖当天旧版）。
 
 ### 说明
-- 与 \`daily-recommend\` 配合使用：在线候选 + 本地口味组合成完整「今日推荐」；
+- 独立成单：与 \`daily-recommend\` 的「今日推荐」互不依赖、内容不重复（今日推荐为在线候选 + 推荐池 + 全库随机）；
+- 「排除近期播放」开启时，候选会剔除近 30 天播放过的歌曲；
 - 无播放历史 / 曲库为空时输出空结果，不报错；
-- 停用本插件后每日推荐只剩在线来源。`,
+- 停用本插件后「每日推荐」歌单不再更新。`,
 };
 
 export const localRecommendPlugin: LocalRecommendPlugin = {
   manifest: localRecommendManifest,
   async pickSongs(date = new Date()) {
     return pickLocalRecommendSongs(date);
+  },
+  async runDailyJob(): Promise<string | null> {
+    const r = await runLocalDailyRecommendJob();
+    if (!r || r.skipped) return null;
+    return `${r.date}: ${r.total} 首本地推荐 (${r.sourceUsers} 用户, ${r.fallback ? "全库随机兜底" : "口味推荐"})`;
   },
 };

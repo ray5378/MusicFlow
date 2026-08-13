@@ -82,25 +82,6 @@
       </div>
     </el-card>
 
-    <!-- 网络代理：仅管理员可见，全局网络配置 -->
-    <el-card v-if="authStore.isAdmin" class="mt-card">
-      <div class="setting-item">
-        <div class="setting-label">
-          <div class="title">网络代理</div>
-          <div class="desc">用于插件市场拉取 GitHub 等源（registry / 插件包下载）。格式：http://ip:port 或 https://ip:port</div>
-        </div>
-        <div class="setting-value"><el-switch v-model="proxyEnabled" /></div>
-      </div>
-      <div v-if="proxyEnabled" class="setting-item">
-        <div class="setting-label"><div class="title">代理地址</div><div class="desc">例如 http://192.168.1.10:7890</div></div>
-        <div class="setting-value proxy-actions">
-          <el-input v-model="proxyUrl" placeholder="http://ip:port" class="proxy-input" clearable />
-          <el-button :loading="proxyTesting" @click="testProxy">测试连接</el-button>
-          <el-button type="primary" :loading="proxySaving" @click="saveProxy">保存</el-button>
-        </div>
-      </div>
-    </el-card>
-
     <el-dialog v-model="showNameDialog" title="修改用户名" width="400px">
       <el-form label-width="80px">
         <el-form-item label="新用户名"><el-input v-model="newName" /></el-form-item>
@@ -199,7 +180,7 @@ async function copyApiKey() {
   await copyText(apiKey.value);
 }
 
-onMounted(() => { loadApiKey(); loadVersion(); loadProxy(); });
+onMounted(() => { loadApiKey(); loadVersion(); });
 const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 function toggleMotion(v: string | number | boolean) {
@@ -214,47 +195,6 @@ function clearCache() {
   localStorage.clear();
   ElMessage.success('本地缓存已清除，即将刷新');
   setTimeout(() => location.reload(), 800);
-}
-
-// ---------- 网络代理（管理员） ----------
-const proxyEnabled = ref(false);
-const proxyUrl = ref("");
-const proxySaving = ref(false);
-const proxyTesting = ref(false);
-
-async function loadProxy() {
-  try {
-    const res = await api.get("/rest/api/v1/proxy");
-    proxyEnabled.value = !!res.data.enabled;
-    proxyUrl.value = res.data.url || "";
-  } catch { /* 静默：非管理员等场景不影响页面 */ }
-}
-
-async function saveProxy() {
-  proxySaving.value = true;
-  try {
-    await api.put("/rest/api/v1/proxy", { enabled: proxyEnabled.value, url: proxyUrl.value });
-    ElMessage.success("代理设置已保存");
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
-  } finally {
-    proxySaving.value = false;
-  }
-}
-
-// 测试连接：先保存当前输入（让后端用最新配置测），再打 GitHub raw 官方 registry。
-async function testProxy() {
-  proxyTesting.value = true;
-  try {
-    await api.put("/rest/api/v1/proxy", { enabled: proxyEnabled.value, url: proxyUrl.value });
-    const res = await api.post("/rest/api/v1/proxy/test", {});
-    if (res.data?.success) ElMessage.success(`代理可用（HTTP ${res.data.status}）`);
-    else ElMessage.error(res.data?.error || "代理不可用");
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "测试失败");
-  } finally {
-    proxyTesting.value = false;
-  }
 }
 
 async function changeUsername() {
@@ -290,15 +230,11 @@ async function changeUsername() {
 .apikey-box .apikey-input { flex: 1 1 auto; min-width: 0; }
 .apikey-box .apikey-copy { flex: 0 0 auto; }
 .apikey-actions { display: flex; gap: 8px; }
-.proxy-actions { display: flex; gap: 8px; align-items: center; }
-.proxy-input { width: 300px; }
 
 @media (max-width: 768px) {
   .settings-page { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
   .setting-item { flex-direction: column; gap: 10px; }
   .apikey-box { max-width: 100%; }
-  .proxy-input { width: 100%; }
-  .proxy-actions { flex-wrap: wrap; }
 }
 </style>

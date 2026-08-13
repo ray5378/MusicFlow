@@ -35,7 +35,6 @@ import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { copyCoverToFile } from "../playlistCover.js";
 import { pickRandomLibrarySongs } from "./localRecommend.js";
-import { firstEnabledByCapability } from "../../plugins/registry.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 
 export interface DailyCandidate {
@@ -237,18 +236,10 @@ function ensureDailyPlaylists(): void {
 }
 
 // Pull the local-library contribution for today's daily playlist through the
-// `localPlaylist` capability. Falls back to a full-library random sample when
-// no local-recommend plugin is enabled (or one throws).
+// Pull the local-library contribution for today's daily playlist.
+// 2026-08-13 起 local-recommend 独立生成「每日推荐」歌单,不再合并进「今日推荐」,
+// 这里直接用全库随机采样,避免两张歌单内容重复。
 async function pickLocalSongsForDaily(date: Date): Promise<string[]> {
-  const lp = firstEnabledByCapability("localPlaylist");
-  if (lp && typeof lp.impl?.pickSongs === "function") {
-    try {
-      const r = await lp.impl.pickSongs(date);
-      if (r && r.songIds.length) return r.songIds.slice(0, RANDOM_LIBRARY_SAMPLE_SIZE);
-    } catch (e: any) {
-      console.error("[DAILY-RECOMMEND] local-recommend plugin failed, using random sample:", e?.message || e);
-    }
-  }
   return pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
 }
 

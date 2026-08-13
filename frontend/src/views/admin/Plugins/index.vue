@@ -336,6 +336,19 @@
             >
               <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
             </el-select>
+            <!-- playlist-multi:参考歌单多选(本地 + 平台导入歌单,可搜索),由 manifest configSchema 声明 -->
+            <el-select
+              v-else-if="f.type === 'playlist-multi'"
+              v-model="editConfig[f.key]"
+              multiple
+              filterable
+              collapse-tags
+              clearable
+              placeholder="搜索并选择歌单(可多选)"
+              style="width: 100%"
+            >
+              <el-option v-for="o in playlistOptions" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
             <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
             <span v-if="f.help" class="field-hint">{{ f.help }}</span>
           </el-form-item>
@@ -444,6 +457,24 @@ function parseConfig(plugin: any) {
 
 /** Config fields rendered in the dialog — driven by the plugin manifest. */
 const configFields = computed<any[]>(() => parseManifest(editing.value).configSchema || []);
+
+// ---- playlist-multi(参考歌单多选):歌单选项(本地 + 平台导入),打开详情弹窗时懒加载 ----
+const allPlaylists = ref<any[]>([]);
+const playlistOptions = computed(() =>
+  allPlaylists.value.map((p: any) => ({
+    value: p.id,
+    label: p.sourcePlatform ? `[${p.sourcePlatform}] ${p.name}` : p.name,
+  })),
+);
+async function loadPlaylistOptions() {
+  if (allPlaylists.value.length) return;
+  try {
+    const res = await api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 200 } });
+    allPlaylists.value = res.data.items || [];
+  } catch {
+    allPlaylists.value = [];
+  }
+}
 
 /** Whether the plugin declares the web-rotation capability (shows the purge button). */
 const hasWebRotation = computed<boolean>(() =>
@@ -747,13 +778,15 @@ function editPlugin(plugin: any) {
     let v = cfg[f.key];
     if (v === undefined) v = f.default;
     if (v === undefined) {
-      if (f.type === "multiselect" || f.type === "select") v = [];
+      if (f.type === "multiselect" || f.type === "select" || f.type === "playlist-multi") v = [];
       else if (f.type === "switch") v = false;
       else if (f.type === "number") v = 0;
       else v = "";
     }
     editConfig[f.key] = v;
   }
+  // 有 playlist-multi 字段时懒加载歌单选项(本地 + 平台导入)
+  if (schema.some((f: any) => f.type === "playlist-multi")) loadPlaylistOptions();
   testResult.value = null;
   showConfigDialog.value = true;
 }

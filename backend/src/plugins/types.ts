@@ -52,7 +52,8 @@ export type PluginCapability =
 export interface ConfigField {
   key: string;
   label: string;
-  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch";
+  // playlist-multi:参考歌单多选(本地 + 平台导入歌单,前端渲染为可搜索下拉多选)。
+  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi";
   required?: boolean;
   default?: unknown;
   options?: { label: string; value: string }[];
@@ -185,6 +186,8 @@ export interface LocalRecommendPlugin {
   manifest: PluginManifest;
   /** Return playable local song ids for today's daily playlist. */
   pickSongs(date?: Date): Promise<{ songIds: string[]; sourceUsers: number; fallback: boolean }>;
+  /** 独立生成「每日推荐」歌单(本地口味)。返回一行摘要,或 null(未生成)。 */
+  runDailyJob?(): Promise<string | null>;
 }
 
 /** Implemented by `lyrics` plugins that declare "lyricProvider".

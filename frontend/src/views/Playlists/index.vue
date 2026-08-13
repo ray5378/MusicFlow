@@ -31,32 +31,6 @@
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
     <div class="playlist-grid" v-loading="loading">
-      <!-- Favorites special playlist -->
-      <div
-        class="playlist-card"
-        @contextmenu="openContextMenu($event, favActions(), '我喜欢的音乐', '喜欢的音乐都在这里')"
-        v-longpress="() => openActionSheet(favActions(), '我喜欢的音乐', '喜欢的音乐都在这里')"
-      >
-        <div class="playlist-cover fav-cover mf-coverwrap" @click.stop="goFav()">
-          <MfIcon name="Heart" :filled="true" :size="48" />
-          <CoverPlay size="md" label="播放我喜欢的音乐" :action="() => playFavorites()" />
-        </div>
-        <div class="playlist-info" @click="goFav()">
-          <div class="playlist-name">我喜欢的音乐</div>
-          <div class="playlist-meta">喜欢的音乐都在这里</div>
-        </div>
-        <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleFavCommand(cmd)">
-          <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
-              <el-dropdown-item command="addToDaily" divided>
-                <MfIcon name="Wand2" />{{ favInPool ? '移出每日推荐池' : '加入每日推荐池' }}
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-      </div>
       <!-- User playlists -->
       <div
         class="playlist-card"
@@ -185,10 +159,6 @@ function open(pl: any) {
   if (menuGuard()) return;
   router.push(`/playlists/${pl.id}`);
 }
-function goFav() {
-  if (menuGuard()) return;
-  router.push("/favorites");
-}
 
 /** 歌单卡片的右键 / 长按操作集（复用页面已有的命令实现） */
 function cardActions(pl: any): MenuAction[] {
@@ -213,18 +183,6 @@ function cardActions(pl: any): MenuAction[] {
   return acts;
 }
 
-function favActions(): MenuAction[] {
-  return [
-    { label: "播放全部", icon: Play, onClick: () => playFavorites() },
-    { label: "查看收藏", icon: Folder, onClick: () => router.push("/favorites") },
-    { divider: true },
-    {
-      label: favInPool.value ? "移出每日推荐池" : "加入每日推荐池",
-      icon: Wand2,
-      onClick: () => toggleFavPool(),
-    },
-  ];
-}
 const playlists = ref<any[]>([]);
 const loading = ref(false);
 const searchQuery = ref("");
@@ -272,7 +230,6 @@ const nativeFileList = ref<any[]>([]);    // el-upload file list (for display/re
 const syncingId = ref("");
 // Recommend-pool membership state, so the dropdown item can toggle between
 // "加入每日推荐池" / "移出每日推荐池".
-const favInPool = ref(false);
 const poolPlaylistIds = ref<Set<string>>(new Set());
 
 // 已启用「歌单链接导入」插件覆盖的平台(来自插件清单,不再写死 QQ/网易云)。
@@ -367,8 +324,8 @@ async function loadPlaylists() {
   finally { loading.value = false; }
 }
 
-// Fetch the full recommend-pool list once, then derive both the playlist-id
-// set and the favorites membership flag from it (saves N+1 requests).
+// Fetch the full recommend-pool list once, then derive the playlist-id set
+// from it (saves N+1 requests).
 async function loadPoolStatus() {
   try {
     const res = await api.get("/rest/api/v1/recommend-pool");
@@ -376,10 +333,8 @@ async function loadPoolStatus() {
     poolPlaylistIds.value = new Set(
       pool.filter((p: any) => p.source_type === "playlist").map((p: any) => p.source_id)
     );
-    favInPool.value = pool.some((p: any) => p.source_type === "favorites");
   } catch {
     poolPlaylistIds.value = new Set();
-    favInPool.value = false;
   }
 }
 
@@ -582,21 +537,6 @@ async function toggleFavorite(pl: any) {
   }
 }
 
-// "我喜欢的音乐" 卡片菜单
-function handleFavCommand(cmd: string) {
-  if (cmd === "play") playFavorites();
-  else if (cmd === "addToDaily") toggleFavPool();
-}
-
-async function playFavorites() {
-  try {
-    const res = await api.get("/rest/getStarred?f=json");
-    const songs = res.data["subsonic-response"]?.starred?.song || [];
-    if (songs.length > 0) { const { usePlayerStore } = await import("@/stores/player"); usePlayerStore().playQueue(songs); }
-    else ElMessage.warning("我喜欢的音乐为空");
-  } catch { ElMessage.error("播放失败"); }
-}
-
 // Toggle a playlist in / out of the daily-recommend pool.
 async function togglePlaylistPool(pl: any) {
   try {
@@ -610,23 +550,6 @@ async function togglePlaylistPool(pl: any) {
       pl._inPool = true;
       poolPlaylistIds.value.add(pl.id);
       ElMessage.success(res.data.message || `已将「${pl.name}」加入每日推荐池`);
-    }
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
-  }
-}
-
-// Toggle "我喜欢的音乐" in / out of the daily-recommend pool.
-async function toggleFavPool() {
-  try {
-    if (favInPool.value) {
-      await api.delete("/rest/api/v1/recommend-pool/favorites");
-      favInPool.value = false;
-      ElMessage.success("已将「我喜欢的音乐」移出每日推荐池");
-    } else {
-      const res = await api.post("/rest/api/v1/recommend-pool/favorites");
-      favInPool.value = true;
-      ElMessage.success(res.data.message || "已将「我喜欢的音乐」加入每日推荐池");
     }
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "操作失败");
