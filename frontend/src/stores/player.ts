@@ -1018,6 +1018,10 @@ export const usePlayerStore = defineStore("player", () => {
             if (next) void switchPeer(next.peerId).catch(() => {});
             else currentPeerId.value = localPeerId.value;
           }
+          // 回收离线设备残留的 RemoteState(pollTimer 2s + tickTimer 250ms),
+          // 与 castClearQueue/stopCast 同款清理,避免定时器永久空转与状态泄漏。
+          // 设备重新上线/再次投屏时 ensureRemoteState 自动重建,无需保留。
+          removeRemoteState(p.peerId);
           break;
         }
         case "peer_queue_changed": {
