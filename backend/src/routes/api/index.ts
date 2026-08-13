@@ -851,9 +851,11 @@ apiRoutes.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: fa
 // A(按需)/B(落库)/C(批量补全) + 独立选源(providerId)。设置存全局 settings 表:
 // 行为归核心、UI 按能力挂载(lyricProvider/coverProvider 插件配置页),与具体
 // 插件解耦——换插件设置不变,选中插件被禁用/卸载自动回退全部启用 provider。
-const setLyricsCoversSettings = async (c: Context, prefix: "lyrics" | "covers") => {
+const setLyricsCoversSettings = async (c: Context, prefix: "lyrics" | "cover") => {
   const body = await c.req.json().catch(() => ({}));
+  // providerId: 字符串直接存;清空(el-select clearable → undefined/null)→ 存空串(=自动)。
   if (typeof body.providerId === "string") setSetting(`${prefix}.providerId`, body.providerId);
+  else if (body.providerId === undefined || body.providerId === null) setSetting(`${prefix}.providerId`, "");
   if (typeof body.onDemand === "boolean") setSetting(`${prefix}.onDemand`, body.onDemand ? "true" : "false");
   if (typeof body.persist === "boolean") setSetting(`${prefix}.persist`, body.persist ? "true" : "false");
   return c.json({ success: true });
@@ -871,7 +873,9 @@ apiRoutes.get("/v1/covers/settings", adminMiddleware, (c) => c.json({
   onDemand: getSettingBool("cover.onDemand", true),
   persist: getSettingBool("cover.persist", true),
 }));
-apiRoutes.put("/v1/covers/settings", adminMiddleware, (c) => setLyricsCoversSettings(c, "covers"));
+// 注意:封面的全局设置键前缀是 `cover.*`(与 providers.ts / covers.ts / GET 一致),
+// 这里必须传 "cover" 而非字面的 "covers",否则写入 covers.* 而无人读取,等同未落库。
+apiRoutes.put("/v1/covers/settings", adminMiddleware, (c) => setLyricsCoversSettings(c, "cover"));
 
 // 手动批量补全(节流执行,后台运行;同种任务在跑则返回 running=true)
 apiRoutes.post("/v1/lyrics/backfill", adminMiddleware, (c) => c.json(startBackfill("lyrics")));
