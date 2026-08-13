@@ -4,24 +4,11 @@
 
 > **北向目标**：V2 完整实现 MusicFlow 的功能与逻辑，只是解耦成插件版——是 HA 主链路（加载项 + 集成 + 卡片）的新内核。
 
-## 当前稳定版本配套（推荐组合）
-
-> 以下组件需**配套使用**，版本号对齐才能正常工作。服务端升级后，请在 HACS 同步更新集成与卡片到对应版本。
-
-| 组件 | 版本 | 仓库 |
-|---|---|---|
-| 服务端（本仓库） | **v1.7.4** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
-| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.7.4**（镜像 musicflow-v2:1.7.4） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
-| HA 集成 [hass-musicflow](https://github.com/ray5378/hass-musicflow) | **v1.3.7** | [ray5378/hass-musicflow](https://github.com/ray5378/hass-musicflow) |
-| HA 卡片 [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | **v1.6.51** | [ray5378/hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) |
-
-各仓库的发版（GitHub Release）说明与镜像构建见各自仓库。
-
 ## 镜像
 
 打 `v*` tag 时 CI 自动构建到（仅 **linux/amd64**）：
 
-- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.7.4`）
+- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.7.7`）
 - `ghcr.io/ray5378/musicflow-v2:latest`
 
 > **架构说明**：当前镜像仅提供 **linux/amd64**（x86_64）。arm64 / ARM 设备（如部分 ARM 架构 NAS）暂时无法运行，后续视 GitHub ARM runner 可用性再补多架构（账号暂无 ARM runner，与 V1 一致）。
@@ -132,7 +119,7 @@ docker run -d --name musicflow --restart unless-stopped \
 
 ## Home Assistant 接入
 
-MusicFlow 提供三个配套仓库，构成完整的 Home Assistant 生态（**版本需与上方「稳定版本配套」对齐**）：
+MusicFlow 提供三个配套仓库，构成完整的 Home Assistant 生态（各仓库发版说明与镜像构建见各自仓库）：
 
 | 仓库 | 类型 | 作用 |
 |---|---|---|
