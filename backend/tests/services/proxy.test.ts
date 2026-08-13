@@ -32,7 +32,14 @@ describe("normalizeProxyUrl", () => {
   it("拒绝无端口", () => {
     expect(normalizeProxyUrl("http://192.168.1.10")).toBe("");
   });
-  it("拒绝非 http(s) 协议与乱码", () => {
+  it("接受 socks5:// 并去尾斜杠", () => {
+    expect(normalizeProxyUrl("socks5://127.0.0.1:1080/")).toBe("socks5://127.0.0.1:1080");
+  });
+  it("接受 socks:// 与 socks4://", () => {
+    expect(normalizeProxyUrl("socks://192.168.1.10:1080")).toBe("socks://192.168.1.10:1080");
+    expect(normalizeProxyUrl("socks4://proxy:1081")).toBe("socks4://proxy:1081");
+  });
+  it("拒绝非 http(s)/socks 协议与乱码", () => {
     expect(normalizeProxyUrl("ftp://x:21")).toBe("");
     expect(normalizeProxyUrl("not a url")).toBe("");
   });

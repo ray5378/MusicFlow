@@ -25,9 +25,9 @@
         <div class="setting-value"><el-switch v-model="proxyEnabled" /></div>
       </div>
       <div v-if="proxyEnabled" class="setting-item">
-        <div class="setting-label"><div class="title">代理地址</div><div class="desc">格式：http://ip:port 或 https://ip:port，例如 http://192.168.1.10:7890</div></div>
+        <div class="setting-label"><div class="title">代理地址</div><div class="desc">格式：http://ip:port、https://ip:port 或 socks5://ip:port，例如 http://192.168.1.10:7890 或 socks5://127.0.0.1:1080</div></div>
         <div class="setting-value proxy-actions">
-          <el-input v-model="proxyUrl" placeholder="http://ip:port" class="proxy-input" clearable />
+          <el-input v-model="proxyUrl" placeholder="http://ip:port 或 socks5://ip:port" class="proxy-input" clearable />
           <el-button :loading="proxyTesting" @click="testProxy">测试连接</el-button>
           <el-button type="primary" :loading="proxySaving" @click="saveProxy">保存</el-button>
         </div>
@@ -84,16 +84,16 @@ async function saveProxy() {
   }
 }
 
-// 测试连接：先保存当前输入（让后端用最新配置测），再打 GitHub raw 官方 registry。
+// 测试连接：先保存当前输入（让后端用最新配置测），再验证代理通道能否出网。
 async function testProxy() {
   proxyTesting.value = true;
   try {
     await api.put("/rest/api/v1/proxy", { enabled: proxyEnabled.value, url: proxyUrl.value });
     const res = await api.post("/rest/api/v1/proxy/test", {});
-    if (res.data?.success) ElMessage.success(`代理可用（HTTP ${res.data.status}）`);
-    else ElMessage.error(res.data?.error || "代理不可用");
+    if (res.data?.success) ElMessage.success(res.data?.message || "代理可用");
+    else ElMessage.error(res.data?.message || res.data?.error || "代理不可用");
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "测试失败");
+    ElMessage.error(e.response?.data?.message || e.response?.data?.error || "测试失败");
   } finally {
     proxyTesting.value = false;
   }

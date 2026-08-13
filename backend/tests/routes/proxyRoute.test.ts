@@ -60,6 +60,6 @@ describe("GET/PUT/POST /v1/proxy (admin)", () => {
     await req("PUT", "", { enabled: false, url: "" });
     const { body } = await req("POST", "/test", {});
     expect(body.success).toBe(false);
-    expect(body.error).toContain("未启用");
+    expect(body.message).toContain("未启用");
   });
 });

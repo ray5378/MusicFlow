@@ -14,7 +14,7 @@ import { dailyRecommendApi, dailyRecommendTag, dailyRecommendHomeCount, playlist
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
-import { getProxyConfig, normalizeProxyUrl, proxyFetch } from "../../services/proxy.js";
+import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
 import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
@@ -118,10 +118,9 @@ apiRoutes.get("/v1/home/playlist-count", (c) => {
 });
 
 // ==================== 网络代理(管理员,仅插件拉取链路) ====================
-// 系统设置里的「网络代理」:http://ip:port 或 https://ip:port,用于插件市场
-// 拉取 GitHub 等源(registry / plugin.json / 安装包)。仅影响插件拉取,其它后端网络直连。
-const PROXY_TEST_URL = "https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json";
-
+// 系统设置里的「网络代理」:http://ip:port、https://ip:port 或 socks5://ip:port,
+// 用于插件市场拉取 GitHub 等源(registry / plugin.json / 安装包)。仅影响插件拉取,
+// 其它后端网络直连。
 apiRoutes.get("/v1/proxy", adminMiddleware, (c) => {
   const { enabled, url } = getProxyConfig();
   return c.json({ success: true, enabled, url });
@@ -131,22 +130,18 @@ apiRoutes.put("/v1/proxy", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const enabled = !!body.enabled;
   const url = normalizeProxyUrl(String(body.url || ""));
-  if (enabled && !url) return c.json({ error: "代理地址格式应为 http://ip:port 或 https://ip:port" }, 400);
+  if (enabled && !url)
+    return c.json({ error: "代理地址格式应为 http://ip:port、https://ip:port 或 socks5://ip:port" }, 400);
   setSetting("proxy_enabled", enabled ? "true" : "false");
   setSetting("proxy_url", url);
   return c.json({ success: true, enabled, url });
 });
 
-// 测试连接:用当前代理配置请求 GitHub raw 官方 registry,验证代理可用。
+// 测试连接:验证代理通道能否出网(解耦单一 GitHub 域名,区分「代理坏」与「仅 GitHub 被挡」)。
+// 返回 { success, message, githubReachable, probes }。
 apiRoutes.post("/v1/proxy/test", adminMiddleware, async (c) => {
-  const { enabled, url } = getProxyConfig();
-  if (!enabled || !url) return c.json({ success: false, error: "代理未启用或地址未配置" });
-  try {
-    const r = await proxyFetch(PROXY_TEST_URL, { signal: AbortSignal.timeout(12000) });
-    return c.json({ success: r.ok, status: r.status, url: PROXY_TEST_URL });
-  } catch (e: any) {
-    return c.json({ success: false, error: String(e?.message || e), url: PROXY_TEST_URL });
-  }
+  const result = await testProxyConnection();
+  return c.json(result);
 });
 
 // ==================== Users ====================
