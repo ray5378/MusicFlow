@@ -148,6 +148,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
   em.on("media_changed", onMedia);
   em.on("device_list_changed", onDeviceList);
   qm.on("queue_changed", onQueue);
+  qm.on("media_changed", onMedia);
   pm.on("peer_registered", onPeerRegistered);
   pm.on("peer_available", onPeerAvailable);
   pm.on("peer_unavailable", onPeerUnavailable);
@@ -161,6 +162,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
   unsubs.push(() => em.off("media_changed", onMedia));
   unsubs.push(() => em.off("device_list_changed", onDeviceList));
   unsubs.push(() => qm.off("queue_changed", onQueue));
+  unsubs.push(() => qm.off("media_changed", onMedia));
   unsubs.push(() => pm.off("peer_registered", onPeerRegistered));
   unsubs.push(() => pm.off("peer_available", onPeerAvailable));
   unsubs.push(() => pm.off("peer_unavailable", onPeerUnavailable));

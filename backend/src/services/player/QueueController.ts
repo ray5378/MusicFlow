@@ -427,6 +427,9 @@ export class QueueController extends EventEmitter {
     }
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+    // 媒体已清空:显式推送,让所有客户端(HA 卡片/Web)立即清掉封面/歌词/进度,
+    // 不必等下一轮 status 轮询自愈。
+    this.emit("media_changed", playerId, undefined);
   }
 
   snapshot(playerId: string): QueueSnapshot {
