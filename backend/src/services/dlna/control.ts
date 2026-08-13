@@ -597,6 +597,8 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
     coverArt: opts.coverArt,
   };
   getEventManager().emit("media_changed", opts.deviceId, rt.currentMedia);
+  // 起播信号:让 HA 卡片等客户端立即强制拉取最新状态(不依赖 GENA 事件/轮询周期)。
+  getEventManager().emit("player_refresh", opts.deviceId, { reason: "play_started" });
   // 新歌开始即清空位置基线(与上面 songId 检测双保险),确保 position 从 0 起算,
   // 不会把上一首的进度带进新歌。
   positionEstimates.delete(opts.deviceId);

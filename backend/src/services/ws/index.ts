@@ -7,6 +7,7 @@
 //   { type: "snapshot", devices: { <deviceId>: <DeviceStatus+media+name>, ... } }
 //   { type: "player_state_changed", device_id, state: <DeviceEventState> }
 //   { type: "media_changed",        device_id, media: <CurrentMedia> }
+//   { type: "player_refresh",       device_id, reason: <string> }  // 起播信号,客户端应强制拉取最新状态
 //   { type: "queue_changed",        device_id, queue: <QueueSnapshot> }
 //   { type: "device_list_changed",  deviceCount: number }
 //
@@ -125,6 +126,9 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const onMedia = (deviceId: string, media: any) => {
     send(ws, { type: "media_changed", device_id: deviceId, media });
   };
+  const onPlayerRefresh = (deviceId: string, info: any) => {
+    send(ws, { type: "player_refresh", device_id: deviceId, reason: info?.reason });
+  };
   const onQueue = (deviceId: string, queue: any) => {
     send(ws, { type: "queue_changed", device_id: deviceId, queue: summarizeQueue(queue) });
   };
@@ -146,6 +150,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
 
   em.on("state_changed", onState);
   em.on("media_changed", onMedia);
+  em.on("player_refresh", onPlayerRefresh);
   em.on("device_list_changed", onDeviceList);
   qm.on("queue_changed", onQueue);
   qm.on("media_changed", onMedia);
@@ -160,6 +165,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
 
   unsubs.push(() => em.off("state_changed", onState));
   unsubs.push(() => em.off("media_changed", onMedia));
+  unsubs.push(() => em.off("player_refresh", onPlayerRefresh));
   unsubs.push(() => em.off("device_list_changed", onDeviceList));
   unsubs.push(() => qm.off("queue_changed", onQueue));
   unsubs.push(() => qm.off("media_changed", onMedia));
