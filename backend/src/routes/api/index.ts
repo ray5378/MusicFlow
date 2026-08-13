@@ -14,6 +14,7 @@ import { dailyRecommendApi, dailyRecommendTag, dailyRecommendHomeCount, playlist
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
+import { getProxyConfig, normalizeProxyUrl, proxyFetch } from "../../services/proxy.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
 import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
@@ -45,7 +46,7 @@ import {
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
-import { unregisterPlugin, firstEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
+import { unregisterPlugin, firstEnabledByCapability, getPluginConfig, getPluginManifest } from "../../plugins/registry.js";
 import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
@@ -114,6 +115,38 @@ apiRoutes.get("/v1/recommend", async (c) => {
 // 由每日推荐插件的 homeCount 配置控制(默认 8),核心经能力门面读取,不写死插件名。
 apiRoutes.get("/v1/home/playlist-count", (c) => {
   return c.json({ success: true, count: dailyRecommendHomeCount() });
+});
+
+// ==================== 网络代理(管理员,仅插件拉取链路) ====================
+// 系统设置里的「网络代理」:http://ip:port 或 https://ip:port,用于插件市场
+// 拉取 GitHub 等源(registry / plugin.json / 安装包)。仅影响插件拉取,其它后端网络直连。
+const PROXY_TEST_URL = "https://raw.githubusercontent.com/ray5378/MusicFlow-plugins/master/registry.json";
+
+apiRoutes.get("/v1/proxy", adminMiddleware, (c) => {
+  const { enabled, url } = getProxyConfig();
+  return c.json({ success: true, enabled, url });
+});
+
+apiRoutes.put("/v1/proxy", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const enabled = !!body.enabled;
+  const url = normalizeProxyUrl(String(body.url || ""));
+  if (enabled && !url) return c.json({ error: "代理地址格式应为 http://ip:port 或 https://ip:port" }, 400);
+  setSetting("proxy_enabled", enabled ? "true" : "false");
+  setSetting("proxy_url", url);
+  return c.json({ success: true, enabled, url });
+});
+
+// 测试连接:用当前代理配置请求 GitHub raw 官方 registry,验证代理可用。
+apiRoutes.post("/v1/proxy/test", adminMiddleware, async (c) => {
+  const { enabled, url } = getProxyConfig();
+  if (!enabled || !url) return c.json({ success: false, error: "代理未启用或地址未配置" });
+  try {
+    const r = await proxyFetch(PROXY_TEST_URL, { signal: AbortSignal.timeout(12000) });
+    return c.json({ success: r.ok, status: r.status, url: PROXY_TEST_URL });
+  } catch (e: any) {
+    return c.json({ success: false, error: String(e?.message || e), url: PROXY_TEST_URL });
+  }
 });
 
 // ==================== Users ====================
@@ -440,7 +473,19 @@ apiRoutes.get("/v1/plugins", adminMiddleware, (c) => {
       r.enabled = 1;
     }
   }
-  return c.json(rows.map((r) => ({ ...r, builtin: isBuiltinRow(r) })));
+  return c.json(rows.map((r) => {
+    const builtin = isBuiltinRow(r);
+    // manifest/version 以注册表内存为准:DB 可能是升级前的旧快照(缺新增配置项
+    // 或版本停留旧值),这里统一覆盖返回;已卸载/不再注册的插件行回退 DB 数据。
+    let manifest = r.manifest;
+    let version = r.version;
+    const m = getPluginManifest(r.name);
+    if (m) {
+      manifest = JSON.stringify(m);
+      version = m.version;
+    }
+    return { ...r, manifest, version, builtin };
+  }));
 });
 apiRoutes.post("/v1/plugins", adminMiddleware, async (c) => { const body = await c.req.json(); const id = uuidv4(); db.insert(plugins).values({ id, name: body.name, version: body.version || "", description: body.description || "", manifest: JSON.stringify(body.manifest || {}), enabled: body.enabled ? 1 : 0, config: JSON.stringify(body.config || {}) }).run(); return c.json({ id }); });
 apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {

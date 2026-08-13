@@ -1,6 +1,6 @@
 {
   "name": "musicflow-v2-backend",
-  "version": "1.7.14",
+  "version": "1.7.15",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -24,6 +24,7 @@
     "music-metadata": "^11.14.0",
     "quickjs-emscripten": "^0.32.0",
     "sharp": "^0.33.5",
+    "undici": "^8.10.0",
     "uuid": "^9.0.0",
     "ws": "^8.18.0"
   },

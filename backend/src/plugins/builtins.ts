@@ -16,6 +16,7 @@
 
 import { db, onDatabaseReady } from "../db/index.js";
 import { plugins } from "../db/schema.js";
+import { eq } from "drizzle-orm";
 import type { PluginManifest } from "./types.js";
 import { registerPlugin, listRegistered } from "./registry.js";
 
@@ -120,15 +121,32 @@ function defaultConfigFor(manifest: PluginManifest): Record<string, any> {
  *  MUST run after the schema exists (i.e. after `initDatabase()`).
  *  Manifest-driven: adding a built-in plugin needs no core change and no
  *  hardcoded plugin name. Idempotent — existing rows are left untouched so user
- *  config/enabled state survives restarts. */
+ *  config/enabled state survives restarts.
+ *
+ *  升级同步：已存在的**内置**插件行若 DB manifest 是旧快照（例如升级前播种的
+ *  configSchema 为空、新增了配置项），刷新 manifest + version 列，让升级部署
+ *  对新增配置项立即可见；用户 enabled / config / description 一律保留。
+ *  外置插件的行不在此刷新（其 manifest 以安装包为准）。 */
 export function seedPluginRows(): number {
   const now = new Date().toISOString();
   let inserted = 0;
   const existing = new Set(
     (db.select({ name: plugins.name }).from(plugins).all() as any[]).map((r: any) => r.name),
   );
+  const builtinIds = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
   for (const { manifest } of listRegistered()) {
-    if (existing.has(manifest.id)) continue;
+    if (existing.has(manifest.id)) {
+      if (builtinIds.has(manifest.id)) {
+        const row = db.select().from(plugins).where(eq(plugins.name, manifest.id)).get() as any;
+        if (row && row.manifest !== JSON.stringify(manifest)) {
+          db.update(plugins)
+            .set({ manifest: JSON.stringify(manifest), version: manifest.version, updatedAt: now })
+            .where(eq(plugins.name, manifest.id))
+            .run();
+        }
+      }
+      continue;
+    }
     db.insert(plugins)
       .values({
         id: manifest.id,

@@ -26,10 +26,11 @@ import { eq } from "drizzle-orm";
 import { promisify } from "util";
 import { getDataDir } from "../utils/env.js";
 import { db } from "../db/index.js";
-import { pluginRegistries, settings } from "../db/schema.js";
+import { pluginRegistries, settings, plugins } from "../db/schema.js";
 import { discoverExternalPlugins } from "./discovery.js";
 import { validateManifest } from "./discovery.js";
 import type { PluginManifest } from "./types.js";
+import { proxyFetch } from "../services/proxy.js";
 
 const execFileAsync = promisify(execFile);
 const APP_VERSION = process.env.APP_VERSION || "dev";
@@ -103,11 +104,13 @@ const OFFICIAL_REGISTRY_URL =
   process.env.MUSICFLOW_OFFICIAL_REGISTRY ??
   "https://gitee.com/ray5378/music-flow-plugins/raw/master/registry.json";
 
-// ==================== 拉取(直连,无镜像回退) ====================
+// ==================== 拉取(直连,无镜像回退;可走系统代理) ====================
 // 2026-08-12 起取消 GitHub→Gitee 镜像回退:插件包已改 raw 仓库文件分发,
 // 直连失败直接抛错,不再猜测镜像地址(避免镜像 404 掩盖真实问题)。
+// 2026-08-13 起支持系统设置里的「网络代理」:启用后 registry/plugin.json/安装包
+// 全部经 proxyFetch 走代理(undici dispatcher,仅本链路,不影响其它后端网络)。
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  const res = await proxyFetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res;
 }
@@ -288,6 +291,25 @@ export async function listMarketplace(): Promise<RegistryEntry[]> {
   return out;
 }
 
+/** 安装/升级外置插件后同步 DB 行：已存在（升级）则刷新 manifest/version/
+ *  description（保留用户 enabled/config）。修复"升级提示成功但插件页版本不变"。
+ *  注意：**不改 name 列**——plugins.name 语义 = 插件 id（seed 播种时
+ *  name=manifest.id），getPluginConfig/getSourcePluginConfig 等均按 name=id 查询，
+ *  误改会导致升级后插件配置/启用状态全部失效。Exported for unit testing. */
+export function syncPluginRowAfterInstall(manifest: PluginManifest): void {
+  const existing = db.select().from(plugins).where(eq(plugins.name, manifest.id)).get() as any;
+  if (!existing) return;
+  db.update(plugins)
+    .set({
+      manifest: JSON.stringify(manifest),
+      version: manifest.version,
+      description: manifest.description || existing.description,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(plugins.name, manifest.id))
+    .run();
+}
+
 /** Download + extract a plugin archive into data/plugins/<id>/ and (re)discover
  *  it. Uses the OS `tar` (handles both .zip and .tgz on modern systems). */
 export async function installPlugin(downloadUrl: string): Promise<{ id: string; name: string }> {
@@ -326,7 +348,10 @@ export async function installPlugin(downloadUrl: string): Promise<{ id: string; 
     }
 
     // Register + seed immediately (no restart needed).
-    await discoverExternalPlugins(APP_VERSION);
+    // 升级（同 id 重装）必须 reload：dispose 旧沙箱、覆盖注册，并同步 DB 行版本，
+    // 否则内存/DB 都停留在旧版本（此前"升级成功但插件页仍显示旧版本"的根因）。
+    syncPluginRowAfterInstall(manifest);
+    await discoverExternalPlugins(APP_VERSION, undefined, { reload: true });
     return { id: manifest.id, name: manifest.name };
   } catch (e) {
     // 把真实失败原因打进服务端日志(响应体只有 error message,容器日志此前看不到原因)。
