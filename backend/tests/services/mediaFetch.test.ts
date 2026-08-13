@@ -46,6 +46,16 @@ function disablePlugin(id: string) {
   db.update(plugins).set({ enabled: 0 }).where(eq(plugins.id, id)).run();
 }
 
+/** 禁用所有声明某能力的插件(测试隔离用,避免残留插件污染后续用例)。 */
+function disableAllByCap(cap: string) {
+  sqlite.prepare(`UPDATE plugins SET enabled = 0 WHERE manifest LIKE '%"${cap}"%'`).run();
+}
+
+/** 启用所有声明某能力的插件(配合 disableAllByCap 恢复)。 */
+function enableAllByCap(cap: string) {
+  sqlite.prepare(`UPDATE plugins SET enabled = 1 WHERE manifest LIKE '%"${cap}"%'`).run();
+}
+
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let coverServer: http.Server | null = null;
@@ -221,10 +231,30 @@ describe("lyrics:本地歌曲缺歌词 → provider 回退 + persist 落库为�
     setSetting("lyrics.onDemand", "true");
   });
 
+  it("只用 A(B 关):能拿到歌词但 DB 不写,再次请求仍实时查插件(不落库)", async () => {
+    let calls = 0;
+    enablePlugin("fake-lyrics-aonly", ["lyricProvider"], {
+      searchLyrics: async () => { calls++; return { lrc: "[00:00.00]a-only lyric" }; },
+    });
+    setSetting("lyrics.onDemand", "true");
+    setSetting("lyrics.persist", "false"); // B 关 = 只用 A
+    setSetting("lyrics.providerId", "fake-lyrics-aonly");
+    db.insert(songs).values({
+      id: "lg-aonly", title: "A Only", artist: "A", path: "l:src:/tmp/aonly.mp3",
+      type: "local", suffix: "mp3",
+    }).run();
+    const lrc = await fetchLrcForSong({ id: "lg-aonly", path: "l:src:/tmp/aonly.mp3", title: "A Only", artist: "A", type: "local" });
+    expect(lrc).toContain("a-only lyric");
+    // B 关:DB 不落库
+    const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get("lg-aonly") as any;
+    expect(row.lyrics).toBeNull();
+    expect(readLyricFile("lg-aonly.lrc")).toBeNull();
+    setSetting("lyrics.providerId", "");
+  });
+
   it("插件未启用(hasLyricProvider=false)时不获取 —— 1.7.4 用户失败根因场景", async () => {
     // 禁用所有 lyricProvider 插件 → ③ 分支直接跳过
-    disablePlugin("fake-lyrics");
-    disablePlugin("fake-lyrics-2");
+    disableAllByCap("lyricProvider");
     setSetting("lyrics.onDemand", "true");
     setSetting("lyrics.persist", "true");
     db.insert(songs).values({
@@ -235,10 +265,8 @@ describe("lyrics:本地歌曲缺歌词 → provider 回退 + persist 落库为�
     expect(lrc).toBeNull();
     const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get("lg4") as any;
     expect(row.lyrics).toBeNull();
-    // 恢复启用
-    enablePlugin("fake-lyrics", ["lyricProvider"], {
-      searchLyrics: async () => ({ lrc: "[00:00.00]hello from provider" }),
-    });
+    // 恢复全部 lyricProvider 插件(测试隔离)
+    enableAllByCap("lyricProvider");
   });
 
   it("searchLyrics 独立选源:设置 providerId 后只查选中插件", async () => {
@@ -380,6 +408,25 @@ describe("covers:按需下载 + persist + 防风暴", () => {
     expect(ref).toBeNull();
     expect(calls).toBe(0);
     setSetting("cover.onDemand", "true");
+    setSetting("cover.providerId", "");
+  });
+
+  it("只用 A(B 关):能下载封面文件返回 ref,但 cover_art 不落库", async () => {
+    setSetting("cover.onDemand", "true");
+    setSetting("cover.persist", "false"); // B 关 = 只用 A
+    setSetting("cover.providerId", "fake-cover");
+    clearCoverAttempt("cv6");
+    db.insert(songs).values({
+      id: "cv6", title: "Cover A Only", artist: "A", path: "l:src:/tmp/ao.mp3",
+      type: "local", suffix: "mp3",
+    }).run();
+    const ref = await fetchCoverForSong({ id: "cv6", title: "Cover A Only", artist: "A" });
+    expect(ref).toBe("cv6.jpg");
+    expect(resolveCoverFile("cv6.jpg")).not.toBeNull(); // 文件已缓存,本次即可显示
+    // B 关:cover_art 不写库
+    const row = sqlite.prepare("SELECT cover_art FROM songs WHERE id = ?").get("cv6") as any;
+    expect(row.cover_art).toBeNull();
+    setSetting("cover.persist", "true");
     setSetting("cover.providerId", "");
   });
 });
