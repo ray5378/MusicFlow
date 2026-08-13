@@ -160,6 +160,8 @@ export interface RecommenderPlugin {
   addToRecommendPool?(sourceType: string, sourceId: string, sourceName: string, userId: string): boolean;
   removeFromRecommendPool?(sourceType: string, sourceId: string): boolean;
   isInRecommendPool?(sourceType: string, sourceId: string): boolean;
+  /** 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐,由插件配置 homeCount 控制)。 */
+  getHomeCount?(): number;
 }
 
 /** Implemented by `sync` plugins that declare "playlistSync". Called by the

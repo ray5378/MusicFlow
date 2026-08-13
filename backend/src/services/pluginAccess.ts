@@ -13,6 +13,13 @@ export function dailyRecommendApi(): any {
   return getEnabledByCapability("dailyPlaylist")[0]?.impl;
 }
 
+/** 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐),由每日推荐插件配置 homeCount 控制。 */
+export function dailyRecommendHomeCount(): number {
+  const api = dailyRecommendApi();
+  const n = api && typeof api.getHomeCount === "function" ? api.getHomeCount() : 0;
+  return Number.isFinite(n) && n >= 1 ? Math.min(Math.trunc(n), 24) : 8;
+}
+
 /** 歌单同步能力(playlistSync):按歌单同步/重建/导出等参数化方法。 */
 export function playlistSyncApi(): any {
   return getEnabledByCapability("playlistSync")[0]?.impl;

@@ -10,7 +10,7 @@ import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
-import { dailyRecommendApi, dailyRecommendTag, playlistSyncApi } from "../../services/pluginAccess.js";
+import { dailyRecommendApi, dailyRecommendTag, dailyRecommendHomeCount, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
@@ -108,6 +108,12 @@ apiRoutes.get("/v1/recommend", async (c) => {
     console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
     return c.json({ success: true, channels: [], providerId, error: String(e?.message || e) });
   }
+});
+
+// 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐)。
+// 由每日推荐插件的 homeCount 配置控制(默认 8),核心经能力门面读取,不写死插件名。
+apiRoutes.get("/v1/home/playlist-count", (c) => {
+  return c.json({ success: true, count: dailyRecommendHomeCount() });
 });
 
 // ==================== Users ====================

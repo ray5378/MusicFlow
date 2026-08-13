@@ -48,8 +48,8 @@
           </div>
         </div>
 
-        <!-- 占位（无数据时） -->
-        <div v-for="n in placeholderCount(featured, sidePlaylists, 8)" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
+        <!-- 占位（无数据时，按 homeCount 补齐） -->
+        <div v-for="n in placeholderCount(featured, sidePlaylists, homeCount)" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
           <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
           <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
         </div>
@@ -119,6 +119,8 @@ const recommendChannels = ref<any[]>([]);
 const recommendProviderId = ref("");
 const recommendError = ref(false);
 const importingId = ref("");
+// 首页顶部展示张数(含今日推荐),由每日推荐插件配置 homeCount 控制(默认 8)。
+const homeCount = ref(8);
 
 function cover(id: string) {
   return coverUrl(id);
@@ -141,14 +143,14 @@ async function playPl(pl: any) {
 const featured = computed(() =>
   playlists.value.find((p) => p.name === "今日推荐" && (p.songCount || 0) > 30) || null
 );
-// 并排随机：从全部歌单里随机抽 7 张（排除今日推荐大卡；只抽音乐 ≥30 首的歌单），
-// 与今日推荐合并成 8 张等大卡片展示。桌面 4 列 × 2 行；移动端由 CSS 截到 2 列。
+// 并排随机：从全部歌单里随机抽 homeCount-1 张（排除今日推荐大卡；只抽音乐 ≥30 首的歌单），
+// 与今日推荐合并成 homeCount 张等大卡片展示（默认 8，桌面 4 列 × 2 行）。
 const sidePlaylists = computed(() => {
   const pool = playlists.value.filter(
     (p) => p.id !== (featured.value && featured.value.id) && (p.songCount || 0) >= 30
   );
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 7);
+  return shuffled.slice(0, Math.max(1, homeCount.value) - 1);
 });
 
 // 各平台精选：直接渲染 recommend 能力插件的输出（每个 channel = 一个平台分区）。
@@ -209,6 +211,16 @@ async function loadPlaylists() {
   }
 }
 
+async function loadHomeConfig() {
+  try {
+    const res = await api.get("/rest/api/v1/home/playlist-count");
+    const n = parseInt(String(res.data?.count), 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 24) homeCount.value = n;
+  } catch {
+    /* 保持默认 8 */
+  }
+}
+
 async function loadRecommend() {
   try {
     const res = await api.get("/rest/api/v1/recommend");
@@ -224,7 +236,7 @@ async function loadRecommend() {
 
 onMounted(async () => {
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadRecommend()]);
+  await Promise.all([loadPlaylists(), loadRecommend(), loadHomeConfig()]);
   loading.value = false;
 });
 </script>

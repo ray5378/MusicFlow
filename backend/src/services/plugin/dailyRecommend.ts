@@ -69,6 +69,23 @@ export const FIXED_TODAY_ID = "pl-daily-today";
 
 const NAME_TODAY = "今日推荐";
 
+// 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐),由本插件配置 homeCount 控制。
+export const DEFAULT_HOME_COUNT = 8;
+export const MAX_HOME_COUNT = 24;
+
+/** 读本插件配置里的首页随机歌单数(1~24,默认 8)。非法/未配置时回落默认值。 */
+export function getDailyHomeCount(): number {
+  try {
+    const row = sqlite.prepare("SELECT config FROM plugins WHERE name = ? AND enabled = 1").get(DAILY_RECOMMEND_PLUGIN_ID) as any;
+    const cfg = row?.config ? JSON.parse(row.config) : {};
+    const raw = parseInt(String(cfg.homeCount), 10);
+    if (Number.isFinite(raw) && raw >= 1) return Math.min(raw, MAX_HOME_COUNT);
+    return DEFAULT_HOME_COUNT;
+  } catch {
+    return DEFAULT_HOME_COUNT;
+  }
+}
+
 // How many random playable songs to pull from each user-pool member as
 // CANDIDATES (before the final pool-wide pick).
 const POOL_MEMBER_CANDIDATE_SIZE = 200;
@@ -673,7 +690,9 @@ export const dailyRecommendManifest: PluginManifest = {
   description: "每天生成「今日推荐」歌单:平台榜单候选 + 推荐池成员 + 本地曲库随机补充",
   capabilities: ["dailyPlaylist"],
   defaultEnabled: true,
-  configSchema: [],
+  configSchema: [
+    { key: "homeCount", label: "首页随机歌单数", type: "number", help: "首页顶部「今日推荐 + 随机歌单」共展示的歌单张数(含今日推荐,1~24,默认 8)" },
+  ],
   // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「今日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
   dailyTag: "每日推荐",
   documentation: `### 功能介绍
@@ -687,6 +706,7 @@ export const dailyRecommendManifest: PluginManifest = {
 
 ### 说明
 - 生成的歌单在首页「每日推荐」入口展示；
+- 配置项 \`homeCount\`：首页顶部「今日推荐 + 随机歌单」共展示的歌单张数（含今日推荐，1~24，默认 8）；
 - 停用本插件即关闭每日推荐，不影响其他 recommender；
 - 配合 \`local-recommend\` 插件：在线候选 + 本地口味组合成完整推荐。`,
 };
@@ -714,4 +734,5 @@ export const dailyRecommendPlugin: RecommenderPlugin = {
   isInRecommendPool(sourceType: string, sourceId: string): boolean {
     return isInRecommendPool(sourceType, sourceId);
   },
+  getHomeCount(): number { return getDailyHomeCount(); },
 };
