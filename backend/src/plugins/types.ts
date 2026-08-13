@@ -53,7 +53,8 @@ export interface ConfigField {
   key: string;
   label: string;
   // playlist-multi:参考歌单多选(本地 + 平台导入歌单,前端渲染为可搜索下拉多选)。
-  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi";
+  // candidate-list:推荐榜单列表(每项 {platform,url,name}),前端渲染为可增删替换的编辑行。
+  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list";
   required?: boolean;
   default?: unknown;
   options?: { label: string; value: string }[];
@@ -76,7 +77,7 @@ export interface PluginManifest {
    *  缺失时按插件返回的原始顺序。 */
   sourcePreference?: string[];
   /** recommender 插件专用:每日推荐歌单的标识(TAG),OpenSubsonic 等据此识别
-   *  「今日推荐」歌单(原核心直连 DAILY_TAG 常量,现已声明化)。 */
+   *  「每日推荐」歌单(原核心直连 DAILY_TAG 常量,现已声明化)。 */
   dailyTag?: string;
   /** Source plugins only: prefix used to tag daily-recommend imported playlists. */
   recommendPrefix?: string;
@@ -161,7 +162,7 @@ export interface RecommenderPlugin {
   addToRecommendPool?(sourceType: string, sourceId: string, sourceName: string, userId: string): boolean;
   removeFromRecommendPool?(sourceType: string, sourceId: string): boolean;
   isInRecommendPool?(sourceType: string, sourceId: string): boolean;
-  /** 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐,由插件配置 homeCount 控制)。 */
+  /** 首页顶部「每日推荐 + 本地推荐 + 随机歌单」展示张数(由插件配置 homeCount 控制)。 */
   getHomeCount?(): number;
 }
 

@@ -349,6 +349,26 @@
             >
               <el-option v-for="o in playlistOptions" :key="o.value" :label="o.label" :value="o.value" />
             </el-select>
+            <!-- candidate-list:推荐榜单(平台 + URL + 显示名)可增删替换,由 manifest configSchema 声明 -->
+            <div v-else-if="f.type === 'candidate-list'" class="candidate-list">
+              <div v-for="(item, idx) in (editConfig[f.key] || [])" :key="idx" class="candidate-row">
+                <el-select v-model="item.platform" style="width: 104px; flex: none">
+                  <el-option label="网易云" value="netease" />
+                  <el-option label="QQ音乐" value="qq" />
+                </el-select>
+                <el-input v-model="item.url" placeholder="榜单 URL" style="flex: 1; min-width: 0" />
+                <el-input v-model="item.name" placeholder="显示名(可选)" style="width: 150px; flex: none" />
+                <el-button
+                  circle
+                  text
+                  type="danger"
+                  :disabled="(editConfig[f.key] || []).length <= 1"
+                  title="删除该榜单"
+                  @click="removeCandidate(f.key, idx)"
+                >✕</el-button>
+              </div>
+              <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
+            </div>
             <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
             <span v-if="f.help" class="field-hint">{{ f.help }}</span>
           </el-form-item>
@@ -577,7 +597,7 @@ const CAP_DOCS: Record<string, string> = {
   webRotation: "定期清理过期的在线歌曲（每日推荐轮换）",
   playlistImport: "认领分享链接并解析成可导入的歌单",
   playlistFile: "认领上传的歌单文件并解析",
-  dailyPlaylist: "每天定时生成「今日推荐」歌单",
+  dailyPlaylist: "每天定时生成「每日推荐」歌单",
   localPlaylist: "基于播放历史与收藏口味生成本地推荐",
   playlistSync: "定期重新拉取已导入的远程歌单",
   autoMatch: "把歌单条目自动匹配到曲库或在线源",
@@ -783,12 +803,26 @@ function editPlugin(plugin: any) {
       else if (f.type === "number") v = 0;
       else v = "";
     }
+    // 数组型默认值(如 candidate-list 的预填榜单)深拷贝,避免编辑行时污染 manifest 默认对象。
+    if (Array.isArray(v)) v = JSON.parse(JSON.stringify(v));
     editConfig[f.key] = v;
   }
   // 有 playlist-multi 字段时懒加载歌单选项(本地 + 平台导入)
   if (schema.some((f: any) => f.type === "playlist-multi")) loadPlaylistOptions();
   testResult.value = null;
   showConfigDialog.value = true;
+}
+
+// candidate-list:新增一行空白榜单(默认网易云)
+function addCandidate(key: string) {
+  if (!Array.isArray(editConfig[key])) editConfig[key] = [];
+  editConfig[key].push({ platform: "netease", url: "", name: "" });
+}
+
+// candidate-list:删除指定行(至少保留 1 个,由按钮 disabled 兜底)
+function removeCandidate(key: string, idx: number) {
+  const arr = editConfig[key];
+  if (Array.isArray(arr) && arr.length > 1) arr.splice(idx, 1);
 }
 
 async function testSource() {
@@ -811,7 +845,27 @@ async function saveConfig(opts?: { silent?: boolean }) {
   saving.value = true;
   try {
     const cfg: any = {};
-    for (const f of configFields.value) cfg[f.key] = editConfig[f.key];
+    for (const f of configFields.value) {
+      let v = editConfig[f.key];
+      // candidate-list:清洗空行 + 至少保留 1 个有效榜单,与后端 cleanCandidates 对齐。
+      if (f.type === "candidate-list") {
+        const arr = Array.isArray(v) ? v : [];
+        const cleaned = arr
+          .filter((c: any) => c && c.url && String(c.url).trim() && c.platform)
+          .map((c: any) => ({
+            platform: c.platform,
+            url: String(c.url).trim(),
+            name: (c.name || "").trim() || undefined,
+          }));
+        if (cleaned.length === 0) {
+          ElMessage.error("推荐榜单至少需要保留 1 个有效榜单");
+          saving.value = false;
+          return;
+        }
+        v = cleaned;
+      }
+      cfg[f.key] = v;
+    }
     await api.put(`/rest/api/v1/plugins/${editing.value.id}`, { config: cfg });
     if (!opts?.silent) {
       ElMessage.success("已保存");
@@ -1021,6 +1075,9 @@ onMounted(() => {
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
+.candidate-list { display: flex; flex-direction: column; gap: 8px; max-width: 640px; }
+.candidate-row { display: flex; align-items: center; gap: 8px; }
+.candidate-row .el-input { margin: 0; }
 .mf-media { width: 100%; display: flex; flex-direction: column; gap: 8px; }
 .mf-media-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .mf-media-label { flex: 0 0 64px; font-size: 13px; color: var(--el-text-color-primary); }

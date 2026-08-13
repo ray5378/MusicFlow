@@ -251,8 +251,8 @@ async function runDailyJobs() {
   // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
   // Every enabled `recommender` plugin builds its own playlist. Core iterates by
-  // capability — it doesn't know that "今日推荐"/"每日推荐" exist, let alone import them.
-  // dailyPlaylist = 每日推荐(今日推荐歌单); localPlaylist = 本地推荐引擎(每日推荐歌单)。
+  // capability — it doesn't know that「每日推荐」/「本地推荐」exist, let alone import them.
+  // dailyPlaylist = 每日推荐插件(在线发现歌单); localPlaylist = 本地推荐引擎(本地口味歌单)。
   for (const cap of ["dailyPlaylist", "localPlaylist"] as const) {
     for (const { manifest, impl } of getEnabledByCapability(cap)) {
       if (typeof impl?.runDailyJob !== "function") continue;

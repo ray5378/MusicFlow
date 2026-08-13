@@ -1,15 +1,15 @@
 <template>
   <div class="home-page">
-    <!-- ===== 顶部：今日推荐歌单 + 并排随机歌单 ===== -->
+    <!-- ===== 顶部：每日推荐 + 本地推荐 + 并排随机歌单 ===== -->
     <section class="section">
       <div class="section-title">
-        <span>今日推荐</span>
+        <span>每日推荐</span>
         <span class="section-sub">为你精选的歌单</span>
         <span class="more" @click="go('/playlists')">查看全部歌单 ›</span>
       </div>
 
       <div class="top-row">
-        <!-- 今日推荐（大卡） -->
+        <!-- 每日推荐（固定第一张，在线发现：榜单 + 推荐池） -->
         <div
           class="card featured fnos-card-sheen"
           v-if="featured"
@@ -19,12 +19,31 @@
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featured.id)">
             <img v-if="featured.coverArt" :src="cover(featured.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="48"  /></div>
-            <span class="badge">今日推荐</span>
+            <span class="badge">每日推荐</span>
             <CoverPlay size="lg" :label="`播放 ${featured.name}`" :action="() => playPl(featured)" />
           </div>
           <div class="card-body" @click="go(`/playlists/${featured.id}`)">
             <div class="card-title">{{ featured.name }}</div>
             <div class="card-sub">{{ featured.songCount ? featured.songCount + ' 首' : '歌单' }}</div>
+          </div>
+        </div>
+
+        <!-- 本地推荐（固定第二张，本地口味/参考歌单） -->
+        <div
+          class="card fnos-card-sheen"
+          v-if="featuredLocal"
+          @contextmenu="openContextMenu($event, playlistActions(featuredLocal), featuredLocal.name, '歌单')"
+          v-longpress="() => openActionSheet(playlistActions(featuredLocal), featuredLocal.name, '歌单')"
+        >
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featuredLocal.id)">
+            <img v-if="featuredLocal.coverArt" :src="cover(featuredLocal.coverArt)" class="card-cover" loading="lazy" decoding="async" />
+            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
+            <span class="badge badge-local">本地推荐</span>
+            <CoverPlay size="md" :label="`播放 ${featuredLocal.name}`" :action="() => playPl(featuredLocal)" />
+          </div>
+          <div class="card-body" @click="go(`/playlists/${featuredLocal.id}`)">
+            <div class="card-title">{{ featuredLocal.name }}</div>
+            <div class="card-sub">{{ featuredLocal.songCount ? featuredLocal.songCount + ' 首' : '歌单' }}</div>
           </div>
         </div>
 
@@ -49,7 +68,7 @@
         </div>
 
         <!-- 占位（无数据时，按 homeCount 补齐） -->
-        <div v-for="n in placeholderCount(featured, sidePlaylists, homeCount)" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
+        <div v-for="n in placeholderHomeCount()" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
           <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
           <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
         </div>
@@ -119,7 +138,7 @@ const recommendChannels = ref<any[]>([]);
 const recommendProviderId = ref("");
 const recommendError = ref(false);
 const importingId = ref("");
-// 首页顶部展示张数(含今日推荐),由每日推荐插件配置 homeCount 控制(默认 8)。
+// 首页顶部展示张数(含每日推荐+本地推荐两张固定),由每日推荐插件配置 homeCount 控制(默认 8)。
 const homeCount = ref(8);
 
 function cover(id: string) {
@@ -138,19 +157,26 @@ async function playPl(pl: any) {
   else ElMessage.warning("该歌单暂无可播放歌曲");
 }
 
-// 今日推荐：固定为后端每日自动生成的名为「今日推荐」的歌单，
-// 先决条件：必须匹配到本地库歌曲数 > 30 首才作为今日推荐展示（不足 30 首不显示大卡）
+// 每日推荐：daily-recommend 插件生成（在线发现：榜单 + 推荐池），固定第一张；
+// 先决条件：必须匹配到本地库歌曲数 > 30 首才展示（不足 30 首不显示）。
 const featured = computed(() =>
-  playlists.value.find((p) => p.name === "今日推荐" && (p.songCount || 0) > 30) || null
+  playlists.value.find((p) => p.name === "每日推荐" && (p.songCount || 0) > 30) || null
 );
-// 并排随机：从全部歌单里随机抽 homeCount-1 张（排除今日推荐大卡；只抽音乐 ≥30 首的歌单），
-// 与今日推荐合并成 homeCount 张等大卡片展示（默认 8，桌面 4 列 × 2 行）。
+// 本地推荐：local-recommend 插件生成（本地口味/参考歌单），固定第二张（同样 >30 首原则）。
+const featuredLocal = computed(() =>
+  playlists.value.find((p) => p.name === "本地推荐" && (p.songCount || 0) > 30) || null
+);
+// 并排随机：从全部歌单里随机抽（排除两张固定推荐；只抽音乐 ≥30 首的歌单），
+// 与两张固定推荐合并成 homeCount 张等大卡片（默认 8，桌面 4 列 × 2 行）。
 const sidePlaylists = computed(() => {
+  const fixedIds = new Set<string>();
+  if (featured.value) fixedIds.add(featured.value.id);
+  if (featuredLocal.value) fixedIds.add(featuredLocal.value.id);
   const pool = playlists.value.filter(
-    (p) => p.id !== (featured.value && featured.value.id) && (p.songCount || 0) >= 30
+    (p) => !fixedIds.has(p.id) && (p.songCount || 0) >= 30
   );
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.max(1, homeCount.value) - 1);
+  return shuffled.slice(0, Math.max(0, homeCount.value - fixedIds.size));
 });
 
 // 各平台精选：直接渲染 recommend 能力插件的输出（每个 channel = 一个平台分区）。
@@ -193,10 +219,18 @@ async function playRemotePl(group: any, pl: any) {
   }
 }
 
-// 无数据时补齐占位卡，保证版式可见
+// 无数据时补齐占位卡，保证版式可见（平台分区用）
 function placeholderCount(featuredItem: any, list: any[], want: number) {
   const real = (featuredItem ? 1 : 0) + (list ? list.length : 0);
   const need = Math.max(0, want - real);
+  return Array.from({ length: need }, (_, i) => i + 1);
+}
+
+// 首页顶部占位：按 homeCount 补齐（含两张固定推荐：每日推荐 + 本地推荐）
+function placeholderHomeCount() {
+  const fixed = (featured.value ? 1 : 0) + (featuredLocal.value ? 1 : 0);
+  const real = fixed + sidePlaylists.value.length;
+  const need = Math.max(0, homeCount.value - real);
   return Array.from({ length: need }, (_, i) => i + 1);
 }
 
@@ -263,7 +297,7 @@ onMounted(async () => {
   .more:hover { color: var(--fnos-red); }
 }
 
-/* 顶部：今日推荐固定第一 + 7 张随机，全部等大（桌面 4 列 × 2 行 = 8 张） */
+/* 顶部：每日推荐 + 本地推荐固定，其余随机，全部等大（桌面 4 列 × 2 行 = 8 张） */
 .top-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -306,6 +340,10 @@ onMounted(async () => {
   font-size: 12px; font-weight: 600;
   padding: 3px 10px; border-radius: 999px;
   box-shadow: 0 4px 12px rgba(246, 44, 85, 0.5);
+}
+.badge-local {
+  background: var(--fnos-blue);
+  box-shadow: 0 4px 12px rgba(27, 115, 251, 0.5);
 }
 .card-cover-wrap { cursor: pointer; }
 .card-body { padding: 10px 12px 12px; cursor: pointer; }

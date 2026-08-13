@@ -8,7 +8,7 @@ import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
 import { generateLocalDailyPlaylist, LOCAL_FIXED_PLAYLIST_ID } from "../../src/services/plugin/localRecommend.js";
 import { setSetting } from "../../src/services/settings.js";
 
-// local-recommend 独立生成「每日推荐」歌单:默认口味/全库随机,可配置参考歌单池与数量。
+// local-recommend 独立生成「本地推荐」歌单:默认口味/全库随机,可配置参考歌单池与数量。
 
 const LOCAL_ID = "local-recommend";
 
@@ -49,7 +49,7 @@ beforeEach(() => {
   setLocalConfig({}); // 默认无参考歌单
 });
 
-describe("generateLocalDailyPlaylist (独立「每日推荐」歌单)", () => {
+describe("generateLocalDailyPlaylist (独立「本地推荐」歌单)", () => {
   it("默认(无参考歌单):口味/全库随机生成,歌曲入固定 id 歌单", async () => {
     const r = await generateLocalDailyPlaylist(new Date("2026-08-13T12:00:00"));
     expect(r).not.toBeNull();
@@ -58,7 +58,7 @@ describe("generateLocalDailyPlaylist (独立「每日推荐」歌单)", () => {
     expect(r!.total).toBeGreaterThan(0);
 
     const row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(LOCAL_FIXED_PLAYLIST_ID) as any;
-    expect(row.name).toBe("每日推荐");
+    expect(row.name).toBe("本地推荐");
     expect(row.song_count).toBe(r!.total);
   });
 

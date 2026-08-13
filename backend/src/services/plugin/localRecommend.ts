@@ -1,6 +1,6 @@
 // Local daily-recommend playlist generator (Plan B).
 //
-// 2026-08-13 起恢复独立生成并支持配置化:插件每天独立生成「每日推荐」歌单
+// 2026-08-13 起恢复独立生成并支持配置化:插件每天独立生成「本地推荐」歌单
 // (固定 id `pl-daily-local`),歌曲来源与数量均可配置:
 //   - sourcePlaylists(可多选,本地+平台歌单):从选定的歌单池抽取歌曲;
 //     留空则按播放口味(play_history + 收藏)从全库推荐。
@@ -370,13 +370,13 @@ export function pickLocalRecommendSongs(date: Date): { songIds: string[]; source
 
 // Build today's local daily playlist.
 //
-// 2026-08-13 起恢复独立生成(用户反馈):local-recommend 不再只是 daily-recommend
-// 的合并来源,而是独立生成「每日推荐」歌单(固定 id,本地口味歌曲)。
-// 命名/保留:固定 id `pl-daily-local` + 歌单名「每日推荐」,每天重建内容,
-// 当天幂等(created_at 前缀判断)。daily-recommend 的「今日推荐」改为纯全库随机,
-// 避免两张歌单内容重复。
+// 2026-08-13 起恢复独立生成:local-recommend 独立生成「本地推荐」歌单
+// (固定 id `pl-daily-local`,本地口味/参考歌单池歌曲)。
+// 命名/保留:固定 id `pl-daily-local` + 歌单名「本地推荐」,每天重建内容,
+// 当天幂等(comment 含日期)。daily-recommend 的「每日推荐」只做在线发现,
+// 两歌单内容不重复。
 export const LOCAL_FIXED_PLAYLIST_ID = "pl-daily-local";
-const NAME_LOCAL = "每日推荐";
+const NAME_LOCAL = "本地推荐";
 
 export async function generateLocalDailyPlaylist(date = new Date()): Promise<LocalRecommendResult | null> {
   const dateStr = todayStr(date);
@@ -390,6 +390,11 @@ export async function generateLocalDailyPlaylist(date = new Date()): Promise<Loc
       VALUES (?, ?, ?, 1, ?, NULL, NULL, '', NULL, 0, ?, ?)
     `).run(LOCAL_FIXED_PLAYLIST_ID, NAME_LOCAL, ownerId, DAILY_TAG_LOCAL, now, now);
     row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(LOCAL_FIXED_PLAYLIST_ID) as any;
+  } else if (row.name !== NAME_LOCAL) {
+    // 2026-08-13 歌单名「每日推荐」→「本地推荐」:已存在的固定行同步改名。
+    sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
+      .run(NAME_LOCAL, now, LOCAL_FIXED_PLAYLIST_ID);
+    row.name = NAME_LOCAL;
   }
   // 当天幂等:comment 含今天日期 = 今天已生成过(与 daily-recommend 同机制;
   // 不能用 created_at 前缀——行是固定的,created_at 始终是首次创建那天)
@@ -456,29 +461,29 @@ export const localRecommendManifest: PluginManifest = {
   name: "本地推荐引擎",
   version: "1.0.0",
   type: "recommender",
-  description: "基于播放历史与收藏口味,每天独立生成「每日推荐」歌单(本地曲库)",
+  description: "基于播放历史与收藏口味,每天独立生成「本地推荐」歌单(本地曲库)",
   capabilities: ["localPlaylist"],
   defaultEnabled: true,
   configSchema: [
-    { key: "sourcePlaylists", label: "参考歌单", type: "playlist-multi", help: "从这些歌单中抽取歌曲生成「每日推荐」(支持本地与平台导入歌单,可多选,可搜索)。留空则按播放口味从全库推荐。" },
+    { key: "sourcePlaylists", label: "参考歌单", type: "playlist-multi", help: "从这些歌单中抽取歌曲生成「本地推荐」(支持本地与平台导入歌单,可多选,可搜索)。留空则按播放口味从全库推荐。" },
     { key: "count", label: "歌曲总数", type: "number", default: 50, help: "生成的歌单歌曲总数量(1~500,默认 50)" },
     { key: "excludeRecent", label: "排除近期播放", type: "switch", default: true, help: "从候选中排除近 30 天播放过的歌曲,让每天推荐更新鲜" },
   ],
   documentation: `### 功能介绍
-基于播放历史与收藏口味，每天从本地曲库独立生成「每日推荐」歌单（固定 id：\`pl-daily-local\`），每天按你的口味更新。
+基于播放历史与收藏口味，每天从本地曲库独立生成「本地推荐」歌单（固定 id：\`pl-daily-local\`），回味你常听的口味。
 
 ### 处理逻辑
 1. 定时器按 \`localPlaylist\` 能力调用本插件的 \`runDailyJob()\`（每天与每日推荐同步，可改系统时间设置）；
 2. 按配置抽取歌曲：
    - 配置了「参考歌单」（本地 / 平台导入歌单，可多选）：从这些歌单的歌曲中确定性随机抽取，生成总数由「歌曲总数」控制；
    - 未配置参考歌单：统计近期播放历史与收藏（\`play_history\` / \`user_favorite_songs\`），给艺术家 / 专辑 / 风格打分，按口味加权抽取；
-3. 写入「每日推荐」歌单（覆盖当天旧版）。
+3. 写入「本地推荐」歌单（覆盖当天旧版）。
 
 ### 说明
-- 独立成单：与 \`daily-recommend\` 的「今日推荐」互不依赖、内容不重复（今日推荐为在线候选 + 推荐池 + 全库随机）；
+- **职责边界**：在线发现新歌由 \`daily-recommend\` 的「每日推荐」歌单承担（榜单 + 推荐池），本歌单只做本地口味，两歌单内容不重复；
 - 「排除近期播放」开启时，候选会剔除近 30 天播放过的歌曲；
 - 无播放历史 / 曲库为空时输出空结果，不报错；
-- 停用本插件后「每日推荐」歌单不再更新。`,
+- 停用本插件后「本地推荐」歌单不再更新。`,
 };
 
 export const localRecommendPlugin: LocalRecommendPlugin = {

@@ -1,7 +1,7 @@
-// Daily-recommend playlist generator — combined edition.
+// Daily-recommend playlist generator — online discovery edition.
 //
-// Each day at the configured hour, this builds a SINGLE combined "今日推荐"
-// playlist by merging songs from THREE sources (all in ONE playlist):
+// Each day at the configured hour, this builds a SINGLE combined「每日推荐」
+// playlist from TWO sources (all in ONE playlist):
 //
 //   1. Remote charts (QQ + NetEase): fetch EVERY candidate in the configured
 //      pool (not just one), match against the local library. Matched songs
@@ -10,18 +10,18 @@
 //   2. User recommend pool (recommend_pool table): all pool members (every
 //      user's favorites + playlists manually added to the pool). Randomly
 //      picks 50 PLAYABLE songs (guaranteed in the library).
-//   3. Full-library random: picks 50 random playable songs from the entire
-//      local library (date-seeded so the same day yields the same set).
 //
-// Dedup: pool songs and full-library random songs are deduplicated against
-// the remote-matched songs already in the playlist (and against each other)
-// so the same track never appears twice.
+// 2026-08-13 职责收敛:不再做「本地曲库随机补充」——本地口味推荐由
+// local-recommend 插件独立生成「本地推荐」歌单(pl-daily-local),两歌单不重复。
+//
+// Dedup: pool songs are deduplicated against the remote-matched songs already
+// in the playlist so the same track never appears twice.
 //
 // STABLE ID (only ONE playlist ever exists, with a FIXED id):
-//   - "今日推荐"  — today's combined playlist (id: pl-daily-today)
+//   - "每日推荐"  — today's combined playlist (id: pl-daily-today)
 //
 // The id is FIXED and never changes across days. Each run rebuilds today's
-// content fresh into the same fixed "今日推荐" row (rebuildPlaylistEntries
+// content fresh into the same fixed「每日推荐」row (rebuildPlaylistEntries
 // clears the old entries first); the previous day's content is simply
 // discarded — no "昨日推荐" archive is kept anymore.
 // This keeps clients (web/app/HA/card) able to reference the playlist by a
@@ -34,7 +34,7 @@ import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { copyCoverToFile } from "../playlistCover.js";
-import { pickRandomLibrarySongs } from "./localRecommend.js";
+import { getPluginConfig } from "../../plugins/registry.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 
 export interface DailyCandidate {
@@ -66,7 +66,9 @@ export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 // playlist by a stable id.
 export const FIXED_TODAY_ID = "pl-daily-today";
 
-const NAME_TODAY = "今日推荐";
+// 歌单名:「每日推荐」(与插件名 daily-recommend「每日推荐」一致)。
+// 本地曲库口味推荐由 local-recommend「本地推荐」歌单独立承担,不再混入本歌单。
+const NAME_TODAY = "每日推荐";
 
 // 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐),由本插件配置 homeCount 控制。
 export const DEFAULT_HOME_COUNT = 8;
@@ -92,9 +94,6 @@ const POOL_MEMBER_CANDIDATE_SIZE = 200;
 // Candidates from all pool members are merged, deduped, then this many are
 // picked with a date-seeded shuffle.
 const POOL_FINAL_SIZE = 50;
-// How many random songs to pull from the entire local library (in addition to
-// the user pool).
-const RANDOM_LIBRARY_SAMPLE_SIZE = 50;
 
 function todayStr(d = new Date()): string {
   const y = d.getFullYear();
@@ -154,25 +153,64 @@ const DEFAULT_CANDIDATES: DailyCandidate[] = [
   { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
 ];
 
+// 读取候选榜单的优先级(UI 配置的权威来源是插件 config JSON 的 candidates 字段):
+//   1) 插件配置(plugin config 的 candidates)——用户在插件设置页手动配置/替换;
+//   2) 旧的 settings 表(daily_recommend_candidates)——向后兼容旧 admin API;
+//   3) 内置 DEFAULT_CANDIDATES——全新安装,且从未手动配置过。
+// 任意一层都会被 isCandidateBlocked 过滤(新歌/欧美等始终排除)。
 export function loadCandidates(): DailyCandidate[] {
+  const fromConfig = loadCandidatesFromPluginConfig();
+  if (fromConfig) return fromConfig;
+  const fromSettings = loadCandidatesFromSettings();
+  if (fromSettings) return fromSettings;
+  return DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
+}
+
+function loadCandidatesFromPluginConfig(): DailyCandidate[] | null {
+  const cfg = getPluginConfig(DAILY_RECOMMEND_PLUGIN_ID);
+  if (!cfg || !Array.isArray(cfg.candidates)) return null;
+  const clean = cleanCandidates(cfg.candidates);
+  return clean.length > 0 ? clean : null;
+}
+
+function loadCandidatesFromSettings(): DailyCandidate[] | null {
   const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_candidates") as any;
-  const raw = row?.value ? row.value : JSON.stringify(DEFAULT_CANDIDATES);
+  if (!row?.value) return null;
   try {
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
-    const clean = arr
-      .filter((c: any) => c && typeof c.url === "string" && typeof c.platform === "string")
-      .filter((c: any) => !isCandidateBlocked(c))
-      .map((c: any) => ({ platform: c.platform, url: c.url, name: c.name }));
-    return clean.length > 0 ? clean : DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
+    const arr = JSON.parse(row.value);
+    if (!Array.isArray(arr)) return null;
+    const clean = cleanCandidates(arr);
+    return clean.length > 0 ? clean : null;
   } catch {
-    return DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
+    return null;
   }
 }
 
+// 仅保留合法项(platform + url 必填)、排除黑名单(新歌/欧美等)、统一字段形状。
+function cleanCandidates(arr: any[]): DailyCandidate[] {
+  return arr
+    .filter((c: any) => c && typeof c.url === "string" && typeof c.platform === "string" && c.platform.trim().length > 0)
+    .filter((c: any) => !isCandidateBlocked(c))
+    .map((c: any) => ({ platform: c.platform, url: c.url.trim(), name: typeof c.name === "string" ? c.name : undefined }));
+}
+
 export function saveCandidates(candidates: DailyCandidate[]): void {
+  const clean = cleanCandidates(candidates);
+  // 写入插件配置(UI 权威来源)与旧 settings 表(向后兼容)两处,保持一致。
+  setPluginConfigCandidates(clean);
   sqlite.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
-    .run("daily_recommend_candidates", JSON.stringify(candidates), new Date().toISOString());
+    .run("daily_recommend_candidates", JSON.stringify(clean), new Date().toISOString());
+}
+
+// 把候选榜单写回插件 config JSON(candidates 字段),其余配置项保持不变。
+function setPluginConfigCandidates(candidates: DailyCandidate[]): void {
+  const row = sqlite.prepare("SELECT config FROM plugins WHERE name = ?").get(DAILY_RECOMMEND_PLUGIN_ID) as any;
+  let cfg: any = {};
+  try { cfg = row?.config ? JSON.parse(row.config) : {}; } catch {}
+  if (!cfg || typeof cfg !== "object") cfg = {};
+  cfg.candidates = candidates;
+  sqlite.prepare("UPDATE plugins SET config = ?, updated_at = ? WHERE name = ?")
+    .run(JSON.stringify(cfg), new Date().toISOString(), DAILY_RECOMMEND_PLUGIN_ID);
 }
 
 function getSetting(key: string, def: string): string {
@@ -232,15 +270,11 @@ function ensureDailyPlaylists(): void {
         VALUES (?, ?, ?, 1, ?, NULL, NULL, 'mixed', NULL, 0, ?, ?)
       `).run(FIXED_TODAY_ID, NAME_TODAY, ownerId, `${DAILY_TAG}`, now, now);
     }
+  } else if (todayFixed.name !== NAME_TODAY) {
+    // 2026-08-13 歌单名「今日推荐」→「每日推荐」:升级用户已存在的固定行同步改名。
+    sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
+      .run(NAME_TODAY, new Date().toISOString(), FIXED_TODAY_ID);
   }
-}
-
-// Pull the local-library contribution for today's daily playlist through the
-// Pull the local-library contribution for today's daily playlist.
-// 2026-08-13 起 local-recommend 独立生成「每日推荐」歌单,不再合并进「今日推荐」,
-// 这里直接用全库随机采样,避免两张歌单内容重复。
-async function pickLocalSongsForDaily(date: Date): Promise<string[]> {
-  return pickRandomLibrarySongs(date, RANDOM_LIBRARY_SAMPLE_SIZE);
 }
 
 // Pick a random local-library song's album cover file ref. Used as the daily
@@ -464,18 +498,16 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     }
   }
 
-  // Step 2: collect user pool songs + a local-library mix.
+  // Step 2: collect user pool songs.
   const { songIds: poolSongIds, members: poolMembers } = collectPoolSongs(date);
-  // Prefer the local-recommend plugin (taste-profile based) when enabled;
-  // fall back to a plain full-library random sample otherwise.
-  const randomLibraryIds = await pickLocalSongsForDaily(date);
 
-  // If we have nothing at all (no remote, no pool, no random), bail out without
-  // touching the existing playlist — better to keep today's previous content
-  // than to have an empty one.
+  // If we have nothing at all (no remote, no pool), bail out without touching
+  // the existing playlist — better to keep today's previous content than to
+  // have an empty one. (本地曲库推荐已由 local-recommend「本地推荐」歌单独立承担,
+  // 每日推荐只做在线发现:榜单候选 + 用户推荐池。)
   const totalRemoteTracks = remoteImports.reduce((n, imp) => n + imp.tracks.length, 0);
-  if (totalRemoteTracks === 0 && poolSongIds.length === 0 && randomLibraryIds.length === 0) {
-    throw new Error("今日推荐生成失败:所有远程榜单抓取失败且用户推荐池和曲库随机均为空");
+  if (totalRemoteTracks === 0 && poolSongIds.length === 0) {
+    throw new Error("每日推荐生成失败:所有远程榜单抓取失败且用户推荐池为空");
   }
 
   // ============ Rebuild today's fixed-id playlist ============
@@ -510,7 +542,6 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
   const sourceLabel = remoteImports.map(i => i.name).filter(Boolean).join(" + ") || "用户推荐池";
   const extraParts: string[] = [];
   if (poolMembers > 0) extraParts.push(`${poolMembers}个用户推荐池`);
-  if (randomLibraryIds.length > 0) extraParts.push("曲库随机");
 
   // Seed remote tracks via rebuildPlaylistEntries (matching + stubs + wishes).
   let matched = 0, unmatched = 0, wishAdded = 0;
@@ -575,41 +606,6 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
       .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
   }
 
-  // Append full-library random songs, DEDUPED against everything above.
-  let randomSongsAdded = 0;
-  const dedupedRandomIds = randomLibraryIds.filter(id => !existingSongIds.has(id));
-  if (dedupedRandomIds.length > 0) {
-    const maxPosRow = sqlite.prepare("SELECT MAX(position) AS m FROM playlist_songs WHERE playlist_id = ?").get(playlistId) as any;
-    let nextPos = (maxPosRow?.m ?? -1) + 1;
-
-    const idToDuration = new Map<string, number>();
-    for (let i = 0; i < dedupedRandomIds.length; i += 500) {
-      const batch = dedupedRandomIds.slice(i, i + 500);
-      const placeholders = batch.map(() => "?").join(",");
-      const rows = sqlite.prepare(`SELECT id, duration FROM songs WHERE id IN (${placeholders})`).all(...batch) as { id: string; duration: number }[];
-      for (const r of rows) idToDuration.set(r.id, r.duration || 0);
-    }
-
-    const now2 = new Date().toISOString();
-    const insertStmt = sqlite.prepare(`
-      INSERT INTO playlist_songs (playlist_id, song_id, position, playable, created_at)
-      VALUES (?, ?, ?, 1, ?)
-    `);
-    let addedDuration = 0;
-    const tx = sqlite.transaction((ids: string[]) => {
-      for (const id of ids) {
-        insertStmt.run(playlistId, id, nextPos++, now2);
-        addedDuration += idToDuration.get(id) || 0;
-        randomSongsAdded++;
-      }
-    });
-    tx(dedupedRandomIds);
-
-    const plRow = sqlite.prepare("SELECT song_count, duration FROM playlists WHERE id = ?").get(playlistId) as any;
-    sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
-      .run((plRow?.song_count || 0) + randomSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
-  }
-
   // Finalize the TODAY row: stamp the generation date into the comment (for
   // idempotency), set the new cover, and refresh timestamps.
   sqlite.prepare("UPDATE playlists SET cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")
@@ -626,13 +622,13 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     name: NAME_TODAY,
     picked: candidates,
     platform: "mixed",
-    total: matched + unmatched + poolSongsAdded + randomSongsAdded,
+    total: matched + unmatched + poolSongsAdded,
     matched,
     unmatched,
     wishAdded,
     poolSongsAdded,
     poolMembers,
-    randomSongsAdded,
+    randomSongsAdded: 0,
     skipped: false,
   };
 }
@@ -650,7 +646,7 @@ export async function runDailyRecommendJob(): Promise<DailyRecommendResult | nul
   try {
     const result = await generateDailyPlaylist();
     if (!result.skipped) {
-      console.log(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members + ${result.randomSongsAdded} random -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool`);
+      console.log(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool`);
     }
     return result;
   } catch (e: any) {
@@ -668,8 +664,8 @@ export function purgeOldDailyPlaylists(_retentionDays: number): number {
 //
 // Registered as a `recommender` plugin so the daily scheduler picks it up by
 // capability ("dailyPlaylist") instead of importing runDailyRecommendJob
-// directly. localRecommend is NOT a separate plugin: its output is merged into
-// this playlist (see generateDailyPlaylist), so it stays an internal helper.
+// directly. localRecommend is a SEPARATE plugin (localPlaylist) generating its
+// own「本地推荐」歌单 — see localRecommend.ts.
 
 export const DAILY_RECOMMEND_PLUGIN_ID = "daily-recommend";
 
@@ -678,28 +674,35 @@ export const dailyRecommendManifest: PluginManifest = {
   name: "每日推荐",
   version: "1.0.0",
   type: "recommender",
-  description: "每天生成「今日推荐」歌单:平台榜单候选 + 推荐池成员 + 本地曲库随机补充",
+  description: "每天生成「每日推荐」歌单:平台榜单候选 + 用户推荐池成员(在线发现新歌)",
   capabilities: ["dailyPlaylist"],
   defaultEnabled: true,
   configSchema: [
-    { key: "homeCount", label: "首页随机歌单数", type: "number", help: "首页顶部「今日推荐 + 随机歌单」共展示的歌单张数(含今日推荐,1~24,默认 8)" },
+    {
+      key: "candidates",
+      label: "推荐榜单",
+      type: "candidate-list",
+      help: "每日推荐从哪些平台榜单抓取候选歌曲(每项一个榜单 URL)。已预填常用榜单,可手动替换 / 增删;至少保留 1 个。",
+      default: DEFAULT_CANDIDATES,
+    },
+    { key: "homeCount", label: "首页随机歌单数", type: "number", help: "首页顶部「每日推荐 + 本地推荐 + 随机歌单」共展示的歌单张数(含两张固定推荐,1~24,默认 8)" },
   ],
-  // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「今日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
+  // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「每日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
   dailyTag: "每日推荐",
   documentation: `### 功能介绍
-每天自动生成「今日推荐」歌单（id：\`pl-daily-today\`），混合三类来源：平台榜单候选、推荐池成员（收藏的歌单 / 我喜欢的音乐）、本地曲库随机补充。
+每天自动生成「每日推荐」歌单（id：\`pl-daily-today\`），聚焦**在线发现新歌**：平台榜单候选 + 用户推荐池成员。
 
 ### 处理逻辑
 1. 定时器按 \`dailyPlaylist\` 能力调用本插件的 \`runDailyJob()\`（默认每天 03:00，可改系统时间设置）；
 2. 收集曲目：\`recommend_pool\` 表里的推荐池成员（用户在歌单或「我喜欢的音乐」上点「加入每日推荐池」写入）+ 平台榜单候选；
-3. 合并去重后随机抽取约 50 首可播放歌曲，写入 \`pl-daily-today\`（覆盖当天旧版）；
-4. 本地曲库为空时跳过并记日志，不报错。
+3. 合并去重后写入 \`pl-daily-today\`（覆盖当天旧版）。
 
 ### 说明
-- 生成的歌单在首页「每日推荐」入口展示；
-- 配置项 \`homeCount\`：首页顶部「今日推荐 + 随机歌单」共展示的歌单张数（含今日推荐，1~24，默认 8）；
-- 停用本插件即关闭每日推荐，不影响其他 recommender；
-- 配合 \`local-recommend\` 插件：在线候选 + 本地口味组合成完整推荐。`,
+- **职责边界**：本地曲库口味推荐由 \`local-recommend\` 插件独立生成「本地推荐」歌单，本歌单不做本地随机补充，两歌单内容不重复；
+- 远程榜单全部抓取失败且推荐池为空时保留旧歌单，不报错（等网络恢复后自动重建）；
+- 配置项 \`推荐榜单\`：在插件设置页可直接编辑「每日推荐」抓取哪些平台榜单（已预填网易云/QQ 常用榜单，可手动替换、增删，至少保留 1 个）；修改后次日生成或手动触发即生效；
+- 配置项 \`homeCount\`：首页顶部「每日推荐 + 本地推荐 + 随机歌单」共展示张数（含两张固定推荐，1~24，默认 8）；
+- 停用本插件即不再更新「每日推荐」歌单。`,
 };
 
 export const dailyRecommendPlugin: RecommenderPlugin = {
@@ -707,7 +710,7 @@ export const dailyRecommendPlugin: RecommenderPlugin = {
   async runDailyJob(): Promise<string | null> {
     const r = await runDailyRecommendJob();
     if (!r || r.skipped) return null;
-    return `${r.date}: ${r.matched} matched, ${r.unmatched} stubs, ${r.poolSongsAdded} pool, ${r.randomSongsAdded} random`;
+    return `${r.date}: ${r.matched} matched, ${r.unmatched} stubs, ${r.poolSongsAdded} pool`;
   },
   // 参数化能力:路由经 registry 门面调用,核心不直连本文件。
   loadCandidates(): DailyCandidate[] { return loadCandidates(); },

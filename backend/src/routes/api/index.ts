@@ -111,7 +111,7 @@ apiRoutes.get("/v1/recommend", async (c) => {
   }
 });
 
-// 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐)。
+// 首页顶部「每日推荐 + 本地推荐 + 随机歌单」展示张数(含两张固定推荐)。
 // 由每日推荐插件的 homeCount 配置控制(默认 8),核心经能力门面读取,不写死插件名。
 apiRoutes.get("/v1/home/playlist-count", (c) => {
   return c.json({ success: true, count: dailyRecommendHomeCount() });
@@ -904,8 +904,8 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   const candidates = dailyApi()?.loadCandidates() ?? [];
   const picked = dailyApi()?.pickDailyCandidate() ?? null;
 
-  // Only ONE playlist ever exists: "今日推荐" (combined: remote charts + user
-  // pool + local history mix, all merged into one).
+  // Only ONE playlist ever exists: 「每日推荐」(combined: remote charts + user
+  // pool, all merged into one).
   const today = (() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -913,7 +913,7 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   const findPl = (name: string, tag: string) =>
     sqlite.prepare("SELECT id, name, song_count, created_at, comment FROM playlists WHERE name = ? AND comment LIKE ?").get(name, `%${tag}%`) as any;
 
-  const todayPl = findPl("今日推荐", dailyRecommendTag() || "每日推荐");
+  const todayPl = findPl(dailyRecommendTag() || "每日推荐", dailyRecommendTag() || "每日推荐");
 
   const plInfo = (row: any) => row ? {
     id: row.id, name: row.name, songCount: row.song_count || 0,
@@ -936,7 +936,7 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
 });
 
 // Update daily-recommend config (master switch, hour).
-// Note: retention is no longer used — only one "今日推荐" playlist exists and
+// Note: retention is no longer used — only one "每日推荐" playlist exists and
 // each run rebuilds it in place.
 apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
@@ -970,7 +970,7 @@ apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
 });
 
 // Manually trigger today's daily-recommend generation.
-// Builds a SINGLE combined "今日推荐" playlist from remote charts + user pool
+// Builds a SINGLE combined "每日推荐" playlist from remote charts + user pool
 // + local history mix. Idempotent: if today's playlist already exists, returns
 // skipped=true.
 apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
@@ -979,7 +979,7 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
     const result = await dailyApi().generateDailyPlaylist();
     return c.json({ success: true, result }, 200);
   } catch (e: any) {
-    const error = e.message || "今日推荐生成失败";
+    const error = e.message || "每日推荐生成失败";
     console.error("[DAILY-RECOMMEND] trigger error:", error);
     return c.json({ success: false, error }, 500);
   }
@@ -989,7 +989,7 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 // A user can click "加入每日推荐池" on any playlist (or on "我喜欢的音乐")
 // to add that source to the pool. Each daily-recommend run picks up to 50
 // random playable songs from every pool member and merges them into the
-// day's combined "今日推荐" playlist.
+// day's combined "每日推荐" playlist.
 
 // List all pool members (for an admin management page if desired).
 apiRoutes.get("/v1/recommend-pool", (c) => {
@@ -1266,10 +1266,10 @@ apiRoutes.get("/v1/playlists", (c) => {
     localOnly ? isNull(playlists.sourceUrl) : undefined,
     favOnly ? eq(playlists.favorite, 1) : undefined,
   );
-  // Daily-recommend-first ordering (今日推荐 > others) expressed as a
+  // Daily-recommend-first ordering (每日推荐 > others) expressed as a
   // CASE, with recency as the secondary sort. Pushed to SQL together with
   // LIMIT/OFFSET so we never load the whole table into JS just to slice it.
-  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
+  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = ${dailyRecommendTag() || "每日推荐"} THEN 0 ELSE 1 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
   const rows = (where
     ? db.select().from(playlists).where(where)
@@ -1300,7 +1300,8 @@ apiRoutes.get("/playlist", (c) => {
   const all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic);
   const dailyRank = (p: any) => {
     const c = p.comment || "";
-    if (c.includes(dailyRecommendTag() || "每日推荐") && p.name === "今日推荐") return 0;
+    const tag = dailyRecommendTag() || "每日推荐";
+    if (c.includes(tag) && p.name === tag) return 0;
     return 1;
   };
   return c.json(all.sort((a, b) => {
