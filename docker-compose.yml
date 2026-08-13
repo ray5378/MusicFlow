@@ -24,9 +24,10 @@ services:
       # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
       # 数据与缓存目录(宿主 ./data 挂到容器 /data):
-      #   musicflow.db      —— SQLite 主库(歌曲/歌单/设置;歌词落库写在 songs.lyrics 列)
+      #   musicflow.db      —— SQLite 主库(歌曲/歌单/设置)
       #   covers/           —— 本地刮削封面(扫描内嵌封面、艺术家头像)
       #   online-covers/    —— 平台/在线封面缓存(web 歌曲、歌单导入、按需获取 A/B)
+      #   online-lyrics/    —— 插件获取并落库的歌词文件(按需获取 A/B、批量补全 C)
       #   plugins/          —— 外置插件
       #   .jwt-secret       —— 自动生成的 JWT 密钥
       - ./data:/data
@@ -34,3 +35,5 @@ services:
       # 默认它在上面的 ./data 卷内,无需配置;想单独存放/单独清缓存时,
       # 取消注释并把宿主机路径换成你的目录(优先级高于 ./data 内的同名子目录):
       # - ./online-covers:/data/online-covers
+      # 可选:歌词文件(online-lyrics)同理可独立挂载/单独清空:
+      # - ./online-lyrics:/data/online-lyrics

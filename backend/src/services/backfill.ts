@@ -5,6 +5,7 @@ import { sqlite } from "../db/index.js";
 import fs from "fs";
 import { searchLyrics } from "../plugins/providers.js";
 import { fetchCoverForSong } from "./covers.js";
+import { saveLyricFile } from "./lyricsStore.js";
 
 export type BackfillKind = "lyrics" | "covers";
 
@@ -86,8 +87,10 @@ async function runLoop(kind: BackfillKind, rows: any[]) {
           extra: sourceData?.extra || null,
         });
         if (lrc) {
-          // C 批量补全总是落库(其目的就是建离线歌词库)
-          sqlite.prepare("UPDATE songs SET lyrics = ? WHERE id = ?").run(lrc, song.id);
+          // C 批量补全总是落库:写 online-lyrics/<id>.lrc 文件 + songs.lyrics 存引用
+          // (与封面同构;其目的就是建离线歌词库)。
+          const ref = saveLyricFile(song.id, lrc);
+          if (ref) sqlite.prepare("UPDATE songs SET lyrics = ? WHERE id = ?").run(ref, song.id);
           found = true;
         }
       } else {

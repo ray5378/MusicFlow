@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { getPluginImpl, getPluginConfig } from "../plugins/registry.js";
 import { hasLyricProvider, searchLyrics } from "../plugins/providers.js";
 import { getSettingBool } from "./settings.js";
+import { saveLyricFile, resolveLyricContent } from "./lyricsStore.js";
 
 export interface LrcLine {
   time: number; // seconds
@@ -118,9 +119,9 @@ async function readSidecarLrc(song: SongRow): Promise<string | null> {
 }
 
 // Fetch lyrics for a song, unified across ALL song types:
-//   ① 已落库歌词(songs.lyrics,离线可用)
+//   ① 已落库歌词(songs.lyrics 存文件引用或旧文本,离线可用)
 //   ② sidecar .lrc(本地 / WebDAV)
-//   ③ 在线按需(A 开关,默认开):lyricProvider 插件,命中且 B(persist) 开则落库
+//   ③ 在线按需(A 开关,默认开):lyricProvider 插件,命中且 B(persist) 开则落库为文件
 //   ④ web 歌曲 legacy 源插件 lyricUrl
 export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   const cached = lrcCache.get(song.id);
@@ -128,10 +129,11 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
 
   let content: string | null = null;
 
-  // ① 已落库的歌词(DB):离线也能显示,不依赖 provider 常驻
+  // ① 已落库的歌词:优先读 online-lyrics/<ref>.lrc 文件(新格式),文件缺失时
+  //    把列内旧文本当歌词(v1.7.4 兼容)。离线也能显示,不依赖 provider 常驻。
   try {
     const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get(song.id) as any;
-    if (row?.lyrics) content = row.lyrics;
+    if (row?.lyrics) content = resolveLyricContent(row.lyrics);
   } catch { /* ignore */ }
 
   // ② sidecar .lrc(离线优先、最准)
@@ -154,9 +156,13 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
     });
     if (fromProviders) {
       content = fromProviders;
-      // B 落库(默认关):命中即写 DB,拉一次永存、离线也能显示
+      // B 落库(默认关):命中即写 online-lyrics/<id>.lrc 文件 + songs.lyrics 存引用,
+      // 拉一次永存、离线也能显示(与封面 online-covers 同构,可单独挂卷/清空)。
       if (getSettingBool("lyrics.persist", false)) {
-        try { sqlite.prepare("UPDATE songs SET lyrics = ? WHERE id = ?").run(content, song.id); } catch { /* ignore */ }
+        const ref = saveLyricFile(song.id, content);
+        if (ref) {
+          try { sqlite.prepare("UPDATE songs SET lyrics = ? WHERE id = ?").run(ref, song.id); } catch { /* ignore */ }
+        }
       }
     }
   }

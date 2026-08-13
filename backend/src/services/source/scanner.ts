@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import { parseBuffer } from "music-metadata";
 import { getDataDir } from "../../utils/env.js";
+import { deleteSongLyric } from "../lyricsStore.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
 const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover art
@@ -591,6 +592,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
   for (const s of existingSongs) {
     if (!seenPaths.has(s.path)) {
       deleteStmt.run(s.id);
+      deleteSongLyric(s.id);
       removed++;
     }
   }

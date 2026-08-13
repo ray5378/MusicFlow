@@ -20,6 +20,7 @@
 import { sqlite } from "../../../db/index.js";
 import { getSourcePluginConfig } from "./index.js";
 import { deleteSongCover } from "../../playlistCover.js";
+import { deleteSongLyric } from "../../lyricsStore.js";
 import { cleanupOrphans } from "../scanner.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -80,10 +81,13 @@ export function purgeExpiredWebSongs(providerId: string): PurgeResult {
     console.error(`[web-purge] ${providerId} 批量清理失败:`, e?.message || e);
   }
 
-  // Covers only when the DB transaction committed (all-or-nothing), so we never
-  // delete cover files of songs that are still in the library.
+  // Covers/lyrics only when the DB transaction committed (all-or-nothing), so we
+  // never delete cover/lyric files of songs that are still in the library.
   if (purged > 0) {
-    for (const s of candidates) covers += deleteSongCover(s.id);
+    for (const s of candidates) {
+      covers += deleteSongCover(s.id);
+      deleteSongLyric(s.id);
+    }
     cleanupOrphans();
   }
 

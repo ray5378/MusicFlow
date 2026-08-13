@@ -184,7 +184,7 @@
             <div class="mf-media-row">
               <span class="mf-media-label">落库 B</span>
               <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
-              <span class="field-hint">获取到的歌词保存到数据库,离线也能显示</span>
+              <span class="field-hint">获取到的歌词保存为本地文件(online-lyrics/),离线也能显示</span>
             </div>
             <div class="mf-media-row">
               <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全 C</el-button>

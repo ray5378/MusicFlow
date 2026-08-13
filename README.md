@@ -82,6 +82,8 @@ services:
       # 可选:把平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
       # 默认它在 ./data 卷内,无需配置;想单独存放/单独清缓存时取消注释:
       # - ./online-covers:/data/online-covers
+      # 可选:歌词文件(online-lyrics)同理可独立挂载/单独清空:
+      # - ./online-lyrics:/data/online-lyrics
 ```
 
 > **平台音乐封面本地落盘默认开启**：QQ / 网易云等平台的歌曲与歌单封面，下载后会默认保存到 `data/online-covers/`（容器内 `/data/online-covers`），无需任何配置；想把它独立放到其他磁盘（如大容量数据盘），取消 compose 里对应那行卷映射即可。
@@ -108,13 +110,14 @@ docker run -d --name musicflow --restart unless-stopped \
 | `musicflow.db-wal` / `-shm` | SQLite WAL 日志 | 正常随主库一起备份即可 |
 | `covers/` | 本地刮削封面 | 本地音乐扫描出的内嵌封面、歌手头像抓取缓存 |
 | `online-covers/` | **平台 / 在线封面缓存** | web 歌曲、歌单导入、以及「媒体获取」按需获取(A/B)下载的远程封面；**可单独挂到大磁盘或单独清空**（清空后缺失封面会重新按需获取） |
+| `online-lyrics/` | **插件获取并落库的歌词文件** | 「媒体获取」按需获取(A/B)与批量补全(C)写入的歌词（`<歌曲id>.lrc`，列内存文件引用）；**可单独挂载/单独清空**（清空后缺词歌曲会重新获取，不影响 `songs.lyrics` 列旧文本兼容） |
 | `plugins/` | 外置插件 | 从插件市场安装的第三方插件（QuickJS 沙箱运行） |
 | `.jwt-secret` | JWT 密钥 | 未配置 `JWT_SECRET` 时自动生成，重启保持稳定 |
 | `.server-uuid` | mDNS 服务标识 | DLNA 发现用，保证实例身份稳定 |
 
-**歌词落库**：按需获取(A) 且「落库 B」开启时，歌词写入 `musicflow.db` 的 `songs.lyrics` 列（不是独立文件）；本地音乐自带的 `.lrc` 歌词文件仍放在**音乐文件同目录**（sidecar），不在此处。**封面落库**：`cover_art` 存的是上述 `online-covers/` 里的文件引用，实际图片文件在 `data/online-covers/`。
+**歌词/封面落库**：「媒体获取」页的 **B 落库**与 **C 批量补全**，歌词写入 `online-lyrics/<歌曲id>.lrc` 文件、`songs.lyrics` 列存文件引用（与封面 `cover_art` 存引用、图片在 `online-covers/` 完全同构，都不再直接落数据库文本）；旧版本已落库的歌词文本仍可直接读取（兼容）。本地音乐自带的 `.lrc` 歌词文件仍放在**音乐文件同目录**（sidecar），不在此处。
 
-想清空媒体缓存（如换封面源后重新拉取），删除 `online-covers/` 目录内容后重启即可，本地 `covers/` 与库内歌词不受影响。
+想清空媒体缓存（如换歌词/封面源后重新拉取），删除 `online-lyrics/`、`online-covers/` 目录内容后重启即可，本地 `covers/` 与库内元数据不受影响。
 
 ## 环境变量
 
