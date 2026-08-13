@@ -26,6 +26,18 @@ export const onlineRoutes = new Hono();
 const matchJobs = new Map<string, { status: string; playlistId: string; startedAt: string; finishedAt?: string; progress: { done: number; total: number }; result: any; error: string | null }>();
 const INLINE_MATCH_LIMIT = 30;
 
+// 完成/失败后的 job 保留 30 min 供前端轮询取结果,超时后清理防 Map 慢增长
+// (参照 services/lyrics.ts 的 lrcCacheSweep 模式;running 中的 job 不清理)。
+const MATCH_JOB_TTL_MS = 30 * 60 * 1000;
+const matchJobsSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of matchJobs) {
+    if (!v.finishedAt) continue;
+    if (now - Date.parse(v.finishedAt) >= MATCH_JOB_TTL_MS) matchJobs.delete(k);
+  }
+}, 5 * 60 * 1000);
+(matchJobsSweep as any).unref?.();
+
 // Connectivity test for an admin-configured provider instance.
 onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
   const providerId = c.req.param("providerId");
