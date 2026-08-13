@@ -148,6 +148,88 @@
           title="插件运行模型与安全提示"
           description="内置插件随服务端发行,是核心功能(不可停用/删除);第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
       </el-tab-pane>
+
+      <!-- ============ Media fetch (lyrics / covers) — 能力级全局设置,独立于任何单个插件 ============ -->
+      <el-tab-pane label="媒体获取" name="media">
+        <div class="page-header">
+          <h2>媒体获取</h2>
+          <span class="page-sub">歌词 / 封面按需获取与批量补全 —— 全局设置,不归属于任何单个插件,换插件不影响设置</span>
+        </div>
+
+        <el-card class="mf-card" shadow="never">
+          <template #header>
+            <div class="card-head">
+              <span class="card-title">歌词获取</span>
+              <el-tag v-if="lyricProviderPlugins.length === 0" size="small" type="warning" effect="plain">未安装歌词提供方插件</el-tag>
+            </div>
+          </template>
+          <div v-if="lyricProviderPlugins.length === 0" class="mf-empty">
+            <el-empty description="未安装任何歌词提供方(lyricProvider)插件" :image-size="60">
+              <el-button size="small" type="primary" @click="activeTab = 'market'">前往插件市场安装</el-button>
+            </el-empty>
+          </div>
+          <div v-else class="mf-media">
+            <div class="mf-media-row">
+              <span class="mf-media-label">来源插件</span>
+              <el-select v-model="lyricsSettings.providerId" clearable placeholder="自动" style="width: 260px" @change="saveMediaSettings('lyrics')">
+                <el-option v-for="p in lyricProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
+              </el-select>
+              <span class="field-hint">选择歌词来源插件;清空 = 自动(全部启用的歌词提供方)</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">按需获取 A</span>
+              <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
+              <span class="field-hint">本地/WebDAV 歌曲缺歌词时,播放实时向所选插件获取</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">落库 B</span>
+              <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
+              <span class="field-hint">获取到的歌词保存到数据库,离线也能显示</span>
+            </div>
+            <div class="mf-media-row">
+              <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全 C</el-button>
+              <span v-if="lyricsBackfill.total > 0" class="field-hint">{{ backfillText('lyrics') }}</span>
+            </div>
+          </div>
+        </el-card>
+
+        <el-card class="mf-card" shadow="never">
+          <template #header>
+            <div class="card-head">
+              <span class="card-title">封面获取</span>
+              <el-tag v-if="coverProviderPlugins.length === 0" size="small" type="warning" effect="plain">未安装封面提供方插件</el-tag>
+            </div>
+          </template>
+          <div v-if="coverProviderPlugins.length === 0" class="mf-empty">
+            <el-empty description="未安装任何封面提供方(coverProvider)插件" :image-size="60">
+              <el-button size="small" type="primary" @click="activeTab = 'market'">前往插件市场安装</el-button>
+            </el-empty>
+          </div>
+          <div v-else class="mf-media">
+            <div class="mf-media-row">
+              <span class="mf-media-label">来源插件</span>
+              <el-select v-model="coversSettings.providerId" clearable placeholder="自动" style="width: 260px" @change="saveMediaSettings('covers')">
+                <el-option v-for="p in coverProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
+              </el-select>
+              <span class="field-hint">选择封面来源插件;清空 = 自动(全部启用的封面提供方)</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">按需获取 A</span>
+              <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
+              <span class="field-hint">歌曲缺封面时,请求封面时实时向所选插件获取</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">落库 B</span>
+              <el-switch v-model="coversSettings.persist" @change="saveMediaSettings('covers')" />
+              <span class="field-hint">下载缓存封面到本地,一次获取永久命中</span>
+            </div>
+            <div class="mf-media-row">
+              <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">批量补全 C</el-button>
+              <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
+            </div>
+          </div>
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
 
     <!-- Add plugin dialog -->
@@ -253,60 +335,7 @@
             <span v-if="f.help" class="field-hint">{{ f.help }}</span>
           </el-form-item>
 
-          <!-- 歌词/封面按需获取设置:按能力挂载(不写死插件名),设置存全局、
-               换插件不变。go-music-dl 同时声明 lyricProvider+coverProvider → 两组并列。 -->
-          <template v-if="hasLyricProvider || hasCoverProvider">
-            <el-form-item v-if="hasLyricProvider" label="歌词获取">
-              <div class="mf-media">
-                <div class="mf-media-row">
-                  <span class="mf-media-label">来源插件</span>
-                  <el-select v-model="lyricsSettings.providerId" clearable placeholder="自动" size="small" style="width: 260px" @change="saveMediaSettings('lyrics')">
-                    <el-option v-for="p in lyricProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
-                  </el-select>
-                  <span class="field-hint">选择歌词来源插件;清空 = 自动(全部启用的歌词提供方)</span>
-                </div>
-                <div class="mf-media-row">
-                  <span class="mf-media-label">按需获取 A</span>
-                  <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
-                  <span class="field-hint">本地/WebDAV 歌曲缺歌词时,播放实时向所选插件获取</span>
-                </div>
-                <div class="mf-media-row">
-                  <span class="mf-media-label">落库 B</span>
-                  <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
-                  <span class="field-hint">获取到的歌词保存到数据库,离线也能显示</span>
-                </div>
-                <div class="mf-media-row">
-                  <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全 C</el-button>
-                  <span v-if="lyricsBackfill.total > 0" class="field-hint">{{ backfillText('lyrics') }}</span>
-                </div>
-              </div>
-            </el-form-item>
-            <el-form-item v-if="hasCoverProvider" label="封面获取">
-              <div class="mf-media">
-                <div class="mf-media-row">
-                  <span class="mf-media-label">来源插件</span>
-                  <el-select v-model="coversSettings.providerId" clearable placeholder="自动" size="small" style="width: 260px" @change="saveMediaSettings('covers')">
-                    <el-option v-for="p in coverProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
-                  </el-select>
-                  <span class="field-hint">选择封面来源插件;清空 = 自动(全部启用的封面提供方)</span>
-                </div>
-                <div class="mf-media-row">
-                  <span class="mf-media-label">按需获取 A</span>
-                  <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
-                  <span class="field-hint">歌曲缺封面时,请求封面时实时向所选插件获取</span>
-                </div>
-                <div class="mf-media-row">
-                  <span class="mf-media-label">落库 B</span>
-                  <el-switch v-model="coversSettings.persist" @change="saveMediaSettings('covers')" />
-                  <span class="field-hint">下载缓存封面到本地,一次获取永久命中</span>
-                </div>
-                <div class="mf-media-row">
-                  <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">批量补全 C</el-button>
-                  <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
-                </div>
-              </div>
-            </el-form-item>
-          </template>
+          <!-- 歌词/封面按需获取设置已移至「媒体获取」标签页(全局设置,不归属于单个插件)。 -->
 
           <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
           <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
@@ -339,7 +368,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
-const activeTab = ref<"installed" | "market">("installed");
+const activeTab = ref<"installed" | "market" | "media">("installed");
 
 // ---- installed plugins ----
 const plugins = ref<any[]>([]);
@@ -415,14 +444,8 @@ const hasWebRotation = computed<boolean>(() =>
   (parseManifest(editing.value).capabilities || []).includes("webRotation"),
 );
 
-/** 按能力挂载歌词/封面区:任何声明 lyricProvider / coverProvider 的插件都显示,
- *  不写死插件名(与 isSourcePlugin/hasWebRotation 同模式)。 */
-const hasLyricProvider = computed<boolean>(() =>
-  (parseManifest(editing.value).capabilities || []).includes("lyricProvider"),
-);
-const hasCoverProvider = computed<boolean>(() =>
-  (parseManifest(editing.value).capabilities || []).includes("coverProvider"),
-);
+/** 歌词/封面 provider 候选:所有已安装且声明对应能力的插件(媒体获取页下拉用),
+ *  不写死插件名 —— 未来装新歌词/封面插件自动出现,零代码改动。 */
 const lyricProviderPlugins = computed<any[]>(() =>
   plugins.value.filter((p) => (parseManifest(p).capabilities || []).includes("lyricProvider")),
 );
@@ -922,9 +945,10 @@ async function installPlugin(row: any) {
   }
 }
 
-/** 切到「插件市场」标签页时自动刷新一次市场(注册表/插件列表)。 */
+/** 切到「插件市场」标签页时自动刷新一次市场;切到「媒体获取」时刷新一次全局设置。 */
 function onTabChange(name: string | number) {
   if (name === "market") loadMarketplace();
+  else if (name === "media") loadMediaSettings();
 }
 
 onMounted(() => {
@@ -937,6 +961,10 @@ onMounted(() => {
 <style lang="scss" scoped>
 .admin-plugins { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+.page-sub { font-size: 13px; color: var(--el-text-color-secondary); }
+.mf-card { margin-bottom: 20px; }
+.mf-card .card-title { font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); }
+.mf-empty { padding: 8px 0; }
 .test-result { margin-left: 12px; font-size: 13px; color: var(--el-color-danger); &.ok { color: var(--el-color-success); } }
 .plugin-name { font-weight: 600; line-height: 1.35; }
 .plugin-id { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.35; }
