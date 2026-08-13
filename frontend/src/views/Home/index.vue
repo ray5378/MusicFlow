@@ -49,14 +49,19 @@
         </div>
 
         <!-- 占位（无数据时） -->
-        <div v-for="n in placeholderCount(featured, sidePlaylists, 7)" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
+        <div v-for="n in placeholderCount(featured, sidePlaylists, 8)" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
           <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
           <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
         </div>
       </div>
     </section>
 
-    <!-- ===== 各平台精选歌单 ===== -->
+    <!-- 平台精选加载失败提示 -->
+    <div v-if="recommendError && platformGroups.length === 0" class="recommend-error">
+      <MfIcon name="TriangleAlert" :size="16" /> 平台精选加载失败，请检查 go-music-dl 插件是否已启用并配置服务地址
+    </div>
+
+    <!-- ===== 各平台精选（go-music-dl recommend 能力输出，每平台数量由插件配置） ===== -->
     <section class="section" v-for="group in platformGroups" :key="group.source">
       <div class="section-title">
         <span>{{ group.name }}精选</span>
@@ -68,18 +73,16 @@
           v-for="pl in group.playlists"
           :key="pl.id"
           class="card fnos-card-sheen"
-          @contextmenu="openContextMenu($event, playlistActions(pl), pl.name, '歌单')"
-          v-longpress="() => openActionSheet(playlistActions(pl), pl.name, '歌单')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
-            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
-            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28"  /></div>
+          <div class="card-cover-wrap mf-coverwrap" @click="playRemotePl(group, pl)">
+            <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
             <PlatformBadge :source="group.source" />
-            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
+            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playRemotePl(group, pl)" />
           </div>
-          <div class="card-body" @click="go(`/playlists/${pl.id}`)">
+          <div class="card-body" @click="playRemotePl(group, pl)">
             <div class="card-title">{{ pl.name }}</div>
-            <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
+            <div class="card-sub">{{ pl.trackCount ? pl.trackCount + ' 首' : '歌单' }}</div>
           </div>
         </div>
         <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + n" class="card placeholder fnos-shimmer">
@@ -110,6 +113,12 @@ const play = usePlayContent();
 
 const playlists = ref<any[]>([]);
 const loading = ref(false);
+// 平台精选：由启用的 recommend 能力插件提供(如 go-music-dl /music/recommend)，
+// 每平台歌单数由插件配置 homeCount 控制，核心透传。
+const recommendChannels = ref<any[]>([]);
+const recommendProviderId = ref("");
+const recommendError = ref(false);
+const importingId = ref("");
 
 function cover(id: string) {
   return coverUrl(id);
@@ -132,36 +141,55 @@ async function playPl(pl: any) {
 const featured = computed(() =>
   playlists.value.find((p) => p.name === "今日推荐" && (p.songCount || 0) > 30) || null
 );
-// 并排随机：从全部歌单里随机抽 6 张（排除今日推荐大卡；只抽音乐 ≥30 首的歌单）
-// 桌面 = 1 大 + 6 小（3 列 × 2 行）；移动端由 CSS 截断到 1 大 + 4 小
+// 并排随机：从全部歌单里随机抽 7 张（排除今日推荐大卡；只抽音乐 ≥30 首的歌单），
+// 与今日推荐合并成 8 张等大卡片展示。桌面 4 列 × 2 行；移动端由 CSS 截到 2 列。
 const sidePlaylists = computed(() => {
   const pool = playlists.value.filter(
     (p) => p.id !== (featured.value && featured.value.id) && (p.songCount || 0) >= 30
   );
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 6);
+  return shuffled.slice(0, 7);
 });
 
-// 各平台精选：按 sourcePlatform 分组，每个平台随机抽 6 张歌单在首页分类展示。
-// 优先取音乐 ≥30 首的歌单;若不足 6 张,用该平台全部歌单(不限首数)随机补足,
-// 保证分区尽量满 6 张(该平台歌单总数不足 6 张则按实际显示)。
-const PLATFORM_META: Array<{ source: string; name: string }> = [
-  { source: "netease", name: "网易云" },
-  { source: "qq", name: "QQ音乐" },
-  { source: "kugou", name: "酷狗" },
-  { source: "kuwo", name: "酷我" },
-];
+// 各平台精选：直接渲染 recommend 能力插件的输出（每个 channel = 一个平台分区）。
+// 每平台歌单数已在插件内部按 homeCount 截断，前端不再写死 slice 数量。
 const platformGroups = computed(() =>
-  PLATFORM_META.map((meta) => {
-    const all = playlists.value.filter((p) => (p.sourcePlatform || "") === meta.source);
-    const eligible = all.filter((p) => (p.songCount || 0) >= 30);
-    const pool = eligible.length >= 6 ? eligible : all;
-    return {
-      ...meta,
-      playlists: [...pool].sort(() => Math.random() - 0.5).slice(0, 6),
-    };
-  }).filter((g) => g.playlists.length > 0)
+  recommendChannels.value
+    .map((ch: any) => ({
+      source: ch.source || "",
+      name: (ch.name || ch.source || "").replace(/音乐$/, ""),
+      playlists: ch.playlists || [],
+    }))
+    .filter((g) => g.playlists.length > 0)
 );
+
+// 平台精选卡片：导入为本地歌单后播放（复用现有 recommend/import 接口）。
+async function playRemotePl(group: any, pl: any) {
+  if (menuGuard() || !pl || !recommendProviderId.value) return;
+  importingId.value = pl.id;
+  try {
+    const res = await api.post(`/rest/api/v1/online/${recommendProviderId.value}/recommend/import`, {
+      source: pl.source || group.source,
+      id: pl.id,
+      name: pl.name,
+      cover: pl.cover || "",
+      creator: pl.creator || "",
+      trackCount: pl.trackCount || "",
+      link: pl.link || "",
+    });
+    if (res.data?.playlistId) {
+      const n = await play.playPlaylist(res.data.playlistId);
+      if (n) ElMessage.success(`正在播放「${pl.name}」`);
+      else ElMessage.warning("导入成功，但该歌单暂无可播放歌曲");
+    } else {
+      ElMessage.warning(res.data?.message || "导入失败");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || e.message || "导入失败");
+  } finally {
+    importingId.value = "";
+  }
+}
 
 // 无数据时补齐占位卡，保证版式可见
 function placeholderCount(featuredItem: any, list: any[], want: number) {
@@ -181,9 +209,22 @@ async function loadPlaylists() {
   }
 }
 
+async function loadRecommend() {
+  try {
+    const res = await api.get("/rest/api/v1/recommend");
+    recommendChannels.value = res.data.channels || [];
+    recommendProviderId.value = res.data.providerId || "";
+    recommendError.value = false;
+  } catch {
+    recommendChannels.value = [];
+    recommendProviderId.value = "";
+    recommendError.value = true;
+  }
+}
+
 onMounted(async () => {
   loading.value = true;
-  await loadPlaylists();
+  await Promise.all([loadPlaylists(), loadRecommend()]);
   loading.value = false;
 });
 </script>
@@ -195,6 +236,13 @@ onMounted(async () => {
   margin: 0 auto;
 }
 .section { margin-bottom: 38px; }
+.recommend-error {
+  display: flex; align-items: center; gap: 6px;
+  margin: -18px 0 18px; padding: 10px 14px;
+  font-size: 13px; color: var(--fnos-orange);
+  background: rgba(255, 165, 0, 0.08); border: 1px solid rgba(255, 165, 0, 0.25);
+  border-radius: 8px;
+}
 .section-title {
   display: flex; align-items: baseline; gap: 12px;
   font-size: 20px; font-weight: 700; margin-bottom: 16px;
@@ -203,10 +251,10 @@ onMounted(async () => {
   .more:hover { color: var(--fnos-red); }
 }
 
-/* 顶部：今日推荐大卡 + 并排随机歌单 */
+/* 顶部：今日推荐固定第一 + 7 张随机，全部等大（桌面 4 列 × 2 行 = 8 张） */
 .top-row {
   display: grid;
-  grid-template-columns: 1.6fr 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, 1fr);
   grid-auto-rows: 1fr;
   gap: 16px;
 }
@@ -227,7 +275,6 @@ onMounted(async () => {
     .card-cover { transform: scale(1.06); }
   }
   &:active { transform: translateY(-2px) scale(0.98); }
-  &.featured { grid-row: span 2; }
 }
 @keyframes home-card-in {
   from { opacity: 0; transform: translateY(14px); }
@@ -267,10 +314,8 @@ onMounted(async () => {
 }
 
 @media (max-width: 1100px) {
-  /* 平板：1 大（通栏）+ 4 小；行高改为自适应，避免小卡被大卡撑高 */
-  .top-row { grid-template-columns: 1fr 1fr; grid-auto-rows: auto; }
-  .card.featured { grid-column: span 2; grid-row: auto; }
-  .top-row > *:nth-child(n + 6) { display: none; }
+  /* 平板：8 张等大卡 3 列换行（3+3+2，占位补满） */
+  .top-row { grid-template-columns: repeat(3, 1fr); grid-auto-rows: auto; }
   .grid-row { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 768px) {
@@ -278,10 +323,8 @@ onMounted(async () => {
   .home-page { padding: 18px 16px 20px; }
   .section { margin-bottom: 28px; }
   .section-title { font-size: 18px; margin-bottom: 12px; }
-  /* 移动端：1 大 + 4 小，正好铺满 2×2 */
-  .top-row { grid-template-columns: 1fr 1fr; gap: 12px; grid-auto-rows: auto; }
-  .card.featured { grid-column: span 2; grid-row: auto; }
-  .top-row > *:nth-child(n + 6) { display: none; }
+  /* 移动端：8 张等大卡 2 列（4 行），正好铺满 */
+  .top-row { grid-template-columns: repeat(2, 1fr); gap: 12px; grid-auto-rows: auto; }
   .grid-row { grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .card-body { padding: 8px 10px 10px; }
   .card-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -1,0 +1,131 @@
+// MUST be the first import: redirects DATA_DIR to an isolated temp dir before
+// the backend opens its SQLite DB at module-load time.
+import "../plugins/_env.js";
+
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { Hono } from "hono";
+import md5 from "md5";
+import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
+import { users, plugins } from "../../src/db/schema.js";
+import { eq } from "drizzle-orm";
+import { authMiddleware } from "../../src/middleware/auth.js";
+import { apiRoutes, clearRecommendCache } from "../../src/routes/api/index.js";
+import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
+
+// 能力路由测试:GET /rest/api/v1/recommend 经 capability("recommend") 查插件、
+// 透传 channels、补全远程封面 URL、标注 imported、5min 缓存。核心不写死插件名。
+const app = new Hono();
+app.use("/rest/api/*", authMiddleware);
+app.route("/rest/api", apiRoutes);
+
+const PLAIN = "hunter2";
+const CLIENT_SALT = "clientsalt123";
+const authQS = () => `u=alice&t=${md5(PLAIN + CLIENT_SALT)}&s=${CLIENT_SALT}`;
+
+const FAKE_ID = "fake-recommend";
+const fakeManifest = {
+  id: FAKE_ID,
+  name: "Fake Recommend",
+  version: "1.0.0",
+  type: "source",
+  description: "test only",
+  capabilities: ["recommend"],
+  platforms: ["netease", "qq"],
+  configSchema: [
+    { key: "baseUrl", label: "服务地址", type: "url", required: true },
+    { key: "homeCount", label: "平台首页每平台歌单数", type: "number" },
+  ],
+};
+
+let fakeCalls = 0;
+const fakeImpl = {
+  manifest: fakeManifest,
+  async recommend(_config: any) {
+    fakeCalls++;
+    return {
+      channels: [
+        {
+          source: "netease",
+          name: "网易云",
+          count: 2,
+          playlists: [
+            { id: "pl-1", source: "netease", name: "歌单一", creator: "a", cover: "/cover/1.jpg", trackCount: "100", link: "/music/playlist?source=netease&id=pl-1" },
+            { id: "pl-2", source: "netease", name: "歌单二", creator: "b", cover: "http://cdn.example.com/2.jpg", trackCount: "50", link: "" },
+          ],
+        },
+      ],
+    };
+  },
+};
+
+function seedUser() {
+  if (db.select().from(users).where(eq(users.username, "alice")).get()) return;
+  db.insert(users).values({ id: "u1", username: "alice", password: "", salt: "salt", subsonicSalt: "subsalt", passEnc: encryptPassword(PLAIN), isAdmin: 1, isActive: 1, email: "a@b.c" }).run();
+}
+
+beforeAll(() => {
+  if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
+  initDatabase();
+  seedUser();
+});
+
+beforeEach(() => {
+  fakeCalls = 0;
+  clearRecommendCache(); // 路由缓存跨用例残留会导致后续用例命中旧数据
+  db.delete(plugins).where(eq(plugins.name, FAKE_ID)).run();
+  unregisterPlugin(FAKE_ID);
+  registerPlugin(fakeManifest as any, fakeImpl as any);
+});
+
+async function getRecommend() {
+  const res = await app.request(`/rest/api/v1/recommend?${authQS()}`);
+  return { res, body: await res.json().catch(() => null) };
+}
+
+describe("GET /rest/api/v1/recommend (capability-driven)", () => {
+  it("returns empty channels when no enabled recommend plugin", async () => {
+    unregisterPlugin(FAKE_ID);
+    const { body } = await getRecommend();
+    expect(body.success).toBe(true);
+    expect(body.channels).toEqual([]);
+    expect(body.providerId).toBe("");
+  });
+
+  it("resolves the enabled recommend plugin and returns its channels", async () => {
+    db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080", homeCount: 3 }) }).run();
+    const { body } = await getRecommend();
+    expect(body.success).toBe(true);
+    expect(body.providerId).toBe(FAKE_ID);
+    expect(body.channels).toHaveLength(1);
+    const pl = body.channels[0].playlists;
+    expect(pl).toHaveLength(2);
+    // 相对封面路径用插件 baseUrl 补全为完整 URL
+    expect(pl[0].cover).toBe("http://gmdl:8080/cover/1.jpg");
+    // 绝对 URL 原样透传
+    expect(pl[1].cover).toBe("http://cdn.example.com/2.jpg");
+    // 未导入的歌单 imported=false
+    expect(pl[0].imported).toBe(false);
+    expect(pl[0].trackCount).toBe("100");
+  });
+
+  it("caches the result for 5min (second call does not hit the plugin again)", async () => {
+    db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080" }) }).run();
+    await getRecommend();
+    expect(fakeCalls).toBe(1);
+    const { body } = await getRecommend();
+    expect(fakeCalls).toBe(1); // cache hit
+    expect(body.channels).toHaveLength(1);
+  });
+
+  it("degrades to empty channels when the plugin throws", async () => {
+    db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: "{}" }).run();
+    const throwing = { manifest: fakeManifest, async recommend() { throw new Error("boom"); } };
+    unregisterPlugin(FAKE_ID);
+    registerPlugin(fakeManifest as any, throwing as any);
+    const { body } = await getRecommend();
+    expect(body.success).toBe(true);
+    expect(body.channels).toEqual([]);
+    expect(body.providerId).toBe(FAKE_ID);
+    expect(body.error).toContain("boom");
+  });
+});

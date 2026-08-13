@@ -15,7 +15,7 @@ import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
-import { isDailyRecommendPlaylist } from "../../services/source/online/recommendImport.js";
+import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
@@ -45,7 +45,7 @@ import {
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
-import { unregisterPlugin } from "../../plugins/registry.js";
+import { unregisterPlugin, firstEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
 import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
@@ -56,6 +56,59 @@ const syncApi = () => playlistSyncApi();
 
 export const apiRoutes = new Hono();
 apiRoutes.route("/", onlineRoutes);
+
+// ==================== 首页平台精选（能力驱动，不写死插件名） ====================
+// 首页「平台精选」分区由启用的 `recommend` 能力插件提供（如 go-music-dl 的
+// /music/recommend）。每个平台展示的歌单数量由插件自身 config.homeCount 控制并
+// 在插件内部截断；核心只按能力查询并透传数据，补充远程封面完整 URL + 已导入标记。
+// 5min TTL 缓存避免每次首页加载都实时打插件网络请求；失败降级返回空 channels。
+const RECOMMEND_CACHE_TTL_MS = 5 * 60_000;
+const recommendCache = new Map<string, { ts: number; channels: any[] }>();
+/** 清空平台精选缓存(供测试/管理端"立即刷新"使用)。 */
+export function clearRecommendCache(): void {
+  recommendCache.clear();
+}
+apiRoutes.get("/v1/recommend", async (c) => {
+  const rp = firstEnabledByCapability("recommend");
+  const providerId = rp?.manifest.id || "";
+  if (!providerId) return c.json({ success: true, channels: [], providerId: "" });
+  const cached = recommendCache.get(providerId);
+  if (cached && Date.now() - cached.ts < RECOMMEND_CACHE_TTL_MS) {
+    return c.json({ success: true, channels: cached.channels, providerId });
+  }
+  if (!rp || typeof rp.impl?.recommend !== "function") {
+    return c.json({ success: true, channels: [], providerId: "" });
+  }
+  const config = getPluginConfig(providerId) || {};
+  try {
+    const result = await rp.impl.recommend(config);
+    const baseUrl = String(config.baseUrl || "").replace(/\/+$/, "");
+    const channels = (Array.isArray(result?.channels) ? result.channels : []).map((ch: any) => ({
+      source: ch.source || "",
+      name: ch.name || ch.source || "",
+      count: ch.count || 0,
+      playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
+        id: pl.id,
+        source: pl.source || ch.source || "",
+        name: pl.name || "",
+        creator: pl.creator || "",
+        // 远程封面 URL:go-music-dl 返回相对路径时用插件 baseUrl 拼成完整地址,
+        // 前端才能直接 <img> 渲染。
+        cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
+          ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
+          : (pl.cover || ""),
+        trackCount: pl.trackCount != null ? String(pl.trackCount) : "",
+        link: pl.link || "",
+        imported: !!findRecommendPlaylist(pl.id),
+      })),
+    }));
+    recommendCache.set(providerId, { ts: Date.now(), channels });
+    return c.json({ success: true, channels, providerId });
+  } catch (e: any) {
+    console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
+    return c.json({ success: true, channels: [], providerId, error: String(e?.message || e) });
+  }
+});
 
 // ==================== Users ====================
 apiRoutes.get("/v1/users", adminMiddleware, (c) => {
