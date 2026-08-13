@@ -12,9 +12,13 @@ import { songs, albums, playlists, playlistSongs } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../utils/env.js";
 
-const COVERS_DIR = path.join(process.cwd(), "data", "covers");
-const ONLINE_COVERS_DIR = path.join(process.cwd(), "data", "online-covers");
+// 数据目录统一走 getDataDir()(DATA_DIR 优先,默认 cwd/data),与 DB/插件/密钥同根:
+//   - data/covers        本地刮削封面(扫描内嵌封面、艺术家头像)
+//   - data/online-covers 平台/在线封面缓存(web 歌曲、歌单导入、按需获取),可独立挂卷
+const COVERS_DIR = path.join(getDataDir(), "covers");
+const ONLINE_COVERS_DIR = path.join(getDataDir(), "online-covers");
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
 // Resolved-path cache: probing both dirs costs a stat syscall per candidate on

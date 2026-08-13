@@ -10,8 +10,8 @@
 
 | 组件 | 版本 | 仓库 |
 |---|---|---|
-| 服务端（本仓库） | **v1.5.0** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
-| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.5.0**（镜像 musicflow-v2:1.5.0） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
+| 服务端（本仓库） | **v1.7.4** | [ray5378/MusicFlow-V2](https://github.com/ray5378/MusicFlow-V2) |
+| HA 加载项 [hassio-addons](https://github.com/ray5378/hassio-addons) | **1.7.4**（镜像 musicflow-v2:1.7.4） | [ray5378/hassio-addons](https://github.com/ray5378/hassio-addons) |
 | HA 集成 [hass-musicflow](https://github.com/ray5378/hass-musicflow) | **v1.3.7** | [ray5378/hass-musicflow](https://github.com/ray5378/hass-musicflow) |
 | HA 卡片 [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | **v1.6.51** | [ray5378/hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) |
 
@@ -21,7 +21,7 @@
 
 打 `v*` tag 时 CI 自动构建到（仅 **linux/amd64**）：
 
-- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.5.0`）
+- `ghcr.io/ray5378/musicflow-v2:<版本>`（如 `:1.7.4`）
 - `ghcr.io/ray5378/musicflow-v2:latest`
 
 > **架构说明**：当前镜像仅提供 **linux/amd64**（x86_64）。arm64 / ARM 设备（如部分 ARM 架构 NAS）暂时无法运行，后续视 GitHub ARM runner 可用性再补多架构（账号暂无 ARM runner，与 V1 一致）。
@@ -58,14 +58,17 @@ docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow-v2
 ```yaml
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow-v2:1.5.0
+    image: ghcr.io/ray5378/musicflow-v2:1.7.4
     container_name: musicflow
     restart: unless-stopped
     # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
     # host 网络仅 Linux 支持;Docker Desktop(macOS/Windows)上多播不可用,DLNA 需原生运行。
     network_mode: host
     environment:
-      # 可选:JWT 签名密钥。留空则首次启动自动生成并保存到 ./data/.jwt-secret(重启稳定)。
+      # 数据目录:SQLite 主库 + 歌词/封面落库 + 外置插件 + 密钥都在这里。
+      # 必须与下方 ./data:/data 卷映射对应,否则数据不会持久化。
+      - DATA_DIR=/data
+      # 可选:JWT 签名密钥。留空则首次启动自动生成并保存到 <DATA_DIR>/.jwt-secret(重启稳定)。
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
@@ -74,24 +77,44 @@ services:
       # 可选:覆盖 DLNA 渲染器回拉流地址的基地址(反代/多网卡场景)。
       # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
-      - ./data:/app/backend/data
-      # 可选:平台歌曲/歌单封面默认下载到容器内 /app/backend/data/online-covers
-      # (即 ./data 卷内,默认开启,无需配置)。如需独立挂到宿主机大磁盘,取消注释:
-      # - ./online-covers:/app/backend/data/online-covers
+      # 数据与缓存目录(宿主 ./data 挂到容器 /data),结构见下方「数据与缓存目录」:
+      - ./data:/data
+      # 可选:把平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
+      # 默认它在 ./data 卷内,无需配置;想单独存放/单独清缓存时取消注释:
+      # - ./online-covers:/data/online-covers
 ```
 
-> **平台音乐封面本地落盘默认开启**：QQ / 网易云等平台的歌曲与歌单封面，下载后会默认保存到本地 `data/online-covers/`（容器内 `/app/backend/data/online-covers`），无需任何配置；想把它独立放到其他磁盘（如大容量数据盘），取消 compose 里对应那行卷映射即可。
+> **平台音乐封面本地落盘默认开启**：QQ / 网易云等平台的歌曲与歌单封面，下载后会默认保存到 `data/online-covers/`（容器内 `/data/online-covers`），无需任何配置；想把它独立放到其他磁盘（如大容量数据盘），取消 compose 里对应那行卷映射即可。
 
 ### 直接 docker run
 
 ```bash
 docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
-  -v $(pwd)/data:/app/backend/data \
-  ghcr.io/ray5378/musicflow-v2:1.5.0
+  -e DATA_DIR=/data \
+  -v $(pwd)/data:/data \
+  ghcr.io/ray5378/musicflow-v2:1.7.4
 ```
 
 > DLNA 发现依赖 SSDP 多播，`docker compose` 默认 `network_mode: host`；Docker Desktop（macOS/Windows）上多播不可用，DLNA 需在 Linux 宿主机运行。
+
+## 数据与缓存目录
+
+所有持久化数据都在 `DATA_DIR`（默认 `./data`，容器内 `/data`）下，升级 / 迁移只需备份整个目录：
+
+| 路径 | 内容 | 说明 |
+|---|---|---|
+| `musicflow.db` | SQLite 主库 | 歌曲 / 歌单 / 设置 / 播放历史等全部元数据 |
+| `musicflow.db-wal` / `-shm` | SQLite WAL 日志 | 正常随主库一起备份即可 |
+| `covers/` | 本地刮削封面 | 本地音乐扫描出的内嵌封面、歌手头像抓取缓存 |
+| `online-covers/` | **平台 / 在线封面缓存** | web 歌曲、歌单导入、以及「媒体获取」按需获取(A/B)下载的远程封面；**可单独挂到大磁盘或单独清空**（清空后缺失封面会重新按需获取） |
+| `plugins/` | 外置插件 | 从插件市场安装的第三方插件（QuickJS 沙箱运行） |
+| `.jwt-secret` | JWT 密钥 | 未配置 `JWT_SECRET` 时自动生成，重启保持稳定 |
+| `.server-uuid` | mDNS 服务标识 | DLNA 发现用，保证实例身份稳定 |
+
+**歌词落库**：按需获取(A) 且「落库 B」开启时，歌词写入 `musicflow.db` 的 `songs.lyrics` 列（不是独立文件）；本地音乐自带的 `.lrc` 歌词文件仍放在**音乐文件同目录**（sidecar），不在此处。**封面落库**：`cover_art` 存的是上述 `online-covers/` 里的文件引用，实际图片文件在 `data/online-covers/`。
+
+想清空媒体缓存（如换封面源后重新拉取），删除 `online-covers/` 目录内容后重启即可，本地 `covers/` 与库内歌词不受影响。
 
 ## 环境变量
 
@@ -101,7 +124,7 @@ docker run -d --name musicflow --restart unless-stopped \
 | `CORS_ORIGINS` | 否 | `*` | 允许的跨域来源（逗号分隔）。HA 卡片直连模式需要把 HA 前端来源加入此处（或保持 `*`） |
 | `PLAY_HISTORY_RETENTION_DAYS` | 否 | `3` | 播放历史保留天数 |
 | `DLNA_BASE_URL` | 否 | 自动探测 | DLNA 渲染器回拉音频流的基地址，多网卡/反代场景需手填 |
-| `DATA_DIR` | 否 | `./data` | 数据目录（SQLite + 封面缓存 + 密钥 + 外置插件） |
+| `DATA_DIR` | 否 | `./data` | 数据与缓存目录（SQLite + 封面缓存 + 外置插件 + 密钥），结构见上方「数据与缓存目录」 |
 | `MUSICFLOW_OFFICIAL_REGISTRY` | 否 | 官方 URL | 插件注册表地址；置空串禁用自动种子（内网/离线） |
 
 ## Home Assistant 接入

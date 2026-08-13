@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 import path from "path";
 import { parseBuffer } from "music-metadata";
+import { getDataDir } from "../../utils/env.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
 const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover art
@@ -365,7 +366,7 @@ function saveCoverArt(albumId: string, pic: { format: string; data: Buffer } | u
   if (!pic) return null;
   try {
     const ext = pic.format === "image/png" ? "png" : pic.format === "image/gif" ? "gif" : "jpg";
-    const dir = path.join(process.cwd(), "data", "covers");
+    const dir = path.join(getDataDir(), "covers");
     fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, `${albumId}.${ext}`);
     fs.writeFileSync(filePath, pic.data);

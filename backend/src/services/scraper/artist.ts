@@ -8,8 +8,9 @@ import { eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { getEnabledByCapability } from "../../plugins/registry.js";
+import { getDataDir } from "../../utils/env.js";
 
-const COVERS_DIR = path.join(process.cwd(), "data", "covers");
+const COVERS_DIR = path.join(getDataDir(), "covers");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
 function ensureDir() {

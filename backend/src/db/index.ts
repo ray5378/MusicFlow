@@ -7,9 +7,9 @@ import path from "path";
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
-import { JWT_SECRET } from "../utils/env.js";
+import { JWT_SECRET, getDataDir } from "../utils/env.js";
 
-const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), "data");
+const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }

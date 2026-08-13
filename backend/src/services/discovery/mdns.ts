@@ -12,6 +12,7 @@ import path from "path";
 import os from "os";
 import crypto from "crypto";
 import { Bonjour } from "bonjour-service";
+import { getDataDir } from "../../utils/env.js";
 
 let bonjour: Bonjour | null = null;
 let service: any = null;
@@ -53,9 +54,7 @@ export function stopMdnsBroadcast(): void {
 }
 
 function getServerUuid(): string {
-  const dataDir = process.env.DATA_DIR
-    ? path.resolve(process.env.DATA_DIR)
-    : path.resolve(process.cwd(), "data");
+  const dataDir = getDataDir();
   const file = path.join(dataDir, ".server-uuid");
   try {
     if (fs.existsSync(file)) {

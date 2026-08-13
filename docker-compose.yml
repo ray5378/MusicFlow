@@ -1,6 +1,6 @@
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow-v2:1.5.0
+    image: ghcr.io/ray5378/musicflow-v2:1.7.4
     container_name: musicflow
     restart: unless-stopped
     # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
@@ -9,7 +9,10 @@ services:
     # DLNA 需改为在 Linux 宿主机原生运行。
     network_mode: host
     environment:
-      # 可选:JWT 签名密钥。留空时首次启动自动生成并保存到 ./data/.jwt-secret
+      # 数据目录:SQLite 主库 + 歌词/封面落库 + 外置插件 + 密钥都在这。
+      # 必须与下方 ./data:/data 卷映射对应,否则数据不会持久化。
+      - DATA_DIR=/data
+      # 可选:JWT 签名密钥。留空时首次启动自动生成并保存到 <DATA_DIR>/.jwt-secret
       # (重启后保持稳定)。复用已有数据目录时建议显式设置,保证密钥一致。
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
@@ -20,9 +23,14 @@ services:
       # 反代/多网卡导致探测错误时设置此项。
       # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
-      - ./data:/app/backend/data
-      # 可选:把平台音乐封面独立挂载到宿主机大磁盘。
-      # 平台歌曲/歌单封面默认下载到容器内 /app/backend/data/online-covers
-      # (即上面的 ./data 卷内,默认开启,无需配置)。
-      # 如需独立存放,取消注释并把宿主机路径换成你的目录:
-      # - ./online-covers:/app/backend/data/online-covers
+      # 数据与缓存目录(宿主 ./data 挂到容器 /data):
+      #   musicflow.db      —— SQLite 主库(歌曲/歌单/设置;歌词落库写在 songs.lyrics 列)
+      #   covers/           —— 本地刮削封面(扫描内嵌封面、艺术家头像)
+      #   online-covers/    —— 平台/在线封面缓存(web 歌曲、歌单导入、按需获取 A/B)
+      #   plugins/          —— 外置插件
+      #   .jwt-secret       —— 自动生成的 JWT 密钥
+      - ./data:/data
+      # 可选:把平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
+      # 默认它在上面的 ./data 卷内,无需配置;想单独存放/单独清缓存时,
+      # 取消注释并把宿主机路径换成你的目录(优先级高于 ./data 内的同名子目录):
+      # - ./online-covers:/data/online-covers

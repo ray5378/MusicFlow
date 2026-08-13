@@ -7,9 +7,11 @@ import { eq } from "drizzle-orm";
 import { initDatabase, db, sqlite } from "../../../src/db/index.js";
 import { songs, playlists, playlistSongs, users, userFavoriteSongs, playHistory } from "../../../src/db/schema.js";
 import { purgeExpiredWebSongs } from "../../../src/services/source/online/purge.js";
+import { getDataDir } from "../../../src/utils/env.js";
 
-const ONLINE_COVERS_DIR = path.join(process.cwd(), "data", "online-covers");
-const CWD_COVERS_DIR = path.join(process.cwd(), "data", "covers");
+// 封面目录与实现一致地走 getDataDir()(测试进程 DATA_DIR 指向隔离临时目录)。
+const ONLINE_COVERS_DIR = path.join(getDataDir(), "online-covers");
+const COVERS_DIR = path.join(getDataDir(), "covers");
 
 const OLD = "2026-01-01T00:00:00.000Z"; // far older than the 7-day retention
 // One minute in the future: always after any purge cutoff ("now").
@@ -93,7 +95,7 @@ function seed() {
 
   // Cover files for one that will be purged (old) and one that must stay (fav).
   for (const name of [`${IDS.old}.jpg`, `${IDS.fav}.jpg`]) {
-    for (const dir of [ONLINE_COVERS_DIR, CWD_COVERS_DIR]) {
+    for (const dir of [ONLINE_COVERS_DIR, COVERS_DIR]) {
       const fp = path.join(dir, name);
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(fp, "fake-cover");
@@ -127,7 +129,7 @@ describe("purgeExpiredWebSongs", () => {
     // Old unreferenced web song + its history row + cover are gone.
     expect(db.select().from(songs).where(eq(songs.id, IDS.old)).get()).toBeUndefined();
     expect(db.select().from(playHistory).where(eq(playHistory.songId, IDS.old)).get()).toBeUndefined();
-    for (const dir of [ONLINE_COVERS_DIR, CWD_COVERS_DIR]) {
+    for (const dir of [ONLINE_COVERS_DIR, COVERS_DIR]) {
       expect(fs.existsSync(path.join(dir, `${IDS.old}.jpg`))).toBe(false);
     }
 
