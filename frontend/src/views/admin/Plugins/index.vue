@@ -177,17 +177,17 @@
               <span class="field-hint">选择歌词来源插件;清空 = 自动(全部启用的歌词提供方)</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">按需获取 A</span>
+              <span class="mf-media-label">按需获取</span>
               <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
               <span class="field-hint">本地/WebDAV 歌曲缺歌词时,播放实时向所选插件获取</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">落库 B</span>
+              <span class="mf-media-label">落库</span>
               <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
               <span class="field-hint">获取到的歌词保存为本地文件(online-lyrics/),离线也能显示</span>
             </div>
             <div class="mf-media-row">
-              <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全 C</el-button>
+              <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全</el-button>
               <span v-if="lyricsBackfill.total > 0" class="field-hint">{{ backfillText('lyrics') }}</span>
             </div>
           </div>
@@ -214,21 +214,26 @@
               <span class="field-hint">选择封面来源插件;清空 = 自动(全部启用的封面提供方)</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">按需获取 A</span>
+              <span class="mf-media-label">按需获取</span>
               <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
               <span class="field-hint">歌曲缺封面时,请求封面时实时向所选插件获取</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">落库 B</span>
+              <span class="mf-media-label">落库</span>
               <el-switch v-model="coversSettings.persist" @change="saveMediaSettings('covers')" />
               <span class="field-hint">下载缓存封面到本地,一次获取永久命中</span>
             </div>
             <div class="mf-media-row">
-              <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">批量补全 C</el-button>
+              <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">批量补全</el-button>
               <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
             </div>
           </div>
         </el-card>
+
+        <div class="mf-actions">
+          <el-button type="primary" :loading="savingMedia" @click="saveAllMedia">保存设置</el-button>
+          <span class="field-hint">修改即时生效;此按钮可一次性确认并保存「歌词获取」与「封面获取」全部设置。</span>
+        </div>
       </el-tab-pane>
     </el-tabs>
 
@@ -418,6 +423,7 @@ const lyricsSettings = reactive({ providerId: "", onDemand: true, persist: false
 const coversSettings = reactive({ providerId: "", onDemand: true, persist: true });
 const lyricsBackfill = reactive({ running: false, total: 0, done: 0, ok: 0, fail: 0, skipped: 0 });
 const coversBackfill = reactive({ running: false, total: 0, done: 0, ok: 0, fail: 0, skipped: 0 });
+const savingMedia = ref(false);
 
 // ---- health ----
 const healthMap = ref<Record<string, any>>({});
@@ -831,13 +837,23 @@ async function loadMediaSettings() {
   } catch { /* 后端旧版本无此端点时保持默认 */ }
 }
 
-async function saveMediaSettings(kind: "lyrics" | "covers") {
+async function saveMediaSettings(kind: "lyrics" | "covers"): Promise<boolean> {
   const s = kind === "lyrics" ? lyricsSettings : coversSettings;
   try {
     await api.put(`/rest/api/v1/${kind}/settings`, { providerId: s.providerId, onDemand: s.onDemand, persist: s.persist });
+    return true;
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || "设置保存失败");
+    return false;
   }
+}
+
+/** 一次性保存「歌词获取」+「封面获取」两组全局设置(保留开关即时保存的同时,给显式确认入口)。 */
+async function saveAllMedia() {
+  savingMedia.value = true;
+  const [a, b] = await Promise.all([saveMediaSettings("lyrics"), saveMediaSettings("covers")]);
+  savingMedia.value = false;
+  if (a && b) ElMessage.success("已保存媒体获取设置");
 }
 
 async function startBackfill(kind: "lyrics" | "covers") {
@@ -963,6 +979,7 @@ onMounted(() => {
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
 .page-sub { font-size: 13px; color: var(--el-text-color-secondary); }
 .mf-card { margin-bottom: 20px; }
+.mf-actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
 .mf-card .card-title { font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); }
 .mf-empty { padding: 8px 0; }
 .test-result { margin-left: 12px; font-size: 13px; color: var(--el-color-danger); &.ok { color: var(--el-color-success); } }
