@@ -28,6 +28,7 @@ import { songs } from "../db/schema.js";
 import { registerPlugin, getPlugin, getPluginConfig, getEnabledByCapability } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
+import { matchPlaylistInBackground } from "../services/plugin/playlistSync.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { createComm } from "./comm.js";
@@ -674,42 +675,17 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
   const cover = coverForPluginPlaylist(playlistId, opts?.coverSongId ? String(opts.coverSongId) : null);
   sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
   // 生成后自动补匹配:仍存在外部(不可播)条目时,后台经已启用在线源再匹配一轮
-  // (与每日推荐 rebuildPlaylistEntries 后的 auto-match 行为一致),成功即导入为
-  // 可播 web 歌曲。失败不阻塞、不报错。
+  // (复用共享宿主服务 matchPlaylistInBackground,与导入歌单 rebuildPlaylistEntries
+  // 后的 auto-match 行为一致),成功即导入为可播 web 歌曲。失败不阻塞、不报错。
   const extCount = sqlite.prepare(
     "SELECT COUNT(*) AS n FROM playlist_songs WHERE playlist_id = ? AND playable = 0 AND external_title IS NOT NULL AND external_title <> ''",
   ).get(playlistId) as { n: number };
   if ((extCount?.n || 0) > 0) {
-    autoMatchPluginPlaylist(playlistId).catch((e) => {
+    matchPlaylistInBackground(playlistId).catch((e) => {
       console.error(`[auto-match] ${playlistId} 后台匹配失败:`, e?.message || e);
     });
   }
   return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);
-}
-
-// 外置插件歌单后台自动匹配:每歌单同时只跑一个(内存锁),经 autoMatch 优先、
-// search 兜底的能力插件,把 playable=0 的 external 条目匹配并导入为可播 web 歌曲。
-const pluginAutoMatchLocks = new Set<string>();
-async function autoMatchPluginPlaylist(playlistId: string): Promise<void> {
-  if (pluginAutoMatchLocks.has(playlistId)) return;
-  pluginAutoMatchLocks.add(playlistId);
-  const started = Date.now();
-  try {
-    const matcher = getEnabledByCapability("autoMatch")[0] ?? getEnabledByCapability("search")[0];
-    if (!matcher || typeof matcher.impl?.search !== "function") return; // 无可用在线源
-    const config = getPluginConfig(matcher.manifest.id);
-    if (!config) return;
-    const { matchUnmatchedPlaylistEntries } = await import("../services/source/online/match.js");
-    const result = await matchUnmatchedPlaylistEntries(matcher.manifest.id, config, matcher.impl, playlistId);
-    if (result.total > 0) {
-      console.log(
-        `[auto-match] ${playlistId}: ${result.matched} matched, ${result.noMatch} no-match, ${result.error} errors in ${((Date.now() - started) / 1000).toFixed(1)}s`,
-      );
-      refreshPluginPlaylistCounts(playlistId); // 条目 playable 变化后刷新计数/时长
-    }
-  } finally {
-    pluginAutoMatchLocks.delete(playlistId);
-  }
 }
 
 /** 歌单封面:优先指定 songId 的封面;否则按 position 顺序扫自身条目取第一首

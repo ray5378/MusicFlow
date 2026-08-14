@@ -125,7 +125,7 @@ export async function rebuildPlaylistEntries(
   // these playlists become playable even without the track being in the local
   // library. Fire-and-forget: the match runs off this request's hot path.
   if (unmatched > 0) {
-    queueAutoMatch(playlistId).catch((e) => {
+    matchPlaylistInBackground(playlistId).catch((e) => {
       console.error(`[auto-match] playlist ${playlistId} 自动匹配失败:`, e?.message || e);
     });
   }
@@ -136,12 +136,13 @@ export async function rebuildPlaylistEntries(
 // Per-playlist auto-match guard: only one background match at a time per playlist.
 const autoMatchLocks = new Set<string>();
 
-// Match a playlist's unmatched entries ("曲库中未找到") through whichever enabled
-// plugin declares the ability to do it. Capability-driven: a plugin that says it
-// can `autoMatch` wins, otherwise any plugin that can `search` is good enough.
-// match.ts is loaded lazily via dynamic import to avoid a static cycle (it
-// imports this module for normalizeKey).
-async function queueAutoMatch(playlistId: string): Promise<void> {
+/** 后台自动匹配一张歌单的未匹配条目(playable=0 且 external_title 非空)。
+ *
+ *  共享宿主服务:导入歌单(rebuildPlaylistEntries 后)与外置插件歌单
+ *  (discovery.upsertPluginPlaylist 写入后)都经此触发,避免两份近似逻辑漂移。
+ *  能力驱动:autoMatch 能力优先,否则任意 search 能力插件兜底;每歌单内存锁防并发;
+ *  失败不抛(调用方 fire-and-forget)。 */
+export async function matchPlaylistInBackground(playlistId: string): Promise<void> {
   if (autoMatchLocks.has(playlistId)) return;
   autoMatchLocks.add(playlistId);
   const started = Date.now();
