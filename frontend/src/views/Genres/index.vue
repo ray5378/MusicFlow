@@ -40,7 +40,7 @@
     </template>
 
     <!-- Add to playlist dialog -->
-    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px">
+    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px" :append-to-body="true">
       <div class="playlist-dialog-song">将选中的 {{ selectedSongs.length }} 首歌曲添加到：</div>
       <div class="playlist-list" v-loading="playlistsLoading">
         <div v-for="pl in playlists" :key="pl.id" class="playlist-item" :class="{ active: addingPlaylistId === pl.id }" @click="addToPlaylist(pl)">

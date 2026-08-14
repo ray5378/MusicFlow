@@ -89,7 +89,7 @@
     </EmptyState>
 
     <!-- Add dialog -->
-    <el-dialog v-model="showAddDialog" title="添加媒体源" width="500px">
+    <el-dialog v-model="showAddDialog" title="添加媒体源" width="500px" :append-to-body="true">
       <el-form label-width="100px">
         <el-form-item label="名称"><el-input v-model="newSource.name" placeholder="我的音乐库" /></el-form-item>
         <el-form-item label="类型">
@@ -115,7 +115,7 @@
     </el-dialog>
 
     <!-- Pencil dialog -->
-    <el-dialog v-model="showEditDialog" title="修改媒体源配置" width="500px">
+    <el-dialog v-model="showEditDialog" title="修改媒体源配置" width="500px" :append-to-body="true">
       <el-form label-width="100px">
         <el-form-item label="名称"><el-input v-model="editSource.name" /></el-form-item>
         <template v-if="editSource.type === 'webdav'">

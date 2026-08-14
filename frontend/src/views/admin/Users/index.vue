@@ -30,7 +30,7 @@
       </template>
     </EmptyState>
 
-    <el-dialog v-model="showAddDialog" title="新增用户" width="400px">
+    <el-dialog v-model="showAddDialog" title="新增用户" width="400px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="用户名"><el-input v-model="newUser.username" /></el-form-item>
         <el-form-item label="密码"><el-input v-model="newUser.password" type="password" /></el-form-item>
@@ -41,7 +41,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showPwdDialog" title="修改密码" width="400px">
+    <el-dialog v-model="showPwdDialog" title="修改密码" width="400px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="新密码"><el-input v-model="pwdForm.newPassword" type="password" /></el-form-item>
       </el-form>
@@ -51,7 +51,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showNameDialog" title="修改用户名" width="400px">
+    <el-dialog v-model="showNameDialog" title="修改用户名" width="400px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="新用户名"><el-input v-model="nameForm.username" /></el-form-item>
       </el-form>
@@ -61,7 +61,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showKeyDialog" :title="`API Key — ${keyForm.username}`" width="520px">
+    <el-dialog v-model="showKeyDialog" :title="`API Key — ${keyForm.username}`" width="520px" :append-to-body="true">
       <div class="key-dialog" v-loading="keyForm.loading">
         <p class="key-desc">
           供 Home Assistant 集成等常驻客户端使用的长期凭据。登录用的 JWT 24 小时过期，第三方客户端要用这里的 Key。

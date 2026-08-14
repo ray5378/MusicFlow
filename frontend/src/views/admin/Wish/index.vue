@@ -52,7 +52,7 @@
     </div>
 
     <!-- Wish list dialog: split into copyable chunks (<= 1000 chars) -->
-    <el-dialog v-model="showListDialog" title="未命中音乐列表" width="620px">
+    <el-dialog v-model="showListDialog" title="未命中音乐列表" width="620px" :append-to-body="true">
       <div class="wish-list-info" v-if="totalWishes > 0">
         共 {{ totalWishes }} 首未命中音乐,已分成 {{ chunks.length }} 段(每段不超过 1000 字符)
       </div>

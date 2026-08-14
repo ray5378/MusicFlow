@@ -82,7 +82,7 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="showNameDialog" title="修改用户名" width="400px">
+    <el-dialog v-model="showNameDialog" title="修改用户名" width="400px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="新用户名"><el-input v-model="newName" /></el-form-item>
       </el-form>

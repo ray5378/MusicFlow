@@ -183,7 +183,7 @@
     </el-dialog>
 
     <!-- Rename-only dialog (quick action, keeps member edits untouched) -->
-    <el-dialog v-model="showRenameDialog" title="重命名群组" width="380px">
+    <el-dialog v-model="showRenameDialog" title="重命名群组" width="380px" :append-to-body="true">
       <el-input v-model="renameName" placeholder="输入新的群组名称" maxlength="50" @keyup.enter="saveRename" />
       <template #footer>
         <el-button @click="showRenameDialog = false">取消</el-button>
@@ -192,7 +192,7 @@
     </el-dialog>
 
     <!-- Rename DLNA device (alias) dialog -->
-    <el-dialog v-model="showRenameDeviceDialog" title="重命名设备" width="380px">
+    <el-dialog v-model="showRenameDeviceDialog" title="重命名设备" width="380px" :append-to-body="true">
       <el-input v-model="renameDeviceName" placeholder="输入设备显示名(留空恢复原始名称)" maxlength="50" @keyup.enter="saveRenameDevice" />
       <div class="form-tip">该名称会显示在播放控件和 HA 卡片上</div>
       <template #footer>

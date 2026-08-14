@@ -312,7 +312,7 @@
     </el-tabs>
 
     <!-- Add plugin dialog -->
-    <el-dialog v-model="showAddDialog" title="添加插件" width="500px">
+    <el-dialog v-model="showAddDialog" title="添加插件" width="500px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="插件名称"><el-input v-model="newPlugin.name" /></el-form-item>
         <el-form-item label="描述"><el-input v-model="newPlugin.description" type="textarea" /></el-form-item>
@@ -324,7 +324,7 @@
     </el-dialog>
 
     <!-- Add registry dialog -->
-    <el-dialog v-model="showRegDialog" title="添加插件注册表" width="500px">
+    <el-dialog v-model="showRegDialog" title="添加插件注册表" width="500px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="URL">
           <el-input v-model="newRegistryUrl" placeholder="https://example.com/registry.json" />
@@ -337,7 +337,7 @@
     </el-dialog>
 
     <!-- Plugin detail dialog: 功能介绍 / 处理逻辑 / 能力 / 权限 / 配置 -->
-    <el-dialog v-model="showConfigDialog" :title="`插件详情 · ${displayName(editing)}`" width="720px" top="6vh">
+    <el-dialog v-model="showConfigDialog" :title="`插件详情 · ${displayName(editing)}`" width="720px" top="6vh" :append-to-body="true">
       <div class="pd-head">
         <span class="pd-id">{{ editing?.id }}@{{ editing?.version }}</span>
         <el-tag size="small" :type="typeTagColor(editing)" effect="light">{{ typeLabel(editing) }}</el-tag>

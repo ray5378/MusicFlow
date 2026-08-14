@@ -85,7 +85,7 @@
       <PagePagination :total="total" :page="currentPage" :page-size="pageSize" :sizes="[15, 20, 50, 100]" storage-key="playlistsPageSize" @change="onPageChange" />
     </div>
 
-    <el-dialog v-model="showCreateDialog" title="新建歌单" width="400px">
+    <el-dialog v-model="showCreateDialog" title="新建歌单" width="400px" :append-to-body="true">
       <el-input v-model="newPlaylistName" placeholder="歌单名称" @keyup.enter="createPlaylist" />
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
@@ -93,7 +93,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px">
+    <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px" :append-to-body="true">
       <el-input v-model="renamePlaylistName" placeholder="新歌单名称" @keyup.enter="renamePlaylist" />
       <template #footer>
         <el-button @click="showRenameDialog = false">取消</el-button>
@@ -101,7 +101,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showImportDialog" title="导入歌单" width="560px">
+    <el-dialog v-model="showImportDialog" title="导入歌单" width="560px" :append-to-body="true">
       <!-- 支持的平台来自「已启用的导入插件」,不再写死:在插件页停用某个导入插件后
            这里的提示会同步变化。 -->
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">

@@ -95,6 +95,58 @@ test("插件配置/详情弹窗在手机端不超出视口宽度", async ({ page
   expect(box!.x, `配置弹窗左缘 ${Math.round(box!.x)}px 越界`).toBeGreaterThanOrEqual(-1);
 });
 
+test("插件配置/详情弹窗不被播放控件遮挡(层级回归守卫)", async ({ page }) => {
+  // 回归守卫:弹窗(el-dialog)若未 append-to-body,会渲染在页面滚动容器
+  // (.main-scroll,z-index:1 的 stacking context)内,其自身 z-index 2000+ 被困在
+  // 该上下文里,对外等效 z-index 1 → 被底部播放条(桌面 50 / 移动 520)或全屏
+  // 播放模式(300/700)盖住。此断言用 elementFromPoint 模拟真实交互命中:
+  // 弹窗内最后一个可见按钮(保存/确定)的中心点必须命中弹窗内部。
+  await page.goto("/admin/plugins", { waitUntil: "load" });
+  await page.waitForTimeout(400);
+  const openBtn = page.getByRole("button", { name: /配置|详情/ }).first();
+  await openBtn.waitFor({ state: "visible", timeout: 10_000 });
+  await openBtn.click();
+  const dialog = page.locator(".el-dialog").first();
+  await dialog.waitFor({ state: "visible", timeout: 5_000 });
+  const hit = await page.evaluate(() => {
+    const dlg = document.querySelector(".el-dialog");
+    if (!dlg) return "no-dialog";
+    const probe = (x: number, y: number): boolean => {
+      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+      const el = document.elementFromPoint(x, y);
+      let node: HTMLElement | null = el as HTMLElement | null;
+      while (node && node !== document.body) {
+        if (node.closest && (node.closest(".el-dialog") || node.closest(".el-overlay"))) return true;
+        node = node.parentElement;
+      }
+      return false;
+    };
+    const r = dlg.getBoundingClientRect();
+    // 1) 弹窗中心点必须命中弹窗内部(被播放条/全屏控件覆盖则 false)
+    if (!probe(r.left + r.width / 2, r.top + r.height / 2)) return "center-covered";
+    // 2) 弹窗内视口可见的最后一个按钮(保存/确定/关闭)也必须命中
+    //    (弹窗可能高于视口,footer 按钮可能被滚出视口,只取视口内的)
+    const btns = Array.from(dlg.querySelectorAll("button"))
+      .map((b) => b.getBoundingClientRect())
+      .filter(
+        (br) =>
+          br.width > 0 &&
+          br.height > 0 &&
+          br.top >= 0 &&
+          br.top + br.height <= window.innerHeight &&
+          br.left >= 0 &&
+          br.left + br.width <= window.innerWidth
+      );
+    const last = btns[btns.length - 1];
+    if (last && !probe(last.left + last.width / 2, last.top + last.height / 2)) return "btn-covered";
+    return "dialog-hit";
+  });
+  expect(
+    hit,
+    `配置弹窗被播放控件遮挡(修复:el-dialog 需 append-to-body 脱离页面滚动容器 stacking context):${hit}`
+  ).toBe("dialog-hit");
+});
+
 test("歌单详情页在手机端不应横向溢出", async ({ page }) => {
   const res = await page.request.get("/rest/api/v1/playlists?page=1&pageSize=1");
   if (!res.ok()) return; // 无数据则跳过(空态由列表测试覆盖)

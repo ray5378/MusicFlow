@@ -65,7 +65,7 @@
       />
     </div>
 
-    <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px">
+    <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px" :append-to-body="true">
       <el-input v-model="newName" placeholder="新歌单名称" @keyup.enter="renamePlaylist" />
       <template #footer>
         <el-button @click="showRenameDialog = false">取消</el-button>
@@ -73,7 +73,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showMatchDialog" title="在线匹配" width="480px" :close-on-click-modal="false">
+    <el-dialog v-model="showMatchDialog" title="在线匹配" width="480px" :close-on-click-modal="false" :append-to-body="true">
       <div v-if="matchRunning" class="match-progress">
         <el-progress :percentage="matchPercent" />
         <p class="match-hint">正在通过在线源匹配「{{ playlist?.name }}」中未收录的 {{ matchTotal }} 首...<br>已匹配 {{ matchDone }} / {{ matchTotal }} 首(耗时较长,可稍后查看)</p>
