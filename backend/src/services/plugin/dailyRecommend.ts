@@ -664,7 +664,7 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
   };
 }
 
-export async function runDailyRecommendJob(): Promise<DailyRecommendResult | null> {
+export async function runDailyRecommendJob(opts?: { force?: boolean; seedSalt?: number }): Promise<DailyRecommendResult | null> {
   if (!getSettingBool("daily_recommend_enabled", true)) return null;
   // Fresh installs have no local library yet; generating "今日推荐" from empty
   // would only create a playlist full of non-playable remote stubs. Skip until
@@ -675,7 +675,7 @@ export async function runDailyRecommendJob(): Promise<DailyRecommendResult | nul
     return null;
   }
   try {
-    const result = await generateDailyPlaylist();
+    const result = await generateDailyPlaylist(new Date(), opts);
     if (!result.skipped) {
       console.log(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool`);
     }
@@ -742,8 +742,8 @@ export const dailyRecommendManifest: PluginManifest = {
 
 export const dailyRecommendPlugin: RecommenderPlugin = {
   manifest: dailyRecommendManifest,
-  async runDailyJob(): Promise<string | null> {
-    const r = await runDailyRecommendJob();
+  async runDailyJob(opts?: { force?: boolean; seedSalt?: number }): Promise<string | null> {
+    const r = await runDailyRecommendJob(opts);
     if (!r || r.skipped) return null;
     return `${r.date}: ${r.matched} matched, ${r.unmatched} stubs, ${r.poolSongsAdded} pool`;
   },

@@ -202,6 +202,19 @@ export interface SandboxHostEnv {
     execute(name: string, code: string): Promise<any>;
     destroy(name: string): Promise<null>;
   };
+  /** host.playlists:受控写推荐歌单(需 playlists:write 权限)。外置推荐插件用
+   *  它生成/更新自己的固定歌单;权限门控在 sandbox 调用点(hostAsync)完成。 */
+  playlists: {
+    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string }): Promise<any>;
+    get(playlistId: string): Promise<any | null>;
+    replaceEntries(playlistId: string, entries: any[]): Promise<any>;
+    updateCover(playlistId: string, coverSongId: string): Promise<any>;
+  };
+  /** host.sources:在线源补全(需 songs:write 权限)。把匹配不到本地的曲目交给
+   *  已启用的 source 插件搜索并导入为可播本地 song,返回 songId。 */
+  sources: {
+    complete(opts: { artist?: string; title?: string }): Promise<{ songId: string | null }>;
+  };
 }
 
 let moduleSingleton: Promise<QuickJSWASMModule> | null = null;
@@ -560,12 +573,32 @@ export class SandboxedPlugin {
     c.setProp(pluginObj, "getNetworkAddresses", pluginGetAddresses);
     pluginGetHostUrl.dispose(); pluginGetAddresses.dispose();
 
+    // host.playlists(受控写,需 playlists:write)
+    const playlistsObj = c.newObject();
+    const plUpsert = this.hostAsync("upsert", (playlistId: any, opts: any) => this.env.playlists.upsert(String(playlistId), opts || {}), "playlists:write");
+    const plGet = this.hostAsync("get", (playlistId: any) => this.env.playlists.get(String(playlistId)), "playlists:write");
+    const plReplace = this.hostAsync("replaceEntries", (playlistId: any, entries: any) => this.env.playlists.replaceEntries(String(playlistId), entries || []), "playlists:write");
+    const plCover = this.hostAsync("updateCover", (playlistId: any, coverSongId: any) => this.env.playlists.updateCover(String(playlistId), String(coverSongId)), "playlists:write");
+    c.setProp(playlistsObj, "upsert", plUpsert);
+    c.setProp(playlistsObj, "get", plGet);
+    c.setProp(playlistsObj, "replaceEntries", plReplace);
+    c.setProp(playlistsObj, "updateCover", plCover);
+    plUpsert.dispose(); plGet.dispose(); plReplace.dispose(); plCover.dispose();
+
+    // host.sources(在线源补全,需 songs:write)
+    const sourcesObj = c.newObject();
+    const srcComplete = this.hostAsync("complete", (opts: any) => this.env.sources.complete(opts || {}), "songs:write");
+    c.setProp(sourcesObj, "complete", srcComplete);
+    srcComplete.dispose();
+
     // host.config(每次调用前刷新)/ host.version
     const hostObj = c.newObject();
     c.setProp(hostObj, "http", httpFn);
     c.setProp(hostObj, "storage", storageObj);
     c.setProp(hostObj, "comm", commObj);
     c.setProp(hostObj, "songs", songsObj);
+    c.setProp(hostObj, "playlists", playlistsObj);
+    c.setProp(hostObj, "sources", sourcesObj);
     c.setProp(hostObj, "plugin", pluginObj);
     c.setProp(hostObj, "fs", this.injectFs());
     c.setProp(hostObj, "command", this.injectCommand());
@@ -574,7 +607,7 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "jsenv", this.injectJsenv());
     c.setProp(hostObj, "log", logFn);
     c.setProp(hostObj, "version", c.newString(this.env.version || ""));
-    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); pluginObj.dispose(); logFn.dispose();
+    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); logFn.dispose();
     c.setProp(c.global, "__mfHost", hostObj);
     hostObj.dispose();
   }

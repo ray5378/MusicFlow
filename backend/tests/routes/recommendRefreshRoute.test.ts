@@ -71,12 +71,18 @@ beforeEach(() => {
   const roam = fakePlugin("f-roam", "comboPlaylist", {
     async generateComboPlaylist(opts: any) { calls.push({ who: "roam", opts }); return { ok: true }; },
   });
+  const lb = fakePlugin("f-lb", "dailyPlaylist", {
+    async runDailyJob(opts: any) { calls.push({ who: "f-lb", opts }); return "f-lb ok"; },
+  });
   registerPlugin(daily.manifest as any, daily.impl as any);
   registerPlugin(local.manifest as any, local.impl as any);
   registerPlugin(roam.manifest as any, roam.impl as any);
+  registerPlugin(lb.manifest as any, lb.impl as any);
   enablePlugin("f-daily");
   enablePlugin("f-local");
   enablePlugin("f-roam");
+  // 注意:f-lb 故意「不」在此处启用——否则会被 dailyApi()(firstEnabledByCapability)
+  // 当成每日推荐插件,干扰「每日推荐插件未启用」等用例;需要时由具体用例按需启用。
 });
 
 async function refresh(body?: any) {
@@ -114,5 +120,45 @@ describe("POST /rest/api/v1/recommend/refresh", () => {
     const { res, body } = await refresh({});
     expect(res.status).toBe(503);
     expect(body.error).toContain("每日推荐");
+  });
+
+  it("pluginId:单插件强制刷新,返回其 runDailyJob 结果", async () => {
+    enablePlugin("f-lb"); // 仅在按需启用,测完还原,避免污染 dailyApi()
+    try {
+      const { res, body } = await refresh({ pluginId: "f-lb" });
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.pluginId).toBe("f-lb");
+      expect(body.result).toBe("f-lb ok");
+      // 走 f-lb 的 runDailyJob(force),未触发内置三件套
+      expect(calls.map(c => c.who)).toEqual(["f-lb"]);
+      expect(calls[0].opts).toEqual({ force: true });
+    } finally {
+      db.delete(plugins).where(eq(plugins.name, "f-lb")).run();
+    }
+  });
+
+  it("pluginId 不存在 → 404", async () => {
+    const { res, body } = await refresh({ pluginId: "nope" });
+    expect(res.status).toBe(404);
+    expect(calls.length).toBe(0);
+  });
+
+  it("pluginId 无每日能力 → 400", async () => {
+    const p = fakePlugin("f-other", "scrobbler", {});
+    registerPlugin(p.manifest as any, p.impl as any);
+    enablePlugin("f-other");
+    const { res, body } = await refresh({ pluginId: "f-other" });
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("手动刷新");
+    db.delete(plugins).where(eq(plugins.name, "f-other")).run();
+    unregisterPlugin("f-other");
+  });
+
+  it("pluginId 未启用 → 503", async () => {
+    db.delete(plugins).where(eq(plugins.name, "f-lb")).run(); // 移除启用行
+    const { res, body } = await refresh({ pluginId: "f-lb" });
+    expect(res.status).toBe(503);
+    enablePlugin("f-lb"); // 还原,供后续测试
   });
 });

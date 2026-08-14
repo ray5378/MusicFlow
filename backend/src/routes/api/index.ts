@@ -46,7 +46,7 @@ import {
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
-import { unregisterPlugin, firstEnabledByCapability, getPluginConfig, getPluginManifest } from "../../plugins/registry.js";
+import { unregisterPlugin, firstEnabledByCapability, getPluginConfig, getPluginManifest, getPlugin } from "../../plugins/registry.js";
 import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
@@ -1038,6 +1038,37 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 // 缺省全刷。返回各自结果。
 apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
+
+  // 单插件手动刷新:任意声明 dailyPlaylist / localPlaylist / comboPlaylist 能力的
+  // 插件(内置或外置)都可经此入口强制重跑。传 force 绕过插件自身的间隔闸门,
+  // 返回该插件 runDailyJob 的结果。
+  const pluginId = body?.pluginId;
+  if (pluginId) {
+    const reg = getPlugin(pluginId);
+    if (!reg) return c.json({ success: false, error: "插件不存在" }, 404);
+    const caps: string[] = reg.manifest.capabilities || [];
+    const isDaily =
+      caps.includes("dailyPlaylist") || caps.includes("localPlaylist") || caps.includes("comboPlaylist");
+    if (!isDaily) {
+      return c.json({ success: false, error: "该插件不支持手动刷新(无每日歌单能力)" }, 400);
+    }
+    // 未启用(或尚无 DB 行)视为不可用。
+    if (getPluginConfig(pluginId) === null) {
+      return c.json({ success: false, error: "插件未启用" }, 503);
+    }
+    const impl = reg.impl;
+    if (typeof impl?.runDailyJob !== "function") {
+      return c.json({ success: false, error: "插件未实现 runDailyJob" }, 500);
+    }
+    try {
+      const result = await impl.runDailyJob({ force: true });
+      return c.json({ success: true, pluginId, result }, 200);
+    } catch (e: any) {
+      console.error(`[RECOMMEND] refresh plugin ${pluginId} error:`, e?.message || e);
+      return c.json({ success: false, error: e?.message || "刷新失败" }, 500);
+    }
+  }
+
   const targets = Array.isArray(body?.targets) ? body.targets : ["daily", "local", "roam"];
   const seedSalt = Math.floor(Math.random() * 1_000_000);
   const results: Record<string, any> = {};

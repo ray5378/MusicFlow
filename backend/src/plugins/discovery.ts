@@ -23,15 +23,16 @@ import net from "net";
 import WebSocket from "ws";
 import { eq, like, or } from "drizzle-orm";
 import { getDataDir } from "../utils/env.js";
-import { db } from "../db/index.js";
+import { db, sqlite } from "../db/index.js";
 import { songs } from "../db/schema.js";
-import { registerPlugin, getPlugin, getPluginConfig } from "./registry.js";
+import { registerPlugin, getPlugin, getPluginConfig, getEnabledByCapability } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { createComm } from "./comm.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
+import { importOnlineSongs } from "../services/source/online/service.js";
 
 const VALID_TYPES: PluginType[] = [
   "source", "importer", "recommender", "sync",
@@ -504,6 +505,25 @@ export async function discoverExternalPlugins(
             return s ? toPluginSong(s) : null;
           },
         },
+        playlists: {
+          upsert: async (playlistId: string, opts: any) => upsertPluginPlaylist(String(playlistId), opts || {}),
+          get: async (playlistId: string) => {
+            const p = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(String(playlistId)) as any;
+            if (!p) return null;
+            const entries = sqlite.prepare("SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY position").all(String(playlistId)) as any[];
+            return { ...p, entries };
+          },
+          replaceEntries: async (playlistId: string, entries: any[]) =>
+            upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "ListenBrainz 推荐", entries: entries || [] }),
+          updateCover: async (playlistId: string, coverSongId: string) => {
+            const cover = coverArtForSong(String(coverSongId));
+            if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, new Date().toISOString(), String(playlistId));
+            return { ok: true };
+          },
+        },
+        sources: {
+          complete: async (opts: any) => completeFromSources(opts || {}),
+        },
         plugin: {
           getHostUrl: async () => process.env.DLNA_BASE_URL || "",
           getNetworkAddresses: async () => getNetworkAddresses(),
@@ -579,4 +599,112 @@ export async function discoverExternalPlugins(
   // without touching existing ones.
   if (!rootDir && loaded > 0) seedPluginRows();
   return loaded;
+}
+
+// ==================== 外置推荐插件受控写接口实现(host.playlists / host.sources) ====================
+// 这些实现只在沙箱宿主侧调用(由 sandbox.ts 的 hostAsync 转发),插件只拿到受控的
+// host.playlists.* / host.sources.* 表面,无法直接触达 DB,权限在调用点由沙箱门控。
+
+function pluginSystemOwnerId(): string {
+  const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as any;
+  return admin?.id || "";
+}
+
+function refreshPluginPlaylistCounts(playlistId: string): void {
+  const entries = sqlite.prepare("SELECT * FROM playlist_songs WHERE playlist_id = ?").all(playlistId) as any[];
+  let duration = 0, count = 0;
+  for (const e of entries) {
+    if (e.playable && e.song_id) {
+      const song = sqlite.prepare("SELECT duration FROM songs WHERE id = ?").get(e.song_id) as any;
+      if (song) { duration += song.duration || 0; count++; }
+    } else if (e.external_title) {
+      duration += (e.external_duration || 0) / 1000;
+      count++;
+    }
+  }
+  sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
+    .run(count, Math.round(duration), new Date().toISOString(), playlistId);
+}
+
+function coverArtForSong(songId: string): string | null {
+  const song = sqlite.prepare("SELECT id, album_id, cover_art FROM songs WHERE id = ?").get(songId) as any;
+  if (!song) return null;
+  if (song.cover_art) return `so-${song.id}`;
+  if (song.album_id) {
+    const album = sqlite.prepare("SELECT cover_art FROM albums WHERE id = ?").get(song.album_id) as any;
+    if (album?.cover_art) return `al-${song.album_id}`;
+  }
+  return null;
+}
+
+/** 按固定 id 创建或全量更新一张歌单(同名刷新覆盖)。entries 为混合条目:
+ *  { songId } 本地歌曲;或 { externalSongId, externalTitle, externalArtist, externalAlbum?, externalDuration? } 外部条目。 */
+async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any> {
+  const now = new Date().toISOString();
+  const name = String(opts?.name || "ListenBrainz 推荐");
+  const desc = opts?.description || "ListenBrainz 推荐歌单";
+  const existing = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId) as any;
+  if (!existing) {
+    sqlite.prepare(`INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, NULL, ?, 'listenbrainz', NULL, 0, ?, ?)`)
+      .run(playlistId, name, pluginSystemOwnerId(), desc, `lb://${playlistId}`, now, now);
+  } else {
+    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, updated_at = ? WHERE id = ?")
+      .run(name, desc, now, playlistId);
+  }
+  sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
+  const entries = Array.isArray(opts?.entries) ? opts.entries : [];
+  entries.forEach((e: any, i: number) => {
+    if (e && e.songId) {
+      const sid = String(e.songId);
+      sqlite.prepare(`INSERT INTO playlist_songs (playlist_id, song_id, position, playable, external_song_id, external_title)
+        VALUES (?, ?, ?, 1, ?, ?)`)
+        .run(playlistId, sid, i, sid, sid);
+    } else if (e && (e.externalTitle || e.externalSongId)) {
+      sqlite.prepare(`INSERT INTO playlist_songs (playlist_id, position, playable, external_song_id, external_title, external_artist, external_album, external_duration)
+        VALUES (?, ?, 0, ?, ?, ?, ?, ?)`)
+        .run(playlistId, i, e.externalSongId || null, e.externalTitle || null, e.externalArtist || null, e.externalAlbum || null, e.externalDuration || null);
+    }
+  });
+  refreshPluginPlaylistCounts(playlistId);
+  if (opts?.coverSongId) {
+    const cover = coverArtForSong(String(opts.coverSongId));
+    if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
+  }
+  return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);
+}
+
+/** 未匹配本地的曲目,经已启用 source 插件(go-music-dl 等)搜索并导入本地库,返回可播 songId。 */
+async function completeFromSources(opts: any): Promise<{ songId: string | null }> {
+  const artist = String(opts?.artist || "").trim();
+  const title = String(opts?.title || "").trim();
+  if (!artist && !title) return { songId: null };
+  const query = [artist, title].filter(Boolean).join(" ");
+  for (const { manifest, impl } of getEnabledByCapability("search")) {
+    if (typeof impl?.search !== "function") continue;
+    try {
+      let res: any = await impl.search(query);
+      let songs: any[] = res?.songs || res || [];
+      // 兜底:部分 source 插件 search(artist, title) 双参,单参 query 未命中时再试。
+      if ((!songs || songs.length === 0) && title) {
+        try { res = await impl.search(artist, title); songs = res?.songs || res || []; } catch { /* ignore */ }
+      }
+      const cand = songs[0];
+      if (!cand || !cand.id) continue;
+      // 归一化为 OnlineSongResult,容忍字段名差异(name/title)。
+      const normalized: any = {
+        id: cand.id,
+        source: cand.source || manifest.id,
+        name: cand.name || cand.title || title,
+        artist: cand.artist || artist,
+        album: cand.album || "",
+        duration: cand.duration || 0,
+        cover: cand.cover || "",
+        extra: cand.extra || null,
+      };
+      const imp = await importOnlineSongs(manifest.id, [normalized], { userId: pluginSystemOwnerId() });
+      if (imp?.songs && imp.songs[0]?.id) return { songId: imp.songs[0].id };
+    } catch { /* 单源失败跳过,试下一个 */ }
+  }
+  return { songId: null };
 }

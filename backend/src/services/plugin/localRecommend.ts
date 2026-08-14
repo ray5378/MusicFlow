@@ -481,9 +481,9 @@ async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<L
 }
 
 // Top-level entry for the scheduler. Never throws.
-export async function runLocalDailyRecommendJob(date = new Date()): Promise<LocalRecommendResult | null> {
+export async function runLocalDailyRecommendJob(opts?: { force?: boolean; seedSalt?: number }): Promise<LocalRecommendResult | null> {
   try {
-    return await generateLocalDailyPlaylist(date);
+    return await generateLocalDailyPlaylist(new Date(), opts);
   } catch (e: any) {
     console.error("[LOCAL-RECOMMEND] error:", e?.message || e);
     return null;
@@ -538,8 +538,8 @@ export const localRecommendPlugin: LocalRecommendPlugin = {
   async pickSongs(date = new Date()) {
     return pickLocalRecommendSongs(date);
   },
-  async runDailyJob(): Promise<string | null> {
-    const r = await runLocalDailyRecommendJob();
+  async runDailyJob(opts?: { force?: boolean; seedSalt?: number }): Promise<string | null> {
+    const r = await runLocalDailyRecommendJob(opts);
     if (!r || r.skipped) return null;
     return `${r.date}: ${r.total} 首本地推荐 (${r.sourceUsers} 用户, ${r.fallback ? "全库随机兜底" : "口味推荐"})`;
   },

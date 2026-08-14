@@ -42,6 +42,16 @@ function makeEnv(overrides?: Partial<SandboxHostEnv>): SandboxHostEnv {
       getHostUrl: async () => "http://host:46400",
       getNetworkAddresses: async () => ["127.0.0.1"],
     },
+    // 受控写接口默认实现(权限门控在沙箱调用点,与实现是否存在无关)。
+    playlists: {
+      upsert: async (id: string, opts: any) => ({ ok: true, id, ...opts }),
+      get: async () => ({ ok: true }),
+      replaceEntries: async () => ({ ok: true }),
+      updateCover: async () => ({ ok: true }),
+    },
+    sources: {
+      complete: async (opts: any) => ({ ok: true, songId: "so-new", opts }),
+    },
     ...overrides,
   };
 }
@@ -335,5 +345,63 @@ describe("QuickJS 插件沙箱", () => {
     sandbox.dispose();
     // dispose 后必须已 off,监听器清空(否则每次 reload 都 +1,消息重复投递)
     expect(commListeners.size).toBe(0);
+  });
+});
+
+describe("QuickJS 沙箱 · host.playlists / host.sources 受控写", () => {
+  const PL_CODE = `
+    globalThis.__mfPlugin = {
+      manifest: { id: "demo-pl", name: "x", version: "1.0.0", type: "recommender", capabilities: ["dailyPlaylist"], configSchema: [], permissions: ["playlists:write","songs:write"] },
+      create(host) {
+        return {
+          async runDailyJob() {
+            const deny = (r, what) => { if (!r || r.ok === false) throw new Error((r && r.error && r.error.message) || ("FAIL:" + what)); };
+            const up = await host.playlists.upsert("pl-x", { name: "X", entries: [{ songId: "s1" }] });
+            deny(up, "upsert");
+            const cov = await host.playlists.updateCover("pl-x", "s1");
+            deny(cov, "cover");
+            const comp = await host.sources.complete({ artist: "A", title: "B" });
+            deny(comp, "complete");
+            return { up, cov, comp };
+          }
+        };
+      }
+    };`;
+
+  it("有写权限时 host.playlists / host.sources 路由到宿主实现", async () => {
+    const plCalls: any[] = [];
+    const env = makeEnv({
+      permissions: ["playlists:write", "songs:write"],
+      playlists: {
+        upsert: async (id: string, opts: any) => { plCalls.push({ id, opts }); return { ok: true, id, ...opts }; },
+        get: async () => ({ ok: true }),
+        replaceEntries: async () => ({ ok: true }),
+        updateCover: async (id: string, sid: string) => { plCalls.push({ cover: { id, sid } }); return { ok: true }; },
+      },
+      sources: {
+        complete: async (opts: any) => { plCalls.push({ complete: opts }); return { ok: true, songId: "so-new" }; },
+      },
+    });
+    const { impl } = await loadSandboxedPlugin("demo-pl", PL_CODE, env);
+    const r = await impl.runDailyJob();
+    expect(r.up.id).toBe("pl-x");
+    expect(r.cov.ok).toBe(true);
+    expect(r.comp.songId).toBe("so-new");
+    // 宿主实现被实际调用
+    expect(plCalls.find((c) => c.id === "pl-x")).toBeTruthy();
+    expect(plCalls.find((c) => c.cover && c.cover.sid === "s1")).toBeTruthy();
+    expect(plCalls.find((c) => c.complete && c.complete.artist === "A" && c.complete.title === "B")).toBeTruthy();
+  });
+
+  it("无 playlists:write 时 host.playlists.upsert 被权限拒绝(信封带方法名)", async () => {
+    const env = makeEnv({ permissions: ["songs:write"] }); // 缺 playlists:write
+    const { impl } = await loadSandboxedPlugin("demo-pl", PL_CODE, env);
+    await expect(impl.runDailyJob()).rejects.toThrow(/PERMISSION_DENIED: playlists:write \(host\.upsert\)/);
+  });
+
+  it("无 songs:write 时 host.sources.complete 被权限拒绝", async () => {
+    const env = makeEnv({ permissions: ["playlists:write"] }); // 缺 songs:write
+    const { impl } = await loadSandboxedPlugin("demo-pl", PL_CODE, env);
+    await expect(impl.runDailyJob()).rejects.toThrow(/PERMISSION_DENIED: songs:write \(host\.complete\)/);
   });
 });

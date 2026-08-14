@@ -195,8 +195,8 @@ export const dailyRoamManifest: PluginManifest = {
 
 export const dailyRoamPlugin: ComboPlaylistPlugin = {
   manifest: dailyRoamManifest,
-  async runDailyJob(): Promise<string | null> {
-    const r = generateRoamPlaylist();
+  async runDailyJob(opts?: { force?: boolean }): Promise<string | null> {
+    const r = generateRoamPlaylist(opts);
     if (!r || r.skipped) return null;
     return `${r.date}: ${r.total} 首今日漫游 (${r.sources.length} 个来源)`;
   },

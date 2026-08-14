@@ -42,6 +42,40 @@ let lbImpl: any;
 let gmConfig = { baseUrl: "http://gm:18080", sources: ["netease"] };
 const requests: any[] = [];
 
+// —— listenbrainz 推荐功能测试用状态 ——
+let lbCfg: any;
+const playlistCalls: any[] = [];
+const lbStorage: Record<string, any> = {};
+// 本地曲库:标题→songId 的可控映射(测试时可改)
+const localLibrary: Record<string, string> = {};
+// 在线源补全:artist+title → songId(测试时可改),返回 null 表示补全失败
+const onlineCompletions: Record<string, string | null> = {};
+
+function lbHttpRoutes() {
+  return async (input: string, init?: any) => {
+    const u = String(input);
+    requests.push({ url: u, method: init?.method || "GET", body: init?.body });
+    // 协同过滤推荐:返回两个 MBID
+    if (u.includes("/1/cf/recommendation/user/")) {
+      return { ok: true, status: 200, headers: {}, body: JSON.stringify({
+        payload: { mbids: [
+          { recording_mbid: "m1", score: 9.5 },
+          { recording_mbid: "m2", score: 8.1 },
+        ] },
+      }) };
+    }
+    // 元数据:换名 + 艺人 + 时长(ms)
+    if (u.includes("/1/metadata/recording")) {
+      return { ok: true, status: 200, headers: {}, body: JSON.stringify({
+        m1: { recording: { name: "Song One", rels: [{ artist_name: "Artist A", type: "vocal" }], length: 200000 } },
+        m2: { recording: { name: "Song Two", rels: [{ artist_name: "Artist B", type: "lead vocals" }], length: 180000 } },
+      }) };
+    }
+    if (u.includes("/1/submit-listens")) return { ok: true, status: 200, headers: {}, body: "{}" };
+    return { ok: false, status: 404, headers: {}, body: "not found" };
+  };
+}
+
 beforeAll(async () => {
   if (!hasPluginRepo) return;
   const gmCode = fs.readFileSync(path.join(PLUGINS_ROOT, "go-music-dl/index.js"), "utf8");
@@ -59,13 +93,41 @@ beforeAll(async () => {
 
   const lbCode = fs.readFileSync(path.join(PLUGINS_ROOT, "listenbrainz/index.js"), "utf8");
   const lbJson = JSON.parse(fs.readFileSync(path.join(PLUGINS_ROOT, "listenbrainz/plugin.json"), "utf8"));
-  let lbCfg = { userToken: "tok-123", apiUrl: "", submitPlayingNow: true, minDuration: 30 };
+  lbCfg = { userToken: "tok-123", apiUrl: "", submitPlayingNow: true, minDuration: 30, username: "testuser", playlistModes: ["top", "similar"], perModeCount: 25, refreshIntervalDays: 1 };
   const lb = await loadSandboxedPlugin("listenbrainz", lbCode, {
     version: "1.3.0",
     getConfig: () => lbCfg,
     permissions: lbJson.permissions || [],
-    http: httpRoutes(requests),
-    storage: { get: async () => null, set: async () => {}, delete: async () => {}, keys: async () => [] },
+    http: lbHttpRoutes(),
+    storage: {
+      get: async (k: string) => (k in lbStorage ? lbStorage[k] : null),
+      set: async (k: string, v: any) => { lbStorage[k] = v; },
+      delete: async (k: string) => { delete lbStorage[k]; },
+      keys: async () => Object.keys(lbStorage),
+    },
+    songs: {
+      list: async () => [],
+      search: async (q: string) => {
+        // 标题出现在本地库映射里 → 返回对应 songId
+        for (const [title, id] of Object.entries(localLibrary)) {
+          if (String(q || "").includes(title)) return [{ id, title, artist: "本地艺人", album: "本地专辑", duration: 200, coverArt: "so-x" }];
+        }
+        return [];
+      },
+      getById: async () => null,
+    },
+    sources: {
+      complete: async (opts: any) => {
+        const key = `${opts.artist}|${opts.title}`;
+        return { songId: key in onlineCompletions ? onlineCompletions[key] : `online-${opts.title}` };
+      },
+    },
+    playlists: {
+      upsert: async (id: string, opts: any) => { playlistCalls.push({ id, opts }); return { id, ...opts }; },
+      get: async () => null,
+      replaceEntries: async () => ({}),
+      updateCover: async () => ({}),
+    },
     log: () => {},
     comm: { send: () => {}, broadcast: () => {}, on: () => {} },
   }, lbJson);
@@ -139,5 +201,74 @@ describe("真实外置插件 · listenbrainz(沙箱)", () => {
     const before = requests.length;
     await lbImpl.onScrobble({}, { artist: "A", title: "B", duration: 10 });
     expect(requests.length).toBe(before);
+  }));
+});
+
+describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => {
+  it("force 刷新:拉推荐→换名→在线补全→upsert 固定歌单", () => skip(async () => {
+    playlistCalls.length = 0;
+    lbStorage.lastRun = 0;
+    const r = await lbImpl.runDailyJob({ force: true });
+    expect(r).toContain("ListenBrainz 推荐");
+    expect(playlistCalls.length).toBe(1);
+    const call = playlistCalls[0];
+    expect(call.id).toBe("pl-lb-recommend");
+    expect(call.opts.name).toBe("ListenBrainz 推荐");
+    // 两首都走在线补全 → 都成为可播 songId 条目
+    expect(call.opts.entries.length).toBe(2);
+    expect(call.opts.entries.every((e: any) => e.songId)).toBe(true);
+    // 封面取第一个有匹配的 songId
+    expect(call.opts.coverSongId).toBeTruthy();
+    // lastRun 已更新
+    expect(lbStorage.lastRun).toBeGreaterThan(0);
+  }));
+
+  it("间隔闸门:非 force 且未到期时跳过(返回 null)", () => skip(async () => {
+    playlistCalls.length = 0;
+    lbStorage.lastRun = Date.now(); // 刚生成过
+    const r = await lbImpl.runDailyJob({});
+    expect(r).toBeNull();
+    expect(playlistCalls.length).toBe(0);
+  }));
+
+  it("本地曲库命中:优先用本地 songId 而非在线补全", () => skip(async () => {
+    playlistCalls.length = 0;
+    lbStorage.lastRun = 0;
+    localLibrary["Song One"] = "local-so-1"; // m1 命中本地
+    const r = await lbImpl.runDailyJob({ force: true });
+    expect(r).toContain("ListenBrainz 推荐");
+    const entries = playlistCalls[0].opts.entries;
+    // 第一首来自本地,第二首来自在线补全
+    expect(entries[0].songId).toBe("local-so-1");
+    expect(entries[1].songId).toBe("online-Song Two");
+    delete localLibrary["Song One"];
+  }));
+
+  it("在线补全也失败:退化为外部不可播占位条目", () => skip(async () => {
+    playlistCalls.length = 0;
+    lbStorage.lastRun = 0;
+    // 让两首都补全失败
+    onlineCompletions["Artist A|Song One"] = null;
+    onlineCompletions["Artist B|Song Two"] = null;
+    const r = await lbImpl.runDailyJob({ force: true });
+    expect(r).toContain("ListenBrainz 推荐");
+    const entries = playlistCalls[0].opts.entries;
+    expect(entries.length).toBe(2);
+    // 全为外部占位:有 externalTitle、playable 由宿主侧置 0、且 duration 透传(ms)
+    expect(entries.every((e: any) => e.externalTitle && !e.songId)).toBe(true);
+    expect(entries[0].externalDuration).toBe(200000);
+    delete onlineCompletions["Artist A|Song One"];
+    delete onlineCompletions["Artist B|Song Two"];
+  }));
+
+  it("未配置 username:跳过生成不报错", () => skip(async () => {
+    playlistCalls.length = 0;
+    lbStorage.lastRun = 0;
+    const saved = lbCfg.username;
+    lbCfg.username = "";
+    const r = await lbImpl.runDailyJob({ force: true });
+    expect(r).toBeNull();
+    expect(playlistCalls.length).toBe(0);
+    lbCfg.username = saved;
   }));
 });
