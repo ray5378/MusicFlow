@@ -10,6 +10,7 @@ import { fetchCoverForSong } from "../../services/covers.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
+import { refreshPlaylistCounts } from "../../services/plugin/playlistSync.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
 
@@ -804,21 +805,6 @@ restRoutes.all("/deletePlaylist", async (c) => {
   clearPlaylistCoverCache(id);
   return c.json(ok());
 });
-
-function refreshPlaylistCounts(playlistId: string) {
-  const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
-  let duration = 0, count = 0;
-  for (const e of entries) {
-    if (e.playable && e.songId) {
-      const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
-      if (song) { duration += song.duration || 0; count++; }
-    } else if (e.externalTitle) {
-      duration += (e.externalDuration || 0) / 1000;
-      count++;
-    }
-  }
-  db.update(playlists).set({ songCount: count, duration, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
-}
 
 // ==================== Starring ====================
 

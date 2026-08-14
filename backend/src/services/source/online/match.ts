@@ -8,8 +8,7 @@
 import { db } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { sqlite } from "../../../db/index.js";
-import { normalizeKey } from "../../plugin/playlistSync.js";
+import { normalizeKey, refreshPlaylistCounts } from "../../plugin/playlistSync.js";
 import { OnlineSongResult } from "./types.js";
 import { importOnlineSong } from "./service.js";
 
@@ -85,29 +84,8 @@ function linkPlaylistEntry(playlistId: string, entryId: number, songId: string) 
     .set({ songId, playable: 1, unavailableReason: null })
     .where(eq(playlistSongs.id, entryId))
     .run();
+  // 共享宿主服务(playlistSync 导出的单聚合查询实现),与导入/插件歌单计数一致。
   refreshPlaylistCounts(playlistId);
-}
-
-export function refreshPlaylistCounts(playlistId: string) {
-  const row = sqlite.prepare(`
-    SELECT
-      SUM(CASE
-        WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END
-        WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN 1
-        ELSE 0 END) AS cnt,
-      COALESCE(SUM(
-        CASE WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN s.duration ELSE 0 END
-             WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN e.external_duration / 1000.0
-             ELSE 0 END
-      ), 0) AS duration
-    FROM playlist_songs e
-    LEFT JOIN songs s ON s.id = e.song_id
-    WHERE e.playlist_id = ?
-  `).get(playlistId) as any;
-  const count = Number(row?.cnt || 0);
-  const duration = Math.round(Number(row?.duration || 0));
-  sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, updated_at = ? WHERE id = ?")
-    .run(count, duration, new Date().toISOString(), playlistId);
 }
 
 // Attempt to match a single unmatched track via the online provider, importing
