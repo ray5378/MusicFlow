@@ -6,7 +6,7 @@
 // 语义:按「能力」取第一个启用插件的 impl;无启用插件时返回 undefined,调用方
 // 负责给出可读错误(通常是「该功能未启用/未安装插件」)。
 
-import { getEnabledByCapability, getPluginConfig, getPluginImpl, getPluginManifest } from "../plugins/registry.js";
+import { getEnabledByCapability, getPluginConfig, getPluginManifest } from "../plugins/registry.js";
 
 /** 每日推荐能力(dailyPlaylist):候选池/生成等参数化方法。 */
 export function dailyRecommendApi(): any {
@@ -104,14 +104,16 @@ export function dailyRecommendHomeCount(): number {
 }
 
 /** 歌单同步能力(playlistSync):按歌单同步/重建/导出等参数化方法。
- *  优先返回**内置**「playlist-sync」插件的 impl(核心路由依赖它的
- *  rebuildPlaylistEntries/checkImportCooldown 等能力),而不是「第一个启用」的
- *  playlistSync 插件——否则外置插件(如 go-music-dl 若声明该能力)会把导入歌单
- *  路由的调用劫持成 undefined(单例陷阱)。内置缺失时才回退到第一个启用者。 */
+ *  优先返回实现了「歌单重建/导入冷却」等参数化方法(rebuildPlaylistEntries /
+ *  checkImportCooldown)的插件——内置 playlist-sync 提供这些方法;只实现
+ *  runSyncJob 的外置插件(如第三方声明 playlistSync 能力)不应劫持核心路由的
+ *  导入/重建调用(单例陷阱)。方法驱动分发,不写死插件 id。 */
 export function playlistSyncApi(): any {
-  const builtin = getPluginImpl("playlist-sync");
-  if (builtin) return builtin;
-  return getEnabledByCapability("playlistSync")[0]?.impl;
+  const enabled = getEnabledByCapability("playlistSync");
+  for (const p of enabled) {
+    if (typeof p.impl?.rebuildPlaylistEntries === "function") return p.impl;
+  }
+  return enabled[0]?.impl;
 }
 
 /** 每日推荐歌单标识(TAG):从启用插件的 manifest.dailyTag 读,无则返回空串。 */
