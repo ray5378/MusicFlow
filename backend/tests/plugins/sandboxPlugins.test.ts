@@ -64,14 +64,15 @@ function lbHttpRoutes() {
         ] },
       }) };
     }
-    // 元数据:换名 + 艺人 + 时长(ms)
+    // 元数据:换名 + 艺人 + 专辑 + 时长(ms)。1.5.3 起 LB 换出名的条目直接用 LB 结果,
+    // 不再经 MusicBrainz 覆盖 artist/album,故此处带 release_name。
     if (u.includes("/1/metadata/recording")) {
       return { ok: true, status: 200, headers: {}, body: JSON.stringify({
-        m1: { recording: { name: "Song One", rels: [{ artist_name: "Artist A", type: "vocal" }], length: 200000 } },
-        m2: { recording: { name: "Song Two", rels: [{ artist_name: "Artist B", type: "lead vocals" }], length: 180000 } },
+        m1: { recording: { name: "Song One", rels: [{ artist_name: "Artist A", type: "vocal" }], release_name: "Album One", length: 200000 } },
+        m2: { recording: { name: "Song Two", rels: [{ artist_name: "Artist B", type: "lead vocals" }], release_name: "Album Two", length: 180000 } },
       }) };
     }
-    // MusicBrainz:艺人/专辑补全(LB metadata 不返回艺人,插件走此接口)
+    // MusicBrainz:仅对 LB 换不出名的推荐 MBID 兜底(本测试两首都换出名,不触发)
     if (u.includes("/ws/2/recording/")) {
       const mbid = decodeURIComponent(u.split("/ws/2/recording/")[1].split("?")[0]);
       const map: Record<string, any> = {
@@ -270,7 +271,7 @@ describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => 
     // 全为外部占位:有 externalTitle、playable 由宿主侧置 0、且 duration 透传(ms)
     expect(entries.every((e: any) => e.externalTitle && !e.songId)).toBe(true);
     expect(entries[0].externalDuration).toBe(200000);
-    // 艺人/专辑经 MusicBrainz 补全(LB metadata 不返回艺人):外部条目也带完整信息
+    // 艺人/专辑来自 LB metadata(1.5.3 起 named 条目直接用 LB 结果):外部条目也带完整信息
     expect(entries[0].externalArtist).toBe("Artist A");
     expect(entries[0].externalAlbum).toBe("Album One");
     expect(entries[1].externalArtist).toBe("Artist B");

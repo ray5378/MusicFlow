@@ -35,6 +35,7 @@ import { firstPlayableCoverFile } from "../services/playlistCover.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { createComm } from "./comm.js";
+import { proxyFetch } from "../services/proxy.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 import { importOnlineSongs } from "../services/source/online/service.js";
 
@@ -477,7 +478,8 @@ export async function discoverExternalPlugins(
           try {
             const timeout = Number(init?.timeout) > 0 ? Number(init.timeout) : 20000;
             const { timeout: _t, ...rest } = init || {};
-            const res = await fetch(String(input), { ...rest, signal: AbortSignal.timeout(timeout) });
+            // 走系统「网络代理」(启用时),与内置插件 host.http 一致;未配置则直连。
+            const res = await proxyFetch(String(input), { ...rest, signal: AbortSignal.timeout(timeout) });
             const body = await res.text();
             const headers: Record<string, string> = {};
             res.headers.forEach((v, k) => { headers[k] = v; });

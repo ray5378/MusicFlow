@@ -18,6 +18,7 @@
 import type { PluginManifest } from "./types.js";
 import { makeScopedStorage, type PluginStorage } from "./storage.js";
 import { createComm, type CommTarget } from "./comm.js";
+import { proxyFetch } from "../services/proxy.js";
 
 export interface PluginHost {
   pluginId: string;
@@ -107,7 +108,9 @@ export function createPluginHost(
     storage,
     http: async (input: any, init?: any) => {
       requirePermission(host, "net");
-      return fetch(input, init);
+      // 走系统「网络代理」（启用时经 dispatcher 出网），未配置则直连：
+      // 容器/受限网络里第三方 API（如 musicbrainz.org）常需代理才可达。
+      return proxyFetch(input, init);
     },
     comm: createComm(manifest.id, permissions),
   };

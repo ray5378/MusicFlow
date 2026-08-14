@@ -1,13 +1,14 @@
-// ==================== 网络代理（插件拉取链路专用） ====================
+// ==================== 网络代理（插件外呼 + 市场拉取） ====================
 //
 // 系统设置里的「网络代理」配置（格式 http://ip:port、https://ip:port 或
 // socks5://ip:port 等）：
-//   - 仅作用于**插件市场拉取**（registry.json / plugin.json / 安装包 tar.gz），
-//     让 GitHub 等源在不可直连的环境下也能安装插件；
+//   - 作用于**插件市场拉取**（registry.json / plugin.json / 安装包 tar.gz）与
+//     **插件沙箱 host.http 外呼**（内置 + 外置插件的第三方 API 请求），让
+//     GitHub / musicbrainz.org 等在容器直连不可达的环境下也能访问；
 //   - 实现：undici `ProxyAgent`(HTTP/HTTPS 代理) 或 `Socks5ProxyAgent`(SOCKS5 代理)
 //     按代理地址做模块级缓存，以 per-request `dispatcher` 注入（不调用
 //     setGlobalDispatcher），因此**不影响其它后端网络**（DLNA 轮询、封面/歌词下载、
-//     插件沙箱 host.http 等仍直连）；
+//     Web 端请求等仍直连）；
 //   - 设置改动即时生效（每次调用读 settings，5s TTL 缓存；代理地址变化时
 //     下次调用自动新建 agent）。
 // 注意:必须显式从 undici 导入 fetch,与 ProxyAgent/Socks5ProxyAgent 保持同一实例。
@@ -56,17 +57,30 @@ function getProxyDispatcher(url: string): ProxyAgent | Socks5ProxyAgent {
   return a;
 }
 
+/** 代理请求扩展参数：`proxy` 覆盖系统设置（true=强制走代理 / false=强制直连 /
+ *  缺省=跟随系统开关）。供插件 host.http 按插件配置逐请求控制。 */
+export type ProxyFetchInit = RequestInit & { proxy?: boolean };
+
 /** 按代理配置发起 fetch：启用代理 → undici 的 fetch + 同实例 dispatcher（dispatcher
  *  必须与 fetch 来自同一份 undici，否则报 invalid onRequestStart method）；否则走
  *  全局 fetch（保持可被测试桩替换、且与其它后端代码一致）。
- *  用于插件市场拉取，避免在直连可用的场景引入代理开销。 */
-export async function proxyFetch(url: string, init?: RequestInit): Promise<Response> {
+ *  `init.proxy` 可覆盖系统开关：false 强制直连；true 强制走代理（系统未配置代理
+ *  地址时降级直连）。用于插件市场拉取与插件沙箱 host.http 外呼。 */
+export async function proxyFetch(url: string, init?: ProxyFetchInit): Promise<Response> {
   const { enabled, url: proxyUrl } = getProxyConfig();
-  if (enabled && proxyUrl) {
+  const override = init?.proxy;
+  const useProxy =
+    override === undefined
+      ? enabled && !!proxyUrl
+      : override === true
+        ? !!proxyUrl
+        : false;
+  const { proxy: _proxy, ...rest } = init || {};
+  if (useProxy) {
     // 必须与 ProxyAgent/Socks5ProxyAgent 同一 undici 实例（即本模块导入的 fetch）。
-    return (fetch as any)(url, { ...init, dispatcher: getProxyDispatcher(proxyUrl) });
+    return (fetch as any)(url, { ...rest, dispatcher: getProxyDispatcher(proxyUrl) });
   }
-  return (globalThis.fetch as any)(url, init);
+  return (globalThis.fetch as any)(url, rest);
 }
 
 // ==================== 代理连通性测试 ====================
