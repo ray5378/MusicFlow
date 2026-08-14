@@ -6,7 +6,7 @@
         <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">
-        <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : playlist.sourcePlatform === 'kugou' ? '酷狗' : playlist.sourcePlatform === 'kuwo' ? '酷我' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag></div>
+        <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : playlist.sourcePlatform === 'kugou' ? '酷狗' : playlist.sourcePlatform === 'kuwo' ? '酷我' : playlist.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag></div>
         <h1>{{ playlist.name }}</h1>
         <div class="info">{{ playlist.songCount }}首 · {{ formatTotalDuration(playlist.duration) }}</div>
         <div class="info" v-if="playlist.isImported && playlist.matched !== undefined">

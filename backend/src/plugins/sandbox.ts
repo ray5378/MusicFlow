@@ -224,9 +224,11 @@ export interface SandboxHostEnv {
     destroy(name: string): Promise<null>;
   };
   /** host.playlists:受控写推荐歌单(需 playlists:write 权限)。外置推荐插件用
-   *  它生成/更新自己的固定歌单;权限门控在 sandbox 调用点(hostAsync)完成。 */
+   *  它生成/更新自己的固定歌单;权限门控在 sandbox 调用点(hostAsync)完成。
+   *  opts.sourcePlatform / opts.sourceUrl:可选的平台标签(如 "netease"/"qq")与
+   *  来源标记,写入 playlists.source_platform / source_url——前端据此显示平台徽标。 */
   playlists: {
-    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string }): Promise<any>;
+    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; sourcePlatform?: string; sourceUrl?: string }): Promise<any>;
     get(playlistId: string): Promise<any | null>;
     replaceEntries(playlistId: string, entries: any[]): Promise<any>;
     updateCover(playlistId: string, coverSongId: string): Promise<any>;

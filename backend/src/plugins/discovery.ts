@@ -653,14 +653,18 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
   const now = new Date().toISOString();
   const name = String(opts?.name || "ListenBrainz 推荐");
   const desc = opts?.description || "ListenBrainz 推荐歌单";
+  // 平台标签(前端显示徽标):插件可传 sourcePlatform(如 "netease"/"qq"/"kugou"/"soda")
+  // 与 sourceUrl;缺省保持历史默认('listenbrainz' / lb://),向后兼容。
+  const sourcePlatform = typeof opts?.sourcePlatform === "string" && opts.sourcePlatform ? String(opts.sourcePlatform) : "listenbrainz";
+  const sourceUrl = typeof opts?.sourceUrl === "string" && opts.sourceUrl ? String(opts.sourceUrl) : `lb://${playlistId}`;
   const existing = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId) as any;
   if (!existing) {
     sqlite.prepare(`INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, NULL, ?, 'listenbrainz', NULL, 0, ?, ?)`)
-      .run(playlistId, name, systemOwnerId(), desc, `lb://${playlistId}`, now, now);
+      VALUES (?, ?, ?, 1, ?, NULL, ?, ?, NULL, 0, ?, ?)`)
+      .run(playlistId, name, systemOwnerId(), desc, sourceUrl, sourcePlatform, now, now);
   } else {
-    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, updated_at = ? WHERE id = ?")
-      .run(name, desc, now, playlistId);
+    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, source_url = ?, source_platform = ?, updated_at = ? WHERE id = ?")
+      .run(name, desc, sourceUrl, sourcePlatform, now, playlistId);
   }
   sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
   const entries = Array.isArray(opts?.entries) ? opts.entries : [];

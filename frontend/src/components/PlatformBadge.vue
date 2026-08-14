@@ -17,6 +17,7 @@ const PLATFORMS: Record<string, { label: string; color: string }> = {
   qq: { label: "QQ音乐", color: "#12b7f5" },
   kugou: { label: "酷狗", color: "#28c76f" },
   kuwo: { label: "酷我", color: "#ff7f27" },
+  soda: { label: "汽水", color: "#00b8a9" },
 };
 
 const source = computed(() => (props.source || "").toLowerCase());
