@@ -388,6 +388,14 @@
               :placeholder="f.help"
               style="width: 100%"
             />
+            <el-input
+              v-else-if="f.type === 'password'"
+              v-model="editConfig[f.key]"
+              type="password"
+              show-password
+              :placeholder="f.help"
+              style="width: 100%"
+            />
             <el-input-number
               v-else-if="f.type === 'number'"
               v-model="editConfig[f.key]"
@@ -402,7 +410,7 @@
               <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
             </el-select>
             <el-select
-              v-else-if="f.type === 'multiselect'"
+              v-else-if="f.type === 'multiselect' || f.type === 'multi-select'"
               v-model="editConfig[f.key]"
               multiple
               collapse-tags
