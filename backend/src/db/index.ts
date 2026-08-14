@@ -430,6 +430,10 @@ export function initDatabase() {
   try {
     sqlite.exec("ALTER TABLE dlna_devices ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0");
   } catch {}
+  // Migration: add source_plugin column to playlists (older DBs) — 插件同步歌单归属
+  try {
+    sqlite.exec("ALTER TABLE playlists ADD COLUMN source_plugin TEXT");
+  } catch {}
   // Online-song columns (online source plugins, e.g. the official go-music-dl)
   for (const col of [
     "type TEXT DEFAULT 'local'",

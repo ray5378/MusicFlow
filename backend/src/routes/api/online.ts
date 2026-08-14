@@ -18,9 +18,17 @@ import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist, syncAllRecommendPlaylists } from "../../services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "../../services/source/online/purge.js";
-import { getPluginManifest } from "../../plugins/registry.js";
+import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
+import { runPluginJob } from "../../services/plugin/jobRunner.js";
 
 export const onlineRoutes = new Hono();
+
+// 批量在线适配任务(一键适配所有含未匹配条目的歌单)。后台串行逐个歌单,
+// 每个歌单内部沿用 MATCH_CONCURRENCY 并发控制;状态存内存,TTL 同 matchJobs。
+const batchMatchJobs = new Map<string, { status: string; startedAt: string; finishedAt?: string; total: number; done: number; current: string; results: any[]; error: string | null }>();
+
+// 「同步所有平台」聚合任务状态(路径 A 推荐歌单重导;插件任务状态在 jobRunner)。
+const syncAllState = new Map<string, { running: boolean; startedAt: string; finishedAt?: string; result: any; error: string | null }>();
 
 // Background match jobs (large playlists). In-memory like scanJobs in api/index.ts.
 const matchJobs = new Map<string, { status: string; playlistId: string; startedAt: string; finishedAt?: string; progress: { done: number; total: number }; result: any; error: string | null }>();
@@ -134,6 +142,58 @@ onlineRoutes.get("/v1/online/:providerId/match-playlist/status", (c) => {
   const job = matchJobs.get(jobId);
   if (!job) return c.json({ success: false, error: "任务不存在" }, 404);
   return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, progress: job.progress, result: job.result, error: job.error });
+});
+
+// 批量在线适配:对「所有含未匹配(外部占位)条目的歌单」启动后台串行匹配。
+// 只处理有占位条目的歌单(不空转);每个歌单内部沿用 MATCH_CONCURRENCY 并发控制。
+//   POST /v1/online/:providerId/match-playlists -> { success, started, batchId, total, alreadyMatched }
+//   GET  /v1/online/:providerId/match-playlists/status?batchId= -> { status, total, done, current, results, error }
+onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
+  const providerId = c.req.param("providerId");
+  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  const configured = getConfiguredProvider(providerId);
+  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+
+  // 收集所有含未匹配条目的歌单(entryCount > 0)。
+  const all = db.select().from(playlists).all();
+  const targets: { id: string; name: string; count: number }[] = [];
+  for (const pl of all) {
+    const count = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, pl.id)).all()
+      .filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim()).length;
+    if (count > 0) targets.push({ id: pl.id, name: pl.name || pl.id, count });
+  }
+  if (targets.length === 0) return c.json({ success: true, started: false, total: 0, alreadyMatched: true });
+
+  const batchId = `batch-match-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const job = { status: "running", startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, total: targets.length, done: 0, current: "", results: [] as any[], error: null as string | null };
+  batchMatchJobs.set(batchId, job);
+  (async () => {
+    try {
+      for (const t of targets) {
+        job.current = t.name;
+        try {
+          const r = await matchUnmatchedPlaylistEntries(providerId, configured.config, configured.provider, t.id);
+          job.results.push({ playlistId: t.id, name: t.name, count: t.count, ...r });
+        } catch (e: any) {
+          job.results.push({ playlistId: t.id, name: t.name, count: t.count, error: String(e?.message || e) });
+        }
+        job.done++;
+      }
+      Object.assign(job, { status: "completed", finishedAt: new Date().toISOString() });
+    } catch (e: any) {
+      job.error = String(e?.message || e);
+      Object.assign(job, { status: "failed", finishedAt: new Date().toISOString() });
+    }
+  })();
+  return c.json({ success: true, started: true, batchId, total: targets.length });
+});
+
+onlineRoutes.get("/v1/online/:providerId/match-playlists/status", (c) => {
+  const batchId = c.req.query("batchId");
+  if (!batchId) return c.json({ success: false, error: "缺少 batchId" });
+  const job = batchMatchJobs.get(batchId);
+  if (!job) return c.json({ success: false, error: "任务不存在" }, 404);
+  return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, total: job.total, done: job.done, current: job.current, results: job.results, error: job.error });
 });
 
 // Auto-match a single unmatched playlist entry before playing it.
@@ -261,16 +321,53 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", async (c) => {
 });
 
 // Re-import all locally-imported daily-recommend playlists (full-replace each).
+// 聚合「同步所有平台」:
+//   ① 路径 A 公开推荐歌单全量重导(后台执行,状态可查);
+//   ② 所有 recommendPlaylist 能力插件(go-music-dl 私人歌单 / listenbrainz 推荐)
+//      经 jobRunner 异步 runDailyJob(force)——per-plugin 串行锁自动防撞车。
+// 立即返回(不阻塞 HTTP),前端轮询各任务状态:
+//   GET /v1/online/:providerId/recommend/sync-all/status(路径 A)
+//   GET /v1/plugins/:id/job(各插件)
 // POST /v1/online/:providerId/recommend/sync-all
 onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
-  try {
-    const result = await syncAllRecommendPlaylists(providerId, { userId: c.get("user")?.id });
-    return c.json({ success: true, ...result });
-  } catch (e: any) {
-    return c.json({ success: false, error: e.message || "同步失败" });
+  const configured = getConfiguredProvider(providerId);
+  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+
+  // ① 路径 A 推荐歌单重导(后台,状态存 syncAllState)。
+  const existing = syncAllState.get(providerId);
+  if (existing?.running) return c.json({ success: false, error: "同步任务进行中,请稍候" }, 409);
+  const state = { running: true, startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, result: null as any, error: null as string | null };
+  syncAllState.set(providerId, state);
+  (async () => {
+    try {
+      const result = await syncAllRecommendPlaylists(providerId, { userId: c.get("user")?.id });
+      Object.assign(state, { running: false, result, finishedAt: new Date().toISOString() });
+    } catch (e: any) {
+      Object.assign(state, { running: false, error: String(e?.message || e), finishedAt: new Date().toISOString() });
+    }
+  })();
+
+  // ② 所有 recommendPlaylist 插件 runDailyJob(force)(仅外置:内置 daily/local 是
+  //    dailyPlaylist/localPlaylist 能力,不在此集合,不会误触发)。
+  const tasks: { pluginId: string; started: boolean; alreadyRunning: boolean }[] = [];
+  for (const { manifest } of getEnabledByCapability("recommendPlaylist")) {
+    if (!manifest || !manifest.id) continue;
+    const r = runPluginJob(manifest.id, "runDailyJob", { force: true });
+    tasks.push({ pluginId: manifest.id, started: r.started, alreadyRunning: r.alreadyRunning });
   }
+
+  return c.json({ success: true, started: true, pathA: { running: true }, tasks });
+});
+
+// 路径 A(公开推荐歌单重导)任务状态查询。
+// GET /v1/online/:providerId/recommend/sync-all/status
+onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", (c) => {
+  const providerId = c.req.param("providerId");
+  const st = syncAllState.get(providerId);
+  if (!st) return c.json({ success: false, error: "尚无同步记录" }, 404);
+  return c.json({ success: true, running: st.running, startedAt: st.startedAt, finishedAt: st.finishedAt, result: st.result, error: st.error });
 });
 
 // Manually purge expired unreferenced web songs for a provider (admin).

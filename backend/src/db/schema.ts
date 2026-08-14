@@ -96,6 +96,7 @@ export const playlists = sqliteTable("playlists", {
   favorite: integer("favorite").default(0), // 用户收藏标记;平台歌单收藏后脱离每日推荐轮换并保留每天同步
   sourceUrl: text("source_url"),
   sourcePlatform: text("source_platform"),
+  sourcePlugin: text("source_plugin"), // 插件同步歌单的归属插件 id(如 go-music-dl 私人歌单);导入歌单为空
   externalId: text("external_id"),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),

@@ -6,7 +6,7 @@
         <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">
-        <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : playlist.sourcePlatform === 'kugou' ? '酷狗' : playlist.sourcePlatform === 'kuwo' ? '酷我' : playlist.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag></div>
+        <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : playlist.sourcePlatform === 'kugou' ? '酷狗' : playlist.sourcePlatform === 'kuwo' ? '酷我' : playlist.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag><el-tag v-else-if="playlist.pluginSynced" size="small" type="info" style="margin-left: 4px">插件同步</el-tag></div>
         <h1>{{ playlist.name }}</h1>
         <div class="info">{{ playlist.songCount }}首 · {{ formatTotalDuration(playlist.duration) }}</div>
         <div class="info" v-if="playlist.isImported && playlist.matched !== undefined">
@@ -18,6 +18,7 @@
           <el-button @click="exportPlaylist"><MfIcon name="Download" />导出</el-button>
           <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />重命名</el-button>
           <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />同步</el-button>
+          <el-button v-else-if="playlist.pluginSynced" :loading="gmdlRefreshing" @click="refreshGmdlPlugin"><MfIcon name="RefreshCw" />刷新</el-button>
           <el-button v-if="playlist.isDaily" @click="convertToLocal"><MfIcon name="Pin" />转成本地永久歌单</el-button>
           <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
           <el-button type="danger" plain @click="deletePlaylist"><MfIcon name="Trash2" />删除歌单</el-button>
@@ -365,6 +366,53 @@ async function syncPlaylist() {
   }
 }
 
+// 插件同步歌单「刷新」:按歌单归属插件(sourcePluginId)精确刷新;旧数据回退 go-music-dl。
+let gmdlPollCancelled = false;
+let gmdlPollTimer: ReturnType<typeof setTimeout> | null = null;
+const gmdlRefreshing = ref(false);
+async function refreshGmdlPlugin() {
+  if (gmdlRefreshing.value) return;
+  const pluginId = playlist.value?.sourcePluginId || "go-music-dl";
+  gmdlRefreshing.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId });
+    if (res.data?.success) {
+      ElMessage.success(res.data.alreadyRunning ? "刷新任务已在后台进行中,完成后自动提示" : "已开始后台刷新,完成后自动提示");
+      pollGmdlJob(pluginId);
+    } else {
+      ElMessage.error(res.data?.error || "刷新启动失败");
+      gmdlRefreshing.value = false;
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "刷新启动失败");
+    gmdlRefreshing.value = false;
+  }
+}
+function pollGmdlJob(pluginId: string) {
+  const tick = async () => {
+    if (gmdlPollCancelled) return;
+    try {
+      const res = await api.get(`/rest/api/v1/plugins/${pluginId}/job`);
+      if (gmdlPollCancelled) return;
+      if (res.data?.running) { gmdlPollTimer = setTimeout(tick, 2000); return; }
+      const job = res.data?.job;
+      gmdlRefreshing.value = false;
+      if (job?.status === "ok") {
+        const s = job.summary;
+        ElMessage.success(typeof s === "string" && s ? s : "刷新完成");
+      } else if (job?.status === "error") {
+        ElMessage.error(job.error || "刷新失败");
+      } else {
+        ElMessage.info("刷新任务已结束");
+      }
+      loadPlaylist();
+    } catch {
+      gmdlPollTimer = setTimeout(tick, 2000);
+    }
+  };
+  tick();
+}
+
 // Convert a daily-recommend imported playlist into a permanent local playlist.
 async function convertToLocal() {
   await ElMessageBox.confirm(
@@ -445,7 +493,11 @@ onMounted(loadPlaylist);
 // the recursive setTimeout keeps issuing /match-playlist/status requests after
 // the component has been unmounted.
 let matchPollCancelled = false;
-onUnmounted(() => { matchPollCancelled = true; });
+onUnmounted(() => {
+  matchPollCancelled = true;
+  gmdlPollCancelled = true;
+  if (gmdlPollTimer) clearTimeout(gmdlPollTimer);
+});
 </script>
 
 <style lang="scss" scoped>

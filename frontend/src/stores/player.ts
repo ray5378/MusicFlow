@@ -291,6 +291,15 @@ export const usePlayerStore = defineStore("player", () => {
 
   function startLocalPlayback() {
     if (howl) { howl.unload(); howl = null; }
+    // 预探测确认不可播的外部音源直接跳过(需求:提前跳过,不打断不卡顿)。
+    // guard 防死循环:整队都不可播时停止,交给失败连击上限兜底。
+    let skipGuard = 0;
+    while (localQueue.value[localIndex.value] && deadSongs.has(localQueue.value[localIndex.value].id)) {
+      if (++skipGuard > localQueue.value.length) break;
+      if (localPlayMode.value === "shuffle") localIndex.value = localRandomIndex();
+      else localIndex.value = (localIndex.value + 1) % localQueue.value.length;
+      console.warn(`[player] 跳过已确认不可播的歌曲: ${localQueue.value[localIndex.value]?.title || localQueue.value[localIndex.value]?.id}`);
+    }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song.id);
@@ -320,6 +329,8 @@ export const usePlayerStore = defineStore("player", () => {
     localIsPlaying.value = true;
     startLocalProgressTimer();
     autoshowQueue();
+    // 播放不阻塞:预探测接下来可能播放的外部音源,提前确认可用/换源/跳过。
+    probeUpcoming();
   }
 
   // Auto-skip when a song can't be fetched/played (e.g. no stream available on
@@ -381,12 +392,69 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
+  // ===== 播放前外部音源预探测(需求:下一首是外部音源前提前确认可用,含随机播放) =====
+  // 前端无法预知哪些歌是外部音源(Song 无 url 字段),故对「接下来可能播放的 3 首」
+  // 无脑批量探测,后端对本地歌曲直接返回 ok:true(零开销)、对 web 歌曲做轻量
+  // Range 探测并自动换源写回;不可用的歌提前跳过(deadSongs),不打断播放。
+  const probeCache = new Map<string, boolean>(); // songId -> 可用性(session 内,重启失效)
+  const deadSongs = new Set<string>();           // 探测确认不可播 → 播放前直接跳过
+  let probing = false;
+  const PROBE_WINDOW = 3;
+
+  async function probeUpcoming() {
+    if (probing || localQueue.value.length === 0) return;
+    const n = localQueue.value.length;
+    const cands: string[] = [];
+    const unseen = (idx: number): boolean => {
+      const s = localQueue.value[idx];
+      return !!s && !probeCache.has(s.id) && idx !== localIndex.value;
+    };
+    if (localPlayMode.value === "shuffle") {
+      // 随机模式:随机挑未探测的歌(渐进预热,每切一首探测一批新的)
+      for (let tries = 0; tries < n && cands.length < PROBE_WINDOW; tries++) {
+        const idx = Math.floor(Math.random() * n);
+        if (unseen(idx) && !cands.includes(localQueue.value[idx].id)) cands.push(localQueue.value[idx].id);
+      }
+    } else {
+      for (let i = 1; i <= PROBE_WINDOW; i++) {
+        const idx = localIndex.value + i;
+        if (idx < n && unseen(idx)) cands.push(localQueue.value[idx].id);
+        else if (idx >= n && localPlayMode.value === "all") {
+          const wrap = idx % n;
+          if (wrap !== localIndex.value && unseen(wrap)) cands.push(localQueue.value[wrap].id);
+        }
+      }
+    }
+    if (!cands.length) return;
+    probing = true;
+    try {
+      const res = await api.post("/rest/api/v1/stream/probe", { songIds: cands });
+      const results = res.data?.results || [];
+      for (const r of results) {
+        probeCache.set(r.songId, !!r.ok);
+        if (!r.ok) {
+          deadSongs.add(r.songId);
+          console.warn(`[player] 预探测不可播,提前跳过: ${r.songId} (${r.reason || "无可用音源"})`);
+        } else {
+          deadSongs.delete(r.songId);
+        }
+      }
+    } catch {
+      // 探测失败不阻塞播放:交给播放时的失败兜底(换源/跳过)。
+    } finally {
+      probing = false;
+    }
+  }
+
   // Pick a random index different from the current one (for shuffle mode).
   function localRandomIndex(): number {
     const n = localQueue.value.length;
     if (n <= 1) return localIndex.value;
     let idx = localIndex.value;
-    while (idx === localIndex.value) idx = Math.floor(Math.random() * n);
+    let guard = 0;
+    do {
+      idx = Math.floor(Math.random() * n);
+    } while ((idx === localIndex.value || deadSongs.has(localQueue.value[idx]?.id)) && guard++ < n * 2);
     return idx;
   }
 

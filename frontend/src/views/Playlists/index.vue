@@ -20,6 +20,8 @@
             <div class="manage-item" @click="openManage('create')"><MfIcon name="Plus" />新建歌单</div>
             <div class="manage-item" @click="openManage('import')"><MfIcon name="Upload" />导入歌单</div>
             <div class="manage-item" @click="openManage('export')"><MfIcon name="Download" />导出全部歌单</div>
+            <div class="manage-item" @click="openManage('matchAll')"><MfIcon name="Search" />一键在线适配</div>
+            <div class="manage-item" @click="openManage('refreshPrivate')"><MfIcon name="RefreshCw" />一键刷新私人歌单</div>
             <div class="manage-item" @click="openManage('sync')"><MfIcon name="RefreshCw" />同步所有平台</div>
             <div v-if="authStore.isAdmin" class="manage-item" @click="openManage('wish')"><MfIcon name="MessageCircle" />未命中音乐</div>
           </div>
@@ -62,6 +64,7 @@
             <el-dropdown-menu>
               <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
               <el-dropdown-item v-if="pl.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
+              <el-dropdown-item v-else-if="pl.pluginSynced" command="refresh"><MfIcon name="RefreshCw" />刷新</el-dropdown-item>
               <el-dropdown-item v-if="pl.isDaily" command="convertLocal"><MfIcon name="Pin" />转成本地永久歌单</el-dropdown-item>
               <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
               <el-dropdown-item command="export"><MfIcon name="Download" />导出</el-dropdown-item>
@@ -140,7 +143,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
@@ -168,6 +171,7 @@ function cardActions(pl: any): MenuAction[] {
     { label: "查看歌单", icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
   ];
   if (pl.isImported) acts.push({ label: "同步", icon: RefreshCw, onClick: () => syncPlaylist(pl) });
+  else if (pl.pluginSynced) acts.push({ label: "刷新", icon: RefreshCw, onClick: () => refreshPluginPlaylist(pl) });
   if (pl.isDaily)
     acts.push({ label: "转成本地永久歌单", icon: Pin, onClick: () => convertToLocal(pl) });
   acts.push({ divider: true });
@@ -265,6 +269,7 @@ async function loadImportPlatforms() {
 // 在线源插件(用于同步所有平台的每日推荐歌单):只认 type==="source" 且已配置 baseUrl,不再写死 go-music-dl
 const dailySourceId = ref("");
 const syncingDaily = ref(false);
+const gmdlRefreshing = ref(false);
 
 async function detectDailySource() {
   if (dailySourceId.value) return;
@@ -278,21 +283,175 @@ async function detectDailySource() {
     if (src) dailySourceId.value = src.id;
   } catch {}
 }
+// 聚合「同步所有平台」:路径A公开推荐歌单重导 + 所有 recommendPlaylist 插件
+// (go-music-dl 私人歌单 / listenbrainz 推荐)异步刷新。立即返回,轮询汇总。
+const syncAllTasks = ref<any[]>([]);
+const syncAllTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const gmdlRefreshTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const matchAllTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const matchAllRunning = ref(false);
+const matchAllBatchId = ref("");
+const matchAllTotal = ref(0);
+const matchAllDone = ref(0);
+const matchAllCurrent = ref("");
+
 async function syncDailyAll() {
   if (!dailySourceId.value) await detectDailySource(); // 未探测到源,先尝试探测
   if (!dailySourceId.value) {
     ElMessage.warning("未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件后再同步");
     return;
   }
+  if (syncingDaily.value) return;
   syncingDaily.value = true;
+  syncAllTasks.value = [];
   try {
     const res = await api.post(`/rest/api/v1/online/${dailySourceId.value}/recommend/sync-all`);
-    if (res.data?.success) {
-      ElMessage.success(res.data.errors?.length ? `已更新 ${res.data.synced} 个,失败 ${res.data.failed} 个` : `已更新 ${res.data.synced} 个每日推荐歌单`);
+    if (res.data?.success && res.data.started) {
+      syncAllTasks.value = res.data.tasks || [];
+      ElMessage.success(`已开始同步:每日推荐 + ${(res.data.tasks || []).length} 个插件推荐,完成后自动提示`);
+      pollSyncAll();
+    } else if (res.data?.success && res.data?.alreadyRunning) {
+      ElMessage.info("同步任务已在后台进行中");
+      syncingDaily.value = false;
+    } else {
+      ElMessage.error(res.data?.error || "同步失败");
+      syncingDaily.value = false;
+    }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || "同步失败"); syncingDaily.value = false; }
+}
+
+// 轮询聚合同步:路径A状态 + 各插件 job 状态,全部结束后汇总提示。
+function pollSyncAll() {
+  const tick = async () => {
+    try {
+      const a = await api.get(`/rest/api/v1/online/${dailySourceId.value}/recommend/sync-all/status`).catch(() => null);
+      const pluginStates = await Promise.all((syncAllTasks.value || []).map(async (t: any) => {
+        try {
+          const r = await api.get(`/rest/api/v1/plugins/${t.pluginId}/job`);
+          return { pluginId: t.pluginId, job: r.data?.job };
+        } catch { return { pluginId: t.pluginId, job: null }; }
+      }));
+      const pathADone = !a?.data?.running;
+      const pluginsDone = pluginStates.every((p) => !p.job || !p.job.running);
+      if (!pathADone || !pluginsDone) {
+        syncAllTimer.value = setTimeout(tick, 2000);
+        return;
+      }
+      syncingDaily.value = false;
+      const failCount = pluginStates.filter((p) => p.job?.status === "error").length;
+      const aResult = a?.data?.result;
+      const aSummary = aResult?.synced ? `每日推荐更新 ${aResult.synced} 个` : "每日推荐更新完成";
+      ElMessage.success(`${aSummary}${failCount ? `,${failCount} 个插件任务失败(详见插件页)` : ",插件任务全部完成"}`);
       loadPlaylists();
-    } else ElMessage.error(res.data?.error || "更新失败");
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "更新失败"); }
-  finally { syncingDaily.value = false; }
+    } catch {
+      syncAllTimer.value = setTimeout(tick, 2000);
+    }
+  };
+  tick();
+}
+
+// go-music-dl 私人歌单「刷新」(插件同步歌单的刷新入口;也用于「一键刷新私人歌单」)。
+// 优先按歌单归属插件(sourcePluginId)精确刷新;旧数据无归属时回退 go-music-dl。
+async function refreshPluginPlaylist(pl?: any) {
+  await startGmdlRefresh(pl?.sourcePluginId || "go-music-dl");
+}
+async function refreshAllPrivate() {
+  await startGmdlRefresh("go-music-dl");
+}
+async function startGmdlRefresh(pluginId: string) {
+  if (gmdlRefreshing.value) return;
+  gmdlRefreshing.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId });
+    if (res.data?.success) {
+      ElMessage.success(res.data.alreadyRunning ? "刷新任务已在后台进行中,完成后自动提示" : "已开始后台刷新,完成后自动提示");
+      pollGmdlJob(pluginId);
+    } else {
+      ElMessage.error(res.data?.error || "刷新启动失败");
+      gmdlRefreshing.value = false;
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "刷新启动失败");
+    gmdlRefreshing.value = false;
+  }
+}
+function pollGmdlJob(pluginId: string) {
+  const tick = async () => {
+    try {
+      const res = await api.get(`/rest/api/v1/plugins/${pluginId}/job`);
+      if (res.data?.running) { gmdlRefreshTimer.value = setTimeout(tick, 2000); return; }
+      const job = res.data?.job;
+      gmdlRefreshing.value = false;
+      if (job?.status === "ok") {
+        const s = job.summary;
+        ElMessage.success(typeof s === "string" && s ? s : "私人歌单刷新完成");
+      } else if (job?.status === "error") {
+        ElMessage.error(job.error || "刷新失败");
+      } else {
+        ElMessage.info("刷新任务已结束");
+      }
+      loadPlaylists();
+    } catch {
+      gmdlRefreshTimer.value = setTimeout(tick, 2000);
+    }
+  };
+  tick();
+}
+
+// 一键在线适配:对所有含未匹配条目的歌单启动后台批量匹配,轮询进度。
+async function matchAllPlaylists() {
+  if (!dailySourceId.value) await detectDailySource();
+  if (!dailySourceId.value) {
+    ElMessage.warning("未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件");
+    return;
+  }
+  if (matchAllRunning.value) return;
+  matchAllRunning.value = true;
+  matchAllTotal.value = 0; matchAllDone.value = 0; matchAllCurrent.value = ""; matchAllBatchId.value = "";
+  try {
+    const res = await api.post(`/rest/api/v1/online/${dailySourceId.value}/match-playlists`);
+    if (res.data?.started) {
+      matchAllBatchId.value = res.data.batchId;
+      matchAllTotal.value = res.data.total || 0;
+      ElMessage.success(`已开始后台在线适配 ${res.data.total} 个歌单…`);
+      pollMatchAll();
+    } else if (res.data?.alreadyMatched) {
+      ElMessage.success("所有歌单均已在线适配,无需处理");
+      matchAllRunning.value = false;
+    } else {
+      ElMessage.error(res.data?.error || "启动失败");
+      matchAllRunning.value = false;
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "启动失败");
+    matchAllRunning.value = false;
+  }
+}
+function pollMatchAll() {
+  const tick = async () => {
+    try {
+      const res = await api.get(`/rest/api/v1/online/${dailySourceId.value}/match-playlists/status`, { params: { batchId: matchAllBatchId.value } });
+      const d = res.data;
+      if (!d || d.status === "running") {
+        if (d) { matchAllDone.value = d.done || 0; matchAllCurrent.value = d.current || ""; }
+        matchAllTimer.value = setTimeout(tick, 2000);
+        return;
+      }
+      matchAllDone.value = d.done || 0;
+      matchAllCurrent.value = "";
+      matchAllRunning.value = false;
+      if (d.status === "completed") {
+        const failed = (d.results || []).filter((r: any) => r.error).length;
+        ElMessage.success(`在线适配完成:${d.total} 个歌单已处理${failed ? `,${failed} 个失败` : ""}`);
+        loadPlaylists();
+      } else {
+        ElMessage.error(d.error || "在线适配失败");
+      }
+    } catch {
+      matchAllTimer.value = setTimeout(tick, 2000);
+    }
+  };
+  tick();
 }
 
 function formatDuration(sec: number) { const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`; }
@@ -355,6 +514,8 @@ function openManage(action: string) {
   if (action === "create") showCreateDialog.value = true;
   else if (action === "import") { showImportDialog.value = true; loadImportPlatforms(); }
   else if (action === "export") exportAllPlaylists();
+  else if (action === "matchAll") matchAllPlaylists();
+  else if (action === "refreshPrivate") refreshAllPrivate();
   else if (action === "sync") syncDailyAll();
   else if (action === "wish") router.push("/admin/wish");
 }
@@ -507,6 +668,7 @@ function handleCardCommand(cmd: string, pl: any) {
   switch (cmd) {
     case "play": playAll(pl); break;
     case "sync": syncPlaylist(pl); break;
+    case "refresh": refreshPluginPlaylist(pl); break;
     case "convertLocal": convertToLocal(pl); break;
     case "rename": openRename(pl); break;
     case "export": exportPlaylist(pl); break;
@@ -589,6 +751,11 @@ async function deletePlaylist(pl: any) {
 }
 
 onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); });
+onUnmounted(() => {
+  if (syncAllTimer.value) clearTimeout(syncAllTimer.value);
+  if (gmdlRefreshTimer.value) clearTimeout(gmdlRefreshTimer.value);
+  if (matchAllTimer.value) clearTimeout(matchAllTimer.value);
+});
 </script>
 
 <style lang="scss" scoped>

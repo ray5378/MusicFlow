@@ -11,8 +11,10 @@ import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
+import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
+import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
@@ -1049,6 +1051,35 @@ apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
   return c.json({ success: true, pluginId: id, running: state.running, job: state });
 });
 
+// 外部音源预探测(播放前):批量检查歌曲是否有可用音源,供播放器在切歌前
+// 提前确认下一首可播(含随机播放)。本地歌曲直接 ok(不探测);web 歌曲经
+// ensurePlayableStream 探测原源(Range bytes=0-20000,失败自动换源并写回 DB),
+// 结果按 songId 内存缓存(playableCache/fallbackCache),短时间内不重复探测。
+//   POST /v1/stream/probe  body: { songIds: string[] }(≤5)
+//   -> { success, results: [{ songId, ok, local?, fallback?, reason? }] }
+apiRoutes.post("/v1/stream/probe", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const songIds = Array.isArray(body.songIds)
+    ? body.songIds.filter((s: any) => typeof s === "string").slice(0, 5)
+    : [];
+  if (!songIds.length) return c.json({ success: false, error: "缺少 songIds" });
+  const results = await Promise.all(songIds.map(async (id: string) => {
+    const song = db.select().from(songs).where(eq(songs.id, id)).get();
+    if (!song) return { songId: id, ok: false, local: false, reason: "歌曲不存在" };
+    // 本地歌曲(无 url 或已缓存文件):无需探测。
+    if (!song.url || song.cachePath) return { songId: id, ok: true, local: true };
+    const original = song.url;
+    try {
+      const url = await ensurePlayableStream(song as any);
+      if (url) return { songId: id, ok: true, local: false, fallback: url !== original };
+      return { songId: id, ok: false, local: false, reason: "无可用音源" };
+    } catch (e: any) {
+      return { songId: id, ok: false, local: false, reason: String(e?.message || e).slice(0, 120) };
+    }
+  }));
+  return c.json({ success: true, results });
+});
+
 // 今日漫游(combo,合并前两者)。body 可选 { targets: ["daily"|"local"|"roam"] },
 // 缺省全刷。返回各自结果。
 apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
@@ -1419,7 +1450,7 @@ apiRoutes.get("/v1/playlists", (c) => {
     songCount: p.songCount || 0, duration: p.duration || 0,
     // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
     coverArt: `pl-${p.id}`, sourcePlatform: p.sourcePlatform || "",
-    isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, favorite: !!p.favorite,
+    isImported: isImportedPlaylist(p), pluginSynced: isPluginSyncPlaylist(p), sourcePluginId: p.sourcePlugin || "", syncEnabled: !!p.syncEnabled, favorite: !!p.favorite,
     isDaily: isDailyRecommendPlaylist(p),
     created: p.createdAt, changed: p.updatedAt,
   }));
@@ -1500,7 +1531,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
       playable: false, isMatched: false, unavailableReason: e.unavailableReason || "曲库中未找到",
     };
   });
-  return c.json({ total, matched, page, pageSize, items, playlist: { id: playlist.id, name: playlist.name, songCount: playlist.songCount || 0, matched, duration: playlist.duration || 0, coverArt: `pl-${playlist.id}`, sourcePlatform: playlist.sourcePlatform || "", isImported: !!playlist.sourceUrl, syncEnabled: !!playlist.syncEnabled, public: !!playlist.isPublic, owner: playlist.ownerId, isDaily: isDailyRecommendPlaylist(playlist) } });
+  return c.json({ total, matched, page, pageSize, items, playlist: { id: playlist.id, name: playlist.name, songCount: playlist.songCount || 0, matched, duration: playlist.duration || 0, coverArt: `pl-${playlist.id}`, sourcePlatform: playlist.sourcePlatform || "", isImported: isImportedPlaylist(playlist), pluginSynced: isPluginSyncPlaylist(playlist), sourcePluginId: playlist.sourcePlugin || "", syncEnabled: !!playlist.syncEnabled, public: !!playlist.isPublic, owner: playlist.ownerId, isDaily: isDailyRecommendPlaylist(playlist) } });
 });
 
 // ==================== Play history (paginated) ====================

@@ -532,7 +532,7 @@ export async function discoverExternalPlugins(
           },
         },
         playlists: {
-          upsert: async (playlistId: string, opts: any) => upsertPluginPlaylist(String(playlistId), opts || {}),
+          upsert: async (playlistId: string, opts: any) => upsertPluginPlaylist(String(playlistId), opts || {}, id),
           get: async (playlistId: string) => {
             const p = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(String(playlistId)) as any;
             if (!p) return null;
@@ -540,7 +540,7 @@ export async function discoverExternalPlugins(
             return { ...p, entries };
           },
           replaceEntries: async (playlistId: string, entries: any[]) =>
-            upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "ListenBrainz 推荐", entries: entries || [] }),
+            upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "ListenBrainz 推荐", entries: entries || [] }, id),
           updateCover: async (playlistId: string, coverSongId: string) => {
             const cover = firstPlayableCoverFile(String(playlistId), { preferSongId: String(coverSongId) });
             if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, new Date().toISOString(), String(playlistId));
@@ -649,7 +649,7 @@ function refreshPluginPlaylistCounts(playlistId: string): void {
 
 /** 按固定 id 创建或全量更新一张歌单(同名刷新覆盖)。entries 为混合条目:
  *  { songId } 本地歌曲;或 { externalSongId, externalTitle, externalArtist, externalAlbum?, externalDuration? } 外部条目。 */
-async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any> {
+async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?: string): Promise<any> {
   const now = new Date().toISOString();
   const name = String(opts?.name || "ListenBrainz 推荐");
   const desc = opts?.description || "ListenBrainz 推荐歌单";
@@ -657,14 +657,16 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
   // 与 sourceUrl;缺省保持历史默认('listenbrainz' / lb://),向后兼容。
   const sourcePlatform = typeof opts?.sourcePlatform === "string" && opts.sourcePlatform ? String(opts.sourcePlatform) : "listenbrainz";
   const sourceUrl = typeof opts?.sourceUrl === "string" && opts.sourceUrl ? String(opts.sourceUrl) : `lb://${playlistId}`;
+  // 归属插件 id(沙箱 env 闭包传入):前端据此显示「刷新」按钮并精确触发对应插件刷新。
+  const plugin = sourcePlugin ? String(sourcePlugin) : null;
   const existing = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId) as any;
   if (!existing) {
-    sqlite.prepare(`INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, NULL, ?, ?, NULL, 0, ?, ?)`)
-      .run(playlistId, name, systemOwnerId(), desc, sourceUrl, sourcePlatform, now, now);
+    sqlite.prepare(`INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, source_plugin, external_id, sync_enabled, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, NULL, ?, ?, ?, NULL, 0, ?, ?)`)
+      .run(playlistId, name, systemOwnerId(), desc, sourceUrl, sourcePlatform, plugin, now, now);
   } else {
-    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, source_url = ?, source_platform = ?, updated_at = ? WHERE id = ?")
-      .run(name, desc, sourceUrl, sourcePlatform, now, playlistId);
+    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, source_url = ?, source_platform = ?, source_plugin = ?, updated_at = ? WHERE id = ?")
+      .run(name, desc, sourceUrl, sourcePlatform, plugin, now, playlistId);
   }
   sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
   const entries = Array.isArray(opts?.entries) ? opts.entries : [];

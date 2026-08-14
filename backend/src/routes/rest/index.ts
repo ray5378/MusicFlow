@@ -7,6 +7,7 @@ import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
 import { notifyScrobble } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
+import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
@@ -680,7 +681,8 @@ restRoutes.get("/getPlaylist", (c) => {
     songCount: entryChildren.length, songTotal, duration,
     coverArt: `pl-${playlist.id}`, comment: playlist.comment || "",
     sourcePlatform: playlist.sourcePlatform || "",
-    isImported: !!playlist.sourceUrl,
+    isImported: isImportedPlaylist(playlist),
+    pluginSynced: isPluginSyncPlaylist(playlist),
     syncEnabled: !!playlist.syncEnabled,
     entry: entryChildren,
   } }));
