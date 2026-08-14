@@ -673,7 +673,43 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
   // 显式清空(避免残留上一次的旧封面,造成「封面不稳定」)。
   const cover = coverForPluginPlaylist(playlistId, opts?.coverSongId ? String(opts.coverSongId) : null);
   sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
+  // 生成后自动补匹配:仍存在外部(不可播)条目时,后台经已启用在线源再匹配一轮
+  // (与每日推荐 rebuildPlaylistEntries 后的 auto-match 行为一致),成功即导入为
+  // 可播 web 歌曲。失败不阻塞、不报错。
+  const extCount = sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM playlist_songs WHERE playlist_id = ? AND playable = 0 AND external_title IS NOT NULL AND external_title <> ''",
+  ).get(playlistId) as { n: number };
+  if ((extCount?.n || 0) > 0) {
+    autoMatchPluginPlaylist(playlistId).catch((e) => {
+      console.error(`[auto-match] ${playlistId} 后台匹配失败:`, e?.message || e);
+    });
+  }
   return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);
+}
+
+// 外置插件歌单后台自动匹配:每歌单同时只跑一个(内存锁),经 autoMatch 优先、
+// search 兜底的能力插件,把 playable=0 的 external 条目匹配并导入为可播 web 歌曲。
+const pluginAutoMatchLocks = new Set<string>();
+async function autoMatchPluginPlaylist(playlistId: string): Promise<void> {
+  if (pluginAutoMatchLocks.has(playlistId)) return;
+  pluginAutoMatchLocks.add(playlistId);
+  const started = Date.now();
+  try {
+    const matcher = getEnabledByCapability("autoMatch")[0] ?? getEnabledByCapability("search")[0];
+    if (!matcher || typeof matcher.impl?.search !== "function") return; // 无可用在线源
+    const config = getPluginConfig(matcher.manifest.id);
+    if (!config) return;
+    const { matchUnmatchedPlaylistEntries } = await import("../services/source/online/match.js");
+    const result = await matchUnmatchedPlaylistEntries(matcher.manifest.id, config, matcher.impl, playlistId);
+    if (result.total > 0) {
+      console.log(
+        `[auto-match] ${playlistId}: ${result.matched} matched, ${result.noMatch} no-match, ${result.error} errors in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+      );
+      refreshPluginPlaylistCounts(playlistId); // 条目 playable 变化后刷新计数/时长
+    }
+  } finally {
+    pluginAutoMatchLocks.delete(playlistId);
+  }
 }
 
 /** 歌单封面:优先指定 songId 的封面;否则按 position 顺序扫自身条目取第一首
@@ -711,12 +747,12 @@ async function completeFromSources(opts: any): Promise<{ songId: string | null }
   for (const { manifest, impl } of getEnabledByCapability("search")) {
     if (typeof impl?.search !== "function") continue;
     try {
-      let res: any = await impl.search(query);
-      let songs: any[] = res?.songs || res || [];
-      // 兜底:部分 source 插件 search(artist, title) 双参,单参 query 未命中时再试。
-      if ((!songs || songs.length === 0) && title) {
-        try { res = await impl.search(artist, title); songs = res?.songs || res || []; } catch { /* ignore */ }
-      }
+      // 在线源 search 契约是 (config, { query })——config 里含 baseUrl 等;此前
+      // 单参 impl.search(query) 把字符串当 config 传,内置 go-music-dl 读不到
+      // baseUrl → 补全恒失败 → 歌单全是外部占位。与 matchToOnlineSong 同约定。
+      const config = getPluginConfig(manifest.id) || {};
+      const res: any = await impl.search(config, { query });
+      const songs: any[] = Array.isArray(res?.songs) ? res.songs : [];
       const cand = songs[0];
       if (!cand || !cand.id) continue;
       // 归一化为 OnlineSongResult,容忍字段名差异(name/title)。
