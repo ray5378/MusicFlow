@@ -107,4 +107,23 @@ describe("generateLocalDailyPlaylist (独立「本地推荐」歌单)", () => {
     // 全库 60 首、取 50 首,两个不同种子序列基本必然不同
     expect(aIds.join(",")).not.toBe(bIds.join(","));
   });
+
+  it("封面从自身歌曲中随机抽取(有封面的歌)", async () => {
+    // 给部分歌曲设置封面
+    sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id IN ('s10','s20','s30')").run("al-cover-test");
+    setLocalConfig({ sourcePlaylists: [], count: 5, excludeRecent: false });
+    const r = await generateLocalDailyPlaylist(new Date("2026-08-17T12:00:00"), { force: true, seedSalt: 42 });
+    expect(r!.skipped).toBe(false);
+    // 生成歌单里的歌曲应该有部分带封面
+    const ids = (sqlite.prepare("SELECT song_id FROM playlist_songs WHERE playlist_id = ?").all(LOCAL_FIXED_PLAYLIST_ID) as any[]).map(x => x.song_id);
+    const row = sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(LOCAL_FIXED_PLAYLIST_ID) as any;
+    // 若歌单内存在带封面的歌,封面必须来自歌单内歌曲;否则留空(不报错)
+    const covered = ids.filter((id: string) => ["s10", "s20", "s30"].includes(id));
+    if (covered.length > 0) {
+      expect(row.cover_art).toBe("al-cover-test");
+    } else {
+      expect(row.cover_art).toBeNull();
+    }
+    sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art = 'al-cover-test'").run();
+  });
 });

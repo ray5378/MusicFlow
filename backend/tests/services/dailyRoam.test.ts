@@ -128,4 +128,27 @@ describe("generateRoamPlaylist (今日漫游组合)", () => {
     const r = generateRoamPlaylist({ force: true });
     expect(r.skipped).toBe(true); // 无可播放内容,保留旧歌单不重建
   });
+
+  it("封面从自身合并歌曲中随机抽取(有封面的歌)", () => {
+    setRoamConfig({});
+    // 给源歌单歌曲设置封面
+    sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id IN ('s0','s1','s2')").run("al-roam-cover");
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 3);
+    seedPlaylist(LOCAL_FIXED_PLAYLIST_ID, "本地推荐", 3, 5);
+    const r = generateRoamPlaylist({ force: true });
+    expect(r.skipped).toBe(false);
+    const row = sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any;
+    // 合并结果含 s0/s1/s2(带封面)→ 封面必须来自自身歌曲
+    expect(row.cover_art).toBe("al-roam-cover");
+    sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art = 'al-roam-cover'").run();
+  });
+
+  it("自身歌曲无封面时封面留空(不报错)", () => {
+    setRoamConfig({});
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 2);
+    const r = generateRoamPlaylist({ force: true });
+    expect(r.skipped).toBe(false);
+    const row = sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any;
+    expect(row.cover_art).toBeNull();
+  });
 });

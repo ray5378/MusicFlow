@@ -56,8 +56,10 @@ globalThis.__mfPlugin = {
 | `description` | ⬜ | 描述。 |
 | `permissions` | ⬜ | 字符串数组，声明本插件需要的权限（见 §5）。不声明则无受控能力可用。 |
 | `platforms` | ⬜ | 字符串数组，用于前端提示（如 `["qq"]`）。 |
+| `urlPatterns` | ⬜ | importer 插件专用：认领的分享链接 URL 模式（文档 + 管理端提示；实际路由用 impl 的 `canHandle()`）。 |
 | `recommendPrefix` | ⬜ | source 插件专用：每日推荐歌单 URL 前缀。 |
 | `dailyTag` | ⬜ | recommender 插件专用：每日推荐歌单标识 TAG（OpenSubsonic 等据此识别「今日推荐」）。 |
+| `homePlaylistId` | ⬜ | recommender 插件专用：该插件在首页展示时对应的固定歌单 id（如「今日漫游」=`pl-daily-roam`）。声明后插件才有资格参与「首页固定卡」自治（见 §4.3）。 |
 | `platformLabels` | ⬜ | source 插件专用：平台 slug → 展示名 映射（如 `{ netease: "网易云", qq: "QQ 音乐" }`）。核心搜索结果据此显示平台中文名，**不再内置平台词典**——新增平台只需在插件里加一项。 |
 | `sourcePreference` | ⬜ | source 插件专用：流兜底搜索的源排序偏好数组（越靠前越优先）。核心按此对兜底候选排序，缺省按插件返回顺序。 |
 | `minAppVersion` | ⬜ | 要求的最低 App 版本；低于此版本会被跳过（沙箱运行时自 **1.3.0** 起）。 |
@@ -73,8 +75,11 @@ globalThis.__mfPlugin = {
 { key: "token", label: "访问令牌", type: "text", required: false, default: "", help: "可选" }
 ```
 
-`type` 可选：`"text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch"`。
+`type` 可选：`"text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list"`。
 `select/multiselect/radio` 需提供 `options: [{ label, value }]`。
+
+- `playlist-multi`：本地 + 平台导入歌单多选（可搜索），常用于「参考歌单」类配置（如本地推荐的 sourcePlaylists）。值 = 歌单 id 数组。
+- `candidate-list`：可增删替换的编辑行列表（每项 `{ platform, url, name? }`），用于「推荐榜单」类配置（如每日推荐的 candidates）。值 = 对象数组。
 
 ---
 
@@ -108,11 +113,11 @@ globalThis.__mfPlugin = {
 | capability | impl 方法 |
 |------|------|
 | `dailyPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateDailyPlaylist(date?, opts?{force, seedSalt})` 供手动刷新） |
-| `localPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateLocalDailyPlaylist(date?, opts?)` 供手动刷新） |
+| `localPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateLocalDailyPlaylist(date?, opts?{force, seedSalt})` 供手动刷新） |
 | `comboPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateComboPlaylist(opts?{force})` 供手动刷新；合并其他推荐歌单，如「今日漫游」） |
 
 > 调度顺序：`dailyPlaylist` → `localPlaylist` → `comboPlaylist`（组合歌单依赖前两者的产物，必须最后跑）。
-> 手动刷新：`POST /v1/recommend/refresh` 按 `targets`（daily/local/roam）以 `force + 随机 seedSalt` 重新触发，`seedSalt` 混入日期种子，让同一天也能刷出不同内容。
+> 手动刷新：`POST /v1/recommend/refresh` 按 `targets`（daily/local/roam）以 `force + 随机 seedSalt` 重新触发，`seedSalt` 混入日期种子，让同一天也能刷出不同内容。前端入口：首页固定卡上的刷新按钮（combo 卡）+ 插件管理详情弹窗的「立即刷新」。
 
 #### 首页固定卡（推荐插件自治）
 推荐插件可通过 manifest 声明参与「首页顶部固定展示」：
@@ -121,6 +126,12 @@ globalThis.__mfPlugin = {
   - `showOnHome`（`switch`，默认 false）——是否显示在首页顶部；
   - `homePosition`（`number`，默认 0）——首页固定位次（1 起；0 = 未固定）。
 - 核心经 `GET /v1/recommend/home-cards` 按位次排序返回固定卡列表；保存插件配置（`PUT /v1/plugins/:id`）或启用插件时，若位次与其它「显示在首页」的插件重复 → 400 拒绝并提示占用者。
+
+内置的 `daily-recommend` / `local-recommend` / `daily-roam` 三个插件即是推荐类的参考实现：
+- `daily-recommend`（`dailyPlaylist`）：每日推荐歌单 `pl-daily-today`，在线榜单 + 推荐池；
+- `local-recommend`（`localPlaylist`）：本地推荐歌单 `pl-daily-local`，播放口味 / 参考歌单池；
+- `daily-roam`（`comboPlaylist`）：今日漫游歌单 `pl-daily-roam`，合并前两者去重重建。
+- 封面：`daily-roam` / `local-recommend` 每次生成时会**从自身歌单的歌曲中随机抽取一张有封面的歌**当歌单封面（跟随内容、刷新后换新）；`daily-recommend` 从本地曲库随机取封面。
 
 ### 4.4 `sync` 类型（歌单同步）
 | capability | impl 方法 |
@@ -266,8 +277,10 @@ cp -r my-plugin backend/data/plugins/
 
 | id | 版本 | type | capabilities | 说明 |
 |----|------|------|--------------|------|
-| `go-music-dl` | 1.2.1 | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
+| `go-music-dl` | 1.2.4 | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
 | `listenbrainz` | 1.1.0 | scrobbler | scrobbler | ListenBrainz 播放上报 |
+
+> `go-music-dl` 的歌词 / 封面能力随该外置 source 插件分发（`lyricProvider` / `coverProvider`），核心按能力遍历调用，不再内置独立的歌词/封面插件。
 
 源码在 [ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)，发布前跑 `node scripts/check.mjs <id>`。
 插件目录结构、打包（`pack.sh`）、Release 资产上传与 `registry.json` 登记的**完整发布流程见该仓库的

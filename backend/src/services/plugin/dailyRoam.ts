@@ -131,11 +131,23 @@ export function generateRoamPlaylist(opts?: { force?: boolean }): RoamResult {
 
   const totalDuration = merged.reduce((s, e) => s + (e.duration || 0), 0);
 
-  // 封面:取第一个有封面的源歌单封面;都没有则留空(前端回落占位图)。
+  // 封面:从自身歌曲(本次合并的可播放歌曲)中随机抽一张有封面的歌的封面。
+  // 不再取源歌单封面——歌单封面跟随内容,手动刷新后会换新封面。
   let cover: string | null = null;
-  for (const src of sources) {
-    const pl = sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(src) as any;
-    if (pl?.cover_art) { cover = pl.cover_art; break; }
+  if (merged.length > 0) {
+    const coverCandidates: string[] = [];
+    const ids = merged.map((e) => e.songId);
+    for (let i = 0; i < ids.length; i += 900) {
+      const batch = ids.slice(i, i + 900);
+      const ph = batch.map(() => "?").join(",");
+      const rows = sqlite.prepare(
+        `SELECT cover_art FROM songs WHERE id IN (${ph}) AND cover_art IS NOT NULL AND cover_art <> ''`,
+      ).all(...batch) as { cover_art: string }[];
+      for (const r of rows) coverCandidates.push(r.cover_art);
+    }
+    if (coverCandidates.length > 0) {
+      cover = coverCandidates[Math.floor(Math.random() * coverCandidates.length)];
+    }
   }
 
   sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")

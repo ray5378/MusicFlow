@@ -448,11 +448,26 @@ async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<L
   const durRows = sqlite.prepare(`SELECT duration FROM songs WHERE id IN (${ph})`).all(...songIds) as { duration: number }[];
   const totalDuration = durRows.reduce((s, r) => s + (r.duration || 0), 0);
 
-  // 封面:取本地任意一张有封面的歌(每日封面可随内容变化)
-  const coverRow = sqlite.prepare("SELECT cover_art FROM songs WHERE cover_art IS NOT NULL AND cover_art <> '' LIMIT 1").get() as any;
+  // 封面:从自身歌曲(本次生成的歌单)中随机抽一张有封面的歌的封面。
+  // 不再取全库第一张——封面跟随内容,手动刷新后会换新封面。
+  let cover: string | null = null;
+  if (songIds.length > 0) {
+    const coverCandidates: string[] = [];
+    for (let i = 0; i < songIds.length; i += 900) {
+      const batch = songIds.slice(i, i + 900);
+      const bph = batch.map(() => "?").join(",");
+      const rows = sqlite.prepare(
+        `SELECT cover_art FROM songs WHERE id IN (${bph}) AND cover_art IS NOT NULL AND cover_art <> ''`,
+      ).all(...batch) as { cover_art: string }[];
+      for (const r of rows) coverCandidates.push(r.cover_art);
+    }
+    if (coverCandidates.length > 0) {
+      cover = coverCandidates[Math.floor(Math.random() * coverCandidates.length)];
+    }
+  }
 
   sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")
-    .run(songIds.length, totalDuration, coverRow?.cover_art || null, `${DAILY_TAG_LOCAL} ${dateStr} 本地口味推荐`, now, LOCAL_FIXED_PLAYLIST_ID);
+    .run(songIds.length, totalDuration, cover, `${DAILY_TAG_LOCAL} ${dateStr} 本地口味推荐`, now, LOCAL_FIXED_PLAYLIST_ID);
 
   return {
     date: dateStr,
