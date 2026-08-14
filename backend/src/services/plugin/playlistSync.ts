@@ -72,49 +72,53 @@ export async function rebuildPlaylistEntries(
   imported: ImportedPlaylist,
   opts: RebuildOptions = {}
 ): Promise<SyncResult> {
-  // Clear old entries, then rebuild in platform order
-  db.delete(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).run();
-
+  // Clear old entries, then rebuild in platform order. 清空+插入+计数包在事务里:
+  // 中途失败整体回滚,避免「条目被清空但 song_count 留旧值」导致首页卡片有数量、
+  // 点开却是空歌单。
   const index = buildLibraryIndex();
-  let matched = 0, unmatched = 0, wishAdded = 0;
+  const { matched, unmatched, wishAdded } = db.transaction(() => {
+    db.delete(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).run();
+    let matched = 0, unmatched = 0, wishAdded = 0;
 
-  imported.tracks.forEach((t, i) => {
-    const match = matchTrack(t, index);
-    if (match) {
-      db.insert(playlistSongs).values({
-        playlistId, songId: match.id, position: i, playable: 1,
-        externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
-        externalAlbum: t.album, externalDuration: t.duration,
-      }).run();
-      matched++;
-    } else {
-      db.insert(playlistSongs).values({
-        playlistId, songId: null, position: i, playable: 0,
-        externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
-        externalAlbum: t.album, externalDuration: t.duration,
-        unavailableReason: "曲库中未找到",
-      }).run();
-      unmatched++;
-      // Auto-add to wish list (dedupe: skip if an identical pending wish already exists)
-      if (opts.autoWish !== false) {
-        const existingWish = db.select().from(wishes)
-          .where(and(eq(wishes.songTitle, t.title), eq(wishes.artist, t.artist || "")))
-          .all().find(w => w.status === "pending");
-        if (!existingWish) {
-          const wid = uuidv4();
-          db.insert(wishes).values({
-            id: wid, userId: opts.userId || "", songTitle: t.title, artist: t.artist || "",
-            album: t.album || "", status: "pending",
-            notes: opts.notes || "来自歌单导入",
-            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-          }).run();
-          wishAdded++;
+    imported.tracks.forEach((t, i) => {
+      const match = matchTrack(t, index);
+      if (match) {
+        db.insert(playlistSongs).values({
+          playlistId, songId: match.id, position: i, playable: 1,
+          externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
+          externalAlbum: t.album, externalDuration: t.duration,
+        }).run();
+        matched++;
+      } else {
+        db.insert(playlistSongs).values({
+          playlistId, songId: null, position: i, playable: 0,
+          externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
+          externalAlbum: t.album, externalDuration: t.duration,
+          unavailableReason: "曲库中未找到",
+        }).run();
+        unmatched++;
+        // Auto-add to wish list (dedupe: skip if an identical pending wish already exists)
+        if (opts.autoWish !== false) {
+          const existingWish = db.select().from(wishes)
+            .where(and(eq(wishes.songTitle, t.title), eq(wishes.artist, t.artist || "")))
+            .all().find(w => w.status === "pending");
+          if (!existingWish) {
+            const wid = uuidv4();
+            db.insert(wishes).values({
+              id: wid, userId: opts.userId || "", songTitle: t.title, artist: t.artist || "",
+              album: t.album || "", status: "pending",
+              notes: opts.notes || "来自歌单导入",
+              createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+            }).run();
+            wishAdded++;
+          }
         }
       }
-    }
-  });
+    });
 
-  refreshPlaylistCounts(playlistId);
+    refreshPlaylistCounts(playlistId);
+    return { matched, unmatched, wishAdded };
+  });
 
   // Any entries that couldn't be matched to the local library are auto-matched
   // against whichever enabled source plugin can do it, in the background, so

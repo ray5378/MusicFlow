@@ -61,23 +61,27 @@ beforeAll(() => {
   seedPlaylist("pl-roam", "今日漫游", 50);
   seedPlaylist("pl-daily", "每日推荐", 45);
   seedPlaylist("pl-local", "本地推荐", 40);
+  seedPlaylist("pl-lb", "ListenBrainz", 35);
 });
 
 beforeEach(() => {
   // 导入 apiRoutes 会顺带注册内置推荐插件,先全部反注册 + 删行,只留假插件。
-  for (const id of ["f-roam", "f-daily", "f-local", "daily-recommend", "local-recommend", "daily-roam"]) {
+  for (const id of ["f-roam", "f-daily", "f-local", "f-lb", "daily-recommend", "local-recommend", "daily-roam"]) {
     db.delete(plugins).where(eq(plugins.name, id)).run();
     unregisterPlugin(id);
   }
   const roam = homePlugin("f-roam", "comboPlaylist", "pl-roam", true, 1);
   const daily = homePlugin("f-daily", "dailyPlaylist", "pl-daily", false, 0);
   const local = homePlugin("f-local", "localPlaylist", "pl-local", false, 0);
+  const lb = homePlugin("f-lb", "recommendPlaylist", "pl-lb", false, 0);
   registerPlugin(roam.manifest as any, roam.impl as any);
   registerPlugin(daily.manifest as any, daily.impl as any);
   registerPlugin(local.manifest as any, local.impl as any);
+  registerPlugin(lb.manifest as any, lb.impl as any);
   enablePlugin("f-roam", { showOnHome: true, homePosition: 1 });
   enablePlugin("f-daily", { showOnHome: false, homePosition: 0 });
   enablePlugin("f-local", { showOnHome: false, homePosition: 0 });
+  enablePlugin("f-lb", { showOnHome: false, homePosition: 0 });
 });
 
 async function getHomeCards() {
@@ -108,6 +112,17 @@ describe("GET /v1/recommend/home-cards (插件自治首页卡)", () => {
     const { body } = await getHomeCards();
     expect(body.cards).toHaveLength(1); // 只有 f-roam
     expect(body.cards[0].pluginId).toBe("f-roam");
+  });
+
+  it("recommendPlaylist 能力插件(第三方推荐歌单)同样可固定首页并按位次排序", async () => {
+    enablePlugin("f-lb", { showOnHome: true, homePosition: 3 });
+    const { body } = await getHomeCards();
+    expect(body.cards.map((c: any) => c.pluginId)).toEqual(["f-roam", "f-lb"]);
+    const lb = body.cards[1];
+    expect(lb).toMatchObject({ pluginId: "f-lb", position: 3, playlistId: "pl-lb", isCombo: false, songCount: 35 });
+    // 位次冲突:占 f-roam 的 1 → 400
+    const { status } = await putPlugin("f-lb", { config: { showOnHome: true, homePosition: 1 } });
+    expect(status).toBe(400);
   });
 });
 

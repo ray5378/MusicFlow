@@ -253,8 +253,9 @@ async function runDailyJobs() {
   // Every enabled `recommender` plugin builds its own playlist. Core iterates by
   // capability — it doesn't know that「每日推荐」/「本地推荐」/「今日漫游」exist, let alone import them.
   // dailyPlaylist = 每日推荐插件(在线发现歌单); localPlaylist = 本地推荐引擎(本地口味歌单);
-  // comboPlaylist = 组合歌单(今日漫游,合并前两者)——必须在前两类之后跑,所以单独放最后。
-  for (const cap of ["dailyPlaylist", "localPlaylist"] as const) {
+  // recommendPlaylist = 通用推荐歌单插件(第三方,如 ListenBrainz,生成/刷新自身歌单);
+  // comboPlaylist = 组合歌单(今日漫游,合并前几者)——必须在前三类之后跑,所以单独放最后。
+  for (const cap of ["dailyPlaylist", "localPlaylist", "recommendPlaylist"] as const) {
     for (const { manifest, impl } of getEnabledByCapability(cap)) {
       if (typeof impl?.runDailyJob !== "function") continue;
       try {

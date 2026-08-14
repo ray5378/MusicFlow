@@ -29,8 +29,9 @@ export function comboPlaylistApi(): any {
 //   - manifest.homePlaylistId 声明该插件在首页展示时对应的固定歌单 id。
 // 核心按能力收集(不写死插件名),保存插件配置时校验位次冲突。
 
-/** 首页固定卡能力的集合(推荐类插件)。 */
-export const HOME_RECOMMENDER_CAPS = ["dailyPlaylist", "localPlaylist", "comboPlaylist"] as const;
+/** 首页固定卡能力的集合(推荐类插件)。recommendPlaylist 为第三方通用推荐歌单插件
+ *  (如 ListenBrainz),与内置 daily/local/combo 一样支持 showOnHome/homePosition 首页卡位。 */
+export const HOME_RECOMMENDER_CAPS = ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist"] as const;
 
 /** 读插件配置中某字段,缺失时回落 manifest configSchema 的 default。 */
 function readConfigField(manifest: any, key: string, cfg: Record<string, any> | null): any {

@@ -28,6 +28,9 @@ beforeAll(() => {
   // 一首本地曲(供 coverArtForSong 命中)
   db.delete(songs).where(eq(songs.id, "s1")).run();
   db.insert(songs).values({ id: "s1", title: "本地曲", artist: "本地人", path: "/x/s1.mp3", coverArt: "ca-1" }).run();
+  // 一首无封面本地曲(供「无封面 → 清空」路径)
+  db.delete(songs).where(eq(songs.id, "s2")).run();
+  db.insert(songs).values({ id: "s2", title: "无封面曲", artist: "本地人", path: "/x/s2.mp3", coverArt: null }).run();
 
   fs.mkdirSync(PLUGIN_DIR, { recursive: true });
   const indexJs = `
@@ -59,10 +62,35 @@ beforeAll(() => {
     capabilities: ["dailyPlaylist"], configSchema: [],
     permissions: ["net","storage","songs:read","songs:write","playlists:write"],
   }), "utf8");
+
+  // 第二个测试插件:验证宿主「自动扫描自身条目取封面 / 无封面显式清空」。
+  const PLUGIN_DIR2 = path.join(TMP_DATA_DIR, "plugins", "lb-test2");
+  fs.mkdirSync(PLUGIN_DIR2, { recursive: true });
+  fs.writeFileSync(path.join(PLUGIN_DIR2, "index.js"), `
+    globalThis.__mfPlugin = {
+      manifest: { id: "lb-test2", name: "LB Test2", version: "1.0.0", type: "recommender",
+        capabilities: ["dailyPlaylist"], configSchema: [], permissions: ["playlists:write"] },
+      create(host) {
+        return {
+          async runDailyJob() {
+            // 未传 coverSongId → 宿主自动扫描:pl-test2 含 s1(有封面)→ so-s1
+            await host.playlists.upsert("pl-test2", { name: "T2", entries: [{ songId: "s1" }] });
+            // 全部无封面 → cover_art 显式清空(不再残留旧封面)
+            await host.playlists.upsert("pl-test3", { name: "T3", entries: [{ songId: "s2" }] });
+            return "ok";
+          }
+        };
+      }
+    };`, "utf8");
+  fs.writeFileSync(path.join(PLUGIN_DIR2, "plugin.json"), JSON.stringify({
+    id: "lb-test2", name: "LB Test2", version: "1.0.0", type: "recommender",
+    capabilities: ["dailyPlaylist"], configSchema: [], permissions: ["playlists:write"],
+  }), "utf8");
 });
 
 afterAll(() => {
   try { fs.rmSync(PLUGIN_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(path.join(TMP_DATA_DIR, "plugins", "lb-test2"), { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", () => {
@@ -107,5 +135,19 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
     // 直接再跑一次(覆盖旧条目),验证 sources.complete 路径稳定
     const res = await reg.impl.runDailyJob({ force: true });
     expect(String(res)).toContain("ok:");
+  });
+
+  it("宿主自动扫封面:未传 coverSongId 时取自身第一首有封面歌曲;全无封面则清空", async () => {
+    const reg2 = getPlugin("lb-test2");
+    expect(reg2).toBeTruthy();
+    await reg2.impl.runDailyJob({ force: true });
+
+    const p2 = db.select().from(playlists).where(eq(playlists.id, "pl-test2")).get() as any;
+    expect(p2).toBeTruthy();
+    expect(p2.coverArt).toBe("so-s1"); // 自动扫描命中 s1(有封面)
+
+    const p3 = db.select().from(playlists).where(eq(playlists.id, "pl-test3")).get() as any;
+    expect(p3).toBeTruthy();
+    expect(p3.coverArt).toBeNull(); // 全无封面 → 显式清空
   });
 });

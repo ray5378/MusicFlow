@@ -33,7 +33,7 @@
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
-import { copyCoverToFile } from "../playlistCover.js";
+import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
 import { getPluginConfig } from "../../plugins/registry.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 
@@ -293,31 +293,26 @@ function ensureDailyPlaylists(): void {
   }
 }
 
-// Pick a random local-library song's album cover file ref. Used as the daily
-// playlist cover so it always reflects real local music (not a remote chart
-// cover). Returns null if the library has no songs with album covers yet.
-//
-// Resource note: uses rowid over-sampling instead of `ORDER BY RANDOM()`, so
-// it never sorts the entire songs table (cheap even with a huge library).
-function pickRandomLibraryAlbumCoverRef(date: Date): string | null {
-  const meta = sqlite.prepare(`
-    SELECT COUNT(*) AS n, MAX(rowid) AS maxR
-    FROM songs WHERE path IS NOT NULL AND cover_art IS NOT NULL AND cover_art <> ''
-  `).get() as { n: number; maxR: number | null };
-  if (!meta.n || !meta.maxR) return null;
-  const rng = mulberry32(dateSeed(date, 91331, 3));
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const rowids = new Set<number>();
-    for (let i = 0; i < 3; i++) rowids.add(1 + Math.floor(rng() * meta.maxR));
-    const arr = Array.from(rowids);
-    const ph = arr.map(() => "?").join(",");
-    const rows = sqlite.prepare(`
-      SELECT cover_art FROM songs
-      WHERE rowid IN (${ph}) AND path IS NOT NULL AND cover_art IS NOT NULL AND cover_art <> ''
-    `).all(...arr) as { cover_art: string }[];
-    if (rows.length) return rows[0].cover_art;
-  }
-  return null;
+// Pick the FIRST covered song from a playlist's OWN playable entries (by
+// position order) — deterministic, so the cover only changes when the content
+// changes (manual refresh re-randomizes content, cover follows it). Song cover
+// wins over album cover. Returns the cover file ref, or null if none.
+function pickOwnPlaylistCoverRef(playlistId: string): string | null {
+  const row = sqlite.prepare(`
+    SELECT s.cover_art AS songCover, a.cover_art AS albumCover
+    FROM playlist_songs ps
+    JOIN songs s ON ps.song_id = s.id
+    LEFT JOIN albums a ON a.id = s.album_id
+    WHERE ps.playlist_id = ? AND ps.playable = 1 AND ps.song_id IS NOT NULL
+      AND (
+        (s.cover_art IS NOT NULL AND s.cover_art <> '')
+        OR (a.cover_art IS NOT NULL AND a.cover_art <> '')
+      )
+    ORDER BY ps.position ASC
+    LIMIT 1
+  `).get(playlistId) as { songCover: string | null; albumCover: string | null } | undefined;
+  if (!row) return null;
+  return (row.songCover && row.songCover.trim()) ? row.songCover : (row.albumCover || null);
 }
 
 function pickSystemOwnerId(): string {
@@ -548,16 +543,6 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
   const now = new Date().toISOString();
   const playlistId = FIXED_TODAY_ID;
 
-  // Cover = a RANDOM local-library song's album cover (per product要求).
-  // Copied to pl-daily-today.jpg so it is self-contained and survives daily
-  // regeneration (the playlist id is fixed, so the cover file name is stable).
-  let coverRef: string | undefined;
-  const albumCoverRef = pickRandomLibraryAlbumCoverRef(date);
-  if (albumCoverRef) {
-    const copied = copyCoverToFile(`pl-${playlistId}.jpg`, albumCoverRef);
-    if (copied) coverRef = copied;
-  }
-
   // Build a merged "ImportedPlaylist" from all remote tracks so we can reuse
   // rebuildPlaylistEntries (which handles matching + stubs + wishes).
   const mergedTracks = remoteImports.flatMap(i => i.tracks);
@@ -637,11 +622,22 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
       .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
   }
 
+  // 封面:从歌单自身可播条目(按 position 顺序)取第一首有封面的歌——确定性,
+  // 内容不变则封面不变(不再全库随机/每次刷新抖动)。无封面时清掉旧缓存文件。
+  let coverRef: string | null = null;
+  const ownCover = pickOwnPlaylistCoverRef(playlistId);
+  if (ownCover) {
+    const copied = copyCoverToFile(`pl-${playlistId}.jpg`, ownCover);
+    if (copied) coverRef = copied;
+  } else {
+    clearPlaylistCoverCache(playlistId);
+  }
+
   // Finalize the TODAY row: stamp the generation date into the comment (for
   // idempotency), set the new cover, and refresh timestamps.
   sqlite.prepare("UPDATE playlists SET cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")
     .run(
-      coverRef || null,
+      coverRef,
       `${DAILY_TAG} ${dateStr} 组合自「${sourceLabel}」${extraParts.length > 0 ? ` + ${extraParts.join(" + ")}` : ""}`,
       now,
       playlistId

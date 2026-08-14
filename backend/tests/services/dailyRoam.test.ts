@@ -151,4 +151,18 @@ describe("generateRoamPlaylist (今日漫游组合)", () => {
     const row = sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any;
     expect(row.cover_art).toBeNull();
   });
+
+  it("封面确定性:同内容重复生成封面不变(不再随机抖动)", () => {
+    setRoamConfig({});
+    sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id IN ('s0','s1','s2')").run("al-stable");
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 3);
+    seedPlaylist(LOCAL_FIXED_PLAYLIST_ID, "本地推荐", 3, 5);
+    generateRoamPlaylist({ force: true });
+    const first = (sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any).cover_art;
+    generateRoamPlaylist({ force: true }); // 同内容再刷一次(force)
+    const second = (sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any).cover_art;
+    expect(first).toBe("al-stable"); // 取第一首有封面的歌(s0)
+    expect(second).toBe(first);      // 内容没变 → 封面必须不变
+    sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art = 'al-stable'").run();
+  });
 });

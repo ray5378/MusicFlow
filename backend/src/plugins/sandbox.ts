@@ -117,6 +117,7 @@ const CAP_METHODS: Record<string, string[]> = {
   playlistFile: ["canHandleFile", "parseFile"],
   dailyPlaylist: ["runDailyJob"],
   localPlaylist: ["runDailyJob"],
+  recommendPlaylist: ["runDailyJob"],
   playlistSync: ["runSyncJob"],
 };
 // source 插件额外暴露 test(连线探测)

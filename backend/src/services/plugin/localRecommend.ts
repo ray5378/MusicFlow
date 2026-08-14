@@ -448,8 +448,8 @@ async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<L
   const durRows = sqlite.prepare(`SELECT duration FROM songs WHERE id IN (${ph})`).all(...songIds) as { duration: number }[];
   const totalDuration = durRows.reduce((s, r) => s + (r.duration || 0), 0);
 
-  // 封面:从自身歌曲(本次生成的歌单)中随机抽一张有封面的歌的封面。
-  // 不再取全库第一张——封面跟随内容,手动刷新后会换新封面。
+  // 封面:从自身歌曲(本次生成的歌单)中取「第一首有封面」的歌的封面。
+  // 确定性选取(不再随机)——内容不变则封面不变,手动刷新后跟随新内容换新封面。
   let cover: string | null = null;
   if (songIds.length > 0) {
     const coverCandidates: string[] = [];
@@ -462,7 +462,7 @@ async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<L
       for (const r of rows) coverCandidates.push(r.cover_art);
     }
     if (coverCandidates.length > 0) {
-      cover = coverCandidates[Math.floor(Math.random() * coverCandidates.length)];
+      cover = coverCandidates[0]; // 确定性:取第一首有封面的歌
     }
   }
 

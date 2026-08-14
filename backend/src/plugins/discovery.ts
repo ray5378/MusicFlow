@@ -41,6 +41,7 @@ const VALID_TYPES: PluginType[] = [
 const VALID_CAPS: PluginCapability[] = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
+  "recommendPlaylist",
   "playlistSync", "autoMatch",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
   "artistInfo",
@@ -667,11 +668,38 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
     }
   });
   refreshPluginPlaylistCounts(playlistId);
-  if (opts?.coverSongId) {
-    const cover = coverArtForSong(String(opts.coverSongId));
-    if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
-  }
+  // 封面:确定性选取——优先插件显式指定的 coverSongId;否则宿主自动从歌单自身
+  // 可播条目中按 position 取第一首有封面的歌(歌曲封面 > 专辑封面);都没有则
+  // 显式清空(避免残留上一次的旧封面,造成「封面不稳定」)。
+  const cover = coverForPluginPlaylist(playlistId, opts?.coverSongId ? String(opts.coverSongId) : null);
+  sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
   return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);
+}
+
+/** 歌单封面:优先指定 songId 的封面;否则按 position 顺序扫自身条目取第一首
+ *  有封面的歌(歌曲封面优先于专辑封面);无则返回 null。 */
+function coverForPluginPlaylist(playlistId: string, preferSongId: string | null): string | null {
+  if (preferSongId) {
+    const c = coverArtForSong(preferSongId);
+    if (c) return c;
+  }
+  const row = sqlite.prepare(`
+    SELECT ps.song_id AS songId, s.cover_art AS songCover, a.cover_art AS albumCover, a.id AS albumId
+    FROM playlist_songs ps
+    JOIN songs s ON ps.song_id = s.id
+    LEFT JOIN albums a ON a.id = s.album_id
+    WHERE ps.playlist_id = ? AND ps.playable = 1 AND ps.song_id IS NOT NULL
+      AND (
+        (s.cover_art IS NOT NULL AND s.cover_art <> '')
+        OR (a.cover_art IS NOT NULL AND a.cover_art <> '')
+      )
+    ORDER BY ps.position ASC
+    LIMIT 1
+  `).get(playlistId) as { songId: string; songCover: string | null; albumCover: string | null; albumId: string | null } | undefined;
+  if (!row) return null;
+  if (row.songCover && row.songCover.trim()) return `so-${row.songId}`;
+  if (row.albumCover && row.albumCover.trim() && row.albumId) return `al-${row.albumId}`;
+  return null;
 }
 
 /** 未匹配本地的曲目,经已启用 source 插件(go-music-dl 等)搜索并导入本地库,返回可播 songId。 */

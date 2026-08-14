@@ -1039,18 +1039,21 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
 
-  // 单插件手动刷新:任意声明 dailyPlaylist / localPlaylist / comboPlaylist 能力的
-  // 插件(内置或外置)都可经此入口强制重跑。传 force 绕过插件自身的间隔闸门,
-  // 返回该插件 runDailyJob 的结果。
+  // 单插件手动刷新:任意声明 dailyPlaylist / localPlaylist / comboPlaylist /
+  // recommendPlaylist 能力的插件(内置或外置)都可经此入口强制重跑。传 force
+  // 绕过插件自身的间隔闸门,返回该插件 runDailyJob 的结果。
   const pluginId = body?.pluginId;
   if (pluginId) {
     const reg = getPlugin(pluginId);
     if (!reg) return c.json({ success: false, error: "插件不存在" }, 404);
     const caps: string[] = reg.manifest.capabilities || [];
     const isDaily =
-      caps.includes("dailyPlaylist") || caps.includes("localPlaylist") || caps.includes("comboPlaylist");
+      caps.includes("dailyPlaylist") ||
+      caps.includes("localPlaylist") ||
+      caps.includes("comboPlaylist") ||
+      caps.includes("recommendPlaylist");
     if (!isDaily) {
-      return c.json({ success: false, error: "该插件不支持手动刷新(无每日歌单能力)" }, 400);
+      return c.json({ success: false, error: "该插件不支持手动刷新(无推荐歌单能力)" }, 400);
     }
     // 未启用(或尚无 DB 行)视为不可用。
     if (getPluginConfig(pluginId) === null) {

@@ -39,6 +39,7 @@ export type PluginCapability =
   | "dailyPlaylist" // build/refresh a scheduled recommendation playlist
   | "localPlaylist" // contribute local-library recommendations
   | "comboPlaylist" // merge other recommenders' playlists into a combined one
+  | "recommendPlaylist" // 通用推荐歌单插件:生成/刷新自身歌单(第三方,如 ListenBrainz)
   // ---- sync plugins ----
   | "playlistSync" // re-fetch an imported playlist and rebuild its entries
   | "autoMatch" // match unmatched playlist entries against an online source

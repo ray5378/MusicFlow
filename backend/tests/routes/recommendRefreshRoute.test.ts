@@ -71,7 +71,7 @@ beforeEach(() => {
   const roam = fakePlugin("f-roam", "comboPlaylist", {
     async generateComboPlaylist(opts: any) { calls.push({ who: "roam", opts }); return { ok: true }; },
   });
-  const lb = fakePlugin("f-lb", "dailyPlaylist", {
+  const lb = fakePlugin("f-lb", "recommendPlaylist", {
     async runDailyJob(opts: any) { calls.push({ who: "f-lb", opts }); return "f-lb ok"; },
   });
   registerPlugin(daily.manifest as any, daily.impl as any);
@@ -81,8 +81,8 @@ beforeEach(() => {
   enablePlugin("f-daily");
   enablePlugin("f-local");
   enablePlugin("f-roam");
-  // 注意:f-lb 故意「不」在此处启用——否则会被 dailyApi()(firstEnabledByCapability)
-  // 当成每日推荐插件,干扰「每日推荐插件未启用」等用例;需要时由具体用例按需启用。
+  // 注意:f-lb(recommendPlaylist)故意「不」在此处启用——插件Id 刷新用例需要时再按需启用,
+  // 且不参与 dailyApi() 等能力门面的首插件位置。
 });
 
 async function refresh(body?: any) {

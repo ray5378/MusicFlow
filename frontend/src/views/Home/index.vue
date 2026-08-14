@@ -167,6 +167,7 @@ const fixedCards = computed<any[]>(() =>
     .filter((c) => c.songCount > 30) // 保持 >30 首展示门槛(用户确认)
     .map((c) => ({
       id: c.playlistId,
+      playlistId: c.playlistId, // 模板点击跳转用(此前缺失 → /playlists/undefined)
       name: c.playlistName || c.name,
       coverArt: c.coverArt,
       songCount: c.songCount,

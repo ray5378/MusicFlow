@@ -209,11 +209,11 @@ describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => 
     playlistCalls.length = 0;
     lbStorage.lastRun = 0;
     const r = await lbImpl.runDailyJob({ force: true });
-    expect(r).toContain("ListenBrainz 推荐");
+    expect(r).toContain("ListenBrainz");
     expect(playlistCalls.length).toBe(1);
     const call = playlistCalls[0];
     expect(call.id).toBe("pl-lb-recommend");
-    expect(call.opts.name).toBe("ListenBrainz 推荐");
+    expect(call.opts.name).toBe("ListenBrainz");
     // 两首都走在线补全 → 都成为可播 songId 条目
     expect(call.opts.entries.length).toBe(2);
     expect(call.opts.entries.every((e: any) => e.songId)).toBe(true);
@@ -236,7 +236,7 @@ describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => 
     lbStorage.lastRun = 0;
     localLibrary["Song One"] = "local-so-1"; // m1 命中本地
     const r = await lbImpl.runDailyJob({ force: true });
-    expect(r).toContain("ListenBrainz 推荐");
+    expect(r).toContain("ListenBrainz");
     const entries = playlistCalls[0].opts.entries;
     // 第一首来自本地,第二首来自在线补全
     expect(entries[0].songId).toBe("local-so-1");
@@ -251,7 +251,7 @@ describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => 
     onlineCompletions["Artist A|Song One"] = null;
     onlineCompletions["Artist B|Song Two"] = null;
     const r = await lbImpl.runDailyJob({ force: true });
-    expect(r).toContain("ListenBrainz 推荐");
+    expect(r).toContain("ListenBrainz");
     const entries = playlistCalls[0].opts.entries;
     expect(entries.length).toBe(2);
     // 全为外部占位:有 externalTitle、playable 由宿主侧置 0、且 duration 透传(ms)
