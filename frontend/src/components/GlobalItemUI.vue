@@ -58,7 +58,7 @@
     </teleport>
 
     <!-- ===== Add to playlist dialog ===== -->
-    <el-dialog v-model="addDlg.open" title="添加到歌单" width="420px" align-center @close="closeAddDlg">
+    <el-dialog v-model="addDlg.open" title="添加到歌单" width="420px" align-center @close="closeAddDlg" :append-to-body="true">
       <div class="pl-dialog-song" v-if="addDlg.song">
         将「{{ addDlg.song.title }} - {{ addDlg.song.artist }}」添加到：
       </div>
@@ -86,7 +86,7 @@
     </el-dialog>
 
     <!-- ===== Song info dialog ===== -->
-    <el-dialog v-model="infoDlg.open" title="歌曲信息" width="420px" align-center>
+    <el-dialog v-model="infoDlg.open" title="歌曲信息" width="420px" align-center :append-to-body="true">
       <div class="info-grid" v-if="infoDlg.song">
         <div class="info-row"><span class="info-k">标题</span><span class="info-v">{{ infoDlg.song.title }}</span></div>
         <div class="info-row"><span class="info-k">艺术家</span><span class="info-v">{{ infoDlg.song.artist || '—' }}</span></div>

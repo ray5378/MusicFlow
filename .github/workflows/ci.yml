@@ -43,6 +43,11 @@ jobs:
       # 零依赖 node 脚本,无需 npm install;与后端 check-core.mts 互为前后端对称守卫。
       - name: 校验插件管理页仅渲染插件声明内容
         run: node backend/scripts/check-frontend-plugins.mjs
+      # 全局浮层遮挡守卫:任何 el-dialog/el-drawer/popover/tooltip/dropdown 必须
+      # append-to-body/teleported 挂 body,否则渲染在页面滚动容器 stacking context 内
+      # 会被底部播放条/全屏播放模式遮挡(全项目静态扫描,新增弹窗忘加直接 CI 失败)。
+      - name: 校验全部浮层组件按约定处理(不被播放控件遮挡)
+        run: node backend/scripts/check-frontend-overlays.mjs
 
   test:
     name: 类型检查 + 全量测试

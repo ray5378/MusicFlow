@@ -448,7 +448,7 @@
     </transition>
 
     <!-- ===== Add to playlist dialog ===== -->
-    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px">
+    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px" :append-to-body="true">
       <div class="playlist-dialog-song" v-if="playlistTargetSong">
         将「{{ playlistTargetSong.title }} - {{ playlistTargetSong.artist }}」添加到：
       </div>

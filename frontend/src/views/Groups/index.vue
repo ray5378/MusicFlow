@@ -135,6 +135,7 @@
       v-model="showDialog"
       :title="editingGroup ? `编辑群组 - ${editingGroup.name}` : '新建群组'"
       width="480px"
+      :append-to-body="true"
     >
       <div class="dialog-field">
         <div class="dialog-label">群组名称</div>
