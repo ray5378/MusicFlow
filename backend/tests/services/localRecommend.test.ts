@@ -3,6 +3,8 @@
 import "../plugins/_env.js";
 
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import fs from "fs";
+import path from "path";
 import { initDatabase, sqlite } from "../../src/db/index.js";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
 import { generateLocalDailyPlaylist, LOCAL_FIXED_PLAYLIST_ID } from "../../src/services/plugin/localRecommend.js";
@@ -108,9 +110,11 @@ describe("generateLocalDailyPlaylist (独立「本地推荐」歌单)", () => {
     expect(aIds.join(",")).not.toBe(bIds.join(","));
   });
 
-  it("封面从自身歌曲中随机抽取(有封面的歌)", async () => {
-    // 给部分歌曲设置封面
+  it("封面从自身歌曲中取第一首有封面的歌(确定性)", async () => {
+    // 给部分歌曲设置封面;封面名需在封面目录真实存在(firstPlayableCoverFile 校验)
     sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id IN ('s10','s20','s30')").run("al-cover-test");
+    fs.mkdirSync(path.join(process.env.DATA_DIR as string, "covers"), { recursive: true });
+    fs.writeFileSync(path.join(process.env.DATA_DIR as string, "covers", "al-cover-test"), "x");
     setLocalConfig({ sourcePlaylists: [], count: 5, excludeRecent: false });
     const r = await generateLocalDailyPlaylist(new Date("2026-08-17T12:00:00"), { force: true, seedSalt: 42 });
     expect(r!.skipped).toBe(false);

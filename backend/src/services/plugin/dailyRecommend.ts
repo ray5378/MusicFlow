@@ -33,7 +33,7 @@
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
-import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
+import { copyCoverToFile, clearPlaylistCoverCache, firstPlayableCoverFile } from "../playlistCover.js";
 import { getPluginConfig } from "../../plugins/registry.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
@@ -291,24 +291,6 @@ function ensureDailyPlaylists(): void {
 // position order) — deterministic, so the cover only changes when the content
 // changes (manual refresh re-randomizes content, cover follows it). Song cover
 // wins over album cover. Returns the cover file ref, or null if none.
-function pickOwnPlaylistCoverRef(playlistId: string): string | null {
-  const row = sqlite.prepare(`
-    SELECT s.cover_art AS songCover, a.cover_art AS albumCover
-    FROM playlist_songs ps
-    JOIN songs s ON ps.song_id = s.id
-    LEFT JOIN albums a ON a.id = s.album_id
-    WHERE ps.playlist_id = ? AND ps.playable = 1 AND ps.song_id IS NOT NULL
-      AND (
-        (s.cover_art IS NOT NULL AND s.cover_art <> '')
-        OR (a.cover_art IS NOT NULL AND a.cover_art <> '')
-      )
-    ORDER BY ps.position ASC
-    LIMIT 1
-  `).get(playlistId) as { songCover: string | null; albumCover: string | null } | undefined;
-  if (!row) return null;
-  return (row.songCover && row.songCover.trim()) ? row.songCover : (row.albumCover || null);
-}
-
 // ==================== User recommend pool ====================
 
 export interface RecommendPoolEntry {
@@ -614,7 +596,7 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
   // 封面:从歌单自身可播条目(按 position 顺序)取第一首有封面的歌——确定性,
   // 内容不变则封面不变(不再全库随机/每次刷新抖动)。无封面时清掉旧缓存文件。
   let coverRef: string | null = null;
-  const ownCover = pickOwnPlaylistCoverRef(playlistId);
+  const ownCover = firstPlayableCoverFile(playlistId);
   if (ownCover) {
     const copied = copyCoverToFile(`pl-${playlistId}.jpg`, ownCover);
     if (copied) coverRef = copied;

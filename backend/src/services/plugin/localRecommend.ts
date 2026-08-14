@@ -12,6 +12,7 @@
 import { sqlite } from "../../db/index.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { LocalRecommendPlugin, PluginManifest } from "../../plugins/types.js";
+import { firstPlayableCoverFile } from "../playlistCover.js";
 
 export const HISTORY_WINDOW_DAYS = 30;
 export const TOP_ARTISTS = 12;
@@ -441,18 +442,7 @@ async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<L
   // 确定性选取(不再随机)——内容不变则封面不变,手动刷新后跟随新内容换新封面。
   let cover: string | null = null;
   if (songIds.length > 0) {
-    const coverCandidates: string[] = [];
-    for (let i = 0; i < songIds.length; i += 900) {
-      const batch = songIds.slice(i, i + 900);
-      const bph = batch.map(() => "?").join(",");
-      const rows = sqlite.prepare(
-        `SELECT cover_art FROM songs WHERE id IN (${bph}) AND cover_art IS NOT NULL AND cover_art <> ''`,
-      ).all(...batch) as { cover_art: string }[];
-      for (const r of rows) coverCandidates.push(r.cover_art);
-    }
-    if (coverCandidates.length > 0) {
-      cover = coverCandidates[0]; // 确定性:取第一首有封面的歌
-    }
+    cover = firstPlayableCoverFile(LOCAL_FIXED_PLAYLIST_ID);
   }
 
   sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")

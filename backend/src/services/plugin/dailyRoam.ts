@@ -18,6 +18,7 @@ import type { ComboPlaylistPlugin, PluginManifest } from "../../plugins/types.js
 import { FIXED_TODAY_ID } from "./dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "./localRecommend.js";
 import { todayStr, systemOwnerId } from "./shared.js";
+import { firstPlayableCoverFile } from "../playlistCover.js";
 
 export const DAILY_ROAM_PLUGIN_ID = "daily-roam";
 export const ROAM_PLAYLIST_ID = "pl-daily-roam";
@@ -124,19 +125,7 @@ export function generateRoamPlaylist(opts?: { force?: boolean }): RoamResult {
   // 确定性选取(不再随机)——内容不变则封面不变,手动刷新后跟随新内容换新封面。
   let cover: string | null = null;
   if (merged.length > 0) {
-    const coverCandidates: string[] = [];
-    const ids = merged.map((e) => e.songId);
-    for (let i = 0; i < ids.length; i += 900) {
-      const batch = ids.slice(i, i + 900);
-      const ph = batch.map(() => "?").join(",");
-      const rows = sqlite.prepare(
-        `SELECT cover_art FROM songs WHERE id IN (${ph}) AND cover_art IS NOT NULL AND cover_art <> ''`,
-      ).all(...batch) as { cover_art: string }[];
-      for (const r of rows) coverCandidates.push(r.cover_art);
-    }
-    if (coverCandidates.length > 0) {
-      cover = coverCandidates[0]; // 确定性:取第一首有封面的歌
-    }
+    cover = firstPlayableCoverFile(ROAM_PLAYLIST_ID);
   }
 
   sqlite.prepare("UPDATE playlists SET song_count = ?, duration = ?, cover_art = ?, comment = ?, updated_at = ? WHERE id = ?")

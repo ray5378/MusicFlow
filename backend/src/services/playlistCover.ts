@@ -7,7 +7,7 @@
 //     a different volume in docker-compose without touching the local covers.
 // Reads always probe both directories so legacy covers stored under
 // data/covers keep working after the split.
-import { db } from "../db/index.js";
+import { db, sqlite } from "../db/index.js";
 import { songs, albums, playlists, playlistSongs } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import fs from "fs";
@@ -151,20 +151,38 @@ export function clearPlaylistCoverCache(playlistId: string) {
   } catch { /* ignore */ }
 }
 
-// Find the first playable song's cover file name. Prefers the song's album
-// cover (albums.cover_art); web/online-imported albums keep artwork on the
-// song rows instead, so fall back to the song's own cover. Returns the ref or null.
-function firstAlbumCoverFile(playlistId: string): string | null {
-  const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
-  for (const e of entries) {
-    if (!e.playable || !e.songId) continue;
-    const song = db.select().from(songs).where(eq(songs.id, e.songId)).get();
-    if (!song) continue;
-    if (song.coverArt && resolveCoverFile(song.coverArt)) return song.coverArt;
-    if (!song.albumId) continue;
-    const album = db.select().from(albums).where(eq(albums.id, song.albumId)).get();
-    if (!album?.coverArt) continue;
-    if (resolveCoverFile(album.coverArt)) return album.coverArt;
+// 共享:取歌单自身可播条目中「第一首有封面」的歌曲封面**文件名**。
+// 优先级:opts.preferSongId 指定歌曲的封面(歌曲封面 > 专辑封面);否则按条目
+// position 顺序扫歌单(歌曲封面 > 专辑封面)。返回的文件名确保在封面目录真实
+// 存在(resolveCoverFile 校验),文件缺失则继续找下一首;都没有返回 null。
+// 单条聚合 SQL + 少量候选,替代旧 N+1 逐条循环。供内置推荐插件(dailyRecommend/
+// dailyRoam/localRecommend)与外置歌单宿主(discovery)统一使用。
+export function firstPlayableCoverFile(playlistId: string, opts?: { preferSongId?: string | null }): string | null {
+  const prefer = opts?.preferSongId;
+  if (prefer) {
+    const p = sqlite.prepare(`
+      SELECT s.cover_art AS songCover, a.cover_art AS albumCover
+      FROM songs s LEFT JOIN albums a ON a.id = s.album_id
+      WHERE s.id = ?
+    `).get(prefer) as { songCover: string | null; albumCover: string | null } | undefined;
+    const c = p ? (p.songCover && p.songCover.trim() ? p.songCover : p.albumCover || null) : null;
+    if (c && resolveCoverFile(c)) return c;
+  }
+  const rows = sqlite.prepare(`
+    SELECT
+      CASE
+        WHEN s.cover_art IS NOT NULL AND s.cover_art <> '' THEN s.cover_art
+        WHEN a.cover_art IS NOT NULL AND a.cover_art <> '' THEN a.cover_art
+        ELSE NULL END AS coverFile
+    FROM playlist_songs ps
+    JOIN songs s ON ps.song_id = s.id
+    LEFT JOIN albums a ON a.id = s.album_id
+    WHERE ps.playlist_id = ? AND ps.playable = 1 AND ps.song_id IS NOT NULL
+    ORDER BY ps.position ASC
+    LIMIT 50
+  `).all(playlistId) as { coverFile: string | null }[];
+  for (const r of rows) {
+    if (r.coverFile && resolveCoverFile(r.coverFile)) return r.coverFile;
   }
   return null;
 }
@@ -185,7 +203,7 @@ export function getPlaylistCover(playlistId: string): { file: string; mime: stri
 
   // 2. No cover yet: self-built (or import cover failed) -> copy the first
   //    playable song's album cover to pl-<playlistId>.jpg and serve it directly
-  const srcFile = firstAlbumCoverFile(playlistId);
+  const srcFile = firstPlayableCoverFile(playlistId);
   if (!srcFile) return null;
 
   const coverFile = `pl-${playlistId}.jpg`;

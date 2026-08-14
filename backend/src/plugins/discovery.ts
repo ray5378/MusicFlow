@@ -30,6 +30,7 @@ import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
 import { matchPlaylistInBackground } from "../services/plugin/playlistSync.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
+import { firstPlayableCoverFile } from "../services/playlistCover.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { createComm } from "./comm.js";
@@ -519,7 +520,7 @@ export async function discoverExternalPlugins(
           replaceEntries: async (playlistId: string, entries: any[]) =>
             upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "ListenBrainz 推荐", entries: entries || [] }),
           updateCover: async (playlistId: string, coverSongId: string) => {
-            const cover = coverArtForSong(String(coverSongId));
+            const cover = firstPlayableCoverFile(String(playlistId), { preferSongId: String(coverSongId) });
             if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, new Date().toISOString(), String(playlistId));
             return { ok: true };
           },
@@ -624,17 +625,6 @@ function refreshPluginPlaylistCounts(playlistId: string): void {
     .run(count, Math.round(duration), new Date().toISOString(), playlistId);
 }
 
-function coverArtForSong(songId: string): string | null {
-  const song = sqlite.prepare("SELECT id, album_id, cover_art FROM songs WHERE id = ?").get(songId) as any;
-  if (!song) return null;
-  if (song.cover_art) return `so-${song.id}`;
-  if (song.album_id) {
-    const album = sqlite.prepare("SELECT cover_art FROM albums WHERE id = ?").get(song.album_id) as any;
-    if (album?.cover_art) return `al-${song.album_id}`;
-  }
-  return null;
-}
-
 /** 按固定 id 创建或全量更新一张歌单(同名刷新覆盖)。entries 为混合条目:
  *  { songId } 本地歌曲;或 { externalSongId, externalTitle, externalArtist, externalAlbum?, externalDuration? } 外部条目。 */
 async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any> {
@@ -668,7 +658,7 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
   // 封面:确定性选取——优先插件显式指定的 coverSongId;否则宿主自动从歌单自身
   // 可播条目中按 position 取第一首有封面的歌(歌曲封面 > 专辑封面);都没有则
   // 显式清空(避免残留上一次的旧封面,造成「封面不稳定」)。
-  const cover = coverForPluginPlaylist(playlistId, opts?.coverSongId ? String(opts.coverSongId) : null);
+  const cover = firstPlayableCoverFile(playlistId, { preferSongId: opts?.coverSongId ? String(opts.coverSongId) : null });
   sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
   // 生成后自动补匹配:仍存在外部(不可播)条目时,后台经已启用在线源再匹配一轮
   // (复用共享宿主服务 matchPlaylistInBackground,与导入歌单 rebuildPlaylistEntries
@@ -682,32 +672,6 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
     });
   }
   return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);
-}
-
-/** 歌单封面:优先指定 songId 的封面;否则按 position 顺序扫自身条目取第一首
- *  有封面的歌(歌曲封面优先于专辑封面);无则返回 null。 */
-function coverForPluginPlaylist(playlistId: string, preferSongId: string | null): string | null {
-  if (preferSongId) {
-    const c = coverArtForSong(preferSongId);
-    if (c) return c;
-  }
-  const row = sqlite.prepare(`
-    SELECT ps.song_id AS songId, s.cover_art AS songCover, a.cover_art AS albumCover, a.id AS albumId
-    FROM playlist_songs ps
-    JOIN songs s ON ps.song_id = s.id
-    LEFT JOIN albums a ON a.id = s.album_id
-    WHERE ps.playlist_id = ? AND ps.playable = 1 AND ps.song_id IS NOT NULL
-      AND (
-        (s.cover_art IS NOT NULL AND s.cover_art <> '')
-        OR (a.cover_art IS NOT NULL AND a.cover_art <> '')
-      )
-    ORDER BY ps.position ASC
-    LIMIT 1
-  `).get(playlistId) as { songId: string; songCover: string | null; albumCover: string | null; albumId: string | null } | undefined;
-  if (!row) return null;
-  if (row.songCover && row.songCover.trim()) return `so-${row.songId}`;
-  if (row.albumCover && row.albumCover.trim() && row.albumId) return `al-${row.albumId}`;
-  return null;
 }
 
 /** 未匹配本地的曲目,经已启用 source 插件(go-music-dl 等)搜索并导入本地库,返回可播 songId。 */

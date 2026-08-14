@@ -13,7 +13,7 @@ import { getPlugin, registerPlugin, unregisterPlugin } from "../../src/plugins/r
 import { TMP_DATA_DIR } from "../plugins/_env.js";
 
 // 验证外置插件经沙箱 host.playlists / host.sources 写歌单的「宿主实现层」
-// (discovery.ts 的 upsertPluginPlaylist / completeFromSources / coverArtForSong /
+// (discovery.ts 的 upsertPluginPlaylist / completeFromSources / firstPlayableCoverFile /
 // refreshPluginPlaylistCounts)——这部分是沙箱单测够不到的真实 DB 写入路径。
 const PLUGIN_ID = "lb-test";
 const PLUGIN_DIR = path.join(TMP_DATA_DIR, "plugins", PLUGIN_ID);
@@ -25,9 +25,11 @@ beforeAll(() => {
   if (!db.select().from(users).where(eq(users.username, "adminx")).get()) {
     db.insert(users).values({ id: "u-admin", username: "adminx", password: "", salt: "", subsonicSalt: "", isAdmin: 1, isActive: 1 }).run();
   }
-  // 一首本地曲(供 coverArtForSong 命中)
+  // 一首本地曲(供封面选取命中):coverArt="ca-1" 需在封面目录真实存在
   db.delete(songs).where(eq(songs.id, "s1")).run();
   db.insert(songs).values({ id: "s1", title: "本地曲", artist: "本地人", path: "/x/s1.mp3", coverArt: "ca-1" }).run();
+  fs.mkdirSync(path.join(TMP_DATA_DIR, "covers"), { recursive: true });
+  fs.writeFileSync(path.join(TMP_DATA_DIR, "covers", "ca-1"), "x");
   // 一首无封面本地曲(供「无封面 → 清空」路径)
   db.delete(songs).where(eq(songs.id, "s2")).run();
   db.insert(songs).values({ id: "s2", title: "无封面曲", artist: "本地人", path: "/x/s2.mp3", coverArt: null }).run();
@@ -125,8 +127,8 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
     // 计数/时长已重算:2 首、外部 123000ms → 123s
     expect(p.songCount).toBe(2);
     expect(p.duration).toBe(123);
-    // 封面:coverSongId=s1 命中本地曲 cover_art → so-s1
-    expect(p.coverArt).toBe("so-s1");
+    // 封面:coverSongId=s1 命中本地曲 cover_art → 文件名 ca-1(共享 firstPlayableCoverFile)
+    expect(p.coverArt).toBe("ca-1");
   });
 
   it("completeFromSources 无 search 插件时返回 { songId: null },不报错", async () => {
@@ -144,7 +146,7 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
 
     const p2 = db.select().from(playlists).where(eq(playlists.id, "pl-test2")).get() as any;
     expect(p2).toBeTruthy();
-    expect(p2.coverArt).toBe("so-s1"); // 自动扫描命中 s1(有封面)
+    expect(p2.coverArt).toBe("ca-1"); // 自动扫描命中 s1(有封面,文件名)
 
     const p3 = db.select().from(playlists).where(eq(playlists.id, "pl-test3")).get() as any;
     expect(p3).toBeTruthy();

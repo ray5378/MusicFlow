@@ -3,6 +3,8 @@
 import "../plugins/_env.js";
 
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import fs from "fs";
+import path from "path";
 import { initDatabase, sqlite } from "../../src/db/index.js";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
 import {
@@ -129,10 +131,12 @@ describe("generateRoamPlaylist (今日漫游组合)", () => {
     expect(r.skipped).toBe(true); // 无可播放内容,保留旧歌单不重建
   });
 
-  it("封面从自身合并歌曲中随机抽取(有封面的歌)", () => {
+  it("封面从自身合并歌曲中取第一首有封面的歌(确定性)", () => {
     setRoamConfig({});
-    // 给源歌单歌曲设置封面
+    // 给源歌单歌曲设置封面;封面名需在封面目录真实存在(firstPlayableCoverFile 校验)
     sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id IN ('s0','s1','s2')").run("al-roam-cover");
+    fs.mkdirSync(path.join(process.env.DATA_DIR as string, "covers"), { recursive: true });
+    fs.writeFileSync(path.join(process.env.DATA_DIR as string, "covers", "al-roam-cover"), "x");
     seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 3);
     seedPlaylist(LOCAL_FIXED_PLAYLIST_ID, "本地推荐", 3, 5);
     const r = generateRoamPlaylist({ force: true });
@@ -155,6 +159,8 @@ describe("generateRoamPlaylist (今日漫游组合)", () => {
   it("封面确定性:同内容重复生成封面不变(不再随机抖动)", () => {
     setRoamConfig({});
     sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id IN ('s0','s1','s2')").run("al-stable");
+    fs.mkdirSync(path.join(process.env.DATA_DIR as string, "covers"), { recursive: true });
+    fs.writeFileSync(path.join(process.env.DATA_DIR as string, "covers", "al-stable"), "x");
     seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 3);
     seedPlaylist(LOCAL_FIXED_PLAYLIST_ID, "本地推荐", 3, 5);
     generateRoamPlaylist({ force: true });
