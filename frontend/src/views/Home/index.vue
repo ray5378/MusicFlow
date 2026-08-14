@@ -109,7 +109,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import api from "@/api";
+import api, { formatApiError } from "@/api";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
@@ -193,11 +193,12 @@ async function refreshRoam() {
   if (refreshing.value) return;
   refreshing.value = true;
   try {
-    await api.post("/rest/api/v1/recommend/refresh", {});
+    // 今日漫游由内置推荐引擎生成,通常秒级;给足 60s 余量防慢网络误报超时。
+    await api.post("/rest/api/v1/recommend/refresh", {}, { timeout: 60000 });
     ElMessage.success("已重新生成今日漫游");
     await Promise.all([loadPlaylists(), loadHomeCards()]);
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "刷新失败");
+    ElMessage.error(formatApiError(e, "刷新失败"));
   } finally {
     refreshing.value = false;
   }

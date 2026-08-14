@@ -162,10 +162,10 @@ describe("QuickJS 插件沙箱", () => {
     expect(r.last).toBe("so-1");
   });
 
-  it("权限拒绝:无 net 权限时 host.http 返回 PERMISSION_DENIED 信封", async () => {
+  it("权限拒绝:无 net 权限时 host.http 返回 SANDBOX_PERMISSION 信封", async () => {
     const { impl } = await loadSandboxedPlugin("demo-sandbox", PLUGIN_CODE, makeEnv({ permissions: ["storage"] }));
-    // 插件代码不处理权限信封 → 搜索失败但宿主不崩(错误信息含 PERMISSION_DENIED)
-    await expect(impl.search({}, { query: "x" })).rejects.toThrow(/PERMISSION_DENIED|unexpected|Unexpected|失败/);
+    // 插件代码不处理权限信封 → 搜索失败但宿主不崩(错误信息含 SANDBOX_PERMISSION/权限不足)
+    await expect(impl.search({}, { query: "x" })).rejects.toThrow(/SANDBOX_PERMISSION|PERMISSION_DENIED|权限不足|unexpected|Unexpected|失败/);
   });
 
   it("插件抛错经信封传播为可读错误", async () => {
@@ -196,9 +196,9 @@ describe("QuickJS 插件沙箱", () => {
     expect(bySearch.songs[0].title).toBe("Demo Song");
   });
 
-  it("host.songs 无 songs:read 权限时拒绝(PERMISSION_DENIED,信封带方法名)", async () => {
+  it("host.songs 无 songs:read 权限时拒绝(SANDBOX_PERMISSION,信封带方法名)", async () => {
     const { impl } = await loadSandboxedPlugin("demo-hostapi", HOST_API_PLUGIN_CODE, makeEnv({ permissions: ["net"] }));
-    await expect(impl.search({}, { byId: "so-1" })).rejects.toThrow(/PERMISSION_DENIED: songs:read \(host\.getById\)/);
+    await expect(impl.search({}, { byId: "so-1" })).rejects.toThrow(/SANDBOX_PERMISSION.*songs:read/);
   });
 
   it("host.http 非 2xx/网络错误时插件能读到透明信封(status + 真实原因)", async () => {
@@ -292,13 +292,13 @@ describe("QuickJS 插件沙箱", () => {
         create(host) {
           return {
             async search(config, params) {
-              // 同时发出 128 个 host.http,但 env.http 永不 resolve(挂起),
-              // 制造 128 个在途 deferred,应触发限流拒绝(不崩溃)。
+              // 同时发出 300 个 host.http,但 env.http 永不 resolve(挂起),
+              // 制造 300 个在途 deferred(> MAX_DEFERS 256),应触发限流拒绝(不崩溃)。
               const ps = [];
-              for (let i = 0; i < 128; i++) ps.push(host.http("https://demo/h?i=" + i, {}));
+              for (let i = 0; i < 300; i++) ps.push(host.http("https://demo/h?i=" + i, {}));
               const rs = await Promise.allSettled(ps);
               let rejected = 0;
-              const LIMIT_RE = /并发 host 调用过多|拒绝新请求/;
+              const LIMIT_RE = /并发宿主调用过多|SANDBOX_CONCURRENCY/;
               for (const r of rs) {
                 if (r.status === "rejected" && LIMIT_RE.test(String(r.reason && r.reason.message || r.reason))) rejected++;
                 else if (r.status === "fulfilled" && r.value && r.value.error && LIMIT_RE.test(String(r.value.error.message))) rejected++;
@@ -396,16 +396,16 @@ describe("QuickJS 沙箱 · host.playlists / host.sources 受控写", () => {
     expect(plCalls.find((c) => c.complete && c.complete.artist === "A" && c.complete.title === "B")).toBeTruthy();
   });
 
-  it("无 playlists:write 时 host.playlists.upsert 被权限拒绝(信封带方法名)", async () => {
+  it("无 playlists:write 时 host.playlists.upsert 被权限拒绝(SANDBOX_PERMISSION)", async () => {
     const env = makeEnv({ permissions: ["songs:write"] }); // 缺 playlists:write
     const { impl } = await loadSandboxedPlugin("demo-pl", PL_CODE, env);
-    await expect(impl.runDailyJob()).rejects.toThrow(/PERMISSION_DENIED: playlists:write \(host\.upsert\)/);
+    await expect(impl.runDailyJob()).rejects.toThrow(/SANDBOX_PERMISSION.*playlists:write/);
   });
 
   it("无 songs:write 时 host.sources.complete 被权限拒绝", async () => {
     const env = makeEnv({ permissions: ["playlists:write"] }); // 缺 songs:write
     const { impl } = await loadSandboxedPlugin("demo-pl", PL_CODE, env);
-    await expect(impl.runDailyJob()).rejects.toThrow(/PERMISSION_DENIED: songs:write \(host\.complete\)/);
+    await expect(impl.runDailyJob()).rejects.toThrow(/SANDBOX_PERMISSION.*songs:write/);
   });
 });
 
@@ -436,7 +436,8 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
     const env = makeEnv({ permissions: [] }); // 缺 crypto
     const { impl } = await loadSandboxedPlugin("demo-crypto", PL_CODE, env);
     const r = await impl.runDailyJob();
-    // hostSync 拒绝时返回 { error: "PERMISSION_DENIED: crypto" }(不抛,插件可读到)
-    expect(String(r.sig?.error || "")).toContain("PERMISSION_DENIED: crypto");
+    // hostSync 拒绝时返回 { error: "[SANDBOX_PERMISSION] 沙箱限制:权限不足(缺少 crypto)…" }(不抛,插件可读到)
+    expect(String(r.sig?.error || "")).toContain("[SANDBOX_PERMISSION]");
+    expect(String(r.sig?.error || "")).toContain("缺少 crypto");
   });
 });

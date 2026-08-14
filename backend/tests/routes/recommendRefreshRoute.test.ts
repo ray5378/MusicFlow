@@ -122,15 +122,17 @@ describe("POST /rest/api/v1/recommend/refresh", () => {
     expect(body.error).toContain("每日推荐");
   });
 
-  it("pluginId:单插件强制刷新,返回其 runDailyJob 结果", async () => {
+  it("pluginId:异步启动后台任务(202+started),任务实际执行 runDailyJob(force)", async () => {
     enablePlugin("f-lb"); // 仅在按需启用,测完还原,避免污染 dailyApi()
     try {
       const { res, body } = await refresh({ pluginId: "f-lb" });
-      expect(res.status).toBe(200);
+      // 异步任务通道:立即返回,不阻塞 HTTP
+      expect(res.status).toBe(202);
       expect(body.success).toBe(true);
       expect(body.pluginId).toBe("f-lb");
-      expect(body.result).toBe("f-lb ok");
-      // 走 f-lb 的 runDailyJob(force),未触发内置三件套
+      expect(body.started).toBe(true);
+      // 任务在后台跑(jobRunner fire-and-forget):稍等一拍确认 runDailyJob 被调用
+      await new Promise((r) => setTimeout(r, 50));
       expect(calls.map(c => c.who)).toEqual(["f-lb"]);
       expect(calls[0].opts).toEqual({ force: true });
     } finally {
@@ -142,6 +144,24 @@ describe("POST /rest/api/v1/recommend/refresh", () => {
     const { res, body } = await refresh({ pluginId: "nope" });
     expect(res.status).toBe(404);
     expect(calls.length).toBe(0);
+  });
+
+  it("GET /v1/plugins/:id/job 返回最近一次后台任务状态(含摘要)", async () => {
+    enablePlugin("f-lb");
+    try {
+      await refresh({ pluginId: "f-lb" });
+      await new Promise((r) => setTimeout(r, 50)); // 等后台任务收尾
+      const res = await app.request(`/rest/api/v1/plugins/f-lb/job?${authQS()}`, { method: "GET" });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.pluginId).toBe("f-lb");
+      expect(body.running).toBe(false);
+      expect(body.job.status).toBe("ok");
+      expect(body.job.summary).toBe("f-lb ok");
+    } finally {
+      db.delete(plugins).where(eq(plugins.name, "f-lb")).run();
+    }
   });
 
   it("pluginId 无每日能力 → 400", async () => {

@@ -10,6 +10,7 @@ import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
+import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
@@ -1038,6 +1039,16 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 
 // ==================== 推荐手动刷新(每日/本地/今日漫游) ====================
 // 一键重新触发随机生成:每日推荐(force+随机盐) → 本地推荐(force+随机盐) →
+// 插件任务状态:查询最近一次后台任务(运行中 / 结果,含沙箱限制错误码与修复提示)。
+// 前端在发起异步刷新后轮询此端点,直到 running=false。
+apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
+  const id = c.req.param("id");
+  if (!id) return c.json({ success: false, error: "缺少插件 id" }, 400);
+  const state = getPluginJobState(id);
+  if (!state) return c.json({ success: false, error: "该插件尚无任务记录" }, 404);
+  return c.json({ success: true, pluginId: id, running: state.running, job: state });
+});
+
 // 今日漫游(combo,合并前两者)。body 可选 { targets: ["daily"|"local"|"roam"] },
 // 缺省全刷。返回各自结果。
 apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
@@ -1045,7 +1056,9 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
 
   // 单插件手动刷新:任意声明 dailyPlaylist / localPlaylist / comboPlaylist /
   // recommendPlaylist 能力的插件(内置或外置)都可经此入口强制重跑。传 force
-  // 绕过插件自身的间隔闸门,返回该插件 runDailyJob 的结果。
+  // 绕过插件自身的间隔闸门。**异步任务通道**:任务在后台跑(沙箱用 manifest.longRunning
+  // 长预算),立即返回,前端轮询 GET /v1/plugins/:id/job 看结果——不再被沙箱 15s
+  // 或前端 axios 15s 卡死。
   const pluginId = body?.pluginId;
   if (pluginId) {
     const reg = getPlugin(pluginId);
@@ -1067,13 +1080,14 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
     if (typeof impl?.runDailyJob !== "function") {
       return c.json({ success: false, error: "插件未实现 runDailyJob" }, 500);
     }
-    try {
-      const result = await impl.runDailyJob({ force: true });
-      return c.json({ success: true, pluginId, result }, 200);
-    } catch (e: any) {
-      console.error(`[RECOMMEND] refresh plugin ${pluginId} error:`, e?.message || e);
-      return c.json({ success: false, error: e?.message || "刷新失败" }, 500);
+    const { started, alreadyRunning } = runPluginJob(pluginId, "runDailyJob", { force: true });
+    if (alreadyRunning) {
+      return c.json({ success: true, pluginId, alreadyRunning: true, message: "该插件刷新任务已在后台运行中" }, 200);
     }
+    if (!started) {
+      return c.json({ success: false, error: "任务启动失败" }, 500);
+    }
+    return c.json({ success: true, pluginId, started: true, message: "已开始后台刷新,可通过 GET /v1/plugins/:id/job 查询进度" }, 202);
   }
 
   const targets = Array.isArray(body?.targets) ? body.targets : ["daily", "local", "roam"];

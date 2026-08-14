@@ -250,7 +250,13 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", async (c) => {
     const result = await importRecommendPlaylist(providerId, info, { userId: user?.id });
     return c.json(result);
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "导入推荐歌单失败" });
+    // 沙箱限制错误透传 sandboxCode/hint,前端可展示「错误码 + 说明 + 修复提示」。
+    return c.json({
+      success: false,
+      error: e.message || "导入推荐歌单失败",
+      sandboxCode: e?.sandboxCode,
+      hint: e?.hint,
+    });
   }
 });
 

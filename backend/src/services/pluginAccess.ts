@@ -6,7 +6,7 @@
 // 语义:按「能力」取第一个启用插件的 impl;无启用插件时返回 undefined,调用方
 // 负责给出可读错误(通常是「该功能未启用/未安装插件」)。
 
-import { getEnabledByCapability, getPluginConfig, getPluginManifest } from "../plugins/registry.js";
+import { getEnabledByCapability, getPluginConfig, getPluginImpl, getPluginManifest } from "../plugins/registry.js";
 
 /** 每日推荐能力(dailyPlaylist):候选池/生成等参数化方法。 */
 export function dailyRecommendApi(): any {
@@ -103,8 +103,14 @@ export function dailyRecommendHomeCount(): number {
   return Number.isFinite(n) && n >= 1 ? Math.min(Math.trunc(n), 24) : 8;
 }
 
-/** 歌单同步能力(playlistSync):按歌单同步/重建/导出等参数化方法。 */
+/** 歌单同步能力(playlistSync):按歌单同步/重建/导出等参数化方法。
+ *  优先返回**内置**「playlist-sync」插件的 impl(核心路由依赖它的
+ *  rebuildPlaylistEntries/checkImportCooldown 等能力),而不是「第一个启用」的
+ *  playlistSync 插件——否则外置插件(如 go-music-dl 若声明该能力)会把导入歌单
+ *  路由的调用劫持成 undefined(单例陷阱)。内置缺失时才回退到第一个启用者。 */
 export function playlistSyncApi(): any {
+  const builtin = getPluginImpl("playlist-sync");
+  if (builtin) return builtin;
   return getEnabledByCapability("playlistSync")[0]?.impl;
 }
 

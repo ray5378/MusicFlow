@@ -376,6 +376,17 @@ export function validateManifest(manifest: any): string | null {  if (!manifest 
   if (!Array.isArray(manifest.configSchema)) return "manifest.configSchema 必须是数组";
   const permErr = validatePermissions(manifest.permissions);
   if (permErr) return `manifest.permissions: ${permErr}`;
+  // longRunning:方法名(字符串)→ 预算毫秒,1s~300s 之间。
+  if (manifest.longRunning != null) {
+    if (typeof manifest.longRunning !== "object" || Array.isArray(manifest.longRunning)) {
+      return "manifest.longRunning 必须是 { 方法名: 毫秒 } 对象";
+    }
+    for (const [m, v] of Object.entries(manifest.longRunning)) {
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 1000 || v > 300000) {
+        return `manifest.longRunning[${m}] 必须是 1000~300000 之间的毫秒数`;
+      }
+    }
+  }
   return null;
 }
 
@@ -480,7 +491,12 @@ export async function discoverExternalPlugins(
             const { timeout: _t, ...rest } = init || {};
             // 走系统「网络代理」(启用时),与内置插件 host.http 一致;未配置则直连。
             const res = await proxyFetch(String(input), { ...rest, signal: AbortSignal.timeout(timeout) });
+            // 响应体积护栏:超大响应(异常/恶意页面)全量入沙箱内存会打爆 256MB VM。
+            const MAX_BODY = 20 * 1024 * 1024;
+            const cl = Number(res.headers.get("content-length") || 0);
+            if (cl > MAX_BODY) return { ok: false, status: 0, headers: {}, body: "", error: `响应过大(${cl} 字节 > 20MB),已拒绝` };
             const body = await res.text();
+            if (body.length > MAX_BODY) return { ok: false, status: 0, headers: {}, body: "", error: "响应过大(> 20MB),已拒绝" };
             const headers: Record<string, string> = {};
             res.headers.forEach((v, k) => { headers[k] = v; });
             return { ok: res.ok, status: res.status, headers, body };
@@ -497,7 +513,7 @@ export async function discoverExternalPlugins(
         },
         songs: {
           list: async (options?: any) => {
-            const limit = Math.min(Math.max(Number(options?.limit) || 200, 1), 500);
+            const limit = Math.min(Math.max(Number(options?.limit) || 200, 1), 2000);
             const offset = Math.max(Number(options?.offset) || 0, 0);
             return db.select().from(songs).limit(limit).offset(offset).all().map(toPluginSong);
           },

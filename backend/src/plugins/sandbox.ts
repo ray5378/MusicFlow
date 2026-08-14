@@ -20,8 +20,24 @@ import type { PluginManifest } from "./types.js";
 
 const MEMORY_LIMIT = 256 * 1024 * 1024; // 单插件内存上限 256MB
 const STACK_LIMIT = 1024 * 1024;        // 单插件栈上限 1MB
-const INVOKE_TIMEOUT_MS = 15000;        // 单次调用超时(卡死可杀)
-const MAX_DEFERS = 64;                  // 单次调用内未结算 deferred 上限(防御性)
+const INVOKE_TIMEOUT_MS = 15000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
+const JOB_TIMEOUT_CAP_MS = 300000;      // longRunning 声明预算上限(5 分钟,低于 Node 默认 requestTimeout)
+const MAX_DEFERS = 256;                 // 单次调用内未结算 deferred 上限(防御性;支持并行 host 调用)
+const LONG_WAIT_GRACE_MS = 60000;       // longRunning 方法在途 await 的额外宽限(等网络合法,CPU 空转仍按预算杀)
+
+/** 沙箱限制类错误:全链路可辨识(稳定错误码 + 中文说明 + 修复提示)。
+ *  路由 / jobRunner 透传 sandboxCode/hint 给前端,避免「timeout of 15000ms exceeded」
+ *  「HTTP undefined」这类无从排查的裸报错。 */
+export class SandboxLimitError extends Error {
+  readonly sandboxCode: string;
+  readonly hint?: string;
+  constructor(code: string, message: string, hint?: string) {
+    super(message);
+    this.name = "SandboxLimitError";
+    this.sandboxCode = code;
+    this.hint = hint;
+  }
+}
 
 // QuickJS 标准库缺失的兼容层(URL / URLSearchParams):插件代码可正常使用,
 // 与浏览器/Node 行为保持一致。网络一律走 host.http(自带超时),插件不需要
@@ -276,7 +292,7 @@ export class SandboxedPlugin {
       const e = this.ctx.dump(std.error);
       std.error.dispose();
       this.dispose();
-      throw new Error(`沙箱 stdlib 注入失败: ${e}`);
+      throw new SandboxLimitError("SANDBOX_VM", `沙箱限制:stdlib 注入失败,原因: ${e}`);
     }
     this.ctx.unwrapResult(std).dispose();
 
@@ -286,7 +302,7 @@ export class SandboxedPlugin {
       const e = this.ctx.dump(reg.error);
       reg.error.dispose();
       this.dispose();
-      throw new Error(`插件 ${this.id} 语法/加载错误: ${e}`);
+      throw new SandboxLimitError("SANDBOX_VM", `沙箱限制:插件 ${this.id} 语法/加载错误,原因: ${e}`);
     }
     this.ctx.unwrapResult(reg).dispose();
 
@@ -422,7 +438,7 @@ export class SandboxedPlugin {
       // "调用过于密集,拒绝新请求",使搜索/歌词/封面等长跑功能间歇性全部失败。
       if (this.defers.length > MAX_DEFERS) {
         this.removeDefer(deferred);
-        const msg = `沙箱:并发 host 调用过多(在途 ${this.defers.length} > 上限 ${MAX_DEFERS}),拒绝新请求;若持续触发请反馈`;
+        const msg = `[SANDBOX_CONCURRENCY] 沙箱限制:并发宿主调用过多(在途 ${this.defers.length} > 上限 ${MAX_DEFERS})。插件应降低并行度或分批串行`;
         deferred.resolve(this.jsToHandle({ ok: false, error: { message: msg } }));
         // 极少触发的分支:先泵送结算,再延后一拍释放 handle,避免 VM 尚未读取就被 dispose
         try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
@@ -435,7 +451,7 @@ export class SandboxedPlugin {
             // 权限拒绝要打日志:否则容器日志完全静默,前端只看到 HTTP undefined
             // 之类无从排查的报错(如 plugin.json 缺 permissions 时 host.http 被拒)。
             console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
-            return { ok: false, error: { message: `PERMISSION_DENIED: ${perm} (host.${name})` } };
+            return { ok: false, error: { message: `[SANDBOX_PERMISSION] 沙箱限制:权限不足(缺少 ${perm})。请确认插件 manifest 已声明所需权限` } };
           }
           return impl(...args);
         })
@@ -471,7 +487,7 @@ export class SandboxedPlugin {
       const args = argHandles.map((h) => this.ctx.dump(h));
       if (perm && !this.hasPerm(perm)) {
         console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
-        return this.jsToHandle({ error: `PERMISSION_DENIED: ${perm}` });
+        return this.jsToHandle({ error: `[SANDBOX_PERMISSION] 沙箱限制:权限不足(缺少 ${perm})。请确认插件 manifest 已声明所需权限` });
       }
       try {
         return this.jsToHandle(impl(...args));
@@ -809,10 +825,21 @@ export class SandboxedPlugin {
   /** 异步方法调用(搜索/推荐/上报等)。guest 永远 resolve 信封,宿主不面对 rejection。 */
   async invoke(method: string, args: any[]): Promise<any> {
     this.refreshConfig();
-    this.deadline = Date.now() + INVOKE_TIMEOUT_MS;
+    const tmo = this.timeoutForMethod(method);
+    this.deadline = Date.now() + tmo;
     const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
     const code = `(async () => { try { const v = await (${body}); return { ok: true, value: v }; } catch (e) { return { ok: false, error: { name: String(e && e.name || ""), message: String(e && e.message || String(e)), stack: String(e && e.stack || "") } }; } })()`;
-    return this.evalAsync(code, method);
+    return this.evalAsync(code, method, tmo);
+  }
+
+  /** 方法级超时:manifest.longRunning[method] 声明的长耗时预算(cap 5 分钟),否则默认 15s。 */
+  private timeoutForMethod(method: string): number {
+    try {
+      const lr = this.manifest?.longRunning;
+      const t = lr && lr[method];
+      if (typeof t === "number" && Number.isFinite(t) && t > 0) return Math.min(t, JOB_TIMEOUT_CAP_MS);
+    } catch { /* ignore */ }
+    return INVOKE_TIMEOUT_MS;
   }
 
   /** 同步方法调用(streamUrl/lyricUrl/canHandle/canHandleFile)。插件契约:这些方法必须纯同步。 */
@@ -836,27 +863,31 @@ export class SandboxedPlugin {
     throw new Error(`插件 ${this.id} ${method}(): ${syncErrMsg}`);
   }
 
-  private async evalAsync(code: string, method?: string): Promise<any> {
+  private async evalAsync(code: string, method?: string, timeoutMs: number = INVOKE_TIMEOUT_MS): Promise<any> {
     const result = this.ctx.evalCode(code);
     if (result.error !== undefined) {
       const e = this.ctx.dump(result.error);
       result.error.dispose();
-      throw new Error(`插件 ${this.id} 执行错误: ${e}`);
+      throw new SandboxLimitError("SANDBOX_VM", `沙箱限制:虚拟机执行失败(${method || "eval"}),原因: ${e}`);
     }
     const promiseHandle = this.ctx.unwrapResult(result);
     const settledPromise = this.ctx.resolvePromise(promiseHandle);
     let done = false;
     settledPromise.then(() => { done = true; }, () => { done = true; });
     const t0 = Date.now();
-    while (!done && Date.now() - t0 < INVOKE_TIMEOUT_MS) {
+    // 长耗时方法:在途有宿主调用(等网络)时额外宽限 LONG_WAIT_GRACE_MS(等网络合法);
+    // 纯 CPU 空转(无在途 defer)仍按预算杀,防插件死循环/连环 host 调用拖到无界。
+    const isLong = timeoutMs !== INVOKE_TIMEOUT_MS;
+    while (!done && Date.now() - t0 < (isLong && this.defers.length > 0 ? timeoutMs + LONG_WAIT_GRACE_MS : timeoutMs)) {
       if (this.runtime.hasPendingJob()) this.runtime.executePendingJobs();
       await new Promise((r) => setImmediate(r));
     }
     try {
-      // 超时(在途未结算):明确告知是超时而非笼统"执行失败",便于定位卡死/死循环。
+      // 超时(在途未结算):明确告知是沙箱限制而非笼统"执行失败",附修复提示。
       if (!done) {
-        console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} 执行超时(> ${INVOKE_TIMEOUT_MS}ms),已中断`);
-        throw new Error(`插件 ${this.id}${method ? " " + method + "()" : ""} 执行超时(> ${INVOKE_TIMEOUT_MS}ms)`);
+        const hint = `该操作可能需拉取平台/外网数据。可在插件 manifest 的 longRunning 中为${method ? ` ${method}()` : "该方法"}声明更长预算(默认 ${INVOKE_TIMEOUT_MS}ms,上限 ${JOB_TIMEOUT_CAP_MS}ms)后更新插件`;
+        console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} 执行超时(> ${timeoutMs}ms),已中断`);
+        throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:单次调用超时(配额 ${timeoutMs}ms)`, hint);
       }
       let rr: any;
       try { rr = await settledPromise; } catch (e) { rr = { rejected: e }; }

@@ -20,6 +20,7 @@ import { authMiddleware } from "./middleware/auth.js";
 import { syncAllRecommendPlaylists } from "./services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
 import { getEnabledSourcePlugins, getEnabledByCapability } from "./plugins/registry.js";
+import { runPluginJob } from "./services/plugin/jobRunner.js";
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
@@ -258,6 +259,15 @@ async function runDailyJobs() {
   for (const cap of ["dailyPlaylist", "localPlaylist", "recommendPlaylist"] as const) {
     for (const { manifest, impl } of getEnabledByCapability(cap)) {
       if (typeof impl?.runDailyJob !== "function") continue;
+      // recommendPlaylist(第三方外置,如 go-music-dl / ListenBrainz):走异步任务通道
+      // (jobRunner 串行锁 + longRunning 长预算),调度不阻塞、也不与手动刷新撞车。
+      // dailyPlaylist / localPlaylist(内置推荐引擎)保持同步 await,不改变既有行为。
+      if (cap === "recommendPlaylist") {
+        const { started, alreadyRunning } = runPluginJob(manifest.id, "runDailyJob");
+        if (started) console.log(`[DAILY-SCHEDULER] ${manifest.id}: 已调度后台任务`);
+        else if (alreadyRunning) console.log(`[DAILY-SCHEDULER] ${manifest.id}: 任务已在运行,跳过`);
+        continue;
+      }
       try {
         const summary = await impl.runDailyJob();
         if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
@@ -338,14 +348,12 @@ const AUTO_SYNC_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 setInterval(async () => {
   cleanupPlayHistory(getPlayHistoryRetentionDays());
   // Every enabled `sync` plugin re-syncs what it owns (imported playlists today).
+  // 走异步任务通道(jobRunner 串行锁):不阻塞维护循环,也不与手动刷新撞车。
   for (const { manifest, impl } of getEnabledByCapability("playlistSync")) {
     if (typeof impl?.runSyncJob !== "function") continue;
-    try {
-      const summary = await impl.runSyncJob();
-      if (summary) console.log(`[AUTO-SYNC] ${manifest.id}: ${summary}`);
-    } catch (e: any) {
-      console.error(`[AUTO-SYNC] ${manifest.id} error:`, e.message || e);
-    }
+    const { started, alreadyRunning } = runPluginJob(manifest.id, "runSyncJob");
+    if (started) console.log(`[AUTO-SYNC] ${manifest.id}: 已调度后台同步`);
+    else if (alreadyRunning) console.log(`[AUTO-SYNC] ${manifest.id}: 同步任务已在运行,跳过`);
   }
   // Auto-scrape artist info for artists added in the last 7 days that still
   // have no cover (QQ first, NetEase fallback). Older artists are left alone

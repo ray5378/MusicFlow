@@ -507,10 +507,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
-import api from "@/api";
+import api, { formatApiError } from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 
@@ -620,30 +620,59 @@ function isRecommenderPlugin(plugin: any): boolean {
   return ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist"].some((c) => caps.includes(c));
 }
 
-// 手动刷新:调 /v1/recommend/refresh 传 pluginId,只重新生成「该插件自身」的歌单
-// (force 绕过间隔闸门)。能力驱动,不写死插件名。
+// 手动刷新:调 /v1/recommend/refresh 传 pluginId,只重新生成「该插件自身」的歌单。
+// 后端为**异步任务通道**(立即返回 started),前端轮询 GET /v1/plugins/:id/job
+// 直到任务完成——不再被沙箱 15s / axios 15s 卡死。
 const refreshingPlugin = ref(false);
 const pluginRefreshResult = ref<{ success: boolean; message: string } | null>(null);
+let pluginJobPollTimer: ReturnType<typeof setInterval> | null = null;
+function stopPluginJobPoll() {
+  if (pluginJobPollTimer) { clearInterval(pluginJobPollTimer); pluginJobPollTimer = null; }
+}
+onUnmounted(stopPluginJobPoll);
+
 async function refreshPlugin() {
   if (!editing.value || refreshingPlugin.value) return;
+  const pluginId = editing.value.id;
   refreshingPlugin.value = true;
   pluginRefreshResult.value = null;
-  try {
-    const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId: editing.value.id });
-    if (res.data?.success) {
-      const r = res.data?.result;
-      let msg = "刷新完成";
-      if (typeof r === "string" && r) msg = r;
-      else if (r?.total !== undefined) msg = `共 ${r.total} 首`;
-      else if (r?.skipped) msg = "已跳过(内容未变)";
-      pluginRefreshResult.value = { success: true, message: msg };
-    } else {
-      pluginRefreshResult.value = { success: false, message: res.data?.error || "刷新失败" };
-    }
-  } catch (e: any) {
-    pluginRefreshResult.value = { success: false, message: e?.response?.data?.error || e.message || "刷新失败" };
-  } finally {
+  let done = false;
+  const finish = (r: { success: boolean; message: string }) => {
+    if (done) return;
+    done = true;
+    stopPluginJobPoll();
+    pluginRefreshResult.value = r;
     refreshingPlugin.value = false;
+  };
+  try {
+    const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId });
+    const d = res.data || {};
+    if (!d.success) { finish({ success: false, message: d.error || "刷新失败" }); return; }
+    if (!d.started && !d.alreadyRunning) { finish({ success: true, message: "刷新完成" }); return; }
+    finish({ success: true, message: d.alreadyRunning ? "任务已在后台运行,等待完成…" : "已开始后台刷新,等待完成…" });
+    // 轮询任务状态(每 2s,上限 6 分钟;超过则提示仍在后台运行)
+    let elapsed = 0;
+    const POLL_MS = 2000;
+    const MAX_POLL_MS = 360000;
+    const poll = async () => {
+      try {
+        const st = await api.get(`/rest/api/v1/plugins/${pluginId}/job`, { timeout: 10000 });
+        const job = st.data?.job;
+        if (job?.status === "ok") {
+          finish({ success: true, message: job.summary ? String(job.summary) : "刷新完成" });
+        } else if (job?.status === "error") {
+          const err = job.sandboxCode
+            ? `[${job.sandboxCode}] ${String(job.error || "刷新失败")}${job.hint ? "。" + String(job.hint) : ""}`
+            : String(job.error || "刷新失败");
+          finish({ success: false, message: err });
+        } else if (elapsed >= MAX_POLL_MS) {
+          finish({ success: true, message: "任务仍在后台运行中,稍后可在插件页查看结果" });
+        }
+      } catch { /* 单次轮询失败忽略,下一轮再试 */ }
+    };
+    pluginJobPollTimer = setInterval(() => { elapsed += POLL_MS; poll().catch(() => {}); }, POLL_MS);
+  } catch (e: any) {
+    finish({ success: false, message: formatApiError(e, "刷新失败") });
   }
 }
 
