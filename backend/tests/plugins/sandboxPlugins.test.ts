@@ -71,6 +71,19 @@ function lbHttpRoutes() {
         m2: { recording: { name: "Song Two", rels: [{ artist_name: "Artist B", type: "lead vocals" }], length: 180000 } },
       }) };
     }
+    // MusicBrainz:艺人/专辑补全(LB metadata 不返回艺人,插件走此接口)
+    if (u.includes("/ws/2/recording/")) {
+      const mbid = decodeURIComponent(u.split("/ws/2/recording/")[1].split("?")[0]);
+      const map: Record<string, any> = {
+        m1: { artist: "Artist A", album: "Album One" },
+        m2: { artist: "Artist B", album: "Album Two" },
+      };
+      const info = map[mbid] || {};
+      return { ok: true, status: 200, headers: {}, body: JSON.stringify({
+        "artist-credit": info.artist ? [{ name: info.artist, artist: { name: info.artist } }] : [],
+        releases: info.album ? [{ title: info.album, status: "official", "primary-type": "Album" }] : [],
+      }) };
+    }
     if (u.includes("/1/submit-listens")) return { ok: true, status: 200, headers: {}, body: "{}" };
     return { ok: false, status: 404, headers: {}, body: "not found" };
   };
@@ -257,6 +270,10 @@ describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => 
     // 全为外部占位:有 externalTitle、playable 由宿主侧置 0、且 duration 透传(ms)
     expect(entries.every((e: any) => e.externalTitle && !e.songId)).toBe(true);
     expect(entries[0].externalDuration).toBe(200000);
+    // 艺人/专辑经 MusicBrainz 补全(LB metadata 不返回艺人):外部条目也带完整信息
+    expect(entries[0].externalArtist).toBe("Artist A");
+    expect(entries[0].externalAlbum).toBe("Album One");
+    expect(entries[1].externalArtist).toBe("Artist B");
     delete onlineCompletions["Artist A|Song One"];
     delete onlineCompletions["Artist B|Song Two"];
   }));
