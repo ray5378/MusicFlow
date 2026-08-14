@@ -445,6 +445,19 @@
             </div>
             <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
             <span v-if="f.help" class="field-hint">{{ f.help }}</span>
+            <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
+                 支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
+                 纯 manifest 驱动,不写死任何插件。 -->
+            <div v-if="(f.links || []).length" class="field-links">
+              <a
+                v-for="(lk, li) in resolvedLinks(f)"
+                :key="li"
+                :href="lk.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="field-link"
+              ><span class="field-link-icon">↗</span>{{ lk.text }}</a>
+            </div>
           </el-form-item>
 
           <!-- 歌词/封面按需获取设置已移至「媒体获取」标签页(全局设置,不归属于单个插件)。 -->
@@ -815,6 +828,22 @@ function pluginHint(plugin: any): string {
 
 function providerId(plugin: any): string {
   return parseManifest(plugin).id || "";
+}
+
+/** 配置项下方的「获取链接」:渲染为可点击外链,支持 ${fieldKey} 插值当前配置值。
+ *  例:sessionKey 的 link.url = "https://last.fm/api/auth?api_key=${apiKey}"
+ *  → 自动把用户已填的 apiKey 拼进去,点开即是带 Key 的授权页。 */
+function resolvedLinks(f: any): { text: string; url: string }[] {
+  const out: { text: string; url: string }[] = [];
+  for (const lk of f.links || []) {
+    const raw = typeof lk.url === "string" ? lk.url : "";
+    const url = raw.replace(/\$\{(\w+)\}/g, (_m: string, k: string) => {
+      const v = editConfig[k];
+      return v === undefined || v === null ? "" : encodeURIComponent(String(v));
+    });
+    out.push({ text: lk.text || url, url });
+  }
+  return out;
 }
 
 async function loadPlugins() {
@@ -1189,6 +1218,10 @@ onMounted(() => {
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
+.field-links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 0 12px; }
+.field-link { font-size: 12px; color: var(--el-color-primary); text-decoration: none; display: inline-flex; align-items: center; gap: 3px; line-height: 1.6; }
+.field-link:hover { text-decoration: underline; }
+.field-link-icon { font-size: 11px; transform: translateY(0.5px); }
 .candidate-list { display: flex; flex-direction: column; gap: 8px; max-width: 640px; }
 .candidate-row { display: flex; align-items: center; gap: 8px; }
 .candidate-row .el-input { margin: 0; }
