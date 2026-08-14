@@ -162,7 +162,11 @@ export const dailyRoamManifest: PluginManifest = {
       help: "从这些歌单合并生成「今日漫游」(默认:每日推荐 + 本地推荐,可多选、可搜索)。至少保留 1 个。",
       default: DEFAULT_SOURCES,
     },
+    { key: "showOnHome", label: "在首页显示", type: "switch", default: true, help: "是否把本插件生成的歌单固定在首页顶部展示(按下方位次排序)" },
+    { key: "homePosition", label: "首页显示位次", type: "number", default: 1, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
+  // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
+  homePlaylistId: ROAM_PLAYLIST_ID,
   documentation: `### 功能介绍
 合并其他推荐歌单生成「今日漫游」组合歌单（固定 id：\`pl-daily-roam\`），首页顶部固定展示的就是它。
 

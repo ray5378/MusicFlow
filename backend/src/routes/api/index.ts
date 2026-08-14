@@ -10,7 +10,7 @@ import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
-import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, playlistSyncApi } from "../../services/pluginAccess.js";
+import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
@@ -117,6 +117,37 @@ apiRoutes.get("/v1/recommend", async (c) => {
 // 由每日推荐插件的 homeCount 配置控制(默认 8),核心经能力门面读取,不写死插件名。
 apiRoutes.get("/v1/home/playlist-count", (c) => {
   return c.json({ success: true, count: dailyRecommendHomeCount() });
+});
+
+// ==================== 首页固定卡(推荐插件自治) ====================
+// 哪些推荐歌单固定在首页顶部、按什么位次排,由各插件自己的配置决定:
+//   manifest.configSchema 声明 showOnHome(switch) / homePosition(number);
+//   manifest.homePlaylistId 声明首页对应的固定歌单 id。
+// 核心按能力收集(不写死插件名),位次冲突在保存插件配置时校验。
+apiRoutes.get("/v1/recommend/home-cards", (c) => {
+  const plugins = listHomeCardPlugins().filter((p) => p.showOnHome);
+  // 位次排序:0(未固定)排最后,固定位次升序。
+  const sorted = [...plugins].sort((a, b) => {
+    const pa = a.position || Number.MAX_SAFE_INTEGER;
+    const pb = b.position || Number.MAX_SAFE_INTEGER;
+    return pa - pb || a.pluginId.localeCompare(b.pluginId);
+  });
+  const cards = sorted.map((p) => {
+    const pl = sqlite.prepare("SELECT id, name, song_count, cover_art FROM playlists WHERE id = ?").get(p.playlistId) as any;
+    return {
+      pluginId: p.pluginId,
+      name: p.name,
+      playlistId: p.playlistId,
+      position: p.position,
+      capabilities: p.capabilities,
+      isCombo: p.capabilities.includes("comboPlaylist"),
+      // 歌单信息(前端按 songCount > 30 门槛展示)
+      playlistName: pl?.name || "",
+      songCount: pl?.song_count || 0,
+      coverArt: pl?.cover_art || null,
+    };
+  });
+  return c.json({ success: true, cards });
 });
 
 // ==================== 网络代理(管理员,仅插件拉取链路) ====================
@@ -490,6 +521,12 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
   if (!p) return c.json({ error: "插件不存在" }, 404);
   const body = await c.req.json().catch(() => ({}));
   const builtin = isBuiltinRow(p);
+  // 首页位次冲突预检:推荐插件保存 showOnHome/homePosition 时,与其它「显示在首页」
+  // 的插件位次重复则拒绝保存(自己占自己位次不算冲突)。
+  if (body.config !== undefined) {
+    const conflict = homePositionConflictForSave(p.id, body.config);
+    if (conflict) return c.json({ error: conflict }, 400);
+  }
   db.update(plugins).set({
     config: body.config !== undefined ? JSON.stringify(body.config) : p.config,
     // 内置核心插件强制启用,忽略停用请求(可更新配置/描述,不可停用)。
@@ -505,6 +542,13 @@ apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
   const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
   if (!p) return c.json({ error: "插件不存在" }, 404);
   if (isBuiltinRow(p)) return c.json({ error: "内置核心插件不可停用" }, 400);
+  // 启用插件时若其已配置首页显示位次,与其它插件位次冲突则拒绝启用。
+  if (!p.enabled) {
+    let cfg: any = {};
+    try { cfg = p.config ? JSON.parse(p.config) : {}; } catch {}
+    const conflict = homePositionConflictForSave(p.id, cfg);
+    if (conflict) return c.json({ error: conflict }, 400);
+  }
   db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run();
   return c.json({ success: true });
 });

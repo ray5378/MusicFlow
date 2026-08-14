@@ -114,6 +114,14 @@ globalThis.__mfPlugin = {
 > 调度顺序：`dailyPlaylist` → `localPlaylist` → `comboPlaylist`（组合歌单依赖前两者的产物，必须最后跑）。
 > 手动刷新：`POST /v1/recommend/refresh` 按 `targets`（daily/local/roam）以 `force + 随机 seedSalt` 重新触发，`seedSalt` 混入日期种子，让同一天也能刷出不同内容。
 
+#### 首页固定卡（推荐插件自治）
+推荐插件可通过 manifest 声明参与「首页顶部固定展示」：
+- `manifest.homePlaylistId`：该插件在首页展示时对应的固定歌单 id（核心按此聚合，不写死歌单 id）。
+- `configSchema` 声明两个配置项（插件设置页自动渲染）：
+  - `showOnHome`（`switch`，默认 false）——是否显示在首页顶部；
+  - `homePosition`（`number`，默认 0）——首页固定位次（1 起；0 = 未固定）。
+- 核心经 `GET /v1/recommend/home-cards` 按位次排序返回固定卡列表；保存插件配置（`PUT /v1/plugins/:id`）或启用插件时，若位次与其它「显示在首页」的插件重复 → 400 拒绝并提示占用者。
+
 ### 4.4 `sync` 类型（歌单同步）
 | capability | impl 方法 |
 |------|------|

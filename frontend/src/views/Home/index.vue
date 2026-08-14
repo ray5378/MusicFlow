@@ -1,27 +1,31 @@
 <template>
   <div class="home-page">
-    <!-- ===== 顶部：今日漫游 + 并排随机歌单 ===== -->
+    <!-- ===== 顶部：首页固定推荐卡(插件自治) + 并排随机歌单 ===== -->
     <section class="section">
       <div class="section-title">
-        <span>今日漫游</span>
-        <span class="section-sub">每日推荐 × 本地推荐组合歌单</span>
+        <span>为你推荐</span>
+        <span class="section-sub">首页固定推荐歌单</span>
         <span class="more" @click="go('/playlists')">查看全部歌单 ›</span>
       </div>
 
       <div class="top-row">
-        <!-- 今日漫游（固定第一张，每日推荐 + 本地推荐合并去重） -->
+        <!-- 固定推荐卡：由各推荐插件配置 showOnHome + homePosition 决定(按位次排序)。
+             今日漫游(combo 能力)卡片带刷新按钮。 -->
         <div
-          class="card featured fnos-card-sheen"
-          v-if="featuredRoam"
-          @contextmenu="openContextMenu($event, playlistActions(featuredRoam), featuredRoam.name, '歌单')"
-          v-longpress="() => openActionSheet(playlistActions(featuredRoam), featuredRoam.name, '歌单')"
+          v-for="(card, idx) in fixedCards"
+          :key="card.pluginId"
+          class="card fnos-card-sheen"
+          :style="{ '--stagger': idx + 1 }"
+          @contextmenu="openContextMenu($event, playlistActions(card), card.playlistName, '歌单')"
+          v-longpress="() => openActionSheet(playlistActions(card), card.playlistName, '歌单')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featuredRoam.id)">
-            <img v-if="featuredRoam.coverArt" :src="cover(featuredRoam.coverArt)" class="card-cover" loading="lazy" decoding="async" />
-            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="48"  /></div>
-            <span class="badge">今日漫游</span>
-            <CoverPlay size="lg" :label="`播放 ${featuredRoam.name}`" :action="() => playPl(featuredRoam)" />
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + card.playlistId)">
+            <img v-if="card.coverArt" :src="cover(card.coverArt)" class="card-cover" loading="lazy" decoding="async" />
+            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
+            <span class="badge">{{ card.playlistName || card.name }}</span>
+            <CoverPlay size="md" :label="`播放 ${card.playlistName}`" :action="() => playPl(card)" />
             <button
+              v-if="card.isCombo"
               class="refresh-btn"
               title="手动刷新(重新随机生成每日推荐/本地推荐并重组今日漫游)"
               :disabled="refreshing"
@@ -30,9 +34,9 @@
               <MfIcon name="RefreshCw" :size="16" :class="{ spinning: refreshing }" />
             </button>
           </div>
-          <div class="card-body" @click="go(`/playlists/${featuredRoam.id}`)">
-            <div class="card-title">{{ featuredRoam.name }}</div>
-            <div class="card-sub">{{ featuredRoam.songCount ? featuredRoam.songCount + ' 首' : '歌单' }}</div>
+          <div class="card-body" @click="go(`/playlists/${card.playlistId}`)">
+            <div class="card-title">{{ card.playlistName || card.name }}</div>
+            <div class="card-sub">{{ card.songCount ? card.songCount + ' 首' : '歌单' }}</div>
           </div>
         </div>
 
@@ -146,16 +150,35 @@ async function playPl(pl: any) {
   else ElMessage.warning("该歌单暂无可播放歌曲");
 }
 
-// 今日漫游：daily-roam 插件生成（每日推荐 + 本地推荐合并去重），固定第一张；
-// 先决条件：必须匹配到本地库歌曲数 > 30 首才展示（不足 30 首不显示）。
-const featuredRoam = computed(() =>
-  playlists.value.find((p) => p.name === "今日漫游" && (p.songCount || 0) > 30) || null
+// 首页固定推荐卡：由各推荐插件配置 showOnHome + homePosition 决定。
+// 核心经 /v1/recommend/home-cards 按位次排序返回,前端只做 >30 首门槛过滤。
+const homeCards = ref<any[]>([]);
+async function loadHomeCards() {
+  try {
+    const res = await api.get("/rest/api/v1/recommend/home-cards");
+    homeCards.value = res.data?.cards || [];
+  } catch {
+    homeCards.value = [];
+  }
+}
+// 归一化为歌单形状(playPl/playlistActions 都按 id/name 工作),带 isCombo 标记。
+const fixedCards = computed<any[]>(() =>
+  homeCards.value
+    .filter((c) => c.songCount > 30) // 保持 >30 首展示门槛(用户确认)
+    .map((c) => ({
+      id: c.playlistId,
+      name: c.playlistName || c.name,
+      coverArt: c.coverArt,
+      songCount: c.songCount,
+      pluginId: c.pluginId,
+      isCombo: !!c.isCombo,
+      position: c.position || 0,
+    })),
 );
-// 并排随机：从全部歌单里随机抽（排除今日漫游；只抽音乐 ≥30 首的歌单），
-// 与今日漫游合并成 homeCount 张等大卡片（默认 8，桌面 4 列 × 2 行）。
+// 并排随机：从全部歌单里随机抽（排除固定卡；只抽音乐 ≥30 首的歌单），
+// 与固定卡合并成 homeCount 张等大卡片（默认 8，桌面 4 列 × 2 行）。
 const sidePlaylists = computed(() => {
-  const fixedIds = new Set<string>();
-  if (featuredRoam.value) fixedIds.add(featuredRoam.value.id);
+  const fixedIds = new Set(fixedCards.value.map((c) => c.id));
   const pool = playlists.value.filter(
     (p) => !fixedIds.has(p.id) && (p.songCount || 0) >= 30
   );
@@ -171,7 +194,7 @@ async function refreshRoam() {
   try {
     await api.post("/rest/api/v1/recommend/refresh", {});
     ElMessage.success("已重新生成今日漫游");
-    await Promise.all([loadPlaylists(), loadHomeConfig()]);
+    await Promise.all([loadPlaylists(), loadHomeCards()]);
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || "刷新失败");
   } finally {
@@ -226,9 +249,9 @@ function placeholderCount(featuredItem: any, list: any[], want: number) {
   return Array.from({ length: need }, (_, i) => i + 1);
 }
 
-// 首页顶部占位：按 homeCount 补齐（含今日漫游固定卡）
+// 首页顶部占位：按 homeCount 补齐（含全部固定推荐卡）
 function placeholderHomeCount() {
-  const fixed = featuredRoam.value ? 1 : 0;
+  const fixed = fixedCards.value.length;
   const real = fixed + sidePlaylists.value.length;
   const need = Math.max(0, homeCount.value - real);
   return Array.from({ length: need }, (_, i) => i + 1);
@@ -270,7 +293,7 @@ async function loadRecommend() {
 
 onMounted(async () => {
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadRecommend(), loadHomeConfig()]);
+  await Promise.all([loadPlaylists(), loadRecommend(), loadHomeConfig(), loadHomeCards()]);
   loading.value = false;
 });
 </script>
@@ -297,7 +320,7 @@ onMounted(async () => {
   .more:hover { color: var(--fnos-red); }
 }
 
-/* 顶部：今日漫游固定第一张，其余随机，全部等大（桌面 4 列 × 2 行 = 8 张） */
+/* 顶部：插件自治固定推荐卡 + 随机补齐，全部等大（桌面 4 列 × 2 行 = 8 张） */
 .top-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

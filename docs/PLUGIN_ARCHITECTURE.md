@@ -25,6 +25,7 @@
 - Phase 3（社区外置 drop-in 插件）已在 §7.3 全部完成。
 - **Phase 4/5/6（songloft 调研启发落地）**：在 §7.4 全部完成——`host.*` 受控上下文 + 权限模型、`lyricProvider`/`coverProvider` first-match-wins 注册表、go-music-dl 歌词/封面拆为独立 provider、DLNA `renderer` 插件化、`scrobbler` 播放上报、通用 KV `storage`、插件间 `comm`、健康追踪、`registryCatalog` 分发注册表 + 插件市场、外置插件热重载。
 - 2026-08-14：新增内置 `daily-roam`「今日漫游」组合歌单插件（`comboPlaylist` 能力，合并「每日推荐 + 本地推荐」去重重建）；调度顺序 `dailyPlaylist → localPlaylist → comboPlaylist`；`POST /v1/recommend/refresh` 手动刷新（force + 随机 seedSalt 重新触发随机生成）。
+- 2026-08-14（v1.7.22）：首页固定卡改为**插件自治**——推荐插件 manifest 声明 `homePlaylistId` + configSchema 声明 `showOnHome`/`homePosition`；核心经 `GET /v1/recommend/home-cards` 按位次聚合，保存/启用插件时位次冲突 → 400 拒绝（`homePositionConflictForSave`）。Web 首页与 HA 卡片均改读该接口。
 
 ---
 

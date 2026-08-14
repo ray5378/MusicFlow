@@ -496,7 +496,11 @@ export const localRecommendManifest: PluginManifest = {
     { key: "sourcePlaylists", label: "参考歌单", type: "playlist-multi", help: "从这些歌单中抽取歌曲生成「本地推荐」(支持本地与平台导入歌单,可多选,可搜索)。留空则按播放口味从全库推荐。" },
     { key: "count", label: "歌曲总数", type: "number", default: 50, help: "生成的歌单歌曲总数量(1~500,默认 50)" },
     { key: "excludeRecent", label: "排除近期播放", type: "switch", default: true, help: "从候选中排除近 30 天播放过的歌曲,让每天推荐更新鲜" },
+    { key: "showOnHome", label: "在首页显示", type: "switch", default: false, help: "是否把本插件生成的歌单固定在首页顶部展示(按下方位次排序)" },
+    { key: "homePosition", label: "首页显示位次", type: "number", default: 0, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
+  // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
+  homePlaylistId: LOCAL_FIXED_PLAYLIST_ID,
   documentation: `### 功能介绍
 基于播放历史与收藏口味，每天从本地曲库独立生成「本地推荐」歌单（固定 id：\`pl-daily-local\`），回味你常听的口味。
 

@@ -80,6 +80,10 @@ export interface PluginManifest {
   /** recommender 插件专用:每日推荐歌单的标识(TAG),OpenSubsonic 等据此识别
    *  「每日推荐」歌单(原核心直连 DAILY_TAG 常量,现已声明化)。 */
   dailyTag?: string;
+  /** recommender 插件专用:该插件在首页展示时对应的固定歌单 id
+   *  (如「今日漫游」= pl-daily-roam)。核心按 homePlaylistId 聚合首页固定卡,
+   *  不写死任何歌单 id。 */
+  homePlaylistId?: string;
   /** Source plugins only: prefix used to tag daily-recommend imported playlists. */
   recommendPrefix?: string;
   minAppVersion?: string;
