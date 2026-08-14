@@ -10,8 +10,9 @@
 // surfaces in the admin Plugins page and the /v1/plugins/health endpoint.
 
 import { sqlite } from "../db/index.js";
+import { listRegistered } from "./registry.js";
 
-export type HealthStatus = "green" | "yellow" | "red" | "down" | "unknown";
+export type HealthStatus = "green" | "yellow" | "red" | "down" | "unknown" | "none";
 
 interface HealthRecord {
   status: HealthStatus;
@@ -118,14 +119,79 @@ export function allHealth(): { pluginId: string; status: HealthStatus; successes
 }
 
 /** Optional self-check hook: a plugin may implement `health()` returning
- *  "ok" | "degraded" | "down" with a message. Returns null if not implemented. */
+ *  "ok" | "degraded" | "down" (or green/yellow/red) with a message.
+ *  Returns null if not implemented. Normalizes ok→green / degraded→yellow. */
 export async function pingPlugin(impl: any): Promise<{ status: HealthStatus; message?: string } | null> {
   if (typeof impl?.health !== "function") return null;
   try {
     const r = await impl.health();
     if (!r || typeof r.status !== "string") return null;
-    return { status: r.status as HealthStatus, message: r.message };
+    const s = String(r.status).toLowerCase();
+    const map: Record<string, HealthStatus> = {
+      ok: "green", degraded: "yellow", down: "down",
+      green: "green", yellow: "yellow", red: "red",
+    };
+    return { status: map[s] || "unknown", message: r.message };
   } catch (e: any) {
     return { status: "down", message: e?.message || String(e) };
   }
+}
+
+// ==================== 主动 ping(插件自检) ====================
+// /v1/plugins/health 调 pingAllHealth:对实现了 health() 的插件(含沙箱外置插件)
+// 主动探测其自检逻辑(如检查 baseUrl 可达、token 已配置);结果缓存 PING_TTL 秒,
+// 避免每次打开插件页都真的发起网络请求。无 health() 的插件回落被动观测记录
+// (plugin_health 表),再无记录则为 none(前端显示「未监控」)。ping 结果**不写
+// 入** plugin_health 表——主动探测与「真实调用」语义不同,避免污染被动观测的
+// 连续失败计数。
+
+const PING_TTL = 60_000; // 60s
+const PING_TIMEOUT = 5_000; // 单插件自检超时
+const pingCache = new Map<string, { at: number; status: HealthStatus; message?: string }>();
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error("自检超时")), ms))]);
+}
+
+export interface PluginHealthItem {
+  pluginId: string;
+  status: HealthStatus;
+  message?: string;
+  lastError?: string | null;
+  /** ping=主动自检 / record=被动观测记录 / none=未监控 */
+  source: "ping" | "record" | "none";
+}
+
+/** 汇总全部已注册插件的健康状态(主动 ping 优先,被动观测其次,无则 none)。 */
+export async function pingAllHealth(): Promise<PluginHealthItem[]> {
+  const now = Date.now();
+  const records = new Map(allHealth().map((h) => [h.pluginId, h]));
+  const out: PluginHealthItem[] = [];
+  for (const { manifest, impl } of listRegistered()) {
+    const id = manifest.id;
+    if (typeof impl?.health === "function") {
+      const cached = pingCache.get(id);
+      if (cached && now - cached.at < PING_TTL) {
+        out.push({ pluginId: id, status: cached.status, message: cached.message, source: "ping" });
+        continue;
+      }
+      let r: { status: HealthStatus; message?: string } | null = null;
+      try {
+        r = await withTimeout(pingPlugin(impl) as Promise<{ status: HealthStatus; message?: string } | null>, PING_TIMEOUT);
+      } catch {
+        r = { status: "down", message: "自检超时" };
+      }
+      const status = r?.status || "unknown";
+      pingCache.set(id, { at: now, status, message: r?.message });
+      out.push({ pluginId: id, status, message: r?.message || undefined, source: "ping" });
+      continue;
+    }
+    const rec = records.get(id);
+    if (rec) {
+      out.push({ pluginId: id, status: rec.status, lastError: rec.lastError, source: "record" });
+    } else {
+      out.push({ pluginId: id, status: "none", source: "none" });
+    }
+  }
+  return out;
 }

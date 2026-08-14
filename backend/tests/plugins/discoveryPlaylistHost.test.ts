@@ -44,6 +44,10 @@ beforeAll(() => {
       },
       create(host) {
         return {
+          // 可选自检钩子:验证沙箱透传(1.7.33 起 makeImpl 无条件暴露 health)
+          health() {
+            return { status: "ok", message: "test-ok" };
+          },
           async runDailyJob(opts) {
             // 无 search 类插件 → sources.complete 应优雅返回 { songId: null }
             const comp = await host.sources.complete({ artist: "X", title: "Y" });
@@ -137,6 +141,14 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
     // 直接再跑一次(覆盖旧条目),验证 sources.complete 路径稳定
     const res = await reg.impl.runDailyJob({ force: true });
     expect(String(res)).toContain("ok:");
+  });
+
+  it("外置插件 health() 自检钩子经沙箱透传到宿主(ok→green)", async () => {
+    const reg = getPlugin("lb-test");
+    expect(reg).toBeTruthy();
+    expect(typeof reg.impl.health).toBe("function");
+    const r = await reg.impl.health();
+    expect(r).toMatchObject({ status: "ok", message: "test-ok" });
   });
 
   it("宿主自动扫封面:未传 coverSongId 时取自身第一首有封面歌曲;全无封面则清空", async () => {

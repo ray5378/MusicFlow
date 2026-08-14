@@ -885,6 +885,10 @@ export class SandboxedPlugin {
         return this.invoke(m, clean);
       };
     }
+    // health() 是可选自检钩子(非能力):插件实现了就暴露,供 /v1/plugins/health 主动 ping。
+    if (present.has("health")) {
+      impl.health = (...args: any[]) => this.invoke("health", args);
+    }
     return impl;
   }
 }

@@ -792,8 +792,8 @@ function healthType(id: string): any {
   return "info";
 }
 function healthLabel(id: string): string {
-  const s: string = healthMap.value[id]?.status || "unknown";
-  return ({ green: "正常", yellow: "波动", red: "异常", down: "离线", unknown: "未知" } as Record<string, string>)[s] || "未知";
+  const s: string = healthMap.value[id]?.status || "none";
+  return ({ green: "正常", yellow: "波动", red: "异常", down: "离线", unknown: "未知", none: "未监控" } as Record<string, string>)[s] || "未监控";
 }
 
 const TYPE_HINTS: Record<string, string> = {

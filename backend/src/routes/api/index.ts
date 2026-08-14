@@ -38,7 +38,7 @@ import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { onlineRoutes } from "./online.js";
-import { allHealth } from "../../plugins/health.js";
+import { pingAllHealth } from "../../plugins/health.js";
 import { getRendererPlugins, discoverRenderers } from "../../plugins/renderers.js";
 import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
 import {
@@ -576,8 +576,9 @@ apiRoutes.delete("/v1/plugins/:id", adminMiddleware, (c) => {
   return c.json({ success: true });
 });
 
-// Plugin health (green/yellow/red + failure counts) — see plugins/health.ts.
-apiRoutes.get("/v1/plugins/health", adminMiddleware, (c) => c.json({ health: allHealth() }));
+// Plugin health:主动 ping(实现了 health() 的插件自检,带缓存) + 被动观测记录 + none。
+// — see plugins/health.ts.
+apiRoutes.get("/v1/plugins/health", adminMiddleware, async (c) => c.json({ health: await pingAllHealth() }));
 
 // Renderer plugins (device-casting capability).
 apiRoutes.get("/v1/plugins/renderers", adminMiddleware, (c) => c.json({ renderers: getRendererPlugins() }));
