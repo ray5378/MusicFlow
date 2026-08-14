@@ -10,7 +10,7 @@ import { fetchCoverForSong } from "../../services/covers.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
-import { refreshPlaylistCounts } from "../../services/plugin/playlistSync.js";
+import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
 

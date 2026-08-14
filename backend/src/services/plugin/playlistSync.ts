@@ -1,12 +1,14 @@
 // Playlist sync service: re-fetch remote playlist, rebuild entries with library matching
-import { db, sqlite } from "../../db/index.js";
+import { db } from "../../db/index.js";
 import { songs, playlists, playlistSongs, wishes } from "../../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { importPlaylistFromUrl, findUrlImporter, ImportedPlaylist, ImportedTrack } from "./playlistImport.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
-import { firstEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
 import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
+// 共享匹配/计数工具已收敛到 services/plugin/shared.ts(宿主中性模块),本插件只消费,
+// 不再持有定义,以免核心路由被迫直接 import 本实现文件(check-core 规则 B)。
+import { normalizeKey, matchPlaylistInBackground, refreshPlaylistCounts } from "./shared.js";
 
 export interface SyncResult {
   total: number;
@@ -33,12 +35,6 @@ export function checkImportCooldown(userId: string, url: string): boolean {
   importCooldowns.set(key, now);
   if (importCooldowns.size > 500) importCooldowns.clear();
   return false;
-}
-
-// Normalize title/artist for fuzzy matching (lowercase, trim, strip separators/parens)
-export function normalizeKey(title: string, artist: string): string {
-  const norm = (s: string) => s.toLowerCase().replace(/[（(].*?[)）]/g, "").replace(/[~～·\-—_\s]+/g, "").trim();
-  return `${norm(title)}|${norm(artist)}`;
 }
 
 // Build a library index (title|artist -> songs) for matching
@@ -133,42 +129,8 @@ export async function rebuildPlaylistEntries(
   return { total: imported.tracks.length, matched, unmatched, wishAdded, platform: imported.platform };
 }
 
-// Per-playlist auto-match guard: only one background match at a time per playlist.
-const autoMatchLocks = new Set<string>();
-
-/** 后台自动匹配一张歌单的未匹配条目(playable=0 且 external_title 非空)。
- *
- *  共享宿主服务:导入歌单(rebuildPlaylistEntries 后)与外置插件歌单
- *  (discovery.upsertPluginPlaylist 写入后)都经此触发,避免两份近似逻辑漂移。
- *  能力驱动:autoMatch 能力优先,否则任意 search 能力插件兜底;每歌单内存锁防并发;
- *  失败不抛(调用方 fire-and-forget)。 */
-export async function matchPlaylistInBackground(playlistId: string): Promise<void> {
-  if (autoMatchLocks.has(playlistId)) return;
-  autoMatchLocks.add(playlistId);
-  const started = Date.now();
-  try {
-    const matcher = firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search");
-    if (!matcher) return; // no capable plugin enabled -> nothing to do
-    const config = getPluginConfig(matcher.manifest.id);
-    if (!config) return; // plugin disabled between lookup and read
-    if (typeof matcher.impl?.search !== "function") return; // can't actually match
-
-    const { matchUnmatchedPlaylistEntries } = await import("../source/online/match.js");
-    const result = await matchUnmatchedPlaylistEntries(
-      matcher.manifest.id,
-      config,
-      matcher.impl,
-      playlistId,
-    );
-    if (result.total > 0) {
-      console.log(
-        `[auto-match] ${playlistId}: ${result.matched} matched, ${result.noMatch} no-match, ${result.error} errors in ${((Date.now() - started) / 1000).toFixed(1)}s`,
-      );
-    }
-  } finally {
-    autoMatchLocks.delete(playlistId);
-  }
-}
+// matchPlaylistInBackground 已收敛到 services/plugin/shared.ts(宿主中性模块)。
+// 本插件只消费(rebuildPlaylistEntries 的 fire-and-forget 调用),不持有定义。
 
 // Sync a playlist: re-fetch remote data and rebuild entries.
 // Returns null if the playlist is not remote-imported, or throws on error.
@@ -228,31 +190,7 @@ export async function syncAllEnabledPlaylists(opts: RebuildOptions = {}): Promis
   return { synced, results, errors };
 }
 
-// Recompute a playlist's songCount and duration
-export function refreshPlaylistCounts(playlistId: string) {
-  // Single aggregate query (LEFT JOIN song durations) instead of one SELECT per
-  // entry. Mirrors the old per-entry logic:
-  //   - playable+linked entry counts when its song exists → contributes s.duration
-  //   - loose external entry counts when it has an external title → ext duration / 1000
-  const row = sqlite.prepare(`
-    SELECT
-      SUM(CASE
-        WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END
-        WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN 1
-        ELSE 0 END) AS cnt,
-      COALESCE(SUM(
-        CASE WHEN e.playable = 1 AND e.song_id IS NOT NULL THEN CASE WHEN s.id IS NOT NULL THEN s.duration ELSE 0 END
-             WHEN e.external_title IS NOT NULL AND e.external_title != '' THEN e.external_duration / 1000.0
-             ELSE 0 END
-      ), 0) AS duration
-    FROM playlist_songs e
-    LEFT JOIN songs s ON s.id = e.song_id
-    WHERE e.playlist_id = ?
-  `).get(playlistId) as any;
-  const count = Number(row?.cnt || 0);
-  const duration = Math.round(Number(row?.duration || 0));
-  db.update(playlists).set({ songCount: count, duration, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
-}
+// refreshPlaylistCounts 已收敛到 services/plugin/shared.ts(宿主中性模块)。
 
 // Export a playlist's ordered tracks as MusicFlow-native ImportedTrack[], so
 // the resulting JSON can be imported back (into this or another instance) via

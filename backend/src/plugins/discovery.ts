@@ -29,7 +29,7 @@ import { songs } from "../db/schema.js";
 import { registerPlugin, getPlugin, getPluginConfig, getEnabledByCapability } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
-import { matchPlaylistInBackground } from "../services/plugin/playlistSync.js";
+import { matchPlaylistInBackground } from "../services/plugin/shared.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
 import { firstPlayableCoverFile } from "../services/playlistCover.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";

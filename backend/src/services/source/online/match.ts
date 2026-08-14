@@ -8,7 +8,7 @@
 import { db } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { normalizeKey, refreshPlaylistCounts } from "../../plugin/playlistSync.js";
+import { normalizeKey, refreshPlaylistCounts } from "../../plugin/shared.js";
 import { OnlineSongResult } from "./types.js";
 import { importOnlineSong } from "./service.js";
 

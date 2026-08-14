@@ -18,7 +18,7 @@ import { getConfiguredProvider } from "./index.js";
 import { importOnlineSongs } from "./service.js";
 import { OnlinePlaylistInfo } from "./types.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.js";
-import { refreshPlaylistCounts } from "../../plugin/playlistSync.js";
+import { refreshPlaylistCounts } from "../../plugin/shared.js";
 import { getPluginManifest, listRegistered } from "../../../plugins/registry.js";
 
 export const DAILY_TAG = "每日推荐";
