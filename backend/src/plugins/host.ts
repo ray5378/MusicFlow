@@ -48,6 +48,7 @@ export const KNOWN_PERMISSIONS: string[] = [
   "playlists:read",
   "playlists:write",
   "inter-plugin",
+  "crypto",
 ];
 
 /** Namespaces a plugin may wildcard with `<ns>.*` (e.g. `songs.*` grants both

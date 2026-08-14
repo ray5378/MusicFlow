@@ -52,6 +52,9 @@ function makeEnv(overrides?: Partial<SandboxHostEnv>): SandboxHostEnv {
     sources: {
       complete: async (opts: any) => ({ ok: true, songId: "so-new", opts }),
     },
+    crypto: {
+      md5: (s: string) => { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) | 0; return "md5-" + (h >>> 0).toString(16); },
+    },
     ...overrides,
   };
 }
@@ -403,5 +406,37 @@ describe("QuickJS 沙箱 · host.playlists / host.sources 受控写", () => {
     const env = makeEnv({ permissions: ["playlists:write"] }); // 缺 songs:write
     const { impl } = await loadSandboxedPlugin("demo-pl", PL_CODE, env);
     await expect(impl.runDailyJob()).rejects.toThrow(/PERMISSION_DENIED: songs:write \(host\.complete\)/);
+  });
+});
+
+describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
+  const PL_CODE = `
+    globalThis.__mfPlugin = {
+      manifest: { id: "demo-crypto", name: "x", version: "1.0.0", type: "recommender", capabilities: ["dailyPlaylist"], configSchema: [], permissions: ["crypto"] },
+      create(host) {
+        return {
+          async runDailyJob() {
+            return { sig: host.crypto.md5("api_keyabc123") };
+          }
+        };
+      }
+    };`;
+
+  it("有 crypto 权限时路由到宿主 md5 实现", async () => {
+    const env = makeEnv({
+      permissions: ["crypto"],
+      crypto: { md5: (s: string) => "ok-" + s },
+    });
+    const { impl } = await loadSandboxedPlugin("demo-crypto", PL_CODE, env);
+    const r = await impl.runDailyJob();
+    expect(r.sig).toBe("ok-api_keyabc123");
+  });
+
+  it("无 crypto 权限时 host.crypto.md5 被权限拒绝", async () => {
+    const env = makeEnv({ permissions: [] }); // 缺 crypto
+    const { impl } = await loadSandboxedPlugin("demo-crypto", PL_CODE, env);
+    const r = await impl.runDailyJob();
+    // hostSync 拒绝时返回 { error: "PERMISSION_DENIED: crypto" }(不抛,插件可读到)
+    expect(String(r.sig?.error || "")).toContain("PERMISSION_DENIED: crypto");
   });
 });

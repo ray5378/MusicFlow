@@ -132,6 +132,10 @@ export interface SandboxHostEnv {
   permissions: string[];
   /** host.http:发起 HTTP 请求,返回 { ok, status, headers, body } 信封。 */
   http(input: string, init?: any): Promise<any>;
+  /** host.crypto:纯同步工具(需 crypto 权限)。MD5 hex(Last.fm api_sig 等签名需要)。 */
+  crypto: {
+    md5(input: string): string;
+  };
   /** host.storage:按插件隔离的 KV(与 host.ts PluginStorage 同契约,异步)。 */
   storage: {
     get(key: string): Promise<any | null>;
@@ -593,6 +597,12 @@ export class SandboxedPlugin {
     srcComplete.dispose();
 
     // host.config(每次调用前刷新)/ host.version
+    // host.crypto(纯同步工具,需 crypto 权限;Last.fm api_sig = MD5(排序拼接 + secret))
+    const cryptoObj = c.newObject();
+    const cryptoMd5 = this.hostSync("md5", (s: any) => this.env.crypto.md5(String(s ?? "")), "crypto");
+    c.setProp(cryptoObj, "md5", cryptoMd5);
+    cryptoMd5.dispose();
+
     const hostObj = c.newObject();
     c.setProp(hostObj, "http", httpFn);
     c.setProp(hostObj, "storage", storageObj);
@@ -601,6 +611,7 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "playlists", playlistsObj);
     c.setProp(hostObj, "sources", sourcesObj);
     c.setProp(hostObj, "plugin", pluginObj);
+    c.setProp(hostObj, "crypto", cryptoObj);
     c.setProp(hostObj, "fs", this.injectFs());
     c.setProp(hostObj, "command", this.injectCommand());
     c.setProp(hostObj, "net", this.injectNet());
@@ -608,7 +619,7 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "jsenv", this.injectJsenv());
     c.setProp(hostObj, "log", logFn);
     c.setProp(hostObj, "version", c.newString(this.env.version || ""));
-    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); logFn.dispose();
+    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); cryptoObj.dispose(); logFn.dispose();
     c.setProp(c.global, "__mfHost", hostObj);
     hostObj.dispose();
   }

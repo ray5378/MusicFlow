@@ -18,6 +18,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { execFile, spawn } from "child_process";
+import { createHash } from "node:crypto";
 import dgram from "dgram";
 import net from "net";
 import WebSocket from "ws";
@@ -469,6 +470,9 @@ export async function discoverExternalPlugins(
         version: process.env.APP_VERSION || "dev",
         getConfig: () => getPluginConfig(id) ?? {},
         permissions: initialPerms,
+        crypto: {
+          md5: (s: string) => createHash("md5").update(String(s)).digest("hex"),
+        },
         http: async (input: string, init?: any) => {
           try {
             const timeout = Number(init?.timeout) > 0 ? Number(init.timeout) : 20000;

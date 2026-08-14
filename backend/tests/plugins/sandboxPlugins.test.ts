@@ -289,3 +289,174 @@ describe("真实外置插件 · listenbrainz 推荐(runDailyJob,沙箱)", () => 
     lbCfg.username = saved;
   }));
 });
+
+// ==================== last.fm(双功能:签名上报 + Top/Loved/相似艺人推荐) ====================
+import { createHash } from "node:crypto";
+
+let lfImpl: any;
+let lfCfg: any;
+const lfWrites: any[] = [];
+const lfPlaylistCalls: any[] = [];
+const lfStorage: Record<string, any> = {};
+const lfLocal: Record<string, string> = {};
+// 在线补全覆盖:key=artist|title → songId 或 null(失败);默认成功返回 online-<title>
+const lfCompletions: Record<string, string | null> = {};
+
+function lfHttpRoutes() {
+  return async (input: string, init?: any) => {
+    const u = String(input);
+    const q = new URLSearchParams((u.split("?")[1] || ""));
+    const method = q.get("method") || "";
+    // 写接口:捕获 form body 供签名断言
+    if (init?.method === "POST") {
+      lfWrites.push({ url: u, body: init?.body || "" });
+      return { ok: true, status: 200, headers: {}, body: "{}" };
+    }
+    if (method === "user.getTopTracks") {
+      return { ok: true, status: 200, headers: {}, body: JSON.stringify({
+        toptracks: { track: [
+          { name: "Top One", artist: { name: "Artist T" }, playcount: 120, mbid: "t1" },
+          { name: "Top Two", artist: { name: "Artist T" }, playcount: 90 },
+        ] },
+      }) };
+    }
+    if (method === "user.getLovedTracks") {
+      return { ok: true, status: 200, headers: {}, body: JSON.stringify({
+        lovedtracks: { track: [
+          { name: "Loved One", artist: { name: "Artist L" }, playcount: 5 },
+        ] },
+      }) };
+    }
+    if (method === "user.getInfo") {
+      return { ok: true, status: 200, headers: {}, body: JSON.stringify({ user: { name: "testuser" } }) };
+    }
+    return { ok: false, status: 404, headers: {}, body: "not found" };
+  };
+}
+
+describe("lastfm 外置插件(沙箱)", () => {
+  beforeAll(async () => {
+    if (!hasPluginRepo) return;
+    const lfCode = fs.readFileSync(path.join(PLUGINS_ROOT, "lastfm/index.js"), "utf8");
+    const lfJson = JSON.parse(fs.readFileSync(path.join(PLUGINS_ROOT, "lastfm/plugin.json"), "utf8"));
+    lfCfg = { username: "testuser", apiKey: "k-1", apiSecret: "sec-123", sessionKey: "sk-1", submitPlayingNow: true, minDuration: 30, periods: ["overall"], includeLoved: true, includeSimilar: false, perPeriodCount: 25, refreshIntervalDays: 1 };
+    const lf = await loadSandboxedPlugin("lastfm", lfCode, {
+      version: "1.7.34",
+      getConfig: () => lfCfg,
+      permissions: lfJson.permissions || [],
+      http: lfHttpRoutes(),
+      crypto: { md5: (s: string) => createHash("md5").update(String(s)).digest("hex") },
+      storage: {
+        get: async (k: string) => (k in lfStorage ? lfStorage[k] : null),
+        set: async (k: string, v: any) => { lfStorage[k] = v; },
+        delete: async (k: string) => { delete lfStorage[k]; },
+        keys: async () => Object.keys(lfStorage),
+      },
+      songs: {
+        list: async () => [],
+        search: async (q: string) => {
+          for (const [title, id] of Object.entries(lfLocal)) {
+            if (String(q || "").includes(title)) return [{ id, title, artist: "本地艺人", duration: 200 }];
+          }
+          return [];
+        },
+        getById: async () => null,
+      },
+      sources: {
+        complete: async (opts: any) => {
+          const key = `${opts.artist}|${opts.title}`;
+          if (key in lfCompletions) return { songId: lfCompletions[key] };
+          return { songId: `online-${opts.title}` };
+        },
+      },
+      playlists: {
+        upsert: async (id: string, opts: any) => { lfPlaylistCalls.push({ id, opts }); return { ok: true }; },
+        get: async () => null,
+        replaceEntries: async () => ({ ok: true }),
+        updateCover: async () => ({ ok: true }),
+      },
+      log: () => {},
+      comm: { send: () => {}, broadcast: () => {}, on: () => {} },
+    }, lfJson);
+    lfImpl = lf.impl;
+  });
+
+  it("runDailyJob:Top(overall) + Loved 合并去重组装歌单,本地命中优先,其余在线补全", () => skip(async () => {
+    lfPlaylistCalls.length = 0;
+    lfStorage.lastRun = 0;
+    lfLocal["Top One"] = "local-top-1";
+    const r = await lfImpl.runDailyJob({ force: true });
+    expect(String(r)).toContain("Last.fm 推荐");
+    expect(lfPlaylistCalls.length).toBe(1);
+    const call = lfPlaylistCalls[0];
+    expect(call.id).toBe("pl-lf-recommend");
+    expect(call.opts.name).toBe("Last.fm 推荐");
+    const entries = call.opts.entries;
+    // Top One(本地命中) + Top Two(在线补全) + Loved One(在线补全)
+    expect(entries.length).toBe(3);
+    expect(entries[0].songId).toBe("local-top-1");
+    expect(entries.find((e: any) => e.songId === "online-Top Two")).toBeTruthy();
+    expect(entries.find((e: any) => e.songId === "online-Loved One")).toBeTruthy();
+    expect(entries.every((e: any) => e.songId)).toBe(true); // 无外部占位
+    delete lfLocal["Top One"];
+  }));
+
+  it("runDailyJob:全链路失败退外部占位条目(带艺人/专辑)", () => skip(async () => {
+    lfPlaylistCalls.length = 0;
+    lfStorage.lastRun = 0;
+    delete lfLocal["Top One"]; // 防止前序用例残留
+    lfCfg.includeLoved = false; // 只剩 Top(2 首),来源可预期
+    lfCompletions["Artist T|Top One"] = null;
+    lfCompletions["Artist T|Top Two"] = null;
+    const r = await lfImpl.runDailyJob({ force: true });
+    expect(String(r)).toContain("Last.fm 推荐");
+    const entries = lfPlaylistCalls[0].opts.entries;
+    // 本地/在线都失败 → 外部占位,但保留 artist/title
+    expect(entries.every((e: any) => e.externalTitle && !e.songId)).toBe(true);
+    expect(entries[0].externalArtist).toBe("Artist T");
+    lfCfg.includeLoved = true;
+    delete lfCompletions["Artist T|Top One"];
+    delete lfCompletions["Artist T|Top Two"];
+  }));
+
+  it("onScrobble:上报请求带正确 api_sig(MD5 排序签名)与 timestamp", () => skip(async () => {
+    lfWrites.length = 0;
+    // 核心按 (host, event) 调用,沙箱剥离首参 → 测试传一个占位 host
+    await lfImpl.onScrobble({}, { artist: "Queen", title: "Bohemian Rhapsody", album: "A Night at the Opera", duration: 355, playedAt: "2026-08-14T10:00:00Z" });
+    expect(lfWrites.length).toBe(1);
+    const params = new URLSearchParams(lfWrites[0].body);
+    expect(params.get("method")).toBe("track.scrobble");
+    expect(params.get("artist")).toBe("Queen");
+    expect(params.get("track")).toBe("Bohemian Rhapsody");
+    expect(params.get("album")).toBe("A Night at the Opera");
+    expect(Number(params.get("timestamp"))).toBeGreaterThan(0);
+    const sig = params.get("api_sig") || "";
+    expect(sig.length).toBe(32); // MD5 hex
+    // 用同一规范重算:除 format/api_sig 外所有参数按 key 字母序 k+v 拼接 + secret
+    const keys: string[] = [];
+    for (const [k] of params) if (k !== "format" && k !== "api_sig") keys.push(k);
+    keys.sort();
+    const str = keys.map((k) => k + String(params.get(k))).join("") + "sec-123";
+    expect(createHash("md5").update(str).digest("hex")).toBe(sig);
+  }));
+
+  it("onPlay:上报 track.updateNowPlaying(带签名)", () => skip(async () => {
+    lfWrites.length = 0;
+    await lfImpl.onPlay({}, { artist: "Queen", title: "Bohemian Rhapsody", duration: 355 });
+    expect(lfWrites.length).toBe(1);
+    const params = new URLSearchParams(lfWrites[0].body);
+    expect(params.get("method")).toBe("track.updateNowPlaying");
+    expect(params.get("artist")).toBe("Queen");
+    expect(params.get("api_sig")?.length).toBe(32);
+  }));
+
+  it("health():配置齐全且 API 可达 → ok;缺 sessionKey → degraded", () => skip(async () => {
+    const ok = await lfImpl.health();
+    expect(ok.status).toBe("ok");
+    const saved = lfCfg.sessionKey;
+    lfCfg.sessionKey = "";
+    const degraded = await lfImpl.health();
+    expect(degraded.status).toBe("degraded");
+    lfCfg.sessionKey = saved;
+  }));
+});
