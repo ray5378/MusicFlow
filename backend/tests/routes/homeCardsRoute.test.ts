@@ -104,8 +104,10 @@ describe("GET /v1/recommend/home-cards (插件自治首页卡)", () => {
     const { body } = await getHomeCards();
     expect(body.success).toBe(true);
     expect(body.cards.map((c: any) => c.pluginId)).toEqual(["f-roam", "f-daily"]);
-    expect(body.cards[0]).toMatchObject({ pluginId: "f-roam", position: 1, playlistId: "pl-roam", isCombo: true, songCount: 50 });
-    expect(body.cards[1]).toMatchObject({ pluginId: "f-daily", position: 2, isCombo: false, songCount: 45 });
+    // coverArt 必须返回标准逻辑 ref pl-<id>(getCoverArt 才能解析出封面,含每日推荐
+    // 那种 cover_art 存文件名的歌单),而不是原始 cover_art 值。
+    expect(body.cards[0]).toMatchObject({ pluginId: "f-roam", position: 1, playlistId: "pl-roam", isCombo: true, songCount: 50, coverArt: "pl-pl-roam" });
+    expect(body.cards[1]).toMatchObject({ pluginId: "f-daily", position: 2, isCombo: false, songCount: 45, coverArt: "pl-pl-daily" });
   });
 
   it("showOnHome=false / 未配置的插件不出现", async () => {

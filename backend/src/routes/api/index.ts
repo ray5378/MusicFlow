@@ -144,7 +144,10 @@ apiRoutes.get("/v1/recommend/home-cards", (c) => {
       // 歌单信息(前端按 songCount > 30 门槛展示)
       playlistName: pl?.name || "",
       songCount: pl?.song_count || 0,
-      coverArt: pl?.cover_art || null,
+      // 统一返回标准逻辑 ref pl-<id>(getCoverArt 按 pl- 前缀查歌单行解析;
+      // 直接返回 cover_art 原始值(如 pl-pl-daily-today.jpg)会被当成 playlistId
+      // 查表失败 → 首页卡片无封面)。
+      coverArt: pl ? `pl-${p.playlistId}` : null,
     };
   });
   return c.json({ success: true, cards });
