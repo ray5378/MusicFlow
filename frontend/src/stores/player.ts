@@ -265,7 +265,8 @@ export const usePlayerStore = defineStore("player", () => {
   function localPlayQueue(songs: Song[], index: number = 0) {
     localQueue.value = [...songs];
     if (localPlayMode.value === "shuffle" && songs.length > 1) {
-      localIndex.value = Math.floor(Math.random() * songs.length);
+      localIndex.value = Math.floor(Math.random() * songs.length); // 随机起点开播
+      rebuildShuffle({ keepCurrent: true });                       // 其后走洗牌序列(当前曲除外)
     } else {
       localIndex.value = index;
     }
@@ -296,8 +297,20 @@ export const usePlayerStore = defineStore("player", () => {
     let skipGuard = 0;
     while (localQueue.value[localIndex.value] && deadSongs.has(localQueue.value[localIndex.value].id)) {
       if (++skipGuard > localQueue.value.length) break;
-      if (localPlayMode.value === "shuffle") localIndex.value = localRandomIndex();
-      else localIndex.value = (localIndex.value + 1) % localQueue.value.length;
+      if (localPlayMode.value === "shuffle") {
+        // 沿洗牌序列前进跳过(序列生成时已排除 dead,此处兜底异步新标记的)
+        ensureShuffleReady();
+        if (shufflePos + 1 >= shuffleOrder.length) {
+          rebuildShuffle({ keepCurrent: true });
+          if (shuffleOrder.length === 0) break;
+          shufflePos = 0;
+        } else {
+          shufflePos++;
+        }
+        localIndex.value = shuffleOrder[shufflePos];
+      } else {
+        localIndex.value = (localIndex.value + 1) % localQueue.value.length;
+      }
       console.warn(`[player] 跳过已确认不可播的歌曲: ${localQueue.value[localIndex.value]?.title || localQueue.value[localIndex.value]?.id}`);
     }
     const song = localQueue.value[localIndex.value];
@@ -410,10 +423,18 @@ export const usePlayerStore = defineStore("player", () => {
       return !!s && !probeCache.has(s.id) && idx !== localIndex.value;
     };
     if (localPlayMode.value === "shuffle") {
-      // 随机模式:随机挑未探测的歌(渐进预热,每切一首探测一批新的)
-      for (let tries = 0; tries < n && cands.length < PROBE_WINDOW; tries++) {
+      // 随机模式:从洗牌序列取接下来 3 首(精确命中实际播放顺序,不浪费探测)。
+      ensureShuffleReady();
+      let used = 0;
+      for (let i = shufflePos + 1; i < shuffleOrder.length && used < PROBE_WINDOW; i++) {
+        const s = localQueue.value[shuffleOrder[i]];
+        if (s && !probeCache.has(s.id)) { cands.push(s.id); used++; }
+      }
+      // 序列剩余不足 3 首:为下一轮洗牌补随机未探测候选(渐进预热)。
+      for (let tries = 0; tries < n && used < PROBE_WINDOW; tries++) {
         const idx = Math.floor(Math.random() * n);
-        if (unseen(idx) && !cands.includes(localQueue.value[idx].id)) cands.push(localQueue.value[idx].id);
+        const s = localQueue.value[idx];
+        if (s && !probeCache.has(s.id) && !cands.includes(s.id)) { cands.push(s.id); used++; }
       }
     } else {
       for (let i = 1; i <= PROBE_WINDOW; i++) {
@@ -446,22 +467,58 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  // Pick a random index different from the current one (for shuffle mode).
-  function localRandomIndex(): number {
+  // ===== 洗牌序(随机播放 = 一轮内不重复的洗牌序列) =====
+  // 主流播放器标准随机语义:开始播放时把队列打乱成固定顺序(shuffleOrder,存队列
+  // index),「下一首」= 序列中下一首,播完一轮重新洗牌;已知不可播(deadSongs)
+  // 的歌不进入序列。相比「每次切歌即时随机」,洗牌序让预探测窗口精确命中真正
+  // 要播的歌,且不会「刚播完的又马上回来」。队列增删(长度变化)时惰性重建。
+  let shuffleOrder: number[] = [];
+  let shufflePos = -1;
+  let shuffleLen = -1;
+
+  function rebuildShuffle(opts?: { keepCurrent?: boolean }) {
     const n = localQueue.value.length;
-    if (n <= 1) return localIndex.value;
-    let idx = localIndex.value;
-    let guard = 0;
-    do {
-      idx = Math.floor(Math.random() * n);
-    } while ((idx === localIndex.value || deadSongs.has(localQueue.value[idx]?.id)) && guard++ < n * 2);
-    return idx;
+    const idxs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const s = localQueue.value[i];
+      if (!s) continue;
+      if (opts?.keepCurrent && i === localIndex.value) continue; // 重建时排除当前曲(避免立刻重播)
+      if (deadSongs.has(s.id)) continue;                          // 已知不可播不进序列
+      idxs.push(i);
+    }
+    // Fisher-Yates
+    for (let i = idxs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+    }
+    shuffleOrder = idxs;
+    shufflePos = -1; // 下一首从序列头开始
+    shuffleLen = n;
+  }
+
+  // 队列增删后序列失效:长度与生成时不符 → 重建(保留当前曲)。
+  function ensureShuffleReady() {
+    if (shuffleLen !== localQueue.value.length) rebuildShuffle({ keepCurrent: true });
   }
 
   function localNext() {
     if (localQueue.value.length === 0) return;
     if (localPlayMode.value === "one") { startLocalPlayback(); syncLocalIndex(); return; }
-    if (localPlayMode.value === "shuffle") { localIndex.value = localRandomIndex(); startLocalPlayback(); syncLocalIndex(); return; }
+    if (localPlayMode.value === "shuffle") {
+      ensureShuffleReady();
+      if (shufflePos + 1 >= shuffleOrder.length) {
+        // 一轮播完(或序列为空):重新洗牌(保留当前曲),从新序列头开始
+        rebuildShuffle({ keepCurrent: true });
+        if (shuffleOrder.length === 0) return;
+        shufflePos = 0;
+      } else {
+        shufflePos++;
+      }
+      localIndex.value = shuffleOrder[shufflePos];
+      startLocalPlayback();
+      syncLocalIndex();
+      return;
+    }
     if (localIndex.value < localQueue.value.length - 1) localIndex.value++;
     else if (localPlayMode.value === "all") localIndex.value = 0;
     else { localIsPlaying.value = false; syncLocalIndex(); return; }
@@ -472,7 +529,17 @@ export const usePlayerStore = defineStore("player", () => {
   function localPrev() {
     if (localQueue.value.length === 0) return;
     if (localCurrentTime.value > 3) { localSeek(0); return; }
-    if (localPlayMode.value === "shuffle") { localIndex.value = localRandomIndex(); startLocalPlayback(); syncLocalIndex(); return; }
+    if (localPlayMode.value === "shuffle") {
+      ensureShuffleReady();
+      if (shufflePos > 0) {
+        shufflePos--;
+        localIndex.value = shuffleOrder[shufflePos];
+      }
+      // 已在序列头部:不绕回,保持当前曲
+      startLocalPlayback();
+      syncLocalIndex();
+      return;
+    }
     if (localIndex.value > 0) localIndex.value--;
     else if (localPlayMode.value === "all") localIndex.value = localQueue.value.length - 1;
     startLocalPlayback();
@@ -504,6 +571,7 @@ export const usePlayerStore = defineStore("player", () => {
     localQueue.value = []; localIndex.value = -1; localIsPlaying.value = false;
     localCurrentTime.value = 0; localDuration.value = 0;
     localLyrics.value = []; localCurrentLyricLine.value = ""; localCurrentLyricIndex.value = -1;
+    shuffleOrder = []; shufflePos = -1; shuffleLen = -1;
     const pid = localPeerId.value;
     if (pid && useAuthStore().userId) {
       api.delete(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue`).catch(() => {});
@@ -513,6 +581,10 @@ export const usePlayerStore = defineStore("player", () => {
   function localCyclePlayMode() {
     const modes: PlayMode[] = ["order", "one", "all", "shuffle"];
     localPlayMode.value = modes[(modes.indexOf(localPlayMode.value) + 1) % modes.length];
+    if (localPlayMode.value === "shuffle") {
+      // 进入随机播放:生成洗牌序列(保留当前曲,后续走序列)
+      rebuildShuffle({ keepCurrent: true });
+    }
     localStorage.setItem("playMode", localPlayMode.value);
     const pid = localPeerId.value;
     if (pid && useAuthStore().userId) {
