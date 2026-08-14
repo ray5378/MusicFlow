@@ -1,6 +1,6 @@
 # 沙箱限制全景审计 + 插件能力增强完整方案
 
-> 状态：**待实施**（2026-08-14 用户拍板方向，先记录）
+> 状态：**P0 + P1 已实施（v1.7.39，2026-08-14 完成）**；P2/P3 按需排期。
 > 触发背景：go-music-dl 私人歌单同步 / ListenBrainz 推荐生成在生产环境反复「15s 超时」失败（`timeout of 15000ms exceeded`），定位为沙箱单次调用配额与前端 axios 超时双重限制叠加，且部分平台走非国内网络（joox/bilibili/apple/ListenBrainz/MusicBrainz）单请求极慢。
 
 ---
@@ -192,12 +192,14 @@ longRunning: { runDailyJob: 120000 }
 
 ## 六、待办（执行时按此顺序）
 
-1. [ ] 主项目：types.ts + sandbox.ts（方法级预算）→ 单测
-2. [ ] 主项目：jobRunner.ts + routes（异步启动 + 状态端点）→ 集成测试
-3. [ ] 主项目：index.ts 调度走 runner；check-core 校验
-4. [ ] **主项目：沙箱限制错误可辨识化（P0-4：sandboxError 分类 + 路由/前端透传）**
-5. [ ] 主项目：前端轮询改造（Plugins/Home）+ playlistSongs 调用点超时覆盖
-6. [ ] 插件：go-music-dl v1.2.9 / listenbrainz v1.5.5（longRunning + 预算放宽 + minAppVersion）
-7. [ ] 主项目版本 1.7.39 发版（CI/tag/Release；addon 待授权）
-8. [ ] 插件仓发版（check/pack/commit/tag/双端推送）
-9. [ ] P1/P2 按需排期
+1. [x] 主项目：types.ts + sandbox.ts（方法级预算）→ 单测
+2. [x] 主项目：jobRunner.ts + routes（异步启动 + 状态端点）→ 集成测试
+3. [x] 主项目：index.ts 调度走 runner；check-core 校验
+4. [x] **主项目：沙箱限制错误可辨识化（P0-4：sandboxError 分类 + 路由/前端透传）**
+5. [x] 主项目：前端轮询改造（Plugins/Home）+ playlistSongs 调用点超时覆盖
+6. [x] 插件：go-music-dl v1.2.9 / listenbrainz v1.5.5（longRunning + 预算放宽 + minAppVersion）
+7. [x] 主项目版本 1.7.39 发版（commit 707f273 + tag v1.7.39 已推送；GitHub Release 发布与 addon 同步待用户授权）
+8. [x] 插件仓发版（check/pack/commit/tag/双端推送：go-music-dl-v1.2.9、listenbrainz-v1.5.5）
+9. [x] P1：MAX_DEFERS 256 / songs.list 2000 / http 20MB 护栏 / playlistSync 单例陷阱修复（随 v1.7.39 一并落地）
+10. [ ] P2 按需排期（任务节律 manifest 化 / 大 upsert 分块 / WS 进度事件）
+11. [ ] P3 按需排期（市场 UI 徽标 / 失败重试 / worker 进程化沙箱）
