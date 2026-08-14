@@ -90,7 +90,7 @@ export interface PluginManifest {
   minAppVersion?: string;
   /** 方法级长耗时预算(毫秒):声明的方法在沙箱调用时使用该预算而非默认 15s。
    *  用于拉取平台/外网歌单等慢网络操作(如 go-music-dl 的 runDailyJob/playlistSongs)。
-   *  上限 300000(5 分钟),未声明的方法一律维持 INVOKE_TIMEOUT_MS 看门狗。 */
+   *  上限 600000(10 分钟),未声明的方法一律维持 INVOKE_TIMEOUT_MS 看门狗。 */
   longRunning?: Record<string, number>;
   /** Declared permissions (see host.KNOWN_PERMISSIONS). Unknown perms are
    *  rejected at manifest-validation time. */

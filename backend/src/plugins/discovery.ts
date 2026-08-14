@@ -382,8 +382,8 @@ export function validateManifest(manifest: any): string | null {  if (!manifest 
       return "manifest.longRunning 必须是 { 方法名: 毫秒 } 对象";
     }
     for (const [m, v] of Object.entries(manifest.longRunning)) {
-      if (typeof v !== "number" || !Number.isFinite(v) || v < 1000 || v > 300000) {
-        return `manifest.longRunning[${m}] 必须是 1000~300000 之间的毫秒数`;
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 1000 || v > 600000) {
+        return `manifest.longRunning[${m}] 必须是 1000~600000 之间的毫秒数`;
       }
     }
   }

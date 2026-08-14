@@ -21,7 +21,7 @@ import type { PluginManifest } from "./types.js";
 const MEMORY_LIMIT = 256 * 1024 * 1024; // 单插件内存上限 256MB
 const STACK_LIMIT = 1024 * 1024;        // 单插件栈上限 1MB
 const INVOKE_TIMEOUT_MS = 15000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
-const JOB_TIMEOUT_CAP_MS = 300000;      // longRunning 声明预算上限(5 分钟,低于 Node 默认 requestTimeout)
+const JOB_TIMEOUT_CAP_MS = 600000;      // longRunning 声明预算上限(10 分钟);任务经 jobRunner 异步执行、HTTP 不阻塞、前端轮询,长预算无副作用
 const MAX_DEFERS = 256;                 // 单次调用内未结算 deferred 上限(防御性;支持并行 host 调用)
 const LONG_WAIT_GRACE_MS = 60000;       // longRunning 方法在途 await 的额外宽限(等网络合法,CPU 空转仍按预算杀)
 
