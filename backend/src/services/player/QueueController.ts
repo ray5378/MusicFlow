@@ -32,6 +32,11 @@ interface QueueData {
   playMode: PlayMode;
   isActive: boolean;
   ended: boolean;  // 对照 MA mark_ended
+  /** 洗牌序(一轮内不重复的队列 index 序列)与位置;随队列重建,不持久化。
+   *  与 web 端播放器(v1.7.43 洗牌序)语义对齐:随机播放 = 固定序列一轮不重复。 */
+  shuffleOrder?: number[];
+  shufflePos?: number;
+  shuffleLen?: number;
 }
 
 interface PlayerControllerLike {
@@ -225,7 +230,7 @@ export class QueueController extends EventEmitter {
     const n = q.items.length;
     if (n === 0) return -1;
     if (q.playMode === "one") return q.currentIndex;
-    if (q.playMode === "shuffle") return this.randomIndex(q);
+    if (q.playMode === "shuffle") return this.shuffleNextIndex(q);
     if (q.playMode === "all") {
       if (q.currentIndex + 1 < n) return q.currentIndex + 1;
       return 0;
@@ -235,12 +240,41 @@ export class QueueController extends EventEmitter {
     return -1;
   }
 
-  private randomIndex(q: QueueData): number {
+  /** 重建洗牌序列:队列 index 打乱(一轮内不重复);可排除当前曲(避免立刻重播)。 */
+  private rebuildShuffle(q: QueueData, opts?: { keepCurrent?: boolean }): void {
     const n = q.items.length;
-    if (n <= 1) return q.currentIndex;
-    let idx = q.currentIndex;
-    while (idx === q.currentIndex) idx = Math.floor(Math.random() * n);
-    return idx;
+    const idxs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (opts?.keepCurrent && i === q.currentIndex) continue;
+      idxs.push(i);
+    }
+    // Fisher-Yates
+    for (let i = idxs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+    }
+    q.shuffleOrder = idxs;
+    q.shufflePos = -1; // 下一首从序列头开始
+    q.shuffleLen = n;
+  }
+
+  /** 队列增删(长度变化)后序列失效 → 惰性重建(保留当前曲)。 */
+  private ensureShuffleReady(q: QueueData): void {
+    if (q.shuffleLen !== q.items.length) this.rebuildShuffle(q, { keepCurrent: true });
+  }
+
+  /** 洗牌序下一首:沿序列前进,播完一轮自动重洗;无可播返回 -1。 */
+  private shuffleNextIndex(q: QueueData): number {
+    this.ensureShuffleReady(q);
+    const order = q.shuffleOrder || [];
+    if ((q.shufflePos ?? -2) + 1 >= order.length) {
+      this.rebuildShuffle(q, { keepCurrent: true });
+      if (!q.shuffleOrder || q.shuffleOrder.length === 0) return -1;
+      q.shufflePos = 0;
+      return q.shuffleOrder[0];
+    }
+    q.shufflePos = (q.shufflePos ?? -1) + 1;
+    return q.shuffleOrder![q.shufflePos!];
   }
 
   private async playCurrent(deviceId: string, baseUrl: string): Promise<void> {
@@ -335,6 +369,7 @@ export class QueueController extends EventEmitter {
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.items = items;
     q.currentIndex = Math.max(-1, Math.min(items.length - 1, startIndex));
+    if (q.playMode === "shuffle" && items.length > 1) this.rebuildShuffle(q, { keepCurrent: true });
     q.isActive = true;
     q.ended = false;
     this.persist(playerId);
@@ -402,7 +437,15 @@ export class QueueController extends EventEmitter {
     try {
       q.isActive = true; q.ended = false;
       if (q.playMode === "one") { await this.playCurrent(playerId, baseUrl); }
-      else if (q.playMode === "shuffle") { q.currentIndex = this.randomIndex(q); await this.playCurrent(playerId, baseUrl); }
+      else if (q.playMode === "shuffle") {
+        this.ensureShuffleReady(q);
+        if ((q.shufflePos ?? 0) > 0) {
+          q.shufflePos!--;
+          q.currentIndex = q.shuffleOrder![q.shufflePos!];
+        }
+        // 已在序列头部:不绕回,保持当前曲
+        await this.playCurrent(playerId, baseUrl);
+      }
       else if (q.currentIndex > 0) { q.currentIndex--; await this.playCurrent(playerId, baseUrl); }
       else if (q.playMode === "all") { q.currentIndex = q.items.length - 1; await this.playCurrent(playerId, baseUrl); }
       this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId));
@@ -418,6 +461,7 @@ export class QueueController extends EventEmitter {
       this.players.get(playerId)?.stop().catch(() => {});
     }
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;
+    q.shuffleOrder = []; q.shufflePos = -1; q.shuffleLen = 0;
     // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(组场景清各成员)。
     const group = getGroupManager().get(playerId);
     if (group) {
