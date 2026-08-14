@@ -13,6 +13,16 @@ export function dailyRecommendApi(): any {
   return getEnabledByCapability("dailyPlaylist")[0]?.impl;
 }
 
+/** 本地推荐能力(localPlaylist):生成本地口味歌单。 */
+export function localRecommendApi(): any {
+  return getEnabledByCapability("localPlaylist")[0]?.impl;
+}
+
+/** 组合歌单能力(comboPlaylist):合并多个推荐歌单(如 今日漫游)。 */
+export function comboPlaylistApi(): any {
+  return getEnabledByCapability("comboPlaylist")[0]?.impl;
+}
+
 /** 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐),由每日推荐插件配置 homeCount 控制。 */
 export function dailyRecommendHomeCount(): number {
   const api = dailyRecommendApi();

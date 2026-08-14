@@ -251,8 +251,9 @@ async function runDailyJobs() {
   // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
   // Every enabled `recommender` plugin builds its own playlist. Core iterates by
-  // capability — it doesn't know that「每日推荐」/「本地推荐」exist, let alone import them.
-  // dailyPlaylist = 每日推荐插件(在线发现歌单); localPlaylist = 本地推荐引擎(本地口味歌单)。
+  // capability — it doesn't know that「每日推荐」/「本地推荐」/「今日漫游」exist, let alone import them.
+  // dailyPlaylist = 每日推荐插件(在线发现歌单); localPlaylist = 本地推荐引擎(本地口味歌单);
+  // comboPlaylist = 组合歌单(今日漫游,合并前两者)——必须在前两类之后跑,所以单独放最后。
   for (const cap of ["dailyPlaylist", "localPlaylist"] as const) {
     for (const { manifest, impl } of getEnabledByCapability(cap)) {
       if (typeof impl?.runDailyJob !== "function") continue;
@@ -262,6 +263,16 @@ async function runDailyJobs() {
       } catch (e: any) {
         console.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error:`, e.message || e);
       }
+    }
+  }
+  // 组合歌单(comboPlaylist)在源歌单生成之后再合并。
+  for (const { manifest, impl } of getEnabledByCapability("comboPlaylist")) {
+    if (typeof impl?.runDailyJob !== "function") continue;
+    try {
+      const summary = await impl.runDailyJob();
+      if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+    } catch (e: any) {
+      console.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error:`, e.message || e);
     }
   }
   // Refresh every enabled source plugin that supports daily-recommend playlists

@@ -456,6 +456,17 @@
             <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
           </el-form-item>
 
+          <!-- 推荐类插件(每日推荐/本地推荐/今日漫游):手动重新触发随机生成。
+               dailyPlaylist → 每日推荐(+重组今日漫游);localPlaylist → 本地推荐(+今日漫游);
+               comboPlaylist → 仅重组今日漫游。能力驱动,不写死插件名。 -->
+          <el-form-item v-if="isRecommenderPlugin(editing)">
+            <el-button type="warning" plain :loading="refreshingPlugin" @click="refreshPlugin">
+              立即刷新
+            </el-button>
+            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+            <span class="field-hint">重新触发随机生成逻辑(同一天也可强制换一批内容),生成后自动重组「今日漫游」</span>
+          </el-form-item>
+
           <el-alert
             type="info"
             :closable="false"
@@ -595,6 +606,46 @@ function isSourcePlugin(plugin: any) {
   return parseManifest(plugin).type === "source";
 }
 
+/** 推荐类插件(每日推荐 / 本地推荐 / 今日漫游):支持手动刷新。 */
+function isRecommenderPlugin(plugin: any): boolean {
+  const caps = parseManifest(plugin).capabilities || [];
+  return ["dailyPlaylist", "localPlaylist", "comboPlaylist"].some((c) => caps.includes(c));
+}
+
+// 手动刷新:按能力调 /v1/recommend/refresh 重新触发随机生成。
+const refreshingPlugin = ref(false);
+const pluginRefreshResult = ref<{ success: boolean; message: string } | null>(null);
+async function refreshPlugin() {
+  if (!editing.value || refreshingPlugin.value) return;
+  refreshingPlugin.value = true;
+  pluginRefreshResult.value = null;
+  const caps = parseManifest(editing.value).capabilities || [];
+  // 能力 → 刷新目标:刷每日/本地后自动重组今日漫游。
+  let targets: string[] = [];
+  if (caps.includes("comboPlaylist")) targets = ["roam"];
+  else if (caps.includes("dailyPlaylist")) targets = ["daily", "roam"];
+  else if (caps.includes("localPlaylist")) targets = ["local", "roam"];
+  try {
+    const res = await api.post("/rest/api/v1/recommend/refresh", { targets });
+    if (res.data?.success) {
+      const parts: string[] = [];
+      for (const [k, r] of Object.entries<any>(res.data.results || {})) {
+        if (!r) continue;
+        if (r.skipped) parts.push(`${k}: 跳过`);
+        else if (r.total !== undefined) parts.push(`${k}: ${r.total} 首`);
+        else parts.push(`${k}: 完成`);
+      }
+      pluginRefreshResult.value = { success: true, message: parts.length ? parts.join(" · ") : "刷新完成" };
+    } else {
+      pluginRefreshResult.value = { success: false, message: res.data?.error || "刷新失败" };
+    }
+  } catch (e: any) {
+    pluginRefreshResult.value = { success: false, message: e?.response?.data?.error || e.message || "刷新失败" };
+  } finally {
+    refreshingPlugin.value = false;
+  }
+}
+
 /** Manifest display name, falling back to the stored row name (= plugin id). */
 function displayName(plugin: any): string {
   return parseManifest(plugin).name || plugin?.name || "";
@@ -643,6 +694,8 @@ const CAP_LABELS: Record<string, string> = {
   playlistImport: "分享链接导入",
   playlistFile: "歌单文件导入",
   dailyPlaylist: "每日歌单生成",
+  localPlaylist: "本地推荐生成",
+  comboPlaylist: "组合歌单生成",
   playlistSync: "歌单定时同步",
   autoMatch: "条目自动匹配",
   lyricProvider: "歌词提供方",
@@ -677,6 +730,7 @@ const CAP_DOCS: Record<string, string> = {
   playlistFile: "认领上传的歌单文件并解析",
   dailyPlaylist: "每天定时生成「每日推荐」歌单",
   localPlaylist: "基于播放历史与收藏口味生成本地推荐",
+  comboPlaylist: "合并其他推荐歌单生成组合歌单(如 今日漫游)",
   playlistSync: "定期重新拉取已导入的远程歌单",
   autoMatch: "把歌单条目自动匹配到曲库或在线源",
   lyricProvider: "提供在线歌词的源",

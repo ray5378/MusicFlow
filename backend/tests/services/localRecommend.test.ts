@@ -89,4 +89,22 @@ describe("generateLocalDailyPlaylist (独立「本地推荐」歌单)", () => {
     const r2 = await generateLocalDailyPlaylist(new Date("2026-08-15T12:00:00"));
     expect(r2!.skipped).toBe(true);
   });
+
+  it("force=true 跳过幂等,同一天可强制重建", async () => {
+    const r3 = await generateLocalDailyPlaylist(new Date("2026-08-15T12:00:00"), { force: true });
+    expect(r3!.skipped).toBe(false);
+    expect(r3!.total).toBeGreaterThan(0);
+  });
+
+  it("不同 seedSalt 同一天产出不同内容(手动刷新真正变化)", async () => {
+    // 用固定日期 + 不同盐,分别生成,比较歌曲集合
+    const a = await generateLocalDailyPlaylist(new Date("2026-08-16T12:00:00"), { force: true, seedSalt: 1 });
+    const aIds = (sqlite.prepare("SELECT song_id FROM playlist_songs WHERE playlist_id = ?").all(LOCAL_FIXED_PLAYLIST_ID) as any[]).map(r => r.song_id);
+    const b = await generateLocalDailyPlaylist(new Date("2026-08-16T12:00:00"), { force: true, seedSalt: 999 });
+    const bIds = (sqlite.prepare("SELECT song_id FROM playlist_songs WHERE playlist_id = ?").all(LOCAL_FIXED_PLAYLIST_ID) as any[]).map(r => r.song_id);
+    expect(a!.skipped).toBe(false);
+    expect(b!.skipped).toBe(false);
+    // 全库 60 首、取 50 首,两个不同种子序列基本必然不同
+    expect(aIds.join(",")).not.toBe(bIds.join(","));
+  });
 });

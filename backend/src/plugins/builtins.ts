@@ -31,6 +31,7 @@ import { nativeImporterManifest, nativeImporter } from "../services/plugin/impor
 // ---- recommender ----
 import { dailyRecommendManifest, dailyRecommendPlugin } from "../services/plugin/dailyRecommend.js";
 import { localRecommendManifest, localRecommendPlugin } from "../services/plugin/localRecommend.js";
+import { dailyRoamManifest, dailyRoamPlugin } from "../services/plugin/dailyRoam.js";
 // ---- sync ----
 import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/playlistSync.js";
 // ---- lyrics / cover providers ----
@@ -59,6 +60,8 @@ export const BUILTIN_IMPORTER_PLUGINS: BuiltinPlugin[] = [
 export const BUILTIN_RECOMMENDER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dailyRecommendManifest, impl: dailyRecommendPlugin },
   { manifest: localRecommendManifest, impl: localRecommendPlugin },
+  // 「今日漫游」组合歌单:合并前两者输出,按 comboPlaylist 能力在调度器最后跑。
+  { manifest: dailyRoamManifest, impl: dailyRoamPlugin },
 ];
 
 export const BUILTIN_SYNC_PLUGINS: BuiltinPlugin[] = [

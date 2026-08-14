@@ -1,49 +1,38 @@
 <template>
   <div class="home-page">
-    <!-- ===== 顶部：每日推荐 + 本地推荐 + 并排随机歌单 ===== -->
+    <!-- ===== 顶部：今日漫游 + 并排随机歌单 ===== -->
     <section class="section">
       <div class="section-title">
-        <span>每日推荐</span>
-        <span class="section-sub">为你精选的歌单</span>
+        <span>今日漫游</span>
+        <span class="section-sub">每日推荐 × 本地推荐组合歌单</span>
         <span class="more" @click="go('/playlists')">查看全部歌单 ›</span>
       </div>
 
       <div class="top-row">
-        <!-- 每日推荐（固定第一张，在线发现：榜单 + 推荐池） -->
+        <!-- 今日漫游（固定第一张，每日推荐 + 本地推荐合并去重） -->
         <div
           class="card featured fnos-card-sheen"
-          v-if="featured"
-          @contextmenu="openContextMenu($event, playlistActions(featured), featured.name, '歌单')"
-          v-longpress="() => openActionSheet(playlistActions(featured), featured.name, '歌单')"
+          v-if="featuredRoam"
+          @contextmenu="openContextMenu($event, playlistActions(featuredRoam), featuredRoam.name, '歌单')"
+          v-longpress="() => openActionSheet(playlistActions(featuredRoam), featuredRoam.name, '歌单')"
         >
-          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featured.id)">
-            <img v-if="featured.coverArt" :src="cover(featured.coverArt)" class="card-cover" loading="lazy" decoding="async" />
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featuredRoam.id)">
+            <img v-if="featuredRoam.coverArt" :src="cover(featuredRoam.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="48"  /></div>
-            <span class="badge">每日推荐</span>
-            <CoverPlay size="lg" :label="`播放 ${featured.name}`" :action="() => playPl(featured)" />
+            <span class="badge">今日漫游</span>
+            <CoverPlay size="lg" :label="`播放 ${featuredRoam.name}`" :action="() => playPl(featuredRoam)" />
+            <button
+              class="refresh-btn"
+              title="手动刷新(重新随机生成每日推荐/本地推荐并重组今日漫游)"
+              :disabled="refreshing"
+              @click.stop="refreshRoam"
+            >
+              <MfIcon name="RefreshCw" :size="16" :class="{ spinning: refreshing }" />
+            </button>
           </div>
-          <div class="card-body" @click="go(`/playlists/${featured.id}`)">
-            <div class="card-title">{{ featured.name }}</div>
-            <div class="card-sub">{{ featured.songCount ? featured.songCount + ' 首' : '歌单' }}</div>
-          </div>
-        </div>
-
-        <!-- 本地推荐（固定第二张，本地口味/参考歌单） -->
-        <div
-          class="card fnos-card-sheen"
-          v-if="featuredLocal"
-          @contextmenu="openContextMenu($event, playlistActions(featuredLocal), featuredLocal.name, '歌单')"
-          v-longpress="() => openActionSheet(playlistActions(featuredLocal), featuredLocal.name, '歌单')"
-        >
-          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + featuredLocal.id)">
-            <img v-if="featuredLocal.coverArt" :src="cover(featuredLocal.coverArt)" class="card-cover" loading="lazy" decoding="async" />
-            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
-            <span class="badge badge-local">本地推荐</span>
-            <CoverPlay size="md" :label="`播放 ${featuredLocal.name}`" :action="() => playPl(featuredLocal)" />
-          </div>
-          <div class="card-body" @click="go(`/playlists/${featuredLocal.id}`)">
-            <div class="card-title">{{ featuredLocal.name }}</div>
-            <div class="card-sub">{{ featuredLocal.songCount ? featuredLocal.songCount + ' 首' : '歌单' }}</div>
+          <div class="card-body" @click="go(`/playlists/${featuredRoam.id}`)">
+            <div class="card-title">{{ featuredRoam.name }}</div>
+            <div class="card-sub">{{ featuredRoam.songCount ? featuredRoam.songCount + ' 首' : '歌单' }}</div>
           </div>
         </div>
 
@@ -138,7 +127,7 @@ const recommendChannels = ref<any[]>([]);
 const recommendProviderId = ref("");
 const recommendError = ref(false);
 const importingId = ref("");
-// 首页顶部展示张数(含每日推荐+本地推荐两张固定),由每日推荐插件配置 homeCount 控制(默认 8)。
+// 首页顶部展示张数(含今日漫游固定卡),由每日推荐插件配置 homeCount 控制(默认 8)。
 const homeCount = ref(8);
 
 function cover(id: string) {
@@ -157,27 +146,38 @@ async function playPl(pl: any) {
   else ElMessage.warning("该歌单暂无可播放歌曲");
 }
 
-// 每日推荐：daily-recommend 插件生成（在线发现：榜单 + 推荐池），固定第一张；
+// 今日漫游：daily-roam 插件生成（每日推荐 + 本地推荐合并去重），固定第一张；
 // 先决条件：必须匹配到本地库歌曲数 > 30 首才展示（不足 30 首不显示）。
-const featured = computed(() =>
-  playlists.value.find((p) => p.name === "每日推荐" && (p.songCount || 0) > 30) || null
+const featuredRoam = computed(() =>
+  playlists.value.find((p) => p.name === "今日漫游" && (p.songCount || 0) > 30) || null
 );
-// 本地推荐：local-recommend 插件生成（本地口味/参考歌单），固定第二张（同样 >30 首原则）。
-const featuredLocal = computed(() =>
-  playlists.value.find((p) => p.name === "本地推荐" && (p.songCount || 0) > 30) || null
-);
-// 并排随机：从全部歌单里随机抽（排除两张固定推荐；只抽音乐 ≥30 首的歌单），
-// 与两张固定推荐合并成 homeCount 张等大卡片（默认 8，桌面 4 列 × 2 行）。
+// 并排随机：从全部歌单里随机抽（排除今日漫游；只抽音乐 ≥30 首的歌单），
+// 与今日漫游合并成 homeCount 张等大卡片（默认 8，桌面 4 列 × 2 行）。
 const sidePlaylists = computed(() => {
   const fixedIds = new Set<string>();
-  if (featured.value) fixedIds.add(featured.value.id);
-  if (featuredLocal.value) fixedIds.add(featuredLocal.value.id);
+  if (featuredRoam.value) fixedIds.add(featuredRoam.value.id);
   const pool = playlists.value.filter(
     (p) => !fixedIds.has(p.id) && (p.songCount || 0) >= 30
   );
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, Math.max(0, homeCount.value - fixedIds.size));
 });
+
+// 手动刷新：重新触发每日推荐 + 本地推荐随机生成，再重组今日漫游。
+const refreshing = ref(false);
+async function refreshRoam() {
+  if (refreshing.value) return;
+  refreshing.value = true;
+  try {
+    await api.post("/rest/api/v1/recommend/refresh", {});
+    ElMessage.success("已重新生成今日漫游");
+    await Promise.all([loadPlaylists(), loadHomeConfig()]);
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "刷新失败");
+  } finally {
+    refreshing.value = false;
+  }
+}
 
 // 各平台精选：直接渲染 recommend 能力插件的输出（每个 channel = 一个平台分区）。
 // 每平台歌单数已在插件内部按 homeCount 截断，前端不再写死 slice 数量。
@@ -226,9 +226,9 @@ function placeholderCount(featuredItem: any, list: any[], want: number) {
   return Array.from({ length: need }, (_, i) => i + 1);
 }
 
-// 首页顶部占位：按 homeCount 补齐（含两张固定推荐：每日推荐 + 本地推荐）
+// 首页顶部占位：按 homeCount 补齐（含今日漫游固定卡）
 function placeholderHomeCount() {
-  const fixed = (featured.value ? 1 : 0) + (featuredLocal.value ? 1 : 0);
+  const fixed = featuredRoam.value ? 1 : 0;
   const real = fixed + sidePlaylists.value.length;
   const need = Math.max(0, homeCount.value - real);
   return Array.from({ length: need }, (_, i) => i + 1);
@@ -297,7 +297,7 @@ onMounted(async () => {
   .more:hover { color: var(--fnos-red); }
 }
 
-/* 顶部：每日推荐 + 本地推荐固定，其余随机，全部等大（桌面 4 列 × 2 行 = 8 张） */
+/* 顶部：今日漫游固定第一张，其余随机，全部等大（桌面 4 列 × 2 行 = 8 张） */
 .top-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -341,10 +341,19 @@ onMounted(async () => {
   padding: 3px 10px; border-radius: 999px;
   box-shadow: 0 4px 12px rgba(246, 44, 85, 0.5);
 }
-.badge-local {
-  background: var(--fnos-blue);
-  box-shadow: 0 4px 12px rgba(27, 115, 251, 0.5);
+/* 今日漫游卡刷新按钮 */
+.refresh-btn {
+  position: absolute; top: 10px; right: 10px;
+  width: 32px; height: 32px; border-radius: 50%;
+  border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; background: rgba(0, 0, 0, 0.45);
+  transition: background 0.18s ease, transform 0.18s ease;
+  &:hover { background: rgba(0, 0, 0, 0.65); }
+  &:disabled { cursor: default; opacity: 0.7; }
 }
+.refresh-btn .spinning { animation: mf-spin 0.9s linear infinite; }
+@keyframes mf-spin { to { transform: rotate(360deg); } }
 .card-cover-wrap { cursor: pointer; }
 .card-body { padding: 10px 12px 12px; cursor: pointer; }
 .card-body:hover .card-title { color: var(--fnos-red); }

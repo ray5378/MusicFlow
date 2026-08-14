@@ -10,7 +10,7 @@ import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
-import { dailyRecommendApi, dailyRecommendTag, dailyRecommendHomeCount, playlistSyncApi } from "../../services/pluginAccess.js";
+import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
@@ -51,8 +51,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
 
-// 每日推荐 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
+// 每日推荐 / 本地推荐 / 今日漫游 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
 const dailyApi = () => dailyRecommendApi();
+const localApi = () => localRecommendApi();
+const comboApi = () => comboPlaylistApi();
 const syncApi = () => playlistSyncApi();
 
 export const apiRoutes = new Hono();
@@ -971,16 +973,51 @@ apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
 // Manually trigger today's daily-recommend generation.
 // Builds a SINGLE combined "每日推荐" playlist from remote charts + user pool
 // + local history mix. Idempotent: if today's playlist already exists, returns
-// skipped=true.
+// skipped=true. With { force: true } it bypasses idempotency and re-randomizes.
 apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
   if (!dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
   try {
-    const result = await dailyApi().generateDailyPlaylist();
+    const body = await c.req.json().catch(() => ({}));
+    const opts = { force: body?.force === true, seedSalt: body?.seedSalt };
+    const result = await dailyApi().generateDailyPlaylist(new Date(), opts);
     return c.json({ success: true, result }, 200);
   } catch (e: any) {
     const error = e.message || "每日推荐生成失败";
     console.error("[DAILY-RECOMMEND] trigger error:", error);
     return c.json({ success: false, error }, 500);
+  }
+});
+
+// ==================== 推荐手动刷新(每日/本地/今日漫游) ====================
+// 一键重新触发随机生成:每日推荐(force+随机盐) → 本地推荐(force+随机盐) →
+// 今日漫游(combo,合并前两者)。body 可选 { targets: ["daily"|"local"|"roam"] },
+// 缺省全刷。返回各自结果。
+apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const targets = Array.isArray(body?.targets) ? body.targets : ["daily", "local", "roam"];
+  const seedSalt = Math.floor(Math.random() * 1_000_000);
+  const results: Record<string, any> = {};
+  try {
+    if (targets.includes("daily")) {
+      if (!dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
+      results.daily = await dailyApi().generateDailyPlaylist(new Date(), { force: true, seedSalt });
+    }
+    if (targets.includes("local")) {
+      if (!localApi() || typeof localApi().generateLocalDailyPlaylist !== "function") {
+        return c.json({ error: "本地推荐插件未启用" }, 503);
+      }
+      results.local = await localApi().generateLocalDailyPlaylist(new Date(), { force: true, seedSalt });
+    }
+    if (targets.includes("roam")) {
+      if (!comboApi() || typeof comboApi().generateComboPlaylist !== "function") {
+        return c.json({ error: "今日漫游插件未启用" }, 503);
+      }
+      results.roam = await comboApi().generateComboPlaylist({ force: true });
+    }
+    return c.json({ success: true, seedSalt, results }, 200);
+  } catch (e: any) {
+    console.error("[RECOMMEND] refresh error:", e.message || e);
+    return c.json({ success: false, error: e.message || "刷新失败" }, 500);
   }
 });
 

@@ -61,6 +61,18 @@ function dayOfYear(d: Date): number {
   return Math.floor((d.getTime() - start.getTime()) / 86400000);
 }
 
+// ===== 手动刷新用的随机盐 =====
+// 生成逻辑是「日期种子确定性随机」:同一天默认重跑结果一致(幂等)。
+// 手动刷新(force)时,路由会给一个随机 seedSalt,混入所有 PRNG 种子,
+// 让同一天也能刷出不同的内容。默认 0 = 保持原有确定性行为。
+let activeSeedSalt = 0;
+function seedSalt(): number {
+  return activeSeedSalt;
+}
+function dateSeed(d: Date, mult: number, add = 0): number {
+  return dayOfYear(d) * mult + add + seedSalt();
+}
+
 // Tiny seeded PRNG (mulberry32) so the same day produces the same shuffle,
 // but two different days produce visibly different orders.
 function mulberry32(seed: number): () => number {
@@ -211,7 +223,7 @@ function pickCandidateSongs(profile: TasteProfile, date: Date): string[] {
 
   // Deterministic shuffle with date seed: rank weights the probability, but
   // the seed makes the same day reproducible.
-  const rng = mulberry32(dayOfYear(date) * 2654435761);
+  const rng = mulberry32(dateSeed(date, 2654435761));
   for (const c of candidates) {
     (c as any).key = Math.pow(rng(), 1 / Math.max(0.1, c.rank));
   }
@@ -227,7 +239,7 @@ function pickRandomSample(date: Date): string[] {
   if (!total.n) return [];
   // Fetch all song ids and shuffle deterministically by date seed.
   const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").all() as { id: string }[];
-  const rng = mulberry32(dayOfYear(date) * 40503 + 1);
+  const rng = mulberry32(dateSeed(date, 40503, 1));
   // Fisher-Yates shuffle with the seeded RNG.
   for (let i = rows.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
@@ -252,7 +264,7 @@ function pickRandomSample(date: Date): string[] {
 export function pickRandomLibrarySongs(date: Date, limit: number): string[] {
   const meta = sqlite.prepare("SELECT COUNT(*) AS n, MAX(rowid) AS maxR FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number; maxR: number | null };
   if (!meta.n || !meta.maxR) return [];
-  const rng = mulberry32(dayOfYear(date) * 774631 + 7);
+  const rng = mulberry32(dateSeed(date, 774631, 7));
   const maxRowid = meta.maxR;
 
   // Small library: just return everything shuffled (cheap enough).
@@ -329,7 +341,7 @@ function pickFromPlaylistPool(date: Date, playlistIds: string[], limit: number, 
   }
   const arr = Array.from(all);
   if (!arr.length) return [];
-  const rng = mulberry32(dayOfYear(date) * 774631 + 11);
+  const rng = mulberry32(dateSeed(date, 774631, 11));
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
@@ -378,7 +390,10 @@ export function pickLocalRecommendSongs(date: Date): { songIds: string[]; source
 export const LOCAL_FIXED_PLAYLIST_ID = "pl-daily-local";
 const NAME_LOCAL = "本地推荐";
 
-export async function generateLocalDailyPlaylist(date = new Date()): Promise<LocalRecommendResult | null> {
+export async function generateLocalDailyPlaylist(
+  date = new Date(),
+  opts?: { force?: boolean; seedSalt?: number }
+): Promise<LocalRecommendResult | null> {
   const dateStr = todayStr(date);
   const ownerId = pickSystemOwnerId();
   const now = new Date().toISOString();
@@ -398,10 +413,23 @@ export async function generateLocalDailyPlaylist(date = new Date()): Promise<Loc
   }
   // 当天幂等:comment 含今天日期 = 今天已生成过(与 daily-recommend 同机制;
   // 不能用 created_at 前缀——行是固定的,created_at 始终是首次创建那天)
-  if ((row.comment || "").includes(dateStr)) {
+  if (!opts?.force && (row.comment || "").includes(dateStr)) {
     return { date: dateStr, playlistId: LOCAL_FIXED_PLAYLIST_ID, name: NAME_LOCAL, total: 0, sourceUsers: 0, fallback: false, skipped: true };
   }
 
+  // 手动刷新:设置随机盐,结束后恢复(保证默认行为仍是确定性)。
+  const prevSalt = activeSeedSalt;
+  if (opts?.force) activeSeedSalt = Number.isFinite(opts.seedSalt) ? opts.seedSalt! : Math.floor(Math.random() * 1_000_000);
+  try {
+    return await doGenerateLocal(date, dateStr, row);
+  } finally {
+    activeSeedSalt = prevSalt;
+  }
+}
+
+async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<LocalRecommendResult | null> {
+  const ownerId = pickSystemOwnerId();
+  const now = new Date().toISOString();
   const { songIds, sourceUsers, fallback } = pickLocalRecommendSongs(date);
   if (!songIds.length) {
     return { date: dateStr, playlistId: LOCAL_FIXED_PLAYLIST_ID, name: NAME_LOCAL, total: 0, sourceUsers, fallback, skipped: true };
@@ -495,5 +523,8 @@ export const localRecommendPlugin: LocalRecommendPlugin = {
     const r = await runLocalDailyRecommendJob();
     if (!r || r.skipped) return null;
     return `${r.date}: ${r.total} 首本地推荐 (${r.sourceUsers} 用户, ${r.fallback ? "全库随机兜底" : "口味推荐"})`;
+  },
+  generateLocalDailyPlaylist(date?: Date, opts?: { force?: boolean; seedSalt?: number }) {
+    return generateLocalDailyPlaylist(date, opts);
   },
 };

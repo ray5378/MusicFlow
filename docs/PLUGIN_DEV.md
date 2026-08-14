@@ -107,8 +107,12 @@ globalThis.__mfPlugin = {
 ### 4.3 `recommender` 类型（每日推荐）
 | capability | impl 方法 |
 |------|------|
-| `dailyPlaylist` | `runDailyJob(): Promise<string \| null>` |
-| `localPlaylist` | `runDailyJob(): Promise<string \| null>` |
+| `dailyPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateDailyPlaylist(date?, opts?{force, seedSalt})` 供手动刷新） |
+| `localPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateLocalDailyPlaylist(date?, opts?)` 供手动刷新） |
+| `comboPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateComboPlaylist(opts?{force})` 供手动刷新；合并其他推荐歌单，如「今日漫游」） |
+
+> 调度顺序：`dailyPlaylist` → `localPlaylist` → `comboPlaylist`（组合歌单依赖前两者的产物，必须最后跑）。
+> 手动刷新：`POST /v1/recommend/refresh` 按 `targets`（daily/local/roam）以 `force + 随机 seedSalt` 重新触发，`seedSalt` 混入日期种子，让同一天也能刷出不同内容。
 
 ### 4.4 `sync` 类型（歌单同步）
 | capability | impl 方法 |

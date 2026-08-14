@@ -107,6 +107,22 @@ function dayOfYear(d: Date): number {
   return Math.floor((d.getTime() - start.getTime()) / 86400000);
 }
 
+// ===== 手动刷新用的随机盐 =====
+// 生成逻辑是「日期种子确定性随机」:同一天默认重跑结果一致(幂等)。
+// 手动刷新(force)时,路由会给一个随机 seedSalt,混入所有 PRNG 种子,
+// 让同一天也能刷出不同的内容。默认 0 = 保持原有确定性行为。
+let activeSeedSalt = 0;
+
+/** 当前生效的随机盐(供各种子计算混入)。 */
+function seedSalt(): number {
+  return activeSeedSalt;
+}
+
+/** 日期种子 + 随机盐:同一天(同盐)确定性,不同盐结果不同。 */
+function dateSeed(d: Date, mult: number, add = 0): number {
+  return dayOfYear(d) * mult + add + seedSalt();
+}
+
 // mulberry32 PRNG — deterministic per (seed, index) so the same day always
 // picks the same 50 songs from a given pool member.
 function mulberry32(seed: number): () => number {
@@ -289,7 +305,7 @@ function pickRandomLibraryAlbumCoverRef(date: Date): string | null {
     FROM songs WHERE path IS NOT NULL AND cover_art IS NOT NULL AND cover_art <> ''
   `).get() as { n: number; maxR: number | null };
   if (!meta.n || !meta.maxR) return null;
-  const rng = mulberry32(dayOfYear(date) * 91331 + 3);
+  const rng = mulberry32(dateSeed(date, 91331, 3));
   for (let attempt = 0; attempt < 6; attempt++) {
     const rowids = new Set<number>();
     for (let i = 0; i < 3; i++) rowids.add(1 + Math.floor(rng() * meta.maxR));
@@ -358,7 +374,7 @@ export function isInRecommendPool(sourceType: string, sourceId: string): boolean
 //     few hundred candidate ids into memory.
 // Uses a date-seeded PRNG so the same day picks the same set (deterministic).
 function pickSongsFromPoolMember(entry: RecommendPoolEntry, date: Date, limit: number): string[] {
-  const rng = mulberry32(dayOfYear(date) * 2654435761 + entry.id * 40503);
+  const rng = mulberry32(dateSeed(date, 2654435761, entry.id * 40503));
   let candidateIds: string[] = [];
   if (entry.source_type === "playlist") {
     candidateIds = samplePlayablePlaylistSongIds(entry.source_id, rng, limit);
@@ -452,7 +468,7 @@ function collectPoolSongs(date: Date): { songIds: string[]; members: number } {
   if (all.size === 0) return { songIds: [], members: pool.length };
   // Date-seeded shuffle of the merged pool, then take POOL_FINAL_SIZE.
   const arr = Array.from(all);
-  const rng = mulberry32(dayOfYear(date) * 2654435761 + 99991);
+  const rng = mulberry32(dateSeed(date, 2654435761, 99991));
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
@@ -462,12 +478,16 @@ function collectPoolSongs(date: Date): { songIds: string[]; members: number } {
 
 // ==================== Main generation ====================
 
-export async function generateDailyPlaylist(date = new Date()): Promise<DailyRecommendResult> {
+export async function generateDailyPlaylist(
+  date = new Date(),
+  opts?: { force?: boolean; seedSalt?: number }
+): Promise<DailyRecommendResult> {
   const dateStr = todayStr(date);
   ensureDailyPlaylists();
 
   const todayRow = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
-  if (isGeneratedToday(todayRow, dateStr)) {
+  // force=true 时跳过当天幂等,重新触发随机生成;seedSalt 混入随机种子让内容不同。
+  if (!opts?.force && isGeneratedToday(todayRow, dateStr)) {
     return {
       date: dateStr,
       playlistId: FIXED_TODAY_ID,
@@ -481,6 +501,17 @@ export async function generateDailyPlaylist(date = new Date()): Promise<DailyRec
     };
   }
 
+  // 手动刷新:设置随机盐,结束后恢复(保证默认行为仍是确定性)。
+  const prevSalt = activeSeedSalt;
+  if (opts?.force) activeSeedSalt = Number.isFinite(opts.seedSalt) ? opts.seedSalt! : Math.floor(Math.random() * 1_000_000);
+  try {
+    return await doGenerate(date, dateStr, todayRow);
+  } finally {
+    activeSeedSalt = prevSalt;
+  }
+}
+
+async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<DailyRecommendResult> {
   const candidates = loadCandidates();
   const ownerId = pickSystemOwnerId();
 
@@ -685,7 +716,7 @@ export const dailyRecommendManifest: PluginManifest = {
       help: "每日推荐从哪些平台榜单抓取候选歌曲(每项一个榜单 URL)。已预填常用榜单,可手动替换 / 增删;至少保留 1 个。",
       default: DEFAULT_CANDIDATES,
     },
-    { key: "homeCount", label: "首页随机歌单数", type: "number", help: "首页顶部「每日推荐 + 本地推荐 + 随机歌单」共展示的歌单张数(含两张固定推荐,1~24,默认 8)" },
+    { key: "homeCount", label: "首页随机歌单数", type: "number", help: "首页顶部「今日漫游 + 随机歌单」共展示的歌单张数(含今日漫游固定卡,1~24,默认 8)" },
   ],
   // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「每日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
   dailyTag: "每日推荐",
@@ -701,7 +732,7 @@ export const dailyRecommendManifest: PluginManifest = {
 - **职责边界**：本地曲库口味推荐由 \`local-recommend\` 插件独立生成「本地推荐」歌单，本歌单不做本地随机补充，两歌单内容不重复；
 - 远程榜单全部抓取失败且推荐池为空时保留旧歌单，不报错（等网络恢复后自动重建）；
 - 配置项 \`推荐榜单\`：在插件设置页可直接编辑「每日推荐」抓取哪些平台榜单（已预填网易云/QQ 常用榜单，可手动替换、增删，至少保留 1 个）；修改后次日生成或手动触发即生效；
-- 配置项 \`homeCount\`：首页顶部「每日推荐 + 本地推荐 + 随机歌单」共展示张数（含两张固定推荐，1~24，默认 8）；
+- 配置项 \`homeCount\`：首页顶部「今日漫游 + 随机歌单」共展示张数（含今日漫游固定卡，1~24，默认 8）；
 - 停用本插件即不再更新「每日推荐」歌单。`,
 };
 
@@ -716,7 +747,9 @@ export const dailyRecommendPlugin: RecommenderPlugin = {
   loadCandidates(): DailyCandidate[] { return loadCandidates(); },
   saveCandidates(candidates: DailyCandidate[]): void { saveCandidates(candidates); },
   pickDailyCandidate(date?: Date) { return pickDailyCandidate(date); },
-  generateDailyPlaylist(date?: Date) { return generateDailyPlaylist(date); },
+  generateDailyPlaylist(date?: Date, opts?: { force?: boolean; seedSalt?: number }) {
+    return generateDailyPlaylist(date, opts);
+  },
   isCandidateBlocked(c: { platform?: string; url?: string; name?: string }): boolean { return isCandidateBlocked(c); },
   listRecommendPool(): RecommendPoolEntry[] { return listRecommendPool(); },
   addToRecommendPool(sourceType: string, sourceId: string, sourceName: string, userId: string): boolean {

@@ -38,6 +38,7 @@ export type PluginCapability =
   // ---- recommender plugins ----
   | "dailyPlaylist" // build/refresh a scheduled recommendation playlist
   | "localPlaylist" // contribute local-library recommendations
+  | "comboPlaylist" // merge other recommenders' playlists into a combined one
   // ---- sync plugins ----
   | "playlistSync" // re-fetch an imported playlist and rebuild its entries
   | "autoMatch" // match unmatched playlist entries against an online source
@@ -156,7 +157,8 @@ export interface RecommenderPlugin {
   loadCandidates?(): any[];
   saveCandidates?(candidates: any[]): void;
   pickDailyCandidate?(date?: Date): any;
-  generateDailyPlaylist?(date?: Date): Promise<any>;
+  /** force=true 跳过当天幂等强制重建;seedSalt 混入随机种子,让同一天重跑内容不同。 */
+  generateDailyPlaylist?(date?: Date, opts?: { force?: boolean; seedSalt?: number }): Promise<any>;
   isCandidateBlocked?(c: any): boolean;
   listRecommendPool?(): any[];
   addToRecommendPool?(sourceType: string, sourceId: string, sourceName: string, userId: string): boolean;
@@ -164,6 +166,17 @@ export interface RecommenderPlugin {
   isInRecommendPool?(sourceType: string, sourceId: string): boolean;
   /** 首页顶部「每日推荐 + 本地推荐 + 随机歌单」展示张数(由插件配置 homeCount 控制)。 */
   getHomeCount?(): number;
+}
+
+/** Implemented by `recommender` plugins that declare "comboPlaylist".
+ *  Merges the playlists produced by other recommenders into one combined
+ *  playlist (e.g. 今日漫游 = 每日推荐 + 本地推荐, deduped). */
+export interface ComboPlaylistPlugin {
+  manifest: PluginManifest;
+  /** Rebuild the combined playlist from its source playlists. */
+  runDailyJob(): Promise<string | null>;
+  /** force=true 跳过当天幂等强制重建(供手动刷新)。 */
+  generateComboPlaylist?(opts?: { force?: boolean }): Promise<any>;
 }
 
 /** Implemented by `sync` plugins that declare "playlistSync". Called by the
@@ -189,6 +202,8 @@ export interface LocalRecommendPlugin {
   pickSongs(date?: Date): Promise<{ songIds: string[]; sourceUsers: number; fallback: boolean }>;
   /** 独立生成「每日推荐」歌单(本地口味)。返回一行摘要,或 null(未生成)。 */
   runDailyJob?(): Promise<string | null>;
+  /** force=true 跳过当天幂等强制重建;seedSalt 混入随机种子(供手动刷新)。 */
+  generateLocalDailyPlaylist?(date?: Date, opts?: { force?: boolean; seedSalt?: number }): Promise<any>;
 }
 
 /** Implemented by `lyrics` plugins that declare "lyricProvider".
