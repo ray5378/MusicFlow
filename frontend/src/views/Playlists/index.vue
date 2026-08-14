@@ -148,6 +148,7 @@ import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin, Heart } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
+import { parseManifest, parseConfig } from "@/utils/plugin";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 
@@ -249,7 +250,6 @@ const importPlaceholder = computed(() =>
 async function loadImportPlatforms() {
   try {
     const res = await api.get("/rest/api/v1/plugins");
-    const parseManifest = (v: any) => { try { return typeof v === "string" ? JSON.parse(v || "{}") : v || {}; } catch { return {}; } };
     const plats = new Set<string>();
     for (const p of (res.data || []) as any[]) {
       if (!p.enabled) continue;
@@ -270,11 +270,9 @@ async function detectDailySource() {
   if (dailySourceId.value) return;
   try {
     const res = await api.get("/rest/api/v1/plugins");
-    const parseCfg = (v: any) => { try { return typeof v === "string" ? JSON.parse(v || "{}") : v || {}; } catch { return {}; } };
-    const parseManifest = (v: any) => { try { return typeof v === "string" ? JSON.parse(v || "{}") : v || {}; } catch { return {}; } };
     const src = (res.data || []).find((p: any) => {
-      const cfg = parseCfg(p.config);
-      const manifest = parseManifest(p.manifest);
+      const cfg = parseConfig(p);
+      const manifest = parseManifest(p);
       return p.enabled && cfg?.baseUrl && manifest?.type === "source";
     });
     if (src) dailySourceId.value = src.id;

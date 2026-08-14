@@ -17,6 +17,7 @@ import { getPluginConfig } from "../../plugins/registry.js";
 import type { ComboPlaylistPlugin, PluginManifest } from "../../plugins/types.js";
 import { FIXED_TODAY_ID } from "./dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "./localRecommend.js";
+import { todayStr, systemOwnerId } from "./shared.js";
 
 export const DAILY_ROAM_PLUGIN_ID = "daily-roam";
 export const ROAM_PLAYLIST_ID = "pl-daily-roam";
@@ -33,18 +34,6 @@ export interface RoamResult {
   total: number;
   sources: string[];
   skipped: boolean;
-}
-
-function todayStr(d = new Date()): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function pickSystemOwnerId(): string {
-  const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as any;
-  return admin?.id || "";
 }
 
 /** 读配置的源歌单 id 列表(playlist-multi);非法/为空时回落默认两张固定推荐。 */
@@ -68,7 +57,7 @@ function ensureRoamPlaylist(): any {
     sqlite.prepare(`
       INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
       VALUES (?, ?, ?, 1, ?, NULL, NULL, 'mixed', NULL, 0, ?, ?)
-    `).run(ROAM_PLAYLIST_ID, NAME_ROAM, pickSystemOwnerId(), ROAM_TAG, now, now);
+    `).run(ROAM_PLAYLIST_ID, NAME_ROAM, systemOwnerId(), ROAM_TAG, now, now);
     row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any;
   } else if (row.name !== NAME_ROAM) {
     sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")

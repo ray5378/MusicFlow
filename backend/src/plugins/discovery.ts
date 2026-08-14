@@ -29,6 +29,7 @@ import { registerPlugin, getPlugin, getPluginConfig, getEnabledByCapability } fr
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
 import { matchPlaylistInBackground } from "../services/plugin/playlistSync.js";
+import { systemOwnerId } from "../services/plugin/shared.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { createComm } from "./comm.js";
@@ -607,11 +608,6 @@ export async function discoverExternalPlugins(
 // 这些实现只在沙箱宿主侧调用(由 sandbox.ts 的 hostAsync 转发),插件只拿到受控的
 // host.playlists.* / host.sources.* 表面,无法直接触达 DB,权限在调用点由沙箱门控。
 
-function pluginSystemOwnerId(): string {
-  const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as any;
-  return admin?.id || "";
-}
-
 function refreshPluginPlaylistCounts(playlistId: string): void {
   const entries = sqlite.prepare("SELECT * FROM playlist_songs WHERE playlist_id = ?").all(playlistId) as any[];
   let duration = 0, count = 0;
@@ -649,7 +645,7 @@ async function upsertPluginPlaylist(playlistId: string, opts: any): Promise<any>
   if (!existing) {
     sqlite.prepare(`INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
       VALUES (?, ?, ?, 1, ?, NULL, ?, 'listenbrainz', NULL, 0, ?, ?)`)
-      .run(playlistId, name, pluginSystemOwnerId(), desc, `lb://${playlistId}`, now, now);
+      .run(playlistId, name, systemOwnerId(), desc, `lb://${playlistId}`, now, now);
   } else {
     sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, updated_at = ? WHERE id = ?")
       .run(name, desc, now, playlistId);
@@ -742,7 +738,7 @@ async function completeFromSources(opts: any): Promise<{ songId: string | null }
         cover: cand.cover || "",
         extra: cand.extra || null,
       };
-      const imp = await importOnlineSongs(manifest.id, [normalized], { userId: pluginSystemOwnerId() });
+      const imp = await importOnlineSongs(manifest.id, [normalized], { userId: systemOwnerId() });
       if (imp?.songs && imp.songs[0]?.id) return { songId: imp.songs[0].id };
     } catch { /* 单源失败跳过,试下一个 */ }
   }

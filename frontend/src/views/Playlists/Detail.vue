@@ -97,6 +97,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
+import { parseManifest, parseConfig } from "@/utils/plugin";
 import { Trash2 } from "lucide-vue-next";
 
 const route = useRoute();
@@ -289,13 +290,9 @@ async function loadOnlineSource() {
     // /v1/plugins 返回的 manifest / config 是 JSON 字符串,须解析后再判断。
     // (此前直接 p.manifest?.type === "source" → 字符串取属性恒 undefined,
     //  导致永远找不到在线源 → 播放外部条目提示「未配置在线源」)
-    const parse = (s: any): any => {
-      if (typeof s !== "string") return s || {};
-      try { return JSON.parse(s); } catch { return {}; }
-    };
     const source = (res.data || []).find((p: any) => {
-      const cfg = parse(p.config);
-      const mf = parse(p.manifest);
+      const cfg = parseConfig(p);
+      const mf = parseManifest(p);
       return p.enabled && cfg.baseUrl && mf.type === "source";
     });
     if (source) onlineSourceId.value = source.id;

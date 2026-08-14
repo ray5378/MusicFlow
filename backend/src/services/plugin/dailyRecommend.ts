@@ -35,6 +35,7 @@ import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { copyCoverToFile, clearPlaylistCoverCache } from "../playlistCover.js";
 import { getPluginConfig } from "../../plugins/registry.js";
+import { todayStr, systemOwnerId } from "./shared.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 
 export interface DailyCandidate {
@@ -94,13 +95,6 @@ const POOL_MEMBER_CANDIDATE_SIZE = 200;
 // Candidates from all pool members are merged, deduped, then this many are
 // picked with a date-seeded shuffle.
 const POOL_FINAL_SIZE = 50;
-
-function todayStr(d = new Date()): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
 
 function dayOfYear(d: Date): number {
   const start = new Date(d.getFullYear(), 0, 0);
@@ -274,7 +268,7 @@ function isGeneratedToday(playlist: any, dateStr: string): boolean {
 function ensureDailyPlaylists(): void {
   const todayFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
   if (!todayFixed) {
-    const ownerId = pickSystemOwnerId();
+    const ownerId = systemOwnerId();
     const now = new Date().toISOString();
     const legacy = findPlaylistByName(NAME_TODAY, DAILY_TAG);
     if (legacy) {
@@ -313,11 +307,6 @@ function pickOwnPlaylistCoverRef(playlistId: string): string | null {
   `).get(playlistId) as { songCover: string | null; albumCover: string | null } | undefined;
   if (!row) return null;
   return (row.songCover && row.songCover.trim()) ? row.songCover : (row.albumCover || null);
-}
-
-function pickSystemOwnerId(): string {
-  const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as any;
-  return admin?.id || "";
 }
 
 // ==================== User recommend pool ====================
@@ -508,7 +497,7 @@ export async function generateDailyPlaylist(
 
 async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<DailyRecommendResult> {
   const candidates = loadCandidates();
-  const ownerId = pickSystemOwnerId();
+  const ownerId = systemOwnerId();
 
   // Step 1: fetch ALL remote playlists FIRST (before any DB mutation).
   // Collect tracks from every successful fetch; failures are logged but don't

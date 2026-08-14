@@ -70,11 +70,6 @@ function scoreCandidate(cand: OnlineSongResult, t: MatchTarget): number {
   return score;
 }
 
-function normalize(s: string): string {
-  return s.trim().toLowerCase();
-}
-void normalize;
-
 /**
  * Link a previously-unmatched playlist entry to an online song and refresh that
  * playlist's display counts.

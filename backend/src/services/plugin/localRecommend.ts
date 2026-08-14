@@ -10,6 +10,7 @@
 // 抽取算法:date-seeded 确定性随机(同一天相同顺序,不同天不同),保证每天内容
 // 稳定可复现;无口味数据且未选歌单池时全库随机兜底。
 import { sqlite } from "../../db/index.js";
+import { todayStr, systemOwnerId } from "./shared.js";
 import type { LocalRecommendPlugin, PluginManifest } from "../../plugins/types.js";
 
 export const HISTORY_WINDOW_DAYS = 30;
@@ -49,13 +50,6 @@ export interface LocalRecommendResult {
   skipped: boolean;
 }
 
-function todayStr(d = new Date()): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 function dayOfYear(d: Date): number {
   const start = new Date(d.getFullYear(), 0, 0);
   return Math.floor((d.getTime() - start.getTime()) / 86400000);
@@ -83,11 +77,6 @@ function mulberry32(seed: number): () => number {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-function pickSystemOwnerId(): string {
-  const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as any;
-  return admin?.id || "";
 }
 
 // Aggregate the taste profile across ALL users (daily mixes are global in this
@@ -395,7 +384,7 @@ export async function generateLocalDailyPlaylist(
   opts?: { force?: boolean; seedSalt?: number }
 ): Promise<LocalRecommendResult | null> {
   const dateStr = todayStr(date);
-  const ownerId = pickSystemOwnerId();
+  const ownerId = systemOwnerId();
   const now = new Date().toISOString();
 
   let row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(LOCAL_FIXED_PLAYLIST_ID) as any;
@@ -428,7 +417,7 @@ export async function generateLocalDailyPlaylist(
 }
 
 async function doGenerateLocal(date: Date, dateStr: string, row: any): Promise<LocalRecommendResult | null> {
-  const ownerId = pickSystemOwnerId();
+  const ownerId = systemOwnerId();
   const now = new Date().toISOString();
   const { songIds, sourceUsers, fallback } = pickLocalRecommendSongs(date);
   if (!songIds.length) {

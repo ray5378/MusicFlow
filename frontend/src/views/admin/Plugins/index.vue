@@ -491,6 +491,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
+import { parseManifest, parseConfig } from "@/utils/plugin";
 
 const activeTab = ref<"installed" | "market" | "media">("installed");
 
@@ -549,20 +550,6 @@ const savingMedia = ref(false);
 
 // ---- health ----
 const healthMap = ref<Record<string, any>>({});
-
-function parseManifest(plugin: any): any {
-  const m = plugin?.manifest;
-  if (!m) return {};
-  return typeof m === "string" ? JSON.parse(m || "{}") : m;
-}
-
-function parseConfig(plugin: any) {
-  try {
-    return typeof plugin.config === "string" ? JSON.parse(plugin.config || "{}") : plugin.config || {};
-  } catch {
-    return {};
-  }
-}
 
 /** Config fields rendered in the dialog — driven by the plugin manifest. */
 const configFields = computed<any[]>(() => parseManifest(editing.value).configSchema || []);
