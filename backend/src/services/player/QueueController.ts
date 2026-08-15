@@ -240,21 +240,27 @@ export class QueueController extends EventEmitter {
     return -1;
   }
 
-  /** 重建洗牌序列:队列 index 打乱(一轮内不重复);可排除当前曲(避免立刻重播)。 */
+  /** 重建洗牌序列:队列 index 打乱(一轮内不重复)。
+   *  keepCurrent:当前曲保留在序列头部——随机起播/跳播/队列增删后"上一首"
+   *  仍能沿序列回退(旧实现把当前曲排除出序列且 pos=-1,导致随机起播曲成为
+   *  "序列外"孤曲,自动切歌后 prev 要求 pos>0 而切不回去)。 */
   private rebuildShuffle(q: QueueData, opts?: { keepCurrent?: boolean }): void {
     const n = q.items.length;
     const idxs: number[] = [];
     for (let i = 0; i < n; i++) {
-      if (opts?.keepCurrent && i === q.currentIndex) continue;
-      idxs.push(i);
+      if (opts?.keepCurrent && i === q.currentIndex) {
+        idxs.unshift(i); // 当前曲固定在序列头
+      } else {
+        idxs.push(i);
+      }
     }
-    // Fisher-Yates
-    for (let i = idxs.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+    // Fisher-Yates(不动头部当前曲)
+    for (let i = 1; i < idxs.length; i++) {
+      const j = 1 + Math.floor(Math.random() * i);
       [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
     }
     q.shuffleOrder = idxs;
-    q.shufflePos = -1; // 下一首从序列头开始
+    q.shufflePos = opts?.keepCurrent && q.currentIndex >= 0 ? 0 : -1; // 当前曲在新序列头
     q.shuffleLen = n;
   }
 
@@ -270,8 +276,10 @@ export class QueueController extends EventEmitter {
     if ((q.shufflePos ?? -2) + 1 >= order.length) {
       this.rebuildShuffle(q, { keepCurrent: true });
       if (!q.shuffleOrder || q.shuffleOrder.length === 0) return -1;
+      // 重建后当前曲在序列头(pos=0):下一首取第 2 位(避开当前曲);仅 1 首则重播当前。
       q.shufflePos = 0;
-      return q.shuffleOrder[0];
+      if (q.shuffleOrder.length > 1) q.shufflePos++;
+      return q.shuffleOrder![q.shufflePos!];
     }
     q.shufflePos = (q.shufflePos ?? -1) + 1;
     return q.shuffleOrder![q.shufflePos!];
@@ -402,6 +410,9 @@ export class QueueController extends EventEmitter {
       q.currentIndex = index;
       q.isActive = true;
       q.ended = false;
+      // 随机模式下跳播后重建序列:当前曲固定到新序列头,避免 next/prev 沿用旧
+      // shufflePos 错位(旧 pos 指向跳播前的位置,切歌会跳到无关的歌)。
+      if (q.playMode === "shuffle") this.rebuildShuffle(q, { keepCurrent: true });
       await this.playCurrent(playerId, baseUrl);
       this.persist(playerId);
       this.emit("queue_changed", playerId, this.snapshot(playerId));

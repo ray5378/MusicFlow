@@ -259,6 +259,9 @@ export const usePlayerStore = defineStore("player", () => {
   function localPlaySong(song: Song) {
     const idx = localQueue.value.findIndex(s => s.id === song.id);
     if (idx >= 0) { localIndex.value = idx; } else { localQueue.value.push(song); localIndex.value = localQueue.value.length - 1; }
+    // 随机模式下跳播后重建序列:当前曲固定到新序列头,避免 next/prev 沿用旧
+    // shufflePos 错位(旧 pos 指向跳播前位置,切歌会跳到无关的歌)。
+    if (localPlayMode.value === "shuffle") rebuildShuffle({ keepCurrent: true });
     startLocalPlayback();
   }
 
@@ -488,17 +491,19 @@ export const usePlayerStore = defineStore("player", () => {
     for (let i = 0; i < n; i++) {
       const s = localQueue.value[i];
       if (!s) continue;
-      if (opts?.keepCurrent && i === localIndex.value) continue; // 重建时排除当前曲(避免立刻重播)
+      if (opts?.keepCurrent && i === localIndex.value) { idxs.unshift(i); continue; } // 当前曲固定序列头
       if (deadSongs.has(s.id)) continue;                          // 已知不可播不进序列
       idxs.push(i);
     }
-    // Fisher-Yates
-    for (let i = idxs.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+    // Fisher-Yates(不动头部当前曲)
+    for (let i = 1; i < idxs.length; i++) {
+      const j = 1 + Math.floor(Math.random() * i);
       [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
     }
     shuffleOrder = idxs;
-    shufflePos = -1; // 下一首从序列头开始
+    // keepCurrent:当前曲在新序列头(pos=0),"上一首"可沿序列回退;
+    // 否则下一首从序列头开始。
+    shufflePos = opts?.keepCurrent && localIndex.value >= 0 ? 0 : -1;
     shuffleLen = n;
   }
 
@@ -513,10 +518,11 @@ export const usePlayerStore = defineStore("player", () => {
     if (localPlayMode.value === "shuffle") {
       ensureShuffleReady();
       if (shufflePos + 1 >= shuffleOrder.length) {
-        // 一轮播完(或序列为空):重新洗牌(保留当前曲),从新序列头开始
+        // 一轮播完(或序列为空):重新洗牌(当前曲入新序列头),从其后继续
         rebuildShuffle({ keepCurrent: true });
         if (shuffleOrder.length === 0) return;
         shufflePos = 0;
+        if (shuffleOrder.length > 1) shufflePos++; // 第 2 位,避开当前曲(不立刻重播)
       } else {
         shufflePos++;
       }

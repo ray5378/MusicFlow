@@ -123,4 +123,51 @@ describe("QueueController", () => {
     qc.clear("d1");
     expect(listener).toHaveBeenCalledWith("d1", { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false });
   });
+
+  describe("shuffle 上一首稳定性(v1.7.52 修复:当前曲固定在序列头,pos 可回退)", () => {
+    beforeEach(() => {
+      qc.setQueue("d1", [
+        { songId: "s1", title: "t1", mime: "audio/mpeg" },
+        { songId: "s2", title: "t2", mime: "audio/mpeg" },
+        { songId: "s3", title: "t3", mime: "audio/mpeg" },
+      ], 0, "http://base");
+      qc.setPlayMode("d1", "shuffle");
+    });
+
+    it("next 后 prev 回到起播曲", async () => {
+      // setQueue(startIndex=0) → 起播曲 s0 固定在序列头(order[0]=0,pos=0)
+      await qc.next("d1", "http://base");
+      const mid = qc.snapshot("d1").currentIndex;
+      expect(mid).not.toBe(0); // 下一首不是起播曲
+      await qc.prev("d1", "http://base");
+      expect(qc.snapshot("d1").currentIndex).toBe(0); // 回到起播曲
+    });
+
+    it("跳播(jumpTo)后 next 再 prev 回到跳播曲", async () => {
+      await qc.jumpTo("d1", 2, "http://base");
+      await qc.next("d1", "http://base");
+      expect(qc.snapshot("d1").currentIndex).not.toBe(2);
+      await qc.prev("d1", "http://base");
+      expect(qc.snapshot("d1").currentIndex).toBe(2);
+    });
+
+    it("prev 在序列头部不绕回(保持当前曲)", async () => {
+      await qc.prev("d1", "http://base"); // pos=0
+      expect(qc.snapshot("d1").currentIndex).toBe(0);
+    });
+
+    it("一轮播完自动重洗后 next 不立刻重播当前曲", async () => {
+      // 2 首歌:序列 [0,1],pos=0;next→1;再 next 一轮播完→重建→当前曲入头→取第 2 位
+      qc.setQueue("d1", [
+        { songId: "s1", title: "t1", mime: "audio/mpeg" },
+        { songId: "s2", title: "t2", mime: "audio/mpeg" },
+      ], 0, "http://base");
+      await qc.next("d1", "http://base");
+      const second = qc.snapshot("d1").currentIndex;
+      await qc.next("d1", "http://base"); // 一轮播完 → 重建
+      const third = qc.snapshot("d1").currentIndex;
+      expect(second).not.toBe(0);
+      expect(third).not.toBe(second); // 新轮次:换成另一首(不立刻重播当前曲)
+    });
+  });
 });
