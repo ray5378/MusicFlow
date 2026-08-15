@@ -70,20 +70,48 @@ export function findRecommendPlaylist(id: string, providerId?: string): any | nu
   return all.find((p) => allRecommendPrefixes().some((pref) => p.sourceUrl === `${pref}${id}`)) || null;
 }
 
-/** Update a local playlist's entry set to the given online songs (full replace). */
+/** Update a local playlist's entry set to the given online songs *incrementally*.
+ *  Already-present entries (keyed by song id) are reused — only their position is
+ *  corrected when it drifted — removed entries are deleted, and genuinely new
+ *  ones are inserted. Avoids clearing and re-inserting the whole playlist. */
 export function replacePlaylistSongs(playlistId: string, songIds: { id: string; title: string }[]) {
-  db.delete(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).run();
-  songIds.forEach((s, i) => {
-    db.insert(playlistSongs).values({
-      playlistId,
-      songId: s.id,
-      position: i,
-      playable: 1,
-      externalTitle: s.title,
-      externalSongId: s.id,
-    }).run();
+  const existingRows = db.select().from(playlistSongs)
+    .where(eq(playlistSongs.playlistId, playlistId)).all();
+  const existMap = new Map<string, any>();
+  for (const e of existingRows) {
+    const key = e.externalSongId || e.songId;
+    if (key) existMap.set(key, e);
+  }
+  const seen = new Set<string>();
+
+  db.transaction(() => {
+    songIds.forEach((s, i) => {
+      seen.add(s.id);
+      const prev = existMap.get(s.id);
+      if (prev) {
+        if (prev.position !== i) {
+          db.update(playlistSongs).set({ position: i }).where(eq(playlistSongs.id, prev.id)).run();
+        }
+        return;
+      }
+      db.insert(playlistSongs).values({
+        playlistId,
+        songId: s.id,
+        position: i,
+        playable: 1,
+        externalTitle: s.title,
+        externalSongId: s.id,
+      }).run();
+    });
+    // Remove entries no longer present in the remote playlist.
+    for (const e of existingRows) {
+      const key = e.externalSongId || e.songId;
+      if (key && !seen.has(key)) {
+        db.delete(playlistSongs).where(eq(playlistSongs.id, e.id)).run();
+      }
+    }
+    refreshPlaylistCounts(playlistId);
   });
-  refreshPlaylistCounts(playlistId);
   clearPlaylistCoverCache(playlistId);
 }
 

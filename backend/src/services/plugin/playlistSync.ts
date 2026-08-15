@@ -1,7 +1,7 @@
 // Playlist sync service: re-fetch remote playlist, rebuild entries with library matching
 import { db } from "../../db/index.js";
 import { songs, playlists, playlistSongs, wishes } from "../../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { importPlaylistFromUrl, findUrlImporter, ImportedPlaylist, ImportedTrack } from "./playlistImport.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
@@ -61,66 +61,137 @@ export interface RebuildOptions {
   notes?: string; // note for wish entries
 }
 
-// Rebuild a playlist's entries from a remote playlist (clear old, then insert all)
-// Returns { total, matched, unmatched, wishAdded }
+// Stable per-track key for diffing: prefer the platform external id; fall back to
+// a normalized title|artist key when it is empty (some importers omit it).
+function trackKey(externalId?: string | null, title?: string | null, artist?: string | null): string {
+  if (externalId) return `e:${externalId}`;
+  return `k:${normalizeKey(title || "", artist || "")}`;
+}
+
+// Add a pending wish only if an identical one isn't already pending. Returns the
+// new wish id, or null when skipped (dedupe).
+function addWishIfMissing(t: ImportedTrack, opts: RebuildOptions): string | null {
+  const existingWish = db.select().from(wishes)
+    .where(and(eq(wishes.songTitle, t.title), eq(wishes.artist, t.artist || "")))
+    .all().find(w => w.status === "pending");
+  if (existingWish) return null;
+  const wid = uuidv4();
+  db.insert(wishes).values({
+    id: wid, userId: opts.userId || "", songTitle: t.title, artist: t.artist || "",
+    album: t.album || "", status: "pending",
+    notes: opts.notes || "来自歌单导入",
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  }).run();
+  return wid;
+}
+
+// Rebuild a playlist's entries from a remote playlist *incrementally*:
+//   - already-matched (playable) entries are REUSED — no library re-match, no rewrite
+//   - only newly-added / removed / position-changed / newly-unmatched rows are written
+//   - the library index (a full songs scan, the expensive part) is built lazily,
+//     only when a track actually needs matching
+// This turns a re-sync of an unchanged playlist into a pure read (zero writes) and
+// keeps large-playlist refreshes cheap. All writes are wrapped in one transaction
+// so a failure rolls back cleanly (no "entries cleared but song_count stale").
 export async function rebuildPlaylistEntries(
   playlistId: string,
   imported: ImportedPlaylist,
   opts: RebuildOptions = {}
 ): Promise<SyncResult> {
-  // Clear old entries, then rebuild in platform order. 清空+插入+计数包在事务里:
-  // 中途失败整体回滚,避免「条目被清空但 song_count 留旧值」导致首页卡片有数量、
-  // 点开却是空歌单。
-  const index = buildLibraryIndex();
-  const { matched, unmatched, wishAdded } = db.transaction(() => {
-    db.delete(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).run();
-    let matched = 0, unmatched = 0, wishAdded = 0;
+  // Existing entries keyed by a stable per-track key.
+  const existingRows = db.select().from(playlistSongs)
+    .where(eq(playlistSongs.playlistId, playlistId)).all();
+  const existMap = new Map<string, any>();
+  for (const e of existingRows) {
+    existMap.set(trackKey(e.externalSongId, e.externalTitle, e.externalArtist), e);
+  }
 
-    imported.tracks.forEach((t, i) => {
-      const match = matchTrack(t, index);
-      if (match) {
-        db.insert(playlistSongs).values({
-          playlistId, songId: match.id, position: i, playable: 1,
-          externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
-          externalAlbum: t.album, externalDuration: t.duration,
-        }).run();
-        matched++;
-      } else {
-        db.insert(playlistSongs).values({
-          playlistId, songId: null, position: i, playable: 0,
-          externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
-          externalAlbum: t.album, externalDuration: t.duration,
-          unavailableReason: "曲库中未找到",
-        }).run();
-        unmatched++;
-        // Auto-add to wish list (dedupe: skip if an identical pending wish already exists)
-        if (opts.autoWish !== false) {
-          const existingWish = db.select().from(wishes)
-            .where(and(eq(wishes.songTitle, t.title), eq(wishes.artist, t.artist || "")))
-            .all().find(w => w.status === "pending");
-          if (!existingWish) {
-            const wid = uuidv4();
-            db.insert(wishes).values({
-              id: wid, userId: opts.userId || "", songTitle: t.title, artist: t.artist || "",
-              album: t.album || "", status: "pending",
-              notes: opts.notes || "来自歌单导入",
-              createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-            }).run();
-            wishAdded++;
-          }
-        }
+  // Lazily-built library index: only touched when at least one track needs matching.
+  let libraryIndex: Map<string, any[]> | null = null;
+  const needIndex = (): Map<string, any[]> => {
+    if (!libraryIndex) libraryIndex = buildLibraryIndex();
+    return libraryIndex;
+  };
+
+  let matched = 0, unmatched = 0, wishAdded = 0, newUnmatched = 0;
+  type Row = {
+    playlistId: string; songId: string | null; position: number; playable: number;
+    externalSongId?: string; externalTitle?: string; externalArtist?: string;
+    externalAlbum?: string; externalDuration?: number; unavailableReason?: string;
+  };
+  const inserts: Row[] = [];
+  const updates: (Row & { id: number })[] = [];
+  const deleteIds: number[] = [];
+  const seenKeys = new Set<string>();
+
+  imported.tracks.forEach((t, i) => {
+    const key = trackKey(t.externalId, t.title, t.artist);
+    seenKeys.add(key);
+    const prev = existMap.get(key);
+
+    // Already matched & playable -> reuse, skip the (expensive) library match.
+    if (prev && prev.songId) {
+      matched++;
+      if (prev.position !== i) {
+        updates.push({
+          id: prev.id, playlistId, songId: prev.songId, position: i, playable: 1,
+          externalSongId: t.externalId ?? undefined, externalTitle: t.title,
+          externalArtist: t.artist, externalAlbum: t.album, externalDuration: t.duration,
+        });
       }
-    });
+      return;
+    }
 
-    refreshPlaylistCounts(playlistId);
-    return { matched, unmatched, wishAdded };
+    // Needs matching: new track, or a previous stub we re-evaluate.
+    const match = matchTrack(t, needIndex());
+    if (match) {
+      matched++;
+      const row: Row = {
+        playlistId, songId: match.id, position: i, playable: 1,
+        externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
+        externalAlbum: t.album, externalDuration: t.duration,
+      };
+      if (prev) updates.push({ ...row, id: prev.id });
+      else inserts.push(row);
+    } else {
+      unmatched++;
+      if (!prev && opts.autoWish !== false) {
+        const wid = addWishIfMissing(t, opts);
+        if (wid) wishAdded++;
+      }
+      const row: Row = {
+        playlistId, songId: null, position: i, playable: 0,
+        externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
+        externalAlbum: t.album, externalDuration: t.duration, unavailableReason: "曲库中未找到",
+      };
+      if (prev) updates.push({ ...row, id: prev.id });
+      else { inserts.push(row); newUnmatched++; }
+    }
   });
 
-  // Any entries that couldn't be matched to the local library are auto-matched
-  // against whichever enabled source plugin can do it, in the background, so
-  // these playlists become playable even without the track being in the local
-  // library. Fire-and-forget: the match runs off this request's hot path.
-  if (unmatched > 0) {
+  // Entries present before but absent from the new remote list -> remove.
+  for (const e of existingRows) {
+    const key = trackKey(e.externalSongId, e.externalTitle, e.externalArtist);
+    if (!seenKeys.has(key)) deleteIds.push(e.id);
+  }
+
+  db.transaction(() => {
+    if (deleteIds.length) {
+      db.delete(playlistSongs)
+        .where(and(eq(playlistSongs.playlistId, playlistId), inArray(playlistSongs.id, deleteIds)))
+        .run();
+    }
+    for (const u of updates) {
+      const { id, ...rest } = u;
+      db.update(playlistSongs).set(rest).where(eq(playlistSongs.id, id)).run();
+    }
+    if (inserts.length) db.insert(playlistSongs).values(inserts).run();
+    refreshPlaylistCounts(playlistId);
+  });
+
+  // Fire background auto-match only when genuinely new unmatched tracks appeared
+  // (skip re-firing for previously-known stubs that are still unmatched).
+  if (newUnmatched > 0) {
     matchPlaylistInBackground(playlistId).catch((e) => {
       console.error(`[auto-match] playlist ${playlistId} 自动匹配失败:`, e?.message || e);
     });

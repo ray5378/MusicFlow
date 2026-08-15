@@ -1280,21 +1280,43 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
     }
     const imported = await importPlaylistFromUrl(url);
     const name = (body.name || imported.name || "导入歌单").trim();
-    const id = `pl-${Date.now()}`;
-    // Cache the remote platform cover locally (native files carry no cover URL)
-    let coverRef: string | undefined = undefined;
-    if (imported.coverUrl) {
-      const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);
-      if (cached) coverRef = cached;
+
+    // Upsert: if this user already imported the same share URL, update that
+    // playlist in place (incremental rebuild) instead of creating a duplicate.
+    const existing = db.select().from(playlists)
+      .where(and(eq(playlists.sourceUrl, url), eq(playlists.ownerId, user?.id || "")))
+      .get();
+
+    let id: string;
+    if (existing) {
+      id = existing.id;
+      // Refresh cached remote cover (force re-download) when the platform supplies one.
+      if (imported.coverUrl) {
+        const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`, true);
+        const upd: any = { updatedAt: new Date().toISOString() };
+        if (body.name) upd.name = name;
+        if (cached) upd.coverArt = cached;
+        db.update(playlists).set(upd).where(eq(playlists.id, id)).run();
+      } else if (body.name) {
+        db.update(playlists).set({ name, updatedAt: new Date().toISOString() }).where(eq(playlists.id, id)).run();
+      }
+    } else {
+      id = `pl-${Date.now()}`;
+      // Cache the remote platform cover locally (native files carry no cover URL)
+      let coverRef: string | undefined = undefined;
+      if (imported.coverUrl) {
+        const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);
+        if (cached) coverRef = cached;
+      }
+      db.insert(playlists).values({
+        id, name, ownerId: user?.id || "",
+        sourceUrl: url,
+        sourcePlatform: imported.platform,
+        externalId: url,
+        coverArt: coverRef,
+        syncEnabled: body.autoSync ? 1 : 0,
+      }).run();
     }
-    db.insert(playlists).values({
-      id, name, ownerId: user?.id || "",
-      sourceUrl: url,
-      sourcePlatform: imported.platform,
-      externalId: url,
-      coverArt: coverRef,
-      syncEnabled: body.autoSync ? 1 : 0,
-    }).run();
     if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
     const result = await syncApi().rebuildPlaylistEntries(id, imported, {
       userId: user?.id,
