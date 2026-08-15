@@ -10,6 +10,7 @@ import { adminMiddleware } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
+import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
 import { currentPace, setPace, BatchPace } from "../../services/plugin/batchPacer.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
@@ -1263,6 +1264,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
         totals.wishAdded += result.wishAdded;
         created.push({ id, name });
       }
+      clearLibraryIndex(); // 本批本地歌单文件导入结束,立即回收曲库索引缓存
       return c.json({
         success: true,
         playlistId: created[0]?.id,
@@ -1322,6 +1324,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
       userId: user?.id,
       notes: `来自歌单「${name}」导入`,
     });
+    clearLibraryIndex(); // 单次平台歌单导入结束,立即回收曲库索引缓存
     return c.json({
       success: true, playlistId: id, name, platform: imported.platform,
       trackCount: result.total, matched: result.matched, unmatched: result.unmatched,
@@ -1380,6 +1383,8 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
     return c.json({ success: true, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "同步失败" });
+  } finally {
+    clearLibraryIndex(); // 手动同步结束,立即回收曲库索引缓存
   }
 });
 

@@ -9,6 +9,7 @@ import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
 // 共享匹配/计数工具已收敛到 services/plugin/shared.ts(宿主中性模块),本插件只消费,
 // 不再持有定义,以免核心路由被迫直接 import 本实现文件(check-core 规则 B)。
 import { normalizeKey, matchPlaylistInBackground, refreshPlaylistCounts } from "./shared.js";
+import { getLibraryIndex, clearLibraryIndex } from "./libraryIndex.js";
 
 export interface SyncResult {
   total: number;
@@ -37,17 +38,10 @@ export function checkImportCooldown(userId: string, url: string): boolean {
   return false;
 }
 
-// Build a library index (title|artist -> songs) for matching
-export function buildLibraryIndex(): Map<string, any[]> {
-  const librarySongs = db.select().from(songs).all();
-  const index = new Map<string, any[]>();
-  for (const s of librarySongs) {
-    const key = normalizeKey(s.title, s.artist || "");
-    if (!index.has(key)) index.set(key, []);
-    index.get(key)!.push(s);
-  }
-  return index;
-}
+// 曲库匹配索引已迁移到 ./libraryIndex.ts(getLibraryIndex / clearLibraryIndex):
+// 只索引「可播放」歌曲的最小列(id/title/artist/suffix/path),带进程级单例缓存
+// 与显式回收,避免把整张 songs 表(含在线歌曲的大文本列)全量加载进内存。
+// 严禁在此处再写 db.select().from(songs).all() 式的全量索引。
 
 // Match a single remote track against the library index
 export function matchTrack(track: ImportedTrack, index: Map<string, any[]>): any | null {
@@ -109,7 +103,7 @@ export async function rebuildPlaylistEntries(
   // Lazily-built library index: only touched when at least one track needs matching.
   let libraryIndex: Map<string, any[]> | null = null;
   const needIndex = (): Map<string, any[]> => {
-    if (!libraryIndex) libraryIndex = buildLibraryIndex();
+    if (!libraryIndex) libraryIndex = getLibraryIndex();
     return libraryIndex;
   };
 
@@ -244,19 +238,25 @@ export async function syncAllEnabledPlaylists(opts: RebuildOptions = {}): Promis
   const results: SyncResult[] = [];
   const errors: string[] = [];
   let synced = 0;
-  for (const pl of enabled) {
-    if (syncLocks.has(pl.id)) continue;
-    // Playlists whose sourceUrl no importer plugin claims are owned by someone
-    // else — e.g. a source plugin's own recommend playlists (its manifest
-    // `recommendPrefix` ref), refreshed by syncAllRecommendPlaylists instead.
-    // Capability-driven skip: no hardcoded URL scheme.
-    if (!pl.sourceUrl || !findUrlImporter(pl.sourceUrl)) continue;
-    try {
-      results.push(await syncPlaylist(pl.id, opts));
-      synced++;
-    } catch (e: any) {
-      errors.push(`${pl.name}: ${e.message || "同步失败"}`);
+  try {
+    for (const pl of enabled) {
+      if (syncLocks.has(pl.id)) continue;
+      // Playlists whose sourceUrl no importer plugin claims are owned by someone
+      // else — e.g. a source plugin's own recommend playlists (its manifest
+      // `recommendPrefix` ref), refreshed by syncAllRecommendPlaylists instead.
+      // Capability-driven skip: no hardcoded URL scheme.
+      if (!pl.sourceUrl || !findUrlImporter(pl.sourceUrl)) continue;
+      try {
+        results.push(await syncPlaylist(pl.id, opts));
+        synced++;
+      } catch (e: any) {
+        errors.push(`${pl.name}: ${e.message || "同步失败"}`);
+      }
     }
+  } finally {
+    // 整轮同步结束,显式释放曲库索引缓存,立即回收其内存(避免缓存长驻,
+    // 也防止下一轮/其他请求误用已过时索引)。
+    clearLibraryIndex();
   }
   return { synced, results, errors };
 }

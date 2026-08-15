@@ -33,6 +33,7 @@
 import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
+import { clearLibraryIndex } from "./libraryIndex.js";
 import { copyCoverToFile, clearPlaylistCoverCache, firstPlayableCoverFile } from "../playlistCover.js";
 import { getPluginConfig } from "../../plugins/registry.js";
 import { todayStr, systemOwnerId } from "./shared.js";
@@ -545,6 +546,7 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
     matched = result.matched;
     unmatched = result.unmatched;
     wishAdded = result.wishAdded;
+    clearLibraryIndex(); // 今日推荐生成结束,立即回收曲库索引缓存
   }
 
   // Collect song_ids already in the playlist (from remote matching)
