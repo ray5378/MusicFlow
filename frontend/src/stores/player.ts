@@ -540,7 +540,8 @@ export const usePlayerStore = defineStore("player", () => {
 
   function localPrev() {
     if (localQueue.value.length === 0) return;
-    if (localCurrentTime.value > 3) { localSeek(0); return; }
+    // 上一首始终切歌:不做「进度>3s 先回到当前曲开头」的常规播放器行为——用户
+    // 要求点上一首就是跳转,不重播当前曲。
     if (localPlayMode.value === "shuffle") {
       ensureShuffleReady();
       if (shufflePos > 0) {
@@ -723,7 +724,7 @@ export const usePlayerStore = defineStore("player", () => {
 
   function castPrev(st: RemoteState) {
     if (st.queue.length === 0) return;
-    if (st.currentTime > 3) { castSeek(st, 0); return; }
+    // 上一首始终切歌(与 localPrev 一致,不做 3s 重播当前曲)。
     api.post(peerApi(st.peerId, "/prev")).catch(() => {});
   }
 
