@@ -440,4 +440,53 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
     expect(String(r.sig?.error || "")).toContain("[SANDBOX_PERMISSION]");
     expect(String(r.sig?.error || "")).toContain("缺少 crypto");
   });
+
+  it("长耗时方法:等网络无限合法(无墙钟,超预算仍完成)", async () => {
+    // manifest.longRunning.runDailyJob=200ms(墙钟预算远小于任务实际时长);任务 15 次
+    // await host.http(每次 ~2ms+ 延迟,总时长 > 200ms)。软看门狗:每步都在等 host
+    // (removeDefer 重置 CPU 基准)→ 不触发空转检测 → 不被杀,任务完整完成。
+    const LONG_CODE = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-long", name: "x", version: "1.0.0", type: "source", capabilities: ["recommendPlaylist"], configSchema: [], permissions: ["net"], longRunning: { runDailyJob: 200 } },
+        create(host) {
+          return {
+            async runDailyJob(opts) {
+              for (let i = 0; i < 200; i++) {
+                const r = await host.http("https://demo/w?i=" + i, {});
+                if (!r || !r.ok) throw new Error("http fail");
+              }
+              return "long-ok:" + Date.now();
+            }
+          };
+        }
+      };`;
+    const { impl } = await loadSandboxedPlugin("demo-long", LONG_CODE, makeEnv());
+    const t0 = Date.now();
+    const r = await impl.runDailyJob({ force: true });
+    const wall = Date.now() - t0;
+    expect(String(r)).toContain("long-ok");
+    // 总耗时超过原墙钟预算(200ms)仍成功 = 批量任务无墙钟、只按 CPU 空转判定。
+    expect(wall).toBeGreaterThan(200);
+  });
+
+  it("长耗时方法:纯 CPU 死循环被软看门狗中断(空转检测)", async () => {
+    // 死循环不 await 任何 host 调用 → QuickJS interrupt 检测到连续 cpuIdleLimitMs
+    // 无进展 → 中断 → 归为 SANDBOX_TIMEOUT(CPU 空转超限)。用 env 缩短阈值加速测试。
+    const prev = process.env.SANDBOX_CPU_IDLE_MS;
+    process.env.SANDBOX_CPU_IDLE_MS = "1200";
+    try {
+      const LOOP_CODE = `
+        globalThis.__mfPlugin = {
+          manifest: { id: "demo-loop", name: "x", version: "1.0.0", type: "source", capabilities: ["recommendPlaylist"], configSchema: [], permissions: ["net"], longRunning: { runDailyJob: 600000 } },
+          create(host) {
+            return { async runDailyJob(opts) { let n = 0; while (true) { n++; } } };
+          }
+        };`;
+      const { impl } = await loadSandboxedPlugin("demo-loop", LOOP_CODE, makeEnv());
+      await expect(impl.runDailyJob({})).rejects.toThrow(/CPU 空转超限|SANDBOX_TIMEOUT/);
+    } finally {
+      if (prev === undefined) delete process.env.SANDBOX_CPU_IDLE_MS;
+      else process.env.SANDBOX_CPU_IDLE_MS = prev;
+    }
+  });
 });

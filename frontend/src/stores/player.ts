@@ -748,39 +748,52 @@ export const usePlayerStore = defineStore("player", () => {
     stopCastPoll(st);
     // 进度自愈:记录上次轮询到的真实 position,用于判断"是否真的在前进"。
     let lastPos = -1;
-    // Backend poll (2s): ground-truth state + queue snapshot.
-    st.pollTimer = setInterval(async () => {
-      try {
-        const res = await api.get(peerApi(st.peerId, "/status"));
-        const s = res.data || {};
-        st.lastCastState = s.state || "STOPPED";
-        if (typeof s.position === "number") st.currentTime = s.position;
-        if (typeof s.duration === "number" && s.duration > 0) st.duration = s.duration;
-        // 播放状态判定(自愈):
-        // 1) 后端 state 明确为 PLAYING/playing/STARTED → 在播;
-        // 2) 关键自愈:部分 DLNA 设备经「清空→重选→重新播放」后,GENA 事件缓存的
-        //    state 停留在旧值(如 STOPPED)并覆盖 SOAP 实时 PLAYING,轮询读到
-        //    state=STOPPED 却 position 仍在前进(进度条在走)。此时以"position 真实前进"
-        //    作为在播的权威证据,强制 isPlaying=true,避免按钮卡在"未播放"。
-        const statePlaying = s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
-        const advancing = st.duration > 0 && st.currentTime > lastPos && st.currentTime < st.duration;
-        st.isPlaying = statePlaying || advancing;
-        if (typeof s.position === "number") lastPos = s.position;
-        // 同步设备真实音量(含 外部 webhook / 其它端 改的)。仅当当前正控制该 peer。
-        if (typeof s.volume === "number" && currentPeerId.value === st.peerId) {
-          volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
-        }
+    // 自适应轮询(P2):链式 setTimeout + 失败退避——后端繁忙(批量导入/匹配)时
+    // 接口慢/超时,固定 2s setInterval 会持续叠加请求雪上加霜;改为失败加倍间隔
+    // (上限 15s)、成功回落到 2s,兼顾实时性与对后端的友好。
+    let pollInterval = 2000;
+    const schedulePoll = () => {
+      if (!st || !st.pollTimer) return; // 已停止(stopCastPoll 后置 null)
+      st.pollTimer = setTimeout(async () => {
+        try {
+          const res = await api.get(peerApi(st.peerId, "/status"), { timeout: 10000 });
+          const s = res.data || {};
+          st.lastCastState = s.state || "STOPPED";
+          if (typeof s.position === "number") st.currentTime = s.position;
+          if (typeof s.duration === "number" && s.duration > 0) st.duration = s.duration;
+          // 播放状态判定(自愈):
+          // 1) 后端 state 明确为 PLAYING/playing/STARTED → 在播;
+          // 2) 关键自愈:部分 DLNA 设备经「清空→重选→重新播放」后,GENA 事件缓存的
+          //    state 停留在旧值(如 STOPPED)并覆盖 SOAP 实时 PLAYING,轮询读到
+          //    state=STOPPED 却 position 仍在前进(进度条在走)。此时以"position 真实前进"
+          //    作为在播的权威证据,强制 isPlaying=true,避免按钮卡在"未播放"。
+          const statePlaying = s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
+          const advancing = st.duration > 0 && st.currentTime > lastPos && st.currentTime < st.duration;
+          st.isPlaying = statePlaying || advancing;
+          if (typeof s.position === "number") lastPos = s.position;
+          // 同步设备真实音量(含 外部 webhook / 其它端 改的)。仅当当前正控制该 peer。
+          if (typeof s.volume === "number" && currentPeerId.value === st.peerId) {
+            volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
+          }
 
-        const media = s.media;
-        if (media && media.songId && media.songId !== st.lastScrobbledSongId) {
-          st.lastScrobbledSongId = media.songId;
-          api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
-          loadCastLyrics(st, media.songId);
+          const media = s.media;
+          if (media && media.songId && media.songId !== st.lastScrobbledSongId) {
+            st.lastScrobbledSongId = media.songId;
+            api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
+            loadCastLyrics(st, media.songId);
+          }
+          updateCastLyric(st);
+          syncCastQueueFromBackend(st);
+          pollInterval = 2000; // 成功:回落基准间隔
+        } catch {
+          // 失败/超时:退避(上限 15s),避免后端繁忙时请求叠加雪上加霜。
+          pollInterval = Math.min(pollInterval * 2, 15000);
+        } finally {
+          schedulePoll();
         }
-        updateCastLyric(st);
-        syncCastQueueFromBackend(st);
-      } catch {}
-    }, 2000);
+      }, pollInterval);
+    };
+    schedulePoll();
     // Smooth interpolation (250ms): advance currentTime locally while
     // playing so the progress bar moves smoothly between the 2s polls. The
     // next poll overwrites with the backend ground truth, correcting drift.

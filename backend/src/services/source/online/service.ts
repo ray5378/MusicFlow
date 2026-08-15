@@ -19,6 +19,24 @@ import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./in
 // old one-song-at-a-time loop and a full unbounded Promise.all.
 const BULK_IMPORT_CONCURRENCY = 4;
 
+// 封面下载全局限流(≤2 并发):批量导入匹配时,避免 4 个并发 worker 各自叠加
+// 封面下载造成网络洪峰(前台 stream/轮询请求被挤占)。全局信号量,所有导入共用。
+const COVER_CONCURRENCY_LIMIT = 2;
+let coverInflight = 0;
+const coverWaiters: (() => void)[] = [];
+async function withCoverLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (coverInflight >= COVER_CONCURRENCY_LIMIT) {
+    await new Promise<void>((resolve) => coverWaiters.push(resolve));
+  }
+  coverInflight++;
+  try {
+    return await fn();
+  } finally {
+    coverInflight--;
+    coverWaiters.shift()?.();
+  }
+}
+
 /** Import a provider search result as an online DB song. Skips if already present. */
 export async function importOnlineSong(
   providerId: string,
@@ -83,9 +101,10 @@ async function importOnlineSongCore(
   if (song.album) albumId = findOrCreateAlbum({ name: song.album, artistId, artist: song.artist });
 
   // Cache the remote cover locally (like imported playlists). Falls back gracefully.
+  // 封面下载走全局限流(≤2 并发),避免批量匹配时网络洪峰挤占前台请求。
   let coverArt: string | null | undefined;
   if (song.cover) {
-    const cached = await cacheRemoteCover(song.cover, songId);
+    const cached = await withCoverLimit(() => cacheRemoteCover(song.cover, songId));
     if (cached) coverArt = cached;
   }
 
@@ -149,7 +168,7 @@ export async function importOnlineSongs(
   providerId: string,
   songList: OnlineSongResult[],
   opts?: { playlistId?: string; userId?: string },
-): Promise<{ added: number; deduped: number; failed: number; songs: { id: string; title: string }[] }> {
+): Promise<{ added: number; deduped: number; failed: number; songs: { id: string; title: string; fingerprint: string }[] }> {
   // One batched dedup query instead of one SELECT per song.
   const existingFingerprints = new Map<string, string>();
   try {
@@ -165,7 +184,7 @@ export async function importOnlineSongs(
   const insertedArtists = new Set<string>();
 
   let added = 0, deduped = 0, failed = 0;
-  const songsOut: { id: string; title: string }[] = [];
+  const songsOut: { id: string; title: string; fingerprint: string }[] = [];
 
   const results = await workerLimit(songList, BULK_IMPORT_CONCURRENCY, async (s) => {
     try {
@@ -174,7 +193,7 @@ export async function importOnlineSongs(
         if (r.deduped) deduped++; else added++;
         if (r.inserted?.albumId) insertedAlbums.add(r.inserted.albumId);
         if (r.inserted?.artistId) insertedArtists.add(r.inserted.artistId);
-        return { id: r.songId, title: s.name };
+        return { id: r.songId, title: s.name, fingerprint: `${providerId}:${s.source}:${s.id}` };
       }
       failed++;
       return null;

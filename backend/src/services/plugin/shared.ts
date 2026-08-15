@@ -58,12 +58,23 @@ export async function matchPlaylistInBackground(playlistId: string): Promise<voi
     if (!config) return; // plugin disabled between lookup and read
     if (typeof matcher.impl?.search !== "function") return; // can't actually match
 
+    // P1:匹配进度经 WS 广播(限频 1s),前端可显示「后台匹配中 x/y」而非"卡死"。
+    // 动态 import 解环:shared → ws → dlna → online → builtins → shared 会成环。
+    let lastBcast = 0;
+    const ws = await import("../ws/index.js");
     const { matchUnmatchedPlaylistEntries } = await import("../source/online/match.js");
     const result = await matchUnmatchedPlaylistEntries(
       matcher.manifest.id,
       config,
       matcher.impl,
       playlistId,
+      (done, total) => {
+        if (total <= 0) return;
+        const now = Date.now();
+        if (done < total && now - lastBcast < 1000) return; // 限频:每秒最多广播一次
+        lastBcast = now;
+        ws.broadcastToClients({ type: "match_progress", playlistId, done, total });
+      },
     );
     if (result.total > 0) {
       console.log(

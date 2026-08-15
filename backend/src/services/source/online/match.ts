@@ -5,12 +5,12 @@
 // provider (go-music-dl), import the best hit as an online DB song (type="web"),
 // then link it back to the playlist entry so it becomes playable.
 
-import { db } from "../../../db/index.js";
+import { db, sqlite } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { normalizeKey, refreshPlaylistCounts } from "../../plugin/shared.js";
 import { OnlineSongResult } from "./types.js";
-import { importOnlineSong } from "./service.js";
+import { importOnlineSong, importOnlineSongs } from "./service.js";
 
 export interface MatchTarget {
   entryId: number;
@@ -83,6 +83,37 @@ function linkPlaylistEntry(playlistId: string, entryId: number, songId: string) 
   refreshPlaylistCounts(playlistId);
 }
 
+/**
+ * 搜索 + 打分选 best(不落库)。供批量匹配(两阶段:先搜索收集,后批量导入)
+ * 与单首实时匹配(match-track)复用——批量场景下避免逐首导入带来的
+ * 每首独立计数刷新 + 独立去重查询(DB 阻塞放大)。
+ */
+export async function searchBestMatch(
+  providerId: string,
+  config: any,
+  provider: any,
+  want: MatchTarget,
+): Promise<{ entryId: number; title: string; status: "matched" | "no-match" | "error"; best?: OnlineSongResult; score?: number; message?: string }> {
+  const query = [want.title, want.artist].filter(Boolean).join(" ").trim();
+  if (!query) return { entryId: want.entryId, title: want.title, status: "no-match", message: "缺少歌曲标题" };
+  if (!provider.search) return { entryId: want.entryId, title: want.title, status: "error", message: "provider 不支持搜索" };
+
+  const search = await provider.search(config, { query });
+  if (!search.songs.length) return { entryId: want.entryId, title: want.title, status: "no-match", message: "未搜索到结果" };
+
+  const ranked = search.songs
+    .map((s: OnlineSongResult) => ({ s, score: scoreCandidate(s, want) }))
+    .sort((a: { score: number }, b: { score: number }) => b.score - a.score);
+
+  const best = ranked[0]!;
+  // Only auto-link when the title plausibly matched (score >= 15 from title);
+  // a pure artist-with-different-song hit is too risky to auto-bind.
+  if (best.score < 15) {
+    return { entryId: want.entryId, title: want.title, status: "no-match", message: `未可靠匹配(${best.s.name})` };
+  }
+  return { entryId: want.entryId, title: want.title, status: "matched", best: best.s, score: best.score };
+}
+
 // Attempt to match a single unmatched track via the online provider, importing
 // the best hit and linking it to that playlist entry.
 export async function matchToOnlineSong(
@@ -93,34 +124,18 @@ export async function matchToOnlineSong(
   want: MatchTarget,
 ): Promise<MatchOutcome> {
   try {
-    const query = [want.title, want.artist].filter(Boolean).join(" ").trim();
-    if (!query) return { entryId: want.entryId, title: want.title, status: "no-match", message: "缺少歌曲标题" };
-    if (!provider.search) return { entryId: want.entryId, title: want.title, status: "error", message: "provider 不支持搜索" };
-
-    const search = await provider.search(config, { query });
-    if (!search.songs.length) return { entryId: want.entryId, title: want.title, status: "no-match", message: "未搜索到结果" };
-
-    const ranked = search.songs
-      .map((s: OnlineSongResult) => ({ s, score: scoreCandidate(s, want) }))
-      .sort((a: { score: number }, b: { score: number }) => b.score - a.score);
-
-    const best = ranked[0]!;
-    // Only auto-link when the title plausibly matched (score >= 15 from title);
-    // a pure artist-with-different-song hit is too risky to auto-bind.
-    if (best.score < 15) {
-      return { entryId: want.entryId, title: want.title, status: "no-match", message: `未可靠匹配(${best.s.name})` };
+    const m = await searchBestMatch(providerId, config, provider, want);
+    if (m.status !== "matched" || !m.best) {
+      return { entryId: want.entryId, title: want.title, status: m.status, message: m.message };
     }
-
-    const res = await importOnlineSong(providerId, best.s, {});
+    const res = await importOnlineSong(providerId, m.best, {});
     if (!res.success || !res.songId) {
       return { entryId: want.entryId, title: want.title, status: "error", message: res.error || "导入失败" };
     }
-
     linkPlaylistEntry(playlistId, want.entryId, res.songId);
-
     return {
       entryId: want.entryId, title: want.title, status: "matched", songId: res.songId,
-      matchedSource: best.s.source, matchedName: best.s.name,
+      matchedSource: m.best.source, matchedName: m.best.name,
       message: res.deduped ? "已导入(去重)" : "已导入",
     };
   } catch (e: any) {
@@ -131,7 +146,13 @@ export async function matchToOnlineSong(
 /**
  * Match all currently-unmatched entries of a playlist through the online provider.
  * Works for any playlist with loose (external) entries, imported or not.
- * Runs with bounded concurrency (each entry is an HTTP search + import).
+ *
+ * 两阶段(P0 优化,解决「导入时前台卡死」):
+ *   阶段1 搜索+打分(不落库),每 10 首让行(setImmediate)——事件循环有机会
+ *         处理前台请求(播放器轮询/stream/歌单加载),不再被同步 DB 写饿死;
+ *   阶段2 批量导入所有命中(importOnlineSongs:批量 dedup + 计数集合去重刷新一次)
+ *         + 事务批量链接条目 + 歌单计数刷新一次——DB 阻塞从「每首 5-8 次」降到
+ *         「整歌单一次」,封面下载也走全局限流(≤2 并发)。
  */
 const MATCH_CONCURRENCY = 4;
 
@@ -148,10 +169,12 @@ export async function matchUnmatchedPlaylistEntries(
     .filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim());
 
   const results: MatchOutcome[] = new Array(entries.length);
+  const matchedByEntry = new Map<number, { best: OnlineSongResult; fp: string; title: string }>();
   let next = 0;
   let done = 0;
-  let matched = 0, noMatch = 0, error = 0;
+  let noMatch = 0, error = 0;
 
+  // ---- 阶段1:并发搜索 + 打分(不落库),每 10 首让行 ----
   const worker = async () => {
     while (next < entries.length) {
       const i = next++;
@@ -163,18 +186,60 @@ export async function matchUnmatchedPlaylistEntries(
         album: e.externalAlbum || undefined,
         duration: e.externalDuration || undefined,
       };
-      const r = await matchToOnlineSong(providerId, config, provider, playlistId, target);
-      results[i] = r;
+      const m = await searchBestMatch(providerId, config, provider, target);
+      if (m.status === "matched" && m.best) {
+        matchedByEntry.set(e.id, { best: m.best, fp: `${providerId}:${m.best.source}:${m.best.id}`, title: target.title });
+        results[i] = { entryId: target.entryId, title: target.title, status: "matched", matchedSource: m.best.source, matchedName: m.best.name, message: "搜索命中,待导入" };
+      } else {
+        results[i] = { entryId: target.entryId, title: target.title, status: m.status, message: m.message };
+        if (m.status === "no-match") noMatch++;
+        else error++;
+      }
       done++;
-      if (r.status === "matched") matched++;
-      else if (r.status === "no-match") noMatch++;
-      else error++;
-      onProgress?.(done, entries.length, r);
+      // 让行:每 10 首让事件循环处理前台请求,避免批量匹配饿死播放器轮询/stream。
+      if (done % 10 === 0) await new Promise((r) => setImmediate(r));
+      onProgress?.(done, entries.length, results[i]);
     }
   };
 
   const workers = Array.from({ length: Math.max(1, Math.min(MATCH_CONCURRENCY, entries.length)) }, () => worker());
   await Promise.all(workers);
+
+  // ---- 阶段2:批量导入所有命中(批量 dedup + 计数去重刷新一次)+ 事务链接 ----
+  let matched = 0;
+  if (matchedByEntry.size > 0) {
+    const imp = await importOnlineSongs(providerId, Array.from(matchedByEntry.values()).map((v) => v.best), {});
+    const byFp = new Map<string, string>();
+    for (const s of imp.songs) byFp.set(s.fingerprint, s.id);
+
+    // 事务批量链接:一次提交全部条目 UPDATE(避免逐条同步写阻塞事件循环)。
+    sqlite.transaction(() => {
+      for (const [entryId, v] of matchedByEntry) {
+        const songId = byFp.get(v.fp);
+        if (!songId) continue;
+        db.update(playlistSongs)
+          .set({ songId, playable: 1, unavailableReason: null })
+          .where(eq(playlistSongs.id, entryId))
+          .run();
+      }
+    })();
+    // 歌单计数整单刷新一次(替代每首刷新)。
+    refreshPlaylistCounts(playlistId);
+
+    // 回填 results(按 entries 顺序,entryId 关联)。
+    for (let i = 0; i < entries.length; i++) {
+      const v = matchedByEntry.get(entries[i].id);
+      if (!v) continue;
+      const songId = byFp.get(v.fp);
+      if (songId) {
+        results[i] = { entryId: entries[i].id, title: v.title, status: "matched", songId, matchedSource: v.best.source, matchedName: v.best.name, message: "已导入" };
+        matched++;
+      } else {
+        results[i] = { entryId: entries[i].id, title: v.title, status: "error", message: "批量导入失败" };
+        error++;
+      }
+    }
+  }
 
   return { total: results.length, matched, noMatch, error, results };
 }

@@ -23,7 +23,14 @@ const STACK_LIMIT = 1024 * 1024;        // 单插件栈上限 1MB
 const INVOKE_TIMEOUT_MS = 15000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
 const JOB_TIMEOUT_CAP_MS = 600000;      // longRunning 声明预算上限(10 分钟);任务经 jobRunner 异步执行、HTTP 不阻塞、前端轮询,长预算无副作用
 const MAX_DEFERS = 256;                 // 单次调用内未结算 deferred 上限(防御性;支持并行 host 调用)
-const LONG_WAIT_GRACE_MS = 60000;       // longRunning 方法在途 await 的额外宽限(等网络合法,CPU 空转仍按预算杀)
+// longRunning 批量任务采用「软看门狗」:无墙钟硬超时(歌单/封面/歌词数量无限,只要每步
+// 都在等网络/DB 就永不超时);仅在「连续该时长无任何 host 调用完成」时判定 CPU 空转/
+// 死循环并中断(QuickJS interrupt 只在 guest 真正执行 JS 时触发,await 挂起不计时)。
+// 支持 SANDBOX_CPU_IDLE_MS 环境变量覆盖(测试用短值,运行时读取便于用例控制)。
+function cpuIdleLimitMs(): number {
+  const v = Number(process.env.SANDBOX_CPU_IDLE_MS);
+  return Number.isFinite(v) && v > 0 ? v : 60000;
+}
 
 /** 沙箱限制类错误:全链路可辨识(稳定错误码 + 中文说明 + 修复提示)。
  *  路由 / jobRunner 透传 sandboxCode/hint 给前端,避免「timeout of 15000ms exceeded」
@@ -263,6 +270,11 @@ export class SandboxedPlugin {
   /** host.comm.on 注册的监听器包装(注册在 env.comm 上)。dispose 时必须 off,否则 hot-reload 重载插件会累积监听器,导致同一条消息被重复投递 N 次。 */
   private commListeners = new Map<QuickJSHandle, (message: any) => void>();
   private deadline = Date.now() + INVOKE_TIMEOUT_MS;
+  /** 软看门狗状态:最近一次 host 调用完成时间(CPU 空转检测基准)、当前调用是否
+   *  longRunning(interrupt 按此选检测方式)、是否因 CPU 空转被杀(错误分类用)。 */
+  private lastHostProgressAt = Date.now();
+  private currentIsLong = false;
+  private cpuKilled = false;
   private disposed = false;
 
   constructor(id: string, env: SandboxHostEnv) {
@@ -279,7 +291,21 @@ export class SandboxedPlugin {
     this.runtime = module.newRuntime();
     this.runtime.setMemoryLimit(MEMORY_LIMIT);
     this.runtime.setMaxStackSize(STACK_LIMIT);
-    this.runtime.setInterruptHandler(() => Date.now() > this.deadline);
+    this.runtime.setInterruptHandler(() => {
+      // 长耗时批量任务:软看门狗——只杀 CPU 空转(连续 JOB_CPU_IDLE_LIMIT_MS 无任何
+      // host 调用完成 = 死循环/超重计算);等网络/DB(await 挂起)期间 guest 不执行
+      // JS,interrupt 不触发,不计时 → 无限等待合法(歌单/封面/歌词数量不限)。
+      if (this.currentIsLong) {
+        if (this.cpuKilled) return true;
+        if (Date.now() - this.lastHostProgressAt > cpuIdleLimitMs()) {
+          this.cpuKilled = true;
+          return true;
+        }
+        return false;
+      }
+      // 交互型调用:维持墙钟 15s 看门狗(用户等一个搜索/歌词不该无限等待)。
+      return Date.now() > this.deadline;
+    });
 
     this.ctx = this.runtime.newContext();
     this.hTrue = this.ctx.unwrapResult(this.ctx.evalCode("true"));
@@ -420,6 +446,9 @@ export class SandboxedPlugin {
   private removeDefer(d: QuickJSDeferredPromise): void {
     const i = this.defers.indexOf(d);
     if (i >= 0) this.defers.splice(i, 1);
+    // host 调用结算(成功/失败/拒绝)即视为任务有进展:重置 CPU 空转基准。
+    // 批量任务只要持续有网络/DB 调用完成,就永不触发软看门狗。
+    this.lastHostProgressAt = Date.now();
   }
 
   /** 宿主异常兜底信封:必须带 status 字段,否则插件读 r.status 得 undefined
@@ -829,6 +858,10 @@ export class SandboxedPlugin {
     this.refreshConfig();
     const tmo = this.timeoutForMethod(method);
     this.deadline = Date.now() + tmo;
+    // 软看门狗状态初始化:longRunning 方法无墙钟(等网络无限合法),只杀 CPU 空转。
+    this.currentIsLong = tmo !== INVOKE_TIMEOUT_MS;
+    this.cpuKilled = false;
+    this.lastHostProgressAt = Date.now();
     const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
     const code = `(async () => { try { const v = await (${body}); return { ok: true, value: v }; } catch (e) { return { ok: false, error: { name: String(e && e.name || ""), message: String(e && e.message || String(e)), stack: String(e && e.stack || "") } }; } })()`;
     return this.evalAsync(code, method, tmo);
@@ -876,17 +909,29 @@ export class SandboxedPlugin {
     const settledPromise = this.ctx.resolvePromise(promiseHandle);
     let done = false;
     settledPromise.then(() => { done = true; }, () => { done = true; });
-    const t0 = Date.now();
-    // 长耗时方法:在途有宿主调用(等网络)时额外宽限 LONG_WAIT_GRACE_MS(等网络合法);
-    // 纯 CPU 空转(无在途 defer)仍按预算杀,防插件死循环/连环 host 调用拖到无界。
+    // 长耗时批量任务:无墙钟硬超时——循环一直推进,退出靠 done(任务完成)或
+    // interrupt 软看门狗(CPU 空转 60s 杀)。等网络/DB(await 挂起)无限合法,
+    // 支持任意规模歌单/封面/歌词;交互型调用维持 15s 墙钟。
     const isLong = timeoutMs !== INVOKE_TIMEOUT_MS;
-    while (!done && Date.now() - t0 < (isLong && this.defers.length > 0 ? timeoutMs + LONG_WAIT_GRACE_MS : timeoutMs)) {
+    const t0 = Date.now();
+    while (!done) {
+      if (isLong && !this.cpuKilled && Date.now() - this.lastHostProgressAt > cpuIdleLimitMs()) {
+        // 兜底:guest 挂起后 CPU 空转(理论上 interrupt 已杀,此处双保险)
+        this.cpuKilled = true;
+      }
       if (this.runtime.hasPendingJob()) this.runtime.executePendingJobs();
       await new Promise((r) => setImmediate(r));
+      if (!isLong && Date.now() - t0 >= timeoutMs) break; // 交互:墙钟到点退出
+      if (isLong && this.cpuKilled) break;                 // 长任务:CPU 空转被杀退出
     }
     try {
       // 超时(在途未结算):明确告知是沙箱限制而非笼统"执行失败",附修复提示。
       if (!done) {
+        if (isLong) {
+          const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据(网络/DB 调用有进展)则属正常,不应被杀;若为死循环请修复插件";
+          console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限(> ${cpuIdleLimitMs()}ms 无网络/DB 进展),已中断`);
+          throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
+        }
         const hint = `该操作可能需拉取平台/外网数据。可在插件 manifest 的 longRunning 中为${method ? ` ${method}()` : "该方法"}声明更长预算(默认 ${INVOKE_TIMEOUT_MS}ms,上限 ${JOB_TIMEOUT_CAP_MS}ms)后更新插件`;
         console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} 执行超时(> ${timeoutMs}ms),已中断`);
         throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:单次调用超时(配额 ${timeoutMs}ms)`, hint);
@@ -895,6 +940,12 @@ export class SandboxedPlugin {
       try { rr = await settledPromise; } catch (e) { rr = { rejected: e }; }
       if (rr && rr.rejected) {
         const msg = String((rr.rejected && (rr.rejected as any).message) || rr.rejected);
+        // 长任务被 CPU 空转中断(QuickJS interrupt):归为沙箱限制而非插件内部错误。
+        if (isLong && this.cpuKilled) {
+          const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
+          console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限,已中断`);
+          throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
+        }
         console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内部异常: ${msg}`);
         throw new Error(`插件 ${this.id} 内部错误: ${msg}`);
       }
@@ -902,6 +953,13 @@ export class SandboxedPlugin {
       const v = this.ctx.dump(vh);
       vh.dispose();
       if (v && v.ok === true) return v.value;
+      // 长任务被软看门狗中断(QuickJS interrupt 被 guest 外层 catch 收成普通信封):
+      // 归为沙箱限制(CPU 空转超限),而非插件内部错误。
+      if (isLong && this.cpuKilled) {
+        const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
+        console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限,已中断`);
+        throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
+      }
       // 插件侧抛错:服务端记录完整 message + stack,便于定位真因;前端只收到精简文案。
       const errMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
       if (v && v.error && v.error.stack) console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`, v.error.stack);

@@ -186,3 +186,13 @@ function send(ws: WebSocket, msg: any): void {
     ws.send(JSON.stringify(msg));
   }
 }
+
+/** 向所有已连接客户端广播(供后台任务进度等全局事件推送,如匹配进度)。 */
+export function broadcastToClients(msg: any): void {
+  if (!wss) return;
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(JSON.stringify(msg)); } catch { /* ignore */ }
+    }
+  }
+}
