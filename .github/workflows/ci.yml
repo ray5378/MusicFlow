@@ -48,6 +48,11 @@ jobs:
       # 会被底部播放条/全屏播放模式遮挡(全项目静态扫描,新增弹窗忘加直接 CI 失败)。
       - name: 校验全部浮层组件按约定处理(不被播放控件遮挡)
         run: node backend/scripts/check-frontend-overlays.mjs
+      # 固定推荐歌单 ID 守卫:今日/本地/漫游歌单 id(pl-daily-*)永远固定,供音流等
+      # 客户端稳定引用——核心/前端不得写死字面量(只能经 manifest.homePlaylistId /
+      # fixedRecommend.ts 引用),防 ID 被改动导致音流断链。
+      - name: 校验固定推荐歌单 ID 未被写死
+        run: node backend/scripts/check-fixed-playlist-ids.mjs
 
   test:
     name: 类型检查 + 全量测试

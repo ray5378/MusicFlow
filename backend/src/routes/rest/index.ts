@@ -8,6 +8,7 @@ import { notifyScrobble } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
+import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
@@ -796,6 +797,7 @@ restRoutes.all("/deletePlaylist", async (c) => {
   const body = await parseBody(c);
   const id = (body.id as string) || (body.playlistId as string) || "";
   if (!id) return c.json(fail(10, "Missing id"));
+  if (isFixedRecommendPlaylist(id)) return c.json(fail(10, "固定推荐歌单(今日/本地/漫游)由插件每日重建,不可删除"));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json(fail(70, "Playlist not found"));
   // Only owner (or admin) can delete; others' public playlists are read-only

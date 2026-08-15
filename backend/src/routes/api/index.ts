@@ -12,6 +12,7 @@ import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
 import { currentPace, setPace, BatchPace } from "../../services/plugin/batchPacer.js";
+import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
@@ -129,7 +130,10 @@ apiRoutes.get("/v1/home/playlist-count", (c) => {
 //   manifest.homePlaylistId 声明首页对应的固定歌单 id。
 // 核心按能力收集(不写死插件名),位次冲突在保存插件配置时校验。
 apiRoutes.get("/v1/recommend/home-cards", (c) => {
-  const plugins = listHomeCardPlugins().filter((p) => p.showOnHome);
+  // ?all=1 返回全部固定推荐歌单(含未开启「在首页显示」的),供音流等场景
+  // 选择固定引用;默认只返回 showOnHome(首页展示)。
+  const all = c.req.query("all") === "1";
+  const plugins = listHomeCardPlugins().filter((p) => p.showOnHome || all);
   // 位次排序:0(未固定)排最后,固定位次升序。
   const sorted = [...plugins].sort((a, b) => {
     const pa = a.position || Number.MAX_SAFE_INTEGER;
@@ -1492,7 +1496,7 @@ apiRoutes.get("/playlist", (c) => {
   }));
 });
 apiRoutes.get("/playlist/:id/tracks", (c) => c.json(db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, c.req.param("id"))).all().filter(e => e.playable && e.songId)));
-apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权删除该歌单" }, 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
+apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; if (isFixedRecommendPlaylist(id)) return c.json({ error: "固定推荐歌单(今日/本地/漫游)由插件每日重建,不可删除" }, 400); const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权删除该歌单" }, 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
 
 // ==================== Playlist tracks (paginated) ====================
 apiRoutes.get("/v1/playlists/:id/tracks", (c) => {

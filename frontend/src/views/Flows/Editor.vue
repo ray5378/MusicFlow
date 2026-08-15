@@ -150,6 +150,20 @@
             />
           </el-select>
         </div>
+        <div v-if="form.contentType === 'playlist' && recommendCards.length" class="select-row select-row--recommend">
+          <span class="select-label">推荐歌单</span>
+          <div class="recommend-chips">
+            <el-tag
+              v-for="card in recommendCards"
+              :key="card.playlistId"
+              class="recommend-chip"
+              :class="{ active: form.contentId === card.playlistId }"
+              :type="form.contentId === card.playlistId ? 'primary' : 'info'"
+              effect="plain"
+              @click="pickRecommendCard(card)"
+            >{{ card.name }}</el-tag>
+          </div>
+        </div>
         <div class="content-name" v-if="form.contentId && form.contentName">{{ form.contentName }}</div>
       </div>
     </div>
@@ -191,6 +205,23 @@ const webhookUrl = ref("");
 const peers = ref<any[]>([]);
 const contentOptions = ref<any[]>([]);
 const contentLoading = ref(false);
+// 固定推荐歌单(今日漫游/今日推荐/本地推荐)快捷入口:id 由后端 manifest.homePlaylistId
+// 声明,核心与前端不写死;音流配置一键选中,触发播放时后端自动确保歌单就绪。
+const recommendCards = ref<any[]>([]);
+
+async function loadRecommendCards() {
+  try {
+    const res = await api.get("/rest/api/v1/recommend/home-cards", { params: { all: "1" } });
+    recommendCards.value = (res.data?.cards || []).filter((c: any) => c.playlistId);
+  } catch {
+    recommendCards.value = [];
+  }
+}
+
+function pickRecommendCard(card: any) {
+  form.contentId = card.playlistId;
+  form.contentName = card.name;
+}
 
 const form = reactive({
   name: "新音流",
@@ -346,7 +377,7 @@ async function save() {
   } finally { saving.value = false; }
 }
 
-onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions(""); });
+onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions(""); loadRecommendCards(); });
 </script>
 
 <style lang="scss" scoped>
@@ -418,7 +449,10 @@ onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions(""); });
 .select-row { display: flex; align-items: center; gap: 8px;
   .select-label { font-size: 12px; color: var(--fnos-text-secondary); flex-shrink: 0; }
   &.select-row--content { margin-top: 8px; }
+  &.select-row--recommend { margin-top: 8px; flex-wrap: wrap; }
 }
+.recommend-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.recommend-chip { cursor: pointer; user-select: none; }
 .content-name { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 6px; }
 
 @media (max-width: 768px) {

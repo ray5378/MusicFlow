@@ -11,6 +11,7 @@ import { getQueueManager } from "../dlna/queue.js";
 import { getQueueController } from "../player/index.js";
 import { setDeviceVolume, refreshDevices } from "../dlna/control.js";
 import { resolveContentSongs, songsToQueueItems } from "../content.js";
+import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../plugin/fixedRecommend.js";
 
 export type FlowPlayMode = "order" | "one" | "all" | "shuffle";
 
@@ -180,6 +181,16 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
   let items: any[] = [];
   let contentName = "";
   if (def.content?.enabled) {
+    // 固定推荐歌单(今日漫游/今日推荐/本地推荐)自愈:歌单缺失或暂无内容时,
+    // 自动触发生成(对应插件 runDailyJob)并等待可播条目——音流触发不依赖
+    // 每日调度时序,刚开机/当天未跑调度也能先生成再播。
+    if ((def.content.type || "playlist") === "playlist" && isFixedRecommendPlaylist(def.content.id)) {
+      const ensure = await ensureHomePlaylist(def.content.id);
+      if (!ensure.ok) {
+        touchRunStatus(flowId, "error", `推荐歌单「${def.content.name || def.content.id}」未就绪:${ensure.reason || "生成失败"}`);
+        return;
+      }
+    }
     const resolved = resolveContentSongs(def.content.type || "playlist", def.content.id);
     if (!resolved || resolved.rows.length === 0) {
       touchRunStatus(flowId, "error", `内容解析失败:${def.content.name ? `「${def.content.name}」` : "所选内容"}无可播放歌曲`);
