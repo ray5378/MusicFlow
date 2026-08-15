@@ -127,6 +127,11 @@ export const usePlayerStore = defineStore("player", () => {
     currentLyricLine: string;
     currentLyricIndex: number;
     pollTimer: ReturnType<typeof setInterval> | null;
+    // Liveness flag for the chained setTimeout poll loop: true while the peer
+    // is being tracked, false after stopCastPoll. (pollTimer alone can't tell
+    // "never started yet" from "stopped" — both are null — so the first
+    // schedulePoll() call must not be mistaken for a stopped loop.)
+    polling: boolean;
     // Smooth-progress interpolation timer: ticks every 250ms and advances
     // currentTime locally so the progress bar moves smoothly between the
     // slower 2s backend polls (which then correct any drift).
@@ -158,6 +163,7 @@ export const usePlayerStore = defineStore("player", () => {
         currentLyricLine: "",
         currentLyricIndex: -1,
         pollTimer: null,
+        polling: false,
         tickTimer: null,
         lastCastState: "STOPPED",
         lastScrobbledSongId: "",
@@ -175,7 +181,7 @@ export const usePlayerStore = defineStore("player", () => {
   }
   function removeRemoteState(peerId: string): void {
     const st = remoteStates.get(peerId);
-    if (st?.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
+    if (st?.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
     if (st?.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
     remoteStates.delete(peerId);
   }
@@ -752,8 +758,14 @@ export const usePlayerStore = defineStore("player", () => {
     // 接口慢/超时,固定 2s setInterval 会持续叠加请求雪上加霜;改为失败加倍间隔
     // (上限 15s)、成功回落到 2s,兼顾实时性与对后端的友好。
     let pollInterval = 2000;
+    // 修复:首调用时 pollTimer 还是 null(刚被 stopCastPoll 清掉),旧守卫
+    // `!st.pollTimer` 把「从未启动」误判为「已停止」,导致 DLNA/群组的状态轮询
+    // 永不启动——Web 端投屏后进度只能靠 250ms tickTimer 本地模拟,与设备真实
+    // 状态脱节(HA 卡片独立拉后端状态,所以正常)。改用独立 polling 标志判活:
+    // startCastPoll 置 true,stopCastPoll 置 false。
+    st.polling = true;
     const schedulePoll = () => {
-      if (!st || !st.pollTimer) return; // 已停止(stopCastPoll 后置 null)
+      if (!st || !st.polling) return; // 已停止(stopCastPoll 置 polling=false)
       st.pollTimer = setTimeout(async () => {
         try {
           const res = await api.get(peerApi(st.peerId, "/status"), { timeout: 10000 });
@@ -806,7 +818,8 @@ export const usePlayerStore = defineStore("player", () => {
     }, 250);
   }
   function stopCastPoll(st: RemoteState) {
-    if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
+    st.polling = false;
+    if (st.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
     if (st.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
   }
 
