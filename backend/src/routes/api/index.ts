@@ -11,6 +11,7 @@ import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
+import { touch, registerCacheCleaner, reclaimNow } from "../../services/memory/reclaim.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
 import { currentPace, setPace, BatchPace } from "../../services/plugin/batchPacer.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
@@ -77,6 +78,8 @@ const recommendCache = new Map<string, { ts: number; channels: any[] }>();
 export function clearRecommendCache(): void {
   recommendCache.clear();
 }
+// 空闲内存回收时一并清空(经注册回调,避免 reclaim 与路由层循环依赖)。
+registerCacheCleaner(() => { recommendCache.clear(); });
 apiRoutes.get("/v1/recommend", async (c) => {
   const rp = firstEnabledByCapability("recommend");
   const providerId = rp?.manifest.id || "";
@@ -429,6 +432,7 @@ apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
 const scanJobs = new Map<string, { status: string; startedAt: string; progress?: ScanProgress; result?: any; error?: string; mode?: string; controller?: AbortController }>();
 
 apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
+  touch(); // 标记活动:媒体源扫描
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
   if (!source) return c.json({ success: false, error: "媒体源不存在" });
@@ -923,6 +927,30 @@ apiRoutes.get("/v1/artists/missing-info-count", (c) => {
 // ==================== Settings ====================
 apiRoutes.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
 
+// 手动触发一轮空闲内存回收(系统设置页「立即回收」按钮)。返回各层回收结果。
+apiRoutes.post("/v1/admin/memory/reclaim", adminMiddleware, (c) => {
+  const r = reclaimNow();
+  return c.json({ success: true, ...r });
+});
+
+// 空闲内存自动回收设置:开关 + 空闲阈值(分钟)。存 settings 表,reclaim 运行时读取。
+apiRoutes.get("/v1/admin/memory-settings", adminMiddleware, (c) => {
+  const v = parseInt(getSetting("memory_idle_minutes", "5"), 10);
+  return c.json({
+    success: true,
+    enabled: getSettingBool("memory_auto_reclaim", true),
+    idleMinutes: Number.isFinite(v) && v > 0 ? v : 5,
+  });
+});
+apiRoutes.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body.enabled === "boolean") setSetting("memory_auto_reclaim", String(body.enabled));
+  if (Number.isFinite(body.idleMinutes) && (body.idleMinutes as number) >= 1) {
+    setSetting("memory_idle_minutes", String(Math.round(body.idleMinutes as number)));
+  }
+  return c.json({ success: true });
+});
+
 // ==================== Lyrics / covers media-fetch settings + backfill ====================
 // A(按需)/B(落库)/C(批量补全) + 独立选源(providerId)。设置存全局 settings 表:
 // 行为归核心、UI 按能力挂载(lyricProvider/coverProvider 插件配置页),与具体
@@ -1106,6 +1134,7 @@ apiRoutes.post("/v1/stream/probe", async (c) => {
 // 今日漫游(combo,合并前两者)。body 可选 { targets: ["daily"|"local"|"roam"] },
 // 缺省全刷。返回各自结果。
 apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
+  touch(); // 标记活动:推荐歌单刷新
   const body = await c.req.json().catch(() => ({}));
 
   // 单插件手动刷新:任意声明 dailyPlaylist / localPlaylist / comboPlaylist /
@@ -1265,6 +1294,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
         created.push({ id, name });
       }
       clearLibraryIndex(); // 本批本地歌单文件导入结束,立即回收曲库索引缓存
+      touch(); // 标记活动:歌单导入
       return c.json({
         success: true,
         playlistId: created[0]?.id,
@@ -1325,6 +1355,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
       notes: `来自歌单「${name}」导入`,
     });
     clearLibraryIndex(); // 单次平台歌单导入结束,立即回收曲库索引缓存
+    touch(); // 标记活动:平台歌单导入
     return c.json({
       success: true, playlistId: id, name, platform: imported.platform,
       trackCount: result.total, matched: result.matched, unmatched: result.unmatched,
@@ -1385,6 +1416,7 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
     return c.json({ success: false, error: e.message || "同步失败" });
   } finally {
     clearLibraryIndex(); // 手动同步结束,立即回收曲库索引缓存
+    touch(); // 标记活动:歌单同步
   }
 });
 

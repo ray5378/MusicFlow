@@ -66,6 +66,11 @@ export function invalidateCoverResolve(ref: string): void {
   resolveCache.delete(ref);
 }
 
+/** 清空封面路径解析缓存(文件不动,仅内存条目;供空闲内存回收)。 */
+export function clearCoverResolveCache(): void {
+  resolveCache.clear();
+}
+
 // Download a remote (platform) cover image and cache it locally. Returns the
 // local file ref or null. Stored under data/online-covers so it can be
 // mounted on a separate volume; reads resolve both dirs.

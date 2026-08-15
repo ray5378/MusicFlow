@@ -123,6 +123,12 @@ export function clearFallbackCache(songId?: string) {
   else fallbackCache.clear();
 }
 
+/** 清空全部回退缓存(含可播记忆,供空闲内存回收;下次使用会重新探测)。 */
+export function clearStreamFallbackCache(): void {
+  fallbackCache.clear();
+  playableCache.clear();
+}
+
 // songId -> true once we confirmed the original url plays (independent of the
 // fallback cache, which only stores fallback hits / misses).
 const playableCache = new Set<string>();

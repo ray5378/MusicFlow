@@ -18,6 +18,7 @@ import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist, syncAllRecommendPlaylists } from "../../services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "../../services/source/online/purge.js";
+import { touch } from "../../services/memory/reclaim.js";
 import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
 import { runPluginJob } from "../../services/plugin/jobRunner.js";
 import { acquireBatchLock } from "../../services/plugin/batchPacer.js";
@@ -339,6 +340,7 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", async (c) => {
 //   GET /v1/plugins/:id/job(各插件)
 // POST /v1/online/:providerId/recommend/sync-all
 onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
+  touch(); // 标记活动:聚合同步所有平台
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   const configured = getConfiguredProvider(providerId);

@@ -97,6 +97,10 @@ export function batchConcurrency(): number {
 
 // ---------- 全局闸(FIFO promise 链;天然互斥,无忙等) ----------
 let lockChain: Promise<void> = Promise.resolve();
+// 持锁者 + 排队者计数。isBatchBusy 的依据(不能比较 promise 实例:每次
+// Promise.resolve() 都是新对象,`lockChain !== Promise.resolve()` 恒 true,
+// 会把「空闲」误判为「忙」——空闲内存回收依赖它判断,必须语义正确)。
+let pendingLocks = 0;
 
 /**
  * 获取全局批量锁。全进程同时只允许 1 个批量任务持有;其余按 FIFO 排队等待。
@@ -104,6 +108,7 @@ let lockChain: Promise<void> = Promise.resolve();
  */
 export async function acquireBatchLock(): Promise<() => void> {
   ensureEldTimer();
+  pendingLocks++; // 入队即计入(持锁者 + 排队者)
   let releaseNext: () => void = () => {};
   const gate = new Promise<void>((r) => { releaseNext = r; });
   const prev = lockChain;
@@ -113,14 +118,14 @@ export async function acquireBatchLock(): Promise<() => void> {
   return () => {
     if (released) return;
     released = true;
+    pendingLocks--;
     releaseNext(); // 唤醒队列中下一个
   };
 }
 
-/** 是否正有批量任务持有全局闸(供状态端点/前端提示)。 */
+/** 是否正有批量任务持有或排队等待全局闸(供状态端点/前端提示/空闲判定)。 */
 export function isBatchBusy(): boolean {
-  // 有未完成的链 = 有持锁者或排队者;队列非空即视为忙
-  return lockChain !== Promise.resolve();
+  return pendingLocks > 0;
 }
 
 // ---------- 测试钩子 ----------
@@ -129,4 +134,5 @@ export function _resetPacerForTest(): void {
   lastTick = 0;
   if (eldTimer) { clearInterval(eldTimer); eldTimer = null; }
   lockChain = Promise.resolve();
+  pendingLocks = 0;
 }

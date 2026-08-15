@@ -77,6 +77,11 @@ const lrcCacheSweep = setInterval(() => {
 // Don't keep the process alive just for cache sweeping.
 (lrcCacheSweep as any).unref?.();
 
+/** 清空歌词内存缓存(供空闲内存回收;下次请求自动重建)。 */
+export function clearLyricsCache(): void {
+  lrcCache.clear();
+}
+
 // 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL)。离线优先、最准;
 // web 歌曲 path 不是 w:/l: 前缀,直接返回 null。
 async function readSidecarLrc(song: SongRow): Promise<string | null> {

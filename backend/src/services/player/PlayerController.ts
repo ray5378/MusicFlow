@@ -7,6 +7,7 @@
 // 5s play 超时:对照 MA PLAYBACK_START_TIMEOUT=5.0。
 import { PlaybackTracker, type TrackDecision } from "./PlaybackTracker.js";
 import { PlaybackState, PlayerState, toCompareState } from "./types.js";
+import { touch } from "../memory/reclaim.js";
 
 const DEBOUNCE_LAYER1_MS = 250;  // player 层去抖
 const DEBOUNCE_LAYER2_MS = 500;  // → queue 层去抖
@@ -41,6 +42,7 @@ export class PlayerController {
 
   /** 协议端点上报状态。0.25s 去抖后转发。 */
   reportState(state: PlayerState): void {
+    touch(); // 标记活动:播放状态上报(有设备在播/切歌/seek 都算活跃)
     this.latest.set(state.playerId, state);
     // 乐观窗口:若该 player 正在切歌,忽略 IDLE/异常上报,只接受 PLAYING(确认成功)
     const opt = this.optimistic.get(state.playerId);

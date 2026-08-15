@@ -51,6 +51,30 @@
         </div>
       </div>
     </el-card>
+
+    <el-card class="mt-card">
+      <h3>空闲内存回收</h3>
+      <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">自动回收</div>
+          <div class="desc">没有播放活动、也没有歌单拉取/导入/同步/扫描等操作持续一段时间后，自动清理可重建缓存（曲库索引/封面/歌词等）并回收内存。</div>
+        </div>
+        <div class="setting-value">
+          <el-switch v-model="memoryAutoReclaim" @change="saveMemorySettings" />
+        </div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">空闲阈值</div>
+          <div class="desc">连续多少分钟无活动后触发回收。</div>
+        </div>
+        <div class="setting-value memory-actions">
+          <el-input-number v-model="memoryIdleMinutes" :min="1" :max="60" size="small" @change="saveMemorySettings" />
+          <span class="pace-hint">分钟</span>
+          <el-button type="primary" :loading="reclaiming" @click="reclaimNow">立即回收</el-button>
+        </div>
+      </div>
+    </el-card>
   </div>
 </template>
 
@@ -151,7 +175,44 @@ async function saveBatchPace(pace: string) {
   }
 }
 
-onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); });
+// ---------- 空闲内存自动回收 ----------
+const memoryAutoReclaim = ref(true);
+const memoryIdleMinutes = ref(5);
+const reclaiming = ref(false);
+
+async function loadMemorySettings() {
+  try {
+    const res = await api.get("/rest/api/v1/admin/memory-settings");
+    memoryAutoReclaim.value = !!res.data?.enabled;
+    if (Number.isFinite(res.data?.idleMinutes)) memoryIdleMinutes.value = res.data.idleMinutes;
+  } catch { /* 静默 */ }
+}
+async function saveMemorySettings() {
+  try {
+    await api.put("/rest/api/v1/admin/memory-settings", {
+      enabled: memoryAutoReclaim.value,
+      idleMinutes: memoryIdleMinutes.value,
+    });
+    ElMessage.success("内存回收设置已保存");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "保存失败");
+  }
+}
+async function reclaimNow() {
+  reclaiming.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/admin/memory/reclaim", {});
+    const r = res.data || {};
+    const n = (r.caches || []).length;
+    ElMessage.success(`已回收 ${n} 类缓存${r.gc ? "，已执行 GC" : ""}${r.checkpoint ? "，已合并 WAL" : ""}`);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "回收失败");
+  } finally {
+    reclaiming.value = false;
+  }
+}
+
+onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); });
 </script>
 
 <style lang="scss" scoped>
@@ -167,6 +228,7 @@ onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); });
 .proxy-actions { display: flex; gap: 8px; align-items: center; }
 .proxy-input { width: 300px; }
 .batch-pace-actions { display: flex; gap: 10px; align-items: center; }
+.memory-actions { display: flex; gap: 10px; align-items: center; }
 .pace-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
 :deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; border-radius: var(--fnos-radius-lg) !important; }
 :deep(.el-descriptions__body) { background: transparent !important; }
