@@ -12,12 +12,13 @@ import { songs, artists, albums } from "../../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { cacheRemoteCover } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
+import { batchConcurrency } from "../../plugin/batchPacer.js";
 
 // Bounded parallelism for cover downloads/network work during a bulk import.
 // Keeps resource usage low (a handful of in-flight upstream requests) while
 // letting serialized upstream latency overlap slightly — a balance between the
 // old one-song-at-a-time loop and a full unbounded Promise.all.
-const BULK_IMPORT_CONCURRENCY = 4;
+// 并发由 batchPacer 档位 + ELD 自适应控制(standard=2, slow=1, full=4,前台忙降档)。
 
 // 封面下载全局限流(≤2 并发):批量导入匹配时,避免 4 个并发 worker 各自叠加
 // 封面下载造成网络洪峰(前台 stream/轮询请求被挤占)。全局信号量,所有导入共用。
@@ -186,7 +187,7 @@ export async function importOnlineSongs(
   let added = 0, deduped = 0, failed = 0;
   const songsOut: { id: string; title: string; fingerprint: string }[] = [];
 
-  const results = await workerLimit(songList, BULK_IMPORT_CONCURRENCY, async (s) => {
+  const results = await workerLimit(songList, batchConcurrency(), async (s) => {
     try {
       const r = await importOnlineSongCore(providerId, s, opts, existingFingerprints);
       if (r.success && r.songId) {

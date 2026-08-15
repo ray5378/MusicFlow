@@ -11,6 +11,7 @@ import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
+import { currentPace, setPace, BatchPace } from "../../services/plugin/batchPacer.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
@@ -181,6 +182,23 @@ apiRoutes.put("/v1/proxy", adminMiddleware, async (c) => {
 apiRoutes.post("/v1/proxy/test", adminMiddleware, async (c) => {
   const result = await testProxyConnection();
   return c.json(result);
+});
+
+// ==================== 后台任务限速档位 ====================
+// 批量任务(歌单同步/在线匹配/推荐补全)的 CPU 节流档位:slow|standard|full。
+// 存 settings.batch_pace,batchPacer 运行时读取(无需重启)。
+apiRoutes.get("/v1/batch-pace", adminMiddleware, (c) => {
+  return c.json({ success: true, pace: currentPace() });
+});
+
+apiRoutes.put("/v1/batch-pace", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const pace = String(body.pace || "standard");
+  if (pace !== "slow" && pace !== "standard" && pace !== "full") {
+    return c.json({ error: "档位必须为 slow | standard | full" }, 400);
+  }
+  setPace(pace as BatchPace);
+  return c.json({ success: true, pace });
 });
 
 // ==================== Users ====================

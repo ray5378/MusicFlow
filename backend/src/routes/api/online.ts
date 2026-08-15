@@ -20,6 +20,7 @@ import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylis
 import { purgeExpiredWebSongs } from "../../services/source/online/purge.js";
 import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
 import { runPluginJob } from "../../services/plugin/jobRunner.js";
+import { acquireBatchLock } from "../../services/plugin/batchPacer.js";
 
 export const onlineRoutes = new Hono();
 
@@ -122,6 +123,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", async (c) => {
   const jobId = `match-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   matchJobs.set(jobId, { status: "running", playlistId, startedAt: new Date().toISOString(), progress: { done: 0, total: entryCount }, result: null, error: null });
   (async () => {
+    // 全局批量闸:与 jobRunner/auto-match 共用,全进程同时只跑 1 个批量任务。
+    const release = await acquireBatchLock();
     try {
       const result = await matchUnmatchedPlaylistEntries(
         providerId, configured.config, configured.provider, playlistId,
@@ -130,6 +133,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", async (c) => {
       matchJobs.set(jobId, { status: "completed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: { done: entryCount, total: entryCount }, result, error: null });
     } catch (e: any) {
       matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: e.message || "匹配失败" });
+    } finally {
+      release();
     }
   })();
   return c.json({ success: true, jobId, running: true, progress: { done: 0, total: entryCount } });
@@ -168,6 +173,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
   const job = { status: "running", startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, total: targets.length, done: 0, current: "", results: [] as any[], error: null as string | null };
   batchMatchJobs.set(batchId, job);
   (async () => {
+    // 全局批量闸:整个批量适配任务作为一个批量任务参与全局互斥(FIFO 排队)。
+    const release = await acquireBatchLock();
     try {
       for (const t of targets) {
         job.current = t.name;
@@ -183,6 +190,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
     } catch (e: any) {
       job.error = String(e?.message || e);
       Object.assign(job, { status: "failed", finishedAt: new Date().toISOString() });
+    } finally {
+      release();
     }
   })();
   return c.json({ success: true, started: true, batchId, total: targets.length });

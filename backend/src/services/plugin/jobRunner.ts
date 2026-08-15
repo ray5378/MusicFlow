@@ -5,12 +5,15 @@
 //     声明的方法级长预算(上限 5 分钟),不再被 15s 看门狗强杀;
 //   - per-plugin 串行锁:同插件同时只跑一个任务,手动刷新 / 每日调度 / 6h 维护
 //     同时触发时不会撞车重复全量;
+//   - 全局批量闸(batchPacer.acquireBatchLock):全进程同时只跑 1 个批量任务(FIFO),
+//     消除 gmdl 同步 + listenbrainz 补全 + 后台 auto-match + 手动导入的 CPU 叠加;
 //   - 记录最近一次结果(状态/摘要/错误含 sandboxCode/hint),供
 //     GET /v1/plugins/:id/job 状态端点查询(前端轮询展示)。
 //
 // 只做「调度与状态」,不复制任何插件业务逻辑;错误捕获后绝不向外抛。
 
 import { getPlugin } from "../../plugins/registry.js";
+import { acquireBatchLock } from "./batchPacer.js";
 
 export interface PluginJobState {
   running: boolean;
@@ -46,6 +49,9 @@ export function runPluginJob(
   const state: PluginJobState = { running: true, status: "running", startedAt: new Date().toISOString() };
   states.set(pluginId, state);
   (async () => {
+    // 全局批量闸:同一时刻全进程只跑 1 个批量任务(FIFO 排队),防多任务叠加 CPU。
+    // 必须 finally 释放,否则队列永久阻塞。
+    const release = await acquireBatchLock();
     try {
       const summary = await reg.impl[method](opts || {});
       Object.assign(state, { running: false, status: "ok", summary, finishedAt: new Date().toISOString() });
@@ -61,6 +67,7 @@ export function runPluginJob(
       console.error(`[PLUGIN-JOB] ${pluginId} ${method} error:`, e?.message || e);
     } finally {
       running.set(pluginId, false);
+      release();
     }
   })();
   return { started: true, alreadyRunning: false };

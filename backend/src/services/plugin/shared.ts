@@ -51,6 +51,11 @@ export async function matchPlaylistInBackground(playlistId: string): Promise<voi
   if (autoMatchLocks.has(playlistId)) return;
   autoMatchLocks.add(playlistId);
   const started = Date.now();
+  // 全局批量闸:与插件任务(jobRunner)共用,全进程同时只跑 1 个批量任务,防叠加。
+  // 动态 import 避免顶层环(shared → batchPacer → settings,settings 无回环,静态亦可;
+  // 保持动态以稳妥)。
+  const { acquireBatchLock } = await import("./batchPacer.js");
+  const release = await acquireBatchLock();
   try {
     const matcher = firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search");
     if (!matcher) return; // no capable plugin enabled -> nothing to do
@@ -83,6 +88,7 @@ export async function matchPlaylistInBackground(playlistId: string): Promise<voi
     }
   } finally {
     autoMatchLocks.delete(playlistId);
+    release(); // 释放全局批量闸
   }
 }
 

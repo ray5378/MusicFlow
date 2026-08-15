@@ -9,6 +9,7 @@ import { db, sqlite } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { normalizeKey, refreshPlaylistCounts } from "../../plugin/shared.js";
+import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { OnlineSongResult } from "./types.js";
 import { importOnlineSong, importOnlineSongs } from "./service.js";
 
@@ -147,14 +148,16 @@ export async function matchToOnlineSong(
  * Match all currently-unmatched entries of a playlist through the online provider.
  * Works for any playlist with loose (external) entries, imported or not.
  *
- * 两阶段(P0 优化,解决「导入时前台卡死」):
- *   阶段1 搜索+打分(不落库),每 10 首让行(setImmediate)——事件循环有机会
- *         处理前台请求(播放器轮询/stream/歌单加载),不再被同步 DB 写饿死;
+ * 两阶段(P0 优化,解决「导入时前台卡死」)+ 节流(P0/P1/P2 批量节拍器):
+ *   阶段1 搜索+打分(不落库),每 10 首 sleepBetweenBatch()——主动睡眠让 CPU 真正
+ *         空闲(区别于 setImmediate 只让事件循环插空),前台请求(播放器轮询/stream/
+ *         歌单加载)有喘息;并发走 batchConcurrency()(档位 + ELD 自适应);
  *   阶段2 批量导入所有命中(importOnlineSongs:批量 dedup + 计数集合去重刷新一次)
- *         + 事务批量链接条目 + 歌单计数刷新一次——DB 阻塞从「每首 5-8 次」降到
- *         「整歌单一次」,封面下载也走全局限流(≤2 并发)。
+ *         + 事务批量链接条目(每 TX_CHUNK 首一个事务,锁粒度更细)+ 歌单计数刷新
+ *         一次——DB 阻塞从「每首 5-8 次」降到「整歌单一次」,封面下载走全局限流。
+ *   全局闸(acquireBatchLock): 由调用方(jobRunner / auto-match)持有,保证全进程
+ *         同时只跑 1 个批量任务,消除多任务叠加。
  */
-const MATCH_CONCURRENCY = 4;
 
 export async function matchUnmatchedPlaylistEntries(
   providerId: string,
@@ -196,33 +199,41 @@ export async function matchUnmatchedPlaylistEntries(
         else error++;
       }
       done++;
-      // 让行:每 10 首让事件循环处理前台请求,避免批量匹配饿死播放器轮询/stream。
-      if (done % 10 === 0) await new Promise((r) => setImmediate(r));
+      // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
+      // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。
+      if (done % 10 === 0) await sleepBetweenBatch();
       onProgress?.(done, entries.length, results[i]);
     }
   };
 
-  const workers = Array.from({ length: Math.max(1, Math.min(MATCH_CONCURRENCY, entries.length)) }, () => worker());
+  const workers = Array.from({ length: Math.max(1, Math.min(batchConcurrency(), entries.length)) }, () => worker());
   await Promise.all(workers);
 
-  // ---- 阶段2:批量导入所有命中(批量 dedup + 计数去重刷新一次)+ 事务链接 ----
+  // ---- 阶段2:批量导入所有命中(批量 dedup + 计数去重刷新一次)+ 分块事务链接 ----
   let matched = 0;
   if (matchedByEntry.size > 0) {
     const imp = await importOnlineSongs(providerId, Array.from(matchedByEntry.values()).map((v) => v.best), {});
     const byFp = new Map<string, string>();
     for (const s of imp.songs) byFp.set(s.fingerprint, s.id);
 
-    // 事务批量链接:一次提交全部条目 UPDATE(避免逐条同步写阻塞事件循环)。
-    sqlite.transaction(() => {
-      for (const [entryId, v] of matchedByEntry) {
-        const songId = byFp.get(v.fp);
-        if (!songId) continue;
-        db.update(playlistSongs)
-          .set({ songId, playable: 1, unavailableReason: null })
-          .where(eq(playlistSongs.id, entryId))
-          .run();
-      }
-    })();
+    // 分块事务链接:每 TX_CHUNK 首一个事务提交(避免超大歌单单事务持锁时间过长,
+    // 提交瞬间 CPU 高峰),块间同样主动睡眠节流。
+    const TX_CHUNK = 200;
+    const linkPairs = Array.from(matchedByEntry.entries());
+    for (let off = 0; off < linkPairs.length; off += TX_CHUNK) {
+      const chunk = linkPairs.slice(off, off + TX_CHUNK);
+      sqlite.transaction(() => {
+        for (const [entryId, v] of chunk) {
+          const songId = byFp.get(v.fp);
+          if (!songId) continue;
+          db.update(playlistSongs)
+            .set({ songId, playable: 1, unavailableReason: null })
+            .where(eq(playlistSongs.id, entryId))
+            .run();
+        }
+      })();
+      if (off + TX_CHUNK < linkPairs.length) await sleepBetweenBatch();
+    }
     // 歌单计数整单刷新一次(替代每首刷新)。
     refreshPlaylistCounts(playlistId);
 

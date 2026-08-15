@@ -33,6 +33,24 @@
         </div>
       </div>
     </el-card>
+
+    <el-card class="mt-card">
+      <h3>后台任务限速</h3>
+      <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">批量任务档位</div>
+          <div class="desc">控制歌单同步 / 在线匹配 / 推荐补全等批量任务的 CPU 占用与速度。低速最省 CPU（白天在用电脑时推荐），全速最快但可能占用较高。</div>
+        </div>
+        <div class="setting-value batch-pace-actions">
+          <el-select v-model="batchPace" style="width: 160px" @change="saveBatchPace">
+            <el-option label="低速（最省 CPU）" value="slow" />
+            <el-option label="标准（推荐）" value="standard" />
+            <el-option label="全速（最快）" value="full" />
+          </el-select>
+          <span class="pace-hint">{{ batchPaceHint }}</span>
+        </div>
+      </div>
+    </el-card>
   </div>
 </template>
 
@@ -99,7 +117,41 @@ async function testProxy() {
   }
 }
 
-onMounted(() => { loadVersion(); loadProxy(); });
+// ---------- 后台任务限速档位 ----------
+const batchPace = ref<"slow" | "standard" | "full">("standard");
+const batchPaceHint = ref("并发 2、批间睡眠 120ms，前台忙时自动降速");
+const PACE_HINTS: Record<string, string> = {
+  slow: "并发 1、批间睡眠 120ms，最平缓",
+  standard: "并发 2、批间睡眠 120ms，前台忙时自动降速",
+  full: "并发 4、批间不睡眠，最快但占用高",
+};
+
+async function loadBatchPace() {
+  try {
+    const res = await api.get("/rest/api/v1/batch-pace");
+    const p = res.data?.pace;
+    if (p === "slow" || p === "standard" || p === "full") {
+      batchPace.value = p;
+      batchPaceHint.value = PACE_HINTS[p];
+    }
+  } catch { /* 静默 */ }
+}
+
+async function saveBatchPace(pace: string) {
+  try {
+    const res = await api.put("/rest/api/v1/batch-pace", { pace });
+    if (res.data?.success) {
+      batchPaceHint.value = PACE_HINTS[pace] || "";
+      ElMessage.success("限速档位已保存，立即生效");
+    } else {
+      ElMessage.error(res.data?.error || "保存失败");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "保存失败");
+  }
+}
+
+onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); });
 </script>
 
 <style lang="scss" scoped>
@@ -114,6 +166,8 @@ onMounted(() => { loadVersion(); loadProxy(); });
 }
 .proxy-actions { display: flex; gap: 8px; align-items: center; }
 .proxy-input { width: 300px; }
+.batch-pace-actions { display: flex; gap: 10px; align-items: center; }
+.pace-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
 :deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; border-radius: var(--fnos-radius-lg) !important; }
 :deep(.el-descriptions__body) { background: transparent !important; }
 :deep(.el-descriptions__label) { background: rgba(255,255,255,0.04) !important; color: var(--fnos-text-secondary) !important; }
