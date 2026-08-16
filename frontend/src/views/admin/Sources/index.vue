@@ -105,7 +105,9 @@
           <el-form-item label="根路径"><el-input v-model="newSource.config.root_path" placeholder="/music" /></el-form-item>
         </template>
         <template v-else>
-          <el-form-item label="本地路径"><el-input v-model="newSource.config.path" placeholder="/path/to/music" /></el-form-item>
+          <el-form-item label="本地路径" description="容器内路径,需与 docker-compose.yml 的本地音乐目录挂载一致,默认填 /local/music">
+            <el-input v-model="newSource.config.path" placeholder="/local/music" />
+          </el-form-item>
         </template>
       </el-form>
       <template #footer>
@@ -125,7 +127,9 @@
           <el-form-item label="根路径"><el-input v-model="editSource.config.root_path" /></el-form-item>
         </template>
         <template v-else>
-          <el-form-item label="本地路径"><el-input v-model="editSource.config.path" /></el-form-item>
+          <el-form-item label="本地路径" description="容器内路径,需与 docker-compose.yml 的本地音乐目录挂载一致,默认 /local/music">
+            <el-input v-model="editSource.config.path" placeholder="/local/music" />
+          </el-form-item>
         </template>
         <el-form-item label="启用">
           <el-switch v-model="editSource.enabled" :active-value="1" :inactive-value="0" />

@@ -45,7 +45,7 @@ docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow
 ```yaml
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow:1.7.60
+    image: ghcr.io/ray5378/musicflow:latest
     container_name: musicflow
     restart: unless-stopped
     # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
@@ -66,6 +66,11 @@ services:
     volumes:
       # 数据与缓存目录(宿主 ./data 挂到容器 /data),结构见下方「数据与缓存目录」:
       - ./data:/data
+      # 本地音乐目录(默认开启):宿主 ./local/music 挂到容器 /local/music。
+      # 把音乐文件放进宿主机的 ./local/music,容器内即 /local/music。
+      # 「媒体源管理 → 添加媒体源 → 类型选本地目录」时,本地路径填 /local/music,
+      # 须与本挂载保持一致,否则读取不到。
+      - ./local/music:/local/music
       # 可选:把平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
       # 默认它在 ./data 卷内,无需配置;想单独存放/单独清缓存时取消注释:
       # - ./online-covers:/data/online-covers
@@ -75,6 +80,8 @@ services:
 
 > **平台音乐封面本地落盘默认开启**：QQ / 网易云等平台的歌曲与歌单封面，下载后会默认保存到 `data/online-covers/`（容器内 `/data/online-covers`），无需任何配置；想把它独立放到其他磁盘（如大容量数据盘），取消 compose 里对应那行卷映射即可。
 
+> **本地音乐目录默认开启**：compose 已默认挂载 `./local/music:/local/music`，把音乐文件放进宿主机的 `./local/music` 即可。然后在「媒体源管理 → 添加媒体源 → 类型选本地目录」，本地路径填容器内的 `/local/music`（必须与 compose 挂载一致）。注意：这是容器内路径，不是宿主机路径。
+
 ### 直接 docker run
 
 ```bash
@@ -82,7 +89,7 @@ docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
   -e DATA_DIR=/data \
   -v $(pwd)/data:/data \
-  ghcr.io/ray5378/musicflow:1.7.60
+  ghcr.io/ray5378/musicflow:latest
 ```
 
 > DLNA 发现依赖 SSDP 多播，`docker compose` 默认 `network_mode: host`；Docker Desktop（macOS/Windows）上多播不可用，DLNA 需在 Linux 宿主机运行。

@@ -31,6 +31,11 @@ services:
       #   plugins/          —— 外置插件
       #   .jwt-secret       —— 自动生成的 JWT 密钥
       - ./data:/data
+      # 本地音乐目录(默认开启):宿主 ./local/music 挂到容器 /local/music。
+      # 把你的音乐文件放到宿主机的 ./local/music 目录,容器内即 /local/music。
+      # 在「媒体源管理 → 添加媒体源 → 类型选本地目录」时,
+      # 本地路径填 /local/music(容器内路径),必须与本挂载保持一致,否则读取不到。
+      - ./local/music:/local/music
       # 可选:把平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
       # 默认它在上面的 ./data 卷内,无需配置;想单独存放/单独清缓存时,
       # 取消注释并把宿主机路径换成你的目录(优先级高于 ./data 内的同名子目录):
