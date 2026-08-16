@@ -53,6 +53,8 @@ function mapItems(kind: Kind, list: any[] | undefined, labels: Record<string, st
       album: s.album || "",
       duration: s.duration || 0,
       cover: s.cover || "",
+      // 插件可在歌曲上告知音频格式(mp3/flac/wav...);透传给前端,本机播放优先采用、不探测。
+      suffix: s.suffix || "",
       platformLabel: labels[s.source] || s.source,
     }));
   }

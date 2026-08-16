@@ -473,12 +473,12 @@ export const usePlayerStore = defineStore("player", () => {
     if (!song) return;
     loadLocalLyrics(song.id);
     let fmt = (song.suffix || "").toLowerCase();
-    if (song.streamUrl) {
-      // 远程歌:探测真实格式(Range 拿 Content-Type,带缓存;suffix 占位不参与本机格式)。
-      // 探测失败兜底 mp3(主流在线源默认);探测期间有更新的播放请求则放弃本次。
-      const probed = (await probeRemoteFormat(getStreamUrl(song))) || "mp3";
+    // 插件在 item 上明确给了格式(_suffixKnown)则直接采用,不探测;否则 Range 探测
+    // 上游 Content-Type 确认真实格式(占位 mp3 只是 DLNA mime 兜底,本机不沿用)。
+    if (song.streamUrl && !(song as any)._suffixKnown) {
+      const probed = await probeRemoteFormat(getStreamUrl(song));
       if (mySeq !== playbackSeq) return;
-      fmt = probed;
+      fmt = probed || fmt || "mp3";
     }
     howl = new Howl({
       src: [getStreamUrl(song)],

@@ -44,12 +44,14 @@ export function remoteItemToSong(item: any, providerId: string): Song {
     album: item.album || "",
     duration: item.duration || 0,
     coverArt: item.cover || undefined,
-    // 远程歌(未入库):streamUrl 指向 /rest/stream-remote 代理流;实际格式由上游
-    // Content-Type 决定,播放前 player store 会 Range 探测拿到真实格式(不写死 mp3,
-    // go-music-dl 等插件可能返回 flac/wav/aac);suffix 占位供 DLNA 队列 item 推导 mime。
-    suffix: "mp3",
+    // 格式契约:插件可在搜索结果的 item 上携带 suffix(它最清楚自己后端输出的格式,
+    // 如 mp3/flac/wav)——带则优先采用,本机播放不探测;不带则占位 mp3(仅 DLNA 队列
+    // mime 推导用),本机播放会 Range 探测上游 Content-Type 确认真实格式(兼容所有格式)。
+    suffix: item.suffix || "mp3",
+    // 远程歌(未入库):streamUrl 指向 /rest/stream-remote 代理流。
     streamUrl: `/rest/stream-remote?${qs.toString()}`,
   };
+  (song as any)._suffixKnown = !!item.suffix; // 插件是否明确给了格式(探测只发生在未给时)
   (song as any)._item = item;
   return song;
 }
