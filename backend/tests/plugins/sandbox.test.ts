@@ -442,12 +442,14 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
   });
 
   it("长耗时方法:等网络无限合法(无墙钟,超预算仍完成)", async () => {
-    // manifest.longRunning.runDailyJob=200ms(墙钟预算远小于任务实际时长);任务 15 次
-    // await host.http(每次 ~2ms+ 延迟,总时长 > 200ms)。软看门狗:每步都在等 host
+    // manifest.longRunning.runDailyJob=50ms(墙钟预算远小于任务实际时长);任务 200 次
+    // await host.http(每次 ~2ms 延迟,总时长 ~400ms ≫ 预算)。软看门狗:每步都在等 host
     // (removeDefer 重置 CPU 基准)→ 不触发空转检测 → 不被杀,任务完整完成。
+    // 预算取 50ms 而非 200ms:全量测试并发负载下 setTimeout(2) 可能聚簇/提前,实测
+    // 总时长会贴近 200ms 边界(曾 flake);50ms 预算给断言 wall>50 留 4× 以上余量。
     const LONG_CODE = `
       globalThis.__mfPlugin = {
-        manifest: { id: "demo-long", name: "x", version: "1.0.0", type: "source", capabilities: ["recommendPlaylist"], configSchema: [], permissions: ["net"], longRunning: { runDailyJob: 200 } },
+        manifest: { id: "demo-long", name: "x", version: "1.0.0", type: "source", capabilities: ["recommendPlaylist"], configSchema: [], permissions: ["net"], longRunning: { runDailyJob: 50 } },
         create(host) {
           return {
             async runDailyJob(opts) {
@@ -465,8 +467,8 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
     const r = await impl.runDailyJob({ force: true });
     const wall = Date.now() - t0;
     expect(String(r)).toContain("long-ok");
-    // 总耗时超过原墙钟预算(200ms)仍成功 = 批量任务无墙钟、只按 CPU 空转判定。
-    expect(wall).toBeGreaterThan(200);
+    // 总耗时超过原墙钟预算(50ms)仍成功 = 批量任务无墙钟、只按 CPU 空转判定。
+    expect(wall).toBeGreaterThan(50);
   });
 
   it("长耗时方法:纯 CPU 死循环被软看门狗中断(空转检测)", async () => {

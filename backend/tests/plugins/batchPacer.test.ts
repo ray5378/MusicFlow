@@ -57,11 +57,13 @@ describe("batchPacer 批量节拍器", () => {
     release2();
   });
 
-  it("批间睡眠: full 档不睡(<30ms), slow 档至少睡 100ms", async () => {
+  it("批间睡眠: full 档不睡(<50ms), slow 档至少睡 100ms", async () => {
     setSetting("batch_pace", "full");
     const t0 = Date.now();
     await sleepBetweenBatch();
-    expect(Date.now() - t0).toBeLessThan(30);
+    // full 档 sleepMs=0 → setTimeout(0)。CI 负载下事件循环可能推迟数 ms,
+    // 留到 <50ms(仍远低于 slow 的 120ms)即可证明「不主动睡」。
+    expect(Date.now() - t0).toBeLessThan(50);
     setSetting("batch_pace", "slow");
     const t1 = Date.now();
     await sleepBetweenBatch();
@@ -83,14 +85,16 @@ describe("batchPacer 批量节拍器", () => {
     expect(batchConcurrency()).toBe(2);
   });
 
-  it("交互窗口内批间睡眠放大 4 倍(slow 120→≥480ms)", async () => {
+  it("交互窗口内批间睡眠放大 4 倍(slow 120→≥460ms)", async () => {
     setSetting("batch_pace", "slow");
     markInteractiveStart();
     const t0 = Date.now();
     await sleepBetweenBatch();
     const elapsed = Date.now() - t0;
     markInteractiveEnd();
-    expect(elapsed).toBeGreaterThanOrEqual(480);
+    // 目标 120×4=480ms。Node 定时器在 CI 负载下可能早 1~2ms 触发(曾实测 479ms),
+    // 断言放 460 仍远高于非交互路径上限(ELD ×2 = 240ms),语义(放大 4 倍)不丢。
+    expect(elapsed).toBeGreaterThanOrEqual(460);
   });
 
   it("交互操作自身并发不受退让影响(interactiveConcurrency = 档位基础并发)", () => {
