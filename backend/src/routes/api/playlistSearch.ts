@@ -11,19 +11,10 @@
 // 核心只按 capability 查插件(getEnabledByCapability),不写死任何插件 id。
 
 import { Hono } from "hono";
-import { db } from "../../db/index.js";
-import { playlists } from "../../db/schema.js";
-import { eq, and } from "drizzle-orm";
 import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
-import { playlistSyncApi } from "../../services/pluginAccess.js";
-import { importOnlineSongs } from "../../services/source/online/service.js";
-import { replacePlaylistSongs } from "../../services/source/online/recommendImport.js";
-import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
-import { cacheRemoteCover } from "../../services/playlistCover.js";
-import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
+import { importRemotePlaylistLike } from "../../services/plugin/remoteImport.js";
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
-import { touch } from "../../services/memory/reclaim.js";
 
 export const playlistSearchRoutes = new Hono();
 
@@ -103,73 +94,18 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) =>
   const sourceUrl = syntheticSourceUrl(providerId, source, id);
 
   const started = startAsyncTask("playlist-search-import", `pl:${sourceUrl}:${user?.id || ""}`, async () => {
-    markInteractiveStart(); // 用户交互窗口:后台批量任务让路;自身走 interactive 全速并发
-    try {
-      const { songs: list } = await plugin.impl.playlistSongs(config, source, id);
-      if (!Array.isArray(list) || list.length === 0) {
-        throw new Error("该歌单没有可导入的歌曲");
-      }
-      // 歌曲入库为在线歌曲(可播),返回 { songs: [{ id, title, ... }], added, deduped, failed }
-      // interactive:用户操作自身不受交互退让影响,按档位基础并发全速导入。
-      const imp = await importOnlineSongs(providerId, list, { userId: user?.id, interactive: true });
-      if (!imp?.songs?.length) {
-        throw new Error("歌曲入库失败,请检查在线源配置");
-      }
-
-      const name = fallbackName || `歌单 ${source}/${id}`;
-      const existing = db.select().from(playlists)
-        .where(and(eq(playlists.sourceUrl, sourceUrl), eq(playlists.ownerId, user?.id || "")))
-        .get();
-
-      let playlistId: string;
-      if (existing) {
-        playlistId = existing.id;
-        const upd: any = { updatedAt: new Date().toISOString() };
-        if (fallbackName) upd.name = name;
-        if (cover) {
-          const cached = await cacheRemoteCover(cover, `pl-${playlistId}`, true);
-          if (cached) upd.coverArt = cached;
-        }
-        db.update(playlists).set(upd).where(eq(playlists.id, playlistId)).run();
-      } else {
-        playlistId = `pl-${Date.now()}`;
-        let coverRef: string | undefined = undefined;
-        if (cover) {
-          const cached = await cacheRemoteCover(cover, `pl-${playlistId}`);
-          if (cached) coverRef = cached;
-        }
-        db.insert(playlists).values({
-          id: playlistId,
-          name,
-          ownerId: user?.id || "",
-          sourceUrl,
-          sourcePlatform: source,
-          sourcePlugin: providerId,
-          externalId: id,
-          coverArt: coverRef,
-          syncEnabled: 0, // 搜索结果歌单默认不同步;用户可在歌单管理手动开启(由插件能力决定是否支持)
-        }).run();
-      }
-
-      // 全量替换条目为本次拉取的歌曲(在线歌曲直接关联 songId,可播放)
-      await replacePlaylistSongs(playlistId, imp.songs);
-      refreshPlaylistCounts(playlistId);
-      return {
-        success: true,
-        playlistId,
-        name,
-        platform: source,
-        trackCount: imp.songs.length,
-        added: imp.added,
-        deduped: imp.deduped,
-        failed: imp.failed,
-        created: !existing,
-      };
-    } finally {
-      clearLibraryIndex(); // 回收曲库索引缓存(避免大歌单残留内存)
-      touch(); // 标记活动:搜索歌单导入
-      markInteractiveEnd();
-    }
+    // 拉歌 → 入库 → 平台歌单 upsert(合成 sourceUrl 幂等)→ 全量替换条目,见 remoteImport.ts
+    return importRemotePlaylistLike({
+      providerId,
+      plugin: plugin.impl,
+      config,
+      userId: user?.id,
+      source,
+      id,
+      name: fallbackName,
+      cover,
+      sourceUrl,
+    });
   });
   if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
   return c.json({ success: true, taskId: started.taskId });

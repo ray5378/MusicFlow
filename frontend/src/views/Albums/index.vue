@@ -2,9 +2,24 @@
   <div class="albums-page">
     <div class="page-header">
       <h2>专辑</h2>
-      <el-input v-model="searchQuery" placeholder="搜索专辑..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
+      <div class="header-actions">
+        <span class="search-label">搜索</span>
+        <el-dropdown trigger="click" @command="onSearchSourceCommand">
+          <el-button>
+            {{ currentSourceLabel }}
+            <el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="local">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
+      </div>
     </div>
-    <div class="album-grid" v-loading="loading">
+    <div class="album-grid" v-if="isLocalMode" v-loading="loading">
       <div
         class="album-card fnos-card-sheen"
         v-for="(album, idx) in albums"
@@ -25,26 +40,69 @@
         </div>
       </div>
     </div>
-    <div class="pagination-bar">
+
+    <!-- 远程搜索结果(插件模式):由启用的 albumSearch 插件(如 go-music-dl)提供,可「加入库」为专辑歌单 -->
+    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
+      <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
+        <MfIcon name="Disc3" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关专辑" : `输入关键词,搜索${currentProviderName}支持的全网专辑` }}</p>
+      </div>
+      <div v-else class="album-grid">
+        <div class="album-card fnos-card-sheen" v-for="(item, i) in remoteItems" :key="i">
+          <div class="album-cover mf-coverwrap">
+            <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
+            <span class="remote-source-tag">{{ item.platformLabel }}</span>
+          </div>
+          <div class="album-info">
+            <div class="album-name">{{ item.name }}</div>
+            <div class="album-artist">{{ item.artist }}</div>
+            <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? item.trackCount + "首" : "" }}</div>
+          </div>
+          <el-button
+            class="remote-import-btn"
+            size="small"
+            type="primary"
+            :loading="importingId === item.source + ':' + item.id"
+            :disabled="item._imported"
+            @click="importAlbum(item)"
+          >{{ item._imported ? "已加入库" : "加入库" }}</el-button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pagination-bar" v-if="isLocalMode">
       <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="albumsPageSize" @change="onPageChange" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
+import { useEntitySearch } from "@/composables/useEntitySearch";
 import api from "@/api";
 import { coverUrl } from "@/utils/cover";
 
 const router = useRouter();
 const { openContextMenu, openActionSheet, menuGuard, albumActions } = useItemActions();
 const play = usePlayContent();
+
+// 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 albumSearch 就不出现在下拉里
+const {
+  searchMode, searchProviders, remoteItems, remoteSearching, importingId,
+  isLocalMode, isRemoteMode, currentProviderName, currentSourceLabel,
+  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, importAlbum,
+  setLocalLoader, setAfterRemoteImport,
+} = useEntitySearch("album");
+const searchPlaceholder = computed(() =>
+  isRemoteMode.value ? `搜索${currentProviderName}全网专辑...` : "搜索专辑...",
+);
 
 function open(album: any) {
   if (menuGuard()) return;
@@ -91,17 +149,45 @@ function onPageChange(page: number, size?: number) {
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { currentPage.value = 1; loadAlbums(); }, 300);
+  searchTimer = setTimeout(() => {
+    currentPage.value = 1;
+    if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
+    else loadAlbums();
+  }, 300);
 }
 
-function onSearchClear() { currentPage.value = 1; loadAlbums(); }
+function onSearchClear() {
+  if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
+  currentPage.value = 1;
+  loadAlbums();
+}
 
-onMounted(loadAlbums);
+// 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
+watch(() => searchMode.value, () => {
+  if (isRemoteMode.value && searchQuery.value.trim()) doRemoteSearch(searchQuery.value);
+});
+
+onMounted(() => {
+  setLocalLoader(loadAlbums);
+  setAfterRemoteImport(loadAlbums); // 「加入库」成功后刷新本地列表
+  loadSearchProviders();
+  loadAlbums();
+});
 </script>
 
 <style lang="scss" scoped>
 .albums-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } }
+.search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
+.remote-results {
+  .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
+  .remote-source-tag {
+    position: absolute; top: 8px; left: 8px; z-index: 2;
+    padding: 2px 8px; border-radius: 6px; font-size: 11px;
+    background: rgba(0,0,0,0.55); color: #fff; backdrop-filter: blur(4px);
+  }
+  .remote-import-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; }
+}
 .album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
 .album-card {
   cursor: pointer;

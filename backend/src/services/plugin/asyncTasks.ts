@@ -10,7 +10,7 @@
 //   - getAsyncTask(id):查状态;任务完成/失败后仍可查(不清理,重启即清零)。
 //   - GET /v1/tasks/:id 暴露给前端轮询(见 api/index.ts)。
 
-export type AsyncTaskKind = "playlist-import" | "playlist-search-import" | "playlist-sync";
+export type AsyncTaskKind = "playlist-import" | "playlist-search-import" | "song-search-import" | "album-search-import" | "playlist-sync";
 
 export interface AsyncTaskState {
   id: string;

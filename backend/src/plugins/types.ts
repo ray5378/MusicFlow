@@ -28,6 +28,9 @@ export type PluginCapability =
   // ---- source plugins ----
   | "search" // online search
   | "playlistSearch" // search remote playlists (aggregated across the plugin's platforms)
+  | "songSearch" // search remote songs (aggregated across the plugin's platforms)
+  | "artistSearch" // search remote artists
+  | "albumSearch" // search remote albums
   | "recommend" // daily-recommend playlists
   | "playlistSongs" // fetch songs of a single remote playlist
   | "stream" // build an audio stream URL
@@ -170,6 +173,70 @@ export interface PlaylistSearchPlugin {
     config: Record<string, unknown>,
     params: { query: string; sources?: string[] },
   ): Promise<{ playlists: RemotePlaylistShape[] }>;
+}
+
+/** A remote song found via a source plugin's "songSearch" capability.
+ *  Field shape aligns with OnlineSongResult (services/source/online/types.ts)
+ *  so search results can be imported into the library as playable web songs. */
+export interface RemoteSongShape {
+  id: string;
+  source: string; // platform slug (netease, qq, kugou, ...)
+  name: string;
+  artist: string;
+  album?: string;
+  duration?: number; // seconds
+  cover?: string;
+  extra?: Record<string, string> | null;
+}
+
+/** A remote artist found via a source plugin's "artistSearch" capability. */
+export interface RemoteArtistShape {
+  id: string;
+  source: string; // platform slug
+  name: string;
+  avatar?: string; // avatar / cover URL
+  link?: string;
+  albumCount?: number | string;
+  songCount?: number | string;
+}
+
+/** A remote album found via a source plugin's "albumSearch" capability. */
+export interface RemoteAlbumShape {
+  id: string;
+  source: string; // platform slug
+  name: string;
+  artist?: string;
+  cover?: string;
+  trackCount?: number | string;
+  year?: number | string;
+  link?: string;
+}
+
+/** Implemented by `source` plugins that declare "songSearch". */
+export interface SongSearchPlugin {
+  manifest: PluginManifest;
+  searchSongs(
+    config: Record<string, unknown>,
+    params: { query: string; sources?: string[] },
+  ): Promise<{ songs: RemoteSongShape[] }>;
+}
+
+/** Implemented by plugins that declare "artistSearch". */
+export interface ArtistSearchPlugin {
+  manifest: PluginManifest;
+  searchArtists(
+    config: Record<string, unknown>,
+    params: { query: string; sources?: string[] },
+  ): Promise<{ artists: RemoteArtistShape[] }>;
+}
+
+/** Implemented by plugins that declare "albumSearch". */
+export interface AlbumSearchPlugin {
+  manifest: PluginManifest;
+  searchAlbums(
+    config: Record<string, unknown>,
+    params: { query: string; sources?: string[] },
+  ): Promise<{ albums: RemoteAlbumShape[] }>;
 }
 
 /** Implemented by `importer` plugins that declare the "playlistFile" capability

@@ -137,6 +137,9 @@ const STRIP_HOST_FIRST = new Set(["searchLyrics", "searchCover", "onPlay", "onSc
 const CAP_METHODS: Record<string, string[]> = {
   search: ["search"],
   playlistSearch: ["searchPlaylists"],
+  songSearch: ["searchSongs"],
+  artistSearch: ["searchArtists"],
+  albumSearch: ["searchAlbums"],
   recommend: ["recommend"],
   playlistSongs: ["playlistSongs"],
   stream: ["streamUrl"],

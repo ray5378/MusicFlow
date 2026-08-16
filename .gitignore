@@ -5,6 +5,7 @@ dist/
 # runtime data (DB, cover cache) - never commit
 backend/data/
 data/
+.test-data/
 *.db
 *.db-wal
 *.db-shm

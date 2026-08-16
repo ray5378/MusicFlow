@@ -24,10 +24,23 @@
             <MfIcon name="RotateCcw" />仅刮削缺失歌手信息<template v-if="missingCount > 0">({{ missingCount }})</template>
           </el-button>
         </el-tooltip>
-        <el-input v-model="searchQuery" placeholder="搜索艺术家..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
+        <span class="search-label">搜索</span>
+        <el-dropdown trigger="click" @command="onSearchSourceCommand">
+          <el-button>
+            {{ currentSourceLabel }}
+            <el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="local">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <div class="artist-grid" v-loading="loading">
+    <div class="artist-grid" v-if="isLocalMode" v-loading="loading">
       <div
         class="artist-card"
         v-for="artist in artists"
@@ -47,26 +60,64 @@
         <div class="artist-meta" @click="open(artist)">{{ formatAlbumCount(artist.albumCount) }}</div>
       </div>
     </div>
-    <div class="pagination-bar">
+
+    <!-- 远程搜索结果(插件模式):由启用的 artistSearch 插件提供,仅展示(发现用,无导入) -->
+    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
+      <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
+        <MfIcon name="User" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关艺术家" : `输入关键词,搜索${currentProviderName}支持的艺术家` }}</p>
+      </div>
+      <div v-else class="artist-grid">
+        <div class="artist-card" v-for="(item, i) in remoteItems" :key="i">
+          <div class="artist-avatar mf-coverwrap">
+            <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
+            <span class="remote-source-tag">{{ item.platformLabel }}</span>
+          </div>
+          <div class="artist-name">{{ item.name }}</div>
+          <div class="artist-meta">{{ formatRemoteMeta(item) }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pagination-bar" v-if="isLocalMode">
       <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="artistsPageSize" @change="onPageChange" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
+import { useEntitySearch } from "@/composables/useEntitySearch";
 import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 
 const router = useRouter();
 const { openContextMenu, openActionSheet, menuGuard, artistActions } = useItemActions();
 const play = usePlayContent();
+
+// 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 artistSearch 就不出现在下拉里
+const {
+  searchMode, searchProviders, remoteItems, remoteSearching,
+  isLocalMode, isRemoteMode, currentProviderName, currentSourceLabel,
+  loadSearchProviders, onSearchSourceCommand, doRemoteSearch,
+  setLocalLoader,
+} = useEntitySearch("artist");
+const searchPlaceholder = computed(() =>
+  isRemoteMode.value ? `搜索${currentProviderName}艺术家...` : "搜索艺术家...",
+);
+function formatRemoteMeta(item: any) {
+  const parts: string[] = [];
+  if (item.albumCount) parts.push(`${item.albumCount} 张专辑`);
+  if (item.songCount) parts.push(`${item.songCount} 首`);
+  return parts.join(" · ");
+}
 
 function open(artist: any) {
   if (menuGuard()) return;
@@ -196,10 +247,18 @@ function onPageChange(page: number, size?: number) {
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { currentPage.value = 1; loadArtists(); }, 300);
+  searchTimer = setTimeout(() => {
+    currentPage.value = 1;
+    if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
+    else loadArtists();
+  }, 300);
 }
 
-function onSearchClear() { currentPage.value = 1; loadArtists(); }
+function onSearchClear() {
+  if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
+  currentPage.value = 1;
+  loadArtists();
+}
 
 function formatAlbumCount(n: number) {
   if (!n || n <= 0) return '';
@@ -207,7 +266,18 @@ function formatAlbumCount(n: number) {
   return `${n} 张专辑`;
 }
 
-onMounted(() => { loadArtists(); loadMissingCount(); checkScrapeStatus(); });
+// 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
+watch(() => searchMode.value, () => {
+  if (isRemoteMode.value && searchQuery.value.trim()) doRemoteSearch(searchQuery.value);
+});
+
+onMounted(() => {
+  setLocalLoader(loadArtists);
+  loadSearchProviders();
+  loadArtists();
+  loadMissingCount();
+  checkScrapeStatus();
+});
 
 // Stop the scrape-progress poll when leaving the page so the 1.5s interval
 // doesn't keep running (and issuing requests) in the background.
@@ -248,6 +318,15 @@ onUnmounted(() => {
   .artist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 5px; min-height: 16px; }
 }
 .pagination-bar { margin-top: 24px; display: flex; justify-content: center; }
+.search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
+.remote-results {
+  .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
+  .remote-source-tag {
+    position: absolute; top: 6px; right: 6px; z-index: 2;
+    padding: 2px 8px; border-radius: 6px; font-size: 11px;
+    background: rgba(0,0,0,0.55); color: #fff; backdrop-filter: blur(4px);
+  }
+}
 @keyframes home-card-in {
   from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: translateY(0); }

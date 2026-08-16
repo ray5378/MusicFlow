@@ -7,9 +7,22 @@
         <span class="song-count">{{ total }} 首</span>
       </div>
       <div class="header-actions">
+        <span class="search-label">搜索</span>
+        <el-dropdown trigger="click" @command="onSearchSourceCommand">
+          <el-button>
+            {{ currentSourceLabel }}
+            <el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="local">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-input
           v-model="searchQuery"
-          placeholder="搜索音乐..."
+          :placeholder="searchPlaceholder"
           prefix-icon="Search"
           clearable
           class="search-input"
@@ -46,10 +59,36 @@
       </div>
     </div>
 
-    <!-- ===== 歌曲列表 ===== -->
-    <SongTable :songs="songs" :offset="(currentPage - 1) * pageSize" :loading="loading" @play="playSong" />
+    <!-- ===== 歌曲列表(本地模式) ===== -->
+    <SongTable v-if="isLocalMode" :songs="songs" :offset="(currentPage - 1) * pageSize" :loading="loading" @play="playSong" />
 
-    <div class="pagination-bar" v-if="total > 0">
+    <!-- ===== 远程搜索结果(插件模式):由启用的 songSearch 插件(如 go-music-dl)提供,可「加入库」 ===== -->
+    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
+      <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
+        <MfIcon name="Search" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关音乐" : `输入关键词,搜索${currentProviderName}支持的全网音乐` }}</p>
+      </div>
+      <template v-else>
+        <div class="remote-toolbar">
+          <el-button size="small" type="primary" :loading="importingId === 'all'" @click="importSongs(remoteItems)">
+            <MfIcon name="Download" />全部加入库
+          </el-button>
+        </div>
+        <div class="remote-song-list">
+          <div class="remote-song-row" v-for="(item, i) in remoteItems" :key="i">
+            <span class="remote-source-tag">{{ item.platformLabel }}</span>
+            <div class="remote-song-main">
+              <div class="remote-song-name">{{ item.name }}</div>
+              <div class="remote-song-sub">{{ item.artist }}{{ item.album ? " · " + item.album : "" }}</div>
+            </div>
+            <span class="remote-song-duration">{{ formatSec(item.duration) }}</span>
+            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click="importSongs([item])">加入库</el-button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <div class="pagination-bar" v-if="isLocalMode && total > 0">
       <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="songsPageSize" @change="onPageChange" />
     </div>
 
@@ -61,6 +100,7 @@ import { ref, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import { useItemActions } from "@/composables/useItemActions";
+import { useEntitySearch } from "@/composables/useEntitySearch";
 import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
 import SongTable from "@/components/SongTable.vue";
@@ -76,6 +116,21 @@ const currentPage = ref(1);
 const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("songsPageSize") || "25"));
 if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
+
+// 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 songSearch 就不出现在下拉里
+const {
+  searchMode, searchProviders, remoteItems, remoteSearching, importingId,
+  isLocalMode, isRemoteMode, currentProviderName, currentSourceLabel,
+  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, importSongs,
+  setLocalLoader, setAfterRemoteImport,
+} = useEntitySearch("song");
+const searchPlaceholder = computed(() =>
+  isRemoteMode.value ? `搜索${currentProviderName}全网音乐...` : "搜索音乐...",
+);
+function formatSec(sec: number) {
+  const s = Math.max(0, Math.floor(sec || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
 // 最近添加模式：/songs?recent=1 → 展示最新入库的 500 首（后端 sort=recentAdded）
 const recentMode = computed(() => route.query.recent === "1");
@@ -120,13 +175,23 @@ function onPageChange(page: number, size?: number) {
 }
 
 function onSearchInput() {
-  // 搜索时退出最近添加模式，回到全部音乐
+  // 远程(插件)模式:直接搜插件
+  if (isRemoteMode.value) {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { doRemoteSearch(searchQuery.value); }, 300);
+    return;
+  }
+  // 本地模式:搜索时退出最近添加模式，回到全部音乐
   if (recentMode.value) { router.replace({ path: "/songs", query: {} }); return; }
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { currentPage.value = 1; loadSongs(); }, 300);
 }
 
-function onSearchClear() { currentPage.value = 1; loadSongs(); }
+function onSearchClear() {
+  if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
+  currentPage.value = 1;
+  loadSongs();
+}
 
 function playSong(song: Song) {
   if (menuGuard()) return;
@@ -134,7 +199,17 @@ function playSong(song: Song) {
 }
 function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
 
-onMounted(() => { loadSongs(); });
+// 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
+watch(() => searchMode.value, () => {
+  if (isRemoteMode.value && searchQuery.value.trim()) doRemoteSearch(searchQuery.value);
+});
+
+onMounted(() => {
+  setLocalLoader(loadSongs);          // 切回「本地」/本地搜索时刷新
+  setAfterRemoteImport(loadSongs);    // 「加入库」成功后刷新本地列表
+  loadSearchProviders();
+  loadSongs();
+});
 </script>
 
 <style lang="scss" scoped>
@@ -283,6 +358,27 @@ onMounted(() => { loadSongs(); });
 }
 
 /* ===== Song list (SongTable component) ===== */
+
+/* ===== 远程搜索结果(插件模式) ===== */
+.search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
+.remote-results {
+  .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
+  .remote-toolbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+  .remote-song-list { display: flex; flex-direction: column; gap: 8px; }
+  .remote-song-row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-radius: var(--fnos-radius-md); background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    .remote-source-tag {
+      flex-shrink: 0; padding: 2px 8px; border-radius: 6px; font-size: 11px;
+      background: rgba(0,0,0,0.45); color: #fff;
+    }
+    .remote-song-main { flex: 1; min-width: 0; }
+    .remote-song-name { font-size: 14px; font-weight: 500; color: var(--fnos-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .remote-song-sub { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .remote-song-duration { flex-shrink: 0; font-size: 12px; color: var(--fnos-text-tertiary); font-variant-numeric: tabular-nums; }
+  }
+}
 
 .pagination-bar {
   margin-top: 24px;
