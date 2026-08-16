@@ -442,18 +442,20 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
   });
 
   it("长耗时方法:等网络无限合法(无墙钟,超预算仍完成)", async () => {
-    // manifest.longRunning.runDailyJob=50ms(墙钟预算远小于任务实际时长);任务 200 次
-    // await host.http(每次 ~2ms 延迟,总时长 ~400ms ≫ 预算)。软看门狗:每步都在等 host
+    // manifest.longRunning.runDailyJob=50ms(墙钟预算远小于任务实际时长);任务 80 次
+    // await host.http(每次 ~2ms 延迟,总时长 ≫ 预算)。软看门狗:每步都在等 host
     // (removeDefer 重置 CPU 基准)→ 不触发空转检测 → 不被杀,任务完整完成。
-    // 预算取 50ms 而非 200ms:全量测试并发负载下 setTimeout(2) 可能聚簇/提前,实测
-    // 总时长会贴近 200ms 边界(曾 flake);50ms 预算给断言 wall>50 留 4× 以上余量。
+    // 预算取 50ms 而非 200ms:断言 wall>50 留 4× 以上余量,不受定时器 1ms 级边界影响。
+    // 迭代取 80 而非 200:本测试经批量 worker 执行,每次 host.http 都是 IPC 往返,
+    // 全量测试负载下 200 次可能超过 vitest 默认 5s 超时(曾 "Test timed out in 5000ms");
+    // 80 次在负载下约 1~2s,配合显式 testTimeout 15000 消除该 flake。
     const LONG_CODE = `
       globalThis.__mfPlugin = {
         manifest: { id: "demo-long", name: "x", version: "1.0.0", type: "source", capabilities: ["recommendPlaylist"], configSchema: [], permissions: ["net"], longRunning: { runDailyJob: 50 } },
         create(host) {
           return {
             async runDailyJob(opts) {
-              for (let i = 0; i < 200; i++) {
+              for (let i = 0; i < 80; i++) {
                 const r = await host.http("https://demo/w?i=" + i, {});
                 if (!r || !r.ok) throw new Error("http fail");
               }
@@ -469,7 +471,7 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
     expect(String(r)).toContain("long-ok");
     // 总耗时超过原墙钟预算(50ms)仍成功 = 批量任务无墙钟、只按 CPU 空转判定。
     expect(wall).toBeGreaterThan(50);
-  });
+  }, 15000);
 
   it("长耗时方法:纯 CPU 死循环被软看门狗中断(空转检测)", async () => {
     // 死循环不 await 任何 host 调用 → QuickJS interrupt 检测到连续 cpuIdleLimitMs
