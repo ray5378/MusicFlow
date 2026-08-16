@@ -10,6 +10,7 @@ import { playlistSongs, wishes } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
 import { rebuildPlaylistEntries } from "../../src/services/plugin/playlistSync.js";
+import { clearLibraryIndex } from "../../src/services/plugin/libraryIndex.js";
 import type { ImportedTrackShape, ImportedPlaylistShape } from "../../src/plugins/types.js";
 
 const PL_ID = "pl-incremental-test";
@@ -112,7 +113,11 @@ describe("rebuildPlaylistEntries (incremental)", () => {
       track("e3", "Song Three", "Artist C"),
       track("e4", "Song Four", "Artist D"), // new, matched against s4
     ]), { userId: "u1" });
+    // 模拟生产:曲库新增歌曲后导入子系统会失效共享索引(reclaim/导入路径都会
+    // clearLibraryIndex)。这里直接 SQL 种子,必须手动失效,否则 rebuild 会复用
+    // 旧索引(无 s4),e4 永远匹配不上 → 偶发 matched=3(CI 全新库必现)。
     seedSong("s4", "Song Four", "Artist D");
+    clearLibraryIndex();
     const r2 = await rebuildPlaylistEntries(PL_ID, pl([
       track("e1", "Song One", "Artist A"),
       track("e2", "Song Two", "Artist B"),
