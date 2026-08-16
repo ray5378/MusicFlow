@@ -44,6 +44,10 @@ export function remoteItemToSong(item: any, providerId: string): Song {
     album: item.album || "",
     duration: item.duration || 0,
     coverArt: item.cover || undefined,
+    // 远程歌(未入库):streamUrl 指向 /rest/stream-remote 代理流;实际格式由上游
+    // Content-Type 决定,播放前 player store 会 Range 探测拿到真实格式(不写死 mp3,
+    // go-music-dl 等插件可能返回 flac/wav/aac);suffix 占位供 DLNA 队列 item 推导 mime。
+    suffix: "mp3",
     streamUrl: `/rest/stream-remote?${qs.toString()}`,
   };
   (song as any)._item = item;

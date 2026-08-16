@@ -142,9 +142,12 @@ for (const spec of SPECS) {
             const imp = await importOnlineSongs(providerId, list, { userId: user?.id, interactive: true });
             if (!imp?.songs?.length) throw new Error("歌曲入库失败,请检查在线源配置");
             // ids 供调用方(如 HA 卡片)「导入后立即入队播放」拿到真实 DB songId。
+            // imported 带 fingerprint(providerId:source:id)供批量导入后精确映射(导入并发执行,
+            // 失败项被过滤,按序对应会错位)。
             return {
               success: true, added: imp.added, deduped: imp.deduped, failed: imp.failed,
               trackCount: imp.songs.length, ids: imp.songs.map((s) => s.id),
+              imported: imp.songs.map((s) => ({ id: s.id, fingerprint: s.fingerprint })),
             };
           } finally {
             clearLibraryIndex();

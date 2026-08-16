@@ -1,10 +1,12 @@
 import { defineStore } from "pinia";
 import { ref, computed, reactive } from "vue";
 import { Howl } from "howler";
+import { ElMessage } from "element-plus";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { coverUrl } from "@/utils/cover";
+import { waitAsyncTask } from "@/utils/asyncTask";
 
 export interface Song {
   id: string;
@@ -48,9 +50,90 @@ function songToQueueItem(song: Song): any {
   };
 }
 
+// ==================== 远程歌(未入库,带 streamUrl)播放辅助 ====================
+// 主项目播放插件搜索结果(远程歌)的两条路:
+//   - 本机:Howl 直接播 streamUrl(/rest/stream-remote 代理流),不要求先入库;
+//   - DLNA/群组 peer:后端 peer 队列按真实 DB songId 取曲,必须先「导入拿 songId」再入队
+//     (与 HA 卡片 _remotePlaySong 同思路),否则 remote:... 伪 id 后端查不到歌曲。
+/** 远程(未入库)歌曲:带 streamUrl 即视为远程歌。 */
+function isRemoteSong(song: Song): boolean { return !!song.streamUrl; }
+
+/** 从远程歌 streamUrl 解析 provider/source/id(与 useEntitySearch.remoteItemToSong 生成的 URL 对齐)。 */
+function remoteParams(song: Song): { provider: string; source: string; id: string } {
+  try {
+    const u = new URL(song.streamUrl!, window.location.origin);
+    return {
+      provider: u.searchParams.get("provider") || "",
+      source: u.searchParams.get("source") || "",
+      id: u.searchParams.get("id") || "",
+    };
+  } catch {
+    return { provider: "", source: "", id: "" };
+  }
+}
+
+/** 远程歌 → 导入 payload(与搜索 item 同形状;优先原始 item,兜底用 Song 字段)。 */
+function remoteSongPayload(song: Song): any {
+  const it = (song as any)._item;
+  if (it && typeof it === "object" && (it.source || it.id)) return it;
+  const p = remoteParams(song);
+  return {
+    source: p.source, id: p.id,
+    name: song.title || "", artist: song.artist || "",
+    album: song.album || "", duration: song.duration || 0,
+    cover: song.coverArt || "",
+  };
+}
+
+/** 远程歌拿到真实 DB songId 后构造的可播放 Song(去掉 streamUrl,DLNA peer 可播)。 */
+function remoteToDbSong(remote: Song, dbId: string): Song {
+  return {
+    id: dbId, title: remote.title || "未知", artist: remote.artist || "",
+    album: remote.album || "", duration: remote.duration || 0,
+    coverArt: remote.coverArt, suffix: "mp3",
+  };
+}
+
+// DLNA/群组播远程歌:按 provider 分组批量导入,用 fingerprint 精确映射(导入并发执行、
+// 失败项被过滤,按序对应会错位)。返回 Map<远程歌 id, DB Song>;无 provider/导入失败的
+// 远程歌不进 Map。整批失败抛错由调用方提示。
+let castImportRunning = false;
+async function importRemoteForCast(songs: Song[]): Promise<Map<string, Song>> {
+  const map = new Map<string, Song>();
+  const byProvider = new Map<string, Song[]>();
+  for (const s of songs) {
+    if (!isRemoteSong(s)) continue;
+    const { provider } = remoteParams(s);
+    if (!provider) continue;
+    if (!byProvider.has(provider)) byProvider.set(provider, []);
+    byProvider.get(provider)!.push(s);
+  }
+  for (const [provider, group] of byProvider) {
+    const res = await api
+      .post(`/rest/api/v1/song-search/${encodeURIComponent(provider)}/import`, {
+        songs: group.map(remoteSongPayload),
+      })
+      .catch((e: any) => { throw new Error(e?.message || "远程歌曲导入失败"); });
+    if (!res.data?.success || !res.data.taskId) throw new Error(res.data?.error || "远程歌曲导入失败");
+    const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
+    const imported = Array.isArray(r?.imported) ? r.imported : [];
+    const ids = Array.isArray(r?.ids) ? r.ids : [];
+    for (const s of group) {
+      const { source, id } = remoteParams(s);
+      const fp = `${provider}:${source}:${id}`;
+      let dbId = "";
+      const hit = imported.find((x: any) => x.fingerprint === fp);
+      if (hit?.id) dbId = hit.id;
+      else if (ids.length === 1) dbId = ids[0]; // 单首场景兼容旧后端(无 imported 字段)
+      if (dbId) map.set(s.id, remoteToDbSong(s, dbId));
+    }
+  }
+  return map;
+}
+
 // Convert a backend QueueItem back to the frontend Song shape for display.
 function queueItemToSong(it: any): Song {
-  return {
+  const s: Song = {
     id: it.songId,
     title: it.title || "未知",
     artist: it.artist || "",
@@ -59,6 +142,25 @@ function queueItemToSong(it: any): Song {
     duration: it.duration || 0,
     coverArt: it.coverArt || (it.albumId ? `al-${it.albumId}` : undefined),
   };
+  // 恢复的远程歌(id 为 remote:provider:source:rid)没有 streamUrl(同步到后端时只存了
+  // songId),按 id 重新拼出 /rest/stream-remote 代理流,保证恢复队列里的远程歌可播。
+  if (typeof it.songId === "string" && it.songId.startsWith("remote:")) {
+    const parts = it.songId.split(":");
+    const provider = parts[1] || "";
+    const source = parts[2] || "";
+    const rid = parts.slice(3).join(":");
+    if (provider && source && rid) {
+      const qs = new URLSearchParams({ provider, source, id: rid });
+      if (s.title) qs.set("title", s.title);
+      if (s.artist) qs.set("artist", s.artist);
+      if (s.album) qs.set("album", s.album);
+      if (s.duration) qs.set("duration", String(s.duration));
+      if (s.coverArt) qs.set("cover", s.coverArt);
+      s.streamUrl = `/rest/stream-remote?${qs.toString()}`;
+      s.suffix = "mp3";
+    }
+  }
+  return s;
 }
 
 export const usePlayerStore = defineStore("player", () => {
@@ -266,7 +368,15 @@ export const usePlayerStore = defineStore("player", () => {
 
   function localPlaySong(song: Song) {
     const idx = localQueue.value.findIndex(s => s.id === song.id);
-    if (idx >= 0) { localIndex.value = idx; } else { localQueue.value.push(song); localIndex.value = localQueue.value.length - 1; }
+    if (idx >= 0) {
+      // 用传入的最新对象覆盖队列条目:恢复队列里同 id 的远程歌可能缺 streamUrl(后端
+      // 只存 songId),点播放时必须以当前对象为准,否则 Howl 无 format 直接播放失败。
+      localQueue.value[idx] = song;
+      localIndex.value = idx;
+    } else {
+      localQueue.value.push(song);
+      localIndex.value = localQueue.value.length - 1;
+    }
     // 随机模式下跳播后重建序列:当前曲固定到新序列头,避免 next/prev 沿用旧
     // shufflePos 错位(旧 pos 指向跳播前位置,切歌会跳到无关的歌)。
     if (localPlayMode.value === "shuffle") rebuildShuffle({ keepCurrent: true });
@@ -307,7 +417,36 @@ export const usePlayerStore = defineStore("player", () => {
     }).catch(() => {});
   }
 
-  function startLocalPlayback() {
+  // 远程歌(/rest/stream-remote 代理流)格式探测:Range 请求拿上游 Content-Type → 真实格式。
+  // 不写死 mp3(go-music-dl 等插件可能返回 flac/wav/aac/ogg);结果按 URL 缓存。
+  const remoteFmtCache = new Map<string, string>();
+  let playbackSeq = 0; // 防 async 探测乱序覆盖更新的播放请求
+  async function probeRemoteFormat(url: string): Promise<string> {
+    if (remoteFmtCache.has(url)) return remoteFmtCache.get(url)!;
+    try {
+      const res = await fetch(url, { method: "GET", headers: { Range: "bytes=0-0" } });
+      const ct = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      const map: Record<string, string> = {
+        "audio/mpeg": "mp3", "audio/mp3": "mp3",
+        "audio/flac": "flac", "audio/x-flac": "flac",
+        "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+        "audio/aac": "aac", "audio/aacp": "aac",
+        "audio/ogg": "ogg", "audio/opus": "opus", "application/ogg": "ogg",
+        "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/m4a": "m4a",
+        "audio/aiff": "aiff", "audio/x-aiff": "aiff",
+        "audio/x-ms-wma": "wma", "audio/ape": "ape",
+      };
+      const fmt = map[ct] || "";
+      remoteFmtCache.set(url, fmt);
+      return fmt;
+    } catch {
+      remoteFmtCache.set(url, "");
+      return "";
+    }
+  }
+
+  async function startLocalPlayback() {
+    const mySeq = ++playbackSeq;
     if (howl) { howl.unload(); howl = null; }
     // 预探测确认不可播的外部音源直接跳过(需求:提前跳过,不打断不卡顿)。
     // guard 防死循环:整队都不可播时停止,交给失败连击上限兜底。
@@ -333,7 +472,14 @@ export const usePlayerStore = defineStore("player", () => {
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song.id);
-    const fmt = (song.suffix || "").toLowerCase();
+    let fmt = (song.suffix || "").toLowerCase();
+    if (song.streamUrl) {
+      // 远程歌:探测真实格式(Range 拿 Content-Type,带缓存;suffix 占位不参与本机格式)。
+      // 探测失败兜底 mp3(主流在线源默认);探测期间有更新的播放请求则放弃本次。
+      const probed = (await probeRemoteFormat(getStreamUrl(song))) || "mp3";
+      if (mySeq !== playbackSeq) return;
+      fmt = probed;
+    }
     howl = new Howl({
       src: [getStreamUrl(song)],
       format: fmt ? [fmt] : [],
@@ -344,7 +490,8 @@ export const usePlayerStore = defineStore("player", () => {
         localIsPlaying.value = true;
         localDuration.value = howl?.duration() || 0;
         startLocalProgressTimer();
-        api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
+        // 远程歌(未入库)不 scrobble:后端按 songId 写播放记录,remote: 伪 id 会外键报错。
+        if (!song.streamUrl) api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       },
       onpause: () => { localIsPlaying.value = false; stopLocalProgressTimer(); },
       onend: () => { localNext(); },
@@ -472,6 +619,9 @@ export const usePlayerStore = defineStore("player", () => {
       const results = res.data?.results || [];
       for (const r of results) {
         probeCache.set(r.songId, !!r.ok);
+        // 远程歌(remote: 前缀)按 DB songId 探测必判不可播,不可进 deadSongs(否则整队被跳过);
+        // 其可用性由播放时失败兜底处理。
+        if (String(r.songId).startsWith("remote:")) continue;
         if (!r.ok) {
           deadSongs.add(r.songId);
           console.warn(`[player] 预探测不可播,提前跳过: ${r.songId} (${r.reason || "无可用音源"})`);
@@ -964,16 +1114,66 @@ export const usePlayerStore = defineStore("player", () => {
   // selected.
 
   function playSong(song: Song) {
-    if (isRemotePeer.value && activeRemote.value) castPlaySong(activeRemote.value, song);
+    if (isRemotePeer.value && activeRemote.value) {
+      if (isRemoteSong(song)) { void playRemoteOnPeer(activeRemote.value, [song], 0); return; }
+      castPlaySong(activeRemote.value, song);
+    }
     else localPlaySong(song);
   }
   function addToQueue(song: Song) {
-    if (isRemotePeer.value && activeRemote.value) castAddToQueue(activeRemote.value, song);
+    if (isRemotePeer.value && activeRemote.value) {
+      if (isRemoteSong(song)) { void addRemoteToPeerQueue(activeRemote.value, song); return; }
+      castAddToQueue(activeRemote.value, song);
+    }
     else localAddToQueue(song);
   }
   function playQueue(songs: Song[], index: number = 0) {
-    if (isRemotePeer.value && activeRemote.value) castPlayQueue(activeRemote.value, songs, index);
+    if (isRemotePeer.value && activeRemote.value) {
+      if (songs.some(isRemoteSong)) { void playRemoteOnPeer(activeRemote.value, songs, index); return; }
+      castPlayQueue(activeRemote.value, songs, index);
+    }
     else localPlayQueue(songs, index);
+  }
+
+  // ==================== 远程歌 → DLNA/群组播放(先导入拿 DB songId) ====================
+  // 与 HA 卡片 _remotePlaySong 同思路:后端 peer 队列按真实 songId 取曲,远程歌必须先
+  // 导入为可播在线歌曲,拿到 DB songId 后才能入队播放。单首走 castPlaySong(追加播放),
+  // 多首走 castPlayQueue(整队播放);导入失败的远程歌跳过并提示。
+  async function playRemoteOnPeer(st: RemoteState, songs: Song[], index: number) {
+    if (castImportRunning) { ElMessage.warning("正在导入远程歌曲,请稍候"); return; }
+    castImportRunning = true;
+    try {
+      const map = await importRemoteForCast(songs);
+      const missing = songs.filter((s) => isRemoteSong(s) && !map.has(s.id));
+      if (songs.length === 1) {
+        const db = map.get(songs[0].id);
+        if (db) castPlaySong(st, db);
+        else ElMessage.error("远程歌曲导入失败,无法在所选设备播放");
+      } else {
+        const resolved = songs.map((s) => (isRemoteSong(s) ? (map.get(s.id) || s) : s));
+        castPlayQueue(st, resolved, index);
+        if (missing.length) ElMessage.warning(`${missing.length} 首远程歌曲导入失败,已跳过`);
+      }
+    } catch (e: any) {
+      ElMessage.error(e?.message || "远程歌曲导入失败,无法播放");
+    } finally {
+      castImportRunning = false;
+    }
+  }
+
+  async function addRemoteToPeerQueue(st: RemoteState, song: Song) {
+    if (castImportRunning) { ElMessage.warning("正在导入远程歌曲,请稍候"); return; }
+    castImportRunning = true;
+    try {
+      const map = await importRemoteForCast([song]);
+      const db = map.get(song.id);
+      if (!db) { ElMessage.error("远程歌曲导入失败,无法加入队列"); return; }
+      castAddToQueue(st, db);
+    } catch (e: any) {
+      ElMessage.error(e?.message || "远程歌曲导入失败,无法加入队列");
+    } finally {
+      castImportRunning = false;
+    }
   }
   function togglePlay() {
     if (isRemotePeer.value && activeRemote.value) castTogglePlay(activeRemote.value);
