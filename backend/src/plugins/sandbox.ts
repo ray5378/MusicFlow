@@ -128,6 +128,7 @@ const STRIP_HOST_FIRST = new Set(["searchLyrics", "searchCover", "onPlay", "onSc
 // capability → 需要暴露的 impl 方法(在 VM 内调用)。
 const CAP_METHODS: Record<string, string[]> = {
   search: ["search"],
+  playlistSearch: ["searchPlaylists"],
   recommend: ["recommend"],
   playlistSongs: ["playlistSongs"],
   stream: ["streamUrl"],

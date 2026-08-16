@@ -44,7 +44,7 @@ const VALID_TYPES: PluginType[] = [
   "lyrics", "cover", "renderer", "scrobbler", "artist",
 ];
 const VALID_CAPS: PluginCapability[] = [
-  "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
+  "search", "playlistSearch", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "recommendPlaylist",
   "playlistSync", "autoMatch",
@@ -69,6 +69,7 @@ const VALID_CAPS: PluginCapability[] = [
 const CAP_PERMISSIONS: Record<string, string[]> = {
   // 源 / 在线能力:实现几乎都走 host.http 取数据 → net
   search: ["net"],
+  playlistSearch: ["net"],  // searchPlaylists 走 host.http
   recommend: ["net"],
   playlistSongs: ["net"],
   stream: ["net"],          // 兜底流可能走 host.http;即使仅构造 URL,补 net 也无害
