@@ -137,13 +137,29 @@ describe("POST /v1/playlist-search/:id/search", () => {
 });
 
 describe("POST /v1/playlist-search/:id/import", () => {
-  it("拉歌入库并创建平台歌单(合成 sourceUrl)", async () => {
+  // 导入端点已异步化:POST 返回 taskId,轮询 GET /v1/tasks/:id 直到完成,返回 result。
+  async function importAndWait(body: any): Promise<any> {
     const res = await app.request(`/rest/api/v1/playlist-search/${FAKE}/import?${authQS()}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "netease", id: "p1", name: "热歌榜" }),
+      body: JSON.stringify(body),
     });
-    const body = (await res.json()) as any;
+    const r = (await res.json()) as any;
+    expect(r.success).toBe(true);
+    const taskId = r.taskId as string;
+    expect(taskId).toBeTruthy();
+    for (let i = 0; i < 100; i++) {
+      const t = await app.request(`/rest/api/v1/tasks/${taskId}?${authQS()}`);
+      const tb = (await t.json()) as any;
+      if (tb.task?.status === "ok") return tb.task.result;
+      if (tb.task?.status === "error") throw new Error(`task error: ${tb.task.error}`);
+      await new Promise((r2) => setTimeout(r2, 20));
+    }
+    throw new Error("task timeout");
+  }
+
+  it("拉歌入库并创建平台歌单(合成 sourceUrl)", async () => {
+    const body = await importAndWait({ source: "netease", id: "p1", name: "热歌榜" });
     expect(body.success).toBe(true);
     expect(playlistCalls).toBe(1);
     expect(body.trackCount).toBe(2);
@@ -155,21 +171,12 @@ describe("POST /v1/playlist-search/:id/import", () => {
   });
 
   it("同歌单再次导入 = 更新不新建(合成 sourceUrl 幂等)", async () => {
-    const first = await app.request(`/rest/api/v1/playlist-search/${FAKE}/import?${authQS()}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "qq", id: "p2", name: "华语精选" }),
-    });
-    expect(((await first.json()) as any).created).toBe(true);
+    const first = await importAndWait({ source: "qq", id: "p2", name: "华语精选" });
+    expect(first.created).toBe(true);
     const before = db.select().from(playlists).where(eq(playlists.sourceUrl, `${FAKE}://qq/p2`)).all();
     expect(before.length).toBe(1);
 
-    const again = await app.request(`/rest/api/v1/playlist-search/${FAKE}/import?${authQS()}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "qq", id: "p2", name: "华语精选" }),
-    });
-    const body = (await again.json()) as any;
+    const body = await importAndWait({ source: "qq", id: "p2", name: "华语精选" });
     expect(body.success).toBe(true);
     expect(body.created).toBe(false);
     const after = db.select().from(playlists).where(eq(playlists.sourceUrl, `${FAKE}://qq/p2`)).all();

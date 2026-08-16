@@ -74,8 +74,13 @@ export function findRecommendPlaylist(id: string, providerId?: string): any | nu
 /** Update a local playlist's entry set to the given online songs *incrementally*.
  *  Already-present entries (keyed by song id) are reused — only their position is
  *  corrected when it drifted — removed entries are deleted, and genuinely new
- *  ones are inserted. Avoids clearing and re-inserting the whole playlist. */
-export function replacePlaylistSongs(playlistId: string, songIds: { id: string; title: string }[]) {
+ *  ones are inserted. Avoids clearing and re-inserting the whole playlist.
+ *
+ *  Async: large playlists are written in TX_CHUNK-sized transactions with a
+ *  sleepBetweenBatch() pause between chunks, so a few-thousand-row sync no
+ *  longer blocks the event loop for one long synchronous transaction. Small
+ *  diffs run as a single transaction, exactly like the old path. */
+export async function replacePlaylistSongs(playlistId: string, songIds: { id: string; title: string }[]) {
   const existingRows = db.select().from(playlistSongs)
     .where(eq(playlistSongs.playlistId, playlistId)).all();
   const existMap = new Map<string, any>();
@@ -85,34 +90,49 @@ export function replacePlaylistSongs(playlistId: string, songIds: { id: string; 
   }
   const seen = new Set<string>();
 
-  db.transaction(() => {
-    songIds.forEach((s, i) => {
-      seen.add(s.id);
-      const prev = existMap.get(s.id);
-      if (prev) {
-        if (prev.position !== i) {
-          db.update(playlistSongs).set({ position: i }).where(eq(playlistSongs.id, prev.id)).run();
+  const TX_CHUNK = 300;
+  for (let off = 0; off < songIds.length; off += TX_CHUNK) {
+    const chunk = songIds.slice(off, off + TX_CHUNK);
+    db.transaction(() => {
+      chunk.forEach((s, i) => {
+        const gi = off + i;
+        seen.add(s.id);
+        const prev = existMap.get(s.id);
+        if (prev) {
+          if (prev.position !== gi) {
+            db.update(playlistSongs).set({ position: gi }).where(eq(playlistSongs.id, prev.id)).run();
+          }
+          return;
         }
-        return;
-      }
-      db.insert(playlistSongs).values({
-        playlistId,
-        songId: s.id,
-        position: i,
-        playable: 1,
-        externalTitle: s.title,
-        externalSongId: s.id,
-      }).run();
+        db.insert(playlistSongs).values({
+          playlistId,
+          songId: s.id,
+          position: gi,
+          playable: 1,
+          externalTitle: s.title,
+          externalSongId: s.id,
+        }).run();
+      });
     });
-    // Remove entries no longer present in the remote playlist.
-    for (const e of existingRows) {
-      const key = e.externalSongId || e.songId;
-      if (key && !seen.has(key)) {
+    if (off + TX_CHUNK < songIds.length) await sleepBetweenBatch();
+  }
+
+  // Remove entries no longer present in the remote playlist (also chunked).
+  const toDelete = existingRows.filter((e) => {
+    const key = e.externalSongId || e.songId;
+    return key && !seen.has(key);
+  });
+  for (let off = 0; off < toDelete.length; off += TX_CHUNK) {
+    const chunk = toDelete.slice(off, off + TX_CHUNK);
+    db.transaction(() => {
+      for (const e of chunk) {
         db.delete(playlistSongs).where(eq(playlistSongs.id, e.id)).run();
       }
-    }
-    refreshPlaylistCounts(playlistId);
-  });
+    });
+    if (off + TX_CHUNK < toDelete.length) await sleepBetweenBatch();
+  }
+
+  refreshPlaylistCounts(playlistId);
   clearPlaylistCoverCache(playlistId);
 }
 
@@ -159,7 +179,7 @@ export async function importRecommendPlaylist(
 
   const existing = findRecommendPlaylist(info.id, providerId);
   if (existing) {
-    replacePlaylistSongs(existing.id, imp.songs);
+    await replacePlaylistSongs(existing.id, imp.songs);
     db.update(playlists).set({
       name: displayName,
       comment: COMMENT_PREFIX + info.source,
@@ -201,7 +221,7 @@ export async function importRecommendPlaylist(
     if (cached) db.update(playlists).set({ coverArt: cached }).where(eq(playlists.id, id)).run();
   }
 
-  replacePlaylistSongs(id, imp.songs);
+  await replacePlaylistSongs(id, imp.songs);
   return {
     success: true, playlistId: id, created: true, name: displayName,
     platform: info.source, trackCount: imp.songs.length, added: imp.added, deduped: imp.deduped, failed: imp.failed,

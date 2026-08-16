@@ -17,12 +17,20 @@
 import { newQuickJSWASMModule, type QuickJSWASMModule } from "quickjs-emscripten";
 import type { QuickJSRuntime, QuickJSContext, QuickJSHandle, QuickJSDeferredPromise } from "quickjs-emscripten";
 import type { PluginManifest } from "./types.js";
+import { Worker } from "worker_threads";
+import { fileURLToPath } from "url";
+import { existsSync } from "fs";
+import { dirname, join } from "path";
 
 const MEMORY_LIMIT = 256 * 1024 * 1024; // 单插件内存上限 256MB
 const STACK_LIMIT = 1024 * 1024;        // 单插件栈上限 1MB
 const INVOKE_TIMEOUT_MS = 15000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
 const JOB_TIMEOUT_CAP_MS = 600000;      // longRunning 声明预算上限(10 分钟);任务经 jobRunner 异步执行、HTTP 不阻塞、前端轮询,长预算无副作用
 const MAX_DEFERS = 256;                 // 单次调用内未结算 deferred 上限(防御性;支持并行 host 调用)
+// 单次 executePendingJobs 最多结算的 job 数:分片泵送,避免「结算风暴」一次连续执行全部
+// pending 回调(几百首歌的 host 调用结算累积)同步阻塞宿主主线程。剩余 job 由 evalAsync
+// 主循环的下一轮(setImmediate 让行后)继续泵送,功能等价、时序更平滑。
+const MAX_JOBS_PER_PUMP = 64;
 // longRunning 批量任务采用「软看门狗」:无墙钟硬超时(歌单/封面/歌词数量无限,只要每步
 // 都在等网络/DB 就永不超时);仅在「连续该时长无任何 host 调用完成」时判定 CPU 空转/
 // 死循环并中断(QuickJS interrupt 只在 guest 真正执行 JS 时触发,await 挂起不计时)。
@@ -277,6 +285,8 @@ export class SandboxedPlugin {
   private currentIsLong = false;
   private cpuKilled = false;
   private disposed = false;
+  /** 批量 worker 代理(longRunning 方法执行线程);attachWorker 挂接,dispose 联动销毁。 */
+  private workerRemote: SandboxedPluginRemote | null = null;
 
   constructor(id: string, env: SandboxHostEnv) {
     this.id = id;
@@ -395,6 +405,7 @@ export class SandboxedPlugin {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    try { this.workerRemote?.dispose(); } catch { /* ignore */ }
     // 先移除 host.comm.on 注册的监听器,避免 hot-reload 累积导致消息重复投递
     for (const listener of this.commListeners.values()) {
       try { this.env.comm.off?.(listener); } catch { /* ignore */ }
@@ -405,6 +416,11 @@ export class SandboxedPlugin {
     for (const h of [this.hTrue, this.hFalse]) { try { if (h.alive) h.dispose(); } catch { /* ignore */ } }
     try { this.ctx?.dispose(); } catch { /* ignore */ }
     try { this.runtime?.dispose(); } catch { /* QuickJS teardown 断言可被捕获且不毒化模块 */ }
+  }
+
+  /** 挂接批量 worker 代理(dispose 时一并销毁)。 */
+  attachWorker(worker: SandboxedPluginRemote): void {
+    this.workerRemote = worker;
   }
 
   // ---------- 宿主 host.* 注入 ----------
@@ -458,6 +474,12 @@ export class SandboxedPlugin {
     return { ok: false, status: 0, error: { name, message } };
   }
 
+  /** 分片泵送:单次最多结算 MAX_JOBS_PER_PUMP 个 pending job,避免同步段长时间占用宿主主线程。
+   *  剩余 job 由 evalAsync 主循环(setImmediate 让行)继续泵送;宿主事件派发点同样限次。 */
+  private pumpJobs(): void {
+    if (this.runtime?.alive) this.runtime.executePendingJobs(MAX_JOBS_PER_PUMP);
+  }
+
   /** 宿主异步函数:deferred-promise 模式。返回 VM promise handle。 */
   private hostAsync(name: string, impl: (...args: any[]) => Promise<any>, perm: string | null): QuickJSHandle {
     const fn = this.ctx.newFunction(name, (...argHandles: QuickJSHandle[]) => {
@@ -473,7 +495,7 @@ export class SandboxedPlugin {
         const msg = `[SANDBOX_CONCURRENCY] 沙箱限制:并发宿主调用过多(在途 ${this.defers.length} > 上限 ${MAX_DEFERS})。插件应降低并行度或分批串行`;
         deferred.resolve(this.jsToHandle({ ok: false, error: { message: msg } }));
         // 极少触发的分支:先泵送结算,再延后一拍释放 handle,避免 VM 尚未读取就被 dispose
-        try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
+        try { this.pumpJobs(); } catch { /* ignore */ }
         Promise.resolve().then(() => { try { deferred.dispose(); } catch { /* ignore */ } });
         return deferred.handle;
       }
@@ -505,7 +527,7 @@ export class SandboxedPlugin {
         })
         .finally(() => {
           this.removeDefer(deferred);
-          try { if (this.runtime?.alive) this.runtime.executePendingJobs(); } catch { /* ignore */ }
+          try { this.pumpJobs(); } catch { /* ignore */ }
           try { deferred.dispose(); } catch { /* ignore */ }
         });
       return deferred.handle;
@@ -581,7 +603,7 @@ export class SandboxedPlugin {
           const ph = this.ctx.unwrapResult(r);
           const rp = this.ctx.resolvePromise(ph);
           rp.then(() => { try { ph.dispose(); } catch { /* ignore */ } }, () => { try { ph.dispose(); } catch { /* ignore */ } });
-          if (this.runtime?.alive) this.runtime.executePendingJobs();
+          this.pumpJobs();
         } catch { /* 消息回调异常不影响宿主 */ }
       };
       this.env.comm.on(listener);
@@ -702,7 +724,7 @@ export class SandboxedPlugin {
       const ph = this.ctx.unwrapResult(r);
       const rp = this.ctx.resolvePromise(ph);
       rp.then(() => { try { ph.dispose(); } catch { /* ignore */ } }, () => { try { ph.dispose(); } catch { /* ignore */ } });
-      if (this.runtime?.alive) this.runtime.executePendingJobs();
+      this.pumpJobs();
     } catch { /* ignore */ }
   }
 
@@ -920,7 +942,7 @@ export class SandboxedPlugin {
         // 兜底:guest 挂起后 CPU 空转(理论上 interrupt 已杀,此处双保险)
         this.cpuKilled = true;
       }
-      if (this.runtime.hasPendingJob()) this.runtime.executePendingJobs();
+      if (this.runtime.hasPendingJob()) this.runtime.executePendingJobs(MAX_JOBS_PER_PUMP);
       await new Promise((r) => setImmediate(r));
       if (!isLong && Date.now() - t0 >= timeoutMs) break; // 交互:墙钟到点退出
       if (isLong && this.cpuKilled) break;                 // 长任务:CPU 空转被杀退出
@@ -971,8 +993,11 @@ export class SandboxedPlugin {
     }
   }
 
-  /** 生成 core 侧的 impl 门面:只暴露插件实际实现且能力要求的方法。 */
-  makeImpl(): any {
+  /** 生成 core 侧的 impl 门面:只暴露插件实际实现且能力要求的方法。
+   *  @param worker 可选:批量 worker 代理——manifest.longRunning 声明的方法路由到
+   *   worker 线程执行(插件计算不占主线程,根治同步刷新假死);同步方法与普通交互
+   *   方法保持主线程执行(快路径,无 IPC 开销,同步语义不变)。 */
+  makeImpl(worker?: SandboxedPluginRemote): any {
     const candidates = new Set<string>();
     for (const cap of this.manifest.capabilities) {
       for (const m of CAP_METHODS[cap] || []) candidates.add(m);
@@ -984,6 +1009,7 @@ export class SandboxedPlugin {
       if (!present.has(m)) continue;
       impl[m] = (...args: any[]) => {
         const clean = STRIP_HOST_FIRST.has(m) ? args.slice(1) : args;
+        if (worker && this.manifest.longRunning?.[m]) return worker.invoke(m, clean, this.env.getConfig());
         if (SYNC_METHODS.has(m)) return this.invokeSync(m, clean);
         return this.invoke(m, clean);
       };
@@ -996,7 +1022,152 @@ export class SandboxedPlugin {
   }
 }
 
-/** 加载沙箱插件:返回 manifest(与 plugin.json 校验过)与 impl 门面。 */
+/** 沙箱批量 worker 的宿主侧代理:持有 worker 线程,把 longRunning 批量方法调用发到
+ *  worker 执行(插件计算不占主线程事件循环),host.* 调用由 worker 发回本代理用真实
+ *  env 执行后回传。与 sandboxWorker.ts 配对(消息协议一致)。 */
+export class SandboxedPluginRemote {
+  readonly id: string;
+  private env: SandboxHostEnv;
+  private worker: Worker | null = null;
+  private seq = 0;
+  private pendingInvoke = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+  private readyWait: Promise<void> | null = null;
+  private readyResolve: (() => void) | null = null;
+  private initWait: Promise<void> | null = null;
+  private initResolve: (() => void) | null = null;
+  private initReject: ((e: any) => void) | null = null;
+  private disposed = false;
+  /** 销毁时回调(loadSandboxedPlugin 注入:注销批量 worker 计数)。 */
+  private onDispose: (() => void) | null = null;
+
+  constructor(id: string, env: SandboxHostEnv) {
+    this.id = id;
+    this.env = env;
+  }
+
+  setOnDispose(fn: () => void): void { this.onDispose = fn; }
+
+  /** 启动 worker 并完成插件 VM 初始化(等 ready + init-done)。 */
+  async init(code: string, expectedManifest?: PluginManifest): Promise<void> {
+    if (this.initWait) return this.initWait;
+    this.readyWait = new Promise<void>((r) => { this.readyResolve = r; });
+    this.initWait = new Promise<void>((r, j) => { this.initResolve = r; this.initReject = j; });
+
+    const here = dirname(fileURLToPath(import.meta.url));
+    const workerPath = existsSync(join(here, "sandboxWorker.js"))
+      ? join(here, "sandboxWorker.js")
+      : join(here, "sandboxWorker.ts");
+    const w = new Worker(workerPath);
+    this.worker = w;
+    // 不阻止宿主进程退出(测试/关闭时无需等待 worker)。
+    w.unref();
+    w.on("message", (msg: any) => this.onMessage(msg));
+    w.on("error", (e: Error) => {
+      this.failAll(`沙箱 worker 错误: ${e?.message || e}`);
+      this.initReject?.(e);
+    });
+    w.on("exit", (code) => {
+      if (code !== 0 && !this.disposed) this.failAll(`沙箱 worker 异常退出(code=${code})`);
+    });
+
+    const timer = setTimeout(() => this.initReject?.(new Error("沙箱 worker 初始化超时")), 20000);
+    try {
+      await this.readyWait; // worker 启动就绪
+      w.postMessage({ type: "init", id: this.id, code, expectedManifest, permissions: expectedManifest?.permissions || this.env.permissions || [] });
+      await this.initWait;  // VM init 完成
+      clearTimeout(timer);
+    } catch (e) {
+      clearTimeout(timer);
+      try { w.terminate(); } catch { /* ignore */ }
+      throw e;
+    }
+  }
+
+  /** 调用 worker 里的批量方法。config 随消息携带(worker 侧 refreshConfig 同步可读)。 */
+  async invoke(method: string, args: any[], config?: Record<string, any>): Promise<any> {
+    if (!this.worker) throw new Error("沙箱 worker 未初始化");
+    const invokeId = ++this.seq;
+    return new Promise((resolve, reject) => {
+      this.pendingInvoke.set(invokeId, { resolve, reject });
+      this.worker!.postMessage({ type: "invoke", invokeId, method, args, config: config || {} });
+    });
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.failAll("沙箱 worker 已销毁");
+    try { this.onDispose?.(); } catch { /* ignore */ }
+    try { this.worker?.postMessage({ type: "dispose" }); } catch { /* ignore */ }
+    setTimeout(() => { try { this.worker?.terminate(); } catch { /* ignore */ } }, 50);
+  }
+
+  // ---------- 内部 ----------
+
+  private onMessage(msg: any): void {
+    switch (msg.type) {
+      case "ready":
+        this.readyResolve?.();
+        break;
+      case "init-done":
+        if (msg.ok) this.initResolve?.();
+        else this.initReject?.(new Error(msg.error || "沙箱 worker 初始化失败"));
+        break;
+      case "invoke-result": {
+        const p = this.pendingInvoke.get(msg.invokeId);
+        if (p) {
+          this.pendingInvoke.delete(msg.invokeId);
+          if (msg.ok) p.resolve(msg.value);
+          else {
+            const e = new Error(msg.error || "执行失败");
+            (e as any).sandboxCode = msg.sandboxCode;
+            (e as any).hint = msg.hint;
+            p.reject(e);
+          }
+        }
+        break;
+      }
+      case "host-call": {
+        this.dispatchHostCall(msg.callId, msg.name, msg.args).catch(() => { /* dispatch 内已兜底 */ });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  private async dispatchHostCall(callId: number, name: string, args: any[]): Promise<void> {
+    try {
+      const [m, sub] = name.split(".");
+      const env = this.env as any;
+      let value: any;
+      switch (m) {
+        case "http": value = await env.http(args[0], args[1]); break;
+        case "storage": value = await env.storage[sub](...args); break;
+        case "comm": value = env.comm[sub](...args); break;
+        case "songs": value = await env.songs[sub](...args); break;
+        case "plugin": value = await env.plugin[sub](...args); break;
+        case "fs": value = await env.fs[sub](...args); break;
+        case "command": value = await env.command[sub](...args); break;
+        case "playlists": value = await env.playlists[sub](...args); break;
+        case "sources": value = await env.sources[sub](...args); break;
+        default: throw new Error(`未知 host 能力: ${name}`);
+      }
+      this.worker?.postMessage({ type: "host-result", callId, ok: true, value });
+    } catch (e: any) {
+      this.worker?.postMessage({ type: "host-result", callId, ok: false, error: String((e && e.message) || e) });
+    }
+  }
+
+  private failAll(reason: string): void {
+    for (const [, p] of this.pendingInvoke) p.reject(new Error(reason));
+    this.pendingInvoke.clear();
+  }
+}
+
+/** 加载沙箱插件:返回 manifest(与 plugin.json 校验过)与 impl 门面。
+ *  插件声明了 longRunning 批量方法时,额外启动批量 worker(挂到 sandbox,dispose 联动),
+ *  这些方法由 worker 线程执行;SANDBOX_WORKER_DISABLE=1 可关(测试/排障用)。 */
 export async function loadSandboxedPlugin(
   id: string,
   code: string,
@@ -1005,5 +1176,22 @@ export async function loadSandboxedPlugin(
 ): Promise<{ sandbox: SandboxedPlugin; impl: any }> {
   const sandbox = new SandboxedPlugin(id, env);
   await sandbox.init(code, expectedManifest);
-  return { sandbox, impl: sandbox.makeImpl() };
+  let worker: SandboxedPluginRemote | null = null;
+  const lr = sandbox.manifest?.longRunning;
+  if (lr && Object.keys(lr).length > 0 && process.env.SANDBOX_WORKER_DISABLE !== "1") {
+    try {
+      worker = new SandboxedPluginRemote(id, env);
+      // 延迟拿批量闸(避免 sandbox.ts 顶层拉入 batchPacer→settings→db 的模块链,worker 里会重复开 DB)。
+      const pacer = await import("../services/plugin/batchPacer.js");
+      worker.setOnDispose(() => { try { pacer.unregisterBatchWorker(); } catch { /* ignore */ } });
+      await worker.init(code, expectedManifest);
+      pacer.registerBatchWorker(); // 并发上限随 worker 数提升(多核并行批量任务)
+      sandbox.attachWorker(worker);
+    } catch (e: any) {
+      console.warn(`[PLUGIN:${id}] 批量 worker 初始化失败,longRunning 方法回退主线程执行:`, e?.message || e);
+      try { worker?.dispose(); } catch { /* ignore */ }
+      worker = null;
+    }
+  }
+  return { sandbox, impl: sandbox.makeImpl(worker ?? undefined) };
 }

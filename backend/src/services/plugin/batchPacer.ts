@@ -134,32 +134,64 @@ export function interactiveConcurrency(): number {
   return PACE_PARAMS[currentPace()].concurrency;
 }
 
-// ---------- 全局闸(FIFO promise 链;天然互斥,无忙等) ----------
-let lockChain: Promise<void> = Promise.resolve();
-// 持锁者 + 排队者计数。isBatchBusy 的依据(不能比较 promise 实例:每次
-// Promise.resolve() 都是新对象,`lockChain !== Promise.resolve()` 恒 true,
-// 会把「空闲」误判为「忙」——空闲内存回收依赖它判断,必须语义正确)。
+// ---------- 全局批量闸(信号量;并发度 = 批量 worker 数,默认 1) ----------
+// 单线程时代:全进程同时只跑 1 个批量任务(FIFO 互斥)。
+// worker 化后:沙箱批量方法在独立 worker 线程执行(不占主线程),同一时刻可以让多个
+// 批量任务并行(每个任务跑在自己的 worker 上,host 调用交替回主线程执行),真正用上
+// 多核。并发上限 = 已注册的批量 worker 数(registerBatchWorker),无 worker 时为 1(现状)。
+let batchLimit = 1;              // 批量并发上限
+let holders = 0;                 // 当前持锁任务数
+let lockQueue: Array<() => void> = [];
+// 持锁者 + 排队者计数。isBatchBusy 的依据(语义:只要有批量任务在跑/排队,即 busy)。
 let pendingLocks = 0;
+let workerPlugins = 0;           // 已注册的批量 worker 数(批量并发上限依据)
 
 /**
- * 获取全局批量锁。全进程同时只允许 1 个批量任务持有;其余按 FIFO 排队等待。
+ * 获取全局批量锁。最多 batchLimit 个任务同时持有,其余按 FIFO 排队等待。
  * 返回释放函数,**调用方必须在 finally 中调用**,否则队列永久阻塞。
  */
 export async function acquireBatchLock(): Promise<() => void> {
   ensureEldTimer();
   pendingLocks++; // 入队即计入(持锁者 + 排队者)
-  let releaseNext: () => void = () => {};
-  const gate = new Promise<void>((r) => { releaseNext = r; });
-  const prev = lockChain;
-  lockChain = lockChain.then(() => gate);
-  await prev; // 前面所有持锁者释放后,本调用才获得执行权
+  await new Promise<void>((resolve) => {
+    lockQueue.push(resolve);
+    pumpLock();
+  });
   let released = false;
   return () => {
     if (released) return;
     released = true;
     pendingLocks--;
-    releaseNext(); // 唤醒队列中下一个
+    holders--;
+    pumpLock(); // 唤醒队列中下一个
   };
+}
+
+/** 批量并发上限变化后唤醒排队者(有空位才放行)。 */
+function pumpLock(): void {
+  while (holders < batchLimit && lockQueue.length > 0) {
+    holders++;
+    const next = lockQueue.shift()!;
+    next();
+  }
+}
+
+/** 设置批量并发上限(≥1)。沙箱 worker 注册/注销时由批量闸联动更新。 */
+export function setBatchConcurrencyLimit(n: number): void {
+  batchLimit = Math.max(1, n);
+  pumpLock();
+}
+
+/** 注册一个批量 worker(沙箱插件加载成功时调用):并发上限随之提升。 */
+export function registerBatchWorker(): void {
+  workerPlugins++;
+  setBatchConcurrencyLimit(workerPlugins);
+}
+
+/** 注销一个批量 worker(沙箱插件销毁时调用)。 */
+export function unregisterBatchWorker(): void {
+  workerPlugins = Math.max(0, workerPlugins - 1);
+  setBatchConcurrencyLimit(workerPlugins);
 }
 
 /** 是否正有批量任务持有或排队等待全局闸(供状态端点/前端提示/空闲判定)。 */
@@ -168,11 +200,16 @@ export function isBatchBusy(): boolean {
 }
 
 // ---------- 测试钩子 ----------
+export function _batchLimitForTest(): number { return batchLimit; }
+
 export function _resetPacerForTest(): void {
   eldSamples = [];
   lastTick = 0;
   if (eldTimer) { clearInterval(eldTimer); eldTimer = null; }
-  lockChain = Promise.resolve();
+  lockQueue = [];
+  holders = 0;
   pendingLocks = 0;
+  batchLimit = 1;
+  workerPlugins = 0;
   interactiveDepth = 0;
 }

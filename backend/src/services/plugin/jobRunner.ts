@@ -34,6 +34,12 @@ export function getPluginJobState(pluginId: string): PluginJobState | null {
   return states.get(pluginId) ?? null;
 }
 
+/** 是否有插件任务正在运行(供 GET /v1/system/busy 聚合)。 */
+export function anyJobRunning(): boolean {
+  for (const v of running.values()) if (v) return true;
+  return false;
+}
+
 /** 启动一个插件任务(异步,fire-and-forget)。
  *  @returns { started:true } 已启动;{ alreadyRunning:true } 同插件任务在跑,本次未叠加;
  *           { started:false, alreadyRunning:false } 插件不存在/未实现该方法。 */

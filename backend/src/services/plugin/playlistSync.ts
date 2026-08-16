@@ -10,6 +10,7 @@ import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
 // 不再持有定义,以免核心路由被迫直接 import 本实现文件(check-core 规则 B)。
 import { normalizeKey, matchPlaylistInBackground, refreshPlaylistCounts } from "./shared.js";
 import { getLibraryIndex, clearLibraryIndex } from "./libraryIndex.js";
+import { sleepBetweenBatch } from "./batchPacer.js";
 
 export interface SyncResult {
   total: number;
@@ -169,19 +170,40 @@ export async function rebuildPlaylistEntries(
     if (!seenKeys.has(key)) deleteIds.push(e.id);
   }
 
-  db.transaction(() => {
-    if (deleteIds.length) {
-      db.delete(playlistSongs)
-        .where(and(eq(playlistSongs.playlistId, playlistId), inArray(playlistSongs.id, deleteIds)))
-        .run();
+  // 写入分片:删除/更新/插入各按 TX_CHUNK 拆小事务,chunk 间 sleepBetweenBatch() 让行,
+  // 避免几千行单事务同步阻塞主线程(同步刷新时前端假死的根因之一)。小差异走单 chunk,
+  // 行为与旧路径一致。
+  const TX_CHUNK = 300;
+  const chunkTx = (fn: () => void) => db.transaction(fn);
+  if (deleteIds.length) {
+    for (let off = 0; off < deleteIds.length; off += TX_CHUNK) {
+      const ids = deleteIds.slice(off, off + TX_CHUNK);
+      chunkTx(() => {
+        db.delete(playlistSongs)
+          .where(and(eq(playlistSongs.playlistId, playlistId), inArray(playlistSongs.id, ids)))
+          .run();
+      });
+      if (off + TX_CHUNK < deleteIds.length) await sleepBetweenBatch();
     }
-    for (const u of updates) {
-      const { id, ...rest } = u;
-      db.update(playlistSongs).set(rest).where(eq(playlistSongs.id, id)).run();
-    }
-    if (inserts.length) db.insert(playlistSongs).values(inserts).run();
-    refreshPlaylistCounts(playlistId);
-  });
+  }
+  for (let off = 0; off < updates.length; off += TX_CHUNK) {
+    const chunk = updates.slice(off, off + TX_CHUNK);
+    chunkTx(() => {
+      for (const u of chunk) {
+        const { id, ...rest } = u;
+        db.update(playlistSongs).set(rest).where(eq(playlistSongs.id, id)).run();
+      }
+    });
+    if (off + TX_CHUNK < updates.length) await sleepBetweenBatch();
+  }
+  for (let off = 0; off < inserts.length; off += TX_CHUNK) {
+    const chunk = inserts.slice(off, off + TX_CHUNK);
+    chunkTx(() => {
+      if (chunk.length) db.insert(playlistSongs).values(chunk).run();
+    });
+    if (off + TX_CHUNK < inserts.length) await sleepBetweenBatch();
+  }
+  refreshPlaylistCounts(playlistId);
 
   // Fire background auto-match only when genuinely new unmatched tracks appeared
   // (skip re-firing for previously-known stubs that are still unmatched).

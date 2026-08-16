@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   acquireBatchLock, batchConcurrency, sleepBetweenBatch, _resetPacerForTest, sleep,
   markInteractiveStart, markInteractiveEnd, isInteractiveActive, interactiveConcurrency,
+  setBatchConcurrencyLimit, registerBatchWorker, unregisterBatchWorker, _batchLimitForTest,
 } from "../../src/services/plugin/batchPacer.js";
 import { setSetting } from "../../src/services/settings.js";
 
@@ -117,5 +118,59 @@ describe("batchPacer 批量节拍器", () => {
     markInteractiveEnd(); // 无 start 的 end → 忽略
     markInteractiveEnd();
     expect(isInteractiveActive()).toBe(false);
+  });
+});
+
+describe("批量闸多核并发(worker 化后)", () => {
+  it("setBatchConcurrencyLimit(2) 后两个任务可同时持锁", async () => {
+    setBatchConcurrencyLimit(2);
+    const r1 = await acquireBatchLock();
+    const r2 = await acquireBatchLock();
+    // 两个都拿到锁(并发 2);第三个必须排队
+    let thirdGot = false;
+    const third = (async () => { const r = await acquireBatchLock(); thirdGot = true; r(); })();
+    await sleep(30);
+    expect(thirdGot).toBe(false);
+    r1();
+    await sleep(10);
+    expect(thirdGot).toBe(true); // r1 释放后有空位(仍 1 个持锁 < 2),third 进入
+    r2();
+    await sleep(10);
+    // third 已执行并释放;补一次获取再释放确保无残留
+    const leftover = await acquireBatchLock();
+    leftover();
+  });
+
+  it("并发上限回 1(无 worker)时退化为互斥", async () => {
+    setBatchConcurrencyLimit(1);
+    const r1 = await acquireBatchLock();
+    let secondGot = false;
+    const second = (async () => { const r = await acquireBatchLock(); secondGot = true; r(); })();
+    await sleep(30);
+    expect(secondGot).toBe(false);
+    r1();
+    await sleep(10);
+    expect(secondGot).toBe(true);
+    // second 已释放;补一次获取再释放确保无残留
+    const leftover = await acquireBatchLock();
+    leftover();
+  });
+
+  it("registerBatchWorker 提升上限、unregister 回退", async () => {
+    _resetPacerForTest();
+    registerBatchWorker();
+    registerBatchWorker(); // 2 个 worker → 并发 2
+    const r1 = await acquireBatchLock();
+    const r2 = await acquireBatchLock();
+    let thirdGot = false;
+    const third = (async () => { const r = await acquireBatchLock(); thirdGot = true; r(); })();
+    await sleep(30);
+    expect(thirdGot).toBe(false);
+    r1(); r2();
+    await sleep(10);
+    expect(thirdGot).toBe(true);
+    unregisterBatchWorker();
+    unregisterBatchWorker(); // 0 worker → 并发 1
+    expect(_batchLimitForTest()).toBe(1);
   });
 });

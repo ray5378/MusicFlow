@@ -39,6 +39,9 @@
         </el-popover>
       </div>
     </div>
+    <el-alert v-if="systemBusy" type="info" :closable="false" class="busy-banner" show-icon>
+      <template #title>后台批量任务运行中（同步 / 导入 / 推荐刷新），操作可能短暂变慢，请稍候</template>
+    </el-alert>
     <div v-if="activeFilter" class="platform-filter-bar">
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
@@ -196,6 +199,7 @@ import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin, Heart } 
 import { coverUrl } from "@/utils/cover";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 import api from "@/api";
+import { waitAsyncTask } from "@/utils/asyncTask";
 import { useAuthStore } from "@/stores/auth";
 
 const router = useRouter();
@@ -647,15 +651,23 @@ async function importRemote(rp: any) {
     const res = await api.post(`/rest/api/v1/playlist-search/${searchMode.value}/import`, {
       source: rp.source, id: rp.id, name: rp.name, cover: rp.cover,
     });
-    if (res.data?.success) {
-      rp._imported = true;
-      ElMessage.success(`已加入库:${res.data.name}(${res.data.trackCount}首,匹配 ${res.data.added})`);
-      loadPlaylists(); // 刷新本地列表(新歌单出现)
+    if (res.data?.alreadyRunning) {
+      ElMessage.warning("该歌单正在导入中,请稍候");
+    } else if (res.data?.success && res.data.taskId) {
+      // 异步任务:轮询直到完成(导入端点已异步化,触发即返回 taskId)
+      const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
+      if (r?.success) {
+        rp._imported = true;
+        ElMessage.success(`已加入库:${r.name}(${r.trackCount}首,匹配 ${r.added})`);
+        loadPlaylists(); // 刷新本地列表(新歌单出现)
+      } else {
+        ElMessage.error(r?.error || "导入失败");
+      }
     } else {
       ElMessage.error(res.data?.error || "导入失败");
     }
-  } catch {
-    ElMessage.error("导入失败:插件未启用或服务不可达");
+  } catch (e: any) {
+    ElMessage.error(e?.message || "导入失败:插件未启用或服务不可达");
   } finally {
     importingId.value = "";
   }
@@ -696,7 +708,22 @@ async function importPlaylist() {
       : { url: importUrl.value, name: importName.value, autoSync: importAutoSync.value };
     const res = await api.post("/rest/api/v1/playlists/import", body);
     if (res.data.success) {
-      if (res.data.created && res.data.created > 1) {
+      if (res.data.taskId) {
+        // URL 导入异步任务:轮询直到完成
+        const r = await waitAsyncTask(res.data.taskId, { intervalMs: 1000 });
+        if (!r?.success) throw new Error(r?.error || "导入失败");
+        if (r.created && r.created > 1) {
+          ElMessage.success(`导入 ${r.created} 个歌单成功: 共 ${r.trackCount} 首,匹配曲库 ${r.matched} 首,未匹配 ${r.unmatched} 首(已加入未命中音乐)`);
+        } else {
+          ElMessage.success(`导入成功: 共 ${r.trackCount} 首,匹配曲库 ${r.matched} 首,未匹配 ${r.unmatched} 首(已加入未命中音乐)`);
+        }
+        showImportDialog.value = false;
+        importUrl.value = "";
+        importName.value = "";
+        nativeFile.value = null;
+        nativeFileList.value = [];
+        loadPlaylists();
+      } else if (res.data.created && res.data.created > 1) {
         ElMessage.success(`导入 ${res.data.created} 个歌单成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入未命中音乐)`);
       } else {
         ElMessage.success(`导入成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入未命中音乐)`);
@@ -711,7 +738,7 @@ async function importPlaylist() {
       ElMessage.error(res.data.error || "导入失败");
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "导入失败");
+    ElMessage.error(e?.response?.data?.error || e?.message || "导入失败");
   } finally {
     importing.value = false;
   }
@@ -782,14 +809,22 @@ async function syncPlaylist(pl: any) {
   syncingId.value = pl.id;
   try {
     const res = await api.post(`/rest/api/v1/playlists/${pl.id}/sync`);
-    if (res.data.success) {
-      ElMessage.success(`同步完成: 共 ${res.data.total} 首,匹配 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首`);
+    if (res.data?.alreadyRunning) {
+      ElMessage.warning("该歌单正在同步中,请稍候");
+    } else if (res.data.success && res.data.taskId) {
+      // 异步任务:轮询直到完成(手动同步已异步化,触发即返回 taskId)
+      const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
+      if (r?.total !== undefined) {
+        ElMessage.success(`同步完成: 共 ${r.total} 首,匹配 ${r.matched} 首,未匹配 ${r.unmatched} 首`);
+      } else {
+        ElMessage.success("同步完成");
+      }
       loadPlaylists();
     } else {
       ElMessage.error(res.data.error || "同步失败");
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "同步失败");
+    ElMessage.error(e?.response?.data?.error || e?.message || "同步失败");
   } finally {
     syncingId.value = "";
   }
@@ -903,8 +938,20 @@ async function deletePlaylist(pl: any) {
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
 }
 
-onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); loadSearchProviders(); });
+// 后端 busy 感知:批量任务(每日推荐/自动匹配/插件任务/异步导入同步)运行中显示横幅,
+// 替代「前端假死」的无反馈表现。
+const systemBusy = ref(false);
+let busyTimer: ReturnType<typeof setInterval> | null = null;
+async function pollBusy() {
+  try {
+    const res = await api.get("/rest/api/v1/system/busy");
+    systemBusy.value = !!res.data?.busy;
+  } catch { /* 网络抖动忽略,维持上一次状态 */ }
+}
+
+onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); loadSearchProviders(); pollBusy(); busyTimer = setInterval(pollBusy, 4000); });
 onUnmounted(() => {
+  if (busyTimer) clearInterval(busyTimer);
   if (syncAllTimer.value) clearTimeout(syncAllTimer.value);
   if (gmdlRefreshTimer.value) clearTimeout(gmdlRefreshTimer.value);
   if (matchAllTimer.value) clearTimeout(matchAllTimer.value);
@@ -918,6 +965,7 @@ onUnmounted(() => {
   .header-actions { display: flex; gap: 10px; }
 }
 .search-area { display: flex; align-items: center; gap: 10px; }
+.busy-banner { margin: 0 0 16px; }
 .remote-results {
   .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
   .remote-source-tag {

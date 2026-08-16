@@ -97,6 +97,7 @@ import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
+import { waitAsyncTask } from "@/utils/asyncTask";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
 import { parseManifest, parseConfig } from "@/utils/plugin";
@@ -361,14 +362,22 @@ async function syncPlaylist() {
   syncing.value = true;
   try {
     const res = await api.post(`/rest/api/v1/playlists/${route.params.id}/sync`);
-    if (res.data.success) {
-      ElMessage.success(`同步完成: 共 ${res.data.total} 首,匹配 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首`);
+    if (res.data?.alreadyRunning) {
+      ElMessage.warning("该歌单正在同步中,请稍候");
+    } else if (res.data.success && res.data.taskId) {
+      // 异步任务:轮询直到完成(手动同步已异步化,触发即返回 taskId)
+      const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
+      if (r?.total !== undefined) {
+        ElMessage.success(`同步完成: 共 ${r.total} 首,匹配 ${r.matched} 首,未匹配 ${r.unmatched} 首`);
+      } else {
+        ElMessage.success("同步完成");
+      }
       loadPlaylist();
     } else {
       ElMessage.error(res.data.error || "同步失败");
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "同步失败");
+    ElMessage.error(e?.response?.data?.error || e?.message || "同步失败");
   } finally {
     syncing.value = false;
   }

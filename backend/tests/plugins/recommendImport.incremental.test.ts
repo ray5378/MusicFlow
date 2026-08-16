@@ -52,8 +52,8 @@ beforeAll(() => {
 beforeEach(() => makePlaylist());
 
 describe("replacePlaylistSongs (incremental)", () => {
-  it("first call inserts all songs", () => {
-    replacePlaylistSongs(PL_ID, [
+  it("first call inserts all songs", async () => {
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
@@ -62,14 +62,14 @@ describe("replacePlaylistSongs (incremental)", () => {
     expect(entryIds().length).toBe(3);
   });
 
-  it("identical call reuses rows (no full rewrite)", () => {
-    replacePlaylistSongs(PL_ID, [
+  it("identical call reuses rows (no full rewrite)", async () => {
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
     ]);
     const idsBefore = entryIds();
-    replacePlaylistSongs(PL_ID, [
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
@@ -77,14 +77,14 @@ describe("replacePlaylistSongs (incremental)", () => {
     expect(entryIds()).toEqual(idsBefore);
   });
 
-  it("adding one song only inserts the new entry", () => {
-    replacePlaylistSongs(PL_ID, [
+  it("adding one song only inserts the new entry", async () => {
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
     ]);
     const idsBefore = entryIds();
-    replacePlaylistSongs(PL_ID, [
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
@@ -96,14 +96,14 @@ describe("replacePlaylistSongs (incremental)", () => {
     expect(new Set(idsAfter).size).toBe(4);
   });
 
-  it("removing one song only deletes that entry", () => {
-    replacePlaylistSongs(PL_ID, [
+  it("removing one song only deletes that entry", async () => {
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
     ]);
     const idsBefore = entryIds(); // [id(w1), id(w2), id(w3)]
-    replacePlaylistSongs(PL_ID, [
+    await replacePlaylistSongs(PL_ID, [
       { id: "w1", title: "W1" },
       { id: "w3", title: "W3" },
     ]);

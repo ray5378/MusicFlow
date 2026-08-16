@@ -13,7 +13,9 @@ import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFi
 import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
 import { touch, registerCacheCleaner, reclaimNow } from "../../services/memory/reclaim.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
-import { currentPace, setPace, BatchPace, markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
+import { currentPace, setPace, BatchPace, markInteractiveStart, markInteractiveEnd, isBatchBusy } from "../../services/plugin/batchPacer.js";
+import { startAsyncTask, getAsyncTask, anyTaskRunning } from "../../services/plugin/asyncTasks.js";
+import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
@@ -1266,9 +1268,9 @@ apiRoutes.get("/v1/recommend-pool/favorites/status", (c) => {
 });
 
 // ==================== Playlist import (built-in plugins: QQ / NetEase / MusicFlow native file) ====================
+// URL 导入走异步任务(触发即返回 taskId,前端轮询 GET /v1/tasks/:id):网络拉取 + 增量重建
+// 可能耗时几秒~几十秒,同步 await 会长时间挂住前端请求;native 文件解析通常量小,保持同步。
 apiRoutes.post("/v1/playlists/import", async (c) => {
-  markInteractiveStart(); // 用户交互窗口:导入期间后台批量任务让路
-  try {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
@@ -1317,62 +1319,67 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
     if (syncApi()?.checkImportCooldown(user?.id || "", url) ?? false) {
       return c.json({ success: false, error: "相同歌单刚导入过,请稍候再试" });
     }
-    const imported = await importPlaylistFromUrl(url);
-    const name = (body.name || imported.name || "导入歌单").trim();
-
-    // Upsert: if this user already imported the same share URL, update that
-    // playlist in place (incremental rebuild) instead of creating a duplicate.
-    const existing = db.select().from(playlists)
-      .where(and(eq(playlists.sourceUrl, url), eq(playlists.ownerId, user?.id || "")))
-      .get();
-
-    let id: string;
-    if (existing) {
-      id = existing.id;
-      // Refresh cached remote cover (force re-download) when the platform supplies one.
-      if (imported.coverUrl) {
-        const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`, true);
-        const upd: any = { updatedAt: new Date().toISOString() };
-        if (body.name) upd.name = name;
-        if (cached) upd.coverArt = cached;
-        db.update(playlists).set(upd).where(eq(playlists.id, id)).run();
-      } else if (body.name) {
-        db.update(playlists).set({ name, updatedAt: new Date().toISOString() }).where(eq(playlists.id, id)).run();
-      }
-    } else {
-      id = `pl-${Date.now()}`;
-      // Cache the remote platform cover locally (native files carry no cover URL)
-      let coverRef: string | undefined = undefined;
-      if (imported.coverUrl) {
-        const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);
-        if (cached) coverRef = cached;
-      }
-      db.insert(playlists).values({
-        id, name, ownerId: user?.id || "",
-        sourceUrl: url,
-        sourcePlatform: imported.platform,
-        externalId: url,
-        coverArt: coverRef,
-        syncEnabled: body.autoSync ? 1 : 0,
-      }).run();
-    }
     if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
-    const result = await syncApi().rebuildPlaylistEntries(id, imported, {
-      userId: user?.id,
-      notes: `来自歌单「${name}」导入`,
+    const ownerKey = `${url}:${user?.id || ""}`;
+    const started = startAsyncTask("playlist-import", `url:${ownerKey}`, async () => {
+      markInteractiveStart(); // 用户交互窗口:导入期间后台批量任务让路
+      try {
+        const imported = await importPlaylistFromUrl(url);
+        const name = (body.name || imported.name || "导入歌单").trim();
+
+        // Upsert: if this user already imported the same share URL, update that
+        // playlist in place (incremental rebuild) instead of creating a duplicate.
+        const existing = db.select().from(playlists)
+          .where(and(eq(playlists.sourceUrl, url), eq(playlists.ownerId, user?.id || "")))
+          .get();
+
+        let id: string;
+        if (existing) {
+          id = existing.id;
+          // Refresh cached remote cover (force re-download) when the platform supplies one.
+          if (imported.coverUrl) {
+            const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`, true);
+            const upd: any = { updatedAt: new Date().toISOString() };
+            if (body.name) upd.name = name;
+            if (cached) upd.coverArt = cached;
+            db.update(playlists).set(upd).where(eq(playlists.id, id)).run();
+          } else if (body.name) {
+            db.update(playlists).set({ name, updatedAt: new Date().toISOString() }).where(eq(playlists.id, id)).run();
+          }
+        } else {
+          id = `pl-${Date.now()}`;
+          // Cache the remote platform cover locally (native files carry no cover URL)
+          let coverRef: string | undefined = undefined;
+          if (imported.coverUrl) {
+            const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);
+            if (cached) coverRef = cached;
+          }
+          db.insert(playlists).values({
+            id, name, ownerId: user?.id || "",
+            sourceUrl: url,
+            sourcePlatform: imported.platform,
+            externalId: url,
+            coverArt: coverRef,
+            syncEnabled: body.autoSync ? 1 : 0,
+          }).run();
+        }
+        const result = await syncApi().rebuildPlaylistEntries(id, imported, {
+          userId: user?.id,
+          notes: `来自歌单「${name}」导入`,
+        });
+        return {
+          success: true, playlistId: id, name, platform: imported.platform,
+          trackCount: result.total, matched: result.matched, unmatched: result.unmatched,
+          wishAdded: result.wishAdded, coverUrl: imported.coverUrl, autoSync: !!body.autoSync,
+        };
+      } finally {
+        clearLibraryIndex(); // 单次平台歌单导入结束,立即回收曲库索引缓存
+        touch(); // 标记活动:平台歌单导入
+        markInteractiveEnd();
+      }
     });
-    clearLibraryIndex(); // 单次平台歌单导入结束,立即回收曲库索引缓存
-    touch(); // 标记活动:平台歌单导入
-    return c.json({
-      success: true, playlistId: id, name, platform: imported.platform,
-      trackCount: result.total, matched: result.matched, unmatched: result.unmatched,
-      wishAdded: result.wishAdded, coverUrl: imported.coverUrl, autoSync: !!body.autoSync,
-    });
-  } catch (e: any) {
-    return c.json({ success: false, error: e.message || "导入失败" });
-  } finally {
-    markInteractiveEnd();
-  }
+    if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
+    return c.json({ success: true, taskId: started.taskId });
 });
 
 // Export a playlist as a MusicFlow-native JSON file that round-trips back
@@ -1410,9 +1417,8 @@ apiRoutes.get("/v1/playlists/export-all", (c) => {
 });
 
 // ==================== Playlist sync ====================
+// 手动同步走异步任务(触发即返回 taskId,前端轮询):大歌单同步可能耗时,避免 HTTP 长时间挂起。
 apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
-  markInteractiveStart(); // 用户交互窗口:手动同步期间后台批量任务让路
-  try {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
@@ -1420,15 +1426,35 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
   // Only owner (or admin) can sync
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权同步该歌单" });
   if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
-  const result = await syncApi().syncPlaylist(id, { userId: user?.id });
-  return c.json({ success: true, ...result });
-  } catch (e: any) {
-    return c.json({ success: false, error: e.message || "同步失败" });
-  } finally {
-    clearLibraryIndex(); // 手动同步结束,立即回收曲库索引缓存
-    touch(); // 标记活动:歌单同步
-    markInteractiveEnd();
-  }
+  const started = startAsyncTask("playlist-sync", `pl:${id}`, async () => {
+    markInteractiveStart(); // 用户交互窗口:手动同步期间后台批量任务让路
+    try {
+      const result = await syncApi().syncPlaylist(id, { userId: user?.id });
+      return result;
+    } finally {
+      clearLibraryIndex(); // 手动同步结束,立即回收曲库索引缓存
+      touch(); // 标记活动:歌单同步
+      markInteractiveEnd();
+    }
+  });
+  if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
+  return c.json({ success: true, taskId: started.taskId });
+});
+
+// 异步任务状态查询(前端轮询):GET /v1/tasks/:taskId
+apiRoutes.get("/v1/tasks/:taskId", (c) => {
+  const state = getAsyncTask(c.req.param("taskId")!);
+  if (!state) return c.json({ success: false, error: "任务不存在" }, 404);
+  return c.json({ success: true, task: state });
+});
+
+// 全局 busy 状态(前端横幅提示):批量闸被持有(每日推荐/自动匹配/插件每日任务)或
+// 异步任务/插件任务在跑 → busy=true。前端据此显示「后台任务运行中」而非假死。
+apiRoutes.get("/v1/system/busy", (c) => {
+  const batch = isBatchBusy();
+  const tasks = anyTaskRunning();
+  const jobs = anyJobRunning();
+  return c.json({ success: true, busy: batch || tasks || jobs, detail: { batch, tasks, jobs } });
 });
 
 // ==================== Playlist settings (rename / public toggle / auto-sync toggle) ====================
