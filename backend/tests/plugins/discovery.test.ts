@@ -13,7 +13,7 @@ import {
 import { registerPlugin, getPlugin } from "../../src/plugins/registry.js";
 import { pluginSandboxes } from "../../src/plugins/discovery.js";
 
-const tmp = path.join(os.tmpdir(), `mfv2-plugins-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+const tmp = path.join(os.tmpdir(), `mf-plugins-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
 
 function writePlugin(id: string, body: string) {
   const dir = path.join(tmp, id);

@@ -1,6 +1,6 @@
 name: build-and-push
 
-# MusicFlow-V2 镜像发布(GHCR + Docker Hub 双推送)。
+# MusicFlow 镜像发布(GHCR + Docker Hub 双推送)。
 #
 # 触发:
 #   - push 到 master:自动构建 :latest(版本号由 git describe 自动生成,去 v 前缀),
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: musicflow-v2
+  IMAGE_NAME: musicflow
   # Docker Hub 命名空间 = 账号用户名(与 GHCR 的 org 路径不同)。
   DH_NAMESPACE: ray5378
 

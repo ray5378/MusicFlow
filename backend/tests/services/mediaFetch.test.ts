@@ -207,7 +207,7 @@ describe("lyrics:本地歌曲缺歌词 → provider 回退 + persist 落库为�
       searchLyrics: async () => { calls++; return { lrc: "[00:00.00]provider" }; },
     });
     setSetting("lyrics.providerId", "fake-lyrics-2");
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mfv2-lrc-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mf-lrc-"));
     const audio = path.join(dir, "side.mp3");
     fs.writeFileSync(audio, "x");
     fs.writeFileSync(path.join(dir, "side.lrc"), "[00:00.00]local sidecar");

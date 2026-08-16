@@ -1,6 +1,6 @@
 // Unit tests for the unified plugin registry + capability-driven dispatch.
 //
-// These are the guard-rails for the V2 refactor: the core must resolve plugins by
+// These are the guard-rails for the pluginization refactor: the core must resolve plugins by
 // *capability* and honour the DB `enabled` flag, and importer routing must come
 // from the plugins themselves (no URL if-chain left in the core).
 import { describe, it, expect, beforeAll, afterEach } from "vitest";

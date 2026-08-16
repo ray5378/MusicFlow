@@ -1,7 +1,7 @@
 name: sync-to-gitee
 
 # 推送到 GitHub 后自动镜像同步到 Gitee(国内访问源)。
-# 镜像仓库: https://gitee.com/ray5378/musicflow-v2
+# 镜像仓库: https://gitee.com/ray5378/musicflow
 # 触发:master 分支 push 或任意 tag 推送(workflow_dispatch 可手动补同步)。
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           # Gitee access_token 可作 git push 密码(需带用户名前缀)
-          git remote add gitee "https://ray5378:${GITEE_TOKEN}@gitee.com/ray5378/musicflow-v2.git"
+          git remote add gitee "https://ray5378:${GITEE_TOKEN}@gitee.com/ray5378/musicflow.git"
           # 只同步 master 分支 + 全部 tags;不用 --mirror(checkout 带下的 refs/remotes/*
           # 会被 Gitee 以 "deny updating a hidden ref" 拒绝导致整体失败)。
           # tag 触发时 runner 处于 detached HEAD、本地无 master 分支,只推 tags

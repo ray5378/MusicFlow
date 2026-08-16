@@ -9,7 +9,7 @@ import os from "os";
 import { loadSandboxedPlugin, type SandboxedPlugin } from "../../src/plugins/sandbox.js";
 import type { SandboxHostEnv } from "../../src/plugins/sandbox.js";
 
-const TMP = path.join(os.tmpdir(), `mfv2-sandbox-${Date.now()}`);
+const TMP = path.join(os.tmpdir(), `mf-sandbox-${Date.now()}`);
 const store = new Map<string, any>();
 
 function makeEnv(overrides?: Partial<SandboxHostEnv>): SandboxHostEnv {

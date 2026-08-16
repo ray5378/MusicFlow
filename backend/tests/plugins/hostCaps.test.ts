@@ -11,7 +11,7 @@ import { makeFsApi, makeCommandApi, makeNetApi, makeWsApi, makeJsenvApi } from "
 import { loadSandboxedPlugin } from "../../src/plugins/sandbox.js";
 import type { SandboxHostEnv } from "../../src/plugins/sandbox.js";
 
-const TMP = path.join(os.tmpdir(), `mfv2-hostcaps-${Date.now()}`);
+const TMP = path.join(os.tmpdir(), `mf-hostcaps-${Date.now()}`);
 fs.mkdirSync(TMP, { recursive: true });
 
 afterAll(() => {

@@ -31,7 +31,7 @@ export interface PluginHost {
   comm: CommTarget;
 }
 
-/** All permissions MusicFlow-V2 understands. A plugin declaring an unknown
+/** All permissions MusicFlow understands. A plugin declaring an unknown
  *  permission at manifest-validation time is rejected. Prefix wildcards
  *  (`songs.*`) are allowed and match any `<ns>.<sub>` permission. */
 export const KNOWN_PERMISSIONS: string[] = [

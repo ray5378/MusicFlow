@@ -1,10 +1,10 @@
-# 调研：songloft 插件化架构对 MusicFlow-V2 的启发
+# 调研：songloft 插件化架构对 MusicFlow 的启发
 
 > 调研对象：`github.com/ray5378/songloft`（v2.x，Go + QuickJS 沙箱 JS 插件）
-> 目的：对照 songloft 的插件体系，找出 V2 还能把哪些内置能力「插件化」、以及如何「让插件充分调用后端能力」。
+> 目的：对照 songloft 的插件体系，找出还能把哪些内置能力「插件化」、以及如何「让插件充分调用后端能力」。
 > 结论：**不落代码，只给行动清单**。下文带 `songloft/...` 引用的是已核实的源码事实。
 >
-> **后续状态（2026-08-12）**：本调研建议的 **QuickJS 沙箱方案（方案 B）已落地**——V2 ≥ 1.3.0 起，
+> **后续状态（2026-08-12）**：本调研建议的 **QuickJS 沙箱方案（方案 B）已落地**——MusicFlow ≥ 1.3.0 起，
 > 外置插件运行在 QuickJS/WASM 虚拟机里（`backend/src/plugins/sandbox.ts`），无 Node 能力、
 > 网络走 `host.http`（权限执行点强制）、`host.storage` 隔离存储、单插件内存/栈/超时上限。
 > 本文档保留为设计参考（songloft 的 provider 注册表、first-match-wins 等机制供后续迭代借鉴）；
@@ -61,9 +61,9 @@
 
 ---
 
-## 2. V2 现状对照（gap）
+## 2. 现状对照（gap）
 
-| 维度 | songloft | MusicFlow-V2 现状 |
+| 维度 | songloft | MusicFlow 现状 |
 |---|---|---|
 | 调用方向 | 宿主注入 `songloft.*` SDK，**插件反调后端** | 插件是 in-process TS 模块，**直接 import 后端内部包**（goMusicDl 等） |
 | Provider 注册 | lyrics/covers 注册成 provider，first-match-wins | 仅 `lyrics` 能力挂在 source 插件上，go-music-dl 垄断歌词；**无 coverProvider** |
@@ -77,7 +77,7 @@
 | 插件间通信 | `comm.send/call` + `inter-plugin` | 无，核心做编排 |
 | 已插件化 | 音源/歌词/封面/元数据/设备/命令 | source / importer×3 / dailyRecommend / playlistSync |
 
-**尚未插件化的 V2 内置功能**（用户关心的「内置功能要插件化」）：
+**尚未插件化的内置功能**（用户关心的「内置功能要插件化」）：
 - `localRecommend`（本地「猜你喜欢」推荐引擎）—— 仍是核心，未注册成 recommender 插件
 - 歌词 provider —— 只有 source 插件顺带提供，无独立 lyricProvider 注册表
 - 封面 provider —— 完全没有插件路径（封面只来自 source URL + 本地扫描）
@@ -145,4 +145,4 @@
 - **Phase 5（P1）**：localRecommend / rendererProvider(DLNA) / scrobbler 插件化；权限模型。
 - **Phase 6（P2）**：分发注册表 + 市场 UI + 自更新 + 健康检查 + 热重载 + Manifest/存储增强。
 
-> 注：当前 V2 已落地 Phase 0+1（能力驱动核心）+ Phase 2（importer/recommender/sync 插件化）+ Phase 3（外置插件发现）。以上为 Phase 4+ 的调研输入。
+> 注：当前已落地 Phase 0+1（能力驱动核心）+ Phase 2（importer/recommender/sync 插件化）+ Phase 3（外置插件发现）。以上为 Phase 4+ 的调研输入。

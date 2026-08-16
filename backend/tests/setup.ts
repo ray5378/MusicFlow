@@ -15,7 +15,7 @@ import path from "path";
 import fs from "fs";
 import { randomUUID } from "crypto";
 
-const dir = path.join(os.tmpdir(), "mfv2-test-data", `t-${process.pid}-${randomUUID().slice(0, 8)}`);
+const dir = path.join(os.tmpdir(), "mf-test-data", `t-${process.pid}-${randomUUID().slice(0, 8)}`);
 fs.mkdirSync(dir, { recursive: true });
 process.env.DATA_DIR = dir;
 const { initDatabase } = await import("../src/db/index.js");

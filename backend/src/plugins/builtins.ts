@@ -1,6 +1,6 @@
 // ==================== Built-in Plugin Catalog + Bootstrap ====================
 //
-// The set of plugins compiled into MusicFlow-V2, and the two-step bootstrap that
+// The set of plugins compiled into MusicFlow, and the two-step bootstrap that
 // gets them into the registry:
 //
 //   1. registerBuiltinPlugins()   — pure, in-memory, safe at module load

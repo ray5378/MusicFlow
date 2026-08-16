@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 // 响应式守卫:在手机视口(390×844)下启动真实前后端,遍历所有路由,
 // 断言页面与表格不出现横向溢出、插件配置弹窗不超出视口宽度。
-// 任何非自适应页面都会让本测试失败 → CI 红,迫使修复(见 MusicFlow-V2 发版流程)。
+// 任何非自适应页面都会让本测试失败 → CI 红,迫使修复(见 MusicFlow 发版流程)。
 
 const BACKEND_PORT = 46400;
 const FRONTEND_PORT = 4173;

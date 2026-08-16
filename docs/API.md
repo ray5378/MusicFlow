@@ -1,4 +1,4 @@
-# MusicFlow-V2 API 参考（API）
+# MusicFlow API 参考（API）
 
 > 适用 v1.4.0+。三套接口面：
 > - **原生 API**：`/rest/api/v1/*`（内部 REST 别名，前端与 HA 集成使用；`/api/v1/*` 经 Navidrome 兼容层同样可达）

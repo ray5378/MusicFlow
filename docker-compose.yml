@@ -1,6 +1,6 @@
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow-v2:1.7.4
+    image: ghcr.io/ray5378/musicflow:latest
     container_name: musicflow
     restart: unless-stopped
     # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。

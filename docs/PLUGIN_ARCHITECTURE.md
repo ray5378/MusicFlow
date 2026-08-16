@@ -1,21 +1,21 @@
-# MusicFlow-V2 插件化架构与开发文档
+# MusicFlow 插件化架构与开发文档
 
 > 版本：基于 MusicFlow 复制基线（v1.1.29）重构
 > 目标：把内置的 `go-music-dl` 从「深度耦合」改造成「真正的插件」，核心代码不再写死任何具体在线源实现；并搭建一套可扩展的统一插件框架，为后续把「歌单导入 / 每日推荐 / 歌单同步」也插件化预留接口。
 
-> **北向目标（2026-08-12 明确）**：**V2 完整实现 MusicFlow 的功能与逻辑，只是解耦成插件版**。
-> 即：V2 不是 V1 的子集或实验品，而是 V1 功能/API 的完整复刻 + 插件化重构，并作为 HA
-> 加载项（addon）+ 集成（hass-musicflow）+ 卡片（hass-musicflow-card）这条主链路的新内核。
+> **定位（2026-08-12 明确）**：**MusicFlow 完整实现音乐服务器的功能与逻辑，并以插件化解耦**。
+> 即：核心不再写死任何具体在线源 / 平台实现，而是作为 HA
+> 加载项（addon）+ 集成（hass-musicflow）+ 卡片（hass-musicflow-card）这条主链路的内核。
 > 已核实的兼容性基线：
-> - 原生 `/v1` API：V2 ⊇ V1（V2 独有 8 个插件端点，V1 独有 0 个）
-> - OpenSubsonic `/rest`：46 端点 V1/V2 集合完全一致（2026-08-12 起 V2 额外补齐合规：品牌、失败体、getAvatar/setRating/savePlayQueue）
-> - HA 链路：addon 1.2.0 构建自 `ghcr.io/ray5378/musicflow-v2:1.2.0`；集成/卡片契约逐项 e2e 通过
+> - 原生 `/v1` API：在 OpenSubsonic 兼容之上额外提供 8 个插件端点
+> - OpenSubsonic `/rest`：46 端点完整兼容（品牌、失败体、getAvatar/setRating/savePlayQueue 等均合规）
+> - HA 链路：addon 构建自 `ghcr.io/ray5378/musicflow`；集成/卡片契约逐项 e2e 通过
 
 ---
 
 ## 0. 范围说明（本次交付）
 
-本版（V2 Phase 0 + 1）聚焦 **在线音乐源（Source）的插件化**，这是用户原始诉求「go-music-dl 不再和项目深度耦合」的完整答案：
+本版（Phase 0 + 1）聚焦 **在线音乐源（Source）的插件化**，这是用户原始诉求「go-music-dl 不再和项目深度耦合」的完整答案：
 
 - Phase 0：统一插件注册表 + 统一 Manifest 类型 + DB 种子改由 manifest 驱动；go-music-dl 改为通过 registry 注册，删除编译期硬 import。
 - Phase 1：核心调度 / 歌词 / 流兜底 / 推荐前缀全部改为「遍历有能力的启用插件」，不再出现字符串 `"go-music-dl"`。
@@ -194,7 +194,7 @@ export function getCapabilities(id: string): PluginCapability[] { return registr
 
 > 每完成一项即标记完成。括号内为代码映射。
 
-- [x] **T0** 复制基线 → `MusicFlow-V2`，初始化新 git，改名 musicflow-v2-*（已完成）
+- [x] **T0** 复制基线 → `MusicFlow`，初始化新 git，改名 musicflow-*（已完成）
 - [x] **T1** 新增 `plugins/types.ts` 统一 Manifest/ConfigField；新增 `plugins/registry.ts` 注册表（含 `getEnabledSourcePlugins` / `getCapabilities`）；新增 `plugins/builtins.ts` 内置插件清单
 - [x] **T2** 扩展 `OnlineProvider` → 带 `manifest`；新增 `lyricUrl?` 方法（`recommendPlaylistRef` 简化为 manifest 内 `recommendPrefix` 字段）
 - [x] **T3** `db/index.ts` 删除 go-music-dl 硬种子；改由 `registerBuiltinPlugins()` 遍历内置清单 + `configSchema` 默认值写入（去 C9）
@@ -336,12 +336,12 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
   覆盖品牌/失败体/浏览/搜索/歌单 CRUD/收藏/评分/scrobble 去重/队列/头像。
   全量 vitest 185 用例绿。
 
-### 9.2 HA 主链路（addon + integration + card 全部对接 V2）
+### 9.2 HA 主链路（addon + integration + card 全部对接）
 
 | 环节 | 仓库 | 状态 |
 |---|---|---|
-| 镜像 | `MusicFlow-V2`（ghcr.io/ray5378/**musicflow-v2**:1.2.0，仅 amd64） | ✅ 已发布 |
-| 加载项 | `hassio-addons/musicflow`（version 1.2.0，build_from 钉 V2 镜像，arch 仅 amd64） | ✅ 已对接 |
+| 镜像 | `MusicFlow`（ghcr.io/ray5378/**musicflow**:1.2.0，仅 amd64） | ✅ 已发布 |
+| 加载项 | `hassio-addons/musicflow`（version 1.2.0，build_from 钉镜像，arch 仅 amd64） | ✅ 已对接 |
 | 集成 | `hass-musicflow` 1.3.7（契约 = `/v1/peers*`、`/v1/groups`、`/v1/play`、`/rest/*` + `/rest/api/*` 代理、`/ws?token=`） | ✅ e2e 12/12 通过，零改动 |
 | 卡片 | `hass-musicflow-card` v1.6.51（`/api/v1/peers`、`/api/v1/users/me`、代理 fallback、`/ws`） | ✅ API 面兼容，零改动 |
 
@@ -351,10 +351,10 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
 
 ### 9.3 CI 与发版
 
-- `MusicFlow-V2/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow-v2:<版本>` + `:latest`；
+- `MusicFlow/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow:<版本>` + `:latest`；
   **workflow_dispatch 手动触发也自动构建 `:latest`**（版本号由 git describe 自动生成，
   无需手动指定升级版本）并附 `:master` 便于回溯；镜像仅 amd64（账号无 ARM runner）。
-- 发版流程：V2 打新 tag → addon 的 `build.yaml` build_from + `config.yaml` version 同步 → addon 仓库发版。
+- 发版流程：MusicFlow 打新 tag → addon 的 `build.yaml` build_from + `config.yaml` version 同步 → addon 仓库发版。
 
 ### 9.4 外置插件 QuickJS 沙箱（v1.3.0）
 

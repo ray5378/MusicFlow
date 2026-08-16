@@ -12,7 +12,7 @@ import os from "os";
 import { loadSandboxedPlugin } from "../../src/plugins/sandbox.js";
 import type { SandboxHostEnv } from "../../src/plugins/sandbox.js";
 
-const TMP = path.join(os.tmpdir(), `mfv2-sandbox-worker-${Date.now()}`);
+const TMP = path.join(os.tmpdir(), `mf-sandbox-worker-${Date.now()}`);
 const store = new Map<string, any>();
 let httpCalls = 0;
 let storageCalls = 0;

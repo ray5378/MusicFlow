@@ -1,6 +1,6 @@
-# Contributing to MusicFlow-V2
+# Contributing to MusicFlow
 
-欢迎贡献。项目由四个仓库组成，本指南针对**主项目 MusicFlow-V2**（服务端 + 前端）；插件相关贡献见
+欢迎贡献。项目由四个仓库组成，本指南针对**主项目 MusicFlow**（服务端 + 前端）；插件相关贡献见
 [MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins) 的 README。
 
 ## 环境要求
@@ -64,13 +64,13 @@ npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
 
 - 提交信息：`<type>(<scope>): <subject>`，如 `feat(plugins): ...` / `fix(rest): ...` / `docs: ...` / `ci: ...`。
 - 消息含 `${...}` 时用**单引号**包住，避免 bash 展开。
-- 发版：改完推 `master` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow-v2:<版本>`（仅 amd64）→ 建 GitHub Release → **同步 addon**（`hassio-addons/musicflow` 的 `build.yaml` build_from + `config.yaml` version）。详细见 `~/.workbuddy/skills/musicflow-v2-release/SKILL.md`。
+- 发版：改完推 `master` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow:<版本>`（仅 amd64）→ 建 GitHub Release → **同步 addon**（`hassio-addons/musicflow` 的 `build.yaml` build_from + `config.yaml` version）。详细见 `~/.workbuddy/skills/musicflow-v2-release/SKILL.md`。
 
 ## 文档规范
 
 - 改代码/发版后，**同步更新** `README.md`（版本配套表、镜像、能力说明）与 `docs/` 下相关文档——版本号、测试数、端点清单最易脱节，提交前 grep 一遍旧版本号。
 - 插件相关改动同步更新 `docs/PLUGIN_DEV.md`（host.* 表、权限白名单、示例）与插件仓库。
-- 新增能力时在 README 补一句，并保持两份 README（V2 / plugins）的跳转链接闭环。
+- 新增能力时在 README 补一句，并保持 README 与插件仓库 README 的跳转链接闭环。
 
 ## PR 流程
 

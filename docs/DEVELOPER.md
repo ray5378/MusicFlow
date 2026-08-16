@@ -1,4 +1,4 @@
-# MusicFlow-V2 架构与开发指南（DEVELOPER）
+# MusicFlow 架构与开发指南（DEVELOPER）
 
 > 适用 v1.4.0+。给想理解、修改、扩展本项目的开发者。
 > 与插件相关的架构见 `PLUGIN_ARCHITECTURE.md`，写插件见 `PLUGIN_DEV.md`。
@@ -12,7 +12,7 @@
 | 沙箱 | **quickjs-emscripten**（WASM QuickJS） | 外置插件运行隔离 |
 | 实时 | **WebSocket**（ws 库） | 播放状态推送 |
 | 设备 | **DLNA/UPnP**（SSDP + SOAP） | 投屏渲染器 |
-| 部署 | 单容器镜像（`ghcr.io/ray5378/musicflow-v2`） | 仅 amd64 |
+| 部署 | 单容器镜像（`ghcr.io/ray5378/musicflow`） | 仅 amd64 |
 
 生产部署为**单进程、单端口**：后端在 `:46400`，前端构建产物由后端 `serveStatic` 托管；对外同时暴露
 原生 API（`/v1/*` + `/rest/api/*` 别名）、OpenSubsonic（`/rest/*`）与 WebSocket（`/ws`）。

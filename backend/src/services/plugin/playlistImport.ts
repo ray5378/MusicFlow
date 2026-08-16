@@ -1,7 +1,7 @@
 // ==================== Playlist import dispatcher ====================
 //
 // This module used to *be* the QQ + NetEase importer (an if-chain on the URL).
-// In V2 each platform is its own `importer` plugin; what is left here is the
+// In this project each platform is its own `importer` plugin; what is left here is the
 // capability-driven dispatcher the core calls:
 //
 //   share URL      -> plugins with capability "playlistImport" -> canHandle(url)

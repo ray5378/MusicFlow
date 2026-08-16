@@ -1,6 +1,6 @@
 // ==================== Unified Plugin Manifest Types ====================
 //
-// These types describe every plugin kind MusicFlow-V2 can load, not just the
+// These types describe every plugin kind MusicFlow can load, not just the
 // online "source" plugins. The core only ever reasons about capabilities
 // (declared in the manifest) — it never references a concrete plugin by name.
 //

@@ -10,7 +10,7 @@
         <el-descriptions-item label="哈希版本号">{{ gitCommit }}</el-descriptions-item>
         <el-descriptions-item label="OpenSubsonic">1.16.1</el-descriptions-item>
         <el-descriptions-item label="项目地址">
-          <a href="https://github.com/ray5378/MusicFlow-V2" target="_blank" rel="noopener" class="gh-link">GitHub 仓库 ↗</a>
+          <a href="https://github.com/ray5378/MusicFlow" target="_blank" rel="noopener" class="gh-link">GitHub 仓库 ↗</a>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>

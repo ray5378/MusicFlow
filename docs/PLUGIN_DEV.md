@@ -1,6 +1,6 @@
-# MusicFlow-V2 外置插件开发指南（PLUGIN_DEV）
+# MusicFlow 外置插件开发指南（PLUGIN_DEV）
 
-> 适用版本：MusicFlow-V2 **v1.4.0+**（QuickJS 沙箱运行时，host.* 能力全量开放）
+> 适用版本：MusicFlow **v1.4.0+**（QuickJS 沙箱运行时，host.* 能力全量开放）
 > 目标：教你自己写一个 drop-in 插件，丢进 `data/plugins/<id>/` 即可被后端加载，**无需改任何核心代码**。
 
 ---
