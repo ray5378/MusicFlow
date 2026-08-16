@@ -2,7 +2,10 @@
   <div class="playlists-page">
     <div class="page-header">
       <h2>歌单</h2>
-      <el-input v-model="searchQuery" placeholder="搜索歌单..." prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
+      <div class="search-area">
+        <el-segmented v-model="searchMode" :options="searchModeOptions" @change="onSearchModeChange" />
+        <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
+      </div>
       <div class="header-actions">
         <el-dropdown trigger="click" @command="onFilterCommand">
           <el-button><MfIcon name="Library" />筛选歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
@@ -40,7 +43,7 @@
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
-    <div class="playlist-grid" v-loading="loading">
+    <div v-if="isLocalMode" class="playlist-grid" v-loading="loading">
       <!-- User playlists -->
       <div
         class="playlist-card"
@@ -90,7 +93,38 @@
       </div>
     </div>
 
-    <div class="pagination-bar">
+    <!-- 平台(插件)歌单搜索结果:由启用的 playlistSearch 插件(如 go-music-dl)提供,可「加入库」 -->
+    <div v-else class="remote-results" v-loading="remoteSearching">
+      <div v-if="remoteResults.length === 0 && !remoteSearching" class="remote-empty">
+        <MfIcon name="List" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关歌单" : `输入关键词,搜索${currentProviderName}支持的全网歌单` }}</p>
+      </div>
+      <div class="playlist-grid">
+        <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="i">
+          <div class="playlist-cover mf-coverwrap">
+            <span class="remote-source-tag">{{ rp.platformLabel }}</span>
+            <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
+          </div>
+          <div class="playlist-info">
+            <div class="playlist-name">{{ rp.name }}</div>
+            <div class="playlist-meta">
+              <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? rp.trackCount + "首" : "" }}</span>
+            </div>
+          </div>
+          <el-button
+            class="remote-import-btn"
+            size="small"
+            type="primary"
+            :loading="importingId === rp.source + ':' + rp.id"
+            :disabled="rp._imported"
+            @click="importRemote(rp)"
+          >{{ rp._imported ? "已加入库" : "加入库" }}</el-button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pagination-bar" v-if="isLocalMode">
       <PagePagination :total="total" :page="currentPage" :page-size="pageSize" :sizes="[15, 20, 50, 100]" storage-key="playlistsPageSize" @change="onPageChange" />
     </div>
 
@@ -200,6 +234,20 @@ function cardActions(pl: any): MenuAction[] {
 const playlists = ref<any[]>([]);
 const loading = ref(false);
 const searchQuery = ref("");
+// 搜索模式:local=本地库搜索(现状) | <pluginId>=平台(插件)歌单搜索
+const searchMode = ref("local");
+const searchProviders = ref<{ id: string; name: string; platforms: string[]; platformLabels: Record<string, string> }[]>([]);
+const remoteResults = ref<any[]>([]);
+const remoteSearching = ref(false);
+const importingId = ref("");
+const isLocalMode = computed(() => searchMode.value === "local");
+const searchModeOptions = computed(() => [
+  { label: "本地", value: "local" },
+  ...searchProviders.value.map(p => ({ label: p.name, value: p.id })),
+]);
+const currentProvider = computed(() => searchProviders.value.find(p => p.id === searchMode.value));
+const currentProviderName = computed(() => currentProvider.value?.name || "平台");
+const searchPlaceholder = computed(() => isLocalMode.value ? "搜索歌单..." : `搜索${currentProviderName.value}全网歌单...`);
 const currentPage = ref(1);
 const total = ref(0);
 const pageSize = ref(parseInt(localStorage.getItem("playlistsPageSize") || "20"));
@@ -535,10 +583,83 @@ function onPageChange(page: number, size?: number) {
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { currentPage.value = 1; loadPlaylists(); }, 300);
+  searchTimer = setTimeout(() => {
+    currentPage.value = 1;
+    if (isLocalMode.value) loadPlaylists();
+    else doRemoteSearch();
+  }, 300);
 }
 
-function onSearchClear() { currentPage.value = 1; loadPlaylists(); }
+function onSearchClear() { currentPage.value = 1; if (isLocalMode.value) loadPlaylists(); else doRemoteSearch(); }
+
+// 模式切换:清空远程结果;切到插件模式时若有关键词立即搜索;切回本地刷新列表
+function onSearchModeChange() {
+  remoteResults.value = [];
+  currentPage.value = 1;
+  if (isLocalMode.value) { loadPlaylists(); return; }
+  if (searchQuery.value.trim()) doRemoteSearch();
+}
+
+// 已启用的 playlistSearch 插件列表(前端切换器数据源,动态)
+async function loadSearchProviders() {
+  try {
+    const res = await api.get("/rest/api/v1/playlist-search/providers");
+    searchProviders.value = res.data.providers || [];
+  } catch {
+    searchProviders.value = [];
+  }
+}
+
+// 平台歌单搜索:调插件的 searchPlaylists(聚合其全部平台),结果带平台标签
+async function doRemoteSearch() {
+  const q = searchQuery.value.trim();
+  if (!q) { remoteResults.value = []; return; }
+  remoteSearching.value = true;
+  try {
+    const res = await api.post(`/rest/api/v1/playlist-search/${searchMode.value}/search`, { q });
+    if (res.data?.success) {
+      remoteResults.value = (res.data.playlists || []).map((p: any) => ({ ...p, _imported: false }));
+    } else {
+      remoteResults.value = [];
+      ElMessage.error(res.data?.error || "搜索失败");
+    }
+  } catch {
+    remoteResults.value = [];
+    ElMessage.error("搜索失败:插件未启用或服务不可达");
+  } finally {
+    remoteSearching.value = false;
+  }
+}
+
+// 把搜索结果加入库:插件 playlistSongs 拉歌 → 核心导入(合成 sourceUrl 幂等,重复加入=增量更新)
+async function importRemote(rp: any) {
+  const key = `${rp.source}:${rp.id}`;
+  if (importingId.value === key) return;
+  try {
+    await ElMessageBox.confirm(`将歌单「${rp.name}」加入本地库?`, "加入库", {
+      confirmButtonText: "加入",
+      cancelButtonText: "取消",
+      type: "info",
+    });
+  } catch { return; }
+  importingId.value = key;
+  try {
+    const res = await api.post(`/rest/api/v1/playlist-search/${searchMode.value}/import`, {
+      source: rp.source, id: rp.id, name: rp.name, cover: rp.cover,
+    });
+    if (res.data?.success) {
+      rp._imported = true;
+      ElMessage.success(`已加入库:${res.data.name}(${res.data.trackCount}首,匹配 ${res.data.added})`);
+      loadPlaylists(); // 刷新本地列表(新歌单出现)
+    } else {
+      ElMessage.error(res.data?.error || "导入失败");
+    }
+  } catch {
+    ElMessage.error("导入失败:插件未启用或服务不可达");
+  } finally {
+    importingId.value = "";
+  }
+}
 
 // 「歌单管理」下拉菜单入口分发:新建/导入走原有对话框,导出/同步直接执行,未命中音乐跳未命中音乐页
 function openManage(action: string) {
@@ -782,7 +903,7 @@ async function deletePlaylist(pl: any) {
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
 }
 
-onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); });
+onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); loadSearchProviders(); });
 onUnmounted(() => {
   if (syncAllTimer.value) clearTimeout(syncAllTimer.value);
   if (gmdlRefreshTimer.value) clearTimeout(gmdlRefreshTimer.value);
@@ -795,6 +916,16 @@ onUnmounted(() => {
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
   h2 { font-size: 28px; font-weight: 700; margin: 0; }
   .header-actions { display: flex; gap: 10px; }
+}
+.search-area { display: flex; align-items: center; gap: 10px; }
+.remote-results {
+  .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
+  .remote-source-tag {
+    position: absolute; top: 8px; left: 8px; z-index: 2;
+    padding: 2px 8px; border-radius: 6px; font-size: 11px;
+    background: rgba(0,0,0,0.55); color: #fff; backdrop-filter: blur(4px);
+  }
+  .remote-import-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; }
 }
 .manage-menu { display: flex; flex-direction: column; gap: 2px; }
 .platform-filter-bar {

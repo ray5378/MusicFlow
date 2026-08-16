@@ -27,6 +27,7 @@ export type PluginType =
 export type PluginCapability =
   // ---- source plugins ----
   | "search" // online search
+  | "playlistSearch" // search remote playlists (aggregated across the plugin's platforms)
   | "recommend" // daily-recommend playlists
   | "playlistSongs" // fetch songs of a single remote playlist
   | "stream" // build an audio stream URL
@@ -144,6 +145,31 @@ export interface ImporterPlugin {
   canHandle(url: string): boolean;
   /** Fetch and parse the remote playlist. */
   fetchPlaylist(url: string): Promise<ImportedPlaylistShape>;
+}
+
+/** A remote playlist found via a source plugin's "playlistSearch" capability.
+ *  Field shape mirrors the playlist cards produced by go-music-dl
+ *  (/music/search?type=playlist and /music/recommend) with zero conversion. */
+export interface RemotePlaylistShape {
+  id: string;
+  source: string; // platform slug (netease, qq, kugou, ...)
+  name: string;
+  creator?: string;
+  cover?: string;
+  trackCount?: number | string;
+  link?: string;
+}
+
+/** Implemented by `source` plugins that declare "playlistSearch".
+ *  Aggregated remote-playlist search across the plugin's supported platforms. */
+export interface PlaylistSearchPlugin {
+  manifest: PluginManifest;
+  /** Search remote playlists. `sources` is the platform subset requested by
+   *  the caller; empty/absent means search all declared platforms. */
+  searchPlaylists(
+    config: Record<string, unknown>,
+    params: { query: string; sources?: string[] },
+  ): Promise<{ playlists: RemotePlaylistShape[] }>;
 }
 
 /** Implemented by `importer` plugins that declare the "playlistFile" capability

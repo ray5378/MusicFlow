@@ -45,6 +45,7 @@ import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { onlineRoutes } from "./online.js";
+import { playlistSearchRoutes } from "./playlistSearch.js";
 import { pingAllHealth } from "../../plugins/health.js";
 import { getRendererPlugins, discoverRenderers } from "../../plugins/renderers.js";
 import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
@@ -66,6 +67,7 @@ const syncApi = () => playlistSyncApi();
 
 export const apiRoutes = new Hono();
 apiRoutes.route("/", onlineRoutes);
+apiRoutes.route("/", playlistSearchRoutes);
 
 // ==================== 首页平台精选（能力驱动，不写死插件名） ====================
 // 首页「平台精选」分区由启用的 `recommend` 能力插件提供（如 go-music-dl 的
