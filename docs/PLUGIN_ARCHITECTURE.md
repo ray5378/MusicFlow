@@ -353,7 +353,7 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
 
 - `MusicFlow/.github/workflows/build.yml`：**仅 v* tag 触发**构建推 `musicflow:<版本>` + `:latest`；
   **workflow_dispatch 手动触发也自动构建 `:latest`**（版本号由 git describe 自动生成，
-  无需手动指定升级版本）并附 `:master` 便于回溯；镜像仅 amd64（账号无 ARM runner）。
+  无需手动指定升级版本）并附 `:main` 便于回溯；镜像仅 amd64（账号无 ARM runner）。
 - 发版流程：MusicFlow 打新 tag → addon 的 `build.yaml` build_from + `config.yaml` version 同步 → addon 仓库发版。
 
 ### 9.4 外置插件 QuickJS 沙箱（v1.3.0）

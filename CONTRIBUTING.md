@@ -64,7 +64,7 @@ npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
 
 - 提交信息：`<type>(<scope>): <subject>`，如 `feat(plugins): ...` / `fix(rest): ...` / `docs: ...` / `ci: ...`。
 - 消息含 `${...}` 时用**单引号**包住，避免 bash 展开。
-- 发版：改完推 `master` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow:<版本>`（仅 amd64）→ 建 GitHub Release → **同步 addon**（`hassio-addons/musicflow` 的 `build.yaml` build_from + `config.yaml` version）。详细见 `~/.workbuddy/skills/musicflow-release/SKILL.md`。
+- 发版：改完推 `main` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow:<版本>`（仅 amd64）→ 建 GitHub Release → **同步 addon**（`hassio-addons/musicflow` 的 `build.yaml` build_from + `config.yaml` version）。详细见 `~/.workbuddy/skills/musicflow-release/SKILL.md`。
 
 ## 文档规范
 
@@ -76,7 +76,7 @@ npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
 
 1. fork 主仓库，切 `feature/<描述>` 分支；
 2. 本地通过全部检查（tsc / vitest / vue-tsc）；
-3. 提交并推送到 fork，开 PR 到 `master`；
+3. 提交并推送到 fork，开 PR 到 `main`；
 4. PR 描述写明：改动内容、验证方式、是否涉及 DB/文档/发版联动。
 
 ## 其他

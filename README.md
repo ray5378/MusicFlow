@@ -34,7 +34,7 @@
 
 ```bash
 mkdir musicflow && cd musicflow
-curl -o docker-compose.yaml https://raw.githubusercontent.com/ray5378/MusicFlow/master/docker-compose.yml
+curl -o docker-compose.yaml https://raw.githubusercontent.com/ray5378/MusicFlow/main/docker-compose.yml
 docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow
 ```
 
@@ -151,7 +151,7 @@ MusicFlow 提供三个配套仓库，构成完整的 Home Assistant 生态（各
 
 ## 发版流程
 
-1. 在 [MusicFlow](https://github.com/ray5378/MusicFlow) 主仓库 `master` 分支打 `v*` tag → CI 构建推 `ghcr.io/ray5378/musicflow:<版本>` + `:latest`（仅 amd64）；
+1. 在 [MusicFlow](https://github.com/ray5378/MusicFlow) 主仓库 `main` 分支打 `v*` tag → CI 构建推 `ghcr.io/ray5378/musicflow:<版本>` + `:latest`（仅 amd64）；
 2. addon 仓库同步 `musicflow/build.yaml` 的 build_from 与 `config.yaml` 的 version；
 3. 集成 / 卡片按需发版（HACS 要求建 GitHub Release）。
 
