@@ -268,6 +268,142 @@ button, a, [role="button"] {
   .el-dialog__footer { padding: 0 24px 20px; }
 }
 
+/* MessageBox (ElMessageBox / ElMessageBox.confirm 等二次确认弹窗)
+   全局兜底暗色——必须 !important 覆盖 Element Plus 默认白色透明底,
+   否则深色主题下后面页面透出、用户感知不到"这是一层模态" */
+.el-message-box {
+  background: #1f1c2a !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: var(--fnos-radius-lg) !important;
+  color: var(--fnos-text-primary) !important;
+  box-shadow: var(--fnos-shadow-large) !important;
+  max-width: min(420px, 92vw); /* 桌面端固定 420px(EP 默认宽度),避免被压成整行 */
+  .el-message-box__title { color: var(--fnos-text-primary) !important; font-weight: 600; }
+  .el-message-box__content { color: var(--fnos-text-primary-dim) !important; }
+  .el-message-box__container { color: var(--fnos-text-primary-dim) !important; }
+  .el-message-box__btns { padding-top: 16px; }
+  .el-message-box__btns .el-button { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.18); color: var(--fnos-text-primary); }
+  .el-message-box__btns .el-button:hover { background: rgba(255, 255, 255, 0.10); border-color: rgba(255, 255, 255, 0.28); }
+  .el-message-box__btns .el-button--primary { background: var(--fnos-red); border-color: var(--fnos-red); color: #fff; }
+  .el-message-box__btns .el-button--primary:hover { background: var(--fnos-red-hover); border-color: var(--fnos-red-hover); }
+}
+/* MessageBox 模态遮罩也必须足够深,避免半透出底层页面 */
+.el-overlay { background-color: rgba(0, 0, 0, 0.55) !important; }
+.el-overlay-dialog { background-color: transparent !important; }
+
+/* ===== P0 弹层组件(Select 下拉项 / PopConfirm)===== */
+.el-select-dropdown {
+  background: #1f1c2a !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: var(--fnos-shadow-large) !important;
+}
+.el-select-dropdown__item {
+  color: var(--fnos-text-primary-dim) !important;
+  background: transparent !important;
+  &:hover, &.hovering { background: rgba(255, 255, 255, 0.08) !important; color: var(--fnos-text-primary) !important; }
+  &.selected { color: var(--fnos-red) !important; font-weight: 600; }
+}
+.el-select-group__title { color: var(--fnos-text-tertiary) !important; font-size: 12px; }
+
+.el-popconfirm {
+  /* PopConfirm 浮层走 el-popper,通用暗色已覆写;这里只补它特有的按钮区 */
+  .el-popconfirm__main { color: var(--fnos-text-primary-dim) !important; }
+  .el-popconfirm__action { padding-top: 12px; }
+  .el-popconfirm__action .el-button { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.18); color: var(--fnos-text-primary); }
+  .el-popconfirm__action .el-button:hover { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.28); }
+  .el-popconfirm__action .el-button--primary { background: var(--fnos-red); border-color: var(--fnos-red); color: #fff; }
+  .el-popconfirm__action .el-button--primary:hover { background: var(--fnos-red-hover); border-color: var(--fnos-red-hover); }
+}
+
+/* ===== P1 表单/交互控件组件覆写 ===== */
+.el-segmented {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--fnos-text-primary-dim);
+  .el-segmented__item { color: var(--fnos-text-secondary) !important; background: transparent !important; }
+  .el-segmented__item:hover { color: var(--fnos-text-primary) !important; background: rgba(255, 255, 255, 0.04) !important; }
+  .el-segmented__item-selected { background: rgba(255, 255, 255, 0.12) !important; color: var(--fnos-text-primary) !important; box-shadow: var(--fnos-shadow-small); }
+}
+.el-segmented.is-disabled { opacity: 0.6; }
+
+.el-switch {
+  --el-switch-off-color: rgba(255, 255, 255, 0.18);
+  --el-switch-on-color: var(--fnos-red);
+  --el-switch-border-color: transparent;
+  .el-switch__label { color: var(--fnos-text-secondary); }
+  .el-switch__label.is-active { color: var(--fnos-red); }
+  .el-switch__core { background: rgba(255, 255, 255, 0.18); border-color: transparent; }
+  .el-switch.is-checked .el-switch__core { background: var(--fnos-red); border-color: var(--fnos-red); }
+}
+
+.el-progress {
+  .el-progress-bar__outer { background: rgba(255, 255, 255, 0.1); }
+  .el-progress-bar__inner { background: var(--fnos-red); }
+  .el-progress__text { color: var(--fnos-text-primary-dim); }
+  .el-progress-circle__track { stroke: rgba(255, 255, 255, 0.1); }
+  .el-progress-circle__path { stroke: var(--fnos-red); }
+}
+
+.el-alert {
+  background: rgba(31, 28, 42, 0.85) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: var(--fnos-text-primary) !important;
+  .el-alert__title { color: var(--fnos-text-primary) !important; }
+  .el-alert__description { color: var(--fnos-text-secondary) !important; }
+  /* type 颜色保留,但调偏亮一点,深色下更易识别 */
+  &.el-alert--info { background: rgba(27, 115, 251, 0.15) !important; border-color: rgba(27, 115, 251, 0.35) !important; }
+  &.el-alert--success { background: rgba(107, 171, 69, 0.15) !important; border-color: rgba(107, 171, 69, 0.35) !important; }
+  &.el-alert--warning { background: rgba(248, 191, 40, 0.15) !important; border-color: rgba(248, 191, 40, 0.35) !important; }
+  &.el-alert--error { background: rgba(246, 44, 85, 0.15) !important; border-color: rgba(246, 44, 85, 0.35) !important; }
+}
+
+.el-empty {
+  color: var(--fnos-text-secondary);
+  .el-empty__description { color: var(--fnos-text-secondary); }
+  .el-empty__image { color: var(--fnos-text-muted); }
+  .el-empty__image svg { fill: var(--fnos-text-muted); }
+}
+
+.el-form {
+  .el-form-item__label { color: var(--fnos-text-secondary) !important; }
+  .el-form-item__error { color: var(--fnos-red) !important; }
+}
+
+.el-descriptions {
+  color: var(--fnos-text-primary-dim);
+  .el-descriptions__label { color: var(--fnos-text-tertiary); }
+  .el-descriptions__content { color: var(--fnos-text-primary-dim); }
+  .el-descriptions__cell { background: transparent; }
+  .el-descriptions__bordered { border-color: rgba(255, 255, 255, 0.08); }
+  .el-descriptions__bordered .el-descriptions__cell { border-color: rgba(255, 255, 255, 0.08); }
+  .el-descriptions__title { color: var(--fnos-text-primary); }
+}
+
+.el-tab-pane { color: var(--fnos-text-primary-dim); }
+
+.el-table { /* el-table-column 是列定义,本身不渲染;列头/单元已由 .el-table 覆盖 */ }
+
+.el-upload {
+  .el-upload-dragger {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px dashed rgba(255, 255, 255, 0.18) !important;
+    color: var(--fnos-text-secondary) !important;
+    &:hover { border-color: rgba(255, 255, 255, 0.35) !important; }
+  }
+  .el-upload-list__item { color: var(--fnos-text-primary-dim); background: transparent; }
+  .el-upload-list__item .el-upload-list__item-name { color: var(--fnos-text-primary-dim); }
+  .el-upload-list__item.is-success .el-upload-list__item-name { color: var(--fnos-text-primary); }
+  .el-upload-list__item .el-icon { color: var(--fnos-text-tertiary); }
+}
+
+/* ===== P2 装饰/容器组件 ===== */
+.el-divider {
+  background-color: rgba(255, 255, 255, 0.08);
+  .el-divider__text { color: var(--fnos-text-tertiary); background: transparent; }
+}
+.el-icon { color: inherit; }
+.el-dropdown { color: inherit; }
+
 /* Drawer */
 .el-drawer { background: #1f1c2a !important; }
 .el-drawer__header { color: var(--fnos-text-primary); margin-bottom: 16px; }
@@ -894,16 +1030,17 @@ html.tab-hidden body.fnos-login::before, html.tab-hidden body.fnos-login::after 
    移动端全局响应式兜底(≤768px 手机视口)
    - 守卫 frontend/e2e/responsive.spec.ts 在 390 视口断言:页面/表格无横向溢出、弹窗不超视口。
    - 这里统一收口两类最高频非自适应:
-       1) 固定宽弹窗(组件写死 720/620/520/500/400px)在窄屏一律被压到 92vw;
+       1) 弹窗在窄屏一律被压到 92vw,组件写死的固定宽(720/620/520/500/400px)也以此为上限
+          (桌面端仍由各组件/全局设置自己的固定宽,不受这条覆盖)。
        2) 窄屏表单 label 置顶、控件占满宽、操作按钮换行。
    ========================================================= */
 
-/* 弹窗宽度封顶视口 92vw:组件写死的固定宽在窄屏被压到 92vw,桌面端各自宽度不受影响
-   (width < max-width 时不触发封顶)。保证 390 视口下弹窗外缘不超出视口。 */
-.el-dialog { max-width: 92vw; }
-.el-message-box { max-width: 92vw; }
-
 @media (max-width: 768px) {
+  /* 弹窗宽度封顶视口 92vw:组件写死的固定宽在窄屏被压到 92vw,桌面端各自宽度不受影响
+     (width < max-width 时不触发封顶)。保证 390 视口下弹窗外缘不超出视口。 */
+  .el-dialog { max-width: 92vw; }
+  .el-message-box { max-width: 92vw; }
+
   /* 弹窗内表单:窄屏 label 置顶,避免左侧固定宽挤压内容导致挤压/溢出 */
   .el-dialog .el-form-item,
   .el-message-box .el-form-item {
