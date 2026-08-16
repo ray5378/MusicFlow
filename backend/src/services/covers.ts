@@ -5,7 +5,9 @@
 //   B(cover.persist,默认开)时把引用写回 songs.cover_art,一次落库永久命中。
 // 防风暴(getCoverArt 是高频端点):每首歌在一次失败后,短 TTL 内不再重复触发;
 //   批量补全(C)用 force 绕过该门控,但自身节流。
-import { sqlite } from "../db/index.js";
+import { db, sqlite } from "../db/index.js";
+import { songs } from "../db/schema.js";
+import { inArray } from "drizzle-orm";
 import { hasCoverProvider, searchCover } from "../plugins/providers.js";
 import { cacheRemoteCover } from "./playlistCover.js";
 import { getSettingBool } from "./settings.js";
@@ -21,6 +23,25 @@ export interface CoverSongInput {
 
 const ATTEMPT_TTL = 10 * 60 * 1000; // 10 分钟内同一首歌失败后不再自动重试
 const attempts = new Map<string, number>();
+
+// 封面下载全局限流(≤2 并发):批量导入/回填时避免叠加造成网络洪峰
+// (前台 stream/轮询请求被挤占)。全局信号量,所有封面下载共用。
+const COVER_CONCURRENCY_LIMIT = 2;
+let coverInflight = 0;
+const coverWaiters: (() => void)[] = [];
+/** 封面下载/封面补全全局信号量(≤2 并发),供导入与后台封面回填共用。 */
+export async function withCoverLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (coverInflight >= COVER_CONCURRENCY_LIMIT) {
+    await new Promise<void>((resolve) => coverWaiters.push(resolve));
+  }
+  coverInflight++;
+  try {
+    return await fn();
+  } finally {
+    coverInflight--;
+    coverWaiters.shift()?.();
+  }
+}
 
 /** 记录一次"已尝试"：force(批量补全)不记,避免污染按需门控语义。 */
 function markAttempt(songId: string, force: boolean) {
@@ -79,4 +100,33 @@ export async function fetchCoverForSong(song: CoverSongInput, force = false): Pr
     try { sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id = ?").run(ref, song.id); } catch { /* ignore */ }
   }
   return ref;
+}
+
+/**
+ * 后台封面回填:导入/链接的歌曲若缺封面,经 coverProvider 插件按歌名搜索
+ * 补齐并落库。全局限流(≤2 并发,与导入共用 withCoverLimit),不阻塞导入。
+ * 无 coverProvider(如测试环境)或无可补歌曲时立即返回。
+ * @returns { ok, fail } 命中并落库 / 未取到封面的数量。
+ */
+export async function runCoverBackfill(songIds: string[]): Promise<{ ok: number; fail: number }> {
+  if (!hasCoverProvider() || songIds.length === 0) return { ok: 0, fail: 0 };
+  const targets = db.select().from(songs).where(inArray(songs.id, songIds)).all()
+    .filter((s: any) => !s.coverArt);
+  if (targets.length === 0) return { ok: 0, fail: 0 };
+  let next = 0;
+  let ok = 0;
+  let fail = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      const s = targets[next++];
+      try {
+        const ref = await withCoverLimit(() => fetchCoverForSong(s, true));
+        if (ref) ok++; else fail++;
+      } catch {
+        fail++;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(2, targets.length) }, () => worker()));
+  return { ok, fail };
 }

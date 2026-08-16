@@ -50,12 +50,14 @@ const autoMatchLocks = new Set<string>();
 export async function matchPlaylistInBackground(playlistId: string): Promise<void> {
   if (autoMatchLocks.has(playlistId)) return;
   autoMatchLocks.add(playlistId);
-  const started = Date.now();
   // 全局批量闸:与插件任务(jobRunner)共用,全进程同时只跑 1 个批量任务,防叠加。
   // 动态 import 避免顶层环(shared → batchPacer → settings,settings 无回环,静态亦可;
   // 保持动态以稳妥)。
   const { acquireBatchLock } = await import("./batchPacer.js");
   const release = await acquireBatchLock();
+  // P2:排队时间不计入匹配耗时——started 在拿到全局批量闸之后才记录,
+  // 日志里的 in Xs 只反映真实匹配开销,不含等待队列的时长。
+  const started = Date.now();
   try {
     const matcher = firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search");
     if (!matcher) return; // no capable plugin enabled -> nothing to do

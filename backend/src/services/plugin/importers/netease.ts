@@ -10,6 +10,24 @@ export function extractNeteasePlaylistId(url: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * 把网易云单曲原始对象转成导入曲目。
+ *
+ * externalId 形如 "netease:123456"(source:平台歌曲 id):rebuildPlaylistEntries 会把
+ * 它写进 playlist_songs.external_song_id,后台 auto-match 的已知 source:id 直通路径
+ * (onlineSongFromExternalId)据此免在线搜索直接导入。修复前这里只存裸 id,
+ * 每日推荐里未匹配曲目 605 首只能逐曲重搜(见 P0 监控)。纯函数,便于单测。
+ */
+export function buildNeteaseTrack(s: any): ImportedTrackShape {
+  return {
+    externalId: s && s.id ? `netease:${String(s.id)}` : "",
+    title: s?.name || "",
+    artist: (s?.ar || []).map((a: any) => a.name).filter(Boolean).join("/"),
+    album: s?.al?.name || "",
+    duration: s?.dt || undefined,
+  };
+}
+
 export async function fetchNeteasePlaylist(id: string): Promise<ImportedPlaylistShape> {
   const data = await fetchJson(`https://music.163.com/api/v6/playlist/detail?id=${id}`);
   const pl = data?.playlist;
@@ -29,13 +47,7 @@ export async function fetchNeteasePlaylist(id: string): Promise<ImportedPlaylist
       { Referer: "https://music.163.com/" },
     );
     for (const s of songs?.songs || []) {
-      tracks.push({
-        externalId: String(s.id || ""),
-        title: s.name || "",
-        artist: (s.ar || []).map((a: any) => a.name).filter(Boolean).join("/"),
-        album: s.al?.name || "",
-        duration: s.dt || undefined,
-      });
+      tracks.push(buildNeteaseTrack(s));
     }
     if (allIds.length > batchSize) await new Promise((r) => setTimeout(r, 300));
   }
@@ -43,13 +55,7 @@ export async function fetchNeteasePlaylist(id: string): Promise<ImportedPlaylist
   // Fallback: use the tracks embedded in the detail response if the batch fetch failed.
   if (tracks.length === 0) {
     for (const t of pl.tracks || []) {
-      tracks.push({
-        externalId: String(t.id || ""),
-        title: t.name || "",
-        artist: (t.ar || []).map((a: any) => a.name).filter(Boolean).join("/"),
-        album: t.al?.name || "",
-        duration: t.dt || undefined,
-      });
+      tracks.push(buildNeteaseTrack(t));
     }
   }
 

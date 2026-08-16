@@ -987,6 +987,10 @@ apiRoutes.get("/v1/lyrics/backfill/status", adminMiddleware, (c) => c.json(backf
 apiRoutes.post("/v1/covers/backfill", adminMiddleware, (c) => c.json(startBackfill("covers")));
 apiRoutes.get("/v1/covers/backfill/status", adminMiddleware, (c) => c.json(backfillStatus("covers")));
 
+// covers-batch:并发批量补封面(≤2 并发,复用 runCoverBackfill,返回立即)。
+apiRoutes.post("/v1/covers/backfill-batch", adminMiddleware, (c) => c.json(startBackfill("covers-batch")));
+apiRoutes.get("/v1/covers/backfill-batch/status", adminMiddleware, (c) => c.json(backfillStatus("covers-batch")));
+
 // ==================== Daily recommend (combined: remote + pool + local) ====================
 //
 // These admin endpoints let you inspect / reconfigure / manually trigger the

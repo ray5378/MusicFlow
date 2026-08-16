@@ -10,7 +10,7 @@
 
 import { Hono } from "hono";
 import { adminMiddleware } from "../../middleware/auth.js";
-import { db } from "../../db/index.js";
+import { db, sqlite } from "../../db/index.js";
 import { playlistSongs, playlists } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "../../services/source/online/index.js";
@@ -161,12 +161,21 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
   if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
 
   // 收集所有含未匹配条目的歌单(entryCount > 0)。
+  // 单条 GROUP BY 聚合替代「每歌单全量扫描」的 N+1 查询。
   const all = db.select().from(playlists).all();
+  const allById = new Map(all.map((p) => [p.id, p]));
   const targets: { id: string; name: string; count: number }[] = [];
-  for (const pl of all) {
-    const count = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, pl.id)).all()
-      .filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim()).length;
-    if (count > 0) targets.push({ id: pl.id, name: pl.name || pl.id, count });
+  const counts = sqlite.prepare(`
+    SELECT playlist_id AS id, COUNT(*) AS count
+    FROM playlist_songs
+    WHERE playable = 0 AND song_id IS NULL
+      AND external_title IS NOT NULL AND external_title != ''
+    GROUP BY playlist_id
+  `).all() as { id: string; count: number }[];
+  for (const r of counts) {
+    const pl = allById.get(r.id);
+    if (!pl) continue;
+    targets.push({ id: pl.id, name: pl.name || pl.id, count: Number(r.count) });
   }
   if (targets.length === 0) return c.json({ success: true, started: false, total: 0, alreadyMatched: true });
 
@@ -229,6 +238,7 @@ onlineRoutes.post("/v1/online/:providerId/match-track", async (c) => {
       artist: entry.externalArtist || "",
       album: entry.externalAlbum || undefined,
       duration: entry.externalDuration || undefined,
+      externalSongId: entry.externalSongId || undefined,
     });
     return c.json({ success: result.status === "matched", ...result });
   } catch (e: any) {

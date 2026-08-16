@@ -4,10 +4,10 @@
 import { sqlite } from "../db/index.js";
 import fs from "fs";
 import { searchLyrics } from "../plugins/providers.js";
-import { fetchCoverForSong } from "./covers.js";
+import { fetchCoverForSong, runCoverBackfill } from "./covers.js";
 import { saveLyricFile } from "./lyricsStore.js";
 
-export type BackfillKind = "lyrics" | "covers";
+export type BackfillKind = "lyrics" | "covers" | "covers-batch";
 
 export interface BackfillJob {
   kind: BackfillKind;
@@ -27,7 +27,11 @@ const idle = (kind: BackfillKind): BackfillJob => ({
   currentId: null, startedAt: null, finishedAt: null,
 });
 
-const jobs: Record<BackfillKind, BackfillJob> = { lyrics: idle("lyrics"), covers: idle("covers") };
+const jobs: Record<BackfillKind, BackfillJob> = {
+  lyrics: idle("lyrics"),
+  covers: idle("covers"),
+  "covers-batch": idle("covers-batch"),
+};
 
 export function backfillStatus(kind: BackfillKind): BackfillJob {
   return jobs[kind];
@@ -57,6 +61,11 @@ function collectCandidates(kind: BackfillKind): any[] {
     return sqlite.prepare(
       `SELECT id, title, artist, album, duration, path, type, url, plugin_entry, source_data
          FROM songs WHERE lyrics IS NULL OR lyrics = ''`,
+    ).all() as any[];
+  }
+  if (kind === "covers-batch") {
+    return sqlite.prepare(
+      `SELECT id FROM songs WHERE cover_art IS NULL OR cover_art = ''`,
     ).all() as any[];
   }
   return sqlite.prepare(
@@ -111,6 +120,31 @@ async function runLoop(kind: BackfillKind, rows: any[]) {
 }
 
 /**
+ * covers-batch:并发批量补封面。复用 runCoverBackfill(内部 ≤2 并发 + 全局限流),
+ * 按 200 首/块顺序推进,避免一次性载入全库。
+ */
+async function runLoopConcurrentCovers(job: BackfillJob, rows: any[]) {
+  const CHUNK = 200;
+  const ids = rows.map((r: any) => r.id);
+  for (let off = 0; off < ids.length; off += CHUNK) {
+    if (!job.running) break;
+    const chunk = ids.slice(off, off + CHUNK);
+    try {
+      const { ok, fail } = await runCoverBackfill(chunk);
+      job.ok += ok;
+      job.fail += fail;
+      job.done += ok + fail;
+    } catch {
+      job.fail += chunk.length;
+      job.done += chunk.length;
+    }
+  }
+  job.running = false;
+  job.currentId = null;
+  job.finishedAt = new Date().toISOString();
+}
+
+/**
  * 启动批量补全。同种任务已在跑则直接返回当前状态(running=true)。
  */
 export function startBackfill(kind: BackfillKind): { accepted: boolean; total: number; running: boolean } {
@@ -121,6 +155,10 @@ export function startBackfill(kind: BackfillKind): { accepted: boolean; total: n
     kind, running: true, total: rows.length, done: 0, ok: 0, fail: 0, skipped: 0,
     currentId: null, startedAt: new Date().toISOString(), finishedAt: null,
   };
-  void runLoop(kind, rows);
+  if (kind === "covers-batch") {
+    void runLoopConcurrentCovers(jobs[kind], rows);
+  } else {
+    void runLoop(kind, rows);
+  }
   return { accepted: true, total: rows.length, running: true };
 }

@@ -37,13 +37,15 @@ async function resolveQQShortLink(url: string): Promise<string> {
 
 // ---------- Fetchers ----------
 
-function parseQQSongs(list: any[]): ImportedTrackShape[] {
+export function parseQQSongs(list: any[]): ImportedTrackShape[] {
   return list
     .map((entry: any) => {
       // Toplist responses nest the song under `data`; playlist responses don't.
       const s = entry?.data || entry;
+      // externalId 带 "qq:" 前缀(source:平台歌曲 id):rebuildPlaylistEntries 写入
+      // external_song_id 后,后台 auto-match 已知 source:id 直通路径可免搜索直接导入。
       return {
-        externalId: String(s.songmid || s.songid || ""),
+        externalId: s.songmid || s.songid ? `qq:${String(s.songmid || s.songid || "")}` : "",
         title: s.songname || "",
         artist: (s.singer || []).map((x: any) => x.name).filter(Boolean).join("/"),
         album: s.albumname || "",

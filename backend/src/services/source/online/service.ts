@@ -13,30 +13,9 @@ import { eq, inArray } from "drizzle-orm";
 import { cacheRemoteCover } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
 import { batchConcurrency } from "../../plugin/batchPacer.js";
+import { runCoverBackfill, withCoverLimit } from "../../covers.js";
 
-// Bounded parallelism for cover downloads/network work during a bulk import.
-// Keeps resource usage low (a handful of in-flight upstream requests) while
-// letting serialized upstream latency overlap slightly — a balance between the
-// old one-song-at-a-time loop and a full unbounded Promise.all.
-// 并发由 batchPacer 档位 + ELD 自适应控制(standard=2, slow=1, full=4,前台忙降档)。
-
-// 封面下载全局限流(≤2 并发):批量导入匹配时,避免 4 个并发 worker 各自叠加
-// 封面下载造成网络洪峰(前台 stream/轮询请求被挤占)。全局信号量,所有导入共用。
-const COVER_CONCURRENCY_LIMIT = 2;
-let coverInflight = 0;
-const coverWaiters: (() => void)[] = [];
-async function withCoverLimit<T>(fn: () => Promise<T>): Promise<T> {
-  if (coverInflight >= COVER_CONCURRENCY_LIMIT) {
-    await new Promise<void>((resolve) => coverWaiters.push(resolve));
-  }
-  coverInflight++;
-  try {
-    return await fn();
-  } finally {
-    coverInflight--;
-    coverWaiters.shift()?.();
-  }
-}
+// 封面下载全局限流(≤2 并发)与封面后台回填见 covers.ts。
 
 /** Import a provider search result as an online DB song. Skips if already present. */
 export async function importOnlineSong(
@@ -205,6 +184,12 @@ export async function importOnlineSongs(
   });
 
   for (const r of results) if (r) songsOut.push(r);
+
+  // 拿完歌曲后:若有导入的歌曲缺封面,后台限量补全(≤2 并发,不阻塞本流程)。
+  // P0 直通导入(onlineSongFromExternalId)构造的歌曲恒无封面,靠这里自动补齐。
+  if (songsOut.length > 0) {
+    void runCoverBackfill(songsOut.map((r) => r.id)).catch(() => {});
+  }
 
   // Refresh counts as a batch (one scan per touched album/artist) instead of
   // re-scanning the whole album on every single-song insert.

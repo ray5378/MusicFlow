@@ -20,6 +20,7 @@ import { OnlinePlaylistInfo } from "./types.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.js";
 import { refreshPlaylistCounts } from "../../plugin/shared.js";
 import { getPluginManifest, listRegistered } from "../../../plugins/registry.js";
+import { acquireBatchLock } from "../../plugin/batchPacer.js";
 
 export const DAILY_TAG = "每日推荐";
 // The daily-recommend sourceUrl prefix is no longer hardcoded — each source
@@ -231,6 +232,21 @@ export async function syncAllRecommendPlaylists(
   providerId: string,
   opts?: { userId?: string },
 ): Promise<SyncRecommendResult> {
+  // 全局批量闸:与 Path B(插件 runDailyJob / jobRunner)、后台 auto-match、手动
+  // 导入互斥(FIFO 排队)——修复前 Path A 不持锁,与 Path B 并发会叠加抢 CPU/带宽。
+  // importRecommendPlaylist → importOnlineSongs 内部不二次取锁,无死锁。
+  const release = await acquireBatchLock();
+  try {
+    return await doSyncAllRecommendPlaylists(providerId, opts);
+  } finally {
+    release();
+  }
+}
+
+async function doSyncAllRecommendPlaylists(
+  providerId: string,
+  opts?: { userId?: string },
+): Promise<SyncRecommendResult> {
   const out: { id: string; name: string; trackCount: number }[] = [];
   const errors: string[] = [];
   let created = 0;
@@ -257,13 +273,23 @@ export async function syncAllRecommendPlaylists(
 
   // 2. Import every playlist of every channel (upsert: new ones created,
   //    existing ones updated in place).
+  // 并发窗口:逐个歌单「拉取歌曲→导入」串行是纯网络密集(每单 1 次上游往返),
+  // 走有界并发池(≤3)重叠网络等待。全程在全局批量闸内(P1 串行),不与其他
+  // 批量任务叠加;导入本身仍受 importOnlineSongs 内部 batchConcurrency 节流。
   const importedKeys = new Set<{ source: string; id: string }>();
+  const work: { ch: { source: string; playlists: OnlinePlaylistInfo[] }; pl: OnlinePlaylistInfo }[] = [];
   for (const ch of channels) {
     if (ch.playlists.length === 0) {
       errors.push(`${ch.source}: 该渠道无推荐歌单,保留原有歌单`);
       continue;
     }
-    for (const pl of ch.playlists) {
+    for (const pl of ch.playlists) work.push({ ch, pl });
+  }
+  const IMPORT_CONCURRENCY = 3;
+  let next = 0;
+  const worker = async () => {
+    while (next < work.length) {
+      const { ch, pl } = work[next++];
       try {
         const r = await importRecommendPlaylist(providerId, pl, opts);
         if (r.success && r.playlistId) {
@@ -280,7 +306,8 @@ export async function syncAllRecommendPlaylists(
         errors.push(`[${ch.source}] ${pl.name}: ${e.message || "导入失败"}`);
       }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(IMPORT_CONCURRENCY, work.length) }, () => worker()));
 
   // 3. Cleanup: delete local daily-recommend playlists that are NOT part of
   //    today's freshly-imported set, per channel. Channels that came back empty

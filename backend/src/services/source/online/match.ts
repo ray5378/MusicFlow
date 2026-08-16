@@ -10,6 +10,7 @@ import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { normalizeKey, refreshPlaylistCounts } from "../../plugin/shared.js";
 import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
+import { runCoverBackfill } from "../../covers.js";
 import { OnlineSongResult } from "./types.js";
 import { importOnlineSong, importOnlineSongs } from "./service.js";
 
@@ -19,6 +20,8 @@ export interface MatchTarget {
   artist: string;
   album?: string;
   duration?: number; // ms
+  /** 已知平台 id(source:id 形式,如 "netease:123456")。存在时直通导入,免在线搜索。 */
+  externalSongId?: string;
 }
 
 export interface MatchOutcome {
@@ -38,6 +41,45 @@ function artistTokens(artist: string): string[] {
     .split(/[/、&,；;，.&]|feat\.|ft\./i)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * 已知平台 id 直通(免搜索)。
+ *
+ * 外置插件(go-music-dl 私人歌单等)写入的外部条目 external_song_id 形如
+ * "netease:123456"(source:平台歌曲 id)——该 id 本就来自上游歌单页面,可直接
+ * 构造歌曲记录交给 importOnlineSongs(与平台推荐 Path A 同路径)导入,无需按
+ * 「歌名+歌手」重新在线搜索。修复前 auto-match 对每一首占位都发一次
+ * /music/search(8587 首 = 8587 次冗余网络往返,CPU 平均 57%、全程 1~2 小时),
+ * 直通后秒级完成、零冗余请求。
+ *
+ * 无法解析(非 source:id 格式、source 非法字符、id 为空)时返回 null,调用方
+ * 回退在线搜索,行为与修复前一致。
+ */
+export function onlineSongFromExternalId(entry: {
+  externalSongId?: string | null;
+  externalTitle?: string | null;
+  externalArtist?: string | null;
+  externalAlbum?: string | null;
+  externalDuration?: number | null;
+}): OnlineSongResult | null {
+  const raw = String(entry.externalSongId || "");
+  const colon = raw.indexOf(":");
+  if (colon <= 0) return null;
+  const source = raw.slice(0, colon).trim();
+  const id = raw.slice(colon + 1).trim();
+  // source 与 id 都必须是字母数字 _ -(平台 slug / 平台歌曲 id 均如此)——避免把
+  // 任意字符串(URL、含空格的描述串等)误当 source:id 而构造出无法流式播放的歌曲。
+  if (!/^[a-zA-Z0-9_-]+$/.test(source) || !/^[a-zA-Z0-9_-]+$/.test(id)) return null;
+  return {
+    id,
+    source,
+    name: String(entry.externalTitle || ""),
+    artist: String(entry.externalArtist || ""),
+    album: String(entry.externalAlbum || ""),
+    duration: (entry.externalDuration || 0) / 1000, // ms → 秒
+    cover: "",
+  };
 }
 
 // Score a provider candidate against a wanted track. Higher is better.
@@ -125,7 +167,12 @@ export async function matchToOnlineSong(
   want: MatchTarget,
 ): Promise<MatchOutcome> {
   try {
-    const m = await searchBestMatch(providerId, config, provider, want);
+    // P0:已知 source:id 直通(与批量 auto-match 同路径)——id 本就来自上游歌单,
+    // 免一次 /music/search 往返,避免「已知答案却再搜一遍」的浪费。
+    const known = onlineSongFromExternalId(want);
+    const m = known
+      ? { entryId: want.entryId, title: want.title, status: "matched" as const, best: known, score: 100 }
+      : await searchBestMatch(providerId, config, provider, want);
     if (m.status !== "matched" || !m.best) {
       return { entryId: want.entryId, title: want.title, status: m.status, message: m.message };
     }
@@ -134,6 +181,7 @@ export async function matchToOnlineSong(
       return { entryId: want.entryId, title: want.title, status: "error", message: res.error || "导入失败" };
     }
     linkPlaylistEntry(playlistId, want.entryId, res.songId);
+    void runCoverBackfill([res.songId]).catch(() => {});
     return {
       entryId: want.entryId, title: want.title, status: "matched", songId: res.songId,
       matchedSource: m.best.source, matchedName: m.best.name,
@@ -178,6 +226,8 @@ export async function matchUnmatchedPlaylistEntries(
   let noMatch = 0, error = 0;
 
   // ---- 阶段1:并发搜索 + 打分(不落库),每 10 首让行 ----
+  // P0:有 source:id 的条目直通(构造歌曲,免搜索),只有真正需要搜索的才计入节流。
+  let searchedSinceSleep = 0;
   const worker = async () => {
     while (next < entries.length) {
       const i = next++;
@@ -188,20 +238,28 @@ export async function matchUnmatchedPlaylistEntries(
         artist: e.externalArtist || "",
         album: e.externalAlbum || undefined,
         duration: e.externalDuration || undefined,
+        externalSongId: e.externalSongId || undefined,
       };
-      const m = await searchBestMatch(providerId, config, provider, target);
+      const known = onlineSongFromExternalId(e);
+      let m: { entryId: number; title: string; status: "matched" | "no-match" | "error"; best?: OnlineSongResult; score?: number; message?: string };
+      if (known) {
+        m = { entryId: target.entryId, title: target.title, status: "matched", best: known, score: 100 };
+      } else {
+        m = await searchBestMatch(providerId, config, provider, target);
+        // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
+        // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。仅对真实网络搜索节流。
+        searchedSinceSleep++;
+        if (searchedSinceSleep % 10 === 0) await sleepBetweenBatch();
+      }
       if (m.status === "matched" && m.best) {
         matchedByEntry.set(e.id, { best: m.best, fp: `${providerId}:${m.best.source}:${m.best.id}`, title: target.title });
-        results[i] = { entryId: target.entryId, title: target.title, status: "matched", matchedSource: m.best.source, matchedName: m.best.name, message: "搜索命中,待导入" };
+        results[i] = { entryId: target.entryId, title: target.title, status: "matched", matchedSource: m.best.source, matchedName: m.best.name, message: known ? "已知平台id直通" : "搜索命中,待导入" };
       } else {
         results[i] = { entryId: target.entryId, title: target.title, status: m.status, message: m.message };
         if (m.status === "no-match") noMatch++;
         else error++;
       }
       done++;
-      // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
-      // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。
-      if (done % 10 === 0) await sleepBetweenBatch();
       onProgress?.(done, entries.length, results[i]);
     }
   };
@@ -250,6 +308,8 @@ export async function matchUnmatchedPlaylistEntries(
         error++;
       }
     }
+
+    // 封面回填由 importOnlineSongs 内部统一触发(见 service.ts);此处不再重复。
   }
 
   return { total: results.length, matched, noMatch, error, results };
