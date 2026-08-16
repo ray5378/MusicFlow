@@ -3,7 +3,19 @@
     <div class="page-header">
       <h2>歌单</h2>
       <div class="search-area">
-        <el-segmented v-model="searchMode" :options="searchModeOptions" @change="onSearchModeChange" />
+        <span class="search-label">搜索</span>
+        <el-dropdown trigger="click" @command="onSearchSourceCommand">
+          <el-button>
+            {{ currentSourceLabel }}
+            <el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="local">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
       <div class="header-actions">
@@ -245,12 +257,10 @@ const remoteResults = ref<any[]>([]);
 const remoteSearching = ref(false);
 const importingId = ref("");
 const isLocalMode = computed(() => searchMode.value === "local");
-const searchModeOptions = computed(() => [
-  { label: "本地", value: "local" },
-  ...searchProviders.value.map(p => ({ label: p.name, value: p.id })),
-]);
 const currentProvider = computed(() => searchProviders.value.find(p => p.id === searchMode.value));
 const currentProviderName = computed(() => currentProvider.value?.name || "平台");
+// 搜索来源下拉按钮文案:本地模式显示「本地」,插件模式显示插件名
+const currentSourceLabel = computed(() => isLocalMode.value ? "本地" : (currentProvider.value?.name || "本地"));
 const searchPlaceholder = computed(() => isLocalMode.value ? "搜索歌单..." : `搜索${currentProviderName.value}全网歌单...`);
 const currentPage = ref(1);
 const total = ref(0);
@@ -602,6 +612,13 @@ function onSearchModeChange() {
   currentPage.value = 1;
   if (isLocalMode.value) { loadPlaylists(); return; }
   if (searchQuery.value.trim()) doRemoteSearch();
+}
+
+// 搜索来源下拉命令:本地=local,其余=对应 playlistSearch 插件 id;复用 onSearchModeChange 切换逻辑
+function onSearchSourceCommand(cmd: string) {
+  if (searchMode.value === cmd) return;
+  searchMode.value = cmd;
+  onSearchModeChange();
 }
 
 // 已启用的 playlistSearch 插件列表(前端切换器数据源,动态)
@@ -965,6 +982,7 @@ onUnmounted(() => {
   .header-actions { display: flex; gap: 10px; }
 }
 .search-area { display: flex; align-items: center; gap: 10px; }
+.search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
 .busy-banner { margin: 0 0 16px; }
 .remote-results {
   .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
