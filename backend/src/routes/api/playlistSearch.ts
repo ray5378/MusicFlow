@@ -21,6 +21,7 @@ import { replacePlaylistSongs } from "../../services/source/online/recommendImpo
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { cacheRemoteCover } from "../../services/playlistCover.js";
 import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
+import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { touch } from "../../services/memory/reclaim.js";
 
 export const playlistSearchRoutes = new Hono();
@@ -46,6 +47,8 @@ playlistSearchRoutes.get("/v1/playlist-search/providers", (c) => {
 // Body: { q: string, sources?: string[] } -> { playlists: [...] }
 // 未显式传 sources 时插件搜索其声明的全部平台;平台展示名由 manifest.platformLabels 映射。
 playlistSearchRoutes.post("/v1/playlist-search/:providerId/search", async (c) => {
+  markInteractiveStart(); // 用户交互窗口:后台批量任务让路,搜索本身不受节流
+  try {
   const providerId = c.req.param("providerId")!;
   const plugin = getEnabledByCapability("playlistSearch").find((p) => p.manifest.id === providerId);
   if (!plugin || typeof plugin.impl?.searchPlaylists !== "function") {
@@ -56,9 +59,8 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/search", async (c) =>
   if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
   const config = getPluginConfig(providerId) || {};
-  try {
-    const res = await plugin.impl.searchPlaylists(config, { query: q, sources });
-    const labels = plugin.manifest.platformLabels || {};
+  const res = await plugin.impl.searchPlaylists(config, { query: q, sources });
+  const labels = plugin.manifest.platformLabels || {};
     const list: any[] = Array.isArray(res?.playlists) ? res.playlists : [];
     const playlists = list.map((p: any) => ({
       id: p.id,
@@ -73,6 +75,8 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/search", async (c) =>
     return c.json({ success: true, total: playlists.length, playlists });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "搜索失败" });
+  } finally {
+    markInteractiveEnd();
   }
 });
 
@@ -81,6 +85,8 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/search", async (c) =>
 // create/update a platform playlist row (synthetic sourceUrl -> idempotent).
 // Body: { source: string, id: string, name?: string, cover?: string }
 playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) => {
+  markInteractiveStart(); // 用户交互窗口:后台批量任务让路;自身走 interactive 全速并发
+  try {
   const user = c.get("user");
   const providerId = c.req.param("providerId")!;
   const plugin = getEnabledByCapability("playlistSearch").find((p) => p.manifest.id === providerId);
@@ -96,13 +102,13 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) =>
   const cover = String(body.cover || "").trim();
   const sourceUrl = syntheticSourceUrl(providerId, source, id);
 
-  try {
-    const { songs: list } = await plugin.impl.playlistSongs(config, source, id);
+  const { songs: list } = await plugin.impl.playlistSongs(config, source, id);
     if (!Array.isArray(list) || list.length === 0) {
       return c.json({ success: false, error: "该歌单没有可导入的歌曲" });
     }
     // 歌曲入库为在线歌曲(可播),返回 { songs: [{ id, title, ... }], added, deduped, failed }
-    const imp = await importOnlineSongs(providerId, list, { userId: user?.id });
+    // interactive:用户操作自身不受交互退让影响,按档位基础并发全速导入。
+    const imp = await importOnlineSongs(providerId, list, { userId: user?.id, interactive: true });
     if (!imp?.songs?.length) {
       return c.json({ success: false, error: "歌曲入库失败,请检查在线源配置" });
     }
@@ -161,5 +167,7 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) =>
     });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "导入失败" });
+  } finally {
+    markInteractiveEnd();
   }
 });

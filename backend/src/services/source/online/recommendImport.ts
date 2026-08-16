@@ -20,7 +20,7 @@ import { OnlinePlaylistInfo } from "./types.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.js";
 import { refreshPlaylistCounts } from "../../plugin/shared.js";
 import { getPluginManifest, listRegistered } from "../../../plugins/registry.js";
-import { acquireBatchLock } from "../../plugin/batchPacer.js";
+import { acquireBatchLock, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 
 export const DAILY_TAG = "每日推荐";
 // The daily-recommend sourceUrl prefix is no longer hardcoded — each source
@@ -305,6 +305,9 @@ async function doSyncAllRecommendPlaylists(
       } catch (e: any) {
         errors.push(`[${ch.source}] ${pl.name}: ${e.message || "导入失败"}`);
       }
+      // 批间让行:批量循环每批主动睡眠(batchPacer:档位 + ELD + 交互窗口内 ×4 退让),
+      // 与 match.ts / importOnlineSongs 的节流保持同一套节奏。
+      await sleepBetweenBatch();
     }
   };
   await Promise.all(Array.from({ length: Math.min(IMPORT_CONCURRENCY, work.length) }, () => worker()));

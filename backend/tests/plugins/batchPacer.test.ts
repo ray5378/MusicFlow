@@ -1,7 +1,10 @@
 // ==================== batchPacer 批量节拍器专项测试 ====================
-// 覆盖 P0/P1/P2 三阶段核心:档位并发、全局闸互斥/FIFO、批间睡眠。
+// 覆盖 P0/P1/P2 三阶段核心:档位并发、全局闸互斥/FIFO、批间睡眠、交互优先让行。
 import { describe, it, expect, beforeEach } from "vitest";
-import { acquireBatchLock, batchConcurrency, sleepBetweenBatch, _resetPacerForTest, sleep } from "../../src/services/plugin/batchPacer.js";
+import {
+  acquireBatchLock, batchConcurrency, sleepBetweenBatch, _resetPacerForTest, sleep,
+  markInteractiveStart, markInteractiveEnd, isInteractiveActive, interactiveConcurrency,
+} from "../../src/services/plugin/batchPacer.js";
 import { setSetting } from "../../src/services/settings.js";
 
 describe("batchPacer 批量节拍器", () => {
@@ -62,5 +65,57 @@ describe("batchPacer 批量节拍器", () => {
     const t1 = Date.now();
     await sleepBetweenBatch();
     expect(Date.now() - t1).toBeGreaterThanOrEqual(100);
+  });
+
+  // ---------- 交互优先(用户前端操作让行) ----------
+  it("交互窗口内批量并发压到 1(不限档位)", () => {
+    for (const pace of ["slow", "standard", "full"] as const) {
+      setSetting("batch_pace", pace);
+      markInteractiveStart();
+      expect(isInteractiveActive()).toBe(true);
+      expect(batchConcurrency()).toBe(1); // 后台单线程,让位用户
+      markInteractiveEnd();
+      expect(isInteractiveActive()).toBe(false);
+    }
+    // 退出交互窗口后恢复正常档位并发
+    setSetting("batch_pace", "standard");
+    expect(batchConcurrency()).toBe(2);
+  });
+
+  it("交互窗口内批间睡眠放大 4 倍(slow 120→≥480ms)", async () => {
+    setSetting("batch_pace", "slow");
+    markInteractiveStart();
+    const t0 = Date.now();
+    await sleepBetweenBatch();
+    const elapsed = Date.now() - t0;
+    markInteractiveEnd();
+    expect(elapsed).toBeGreaterThanOrEqual(480);
+  });
+
+  it("交互操作自身并发不受退让影响(interactiveConcurrency = 档位基础并发)", () => {
+    setSetting("batch_pace", "standard");
+    markInteractiveStart();
+    expect(interactiveConcurrency()).toBe(2); // 用户导入全速,不自我节流
+    markInteractiveEnd();
+    setSetting("batch_pace", "full");
+    markInteractiveStart();
+    expect(interactiveConcurrency()).toBe(4);
+    markInteractiveEnd();
+  });
+
+  it("计数成对:嵌套交互(搜索+导入)结束一个仍处于窗口,全部结束才退出", () => {
+    markInteractiveStart(); // 搜索
+    markInteractiveStart(); // 导入
+    expect(isInteractiveActive()).toBe(true);
+    markInteractiveEnd();   // 搜索结束
+    expect(isInteractiveActive()).toBe(true); // 导入仍在 → 后台继续让路
+    markInteractiveEnd();   // 导入结束
+    expect(isInteractiveActive()).toBe(false);
+  });
+
+  it("多余 end 不产生负计数(reset 后语义正确)", () => {
+    markInteractiveEnd(); // 无 start 的 end → 忽略
+    markInteractiveEnd();
+    expect(isInteractiveActive()).toBe(false);
   });
 });

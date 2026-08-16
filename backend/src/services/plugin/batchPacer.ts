@@ -9,6 +9,9 @@
 //   P0-2 动态并发(batchConcurrency): 按档位返回基础并发;事件循环延迟高时降 1。
 //   P0-3 全局闸(acquireBatchLock): 全进程同时只跑 1 个批量任务(FIFO 排队),消除
 //        gmdl 同步 + listenbrainz 补全 + 后台 auto-match + 手动导入的多任务叠加。
+//   P0-4 交互优先(用户前端操作让行): 用户搜索/导入/手动同步时进入 interactive 窗口,
+//        后台批量任务主动退让——批间睡眠 ×4、并发压到 1,把 CPU/DB/带宽让给用户;
+//        交互操作本身走 interactiveConcurrency()(档位基础并发),不受退让影响。
 //   P1   自适应(ELD): 每 200ms 探测事件循环实际节拍偏差,前台有请求在等(ELD 高)
 //        时 sleep 加倍/并发降档,空闲时恢复全速——用户在用时不卡,深夜尽量快。
 //   P2   档位(batch_pace): slow|standard|full,系统设置页可改,运行时生效。
@@ -62,6 +65,31 @@ export function eventLoopLag(): number {
   return eldSamples.reduce((a, b) => a + b, 0) / eldSamples.length;
 }
 
+// ---------- 交互优先(用户前端操作让行) ----------
+//
+// 设计原则:批量任务(每日推荐同步 / 后台自动匹配 / 插件每日任务)是后台巡航,
+// 用户前端的搜索/导入/手动同步是交互操作,必须优先。交互操作本身**不排队**
+// (不加全局闸——routes/api/playlistSearch.ts 的 import 是用户单次触发、量小,
+// 直接与后台并行跑),但正在跑的批量任务要在交互窗口内主动退让:
+//   批间睡眠 ×4 + 并发压到 1 → 后台近乎暂停,把 CPU/DB/带宽让给用户。
+// 显式计数(try/finally 成对,进程重启即清零)比 TTL 精确,无残留风险。
+let interactiveDepth = 0;
+
+/** 标记一次用户交互操作开始(前端搜索/导入/手动同步),后台批量任务将退让。 */
+export function markInteractiveStart(): void {
+  interactiveDepth++;
+}
+
+/** 标记一次用户交互操作结束(与 start 成对,务必放 try/finally 的 finally)。 */
+export function markInteractiveEnd(): void {
+  if (interactiveDepth > 0) interactiveDepth--;
+}
+
+/** 是否处于用户交互窗口内(有未结束的交互操作)。 */
+export function isInteractiveActive(): boolean {
+  return interactiveDepth > 0;
+}
+
 // ---------- 档位 ----------
 /** 当前限速档位(settings.batch_pace,默认 standard)。 */
 export function currentPace(): BatchPace {
@@ -78,21 +106,32 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 批量任务批间主动睡眠: 基础时长,ELD 忙时加倍;full 档不主动睡(0ms)。 */
+/** 批量任务批间主动睡眠: 基础时长;交互窗口内 ×4(用户优先),否则 ELD 忙时 ×2;
+ *  full 档不主动睡(0ms)。 */
 export async function sleepBetweenBatch(): Promise<void> {
   ensureEldTimer();
   const p = PACE_PARAMS[currentPace()];
   if (p.sleepMs <= 0) return;
-  const mul = eventLoopLag() > ELD_BUSY_MS ? 2 : 1;
+  let mul = 1;
+  if (isInteractiveActive()) mul = 4; // 用户在操作:大幅退让
+  else if (eventLoopLag() > ELD_BUSY_MS) mul = 2; // 前台忙(无交互标记):适度退让
   await sleep(p.sleepMs * mul);
 }
 
-/** 批量任务并发: 档位基础并发,ELD 忙时 -1(最低 1)。 */
+/** 批量任务并发: 档位基础并发;交互窗口内压到 1(后台近乎暂停,让位用户);
+ *  否则 ELD 忙时 -1(最低 1)。 */
 export function batchConcurrency(): number {
   ensureEldTimer();
   const p = PACE_PARAMS[currentPace()];
+  if (isInteractiveActive()) return 1; // 用户优先:后台单线程,最大程度让出资源
   if (eventLoopLag() > ELD_BUSY_MS) return Math.max(1, p.concurrency - 1);
   return p.concurrency;
+}
+
+/** 交互操作自身的并发:用户操作就是优先者,不受交互退让影响,按档位基础并发全速跑。 */
+export function interactiveConcurrency(): number {
+  ensureEldTimer();
+  return PACE_PARAMS[currentPace()].concurrency;
 }
 
 // ---------- 全局闸(FIFO promise 链;天然互斥,无忙等) ----------
@@ -135,4 +174,5 @@ export function _resetPacerForTest(): void {
   if (eldTimer) { clearInterval(eldTimer); eldTimer = null; }
   lockChain = Promise.resolve();
   pendingLocks = 0;
+  interactiveDepth = 0;
 }

@@ -12,7 +12,7 @@ import { songs, artists, albums } from "../../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { cacheRemoteCover } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
-import { batchConcurrency } from "../../plugin/batchPacer.js";
+import { batchConcurrency, interactiveConcurrency } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
 
 // 封面下载全局限流(≤2 并发)与封面后台回填见 covers.ts。
@@ -147,7 +147,7 @@ async function workerLimit<T, R>(items: T[], limit: number, fn: (item: T) => Pro
 export async function importOnlineSongs(
   providerId: string,
   songList: OnlineSongResult[],
-  opts?: { playlistId?: string; userId?: string },
+  opts?: { playlistId?: string; userId?: string; interactive?: boolean },
 ): Promise<{ added: number; deduped: number; failed: number; songs: { id: string; title: string; fingerprint: string }[] }> {
   // One batched dedup query instead of one SELECT per song.
   const existingFingerprints = new Map<string, string>();
@@ -166,7 +166,10 @@ export async function importOnlineSongs(
   let added = 0, deduped = 0, failed = 0;
   const songsOut: { id: string; title: string; fingerprint: string }[] = [];
 
-  const results = await workerLimit(songList, batchConcurrency(), async (s) => {
+  // 交互操作(用户前端导入)用档位基础并发全速跑,不受 interactive 退让影响;
+  // 后台批量(每日推荐同步/自动匹配)用 batchConcurrency()——交互窗口内自动压到 1。
+  const conc = opts?.interactive ? interactiveConcurrency() : batchConcurrency();
+  const results = await workerLimit(songList, conc, async (s) => {
     try {
       const r = await importOnlineSongCore(providerId, s, opts, existingFingerprints);
       if (r.success && r.songId) {

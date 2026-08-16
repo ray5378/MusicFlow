@@ -13,7 +13,7 @@ import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFi
 import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
 import { touch, registerCacheCleaner, reclaimNow } from "../../services/memory/reclaim.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
-import { currentPace, setPace, BatchPace } from "../../services/plugin/batchPacer.js";
+import { currentPace, setPace, BatchPace, markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
@@ -1267,13 +1267,14 @@ apiRoutes.get("/v1/recommend-pool/favorites/status", (c) => {
 
 // ==================== Playlist import (built-in plugins: QQ / NetEase / MusicFlow native file) ====================
 apiRoutes.post("/v1/playlists/import", async (c) => {
+  markInteractiveStart(); // 用户交互窗口:导入期间后台批量任务让路
+  try {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
   const native = body.native; // MusicFlow-exported JSON (object) for native files
   if (!url && !native) return c.json({ success: false, error: "请输入歌单链接或选择歌单文件" });
-  try {
-    if (native) {
+  if (native) {
       // Uploaded playlist file — routed to whichever enabled importer plugin
       // recognizes the payload (built-in: MusicFlow export, one or many playlists).
       const nativeList = parsePlaylistFile(native);
@@ -1369,6 +1370,8 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
     });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "导入失败" });
+  } finally {
+    markInteractiveEnd();
   }
 });
 
@@ -1408,21 +1411,23 @@ apiRoutes.get("/v1/playlists/export-all", (c) => {
 
 // ==================== Playlist sync ====================
 apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
+  markInteractiveStart(); // 用户交互窗口:手动同步期间后台批量任务让路
+  try {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json({ success: false, error: "歌单不存在" });
   // Only owner (or admin) can sync
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权同步该歌单" });
-  try {
-    if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
-    const result = await syncApi().syncPlaylist(id, { userId: user?.id });
-    return c.json({ success: true, ...result });
+  if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+  const result = await syncApi().syncPlaylist(id, { userId: user?.id });
+  return c.json({ success: true, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "同步失败" });
   } finally {
     clearLibraryIndex(); // 手动同步结束,立即回收曲库索引缓存
     touch(); // 标记活动:歌单同步
+    markInteractiveEnd();
   }
 });
 
