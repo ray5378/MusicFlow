@@ -18,6 +18,9 @@ export interface Song {
   suffix?: string;
   bitRate?: number;
   playCount?: number;
+  /** 远程(未入库)歌曲:直接指向后端代理流的相对 URL(如 /rest/stream-remote?...)。
+   *  有值时代替 /rest/stream?id= 作为播放源,播放不要求先入库。 */
+  streamUrl?: string;
 }
 
 export interface LyricLine {
@@ -240,10 +243,15 @@ export const usePlayerStore = defineStore("player", () => {
   });
   const progress = computed(() => duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0);
 
-  function getStreamUrl(id: string) {
+  // 播放源 URL:远程歌(带 streamUrl)直接用它(需补 token),否则走后端 /rest/stream?id=。
+  function getStreamUrl(song: Song): string {
     const authStore = useAuthStore();
     const token = authStore.token || "";
-    return `/rest/stream?id=${id}&token=${encodeURIComponent(token)}`;
+    if (song.streamUrl) {
+      const sep = song.streamUrl.includes("?") ? "&" : "?";
+      return `${song.streamUrl}${sep}token=${encodeURIComponent(token)}`;
+    }
+    return `/rest/stream?id=${song.id}&token=${encodeURIComponent(token)}`;
   }
   function getCoverUrl(id: string | undefined) { return coverUrl(id, 300); }
 
@@ -327,7 +335,7 @@ export const usePlayerStore = defineStore("player", () => {
     loadLocalLyrics(song.id);
     const fmt = (song.suffix || "").toLowerCase();
     howl = new Howl({
-      src: [getStreamUrl(song.id)],
+      src: [getStreamUrl(song)],
       format: fmt ? [fmt] : [],
       volume: volume.value,
       html5: true,
@@ -429,7 +437,9 @@ export const usePlayerStore = defineStore("player", () => {
     const cands: string[] = [];
     const unseen = (idx: number): boolean => {
       const s = localQueue.value[idx];
-      return !!s && !probeCache.has(s.id) && idx !== localIndex.value;
+      // 远程歌(带 streamUrl)跳过预探测:后端 probe 按 DB songId 判可用性,远程歌
+      // 无 DB 行会被误判不可播;其可用性由播放时的失败兜底(跳过/换源)处理。
+      return !!s && !s.streamUrl && !probeCache.has(s.id) && idx !== localIndex.value;
     };
     if (localPlayMode.value === "shuffle") {
       // 随机模式:从洗牌序列取接下来 3 首(精确命中实际播放顺序,不浪费探测)。
@@ -437,13 +447,13 @@ export const usePlayerStore = defineStore("player", () => {
       let used = 0;
       for (let i = shufflePos + 1; i < shuffleOrder.length && used < PROBE_WINDOW; i++) {
         const s = localQueue.value[shuffleOrder[i]];
-        if (s && !probeCache.has(s.id)) { cands.push(s.id); used++; }
+        if (s && !s.streamUrl && !probeCache.has(s.id)) { cands.push(s.id); used++; }
       }
       // 序列剩余不足 3 首:为下一轮洗牌补随机未探测候选(渐进预热)。
       for (let tries = 0; tries < n && used < PROBE_WINDOW; tries++) {
         const idx = Math.floor(Math.random() * n);
         const s = localQueue.value[idx];
-        if (s && !probeCache.has(s.id) && !cands.includes(s.id)) { cands.push(s.id); used++; }
+        if (s && !s.streamUrl && !probeCache.has(s.id) && !cands.includes(s.id)) { cands.push(s.id); used++; }
       }
     } else {
       for (let i = 1; i <= PROBE_WINDOW; i++) {

@@ -62,8 +62,10 @@
     <!-- ===== 歌曲列表(本地模式) ===== -->
     <SongTable v-if="isLocalMode" :songs="songs" :offset="(currentPage - 1) * pageSize" :loading="loading" @play="playSong" />
 
-    <!-- ===== 远程搜索结果(插件模式):由启用的 songSearch 插件(如 go-music-dl)提供,可「加入库」 ===== -->
-    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
+    <!-- ===== 远程搜索结果(插件模式):由启用的 songSearch 插件(如 go-music-dl)提供 =====
+         复用 SongTable(本地同款交互:悬浮播放/点击播放/右键菜单),歌曲未入库也能播
+         (streamUrl → /rest/stream-remote 代理流),另保留「加入库」能力 -->
+    <div v-else-if="isRemoteMode" class="remote-results">
       <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="Search" :size="40" />
         <p>{{ searchQuery.trim() ? "没有找到相关音乐" : `输入关键词,搜索${currentProviderName}支持的全网音乐` }}</p>
@@ -74,17 +76,11 @@
             <MfIcon name="Download" />全部加入库
           </el-button>
         </div>
-        <div class="remote-song-list">
-          <div class="remote-song-row" v-for="(item, i) in remoteItems" :key="i">
-            <span class="remote-source-tag">{{ item.platformLabel }}</span>
-            <div class="remote-song-main">
-              <div class="remote-song-name">{{ item.name }}</div>
-              <div class="remote-song-sub">{{ item.artist }}{{ item.album ? " · " + item.album : "" }}</div>
-            </div>
-            <span class="remote-song-duration">{{ formatSec(item.duration) }}</span>
-            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click="importSongs([item])">加入库</el-button>
-          </div>
-        </div>
+        <SongTable :songs="remoteSongs" remote :loading="remoteSearching" empty-text="没有找到相关音乐" @play="playSong">
+          <template #row-actions="{ row }">
+            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click.stop="importSongs([row._item])">加入库</el-button>
+          </template>
+        </SongTable>
       </template>
     </div>
 
@@ -100,7 +96,7 @@ import { ref, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import { useItemActions } from "@/composables/useItemActions";
-import { useEntitySearch } from "@/composables/useEntitySearch";
+import { useEntitySearch, remoteItemToSong } from "@/composables/useEntitySearch";
 import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
 import SongTable from "@/components/SongTable.vue";
@@ -127,10 +123,8 @@ const {
 const searchPlaceholder = computed(() =>
   isRemoteMode.value ? `搜索${currentProviderName}全网音乐...` : "搜索音乐...",
 );
-function formatSec(sec: number) {
-  const s = Math.max(0, Math.floor(sec || 0));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
+// 远程搜索结果 → 可播放 Song(带 streamUrl,未入库直接播;原始 item 挂 _item 供加入库)
+const remoteSongs = computed(() => remoteItems.value.map((it) => remoteItemToSong(it, searchMode.value)));
 
 // 最近添加模式：/songs?recent=1 → 展示最新入库的 500 首（后端 sort=recentAdded）
 const recentMode = computed(() => route.query.recent === "1");
@@ -364,20 +358,6 @@ onMounted(() => {
 .remote-results {
   .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
   .remote-toolbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
-  .remote-song-list { display: flex; flex-direction: column; gap: 8px; }
-  .remote-song-row {
-    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
-    border-radius: var(--fnos-radius-md); background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.06);
-    .remote-source-tag {
-      flex-shrink: 0; padding: 2px 8px; border-radius: 6px; font-size: 11px;
-      background: rgba(0,0,0,0.45); color: #fff;
-    }
-    .remote-song-main { flex: 1; min-width: 0; }
-    .remote-song-name { font-size: 14px; font-weight: 500; color: var(--fnos-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .remote-song-sub { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .remote-song-duration { flex-shrink: 0; font-size: 12px; color: var(--fnos-text-tertiary); font-variant-numeric: tabular-nums; }
-  }
 }
 
 .pagination-bar {

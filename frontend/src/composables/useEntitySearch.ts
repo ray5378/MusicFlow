@@ -17,6 +17,7 @@ import { ref, computed } from "vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { waitAsyncTask } from "@/utils/asyncTask";
+import { usePlayerStore, Song } from "@/stores/player";
 
 export type EntitySearchKind = "song" | "artist" | "album";
 
@@ -25,6 +26,65 @@ export interface EntitySearchProvider {
   name: string;
   platforms: string[];
   platformLabels: Record<string, string>;
+}
+
+/** 远程搜索结果(歌曲) → 可播放 Song:streamUrl 指向 /rest/stream-remote,未入库也能播。
+ *  原始 item 挂到 song._item 供「加入库」等需要原始字段的操作回取。 */
+export function remoteItemToSong(item: any, providerId: string): Song {
+  const qs = new URLSearchParams({ provider: providerId, source: item.source || "", id: item.id || "" });
+  if (item.name) qs.set("title", item.name);
+  if (item.artist) qs.set("artist", item.artist);
+  if (item.album) qs.set("album", item.album);
+  if (item.duration) qs.set("duration", String(item.duration));
+  if (item.cover) qs.set("cover", item.cover);
+  const song: Song = {
+    id: `remote:${providerId}:${item.source || ""}:${item.id || ""}`,
+    title: item.name || "",
+    artist: item.artist || "",
+    album: item.album || "",
+    duration: item.duration || 0,
+    coverArt: item.cover || undefined,
+    streamUrl: `/rest/stream-remote?${qs.toString()}`,
+  };
+  (song as any)._item = item;
+  return song;
+}
+
+/** 拉取远程集合(专辑/歌单/艺术家)的歌曲列表(只拉不导入),映射为可播放 Song。
+ *  kind: "album"|"playlist"|"artist";item 需含 source/id(艺术家还可用 name)。
+ *  返回空数组表示无歌曲或失败(已 toast)。 */
+export async function fetchRemoteCollectionSongs(
+  kind: "album" | "playlist" | "artist",
+  providerId: string,
+  item: any,
+): Promise<Song[]> {
+  if (!providerId || !item?.source) return [];
+  const base = kind === "playlist" ? "/rest/api/v1/playlist-search" : `/rest/api/v1/${kind}-search`;
+  const qs = new URLSearchParams({ source: item.source });
+  if (item.id) qs.set("id", item.id);
+  if (item.name) qs.set("name", item.name);
+  try {
+    const res = await api.get(`${base}/${providerId}/items?${qs.toString()}`);
+    if (!res.data?.success) {
+      ElMessage.error(res.data?.error || "拉取失败");
+      return [];
+    }
+    return (res.data.items || []).map((it: any) => remoteItemToSong(it, providerId));
+  } catch (e: any) {
+    ElMessage.error(e?.message || "拉取失败:插件未启用或服务不可达");
+    return [];
+  }
+}
+
+/** 远程集合「播放」:拉歌曲列表 → 直接进播放队列(未入库,靠 streamUrl 播放)。 */
+export async function playRemoteCollection(
+  kind: "album" | "playlist" | "artist",
+  providerId: string,
+  item: any,
+): Promise<number> {
+  const songs = await fetchRemoteCollectionSongs(kind, providerId, item);
+  if (songs.length) usePlayerStore().playQueue(songs, 0);
+  return songs.length;
 }
 
 export function useEntitySearch(kind: EntitySearchKind) {

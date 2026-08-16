@@ -69,15 +69,24 @@
       </div>
       <div v-else class="artist-grid">
         <div class="artist-card" v-for="(item, i) in remoteItems" :key="i">
-          <div class="artist-avatar mf-coverwrap">
+          <div class="artist-avatar mf-coverwrap" @click="openRemote(item)">
             <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
             <span class="remote-source-tag">{{ item.platformLabel }}</span>
+            <CoverPlay size="md" :label="`播放 ${item.name} 的歌曲`" :action="() => playRemoteAr(item)" />
           </div>
-          <div class="artist-name">{{ item.name }}</div>
-          <div class="artist-meta">{{ formatRemoteMeta(item) }}</div>
+          <div class="artist-name" @click="openRemote(item)">{{ item.name }}</div>
+          <div class="artist-meta" @click="openRemote(item)">{{ formatRemoteMeta(item) }}</div>
         </div>
       </div>
+
+      <!-- 远程艺术家详情:点击卡片 → 按名字搜歌预览(仅展示+播放,无导入) -->
+      <RemoteDetailDialog
+        v-model="remoteDetailVisible"
+        kind="artist"
+        :provider-id="searchMode"
+        :item="remoteDetailItem"
+      />
     </div>
 
     <div class="pagination-bar" v-if="isLocalMode">
@@ -91,10 +100,11 @@ import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
+import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
-import { useEntitySearch } from "@/composables/useEntitySearch";
+import { useEntitySearch, playRemoteCollection } from "@/composables/useEntitySearch";
 import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 
@@ -127,6 +137,21 @@ async function playAr(artist: any) {
   if (menuGuard()) return;
   const n = await play.playArtist(artist.id);
   if (n) ElMessage.success(`正在播放「${artist.name}」的 ${n} 首歌曲`);
+  else ElMessage.warning("该艺人暂无可播放歌曲");
+}
+
+// ===== 远程艺术家:悬浮播放(按名字搜歌,未入库直接播) + 点击头像/名字看详情 =====
+const remoteDetailVisible = ref(false);
+const remoteDetailItem = ref<any>(null);
+function openRemote(item: any) {
+  if (menuGuard()) return;
+  remoteDetailItem.value = item;
+  remoteDetailVisible.value = true;
+}
+async function playRemoteAr(item: any) {
+  if (menuGuard()) return;
+  const n = await playRemoteCollection("artist", searchMode.value, item);
+  if (n) ElMessage.success(`正在播放「${item.name}」的 ${n} 首歌曲`);
   else ElMessage.warning("该艺人暂无可播放歌曲");
 }
 const artists = ref<any[]>([]);

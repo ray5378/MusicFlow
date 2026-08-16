@@ -49,12 +49,13 @@
       </div>
       <div v-else class="album-grid">
         <div class="album-card fnos-card-sheen" v-for="(item, i) in remoteItems" :key="i">
-          <div class="album-cover mf-coverwrap">
+          <div class="album-cover mf-coverwrap" @click="openRemote(item)">
             <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
             <span class="remote-source-tag">{{ item.platformLabel }}</span>
+            <CoverPlay size="md" :label="`播放 ${item.name}`" :action="() => playRemoteAl(item)" />
           </div>
-          <div class="album-info">
+          <div class="album-info" @click="openRemote(item)">
             <div class="album-name">{{ item.name }}</div>
             <div class="album-artist">{{ item.artist }}</div>
             <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? item.trackCount + "首" : "" }}</div>
@@ -69,6 +70,15 @@
           >{{ item._imported ? "已加入库" : "加入库" }}</el-button>
         </div>
       </div>
+
+      <!-- 远程专辑详情:点击卡片 → 预览专辑歌曲(未入库也可播放/加入库) -->
+      <RemoteDetailDialog
+        v-model="remoteDetailVisible"
+        kind="album"
+        :provider-id="searchMode"
+        :item="remoteDetailItem"
+        @imported="loadAlbums"
+      />
     </div>
 
     <div class="pagination-bar" v-if="isLocalMode">
@@ -82,10 +92,11 @@ import { ref, computed, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
+import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
-import { useEntitySearch } from "@/composables/useEntitySearch";
+import { useEntitySearch, playRemoteCollection } from "@/composables/useEntitySearch";
 import api from "@/api";
 import { coverUrl } from "@/utils/cover";
 
@@ -117,6 +128,21 @@ async function playAl(album: any) {
   if (menuGuard()) return;
   const n = await play.playAlbum(album.id);
   if (n) ElMessage.success(`正在播放「${album.name}」`);
+  else ElMessage.warning("该专辑暂无可播放歌曲");
+}
+
+// ===== 远程专辑:悬浮播放(未入库直接播) + 点击卡片看详情 =====
+const remoteDetailVisible = ref(false);
+const remoteDetailItem = ref<any>(null);
+function openRemote(item: any) {
+  if (menuGuard()) return;
+  remoteDetailItem.value = item;
+  remoteDetailVisible.value = true;
+}
+async function playRemoteAl(item: any) {
+  if (menuGuard()) return;
+  const n = await playRemoteCollection("album", searchMode.value, item);
+  if (n) ElMessage.success(`正在播放「${item.name}」`);
   else ElMessage.warning("该专辑暂无可播放歌曲");
 }
 const albums = ref<any[]>([]);

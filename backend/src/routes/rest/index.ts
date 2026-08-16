@@ -15,6 +15,7 @@ import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
+import { getConfiguredProvider } from "../../services/source/online/index.js";
 
 export const restRoutes = new Hono();
 
@@ -1118,7 +1119,6 @@ restRoutes.get("/stream", async (c) => {
   if ((song.type || "local") === "web") {
     return serveWebSongStream(c, song, rangeHeader);
   }
-
   const parsed = parseSongPath(song.path);
   if (!parsed) return c.json(fail(0, "Invalid song path"));
 
@@ -1186,6 +1186,52 @@ restRoutes.get("/stream", async (c) => {
     }
   } catch (e: any) {
     return c.json(fail(0, e.message || "Stream failed"));
+  }
+});
+
+// ==================== Remote stream proxy (未入库远程歌曲直播) ====================
+// 搜索结果的远程歌曲(尚未「加入库」,无 DB 行)直接播放:按 provider/source/id 现场
+// 调用插件的 streamUrl() 拿到真实流地址,再复用 serveWebStreamSong 的代理逻辑
+// (Range + 按源补 Referer 等 headers)。主项目前端与 HA 卡片「搜索即播」都走这里,
+// 播放不要求先入库。参数: provider, source, id, title, artist, album, duration, cover
+restRoutes.get("/stream-remote", async (c) => {
+  const providerId = getParam(c, "provider") || "";
+  const source = getParam(c, "source") || "";
+  const id = getParam(c, "id") || "";
+  if (!providerId || !source || !id) return c.json(fail(0, "Missing provider/source/id"));
+  const cfg = getConfiguredProvider(providerId);
+  if (!cfg) return c.json(fail(0, "在线源未启用或未配置"));
+  const song = {
+    id,
+    source,
+    name: getParam(c, "title") || "",
+    artist: getParam(c, "artist") || "",
+    album: getParam(c, "album") || "",
+    duration: parseInt(getParam(c, "duration") || "0") || 0,
+    cover: getParam(c, "cover") || "",
+  };
+  try {
+    const streamUrl = cfg.provider.streamUrl(cfg.config, song);
+    if (!streamUrl) return c.json(fail(0, "No stream url"));
+    const streamHeaders: Record<string, string> = {};
+    if (source === "bilibili") streamHeaders["Referer"] = "https://www.bilibili.com/";
+    // 现场构造最小 web-song 形状:无 cachePath(未缓存)、无 pluginEntry/sourceData
+    // (不做自动换源),直接复用远程代理分支。
+    return serveWebSongStream(c, {
+      id,
+      title: song.name,
+      artist: song.artist,
+      album: song.album,
+      suffix: "mp3",
+      type: "web",
+      url: streamUrl,
+      streamHeaders: JSON.stringify(streamHeaders),
+      cachePath: null,
+      pluginEntry: undefined,
+      sourceData: undefined,
+    }, c.req.header("range"));
+  } catch (e: any) {
+    return c.json(fail(0, e.message || "Remote stream failed"));
   }
 });
 

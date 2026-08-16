@@ -194,3 +194,42 @@ describe("POST /v1/playlist-search/:id/import", () => {
     expect(body.success).toBe(false);
   });
 });
+
+describe("GET /v1/playlist-search/:id/items (远程歌单详情,只拉不导入)", () => {
+  it("调插件 playlistSongs 返回歌曲列表,不写库", async () => {
+    const res = await app.request(`/rest/api/v1/playlist-search/${FAKE}/items?${authQS()}&source=netease&id=p1`);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(playlistCalls).toBe(1);
+    expect(body.total).toBe(2);
+    expect(body.items[0].name).toBe("Song 1");
+    expect(body.items[0].platformLabel).toBe("网易云");
+  });
+
+  it("缺 source/id 报错", async () => {
+    const res = await app.request(`/rest/api/v1/playlist-search/${FAKE}/items?${authQS()}&source=netease`);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(false);
+  });
+
+  it("插件无 playlistSongs → 404", async () => {
+    unregisterPlugin(FAKE);
+    registerPlugin(
+      {
+        id: FAKE,
+        name: "fake-dl 聚合",
+        version: "1.0.0",
+        type: "source",
+        capabilities: ["playlistSearch"], // 只声明 search,无 playlistSongs
+        platforms: ["netease"],
+        platformLabels: {},
+        configSchema: [],
+      } as any,
+      { async searchPlaylists() { return { playlists: [] }; } } as any,
+    );
+    db.delete(plugins).where(eq(plugins.name, FAKE)).run();
+    db.insert(plugins).values({ id: FAKE, name: FAKE, enabled: 1, config: "{}" }).run();
+    const res = await app.request(`/rest/api/v1/playlist-search/${FAKE}/items?${authQS()}&source=netease&id=p1`);
+    expect(res.status).toBe(404);
+  });
+});

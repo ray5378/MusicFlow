@@ -110,3 +110,38 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) =>
   if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
   return c.json({ success: true, taskId: started.taskId });
 });
+
+// Remote detail (只拉不导入):点击远程歌单卡片后预览其歌曲列表。调用插件
+// playlistSongs 拉歌但**不写库**,前端可据此直接播放(/rest/stream-remote)或加入库。
+playlistSearchRoutes.get("/v1/playlist-search/:providerId/items", async (c) => {
+  markInteractiveStart();
+  try {
+    const providerId = c.req.param("providerId")!;
+    const plugin = getEnabledByCapability("playlistSearch").find((p) => p.manifest.id === providerId);
+    if (!plugin || typeof plugin.impl?.playlistSongs !== "function") {
+      return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取歌单歌曲)" }, 404);
+    }
+    const source = String(c.req.query("source") || "").trim();
+    const id = String(c.req.query("id") || "").trim();
+    if (!source || !id) return c.json({ success: false, error: "缺少歌单 source/id" });
+    const config = getPluginConfig(providerId) || {};
+    const res = await plugin.impl.playlistSongs(config, source, id);
+    const list = Array.isArray(res?.songs) ? res.songs : [];
+    const labels = plugin.manifest.platformLabels || {};
+    const items = list.map((s: any) => ({
+      id: s.id,
+      source: s.source,
+      name: s.name || "",
+      artist: s.artist || "",
+      album: s.album || "",
+      duration: s.duration || 0,
+      cover: s.cover || "",
+      platformLabel: labels[s.source] || s.source,
+    }));
+    return c.json({ success: true, total: items.length, items });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "拉取失败" });
+  } finally {
+    markInteractiveEnd();
+  }
+});

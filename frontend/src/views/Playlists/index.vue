@@ -116,12 +116,13 @@
       </div>
       <div class="playlist-grid">
         <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="i">
-          <div class="playlist-cover mf-coverwrap">
+          <div class="playlist-cover mf-coverwrap" @click="openRemote(rp)">
             <span class="remote-source-tag">{{ rp.platformLabel }}</span>
             <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
+            <CoverPlay size="md" :label="`播放 ${rp.name}`" :action="() => playRemotePl(rp)" />
           </div>
-          <div class="playlist-info">
+          <div class="playlist-info" @click="openRemote(rp)">
             <div class="playlist-name">{{ rp.name }}</div>
             <div class="playlist-meta">
               <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? rp.trackCount + "首" : "" }}</span>
@@ -137,6 +138,15 @@
           >{{ rp._imported ? "已加入库" : "加入库" }}</el-button>
         </div>
       </div>
+
+      <!-- 远程歌单详情:点击卡片 → 预览歌单歌曲(未入库也可播放/加入库) -->
+      <RemoteDetailDialog
+        v-model="remoteDetailVisible"
+        kind="playlist"
+        :provider-id="searchMode"
+        :item="remoteDetailItem"
+        @imported="loadPlaylists"
+      />
     </div>
 
     <div class="pagination-bar" v-if="isLocalMode">
@@ -204,8 +214,10 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
+import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
 import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
+import { playRemoteCollection } from "@/composables/useEntitySearch";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin, Heart } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
@@ -700,6 +712,21 @@ function openManage(action: string) {
   else if (action === "refreshPrivate") refreshAllPrivate();
   else if (action === "sync") syncDailyAll();
   else if (action === "wish") router.push("/admin/wish");
+}
+
+// ===== 远程歌单:悬浮播放(未入库直接播) + 点击卡片看详情 =====
+const remoteDetailVisible = ref(false);
+const remoteDetailItem = ref<any>(null);
+function openRemote(rp: any) {
+  if (menuGuard()) return;
+  remoteDetailItem.value = rp;
+  remoteDetailVisible.value = true;
+}
+async function playRemotePl(rp: any) {
+  if (menuGuard()) return;
+  const n = await playRemoteCollection("playlist", searchMode.value, rp);
+  if (n) ElMessage.success(`正在播放「${rp.name}」`);
+  else ElMessage.warning("该歌单暂无可播放歌曲");
 }
 
 async function createPlaylist() {

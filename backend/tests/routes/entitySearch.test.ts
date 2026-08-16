@@ -273,8 +273,12 @@ describe("import endpoints", () => {
     });
     expect(body.success).toBe(true);
     expect(body.added).toBe(2);
+    // 结果带导入后的真实 DB songId(供「导入后立即播放」)
+    expect(Array.isArray(body.ids)).toBe(true);
+    expect(body.ids.length).toBe(2);
     const rows = db.select().from(songs).where(inArray(songs.fingerprint, [`${FAKE}:netease:s1`, `${FAKE}:qq:s2`])).all();
     expect(rows.length).toBe(2);
+    for (const id of body.ids) expect(rows.some((r) => r.id === id)).toBe(true);
   });
 
   it("song import:重复导入去重(fingerprint 幂等)", async () => {
@@ -339,6 +343,53 @@ describe("import endpoints", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source: "netease", id: "x" }),
     });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /v1/{album,artist}-search/:id/items (远程详情,只拉不导入)", () => {
+  it("album items:调插件 playlistSongs,返回歌曲列表且不写库", async () => {
+    const before = db.select().from(songs).all().length;
+    const res = await app.request(`/rest/api/v1/album-search/${FAKE}/items?${authQS()}&source=netease&id=al1`);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(playlistCalls).toBe(1);
+    expect(body.total).toBe(2);
+    expect(body.items[0].name).toBe("Track 1");
+    expect(body.items[0].platformLabel).toBe("网易云");
+    // 只拉不导入:歌曲表零新增
+    const after = db.select().from(songs).all().length;
+    expect(after).toBe(before);
+  });
+
+  it("album items:缺 source/id 报错", async () => {
+    const res = await app.request(`/rest/api/v1/album-search/${FAKE}/items?${authQS()}`);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(false);
+  });
+
+  it("artist items:调插件 searchSongs 按名字拉歌(通用能力)", async () => {
+    const res = await app.request(`/rest/api/v1/artist-search/${FAKE}/items?${authQS()}&source=netease&name=周杰伦`);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(songSearchCalls).toBe(1);
+    expect(body.total).toBe(2);
+    expect(body.items[0].name).toBe("晴天");
+  });
+
+  it("artist items:缺名字报错", async () => {
+    const res = await app.request(`/rest/api/v1/artist-search/${FAKE}/items?${authQS()}&source=netease`);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(false);
+  });
+
+  it("未注册插件 → 404", async () => {
+    const res = await app.request(`/rest/api/v1/album-search/no-such/items?${authQS()}&source=netease&id=1`);
+    expect(res.status).toBe(404);
+  });
+
+  it("song 类型没有 items 端点(404)", async () => {
+    const res = await app.request(`/rest/api/v1/song-search/${FAKE}/items?${authQS()}&source=netease&id=1`);
     expect(res.status).toBe(404);
   });
 });

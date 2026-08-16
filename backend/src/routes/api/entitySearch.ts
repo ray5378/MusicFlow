@@ -141,7 +141,11 @@ for (const spec of SPECS) {
           try {
             const imp = await importOnlineSongs(providerId, list, { userId: user?.id, interactive: true });
             if (!imp?.songs?.length) throw new Error("歌曲入库失败,请检查在线源配置");
-            return { success: true, added: imp.added, deduped: imp.deduped, failed: imp.failed, trackCount: imp.songs.length };
+            // ids 供调用方(如 HA 卡片)「导入后立即入队播放」拿到真实 DB songId。
+            return {
+              success: true, added: imp.added, deduped: imp.deduped, failed: imp.failed,
+              trackCount: imp.songs.length, ids: imp.songs.map((s) => s.id),
+            };
           } finally {
             clearLibraryIndex();
             touch();
@@ -177,6 +181,49 @@ for (const spec of SPECS) {
       });
       if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
       return c.json({ success: true, taskId: started.taskId });
+    });
+  }
+
+  // Remote detail (只拉不导入):点击远程专辑/艺术家卡片后,预览其内部歌曲列表。
+  //   album  → 插件 playlistSongs 拉整专歌曲
+  //   artist → 插件 searchSongs 按艺术家名搜歌曲(通用能力,不新增 artist 专属接口)
+  // 与 search 一样走同步返回(仅网络拉取,不写库);歌曲带 source/id,前端可拼
+  // /rest/stream-remote 直接播放或「加入库」。
+  if (spec.kind === "album" || spec.kind === "artist") {
+    entitySearchRoutes.get(`${spec.base}/:providerId/items`, async (c) => {
+      markInteractiveStart();
+      try {
+        const providerId = c.req.param("providerId")!;
+        const plugin = getEnabledByCapability(spec.capability).find((p) => p.manifest.id === providerId);
+        if (!plugin) return c.json({ success: false, error: "未找到已启用的搜索插件" }, 404);
+        const source = String(c.req.query("source") || "").trim();
+        const id = String(c.req.query("id") || "").trim();
+        const name = String(c.req.query("name") || "").trim();
+        const config = getPluginConfig(providerId) || {};
+        const labels = plugin.manifest.platformLabels || {};
+        let raw: any[] = [];
+        if (spec.kind === "album") {
+          if (!source || !id) return c.json({ success: false, error: "缺少专辑 source/id" });
+          if (typeof plugin.impl?.playlistSongs !== "function") {
+            return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取专辑歌曲)" }, 404);
+          }
+          const res = await plugin.impl.playlistSongs(config, source, id);
+          raw = Array.isArray(res?.songs) ? res.songs : [];
+        } else {
+          if (!name) return c.json({ success: false, error: "缺少艺术家名称" });
+          if (typeof plugin.impl?.searchSongs !== "function") {
+            return c.json({ success: false, error: "插件缺少 songSearch 能力(无法拉取歌手歌曲)" }, 404);
+          }
+          const res = await plugin.impl.searchSongs(config, { query: name, sources: source ? [source] : undefined });
+          raw = Array.isArray(res?.songs) ? res.songs : [];
+        }
+        const items = mapItems("song", raw, labels);
+        return c.json({ success: true, total: items.length, items });
+      } catch (e: any) {
+        return c.json({ success: false, error: e.message || "拉取失败" });
+      } finally {
+        markInteractiveEnd();
+      }
     });
   }
 }

@@ -36,7 +36,7 @@
       </span>
       <span class="col col-title">
         <div class="song-cover-wrap" @click.stop="emitPlay(song)">
-          <el-image v-if="song.coverArt" :src="`/rest/getCoverArt?id=${song.coverArt}&size=120`" class="song-cover" fit="cover" lazy>
+          <el-image v-if="song.coverArt" :src="coverSrc(song)" class="song-cover" fit="cover" lazy>
             <template #error><div class="cover-placeholder"><MfIcon name="Headphones" /></div></template>
           </el-image>
           <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
@@ -59,10 +59,10 @@
       <span class="col col-duration">{{ formatDuration(song.duration) }}</span>
       <span class="col col-actions">
         <slot name="row-actions" :row="song" />
-        <button class="row-btn" :class="{ active: fav.isFavorite(song.id) }" @click.stop="toggleFavorite(song)" :title="fav.isFavorite(song.id) ? '取消喜欢' : '我喜欢'">
+        <button v-if="!remote" class="row-btn" :class="{ active: fav.isFavorite(song.id) }" @click.stop="toggleFavorite(song)" :title="fav.isFavorite(song.id) ? '取消喜欢' : '我喜欢'">
           <MfIcon name="Heart" :filled="fav.isFavorite(song.id)" :size="16" />
         </button>
-        <button class="row-btn" @click.stop="openAddToPlaylist(song)" title="添加到歌单">
+        <button v-if="!remote" class="row-btn" @click.stop="openAddToPlaylist(song)" title="添加到歌单">
           <MfIcon name="Plus" :size="16" />
         </button>
         <button class="row-btn" @click.stop="onContext(song, $event)" title="更多操作">
@@ -104,6 +104,8 @@ const props = withDefaults(
     extraActions?: (row: any) => any[];
     /** 允许点击「曲库中未找到」的行触发 play(由页面自行处理转在线匹配) */
     allowUnmatchedPlay?: boolean;
+    /** 远程(未入库)搜索结果行:封面用远程 URL、隐藏「喜欢/加歌单」等依赖库内 id 的按钮 */
+    remote?: boolean;
   }>(),
   {
     songs: () => [],
@@ -117,6 +119,7 @@ const props = withDefaults(
     emptyText: "",
     extraActions: undefined,
     allowUnmatchedPlay: false,
+    remote: false,
   }
 );
 
@@ -131,6 +134,13 @@ const isMobile = useIsMobile();
 const { openContextMenu, openActionSheet, menuGuard, songActions, openAddToPlaylist } = useItemActions();
 
 const isCurrent = (song: any) => !!playerStore.currentSong && playerStore.currentSong.id === song.id;
+
+// 封面地址:远程行(remote 或 coverArt 是完整 URL)直接用远程 URL,库内歌曲走后端取封
+function coverSrc(song: any): string {
+  if (!song.coverArt) return "";
+  if (props.remote || /^https?:\/\//i.test(song.coverArt)) return song.coverArt;
+  return `/rest/getCoverArt?id=${song.coverArt}&size=120`;
+}
 
 const slots = useSlots();
 // Playlist detail injects an extra "remove" row action via #row-actions; widen
