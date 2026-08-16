@@ -1,8 +1,10 @@
-# MusicFlow-V2
+# MusicFlow
 
-自托管音乐库播放器（OpenSubsonic 兼容），**插件化重构版**。后端 Hono + SQLite（better-sqlite3），前端 Vue 3 + Element Plus。在线音乐源、歌单导入、每日推荐、歌单同步、歌词/封面、DLNA 渲染、播放上报等均以插件形式接入，核心只按能力遍历，不再耦合具体实现。
+自托管音乐库播放器（OpenSubsonic 兼容），**插件化重构版（V2）**。后端 Hono + SQLite（better-sqlite3），前端 Vue 3 + Element Plus。在线音乐源、歌单导入、每日推荐、歌单同步、歌词/封面、DLNA 渲染、播放上报等均以插件形式接入，核心只按能力遍历，不再耦合具体实现。
 
 > **北向目标**：V2 完整实现 MusicFlow 的功能与逻辑，只是解耦成插件版——是 HA 主链路（加载项 + 集成 + 卡片）的新内核。
+
+> **仓库关系**：本仓库（`MusicFlow-V2`）是 V2 的源码仓库；其 `master` 已镜像托管到主仓库 [MusicFlow](https://github.com/ray5378/MusicFlow) 的 `main` 分支。V1 MVP 代码保留在 MusicFlow 仓库的 [`V1-backup`](https://github.com/ray5378/MusicFlow/tree/V1-backup) 分支。
 
 ## 镜像
 
@@ -45,7 +47,7 @@ docker compose up -d    # 自动拉取 ghcr.io/ray5378/musicflow-v2
 ```yaml
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow-v2:1.7.4
+    image: ghcr.io/ray5378/musicflow-v2:1.7.60
     container_name: musicflow
     restart: unless-stopped
     # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
@@ -82,7 +84,7 @@ docker run -d --name musicflow --restart unless-stopped \
   -p 46400:46400 \
   -e DATA_DIR=/data \
   -v $(pwd)/data:/data \
-  ghcr.io/ray5378/musicflow-v2:1.7.4
+  ghcr.io/ray5378/musicflow-v2:1.7.60
 ```
 
 > DLNA 发现依赖 SSDP 多播，`docker compose` 默认 `network_mode: host`；Docker Desktop（macOS/Windows）上多播不可用，DLNA 需在 Linux 宿主机运行。
@@ -144,7 +146,7 @@ MusicFlow 提供三个配套仓库，构成完整的 Home Assistant 生态（各
 
 ## 发版流程
 
-1. V2 打 `v*` tag → CI 构建推 `ghcr.io/ray5378/musicflow-v2:<版本>` + `:latest`（仅 amd64）；
+1. 在主仓库 [MusicFlow](https://github.com/ray5378/MusicFlow) 打 `v*` tag（本仓库 `master` 同步）→ CI 构建推 `ghcr.io/ray5378/musicflow-v2:<版本>` + `:latest`（仅 amd64）；
 2. addon 仓库同步 `musicflow/build.yaml` 的 build_from 与 `config.yaml` 的 version；
 3. 集成 / 卡片按需发版（HACS 要求建 GitHub Release）。
 
