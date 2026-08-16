@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { initDatabase, sqlite } from "../../src/db/index.js";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
-import { setSetting } from "../../src/services/settings.js";
+import { setSetting, _resetSettingsCacheForTest } from "../../src/services/settings.js";
 import {
   isIdle, touch, reclaimNow, registerCacheCleaner,
   _resetReclaimForTest, _setLastActivityForTest,
@@ -30,6 +30,7 @@ beforeAll(() => {
 beforeEach(() => {
   _resetReclaimForTest();
   sqlite.prepare("DELETE FROM settings").run();
+  _resetSettingsCacheForTest();
 });
 
 describe("reclaim isIdle", () => {

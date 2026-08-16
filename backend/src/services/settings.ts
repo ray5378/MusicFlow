@@ -28,3 +28,9 @@ export function setSetting(key: string, value: string): void {
     .run(key, value, new Date().toISOString());
   cache.set(key, { value, at: Date.now() });
 }
+
+/** Test-only:清空设置缓存。测试常 DELETE FROM settings 以重置库,但 5s TTL
+ *  内存缓存会让同文件后续用例读到旧值,造成用例间顺序耦合(shuffle 必现)。 */
+export function _resetSettingsCacheForTest(): void {
+  cache.clear();
+}

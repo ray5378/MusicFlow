@@ -88,12 +88,17 @@ describe("generateLocalDailyPlaylist (独立「本地推荐」歌单)", () => {
   });
 
   it("当天幂等:同一天第二次调用 skipped=true", async () => {
-    const r2 = await generateLocalDailyPlaylist(new Date("2026-08-15T12:00:00"));
+    // 自包含:用本文件其他用例未用过的日期(2026-09-01)先正常生成一次,再断言
+    // 第二次被跳过,避免与"封面/force"用例撞同一日期(幂等记录在库里跨用例残留,
+    // shuffle 时顺序不定 → 曾见 r1.skipped 误为 true)。
+    const r1 = await generateLocalDailyPlaylist(new Date("2026-09-01T12:00:00"));
+    expect(r1!.skipped).toBe(false);
+    const r2 = await generateLocalDailyPlaylist(new Date("2026-09-01T12:00:00"));
     expect(r2!.skipped).toBe(true);
   });
 
   it("force=true 跳过幂等,同一天可强制重建", async () => {
-    const r3 = await generateLocalDailyPlaylist(new Date("2026-08-15T12:00:00"), { force: true });
+    const r3 = await generateLocalDailyPlaylist(new Date("2026-09-02T12:00:00"), { force: true });
     expect(r3!.skipped).toBe(false);
     expect(r3!.total).toBeGreaterThan(0);
   });

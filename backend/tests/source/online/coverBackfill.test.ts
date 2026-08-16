@@ -4,7 +4,7 @@
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../../plugins/_env.js";
 
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 
 // 拦截真实网络下载:cacheRemoteCover 直接返回本地引用,便于断言调用次数与落库。
 vi.mock("../../../src/services/playlistCover.js", () => ({
@@ -75,6 +75,12 @@ function clearRows() {
 
 beforeAll(() => {
   initDatabase();
+});
+
+// 每个用例后清行 + 注销 provider,避免用例间通过歌曲/插件行耦合(shuffle 时
+// 任一用例先种 cov-* 会导致后续用例 UNIQUE 冲突)。
+afterEach(() => {
+  clearRows();
 });
 
 afterAll(() => {

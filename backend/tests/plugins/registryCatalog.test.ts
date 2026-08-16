@@ -2,12 +2,12 @@
 // opens its SQLite DB at module-load time.
 import "./_env.js";
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import os from "os";
 import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
-import { initDatabase } from "../../src/db/index.js";
+import { initDatabase, sqlite } from "../../src/db/index.js";
 import { hasTar, TMP_DATA_DIR } from "./_env.js";
 import {
   addRegistry,
@@ -187,6 +187,13 @@ describe("extraction helpers", () => {
 describe("official registry seeding", () => {
   const url = officialRegistryUrl();
 
+  // 两个用例都依赖 seeded 标志的初始状态,须各自从"未种子化"开始,否则
+  // 用例间通过该标志耦合(shuffle 时先跑"已删除"用例会先种子化→断言失败)。
+  beforeEach(() => {
+    sqlite.prepare("DELETE FROM settings WHERE key = 'official_registry_seeded'").run();
+    for (const r of listRegistries()) if (r.url === url) removeRegistry(r.id);
+  });
+
   afterAll(() => {
     for (const r of listRegistries()) if (r.url === url) removeRegistry(r.id);
   });
@@ -201,6 +208,8 @@ describe("official registry seeding", () => {
   });
 
   it("does not re-add a registry the admin deliberately removed", () => {
+    // 先手动种一次(置起 seeded 标志),模拟"已种子化后被管理员删除"。
+    expect(seedDefaultRegistry()).toBe(true);
     for (const r of listRegistries()) if (r.url === url) removeRegistry(r.id);
     expect(listRegistries().some((r) => r.url === url)).toBe(false);
     // The seeded flag survives the removal, so boot must leave it removed.

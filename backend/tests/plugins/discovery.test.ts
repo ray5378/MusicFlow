@@ -251,14 +251,20 @@ describe("derivePermissions (P0 能力推导权限)", () => {
 });
 
 describe("discoverExternalPlugins", () => {
-  it("loads valid plugins, skips invalid / too-old / conflicting / non-dir", async () => {
-    // Pre-register a conflicting id so the conflict guard triggers.
+  let loaded = 0;
+
+  // 预注册冲突插件 + 扫描一次,保证 pluginSandboxes(perm-fallback /
+  // perm-derived / src-noperm 等)就绪,使读沙箱的用例不依赖"先跑扫描用例"
+  // 的执行顺序(shuffle 时顺序不定 → 曾见 undefined)。
+  beforeAll(async () => {
     registerPlugin(
       { id: "conflict-plugin", name: "Builtin", version: "1", type: "importer", capabilities: ["playlistImport"], configSchema: [] },
       {},
     );
+    loaded = await discoverExternalPlugins("1.0.0", tmp);
+  });
 
-    const loaded = await discoverExternalPlugins("1.0.0", tmp);
+  it("loads valid plugins, skips invalid / too-old / conflicting / non-dir", () => {
     expect(loaded).toBe(4); // valid-plugin + perm-fallback + perm-derived + src-noperm
     expect(getPlugin("valid-plugin")).toBeDefined();
     expect(getPlugin("badmanifest")).toBeUndefined();

@@ -100,8 +100,15 @@ afterAll(() => {
 });
 
 describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", () => {
+  let loaded = 0;
+
+  // 先发现并注册 lb-test / lb-test2 及其沙箱,其余用例直接 getPlugin,
+  // 不再依赖"第一个用例先跑发现"的执行顺序(shuffle 时顺序不定)。
+  beforeAll(async () => {
+    loaded = await discoverExternalPlugins(process.env.APP_VERSION || "dev");
+  });
+
   it("discover 后 runDailyJob 经 host.playlists.upsert 写入混合歌单", async () => {
-    const loaded = await discoverExternalPlugins(process.env.APP_VERSION || "dev");
     expect(loaded).toBeGreaterThanOrEqual(1);
     const reg = getPlugin("lb-test");
     expect(reg).toBeTruthy();

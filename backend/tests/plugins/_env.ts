@@ -1,15 +1,9 @@
-// Test-only helper: redirect DATA_DIR to an isolated temp dir BEFORE any
-// backend module (which opens the SQLite DB at import time) is evaluated. This
-// file is imported first by registryCatalog.test.ts so the import order
-// guarantees the env var is set before db/index.js reads it.
-import os from "os";
-import path from "path";
-import fs from "fs";
+// Test-only helper:隔离 DATA_DIR 已由 tests/setup.ts 统一分配(每个测试文件
+// 独立目录 + 全量 schema)。本模块保留 TMP_DATA_DIR(指向当前文件的隔离目录,
+// 供写插件目录/封面等用)与 hasTar()。
 import { execFileSync } from "child_process";
 
-const dir = path.join(os.tmpdir(), `mfv2-data-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
-fs.mkdirSync(dir, { recursive: true });
-process.env.DATA_DIR = dir;
+export const TMP_DATA_DIR = process.env.DATA_DIR!;
 
 /** Whether the system `tar` binary exists (installPlugin relies on it). */
 export function hasTar(): boolean {
@@ -20,5 +14,3 @@ export function hasTar(): boolean {
     return false;
   }
 }
-
-export const TMP_DATA_DIR = dir;

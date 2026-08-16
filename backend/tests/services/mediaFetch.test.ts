@@ -24,7 +24,7 @@ import { filterProvidersByPreference, searchLyrics } from "../../src/plugins/pro
 import { fetchLrcForSong } from "../../src/services/lyrics.js";
 import { fetchCoverForSong, clearCoverAttempt } from "../../src/services/covers.js";
 import { resolveCoverFile } from "../../src/services/playlistCover.js";
-import { readLyricFile, resolveLyricContent, deleteSongLyric } from "../../src/services/lyricsStore.js";
+import { readLyricFile, resolveLyricContent, deleteSongLyric, saveLyricFile } from "../../src/services/lyricsStore.js";
 import { startBackfill, backfillStatus } from "../../src/services/backfill.js";
 
 const manifestOf = (id: string, caps: string[]) => ({
@@ -99,6 +99,15 @@ beforeAll(async () => {
   db.update(mediaSources).set({
     config: JSON.stringify({ url: `http://127.0.0.1:${coverPort}/dav`, username: "u", password: "p" }),
   }).where(eq(mediaSources.id, "wdav")).run();
+  // 文件级注册默认 provider:shuffle 时各 describe 的 beforeAll 不保证先于他
+  // describe 的用例执行,若 provider 只在 describe beforeAll 注册,backfill 等
+  // 用例跑到前面会找不到插件(曾见 ok=0 / 拿到别的 provider 输出)。
+  enablePlugin("fake-lyrics", ["lyricProvider"], {
+    searchLyrics: async () => ({ lrc: "[00:00.00]hello from provider" }),
+  });
+  enablePlugin("fake-cover", ["coverProvider"], {
+    searchCover: async () => ({ url: `http://127.0.0.1:${coverPort}/c.jpg` }),
+  });
 });
 
 afterAll(async () => {
@@ -136,16 +145,12 @@ describe("filterProvidersByPreference 独立选源", () => {
 });
 
 describe("lyrics:本地歌曲缺歌词 → provider 回退 + persist 落库为文件", () => {
-  beforeAll(() => {
-    enablePlugin("fake-lyrics", ["lyricProvider"], {
-      searchLyrics: async () => ({ lrc: "[00:00.00]hello from provider" }),
-    });
-  });
-
   it("sidecar 缺失时经 provider 拿到 LRC,persist 开则写文件引用", async () => {
     setSetting("lyrics.onDemand", "true");
     setSetting("lyrics.persist", "true");
-    setSetting("lyrics.providerId", "");
+    // 显式选 fake-lyrics:shuffle 时其他 provider(fake-lyr-wd 等)可能已先注册,
+    // first-match 模式下不指定会拿到它们(曾见 [00:00.00]provider)。
+    setSetting("lyrics.providerId", "fake-lyrics");
     db.insert(songs).values({
       id: "lg1", title: "Song One", artist: "Artist", path: "l:src:/tmp/nonexist-1.mp3",
       type: "local", suffix: "mp3", duration: 100,
@@ -283,6 +288,14 @@ describe("lyrics:本地歌曲缺歌词 → provider 回退 + persist 落库为�
 });
 
 describe("lyrics:WebDAV 歌曲(w: 路径)完整链路", () => {
+  // 描述块级注册 provider:保证"无 sidecar"等用例不依赖"sidecar 优先"用例
+  // 先跑先注册(shuffle 时顺序不定,曾见 fake-lyr-wd 未注册 → 拿不到 provider)。
+  beforeAll(() => {
+    enablePlugin("fake-lyr-wd", ["lyricProvider"], {
+      searchLyrics: async () => ({ lrc: "[00:00.00]provider" }),
+    });
+  });
+
   it("WebDAV sidecar .lrc 优先于 provider", async () => {
     let calls = 0;
     enablePlugin("fake-lyr-wd", ["lyricProvider"], {
@@ -326,6 +339,8 @@ describe("lyrics:WebDAV 歌曲(w: 路径)完整链路", () => {
   });
 
   it("删除歌词文件(deleteSongLyric)配合删歌清理", () => {
+    // 自包含:不依赖前序用例已写 wd2.lrc(shuffle 时该用例可能后置)。
+    saveLyricFile("wd2", "[00:00.00]x");
     expect(readLyricFile("wd2.lrc")).not.toBeNull();
     expect(deleteSongLyric("wd2")).toBe(1);
     expect(readLyricFile("wd2.lrc")).toBeNull();
@@ -334,12 +349,6 @@ describe("lyrics:WebDAV 歌曲(w: 路径)完整链路", () => {
 });
 
 describe("covers:按需下载 + persist + 防风暴", () => {
-  beforeAll(() => {
-    enablePlugin("fake-cover", ["coverProvider"], {
-      searchCover: async () => ({ url: `http://127.0.0.1:${coverPort}/c.jpg` }),
-    });
-  });
-
   it("已有 cover_art 直接返回,不访问 provider", async () => {
     db.insert(songs).values({
       id: "cv3", title: "With Cover", artist: "A", path: "l:src:/tmp/cover.mp3",

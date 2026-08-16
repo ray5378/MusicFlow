@@ -69,4 +69,16 @@ jobs:
       - name: TypeScript 类型检查
         run: cd backend && npx tsc --noEmit
       - name: 全量测试
-        run: cd backend && npx vitest run
+        shell: bash
+        run: |
+          set -o pipefail
+          cd backend
+          npx vitest run 2>&1 | tee /tmp/vitest.log
+      - name: 上传失败日志(便于排查顺序相关偶发)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-log
+          path: /tmp/vitest.log
+          if-no-files-found: ignore
+          retention-days: 3
