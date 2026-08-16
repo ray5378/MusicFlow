@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres, deviceQueues } from "../../db/schema.js";
-import { eq, like, inArray, or, and, sql, desc, isNotNull, isNull, count } from "drizzle-orm";
+import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import md5 from "md5";
@@ -1502,6 +1502,7 @@ apiRoutes.get("/v1/playlists", (c) => {
   const platform = (c.req.query("platform") || "").trim();
   const localOnly = (c.req.query("local") || "").trim() === "1";
   const favOnly = (c.req.query("favorite") || "").trim() === "1";
+  const sort = (c.req.query("sort") || "").trim();
   const user = c.get("user");
   // Push the ownership/visibility filter + name search + platform/local/favorite
   // filters to SQL. and() skips undefined conditions, so any subset works.
@@ -1514,15 +1515,26 @@ apiRoutes.get("/v1/playlists", (c) => {
     localOnly ? isNull(playlists.sourceUrl) : undefined,
     favOnly ? eq(playlists.favorite, 1) : undefined,
   );
-  // Daily-recommend-first ordering (每日推荐 > others) expressed as a
-  // CASE, with recency as the secondary sort. Pushed to SQL together with
-  // LIMIT/OFFSET so we never load the whole table into JS just to slice it.
-  const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = ${dailyRecommendTag() || "每日推荐"} THEN 0 ELSE 1 END`;
-  const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
+  // Ordering. An explicit sort (by creation time / name) fully overrides the
+  // default daily-recommend-first + recency ranking; unknown values fall back
+  // to that default. Pushed to SQL with LIMIT/OFFSET so we never load the
+  // whole table into JS just to slice it.
+  let orderByExpr: any;
+  switch (sort) {
+    case "created_asc":  orderByExpr = [asc(playlists.createdAt)]; break;
+    case "created_desc": orderByExpr = [desc(playlists.createdAt)]; break;
+    case "name_asc":     orderByExpr = [asc(playlists.name)]; break;
+    case "name_desc":    orderByExpr = [desc(playlists.name)]; break;
+    default: {
+      const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = ${dailyRecommendTag() || "每日推荐"} THEN 0 ELSE 1 END`;
+      const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
+      orderByExpr = [dailyOrder, desc(recency)];
+    }
+  }
   const rows = (where
     ? db.select().from(playlists).where(where)
     : db.select().from(playlists))
-    .orderBy(dailyOrder, desc(recency))
+    .orderBy(...orderByExpr)
     .limit(pageSize)
     .offset((page - 1) * pageSize)
     .all();

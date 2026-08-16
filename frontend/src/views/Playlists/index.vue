@@ -12,6 +12,14 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown>
+        <el-dropdown trigger="click" @command="onSortCommand">
+          <el-button><MfIcon name="ListOrdered" />排序：{{ sortLabel }}<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="s in SORTS" :key="s.key" :command="s.key">{{ s.label }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-popover placement="bottom-end" :width="200" trigger="click" v-model:visible="showManageMenu">
           <template #reference>
             <el-button type="primary"><MfIcon name="Settings" />歌单管理</el-button>
@@ -57,6 +65,7 @@
             <span>{{ pl.songCount }}首 · {{ formatDuration(pl.duration) }}</span>
             <MfIcon v-if="pl.favorite" name="Heart" :filled="true" :size="13" class="pl-fav-heart" />
           </div>
+          <div class="playlist-sub" v-if="pl.isImported && pl.created">导入于 {{ formatCreated(pl.created) }}</div>
         </div>
         <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleCardCommand(cmd, pl)">
           <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
@@ -217,6 +226,21 @@ function onFilterCommand(key: string) {
 }
 function clearFilter() {
   activeFilter.value = "";
+  currentPage.value = 1;
+  loadPlaylists();
+}
+// 歌单排序:按创建时间/名称升序降序;空=后端默认(每日推荐优先+最近更新)
+const SORTS = [
+  { key: "", label: "默认(推荐优先)" },
+  { key: "created_desc", label: "创建时间(最新在前)" },
+  { key: "created_asc", label: "创建时间(最早在前)" },
+  { key: "name_asc", label: "名称(升序 A→Z)" },
+  { key: "name_desc", label: "名称(降序 Z→A)" },
+];
+const sortMode = ref("");
+const sortLabel = computed(() => SORTS.find(s => s.key === sortMode.value)?.label || "默认(推荐优先)");
+function onSortCommand(key: string) {
+  sortMode.value = key;
   currentPage.value = 1;
   loadPlaylists();
 }
@@ -455,6 +479,13 @@ function pollMatchAll() {
 }
 
 function formatDuration(sec: number) { const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`; }
+function formatCreated(t: string): string {
+  if (!t) return "";
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 async function loadPlaylists() {
   loading.value = true;
@@ -467,6 +498,7 @@ async function loadPlaylists() {
         ...(activeFilter.value === "local" ? { local: "1" } : {}),
         ...(activeFilter.value === "favorite" ? { favorite: "1" } : {}),
         ...(activeFilter.value && activeFilter.value !== "local" && activeFilter.value !== "favorite" ? { platform: activeFilter.value } : {}),
+        ...(sortMode.value ? { sort: sortMode.value } : {}),
       },
     });
     playlists.value = res.data.items || [];
@@ -809,6 +841,7 @@ onUnmounted(() => {
     .playlist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; display: flex; align-items: center; justify-content: space-between; gap: 4px;
       .pl-fav-heart { color: var(--fnos-red); flex-shrink: 0; }
     }
+    .playlist-sub { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; }
   }
   .playlist-info:hover .playlist-name { color: var(--fnos-red); }
   .playlist-menu { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 0.2s; z-index: 8; }
