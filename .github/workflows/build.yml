@@ -3,17 +3,17 @@ name: build-and-push
 # MusicFlow 镜像发布(GHCR + Docker Hub 双推送)。
 #
 # 触发:
-#   - push 到 master:自动构建 :latest(版本号由 git describe 自动生成,去 v 前缀),
-#     并附 :master 便于回溯;提交即出新镜像,无需手动指定版本。
+#   - push 到 main:自动构建 :latest(版本号由 git describe 自动生成,去 v 前缀),
+#     并附 :main 便于回溯;提交即出新镜像,无需手动指定版本。
 #   - 打 v* tag:发布 <版本> + :latest(版本锁定的发版语义——加载项钉具体版本号)。
-#   - workflow_dispatch:手动构建 :latest + :master(与 master push 相同)。
+#   - workflow_dispatch:手动构建 :latest + :main(与 main push 相同)。
 #
 # 前置条件(仓库 Secrets,已配置):
 #   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN —— Docker Hub 登录凭据,缺失时自动跳过
 #   Docker Hub 推送(镜像仍会推到 GHCR,不影响发版)。
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -74,12 +74,12 @@ jobs:
             VERSION="$V"
             TAGS="$GHCR:$V,$GHCR:latest,$DH:$V,$DH:latest"
           else
-            # master push / 手动构建:版本号由 git describe 自动生成,不需要用户指定。
+            # main push / 手动构建:版本号由 git describe 自动生成,不需要用户指定。
             # 去掉 v 前缀(git tag 是 v1.5.0,describe 输出 v1.5.0-8-g595a0d8),
             # APP_VERSION 必须是纯版本号,否则插件 minAppVersion 比较会把 v1 解析成 0 而误跳过。
-            # 直接推 :latest(提交即更新"最新镜像"),附 :master 便于回溯。
-            VERSION=$(git describe --tags --abbrev=7 2>/dev/null | sed 's/^v//' || echo "master-$SHORT_SHA")
-            TAGS="$GHCR:latest,$GHCR:master,$DH:latest,$DH:master"
+            # 直接推 :latest(提交即更新"最新镜像"),附 :main 便于回溯。
+            VERSION=$(git describe --tags --abbrev=7 2>/dev/null | sed 's/^v//' || echo "main-$SHORT_SHA")
+            TAGS="$GHCR:latest,$GHCR:main,$DH:latest,$DH:main"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "commit=$SHORT_SHA" >> "$GITHUB_OUTPUT"

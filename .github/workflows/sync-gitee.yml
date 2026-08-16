@@ -2,10 +2,10 @@ name: sync-to-gitee
 
 # 推送到 GitHub 后自动镜像同步到 Gitee(国内访问源)。
 # 镜像仓库: https://gitee.com/ray5378/musicflow
-# 触发:master 分支 push 或任意 tag 推送(workflow_dispatch 可手动补同步)。
+# 触发:main 分支 push 或任意 tag 推送(workflow_dispatch 可手动补同步)。
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["*"]
   workflow_dispatch:
 
@@ -23,10 +23,10 @@ jobs:
         run: |
           # Gitee access_token 可作 git push 密码(需带用户名前缀)
           git remote add gitee "https://ray5378:${GITEE_TOKEN}@gitee.com/ray5378/musicflow.git"
-          # 只同步 master 分支 + 全部 tags;不用 --mirror(checkout 带下的 refs/remotes/*
+          # 只同步 main 分支 + 全部 tags;不用 --mirror(checkout 带下的 refs/remotes/*
           # 会被 Gitee 以 "deny updating a hidden ref" 拒绝导致整体失败)。
-          # tag 触发时 runner 处于 detached HEAD、本地无 master 分支,只推 tags
-          # (master 由分支推送那次运行负责),避免 tag 推送运行误报失败。
+          # tag 触发时 runner 处于 detached HEAD、本地无 main 分支,只推 tags
+          # (main 由分支推送那次运行负责),避免 tag 推送运行误报失败。
           # GitHub runner 访问 Gitee 偶发 SSL 超时,循环重试 3 次。
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             for i in 1 2 3; do
@@ -37,7 +37,7 @@ jobs:
           else
             for i in 1 2 3; do
               echo "Gitee 同步尝试 $i/3"
-              git push gitee master --force && git push gitee --tags --force && { echo "Gitee 镜像同步完成"; break; }
+              git push gitee main --force && git push gitee --tags --force && { echo "Gitee 镜像同步完成"; break; }
               [ "$i" -lt 3 ] && sleep 15
             done
           fi

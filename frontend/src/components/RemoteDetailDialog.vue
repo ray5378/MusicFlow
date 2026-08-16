@@ -5,7 +5,7 @@
     width="680px"
     :append-to-body="true"
     class="remote-detail-dialog"
-    @update:model-value="(v) => emit('update:modelValue', v)"
+    @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     @open="open"
   >
     <!-- 头部:封面 + 名称 + 元信息 + 操作 -->
