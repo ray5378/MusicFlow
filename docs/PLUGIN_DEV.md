@@ -1,6 +1,7 @@
 # MusicFlow 外置插件开发指南（PLUGIN_DEV）
 
-> 适用版本：MusicFlow **v1.4.0+**（QuickJS 沙箱运行时，host.* 能力全量开放）
+> 适用版本：MusicFlow **沙箱运行时（QuickJS/WASM）1.3.0+**；核心按 `manifest.capabilities` 分发，**不写死任何插件名**。
+> 当前主项目 ≈ **v1.7.66**；实例插件 `go-music-dl` 需后端 **≥ 1.7.39**（`longRunning` / 异步任务通道）。
 > 目标：教你自己写一个 drop-in 插件，丢进 `data/plugins/<id>/` 即可被后端加载，**无需改任何核心代码**。
 
 ---
@@ -21,7 +22,7 @@
 
 > 仓库里 `examples/plugins/hello-importer/index.js` 是一个可复制的参考实现。**它不在 `data/plugins` 下，所以不会被自动加载**——请把它整体复制到 `data/plugins/` 再启用。
 
-**热重载**：修改 `data/plugins/<id>/` 下的文件后，后端会自动重新发现该插件——旧的 QuickJS 沙箱被释放、新代码重新加载，无需重启（见 §10）。
+**热重载**：修改 `data/plugins/<id>/` 下的文件后，后端会自动重新发现该插件——旧的 QuickJS 沙箱被释放、新代码重新加载，无需重启（见 §11）。
 
 ---
 
@@ -37,9 +38,11 @@ globalThis.__mfPlugin = {
 ```
 
 - `manifest`：告诉核心「我是谁、我会什么、需要什么配置、要什么权限」。
-- `create(host)`：核心注入受控上下文 `host`（见 §5），插件用它闭包构造 `impl`——真正干活的函数集合。
+- `create(host)`：核心注入受控上下文 `host`（见 §6），插件用它闭包构造 `impl`——真正干活的函数集合。
 
 **插件拿不到 Node 的任何能力**：没有 `import`/`require`/`fetch`/`fs`/`process`。网络只能走 `host.http` / `host.net` / `host.ws`（均自带超时与权限点），存储走 `host.storage`，文件走 `host.fs`（限插件目录），日志走 `host.log`。`permissions` 在宿主函数调用点强制执行——不再只是契约，是真实的运行时边界。
+
+> 沙箱内**禁止使用 `eval` / `new Function`**（QuickJS 下即使用到也碰不到宿主，但核心直接拒绝此类代码）。
 
 ---
 
@@ -51,18 +54,19 @@ globalThis.__mfPlugin = {
 | `name` | ✅ | 展示名（插件页显示）。 |
 | `version` | ✅ | 插件版本，语义化版本串。**必须与 plugin.json 的 version 一致**，否则拒绝加载。 |
 | `type` | ✅ | `"source" \| "importer" \| "recommender" \| "sync" \| "lyrics" \| "cover" \| "renderer" \| "scrobbler" \| "artist"` 之一。 |
-| `capabilities` | ✅ | 非空数组，声明本插件提供的能力（见 §4）。 |
+| `capabilities` | ✅ | 非空数组，声明本插件提供的能力（见 §4，**沙箱据此白名单暴露 impl 方法**）。 |
 | `configSchema` | ✅ | 数组（可为空 `[]`）。描述插件配置项，自动渲染成插件页表单。 |
 | `description` | ⬜ | 描述。 |
-| `permissions` | ⬜ | 字符串数组，声明本插件需要的权限（见 §5）。不声明则无受控能力可用。 |
+| `permissions` | ⬜ | 字符串数组，声明本插件需要的权限（见 §6）。不声明则无受控能力可用。 |
 | `platforms` | ⬜ | 字符串数组，用于前端提示（如 `["qq"]`）。 |
 | `urlPatterns` | ⬜ | importer 插件专用：认领的分享链接 URL 模式（文档 + 管理端提示；实际路由用 impl 的 `canHandle()`）。 |
 | `recommendPrefix` | ⬜ | source 插件专用：每日推荐歌单 URL 前缀。 |
 | `dailyTag` | ⬜ | recommender 插件专用：每日推荐歌单标识 TAG（OpenSubsonic 等据此识别「今日推荐」）。 |
-| `homePlaylistId` | ⬜ | recommender 插件专用：该插件在首页展示时对应的固定歌单 id（如「今日漫游」=`pl-daily-roam`）。声明后插件才有资格参与「首页固定卡」自治（见 §4.3）。 |
+| `homePlaylistId` | ⬜ | recommender 插件专用：该插件在首页展示时对应的固定歌单 id（如「ListenBrainz」=`pl-lb-recommend`）。声明后插件才有资格参与「首页固定卡」自治（见 §4.12）。 |
 | `platformLabels` | ⬜ | source 插件专用：平台 slug → 展示名 映射（如 `{ netease: "网易云", qq: "QQ 音乐" }`）。核心搜索结果据此显示平台中文名，**不再内置平台词典**——新增平台只需在插件里加一项。 |
 | `sourcePreference` | ⬜ | source 插件专用：流兜底搜索的源排序偏好数组（越靠前越优先）。核心按此对兜底候选排序，缺省按插件返回顺序。 |
 | `minAppVersion` | ⬜ | 要求的最低 App 版本；低于此版本会被跳过（沙箱运行时自 **1.3.0** 起）。 |
+| `longRunning` | ⬜ | 方法级长耗时预算（毫秒）：`{ methodName: ms }`。声明的方法在沙箱调用时使用该预算（**上限 600000 = 10 分钟**），否则维持默认 15s 看门狗。用于拉取平台/外网歌单等慢网络操作（如 `go-music-dl` 的 `runDailyJob`/`playlistSongs`）。需后端 **≥ 1.7.39** 才生效，老后端会静默退化到 15s 并可能超时。 |
 | `documentation` | ⬜ | **Markdown 字符串**，插件详情页的「功能介绍 + 处理逻辑」说明（用户点「详情」看到的内容）。建议每个插件都写：功能一句话 + 处理逻辑（数据来源 / 触发时机 / 边界）。未提供时前端按能力自动生成通用说明。 |
 | `author` / `homepage` / `icon` / `license` / `updateUrl` | ⬜ | 元数据，市场页展示。 |
 | `defaultEnabled` | ⬜ | 外置插件默认 `false`（用户手动开启）。 |
@@ -83,41 +87,68 @@ globalThis.__mfPlugin = {
 
 ---
 
-## 4. 能力（capabilities）与 `impl` 方法对照
+## 4. 能力（capabilities）→ impl 方法：沙箱**白名单**暴露
 
-核心按 `manifest.capabilities` 找到启用插件后，调用 `impl` 上对应的方法。**只调用你声明的能力对应的方法**。
+> ⚠️ **这是最容易踩的坑，务必先读这一段。**
+>
+> 外置插件沙箱在 `makeImpl()` 阶段，**只从 `manifest.capabilities` 派生 impl 对象**：对每个声明的 capability，把 `CAP_METHODS[cap]`（见 `backend/src/plugins/sandbox.ts`）里的方法列出，再与 `create(host)` 实际返回的方法取交集。**未声明某 capability，对应方法就不会出现在 impl 上。**
+>
+> 后果：
+> - **播放类插件必须声明 `stream` capability**，否则 `impl` 上没有 `streamUrl`，核心在 `/rest/stream-remote` 调用 `cfg.provider.streamUrl(...)` 会抛 **`streamUrl is not a function`**（`catch` 后返回「streamUrl is not a function」），前端/HA 卡片「搜索即播」直接失败。
+> - 同样的规则适用于所有 capability：声明 `lyricProvider` 才有 `searchLyrics`，声明 `recommendPlaylist` 才有 `runDailyJob`，声明 `albumSearch` 才有 `searchAlbums`，依此类推。
+> - **测试桩也受此约束**：任何要验证播放（`stream-remote` / 在线源「搜索即播」）的桩插件，`manifest.capabilities` 必须包含 `stream`，且 `create(host)` 必须返回 `streamUrl`。忘记声明会得到「is not a function」这种令人困惑的报错，而不是「插件未实现」。
+>
+> 校验脚本 `scripts/check.mjs` 会反向检查「有方法但没声明能力」并警告，但**不会**拦截「声明了能力但方法因 capability 缺失而没暴露」——那只在运行时表现为调用失败。所以：能力与方法必须成对声明。
 
-> 方法签名注意：`lyricProvider` / `coverProvider` / `scrobbler` 的方法，核心以 `(host, …)` 调用，但沙箱门面会**剥掉 host**——插件方法里直接用 `create(host)` 闭包捕获的 `host`（始终实时）。source 系方法则照常收到 `(config, …)`。
+### 4.0 通用调用约定
 
-### 4.1 `source` 类型（在线音乐源）
-| capability | impl 方法 |
-|------|------|
-| `search` | `search(config, params)` → `{ songs: OnlineSongResult[] }` |
-| `recommend` | `recommend(config)` → `{ channels: [...] }` |
-| `playlistSongs` | `playlistSongs(config, source, id)` → `{ songs, name }` |
-| `stream` | `streamUrl(config, song, range?)` → string（**纯同步**，不发起网络） |
-| `lyrics` | `lyricUrl(config, song)` → string \| null（**纯同步**，建议用 `lyricProvider` 替代） |
-| `webRotation` | （由核心的 purge 逻辑触发，无需方法） |
+- **方法签名注意**：`source` 系方法（search*/recommend/playlistSongs/streamUrl）核心以 `(config, …)` 调用，`config` 即时刷新；而 `lyricProvider` / `coverProvider` / `scrobbler` / `artistInfo` 的方法，核心以 `(host, …)` 调用，但**沙箱门面会剥掉第一个 host 参数**——插件方法里直接用 `create(host)` 闭包捕获的 `host`（始终实时）。
+- **同步方法**：`streamUrl` / `lyricUrl` / `canHandle` / `canHandleFile` 是纯同步的（构造 URL / 判断 URL 是否可处理），**不得发起网络**。
+- **批量/慢方法**：拉取平台/外网的方法（如 `runDailyJob` / `playlistSongs` / `searchPlaylists` / `searchAlbums` / `searchSongs`）应在 `manifest.longRunning` 声明预算（需后端 ≥ 1.7.39）。
+- **`search*` 系列参数**：`(config, { query, sources? })`，`sources` 是调用方指定的平台子集，空/缺省表示搜全部已声明平台。
 
-`OnlineSongResult` = `{ id, source, name, artist, album, duration, cover, extra? }`（`name` 不是 `title`）。
+### 4.1 `source` 类型（在线音乐源）—— 搜索/推荐/播放
+
+| capability | impl 方法 | 说明 |
+|------|------|------|
+| `search` | `search(config, params)` → `{ songs: OnlineSongResult[] }` | 统一/兼容搜索入口（go-music-dl 等仍声明）。 |
+| `songSearch` | `searchSongs(config, {query, sources?})` → `{ songs: RemoteSongShape[] }` | **歌曲搜索**（核心 `/v1/song-search` 实际调用）。 |
+| `albumSearch` | `searchAlbums(config, {query, sources?})` → `{ albums: RemoteAlbumShape[] }` | **专辑搜索**（核心 `/v1/album-search`；HA 卡片也走此）。 |
+| `artistSearch` | `searchArtists(config, {query, sources?})` → `{ artists: RemoteArtistShape[] }` | 歌手搜索。 |
+| `playlistSearch` | `searchPlaylists(config, {query, sources?})` → `{ playlists: RemotePlaylistShape[] }` | **歌单搜索**（核心 `/v1/playlist-search`）。 |
+| `recommend` | `recommend(config)` → `{ channels: [...] }` | 每日推荐频道。 |
+| `playlistSongs` | `playlistSongs(config, source, id)` → `{ songs, name }` | 拉取单个远程歌单的歌曲。 |
+| `stream` | `streamUrl(config, song, range?)` → **string（纯同步）** | 构造可播流地址；**不发起网络**。 |
+| `lyrics` | —（**当前沙箱 `CAP_METHODS` 未映射此能力**，`lyricUrl` 不会被暴露到 impl） | ⚠️ 已废弃路径；请改用 `lyricProvider` → `searchLyrics`（见 §4.5）。声明 `lyrics` 但实际不会暴露任何方法，歌词会静默失效。 |
+| `webRotation` | （由核心 purge 逻辑触发，无需方法） | 回收不再被引用的 web 歌曲/封面。 |
+
+`OnlineSongResult` / `RemoteSongShape` = `{ id, source, name/title?, artist, album, duration, cover, extra? }`。
+`RemoteAlbumShape` = `{ id, source, name, artist?, cover?, trackCount?, year?, link? }`。
+`RemotePlaylistShape` = `{ id, source, name, creator?, cover?, trackCount?, link? }`。
+
+> **`albumSearch` 实现要点**（血泪教训）：核心按 `albumSearch` 能力路由到 `searchAlbums`，但**前端/HA 卡片的专辑 DOM 结构是 `<li class="album-card" data-*>`**（与歌曲卡片同构），不是 `<div class="album-card">`。解析器必须同时匹配 `<li class="album-card">` 与 `<div class="album-card">`，并优先读 `data-*` 属性（`id/source/name/artist/cover/trackCount/link`），按 `source:id` 去重，跳过 `source==="local"`。只匹配 `<div>` 会得到 0 条结果，表现为「插件专辑在 HA 卡片和主项目都搜不到」。
 
 ### 4.2 `importer` 类型（歌单导入）
+
 | capability | impl 方法 |
 |------|------|
 | `playlistImport` | `canHandle(url): boolean`（同步）+ `fetchPlaylist(url): Promise<ImportedPlaylistShape>` |
 | `playlistFile` | `canHandleFile(raw): boolean`（同步）+ `parseFile(raw): Promise<ImportedPlaylistShape[]>` |
 
-`ImportedPlaylistShape` = `{ name, platform, coverUrl?, tracks: ImportedTrackShape[] }`
+`ImportedPlaylistShape` = `{ name, platform, coverUrl?, tracks: ImportedTrackShape[] }`。
 
-### 4.3 `recommender` 类型（每日推荐）
-| capability | impl 方法 |
-|------|------|
-| `dailyPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateDailyPlaylist(date?, opts?{force, seedSalt})` 供手动刷新） |
-| `localPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateLocalDailyPlaylist(date?, opts?{force, seedSalt})` 供手动刷新） |
-| `comboPlaylist` | `runDailyJob(): Promise<string \| null>`（可选 `generateComboPlaylist(opts?{force})` 供手动刷新；合并其他推荐歌单，如「今日漫游」） |
+### 4.3 `recommender` 类型（每日 / 固定推荐歌单）
 
-> 调度顺序：`dailyPlaylist` → `localPlaylist` → `comboPlaylist`（组合歌单依赖前两者的产物，必须最后跑）。
-> 手动刷新：`POST /v1/recommend/refresh` 按 `targets`（daily/local/roam）以 `force + 随机 seedSalt` 重新触发，`seedSalt` 混入日期种子，让同一天也能刷出不同内容。前端入口：首页固定卡上的刷新按钮（combo 卡）+ 插件管理详情弹窗的「立即刷新」。
+| capability | impl 方法 | 调度角色 |
+|------|------|------|
+| `dailyPlaylist` | `runDailyJob(): Promise<string\|null>`（可选 `generateDailyPlaylist(date?, {force,seedSalt})`） | 每日推荐（如 `pl-daily-today`） |
+| `localPlaylist` | `runDailyJob(): Promise<string\|null>`（可选 `generateLocalDailyPlaylist(...)`） | 本地推荐（如 `pl-daily-local`） |
+| `comboPlaylist` | `runDailyJob(): Promise<string\|null>`（可选 `generateComboPlaylist({force})`） | 组合歌单（如 `pl-daily-roam`，合并前两者去重） |
+| `recommendPlaylist` | `runDailyJob(opts?): Promise<string\|null>` | **通用推荐歌单（第三方插件自管）** |
+
+> `recommendPlaylist` 与上面三个内置调度类的区别：它是**给外置插件用的通用推荐入口**——插件自己拥有并维护一张固定歌单（通过 `manifest.homePlaylistId` 声明，如 `pl-lb-recommend`），核心不关心其内容来源。go-music-dl（私人歌单）与 listenbrainz（协同过滤推荐）都走这个 capability。`runDailyJob` 返回摘要行或 `null`（无操作）；手动刷新 `POST /v1/recommend/refresh` 传 `pluginId` 会以 `force` 强制重跑（走后端异步任务通道）。
+
+调度顺序（内置三类）：`dailyPlaylist` → `localPlaylist` → `comboPlaylist`（组合歌单依赖前两者产物，必须最后跑）。`recommendPlaylist` 与它们并行参与每日调度与首页固定卡。
 
 #### 首页固定卡（推荐插件自治）
 推荐插件可通过 manifest 声明参与「首页顶部固定展示」：
@@ -127,19 +158,17 @@ globalThis.__mfPlugin = {
   - `homePosition`（`number`，默认 0）——首页固定位次（1 起；0 = 未固定）。
 - 核心经 `GET /v1/recommend/home-cards` 按位次排序返回固定卡列表；保存插件配置（`PUT /v1/plugins/:id`）或启用插件时，若位次与其它「显示在首页」的插件重复 → 400 拒绝并提示占用者。
 
-内置的 `daily-recommend` / `local-recommend` / `daily-roam` 三个插件即是推荐类的参考实现：
-- `daily-recommend`（`dailyPlaylist`）：每日推荐歌单 `pl-daily-today`，在线榜单 + 推荐池；
-- `local-recommend`（`localPlaylist`）：本地推荐歌单 `pl-daily-local`，播放口味 / 参考歌单池；
-- `daily-roam`（`comboPlaylist`）：今日漫游歌单 `pl-daily-roam`，合并前两者去重重建。
-- 封面：`daily-roam` / `local-recommend` 每次生成时会**从自身歌单的歌曲中随机抽取一张有封面的歌**当歌单封面（跟随内容、刷新后换新）；`daily-recommend` 从本地曲库随机取封面。
+内置 `daily-recommend` / `local-recommend` / `daily-roam` 是推荐类的参考实现；外置 `go-music-dl` / `listenbrainz` 通过 `recommendPlaylist` + `homePlaylistId` 接入同一套机制。
 
 ### 4.4 `sync` 类型（歌单同步）
+
 | capability | impl 方法 |
 |------|------|
-| `playlistSync` | `runSyncJob(): Promise<string \| null>` |
+| `playlistSync` | `runSyncJob(): Promise<string\|null>` |
 | `autoMatch` | （复用 `search` 方法作在线匹配源） |
 
 ### 4.5 `lyricProvider`（歌词提供方）
+
 | capability | impl 方法 |
 |------|------|
 | `lyricProvider` | `searchLyrics(song): Promise<{ lrc?, text? } \| null>` |
@@ -147,16 +176,19 @@ globalThis.__mfPlugin = {
 first-match-wins（首个返回非空结果的胜出；抛错被记入健康追踪后跳过）。
 
 ### 4.6 `coverProvider`（封面提供方）
+
 | capability | impl 方法 |
 |------|------|
 | `coverProvider` | `searchCover(song): Promise<{ url? } \| null>` |
 
 ### 4.7 `renderer`（设备投屏）
+
 | capability | impl 方法 |
 |------|------|
 | `renderer` | `discover(): Promise<RendererDevice[]>` + `cast(deviceId, songId)` + 可选 `control(...)` |
 
 ### 4.8 `scrobbler`（播放上报）
+
 | capability | impl 方法 |
 |------|------|
 | `scrobbler` | 可选 `onPlay(event)` + 可选 `onScrobble(event)` |
@@ -164,15 +196,58 @@ first-match-wins（首个返回非空结果的胜出；抛错被记入健康追�
 `ScrobbleEvent` = `{ songId, title, artist, album?, duration?, playedAt }`。回调抛错会记入健康面板。
 
 ### 4.9 `artist`（歌手资料）
+
 | capability | impl 方法 |
 |------|------|
 | `artistInfo` | `fetchArtistInfo(name): Promise<{ name, platform, coverArtUrl?, bio? } \| null>` |
 
 first-match-wins（首个返回非空结果的胜出）。封面下载与数据库持久化由核心完成，插件只负责抓取返回纯数据。参考实现：内置 `artist-info`。
 
+### 4.10 `source` 额外方法（非 capability，自动暴露）
+
+- `test(config)`：source 插件的连线探测（核心「测试连接」按钮调用）；无需声明额外 capability，沙箱对 `type==="source"` 自动纳入。
+- `health()`：可选自检钩子（非 capability）；插件实现了就暴露，供 `/v1/plugins/health` 主动 ping（结果缓存 60s）。
+
+### 4.11 完整 capability → impl 方法映射（sandbox `CAP_METHODS`）
+
+| capability | 暴露的 impl 方法 |
+|------|------|
+| `search` | `search` |
+| `playlistSearch` | `searchPlaylists` |
+| `songSearch` | `searchSongs` |
+| `artistSearch` | `searchArtists` |
+| `albumSearch` | `searchAlbums` |
+| `recommend` | `recommend` |
+| `playlistSongs` | `playlistSongs` |
+| `stream` | `streamUrl` |
+| `autoMatch` | `search` |
+| `lyricProvider` | `searchLyrics` |
+| `coverProvider` | `searchCover` |
+| `scrobbler` | `onPlay`, `onScrobble` |
+| `artistInfo` | `fetchArtistInfo` |
+| `playlistImport` | `canHandle`, `fetchPlaylist` |
+| `playlistFile` | `canHandleFile`, `parseFile` |
+| `dailyPlaylist` | `runDailyJob` |
+| `localPlaylist` | `runDailyJob` |
+| `recommendPlaylist` | `runDailyJob` |
+| `playlistSync` | `runSyncJob` |
+
+> 记住：**这张表就是「声明了某 capability，核心才会去找对应方法」的依据。** impl 上最终只保留「capability 要求 + 插件实际实现」的交集。
+
 ---
 
-## 5. 受控上下文 `host.*`（沙箱桥接）
+## 5. 格式契约：音频格式与 `suffix`
+
+> 与「`stream` capability 必须声明」同等重要——否则即使 `streamUrl` 存在，播放也可能因格式未知失败。
+
+- **插件最清楚自己后端的输出格式**：`searchSongs` / `playlistSongs` 返回的歌曲对象**应带 `suffix` 字段**（如 `"flac"` / `"mp3"` / `"wav"` / `"aac"` / `"ogg"`）。前端优先用 `suffix` 决定解码格式，**不要求 URL 带扩展名**。
+- **核心 `mapItems` 会原样透传 `suffix`**（不会丢弃），后端 → 前端链路都保留该字段。
+- 若插件不提供 `suffix`，前端会对 `/rest/stream-remote` 做一次 `Range: bytes=0-0` 探测，读上游 `Content-Type` 推断格式（缓存，失败回退 `mp3`）。**探针路径更慢且依赖上游返回正确的 Content-Type**，所以播放类插件尽量带上 `suffix`。
+- 该契约使 MusicFlow 兼容**所有音频格式**（mp3/flac/wav/aac/ogg...），而非硬编码 mp3。
+
+---
+
+## 6. 受控上下文 `host.*`（沙箱桥接）
 
 插件运行在 QuickJS VM 里，`host` 是它触达宿主的**唯一**通道。权限在宿主函数的调用点检查——无权限时直接返回 `{ ok:false, error:"PERMISSION_DENIED: <perm>" }`，不会执行。
 
@@ -209,23 +284,26 @@ globalThis.__mfPlugin = {
 | `host.net` | 原始网络 socket：`udpBind({port,address,reuseAddr})` / `udpSend(id, data, {address,port})` / `udpClose` / `onData(id, handler)`；`tcpConnect(host, port, {timeout})` 返回 `{ send, onData, onClose, close }`。数据以 **base64** 传输（沙箱提供 `btoa/atob`），事件经回调推回 VM | `net` |
 | `host.ws` | WebSocket 客户端：`connect(url, {headers, protocols, timeout})` 返回 `{ send, onMessage, onClose, close }`（文本直传、二进制 base64） | `websocket` |
 | `host.jsenv` | 嵌套 QuickJS 子环境跑隔离脚本：`create(name, initCode)` / `execute(name, code)` / `destroy(name)`——子环境只有标准 JS，**没有 host.***，无法触达宿主 | `jsenv` |
+| `host.playlists` | 受控写推荐歌单（需 `playlists:write`）：`upsert/get/replaceEntries/updateCover`。`opts.sourcePlatform` / `opts.sourceUrl` 写入歌单的平台标签/来源，前端据此显示平台徽标 | `playlists:write` |
+| `host.sources` | 在线源补全（需 `songs:write`）：`complete({artist,title})` 把匹配不到本地的曲目交给已启用的 source 插件搜索并导入为可播本地 song，返回 `{ songId }` | `songs:write` |
+| `host.crypto` | 纯同步工具（需 `crypto` 权限）：`md5(input)`（Last.fm api_sig 等签名用） | `crypto` |
 
-### 5.1 权限白名单 `KNOWN_PERMISSIONS`
+### 6.1 权限白名单 `KNOWN_PERMISSIONS`
 
 manifest 的 `permissions` 只能是白名单中的值，支持命名空间通配（`songs.*`）与全局 `*`。
 
 ```
 log  storage  net  command  fs  fs:music  fs:external
-websocket  jsenv
+websocket  jsenv  crypto
 songs:read  songs:write  playlists:read  playlists:write  inter-plugin
 ```
 
-> **已桥接的权限**：`log` / `storage` / `net`（`host.http` + `host.net` socket）/ `inter-plugin`（`host.comm`）/ `songs:read`（`host.songs`）/ `fs`（`host.fs` 插件目录内）/ `command`（`host.command`）/ `websocket`（`host.ws`）/ `jsenv`（`host.jsenv`）。
-> **挂名未桥接**（白名单校验放行，但沙箱里没有对应宿主函数——刻意保留为未来扩展位）：`fs:music`、`fs:external`、`songs:write`、`playlists:*`。外置插件无法改宿主曲库、无法读写宿主音乐库文件；`host.fs` 被限定在插件自己的 `files/` 目录。
+> **已桥接的权限**：`log` / `storage` / `net`（`host.http` + `host.net` socket）/ `inter-plugin`（`host.comm`）/ `songs:read`（`host.songs`）/ `songs:write`（`host.sources`）/ `playlists:write`（`host.playlists`）/ `fs`（`host.fs` 插件目录内）/ `command`（`host.command`）/ `websocket`（`host.ws`）/ `jsenv`（`host.jsenv`）/ `crypto`（`host.crypto`）。
+> **挂名未桥接**（白名单校验放行，但沙箱里没有对应宿主函数——刻意保留为未来扩展位）：`fs:music`、`fs:external`、`playlists:read`。外置插件无法改宿主曲库、无法读写宿主音乐库文件；`host.fs` 被限定在插件自己的 `files/` 目录。
 
 ---
 
-## 6. 插件间通信 `host.comm`
+## 7. 插件间通信 `host.comm`
 
 ```js
 host.comm.on((msg) => { /* 收到消息 */ });
@@ -235,17 +313,17 @@ host.comm.broadcast({ type: "tick" });
 
 ---
 
-## 7. 安全边界（后端强制 + 沙箱隔离）
+## 8. 安全边界（后端强制 + 沙箱隔离）
 
 加载外置插件时：
 
-1. **QuickJS 沙箱**：代码在独立 VM 里运行，拿不到 Node 能力；内存上限 256MB、栈上限 1MB、单次调用超时 15s、中断处理器可切断死循环。
+1. **QuickJS 沙箱**：代码在独立 VM 里运行，拿不到 Node 能力；内存上限 256MB、栈上限 1MB、单次调用超时 15s（长耗时方法见 `longRunning`）、中断处理器可切断死循环。
 2. **路径白名单**：只能加载 `<data>/plugins/<id>/index.js`，路径穿越拒绝。
 3. **Manifest 校验**：id / type / capabilities / configSchema 必须合规；`index.js` 与 `plugin.json` 不一致拒绝加载。
 4. **权限执行点**：`host.http` 无 `net` 权限直接拒绝，不发起请求。
 5. **minAppVersion**：低于要求版本跳过。
 6. **id 冲突**：内置插件不可被外置遮蔽。
-7. **高风险能力的硬限制**（v1.4.0+，均经权限执行点 + 运行期限制）：
+7. **高风险能力的硬限制**（均经权限执行点 + 运行期限制）：
    - `host.fs` 只能读写插件自己的 `<data>/plugins/<id>/files/`，**路径穿越（`../`、绝对路径）在宿主侧直接抛错**；
    - `host.command.exec` 走 `execFile`（**不经 shell**，参数不可拼接注入），默认 30s 超时、16MB 输出上限；`start` 管理的常驻进程随 `stop`/退出回收；
    - `host.net` / `host.ws` 与 `host.http` 同级（需 `net` / `websocket` 权限），socket 有连接超时；
@@ -253,7 +331,7 @@ host.comm.broadcast({ type: "tick" });
 
 ---
 
-## 8. 安装与启用流程
+## 9. 安装与启用流程
 
 **方式 A：拖入目录（开发 / 自托管）**
 
@@ -273,12 +351,13 @@ cp -r my-plugin backend/data/plugins/
 
 ---
 
-## 9. 官方外置插件（参考实现）
+## 10. 官方外置插件（参考实现）
 
 | id | 版本 | type | capabilities | 说明 |
 |----|------|------|--------------|------|
-| `go-music-dl` | 1.2.4 | source | search/recommend/playlistSongs/stream/webRotation/lyricProvider/coverProvider | 全网聚合（源+歌词+封面三合一） |
-| `listenbrainz` | 1.1.0 | scrobbler | scrobbler | ListenBrainz 播放上报 |
+| `go-music-dl` | 1.2.18 | source | `search` / `playlistSearch` / `songSearch` / `albumSearch` / `recommend` / `playlistSongs` / `stream` / `webRotation` / `lyricProvider` / `coverProvider` / `recommendPlaylist` | 全网聚合（源+歌词+封面+推荐 四合一）；私人歌单经 `recommendPlaylist` 持久同步 |
+| `listenbrainz` | 1.5.6 | scrobbler | `scrobbler` / `recommendPlaylist` | **双功能**：播放记录上报（scrobbler）+ 协同过滤推荐歌单（recommendPlaylist，固定 `pl-lb-recommend`） |
+| `lastfm` | 1.0.1 | scrobbler | `scrobbler` / `recommendPlaylist` | 双功能：Last.fm 播放记录上报 + 推荐歌单 |
 
 > `go-music-dl` 的歌词 / 封面能力随该外置 source 插件分发（`lyricProvider` / `coverProvider`），核心按能力遍历调用，不再内置独立的歌词/封面插件。
 
@@ -288,9 +367,9 @@ cp -r my-plugin backend/data/plugins/
 
 ---
 
-## 10. 完整示例
+## 11. 完整示例
 
-### 10.1 歌词提供方（lyricProvider）
+### 11.1 歌词提供方（lyricProvider）
 
 ```js
 globalThis.__mfPlugin = {
@@ -328,7 +407,7 @@ globalThis.__mfPlugin = {
 };
 ```
 
-### 10.2 播放上报（scrobbler）
+### 11.2 播放上报（scrobbler）
 
 ```js
 globalThis.__mfPlugin = {
@@ -360,7 +439,40 @@ globalThis.__mfPlugin = {
 };
 ```
 
-### 10.3 读宿主曲库（host.songs，需 `songs:read`）
+### 11.3 双功能推荐插件（scrobbler + recommendPlaylist）
+
+```js
+globalThis.__mfPlugin = {
+  manifest: {
+    id: "demo-recommender",
+    name: "示例推荐上报双功能",
+    version: "1.0.0",
+    type: "scrobbler",
+    capabilities: ["scrobbler", "recommendPlaylist"],
+    homePlaylistId: "pl-demo-recommend",
+    permissions: ["net", "storage", "songs:read", "songs:write", "playlists:write"],
+    minAppVersion: "1.7.39",
+    longRunning: { runDailyJob: 120000 },
+    defaultEnabled: false,
+    configSchema: [{ key: "username", label: "用户名", type: "text", required: true }],
+  },
+  create(host) {
+    return {
+      async onScrobble(event) { /* 上报逻辑 */ },
+      // recommendPlaylist 能力 → runDailyJob 才会被沙箱暴露
+      async runDailyJob() {
+        const top = await host.http("https://api.example.com/recommend?u=" + host.config.username);
+        if (!top.ok) return null;
+        const ids = JSON.parse(top.body).ids;
+        await host.playlists.upsert("pl-demo-recommend", { name: "示例推荐", entries: ids });
+        return "已生成 " + ids.length + " 首";
+      },
+    };
+  },
+};
+```
+
+### 11.4 读宿主曲库（host.songs，需 `songs:read`）
 
 ```js
 globalThis.__mfPlugin = {
@@ -377,7 +489,6 @@ globalThis.__mfPlugin = {
   },
   create(host) {
     return {
-      // 示例：给歌曲补充「同名曲目数」作为歌词缓存键的一部分
       async searchLyrics(song) {
         const hit = await host.songs.getById(song.songId || "");
         if (!hit) return null;
@@ -389,9 +500,9 @@ globalThis.__mfPlugin = {
 };
 ```
 
-> `host.songs.search("周杰伦")` 会模糊匹配 `title / artist / album`；`list({ limit, offset })` 支持分页（limit 上限 500）。返回的歌曲是**脱敏视图**——拿不到 `path` / `streamHeaders` / `sourceData` 等内部字段。
+> `host.songs.search("周杰伦")` 会模糊匹配 `title / artist / album`；`list({ limit, offset })` 支持分页（limit 上限 2000）。返回的歌曲是**脱敏视图**——拿不到 `path` / `streamHeaders` / `sourceData` 等内部字段。
 
-### 10.4 高风险能力（host.fs + host.command，需 `fs` + `command` 权限）
+### 11.5 高风险能力（host.fs + host.command，需 `fs` + `command` 权限）
 
 ```js
 globalThis.__mfPlugin = {
@@ -409,11 +520,8 @@ globalThis.__mfPlugin = {
   create(host) {
     return {
       async searchLyrics(song) {
-        // fs: 只能读写 <data>/plugins/demo-fs-cmd/files/ 内的文件(穿越直接抛错)
-        const report = "files/report.txt";
         await host.fs.mkdir("files", { recursive: true });
-        await host.fs.writeFile(report, `title=${song.title}\ntime=${Date.now()}`);
-        // command: execFile 执行,不经 shell,默认 30s 超时
+        await host.fs.writeFile("files/report.txt", `title=${song.title}\ntime=${Date.now()}`);
         const r = await host.command.exec("node", ["-e", "console.log('ok')"], { timeout: 5000 });
         return { text: `wrote=${r.code === 0} stdout=${r.stdout.trim()}` };
       },
@@ -424,15 +532,47 @@ globalThis.__mfPlugin = {
 
 > ⚠️ `command` / `fs` / `net` / `websocket` / `jsenv` 是**高风险权限**：只给可信插件声明。`host.command` 等于把该插件的代码当作可执行程序信任——虽然沙箱隔离了代码本身，但**通过 `command` 跑出的进程是宿主级的**。安装第三方插件前请确认其来源与 `plugin.json` 声明的权限。
 
+### 11.6 播放类测试桩（**必须声明 `stream`**）
+
+```js
+globalThis.__mfPlugin = {
+  manifest: {
+    id: "mf-test-stream",
+    name: "播放测试桩",
+    version: "1.0.0",
+    type: "source",
+    // ⚠️ 不声明 stream，impl 上就没有 streamUrl，/rest/stream-remote 会抛
+    //    "streamUrl is not a function"。验证播放的桩必须带它。
+    capabilities: ["songSearch", "stream"],
+    permissions: ["net"],
+    defaultEnabled: false,
+    minAppVersion: "1.3.0",
+    configSchema: [],
+  },
+  create(host) {
+    return {
+      async searchSongs(config, { query }) {
+        // 带 suffix：前端直接拿到格式，无需 Range 探测
+        return { songs: [{ id: "t1", source: "test", name: query, artist: "T", album: "A", duration: 120, cover: "", suffix: "mp3" }] };
+      },
+      // 纯同步：只拼地址，不发起网络
+      streamUrl(config, song) {
+        return "http://localhost:46401/" + song.id + ".mp3";
+      },
+    };
+  },
+};
+```
+
 ---
 
-## 11. 健康追踪
+## 12. 健康追踪
 
 每个插件的核心调用都会记录成功/失败：0 失败 → green，1–2 → yellow，≥3 → red。状态在「插件」页「健康」列实时显示。
 
 ---
 
-## 12. 常见问题
+## 13. 常见问题
 
 - **插件没出现？** 看启动日志里的 `[PLUGIN]` 行；被跳过会写明原因。
 - **改了插件要生效吗？** 不需要重启——`data/plugins` 变更触发热重载（释放旧沙箱、加载新代码）。
@@ -441,4 +581,6 @@ globalThis.__mfPlugin = {
 - **网络超时怎么办？** `host.http(url, { timeout: 8000 })` —— 不需要 AbortController。
 - **URL / URLSearchParams 有吗？** 沙箱注入了兼容层，与浏览器行为一致；另有 `btoa/atob`（`host.net` 数据通道用）。
 - **TypeScript 写的插件？** 先编译成纯 JS（无 ESM export）再放进去。
+- **为什么报 `streamUrl is not a function`？** 你的 `manifest.capabilities` 里**没有 `stream`**，沙箱 `makeImpl()` 不会把 `streamUrl` 暴露到 impl 上（见 §4 开头）。补上 `stream` 能力并在 `create(host)` 返回 `streamUrl` 即可。同理适用于所有 capability。
+- **`searchAlbums` 搜不到东西？** 确认前端/HA 的专辑 DOM 是 `<li class="album-card" data-*>`，解析器必须读 `data-*` 属性并按 `source:id` 去重（见 §4.1 注）。
 - **外部插件安全吗？** 代码运行在 QuickJS 沙箱（内存/栈/超时受限、权限执行点强制、无 Node 能力）；但 `fs` / `command` / `net` / `websocket` / `jsenv` 是**高风险权限**——尤其 `command` 跑出的进程是宿主级的，只对可信插件开放。安装前请确认插件来源与其 `plugin.json` 声明的权限。

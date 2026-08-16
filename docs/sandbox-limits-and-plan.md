@@ -1,13 +1,55 @@
 # 沙箱限制全景审计 + 插件能力增强完整方案
 
-> 状态：**P0 + P1 已实施（v1.7.39，2026-08-14 完成）**；P2/P3 按需排期。
+> 状态：**P0 + P1 已实施（v1.7.39，2026-08-14 完成）**；P2/P3 按需排期。当前主项目 ≈ v1.7.66。
+> 配套插件开发文档见 [`PLUGIN_DEV.md`](./PLUGIN_DEV.md)（含能力→方法白名单与 `stream` 必声明说明）。
 > 触发背景：go-music-dl 私人歌单同步 / ListenBrainz 推荐生成在生产环境反复「15s 超时」失败（`timeout of 15000ms exceeded`），定位为沙箱单次调用配额与前端 axios 超时双重限制叠加，且部分平台走非国内网络（joox/bilibili/apple/ListenBrainz/MusicBrainz）单请求极慢。
+
+---
+
+## 零、沙箱方法暴露白名单（capabilities → impl 方法）
+
+> 这是沙箱最容易被忽略、却最致命的机制，与后面所有「限制」同等重要。
+
+外置插件沙箱在 `makeImpl()`（`backend/src/plugins/sandbox.ts`）阶段，**只从 `manifest.capabilities` 派生 impl 对象**：
+
+```js
+// sandbox.ts 内的 CAP_METHODS 映射（节选）
+const CAP_METHODS = {
+  search: ["search"], songSearch: ["searchSongs"], albumSearch: ["searchAlbums"],
+  artistSearch: ["searchArtists"], playlistSearch: ["searchPlaylists"],
+  recommend: ["recommend"], playlistSongs: ["playlistSongs"],
+  stream: ["streamUrl"], lyricProvider: ["searchLyrics"], coverProvider: ["searchCover"],
+  scrobbler: ["onPlay", "onScrobble"], artistInfo: ["fetchArtistInfo"],
+  playlistImport: ["canHandle", "fetchPlaylist"], playlistFile: ["canHandleFile", "parseFile"],
+  dailyPlaylist: ["runDailyJob"], localPlaylist: ["runDailyJob"],
+  recommendPlaylist: ["runDailyJob"], playlistSync: ["runSyncJob"],
+  // ...
+};
+function makeImpl() {
+  const candidates = new Set();
+  for (const cap of this.manifest.capabilities)
+    for (const m of CAP_METHODS[cap] || []) candidates.add(m);
+  if (this.manifest.type === "source") for (const m of ["test"]) candidates.add(m);
+  const present = this.presentMethods();           // create(host) 实际返回的方法
+  for (const m of candidates)
+    if (present.has(m)) impl[m] = (...args) => /* 桥接调用 */;
+  return impl;                                    // 只含「capability 要求 ∩ 插件实现」
+}
+```
+
+**结论（务必记住）**：
+
+- **未声明某 capability，对应方法就不会出现在 impl 上**——即使 `create(host)` 里写了该方法。
+- **播放类插件必须声明 `stream` capability**，否则 impl 上没有 `streamUrl`，核心在 `/rest/stream-remote` 调 `cfg.provider.streamUrl(...)` 会抛 **`streamUrl is not a function`**（`catch` 后返回「streamUrl is not a function」），前端/HA 卡片「搜索即播」直接失败。
+- 同一规则适用于全部 capability：声明 `lyricProvider` 才有 `searchLyrics`，声明 `recommendPlaylist` 才有 `runDailyJob`，声明 `albumSearch` 才有 `searchAlbums`。
+- **测试桩也受此约束**：任何要验证播放（`stream-remote` / 在线源「搜索即播」）的桩插件，`manifest.capabilities` 必须含 `stream` 且 `create(host)` 必须返回 `streamUrl`；否则会得到「is not a function」而非「插件未实现」。
+- 校验脚本 `scripts/check.mjs` 会反向警告「有方法但没声明能力」，但**不会**拦截「声明了能力却因缺失 capability 而方法未暴露」——后者只在运行时表现为调用失败。能力与方法必须成对声明。
 
 ---
 
 ## 一、问题链回顾（为什么要做）
 
-1. 沙箱 `INVOKE_TIMEOUT_MS=15000`（`backend/src/plugins/sandbox.ts:23`）对**所有方法**一刀切：`search`/`searchLyrics` 与 `runDailyJob`（批量同步几十个歌单）共用同一预算。
+1. 沙箱 `INVOKE_TIMEOUT_MS=15000`（`backend/src/plugins/sandbox.ts:27`）对**所有方法**一刀切：`search`/`searchLyrics` 与 `runDailyJob`（批量同步几十个歌单）共用同一预算。
 2. 批量任务本质分钟级，15s 只够同步 ~15 个优化过的歌单或完成 ~4 次在线补全 → 被强杀，且**在途 await 一并中断**，插件必须靠持久化游标抢救进度。
 3. 前端 axios 全局 `timeout: 15000`（`frontend/src/api/index.ts:5`）→ 即使后端压线返回，HTTP 请求也已断开，用户看到 `timeout of 15000ms exceeded`。
 4. 插件侧已做的兜底（go-music-dl v1.2.8 分批滚动 + 后台 auto-match；listenbrainz v1.5.4 补全预算闸）**能用但慢**：一次刷新只能推进一批，全量需多次点击或等 3~5 天。
@@ -96,18 +138,18 @@ longRunning: { runDailyJob: 240000, playlistSongs: 60000 }
 // listenbrainz
 longRunning: { runDailyJob: 120000 }
 ```
-- 语义：声明的沙箱方法调用使用该预算（默认 15s，**上限 300000ms**，低于 Node 默认 `requestTimeout` 5min）；未声明的方法一律维持 15s 看门狗。
+- 语义：声明的沙箱方法调用使用该预算（默认 15s，**上限 600000ms = 10 分钟**，与 `sandbox.ts` 的 `JOB_TIMEOUT_CAP_MS` 一致）；未声明的方法一律维持 15s 看门狗。
 - 插件作者最清楚哪些操作拉平台/外网 → 声明粒度精确，不误伤、不漏。
 
 **改动清单（主项目）**
 | 文件 | 改动 |
 |---|---|
 | `backend/src/plugins/types.ts` | `PluginManifest` 加可选 `longRunning?: Record<string, number>` |
-| `backend/src/plugins/sandbox.ts` | `invoke(method)` 按 `manifest.longRunning?.[method]` 取预算（cap 300000）；`evalAsync` 循环与 `this.deadline` 同步使用该预算；`invokeSync` 维持 15s |
+| `backend/src/plugins/sandbox.ts` | `invoke(method)` 按 `manifest.longRunning?.[method]` 取预算（cap 600000）；`evalAsync` 循环与 `this.deadline` 同步使用该预算；`invokeSync` 维持 15s |
 | `backend/src/services/plugin/jobRunner.ts` | **新增**：per-plugin 串行锁（同插件同时只跑一个任务）+ 最近结果记录（status/summary/error/startedAt/finishedAt）；错误捕获不崩溃 |
 | `backend/src/routes/api/index.ts` | `POST /v1/recommend/refresh?pluginId=` 改**异步启动**：未在跑 → kick off 并返回 `{success, started:true}`；在跑 → `{success, alreadyRunning:true}`。新增 `GET /v1/plugins/:id/job` 返回 `{running, last}` |
 | `backend/src/index.ts` | 每日 `runDailyJobs()` 与 6h 维护循环改走 jobRunner（共用串行锁） |
-| check-core（主项目） | 校验 `longRunning`：方法必须存在、值 1000~300000 |
+| check-core（主项目） | 校验 `longRunning`：方法必须存在、值 1000~600000 |
 | `frontend/src/views/admin/Plugins/index.vue` | 刷新改「POST 启动 → 立即显示后台刷新中 → 2s 轮询 GET job 状态 → 展示结果」 |
 | `frontend/src/views/Home/index.vue` | 同上（今日漫游刷新） |
 | `frontend` 远程歌单浏览 | `playlistSongs` 相关调用点 axios 覆盖 `timeout: 60000`（同步浏览，不能异步） |
