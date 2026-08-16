@@ -207,7 +207,14 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
 export async function getLyricsForSongId(songId: string): Promise<LrcLine[] | null> {
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return null;
-  const content = await fetchLrcForSong(song);
+  return getLyricsForSong(song);
+}
+
+// Get parsed lyrics for an arbitrary song row / virtual song shape (null if none).
+// 供远程未入库歌曲(web 端 remote: 直放)复用同一条在线歌词管线:fetchLrcForSong 只需
+// id/url/type/pluginEntry/sourceData 等字段,不要求行真的存在于 DB。
+export async function getLyricsForSong(song: any): Promise<LrcLine[] | null> {
+  const content = await fetchLrcForSong(song as SongRow);
   if (!content) return null;
   const lines = parseLrc(content);
   return lines.length > 0 ? lines : null;

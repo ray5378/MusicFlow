@@ -58,18 +58,9 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
       playlistId = existing.id;
       const upd: any = { updatedAt: new Date().toISOString() };
       if (name && name.trim()) upd.name = fallbackName;
-      if (cover) {
-        const cached = await cacheRemoteCover(cover, `pl-${playlistId}`, true);
-        if (cached) upd.coverArt = cached;
-      }
       db.update(playlists).set(upd).where(eq(playlists.id, playlistId)).run();
     } else {
       playlistId = `pl-${Date.now()}`;
-      let coverRef: string | undefined = undefined;
-      if (cover) {
-        const cached = await cacheRemoteCover(cover, `pl-${playlistId}`);
-        if (cached) coverRef = cached;
-      }
       db.insert(playlists).values({
         id: playlistId,
         name: fallbackName,
@@ -78,14 +69,23 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
         sourcePlatform: source,
         sourcePlugin: providerId,
         externalId: id,
-        coverArt: coverRef,
+        coverArt: undefined,
         syncEnabled: 0, // 搜索结果歌单默认不同步;用户可在歌单管理手动开启(由插件能力决定是否支持)
       }).run();
     }
 
-    // 全量替换条目为本次拉取的歌曲(在线歌曲直接关联 songId,可播放)
+    // 全量替换条目为本次拉取的歌曲(在线歌曲直接关联 songId,可播放)。
+    // replacePlaylistSongs 内部会 clearPlaylistCoverCache 清掉旧封面,故导入封面必须
+    // 在替换完成之后再缓存/回填,否则刚下载的歌单封面会被立即清空。
     await replacePlaylistSongs(playlistId, imp.songs);
     refreshPlaylistCounts(playlistId);
+
+    // 歌单封面:远程搜索命中时将该平台封面缓存到本地(失败静默,仍能回退到首曲封面)。
+    if (cover) {
+      const cached = await cacheRemoteCover(cover, `pl-${playlistId}`, true);
+      if (cached) db.update(playlists).set({ coverArt: cached, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
+    }
+
     return {
       success: true,
       playlistId,

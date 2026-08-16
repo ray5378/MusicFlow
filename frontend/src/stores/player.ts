@@ -471,7 +471,7 @@ export const usePlayerStore = defineStore("player", () => {
     }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
-    loadLocalLyrics(song.id);
+    loadLocalLyrics(song);
     let fmt = (song.suffix || "").toLowerCase();
     // 插件在 item 上明确给了格式(_suffixKnown)则直接采用,不探测;否则 Range 探测
     // 上游 Content-Type 确认真实格式(占位 mp3 只是 DLNA mime 兜底,本机不沿用)。
@@ -528,12 +528,22 @@ export const usePlayerStore = defineStore("player", () => {
     localNext();
   }
 
-  async function loadLocalLyrics(songId: string) {
+  async function loadLocalLyrics(song: Song) {
     localLyrics.value = [];
     localCurrentLyricLine.value = "";
     localCurrentLyricIndex.value = -1;
     try {
-      const res = await api.get(`/rest/getLyricsBySongId?id=${songId}&f=json`);
+      // 远程歌(未入库,id 为 remote:<provider>:<source>:<rid>)后端无 DB 行,歌词由
+      // 后端按流地址走在线 lyricProvider 拉取,需把曲目字段一并带上;本地歌曲忽略多余参数。
+      const params: Record<string, string> = { id: song.id, f: "json" };
+      if (isRemoteSong(song)) {
+        if (song.title) params.title = song.title;
+        if (song.artist) params.artist = song.artist;
+        if (song.album) params.album = song.album;
+        if (song.duration) params.duration = String(song.duration);
+        if (song.coverArt) params.cover = song.coverArt;
+      }
+      const res = await api.get(`/rest/getLyricsBySongId`, { params });
       const structured = res.data["subsonic-response"]?.lyricsList?.structuredLyrics || [];
       const first = structured.find((l: any) => l.synced) || structured[0];
       if (!first || !first.line) return;
@@ -1233,9 +1243,9 @@ export const usePlayerStore = defineStore("player", () => {
   function toggleLyrics() { showLyrics.value = !showLyrics.value; }
   function togglePlaylistPanel() { showPlaylist.value = !showPlaylist.value; }
   function togglePlayMode() { playModeVisible.value = !playModeVisible.value; }
-  function loadLyrics(songId: string) {
+  function loadLyrics(songId: string, song?: Song) {
     if (isRemotePeer.value && activeRemote.value) loadCastLyrics(activeRemote.value, songId);
-    else loadLocalLyrics(songId);
+    else loadLocalLyrics(song || currentSong.value || ({ id: songId } as Song));
   }
   function updateCurrentLyric() {
     if (isRemotePeer.value && activeRemote.value) updateCastLyric(activeRemote.value);
@@ -1346,7 +1356,7 @@ export const usePlayerStore = defineStore("player", () => {
           localStorage.setItem("playMode", localPlayMode.value);
         }
         const song = localQueue.value[localIndex.value];
-        if (song) loadLocalLyrics(song.id);
+        if (song) loadLocalLyrics(song);
       }
     } catch {}
   }

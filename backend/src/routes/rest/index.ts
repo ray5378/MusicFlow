@@ -3,7 +3,7 @@ import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
-import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
+import { getLyricsForSongId, getLyricsForSong, lrcToStructured } from "../../services/lyrics.js";
 import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
@@ -1005,8 +1005,45 @@ restRoutes.get("/getLyrics", async (c) => {
 restRoutes.get("/getLyricsBySongId", async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
-  if (!song) return c.json(ok({ lyricsList: { structuredLyrics: [] } }));
-  const lines = await getLyricsForSongId(song.id);
+  let lines = null;
+  if (song) {
+    lines = await getLyricsForSong(song as any);
+  } else if (id.startsWith("remote:")) {
+    // 远程未入库歌曲(web 端 remote:<provider>:<source>:<rid> 直放,无 DB 行):用请求
+    // 里的曲目字段现场构造虚拟 web 歌曲,复用同一条在线歌词管线(lyricProvider 搜索 /
+    // legacy lyricUrl)。title/artist/album/duration/cover 由前端在查询串中携带。
+    const parts = id.split(":");
+    const providerId = parts[1] || "";
+    const source = parts[2] || "";
+    const rid = parts.slice(3).join(":");
+    const cfg = getConfiguredProvider(providerId);
+    if (cfg && source && rid) {
+      const title = getParam(c, "title") || "";
+      const artist = getParam(c, "artist") || "";
+      const album = getParam(c, "album") || "";
+      const duration = Number(getParam(c, "duration") || 0) || 0;
+      const virtualSong = {
+        id: rid,
+        title,
+        artist,
+        album,
+        duration,
+        type: "web",
+        pluginEntry: providerId,
+        url: cfg.provider.streamUrl(cfg.config, {
+          source,
+          id: rid,
+          name: title || "Unknown",
+          artist: artist || "Unknown",
+          album,
+          duration,
+          cover: getParam(c, "cover") || "",
+        }),
+        sourceData: JSON.stringify({ source, extra: null }),
+      };
+      lines = await getLyricsForSong(virtualSong);
+    }
+  }
   if (!lines) return c.json(ok({ lyricsList: { structuredLyrics: [] } }));
   return c.json(ok({ lyricsList: { structuredLyrics: [lrcToStructured(lines, "und")] } }));
 });
@@ -1421,6 +1458,28 @@ restRoutes.get("/getCoverArt", async (c) => {
     // Playlist cover: plain local image (imported platform cover or first song's album cover)
     const playlistCover = getPlaylistCover(id.slice(3));
     if (playlistCover) filePath = resolveCoverFile(playlistCover.file);
+  } else if (/^https?:\/\//i.test(id)) {
+    // 远程封面直链(远程歌曲 / 远程歌单、专辑搜索结果的完整 http URL)在队列、播放器、
+    // 详情页会经 getCoverArt 代理。浏览器直连会被部分平台防盗链拦截,后端代理取图稳定,
+    // 且与本地封面走同一 <img> 渲染路径。失败静默回落到占位图。
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const up = await fetch(id, { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0" } });
+      clearTimeout(timer);
+      if (up.ok) {
+        const ct = (up.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
+        const buf = Buffer.from(await up.arrayBuffer());
+        if (buf.length > 100 && /^image\//i.test(ct)) {
+          return new Response(new Uint8Array(buf), {
+            headers: {
+              "Content-Type": ct,
+              "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+            },
+          });
+        }
+      }
+    } catch { /* 代理失败 → 占位图 */ } finally { clearTimeout(timer); }
   } else {
     filePath = resolveCandidates(id);
   }
