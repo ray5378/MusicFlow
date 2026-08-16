@@ -12,6 +12,7 @@
         <div class="info" v-if="playlist.isImported && playlist.matched !== undefined">
           <span class="matched-count">已匹配 {{ playlist.matched }} / {{ playlist.songCount }}</span>
         </div>
+        <div class="info" v-if="playlist.isImported && playlist.created">导入时间 {{ formatCreated(playlist.created) }}</div>
         <div class="actions">
           <el-button type="primary" @click="playAll">播放全部</el-button>
           <el-button v-if="hasOnlineSource" :loading="matchingAll" @click="matchAllPlaylist"><MfIcon name="Search" />在线匹配未匹配</el-button>
@@ -142,6 +143,13 @@ function formatTotalDuration(sec: number) {
   const m = Math.floor((sec % 3600) / 60);
   if (h > 0) return m > 0 ? `${h}小时${m}分钟` : `${h}小时`;
   return `${m}分钟`;
+}
+function formatCreated(t: string): string {
+  if (!t) return "";
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 async function playSong(song: any) {
   if (song.isMatched !== false) { playerStore.playSong(song); return; }
