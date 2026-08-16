@@ -9,7 +9,7 @@
 // "first failure => yellow" assertion sees a stale `red`.
 import "./_env.js";
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "fs";
 import { sqlite } from "../../src/db/index.js";
 import { TMP_DATA_DIR } from "./_env.js";
@@ -20,7 +20,7 @@ import type { PluginManifest, LyricProviderPlugin, CoverProviderPlugin, Renderer
 
 import { hasLyricProvider, hasCoverProvider, searchLyrics, searchCover } from "../../src/plugins/providers.js";
 import { getRendererPlugins, discoverRenderers, castToRenderer, controlRenderer } from "../../src/plugins/renderers.js";
-import { getScrobblerPlugins, notifyScrobble } from "../../src/plugins/scrobblers.js";
+import { getScrobblerPlugins, notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../src/plugins/scrobblers.js";
 import { getHealth } from "../../src/plugins/health.js";
 
 // ---- mock manifests / impls -------------------------------------------------

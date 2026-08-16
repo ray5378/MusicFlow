@@ -4,7 +4,7 @@ import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSo
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import { getLyricsForSongId, lrcToStructured } from "../../services/lyrics.js";
-import { notifyScrobble } from "../../plugins/scrobblers.js";
+import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
@@ -964,6 +964,10 @@ restRoutes.get("/scrobble", (c) => {
   // Dispatch to enabled scrobbler plugins (Last.fm / ListenBrainz / ...).
   // Fire-and-forget: a scrobbler failure must never break the request, and the
   // plugin layer already isolates each scrobbler's errors.
+  // 派发去重:客户端(尤其 OpenSubsonic)会对同一首歌连发多个 /scrobble——
+  // now-playing 常连发多次、submission 偶发重复。playHistory 的去重只挡 DB
+  // 写入、挡不住插件派发,这里按「用户+歌曲+窗口」只放行一次,否则每次调用
+  // 都会真实地向 Last.fm / ListenBrainz 提交一条重复收听记录。
   try {
     const songRow: any = db.select().from(songs).where(eq(songs.id, id)).get();
     const event = {
@@ -974,7 +978,8 @@ restRoutes.get("/scrobble", (c) => {
       duration: songRow?.duration || undefined,
       playedAt: nowIso,
     };
-    notifyScrobble(submission ? "scrobble" : "play", event).catch(() => {});
+    const allowDispatch = submission ? dedupeScrobbleDispatch(user.id, id) : dedupePlayDispatch(user.id, id);
+    if (allowDispatch) notifyScrobble(submission ? "scrobble" : "play", event).catch(() => {});
   } catch { /* never block the scrobble response */ }
   return c.json(ok());
 });
