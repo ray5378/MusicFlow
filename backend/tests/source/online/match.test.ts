@@ -13,6 +13,7 @@ import { registerPlugin, unregisterPlugin } from "../../../src/plugins/registry.
 import {
   onlineSongFromExternalId,
   matchUnmatchedPlaylistEntries,
+  searchBestMatch,
 } from "../../../src/services/source/online/match.js";
 
 const PROVIDER = "go-music-dl";
@@ -148,5 +149,48 @@ describe("matchUnmatchedPlaylistEntries — 已知 source:id 直通", () => {
     expect(song.type).toBe("web");
 
     resetRows();
+  });
+});
+
+describe("searchBestMatch — 同名异曲(歌手不符)拒绑", () => {
+  function providerReturning(cands: any[]) {
+    return {
+      id: PROVIDER,
+      manifest: manifestOf,
+      search: async (_config: any, _params: any) => ({ songs: cands }),
+      streamUrl: (_config: any, s: any) => `http://gm:18080/music/download?id=${s.id}&source=${s.source}`,
+    };
+  }
+
+  it("标题命中但歌手不符 → no-match(不把同名异曲误绑进歌单)", async () => {
+    const provider = providerReturning([
+      { id: "r1", source: "netease", name: "同名曲", artist: "不同人", duration: 180 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "同名曲", artist: "期望歌手", duration: 180000,
+    });
+    expect(m.status).toBe("no-match");
+  });
+
+  it("标题+歌手一致 → matched", async () => {
+    const provider = providerReturning([
+      { id: "r2", source: "netease", name: "同名曲", artist: "期望歌手", duration: 180 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "同名曲", artist: "期望歌手", duration: 180000,
+    });
+    expect(m.status).toBe("matched");
+    expect(m.best!.id).toBe("r2");
+  });
+
+  it("期望无歌手 → 仅标题命中即 matched", async () => {
+    const provider = providerReturning([
+      { id: "r3", source: "netease", name: "同名曲", artist: "随便谁", duration: 180 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "同名曲", artist: "", duration: 180000,
+    });
+    expect(m.status).toBe("matched");
+    expect(m.best!.id).toBe("r3");
   });
 });

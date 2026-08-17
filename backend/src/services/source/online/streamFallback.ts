@@ -76,10 +76,13 @@ export async function findFallbackStream(
     return null;
   }
 
-  // Rank results: must match title (exact or contained) and not be the failing source.
+  // Rank results: title must match exactly (normalized) and, when the wanted track
+  // carries an artist, the candidate's artist must agree — otherwise two same-named
+  // songs by different artists could swap streams (e.g. 点「七里香·周杰伦」实际换源到
+  // 另一首同歌名的歌)。歌名单一匹配 + 歌手不符 → 不换源。
   const preference = getSourcePreference(providerId);
   const ranked = results
-    .filter(s => s.source !== failingSource && s.name && normalize(s.name) === normalize(title))
+    .filter(s => s.source !== failingSource && s.name && normalize(s.name) === normalize(title) && artistAgrees(artist, s.artist))
     .sort((a, b) => {
       const ar = preference.indexOf(a.source);
       const br = preference.indexOf(b.source);
@@ -116,6 +119,23 @@ export { probe as probeStream };
 
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[（(].*?[)）]/g, "").replace(/[\s·\-:_~]+/g, "").trim();
+}
+
+// Split a combined-artist string ("周杰伦、温岚、吴宗宪" / "A feat. B") into tokens.
+function artistTokens(s: string): string[] {
+  return (s || "")
+    .split(/[/、&,；;，.&]|feat\.|ft\./i)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+// Strict artist agreement: 期望曲有歌手时,候选的艺人集必须包含期望的首位歌手。
+// 无期望歌手 → 视为通过(仅按歌名换源)。「首位名分」与 match.ts 的 firstMatch 判定一致。
+function artistAgrees(wantArtist: string, candArtist: string): boolean {
+  const want = artistTokens(wantArtist);
+  if (!want.length) return true;
+  const primary = want[0];
+  return artistTokens(candArtist).some((c) => primary === c || primary.includes(c) || c.includes(primary));
 }
 
 export function clearFallbackCache(songId?: string) {

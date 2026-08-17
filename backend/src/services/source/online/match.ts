@@ -151,7 +151,16 @@ export async function searchBestMatch(
   const best = ranked[0]!;
   // Only auto-link when the title plausibly matched (score >= 15 from title);
   // a pure artist-with-different-song hit is too risky to auto-bind.
-  if (best.score < 15) {
+  // 收紧:期望曲带歌手时,候选歌手必须与期望首位歌手一致——否则同歌名异歌手的
+  // 结果(score 15~18 + 时长分可 ≥15)会被误绑为「同名异曲」。
+  const wantArtists = artistTokens(want.artist);
+  const titleOk = best.s.name != null &&
+    (best.s.name.toLowerCase() === (want.title || "").toLowerCase() ||
+      normalizeKey(best.s.name, "") === normalizeKey(want.title || "", ""));
+  const primary = wantArtists[0] || "";
+  const artistOk = !primary || artistTokens(best.s.artist || "")
+    .some((ca) => primary === ca || primary.includes(ca) || ca.includes(primary));
+  if (best.score < 15 || !titleOk || !artistOk) {
     return { entryId: want.entryId, title: want.title, status: "no-match", message: `未可靠匹配(${best.s.name})` };
   }
   return { entryId: want.entryId, title: want.title, status: "matched", best: best.s, score: best.score };
