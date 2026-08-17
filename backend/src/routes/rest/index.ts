@@ -1121,16 +1121,25 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
 
     // If the original platform could not resolve this song, try an automatic
     // multi-source fallback (search the same provider for a working alternative).
-    if ((upstream.status === 404 || upstream.status >= 500) && song.pluginEntry && song.sourceData) {
+    // 触发条件含 403(地区版权封锁)与 404/5xx,全代理链路(本机 /rest/stream、
+    // /rest/stream-remote、/dlna/stream)统一命中。仅当换源命中时才 cancel 原 body;
+    // 未命中(无可播替代/normalize 失配)保留原始失败响应原样透传,避免把已锁定
+    // 的 body 再交给 c.body() 抛错。
+    if ((upstream.status === 404 || upstream.status === 403 || upstream.status >= 500) && song.pluginEntry && song.sourceData) {
       try {
-        await upstream.body?.cancel();
         const sd = JSON.parse(song.sourceData || "{}");
         const fb = await findFallbackStream(
           song.id, song.title || sd?.title || "", song.artist || sd?.artist || "", song.album || "",
           song.pluginEntry, sd?.source || "",
         );
-        if (fb) { url = fb.url; upstream = await fetch(url, { headers }); }
-      } catch { /* keep original upstream result */ }
+        if (fb) {
+          await upstream.body?.cancel();
+          url = fb.url;
+          upstream = await fetch(url, { headers });
+        }
+      } catch {
+        // keep original upstream result
+      }
     }
 
     const respHeaders: Record<string, string> = {
@@ -1257,10 +1266,12 @@ restRoutes.get("/stream-remote", async (c) => {
     if (!streamUrl) return c.json(fail(0, "No stream url"));
     const streamHeaders: Record<string, string> = {};
     if (source === "bilibili") streamHeaders["Referer"] = "https://www.bilibili.com/";
-    // 现场构造最小 web-song 形状:无 cachePath(未缓存)、无 pluginEntry/sourceData
-    // (不做自动换源),直接复用远程代理分支。
+    // 现场构造 web-song 形状(无 cachePath/未缓存),并补 pluginEntry/sourceData 让
+    // serveWebSongStream 复用与 /rest/stream 同一套「多源换源」:原平台 404/VIP 时按
+    // 严格「歌名-歌手」换到其它平台可播候选(与本机 DLNA 本地播放行为一致)。
+    // id 用合成 key 隔离换源缓存,避免与库内真实歌曲混淆(无 DB 行,写回为 no-op)。
     return serveWebSongStream(c, {
-      id,
+      id: `remote:${providerId}:${source}:${id}`,
       title: song.name,
       artist: song.artist,
       album: song.album,
@@ -1269,8 +1280,8 @@ restRoutes.get("/stream-remote", async (c) => {
       url: streamUrl,
       streamHeaders: JSON.stringify(streamHeaders),
       cachePath: null,
-      pluginEntry: undefined,
-      sourceData: undefined,
+      pluginEntry: providerId,
+      sourceData: JSON.stringify({ source, title: song.name, artist: song.artist }),
     }, c.req.header("range"));
   } catch (e: any) {
     return c.json(fail(0, e.message || "Remote stream failed"));
