@@ -1,6 +1,7 @@
 // Unit tests for services/source/online/streamFallback.ts — 换源「歌名+歌手」严格匹配。
 //   - 同歌名同歌手 → 换源命中(按 sourcePreference 排序、排除失败源)
 //   - 同歌名不同歌手 → 不换源(null,防「点七里香实际播别首」)
+//   - 歌名有后缀(Live/演唱会版/伴奏)只能配带相同后缀,无后缀只能配无后缀
 //   - 期望曲无歌手 → 仅按歌名换源(向后兼容)
 //   - ensurePlayableStream:原 URL 探测失败 → 换源并把替换 URL 写回 songs.url
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
@@ -155,6 +156,47 @@ describe("findFallbackStream — 换源严格「歌名+歌手」匹配", () => {
 
     expect(fb).toBeTruthy();
     expect(fb!.url).toContain("id=n1");
+  });
+
+  it("期望无后缀 + 候选带(Live)后缀 → 不换源(严格全串对齐)", async () => {
+    enableProvider([
+      { id: "live1", name: "听妈妈的话(Live)", artist: "周杰伦", source: "kuwo" },
+    ]);
+
+    const fb = await findFallbackStream("s-suf1", "听妈妈的话", "周杰伦", "", PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  it("期望无后缀 + 候选带「演唱会版」后缀 → 不换源", async () => {
+    enableProvider([
+      { id: "live2", name: "听妈妈的话-演唱会版", artist: "周杰伦", source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-suf2", "听妈妈的话", "周杰伦", "", PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  it("期望带(Live) + 候选带相同后缀(大小写/空格/括号差异) → 换源", async () => {
+    enableProvider([
+      { id: "live3", name: "听妈妈的话 (LIVE)", artist: "周杰伦", source: "kuwo" },
+    ]);
+
+    const fb = await findFallbackStream("s-suf3", "听妈妈的话(Live)", "周杰伦", "", PROVIDER, "qq");
+
+    expect(fb).toBeTruthy();
+    expect(fb!.url).toContain("id=live3");
+  });
+
+  it("期望带(Live)但候选无后缀 → 不换源", async () => {
+    enableProvider([
+      { id: "plain1", name: "听妈妈的话", artist: "周杰伦", source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-suf4", "听妈妈的话(Live)", "周杰伦", "", PROVIDER, "qq");
+
+    expect(fb).toBeNull();
   });
 });
 

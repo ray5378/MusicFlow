@@ -193,4 +193,35 @@ describe("searchBestMatch — 同名异曲(歌手不符)拒绑", () => {
     expect(m.status).toBe("matched");
     expect(m.best!.id).toBe("r3");
   });
+
+  it("期望无后缀(Live)候选带后缀 → no-match(有后缀只能配带相同后缀)", async () => {
+    const provider = providerReturning([
+      { id: "r4", source: "netease", name: "听妈妈的话(Live)", artist: "周杰伦", duration: 180 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "听妈妈的话", artist: "周杰伦", duration: 180000,
+    });
+    expect(m.status).toBe("no-match");
+  });
+
+  it("期望带(Live)候选带相同后缀(大小写/空格/括号差异) → matched", async () => {
+    const provider = providerReturning([
+      { id: "r5", source: "netease", name: "听妈妈的话 (LIVE)", artist: "周杰伦", duration: 180 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "听妈妈的话(Live)", artist: "周杰伦", duration: 180000,
+    });
+    expect(m.status).toBe("matched");
+    expect(m.best!.id).toBe("r5");
+  });
+
+  it("期望带(Live)候选无后缀 → no-match(无后缀只能配无后缀)", async () => {
+    const provider = providerReturning([
+      { id: "r6", source: "netease", name: "听妈妈的话", artist: "周杰伦", duration: 180 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "听妈妈的话(Live)", artist: "周杰伦", duration: 180000,
+    });
+    expect(m.status).toBe("no-match");
+  });
 });

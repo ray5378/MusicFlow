@@ -8,7 +8,7 @@
 import { db, sqlite } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { normalizeKey, refreshPlaylistCounts } from "../../plugin/shared.js";
+import { refreshPlaylistCounts, normalizeTitleStrict } from "../../plugin/shared.js";
 import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill } from "../../covers.js";
 import { OnlineSongResult } from "./types.js";
@@ -86,10 +86,10 @@ export function onlineSongFromExternalId(entry: {
 function scoreCandidate(cand: OnlineSongResult, t: MatchTarget): number {
   let score = 0;
 
-  const titleExact = cand.name.toLowerCase() === (t.title || "").toLowerCase();
-  const titleNorm = normalizeKey(cand.name, "") === normalizeKey(t.title || "", "");
-  if (titleExact) score += 20;
-  else if (titleNorm) score += 15;
+  // 歌名严格对齐:只保留中英文归一后的全串相等(后缀原样保留,有后缀只能配带相同
+  // 后缀、无后缀只能配无后缀),仅大小写/符号/空白/全角半角放宽。
+  const titleStrict = normalizeTitleStrict(cand.name) === normalizeTitleStrict(t.title || "");
+  if (titleStrict) score += 20;
 
   const wantArtists = artistTokens(t.artist);
   const candArtists = artistTokens(cand.artist);
@@ -149,14 +149,14 @@ export async function searchBestMatch(
     .sort((a: { score: number }, b: { score: number }) => b.score - a.score);
 
   const best = ranked[0]!;
-  // Only auto-link when the title plausibly matched (score >= 15 from title);
+  // Only auto-link when the title strictly matched (skip <15 即标题未全串对齐);
   // a pure artist-with-different-song hit is too risky to auto-bind.
-  // 收紧:期望曲带歌手时,候选歌手必须与期望首位歌手一致——否则同歌名异歌手的
-  // 结果(score 15~18 + 时长分可 ≥15)会被误绑为「同名异曲」。
+  // 收紧两层:① 歌名只保留中英文归一后必须「全串相等」(后缀原样保留,有后缀只能配
+  // 带相同后缀、无后缀只能配无后缀);② 期望曲带歌手时,候选歌手必须与期望首位歌手
+  // 一致——否则同歌名异歌手/同后缀异歌名的结果会被误绑为「同名异曲」。
   const wantArtists = artistTokens(want.artist);
   const titleOk = best.s.name != null &&
-    (best.s.name.toLowerCase() === (want.title || "").toLowerCase() ||
-      normalizeKey(best.s.name, "") === normalizeKey(want.title || "", ""));
+    normalizeTitleStrict(best.s.name) === normalizeTitleStrict(want.title || "");
   const primary = wantArtists[0] || "";
   const artistOk = !primary || artistTokens(best.s.artist || "")
     .some((ca) => primary === ca || primary.includes(ca) || ca.includes(primary));

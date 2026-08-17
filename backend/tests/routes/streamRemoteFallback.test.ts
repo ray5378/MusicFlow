@@ -5,6 +5,7 @@
 
 //   - 原平台 404 → 严格「歌名-歌手」换到其它平台候选并回 206(同 DLNA 行为)
 //   - 无歌手一致的候选 → 维持原 404(不误绑同名异曲)
+//   - 歌名后缀严格对齐(Live/演唱会版):有后缀只能配带相同后缀,无后缀只能配无后缀
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
@@ -97,5 +98,25 @@ describe("/rest/stream-remote 多源换源", () => {
     expect(res.status).toBe(404);
     // 未触发对歌名撞车候选的流式拉取
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("id=alt2"))).toBe(false);
+  });
+
+  it("期望无后缀 + 只搜到带(Live)后缀候选 → 维持原 404(有后缀只能配带相同后缀)", async () => {
+    enableProvider([
+      { id: "alt3", source: "kuwo", name: "听妈妈的话(Live)", artist: "周杰伦", album: "", duration: 0, cover: "" },
+    ]);
+    const res = await app.request(remoteUrl("dead789", "听妈妈的话", "周杰伦"), { method: "GET", headers: { Range: "bytes=0-20000" } });
+
+    expect(res.status).toBe(404);
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("id=alt3"))).toBe(false);
+  });
+
+  it("期望带(Live) + 候选带相同后缀(大小写/空格差异) → 换源回 206", async () => {
+    enableProvider([
+      { id: "alt4", source: "kuwo", name: "听妈妈的话 (LIVE)", artist: "周杰伦", album: "", duration: 0, cover: "" },
+    ]);
+    const res = await app.request(remoteUrl("dead1011", "听妈妈的话(Live)", "周杰伦"), { method: "GET", headers: { Range: "bytes=0-20000" } });
+
+    expect(res.status).toBe(206);
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("id=alt4"))).toBe(true);
   });
 });

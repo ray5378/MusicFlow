@@ -38,6 +38,25 @@ export function normalizeKey(title: string, artist: string): string {
   return `${norm(title)}|${norm(artist)}`;
 }
 
+// 全角拉丁/数字 → 半角(如 ＬＩＶＥ → LIVE)。
+function halfWidth(s: string): string {
+  return s.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0)).replace(/\u3000/g, " ");
+}
+
+/**
+ * 换源/匹配使用的严格歌曲名归一化:全角转半角 → 小写 → 只保留中文字与英文字母
+ * 数字下划线([a-z0-9_\u4e00-\u9fa5]),其余符号、空格、括号全部丢弃。
+ *
+ * 与 go-music-dl 插件 matchInPool 的 norm 规则一致。由于 "Live / 演唱会 / 版 /
+ * 伴奏 / (Taylor's Version)" 等后缀全由中英文字母构成,归一后必然保留——因此
+ * 「有后缀的名字只能匹配带相同后缀的名字,无后缀的名字只能匹配无后缀的名字」,
+ * 仅大小写、符号、空白、全角/半角差异被放宽。用作播放换源(streamFallback)与
+ * auto-match(在线匹配)的「歌名严格对齐」判定;库内索引继续走 normalizeKey。
+ */
+export function normalizeTitleStrict(title: string): string {
+  return halfWidth(String(title || "")).toLowerCase().replace(/[^a-z0-9_\u4e00-\u9fa5]/g, "");
+}
+
 // Per-playlist auto-match guard: only one background match at a time per playlist.
 const autoMatchLocks = new Set<string>();
 

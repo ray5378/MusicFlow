@@ -15,6 +15,7 @@ import { db } from "../../../db/index.js";
 import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest } from "../../../plugins/registry.js";
+import { normalizeTitleStrict } from "../../plugin/shared.js";
 
 // Bounded in-memory caches. Both grow with every web song played, so enforce a
 // FIFO cap to keep memory usage bounded on long-running servers.
@@ -76,13 +77,15 @@ export async function findFallbackStream(
     return null;
   }
 
-  // Rank results: title must match exactly (normalized) and, when the wanted track
-  // carries an artist, the candidate's artist must agree — otherwise two same-named
-  // songs by different artists could swap streams (e.g. 点「七里香·周杰伦」实际换源到
-  // 另一首同歌名的歌)。歌名单一匹配 + 歌手不符 → 不换源。
+  // Rank results: title must match exactly (strict full-string, suffix preserved:
+  // 只保留中英文归一后的全串相等——"Live/演唱会/版" 等后缀不会剥离,有后缀只能配
+  // 带相同后缀、无后缀只能配无后缀) and, when the wanted track carries an artist,
+  // the candidate's artist must agree — otherwise two same-named songs by different
+  // artists could swap streams (e.g. 点「七里香·周杰伦」实际换源到一首同歌名的歌)。
+  // 歌名单一匹配 + 歌手不符 → 不换源。
   const preference = getSourcePreference(providerId);
   const ranked = results
-    .filter(s => s.source !== failingSource && s.name && normalize(s.name) === normalize(title) && artistAgrees(artist, s.artist))
+    .filter(s => s.source !== failingSource && s.name && normalizeTitleStrict(s.name) === normalizeTitleStrict(title) && artistAgrees(artist, s.artist))
     .sort((a, b) => {
       const ar = preference.indexOf(a.source);
       const br = preference.indexOf(b.source);
@@ -116,10 +119,6 @@ async function probe(url: string): Promise<boolean> {
 }
 
 export { probe as probeStream };
-
-function normalize(s: string): string {
-  return s.toLowerCase().replace(/[（(].*?[)）]/g, "").replace(/[\s·\-:_~]+/g, "").trim();
-}
 
 // Split a combined-artist string ("周杰伦、温岚、吴宗宪" / "A feat. B") into tokens.
 function artistTokens(s: string): string[] {
