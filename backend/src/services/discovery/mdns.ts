@@ -13,6 +13,7 @@ import os from "os";
 import crypto from "crypto";
 import { Bonjour } from "bonjour-service";
 import { getDataDir } from "../../utils/env.js";
+import { createLogger } from "../../utils/logger.js";
 
 let bonjour: Bonjour | null = null;
 let service: any = null;
@@ -20,6 +21,7 @@ let service: any = null;
 const SERVICE_TYPE = "musicflow";
 const PROTO = "tcp";
 
+const log = createLogger("mDNS");
 export function startMdnsBroadcast(port: number): void {
   if (bonjour) return;
   bonjour = new Bonjour();
@@ -42,7 +44,7 @@ export function startMdnsBroadcast(port: number): void {
     });
     console.log(`[mDNS] broadcasting ${instanceName}._${SERVICE_TYPE}._${PROTO}.local. on :${port} (uuid=${uuid})`);
   } catch (e: any) {
-    console.error("[mDNS] publish failed:", e.message);
+    log.error("publish failed", { err: e.message });
   }
 }
 

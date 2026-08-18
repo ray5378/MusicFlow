@@ -16,6 +16,9 @@ import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from ".
 import { getGroupManager } from "../group/index.js";
 import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("QueueController");
 
 /** PlayerController 用 "dlna:<deviceId>" / "group:<groupId>" 作 playerId;
  *  QueueController 内部用裸 id。此函数在 handleDecision 入口剥前缀,
@@ -197,7 +200,9 @@ export class QueueController extends EventEmitter {
           this.ctrls.get(id)?.resetTracker(playerId);
           return;
         }
-      } catch {}
+      } catch (e: any) {
+        log.warn("切歌前状态检查失败,继续播放", { playerId, err: e?.message || e });
+      }
       this.advancing.add(id);
       try {
         await this.playCurrent(id, baseUrl);
@@ -633,7 +638,9 @@ export class QueueController extends EventEmitter {
       const st = await getGroupStatus(groupId);
       if (typeof st.position === "number" && st.position > 0) position = st.position;
       playState = st.state;
-    } catch {}
+    } catch (e: any) {
+      log.warn("组状态查询失败,回退 position=0", { groupId, err: e?.message || e });
+    }
     for (const deviceId of online) {
       try {
         const p = createDlnaProtocolPlayer(deviceId);

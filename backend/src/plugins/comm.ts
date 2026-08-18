@@ -1,3 +1,4 @@
+import { createLogger } from "../utils/logger.js";
 // ==================== Inter-plugin communication ====================
 //
 // A tiny pub/sub bus that lets plugins talk to each other without importing
@@ -8,6 +9,7 @@
 // This is an in-process event bus (we have no cross-VM messaging), but the API
 // shape intentionally matches songloft so external JS plugins feel at home.
 
+const log = createLogger("comm");
 export type CommHandler = (message: any) => void | Promise<void>;
 
 interface CommTarget {
@@ -44,7 +46,7 @@ function createComm(pluginId: string, permissions: string[]): CommTarget {
     send(targetId: string, message: any) {
       if (!allowed) return fail("向其他插件发消息");
       for (const h of ensure(targetId)) {
-        try { h(message); } catch (e: any) { console.error(`[comm] handler error in ${targetId}:`, e?.message || e); }
+        try { h(message); } catch (e: any) { log.error(`handler error in ${targetId}`, { err: e?.message || e }); }
       }
     },
     broadcast(message: any) {
@@ -52,7 +54,7 @@ function createComm(pluginId: string, permissions: string[]): CommTarget {
       for (const [id, set] of listeners) {
         if (id === pluginId) continue;
         for (const h of set) {
-          try { h(message); } catch (e: any) { console.error(`[comm] handler error in ${id}:`, e?.message || e); }
+          try { h(message); } catch (e: any) { log.error(`handler error in ${id}`, { err: e?.message || e }); }
         }
       }
     },

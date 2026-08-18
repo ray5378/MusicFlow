@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import { getDataDir } from "../utils/env.js";
 import { discoverExternalPlugins } from "./discovery.js";
+import { createLogger } from "../utils/logger.js";
 
 const APP_VERSION = process.env.APP_VERSION || "dev";
 let timer: NodeJS.Timeout | null = null;
@@ -24,12 +25,13 @@ function scheduleReload(): void {
       const loaded = await discoverExternalPlugins(APP_VERSION, undefined, { reload: true });
       if (loaded > 0) console.log(`[PLUGIN-HOTRELOAD] 重新发现 ${loaded} 个外置插件`);
     } catch (e: any) {
-      console.error("[PLUGIN-HOTRELOAD] 重载失败:", e?.message || e);
+      log.error("重载失败", { err: e?.message || e });
     }
   }, 800);
 }
 
 /** Begin watching data/plugins for changes. Safe to call once at boot. */
+const log = createLogger("PLUGIN-HOTRELOAD");
 export function startPluginHotReload(): void {
   const root = path.join(getDataDir(), "plugins");
   if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });

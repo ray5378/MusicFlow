@@ -14,6 +14,9 @@
 
 import { getPlugin } from "../../plugins/registry.js";
 import { acquireBatchLock } from "./batchPacer.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("PLUGIN-JOB");
 
 export interface PluginJobState {
   running: boolean;
@@ -70,7 +73,7 @@ export function runPluginJob(
         hint: e?.hint,
         finishedAt: new Date().toISOString(),
       });
-      console.error(`[PLUGIN-JOB] ${pluginId} ${method} error:`, e?.message || e);
+      log.error("插件任务执行失败", { pluginId, method, err: e?.message || e });
     } finally {
       running.set(pluginId, false);
       release();

@@ -3,6 +3,11 @@ import { createServer } from "http";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
+import { metricsMiddleware } from "./middleware/metrics.js";
+import { createLogger } from "./utils/logger.js";
+
+const log = createLogger("INDEX");
+
 import fs from "fs";
 import path from "path";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -68,6 +73,9 @@ app.use("*", cors({
 // link are much smaller. Pure transport-layer win — response bytes are
 // identical after decompression, so behaviour is unchanged.
 app.use("*", compress());
+
+// 请求级 metrics:慢请求(≥1s)告警 + 端点调用计数(供 GET /v1/admin/metrics 查看)。
+app.use("*", metricsMiddleware);
 
 app.route("/rest", authRoutes);
 // Baked in at image build time (Dockerfile ARG APP_VERSION / APP_COMMIT, fed by
@@ -272,7 +280,7 @@ async function runDailyJobs() {
         const summary = await impl.runDailyJob();
         if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
       } catch (e: any) {
-        console.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error:`, e.message || e);
+        log.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error`, { err: e.message || e });
       }
     }
   }
@@ -283,7 +291,7 @@ async function runDailyJobs() {
       const summary = await impl.runDailyJob();
       if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
     } catch (e: any) {
-      console.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error:`, e.message || e);
+      log.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error`, { err: e.message || e });
     }
   }
   // Refresh every enabled source plugin that supports daily-recommend playlists
@@ -298,7 +306,7 @@ async function runDailyJobs() {
           console.log(`[DAILY-SCHEDULER] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
         }
       } catch (e: any) {
-        console.error(`[DAILY-SCHEDULER] ${manifest.id} recommend sync error:`, e.message || e);
+        log.error(`[DAILY-SCHEDULER] ${manifest.id} recommend sync error`, { err: e.message || e });
       }
     }
     if (caps.includes("webRotation")) {
@@ -308,7 +316,7 @@ async function runDailyJobs() {
           console.log(`[DAILY-SCHEDULER] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
         }
       } catch (e: any) {
-        console.error(`[DAILY-SCHEDULER] ${manifest.id} web-song purge error:`, e.message || e);
+        log.error(`[DAILY-SCHEDULER] ${manifest.id} web-song purge error`, { err: e.message || e });
       }
     }
   }
@@ -335,7 +343,7 @@ function scheduleNextDailyRun() {
   try {
     await runDailyJobs();
   } catch (e: any) {
-    console.error("[DAILY-SCHEDULER] boot catch-up error:", e.message || e);
+    log.error("[DAILY-SCHEDULER] boot catch-up error", { err: e.message || e });
   }
   scheduleNextDailyRun();
 })();
@@ -367,7 +375,7 @@ setInterval(async () => {
       console.log(`[ARTIST-SCRAPE] scheduled run: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
     }
   } catch (e: any) {
-    console.error("[ARTIST-SCRAPE] error:", e.message);
+    log.error("[ARTIST-SCRAPE] error", { err: e.message });
   }
 }, AUTO_SYNC_INTERVAL);
 

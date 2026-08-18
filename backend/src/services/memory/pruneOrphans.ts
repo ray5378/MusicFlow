@@ -14,14 +14,17 @@ import { getPlayerController, getQueueController } from "../player/index.js";
 import { sweepScrobbleDedupe } from "../../plugins/scrobblers.js";
 import { db } from "../../db/index.js";
 import { users } from "../../db/schema.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("ORPHAN-PRUNE");
 
 const ORPHAN_PRUNE_INTERVAL_MS = 10 * 60 * 1000; // 10 分钟一轮
 
 /** 启动定期孤儿清理。在 index.ts 启动时调用一次。 */
 export function startOrphanPruner(): void {
   // 启动后 1 分钟先跑一轮(此时设备表/组已 loadFromDb),之后每 10 分钟一轮。
-  setTimeout(() => { try { pruneOrphansOnce(); } catch (e: any) { console.error("[ORPHAN-PRUNE] 首次清理出错:", e?.message || e); } }, 60_000);
-  setInterval(() => { try { pruneOrphansOnce(); } catch (e: any) { console.error("[ORPHAN-PRUNE] 清理出错:", e?.message || e); } }, ORPHAN_PRUNE_INTERVAL_MS);
+  setTimeout(() => { try { pruneOrphansOnce(); } catch (e: any) { log.error("首次清理出错", { err: e?.message || e }); } }, 60_000);
+  setInterval(() => { try { pruneOrphansOnce(); } catch (e: any) { log.error("清理出错", { err: e?.message || e }); } }, ORPHAN_PRUNE_INTERVAL_MS);
 }
 
 /** 执行一轮孤儿清理(供测试直接调用)。 */

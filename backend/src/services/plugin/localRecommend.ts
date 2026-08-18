@@ -13,7 +13,9 @@ import { sqlite } from "../../db/index.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { LocalRecommendPlugin, PluginManifest } from "../../plugins/types.js";
 import { firstPlayableCoverFile } from "../playlistCover.js";
+import { createLogger } from "../../utils/logger.js";
 
+const log = createLogger("LOCAL-RECOMMEND");
 export const HISTORY_WINDOW_DAYS = 30;
 export const TOP_ARTISTS = 12;
 export const TOP_ALBUMS = 8;
@@ -464,7 +466,7 @@ export async function runLocalDailyRecommendJob(opts?: { force?: boolean; seedSa
   try {
     return await generateLocalDailyPlaylist(new Date(), opts);
   } catch (e: any) {
-    console.error("[LOCAL-RECOMMEND] error:", e?.message || e);
+    log.error("error", { err: e?.message || e });
     return null;
   }
 }

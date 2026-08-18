@@ -9,10 +9,12 @@ import { getEnabledByCapability, getPluginConfig } from "./registry.js";
 import { createPluginHost } from "./host.js";
 import { recordSuccess, recordFailure } from "./health.js";
 import type { RendererDevice } from "./types.js";
+import { createLogger } from "../utils/logger.js";
 
 const APP_VERSION = process.env.APP_VERSION || "dev";
 
 /** All enabled renderer plugins (id + manifest). */
+const log = createLogger("renderer");
 export function getRendererPlugins(): { id: string; name: string }[] {
   return getEnabledByCapability("renderer").map((p) => ({ id: p.manifest.id, name: p.manifest.name }));
 }
@@ -30,7 +32,7 @@ export async function discoverRenderers(): Promise<(RendererDevice & { pluginId:
       recordSuccess(manifest.id);
     } catch (e: any) {
       recordFailure(manifest.id, e?.message || String(e));
-      console.error(`[renderer] ${manifest.id} discover failed:`, e?.message || e);
+      log.error(`${manifest.id} discover failed`, { err: e?.message || e });
     }
   }
   return out;

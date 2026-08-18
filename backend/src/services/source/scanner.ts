@@ -7,6 +7,7 @@ import path from "path";
 import { parseBuffer } from "music-metadata";
 import { getDataDir } from "../../utils/env.js";
 import { deleteSongLyric } from "../lyricsStore.js";
+import { createLogger } from "../../utils/logger.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
 const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover art
@@ -48,6 +49,7 @@ interface MusicMetadata {
   picture?: { format: string; data: Buffer };
 }
 
+const log = createLogger("SCANNER");
 export interface ScanProgress {
   phase: "traverse" | "scanning" | "done";
   totalDirs: number;
@@ -373,7 +375,7 @@ function saveCoverArt(albumId: string, pic: { format: string; data: Buffer } | u
     fs.writeFileSync(filePath, pic.data);
     return `${albumId}.${ext}`;
   } catch (e) {
-    console.error("[SCANNER] Save cover error:", e);
+    log.error("Save cover error", { err: e });
     return null;
   }
 }

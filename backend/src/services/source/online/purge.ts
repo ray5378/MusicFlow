@@ -22,9 +22,11 @@ import { getSourcePluginConfig } from "./index.js";
 import { deleteSongCover } from "../../playlistCover.js";
 import { deleteSongLyric } from "../../lyricsStore.js";
 import { cleanupOrphans } from "../scanner.js";
+import { createLogger } from "../../../utils/logger.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+const log = createLogger("web-purge");
 export interface PurgeResult {
   mode: string;
   retentionDays: number;
@@ -78,7 +80,7 @@ export function purgeExpiredWebSongs(providerId: string): PurgeResult {
     purged = candidates.length;
   } catch (e: any) {
     errors++;
-    console.error(`[web-purge] ${providerId} 批量清理失败:`, e?.message || e);
+    log.error(`${providerId} 批量清理失败`, { err: e?.message || e });
   }
 
   // Covers/lyrics only when the DB transaction committed (all-or-nothing), so we

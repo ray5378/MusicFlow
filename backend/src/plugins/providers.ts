@@ -16,11 +16,13 @@ import { createPluginHost } from "./host.js";
 import { recordSuccess, recordFailure } from "./health.js";
 import { getSetting } from "../services/settings.js";
 import type { LyricSongInput } from "./types.js";
+import { createLogger } from "../utils/logger.js";
 
 const APP_VERSION = process.env.APP_VERSION || "dev";
 
 /** Whether any enabled lyric provider exists (lets the core decide whether to
  *  take the plugin path at all — mirrors songloft's HasLyricProvider()). */
+const log = createLogger("cover");
 export function hasLyricProvider(): boolean {
   return getEnabledByCapability("lyricProvider").length > 0;
 }
@@ -68,7 +70,7 @@ export async function searchLyrics(song: LyricSongInput): Promise<string | null>
       // Provider responded but had nothing for this song — keep trying others.
     } catch (e: any) {
       recordFailure(manifest.id, e?.message || String(e));
-      console.error(`[lyrics] provider ${manifest.id} failed:`, e?.message || e);
+      log.error(`provider ${manifest.id} failed`, { err: e?.message || e });
     }
   }
   return null;
@@ -93,7 +95,7 @@ export async function searchCover(song: LyricSongInput): Promise<string | null> 
       }
     } catch (e: any) {
       recordFailure(manifest.id, e?.message || String(e));
-      console.error(`[cover] provider ${manifest.id} failed:`, e?.message || e);
+      log.error(`provider ${manifest.id} failed`, { err: e?.message || e });
     }
   }
   return null;

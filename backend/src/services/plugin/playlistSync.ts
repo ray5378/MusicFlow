@@ -11,7 +11,9 @@ import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
 import { normalizeKey, matchPlaylistInBackground, refreshPlaylistCounts } from "./shared.js";
 import { getLibraryIndex, clearLibraryIndex } from "./libraryIndex.js";
 import { sleepBetweenBatch } from "./batchPacer.js";
+import { createLogger } from "../../utils/logger.js";
 
+const log = createLogger("auto-match");
 export interface SyncResult {
   total: number;
   matched: number;
@@ -209,7 +211,7 @@ export async function rebuildPlaylistEntries(
   // (skip re-firing for previously-known stubs that are still unmatched).
   if (newUnmatched > 0) {
     matchPlaylistInBackground(playlistId).catch((e) => {
-      console.error(`[auto-match] playlist ${playlistId} 自动匹配失败:`, e?.message || e);
+      log.error(`playlist ${playlistId} 自动匹配失败`, { err: e?.message || e });
     });
   }
 

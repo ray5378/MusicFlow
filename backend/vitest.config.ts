@@ -5,6 +5,14 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     environment: "node",
     globals: false,
+    // 覆盖率报告: npm run test:coverage。阈值仅提示不阻断(存量代码未全覆盖)。
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.ts"],
+      exclude: ["src/index.ts", "src/db/*.ts", "src/plugins/sandbox.ts", "src/routes/rest/index.ts"],
+      reporter: ["text", "lcov"],
+      reportsDirectory: "coverage",
+    },
     // 每个测试文件通过 tests/setup.ts 分配独立的 DATA_DIR(独立 SQLite 库),
     // 文件之间不再共享任何数据,故可安全并行提速。此前共享一个库必须串行,
     // 并行会互相改写 plugins / device_queues 等共享行导致偶发失败;且共享库的

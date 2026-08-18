@@ -9,10 +9,12 @@ import { getEnabledByCapability, getPluginConfig } from "./registry.js";
 import { createPluginHost } from "./host.js";
 import { recordSuccess, recordFailure } from "./health.js";
 import type { ScrobbleEvent } from "./types.js";
+import { createLogger } from "../utils/logger.js";
 
 const APP_VERSION = process.env.APP_VERSION || "dev";
 
 /** All enabled scrobbler plugins. */
+const log = createLogger("scrobbler");
 export function getScrobblerPlugins(): { id: string; name: string }[] {
   return getEnabledByCapability("scrobbler").map((p) => ({ id: p.manifest.id, name: p.manifest.name }));
 }
@@ -80,7 +82,7 @@ export async function notifyScrobble(phase: "play" | "scrobble", event: Scrobble
       recordSuccess(manifest.id);
     } catch (e: any) {
       recordFailure(manifest.id, e?.message || String(e));
-      console.error(`[scrobbler] ${manifest.id} ${handler} failed:`, e?.message || e);
+      log.error(`${manifest.id} ${handler} failed`, { err: e?.message || e });
     }
   }
 }

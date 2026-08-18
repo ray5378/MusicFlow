@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { createLogger } from "../utils/logger.js";
 
 // Lazily load a backend/.env file if present (no dotenv dependency).
 // Real env vars always take precedence; existing vars are never overwritten.
@@ -16,6 +17,7 @@ function loadDotEnv() {
   } catch {}
 }
 
+const log = createLogger("FATAL");
 export function getDataDir(): string {
   return process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), "data");
 }
@@ -38,7 +40,7 @@ export function getJwtSecret(): string {
     console.log(`[SECRET] JWT_SECRET 未配置,已自动生成并保存到 ${secretFile}`);
     return generated;
   } catch (e: any) {
-    console.error("[FATAL] 无法生成 JWT_SECRET:", e.message);
+    log.error("无法生成 JWT_SECRET", { err: e.message });
     process.exit(1);
   }
 }

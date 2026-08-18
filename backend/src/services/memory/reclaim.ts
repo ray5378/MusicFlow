@@ -27,6 +27,9 @@ import { clearRenderedCovers } from "../coverImage.js";
 import { clearLyricsCache } from "../lyrics.js";
 import { clearCoverResolveCache } from "../playlistCover.js";
 import { clearStreamFallbackCache } from "../source/online/streamFallback.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("MEMORY-RECLAIM");
 
 const CHECK_INTERVAL_MS = 60 * 1000;        // 空闲检查周期
 const DEFAULT_IDLE_MINUTES = 5;             // 默认空闲阈值
@@ -125,19 +128,60 @@ function checkpointDb(): boolean {
   }
 }
 
+export interface MemorySnapshot {
+  rssMB: number;
+  heapUsedMB: number;
+  externalMB: number;
+  arrayBuffersMB: number;
+}
+
+/** 当前进程内存快照(只读观测,不触发回收)。 */
+export function getMemorySnapshot(): MemorySnapshot {
+  const m = process.memoryUsage();
+  return {
+    rssMB: Math.round(m.rss / 1024 / 1024),
+    heapUsedMB: Math.round(m.heapUsed / 1024 / 1024),
+    externalMB: Math.round(m.external / 1024 / 1024),
+    arrayBuffersMB: Math.round((m.arrayBuffers || 0) / 1024 / 1024),
+  };
+}
+
 export interface ReclaimReport {
   caches: string[];
   gc: boolean;
   checkpoint: boolean;
+  reason: "idle" | "manual";
+  memBefore: MemorySnapshot;
+  memAfter: MemorySnapshot;
 }
 
-/** 执行一轮完整回收(手动「立即回收」与空闲定时器共用)。 */
-export function reclaimNow(): ReclaimReport {
-  return {
+let lastReclaimAt: number | null = null;
+let lastReclaimReport: ReclaimReport | null = null;
+
+/** 执行一轮完整回收(手动「立即回收」与空闲定时器共用)。返回含回收前后内存的报告。 */
+export function reclaimNow(reason: "idle" | "manual" = "manual"): ReclaimReport {
+  const memBefore = getMemorySnapshot();
+  const report: ReclaimReport = {
     caches: reclaimCaches(),
     gc: gcNow(),
     checkpoint: checkpointDb(),
+    reason,
+    memBefore,
+    memAfter: getMemorySnapshot(),
   };
+  lastReclaimAt = Date.now();
+  lastReclaimReport = report;
+  console.log(
+    `[MEMORY-RECLAIM] ${reason} | caches=[${report.caches.join(",")}] gc=${report.gc} checkpoint=${report.checkpoint} | ` +
+    `rss ${memBefore.rssMB}→${report.memAfter.rssMB}MB heapUsed ${memBefore.heapUsedMB}→${report.memAfter.heapUsedMB}MB ` +
+    `external ${memBefore.externalMB}→${report.memAfter.externalMB}MB arrayBuffers ${memBefore.arrayBuffersMB}→${report.memAfter.arrayBuffersMB}MB`,
+  );
+  return report;
+}
+
+/** 最近一次回收状态(供管理端点观测)。 */
+export function getReclaimStatus(): { lastReclaimAt: number | null; lastReclaim: ReclaimReport | null } {
+  return { lastReclaimAt, lastReclaim: lastReclaimReport };
 }
 
 /** 启动空闲回收器:每 60s 检查一次,空闲则回收。幂等。 */
@@ -149,7 +193,7 @@ export function startIdleReclaimer(): void {
     try {
       if (isIdle()) reclaimNow();
     } catch (e: any) {
-      console.error("[MEMORY-RECLAIM] 空闲回收出错:", e?.message || e);
+      log.error("空闲回收出错", { err: e?.message || e });
     } finally {
       running = false;
     }
@@ -162,6 +206,8 @@ export function _resetReclaimForTest(): void {
   lastActivityAt = Date.now();
   lastGcAt = 0;
   lastCheckpointAt = 0;
+  lastReclaimAt = null;
+  lastReclaimReport = null;
   if (timer) { clearInterval(timer); timer = null; }
   running = false;
   cleaners.length = 0;

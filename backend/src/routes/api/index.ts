@@ -5,13 +5,15 @@ import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, 
 import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
+import { apiError, BusinessErrorCode } from "../../utils/errors.js";
+import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
-import { adminMiddleware } from "../../middleware/auth.js";
+import { adminMiddleware, invalidateAuthCaches } from "../../middleware/auth.js";
 import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
-import { touch, registerCacheCleaner, reclaimNow } from "../../services/memory/reclaim.js";
+import { touch, registerCacheCleaner, reclaimNow, isIdle, getMemorySnapshot, getReclaimStatus } from "../../services/memory/reclaim.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
 import { currentPace, setPace, BatchPace, markInteractiveStart, markInteractiveEnd, isBatchBusy } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask, getAsyncTask, anyTaskRunning } from "../../services/plugin/asyncTasks.js";
@@ -61,6 +63,7 @@ import { unregisterPlugin, firstEnabledByCapability, getPluginConfig, getPluginM
 import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
+import { createLogger } from "../../utils/logger.js";
 
 // 每日推荐 / 本地推荐 / 今日漫游 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
 const dailyApi = () => dailyRecommendApi();
@@ -68,6 +71,7 @@ const localApi = () => localRecommendApi();
 const comboApi = () => comboPlaylistApi();
 const syncApi = () => playlistSyncApi();
 
+const log = createLogger("RECOMMEND");
 export const apiRoutes = new Hono();
 apiRoutes.route("/", onlineRoutes);
 apiRoutes.route("/", playlistSearchRoutes);
@@ -237,6 +241,7 @@ apiRoutes.put("/v1/users/:id/password", async (c) => {
   if (!body.newPassword) return c.json({ error: "新密码不能为空" }, 400);
   const newSubsonicSalt = Math.random().toString(16).substring(2, 10);
   db.update(users).set({ password: md5(body.newPassword + newSubsonicSalt), subsonicSalt: newSubsonicSalt, passEnc: encryptPassword(body.newPassword), mustChangePassword: 0, apiKey: null, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
+  invalidateAuthCaches(); // 密码变更会清空 apiKey → 重建鉴权索引
   return c.json({ success: true });
 });
 
@@ -250,6 +255,7 @@ apiRoutes.put("/v1/users/:id/username", async (c) => {
   const existing = db.select().from(users).where(eq(users.username, name)).get();
   if (existing && existing.id !== id) return c.json({ error: "用户名已被占用" }, 409);
   db.update(users).set({ username: name, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
+  invalidateAuthCaches(); // 用户名变更影响鉴权缓存
   return c.json({ success: true, username: name });
 });
 
@@ -258,7 +264,7 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   if (id === user?.id) return c.json({ error: "不能删除当前登录账号" }, 400);
   const target = db.select().from(users).where(eq(users.id, id)).get();
-  if (!target) return c.json({ error: "用户不存在" }, 404);
+  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
   const owned = db.select().from(playlists).where(eq(playlists.ownerId, id)).all();
   if (owned.length > 0) {
     db.delete(playlistSongs).where(inArray(playlistSongs.playlistId, owned.map(p => p.id))).run();
@@ -308,6 +314,7 @@ apiRoutes.post("/v1/users/me/api-key", async (c) => {
     .set({ apiKey, apiKeyExpiresAt: expiresAt, updatedAt: new Date().toISOString() })
     .where(eq(users.id, user!.id))
     .run();
+  invalidateAuthCaches(); // 新 key 生效前重建索引
   return c.json({ apiKey, expiresAt });
 });
 
@@ -317,6 +324,7 @@ apiRoutes.delete("/v1/users/me/api-key", (c) => {
     .set({ apiKey: null, apiKeyExpiresAt: null, updatedAt: new Date().toISOString() })
     .where(eq(users.id, user!.id))
     .run();
+  invalidateAuthCaches(); // 撤销 key 后立即失效
   return c.json({ success: true });
 });
 
@@ -331,18 +339,18 @@ function assertKeyAccess(c: Context, id: string) {
 
 apiRoutes.get("/v1/users/:id/api-key", (c) => {
   const id = c.req.param("id")!;
-  if (!assertKeyAccess(c, id)) return c.json({ error: "无权查看该用户的 API Key" }, 403);
+  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权查看该用户的 API Key"), 403);
   const row = db.select().from(users).where(eq(users.id, id)).get();
-  if (!row) return c.json({ error: "用户不存在" }, 404);
+  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
   return c.json({ apiKey: row.apiKey || null, expiresAt: row.apiKeyExpiresAt || null });
 });
 
 // body: { expiresInDays?: number }  — omit or 0 for a key that never expires
 apiRoutes.post("/v1/users/:id/api-key", async (c) => {
   const id = c.req.param("id")!;
-  if (!assertKeyAccess(c, id)) return c.json({ error: "无权签发该用户的 API Key" }, 403);
+  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权签发该用户的 API Key"), 403);
   const row = db.select().from(users).where(eq(users.id, id)).get();
-  if (!row) return c.json({ error: "用户不存在" }, 404);
+  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
   const body = await c.req.json().catch(() => ({} as any));
   const days = Number(body?.expiresInDays) || 0;
   const apiKey = `mf_${randomBytes(24).toString("base64url")}`;
@@ -351,16 +359,18 @@ apiRoutes.post("/v1/users/:id/api-key", async (c) => {
     .set({ apiKey, apiKeyExpiresAt: expiresAt, updatedAt: new Date().toISOString() })
     .where(eq(users.id, id))
     .run();
+  invalidateAuthCaches(); // 新 key 生效前重建索引
   return c.json({ apiKey, expiresAt });
 });
 
 apiRoutes.delete("/v1/users/:id/api-key", (c) => {
   const id = c.req.param("id")!;
-  if (!assertKeyAccess(c, id)) return c.json({ error: "无权撤销该用户的 API Key" }, 403);
+  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权撤销该用户的 API Key"), 403);
   db.update(users)
     .set({ apiKey: null, apiKeyExpiresAt: null, updatedAt: new Date().toISOString() })
     .where(eq(users.id, id))
     .run();
+  invalidateAuthCaches(); // 撤销 key 后立即失效
   return c.json({ success: true });
 });
 
@@ -409,7 +419,7 @@ apiRoutes.delete("/v1/sources/:id", adminMiddleware, (c) => {
 apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!source) return c.json({ success: false, error: "媒体源不存在" });
+  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "媒体源不存在"));
 
   const config = JSON.parse(source.config || "{}");
 
@@ -421,7 +431,7 @@ apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
       return c.json(result);
     } catch (e: any) {
       console.log("[TEST] Error:", e.message);
-      return c.json({ success: false, error: e.message || "连接失败" });
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "连接失败"));
     }
   } else if (source.type === "local") {
     const fs = await import("fs");
@@ -431,7 +441,7 @@ apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
       return c.json({ success: false, error: `路径 ${config.path} 不存在` });
     }
   }
-  return c.json({ success: false, error: "不支持的媒体源类型" });
+  return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "不支持的媒体源类型"));
 });
 
 // Scan source
@@ -441,10 +451,10 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   touch(); // 标记活动:媒体源扫描
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!source) return c.json({ success: false, error: "媒体源不存在" });
-  if (!source.enabled) return c.json({ success: false, error: "媒体源已禁用" });
+  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "媒体源不存在"));
+  if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "媒体源已禁用"));
   if (scanJobs.has(id) && scanJobs.get(id)!.status === "running") {
-    return c.json({ success: false, error: "扫描正在进行中" });
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "扫描正在进行中"));
   }
 
   const body = await c.req.json().catch(() => ({}));
@@ -496,12 +506,12 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
               }
             }
           } catch (e: any) {
-            console.error("[ARTIST-SCRAPE] error:", e.message);
+            log.error("[ARTIST-SCRAPE] error", { err: e.message });
           }
         })();
       }
     } catch (e: any) {
-      console.error("Scan error:", e);
+      log.error("[SCANNER] Scan error", { err: e });
       scanJobs.set(id, { status: "failed", error: e.message || "扫描失败", startedAt: job.startedAt, progress: job.progress, mode });
     }
   })();
@@ -513,7 +523,7 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
 apiRoutes.post("/v1/sources/:id/scan-stop", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   const job = scanJobs.get(id);
-  if (!job || job.status !== "running") return c.json({ success: false, error: "没有正在运行的扫描" });
+  if (!job || job.status !== "running") return c.json(apiError(BusinessErrorCode.CONFLICT, "没有正在运行的扫描"));
   job.controller?.abort();
   return c.json({ success: true, message: "正在停止扫描..." });
 });
@@ -865,12 +875,12 @@ apiRoutes.post("/v1/artists/scrape", async (c) => {
   try {
     if (name) {
       const result = await scrapeArtist(name, body.artistId || undefined);
-      if (!result) return c.json({ success: false, error: "未找到歌手信息(QQ 和网易云均无结果)" });
+      if (!result) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "未找到歌手信息(QQ 和网易云均无结果)"));
       return c.json({ success: true, name: result.name, platform: result.platform, coverArt: result.coverArt, bio: result.bio || undefined });
     }
     // Full scrape: all artists missing covers, run in background with progress
     if (scrapeJobs.get(SCRAPE_JOB_ID)?.status === "running") {
-      return c.json({ success: false, error: "刮削正在进行中" });
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "刮削正在进行中"));
     }
     const missing = artistsMissingCovers();
     const job = { status: "running", startedAt: new Date().toISOString(), progress: undefined as any };
@@ -886,7 +896,7 @@ apiRoutes.post("/v1/artists/scrape", async (c) => {
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削" });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "刮削失败" });
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "刮削失败"));
   }
 });
 
@@ -902,7 +912,7 @@ apiRoutes.get("/v1/artists/scrape-status", (c) => {
 apiRoutes.post("/v1/artists/scrape-missing", async (c) => {
   try {
     if (scrapeJobs.get(SCRAPE_JOB_ID)?.status === "running") {
-      return c.json({ success: false, error: "刮削正在进行中" });
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "刮削正在进行中"));
     }
     const missing = artistsMissingInfo();
     if (missing.length === 0) {
@@ -921,7 +931,7 @@ apiRoutes.post("/v1/artists/scrape-missing", async (c) => {
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削缺失歌手信息" });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "刮削失败" });
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "刮削失败"));
   }
 });
 
@@ -933,19 +943,30 @@ apiRoutes.get("/v1/artists/missing-info-count", (c) => {
 // ==================== Settings ====================
 apiRoutes.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
 
-// 手动触发一轮空闲内存回收(系统设置页「立即回收」按钮)。返回各层回收结果。
+// 手动触发一轮空闲内存回收(系统设置页「立即回收」按钮)。返回各层回收结果 + 回收前后内存。
 apiRoutes.post("/v1/admin/memory/reclaim", adminMiddleware, (c) => {
-  const r = reclaimNow();
+  const r = reclaimNow("manual");
   return c.json({ success: true, ...r });
 });
 
 // 空闲内存自动回收设置:开关 + 空闲阈值(分钟)。存 settings 表,reclaim 运行时读取。
+// 附带实时内存快照与回收状态,供发版后一眼确认内存曲线(只读观测)。
 apiRoutes.get("/v1/admin/memory-settings", adminMiddleware, (c) => {
   const v = parseInt(getSetting("memory_idle_minutes", "5"), 10);
+  const mem = getMemorySnapshot();
+  const rs = getReclaimStatus();
   return c.json({
     success: true,
     enabled: getSettingBool("memory_auto_reclaim", true),
     idleMinutes: Number.isFinite(v) && v > 0 ? v : 5,
+    rssMB: mem.rssMB,
+    heapUsedMB: mem.heapUsedMB,
+    externalMB: mem.externalMB,
+    arrayBuffersMB: mem.arrayBuffersMB,
+    isIdle: isIdle(),
+    isBatchBusy: isBatchBusy(),
+    lastReclaimAt: rs.lastReclaimAt,
+    lastReclaim: rs.lastReclaim,
   });
 });
 apiRoutes.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
@@ -955,6 +976,11 @@ apiRoutes.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
     setSetting("memory_idle_minutes", String(Math.round(body.idleMinutes as number)));
   }
   return c.json({ success: true });
+});
+
+// 请求指标:总请求数 / 慢请求数 / 端点调用计数(内存态,重启清零)。
+apiRoutes.get("/v1/admin/metrics", adminMiddleware, (c) => {
+  return c.json({ success: true, ...getRequestMetrics() });
 });
 
 // ==================== Lyrics / covers media-fetch settings + backfill ====================
@@ -1095,7 +1121,7 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
     return c.json({ success: true, result }, 200);
   } catch (e: any) {
     const error = e.message || "每日推荐生成失败";
-    console.error("[DAILY-RECOMMEND] trigger error:", error);
+    log.error("[DAILY-RECOMMEND] trigger error", { err: error });
     return c.json({ success: false, error }, 500);
   }
 });
@@ -1106,9 +1132,9 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 // 前端在发起异步刷新后轮询此端点,直到 running=false。
 apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
   const id = c.req.param("id");
-  if (!id) return c.json({ success: false, error: "缺少插件 id" }, 400);
+  if (!id) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "缺少插件 id"), 400);
   const state = getPluginJobState(id);
-  if (!state) return c.json({ success: false, error: "该插件尚无任务记录" }, 404);
+  if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "该插件尚无任务记录"), 404);
   return c.json({ success: true, pluginId: id, running: state.running, job: state });
 });
 
@@ -1123,7 +1149,7 @@ apiRoutes.post("/v1/stream/probe", async (c) => {
   const songIds = Array.isArray(body.songIds)
     ? body.songIds.filter((s: any) => typeof s === "string").slice(0, 5)
     : [];
-  if (!songIds.length) return c.json({ success: false, error: "缺少 songIds" });
+  if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "缺少 songIds"));
   const results = await Promise.all(songIds.map(async (id: string) => {
     const song = db.select().from(songs).where(eq(songs.id, id)).get();
     if (!song) return { songId: id, ok: false, local: false, reason: "歌曲不存在" };
@@ -1155,7 +1181,7 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   const pluginId = body?.pluginId;
   if (pluginId) {
     const reg = getPlugin(pluginId);
-    if (!reg) return c.json({ success: false, error: "插件不存在" }, 404);
+    if (!reg) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "插件不存在"), 404);
     const caps: string[] = reg.manifest.capabilities || [];
     const isDaily =
       caps.includes("dailyPlaylist") ||
@@ -1163,22 +1189,22 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
       caps.includes("comboPlaylist") ||
       caps.includes("recommendPlaylist");
     if (!isDaily) {
-      return c.json({ success: false, error: "该插件不支持手动刷新(无推荐歌单能力)" }, 400);
+      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "该插件不支持手动刷新(无推荐歌单能力)"), 400);
     }
     // 未启用(或尚无 DB 行)视为不可用。
     if (getPluginConfig(pluginId) === null) {
-      return c.json({ success: false, error: "插件未启用" }, 503);
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "插件未启用"), 503);
     }
     const impl = reg.impl;
     if (typeof impl?.runDailyJob !== "function") {
-      return c.json({ success: false, error: "插件未实现 runDailyJob" }, 500);
+      return c.json(apiError(BusinessErrorCode.INTERNAL, "插件未实现 runDailyJob"), 500);
     }
     const { started, alreadyRunning } = runPluginJob(pluginId, "runDailyJob", { force: true });
     if (alreadyRunning) {
       return c.json({ success: true, pluginId, alreadyRunning: true, message: "该插件刷新任务已在后台运行中" }, 200);
     }
     if (!started) {
-      return c.json({ success: false, error: "任务启动失败" }, 500);
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "任务启动失败"), 500);
     }
     return c.json({ success: true, pluginId, started: true, message: "已开始后台刷新,可通过 GET /v1/plugins/:id/job 查询进度" }, 202);
   }
@@ -1205,8 +1231,8 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
     }
     return c.json({ success: true, seedSalt, results }, 200);
   } catch (e: any) {
-    console.error("[RECOMMEND] refresh error:", e.message || e);
-    return c.json({ success: false, error: e.message || "刷新失败" }, 500);
+    log.error("[RECOMMEND] refresh error", { err: e.message || e });
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "刷新失败"), 500);
   }
 });
 
@@ -1228,7 +1254,7 @@ apiRoutes.post("/v1/recommend-pool/playlist/:playlistId", async (c) => {
   const user = c.get("user");
   const playlistId = c.req.param("playlistId");
   const row = sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(playlistId) as any;
-  if (!row) return c.json({ success: false, error: "歌单不存在" }, 404);
+  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"), 404);
   const added = dailyApi()?.addToRecommendPool("playlist", playlistId, row.name || "", user?.id || "") ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "该歌单已在推荐池中" });
 });
@@ -1249,7 +1275,7 @@ apiRoutes.get("/v1/recommend-pool/playlist/:playlistId/status", (c) => {
 // Add the current user's favorites ("我喜欢的音乐") to the pool.
 apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
   const user = c.get("user");
-  if (!user?.id) return c.json({ success: false, error: "未登录" }, 401);
+  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "未登录"), 401);
   const added = dailyApi()?.addToRecommendPool("favorites", user.id, "我喜欢的音乐", user.id) ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "我喜欢的音乐已在推荐池中" });
 });
@@ -1257,7 +1283,7 @@ apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
 // Remove the current user's favorites from the pool.
 apiRoutes.delete("/v1/recommend-pool/favorites", (c) => {
   const user = c.get("user");
-  if (!user?.id) return c.json({ success: false, error: "未登录" }, 401);
+  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "未登录"), 401);
   const removed = dailyApi()?.removeFromRecommendPool("favorites", user.id) ?? false;
   return c.json({ success: true, removed });
 });
@@ -1277,7 +1303,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
   const native = body.native; // MusicFlow-exported JSON (object) for native files
-  if (!url && !native) return c.json({ success: false, error: "请输入歌单链接或选择歌单文件" });
+  if (!url && !native) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "请输入歌单链接或选择歌单文件"));
   if (native) {
       // Uploaded playlist file — routed to whichever enabled importer plugin
       // recognizes the payload (built-in: MusicFlow export, one or many playlists).
@@ -1293,7 +1319,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
           sourceUrl: null, sourcePlatform: imp.platform, externalId: null,
           syncEnabled: 0,
         }).run();
-        if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+        if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
         const result = await syncApi().rebuildPlaylistEntries(id, imp, {
           userId: user?.id,
           notes: `从本地歌单文件导入「${name}」`,
@@ -1319,9 +1345,9 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
       });
     }
     if (syncApi()?.checkImportCooldown(user?.id || "", url) ?? false) {
-      return c.json({ success: false, error: "相同歌单刚导入过,请稍候再试" });
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "相同歌单刚导入过,请稍候再试"));
     }
-    if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+    if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
     const ownerKey = `${url}:${user?.id || ""}`;
     const started = startAsyncTask("playlist-import", `url:${ownerKey}`, async () => {
       markInteractiveStart(); // 用户交互窗口:导入期间后台批量任务让路
@@ -1424,10 +1450,10 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ success: false, error: "歌单不存在" });
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"));
   // Only owner (or admin) can sync
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权同步该歌单" });
-  if (!syncApi()) return c.json({ success: false, error: "歌单同步插件未启用" }, 503);
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权同步该歌单"));
+  if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
   const started = startAsyncTask("playlist-sync", `pl:${id}`, async () => {
     markInteractiveStart(); // 用户交互窗口:手动同步期间后台批量任务让路
     try {
@@ -1446,7 +1472,7 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
 // 异步任务状态查询(前端轮询):GET /v1/tasks/:taskId
 apiRoutes.get("/v1/tasks/:taskId", (c) => {
   const state = getAsyncTask(c.req.param("taskId")!);
-  if (!state) return c.json({ success: false, error: "任务不存在" }, 404);
+  if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "任务不存在"), 404);
   return c.json({ success: true, task: state });
 });
 
@@ -1465,8 +1491,8 @@ apiRoutes.put("/v1/playlists/:id", async (c) => {
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({}));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ success: false, error: "歌单不存在" });
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权修改该歌单" });
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权修改该歌单"));
   const update: any = { updatedAt: new Date().toISOString() };
   if (body.name !== undefined) update.name = String(body.name).trim() || playlist.name;
   if (body.isPublic !== undefined) update.isPublic = body.isPublic ? 1 : 0;
@@ -1482,9 +1508,9 @@ apiRoutes.post("/v1/playlists/:id/convert-to-local", async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ success: false, error: "歌单不存在" });
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ success: false, error: "无权修改该歌单" });
-  if (!playlist.sourceUrl) return c.json({ success: false, error: "该歌单已是本地歌单,无需转换" });
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权修改该歌单"));
+  if (!playlist.sourceUrl) return c.json(apiError(BusinessErrorCode.CONFLICT, "该歌单已是本地歌单,无需转换"));
   const update: any = {
     sourceUrl: null,
     externalId: null,

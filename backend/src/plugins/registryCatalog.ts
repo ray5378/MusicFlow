@@ -31,6 +31,7 @@ import { discoverExternalPlugins } from "./discovery.js";
 import { validateManifest } from "./discovery.js";
 import type { PluginManifest } from "./types.js";
 import { proxyFetch } from "../services/proxy.js";
+import { createLogger } from "../utils/logger.js";
 
 const execFileAsync = promisify(execFile);
 const APP_VERSION = process.env.APP_VERSION || "dev";
@@ -67,6 +68,7 @@ interface RegistryEntry {
 }
 
 /** Persisted registry sources. */
+const log = createLogger("PLUGIN");
 export function listRegistries(): { id: string; url: string; enabled: number }[] {
   return db.select().from(pluginRegistries).all() as any[];
 }
@@ -355,7 +357,7 @@ export async function installPlugin(downloadUrl: string): Promise<{ id: string; 
     return { id: manifest.id, name: manifest.name };
   } catch (e) {
     // 把真实失败原因打进服务端日志(响应体只有 error message,容器日志此前看不到原因)。
-    console.error(`[PLUGIN] 安装失败(downloadUrl=${downloadUrl}):`, e);
+    log.error(`安装失败(downloadUrl=${downloadUrl})`, { err: e });
     throw e;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

@@ -38,7 +38,9 @@ import { copyCoverToFile, clearPlaylistCoverCache, firstPlayableCoverFile } from
 import { getPluginConfig } from "../../plugins/registry.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
+import { createLogger } from "../../utils/logger.js";
 
+const log = createLogger("DAILY-RECOMMEND");
 export interface DailyCandidate {
   platform: "qq" | "netease";
   url: string;
@@ -492,7 +494,7 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
       remoteImports.push(imported);
       console.log(`[DAILY-RECOMMEND] fetched ${c.platform} "${c.name || c.url}": ${imported.tracks.length} tracks`);
     } catch (e: any) {
-      console.error(`[DAILY-RECOMMEND] fetch failed for ${c.platform} "${c.name || c.url}": ${e.message || e}`);
+      log.error(`fetch failed for ${c.platform} "${c.name || c.url}": ${e.message || e}`);
     }
   }
 
@@ -650,7 +652,7 @@ export async function runDailyRecommendJob(opts?: { force?: boolean; seedSalt?: 
     }
     return result;
   } catch (e: any) {
-    console.error("[DAILY-RECOMMEND] error:", e.message || e);
+    log.error("error", { err: e.message || e });
     return null;
   }
 }

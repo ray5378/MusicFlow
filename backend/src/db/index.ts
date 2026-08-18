@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { JWT_SECRET, getDataDir } from "../utils/env.js";
+import { createLogger } from "../utils/logger.js";
 
 const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
@@ -21,6 +22,7 @@ sqlite.pragma("busy_timeout = 5000");
 sqlite.pragma("synchronous = NORMAL");
 sqlite.pragma("cache_size = -20000");
 
+const log = createLogger("db");
 export const db = drizzle(sqlite, { schema });
 // Export the raw sqlite handle so services can run lightweight key/value
 // lookups on the `settings` table without going through drizzle each time.
@@ -47,7 +49,7 @@ function runHook(hook: DbReadyHook): void {
   try {
     hook();
   } catch (e: any) {
-    console.error("[db] db-ready hook failed:", e?.message || e);
+    log.error("db-ready hook failed", { err: e?.message || e });
   }
 }
 

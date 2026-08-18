@@ -38,6 +38,7 @@ import { createComm } from "./comm.js";
 import { proxyFetch } from "../services/proxy.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 import { importOnlineSongs } from "../services/source/online/service.js";
+import { createLogger } from "../utils/logger.js";
 
 const VALID_TYPES: PluginType[] = [
   "source", "importer", "recommender", "sync",
@@ -95,6 +96,7 @@ const CAP_PERMISSIONS: Record<string, string[]> = {
 };
 
 /** 按 capabilities 推导插件需要的权限集合(去重)。 */
+const log = createLogger("auto-match");
 export function derivePermissions(caps: string[] | undefined): string[] {
   const out = new Set<string>();
   for (const c of caps || []) {
@@ -700,7 +702,7 @@ async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?
   ).get(playlistId) as { n: number };
   if ((extCount?.n || 0) > 0) {
     matchPlaylistInBackground(playlistId).catch((e) => {
-      console.error(`[auto-match] ${playlistId} 后台匹配失败:`, e?.message || e);
+      log.error(`${playlistId} 后台匹配失败`, { err: e?.message || e });
     });
   }
   return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);

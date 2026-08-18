@@ -21,6 +21,7 @@ import { discoverDlnaDevices, fetchDeviceAtLocation, onSsdpEvent, DlnaDevice } f
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
+import { createLogger } from "../../utils/logger.js";
 
 // ==================== base URL resolution (DLNA 拉流地址) ====================
 // DLNA 设备需要回连本服务的 /rest/dlna/stream/:token 拉取音频流,因此 streamUrl
@@ -41,6 +42,7 @@ const CURRENT_PORT = "46400";
 const LOOPBACK_RE = /^(localhost|0\.0\.0\.0|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\])$/i;
 
 /** Host 头推导的主机名能否用于 DLNA 拉流:必须可路由(非回环 IP 或带点主机名)。 */
+const log = createLogger("DLNA");
 export function isRoutableHostname(hostname: string): boolean {
   if (!hostname) return false;
   const h = hostname.replace(/^\[/, "").replace(/\]$/, "").trim();
@@ -530,7 +532,7 @@ function markFailed(deviceId: string, action: string, err: Error) {
   rt.available = false;
   // Suppress noisy logs for the expected "Pause on a stopped transport" fault.
   if (!/70[0-9]|transport/i.test(err.message)) {
-    console.error(`[DLNA] ${action} failed on ${deviceId}: ${err.message}`);
+    log.error(`${action} failed on ${deviceId}: ${err.message}`);
   }
 }
 
