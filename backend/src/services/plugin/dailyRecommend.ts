@@ -492,7 +492,7 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
     try {
       const imported = await importPlaylistFromUrl(c.url);
       remoteImports.push(imported);
-      console.log(`[DAILY-RECOMMEND] fetched ${c.platform} "${c.name || c.url}": ${imported.tracks.length} tracks`);
+      log.info(`[DAILY-RECOMMEND] fetched ${c.platform} "${c.name || c.url}": ${imported.tracks.length} tracks`);
     } catch (e: any) {
       log.error(`fetch failed for ${c.platform} "${c.name || c.url}": ${e.message || e}`);
     }
@@ -642,13 +642,13 @@ export async function runDailyRecommendJob(opts?: { force?: boolean; seedSalt?: 
   // the user actually has songs.
   const localCount = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number };
   if (!localCount || localCount.n === 0) {
-    console.log("[DAILY-RECOMMEND] local library empty, skipping today's recommendation");
+    log.info("[DAILY-RECOMMEND] local library empty, skipping today's recommendation");
     return null;
   }
   try {
     const result = await generateDailyPlaylist(new Date(), opts);
     if (!result.skipped) {
-      console.log(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool`);
+      log.info(`[DAILY-RECOMMEND] ${result.date}: ${result.picked.length} charts + ${result.poolMembers} pool members -> ${result.matched} matched, ${result.unmatched} stubs, ${result.wishAdded} wishes, ${result.poolSongsAdded} pool`);
     }
     return result;
   } catch (e: any) {

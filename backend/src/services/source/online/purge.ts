@@ -94,7 +94,7 @@ export function purgeExpiredWebSongs(providerId: string): PurgeResult {
   }
 
   if (purged > 0 || errors > 0) {
-    console.log(`[web-purge] ${providerId}: mode=${mode} retention=${retentionDays}d checked=${candidates.length} purged=${purged} covers=${covers} errors=${errors}`);
+    log.info(`[web-purge] ${providerId}: mode=${mode} retention=${retentionDays}d checked=${candidates.length} purged=${purged} covers=${covers} errors=${errors}`);
   }
   return { mode, retentionDays, checked: candidates.length, purged, covers, errors };
 }

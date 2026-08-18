@@ -138,7 +138,7 @@ export function seedDefaultRegistry(): boolean {
     const already = (db.select().from(pluginRegistries).all() as any[]).some((r) => r.url === url);
     if (!already) {
       addRegistry(url);
-      console.log(`[REGISTRY] 已添加官方插件注册表: ${url}`);
+      log.info(`[REGISTRY] 已添加官方插件注册表: ${url}`);
     }
 
     const now = new Date().toISOString();
@@ -149,7 +149,7 @@ export function seedDefaultRegistry(): boolean {
     return !already;
   } catch (e: any) {
     // A failed seed must never block boot — the admin can still add the URL by hand.
-    console.warn(`[REGISTRY] 官方注册表种子写入失败: ${e?.message || e}`);
+    log.warn(`[REGISTRY] 官方注册表种子写入失败: ${e?.message || e}`);
     return false;
   }
 }
@@ -286,7 +286,7 @@ export async function listMarketplace(): Promise<RegistryEntry[]> {
         seen.add(key);
         out.push(entry);
       } catch (e: any) {
-        console.warn(`[REGISTRY] 无法读取插件清单 ${url}: ${e?.message || e}`);
+        log.warn(`[REGISTRY] 无法读取插件清单 ${url}: ${e?.message || e}`);
       }
     }
   }

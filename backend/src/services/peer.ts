@@ -33,7 +33,9 @@ import { getQueueManager, type QueueItem, type PlayMode, type QueueSnapshot } fr
 import { getCachedDevices } from "./dlna/control.js";
 import { getEventManager } from "./dlna/eventing.js";
 import { getGroupManager } from "./group/index.js";
+import { createLogger } from "../utils/logger.js";
 
+const log = createLogger("peer");
 export type PeerKind = "local" | "dlna" | "group";
 
 export interface Peer {
@@ -451,7 +453,7 @@ class PeerManager extends EventEmitter {
           p.available = false;
           this.emit("peer_unavailable", p);
           this.emit("peer_queue_cleared", p.peerId);
-          console.log(`[peer] local peer ${p.peerId} inactive ${Math.round(idleMs / 1000)}s, queue cleared`);
+          log.info(`[peer] local peer ${p.peerId} inactive ${Math.round(idleMs / 1000)}s, queue cleared`);
         }
       } else {
         // dlna: only clear the device queue if the device is offline.
@@ -461,7 +463,7 @@ class PeerManager extends EventEmitter {
           if (snap && (snap.isActive || snap.items.length > 0)) {
             getQueueManager().clear(p.deviceId!);
             this.emit("peer_queue_cleared", p.peerId);
-            console.log(`[peer] dlna peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
+            log.info(`[peer] dlna peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
           }
         }
       }

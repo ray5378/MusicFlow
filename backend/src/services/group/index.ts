@@ -11,7 +11,9 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { playerGroups } from "../../db/schema.js";
 import { getCachedDevices } from "../dlna/control.js";
+import { createLogger } from "../../utils/logger.js";
 
+const log = createLogger("group");
 export interface PlayerGroup {
   id: string;
   name: string;
@@ -59,7 +61,7 @@ export class GroupManager extends EventEmitter {
       });
       for (const m of memberIds) this.addToIndex(m, r.id);
     }
-    console.log(`[group] loaded ${this.groups.size} player group(s) from DB`);
+    log.info(`[group] loaded ${this.groups.size} player group(s) from DB`);
   }
 
   list(): PlayerGroup[] {

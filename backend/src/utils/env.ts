@@ -37,7 +37,7 @@ export function getJwtSecret(): string {
     const generated = crypto.randomBytes(32).toString("hex");
     fs.mkdirSync(getDataDir(), { recursive: true });
     fs.writeFileSync(secretFile, generated, { mode: 0o600 });
-    console.log(`[SECRET] JWT_SECRET 未配置,已自动生成并保存到 ${secretFile}`);
+    log.info(`[SECRET] JWT_SECRET 未配置,已自动生成并保存到 ${secretFile}`);
     return generated;
   } catch (e: any) {
     log.error("无法生成 JWT_SECRET", { err: e.message });

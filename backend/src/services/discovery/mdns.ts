@@ -42,7 +42,7 @@ export function startMdnsBroadcast(port: number): void {
         uuid,
       },
     });
-    console.log(`[mDNS] broadcasting ${instanceName}._${SERVICE_TYPE}._${PROTO}.local. on :${port} (uuid=${uuid})`);
+    log.info(`[mDNS] broadcasting ${instanceName}._${SERVICE_TYPE}._${PROTO}.local. on :${port} (uuid=${uuid})`);
   } catch (e: any) {
     log.error("publish failed", { err: e.message });
   }

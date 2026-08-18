@@ -19,6 +19,9 @@ logs/
 *.log
 buildlog.txt
 
+# test coverage reports
+backend/coverage/
+
 # local scratch / capture artifacts (not project source)
 .workbuddy/
 capture_*.cjs

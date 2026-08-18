@@ -466,7 +466,7 @@ export function initDatabase() {
       INSERT INTO users (id, username, password, salt, subsonic_salt, is_admin, pass_enc, must_change_password)
       VALUES (?, ?, ?, ?, ?, 1, ?, 1)
     `).run(id, "admin", passwordHash, salt, defaultSalt, encryptPassword("admin"));
-    console.log("Default admin user created (admin/admin) — 请尽快登录并修改密码");
+    log.info("Default admin user created (admin/admin) — 请尽快登录并修改密码");
   }
 
   // Migration: force password change for users still on the well-known default credentials
@@ -477,7 +477,7 @@ export function initDatabase() {
     const stillDefault = decryptPassword(u.pass_enc) === "admin" || u.password === md5("admin" + u.subsonic_salt);
     if (stillDefault) {
       sqlite.prepare("UPDATE users SET must_change_password = 1 WHERE id = ?").run(u.id);
-      console.warn("[SECURITY] 检测到 admin 仍在使用默认密码(admin/admin),已标记为必须修改密码");
+      log.warn("[SECURITY] 检测到 admin 仍在使用默认密码(admin/admin),已标记为必须修改密码");
     }
   }
   // Migration: normalize legacy space-separated timestamps ('YYYY-MM-DD HH:MM:SS') to ISO 8601
@@ -495,7 +495,7 @@ export function initDatabase() {
     const adminUser = sqlite.prepare("SELECT id, password, subsonic_salt FROM users WHERE username = 'admin' AND (pass_enc IS NULL OR pass_enc = '')").get() as any;
     if (adminUser && adminUser.password === md5("admin" + adminUser.subsonic_salt)) {
       sqlite.prepare("UPDATE users SET pass_enc = ?, must_change_password = 1 WHERE id = ?").run(encryptPassword("admin"), adminUser.id);
-      console.warn("[SECURITY] admin 仍在使用默认密码(admin/admin),已标记为必须修改密码");
+      log.warn("[SECURITY] admin 仍在使用默认密码(admin/admin),已标记为必须修改密码");
     }
   } catch {}
 
@@ -528,7 +528,7 @@ export function initDatabase() {
   // initDatabase() guarantees the schema already exists.
   seedRegisteredPlugins();
 
-  console.log("Database initialized successfully");
+  log.info("Database initialized successfully");
 }
 
 // 风格表回填:从 songs.genre 全量同步(幂等,启动时调用)。
@@ -551,7 +551,7 @@ export function cleanupPlayHistory(retentionDays: number): number {
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
   const result = sqlite.prepare("DELETE FROM play_history WHERE played_at < ?").run(cutoff);
   if (result.changes > 0) {
-    console.log(`[PLAY-HISTORY] cleaned ${result.changes} rows older than ${retentionDays} days`);
+    log.info(`[PLAY-HISTORY] cleaned ${result.changes} rows older than ${retentionDays} days`);
   }
   return result.changes;
 }

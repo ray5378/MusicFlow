@@ -6,10 +6,12 @@
 import { getGroupManager } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
+import { createLogger } from "../../utils/logger.js";
 
 /** 组当前在线的成员 deviceId 列表(按成员顺序)。
  *  用"实时可达性"(isDeviceAvailable,由最近一次 SOAP 成败决定)而非发现缓存里的
  *  available(10 分钟无 SSDP 才翻转)——否则断电/断网一分钟内看门狗完全无法感知成员离线。 */
+const log = createLogger("group");
 export function getOnlineMemberIds(groupId: string): string[] {
   const g = getGroupManager().get(groupId);
   if (!g) return [];
@@ -32,7 +34,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     const results = await Promise.allSettled(members.map(d => op(createDlnaProtocolPlayer(d))));
     const rejected = results.filter(r => r.status === "rejected");
     if (rejected.length > 0) {
-      console.warn(`[group] ${groupId}: ${rejected.length}/${members.length} 成员命令失败`);
+      log.warn(`[group] ${groupId}: ${rejected.length}/${members.length} 成员命令失败`);
     }
     return { fulfilled: results.length - rejected.length, rejected: rejected.length };
   }
@@ -51,7 +53,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       if (!ok) throw new Error(`组 ${groupId} 全部成员 cast 失败`);
       const rejected = results.filter(r => r.status === "rejected");
       if (rejected.length > 0) {
-        console.warn(`[group][cast] ${groupId}: ${rejected.length}/${members.length} 成员 cast 失败`);
+        log.warn(`[group][cast] ${groupId}: ${rejected.length}/${members.length} 成员 cast 失败`);
       }
       // 上报用的 mediaUri 取 leader 的(状态派生自 leader)。
       return (ok as PromiseFulfilledResult<{ mediaUri: string }>).value;

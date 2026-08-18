@@ -21,7 +21,9 @@ import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.j
 import { refreshPlaylistCounts } from "../../plugin/shared.js";
 import { getPluginManifest, listRegistered } from "../../../plugins/registry.js";
 import { acquireBatchLock, sleepBetweenBatch } from "../../plugin/batchPacer.js";
+import { createLogger } from "../../../utils/logger.js";
 
+const log = createLogger("recommend-sync");
 export const DAILY_TAG = "每日推荐";
 // The daily-recommend sourceUrl prefix is no longer hardcoded — each source
 // plugin declares its own `recommendPrefix` in its manifest, so a second
@@ -172,7 +174,7 @@ export async function importRecommendPlaylist(
     const existing = findRecommendPlaylist(info.id, providerId);
     if (existing) {
       removePlaylistRows(existing.id);
-      console.log(`[recommend-sync] 歌单「${displayName}」音乐为 0,已自动删除`);
+      log.info(`[recommend-sync] 歌单「${displayName}」音乐为 0,已自动删除`);
     }
     return { success: false, created: false, name: displayName, platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: imp.failed };
   }
@@ -318,7 +320,7 @@ async function doSyncAllRecommendPlaylists(
           out.push({ id: r.playlistId, name: r.name, trackCount: r.trackCount });
         } else if (r.trackCount === 0) {
           // 空歌单(音乐为 0)已在 importRecommendPlaylist 中自动删除,不算失败。
-          console.log(`[recommend-sync] [${ch.source}] ${pl.name}: 空歌单,已自动删除`);
+          log.info(`[recommend-sync] [${ch.source}] ${pl.name}: 空歌单,已自动删除`);
         } else {
           errors.push(`[${ch.source}] ${pl.name}: 导入失败`);
         }
@@ -360,7 +362,7 @@ async function doSyncAllRecommendPlaylists(
     if (current.size > 0 && current.size >= (oldByChannel.get(src) || 0) && !current.has(remoteId)) {
       try {
         removePlaylistRows(pl.id);
-        console.log(`[recommend-sync] 清理旧歌单 ${pl.name} (${src}/${remoteId})`);
+        log.info(`[recommend-sync] 清理旧歌单 ${pl.name} (${src}/${remoteId})`);
       } catch (e: any) {
         errors.push(`删除旧歌单 ${pl.name}: ${e.message || "失败"}`);
       }

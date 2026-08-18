@@ -74,7 +74,7 @@ export class QueueController extends EventEmitter {
     const up = new UniversalPlayer(`dlna:${deviceId}`, name);
     up.attachProtocol(createDlnaProtocolPlayer(deviceId));
     this.registerPlayer(deviceId, up, getPlayerController());
-    console.log(`[QueueController] registered DLNA device: ${deviceId} (${name})`);
+    log.info(`[QueueController] registered DLNA device: ${deviceId} (${name})`);
   }
 
   /** 组创建后注册:创建 UniversalPlayer + 绑定 GroupProtocolPlayer(扇出到在线成员)。
@@ -84,7 +84,7 @@ export class QueueController extends EventEmitter {
     const up = new UniversalPlayer(`group:${groupId}`, name);
     up.attachProtocol(createGroupProtocolPlayer(groupId));
     this.registerPlayer(groupId, up, getPlayerController());
-    console.log(`[QueueController] registered group player: ${groupId} (${name})`);
+    log.info(`[QueueController] registered group player: ${groupId} (${name})`);
   }
 
   /** 孤儿清理:删除已不在设备表/组表中的注册播放器与队列(key=裸 deviceId/groupId,
@@ -130,7 +130,7 @@ export class QueueController extends EventEmitter {
         // state.playerId 已是 "dlna:<deviceId>",直接上报 PlayerController。
         this.ctrls.get(deviceId)?.reportState(state);
       } catch (e: any) {
-        console.warn(`[QueueController][poll] ${deviceId}: ${e?.message || e}`);
+        log.warn(`[QueueController][poll] ${deviceId}: ${e?.message || e}`);
       }
     }
   }
@@ -325,19 +325,19 @@ export class QueueController extends EventEmitter {
         const skips = (this.skipCounters.get(deviceId) || 0) + 1;
         this.skipCounters.set(deviceId, skips);
         if (skips >= Math.max(3, q.items.length + 1)) {
-          console.warn(`[QueueController][playCurrent] ${deviceId}: 连续 ${skips} 首不可播,停止`);
+          log.warn(`[QueueController][playCurrent] ${deviceId}: 连续 ${skips} 首不可播,停止`);
           this.skipCounters.delete(deviceId);
           this.markEnded(deviceId);
           return;
         }
-        console.warn(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过并移除 (${skips})`);
+        log.warn(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过并移除 (${skips})`);
         this.removeAt(deviceId, q.currentIndex, baseUrl);
         return;
       }
     }
     // PlayerController 的 key 取 player 自身完整 id(dlna:<id> 或 group:<gid>)。
     const playerId = player.playerId;
-    console.log(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
+    log.info(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
     try {
       // 乐观窗口必须在 cast 之前开启:castToDevice 内部 Stop→SetAVTransportURI→Play
       // 会触发 GENA STOPPED/TRANSITIONING/PLAYING 事件。若窗口在 cast 之后才开,
@@ -663,9 +663,9 @@ export class QueueController extends EventEmitter {
           this.persist(deviceId);
           this.emit("queue_changed", deviceId, this.snapshot(deviceId));
         }
-        console.log(`[group] ${groupId}: 新成员 ${deviceId} 已对齐(位置 ${Math.round(landed)}s, 状态 ${playState ?? "?"})`);
+        log.info(`[group] ${groupId}: 新成员 ${deviceId} 已对齐(位置 ${Math.round(landed)}s, 状态 ${playState ?? "?"})`);
       } catch (e: any) {
-        console.warn(`[group] ${groupId}: 新成员 ${deviceId} 加入对齐失败: ${e?.message || e}`);
+        log.warn(`[group] ${groupId}: 新成员 ${deviceId} 加入对齐失败: ${e?.message || e}`);
       }
     }
   }
@@ -712,7 +712,7 @@ export class QueueController extends EventEmitter {
         });
       } catch {}
     }
-    console.log(`[QueueController] loaded ${this.queues.size} persisted queue(s) (${groupRows.length} group) from DB`);
+    log.info(`[QueueController] loaded ${this.queues.size} persisted queue(s) (${groupRows.length} group) from DB`);
   }
 
   private persist(playerId: string): void {

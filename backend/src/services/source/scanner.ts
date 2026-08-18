@@ -167,7 +167,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
       progress.currentTrack = "";
       progress.totalFiles = discoveredFiles;
       emitProgress();
-      console.log(`[SCANNER] Scan complete: +${added} ~${updated} -${skipped} (mode=${mode})`);
+      log.info(`[SCANNER] Scan complete: +${added} ~${updated} -${skipped} (mode=${mode})`);
       doneResolve();
     }
   };
@@ -180,7 +180,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
     progress.currentTrack = "";
     progress.totalFiles = discoveredFiles;
     emitProgress();
-    console.log(`[SCANNER] Scan aborted: +${added} ~${updated} -${skipped} (mode=${mode})`);
+    log.info(`[SCANNER] Scan aborted: +${added} ~${updated} -${skipped} (mode=${mode})`);
     doneResolve();
   };
   if (signal) {
@@ -311,7 +311,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   }
   if (removed > 0) cleanupOrphans();
 
-  console.log(`[SCANNER] WebDAV ${mode} scan: +${added} ~${updated} -${removed} skip=${skipped}`);
+  log.info(`[SCANNER] WebDAV ${mode} scan: +${added} ~${updated} -${removed} skip=${skipped}`);
   return { added, updated, removed, skipped };
 }
 
@@ -602,6 +602,6 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
   progress.phase = "done";
   progress.currentTrack = "";
   if (onProgress) onProgress(progress);
-  console.log(`[Local] ${mode} scan complete: +${added} ~${updated} -${removed} skip=${skipped}`);
+  log.info(`[Local] ${mode} scan complete: +${added} ~${updated} -${removed} skip=${skipped}`);
   return { added, updated, removed, skipped };
 }

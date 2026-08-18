@@ -23,7 +23,7 @@ function scheduleReload(): void {
     try {
       // reload 模式:同 id 外置插件先 dispose 旧 QuickJS VM 再覆盖注册,文件改动即时生效。
       const loaded = await discoverExternalPlugins(APP_VERSION, undefined, { reload: true });
-      if (loaded > 0) console.log(`[PLUGIN-HOTRELOAD] 重新发现 ${loaded} 个外置插件`);
+      if (loaded > 0) log.info(`[PLUGIN-HOTRELOAD] 重新发现 ${loaded} 个外置插件`);
     } catch (e: any) {
       log.error("重载失败", { err: e?.message || e });
     }
@@ -43,7 +43,7 @@ export function startPluginHotReload(): void {
       scheduleReload();
     });
     watcher.on("error", (e: any) => console.warn("[PLUGIN-HOTRELOAD] watch error:", e?.message || e));
-    console.log("[PLUGIN-HOTRELOAD] 已监听 data/plugins 变更");
+    log.info("[PLUGIN-HOTRELOAD] 已监听 data/plugins 变更");
   } catch (e: any) {
     console.warn("[PLUGIN-HOTRELOAD] 无法启动监听(将需重启后端以加载新插件):", e?.message || e);
   }

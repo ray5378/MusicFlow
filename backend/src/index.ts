@@ -45,9 +45,9 @@ app.use("*", async (c, next) => {
   const status = c.res.status;
   const ts = new Date().toLocaleString("zh-CN", { hour12: false });
   if (status === 401) {
-    console.log(`[${ts}] 认证失败,请检查账号密码: ${c.req.method} ${c.req.path}`);
+    log.info(`[${ts}] 认证失败,请检查账号密码: ${c.req.method} ${c.req.path}`);
   } else if (status >= 500) {
-    console.log(`[${ts}] ${c.req.method} ${c.req.path} -> ${status}`);
+    log.info(`[${ts}] ${c.req.method} ${c.req.path} -> ${status}`);
   }
 });
 
@@ -272,13 +272,13 @@ async function runDailyJobs() {
       // dailyPlaylist / localPlaylist(内置推荐引擎)保持同步 await,不改变既有行为。
       if (cap === "recommendPlaylist") {
         const { started, alreadyRunning } = runPluginJob(manifest.id, "runDailyJob");
-        if (started) console.log(`[DAILY-SCHEDULER] ${manifest.id}: 已调度后台任务`);
-        else if (alreadyRunning) console.log(`[DAILY-SCHEDULER] ${manifest.id}: 任务已在运行,跳过`);
+        if (started) log.info(`[DAILY-SCHEDULER] ${manifest.id}: 已调度后台任务`);
+        else if (alreadyRunning) log.info(`[DAILY-SCHEDULER] ${manifest.id}: 任务已在运行,跳过`);
         continue;
       }
       try {
         const summary = await impl.runDailyJob();
-        if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+        if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
       } catch (e: any) {
         log.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error`, { err: e.message || e });
       }
@@ -289,7 +289,7 @@ async function runDailyJobs() {
     if (typeof impl?.runDailyJob !== "function") continue;
     try {
       const summary = await impl.runDailyJob();
-      if (summary) console.log(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+      if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
     } catch (e: any) {
       log.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error`, { err: e.message || e });
     }
@@ -303,7 +303,7 @@ async function runDailyJobs() {
       try {
         const r = await syncAllRecommendPlaylists(manifest.id, {});
         if (r.synced > 0 || r.failed > 0) {
-          console.log(`[DAILY-SCHEDULER] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
+          log.info(`[DAILY-SCHEDULER] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
         }
       } catch (e: any) {
         log.error(`[DAILY-SCHEDULER] ${manifest.id} recommend sync error`, { err: e.message || e });
@@ -313,7 +313,7 @@ async function runDailyJobs() {
       try {
         const r = purgeExpiredWebSongs(manifest.id);
         if (r.purged > 0 || r.errors > 0) {
-          console.log(`[DAILY-SCHEDULER] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
+          log.info(`[DAILY-SCHEDULER] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
         }
       } catch (e: any) {
         log.error(`[DAILY-SCHEDULER] ${manifest.id} web-song purge error`, { err: e.message || e });
@@ -333,7 +333,7 @@ function scheduleNextDailyRun() {
     await runDailyJobs();
     scheduleNextDailyRun(); // re-arm for the next day
   }, delay);
-  console.log(`[DAILY-SCHEDULER] next daily-recommend run at ${next.toLocaleString("zh-CN", { hour12: false })} (in ${Math.round(delay / 60000)} min)`);
+  log.info(`[DAILY-SCHEDULER] next daily-recommend run at ${next.toLocaleString("zh-CN", { hour12: false })} (in ${Math.round(delay / 60000)} min)`);
 }
 
 // Boot-time catch-up: if today's daily playlist is missing (server was off at
@@ -360,8 +360,8 @@ setInterval(async () => {
   for (const { manifest, impl } of getEnabledByCapability("playlistSync")) {
     if (typeof impl?.runSyncJob !== "function") continue;
     const { started, alreadyRunning } = runPluginJob(manifest.id, "runSyncJob");
-    if (started) console.log(`[AUTO-SYNC] ${manifest.id}: 已调度后台同步`);
-    else if (alreadyRunning) console.log(`[AUTO-SYNC] ${manifest.id}: 同步任务已在运行,跳过`);
+    if (started) log.info(`[AUTO-SYNC] ${manifest.id}: 已调度后台同步`);
+    else if (alreadyRunning) log.info(`[AUTO-SYNC] ${manifest.id}: 同步任务已在运行,跳过`);
   }
   // Auto-scrape artist info for artists added in the last 7 days that still
   // have no cover (QQ first, NetEase fallback). Older artists are left alone
@@ -372,7 +372,7 @@ setInterval(async () => {
       .filter(a => !a.coverArt && (a.createdAt || "") >= since);
     if (recent.length > 0) {
       const r = await scrapeArtistList(recent.map(a => a.id));
-      console.log(`[ARTIST-SCRAPE] scheduled run: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
+      log.info(`[ARTIST-SCRAPE] scheduled run: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
     }
   } catch (e: any) {
     log.error("[ARTIST-SCRAPE] error", { err: e.message });
@@ -485,7 +485,7 @@ startIdleReclaimer();
 startOrphanPruner();
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`MusicFlow backend listening on http://0.0.0.0:${port}`);
+  log.info(`MusicFlow backend listening on http://0.0.0.0:${port}`);
   // Broadcast via mDNS so the HA integration can auto-discover this instance.
   startMdnsBroadcast(port);
   // Resume active queues after a short delay so SSDP discovery has time to
@@ -500,7 +500,7 @@ server.listen(port, "0.0.0.0", () => {
     }
     const active = getQueueController().activeDevices();
     if (active.length === 0) return;
-    console.log(`[queue] resuming ${active.length} active device queue(s) after restart`);
+    log.info(`[queue] resuming ${active.length} active device queue(s) after restart`);
     for (const { deviceId } of active) {
       getQueueController().resumeActive(deviceId, baseUrl).catch((e) => {
         console.warn(`[queue] resume failed for ${deviceId}:`, e?.message || e);

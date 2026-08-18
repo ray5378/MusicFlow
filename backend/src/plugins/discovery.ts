@@ -459,7 +459,7 @@ export async function discoverExternalPlugins(
     const id = entry.name;
     const file = safeResolve(root, id);
     if (!file || !fs.existsSync(file)) {
-      console.warn(`[PLUGIN] 跳过外置插件 ${id}: 缺少 index.js`);
+      log.warn(`[PLUGIN] 跳过外置插件 ${id}: 缺少 index.js`);
       continue;
     }
     try {
@@ -475,7 +475,7 @@ export async function discoverExternalPlugins(
       // 这是必须的——若等沙箱建好再 dispose,QuickJS JS_FreeRuntime 的 gc 断言
       // (list_empty(&rt->gc_obj_list))会以 abort 终止整个进程(实测崩溃,容器退出)。
       if (expectedManifest && !isAppVersionCompatible(expectedManifest, appVersion)) {
-        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${expectedManifest.minAppVersion}, 当前 ${appVersion}`);
+        log.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${expectedManifest.minAppVersion}, 当前 ${appVersion}`);
         continue;
       }
       const declaredPerms = expectedManifest?.permissions ?? [];
@@ -585,18 +585,18 @@ export async function discoverExternalPlugins(
       const added = [...merged].filter((p) => !env.permissions.includes(p));
       if (added.length) {
         env.permissions = [...merged];
-        console.warn(`[PLUGIN] ${id}: 按能力/类型推导自动补齐权限: ${added.join(",")}`);
+        log.warn(`[PLUGIN] ${id}: 按能力/类型推导自动补齐权限: ${added.join(",")}`);
       }
       const reason = validateManifest(manifest);
-      if (reason) { sandbox.dispose(); console.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }
+      if (reason) { sandbox.dispose(); log.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }
       if (!impl || typeof impl !== "object") {
         sandbox.dispose();
-        console.warn(`[PLUGIN] 跳过外置插件 ${id}: create() 未返回 impl 对象`);
+        log.warn(`[PLUGIN] 跳过外置插件 ${id}: create() 未返回 impl 对象`);
         continue;
       }
       if (getPlugin(manifest.id) && !reload) {
         sandbox.dispose();
-        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 与已注册插件 id 冲突`);
+        log.warn(`[PLUGIN] 跳过外置插件 ${id}: 与已注册插件 id 冲突`);
         continue;
       }
       if (reload) {
@@ -604,7 +604,7 @@ export async function discoverExternalPlugins(
         const existingSandbox = pluginSandboxes.get(manifest.id);
         if (!existingSandbox && getPlugin(manifest.id)) {
           sandbox.dispose();
-          console.warn(`[PLUGIN] 跳过外置插件 ${id}: 与内置插件 id 冲突,不可覆盖`);
+          log.warn(`[PLUGIN] 跳过外置插件 ${id}: 与内置插件 id 冲突,不可覆盖`);
           continue;
         }
         if (existingSandbox) {
@@ -614,15 +614,15 @@ export async function discoverExternalPlugins(
       }
       if (!isAppVersionCompatible(manifest, appVersion)) {
         sandbox.dispose();
-        console.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${manifest.minAppVersion}, 当前 ${appVersion}`);
+        log.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${manifest.minAppVersion}, 当前 ${appVersion}`);
         continue;
       }
       registerPlugin(manifest, impl);
       pluginSandboxes.set(manifest.id, sandbox);
       loaded++;
-      console.log(`[PLUGIN] 已加载外置插件 ${id} (${manifest.type}, ${manifest.capabilities.join("/")}) [沙箱]`);
+      log.info(`[PLUGIN] 已加载外置插件 ${id} (${manifest.type}, ${manifest.capabilities.join("/")}) [沙箱]`);
     } catch (e: any) {
-      console.warn(`[PLUGIN] 加载外置插件 ${id} 失败: ${e?.message || e}`);
+      log.warn(`[PLUGIN] 加载外置插件 ${id} 失败: ${e?.message || e}`);
     }
   }
 

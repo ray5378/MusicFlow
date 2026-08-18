@@ -10,6 +10,7 @@ import { getGroupManager } from "./index.js";
 import { getOnlineMemberIds, getGroupStatus } from "./protocolPlayer.js";
 import { getQueueController } from "../player/index.js";
 import { getEffectiveBaseUrl, alignDeviceToPosition, getDeviceStatus } from "../dlna/control.js";
+import { createLogger } from "../../utils/logger.js";
 
 const TICK_MS = 10_000;
 
@@ -20,10 +21,11 @@ const suspended = new Set<string>();
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
+const log = createLogger("group");
 export function startGroupWatchdog(): void {
   if (timer) return;
   timer = setInterval(() => { runGroupWatchdogTick().catch(() => {}); }, TICK_MS);
-  console.log(`[group] offline watchdog started (every ${TICK_MS / 1000}s)`);
+  log.info(`[group] offline watchdog started (every ${TICK_MS / 1000}s)`);
 }
 
 export function stopGroupWatchdog(): void {
@@ -67,7 +69,7 @@ export async function runGroupWatchdogTick(): Promise<void> {
         // 清掉 tracker 的 lastPlaying:成员回归后 leader 报 NO_MEDIA_PRESENT→IDLE 时
         // 不再被误判 ended(否则队列被 deactivate,恢复无从谈起)。
         qc.resetGroupTracker(g.id);
-        console.log(`[group] ${g.id}(${g.name}) 所有成员离线,播放悬挂(队列保留),成员回归后自动恢复`);
+        log.info(`[group] ${g.id}(${g.name}) 所有成员离线,播放悬挂(队列保留),成员回归后自动恢复`);
       }
       continue;
     }
@@ -79,10 +81,10 @@ export async function runGroupWatchdogTick(): Promise<void> {
       let state: string | undefined;
       try { state = (await getGroupStatus(g.id)).state; } catch {}
       if (state === "PLAYING" || state === "PAUSED_PLAYBACK") {
-        console.log(`[group] ${g.id}(${g.name}) 成员回归但已在播(${state}),跳过自动恢复`);
+        log.info(`[group] ${g.id}(${g.name}) 成员回归但已在播(${state}),跳过自动恢复`);
         continue;
       }
-      console.log(`[group] ${g.id}(${g.name}) 成员回归,恢复播放@${resumePos}s`);
+      log.info(`[group] ${g.id}(${g.name}) 成员回归,恢复播放@${resumePos}s`);
       await qc.resumeActive(g.id, getEffectiveBaseUrl());
       if (resumePos > 0) {
         // resumeActive 里的 cast 会让成员从头播,cast 后立刻 seek 在部分渲染器上

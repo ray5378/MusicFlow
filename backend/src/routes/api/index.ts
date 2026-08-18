@@ -493,14 +493,14 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
             const newArtists = db.select().from(artists).all()
               .filter(a => !preScanArtistIds.has(a.id) && !a.coverArt);
             if (newArtists.length > 0) {
-              console.log(`[ARTIST-SCRAPE] ${newArtists.length} new artists, scraping...`);
+              log.info(`[ARTIST-SCRAPE] ${newArtists.length} new artists, scraping...`);
               const job2 = { status: "running", startedAt: new Date().toISOString(), progress: undefined as any };
               scrapeJobs.set(SCRAPE_JOB_ID, job2);
               const onProgress = (p: any) => { job2.progress = { ...p }; };
               try {
                 const r = await scrapeArtistList(newArtists.map(a => a.id), onProgress);
                 scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job2.startedAt, finishedAt: new Date().toISOString(), progress: r });
-                console.log(`[ARTIST-SCRAPE] done: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
+                log.info(`[ARTIST-SCRAPE] done: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
               } catch (e: any) {
                 scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job2.startedAt, error: e.message || "刮削失败", progress: job2.progress });
               }
@@ -618,7 +618,7 @@ apiRoutes.delete("/v1/plugins/:id", adminMiddleware, (c) => {
   const dir = path.join(getDataDir(), "plugins", p.id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   db.delete(plugins).where(eq(plugins.id, p.id)).run();
-  console.log(`[PLUGIN] 已删除插件 ${p.id} (${p.name || ""})`);
+  log.info(`[PLUGIN] 已删除插件 ${p.id} (${p.name || ""})`);
   return c.json({ success: true });
 });
 
@@ -2429,7 +2429,7 @@ apiRoutes.post("/v1/peers/:peerId/announce", async (c) => {
   }
   if (isAnnouncing(peerId)) return c.json({ error: "该播放器正在播报中" }, 409);
   announceOnPeer({ peerId, url, volume }).catch((e: any) => {
-    console.warn(`[announce] ${peerId}: ${e?.message || e}`);
+    log.warn(`[announce] ${peerId}: ${e?.message || e}`);
   });
   return c.json({ success: true, accepted: true }, 202);
 });
@@ -2559,7 +2559,7 @@ apiRoutes.put("/v1/groups/:id", async (c) => {
         // 成员加入播放中的组:把当前曲 cast 给新成员并 seek 到 leader 进度
         // (仅加入时一次,不做周期漂移校正——纯 MA 忠实策略)。
         getQueueController().rejoinMembers(id, added).catch((e: any) => {
-          console.warn(`[group] ${id}: 成员加入对齐失败: ${e?.message || e}`);
+          log.warn(`[group] ${id}: 成员加入对齐失败: ${e?.message || e}`);
         });
       }
     }

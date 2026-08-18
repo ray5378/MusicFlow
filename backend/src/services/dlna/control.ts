@@ -521,7 +521,7 @@ async function waitForCanPlay(device: DlnaDevice, budgetMs = 10000): Promise<voi
     } catch { return; }
     await new Promise(r => setTimeout(r, 250));
   }
-  console.log(`[cast] ${device.id}: waitForCanPlay 超时(10s),继续尝试 Play`);
+  log.info(`[cast] ${device.id}: waitForCanPlay 超时(10s),继续尝试 Play`);
 }
 
 // Mark a SOAP failure on the device runtime so the poller knows to keep
@@ -555,7 +555,7 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   const albumArtUri = opts.coverArt ? `${opts.baseUrl}/rest/getCoverArt?id=${encodeURIComponent(opts.coverArt)}&size=500` : undefined;
   const metadata = buildDidlLite({ title: opts.title, artist: opts.artist, album: opts.album, uri: streamUrl, mime: opts.mime, albumArtUri });
 
-  console.log(`[cast] ${opts.deviceId}: BEGIN songId=${opts.songId} title="${opts.title}"`);
+  log.info(`[cast] ${opts.deviceId}: BEGIN songId=${opts.songId} title="${opts.title}"`);
   // Reset the "next enqueued" flag — a fresh SetAVTransportURI clears the device's next slot.
   runtimeOf(opts.deviceId).nextEnqueued = false;
 
@@ -563,29 +563,29 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
   } catch (e: any) {
-    console.log(`[cast] ${opts.deviceId}: Step 1 Stop failed (ignored): ${e?.message || e}`);
+    log.info(`[cast] ${opts.deviceId}: Step 1 Stop failed (ignored): ${e?.message || e}`);
   }
 
   // 注:MA 在 stop 与 SetAVTransportURI 之间无固定 sleep,依赖 wait_for_can_play 等设备就绪。
 
   // Step 2: SetAVTransportURI.
-  console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI`);
+  log.info(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI`);
   await soapCall(device.avTransportUrl, AV_TRANSPORT, "SetAVTransportURI", {
     InstanceID: "0",
     CurrentURI: streamUrl,
     CurrentURIMetaData: metadata,
   });
-  console.log(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI OK`);
+  log.info(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI OK`);
 
   // Step 3: wait_for_can_play — 检查 CurrentTransportActions 含 play。对照 MA 10s budget。
-  console.log(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay`);
+  log.info(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay`);
   await waitForCanPlay(device);
-  console.log(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay OK`);
+  log.info(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay OK`);
 
   // Step 4: Play.
-  console.log(`[cast] ${opts.deviceId}: Step 4 Play`);
+  log.info(`[cast] ${opts.deviceId}: Step 4 Play`);
   await soapCall(device.avTransportUrl, AV_TRANSPORT, "Play", { InstanceID: "0", Speed: "1" });
-  console.log(`[cast] ${opts.deviceId}: Step 4 Play OK`);
+  log.info(`[cast] ${opts.deviceId}: Step 4 Play OK`);
   markOk(opts.deviceId);
 
   // Record the currently-loaded media so getDeviceStatus / WS pushes can
@@ -608,7 +608,7 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
   getEventManager().subscribe(device).catch(() => {});
-  console.log(`[cast] ${opts.deviceId}: END songId=${opts.songId}`);
+  log.info(`[cast] ${opts.deviceId}: END songId=${opts.songId}`);
   return { mediaUri: streamUrl };
 }
 
@@ -825,7 +825,7 @@ export async function alignDeviceToPosition(
   }
   const finalTarget = opts?.getTargetSec ? await opts.getTargetSec() : targetSec;
   if (Math.abs(lastPos - finalTarget) > toleranceSec) {
-    console.warn(`[align] ${deviceId} 目标 ${Math.round(finalTarget)}s,校准后仍在 ${lastPos}s(设备可能不支持 seek)`);
+    log.warn(`[align] ${deviceId} 目标 ${Math.round(finalTarget)}s,校准后仍在 ${lastPos}s(设备可能不支持 seek)`);
   }
   return lastPos;
 }

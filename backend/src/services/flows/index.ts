@@ -12,7 +12,9 @@ import { getQueueController } from "../player/index.js";
 import { setDeviceVolume, refreshDevices } from "../dlna/control.js";
 import { resolveContentSongs, songsToQueueItems } from "../content.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../plugin/fixedRecommend.js";
+import { createLogger } from "../../utils/logger.js";
 
+const log = createLogger("INDEX");
 export type FlowPlayMode = "order" | "one" | "all" | "shuffle";
 
 export interface FlowDefinition {
@@ -241,7 +243,7 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
       console.log(`[flow ${flow.name}] 已执行:${name}(${pid})${contentName ? ` → 「${contentName}」` : ""}`);
     } catch (e: any) {
       errs.push(`${name}: ${e?.message || e}`);
-      console.warn(`[flow ${flow.name}] 目标 ${pid} 执行失败:${e?.message || e}`);
+      log.warn(`[flow ${flow.name}] 目标 ${pid} 执行失败:${e?.message || e}`);
     }
   }
   if (errs.length === 0) touchRunStatus(flowId, "success", "");
