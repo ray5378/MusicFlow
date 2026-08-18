@@ -58,6 +58,13 @@ export function dedupePlayDispatch(userId: string, songId: string): boolean {
   return dedupeMark(playDispatched, `${userId}:${songId}`, PLAY_DEDUPE_MS);
 }
 
+/** 定期清理超窗去重键(惰性 GC 只在有活动时清,闲置期可能残留)。由 memory/pruneOrphans 周期调用。 */
+export function sweepScrobbleDedupe(): void {
+  const now = Date.now();
+  for (const [k, t] of scrobbleDispatched) if (now - t > SCROBBLE_DEDUPE_MS) scrobbleDispatched.delete(k);
+  for (const [k, t] of playDispatched) if (now - t > PLAY_DEDUPE_MS) playDispatched.delete(k);
+}
+
 /**
  * Dispatch a playback event to all enabled scrobblers.
  * @param phase "play" → onPlay, "scrobble" → onScrobble

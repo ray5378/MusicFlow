@@ -135,4 +135,18 @@ export class PlayerController {
     const d = this.debounceTimers.get(playerId); if (d) { clearTimeout(d); this.debounceTimers.delete(playerId); }
     const f = this.forwardTimers.get(playerId); if (f) { clearTimeout(f); this.forwardTimers.delete(playerId); }
   }
+
+  /** 孤儿清理:删除已不在合法 playerId 集合的 tracker/最新状态/决策/乐观窗口
+   *  (设备/组删除后残留,key 只增不删)。由 memory/pruneOrphans 定期调用。 */
+  pruneOrphans(validPlayerIds: Set<string>): void {
+    for (const k of this.trackers.keys()) if (!validPlayerIds.has(k)) this.trackers.delete(k);
+    for (const k of this.latest.keys()) {
+      if (validPlayerIds.has(k)) continue;
+      this.latest.delete(k);
+      this.pendingDecision.delete(k);
+      this.clearOptimistic(k);
+      const d = this.debounceTimers.get(k); if (d) { clearTimeout(d); this.debounceTimers.delete(k); }
+      const f = this.forwardTimers.get(k); if (f) { clearTimeout(f); this.forwardTimers.delete(k); }
+    }
+  }
 }

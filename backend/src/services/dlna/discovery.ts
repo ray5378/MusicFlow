@@ -167,6 +167,8 @@ async function mergeAndFetch(searchLocations: string[]): Promise<DlnaDevice[]> {
       announced.delete(usn);
     }
   }
+  // 顺带清掉已不在活动集合中的 alive 去抖记录(key=location 只增不删,设备去留累积)。
+  for (const loc of lastAliveEmitAt.keys()) if (!allLocations.has(loc)) lastAliveEmitAt.delete(loc);
   const devices = await Promise.all(Array.from(allLocations).map(fetchDescription));
   // Deduplicate by id (a device may appear via both M-SEARCH and NOTIFY).
   const byId = new Map<string, DlnaDevice>();

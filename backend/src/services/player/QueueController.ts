@@ -84,6 +84,20 @@ export class QueueController extends EventEmitter {
     console.log(`[QueueController] registered group player: ${groupId} (${name})`);
   }
 
+  /** 孤儿清理:删除已不在设备表/组表中的注册播放器与队列(key=裸 deviceId/groupId,
+   *  设备/组删除后残留)。由 memory/pruneOrphans 定期调用;合法集合为空时不动(防误删)。 */
+  pruneOrphans(validDeviceIds: Set<string>, validGroupIds: Set<string>): void {
+    if (validDeviceIds.size === 0 && validGroupIds.size === 0) return;
+    const valid = new Set<string>([...validDeviceIds, ...validGroupIds]);
+    for (const k of this.players.keys()) {
+      if (valid.has(k)) continue;
+      this.players.delete(k);
+      this.ctrls.delete(k);
+      this.queues.delete(k);
+      this.skipCounters.delete(k);
+    }
+  }
+
   /** 对注册播放器下发传输控制(dlna=单设备,group=扇出)。 */
   async transport(playerId: string, op: "play" | "pause" | "stop" | "seek" | "volume", arg?: number): Promise<void> {
     playerId = stripPlayerPrefix(playerId);

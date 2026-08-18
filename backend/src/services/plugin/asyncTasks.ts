@@ -27,6 +27,18 @@ export interface AsyncTaskState {
 const tasks = new Map<string, AsyncTaskState>();
 const runningKeys = new Map<string, string>(); // `${kind}:${key}` -> taskId
 
+// 已完成/失败任务只保留最近 N 条(running 不受限):任务 result 可能很大(导入结果),
+// 只增不删会随长期使用无界膨胀。FIFO:超限删最老。
+const ASYNC_TASK_KEEP_MAX = 50;
+
+function pruneFinishedTasks(): void {
+  if (tasks.size <= ASYNC_TASK_KEEP_MAX) return;
+  for (const [id, t] of tasks) {
+    if (tasks.size <= ASYNC_TASK_KEEP_MAX) break;
+    if (t.status !== "running") tasks.delete(id);
+  }
+}
+
 /** 启动一个异步任务。返回 { started:true, taskId } 或 { started:false, alreadyRunning:true, taskId }。 */
 export function startAsyncTask<T>(
   kind: AsyncTaskKind,
@@ -53,6 +65,7 @@ export function startAsyncTask<T>(
       });
     } finally {
       if (rk) runningKeys.delete(rk);
+      pruneFinishedTasks();
     }
   })();
   return { started: true, taskId: id };
@@ -67,4 +80,10 @@ export function getAsyncTask(id: string): AsyncTaskState | null {
 export function anyTaskRunning(): boolean {
   for (const t of tasks.values()) if (t.status === "running") return true;
   return false;
+}
+
+/** 测试专用:清空全部任务状态(避免用例间共享模块级 Map 串扰)。 */
+export function _resetAsyncTasksForTest(): void {
+  tasks.clear();
+  runningKeys.clear();
 }

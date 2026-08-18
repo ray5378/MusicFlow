@@ -421,6 +421,7 @@ import { getPeerManager } from "./services/peer.js";
 import { getGroupManager } from "./services/group/index.js";
 import { startGroupWatchdog } from "./services/group/watchdog.js";
 import { startIdleReclaimer } from "./services/memory/reclaim.js";
+import { startOrphanPruner } from "./services/memory/pruneOrphans.js";
 
 const server = createServer(getRequestListener(app.fetch));
 
@@ -469,6 +470,11 @@ getQueueController().startPollLoop(() => getEffectiveBaseUrl());
 // 空闲内存自动回收:无播放活动且无批量任务(导入/同步/扫描等)时,自动清理
 // 可重建缓存 + 主动 GC + SQLite WAL checkpoint。60s 检查一轮,幂等启动。
 startIdleReclaimer();
+
+// 定期孤儿清理:以设备表+组表+用户表为合法集合,清理各模块「只增不删」Map 的
+// 残留 key(asyncTasks/eventing/QueueController/PlayerController/proxy/scrobblers)。
+// 10 分钟一轮,启动 1 分钟后先跑首轮。与空闲回收互补(不依赖空闲)。
+startOrphanPruner();
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`MusicFlow backend listening on http://0.0.0.0:${port}`);

@@ -45,6 +45,8 @@ export function normalizeProxyUrl(raw: string): string {
 // ProxyAgent / Socks5ProxyAgent 带连接池，长存复用；key 为规整后的代理地址，
 // 设置变更后自然重建。两类 agent 都实现 undici Dispatcher 接口。
 const agents = new Map<string, ProxyAgent | Socks5ProxyAgent>();
+// FIFO 上限:代理地址变更频繁时防止 agent/连接池无界累积(每个 agent 含 keep-alive 连接)。
+const PROXY_AGENT_MAX = 32;
 
 /** 按代理地址返回对应的 dispatcher：http(s) → ProxyAgent，socks → Socks5ProxyAgent。 */
 function getProxyDispatcher(url: string): ProxyAgent | Socks5ProxyAgent {
@@ -53,6 +55,14 @@ function getProxyDispatcher(url: string): ProxyAgent | Socks5ProxyAgent {
     const scheme = new URL(url).protocol.replace(":", "").toLowerCase();
     a = /^socks[45]?$/.test(scheme) ? new Socks5ProxyAgent(url) : new ProxyAgent(url);
     agents.set(url, a);
+    if (agents.size > PROXY_AGENT_MAX) {
+      const oldest = agents.keys().next().value;
+      if (oldest !== undefined && oldest !== url) {
+        const old = agents.get(oldest)!;
+        (old as any).close?.().catch?.(() => {}); // 关闭连接池,防 socket 泄漏
+        agents.delete(oldest);
+      }
+    }
   }
   return a;
 }

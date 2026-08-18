@@ -354,6 +354,13 @@ class EventManager extends EventEmitter {
       }
     }
   }
+
+  /** 孤儿清理:删除已不在设备表中的设备事件状态与曲目缓存(key=deviceId 只增不删,
+   *  设备下线/删除后残留)。由 memory/pruneOrphans 定期调用。 */
+  pruneOrphans(validDeviceIds: Set<string>): void {
+    for (const k of this.states.keys()) if (!validDeviceIds.has(k)) this.states.delete(k);
+    for (const k of this.lastTrackUri.keys()) if (!validDeviceIds.has(k)) this.lastTrackUri.delete(k);
+  }
 }
 
 let instance: EventManager | null = null;
