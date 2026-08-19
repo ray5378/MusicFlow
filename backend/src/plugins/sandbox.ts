@@ -11,8 +11,11 @@
 //     宿主永不面对 guest rejection(避免异步变体的 teardown bug);
 //   - 值转换:jsToHandle 纯构造(newString/newNumber/newObject/newArray + 共享 null/true/false),
 //     禁止在宿主函数执行期间 evalCode(会破坏 wasm 栈);
-//   - teardown:runtime.dispose 的 gc 断言在 guest 有未回收对象时会抛,可被 JS 捕获且不毒化
-//     模块(已验证),故 dispose() 里 try/catch 兜底,服务永不因插件卸载崩溃。
+//   - teardown:runtime.dispose 在宿主注入的 host.* 函数(host-ref 由模块级 Scope 持有)
+//     未释放时会触发 QuickJS gc_obj_list 断言(Aborted)。该 abort 可被 try/catch 捕获,
+//     但会毒化「共享 WASM module」(后续 newRuntime/newContext 全崩 "null function")。
+//     故 dispose() 捕获后标记 module 已损坏,下一个沙箱经 getQuickJS() 重建全新 module,
+//     单插件卸载不会拖垮全局沙箱能力,服务永不因插件卸载崩溃。
 
 import { newQuickJSWASMModule, type QuickJSWASMModule } from "quickjs-emscripten";
 import type { QuickJSRuntime, QuickJSContext, QuickJSHandle, QuickJSDeferredPromise } from "quickjs-emscripten";
@@ -269,8 +272,18 @@ export interface SandboxHostEnv {
 }
 
 let moduleSingleton: Promise<QuickJSWASMModule> | null = null;
+/** 共享 WASM module 是否已被某次 runtime.dispose() 的 QuickJS teardown 断言毒化。
+ *  一旦毒化,所有后续 newRuntime/newContext 都会 "null function" / "table index out of
+ *  bounds",必须丢弃并重新加载一份全新的 module(见 getQuickJS)。 */
+let modulePoisoned = false;
+function markModulePoisoned(): void {
+  modulePoisoned = true;
+}
 function getQuickJS(): Promise<QuickJSWASMModule> {
-  if (!moduleSingleton) moduleSingleton = newQuickJSWASMModule();
+  if (!moduleSingleton || modulePoisoned) {
+    modulePoisoned = false;
+    moduleSingleton = newQuickJSWASMModule();
+  }
   return moduleSingleton;
 }
 /** 共享 QuickJS WASM 模块(供 jsenv 嵌套子环境等复用,避免重复加载 WASM)。 */
@@ -442,7 +455,11 @@ export class SandboxedPlugin {
     // 清空对象列表),dispose 恢复安全(实测连续多次 OOM 自愈均干净、module 不毒化)。
     if (this.oomFaulty && this.runtime) this.oomCleanup();
     try { this.ctx?.dispose(); } catch { /* ignore */ }
-    try { this.runtime?.dispose(); } catch { /* QuickJS teardown 断言可被捕获且不毒化模块 */ }
+    // 兜底:QuickJS teardown 断言(gc_obj_list 非空)若仍发生(如某插件/宿主侧句柄泄漏),
+    // 该 abort 会永久毒化「共享 WASM module」(后续 newRuntime/newContext 全崩
+    // "null function" / "table index out of bounds")。捕获后标记 module 已损坏,下一个
+    // 沙箱会用全新 module 重建(见 getQuickJS),避免单个插件卸载拖垮全局沙箱能力。
+    try { this.runtime?.dispose(); } catch { markModulePoisoned(); }
   }
 
   /** OOM 后清理 runtime:① 解除内存限制(否则任何分配都抛 OOM);② 禁用 interrupt handler
@@ -780,13 +797,27 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "sources", sourcesObj);
     c.setProp(hostObj, "plugin", pluginObj);
     c.setProp(hostObj, "crypto", cryptoObj);
-    c.setProp(hostObj, "fs", this.injectFs());
-    c.setProp(hostObj, "command", this.injectCommand());
-    c.setProp(hostObj, "net", this.injectNet());
-    c.setProp(hostObj, "ws", this.injectWs());
-    c.setProp(hostObj, "jsenv", this.injectJsenv());
+    // [FIX] 子 inject 返回的 newObject 句柄必须显式 dispose,否则 host-ref 泄漏 →
+    // runtime.dispose() 触发 QuickJS gc_obj_list 断言并毒化共享 WASM module。
+    const fsObj = this.injectFs();
+    c.setProp(hostObj, "fs", fsObj);
+    fsObj.dispose();
+    const commandObj = this.injectCommand();
+    c.setProp(hostObj, "command", commandObj);
+    commandObj.dispose();
+    const netObj = this.injectNet();
+    c.setProp(hostObj, "net", netObj);
+    netObj.dispose();
+    const wsObj = this.injectWs();
+    c.setProp(hostObj, "ws", wsObj);
+    wsObj.dispose();
+    const jsenvObj = this.injectJsenv();
+    c.setProp(hostObj, "jsenv", jsenvObj);
+    jsenvObj.dispose();
     c.setProp(hostObj, "log", logFn);
-    c.setProp(hostObj, "version", c.newString(this.env.version || ""));
+    const versionStr = c.newString(this.env.version || "");
+    c.setProp(hostObj, "version", versionStr);
+    versionStr.dispose();
     httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); cryptoObj.dispose(); logFn.dispose();
     c.setProp(c.global, "__mfHost", hostObj);
     hostObj.dispose();
@@ -886,9 +917,13 @@ export class SandboxedPlugin {
       this.env.net.tcpOnClose(socketId, () => this.callVmHandler(key, null));
       return c.undefined;
     });
-    c.setProp(obj, "socketId", c.newString(socketId));
-    c.setProp(obj, "localAddr", info.localAddr ? c.newString(String(info.localAddr)) : c.null);
-    c.setProp(obj, "remoteAddr", info.remoteAddr ? c.newString(String(info.remoteAddr)) : c.null);
+    const sidHandle = c.newString(socketId);
+    c.setProp(obj, "socketId", sidHandle);
+    sidHandle.dispose();
+    if (info.localAddr) { const h = c.newString(String(info.localAddr)); c.setProp(obj, "localAddr", h); h.dispose(); }
+    else c.setProp(obj, "localAddr", c.null);
+    if (info.remoteAddr) { const h = c.newString(String(info.remoteAddr)); c.setProp(obj, "remoteAddr", h); h.dispose(); }
+    else c.setProp(obj, "remoteAddr", c.null);
     c.setProp(obj, "send", sendFn);
     c.setProp(obj, "onData", onDataFn);
     c.setProp(obj, "onClose", onCloseFn);
@@ -946,7 +981,9 @@ export class SandboxedPlugin {
           this.env.ws.wsOnClose(socketId, (code: number, reason: string) => this.callVmHandler(key, { code, reason }));
           return c.undefined;
         });
-        c.setProp(sockObj, "socketId", c.newString(socketId));
+        const sidHandle = c.newString(socketId);
+        c.setProp(sockObj, "socketId", sidHandle);
+        sidHandle.dispose();
         c.setProp(sockObj, "send", sendFn);
         c.setProp(sockObj, "onMessage", onMessageFn);
         c.setProp(sockObj, "onClose", onCloseFn);
