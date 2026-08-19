@@ -10,6 +10,7 @@
 import { getCachedDevices } from "../dlna/control.js";
 import { getEventManager } from "../dlna/eventing.js";
 import { getGroupManager } from "../group/index.js";
+import { getAirPlayDevices } from "../airplay/discovery.js";
 import { getPlayerController, getQueueController } from "../player/index.js";
 import { sweepScrobbleDedupe } from "../../plugins/scrobblers.js";
 import { db } from "../../db/index.js";
@@ -29,17 +30,21 @@ export function startOrphanPruner(): void {
 
 /** 执行一轮孤儿清理(供测试直接调用)。 */
 export function pruneOrphansOnce(): void {
-  const deviceIds = new Set(getCachedDevices().map((d) => d.id));
+  // AirPlay 设备也注册了 QueueController/PlayerController 播放器,必须并入合法集合,
+  // 否则每 10 分钟一轮的清理会把 airplay:<id> 当作孤儿删掉,导致播放中断。
+  const airplayIds = getAirPlayDevices().map((d) => d.id);
+  const deviceIds = new Set([...getCachedDevices().map((d) => d.id), ...airplayIds]);
   const groupIds = new Set(getGroupManager().list().map((g) => g.id));
   const userIds = new Set(db.select().from(users).all().map((u) => u.id));
 
   getEventManager().pruneOrphans(deviceIds);
   getQueueController().pruneOrphans(deviceIds, groupIds);
 
-  // PlayerController 的 key 是 playerId(local:<uid> / dlna:<deviceId> / group:<groupId>)。
+  // PlayerController 的 key 是 playerId(local:<uid> / dlna:<deviceId> / group:<groupId> / airplay:<deviceId>)。
   const playerIds = new Set<string>();
   for (const uid of userIds) playerIds.add(`local:${uid}`);
   for (const did of deviceIds) playerIds.add(`dlna:${did}`);
+  for (const did of airplayIds) playerIds.add(`airplay:${did}`);
   for (const gid of groupIds) playerIds.add(`group:${gid}`);
   getPlayerController().pruneOrphans(playerIds);
 

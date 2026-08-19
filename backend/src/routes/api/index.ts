@@ -40,6 +40,7 @@ import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
+import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession } from "../../services/airplay/control.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
@@ -2048,6 +2049,85 @@ apiRoutes.get("/v1/dlna/active", (c) => {
   return c.json({ active });
 });
 
+// ==================== AirPlay (RAOP) renderer ====================
+// Discovered via mDNS (_raop._tcp); each device also appears as an
+// "airplay:<deviceId>" peer in /v1/peers, so the Web switcher + HA treat them
+// exactly like DLNA renderers. These routes mirror the DLNA ones for tooling
+// that talks to the renderer kind directly.
+
+apiRoutes.get("/v1/airplay/devices", (c) => {
+  return c.json({ devices: listAirPlayDevices() });
+});
+
+// 重命名 AirPlay 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
+// alias 会同步到播放控件 / HA 卡片显示(peer.name = alias || name)。
+apiRoutes.put("/v1/airplay/devices/:deviceId", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const body = await c.req.json().catch(() => ({}));
+  const alias = typeof body.alias === "string" ? body.alias.trim() : "";
+  if (alias.length > 50) return c.json({ error: "名称不能超过 50 字符" }, 400);
+  const dev = setAirPlayAlias(deviceId, alias);
+  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  return c.json({ success: true, device: { id: dev.id, alias: dev.alias || "" } });
+});
+
+// 删除 AirPlay 设备(通常删除离线的)。同时清理:设备队列、peer、DB 记录。
+apiRoutes.delete("/v1/airplay/devices/:deviceId", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  // 1. 停止并清空设备队列(如果有),并删除持久化队列行。
+  try { getQueueController().clear(deviceId); } catch { /* ignore */ }
+  db.delete(deviceQueues).where(eq(deviceQueues.deviceId, deviceId)).run();
+  // 2. 移除 peer(播放控件 / HA 卡片不再出现)。
+  getPeerManager().removeAirPlayPeer(deviceId);
+  // 3. 停止活动会话。
+  try { await stopAirPlaySession(deviceId); } catch { /* ignore */ }
+  // 4. 删除缓存 + DB 记录。
+  const existed = deleteAirPlayDeviceRecord(deviceId);
+  if (!existed) return c.json({ error: "设备不存在" }, 404);
+  return c.json({ success: true });
+});
+
+// 禁用/启用 AirPlay 设备。禁用后:从所有选择播放器的地方消失(peer 移除)、
+// 停止播放并清空队列、不可投屏;启用则恢复。
+apiRoutes.put("/v1/airplay/devices/:deviceId/disabled", async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const body = await c.req.json().catch(() => ({}));
+  const disabled = !!body.disabled;
+  if (disabled) {
+    // 1. 停止并清空设备队列(如果有),并删除持久化队列行。
+    try { getQueueController().clear(deviceId); } catch { /* ignore */ }
+    db.delete(deviceQueues).where(eq(deviceQueues.deviceId, deviceId)).run();
+    // 2. 停止活动会话。
+    try { await stopAirPlaySession(deviceId); } catch { /* ignore */ }
+  }
+  const dev = setAirPlayDisabled(deviceId, disabled);
+  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  return c.json({ success: true, disabled, device: { id: dev.id, disabled: !!dev.disabled } });
+});
+
+apiRoutes.get("/v1/airplay/active", (c) => {
+  const active = getQueueManager().activeDevices().map((a) => ({
+    deviceId: a.deviceId,
+    snapshot: { ...a.snapshot, currentMedia: getAirPlayPeerStatus(a.deviceId).media },
+  }));
+  return c.json({ active });
+});
+
+apiRoutes.post("/v1/airplay/cast", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { songId, deviceId } = body as any;
+  if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  try {
+    await castToAirPlayDevice({
+      songId, deviceId,
+      baseUrl: getDlnaBaseUrl(c),
+    });
+    return c.json({ success: true, message: "已投放到 AirPlay 设备" });
+  } catch (e: any) {
+    return c.json({ error: e.message || "投放失败" }, 500);
+  }
+});
+
 // Set the play mode (order | one | all | shuffle) for a device's queue.
 // Body: { mode: PlayMode }
 apiRoutes.post("/v1/dlna/devices/:deviceId/play-mode", async (c) => {
@@ -2097,10 +2177,11 @@ function decodePeerId(c: any): string {
   return decodeURIComponent(c.req.param("peerId") || "");
 }
 
-// 可投屏/可控制 peer:dlna 设备与播放器群组(group)。两者队列都归
-// QueueController 管(内部按裸 id),传输控制一个走 control.ts、一个走组扇出。
+// 可投屏/可控制 peer:dlna 设备、播放器群组(group)与 AirPlay 设备(airplay)。
+// dlna/group/airplay 队列都归 QueueController 管(内部按裸 id),
+// 传输控制 dlna 走 control.ts、group 走组扇出、airplay 走 airplay/control.ts。
 function isCastPeer(parsed: { kind: string }): boolean {
-  return parsed.kind === "dlna" || parsed.kind === "group";
+  return parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay";
 }
 
 // List all known peers (local + dlna) with their queue snapshots. The Web
@@ -2135,7 +2216,13 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   if (!snap) return c.json({ error: "无效的 peerId" }, 400);
   // dlna peer:补 currentMedia(原 QueueSnapshot 字段,新 snapshot 改用 ended)。
   const parsed = parsePeerId(peerId);
-  const currentMedia = parsed && parsed.kind === "dlna" ? getCurrentMedia(parsed.id) : undefined;
+  const currentMedia = parsed
+    ? parsed.kind === "dlna"
+      ? getCurrentMedia(parsed.id)
+      : parsed.kind === "airplay"
+        ? getAirPlayPeerStatus(parsed.id).media
+        : undefined
+    : undefined;
   const items = Array.isArray(snap.items) ? snap.items : [];
   const total = items.length;
   const offset = Math.max(0, parseInt(c.req.query("offset") || "0", 10) || 0);
@@ -2214,6 +2301,16 @@ apiRoutes.delete("/v1/peers/:peerId/queue", (c) => {
   } else {
     pm.localClear(peerId);
   }
+  return c.json({ success: true });
+});
+
+// Mark a cast peer's queue inactive without clearing it (Web client stops cast:
+// playback stops, the queue stays in DB for later reuse / restore skipping).
+apiRoutes.post("/v1/peers/:peerId/queue/deactivate", (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (isCastPeer(parsed)) getQueueManager().deactivate(parsed.id);
   return c.json({ success: true });
 });
 
@@ -2305,6 +2402,14 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
     }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "airplay") {
+    try {
+      getQueueController().resumePlayback(parsed.id);
+      await getQueueController().transport(parsed.id, "play");
+      return c.json({ success: true });
+    }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true }); // local: no-op
 });
 
@@ -2317,6 +2422,10 @@ apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
+    try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "airplay") {
     try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
@@ -2336,6 +2445,14 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
+    try {
+      getQueueController().stopPlayback(parsed.id);
+      await getQueueController().transport(parsed.id, "stop");
+      return c.json({ success: true });
+    }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "airplay") {
     try {
       getQueueController().stopPlayback(parsed.id);
       await getQueueController().transport(parsed.id, "stop");
@@ -2386,6 +2503,13 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
     try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "airplay") {
+    const body = await c.req.json().catch(() => ({} as any));
+    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
+    if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
+    try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
@@ -2400,6 +2524,12 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
+    const { volume } = await c.req.json().catch(() => ({} as any));
+    if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+    try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "airplay") {
     const { volume } = await c.req.json().catch(() => ({} as any));
     if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
@@ -2461,6 +2591,10 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
     }
     return c.json({ success: true, applied: ok, total: members.length });
   }
+  if (parsed.kind === "airplay") {
+    try { await setAirPlayMuted(parsed.id, muted); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
@@ -2511,6 +2645,9 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       }
       return c.json(status);
     } catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "airplay") {
+    return c.json(getAirPlayPeerStatus(parsed.id));
   }
   // local: return queue snapshot as "status"
   return c.json(pm.getQueueSnapshot(peerId) || {});

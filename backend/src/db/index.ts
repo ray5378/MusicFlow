@@ -341,6 +341,17 @@ export function initDatabase() {
       updated_at TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS airplay_devices (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      alias TEXT NOT NULL DEFAULT '',
+      first_seen TEXT NOT NULL DEFAULT '',
+      last_seen TEXT NOT NULL DEFAULT '',
+      available INTEGER NOT NULL DEFAULT 0,
+      disabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS device_queues (
       device_id TEXT PRIMARY KEY,
       items_json TEXT NOT NULL DEFAULT '[]',

@@ -67,7 +67,7 @@
             <el-checkbox :model-value="allChecked" size="small" @change="(v: any) => toggleAllTargets(!!v)" />
             <span class="target-name">全选</span>
           </label>
-          <div v-if="castTargets.length === 0" class="target-empty">暂无可投 DLNA 设备。可到「播放器群组」页扫描/编排。</div>
+          <div v-if="castTargets.length === 0" class="target-empty">暂无可投播放器(DLNA / AirPlay / 群组)。可到「播放器」页查看在线设备。</div>
         </div>
         <div class="row-inline">
           <label class="inline-field">
@@ -237,7 +237,7 @@ const form = reactive({
 });
 
 const castTargets = computed(() =>
-  (peers.value || []).filter((p: any) => (p.kind === "dlna" || p.kind === "group") && p.name),
+  (peers.value || []).filter((p: any) => (p.kind === "dlna" || p.kind === "group" || p.kind === "airplay") && p.name),
 );
 
 const contentPlaceholder = computed(() => {

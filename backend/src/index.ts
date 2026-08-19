@@ -412,6 +412,27 @@ getEventManager().on("device_list_changed", () => {
   }
 });
 
+// ==================== AirPlay (RAOP) renderer ====================
+// Built-in -> mDNS discovery of _raop._tcp receivers + real-time queue registration.
+// AirPlay devices register as "airplay:<id>" players in QueueController exactly
+// like DLNA devices, so queue/transport/restore all flow through the unified
+// controller; the DLNA chain is untouched (we only read DLNA's exported
+// createCastSession for stream URLs).
+import { startAirPlayService, wireAirPlayPersistence, loadPersistedAirPlayDevices, isAirPlayDeviceDisabled } from "./services/airplay/control.js";
+import { getAirPlayDevices, onAirPlayEvent } from "./services/airplay/discovery.js";
+startAirPlayService();
+wireAirPlayPersistence();
+loadPersistedAirPlayDevices();
+onAirPlayEvent((e) => {
+  if (e.type === "alive" && !isAirPlayDeviceDisabled(e.device.id)) {
+    getQueueController().registerAirPlayDevice(e.device.id, (e.device.alias || e.device.name).trim());
+  }
+});
+// 启动时把已发现的设备注册上(等侦测到 mDNS 结果后即可播)。
+for (const d of getAirPlayDevices()) {
+  if (d.available) getQueueController().registerAirPlayDevice(d.id, (d.alias || d.name).trim());
+}
+
 const port = parseInt(process.env.PORT || "46400", 10);
 
 // ==================== HA integration: WebSocket + mDNS + queue auto-next ====================

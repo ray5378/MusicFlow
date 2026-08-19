@@ -49,7 +49,7 @@
         <div class="ctl-grid">
           <div class="ctl-field">
             <span class="ctl-label">目标播放器</span>
-            <el-select v-model="ctl.device" placeholder="选择 DLNA 设备/群组" filterable clearable style="width: 100%">
+            <el-select v-model="ctl.device" placeholder="选择播放器(DLNA / AirPlay / 群组)" filterable clearable style="width: 100%">
               <el-option label="全部在线播放器 (all)" value="all" />
               <el-option v-for="p in ctlTargets" :key="p.peerId" :label="p.kind === 'group' ? `${p.name}(组)` : p.name" :value="p.peerId" />
             </el-select>
@@ -291,6 +291,12 @@ async function loadCtlTargets() {
     const g = await api.get("/rest/api/v1/groups");
     for (const it of g.data?.groups || []) out.push({ peerId: `group:${it.id}`, name: it.name || it.id, kind: "group", available: true });
   } catch {}
+  try {
+    const a = await api.get("/rest/api/v1/airplay/devices");
+    for (const it of a.data?.devices || []) {
+      out.push({ peerId: `airplay:${it.id}`, name: it.name || it.id, kind: "airplay", available: it.available });
+    }
+  } catch {}
   ctlTargets.value = out;
 }
 
@@ -375,7 +381,7 @@ function hasTargets(f: any): boolean { return (f.definition.targets || []).lengt
 async function loadPeers() {
   try {
     const res = await api.get("/rest/api/v1/peers");
-    peers.value = (res.data?.peers || []).filter((p: any) => p.kind === "dlna" || p.kind === "group");
+    peers.value = (res.data?.peers || []).filter((p: any) => p.kind === "dlna" || p.kind === "group" || p.kind === "airplay");
   } catch { peers.value = []; }
 }
 

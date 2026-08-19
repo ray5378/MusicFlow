@@ -66,6 +66,69 @@
       </div>
     </div>
 
+    <!-- AirPlay 设备管理(mDNS 自动发现;可像 DLNA 设备一样重命名 / 禁用 / 删除) -->
+    <div class="devices-section" style="margin-top: 28px">
+      <div class="section-head">
+        <h3>AirPlay 设备</h3>
+        <el-button size="small" :loading="loadingAirPlay" @click="loadAirPlayDevices"><MfIcon name="RefreshCw" />刷新</el-button>
+      </div>
+      <div class="devices-box" v-loading="loadingAirPlay">
+        <div v-for="dev in airplayDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
+          <MfIcon name="Airplay" class="device-row-icon" :class="{ offline: !dev.available }"  />
+          <div class="device-row-info">
+            <div class="device-row-name">
+              {{ dev.displayName || dev.name }}
+              <el-tag v-if="dev.alias" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
+              <span v-if="!dev.available" class="device-offline-tag">离线</span>
+              <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">已禁用</el-tag>
+            </div>
+            <div class="device-row-meta">
+              AirPlay 设备 · {{ dev.supportsRsa ? "RSA 加密" : "不支持加密" }} · {{ dev.host }}:{{ dev.port }}
+            </div>
+          </div>
+          <div class="device-row-actions">
+            <el-popconfirm
+              :title="dev.disabled
+                ? `确定恢复启用「${dev.displayName || dev.name}」?`
+                : `确定禁用「${dev.displayName || dev.name}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列`"
+              :confirm-button-text="dev.disabled ? '恢复' : '禁用'"
+              :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
+              cancel-button-text="取消"
+              width="320"
+              @confirm="toggleAirPlayDisabled(dev, !dev.disabled)"
+            >
+              <template #reference>
+                <el-button
+                  size="small"
+                  :type="dev.disabled ? 'danger' : ''"
+                  :plain="!dev.disabled"
+                  class="device-disable-btn"
+                >
+                  <MfIcon name="CircleSlash" />{{ dev.disabled ? "恢复" : "禁用" }}
+                </el-button>
+              </template>
+            </el-popconfirm>
+            <el-button size="small" @click="openRenameAirPlayDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
+            <el-popconfirm
+              v-if="!dev.available"
+              title="确定删除该设备?"
+              confirm-button-text="删除"
+              cancel-button-text="取消"
+              width="240"
+              @confirm="removeAirPlayDevice(dev)"
+            >
+              <template #reference>
+                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
+              </template>
+            </el-popconfirm>
+          </div>
+        </div>
+        <div v-if="!loadingAirPlay && airplayDevices.length === 0" class="device-empty">
+          未发现 AirPlay 设备。请确认设备已开启 AirPlay 并处于同一局域网,mDNS 会自动发现。
+        </div>
+      </div>
+    </div>
+
     <div class="section-head group-section-head">
       <h3>播放器群组</h3>
     </div>
@@ -222,6 +285,8 @@ const playerStore = usePlayerStore();
 
 const groups = ref<any[]>([]);
 const dlnaDevices = ref<any[]>([]);
+const airplayDevices = ref<any[]>([]);
+const loadingAirPlay = ref(false);
 const loading = ref(false);
 const saving = ref(false);
 
@@ -298,13 +363,18 @@ function openRenameDevice(dev: any) {
 async function saveRenameDevice() {
   const alias = renameDeviceName.value.trim();
   if (!renameDeviceTarget.value || saving.value) return;
+  const isAirPlay = !!renameDeviceTarget.value.isAirPlay;
   saving.value = true;
   try {
-    const res = await api.put(`/rest/api/v1/dlna/devices/${renameDeviceTarget.value.id}`, { alias });
+    const res = await api.put(
+      `/rest/api/v1/${isAirPlay ? "airplay" : "dlna"}/devices/${renameDeviceTarget.value.id}`,
+      { alias },
+    );
     if (res.data.success) {
       ElMessage.success(alias ? "已重命名" : "已恢复原始名称");
       showRenameDeviceDialog.value = false;
-      await loadDlnaDevices();
+      if (isAirPlay) await loadAirPlayDevices();
+      else await loadDlnaDevices();
     }
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "重命名失败");
@@ -331,6 +401,44 @@ async function toggleDisabled(dev: any, disabled: boolean) {
       ElMessage.success(disabled ? `已禁用「${dev.displayName || dev.name}」` : `已启用「${dev.displayName || dev.name}」`);
       await loadDlnaDevices();
       await loadGroups(); // 禁用会把设备移出群组,组列表需要刷新
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
+  }
+}
+
+async function loadAirPlayDevices(): Promise<void> {
+  loadingAirPlay.value = true;
+  try {
+    const res = await api.get("/rest/api/v1/airplay/devices");
+    airplayDevices.value = res.data?.devices || [];
+  } catch { airplayDevices.value = []; }
+  finally { loadingAirPlay.value = false; }
+}
+
+// ---- AirPlay 设备管理(对标 DLNA) ----
+function openRenameAirPlayDevice(dev: any) {
+  renameDeviceTarget.value = { ...dev, isAirPlay: true };
+  renameDeviceName.value = dev.alias || "";
+  showRenameDeviceDialog.value = true;
+}
+
+async function removeAirPlayDevice(dev: any) {
+  try {
+    await api.delete(`/rest/api/v1/airplay/devices/${dev.id}`);
+    ElMessage.success(`已删除设备「${dev.displayName || dev.name}」`);
+    await loadAirPlayDevices();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "删除失败");
+  }
+}
+
+async function toggleAirPlayDisabled(dev: any, disabled: boolean) {
+  try {
+    const res = await api.put(`/rest/api/v1/airplay/devices/${dev.id}/disabled`, { disabled });
+    if (res.data.success) {
+      ElMessage.success(disabled ? `已禁用「${dev.displayName || dev.name}」` : `已启用「${dev.displayName || dev.name}」`);
+      await loadAirPlayDevices();
     }
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "操作失败");
@@ -429,7 +537,7 @@ function controlGroup(g: any) {
 // player store bumps groupVersion so this page reloads live (no polling).
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
-onMounted(() => { loadGroups(); loadDlnaDevices(); });
+onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); });
 </script>
 
 <style lang="scss" scoped>

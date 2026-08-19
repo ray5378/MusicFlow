@@ -80,6 +80,7 @@
               <div class="controls-peer-info">
                 <div class="controls-peer-name">
                   {{ p.kind === 'local' ? '本机' : p.name }}
+                  <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? '群组' : 'DLNA' }}</span>
                   <span v-if="!p.available" class="controls-peer-offline">离线</span>
                 </div>
                 <div class="controls-peer-meta">
@@ -99,7 +100,7 @@
           </div>
           <div class="controls-scan">
             <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
-              <MfIcon name="RefreshCw" />重新扫描DLNA设备
+              <MfIcon name="RefreshCw" />重新扫描播放器
             </el-button>
           </div>
         </div>
@@ -251,7 +252,7 @@
              (local + DLNA + groups). Clicking a peer rebinds the player bar
              + queue panel to it and starts controlling that player. For a
              DLNA device this effectively casts to it. The popup also hosts
-             the manual "重新扫描DLNA设备" action. -->
+             the manual "重新扫描播放器" action. -->
         <el-popover
           placement="top-start"
           :width="280"
@@ -279,6 +280,7 @@
                 <div class="psi-info">
                   <div class="psi-name">
                     {{ p.kind === 'local' ? '本机' : p.name }}
+                    <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? '群组' : 'DLNA' }}</span>
                     <span v-if="!p.available" class="psi-offline">离线</span>
                   </div>
                   <div class="psi-meta">
@@ -298,7 +300,7 @@
             </div>
             <div class="peer-switcher-scan">
               <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
-                <MfIcon name="RefreshCw" />重新扫描DLNA设备
+                <MfIcon name="RefreshCw" />重新扫描播放器
               </el-button>
             </div>
             <div class="peer-switcher-tip">切换播放器仅改变当前控制目标,不会停止其他播放器</div>
@@ -1736,6 +1738,12 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       background: var(--fnos-text-muted); border-radius: 8px;
       padding: 0 6px;
     }
+    .peer-kind-tag {
+      font-size: 10px; color: var(--fnos-text-tertiary);
+      border: 1px solid var(--fnos-text-tertiary);
+      border-radius: 4px; padding: 0 4px; flex-shrink: 0;
+      transform: scale(0.9);
+    }
     .psi-meta {
       font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1785,6 +1793,7 @@ watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .controls-peer-offline { font-size: 11px; color: #fff; background: var(--fnos-text-muted); border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+    .controls-peer-name .peer-kind-tag { font-size: 10px; color: var(--fnos-text-tertiary); border: 1px solid var(--fnos-text-tertiary); border-radius: 4px; padding: 0 4px; flex-shrink: 0; transform: scale(0.9); }
     .controls-peer-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .controls-playing-title { color: var(--fnos-yellow); }
   }

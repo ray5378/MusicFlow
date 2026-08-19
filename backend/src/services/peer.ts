@@ -34,9 +34,10 @@ import { getCachedDevices } from "./dlna/control.js";
 import { getEventManager } from "./dlna/eventing.js";
 import { getGroupManager } from "./group/index.js";
 import { createLogger } from "../utils/logger.js";
+import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
 
 const log = createLogger("peer");
-export type PeerKind = "local" | "dlna" | "group";
+export type PeerKind = "local" | "dlna" | "group" | "airplay";
 
 export interface Peer {
   peerId: string;
@@ -45,7 +46,7 @@ export interface Peer {
   available: boolean;
   lastActiveAt: number; // ms epoch
   userId?: string;      // local peers only
-  deviceId?: string;    // dlna peers only
+  deviceId?: string;    // dlna / airplay peers only
   groupId?: string;     // group peers only
 }
 
@@ -75,15 +76,27 @@ class PeerManager extends EventEmitter {
     this.cleanupTimer = setInterval(() => {
       this.reconcileDlnaPeers();
       this.reconcileGroupPeers();
+      this.reconcileAirPlayPeers();
       this.runCleanup();
     }, CLEANUP_INTERVAL_MS);
     // Run once shortly after boot so the peer list is populated immediately.
-    setTimeout(() => { this.reconcileDlnaPeers(); this.reconcileGroupPeers(); }, 5000);
+    setTimeout(() => { this.reconcileDlnaPeers(); this.reconcileGroupPeers(); this.reconcileAirPlayPeers(); }, 5000);
     // Bridge DLNA discovery → peer availability. Whenever the device list
     // changes (refreshDevices / SSDP sweep), re-sync the dlna peer set so the
     // switcher popup and cleanup timer see fresh availability without waiting
     // for the next 60s tick.
     getEventManager().on("device_list_changed", () => this.reconcileDlnaPeers());
+    // Bridge AirPlay discovery → peer availability in real time (mDNS
+    // alive/byebye events map directly to peer registered/available/unavailable).
+    onAirPlayEvent((e) => {
+      if (e.type === "alive") {
+        // Disabled devices stay hidden even while online (deferred to reconcile
+        // so alias/disabled from persistence always win).
+        this.reconcileAirPlayPeers();
+      } else {
+        this.markAirPlayUnavailable(e.id);
+      }
+    });
   }
 
   // ==================== Registration ====================
@@ -149,6 +162,72 @@ class PeerManager extends EventEmitter {
       p.available = false;
       this.emit("peer_unavailable", p);
     }
+  }
+
+  // ==================== AirPlay peers ====================
+
+  /** Register or refresh an AirPlay peer from mDNS discovery. Same shape as
+   *  registerDlna — the peer registry is kind-agnostic from here on. */
+  registerAirPlay(deviceId: string, name: string, available: boolean): Peer {
+    const peerId = `airplay:${deviceId}`;
+    const now = Date.now();
+    let p = this.peers.get(peerId);
+    if (!p) {
+      p = { peerId, kind: "airplay", name, available, lastActiveAt: now, deviceId };
+      this.peers.set(peerId, p);
+      this.emit("peer_registered", p);
+    } else {
+      const wasAvailable = p.available;
+      p.name = name;
+      p.available = available;
+      if (available) p.lastActiveAt = now;
+      if (available && !wasAvailable) this.emit("peer_available", p);
+      else if (!available && wasAvailable) this.emit("peer_unavailable", p);
+    }
+    return p;
+  }
+
+  /** Mark an AirPlay peer unavailable (device sent byebye / mDNS stale). */
+  markAirPlayUnavailable(deviceId: string): void {
+    const peerId = `airplay:${deviceId}`;
+    const p = this.peers.get(peerId);
+    if (!p) return;
+    if (p.available) {
+      p.available = false;
+      this.emit("peer_unavailable", p);
+    }
+  }
+
+  /** Sync the AirPlay peer set from the mDNS device map. Disabled devices are
+   *  removed (hidden from switcher / HA card); display name = alias || name.
+   *  Devices that fell out of the map are marked unavailable (kept, like DLNA). */
+  reconcileAirPlayPeers(): void {
+    const devices = getAirPlayDevices();
+    const seen = new Set<string>();
+    for (const d of devices) {
+      seen.add(d.id);
+      if (d.disabled) {
+        this.removeAirPlayPeer(d.id);
+        continue;
+      }
+      this.registerAirPlay(d.id, (d.alias || d.name).trim(), !!d.available);
+    }
+    for (const p of this.peers.values()) {
+      if (p.kind !== "airplay" || !p.deviceId) continue;
+      if (!seen.has(p.deviceId) && p.available) {
+        p.available = false;
+        this.emit("peer_unavailable", p);
+      }
+    }
+  }
+
+  /** Remove an AirPlay peer entirely (device deleted / disabled → hidden). */
+  removeAirPlayPeer(deviceId: string): void {
+    const peerId = `airplay:${deviceId}`;
+    const p = this.peers.get(peerId);
+    if (!p) return;
+    if (p.available) this.emit("peer_unavailable", p);
+    this.peers.delete(peerId);
   }
 
   // ==================== Reconciliation ====================
@@ -244,7 +323,7 @@ class PeerManager extends EventEmitter {
 
   /** Peers sorted: local first, then dlna, then group by name. Includes queue snapshot. */
   listWithQueues(): PeerWithQueue[] {
-    const KIND_RANK: Record<PeerKind, number> = { local: 0, dlna: 1, group: 2 };
+    const KIND_RANK: Record<PeerKind, number> = { local: 0, dlna: 1, airplay: 1, group: 2 };
     return this.list()
       .sort((a, b) => {
         if (a.kind !== b.kind) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
@@ -262,6 +341,7 @@ class PeerManager extends EventEmitter {
     if (peerId.startsWith("local:")) return { kind: "local", id: peerId.slice(6) };
     if (peerId.startsWith("dlna:")) return { kind: "dlna", id: peerId.slice(5) };
     if (peerId.startsWith("group:")) return { kind: "group", id: peerId.slice(6) };
+    if (peerId.startsWith("airplay:")) return { kind: "airplay", id: peerId.slice(8) };
     return null;
   }
 
@@ -271,8 +351,8 @@ class PeerManager extends EventEmitter {
   getQueueSnapshot(peerId: string): QueueSnapshot | undefined {
     const parsed = PeerManager.parse(peerId);
     if (!parsed) return undefined;
-    if (parsed.kind === "dlna" || parsed.kind === "group") {
-      // dlna 与 group 队列都归 QueueController 管,内部按裸 id 作 key。
+    if (parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay") {
+      // dlna / group / airplay 队列都归 QueueController 管,内部按裸 id 作 key。
       return getQueueManager().snapshot(parsed.id);
     }
     // local
@@ -456,14 +536,14 @@ class PeerManager extends EventEmitter {
           log.info(`[peer] local peer ${p.peerId} inactive ${Math.round(idleMs / 1000)}s, queue cleared`);
         }
       } else {
-        // dlna: only clear the device queue if the device is offline.
+        // dlna / airplay: only clear the device queue if the device is offline.
         // 设备条目不再自动移除(由用户在「播放器」页手动删除)。
         if (!p.available) {
           const snap = getQueueManager().snapshot(p.deviceId!);
           if (snap && (snap.isActive || snap.items.length > 0)) {
             getQueueManager().clear(p.deviceId!);
             this.emit("peer_queue_cleared", p.peerId);
-            log.info(`[peer] dlna peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
+log.info(`[peer] ${p.kind} peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
           }
         }
       }

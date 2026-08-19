@@ -17,6 +17,7 @@ import {
   playDevice, pauseDevice, stopDevice, setDeviceVolume,
   getCachedDevices, getDeviceStatus,
 } from "../dlna/control.js";
+import { listAirPlayDevices } from "../airplay/control.js";
 
 export const PLAY_MODES = ["order", "one", "all", "shuffle"] as const;
 
@@ -76,7 +77,7 @@ export function resolvePlayerDevicePeers(device: string): string[] {
   const q = (device || "").trim();
   if (!q) throw new Error("缺少 device 参数");
   // 精确 peerId
-  if (q.startsWith("dlna:") || q.startsWith("group:")) {
+  if (q.startsWith("dlna:") || q.startsWith("group:") || q.startsWith("airplay:")) {
     const parsed = parsePeerId(q);
     if (!parsed) throw new Error(`无效的 peerId: ${q}`);
     return [q];
@@ -98,6 +99,9 @@ export function resolvePlayerDevicePeers(device: string): string[] {
   const matches: Array<{ peerId: string; name: string }> = [];
   for (const d of getCachedDevices()) {
     if ((d.name || "").toLowerCase().includes(lower)) matches.push({ peerId: `dlna:${d.id}`, name: d.name });
+  }
+  for (const a of listAirPlayDevices()) {
+    if ((a.name || "").toLowerCase().includes(lower)) matches.push({ peerId: `airplay:${a.id}`, name: a.name });
   }
   for (const g of getGroupManager().list()) {
     if ((g.name || "").toLowerCase().includes(lower)) matches.push({ peerId: `group:${g.id}`, name: g.name });
@@ -176,8 +180,8 @@ export async function handlePlayerWebhook(
   ownerUserId = "",
 ): Promise<PlayerWebhookResult> {
   const parsed = parsePeerId(peerId);
-  if (!parsed || (parsed.kind !== "dlna" && parsed.kind !== "group")) {
-    throw new Error("仅支持 DLNA 设备与播放器群组");
+  if (!parsed || (parsed.kind !== "dlna" && parsed.kind !== "group" && parsed.kind !== "airplay")) {
+    throw new Error("仅支持 DLNA 设备、播放器群组与 AirPlay 设备");
   }
   const id = parsed.id;
   const results: PlayerWebhookOpResult[] = [];
@@ -196,7 +200,14 @@ export async function handlePlayerWebhook(
   // ② 传输控制(按 play/pause/stop/next/prev 顺序)
   const runTransport = async (op: string): Promise<void> => {
     try {
-      if (op === "next") { await qm.next(id, baseUrl); }
+      if (parsed.kind === "airplay") {
+        if (op === "next") { await qc.next(`airplay:${id}`, baseUrl); }
+        else if (op === "prev") { await qc.prev(`airplay:${id}`, baseUrl); }
+        else if (op === "play") qc.resumePlayback(id);
+        else if (op === "stop") qc.stopPlayback(id);
+        else await qc.transport(id, op as "play" | "pause" | "stop");
+      }
+      else if (op === "next") { await qm.next(id, baseUrl); }
       else if (op === "prev") { await qm.prev(id, baseUrl); }
       else if (parsed.kind === "dlna") {
         if (op === "play") { qc.resumePlayback(id); await playDevice(id); }

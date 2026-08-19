@@ -11,6 +11,7 @@ import { PlayMode, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
+import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { ensurePlayableStream } from "../source/online/streamFallback.js";
 import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from "../group/protocolPlayer.js";
 import { getGroupManager } from "../group/index.js";
@@ -26,6 +27,7 @@ const log = createLogger("QueueController");
 function stripPlayerPrefix(playerId: string): string {
   if (playerId.startsWith("dlna:")) return playerId.slice(5);
   if (playerId.startsWith("group:")) return playerId.slice(6);
+  if (playerId.startsWith("airplay:")) return playerId.slice(8);
   return playerId;
 }
 
@@ -99,6 +101,16 @@ export class QueueController extends EventEmitter {
       this.queues.delete(k);
       this.skipCounters.delete(k);
     }
+  }
+
+  /** AirPlay 设备发现后注册:创建 UniversalPlayer + 绑定 AirPlay ProtocolPlayer。
+   *  与 registerDlnaDevice 完全同构 —— 队列/切歌/恢复全走同一套 QueueController。 */
+  registerAirPlayDevice(deviceId: string, name: string): void {
+    if (this.players.has(deviceId)) return;
+    const up = new UniversalPlayer(`airplay:${deviceId}`, name);
+    up.attachProtocol(createAirPlayProtocolPlayer(deviceId));
+    this.registerPlayer(deviceId, up, getPlayerController());
+    log.info(`[QueueController] registered AirPlay device: ${deviceId} (${name})`);
   }
 
   /** 对注册播放器下发传输控制(dlna=单设备,group=扇出)。 */
