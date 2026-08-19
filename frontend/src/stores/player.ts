@@ -903,9 +903,18 @@ export const usePlayerStore = defineStore("player", () => {
     api.post(peerApi(st.peerId, "/prev")).catch(() => {});
   }
 
+  // Per-peer trailing debounce: el-slider emits @input on every drag tick, and
+  // on AirPlay a seek swaps the decoder — issuing one per tick would restart
+  // ffmpeg dozens of times per drag. Only the last position within 250ms fires.
+  const seekTimers = new Map<string, ReturnType<typeof setTimeout>>();
   function castSeek(st: RemoteState, time: number) {
-    api.post(peerApi(st.peerId, "/seek"), { seconds: time }).catch(() => {});
     st.currentTime = time; updateCastLyric(st);
+    const timer = seekTimers.get(st.peerId);
+    if (timer) clearTimeout(timer);
+    seekTimers.set(st.peerId, setTimeout(() => {
+      seekTimers.delete(st.peerId);
+      api.post(peerApi(st.peerId, "/seek"), { seconds: time }).catch(() => {});
+    }, 250));
   }
 
   function castRemoveFromQueue(st: RemoteState, index: number) {
@@ -1066,61 +1075,41 @@ export const usePlayerStore = defineStore("player", () => {
     currentPeerId.value = localPeerId.value;
   }
 
-  // On Web tab reopen: restore all active DLNA devices (and any actively
-  // playing player groups) from the backend so the user can see/control
-  // whatever is still playing. The first restored target becomes the current
-  // peer (matches the old single-device restore).
+  // On Web tab reopen: restore every peer whose queue is still active (dlna /
+  // airplay / group) from the backend so the user can see/control whatever is
+  // still playing. The first restored target becomes the current peer (matches
+  // the old single-device restore).
+  //
+  // The unified /v1/peers list is the single source of truth here: it already
+  // carries the kind-correct peerId + queue snapshot (with isActive) for ALL
+  // remote kinds. A separate /v1/dlna/active pass would mislabel AirPlay
+  // devices and player groups as "dlna:" peers (QueueController's shared queue
+  // map holds all three kinds), so its /status poll dies and progress/lyrics
+  // never show — hence the unified restore below.
   async function restoreCast(): Promise<void> {
     try {
-      const res = await api.get("/rest/api/v1/dlna/active");
-      const active = res.data?.active || [];
-      // Resolve device names once.
-      let devices: any[] = [];
-      try {
-        const devRes = await api.get("/rest/api/v1/dlna/devices");
-        devices = devRes.data?.devices || [];
-      } catch {}
-      let firstRestored = false;
-      for (const { deviceId, snapshot } of active) {
-        if (!deviceId || !snapshot || !snapshot.isActive) continue;
-        if (remoteStates.has(`dlna:${deviceId}`)) continue; // already tracked
-        const dev = devices.find((d: any) => d.id === deviceId);
-        // 禁用设备不恢复投屏会话(后端已过滤 peer,这里兜底防恢复一个已禁用的设备)。
-        if (dev && dev.disabled) continue;
-        const name = dev?.name || "播放器";
-        const st = ensureRemoteState(`dlna:${deviceId}`, name);
+      const peersRes = await api.get("/rest/api/v1/peers");
+      const remotePeers = (peersRes.data?.peers || [])
+        .filter((p: any) => p.kind !== "local" && p.queue && p.queue.isActive);
+      // 幂等:若已有远端当前目标(上次调用已恢复/用户已手动选择),不再抢占
+      // currentPeerId。注意 mount 时 currentPeerId 是 ""(未初始化),不能用
+      // "!== localPeerId" 判断——那会误判为"已恢复"而跳过首个设备的跳转。
+      let firstRestored = activeRemotePeerId.value !== "";
+      for (const p of remotePeers) {
+        if (remoteStates.has(p.peerId)) continue; // already tracked
+        // 禁用设备后端 reconcile 已移出 peers 列表,这里不出现。
+        const name = p.name || (p.kind === "airplay" ? "播放器"
+          : p.kind === "group" ? "播放器群组" : "播放器");
+        const st = ensureRemoteState(p.peerId, name);
         await syncCastQueueFromBackend(st);
         const song = st.queue[st.index];
         if (song) loadCastLyrics(st, song.id);
         st.lastScrobbledSongId = song?.id || "";
         startCastPoll(st);
         if (!firstRestored) {
-          currentPeerId.value = `dlna:${deviceId}`;
+          currentPeerId.value = p.peerId;
           firstRestored = true;
         }
-      }
-      // Player groups and AirPlay devices: restore any whose queue is active
-      // (isActive) — group/airplay peers are permanent and carry their queue
-      // snapshot.
-      if (!firstRestored) {
-        try {
-          const peersRes = await api.get("/rest/api/v1/peers");
-          const remotePeers = (peersRes.data?.peers || [])
-            .filter((p: any) => (p.kind === "group" || p.kind === "airplay") && p.queue && p.queue.isActive);
-          for (const p of remotePeers) {
-            if (remoteStates.has(p.peerId)) continue;
-            const st = ensureRemoteState(p.peerId, p.name || (p.kind === "airplay" ? "AirPlay 设备" : "播放器群组"));
-            await syncCastQueueFromBackend(st);
-            const song = st.queue[st.index];
-            if (song) loadCastLyrics(st, song.id);
-            st.lastScrobbledSongId = song?.id || "";
-            startCastPoll(st);
-            if (!firstRestored) {
-              currentPeerId.value = p.peerId;
-              firstRestored = true;
-            }
-          }
-        } catch {}
       }
     } catch {}
   }
@@ -1398,6 +1387,13 @@ export const usePlayerStore = defineStore("player", () => {
           peers.value = filterVisiblePeers(msg.peers || []);
           if (!peers.value.find(p => p.peerId === localPeerId.value)) {
             peers.value.unshift({ peerId: localPeerId.value, kind: "local", name: "本机", available: true, lastActiveAt: Date.now() });
+          }
+          // 启动 5s 内 peer 注册晚于前端恢复窗口:后端把队列恢复到内存后,
+          // WS 一推 peer_snapshot 就再补一次恢复,幂等(remoteStates 已跟踪的
+          // 跳过,currentPeerId 已设则不抢)。
+          if (currentPeerId.value === localPeerId.value
+            && (msg.peers || []).some((p: any) => p.kind !== "local" && p.queue?.isActive && !remoteStates.has(p.peerId))) {
+            void restoreCast().catch(() => {});
           }
           break;
         case "peer_registered":

@@ -41,8 +41,9 @@ interface Rendered {
 }
 
 // RAM budget for rendered (resized/encoded) covers. Distinct covers are few;
-// a 160px webp is ~10-30KB so this holds thousands of entries.
-const RENDER_BUDGET = 96 * 1024 * 1024;
+// a 160px webp is ~10-30KB so this holds thousands of entries. 32MB plus the
+// 500-entry cap keeps the ceiling low while still covering active browsing.
+const RENDER_BUDGET = 32 * 1024 * 1024;
 const RENDER_MAX_ENTRIES = 500;
 const cache = new Map<string, Rendered>();
 let heldBytes = 0;
@@ -156,4 +157,9 @@ export async function loadAndRenderCover(
 export function clearRenderedCovers(): void {
   cache.clear();
   heldBytes = 0;
+}
+
+/** Bytes of rendered (resized/webp) cover bytes held in RAM (observability). */
+export function getRenderedCoverBytes(): number {
+  return heldBytes;
 }

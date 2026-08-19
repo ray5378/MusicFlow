@@ -16,12 +16,11 @@ import { eq } from "drizzle-orm";
 import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "../../services/source/online/index.js";
 import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
-import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist, syncAllRecommendPlaylists } from "../../services/source/online/recommendImport.js";
-import { purgeExpiredWebSongs } from "../../services/source/online/purge.js";
+import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { touch } from "../../services/memory/reclaim.js";
 import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
 import { runPluginJob } from "../../services/plugin/jobRunner.js";
-import { acquireBatchLock } from "../../services/plugin/batchPacer.js";
+import { runBatchJob } from "../../batch/runner.js";
 
 export const onlineRoutes = new Hono();
 
@@ -38,12 +37,21 @@ const INLINE_MATCH_LIMIT = 30;
 
 // 完成/失败后的 job 保留 30 min 供前端轮询取结果,超时后清理防 Map 慢增长
 // (参照 services/lyrics.ts 的 lrcCacheSweep 模式;running 中的 job 不清理)。
+// batchMatchJobs(results 数组按歌单累积)与 syncAllState 同用这套 TTL 清扫。
 const MATCH_JOB_TTL_MS = 30 * 60 * 1000;
 const matchJobsSweep = setInterval(() => {
   const now = Date.now();
   for (const [k, v] of matchJobs) {
     if (!v.finishedAt) continue;
     if (now - Date.parse(v.finishedAt) >= MATCH_JOB_TTL_MS) matchJobs.delete(k);
+  }
+  for (const [k, v] of batchMatchJobs) {
+    if (!v.finishedAt) continue;
+    if (now - Date.parse(v.finishedAt) >= MATCH_JOB_TTL_MS) batchMatchJobs.delete(k);
+  }
+  for (const [k, v] of syncAllState) {
+    if (!v.finishedAt) continue;
+    if (now - Date.parse(v.finishedAt) >= MATCH_JOB_TTL_MS) syncAllState.delete(k);
   }
 }, 5 * 60 * 1000);
 (matchJobsSweep as any).unref?.();
@@ -124,18 +132,15 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", async (c) => {
   const jobId = `match-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   matchJobs.set(jobId, { status: "running", playlistId, startedAt: new Date().toISOString(), progress: { done: 0, total: entryCount }, result: null, error: null });
   (async () => {
-    // 全局批量闸:与 jobRunner/auto-match 共用,全进程同时只跑 1 个批量任务。
-    const release = await acquireBatchLock();
+    // 匹配在一次性批量子进程里执行(方案3);进度经 IPC 转发,全局批量闸由
+    // runBatchJob 持有(FIFO 排队),这里不再重复取锁。
     try {
-      const result = await matchUnmatchedPlaylistEntries(
-        providerId, configured.config, configured.provider, playlistId,
-        (done, total) => { matchJobs.get(jobId)!.progress = { done, total }; },
-      );
+      const { result } = await runBatchJob("match-playlist", { providerId, playlistId }, {
+        onProgress: (p) => { const j = matchJobs.get(jobId); if (j && p) j.progress = { done: p.done, total: p.total }; },
+      });
       matchJobs.set(jobId, { status: "completed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: { done: entryCount, total: entryCount }, result, error: null });
     } catch (e: any) {
       matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: e.message || "匹配失败" });
-    } finally {
-      release();
     }
   })();
   return c.json({ success: true, jobId, running: true, progress: { done: 0, total: entryCount } });
@@ -183,25 +188,17 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
   const job = { status: "running", startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, total: targets.length, done: 0, current: "", results: [] as any[], error: null as string | null };
   batchMatchJobs.set(batchId, job);
   (async () => {
-    // 全局批量闸:整个批量适配任务作为一个批量任务参与全局互斥(FIFO 排队)。
-    const release = await acquireBatchLock();
+    // 批量匹配在一次性批量子进程里执行(方案3);进度经 IPC 转发,全局批量闸由
+    // runBatchJob 持有(整个批量适配作为一个批量任务参与全局互斥)。
     try {
-      for (const t of targets) {
-        job.current = t.name;
-        try {
-          const r = await matchUnmatchedPlaylistEntries(providerId, configured.config, configured.provider, t.id);
-          job.results.push({ playlistId: t.id, name: t.name, count: t.count, ...r });
-        } catch (e: any) {
-          job.results.push({ playlistId: t.id, name: t.name, count: t.count, error: String(e?.message || e) });
-        }
-        job.done++;
-      }
-      Object.assign(job, { status: "completed", finishedAt: new Date().toISOString() });
+      const { result } = await runBatchJob("match-playlists", { providerId }, {
+        onProgress: (p) => { if (p) Object.assign(job, { done: p.done, total: p.total, current: p.current || "" }); },
+      });
+      job.results = Array.isArray(result?.results) ? result.results : [];
+      Object.assign(job, { status: "completed", done: result?.done ?? job.total, finishedAt: new Date().toISOString() });
     } catch (e: any) {
       job.error = String(e?.message || e);
       Object.assign(job, { status: "failed", finishedAt: new Date().toISOString() });
-    } finally {
-      release();
     }
   })();
   return c.json({ success: true, started: true, batchId, total: targets.length });
@@ -362,8 +359,9 @@ onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
   const state = { running: true, startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, result: null as any, error: null as string | null };
   syncAllState.set(providerId, state);
   (async () => {
+    // 路径 A 在一次性批量子进程里执行(方案3),全局批量闸由 runBatchJob 持有。
     try {
-      const result = await syncAllRecommendPlaylists(providerId, { userId: c.get("user")?.id });
+      const { result } = await runBatchJob("recommend-sync-all", { providerId, userId: c.get("user")?.id });
       Object.assign(state, { running: false, result, finishedAt: new Date().toISOString() });
     } catch (e: any) {
       Object.assign(state, { running: false, error: String(e?.message || e), finishedAt: new Date().toISOString() });
@@ -399,7 +397,8 @@ onlineRoutes.post("/v1/online/:providerId/purge-web-songs", adminMiddleware, asy
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   if (!getConfiguredProvider(providerId)) return c.json({ success: false, error: "在线源未启用或未配置" });
   try {
-    const result = purgeExpiredWebSongs(providerId);
+    // 清理在一次性批量子进程里执行(方案3);结果经 IPC 回传。
+    const { result } = await runBatchJob("purge-web-songs", { providerId });
     return c.json({ success: true, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || "清理失败" });

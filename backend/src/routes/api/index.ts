@@ -9,26 +9,30 @@ import { apiError, BusinessErrorCode } from "../../utils/errors.js";
 import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
 import { adminMiddleware, invalidateAuthCaches } from "../../middleware/auth.js";
-import { scanLocalSource, scanWebDAVSource, testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
+import { testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
-import { importPlaylistFromUrl, ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
-import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
+import { ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
+import { clearLibraryIndex, getLibraryIndexStats } from "../../services/plugin/libraryIndex.js";
 import { touch, registerCacheCleaner, reclaimNow, isIdle, getMemorySnapshot, getReclaimStatus } from "../../services/memory/reclaim.js";
+import { getCoverCacheBytes } from "../../services/coverCache.js";
+import { getRenderedCoverBytes } from "../../services/coverImage.js";
+import { getLyricsCacheEntries } from "../../services/lyrics.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
-import { currentPace, setPace, BatchPace, markInteractiveStart, markInteractiveEnd, isBatchBusy } from "../../services/plugin/batchPacer.js";
+import { currentPace, setPace, BatchPace, isBatchBusy } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask, getAsyncTask, anyTaskRunning } from "../../services/plugin/asyncTasks.js";
+import { runBatchJob } from "../../batch/runner.js";
 import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
-import { cacheRemoteCover, clearPlaylistCoverCache } from "../../services/playlistCover.js";
+import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
 import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
-import { scrapeArtist, scrapeArtistList, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
+import { scrapeArtist, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
   refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, setDeviceMute, getDeviceStatus,
@@ -448,6 +452,18 @@ apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
 // Scan source
 const scanJobs = new Map<string, { status: string; startedAt: string; progress?: ScanProgress; result?: any; error?: string; mode?: string; controller?: AbortController }>();
 
+// 完成/失败/停止的扫描任务保留 30 min(前端轮询取结果),超时清理防 Map 无界
+// (running 中任务不清,避免并发扫描判定失效;参照 online.ts matchJobs 同款)。
+const SCAN_JOB_TTL_MS = 30 * 60 * 1000;
+const scanJobsSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of scanJobs) {
+    if (v.status === "running") continue;
+    if (now - Date.parse(v.startedAt) >= SCAN_JOB_TTL_MS) scanJobs.delete(k);
+  }
+}, 5 * 60 * 1000);
+(scanJobsSweep as any).unref?.();
+
 apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   touch(); // 标记活动:媒体源扫描
   const id = c.req.param("id")!;
@@ -466,50 +482,42 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   const job = { status: "running", startedAt: new Date().toISOString(), progress: undefined as ScanProgress | undefined, mode, controller };
   scanJobs.set(id, job);
 
-  const onProgress = (p: ScanProgress) => { job.progress = { ...p }; };
-
-  // Snapshot of existing artist ids before the scan: after scanning we scrape
-  // ONLY the newly-added artists' info (avatars), not the whole library.
-  const preScanArtistIds = new Set(db.select().from(artists).all().map(a => a.id));
+  // 扫描在一次性批量子进程里执行(方案3);子进程进度经 IPC 转发:
+  //   { stage: "scan", ...ScanProgress } → job.progress
+  //   { stage: "scrape-start" | "scrape" | "scrape-done" | "scrape-failed" } → scrapeJobs
+  const onProgress = (p: any) => {
+    if (!p || typeof p !== "object") return;
+    if (p.stage === "scrape-start") {
+      const j = { status: "running", startedAt: new Date().toISOString(), progress: { done: 0, total: p.total } as any };
+      scrapeJobs.set(SCRAPE_JOB_ID, j);
+      return;
+    }
+    if (p.stage === "scrape-done") {
+      const cur = scrapeJobs.get(SCRAPE_JOB_ID);
+      if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: cur.startedAt, finishedAt: new Date().toISOString(), progress: p.progress });
+      log.info(`[ARTIST-SCRAPE] done: scraped ${p.progress?.scraped}, skipped ${p.progress?.skipped}, errors ${p.progress?.errors?.length}`);
+      return;
+    }
+    if (p.stage === "scrape-failed") {
+      const cur = scrapeJobs.get(SCRAPE_JOB_ID);
+      if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: cur.startedAt, error: p.error || "刮削失败", progress: cur.progress });
+      return;
+    }
+    if (p.stage === "scrape") {
+      const cur = scrapeJobs.get(SCRAPE_JOB_ID);
+      if (cur) cur.progress = { ...p };
+      return;
+    }
+    job.progress = { ...p };
+  };
 
   (async () => {
     try {
-      let result;
-      if (source.type === "webdav") {
-        result = await scanWebDAVSource(source.id, config, mode, onProgress, controller.signal);
-      } else if (source.type === "local") {
-        result = await scanLocalSource(source.id, config, mode, onProgress, controller.signal);
+      const { result, aborted } = await runBatchJob("scan", { sourceId: id, mode }, { signal: controller.signal, onProgress });
+      if (aborted || controller.signal.aborted) {
+        scanJobs.set(id, { status: "stopped", result: result?.result, startedAt: job.startedAt, progress: job.progress, mode });
       } else {
-        scanJobs.set(id, { status: "failed", error: "不支持的媒体源类型", startedAt: job.startedAt });
-        return;
-      }
-      if (controller.signal.aborted) {
-        scanJobs.set(id, { status: "stopped", result, startedAt: job.startedAt, progress: job.progress, mode });
-      } else {
-        scanJobs.set(id, { status: "completed", result, startedAt: job.startedAt, progress: job.progress, mode });
-        // Auto-scrape ONLY the newly-added artists' info (avatars/bios),
-        // QQ Music first then NetEase. Runs in background with progress.
-        (async () => {
-          try {
-            const newArtists = db.select().from(artists).all()
-              .filter(a => !preScanArtistIds.has(a.id) && !a.coverArt);
-            if (newArtists.length > 0) {
-              log.info(`[ARTIST-SCRAPE] ${newArtists.length} new artists, scraping...`);
-              const job2 = { status: "running", startedAt: new Date().toISOString(), progress: undefined as any };
-              scrapeJobs.set(SCRAPE_JOB_ID, job2);
-              const onProgress = (p: any) => { job2.progress = { ...p }; };
-              try {
-                const r = await scrapeArtistList(newArtists.map(a => a.id), onProgress);
-                scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job2.startedAt, finishedAt: new Date().toISOString(), progress: r });
-                log.info(`[ARTIST-SCRAPE] done: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
-              } catch (e: any) {
-                scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job2.startedAt, error: e.message || "刮削失败", progress: job2.progress });
-              }
-            }
-          } catch (e: any) {
-            log.error("[ARTIST-SCRAPE] error", { err: e.message });
-          }
-        })();
+        scanJobs.set(id, { status: "completed", result: result?.result, startedAt: job.startedAt, progress: job.progress, mode });
       }
     } catch (e: any) {
       log.error("[SCANNER] Scan error", { err: e });
@@ -889,7 +897,7 @@ apiRoutes.post("/v1/artists/scrape", async (c) => {
     const onProgress = (p: any) => { job.progress = { ...p }; };
     (async () => {
       try {
-        const result = await scrapeArtistList(missing.map(a => a.id), onProgress);
+        const { result } = await runBatchJob("scrape-artists", { artistIds: missing.map(a => a.id) }, { onProgress });
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job.startedAt, finishedAt: new Date().toISOString(), progress: result });
       } catch (e: any) {
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "刮削失败", progress: job.progress });
@@ -924,7 +932,7 @@ apiRoutes.post("/v1/artists/scrape-missing", async (c) => {
     const onProgress = (p: any) => { job.progress = { ...p }; };
     (async () => {
       try {
-        const result = await scrapeArtistList(missing.map(a => a.id), onProgress);
+        const { result } = await runBatchJob("scrape-artists", { artistIds: missing.map(a => a.id) }, { onProgress });
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job.startedAt, finishedAt: new Date().toISOString(), progress: result });
       } catch (e: any) {
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "刮削失败", progress: job.progress });
@@ -956,6 +964,7 @@ apiRoutes.get("/v1/admin/memory-settings", adminMiddleware, (c) => {
   const v = parseInt(getSetting("memory_idle_minutes", "5"), 10);
   const mem = getMemorySnapshot();
   const rs = getReclaimStatus();
+  const libIndex = getLibraryIndexStats();
   return c.json({
     success: true,
     enabled: getSettingBool("memory_auto_reclaim", true),
@@ -968,6 +977,15 @@ apiRoutes.get("/v1/admin/memory-settings", adminMiddleware, (c) => {
     isBatchBusy: isBatchBusy(),
     lastReclaimAt: rs.lastReclaimAt,
     lastReclaim: rs.lastReclaim,
+    // 可重建缓存明细(全部可被空闲回收清空;pageCacheMB 为 SQLite 页缓存估算)。
+    caches: {
+      coverRawBytes: getCoverCacheBytes(),
+      coverRenderedBytes: getRenderedCoverBytes(),
+      lyricsEntries: getLyricsCacheEntries(),
+      libraryIndexBuilt: libIndex.built,
+      libraryIndexSongs: libIndex.songs,
+      pageCacheMB: 10, // cache_size = -10000 KB
+    },
   });
 });
 apiRoutes.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
@@ -1350,62 +1368,11 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
     }
     if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
     const ownerKey = `${url}:${user?.id || ""}`;
-    const started = startAsyncTask("playlist-import", `url:${ownerKey}`, async () => {
-      markInteractiveStart(); // 用户交互窗口:导入期间后台批量任务让路
-      try {
-        const imported = await importPlaylistFromUrl(url);
-        const name = (body.name || imported.name || "导入歌单").trim();
-
-        // Upsert: if this user already imported the same share URL, update that
-        // playlist in place (incremental rebuild) instead of creating a duplicate.
-        const existing = db.select().from(playlists)
-          .where(and(eq(playlists.sourceUrl, url), eq(playlists.ownerId, user?.id || "")))
-          .get();
-
-        let id: string;
-        if (existing) {
-          id = existing.id;
-          // Refresh cached remote cover (force re-download) when the platform supplies one.
-          if (imported.coverUrl) {
-            const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`, true);
-            const upd: any = { updatedAt: new Date().toISOString() };
-            if (body.name) upd.name = name;
-            if (cached) upd.coverArt = cached;
-            db.update(playlists).set(upd).where(eq(playlists.id, id)).run();
-          } else if (body.name) {
-            db.update(playlists).set({ name, updatedAt: new Date().toISOString() }).where(eq(playlists.id, id)).run();
-          }
-        } else {
-          id = `pl-${Date.now()}`;
-          // Cache the remote platform cover locally (native files carry no cover URL)
-          let coverRef: string | undefined = undefined;
-          if (imported.coverUrl) {
-            const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);
-            if (cached) coverRef = cached;
-          }
-          db.insert(playlists).values({
-            id, name, ownerId: user?.id || "",
-            sourceUrl: url,
-            sourcePlatform: imported.platform,
-            externalId: url,
-            coverArt: coverRef,
-            syncEnabled: body.autoSync ? 1 : 0,
-          }).run();
-        }
-        const result = await syncApi().rebuildPlaylistEntries(id, imported, {
-          userId: user?.id,
-          notes: `来自歌单「${name}」导入`,
-        });
-        return {
-          success: true, playlistId: id, name, platform: imported.platform,
-          trackCount: result.total, matched: result.matched, unmatched: result.unmatched,
-          wishAdded: result.wishAdded, coverUrl: imported.coverUrl, autoSync: !!body.autoSync,
-        };
-      } finally {
-        clearLibraryIndex(); // 单次平台歌单导入结束,立即回收曲库索引缓存
-        touch(); // 标记活动:平台歌单导入
-        markInteractiveEnd();
-      }
+    // URL 导入跑在一次性批量子进程里(方案3):子进程内 importPlaylistFromUrl +
+    // 增量重建,进度/结果经 IPC 回传;clearLibraryIndex/touch 由 runBatchJob 收尾。
+    const started = startAsyncTask("playlist-import", `url:${ownerKey}`, {
+      kind: "playlist-import",
+      args: { url, userId: user?.id, name: typeof body.name === "string" ? body.name : undefined, autoSync: !!body.autoSync },
     });
     if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
     return c.json({ success: true, taskId: started.taskId });
@@ -1455,16 +1422,9 @@ apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
   // Only owner (or admin) can sync
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权同步该歌单"));
   if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
-  const started = startAsyncTask("playlist-sync", `pl:${id}`, async () => {
-    markInteractiveStart(); // 用户交互窗口:手动同步期间后台批量任务让路
-    try {
-      const result = await syncApi().syncPlaylist(id, { userId: user?.id });
-      return result;
-    } finally {
-      clearLibraryIndex(); // 手动同步结束,立即回收曲库索引缓存
-      touch(); // 标记活动:歌单同步
-      markInteractiveEnd();
-    }
+  const started = startAsyncTask("playlist-sync", `pl:${id}`, {
+    kind: "playlist-sync",
+    args: { playlistId: id, userId: user?.id },
   });
   if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
   return c.json({ success: true, taskId: started.taskId });

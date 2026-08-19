@@ -72,6 +72,21 @@ export function ntpToMs(ntp: bigint): number {
   return Number((ntp >> 32n) * 1000n + (((ntp & 0xffffffffn) * 1000n) >> 32n));
 }
 
+/** Session base timeline: RTP timestamp that file-time 0 maps to. Set once at
+ *  RECORD time; every later in-place seek re-anchors `startTs` on top of it so
+ *  position (headTs − baseTs)/rate always equals the *content* position. */
+export function seekStartTs(baseTs: number, seekSec: number, sampleRate: number, chunkLen: number): number {
+  const targetFrames = Math.max(0, Math.round(seekSec * sampleRate));
+  const aligned = targetFrames - (targetFrames % chunkLen);
+  return (baseTs + aligned) >>> 0;
+}
+
+/** Content position in seconds of the chunk sequence starting at `startTs`
+ *  (anchored on `baseTs`) after `idx` chunks have been sent. */
+export function seekPositionSec(baseTs: number, startTs: number, idx: number, chunkLen: number, sampleRate: number): number {
+  return ts2ms(((startTs + idx * chunkLen - baseTs) >>> 0), sampleRate) / 1000;
+}
+
 // ---------------------------------------------------------------------------
 // RAW ALAC encoder — verbatim port of libcodecs `pcm_to_alac_raw`.
 // Input: interleaved stereo signed-16-le. Output: the exact packed lossless
@@ -220,6 +235,7 @@ export class RaopPlayer {
   private seq = (Math.random() * 0xffff) | 0;
   private headTs = 0;
   private startTs = 0;
+  private baseTs = 0; // RTP ts of file-time 0 (fixed at RECORD; seek re-anchors startTs on it)
   // libraop default latency_frames = 1s of frames (cliraop passes MS2TS(1000,sr));
   // the device derives its RTP hold depth mostly from this sync field, and a
   // too-small value makes it run dry → periodic total silence while progress
@@ -437,6 +453,7 @@ export class RaopPlayer {
     this.headTs = ntp2ts(ntpNow(), this.opts.sampleRate);
     this.headTs -= this.headTs % CHUNK_LEN;
     this.startTs = this.headTs;
+    this.baseTs = this.headTs;
     const rtpInfo = `seq=${this.seq};rtptime=${this.headTs}`;
     const record = await this.sendRtsp("RECORD", null, null, [["Range", "npt=0-"], ["RTP-Info", rtpInfo]]);
     // libraop: Audio-Latency (frames) from the RECORD reply adjusts the latency
@@ -523,7 +540,7 @@ export class RaopPlayer {
     }
     this.audioSocket.send(pkt, 0, pkt.length, this.serverAudioPort, this.opts.host);
     this.headTs = (this.headTs + CHUNK_LEN) >>> 0;
-    this.positionSec = (ts2ms((this.headTs - this.startTs) >>> 0, this.opts.sampleRate)) / 1000;
+    this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, this.opts.sampleRate) / 1000;
     return true;
   }
 
@@ -641,6 +658,34 @@ export class RaopPlayer {
 
   resume(): void {
     this.paused = false;
+  }
+
+  /** Prepare for an in-place seek WITHOUT tearing down the RTSP session.
+   *
+   *  Flushes the receiver's audio buffer (RAOP FLUSH with the new anchor),
+   *  then resets all per-stream state so a fresh `stream()` call picks up at
+   *  file-time `seekSec`: re-anchored startTs (clock keeps its session base),
+   *  new RTP seq, first-packet marker, cleared retransmit backlog, stopped
+   *  sync timer, and a positionSec that already reflects the target. A FLUSH
+   *  rejection is non-fatal: the 0xE0 first-packet marker on the next stream
+   *  re-anchors receivers that don't answer FLUSH. */
+  async prepareSeek(seekSec: number): Promise<void> {
+    this.streaming = false; // no further chunks from the old timeline
+    this.paused = false;
+    if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
+    this.startTs = seekStartTs(this.baseTs, seekSec, this.opts.sampleRate, CHUNK_LEN);
+    this.seq = (Math.random() * 0xffff) | 0;
+    this.started = false;
+    this.audioBacklog.clear();
+    this.backlogSeq = 0;
+    this.positionSec = seekSec;
+    if (this.socket && !this.socket.destroyed) {
+      try {
+        await this.sendRtsp("FLUSH", null, null, [["RTP-Info", `seq=${this.seq};rtptime=${this.startTs}`]]);
+      } catch (e) {
+        log.warn(`RAOP FLUSH rejected (${(e as Error)?.message}); relying on first-packet marker`);
+      }
+    }
   }
 
   /** Send volume via SET_PARAMETER (dB, -30..0). Fire-and-forget: receivers

@@ -15,6 +15,7 @@ import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../src/services
 import { FIXED_TODAY_ID } from "../../src/services/plugin/dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "../../src/services/plugin/localRecommend.js";
 import { ROAM_PLAYLIST_ID } from "../../src/services/plugin/dailyRoam.js";
+import { installInProcessBatchRunner } from "../batch/fakeRunner.js";
 
 // 固定推荐歌单契约:pl-daily-today/local/roam 永远固定,供音流稳定引用——
 // 识别(内置兜底 + manifest 动态)、自愈(缺失触发生成)、删除保护(管理端 400)。
@@ -28,6 +29,9 @@ const authQS = () => `u=alice&t=${md5(PLAIN + CLIENT_SALT)}&s=${CLIENT_SALT}`;
 
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
+  // ensureHomePlaylist 经 runPluginJob 触发生成;默认会 fork 子进程,假插件仅在
+  // 本进程注册,子进程看不到 → 改用进程内直调。
+  installInProcessBatchRunner();
   initDatabase();
   if (!db.select().from(users).where(eq(users.username, "alice")).get()) {
     db.insert(users).values({ id: "u1", username: "alice", password: "", salt: "salt", subsonicSalt: "subsalt", passEnc: encryptPassword(PLAIN), isAdmin: 1, isActive: 1, email: "a@b.c" }).run();

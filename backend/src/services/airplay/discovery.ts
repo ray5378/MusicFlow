@@ -3,9 +3,10 @@
 // the same `bonjour-service` package the backend already ships.
 //
 // Notes:
-//   - We also browse `_airplay._tcp` so AirPlay 2-only receivers would appear
-//     too (only RAOP over RTSP:5000 is supported for now — AP2-capable devices
-//     typically also advertise `_raop`).
+//   - We only browse `_raop._tcp` (AirPlay 1). AirPlay 2 (`_airplay._tcp`) is
+//     NOT supported: it needs a different protocol (HAP pairing / encrypted
+//     RTSP / ALAC realtime) and there are no AP2 test devices on hand, so pure
+//     AP2-only receivers simply stay undiscovered.
 //   - TXT fields we care about: `et` (encryption types, `1` = RSA supported),
 //     `pk` (device RSA public key, base64), `am` (model name), `flags`, `vv`.
 import { Bonjour, Service, Browser } from "bonjour-service";

@@ -19,6 +19,10 @@ services:
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
+      # V8 堆上限:server 的 JS 堆日常仅 ~30MB,256MB 上限让 V8 及时压堆、
+      # 少保留已提交的低位页(RSS 里的"无主内存"),与空闲回收(服务端内置 gc)
+      # 配合把常驻内存压到百 MB 级。可按需调大(如 512)但收益递减。
+      - NODE_OPTIONS=--max-old-space-size=256
       # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;
       # 反代/多网卡导致探测错误时设置此项。
       # - DLNA_BASE_URL=http://192.168.1.100:46400

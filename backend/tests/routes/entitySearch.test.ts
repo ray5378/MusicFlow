@@ -11,6 +11,7 @@ import { eq, inArray } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes } from "../../src/routes/api/index.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
+import { installInProcessBatchRunner } from "../batch/fakeRunner.js";
 
 const app = new Hono();
 app.use("/rest/api/*", authMiddleware);
@@ -121,6 +122,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  installInProcessBatchRunner();
   for (const id of [FAKE, FAKE_ARTIST_ONLY]) {
     db.delete(plugins).where(eq(plugins.name, id)).run();
     unregisterPlugin(id);

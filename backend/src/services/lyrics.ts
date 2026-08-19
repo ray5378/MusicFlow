@@ -82,6 +82,11 @@ export function clearLyricsCache(): void {
   lrcCache.clear();
 }
 
+/** 歌词内存缓存条目数(观测)。 */
+export function getLyricsCacheEntries(): number {
+  return lrcCache.size;
+}
+
 // 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL)。离线优先、最准;
 // web 歌曲 path 不是 w:/l: 前缀,直接返回 null。
 async function readSidecarLrc(song: SongRow): Promise<string | null> {

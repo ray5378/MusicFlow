@@ -14,12 +14,8 @@
 
 import { Hono } from "hono";
 import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
-import { importOnlineSongs } from "../../services/source/online/service.js";
-import { importRemotePlaylistLike } from "../../services/plugin/remoteImport.js";
-import { clearLibraryIndex } from "../../services/plugin/libraryIndex.js";
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
-import { touch } from "../../services/memory/reclaim.js";
 
 type Kind = "song" | "artist" | "album";
 
@@ -138,24 +134,10 @@ for (const spec of SPECS) {
         // 歌曲:搜索结果的歌曲数据直接入库为可播在线歌曲(fingerprint 去重,重复导入无副作用)。
         const list = Array.isArray(body.songs) ? body.songs : [];
         if (!list.length) return c.json({ success: false, error: "缺少 songs 列表" });
-        const started = startAsyncTask("song-search-import", `sg:${providerId}:${user?.id || ""}:${Date.now()}`, async () => {
-          markInteractiveStart();
-          try {
-            const imp = await importOnlineSongs(providerId, list, { userId: user?.id, interactive: true });
-            if (!imp?.songs?.length) throw new Error("歌曲入库失败,请检查在线源配置");
-            // ids 供调用方(如 HA 卡片)「导入后立即入队播放」拿到真实 DB songId。
-            // imported 带 fingerprint(providerId:source:id)供批量导入后精确映射(导入并发执行,
-            // 失败项被过滤,按序对应会错位)。
-            return {
-              success: true, added: imp.added, deduped: imp.deduped, failed: imp.failed,
-              trackCount: imp.songs.length, ids: imp.songs.map((s) => s.id),
-              imported: imp.songs.map((s) => ({ id: s.id, fingerprint: s.fingerprint })),
-            };
-          } finally {
-            clearLibraryIndex();
-            touch();
-            markInteractiveEnd();
-          }
+        // 入库在一次性批量子进程里执行(方案3);子进程按 providerId 重建在线源。
+        const started = startAsyncTask("song-search-import", `sg:${providerId}:${user?.id || ""}:${Date.now()}`, {
+          kind: "song-search-import",
+          args: { providerId, songs: list, userId: user?.id },
         });
         if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
         return c.json({ success: true, taskId: started.taskId });
@@ -168,21 +150,20 @@ for (const spec of SPECS) {
       if (typeof plugin.impl?.playlistSongs !== "function") {
         return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取专辑歌曲)" }, 404);
       }
-      const config = getPluginConfig(providerId) || {};
       // 专辑用独立 scheme,避免与同平台歌单 id 撞幂等键
       const sourceUrl = `${providerId}://album/${source}/${id}`;
-      const started = startAsyncTask("album-search-import", `al:${sourceUrl}:${user?.id || ""}`, async () => {
-        return importRemotePlaylistLike({
+      const started = startAsyncTask("album-search-import", `al:${sourceUrl}:${user?.id || ""}`, {
+        kind: "album-search-import",
+        args: {
           providerId,
-          plugin: plugin.impl,
-          config,
-          userId: user?.id,
+          lookupCap: "albumSearch",
           source,
           id,
           name: String(body.name || "").trim(),
           cover: String(body.cover || "").trim(),
           sourceUrl,
-        });
+          userId: user?.id,
+        },
       });
       if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
       return c.json({ success: true, taskId: started.taskId });

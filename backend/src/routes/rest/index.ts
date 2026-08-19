@@ -537,8 +537,29 @@ const searchHandler = (c: any) => {
   let foundArtists: any[];
 
   if (query === "" || query === '""') {
-    // Empty query: return everything (used by clients to page through the whole library)
-    foundSongs = db.select().from(songs).all().sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+    // Empty query: return everything (used by clients to page through the whole library).
+    // 只投影 songToChild 实际用到的列,避开 source_data/stream_headers/cache_path
+    // 等大文本列 —— 整库翻页不会再把整张 songs 表的文本载荷都拉进内存(排序/分页
+    // 语义不变:标题按 localeCompare 排)。
+    foundSongs = db.select({
+      id: songs.id,
+      albumId: songs.albumId,
+      title: songs.title,
+      album: songs.album,
+      artist: songs.artist,
+      track: songs.track,
+      genre: songs.genre,
+      coverArt: songs.coverArt,
+      size: songs.size,
+      contentType: songs.contentType,
+      suffix: songs.suffix,
+      duration: songs.duration,
+      bitRate: songs.bitRate,
+      path: songs.path,
+      playCount: songs.playCount,
+      discNumber: songs.discNumber,
+      createdAt: songs.createdAt,
+    }).from(songs).all().sort((a, b) => (a.title || "").localeCompare(b.title || ""));
     foundAlbums = db.select().from(albums).all();
     foundArtists = db.select().from(artists).all();
   } else if (isId) {
@@ -571,24 +592,31 @@ restRoutes.get("/getSongsByGenre", (c) => {
 });
 
 restRoutes.get("/getRandomSongs", (c) => {
-  const size = parseInt(getParam(c, "size") || "10") || 10;
+  const size = Math.min(100, parseInt(getParam(c, "size") || "10") || 10);
   const user = c.get("user");
-  const allSongs = db.select().from(songs).all().sort(() => Math.random() - 0.5).slice(0, size);
+  // SQL 随机取样,避免把整张 songs 表(含大文本列)加载进来在 JS 里洗牌。
+  const allSongs = db.select().from(songs).orderBy(sql`random()`).limit(size).all();
   return c.json(ok({ randomSongs: { song: allSongs.map(s => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
 restRoutes.get("/getGenres", (c) => {
   const genreMap = new Map<string, { songCount: number; albumCount: number }>();
-  for (const s of db.select().from(songs).all()) {
-    if (!s.genre) continue;
-    const entry = genreMap.get(s.genre) || { songCount: 0, albumCount: 0 };
-    entry.songCount++;
-    genreMap.set(s.genre, entry);
+  // SQL GROUP BY 聚合,替代整表加载后在 JS 里逐行计数(大曲库下避免两张大表
+  // 的瞬态内存尖峰)。语义与原实现一致:跳过空串 genre(NULL/'' 排除,'' 保留)。
+  const songRows = db.select({ genre: songs.genre, count: sql<number>`count(*)` })
+    .from(songs)
+    .where(sql`${songs.genre} is not null and ${songs.genre} != ''`)
+    .groupBy(songs.genre).all();
+  for (const r of songRows) {
+    genreMap.set(r.genre!, { songCount: r.count, albumCount: 0 });
   }
-  for (const a of db.select().from(albums).all()) {
-    if (!a.genre) continue;
-    const entry = genreMap.get(a.genre);
-    if (entry) entry.albumCount++;
+  const albumRows = db.select({ genre: albums.genre, count: sql<number>`count(*)` })
+    .from(albums)
+    .where(sql`${albums.genre} is not null and ${albums.genre} != ''`)
+    .groupBy(albums.genre).all();
+  for (const r of albumRows) {
+    const entry = genreMap.get(r.genre!);
+    if (entry) entry.albumCount = r.count;
   }
   return c.json(ok({ genres: { genre: Array.from(genreMap.entries()).map(([name, counts]) => ({ value: name, songCount: counts.songCount, albumCount: counts.albumCount })) } }));
 });

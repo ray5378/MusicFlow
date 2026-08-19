@@ -22,18 +22,12 @@ import {
 } from "./services/player/playerWebhook.js";
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
 import { authMiddleware } from "./middleware/auth.js";
-import { syncAllRecommendPlaylists } from "./services/source/online/recommendImport.js";
-import { purgeExpiredWebSongs } from "./services/source/online/purge.js";
-import { getEnabledSourcePlugins, getEnabledByCapability } from "./plugins/registry.js";
-import { runPluginJob } from "./services/plugin/jobRunner.js";
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
 import { seedDefaultRegistry } from "./plugins/registryCatalog.js";
-import { scrapeArtistList } from "./services/scraper/artist.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
-import { db } from "./db/index.js";
-import { artists } from "./db/schema.js";
+import { runBatchJob } from "./batch/runner.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
 const app = new Hono();
@@ -259,66 +253,13 @@ function getDailyMasterEnabled(): boolean {
 async function runDailyJobs() {
   // Master switch gates the combined daily-recommend job (remote + pool + local).
   if (!getDailyMasterEnabled()) return;
-  // Every enabled `recommender` plugin builds its own playlist. Core iterates by
-  // capability — it doesn't know that「每日推荐」/「本地推荐」/「今日漫游」exist, let alone import them.
-  // dailyPlaylist = 每日推荐插件(在线发现歌单); localPlaylist = 本地推荐引擎(本地口味歌单);
-  // recommendPlaylist = 通用推荐歌单插件(第三方,如 ListenBrainz,生成/刷新自身歌单);
-  // comboPlaylist = 组合歌单(今日漫游,合并前几者)——必须在前三类之后跑,所以单独放最后。
-  for (const cap of ["dailyPlaylist", "localPlaylist", "recommendPlaylist"] as const) {
-    for (const { manifest, impl } of getEnabledByCapability(cap)) {
-      if (typeof impl?.runDailyJob !== "function") continue;
-      // recommendPlaylist(第三方外置,如 go-music-dl / ListenBrainz):走异步任务通道
-      // (jobRunner 串行锁 + longRunning 长预算),调度不阻塞、也不与手动刷新撞车。
-      // dailyPlaylist / localPlaylist(内置推荐引擎)保持同步 await,不改变既有行为。
-      if (cap === "recommendPlaylist") {
-        const { started, alreadyRunning } = runPluginJob(manifest.id, "runDailyJob");
-        if (started) log.info(`[DAILY-SCHEDULER] ${manifest.id}: 已调度后台任务`);
-        else if (alreadyRunning) log.info(`[DAILY-SCHEDULER] ${manifest.id}: 任务已在运行,跳过`);
-        continue;
-      }
-      try {
-        const summary = await impl.runDailyJob();
-        if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
-      } catch (e: any) {
-        log.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error`, { err: e.message || e });
-      }
-    }
-  }
-  // 组合歌单(comboPlaylist)在源歌单生成之后再合并。
-  for (const { manifest, impl } of getEnabledByCapability("comboPlaylist")) {
-    if (typeof impl?.runDailyJob !== "function") continue;
-    try {
-      const summary = await impl.runDailyJob();
-      if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
-    } catch (e: any) {
-      log.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error`, { err: e.message || e });
-    }
-  }
-  // Refresh every enabled source plugin that supports daily-recommend playlists
-  // and/or web-song rotation. Core iterates by *capability* — no hardcoded
-  // provider name.
-  for (const { manifest } of getEnabledSourcePlugins()) {
-    const caps = manifest.capabilities;
-    if (caps.includes("recommend")) {
-      try {
-        const r = await syncAllRecommendPlaylists(manifest.id, {});
-        if (r.synced > 0 || r.failed > 0) {
-          log.info(`[DAILY-SCHEDULER] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
-        }
-      } catch (e: any) {
-        log.error(`[DAILY-SCHEDULER] ${manifest.id} recommend sync error`, { err: e.message || e });
-      }
-    }
-    if (caps.includes("webRotation")) {
-      try {
-        const r = purgeExpiredWebSongs(manifest.id);
-        if (r.purged > 0 || r.errors > 0) {
-          log.info(`[DAILY-SCHEDULER] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
-        }
-      } catch (e: any) {
-        log.error(`[DAILY-SCHEDULER] ${manifest.id} web-song purge error`, { err: e.message || e });
-      }
-    }
+  // 每日推荐全管线在一次性批量子进程里执行(方案3):内置/外置推荐插件的
+  // runDailyJob + 组合歌单 + 平台每日推荐同步 + 网页歌清理,见 batch/jobs.ts。
+  // 全局批量闸由 runBatchJob 持有,主进程事件循环/内存不受批量任务影响。
+  try {
+    await runBatchJob("daily-jobs", {});
+  } catch (e: any) {
+    log.error("[DAILY-SCHEDULER] daily job error", { err: e.message || e });
   }
 }
 
@@ -354,29 +295,13 @@ function scheduleNextDailyRun() {
 // time-of-day sensitive and benefit from running shortly after boot too.
 const AUTO_SYNC_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 setInterval(async () => {
+  // play_history 保留期清理留在主进程(单条 DELETE,不构成内存峰)。
   cleanupPlayHistory(getPlayHistoryRetentionDays());
-  // Every enabled `sync` plugin re-syncs what it owns (imported playlists today).
-  // 走异步任务通道(jobRunner 串行锁):不阻塞维护循环,也不与手动刷新撞车。
-  for (const { manifest, impl } of getEnabledByCapability("playlistSync")) {
-    if (typeof impl?.runSyncJob !== "function") continue;
-    const { started, alreadyRunning } = runPluginJob(manifest.id, "runSyncJob");
-    if (started) log.info(`[AUTO-SYNC] ${manifest.id}: 已调度后台同步`);
-    else if (alreadyRunning) log.info(`[AUTO-SYNC] ${manifest.id}: 同步任务已在运行,跳过`);
-  }
-  // Auto-scrape artist info for artists added in the last 7 days that still
-  // have no cover (QQ first, NetEase fallback). Older artists are left alone
-  // unless the user triggers a manual full scrape.
-  try {
-    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const recent = db.select().from(artists).all()
-      .filter(a => !a.coverArt && (a.createdAt || "") >= since);
-    if (recent.length > 0) {
-      const r = await scrapeArtistList(recent.map(a => a.id));
-      log.info(`[ARTIST-SCRAPE] scheduled run: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
-    }
-  } catch (e: any) {
-    log.error("[ARTIST-SCRAPE] error", { err: e.message });
-  }
+  // playlistSync 插件 runSyncJob + 新歌手刮削在一次性批量子进程里执行(方案3),
+  // 全局批量闸由 runBatchJob 持有,不阻塞维护循环、也不与手动刷新撞车。
+  runBatchJob("maintenance", {}).catch((e: any) => {
+    log.error("[AUTO-SYNC] maintenance error", { err: e.message || e });
+  });
 }, AUTO_SYNC_INTERVAL);
 
 // ==================== DLNA background discovery ====================

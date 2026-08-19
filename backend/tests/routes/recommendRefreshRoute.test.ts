@@ -10,7 +10,8 @@ import { users, plugins } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes } from "../../src/routes/api/index.js";
-import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
+import { registerPlugin, unregisterPlugin, getPlugin } from "../../src/plugins/registry.js";
+import { _setPluginJobExecForTest } from "../../src/services/plugin/jobRunner.js";
 
 // POST /rest/api/v1/recommend/refresh:按 daily → local → roam 顺序,以
 // force + 随机 seedSalt 重新触发生成,并支持 targets 子集。核心按能力门面调用,
@@ -56,6 +57,12 @@ function enablePlugin(name: string) {
 
 beforeEach(() => {
   calls.length = 0;
+  // 注入进程内直调的插件任务执行器:默认 jobRunner 会 fork 一次性批量子进程执行,
+  // 但测试的假插件只注册在本进程内存注册表,子进程看不到;测试环境改用进程内直调。
+  _setPluginJobExecForTest(async (pluginId, method, opts) => {
+    const reg = getPlugin(pluginId);
+    return reg?.impl?.[method]?.(opts);
+  });
   // 导入 apiRoutes 会经 services/source/online 顺带注册内置插件(daily-recommend 等),
   // 会抢走能力门面的"第一个插件"位置——先把内置推荐插件反注册 + 删行,只剩假插件。
   for (const id of ["f-daily", "f-local", "f-roam", "daily-recommend", "local-recommend", "daily-roam"]) {

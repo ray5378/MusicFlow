@@ -82,3 +82,11 @@ export function clearLibraryIndex(): void {
   cache = null;
   lastUsedAt = 0;
 }
+
+/** 当前曲库索引是否已构建 + 歌曲条数(观测)。 */
+export function getLibraryIndexStats(): { built: boolean; songs: number } {
+  if (!cache) return { built: false, songs: 0 };
+  let songs = 0;
+  for (const arr of cache.values()) songs += arr.length;
+  return { built: true, songs };
+}

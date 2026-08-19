@@ -12,7 +12,6 @@
 
 import { Hono } from "hono";
 import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
-import { importRemotePlaylistLike } from "../../services/plugin/remoteImport.js";
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
 
@@ -88,24 +87,15 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) =>
   const source = String(body.source || "").trim();
   const id = String(body.id || "").trim();
   if (!source || !id) return c.json({ success: false, error: "缺少歌单 source/id" });
-  const config = getPluginConfig(providerId) || {};
   const fallbackName = String(body.name || "").trim();
   const cover = String(body.cover || "").trim();
   const sourceUrl = syntheticSourceUrl(providerId, source, id);
 
-  const started = startAsyncTask("playlist-search-import", `pl:${sourceUrl}:${user?.id || ""}`, async () => {
-    // 拉歌 → 入库 → 平台歌单 upsert(合成 sourceUrl 幂等)→ 全量替换条目,见 remoteImport.ts
-    return importRemotePlaylistLike({
-      providerId,
-      plugin: plugin.impl,
-      config,
-      userId: user?.id,
-      source,
-      id,
-      name: fallbackName,
-      cover,
-      sourceUrl,
-    });
+  // 拉歌 → 入库 → 平台歌单 upsert → 全量替换条目,在一次性批量子进程里执行(方案3),
+  // 子进程从自身注册表按 providerId + capability 重建插件/config。
+  const started = startAsyncTask("playlist-search-import", `pl:${sourceUrl}:${user?.id || ""}`, {
+    kind: "playlist-search-import",
+    args: { providerId, lookupCap: "playlistSearch", source, id, name: fallbackName, cover, sourceUrl, userId: user?.id },
   });
   if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
   return c.json({ success: true, taskId: started.taskId });

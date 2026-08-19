@@ -72,6 +72,7 @@
         <h3>AirPlay 设备</h3>
         <el-button size="small" :loading="loadingAirPlay" @click="loadAirPlayDevices"><MfIcon name="RefreshCw" />刷新</el-button>
       </div>
+      <div class="section-note">仅 AirPlay 1 (RAOP)。当前只在「阿音 WR320」上验证过,其他设备不保证兼容;不支持 AirPlay 2。</div>
       <div class="devices-box" v-loading="loadingAirPlay">
         <div v-for="dev in airplayDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
           <MfIcon name="Airplay" class="device-row-icon" :class="{ offline: !dev.available }"  />
@@ -549,6 +550,7 @@ onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); });
   h3 { font-size: 16px; font-weight: 600; margin: 0; color: var(--fnos-text-primary); }
 }
 .group-section-head { margin-top: 28px; }
+.section-note { color: var(--fnos-text-tertiary); font-size: 12px; margin: -4px 0 12px; line-height: 1.6; }
 .devices-box { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 6px; background: rgba(0,0,0,0.15); min-height: 60px; }
 .device-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; transition: background 0.15s, border-color 0.15s; border: 1px solid transparent;
   &:hover { background: rgba(255,255,255,0.05); }

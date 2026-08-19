@@ -17,9 +17,13 @@
 //     budget (COVER_CACHE_BUDGET_BYTES) is exceeded, independent of age.
 import fs from "fs";
 
-const INACTIVE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min without a cover request
-const SWEEP_INTERVAL_MS = 60 * 1000;        // check once a minute
-const COVER_CACHE_BUDGET_BYTES = 128 * 1024 * 1024; // 128 MB
+// Tunable memory caps (env-overridable). Defaults are sized for slow/HDD
+// storage: 64MB of decoded cover bytes + a 5-min inactivity flush still keeps
+// repeated reads off the disk, but bounds the ceiling roughly in half vs the
+// old 128MB/10min. A fast-SSD deployment can tighten further via env.
+const INACTIVE_TIMEOUT_MS = parseInt(process.env.COVER_CACHE_IDLE_MINUTES || "5", 10) * 60 * 1000; // default 5 min
+const SWEEP_INTERVAL_MS = 60 * 1000; // check once a minute
+const COVER_CACHE_BUDGET_BYTES = parseInt(process.env.COVER_CACHE_BUDGET_MB || "64", 10) * 1024 * 1024; // 64 MB
 
 const cache = new Map<string, { buf: Uint8Array<ArrayBuffer>; size: number }>();
 let heldBytes = 0;
@@ -71,4 +75,9 @@ export async function readCoverFile(filePath: string): Promise<Uint8Array<ArrayB
 export function clearCoverCache(): void {
   cache.clear();
   heldBytes = 0;
+}
+
+/** Bytes of decoded cover art currently held in RAM (observability). */
+export function getCoverCacheBytes(): number {
+  return heldBytes;
 }

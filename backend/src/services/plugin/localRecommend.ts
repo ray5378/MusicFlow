@@ -97,12 +97,8 @@ interface TasteProfile {
 function buildTasteProfile(): TasteProfile {
   const since = new Date(Date.now() - HISTORY_WINDOW_DAYS * 86400000).toISOString();
 
-  // Plays per song, with recency weighting (newer = heavier).
-  const playRows = sqlite.prepare(`
-    SELECT song_id, played_at FROM play_history
-    WHERE played_at >= ?
-  `).all(since) as { song_id: string; played_at: string }[];
-
+  // 方案1:play_history 用 rowid 游标分批读取,避免一次把窗口内全部播放记录载入内存
+  // (重度使用场景可达几十万行)。聚合(weight 累加)与顺序无关,分批结果与一次性读取等价。
   const userCountRow = sqlite.prepare(`
     SELECT COUNT(DISTINCT user_id) AS n FROM play_history WHERE played_at >= ?
   `).get(since) as { n: number };
@@ -110,12 +106,24 @@ function buildTasteProfile(): TasteProfile {
   const songScores = new Map<string, number>();
   const recentSongIds = new Set<string>();
   const nowMs = Date.now();
-  for (const r of playRows) {
-    const t = new Date(r.played_at).getTime() || nowMs;
-    const ageDays = Math.max(0, (nowMs - t) / 86400000);
-    const weight = Math.max(0.05, 1 - ageDays / HISTORY_WINDOW_DAYS);
-    songScores.set(r.song_id, (songScores.get(r.song_id) || 0) + weight);
-    recentSongIds.add(r.song_id);
+  const PLAY_HISTORY_BATCH = 2000;
+  let cursor = 0;
+  for (;;) {
+    const playRows = sqlite.prepare(`
+      SELECT song_id, played_at, rowid AS rid FROM play_history
+      WHERE played_at >= ? AND rowid > ?
+      ORDER BY rowid ASC LIMIT ?
+    `).all(since, cursor, PLAY_HISTORY_BATCH) as { song_id: string; played_at: string; rid: number }[];
+    if (playRows.length === 0) break;
+    for (const r of playRows) {
+      const t = new Date(r.played_at).getTime() || nowMs;
+      const ageDays = Math.max(0, (nowMs - t) / 86400000);
+      const weight = Math.max(0.05, 1 - ageDays / HISTORY_WINDOW_DAYS);
+      songScores.set(r.song_id, (songScores.get(r.song_id) || 0) + weight);
+      recentSongIds.add(r.song_id);
+    }
+    cursor = playRows[playRows.length - 1].rid;
+    if (playRows.length < PLAY_HISTORY_BATCH) break;
   }
 
   // Favorites count as a strong, non-decaying signal.

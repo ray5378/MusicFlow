@@ -31,6 +31,16 @@ const USER_CACHE_TTL_MS = 60_000;
 const userCache = new Map<string, { user: AuthUser; isActive: boolean; at: number }>();
 let apiKeyIndex: Map<string, { userId: string; expiresAt: string | null }> | null = null;
 
+// 用户缓存 TTL 清扫:TTL 只在读取时惰性校验,不扫的话被删/改名过的用户会一直
+// 留在 map 里(users 行数少,影响极小,但保持有界)。
+const userCacheSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of userCache) {
+    if (now - v.at >= USER_CACHE_TTL_MS) userCache.delete(k);
+  }
+}, USER_CACHE_TTL_MS);
+(userCacheSweep as any).unref?.();
+
 function buildApiKeyIndex(): void {
   const idx = new Map<string, { userId: string; expiresAt: string | null }>();
   const rows = db.select().from(users).all();

@@ -484,14 +484,28 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
   const candidates = loadCandidates();
   const ownerId = systemOwnerId();
 
-  // Step 1: fetch ALL remote playlists FIRST (before any DB mutation).
-  // Collect tracks from every successful fetch; failures are logged but don't
-  // abort the whole run — we still want pool songs + local mix to work.
-  const remoteImports: { name: string; platform: string; coverUrl?: string; tracks: any[] }[] = [];
+  // Step 1: fetch ALL remote playlists, but merge + dedupe INCREMENTALLY — a
+  // single seenTrackKeys set and one combined array, each playlist's track
+  // array dropped the moment it's folded in. (Old code kept every fetched
+  // playlist's full `tracks` array in remoteImports AND a separate flatMap +
+  // filter copy until after the rebuild — 3x the track objects held at once.)
+  // Failures are logged but don't abort the run — we still want pool songs +
+  // local mix to work.
+  const dedupedTracks: any[] = [];
+  const seenTrackKeys = new Set<string>();
+  const sourceNames: string[] = [];
+  let totalRemoteTracks = 0;
   for (const c of candidates) {
     try {
       const imported = await importPlaylistFromUrl(c.url);
-      remoteImports.push(imported);
+      totalRemoteTracks += imported.tracks.length;
+      if (imported.name) sourceNames.push(imported.name);
+      for (const t of imported.tracks) {
+        const key = `${t.externalId}|${t.title}|${t.artist}`;
+        if (seenTrackKeys.has(key)) continue;
+        seenTrackKeys.add(key);
+        dedupedTracks.push(t);
+      }
       log.info(`[DAILY-RECOMMEND] fetched ${c.platform} "${c.name || c.url}": ${imported.tracks.length} tracks`);
     } catch (e: any) {
       log.error(`fetch failed for ${c.platform} "${c.name || c.url}": ${e.message || e}`);
@@ -505,7 +519,6 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
   // the existing playlist — better to keep today's previous content than to
   // have an empty one. (本地曲库推荐已由 local-recommend「本地推荐」歌单独立承担,
   // 每日推荐只做在线发现:榜单候选 + 用户推荐池。)
-  const totalRemoteTracks = remoteImports.reduce((n, imp) => n + imp.tracks.length, 0);
   if (totalRemoteTracks === 0 && poolSongIds.length === 0) {
     throw new Error("每日推荐生成失败:所有远程榜单抓取失败且用户推荐池为空");
   }
@@ -517,19 +530,7 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
   const now = new Date().toISOString();
   const playlistId = FIXED_TODAY_ID;
 
-  // Build a merged "ImportedPlaylist" from all remote tracks so we can reuse
-  // rebuildPlaylistEntries (which handles matching + stubs + wishes).
-  const mergedTracks = remoteImports.flatMap(i => i.tracks);
-  // Dedupe merged tracks by externalId+title to avoid double stubs.
-  const seenTrackKeys = new Set<string>();
-  const dedupedTracks = mergedTracks.filter(t => {
-    const key = `${t.externalId}|${t.title}|${t.artist}`;
-    if (seenTrackKeys.has(key)) return false;
-    seenTrackKeys.add(key);
-    return true;
-  });
-
-  const sourceLabel = remoteImports.map(i => i.name).filter(Boolean).join(" + ") || "用户推荐池";
+  const sourceLabel = sourceNames.join(" + ") || "用户推荐池";
   const extraParts: string[] = [];
   if (poolMembers > 0) extraParts.push(`${poolMembers}个用户推荐池`);
 
@@ -548,6 +549,10 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
     matched = result.matched;
     unmatched = result.unmatched;
     wishAdded = result.wishAdded;
+    // rebuild 完成后立即释放远程轨道引用 + 曲库索引,进入 pool/local 阶段前
+    // 把峰值压下来(大候选集时最占内存的两个结构)。
+    dedupedTracks.length = 0;
+    seenTrackKeys.clear();
     clearLibraryIndex(); // 今日推荐生成结束,立即回收曲库索引缓存
   }
 

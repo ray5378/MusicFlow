@@ -74,20 +74,49 @@ export function eventLoopLag(): number {
 //   批间睡眠 ×4 + 并发压到 1 → 后台近乎暂停,把 CPU/DB/带宽让给用户。
 // 显式计数(try/finally 成对,进程重启即清零)比 TTL 精确,无残留风险。
 let interactiveDepth = 0;
+// 子进程批量任务的远端交互标记:主进程把交互窗口同步给子进程(runner 发 pace),
+// 子进程用它让批量循环退让——子进程自己的交互计数不含用户在前台的操作。
+let remoteInteractive = false;
+
+/** 子进程侧:接收主进程同步的交互窗口状态(批量任务是否让路)。 */
+export function setRemoteInteractive(active: boolean): void {
+  remoteInteractive = !!active;
+}
+
+/** 主进程侧:批量任务启动/停止时,通知订阅者(运行器借此转发 pace 给子进程)。 */
+type InteractiveListener = (active: boolean) => void;
+const interactiveListeners: InteractiveListener[] = [];
+
+export function onInteractiveChange(fn: InteractiveListener): () => void {
+  interactiveListeners.push(fn);
+  return () => {
+    const i = interactiveListeners.indexOf(fn);
+    if (i >= 0) interactiveListeners.splice(i, 1);
+  };
+}
+
+function notifyInteractive(): void {
+  const active = isInteractiveActive();
+  for (const fn of interactiveListeners) {
+    try { fn(active); } catch { /* 订阅者异常不影响节拍器 */ }
+  }
+}
 
 /** 标记一次用户交互操作开始(前端搜索/导入/手动同步),后台批量任务将退让。 */
 export function markInteractiveStart(): void {
   interactiveDepth++;
+  notifyInteractive();
 }
 
 /** 标记一次用户交互操作结束(与 start 成对,务必放 try/finally 的 finally)。 */
 export function markInteractiveEnd(): void {
   if (interactiveDepth > 0) interactiveDepth--;
+  notifyInteractive();
 }
 
-/** 是否处于用户交互窗口内(有未结束的交互操作)。 */
+/** 是否处于用户交互窗口内(本进程交互操作,或主进程同步来的远端交互)。 */
 export function isInteractiveActive(): boolean {
-  return interactiveDepth > 0;
+  return interactiveDepth > 0 || remoteInteractive;
 }
 
 // ---------- 档位 ----------
@@ -212,4 +241,6 @@ export function _resetPacerForTest(): void {
   batchLimit = 1;
   workerPlugins = 0;
   interactiveDepth = 0;
+  remoteInteractive = false;
+  interactiveListeners.length = 0;
 }

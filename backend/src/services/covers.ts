@@ -24,6 +24,16 @@ export interface CoverSongInput {
 const ATTEMPT_TTL = 10 * 60 * 1000; // 10 分钟内同一首歌失败后不再自动重试
 const attempts = new Map<string, number>();
 
+// 失败标记的 TTL 清扫:entries 只在成功时被删(clearCoverAttempt),失败的歌会
+// 一直留在 map 里。周期扫掉过期项,避免随失败歌曲数量无界增长(歌词缓存同款)。
+const attemptsSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of attempts) {
+    if (now - v >= ATTEMPT_TTL) attempts.delete(k);
+  }
+}, 5 * 60 * 1000);
+(attemptsSweep as any).unref?.();
+
 // 封面下载全局限流(≤2 并发):批量导入/回填时避免叠加造成网络洪峰
 // (前台 stream/轮询请求被挤占)。全局信号量,所有封面下载共用。
 const COVER_CONCURRENCY_LIMIT = 2;

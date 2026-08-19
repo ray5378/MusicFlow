@@ -38,9 +38,10 @@ export const airplayRendererManifest: PluginManifest = {
 4. 与 DLNA 共用统一队列控制器(\`QueueController\`),支持持久化队列、自动切歌、重启恢复。
 
 ### 说明
-- 设备需支持 AirPlay 1 (RAOP,RTSP + RSA)——当前常见的有源音箱/回音壁基本都支持;
+- 当前仅在「阿音 WR320」上验证通过(投屏/控制/音量/进度均正常),**其他设备不保证兼容**;
+- 设备需支持 AirPlay 1 (RAOP,RTSP + RSA)——当前常见的有源音箱/回音壁基本都支持,但个别实现存在差异,如遇异常可在群组页先禁用/删除设备排查;
 - 音频由服务器端 ffmpeg 解码后转码(无需设备支持格式);
-- AirPlay 2 专属设备不适用(协议不同)。`,
+- 不支持 AirPlay 2:开发与验证环境没有 AirPlay 2 真机(HomePod / Apple TV / 纯 AP2 音箱等),协议差异较大,暂不提供 AirPlay 2 支持。`,
 };
 
 export const airplayRendererPlugin: RendererPlugin = {

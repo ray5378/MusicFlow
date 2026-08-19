@@ -30,6 +30,17 @@ const log = createLogger("AIRPLAY");
 const PREFILL_MS = 1500; // target decoded-audio lead before the first packet
 const PREFILL_BYTES = Math.round((PREFILL_MS / 1000) * SAMPLE_RATE * 2 * 2); // 44100×16bit stereo
 
+// Upper bound for the decoded-PCM read-ahead queue. ffmpeg decodes at max
+// speed, so WITHOUT a cap the producer buffers the ENTIRE track in memory
+// (34MB for a 193s song, ~1.2GB for a 2h one) and plays it out over minutes.
+// Instead we apply backpressure: once buffered PCM crosses MAX_BUFFER_BYTES we
+// pause ffmpeg's stdout (it then blocks inside the pipe write), and resume as
+// soon as it drains below the low-water mark. Cap ≈ 10s of audio (176.4KB/s),
+// which still rides out long stalls without stutter while keeping memory small.
+const MAX_BUFFER_MS = 10_000;
+const MAX_BUFFER_BYTES = Math.round((MAX_BUFFER_MS / 1000) * SAMPLE_RATE * 2 * 2); // 176400 B/s × 10s
+const RESUME_BUFFER_BYTES = Math.round(MAX_BUFFER_BYTES / 2);
+
 export interface AirPlayCastOptions {
   deviceId: string;
   songId: string;
@@ -61,6 +72,11 @@ interface ActiveSession {
   deviceId: string;
   player: RaopPlayer;
   ffmpeg: ChildProcessWithoutNullStreams;
+  session: RaopSession;
+  streamPromise?: Promise<unknown>;
+  /** Set while an in-place seek swaps the decoder: the old stream's finalizer
+   *  must keep the RTSP session + sockets alive instead of tearing down. */
+  seekReplace?: boolean;
   title?: string;
   artist?: string;
   album?: string;
@@ -125,7 +141,7 @@ function spawnDecoder(url: string, seekSec?: number): ChildProcessWithoutNullStr
  *  realtime (a fast cloud source decodes a whole track in seconds) that turns
  *  into dozens of MB of copies per second and multi-hundred-ms GC pauses that
  *  stall the sender and make the receiver stutter. */
-function makeProducer(ff: ChildProcessWithoutNullStreams): () => Promise<Buffer | null> {
+export function makeProducer(ff: ChildProcessWithoutNullStreams): () => Promise<Buffer | null> {
   const ready: Buffer[] = [];
   let carry = Buffer.alloc(0); // <1408B remainder awaiting the next data event
   let readIdx = 0;
@@ -158,6 +174,11 @@ function makeProducer(ff: ChildProcessWithoutNullStreams): () => Promise<Buffer 
     }
     if ((d as Buffer).length) carry = Buffer.from(d as Buffer);
     if (wake) { const w = wake; wake = null; w(); }
+    // Backpressure: stop pulling from ffmpeg before the buffered PCM grows past
+    // MAX_BUFFER_BYTES. pause() stops our 'data' events, the pipe fills up and
+    // ffmpeg blocks on its write — zero data lost, no audio skipped, and memory
+    // stays bounded to ~10s instead of an entire track.
+    if (!ended && bufferedBytes() >= MAX_BUFFER_BYTES) ff.stdout.pause();
   });
   ff.stdout.on("end", () => { ended = true; log.info(`producer stdout end: totalBytes=${totalBytes} (${(totalBytes / (SAMPLE_RATE * 4)).toFixed(1)}s audio)`); if (wake) { const w = wake; wake = null; w(); } });
   ff.on("exit", (code, signal) => { ended = true; log.info(`producer ffmpeg exit code=${code} signal=${signal} totalBytes=${totalBytes}`); if (wake) { const w = wake; wake = null; w(); } });
@@ -194,8 +215,17 @@ function makeProducer(ff: ChildProcessWithoutNullStreams): () => Promise<Buffer 
     return null;
   };
 
+  // Resume ffmpeg once the buffered PCM has drained below the low-water mark
+  // (half the cap). Called on every pull so backpressure never dead-locks: pause
+  // only kicks in while the queue is at/above the cap, and every consumed chunk
+  // is an opportunity to restart the pipe.
+  const maybeResume = (): void => {
+    if (ff.stdout.isPaused() && bufferedBytes() <= RESUME_BUFFER_BYTES) ff.stdout.resume();
+  };
+
   return async (): Promise<Buffer | null> => {
     if (done) return null;
+    maybeResume();
     if (!prefilled) {
       // First pull: wait until enough decoded audio is buffered to ride out
       // short stalls (decode start, WebDAV hiccup) without an audible gap.
@@ -209,6 +239,7 @@ function makeProducer(ff: ChildProcessWithoutNullStreams): () => Promise<Buffer 
     if (c) return c;
     if (!ended) {
       if (!(await waitData(30000))) { done = true; return null; }
+      maybeResume();
       const c2 = nextChunk();
       if (c2) return c2;
     }
@@ -256,6 +287,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     deviceId: opts.deviceId,
     player,
     ffmpeg: ff,
+    session,
     title: opts.title,
     artist: opts.artist,
     album: opts.album,
@@ -274,37 +306,60 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     streamUrl,
   });
 
-  player.stream(producer, session)
+  runStream(active, session);
+}
+
+/** Drive the session's current decoder into the RAOP sender and attach its
+ *  lifecycle finalizer. Reused by the in-place seek path to attach a brand-new
+ *  ffmpeg/producer to the SAME RTSP session.
+ *
+ *  Finalizer semantics:
+ *   - Normal end (whole track played / stream failed / stopped): remove the
+ *     session, kill the decoder, TEARDOWN the RTSP session and close the RTP
+ *     sockets — otherwise the socket leaks and the device keeps serving
+ *     concurrent sessions (multiple timing loops) that interfere and stutter —
+ *     then report IDLE to the PlayerController so QueueController auto-advances
+ *     without waiting for the 5s fallback poll. The single IDLE is fine: a
+ *     stop by QueueController resets tracker first, so no false ended.
+ *   - seekReplace: an in-place seek owns the session; keep it + sockets alive,
+ *     kill only the (old) decoder. */
+function runStream(active: ActiveSession, session: RaopSession): void {
+  const ff = active.ffmpeg;
+  const producer = makeProducer(ff);
+  const p = active.player.stream(producer, session)
     .catch((e) => {
-      log.error("airplay stream failed", { deviceId: opts.deviceId, songId: opts.songId, err: (e as Error)?.message || e });
+      log.error("airplay stream failed", { deviceId: active.deviceId, err: (e as Error)?.message || e });
     })
     .finally(() => {
-      if (sessions.get(opts.deviceId) === active) {
-        sessions.delete(opts.deviceId);
+      if (active.seekReplace) {
+        active.seekReplace = false;
+        try { ff.kill(); } catch { /* ignore */ }
+        return;
+      }
+      if (sessions.get(active.deviceId) === active) {
+        sessions.delete(active.deviceId);
       }
       try { ff.kill(); } catch { /* ignore */ }
       // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
       // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
-      player.stop().catch(() => {});
+      active.player.stop().catch(() => {});
       // 会话结束(整首播完 / 中途失败 / 被 stop):立即向 PlayerController 上报 IDLE。
       // 等效于 DLNA 的 GENA 事件 —— 让 QueueController 无需等下一次 5s fallback poll
       // 就能感知"这首已结束"并自动切下一首(接近无缝续播)。
-      // 对本会话的 stop 由 QueueController.stopPlayback 先行 resetTracker,
-      // 单发 IDLE 无 lastPlaying,PlaybackTracker 不会误判 ended。
-      // 注意用动态 import 避免静态循环依赖(builtins → control → player/index →
-      // QueueController → protocolPlayer → control)。
+      // ===== 注意用动态 import 避免静态循环依赖 =====
       import("../player/index.js").then(({ getPlayerController }) => {
         getPlayerController().reportState({
-          playerId: `airplay:${opts.deviceId}`,
+          playerId: `airplay:${active.deviceId}`,
           playbackState: PlaybackState.IDLE,
           position: 0,
           duration: 0,
           updatedAt: Date.now(),
         });
       }).catch((e) => {
-        log.error("reportState IDLE 上报失败", { deviceId: opts.deviceId, err: (e as Error)?.message || e });
+        log.error("reportState IDLE 上报失败", { deviceId: active.deviceId, err: (e as Error)?.message || e });
       });
     });
+  active.streamPromise = p;
 }
 
 // ==================== 设备持久化(airplay_devices) ====================
@@ -489,11 +544,53 @@ export async function stopAirPlay(deviceId: string): Promise<void> {
   await stopSession(deviceId);
 }
 
-/** Seek: restart the current track at `seconds`. */
+/** Seek the current track to `seconds`.
+ *
+ *  While a session is live this is an IN-PLACE seek: the RTSP session and RTP
+ *  sockets stay up, the receiver's buffer is flushed (RAOP FLUSH), the RTP
+ *  clock is re-anchored on the session base (so the reported position starts
+ *  at the seek target and keeps climbing — no snap-back-to-0), and only the
+ *  ffmpeg decoder is swapped for one that resumes at `-ss seconds`. The hard
+ *  gap is just ffmpeg's seek+decode startup instead of a full TEARDOWN →
+ *  ANNOUNCE/SETUP/RECORD round trip. No live session → fall back to the old
+ *  restart path (e.g. a raw api.seek right after stop). */
 export async function seekAirPlay(deviceId: string, seconds: number): Promise<void> {
-  const last = lastCast.get(deviceId);
-  if (!last) return;
-  await startSession({ ...last, deviceId, seekSec: Math.max(0, seconds) }, Math.max(0, seconds));
+  const t = Math.max(0, seconds);
+  const s = sessions.get(deviceId);
+  if (!s || s.ended || !s.player.isStreaming) {
+    const last = lastCast.get(deviceId);
+    if (!last) return;
+    await startSession({ ...last, deviceId, seekSec: t }, t);
+    return;
+  }
+
+  const wasPaused = s.player.isPaused;
+  const oldStream = s.streamPromise;
+
+  // Suppress the old stream's finalizer so the RTSP session survives the swap.
+  s.seekReplace = true;
+  // Stop the old decoder NOW: makes the old producer's waitData unblock so the
+  // old stream loop exits promptly instead of waiting out its 30s timeout.
+  try {
+    s.ffmpeg.kill();
+    s.ffmpeg.stdout?.destroy();
+    s.ffmpeg.stderr?.destroy();
+  } catch { /* ignore */ }
+
+  await s.player.prepareSeek(t).catch(() => {});
+  // Wait for the old loop + finalizer (which now runs the seekReplace branch).
+  await (oldStream || Promise.resolve()).catch(() => {});
+
+  // The finalizer raced and tore the session down anyway → full restart.
+  if (sessions.get(deviceId) !== s) {
+    const last = lastCast.get(deviceId);
+    if (last) await startSession({ ...last, deviceId, seekSec: t }, t);
+    return;
+  }
+
+  s.ffmpeg = spawnDecoder(s.streamUrl, t);
+  runStream(s, s.session);
+  if (wasPaused) s.player.pause();
 }
 
 /** Best-effort: find the DLNA device that lives on the same host as an AirPlay

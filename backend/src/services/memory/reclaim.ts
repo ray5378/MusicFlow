@@ -11,10 +11,10 @@
 //       L1 清空可重建缓存:曲库索引/封面二进制/封面渲染/歌词/封面路径解析/
 //          在线音源 fallback + 各模块经 registerCacheCleaner 注册的清理回调。
 //       L2 主动 GC:运行时 v8.setFlagsFromString('--expose_gc') + vm.runInNewContext
-//          ('gc') 拿到 gc——无需 Dockerfile 加 --expose-gc 参数;30 分钟节流;
+//          ('gc') 拿到 gc——无需 Dockerfile 加 --expose-gc 参数;5 分钟节流;
 //          拿不到 gc 则优雅跳过(仅 L1/L3)。
 //       L3 SQLite 维护:wal_checkpoint(TRUNCATE) 合并并截断 WAL + optimize;
-//          30 分钟节流。空闲时无写事务争用,最安全。
+//          30 分钟节流(远低于 GC,避免反复截断)。空闲时无写事务争用,最安全。
 //   - 调度:startIdleReclaimer() 每 60s 检查一轮,命中空闲即执行;运行中防重入。
 import { setFlagsFromString } from "node:v8";
 import vm from "node:vm";
@@ -33,7 +33,8 @@ const log = createLogger("MEMORY-RECLAIM");
 
 const CHECK_INTERVAL_MS = 60 * 1000;        // 空闲检查周期
 const DEFAULT_IDLE_MINUTES = 5;             // 默认空闲阈值
-const GC_COOLDOWN_MS = 30 * 60 * 1000;      // L2 GC 节流
+const GC_COOLDOWN_MS = 5 * 60 * 1000;       // L2 GC 节流(30min→5min:批量任务(每日同步等)后 V8 提交页
+                                            // 迟迟不回落,RSS 停在峰值;空闲期每 5 分钟一次 gc 及时压实压回)
 const CHECKPOINT_COOLDOWN_MS = 30 * 60 * 1000; // L3 checkpoint 节流
 
 let lastActivityAt = Date.now();
@@ -101,8 +102,8 @@ function getGc(): (() => void) | null {
   return gcFn ?? null;
 }
 
-function gcNow(): boolean {
-  if (Date.now() - lastGcAt < GC_COOLDOWN_MS) return false;
+function gcNow(force = false): boolean {
+  if (!force && Date.now() - lastGcAt < GC_COOLDOWN_MS) return false;
   const g = getGc();
   if (!g) return false;
   try {
@@ -116,8 +117,8 @@ function gcNow(): boolean {
 }
 
 // ---------- L3: SQLite WAL 合并 + 统计优化 ----------
-function checkpointDb(): boolean {
-  if (Date.now() - lastCheckpointAt < CHECKPOINT_COOLDOWN_MS) return false;
+function checkpointDb(force = false): boolean {
+  if (!force && Date.now() - lastCheckpointAt < CHECKPOINT_COOLDOWN_MS) return false;
   try {
     sqlite.pragma("wal_checkpoint(TRUNCATE)");
     sqlite.pragma("optimize");
@@ -158,13 +159,17 @@ export interface ReclaimReport {
 let lastReclaimAt: number | null = null;
 let lastReclaimReport: ReclaimReport | null = null;
 
-/** 执行一轮完整回收(手动「立即回收」与空闲定时器共用)。返回含回收前后内存的报告。 */
+/** 执行一轮完整回收(手动「立即回收」与空闲定时器共用)。返回含回收前后内存的报告。
+ *  手动回收强制跳过 GC/checkpoint 节流:空闲回收只在空闲时跑,活跃服务器上
+ *  heapUsed 很小但批量任务(每日同步等)会把 V8 提交页顶高且迟迟不回落,
+ *  用户点「立即回收」应当真的把内存压回来。 */
 export function reclaimNow(reason: "idle" | "manual" = "manual"): ReclaimReport {
   const memBefore = getMemorySnapshot();
+  const force = reason === "manual";
   const report: ReclaimReport = {
     caches: reclaimCaches(),
-    gc: gcNow(),
-    checkpoint: checkpointDb(),
+    gc: gcNow(force),
+    checkpoint: checkpointDb(force),
     reason,
     memBefore,
     memAfter: getMemorySnapshot(),

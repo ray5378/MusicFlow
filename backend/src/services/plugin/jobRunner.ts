@@ -5,15 +5,15 @@
 //     声明的方法级长预算(上限 5 分钟),不再被 15s 看门狗强杀;
 //   - per-plugin 串行锁:同插件同时只跑一个任务,手动刷新 / 每日调度 / 6h 维护
 //     同时触发时不会撞车重复全量;
-//   - 全局批量闸(batchPacer.acquireBatchLock):全进程同时只跑 1 个批量任务(FIFO),
-//     消除 gmdl 同步 + listenbrainz 补全 + 后台 auto-match + 手动导入的 CPU 叠加;
+//   - 实际执行在一次性批量子进程里(方案3,runBatchJob):子进程调插件 impl[method],
+//     全局批量闸由 runBatchJob 持有(FIFO,同一时刻只跑 1 个批量任务);
 //   - 记录最近一次结果(状态/摘要/错误含 sandboxCode/hint),供
 //     GET /v1/plugins/:id/job 状态端点查询(前端轮询展示)。
 //
 // 只做「调度与状态」,不复制任何插件业务逻辑;错误捕获后绝不向外抛。
 
 import { getPlugin } from "../../plugins/registry.js";
-import { acquireBatchLock } from "./batchPacer.js";
+import { runBatchJob } from "../../batch/runner.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("PLUGIN-JOB");
@@ -31,6 +31,17 @@ export interface PluginJobState {
 
 const running = new Map<string, boolean>();
 const states = new Map<string, PluginJobState>();
+
+// 实际执行器:默认 fork 一次性批量子进程(方案3);测试可注入进程内直调,避免真实 fork。
+type JobExecFn = (pluginId: string, method: string, opts: any) => Promise<any>;
+let execJob: JobExecFn = (pluginId, method, opts) =>
+  runBatchJob("plugin-job", { pluginId, method, opts: opts || {} }).then(r => r.result);
+
+/** 测试钩子:替换插件任务的执行实现(注入进程内直调 / 假 runner)。 */
+export function _setPluginJobExecForTest(fn: JobExecFn | null): void {
+  execJob = fn ?? ((pluginId, method, opts) =>
+    runBatchJob("plugin-job", { pluginId, method, opts: opts || {} }).then(r => r.result));
+}
 
 /** 查询插件最近一次任务状态;无记录返回 null。 */
 export function getPluginJobState(pluginId: string): PluginJobState | null {
@@ -58,11 +69,10 @@ export function runPluginJob(
   const state: PluginJobState = { running: true, status: "running", startedAt: new Date().toISOString() };
   states.set(pluginId, state);
   (async () => {
-    // 全局批量闸:同一时刻全进程只跑 1 个批量任务(FIFO 排队),防多任务叠加 CPU。
-    // 必须 finally 释放,否则队列永久阻塞。
-    const release = await acquireBatchLock();
+    // 实际执行在一次性批量子进程里(方案3):子进程内调插件 impl[method]。
+    // 全局批量闸由 runBatchJob 持有(FIFO),这里不再重复取锁。
     try {
-      const summary = await reg.impl[method](opts || {});
+      const summary = await execJob(pluginId, method, opts || {});
       Object.assign(state, { running: false, status: "ok", summary, finishedAt: new Date().toISOString() });
     } catch (e: any) {
       Object.assign(state, {
@@ -76,7 +86,6 @@ export function runPluginJob(
       log.error("插件任务执行失败", { pluginId, method, err: e?.message || e });
     } finally {
       running.set(pluginId, false);
-      release();
     }
   })();
   return { started: true, alreadyRunning: false };

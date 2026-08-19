@@ -5,12 +5,22 @@
 // 与 jobRunner(插件级任务)互补:这里服务核心业务任务(不绑插件),同一套轮询心智。
 //
 // 契约:
-//   - startAsyncTask(kind, key, fn):key 给出去重键(同 kind+key 在跑则 alreadyRunning);
-//     fn 可写 state.progress 汇报进度;返回结果存入 state.result。
+//   - startAsyncTask(kind, key, job):key 给出去重键(同 kind+key 在跑则 alreadyRunning);
+//     job 为 { kind, args } 批量子进程任务描述(方案3)——实际执行经 runBatchJob
+//     fork 一次性子进程,子进程进度经 IPC 转发回 task.state.progress。
 //   - getAsyncTask(id):查状态;任务完成/失败后仍可查(不清理,重启即清零)。
 //   - GET /v1/tasks/:id 暴露给前端轮询(见 api/index.ts)。
 
+import { runBatchJob } from "../../batch/runner.js";
+import type { BatchJobKind } from "../../batch/types.js";
+
 export type AsyncTaskKind = "playlist-import" | "playlist-search-import" | "song-search-import" | "album-search-import" | "playlist-sync";
+
+/** 异步任务 = 一个可序列化的批量子进程任务描述(args 必须 JSON 安全)。 */
+export interface AsyncTaskJob {
+  kind: BatchJobKind;
+  args: Record<string, any>;
+}
 
 export interface AsyncTaskState {
   id: string;
@@ -19,13 +29,24 @@ export interface AsyncTaskState {
   key?: string;
   startedAt: string;
   finishedAt?: string;
-  progress?: { current: number; total: number; label: string };
+  progress?: any;
   result?: any;
   error?: string;
 }
 
 const tasks = new Map<string, AsyncTaskState>();
 const runningKeys = new Map<string, string>(); // `${kind}:${key}` -> taskId
+
+// 实际执行器:默认 fork 一次性批量子进程(方案3);测试可注入假 runner,避免真实 fork。
+type BatchRunnerFn = (kind: any, args: Record<string, any>, opts: { onProgress?: (p: any) => void }) => Promise<{ result: any }>;
+let runBatch: BatchRunnerFn = (kind, args, opts) =>
+  runBatchJob(kind, args, { onProgress: opts.onProgress }).then(r => r);
+
+/** 测试钩子:替换批量子进程运行实现。 */
+export function _setBatchRunnerForTest(fn: BatchRunnerFn | null): void {
+  runBatch = fn ?? ((kind, args, opts) =>
+    runBatchJob(kind, args, { onProgress: opts.onProgress }).then(r => r));
+}
 
 // 已完成/失败任务只保留最近 N 条(running 不受限):任务 result 可能很大(导入结果),
 // 只增不删会随长期使用无界膨胀。FIFO:超限删最老。
@@ -40,10 +61,10 @@ function pruneFinishedTasks(): void {
 }
 
 /** 启动一个异步任务。返回 { started:true, taskId } 或 { started:false, alreadyRunning:true, taskId }。 */
-export function startAsyncTask<T>(
+export function startAsyncTask(
   kind: AsyncTaskKind,
   key: string | undefined,
-  fn: (state: AsyncTaskState) => Promise<T>,
+  job: AsyncTaskJob,
 ): { started: boolean; taskId?: string; alreadyRunning?: boolean } {
   const rk = key ? `${kind}:${key}` : null;
   if (rk && runningKeys.has(rk)) {
@@ -55,7 +76,10 @@ export function startAsyncTask<T>(
   if (rk) runningKeys.set(rk, id);
   (async () => {
     try {
-      const result = await fn(state);
+      // 实际执行在一次性批量子进程里;子进程进度经 IPC 转发回 task 状态。
+      const { result } = await runBatch(job.kind, job.args, {
+        onProgress: (p) => { state.progress = p; },
+      });
       Object.assign(state, { status: "ok", result, finishedAt: new Date().toISOString() });
     } catch (e: any) {
       Object.assign(state, {

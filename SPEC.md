@@ -19,9 +19,9 @@
 |----|------|----------|
 | 语言 | TypeScript | `strict` 模式；target ES2022；module ESNext；moduleResolution bundler |
 | 后端框架 | Node.js + Hono + @hono/node-server | 部署基线 Node 22（Docker node:22-alpine，musl） |
-| 数据库 | SQLite（better-sqlite3 单连接）+ drizzle-orm | 迁移工具 drizzle-kit；**全库只有一个 `new Database`（db/index.ts）** |
+| 数据库 | SQLite（better-sqlite3 单连接）+ drizzle-orm | 迁移工具 drizzle-kit；**每进程一个 `new Database`（db/index.ts）**：批量任务跑在一次性子进程（`child_process.fork`），子进程自带独立 SQLite 连接，WAL + busy_timeout=5000 支撑多进程并发写 |
 | 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router + Howler（音频） | 构建产物 `frontend/dist`，**gitignore，不入库**；后端仅当静态资源吐给浏览器。**大列表虚拟滚动已在 `components/SongTable.vue` 内置**（桌面端 >200 首自动窗口化，行高 68px，无需新依赖） |
-| 插件运行时 | quickjs-emscripten（WASM 沙箱，主线程常驻）+ worker_threads（批量任务，按需起、跑完 `process.exit(0)`） | 每启用插件一份常驻沙箱（`pluginSandboxes`） |
+| 插件运行时 | quickjs-emscripten（WASM 沙箱，主线程常驻）+ worker_threads（插件沙箱按需起）+ **批量任务子进程（`child_process.fork`，一次性，跑完 `process.exit(0)`）** | 每启用插件一份常驻沙箱（`pluginSandboxes`）；批量任务（每日推荐/扫描/导入/同步/匹配/清理/刮削）一律在隔离子进程执行，峰值内存随进程销毁归还 |
 | 网络 | ws（WebSocket）、undici（HTTP/代理）、bonjour-service（mDNS/DLNA）、sharp（图像）、music-metadata（音频标签） | |
 | 认证 | jsonwebtoken + md5 | 密码 md5+盐 / pass_enc 加密；API key 存 hash |
 | 测试 | vitest | `pool: "forks"`、每文件独立 DATA_DIR、`sequence.shuffle` |
