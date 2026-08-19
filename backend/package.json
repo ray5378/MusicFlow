@@ -1,6 +1,6 @@
 {
   "name": "musicflow-backend",
-  "version": "1.7.77",
+  "version": "1.7.78",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
