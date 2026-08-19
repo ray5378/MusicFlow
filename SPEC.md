@@ -38,6 +38,53 @@
 - **代码位置**：后端 `backend/src/**`（88+ TS 文件，456 个 HTTP 端点全量编译入堆）；前端 `frontend/src/**`；测试 `backend/tests/**/*.test.ts`。
 - **脚本**：`dev`（tsx watch src/index.ts）｜ `build`（tsc）｜ `start`（node dist/index.js）｜ `test`（vitest run）｜ `db:generate/migrate/push`（drizzle-kit）。
 - **内存红线**：新增任何常驻 `Map`/`Set`/数组缓存，**必须**带上限（FIFO/LRU/字节预算）或清理机制（TTL/定期驱逐/孤儿回收），禁止只增不删（见 6.8）。
+- **批量任务红线（v1.7.75+，见 1.3）**：所有批量任务必须在一次性子进程执行（`runBatchJob`），**禁止**在主进程内联跑批量重活；子进程峰值内存不计入主进程常驻 RSS。
+
+### 1.3 批量子进程契约（方案3，v1.7.75+）
+
+> 目标：批量任务峰值内存随一次性子进程退出归还操作系统，主进程常驻 RSS 不被批量任务拉高。
+> 实现：`backend/src/batch/`（types.ts 协议 / jobs.ts 处理器 / child.ts 子进程引导 / runner.ts 父进程运行器）。验证基线见第 8 章：`[BATCH]` 日志输出「子进程峰值 + 主进程前后 RSS」。
+
+**A. 白名单：这些 kind 必须走 `runBatchJob(kind, args)`，禁止在主进程内联执行其逻辑**
+
+| kind | 语义 |
+|------|------|
+| `daily-jobs` | 每日推荐全管线（推荐插件 runDailyJob + 组合歌单 + 平台推荐同步 + 网页歌清理） |
+| `maintenance` | 6h 维护（playlistSync.runSyncJob 全部 + 新歌手信息刮削） |
+| `plugin-job` | 单插件后台方法（手动刷新 / 聚合同步 Path B） |
+| `scan` | 媒体源扫描（webdav/local）+ 扫描后新增歌手刮削 |
+| `playlist-import` / `playlist-sync` | URL 歌单导入 / 手动同步一张歌单 |
+| `playlist-search-import` / `album-search-import` / `song-search-import` | 搜索「加入库」 |
+| `match-playlist` / `match-playlists` | 在线匹配一张 / 批量匹配全部含占位条目歌单 |
+| `recommend-sync-all` | 路径 A：平台每日推荐全量重导 |
+| `purge-web-songs` | 过期未引用网页歌曲清理 |
+| `scrape-artists` | 批量歌手信息刮削 |
+
+新增批量任务类型：先在此表补一行，并在 `batch/types.ts`（jobKinds）/ `batch/jobs.ts`（batchJobHandlers）注册。
+
+**B. 边界（禁止违反）**
+
+- **一次性子进程**：`child_process.fork`，每个子进程**只跑一个 job**，跑完 `sendAndExit`（`process.send` 回调后再 `process.exit`，防终结消息丢失）。
+- **全局串行**：`runBatchJob` 先持 `acquireBatchLock`（FIFO），同一时刻最多 1 个批量子进程；批量档位/交互让行对子进程生效——主进程交互窗口经 `pace` 消息同步给子进程。
+- **args 必须 JSON 可序列化**：只传最小入参（id/url/mode/list…），**禁止**传函数/实例；子进程从自身注册表/DB 重建 provider/config/plugin（`getConfiguredProvider` / `getPluginConfig` / `getEnabledByCapability`）。
+- **子进程引导序列（child.ts，固定）**：`registerBuiltinPlugins()` → `initDatabase()` → `backfillGenres()` → `discoverExternalPlugins(APP_VERSION)`，然后上报 `ready`。子进程**不启动** HTTP/WS/播放器/DLNA/热重载/内存回收/调度器。
+- **IPC 协议**：父→子 `run{jobId,kind,args}` / `abort{jobId}` / `pace{active}`；子→父 `ready{pid}` / `heartbeat{pid}`（30s，unref）/ `progress{jobId,payload}` / `result{jobId,result,rss}` / `error{jobId,error,sandboxCode,hint}`。
+- **看门狗**：子进程 15min 无任何消息（心跳/progress/result 皆算）→ SIGKILL + `BatchJobError`；父进程 `abort` 发 `abort` 消息，宽限期 30s 后未退 → SIGKILL。
+- **收尾（成功与失败都必须）**：`clearLibraryIndex()` + `touch()`（子进程改了库 → 主进程缓存失效、标记活动），并记录子进程峰值 RSS 与主进程前后 RSS。
+- **状态/进度**：任务状态 Map 全部留在主进程（scanJobs/scrapeJobs/matchJobs/asyncTasks/jobRunner），子进程只回报 `progress`；前端轮询端点不变。
+- **错误透传**：子进程失败携带 `sandboxCode`/`hint`（`BatchJobError`），jobRunner 的 PluginJobState 错误字段照常填充。
+
+**C. 例外（允许留在主进程，量小或需前台同步返回）**
+
+- 在线搜索等同步前台小操作（search 端点、`importOnlineSongs` 同步路由）。
+- native 文件歌单导入（量小）。
+- `cleanupPlayHistory`（定时小清理）。
+- `matchPlaylistInBackground`（shared.ts）：父进程侧持 `acquireBatchLock` 排队，串行在批量子进程之后，不另 fork。
+
+**D. 测试契约**
+
+- runner 单测用 `_setForkImplForTest` 注入假子进程（不真实 fork）；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` 注入进程内直调。**这些钩子仅供测试，生产禁止。**
+- 内存验证基线：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`，要求批量执行期间主进程 RSS 平稳（B ≤ A + 5MB 或下降）。
 
 ---
 
@@ -153,7 +200,7 @@ OpenSubsonic 参数(u+t+s / u+p) → token 参数(流媒体 URL 场景)
 |------|------|------|
 | 异步任务（歌单导入/搜索导入/同步） | 同 kind+key 在跑 → `alreadyRunning`（runningKeys 去重） | `services/plugin/asyncTasks.ts` |
 | 媒体源扫描 | 同媒体源 running → 拒绝重复扫描 | `routes/api/index.ts` scanJobs |
-| 全进程批量任务（同步/匹配/导入/推荐） | `acquireBatchLock` 全局 FIFO 锁，**必须 finally release** | `services/plugin/batchPacer.ts` |
+| 全进程批量任务（同步/匹配/导入/推荐） | `acquireBatchLock` 全局 FIFO 锁，**必须 finally release**；由 `runBatchJob` 持有并串行化批量子进程（1.3） | `services/plugin/batchPacer.ts` + `batch/runner.ts` |
 | scrobble 派发 | 10min（scrobble）/ 60s（play）窗口去重 | `plugins/scrobblers.ts` |
 | 播放历史写入 | 10 分钟窗口去重 | rest 路由 HISTORY_DEDUPE_WINDOW_MS |
 
@@ -238,6 +285,7 @@ Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 | `services/plugin/` | 插件编排：registry、sandbox、discovery、jobRunner、asyncTasks、batchPacer、libraryIndex、dailyRecommend/localRecommend、playlistSync、comm、health、scrobblers 入口在 `plugins/` |
 | `services/memory/` | reclaim（空闲回收）、pruneOrphans（孤儿清理） |
 | `services/source/` | scanner（本地/WebDAV 扫描）、online/（在线搜索/匹配/导入/streamFallback） |
+| `batch/` | 批量子进程（1.3）：types.ts（kind + IPC 协议）、jobs.ts（处理器映射）、child.ts（子进程引导）、runner.ts（父进程运行器：锁/看门狗/abort/pace/收尾） |
 | `services/` | peer、settings、proxy、lyrics、covers、coverCache、coverImage、playlistCover、content、backfill、scraper、ws |
 | `plugins/` | 内建插件注册（builtins.ts 9 个）、沙箱宿主（sandbox.ts/sandboxWorker.ts）、registry、health、comm、scrobblers |
 | `utils/` | auth（JWT/md5/hashApiKey）、env、errors（BusinessErrorCode/apiError/apiOk）、logger（createLogger 结构化日志） |
@@ -252,7 +300,7 @@ Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 ```
 Web/HA → /rest/stream → authMiddleware → rest 路由 → 源插件(stream 能力) → streamFallback(换源) → 客户端
 WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueController(切歌决策) → WS peer/queue 事件
-任务: 前端 POST 导入 → startAsyncTask(立即返回 taskId) → 后台 fn + batchPacer 锁 → 前端轮询 GET /v1/tasks/:id
+任务: 前端 POST 导入 → startAsyncTask(立即返回 taskId) → runBatchJob(kind, args) 持全局闸 fork 一次性子进程 → 子进程 bootstrap 后跑 handler → 进度经 IPC 回报主进程 → 前端轮询 GET /v1/tasks/:id
 内存: 启动 index.ts → startIdleReclaimer(60s) + startOrphanPruner(10min) + peer.startCleanup(60s)
 ```
 
@@ -267,9 +315,10 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
   - 结构化：`log.error("任务失败", { pluginId, taskId, err })` → 输出 `[PLUGIN-JOB] ERROR 任务失败 pluginId=x taskId=y err=z`。
   - **强制**：所有 catch 块打 `error` 且**必须包含关键入参**（userId/songId/deviceId/playerId/pluginId/taskId/url 之一或多个），禁止吞异常、禁止仅 `console.error(e)` 无上下文。
 - **豁免条款（仅限以下场景，必须配注释）**：① 纯解析容错（`JSON.parse` 失败回落默认值）；② 幂等清理（`ALTER TABLE` 迁移失败跳过、socket/资源 close 失败）；③ 高频轮询兜底（设备状态/组状态查询失败走默认值，如 DLNA poll 失败继续轮询）。以上场景允许静默或 `log.debug`，**禁止**在关键业务路径（播放/导入/同步/鉴权）吞异常。
-- **日志前缀**（沿用既有标签习惯，新增标签先查重）：`[MEMORY-RECLAIM]`、`[ORPHAN-PRUNE]`、`[PLUGIN-JOB]`、`[PLUGIN-WORKER]`、`[PLUGIN-HOTRELOAD]`、`[SCANNER]`、`[DAILY-RECOMMEND]`、`[LOCAL-RECOMMEND]`、`[DAILY-SCHEDULER]`、`[ARTIST-SCRAPE]`、`[AUTO-SYNC]`、`[REGISTRY]`、`[DLNA]`、`[peer]`、`[group]`、`[QueueController]`、`[SECRET]`、`[FATAL]`、`[SECURITY]`、`[PLAY-HISTORY]`、`[HTTP]`（慢请求）。
+- **日志前缀**（沿用既有标签习惯，新增标签先查重）：`[MEMORY-RECLAIM]`、`[ORPHAN-PRUNE]`、`[PLUGIN-JOB]`、`[PLUGIN-WORKER]`、`[PLUGIN-HOTRELOAD]`、`[SCANNER]`、`[DAILY-RECOMMEND]`、`[LOCAL-RECOMMEND]`、`[DAILY-SCHEDULER]`、`[ARTIST-SCRAPE]`、`[AUTO-SYNC]`、`[REGISTRY]`、`[batch-runner]`（批量子进程完成：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`）、`[batch-child]`（子进程引导/异常）、`[batch-job]`（子进程 handler 侧）、`[DLNA]`、`[peer]`、`[group]`、`[QueueController]`、`[SECRET]`、`[FATAL]`、`[SECURITY]`、`[PLAY-HISTORY]`、`[HTTP]`（慢请求）。
 - **请求 metrics（v1.7.72+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[HTTP] WARN 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
 - **内存观测（v1.7.72+）**：`GET /rest/api/v1/admin/memory-settings` 返回 `rssMB/heapUsedMB/externalMB/arrayBuffersMB/isIdle/isBatchBusy/lastReclaimAt/lastReclaim`；`POST /rest/api/v1/admin/memory/reclaim` 返回回收前后内存快照。发版后先看 `rssMB` 曲线定论（稳定高位=正常；持续上涨=查泄漏）。
+- **批量子进程内存观测（v1.7.75+）**：批量任务完成时 `[batch-runner]` 必打 `[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`。验收基线：子进程峰值归一次性子进程所有（退出即归还 OS）；主进程 B ≤ A + 5MB（或下降）。批量执行期间抽样主进程 RSS 应平稳，不得随子进程工作增长。
 - 入口/出口关键动作打 Info（含耗时可选）；分支判断 Debug。
 
 ---
@@ -280,6 +329,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 
 - 测试框架 vitest（`pool: forks`、每文件独立 DATA_DIR、shuffle）。
 - **单元测试**：核心业务逻辑（player/memory/plugins/group/source）必须覆盖；新增/修改逻辑**必须**附测试或更新既有测试。
+- **批量子进程测试（v1.7.75+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` 进程内直调（测试专用钩子，生产禁止）。
 - **集成/冒烟**：行为类改动（新路由/新流程）用本地隔离实例实测（临时 DATA_DIR + 桩插件，跑通后端直连/代理/真浏览器三层），或至少补集成测试。
 - **一键 e2e（v1.7.72+）**：`bash scripts/e2e.sh` —— 临时 DATA_DIR 起服 + 登录 + 验证 `users/me`、`peers`、`groups`、`memory-settings`、`metrics`、OpenSubsonic 错误凭据契约，自动清理。交付前跑一遍。
 - **交付门槛**：`tsc --noEmit` 0 错误 + 相关测试全绿 + 无回归；未附冒烟用例视为未完成。
