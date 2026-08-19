@@ -47,6 +47,7 @@ export interface AirPlayCastOptions {
   title?: string;
   artist?: string;
   album?: string;
+  coverArt?: string;
   durationSec?: number;
   streamUrl?: string; // explicit stream URL (defaults to a fresh token URL)
   baseUrl?: string;   // LAN-visible origin for the stream URL
@@ -88,7 +89,7 @@ interface ActiveSession {
 
 const sessions = new Map<string, ActiveSession>();
 const volumeState = new Map<string, { volume: number; muted: boolean; supportsRsa: boolean }>();
-const lastCast = new Map<string, { songId: string; title?: string; artist?: string; album?: string; durationSec?: number; streamUrl: string }>();
+const lastCast = new Map<string, { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; durationSec?: number; streamUrl: string }>();
 
 function degreesToDb(volume: number): number {
   const v = Math.max(0, Math.min(100, volume));
@@ -302,6 +303,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     title: opts.title,
     artist: opts.artist,
     album: opts.album,
+    coverArt: opts.coverArt,
     durationSec: opts.durationSec,
     streamUrl,
   });
@@ -714,7 +716,7 @@ export function getAirPlayStatus(deviceId: string): AirPlayDeviceStatus {
 export function getAirPlayPeerStatus(deviceId: string): {
   state: string; position: number; duration: number; volume: number; muted: boolean;
   updatedAt: number; trackUri: string;
-  media?: { songId: string; title?: string; artist?: string; album?: string };
+  media?: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string };
 } {
   const s = getAirPlayStatus(deviceId);
   const last = lastCast.get(deviceId);
@@ -731,6 +733,7 @@ export function getAirPlayPeerStatus(deviceId: string): {
       title: last.title,
       artist: last.artist,
       album: last.album,
+      coverArt: last.coverArt,
     } : undefined,
   };
 }

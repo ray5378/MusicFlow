@@ -30,6 +30,7 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
         title: item.title,
         artist: item.artist,
         album: item.album,
+        coverArt: item.coverArt,
         durationSec: item.duration,
         baseUrl,
         streamUrl,
