@@ -110,6 +110,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import api, { formatApiError } from "@/api";
+import { waitAsyncTask } from "@/utils/asyncTask";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
@@ -188,13 +189,18 @@ const sidePlaylists = computed(() => {
 });
 
 // 手动刷新：重新触发每日推荐 + 本地推荐随机生成，再重组今日漫游。
+// 异步契约(方案3)：POST 立即返回 taskId(202)，生成跑在一次性批量子进程里，
+// 前端轮询 GET /v1/tasks/:id 拿结果，不长时间挂起单个 HTTP 请求。
 const refreshing = ref(false);
 async function refreshRoam() {
   if (refreshing.value) return;
   refreshing.value = true;
   try {
-    // 今日漫游由内置推荐引擎生成,通常秒级;给足 60s 余量防慢网络误报超时。
-    await api.post("/rest/api/v1/recommend/refresh", {}, { timeout: 60000 });
+    const res = await api.post("/rest/api/v1/recommend/refresh", {}, { timeout: 15000 });
+    const taskId: string | undefined = res.data?.taskId;
+    if (!taskId) throw new Error("未返回任务 ID");
+    // 结果仅在任务完成时携带(每日/本地/漫游各生成一张歌单),耗时通常秒级。
+    await waitAsyncTask(taskId, { timeoutMs: 600000 });
     ElMessage.success("已重新生成今日漫游");
     await Promise.all([loadPlaylists(), loadHomeCards()]);
   } catch (e: any) {

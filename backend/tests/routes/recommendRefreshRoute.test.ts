@@ -12,10 +12,13 @@ import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes } from "../../src/routes/api/index.js";
 import { registerPlugin, unregisterPlugin, getPlugin } from "../../src/plugins/registry.js";
 import { _setPluginJobExecForTest } from "../../src/services/plugin/jobRunner.js";
+import { _setBatchRunnerForTest } from "../../src/services/plugin/asyncTasks.js";
+import { batchJobHandlers } from "../../src/batch/jobs.js";
 
-// POST /rest/api/v1/recommend/refresh:按 daily → local → roam 顺序,以
-// force + 随机 seedSalt 重新触发生成,并支持 targets 子集。核心按能力门面调用,
-// 不写死插件名 —— 这里用三个假插件验证调用契约。
+// POST /rest/api/v1/recommend/refresh:默认路径(不带 pluginId)为**异步**——202 + taskId,
+// 生成跑在一次性批量子进程(recommend-refresh)里,按 daily → local → roam 顺序以
+// force + 随机 seedSalt 重新触发生成,支持 targets 子集;前端轮询 GET /v1/tasks/:id。
+// 核心按能力门面调用,不写死插件名 —— 这里用三个假插件验证调用契约。
 const app = new Hono();
 app.use("/rest/api/*", authMiddleware);
 app.route("/rest/api", apiRoutes);
@@ -63,6 +66,12 @@ beforeEach(() => {
     const reg = getPlugin(pluginId);
     return reg?.impl?.[method]?.(opts);
   });
+  // 默认路径(每日/本地/漫游刷新)走异步任务 → 批量子进程(recommend-refresh);
+  // 同样注入进程内直调,假插件只在本进程可见。
+  _setBatchRunnerForTest(async (kind, args, { onProgress }) => {
+    const ctx = { onProgress: onProgress || (() => {}), signal: new AbortController().signal };
+    return { result: await batchJobHandlers[kind as keyof typeof batchJobHandlers](args, ctx) };
+  });
   // 导入 apiRoutes 会经 services/source/online 顺带注册内置插件(daily-recommend 等),
   // 会抢走能力门面的"第一个插件"位置——先把内置推荐插件反注册 + 删行,只剩假插件。
   for (const id of ["f-daily", "f-local", "f-roam", "daily-recommend", "local-recommend", "daily-roam"]) {
@@ -101,12 +110,29 @@ async function refresh(body?: any) {
   return { res, body: await res.json().catch(() => null) };
 }
 
+/** 轮询异步任务直到非 running,返回最终 task 状态。 */
+async function waitTask(taskId: string): Promise<any> {
+  let task: any = null;
+  for (let i = 0; i < 200; i++) {
+    const res = await app.request(`/rest/api/v1/tasks/${taskId}?${authQS()}`, { method: "GET" });
+    task = (await res.json()).task;
+    if (task?.status !== "running") break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return task;
+}
+
 describe("POST /rest/api/v1/recommend/refresh", () => {
-  it("默认全刷:daily → local → roam 顺序,带 force + seedSalt", async () => {
+  it("默认全刷:daily → local → roam 顺序,带 force + seedSalt(异步 202+taskId)", async () => {
     const { res, body } = await refresh({});
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(body.success).toBe(true);
-    expect(typeof body.seedSalt).toBe("number");
+    expect(body.started).toBe(true);
+    expect(typeof body.taskId).toBe("string");
+    // 生成跑在一次性批量子进程里;轮询 GET /v1/tasks/:id 等结果。
+    const task = await waitTask(body.taskId);
+    expect(task.status).toBe("ok");
+    expect(task.result.seedSalt).toBe(body.seedSalt);
     expect(calls.map(c => c.who)).toEqual(["daily", "local", "roam"]);
     // daily/local 收到 force + seedSalt;roam 收到 force
     expect(calls[0].opts).toMatchObject({ force: true });
@@ -116,10 +142,28 @@ describe("POST /rest/api/v1/recommend/refresh", () => {
   });
 
   it("targets 子集只刷指定项,且仍带 force", async () => {
-    const { body } = await refresh({ targets: ["local"] });
-    expect(body.success).toBe(true);
+    const { res, body } = await refresh({ targets: ["local"] });
+    expect(res.status).toBe(202);
+    expect(body.started).toBe(true);
+    const task = await waitTask(body.taskId);
+    expect(task.status).toBe("ok");
     expect(calls.map(c => c.who)).toEqual(["local"]);
     expect(calls[0].opts.force).toBe(true);
+  });
+
+  it("生成抛错 → 任务置 error,HTTP 不被阻塞(202)", async () => {
+    const reg = getPlugin("f-local");
+    const orig = reg.impl.generateLocalDailyPlaylist;
+    reg.impl.generateLocalDailyPlaylist = async () => { throw new Error("生成炸了"); };
+    try {
+      const { res, body } = await refresh({ targets: ["local"] });
+      expect(res.status).toBe(202);
+      const task = await waitTask(body.taskId);
+      expect(task.status).toBe("error");
+      expect(task.error).toContain("生成炸了");
+    } finally {
+      reg.impl.generateLocalDailyPlaylist = orig;
+    }
   });
 
   it("每日推荐插件未启用时返回 503", async () => {

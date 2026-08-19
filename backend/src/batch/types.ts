@@ -30,7 +30,9 @@ export type BatchJobKind =
   | "match-playlists"      // 在线批量匹配所有含占位条目的歌单
   | "recommend-sync-all"   // 路径 A:平台每日推荐全量重导
   | "purge-web-songs"      // 过期未引用网页歌曲清理
-  | "scrape-artists";      // 批量歌手信息刮削
+  | "scrape-artists"       // 批量歌手信息刮削
+  | "backfill"             // 歌词/封面批量补全(C 按钮)
+  | "recommend-refresh";   // 推荐手动刷新默认路径(每日/本地/漫游,202+轮询)
 
 /** 运行时任务类型列表(用于注册校验 / 日志)。 */
 export const jobKinds: readonly BatchJobKind[] = [
@@ -48,6 +50,8 @@ export const jobKinds: readonly BatchJobKind[] = [
   "recommend-sync-all",
   "purge-web-songs",
   "scrape-artists",
+  "backfill",
+  "recommend-refresh",
 ];
 
 /** 一次批量任务的完整请求(父进程可 JSON 序列化后传给子进程)。 */

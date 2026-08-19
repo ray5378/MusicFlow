@@ -23,6 +23,9 @@ import { syncAllRecommendPlaylists } from "../services/source/online/recommendIm
 import { purgeExpiredWebSongs } from "../services/source/online/purge.js";
 import { scanLocalSource, scanWebDAVSource } from "../services/source/scanner.js";
 import { scrapeArtistList } from "../services/scraper/artist.js";
+import { collectCandidates, runBackfillLoop, runBackfillChunked } from "../services/backfill.js";
+import { dailyRecommendApi, localRecommendApi, comboPlaylistApi } from "../services/pluginAccess.js";
+import type { BackfillKind } from "../services/backfill.js";
 import type { BatchJobKind } from "./types.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -319,6 +322,51 @@ async function scrapeArtistsHandler(args: Record<string, any>, ctx: BatchJobCont
   return scrapeArtistList(ids, (p: any) => ctx.onProgress(p));
 }
 
+// ---------- 歌词/封面批量补全(C 按钮) ----------
+// 全量候选查询 + 逐首补全都在子进程内跑,峰值内存随进程退出归还。
+async function backfillHandler(args: Record<string, any>, ctx: BatchJobContext): Promise<any> {
+  const kind = String(args.kind) as BackfillKind;
+  if (kind !== "lyrics" && kind !== "covers" && kind !== "covers-batch") {
+    throw new Error(`未知批量补全类型: ${kind}`);
+  }
+  const rows = collectCandidates(kind);
+  const onProgress = (p: any) => ctx.onProgress({ ...p, total: rows.length });
+  if (kind === "covers-batch") {
+    return runBackfillChunked(rows.map((r: any) => r.id), onProgress, ctx.signal);
+  }
+  return runBackfillLoop(kind, rows, onProgress, ctx.signal);
+}
+
+// ---------- 推荐手动刷新默认路径(每日/本地/漫游) ----------
+// 镜像主进程路由的旧同步闭包:按 targets 顺序以 force + seedSalt 重新触发生成。
+// 经 pluginAccess 能力门面调用,不写死插件名;进度按 target 回报。
+async function recommendRefreshHandler(args: Record<string, any>, ctx: BatchJobContext): Promise<any> {
+  const targets: string[] = Array.isArray(args.targets) ? args.targets.map(String) : ["daily", "local", "roam"];
+  const seedSalt = typeof args.seedSalt === "number" ? args.seedSalt : Math.floor(Math.random() * 1_000_000);
+  const results: Record<string, any> = {};
+  let done = 0;
+  for (const t of targets) {
+    if (ctx.signal.aborted) throw new Error("刷新任务被中止");
+    ctx.onProgress({ target: t, done, total: targets.length });
+    if (t === "daily") {
+      const api = dailyRecommendApi();
+      if (!api) throw new Error("每日推荐插件未启用");
+      results.daily = await api.generateDailyPlaylist(new Date(), { force: true, seedSalt });
+    } else if (t === "local") {
+      const api = localRecommendApi();
+      if (!api || typeof api.generateLocalDailyPlaylist !== "function") throw new Error("本地推荐插件未启用");
+      results.local = await api.generateLocalDailyPlaylist(new Date(), { force: true, seedSalt });
+    } else if (t === "roam") {
+      const api = comboPlaylistApi();
+      if (!api || typeof api.generateComboPlaylist !== "function") throw new Error("今日漫游插件未启用");
+      results.roam = await api.generateComboPlaylist({ force: true });
+    }
+    done++;
+    ctx.onProgress({ target: t, done, total: targets.length });
+  }
+  return { success: true, seedSalt, results };
+}
+
 /** 任务类型 → 处理器映射(子进程 dispatch 用)。 */
 export const batchJobHandlers: Record<BatchJobKind, BatchJobHandler> = {
   "daily-jobs": dailyJobsHandler,
@@ -335,4 +383,6 @@ export const batchJobHandlers: Record<BatchJobKind, BatchJobHandler> = {
   "recommend-sync-all": recommendSyncAllHandler,
   "purge-web-songs": purgeWebSongsHandler,
   "scrape-artists": scrapeArtistsHandler,
+  "backfill": backfillHandler,
+  "recommend-refresh": recommendRefreshHandler,
 };

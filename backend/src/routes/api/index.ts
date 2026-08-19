@@ -1187,7 +1187,8 @@ apiRoutes.post("/v1/stream/probe", async (c) => {
 });
 
 // 今日漫游(combo,合并前两者)。body 可选 { targets: ["daily"|"local"|"roam"] },
-// 缺省全刷。返回各自结果。
+// 缺省全刷。**默认路径(不带 pluginId)为异步**:202 + taskId,前端轮询 GET /v1/tasks/:id
+// 取 task.result({ success, seedSalt, results })——生成跑在一次性批量子进程里(方案3)。
 apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   touch(); // 标记活动:推荐歌单刷新
   const body = await c.req.json().catch(() => ({}));
@@ -1229,30 +1230,31 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   }
 
   const targets = Array.isArray(body?.targets) ? body.targets : ["daily", "local", "roam"];
-  const seedSalt = Math.floor(Math.random() * 1_000_000);
-  const results: Record<string, any> = {};
-  try {
-    if (targets.includes("daily")) {
-      if (!dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
-      results.daily = await dailyApi().generateDailyPlaylist(new Date(), { force: true, seedSalt });
-    }
-    if (targets.includes("local")) {
-      if (!localApi() || typeof localApi().generateLocalDailyPlaylist !== "function") {
-        return c.json({ error: "本地推荐插件未启用" }, 503);
-      }
-      results.local = await localApi().generateLocalDailyPlaylist(new Date(), { force: true, seedSalt });
-    }
-    if (targets.includes("roam")) {
-      if (!comboApi() || typeof comboApi().generateComboPlaylist !== "function") {
-        return c.json({ error: "今日漫游插件未启用" }, 503);
-      }
-      results.roam = await comboApi().generateComboPlaylist({ force: true });
-    }
-    return c.json({ success: true, seedSalt, results }, 200);
-  } catch (e: any) {
-    log.error("[RECOMMEND] refresh error", { err: e.message || e });
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "刷新失败"), 500);
+  // 同步前置校验:能力不存在直接 503(契约保留)。实际生成在一次性批量子进程内跑
+  // (recommend-refresh,方案3),峰值内存随子进程退出归还;前端 202 后轮询
+  // GET /v1/tasks/:taskId 取结果(task.result = { success, seedSalt, results })。
+  if (targets.includes("daily") && !dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
+  if (targets.includes("local") && (!localApi() || typeof localApi().generateLocalDailyPlaylist !== "function")) {
+    return c.json({ error: "本地推荐插件未启用" }, 503);
   }
+  if (targets.includes("roam") && (!comboApi() || typeof comboApi().generateComboPlaylist !== "function")) {
+    return c.json({ error: "今日漫游插件未启用" }, 503);
+  }
+  const seedSalt = Math.floor(Math.random() * 1_000_000);
+  const started = startAsyncTask("recommend-refresh", `targets:${targets.join(",")}`, {
+    kind: "recommend-refresh",
+    args: { targets, seedSalt },
+  });
+  if (!started.started) {
+    return c.json({
+      success: true, started: false, alreadyRunning: true, taskId: started.taskId, seedSalt,
+      message: "刷新任务已在后台运行中,可通过 GET /v1/tasks/:taskId 查询进度",
+    }, 202);
+  }
+  return c.json({
+    success: true, started: true, taskId: started.taskId, seedSalt,
+    message: "已开始后台刷新,可通过 GET /v1/tasks/:taskId 查询进度",
+  }, 202);
 });
 
 // ==================== User recommend pool ====================

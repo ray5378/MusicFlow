@@ -14,7 +14,7 @@
 import { runBatchJob } from "../../batch/runner.js";
 import type { BatchJobKind } from "../../batch/types.js";
 
-export type AsyncTaskKind = "playlist-import" | "playlist-search-import" | "song-search-import" | "album-search-import" | "playlist-sync";
+export type AsyncTaskKind = "playlist-import" | "playlist-search-import" | "song-search-import" | "album-search-import" | "playlist-sync" | "recommend-refresh";
 
 /** 异步任务 = 一个可序列化的批量子进程任务描述(args 必须 JSON 安全)。 */
 export interface AsyncTaskJob {

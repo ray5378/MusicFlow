@@ -59,6 +59,8 @@
 | `recommend-sync-all` | 路径 A：平台每日推荐全量重导 |
 | `purge-web-songs` | 过期未引用网页歌曲清理 |
 | `scrape-artists` | 批量歌手信息刮削 |
+| `backfill` | 歌词/封面批量补全（C 按钮：候选查询 + 逐首补全，峰值随子进程退出归还） |
+| `recommend-refresh` | 推荐手动刷新默认路径（每日/本地/漫游，异步 202+轮询） |
 
 新增批量任务类型：先在此表补一行，并在 `batch/types.ts`（jobKinds）/ `batch/jobs.ts`（batchJobHandlers）注册。
 
@@ -72,6 +74,7 @@
 - **看门狗**：子进程 15min 无任何消息（心跳/progress/result 皆算）→ SIGKILL + `BatchJobError`；父进程 `abort` 发 `abort` 消息，宽限期 30s 后未退 → SIGKILL。
 - **收尾（成功与失败都必须）**：`clearLibraryIndex()` + `touch()`（子进程改了库 → 主进程缓存失效、标记活动），并记录子进程峰值 RSS 与主进程前后 RSS。
 - **状态/进度**：任务状态 Map 全部留在主进程（scanJobs/scrapeJobs/matchJobs/asyncTasks/jobRunner），子进程只回报 `progress`；前端轮询端点不变。
+- **异步入口契约（v1.7.75+）**：`POST /v1/recommend/refresh`（默认路径，不带 pluginId）与 `POST /v1/{lyrics,covers}/backfill` 均为异步。刷新返回 202 + taskId，前端轮询 `GET /v1/tasks/:id`，`task.result` = `{success, seedSalt, results}`（能力缺失仍同步 503）；批量补全沿用 `GET /v1/{lyrics,covers}/backfill/status` 轮询（`startBackfill` 契约不变：同步 `COUNT` 出 total，全量候选 + 逐首补全在子进程内跑）。
 - **插件调用仍经沙箱（边界不因子进程而削弱）**：子进程内调 `reg.impl[method]` 走与主进程相同的沙箱代理——外置插件权限授权（permissions）照常生效；单次调用预算由沙箱 `timeoutForMethod()` 落地（`manifest.longRunning` 或默认 15s），longRunning 方法路由到批量 worker（软看门狗）。子进程不绕过沙箱、不写死 provider id、不直接 import 插件实现（`scripts/check-core.mts` 覆盖 `batch/` 目录）。
 - **错误透传**：子进程失败携带 `sandboxCode`/`hint`（`BatchJobError`），jobRunner 的 PluginJobState 错误字段照常填充。
 
@@ -84,7 +87,7 @@
 
 **D. 测试契约**
 
-- runner 单测用 `_setForkImplForTest` 注入假子进程（不真实 fork）；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` 注入进程内直调。**这些钩子仅供测试，生产禁止。**
+- runner 单测用 `_setForkImplForTest` 注入假子进程（不真实 fork）；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 注入进程内直调。**这些钩子仅供测试，生产禁止。**
 - 内存验证基线：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`，要求批量执行期间主进程 RSS 平稳（B ≤ A + 5MB 或下降）。
 
 ---
@@ -319,7 +322,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 - **日志前缀**（沿用既有标签习惯，新增标签先查重）：`[MEMORY-RECLAIM]`、`[ORPHAN-PRUNE]`、`[PLUGIN-JOB]`、`[PLUGIN-WORKER]`、`[PLUGIN-HOTRELOAD]`、`[SCANNER]`、`[DAILY-RECOMMEND]`、`[LOCAL-RECOMMEND]`、`[DAILY-SCHEDULER]`、`[ARTIST-SCRAPE]`、`[AUTO-SYNC]`、`[REGISTRY]`、`[batch-runner]`（批量子进程完成：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`）、`[batch-child]`（子进程引导/异常）、`[batch-job]`（子进程 handler 侧）、`[DLNA]`、`[peer]`、`[group]`、`[QueueController]`、`[SECRET]`、`[FATAL]`、`[SECURITY]`、`[PLAY-HISTORY]`、`[HTTP]`（慢请求）。
 - **请求 metrics（v1.7.72+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[HTTP] WARN 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
 - **内存观测（v1.7.72+）**：`GET /rest/api/v1/admin/memory-settings` 返回 `rssMB/heapUsedMB/externalMB/arrayBuffersMB/isIdle/isBatchBusy/lastReclaimAt/lastReclaim`；`POST /rest/api/v1/admin/memory/reclaim` 返回回收前后内存快照。发版后先看 `rssMB` 曲线定论（稳定高位=正常；持续上涨=查泄漏）。
-- **批量子进程内存观测（v1.7.75+）**：批量任务完成时 `[batch-runner]` 必打 `[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`。验收基线：子进程峰值归一次性子进程所有（退出即归还 OS）；主进程 B ≤ A + 5MB（或下降）。批量执行期间抽样主进程 RSS 应平稳，不得随子进程工作增长。
+- **批量子进程内存观测（v1.7.75+）**：批量任务完成时 `[batch-runner]` 必打 `[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`（新增 `backfill` / `recommend-refresh` 等 kind 前缀同构）。验收基线：子进程峰值归一次性子进程所有（退出即归还 OS）；主进程 B ≤ A + 5MB（或下降）。批量执行期间抽样主进程 RSS 应平稳，不得随子进程工作增长。
 - 入口/出口关键动作打 Info（含耗时可选）；分支判断 Debug。
 
 ---
@@ -330,7 +333,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 
 - 测试框架 vitest（`pool: forks`、每文件独立 DATA_DIR、shuffle）。
 - **单元测试**：核心业务逻辑（player/memory/plugins/group/source）必须覆盖；新增/修改逻辑**必须**附测试或更新既有测试。
-- **批量子进程测试（v1.7.75+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` 进程内直调（测试专用钩子，生产禁止）。
+- **批量子进程测试（v1.7.75+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 进程内直调（测试专用钩子，生产禁止）。
 - **集成/冒烟**：行为类改动（新路由/新流程）用本地隔离实例实测（临时 DATA_DIR + 桩插件，跑通后端直连/代理/真浏览器三层），或至少补集成测试。
 - **一键 e2e（v1.7.72+）**：`bash scripts/e2e.sh` —— 临时 DATA_DIR 起服 + 登录 + 验证 `users/me`、`peers`、`groups`、`memory-settings`、`metrics`、OpenSubsonic 错误凭据契约，自动清理。交付前跑一遍。
 - **交付门槛**：`tsc --noEmit` 0 错误 + 相关测试全绿 + 无回归；未附冒烟用例视为未完成。

@@ -25,7 +25,8 @@ import { fetchLrcForSong } from "../../src/services/lyrics.js";
 import { fetchCoverForSong, clearCoverAttempt } from "../../src/services/covers.js";
 import { resolveCoverFile } from "../../src/services/playlistCover.js";
 import { readLyricFile, resolveLyricContent, deleteSongLyric, saveLyricFile } from "../../src/services/lyricsStore.js";
-import { startBackfill, backfillStatus } from "../../src/services/backfill.js";
+import { startBackfill, backfillStatus, _setBackfillRunnerForTest, _resetBackfillJobsForTest } from "../../src/services/backfill.js";
+import { batchJobHandlers } from "../../src/batch/jobs.js";
 
 const manifestOf = (id: string, caps: string[]) => ({
   id, name: id, version: "1.0.0", type: "lyrics",
@@ -441,6 +442,16 @@ describe("covers:按需下载 + persist + 防风暴", () => {
 });
 
 describe("backfill:歌词/封面批量补全", () => {
+  beforeAll(() => {
+    _resetBackfillJobsForTest();
+    // 补全实际执行在一次性批量子进程(batch/jobs.ts 的 backfill handler),候选查询
+    // 与逐首补全都在子进程侧;测试的假 provider 只注册在本进程内存,注入进程内直调,
+    // 避免真实 fork(与 runner 单测的注入思路一致)。
+    _setBackfillRunnerForTest(async (kind, onProgress) =>
+      batchJobHandlers.backfill({ kind }, { onProgress, signal: new AbortController().signal }));
+  });
+  afterAll(() => _setBackfillRunnerForTest(null));
+
   it("缺歌词的本地歌曲经 provider 补全并落库为文件引用", async () => {
     setSetting("lyrics.onDemand", "true");
     setSetting("lyrics.persist", "true");
