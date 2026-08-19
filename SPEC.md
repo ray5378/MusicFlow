@@ -72,6 +72,7 @@
 - **看门狗**：子进程 15min 无任何消息（心跳/progress/result 皆算）→ SIGKILL + `BatchJobError`；父进程 `abort` 发 `abort` 消息，宽限期 30s 后未退 → SIGKILL。
 - **收尾（成功与失败都必须）**：`clearLibraryIndex()` + `touch()`（子进程改了库 → 主进程缓存失效、标记活动），并记录子进程峰值 RSS 与主进程前后 RSS。
 - **状态/进度**：任务状态 Map 全部留在主进程（scanJobs/scrapeJobs/matchJobs/asyncTasks/jobRunner），子进程只回报 `progress`；前端轮询端点不变。
+- **插件调用仍经沙箱（边界不因子进程而削弱）**：子进程内调 `reg.impl[method]` 走与主进程相同的沙箱代理——外置插件权限授权（permissions）照常生效；单次调用预算由沙箱 `timeoutForMethod()` 落地（`manifest.longRunning` 或默认 15s），longRunning 方法路由到批量 worker（软看门狗）。子进程不绕过沙箱、不写死 provider id、不直接 import 插件实现（`scripts/check-core.mts` 覆盖 `batch/` 目录）。
 - **错误透传**：子进程失败携带 `sandboxCode`/`hint`（`BatchJobError`），jobRunner 的 PluginJobState 错误字段照常填充。
 
 **C. 例外（允许留在主进程，量小或需前台同步返回）**
