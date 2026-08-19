@@ -100,6 +100,18 @@
 - 音量/静音跨协议转发（`setAirPlayVolume` → DLNA RenderingControl）仍走既有 `dlnaPeerOfAirPlay` 逻辑，不受互斥影响。
 - 新增协议播放器（Cast 等）若与既有协议可能同设备，必须同样登记互斥（按 host IP 匹配），禁止只增不互斥。
 
+### 1.5 AirPlay 插件开关契约（v1.7.78+）
+
+> AirPlay（RAOP）渲染器是**可停用内置插件**（`airplay-renderer`），**默认关闭**。未开启时不启动任何服务，零常驻资源。
+
+- **开关入口**：插件管理页（`/v1/plugins` 的 `optionalBuiltin: true` 行显示开关按钮）→ `PUT /v1/plugins/:id` toggle。
+- **默认关闭**：manifest `defaultEnabled: false`；存量库已启用行保留（不强制关闭）。
+- **开启时才启动**：`index.ts` 启动门控 `isAirPlayEnabled()` → 才 `startAirPlayService()` + 持久化 wire + 设备注册。
+- **关闭时零常驻**：`stopAirPlayService()`（airplay/control.ts）——停全部会话（RAOP TEARDOWN + ffmpeg kill）、清 volumeState/lastCast、移除全部 `airplay:*` peer（`removeAirPlayPeers`）、注销 QueueController player（`unregisterAirPlayDevices`）、停 mDNS（`stopAirPlayDiscovery`：browser.stop + bonjour.destroy + clearInterval）并清空设备内存列表。**关闭后无网络监听/无定时器/无会话/无 peer/无 player 注册**。
+- **路由守卫**：`/v1/airplay/*` 全部端点挂 `use` 中间件，未启用返回 409（`CONFLICT`，"AirPlay 播放器已关闭"），防绕过。
+- **禁止**：未启用状态下任何代码路径调用 discovery/设备注册（mDNS 是唯一设备来源，关闭后设备列表为空，天然免疫）。
+- **内置插件均可停用**（v1.7.78+）：移除"内置不可停用"限制——`/v1/plugins` 的 toggle 对所有插件生效（内置插件仅不可删除/不可更新）。需要服务生命周期联动的内置插件（如 airplay-renderer → AirPlay 服务启停）在 toggle 端点特判 id 接线，禁止只改 DB 不联动。
+
 ---
 
 ## 二、数据模型契约（SQLite）
