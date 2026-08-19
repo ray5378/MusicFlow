@@ -61,7 +61,7 @@ test.beforeEach(async ({ page }) => {
   await loginAsAdmin(page);
 });
 
-test("手机端(390px)各页面不应横向溢出", async ({ page }) => {
+test("手机端各页面不应横向溢出(390/360 双视口)", async ({ page }) => {
   const failures: string[] = [];
   for (const route of ROUTES) {
     await page.goto(route, { waitUntil: "load" });
@@ -88,9 +88,11 @@ test("插件配置/详情弹窗在手机端不超出视口宽度", async ({ page
   await dialog.waitFor({ state: "visible", timeout: 5_000 });
   const box = await dialog.boundingBox();
   expect(box, "弹窗未渲染").not.toBeNull();
-  // 弹窗不得超出视口(左/右越界即视为非自适应)。
-  expect(box!.width, `配置弹窗宽度 ${Math.round(box!.width)}px 超出 390 视口`).toBeLessThanOrEqual(
-    390 + 1
+  // 弹窗不得超出当前视口(左/右越界即视为非自适应)。阈值取运行期视口宽度,
+  // 使本测试同时服务于 390 与 360 两个 project(同一个 spec 跑两档视口)。
+  const vw = (page.viewportSize()?.width ?? 390) + 1;
+  expect(box!.width, `配置弹窗宽度 ${Math.round(box!.width)}px 超出 ${vw - 1} 视口`).toBeLessThanOrEqual(
+    vw
   );
   expect(box!.x, `配置弹窗左缘 ${Math.round(box!.x)}px 越界`).toBeGreaterThanOrEqual(-1);
 });

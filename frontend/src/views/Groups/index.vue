@@ -615,6 +615,17 @@ onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); });
   .group-actions { flex-wrap: wrap; }
   .group-actions .el-button { margin-left: 0; }
   .groups-tip { padding: 8px 10px; }
+  // 设备行窄屏布局:信息区一行、操作按钮整行右对齐(允许换行)。
+  // 修复:禁用设备(恢复/重命名/删除)按钮在 ≤360px 下把行挤爆/按钮越界的问题。
+  .device-row { flex-wrap: wrap; }
+  .device-row-info { flex: 1 1 calc(100% - 30px); }
+  .device-row-actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    .el-button { margin-left: 0; }
+  }
 }
 .dialog-field { margin-bottom: 16px;
   .dialog-label { font-size: 13px; font-weight: 500; color: var(--fnos-text-secondary); margin-bottom: 8px; }

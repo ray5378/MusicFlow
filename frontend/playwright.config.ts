@@ -28,6 +28,12 @@ export default defineConfig({
       name: "mobile",
       use: { viewport: { width: 390, height: 844 }, hasTouch: true },
     },
+    {
+      // 最坏情况视口(360×800):覆盖小屏手机。与 390 共用同一套响应式断言,
+      // 插件弹窗宽度阈值按运行期视口动态取(见 responsive.spec.ts),两档都过。
+      name: "mobile360",
+      use: { viewport: { width: 360, height: 800 }, hasTouch: true },
+    },
   ],
   webServer: [
     {
