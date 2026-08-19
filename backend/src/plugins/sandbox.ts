@@ -39,6 +39,15 @@ function cpuIdleLimitMs(): number {
   const v = Number(process.env.SANDBOX_CPU_IDLE_MS);
   return Number.isFinite(v) && v > 0 ? v : 60000;
 }
+// 单插件内存上限(QuickJS setMemoryLimit 硬上限,触顶即 OOM):支持 SANDBOX_MEMORY_LIMIT
+// 环境变量覆盖(测试用短值便于触发触顶自愈,运行时读取同 cpuIdleLimitMs 模式)。
+function memoryLimitBytes(): number {
+  const v = Number(process.env.SANDBOX_MEMORY_LIMIT);
+  return Number.isFinite(v) && v > 0 ? v : MEMORY_LIMIT;
+}
+const MEMORY_LIMIT_MB = MEMORY_LIMIT / 1024 / 1024;
+/** 内存超限(OOM)的修复提示:识别后自动重建沙箱,频繁出现指向插件侧 guest 累积。 */
+const OOM_HINT = `插件疑似内存泄漏(guest 全局数据跨调用累积,如把搜索结果缓存在模块级变量)。已自动重建沙箱,本次调用失败;若频繁出现请检查插件的全局缓存/累积逻辑`;
 
 /** 沙箱限制类错误:全链路可辨识(稳定错误码 + 中文说明 + 修复提示)。
  *  路由 / jobRunner 透传 sandboxCode/hint 给前端,避免「timeout of 15000ms exceeded」
@@ -288,6 +297,13 @@ export class SandboxedPlugin {
   private currentIsLong = false;
   private cpuKilled = false;
   private disposed = false;
+  /** 自愈重建(内存超限后):dispose + 重新 init。init 入参缓存在此,重建无需上层重新读盘。 */
+  private initCode: string | null = null;
+  private initManifest: PluginManifest | undefined;
+  /** 重建进行中标志:init 是异步的,重建期间拒绝并发调用(防访问已 dispose 的 ctx/runtime)。 */
+  private rebuilding = false;
+  /** 内存超限标志:置位后 dispose() 先解除限制+触发 GC 再销毁(见 dispose 注释),避免毒化 WASM module。 */
+  private oomFaulty = false;
   /** 批量 worker 代理(longRunning 方法执行线程);attachWorker 挂接,dispose 联动销毁。 */
   private workerRemote: SandboxedPluginRemote | null = null;
 
@@ -301,9 +317,12 @@ export class SandboxedPlugin {
   /** 创建 VM → 注入 host.* → 运行插件代码 → 校验 manifest → 调 create(host) 拿 impl。
    *  @param expectedManifest 可选:plugin.json 里的 manifest,与 VM 内 __mfPlugin.manifest 比对。 */
   async init(code: string, expectedManifest?: PluginManifest): Promise<void> {
+    // 缓存 init 入参,供内存超限后自愈重建(rebuild)使用;不随首次加载失败而丢失(init 失败路径 dispose 但不清缓存)。
+    this.initCode = code;
+    this.initManifest = expectedManifest;
     const module = await getQuickJS();
     this.runtime = module.newRuntime();
-    this.runtime.setMemoryLimit(MEMORY_LIMIT);
+    this.runtime.setMemoryLimit(memoryLimitBytes());
     this.runtime.setMaxStackSize(STACK_LIMIT);
     this.runtime.setInterruptHandler(() => {
       // 长耗时批量任务:软看门狗——只杀 CPU 空转(连续 JOB_CPU_IDLE_LIMIT_MS 无任何
@@ -417,13 +436,89 @@ export class SandboxedPlugin {
     for (const d of this.defers) { try { if (d.alive) d.dispose(); } catch { /* ignore */ } }
     this.defers = [];
     for (const h of [this.hTrue, this.hFalse]) { try { if (h.alive) h.dispose(); } catch { /* ignore */ } }
+    // 内存超限(OOM)后的 runtime 处于「malloc 超限」状态,直接 dispose 会触发 QuickJS
+    // gc_obj_list 断言(Aborted)把 WASM function table 打坏(实测后续 newContext 全崩
+    // "RuntimeError: null function")。先走 oomCleanup(解除限制+禁用 interrupt+触发 GC
+    // 清空对象列表),dispose 恢复安全(实测连续多次 OOM 自愈均干净、module 不毒化)。
+    if (this.oomFaulty && this.runtime) this.oomCleanup();
     try { this.ctx?.dispose(); } catch { /* ignore */ }
     try { this.runtime?.dispose(); } catch { /* QuickJS teardown 断言可被捕获且不毒化模块 */ }
+  }
+
+  /** OOM 后清理 runtime:① 解除内存限制(否则任何分配都抛 OOM);② 禁用 interrupt handler
+   *   (否则 deadline 已过 → evalCode 一执行就被 interrupt 中断,GC 代码跑不完);
+   *   ③ 触发一次小分配驱动 QuickJS 周期 GC 清空 gc_obj_list,dispose 不再断言失败。 */
+  private oomCleanup(): void {
+    try { this.runtime.setMemoryLimit(-1); } catch { /* ignore */ }
+    try { this.runtime.setInterruptHandler(() => false); } catch { /* ignore */ }
+    try {
+      this.ctx?.evalCode(
+        `let __mfGc__ = []; for (let __mfI__ = 0; __mfI__ < 128; __mfI__++) __mfGc__.push({ __mfS__: "y".repeat(2048) }); __mfGc__ = null; 1;`
+      );
+    } catch { /* ignore */ }
   }
 
   /** 挂接批量 worker 代理(dispose 时一并销毁)。 */
   attachWorker(worker: SandboxedPluginRemote): void {
     this.workerRemote = worker;
+  }
+
+  /** 调用前守卫:沙箱已销毁或重建进行中时拒绝执行(防访问已释放的 ctx/runtime 崩溃)。 */
+  private assertUsable(): void {
+    if (this.disposed) throw new Error(`插件 ${this.id} 沙箱不可用(已销毁)`);
+    if (this.rebuilding) throw new Error(`插件 ${this.id} 沙箱重建中,请重试`);
+  }
+
+  /** 自愈重建:销毁当前 VM 后用缓存的 init 入参重建全新 runtime。
+   *   impl 门面(makeImpl 产物)闭包引用本实例的 invoke/this,重建后无需重新注册。
+   *   注意:dispose 会一并销毁批量 worker(workerRemote),重建后 longRunning 方法回退
+   *   主线程执行(既有合法回退路径);shared 句柄集合整体重建,防旧句柄残留累积。 */
+  async rebuild(): Promise<void> {
+    if (this.rebuilding) return;
+    const code = this.initCode;
+    if (!code) return;
+    const manifest = this.initManifest;
+    this.rebuilding = true;
+    try {
+      // 内存超限后 runtime.dispose() 会抛 QuickJS gc 断言异常(实测 abort 可捕获),
+      // dispose 内部已 try/catch 吞掉;全新 init 不受旧 runtime 状态影响。
+      this.dispose();
+      this.disposed = false;
+      this.oomFaulty = false;
+      this.shared = new Set<QuickJSHandle>();
+      await this.init(code, manifest);
+    } finally {
+      this.rebuilding = false;
+    }
+  }
+
+  /** 识别 QuickJS 内存超限错误(实测:guest 抛 InternalError "out of memory",invoke 信封 message 即此)。 */
+  private isOomMessage(msg: unknown): boolean {
+    const s = String(msg || "");
+    return /out of memory/i.test(s) || /OutOfMemory/i.test(s) || /cannot allocate/i.test(s);
+  }
+
+  /** 异步上下文 OOM 处理:打日志 → 自愈重建(await 完成后再抛)→ 抛 SANDBOX_MEMORY。
+   *   rebuild 失败(如插件 create() 依赖异常状态)时沙箱保持已销毁,后续调用被 assertUsable 拦截。 */
+  private async handleOom(method?: string): Promise<never> {
+    console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内存超限(> ${MEMORY_LIMIT_MB}MB),自动重建沙箱`);
+    this.oomFaulty = true;
+    try {
+      await this.rebuild();
+      console.warn(`[PLUGIN:${this.id}] 沙箱已重建,后续调用生效`);
+    } catch (e: any) {
+      console.error(`[PLUGIN:${this.id}] 沙箱重建失败,该插件暂不可用: ${e?.message || e}`);
+    }
+    throw new SandboxLimitError("SANDBOX_MEMORY", `沙箱限制:插件 ${this.id} 内存超限(${MEMORY_LIMIT_MB}MB),已自动重建沙箱`, OOM_HINT);
+  }
+
+  /** 同步上下文 OOM 处理(invokeSync 是同步方法,rebuild 为异步 → fire-and-forget;
+   *   重建期间并发调用被 assertUsable 的 rebuilding 标志拦截)。 */
+  private handleOomSync(method?: string): never {
+    console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内存超限(> ${MEMORY_LIMIT_MB}MB),自动重建沙箱`);
+    this.oomFaulty = true;
+    void this.rebuild();
+    throw new SandboxLimitError("SANDBOX_MEMORY", `沙箱限制:插件 ${this.id} 内存超限(${MEMORY_LIMIT_MB}MB),已自动重建沙箱`, OOM_HINT);
   }
 
   // ---------- 宿主 host.* 注入 ----------
@@ -881,6 +976,7 @@ export class SandboxedPlugin {
 
   /** 异步方法调用(搜索/推荐/上报等)。guest 永远 resolve 信封,宿主不面对 rejection。 */
   async invoke(method: string, args: any[]): Promise<any> {
+    this.assertUsable();
     this.refreshConfig();
     const tmo = this.timeoutForMethod(method);
     this.deadline = Date.now() + tmo;
@@ -905,6 +1001,7 @@ export class SandboxedPlugin {
 
   /** 同步方法调用(streamUrl/lyricUrl/canHandle/canHandleFile)。插件契约:这些方法必须纯同步。 */
   invokeSync(method: string, args: any[]): any {
+    this.assertUsable();
     this.refreshConfig();
     this.deadline = Date.now() + INVOKE_TIMEOUT_MS;
     const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
@@ -913,6 +1010,7 @@ export class SandboxedPlugin {
     if (result.error !== undefined) {
       const e = this.ctx.dump(result.error);
       result.error.dispose();
+      if (this.isOomMessage(e)) return this.handleOomSync(method);
       throw new Error(`插件 ${this.id} ${method}() 执行失败: ${e}`);
     }
     const vh = this.ctx.unwrapResult(result);
@@ -920,6 +1018,7 @@ export class SandboxedPlugin {
     vh.dispose();
     if (v && v.ok === true) return v.value;
     const syncErrMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
+    if (this.isOomMessage(syncErrMsg)) return this.handleOomSync(method);
     console.error(`[PLUGIN:${this.id}] ${method}() 失败: ${syncErrMsg}`);
     throw new Error(`插件 ${this.id} ${method}(): ${syncErrMsg}`);
   }
@@ -929,6 +1028,7 @@ export class SandboxedPlugin {
     if (result.error !== undefined) {
       const e = this.ctx.dump(result.error);
       result.error.dispose();
+      if (this.isOomMessage(e)) return this.handleOom(method);
       throw new SandboxLimitError("SANDBOX_VM", `沙箱限制:虚拟机执行失败(${method || "eval"}),原因: ${e}`);
     }
     const promiseHandle = this.ctx.unwrapResult(result);
@@ -966,6 +1066,7 @@ export class SandboxedPlugin {
       try { rr = await settledPromise; } catch (e) { rr = { rejected: e }; }
       if (rr && rr.rejected) {
         const msg = String((rr.rejected && (rr.rejected as any).message) || rr.rejected);
+        if (this.isOomMessage(msg)) return this.handleOom(method);
         // 长任务被 CPU 空转中断(QuickJS interrupt):归为沙箱限制而非插件内部错误。
         if (isLong && this.cpuKilled) {
           const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
@@ -988,6 +1089,7 @@ export class SandboxedPlugin {
       }
       // 插件侧抛错:服务端记录完整 message + stack,便于定位真因;前端只收到精简文案。
       const errMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
+      if (this.isOomMessage(errMsg)) return this.handleOom(method);
       if (v && v.error && v.error.stack) console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`, v.error.stack);
       else console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`);
       throw new Error(`插件 ${this.id}: ${errMsg}`);
