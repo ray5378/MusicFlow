@@ -551,6 +551,17 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   if (isDeviceDisabled(opts.deviceId)) throw new Error("设备已禁用");
   const device = getDevice(opts.deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到或不可用");
+  // ===== 双协议互斥(同 host 的 AirPlay 会话先行停止) =====
+  // Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay,音频输入互斥:若 AirPlay RAOP 会话
+  // 残留(未 TEARDOWN 或 ffmpeg 卡死),DLNA SetAVTransportURI+Play 后设备"显示在播"
+  // 但音频被 AirPlay 通道占用 → 无声且进度走。动态 import 避免 dlna↔airplay 循环依赖。
+  try {
+    const apHost = new URL(device.location).hostname;
+    const { stopAirPlaySessionsForHost } = await import("../airplay/control.js");
+    await stopAirPlaySessionsForHost(apHost);
+  } catch (e: any) {
+    log.warn("[cast] 双协议互斥:停止同 host AirPlay 会话失败(忽略)", { deviceId: opts.deviceId, err: e?.message || e });
+  }
   const { token, streamUrl } = createCastSession(opts.songId, opts.deviceId, opts.baseUrl);
   const albumArtUri = opts.coverArt ? `${opts.baseUrl}/rest/getCoverArt?id=${encodeURIComponent(opts.coverArt)}&size=500` : undefined;
   const metadata = buildDidlLite({ title: opts.title, artist: opts.artist, album: opts.album, uri: streamUrl, mime: opts.mime, albumArtUri });
@@ -671,6 +682,20 @@ export function getCurrentMedia(deviceId: string): CurrentMedia | undefined {
 export function clearCurrentMedia(deviceId: string): void {
   const rt = runtimes.get(deviceId);
   if (rt) rt.currentMedia = undefined;
+}
+
+/** 停止设备的当前播放(SOAP Stop + 清内存态 + 通知客户端刷新)。
+ *  用于双协议互斥:同一物理设备(同 host)的 AirPlay 起播前,先让 DLNA 让出音频输入。 */
+export async function stopDevicePlayback(deviceId: string): Promise<void> {
+  const device = getDevice(deviceId);
+  if (!device?.avTransportUrl) return;
+  try {
+    await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
+  } catch (e: any) {
+    log.info(`[stopDevicePlayback] ${deviceId}: Stop failed (ignored): ${e?.message || e}`);
+  }
+  clearCurrentMedia(deviceId);
+  getEventManager().emit("player_refresh", deviceId, { reason: "stopped" });
 }
 
 // Preload the next track on the device via SetNextAVTransportURI so the

@@ -14,7 +14,7 @@ import { createRequire } from "module";
 import { PlaybackState } from "../player/types.js";
 import { RaopPlayer, type RaopSession, PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, setAirPlayPersist, type AirPlayDevice } from "./discovery.js";
-import { createCastSession, getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute } from "../dlna/control.js";
+import { createCastSession, getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -258,6 +258,25 @@ async function stopSession(deviceId: string): Promise<void> {
   await s.player.stop().catch(() => {});
 }
 
+/** 双协议互斥:停止与指定 host 同址的 AirPlay 会话(RAOP TEARDOWN)。
+ *  DLNA cast 前调用——Linkplay/HiVi 类设备音频输入互斥,残留 AirPlay 会话
+ *  会占用音频通道导致 DLNA 无声。返回被停止的会话 deviceId 列表。 */
+export async function stopAirPlaySessionsForHost(host: string): Promise<string[]> {
+  const stopped: string[] = [];
+  if (!host) return stopped;
+  const h = host.toLowerCase();
+  for (const d of getAirPlayDevices()) {
+    if (d.host && d.host.toLowerCase() === h && sessions.has(d.id)) {
+      await stopSession(d.id);
+      stopped.push(d.id);
+    }
+  }
+  if (stopped.length) {
+    log.info("双协议互斥:DLNA 播放前停止同 host AirPlay 会话", { host: h, stopped });
+  }
+  return stopped;
+}
+
 /** Stop an active AirPlay session (used by device management: delete/disable). */
 export async function stopAirPlaySession(deviceId: string): Promise<void> {
   await stopSession(deviceId);
@@ -266,6 +285,20 @@ export async function stopAirPlaySession(deviceId: string): Promise<void> {
 async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise<void> {
   const dev = getAirPlayDevice(opts.deviceId);
   if (!dev) throw new Error("AirPlay 设备不在线或未发现");
+
+  // ===== 双协议互斥(同 host 的 DLNA 播放先行停止) =====
+  // Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay,音频输入互斥:若 DLNA 正在播放,
+  // AirPlay RAOP 起播会被设备输入抢占逻辑干扰(或设备停在 DLNA 通道 → 无声)。
+  // 复用已有 dlnaPeerOfAirPlay(同 host 优先带 RenderingControl 的 DLNA renderer)。
+  const dlnaPeer = dlnaPeerOfAirPlay(opts.deviceId);
+  if (dlnaPeer) {
+    try {
+      await stopDevicePlayback(dlnaPeer);
+      log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放", { deviceId: opts.deviceId, dlnaPeer });
+    } catch (e) {
+      log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId: opts.deviceId, err: (e as Error)?.message || e });
+    }
+  }
 
   await stopSession(opts.deviceId);
 
