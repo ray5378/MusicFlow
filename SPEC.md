@@ -90,6 +90,16 @@
 - runner 单测用 `_setForkImplForTest` 注入假子进程（不真实 fork）；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 注入进程内直调。**这些钩子仅供测试，生产禁止。**
 - 内存验证基线：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`，要求批量执行期间主进程 RSS 平稳（B ≤ A + 5MB 或下降）。
 
+### 1.4 播放器双协议互斥契约（v1.7.76+，方案 A）
+
+> Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay（音频输入互斥）。双协议会话**必须互斥**，否则残留会话抢占音频通道 → 设备"显示在播但无声"。
+
+- **DLNA cast 前**：`castToDevice`（services/dlna/control.ts）按 device location 的 host 调 `stopAirPlaySessionsForHost(host)`（动态 import，防 dlna↔airplay 循环依赖），停止同 host 全部活跃 AirPlay 会话（RAOP TEARDOWN）。
+- **AirPlay cast 前**：`startSession`（services/airplay/control.ts）用 `dlnaPeerOfAirPlay` 找同 host DLNA renderer → `stopDevicePlayback(dlnaPeer)`（SOAP Stop + 清内存态 + player_refresh）。
+- 互斥钩子**失败只记日志不阻断 cast**（warn 级，含 deviceId/host 上下文）。
+- 音量/静音跨协议转发（`setAirPlayVolume` → DLNA RenderingControl）仍走既有 `dlnaPeerOfAirPlay` 逻辑，不受互斥影响。
+- 新增协议播放器（Cast 等）若与既有协议可能同设备，必须同样登记互斥（按 host IP 匹配），禁止只增不互斥。
+
 ---
 
 ## 二、数据模型契约（SQLite）
