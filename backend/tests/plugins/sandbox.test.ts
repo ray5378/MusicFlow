@@ -6,7 +6,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { loadSandboxedPlugin, type SandboxedPlugin } from "../../src/plugins/sandbox.js";
+import { loadSandboxedPlugin, SandboxLimitError, type SandboxedPlugin } from "../../src/plugins/sandbox.js";
 import type { SandboxHostEnv } from "../../src/plugins/sandbox.js";
 
 const TMP = path.join(os.tmpdir(), `mf-sandbox-${Date.now()}`);
@@ -493,4 +493,72 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
       else process.env.SANDBOX_CPU_IDLE_MS = prev;
     }
   });
+});
+
+describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
+  it("内存超限抛 SANDBOX_MEMORY 并自动重建沙箱,重建后可继续正常调用", async () => {
+    // 插件把搜索结果累积进模块级数组(模拟跨调用泄漏);小内存限制加速触顶。
+    // 注:8MB 下 while(true) 触顶实测 ~6.9s,故限制取 4MB + 显式 testTimeout 20000。
+    const LEAK_CODE = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-leak", name: "泄漏演示", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: ["storage"] },
+        create(host) {
+          const acc = [];
+          return {
+            async leak(config) { while (true) { acc.push("x".repeat(1024 * 1024)); } },
+            async ping(config) { return { ok: true }; }
+          };
+        }
+      };`;
+    const prev = process.env.SANDBOX_MEMORY_LIMIT;
+    process.env.SANDBOX_MEMORY_LIMIT = String(4 * 1024 * 1024);
+    let sb: SandboxedPlugin | null = null;
+    try {
+      const { sandbox } = await loadSandboxedPlugin("demo-leak", LEAK_CODE, makeEnv());
+      sb = sandbox;
+      const rtBefore = (sandbox as any).runtime;
+      expect(rtBefore).toBeTruthy();
+      // 触发内存超限:leak() 无限分配 → guest 抛 InternalError "out of memory"
+      // → 宿主识别为 OOM → 自愈重建 → 抛 SandboxLimitError(SANDBOX_MEMORY)。
+      await expect(sandbox.invoke("leak", [])).rejects.toMatchObject({
+        name: "SandboxLimitError",
+        sandboxCode: "SANDBOX_MEMORY",
+      });
+      // 自愈生效:runtime 实例已更换(全新 VM,泄漏的模块级 acc 随之消失)。
+      expect((sandbox as any).runtime).not.toBe(rtBefore);
+      // 重建后正常方法可用(新沙箱无泄漏状态)。
+      await expect(sandbox.invoke("ping", [])).resolves.toEqual({ ok: true });
+    } finally {
+      if (prev === undefined) delete process.env.SANDBOX_MEMORY_LIMIT;
+      else process.env.SANDBOX_MEMORY_LIMIT = prev;
+      try { sb?.dispose(); } catch { /* ignore */ }
+    }
+  }, 20000);
+
+  it("内存超限错误可被 SandboxLimitError 类型识别(含 hint)", async () => {
+    const prev = process.env.SANDBOX_MEMORY_LIMIT;
+    process.env.SANDBOX_MEMORY_LIMIT = String(4 * 1024 * 1024);
+    let sb: SandboxedPlugin | null = null;
+    try {
+      const LEAK_CODE = `
+        globalThis.__mfPlugin = {
+          manifest: { id: "demo-leak2", name: "泄漏2", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: [] },
+          create(host) { const acc = []; return { async leak(config) { while (true) { acc.push("y".repeat(1024 * 1024)); } } }; }
+        };`;
+      const { sandbox } = await loadSandboxedPlugin("demo-leak2", LEAK_CODE, makeEnv());
+      sb = sandbox;
+      const err = await sandbox.invoke("leak", []).then(
+        () => null,
+        (e: any) => e,
+      );
+      expect(err).toBeInstanceOf(SandboxLimitError);
+      expect((err as SandboxLimitError).sandboxCode).toBe("SANDBOX_MEMORY");
+      expect(String((err as SandboxLimitError).hint || "")).toContain("自动重建沙箱");
+      expect(String((err as SandboxLimitError).message)).toContain("内存超限");
+    } finally {
+      if (prev === undefined) delete process.env.SANDBOX_MEMORY_LIMIT;
+      else process.env.SANDBOX_MEMORY_LIMIT = prev;
+      try { sb?.dispose(); } catch { /* ignore */ }
+    }
+  }, 20000);
 });
