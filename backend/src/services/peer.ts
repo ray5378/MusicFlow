@@ -230,6 +230,16 @@ class PeerManager extends EventEmitter {
     this.peers.delete(peerId);
   }
 
+  /** Remove ALL AirPlay peers (AirPlay 插件关闭时调用,播放器列表不再出现)。 */
+  removeAirPlayPeers(): void {
+    for (const [peerId, p] of Array.from(this.peers.entries())) {
+      if (p.kind === "airplay") {
+        if (p.available) this.emit("peer_unavailable", p);
+        this.peers.delete(peerId);
+      }
+    }
+  }
+
   // ==================== Reconciliation ====================
 
   /** Sync the DLNA peer set from the device cache. New devices are registered,

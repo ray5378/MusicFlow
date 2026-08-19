@@ -13,7 +13,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { createRequire } from "module";
 import { PlaybackState } from "../player/types.js";
 import { RaopPlayer, type RaopSession, PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
-import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, setAirPlayPersist, type AirPlayDevice } from "./discovery.js";
+import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
 import { createCastSession, getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
@@ -771,7 +771,8 @@ export function getAirPlayPeerStatus(deviceId: string): {
   };
 }
 
-/** Start discovery + device event wiring. Call once at boot. */
+/** Start discovery + device event wiring. Call once at boot (or when the
+ *  AirPlay renderer plugin is toggled on). Idempotent. */
 export function startAirPlayService(): void {
   startAirPlayDiscovery();
   onAirPlayEvent((e) => {
@@ -781,4 +782,44 @@ export function startAirPlayService(): void {
       if (s) void stopSession(e.id);
     }
   });
+}
+
+/** AirPlay renderer 插件是否启用(plugins 表 airplay-renderer 行)。 */
+export function isAirPlayEnabled(): boolean {
+  try {
+    const row = sqlite.prepare("SELECT enabled FROM plugins WHERE name = 'airplay-renderer'").get() as any;
+    return !!row?.enabled;
+  } catch {
+    return false;
+  }
+}
+
+/** 关闭 AirPlay:停 mDNS + 停全部会话 + 清内存态 + 移除 peer + 注销 player。
+ *  目标是零常驻资源(无网络监听/无定时器/无会话/无 peer/无 player 注册)。幂等。
+ *  由插件管理页关闭 airplay-renderer 或启动时未启用时调用。 */
+export async function stopAirPlayService(): Promise<void> {
+  // 1. 停掉全部活跃会话(RAOP TEARDOWN + ffmpeg kill),释放音频资源。
+  const activeIds = Array.from(sessions.keys());
+  for (const id of activeIds) {
+    try { await stopSession(id); } catch { /* ignore */ }
+  }
+  // 2. 清内存态(音量/最近投屏/设备列表)。
+  volumeState.clear();
+  lastCast.clear();
+  // 3. 移除 peer(动态 import 避免循环依赖: peer → airplay/control)。
+  try {
+    const { getPeerManager } = await import("../peer.js");
+    getPeerManager().removeAirPlayPeers();
+  } catch { /* ignore */ }
+  // 4. 注销 QueueController 的 airplay player 与队列。
+  try {
+    const { getQueueController } = await import("../player/index.js");
+    getQueueController().unregisterAirPlayDevices();
+  } catch { /* ignore */ }
+  // 5. 停 mDNS(释放 socket + 定时器)并清空设备内存列表。
+  stopAirPlayDiscovery();
+  for (const d of Array.from(getAirPlayDevices())) {
+    try { removeAirPlayDevice(d.id); } catch { /* ignore */ }
+  }
+  log.info("AirPlay 服务已关闭(零常驻资源)");
 }

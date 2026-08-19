@@ -32,9 +32,8 @@
             </el-table-column>
             <el-table-column label="状态" width="104">
               <template #default="{ row }">
-                <!-- 内置插件是核心功能:不显示关闭按钮 -->
-                <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心·启用</el-tag>
-                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <!-- 内置插件也可停用(服务生命周期联动);仅删除受限 -->
+                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
               </template>
             </el-table-column>
             <el-table-column label="操作" width="210">
@@ -62,8 +61,7 @@
               </div>
               <div class="pc-desc m-sub">{{ parseManifest(row).description || row.description || "—" }}</div>
               <div class="pc-actions">
-                <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心·启用</el-tag>
-                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                 <el-button size="small" type="primary" plain @click="editPlugin(row)">
                   {{ hasConfig(row) ? "配置" : "详情" }}
                 </el-button>
@@ -162,9 +160,8 @@
                 <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
                 <el-table-column label="状态" width="104">
                   <template #default="{ row }">
-                    <!-- 内置核心插件不显示关闭按钮 -->
-                    <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
-                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <!-- 内置插件也可停用(服务生命周期联动);仅删除受限 -->
+                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                     <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                   </template>
                 </el-table-column>
@@ -198,8 +195,7 @@
                   <div class="pc-desc m-sub">{{ row.description }}</div>
                   <div class="pc-meta">
                     <span class="pc-ver">v{{ row.version }}</span>
-                    <el-tag v-if="row.builtin" size="small" type="warning" effect="light">核心</el-tag>
-                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                     <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                   </div>
                   <div class="pc-actions">

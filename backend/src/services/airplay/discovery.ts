@@ -34,6 +34,7 @@ const STALENESS_MS = 90 * 1000; // no mDNS refresh in 90s → mark unavailable
 
 let bonjour: Bonjour | null = null;
 let browser: Browser | null = null;
+let tick: ReturnType<typeof setInterval> | null = null;
 const devices = new Map<string, AirPlayDevice>();
 
 export type AirPlayEvent =
@@ -140,7 +141,7 @@ export function startAirPlayDiscovery(): void {
   // the LAN. Work around it by periodically spinning a short-lived fresh
   // browser that only refreshes lastSeen (its query also reaches the
   // persistent browser, which handles alive/up/down events as usual).
-  const tick = setInterval(() => {
+  tick = setInterval(() => {
     try {
       const refresh = bonjour?.find({ type: "raop" }, (svc: Service) => {
         const dev = devices.get(deviceIdOf(svc));
@@ -155,6 +156,17 @@ export function startAirPlayDiscovery(): void {
   }, 30_000);
   tick.unref?.();
   log.info("mDNS discovery started (_raop._tcp)");
+}
+
+/** 停止 mDNS 浏览:销毁 browser + bonjour + 周期刷新定时器,释放网络 socket 与 CPU。
+ *  关闭 AirPlay 插件时调用(零常驻资源)。幂等。设备内存列表由调用方负责清空。 */
+export function stopAirPlayDiscovery(): void {
+  if (tick) { clearInterval(tick); tick = null; }
+  try { browser?.stop(); } catch { /* ignore */ }
+  try { bonjour?.destroy(); } catch { /* ignore */ }
+  browser = null;
+  bonjour = null;
+  log.info("mDNS discovery stopped (_raop._tcp)");
 }
 
 /** Current device list (with staleness applied at read time). */

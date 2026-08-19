@@ -44,7 +44,7 @@ import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
-import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession } from "../../services/airplay/control.js";
+import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
@@ -545,20 +545,12 @@ apiRoutes.get("/v1/sources/:id/scan-status", adminMiddleware, (c) => {
 });
 
 // ==================== Plugins ====================
-// 内置插件 = 随服务端发行的核心功能:始终启用、不可停用、不可删除、不可更新。
+// 内置插件 = 随服务端发行的功能:可停用(服务生命周期按插件联动)、不可删除、不可更新。
 const BUILTIN_IDS = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
 const isBuiltinRow = (r: any): boolean => BUILTIN_IDS.has(r?.id) || BUILTIN_IDS.has(r?.name);
 
 apiRoutes.get("/v1/plugins", adminMiddleware, (c) => {
   const rows = db.select().from(plugins).all() as any[];
-  const now = new Date().toISOString();
-  // 内置插件是核心功能:若因历史操作被停用,这里校正为启用(DB 与视图同步)。
-  for (const r of rows) {
-    if (isBuiltinRow(r) && !r.enabled) {
-      db.update(plugins).set({ enabled: 1, updatedAt: now }).where(eq(plugins.id, r.id)).run();
-      r.enabled = 1;
-    }
-  }
   return c.json(rows.map((r) => {
     const builtin = isBuiltinRow(r);
     // manifest/version 以注册表内存为准:DB 可能是升级前的旧快照(缺新增配置项
@@ -599,7 +591,6 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
   const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
   if (!p) return c.json({ error: "插件不存在" }, 404);
-  if (isBuiltinRow(p)) return c.json({ error: "内置核心插件不可停用" }, 400);
   // 启用插件时若其已配置首页显示位次,与其它插件位次冲突则拒绝启用。
   if (!p.enabled) {
     let cfg: any = {};
@@ -607,7 +598,14 @@ apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
     const conflict = homePositionConflictForSave(p.id, cfg);
     if (conflict) return c.json({ error: conflict }, 400);
   }
-  db.update(plugins).set({ enabled: p.enabled ? 0 : 1 }).where(eq(plugins.id, p.id)).run();
+  const nextEnabled = p.enabled ? 0 : 1;
+  db.update(plugins).set({ enabled: nextEnabled }).where(eq(plugins.id, p.id)).run();
+  // 内置插件的服务生命周期联动:airplay-renderer 开关 → 启动/停止 AirPlay 服务
+  // (开启才启动 mDNS discovery;关闭时停全部会话 + 清 peer/player + 释放 socket,零常驻资源)。
+  if (p.id === "airplay-renderer" || p.name === "airplay-renderer") {
+    if (nextEnabled) startAirPlayService();
+    else void stopAirPlayService();
+  }
   return c.json({ success: true });
 });
 // 删除插件(仅外置插件;内置核心插件不可删除)。删除目录 + 释放沙箱 + 反注册 + 删 DB 行。
@@ -2016,6 +2014,14 @@ apiRoutes.get("/v1/dlna/active", (c) => {
 // "airplay:<deviceId>" peer in /v1/peers, so the Web switcher + HA treat them
 // exactly like DLNA renderers. These routes mirror the DLNA ones for tooling
 // that talks to the renderer kind directly.
+
+// AirPlay 插件未启用(默认关闭)时,全部 airplay 管理端点拒绝(防绕过)。
+apiRoutes.use("/v1/airplay/*", async (c, next) => {
+  if (!isAirPlayEnabled()) {
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "AirPlay 播放器已关闭(插件管理页开启后可用)"), 409);
+  }
+  await next();
+});
 
 apiRoutes.get("/v1/airplay/devices", (c) => {
   return c.json({ devices: listAirPlayDevices() });

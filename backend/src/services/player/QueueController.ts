@@ -113,6 +113,21 @@ export class QueueController extends EventEmitter {
     log.info(`[QueueController] registered AirPlay device: ${deviceId} (${name})`);
   }
 
+  /** 注销全部 AirPlay player 与其队列(AirPlay 插件关闭时调用,零残留)。
+   *  players 的 key 是裸 deviceId(registerAirPlayDevice 传入),按 player.playerId
+   *  前缀判断是否为 AirPlay(UniversalPlayer.playerId = "airplay:<deviceId>")。 */
+  unregisterAirPlayDevices(): void {
+    for (const key of Array.from(this.players.keys())) {
+      const up = this.players.get(key);
+      if (!up || !up.playerId.startsWith("airplay:")) continue;
+      this.players.delete(key);
+      this.ctrls.delete(key);
+      this.queues.delete(key);
+      this.skipCounters.delete(key);
+      log.info(`[QueueController] unregistered AirPlay device: ${key}`);
+    }
+  }
+
   /** 对注册播放器下发传输控制(dlna=单设备,group=扇出)。 */
   async transport(playerId: string, op: "play" | "pause" | "stop" | "seek" | "volume", arg?: number): Promise<void> {
     playerId = stripPlayerPrefix(playerId);

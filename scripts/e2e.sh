@@ -63,6 +63,12 @@ check "groups"             "http://127.0.0.1:$PORT/rest/api/v1/groups"
 check "memory-settings"    "http://127.0.0.1:$PORT/rest/api/v1/admin/memory-settings"
 check "metrics"            "http://127.0.0.1:$PORT/rest/api/v1/admin/metrics"
 
+echo "== [4.5/6] AirPlay 默认关闭(插件未启用应 409) =="
+# 注意:MSYS curl -o /dev/null 会 exit 23 且 set -e 直接退出,必须写临时真实文件
+AIRPLAY_CODE=$(curl -s -o "$TMP/airplay.out" -w "%{http_code}" -m 5 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/rest/api/v1/airplay/devices")
+echo "  /v1/airplay/devices -> HTTP $AIRPLAY_CODE (期望 409)"
+if [ "$AIRPLAY_CODE" != "409" ]; then echo "!! AirPlay 未默认关闭(开关契约破坏)"; exit 1; fi
+
 echo "== [5/6] OpenSubsonic(错误凭据应返回 failed/40) =="
 curl -s -m 5 "http://127.0.0.1:$PORT/rest/getMusicFolders?u=admin&t=wrong&s=x" | head -c 300
 echo

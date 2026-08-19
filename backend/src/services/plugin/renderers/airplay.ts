@@ -26,7 +26,9 @@ export const airplayRendererManifest: PluginManifest = {
   type: "renderer",
   description: "通过 AirPlay (RAOP) 协议将音乐投放到局域网内的 AirPlay 音箱、电视等设备",
   capabilities: ["renderer"],
-  defaultEnabled: true,
+  // 默认关闭:不是所有用户都需要 AirPlay(mDNS 常驻监听有 CPU/内存开销)。
+  // 用户可在插件管理页开启;开启后才启动 discovery/服务,关闭时零常驻资源。
+  defaultEnabled: false,
   configSchema: [],
   documentation: `### 功能介绍
 通过 AirPlay 1 (RAOP) 协议把音乐投放到局域网内的 AirPlay 音箱、电视、回音壁等设备（renderer 能力）。协议要求 RSA-OAEP 加密 + AES-CBC 分块推送,由系统 ffmpeg 解码任意音源 → 实时 RAW-ALAC 编码后推流。

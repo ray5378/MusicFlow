@@ -343,19 +343,23 @@ getEventManager().on("device_list_changed", () => {
 // like DLNA devices, so queue/transport/restore all flow through the unified
 // controller; the DLNA chain is untouched (we only read DLNA's exported
 // createCastSession for stream URLs).
-import { startAirPlayService, wireAirPlayPersistence, loadPersistedAirPlayDevices, isAirPlayDeviceDisabled } from "./services/airplay/control.js";
+import { startAirPlayService, wireAirPlayPersistence, loadPersistedAirPlayDevices, isAirPlayDeviceDisabled, isAirPlayEnabled } from "./services/airplay/control.js";
 import { getAirPlayDevices, onAirPlayEvent } from "./services/airplay/discovery.js";
-startAirPlayService();
-wireAirPlayPersistence();
-loadPersistedAirPlayDevices();
-onAirPlayEvent((e) => {
-  if (e.type === "alive" && !isAirPlayDeviceDisabled(e.device.id)) {
-    getQueueController().registerAirPlayDevice(e.device.id, (e.device.alias || e.device.name).trim());
+// AirPlay 渲染器插件默认关闭(插件管理页开关):开启才启动 mDNS 服务与设备注册,
+// 关闭时零常驻资源(无网络监听/定时器/会话/peer/player)。
+if (isAirPlayEnabled()) {
+  startAirPlayService();
+  wireAirPlayPersistence();
+  loadPersistedAirPlayDevices();
+  onAirPlayEvent((e) => {
+    if (e.type === "alive" && !isAirPlayDeviceDisabled(e.device.id)) {
+      getQueueController().registerAirPlayDevice(e.device.id, (e.device.alias || e.device.name).trim());
+    }
+  });
+  // 启动时把已发现的设备注册上(等侦测到 mDNS 结果后即可播)。
+  for (const d of getAirPlayDevices()) {
+    if (d.available) getQueueController().registerAirPlayDevice(d.id, (d.alias || d.name).trim());
   }
-});
-// 启动时把已发现的设备注册上(等侦测到 mDNS 结果后即可播)。
-for (const d of getAirPlayDevices()) {
-  if (d.available) getQueueController().registerAirPlayDevice(d.id, (d.alias || d.name).trim());
 }
 
 const port = parseInt(process.env.PORT || "46400", 10);
