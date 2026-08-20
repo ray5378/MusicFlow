@@ -498,7 +498,9 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
 describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
   it("内存超限抛 SANDBOX_MEMORY 并自动重建沙箱,重建后可继续正常调用", async () => {
     // 插件把搜索结果累积进模块级数组(模拟跨调用泄漏);小内存限制加速触顶。
-    // 注:8MB 下 while(true) 触顶实测 ~6.9s,故限制取 4MB + 显式 testTimeout 20000。
+    // 注:8MB 下 while(true) 触顶实测 ~6.9s,故限制取 4MB。
+    // 显式 testTimeout 60000:CI 并行 fork 下 OOM 识别+重建可能显著变慢,
+    // 2026-08-20 CI 曾以 20000 超时(本地单跑可通过),放宽后不再抖动。
     const LEAK_CODE = `
       globalThis.__mfPlugin = {
         manifest: { id: "demo-leak", name: "泄漏演示", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: ["storage"] },
@@ -533,7 +535,7 @@ describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
       else process.env.SANDBOX_MEMORY_LIMIT = prev;
       try { sb?.dispose(); } catch { /* ignore */ }
     }
-  }, 20000);
+  }, 60000);
 
   it("内存超限错误可被 SandboxLimitError 类型识别(含 hint)", async () => {
     const prev = process.env.SANDBOX_MEMORY_LIMIT;
@@ -560,7 +562,7 @@ describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
       else process.env.SANDBOX_MEMORY_LIMIT = prev;
       try { sb?.dispose(); } catch { /* ignore */ }
     }
-  }, 20000);
+  }, 60000);
 
   it("OOM 触顶耗尽 deadline 后重建仍成功(rebuild 重置看门狗,不被 interrupt 打断)", async () => {
     // CI 回归场景(2026-08-20 CI failure):256MB/慢机器上 while(true) 触顶耗时 > 15s
