@@ -5,7 +5,7 @@
       <div class="section-title">
         <span>为你推荐</span>
         <span class="section-sub">首页固定推荐歌单</span>
-        <span class="more" @click="go('/playlists')">查看全部歌单 ›</span>
+        <span class="more" @click="go('/playlists?filter=favorite')">查看收藏的歌单 ›</span>
       </div>
 
       <div class="top-row">
@@ -78,7 +78,7 @@
       <div class="section-title">
         <span>{{ group.name }}精选</span>
         <span class="section-sub">为你精选的 {{ group.name }} 歌单</span>
-        <span class="more" @click="go('/playlists')">查看全部歌单 ›</span>
+        <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
       </div>
       <div class="grid-row">
         <div

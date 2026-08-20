@@ -19,6 +19,9 @@
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
       <div class="header-actions">
+        <el-button :type="activeFilter === 'favorite' ? 'danger' : ''" @click="toggleFavoriteFilter">
+          <el-icon class="fav-heart"><MfIcon name="Heart" :filled="activeFilter === 'favorite'" :size="16" /></el-icon>收藏的歌单
+        </el-button>
         <el-dropdown trigger="click" @command="onFilterCommand">
           <el-button><MfIcon name="Library" />筛选歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
           <template #dropdown>
@@ -214,7 +217,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
 import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
@@ -229,6 +232,7 @@ import { waitAsyncTask } from "@/utils/asyncTask";
 import { useAuthStore } from "@/stores/auth";
 
 const router = useRouter();
+const route = useRoute();
 const authStore = useAuthStore();
 const { openContextMenu, openActionSheet, menuGuard } = useItemActions();
 
@@ -313,11 +317,11 @@ const currentSourceLabel = computed(() => isLocalMode.value ? "本地" : (curren
 const searchPlaceholder = computed(() => isLocalMode.value ? "搜索歌单..." : `搜索${currentProviderName.value}全网歌单...`);
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showManageMenu = ref(false);
-// 歌单筛选:空=全部 | local=本地歌单 | favorite=收藏的歌单 | 平台值(netease/qq/kugou/kuwo)
+// 歌单筛选:空=全部 | local=本地歌单 | 平台值(netease/qq/kugou/kuwo)
+// 「收藏的歌单」已独立为顶部专属按钮(不再出现在筛选下拉里),由 activeFilter==="favorite" 触发。
 const FILTERS = [
   { key: "", label: "全部歌单" },
   { key: "local", label: "本地歌单" },
-  { key: "favorite", label: "收藏的歌单" },
   { key: "netease", label: "网易云" },
   { key: "qq", label: "QQ音乐" },
   { key: "kugou", label: "酷狗" },
@@ -332,6 +336,11 @@ function onFilterCommand(key: string) {
 }
 function clearFilter() {
   activeFilter.value = "";
+  loadPlaylists();
+}
+// 独立「收藏的歌单」按钮:点击切换收藏筛选,再次点击回到全部。
+function toggleFavoriteFilter() {
+  activeFilter.value = activeFilter.value === "favorite" ? "" : "favorite";
   loadPlaylists();
 }
 // 歌单排序:按创建时间/名称升序降序;空=后端默认(每日推荐优先+最近更新)
@@ -995,7 +1004,20 @@ async function pollBusy() {
   } catch { /* 网络抖动忽略,维持上一次状态 */ }
 }
 
-onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); loadSearchProviders(); pollBusy(); busyTimer = setInterval(pollBusy, 4000); nextTick(() => cardGrid.bindGrid()); });
+onMounted(() => { detectDailySource(); loadImportPlatforms(); loadSearchProviders(); pollBusy(); busyTimer = setInterval(pollBusy, 4000); nextTick(() => cardGrid.bindGrid()); });
+
+// 首页「查看收藏的歌单 / 查看网易云歌单」等入口通过 ?filter= 深链到本页。
+// keep-alive 下组件复用,onMounted 不重跑,故用 watch 监听路由 query 每次生效。
+watch(
+  () => route.query.filter,
+  (f) => {
+    const qf = String(f || "").trim();
+    if (qf) activeFilter.value = qf;
+    else activeFilter.value = ""; // 无 query(如侧边栏直达)回落到全部歌单
+    loadPlaylists();
+  },
+  { immediate: true },
+);
 
 // 首块拉到总数后需要据此重算一次可见窗口;之后由滚动驱动。
 watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
@@ -1013,7 +1035,9 @@ onUnmounted(() => {
   h2 { font-size: 28px; font-weight: 700; margin: 0; display: flex; align-items: baseline; gap: 14px;
     .song-count { font-size: 14px; color: var(--fnos-text-tertiary); font-weight: 500; }
   }
-  .header-actions { display: flex; gap: 10px; }
+  .header-actions { display: flex; gap: 10px;
+    .fav-heart { margin-right: 2px; }
+  }
 }
 .search-area { display: flex; align-items: center; gap: 10px; }
 .search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
