@@ -66,6 +66,28 @@ export function invalidateCoverResolve(ref: string): void {
   resolveCache.delete(ref);
 }
 
+/**
+ * 复制一份已缓存的平台封面到新 ref(`<destSongId>` + 与源同扩展名)。
+ * 供导入批量去重:同一远程封面 URL 被歌单里多首歌引用时,只下载一次到首个
+ * ref,后续歌曲据此本地复制字节,避免重复网络拉取 + 重复落盘。失败返回 null
+ * (调用方回落 cacheRemoteCover 正常下载)。写入平台封面目录,保持在线封面可独立挂卷。
+ */
+export function copyOnlineCoverToRef(srcFileName: string, destSongId: string): string | null {
+  const src = resolveCoverFile(srcFileName);
+  if (!src) return null;
+  const ext = path.extname(src).toLowerCase() || ".jpg";
+  const destFileName = `${destSongId}${ext}`;
+  const destPath = path.join(ONLINE_COVERS_DIR, destFileName);
+  try {
+    ensureDir();
+    fs.copyFileSync(src, destPath);
+    invalidateCoverResolve(destFileName);
+    return destFileName;
+  } catch {
+    return null;
+  }
+}
+
 /** 清空封面路径解析缓存(文件不动,仅内存条目;供空闲内存回收)。 */
 export function clearCoverResolveCache(): void {
   resolveCache.clear();

@@ -16,7 +16,7 @@ import { v4 as uuidv4 } from "uuid";
 import { db, sqlite } from "../../../db/index.js";
 import { songs, artists, albums } from "../../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
-import { cacheRemoteCover } from "../../playlistCover.js";
+import { cacheRemoteCover, copyOnlineCoverToRef } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
@@ -102,6 +102,7 @@ async function planSongInsert(
   albumsPending: { id: string; name: string; artistId: string | null; artist: string }[],
   artistIds: Map<string, string>,
   albumIds: Map<string, string>,
+  coverUrls: Map<string, string>,
 ): Promise<PlanResult> {
   const configured = getSourcePluginConfig(providerId);
   const provider = getOnlineProvider(providerId);
@@ -129,12 +130,23 @@ async function planSongInsert(
   const artistId = planArtist(song.artist, artistIds, artistsPending);
   const albumId = planAlbum(song.album, artistId, song.artist, albumIds, albumsPending);
 
-  // Cache the remote cover locally (like imported playlists). Falls back
-  // gracefully; 封面下载走全局限流(≤2 并发),避免批量匹配时网络洪峰挤占前台请求。
+  // Cache the remote cover locally (like imported playlists). A whole playlist
+  // often shares one cover URL — memoize the first downloaded ref per URL in
+  // this call and reuse its bytes (local file copy) for later songs, so the
+  // same image isn't re-fetched over the network once per song. Map is scoped
+  // to a single import call (bounded by distinct covers) and discarded after.
   let coverArt: string | null | undefined;
   if (song.cover) {
-    const cached = await withCoverLimit(() => cacheRemoteCover(song.cover, songId));
-    if (cached) coverArt = cached;
+    const memoRef = coverUrls.get(song.cover);
+    if (memoRef) coverArt = copyOnlineCoverToRef(memoRef, songId);
+    if (!coverArt) {
+      const cached = await withCoverLimit(() => cacheRemoteCover(song.cover, songId));
+      if (cached) {
+        coverArt = cached;
+        coverUrls.set(song.cover, cached);
+      }
+      // 封面下载走全局限流(≤2 并发),避免批量匹配时网络洪峰挤占前台请求。
+    }
   }
 
   const streamHeaders: Record<string, string> = {};
@@ -240,7 +252,7 @@ export async function importOnlineSong(
   const artistsPending: { id: string; name: string }[] = [];
   const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
 
-  const plan = await planSongInsert(providerId, song, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds);
+  const plan = await planSongInsert(providerId, song, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, new Map<string, string>());
   if (!plan.success) return { success: false, error: plan.error };
   if (plan.deduped) return { success: true, songId: plan.songId, deduped: true };
 
@@ -302,6 +314,8 @@ export async function importOnlineSongs(
   const pendingSongs: PlannedSong[] = [];
   const insertedAlbums = new Set<string>();
   const insertedArtists = new Set<string>();
+  // 批内封面去重:URL→已下载 ref,同一封面只网络拉取一次,其余本地复制字节。
+  const coverUrls = new Map<string, string>();
 
   let added = 0, deduped = 0, failed = 0;
   const songsOut: { id: string; title: string; fingerprint: string }[] = [];
@@ -311,7 +325,7 @@ export async function importOnlineSongs(
   const conc = opts?.interactive ? interactiveConcurrency() : batchConcurrency();
   const results = await workerLimit(songList, conc, async (s) => {
     try {
-      const plan = await planSongInsert(providerId, s, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds);
+      const plan = await planSongInsert(providerId, s, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls);
       if (plan.success && plan.songId) {
         if (plan.deduped) deduped++; else added++;
         if (plan.planned) {
