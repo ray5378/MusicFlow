@@ -6,7 +6,7 @@
 // - 随滚动按块预取(并发上限 concurrency),窗口移动超过 keepRows 后,把范围外的整块 slot
 //   置为 undefined 释放歌曲对象,保证缓存不随浏览过的条目数增长;回退到保留区(±prefetch)
 //   直接复用,避免抖拉。
-import { ref } from "vue";
+import { ref, onBeforeUnmount } from "vue";
 
 export interface RangeResult<T> {
   items: T[];
@@ -158,6 +158,15 @@ export function useInfiniteList<T = any>(fetcher: RangeFetcher<T>, options: UseI
     activeEnd = endRow;
     ensureChunk(Math.floor(startRow / chunk)); // 先取窗口所在块拿 total,再按窗口扩充
   }
+
+  // 组件真正卸载(被 keep-alive 淘汰或销毁)时释放缓存:作废在途请求、清空块标记,
+  // 并把稀疏数组置空以释放已加载对象供 V8 回收。keep-alive 的 deactivate 不触发此处。
+  onBeforeUnmount(() => {
+    seq++;
+    loaded.clear();
+    inflight.clear();
+    list.value = [];
+  });
 
   return { list, loading, error, total, init, reload: init, onWindow };
 }
