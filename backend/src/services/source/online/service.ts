@@ -106,6 +106,7 @@ async function planSongInsert(
   artistIds: Map<string, string>,
   albumIds: Map<string, string>,
   coverUrls: Map<string, string>,
+  nowIn?: string,
 ): Promise<PlanResult> {
   if (!configured || !provider) return { success: false, error: "在线源未启用或未配置" };
 
@@ -125,7 +126,9 @@ async function planSongInsert(
     return { success: true, songId: existing, deduped: true };
   }
 
-  const now = new Date().toISOString();
+  // 批量导入时由外层波循环传共享时间戳,省去每首一次 new Date() 序列化(N 次→1 次);
+  // 单首调用(importOnlineSong)不传,这里回退即时生成。
+  const now = nowIn ?? new Date().toISOString();
   const songId = uuidv4();
   // Reserve the fingerprint BEFORE any await so concurrent duplicates in the
   // same list collapse onto this id (no double-insert), even while covers load.
@@ -226,6 +229,9 @@ async function workerLimit<T, R>(items: T[], limit: number, fn: (item: T) => Pro
 // main-process import never blocks the event loop for the whole batch.
 // ---------------------------------------------------------------------------
 const TX_CHUNK = 500;
+// refreshCounts 落库用的小分块:单条 CASE update 的列数多(albums 每行 4 参数),
+// 需保证参数总数 < SQLite 999 上限。
+const COUNT_UPD_CHUNK = 100;
 const nowIso = () => new Date().toISOString();
 
 /** Insert the newly-appended artists/albums (from the given indices onward),
@@ -363,13 +369,15 @@ export async function importOnlineSongs(
   // FK,再写歌曲)并丢弃该波的 params——把峰值常驻内存从"整列表 O(N)"压到
   // "单波 O(TX_CHUNK)"。去重所用的 name→id 映射与封面 memo 仍按整批累积
   // (仅小字符串),跨波正确性(去重/单行)不变。
+  // created/updated 时间戳共享一个秒级 now,替代每首 new Date() 序列化。
+  const waveNow = nowIso();
   let artFlushed = 0, albFlushed = 0;
   for (let off = 0; off < songList.length; off += TX_CHUNK) {
     const slice = songList.slice(off, off + TX_CHUNK);
     const planned: PlannedSong[] = [];
     const results = await workerLimit(slice, conc, async (s) => {
       try {
-        const plan = await planSongInsert(providerId, s, configured, provider, dedupPreloaded, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls);
+        const plan = await planSongInsert(providerId, s, configured, provider, dedupPreloaded, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls, waveNow);
         if (plan.success && plan.songId) {
           if (plan.deduped) deduped++; else added++;
           if (plan.planned) {
@@ -433,7 +441,9 @@ async function refreshCounts(albumIds: Set<string>, artistIds: Set<string>): Pro
 
   // Each IN(...) list is capped at TX_CHUNK so the parameterized statement stays
   // within SQLite's variable limit; every chunk is one grouped scan, not one query
-  // per id.
+  // per id. The count write-back itself is ALSO batched — single CASE UPDATE per
+  // COUNT_UPD_CHUNK instead of one UPDATE per album/artist (the old per-id loop
+  // ran hundreds of prepare+run on a big go-music-dl playlist).
   for (let off = 0; off < albumsList.length; off += TX_CHUNK) {
     const chunk = albumsList.slice(off, off + TX_CHUNK);
     db.transaction(() => {
@@ -443,9 +453,23 @@ async function refreshCounts(albumIds: Set<string>, artistIds: Set<string>): Pro
         .all(...chunk) as { id: string; cnt: number; dur: number }[];
       const byId = new Map(rows.map((r) => [r.id, r]));
       const t = nowIso();
-      for (const a of chunk) {
-        const r = byId.get(a);
-        db.update(albums).set({ songCount: Number(r?.cnt || 0), duration: Math.round(Number(r?.dur || 0)), updatedAt: t }).where(eq(albums.id, a)).run();
+      for (let u = 0; u < chunk.length; u += COUNT_UPD_CHUNK) {
+        const sub = chunk.slice(u, u + COUNT_UPD_CHUNK);
+        const ids = sub.map(() => "?").join(",");
+        const songCases = sub.map(() => "WHEN ? THEN ?").join(" ");
+        const durCases = sub.map(() => "WHEN ? THEN ?").join(" ");
+        // 两个 CASE 的占位符各自成段:先放 songCount 的 (id,cnt) 组,再放
+        // duration 的 (id,dur) 组,再 updatedAt、IN。不能交错 push,否则绑定错位。
+        const songArgs: any[] = [];
+        const durArgs: any[] = [];
+        for (const a of sub) {
+          const r = byId.get(a);
+          songArgs.push(a, Number(r?.cnt || 0));
+          durArgs.push(a, Math.round(Number(r?.dur || 0)));
+        }
+        sqlite
+          .prepare(`UPDATE albums SET song_count = CASE id ${songCases} END, duration = CASE id ${durCases} END, updated_at = ? WHERE id IN (${ids})`)
+          .run(...songArgs, ...durArgs, t, ...sub);
       }
     });
     if (off + TX_CHUNK < albumsList.length) await sleepBetweenBatch();
@@ -459,8 +483,17 @@ async function refreshCounts(albumIds: Set<string>, artistIds: Set<string>): Pro
         .all(...chunk) as { id: string; cnt: number }[];
       const byId = new Map(rows.map((r) => [r.id, r]));
       const t = nowIso();
-      for (const a of chunk) {
-        db.update(artists).set({ albumCount: Number(byId.get(a)?.cnt || 0), updatedAt: t }).where(eq(artists.id, a)).run();
+      // 每行 2 参数(WHEN id THEN cnt)+ updatedAt + IN,整块(≤500)会 3n+1 超
+      // SQLite 999 上限,同样按 COUNT_UPD_CHUNK 细分。
+      for (let u = 0; u < chunk.length; u += COUNT_UPD_CHUNK) {
+        const sub = chunk.slice(u, u + COUNT_UPD_CHUNK);
+        const cntCases = sub.map(() => "WHEN ? THEN ?").join(" ");
+        const ids = sub.map(() => "?").join(",");
+        const args: any[] = [];
+        for (const a of sub) args.push(a, Number(byId.get(a)?.cnt || 0));
+        sqlite
+          .prepare(`UPDATE artists SET album_count = CASE id ${cntCases} END, updated_at = ? WHERE id IN (${ids})`)
+          .run(...args, t, ...sub);
       }
     });
     if (off + TX_CHUNK < artistsList.length) await sleepBetweenBatch();
