@@ -299,12 +299,18 @@ export async function importOnlineSongs(
   let dedupPreloaded = false;
   try {
     const fingerprints = songList.map(s => `${providerId}:${s.source}:${s.id}`);
-    for (const row of db.select().from(songs).where(inArray(songs.fingerprint, fingerprints)).all()) {
-      if (row.fingerprint) existingFingerprints.set(row.fingerprint, row.id);
+    // 超大歌单下整批 IN 参数可能超 SQLite 变量上限(999)而抛错降级为逐条
+    // 去重。按 TX_CHUNK 分块预载,使任意大小歌单都保持"一次批量扫描"——去重
+    // 不再因歌单变长退化,CPU 不会随之回升。
+    for (let off = 0; off < fingerprints.length; off += TX_CHUNK) {
+      const slice = fingerprints.slice(off, off + TX_CHUNK);
+      for (const row of db.select().from(songs).where(inArray(songs.fingerprint, slice)).all()) {
+        if (row.fingerprint) existingFingerprints.set(row.fingerprint, row.id);
+      }
     }
-    dedupPreloaded = songList.length > 0;
+    dedupPreloaded = fingerprints.length > 0;
   } catch (e) {
-    // 超限/引擎不支持 inArray 时优雅降级:去重退回逐 plan 兜底,仍正确。
+    // 引擎不支持/意外错误时优雅降级:去重退回逐 plan 兜底,仍正确。
     log.error("fingerprint 预载失败,退回逐条去重", { providerId, stage: "dedup-preload", err: (e as Error)?.message || e });
   }
 
@@ -316,14 +322,17 @@ export async function importOnlineSongs(
   const albumIds = new Map<string, string>();
   try {
     const wantArtists = [...new Set(songList.map((s) => (s.artist || "").trim()).filter(Boolean))];
-    if (wantArtists.length) {
-      for (const r of db.select({ id: artists.id, name: artists.name }).from(artists).where(inArray(artists.name, wantArtists)).all()) {
+    // 同上:distinct 歌手也可能超 IN 参数上限,分块扫描保持批量。
+    for (let off = 0; off < wantArtists.length; off += TX_CHUNK) {
+      const slice = wantArtists.slice(off, off + TX_CHUNK);
+      for (const r of db.select({ id: artists.id, name: artists.name }).from(artists).where(inArray(artists.name, slice)).all()) {
         if (r.name) artistIds.set(r.name, r.id);
       }
     }
     const wantAlbums = [...new Set(songList.map((s) => (s.album || "").trim()).filter(Boolean))];
-    if (wantAlbums.length) {
-      for (const r of db.select({ id: albums.id, name: albums.name }).from(albums).where(inArray(albums.name, wantAlbums)).all()) {
+    for (let off = 0; off < wantAlbums.length; off += TX_CHUNK) {
+      const slice = wantAlbums.slice(off, off + TX_CHUNK);
+      for (const r of db.select({ id: albums.id, name: albums.name }).from(albums).where(inArray(albums.name, slice)).all()) {
         if (r.name) albumIds.set(r.name, r.id);
       }
     }
