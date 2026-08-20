@@ -5,6 +5,12 @@
 //     provider's streamUrl(), i.e. go-music-dl /music/download?stream=1)
 //   - covers are cached locally like imported playlists
 //   - artist/album rows are created/updated to match the rest of the library
+//
+// Write path is split into PLAN + FLUSH so a whole batch of DB writes (new
+// artist/album rows, song rows, count refreshes) commits as chunked
+// transactions with multi-row VALUES inserts instead of one autocommit per
+// song — cuts SQLite statement-compile and commit overhead on large
+// go-music-dl 歌单/私人歌单导入 significantly. Behavior is unchanged.
 
 import { v4 as uuidv4 } from "uuid";
 import { db, sqlite } from "../../../db/index.js";
@@ -12,49 +18,25 @@ import { songs, artists, albums } from "../../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { cacheRemoteCover } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
-import { batchConcurrency, interactiveConcurrency } from "../../plugin/batchPacer.js";
+import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
 
 // 封面下载全局限流(≤2 并发)与封面后台回填见 covers.ts。
-
-/** Import a provider search result as an online DB song. Skips if already present. */
-export async function importOnlineSong(
-  providerId: string,
-  song: OnlineSongResult,
-  opts?: { playlistId?: string; userId?: string },
-): Promise<{ success: boolean; songId?: string; deduped?: boolean; error?: string; cover?: string }> {
-  const core = await importOnlineSongCore(providerId, song, opts, new Map());
-  if (core.success && core.songId) {
-    // Single-song call site: refresh counts immediately (importOnlineSongs
-    // batches them instead for cheaper bulk imports).
-    const inserted = core.inserted;
-    if (inserted?.albumId) updateAlbumCounts(inserted.albumId);
-    if (inserted?.artistId) updateArtistAlbumCount(inserted.artistId);
-  }
-  return core;
-}
-
-interface OnlineSongImportCore {
-  success: boolean;
-  songId?: string;
-  deduped?: boolean;
-  error?: string;
-  cover?: string;
-  inserted?: { albumId?: string | null; artistId?: string };
-}
+// 批量写放分块事务,chunk 间也让行,兼容交互路径在主进程跑的场景。
 
 // ---------------------------------------------------------------------------
-// Batch-scoped artist/album resolver.
-// Instead of a SELECT + possible INSERT per song (N round-trips over songs/
-// albums/artists), a bulk caller preloads the referenced artist/album names
-// into name->id maps, so repeated songs within one list become pure cache hits.
-// Each map additionally caches the result of a first miss (existing rows reused,
-// genuinely-new rows inserted once and remembered), so correctness holds even
-// when the preload is skipped/falls back — no duplicate artist/album rows.
-// Maps are scoped to a single importOnlineSongs call (bounded by list size) and
-// thrown away after, so the batches never leak into a persistent cache.
+// Batch-scoped artist/album planning.
+// Instead of a SELECT + INSERT per song (N round-trips over songs/albums/
+// artists), a bulk caller preloads the referenced artist/album names into
+// name->id maps so repeated songs become pure cache hits. `planArtist`/
+// `planAlbum` NEVER write: an existing name is looked up (cache, then DB on a
+// miss when the preload was skipped), and a genuinely-new name gets a fresh id
+// and a place-holder pushed into the `pending` collector — the actual INSERT
+// happens once, in the transaction flush. Maps/collectors are scoped to a
+// single import call (bounded by list size) and thrown away after, so no
+// persistent cache leaks out of the batches.
 // ---------------------------------------------------------------------------
-function resolveArtist(name: string, artistIds: Map<string, string>): string {
+function planArtist(name: string, artistIds: Map<string, string>, pending: { id: string; name: string }[]): string {
   if (!name) return "";
   if (artistIds.has(name)) return artistIds.get(name)!;
   const existing = db.select().from(artists).where(eq(artists.name, name)).get();
@@ -63,12 +45,18 @@ function resolveArtist(name: string, artistIds: Map<string, string>): string {
     return existing.id;
   }
   const id = uuidv4();
-  db.insert(artists).values({ id, name, albumCount: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
   artistIds.set(name, id);
+  pending.push({ id, name });
   return id;
 }
 
-function resolveAlbum(name: string | undefined, artistId: string, artist: string, albumIds: Map<string, string>): string | null {
+function planAlbum(
+  name: string | undefined,
+  artistId: string,
+  artist: string,
+  albumIds: Map<string, string>,
+  pending: { id: string; name: string; artistId: string | null; artist: string }[],
+): string | null {
   if (!name) return null;
   if (albumIds.has(name)) return albumIds.get(name)!;
   const existing = db.select().from(albums).where(eq(albums.name, name)).get();
@@ -77,34 +65,50 @@ function resolveAlbum(name: string | undefined, artistId: string, artist: string
     return existing.id;
   }
   const id = uuidv4();
-  db.insert(albums).values({ id, name, artistId: artistId || null, artist, year: 0, songCount: 0, duration: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
   albumIds.set(name, id);
+  pending.push({ id, name, artistId: artistId || null, artist });
   return id;
 }
 
-// Core import logic (no count refresh). `existingFingerprints` lets a bulk
-// caller resolve dedup in one query instead of one SELECT per song; new rows
-// insert their fingerprint into the map so duplicate tracks in one list collapse.
-// `resolvers` lets a bulk caller reuse a shared artist/album id map instead of
-// resolving (SELECT, possibly INSERT) every single song's artist/album.
-async function importOnlineSongCore(
+// ---------------------------------------------------------------------------
+// PLAN stage — figures out everything needed for one song without writing.
+// Returns a dedup marker, or the fully-resolved insert params for a brand-new
+// song. Async only for the cover download (network); DB is not written here.
+// ---------------------------------------------------------------------------
+interface PlannedSong {
+  id: string;
+  params: Record<string, any>;
+  albumId?: string | null;
+  artistId?: string;
+}
+
+interface PlanResult {
+  success: boolean;
+  deduped?: boolean;
+  songId?: string;
+  cover?: string;
+  error?: string;
+  planned?: PlannedSong;
+}
+
+async function planSongInsert(
   providerId: string,
   song: OnlineSongResult,
-  opts: { playlistId?: string; userId?: string } | undefined,
   existingFingerprints: Map<string, string>,
-  resolvers?: { artistIds: Map<string, string>; albumIds: Map<string, string> },
-): Promise<OnlineSongImportCore> {
+  artistsPending: { id: string; name: string }[],
+  albumsPending: { id: string; name: string; artistId: string | null; artist: string }[],
+  artistIds: Map<string, string>,
+  albumIds: Map<string, string>,
+): Promise<PlanResult> {
   const configured = getSourcePluginConfig(providerId);
   const provider = getOnlineProvider(providerId);
   if (!configured || !provider) return { success: false, error: "在线源未启用或未配置" };
 
-  const streamUrl = provider.streamUrl(configured, song);
   const fingerprint = `${providerId}:${song.source}:${song.id}`;
   let existing = existingFingerprints.get(fingerprint);
   if (!existing) {
-    // Single-song call sites (e.g. match.ts) pass an empty map. Look the
-    // fingerprint up in the DB so repeated matches return the SAME song row
-    // instead of inserting a duplicate web song every time.
+    // Single-song call sites (e.g. match.ts) may not preload; look the
+    // fingerprint up in the DB so repeated matches return the SAME song row.
     const row = db.select().from(songs).where(eq(songs.fingerprint, fingerprint)).get();
     if (row) existing = row.id;
   }
@@ -115,16 +119,15 @@ async function importOnlineSongCore(
 
   const now = new Date().toISOString();
   const songId = uuidv4();
-  const sourcePlatform = song.source || providerId;
+  // Reserve the fingerprint BEFORE any await so concurrent duplicates in the
+  // same list collapse onto this id (no double-insert), even while covers load.
+  existingFingerprints.set(fingerprint, songId);
 
-  // Resolve artist + album (match scanner.ts findOrCreate* behavior) — reuse
-  // the batch-scoped resolvers so a bulk import doesn't SELECT/INSERT per song.
-  const r = resolvers ?? { artistIds: new Map<string, string>(), albumIds: new Map<string, string>() };
-  const artistId = resolveArtist(song.artist, r.artistIds);
-  let albumId: string | null = resolveAlbum(song.album, artistId, song.artist, r.albumIds);
+  const artistId = planArtist(song.artist, artistIds, artistsPending);
+  const albumId = planAlbum(song.album, artistId, song.artist, albumIds, albumsPending);
 
-  // Cache the remote cover locally (like imported playlists). Falls back gracefully.
-  // 封面下载走全局限流(≤2 并发),避免批量匹配时网络洪峰挤占前台请求。
+  // Cache the remote cover locally (like imported playlists). Falls back
+  // gracefully; 封面下载走全局限流(≤2 并发),避免批量匹配时网络洪峰挤占前台请求。
   let coverArt: string | null | undefined;
   if (song.cover) {
     const cached = await withCoverLimit(() => cacheRemoteCover(song.cover, songId));
@@ -134,41 +137,48 @@ async function importOnlineSongCore(
   const streamHeaders: Record<string, string> = {};
   if (song.source === "bilibili") streamHeaders["Referer"] = "https://www.bilibili.com/";
 
-  db.insert(songs).values({
-    id: songId,
-    title: song.name || "Unknown",
-    artist: song.artist || "",
-    artistId: artistId || null,
-    album: song.album || "",
-    albumId,
-    duration: song.duration || 0,
-    contentType: "audio/mpeg",
-    suffix: "mp3",
-    path: `web:${providerId}:${song.source || providerId}`,
-    coverArt: coverArt || null,
-    playCount: 0,
-    discNumber: 1,
-    track: 0,
-    genre: "",
-    size: 0,
-    fingerprint,
-    type: "web",
-    url: streamUrl,
-    streamHeaders: JSON.stringify(streamHeaders),
-    sourceData: JSON.stringify({
-      provider: providerId,
-      source: song.source,
-      remoteId: song.id,
-      extra: song.extra || null,
-      cover: song.cover || "",
-    }),
-    pluginEntry: providerId,
-    createdAt: now,
-    updatedAt: now,
-  }).run();
-
-  existingFingerprints.set(fingerprint, songId);
-  return { success: true, songId, deduped: false, cover: coverArt || undefined, inserted: { albumId, artistId } };
+  return {
+    success: true,
+    songId,
+    cover: coverArt || undefined,
+    planned: {
+      id: songId,
+      albumId,
+      artistId,
+      params: {
+        id: songId,
+        title: song.name || "Unknown",
+        artist: song.artist || "",
+        artistId: artistId || null,
+        album: song.album || "",
+        albumId,
+        duration: song.duration || 0,
+        contentType: "audio/mpeg",
+        suffix: "mp3",
+        path: `web:${providerId}:${song.source || providerId}`,
+        coverArt: coverArt || null,
+        playCount: 0,
+        discNumber: 1,
+        track: 0,
+        genre: "",
+        size: 0,
+        fingerprint,
+        type: "web",
+        url: provider.streamUrl(configured, song),
+        streamHeaders: JSON.stringify(streamHeaders),
+        sourceData: JSON.stringify({
+          provider: providerId,
+          source: song.source,
+          remoteId: song.id,
+          extra: song.extra || null,
+          cover: song.cover || "",
+        }),
+        pluginEntry: providerId,
+        createdAt: now,
+        updatedAt: now,
+      },
+    },
+  };
 }
 
 // Run async workers over a list, bounding the number in flight at once. The
@@ -187,6 +197,62 @@ async function workerLimit<T, R>(items: T[], limit: number, fn: (item: T) => Pro
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// FLUSH stage — commit all planned DB writes as chunked transactions with
+// multi-row VALUES inserts (artists/albums first, then songs, then the
+// aggregate count refreshes), sleeping between chunks so an interactive
+// main-process import never blocks the event loop for the whole batch.
+// ---------------------------------------------------------------------------
+const TX_CHUNK = 500;
+const nowIso = () => new Date().toISOString();
+
+function flushArtistsAlbums(pendingArtists: { id: string; name: string }[], pendingAlbums: { id: string; name: string; artistId: string | null; artist: string }[]) {
+  const t = nowIso();
+  for (let off = 0; off < pendingArtists.length; off += TX_CHUNK) {
+    const chunk = pendingArtists.slice(off, off + TX_CHUNK);
+    db.transaction(() => {
+      if (chunk.length) {
+        db.insert(artists).values(chunk.map((c) => ({ id: c.id, name: c.name, albumCount: 0, createdAt: t, updatedAt: t }))).run();
+      }
+    });
+  }
+  for (let off = 0; off < pendingAlbums.length; off += TX_CHUNK) {
+    const chunk = pendingAlbums.slice(off, off + TX_CHUNK);
+    db.transaction(() => {
+      if (chunk.length) {
+        db.insert(albums).values(chunk.map((c) => ({ id: c.id, name: c.name, artistId: c.artistId, artist: c.artist, year: 0, songCount: 0, duration: 0, createdAt: t, updatedAt: t }))).run();
+      }
+    });
+  }
+}
+
+export async function importOnlineSong(
+  providerId: string,
+  song: OnlineSongResult,
+  opts?: { playlistId?: string; userId?: string },
+): Promise<{ success: boolean; songId?: string; deduped?: boolean; error?: string; cover?: string }> {
+  const existingFingerprints = new Map<string, string>();
+  const artistIds = new Map<string, string>();
+  const albumIds = new Map<string, string>();
+  const artistsPending: { id: string; name: string }[] = [];
+  const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
+
+  const plan = await planSongInsert(providerId, song, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds);
+  if (!plan.success) return { success: false, error: plan.error };
+  if (plan.deduped) return { success: true, songId: plan.songId, deduped: true };
+
+  const insertedAlbums = new Set<string>();
+  const insertedArtists = new Set<string>();
+  if (plan.planned?.albumId) insertedAlbums.add(plan.planned.albumId);
+  if (plan.planned?.artistId) insertedArtists.add(plan.planned.artistId);
+
+  flushArtistsAlbums(artistsPending, albumsPending);
+  if (plan.planned) await flushSongs([plan.planned]);
+  await refreshCounts(insertedAlbums, insertedArtists);
+
+  return { success: true, songId: plan.songId, deduped: false, cover: plan.cover };
+}
+
 export async function importOnlineSongs(
   providerId: string,
   songList: OnlineSongResult[],
@@ -200,13 +266,13 @@ export async function importOnlineSongs(
       if (row.fingerprint) existingFingerprints.set(row.fingerprint, row.id);
     }
   } catch {
-    // fall through (e.g. over-parameterized); dedup still works per-core.
+    // fall through (e.g. over-parameterized); dedup still works per-plan.
   }
 
   // Preload the artist/album names actually referenced by this list into
   // name->id maps (one batched scan instead of a SELECT/INSERT per song).
-  // Falls back gracefully: resolveArtist/resolveAlbum re-check the DB on a miss,
-  // so even if this preload is skipped correctness (and dedup) is preserved.
+  // Falls back gracefully: planArtist/planAlbum re-check the DB on a miss, so
+  // even if this preload is skipped correctness (and dedup) is preserved.
   const artistIds = new Map<string, string>();
   const albumIds = new Map<string, string>();
   try {
@@ -223,9 +289,12 @@ export async function importOnlineSongs(
       }
     }
   } catch {
-    // over-parameterized / unsupported → empty maps; resolveArtist/Album re-check per miss.
+    // over-parameterized / unsupported → empty maps; planArtist/Album re-check per miss.
   }
 
+  const artistsPending: { id: string; name: string }[] = [];
+  const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
+  const pendingSongs: PlannedSong[] = [];
   const insertedAlbums = new Set<string>();
   const insertedArtists = new Set<string>();
 
@@ -237,12 +306,15 @@ export async function importOnlineSongs(
   const conc = opts?.interactive ? interactiveConcurrency() : batchConcurrency();
   const results = await workerLimit(songList, conc, async (s) => {
     try {
-      const r = await importOnlineSongCore(providerId, s, opts, existingFingerprints, { artistIds, albumIds });
-      if (r.success && r.songId) {
-        if (r.deduped) deduped++; else added++;
-        if (r.inserted?.albumId) insertedAlbums.add(r.inserted.albumId);
-        if (r.inserted?.artistId) insertedArtists.add(r.inserted.artistId);
-        return { id: r.songId, title: s.name, fingerprint: `${providerId}:${s.source}:${s.id}` };
+      const plan = await planSongInsert(providerId, s, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds);
+      if (plan.success && plan.songId) {
+        if (plan.deduped) deduped++; else added++;
+        if (plan.planned) {
+          pendingSongs.push(plan.planned);
+          if (plan.planned.albumId) insertedAlbums.add(plan.planned.albumId);
+          if (plan.planned.artistId) insertedArtists.add(plan.planned.artistId);
+        }
+        return { id: plan.songId, title: s.name, fingerprint: `${providerId}:${s.source}:${s.id}` };
       }
       failed++;
       return null;
@@ -260,20 +332,48 @@ export async function importOnlineSongs(
     void runCoverBackfill(songsOut.map((r) => r.id)).catch(() => {});
   }
 
-  // Refresh counts as a batch (one scan per touched album/artist) instead of
-  // re-scanning the whole album on every single-song insert.
-  for (const albumId of insertedAlbums) updateAlbumCounts(albumId);
-  for (const artistId of insertedArtists) updateArtistAlbumCount(artistId);
+  // PLAN→FLUSH:所有写入走分块事务 + 多行批量插入(先歌手/专辑再歌曲),计数用聚合 SQL。
+  flushArtistsAlbums(artistsPending, albumsPending);
+  await flushSongs(pendingSongs);
+  await refreshCounts(insertedAlbums, insertedArtists);
 
   return { added, deduped, failed, songs: songsOut };
 }
 
+// Chunked flush with a chance to yield between chunks (async wrapper).
+async function flushSongs(pendingSongs: PlannedSong[]): Promise<void> {
+  for (let off = 0; off < pendingSongs.length; off += TX_CHUNK) {
+    const chunk = pendingSongs.slice(off, off + TX_CHUNK);
+    db.transaction(() => {
+      if (chunk.length) db.insert(songs).values(chunk.map((c) => c.params) as any).run();
+    });
+    if (off + TX_CHUNK < pendingSongs.length) await sleepBetweenBatch();
+  }
+}
+
+// Count refreshes are few (one per distinct album/artist touched) — batch them
+// as a chunked transaction with an idle gap between chunks.
+async function refreshCounts(albumIds: Set<string>, artistIds: Set<string>): Promise<void> {
+  const albumsList = [...albumIds];
+  const artistsList = [...artistIds];
+  for (let off = 0; off < albumsList.length; off += TX_CHUNK) {
+    const chunk = albumsList.slice(off, off + TX_CHUNK);
+    db.transaction(() => { for (const a of chunk) updateAlbumCounts(a); });
+    if (off + TX_CHUNK < albumsList.length) await sleepBetweenBatch();
+  }
+  for (let off = 0; off < artistsList.length; off += TX_CHUNK) {
+    const chunk = artistsList.slice(off, off + TX_CHUNK);
+    db.transaction(() => { for (const a of chunk) updateArtistAlbumCount(a); });
+    if (off + TX_CHUNK < artistsList.length) await sleepBetweenBatch();
+  }
+}
+
 // ==================== DB helpers (mirror scanner.ts) ====================
 //
-// findOrCreateArtist/findOrCreateAlbum are gone — replaced by the batch-scoped
-// resolveArtist/resolveAlbum above (one SELECT/INSERT per unique name, reused
-// across the whole list). Count refresh below uses a single aggregate query per
-// album/artist instead of loading every child row into JS to count it.
+// Per-song findOrCreate is gone — replaced by planArtist/planAlbum (one
+// SELECT/INSERT per unique name, reused across the whole list, committed in
+// the flush) and multi-row song inserts. Count refresh below uses a single
+// aggregate query per album/artist instead of loading every child row into JS.
 
 function updateAlbumCounts(albumId: string) {
   const row = sqlite.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(duration), 0) AS dur FROM songs WHERE album_id = ?").get(albumId) as { cnt: number; dur: number };
