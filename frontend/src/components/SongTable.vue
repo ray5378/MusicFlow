@@ -315,15 +315,25 @@ function recomputeWindow() {
 
 let scrollBound = false;
 let scrollHandler: (() => void) | null = null;
+const raf = { id: 0 };
+// 与 useCardGrid 同款:滚动事件合并到一帧一次 recompute,避免快速滚动时
+// 每个 scroll tick 都触发窗口重算/预取调用(拖拽/惯性滚动尤其频繁)。
+function scheduleRecompute() {
+  if (raf.id) return;
+  raf.id = requestAnimationFrame(() => {
+    raf.id = 0;
+    recomputeWindow();
+  });
+}
 function bindScroll() {
   if (scrollBound || !virtualized.value) return;
   const sp = findScrollParent(listBodyEl.value);
   scrollParentEl.value = sp;
-  scrollHandler = () => recomputeWindow();
+  scrollHandler = () => scheduleRecompute();
   sp.addEventListener("scroll", scrollHandler, { passive: true });
   window.addEventListener("resize", scrollHandler);
   scrollBound = true;
-  recomputeWindow();
+  scheduleRecompute();
 }
 function unbindScroll() {
   if (!scrollBound) return;
@@ -332,6 +342,8 @@ function unbindScroll() {
     sp.removeEventListener("scroll", scrollHandler);
     window.removeEventListener("resize", scrollHandler);
   }
+  if (raf.id) cancelAnimationFrame(raf.id);
+  raf.id = 0;
   scrollHandler = null;
   scrollParentEl.value = null;
   scrollBound = false;

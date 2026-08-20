@@ -39,7 +39,9 @@ const { list: songs, loading, total, reload: loadFavorites, onWindow } = useInfi
     const starred2 = res.data["subsonic-response"]?.starred2;
     return { items: starred2?.song || [], total: starred2?.songTotal || 0 };
   },
-  { chunk: 200, keepRows: 200, prefetchBlocks: 1, concurrency: 2 }
+  // chunk 需与后端允许的 pageSize 上限对齐,保证每块槽位都被填满、无空白带。
+  // prefetchBlocks/concurrency 调大:预取跑道更长、并发更高,滚动更丝滑。
+  { chunk: 200, keepRows: 300, prefetchBlocks: 2, concurrency: 3 }
 );
 // Whether "我喜欢的音乐" is in the daily-recommend pool.
 const inPool = ref(false);

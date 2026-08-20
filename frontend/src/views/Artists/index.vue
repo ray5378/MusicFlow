@@ -167,7 +167,7 @@ const cardGrid = useCardGrid<any>(
     return { items: res.data.items || [], total: res.data.total || 0 };
   },
   // 艺术家卡片为「圆形头像(固定120) + 文字」,行高不随卡宽线性变化 → 用固定行高。
-  { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 160, gap: 18, rowHeight: 212 }
+  { chunk: 60, keepRows: 120, prefetchBlocks: 2, concurrency: 3, minTileWidth: 160, gap: 18, rowHeight: 212 }
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;

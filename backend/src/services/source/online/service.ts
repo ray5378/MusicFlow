@@ -17,6 +17,7 @@ import { db, sqlite } from "../../../db/index.js";
 import { songs, artists, albums } from "../../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { cacheRemoteCover, copyOnlineCoverToRef } from "../../playlistCover.js";
+import { invalidateArtistList } from "../../../utils/artistListCache.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
@@ -254,6 +255,7 @@ function flushArtistAlbumTail(
       }
     });
   }
+  invalidateArtistList();
   for (let off = fromAlbums; off < pendingAlbums.length; off += TX_CHUNK) {
     const chunk = pendingAlbums.slice(off, off + TX_CHUNK);
     db.transaction(() => {

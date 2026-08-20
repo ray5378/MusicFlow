@@ -27,6 +27,7 @@ import { ensurePlayableStream } from "../../services/source/online/streamFallbac
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
+import { getArtistList, setArtistList, invalidateArtistList } from "../../utils/artistListCache.js";
 import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
@@ -857,17 +858,28 @@ apiRoutes.get("/v1/artists", (c) => {
   const query = (c.req.query("query") || "").trim();
   // Push the name search to SQL to shrink the working set; the final sort stays
   // in JS (localeCompare) so Chinese/locale ordering is preserved exactly.
-  const rows = query
-    ? db.select().from(artists).where(like(artists.name, `%${query}%`)).all()
-    : db.select().from(artists).all();
+  // 无限滚动每块都调此端点:全量取数+排序是每块延迟主因(17k 行实测 ~90ms)。
+  // 按 query 缓存「排好序的完整数组」,滚动期间各块直接切片复用;写入后缓存失效。
+  const cacheKey = query.toLowerCase();
+  const rows = (getArtistList(cacheKey) as typeof artists.$inferSelect[]) || buildArtistList(cacheKey, query);
   const total = rows.length;
   const start = (page - 1) * pageSize;
-  const items = rows.sort((a, b) => (a.name || "").localeCompare(b.name || "")).slice(start, start + pageSize).map(a => ({
+  const items = rows.slice(start, start + pageSize).map(a => ({
     id: a.id, name: a.name, albumCount: a.albumCount, coverArt: a.coverArt ? `ar-${a.id}` : undefined,
     scrapeMissing: a.scrapeMissing === 1,
   }));
   return c.json({ total, page, pageSize, items });
 });
+
+// 取全量/搜索艺术家并做 JS localeCompare 排序(保留中文序),结果按 query 缓存供后续块复用。
+function buildArtistList(cacheKey: string, query: string): typeof artists.$inferSelect[] {
+  const fetched = query
+    ? db.select().from(artists).where(like(artists.name, `%${query}%`)).all()
+    : db.select().from(artists).all();
+  const sorted = fetched.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  setArtistList(cacheKey, sorted);
+  return sorted;
+}
 
 // ==================== Artist scrape (QQ Music first, NetEase fallback) ====================
 // Manual scrape: scrapes ALL artists missing covers, with real-time progress.

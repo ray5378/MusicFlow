@@ -33,7 +33,9 @@ const { list, loading, total, init, onWindow } = useInfiniteList<any>(
     const res = await api.get("/rest/api/v1/history", { params: { page, pageSize: size } });
     return { items: res.data.items || [], total: res.data.total || 0 };
   },
-  { chunk: 200 }
+  // chunk 需与后端 pageSize 上限(200)对齐。prefetchBlocks/concurrency 调大:
+  // 预取跑道更长、并发更高,滚动更丝滑不卡骨架。
+  { chunk: 200, keepRows: 300, prefetchBlocks: 2, concurrency: 3 }
 );
 
 const clearing = ref(false);

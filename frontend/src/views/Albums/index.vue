@@ -155,7 +155,7 @@ const cardGrid = useCardGrid<any>(
     });
     return { items: res.data.items || [], total: res.data.total || 0 };
   },
-  { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 180, gap: 20, coverRatio: 1, rowFooter: 80 }
+  { chunk: 60, keepRows: 120, prefetchBlocks: 2, concurrency: 3, minTileWidth: 180, gap: 20, coverRatio: 1, rowFooter: 80 }
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;

@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { getEnabledByCapability } from "../../plugins/registry.js";
 import { getDataDir } from "../../utils/env.js";
+import { invalidateArtistList } from "../../utils/artistListCache.js";
 
 const COVERS_DIR = path.join(getDataDir(), "covers");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
@@ -124,6 +125,7 @@ export async function scrapeArtist(artistName: string, artistId?: string): Promi
   }
   if (result?.bio) update.bio = result.bio;
   db.update(artists).set(update).where(eq(artists.id, id)).run();
+  invalidateArtistList();
 
   return { name: result?.name || artistName, platform: result?.platform || "none", coverArt: coverRef, bio: result?.bio, fallbackCover };
 }

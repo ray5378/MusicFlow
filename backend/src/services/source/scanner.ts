@@ -7,6 +7,7 @@ import path from "path";
 import { parseBuffer } from "music-metadata";
 import { getDataDir } from "../../utils/env.js";
 import { deleteSongLyric } from "../lyricsStore.js";
+import { invalidateArtistList } from "../../utils/artistListCache.js";
 import { createLogger } from "../../utils/logger.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
@@ -448,6 +449,7 @@ function findOrCreateArtist(name: string): string {
   if (existing) return existing.id;
   const id = uuidv4();
   db.insert(artists).values({ id, name, albumCount: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
+  invalidateArtistList();
   return id;
 }
 
@@ -500,6 +502,7 @@ function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fin
   if (artistId) {
     const agg = sqlite.prepare("SELECT COUNT(*) AS cnt FROM albums WHERE artist_id = ?").get(artistId) as any;
     db.update(artists).set({ albumCount: agg?.cnt ?? 0 }).where(eq(artists.id, artistId)).run();
+    invalidateArtistList();
   }
   return "added";
 }
@@ -530,6 +533,7 @@ export function cleanupOrphans() {
     db.update(songs).set({ artistId: null }).where(inArray(songs.artistId, ids)).run();
     db.delete(albumArtists).where(inArray(albumArtists.artistId, ids)).run();
     db.delete(artists).where(inArray(artists.id, ids)).run();
+    invalidateArtistList();
   }
 }
 

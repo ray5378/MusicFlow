@@ -282,7 +282,7 @@ const cardGrid = useCardGrid<any>(
     for (const pl of items) pl._inPool = poolPlaylistIds.value.has(pl.id);
     return { items, total: res.data.total || 0 };
   },
-  { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 220, gap: 18, coverRatio: 1, rowFooter: 64 }
+  { chunk: 60, keepRows: 120, prefetchBlocks: 2, concurrency: 3, minTileWidth: 220, gap: 18, coverRatio: 1, rowFooter: 64 }
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
