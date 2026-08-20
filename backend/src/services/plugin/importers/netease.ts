@@ -37,20 +37,36 @@ export async function fetchNeteasePlaylist(id: string): Promise<ImportedPlaylist
   const tracks: ImportedTrackShape[] = [];
 
   // The detail response only embeds ~10 full tracks, but trackIds holds them all —
-  // fetch the rest in batches.
+  // fetch the rest in batches. 分批小并发拉取(替代串行+每批固定 300ms):大歌单的
+  // 网络等待被摊到 3 条 worker 上,显著降导入耗时;每批保留少量节流防网易限流。
   const batchSize = 100;
+  const batches: number[][] = [];
   for (let i = 0; i < allIds.length; i += batchSize) {
-    const batch = allIds.slice(i, i + batchSize);
-    const body = JSON.stringify(batch.map((x) => ({ id: x })));
-    const songs = await fetchJson(
-      `https://music.163.com/api/v3/song/detail?c=${encodeURIComponent(body)}`,
-      { Referer: "https://music.163.com/" },
-    );
-    for (const s of songs?.songs || []) {
-      tracks.push(buildNeteaseTrack(s));
-    }
-    if (allIds.length > batchSize) await new Promise((r) => setTimeout(r, 300));
+    batches.push(allIds.slice(i, i + batchSize));
   }
+  const CONCURRENCY = 3;
+  let di = 0;
+  async function fetchBatchWorker(): Promise<void> {
+    // di++/tracks.push 都是同步原子操作,单事件循环下 worker 间无竞态。
+    while (di < batches.length) {
+      const batch = batches[di++];
+      try {
+        const body = JSON.stringify(batch.map((x) => ({ id: x })));
+        const songs = await fetchJson(
+          `https://music.163.com/api/v3/song/detail?c=${encodeURIComponent(body)}`,
+          { Referer: "https://music.163.com/" },
+        );
+        for (const s of songs?.songs || []) {
+          tracks.push(buildNeteaseTrack(s));
+        }
+      } catch {
+        // 单批失败不影响其余批:空批稍后由 fallback(embedded tracks)兜底。
+      }
+      // 仅多批时才节流;多数曲目都嵌在首响应里时无需额外等待。
+      if (batches.length > 1) await new Promise((r) => setTimeout(r, 120));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, fetchBatchWorker));
 
   // Fallback: use the tracks embedded in the detail response if the batch fetch failed.
   if (tracks.length === 0) {
