@@ -1562,10 +1562,16 @@ apiRoutes.get("/v1/playlists", (c) => {
     .all().map(r => r.pid));
   // Push the ownership/visibility filter + name search + platform/local/favorite
   // filters to SQL. and() skips undefined conditions, so any subset works.
+  // 音乐库对所有用户开放:任何登录用户都能看到「自己 + 公开 + 导入/插件歌单
+  // (sourceUrl 非空,如 go-music-dl 等导入的曲库内容)」;私人普通歌单仍仅属主可见。
   const where = and(
     user?.isAdmin
       ? undefined
-      : or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1)),
+      : or(
+          eq(playlists.ownerId, user?.id ?? ""),
+          eq(playlists.isPublic, 1),
+          isNotNull(playlists.sourceUrl),
+        ),
     query ? like(playlists.name, `%${query}%`) : undefined,
     platform ? eq(playlists.sourcePlatform, platform) : undefined,
     localOnly ? isNull(playlists.sourceUrl) : undefined,
@@ -1616,7 +1622,7 @@ apiRoutes.get("/v1/playlists", (c) => {
 // ==================== Navidrome compatible ====================
 apiRoutes.get("/playlist", (c) => {
   const user = c.get("user");
-  const all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic);
+  const all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic || p.sourceUrl);
   const dailyRank = (p: any) => {
     const c = p.comment || "";
     const tag = dailyRecommendTag() || "每日推荐";

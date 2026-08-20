@@ -642,11 +642,16 @@ restRoutes.get("/getSimilarSongs2", (c) => c.json(ok({ similarSongs2: { song: []
 
 restRoutes.get("/getPlaylists", (c) => {
   const user = c.get("user");
-  // Visibility: admin sees all; others see their own + public. Pushed to SQL,
+  // Visibility: admin sees all; others see their own + public + 导入/插件歌单
+  // (sourceUrl 非空,音乐库内容对所有用户开放)。Pushed to SQL,
   // and the daily-recommend-first ordering is expressed as a CASE + recency.
   const where = user?.isAdmin
     ? undefined
-    : or(eq(playlists.isPublic, 1), eq(playlists.ownerId, user?.id ?? ""));
+    : or(
+        eq(playlists.isPublic, 1),
+        eq(playlists.ownerId, user?.id ?? ""),
+        isNotNull(playlists.sourceUrl),
+      );
   // 当前用户收藏的歌单 id 集合:每项 favorite 状态按它判断(收藏已按用户隔离)。
   const favIds = new Set(db.select({ pid: playlistFavorites.playlistId })
     .from(playlistFavorites).where(eq(playlistFavorites.userId, user?.id ?? ""))
@@ -672,8 +677,9 @@ restRoutes.get("/getPlaylist", (c) => {
   const user = c.get("user");
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json(fail(70, "Playlist not found"));
-  // Private playlists are only visible to the owner (admins can view all)
-  if (!playlist.isPublic && playlist.ownerId !== user?.id && !user?.isAdmin) {
+  // Private playlists are only visible to the owner (admins can view all).
+  // 导入/插件歌单(sourceUrl 非空)属于音乐库内容,对所有登录用户开放。
+  if (!playlist.isPublic && playlist.ownerId !== user?.id && !user?.isAdmin && !playlist.sourceUrl) {
     return c.json(fail(50, "Playlist is private"));
   }
   // Server-side paging: only the requested page of playable entries is pulled
