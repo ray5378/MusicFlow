@@ -121,6 +121,42 @@ describe("importOnlineSongs — 批量导入(歌单/私人歌单路径)", () => 
     expect((db.select().from(albums).where(eq(albums.name, "另张专辑")).get() as any).songCount).toBe(1);
     expect((db.select().from(albums).where(eq(albums.name, "另张专辑")).get() as any).duration).toBe(50);
   });
+
+  it("超过单项事务尺寸的歌单分波落库:跨波去重/单行 artist-album/计数正确(峰值内存 O(CHUNK))", async () => {
+    const n = 1010; // > TX_CHUNK(500),触发多个分波
+    const list: any[] = [];
+    let expectDur = 0;
+    for (let i = 0; i < n; i++) {
+      list.push({ id: `w${i}`, source: "netease", name: `歌${i}`, artist: "批量歌手", album: "同名专辑", duration: 100 + (i % 300), cover: "" });
+      expectDur += 100 + (i % 300);
+    }
+    // 末尾重复列表前 10 首,验证去重不受分波边界影响(预载已覆盖全列表指纹)
+    for (let k = 0; k < 10; k++) list.push({ ...list[k] });
+
+    const res = await importOnlineSongs(PROVIDER, list);
+    expect(res.added).toBe(n);
+    expect(res.deduped).toBe(10);
+    expect(res.failed).toBe(0);
+    expect(res.songs.length).toBe(n + 10);
+
+    // DB 仅 n 条,歌手/专辑仅一行,计数聚合到最新值
+    const dbSongs = db.select().from(songs).where(eq(songs.pluginEntry, PROVIDER)).all();
+    expect(dbSongs.length).toBe(n);
+    expect(new Set(dbSongs.map((s) => s.fingerprint)).size).toBe(n);
+
+    const artistRows = db.select().from(artists).where(eq(artists.name, "批量歌手")).all();
+    expect(artistRows.length).toBe(1);
+    expect(artistRows[0].albumCount).toBe(1);
+
+    const albumRows = db.select().from(albums).where(eq(albums.name, "同名专辑")).all();
+    expect(albumRows.length).toBe(1);
+    expect(albumRows[0].songCount).toBe(n);
+    expect(albumRows[0].duration).toBe(expectDur);
+
+    // 所有新歌共享同一 artist/album(批量解析只建一行)
+    expect(dbSongs.every((s) => s.artistId === artistRows[0].id)).toBe(true);
+    expect(dbSongs.every((s) => s.albumId === albumRows[0].id)).toBe(true);
+  });
 });
 
 describe("importOnlineSong — 单曲路径逐个 refresh", () => {

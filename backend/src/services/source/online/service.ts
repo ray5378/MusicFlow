@@ -225,9 +225,19 @@ async function workerLimit<T, R>(items: T[], limit: number, fn: (item: T) => Pro
 const TX_CHUNK = 500;
 const nowIso = () => new Date().toISOString();
 
-function flushArtistsAlbums(pendingArtists: { id: string; name: string }[], pendingAlbums: { id: string; name: string; artistId: string | null; artist: string }[]) {
+/** Insert the newly-appended artists/albums (from the given indices onward),
+ *  in chunked multi-row transactions. Artists always flush before albums so the
+ *  albums' `artistId` FK is satisfied. Returns the new "already inserted" tails
+ *  so the next call only writes the delta — keeps the peak resident set small
+ *  when songs are flushed incrementally instead of all at the end. */
+function flushArtistAlbumTail(
+  pendingArtists: { id: string; name: string }[],
+  pendingAlbums: { id: string; name: string; artistId: string | null; artist: string }[],
+  fromArtists: number,
+  fromAlbums: number,
+): { artists: number; albums: number } {
   const t = nowIso();
-  for (let off = 0; off < pendingArtists.length; off += TX_CHUNK) {
+  for (let off = fromArtists; off < pendingArtists.length; off += TX_CHUNK) {
     const chunk = pendingArtists.slice(off, off + TX_CHUNK);
     db.transaction(() => {
       if (chunk.length) {
@@ -235,7 +245,7 @@ function flushArtistsAlbums(pendingArtists: { id: string; name: string }[], pend
       }
     });
   }
-  for (let off = 0; off < pendingAlbums.length; off += TX_CHUNK) {
+  for (let off = fromAlbums; off < pendingAlbums.length; off += TX_CHUNK) {
     const chunk = pendingAlbums.slice(off, off + TX_CHUNK);
     db.transaction(() => {
       if (chunk.length) {
@@ -243,6 +253,7 @@ function flushArtistsAlbums(pendingArtists: { id: string; name: string }[], pend
       }
     });
   }
+  return { artists: pendingArtists.length, albums: pendingAlbums.length };
 }
 
 export async function importOnlineSong(
@@ -268,7 +279,7 @@ export async function importOnlineSong(
   if (plan.planned?.albumId) insertedAlbums.add(plan.planned.albumId);
   if (plan.planned?.artistId) insertedArtists.add(plan.planned.artistId);
 
-  flushArtistsAlbums(artistsPending, albumsPending);
+  flushArtistAlbumTail(artistsPending, albumsPending, 0, 0);
   if (plan.planned) await flushSongs([plan.planned]);
   await refreshCounts(insertedAlbums, insertedArtists);
 
@@ -324,7 +335,6 @@ export async function importOnlineSongs(
   const provider = getOnlineProvider(providerId);
   const artistsPending: { id: string; name: string }[] = [];
   const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
-  const pendingSongs: PlannedSong[] = [];
   const insertedAlbums = new Set<string>();
   const insertedArtists = new Set<string>();
   // 批内封面去重:URL→已下载 ref,同一封面只网络拉取一次,其余本地复制字节。
@@ -336,30 +346,45 @@ export async function importOnlineSongs(
   // 交互操作(用户前端导入)用档位基础并发全速跑,不受 interactive 退让影响;
   // 后台批量(每日推荐同步/自动匹配)用 batchConcurrency()——交互窗口内自动压到 1。
   const conc = opts?.interactive ? interactiveConcurrency() : batchConcurrency();
-  const results = await workerLimit(songList, conc, async (s) => {
-    try {
-      const plan = await planSongInsert(providerId, s, configured, provider, dedupPreloaded, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls);
-      if (plan.success && plan.songId) {
-        if (plan.deduped) deduped++; else added++;
-        if (plan.planned) {
-          pendingSongs.push(plan.planned);
-          if (plan.planned.albumId) insertedAlbums.add(plan.planned.albumId);
-          if (plan.planned.artistId) insertedArtists.add(plan.planned.artistId);
+
+  // PLAN 按 TX_CHUNK 分波:每波规划完立即落库(先补写本波新增的歌手/专辑保证
+  // FK,再写歌曲)并丢弃该波的 params——把峰值常驻内存从"整列表 O(N)"压到
+  // "单波 O(TX_CHUNK)"。去重所用的 name→id 映射与封面 memo 仍按整批累积
+  // (仅小字符串),跨波正确性(去重/单行)不变。
+  let artFlushed = 0, albFlushed = 0;
+  for (let off = 0; off < songList.length; off += TX_CHUNK) {
+    const slice = songList.slice(off, off + TX_CHUNK);
+    const planned: PlannedSong[] = [];
+    const results = await workerLimit(slice, conc, async (s) => {
+      try {
+        const plan = await planSongInsert(providerId, s, configured, provider, dedupPreloaded, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls);
+        if (plan.success && plan.songId) {
+          if (plan.deduped) deduped++; else added++;
+          if (plan.planned) {
+            planned.push(plan.planned);
+            if (plan.planned.albumId) insertedAlbums.add(plan.planned.albumId);
+            if (plan.planned.artistId) insertedArtists.add(plan.planned.artistId);
+          }
+          return { id: plan.songId, title: s.name, fingerprint: `${providerId}:${s.source}:${s.id}` };
         }
-        return { id: plan.songId, title: s.name, fingerprint: `${providerId}:${s.source}:${s.id}` };
+        failed++;
+        return null;
+      } catch (e) {
+        failed++;
+        log.error("在线歌曲导入失败", { providerId, songId: s.id, source: s.source, name: s.name, err: (e as Error)?.message || e });
+        return null;
       }
-      failed++;
-      return null;
-    } catch (e) {
-      failed++;
-      log.error("在线歌曲导入失败", { providerId, songId: s.id, source: s.source, name: s.name, err: (e as Error)?.message || e });
-      return null;
-    }
-  });
+    });
+    for (const r of results) if (r) songsOut.push(r);
 
-  for (const r of results) if (r) songsOut.push(r);
+    // 本波落库:先写新增歌手/专辑尾巴,再写本波歌曲(分块事务内多行插入)。
+    const ts = flushArtistAlbumTail(artistsPending, albumsPending, artFlushed, albFlushed);
+    artFlushed = ts.artists; albFlushed = ts.albums;
+    await flushSongs(planned);
+    if (off + TX_CHUNK < songList.length) await sleepBetweenBatch();
+  }
 
-  // 拿完歌曲后:若有导入的歌曲缺封面,后台限量补全(≤2 并发,不阻塞本流程)。
+  // 若有导入的歌曲缺封面,后台限量补全(≤2 并发,不阻塞本流程)。
   // P0 直通导入(onlineSongFromExternalId)构造的歌曲恒无封面,靠这里自动补齐。
   if (songsOut.length > 0) {
     void runCoverBackfill(songsOut.map((r) => r.id)).catch((e: unknown) =>
@@ -367,9 +392,7 @@ export async function importOnlineSongs(
     );
   }
 
-  // PLAN→FLUSH:所有写入走分块事务 + 多行批量插入(先歌手/专辑再歌曲),计数用聚合 SQL。
-  flushArtistsAlbums(artistsPending, albumsPending);
-  await flushSongs(pendingSongs);
+  // 计数聚合更新(每个触达的专辑/歌手一次,聚合 SQL 取最新值)。
   await refreshCounts(insertedAlbums, insertedArtists);
 
   return { added, deduped, failed, songs: songsOut };
