@@ -58,7 +58,7 @@
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
-    <div v-if="isLocalMode" class="playlist-grid" ref="cardGrid.gridEl" v-loading="loading">
+    <div v-if="isLocalMode" class="playlist-grid" ref="gridEl" v-loading="loading">
       <!-- User playlists (windowed: only the visible tile range is mounted) -->
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
@@ -283,6 +283,7 @@ const cardGrid = useCardGrid<any>(
   },
   { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 220, gap: 18, coverRatio: 1, rowFooter: 64 }
 );
+const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
 // 窗口化渲染辅助:当前可见卡片区间(全局下标)+ 列数。
 const gridViews = computed(() => {

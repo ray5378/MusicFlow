@@ -40,7 +40,7 @@
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <div class="artist-grid" v-if="isLocalMode" ref="cardGrid.gridEl" v-loading="loading">
+    <div class="artist-grid" v-if="isLocalMode" ref="gridEl" v-loading="loading">
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
         v-if="g.item"
@@ -168,6 +168,7 @@ const cardGrid = useCardGrid<any>(
   // 艺术家卡片为「圆形头像(固定120) + 文字」,行高不随卡宽线性变化 → 用固定行高。
   { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 160, gap: 18, rowHeight: 212 }
 );
+const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
 const gridViews = computed(() => {
   const start = cardGrid.startIndex.value;
