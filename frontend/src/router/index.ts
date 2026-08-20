@@ -24,8 +24,8 @@ const routes = [
       { path: "playlists/:id", name: "PlaylistDetail", component: () => import("@/views/Playlists/Detail.vue") },
       { path: "favorites", name: "Favorites", component: () => import("@/views/Favorites/index.vue") },
       { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue") },
-      { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue") },
-      { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue") },
+      { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { requiresAdmin: true } },
+      { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { requiresAdmin: true } },
       { path: "history", name: "History", component: () => import("@/views/History/index.vue") },
       { path: "settings", name: "Settings", component: () => import("@/views/Settings/index.vue") },
       {

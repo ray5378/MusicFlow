@@ -2751,18 +2751,18 @@ function flowWithWebhook(flow: any) {
   return { ...flow, webhookUrl: `${getEffectiveBaseUrl()}/webhooks/flows/${flow.token}` };
 }
 
-apiRoutes.get("/v1/flows", (c) => {
+apiRoutes.get("/v1/flows", adminMiddleware, (c) => {
   const items = listFlows().map(flowWithWebhook);
   return c.json({ total: items.length, items });
 });
 
-apiRoutes.get("/v1/flows/:id", (c) => {
+apiRoutes.get("/v1/flows/:id", adminMiddleware, (c) => {
   const flow = getFlow(c.req.param("id")!);
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
-apiRoutes.post("/v1/flows", async (c) => {
+apiRoutes.post("/v1/flows", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return c.json({ error: "需要 name" }, 400);
@@ -2770,7 +2770,7 @@ apiRoutes.post("/v1/flows", async (c) => {
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
-apiRoutes.put("/v1/flows/:id", async (c) => {
+apiRoutes.put("/v1/flows/:id", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const flow = updateFlow(c.req.param("id")!, {
     name: typeof body.name === "string" ? body.name : undefined,
@@ -2781,14 +2781,14 @@ apiRoutes.put("/v1/flows/:id", async (c) => {
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
-apiRoutes.delete("/v1/flows/:id", (c) => {
+apiRoutes.delete("/v1/flows/:id", adminMiddleware, (c) => {
   const ok = deleteFlow(c.req.param("id")!);
   if (!ok) return c.json({ error: "流程不存在" }, 404);
   return c.json({ success: true });
 });
 
 // UI 手动触发(异步执行,返回当前运行状态)。
-apiRoutes.post("/v1/flows/:id/run", async (c) => {
+apiRoutes.post("/v1/flows/:id/run", adminMiddleware, async (c) => {
   const flow = getFlow(c.req.param("id")!);
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   if (!flow.enabled) return c.json({ error: "流程已停用" }, 409);

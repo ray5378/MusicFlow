@@ -33,7 +33,7 @@
         <el-menu-item index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>我喜欢</template></el-menu-item>
         <el-menu-item index="/genres"><MfIcon name="Library" /><template #title>风格</template></el-menu-item>
         <el-menu-item index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
-        <el-menu-item index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
         <el-menu-item index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>插件管理</template></el-menu-item>
