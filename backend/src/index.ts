@@ -272,37 +272,30 @@ function scheduleNextDailyRun() {
   const delay = next.getTime() - now.getTime();
   setTimeout(async () => {
     await runDailyJobs();
+    // 原 6h 维护循环取消:歌单同步+歌手刮削+历史清理改为「每天定点任务完成后」执行一次。
+    await runMaintenanceOnce();
     scheduleNextDailyRun(); // re-arm for the next day
   }, delay);
   log.info(`[DAILY-SCHEDULER] next daily-recommend run at ${next.toLocaleString("zh-CN", { hour12: false })} (in ${Math.round(delay / 60000)} min)`);
 }
 
-// Boot-time catch-up: if today's daily playlist is missing (server was off at
-// the scheduled hour), generate it now. Idempotent — generate*() also checks
-// internally, so this is safe to call every boot.
-(async () => {
-  try {
-    await runDailyJobs();
-  } catch (e: any) {
-    log.error("[DAILY-SCHEDULER] boot catch-up error", { err: e.message || e });
-  }
-  scheduleNextDailyRun();
-})();
+// 去掉启动时立即刷新:不再做 daily catch-up,只在每天定点执行。启动仅把定时器挂上。
+// runDailyJobs 内部由 daily_recommend_enabled 主开关控制。
+scheduleNextDailyRun();
 
-// ==================== Regular maintenance loop (every 6h) ====================
-// Re-fetch imported playlists with syncEnabled=true, scrape recent uncovered
-// artists, and trim play history. Kept as setInterval because these are not
-// time-of-day sensitive and benefit from running shortly after boot too.
-const AUTO_SYNC_INTERVAL = 6 * 60 * 60 * 1000; // 6h
-setInterval(async () => {
+// ==================== Maintenance (按每天定点任务后执行一次) ====================
+// 原 6h 独立定时循环取消:歌单自动同步(playlistSync.runSyncJob)+ 新歌手刮削 + 播放历史
+// 清理,统一放在每天定点任务完成后执行一次。playlistSync 等跑在一次性批量子进程里
+// (方案3),全局批量闸由 runBatchJob 持有,不阻塞主进程事件循环/内存。
+async function runMaintenanceOnce() {
   // play_history 保留期清理留在主进程(单条 DELETE,不构成内存峰)。
   cleanupPlayHistory(getPlayHistoryRetentionDays());
-  // playlistSync 插件 runSyncJob + 新歌手刮削在一次性批量子进程里执行(方案3),
-  // 全局批量闸由 runBatchJob 持有,不阻塞维护循环、也不与手动刷新撞车。
-  runBatchJob("maintenance", {}).catch((e: any) => {
+  try {
+    await runBatchJob("maintenance", {});
+  } catch (e: any) {
     log.error("[AUTO-SYNC] maintenance error", { err: e.message || e });
-  });
-}, AUTO_SYNC_INTERVAL);
+  }
+}
 
 // ==================== DLNA background discovery ====================
 // Keep the device cache warm so the cast dialog can show devices instantly
