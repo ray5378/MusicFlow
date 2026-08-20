@@ -197,7 +197,7 @@
     <footer class="player-bar" v-if="!isMobile">
       <div class="player-left" v-if="playerStore.currentSong">
         <div class="np-main" @click="playerStore.togglePlayMode">
-          <img v-if="coverUrl" :src="coverUrl" class="player-cover" decoding="async" />
+          <img v-if="coverUrl" :src="coverUrl" class="player-cover" loading="lazy" decoding="async" />
           <div v-else class="player-cover-placeholder"><MfIcon name="Headphones" :size="24"  /></div>
           <div class="player-song-info">
             <div class="player-title">{{ playerStore.currentSong.title }}</div>

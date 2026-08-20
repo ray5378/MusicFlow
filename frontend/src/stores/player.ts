@@ -556,17 +556,22 @@ export const usePlayerStore = defineStore("player", () => {
         .filter((l: any) => l.start !== undefined && l.start !== null)
         .map((l: any) => ({ time: Number(l.start) / 1000, text: l.value }))
         .sort((a: LyricLine, b: LyricLine) => a.time - b.time);
+      // 新歌词:游标重置到首行,避免旧游标残留导致越界/错误行。
+      lyricCursor = 0;
     } catch { localLyrics.value = []; }
   }
 
+  let lyricCursor = 0; // 歌词行游标(正常播放单调前进,seek 回退时回扫),避免每帧从头线性扫描
   function updateLocalLyric() {
-    if (localLyrics.value.length === 0) { localCurrentLyricLine.value = ""; localCurrentLyricIndex.value = -1; return; }
+    if (localLyrics.value.length === 0) { lyricCursor = 0; localCurrentLyricLine.value = ""; localCurrentLyricIndex.value = -1; return; }
     const t = localCurrentTime.value;
-    let idx = -1;
-    for (let i = 0; i < localLyrics.value.length; i++) {
-      if (localLyrics.value[i].time <= t) idx = i;
-      else break;
-    }
+    const n = localLyrics.value.length;
+    let idx = lyricCursor;
+    // 前进:从游标向后找最后 time<=t 的行(时间单调,游标不回头 → 摊销 O(1))
+    while (idx + 1 < n && localLyrics.value[idx + 1].time <= t) idx++;
+    // 后退:seek/拖动回退时回到正确行
+    while (idx > 0 && localLyrics.value[idx].time > t) idx--;
+    lyricCursor = idx;
     if (idx !== localCurrentLyricIndex.value) {
       localCurrentLyricIndex.value = idx;
       localCurrentLyricLine.value = idx >= 0 ? localLyrics.value[idx].text : "";
