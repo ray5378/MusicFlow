@@ -40,11 +40,12 @@
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <div class="artist-grid" v-if="isLocalMode" ref="gridEl" v-loading="loading">
+    <div class="artist-grid virt-grid" v-if="isLocalMode" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
         v-if="g.item"
         class="artist-card"
+        :style="cardStyle(g.idx)"
         @contextmenu="openContextMenu($event, artistActions(g.item), g.item.name, formatAlbumCount(g.item.albumCount))"
         v-longpress="() => openActionSheet(artistActions(g.item), g.item.name, formatAlbumCount(g.item.albumCount))"
       >
@@ -59,7 +60,7 @@
         <div class="artist-name" @click="open(g.item)">{{ g.item.name }}</div>
         <div class="artist-meta" @click="open(g.item)">{{ formatAlbumCount(g.item.albumCount) }}</div>
       </div>
-      <div v-else class="artist-card is-placeholder">
+      <div v-else class="artist-card is-placeholder" :style="cardStyle(g.idx)">
         <div class="artist-avatar ph-avatar"></div>
         <div class="artist-name ph-bar"></div>
         <div class="artist-meta ph-bar short"></div>
@@ -170,6 +171,8 @@ const cardGrid = useCardGrid<any>(
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
+const frameHeight = cardGrid.frameHeight;
+const cardStyle = cardGrid.cardStyle;
 const gridViews = computed(() => {
   const start = cardGrid.startIndex.value;
   const end = cardGrid.endIndex.value;
@@ -322,6 +325,9 @@ onUnmounted(() => {
   .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 }
 .artist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 18px; }
+// 本地网格窗口化:固定高度 spacer + 绝对定位虚拟卡片;`.artist-grid`(远程结果)仍走自动 grid。
+.artist-grid.virt-grid { display: block; position: relative; width: 100%; }
+.artist-grid.virt-grid .artist-card { box-sizing: border-box; }
 .artist-card.is-placeholder {
   cursor: default;
   .ph-avatar { width: 120px; height: 120px; border-radius: 50%; margin: 0 auto 12px; background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 37%, rgba(255,255,255,0.05) 63%); background-size: 400% 100%; animation: mf-ph 1.2s ease-in-out infinite; }

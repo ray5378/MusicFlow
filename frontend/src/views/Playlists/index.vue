@@ -58,12 +58,13 @@
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
-    <div v-if="isLocalMode" class="playlist-grid" ref="gridEl" v-loading="loading">
-      <!-- User playlists (windowed: only the visible tile range is mounted) -->
+    <div v-if="isLocalMode" class="playlist-grid virt-grid" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
+      <!-- User playlists (windowed: fixed-height spacer + absolutely positioned virtual tiles) -->
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
         v-if="g.item"
         class="playlist-card"
+        :style="cardStyle(g.idx)"
         @contextmenu="openContextMenu($event, cardActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
         v-longpress="() => openActionSheet(cardActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
       >
@@ -106,7 +107,7 @@
           </template>
         </el-dropdown>
       </div>
-      <div v-else class="playlist-card is-placeholder">
+      <div v-else class="playlist-card is-placeholder" :style="cardStyle(g.idx)">
         <div class="playlist-cover ph-cover"></div>
         <div class="playlist-placeholder"><span class="ph-bar"></span><span class="ph-bar short"></span></div>
       </div>
@@ -285,6 +286,8 @@ const cardGrid = useCardGrid<any>(
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
+const frameHeight = cardGrid.frameHeight;
+const cardStyle = cardGrid.cardStyle;
 // 窗口化渲染辅助:当前可见卡片区间(全局下标)+ 列数。
 const gridViews = computed(() => {
   const start = cardGrid.startIndex.value;
@@ -1034,6 +1037,10 @@ onUnmounted(() => {
   &:hover { background: rgba(255,255,255,0.08); color: var(--fnos-red); }
 }
 .playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px; }
+// 本地网格窗口化:固定高度 spacer + 绝对定位虚拟卡片。覆盖默认 grid 布局;
+// `.playlist-grid`(远程结果)仍走自动 grid 排列。
+.playlist-grid.virt-grid { display: block; position: relative; width: 100%; }
+.playlist-grid.virt-grid .playlist-card { box-sizing: border-box; }
 // 窗口化懒加载:未加载槽位占位卡(封面灰块 + 骨架条),块到达后由真实卡片替换。
 .playlist-card.is-placeholder {
   cursor: default;

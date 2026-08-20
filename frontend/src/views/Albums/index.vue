@@ -19,12 +19,12 @@
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <div class="album-grid" v-if="isLocalMode" ref="gridEl" v-loading="loading">
+    <div class="album-grid virt-grid" v-if="isLocalMode" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
         v-if="g.item"
         class="album-card fnos-card-sheen"
-        :style="{ '--stagger': g.idx }"
+        :style="[cardStyle(g.idx), { '--stagger': g.idx }]"
         @contextmenu="openContextMenu($event, albumActions(g.item), g.item.name, albumMeta(g.item))"
         v-longpress="() => openActionSheet(albumActions(g.item), g.item.name, albumMeta(g.item))"
       >
@@ -39,7 +39,7 @@
           <div class="album-meta">{{ g.item.year || '' }} {{ g.item.songCount }}首</div>
         </div>
       </div>
-      <div v-else class="album-card is-placeholder">
+      <div v-else class="album-card is-placeholder" :style="cardStyle(g.idx)">
         <div class="album-cover ph-cover"></div>
         <div class="album-placeholder"><span class="ph-bar"></span><span class="ph-bar short"></span></div>
       </div>
@@ -159,6 +159,8 @@ const cardGrid = useCardGrid<any>(
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
+const frameHeight = cardGrid.frameHeight;
+const cardStyle = cardGrid.cardStyle;
 const gridViews = computed(() => {
   const start = cardGrid.startIndex.value;
   const end = cardGrid.endIndex.value;
@@ -216,6 +218,9 @@ watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
   .remote-import-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; }
 }
 .album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
+// 本地网格窗口化:固定高度 spacer + 绝对定位虚拟卡片;`.album-grid`(远程结果)仍走自动 grid。
+.album-grid.virt-grid { display: block; position: relative; width: 100%; }
+.album-grid.virt-grid .album-card { box-sizing: border-box; }
 .album-card.is-placeholder {
   cursor: default;
   .ph-cover { aspect-ratio: 1; border-radius: var(--fnos-radius-lg); background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 37%, rgba(255,255,255,0.05) 63%); background-size: 400% 100%; animation: mf-ph 1.2s ease-in-out infinite; }

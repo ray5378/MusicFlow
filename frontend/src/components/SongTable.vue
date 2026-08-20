@@ -264,25 +264,24 @@ function formatPlayedAt(t: string) {
 }
 
 // ==================== 虚拟滚动（大列表 windowing）====================
-// 桌面端行高固定(64px + margin 2*2 = 68px)才可虚拟化;移动端行高不定且列表
-// 通常较短,保持全量渲染。仅 songs > VIRTUAL_THRESHOLD 时启用,小列表零影响。
-// 方案:监听最近滚动容器,按 scrollTop 计算可见行区间,前后留 BUFFER 缓冲行,
+// 桌面端行高固定(64px + margin 2*2 = 68px)、移动端行高不定且较长;超过阈值即虚拟化,
 // 用 padding-top/bottom 占位保持滚动条范围不变(不新增依赖、不改滚动架构)。
-const ROW_HEIGHT = 68;
+// 移动端行高取偏大的估值 + 缓冲行,避免行重叠;小列表(< 阈值)保持全量渲染零影响。
+const rowH = computed(() => (isMobile.value ? 96 : 68));
 const VIRTUAL_THRESHOLD = 200;
 const BUFFER = 6;
 const listBodyEl = ref<HTMLElement | null>(null);
 const scrollParentEl = ref<HTMLElement | Window | null>(null);
 const startIndex = ref(0);
 const endIndex = ref(0);
-const virtualized = computed(() => !isMobile.value && props.songs.length > VIRTUAL_THRESHOLD);
+const virtualized = computed(() => props.songs.length > VIRTUAL_THRESHOLD);
 const visibleSongs = computed(() =>
   virtualized.value ? props.songs.slice(startIndex.value, endIndex.value) : props.songs
 );
 /** 行号/索引换算:虚拟化时加上窗口起点,保证显示的行号仍是全局序号 */
 const rowGlobalIdx = (i: number) => (virtualized.value ? startIndex.value : 0) + i;
-const padTop = computed(() => startIndex.value * ROW_HEIGHT);
-const padBottom = computed(() => (props.songs.length - endIndex.value) * ROW_HEIGHT);
+const padTop = computed(() => startIndex.value * rowH.value);
+const padBottom = computed(() => (props.songs.length - endIndex.value) * rowH.value);
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | Window {
   let node = el?.parentElement ?? null;
@@ -306,8 +305,8 @@ function recomputeWindow() {
   const spTop = isWin ? 0 : (sp as HTMLElement).getBoundingClientRect().top;
   const listTopInSp = bodyRect.top - spTop + scrollTopV;
   const total = props.songs.length;
-  const s = Math.max(0, Math.floor((scrollTopV - listTopInSp) / ROW_HEIGHT) - BUFFER);
-  const e = Math.min(total, Math.ceil((scrollTopV + vh - listTopInSp) / ROW_HEIGHT) + BUFFER);
+  const s = Math.max(0, Math.floor((scrollTopV - listTopInSp) / rowH.value) - BUFFER);
+  const e = Math.min(total, Math.ceil((scrollTopV + vh - listTopInSp) / rowH.value) + BUFFER);
   startIndex.value = s;
   endIndex.value = Math.max(e, s);
   // 无限滚动模式:把可见行区间交给父级窗口化加载器(按块预取 + 剪枝)。

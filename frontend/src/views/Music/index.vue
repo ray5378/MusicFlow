@@ -60,7 +60,7 @@
     </div>
 
     <!-- ===== 歌曲列表(本地模式) ===== -->
-    <SongTable v-if="isLocalMode" :songs="songs" :offset="(currentPage - 1) * pageSize" :loading="loading" @play="playSong" />
+    <SongTable v-if="isLocalMode" :songs="songs" :loading="loading" :on-window="onWindow" @play="playSong" />
 
     <!-- ===== 远程搜索结果(插件模式):由启用的 songSearch 插件(如 go-music-dl)提供 =====
          复用 SongTable(本地同款交互:悬浮播放/点击播放/右键菜单),歌曲未入库也能播
@@ -84,10 +84,6 @@
       </template>
     </div>
 
-    <div class="pagination-bar" v-if="isLocalMode && total > 0">
-      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="songsPageSize" @change="onPageChange" />
-    </div>
-
   </div>
 </template>
 
@@ -98,20 +94,32 @@ import { usePlayerStore, Song } from "@/stores/player";
 import { useItemActions } from "@/composables/useItemActions";
 import { useEntitySearch, remoteItemToSong } from "@/composables/useEntitySearch";
 import api from "@/api";
-import PagePagination from "@/components/PagePagination.vue";
 import SongTable from "@/components/SongTable.vue";
+import { useInfiniteList } from "@/composables/useInfiniteList";
 
 const playerStore = usePlayerStore();
 const route = useRoute();
 const router = useRouter();
 const { menuGuard } = useItemActions();
-const songs = ref<Song[]>([]);
-const loading = ref(false);
 const searchQuery = ref("");
-const currentPage = ref(1);
-const total = ref(0);
-const pageSize = ref(parseInt(localStorage.getItem("songsPageSize") || "25"));
-if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
+
+// 本地歌曲列表:窗口化分块加载(与 HA 卡片同构)。整页展示 + 滚动懒加载:
+// 数据按块 fetch,仅视口窗口渲染,越界剪枝,内存不随浏览条目数增长;取代原分页。
+const { list: songs, loading, total, reload: loadSongs, onWindow } = useInfiniteList<any>(
+  async (offset, size) => {
+    const page = Math.floor(offset / size) + 1;
+    const res = await api.get(`/rest/api/v1/songs`, {
+      params: {
+        page,
+        pageSize: size,
+        query: searchQuery.value,
+        ...(recentMode.value ? { sort: "recentAdded" } : {}),
+      },
+    });
+    return { items: res.data.items || [], total: res.data.total || 0 };
+  },
+  { chunk: 250, keepRows: 250, prefetchBlocks: 1, concurrency: 2 }
+);
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 songSearch 就不出现在下拉里
 const {
@@ -131,42 +139,17 @@ const recentMode = computed(() => route.query.recent === "1");
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function loadSongs() {
-  loading.value = true;
-  try {
-    const res = await api.get(`/rest/api/v1/songs`, {
-      params: {
-        page: currentPage.value,
-        pageSize: pageSize.value,
-        query: searchQuery.value,
-        ...(recentMode.value ? { sort: "recentAdded" } : {}),
-      },
-    });
-    songs.value = res.data.items || [];
-    total.value = res.data.total || 0;
-  } catch { songs.value = []; total.value = 0; }
-  finally { loading.value = false; }
-}
-
 function goRecent() {
   if (recentMode.value) return;
-  currentPage.value = 1;
   searchQuery.value = "";
   router.push({ path: "/songs", query: { recent: "1" } });
 }
 
 // recent 模式切换（进入/退出）时重置并重新加载
 watch(() => route.query.recent, () => {
-  currentPage.value = 1;
   searchQuery.value = "";
   loadSongs();
 });
-
-function onPageChange(page: number, size?: number) {
-  currentPage.value = page;
-  if (size) pageSize.value = size;
-  loadSongs();
-}
 
 function onSearchInput() {
   // 远程(插件)模式:直接搜插件
@@ -178,12 +161,11 @@ function onSearchInput() {
   // 本地模式:搜索时退出最近添加模式，回到全部音乐
   if (recentMode.value) { router.replace({ path: "/songs", query: {} }); return; }
   if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { currentPage.value = 1; loadSongs(); }, 300);
+  searchTimer = setTimeout(() => { loadSongs(); }, 300);
 }
 
 function onSearchClear() {
   if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
-  currentPage.value = 1;
   loadSongs();
 }
 
@@ -191,7 +173,7 @@ function playSong(song: Song) {
   if (menuGuard()) return;
   playerStore.playSong(song);
 }
-function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
+function playAll() { const all = songs.value.filter(Boolean); if (all.length > 0) playerStore.playQueue(all); }
 
 // 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
 watch(() => searchMode.value, () => {
