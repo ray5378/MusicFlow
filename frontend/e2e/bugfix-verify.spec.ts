@@ -23,6 +23,12 @@ async function loginAsAdmin(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await loginAsAdmin(page);
+  // CI 后端用临时空库(仅 seed admin/admin),无演示数据时本组测试无法产生
+  // “滚过 200 行/网格多卡/我喜欢多首”的验证场景 → 整组跳过(与 responsive.spec
+  // 的“无数据则跳过”守卫同款);本地用 seed-demo.mjs 填数后可跑真实回归。
+  const res = await page.request.get("/rest/api/v1/songs?page=1&pageSize=1");
+  const total = res.ok() ? (await res.json()).total ?? 0 : 0;
+  test.skip(total < 200, `歌曲数 ${total} < 200,跳过无限滚动/网格/总数验证(需要演示数据)`);
 });
 
 async function scrollSongs(page: Page, targetRows: number) {
