@@ -28,6 +28,10 @@ import { dirname, join } from "path";
 const MEMORY_LIMIT = 256 * 1024 * 1024; // 单插件内存上限 256MB
 const STACK_LIMIT = 1024 * 1024;        // 单插件栈上限 1MB
 const INVOKE_TIMEOUT_MS = 15000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
+const REBUILD_TIMEOUT_MS = 30000;       // OOM 自愈重建的 init 全程预算:触顶可能已耗尽旧 deadline(15s),
+                                        // 重建时若沿用旧 deadline,interrupt handler 会立即中断重建代码
+                                        // (CI 实测 rebuild 失败 "interrupted" → 沙箱半死)。重建应给足
+                                        // 独立预算(init 加载 stdlib + 插件代码正常 <1s,30s 宽裕且不失控)。
 const JOB_TIMEOUT_CAP_MS = 600000;      // longRunning 声明预算上限(10 分钟);任务经 jobRunner 异步执行、HTTP 不阻塞、前端轮询,长预算无副作用
 const MAX_DEFERS = 256;                 // 单次调用内未结算 deferred 上限(防御性;支持并行 host 调用)
 // 单次 executePendingJobs 最多结算的 job 数:分片泵送,避免「结算风暴」一次连续执行全部
@@ -499,11 +503,21 @@ export class SandboxedPlugin {
     try {
       // 内存超限后 runtime.dispose() 会抛 QuickJS gc 断言异常(实测 abort 可捕获),
       // dispose 内部已 try/catch 吞掉;全新 init 不受旧 runtime 状态影响。
+      // 关键:OOM 触顶可能已耗尽旧 deadline(默认 15s),init() 会重新设置 interrupt
+      // handler(Date.now() > this.deadline),若沿用旧 deadline,重建代码一执行就被
+      // 中断 → rebuild 失败 "interrupted" → 沙箱半死(CI 实测)。重置 deadline 给
+      // 重建独立预算(REBUILD_TIMEOUT_MS),init 全程不被看门狗打断。
+      this.deadline = Date.now() + REBUILD_TIMEOUT_MS;
       this.dispose();
       this.disposed = false;
       this.oomFaulty = false;
       this.shared = new Set<QuickJSHandle>();
       await this.init(code, manifest);
+    } catch (e) {
+      // init 失败:沙箱保持已销毁状态,后续调用被 assertUsable 拦截,
+      // 避免「半死沙箱」访问未就绪的 __mfImpl 等全局导致 cannot read property 类崩溃。
+      this.disposed = true;
+      throw e;
     } finally {
       this.rebuilding = false;
     }

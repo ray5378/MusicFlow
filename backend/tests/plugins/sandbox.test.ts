@@ -561,4 +561,38 @@ describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
       try { sb?.dispose(); } catch { /* ignore */ }
     }
   }, 20000);
+
+  it("OOM 触顶耗尽 deadline 后重建仍成功(rebuild 重置看门狗,不被 interrupt 打断)", async () => {
+    // CI 回归场景(2026-08-20 CI failure):256MB/慢机器上 while(true) 触顶耗时 > 15s
+    // 交互看门狗 → rebuild() 若沿用旧 deadline,init 里重设的 interrupt handler 立即
+    // 中断重建代码 → "沙箱重建失败: interrupted" → 沙箱半死(disposed=false 但
+    // __mfImpl 未就绪)→ 后续调用 cannot read property of undefined。修复:rebuild()
+    // 开头重置 deadline = now + REBUILD_TIMEOUT_MS。此处模拟 deadline 已过期后触发 OOM。
+    const prev = process.env.SANDBOX_MEMORY_LIMIT;
+    process.env.SANDBOX_MEMORY_LIMIT = String(4 * 1024 * 1024);
+    let sb: SandboxedPlugin | null = null;
+    try {
+      const LEAK_CODE = `
+        globalThis.__mfPlugin = {
+          manifest: { id: "demo-leak3", name: "泄漏3", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: [] },
+          create(host) { const acc = []; return { async leak(config) { while (true) { acc.push("z".repeat(1024 * 1024)); } }, async ping(config) { return { ok: true }; } }; }
+        };`;
+      const { sandbox } = await loadSandboxedPlugin("demo-leak3", LEAK_CODE, makeEnv());
+      sb = sandbox;
+      const rtBefore = (sandbox as any).runtime;
+      // 模拟慢触顶:deadline 拨到过去(等价触顶耗时已超 INVOKE_TIMEOUT_MS)。
+      (sandbox as any).deadline = Date.now() - 1000;
+      await expect(sandbox.invoke("leak", [])).rejects.toMatchObject({
+        name: "SandboxLimitError",
+        sandboxCode: "SANDBOX_MEMORY",
+      });
+      // 重建成功:runtime 换新 + 重建后 ping 正常(不再是 interrupted / cannot read property)。
+      expect((sandbox as any).runtime).not.toBe(rtBefore);
+      await expect(sandbox.invoke("ping", [])).resolves.toEqual({ ok: true });
+    } finally {
+      if (prev === undefined) delete process.env.SANDBOX_MEMORY_LIMIT;
+      else process.env.SANDBOX_MEMORY_LIMIT = prev;
+      try { sb?.dispose(); } catch { /* ignore */ }
+    }
+  }, 30000);
 });
