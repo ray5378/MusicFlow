@@ -19,7 +19,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { ElMessage } from "element-plus";
@@ -73,6 +73,13 @@ function playSong(song: any) { playerStore.playSong(song); }
 function playAll() { const all = songs.value.filter(Boolean); if (all.length > 0) playerStore.playQueue(all); }
 
 onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); loadPoolStatus(); });
+// 收藏状态在任何页面发生变化(点击我喜欢/取消收藏)后,列表实时重载。
+// 之前只靠 onMounted 拉一次 + keep-alive 页面缓存,切走再回或跨页收藏都不刷新,
+// 必须整页强制刷新才能看到变化;监听 store 的 revision 信号量即可实时同步。
+watch(() => favoritesStore.revision, () => {
+  loadFavorites();
+  favoritesStore.loadFavorites();
+});
 </script>
 
 <style lang="scss" scoped>

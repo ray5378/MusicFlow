@@ -125,6 +125,16 @@ export const userFavoriteSongs = sqliteTable("user_favorite_songs", {
   pk: primaryKey({ columns: [t.userId, t.songId] }),
 }));
 
+// 歌单收藏按用户隔离:谁收藏归谁(user_id + playlist_id 联合主键)。
+// 旧 playlists.favorite 全局列仅作迁移快照,新收藏一律写这张表。
+export const playlistFavorites = sqliteTable("playlist_favorites", {
+  userId: text("user_id").notNull(),
+  playlistId: text("playlist_id").notNull(),
+  createdAt: text("created_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.playlistId] }),
+}));
+
 export const playHistory = sqliteTable("play_history", {
   id: integer("id").primaryKey(),
   userId: text("user_id").notNull(),

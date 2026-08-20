@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
-import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playHistory, genres, deviceQueues } from "../../db/schema.js";
+import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playlistFavorites, playHistory, genres, deviceQueues } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
@@ -278,6 +278,7 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
     db.delete(playlists).where(inArray(playlists.id, owned.map(p => p.id))).run();
   }
   db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.userId, id)).run();
+  db.delete(playlistFavorites).where(eq(playlistFavorites.userId, id)).run();
   db.delete(playHistory).where(eq(playHistory.userId, id)).run();
   db.delete(wishes).where(eq(wishes.userId, id)).run();
   db.delete(users).where(eq(users.id, id)).run();
@@ -1502,8 +1503,10 @@ apiRoutes.post("/v1/playlists/:id/convert-to-local", async (c) => {
 
 // 收藏 / 取消收藏歌单。Body: { favorite: boolean }。
 // 收藏平台歌单(sourceUrl 非空):保留来源信息供每天自动同步,置 favorite + syncEnabled=1
-// (每天自动同步默认打开),并脱离每日推荐轮换(不会被轮换删除)。
-// 取消收藏平台歌单:仅清标记,恢复每日推荐轮换身份(syncAll 重新管理)。
+// 收藏歌单按用户隔离:任意登录用户都能收藏/取消(不再限 owner/admin),
+// 写入 playlist_favorites(user_id × playlist_id)。收藏后的副作用与原先一致:
+// 平台歌单收藏后转本地并开启每天自动同步(每天同步默认打开),并脱离每日推荐轮换。
+// 取消收藏平台歌单:仅移除当前用户的收藏标记,恢复每日推荐轮换身份(syncAll 重新管理)。
 apiRoutes.post("/v1/playlists/:id/favorite", async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
@@ -1511,19 +1514,34 @@ apiRoutes.post("/v1/playlists/:id/favorite", async (c) => {
   const favorite = body.favorite === true;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json({ error: "歌单不存在" }, 404);
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权修改该歌单" }, 403);
 
   const now = new Date().toISOString();
   if (favorite) {
+    // 收藏:写入当前用户 × 该歌单的多对多关系。
+    try {
+      db.insert(playlistFavorites).values({ userId: user.id, playlistId: id, createdAt: now }).run();
+    } catch {
+      // 已收藏过(唯一键冲突)则忽略,幂等。
+    }
     const isPlatform = !!playlist.sourceUrl;
     db.update(playlists).set({
+      // 兼容旧全局字段:仍置 1(有用户收藏),供每日推荐轮换保护等旧逻辑判断。
       favorite: 1,
       // 平台歌单收藏后每天自动同步(默认打开);本地歌单保持原 syncEnabled 不变。
       syncEnabled: isPlatform ? 1 : playlist.syncEnabled || 0,
       updatedAt: now,
     }).where(eq(playlists.id, id)).run();
   } else {
-    db.update(playlists).set({ favorite: 0, updatedAt: now }).where(eq(playlists.id, id)).run();
+    // 取消收藏:仅移除当前用户的收藏记录。
+    db.delete(playlistFavorites).where(and(
+      eq(playlistFavorites.userId, user.id),
+      eq(playlistFavorites.playlistId, id),
+    )).run();
+    // 若无任何用户收藏该歌单,清除全局收藏标记(恢复可被每日推荐轮换的资格)。
+    const others = db.select({ c: count() }).from(playlistFavorites).where(eq(playlistFavorites.playlistId, id)).get()?.c ?? 0;
+    if (others === 0) {
+      db.update(playlists).set({ favorite: 0, updatedAt: now }).where(eq(playlists.id, id)).run();
+    }
   }
   return c.json({ success: true, favorite });
 });
@@ -1538,6 +1556,10 @@ apiRoutes.get("/v1/playlists", (c) => {
   const favOnly = (c.req.query("favorite") || "").trim() === "1";
   const sort = (c.req.query("sort") || "").trim();
   const user = c.get("user");
+  // 当前用户已收藏的歌单 id 集合:收藏过滤与每项 favorite 状态都按它判断。
+  const favIds = new Set(db.select({ pid: playlistFavorites.playlistId })
+    .from(playlistFavorites).where(eq(playlistFavorites.userId, user?.id ?? ""))
+    .all().map(r => r.pid));
   // Push the ownership/visibility filter + name search + platform/local/favorite
   // filters to SQL. and() skips undefined conditions, so any subset works.
   const where = and(
@@ -1547,7 +1569,8 @@ apiRoutes.get("/v1/playlists", (c) => {
     query ? like(playlists.name, `%${query}%`) : undefined,
     platform ? eq(playlists.sourcePlatform, platform) : undefined,
     localOnly ? isNull(playlists.sourceUrl) : undefined,
-    favOnly ? eq(playlists.favorite, 1) : undefined,
+    // 收藏过滤改为按当前用户:只显示「我收藏的」歌单(不再是全局 favorite 标记)。
+    favOnly ? inArray(playlists.id, [...favIds]) : undefined,
   );
   // Ordering. An explicit sort (by creation time / name) fully overrides the
   // default daily-recommend-first + recency ranking; unknown values fall back
@@ -1581,7 +1604,9 @@ apiRoutes.get("/v1/playlists", (c) => {
     songCount: p.songCount || 0, duration: p.duration || 0,
     // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
     coverArt: `pl-${p.id}`, sourcePlatform: p.sourcePlatform || "",
-    isImported: isImportedPlaylist(p), pluginSynced: isPluginSyncPlaylist(p), sourcePluginId: p.sourcePlugin || "", syncEnabled: !!p.syncEnabled, favorite: !!p.favorite,
+    isImported: isImportedPlaylist(p), pluginSynced: isPluginSyncPlaylist(p), sourcePluginId: p.sourcePlugin || "", syncEnabled: !!p.syncEnabled,
+    // favorite 改为「当前用户是否收藏」(按 playlist_favorites 判断),不再用全局标记。
+    favorite: favIds.has(p.id),
     isDaily: isDailyRecommendPlaylist(p),
     created: p.createdAt, changed: p.updatedAt,
   }));
@@ -1738,6 +1763,14 @@ export function getDlnaBaseUrl(c: any): string {
   recordBaseUrl(u);
   return u;
 }
+
+// ==================== 播放器管理(仅管理员)====================
+// DLNA / AirPlay / 群组是「播放器」功能的全部端点。普通用户只能看到并控制
+// 自己的本机播放器(local:<自己的 userId>),播放器管理端点一律对 admin 开放。
+// WS 连接同样按用户过滤,非 admin 只收本机 peer 事件(见 services/ws)。
+apiRoutes.use("/v1/dlna/*", adminMiddleware);
+apiRoutes.use("/v1/airplay/*", adminMiddleware);
+apiRoutes.use("/v1/groups*", async (c, next) => { return c.get("user")?.isAdmin ? next() : c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作"), 403); });
 
 // List discovered DLNA renderers (refreshes cache if stale).
 apiRoutes.get("/v1/dlna/devices", async (c) => {
@@ -2166,8 +2199,36 @@ function isCastPeer(parsed: { kind: string }): boolean {
 
 // List all known peers (local + dlna) with their queue snapshots. The Web
 // client calls this to populate the player-switcher popup.
+// 权限:管理员看到全部;普通用户只能看到自己的本机播放器(local:<userId>),
+// 无法看到其他用户的播放器/DLNA/群组(见需求:播放器仅对 admin 开放)。
 apiRoutes.get("/v1/peers", (c) => {
-  return c.json({ peers: pm.listWithQueues() });
+  const user = c.get("user");
+  let peers = pm.listWithQueues();
+  if (!user?.isAdmin) {
+    const ownLocal = `local:${user?.id ?? ""}`;
+    peers = peers.filter((p) => p.peerId === ownLocal);
+  }
+  return c.json({ peers });
+});
+
+// 非 admin 只能控制/查询自己的本机播放器(local:<userId>);对其它 peer 一律 403。
+// 与 /v1/peers 列表过滤一致,防止普通用户看到或遥控别人的播放器/群组。
+apiRoutes.use("/v1/peers/:peerId/*", async (c, next) => {
+  const user = c.get("user");
+  if (user?.isAdmin) return next();
+  const peerId = c.req.param("peerId");
+  if (peerId === `local:${user?.id ?? ""}`) return next();
+  return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
+});
+
+apiRoutes.use("/v1/peers/:peerId", async (c, next) => {
+  if (c.req.method !== "GET") return next(); // 只拦 GET 详情/状态查询;register/heartbeat 等走各自校验
+  const user = c.get("user");
+  if (user?.isAdmin) return next();
+  const peerId = c.req.param("peerId");
+  return peerId === `local:${user?.id ?? ""}`
+    ? next()
+    : c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
 });
 
 // Register/refresh the calling user's local peer. Body: { name?: string }.

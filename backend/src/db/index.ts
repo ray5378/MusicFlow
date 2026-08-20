@@ -211,6 +211,18 @@ export function initDatabase() {
       FOREIGN KEY (song_id) REFERENCES songs(id)
     );
 
+    -- 歌单收藏按用户隔离:谁收藏归谁。旧的 playlists.favorite 全局布尔列仅作
+    -- 迁移前的兼容快照,新收藏一律写这张表;列表接口按当前用户过滤。
+    CREATE TABLE IF NOT EXISTS playlist_favorites (
+      user_id TEXT NOT NULL,
+      playlist_id TEXT NOT NULL,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (user_id, playlist_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (playlist_id) REFERENCES playlists(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_playlist_favorites_playlist ON playlist_favorites(playlist_id);
+
     CREATE TABLE IF NOT EXISTS play_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
@@ -543,6 +555,20 @@ export function initDatabase() {
   // so a static import here would create a load-time cycle. Doing it *inside*
   // initDatabase() guarantees the schema already exists.
   seedRegisteredPlugins();
+
+  // 歌单收藏按用户隔离迁移(一次性):旧的 playlists.favorite=1 是全局布尔,
+  // 没有用户归属。首次升级时把它们归给 admin 用户(谁最早接管的系统主账号),
+  // 写入新的 playlist_favorites 关系表;之后新收藏全部按 user_id 记录。
+  const legacyFavCount = (sqlite.prepare("SELECT COUNT(*) AS c FROM playlists WHERE favorite = 1").get() as any).c;
+  if ((legacyFavCount || 0) > 0) {
+    const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1").get() as any;
+    if (admin?.id) {
+      sqlite.prepare(
+        "INSERT OR IGNORE INTO playlist_favorites (user_id, playlist_id) SELECT ?, id FROM playlists WHERE favorite = 1"
+      ).run(admin.id);
+      log.info(`[MIGRATION] 歌单收藏按用户隔离:迁移 ${legacyFavCount} 个历史收藏到 admin 用户`);
+    }
+  }
 
   log.info("Database initialized successfully");
 }

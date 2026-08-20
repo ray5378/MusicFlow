@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
-import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
+import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import { getLyricsForSongId, getLyricsForSong, lrcToStructured } from "../../services/lyrics.js";
@@ -647,6 +647,10 @@ restRoutes.get("/getPlaylists", (c) => {
   const where = user?.isAdmin
     ? undefined
     : or(eq(playlists.isPublic, 1), eq(playlists.ownerId, user?.id ?? ""));
+  // 当前用户收藏的歌单 id 集合:每项 favorite 状态按它判断(收藏已按用户隔离)。
+  const favIds = new Set(db.select({ pid: playlistFavorites.playlistId })
+    .from(playlistFavorites).where(eq(playlistFavorites.userId, user?.id ?? ""))
+    .all().map(r => r.pid));
   const dailyTag = dailyRecommendTag() || "每日推荐";
   const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyTag}%`} AND ${playlists.name} = '今日推荐' THEN 0 ELSE 1 END`;
   const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
@@ -660,7 +664,7 @@ restRoutes.get("/getPlaylists", (c) => {
   const size = parseInt(getParam(c, "size") || "0", 10) || 0;
   const base = db.select().from(playlists).where(whereAll).orderBy(dailyOrder, desc(recency));
   const page = size > 0 ? base.limit(size).offset(offset).all() : base.all();
-  return c.json(ok({ playlists: { total, playlist: page.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, favorite: !!p.favorite, sourcePlatform: p.sourcePlatform || "" })) } }));
+  return c.json(ok({ playlists: { total, playlist: page.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, favorite: favIds.has(p.id), sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
 restRoutes.get("/getPlaylist", (c) => {

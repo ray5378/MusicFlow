@@ -35,7 +35,7 @@ import {
 } from "../dlna/control.js";
 import { getPeerManager } from "../peer.js";
 import { getGroupManager } from "../group/index.js";
-import { authenticateWsToken } from "./auth.js";
+import { authenticateWsToken, WsUser } from "./auth.js";
 
 let wss: WebSocketServer | null = null;
 
@@ -54,6 +54,7 @@ export function initWebSocketServer(server: import("http").Server): void {
       return;
     }
     wss!.handleUpgrade(req, socket, head, (ws) => {
+      (ws as any).__user = user;
       wss!.emit("connection", ws, req);
     });
   });
@@ -78,7 +79,13 @@ export function initWebSocketServer(server: import("http").Server): void {
 }
 
 // Build + send the initial full-state snapshot once per new connection.
+// 权限:非 admin 不推送 DLNA 设备状态(其唯一可见播放器是本机 peer)。
 async function sendSnapshot(ws: WebSocket): Promise<void> {
+  const user: WsUser | undefined = (ws as any).__user;
+  if (user && !user.isAdmin) {
+    send(ws, { type: "snapshot", devices: {} });
+    return;
+  }
   const devices: Record<string, any> = {};
   for (const d of getCachedDevices()) {
     if (!d.available) continue;
@@ -95,8 +102,15 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
 
 // Send the current peer list (with queue snapshots) so a freshly connected
 // client can populate the player switcher immediately.
+// 权限:非 admin 只看到自己的本机播放器(local:<userId>),与 /v1/peers 一致。
 function sendPeerSnapshot(ws: WebSocket): void {
-  send(ws, { type: "peer_snapshot", peers: getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) })) });
+  const user: WsUser | undefined = (ws as any).__user;
+  let peers = getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) }));
+  if (user && !user.isAdmin) {
+    const ownLocal = `local:${user.id}`;
+    peers = peers.filter(p => p.peerId === ownLocal);
+  }
+  send(ws, { type: "peer_snapshot", peers });
 }
 
 // 大队列摘要:items 超过阈值时 WS 只推元数据(total/currentIndex/playMode),
@@ -118,35 +132,45 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const pm = getPeerManager();
   const gm = getGroupManager();
   const unsubs: Array<() => void> = [];
+  const user: WsUser | undefined = (ws as any).__user;
 
+  const canSeeDevices = !user || user.isAdmin;
   const onState = (deviceId: string, st: any) => {
+    if (!canSeeDevices) return;
     const media = getCurrentMedia(deviceId);
     send(ws, { type: "player_state_changed", device_id: deviceId, state: { ...st, media } });
   };
   const onMedia = (deviceId: string, media: any) => {
+    if (!canSeeDevices) return;
     send(ws, { type: "media_changed", device_id: deviceId, media });
   };
   const onPlayerRefresh = (deviceId: string, info: any) => {
+    if (!canSeeDevices) return;
     send(ws, { type: "player_refresh", device_id: deviceId, reason: info?.reason });
   };
   const onQueue = (deviceId: string, queue: any) => {
+    if (!canSeeDevices) return;
     send(ws, { type: "queue_changed", device_id: deviceId, queue: summarizeQueue(queue) });
   };
   const onDeviceList = (deviceCount: number) => {
+    if (!canSeeDevices) return;
     send(ws, { type: "device_list_changed", deviceCount });
   };
 
   // Peer events: forward registration/availability/queue changes so the Web
   // client's player switcher stays live without polling /v1/peers.
-  const onPeerRegistered = (peer: any) => send(ws, { type: "peer_registered", peer });
-  const onPeerAvailable = (peer: any) => send(ws, { type: "peer_available", peer });
-  const onPeerUnavailable = (peer: any) => send(ws, { type: "peer_unavailable", peer });
-  const onPeerQueue = (peerId: string, queue: any) => send(ws, { type: "peer_queue_changed", peer_id: peerId, queue: summarizeQueue(queue) });
-  const onPeerQueueCleared = (peerId: string) => send(ws, { type: "peer_queue_cleared", peer_id: peerId });
+  // 权限:非 admin 只转发自己的本机 peer 事件,不泄漏其他播放器。
+  const canSeePeer = (peerId?: string) => !user || user.isAdmin || peerId === `local:${user.id}`;
+  const onPeerRegistered = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_registered", peer }); };
+  const onPeerAvailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_available", peer }); };
+  const onPeerUnavailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_unavailable", peer }); };
+  const onPeerQueue = (peerId: string, queue: any) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_changed", peer_id: peerId, queue: summarizeQueue(queue) }); };
+  const onPeerQueueCleared = (peerId: string) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_cleared", peer_id: peerId }); };
 
   // Group events: 组创建/改名/成员变更 → 前端群组页刷新;组删除 → 移除条目。
-  const onGroupChanged = (group: any) => send(ws, { type: "group_changed", group });
-  const onGroupDeleted = (id: string) => send(ws, { type: "group_deleted", id });
+  // 权限:群组属于播放器管理,非 admin 不转发。
+  const onGroupChanged = (group: any) => { if (canSeeDevices) send(ws, { type: "group_changed", group }); };
+  const onGroupDeleted = (id: string) => { if (canSeeDevices) send(ws, { type: "group_deleted", id }); };
 
   em.on("state_changed", onState);
   em.on("media_changed", onMedia);
