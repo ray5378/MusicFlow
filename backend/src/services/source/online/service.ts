@@ -97,6 +97,9 @@ interface PlanResult {
 async function planSongInsert(
   providerId: string,
   song: OnlineSongResult,
+  configured: ReturnType<typeof getSourcePluginConfig>,
+  provider: ReturnType<typeof getOnlineProvider>,
+  dedupPreloaded: boolean,
   existingFingerprints: Map<string, string>,
   artistsPending: { id: string; name: string }[],
   albumsPending: { id: string; name: string; artistId: string | null; artist: string }[],
@@ -104,15 +107,16 @@ async function planSongInsert(
   albumIds: Map<string, string>,
   coverUrls: Map<string, string>,
 ): Promise<PlanResult> {
-  const configured = getSourcePluginConfig(providerId);
-  const provider = getOnlineProvider(providerId);
   if (!configured || !provider) return { success: false, error: "在线源未启用或未配置" };
 
   const fingerprint = `${providerId}:${song.source}:${song.id}`;
   let existing = existingFingerprints.get(fingerprint);
-  if (!existing) {
-    // Single-song call sites (e.g. match.ts) may not preload; look the
-    // fingerprint up in the DB so repeated matches return the SAME song row.
+  if (!existing && !dedupPreloaded) {
+    // Single-song call sites (e.g. match.ts), or a batch whose batched preload
+    // was skipped (empty list / over-parameterized), don't have the map seeded —
+    // look the fingerprint up so repeated matches return the SAME song row.
+    // A successful batch preload already covered every fingerprint in the list,
+    // so one that is missing here is genuinely new — skip this per-song SELECT.
     const row = db.select().from(songs).where(eq(songs.fingerprint, fingerprint)).get();
     if (row) existing = row.id;
   }
@@ -252,7 +256,10 @@ export async function importOnlineSong(
   const artistsPending: { id: string; name: string }[] = [];
   const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
 
-  const plan = await planSongInsert(providerId, song, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, new Map<string, string>());
+  // 解析一次配置与 provider,避免单首也逐 song 反复查 plugins 表 + 注册表。
+  const configured = getSourcePluginConfig(providerId);
+  const provider = getOnlineProvider(providerId);
+  const plan = await planSongInsert(providerId, song, configured, provider, false, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, new Map<string, string>());
   if (!plan.success) return { success: false, error: plan.error };
   if (plan.deduped) return { success: true, songId: plan.songId, deduped: true };
 
@@ -275,11 +282,13 @@ export async function importOnlineSongs(
 ): Promise<{ added: number; deduped: number; failed: number; songs: { id: string; title: string; fingerprint: string }[] }> {
   // One batched dedup query instead of one SELECT per song.
   const existingFingerprints = new Map<string, string>();
+  let dedupPreloaded = false;
   try {
     const fingerprints = songList.map(s => `${providerId}:${s.source}:${s.id}`);
     for (const row of db.select().from(songs).where(inArray(songs.fingerprint, fingerprints)).all()) {
       if (row.fingerprint) existingFingerprints.set(row.fingerprint, row.id);
     }
+    dedupPreloaded = songList.length > 0;
   } catch (e) {
     // 超限/引擎不支持 inArray 时优雅降级:去重退回逐 plan 兜底,仍正确。
     log.error("fingerprint 预载失败,退回逐条去重", { providerId, stage: "dedup-preload", err: (e as Error)?.message || e });
@@ -309,6 +318,10 @@ export async function importOnlineSongs(
     log.error("歌手/专辑预载失败,退回逐条解析", { providerId, stage: "entity-preload", err: (e as Error)?.message || e });
   }
 
+  // 解析一次配置与 provider,命中同一规则:整批复用,避免每首歌重复查
+  // plugins 表 + 注册表(大歌单时 O(N)→O(1))。
+  const configured = getSourcePluginConfig(providerId);
+  const provider = getOnlineProvider(providerId);
   const artistsPending: { id: string; name: string }[] = [];
   const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
   const pendingSongs: PlannedSong[] = [];
@@ -325,7 +338,7 @@ export async function importOnlineSongs(
   const conc = opts?.interactive ? interactiveConcurrency() : batchConcurrency();
   const results = await workerLimit(songList, conc, async (s) => {
     try {
-      const plan = await planSongInsert(providerId, s, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls);
+      const plan = await planSongInsert(providerId, s, configured, provider, dedupPreloaded, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls);
       if (plan.success && plan.songId) {
         if (plan.deduped) deduped++; else added++;
         if (plan.planned) {
