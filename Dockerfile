@@ -32,7 +32,18 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build && npm cache clean --force
 
-# ---------- stage 3: runtime ----------
+# ---------- stage 3: preload external plugins ----------
+# 镜像内置「预装外置插件」种子(go-music-dl 等):构建期从插件仓库拉取**固定版本**,
+# 插件代码不进主仓库(核心/插件代码隔离);entrypoint.sh 在容器首次启动时落盘到
+# data/plugins/。市场更新 installPlugin 会覆盖 data/plugins 里的预装版本——预装
+# 只保证「开箱可用」,不阻止用户升级到市场新版本。
+# 升级预装插件版本:改下方 ARG GMDL_VERSION 后重新发版。
+FROM node:22-alpine AS preload
+ARG GMDL_VERSION=1.2.21
+COPY backend/scripts/preload-plugin.mjs /preload-plugin.mjs
+RUN node /preload-plugin.mjs go-music-dl ${GMDL_VERSION} /preloaded
+
+# ---------- stage 4: runtime ----------
 FROM node:22-alpine AS runtime
 # 由 CI 从 git tag / commit 注入; 经 /ping(APP_VERSION/APP_COMMIT) 暴露给前端系统信息,
 # 让用户确认当前跑的到底是哪个版本和哪次提交。
@@ -51,6 +62,7 @@ COPY --from=backend-build /app/backend/package.json /app/backend/package-lock.js
 COPY --from=backend-build /app/backend/node_modules ./node_modules
 COPY --from=backend-build /app/backend/dist ./dist
 COPY --from=frontend-build /app/frontend/dist ./public
+COPY --from=preload /preloaded /app/backend/preloaded-plugins
 COPY backend/entrypoint.sh ./entrypoint.sh
 RUN chmod +x entrypoint.sh \
  && mkdir -p /app/backend/data && chown -R musicflow:musicflow /app/backend
