@@ -115,14 +115,10 @@ jobs:
             echo "Release $TAG already exists, skipping"
             exit 0
           fi
-          # 模板正文 + git log 变更列表(相对上一个 tag)。
+          # 模板正文 + git log 变更列表 + 涉及文件统计(中文,列具体修改点,符合 SPEC 提交/发版规范)。
           PREV=$(git tag --sort=-version:refname | sed -n '2p')
           {
             echo "## ${TAG#v} 发布说明"
-            echo
-            echo "镜像已推送:"
-            echo "- ghcr.io/${GITHUB_REPOSITORY_OWNER}/musicflow:${VERSION}"
-            echo "- ${DH_NAMESPACE}/musicflow:${VERSION} (Docker Hub)"
             echo
             echo "### 变更"
             if [ -n "$PREV" ]; then
@@ -130,5 +126,19 @@ jobs:
             else
               git log --oneline --no-merges --grep='^chore: release' --invert-grep "$TAG"
             fi
+            echo
+            echo "### 涉及文件与影响面"
+            if [ -n "$PREV" ]; then
+              git diff --stat "$PREV" "$TAG"
+            else
+              git show --stat "$TAG"
+            fi
+            echo
+            echo "### 镜像"
+            echo "- ghcr.io/${GITHUB_REPOSITORY_OWNER}/musicflow:${VERSION} (Docker Hub 同步: ${DH_NAMESPACE}/musicflow:${VERSION})"
+            echo
+            echo "### 升级步骤"
+            echo "- 加载项/容器直接拉取最新镜像重建重启即可;数据自动迁移保留。"
+            echo "- 若依赖上一版本新增索引/缓存,首次启动会自动补齐,无需手工操作。"
           } > /tmp/release-body.md
           gh release create "$TAG" --title "${TAG#v}" --notes-file /tmp/release-body.md
