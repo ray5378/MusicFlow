@@ -1,5 +1,5 @@
 // Playlist sync service: re-fetch remote playlist, rebuild entries with library matching
-import { db } from "../../db/index.js";
+import { db, sqlite } from "../../db/index.js";
 import { songs, playlists, playlistSongs, wishes } from "../../db/schema.js";
 import { eq, and, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
@@ -65,21 +65,45 @@ function trackKey(externalId?: string | null, title?: string | null, artist?: st
   return `k:${normalizeKey(title || "", artist || "")}`;
 }
 
-// Add a pending wish only if an identical one isn't already pending. Returns the
-// new wish id, or null when skipped (dedupe).
-function addWishIfMissing(t: ImportedTrack, opts: RebuildOptions): string | null {
-  const existingWish = db.select().from(wishes)
-    .where(and(eq(wishes.songTitle, t.title), eq(wishes.artist, t.artist || "")))
-    .all().find(w => w.status === "pending");
-  if (existingWish) return null;
-  const wid = uuidv4();
-  db.insert(wishes).values({
-    id: wid, userId: opts.userId || "", songTitle: t.title, artist: t.artist || "",
-    album: t.album || "", status: "pending",
-    notes: opts.notes || "来自歌单导入",
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-  }).run();
-  return wid;
+// Add pending wishes in bulk. Dedupes against already-pending wishes (same
+// songTitle+artist) with ONE grouped SELECT instead of one SELECT per track, then
+// inserts the genuinely-new ones with a single multi-row INSERT. Returns count.
+function addWishesBulk(candidates: ImportedTrack[], opts: RebuildOptions): number {
+  if (candidates.length === 0) return 0;
+  // 批内自身去重:同一 (title,artist) 只建一条 pending(也避免下面 IN 条件重复)。
+  const dedupe = new Map<string, ImportedTrack>();
+  for (const t of candidates) {
+    const k = `${t.title}||${t.artist || ""}`;
+    if (!dedupe.has(k)) dedupe.set(k, t);
+  }
+  const unique = [...dedupe.values()];
+
+  // 一次查出已存在 pending(与待补同 title 的)——替代逐条 SELECT。
+  const existingPending = new Set<string>();
+  // 大列表下 IN 可能超长,按块分批查询(每块仍一次 SELECT,远少于逐条)。
+  const CHUNK = 300;
+  for (let off = 0; off < unique.length; off += CHUNK) {
+    const slice = unique.slice(off, off + CHUNK);
+    const rows = db.select().from(wishes)
+      .where(and(
+        eq(wishes.status, "pending"),
+        inArray(wishes.songTitle, slice.map((t) => t.title)),
+      ))
+      .all();
+    for (const r of rows) existingPending.add(`${r.songTitle}||${r.artist || ""}`);
+  }
+
+  // 真正缺失的 → 多行一次 INSERT(替代逐条 INSERT)。
+  const now = new Date().toISOString();
+  const rows = unique
+    .filter((t) => !existingPending.has(`${t.title}||${t.artist || ""}`))
+    .map((t) => ({
+      id: uuidv4(), userId: opts.userId || "", songTitle: t.title, artist: t.artist || "",
+      album: t.album || "", status: "pending", notes: opts.notes || "来自歌单导入",
+      createdAt: now, updatedAt: now,
+    }));
+  if (rows.length) db.insert(wishes).values(rows).run();
+  return rows.length;
 }
 
 // Rebuild a playlist's entries from a remote playlist *incrementally*:
@@ -120,6 +144,9 @@ export async function rebuildPlaylistEntries(
   const updates: (Row & { id: number })[] = [];
   const deleteIds: number[] = [];
   const seenKeys = new Set<string>();
+  // 待补 wish 的候选(未匹配且首次出现的条目)。批量收集后一次查询/插入,
+  // 避免逐条对 wishes 表 SELECT+INSERT(大歌单大量未匹配时省下 N 次 DB 往返)。
+  const wishCandidates: ImportedTrack[] = [];
 
   imported.tracks.forEach((t, i) => {
     const key = trackKey(t.externalId, t.title, t.artist);
@@ -152,10 +179,7 @@ export async function rebuildPlaylistEntries(
       else inserts.push(row);
     } else {
       unmatched++;
-      if (!prev && opts.autoWish !== false) {
-        const wid = addWishIfMissing(t, opts);
-        if (wid) wishAdded++;
-      }
+      if (!prev && opts.autoWish !== false) wishCandidates.push(t);
       const row: Row = {
         playlistId, songId: null, position: i, playable: 0,
         externalSongId: t.externalId, externalTitle: t.title, externalArtist: t.artist,
@@ -188,15 +212,54 @@ export async function rebuildPlaylistEntries(
       if (off + TX_CHUNK < deleteIds.length) await sleepBetweenBatch();
     }
   }
-  for (let off = 0; off < updates.length; off += TX_CHUNK) {
-    const chunk = updates.slice(off, off + TX_CHUNK);
-    chunkTx(() => {
-      for (const u of chunk) {
-        const { id, ...rest } = u;
-        db.update(playlistSongs).set(rest).where(eq(playlistSongs.id, id)).run();
+  // updates 逐条 drizzle UPDATE -> 单条 CASE 批量 UPDATE。updates 的列在同一行上
+  // 并非全部携带(如 matched 行无 unavailable_reason),CASE 若强行逐列会改动 drizzle
+  // 未携带列的原值语义差异;且全列 CASE 参数会超 SQLite 变量上限(999)。故拆两段:
+  //   ① 公共列 song_id/position/playable/external_*(8 列) 用较短分块(50)写 CASE;
+  //   ② 仅带 unavailable_reason 的行再单独 CASE 补它。
+  {
+    const UPD_CHUNK = 50; // 8 列 CASE ≈ 17 参数/行,50 行 ≈ 850 < 999 上限
+    const sets: string[] = [];
+    const cols: [keyof Row & string, string][] = [
+      ["songId", "song_id"],
+      ["position", "position"],
+      ["playable", "playable"],
+      ["externalSongId", "external_song_id"],
+      ["externalTitle", "external_title"],
+      ["externalArtist", "external_artist"],
+      ["externalAlbum", "external_album"],
+      ["externalDuration", "external_duration"],
+    ];
+    for (let off = 0; off < updates.length; off += UPD_CHUNK) {
+      const chunk = updates.slice(off, off + UPD_CHUNK);
+      const ids = chunk.map((u) => u.id);
+      const args: (number | string | null)[] = [];
+      for (const [k, col] of cols) {
+        sets.push(`${col} = CASE id ${chunk.map(() => "WHEN ? THEN ?").join(" ")} END`);
+        for (const u of chunk) args.push(u.id, (u as any)[k] ?? null);
       }
-    });
-    if (off + TX_CHUNK < updates.length) await sleepBetweenBatch();
+      const idPh = ids.map(() => "?").join(",");
+      chunkTx(() => {
+        sqlite.prepare(`UPDATE playlist_songs SET ${sets.join(", ")} WHERE id IN (${idPh})`).run(...args, ...ids);
+      });
+      if (off + UPD_CHUNK < updates.length) await sleepBetweenBatch();
+    }
+    // 仅 unavailable_reason 非空的行:单独 CASE 写回(与 drizzle 语义一致——matched 行
+    // 不携带该列即不改动)。
+    const withReason = updates.filter((u) => (u as any).unavailableReason != null);
+    for (let off = 0; off < withReason.length; off += UPD_CHUNK) {
+      const chunk = withReason.slice(off, off + UPD_CHUNK);
+      const ids = chunk.map((u) => u.id);
+      const args: (number | string)[] = [];
+      sets.length = 0;
+      sets.push(`unavailable_reason = CASE id ${chunk.map(() => "WHEN ? THEN ?").join(" ")} END`);
+      for (const u of chunk) args.push(u.id, (u as any).unavailableReason);
+      const idPh = ids.map(() => "?").join(",");
+      chunkTx(() => {
+        sqlite.prepare(`UPDATE playlist_songs SET ${sets.join(", ")} WHERE id IN (${idPh})`).run(...args, ...ids);
+      });
+      if (off + UPD_CHUNK < withReason.length) await sleepBetweenBatch();
+    }
   }
   for (let off = 0; off < inserts.length; off += TX_CHUNK) {
     const chunk = inserts.slice(off, off + TX_CHUNK);
@@ -205,6 +268,8 @@ export async function rebuildPlaylistEntries(
     });
     if (off + TX_CHUNK < inserts.length) await sleepBetweenBatch();
   }
+  // 批量补 wish(一次性去重 + 多行 INSERT),替代此前逐条 SELECT/INSERT。
+  wishAdded += addWishesBulk(wishCandidates, opts);
   refreshPlaylistCounts(playlistId);
 
   // Fire background auto-match only when genuinely new unmatched tracks appeared

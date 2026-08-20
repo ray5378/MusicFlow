@@ -10,9 +10,7 @@
 // `registry -> builtins -> impl -> registry` and leave half-initialised ESM
 // bindings at load time. Registration + DB seeding therefore live in builtins.ts.
 
-import { db } from "../db/index.js";
-import { plugins } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { sqlite } from "../db/index.js";
 import type { PluginManifest, PluginType, PluginCapability, LyricSongInput } from "./types.js";
 
 export interface RegisteredPlugin {
@@ -64,10 +62,18 @@ export function getCapabilities(id: string): PluginCapability[] {
   return registry.get(id)?.manifest.capabilities ?? [];
 }
 
+// getEnabledPlugins/getEnabledByCapability 是导入/匹配/选源的高频入口。原实现用
+// drizzle `db.select().from(plugins)` 拉整表(含 manifest/config 大 JSON 列)。这里
+// 只投影 name 列并在 DB 侧过滤 enabled=1,避免反复读出大字段却只用到一行 name。
+// 不做 enabled 状态的内存缓存:启用/停用通过原 SQL 写入,TTL 缓存会读到陈旧快照
+// (破坏"写后立即可见"契约),而精简投影已足够廉价。
+const ENABLED_SQL = "SELECT name FROM plugins WHERE enabled = 1";
+
 /** Plugins that are both registered in code AND enabled in the DB. */
 export function getEnabledPlugins(type?: PluginType): RegisteredPlugin[] {
-  const rows = db.select().from(plugins).all();
-  const enabledIds = new Set(rows.filter((r: any) => r.enabled).map((r: any) => r.name));
+  const enabledIds = new Set(
+    (sqlite.prepare(ENABLED_SQL).all() as { name: string }[]).map((r) => r.name),
+  );
   return listRegistered().filter(
     (p) => (type ? p.manifest.type === type : true) && enabledIds.has(p.manifest.id),
   );
@@ -91,9 +97,13 @@ export function firstEnabledByCapability(cap: PluginCapability): RegisteredPlugi
   return getEnabledByCapability(cap)[0];
 }
 
-/** Read the stored config JSON for a plugin id (from the DB `plugins` row). */
+/** Read the stored config JSON for a plugin id (from the DB `plugins` row).
+ *  只投影 name/enabled/config,避开 manifest 大 JSON 列。不做内存缓存(同上,
+ *  配置/启用经原 SQL 写入需立即可见)。 */
+const CONFIG_SQL = "SELECT name, enabled, config FROM plugins WHERE name = ?";
+
 export function getPluginConfig(id: string): Record<string, any> | null {
-  const p = db.select().from(plugins).where(eq(plugins.name, id)).get() as any;
+  const p = sqlite.prepare(CONFIG_SQL).get(id) as { enabled: number; config: string | null } | undefined;
   if (!p || !p.enabled) return null;
   try {
     return JSON.parse(p.config || "{}");

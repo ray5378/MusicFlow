@@ -153,8 +153,11 @@ async function planSongInsert(
     }
   }
 
-  const streamHeaders: Record<string, string> = {};
-  if (song.source === "bilibili") streamHeaders["Referer"] = "https://www.bilibili.com/";
+  // Referer 只在 bilibili 需要;其余 source 的 stream_headers 恒为空对象,直接用常量
+  // 字符串,避免每首歌各做一次 JSON.stringify(大歌单时 N 次序列化)。
+  const streamHeadersJson = song.source === "bilibili"
+    ? JSON.stringify({ Referer: "https://www.bilibili.com/" })
+    : "{}";
 
   return {
     success: true,
@@ -184,7 +187,7 @@ async function planSongInsert(
         fingerprint,
         type: "web",
         url: provider.streamUrl(configured, song),
-        streamHeaders: JSON.stringify(streamHeaders),
+        streamHeaders: streamHeadersJson,
         sourceData: JSON.stringify({
           provider: providerId,
           source: song.source,
@@ -409,39 +412,56 @@ async function flushSongs(pendingSongs: PlannedSong[]): Promise<void> {
   }
 }
 
-// Count refreshes are few (one per distinct album/artist touched) — batch them
-// as a chunked transaction with an idle gap between chunks.
+// Count refreshes are few (one per distinct album/artist touched), but on a big
+// go-music-dl playlist that is still hundreds of COUNT(*) scans. Collapse all of
+// them into ONE grouped aggregate per entity kind (GROUP BY album_id / artist_id)
+// instead of one aggregate query per album/artist — N queries -> 2. Results are
+// still a full recompute (an album can also hold pre-existing library songs), so
+// behavior is unchanged.
 async function refreshCounts(albumIds: Set<string>, artistIds: Set<string>): Promise<void> {
   const albumsList = [...albumIds];
   const artistsList = [...artistIds];
+
+  // Each IN(...) list is capped at TX_CHUNK so the parameterized statement stays
+  // within SQLite's variable limit; every chunk is one grouped scan, not one query
+  // per id.
   for (let off = 0; off < albumsList.length; off += TX_CHUNK) {
     const chunk = albumsList.slice(off, off + TX_CHUNK);
-    db.transaction(() => { for (const a of chunk) updateAlbumCounts(a); });
+    db.transaction(() => {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = sqlite
+        .prepare(`SELECT album_id AS id, COUNT(*) AS cnt, COALESCE(SUM(duration),0) AS dur FROM songs WHERE album_id IN (${placeholders}) GROUP BY album_id`)
+        .all(...chunk) as { id: string; cnt: number; dur: number }[];
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const t = nowIso();
+      for (const a of chunk) {
+        const r = byId.get(a);
+        db.update(albums).set({ songCount: Number(r?.cnt || 0), duration: Math.round(Number(r?.dur || 0)), updatedAt: t }).where(eq(albums.id, a)).run();
+      }
+    });
     if (off + TX_CHUNK < albumsList.length) await sleepBetweenBatch();
   }
   for (let off = 0; off < artistsList.length; off += TX_CHUNK) {
     const chunk = artistsList.slice(off, off + TX_CHUNK);
-    db.transaction(() => { for (const a of chunk) updateArtistAlbumCount(a); });
+    db.transaction(() => {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = sqlite
+        .prepare(`SELECT artist_id AS id, COUNT(*) AS cnt FROM albums WHERE artist_id IN (${placeholders}) GROUP BY artist_id`)
+        .all(...chunk) as { id: string; cnt: number }[];
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const t = nowIso();
+      for (const a of chunk) {
+        db.update(artists).set({ albumCount: Number(byId.get(a)?.cnt || 0), updatedAt: t }).where(eq(artists.id, a)).run();
+      }
+    });
     if (off + TX_CHUNK < artistsList.length) await sleepBetweenBatch();
   }
 }
 
-// ==================== DB helpers (mirror scanner.ts) ====================
+// ==================== Batch import (mirror scanner.ts counts) ====================
 //
 // Per-song findOrCreate is gone — replaced by planArtist/planAlbum (one
 // SELECT/INSERT per unique name, reused across the whole list, committed in
-// the flush) and multi-row song inserts. Count refresh below uses a single
-// aggregate query per album/artist instead of loading every child row into JS.
-
-function updateAlbumCounts(albumId: string) {
-  const row = sqlite.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(duration), 0) AS dur FROM songs WHERE album_id = ?").get(albumId) as { cnt: number; dur: number };
-  const count = Number(row?.cnt || 0);
-  const duration = Math.round(Number(row?.dur || 0));
-  db.update(albums).set({ songCount: count, duration, updatedAt: new Date().toISOString() }).where(eq(albums.id, albumId)).run();
-}
-
-function updateArtistAlbumCount(artistId: string) {
-  const row = sqlite.prepare("SELECT COUNT(*) AS cnt FROM albums WHERE artist_id = ?").get(artistId) as { cnt: number };
-  const count = Number(row?.cnt || 0);
-  db.update(artists).set({ albumCount: count, updatedAt: new Date().toISOString() }).where(eq(artists.id, artistId)).run();
-}
+// the flush) and multi-row song inserts. Count refresh collapses all touched
+// albums/artists into two grouped aggregates (GROUP BY) instead of one
+// aggregate query per album/artist.

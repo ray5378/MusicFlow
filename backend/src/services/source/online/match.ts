@@ -127,16 +127,40 @@ function linkPlaylistEntry(playlistId: string, entryId: number, songId: string) 
 }
 
 /**
+ * 搜索结果缓存条目(searchBestMatch 复用)。key 由 (title,artist) 归一化得出。
+ * 同一歌单内的重复标题/歌手(同专辑多曲、不同 source id 的同一首歌)不必重复
+ * 在线搜索——命中直接沿用 first 结果,省下网络往返与搜索打分 CPU。
+ */
+export interface SearchMatchCache {
+  status: "matched" | "no-match" | "error";
+  best?: OnlineSongResult;
+  score?: number;
+  message?: string;
+}
+
+/**
  * 搜索 + 打分选 best(不落库)。供批量匹配(两阶段:先搜索收集,后批量导入)
  * 与单首实时匹配(match-track)复用——批量场景下避免逐首导入带来的
  * 每首独立计数刷新 + 独立去重查询(DB 阻塞放大)。
+ *
+ * @param cache 批内可选结果缓存(按 (title,artist) 归一化 key 记忆)。传入时,
+ *              同一歌单内重复的标题重复搜索直接复用首次结果;未传则每次真实搜索
+ *              (单首实况匹配路径,保持原行为)。缓存只记忆资源结果,不记忆 DB 产物。
  */
 export async function searchBestMatch(
   providerId: string,
   config: any,
   provider: any,
   want: MatchTarget,
+  cache?: Map<string, SearchMatchCache>,
 ): Promise<{ entryId: number; title: string; status: "matched" | "no-match" | "error"; best?: OnlineSongResult; score?: number; message?: string }> {
+  // P0 直通已在上层(onlineSongFromExternalId)拦截;到这里的都是需要服务端搜索的。
+  const cacheKey = cache ? `${normalizeTitleStrict(want.title)}|${normalizeTitleStrict(want.artist || "")}` : "";
+  if (cache && cache.has(cacheKey)) {
+    const hit = cache.get(cacheKey)!;
+    return { entryId: want.entryId, title: want.title, status: hit.status, best: hit.best, score: hit.score, message: hit.message };
+  }
+
   const query = [want.title, want.artist].filter(Boolean).join(" ").trim();
   if (!query) return { entryId: want.entryId, title: want.title, status: "no-match", message: "缺少歌曲标题" };
   if (!provider.search) return { entryId: want.entryId, title: want.title, status: "error", message: "provider 不支持搜索" };
@@ -161,9 +185,13 @@ export async function searchBestMatch(
   const artistOk = !primary || artistTokens(best.s.artist || "")
     .some((ca) => primary === ca || primary.includes(ca) || ca.includes(primary));
   if (best.score < 15 || !titleOk || !artistOk) {
-    return { entryId: want.entryId, title: want.title, status: "no-match", message: `未可靠匹配(${best.s.name})` };
+    const out = { entryId: want.entryId, title: want.title, status: "no-match" as const, message: `未可靠匹配(${best.s.name})` };
+    if (cache) cache.set(cacheKey, { status: "no-match", message: out.message });
+    return out;
   }
-  return { entryId: want.entryId, title: want.title, status: "matched", best: best.s, score: best.score };
+  const out = { entryId: want.entryId, title: want.title, status: "matched" as const, best: best.s, score: best.score };
+  if (cache) cache.set(cacheKey, { status: "matched", best: best.s, score: best.score });
+  return out;
 }
 
 // Attempt to match a single unmatched track via the online provider, importing
@@ -236,6 +264,9 @@ export async function matchUnmatchedPlaylistEntries(
 
   // ---- 阶段1:并发搜索 + 打分(不落库),每 10 首让行 ----
   // P0:有 source:id 的条目直通(构造歌曲,免搜索),只有真正需要搜索的才计入节流。
+  // 批内结果缓存:同一歌单里重复 (title,artist)(同专辑多曲、多 source id 的同一首)
+  // 只发一次真实在线搜索,后续命中直接沿用 first 结果(截断重复网络往返 + 打分 CPU)。
+  const searchCache = new Map<string, SearchMatchCache>();
   let searchedSinceSleep = 0;
   const worker = async () => {
     while (next < entries.length) {
@@ -254,7 +285,7 @@ export async function matchUnmatchedPlaylistEntries(
       if (known) {
         m = { entryId: target.entryId, title: target.title, status: "matched", best: known, score: 100 };
       } else {
-        m = await searchBestMatch(providerId, config, provider, target);
+        m = await searchBestMatch(providerId, config, provider, target, searchCache);
         // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
         // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。仅对真实网络搜索节流。
         searchedSinceSleep++;
@@ -283,21 +314,28 @@ export async function matchUnmatchedPlaylistEntries(
     const byFp = new Map<string, string>();
     for (const s of imp.songs) byFp.set(s.fingerprint, s.id);
 
-    // 分块事务链接:每 TX_CHUNK 首一个事务提交(避免超大歌单单事务持锁时间过长,
-    // 提交瞬间 CPU 高峰),块间同样主动睡眠节流。
+    // 只保留真正链接成功的 (entryId → songId) 对(byFp 命中的)。
+    const linkPairs = Array.from(matchedByEntry.entries())
+      .map(([entryId, v]) => ({ entryId, songId: byFp.get(v.fp) }))
+      .filter((x): x is { entryId: number; songId: string } => !!x.songId);
+    matched = linkPairs.length;
+
+    // 分块事务链接:每块用【单条 CASE UPDATE】替掉逐 entry 的 N 次 UPDATE(prepare+run
+    // 每次),块提交避免超大歌单单事务持锁时间过长。块间主动睡眠节流。
     const TX_CHUNK = 200;
-    const linkPairs = Array.from(matchedByEntry.entries());
     for (let off = 0; off < linkPairs.length; off += TX_CHUNK) {
       const chunk = linkPairs.slice(off, off + TX_CHUNK);
       sqlite.transaction(() => {
-        for (const [entryId, v] of chunk) {
-          const songId = byFp.get(v.fp);
-          if (!songId) continue;
-          db.update(playlistSongs)
-            .set({ songId, playable: 1, unavailableReason: null })
-            .where(eq(playlistSongs.id, entryId))
-            .run();
-        }
+        const ids = chunk.map((c) => c.entryId);
+        const idPh = ids.map(() => "?").join(",");
+        const songCases = chunk.map(() => "WHEN ? THEN ?").join(" ");
+        const songArgs: any[] = [];
+        for (const c of chunk) songArgs.push(c.entryId, c.songId);
+        // CASE id WHEN entry THEN song END → 每行写回各自 song_id;WHERE id IN 限定本块,
+        // 未命中分支的 id 不会出现在 IN 内,因此 ELSE 分支不会被走到(缺省为 NULL 也无妨)。
+        sqlite
+          .prepare(`UPDATE playlist_songs SET song_id = CASE id ${songCases} END, playable = 1, unavailable_reason = NULL WHERE id IN (${idPh})`)
+          .run(...songArgs, ...ids);
       })();
       if (off + TX_CHUNK < linkPairs.length) await sleepBetweenBatch();
     }
@@ -311,7 +349,6 @@ export async function matchUnmatchedPlaylistEntries(
       const songId = byFp.get(v.fp);
       if (songId) {
         results[i] = { entryId: entries[i].id, title: v.title, status: "matched", songId, matchedSource: v.best.source, matchedName: v.best.name, message: "已导入" };
-        matched++;
       } else {
         results[i] = { entryId: entries[i].id, title: v.title, status: "error", message: "批量导入失败" };
         error++;
