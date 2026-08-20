@@ -34,7 +34,7 @@ import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { clearLibraryIndex } from "./libraryIndex.js";
-import { copyCoverToFile, clearPlaylistCoverCache, firstPlayableCoverFile } from "../playlistCover.js";
+import { clearPlaylistCoverCache, pickDailyRotatedCover } from "../playlistCover.js";
 import { getPluginConfig } from "../../plugins/registry.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
@@ -602,13 +602,13 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
       .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
   }
 
-  // 封面:从歌单自身可播条目(按 position 顺序)取第一首有封面的歌——确定性,
-  // 内容不变则封面不变(不再全库随机/每次刷新抖动)。无封面时清掉旧缓存文件。
+  // 封面:取歌单自身可播条目中某首有封面歌曲的封面 ref(同一首封面每天固定,
+  // 跨天自动轮换成另一首的封面;被其它固定推荐歌单占用的 ref 自动跳过,保证各
+  // 固定歌单封面两两不同)。无封面时清掉旧缓存文件。
   let coverRef: string | null = null;
-  const ownCover = firstPlayableCoverFile(playlistId);
+  const ownCover = pickDailyRotatedCover(playlistId, { dateStr });
   if (ownCover) {
-    const copied = copyCoverToFile(`pl-${playlistId}.jpg`, ownCover);
-    if (copied) coverRef = copied;
+    coverRef = ownCover;
   } else {
     clearPlaylistCoverCache(playlistId);
   }

@@ -15,6 +15,7 @@ import {
 } from "../../src/services/plugin/dailyRoam.js";
 import { FIXED_TODAY_ID } from "../../src/services/plugin/dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "../../src/services/plugin/localRecommend.js";
+import { resetDailyCoverClaims } from "../../src/services/playlistCover.js";
 
 // daily-roam「今日漫游」:合并 每日推荐 + 本地推荐 可播放条目,去重重建。
 // 源歌单默认取两个固定 id(配置 sourcePlaylists 可改)。
@@ -58,8 +59,10 @@ beforeAll(() => {
   seedSongs(100);
 });
 
-// 每个用例前清空涉及歌单,保证隔离(歌单行保留即可,清 entries)。
+// 每个用例前清空涉及歌单,保证隔离(歌单行保留即可,清 entries)。同时重置
+// 按天封面认领表,防止用例间互相影响。
 beforeEach(() => {
+  resetDailyCoverClaims();
   for (const id of [ROAM_PLAYLIST_ID, FIXED_TODAY_ID, LOCAL_FIXED_PLAYLIST_ID, "pl-x"]) {
     sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(id);
     sqlite.prepare("UPDATE playlists SET song_count = 0, duration = 0, comment = '' WHERE id = ?").run(id);
@@ -170,5 +173,56 @@ describe("generateRoamPlaylist (今日漫游组合)", () => {
     expect(first).toBe("al-stable"); // 取第一首有封面的歌(s0)
     expect(second).toBe(first);      // 内容没变 → 封面必须不变
     sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art = 'al-stable'").run();
+  });
+
+  it("与其它固定歌单当天封面互斥(自定义 sourcePlaylists 只合并今日,也应换一首有封面的歌)", async () => {
+    // 每日推荐与今日漫游内容完全一致(漫游只合并每日推荐)时,封面也不得与每日推荐相同。
+    setRoamConfig({ sourcePlaylists: [FIXED_TODAY_ID] });
+    const covers = ["al-a", "al-b"];
+    for (const [i, ref] of covers.entries()) {
+      sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id = ?").run(ref, `s${i}`);
+      fs.mkdirSync(path.join(process.env.DATA_DIR as string, "covers"), { recursive: true });
+      fs.writeFileSync(path.join(process.env.DATA_DIR as string, "covers", ref), "x");
+    }
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 2);
+    // 调度顺序:每日推荐先于今日漫游生成;模拟每日推荐当天先认领封面。
+    const { pickDailyRotatedCover } = await import("../../src/services/playlistCover.js");
+    const todayPick = pickDailyRotatedCover(FIXED_TODAY_ID, {});
+    expect(["al-a", "al-b"]).toContain(todayPick);
+
+    const r = generateRoamPlaylist({ force: true });
+    expect(r.skipped).toBe(false);
+    const row = sqlite.prepare("SELECT cover_art FROM playlists WHERE id = ?").get(ROAM_PLAYLIST_ID) as any;
+    // 漫游排除今日已认领的封面,封面不得与之相同。
+    expect(row.cover_art).not.toBe(todayPick);
+    expect(row.cover_art).not.toBeNull();
+    sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art IN ('al-a','al-b')").run();
+    resetDailyCoverClaims();
+  });
+
+  it("封面按天轮换:不同日期取到不同封面,且与已占用封面互斥", async () => {
+    const { pickDailyRotatedCover, resetDailyCoverClaims } = await import("../../src/services/playlistCover.js");
+    const covers = ["al-r1", "al-r2", "al-r3"];
+    for (const [i, ref] of covers.entries()) {
+      sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id = ?").run(ref, `s${i}`);
+      fs.mkdirSync(path.join(process.env.DATA_DIR as string, "covers"), { recursive: true });
+      fs.writeFileSync(path.join(process.env.DATA_DIR as string, "covers", ref), "x");
+    }
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 3);
+
+    // 同一天内重复取 → 结果稳定。
+    const a1 = pickDailyRotatedCover(FIXED_TODAY_ID, { dateStr: "2026-08-20" });
+    const a2 = pickDailyRotatedCover(FIXED_TODAY_ID, { dateStr: "2026-08-20" });
+    expect(a1).toBe(a2);
+
+    // 次日 → 轮换到另一张。
+    const b = pickDailyRotatedCover(FIXED_TODAY_ID, { dateStr: "2026-08-21" });
+    expect(b).not.toBe(a1);
+
+    // 互斥:已被其它歌单认领的封面不再被选中(排除后从剩余候选取)。
+    const c1 = pickDailyRotatedCover(ROAM_PLAYLIST_ID, { dateStr: "2026-08-20", excludeRefs: [a1!] });
+    expect(c1).not.toBe(a1);
+    sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art IN ('al-r1','al-r2','al-r3')").run();
+    resetDailyCoverClaims();
   });
 });

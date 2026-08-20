@@ -178,13 +178,32 @@ export function clearPlaylistCoverCache(playlistId: string) {
   } catch { /* ignore */ }
 }
 
-// 共享:取歌单自身可播条目中「第一首有封面」的歌曲封面**文件名**。
-// 优先级:opts.preferSongId 指定歌曲的封面(歌曲封面 > 专辑封面);否则按条目
-// position 顺序扫歌单(歌曲封面 > 专辑封面)。返回的文件名确保在封面目录真实
-// 存在(resolveCoverFile 校验),文件缺失则继续找下一首;都没有返回 null。
-// 单条聚合 SQL + 少量候选,替代旧 N+1 逐条循环。供内置推荐插件(dailyRecommend/
-// dailyRoam/localRecommend)与外置歌单宿主(discovery)统一使用。
-export function firstPlayableCoverFile(playlistId: string, opts?: { preferSongId?: string | null }): string | null {
+// 共享:取歌单自身可播条目中所有「有封面」歌曲的封面**文件名**列表
+// (按 position 顺序、去重、且确保在封面目录真实存在,resolveCoverFile 校验)。
+// 优先级:opts.preferSongId 指定歌曲的封面(歌曲封面 > 专辑封面)排最前;随后按
+// 条目 position 顺序扫歌单(歌曲封面 > 专辑封面)。opts.excludeRefs 提供要排挤
+// 掉的封面 ref 集合(供多张固定推荐卡封面互不重复)。单条聚合 SQL + 少量候选,
+// 替代旧 N+1 逐条循环。供内置推荐插件(dailyRecommend/dailyRoam/localRecommend)
+// 与外置歌单宿主(discovery)统一使用。
+export interface CoverPickOptions {
+  preferSongId?: string | null;
+  /** 需要忽略的封面 ref(返回列表中将完全排除,用于多歌单封面互斥)。 */
+  excludeRefs?: string[];
+}
+
+export function listPlayableCoverRefs(playlistId: string, opts?: CoverPickOptions): string[] {
+  const exclude = new Set<string>(opts?.excludeRefs ?? []);
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  const pushRef = (ref: string | null | undefined) => {
+    if (!ref) return;
+    if (exclude.has(ref) || seen.has(ref)) return;
+    if (!resolveCoverFile(ref)) return;
+    seen.add(ref);
+    result.push(ref);
+  };
+
   const prefer = opts?.preferSongId;
   if (prefer) {
     const p = sqlite.prepare(`
@@ -193,7 +212,7 @@ export function firstPlayableCoverFile(playlistId: string, opts?: { preferSongId
       WHERE s.id = ?
     `).get(prefer) as { songCover: string | null; albumCover: string | null } | undefined;
     const c = p ? (p.songCover && p.songCover.trim() ? p.songCover : p.albumCover || null) : null;
-    if (c && resolveCoverFile(c)) return c;
+    pushRef(c);
   }
   const rows = sqlite.prepare(`
     SELECT
@@ -208,10 +227,70 @@ export function firstPlayableCoverFile(playlistId: string, opts?: { preferSongId
     ORDER BY ps.position ASC
     LIMIT 50
   `).all(playlistId) as { coverFile: string | null }[];
-  for (const r of rows) {
-    if (r.coverFile && resolveCoverFile(r.coverFile)) return r.coverFile;
+  for (const r of rows) pushRef(r.coverFile);
+  return result;
+}
+
+/** 取歌单自身可播条目中「第一首有封面」的歌曲封面**文件名**(列表首项)。 */
+export function firstPlayableCoverFile(playlistId: string, opts?: CoverPickOptions): string | null {
+  return listPlayableCoverRefs(playlistId, opts)[0] ?? null;
+}
+
+/**
+ * 按天轮换取歌单封面:列表按 position 去重排序后,用「距 epoch 的天数」对列表
+ * 长度取模 —— 同一天确定(内容不变则封面固定),跨天自动轮换一张(内容不变也换)。
+ *
+ * 封面互斥(可扩展):同一进程内所有固定推荐歌单当天生成时共享一张「已认领封面
+ * 注册表」——每个歌单会自动跳过其它歌单当天已认领的封面 ref,保证任意数量固定
+ * 歌单的封面两两不同;仅凭候选全部被占用时回退完整候选首项,保持有封面的行为。
+ * opts.excludeRefs 可额外指定禁用的 ref。
+ * opts.dateStr 供调用方注入当日 YYYY-MM-DD(默认取系统当天,与 todayStr 同源)。
+ */
+const claimedCoversByDay = new Map<string, Map<string, Set<string>>>();
+
+/** 测试/重跑用:清空按天封面认领表。 */
+export function resetDailyCoverClaims(): void {
+  claimedCoversByDay.clear();
+}
+
+export function pickDailyRotatedCover(playlistId: string, opts?: CoverPickOptions & { dateStr?: string }): string | null {
+  const s = opts?.dateStr;
+  const d = s ? new Date(`${s}T00:00:00Z`) : new Date();
+  const dateKey = s ?? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const dayIndex = Math.floor(Date.parse(`${dateKey}T00:00:00Z`) / 86400000);
+
+  // 当天已认领集合:其他歌单认领的 ref 全部排除,本歌单自己的认领不排除(可覆盖)。
+  let claims = claimedCoversByDay.get(dateKey);
+  if (!claims) {
+    claims = new Map();
+    claimedCoversByDay.set(dateKey, claims);
   }
-  return null;
+  const others = new Set<string>();
+  for (const [pid, refs] of claims) {
+    if (pid !== playlistId) for (const r of refs) others.add(r);
+  }
+  for (const r of opts?.excludeRefs ?? []) others.add(r);
+
+  const refs = listPlayableCoverRefs(playlistId, { preferSongId: opts?.preferSongId, excludeRefs: [...others] });
+  let pick: string | null;
+  if (refs.length === 0) {
+    // 候选全部被排除(库内可用封面有限)——回退到完整候选(不排挤),照常有封面。
+    const all = listPlayableCoverRefs(playlistId, { preferSongId: opts?.preferSongId });
+    pick = all[0] ?? null;
+  } else {
+    pick = refs[dayIndex % refs.length];
+  }
+  if (pick) {
+    const mine = claims.get(playlistId) ?? new Set<string>();
+    mine.add(pick);
+    claims.set(playlistId, mine);
+  }
+  // 只保留最近 7 天,防止内存无界增长。
+  if (claimedCoversByDay.size > 7) {
+    const oldest = claimedCoversByDay.keys().next().value;
+    if (oldest !== undefined) claimedCoversByDay.delete(oldest);
+  }
+  return pick;
 }
 
 // Resolve playlist cover: serve the cached local image (either downloaded for
