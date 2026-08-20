@@ -40,25 +40,31 @@
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <div class="artist-grid" v-if="isLocalMode" v-loading="loading">
+    <div class="artist-grid" v-if="isLocalMode" ref="cardGrid.gridEl" v-loading="loading">
+      <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
+        v-if="g.item"
         class="artist-card"
-        v-for="artist in artists"
-        :key="artist.id"
-        @contextmenu="openContextMenu($event, artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
-        v-longpress="() => openActionSheet(artistActions(artist), artist.name, formatAlbumCount(artist.albumCount))"
+        @contextmenu="openContextMenu($event, artistActions(g.item), g.item.name, formatAlbumCount(g.item.albumCount))"
+        v-longpress="() => openActionSheet(artistActions(g.item), g.item.name, formatAlbumCount(g.item.albumCount))"
       >
-        <div class="artist-avatar mf-coverwrap" @click="open(artist)">
-          <img v-if="artist.coverArt" :src="coverUrl(artist.coverArt)" loading="lazy" decoding="async" />
+        <div class="artist-avatar mf-coverwrap" @click="open(g.item)">
+          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48"  /></div>
-          <el-tooltip v-if="artist.scrapeMissing" content="缺失歌手信息(当前为专辑封面兜底)" placement="top">
+          <el-tooltip v-if="g.item.scrapeMissing" content="缺失歌手信息(当前为专辑封面兜底)" placement="top">
             <el-tag size="small" type="warning" class="missing-tag">缺信息</el-tag>
           </el-tooltip>
-          <CoverPlay size="md" :label="`播放 ${artist.name} 的歌曲`" :action="() => playAr(artist)" />
+          <CoverPlay size="md" :label="`播放 ${g.item.name} 的歌曲`" :action="() => playAr(g.item)" />
         </div>
-        <div class="artist-name" @click="open(artist)">{{ artist.name }}</div>
-        <div class="artist-meta" @click="open(artist)">{{ formatAlbumCount(artist.albumCount) }}</div>
+        <div class="artist-name" @click="open(g.item)">{{ g.item.name }}</div>
+        <div class="artist-meta" @click="open(g.item)">{{ formatAlbumCount(g.item.albumCount) }}</div>
       </div>
+      <div v-else class="artist-card is-placeholder">
+        <div class="artist-avatar ph-avatar"></div>
+        <div class="artist-name ph-bar"></div>
+        <div class="artist-meta ph-bar short"></div>
+      </div>
+      </template>
     </div>
 
     <!-- 远程搜索结果(插件模式):由启用的 artistSearch 插件提供,仅展示(发现用,无导入) -->
@@ -88,23 +94,19 @@
         :item="remoteDetailItem"
       />
     </div>
-
-    <div class="pagination-bar" v-if="isLocalMode">
-      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="artistsPageSize" @change="onPageChange" />
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
-import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { useEntitySearch, playRemoteCollection } from "@/composables/useEntitySearch";
+import { useCardGrid } from "@/composables/useCardGrid";
 import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 
@@ -154,36 +156,40 @@ async function playRemoteAr(item: any) {
   if (n) ElMessage.success(`正在播放「${item.name}」的 ${n} 首歌曲`);
   else ElMessage.warning("该艺人暂无可播放歌曲");
 }
-const artists = ref<any[]>([]);
-const loading = ref(false);
+// 本地艺术家网格:窗口化分块加载(与 HA 卡片同构),整页展示 + 滚动懒加载 + 越界剪枝。
+const cardGrid = useCardGrid<any>(
+  async (offset, size) => {
+    const page = Math.floor(offset / size) + 1;
+    const res = await api.get("/rest/api/v1/artists", {
+      params: { page, pageSize: size, query: searchQuery.value },
+    });
+    return { items: res.data.items || [], total: res.data.total || 0 };
+  },
+  // 艺术家卡片为「圆形头像(固定120) + 文字」,行高不随卡宽线性变化 → 用固定行高。
+  { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 160, gap: 18, rowHeight: 212 }
+);
+const loading = cardGrid.loading;
+const gridViews = computed(() => {
+  const start = cardGrid.startIndex.value;
+  const end = cardGrid.endIndex.value;
+  const arr: { idx: number; item: any }[] = [];
+  for (let i = Math.max(0, start); i < end; i++) arr.push({ idx: i, item: cardGrid.list.value[i] });
+  return arr;
+});
 const scraping = ref(false);
 const searchQuery = ref("");
-const currentPage = ref(1);
-const total = ref(0);
-const pageSize = ref(parseInt(localStorage.getItem("artistsPageSize") || "25"));
-if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
 
 // Scrape progress polling
 const scrapeProgress = ref<any>(null);
 const scrapeRunning = computed(() => scrapeProgress.value?.status === "running");
 let scrapeTimer: ReturnType<typeof setInterval> | null = null;
-
 const scrapingMissing = ref(false);
 const missingCount = ref(0);
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function loadArtists() {
-  loading.value = true;
-  try {
-    const res = await api.get("/rest/api/v1/artists", {
-      params: { page: currentPage.value, pageSize: pageSize.value, query: searchQuery.value },
-    });
-    artists.value = res.data.items || [];
-    total.value = res.data.total || 0;
-  } catch { artists.value = []; total.value = 0; }
-  finally { loading.value = false; }
-}
+// 重新拉取本地艺术家(窗口化)。
+async function loadArtists() { cardGrid.reload(); }
 
 // Count of artists marked missing-info (shown on the "仅刮削缺失" button)
 async function loadMissingCount() {
@@ -264,16 +270,9 @@ async function scrapeMissingArtists() {
   }
 }
 
-function onPageChange(page: number, size?: number) {
-  currentPage.value = page;
-  if (size) pageSize.value = size;
-  loadArtists();
-}
-
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    currentPage.value = 1;
     if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
     else loadArtists();
   }, 300);
@@ -281,7 +280,6 @@ function onSearchInput() {
 
 function onSearchClear() {
   if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
-  currentPage.value = 1;
   loadArtists();
 }
 
@@ -302,7 +300,11 @@ onMounted(() => {
   loadArtists();
   loadMissingCount();
   checkScrapeStatus();
+  nextTick(() => cardGrid.bindGrid());
 });
+
+// 首块拉到总数后重算一次可见窗口;之后由滚动驱动。
+watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
 
 // Stop the scrape-progress poll when leaving the page so the 1.5s interval
 // doesn't keep running (and issuing requests) in the background.
@@ -319,6 +321,14 @@ onUnmounted(() => {
   .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 }
 .artist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 18px; }
+.artist-card.is-placeholder {
+  cursor: default;
+  .ph-avatar { width: 120px; height: 120px; border-radius: 50%; margin: 0 auto 12px; background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 37%, rgba(255,255,255,0.05) 63%); background-size: 400% 100%; animation: mf-ph 1.2s ease-in-out infinite; }
+  .ph-bar { display: block; height: 12px; margin: 5px auto 0; width: 55%; border-radius: 6px; background: rgba(255,255,255,0.08);
+    &.short { width: 40%; }
+  }
+}
+@keyframes mf-ph { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 .artist-card {
   cursor: pointer; text-align: center; padding: 16px 12px;
   border-radius: var(--fnos-radius-lg);
@@ -342,7 +352,6 @@ onUnmounted(() => {
   .artist-name:hover { color: var(--fnos-red); }
   .artist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 5px; min-height: 16px; }
 }
-.pagination-bar { margin-top: 24px; display: flex; justify-content: center; }
 .search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
 .remote-results {
   .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }

@@ -19,26 +19,31 @@
         <el-input v-model="searchQuery" :placeholder="searchPlaceholder" prefix-icon="Search" clearable style="width: 300px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
-    <div class="album-grid" v-if="isLocalMode" v-loading="loading">
+    <div class="album-grid" v-if="isLocalMode" ref="cardGrid.gridEl" v-loading="loading">
+      <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
+        v-if="g.item"
         class="album-card fnos-card-sheen"
-        v-for="(album, idx) in albums"
-        :key="album.id"
-        :style="{ '--stagger': idx }"
-        @contextmenu="openContextMenu($event, albumActions(album), album.name, albumMeta(album))"
-        v-longpress="() => openActionSheet(albumActions(album), album.name, albumMeta(album))"
+        :style="{ '--stagger': g.idx }"
+        @contextmenu="openContextMenu($event, albumActions(g.item), g.item.name, albumMeta(g.item))"
+        v-longpress="() => openActionSheet(albumActions(g.item), g.item.name, albumMeta(g.item))"
       >
-        <div class="album-cover mf-coverwrap" @click="open(album)">
-          <img v-if="album.coverArt" :src="coverUrl(album.coverArt)" loading="lazy" decoding="async" />
+        <div class="album-cover mf-coverwrap" @click="open(g.item)">
+          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48"  /></div>
-          <CoverPlay size="md" :label="`播放 ${album.name}`" :action="() => playAl(album)" />
+          <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playAl(g.item)" />
         </div>
-        <div class="album-info" @click="open(album)">
-          <div class="album-name">{{ album.name }}</div>
-          <div class="album-artist">{{ album.artist }}</div>
-          <div class="album-meta">{{ album.year || '' }} {{ album.songCount }}首</div>
+        <div class="album-info" @click="open(g.item)">
+          <div class="album-name">{{ g.item.name }}</div>
+          <div class="album-artist">{{ g.item.artist }}</div>
+          <div class="album-meta">{{ g.item.year || '' }} {{ g.item.songCount }}首</div>
         </div>
       </div>
+      <div v-else class="album-card is-placeholder">
+        <div class="album-cover ph-cover"></div>
+        <div class="album-placeholder"><span class="ph-bar"></span><span class="ph-bar short"></span></div>
+      </div>
+      </template>
     </div>
 
     <!-- 远程搜索结果(插件模式):由启用的 albumSearch 插件(如 go-music-dl)提供,可「加入库」为专辑歌单 -->
@@ -80,23 +85,19 @@
         @imported="loadAlbums"
       />
     </div>
-
-    <div class="pagination-bar" v-if="isLocalMode">
-      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" storage-key="albumsPageSize" @change="onPageChange" />
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
-import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { useEntitySearch, playRemoteCollection } from "@/composables/useEntitySearch";
+import { useCardGrid } from "@/composables/useCardGrid";
 import api from "@/api";
 import { coverUrl } from "@/utils/cover";
 
@@ -145,38 +146,34 @@ async function playRemoteAl(item: any) {
   if (n) ElMessage.success(`正在播放「${item.name}」`);
   else ElMessage.warning("该专辑暂无可播放歌曲");
 }
-const albums = ref<any[]>([]);
-const loading = ref(false);
+// 本地专辑网格:窗口化分块加载(与 HA 卡片同构),整页展示 + 滚动懒加载 + 越界剪枝。
+const cardGrid = useCardGrid<any>(
+  async (offset, size) => {
+    const page = Math.floor(offset / size) + 1;
+    const res = await api.get("/rest/api/v1/albums", {
+      params: { page, pageSize: size, query: searchQuery.value },
+    });
+    return { items: res.data.items || [], total: res.data.total || 0 };
+  },
+  { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 180, gap: 20, coverRatio: 1, rowFooter: 80 }
+);
+const loading = cardGrid.loading;
+const gridViews = computed(() => {
+  const start = cardGrid.startIndex.value;
+  const end = cardGrid.endIndex.value;
+  const arr: { idx: number; item: any }[] = [];
+  for (let i = Math.max(0, start); i < end; i++) arr.push({ idx: i, item: cardGrid.list.value[i] });
+  return arr;
+});
 const searchQuery = ref("");
-const currentPage = ref(1);
-const total = ref(0);
-const pageSize = ref(parseInt(localStorage.getItem("albumsPageSize") || "25"));
-if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
-
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function loadAlbums() {
-  loading.value = true;
-  try {
-    const res = await api.get("/rest/api/v1/albums", {
-      params: { page: currentPage.value, pageSize: pageSize.value, query: searchQuery.value },
-    });
-    albums.value = res.data.items || [];
-    total.value = res.data.total || 0;
-  } catch { albums.value = []; total.value = 0; }
-  finally { loading.value = false; }
-}
-
-function onPageChange(page: number, size?: number) {
-  currentPage.value = page;
-  if (size) pageSize.value = size;
-  loadAlbums();
-}
+// 重新拉取本地专辑(窗口化)。
+async function loadAlbums() { cardGrid.reload(); }
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    currentPage.value = 1;
     if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
     else loadAlbums();
   }, 300);
@@ -184,7 +181,6 @@ function onSearchInput() {
 
 function onSearchClear() {
   if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
-  currentPage.value = 1;
   loadAlbums();
 }
 
@@ -198,7 +194,11 @@ onMounted(() => {
   setAfterRemoteImport(loadAlbums); // 「加入库」成功后刷新本地列表
   loadSearchProviders();
   loadAlbums();
+  nextTick(() => cardGrid.bindGrid());
 });
+
+// 首块拉到总数后重算一次可见窗口;之后由滚动驱动。
+watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
 </script>
 
 <style lang="scss" scoped>
@@ -215,6 +215,16 @@ onMounted(() => {
   .remote-import-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; }
 }
 .album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
+.album-card.is-placeholder {
+  cursor: default;
+  .ph-cover { aspect-ratio: 1; border-radius: var(--fnos-radius-lg); background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 37%, rgba(255,255,255,0.05) 63%); background-size: 400% 100%; animation: mf-ph 1.2s ease-in-out infinite; }
+  .album-placeholder { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px;
+    .ph-bar { height: 12px; width: 60%; border-radius: 6px; background: rgba(255,255,255,0.08);
+      &.short { width: 40%; }
+    }
+  }
+}
+@keyframes mf-ph { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 .album-card {
   cursor: pointer;
   border-radius: var(--fnos-radius-lg);
@@ -238,7 +248,6 @@ onMounted(() => {
     .album-meta { font-size: 11px; color: var(--fnos-text-muted); margin-top: 2px; }
   }
 }
-.pagination-bar { margin-top: 24px; display: flex; justify-content: center; }
 @keyframes home-card-in {
   from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: translateY(0); }

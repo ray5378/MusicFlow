@@ -58,54 +58,59 @@
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
-    <div v-if="isLocalMode" class="playlist-grid" v-loading="loading">
-      <!-- User playlists -->
+    <div v-if="isLocalMode" class="playlist-grid" ref="cardGrid.gridEl" v-loading="loading">
+      <!-- User playlists (windowed: only the visible tile range is mounted) -->
+      <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
+        v-if="g.item"
         class="playlist-card"
-        v-for="pl in playlists"
-        :key="pl.id"
-        @contextmenu="openContextMenu($event, cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
-        v-longpress="() => openActionSheet(cardActions(pl), pl.name, `${pl.songCount} 首 · ${formatDuration(pl.duration)}`)"
+        @contextmenu="openContextMenu($event, cardActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
+        v-longpress="() => openActionSheet(cardActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
       >
-        <div class="playlist-cover mf-coverwrap" @click.stop="open(pl)">
-          <PlatformBadge :source="pl.sourcePlatform" />
-          <img v-if="pl.coverArt" :src="coverUrl(pl.coverArt)" loading="lazy" decoding="async" />
+        <div class="playlist-cover mf-coverwrap" @click.stop="open(g.item)">
+          <PlatformBadge :source="g.item.sourcePlatform" />
+          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
-          <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playAll(pl)" />
+          <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playAll(g.item)" />
         </div>
-        <div class="playlist-info" @click="open(pl)">
+        <div class="playlist-info" @click="open(g.item)">
           <div class="playlist-name">
-            {{ pl.name }}
-            <el-tag v-if="pl.sourcePlatform" size="small" style="margin-left: 4px">{{ pl.sourcePlatform === 'qq' ? 'QQ' : pl.sourcePlatform === 'netease' ? '网易云' : pl.sourcePlatform === 'kugou' ? '酷狗' : pl.sourcePlatform === 'kuwo' ? '酷我' : pl.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag>
-            <el-tag v-if="pl.public" size="small" type="success" style="margin-left: 4px">公开</el-tag>
+            {{ g.item.name }}
+            <el-tag v-if="g.item.sourcePlatform" size="small" style="margin-left: 4px">{{ g.item.sourcePlatform === 'qq' ? 'QQ' : g.item.sourcePlatform === 'netease' ? '网易云' : g.item.sourcePlatform === 'kugou' ? '酷狗' : g.item.sourcePlatform === 'kuwo' ? '酷我' : g.item.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag>
+            <el-tag v-if="g.item.public" size="small" type="success" style="margin-left: 4px">公开</el-tag>
           </div>
           <div class="playlist-meta">
-            <span>{{ pl.songCount }}首 · {{ formatDuration(pl.duration) }}</span>
-            <MfIcon v-if="pl.favorite" name="Heart" :filled="true" :size="13" class="pl-fav-heart" />
+            <span>{{ g.item.songCount }}首 · {{ formatDuration(g.item.duration) }}</span>
+            <MfIcon v-if="g.item.favorite" name="Heart" :filled="true" :size="13" class="pl-fav-heart" />
           </div>
-          <div class="playlist-sub" v-if="pl.isImported && pl.created">导入于 {{ formatCreated(pl.created) }}</div>
+          <div class="playlist-sub" v-if="g.item.isImported && g.item.created">导入于 {{ formatCreated(g.item.created) }}</div>
         </div>
-        <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleCardCommand(cmd, pl)">
+        <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleCardCommand(cmd, g.item)">
           <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
-              <el-dropdown-item v-if="pl.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
-              <el-dropdown-item v-else-if="pl.pluginSynced" command="refresh"><MfIcon name="RefreshCw" />刷新</el-dropdown-item>
-              <el-dropdown-item v-if="pl.isDaily" command="convertLocal"><MfIcon name="Pin" />转成本地永久歌单</el-dropdown-item>
+              <el-dropdown-item v-if="g.item.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
+              <el-dropdown-item v-else-if="g.item.pluginSynced" command="refresh"><MfIcon name="RefreshCw" />刷新</el-dropdown-item>
+              <el-dropdown-item v-if="g.item.isDaily" command="convertLocal"><MfIcon name="Pin" />转成本地永久歌单</el-dropdown-item>
               <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
               <el-dropdown-item command="export"><MfIcon name="Download" />导出</el-dropdown-item>
               <el-dropdown-item command="favorite">
-                <MfIcon name="Heart" :filled="pl.favorite" :size="14" />{{ pl.favorite ? '取消收藏' : '收藏歌单' }}
+                <MfIcon name="Heart" :filled="g.item.favorite" :size="14" />{{ g.item.favorite ? '取消收藏' : '收藏歌单' }}
               </el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
-                <MfIcon name="Wand2" />{{ pl._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
+                <MfIcon name="Wand2" />{{ g.item._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
               </el-dropdown-item>
               <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />删除歌单</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
       </div>
+      <div v-else class="playlist-card is-placeholder">
+        <div class="playlist-cover ph-cover"></div>
+        <div class="playlist-placeholder"><span class="ph-bar"></span><span class="ph-bar short"></span></div>
+      </div>
+      </template>
     </div>
 
     <!-- 平台(插件)歌单搜索结果:由启用的 playlistSearch 插件(如 go-music-dl)提供,可「加入库」 -->
@@ -147,10 +152,6 @@
         :item="remoteDetailItem"
         @imported="loadPlaylists"
       />
-    </div>
-
-    <div class="pagination-bar" v-if="isLocalMode">
-      <PagePagination :total="total" :page="currentPage" :page-size="pageSize" :sizes="[15, 20, 50, 100]" storage-key="playlistsPageSize" @change="onPageChange" />
     </div>
 
     <el-dialog v-model="showCreateDialog" title="新建歌单" width="400px" :append-to-body="true">
@@ -211,13 +212,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
 import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
-import PagePagination from "@/components/PagePagination.vue";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
 import { playRemoteCollection } from "@/composables/useEntitySearch";
+import { useCardGrid } from "@/composables/useCardGrid";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Play, Folder, RefreshCw, Pencil, Wand2, Trash2, Download, Pin, Heart } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
@@ -259,8 +260,39 @@ function cardActions(pl: any): MenuAction[] {
   return acts;
 }
 
-const playlists = ref<any[]>([]);
-const loading = ref(false);
+// 本地歌单网格:窗口化分块加载(与 HA 卡片同构)。整页展示 + 滚动懒加载:
+// 数据按块 fetch,仅视口窗口渲染,越界剪枝,内存不随浏览条目数增长。
+const cardGrid = useCardGrid<any>(
+  async (offset, size) => {
+    const page = Math.floor(offset / size) + 1;
+    const res = await api.get("/rest/api/v1/playlists", {
+      params: {
+        page,
+        pageSize: size,
+        query: searchQuery.value,
+        ...(activeFilter.value === "local" ? { local: "1" } : {}),
+        ...(activeFilter.value === "favorite" ? { favorite: "1" } : {}),
+        ...(activeFilter.value && activeFilter.value !== "local" && activeFilter.value !== "favorite" ? { platform: activeFilter.value } : {}),
+        ...(sortMode.value ? { sort: sortMode.value } : {}),
+      },
+    });
+    const items = res.data.items || [];
+    // 逐条标注推荐池状态,按钮文案才能正确显示「加入/移出每日推荐池」。
+    for (const pl of items) pl._inPool = poolPlaylistIds.value.has(pl.id);
+    return { items, total: res.data.total || 0 };
+  },
+  { chunk: 60, keepRows: 80, prefetchBlocks: 1, concurrency: 2, minTileWidth: 220, gap: 18, coverRatio: 1, rowFooter: 64 }
+);
+const loading = cardGrid.loading;
+// 窗口化渲染辅助:当前可见卡片区间(全局下标)+ 列数。
+const gridViews = computed(() => {
+  const start = cardGrid.startIndex.value;
+  const end = cardGrid.endIndex.value;
+  const arr: { idx: number; item: any }[] = [];
+  for (let i = Math.max(0, start); i < end; i++) arr.push({ idx: i, item: cardGrid.list.value[i] });
+  return arr;
+});
+
 const searchQuery = ref("");
 // 搜索模式:local=本地库搜索(现状) | <pluginId>=平台(插件)歌单搜索
 const searchMode = ref("local");
@@ -274,10 +306,6 @@ const currentProviderName = computed(() => currentProvider.value?.name || "平�
 // 搜索来源下拉按钮文案:本地模式显示「本地」,插件模式显示插件名
 const currentSourceLabel = computed(() => isLocalMode.value ? "本地" : (currentProvider.value?.name || "本地"));
 const searchPlaceholder = computed(() => isLocalMode.value ? "搜索歌单..." : `搜索${currentProviderName.value}全网歌单...`);
-const currentPage = ref(1);
-const total = ref(0);
-const pageSize = ref(parseInt(localStorage.getItem("playlistsPageSize") || "20"));
-if (![15, 20, 50, 100].includes(pageSize.value)) pageSize.value = 20;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showManageMenu = ref(false);
 // 歌单筛选:空=全部 | local=本地歌单 | favorite=收藏的歌单 | 平台值(netease/qq/kugou/kuwo)
@@ -295,12 +323,10 @@ const activeFilter = ref("");
 function filterName(key: string) { return FILTERS.find(f => f.key === key)?.label || PLATFORM_NAMES[key] || key || "全部"; }
 function onFilterCommand(key: string) {
   activeFilter.value = key;
-  currentPage.value = 1;
   loadPlaylists();
 }
 function clearFilter() {
   activeFilter.value = "";
-  currentPage.value = 1;
   loadPlaylists();
 }
 // 歌单排序:按创建时间/名称升序降序;空=后端默认(每日推荐优先+最近更新)
@@ -315,7 +341,6 @@ const sortMode = ref("");
 const sortLabel = computed(() => SORTS.find(s => s.key === sortMode.value)?.label || "默认(推荐优先)");
 function onSortCommand(key: string) {
   sortMode.value = key;
-  currentPage.value = 1;
   loadPlaylists();
 }
 const showCreateDialog = ref(false);
@@ -561,30 +586,10 @@ function formatCreated(t: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// 重新拉取本地歌单(窗口化):更新推荐池状态后重置并补拉窗口所在块。
 async function loadPlaylists() {
-  loading.value = true;
-  try {
-    const res = await api.get("/rest/api/v1/playlists", {
-      params: {
-        page: currentPage.value,
-        pageSize: pageSize.value,
-        query: searchQuery.value,
-        ...(activeFilter.value === "local" ? { local: "1" } : {}),
-        ...(activeFilter.value === "favorite" ? { favorite: "1" } : {}),
-        ...(activeFilter.value && activeFilter.value !== "local" && activeFilter.value !== "favorite" ? { platform: activeFilter.value } : {}),
-        ...(sortMode.value ? { sort: sortMode.value } : {}),
-      },
-    });
-    playlists.value = res.data.items || [];
-    total.value = res.data.total || 0;
-    // Annotate each playlist with its recommend-pool membership so the
-    // dropdown item label can toggle.
-    await loadPoolStatus();
-    for (const pl of playlists.value) {
-      pl._inPool = poolPlaylistIds.value.has(pl.id);
-    }
-  } catch { playlists.value = []; total.value = 0; }
-  finally { loading.value = false; }
+  await loadPoolStatus();
+  cardGrid.reload();
 }
 
 // Fetch the full recommend-pool list once, then derive the playlist-id set
@@ -601,27 +606,19 @@ async function loadPoolStatus() {
   }
 }
 
-function onPageChange(page: number, size?: number) {
-  currentPage.value = page;
-  if (size) pageSize.value = size;
-  loadPlaylists();
-}
-
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    currentPage.value = 1;
     if (isLocalMode.value) loadPlaylists();
     else doRemoteSearch();
   }, 300);
 }
 
-function onSearchClear() { currentPage.value = 1; if (isLocalMode.value) loadPlaylists(); else doRemoteSearch(); }
+function onSearchClear() { if (isLocalMode.value) loadPlaylists(); else doRemoteSearch(); }
 
 // 模式切换:清空远程结果;切到插件模式时若有关键词立即搜索;切回本地刷新列表
 function onSearchModeChange() {
   remoteResults.value = [];
-  currentPage.value = 1;
   if (isLocalMode.value) { loadPlaylists(); return; }
   if (searchQuery.value.trim()) doRemoteSearch();
 }
@@ -993,7 +990,10 @@ async function pollBusy() {
   } catch { /* 网络抖动忽略,维持上一次状态 */ }
 }
 
-onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); loadSearchProviders(); pollBusy(); busyTimer = setInterval(pollBusy, 4000); });
+onMounted(() => { loadPlaylists(); detectDailySource(); loadImportPlatforms(); loadSearchProviders(); pollBusy(); busyTimer = setInterval(pollBusy, 4000); nextTick(() => cardGrid.bindGrid()); });
+
+// 首块拉到总数后需要据此重算一次可见窗口;之后由滚动驱动。
+watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
 onUnmounted(() => {
   if (busyTimer) clearInterval(busyTimer);
   if (syncAllTimer.value) clearTimeout(syncAllTimer.value);
@@ -1033,6 +1033,17 @@ onUnmounted(() => {
   &:hover { background: rgba(255,255,255,0.08); color: var(--fnos-red); }
 }
 .playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px; }
+// 窗口化懒加载:未加载槽位占位卡(封面灰块 + 骨架条),块到达后由真实卡片替换。
+.playlist-card.is-placeholder {
+  cursor: default;
+  .ph-cover { aspect-ratio: 1; border-radius: 12px; background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 37%, rgba(255,255,255,0.05) 63%); background-size: 400% 100%; animation: mf-ph 1.2s ease-in-out infinite; }
+  .playlist-placeholder { padding: 10px 4px 0; display: flex; flex-direction: column; gap: 8px;
+    .ph-bar { height: 12px; width: 60%; border-radius: 6px; background: rgba(255,255,255,0.08);
+      &.short { width: 40%; }
+    }
+  }
+}
+@keyframes mf-ph { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 .playlist-card {
   position: relative; cursor: pointer;
   border-radius: var(--fnos-radius-lg);

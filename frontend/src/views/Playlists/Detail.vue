@@ -33,12 +33,12 @@
       </div>
     </div>
     <SongTable
-      :songs="songs"
-      :offset="(currentPage - 1) * pageSize"
+      :songs="list"
       :selectable="!isMobile"
       :loading="loading"
       allow-unmatched-play
       :extra-actions="playlistRowActions"
+      :on-window="onWindow"
       @play="playSong"
       @select="onSelectionChange"
     >
@@ -52,18 +52,6 @@
       <span>已选 {{ selectedSongs.length }} 首</span>
       <el-button size="small" type="danger" plain @click="removeSelected">批量移除</el-button>
       <el-button size="small" @click="playSelected">播放所选</el-button>
-    </div>
-    <div class="pagination-bar">
-      <el-pagination
-        layout="total, sizes, prev, pager, next, jumper"
-        :total="total"
-        :page-size="pageSize"
-        :page-sizes="[15, 25, 50, 100]"
-        :current-page="currentPage"
-        background
-        @current-change="onPageChange"
-        @size-change="onSizeChange"
-      />
     </div>
 
     <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px" :append-to-body="true">
@@ -100,6 +88,7 @@ import api from "@/api";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
+import { useInfiniteList } from "@/composables/useInfiniteList";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 import { Trash2 } from "lucide-vue-next";
 
@@ -109,16 +98,11 @@ const playerStore = usePlayerStore();
 const playlist = ref<any>(null);
 // Whether this playlist is in the daily-recommend pool.
 const inPool = ref(false);
-const songs = ref<any[]>([]);
 const isMobile = useIsMobile();
-const loading = ref(false);
 const syncing = ref(false);
 const showRenameDialog = ref(false);
 const newName = ref("");
 const selectedSongs = ref<any[]>([]);
-const currentPage = ref(1);
-const total = ref(0);
-const pageSize = ref(parseInt(localStorage.getItem("playlistTracksPageSize") || "50"));
 const onlineSourceId = ref("");
 const matchingAll = ref(false);
 const showMatchDialog = ref(false);
@@ -127,7 +111,24 @@ const matchTotal = ref(0);
 const matchDone = ref(0);
 const matchResult = ref<any>(null);
 const hasOnlineSource = computed(() => !!onlineSourceId.value);
-if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 50;
+
+// 窗口化分块加载(与 HA 卡片同构):全曲目稀疏数组 + 视口窗口预取 + 越界剪枝。
+// 分块 fetch 的同时把歌单头信息吸附到 playlist(首块响应即带 total/playlist 元数据)。
+const { list, loading, total, init: reloadTracks, onWindow } = useInfiniteList<any>(
+  async (offset, size) => {
+    const page = Math.floor(offset / size) + 1;
+    const res = await api.get(`/rest/api/v1/playlists/${route.params.id}/tracks`, {
+      params: { page, pageSize: size },
+    });
+    if (res.data?.playlist) {
+      playlist.value = res.data.playlist;
+      loadPoolStatus();
+      loadOnlineSource();
+    }
+    return { items: res.data.items || [], total: res.data.total || 0 };
+  },
+  { chunk: 200, keepRows: 200, prefetchBlocks: 1, concurrency: 2 }
+);
 
 function playlistRowActions(row: any) {
   return [
@@ -157,8 +158,9 @@ async function playSong(song: any) {
   await matchAndPlay(song);
 }
 async function playAll() {
-  const playable = songs.value.filter(s => s.isMatched !== false);
-  const unmatched = songs.value.filter(s => s.isMatched === false);
+  const loaded = list.value;
+  const playable = loaded.filter(s => !!s && s.isMatched !== false);
+  const unmatched = loaded.filter(s => !!s && s.isMatched === false);
   if (unmatched.length > 0) {
     const matched = await matchBeforePlay(unmatched);
     if (matched.length > 0) playerStore.playQueue([...playable, ...matched]);
@@ -188,8 +190,8 @@ async function matchAndPlay(song: any) {
     const res = await api.post(`/rest/api/v1/online/${pid}/match-track`, { entryId: song.entryId });
     if (res.data?.success && res.data.songId) {
       ElMessage.success(`已匹配「${song.title}」`);
-      await loadPlaylist();
-      const updated = songs.value.find(s => s.id === res.data.songId);
+      await reloadTracks();
+      const updated = list.value.find(s => s && s.id === res.data.songId);
       if (updated) playerStore.playSong(updated);
     } else {
       ElMessage.warning(`未匹配「${song.title}」: ${res.data?.message || "未找到可靠结果"}`);
@@ -209,12 +211,12 @@ async function matchBeforePlay(unmatched: any[]) {
     try {
       const res = await api.post(`/rest/api/v1/online/${pid}/match-track`, { entryId: song.entryId });
       if (res.data?.success && res.data.songId) {
-        const updated = songs.value.find(s => s.id === res.data.songId) || { ...song, id: res.data.songId, playable: true, isMatched: true };
+        const updated = list.value.find(s => s && s.id === res.data.songId) || { ...song, id: res.data.songId, playable: true, isMatched: true };
         ok.push(updated);
       }
     } catch {}
   }
-  if (ok.length > 0) await loadPlaylist();
+  if (ok.length > 0) await reloadTracks();
   return ok;
 }
 
@@ -309,20 +311,7 @@ async function loadOnlineSource() {
   } catch { onlineSourceId.value = ""; }
 }
 
-async function loadPlaylist() {
-  loading.value = true;
-  try {
-    const res = await api.get(`/rest/api/v1/playlists/${route.params.id}/tracks`, {
-      params: { page: currentPage.value, pageSize: pageSize.value },
-    });
-    playlist.value = res.data.playlist;
-    songs.value = res.data.items || [];
-    total.value = res.data.total || 0;
-    loadPoolStatus();
-    loadOnlineSource();
-  } catch {}
-  finally { loading.value = false; }
-}
+function loadPlaylist() { return reloadTracks(); }
 
 async function loadPoolStatus() {
   if (!playlist.value?.id) return;
@@ -347,15 +336,6 @@ async function togglePool() {
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "操作失败");
   }
-}
-
-function onPageChange(page: number) { currentPage.value = page; loadPlaylist(); }
-
-function onSizeChange(size: number) {
-  pageSize.value = size;
-  localStorage.setItem("playlistTracksPageSize", String(size));
-  currentPage.value = 1;
-  loadPlaylist();
 }
 
 async function syncPlaylist() {
@@ -542,7 +522,6 @@ onUnmounted(() => {
 .match-progress { padding: 8px 0; }
 .match-hint { color: var(--fnos-text-secondary); font-size: 13px; line-height: 1.8; }
 .match-result { color: var(--fnos-green); font-size: 14px; line-height: 1.8; }
-.pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
 
 @media (max-width: 768px) {
   .playlist-detail { padding: 20px 16px; }

@@ -14,9 +14,9 @@
     </div>
 
     <div class="list-body" ref="listBodyEl" :style="virtualized ? { paddingTop: padTop + 'px', paddingBottom: padBottom + 'px' } : undefined">
+    <template v-for="(song, i) in visibleSongs" :key="song ? (song.id || `ext-${rowGlobalIdx(i)}`) : `load-${rowGlobalIdx(i)}`">
     <div
-      v-for="(song, i) in visibleSongs"
-      :key="song.id || `ext-${rowGlobalIdx(i)}`"
+      v-if="song"
       class="song-row"
       :class="{
         active: isCurrent(song),
@@ -70,6 +70,17 @@
         </button>
       </span>
     </div>
+    <div v-else class="song-row is-loading">
+      <span v-if="selectable" class="col col-select"></span>
+      <span class="col col-index"><span class="row-index">{{ (offset || 0) + rowGlobalIdx(i) + 1 }}</span></span>
+      <span class="col col-title"><span class="loading-bar"></span></span>
+      <span v-if="showArtist" class="col col-artist"><span class="loading-bar short"></span></span>
+      <span v-if="showAlbum" class="col col-album"><span class="loading-bar"></span></span>
+      <span v-if="showPlayedAt" class="col col-played-at">–</span>
+      <span class="col col-duration">–</span>
+      <span class="col col-actions"></span>
+    </div>
+    </template>
     </div>
 
     <div v-if="!loading && songs.length === 0" class="empty-state">
@@ -106,6 +117,12 @@ const props = withDefaults(
     allowUnmatchedPlay?: boolean;
     /** 远程(未入库)搜索结果行:封面用远程 URL、隐藏「喜欢/加歌单」等依赖库内 id 的按钮 */
     remote?: boolean;
+    /**
+     * 无限滚动(窗口化加载)模式下的窗口回调:虚拟列表每次重算可见行区间后调用,
+     * 由父级 useInfiniteList 据此按块预取 + 剪枝。传入后本表即视为「全长稀疏数组」,
+     * 未加载槽位(songs[i] === undefined)渲染为占位行。
+     */
+    onWindow?: (start: number, end: number) => void;
   }>(),
   {
     songs: () => [],
@@ -120,6 +137,7 @@ const props = withDefaults(
     extraActions: undefined,
     allowUnmatchedPlay: false,
     remote: false,
+    onWindow: undefined,
   }
 );
 
@@ -161,18 +179,20 @@ const gridColumns = computed(() => {
 });
 
 const selectedIds = ref<Set<string>>(new Set());
-const allSelected = computed(() => props.songs.length > 0 && props.songs.every((s) => isSelected(s.id)));
-const someSelected = computed(() => props.songs.some((s) => isSelected(s.id)));
+// 无限滚动模式下 songs 是全长稀疏数组,可能存在 undefined 未加载槽位,一律跳过。
+const filledSongs = computed(() => props.songs.filter((s) => !!s));
+const allSelected = computed(() => filledSongs.value.length > 0 && filledSongs.value.every((s) => isSelected(s.id)));
+const someSelected = computed(() => filledSongs.value.some((s) => isSelected(s.id)));
 function isSelected(id: string) {
   return selectedIds.value.has(id);
 }
 function emitSelect() {
-  const rows = props.songs.filter((s) => isSelected(s.id));
+  const rows = filledSongs.value.filter((s) => isSelected(s.id));
   emit("select", rows);
 }
 function toggleAll(val: boolean | string | number) {
-  if (val) props.songs.forEach((s) => selectedIds.value.add(s.id));
-  else props.songs.forEach((s) => selectedIds.value.delete(s.id));
+  if (val) filledSongs.value.forEach((s) => selectedIds.value.add(s.id));
+  else filledSongs.value.forEach((s) => selectedIds.value.delete(s.id));
   selectedIds.value = new Set(selectedIds.value);
   emitSelect();
 }
@@ -185,7 +205,7 @@ function toggleOne(song: any, val: boolean | string | number) {
 watch(
   () => props.songs,
   (rows) => {
-    const valid = new Set(rows.map((s) => s.id));
+    const valid = new Set(rows.filter((s) => !!s).map((s) => s.id));
     selectedIds.value = new Set([...selectedIds.value].filter((id) => valid.has(id)));
   }
 );
@@ -290,6 +310,8 @@ function recomputeWindow() {
   const e = Math.min(total, Math.ceil((scrollTopV + vh - listTopInSp) / ROW_HEIGHT) + BUFFER);
   startIndex.value = s;
   endIndex.value = Math.max(e, s);
+  // 无限滚动模式:把可见行区间交给父级窗口化加载器(按块预取 + 剪枝)。
+  if (props.onWindow) props.onWindow(s, Math.max(e, s));
 }
 
 let scrollBound = false;
@@ -504,6 +526,27 @@ onBeforeUnmount(unbindScroll);
 @keyframes st-bar {
   0%, 100% { transform: scaleY(0.4); }
   50% { transform: scaleY(1); }
+}
+
+// 无限滚动:未加载槽位的占位行(灰条骨架,等待对应块到达后替换)。
+.song-row.is-loading {
+  .col { display: flex; align-items: center; }
+  .col-title { padding-left: 8px; }
+}
+.loading-bar {
+  display: inline-block;
+  height: 12px;
+  width: 40%;
+  max-width: 240px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--fnos-bg-muted, rgba(128,128,128,.12)) 25%, rgba(128,128,128,.22) 37%, var(--fnos-bg-muted, rgba(128,128,128,.12)) 63%);
+  background-size: 400% 100%;
+  animation: st-loading 1.2s ease-in-out infinite;
+  &.short { width: 22%; }
+}
+@keyframes st-loading {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0 0; }
 }
 
 .empty-state {
