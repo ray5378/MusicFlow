@@ -20,6 +20,9 @@ import { cacheRemoteCover } from "../../playlistCover.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
+import { createLogger } from "../../../utils/logger.js";
+
+const log = createLogger("online-import");
 
 // 封面下载全局限流(≤2 并发)与封面后台回填见 covers.ts。
 // 批量写放分块事务,chunk 间也让行,兼容交互路径在主进程跑的场景。
@@ -265,8 +268,9 @@ export async function importOnlineSongs(
     for (const row of db.select().from(songs).where(inArray(songs.fingerprint, fingerprints)).all()) {
       if (row.fingerprint) existingFingerprints.set(row.fingerprint, row.id);
     }
-  } catch {
-    // fall through (e.g. over-parameterized); dedup still works per-plan.
+  } catch (e) {
+    // 超限/引擎不支持 inArray 时优雅降级:去重退回逐 plan 兜底,仍正确。
+    log.error("fingerprint 预载失败,退回逐条去重", { providerId, stage: "dedup-preload", err: (e as Error)?.message || e });
   }
 
   // Preload the artist/album names actually referenced by this list into
@@ -288,8 +292,9 @@ export async function importOnlineSongs(
         if (r.name) albumIds.set(r.name, r.id);
       }
     }
-  } catch {
-    // over-parameterized / unsupported → empty maps; planArtist/Album re-check per miss.
+  } catch (e) {
+    // 超限/引擎不支持 inArray 时优雅降级:planArtist/Album 逐 miss 回查 DB,仍正确。
+    log.error("歌手/专辑预载失败,退回逐条解析", { providerId, stage: "entity-preload", err: (e as Error)?.message || e });
   }
 
   const artistsPending: { id: string; name: string }[] = [];
@@ -318,8 +323,9 @@ export async function importOnlineSongs(
       }
       failed++;
       return null;
-    } catch {
+    } catch (e) {
       failed++;
+      log.error("在线歌曲导入失败", { providerId, songId: s.id, source: s.source, name: s.name, err: (e as Error)?.message || e });
       return null;
     }
   });
@@ -329,7 +335,9 @@ export async function importOnlineSongs(
   // 拿完歌曲后:若有导入的歌曲缺封面,后台限量补全(≤2 并发,不阻塞本流程)。
   // P0 直通导入(onlineSongFromExternalId)构造的歌曲恒无封面,靠这里自动补齐。
   if (songsOut.length > 0) {
-    void runCoverBackfill(songsOut.map((r) => r.id)).catch(() => {});
+    void runCoverBackfill(songsOut.map((r) => r.id)).catch((e: unknown) =>
+      log.error("封面后台回填失败", { providerId, count: songsOut.length, err: (e as Error)?.message || e }),
+    );
   }
 
   // PLAN→FLUSH:所有写入走分块事务 + 多行批量插入(先歌手/专辑再歌曲),计数用聚合 SQL。
