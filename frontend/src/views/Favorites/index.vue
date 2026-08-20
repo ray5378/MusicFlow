@@ -1,5 +1,5 @@
 <template>
-  <div class="favorites-page" v-loading="loading">
+  <div class="favorites-page">
     <div class="fav-header">
       <div class="fav-cover">
         <MfIcon name="Heart" :filled="true" :size="64" class="fav-heart" />
@@ -7,42 +7,40 @@
       <div class="fav-meta">
         <div class="label">我喜欢</div>
         <h1>我喜欢</h1>
-        <div class="info">{{ songs.length }}首 · 喜欢的音乐都在这里</div>
+        <div class="info">{{ total }}首 · 喜欢的音乐都在这里</div>
         <div class="actions">
-          <el-button type="primary" @click="playAll" :disabled="songs.length === 0">播放全部</el-button>
+          <el-button type="primary" @click="playAll" :disabled="total === 0">播放全部</el-button>
           <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
         </div>
       </div>
     </div>
-    <SongTable :songs="pagedSongs" :offset="(currentPage - 1) * pageSize" show-bitrate @play="playSong" />
-
-    <div class="pagination-bar" v-if="songs.length > 0">
-      <PagePagination :total="songs.length" :page="currentPage" :page-size="pageSize" storage-key="favPageSize" @change="onPageChange" />
-    </div>
+    <SongTable :songs="songs" :loading="loading" show-bitrate :on-window="onWindow" @play="playSong" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { ElMessage } from "element-plus";
 import api from "@/api";
-import PagePagination from "@/components/PagePagination.vue";
 import SongTable from "@/components/SongTable.vue";
+import { useInfiniteList } from "@/composables/useInfiniteList";
 
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
-const songs = ref<any[]>([]);
-const loading = ref(false);
-// 前端分页（getStarred 一次性返回全部收藏，本地切片展示）
-const currentPage = ref(1);
-const pageSize = ref(parseInt(localStorage.getItem("favPageSize") || "25"));
-if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
-const pagedSongs = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value;
-  return songs.value.slice(start, start + pageSize.value);
-});
+
+// 我喜欢:窗口化分块加载(与音乐页同构)。整页展示 + 滚动懒加载 + 越界剪枝,
+// 取代原前端分页,滚动时不增加内存;后端 getStarred2 支持 offset/size 分页。
+// chunk 需与后端允许的 pageSize 上限对齐,保证每块槽位都被填满、无空白带。
+const { list: songs, loading, total, reload: loadFavorites, onWindow } = useInfiniteList<any>(
+  async (offset, size) => {
+    const res = await api.get("/rest/getStarred2", { params: { offset, size } });
+    const starred2 = res.data["subsonic-response"]?.starred2;
+    return { items: starred2?.song || [], total: starred2?.songTotal || 0 };
+  },
+  { chunk: 200, keepRows: 200, prefetchBlocks: 1, concurrency: 2 }
+);
 // Whether "我喜欢的音乐" is in the daily-recommend pool.
 const inPool = ref(false);
 
@@ -70,21 +68,7 @@ async function togglePool() {
 }
 
 function playSong(song: any) { playerStore.playSong(song); }
-function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
-
-async function loadFavorites() {
-  loading.value = true;
-  try {
-    const res = await api.get("/rest/getStarred?f=json");
-    songs.value = res.data["subsonic-response"]?.starred?.song || [];
-  } catch { songs.value = []; }
-  finally { loading.value = false; }
-}
-
-function onPageChange(page: number, size?: number) {
-  currentPage.value = page;
-  if (size) pageSize.value = size;
-}
+function playAll() { const all = songs.value.filter(Boolean); if (all.length > 0) playerStore.playQueue(all); }
 
 onMounted(() => { loadFavorites(); favoritesStore.loadFavorites(); loadPoolStatus(); });
 </script>

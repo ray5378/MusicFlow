@@ -118,7 +118,9 @@ const { list: songs, loading, total, reload: loadSongs, onWindow } = useInfinite
     });
     return { items: res.data.items || [], total: res.data.total || 0 };
   },
-  { chunk: 250, keepRows: 250, prefetchBlocks: 1, concurrency: 2 }
+  // chunk 与后端 /v1/songs 的 pageSize 上限(200)对齐:若 chunk 超过后端上限
+  // (如旧值 250),后端只回 200 条,块内剩余 50 个槽位永远 undefined → 滚动后空白。
+  { chunk: 200, keepRows: 200, prefetchBlocks: 1, concurrency: 2 }
 );
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 songSearch 就不出现在下拉里

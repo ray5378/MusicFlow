@@ -1,7 +1,7 @@
 <template>
   <div class="playlists-page">
     <div class="page-header">
-      <h2>歌单</h2>
+      <h2>歌单<span class="song-count">{{ total }} 个</span></h2>
       <div class="search-area">
         <span class="search-label">搜索</span>
         <el-dropdown trigger="click" @command="onSearchSourceCommand">
@@ -286,6 +286,7 @@ const cardGrid = useCardGrid<any>(
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
+const total = cardGrid.total;
 const frameHeight = cardGrid.frameHeight;
 const cardStyle = cardGrid.cardStyle;
 // 窗口化渲染辅助:当前可见卡片区间(全局下标)+ 列数。
@@ -1009,7 +1010,9 @@ onUnmounted(() => {
 <style lang="scss" scoped>
 .playlists-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
-  h2 { font-size: 28px; font-weight: 700; margin: 0; }
+  h2 { font-size: 28px; font-weight: 700; margin: 0; display: flex; align-items: baseline; gap: 14px;
+    .song-count { font-size: 14px; color: var(--fnos-text-tertiary); font-weight: 500; }
+  }
   .header-actions { display: flex; gap: 10px; }
 }
 .search-area { display: flex; align-items: center; gap: 10px; }

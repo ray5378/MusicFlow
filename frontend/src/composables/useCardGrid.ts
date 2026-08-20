@@ -48,6 +48,8 @@ export function useCardGrid<T = any>(fetcher: RangeFetcher<T>, options: CardGrid
   const cols = ref(1); // 当前列数
   const tileW = ref(minTileWidth); // 每格卡宽(px,由容器宽与列数反算)
   const rowH = ref(fixedRowHeight ?? (minTileWidth / coverRatio + rowFooter)); // 每行高/每卡高(px)
+  // 行距(px):卡高 + 纵向 gap,供卡定位 / 容器高度 / 窗口换算共用,保证与 CSS grid 的 gap 一致。
+  const rowPitch = computed(() => rowH.value + gap);
   const startIndex = ref(0); // 首个可见卡片(全局下标)
   const endIndex = ref(0);
 
@@ -68,22 +70,23 @@ export function useCardGrid<T = any>(fetcher: RangeFetcher<T>, options: CardGrid
   const frameHeight = computed(() => {
     const total = inf.total.value;
     if (!total || total <= 0) return "0px";
-    return Math.ceil(total / Math.max(1, cols.value)) * rowH.value + "px";
+    // 行像素 = 行距 × 行数 − 尾行不需要的额外 gap(整体高度与「行高+gap」布局吻合)。
+    const rows = Math.ceil(total / Math.max(1, cols.value));
+    return Math.max(1, rows * rowPitch.value - gap) + "px";
   });
 
-  /** 某张卡(或占位)的绝对定位样式:top=row×rowH,left=col×(w+gap) */
+  /** 某张卡(或占位)的绝对定位样式:top=row×行距(含纵向 gap),left=col×(w+gap) */
   function cardStyle(idx: number): CSSProperties {
     const c = Math.max(1, cols.value);
     const row = Math.floor(idx / c);
     const col = idx % c;
     const tw = tileW.value;
-    const rh = rowH.value;
     return {
       position: "absolute",
-      top: row * rh + "px",
+      top: row * rowPitch.value + "px",
       left: col * (tw + gap) + "px",
       width: tw + "px",
-      height: rh + "px",
+      height: rowH.value + "px",
     };
   }
 
@@ -95,7 +98,7 @@ export function useCardGrid<T = any>(fetcher: RangeFetcher<T>, options: CardGrid
     const total = inf.total.value;
     if (total <= 0 || !inf.list.value.length) return;
     const c = cols.value;
-    const rh = rowH.value;
+    const pitch = rowPitch.value;
     const root = findScrollRoot(el);
     const isWin = root === window;
     const st = isWin ? window.scrollY : (root as HTMLElement).scrollTop;
@@ -104,8 +107,8 @@ export function useCardGrid<T = any>(fetcher: RangeFetcher<T>, options: CardGrid
     const elRect = el.getBoundingClientRect();
     const rootTop = isWin ? 0 : (root as HTMLElement).getBoundingClientRect().top;
     const topInRoot = elRect.top - rootTop + st;
-    const firstRow = Math.max(0, Math.floor((st - topInRoot) / rh) - bufferRows);
-    const lastRow = Math.min(Math.ceil(total / c), Math.ceil((st + vh - topInRoot) / rh) + bufferRows);
+    const firstRow = Math.max(0, Math.floor((st - topInRoot) / pitch) - bufferRows);
+    const lastRow = Math.min(Math.ceil(total / c), Math.ceil((st + vh - topInRoot) / pitch) + bufferRows);
     startIndex.value = Math.max(0, firstRow * c);
     endIndex.value = Math.max(startIndex.value, Math.min(total, lastRow * c));
     inf.onWindow(startIndex.value, endIndex.value);

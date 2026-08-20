@@ -1,7 +1,7 @@
 <template>
   <div class="albums-page">
     <div class="page-header">
-      <h2>专辑</h2>
+      <h2>专辑<span class="song-count">{{ total }} 张</span></h2>
       <div class="header-actions">
         <span class="search-label">搜索</span>
         <el-dropdown trigger="click" @command="onSearchSourceCommand">
@@ -159,6 +159,7 @@ const cardGrid = useCardGrid<any>(
 );
 const gridEl = cardGrid.gridEl;
 const loading = cardGrid.loading;
+const total = cardGrid.total;
 const frameHeight = cardGrid.frameHeight;
 const cardStyle = cardGrid.cardStyle;
 const gridViews = computed(() => {
@@ -206,7 +207,7 @@ watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
 
 <style lang="scss" scoped>
 .albums-page { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; display: flex; align-items: baseline; gap: 14px; .song-count { font-size: 14px; color: var(--fnos-text-tertiary); font-weight: 500; } } .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } }
 .search-label { font-size: 14px; color: var(--fnos-text-secondary); margin-right: 2px; white-space: nowrap; }
 .remote-results {
   .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
