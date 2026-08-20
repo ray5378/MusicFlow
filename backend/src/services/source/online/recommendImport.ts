@@ -11,9 +11,9 @@
 // links the online song directly (playable=1) instead of leaving a stub.
 
 import { v4 as uuidv4 } from "uuid";
-import { db } from "../../../db/index.js";
+import { db, sqlite } from "../../../db/index.js";
 import { playlists, playlistSongs } from "../../../db/schema.js";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { getConfiguredProvider } from "./index.js";
 import { importOnlineSongs } from "./service.js";
 import { OnlinePlaylistInfo } from "./types.js";
@@ -92,31 +92,51 @@ export async function replacePlaylistSongs(playlistId: string, songIds: { id: st
   }
   const seen = new Set<string>();
 
-  const TX_CHUNK = 300;
-  for (let off = 0; off < songIds.length; off += TX_CHUNK) {
-    const chunk = songIds.slice(off, off + TX_CHUNK);
-    db.transaction(() => {
-      chunk.forEach((s, i) => {
-        const gi = off + i;
-        seen.add(s.id);
-        const prev = existMap.get(s.id);
-        if (prev) {
-          if (prev.position !== gi) {
-            db.update(playlistSongs).set({ position: gi }).where(eq(playlistSongs.id, prev.id)).run();
-          }
-          return;
-        }
-        db.insert(playlistSongs).values({
-          playlistId,
-          songId: s.id,
-          position: gi,
-          playable: 1,
-          externalTitle: s.title,
-          externalSongId: s.id,
-        }).run();
+  // 一次遍历分出「新增」与「position 漂移需更新」两批,避免逐行 INSERT/UPDATE。
+  const inserts: any[] = [];
+  const posUpdates: { id: number; position: number }[] = [];
+  songIds.forEach((s, gi) => {
+    seen.add(s.id);
+    const prev = existMap.get(s.id);
+    if (prev) {
+      if (prev.position !== gi) posUpdates.push({ id: prev.id, position: gi });
+    } else {
+      inserts.push({
+        playlistId,
+        songId: s.id,
+        position: gi,
+        playable: 1,
+        externalTitle: s.title,
+        externalSongId: s.id,
       });
+    }
+  });
+
+  const TX_CHUNK = 300;
+  // 新增条目:多行 VALUES 一次插入(替代逐行 INSERT)。
+  for (let off = 0; off < inserts.length; off += TX_CHUNK) {
+    const chunk = inserts.slice(off, off + TX_CHUNK);
+    db.transaction(() => {
+      if (chunk.length) db.insert(playlistSongs).values(chunk).run();
     });
-    if (off + TX_CHUNK < songIds.length) await sleepBetweenBatch();
+    if (off + TX_CHUNK < inserts.length) await sleepBetweenBatch();
+  }
+
+  // position 漂移的行:单条 CASE 批量更新(替代逐行 UPDATE)。只有 position 一列,
+  // 单例 enum-arg 数少,分块上限可放宽到 TX_CHUNK(每行 2 参数,300 行≈600<999)。
+  for (let off = 0; off < posUpdates.length; off += TX_CHUNK) {
+    const chunk = posUpdates.slice(off, off + TX_CHUNK);
+    const ids = chunk.map((u) => u.id);
+    const args: any[] = [];
+    const cases = chunk.map(() => "WHEN ? THEN ?").join(" ");
+    for (const u of chunk) args.push(u.id, u.position);
+    const idPh = ids.map(() => "?").join(",");
+    db.transaction(() => {
+      sqlite
+        .prepare(`UPDATE playlist_songs SET position = CASE id ${cases} END WHERE id IN (${idPh})`)
+        .run(...args, ...ids);
+    });
+    if (off + TX_CHUNK < posUpdates.length) await sleepBetweenBatch();
   }
 
   // Remove entries no longer present in the remote playlist (also chunked).
@@ -124,11 +144,12 @@ export async function replacePlaylistSongs(playlistId: string, songIds: { id: st
     const key = e.externalSongId || e.songId;
     return key && !seen.has(key);
   });
+  // 批量删除:IN 一次删一批(替代逐行 DELETE)。
   for (let off = 0; off < toDelete.length; off += TX_CHUNK) {
     const chunk = toDelete.slice(off, off + TX_CHUNK);
     db.transaction(() => {
-      for (const e of chunk) {
-        db.delete(playlistSongs).where(eq(playlistSongs.id, e.id)).run();
+      if (chunk.length) {
+        db.delete(playlistSongs).where(inArray(playlistSongs.id, chunk.map((e) => e.id))).run();
       }
     });
     if (off + TX_CHUNK < toDelete.length) await sleepBetweenBatch();
