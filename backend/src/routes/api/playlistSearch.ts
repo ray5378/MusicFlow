@@ -14,7 +14,9 @@ import { Hono } from "hono";
 import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
+import { createLogger } from "../../utils/logger.js";
 
+const log = createLogger("PLAYLIST-SEARCH");
 export const playlistSearchRoutes = new Hono();
 
 /** 合成 sourceUrl:保证「同一远程歌单幂等」(upsert 去重键)且 isImportedPlaylist 判定为平台歌单。 */
@@ -32,6 +34,56 @@ playlistSearchRoutes.get("/v1/playlist-search/providers", (c) => {
     platformLabels: manifest.platformLabels || {},
   }));
   return c.json({ success: true, providers });
+});
+
+// Aggregate remote-playlist search across ALL enabled playlistSearch plugins
+// (前端「聚合」默认模式的端点)。并发 Promise.allSettled:单个插件失败不阻断整体,
+// 失败仅记日志;每条结果带 providerId/providerName,供前端详情/导入/播放归位到对应插件。
+// 单独服务于「聚合」静态段语义;既有 /:providerId/search(单插件)不在此覆盖。
+playlistSearchRoutes.post("/v1/playlist-search/aggregate/search", async (c) => {
+  markInteractiveStart();
+  try {
+    const q = String((await c.req.json().catch(() => ({}))).q || "").trim();
+    if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+    const providers = getEnabledByCapability("playlistSearch").filter((p) => typeof p.impl?.searchPlaylists === "function");
+    if (providers.length === 0) return c.json({ success: true, total: 0, providers: [], playlists: [] });
+
+    const settled = await Promise.allSettled(providers.map(async (p) => {
+      const config = getPluginConfig(p.manifest.id) || {};
+      const res = await p.impl.searchPlaylists(config, { query: q });
+      const list = Array.isArray(res?.playlists) ? res.playlists : [];
+      return { providerId: p.manifest.id, providerName: p.manifest.name, labels: p.manifest.platformLabels || {}, list };
+    }));
+
+    const playlists: any[] = [];
+    settled.forEach((s, i) => {
+      if (s.status === "fulfilled") {
+        for (const p of s.value.list) {
+          playlists.push({
+            providerId: s.value.providerId,
+            providerName: s.value.providerName,
+            id: p.id, source: p.source, name: p.name || "", creator: p.creator || "",
+            cover: p.cover || "", trackCount: p.trackCount ?? "", link: p.link || "",
+            platformLabel: s.value.labels[p.source] || p.source,
+          });
+        }
+      } else {
+        // 单个插件失败只降级,不拖垮聚合;必须记日志且带插件 id。
+        log.error("聚合搜索插件失败", { providerId: providers[i]?.manifest.id || "?", err: s.reason instanceof Error ? s.reason.message : String(s.reason) });
+      }
+    });
+
+    return c.json({
+      success: true,
+      total: playlists.length,
+      providers: providers.map((pt) => ({ id: pt.manifest.id, name: pt.manifest.name, platforms: pt.manifest.platforms || [], platformLabels: pt.manifest.platformLabels || {} })),
+      playlists,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || "搜索失败" });
+  } finally {
+    markInteractiveEnd();
+  }
 });
 
 // Aggregate remote-playlist search across the plugin's platforms.

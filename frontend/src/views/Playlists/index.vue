@@ -11,8 +11,9 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="local">本地</el-dropdown-item>
-              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+              <el-dropdown-item command="aggregate" :divided="false">聚合</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item v-for="p in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -61,7 +62,7 @@
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
-    <div v-if="isLocalMode" class="playlist-grid virt-grid" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
+    <div v-if="showLocalGrid" class="playlist-grid virt-grid" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
       <!-- User playlists (windowed: fixed-height spacer + absolutely positioned virtual tiles) -->
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
       <div
@@ -118,7 +119,7 @@
     </div>
 
     <!-- 平台(插件)歌单搜索结果:由启用的 playlistSearch 插件(如 go-music-dl)提供,可「加入库」 -->
-    <div v-else class="remote-results" v-loading="remoteSearching">
+    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
       <div v-if="remoteResults.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="List" :size="40" />
         <p>{{ searchQuery.trim() ? "没有找到相关歌单" : `输入关键词,搜索${currentProviderName}支持的全网歌单` }}</p>
@@ -126,7 +127,7 @@
       <div class="playlist-grid">
         <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="i">
           <div class="playlist-cover mf-coverwrap" @click="openRemote(rp)">
-            <span class="remote-source-tag">{{ rp.platformLabel }}</span>
+            <span class="remote-source-tag">{{ rp.providerName ? rp.providerName + "·" : "" }}{{ rp.platformLabel }}</span>
             <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
             <CoverPlay size="md" :label="`播放 ${rp.name}`" :action="() => playRemotePl(rp)" />
@@ -141,7 +142,7 @@
             class="remote-import-btn"
             size="small"
             type="primary"
-            :loading="importingId === rp.source + ':' + rp.id"
+            :loading="importingId === rp.providerId + ':' + rp.source + ':' + rp.id"
             :disabled="rp._imported"
             @click="importRemote(rp)"
           >{{ rp._imported ? "已加入库" : "加入库" }}</el-button>
@@ -152,10 +153,48 @@
       <RemoteDetailDialog
         v-model="remoteDetailVisible"
         kind="playlist"
-        :provider-id="searchMode"
+        :provider-id="remoteDetailProviderId"
         :item="remoteDetailItem"
         @imported="loadPlaylists"
       />
+    </div>
+
+    <!-- 聚合模式:逾越本地下方,合并展示所有已启用插件搜到的全网歌单(卡片带插件·平台标签,可加入库) -->
+    <div v-if="isAggregateMode" class="remote-results agg" v-loading="remoteSearching">
+      <div v-if="remoteResults.length === 0 && !remoteSearching" class="remote-empty">
+        <MfIcon name="List" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关歌单(本地与全网)" : "输入关键词,同时搜索本地库与已启用插件的全网歌单" }}</p>
+      </div>
+      <template v-else>
+        <div class="agg-head">
+          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
+          <span class="agg-meta">已启用插件的合并搜索,卡片带插件·平台标签</span>
+        </div>
+        <div class="playlist-grid">
+        <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="rp.providerId + ':' + rp.source + ':' + rp.id">
+          <div class="playlist-cover mf-coverwrap" @click="openRemote(rp)">
+            <span class="remote-source-tag">{{ rp.providerName ? rp.providerName + "·" : "" }}{{ rp.platformLabel }}</span>
+            <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
+            <CoverPlay size="md" :label="`播放 ${rp.name}`" :action="() => playRemotePl(rp)" />
+          </div>
+          <div class="playlist-info" @click="openRemote(rp)">
+            <div class="playlist-name">{{ rp.name }}</div>
+            <div class="playlist-meta">
+              <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? rp.trackCount + "首" : "" }}</span>
+            </div>
+          </div>
+          <el-button
+            class="remote-import-btn"
+            size="small"
+            type="primary"
+            :loading="importingId === rp.providerId + ':' + rp.source + ':' + rp.id"
+            :disabled="rp._imported"
+            @click="importRemote(rp)"
+          >{{ rp._imported ? "已加入库" : "加入库" }}</el-button>
+        </div>
+      </div>
+      </template>
     </div>
 
     <el-dialog v-model="showCreateDialog" title="新建歌单" width="400px" :append-to-body="true">
@@ -303,18 +342,33 @@ const gridViews = computed(() => {
 });
 
 const searchQuery = ref("");
-// 搜索模式:local=本地库搜索(现状) | <pluginId>=平台(插件)歌单搜索
-const searchMode = ref("local");
+// 搜索模式:aggregate=聚合(本地 + 全部已启用插件,默认) | local=本地库 | <pluginId>=单平台插件
+const searchMode = ref("aggregate");
 const searchProviders = ref<{ id: string; name: string; platforms: string[]; platformLabels: Record<string, string> }[]>([]);
 const remoteResults = ref<any[]>([]);
 const remoteSearching = ref(false);
 const importingId = ref("");
 const isLocalMode = computed(() => searchMode.value === "local");
+const isAggregateMode = computed(() => searchMode.value === "aggregate");
+// 单平台插件模式(= 既非本地也非聚合并落在一个已启用插件 id 上)
+const isRemoteMode = computed(() => !isLocalMode.value && !isAggregateMode.value);
+// 本地窗口化网格在「本地」与「聚合」两种模式都渲染(聚合时下方再接全网结果区)
+const showLocalGrid = computed(() => isLocalMode.value || isAggregateMode.value);
 const currentProvider = computed(() => searchProviders.value.find(p => p.id === searchMode.value));
 const currentProviderName = computed(() => currentProvider.value?.name || "平台");
-// 搜索来源下拉按钮文案:本地模式显示「本地」,插件模式显示插件名
-const currentSourceLabel = computed(() => isLocalMode.value ? "本地" : (currentProvider.value?.name || "本地"));
-const searchPlaceholder = computed(() => isLocalMode.value ? "搜索歌单..." : `搜索${currentProviderName.value}全网歌单...`);
+// 搜索来源下拉按钮文案:聚合=「聚合」,本地=「本地」,插件模式=插件名
+const currentSourceLabel = computed(() => {
+  if (isAggregateMode.value) return "聚合";
+  if (isLocalMode.value) return "本地";
+  return currentProvider.value?.name || "本地";
+});
+const searchPlaceholder = computed(() => {
+  if (isAggregateMode.value) return "搜索本地与全网歌单...";
+  if (isLocalMode.value) return "搜索歌单...";
+  return `搜索${currentProviderName.value}全网歌单...`;
+});
+// 远程歌单详情 / 加入库 / 播放要定位到具体插件:单插件模式=当前插件,聚合模式=结果自带 providerId
+const remoteDetailProviderId = ref("");
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showManageMenu = ref(false);
 // 歌单筛选:空=全部 | local=本地歌单 | 平台值(netease/qq/kugou/kuwo)
@@ -623,17 +677,27 @@ async function loadPoolStatus() {
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    if (isLocalMode.value) loadPlaylists();
-    else doRemoteSearch();
+    if (isRemoteMode.value) doRemoteSearch();
+    else {
+      loadPlaylists();
+      if (isAggregateMode.value && searchQuery.value.trim()) doAggregateSearch();
+    }
   }, 300);
 }
 
-function onSearchClear() { if (isLocalMode.value) loadPlaylists(); else doRemoteSearch(); }
+function onSearchClear() {
+  if (isRemoteMode.value) doRemoteSearch();
+  else {
+    loadPlaylists();
+    if (isAggregateMode.value) doAggregateSearch();
+  }
+}
 
-// 模式切换:清空远程结果;切到插件模式时若有关键词立即搜索;切回本地刷新列表
+// 模式切换:清空远程结果;本地=刷新列表;聚合=刷新本地列表(空关键词显示全部)+有词即全网搜索;插件=有词即搜
 function onSearchModeChange() {
   remoteResults.value = [];
   if (isLocalMode.value) { loadPlaylists(); return; }
+  if (isAggregateMode.value) { loadPlaylists(); if (searchQuery.value.trim()) doAggregateSearch(); return; }
   if (searchQuery.value.trim()) doRemoteSearch();
 }
 
@@ -654,7 +718,7 @@ async function loadSearchProviders() {
   }
 }
 
-// 平台歌单搜索:调插件的 searchPlaylists(聚合其全部平台),结果带平台标签
+// 单平台歌单搜索:调指定插件的 searchPlaylists(聚合其全部平台),结果带平台标签+归属插件
 async function doRemoteSearch() {
   const q = searchQuery.value.trim();
   if (!q) { remoteResults.value = []; return; }
@@ -662,7 +726,9 @@ async function doRemoteSearch() {
   try {
     const res = await api.post(`/rest/api/v1/playlist-search/${searchMode.value}/search`, { q });
     if (res.data?.success) {
-      remoteResults.value = (res.data.playlists || []).map((p: any) => ({ ...p, _imported: false }));
+      remoteResults.value = (res.data.playlists || []).map((p: any) => ({
+        ...p, providerId: searchMode.value, providerName: currentProvider.value?.name || "", _imported: false,
+      }));
     } else {
       remoteResults.value = [];
       ElMessage.error(res.data?.error || "搜索失败");
@@ -675,9 +741,31 @@ async function doRemoteSearch() {
   }
 }
 
+// 聚合歌单搜索:一次同时搜本地(本地网格随 query 过滤)与全部已启用插件,结果带归属插件 id
+async function doAggregateSearch() {
+  const q = searchQuery.value.trim();
+  if (!q) { remoteResults.value = []; return; }
+  remoteSearching.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/playlist-search/aggregate/search", { q });
+    if (res.data?.success) {
+      remoteResults.value = (res.data.playlists || []).map((p: any) => ({ ...p, _imported: false }));
+    } else {
+      remoteResults.value = [];
+      ElMessage.error(res.data?.error || "聚合搜索失败");
+    }
+  } catch {
+    remoteResults.value = [];
+    ElMessage.error("聚合搜索失败:无已启用插件或服务不可达");
+  } finally {
+    remoteSearching.value = false;
+  }
+}
+
 // 把搜索结果加入库:插件 playlistSongs 拉歌 → 核心导入(合成 sourceUrl 幂等,重复加入=增量更新)
 async function importRemote(rp: any) {
-  const key = `${rp.source}:${rp.id}`;
+  const providerId = rp.providerId || searchMode.value;
+  const key = `${providerId}:${rp.source}:${rp.id}`;
   if (importingId.value === key) return;
   try {
     await ElMessageBox.confirm(`将歌单「${rp.name}」加入本地库?`, "加入库", {
@@ -688,7 +776,7 @@ async function importRemote(rp: any) {
   } catch { return; }
   importingId.value = key;
   try {
-    const res = await api.post(`/rest/api/v1/playlist-search/${searchMode.value}/import`, {
+    const res = await api.post(`/rest/api/v1/playlist-search/${providerId}/import`, {
       source: rp.source, id: rp.id, name: rp.name, cover: rp.cover,
     });
     if (res.data?.alreadyRunning) {
@@ -731,11 +819,12 @@ const remoteDetailItem = ref<any>(null);
 function openRemote(rp: any) {
   if (menuGuard()) return;
   remoteDetailItem.value = rp;
+  remoteDetailProviderId.value = rp.providerId || searchMode.value;
   remoteDetailVisible.value = true;
 }
 async function playRemotePl(rp: any) {
   if (menuGuard()) return;
-  const n = await playRemoteCollection("playlist", searchMode.value, rp);
+  const n = await playRemoteCollection("playlist", rp.providerId || searchMode.value, rp);
   if (n) ElMessage.success(`正在播放「${rp.name}」`);
   else ElMessage.warning("该歌单暂无可播放歌曲");
 }
@@ -1050,6 +1139,14 @@ onUnmounted(() => {
     background: rgba(0,0,0,0.55); color: #fff; backdrop-filter: blur(4px);
   }
   .remote-import-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; }
+  &.agg {
+    margin-top: 20px; padding-top: 20px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+    .agg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px;
+      .agg-title { font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
+      .agg-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
+    }
+  }
 }
 .manage-menu { display: flex; flex-direction: column; gap: 2px; }
 .platform-filter-bar {

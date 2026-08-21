@@ -22,8 +22,10 @@ const CLIENT_SALT = "clientsalt123";
 const authQS = () => `u=alice&t=${md5(PLAIN + CLIENT_SALT)}&s=${CLIENT_SALT}`;
 
 const FAKE = "fake-dl";
+const FAKE2 = "fake-dl-2";
 let searchCalls = 0;
 let playlistCalls = 0;
+let search2Calls = 0;
 
 function registerFakePlugin() {
   registerPlugin(
@@ -66,6 +68,33 @@ function registerFakePlugin() {
   db.insert(plugins).values({ id: FAKE, name: FAKE, enabled: 1, config: JSON.stringify({ baseUrl: "http://fake" }) }).run();
 }
 
+/** 注册第二个聚合插件:fail=true 时 searchPlaylists 抛错,用于验证「单插件失败不阻断聚合」,
+ * 注册进 plugins 表(enabled=1)并清理同名残留。 */
+function registerFakePlugin2(fail = false) {
+  registerPlugin(
+    {
+      id: FAKE2,
+      name: "fake-dl 第二个聚合",
+      version: "1.0.0",
+      type: "source",
+      capabilities: ["playlistSearch"],
+      platforms: ["kugou"],
+      platformLabels: { kugou: "酷狗" },
+      configSchema: [],
+    } as any,
+    {
+      async searchPlaylists(config: any, params: any) {
+        search2Calls++;
+        if (fail) throw new Error("第二个插件挂掉");
+        if (!params?.query) return { playlists: [] };
+        return { playlists: [{ id: "k1", source: "kugou", name: "聚合专属", trackCount: 10 }] };
+      },
+    } as any,
+  );
+  db.delete(plugins).where(eq(plugins.name, FAKE2)).run();
+  db.insert(plugins).values({ id: FAKE2, name: FAKE2, enabled: 1, config: "{}" }).run();
+}
+
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
   initDatabase();
@@ -76,11 +105,12 @@ beforeAll(() => {
 
 beforeEach(() => {
   installInProcessBatchRunner();
-  for (const id of [FAKE, "go-music-dl"]) {
+  for (const id of [FAKE, "go-music-dl", "fake-dl-2"]) {
     db.delete(plugins).where(eq(plugins.name, id)).run();
     unregisterPlugin(id);
   }
   searchCalls = 0;
+  search2Calls = 0;
   playlistCalls = 0;
   registerFakePlugin();
 });
