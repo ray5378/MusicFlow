@@ -62,6 +62,11 @@
       <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
       <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
     </div>
+    <!-- 聚合模式:本地结果置于全网结果上方,用与「全网结果」同款的标题栏区分两个分区 -->
+    <div v-if="isAggregateMode" class="agg-head local-head">
+      <span class="agg-title"><MfIcon name="Library" />本地结果</span>
+      <span class="agg-meta">本地库匹配的歌单</span>
+    </div>
     <div v-if="showLocalGrid" class="playlist-grid virt-grid" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
       <!-- User playlists (windowed: fixed-height spacer + absolutely positioned virtual tiles) -->
       <template v-for="g in gridViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
@@ -1142,11 +1147,13 @@ onUnmounted(() => {
   &.agg {
     margin-top: 20px; padding-top: 20px;
     border-top: 1px solid rgba(255,255,255,0.1);
-    .agg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px;
-      .agg-title { font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
-      .agg-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
-    }
   }
+}
+/* 聚合模式下本地/全网分节标题栏(本地头部位于 remote-results 之外,故提为顶层共享样式)。 */
+.agg-head {
+  display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px;
+  .agg-title { font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
+  .agg-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
 }
 .manage-menu { display: flex; flex-direction: column; gap: 2px; }
 .platform-filter-bar {
