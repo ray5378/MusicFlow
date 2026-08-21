@@ -32,8 +32,9 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="local">本地</el-dropdown-item>
-              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+              <el-dropdown-item command="aggregate">聚合</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -68,8 +69,42 @@
       </template>
     </div>
 
+    <!-- ===== 聚合搜索结果(默认模式):本地在上,全网并用分节标题放在下 ===== -->
+    <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">
+      <div v-if="aggregateItems.length === 0 && !aggregateSearching" class="remote-empty">
+        <MfIcon name="User" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关全网艺术家" : "输入关键词,同时搜索本地库与已启用插件的艺术家" }}</p>
+      </div>
+      <template v-else>
+        <div class="agg-head">
+          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
+          <span class="agg-meta">已启用插件的合并搜索,卡片带插件·平台标签</span>
+        </div>
+        <div class="artist-grid" v-loading="aggregateSearching">
+          <div class="artist-card" v-for="(item, i) in aggregateItems" :key="item.providerId + ':' + item.source + ':' + item.id">
+            <div class="artist-avatar mf-coverwrap" @click="openRemote(item)">
+              <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+              <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
+              <span class="remote-source-tag">{{ item.providerName ? item.providerName + "·" : "" }}{{ item.platformLabel }}</span>
+              <CoverPlay size="md" :label="`播放 ${item.name} 的歌曲`" :action="() => playRemoteAr(item)" />
+            </div>
+            <div class="artist-name" @click="openRemote(item)">{{ item.name }}</div>
+            <div class="artist-meta" @click="openRemote(item)">{{ formatRemoteMeta(item) }}</div>
+          </div>
+        </div>
+      </template>
+
+      <!-- 聚合远程艺术家详情:点击卡片 → 按名字搜歌预览(仅展示+播放,无导入) -->
+      <RemoteDetailDialog
+        v-model="remoteDetailVisible"
+        kind="artist"
+        :provider-id="remoteDetailProviderId"
+        :item="remoteDetailItem"
+      />
+    </div>
+
     <!-- 远程搜索结果(插件模式):由启用的 artistSearch 插件提供,仅展示(发现用,无导入) -->
-    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
+    <div v-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
       <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="User" :size="40" />
         <p>{{ searchQuery.trim() ? "没有找到相关艺术家" : `输入关键词,搜索${currentProviderName}支持的艺术家` }}</p>
@@ -91,7 +126,7 @@
       <RemoteDetailDialog
         v-model="remoteDetailVisible"
         kind="artist"
-        :provider-id="searchMode"
+        :provider-id="remoteDetailProviderId"
         :item="remoteDetailItem"
       />
     </div>
@@ -117,14 +152,15 @@ const play = usePlayContent();
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 artistSearch 就不出现在下拉里
 const {
-  searchMode, searchProviders, remoteItems, remoteSearching,
-  isLocalMode, isRemoteMode, currentProviderName, currentSourceLabel,
-  loadSearchProviders, onSearchSourceCommand, doRemoteSearch,
+  searchMode, searchProviders, remoteItems, remoteSearching, aggregateItems, aggregateSearching,
+  isLocalMode, isRemoteMode, isAggregateMode, currentProviderName, currentSourceLabel,
+  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, doAggregateSearch,
   setLocalLoader,
 } = useEntitySearch("artist");
-const searchPlaceholder = computed(() =>
-  isRemoteMode.value ? `搜索${currentProviderName}艺术家...` : "搜索艺术家...",
-);
+const searchPlaceholder = computed(() => {
+  if (isAggregateMode.value) return "搜索本地与全网艺术家...";
+  return isRemoteMode.value ? `搜索${currentProviderName}艺术家...` : "搜索艺术家...";
+});
 function formatRemoteMeta(item: any) {
   const parts: string[] = [];
   if (item.albumCount) parts.push(`${item.albumCount} 张专辑`);
@@ -146,14 +182,16 @@ async function playAr(artist: any) {
 // ===== 远程艺术家:悬浮播放(按名字搜歌,未入库直接播) + 点击头像/名字看详情 =====
 const remoteDetailVisible = ref(false);
 const remoteDetailItem = ref<any>(null);
+const remoteDetailProviderId = ref("");
 function openRemote(item: any) {
   if (menuGuard()) return;
   remoteDetailItem.value = item;
+  remoteDetailProviderId.value = item.providerId || searchMode.value;
   remoteDetailVisible.value = true;
 }
 async function playRemoteAr(item: any) {
   if (menuGuard()) return;
-  const n = await playRemoteCollection("artist", searchMode.value, item);
+  const n = await playRemoteCollection("artist", item.providerId || searchMode.value, item);
   if (n) ElMessage.success(`正在播放「${item.name}」的 ${n} 首歌曲`);
   else ElMessage.warning("该艺人暂无可播放歌曲");
 }
@@ -278,12 +316,14 @@ async function scrapeMissingArtists() {
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
+    if (isAggregateMode.value) { loadArtists(); doAggregateSearch(searchQuery.value); return; }
     if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
     else loadArtists();
   }, 300);
 }
 
 function onSearchClear() {
+  if (isAggregateMode.value) { loadArtists(); doAggregateSearch(searchQuery.value); return; }
   if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
   loadArtists();
 }
@@ -294,9 +334,11 @@ function formatAlbumCount(n: number) {
   return `${n} 张专辑`;
 }
 
-// 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
+// 切换搜索来源:聚合刷新本地+聚合全网;插件立即搜;切回本地由 composable 触发 localLoader
 watch(() => searchMode.value, () => {
-  if (isRemoteMode.value && searchQuery.value.trim()) doRemoteSearch(searchQuery.value);
+  if (!searchQuery.value.trim()) return;
+  if (isAggregateMode.value) { loadArtists(); doAggregateSearch(searchQuery.value); }
+  else if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
 });
 
 onMounted(() => {
@@ -369,6 +411,15 @@ onUnmounted(() => {
     position: absolute; top: 6px; right: 6px; z-index: 2;
     padding: 2px 8px; border-radius: 6px; font-size: 11px;
     background: rgba(0,0,0,0.55); color: #fff; backdrop-filter: blur(4px);
+  }
+}
+/* 聚合模式分节标题栏 */
+.remote-results.agg {
+  margin-top: 24px; padding-top: 20px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  .agg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px;
+    .agg-title { font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
+    .agg-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
   }
 }
 @keyframes home-card-in {

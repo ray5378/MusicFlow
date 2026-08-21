@@ -96,18 +96,26 @@ export async function playRemoteCollection(
 export function useEntitySearch(kind: EntitySearchKind) {
   const base = `/rest/api/v1/${kind}-search`;
 
-  const searchMode = ref("local"); // "local" | providerId
+  // "aggregate" | "local" | providerId —— 默认「聚合」(同时搜本地库 + 全部已启用插件全网结果)
+  const searchMode = ref("aggregate");
   const searchProviders = ref<EntitySearchProvider[]>([]);
-  const remoteItems = ref<any[]>([]);
+  const remoteItems = ref<any[]>([]);       // 单插件远程搜索结果
   const remoteSearching = ref(false);
+  const aggregateItems = ref<any[]>([]);    // 聚合搜索结果(本地由页面列表承载,此处仅全网合并)
+  const aggregateSearching = ref(false);
   const importingId = ref("");
 
-  const isRemoteMode = computed(() => searchMode.value !== "local");
+  const isAggregateMode = computed(() => searchMode.value === "aggregate");
+  // 插件模式:仅单插件(排除聚合)。本地内容在 local 与 aggregate 下都展示 → isLocalMode 对两者为真。
+  const isRemoteMode = computed(() => searchMode.value !== "local" && searchMode.value !== "aggregate");
   const isLocalMode = computed(() => !isRemoteMode.value);
   const currentProvider = computed(() => searchProviders.value.find((p) => p.id === searchMode.value));
   const currentProviderName = computed(() => currentProvider.value?.name || "平台");
-  // 下拉按钮文案:本地模式显示「本地」,插件模式显示插件名
-  const currentSourceLabel = computed(() => (isRemoteMode.value ? currentProvider.value?.name || "本地" : "本地"));
+  // 下拉按钮文案:聚合=「聚合」,插件=插件名,本地=「本地」
+  const currentSourceLabel = computed(() => {
+    if (isAggregateMode.value) return "聚合";
+    return isRemoteMode.value ? currentProvider.value?.name || "本地" : "本地";
+  });
 
   // 页面注入:切回本地模式 / 本地搜索时刷新本地列表
   let localLoader: () => void = () => {};
@@ -131,19 +139,20 @@ export function useEntitySearch(kind: EntitySearchKind) {
     }
   }
 
-  /** 下拉命令:本地=local,其余=对应插件 id。切回本地刷新列表;切插件清空远程结果。 */
+  /** 下拉命令:聚合=aggregate,本地=local,其余=插件 id。切回本地刷新列表;切来源清空各结果。 */
   function onSearchSourceCommand(cmd: string) {
     if (searchMode.value === cmd) return;
     searchMode.value = cmd;
     remoteItems.value = [];
+    aggregateItems.value = [];
     importingId.value = "";
     if (searchMode.value === "local") localLoader();
   }
 
-  /** 远程搜索(输入 debounce 后由页面调用)。本地模式或无词时清空。 */
+  /** 远程搜索(输入 debounce 后由页面调用,单插件模式)。本地/聚合或无词时清空。 */
   async function doRemoteSearch(q: string) {
     const query = String(q || "").trim();
-    if (!query || searchMode.value === "local") {
+    if (!query || !isRemoteMode.value) {
       remoteItems.value = [];
       return;
     }
@@ -164,13 +173,38 @@ export function useEntitySearch(kind: EntitySearchKind) {
     }
   }
 
-  /** 歌曲导入(音乐页):把搜索结果歌曲直接入库为可播在线歌曲。 */
-  async function importSongs(songs: any[]) {
+  /** 聚合搜索(输入 debounce 后由页面调用,「聚合」默认模式):并发查全部已启用插件全网结果。
+   *  每条结果挂 providerId/providerName,页面据此归位到对应插件的详情/导入/播放。 */
+  async function doAggregateSearch(q: string) {
+    const query = String(q || "").trim();
+    if (!query || !isAggregateMode.value) {
+      aggregateItems.value = [];
+      return;
+    }
+    aggregateSearching.value = true;
+    try {
+      const res = await api.post(`${base}/aggregate/search`, { q: query });
+      if (res.data?.success) {
+        aggregateItems.value = res.data.items || [];
+      } else {
+        aggregateItems.value = [];
+        ElMessage.error(res.data?.error || "搜索失败");
+      }
+    } catch {
+      aggregateItems.value = [];
+      ElMessage.error("聚合搜索失败:无已启用插件或服务不可达");
+    } finally {
+      aggregateSearching.value = false;
+    }
+  }
+
+  /** 歌曲导入(音乐页):把搜索结果歌曲直接入库为可播在线歌曲。providerId 用于聚合行逐条归位(默认当前来源)。 */
+  async function importSongs(songs: any[], providerId?: string) {
     if (!Array.isArray(songs) || !songs.length) return;
     if (importingId.value) return;
     importingId.value = "all";
     try {
-      const res = await api.post(`${base}/${searchMode.value}/import`, { songs });
+      const res = await api.post(`${base}/${providerId || searchMode.value}/import`, { songs });
       if (res.data?.alreadyRunning) {
         ElMessage.warning("正在导入中,请稍候");
         return;
@@ -193,14 +227,14 @@ export function useEntitySearch(kind: EntitySearchKind) {
     }
   }
 
-  /** 专辑导入(专辑页):拉整专 → 以「专辑歌单」形式入库(幂等)。 */
-  async function importAlbum(item: any) {
+  /** 专辑导入(专辑页):拉整专 → 以「专辑歌单」形式入库(幂等)。providerId 用于聚合行逐条归位(默认当前来源)。 */
+  async function importAlbum(item: any, providerId?: string) {
     const key = `${item.source}:${item.id}`;
     if (!item?.source || !item?.id) return;
     if (importingId.value === key) return;
     importingId.value = key;
     try {
-      const res = await api.post(`${base}/${searchMode.value}/import`, {
+      const res = await api.post(`${base}/${providerId || searchMode.value}/import`, {
         source: item.source,
         id: item.id,
         name: item.name,
@@ -234,14 +268,18 @@ export function useEntitySearch(kind: EntitySearchKind) {
     searchProviders,
     remoteItems,
     remoteSearching,
+    aggregateItems,
+    aggregateSearching,
     importingId,
     isLocalMode,
     isRemoteMode,
+    isAggregateMode,
     currentProviderName,
     currentSourceLabel,
     loadSearchProviders,
     onSearchSourceCommand,
     doRemoteSearch,
+    doAggregateSearch,
     importSongs,
     importAlbum,
     setLocalLoader,

@@ -395,3 +395,70 @@ describe("GET /v1/{album,artist}-search/:id/items (远程详情,只拉不导入)
     expect(res.status).toBe(404);
   });
 });
+
+describe("POST /v1/{song,artist,album}-search/aggregate/search (聚合搜索)", () => {
+  const postAgg = (kind: "song" | "artist" | "album", q: string) =>
+    app.request(`/rest/api/v1/${kind}-search/aggregate/search?${authQS()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q }),
+    });
+
+  it("song 聚合:查启用且声明 songSearch 的插件,结果带 providerId/providerName", async () => {
+    const body = (await (await postAgg("song", "周杰伦")).json()) as any;
+    expect(body.success).toBe(true);
+    expect(songSearchCalls).toBe(1);
+    expect(body.total).toBe(2);
+    expect(body.providers.map((p: any) => p.id)).toEqual([FAKE]);
+    // 未声明 songSearch 的 artist-only 插件不参与
+    expect(body.providers.some((p: any) => p.id === FAKE_ARTIST_ONLY)).toBe(false);
+    for (const it of body.items) {
+      expect(it.providerId).toBe(FAKE);
+      expect(it.providerName).toBe("fake-dl 聚合");
+    }
+  });
+
+  it("album 聚合:返回专辑并归位 provider", async () => {
+    const body = (await (await postAgg("album", "叶惠美")).json()) as any;
+    expect(body.success).toBe(true);
+    expect(albumSearchCalls).toBe(1);
+    expect(body.items[0].name).toBe("叶惠美");
+    expect(body.items[0].providerId).toBe(FAKE);
+    expect(body.items[0].platformLabel).toBe("网易云");
+  });
+
+  it("artist 聚合:跨多个已启用插件并发合并(FAKE + 纯艺术家)", async () => {
+    const body = (await (await postAgg("artist", "杰伦")).json()) as any;
+    expect(body.success).toBe(true);
+    // 两个声明 artistSearch 的插件都被调用
+    expect(artistSearchCalls).toBe(1); // 计数仅在 FAKE 递增,artist-only 返回空
+    expect(body.providers.map((p: any) => p.id).sort()).toEqual([FAKE, FAKE_ARTIST_ONLY].sort());
+    // FAKE 返回 2 条,纯艺术家返回空 → 合并 2 条
+    expect(body.total).toBe(2);
+  });
+
+  it("空关键词报错", async () => {
+    const body = (await (await postAgg("song", "   ")).json()) as any;
+    expect(body.success).toBe(false);
+    expect(songSearchCalls).toBe(0);
+  });
+
+  it("单个插件失败不阻断聚合(仅成功插件的结果保留)", async () => {
+    const BAD = "bad-artist";
+    registerPlugin(
+      { id: BAD, name: "坏插件", version: "1.0.0", type: "source", capabilities: ["artistSearch"], platforms: [], platformLabels: {}, configSchema: [] } as any,
+      { async searchArtists() { throw new Error("boom"); } } as any,
+    );
+    db.insert(plugins).values({ id: BAD, name: BAD, enabled: 1, config: "{}" }).run();
+    try {
+      const body = (await (await postAgg("artist", "杰伦")).json()) as any;
+      expect(body.success).toBe(true);
+      // 好插件(FAKE)结果保留,坏插件被跳过 → 合并 2 条
+      expect(body.total).toBe(2);
+      expect(body.items.every((it: any) => it.providerId === FAKE)).toBe(true);
+    } finally {
+      unregisterPlugin(BAD);
+      db.delete(plugins).where(eq(plugins.name, BAD)).run();
+    }
+  });
+});

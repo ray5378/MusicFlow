@@ -11,8 +11,9 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="local">本地</el-dropdown-item>
-              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+              <el-dropdown-item command="aggregate">聚合</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -46,8 +47,54 @@
       </template>
     </div>
 
+    <!-- ===== 聚合搜索结果(默认模式):本地在上,全网并用分节标题放在下 ===== -->
+    <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">
+      <div v-if="aggregateItems.length === 0 && !aggregateSearching" class="remote-empty">
+        <MfIcon name="Disc3" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关全网专辑" : "输入关键词,同时搜索本地库与已启用插件的全网专辑" }}</p>
+      </div>
+      <template v-else>
+        <div class="agg-head">
+          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
+          <span class="agg-meta">已启用插件的合并搜索,卡片带插件·平台标签</span>
+        </div>
+        <div class="album-grid" v-loading="aggregateSearching">
+          <div class="album-card fnos-card-sheen" v-for="(item, i) in aggregateItems" :key="item.providerId + ':' + item.source + ':' + item.id">
+            <div class="album-cover mf-coverwrap" @click="openRemote(item)">
+              <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+              <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
+              <span class="remote-source-tag">{{ item.providerName ? item.providerName + "·" : "" }}{{ item.platformLabel }}</span>
+              <CoverPlay size="md" :label="`播放 ${item.name}`" :action="() => playRemoteAl(item)" />
+            </div>
+            <div class="album-info" @click="openRemote(item)">
+              <div class="album-name">{{ item.name }}</div>
+              <div class="album-artist">{{ item.artist }}</div>
+              <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? item.trackCount + "首" : "" }}</div>
+            </div>
+            <el-button
+              class="remote-import-btn"
+              size="small"
+              type="primary"
+              :loading="importingId === item.source + ':' + item.id"
+              :disabled="item._imported"
+              @click="importAlbum(item, item.providerId)"
+            >{{ item._imported ? "已加入库" : "加入库" }}</el-button>
+          </div>
+        </div>
+      </template>
+
+      <!-- 聚合远程专辑详情:点击卡片 → 预览该专辑歌曲(未入库也可播放/加入库) -->
+      <RemoteDetailDialog
+        v-model="remoteDetailVisible"
+        kind="album"
+        :provider-id="remoteDetailProviderId"
+        :item="remoteDetailItem"
+        @imported="loadAlbums"
+      />
+    </div>
+
     <!-- 远程搜索结果(插件模式):由启用的 albumSearch 插件(如 go-music-dl)提供,可「加入库」为专辑歌单 -->
-    <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
+    <div v-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
       <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="Disc3" :size="40" />
         <p>{{ searchQuery.trim() ? "没有找到相关专辑" : `输入关键词,搜索${currentProviderName}支持的全网专辑` }}</p>
@@ -80,7 +127,7 @@
       <RemoteDetailDialog
         v-model="remoteDetailVisible"
         kind="album"
-        :provider-id="searchMode"
+        :provider-id="remoteDetailProviderId"
         :item="remoteDetailItem"
         @imported="loadAlbums"
       />
@@ -107,14 +154,15 @@ const play = usePlayContent();
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 albumSearch 就不出现在下拉里
 const {
-  searchMode, searchProviders, remoteItems, remoteSearching, importingId,
-  isLocalMode, isRemoteMode, currentProviderName, currentSourceLabel,
-  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, importAlbum,
+  searchMode, searchProviders, remoteItems, remoteSearching, aggregateItems, aggregateSearching,
+  importingId, isLocalMode, isRemoteMode, isAggregateMode, currentProviderName, currentSourceLabel,
+  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, doAggregateSearch, importAlbum,
   setLocalLoader, setAfterRemoteImport,
 } = useEntitySearch("album");
-const searchPlaceholder = computed(() =>
-  isRemoteMode.value ? `搜索${currentProviderName}全网专辑...` : "搜索专辑...",
-);
+const searchPlaceholder = computed(() => {
+  if (isAggregateMode.value) return "搜索本地与全网专辑...";
+  return isRemoteMode.value ? `搜索${currentProviderName}全网专辑...` : "搜索专辑...";
+});
 
 function open(album: any) {
   if (menuGuard()) return;
@@ -133,16 +181,19 @@ async function playAl(album: any) {
 }
 
 // ===== 远程专辑:悬浮播放(未入库直接播) + 点击卡片看详情 =====
+// 聚合结果每条挂自己的 providerId → 详情/播放/入库归位到对应插件(单插件结果无 providerId,回退当前来源)
 const remoteDetailVisible = ref(false);
 const remoteDetailItem = ref<any>(null);
+const remoteDetailProviderId = ref("");
 function openRemote(item: any) {
   if (menuGuard()) return;
   remoteDetailItem.value = item;
+  remoteDetailProviderId.value = item.providerId || searchMode.value;
   remoteDetailVisible.value = true;
 }
 async function playRemoteAl(item: any) {
   if (menuGuard()) return;
-  const n = await playRemoteCollection("album", searchMode.value, item);
+  const n = await playRemoteCollection("album", item.providerId || searchMode.value, item);
   if (n) ElMessage.success(`正在播放「${item.name}」`);
   else ElMessage.warning("该专辑暂无可播放歌曲");
 }
@@ -178,19 +229,23 @@ async function loadAlbums() { cardGrid.reload(); }
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
+    if (isAggregateMode.value) { loadAlbums(); doAggregateSearch(searchQuery.value); return; }
     if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
     else loadAlbums();
   }, 300);
 }
 
 function onSearchClear() {
+  if (isAggregateMode.value) { loadAlbums(); doAggregateSearch(searchQuery.value); return; }
   if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
   loadAlbums();
 }
 
-// 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
+// 切换搜索来源:聚合刷新本地+聚合全网;插件立即搜;切回本地由 composable 触发 localLoader
 watch(() => searchMode.value, () => {
-  if (isRemoteMode.value && searchQuery.value.trim()) doRemoteSearch(searchQuery.value);
+  if (!searchQuery.value.trim()) return;
+  if (isAggregateMode.value) { loadAlbums(); doAggregateSearch(searchQuery.value); }
+  else if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
 });
 
 onMounted(() => {
@@ -217,6 +272,15 @@ watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
     background: rgba(0,0,0,0.55); color: #fff; backdrop-filter: blur(4px);
   }
   .remote-import-btn { position: absolute; right: 8px; bottom: 8px; z-index: 2; }
+}
+/* 聚合模式分节标题栏 */
+.remote-results.agg {
+  margin-top: 24px; padding-top: 20px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  .agg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px;
+    .agg-title { font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
+    .agg-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
+  }
 }
 .album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
 // 本地网格窗口化:固定高度 spacer + 绝对定位虚拟卡片;`.album-grid`(远程结果)仍走自动 grid。

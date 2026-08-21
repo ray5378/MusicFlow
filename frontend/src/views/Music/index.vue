@@ -15,8 +15,9 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="local">本地</el-dropdown-item>
-              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id" :divided="i === 0">{{ p.name }}</el-dropdown-item>
+              <el-dropdown-item command="aggregate">聚合</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -59,13 +60,32 @@
       </div>
     </div>
 
-    <!-- ===== 歌曲列表(本地模式) ===== -->
+    <!-- ===== 歌曲列表(本地模式,聚合模式下同样展示) ===== -->
     <SongTable v-if="isLocalMode" :songs="songs" :loading="loading" :on-window="onWindow" @play="playSong" />
+
+    <!-- ===== 聚合搜索结果(默认模式):本地在上,全网并用分节标题放在下 ===== -->
+    <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">
+      <div v-if="aggregateItems.length === 0 && !aggregateSearching" class="remote-empty">
+        <MfIcon name="Search" :size="40" />
+        <p>{{ searchQuery.trim() ? "没有找到相关全网音乐" : "输入关键词,同时搜索本地库与已启用插件的全网音乐" }}</p>
+      </div>
+      <template v-else>
+        <div class="agg-head">
+          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
+          <span class="agg-meta">已启用插件的合并搜索,歌曲带插件·平台标签</span>
+        </div>
+        <SongTable :songs="aggregateSongs" remote :loading="aggregateSearching" empty-text="没有找到相关音乐" @play="playSong">
+          <template #row-actions="{ row }">
+            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click.stop="importSongs([row._item], row._item.providerId)">加入库</el-button>
+          </template>
+        </SongTable>
+      </template>
+    </div>
 
     <!-- ===== 远程搜索结果(插件模式):由启用的 songSearch 插件(如 go-music-dl)提供 =====
          复用 SongTable(本地同款交互:悬浮播放/点击播放/右键菜单),歌曲未入库也能播
          (streamUrl → /rest/stream-remote 代理流),另保留「加入库」能力 -->
-    <div v-else-if="isRemoteMode" class="remote-results">
+    <div v-if="isRemoteMode" class="remote-results">
       <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="Search" :size="40" />
         <p>{{ searchQuery.trim() ? "没有找到相关音乐" : `输入关键词,搜索${currentProviderName}支持的全网音乐` }}</p>
@@ -126,16 +146,19 @@ const { list: songs, loading, total, reload: loadSongs, onWindow } = useInfinite
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 songSearch 就不出现在下拉里
 const {
-  searchMode, searchProviders, remoteItems, remoteSearching, importingId,
-  isLocalMode, isRemoteMode, currentProviderName, currentSourceLabel,
-  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, importSongs,
+  searchMode, searchProviders, remoteItems, remoteSearching, aggregateItems, aggregateSearching,
+  importingId, isLocalMode, isRemoteMode, isAggregateMode, currentProviderName, currentSourceLabel,
+  loadSearchProviders, onSearchSourceCommand, doRemoteSearch, doAggregateSearch, importSongs,
   setLocalLoader, setAfterRemoteImport,
 } = useEntitySearch("song");
-const searchPlaceholder = computed(() =>
-  isRemoteMode.value ? `搜索${currentProviderName}全网音乐...` : "搜索音乐...",
-);
+const searchPlaceholder = computed(() => {
+  if (isAggregateMode.value) return "搜索本地与全网音乐...";
+  return isRemoteMode.value ? `搜索${currentProviderName}全网音乐...` : "搜索音乐...";
+});
 // 远程搜索结果 → 可播放 Song(带 streamUrl,未入库直接播;原始 item 挂 _item 供加入库)
 const remoteSongs = computed(() => remoteItems.value.map((it) => remoteItemToSong(it, searchMode.value)));
+// 聚合结果:每条挂自己的 providerId → 各自归位到对应插件(可播/可入库)
+const aggregateSongs = computed(() => aggregateItems.value.map((it) => remoteItemToSong(it, it.providerId)));
 
 // 最近添加模式：/songs?recent=1 → 展示最新入库的 500 首（后端 sort=recentAdded）
 const recentMode = computed(() => route.query.recent === "1");
@@ -155,6 +178,16 @@ watch(() => route.query.recent, () => {
 });
 
 function onSearchInput() {
+  // 聚合(默认)模式:同时刷新本地 + 聚合全网
+  if (isAggregateMode.value) {
+    if (recentMode.value) router.replace({ path: "/songs", query: {} });
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      loadSongs();
+      doAggregateSearch(searchQuery.value);
+    }, 300);
+    return;
+  }
   // 远程(插件)模式:直接搜插件
   if (isRemoteMode.value) {
     if (searchTimer) clearTimeout(searchTimer);
@@ -168,6 +201,7 @@ function onSearchInput() {
 }
 
 function onSearchClear() {
+  if (isAggregateMode.value) { loadSongs(); doAggregateSearch(searchQuery.value); return; }
   if (isRemoteMode.value) { doRemoteSearch(searchQuery.value); return; }
   loadSongs();
 }
@@ -178,9 +212,11 @@ function playSong(song: Song) {
 }
 function playAll() { const all = songs.value.filter(Boolean); if (all.length > 0) playerStore.playQueue(all); }
 
-// 切到插件搜索模式时,若已有关键词立即搜;切回本地由 composable 触发 localLoader
+// 切换搜索来源:插件模式立即搜插件;聚合模式刷新本地+聚合全网;切回本地由 composable 触发 localLoader
 watch(() => searchMode.value, () => {
-  if (isRemoteMode.value && searchQuery.value.trim()) doRemoteSearch(searchQuery.value);
+  if (!searchQuery.value.trim()) return;
+  if (isRemoteMode.value) doRemoteSearch(searchQuery.value);
+  else if (isAggregateMode.value) { loadSongs(); doAggregateSearch(searchQuery.value); }
 });
 
 onMounted(() => {
@@ -343,6 +379,15 @@ onMounted(() => {
 .remote-results {
   .remote-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 60px 0; color: var(--fnos-text-tertiary); font-size: 13px; }
   .remote-toolbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+}
+/* 聚合模式分节标题栏(与本页「全网结果」分节共用) */
+.remote-results.agg {
+  margin-top: 24px; padding-top: 20px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  .agg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px;
+    .agg-title { font-size: 15px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; color: var(--fnos-text-primary); }
+    .agg-meta { font-size: 12px; color: var(--fnos-text-tertiary); }
+  }
 }
 
 .pagination-bar {

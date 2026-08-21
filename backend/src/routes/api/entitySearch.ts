@@ -16,6 +16,9 @@ import { Hono } from "hono";
 import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("ENTITY-SEARCH");
 
 type Kind = "song" | "artist" | "album";
 
@@ -90,6 +93,59 @@ for (const spec of SPECS) {
       platformLabels: manifest.platformLabels || {},
     }));
     return c.json({ success: true, providers });
+  });
+
+  // 聚合远程搜索(前端「聚合」默认模式):一次并发查全部已启用且声明该能力的插件。
+  // 单插件失败不断路:Promise.allSettled 降级,失败仅记日志,结果带 providerId/providerName,
+  // 供前端把每条结果归位到对应插件的详情/导入/播放。Body { q } -> { items }(每条挂 providerId)。
+  entitySearchRoutes.post(`${spec.base}/aggregate/search`, async (c) => {
+    markInteractiveStart();
+    try {
+      const q = String((await c.req.json().catch(() => ({}))).q || "").trim();
+      if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+      const plugins = getEnabledByCapability(spec.capability).filter((p) => typeof p.impl?.[spec.method] === "function");
+      if (plugins.length === 0) return c.json({ success: true, total: 0, providers: [], items: [] });
+
+      const settled = await Promise.allSettled(
+        plugins.map(async (p) => {
+          const config = getPluginConfig(p.manifest.id) || {};
+          const res = await p.impl[spec.method](config, { query: q });
+          const list = Array.isArray(res?.[spec.resultKey]) ? res[spec.resultKey] : [];
+          return { providerId: p.manifest.id, providerName: p.manifest.name, labels: p.manifest.platformLabels || {}, list };
+        }),
+      );
+
+      const items: any[] = [];
+      settled.forEach((s, i) => {
+        if (s.status === "fulfilled") {
+          for (const it of mapItems(spec.kind, s.value.list, s.value.labels)) {
+            items.push({ ...it, providerId: s.value.providerId, providerName: s.value.providerName });
+          }
+        } else {
+          // 单个插件失败只降级,不拖垮聚合;必须记日志且带插件 id。
+          log.error(`聚合${spec.kind}搜索插件失败`, {
+            providerId: plugins[i]?.manifest.id || "?",
+            err: s.reason instanceof Error ? s.reason.message : String(s.reason),
+          });
+        }
+      });
+
+      return c.json({
+        success: true,
+        total: items.length,
+        providers: plugins.map((p) => ({
+          id: p.manifest.id,
+          name: p.manifest.name,
+          platforms: p.manifest.platforms || [],
+          platformLabels: p.manifest.platformLabels || {},
+        })),
+        items,
+      });
+    } catch (e: any) {
+      return c.json({ success: false, error: e.message || "搜索失败" });
+    } finally {
+      markInteractiveEnd();
+    }
   });
 
   // Aggregate remote search across the plugin's platforms.
