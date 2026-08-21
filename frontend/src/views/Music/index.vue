@@ -401,9 +401,11 @@ onMounted(() => {
   .page-header {
     flex-direction: column; align-items: flex-start; gap: 12px;
     .page-title h2 { font-size: 24px; }
-    .header-actions { width: 100%; }
-    .header-actions .search-input { width: 100%; flex: 1; }
-    .header-actions .play-all-btn { flex-shrink: 0; }
+    /* 手机端:搜索「来源 + 输入框」独占一行,「播放全部」换行到下一整行。
+       否则来源下拉 + 输入框 + 按钮挤在同一行,输入框被压缩到几乎看不清文字。 */
+    .header-actions { width: 100%; flex-wrap: wrap; gap: 10px 12px; }
+    .header-actions .search-input { flex: 1 1 auto; width: auto; min-width: 0; }
+    .header-actions .play-all-btn { flex-basis: 100%; flex-grow: 1; flex-shrink: 0; }
   }
 }
 </style>
