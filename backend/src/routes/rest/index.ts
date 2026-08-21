@@ -520,7 +520,7 @@ restRoutes.get("/getAlbumList2", (c) => {
 
 const searchHandler = (c: any) => {
   const query = getParam(c, "query") || "";
-  const songCount = Math.min(5000, parseInt(getParam(c, "songCount") || "20") || 20);
+  const songCount = Math.min(500, parseInt(getParam(c, "songCount") || "20") || 20);
   const albumCount = Math.min(500, parseInt(getParam(c, "albumCount") || "20") || 20);
   const artistCount = Math.min(500, parseInt(getParam(c, "artistCount") || "20") || 20);
   const songOffset = parseInt(getParam(c, "songOffset") || "0") || 0;
