@@ -15,9 +15,9 @@ import { authRoutes } from "./routes/auth/index.js";
 import { restRoutes } from "./routes/rest/index.js";
 import { apiRoutes, getDlnaBaseUrl } from "./routes/api/index.js";
 import { navidromeRoutes } from "./routes/navidrome/index.js";
-import { getFlowByToken, executeFlow, isFlowRunning } from "./services/flows/index.js";
+import { getFlow, executeFlow, isFlowRunning } from "./services/flows/index.js";
 import {
-  validatePlayerWebhookToken, listPlayerWebhookTokens,
+  validatePlayerWebhookToken, listPlayerWebhookTokens, getPlayerWebhookTokenById,
   resolvePlayerDevicePeers, handlePlayerWebhook,
 } from "./services/player/playerWebhook.js";
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
@@ -98,14 +98,37 @@ app.use("/api/*", authMiddleware);
 app.route("/api", navidromeRoutes);
 app.get("/ping", (c) => c.json({ status: "ok", version: APP_VERSION, commit: APP_COMMIT }));
 
-// ==================== 音流 Webhook(免鉴权,凭 token 触发) ====================
+// ==================== 音流 Webhook(免鉴权,凭「通用播放器控制」渠道 token 触发) ====================
 // 注册在 /rest、/api 鉴权中间件之外,外部工具(GET 或 POST)直接打开链接即可触发:
+//   Base/webhooks/flows/{flowId}?token={渠道token}
 // 后台异步持续扫描 DLNA → 任一目标设备/组上线后依次 设音量 → 播放模式 → 播歌单。
-app.all("/webhooks/flows/:token", async (c) => {
-  const token = c.req.param("token") || "";
-  const flow = getFlowByToken(token);
-  if (!flow) return c.json({ success: false, error: "无效的 webhook token" }, 404);
+// 该 token 必须存在、启用,且是该音流所绑定的那一个(在新建音流时选择)。
+app.all("/webhooks/flows/:id", async (c) => {
+  const id = c.req.param("id") || "";
+  const flow = getFlow(id);
+  if (!flow) return c.json({ success: false, error: "音流不存在" }, 404);
+
+  const q = c.req.queries();
+  const flat: Record<string, string> = {};
+  for (const [k, v] of Object.entries(q)) {
+    if (v && v[0] !== undefined) flat[k] = String(v[0]);
+  }
+  if (!flat.token) return c.json({ success: false, error: "缺少 token 参数" }, 401);
+
+  // ① 令牌本身须存在且启用(与 /webhook/player 一致)。
+  const auth = validatePlayerWebhookToken(flat.token);
+  if (!auth) {
+    const t = listPlayerWebhookTokens();
+    if (t.some(x => x.token === flat.token)) return c.json({ success: false, error: "该渠道 token 已停用" }, 403);
+    return c.json({ success: false, error: "无效的 token" }, 401);
+  }
+  // ② 令牌必须是对该音流绑定的那一个(新建音流时选择)。
+  const bound = flow.tokenId ? getPlayerWebhookTokenById(flow.tokenId) : undefined;
+  if (!bound || bound.token !== flat.token || !bound.enabled) {
+    return c.json({ success: false, error: "该渠道 token 与音流不匹配" }, 403);
+  }
   if (!flow.enabled) return c.json({ success: false, error: "该音流已停用" }, 409);
+
   const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
   return c.json({
     success: true,

@@ -324,6 +324,9 @@ export const genres = sqliteTable("genres", {
 export const flows = sqliteTable("flows", {
   id: text("id").primaryKey(),
   token: text("token").notNull().unique(),
+  // 对外链接所绑定的「通用播放器控制」渠道 token id(见 player_webhook_tokens);
+  // 空 = 未绑定,链接不可用。旧版 flow 自带的 token 随迁移废弃。
+  tokenId: text("token_id").default(""),
   name: text("name").notNull(),
   definitionJson: text("definition_json").notNull().default("{}"), // FlowDefinition
   enabled: integer("enabled").notNull().default(1), // 1 = 可被 webhook/UI 触发

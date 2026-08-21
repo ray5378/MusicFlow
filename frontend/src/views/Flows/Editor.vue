@@ -26,11 +26,19 @@
         <span class="node-hint">外部工具直接打开/GET/POST 下方链接即可启动本音流</span>
       </div>
       <div class="node-body">
+        <div class="token-row">
+          <span class="token-label">鉴权渠道 Token</span>
+          <el-select v-model="form.tokenId" placeholder="选择渠道 token" size="small" style="width: 260px" @change="onTokenChange">
+            <el-option v-for="t in tokens" :key="t.id" :label="`${t.name}${t.enabled ? '' : '(停用)'}`" :value="t.id" />
+          </el-select>
+          <span class="token-hint">对外链接须绑定的「通用播放器控制」渠道 token,可在音流页顶部模块创建/启用。</span>
+        </div>
         <div class="wh-row">
           <span class="wh-label">对外链接</span>
           <IdBadge :id="webhookUrl" copy-label="对外链接" style="min-width: 0" />
         </div>
-        <div class="wh-note">链接内已包含私有 Token,勿公开分享。</div>
+        <div v-if="!webhookUrl" class="wh-note">所选渠道 token 不存在或已停用,对外链接不可用。请先在「通用播放器控制」创建并启用一个 token。</div>
+        <div v-else class="wh-note">链接内已包含所绑定的私有 Token,勿公开分享。</div>
       </div>
     </div>
 
@@ -202,6 +210,8 @@ const CONTENT_TYPE_OPTIONS: Record<string, string> = {
 const loading = ref(false);
 const saving = ref(false);
 const webhookUrl = ref("");
+const tokens = ref<any[]>([]);
+const tokensTemplateUrl = ref("");
 const peers = ref<any[]>([]);
 const contentOptions = ref<any[]>([]);
 const contentLoading = ref(false);
@@ -226,6 +236,7 @@ function pickRecommendCard(card: any) {
 const form = reactive({
   name: "新音流",
   enabled: true,
+  tokenId: "",
   targets: [] as string[],
   waitTimeoutSec: 0,
   scanIntervalSec: 5,
@@ -314,13 +325,35 @@ function platformLabel(platform?: string): string {
   return platform || "本地";
 }
 
+async function loadTokens() {
+  try {
+    const res = await api.get("/rest/api/v1/player-webhook/tokens");
+    tokens.value = res.data?.items || [];
+    tokensTemplateUrl.value = res.data?.templateUrl || `${location.origin}/webhook/player`;
+  } catch { tokens.value = []; }
+}
+
+// 与后端 flowWithWebhook 一致:取所选启用 token 拼出带鉴权的对外链接;缺失/停用则空(触发节点提示不可用)。
+function buildWebhookUrl(): string {
+  const tk = tokens.value.find((t) => t.id === form.tokenId && t.enabled);
+  if (!tk) return "";
+  const base = tokensTemplateUrl.value.replace(/\/webhook\/player$/, "");
+  return `${base}/webhooks/flows/${flowId}?token=${encodeURIComponent(tk.token)}`;
+}
+
+function onTokenChange() {
+  webhookUrl.value = buildWebhookUrl();
+}
+
 async function loadFlow() {
   loading.value = true;
   try {
+    if (tokens.value.length === 0) await loadTokens();
     const res = await api.get(`/rest/api/v1/flows/${flowId}`);
     const f = res.data.flow;
     form.name = f.name;
     form.enabled = !!f.enabled;
+    form.tokenId = f.tokenId || "";
     const d = f.definition;
     form.targets = [...(d.targets || [])];
     form.waitTimeoutSec = d.waitTimeoutSec ?? 0;
@@ -332,7 +365,7 @@ async function loadFlow() {
       form.contentId = d.content.id || "";
       form.contentName = d.content.name || "";
     }
-    webhookUrl.value = f.webhookUrl || "";
+    webhookUrl.value = buildWebhookUrl();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "加载失败");
   } finally { loading.value = false; }
@@ -367,9 +400,12 @@ async function save() {
   if (!name) { ElMessage.warning("请填写音流名称"); return; }
   if (form.targets.length === 0) { ElMessage.warning("请选择目标设备/组"); return; }
   if (!form.contentId) { ElMessage.warning("请选择要播放的内容"); return; }
+  if (!form.tokenId) { ElMessage.warning("请选择对外链接绑定的渠道 token"); return; }
+  const tk = tokens.value.find((t) => t.id === form.tokenId);
+  if (!tk || !tk.enabled) { ElMessage.warning("所选渠道 token 不存在或已停用,请先到「通用播放器控制」创建并启用"); return; }
   saving.value = true;
   try {
-    await api.put(`/rest/api/v1/flows/${flowId}`, { name, enabled: form.enabled, definition: toDefinition() });
+    await api.put(`/rest/api/v1/flows/${flowId}`, { name, enabled: form.enabled, tokenId: form.tokenId, definition: toDefinition() });
     ElMessage.success("已保存");
     router.push("/flows");
   } catch (e: any) {
@@ -377,7 +413,7 @@ async function save() {
   } finally { saving.value = false; }
 }
 
-onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions(""); loadRecommendCards(); });
+onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions(""); loadRecommendCards(); loadTokens(); });
 </script>
 
 <style lang="scss" scoped>
@@ -424,6 +460,10 @@ onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions(""); loadRecommen
   .wh-label { font-size: 12px; color: var(--fnos-text-tertiary); flex-shrink: 0; }
 }
 .wh-note { font-size: 11px; color: var(--fnos-text-muted); margin-top: 6px; }
+.token-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
+  .token-label { font-size: 12px; color: var(--fnos-text-secondary); flex-shrink: 0; }
+  .token-hint { font-size: 11px; color: var(--fnos-text-tertiary); }
+}
 
 .field-row { margin-bottom: 8px;
   .field-label { font-size: 12px; color: var(--fnos-text-secondary); }

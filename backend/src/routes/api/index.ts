@@ -49,7 +49,7 @@ import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPl
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
-  setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName,
+  setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
 } from "../../services/player/playerWebhook.js";
 import { getGroupManager } from "../../services/group/index.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
@@ -2813,9 +2813,21 @@ const DEFAULT_DEFINITION = {
 };
 
 // 对外可复制链接:用局域网可达 base,保证外部 webhook 能命中。/rest、/api 均受鉴权,
-// 音流链接悬停在 /webhooks/... 路径上(免鉴权)。
+// 音流链接悬停在 /webhooks/... 路径上(免鉴权),且必须携带所绑定的「通用播放器控制」渠道 token。
+// 绑定 token 缺失或已停用时,flow.webhookUrl 为空(前端提示先到「通用播放器控制」创建/启用 token)。
 function flowWithWebhook(flow: any) {
-  return { ...flow, webhookUrl: `${getEffectiveBaseUrl()}/webhooks/flows/${flow.token}` };
+  let webhookUrl = "";
+  const tok = flow.tokenId ? getPlayerWebhookTokenById(flow.tokenId) : undefined;
+  if (tok && tok.enabled) {
+    webhookUrl = `${getEffectiveBaseUrl()}/webhooks/flows/${flow.id}?token=${encodeURIComponent(tok.token)}`;
+  }
+  return { ...flow, tokenId: flow.tokenId || "", tokenName: tok?.name || "", webhookUrl };
+}
+
+// 创建时未指定 tokenId:自动绑定第一个启用渠道 token,让新音流立即可触发。
+function resolveDefaultTokenId(): string {
+  const t = listPlayerWebhookTokens().find(x => x.enabled);
+  return t ? t.id : "";
 }
 
 apiRoutes.get("/v1/flows", adminMiddleware, (c) => {
@@ -2833,17 +2845,37 @@ apiRoutes.post("/v1/flows", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return c.json({ error: "需要 name" }, 400);
-  const flow = createFlow(name, body.definition || { ...DEFAULT_DEFINITION });
+  // 绑定渠道 token:校验 body.tokenId 存在;缺省自动绑定第一个启用渠道 token。
+  let tokenId = "";
+  if (body.tokenId) {
+    const t = getPlayerWebhookTokenById(String(body.tokenId));
+    if (!t) return c.json({ error: "指定的渠道 token 不存在" }, 400);
+    tokenId = t.id;
+  } else {
+    tokenId = resolveDefaultTokenId();
+  }
+  const flow = createFlow(name, body.definition || { ...DEFAULT_DEFINITION }, tokenId);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
 apiRoutes.put("/v1/flows/:id", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
-  const flow = updateFlow(c.req.param("id")!, {
+  const upd: any = {
     name: typeof body.name === "string" ? body.name : undefined,
     definition: body.definition,
     enabled: body.enabled === undefined ? undefined : !!body.enabled,
-  });
+  };
+  // 音流对外链接可改绑渠道 token。
+  if (typeof body.tokenId === "string") {
+    if (body.tokenId) {
+      const t = getPlayerWebhookTokenById(body.tokenId);
+      if (!t) return c.json({ error: "指定的渠道 token 不存在" }, 400);
+      upd.tokenId = t.id;
+    } else {
+      upd.tokenId = "";
+    }
+  }
+  const flow = updateFlow(c.req.param("id")!, upd);
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });

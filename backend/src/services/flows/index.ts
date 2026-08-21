@@ -32,6 +32,8 @@ export interface FlowDefinition {
 export interface FlowRow {
   id: string;
   token: string;
+  /** 对外链接绑定的「通用播放器控制」渠道 token id;空 = 未绑定,链接不可用。 */
+  tokenId: string;
   name: string;
   definition: FlowDefinition;
   enabled: boolean;
@@ -62,6 +64,7 @@ function rowToFlow(r: any): FlowRow {
   return {
     id: r.id,
     token: r.token,
+    tokenId: r.tokenId || "",
     name: r.name,
     definition: parseDef(r.definitionJson),
     enabled: r.enabled === 1,
@@ -87,12 +90,13 @@ export function getFlowByToken(token: string): FlowRow | undefined {
   return r ? rowToFlow(r) : undefined;
 }
 
-export function createFlow(name: string, definition: FlowDefinition): FlowRow {
+export function createFlow(name: string, definition: FlowDefinition, tokenId = ""): FlowRow {
   const id = `flow-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const now = new Date().toISOString();
   db.insert(flows).values({
     id,
     token: uuidv4().replace(/-/g, ""),
+    tokenId,
     name,
     definitionJson: JSON.stringify(definition),
     enabled: 1,
@@ -102,13 +106,14 @@ export function createFlow(name: string, definition: FlowDefinition): FlowRow {
   return getFlow(id)!;
 }
 
-export function updateFlow(id: string, patch: { name?: string; definition?: FlowDefinition; enabled?: boolean }): FlowRow | undefined {
+export function updateFlow(id: string, patch: { name?: string; definition?: FlowDefinition; enabled?: boolean; tokenId?: string }): FlowRow | undefined {
   const cur = getFlow(id);
   if (!cur) return undefined;
   const now = new Date().toISOString();
   db.update(flows).set({
     name: patch.name ?? cur.name,
-    definitionJson: patch.definition ? JSON.stringify(patch.definition) : cur.definition ? JSON.stringify(cur.definition) : JSON.stringify(cur.definition),
+    tokenId: patch.tokenId === undefined ? cur.tokenId : patch.tokenId,
+    definitionJson: patch.definition ? JSON.stringify(patch.definition) : JSON.stringify(cur.definition),
     enabled: patch.enabled === undefined ? (cur.enabled ? 1 : 0) : patch.enabled ? 1 : 0,
     updatedAt: now,
   }).where(eq(flows.id, id)).run();

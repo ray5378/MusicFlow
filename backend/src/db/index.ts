@@ -419,6 +419,7 @@ export function initDatabase() {
     CREATE TABLE IF NOT EXISTS flows (
       id TEXT PRIMARY KEY,
       token TEXT UNIQUE NOT NULL,
+      token_id TEXT DEFAULT '',
       name TEXT NOT NULL,
       definition_json TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1,
@@ -451,6 +452,10 @@ export function initDatabase() {
   // Migration: add must_change_password column to users table (older DBs)
   try {
     sqlite.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0");
+  } catch {}
+  // Migration: add token_id column to flows (older DBs) — 音流对外链接绑定渠道 token
+  try {
+    sqlite.exec("ALTER TABLE flows ADD COLUMN token_id TEXT DEFAULT ''");
   } catch {}
   // Migration: add favorite column to playlists table (older DBs) — 收藏歌单标记
   try {

@@ -65,6 +65,16 @@ export function validatePlayerWebhookToken(token: string): { ownerUserId: string
   return { ownerUserId: r.ownerUserId || "" };
 }
 
+/** 按 id 取一条渠道 token(token 值仅此处/管理接口返回)。音流对外链接据此生成。 */
+export function getPlayerWebhookTokenById(id: string): {
+  id: string; name: string; token: string; enabled: boolean; ownerUserId: string;
+} | undefined {
+  if (!id) return undefined;
+  const r = db.select().from(playerWebhookTokens).where(eq(playerWebhookTokens.id, id)).get();
+  if (!r) return undefined;
+  return { id: r.id, name: r.name || "", token: r.token, enabled: !!r.enabled, ownerUserId: r.ownerUserId || "" };
+}
+
 /** 渠道 token 的归属用户名(展示用)。 */
 export function resolvePlayerWebhookOwnerName(ownerUserId: string): string {
   if (!ownerUserId) return "";
