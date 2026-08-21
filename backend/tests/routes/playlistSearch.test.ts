@@ -117,6 +117,7 @@ beforeEach(() => {
 
 afterAll(() => {
   unregisterPlugin(FAKE);
+  unregisterPlugin(FAKE2);
 });
 
 describe("GET /v1/playlist-search/providers", () => {
@@ -165,6 +166,80 @@ describe("POST /v1/playlist-search/:id/search", () => {
       body: JSON.stringify({ q: "x" }),
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /v1/playlist-search/aggregate/search (聚合:同时搜全部已启用插件)", () => {
+  it("空关键词报错且不调任何插件", async () => {
+    const res = await app.request(`/rest/api/v1/playlist-search/aggregate/search?${authQS()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "   " }),
+    });
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(false);
+    expect(searchCalls).toBe(0);
+  });
+
+  it("无已启用插件 → 返回成功空结果(不抛错)", async () => {
+    unregisterPlugin(FAKE);
+    db.delete(plugins).where(eq(plugins.name, FAKE)).run();
+    const res = await app.request(`/rest/api/v1/playlist-search/aggregate/search?${authQS()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "周杰伦" }),
+    });
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(body.total).toBe(0);
+    expect(body.playlists).toEqual([]);
+  });
+
+  it("并发搜全部已启用插件并归并结果(带 providerId/providerName/平台标签)", async () => {
+    registerFakePlugin2();
+    const res = await app.request(`/rest/api/v1/playlist-search/aggregate/search?${authQS()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "周杰伦" }),
+    });
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+
+    // 两个插件各调一次
+    expect(searchCalls).toBe(1);
+    expect(search2Calls).toBe(1);
+
+    // 归并:fake-dl 2 条 + fake-dl-2 1 条
+    expect(body.total).toBe(3);
+
+    const first = body.playlists.find((p: any) => p.providerId === FAKE);
+    expect(first.providerName).toBe("fake-dl 聚合");
+    expect(first.platformLabel).toBe("网易云");
+
+    const second = body.playlists.find((p: any) => p.providerId === FAKE2);
+    expect(second.providerName).toBe("fake-dl 第二个聚合");
+    expect(second.id).toBe("k1");
+    expect(second.platformLabel).toBe("酷狗");
+    expect(second.name).toBe("聚合专属");
+
+    // providers 同时列出全部已启用插件
+    expect(body.providers.map((p: any) => p.id).sort()).toEqual([FAKE, FAKE2].sort());
+  });
+
+  it("单个插件失败不阻断聚合(仍返回其余插件结果)", async () => {
+    registerFakePlugin2(true); // 该插件 searchPlaylists 抛错
+    const res = await app.request(`/rest/api/v1/playlist-search/aggregate/search?${authQS()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "周杰伦" }),
+    });
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(searchCalls).toBe(1);   // fake-dl 仍正常命中
+    expect(search2Calls).toBe(1);  // 失败插件也被调过(只是被 allSettled 兜住)
+    // 只保留成功插件的结果,失败插件的不含任何条目
+    expect(body.total).toBe(2);
+    for (const p of body.playlists as any[]) expect(p.providerId).toBe(FAKE);
   });
 });
 
