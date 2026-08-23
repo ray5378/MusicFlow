@@ -115,20 +115,25 @@ apiRoutes.get("/v1/recommend", async (c) => {
       source: ch.source || "",
       name: ch.name || ch.source || "",
       count: ch.count || 0,
-      playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
-        id: pl.id,
-        source: pl.source || ch.source || "",
-        name: pl.name || "",
-        creator: pl.creator || "",
-        // 远程封面 URL:go-music-dl 返回相对路径时用插件 baseUrl 拼成完整地址,
-        // 前端才能直接 <img> 渲染。
-        cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
-          ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
-          : (pl.cover || ""),
-        trackCount: pl.trackCount != null ? String(pl.trackCount) : "",
-        link: pl.link || "",
-        imported: !!findRecommendPlaylist(pl.id),
-      })),
+      playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
+        // 首页平台精选歌单均已入库,曲目数量直接取本地库里的真实 songCount(与歌单列表/详情页
+        // 口径一致),不再透传插件远程 trackCount——对已导入歌单该值常为空,导致首页不显示数字。
+        const local = findRecommendPlaylist(pl.id);
+        return {
+          id: pl.id,
+          source: pl.source || ch.source || "",
+          name: pl.name || "",
+          creator: pl.creator || "",
+          // 远程封面 URL:go-music-dl 返回相对路径时用插件 baseUrl 拼成完整地址,
+          // 前端才能直接 <img> 渲染。
+          cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
+            ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
+            : (pl.cover || ""),
+          trackCount: local ? String(local.songCount ?? "") : "",
+          link: pl.link || "",
+          imported: !!local,
+        };
+      }),
     }));
     recommendCache.set(providerId, { ts: Date.now(), channels });
     return c.json({ success: true, channels, providerId });

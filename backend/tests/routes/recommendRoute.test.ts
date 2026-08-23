@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
-import { users, plugins } from "../../src/db/schema.js";
+import { users, plugins, playlists } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes, clearRecommendCache } from "../../src/routes/api/index.js";
@@ -30,6 +30,7 @@ const fakeManifest = {
   type: "source",
   description: "test only",
   capabilities: ["recommend"],
+  recommendPrefix: "gmdl://", // 声明推荐歌单 sourceUrl 前缀,使 findRecommendPlaylist 能匹配已入库歌单
   platforms: ["netease", "qq"],
   configSchema: [
     { key: "baseUrl", label: "服务地址", type: "url", required: true },
@@ -93,6 +94,8 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
 
   it("resolves the enabled recommend plugin and returns its channels", async () => {
     db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080", homeCount: 3 }) }).run();
+    // 已入库本地歌单(与插件返回的 pl-1 通过 sourceUrl 前缀匹配),songCount 即数据库中真实数量
+    db.insert(playlists).values({ id: "local-pl-1", name: "歌单一", ownerId: "u1", sourceUrl: "gmdl://pl-1", songCount: 58 }).run();
     const { body } = await getRecommend();
     expect(body.success).toBe(true);
     expect(body.providerId).toBe(FAKE_ID);
@@ -103,9 +106,12 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
     expect(pl[0].cover).toBe("http://gmdl:8080/cover/1.jpg");
     // 绝对 URL 原样透传
     expect(pl[1].cover).toBe("http://cdn.example.com/2.jpg");
-    // 未导入的歌单 imported=false
-    expect(pl[0].imported).toBe(false);
-    expect(pl[0].trackCount).toBe("100");
+    // 已入库歌单:imported=true,曲目数量取本地库真实 songCount
+    expect(pl[0].imported).toBe(true);
+    expect(pl[0].trackCount).toBe("58");
+    // 未入库歌单:不取插件 trackCount(无本地候补)
+    expect(pl[1].imported).toBe(false);
+    expect(pl[1].trackCount).toBe("");
   });
 
   it("caches the result for 5min (second call does not hit the plugin again)", async () => {
