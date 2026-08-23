@@ -96,6 +96,39 @@ export function clearRecommendCache(): void {
 }
 // 空闲内存回收时一并清空(经注册回调,避免 reclaim 与路由层循环依赖)。
 registerCacheCleaner(() => { recommendCache.clear(); });
+
+/** 归一化歌名供兜底比对:去空白、去尾部省略号、小写。 */
+function normalizePlaylistName(name: unknown): string {
+  return String(name ?? "").trim().replace(/[…...]+$/, "").toLowerCase();
+}
+
+/**
+ * 把首页「平台精选」的远端歌单匹配到已入库的本地歌单,用于读取真实曲目数量。
+ * 命中优先级:sourceUrl 前缀 → externalId+平台 → 歌名+平台。
+ * 只依赖本地库定位并取 songCount,完全不用插件远程 trackCount 候补。
+ * 覆盖不同入库途径:每日推荐同步/点播导入(有平台 id)、URL/搜索导入(仅剩歌名可对齐)。
+ */
+function findLocalRemotePlaylist(remoteId: string, source: string, name: string): any | null {
+  if (remoteId) {
+    const bySourceUrl = findRecommendPlaylist(remoteId);
+    if (bySourceUrl) return bySourceUrl;
+  }
+  const src = source || "";
+  if (remoteId && src) {
+    const byExternal = db.select().from(playlists)
+      .where(and(eq(playlists.externalId, remoteId), eq(playlists.sourcePlatform, src)))
+      .get();
+    if (byExternal) return byExternal;
+  }
+  const norm = normalizePlaylistName(name);
+  if (norm.length >= 3 && src) {
+    const candidates = db.select().from(playlists).where(eq(playlists.sourcePlatform, src)).all();
+    const hit = candidates.find((p) => normalizePlaylistName(p.name) === norm);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 apiRoutes.get("/v1/recommend", async (c) => {
   const rp = firstEnabledByCapability("recommend");
   const providerId = rp?.manifest.id || "";
@@ -116,12 +149,14 @@ apiRoutes.get("/v1/recommend", async (c) => {
       name: ch.name || ch.source || "",
       count: ch.count || 0,
       playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
-        // 首页平台精选歌单均已入库,曲目数量直接取本地库里的真实 songCount(与歌单列表/详情页
-        // 口径一致),不再透传插件远程 trackCount——对已导入歌单该值常为空,导致首页不显示数字。
-        const local = findRecommendPlaylist(pl.id);
+        // 首页平台精选歌单均已入库,先用三重匹配定位本地歌单,再取数据库真实
+        // songCount(与歌单列表/详情页口径一致)。不再透传插件远程 trackCount——
+        // 对已入库歌单该值常为空,导致首页不显示数字。
+        const source = pl.source || ch.source || "";
+        const local = findLocalRemotePlaylist(pl.id, source, pl.name || "");
         return {
           id: pl.id,
-          source: pl.source || ch.source || "",
+          source,
           name: pl.name || "",
           creator: pl.creator || "",
           // 远程封面 URL:go-music-dl 返回相对路径时用插件 baseUrl 拼成完整地址,

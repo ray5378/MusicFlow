@@ -114,6 +114,50 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
     expect(pl[1].trackCount).toBe("");
   });
 
+  it("fallback: matches an imported playlist via externalId + platform when sourceUrl does not match", async () => {
+    db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080" }) }).run();
+    // sourceUrl 不是 "gmdl://94123"(故意错开),迫使走 externalId+平台 命中
+    db.insert(playlists).values({ id: "local-ext", name: "外部歌单", ownerId: "u1", sourceUrl: "http://import/94123", externalId: "94123", sourcePlatform: "netease", songCount: 77 }).run();
+    const custom = {
+      manifest: fakeManifest,
+      async recommend() {
+        return {
+          channels: [{ source: "netease", name: "网易云", count: 1, playlists: [
+            { id: "94123", source: "netease", name: "外部歌单", creator: "a", cover: "", trackCount: "999", link: "" },
+          ] }],
+        };
+      },
+    };
+    unregisterPlugin(FAKE_ID);
+    registerPlugin(fakeManifest as any, custom as any);
+    const { body } = await getRecommend();
+    const pl = body.channels[0].playlists[0];
+    expect(pl.imported).toBe(true);
+    expect(pl.trackCount).toBe("77"); // 取本地库真实数量,而非插件 trackCount
+  });
+
+  it("fallback: matches an imported playlist by name + platform when no platform id is alignable", async () => {
+    db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080" }) }).run();
+    // URL/搜索导入:sourceUrl 为整份 URL、externalId 为 URL,无法按 id 对齐,仅剩歌名
+    db.insert(playlists).values({ id: "local-nm", name: "深夜民谣电台", ownerId: "u1", sourceUrl: "http://import/y.d.f.3", externalId: "http://import/y.d.f.3", sourcePlatform: "netease", songCount: 33 }).run();
+    const custom = {
+      manifest: fakeManifest,
+      async recommend() {
+        return {
+          channels: [{ source: "netease", name: "网易云", count: 1, playlists: [
+            { id: "y.d.f.3", source: "netease", name: "深夜民谣电台", creator: "a", cover: "", trackCount: "999", link: "" },
+          ] }],
+        };
+      },
+    };
+    unregisterPlugin(FAKE_ID);
+    registerPlugin(fakeManifest as any, custom as any);
+    const { body } = await getRecommend();
+    const pl = body.channels[0].playlists[0];
+    expect(pl.imported).toBe(true);
+    expect(pl.trackCount).toBe("33");
+  });
+
   it("caches the result for 5min (second call does not hit the plugin again)", async () => {
     db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080" }) }).run();
     await getRecommend();
