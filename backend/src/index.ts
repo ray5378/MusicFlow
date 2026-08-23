@@ -27,6 +27,7 @@ import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
 import { seedDefaultRegistry } from "./plugins/registryCatalog.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
+import { startRandomSongsAutoRefresh } from "./services/plugin/randomSongs.js";
 import { runBatchJob } from "./batch/runner.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
@@ -305,6 +306,10 @@ function scheduleNextDailyRun() {
 // 去掉启动时立即刷新:不再做 daily catch-up,只在每天定点执行。启动仅把定时器挂上。
 // runDailyJobs 内部由 daily_recommend_enabled 主开关控制。
 scheduleNextDailyRun();
+
+// 「随机歌曲」固定歌单后台自动刷新:按插件配置 refreshMinutes(默认 30 分钟)
+// 自适应循环触发;配合 getPlaylist 的惰性刷新,保证客户端/前端随时取到已备好的歌单。
+startRandomSongsAutoRefresh();
 
 // ==================== Maintenance (按每天定点任务后执行一次) ====================
 // 原 6h 独立定时循环取消:歌单自动同步(playlistSync.runSyncJob)+ 新歌手刮削 + 播放历史

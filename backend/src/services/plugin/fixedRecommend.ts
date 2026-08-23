@@ -22,9 +22,10 @@ import { sleep } from "./batchPacer.js";
 import { FIXED_TODAY_ID } from "./dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "./localRecommend.js";
 import { ROAM_PLAYLIST_ID } from "./dailyRoam.js";
+import { RANDOM_PLAYLIST_ID } from "./randomSongs.js";
 
 /** 内置固定推荐歌单(兜底:即使插件未注册/禁用也能识别)。顺序即依赖倾向(漫游依赖前两者)。 */
-const BUILTIN_FIXED = [FIXED_TODAY_ID, LOCAL_FIXED_PLAYLIST_ID, ROAM_PLAYLIST_ID];
+const BUILTIN_FIXED = [FIXED_TODAY_ID, LOCAL_FIXED_PLAYLIST_ID, ROAM_PLAYLIST_ID, RANDOM_PLAYLIST_ID];
 const BUILTIN_FIXED_SET = new Set<string>(BUILTIN_FIXED);
 
 const HOME_RECOMMENDER_CAPS: PluginCapability[] = ["dailyPlaylist", "localPlaylist", "recommendPlaylist"];

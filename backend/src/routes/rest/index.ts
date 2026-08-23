@@ -9,6 +9,7 @@ import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCov
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
+import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
@@ -677,6 +678,9 @@ restRoutes.get("/getPlaylist", (c) => {
   const user = c.get("user");
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json(fail(70, "Playlist not found"));
+  // 「随机歌曲」固定歌单惰性刷新:距上次生成超时则立即重建(毫秒级),客户端播完
+  // 一轮再来读取时歌单必然已刷新好 → 消除「现场生成导致的空白等待」。
+  if (playlist.id === RANDOM_PLAYLIST_ID) maybeRefreshRandomSongs();
   // Private playlists are only visible to the owner (admins can view all).
   // 导入/插件歌单(sourceUrl 非空)属于音乐库内容,对所有登录用户开放。
   if (!playlist.isPublic && playlist.ownerId !== user?.id && !user?.isAdmin && !playlist.sourceUrl) {

@@ -23,6 +23,7 @@ import { startAsyncTask, getAsyncTask, anyTaskRunning } from "../../services/plu
 import { runBatchJob } from "../../batch/runner.js";
 import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
+import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
@@ -1685,6 +1686,9 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
   const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
   if (!playlist) return c.json({ error: "Playlist not found" }, 404);
+  // 「随机歌曲」固定歌单惰性刷新:客户端(音流随心听)读取曲目列表时若超过
+  // 刷新间隔则立即重建,播完一轮再来取时歌单必然已刷新好 → 无空白等待。
+  if (playlist.id === RANDOM_PLAYLIST_ID) maybeRefreshRandomSongs();
   // Push total / matched counts + the page slice to SQL instead of pulling
   // every entry and slicing in JS. orderBy(position, id) keeps pagination
   // stable and follows the playlist's intended track order.
