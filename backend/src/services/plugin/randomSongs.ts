@@ -11,6 +11,7 @@
 // 抽取算法:全库随机 O(limit) 方案(COUNT + rowid 采样,不整表加载),每次刷新
 // 用 Math.random() 非确定性抽样,保证每次内容不同(区别于 daily/local 的日期确定性)。
 
+import { EventEmitter } from "events";
 import { sqlite } from "../../db/index.js";
 import { systemOwnerId } from "./shared.js";
 import { pickDailyRotatedCover } from "../playlistCover.js";
@@ -18,6 +19,13 @@ import { createLogger } from "../../utils/logger.js";
 import type { PluginManifest } from "../../plugins/types.js";
 
 const log = createLogger("RANDOM-SONGS");
+
+// 轻量事件总线:歌单内容变动时 emit,由 ws 服务(initWebSocketServer)订阅后
+// 广播给已连接的客户端。这里**不**直接 import ws —— ws 依赖 peer/dlna/player,
+// 若从本插件反向依赖会形成 builtins → randomSongs → ws → player →
+// source/online → builtins 的模块循环,导致 registerBuiltinPlugins 未初始化。
+export const randomSongsEvents = new EventEmitter();
+export const RANDOM_SONGS_CHANGED_EVENT = "random-songs-changed";
 
 export const RANDOM_PLAYLIST_ID = "pl-random-songs";
 export const RANDOM_PLUGIN_ID = "random-songs";
@@ -190,6 +198,10 @@ export function generateRandomSongsPlaylist(
       now,
       RANDOM_PLAYLIST_ID,
     );
+
+  // 歌单内容已变动:通过事件总线通知 ws 服务广播「random-songs-changed」信号,
+  // 客户端(音流 / 前端)收到后按需重拉歌单,替代「客户端轮询随机歌曲歌单」。
+  randomSongsEvents.emit(RANDOM_SONGS_CHANGED_EVENT, RANDOM_PLAYLIST_ID, now);
 
   return { total: songIds.length, skipped: false };
 }

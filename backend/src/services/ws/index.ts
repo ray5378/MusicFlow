@@ -36,12 +36,22 @@ import {
 import { getPeerManager } from "../peer.js";
 import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken, WsUser } from "./auth.js";
+import {
+  randomSongsEvents,
+  RANDOM_SONGS_CHANGED_EVENT,
+} from "../plugin/randomSongs.js";
 
 let wss: WebSocketServer | null = null;
 
 export function initWebSocketServer(server: import("http").Server): void {
   if (wss) return;
   wss = new WebSocketServer({ noServer: true });
+
+  // 「随机歌曲」歌单变动广播:插件(后台定时 / 惰性刷新)重建歌单后 emit,
+  // 此处转发给所有已连接客户端,客户端收到后按需重拉歌单,不再轮询。
+  randomSongsEvents.on(RANDOM_SONGS_CHANGED_EVENT, (playlistId: unknown) => {
+    broadcastToClients({ type: RANDOM_SONGS_CHANGED_EVENT, playlistId });
+  });
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url || "", `http://${req.headers.host}`);
