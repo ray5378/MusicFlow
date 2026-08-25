@@ -242,8 +242,18 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
         await qm.playFrom(parsed.id, items, def.content?.startIndex || 0, baseUrl);
       }
       if (def.volume?.enabled && typeof def.volume.value === "number") {
-        if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
-        else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
+        // 播放开始后等设备稳定再设音量,否则部分 DLNA 设备可能忽略音量指令。
+        // 重试一次:首次失败后等 1.5s 再试,确保音量真正生效。
+        const doSetVolume = async (): Promise<void> => {
+          if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
+          else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
+        };
+        try {
+          await doSetVolume();
+        } catch {
+          await sleep(1500);
+          await doSetVolume();
+        }
       }
       console.log(`[flow ${flow.name}] 已执行:${name}(${pid})${contentName ? ` → 「${contentName}」` : ""}`);
     } catch (e: any) {
