@@ -27,7 +27,7 @@
           <el-button><MfIcon name="Library" />筛选歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item v-for="f in FILTERS" :key="f.key" :command="f.key">{{ f.label }}</el-dropdown-item>
+              <el-dropdown-item v-for="f in filterOptions" :key="f.key" :command="f.key">{{ f.label }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -376,19 +376,38 @@ const searchPlaceholder = computed(() => {
 const remoteDetailProviderId = ref("");
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 const showManageMenu = ref(false);
-// 歌单筛选:空=全部 | local=本地歌单 | 平台值(netease/qq/kugou/kuwo)
+// 歌单筛选:空=全部 | local=本地歌单 | 平台值(netease/qq/kugou/kuwo/...)
 // 「收藏的歌单」已独立为顶部专属按钮(不再出现在筛选下拉里),由 activeFilter==="favorite" 触发。
-const FILTERS = [
-  { key: "", label: "全部歌单" },
-  { key: "local", label: "本地歌单" },
-  { key: "netease", label: "网易云" },
-  { key: "qq", label: "QQ音乐" },
-  { key: "kugou", label: "酷狗" },
-  { key: "kuwo", label: "酷我" },
-];
-const PLATFORM_NAMES: Record<string, string> = { netease: "网易云", qq: "QQ音乐", kugou: "酷狗", kuwo: "酷我" };
+// 筛选选项动态构建自已启用插件的 filterPlatforms 配置,不再硬编码。
 const activeFilter = ref("");
-function filterName(key: string) { return FILTERS.find(f => f.key === key)?.label || PLATFORM_NAMES[key] || key || "全部"; }
+const filterOptions = computed(() => {
+  const opts = [
+    { key: "", label: "全部歌单" },
+    { key: "local", label: "本地歌单" },
+  ];
+  const seen = new Set<string>();
+  for (const p of searchProviders.value) {
+    for (const plat of (p.platforms || [])) {
+      if (!seen.has(plat)) {
+        seen.add(plat);
+        opts.push({ key: plat, label: (p.platformLabels || {})[plat] || plat });
+      }
+    }
+  }
+  return opts;
+});
+// 合并所有插件的 platformLabels,供导入提示等场景使用
+const mergedPlatformLabels = computed(() => {
+  const m: Record<string, string> = {};
+  for (const p of searchProviders.value) {
+    if (p.platformLabels) Object.assign(m, p.platformLabels);
+  }
+  return m;
+});
+function filterName(key: string) {
+  if (key === "favorite") return "收藏的歌单";
+  return filterOptions.value.find(f => f.key === key)?.label || mergedPlatformLabels.value[key] || key || "全部";
+}
 function onFilterCommand(key: string) {
   activeFilter.value = key;
   loadPlaylists();
@@ -437,7 +456,7 @@ const poolPlaylistIds = ref<Set<string>>(new Set());
 // 停用某个导入插件后,导入弹窗的提示文案会同步变化。
 const importPlatforms = ref<string[]>([]);
 const enabledImportPlatformLabels = computed(() =>
-  importPlatforms.value.map((p) => PLATFORM_NAMES[p] || p).join(" / "),
+  importPlatforms.value.map((p) => mergedPlatformLabels.value[p] || p).join(" / "),
 );
 const importHint = computed(() => {
   const links = enabledImportPlatformLabels.value;

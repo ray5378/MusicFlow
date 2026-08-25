@@ -26,13 +26,22 @@ function syntheticSourceUrl(providerId: string, source: string, id: string): str
 
 // List enabled plugins that can search remote playlists. The frontend renders
 // the search-mode switcher from this (动态,不写死「本地/go-music-dl」)。
+// 同时返回每插件「歌单筛选平台」配置(filterPlatforms),供前端筛选下拉动态构建。
 playlistSearchRoutes.get("/v1/playlist-search/providers", (c) => {
-  const providers = getEnabledByCapability("playlistSearch").map(({ manifest }) => ({
-    id: manifest.id,
-    name: manifest.name,
-    platforms: manifest.platforms || [],
-    platformLabels: manifest.platformLabels || {},
-  }));
+  const providers = getEnabledByCapability("playlistSearch").map(({ manifest }) => {
+    const config = getPluginConfig(manifest.id);
+    const filterPlatforms = config?.filterPlatforms;
+    // 如果有 filterPlatforms 配置且非空,用它覆盖 manifest.platforms
+    const platforms = Array.isArray(filterPlatforms) && filterPlatforms.length > 0
+      ? filterPlatforms
+      : (manifest.platforms || []);
+    return {
+      id: manifest.id,
+      name: manifest.name,
+      platforms,
+      platformLabels: manifest.platformLabels || {},
+    };
+  });
   return c.json({ success: true, providers });
 });
 
