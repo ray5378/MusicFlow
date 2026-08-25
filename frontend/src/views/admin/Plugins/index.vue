@@ -378,8 +378,37 @@
           <!-- Config form is driven entirely by the plugin manifest's configSchema.
                No field is hardcoded to go-music-dl. -->
           <el-form-item v-for="f in configFields" :key="f.key" :label="f.label">
+            <!-- keywords 字段特殊处理：渲染为标签输入组件，内置搜索入库按钮。
+                 必须在 type === 'text' 之前，否则 keywords (type: text) 会被普通文本输入框吃掉。 -->
+            <div v-if="f.key === 'keywords'" class="tag-input-wrap">
+              <el-input
+                v-model="tagInputValue"
+                :placeholder="'输入关键词后按回车添加'"
+                @keyup.enter="addTag(f.key)"
+              >
+                <template #append>
+                  <el-button @click="addTag(f.key)">添加</el-button>
+                </template>
+              </el-input>
+              <div v-if="getTags(f.key).length > 0" class="tag-list">
+                <el-tag
+                  v-for="(tag, idx) in getTags(f.key)"
+                  :key="idx"
+                  closable
+                  :disable-transitions="true"
+                  @close="removeTag(f.key, idx)"
+                >{{ tag }}</el-tag>
+              </div>
+              <div class="tag-actions">
+                <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
+                  关键词搜索入库
+                </el-button>
+                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+              </div>
+              <span v-if="f.help" class="field-hint">{{ f.help }}</span>
+            </div>
             <el-input
-              v-if="f.type === 'text' || f.type === 'url'"
+              v-else-if="f.type === 'text' || f.type === 'url'"
               v-model="editConfig[f.key]"
               :placeholder="f.help"
               style="width: 100%"
@@ -448,34 +477,6 @@
               <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
             </div>
             <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
-            <!-- keywords 字段特殊处理：渲染为标签输入组件，内置搜索入库按钮 -->
-            <div v-else-if="f.key === 'keywords'" class="tag-input-wrap">
-              <el-input
-                v-model="tagInputValue"
-                :placeholder="'输入关键词后按回车添加'"
-                @keyup.enter="addTag(f.key)"
-              >
-                <template #append>
-                  <el-button @click="addTag(f.key)">添加</el-button>
-                </template>
-              </el-input>
-              <div v-if="getTags(f.key).length > 0" class="tag-list">
-                <el-tag
-                  v-for="(tag, idx) in getTags(f.key)"
-                  :key="idx"
-                  closable
-                  :disable-transitions="true"
-                  @close="removeTag(f.key, idx)"
-                >{{ tag }}</el-tag>
-              </div>
-              <div class="tag-actions">
-                <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
-                  关键词搜索入库
-                </el-button>
-                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-              </div>
-              <span v-if="f.help" class="field-hint">{{ f.help }}</span>
-            </div>
             <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
             <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
                  支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
