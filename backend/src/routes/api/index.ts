@@ -2982,19 +2982,37 @@ function flowWithWebhook(flow: any) {
   return { ...flow, tokenId: flow.tokenId || "", tokenName: tok?.name || "", webhookUrl };
 }
 
+// 音流按用户划分:管理员可见/操作全部;普通用户仅自己的(ownerUserId 兜底)。
+function flowOwner(c: any): string | undefined {
+  const user = c.get("user");
+  return user && !user.isAdmin ? user.id : undefined;
+}
+
+/** 非管理员只能绑定属于自己的渠道 token(音流按用户划分的延伸)。 */
+function assertOwnToken(c: any, tokenId: string): boolean {
+  const user = c.get("user");
+  if (!user || user.isAdmin) return true;
+  const t = getPlayerWebhookTokenById(tokenId);
+  return !!t && t.ownerUserId === user.id;
+}
+
 // 创建时未指定 tokenId:自动绑定第一个启用渠道 token,让新音流立即可触发。
-function resolveDefaultTokenId(): string {
-  const t = listPlayerWebhookTokens().find(x => x.enabled);
+// 普通用户优先绑定自己的启用 token,找不到则空(不跨用户借用)。
+function resolveDefaultTokenId(userId?: string): string {
+  const list = listPlayerWebhookTokens();
+  const t = userId
+    ? list.find(x => x.enabled && x.ownerUserId === userId)
+    : list.find(x => x.enabled);
   return t ? t.id : "";
 }
 
 apiRoutes.get("/v1/flows", permMiddleware(PERM.FLOW_MANAGE), (c) => {
-  const items = listFlows().map(flowWithWebhook);
+  const items = listFlows(flowOwner(c)).map(flowWithWebhook);
   return c.json({ total: items.length, items });
 });
 
 apiRoutes.get("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), (c) => {
-  const flow = getFlow(c.req.param("id")!);
+  const flow = getFlow(c.req.param("id")!, flowOwner(c));
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });
@@ -3003,16 +3021,18 @@ apiRoutes.post("/v1/flows", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return c.json({ error: "需要 name" }, 400);
-  // 绑定渠道 token:校验 body.tokenId 存在;缺省自动绑定第一个启用渠道 token。
+  const user = c.get("user")!;
+  // 绑定渠道 token:校验 body.tokenId 存在且(非管理员)归属本人;缺省自动绑定自己的启用渠道 token。
   let tokenId = "";
   if (body.tokenId) {
     const t = getPlayerWebhookTokenById(String(body.tokenId));
     if (!t) return c.json({ error: "指定的渠道 token 不存在" }, 400);
+    if (!assertOwnToken(c, t.id)) return c.json({ error: "只能绑定属于自己的渠道 token" }, 403);
     tokenId = t.id;
   } else {
-    tokenId = resolveDefaultTokenId();
+    tokenId = resolveDefaultTokenId(user.isAdmin ? undefined : user.id);
   }
-  const flow = createFlow(name, body.definition || { ...DEFAULT_DEFINITION }, tokenId);
+  const flow = createFlow(user.id, name, body.definition || { ...DEFAULT_DEFINITION }, tokenId);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
@@ -3023,30 +3043,31 @@ apiRoutes.put("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
     definition: body.definition,
     enabled: body.enabled === undefined ? undefined : !!body.enabled,
   };
-  // 音流对外链接可改绑渠道 token。
+  // 音流对外链接可改绑渠道 token(非管理员只能改绑自己的)。
   if (typeof body.tokenId === "string") {
     if (body.tokenId) {
       const t = getPlayerWebhookTokenById(body.tokenId);
       if (!t) return c.json({ error: "指定的渠道 token 不存在" }, 400);
+      if (!assertOwnToken(c, t.id)) return c.json({ error: "只能绑定属于自己的渠道 token" }, 403);
       upd.tokenId = t.id;
     } else {
       upd.tokenId = "";
     }
   }
-  const flow = updateFlow(c.req.param("id")!, upd);
+  const flow = updateFlow(c.req.param("id")!, flowOwner(c), upd);
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
 apiRoutes.delete("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), (c) => {
-  const ok = deleteFlow(c.req.param("id")!);
+  const ok = deleteFlow(c.req.param("id")!, flowOwner(c));
   if (!ok) return c.json({ error: "流程不存在" }, 404);
   return c.json({ success: true });
 });
 
 // UI 手动触发(异步执行,返回当前运行状态)。
 apiRoutes.post("/v1/flows/:id/run", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
-  const flow = getFlow(c.req.param("id")!);
+  const flow = getFlow(c.req.param("id")!, flowOwner(c));
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   if (!flow.enabled) return c.json({ error: "流程已停用" }, 409);
   const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
@@ -3058,7 +3079,11 @@ apiRoutes.post("/v1/flows/:id/run", permMiddleware(PERM.FLOW_MANAGE), async (c) 
 // 免鉴权端点 /webhook/player 凭任一启用的 token 执行。与音流(flow)流程完全解耦。
 
 apiRoutes.get("/v1/player-webhook/tokens", (c) => {
-  const items = listPlayerWebhookTokens().map(t => ({
+  const user = c.get("user")!;
+  // 按用户划分:普通用户仅见自己创建的渠道 token(避免泄露他人 token 值)。
+  const all = listPlayerWebhookTokens();
+  const scoped = user.isAdmin ? all : all.filter(t => t.ownerUserId === user.id);
+  const items = scoped.map(t => ({
     id: t.id, name: t.name, token: t.token, enabled: t.enabled,
     ownerName: resolvePlayerWebhookOwnerName(t.ownerUserId),
     createdAt: t.createdAt, updatedAt: t.updatedAt,
@@ -3073,16 +3098,29 @@ apiRoutes.post("/v1/player-webhook/tokens", async (c) => {
   return c.json({ token, name });
 });
 
+// 非管理员仅能操作自己创建的 token(他人 token 视为不存在)。
+function tokenOfUser(c: any, id: string): { id: string } | undefined {
+  const user = c.get("user")!;
+  const t = getPlayerWebhookTokenById(id);
+  if (!t) return undefined;
+  if (!user.isAdmin && t.ownerUserId !== user.id) return undefined;
+  return t;
+}
+
 apiRoutes.put("/v1/player-webhook/tokens/:id", async (c) => {
+  const id = c.req.param("id")!;
+  if (!tokenOfUser(c, id)) return c.json({ error: "token 不存在" }, 404);
   const body = await c.req.json().catch(() => ({} as any));
   const enabled = !!(body && body.enabled);
-  const ok = setPlayerWebhookTokenEnabled(c.req.param("id")!, enabled);
+  const ok = setPlayerWebhookTokenEnabled(id, enabled);
   if (!ok) return c.json({ error: "token 不存在" }, 404);
   return c.json({ success: true });
 });
 
 apiRoutes.delete("/v1/player-webhook/tokens/:id", (c) => {
-  const ok = deletePlayerWebhookToken(c.req.param("id")!);
+  const id = c.req.param("id")!;
+  if (!tokenOfUser(c, id)) return c.json({ error: "token 不存在" }, 404);
+  const ok = deletePlayerWebhookToken(id);
   if (!ok) return c.json({ error: "token 不存在" }, 404);
   return c.json({ success: true });
 });

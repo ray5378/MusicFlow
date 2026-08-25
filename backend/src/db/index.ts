@@ -420,6 +420,7 @@ export function initDatabase() {
       id TEXT PRIMARY KEY,
       token TEXT UNIQUE NOT NULL,
       token_id TEXT DEFAULT '',
+      owner_user_id TEXT DEFAULT '',
       name TEXT NOT NULL,
       definition_json TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1,
@@ -476,6 +477,14 @@ export function initDatabase() {
   // Migration: add token_id column to flows (older DBs) — 音流对外链接绑定渠道 token
   try {
     sqlite.exec("ALTER TABLE flows ADD COLUMN token_id TEXT DEFAULT ''");
+  } catch {}
+  // Migration: add owner_user_id column to flows (older DBs) — 音流按用户划分
+  try {
+    sqlite.exec("ALTER TABLE flows ADD COLUMN owner_user_id TEXT DEFAULT ''");
+  } catch {}
+  // Migration: 存量音流默认归属首个管理员(管理员原有音流保持可见)
+  try {
+    sqlite.exec("UPDATE flows SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1 LIMIT 1) WHERE owner_user_id = ''");
   } catch {}
   // Migration: add favorite column to playlists table (older DBs) — 收藏歌单标记
   try {

@@ -25,8 +25,8 @@ const routes = [
       { path: "playlists/:id", name: "PlaylistDetail", component: () => import("@/views/Playlists/Detail.vue"), meta: { perm: PERM.PLAYLIST_VIEW } },
       { path: "favorites", name: "Favorites", component: () => import("@/views/Favorites/index.vue"), meta: { perm: PERM.FAVORITES_MANAGE } },
       { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue"), meta: { perm: PERM.RENDERER_MANAGE } },
-      { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { requiresAdmin: true, perm: PERM.FLOW_MANAGE } },
-      { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { requiresAdmin: true, perm: PERM.FLOW_MANAGE } },
+      { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { perm: PERM.FLOW_MANAGE } },
+      { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "history", name: "History", component: () => import("@/views/History/index.vue"), meta: { perm: PERM.HISTORY_MANAGE } },
       { path: "settings", name: "Settings", component: () => import("@/views/Settings/index.vue") },
       {

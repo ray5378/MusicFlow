@@ -3,7 +3,7 @@
 // 触发后异步在后台执行:持续扫描 DLNA → 任一目标上线即对其依次执行后续节点;
 // 执行状态写入 flows 表(页面可查看最近一次运行结果)。
 import { randomUUID as uuidv4 } from "crypto";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { flows } from "../../db/schema.js";
 import { getPeerManager, parsePeerId } from "../peer.js";
@@ -34,6 +34,8 @@ export interface FlowRow {
   token: string;
   /** 对外链接绑定的「通用播放器控制」渠道 token id;空 = 未绑定,链接不可用。 */
   tokenId: string;
+  /** 归属用户 id:音流按用户划分,普通用户仅见/管自己的;管理员见全部。 */
+  ownerUserId: string;
   name: string;
   definition: FlowDefinition;
   enabled: boolean;
@@ -65,6 +67,7 @@ function rowToFlow(r: any): FlowRow {
     id: r.id,
     token: r.token,
     tokenId: r.tokenId || "",
+    ownerUserId: r.ownerUserId || "",
     name: r.name,
     definition: parseDef(r.definitionJson),
     enabled: r.enabled === 1,
@@ -76,12 +79,18 @@ function rowToFlow(r: any): FlowRow {
   };
 }
 
-export function listFlows(): FlowRow[] {
+export function listFlows(ownerUserId?: string): FlowRow[] {
+  if (ownerUserId) {
+    return db.select().from(flows).where(eq(flows.ownerUserId, ownerUserId)).all().map(rowToFlow);
+  }
   return db.select().from(flows).all().map(rowToFlow);
 }
 
-export function getFlow(id: string): FlowRow | undefined {
-  const r = db.select().from(flows).where(eq(flows.id, id)).get();
+export function getFlow(id: string, ownerUserId?: string): FlowRow | undefined {
+  const cond = ownerUserId
+    ? and(eq(flows.id, id), eq(flows.ownerUserId, ownerUserId))
+    : eq(flows.id, id);
+  const r = db.select().from(flows).where(cond).get();
   return r ? rowToFlow(r) : undefined;
 }
 
@@ -90,24 +99,25 @@ export function getFlowByToken(token: string): FlowRow | undefined {
   return r ? rowToFlow(r) : undefined;
 }
 
-export function createFlow(name: string, definition: FlowDefinition, tokenId = ""): FlowRow {
+export function createFlow(ownerUserId: string, name: string, definition: FlowDefinition, tokenId = ""): FlowRow {
   const id = `flow-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const now = new Date().toISOString();
   db.insert(flows).values({
     id,
     token: uuidv4().replace(/-/g, ""),
     tokenId,
+    ownerUserId,
     name,
     definitionJson: JSON.stringify(definition),
     enabled: 1,
     createdAt: now,
     updatedAt: now,
   }).run();
-  return getFlow(id)!;
+  return getFlow(id, ownerUserId)!;
 }
 
-export function updateFlow(id: string, patch: { name?: string; definition?: FlowDefinition; enabled?: boolean; tokenId?: string }): FlowRow | undefined {
-  const cur = getFlow(id);
+export function updateFlow(id: string, ownerUserId: string | undefined, patch: { name?: string; definition?: FlowDefinition; enabled?: boolean; tokenId?: string }): FlowRow | undefined {
+  const cur = getFlow(id, ownerUserId);
   if (!cur) return undefined;
   const now = new Date().toISOString();
   db.update(flows).set({
@@ -117,17 +127,18 @@ export function updateFlow(id: string, patch: { name?: string; definition?: Flow
     enabled: patch.enabled === undefined ? (cur.enabled ? 1 : 0) : patch.enabled ? 1 : 0,
     updatedAt: now,
   }).where(eq(flows.id, id)).run();
-  return getFlow(id);
+  return getFlow(id, ownerUserId);
 }
 
-export function deleteFlow(id: string): boolean {
-  const cur = getFlow(id);
+export function deleteFlow(id: string, ownerUserId?: string): boolean {
+  const cur = getFlow(id, ownerUserId);
   if (!cur) return false;
   db.delete(flows).where(eq(flows.id, id)).run();
   return true;
 }
 
-export function setFlowEnabled(id: string, enabled: boolean): void {
+export function setFlowEnabled(id: string, ownerUserId: string | undefined, enabled: boolean): void {
+  if (!getFlow(id, ownerUserId)) return;
   db.update(flows).set({ enabled: enabled ? 1 : 0, updatedAt: new Date().toISOString() }).where(eq(flows.id, id)).run();
 }
 

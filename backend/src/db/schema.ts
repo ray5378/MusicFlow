@@ -321,12 +321,14 @@ export const genres = sqliteTable("genres", {
 
 // 音流(MusicFlow):一条可复用的自动播放流程(等设备上线→音量→播放模式→播歌单)。
 // 每个流程持有一个唯一 token,对外暴露免登录的 webhook 链接。
+// 按用户划分:ownerUserId 记录创建者,普通用户仅见/管自己的音流,管理员见全部。
 export const flows = sqliteTable("flows", {
   id: text("id").primaryKey(),
   token: text("token").notNull().unique(),
   // 对外链接所绑定的「通用播放器控制」渠道 token id(见 player_webhook_tokens);
   // 空 = 未绑定,链接不可用。旧版 flow 自带的 token 随迁移废弃。
   tokenId: text("token_id").default(""),
+  ownerUserId: text("owner_user_id").default(""),
   name: text("name").notNull(),
   definitionJson: text("definition_json").notNull().default("{}"), // FlowDefinition
   enabled: integer("enabled").notNull().default(1), // 1 = 可被 webhook/UI 触发
