@@ -7,6 +7,9 @@ import { eq } from "drizzle-orm";
 import { decryptPassword } from "../db/index.js";
 import { hashApiKey } from "../utils/auth.js";
 import { JWT_SECRET } from "../utils/env.js";
+// 细粒度权限判定中间件与判定函数,集中放在 services/access.ts,这里只做转发
+// (路由层既有的 `import { adminMiddleware } from middleware/auth` 习惯不变)。
+export { permMiddleware, rendererGrantParamMiddleware, hasPerm, canUseRenderer, canControlPeer, peerToDeviceKey, filterPeersByAccess } from "../services/access.js";
 
 export interface AuthUser {
   id: string;

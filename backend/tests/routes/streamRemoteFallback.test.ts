@@ -12,11 +12,16 @@ import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { initDatabase, db, sqlite } from "../../src/db/index.js";
+import { users } from "../../src/db/schema.js";
+import { eq } from "drizzle-orm";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
 import { restRoutes } from "../../src/routes/rest/index.js";
+import { authMiddleware } from "../../src/middleware/auth.js";
+import { generateToken } from "../../src/utils/auth.js";
 import { clearStreamFallbackCache } from "../../src/services/source/online/streamFallback.js";
 
 const app = new Hono();
+app.use("/rest/*", authMiddleware);
 app.route("/rest", restRoutes);
 
 const PROVIDER = "remote-fb-routes";
@@ -65,7 +70,24 @@ function remoteUrl(rid: string, title: string, artist: string) {
 
 beforeAll(() => {
   initDatabase();
+  if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
+  if (!db.select().from(users).where(eq(users.username, "stream-fb-user")).get()) {
+    db.insert(users).values({
+      id: "stream-fb-user",
+      username: "stream-fb-user",
+      password: "",
+      salt: "salt",
+      subsonicSalt: "subsalt",
+      isAdmin: 0,
+      isActive: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+  }
+  authHeaders = { Authorization: `Bearer ${generateToken("stream-fb-user", "stream-fb-user", false)}`, Range: "bytes=0-20000" };
 });
+
+let authHeaders: Record<string, string> = {};
 
 afterEach(() => {
   clearStreamFallbackCache();
@@ -80,7 +102,7 @@ describe("/rest/stream-remote 多源换源", () => {
       { id: "alt1", source: "kuwo", name: "听妈妈的话", artist: "周杰伦", album: "", duration: 0, cover: "" },
       { id: "alt2", source: "netease", name: "听妈妈的话", artist: "别人", album: "", duration: 0, cover: "" },
     ]);
-    const res = await app.request(remoteUrl("dead123", "听妈妈的话", "周杰伦"), { method: "GET", headers: { Range: "bytes=0-20000" } });
+    const res = await app.request(remoteUrl("dead123", "听妈妈的话", "周杰伦"), { method: "GET", headers: authHeaders });
 
     expect(res.status).toBe(206);
     expect(res.headers.get("content-type")?.split(";")[0]).toBe("audio/mpeg");
@@ -93,7 +115,7 @@ describe("/rest/stream-remote 多源换源", () => {
     enableProvider([
       { id: "alt2", source: "netease", name: "听妈妈的话", artist: "别人", album: "", duration: 0, cover: "" },
     ]);
-    const res = await app.request(remoteUrl("dead456", "听妈妈的话", "周杰伦"), { method: "GET", headers: { Range: "bytes=0-20000" } });
+    const res = await app.request(remoteUrl("dead456", "听妈妈的话", "周杰伦"), { method: "GET", headers: authHeaders });
 
     expect(res.status).toBe(404);
     // 未触发对歌名撞车候选的流式拉取
@@ -104,7 +126,7 @@ describe("/rest/stream-remote 多源换源", () => {
     enableProvider([
       { id: "alt3", source: "kuwo", name: "听妈妈的话(Live)", artist: "周杰伦", album: "", duration: 0, cover: "" },
     ]);
-    const res = await app.request(remoteUrl("dead789", "听妈妈的话", "周杰伦"), { method: "GET", headers: { Range: "bytes=0-20000" } });
+    const res = await app.request(remoteUrl("dead789", "听妈妈的话", "周杰伦"), { method: "GET", headers: authHeaders });
 
     expect(res.status).toBe(404);
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("id=alt3"))).toBe(false);
@@ -114,7 +136,7 @@ describe("/rest/stream-remote 多源换源", () => {
     enableProvider([
       { id: "alt4", source: "kuwo", name: "听妈妈的话 (LIVE)", artist: "周杰伦", album: "", duration: 0, cover: "" },
     ]);
-    const res = await app.request(remoteUrl("dead1011", "听妈妈的话(Live)", "周杰伦"), { method: "GET", headers: { Range: "bytes=0-20000" } });
+    const res = await app.request(remoteUrl("dead1011", "听妈妈的话(Live)", "周杰伦"), { method: "GET", headers: authHeaders });
 
     expect(res.status).toBe(206);
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("id=alt4"))).toBe(true);

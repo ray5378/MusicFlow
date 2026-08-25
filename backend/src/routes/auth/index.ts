@@ -5,8 +5,28 @@ import { eq } from "drizzle-orm";
 import { generateToken, md5Hash } from "../../utils/auth.js";
 import { encryptPassword } from "../../db/index.js";
 import { v4 as uuidv4 } from "uuid";
+import { getUserPermissions, getUserRendererGrants } from "../../services/access.js";
 
 export const authRoutes = new Hono();
+
+// 登录响应的权限载荷:功能权限有效值 + 播放器授权列表(管理员恒全量授权,
+// 前端据此渲染菜单 / 校验播放器可见性)。管理员返回 permission:true 语义。
+function loginPayload(user: any, token: string) {
+  const isAdmin = !!user.isAdmin;
+  const permissions = isAdmin ? { admin: true } : getUserPermissions(user.id);
+  const rendererGrants = isAdmin ? null : [...getUserRendererGrants(user.id)].sort();
+  return {
+    id: user.id,
+    username: user.username,
+    isAdmin,
+    permissions,
+    rendererGrants,
+    subsonicSalt: user.subsonicSalt,
+    subsonicToken: md5Hash(user.password + user.subsonicSalt),
+    mustChangePassword: !!user.mustChangePassword,
+    token,
+  };
+}
 
 authRoutes.post("/api/v1/auth/login", async (c) => {
   const body = await c.req.json();
@@ -25,7 +45,7 @@ authRoutes.post("/api/v1/auth/login", async (c) => {
   db.update(users).set({ passEnc: encryptPassword(password), updatedAt: new Date().toISOString() }).where(eq(users.id, user.id)).run();
 
   const token = generateToken(user.id, user.username, !!user.isAdmin);
-  return c.json({ id: user.id, username: user.username, isAdmin: !!user.isAdmin, subsonicSalt: user.subsonicSalt, subsonicToken: md5Hash(password + user.subsonicSalt), mustChangePassword: !!user.mustChangePassword, token });
+  return c.json(loginPayload(user, token));
 });
 
 authRoutes.post("/auth/login", async (c) => {
@@ -37,5 +57,5 @@ authRoutes.post("/auth/login", async (c) => {
   if (passwordHash !== user.password) return c.json({ error: "Invalid credentials" }, 401);
   db.update(users).set({ passEnc: encryptPassword(password), updatedAt: new Date().toISOString() }).where(eq(users.id, user.id)).run();
   const token = generateToken(user.id, user.username, !!user.isAdmin);
-  return c.json({ id: user.id, username: user.username, isAdmin: !!user.isAdmin, subsonicSalt: user.subsonicSalt, subsonicToken: md5Hash(password + user.subsonicSalt), mustChangePassword: !!user.mustChangePassword, token });
+  return c.json(loginPayload(user, token));
 });

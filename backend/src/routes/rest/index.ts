@@ -17,6 +17,8 @@ import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
+import { permMiddleware } from "../../middleware/auth.js";
+import { PERM, hasPerm } from "../../services/access.js";
 
 export const restRoutes = new Hono();
 
@@ -314,20 +316,22 @@ restRoutes.get("/getUser", (c) => {
   const username = getParam(c, "username") || c.get("user")?.username;
   const user = db.select().from(users).where(eq(users.username, username || "")).get();
   if (!user) return c.json(fail(70, "User not found"));
+  const isAdmin = !!user.isAdmin;
   const roles = (b: boolean) => b;
+  const can = (key: string) => hasPerm(user.id, isAdmin, key);
   return c.json(ok({ user: {
     username: user.username,
     email: user.email || "",
     scrobblingEnabled: true,
-    adminRole: roles(!!user.isAdmin),
-    settingsRole: true,
-    downloadRole: true,
+    adminRole: roles(isAdmin),
+    settingsRole: roles(can(PERM.SETTINGS_MANAGE)),
+    downloadRole: roles(can(PERM.LIBRARY_STREAM)),
     uploadRole: false,
-    playlistRole: true,
-    coverArtRole: true,
+    playlistRole: roles(can(PERM.PLAYLIST_MANAGE)),
+    coverArtRole: roles(can(PERM.COVER_VIEW)),
     commentRole: false,
     podcastRole: false,
-    streamRole: true,
+    streamRole: roles(can(PERM.LIBRARY_STREAM)),
     jukeboxRole: false,
     shareRole: false,
     videoConversionRole: false,
@@ -337,7 +341,24 @@ restRoutes.get("/getUser", (c) => {
 
 restRoutes.get("/getUsers", (c) => {
   const all = db.select().from(users).all();
-  return c.json(ok({ users: { user: all.map(u => ({ username: u.username, email: u.email || "", scrobblingEnabled: true, adminRole: !!u.isAdmin, settingsRole: true, downloadRole: true, uploadRole: false, playlistRole: true, coverArtRole: true, commentRole: false, podcastRole: false, streamRole: true, jukeboxRole: false, shareRole: false, videoConversionRole: false, folder: [0] })) } }));
+  return c.json(ok({ users: { user: all.map(u => { const isAdmin = !!u.isAdmin; const can = (key: string) => hasPerm(u.id, isAdmin, key); return {
+    username: u.username,
+    email: u.email || "",
+    scrobblingEnabled: true,
+    adminRole: isAdmin,
+    settingsRole: can(PERM.SETTINGS_MANAGE),
+    downloadRole: can(PERM.LIBRARY_STREAM),
+    uploadRole: false,
+    playlistRole: can(PERM.PLAYLIST_MANAGE),
+    coverArtRole: can(PERM.COVER_VIEW),
+    commentRole: false,
+    podcastRole: false,
+    streamRole: can(PERM.LIBRARY_STREAM),
+    jukeboxRole: false,
+    shareRole: false,
+    videoConversionRole: false,
+    folder: [0],
+  }; }) } }));
 });
 
 // MusicFlow 不存用户头像:对存在的用户返回品牌占位图(与 coverArt 占位同风格),
@@ -358,7 +379,7 @@ restRoutes.get("/getMusicFolders", (c) => {
   return c.json(ok({ musicFolders: { musicFolder: [{ id: 0, name: "Music" }, ...sources.map(s => ({ id: s.id as any, name: s.name }))] } }));
 });
 
-restRoutes.get("/getIndexes", (c) => {
+restRoutes.get("/getIndexes", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const allArtists = db.select().from(artists).all();
   const indexMap = new Map<string, any[]>();
   for (const a of allArtists) {
@@ -370,7 +391,7 @@ restRoutes.get("/getIndexes", (c) => {
   return c.json(ok({ indexes: { lastModified: Date.now(), ignoredArticles: "The An A Die Das Ein Eine Les Le La", index: Array.from(indexMap.entries()).map(([name, artist]) => ({ name, artist })) } }));
 });
 
-restRoutes.get("/getArtists", (c) => {
+restRoutes.get("/getArtists", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const user = c.get("user");
   const starredSet = getArtistStarredSet(user?.id);
   const allArtists = db.select().from(artists).all();
@@ -384,7 +405,7 @@ restRoutes.get("/getArtists", (c) => {
   return c.json(ok({ artists: { ignoredArticles: "The An A Die Das Ein Eine Les Le La", index: Array.from(indexMap.entries()).map(([name, artist]) => ({ name, artist })) } }));
 });
 
-restRoutes.get("/getArtist", (c) => {
+restRoutes.get("/getArtist", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const artist = db.select().from(artists).where(eq(artists.id, id)).get();
@@ -408,7 +429,7 @@ restRoutes.get("/getArtistInfo2", (c) => {
   return c.json(ok({ artistInfo2: { biography: artist.bio || "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=200` : "", mediumImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=500` : "", largeImageUrl: artist.coverArt ? `/rest/getCoverArt?id=ar-${artist.id}&size=1200` : "", similarArtist: { artist: [] } } }));
 });
 
-restRoutes.get("/getAlbum", (c) => {
+restRoutes.get("/getAlbum", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const album = db.select().from(albums).where(eq(albums.id, id)).get();
@@ -445,7 +466,7 @@ restRoutes.get("/getAlbumInfo2", (c) => {
   return c.json(ok({ albumInfo: { notes: "", musicBrainzId: "", lastFmUrl: "", smallImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=200` : "", mediumImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=500` : "", largeImageUrl: coverRef ? `/rest/getCoverArt?id=${coverRef}&size=1200` : "" } }));
 });
 
-restRoutes.get("/getSong", (c) => {
+restRoutes.get("/getSong", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
@@ -453,7 +474,7 @@ restRoutes.get("/getSong", (c) => {
   return c.json(ok({ song: songToChild(song, getStarredSet(user?.id), getRatingValue(user?.id, "song", id)) }));
 });
 
-restRoutes.get("/getMusicDirectory", (c) => {
+restRoutes.get("/getMusicDirectory", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const starredSet = getStarredSet(user?.id);
@@ -505,13 +526,13 @@ function getAlbumListData(c: any) {
   return { paged: paginate(allAlbums, offset, size), user };
 }
 
-restRoutes.get("/getAlbumList", (c) => {
+restRoutes.get("/getAlbumList", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const { paged, user } = getAlbumListData(c);
   const starredSet = getAlbumStarredSet(user?.id);
   return c.json(ok({ albumList: { album: paged.map(al => albumToChild(al, starredSet)) } }));
 });
 
-restRoutes.get("/getAlbumList2", (c) => {
+restRoutes.get("/getAlbumList2", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const { paged, user } = getAlbumListData(c);
   const starredSet = getAlbumStarredSet(user?.id);
   return c.json(ok({ albumList2: { album: paged.map(al => albumToID3(al, starredSet)) } }));
@@ -580,10 +601,10 @@ const searchHandler = (c: any) => {
   };
 };
 
-restRoutes.get("/search2", (c) => c.json(ok({ searchResult2: searchHandler(c) })));
-restRoutes.get("/search3", (c) => c.json(ok({ searchResult3: searchHandler(c) })));
+restRoutes.get("/search2", permMiddleware(PERM.LIBRARY_SEARCH), (c) => c.json(ok({ searchResult2: searchHandler(c) })));
+restRoutes.get("/search3", permMiddleware(PERM.LIBRARY_SEARCH), (c) => c.json(ok({ searchResult3: searchHandler(c) })));
 
-restRoutes.get("/getSongsByGenre", (c) => {
+restRoutes.get("/getSongsByGenre", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const genre = getParam(c, "genre") || "";
   const count = parseInt(getParam(c, "count") || "10") || 10;
   const offset = parseInt(getParam(c, "offset") || "0") || 0;
@@ -592,7 +613,7 @@ restRoutes.get("/getSongsByGenre", (c) => {
   return c.json(ok({ songsByGenre: { song: paginate(allSongs, offset, count).map(s => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
-restRoutes.get("/getRandomSongs", (c) => {
+restRoutes.get("/getRandomSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const size = Math.min(100, parseInt(getParam(c, "size") || "10") || 10);
   const user = c.get("user");
   // SQL 随机取样,避免把整张 songs 表(含大文本列)加载进来在 JS 里洗牌。
@@ -600,7 +621,7 @@ restRoutes.get("/getRandomSongs", (c) => {
   return c.json(ok({ randomSongs: { song: allSongs.map(s => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
-restRoutes.get("/getGenres", (c) => {
+restRoutes.get("/getGenres", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const genreMap = new Map<string, { songCount: number; albumCount: number }>();
   // SQL GROUP BY 聚合,替代整表加载后在 JS 里逐行计数(大曲库下避免两张大表
   // 的瞬态内存尖峰)。语义与原实现一致:跳过空串 genre(NULL/'' 排除,'' 保留)。
@@ -622,7 +643,7 @@ restRoutes.get("/getGenres", (c) => {
   return c.json(ok({ genres: { genre: Array.from(genreMap.entries()).map(([name, counts]) => ({ value: name, songCount: counts.songCount, albumCount: counts.albumCount })) } }));
 });
 
-restRoutes.get("/getTopSongs", (c) => {
+restRoutes.get("/getTopSongs", permMiddleware(PERM.LIBRARY_SEARCH), (c) => {
   const artistId = getParam(c, "artistId");
   let artistName = getParam(c, "artist") || "";
   if (!artistName && artistId) {
@@ -636,12 +657,12 @@ restRoutes.get("/getTopSongs", (c) => {
   return c.json(ok({ topSongs: { song: allSongs.map(s => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
-restRoutes.get("/getSimilarSongs", (c) => c.json(ok({ similarSongs: { song: [] } })));
-restRoutes.get("/getSimilarSongs2", (c) => c.json(ok({ similarSongs2: { song: [] } })));
+restRoutes.get("/getSimilarSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => c.json(ok({ similarSongs: { song: [] } })));
+restRoutes.get("/getSimilarSongs2", permMiddleware(PERM.LIBRARY_BROWSE), (c) => c.json(ok({ similarSongs2: { song: [] } })));
 
 // ==================== Playlists ====================
 
-restRoutes.get("/getPlaylists", (c) => {
+restRoutes.get("/getPlaylists", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const user = c.get("user");
   // Visibility: admin sees all; others see their own + public + 导入/插件歌单
   // (sourceUrl 非空,音乐库内容对所有用户开放)。Pushed to SQL,
@@ -673,7 +694,7 @@ restRoutes.get("/getPlaylists", (c) => {
   return c.json(ok({ playlists: { total, playlist: page.map(p => ({ id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic, created: p.createdAt || new Date().toISOString(), changed: p.updatedAt || new Date().toISOString(), songCount: p.songCount || 0, duration: p.duration || 0, coverArt: `pl-${p.id}`, comment: p.comment || "", isImported: !!p.sourceUrl, syncEnabled: !!p.syncEnabled, favorite: favIds.has(p.id), sourcePlatform: p.sourcePlatform || "" })) } }));
 });
 
-restRoutes.get("/getPlaylist", (c) => {
+restRoutes.get("/getPlaylist", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
@@ -767,7 +788,7 @@ function toIdArray(v: any): string[] {
   return String(v).split(",").filter(Boolean);
 }
 
-restRoutes.all("/createPlaylist", async (c) => {
+restRoutes.all("/createPlaylist", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => {
   const user = c.get("user");
   const body = await parseBody(c);
   const id = `pl-${Date.now()}`;
@@ -779,7 +800,7 @@ restRoutes.all("/createPlaylist", async (c) => {
   return c.json(ok({ playlist: { id, name, songCount: songIds.length, duration: 0, created: new Date().toISOString(), changed: new Date().toISOString(), owner: user?.id || "", public: false } }));
 });
 
-restRoutes.all("/updatePlaylist", async (c) => {
+restRoutes.all("/updatePlaylist", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => {
   const user = c.get("user");
   const body = await parseBody(c);
   const playlistId = (body.playlistId as string) || (body.id as string) || "";
@@ -835,7 +856,7 @@ restRoutes.all("/updatePlaylist", async (c) => {
   return c.json(ok());
 });
 
-restRoutes.all("/deletePlaylist", async (c) => {
+restRoutes.all("/deletePlaylist", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => {
   const user = c.get("user");
   const body = await parseBody(c);
   const id = (body.id as string) || (body.playlistId as string) || "";
@@ -861,7 +882,7 @@ function parseStarIds(raw: string | undefined): string[] {
   return String(raw).split(",").filter(Boolean);
 }
 
-restRoutes.get("/star", (c) => {
+restRoutes.get("/star", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json(fail(40, "Unauthorized"));
   const ids = parseStarIds(getParam(c, "id"));
@@ -889,7 +910,7 @@ restRoutes.get("/star", (c) => {
   return c.json(ok());
 });
 
-restRoutes.get("/unstar", (c) => {
+restRoutes.get("/unstar", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json(fail(40, "Unauthorized"));
   const ids = parseStarIds(getParam(c, "id"));
@@ -913,7 +934,7 @@ restRoutes.get("/unstar", (c) => {
 
 // OpenSubsonic setRating:id 支持歌曲/专辑/歌手(均为 uuid,无前缀),rating 0–5;
 // rating=0 等价删除评分。GET/POST/.view 由底部兼容垫片统一补全。
-restRoutes.all("/setRating", async (c) => {
+restRoutes.all("/setRating", permMiddleware(PERM.FAVORITES_MANAGE), async (c) => {
   const user = c.get("user");
   if (!user) return c.json(fail(40, "Unauthorized"));
   const body = await parseBody(c);
@@ -935,7 +956,7 @@ restRoutes.all("/setRating", async (c) => {
   return c.json(ok());
 });
 
-restRoutes.get("/getStarred", (c) => {
+restRoutes.get("/getStarred", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json(ok({ starred: { song: [], album: [], artist: [] } }));
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
@@ -944,7 +965,7 @@ restRoutes.get("/getStarred", (c) => {
   return c.json(ok({ starred: { song: favSongs, album: [], artist: [] } }));
 });
 
-restRoutes.get("/getStarred2", (c) => {
+restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [], songTotal: 0 } }));
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
@@ -984,7 +1005,7 @@ restRoutes.get("/getStarred2", (c) => {
 // 10 秒内存 Map 去重。songs.playCount 仍按真实播放次数累加。
 const HISTORY_DEDUPE_WINDOW_MS = 10 * 60 * 1000; // 10 分钟
 
-restRoutes.get("/scrobble", (c) => {
+restRoutes.get("/scrobble", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
   const user = c.get("user");
   const id = getParam(c, "id");
   const nowIso = new Date().toISOString();
@@ -1030,7 +1051,7 @@ restRoutes.get("/getNowPlaying", (c) => c.json(ok({ nowPlaying: { entry: [] } })
 
 // ==================== Lyrics ====================
 
-restRoutes.get("/getLyrics", async (c) => {
+restRoutes.get("/getLyrics", permMiddleware(PERM.LYRICS_VIEW), async (c) => {
   const artist = getParam(c, "artist") || "";
   const title = getParam(c, "title") || "";
   let song: any = null;
@@ -1044,7 +1065,7 @@ restRoutes.get("/getLyrics", async (c) => {
   return c.json(ok({ lyrics: { artist, title, value } }));
 });
 
-restRoutes.get("/getLyricsBySongId", async (c) => {
+restRoutes.get("/getLyricsBySongId", permMiddleware(PERM.LYRICS_VIEW), async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
   let lines = null;
@@ -1199,7 +1220,7 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
   }
 }
 
-restRoutes.get("/stream", async (c) => {
+restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
   if (!song) return c.json(fail(70, "Song not found"));
@@ -1287,7 +1308,7 @@ restRoutes.get("/stream", async (c) => {
 // 调用插件的 streamUrl() 拿到真实流地址,再复用 serveWebStreamSong 的代理逻辑
 // (Range + 按源补 Referer 等 headers)。主项目前端与 HA 卡片「搜索即播」都走这里,
 // 播放不要求先入库。参数: provider, source, id, title, artist, album, duration, cover
-restRoutes.get("/stream-remote", async (c) => {
+restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const providerId = getParam(c, "provider") || "";
   const source = getParam(c, "source") || "";
   const id = getParam(c, "id") || "";
@@ -1412,7 +1433,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   }
 });
 
-restRoutes.get("/download", async (c) => {
+restRoutes.get("/download", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
   if (!song) return c.json(fail(70, "Song not found"));
@@ -1441,7 +1462,7 @@ restRoutes.get("/download", async (c) => {
   }
 });
 
-restRoutes.get("/getCoverArt", async (c) => {
+restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
   const id = getParam(c, "id") || "";
   const size = Number(getParam(c, "size") || "300") || 300;
   const accept = c.req.header("Accept") || "";

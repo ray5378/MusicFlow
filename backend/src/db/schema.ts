@@ -348,3 +348,25 @@ export const playerWebhookTokens = sqliteTable("player_webhook_tokens", {
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
+
+// ==================== 细粒度权限(管理员在前端为用户逐项勾选) ====================
+// user_permissions:功能权限显式覆盖。granted=1 授权 / 0 撤销;无行时走
+// PERMISSION_CATALOG 的 defaultGranted(大部分库功能默认放行,renderer:use 默认收紧)。
+export const userPermissions = sqliteTable("user_permissions", {
+  userId: text("user_id").notNull(),
+  permKey: text("perm_key").notNull(),
+  granted: integer("granted").notNull().default(1),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.permKey] }),
+}));
+
+// user_renderer_grants:播放器授权。device_key = "dlna:<id>" | "airplay:<id>" | "group:<id>",
+// 决定普通用户能控制哪些 DLNA/AirPlay 设备与播放器群组(管理员恒可控制全部)。
+export const userRendererGrants = sqliteTable("user_renderer_grants", {
+  userId: text("user_id").notNull(),
+  deviceKey: text("device_key").notNull(),
+  createdAt: text("created_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.deviceKey] }),
+}));

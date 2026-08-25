@@ -10,6 +10,8 @@
 
 import { Hono } from "hono";
 import { adminMiddleware } from "../../middleware/auth.js";
+import { permMiddleware } from "../../middleware/auth.js";
+import { PERM } from "../../services/access.js";
 import { db, sqlite } from "../../db/index.js";
 import { playlistSongs, playlists } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
@@ -70,7 +72,7 @@ onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
 
 // Aggregate online search across the configured go-music-dl instance.
 // Body: { q: string, sources?: string[] } -> { songs: OnlineSongResult[] }
-onlineRoutes.post("/v1/online/:providerId/search", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_SEARCH), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少 provider id" });
   const configured = getConfiguredProvider(providerId);
@@ -102,7 +104,7 @@ onlineRoutes.post("/v1/online/:providerId/search", async (c) => {
 // For large playlists this runs as a background job:
 //   POST  .../match-playlist -> { success, started, jobId, total, running }
 //   GET   .../match-playlist/status?jobId=  -> { status, progress, result?, error? }
-onlineRoutes.post("/v1/online/:providerId/match-playlist", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   const configured = getConfiguredProvider(providerId);
@@ -147,7 +149,7 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", async (c) => {
 });
 
 // Poll status of a background match job.
-onlineRoutes.get("/v1/online/:providerId/match-playlist/status", (c) => {
+onlineRoutes.get("/v1/online/:providerId/match-playlist/status", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const jobId = c.req.query("jobId");
   if (!jobId) return c.json({ success: false, error: "缺少 jobId" });
   const job = matchJobs.get(jobId);
@@ -159,7 +161,7 @@ onlineRoutes.get("/v1/online/:providerId/match-playlist/status", (c) => {
 // 只处理有占位条目的歌单(不空转);每个歌单内部沿用 MATCH_CONCURRENCY 并发控制。
 //   POST /v1/online/:providerId/match-playlists -> { success, started, batchId, total, alreadyMatched }
 //   GET  /v1/online/:providerId/match-playlists/status?batchId= -> { status, total, done, current, results, error }
-onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/match-playlists", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   const configured = getConfiguredProvider(providerId);
@@ -204,7 +206,7 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", async (c) => {
   return c.json({ success: true, started: true, batchId, total: targets.length });
 });
 
-onlineRoutes.get("/v1/online/:providerId/match-playlists/status", (c) => {
+onlineRoutes.get("/v1/online/:providerId/match-playlists/status", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const batchId = c.req.query("batchId");
   if (!batchId) return c.json({ success: false, error: "缺少 batchId" });
   const job = batchMatchJobs.get(batchId);
@@ -214,7 +216,7 @@ onlineRoutes.get("/v1/online/:providerId/match-playlists/status", (c) => {
 
 // Auto-match a single unmatched playlist entry before playing it.
 // Body: { entryId }
-onlineRoutes.post("/v1/online/:providerId/match-track", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   const configured = getConfiguredProvider(providerId);
@@ -245,7 +247,7 @@ onlineRoutes.post("/v1/online/:providerId/match-track", async (c) => {
 
 // Convenience count of unmatched entries in a playlist.
 // GET /v1/online/:providerId/unmatched?playlistId=
-onlineRoutes.get("/v1/online/:providerId/unmatched", async (c) => {
+onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   const playlistId = c.req.query("playlistId");
   if (!providerId || !playlistId) return c.json({ success: false, error: "缺少参数" });
@@ -261,7 +263,7 @@ onlineRoutes.get("/v1/online/:providerId/unmatched", async (c) => {
 });
 // Body: { songs: OnlineSongResult[], playlistId?: string }
 // Returns per-song DB ids (deduped rows are reported too).
-onlineRoutes.post("/v1/online/:providerId/import", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   if (!getSourcePluginConfig(providerId)) return c.json({ success: false, error: "在线源未启用或未配置" });
@@ -282,7 +284,7 @@ onlineRoutes.post("/v1/online/:providerId/import", async (c) => {
 
 // Fetch go-music-dl's /music/recommend, grouped by channel (netease/qq/kugou/kuwo).
 // GET /v1/online/:providerId/recommend
-onlineRoutes.get("/v1/online/:providerId/recommend", async (c) => {
+onlineRoutes.get("/v1/online/:providerId/recommend", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   const configured = getConfiguredProvider(providerId);
@@ -303,7 +305,7 @@ onlineRoutes.get("/v1/online/:providerId/recommend", async (c) => {
 
 // List local daily-recommend playlists that were imported from the provider.
 // GET /v1/online/:providerId/recommend/local
-onlineRoutes.get("/v1/online/:providerId/recommend/local", (c) => {
+onlineRoutes.get("/v1/online/:providerId/recommend/local", permMiddleware(PERM.RECOMMEND_VIEW), (c) => {
   const all = db.select().from(playlists).all();
   const list = all.filter((p) => isDailyRecommendPlaylist(p)).map((p) => ({
     id: p.id, name: p.name, source: p.sourcePlatform || "", imported: true, coverArt: p.coverArt ? `pl-${p.id}` : null, songCount: p.songCount || 0,
@@ -314,7 +316,7 @@ onlineRoutes.get("/v1/online/:providerId/recommend/local", (c) => {
 
 // Import (or full-replace) one recommended playlist into a local playlist.
 // POST /v1/online/:providerId/recommend/import { source, id, name, cover, creator, trackCount }
-onlineRoutes.post("/v1/online/:providerId/recommend/import", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
   const configured = getConfiguredProvider(providerId);
@@ -346,7 +348,7 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", async (c) => {
 //   GET /v1/online/:providerId/recommend/sync-all/status(路径 A)
 //   GET /v1/plugins/:id/job(各插件)
 // POST /v1/online/:providerId/recommend/sync-all
-onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
+onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   touch(); // 标记活动:聚合同步所有平台
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
@@ -382,9 +384,9 @@ onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", async (c) => {
 
 // 路径 A(公开推荐歌单重导)任务状态查询。
 // GET /v1/online/:providerId/recommend/sync-all/status
-onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", (c) => {
+onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", permMiddleware(PERM.RECOMMEND_VIEW), (c) => {
   const providerId = c.req.param("providerId");
-  const st = syncAllState.get(providerId);
+  const st = syncAllState.get(providerId || "");
   if (!st) return c.json({ success: false, error: "尚无同步记录" }, 404);
   return c.json({ success: true, running: st.running, startedAt: st.startedAt, finishedAt: st.finishedAt, result: st.result, error: st.error });
 });

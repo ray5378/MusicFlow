@@ -37,6 +37,11 @@ import { getPeerManager } from "../peer.js";
 import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken, WsUser } from "./auth.js";
 import {
+  canUseRenderer,
+  canControlPeer,
+  filterPeersByAccess,
+} from "../access.js";
+import {
   randomSongsEvents,
   RANDOM_SONGS_CHANGED_EVENT,
 } from "../plugin/randomSongs.js";
@@ -89,17 +94,14 @@ export function initWebSocketServer(server: import("http").Server): void {
 }
 
 // Build + send the initial full-state snapshot once per new connection.
-// 权限:非 admin 不推送 DLNA 设备状态(其唯一可见播放器是本机 peer)。
+// 权限:非 admin 只推送被授权设备(dlna:<id>)的状态;无授权则空快照。
 async function sendSnapshot(ws: WebSocket): Promise<void> {
   const user: WsUser | undefined = (ws as any).__user;
-  if (user && !user.isAdmin) {
-    send(ws, { type: "snapshot", devices: {} });
-    return;
-  }
   const devices: Record<string, any> = {};
   for (const d of getCachedDevices()) {
     if (!d.available) continue;
     if (d.disabled) continue; // 禁用设备不推送给任何客户端(卡片/Web)
+    if (user && !user.isAdmin && !canUseRenderer(user.id, false, `dlna:${d.id}`)) continue;
     try {
       const status = await getDeviceStatus(d.id);
       devices[d.id] = { ...status, name: d.name, available: d.available };
@@ -112,14 +114,12 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
 
 // Send the current peer list (with queue snapshots) so a freshly connected
 // client can populate the player switcher immediately.
-// 权限:非 admin 只看到自己的本机播放器(local:<userId>),与 /v1/peers 一致。
+// 权限:管理员全量;非 admin 只看到自己的本机播放器 + 被授权的设备/群组
+// (与 /v1/peers 一致,filterPeersByAccess)。
 function sendPeerSnapshot(ws: WebSocket): void {
   const user: WsUser | undefined = (ws as any).__user;
   let peers = getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) }));
-  if (user && !user.isAdmin) {
-    const ownLocal = `local:${user.id}`;
-    peers = peers.filter(p => p.peerId === ownLocal);
-  }
+  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers);
   send(ws, { type: "peer_snapshot", peers });
 }
 
@@ -144,33 +144,38 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const unsubs: Array<() => void> = [];
   const user: WsUser | undefined = (ws as any).__user;
 
-  const canSeeDevices = !user || user.isAdmin;
+  // 设备状态/队列事件:管理员全量;非 admin 只收到被授权设备(dlna:/airplay: 授权)
+  // 的事件,其余不推送(避免泄漏别人播放器的状态)。
+  const canSeeDevice = (deviceId: string) =>
+    !user || user.isAdmin
+    || canUseRenderer(user.id, false, `dlna:${deviceId}`)
+    || canUseRenderer(user.id, false, `airplay:${deviceId}`);
   const onState = (deviceId: string, st: any) => {
-    if (!canSeeDevices) return;
+    if (!canSeeDevice(deviceId)) return;
     const media = getCurrentMedia(deviceId);
     send(ws, { type: "player_state_changed", device_id: deviceId, state: { ...st, media } });
   };
   const onMedia = (deviceId: string, media: any) => {
-    if (!canSeeDevices) return;
+    if (!canSeeDevice(deviceId)) return;
     send(ws, { type: "media_changed", device_id: deviceId, media });
   };
   const onPlayerRefresh = (deviceId: string, info: any) => {
-    if (!canSeeDevices) return;
+    if (!canSeeDevice(deviceId)) return;
     send(ws, { type: "player_refresh", device_id: deviceId, reason: info?.reason });
   };
   const onQueue = (deviceId: string, queue: any) => {
-    if (!canSeeDevices) return;
+    if (!canSeeDevice(deviceId)) return;
     send(ws, { type: "queue_changed", device_id: deviceId, queue: summarizeQueue(queue) });
   };
   const onDeviceList = (deviceCount: number) => {
-    if (!canSeeDevices) return;
-    send(ws, { type: "device_list_changed", deviceCount });
+    // 设备列表变化属播放器管理信息,非 admin 不推送。
+    if (!user || user.isAdmin) send(ws, { type: "device_list_changed", deviceCount });
   };
 
   // Peer events: forward registration/availability/queue changes so the Web
   // client's player switcher stays live without polling /v1/peers.
-  // 权限:非 admin 只转发自己的本机 peer 事件,不泄漏其他播放器。
-  const canSeePeer = (peerId?: string) => !user || user.isAdmin || peerId === `local:${user.id}`;
+  // 权限:非 admin 只转发「自己的本机 peer + 被授权的设备/群组」事件(canControlPeer)。
+  const canSeePeer = (peerId?: string) => canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId || "");
   const onPeerRegistered = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_registered", peer }); };
   const onPeerAvailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_available", peer }); };
   const onPeerUnavailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_unavailable", peer }); };
@@ -179,8 +184,8 @@ function subscribeAndForward(ws: WebSocket): () => void {
 
   // Group events: 组创建/改名/成员变更 → 前端群组页刷新;组删除 → 移除条目。
   // 权限:群组属于播放器管理,非 admin 不转发。
-  const onGroupChanged = (group: any) => { if (canSeeDevices) send(ws, { type: "group_changed", group }); };
-  const onGroupDeleted = (id: string) => { if (canSeeDevices) send(ws, { type: "group_deleted", id }); };
+  const onGroupChanged = (group: any) => { if (!user || user.isAdmin) send(ws, { type: "group_changed", group }); };
+  const onGroupDeleted = (id: string) => { if (!user || user.isAdmin) send(ws, { type: "group_deleted", id }); };
 
   em.on("state_changed", onState);
   em.on("media_changed", onMedia);

@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
+import { PERM } from "@/utils/perms";
 
 const routes = [
   {
@@ -14,19 +15,19 @@ const routes = [
     meta: { requiresAuth: true },
     children: [
       { path: "", name: "Home", component: () => import("@/views/Home/index.vue") },
-      { path: "songs", name: "Songs", component: () => import("@/views/Music/index.vue") },
-      { path: "genres", name: "Genres", component: () => import("@/views/Genres/index.vue") },
-      { path: "albums", name: "Albums", component: () => import("@/views/Albums/index.vue") },
-      { path: "albums/:id", name: "AlbumDetail", component: () => import("@/views/Albums/Detail.vue") },
-      { path: "artists", name: "Artists", component: () => import("@/views/Artists/index.vue") },
-      { path: "artists/:id", name: "ArtistDetail", component: () => import("@/views/Artists/Detail.vue") },
-      { path: "playlists", name: "Playlists", component: () => import("@/views/Playlists/index.vue") },
-      { path: "playlists/:id", name: "PlaylistDetail", component: () => import("@/views/Playlists/Detail.vue") },
-      { path: "favorites", name: "Favorites", component: () => import("@/views/Favorites/index.vue") },
-      { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue"), meta: { requiresAdmin: true } },
-      { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { requiresAdmin: true } },
-      { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { requiresAdmin: true } },
-      { path: "history", name: "History", component: () => import("@/views/History/index.vue") },
+      { path: "songs", name: "Songs", component: () => import("@/views/Music/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
+      { path: "genres", name: "Genres", component: () => import("@/views/Genres/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
+      { path: "albums", name: "Albums", component: () => import("@/views/Albums/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
+      { path: "albums/:id", name: "AlbumDetail", component: () => import("@/views/Albums/Detail.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
+      { path: "artists", name: "Artists", component: () => import("@/views/Artists/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
+      { path: "artists/:id", name: "ArtistDetail", component: () => import("@/views/Artists/Detail.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
+      { path: "playlists", name: "Playlists", component: () => import("@/views/Playlists/index.vue"), meta: { perm: PERM.PLAYLIST_VIEW } },
+      { path: "playlists/:id", name: "PlaylistDetail", component: () => import("@/views/Playlists/Detail.vue"), meta: { perm: PERM.PLAYLIST_VIEW } },
+      { path: "favorites", name: "Favorites", component: () => import("@/views/Favorites/index.vue"), meta: { perm: PERM.FAVORITES_MANAGE } },
+      { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue"), meta: { perm: PERM.RENDERER_MANAGE } },
+      { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { requiresAdmin: true, perm: PERM.FLOW_MANAGE } },
+      { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { requiresAdmin: true, perm: PERM.FLOW_MANAGE } },
+      { path: "history", name: "History", component: () => import("@/views/History/index.vue"), meta: { perm: PERM.HISTORY_MANAGE } },
       { path: "settings", name: "Settings", component: () => import("@/views/Settings/index.vue") },
       {
         path: "admin",
@@ -52,6 +53,8 @@ router.beforeEach((to, _from, next) => {
   if (to.meta.requiresAuth !== false && !authStore.isLoggedIn) {
     next("/login");
   } else if (to.meta.requiresAdmin && !authStore.isAdmin) {
+    next("/");
+  } else if (to.meta.perm && !authStore.hasPerm(to.meta.perm as string)) {
     next("/");
   } else {
     next();

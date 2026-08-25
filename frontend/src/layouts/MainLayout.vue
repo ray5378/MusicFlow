@@ -26,15 +26,15 @@
       </div>
       <el-menu :default-active="activeMenu" :collapse="!isMobile && sidebarCollapsed" router class="sidebar-menu" @select="closeMobileNav">
         <el-menu-item index="/"><MfIcon name="Home" /><template #title>首页</template></el-menu-item>
-        <el-menu-item index="/playlists"><MfIcon name="List" /><template #title>歌单</template></el-menu-item>
-        <el-menu-item index="/songs"><MfIcon name="Headphones" /><template #title>音乐</template></el-menu-item>
-        <el-menu-item index="/artists"><MfIcon name="User" /><template #title>艺术家</template></el-menu-item>
-        <el-menu-item index="/albums"><MfIcon name="Disc3" /><template #title>专辑</template></el-menu-item>
-        <el-menu-item index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>我喜欢</template></el-menu-item>
-        <el-menu-item index="/genres"><MfIcon name="Library" /><template #title>风格</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
-        <el-menu-item index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.PLAYLIST_VIEW)" index="/playlists"><MfIcon name="List" /><template #title>歌单</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/songs"><MfIcon name="Headphones" /><template #title>音乐</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/artists"><MfIcon name="User" /><template #title>艺术家</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/albums"><MfIcon name="Disc3" /><template #title>专辑</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.FAVORITES_MANAGE)" index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>我喜欢</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/genres"><MfIcon name="Library" /><template #title>风格</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE)" index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>插件管理</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>媒体源</template></el-menu-item>
@@ -491,6 +491,7 @@ import { useFavoritesStore } from "@/stores/favorites";
 import GlobalItemUI from "@/components/GlobalItemUI.vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
+import { PERM } from "@/utils/perms";
 
 const route = useRoute();
 const router = useRouter();

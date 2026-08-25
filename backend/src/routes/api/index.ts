@@ -9,6 +9,12 @@ import { apiError, BusinessErrorCode } from "../../utils/errors.js";
 import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
 import { adminMiddleware, invalidateAuthCaches } from "../../middleware/auth.js";
+import {
+  PERM, PERMISSION_CATALOG, permMiddleware, rendererGrantParamMiddleware,
+  hasPerm, canUseRenderer, canControlPeer, filterPeersByAccess, peerToDeviceKey,
+  getUserPermissions, getUserRendererGrants, effectiveAccessView,
+  replaceUserPermissions, replaceRendererGrants, grantRenderer, revokeRenderer, invalidateAccessCaches,
+} from "../../services/access.js";
 import { testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
 import { encryptPassword } from "../../db/index.js";
 import { ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
@@ -80,6 +86,27 @@ const syncApi = () => playlistSyncApi();
 
 const log = createLogger("RECOMMEND");
 export const apiRoutes = new Hono();
+
+// ==================== 细粒度功能权限门禁(前缀 → 权限 key) ====================
+// 管理员恒通过(permMiddleware → hasPerm 短路);普通用户按用户权限判定,
+// 被管理员显式撤销的库功能一律 403。默认放行的功能(浏览/搜索/播放/推荐等)
+// 仅在管理员撤销后生效,对既有用户零影响。
+// 歌单(子权限)与历史/愿望单/音流等在各自路由上单独挂载。
+// 注意:必须注册在子路由(route)之前,才能先于子路由处理器执行。
+apiRoutes.use("/v1/recommend", permMiddleware(PERM.RECOMMEND_VIEW));
+apiRoutes.use("/v1/home/playlist-count", permMiddleware(PERM.RECOMMEND_VIEW));
+apiRoutes.use("/v1/recommend-pool", permMiddleware(PERM.RECOMMEND_VIEW));
+apiRoutes.use("/v1/songs", permMiddleware(PERM.LIBRARY_BROWSE));
+apiRoutes.use("/v1/genres", permMiddleware(PERM.LIBRARY_BROWSE));
+apiRoutes.use("/v1/albums", permMiddleware(PERM.LIBRARY_BROWSE));
+apiRoutes.use("/v1/artists", permMiddleware(PERM.LIBRARY_BROWSE));
+apiRoutes.use("/v1/stats", permMiddleware(PERM.LIBRARY_BROWSE));
+apiRoutes.use("/v1/stream", permMiddleware(PERM.LIBRARY_STREAM));
+apiRoutes.use("/v1/song-search", permMiddleware(PERM.LIBRARY_SEARCH));
+apiRoutes.use("/v1/artist-search", permMiddleware(PERM.LIBRARY_SEARCH));
+apiRoutes.use("/v1/album-search", permMiddleware(PERM.LIBRARY_SEARCH));
+apiRoutes.use("/v1/playlist-search", permMiddleware(PERM.LIBRARY_SEARCH));
+
 apiRoutes.route("/", onlineRoutes);
 apiRoutes.route("/", playlistSearchRoutes);
 apiRoutes.route("/", entitySearchRoutes);
@@ -323,14 +350,79 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
   db.delete(playHistory).where(eq(playHistory.userId, id)).run();
   db.delete(wishes).where(eq(wishes.userId, id)).run();
   db.delete(users).where(eq(users.id, id)).run();
+  // 清理该用户的权限与播放器授权(避免孤儿行)。
+  invalidateAccessCaches(id);
   return c.json({ success: true });
+});
+
+// ==================== 细粒度权限管理(管理员) ====================
+// GET  /v1/users/:id/access    — 目录 + 该用户功能权限有效值 + 播放器授权列表
+// PUT  /v1/users/:id/access    — 整表替换(功能权限 + 播放器授权),一次性勾选提交
+// GET  /v1/access/renderers    — 可授权播放器清单(DLNA / AirPlay / 群组)
+apiRoutes.get("/v1/users/:id/access", adminMiddleware, (c) => {
+  const id = c.req.param("id")!;
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  const view = effectiveAccessView(id, !!target.isAdmin);
+  // 管理员无授权限制,rendererGrants 返回 null 由前端展示"管理员不限"。
+  return c.json({ success: true, ...view });
+});
+
+apiRoutes.put("/v1/users/:id/access", adminMiddleware, async (c) => {
+  const id = c.req.param("id")!;
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  const body = await c.req.json().catch(() => ({}));
+  if (body.permissions !== undefined && body.permissions !== null && typeof body.permissions === "object") {
+    replaceUserPermissions(id, body.permissions);
+  }
+  if (Array.isArray(body.renderers)) {
+    replaceRendererGrants(id, body.renderers.filter((k: unknown) => typeof k === "string"));
+  }
+  const view = effectiveAccessView(id, !!target.isAdmin);
+  return c.json({ success: true, ...view });
+});
+
+// 可授权播放器清单:DLNA 设备、AirPlay 设备、播放器群组(管理端勾选 UI 用)。
+apiRoutes.get("/v1/access/renderers", adminMiddleware, (c) => {
+  const dlna = getCachedDevices().map((d) => ({
+    kind: "dlna" as const,
+    deviceKey: `dlna:${d.id}`,
+    name: d.alias || d.name || d.id,
+    available: !!d.available,
+    disabled: !!d.disabled,
+  }));
+  const airplay = listAirPlayDevices().map((d: any) => ({
+    kind: "airplay" as const,
+    deviceKey: `airplay:${d.id}`,
+    name: d.alias || d.name || d.id,
+    available: !!d.available,
+    disabled: !!d.disabled,
+  }));
+  const groups = gm.listWithMembers().map((g: any) => ({
+    kind: "group" as const,
+    deviceKey: `group:${g.id}`,
+    name: g.name || g.id,
+    available: (g.members || []).some((m: any) => m.available),
+    memberCount: (g.members || []).length,
+  }));
+  return c.json({ success: true, renderers: [...dlna, ...airplay, ...groups] });
 });
 
 // ==================== Current user (HA integration health check) ====================
 // Used by the hass-musicflow config flow to verify the API key works.
+// 附带细粒度权限载荷(与登录一致),供前端刷新后恢复菜单/播放器可见性。
 apiRoutes.get("/v1/users/me", (c) => {
   const user = c.get("user");
-  return c.json({ id: user?.id, username: user?.username, isAdmin: user?.isAdmin });
+  if (!user) return c.json({ id: null, username: null, isAdmin: false });
+  const isAdmin = !!user.isAdmin;
+  return c.json({
+    id: user.id,
+    username: user.username,
+    isAdmin,
+    permissions: isAdmin ? { admin: true } : getUserPermissions(user.id),
+    rendererGrants: isAdmin ? null : [...getUserRendererGrants(user.id)].sort(),
+  });
 });
 
 // ==================== API Key (long-lived token for third-party clients) ====================
@@ -733,7 +825,7 @@ apiRoutes.post("/v1/plugins/registry/install", adminMiddleware, async (c) => {
 
 // ==================== Wish ====================
 // ==================== Wish (paginated) ====================
-apiRoutes.get("/v1/wish", adminMiddleware, (c) => {
+apiRoutes.get("/v1/wish", permMiddleware(PERM.WISH_VIEW), (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
@@ -748,10 +840,10 @@ apiRoutes.get("/v1/wish", adminMiddleware, (c) => {
   const items = all.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice((page - 1) * pageSize, page * pageSize);
   return c.json({ total, page, pageSize, items });
 });
-apiRoutes.post("/v1/wish", adminMiddleware, async (c) => { const user = c.get("user"); const body = await c.req.json(); const id = uuidv4(); db.insert(wishes).values({ id, userId: user?.id || "", songTitle: body.songTitle, artist: body.artist || "", album: body.album || "", status: "pending" }).run(); return c.json({ id }); });
+apiRoutes.post("/v1/wish", permMiddleware(PERM.WISH_VIEW), async (c) => { const user = c.get("user"); const body = await c.req.json(); const id = uuidv4(); db.insert(wishes).values({ id, userId: user?.id || "", songTitle: body.songTitle, artist: body.artist || "", album: body.album || "", status: "pending" }).run(); return c.json({ id }); });
 
 // Export ALL wishes as "artist songTitle" lines (for copying to import into download tools)
-apiRoutes.get("/v1/wish/export", adminMiddleware, (c) => {
+apiRoutes.get("/v1/wish/export", permMiddleware(PERM.WISH_VIEW), (c) => {
   const all = db.select().from(wishes).all()
     .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   const text = all.map(w => [w.artist, w.songTitle].filter(Boolean).join(" ")).filter(Boolean).join("\n");
@@ -1372,7 +1464,7 @@ apiRoutes.get("/v1/recommend-pool/favorites/status", (c) => {
 // ==================== Playlist import (built-in plugins: QQ / NetEase / MusicFlow native file) ====================
 // URL 导入走异步任务(触发即返回 taskId,前端轮询 GET /v1/tasks/:id):网络拉取 + 增量重建
 // 可能耗时几秒~几十秒,同步 await 会长时间挂住前端请求;native 文件解析通常量小,保持同步。
-apiRoutes.post("/v1/playlists/import", async (c) => {
+apiRoutes.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
@@ -1435,7 +1527,7 @@ apiRoutes.post("/v1/playlists/import", async (c) => {
 
 // Export a playlist as a MusicFlow-native JSON file that round-trips back
 // through the import endpoint.
-apiRoutes.get("/v1/playlists/:id/export", (c) => {
+apiRoutes.get("/v1/playlists/:id/export", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
@@ -1453,7 +1545,7 @@ apiRoutes.get("/v1/playlists/:id/export", (c) => {
 // Export ALL of the current user's playlists into a single MusicFlow-native
 // file (raw.playlists array). Re-imports through the same /import endpoint,
 // which recreates each playlist.
-apiRoutes.get("/v1/playlists/export-all", (c) => {
+apiRoutes.get("/v1/playlists/export-all", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const user = c.get("user");
   const mine = db.select().from(playlists)
     .where(eq(playlists.ownerId, user?.id || ""))
@@ -1469,7 +1561,7 @@ apiRoutes.get("/v1/playlists/export-all", (c) => {
 
 // ==================== Playlist sync ====================
 // 手动同步走异步任务(触发即返回 taskId,前端轮询):大歌单同步可能耗时,避免 HTTP 长时间挂起。
-apiRoutes.post("/v1/playlists/:id/sync", async (c) => {
+apiRoutes.post("/v1/playlists/:id/sync", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
@@ -1502,7 +1594,7 @@ apiRoutes.get("/v1/system/busy", (c) => {
 });
 
 // ==================== Playlist settings (rename / public toggle / auto-sync toggle) ====================
-apiRoutes.put("/v1/playlists/:id", async (c) => {
+apiRoutes.put("/v1/playlists/:id", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({}));
@@ -1520,7 +1612,7 @@ apiRoutes.put("/v1/playlists/:id", async (c) => {
 // Convert a platform-imported playlist (go-music-dl daily-recommend etc.) into a
 // permanent local playlist: detach its source link so the daily rotation neither
 // replaces its contents nor deletes it. Entries/cover/name are kept as-is.
-apiRoutes.post("/v1/playlists/:id/convert-to-local", async (c) => {
+apiRoutes.post("/v1/playlists/:id/convert-to-local", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
@@ -1549,7 +1641,7 @@ apiRoutes.post("/v1/playlists/:id/convert-to-local", async (c) => {
 // 写入 playlist_favorites(user_id × playlist_id)。收藏后的副作用与原先一致:
 // 平台歌单收藏后转本地并开启每天自动同步(每天同步默认打开),并脱离每日推荐轮换。
 // 取消收藏平台歌单:仅移除当前用户的收藏标记,恢复每日推荐轮换身份(syncAll 重新管理)。
-apiRoutes.post("/v1/playlists/:id/favorite", async (c) => {
+apiRoutes.post("/v1/playlists/:id/favorite", permMiddleware(PERM.FAVORITES_MANAGE), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({}));
@@ -1589,7 +1681,7 @@ apiRoutes.post("/v1/playlists/:id/favorite", async (c) => {
 });
 
 // ==================== Playlists (paginated) ====================
-apiRoutes.get("/v1/playlists", (c) => {
+apiRoutes.get("/v1/playlists", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
@@ -1681,7 +1773,7 @@ apiRoutes.get("/playlist/:id/tracks", (c) => c.json(db.select().from(playlistSon
 apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; if (isFixedRecommendPlaylist(id)) return c.json({ error: "固定推荐歌单(今日/本地/漫游)由插件每日重建,不可删除" }, 400); const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权删除该歌单" }, 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
 
 // ==================== Playlist tracks (paginated) ====================
-apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
+apiRoutes.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const id = c.req.param("id")!;
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
@@ -1742,7 +1834,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", (c) => {
 });
 
 // ==================== Play history (paginated) ====================
-apiRoutes.get("/v1/history", (c) => {
+apiRoutes.get("/v1/history", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
   const user = c.get("user");
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
@@ -1778,7 +1870,7 @@ apiRoutes.get("/v1/history", (c) => {
 
 // Clear the current user's play history. Does not touch playCount on songs
 // (that's a historical counter, not a history record).
-apiRoutes.delete("/v1/history", (c) => {
+apiRoutes.delete("/v1/history", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json({ deleted: 0 });
   const result = db.delete(playHistory).where(eq(playHistory.userId, user.id)).run();
@@ -1815,13 +1907,16 @@ export function getDlnaBaseUrl(c: any): string {
   return u;
 }
 
-// ==================== 播放器管理(仅管理员)====================
-// DLNA / AirPlay / 群组是「播放器」功能的全部端点。普通用户只能看到并控制
-// 自己的本机播放器(local:<自己的 userId>),播放器管理端点一律对 admin 开放。
-// WS 连接同样按用户过滤,非 admin 只收本机 peer 事件(见 services/ws)。
-apiRoutes.use("/v1/dlna/*", adminMiddleware);
-apiRoutes.use("/v1/airplay/*", adminMiddleware);
-apiRoutes.use("/v1/groups*", async (c, next) => { return c.get("user")?.isAdmin ? next() : c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作"), 403); });
+// ==================== 播放器管理(细粒度权限) ====================
+// 双层模型(见 services/access.ts):
+//   - 功能权限 renderer.use 控制"能否使用播放器",设备/群组授权
+//     user_renderer_grants 控制"能用哪些播放器"。管理员恒全量。
+//   - 控制类端点(play/pause/status/queue…)按设备授权判定;
+//     管理类端点(扫描/改名/删除/禁用/群组 CRUD)要求 renderer.manage。
+//   - 本机播放器 local:<userId> 属用户自己的 Web 播放器,永远可用。
+// WS 连接同样按用户过滤(见 services/ws)。
+apiRoutes.use("/v1/dlna/devices/:deviceId/*", rendererGrantParamMiddleware("dlna"));
+apiRoutes.use("/v1/airplay/devices/:deviceId/*", rendererGrantParamMiddleware("airplay"));
 
 // List discovered DLNA renderers (refreshes cache if stale).
 apiRoutes.get("/v1/dlna/devices", async (c) => {
@@ -1840,8 +1935,8 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
   return c.json({ devices });
 });
 
-// Force a fresh SSDP discovery scan.
-apiRoutes.post("/v1/dlna/scan", async (c) => {
+// Force a fresh SSDP discovery scan.(管理播放器能力:renderer.manage)
+apiRoutes.post("/v1/dlna/scan", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const devices = await refreshDevices();
   return c.json({ devices: devices.map(d => ({
     id: d.id, name: d.name, alias: d.alias || "",
@@ -1855,7 +1950,8 @@ apiRoutes.post("/v1/dlna/scan", async (c) => {
 
 // 重命名 DLNA 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
 // alias 会同步到播放控件/HA 卡片显示(peer.name = alias || name)。
-apiRoutes.put("/v1/dlna/devices/:deviceId", async (c) => {
+// 管理播放器能力:renderer.manage。
+apiRoutes.put("/v1/dlna/devices/:deviceId", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const body = await c.req.json().catch(() => ({}));
   const alias = typeof body.alias === "string" ? body.alias.trim() : "";
@@ -1877,7 +1973,8 @@ apiRoutes.put("/v1/dlna/devices/:deviceId", async (c) => {
 });
 
 // 删除 DLNA 设备(通常删除离线的)。同时清理:群组成员、设备队列、peer、DB 记录。
-apiRoutes.delete("/v1/dlna/devices/:deviceId", async (c) => {
+// 管理播放器能力:renderer.manage。
+apiRoutes.delete("/v1/dlna/devices/:deviceId", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const deviceId = c.req.param("deviceId")!;
   // 1. 从所有播放器群组中移除该成员。
   getGroupManager().removeDeviceFromAllGroups(deviceId);
@@ -1896,7 +1993,8 @@ apiRoutes.delete("/v1/dlna/devices/:deviceId", async (c) => {
 
 // 禁用/启用 DLNA 设备。禁用后:从所有选择播放器的地方消失(peer 移除 + WS 不推送)、
 // 停止播放并清空队列、从所有播放器群组移除、不可投屏(castToDevice 校验);启用则恢复。
-apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", async (c) => {
+// 管理播放器能力:renderer.manage。
+apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const body = await c.req.json().catch(() => ({}));
   const disabled = !!body.disabled;
@@ -2125,7 +2223,8 @@ apiRoutes.get("/v1/airplay/devices", (c) => {
 
 // 重命名 AirPlay 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
 // alias 会同步到播放控件 / HA 卡片显示(peer.name = alias || name)。
-apiRoutes.put("/v1/airplay/devices/:deviceId", async (c) => {
+// 管理播放器能力:renderer.manage。
+apiRoutes.put("/v1/airplay/devices/:deviceId", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const body = await c.req.json().catch(() => ({}));
   const alias = typeof body.alias === "string" ? body.alias.trim() : "";
@@ -2136,7 +2235,8 @@ apiRoutes.put("/v1/airplay/devices/:deviceId", async (c) => {
 });
 
 // 删除 AirPlay 设备(通常删除离线的)。同时清理:设备队列、peer、DB 记录。
-apiRoutes.delete("/v1/airplay/devices/:deviceId", async (c) => {
+// 管理播放器能力:renderer.manage。
+apiRoutes.delete("/v1/airplay/devices/:deviceId", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const deviceId = c.req.param("deviceId")!;
   // 1. 停止并清空设备队列(如果有),并删除持久化队列行。
   try { getQueueController().clear(deviceId); } catch { /* ignore */ }
@@ -2153,7 +2253,8 @@ apiRoutes.delete("/v1/airplay/devices/:deviceId", async (c) => {
 
 // 禁用/启用 AirPlay 设备。禁用后:从所有选择播放器的地方消失(peer 移除)、
 // 停止播放并清空队列、不可投屏;启用则恢复。
-apiRoutes.put("/v1/airplay/devices/:deviceId/disabled", async (c) => {
+// 管理播放器能力:renderer.manage。
+apiRoutes.put("/v1/airplay/devices/:deviceId/disabled", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const body = await c.req.json().catch(() => ({}));
   const disabled = !!body.disabled;
@@ -2178,9 +2279,13 @@ apiRoutes.get("/v1/airplay/active", (c) => {
 });
 
 apiRoutes.post("/v1/airplay/cast", async (c) => {
+  const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const { songId, deviceId } = body as any;
   if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  if (!canUseRenderer(user?.id ?? "", !!user?.isAdmin, `airplay:${deviceId}`)) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权控制该播放器"), 403);
+  }
   try {
     await castToAirPlayDevice({
       songId, deviceId,
@@ -2248,36 +2353,32 @@ function isCastPeer(parsed: { kind: string }): boolean {
   return parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay";
 }
 
-// List all known peers (local + dlna) with their queue snapshots. The Web
-// client calls this to populate the player-switcher popup.
-// 权限:管理员看到全部;普通用户只能看到自己的本机播放器(local:<userId>),
-// 无法看到其他用户的播放器/DLNA/群组(见需求:播放器仅对 admin 开放)。
+// List all known peers (local + dlna + group + airplay) with their queue
+// snapshots. The Web client calls this to populate the player-switcher popup.
+// 权限:管理员看到全部;普通用户看到「自己的本机播放器 + 被授权的设备/群组」,
+// 其余 peer 一律不可见(见 services/access.ts 的 filterPeersByAccess)。
 apiRoutes.get("/v1/peers", (c) => {
   const user = c.get("user");
   let peers = pm.listWithQueues();
-  if (!user?.isAdmin) {
-    const ownLocal = `local:${user?.id ?? ""}`;
-    peers = peers.filter((p) => p.peerId === ownLocal);
-  }
+  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers);
   return c.json({ peers });
 });
 
-// 非 admin 只能控制/查询自己的本机播放器(local:<userId>);对其它 peer 一律 403。
-// 与 /v1/peers 列表过滤一致,防止普通用户看到或遥控别人的播放器/群组。
+// 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。
+// 与 /v1/peers 列表过滤一致(canControlPeer 含 local:<userId> 永远放行),
+// 防止普通用户看到或遥控别人的播放器/群组。
 apiRoutes.use("/v1/peers/:peerId/*", async (c, next) => {
   const user = c.get("user");
-  if (user?.isAdmin) return next();
-  const peerId = c.req.param("peerId");
-  if (peerId === `local:${user?.id ?? ""}`) return next();
+  const peerId = c.req.param("peerId") || "";
+  if (canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)) return next();
   return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
 });
 
 apiRoutes.use("/v1/peers/:peerId", async (c, next) => {
   if (c.req.method !== "GET") return next(); // 只拦 GET 详情/状态查询;register/heartbeat 等走各自校验
   const user = c.get("user");
-  if (user?.isAdmin) return next();
-  const peerId = c.req.param("peerId");
-  return peerId === `local:${user?.id ?? ""}`
+  const peerId = c.req.param("peerId") || "";
+  return canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)
     ? next()
     : c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
 });
@@ -2752,12 +2853,19 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
 const gm = getGroupManager();
 
 // 列出全部组(含成员设备信息:名称/可用性)。
+// 播放器群组:管理员看到全部;普通用户只能看到被授权的群组(group:<id>)。
+// 创建/更新/删除属「管理播放器」能力,要求 renderer.manage。
 apiRoutes.get("/v1/groups", (c) => {
-  return c.json({ groups: gm.listWithMembers() });
+  const user = c.get("user");
+  let groups = gm.listWithMembers();
+  if (!user?.isAdmin) {
+    groups = groups.filter((g: any) => canUseRenderer(user.id, false, `group:${g.id}`));
+  }
+  return c.json({ groups });
 });
 
 // 新建组。Body: { name: string, memberIds?: string[] }
-apiRoutes.post("/v1/groups", async (c) => {
+apiRoutes.post("/v1/groups", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name : "";
   const memberIds = Array.isArray(body.memberIds) ? body.memberIds : [];
@@ -2770,7 +2878,7 @@ apiRoutes.post("/v1/groups", async (c) => {
 });
 
 // 更新组:改名(name)和/或全量替换成员(memberIds)。Body: { name?, memberIds? }
-apiRoutes.put("/v1/groups/:id", async (c) => {
+apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({} as any));
   try {
@@ -2801,7 +2909,7 @@ apiRoutes.put("/v1/groups/:id", async (c) => {
 });
 
 // 删除组(组队列随之删除,成员设备恢复单独控制)。
-apiRoutes.delete("/v1/groups/:id", (c) => {
+apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_MANAGE), (c) => {
   const ok = gm.deleteGroup(c.req.param("id")!);
   if (!ok) return c.json({ error: "组不存在" }, 404);
   return c.json({ success: true });
@@ -2818,6 +2926,11 @@ apiRoutes.post("/v1/play", async (c) => {
   const { peerId, type, id, startIndex, playMode, enqueue } = body || {};
   if (typeof peerId !== "string" || typeof type !== "string" || typeof id !== "string") {
     return c.json({ error: "需要 peerId / type / id" }, 400);
+  }
+  const user = c.get("user");
+  // 细粒度播放器授权:非 admin 只能投放到被授权的 peer(含自己的 local)。
+  if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
   }
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
@@ -2875,18 +2988,18 @@ function resolveDefaultTokenId(): string {
   return t ? t.id : "";
 }
 
-apiRoutes.get("/v1/flows", adminMiddleware, (c) => {
+apiRoutes.get("/v1/flows", permMiddleware(PERM.FLOW_MANAGE), (c) => {
   const items = listFlows().map(flowWithWebhook);
   return c.json({ total: items.length, items });
 });
 
-apiRoutes.get("/v1/flows/:id", adminMiddleware, (c) => {
+apiRoutes.get("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), (c) => {
   const flow = getFlow(c.req.param("id")!);
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
-apiRoutes.post("/v1/flows", adminMiddleware, async (c) => {
+apiRoutes.post("/v1/flows", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return c.json({ error: "需要 name" }, 400);
@@ -2903,7 +3016,7 @@ apiRoutes.post("/v1/flows", adminMiddleware, async (c) => {
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
-apiRoutes.put("/v1/flows/:id", adminMiddleware, async (c) => {
+apiRoutes.put("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const upd: any = {
     name: typeof body.name === "string" ? body.name : undefined,
@@ -2925,14 +3038,14 @@ apiRoutes.put("/v1/flows/:id", adminMiddleware, async (c) => {
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
-apiRoutes.delete("/v1/flows/:id", adminMiddleware, (c) => {
+apiRoutes.delete("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), (c) => {
   const ok = deleteFlow(c.req.param("id")!);
   if (!ok) return c.json({ error: "流程不存在" }, 404);
   return c.json({ success: true });
 });
 
 // UI 手动触发(异步执行,返回当前运行状态)。
-apiRoutes.post("/v1/flows/:id/run", adminMiddleware, async (c) => {
+apiRoutes.post("/v1/flows/:id/run", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   const flow = getFlow(c.req.param("id")!);
   if (!flow) return c.json({ error: "流程不存在" }, 404);
   if (!flow.enabled) return c.json({ error: "流程已停用" }, 409);

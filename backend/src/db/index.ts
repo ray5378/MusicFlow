@@ -439,6 +439,26 @@ export function initDatabase() {
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
+
+    -- 细粒度权限:功能权限显式覆盖 + 播放器授权(管理员在前端逐项勾选)。
+    CREATE TABLE IF NOT EXISTS user_permissions (
+      user_id TEXT NOT NULL,
+      perm_key TEXT NOT NULL,
+      granted INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (user_id, perm_key),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_permissions_user ON user_permissions(user_id);
+
+    CREATE TABLE IF NOT EXISTS user_renderer_grants (
+      user_id TEXT NOT NULL,
+      device_key TEXT NOT NULL,
+      created_at TEXT DEFAULT '',
+      PRIMARY KEY (user_id, device_key),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_renderer_grants_user ON user_renderer_grants(user_id);
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)
