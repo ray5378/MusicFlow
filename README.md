@@ -38,7 +38,7 @@ services:
       # 数据目录(SQLite 主库 + 歌词/封面/插件/密钥)
       - ${MUSICFLOW_DATA_DIR:-./data}:/app/backend/data
       # 本地音乐目录:把音乐文件放进宿主机路径,容器内即 /local/music
-      - ${MUSICFLOW_MUSIC_DIR:-./local/music}:/local/music
+      - ./local/music:/local/music
       # 可选:平台歌曲/歌单封面缓存,独立挂到大磁盘
       - ${MUSICFLOW_ONLINE_COVERS_DIR:-}:/app/backend/data/online-covers
       # 可选:歌词缓存,独立挂到大磁盘
