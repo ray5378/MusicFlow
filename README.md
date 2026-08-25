@@ -36,13 +36,13 @@ services:
       - UV_USE_IO_URING=0
     volumes:
       # 数据目录(SQLite 主库 + 歌词/封面/插件/密钥)
-      - ${MUSICFLOW_DATA_DIR:-./data}:/app/backend/data
+      - ./local/data:/app/backend/data
       # 本地音乐目录:把音乐文件放进宿主机路径,容器内即 /local/music
       - ./local/music:/local/music
       # 可选:平台歌曲/歌单封面缓存,独立挂到大磁盘
-      - ${MUSICFLOW_ONLINE_COVERS_DIR:-}:/app/backend/data/online-covers
+      - ./local/online-covers:/app/backend/data/online-covers
       # 可选:歌词缓存,独立挂到大磁盘
-      - ${MUSICFLOW_ONLINE_LYRICS_DIR:-}:/app/backend/data/online-lyrics
+      - ./local/online-lyrics:/app/backend/data/online-lyrics
 
 networks: {}
 ```
