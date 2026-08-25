@@ -512,14 +512,7 @@
             <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
           </el-form-item>
 
-          <!-- 关键词搜索导入:已内嵌在 keywords 字段的 tag-input 组件中,此处不再重复显示。 -->
-          <el-form-item v-if="false">
-            <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
-              关键词搜索入库
-            </el-button>
-            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-            <span class="field-hint">按已配置的关键词搜索所有平台歌单并自动导入,已入库的跳过</span>
-          </el-form-item>
+          <!-- 关键词搜索入库按钮已内嵌在 keywords 字段的 tag-input 组件中。 -->
 
           <el-alert
             type="info"
