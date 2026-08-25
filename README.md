@@ -16,25 +16,33 @@ docker compose up -d
 
 > DLNA 投屏依赖 SSDP 多播，需使用 `network_mode: host`（仅 Linux 支持）。
 
-完整的 `docker-compose.yml`（含中文注释，也可直接 `curl` 上方命令拉取仓库源文件）：
+完整的 `docker-compose.yml`（可变量根据实际路径替换）：
 
 ```yaml
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow:latest
+    image: ray5378/musicflow:latest
     container_name: musicflow
-    restart: unless-stopped
+    restart: always
+    # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
+    # host 网络仅 Linux 支持;Docker Desktop(macOS/Windows)上多播不可用,DLNA 需原生运行。
     network_mode: host
     environment:
-      - DATA_DIR=/data
+      # 可选:JWT 签名密钥。留空则首次启动自动生成并保存到数据目录 .jwt-secret(重启稳定)。
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
     volumes:
-      - ./data:/data
-      - ./local/music:/local/music
+      # 数据目录(SQLite 主库 + 歌词/封面/插件/密钥)
+      - ${MUSICFLOW_DATA_DIR:-./data}:/app/backend/data
+      # 可选:平台歌曲/歌单封面缓存,独立挂到大磁盘
+      - ${MUSICFLOW_ONLINE_COVERS_DIR:-}:/app/backend/data/online-covers
+      # 可选:歌词缓存,独立挂到大磁盘
+      - ${MUSICFLOW_ONLINE_LYRICS_DIR:-}:/app/backend/data/online-lyrics
+
+networks: {}
 ```
 
 ## 功能概览
