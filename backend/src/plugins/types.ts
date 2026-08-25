@@ -67,6 +67,8 @@ export interface ConfigField {
   default?: unknown;
   options?: { label: string; value: string }[];
   help?: string;
+  /** 配置分组标识,前端按此字段将配置项圈入带标题的功能模块框。如 "backend","recommend","keyword","frontend"。 */
+  group?: string;
 }
 
 export interface PluginManifest {

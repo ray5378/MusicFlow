@@ -372,126 +372,131 @@
         </div>
       </div>
 
-      <div v-if="canSaveConfig && configFields.length > 0" class="pd-section">
-        <h4>配置</h4>
-        <el-form label-width="120px">
-          <!-- Config form is driven entirely by the plugin manifest's configSchema.
-               No field is hardcoded to go-music-dl. -->
-          <el-form-item v-for="f in configFields" :key="f.key" :label="f.label">
-            <!-- keywords 字段特殊处理：渲染为标签输入组件，内置搜索入库按钮。
-                 必须在 type === 'text' 之前，否则 keywords (type: text) 会被普通文本输入框吃掉。 -->
-            <div v-if="f.key === 'keywords'" class="tag-input-wrap">
-              <el-input
-                v-model="tagInputValue"
-                :placeholder="'输入关键词后按回车添加'"
-                @keyup.enter="addTag(f.key)"
-              >
-                <template #append>
-                  <el-button @click="addTag(f.key)">添加</el-button>
-                </template>
-              </el-input>
-              <div v-if="getTags(f.key).length > 0" class="tag-list">
-                <el-tag
-                  v-for="(tag, idx) in getTags(f.key)"
-                  :key="idx"
-                  closable
-                  :disable-transitions="true"
-                  @close="removeTag(f.key, idx)"
-                >{{ tag }}</el-tag>
-              </div>
-              <div class="tag-actions">
-                <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
-                  关键词搜索入库
-                </el-button>
-                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-              </div>
-              <span v-if="f.help" class="field-hint">{{ f.help }}</span>
-            </div>
-            <el-input
-              v-else-if="f.type === 'text' || f.type === 'url'"
-              v-model="editConfig[f.key]"
-              :placeholder="f.help"
-              style="width: 100%"
-            />
-            <el-input
-              v-else-if="f.type === 'password'"
-              v-model="editConfig[f.key]"
-              type="password"
-              show-password
-              :placeholder="f.help"
-              style="width: 100%"
-            />
-            <el-input-number
-              v-else-if="f.type === 'number'"
-              v-model="editConfig[f.key]"
-              :min="0"
-              controls-position="right"
-              style="width: 180px"
-            />
-            <el-radio-group v-else-if="f.type === 'radio'" v-model="editConfig[f.key]">
-              <el-radio v-for="o in (f.options || [])" :key="o.value" :value="o.value">{{ o.label }}</el-radio>
-            </el-radio-group>
-            <el-select v-else-if="f.type === 'select'" v-model="editConfig[f.key]" style="width: 100%">
-              <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
-            </el-select>
-            <el-select
-              v-else-if="f.type === 'multiselect' || f.type === 'multi-select'"
-              v-model="editConfig[f.key]"
-              multiple
-              collapse-tags
-              style="width: 100%"
-            >
-              <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
-            </el-select>
-            <!-- playlist-multi:参考歌单多选(本地 + 平台导入歌单,可搜索),由 manifest configSchema 声明 -->
-            <el-select
-              v-else-if="f.type === 'playlist-multi'"
-              v-model="editConfig[f.key]"
-              multiple
-              filterable
-              collapse-tags
-              clearable
-              placeholder="搜索并选择歌单(可多选)"
-              style="width: 100%"
-            >
-              <el-option v-for="o in playlistOptions" :key="o.value" :label="o.label" :value="o.value" />
-            </el-select>
-            <!-- candidate-list:推荐榜单(平台 + URL + 显示名)可增删替换,由 manifest configSchema 声明 -->
-            <div v-else-if="f.type === 'candidate-list'" class="candidate-list">
-              <div v-for="(item, idx) in (editConfig[f.key] || [])" :key="idx" class="candidate-row">
-                <el-select v-model="item.platform" style="width: 104px; flex: none">
-                  <el-option label="网易云" value="netease" />
-                  <el-option label="QQ音乐" value="qq" />
+      <div v-if="canSaveConfig && configFields.length > 0">
+        <template v-for="g in groupedConfigFields" :key="g.key">
+          <div class="pd-section">
+            <h4>{{ g.label }}</h4>
+            <el-form label-width="120px">
+              <!-- Config form is driven entirely by the plugin manifest's configSchema.
+                   No field is hardcoded to go-music-dl. -->
+              <el-form-item v-for="f in g.fields" :key="f.key" :label="f.label">
+                <!-- keywords 字段特殊处理：渲染为标签输入组件，内置搜索入库按钮。
+                     必须在 type === 'text' 之前，否则 keywords (type: text) 会被普通文本输入框吃掉。 -->
+                <div v-if="f.key === 'keywords'" class="tag-input-wrap">
+                  <el-input
+                    v-model="tagInputValue"
+                    :placeholder="'输入关键词后按回车添加'"
+                    @keyup.enter="addTag(f.key)"
+                  >
+                    <template #append>
+                      <el-button @click="addTag(f.key)">添加</el-button>
+                    </template>
+                  </el-input>
+                  <div v-if="getTags(f.key).length > 0" class="tag-list">
+                    <el-tag
+                      v-for="(tag, idx) in getTags(f.key)"
+                      :key="idx"
+                      closable
+                      :disable-transitions="true"
+                      @close="removeTag(f.key, idx)"
+                    >{{ tag }}</el-tag>
+                  </div>
+                  <div class="tag-actions">
+                    <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
+                      关键词搜索入库
+                    </el-button>
+                    <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+                  </div>
+                  <span v-if="f.help" class="field-hint">{{ f.help }}</span>
+                </div>
+                <el-input
+                  v-else-if="f.type === 'text' || f.type === 'url'"
+                  v-model="editConfig[f.key]"
+                  :placeholder="f.help"
+                  style="width: 100%"
+                />
+                <el-input
+                  v-else-if="f.type === 'password'"
+                  v-model="editConfig[f.key]"
+                  type="password"
+                  show-password
+                  :placeholder="f.help"
+                  style="width: 100%"
+                />
+                <el-input-number
+                  v-else-if="f.type === 'number'"
+                  v-model="editConfig[f.key]"
+                  :min="0"
+                  controls-position="right"
+                  style="width: 180px"
+                />
+                <el-radio-group v-else-if="f.type === 'radio'" v-model="editConfig[f.key]">
+                  <el-radio v-for="o in (f.options || [])" :key="o.value" :value="o.value">{{ o.label }}</el-radio>
+                </el-radio-group>
+                <el-select v-else-if="f.type === 'select'" v-model="editConfig[f.key]" style="width: 100%">
+                  <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
                 </el-select>
-                <el-input v-model="item.url" placeholder="榜单 URL" style="flex: 1; min-width: 0" />
-                <el-input v-model="item.name" placeholder="显示名(可选)" style="width: 150px; flex: none" />
-                <el-button
-                  circle
-                  text
-                  type="danger"
-                  :disabled="(editConfig[f.key] || []).length <= 1"
-                  title="删除该榜单"
-                  @click="removeCandidate(f.key, idx)"
-                >✕</el-button>
-              </div>
-              <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
-            </div>
-            <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
-            <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
-            <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
-                 支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
-                 纯 manifest 驱动,不写死任何插件。 -->
-            <div v-if="(f.links || []).length" class="field-links">
-              <a
-                v-for="(lk, li) in resolvedLinks(f)"
-                :key="li"
-                :href="lk.url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="field-link"
-              ><span class="field-link-icon">↗</span>{{ lk.text }}</a>
-            </div>
-          </el-form-item>
+                <el-select
+                  v-else-if="f.type === 'multiselect' || f.type === 'multi-select'"
+                  v-model="editConfig[f.key]"
+                  multiple
+                  collapse-tags
+                  style="width: 100%"
+                >
+                  <el-option v-for="o in (f.options || [])" :key="o.value" :label="o.label" :value="o.value" />
+                </el-select>
+                <!-- playlist-multi:参考歌单多选(本地 + 平台导入歌单,可搜索),由 manifest configSchema 声明 -->
+                <el-select
+                  v-else-if="f.type === 'playlist-multi'"
+                  v-model="editConfig[f.key]"
+                  multiple
+                  filterable
+                  collapse-tags
+                  clearable
+                  placeholder="搜索并选择歌单(可多选)"
+                  style="width: 100%"
+                >
+                  <el-option v-for="o in playlistOptions" :key="o.value" :label="o.label" :value="o.value" />
+                </el-select>
+                <!-- candidate-list:推荐榜单(平台 + URL + 显示名)可增删替换,由 manifest configSchema 声明 -->
+                <div v-else-if="f.type === 'candidate-list'" class="candidate-list">
+                  <div v-for="(item, idx) in (editConfig[f.key] || [])" :key="idx" class="candidate-row">
+                    <el-select v-model="item.platform" style="width: 104px; flex: none">
+                      <el-option label="网易云" value="netease" />
+                      <el-option label="QQ音乐" value="qq" />
+                    </el-select>
+                    <el-input v-model="item.url" placeholder="榜单 URL" style="flex: 1; min-width: 0" />
+                    <el-input v-model="item.name" placeholder="显示名(可选)" style="width: 150px; flex: none" />
+                    <el-button
+                      circle
+                      text
+                      type="danger"
+                      :disabled="(editConfig[f.key] || []).length <= 1"
+                      title="删除该榜单"
+                      @click="removeCandidate(f.key, idx)"
+                    >✕</el-button>
+                  </div>
+                  <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
+                </div>
+                <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
+                <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
+                <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
+                     支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
+                     纯 manifest 驱动,不写死任何插件。 -->
+                <div v-if="(f.links || []).length" class="field-links">
+                  <a
+                    v-for="(lk, li) in resolvedLinks(f)"
+                    :key="li"
+                    :href="lk.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="field-link"
+                  ><span class="field-link-icon">↗</span>{{ lk.text }}</a>
+                </div>
+              </el-form-item>
+            </el-form>
+          </div>
+        </template>
 
           <!-- 歌词/封面按需获取设置已移至「媒体获取」标签页(全局设置,不归属于单个插件)。 -->
 
@@ -610,6 +615,35 @@ const healthMap = ref<Record<string, any>>({});
 
 /** Config fields rendered in the dialog — driven by the plugin manifest. */
 const configFields = computed<any[]>(() => parseManifest(editing.value).configSchema || []);
+
+/** 按 group 字段分组的配置项,每组渲染为带标题的模块框。无 group 的字段归入"其他"。 */
+const groupedConfigFields = computed(() => {
+  const groups: Record<string, any[]> = {};
+  const groupOrder = ['backend', 'recommend', 'keyword', 'frontend'];
+  const groupLabels: Record<string, string> = {
+    backend: '后端配置',
+    recommend: '首页推荐',
+    keyword: '关键词自动入库',
+    frontend: '前端显示',
+  };
+  for (const f of configFields.value) {
+    const g = f.group || '_ungrouped';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(f);
+  }
+  const result: any[] = [];
+  for (const k of groupOrder) {
+    if (groups[k]) {
+      result.push({ key: k, label: groupLabels[k] || k, fields: groups[k] });
+      delete groups[k];
+    }
+  }
+  // 剩余未识别的 group 和未分组字段
+  for (const k of Object.keys(groups).sort()) {
+    result.push({ key: k, label: k === '_ungrouped' ? '其他' : k, fields: groups[k] });
+  }
+  return result;
+});
 
 // ---- playlist-multi(参考歌单多选):歌单选项(本地 + 平台导入),打开详情弹窗时懒加载 ----
 const allPlaylists = ref<any[]>([]);
