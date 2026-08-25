@@ -275,6 +275,8 @@ export interface SandboxHostEnv {
     findBySource(sourcePlatform: string, externalId: string): Promise<any | null>;
     /** 删除一张歌单及其所有条目(需 playlists:write 权限)。 */
     delete(playlistId: string): Promise<boolean>;
+    /** 批量导入远程歌曲为可播在线歌曲(与前端「加入库」同路径)。返回 { songs: [{id, title, fingerprint}], added, deduped, failed }。 */
+    importSongs(providerId: string, songs: any[]): Promise<{ songs: { id: string; title: string; fingerprint: string }[]; added: number; deduped: number; failed: number }>;
   };
   /** host.sources:在线源补全(需 songs:write 权限)。把匹配不到本地的曲目交给
    *  已启用的 source 插件搜索并导入为可播本地 song,返回 songId。 */
@@ -794,6 +796,7 @@ export class SandboxedPlugin {
     const plCover = this.hostAsync("updateCover", (playlistId: any, coverSongId: any) => this.env.playlists.updateCover(String(playlistId), String(coverSongId)), "playlists:write");
     const plFindBySource = this.hostAsync("findBySource", (sourcePlatform: any, externalId: any) => this.env.playlists.findBySource(String(sourcePlatform), String(externalId)), "playlists:read");
     const plDelete = this.hostAsync("delete", (playlistId: any) => this.env.playlists.delete(String(playlistId)), "playlists:write");
+    const plImportSongs = this.hostAsync("importSongs", (providerId: any, songs: any) => this.env.playlists.importSongs(String(providerId), songs || []), "playlists:write");
     c.setProp(playlistsObj, "upsert", plUpsert);
     c.setProp(playlistsObj, "get", plGet);
     c.setProp(playlistsObj, "list", plList);
@@ -801,7 +804,8 @@ export class SandboxedPlugin {
     c.setProp(playlistsObj, "updateCover", plCover);
     c.setProp(playlistsObj, "findBySource", plFindBySource);
     c.setProp(playlistsObj, "delete", plDelete);
-    plUpsert.dispose(); plGet.dispose(); plList.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose(); plDelete.dispose();
+    c.setProp(playlistsObj, "importSongs", plImportSongs);
+    plUpsert.dispose(); plGet.dispose(); plList.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose(); plDelete.dispose(); plImportSongs.dispose();
 
     // host.sources(在线源补全,需 songs:write)
     const sourcesObj = c.newObject();
