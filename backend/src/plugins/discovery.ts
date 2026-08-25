@@ -540,11 +540,6 @@ export async function discoverExternalPlugins(
           },
         },
         playlists: {
-          /** 将远程歌曲批量导入为可播在线歌曲(与前端「加入库」同路径)。返回 { songs: [{id, title, fingerprint}], added, deduped, failed }。 */
-          importSongs: async (providerId: string, songs: any[]) => {
-            if (!Array.isArray(songs) || !songs.length) return { songs: [], added: 0, deduped: 0, failed: 0 };
-            return await importOnlineSongs(String(providerId), songs, { userId: systemOwnerId() });
-          },
           upsert: async (playlistId: string, opts: any) => upsertPluginPlaylist(String(playlistId), opts || {}, id),
           get: async (playlistId: string) => {
             const p = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(String(playlistId)) as any;
