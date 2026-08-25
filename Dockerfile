@@ -39,7 +39,7 @@ RUN npm run build && npm cache clean --force
 # 只保证「开箱可用」,不阻止用户升级到市场新版本。
 # 升级预装插件版本:改下方 ARG GMDL_VERSION 后重新发版。
 FROM node:22-alpine AS preload
-ARG GMDL_VERSION=1.2.21
+ARG GMDL_VERSION=1.2.39
 COPY backend/scripts/preload-plugin.mjs /preload-plugin.mjs
 RUN node /preload-plugin.mjs go-music-dl ${GMDL_VERSION} /preloaded
 

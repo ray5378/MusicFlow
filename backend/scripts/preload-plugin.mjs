@@ -15,7 +15,7 @@
 //   - 失败即退出非 0:构建失败要显式可见,禁止静默跳过导致镜像里没有预装插件。
 //
 // 用法: node scripts/preload-plugin.mjs <pluginId> <version> <outDir>
-//   例: node scripts/preload-plugin.mjs go-music-dl 1.2.21 /app/preloaded
+//   例: node scripts/preload-plugin.mjs go-music-dl 1.2.39 /app/preloaded
 //   → 输出 /app/preloaded/go-music-dl/{index.js,plugin.json,package.json}
 //
 // 说明:插件仓库目录结构为 plugins/<id>/{index.js,plugin.json,package.json};
