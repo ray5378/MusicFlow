@@ -1271,7 +1271,7 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
     if (typeof impl?.runDailyJob !== "function") {
       return c.json(apiError(BusinessErrorCode.INTERNAL, "插件未实现 runDailyJob"), 500);
     }
-    const { started, alreadyRunning } = runPluginJob(pluginId, "runDailyJob", { force: true });
+    const { started, alreadyRunning } = runPluginJob(pluginId, "runDailyJob", { force: true, keywordOnly: !!body?.keywordOnly });
     if (alreadyRunning) {
       return c.json({ success: true, pluginId, alreadyRunning: true, message: "该插件刷新任务已在后台运行中" }, 200);
     }

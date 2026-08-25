@@ -709,7 +709,7 @@ async function refreshPlugin() {
     refreshingPlugin.value = false;
   };
   try {
-    const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId });
+    const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId, keywordOnly: true });
     const d = res.data || {};
     if (!d.success) { finish({ success: false, message: d.error || "刷新失败" }); return; }
     if (!d.started && !d.alreadyRunning) { finish({ success: true, message: "刷新完成" }); return; }

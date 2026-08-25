@@ -60,7 +60,7 @@ export function anyJobRunning(): boolean {
 export function runPluginJob(
   pluginId: string,
   method: "runDailyJob" | "runSyncJob",
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; keywordOnly?: boolean },
 ): { started: boolean; alreadyRunning: boolean } {
   const reg = getPlugin(pluginId);
   if (!reg || typeof reg.impl?.[method] !== "function") return { started: false, alreadyRunning: false };
