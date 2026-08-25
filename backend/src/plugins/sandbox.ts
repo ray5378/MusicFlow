@@ -261,12 +261,15 @@ export interface SandboxHostEnv {
   /** host.playlists:受控写推荐歌单(需 playlists:write 权限)。外置推荐插件用
    *  它生成/更新自己的固定歌单;权限门控在 sandbox 调用点(hostAsync)完成。
    *  opts.sourcePlatform / opts.sourceUrl:可选的平台标签(如 "netease"/"qq")与
-   *  来源标记,写入 playlists.source_platform / source_url——前端据此显示平台徽标。 */
+   *  来源标记,写入 playlists.source_platform / source_url——前端据此显示平台徽标。
+   *  opts.externalId:远端平台歌单 ID,配合 findBySource 用于去重判断。 */
   playlists: {
-    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; sourcePlatform?: string; sourceUrl?: string }): Promise<any>;
+    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; sourcePlatform?: string; sourceUrl?: string; externalId?: string }): Promise<any>;
     get(playlistId: string): Promise<any | null>;
     replaceEntries(playlistId: string, entries: any[]): Promise<any>;
     updateCover(playlistId: string, coverSongId: string): Promise<any>;
+    /** 按 sourcePlatform + externalId 查找已入库歌单,用于关键词搜索导入去重。 */
+    findBySource(sourcePlatform: string, externalId: string): Promise<any | null>;
   };
   /** host.sources:在线源补全(需 songs:write 权限)。把匹配不到本地的曲目交给
    *  已启用的 source 插件搜索并导入为可播本地 song,返回 songId。 */
@@ -783,11 +786,13 @@ export class SandboxedPlugin {
     const plGet = this.hostAsync("get", (playlistId: any) => this.env.playlists.get(String(playlistId)), "playlists:write");
     const plReplace = this.hostAsync("replaceEntries", (playlistId: any, entries: any) => this.env.playlists.replaceEntries(String(playlistId), entries || []), "playlists:write");
     const plCover = this.hostAsync("updateCover", (playlistId: any, coverSongId: any) => this.env.playlists.updateCover(String(playlistId), String(coverSongId)), "playlists:write");
+    const plFindBySource = this.hostAsync("findBySource", (sourcePlatform: any, externalId: any) => this.env.playlists.findBySource(String(sourcePlatform), String(externalId)), "playlists:read");
     c.setProp(playlistsObj, "upsert", plUpsert);
     c.setProp(playlistsObj, "get", plGet);
     c.setProp(playlistsObj, "replaceEntries", plReplace);
     c.setProp(playlistsObj, "updateCover", plCover);
-    plUpsert.dispose(); plGet.dispose(); plReplace.dispose(); plCover.dispose();
+    c.setProp(playlistsObj, "findBySource", plFindBySource);
+    plUpsert.dispose(); plGet.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose();
 
     // host.sources(在线源补全,需 songs:write)
     const sourcesObj = c.newObject();

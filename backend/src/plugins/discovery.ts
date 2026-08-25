@@ -552,6 +552,10 @@ export async function discoverExternalPlugins(
             if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, new Date().toISOString(), String(playlistId));
             return { ok: true };
           },
+          findBySource: async (sourcePlatform: string, externalId: string) => {
+            const p = sqlite.prepare("SELECT * FROM playlists WHERE source_platform = ? AND external_id = ? LIMIT 1").get(String(sourcePlatform), String(externalId)) as any;
+            return p || null;
+          },
         },
         sources: {
           complete: async (opts: any) => completeFromSources(opts || {}),
@@ -663,16 +667,18 @@ async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?
   // 与 sourceUrl;缺省保持历史默认('listenbrainz' / lb://),向后兼容。
   const sourcePlatform = typeof opts?.sourcePlatform === "string" && opts.sourcePlatform ? String(opts.sourcePlatform) : "listenbrainz";
   const sourceUrl = typeof opts?.sourceUrl === "string" && opts.sourceUrl ? String(opts.sourceUrl) : `lb://${playlistId}`;
+  // 远端平台歌单 ID:关键词搜索导入时设置,配合 findBySource 用于去重。
+  const externalId = typeof opts?.externalId === "string" && opts.externalId ? String(opts.externalId) : null;
   // 归属插件 id(沙箱 env 闭包传入):前端据此显示「刷新」按钮并精确触发对应插件刷新。
   const plugin = sourcePlugin ? String(sourcePlugin) : null;
   const existing = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId) as any;
   if (!existing) {
     sqlite.prepare(`INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, source_plugin, external_id, sync_enabled, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, NULL, ?, ?, ?, NULL, 0, ?, ?)`)
-      .run(playlistId, name, systemOwnerId(), desc, sourceUrl, sourcePlatform, plugin, now, now);
+      VALUES (?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, 0, ?, ?)`)
+      .run(playlistId, name, systemOwnerId(), desc, sourceUrl, sourcePlatform, plugin, externalId, now, now);
   } else {
-    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, source_url = ?, source_platform = ?, source_plugin = ?, updated_at = ? WHERE id = ?")
-      .run(name, desc, sourceUrl, sourcePlatform, plugin, now, playlistId);
+    sqlite.prepare("UPDATE playlists SET name = ?, comment = ?, source_url = ?, source_platform = ?, source_plugin = ?, external_id = ?, updated_at = ? WHERE id = ?")
+      .run(name, desc, sourceUrl, sourcePlatform, plugin, externalId, now, playlistId);
   }
   sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(playlistId);
   const entries = Array.isArray(opts?.entries) ? opts.entries : [];

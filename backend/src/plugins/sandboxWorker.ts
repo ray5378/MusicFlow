@@ -124,6 +124,7 @@ function makeWorkerEnv(permissions: string[]): SandboxHostEnv {
       get: (pl) => hostCall("playlists.get", [pl]),
       replaceEntries: (pl, e) => hostCall("playlists.replaceEntries", [pl, e]),
       updateCover: (pl, c) => hostCall("playlists.updateCover", [pl, c]),
+      findBySource: (sp, ei) => hostCall("playlists.findBySource", [sp, ei]),
     },
     sources: {
       complete: (o) => hostCall("sources.complete", [o]),

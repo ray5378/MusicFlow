@@ -484,6 +484,15 @@
             <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
           </el-form-item>
 
+          <!-- 关键词搜索导入:插件配置了 keywords 字段时显示,按已配置关键词搜索所有平台歌单并导入。 -->
+          <el-form-item v-if="hasKeywordsConfig">
+            <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
+              关键词搜索入库
+            </el-button>
+            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+            <span class="field-hint">按已配置的关键词搜索所有平台歌单并自动导入,已入库的跳过</span>
+          </el-form-item>
+
           <el-alert
             type="info"
             :closable="false"
@@ -615,6 +624,13 @@ function isRecommenderPlugin(plugin: any): boolean {
   const caps = parseManifest(plugin).capabilities || [];
   return ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist"].some((c) => caps.includes(c));
 }
+
+/** 插件是否配置了 keywords 字段(关键词搜索导入)。 */
+const hasKeywordsConfig = computed(() => {
+  if (!editing.value) return false;
+  const m = parseManifest(editing.value);
+  return (m.configSchema || []).some((f: any) => f.key === "keywords");
+});
 
 // 手动刷新:调 /v1/recommend/refresh 传 pluginId,只重新生成「该插件自身」的歌单。
 // 后端为**异步任务通道**(立即返回 started),前端轮询 GET /v1/plugins/:id/job
