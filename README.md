@@ -149,6 +149,15 @@ MusicFlow 提供三个配套仓库，构成完整的 Home Assistant 生态（各
 集成使用 API Key 鉴权（登录 Token 24h 过期，不适合常驻客户端）。
 在 **设置 → API Key** 生成后填入 HA 即可，可随时重新生成或撤销。
 
+## 客户端
+
+[MusicFlow-client](https://github.com/ray5378/MusicFlow-client) 提供 Android 和 Windows 桌面客户端，通过 OpenSubsonic 协议连接服务端，支持浏览曲库、播放控制、歌词显示、歌单管理等功能。
+
+| 平台 | 说明 |
+|------|------|
+| Android | 原生移动客户端，支持后台播放、通知栏控制、锁屏封面 |
+| Windows | 桌面客户端，支持托盘运行、全局快捷键、系统媒体集成 |
+
 ## 发版流程
 
 1. 在 [MusicFlow](https://github.com/ray5378/MusicFlow) 主仓库 `main` 分支打 `v*` tag → CI 构建推 `ghcr.io/ray5378/musicflow:<版本>` + `:latest`（仅 amd64）；
