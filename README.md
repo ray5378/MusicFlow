@@ -71,7 +71,7 @@ networks: {}
 
 | 仓库 | 类型 | 作用 |
 |------|------|------|
-| [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项 | 把服务端跑在 Supervisor 下 |
+| [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项 | 把服务端跑在 Supervisor 下(不建议,封面会占用非常多的硬盘空间) |
 | [hass-musicflow](https://github.com/ray5378/hass-musicflow) | HACS 集成 | 将 DLNA 设备与播放组变为 `media_player` 实体 |
 | [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | HACS 前端卡片 | 复刻 HA 官方 `media-control` 卡片样式 |
 
