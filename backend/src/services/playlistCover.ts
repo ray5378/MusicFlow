@@ -8,12 +8,11 @@
 // Reads always probe both directories so legacy covers stored under
 // data/covers keep working after the split.
 import { db, sqlite } from "../db/index.js";
-import { songs, albums, playlists, playlistSongs } from "../db/schema.js";
+import { songs, albums, playlists } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { getDataDir } from "../utils/env.js";
-import { isFixedRecommendPlaylist } from "./plugin/fixedRecommend.js";
 
 // 数据目录统一走 getDataDir()(DATA_DIR 优先,默认 cwd/data),与 DB/插件/密钥同根:
 //   - data/covers        本地刮削封面(扫描内嵌封面、艺术家头像)
@@ -294,42 +293,22 @@ export function pickDailyRotatedCover(playlistId: string, opts?: CoverPickOption
   return pick;
 }
 
-// Resolve playlist cover: serve the cached local image (either downloaded for
-// imported playlists, or copied from the first song's album for self-built ones).
+// Resolve playlist cover: serve the local cover image if it exists on disk.
 // Returns { file, mime } or null (UI falls back to the placeholder).
+// Do NOT create a permanent pl-<playlistId>.jpg cache here — that would freeze
+// the cover to the first song's artwork and prevent daily rotation for fixed
+// recommend playlists. The coverArt is set by the daily generation job or by
+// import processes; if the file doesn't exist on disk, just return null.
 export function getPlaylistCover(playlistId: string): { file: string; mime: string } | null {
   const playlist = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
   if (!playlist) return null;
 
-  // 1. A cached local cover image already exists -> serve it (probe both dirs)
+  // Serve the coverArt file if it exists on disk (probe both dirs).
   if (playlist.coverArt && /\.(jpg|jpeg|png|gif)$/i.test(playlist.coverArt)) {
     if (resolveCoverFile(playlist.coverArt)) {
       return { file: playlist.coverArt, mime: mimeFor(playlist.coverArt) };
     }
   }
 
-  // 2. Fixed recommend playlists (daily-recommend, daily-roam, local-recommend):
-  //    their coverArt is rotated daily by pickDailyRotatedCover during generation.
-  //    Do NOT create a permanent pl-<playlistId>.jpg cache here — that would
-  //    freeze the cover to the first song's artwork and prevent daily rotation.
-  //    Return null instead; the frontend will show a placeholder, and the next
-  //    daily generation run will pick a new cover.
-  if (isFixedRecommendPlaylist(playlistId)) return null;
-
-  // 3. No cover yet: self-built (or import cover failed) -> copy the first
-  //    playable song's album cover to pl-<playlistId>.jpg and serve it directly
-  const srcFile = firstPlayableCoverFile(playlistId);
-  if (!srcFile) return null;
-
-  const coverFile = `pl-${playlistId}.jpg`;
-  const src = resolveCoverFile(srcFile);
-  if (!src) return null;
-  try {
-    ensureDir();
-    fs.copyFileSync(src, path.join(COVERS_DIR, coverFile));
-    db.update(playlists).set({ coverArt: coverFile, updatedAt: new Date().toISOString() }).where(eq(playlists.id, playlistId)).run();
-    return { file: coverFile, mime: mimeFor(coverFile) };
-  } catch {
-    return null;
-  }
+  return null;
 }
