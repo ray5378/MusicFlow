@@ -501,31 +501,33 @@
           <!-- 歌词/封面按需获取设置已移至「媒体获取」标签页(全局设置,不归属于单个插件)。 -->
 
           <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
-          <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
-            <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
-            <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
-            <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
-          </el-form-item>
+          <!-- 推荐歌单类插件手动重新生成;歌单清理类插件手动触发清理。 -->
+          <div class="pd-section">
+            <h4>操作</h4>
+            <el-form label-width="120px">
+              <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
+                <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
+                <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
+                <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
+              </el-form-item>
 
-          <!-- 推荐歌单类插件(每日推荐/本地推荐/今日漫游/第三方推荐歌单如 ListenBrainz):
-               手动重新生成「该插件自身」的推荐歌单(force 绕过间隔闸门)。
-               能力驱动,不写死插件名。 -->
-          <el-form-item v-if="isRecommenderPlugin(editing)">
-            <el-button type="warning" plain :loading="refreshingPlugin" @click="refreshPlugin">
-              立即刷新
-            </el-button>
-            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-            <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
-          </el-form-item>
+              <el-form-item v-if="isRecommenderPlugin(editing)">
+                <el-button type="warning" plain :loading="refreshingPlugin" @click="refreshPlugin">
+                  立即刷新
+                </el-button>
+                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+                <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
+              </el-form-item>
 
-          <!-- 歌单清理类插件:手动触发清理。 -->
-          <el-form-item v-if="isCleanupPlugin(editing)">
-            <el-button type="danger" plain :loading="refreshingPlugin" @click="refreshPlugin">
-              立即清理
-            </el-button>
-            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-            <span class="field-hint">按配置的阈值立即清理低歌曲数歌单</span>
-          </el-form-item>
+              <el-form-item v-if="isCleanupPlugin(editing)">
+                <el-button type="danger" plain :loading="refreshingPlugin" @click="refreshPlugin">
+                  立即清理
+                </el-button>
+                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+                <span class="field-hint">按配置的阈值立即清理低歌曲数歌单</span>
+              </el-form-item>
+            </el-form>
+          </div>
 
           <!-- 关键词搜索入库按钮已内嵌在 keywords 字段的 tag-input 组件中。 -->
 
@@ -1395,7 +1397,7 @@ onMounted(() => {
 .src-builtin { font-size: 13px; color: var(--el-text-color-secondary); }
 .pd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .pd-id { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--el-text-color-secondary); }
-.pd-section { margin-bottom: 18px; }
+.pd-section { margin-bottom: 18px; border: 1px solid var(--el-border-color-light); border-radius: 8px; padding: 14px 16px; background: var(--el-fill-color-blank); }
 .pd-section h4 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--el-text-color-primary); }
 .pd-desc { margin: 0; font-size: 13px; line-height: 1.7; color: var(--el-text-color-regular); }
 .pd-md { font-size: 13px; line-height: 1.75; color: var(--el-text-color-regular); }
