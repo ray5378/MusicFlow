@@ -448,7 +448,34 @@
               <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
             </div>
             <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
-            <span v-if="f.help" class="field-hint">{{ f.help }}</span>
+            <div v-else-if="f.type === 'tag-input'" class="tag-input-wrap">
+              <el-input
+                v-model="tagInputValue"
+                :placeholder="'输入关键词后按回车添加'"
+                @keyup.enter="addTag(f.key)"
+              >
+                <template #append>
+                  <el-button @click="addTag(f.key)">添加</el-button>
+                </template>
+              </el-input>
+              <div v-if="getTags(f.key).length > 0" class="tag-list">
+                <el-tag
+                  v-for="(tag, idx) in getTags(f.key)"
+                  :key="idx"
+                  closable
+                  :disable-transitions="true"
+                  @close="removeTag(f.key, idx)"
+                >{{ tag }}</el-tag>
+              </div>
+              <div class="tag-actions">
+                <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
+                  关键词搜索入库
+                </el-button>
+                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+              </div>
+              <span v-if="f.help" class="field-hint">{{ f.help }}</span>
+            </div>
+            <span v-if="f.help && f.type !== 'tag-input'" class="field-hint">{{ f.help }}</span>
             <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
                  支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
                  纯 manifest 驱动,不写死任何插件。 -->
@@ -484,8 +511,8 @@
             <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
           </el-form-item>
 
-          <!-- 关键词搜索导入:插件配置了 keywords 字段时显示,按已配置关键词搜索所有平台歌单并导入。 -->
-          <el-form-item v-if="hasKeywordsConfig">
+          <!-- 关键词搜索导入:插件配置了 keywords 字段且类型不是 tag-input 时显示(已内嵌在 tag-input 组件中)。 -->
+          <el-form-item v-if="hasKeywordsConfig && !hasTagInputKeywords">
             <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
               关键词搜索入库
             </el-button>
@@ -631,6 +658,44 @@ const hasKeywordsConfig = computed(() => {
   const m = parseManifest(editing.value);
   return (m.configSchema || []).some((f: any) => f.key === "keywords");
 });
+
+/** keywords 字段是否为 tag-input 类型(关键词搜索入库按钮已内嵌在组件中,不再单独显示)。 */
+const hasTagInputKeywords = computed(() => {
+  if (!editing.value) return false;
+  const m = parseManifest(editing.value);
+  return (m.configSchema || []).some((f: any) => f.key === "keywords" && f.type === "tag-input");
+});
+
+// ---- tag-input 组件支持 ----
+const tagInputValue = ref('');
+
+/** 把 editConfig 中以换行分隔的关键词字符串转为数组。 */
+function getTags(key: string): string[] {
+  const v = editConfig[key];
+  if (!v) return [];
+  return String(v).split('\n').filter((s: string) => s.trim().length > 0);
+}
+
+/** 添加一个关键词标签。 */
+function addTag(key: string) {
+  const val = tagInputValue.value.trim();
+  if (!val) return;
+  const tags = getTags(key);
+  if (tags.includes(val)) {
+    tagInputValue.value = '';
+    return;
+  }
+  tags.push(val);
+  editConfig[key] = tags.join('\n');
+  tagInputValue.value = '';
+}
+
+/** 删除指定索引的关键词标签。 */
+function removeTag(key: string, idx: number) {
+  const tags = getTags(key);
+  tags.splice(idx, 1);
+  editConfig[key] = tags.join('\n');
+}
 
 // 手动刷新:调 /v1/recommend/refresh 传 pluginId,只重新生成「该插件自身」的歌单。
 // 后端为**异步任务通道**(立即返回 started),前端轮询 GET /v1/plugins/:id/job
@@ -1267,6 +1332,10 @@ onMounted(() => {
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
+.tag-input-wrap { width: 100%; }
+.tag-input-wrap .tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.tag-input-wrap .tag-actions { margin-top: 10px; }
+.tag-input-wrap .tag-actions .test-result { margin-left: 12px; }
 .field-links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 0 12px; }
 .field-link { font-size: 12px; color: var(--el-color-primary); text-decoration: none; display: inline-flex; align-items: center; gap: 3px; line-height: 1.6; }
 .field-link:hover { text-decoration: underline; }
