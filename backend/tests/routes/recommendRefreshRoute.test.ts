@@ -185,7 +185,7 @@ describe("POST /rest/api/v1/recommend/refresh", () => {
       // 任务在后台跑(jobRunner fire-and-forget):稍等一拍确认 runDailyJob 被调用
       await new Promise((r) => setTimeout(r, 50));
       expect(calls.map(c => c.who)).toEqual(["f-lb"]);
-      expect(calls[0].opts).toEqual({ force: true });
+      expect(calls[0].opts).toEqual({ force: true, keywordOnly: false });
     } finally {
       db.delete(plugins).where(eq(plugins.name, "f-lb")).run();
     }
