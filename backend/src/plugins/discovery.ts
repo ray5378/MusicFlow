@@ -49,6 +49,7 @@ const VALID_CAPS: PluginCapability[] = [
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "recommendPlaylist",
   "playlistSync", "autoMatch",
+  "playlistCleanup",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
   "artistInfo",
 ];
@@ -91,6 +92,7 @@ const CAP_PERMISSIONS: Record<string, string[]> = {
   dailyPlaylist: ["storage", "net"],
   localPlaylist: ["storage"],
   playlistSync: ["storage", "net"],
+  playlistCleanup: ["playlists:read", "playlists:write"],
   // 设备投射:发现/投送设备走网络
   renderer: ["net"],
 };
@@ -545,6 +547,10 @@ export async function discoverExternalPlugins(
             const entries = sqlite.prepare("SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY position").all(String(playlistId)) as any[];
             return { ...p, entries };
           },
+          list: async () => {
+            const rows = sqlite.prepare("SELECT id, name, song_count, duration, source_platform, source_plugin, created_at, updated_at FROM playlists ORDER BY created_at DESC").all() as any[];
+            return rows;
+          },
           replaceEntries: async (playlistId: string, entries: any[]) =>
             upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "ListenBrainz 推荐", entries: entries || [] }, id),
           updateCover: async (playlistId: string, coverSongId: string) => {
@@ -555,6 +561,13 @@ export async function discoverExternalPlugins(
           findBySource: async (sourcePlatform: string, externalId: string) => {
             const p = sqlite.prepare("SELECT * FROM playlists WHERE source_platform = ? AND external_id = ? LIMIT 1").get(String(sourcePlatform), String(externalId)) as any;
             return p || null;
+          },
+          delete: async (playlistId: string) => {
+            const existing = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(String(playlistId)) as any;
+            if (!existing) return false;
+            sqlite.prepare("DELETE FROM playlist_songs WHERE playlist_id = ?").run(String(playlistId));
+            sqlite.prepare("DELETE FROM playlists WHERE id = ?").run(String(playlistId));
+            return true;
           },
         },
         sources: {

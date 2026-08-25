@@ -512,6 +512,15 @@
             <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
           </el-form-item>
 
+          <!-- 歌单清理类插件:手动触发清理。 -->
+          <el-form-item v-if="isCleanupPlugin(editing)">
+            <el-button type="danger" plain :loading="refreshingPlugin" @click="refreshPlugin">
+              立即清理
+            </el-button>
+            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+            <span class="field-hint">按配置的阈值立即清理低歌曲数歌单</span>
+          </el-form-item>
+
           <!-- 关键词搜索入库按钮已内嵌在 keywords 字段的 tag-input 组件中。 -->
 
           <el-alert
@@ -644,6 +653,11 @@ function isSourcePlugin(plugin: any) {
 function isRecommenderPlugin(plugin: any): boolean {
   const caps = parseManifest(plugin).capabilities || [];
   return ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist"].some((c) => caps.includes(c));
+}
+
+/** 歌单清理类插件:支持手动触发清理。 */
+function isCleanupPlugin(plugin: any): boolean {
+  return (parseManifest(plugin).capabilities || []).includes("playlistCleanup");
 }
 
 /** 插件是否配置了 keywords 字段(关键词搜索导入)。 */

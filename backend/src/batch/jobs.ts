@@ -73,6 +73,16 @@ async function dailyJobsHandler(_args: Record<string, any>, _ctx: BatchJobContex
       log.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error`, { err: e.message || e });
     }
   }
+  // 歌单清理插件(playlistCleanup):在每日推荐/同步之后执行,清理低歌曲数歌单。
+  for (const { manifest, impl } of getEnabledByCapability("playlistCleanup")) {
+    if (typeof impl?.runDailyJob !== "function") continue;
+    try {
+      const summary = await impl.runDailyJob();
+      if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+    } catch (e: any) {
+      log.error(`[DAILY-SCHEDULER] ${manifest.id} cleanup error`, { err: e.message || e });
+    }
+  }
   for (const { manifest } of getEnabledSourcePlugins()) {
     const caps = manifest.capabilities;
     if (caps.includes("recommend")) {

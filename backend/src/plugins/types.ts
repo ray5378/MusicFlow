@@ -47,6 +47,8 @@ export type PluginCapability =
   // ---- sync plugins ----
   | "playlistSync" // re-fetch an imported playlist and rebuild its entries
   | "autoMatch" // match unmatched playlist entries against an online source
+  // ---- cleanup plugins ----
+  | "playlistCleanup" // 歌单清理:删除低歌曲数的歌单
   // ---- provider plugins ----
   | "lyricProvider" // supplies lyrics via searchLyrics()
   | "coverProvider" // supplies cover art via searchCover()

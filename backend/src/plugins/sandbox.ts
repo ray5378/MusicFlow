@@ -169,6 +169,7 @@ const CAP_METHODS: Record<string, string[]> = {
   dailyPlaylist: ["runDailyJob"],
   localPlaylist: ["runDailyJob"],
   recommendPlaylist: ["runDailyJob"],
+  playlistCleanup: ["runDailyJob"],
   playlistSync: ["runSyncJob"],
 };
 // source 插件额外暴露 test(连线探测)
@@ -266,10 +267,14 @@ export interface SandboxHostEnv {
   playlists: {
     upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; sourcePlatform?: string; sourceUrl?: string; externalId?: string }): Promise<any>;
     get(playlistId: string): Promise<any | null>;
+    /** 列出所有歌单(脱敏视图,不含 entries)。 */
+    list(): Promise<any[]>;
     replaceEntries(playlistId: string, entries: any[]): Promise<any>;
     updateCover(playlistId: string, coverSongId: string): Promise<any>;
     /** 按 sourcePlatform + externalId 查找已入库歌单,用于关键词搜索导入去重。 */
     findBySource(sourcePlatform: string, externalId: string): Promise<any | null>;
+    /** 删除一张歌单及其所有条目(需 playlists:write 权限)。 */
+    delete(playlistId: string): Promise<boolean>;
   };
   /** host.sources:在线源补全(需 songs:write 权限)。把匹配不到本地的曲目交给
    *  已启用的 source 插件搜索并导入为可播本地 song,返回 songId。 */
@@ -784,15 +789,19 @@ export class SandboxedPlugin {
     const playlistsObj = c.newObject();
     const plUpsert = this.hostAsync("upsert", (playlistId: any, opts: any) => this.env.playlists.upsert(String(playlistId), opts || {}), "playlists:write");
     const plGet = this.hostAsync("get", (playlistId: any) => this.env.playlists.get(String(playlistId)), "playlists:write");
+    const plList = this.hostAsync("list", () => this.env.playlists.list(), "playlists:read");
     const plReplace = this.hostAsync("replaceEntries", (playlistId: any, entries: any) => this.env.playlists.replaceEntries(String(playlistId), entries || []), "playlists:write");
     const plCover = this.hostAsync("updateCover", (playlistId: any, coverSongId: any) => this.env.playlists.updateCover(String(playlistId), String(coverSongId)), "playlists:write");
     const plFindBySource = this.hostAsync("findBySource", (sourcePlatform: any, externalId: any) => this.env.playlists.findBySource(String(sourcePlatform), String(externalId)), "playlists:read");
+    const plDelete = this.hostAsync("delete", (playlistId: any) => this.env.playlists.delete(String(playlistId)), "playlists:write");
     c.setProp(playlistsObj, "upsert", plUpsert);
     c.setProp(playlistsObj, "get", plGet);
+    c.setProp(playlistsObj, "list", plList);
     c.setProp(playlistsObj, "replaceEntries", plReplace);
     c.setProp(playlistsObj, "updateCover", plCover);
     c.setProp(playlistsObj, "findBySource", plFindBySource);
-    plUpsert.dispose(); plGet.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose();
+    c.setProp(playlistsObj, "delete", plDelete);
+    plUpsert.dispose(); plGet.dispose(); plList.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose(); plDelete.dispose();
 
     // host.sources(在线源补全,需 songs:write)
     const sourcesObj = c.newObject();
