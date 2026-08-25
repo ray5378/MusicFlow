@@ -228,22 +228,22 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
     return;
   }
 
-  // 阶段 2:对每个在线目标执行 音量 → 播放模式 → 播放。
+  // 阶段 2:对每个在线目标执行 播放模式 → 播放 → 音量。
   touchRunStatus(flowId, "playing", "");
   const errs: string[] = [];
   for (const pid of online) {
     const parsed = parsePeerId(pid)!;
     const name = pm.get(pid)?.name || pid;
     try {
-      if (def.volume?.enabled && typeof def.volume.value === "number") {
-        if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
-        else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
-      }
       if (def.playmode?.enabled && def.playmode.mode) {
         qm.setPlayMode(parsed.id, def.playmode.mode);
       }
       if (items.length > 0) {
         await qm.playFrom(parsed.id, items, def.content?.startIndex || 0, baseUrl);
+      }
+      if (def.volume?.enabled && typeof def.volume.value === "number") {
+        if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
+        else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
       }
       console.log(`[flow ${flow.name}] 已执行:${name}(${pid})${contentName ? ` → 「${contentName}」` : ""}`);
     } catch (e: any) {
