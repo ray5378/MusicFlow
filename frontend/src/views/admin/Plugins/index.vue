@@ -497,49 +497,44 @@
             </el-form>
           </div>
         </template>
+      </div>
 
-          <!-- 歌词/封面按需获取设置已移至「媒体获取」标签页(全局设置,不归属于单个插件)。 -->
+      <!-- 操作模块:独立于配置项,只要有相关操作能力的插件都显示 -->
+      <div v-if="showOperationSection" class="pd-section">
+        <h4>操作</h4>
+        <el-form label-width="120px">
+          <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
+            <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
+            <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
+            <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
+          </el-form-item>
 
-          <!-- Only source plugins expose a reachable endpoint to test / web songs to purge. -->
-          <!-- 推荐歌单类插件手动重新生成;歌单清理类插件手动触发清理。 -->
-          <div class="pd-section">
-            <h4>操作</h4>
-            <el-form label-width="120px">
-              <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
-                <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
-                <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
-                <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
-              </el-form-item>
+          <el-form-item v-if="isRecommenderPlugin(editing)">
+            <el-button type="warning" plain :loading="refreshingPlugin" @click="refreshPlugin">
+              立即刷新
+            </el-button>
+            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+            <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
+          </el-form-item>
 
-              <el-form-item v-if="isRecommenderPlugin(editing)">
-                <el-button type="warning" plain :loading="refreshingPlugin" @click="refreshPlugin">
-                  立即刷新
-                </el-button>
-                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-                <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
-              </el-form-item>
-
-              <el-form-item v-if="isCleanupPlugin(editing)">
-                <el-button type="danger" plain :loading="refreshingPlugin" @click="refreshPlugin">
-                  立即清理
-                </el-button>
-                <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-                <span class="field-hint">按配置的阈值立即清理低歌曲数歌单</span>
-              </el-form-item>
-            </el-form>
-          </div>
-
-          <!-- 关键词搜索入库按钮已内嵌在 keywords 字段的 tag-input 组件中。 -->
-
-          <el-alert
-            type="info"
-            :closable="false"
-            show-icon
-            :title="`${typeLabel(editing)}插件`"
-            :description="pluginHint(editing)"
-          />
+          <el-form-item v-if="isCleanupPlugin(editing)">
+            <el-button type="danger" plain :loading="refreshingPlugin" @click="refreshPlugin">
+              立即清理
+            </el-button>
+            <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
+            <span class="field-hint">按配置的阈值立即清理低歌曲数歌单</span>
+          </el-form-item>
         </el-form>
       </div>
+
+      <el-alert
+        v-if="canSaveConfig && configFields.length > 0"
+        type="info"
+        :closable="false"
+        show-icon
+        :title="`${typeLabel(editing)}插件`"
+        :description="pluginHint(editing)"
+      />
 
       <template #footer>
         <el-button @click="showConfigDialog = false">关闭</el-button>
@@ -668,6 +663,16 @@ async function loadPlaylistOptions() {
 /** Whether the plugin declares the web-rotation capability (shows the purge button). */
 const hasWebRotation = computed<boolean>(() =>
   (parseManifest(editing.value).capabilities || []).includes("webRotation"),
+);
+
+/** 操作模块是否显示:插件有测试连接、立即清理、立即刷新、立即清理(cleanup)等操作按钮时显示。 */
+const showOperationSection = computed<boolean>(() =>
+  !!editing.value && (
+    isSourcePlugin(editing.value) ||
+    hasWebRotation.value ||
+    isRecommenderPlugin(editing.value) ||
+    isCleanupPlugin(editing.value)
+  ),
 );
 
 /** 歌词/封面 provider 候选:所有已安装且声明对应能力的插件(媒体获取页下拉用),
