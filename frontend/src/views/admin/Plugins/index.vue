@@ -448,7 +448,8 @@
               <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
             </div>
             <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
-            <div v-else-if="f.type === 'tag-input'" class="tag-input-wrap">
+            <!-- keywords 字段特殊处理：渲染为标签输入组件，内置搜索入库按钮 -->
+            <div v-else-if="f.key === 'keywords'" class="tag-input-wrap">
               <el-input
                 v-model="tagInputValue"
                 :placeholder="'输入关键词后按回车添加'"
@@ -475,7 +476,7 @@
               </div>
               <span v-if="f.help" class="field-hint">{{ f.help }}</span>
             </div>
-            <span v-if="f.help && f.type !== 'tag-input'" class="field-hint">{{ f.help }}</span>
+            <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
             <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
                  支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
                  纯 manifest 驱动,不写死任何插件。 -->
@@ -511,8 +512,8 @@
             <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
           </el-form-item>
 
-          <!-- 关键词搜索导入:插件配置了 keywords 字段且类型不是 tag-input 时显示(已内嵌在 tag-input 组件中)。 -->
-          <el-form-item v-if="hasKeywordsConfig && !hasTagInputKeywords">
+          <!-- 关键词搜索导入:已内嵌在 keywords 字段的 tag-input 组件中,此处不再重复显示。 -->
+          <el-form-item v-if="false">
             <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
               关键词搜索入库
             </el-button>
@@ -657,13 +658,6 @@ const hasKeywordsConfig = computed(() => {
   if (!editing.value) return false;
   const m = parseManifest(editing.value);
   return (m.configSchema || []).some((f: any) => f.key === "keywords");
-});
-
-/** keywords 字段是否为 tag-input 类型(关键词搜索入库按钮已内嵌在组件中,不再单独显示)。 */
-const hasTagInputKeywords = computed(() => {
-  if (!editing.value) return false;
-  const m = parseManifest(editing.value);
-  return (m.configSchema || []).some((f: any) => f.key === "keywords" && f.type === "tag-input");
 });
 
 // ---- tag-input 组件支持 ----
