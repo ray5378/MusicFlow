@@ -41,7 +41,7 @@ services:
       - ./local/music:/local/music
       # 可选:平台歌曲/歌单封面缓存,独立挂到大磁盘
       - ./local/online-covers:/app/backend/data/online-covers
-      # 可选:歌词缓存,独立挂到大磁盘
+      # 可选:平台歌词缓存,独立挂到大磁盘
       - ./local/online-lyrics:/app/backend/data/online-lyrics
 
 networks: {}
