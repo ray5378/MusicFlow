@@ -59,6 +59,7 @@ import {
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
 } from "../../services/player/playerWebhook.js";
 import { getGroupManager } from "../../services/group/index.js";
+import { getHiddenPeerIds, setPeerHidden, isPeerHidden } from "../../services/playerPrefs.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { onlineRoutes } from "./online.js";
@@ -2361,7 +2362,28 @@ apiRoutes.get("/v1/peers", (c) => {
   const user = c.get("user");
   let peers = pm.listWithQueues();
   peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers);
+  // 按用户级隐藏:该用户在不显示自己切换弹窗里的设备/群组(不禁用,他人仍可用)。
+  const hidden = getHiddenPeerIds(user?.id ?? "");
+  if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
   return c.json({ peers });
+});
+
+// ===== 播放器「按用户级隐藏」偏好 =====
+// 每个用户可对某台设备/群组设置「不显示在我自己的播放器切换弹窗」。独立于
+// 播放器授权,管理员同样受自己的隐藏影响。登录即可设置(user 恒有,故不用额外的权限门禁)。
+// GET:返回我隐藏的 peerId 列表(供「播放器」页渲染开关状态)。
+apiRoutes.get("/v1/player-prefs/hidden", (c) => {
+  const userId = c.get("user")?.id || "";
+  return c.json({ peerIds: Array.from(getHiddenPeerIds(userId)) });
+});
+// PUT:设置/取消对某 peer 的隐藏。Body: { peerId: string, hidden: boolean }。
+apiRoutes.put("/v1/player-prefs/hidden", async (c) => {
+  const userId = c.get("user")?.id || "";
+  const body = await c.req.json().catch(() => ({} as any));
+  const peerId = typeof body?.peerId === "string" ? body.peerId.trim() : "";
+  if (!peerId) return c.json({ error: "缺少 peerId" }, 400);
+  setPeerHidden(userId, peerId, body?.hidden === true);
+  return c.json({ ok: true, hidden: isPeerHidden(userId, peerId) });
 });
 
 // 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。

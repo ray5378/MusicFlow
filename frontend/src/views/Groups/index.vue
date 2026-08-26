@@ -24,6 +24,13 @@
             <div class="device-row-meta">{{ dev.manufacturer || dev.model || "DLNA 设备" }}</div>
           </div>
           <div class="device-row-actions">
+            <div class="device-hide-toggle" title="开启后不显示在我自己的播放器切换弹窗(仅影响我,不禁用设备,他人仍可用)">
+              <el-switch
+                :model-value="isHidden(`dlna:${dev.id}`)"
+                @change="(v: any) => setPeerHidden(`dlna:${dev.id}`, !!v)"
+                inline-prompt active-text="隐藏" inactive-text="显示" size="small"
+              />
+            </div>
             <el-popconfirm
               :title="dev.disabled
                 ? `确定恢复启用「${dev.displayName || dev.name}」?`
@@ -88,6 +95,13 @@
             </div>
           </div>
           <div class="device-row-actions">
+            <div class="device-hide-toggle" title="开启后不显示在我自己的播放器切换弹窗(仅影响我,不禁用设备,他人仍可用)">
+              <el-switch
+                :model-value="isHidden(`airplay:${dev.id}`)"
+                @change="(v: any) => setPeerHidden(`airplay:${dev.id}`, !!v)"
+                inline-prompt active-text="隐藏" inactive-text="显示" size="small"
+              />
+            </div>
             <el-popconfirm
               :title="dev.disabled
                 ? `确定恢复启用「${dev.displayName || dev.name}」?`
@@ -173,6 +187,13 @@
           <span v-else class="member-empty">暂无成员,点击「编辑成员」添加设备</span>
         </div>
         <div class="group-actions">
+          <div class="device-hide-toggle" title="开启后不显示在我自己的播放器切换弹窗(仅影响我,不禁用设备/群组,他人仍可用)">
+            <el-switch
+              :model-value="isHidden(`group:${g.id}`)"
+              @change="(v: any) => setPeerHidden(`group:${g.id}`, !!v)"
+              inline-prompt active-text="隐藏" inactive-text="显示" size="small"
+            />
+          </div>
           <el-button size="small" :disabled="onlineCount(g) === 0" @click="controlGroup(g)"><MfIcon name="Monitor" />控制</el-button>
           <el-button size="small" @click="openEditMembers(g)"><MfIcon name="Pencil" />编辑成员</el-button>
           <el-button size="small" @click="openRename(g)"><MfIcon name="Pencil" />重命名</el-button>
@@ -446,6 +467,37 @@ async function toggleAirPlayDisabled(dev: any, disabled: boolean) {
   }
 }
 
+// 播放器「按用户级隐藏」偏好:peerId = "dlna:<id>" | "airplay:<id>" | "group:<id>"。
+// 仅影响本人切换弹窗的显示,不禁用设备(他人/其他用户仍可用),独立于权限。
+const hiddenPeerIds = ref<Set<string>>(new Set());
+
+function isHidden(peerId: string): boolean {
+  return hiddenPeerIds.value.has(peerId);
+}
+
+async function loadHiddenPrefs(): Promise<void> {
+  try {
+    const res = await api.get("/rest/api/v1/player-prefs/hidden");
+    hiddenPeerIds.value = new Set(res.data?.peerIds || []);
+  } catch { hiddenPeerIds.value = new Set(); }
+}
+
+async function setPeerHidden(peerId: string, hidden: boolean) {
+  // 乐观更新:切换后本地立即生效,失败再回滚。
+  const next = new Set(hiddenPeerIds.value);
+  if (hidden) next.add(peerId); else next.delete(peerId);
+  hiddenPeerIds.value = next;
+  try {
+    await api.put("/rest/api/v1/player-prefs/hidden", { peerId, hidden });
+    ElMessage.success(hidden
+      ? "已隐藏(不再显示在我的播放器切换弹窗;未禁用,他人仍可用)"
+      : "已设为显示(将出现在我的播放器切换弹窗)");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "操作失败");
+    await loadHiddenPrefs(); // 回滚
+  }
+}
+
 async function openCreate() {
   editingGroup.value = null;
   formName.value = "";
@@ -538,7 +590,7 @@ function controlGroup(g: any) {
 // player store bumps groupVersion so this page reloads live (no polling).
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
-onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); });
+onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); loadHiddenPrefs(); });
 </script>
 
 <style lang="scss" scoped>
@@ -570,6 +622,9 @@ onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); });
   }
   .device-row-actions { display: flex; gap: 8px; flex-shrink: 0; }
 }
+.device-hide-toggle { display: inline-flex; align-items: center; }
+.group-actions .device-hide-toggle { margin-right: 2px; }
+.group-actions .el-button { margin-left: 0; }
 .device-empty { text-align: center; color: var(--fnos-text-tertiary); font-size: 12px; padding: 22px 0; }
 .form-tip { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 6px; }
 .groups-tip {

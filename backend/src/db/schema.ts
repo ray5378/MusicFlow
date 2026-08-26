@@ -372,3 +372,16 @@ export const userRendererGrants = sqliteTable("user_renderer_grants", {
 }, (t) => ({
   pk: primaryKey({ columns: [t.userId, t.deviceKey] }),
 }));
+
+// player_prefs:播放器「按用户级隐藏」偏好。hidden=1 表示该用户在自己的
+// 播放器切换弹窗里不显示这台 DLNA/AirPlay 设备/群组(peerId = "dlna:<id>"
+// | "airplay:<id>" | "group:<id>")。仅影响本人列表,不禁用设备(他人仍可用),
+// 管理员同样受自己的隐藏影响,独立于权限(user_renderer_grants)。
+export const playerPrefs = sqliteTable("player_prefs", {
+  ownerUserId: text("owner_user_id").notNull(),
+  peerId: text("peer_id").notNull(),
+  hidden: integer("hidden").notNull().default(1),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.ownerUserId, t.peerId] }),
+}));

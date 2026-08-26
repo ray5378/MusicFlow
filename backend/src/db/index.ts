@@ -460,6 +460,18 @@ export function initDatabase() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_user_renderer_grants_user ON user_renderer_grants(user_id);
+
+    -- 播放器「按用户级隐藏」偏好:用户在自己切换弹窗里不显示某些设备/群组
+    -- (peer_id = "dlna:<id>" | "airplay:<id>" | "group:<id>")。仅影响本人,不禁用设备。
+    CREATE TABLE IF NOT EXISTS player_prefs (
+      owner_user_id TEXT NOT NULL,
+      peer_id TEXT NOT NULL,
+      hidden INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (owner_user_id, peer_id),
+      FOREIGN KEY (owner_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_player_prefs_owner ON player_prefs(owner_user_id);
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)
