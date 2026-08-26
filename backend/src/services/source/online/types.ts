@@ -72,8 +72,10 @@ export interface OnlineProvider {
   test(config: Record<string, any>): Promise<{ success: boolean; message?: string }>;
   /** Search the aggregated online catalog. */
   search(config: Record<string, any>, params: OnlineSearchParams): Promise<OnlineSearchResult>;
-  /** Fetch the daily-recommend playlist channels (/music/recommend). */
-  recommend?(config: Record<string, any>): Promise<OnlineRecommendResult>;
+  /** Fetch the daily-recommend playlist channels (/music/recommend).
+   *  opts.mode === "sync":路径 A 每日同步需要「真实上游列表」入库/清理,插件应走上游
+   *  (go-music-dl 插件对非网易平台默认改走本地库轮转,仅 sync 模式仍拉上游)。 */
+  recommend?(config: Record<string, any>, opts?: { mode?: string }): Promise<OnlineRecommendResult>;
   /** Fetch a single remote playlist's songs (/music/playlist?source=..id=..). */
   playlistSongs?(config: Record<string, any>, source: string, id: string): Promise<{ songs: OnlineSongResult[]; name: string }>;
   /** Build the audio proxy URL for a song (go-music-dl /download?stream=1). */
