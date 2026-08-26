@@ -181,15 +181,8 @@ apiRoutes.get("/v1/recommend", async (c) => {
         // 首页平台精选歌单均已入库,先用三重匹配定位本地歌单,再取数据库真实
         // songCount(与歌单列表/详情页口径一致)。不再透传插件远程 trackCount——
         // 对已入库歌单该值常为空,导致首页不显示数字。
-        //
-        // 2026-08 新增:非网易平台首页精选改为「本地库轮转」(go-music-dl 插件
-        // recommend() 对非网易平台返回 local:true + 本地歌单 UUID)。这类歌单的
-        // id 就是本地库主键,直接用 id 查库即可;封面走 getCoverArt 的 pl-<id>
-        // 逻辑,前端据此渲染本地封面并「直接播放」(见前端 Home/index.vue)。
         const source = pl.source || ch.source || "";
-        const local = pl.local
-          ? (db.select().from(playlists).where(eq(playlists.id, String(pl.id))).get() || null)
-          : findLocalRemotePlaylist(pl.id, source, pl.name || "");
+        const local = findLocalRemotePlaylist(pl.id, source, pl.name || "");
         return {
           id: pl.id,
           source,
@@ -200,13 +193,9 @@ apiRoutes.get("/v1/recommend", async (c) => {
           cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
             ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
             : (pl.cover || ""),
-          // 本地库轮转歌单:封面走 getCoverArt(pl-<id>,空/自建歌单自动回退 4 宫格拼图);
-          // 远端歌单封面用上面的远程 URL(cover 字段),不需要 coverArt。
-          coverArt: pl.local && local ? `pl-${local.id}` : undefined,
           trackCount: local ? String(local.songCount ?? "") : "",
           link: pl.link || "",
           imported: !!local,
-          local: !!pl.local, // 本地库轮转歌单标记,前端据此直接播放(不走导入)
         };
       }),
     }));
