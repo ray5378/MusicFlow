@@ -115,17 +115,16 @@ jobs:
             echo "Release $TAG already exists, skipping"
             exit 0
           fi
-          # 模板正文 + git log 变更列表 + 涉及文件统计(中文,列具体修改点,符合 SPEC 提交/发版规范)。
+          # 模板正文 + 自动生成的变更日志(按类型分组,见 scripts/gen-changelog.sh)
+          # + 涉及文件统计(中文,列具体修改点,符合 SPEC 提交/发版规范)。
           PREV=$(git tag --sort=-version:refname | sed -n '2p')
           {
             echo "## ${TAG#v} 发布说明"
             echo
             echo "### 变更"
-            if [ -n "$PREV" ]; then
-              git log --oneline --no-merges --grep='^chore: release' --invert-grep "$PREV..$TAG"
-            else
-              git log --oneline --no-merges --grep='^chore: release' --invert-grep "$TAG"
-            fi
+            echo "> 由提交历史按类型自动生成:新功能 / Bug 修复 / 优化·重构·依赖 / 文档 / 其他。"
+            echo
+            bash scripts/gen-changelog.sh "$TAG"
             echo
             echo "### 涉及文件与影响面"
             if [ -n "$PREV" ]; then

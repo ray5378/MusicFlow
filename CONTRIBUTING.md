@@ -64,7 +64,7 @@ npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
 
 - 提交信息：`<type>(<scope>): <subject>`，如 `feat(plugins): ...` / `fix(rest): ...` / `docs: ...` / `ci: ...`。
 - 消息含 `${...}` 时用**单引号**包住，避免 bash 展开。
-- 发版：改完推 `main` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow:<版本>`（仅 amd64）→ 建 GitHub Release → **同步 addon**（`hassio-addons/musicflow` 的 `build.yaml` build_from + `config.yaml` version）。详细见 `~/.workbuddy/skills/musicflow-release/SKILL.md`。
+- 发版：改完推 `main` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow:<版本>`（仅 amd64）→ 建 GitHub Release（正文「变更」由 `scripts/gen-changelog.sh` 按提交类型自动分组生成，无需手写；本地可先跑 `bash scripts/gen-changelog.sh` 预览）→ **同步 addon**（`hassio-addons/musicflow` 的 `build.yaml` build_from + `config.yaml` version）。详细见 `~/.workbuddy/skills/musicflow-release/SKILL.md`。
 
 ## 文档规范
 
