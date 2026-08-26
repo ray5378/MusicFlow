@@ -103,6 +103,34 @@
         </div>
       </div>
     </section>
+
+    <!-- ===== 本地随机(按平台):由 local-random-recommend 插件提供,仅删依赖上游固定精选。
+          从本地库按平台随机挑歌单,每次刷新不同;歌单已入库,直接打开/播放,无需导入。 ===== -->
+    <section class="section" v-for="group in localRandomGroups" :key="'lr-' + group.source">
+      <div class="section-title">
+        <span>{{ group.name }}·本地随机</span>
+        <span class="section-sub">从你的 {{ group.name }} 歌单里随机(每次刷新不同)</span>
+        <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
+      </div>
+      <div class="grid-row">
+        <div
+          v-for="pl in group.playlists"
+          :key="'lr-' + group.source + '-' + pl.id"
+          class="card fnos-card-sheen"
+        >
+          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
+            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
+            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
+            <PlatformBadge :source="group.source" />
+            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
+          </div>
+          <div class="card-body" @click="go('/playlists/' + pl.id)">
+            <div class="card-title">{{ pl.name }}</div>
+            <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -222,6 +250,29 @@ const platformGroups = computed(() =>
     .filter((g) => g.playlists.length > 0)
 );
 
+// 本地随机(按平台)：由 local-random-recommend 插件(localPlatformRecommend 能力)
+// 输出——从本地库按 source_platform 分组随机挑歌单，每次刷新内容不同。歌单均已
+// 入库，可直接打开/播放（playPl 按本地 id 播放），无需走导入。数据由后端提供，
+// 前端不做平台硬编码。
+const localRandomChannels = ref<any[]>([]);
+const localRandomGroups = computed(() =>
+  localRandomChannels.value
+    .map((ch: any) => ({
+      source: ch.source || "",
+      name: (ch.name || ch.source || "").replace(/音乐$/, ""),
+      playlists: ch.playlists || [],
+    }))
+    .filter((g) => g.playlists.length > 0)
+);
+async function loadLocalRandom() {
+  try {
+    const res = await api.get("/rest/api/v1/local-recommend");
+    localRandomChannels.value = res.data.channels || [];
+  } catch {
+    localRandomChannels.value = [];
+  }
+}
+
 // 平台精选卡片：导入为本地歌单后播放（复用现有 recommend/import 接口）。
 async function playRemotePl(group: any, pl: any) {
   if (menuGuard() || !pl || !recommendProviderId.value) return;
@@ -301,7 +352,7 @@ async function loadRecommend() {
 
 onMounted(async () => {
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadRecommend(), loadHomeConfig(), loadHomeCards()]);
+  await Promise.all([loadPlaylists(), loadRecommend(), loadLocalRandom(), loadHomeConfig(), loadHomeCards()]);
   loading.value = false;
 });
 </script>
