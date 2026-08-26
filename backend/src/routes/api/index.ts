@@ -2316,6 +2316,11 @@ apiRoutes.put("/v1/airplay/devices/:deviceId/disabled", permMiddleware(PERM.REND
   }
   const dev = setAirPlayDisabled(deviceId, disabled);
   if (!dev) return c.json({ error: "设备不存在" }, 404);
+  // 3. 立即同步 AirPlay peer 列表(与 DLNA 禁用一致:禁用→移除 peer 并推
+  //    peer_unavailable;启用→重新注册),否则隐藏的设备会一直留在 HA 卡片/切换器。
+  getPeerManager().reconcileAirPlayPeers();
+  // 4. 广播设备列表变化(WS → 卡片/Web 刷新)。
+  getEventManager().emitDeviceListChanged(listAirPlayDevices().length);
   return c.json({ success: true, disabled, device: { id: dev.id, disabled: !!dev.disabled } });
 });
 
