@@ -254,8 +254,15 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
       }
       if (def.volume?.enabled && typeof def.volume.value === "number") {
         // 播放开始后等设备稳定再设音量,否则部分 DLNA 设备可能忽略音量指令。
-        // 重试一次:首次失败后等 1.5s 再试,确保音量真正生效。
+        // 只发一次目标值可能仍被忽略(未进入播放态),故连发两次:
+        //   先发略低于目标的中间值(value-1),再发目标值(value),
+        //   用 19→20 这种两次跳变逼设备真正采纳音量(setDeviceVolume 内部已 clamp)。
+        // 失败后 1.5s 整体重试一遍,确保音量生效。
+        const step1 = Math.max(0, def.volume.value - 1);
         const doSetVolume = async (): Promise<void> => {
+          if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, step1);
+          else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", step1);
+          await sleep(500);
           if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
           else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
         };
