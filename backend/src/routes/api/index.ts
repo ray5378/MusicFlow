@@ -59,7 +59,7 @@ import {
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
 } from "../../services/player/playerWebhook.js";
 import { getGroupManager } from "../../services/group/index.js";
-import { getHiddenPeerIds, setPeerHidden, isPeerHidden } from "../../services/playerPrefs.js";
+import { getHiddenPeerIds, setPeerHidden, isPeerHidden, getNameOverrides, getPeerNameOverride, setPeerNameOverride } from "../../services/playerPrefs.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { onlineRoutes } from "./online.js";
@@ -1936,8 +1936,8 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
   return c.json({ devices });
 });
 
-// Force a fresh SSDP discovery scan.(管理播放器能力:renderer.manage)
-apiRoutes.post("/v1/dlna/scan", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+// Force a fresh SSDP discovery scan.(需 renderer.use —— 普通用户被授予播放器能力后可扫描)
+apiRoutes.post("/v1/dlna/scan", permMiddleware(PERM.RENDERER_USE), async (c) => {
   const devices = await refreshDevices();
   return c.json({ devices: devices.map(d => ({
     id: d.id, name: d.name, alias: d.alias || "",
@@ -2365,6 +2365,14 @@ apiRoutes.get("/v1/peers", (c) => {
   // 按用户级隐藏:该用户在不显示自己切换弹窗里的设备/群组(不禁用,他人仍可用)。
   const hidden = getHiddenPeerIds(user?.id ?? "");
   if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
+  // 按用户级显示名覆盖:该用户给自己视角下的设备/群组起的名,只影响本人切换器。
+  const nameOverrides = getNameOverrides(user?.id ?? "");
+  if (nameOverrides.size > 0) {
+    peers = peers.map((p) => {
+      const override = nameOverrides.get(p.peerId);
+      return override ? { ...p, name: override } : p;
+    });
+  }
   return c.json({ peers });
 });
 
@@ -2384,6 +2392,27 @@ apiRoutes.put("/v1/player-prefs/hidden", async (c) => {
   if (!peerId) return c.json({ error: "缺少 peerId" }, 400);
   setPeerHidden(userId, peerId, body?.hidden === true);
   return c.json({ ok: true, hidden: isPeerHidden(userId, peerId) });
+});
+
+// ===== 播放器「按用户级」显示名覆盖 =====
+// 每个用户可给自己视角下的 DLNA/AirPlay 设备/群组(peerId)起显示名,只影响本人
+// 界面与播放器切换器,他人各自改名互不影响,设备原始名(alias/name)保持不变。
+// 需要 renderer.use(普通用户被授予播放器使用能力后可改名,无需管理权限)。
+// GET:返回我的全部改名覆盖 { {peerId}: displayName }。
+apiRoutes.get("/v1/player-prefs/names", permMiddleware(PERM.RENDERER_USE), (c) => {
+  const userId = c.get("user")?.id || "";
+  return c.json({ names: Object.fromEntries(getNameOverrides(userId)) });
+});
+// PUT:设置/清除我对某 peer 的显示名。Body: { peerId: string, name?: string } — name 空串清除。
+apiRoutes.put("/v1/player-prefs/names", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const userId = c.get("user")?.id || "";
+  const body = await c.req.json().catch(() => ({} as any));
+  const peerId = typeof body?.peerId === "string" ? body.peerId.trim() : "";
+  if (!peerId) return c.json({ error: "缺少 peerId" }, 400);
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (name.length > 50) return c.json({ error: "名称不能超过 50 字符" }, 400);
+  setPeerNameOverride(userId, peerId, name);
+  return c.json({ ok: true, displayName: getPeerNameOverride(userId, peerId) });
 });
 
 // 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。
@@ -2875,33 +2904,35 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
 const gm = getGroupManager();
 
 // 列出全部组(含成员设备信息:名称/可用性)。
-// 播放器群组:管理员看到全部;普通用户只能看到被授权的群组(group:<id>)。
-// 创建/更新/删除属「管理播放器」能力,要求 renderer.manage。
+// 播放器群组按用户划分:管理员看到全部;普通用户只看到自己创建的组(ownerUserId === 本人)。
+// 普通用户看不到管理员建的组,也看不到别人的组;组内成员设备访问安全由 peer 控制层把关。
 apiRoutes.get("/v1/groups", (c) => {
   const user = c.get("user");
-  let groups = gm.listWithMembers();
-  if (!user?.isAdmin) {
-    groups = groups.filter((g: any) => canUseRenderer(user.id, false, `group:${g.id}`));
-  }
+  const groups = user?.isAdmin ? gm.listWithMembers() : gm.listWithMembersForOwner(user?.id ?? "");
   return c.json({ groups });
 });
 
-// 新建组。Body: { name: string, memberIds?: string[] }
-apiRoutes.post("/v1/groups", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+// 新建组。Body: { name: string, memberIds?: string[] }。需要 renderer.use(普通用户可建自组)。
+apiRoutes.post("/v1/groups", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user")!;
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name : "";
   const memberIds = Array.isArray(body.memberIds) ? body.memberIds : [];
   try {
-    const g = gm.createGroup(name, memberIds);
+    const g = gm.createGroup(name, memberIds, user?.id ?? "");
     return c.json({ group: gm.getWithMembers(g.id) }, 201);
   } catch (e: any) {
     return c.json({ error: e.message || "创建组失败" }, 400);
   }
 });
 
-// 更新组:改名(name)和/或全量替换成员(memberIds)。Body: { name?, memberIds? }
-apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+// 更新组:只允许组 owner(或管理员)。改名(name)和/或全量替换成员(memberIds)。Body: { name?, memberIds? }
+apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user")!;
   const id = c.req.param("id")!;
+  if (!gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json({ error: "组不存在或无权限" }, 404);
+  }
   const body = await c.req.json().catch(() => ({} as any));
   try {
     if (typeof body.name === "string") {
@@ -2930,9 +2961,14 @@ apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_MANAGE), async (c) 
   }
 });
 
-// 删除组(组队列随之删除,成员设备恢复单独控制)。
-apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_MANAGE), (c) => {
-  const ok = gm.deleteGroup(c.req.param("id")!);
+// 删除组(组队列随之删除,成员设备恢复单独控制)。仅组 owner(或管理员)。需要 renderer.use。
+apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
+  const user = c.get("user")!;
+  const id = c.req.param("id")!;
+  if (!gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json({ error: "组不存在或无权限" }, 404);
+  }
+  const ok = gm.deleteGroup(id);
   if (!ok) return c.json({ error: "组不存在" }, 404);
   return c.json({ success: true });
 });

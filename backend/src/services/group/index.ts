@@ -16,6 +16,7 @@ import { createLogger } from "../../utils/logger.js";
 const log = createLogger("group");
 export interface PlayerGroup {
   id: string;
+  ownerUserId: string; // 创建者;管理员可为空串(历史数据)或管理员 id
   name: string;
   memberIds: string[]; // dlna deviceIds
   createdAt: string;
@@ -54,6 +55,7 @@ export class GroupManager extends EventEmitter {
       try { memberIds = JSON.parse(r.memberIds || "[]"); } catch {}
       this.groups.set(r.id, {
         id: r.id,
+        ownerUserId: r.ownerUserId || "",
         name: r.name,
         memberIds,
         createdAt: r.createdAt || "",
@@ -68,8 +70,22 @@ export class GroupManager extends EventEmitter {
     return Array.from(this.groups.values());
   }
 
+  /** 某用户「自己的」组(仅 ownerUserId === ownerUserId)。管理员传 all。 */
+  listForOwner(ownerUserId: string): PlayerGroup[] {
+    if (!ownerUserId) return [];
+    return this.list().filter(g => g.ownerUserId === ownerUserId);
+  }
+
   get(id: string): PlayerGroup | undefined {
     return this.groups.get(id);
+  }
+
+  /** 该用户是否有权操作该组(管理员恒有权;普通用户须为组 owner)。 */
+  isOwnedBy(id: string, userId: string, isAdmin: boolean): boolean {
+    if (isAdmin) return true;
+    const g = this.groups.get(id);
+    if (!g) return false;
+    return g.ownerUserId === userId;
   }
 
   getWithMembers(id: string): PlayerGroupWithMembers | undefined {
@@ -81,11 +97,16 @@ export class GroupManager extends EventEmitter {
     return this.list().map(g => ({ ...g, members: this.resolveMembers(g.memberIds) }));
   }
 
-  createGroup(name: string, memberIds: string[] = []): PlayerGroup {
+  /** 某用户自己的组(含成员详情)。管理员传入空串返回全量。 */
+  listWithMembersForOwner(ownerUserId: string): PlayerGroupWithMembers[] {
+    return this.listForOwner(ownerUserId).map(g => ({ ...g, members: this.resolveMembers(g.memberIds) }));
+  }
+
+  createGroup(name: string, memberIds: string[] = [], ownerUserId = ""): PlayerGroup {
     const id = uuidv4();
     this.assertMembersAvailable(memberIds);
     const now = new Date().toISOString();
-    const g: PlayerGroup = { id, name: this.normalizeName(name), memberIds: [...memberIds], createdAt: now, updatedAt: now };
+    const g: PlayerGroup = { id, ownerUserId, name: this.normalizeName(name), memberIds: [...memberIds], createdAt: now, updatedAt: now };
     this.persist(g);
     this.groups.set(id, g);
     for (const m of g.memberIds) this.addToIndex(m, id);
@@ -195,6 +216,7 @@ export class GroupManager extends EventEmitter {
     db.insert(playerGroups)
       .values({
         id: g.id,
+        ownerUserId: g.ownerUserId || "",
         name: g.name,
         memberIds: JSON.stringify(g.memberIds),
         createdAt: g.createdAt,
@@ -202,7 +224,7 @@ export class GroupManager extends EventEmitter {
       })
       .onConflictDoUpdate({
         target: playerGroups.id,
-        set: { name: g.name, memberIds: JSON.stringify(g.memberIds), updatedAt: g.updatedAt },
+        set: { ownerUserId: g.ownerUserId || "", name: g.name, memberIds: JSON.stringify(g.memberIds), updatedAt: g.updatedAt },
       })
       .run();
   }

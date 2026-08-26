@@ -2,22 +2,22 @@
   <div class="groups-page">
     <div class="page-header">
       <h2>播放器</h2>
-      <el-button v-if="canManage" type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
+      <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
     </div>
 
     <!-- DLNA 设备管理:在线 + 离线全部展示,可重命名 / 删除离线设备 -->
     <div class="devices-section">
       <div class="section-head">
         <h3>DLNA 设备</h3>
-        <el-button v-if="canManage" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
+        <el-button v-if="canUse" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
       </div>
       <div class="devices-box" v-loading="loadingDevices">
         <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
           <MfIcon name="Monitor" class="device-row-icon" :class="{ offline: !dev.available }" />
           <div class="device-row-info">
             <div class="device-row-name">
-              {{ dev.displayName || dev.name }}
-              <el-tag v-if="dev.alias" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
+              {{ deviceDisplayName(dev, `dlna:${dev.id}`) }}
+              <el-tag v-if="isDeviceRenamed(dev, `dlna:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
               <span v-if="!dev.available" class="device-offline-tag">离线</span>
               <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">已禁用</el-tag>
             </div>
@@ -32,9 +32,10 @@
               />
             </div>
             <el-popconfirm
+              v-if="canManage"
               :title="dev.disabled
-                ? `确定恢复启用「${dev.displayName || dev.name}」?`
-                : `确定禁用「${dev.displayName || dev.name}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列、移出群组`"
+                ? `确定恢复启用「${deviceDisplayName(dev, `dlna:${dev.id}`)}」?`
+                : `确定禁用「${deviceDisplayName(dev, `dlna:${dev.id}`)}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列、移出群组`"
               :confirm-button-text="dev.disabled ? '恢复' : '禁用'"
               :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
               cancel-button-text="取消"
@@ -52,9 +53,9 @@
                 </el-button>
               </template>
             </el-popconfirm>
-            <el-button size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
+            <el-button v-if="canUse" size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
             <el-popconfirm
-              v-if="!dev.available"
+              v-if="canManage && !dev.available"
               title="确定删除该设备?将同时从所有群组中移除"
               confirm-button-text="删除"
               cancel-button-text="取消"
@@ -85,8 +86,8 @@
           <MfIcon name="Airplay" class="device-row-icon" :class="{ offline: !dev.available }"  />
           <div class="device-row-info">
             <div class="device-row-name">
-              {{ dev.displayName || dev.name }}
-              <el-tag v-if="dev.alias" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
+              {{ deviceDisplayName(dev, `airplay:${dev.id}`) }}
+              <el-tag v-if="isDeviceRenamed(dev, `airplay:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
               <span v-if="!dev.available" class="device-offline-tag">离线</span>
               <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">已禁用</el-tag>
             </div>
@@ -103,9 +104,10 @@
               />
             </div>
             <el-popconfirm
+              v-if="canManage"
               :title="dev.disabled
-                ? `确定恢复启用「${dev.displayName || dev.name}」?`
-                : `确定禁用「${dev.displayName || dev.name}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列`"
+                ? `确定恢复启用「${deviceDisplayName(dev, `airplay:${dev.id}`)}」?`
+                : `确定禁用「${deviceDisplayName(dev, `airplay:${dev.id}`)}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列`"
               :confirm-button-text="dev.disabled ? '恢复' : '禁用'"
               :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
               cancel-button-text="取消"
@@ -123,9 +125,9 @@
                 </el-button>
               </template>
             </el-popconfirm>
-            <el-button size="small" @click="openRenameAirPlayDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
+            <el-button v-if="canUse" size="small" @click="openRenameAirPlayDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
             <el-popconfirm
-              v-if="!dev.available"
+              v-if="canManage && !dev.available"
               title="确定删除该设备?"
               confirm-button-text="删除"
               cancel-button-text="取消"
@@ -195,9 +197,10 @@
             />
           </div>
           <el-button size="small" :disabled="onlineCount(g) === 0" @click="controlGroup(g)"><MfIcon name="Monitor" />控制</el-button>
-          <el-button size="small" @click="openEditMembers(g)"><MfIcon name="Pencil" />编辑成员</el-button>
-          <el-button size="small" @click="openRename(g)"><MfIcon name="Pencil" />重命名</el-button>
+          <el-button v-if="canUse" size="small" @click="openEditMembers(g)"><MfIcon name="Pencil" />编辑成员</el-button>
+          <el-button v-if="canUse" size="small" @click="openRename(g)"><MfIcon name="Pencil" />重命名</el-button>
           <el-popconfirm
+            v-if="canUse"
             title="确定删除该群组?组队列与成员集合将一并删除"
             confirm-button-text="删除"
             cancel-button-text="取消"
@@ -211,7 +214,7 @@
         </div>
       </div>
       <el-empty v-if="!loading && groups.length === 0" description="暂无群组">
-        <el-button type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
+        <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
       </el-empty>
     </div>
 
@@ -277,10 +280,10 @@
       </template>
     </el-dialog>
 
-    <!-- Rename DLNA device (alias) dialog -->
+    <!-- Rename DLNA device (per-user display name) dialog -->
     <el-dialog v-model="showRenameDeviceDialog" title="重命名设备" width="380px" :append-to-body="true">
-      <el-input v-model="renameDeviceName" placeholder="输入设备显示名(留空恢复原始名称)" maxlength="50" @keyup.enter="saveRenameDevice" />
-      <div class="form-tip">该名称会显示在播放控件和 HA 卡片上</div>
+      <el-input v-model="renameDeviceName" placeholder="输入设备显示名(留空恢复为全局名称)" maxlength="50" @keyup.enter="saveRenameDevice" />
+      <div class="form-tip">该名称仅你自己可见,不影响其他用户与 HA 卡片</div>
       <template #footer>
         <el-button @click="showRenameDeviceDialog = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveRenameDevice">保存</el-button>
@@ -302,8 +305,11 @@ import { useCopy } from "@/composables/useCopy";
 const { copy } = useCopy();
 
 const authStore = useAuthStore();
-// 管理能力:管理员或具 renderer.manage。仅 manage 可扫描/改名/删除/禁用/群组 CRUD;
-// 仅具 renderer.use 的普通用户只能查看设备/群组并设置自己的隐藏开关、切换到被授权设备。
+// 使用能力:管理员或具 renderer.use。拥有 use 的普通用户可:新建/删除自己的群组、扫描、
+// 重命名(每用户显示名)、设置自己的显示/隐藏,并控制授权(或自建)的设备/群组。
+const canUse = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_USE));
+// 管理能力:管理员或具 renderer.manage。仅 manage 可删除播放器设备本体、全局禁用。
+// 删除设备是「根级」操作,普通用户一律不可(与 use 区分)。
 const canManage = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE));
 
 function copyPeer(peerId: string, name: string) {
@@ -337,6 +343,15 @@ const renameDeviceName = ref("");
 
 function onlineCount(g: any): number {
   return (g.members || []).filter((m: any) => m.available).length;
+}
+
+// 每用户显示名:优先用「我」的改名覆盖,其次全局 alias,最后原始名。
+// 改名是用户级动作(只影响我),故命名判定也用我自己的覆盖。
+function deviceDisplayName(dev: any, peerId: string): string {
+  return playerStore.getPeerName(peerId) || dev.alias || dev.name || dev.id || "";
+}
+function isDeviceRenamed(dev: any, peerId: string): boolean {
+  return !!playerStore.getPeerName(peerId) || !!dev.alias;
 }
 
 // 群组编辑对话框可选成员:排除禁用设备(禁用设备不可加入/保留在群组中)。
@@ -385,7 +400,7 @@ async function scanDevices(): Promise<void> {
 
 function openRenameDevice(dev: any) {
   renameDeviceTarget.value = dev;
-  renameDeviceName.value = dev.alias || "";
+  renameDeviceName.value = playerStore.getPeerName(`dlna:${dev.id}`) || dev.alias || "";
   showRenameDeviceDialog.value = true;
 }
 
@@ -393,17 +408,16 @@ async function saveRenameDevice() {
   const alias = renameDeviceName.value.trim();
   if (!renameDeviceTarget.value || saving.value) return;
   const isAirPlay = !!renameDeviceTarget.value.isAirPlay;
+  const peerId = `${isAirPlay ? "airplay" : "dlna"}:${renameDeviceTarget.value.id}`;
   saving.value = true;
   try {
-    const res = await api.put(
-      `/rest/api/v1/${isAirPlay ? "airplay" : "dlna"}/devices/${renameDeviceTarget.value.id}`,
-      { alias },
-    );
-    if (res.data.success) {
-      ElMessage.success(alias ? "已重命名" : "已恢复原始名称");
+    // 按用户级改名:只改我自己看到的显示名,他人/设备原始名不受影响。
+    const ok = await playerStore.setPeerName(peerId, alias);
+    if (ok) {
+      ElMessage.success(alias ? "已重命名(仅我可见)" : "已恢复(显示为全局名称)");
       showRenameDeviceDialog.value = false;
-      if (isAirPlay) await loadAirPlayDevices();
-      else await loadDlnaDevices();
+    } else {
+      ElMessage.error("重命名失败,已回滚");
     }
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "重命名失败");
@@ -448,7 +462,7 @@ async function loadAirPlayDevices(): Promise<void> {
 // ---- AirPlay 设备管理(对标 DLNA) ----
 function openRenameAirPlayDevice(dev: any) {
   renameDeviceTarget.value = { ...dev, isAirPlay: true };
-  renameDeviceName.value = dev.alias || "";
+  renameDeviceName.value = playerStore.getPeerName(`airplay:${dev.id}`) || dev.alias || "";
   showRenameDeviceDialog.value = true;
 }
 
@@ -580,7 +594,7 @@ function controlGroup(g: any) {
 // player store bumps groupVersion so this page reloads live (no polling).
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
-onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); playerStore.loadHiddenPrefs(); });
+onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); playerStore.loadHiddenPrefs(); playerStore.loadNamePrefs(); });
 </script>
 
 <style lang="scss" scoped>

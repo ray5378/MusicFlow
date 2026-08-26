@@ -320,6 +320,8 @@ export const usePlayerStore = defineStore("player", () => {
   // 单一数据源——REST /v1/peers、WS peer_snapshot、peer_available 都据此过滤,保证
   // 隐藏后无论哪种来源刷新都不重现(后端 WS 广播是全局未过滤的,必须前端再过滤一次)。
   const hiddenPeers = ref<Set<string>>(new Set());
+  // 「按用户级」显示名覆盖:peerId → 该用户自己起的显示名(仅影响本人界面/切换器)。
+  const nameOverrides = ref<Record<string, string>>({});
   const currentPeer = computed(() => peers.value.find(p => p.peerId === currentPeerId.value));
   const currentPeerName = computed(() => {
     const p = currentPeer.value;
@@ -1262,12 +1264,16 @@ export const usePlayerStore = defineStore("player", () => {
 
   // 离线 DLNA 设备 / 成员全离线的群组不显示;local(本机)恒显示。
   // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
-  // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权)。
+  // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权),并应用
+  // 该用户的「按用户级改名」(REST 与 WS 推送统一在此应用,保证改名不被 WS 覆盖)。
   function filterVisiblePeers(list: any[]): any[] {
     const hidden = hiddenPeers.value;
-    return (list || []).filter((p) =>
-      (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay"))
-      && !hidden.has(p.peerId));
+    const overrides = nameOverrides.value;
+    return (list || [])
+      .filter((p) =>
+        (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay"))
+        && !hidden.has(p.peerId))
+      .map((p) => (overrides[p.peerId] ? { ...p, name: overrides[p.peerId] } : p));
   }
 
   // ==================== 按用户级隐藏偏好 ====================
@@ -1320,6 +1326,43 @@ export const usePlayerStore = defineStore("player", () => {
       await api.post("/rest/api/v1/peers/register", { name: authStore.username || "本机" });
     } catch {}
     startHeartbeat();
+  }
+
+  // ==================== 按用户级改名 ====================
+  // 每个用户给自己视角下的设备/群组起显示名,只影响本人界面与切换器;他人各自
+  // 改名互不影响,设备原始名(alias/name)保持不变。需 renderer.use(播放器使用权限)。
+  async function loadNamePrefs(): Promise<void> {
+    try {
+      const res = await api.get("/rest/api/v1/player-prefs/names");
+      nameOverrides.value = res.data?.names || {};
+    } catch { nameOverrides.value = {}; }
+  }
+  function getPeerName(peerId: string): string {
+    return nameOverrides.value[peerId] || "";
+  }
+  function isPeerNameOverridden(peerId: string): boolean {
+    return !!nameOverrides.value[peerId];
+  }
+  // 设置/清除我对某 peer 的显示名(name 空串=清除覆盖)。乐观更新,失败回滚。
+  async function setPeerName(peerId: string, name: string): Promise<boolean> {
+    const nameTrim = (name || "").trim();
+    const prev = nameOverrides.value[peerId] || "";
+    const next = { ...nameOverrides.value };
+    if (nameTrim) next[peerId] = nameTrim; else delete next[peerId];
+    nameOverrides.value = next;
+    // 同步刷新切换器列表,让改名立即生效。
+    refreshPeers();
+    try {
+      await api.put("/rest/api/v1/player-prefs/names", { peerId, name: nameTrim });
+      return true;
+    } catch {
+      // 回滚 + 重新拉取。
+      const rollback = { ...nameOverrides.value };
+      if (prev) rollback[peerId] = prev; else delete rollback[peerId];
+      nameOverrides.value = rollback;
+      loadNamePrefs();
+      return false;
+    }
   }
 
   function startHeartbeat(): void {
@@ -1441,8 +1484,8 @@ export const usePlayerStore = defineStore("player", () => {
           const p = msg.peer;
           if (!p) break;
           const idx = peers.value.findIndex(x => x.peerId === p.peerId);
-          if (idx >= 0) peers.value[idx] = { ...peers.value[idx], ...p };
-          else if (p.available !== false && !hiddenPeers.value.has(p.peerId)) peers.value.push(p);
+          if (idx >= 0) peers.value[idx] = { ...peers.value[idx], ...p, ...(nameOverrides.value[p.peerId] ? { name: nameOverrides.value[p.peerId] } : {}) };
+          else if (p.available !== false && !hiddenPeers.value.has(p.peerId)) peers.value.push({ ...p, ...(nameOverrides.value[p.peerId] ? { name: nameOverrides.value[p.peerId] } : {}) });
           break;
         }
         case "peer_unavailable": {
@@ -1529,6 +1572,8 @@ export const usePlayerStore = defineStore("player", () => {
     switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,
     // 按用户级隐藏
     hiddenPeers, loadHiddenPrefs, isPeerHidden, setPeerHidden,
+    // 按用户级改名
+    loadNamePrefs, getPeerName, isPeerNameOverridden, setPeerName,
     // group events (播放器群组页刷新信号)
     groupVersion,
     // UI-routed controls

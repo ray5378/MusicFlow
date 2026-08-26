@@ -393,6 +393,7 @@ export function initDatabase() {
 
     CREATE TABLE IF NOT EXISTS player_groups (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       member_ids TEXT NOT NULL DEFAULT '[]',
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -472,6 +473,17 @@ export function initDatabase() {
       FOREIGN KEY (owner_user_id) REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_player_prefs_owner ON player_prefs(owner_user_id);
+
+    -- 播放器「按用户级」显示名覆盖:用户给自己视角下的设备/群组起名,只影响本人。
+    CREATE TABLE IF NOT EXISTS player_name_overrides (
+      owner_user_id TEXT NOT NULL,
+      peer_id TEXT NOT NULL,
+      display_name TEXT NOT NULL DEFAULT '',
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (owner_user_id, peer_id),
+      FOREIGN KEY (owner_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_player_name_overrides_owner ON player_name_overrides(owner_user_id);
   `);
 
   // Migration: add pass_enc column to existing users table (older DBs)
@@ -501,6 +513,14 @@ export function initDatabase() {
   // Migration: add favorite column to playlists table (older DBs) — 收藏歌单标记
   try {
     sqlite.exec("ALTER TABLE playlists ADD COLUMN favorite INTEGER DEFAULT 0");
+  } catch {}
+  // Migration: 播放器群组按用户划分,给存量表加 owner_user_id(旧组无归属)。
+  try {
+    sqlite.exec("ALTER TABLE player_groups ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''");
+  } catch {}
+  // 存量/无归属的群组默认归属首个管理员(保留管理员原有群组可见)。
+  try {
+    sqlite.exec("UPDATE player_groups SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1 LIMIT 1) WHERE owner_user_id = ''");
   } catch {}
   // Migration: add disabled column to dlna_devices (older DBs) — 播放器页禁用设备
   try {

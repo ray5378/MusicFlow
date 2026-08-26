@@ -291,8 +291,10 @@ export const localQueues = sqliteTable("local_queues", {
 // 播放器群组(SyncGroup,仿 MA Sync Group):一个组聚合多台 DLNA 设备。
 // 成员只能是 DLNA 设备(裸 deviceId);一台设备最多属于一个组;组不能套组。
 // 组持有自己的持久化队列(group_queues),播放时并发向成员 cast 同一首歌。
+// 群组按用户划分:ownerUserId 记录创建者,普通用户仅见/管自己的组,管理员见全部。
 export const playerGroups = sqliteTable("player_groups", {
   id: text("id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull().default(""), // 创建者;空=历史数据(按迁移归属首个管理员)
   name: text("name").notNull(),
   memberIds: text("member_ids").notNull().default("[]"), // dlna deviceId[] serialized
   createdAt: text("created_at").default(""),
@@ -381,6 +383,18 @@ export const playerPrefs = sqliteTable("player_prefs", {
   ownerUserId: text("owner_user_id").notNull(),
   peerId: text("peer_id").notNull(),
   hidden: integer("hidden").notNull().default(1),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.ownerUserId, t.peerId] }),
+}));
+
+// player_name_overrides:播放器「按用户级」显示名覆盖。每个用户可给自己视角下的
+// 某台 DLNA/AirPlay 设备/群组(peerId)起显示名,仅影响本人界面/切换器;他人仍显示
+// 各自的改名,设备原始名(alias/name)不受影响。设置与播放器授权/隐藏互相独立。
+export const playerNameOverrides = sqliteTable("player_name_overrides", {
+  ownerUserId: text("owner_user_id").notNull(),
+  peerId: text("peer_id").notNull(),
+  displayName: text("display_name").notNull().default(""),
   updatedAt: text("updated_at").default(""),
 }, (t) => ({
   pk: primaryKey({ columns: [t.ownerUserId, t.peerId] }),

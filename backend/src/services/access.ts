@@ -22,6 +22,7 @@ import { db } from "../db/index.js";
 import { userPermissions, userRendererGrants } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { apiError, BusinessErrorCode } from "../utils/errors.js";
+import { getGroupManager } from "./group/index.js";
 
 export interface PermDefinition {
   key: string;
@@ -131,11 +132,18 @@ export function getUserRendererGrants(userId: string): Set<string> {
   return keys;
 }
 
-/** 播放器可用判定:管理员恒可用;普通用户需 renderer.use + 设备授权。 */
+/** 播放器可用判定:管理员恒可用;普通用户需 renderer.use + 设备授权。
+ *  群组例外:用户自己创建的群组(ownerUserId === userId)创建即可控,无需额外授权。 */
 export function canUseRenderer(userId: string, isAdmin: boolean, deviceKey: string): boolean {
   if (isAdmin) return true;
   const perms = getUserPermissions(userId);
   if (!perms[PERM.RENDERER_USE]) return false;
+  if (deviceKey.startsWith("group:")) {
+    const groupId = deviceKey.slice("group:".length);
+    try {
+      if (getGroupManager().isOwnedBy(groupId, userId, false)) return true;
+    } catch { /* 忽略,退回授权判定 */ }
+  }
   return getUserRendererGrants(userId).has(deviceKey);
 }
 
