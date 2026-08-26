@@ -1976,7 +1976,7 @@ apiRoutes.get("/v1/dlna/devices", async (c) => {
   // 返回设备(在线 + 离线)。离线设备保留在列表,供「播放器」页管理(改名/删除)。
   let devices = serializeDlnaDevices(markStaleDevices(getCachedDevices()));
   if (user && !user.isAdmin) {
-    devices = devices.filter((d) => canUseRenderer(user.id, false, `dlna:${d.id}`));
+    devices = devices.filter((d) => !d.disabled && canUseRenderer(user.id, false, `dlna:${d.id}`));
   }
   return c.json({ devices });
 });
@@ -1986,7 +1986,7 @@ apiRoutes.post("/v1/dlna/scan", permMiddleware(PERM.RENDERER_USE), async (c) => 
   const user = c.get("user");
   let devices = serializeDlnaDevices(await refreshDevices());
   if (user && !user.isAdmin) {
-    devices = devices.filter((d) => canUseRenderer(user.id, false, `dlna:${d.id}`));
+    devices = devices.filter((d) => !d.disabled && canUseRenderer(user.id, false, `dlna:${d.id}`));
   }
   return c.json({ devices });
 });
@@ -2265,7 +2265,7 @@ apiRoutes.get("/v1/airplay/devices", (c) => {
   // 与 DLNA 一致:管理员返回全部;普通用户只见自己授权可控的设备(airplay:<id>)。
   let devices = listAirPlayDevices();
   if (user && !user.isAdmin) {
-    devices = devices.filter((d) => canUseRenderer(user.id, false, `airplay:${d.id}`));
+    devices = devices.filter((d) => !d.disabled && canUseRenderer(user.id, false, `airplay:${d.id}`));
   }
   return c.json({ devices });
 });
