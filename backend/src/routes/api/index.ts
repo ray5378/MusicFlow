@@ -1956,33 +1956,39 @@ apiRoutes.use("/v1/dlna/devices/:deviceId/*", rendererGrantParamMiddleware("dlna
 apiRoutes.use("/v1/airplay/devices/:deviceId/*", rendererGrantParamMiddleware("airplay"));
 
 // List discovered DLNA renderers (refreshes cache if stale).
+// 设备列表按用户授权过滤:管理员返回全部(管理/授权 UI 需要);普通用户只见
+// 自己「可控制的设备」(renderer.use + dlna:<id> 授权),避免播放器页泄露全部
+// 设备。与 /v1/peers 的 filterPeersByAccess 语义一致。
+const serializeDlnaDevices = (devices: ReturnType<typeof getCachedDevices>) => devices.map(d => ({
+  id: d.id, name: d.name, alias: d.alias || "",
+  displayName: d.alias || d.name,
+  manufacturer: d.manufacturer, model: d.model,
+  hasVolumeControl: !!d.renderingControlUrl,
+  available: d.available,
+  disabled: !!d.disabled,
+}));
+
 apiRoutes.get("/v1/dlna/devices", async (c) => {
   if (shouldRefreshDevices() || getCachedDevices().length === 0) {
     await refreshDevices();
   }
-  // 返回全部设备(在线 + 离线)。离线设备保留在列表,供「播放器」页管理(改名/删除)。
-  const devices = markStaleDevices(getCachedDevices()).map(d => ({
-    id: d.id, name: d.name, alias: d.alias || "",
-    displayName: d.alias || d.name,
-    manufacturer: d.manufacturer, model: d.model,
-    hasVolumeControl: !!d.renderingControlUrl,
-    available: d.available,
-    disabled: !!d.disabled,
-  }));
+  const user = c.get("user");
+  // 返回设备(在线 + 离线)。离线设备保留在列表,供「播放器」页管理(改名/删除)。
+  let devices = serializeDlnaDevices(markStaleDevices(getCachedDevices()));
+  if (user && !user.isAdmin) {
+    devices = devices.filter((d) => canUseRenderer(user.id, false, `dlna:${d.id}`));
+  }
   return c.json({ devices });
 });
 
 // Force a fresh SSDP discovery scan.(需 renderer.use —— 普通用户被授予播放器能力后可扫描)
 apiRoutes.post("/v1/dlna/scan", permMiddleware(PERM.RENDERER_USE), async (c) => {
-  const devices = await refreshDevices();
-  return c.json({ devices: devices.map(d => ({
-    id: d.id, name: d.name, alias: d.alias || "",
-    displayName: d.alias || d.name,
-    manufacturer: d.manufacturer, model: d.model,
-    hasVolumeControl: !!d.renderingControlUrl,
-    available: d.available,
-    disabled: !!d.disabled,
-  })) });
+  const user = c.get("user");
+  let devices = serializeDlnaDevices(await refreshDevices());
+  if (user && !user.isAdmin) {
+    devices = devices.filter((d) => canUseRenderer(user.id, false, `dlna:${d.id}`));
+  }
+  return c.json({ devices });
 });
 
 // 重命名 DLNA 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
@@ -2255,7 +2261,13 @@ apiRoutes.use("/v1/airplay/*", async (c, next) => {
 });
 
 apiRoutes.get("/v1/airplay/devices", (c) => {
-  return c.json({ devices: listAirPlayDevices() });
+  const user = c.get("user");
+  // 与 DLNA 一致:管理员返回全部;普通用户只见自己授权可控的设备(airplay:<id>)。
+  let devices = listAirPlayDevices();
+  if (user && !user.isAdmin) {
+    devices = devices.filter((d) => canUseRenderer(user.id, false, `airplay:${d.id}`));
+  }
+  return c.json({ devices });
 });
 
 // 重命名 AirPlay 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
