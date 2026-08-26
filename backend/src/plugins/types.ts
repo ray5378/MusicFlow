@@ -42,6 +42,9 @@ export type PluginCapability =
   // ---- recommender plugins ----
   | "dailyPlaylist" // build/refresh a scheduled recommendation playlist
   | "localPlaylist" // contribute local-library recommendations
+  // 本地随机歌单(按平台分组):供首页「本地随机(按平台)」区块调 /v1/local-recommend
+  // 动态展示本地库里各平台已入库歌单的随机刷新结果。独立于此前的 recommend(上游)。
+  | "localPlatformRecommend"
   | "comboPlaylist" // merge other recommenders' playlists into a combined one
   | "recommendPlaylist" // 通用推荐歌单插件:生成/刷新自身歌单(第三方,如 ListenBrainz)
   // ---- sync plugins ----
