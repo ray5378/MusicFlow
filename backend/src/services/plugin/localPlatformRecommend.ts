@@ -19,6 +19,7 @@
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import type { PluginManifest } from "../../plugins/types.js";
+import { resolveCoverFile, listPlayableCoverRefs } from "../playlistCover.js";
 
 const log = createLogger("LOCAL-PLATFORM-REC");
 
@@ -117,13 +118,27 @@ export function recommendLocalPlatforms(): { channels: LocalPlatformChannel[] } 
         source,
         name: PLATFORM_LABELS[source] || source,
         count: picked.length,
-        playlists: picked.map((r) => ({
-          id: r.id,
-          name: r.name,
-          coverArt: r.cover_art || null,
-          songCount: r.song_count || 0,
-          imported: true,
-        })),
+        playlists: picked.map((r) => {
+          // ① 先直接用歌单存储的封面 ref;若值存在但文件在本地/平台封面目录均探测不到
+          //    (无效引用),视为无封面,进入兜底,避免前端拿到空封面 URL。
+          let coverArt = r.cover_art || null;
+          if (coverArt && !resolveCoverFile(coverArt)) coverArt = null;
+          // ② 兜底:从歌单可播歌曲的有效封面里随机抽一张作歌单封面。
+          //    仅当歌单确实没有任何歌曲封面时才保留 null(前端显示占位符)。
+          if (!coverArt) {
+            const candidates = listPlayableCoverRefs(r.id);
+            if (candidates.length > 0) {
+              coverArt = candidates[Math.floor(Math.random() * candidates.length)];
+            }
+          }
+          return {
+            id: r.id,
+            name: r.name,
+            coverArt,
+            songCount: r.song_count || 0,
+            imported: true,
+          };
+        }),
       });
     }
     return { channels };
