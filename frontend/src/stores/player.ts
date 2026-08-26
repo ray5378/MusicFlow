@@ -316,6 +316,10 @@ export const usePlayerStore = defineStore("player", () => {
 
   // ==================== Unified peer system (rest) ====================
   const peers = ref<any[]>([]);
+  // 「按用户级隐藏」集合:该用户不显示在播放器切换弹窗的 peerId(dlna/airplay/group)。
+  // 单一数据源——REST /v1/peers、WS peer_snapshot、peer_available 都据此过滤,保证
+  // 隐藏后无论哪种来源刷新都不重现(后端 WS 广播是全局未过滤的,必须前端再过滤一次)。
+  const hiddenPeers = ref<Set<string>>(new Set());
   const currentPeer = computed(() => peers.value.find(p => p.peerId === currentPeerId.value));
   const currentPeerName = computed(() => {
     const p = currentPeer.value;
@@ -1258,9 +1262,39 @@ export const usePlayerStore = defineStore("player", () => {
 
   // 离线 DLNA 设备 / 成员全离线的群组不显示;local(本机)恒显示。
   // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
+  // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权)。
   function filterVisiblePeers(list: any[]): any[] {
+    const hidden = hiddenPeers.value;
     return (list || []).filter((p) =>
-      p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay"));
+      (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay"))
+      && !hidden.has(p.peerId));
+  }
+
+  // ==================== 按用户级隐藏偏好 ====================
+  // 仅影响本人播放器切换弹窗;不禁用设备,独立于权限。单一数据源即 hiddenPeers。
+  async function loadHiddenPrefs(): Promise<void> {
+    try {
+      const res = await api.get("/rest/api/v1/player-prefs/hidden");
+      hiddenPeers.value = new Set(res.data?.peerIds || []);
+    } catch { hiddenPeers.value = new Set(); }
+  }
+  function isPeerHidden(peerId: string): boolean {
+    return hiddenPeers.value.has(peerId);
+  }
+  // 乐观更新隐藏状态并持久化;失败回滚并重新拉取。
+  async function setPeerHidden(peerId: string, hidden: boolean): Promise<boolean> {
+    const next = new Set(hiddenPeers.value);
+    if (hidden) next.add(peerId); else next.delete(peerId);
+    hiddenPeers.value = next;
+    // 立即对当前 peers 重新过滤:隐藏的立刻从切换列表消失,显示的立刻回来。
+    peers.value = filterVisiblePeers(peers.value);
+    try {
+      await api.put("/rest/api/v1/player-prefs/hidden", { peerId, hidden });
+      return true;
+    } catch {
+      await loadHiddenPrefs();
+      return false;
+    }
   }
 
   async function refreshPeers(): Promise<void> {
@@ -1372,6 +1406,7 @@ export const usePlayerStore = defineStore("player", () => {
     if (remoteStates.size === 0) currentPeerId.value = localPeerId.value;
     await registerLocalPeer();
     await restoreLocalPeer();
+    await loadHiddenPrefs();
     await refreshPeers();
     connectPeerWs();
   }
@@ -1407,7 +1442,7 @@ export const usePlayerStore = defineStore("player", () => {
           if (!p) break;
           const idx = peers.value.findIndex(x => x.peerId === p.peerId);
           if (idx >= 0) peers.value[idx] = { ...peers.value[idx], ...p };
-          else if (p.available !== false) peers.value.push(p);
+          else if (p.available !== false && !hiddenPeers.value.has(p.peerId)) peers.value.push(p);
           break;
         }
         case "peer_unavailable": {
@@ -1492,6 +1527,8 @@ export const usePlayerStore = defineStore("player", () => {
     // peer system
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
     switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,
+    // 按用户级隐藏
+    hiddenPeers, loadHiddenPrefs, isPeerHidden, setPeerHidden,
     // group events (播放器群组页刷新信号)
     groupVersion,
     // UI-routed controls

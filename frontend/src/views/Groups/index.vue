@@ -469,33 +469,16 @@ async function toggleAirPlayDisabled(dev: any, disabled: boolean) {
 
 // 播放器「按用户级隐藏」偏好:peerId = "dlna:<id>" | "airplay:<id>" | "group:<id>"。
 // 仅影响本人切换弹窗的显示,不禁用设备(他人/其他用户仍可用),独立于权限。
-const hiddenPeerIds = ref<Set<string>>(new Set());
-
+// 单一数据源在 player store(hiddenPeers),切换弹窗与之共用,保证隐藏后不重现。
 function isHidden(peerId: string): boolean {
-  return hiddenPeerIds.value.has(peerId);
-}
-
-async function loadHiddenPrefs(): Promise<void> {
-  try {
-    const res = await api.get("/rest/api/v1/player-prefs/hidden");
-    hiddenPeerIds.value = new Set(res.data?.peerIds || []);
-  } catch { hiddenPeerIds.value = new Set(); }
+  return playerStore.isPeerHidden(peerId);
 }
 
 async function setPeerHidden(peerId: string, hidden: boolean) {
-  // 乐观更新:切换后本地立即生效,失败再回滚。
-  const next = new Set(hiddenPeerIds.value);
-  if (hidden) next.add(peerId); else next.delete(peerId);
-  hiddenPeerIds.value = next;
-  try {
-    await api.put("/rest/api/v1/player-prefs/hidden", { peerId, hidden });
-    ElMessage.success(hidden
-      ? "已隐藏(不再显示在我的播放器切换弹窗;未禁用,他人仍可用)"
-      : "已设为显示(将出现在我的播放器切换弹窗)");
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
-    await loadHiddenPrefs(); // 回滚
-  }
+  const ok = await playerStore.setPeerHidden(peerId, hidden);
+  ElMessage[ok ? "success" : "error"](ok
+    ? (hidden ? "已隐藏(不再显示在我的播放器切换弹窗;未禁用,他人仍可用)" : "已设为显示(将出现在我的播放器切换弹窗)")
+    : "操作失败,已回滚");
 }
 
 async function openCreate() {
@@ -590,7 +573,7 @@ function controlGroup(g: any) {
 // player store bumps groupVersion so this page reloads live (no polling).
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
-onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); loadHiddenPrefs(); });
+onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); playerStore.loadHiddenPrefs(); });
 </script>
 
 <style lang="scss" scoped>
