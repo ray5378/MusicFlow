@@ -19,7 +19,7 @@
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import type { PluginManifest } from "../../plugins/types.js";
-import { resolveCoverFile, listPlayableCoverRefs } from "../playlistCover.js";
+import { getPlaylistCover, listPlayableCoverRefs } from "../playlistCover.js";
 
 const log = createLogger("LOCAL-PLATFORM-REC");
 
@@ -119,13 +119,18 @@ export function recommendLocalPlatforms(): { channels: LocalPlatformChannel[] } 
         name: PLATFORM_LABELS[source] || source,
         count: picked.length,
         playlists: picked.map((r) => {
-          // ① 先直接用歌单存储的封面 ref;若值存在但文件在本地/平台封面目录均探测不到
-          //    (无效引用),视为无封面,进入兜底,避免前端拿到空封面 URL。
-          let coverArt = r.cover_art || null;
-          if (coverArt && !resolveCoverFile(coverArt)) coverArt = null;
-          // ② 兜底:从歌单可播歌曲的有效封面里随机抽一张作歌单封面。
-          //    仅当歌单确实没有任何歌曲封面时才保留 null(前端显示占位符)。
-          if (!coverArt) {
+          // ① 歌单自身有可解析封面时,统一返回不带扩展名的 `pl-<id>` ref(与详情页
+          //    一致)。不能直接透传 DB 的 cover_art(如 `pl-<id>.jpg` 带扩展名),否则
+          //    `getCoverArt?id=pl-<id>.jpg` 会按 pl- 前缀把 `.jpg` 混进歌单 id 去查库,
+          //    查不到该歌单 → 封面空白。
+          //    getPlaylistCover(id) 即详情页 `pl-<id>` 的解析路径:读到 playlists.coverArt
+          //    文件存在才返回非空,保证与详情页显示完全一致。
+          let coverArt: string | null = null;
+          if (getPlaylistCover(r.id)) {
+            coverArt = `pl-${r.id}`;
+          } else {
+            // ② 兜底:歌单自身无封面时,从歌单可播歌曲的有效封面里随机抽一张作歌单封面。
+            //    仅当歌单确实没有任何歌曲封面时才保留 null(前端显示占位符)。
             const candidates = listPlayableCoverRefs(r.id);
             if (candidates.length > 0) {
               coverArt = candidates[Math.floor(Math.random() * candidates.length)];
