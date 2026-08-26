@@ -300,12 +300,9 @@ async function doSyncAllRecommendPlaylists(
   }
 
   // 1. Fetch today's recommendations per channel (retry until non-empty).
-  // 注意:{ mode: "sync" } —— 路径 A 必须拿到「真实上游列表」才能入库/清理,
-  // 因此显式要求插件走上游抓取,而不是首页展示用的「本地库轮转」(recommend()
-  // 仅在未传 mode 时才对非网易平台走本地轮转)。见 go-music-dl 插件 recommend()。
   let channels: { source: string; playlists: OnlinePlaylistInfo[] }[] = [];
   for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await configured.provider.recommend(configured.config, { mode: "sync" });
+    const res = await configured.provider.recommend(configured.config);
     channels = (res.channels || []).map((ch: any) => ({ source: ch.source, playlists: ch.playlists || [] }));
     const hasAll = channels.every((ch) => ch.playlists.length > 0);
     if (hasAll) break;

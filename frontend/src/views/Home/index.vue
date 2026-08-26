@@ -87,7 +87,7 @@
           class="card fnos-card-sheen"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="playRemotePl(group, pl)">
-            <img v-if="pl.cover || pl.coverArt" :src="pl.cover || cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
             <PlatformBadge :source="group.source" />
             <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playRemotePl(group, pl)" />
@@ -222,18 +222,9 @@ const platformGroups = computed(() =>
     .filter((g) => g.playlists.length > 0)
 );
 
-// 平台精选卡片:导入为本地歌单后播放(复用现有 recommend/import 接口)。
+// 平台精选卡片：导入为本地歌单后播放（复用现有 recommend/import 接口）。
 async function playRemotePl(group: any, pl: any) {
-  if (menuGuard() || !pl) return;
-  // 2026-08:非网易平台首页精选改为「本地库轮转」(go-music-dl 插件返回 local:true,
-  // id = 本地歌单 UUID)。这类歌单已在本库,直接播放即可,无需再走远端导入。
-  if (pl.local) {
-    const n = await play.playPlaylist(pl.id);
-    if (n) ElMessage.success(`正在播放「${pl.name}」`);
-    else ElMessage.warning("该歌单暂无可播放歌曲");
-    return;
-  }
-  if (!recommendProviderId.value) return;
+  if (menuGuard() || !pl || !recommendProviderId.value) return;
   importingId.value = pl.id;
   try {
     const res = await api.post(`/rest/api/v1/online/${recommendProviderId.value}/recommend/import`, {
