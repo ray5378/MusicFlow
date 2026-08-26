@@ -96,6 +96,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
 import { useIsMobile } from "@/composables/useIsMobile";
+import { coverUrl } from "@/utils/cover";
 
 const props = withDefaults(
   defineProps<{
@@ -157,7 +158,7 @@ const isCurrent = (song: any) => !!playerStore.currentSong && playerStore.curren
 function coverSrc(song: any): string {
   if (!song.coverArt) return "";
   if (props.remote || /^https?:\/\//i.test(song.coverArt)) return song.coverArt;
-  return `/rest/getCoverArt?id=${song.coverArt}&size=120`;
+  return coverUrl(song.coverArt, 120);
 }
 
 const slots = useSlots();

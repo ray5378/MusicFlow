@@ -1462,10 +1462,9 @@ restRoutes.get("/download", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   }
 });
 
-restRoutes.get("/getCoverArt", async (c) => {
-  // 封面经 <img> 标签加载,请求无法携带鉴权头(/rest/* 已刻意放行 getCoverArt),
-  // 故此处不做权限门禁,保持公开可访问——否则所有封面会 401 不显示。
-  // COVER_VIEW 权限由前端在 UI 层决定是否渲染封面图。
+restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
+  // 封面 <img> 经 URL ?token= 鉴权(前端 coverUrl 自动附加,与 /rest/stream 一致),
+  // OpenSubsonic 规范要求 getCoverArt 鉴权,故保留 COVER_VIEW 门禁:撤销后 403。
   const id = getParam(c, "id") || "";
   const size = Number(getParam(c, "size") || "300") || 300;
   const accept = c.req.header("Accept") || "";

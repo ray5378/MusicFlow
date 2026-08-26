@@ -82,13 +82,13 @@ app.get("/rest/ping", (c) => c.json({ "subsonic-response": { status: "ok", versi
 
 app.use("/rest/*", async (c, next) => {
   // Public endpoints under /rest/* that cannot send auth headers:
-  //  - getCoverArt: loaded via <img> tags
   //  - dlna/stream/:token: pulled by DLNA renderers (TVs, speakers) which
   //    have no way to authenticate; access is gated by a short-lived cast
   //    token that maps to a songId inside the route handler itself.
+  // getCoverArt 曾在此放行(封面 <img> 带不上请求头),但 OpenSubsonic 规范要求
+  // 其鉴权,前端已在封面 URL 上附加 ?token= 查询参数,故改走 authMiddleware。
   const p = c.req.path;
   // c.req.path 是完整路径(含 /rest 前缀),所以用 includes/endsWith 匹配
-  if (p === "/getCoverArt" || p.endsWith("/getCoverArt")) return next();
   if (p.includes("/dlna/stream/")) return next();
   return authMiddleware(c, next);
 });

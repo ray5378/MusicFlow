@@ -2,7 +2,7 @@
   <div class="album-detail" v-loading="loading">
     <div class="album-header" v-if="album">
       <div class="album-cover">
-        <img v-if="album.coverArt" :src="`/rest/getCoverArt?id=${album.coverArt}&size=300`" loading="lazy" decoding="async" />
+        <img v-if="album.coverArt" :src="coverUrl(album.coverArt, 300)" loading="lazy" decoding="async" />
         <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="64"  /></div>
       </div>
       <div class="album-meta">
@@ -27,6 +27,7 @@ import { usePlayerStore, Song } from "@/stores/player";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 import SongTable from "@/components/SongTable.vue";
+import { coverUrl } from "@/utils/cover";
 
 const route = useRoute();
 const router = useRouter();

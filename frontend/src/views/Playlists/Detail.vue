@@ -2,7 +2,7 @@
   <div class="playlist-detail" v-loading="loading">
     <div class="playlist-header" v-if="playlist">
       <div class="playlist-cover">
-        <img v-if="playlist.coverArt" :src="`/rest/getCoverArt?id=${playlist.coverArt}&size=300`" loading="lazy" decoding="async" />
+        <img v-if="playlist.coverArt" :src="coverUrl(playlist.coverArt, 300)" loading="lazy" decoding="async" />
         <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">
@@ -91,6 +91,7 @@ import SongTable from "@/components/SongTable.vue";
 import { useInfiniteList } from "@/composables/useInfiniteList";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 import { Trash2 } from "lucide-vue-next";
+import { coverUrl } from "@/utils/cover";
 
 const route = useRoute();
 const router = useRouter();

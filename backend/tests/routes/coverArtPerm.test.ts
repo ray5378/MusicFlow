@@ -12,14 +12,16 @@ import { authMiddleware } from "../../src/middleware/auth.js";
 import { restRoutes } from "../../src/routes/rest/index.js";
 import { PERM, setUserPermission } from "../../src/services/access.js";
 
-// 封面回归:getCoverArt 经 <img> 标签加载,请求带不上鉴权头,
-// 因此 /rest/* 刻意放行它(不跑 authMiddleware),路由也不做权限门禁——
-// 匿名必须能取图(占位图),否则所有封面 401 不显示。
-// (复刻 index.ts 的 /rest/* 中间件编排,含 getCoverArt 匿名放行分支。)
+// 封面回归(方案B):OpenSubsonic 规范要求 getCoverArt 鉴权,前端封面 <img> 用
+// URL ?token= 携带凭据(与 /rest/stream 一致)。因此:
+//  - 匿名无凭据 → 401
+//  - 带鉴权 + 默认 cover.view → 200
+//  - 撤销 cover.view → 403
+// (复刻 index.ts 的 /rest/* 中间件:仅放行 dlna/stream,其余走 authMiddleware。)
 const app = new Hono();
 app.use("/rest/*", async (c, next) => {
   const p = c.req.path;
-  if (p === "/getCoverArt" || p.endsWith("/getCoverArt")) return next();
+  if (p.includes("/dlna/stream/")) return next();
   return authMiddleware(c, next);
 });
 app.route("/rest", restRoutes);
@@ -44,26 +46,31 @@ beforeAll(() => {
   seedUser(U.dave, "dave", 0);
 });
 
-describe("getCoverArt 匿名放行(封面 <img> 不 401)", () => {
-  it("匿名 <img> 请求不被 401,返回占位封面(200 image)", async () => {
+describe("getCoverArt 需鉴权(方案 B)+ COVER_VIEW 门禁", () => {
+  it("无凭据匿名 <img> 请求被拒绝(401)", async () => {
     const res = await app.request("/rest/getCoverArt?id=al-no-such-album&size=300");
+    expect(res.status).toBe(401);
+  });
+
+  it("带鉴权且保留 cover.view(默认授权)可正常取图", async () => {
+    const res = await app.request("/rest/getCoverArt?id=al-no-such-album&size=300&" + authQS("dave"));
     expect(res.status).toBe(200);
     expect((res.headers.get("content-type") || "").toLowerCase()).toContain("image/");
   });
 
-  it("携带鉴权的请求同样可取图", async () => {
-    const res = await app.request("/rest/getCoverArt?id=al-no-such-album&size=300&" + authQS("dave"));
-    expect(res.status).toBe(200);
-  });
-
-  it("管理员撤销 cover.view 也不影响 <img> 取图(封面公开,权限在 UI 层控制)", async () => {
+  it("管理员撤销 cover.view 后,该用户取封面被 403 拦截", async () => {
     setUserPermission(U.dave, PERM.COVER_VIEW, false);
     const res = await app.request("/rest/getCoverArt?id=al-no-such-album&size=300&" + authQS("dave"));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
     setUserPermission(U.dave, PERM.COVER_VIEW, true);
   });
 
-  it("其余 /rest/* 端点(如 getAlbumList)仍要求鉴权", async () => {
+  it("管理员始终可取图(不受 COVER_VIEW 限制)", async () => {
+    const res = await app.request("/rest/getCoverArt?id=al-no-such-album&size=300&" + authQS("root"));
+    expect(res.status).toBe(200);
+  });
+
+  it("其余 /rest/* 端点(如 getAlbumList)同样要求鉴权", async () => {
     const res = await app.request("/rest/getAlbumList?type=newest");
     expect(res.status).toBe(401);
   });

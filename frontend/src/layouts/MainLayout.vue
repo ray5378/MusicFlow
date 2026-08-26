@@ -352,7 +352,7 @@
             @click="playFromQueue(idx)"
           >
             <div class="queue-cover">
-              <img v-if="song.coverArt" :src="`/rest/getCoverArt?id=${song.coverArt}&size=80`" loading="lazy" decoding="async" />
+              <img v-if="song.coverArt" :src="coverArtUrl(song.coverArt, 80)" loading="lazy" decoding="async" />
               <div v-else class="queue-cover-ph"><MfIcon name="Headphones" /></div>
               <span v-if="idx === playerStore.currentIndex" class="playing-indicator" :class="{ paused: !playerStore.isPlaying }"></span>
             </div>
@@ -492,6 +492,7 @@ import GlobalItemUI from "@/components/GlobalItemUI.vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { PERM } from "@/utils/perms";
+import { coverUrl as coverArtUrl } from "@/utils/cover";
 
 const route = useRoute();
 const router = useRouter();

@@ -12,5 +12,9 @@ export function coverUrl(id: string | undefined, fallback = 300): string {
     typeof window !== "undefined" && window.innerWidth <= 768
       ? Math.min(fallback, 150)
       : fallback;
-  return `/rest/getCoverArt?id=${id}&size=${size}`;
+  // 封面 <img> 无法携带请求头,鉴权凭据走 URL ?token=(与 /rest/stream 一致)。
+  // 后端 getCoverArt 按 OpenSubsonic 规范要求鉴权,不带 token 会 401。
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+  const q = `/rest/getCoverArt?id=${id}&size=${size}`;
+  return token ? `${q}&token=${encodeURIComponent(token)}` : q;
 }
