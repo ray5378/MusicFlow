@@ -2,14 +2,14 @@
   <div class="groups-page">
     <div class="page-header">
       <h2>播放器</h2>
-      <el-button type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
+      <el-button v-if="canManage" type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
     </div>
 
     <!-- DLNA 设备管理:在线 + 离线全部展示,可重命名 / 删除离线设备 -->
     <div class="devices-section">
       <div class="section-head">
         <h3>DLNA 设备</h3>
-        <el-button size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
+        <el-button v-if="canManage" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
       </div>
       <div class="devices-box" v-loading="loadingDevices">
         <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
@@ -293,11 +293,18 @@
 import { ref, computed, watch, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
+import { useAuthStore } from "@/stores/auth";
+import { PERM } from "@/utils/perms";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
 import { useCopy } from "@/composables/useCopy";
 
 const { copy } = useCopy();
+
+const authStore = useAuthStore();
+// 管理能力:管理员或具 renderer.manage。仅 manage 可扫描/改名/删除/禁用/群组 CRUD;
+// 仅具 renderer.use 的普通用户只能查看设备/群组并设置自己的隐藏开关、切换到被授权设备。
+const canManage = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE));
 
 function copyPeer(peerId: string, name: string) {
   copy(peerId, `设备 ID(${name})`);

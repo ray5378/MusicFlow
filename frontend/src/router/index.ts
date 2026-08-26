@@ -24,7 +24,7 @@ const routes = [
       { path: "playlists", name: "Playlists", component: () => import("@/views/Playlists/index.vue"), meta: { perm: PERM.PLAYLIST_VIEW } },
       { path: "playlists/:id", name: "PlaylistDetail", component: () => import("@/views/Playlists/Detail.vue"), meta: { perm: PERM.PLAYLIST_VIEW } },
       { path: "favorites", name: "Favorites", component: () => import("@/views/Favorites/index.vue"), meta: { perm: PERM.FAVORITES_MANAGE } },
-      { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue"), meta: { perm: PERM.RENDERER_MANAGE } },
+      { path: "groups", name: "Groups", component: () => import("@/views/Groups/index.vue"), meta: { perms: [PERM.RENDERER_MANAGE, PERM.RENDERER_USE] } },
       { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "history", name: "History", component: () => import("@/views/History/index.vue"), meta: { perm: PERM.HISTORY_MANAGE } },
@@ -55,6 +55,8 @@ router.beforeEach((to, _from, next) => {
   } else if (to.meta.requiresAdmin && !authStore.isAdmin) {
     next("/");
   } else if (to.meta.perm && !authStore.hasPerm(to.meta.perm as string)) {
+    next("/");
+  } else if (to.meta.perms && !(to.meta.perms as string[]).some(p => authStore.hasPerm(p))) {
     next("/");
   } else {
     next();

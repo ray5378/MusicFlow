@@ -32,7 +32,7 @@
         <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/albums"><MfIcon name="Disc3" /><template #title>专辑</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.FAVORITES_MANAGE)" index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>我喜欢</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/genres"><MfIcon name="Library" /><template #title>风格</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE)" index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
