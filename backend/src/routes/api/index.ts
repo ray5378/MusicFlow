@@ -73,7 +73,7 @@ import {
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
-import { unregisterPlugin, firstEnabledByCapability, getPluginConfig, getPluginManifest, getPlugin } from "../../plugins/registry.js";
+import { unregisterPlugin, firstEnabledByCapability, getEnabledByCapability, getPluginConfig, getPluginManifest, getPlugin } from "../../plugins/registry.js";
 import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
@@ -95,6 +95,7 @@ export const apiRoutes = new Hono();
 // 歌单(子权限)与历史/愿望单/音流等在各自路由上单独挂载。
 // 注意:必须注册在子路由(route)之前,才能先于子路由处理器执行。
 apiRoutes.use("/v1/recommend", permMiddleware(PERM.RECOMMEND_VIEW));
+apiRoutes.use("/v1/local-recommend", permMiddleware(PERM.RECOMMEND_VIEW));
 apiRoutes.use("/v1/home/playlist-count", permMiddleware(PERM.RECOMMEND_VIEW));
 apiRoutes.use("/v1/recommend-pool", permMiddleware(PERM.RECOMMEND_VIEW));
 apiRoutes.use("/v1/songs", permMiddleware(PERM.LIBRARY_BROWSE));
@@ -181,15 +182,8 @@ apiRoutes.get("/v1/recommend", async (c) => {
         // 首页平台精选歌单均已入库,先用三重匹配定位本地歌单,再取数据库真实
         // songCount(与歌单列表/详情页口径一致)。不再透传插件远程 trackCount——
         // 对已入库歌单该值常为空,导致首页不显示数字。
-        //
-        // 2026-08 新增:非网易平台首页精选改为「本地库轮转」(go-music-dl 插件
-        // recommend() 对非网易平台返回 local:true + 本地歌单 UUID)。这类歌单的
-        // id 就是本地库主键,直接用 id 查库即可;封面走 getCoverArt 的 pl-<id>
-        // 逻辑,前端据此渲染本地封面并「直接播放」(见前端 Home/index.vue)。
         const source = pl.source || ch.source || "";
-        const local = pl.local
-          ? (db.select().from(playlists).where(eq(playlists.id, String(pl.id))).get() || null)
-          : findLocalRemotePlaylist(pl.id, source, pl.name || "");
+        const local = findLocalRemotePlaylist(pl.id, source, pl.name || "");
         return {
           id: pl.id,
           source,
@@ -200,13 +194,9 @@ apiRoutes.get("/v1/recommend", async (c) => {
           cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
             ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
             : (pl.cover || ""),
-          // 本地库轮转歌单:封面走 getCoverArt(pl-<id>,空/自建歌单自动回退 4 宫格拼图);
-          // 远端歌单封面用上面的远程 URL(cover 字段),不需要 coverArt。
-          coverArt: pl.local && local ? `pl-${local.id}` : undefined,
           trackCount: local ? String(local.songCount ?? "") : "",
           link: pl.link || "",
           imported: !!local,
-          local: !!pl.local, // 本地库轮转歌单标记,前端据此直接播放(不走导入)
         };
       }),
     }));
@@ -216,6 +206,41 @@ apiRoutes.get("/v1/recommend", async (c) => {
     console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
     return c.json({ success: true, channels: [], providerId, error: String(e?.message || e) });
   }
+});
+
+// ==================== 首页「本地随机(按平台)」(能力驱动,不写死插件名) ====================
+// 由启用的 `localPlatformRecommend` 插件(如内置 local-random-recommend)提供:
+// 从本地库按平台分组随机取已入库歌单,供三端(Web/客户端/HA)统一展示动态刷新的
+// 平台歌单——不依赖上游固定精选。核心只按能力遍历调用并透传数据。
+apiRoutes.get("/v1/local-recommend", async (c) => {
+  // 遍历所有具备该能力的插件,合并多插件的 channels(支持多提供方共存)。
+  const providers = getEnabledByCapability("localPlatformRecommend");
+  const allChannels: any[] = [];
+  for (const p of providers) {
+    if (typeof p.impl?.recommendLocal !== "function") continue;
+    try {
+      const result = await p.impl.recommendLocal(getPluginConfig(p.manifest.id) || {});
+      const channels = Array.isArray(result?.channels) ? result.channels : [];
+      for (const ch of channels) {
+        allChannels.push({
+          source: ch.source || "",
+          name: ch.name || ch.source || "",
+          count: ch.count || 0,
+          // 本地歌单:直接透传 DB 字段(coverArt 为本地封面 ref,三端用各自 cover 工具拼 URL)。
+          playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
+            id: pl.id ?? "",
+            name: pl.name ?? "",
+            coverArt: pl.coverArt ?? null,
+            songCount: pl.songCount ?? 0,
+            imported: true,
+          })),
+        });
+      }
+    } catch (e: any) {
+      console.warn(`[LOCAL-RECOMMEND] ${p.manifest.id} recommendLocal() failed:`, e?.message || e);
+    }
+  }
+  return c.json({ success: true, channels: allChannels });
 });
 
 // 首页顶部「每日推荐 + 本地推荐 + 随机歌单」展示张数(含两张固定推荐)。

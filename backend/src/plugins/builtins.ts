@@ -33,6 +33,7 @@ import { dailyRecommendManifest, dailyRecommendPlugin } from "../services/plugin
 import { localRecommendManifest, localRecommendPlugin } from "../services/plugin/localRecommend.js";
 import { dailyRoamManifest, dailyRoamPlugin } from "../services/plugin/dailyRoam.js";
 import { randomSongsManifest, randomSongsPlugin } from "../services/plugin/randomSongs.js";
+import { localPlatformRecommendManifest, localPlatformRecommendPlugin } from "../services/plugin/localPlatformRecommend.js";
 // ---- sync ----
 import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/playlistSync.js";
 // ---- lyrics / cover providers ----
@@ -66,6 +67,8 @@ export const BUILTIN_RECOMMENDER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dailyRoamManifest, impl: dailyRoamPlugin },
   // 「随机歌曲」:全库随机实时更新歌单(客户端随心听 / 前端通用,惰性刷新)。
   { manifest: randomSongsManifest, impl: randomSongsPlugin },
+  // 「本地随机(按平台)」:首页动态分区数据源(独立能力,不占 /v1/recommend)。
+  { manifest: localPlatformRecommendManifest, impl: localPlatformRecommendPlugin },
 ];
 
 export const BUILTIN_SYNC_PLUGINS: BuiltinPlugin[] = [
