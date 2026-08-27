@@ -73,63 +73,62 @@
       <MfIcon name="TriangleAlert" :size="16" /> 平台精选加载失败，请检查 go-music-dl 插件是否已启用并配置服务地址
     </div>
 
-    <!-- ===== 各平台精选（go-music-dl recommend 能力输出，每平台数量由插件配置） ===== -->
-    <section class="section" v-for="group in platformGroups" :key="group.source">
-      <div class="section-title">
-        <span>{{ group.name }}精选</span>
-        <span class="section-sub">为你精选的 {{ group.name }} 歌单</span>
-        <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
-      </div>
-      <div class="grid-row">
-        <div
-          v-for="pl in group.playlists"
-          :key="pl.id"
-          class="card fnos-card-sheen"
-        >
-          <div class="card-cover-wrap mf-coverwrap" @click="playRemotePl(group, pl)">
-            <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
-            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
-            <PlatformBadge :source="group.source" />
-            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playRemotePl(group, pl)" />
+    <!-- ===== 首页推荐分区（按 sortOrder 排序，go-music-dl 推荐 + 本地随机混合排列） ===== -->
+    <section class="section" v-for="group in sortedAllGroups" :key="group.type + '-' + group.source">
+      <template v-if="group.type === 'recommend'">
+        <div class="section-title">
+          <span>{{ group.name }}精选</span>
+          <span class="section-sub">为你精选的 {{ group.name }} 歌单</span>
+          <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
+        </div>
+        <div class="grid-row">
+          <div
+            v-for="pl in group.playlists"
+            :key="pl.id"
+            class="card fnos-card-sheen"
+          >
+            <div class="card-cover-wrap mf-coverwrap" @click="playRemotePl(group, pl)">
+              <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+              <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
+              <PlatformBadge :source="group.source" />
+              <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playRemotePl(group, pl)" />
+            </div>
+            <div class="card-body" @click="playRemotePl(group, pl)">
+              <div class="card-title">{{ pl.name }}</div>
+              <div class="card-sub">{{ pl.trackCount ? pl.trackCount + ' 首' : '歌单' }}</div>
+            </div>
           </div>
-          <div class="card-body" @click="playRemotePl(group, pl)">
-            <div class="card-title">{{ pl.name }}</div>
-            <div class="card-sub">{{ pl.trackCount ? pl.trackCount + ' 首' : '歌单' }}</div>
+          <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + n" class="card placeholder fnos-shimmer">
+            <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
+            <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
           </div>
         </div>
-        <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + n" class="card placeholder fnos-shimmer">
-          <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
-          <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
+      </template>
+      <template v-else>
+        <div class="section-title">
+          <span>{{ group.name }}·本地随机</span>
+          <span class="section-sub">从你的 {{ group.name }} 歌单里随机(每次刷新不同)</span>
+          <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
         </div>
-      </div>
-    </section>
-
-    <!-- ===== 本地随机(按平台):由 local-random-recommend 插件提供,仅删依赖上游固定精选。
-          从本地库按平台随机挑歌单,每次刷新不同;歌单已入库,直接打开/播放,无需导入。 ===== -->
-    <section class="section" v-for="group in localRandomGroups" :key="'lr-' + group.source">
-      <div class="section-title">
-        <span>{{ group.name }}·本地随机</span>
-        <span class="section-sub">从你的 {{ group.name }} 歌单里随机(每次刷新不同)</span>
-        <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
-      </div>
-      <div class="grid-row">
-        <div
-          v-for="pl in group.playlists"
-          :key="'lr-' + group.source + '-' + pl.id"
-          class="card fnos-card-sheen"
-        >
-          <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
-            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
-            <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
-            <PlatformBadge :source="group.source" />
-            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
-          </div>
-          <div class="card-body" @click="go('/playlists/' + pl.id)">
-            <div class="card-title">{{ pl.name }}</div>
-            <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
+        <div class="grid-row">
+          <div
+            v-for="pl in group.playlists"
+            :key="'lr-' + group.source + '-' + pl.id"
+            class="card fnos-card-sheen"
+          >
+            <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
+              <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
+              <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
+              <PlatformBadge :source="group.source" />
+              <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
+            </div>
+            <div class="card-body" @click="go('/playlists/' + pl.id)">
+              <div class="card-title">{{ pl.name }}</div>
+              <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
+            </div>
           </div>
         </div>
-      </div>
+      </template>
     </section>
   </div>
 </template>
@@ -258,12 +257,28 @@ const localRandomChannels = ref<any[]>([]);
 const localRandomGroups = computed(() =>
   localRandomChannels.value
     .map((ch: any) => ({
+      type: "localRandom",
       source: ch.source || "",
       name: (ch.name || ch.source || "").replace(/音乐$/, ""),
       playlists: ch.playlists || [],
+      sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
     }))
     .filter((g) => g.playlists.length > 0)
 );
+
+// 合并推荐 + 本地随机，按 sortOrder 升序排列（数值越小越靠前）
+const sortedAllGroups = computed(() => {
+  const recommend = recommendChannels.value
+    .map((ch: any) => ({
+      type: "recommend",
+      source: ch.source || "",
+      name: (ch.name || ch.source || "").replace(/音乐$/, ""),
+      playlists: ch.playlists || [],
+      sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+    }))
+    .filter((g) => g.playlists.length > 0);
+  return [...recommend, ...localRandomGroups.value].sort((a, b) => a.sortOrder - b.sortOrder);
+});
 async function loadLocalRandom() {
   try {
     const res = await api.get("/rest/api/v1/local-recommend");
