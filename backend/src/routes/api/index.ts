@@ -179,6 +179,7 @@ apiRoutes.get("/v1/recommend", async (c) => {
   }
 
   const allChannels: any[] = [];
+  let primaryError: string | undefined;
 
   // ---- 1. 主推荐插件(如 go-music-dl) ----
   if (rp && typeof rp.impl?.recommend === "function") {
@@ -212,6 +213,7 @@ apiRoutes.get("/v1/recommend", async (c) => {
       for (const ch of channels) allChannels.push(ch);
     } catch (e: any) {
       console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
+      primaryError = String(e?.message || e);
       // 主推荐插件失败不阻断其他插件
     }
   }
@@ -261,7 +263,9 @@ apiRoutes.get("/v1/recommend", async (c) => {
   });
 
   recommendCache.set(cacheKey, { ts: Date.now(), channels: allChannels });
-  return c.json({ success: true, channels: allChannels, providerId });
+  const resp: any = { success: true, channels: allChannels, providerId };
+  if (primaryError) resp.error = primaryError;
+  return c.json(resp);
 });
 
 // ==================== 首页「本地随机(按平台)」(能力驱动,不写死插件名) ====================
