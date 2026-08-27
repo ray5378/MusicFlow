@@ -42,7 +42,7 @@ const PLATFORM_LABELS: Record<string, string> = {
 };
 
 /** 读本插件配置:每平台歌单数。非法或未配置回落默认。 */
-function getConfig(): { homeCount: number } {
+function getConfig(): { homeCount: number; sortOrder: number } {
   try {
     const row = sqlite
       .prepare("SELECT config FROM plugins WHERE name = ? AND enabled = 1")
@@ -51,9 +51,11 @@ function getConfig(): { homeCount: number } {
     const raw = parseInt(String(cfg.homeCount), 10);
     const homeCount =
       Number.isFinite(raw) && raw > 0 ? Math.min(raw, MAX_HOME_COUNT) : DEFAULT_HOME_COUNT;
-    return { homeCount };
+    const sortRaw = parseInt(String(cfg.sortOrder), 10);
+    const sortOrder = Number.isFinite(sortRaw) && sortRaw > 0 ? sortRaw : 20;
+    return { homeCount, sortOrder };
   } catch {
-    return { homeCount: DEFAULT_HOME_COUNT };
+    return { homeCount: DEFAULT_HOME_COUNT, sortOrder: 20 };
   }
 }
 
@@ -71,6 +73,7 @@ export interface LocalPlatformChannel {
   source: string; // 平台 slug,如 netease
   name: string; // 平台展示名
   count: number; // 本平台返回歌单数
+  sortOrder?: number; // 首页排序值,数值越小越靠前
   playlists: {
     id: string; // 本地歌单 id(已入库,可直接播)
     name: string;
@@ -86,7 +89,8 @@ export interface LocalPlatformChannel {
  */
 export function recommendLocalPlatforms(): { channels: LocalPlatformChannel[] } {
   try {
-    const { homeCount } = getConfig();
+    const cfg = getConfig();
+    const { homeCount, sortOrder = 20 } = cfg;
     const rows = sqlite
       .prepare(
         `SELECT id, name, source_platform, song_count, cover_art
@@ -118,6 +122,7 @@ export function recommendLocalPlatforms(): { channels: LocalPlatformChannel[] } 
         source,
         name: PLATFORM_LABELS[source] || source,
         count: picked.length,
+        sortOrder,
         playlists: picked.map((r) => {
           // ① 歌单自身有可解析封面时,统一返回不带扩展名的 `pl-<id>` ref(与详情页
           //    一致)。不能直接透传 DB 的 cover_art(如 `pl-<id>.jpg` 带扩展名),否则
@@ -171,6 +176,14 @@ export const localPlatformRecommendManifest: PluginManifest = {
       default: DEFAULT_HOME_COUNT,
       group: "frontend",
       help: "每个平台在首页「本地随机」分区展示的歌单数量(1~50,默认 6)。所有平台取同一个值。",
+    },
+    {
+      key: "sortOrder",
+      label: "首页显示顺序",
+      type: "number",
+      default: 20,
+      group: "frontend",
+      help: "数值越小越靠前(1~100,默认 20)。影响首页推荐中「本地随机(按平台)」分区的位置。",
     },
   ],
   documentation: `### 功能介绍
