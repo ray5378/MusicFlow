@@ -201,6 +201,12 @@ apiRoutes.get("/v1/recommend", async (c) => {
       }),
     }));
     recommendCache.set(providerId, { ts: Date.now(), channels });
+    // 按 sortOrder 升序排列(数值越小越靠前,插件未设置时默认 99)
+    channels.sort((a: any, b: any) => {
+      const sa = typeof a.sortOrder === "number" ? a.sortOrder : 99;
+      const sb = typeof b.sortOrder === "number" ? b.sortOrder : 99;
+      return sa - sb;
+    });
     return c.json({ success: true, channels, providerId });
   } catch (e: any) {
     console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
@@ -240,6 +246,12 @@ apiRoutes.get("/v1/local-recommend", async (c) => {
       console.warn(`[LOCAL-RECOMMEND] ${p.manifest.id} recommendLocal() failed:`, e?.message || e);
     }
   }
+  // 按 sortOrder 升序排列(数值越小越靠前)
+  allChannels.sort((a, b) => {
+    const sa = typeof a.sortOrder === "number" ? a.sortOrder : 99;
+    const sb = typeof b.sortOrder === "number" ? b.sortOrder : 99;
+    return sa - sb;
+  });
   return c.json({ success: true, channels: allChannels });
 });
 
