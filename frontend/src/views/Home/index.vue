@@ -74,7 +74,7 @@
     </div>
 
     <!-- ===== 首页推荐分区（按 sortOrder 排序，go-music-dl 推荐 + 本地随机混合排列） ===== -->
-    <section class="section" v-for="group in sortedAllGroups" :key="group.type + '-' + group.source">
+    <section class="section" v-for="group in sortedAllGroups" :key="group.type + '-' + group.source + '-' + (group._pluginId || '')">
       <template v-if="group.type === 'recommend'">
         <div class="section-title">
           <span>{{ group.name }}精选</span>
@@ -87,18 +87,18 @@
             :key="pl.id"
             class="card fnos-card-sheen"
           >
-            <div class="card-cover-wrap mf-coverwrap" @click="playRemotePl(group, pl)">
+            <div class="card-cover-wrap mf-coverwrap" @click="pl.imported ? playPl(pl) : playRemotePl(group, pl)">
               <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
               <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
               <PlatformBadge :source="group.source" />
-              <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playRemotePl(group, pl)" />
+              <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => pl.imported ? playPl(pl) : playRemotePl(group, pl)" />
             </div>
-            <div class="card-body" @click="playRemotePl(group, pl)">
+            <div class="card-body" @click="pl.imported ? playPl(pl) : playRemotePl(group, pl)">
               <div class="card-title">{{ pl.name }}</div>
               <div class="card-sub">{{ pl.trackCount ? pl.trackCount + ' 首' : '歌单' }}</div>
             </div>
           </div>
-          <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + n" class="card placeholder fnos-shimmer">
+          <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + (group._pluginId || '') + '-' + n" class="card placeholder fnos-shimmer">
             <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
             <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
           </div>
@@ -275,6 +275,7 @@ const sortedAllGroups = computed(() => {
       name: (ch.name || ch.source || "").replace(/音乐$/, ""),
       playlists: ch.playlists || [],
       sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+      _pluginId: ch._pluginId || "",
     }))
     .filter((g) => g.playlists.length > 0);
   return [...recommend, ...localRandomGroups.value].sort((a, b) => a.sortOrder - b.sortOrder);
