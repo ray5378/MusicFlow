@@ -112,6 +112,48 @@
 - **禁止**：未启用状态下任何代码路径调用 discovery/设备注册（mDNS 是唯一设备来源，关闭后设备列表为空，天然免疫）。
 - **内置插件均可停用**（v1.7.78+）：移除"内置不可停用"限制——`/v1/plugins` 的 toggle 对所有插件生效（内置插件仅不可删除/不可更新）。需要服务生命周期联动的内置插件（如 airplay-renderer → AirPlay 服务启停）在 toggle 端点特判 id 接线，禁止只改 DB 不联动。
 
+### 1.6 首页推荐展示与歌曲处理解耦契约（v1.7.79+，根治方案）
+
+> **问题**：榜单插件（QQ/酷狗/网易云）的 `recommend()` 曾做完整抓歌+匹配+在线补全（酷狗 TOP500 一次处理 500 首），但 `/v1/recommend` 首页只用到了 `id/name/cover/count`，处理出的 `songs` 被后端丢弃。于是**首页展示延迟被绑定在"插件处理了多少首歌"上**——冷启动下多个频道累积的几百次匹配/补全轻松超过前端默认 15s 超时，`/v1/recommend` 整单被中止 → go-music-dl 的频道与榜单频道一起消失。这是逻辑错误：首页只需元数据，却被设计成了"迷你同步"。
+>
+> **目标**：首页展示任何歌单（封面+数量+点击进入）都**不得依赖插件处理歌曲数**；歌曲只在**每日一次** `runDailyJob` 或**点击卡片时按需**拉取；其余时间一律复用"每日更新后的"数据，不重新刷新平台歌单。
+
+**A. 责任切分（禁止合职责）**
+
+| 时机 | 谁去做 | 做什么 | 是否访问上游 |
+|------|--------|--------|--------------|
+| 首页展示（每次 `/v1/recommend`） | 插件 `recommend()` | 只返回**轻量元数据**：`{ id, name, cover, creator }`；不 grep、不匹配、不补全、不做任何歌曲级处理 | **否** |
+| 每日一次（调度器） | 插件 `runDailyJob()` | 抓全量歌单→逐首匹配/补全→`host.playlists.upsert` 写入本地库 | 是 |
+| 点击卡片/进入歌单 | 既有 `/v1/online/:providerId/recommend/import`（`importRecommendPlaylist` → `provider.playlistSongs`） | 按需拉取该歌单歌曲并导入本地库 | 是（按需） |
+
+**B. 数据契约（`/v1/recommend` 返回）**
+
+- 频道：`{ source, name, count, sortOrder, _pluginId, playlists }`。
+- 歌单卡片字段：
+  - `id`：`pl-<plugin>-<rankid>`，与 `runDailyJob` upsert 的本地歌单 id 一致；
+  - `name` / `cover` / `creator`：插件轻量元数据；
+  - `trackCount` / `imported`：**由后端用每日同步入库的本地歌单（`local.songCount` / 是否存在）覆盖**，不来自插件；
+  - 未入库（每日同步还没跑）时 `imported=false`、`trackCount=""`（首页显示"歌单"占位，点击即按需拉取）。
+- 聚合仍需并行（`Promise.all`，各插件独立 `try/catch`）并走后端 `recommendCache`；因各插件 `recommend()` 已零网络，冷缓存首次也秒级。
+
+**C. 插件侧硬约束（对 recommendPlaylist 能力插件）**
+
+- `recommend()` 不得调用上游、不得调用 `host.songs.search` / `host.sources.complete`、不得逐首处理歌曲——**只允许**基于配置（rankIds/chartIds + homeCount + sortOrder）拼装歌单元数据返回。
+- 单次 `recommend()` 必须是纯本地、同步秒回；若某频道失败，仅跳过该频道，不影响其它插件与 go-music-dl 主频道。
+- 严禁在 `recommend()` 内完成 `runDailyJob` 的职责；两方法职责不可互相侵入。
+- 明确每个发布版本保留 `manifest.longRunning.recommend` 预算即可，但实现上不应再触发长耗时逻辑。
+
+**D. 核心侧硬约束**
+
+- `/v1/recommend` 的 recommendPlaylist 聚合分支：`trackCount`/`imported` 一律以 `findLocalRemotePlaylist(id, source, name)` 的本地行为准；禁止回落到插件返回的歌曲数（插件不应再返回 song 级数据）。
+- 禁止因单插件慢而让整个响应超时/失败：聚合必须并行 + 独立 catch，任何一频道失败都不能吞掉 go-music-dl 主频道。
+
+**E. 边界（禁止违反）**
+
+- 不在首页链路里触发每日同步或歌曲拉取；首页与"爬取歌曲"彻底解耦。
+- 不新增缓存层，沿用既有 `recommendCache` 与并行聚合。
+- 不改变 `/v1/recommend` 的路径/返回结构/`success`/`providerId` 语义（遵守 3.5 行为契约）。
+
 ---
 
 ## 二、数据模型契约（SQLite）
