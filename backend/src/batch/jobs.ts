@@ -53,7 +53,7 @@ async function runPluginMethod(pluginId: string, method: string, opts: any): Pro
 // 推荐插件直接在子进程内 await(不再经 jobRunner),组合歌单在源歌单之后跑,
 // 平台推荐/网页歌清理按 capability 遍历启用 source 插件。
 async function dailyJobsHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
-  for (const cap of ["dailyPlaylist", "localPlaylist", "recommendPlaylist"] as const) {
+  for (const cap of ["dailyPlaylist", "localPlaylist", "recommendPlaylist", "localPlatformRecommend"] as const) {
     for (const { manifest, impl } of getEnabledByCapability(cap)) {
       if (typeof impl?.runDailyJob !== "function") continue;
       try {

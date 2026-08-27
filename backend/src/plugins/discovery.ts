@@ -47,7 +47,7 @@ const VALID_TYPES: PluginType[] = [
 const VALID_CAPS: PluginCapability[] = [
   "search", "playlistSearch", "songSearch", "artistSearch", "albumSearch", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
-  "recommendPlaylist",
+  "recommendPlaylist", "localPlatformRecommend",
   "playlistSync", "autoMatch",
   "playlistCleanup",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",

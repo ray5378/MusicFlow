@@ -154,6 +154,24 @@
 - 不新增缓存层，沿用既有 `recommendCache` 与并行聚合。
 - 不改变 `/v1/recommend` 的路径/返回结构/`success`/`providerId` 语义（遵守 3.5 行为契约）。
 
+### 1.6.1 首页歌单接口分流规则（v1.7.79+，根治「已入库仍被当作远程导入」）
+
+> **问题**：三个榜单插件（QQ音乐榜单 / 酷狗榜单 / 网易云榜单）虽已把歌单同步入库（`runDailyJob` → `host.playlists.upsert`），但此前仍声明 `recommendPlaylist` 能力、走 `/v1/recommend` 首页链路。前端据此把卡片当作"待 go-music-dl 导入的远程歌单"，点击走 `importRecommendPlaylist` 导入路线 → 「已入库却仍被远程导入」→ 导入失败、无法播放。
+
+> **根治**：按"歌单数据是否已在本地库"把首页接口彻底分成两路，任何歌单只属于其一，禁止混淆。
+
+| 歌单状态 | 首页接口（能力） | 端点 | 数据来源 | 点击行为 |
+|----------|------------------|------|----------|----------|
+| **已入库**（`runDailyJob` 已把歌单 upsert 到本地库） | `localPlatformRecommend` | `GET /v1/local-recommend` | 插件 `recommendLocal()` 直接 `host.playlists.get(id)` 读**本地库真实字段**（`name`/`cover_art`/`song_count`），`imported:true` | 三端（Web/客户端/HA）经本地歌单 id 直接播放，**绝不走导入** |
+| **需实时导入**（歌单不在本地库，如 go-music-dl 私人歌单） | `recommendPlaylist` | `GET /v1/recommend` | 插件 `recommend()` 返回轻量元数据，后端按需 `importRecommendPlaylist` 导入 | 点击按需拉取并导入本地库 |
+
+**硬约束**
+
+- 三个榜单插件**必须**声明 `localPlatformRecommend`（已入库 → 走本地接口），**禁止**退回 `recommendPlaylist`。
+- `recommendLocal()` 只读本地库、零网络、同步秒回；未同步入库的榜单不展示（后端不兜底远程导入）。
+- go-music-dl 及任何"每次需导入"的播放源继续走 `recommendPlaylist`；两边能力、方法、端点互不复用、不混淆。
+- 后端 `CAP_METHODS` / `VALID_CAPS` / 每日调度器 / 插件校验脚本（`check.mjs`）必须同时识别 `localPlatformRecommend`（`recommendLocal` + `runDailyJob`），否则插件无法加载/被每日调度/通过校验。
+
 ---
 
 ## 二、数据模型契约（SQLite）

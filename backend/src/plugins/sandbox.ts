@@ -169,6 +169,7 @@ const CAP_METHODS: Record<string, string[]> = {
   dailyPlaylist: ["runDailyJob"],
   localPlaylist: ["runDailyJob"],
   recommendPlaylist: ["runDailyJob", "recommend"],
+  localPlatformRecommend: ["runDailyJob", "recommendLocal"],
   playlistCleanup: ["runDailyJob"],
   playlistSync: ["runSyncJob"],
 };
