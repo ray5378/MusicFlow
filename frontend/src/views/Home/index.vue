@@ -356,7 +356,10 @@ async function loadHomeConfig() {
 
 async function loadRecommend() {
   try {
-    const res = await api.get("/rest/api/v1/recommend");
+    // 聚合请求包含 go-music-dl + 全部榜单插件频道,冷缓存下可能较慢(榜单插件首页需
+    // 拉取歌单明细)。超时放宽到 150s,避免请求被 15s 默认超时整单中止导致首页精选
+    // (含 go-music-dl)一起消失;第二次命中后端缓存即秒开。
+    const res = await api.get("/rest/api/v1/recommend", { timeout: 150000 });
     recommendChannels.value = res.data.channels || [];
     recommendProviderId.value = res.data.providerId || "";
     recommendError.value = false;

@@ -221,41 +221,48 @@ apiRoutes.get("/v1/recommend", async (c) => {
   console.log(`[RECOMMEND] 找到 ${rpList.length} 个 recommendPlaylist 插件:`, rpList.map((p: any) => p.manifest.id).join(","));
 
   // ---- 2. 推荐歌单插件(具备 recommendPlaylist 能力,如榜单插件) ----
-  for (const p of rpList) {
-    if (p.manifest.id === providerId) continue; // 跳过主推荐插件(它也可能有 recommendPlaylist)
-    if (typeof p.impl?.recommend !== "function") continue;
-    const pConfig = getPluginConfig(p.manifest.id) || {};
-    try {
-      const result = await p.impl.recommend(pConfig);
-      const channels = Array.isArray(result?.channels) ? result.channels : [];
-      for (const ch of channels) {
-        const playlists = (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
-          // 检查该歌单是否已入库(由 runDailyJob 同步)
-          const local = findLocalRemotePlaylist(pl.id, ch.source || "", pl.name || "");
-          return {
-            id: pl.id,
-            source: ch.source || "",
-            name: pl.name || "",
-            creator: pl.creator || "",
-            cover: pl.cover || "",
-            trackCount: local ? String(local.songCount ?? "") : "",
-            link: pl.link || "",
-            imported: !!local,
-          };
-        });
-        allChannels.push({
-          source: ch.source || "",
-          name: ch.name || ch.source || "",
-          count: ch.count || 0,
-          sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
-          _pluginId: p.manifest.id,
-          playlists,
-        });
-      }
-    } catch (e: any) {
-      console.warn(`[RECOMMEND] ${p.manifest.id} recommend() failed:`, e?.message || e);
-    }
-  }
+  // 并行聚合:各插件的 recommend() 各自看门狗/长耗时预算,互不阻塞。串行会累加
+  // 墙钟(go-music-dl + 三个榜单),冷缓存下一次聚合轻松超过前端默认 15s 超时,导致
+  // 首页整单(含 go-music-dl)被中止。并行 + 后端缓存后,首次即显著加快,后续秒开。
+  // 每个插件独立 try/catch,单个失败不影响其它插件频道。
+  const rpTasks = rpList
+    .filter((p: any) => p.manifest.id !== providerId && typeof p.impl?.recommend === "function")
+    .map((p: any) =>
+      (async () => {
+        const pConfig = getPluginConfig(p.manifest.id) || {};
+        try {
+          const result = await p.impl.recommend(pConfig);
+          const channels = Array.isArray(result?.channels) ? result.channels : [];
+          for (const ch of channels) {
+            const playlists = (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
+              // 检查该歌单是否已入库(由 runDailyJob 同步)
+              const local = findLocalRemotePlaylist(pl.id, ch.source || "", pl.name || "");
+              return {
+                id: pl.id,
+                source: ch.source || "",
+                name: pl.name || "",
+                creator: pl.creator || "",
+                cover: pl.cover || "",
+                trackCount: local ? String(local.songCount ?? "") : "",
+                link: pl.link || "",
+                imported: !!local,
+              };
+            });
+            allChannels.push({
+              source: ch.source || "",
+              name: ch.name || ch.source || "",
+              count: ch.count || 0,
+              sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+              _pluginId: p.manifest.id,
+              playlists,
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[RECOMMEND] ${p.manifest.id} recommend() failed:`, e?.message || e);
+        }
+      })()
+    );
+  await Promise.all(rpTasks);
 
   // ---- 3. 按 sortOrder 升序排列(数值越小越靠前) ----
   allChannels.sort((a: any, b: any) => {
