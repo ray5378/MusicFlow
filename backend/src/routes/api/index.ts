@@ -160,59 +160,108 @@ function findLocalRemotePlaylist(remoteId: string, source: string, name: string)
 }
 
 apiRoutes.get("/v1/recommend", async (c) => {
+  // ==================== 统一推荐聚合 ====================
+  // 1) 调用主推荐插件(具备 recommend 能力,如 go-music-dl)获取频道
+  // 2) 调用所有推荐歌单插件(具备 recommendPlaylist 能力,如 QQ/酷狗/网易云榜单)
+  // 3) 合并所有频道,按 sortOrder 升序排列
+  // 这样每个插件都是独立平等的,不依赖 go-music-dl 内部合并。
+  // ====================================================
   const rp = firstEnabledByCapability("recommend");
   const providerId = rp?.manifest.id || "";
-  if (!providerId) return c.json({ success: true, channels: [], providerId: "" });
-  const cached = recommendCache.get(providerId);
+
+  // 缓存 key 包含所有 recommendPlaylist 插件 ID,避免缓存错乱
+  const rpList = getEnabledByCapability("recommendPlaylist");
+  const rpSigs = rpList.map((p: any) => p.manifest.id).sort().join(",");
+  const cacheKey = providerId + "|" + rpSigs;
+  const cached = recommendCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < RECOMMEND_CACHE_TTL_MS) {
     return c.json({ success: true, channels: cached.channels, providerId });
   }
-  if (!rp || typeof rp.impl?.recommend !== "function") {
-    return c.json({ success: true, channels: [], providerId: "" });
+
+  const allChannels: any[] = [];
+
+  // ---- 1. 主推荐插件(如 go-music-dl) ----
+  if (rp && typeof rp.impl?.recommend === "function") {
+    const config = getPluginConfig(providerId) || {};
+    try {
+      const result = await rp.impl.recommend(config);
+      const baseUrl = String(config.baseUrl || "").replace(/\/+$/, "");
+      const channels = (Array.isArray(result?.channels) ? result.channels : []).map((ch: any) => ({
+        source: ch.source || "",
+        name: ch.name || ch.source || "",
+        count: ch.count || 0,
+        sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+        _pluginId: providerId,
+        playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
+          const source = pl.source || ch.source || "";
+          const local = findLocalRemotePlaylist(pl.id, source, pl.name || "");
+          return {
+            id: pl.id,
+            source,
+            name: pl.name || "",
+            creator: pl.creator || "",
+            cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
+              ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
+              : (pl.cover || ""),
+            trackCount: local ? String(local.songCount ?? "") : "",
+            link: pl.link || "",
+            imported: !!local,
+          };
+        }),
+      }));
+      for (const ch of channels) allChannels.push(ch);
+    } catch (e: any) {
+      console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
+      // 主推荐插件失败不阻断其他插件
+    }
   }
-  const config = getPluginConfig(providerId) || {};
-  try {
-    const result = await rp.impl.recommend(config);
-    const baseUrl = String(config.baseUrl || "").replace(/\/+$/, "");
-    const channels = (Array.isArray(result?.channels) ? result.channels : []).map((ch: any) => ({
-      source: ch.source || "",
-      name: ch.name || ch.source || "",
-      count: ch.count || 0,
-      sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
-      playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
-        // 首页平台精选歌单均已入库,先用三重匹配定位本地歌单,再取数据库真实
-        // songCount(与歌单列表/详情页口径一致)。不再透传插件远程 trackCount——
-        // 对已入库歌单该值常为空,导致首页不显示数字。
-        const source = pl.source || ch.source || "";
-        const local = findLocalRemotePlaylist(pl.id, source, pl.name || "");
-        return {
-          id: pl.id,
-          source,
-          name: pl.name || "",
-          creator: pl.creator || "",
-          // 远程封面 URL:go-music-dl 返回相对路径时用插件 baseUrl 拼成完整地址,
-          // 前端才能直接 <img> 渲染。
-          cover: pl.cover && !/^https?:\/\//i.test(String(pl.cover))
-            ? `${baseUrl}${String(pl.cover).startsWith("/") ? "" : "/"}${pl.cover}`
-            : (pl.cover || ""),
-          trackCount: local ? String(local.songCount ?? "") : "",
-          link: pl.link || "",
-          imported: !!local,
-        };
-      }),
-    }));
-    recommendCache.set(providerId, { ts: Date.now(), channels });
-    // 按 sortOrder 升序排列(数值越小越靠前,插件未设置时默认 99)
-    channels.sort((a: any, b: any) => {
-      const sa = typeof a.sortOrder === "number" ? a.sortOrder : 99;
-      const sb = typeof b.sortOrder === "number" ? b.sortOrder : 99;
-      return sa - sb;
-    });
-    return c.json({ success: true, channels, providerId });
-  } catch (e: any) {
-    console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
-    return c.json({ success: true, channels: [], providerId, error: String(e?.message || e) });
+
+  // ---- 2. 推荐歌单插件(具备 recommendPlaylist 能力,如榜单插件) ----
+  for (const p of rpList) {
+    if (p.manifest.id === providerId) continue; // 跳过主推荐插件(它也可能有 recommendPlaylist)
+    if (typeof p.impl?.recommend !== "function") continue;
+    const pConfig = getPluginConfig(p.manifest.id) || {};
+    try {
+      const result = await p.impl.recommend(pConfig);
+      const channels = Array.isArray(result?.channels) ? result.channels : [];
+      for (const ch of channels) {
+        const playlists = (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
+          // 检查该歌单是否已入库(由 runDailyJob 同步)
+          const local = findLocalRemotePlaylist(pl.id, ch.source || "", pl.name || "");
+          return {
+            id: pl.id,
+            source: ch.source || "",
+            name: pl.name || "",
+            creator: pl.creator || "",
+            cover: pl.cover || "",
+            trackCount: local ? String(local.songCount ?? "") : "",
+            link: pl.link || "",
+            imported: !!local,
+          };
+        });
+        allChannels.push({
+          source: ch.source || "",
+          name: ch.name || ch.source || "",
+          count: ch.count || 0,
+          sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+          _pluginId: p.manifest.id,
+          playlists,
+        });
+      }
+    } catch (e: any) {
+      console.warn(`[RECOMMEND] ${p.manifest.id} recommend() failed:`, e?.message || e);
+    }
   }
+
+  // ---- 3. 按 sortOrder 升序排列(数值越小越靠前) ----
+  allChannels.sort((a: any, b: any) => {
+    const sa = typeof a.sortOrder === "number" ? a.sortOrder : 99;
+    const sb = typeof b.sortOrder === "number" ? b.sortOrder : 99;
+    return sa - sb;
+  });
+
+  recommendCache.set(cacheKey, { ts: Date.now(), channels: allChannels });
+  return c.json({ success: true, channels: allChannels, providerId });
 });
 
 // ==================== 首页「本地随机(按平台)」(能力驱动,不写死插件名) ====================
