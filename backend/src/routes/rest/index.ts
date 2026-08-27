@@ -3,6 +3,7 @@ import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
+import { spawn } from "node:child_process";
 import { getLyricsForSongId, getLyricsForSong, lrcToStructured } from "../../services/lyrics.js";
 import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
@@ -1310,7 +1311,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
 // 鉴权与 /rest/stream 一致;item 的 res 复用本次请求的 token(query 串令牌认证,
 // 让无法携带 header 的渲染器仅凭 URL 即可直连拉流)。
 restRoutes.get("/castPlaylist", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
-  const songIds = getParams(c, "songs").map(s => s.trim()).filter(Boolean);
+  const songIds = getParams(c, "songs").flatMap(s => s.split(",")).map(s => s.trim()).filter(Boolean);
   if (songIds.length === 0) return c.json(fail(0, "No songs specified"));
   const token = getParam(c, "token") || "";
 
@@ -1412,8 +1413,85 @@ async function* openCastStreamChunks(song: any): AsyncGenerator<Uint8Array> {
   for await (const c of fs.createReadStream(filePath)) yield new Uint8Array(c as Buffer);
 }
 
+// ---------- 连续流得统一为同一种可解码格式 ----------
+// 纯 renderer 把整根 /castStream 当**单一音频流**解。若队列里 mp3/wav/flac 混排,
+// 直接逐段拼接 WAV/FLAC(它们自带容器头)得到的字节流,renderer 会按首曲格式解码而
+// 在格式切换处解出噪音/停顿。所以:只要队列里存在非 mp3 的歌曲,就用 ffmpeg 把非 mp3
+// 的每首重编码为 mp3(LAME, 192k),与 mp3 曲目的原生帧一起拼成一根纯 mp3 连续流
+// (mp3 帧自带边界,拼接天然合法)。全队列都是 mp3 时走 0 转码快速通道。
+const CAST_TARGET_SUFFIX = "mp3";
+function castQueueNeedsTranscode(ordered: any[]): boolean {
+  return ordered.some(s => (s.suffix || "").toLowerCase() !== CAST_TARGET_SUFFIX);
+}
+
+// 把单首不可直接拼接的歌曲经 ffmpeg 重编码为 mp3,逐块产出。
+async function* transcodeSongToMp3(song: any): AsyncGenerator<Uint8Array> {
+  const parsed = parseSongPath(song.path);
+  // 输入: 本地文件最优先;否则用远程 URL(含必需 headers)。
+  let input = "";
+  let headers: Record<string, string> = {};
+  if ((song.type || "local") === "web") {
+    if (song.cachePath && fs.existsSync(song.cachePath)) {
+      input = song.cachePath;
+    } else if (song.url) {
+      input = song.url;
+      try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
+    } else {
+      throw new Error("No stream source");
+    }
+  } else if (parsed) {
+    if (parsed.type === "w") {
+      const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
+      if (!source) throw new Error("Source not found");
+      const config = JSON.parse(source.config || "{}");
+      if (!config.username || !config.password) throw new Error("Source auth not configured");
+      input = getWebDAVUrl(config, parsed.filePath);
+      headers = { "Authorization": "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64") };
+    } else {
+      input = parsed.filePath;
+      if (!fs.existsSync(input)) throw new Error("File not found");
+    }
+  } else {
+    throw new Error("Unsupported source");
+  }
+
+  const args = ["-v", "error", "-nostdin", "-i", input];
+  if (Object.keys(headers).length) {
+    args.push("-headers", Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\r\n"));
+  }
+  args.push("-f", "mp3", "-acodec", "libmp3lame", "-b:a", "192k",
+    // 统一采样率/声道,避免混排时(如 48k 的 opus 段)中段采样率突变导致解码器报错。
+    "-ar", "44100", "-ac", "2",
+    // 去掉每段自带的 ID3v2 标签与 Xing/Info 头,让拼接处=纯 MPEG frame,无缝可解码。
+    "-write_xing", "0", "-id3v2_version", "0", "-map_metadata", "-1",
+    "-y", "pipe:1");
+
+  const proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const errBuf: Buffer[] = [];
+  proc.stderr?.on("data", (c) => errBuf.push(c as Buffer));
+  let spawned = false;
+  await new Promise<void>((resolve, reject) => {
+    proc.once("spawn", () => { spawned = true; resolve(); });
+    proc.once("error", reject);
+  });
+  for await (const chunk of proc.stdout) yield new Uint8Array(chunk as Buffer);
+  await new Promise<void>((resolve, reject) => {
+    proc.once("close", (code) => code === 0 ? resolve() : reject(new Error("ffmpeg exit " + code + ": " + Buffer.concat(errBuf).toString("utf8").slice(0, 200))));
+  });
+}
+
+async function* openCastSongForQueue(song: any, transcode: boolean): AsyncGenerator<Uint8Array> {
+  if (transcode) {
+    // 只要队列存在格式变化,就统一把每首(含 mp3)重编码为无头的统一采样率 mp3,
+    // 保证整根 /castStream 是同一种可无缝解码的音频流(设备按单一流解码整队列)。
+    yield* transcodeSongToMp3(song);
+  } else {
+    yield* openCastStreamChunks(song);
+  }
+}
+
 restRoutes.get("/castStream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
-  const songIds = getParams(c, "songs").map(s => s.trim()).filter(Boolean);
+  const songIds = getParams(c, "songs").flatMap(s => s.split(",")).map(s => s.trim()).filter(Boolean);
   if (songIds.length === 0) return c.json(fail(0, "No songs specified"));
 
   const rows = db.select().from(songs).where(inArray(songs.id, songIds)).all();
@@ -1421,12 +1499,19 @@ restRoutes.get("/castStream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => 
   const ordered = songIds.map(id => rows.find(r => r.id === id)).filter((r): r is any => !!r);
   if (ordered.length === 0) return c.json(fail(0, "No playable songs"));
 
+  // 只要队列准备拼成**一根**给纯 renderer 的连续流,拼接多段就必须统一重编码:
+  // 逐段原样拼接(含 mp3 自带的 ID3v2/Xing 头)会在段边界产生「Header missing」解码
+  // 错误(设备报嘟嘟声)并虚报时长。因此除「单曲且本身就是 mp3」这种无拼接、可原样直出的
+  // 情况外,一律走 0 头/统一采样率重编码,保证整根流可无缝解码。格式变化(任意非 mp3 出现)
+  // 天然落入转码分支。
+  const transcode = ordered.length !== 1 || castQueueNeedsTranscode(ordered);
+
   // 逐首顺序写盘为连续流;单首失败仅跳过(不中断整段),设备仍会续播后续歌曲。
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       for (const s of ordered) {
         try {
-          for await (const chunk of openCastStreamChunks(s)) controller.enqueue(chunk);
+          for await (const chunk of openCastSongForQueue(s, transcode)) controller.enqueue(chunk);
         } catch {
           // 单首不可播 → 跳过,播放器自然进入下一首。
         }
@@ -1435,11 +1520,11 @@ restRoutes.get("/castStream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => 
     },
   });
 
-  // 不设 Content-Length → 运行时自动 chunked;mime 对齐首曲,保证纯 renderer 能识别为音频流。
+  // 不设 Content-Length → 运行时自动 chunked;统一 audio/mpeg,保证纯 renderer 能识别。
   return new Response(stream as any, {
     status: 200,
     headers: {
-      "Content-Type": MIME_MAP[ordered[0]?.suffix || ""] || "audio/mpeg",
+      "Content-Type": "audio/mpeg",
       "Cache-Control": "no-cache",
     },
   });
