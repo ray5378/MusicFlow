@@ -1362,6 +1362,89 @@ restRoutes.get("/castPlaylist", permMiddleware(PERM.LIBRARY_STREAM), async (c) =
   });
 });
 
+// ==================== DLNA 连续流 (链路 B 纯 renderer 档) ====================
+// HiVi H5MKII 等纯音频 renderer 只能 Set 单个 URI:既不暴露 ContentDirectory(/castPlaylist
+// 的 CDS 容器无效),也不支持 SetNext(无法 NextURI 预置)。把它们整队列串成**一根连续音频流**:
+// 设备 SetAVTransportURI 这个 URL 即一路播到队列末尾——切窗口、手机进程被系统挂起/杀死,
+// 设备仍自主连播到底,彻底摆脱对客户端进程与轮询的依赖。
+// 鉴权同 /rest/stream;内部对每首复用单曲流逻辑(本地文件 / WebDAV / 远程代理 + 多源换源),
+// 逐段写入响应体,无 Content-Length → chunked 无限续传。
+async function* openCastStreamChunks(song: any): AsyncGenerator<Uint8Array> {
+  if ((song.type || "local") === "web") {
+    if (song.cachePath && fs.existsSync(song.cachePath)) {
+      for await (const c of fs.createReadStream(song.cachePath)) yield new Uint8Array(c as Buffer);
+      return;
+    }
+    if (!song.url) throw new Error("No stream url");
+    const headers: Record<string, string> = {};
+    try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
+    let upstream = await fetch(song.url, { headers });
+    if ((upstream.status === 404 || upstream.status === 403 || upstream.status >= 500) && song.pluginEntry && song.sourceData) {
+      try {
+        const sd = JSON.parse(song.sourceData || "{}");
+        const fb = await findFallbackStream(song.id, song.title || sd?.title || "", song.artist || sd?.artist || "", song.album || "", song.pluginEntry, sd?.source || "");
+        if (fb) { await upstream.body?.cancel(); upstream = await fetch(fb.url, { headers }); }
+      } catch {}
+    }
+    if (!upstream.body) throw new Error("Empty body");
+    const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
+    while (true) { const { done, value } = await reader.read(); if (done) break; yield value; }
+    return;
+  }
+  const parsed = parseSongPath(song.path);
+  if (!parsed) throw new Error("Invalid song path");
+  if (parsed.type === "w") {
+    const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
+    if (!source) throw new Error("Source not found");
+    const config = JSON.parse(source.config || "{}");
+    if (!config.username || !config.password) throw new Error("Source auth not configured");
+    const headers: Record<string, string> = {
+      "Authorization": "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64"),
+    };
+    const upstream = await fetch(getWebDAVUrl(config, parsed.filePath), { headers });
+    if (!upstream.body) throw new Error("Empty body");
+    const reader = (upstream.body as ReadableStream<Uint8Array>).getReader();
+    while (true) { const { done, value } = await reader.read(); if (done) break; yield value; }
+    return;
+  }
+  const filePath = parsed.filePath;
+  if (!fs.existsSync(filePath)) throw new Error("File not found");
+  for await (const c of fs.createReadStream(filePath)) yield new Uint8Array(c as Buffer);
+}
+
+restRoutes.get("/castStream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
+  const songIds = getParams(c, "songs").map(s => s.trim()).filter(Boolean);
+  if (songIds.length === 0) return c.json(fail(0, "No songs specified"));
+
+  const rows = db.select().from(songs).where(inArray(songs.id, songIds)).all();
+  // 按请求顺序排列(队列语义),跳过已不存在的 id。
+  const ordered = songIds.map(id => rows.find(r => r.id === id)).filter((r): r is any => !!r);
+  if (ordered.length === 0) return c.json(fail(0, "No playable songs"));
+
+  // 逐首顺序写盘为连续流;单首失败仅跳过(不中断整段),设备仍会续播后续歌曲。
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const s of ordered) {
+        try {
+          for await (const chunk of openCastStreamChunks(s)) controller.enqueue(chunk);
+        } catch {
+          // 单首不可播 → 跳过,播放器自然进入下一首。
+        }
+      }
+      controller.close();
+    },
+  });
+
+  // 不设 Content-Length → 运行时自动 chunked;mime 对齐首曲,保证纯 renderer 能识别为音频流。
+  return new Response(stream as any, {
+    status: 200,
+    headers: {
+      "Content-Type": MIME_MAP[ordered[0]?.suffix || ""] || "audio/mpeg",
+      "Cache-Control": "no-cache",
+    },
+  });
+});
+
 // ==================== Remote stream proxy (未入库远程歌曲直播) ====================
 // 搜索结果的远程歌曲(尚未「加入库」,无 DB 行)直接播放:按 provider/source/id 现场
 // 调用插件的 streamUrl() 拿到真实流地址,再复用 serveWebStreamSong 的代理逻辑
