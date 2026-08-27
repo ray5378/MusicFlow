@@ -168,7 +168,7 @@ const CAP_METHODS: Record<string, string[]> = {
   playlistFile: ["canHandleFile", "parseFile"],
   dailyPlaylist: ["runDailyJob"],
   localPlaylist: ["runDailyJob"],
-  recommendPlaylist: ["runDailyJob"],
+  recommendPlaylist: ["runDailyJob", "recommend"],
   playlistCleanup: ["runDailyJob"],
   playlistSync: ["runSyncJob"],
 };

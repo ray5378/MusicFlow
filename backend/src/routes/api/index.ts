@@ -218,6 +218,8 @@ apiRoutes.get("/v1/recommend", async (c) => {
     }
   }
 
+  console.log(`[RECOMMEND] 找到 ${rpList.length} 个 recommendPlaylist 插件:`, rpList.map((p: any) => p.manifest.id).join(","));
+
   // ---- 2. 推荐歌单插件(具备 recommendPlaylist 能力,如榜单插件) ----
   for (const p of rpList) {
     if (p.manifest.id === providerId) continue; // 跳过主推荐插件(它也可能有 recommendPlaylist)
