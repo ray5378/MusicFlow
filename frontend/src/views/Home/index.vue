@@ -257,11 +257,12 @@ const localRandomChannels = ref<any[]>([]);
 const localRandomGroups = computed(() =>
   localRandomChannels.value
     .map((ch: any) => ({
-      type: "localRandom",
+      type: "localRandom" as const,
       source: ch.source || "",
       name: (ch.name || ch.source || "").replace(/音乐$/, ""),
       playlists: ch.playlists || [],
       sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+      _pluginId: "",
     }))
     .filter((g) => g.playlists.length > 0)
 );
@@ -270,7 +271,7 @@ const localRandomGroups = computed(() =>
 const sortedAllGroups = computed(() => {
   const recommend = recommendChannels.value
     .map((ch: any) => ({
-      type: "recommend",
+      type: "recommend" as const,
       source: ch.source || "",
       name: (ch.name || ch.source || "").replace(/音乐$/, ""),
       playlists: ch.playlists || [],
