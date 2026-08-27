@@ -132,6 +132,16 @@ describe("三个榜单插件(改动后)声明 localPlatformRecommend 并走本�
       expect(c).toBeTruthy();
       // 三个榜单分区再按 sortOrder 升序(30/31/32)
     }
+    // 分区展示文案透传:三个榜单插件携带 subtag「每日更新」+ 说明性 tagline
+    const qqCh = ch.find((x: any) => x.source === "qq");
+    expect(qqCh).toMatchObject({
+      subtag: "每日更新",
+      tagline: "从QQ音乐榜单获取最新的榜单",
+    });
+    const kgCh = ch.find((x: any) => x.source === "kugou");
+    expect(kgCh?.subtag).toBe("每日更新");
+    const neCh = ch.find((x: any) => x.source === "netease");
+    expect(neCh?.subtag).toBe("每日更新");
     expect(ch.filter((x: any) => chartSources.includes(x.source)).map((x: any) => x.sortOrder))
       .toEqual([30, 31, 32]);
     // 内置 provider 作为独立 provider 也返回了分区(这里是 chart 源,取决于 seed 的 source_platform)

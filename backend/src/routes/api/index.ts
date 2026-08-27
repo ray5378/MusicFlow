@@ -296,6 +296,11 @@ apiRoutes.get("/v1/local-recommend", async (c) => {
           name: ch.name || ch.source || "",
           count: ch.count || 0,
           sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+          // 可选展示文案(由提供方决定;缺省时前端回落为「本地随机」默认表述):
+          //   subtag  → 分区标题后缀(如「每日更新」),缺省用「本地随机」
+          //   tagline → 分区副标题说明,缺省用「从你的 X 歌单里随机(每次刷新不同)」
+          subtag: typeof ch.subtag === "string" ? ch.subtag : undefined,
+          tagline: typeof ch.tagline === "string" ? ch.tagline : undefined,
           // 本地歌单:直接透传 DB 字段(coverArt 为本地封面 ref,三端用各自 cover 工具拼 URL)。
           playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
             id: pl.id ?? "",

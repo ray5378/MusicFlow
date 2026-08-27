@@ -106,8 +106,8 @@
       </template>
       <template v-else>
         <div class="section-title">
-          <span>{{ group.name }}·本地随机</span>
-          <span class="section-sub">从你的 {{ group.name }} 歌单里随机(每次刷新不同)</span>
+          <span>{{ group.subtag ? group.name + '·' + group.subtag : group.name + '·本地随机' }}</span>
+          <span class="section-sub">{{ group.tagline || ('从你的 ' + group.name + ' 歌单里随机(每次刷新不同)') }}</span>
           <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
         </div>
         <div class="grid-row">
@@ -262,6 +262,8 @@ const localRandomGroups = computed(() =>
       name: (ch.name || ch.source || "").replace(/音乐$/, ""),
       playlists: ch.playlists || [],
       sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+      subtag: ch.subtag,
+      tagline: ch.tagline,
       _pluginId: "",
     }))
     .filter((g) => g.playlists.length > 0)
