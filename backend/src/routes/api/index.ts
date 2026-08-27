@@ -178,6 +178,7 @@ apiRoutes.get("/v1/recommend", async (c) => {
       source: ch.source || "",
       name: ch.name || ch.source || "",
       count: ch.count || 0,
+      sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
       playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => {
         // 首页平台精选歌单均已入库,先用三重匹配定位本地歌单,再取数据库真实
         // songCount(与歌单列表/详情页口径一致)。不再透传插件远程 trackCount——
@@ -232,6 +233,7 @@ apiRoutes.get("/v1/local-recommend", async (c) => {
           source: ch.source || "",
           name: ch.name || ch.source || "",
           count: ch.count || 0,
+          sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
           // 本地歌单:直接透传 DB 字段(coverArt 为本地封面 ref,三端用各自 cover 工具拼 URL)。
           playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
             id: pl.id ?? "",
