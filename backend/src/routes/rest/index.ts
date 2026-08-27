@@ -1303,6 +1303,65 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   }
 });
 
+// ==================== DLNA 投屏 CDS 播放清单 (链路 B) ====================
+// DLNA 设备(电视/盒子/Kodi)作为渲染器可依 ContentDirectory (DIDL-Lite) 容器按序
+// 自播整段列表。服务端以请求携带的队列 id 列表构造标准容器:设备拿到容器后逐个
+// item 从 /rest/stream **直连拉流** → 手机被杀也能整列表续播(符合 DLNA 标准)。
+// 鉴权与 /rest/stream 一致;item 的 res 复用本次请求的 token(query 串令牌认证,
+// 让无法携带 header 的渲染器仅凭 URL 即可直连拉流)。
+restRoutes.get("/castPlaylist", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
+  const songIds = getParams(c, "songs").map(s => s.trim()).filter(Boolean);
+  if (songIds.length === 0) return c.json(fail(0, "No songs specified"));
+  const token = getParam(c, "token") || "";
+
+  const rows = db.select().from(songs).where(inArray(songs.id, songIds)).all();
+  // 按请求顺序排列(队列语义),跳过已不存在的 id。
+  const ordered = songIds.map(id => rows.find(r => r.id === id)).filter((r): r is any => !!r);
+
+  // 绝对 base url:优先反代 X-Forwarded-*,否则用请求 Host(渲染器在 LAN 内直连)。
+  const fwdProto = c.req.header("x-forwarded-proto");
+  const proto = fwdProto ? fwdProto.split(",")[0].trim() : (new URL(c.req.url).protocol.replace(":", "") || "http");
+  const host = c.req.header("x-forwarded-host") || c.req.header("host");
+  const base = `${proto}://${host}`;
+
+  const xmlEscape = (v: string): string => String(v ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
+  const hms = (sec: number): string => {
+    const s = Math.floor(sec || 0);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
+  };
+
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" ` +
+    `xmlns:dc="http://purl.org/dc/elements/1.1/" ` +
+    `xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">` +
+    `<container id="cast-queue" parentID="0" restricted="false" childCount="${ordered.length}">` +
+    `<dc:title>MusicFlow 投屏队列</dc:title>` +
+    `<upnp:class>object.container.playlistContainer.musicPlaylist</upnp:class>` +
+    `</container>`;
+
+  for (const s of ordered) {
+    const mime = MIME_MAP[s.suffix || ""] || s.contentType || "audio/mpeg";
+    const resUrl = `${base}/rest/stream?id=${encodeURIComponent(s.id)}` +
+      (token ? `&token=${encodeURIComponent(token)}` : "");
+    xml += `<item id="so-${xmlEscape(s.id)}" parentID="cast-queue" restricted="false">` +
+      `<dc:title>${xmlEscape(s.title)}</dc:title>` +
+      `<dc:creator>${xmlEscape(s.artist || "未知艺人")}</dc:creator>` +
+      `<upnp:class>object.item.audioItem.musicTrack</upnp:class>` +
+      `<res protocolInfo="http-get:*:${xmlEscape(mime)}:*" ` +
+      `duration="${hms(s.duration)}" size="">${xmlEscape(resUrl)}</res>` +
+      `</item>`;
+  }
+  xml += `</DIDL-Lite>`;
+
+  return c.body(xml, 200, {
+    "Content-Type": "text/xml; charset=\"utf-8\"",
+    "Cache-Control": "no-cache",
+  });
+});
+
 // ==================== Remote stream proxy (未入库远程歌曲直播) ====================
 // 搜索结果的远程歌曲(尚未「加入库」,无 DB 行)直接播放:按 provider/source/id 现场
 // 调用插件的 streamUrl() 拿到真实流地址,再复用 serveWebStreamSong 的代理逻辑
