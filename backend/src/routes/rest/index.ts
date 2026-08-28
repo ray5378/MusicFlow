@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
-import { eq, like, sql, or, and, isNotNull, inArray, desc, gt, leftJoin } from "drizzle-orm";
+import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import path from "node:path";
 import os from "node:os";
@@ -642,14 +642,17 @@ restRoutes.get("/getRandomSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   if (effFrom != null) conds.push(sql`${albums.year} >= ${effFrom}`);
   if (effTo != null) conds.push(sql`${albums.year} <= ${effTo}`);
 
-  let query = db
+  // SQL 随机取样,避免把整张 songs 表(含大文本列)加载进来在 JS 里洗牌。
+  // 单条链式表达式避免对查询变量重赋值引发的 drizzle 类型推断问题;
+  // 无过滤时 where(undefined) 等于不设置筛选。
+  const allSongs = db
     .select()
     .from(songs)
-    .leftJoin(albums, eq(songs.albumId, albums.id));
-  if (conds.length) query = query.where(and(...conds));
-
-  // SQL 随机取样,避免把整张 songs 表(含大文本列)加载进来在 JS 里洗牌。
-  const allSongs = query.orderBy(sql`random()`).limit(size).all();
+    .leftJoin(albums, eq(songs.albumId, albums.id))
+    .where(conds.length ? and(...(conds as any[])) : undefined)
+    .orderBy(sql`random()`)
+    .limit(size)
+    .all();
   return c.json(ok({ randomSongs: { song: allSongs.map((r) => songToChild(r.songs, getStarredSet(user?.id))) } }));
 });
 
