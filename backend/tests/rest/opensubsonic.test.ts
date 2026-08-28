@@ -90,6 +90,29 @@ describe("OpenSubsonic 基础合规", () => {
   });
 });
 
+describe("首页分区清单", () => {
+  it("/api/v1/home/sections 返回有序分区清单,随机歌曲可见、平台推荐不可见", async () => {
+    const r = await get("/rest/api/v1/home/sections");
+    expect(r.res.status).toBe(200);
+    expect(sr(r)?.status).toBe("ok");
+    const sections = sr(r)?.homeSections?.sections ?? [];
+    // 顺序按 sortOrder 升序。
+    expect(sections.map((s: any) => s.sortOrder)).toEqual([1, 2, 3, 4, 5]);
+    expect(sections.map((s: any) => s.key)).toEqual([
+      "random-songs",
+      "recent-playlists",
+      "home-recommend",
+      "platform-recommend",
+      "local-recommend",
+    ]);
+    // 测试库有歌曲但无平台导入歌单(sourceUrl 为空)。
+    const byKey = new Map(sections.map((s: any) => [s.key, s]));
+    expect(byKey.get("random-songs").visible).toBe(true);
+    expect(byKey.get("home-recommend").visible).toBe(true);
+    expect(byKey.get("platform-recommend").visible).toBe(false);
+  });
+});
+
 describe("浏览与搜索", () => {
   it("getMusicFolders 恒含根目录 0", async () => {
     const r = await get("/rest/getMusicFolders");

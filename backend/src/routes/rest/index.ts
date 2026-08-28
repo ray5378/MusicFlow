@@ -1587,6 +1587,30 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
   return new Response(svg, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" } });
 });
 
+// ==================== Home 首页分区清单 ====================
+// 数据驱动解耦:客户端首页不再写死分区,而是先拉本清单(有序 + visible)再逐区渲染。
+// 各分区具体内容仍由对应接口独立提供(随机歌曲 / 最近更新 / 推荐 / 平台推荐 /
+// 本地随机),分区数据为空时客户端按内容自行隐藏,清单里的 visible 由服务端决定
+// 是否开放该分区 —— 客户端与服务端完全解耦,增删分区、调整排序只在服务端发生。
+// 可见性判定以本模块可直接查询的库状态为依据:
+//  - 随机歌曲/本地随机/为你推荐/最近更新:依赖本地音库存在歌单(或歌曲);
+//  - 平台推荐:依赖已从平台导入的歌单(sourceUrl 非空)。
+restRoutes.get("/api/v1/home/sections", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
+  const songCount = db.select({ n: sql<number>`count(*)` }).from(songs).get()?.n ?? 0;
+  const playlistCount = db.select({ n: sql<number>`count(*)` }).from(playlists).get()?.n ?? 0;
+  const importedCount = db.select({ n: sql<number>`count(*)` }).from(playlists)
+    .where(isNotNull(playlists.sourceUrl)).get()?.n ?? 0;
+  // sortOrder 升序(数值越小越靠前),由服务端决定首页展示顺序。
+  const sections = [
+    { key: "random-songs", title: "随机歌曲", sortOrder: 1, visible: songCount > 0 },
+    { key: "recent-playlists", title: "最近更新的歌单", sortOrder: 2, visible: playlistCount > 0 },
+    { key: "home-recommend", title: "为你推荐", sortOrder: 3, visible: playlistCount > 0 },
+    { key: "platform-recommend", title: "平台推荐", sortOrder: 4, visible: importedCount > 0 },
+    { key: "local-recommend", title: "本地随机", sortOrder: 5, visible: playlistCount > 0 },
+  ].sort((a, b) => a.sortOrder - b.sortOrder);
+  return c.json(ok({ homeSections: { sections } }));
+});
+
 // libopensonic/MA uses use_views=True by default, appending .view to every endpoint.
 // Register .view aliases for all routes so they respond identically.
 // libopensonic/MA uses use_views=True, appending .view to endpoints, and POSTs form data.
