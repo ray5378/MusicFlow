@@ -39,9 +39,12 @@ export const DEFAULT_REFRESH_MINUTES = 30;
 export interface RandomSongsConfig {
   count: number;
   refreshMinutes: number;
+  genre?: string;
+  fromYear?: number;
+  toYear?: number;
 }
 
-/** 读本插件配置:歌曲总数 / 刷新间隔。非法或未配置回落默认。 */
+/** 读本插件配置:歌曲总数 / 刷新间隔 / 过滤条件。非法或未配置回落默认。 */
 export function getRandomSongsConfig(): RandomSongsConfig {
   try {
     const row = sqlite
@@ -58,7 +61,27 @@ export function getRandomSongsConfig(): RandomSongsConfig {
       Number.isFinite(rawRefresh) && rawRefresh >= 1
         ? Math.min(rawRefresh, 1440)
         : DEFAULT_REFRESH_MINUTES;
-    return { count, refreshMinutes };
+    let genre: string | undefined = cfg.genre?.trim();
+    if (!genre) genre = undefined;
+    let fromYear: number | undefined;
+    if (cfg.fromYear != null && cfg.fromYear !== "") {
+      const v = parseInt(String(cfg.fromYear), 10);
+      if (Number.isFinite(v) && v >= 1900 && v <= new Date().getFullYear()) {
+        fromYear = v;
+      }
+    }
+    let toYear: number | undefined;
+    if (cfg.toYear != null && cfg.toYear !== "") {
+      const v = parseInt(String(cfg.toYear), 10);
+      if (Number.isFinite(v) && v >= 1900 && v <= new Date().getFullYear()) {
+        toYear = v;
+      }
+    }
+    // 区间容错:起始 > 结束时交换
+    if (fromYear != null && toYear != null && fromYear > toYear) {
+      [fromYear, toYear] = [toYear, fromYear];
+    }
+    return { count, refreshMinutes, genre, fromYear, toYear };
   } catch {
     return { count: DEFAULT_SONG_COUNT, refreshMinutes: DEFAULT_REFRESH_MINUTES };
   }
@@ -73,27 +96,74 @@ function lastRefreshMs(): number {
   return new Date(row.updated_at).getTime() || 0;
 }
 
-/** 可播歌曲总数(随机抽取的候选源)。 */
-function playableSongCount(): number {
+/** 可播歌曲总数(随机抽取的候选源,含过滤条件)。 */
+function playableSongCount(filters?: RandomSongsConfig): number {
+  const f = buildFilterClause(filters);
   const row = sqlite
-    .prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL")
-    .get() as { n: number };
+    .prepare(
+      `SELECT COUNT(*) AS n FROM songs LEFT JOIN albums ON songs.album_id = albums.id
+       WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL${f.where}`,
+    )
+    .get(...f.params) as { n: number };
   return row?.n || 0;
 }
 
-/** 从全部可播曲库随机抽取 limit 首(O(limit),不整表加载;非确定性,每次不同)。 */
-function pickRandomPlayableSongs(limit: number): string[] {
+/** 把已生效的过滤条件拼成可读描述(用于歌单 comment)。 */
+function describeFilters(filters: RandomSongsConfig): string {
+  const parts: string[] = [];
+  if (filters.genre) parts.push(`流派=${filters.genre}`);
+  if (filters.fromYear != null) parts.push(`起始≥${filters.fromYear}`);
+  if (filters.toYear != null) parts.push(`截至≤${filters.toYear}`);
+  return parts.length ? `[${parts.join(" ")}]` : "";
+}
+
+/** 构建过滤条件片段(genre 用 LIKE、年份 JOIN albums.year)。返回 SQL 片段与参数。 */
+function buildFilterClause(filters?: {
+  genre?: string;
+  fromYear?: number;
+  toYear?: number;
+}): { where: string; params: unknown[] } {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (filters?.genre) {
+    // 多标签(如 ;, .)也用部分匹配命中;转义 LIKE 通配符。
+    const esc = filters.genre.replace(/[\\%_]/g, (c) => "\\" + c);
+    conds.push("songs.genre LIKE ? ESCAPE '\\'");
+    params.push("%" + esc + "%");
+  }
+  if (filters?.fromYear != null) {
+    conds.push("albums.year >= ?");
+    params.push(filters.fromYear);
+  }
+  if (filters?.toYear != null) {
+    conds.push("albums.year <= ?");
+    params.push(filters.toYear);
+  }
+  return { where: conds.length ? " AND " + conds.join(" AND ") : "", params };
+}
+
+/** 从满足过滤条件的可播曲库随机抽取 limit 首(O(limit),不整表加载;非确定性,每次不同)。 */
+function pickRandomPlayableSongs(
+  limit: number,
+  filters?: RandomSongsConfig,
+): string[] {
+  const f = buildFilterClause(filters);
+  const filterParams = f.params;
+  const baseFrom =
+    `FROM songs LEFT JOIN albums ON songs.album_id = albums.id ` +
+    `WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL${f.where}`;
+
   const meta = sqlite
-    .prepare("SELECT COUNT(*) AS n, MAX(rowid) AS maxR FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL")
-    .get() as { n: number; maxR: number | null };
+    .prepare(`SELECT COUNT(*) AS n, MAX(songs.rowid) AS maxR ${baseFrom}`)
+    .get(...filterParams) as { n: number; maxR: number | null };
   if (!meta.n || !meta.maxR) return [];
   const maxRowid = meta.maxR;
 
-  // 小曲库:直接全量洗牌返回。
+  // 命中数量不超过 limit:直接全量洗牌返回。
   if (meta.n <= limit) {
     const rows = sqlite
-      .prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL")
-      .all() as { id: string }[];
+      .prepare(`SELECT songs.id ${baseFrom}`)
+      .all(...filterParams) as { id: string }[];
     for (let i = rows.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [rows[i], rows[j]] = [rows[j], rows[i]];
@@ -118,10 +188,8 @@ function pickRandomPlayableSongs(limit: number): string[] {
       const batch = idArr.slice(i, i + 500);
       const placeholders = batch.map(() => "?").join(",");
       const rows = sqlite
-        .prepare(
-          `SELECT id FROM songs WHERE rowid IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL`,
-        )
-        .all(...batch) as { id: string }[];
+        .prepare(`SELECT songs.id ${baseFrom} AND songs.rowid IN (${placeholders})`)
+        .all(...filterParams, ...batch) as { id: string }[];
       for (const r of rows) {
         if (ids.size < limit) ids.add(r.id);
       }
@@ -143,10 +211,10 @@ export function generateRandomSongsPlaylist(
 ): { total: number; skipped: boolean } | null {
   const ownerId = systemOwnerId();
   const now = new Date().toISOString();
-  const { count: cfgCount } = getRandomSongsConfig();
-  const limit = count && count > 0 ? count : cfgCount;
+  const cfg = getRandomSongsConfig();
+  const limit = count && count > 0 ? count : cfg.count;
 
-  if (playableSongCount() === 0) return { total: 0, skipped: true };
+  if (playableSongCount(cfg) === 0) return { total: 0, skipped: true };
 
   // 保证歌单行存在。
   let row = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(RANDOM_PLAYLIST_ID) as any;
@@ -164,7 +232,7 @@ export function generateRandomSongsPlaylist(
       .run(PLAYLIST_NAME, now, RANDOM_PLAYLIST_ID);
   }
 
-  const songIds = pickRandomPlayableSongs(limit);
+  const songIds = pickRandomPlayableSongs(limit, cfg);
   if (!songIds.length) return { total: 0, skipped: true };
 
   // 重建内容:清空旧 entries 再插入。
@@ -194,7 +262,7 @@ export function generateRandomSongsPlaylist(
       songIds.length,
       totalDuration,
       cover,
-      `${RANDOM_TAG} 全库随机 ${songIds.length} 首`,
+      `${RANDOM_TAG} 全库随机 ${songIds.length} 首${describeFilters(cfg)}`,
       now,
       RANDOM_PLAYLIST_ID,
     );
@@ -262,6 +330,9 @@ export const randomSongsManifest: PluginManifest = {
   defaultEnabled: true,
   configSchema: [
     { key: "count", label: "歌曲总数", type: "number", default: 48, help: "歌单歌曲总数量(1~500,默认 48 = 客户端一轮的两倍,留足缓冲)" },
+    { key: "genre", label: "流派过滤", type: "text", default: "", help: "只从该流派抽取(支持部分匹配,如 Pop / 华语)。留空=不限流派" },
+    { key: "fromYear", label: "起始年份", type: "number", default: "", help: "只抽取年份 ≥ 该值的歌曲(默认 0)。留空=不限起始" },
+    { key: "toYear", label: "截至年份", type: "number", default: "", help: "只抽取年份 ≤ 该值的歌曲(默认 0)。留空=不限截至。起始≥截至自动交换" },
     { key: "refreshMinutes", label: "刷新间隔(分钟)", type: "number", default: 30, help: "每隔多少分钟自动重新随机抽取一次(默认 30;读取歌单时若超过该间隔也会立即重建)" },
     { key: "showOnHome", label: "在首页显示", type: "switch", default: false, help: "是否把「随机歌曲」歌单固定在首页顶部展示(按下方位次排序)" },
     { key: "homePosition", label: "首页显示位次", type: "number", default: 0, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
@@ -271,13 +342,19 @@ export const randomSongsManifest: PluginManifest = {
   documentation: `### 功能介绍
 从全部曲库随机抽取歌曲,维护一个固定 id 为 \`pl-random-songs\` 的「随机歌曲」歌单(默认 48 首,可配置)。客户端「随心听」与主项目前端都直接读这个歌单,走现有歌单接口,无需新增接口。
 
+### 过滤条件(可选)
+除「歌曲总数」外,可手动设置三个过滤维度,让随机的候选集收敛到指定范围:
+- \`流派过滤\`:只从该流派的歌曲中抽取(部分匹配,可命中多标签,如 \`Pop\` / \`华语\`);留空=不限流派。注意:歌曲的流派继承自歌曲自身 \`genre\` 字段。
+- \`起始年份\` / \`截至年份\`:只抽取年份落在区间内的歌曲(经所属专辑的 \`year\` 判断);留空即可不留该端。若起始>截至,保存时自动交换。
+- 随机结果始终只在「同时满足所有已设条件」的曲库中抽取。
+
 ### 处理逻辑
 1. 定时器按 \`refreshMinutes\`(默认 30 分钟)后台自动重新随机抽取一次;
 2. 歌单被读取(getPlaylist)时,若距上次生成已超过刷新间隔,立即重建——客户端播完一轮再来取时歌单必然已刷新好,不会出现「现场生成导致的空白等待」;
-3. 抽取算法为全库随机 O(limit):COUNT + rowid 采样,不整表加载;每次刷新内容不同。
+3. 抽取算法为全库随机 O(limit):COUNT + rowid 采样,不整表加载;每次刷新内容不同;保存过滤条件后立即生效(下次读取/定时自动应用)。
 
 ### 说明
-- 曲库为空时输出空结果,不报错;
+- 曲库为空、或过滤条件下无可抽取歌曲时输出空结果,不报错;
 - 停用本插件后「随机歌曲」歌单不再自动刷新(已有内容保留);
 - 「在首页显示」开启后,歌单会固定在主项目前端首页顶部展示(与其它推荐插件共用位次校验)。`,
 };

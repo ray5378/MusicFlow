@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
-import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
+import { eq, like, sql, or, and, isNotNull, inArray, desc, gt, leftJoin } from "drizzle-orm";
 import fs from "fs";
 import path from "node:path";
 import os from "node:os";
@@ -14,7 +14,7 @@ import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCov
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
-import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
+import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
@@ -621,9 +621,36 @@ restRoutes.get("/getSongsByGenre", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
 restRoutes.get("/getRandomSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const size = Math.min(100, parseInt(getParam(c, "size") || "10") || 10);
   const user = c.get("user");
+
+  // 过滤维度合并规则:客户端显式传参(Subsonic 标准 genre/fromYear/toYear)优先,
+  // 未传时回落「随机歌曲」插件的预设过滤(getRandomSongsConfig)。这样客户端获取的
+  // 随机歌曲默认就落在用户在该插件里预设的范围内,零客户端改动。
+  const cfg = getRandomSongsConfig();
+  const clientGenre = getParam(c, "genre");
+  const effGenre = clientGenre || cfg.genre || null;
+  const ri = parseInt(getParam(c, "fromYear") || "", 10);
+  const toi = parseInt(getParam(c, "toYear") || "", 10);
+  const effFrom = Number.isFinite(ri) ? ri : cfg.fromYear ?? null;
+  const effTo = Number.isFinite(toi) ? toi : cfg.toYear ?? null;
+
+  const conds: any[] = [];
+  if (effGenre) {
+    // 客户端显式 genre 按 Subsonic 语义精确匹配;插件预设按部分匹配(与插件文档一致)。
+    if (clientGenre) conds.push(eq(songs.genre, clientGenre));
+    else conds.push(like(songs.genre, `%${cfg.genre}%`));
+  }
+  if (effFrom != null) conds.push(sql`${albums.year} >= ${effFrom}`);
+  if (effTo != null) conds.push(sql`${albums.year} <= ${effTo}`);
+
+  let query = db
+    .select()
+    .from(songs)
+    .leftJoin(albums, eq(songs.albumId, albums.id));
+  if (conds.length) query = query.where(and(...conds));
+
   // SQL 随机取样,避免把整张 songs 表(含大文本列)加载进来在 JS 里洗牌。
-  const allSongs = db.select().from(songs).orderBy(sql`random()`).limit(size).all();
-  return c.json(ok({ randomSongs: { song: allSongs.map(s => songToChild(s, getStarredSet(user?.id))) } }));
+  const allSongs = query.orderBy(sql`random()`).limit(size).all();
+  return c.json(ok({ randomSongs: { song: allSongs.map((r) => songToChild(r.songs, getStarredSet(user?.id))) } }));
 });
 
 restRoutes.get("/getGenres", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
