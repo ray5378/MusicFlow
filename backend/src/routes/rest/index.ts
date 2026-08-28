@@ -3,6 +3,10 @@ import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
+import path from "node:path";
+import os from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
 import { getLyricsForSongId, getLyricsForSong, lrcToStructured } from "../../services/lyrics.js";
 import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../plugins/scrobblers.js";
@@ -1419,10 +1423,6 @@ async function* openCastStreamChunks(song: any): AsyncGenerator<Uint8Array> {
 // 在格式切换处解出噪音/停顿。所以:只要队列里存在非 mp3 的歌曲,就用 ffmpeg 把非 mp3
 // 的每首重编码为 mp3(LAME, 192k),与 mp3 曲目的原生帧一起拼成一根纯 mp3 连续流
 // (mp3 帧自带边界,拼接天然合法)。全队列都是 mp3 时走 0 转码快速通道。
-const CAST_TARGET_SUFFIX = "mp3";
-function castQueueNeedsTranscode(ordered: any[]): boolean {
-  return ordered.some(s => (s.suffix || "").toLowerCase() !== CAST_TARGET_SUFFIX);
-}
 
 // 把单首不可直接拼接的歌曲经 ffmpeg 重编码为 mp3,逐块产出。
 async function* transcodeSongToMp3(song: any): AsyncGenerator<Uint8Array> {
@@ -1480,54 +1480,225 @@ async function* transcodeSongToMp3(song: any): AsyncGenerator<Uint8Array> {
   });
 }
 
-async function* openCastSongForQueue(song: any, transcode: boolean): AsyncGenerator<Uint8Array> {
-  if (transcode) {
-    // 只要队列存在格式变化,就统一把每首(含 mp3)重编码为无头的统一采样率 mp3,
-    // 保证整根 /castStream 是同一种可无缝解码的音频流(设备按单一流解码整队列)。
-    yield* transcodeSongToMp3(song);
-  } else {
-    yield* openCastStreamChunks(song);
+// 返回可剥头拼帧的本地 mp3 文件路径(web 有 cachePath / 本地非 webdav),否则 null。
+function localMp3FilePath(song: any): string | null {
+  if ((song.type || "local") === "web") {
+    if (song.cachePath && fs.existsSync(song.cachePath)) return song.cachePath;
+    return null;
+  }
+  const parsed = parseSongPath(song.path);
+  if (parsed && parsed.type !== "w" && fs.existsSync(parsed.filePath)) return parsed.filePath;
+  return null;
+}
+
+// 探测本地文件首帧是否为 MPEG1-Layer3 44.1kHz 立体声(与重编码目标完全一致)。
+// 只读前 64KB 同步到首个帧头即可,微秒级;匹配则走快通道,不匹配则重编码——
+// 保证整根流采样率/声道完全一致,纯 renderer 跨曲/跨格式连播不再"嘟嘟"。
+function mp3MatchesTarget(filePath: string): boolean {
+  let fd: number;
+  try { fd = fs.openSync(filePath, "r"); } catch { return false; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size <= 4) return false;
+    let offset = 0;
+    // 跳过 ID3v2 头。
+    {
+      const b = Buffer.alloc(10);
+      if (size >= 10 && fs.readSync(fd, b, 0, 10, 0) === 10 && b.toString("ascii", 0, 3) === "ID3") {
+        const sz = ((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f);
+        offset = Math.min(10 + sz + ((b[5] & 0x10) ? 10 : 0), size);
+      }
+    }
+    const buf = Buffer.alloc(65536);
+    const n = fs.readSync(fd, buf, 0, buf.length, offset);
+    // 找首个 0xFFE 帧同步:MPEG1(ver=3)+LayerIII(layer=1)+srIdx0(44.1k)+非 mono。
+    for (let i = 0; i + 4 < n; i++) {
+      if (buf[i] === 0xff && (buf[i + 1] & 0xe0) === 0xe0) {
+        const verBits = (buf[i + 1] >> 3) & 0x03;
+        const layerBits = (buf[i + 1] >> 1) & 0x03;
+        const srIdx = (buf[i + 2] >> 2) & 0x03;
+        const chMode = (buf[i + 3] >> 6) & 0x03;
+        return verBits === 3 && layerBits === 1 && srIdx === 0 && chMode !== 3;
+      }
+    }
+    return false;
+  } finally { fs.closeSync(fd); }
+}
+
+async function* remuxLocalFile(filePath: string): AsyncGenerator<Uint8Array> {
+  let size = 0;
+  try { size = fs.statSync(filePath).size; } catch { return; }
+  if (size <= 0) return;
+  // 剥掉开头的 ID3v2 头(10 字节主头 + 变长同步位标签长度,可能带 10 字节 footer)。
+  let start = 0;
+  try {
+    const b = Buffer.alloc(10);
+    const fd = fs.openSync(filePath, "r");
+    try {
+      if (fs.readSync(fd, b, 0, 10, 0) === 10 && b.toString("ascii", 0, 3) === "ID3") {
+        const sz = ((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f);
+        let skip = 10 + sz;
+        if ((b[5] & 0x10) !== 0) skip += 10; // v2.4 footer
+        start = Math.min(skip, size);
+      }
+    } finally { fs.closeSync(fd); }
+  } catch {}
+  // 剥掉结尾的 ID3v1 尾(128 字节,末尾 "TAG")。
+  let end = size;
+  if (size >= 128) {
+    try {
+      const tb = Buffer.alloc(128);
+      const fd = fs.openSync(filePath, "r");
+      try {
+        if (fs.readSync(fd, tb, 0, 128, size - 128) === 128 && tb.toString("ascii", 0, 3) === "TAG") {
+          end = size - 128;
+        }
+      } finally { fs.closeSync(fd); }
+    } catch {}
+  }
+  if (end <= start) return;
+  for await (const c of fs.createReadStream(filePath, { start, end: end - 1 })) {
+    yield new Uint8Array(c as Buffer);
   }
 }
 
-restRoutes.get("/castStream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
-  const songIds = getParams(c, "songs").flatMap(s => s.split(",")).map(s => s.trim()).filter(Boolean);
-  if (songIds.length === 0) return c.json(fail(0, "No songs specified"));
+// 连续流「短令牌」表:客户端把整队列一次交给服务端存成短 token,纯 renderer 再用一个很短的
+// URL(/rest/castStream?token=xxx)拉流;把「队列条数」与「renderer 现场 URL 长度」解耦。
+// 原因:300 首 UUID 逗号拼出的 ~12KB 超长 URI 会被 HiVi 等嵌入式 renderer 截断/拒拉。
+// token 仅内存驻留,插入时惰性清理过期项防无界增长。
+const castStreamTokens = new Map<string, { ids: string[]; ts: number; file?: string; size?: number }>();
+function newCastStreamToken(ids: string[]): string {
+  const now = Date.now();
+  if (castStreamTokens.size > 2000) {
+    for (const [k, v] of castStreamTokens) {
+      if (now - v.ts > 24 * 3600 * 1000) castStreamTokens.delete(k);
+    }
+    if (castStreamTokens.size > 2000) castStreamTokens.clear(); // 极端兜底
+  }
+  const token = "cs_" + now.toString(36) + "_" + Math.random().toString(36).slice(2, 10);
+  castStreamTokens.set(token, { ids, ts: now });
+  return token;
+}
 
-  const rows = db.select().from(songs).where(inArray(songs.id, songIds)).all();
-  // 按请求顺序排列(队列语义),跳过已不存在的 id。
-  const ordered = songIds.map(id => rows.find(r => r.id === id)).filter((r): r is any => !!r);
-  if (ordered.length === 0) return c.json(fail(0, "No playable songs"));
+// 把整队列统一重编码为**一个**带 Content-Length、可 Range 的 mp3 文件,再按普通文件流
+// (206/Range/Content-Length/Accept-Ranges)交给 renderer。原因:设备只对「有限大小、可探测
+// 长度」的媒体稳定播放;旧的实时 chunked 无 Content-Length 连续流,会让 HiVi 等纯 renderer
+// 在播放十几秒后自行停播并报错(两声嘟嘟)——与单曲 /stream 文件流能正常播放形成对照。
+async function renderCastQueueToFile(ordered: any[]): Promise<{ file: string; size: number }> {
+  const file = path.join(os.tmpdir(), `mf-cast-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`);
+  await pipeline(
+    Readable.from(castQueueGenerator(ordered) as AsyncGenerator<Uint8Array>),
+    fs.createWriteStream(file),
+  );
+  return { file, size: fs.statSync(file).size };
+}
 
-  // 只要队列准备拼成**一根**给纯 renderer 的连续流,拼接多段就必须统一重编码:
-  // 逐段原样拼接(含 mp3 自带的 ID3v2/Xing 头)会在段边界产生「Header missing」解码
-  // 错误(设备报嘟嘟声)并虚报时长。因此除「单曲且本身就是 mp3」这种无拼接、可原样直出的
-  // 情况外,一律走 0 头/统一采样率重编码,保证整根流可无缝解码。格式变化(任意非 mp3 出现)
-  // 天然落入转码分支。
-  const transcode = ordered.length !== 1 || castQueueNeedsTranscode(ordered);
-
-  // 逐首顺序写盘为连续流;单首失败仅跳过(不中断整段),设备仍会续播后续歌曲。
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      for (const s of ordered) {
-        try {
-          for await (const chunk of openCastSongForQueue(s, transcode)) controller.enqueue(chunk);
-        } catch {
-          // 单首不可播 → 跳过,播放器自然进入下一首。
-        }
+async function* castQueueGenerator(ordered: any[]): AsyncGenerator<Uint8Array> {
+  for (const s of ordered) {
+    try {
+      const f = localMp3FilePath(s);
+      // 仅当本地文件是 MPEG1-Layer3 44.1kHz 立体声时才走剥头快通道(零转码);
+      // 其它(48k/22k、mono、非 mp3)一律重编码为统一 44.1k/2ch 无头 mp3。
+      // 这是整根流采样率/声道完全一致的前提——纯 renderer 跨曲/跨格式连播不再"嘟嘟"。
+      if (f && mp3MatchesTarget(f)) {
+        yield* remuxLocalFile(f);
+      } else {
+        yield* transcodeSongToMp3(s);
       }
-      controller.close();
-    },
-  });
+    } catch {
+      // 单首不可播 → 跳过,不中断整段。
+    }
+  }
+}
+// 每个 token 只整根渲染一次;并发 Range/HEAD/GET 探针共享同一在途渲染,避免重复 ffmpeg。
+const castRenderInflight = new Map<string, Promise<{ file: string; size?: number }>>();
+async function ensureCastRender(
+  rec: { file?: string; size?: number },
+  ordered: any[],
+  token: string,
+): Promise<{ file: string; size: number }> {
+  if (rec.file) return { file: rec.file, size: rec.size! };
+  let p = castRenderInflight.get(token);
+  if (!p) {
+    p = (async () => {
+      const r = await renderCastQueueToFile(ordered);
+      rec.file = r.file;
+      rec.size = r.size;
+      return r;
+    })();
+    castRenderInflight.set(token, p);
+    p.finally(() => castRenderInflight.delete(token)).catch(() => {});
+  }
+  const r = await p;
+  return { file: r.file, size: r.size! };
+}
 
-  // 不设 Content-Length → 运行时自动 chunked;统一 audio/mpeg,保证纯 renderer 能识别。
-  return new Response(stream as any, {
+function serveCastFile(c: any, file: string, size: number, rangeHeader: string | null) {
+  if (rangeHeader) {
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (match) {
+      const start = parseInt(match[1]);
+      const end = match[2] ? parseInt(match[2]) : size - 1;
+      const chunkSize = end - start + 1;
+      return new Response(fs.createReadStream(file, { start, end }) as any, {
+        status: 206,
+        headers: {
+          "Content-Type": "audio/mpeg",
+          "Content-Range": `bytes ${start}-${end}/${size}`,
+          "Content-Length": String(chunkSize),
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "no-cache",
+        },
+      });
+    }
+  }
+  return new Response(fs.createReadStream(file) as any, {
     status: 200,
     headers: {
       "Content-Type": "audio/mpeg",
+      "Content-Length": String(size),
+      "Accept-Ranges": "bytes",
       "Cache-Control": "no-cache",
     },
   });
+}
+
+restRoutes.get("/castStream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
+  const token = (getParam(c, "token") || "").trim();
+  const create = getParam(c, "create") === "1";
+
+  // 已有 token:renderer 现场拉流,按短链解析队列(不再依赖超长的 songs 列表)。
+  let ordered: any[];
+  if (token) {
+    const rec = castStreamTokens.get(token);
+    if (!rec) return c.json(fail(0, "Invalid or expired stream token"));
+    const ids = rec.ids;
+    const trows = db.select().from(songs).where(inArray(songs.id, ids)).all();
+    ordered = ids.map(id => trows.find(r => r.id === id)).filter((r): r is any => !!r);
+    if (ordered.length === 0) return c.json(fail(0, "No playable songs"));
+  } else {
+    const songIds = getParams(c, "songs").flatMap(s => s.split(",")).map(s => s.trim()).filter(Boolean);
+    if (songIds.length === 0) return c.json(fail(0, "No songs specified"));
+    const rows = db.select().from(songs).where(inArray(songs.id, songIds)).all();
+    ordered = songIds.map(id => rows.find(r => r.id === id)).filter((r): r is any => !!r);
+    if (ordered.length === 0) return c.json(fail(0, "No playable songs"));
+  }
+
+  if (create) {
+    // 客户端一次性把队列交给服务端:立刻返回短 token,整根连续流在后台渲染
+    // (mp3 段走 remux 快通道亚秒级;非 mp3 段才 ffmpeg 转码)。这样 create 永不阻塞
+    // 到超过客户端超时——修复此前「队列入库→后台慢转码→create 超时→回退超长 URL→
+    // renderer 解码报错(两声嘟嘟)」的根因。
+    const t = newCastStreamToken(ordered.map(s => s.id));
+    const rec = castStreamTokens.get(t)!;
+    ensureCastRender(rec, ordered, t).catch(() => {});
+    return c.json(ok({ stream: { token: t } }));
+  }
+
+  // 末尾:整队列统一重编码为单个可 Range 的 mp3 文件后,按普通文件流交给 renderer。
+  const rec = token ? castStreamTokens.get(token)! : ({ file: undefined, size: undefined } as any);
+  const { file, size } = await ensureCastRender(rec, ordered, token || `inline:${ordered[0]?.id}:${ordered.length}`);
+  return serveCastFile(c, file, size, c.req.header("range") ?? null);
 });
 
 // ==================== Remote stream proxy (未入库远程歌曲直播) ====================

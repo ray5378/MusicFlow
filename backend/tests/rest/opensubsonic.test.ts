@@ -307,5 +307,42 @@ describe("DLNA 连续流 castStream（链路 B2）", () => {
     expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
     await res.arrayBuffer();
   });
+
+  // —— 短令牌:解决 300 首 UUID 拼出 ~12KB 超长 URL 令纯 renderer(HiVi)截断/拒拉报错。
+  // 客户端先 create=1 把整队列存成短 token,renderer 再用 /rest/castStream?token=xxx 拉整根流。
+  it("songs 长队列 create=1 返回短 token", async () => {
+    const r = await get("/rest/castStream?create=1&songs=s1,s3,s4,s5,s6,s7,s8");
+    expect(r.res.status).toBe(200);
+    const token = sr(r)?.stream?.token;
+    expect(typeof token).toBe("string");
+    expect((token as string).startsWith("cs_")).toBe(true);
+  });
+
+  it("token 拉流:混合格式队列统一 audio/mpeg 且不中断", async () => {
+    const create = await get("/rest/castStream?create=1&songs=s1,s3,s4,s5,s6,s7,s8");
+    const token = (sr(create)?.stream?.token as string) ?? "";
+    expect(token).not.toBe("");
+    const res = await app.request(url(`/rest/castStream?token=${token}`));
+    expect(res.status).toBe(200);
+    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
+    await res.arrayBuffer();
+  });
+
+  it("token 拉流:renderer URL 不再随队列条数膨胀(URL 短)", async () => {
+    const many = Array.from({ length: 300 }, (_, i) => `s${(i % 8) + 1}`).join(",");
+    const create = await get(`/rest/castStream?create=1&songs=${many}`);
+    const token = (sr(create)?.stream?.token as string) ?? "";
+    expect(token).not.toBe("");
+    const res = await app.request(url(`/rest/castStream?token=${token}`));
+    expect(res.status).toBe(200);
+    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
+    await res.arrayBuffer();
+  });
+
+  it("无效或过期 token 返回 failed", async () => {
+    const res = await app.request(url("/rest/castStream?token=cs_bogus"));
+    const b = await res.json();
+    expect(b?.["subsonic-response"]?.status).toBe("failed");
+  });
 });
 
