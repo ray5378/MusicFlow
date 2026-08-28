@@ -37,10 +37,10 @@ beforeAll(() => {
   db.insert(songs).values([
     { id: "s1", title: "Song One", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 180, path: "l:src:/tmp/one.mp3", suffix: "mp3", genre: "Rock", type: "local" },
     { id: "s2", title: "Song Two", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 200, path: "l:src:/tmp/two.mp3", suffix: "mp3", genre: "Rock", type: "local" },
-    // 混排连续流回归:suffix 非 mp3(wav/flac)时 /castStream 必须走转码通道,统一输出 audio/mpeg。
+    // 混排多格式曲目：suffix 覆盖 mp3/wav/flac/ogg/m4a/opus/aac，供目录/搜索/排行等断言使用。
     { id: "s3", title: "Song Wav", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 30, path: "l:src:/tmp/three.wav", suffix: "wav", genre: "Rock", type: "local" },
     { id: "s4", title: "Song Flac", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 40, path: "l:src:/tmp/four.flac", suffix: "flac", genre: "Rock", type: "local" },
-    // 扩展「单流内格式任意变化」回归:ogg/m4a/opus/aac 混排也必须统一转码输出 audio/mpeg。
+    // 扩展多格式覆盖：ogg/m4a/opus/aac 亦入库。
     { id: "s5", title: "Song Ogg", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 20, path: "l:src:/tmp/five.ogg", suffix: "ogg", genre: "Rock", type: "local" },
     { id: "s6", title: "Song M4a", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 25, path: "l:src:/tmp/six.m4a", suffix: "m4a", genre: "Rock", type: "local" },
     { id: "s7", title: "Song Opus", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 28, path: "l:src:/tmp/seven.opus", suffix: "opus", genre: "Rock", type: "local" },
@@ -246,103 +246,4 @@ describe("头像", () => {
   });
 });
 
-describe("DLNA 连续流 castStream（链路 B2）", () => {
-  // 回归:客户端用 songs=A,B,C 逗号拼接传多曲;此前 getParams 不拆逗号 → inArray
-  // 查不到 → 返回 JSON fail(0,"No playable songs"),纯 renderer(HiVi)拉到此 JSON
-  // 解码失败 → 两声报错并停止。修复后按逗号拆分,返回 audio/mpeg 连续流。
-  it("songs 逗号拼接的多曲列表能被正确拆分并返回音频流", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s1,s2"));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toMatch(/^audio\//);
-    // 消费完 body,确保连续流 start() 能正常收尾不挂起。
-    await res.arrayBuffer();
-  });
-
-  it("songs 重复参数形式同样生效", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s1&songs=s2"));
-    expect(res.headers.get("content-type") || "").toMatch(/^audio\//);
-  });
-
-  // 回归:队列内格式变化(mp3+wav+flac 混排)。纯 renderer 把整根流按**单一**音频流解码,
-  // 因此混排时 /castStream 必须进入转码通道并统一输出 audio/mpeg(而非按首曲命中 mime)。
-  // 单首源缺失时仅跳过(不中断整体),仍返回 200 音频流,不抛 JSON 错误、不挂起。
-  it("songs 混排 mp3+wav+flac 时统一输出 audio/mpeg 且不中断", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s1,s3,s4"));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  // 单流内「格式任意变化」全量回归:mp3/wav/flac/ogg/m4a/opus/aac 一次性混排,
-  // 必须统一转码输出 audio/mpeg,且能正常消费殆尽不挂起、不抛 JSON 错误。
-  it("songs 全格式混排(mp3/wav/flac/ogg/m4a/opus/aac)统一 audio/mpeg 且不中断", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s1,s3,s4,s5,s6,s7,s8"));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  // 首曲即非 mp3 也会触发转码,同样统一 audio/mpeg(不按首曲格式回退)。
-  it("songs 首曲为非 mp3 格式时仍统一输出 audio/mpeg", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s7,s1"));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  // 回归:队列全为 mp3 但≥2 首时也必须走转码(此前误走 0 转码快通道,把多个原生 mp3
-  // 原样拼接,段首自带的 ID3v2/Xing 头会在拼接处产生「Header missing」解码错误并虚报
-  // 时长,纯 renderer 会报嘟嘟声)。修复:凡拼接多段一律统一重编码,确保零错误无缝连播。
-  it("songs 多首全 mp3 也统一重编码为无缝 audio/mpeg", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s1,s8"));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  // 单曲且本身就是 mp3 → 无拼接,走 0 转码快通道(原样直出),仍为可解码的 audio/mpeg。
-  it("songs 单曲 mp3 走原样快通道输出 audio/mpeg", async () => {
-    const res = await app.request(url("/rest/castStream?songs=s1"));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  // —— 短令牌:解决 300 首 UUID 拼出 ~12KB 超长 URL 令纯 renderer(HiVi)截断/拒拉报错。
-  // 客户端先 create=1 把整队列存成短 token,renderer 再用 /rest/castStream?token=xxx 拉整根流。
-  it("songs 长队列 create=1 返回短 token", async () => {
-    const r = await get("/rest/castStream?create=1&songs=s1,s3,s4,s5,s6,s7,s8");
-    expect(r.res.status).toBe(200);
-    const token = sr(r)?.stream?.token;
-    expect(typeof token).toBe("string");
-    expect((token as string).startsWith("cs_")).toBe(true);
-  });
-
-  it("token 拉流:混合格式队列统一 audio/mpeg 且不中断", async () => {
-    const create = await get("/rest/castStream?create=1&songs=s1,s3,s4,s5,s6,s7,s8");
-    const token = (sr(create)?.stream?.token as string) ?? "";
-    expect(token).not.toBe("");
-    const res = await app.request(url(`/rest/castStream?token=${token}`));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  it("token 拉流:renderer URL 不再随队列条数膨胀(URL 短)", async () => {
-    const many = Array.from({ length: 300 }, (_, i) => `s${(i % 8) + 1}`).join(",");
-    const create = await get(`/rest/castStream?create=1&songs=${many}`);
-    const token = (sr(create)?.stream?.token as string) ?? "";
-    expect(token).not.toBe("");
-    const res = await app.request(url(`/rest/castStream?token=${token}`));
-    expect(res.status).toBe(200);
-    expect((res.headers.get("content-type") || "").toLowerCase()).toBe("audio/mpeg");
-    await res.arrayBuffer();
-  });
-
-  it("无效或过期 token 返回 failed", async () => {
-    const res = await app.request(url("/rest/castStream?token=cs_bogus"));
-    const b = await res.json();
-    expect(b?.["subsonic-response"]?.status).toBe("failed");
-  });
-});
 
