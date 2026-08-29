@@ -440,15 +440,17 @@ export function getDevice(deviceId: string): DlnaDevice | undefined {
 
 // Create a token-auth-free stream URL for DLNA renderer to pull.
 // The URL points at this server; the caller passes the server's LAN base URL.
-export function createCastSession(songId: string, deviceId: string, baseUrl: string): { token: string; streamUrl: string } {
+// Returns expiresAt so callers (e.g. the /v1/dlna/stream-url API) can surface a TTL.
+export function createCastSession(songId: string, deviceId: string, baseUrl: string): { token: string; streamUrl: string; expiresAt: number } {
   const token = randomBytes(16).toString("hex");
   const now = Date.now();
-  sessions.set(token, { token, songId, deviceId, createdAt: now, expiresAt: now + SESSION_TTL_MS });
+  const expiresAt = now + SESSION_TTL_MS;
+  sessions.set(token, { token, songId, deviceId, createdAt: now, expiresAt });
   // Clean expired sessions opportunistically.
   if (sessions.size > 50) {
     for (const [k, v] of sessions) if (v.expiresAt < now) sessions.delete(k);
   }
-  return { token, streamUrl: `${baseUrl}/rest/dlna/stream/${token}` };
+  return { token, streamUrl: `${baseUrl}/rest/dlna/stream/${token}`, expiresAt };
 }
 
 export function resolveCastToken(token: string): string | null {

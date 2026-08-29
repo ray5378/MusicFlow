@@ -42,7 +42,7 @@ import { startBackfill, backfillStatus } from "../../services/backfill.js";
 import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
-  refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice,
+  refreshDevices, getCachedDevices, shouldRefreshDevices, castToDevice, createCastSession,
   playDevice, pauseDevice, stopDevice, seekDevice, setDeviceVolume, setDeviceMute, getDeviceStatus,
   enqueueNextTrack, getCurrentMedia, recordBaseUrl, getEffectiveBaseUrl, isPrivateLanHostname,
   setDeviceAlias, deleteDeviceRecord, setDeviceDisabled, isDeviceDisabled,
@@ -2149,6 +2149,23 @@ apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", permMiddleware(PERM.RENDERE
 });
 
 // Cast a song to a DLNA renderer.
+// 为客户端投屏入口生成“无鉴权”流 URL 的一次性 token。
+// 部分渲染器(如 OpenWrt 上的 GMediaRender)拉流时无法携带 Subsonic 的 u/t/s 鉴权
+// 参数,只能拉纯 URL 的流 —— 客户端直接下发 /rest/stream?u&t&s 会因鉴权解析失败无声。
+// 这里先用 songId 注册一个临时 cast session,服务端以 /rest/dlna/stream/:token
+// 免鉴权回源;客户端用**自身的公网 baseUrl** 拼出最终 URL(服务端这里只回相对路径,
+// 避免把 LAN IP 推给设备)。token 短期有效(6h),且该端点本身受 authMiddleware 保护。
+apiRoutes.post("/v1/dlna/stream-url", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const songId = body.songId;
+  if (!songId) return c.json({ error: "需要 songId" }, 400);
+  const song = db.select().from(songs).where(eq(songs.id, songId)).get();
+  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  const deviceId = typeof body.deviceId === "string" && body.deviceId ? body.deviceId : "client-cast";
+  const { token, expiresAt } = createCastSession(songId, deviceId, getDlnaBaseUrl(c));
+  return c.json({ token, streamUrl: `/rest/dlna/stream/${token}`, expiresAt });
+});
+
 apiRoutes.post("/v1/dlna/cast", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { songId, deviceId } = body;
