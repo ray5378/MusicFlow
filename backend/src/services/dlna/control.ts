@@ -858,20 +858,100 @@ export async function alignDeviceToPosition(
 }
 
 // Set volume (0-100). Requires RenderingControl service.
-export async function setDeviceVolume(deviceId: string, volume: number): Promise<void> {
+//
+// 音量设置带「回读确认 + 持续重发」闭环:SOAP SetVolume 返回 200 不代表设备真正
+// 采纳(部分 DLNA / Linkplay 设备在播放态会静默忽略音量指令)。因此 SetVolume 后
+// 按 confirmIntervalMs 间隔回读 GetVolume 校验设备真实音量;在 timeoutMs 窗口内
+// 只要未确认(未回读到目标 ±tolerance),就持续重发 SetVolume,直到命中或窗口
+// 耗尽。窗口耗尽仍未确认 → 抛错,由调用方(flow / announce / API)决定重试或
+// 上报;同时把事件缓存纠正为设备真实音量,避免 HA / WS 误以为音量已生效。
+export interface SetVolumeOptions {
+  /** 是否回读确认设备真实音量,默认 true */
+  confirm?: boolean;
+  /** 确认总预算 ms:窗口内只要未确认就持续重发,默认 10000(10s) */
+  timeoutMs?: number;
+  /** 每次 SetVolume 后到回读 GetVolume 的间隔 ms,默认 500 */
+  confirmIntervalMs?: number;
+  /** 与目标值的允许偏差(设备步进/舍入),默认 1 */
+  tolerance?: number;
+}
+
+/** 读取设备当前音量(0-100)。设备不支持 RenderingControl 或响应异常时抛错。 */
+async function readDeviceVolume(deviceId: string): Promise<number> {
+  const device = getDevice(deviceId);
+  if (!device?.renderingControlUrl) throw new Error("设备不支持音量控制");
+  const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetVolume", {
+    InstanceID: "0",
+    Channel: "Master",
+  });
+  const m = xml.match(/<CurrentVolume>([^<]*)<\/CurrentVolume>/i);
+  if (!m) throw new Error("GetVolume 响应缺少 CurrentVolume");
+  const v = parseInt(m[1].trim(), 10);
+  if (Number.isNaN(v)) throw new Error(`GetVolume 响应非数字:${m[1]}`);
+  return v;
+}
+
+export async function setDeviceVolume(deviceId: string, volume: number, opts?: SetVolumeOptions): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.renderingControlUrl) throw new Error("设备不支持音量控制");
   const vol = Math.max(0, Math.min(100, Math.round(volume)));
+  const confirm = opts?.confirm ?? true;
+  const timeoutMs = Math.max(500, opts?.timeoutMs ?? 10000);
+  const intervalMs = Math.max(50, opts?.confirmIntervalMs ?? 500);
+  const tolerance = Math.max(0, opts?.tolerance ?? 1);
+  const deadline = Date.now() + timeoutMs;
+  let lastGot = -1;
+  let setFailedErr: unknown = null;
+  let setSucceeded = false;
   try {
-    await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetVolume", {
-      InstanceID: "0",
-      Channel: "Master",
-      DesiredVolume: String(vol),
-    });
-    markOk(deviceId);
-    // 立刻把新音量写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
-    getEventManager().setVolume(deviceId, vol);
-  } catch (e: any) { markFailed(deviceId, "SetVolume", e); throw e; }
+    if (!confirm) {
+      // 不做确认:发一次即返回(向后兼容,如纯异步调用方自行管理)。
+      await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetVolume", {
+        InstanceID: "0",
+        Channel: "Master",
+        DesiredVolume: String(vol),
+      });
+      markOk(deviceId);
+      getEventManager().setVolume(deviceId, vol);
+      return;
+    }
+    // 确认窗口:只要未回读到目标音量(±tolerance),就持续重发 SetVolume,
+    // 直到 timeoutMs 耗尽。GetVolume 无回应/异常同样继续重发。
+    while (Date.now() < deadline) {
+      try {
+        await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetVolume", {
+          InstanceID: "0",
+          Channel: "Master",
+          DesiredVolume: String(vol),
+        });
+        markOk(deviceId);
+        setSucceeded = true;
+        // 立刻把新音量写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+        getEventManager().setVolume(deviceId, vol);
+      } catch (e: any) {
+        setFailedErr = e;
+        // SetVolume 本身失败也继续重发到窗口结束。
+      }
+      // 按频率等待后回读确认(窗口剩余不足则直接退出)。
+      await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+      if (Date.now() >= deadline) break;
+      try {
+        lastGot = await readDeviceVolume(deviceId);
+        if (Math.abs(lastGot - vol) <= tolerance) return; // 确认命中 → 成功
+      } catch {
+        // GetVolume 暂不可用 / 无回应 → 继续下一轮重发。
+      }
+    }
+  } finally {
+    // 确认失败:把事件缓存纠正为设备真实音量,避免 HA/WS 误以为音量已生效。
+    if (lastGot >= 0) getEventManager().setVolume(deviceId, lastGot);
+  }
+  // 窗口耗尽仍未确认 → 抛错(区分「SetVolume 从未成功」与「成功但未获确认」)。
+  const err = setSucceeded
+    ? new Error(`音量 ${vol} 在 ${timeoutMs}ms 内未获设备确认:最后回读 ${lastGot === -1 ? "无响应" : lastGot}`)
+    : (setFailedErr instanceof Error ? setFailedErr : new Error(String(setFailedErr ?? "SetVolume 无响应")));
+  markFailed(deviceId, "SetVolume", err);
+  throw err;
 }
 
 /** 静音开关(RenderingControl SetMute)。与音量相互独立:静音不改变 Volume 值,

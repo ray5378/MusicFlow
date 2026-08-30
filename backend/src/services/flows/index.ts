@@ -254,10 +254,11 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
       }
       if (def.volume?.enabled && typeof def.volume.value === "number") {
         // 播放开始后等设备稳定再设音量,否则部分 DLNA 设备可能忽略音量指令。
-        // 只发一次目标值可能仍被忽略(未进入播放态),故连发两次:
-        //   先发略低于目标的中间值(value-1),再发目标值(value),
-        //   用 19→20 这种两次跳变逼设备真正采纳音量(setDeviceVolume 内部已 clamp)。
-        // 失败后 1.5s 整体重试一遍,确保音量生效。
+        // setDeviceVolume 内部已带「回读确认 + 持续重发」(SetVolume → GetVolume
+        // 校验,默认 10s 窗口内未确认就按 500ms 频率持续重发,直到设备真实音量
+        // 命中目标);此处再做 3 轮整体重试(19→20 两次跳变),确保设备真实音量
+        // 达到配置值,杜绝「SOAP 返回 200 但设备未采纳」导致实际音量不符
+        // (如 H5MKII 类 Linkplay 设备播放态静默忽略音量指令)。
         const step1 = Math.max(0, def.volume.value - 1);
         const doSetVolume = async (): Promise<void> => {
           if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, step1);
@@ -266,11 +267,18 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
           if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
           else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
         };
-        try {
-          await doSetVolume();
-        } catch {
-          await sleep(1500);
-          await doSetVolume();
+        let volumeApplied = false;
+        for (let vAttempt = 0; vAttempt < 3 && !volumeApplied; vAttempt++) {
+          try {
+            await doSetVolume();
+            volumeApplied = true;
+          } catch (e: any) {
+            log.warn(`[flow ${flow.name}] 目标 ${name} 音量 ${def.volume.value}% 设置未确认(第 ${vAttempt + 1} 轮):${e?.message || e}`);
+            await sleep(1500);
+          }
+        }
+        if (!volumeApplied) {
+          errs.push(`${name}: 音量 ${def.volume.value}% 设置失败(设备未确认回读)`);
         }
       }
       console.log(`[flow ${flow.name}] 已执行:${name}(${pid})${contentName ? ` → 「${contentName}」` : ""}`);

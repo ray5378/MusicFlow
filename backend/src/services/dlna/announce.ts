@@ -23,6 +23,9 @@ import {
 } from "./control.js";
 import { getQueueController } from "../player/index.js";
 import { getGroupManager } from "../group/index.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("ANNOUNCE");
 
 interface SavedState {
   deviceId: string;
@@ -90,9 +93,14 @@ export async function announceOnPeer(opts: AnnounceOptions): Promise<{ targets: 
     if (wasActive) qc.deactivate(peerId);
 
     // 3) 调播报音量 → 播 → 等播完。任一台失败不影响其余设备。
+    //    setDeviceVolume 自带「回读确认 + 重发」,此处检查各设备音量是否真正就位,
+    //    未确认的记入日志(播报继续,不中断)。
     if (typeof opts.volume === "number") {
       const v = Math.max(0, Math.min(100, Math.round(opts.volume)));
-      await Promise.allSettled(targets.map(d => setDeviceVolume(d, v)));
+      const volResults = await Promise.allSettled(targets.map(d => setDeviceVolume(d, v)));
+      volResults.forEach((r, i) => {
+        if (r.status === "rejected") log.warn(`[announce] ${targets[i]} 播报音量 ${v} 未确认:${(r.reason as Error)?.message || r.reason}`);
+      });
     }
     const played = await Promise.allSettled(
       targets.map(d => playUriOnDevice(d, url, { title: "Announcement" })),
@@ -105,11 +113,15 @@ export async function announceOnPeer(opts: AnnounceOptions): Promise<{ targets: 
     );
 
     // 4) 还原音量。放在恢复播放之前,免得原曲先以播报音量炸出来一下。
-    await Promise.allSettled(
+    //    setDeviceVolume 自带确认+重发;还原失败会导致设备音量停在播报档,记日志提示。
+    const restoreResults = await Promise.allSettled(
       saved
         .filter(s => typeof opts.volume === "number")
         .map(s => setDeviceVolume(s.deviceId, s.volume)),
     );
+    restoreResults.forEach((r, i) => {
+      if (r.status === "rejected") log.warn(`[announce] 还原音量失败(${i}):${(r.reason as Error)?.message || r.reason}`);
+    });
 
     // 5) 恢复原曲。播报前本来就没在播的,保持安静即可 —— 播报不该顺手开始放歌。
     const anyWasPlaying = saved.some(s => s.wasPlaying);
