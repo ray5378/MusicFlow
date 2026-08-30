@@ -107,7 +107,7 @@
       <template v-else>
         <div class="section-title">
           <span>{{ group.subtag ? group.name + '·' + group.subtag : group.name + '·本地随机' }}</span>
-          <span class="section-sub">{{ group.tagline || ('从你的 ' + group.name + ' 歌单里随机(每次刷新不同)') }}</span>
+          <span v-if="group.tagline" class="section-sub">{{ group.tagline }}</span>
           <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
         </div>
         <div class="grid-row">

@@ -132,12 +132,13 @@ describe("三个榜单插件(改动后)声明 localPlatformRecommend 并走本�
       expect(c).toBeTruthy();
       // 三个榜单分区再按 sortOrder 升序(30/31/32)
     }
-    // 分区展示文案透传:三个榜单插件携带 subtag「每日更新」+ 说明性 tagline
+    // 分区展示文案透传:三个榜单插件携带 subtag「每日更新」;tagline 说明性文案已移除
+    // (三端前端均改为「有 tagline 才渲染副标题」,榜单分区不再显示小字注释)。
     const qqCh = ch.find((x: any) => x.source === "qq");
     expect(qqCh).toMatchObject({
       subtag: "每日更新",
-      tagline: "从QQ音乐榜单获取最新的榜单",
     });
+    expect(qqCh.tagline).toBeUndefined();
     const kgCh = ch.find((x: any) => x.source === "kugou");
     expect(kgCh?.subtag).toBe("每日更新");
     const neCh = ch.find((x: any) => x.source === "netease");
