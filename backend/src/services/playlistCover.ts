@@ -50,8 +50,13 @@ export function resolveCoverFile(ref: string): string | null {
   if (cached !== undefined) return cached;
   let resolved: string | null = null;
   for (const dir of [ONLINE_COVERS_DIR, COVERS_DIR]) {
-    const p = path.join(dir, ref);
-    try { if (fs.existsSync(p)) { resolved = p; break; } } catch { /* keep probing */ }
+    try {
+      // 目录内校验:归一化(ref 可能含 ../ 或绝对路径)后,解析结果必须落在封面目录
+      // 内,否则拒绝——堵死经 getCoverArt 裸 id 等入口的路径穿越(任意文件读取)。
+      const p = path.resolve(dir, ref);
+      if (p !== dir && !p.startsWith(dir + path.sep)) continue;
+      if (fs.existsSync(p)) { resolved = p; break; }
+    } catch { /* 非法 ref(如空字节)→ 跳过该目录 */ }
   }
   if (resolveCache.size >= RESOLVE_CACHE_MAX) {
     const first = resolveCache.keys().next().value;

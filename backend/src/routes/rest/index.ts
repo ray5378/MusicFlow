@@ -20,6 +20,7 @@ import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
+import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
 import { findFallbackStream } from "../../services/source/online/streamFallback.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
@@ -1576,6 +1577,12 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
+      // SSRF 防护:仅放行公网 http(s) 目标(回环/私网/链路本地/保留地址默认拦截,可经
+      // COVER_PROXY_ALLOW_HOSTS / COVER_PROXY_ALLOW_PRIVATE 放行内网封面)。拦截与
+      // 代理失败走同一占位图路径,不向调用方暴露内网目标的可达性。
+      if (await isBlockedCoverProxyUrl(id)) {
+        throw new Error("blocked cover proxy (SSRF guard)");
+      }
       const up = await fetch(id, { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0" } });
       clearTimeout(timer);
       if (up.ok) {

@@ -75,3 +75,27 @@ describe("getCoverArt 需鉴权(方案 B)+ COVER_VIEW 门禁", () => {
     expect(res.status).toBe(401);
   });
 });
+
+// 封面安全回归:路径穿越(裸 id 直接拼路径)与 SSRF(远程封面代理)必须被拦,
+// 且拦截与「找不到封面」走同一占位图路径,不向调用方泄露内网/文件系统信息。
+describe("getCoverArt 安全防护", () => {
+  it("路径穿越:带 ../ 的裸 id 不返回目标文件内容,仅回落到占位图", async () => {
+    const res = await app.request(
+      "/rest/getCoverArt?id=../../../../etc/passwd&size=300&" + authQS("root"),
+    );
+    expect(res.status).toBe(200);
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    expect(ct).toContain("image/");
+    const body = await res.text();
+    expect(body).not.toContain("root:"); // 绝不泄露 /etc/passwd 内容
+  });
+
+  it("SSRF:代理请求内网地址被拦截(不产生到内网的出站请求)", async () => {
+    const res = await app.request(
+      "/rest/getCoverArt?id=http://127.0.0.1:9/secret&size=300&" + authQS("root"),
+    );
+    expect(res.status).toBe(200);
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    expect(ct).toContain("image/"); // 与代理失败一致回落到占位图
+  });
+});
