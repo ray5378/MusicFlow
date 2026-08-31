@@ -163,14 +163,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 镜像 tag 解析:tag 触发时 build 会推送 <version>(即打的 v* 号);main push /
+      # 手动构建只推送 :latest + :main,不产生版本 tag,此时扫 :main 即可拿到同一产物。
+      - name: Resolve image tag
+        id: resolve
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ needs.build.outputs.version }}"
+          else
+            TAG="main"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Pull built image
-        run: docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
+        run: docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}
 
       - name: Trivy 镜像扫描 (HIGH/CRITICAL, 免修复忽略)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          scan-ref: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
+          scan-ref: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
