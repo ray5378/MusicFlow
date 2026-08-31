@@ -41,7 +41,7 @@ jobs:
       - name: frontend 依赖审计 (high+critical 失败)
         run: cd frontend && npm audit --audit-level=high
       - name: OSV 全量 lockfile 扫描
-        uses: google/osv-scanner-action@v1.9.2
+        uses: google/osv-scanner-action/osv-scanner-action@v1.9.2
         with:
           scan-args: |-
             --recursive
@@ -90,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy 文件系统扫描 (vuln + secret + config)
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
