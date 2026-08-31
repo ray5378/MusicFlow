@@ -1,0 +1,107 @@
+name: security
+
+# 多维度安全扫描(独立于 ci.yml 的功能/规范校验):
+#   1. 依赖漏洞(SCA):backend + frontend `npm audit`(hard gate, high+critical 即失败)
+#      + OSV Scanner 扫全量 lockfile(覆盖面比 npm advisory 更全,含 Go/Python 生态对照)
+#   2. 密钥泄露扫描:gitleaks 全提交历史(任何硬编码 token/密码即失败)
+#   3. 静态安全分析(SAST):CodeQL security-and-quality 规则集(注入/SSRF/路径穿越等),
+#      结果上报 Security → Code scanning,不阻塞构建
+#   4. 整仓文件系统扫描:Trivy(fs: vuln + secret + config),SARIF 上报不阻塞
+#   5. 定时全量复核:每天 02:00 UTC 重扫,捕获「今天新发布」的 CVE(即使代码没变)
+#
+# 阻塞策略:
+#   - 生产依赖高危/严重(npm audit --audit-level=high)→ 硬性失败,必须修复
+#   - 密钥泄露(gitleaks)→ 硬性失败,零容忍
+#   - CodeQL / Trivy 发现项 → 上报 Security tab(不阻塞),供人工处置
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit:
+    name: 依赖漏洞扫描 (npm audit + OSV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # 仅用 lockfile 即可审计,无需 npm ci(省去安装耗时)。
+      - name: backend 依赖审计 (high+critical 失败)
+        run: cd backend && npm audit --audit-level=high
+      - name: frontend 依赖审计 (high+critical 失败)
+        run: cd frontend && npm audit --audit-level=high
+      - name: OSV 全量 lockfile 扫描
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            --recursive
+            --fail-on-vuln
+            --skip-git
+            .
+
+  secret-scan:
+    name: 密钥泄露扫描 (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql:
+    name: 静态安全分析 (CodeQL)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["javascript-typescript"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # security-and-quality:默认规则 + 高质量实验规则,覆盖面更全。
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  trivy-fs:
+    name: 整仓漏洞扫描 (Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy 文件系统扫描 (vuln + secret + config)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+      - name: 上传 SARIF 到 Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif

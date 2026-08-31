@@ -1,0 +1,35 @@
+version: 2
+
+# 依赖自动更新(安全维护):依赖漏洞一旦有可用修复版本,Dependabot 自动开 PR。
+# 配合 security.yml 的 npm audit 硬门槛,形成「检测 → 修复 → 合并」闭环。
+updates:
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "security"]
+    groups:
+      runtime:
+        patterns: ["*"]
+        exclude-patterns: []
+    # 仅安全/高优先级更新直接开 PR;日常小版本也纳入(weekly)但不阻塞发版。
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "security"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "chore(ci)"
