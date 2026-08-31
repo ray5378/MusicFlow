@@ -81,12 +81,12 @@ describe("OpenSubsonic 基础合规", () => {
     expect(sr(r)?.serverVersion).toBe(process.env.APP_VERSION);
   });
 
-  it("扩展声明含 songLyrics / formPost,不含未实现的 transcoding", async () => {
+  it("扩展声明含 transcoding / songLyrics / formPost", async () => {
     const r = await get("/rest/getOpenSubsonicExtensions");
     const names = sr(r)?.openSubsonicExtensions?.map((e: any) => e.name) ?? [];
+    expect(names).toContain("transcoding");
     expect(names).toContain("songLyrics");
     expect(names).toContain("formPost");
-    expect(names).not.toContain("transcoding");
   });
 });
 

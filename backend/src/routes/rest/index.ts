@@ -25,6 +25,10 @@ import { findFallbackStream } from "../../services/source/online/streamFallback.
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
+import { decideTranscode, spawnTranscoder, acquireTranscodeSlot, releaseTranscodeSlot, TRANSCODE_MIME } from "../../services/transcode.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("REST-STREAM");
 
 export const restRoutes = new Hono();
 
@@ -265,6 +269,7 @@ restRoutes.get("/getLicense", (c) => c.json(ok({ license: { valid: true } })));
 restRoutes.get("/getOpenSubsonicExtensions", (c) => c.json(ok({
   openSubsonicExtensions: [
     { name: "transcodeOffset", versions: [1] },
+    { name: "transcoding", versions: [1] },
     { name: "formPost", versions: [1] },
     { name: "songLyrics", versions: [1, 2] },
     { name: "indexBasedQueue", versions: [1] },
@@ -1256,6 +1261,86 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
   }
 }
 
+// ==================== 转码拉流（OpenSubsonic /rest/stream 语义） ====================
+// 需要转码时用系统 ffmpeg 把音源实时转成目标格式输出为分块流：
+//   - 转码流不可按字节 Range 断点续传 → 不返回 Content-Length / Accept-Ranges，
+//     客户端（shouldUseServerTimeOffsetSeek）改用 timeOffset 重新拉流 seek；
+//   - 客户端断开立即 kill ffmpeg 并释放并发槽，避免孤儿进程持续烧 CPU。
+async function serveTranscodedSong(
+  c: any,
+  input: { source: string; headers?: Record<string, string> },
+  opts: { format: "mp3" | "aac"; bitrateKbps: number; timeOffset?: number },
+) {
+  await acquireTranscodeSlot();
+  if (c.req.raw.signal.aborted) {
+    releaseTranscodeSlot();
+    return new Response(null, { status: 499 });
+  }
+  const child = spawnTranscoder({
+    source: input.source,
+    headers: input.headers,
+    format: opts.format,
+    bitrateKbps: opts.bitrateKbps,
+    timeOffsetSec: opts.timeOffset,
+  });
+  const signal = c.req.raw.signal;
+  let releasedSlot = false;
+  const killChild = () => { try { child.kill("SIGKILL"); } catch {} };
+  const release = () => {
+    if (releasedSlot) return;
+    releasedSlot = true;
+    signal.removeEventListener("abort", killChild);
+    releaseTranscodeSlot();
+  };
+  signal.addEventListener("abort", killChild, { once: true });
+  child.once("exit", release);
+  child.once("error", release);
+  child.stdout.on("close", () => { killChild(); release(); });
+
+  // 排空 stderr 防止管道写满阻塞 ffmpeg，保留末尾便于排障
+  let errBuf = "";
+  child.stderr.on("data", (d: Buffer) => { errBuf = (errBuf + d.toString()).slice(-4096); });
+  child.on("exit", (code, sig) => {
+    if (code !== 0 && code !== null) {
+      log.error("ffmpeg 转码退出异常", { code, signal: sig, stderr: errBuf.slice(0, 800), source: input.source });
+    }
+  });
+
+  return new Response(child.stdout as any, {
+    status: 200,
+    headers: {
+      "Content-Type": TRANSCODE_MIME[opts.format],
+      "Cache-Control": "no-cache",
+    },
+  });
+}
+
+// 解析转码输入：本地文件路径 / WebDAV URL(+Basic) / 在线 URL(+headers，优先本地缓存)。
+async function resolveTranscodeInput(c: any, song: any): Promise<{ source: string; headers?: Record<string, string> } | null> {
+  if ((song.type || "local") === "web") {
+    const fs = await import("fs");
+    if (song.cachePath && fs.existsSync(song.cachePath)) return { source: song.cachePath };
+    if (!song.url) return null;
+    const headers: Record<string, string> = {};
+    try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
+    return { source: song.url, headers };
+  }
+  const parsed = parseSongPath(song.path);
+  if (!parsed) return null;
+  if (parsed.type === "w") {
+    const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
+    if (!source) return null;
+    const config = JSON.parse(source.config || "{}");
+    const downloadUrl = getWebDAVUrl(config, parsed.filePath);
+    const headers: Record<string, string> = {};
+    if (config.username && config.password) {
+      headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+    }
+    return { source: downloadUrl, headers };
+  }
+  return { source: parsed.filePath };
+}
+
 restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const id = getParam(c, "id") || "";
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
@@ -1263,8 +1348,29 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
 
   const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
-  const format = getParam(c, "format"); // "raw" = no transcode; other formats unsupported
+  const requestedFormat = getParam(c, "format");
+  const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
 
+  // OpenSubsonic 转码语义：客户端要求 format=mp3/aac，或 maxBitRate 低于源码率 → 服务端实时转码。
+  // 转码流不可按字节 seek，客户端会用 timeOffset 重新拉流（对应已宣告的 transcodeOffset 扩展）。
+  const transcode = decideTranscode({
+    requestedFormat,
+    maxBitRate,
+    sourceFormat: song.suffix,
+    sourceBitRate: song.bitRate,
+  });
+  if (transcode.should && transcode.format) {
+    const input = await resolveTranscodeInput(c, song);
+    if (input) {
+      return serveTranscodedSong(c, input, {
+        format: transcode.format,
+        bitrateKbps: transcode.bitrateKbps,
+        timeOffset,
+      });
+    }
+  }
+
+  // 原样拉流（支持 Range / 本地缓存 / 远程代理）。
   // Online song (built-in source plugin): serve local cache first, else proxy `url` with its headers.
   if ((song.type || "local") === "web") {
     return serveWebSongStream(c, song, rangeHeader);
@@ -1365,6 +1471,22 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
     if (!streamUrl) return c.json(fail(0, "No stream url"));
     const streamHeaders: Record<string, string> = {};
     if (source === "bilibili") streamHeaders["Referer"] = "https://www.bilibili.com/";
+
+    // 与 /rest/stream 一致：format/maxBitRate/timeOffset 触发服务端实时转码（在线源默认按 mp3 判定）。
+    const transcode = decideTranscode({
+      requestedFormat: getParam(c, "format"),
+      maxBitRate: parseInt(getParam(c, "maxBitRate") || "0") || null,
+      sourceFormat: getParam(c, "suffix") || "mp3",
+      sourceBitRate: parseInt(getParam(c, "bitRate") || "0") || null,
+    });
+    if (transcode.should && transcode.format) {
+      return serveTranscodedSong(c, { source: streamUrl, headers: streamHeaders }, {
+        format: transcode.format,
+        bitrateKbps: transcode.bitrateKbps,
+        timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0,
+      });
+    }
+
     // 现场构造 web-song 形状(无 cachePath/未缓存),并补 pluginEntry/sourceData 让
     // serveWebSongStream 复用与 /rest/stream 同一套「多源换源」:原平台 404/VIP 时按
     // 严格「歌名-歌手」换到其它平台可播候选(与本机 DLNA 本地播放行为一致)。
@@ -1400,6 +1522,29 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   if (!song) return c.text("Song not found", 404);
 
   const rangeHeader = c.req.header("range");
+  const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
+  const requestedFormat = getParam(c, "format");
+  const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
+
+  // 与 /rest/stream 一致支持 format/maxBitRate/timeOffset 服务端实时转码；
+  // DLNA 渲染器默认不带这些参数 → 走原样拉流，行为不变。
+  const transcode = decideTranscode({
+    requestedFormat,
+    maxBitRate,
+    sourceFormat: song.suffix,
+    sourceBitRate: song.bitRate,
+  });
+  if (transcode.should && transcode.format) {
+    const input = await resolveTranscodeInput(c, song);
+    if (input) {
+      return serveTranscodedSong(c, input, {
+        format: transcode.format,
+        bitrateKbps: transcode.bitrateKbps,
+        timeOffset,
+      });
+    }
+  }
+
   // Online/plugin song (type="web", path like "web:provider:source"): proxy the
   // song's remote url (with per-song headers + Range), same as /rest/stream.
   if (song.type === "web") {

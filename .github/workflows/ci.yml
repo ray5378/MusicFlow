@@ -73,7 +73,10 @@ jobs:
         run: cd backend && npm ci
       - name: TypeScript 类型检查
         run: cd backend && npx tsc --noEmit
-      - name: 全量测试
+      # 全量测试含转码链路契约门禁:services/transcode.test.ts 的共享契约表与
+      # 客户端 transcode-chain.yml 所跑向量完全一致,decideTranscode 一旦漂移即失败;
+      # rest/transcodeStream.test.ts 用真实 ffmpeg 端到端验证 /rest/stream 转码。
+      - name: 全量测试(含转码链路契约)
         shell: bash
         run: |
           set -o pipefail
