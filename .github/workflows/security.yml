@@ -49,6 +49,41 @@ jobs:
             --skip-git
             .
 
+  license-scan:
+    name: License 合规扫描
+    runs-on: ubuntu-latest
+    # 第三方依赖许可证合规:发版(尤其 OSS / 商业分发)需避免 copyleft(GPL/AGPL/LGPL)
+    # 与「未识别许可证」混入。用 license-checker 对生产依赖(bundle 进镜像的部分)做门禁:
+    # 命中 copyleft / unknown 即失败;补充基许可(默认放行)外的专项验证见 scripts 说明。
+    # 注:license-checker 需 node_modules 存在,这里只为拿全量许可证信息,cosmetic 依赖跑一遍。
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: backend License 门禁 (copyleft/unknown 即失败)
+        run: |
+          export HOME=/tmp/home && mkdir -p "$HOME"
+          cd backend
+          # 只装生产依赖(bundle 进镜像的部分)供 license-checker 列全;--ignore-scripts
+          # 跳过原生构建,装完即扫。命中 copyleft / 未识别许可证视为非合规。
+          npm ci --omit=dev --ignore-scripts --no-fund --no-audit >/dev/null 2>&1
+          npx --yes license-checker --production --excludePrivatePackages \
+            --failOn "GPL;AGPL;LGPL;CC-BY;CC-BY-SA;UNKNOWN" || {
+              echo "::error::backend 存在 copyleft 或未识别许可证,详见上方列表"
+              exit 1
+            }
+      - name: frontend License 门禁 (copyleft/unknown 即失败)
+        run: |
+          export HOME=/tmp/home && mkdir -p "$HOME"
+          cd frontend
+          npm ci --omit=dev --ignore-scripts --no-fund --no-audit >/dev/null 2>&1
+          npx --yes license-checker --production --excludePrivatePackages \
+            --failOn "GPL;AGPL;LGPL;CC-BY;CC-BY-SA;UNKNOWN" || {
+              echo "::error::frontend 存在 copyleft 或未识别许可证,详见上方列表"
+              exit 1
+            }
+
   secret-scan:
     name: 密钥泄露扫描 (gitleaks)
     runs-on: ubuntu-latest

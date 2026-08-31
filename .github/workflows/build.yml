@@ -36,6 +36,8 @@ jobs:
   # (账号没有 ARM runner,与 V1 一致)。
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     permissions:
       contents: write
       packages: write
@@ -141,3 +143,44 @@ jobs:
             echo "- 若依赖上一版本新增索引/缓存,首次启动会自动补齐,无需手工操作。"
           } > /tmp/release-body.md
           gh release create "$TAG" --title "${TAG#v}" --notes-file /tmp/release-body.md
+
+  # 容器镜像漏洞扫描(发版前最后一关):Trivy 对「构建产物镜像」做层扫描,捕获
+  # 源码扫描(security.yml 的 trivy-fs)看不到的 OS 包 / base 镜像引入漏洞
+  # (apt-get 装系统依赖、FROM 的运行时库等)。依赖 build 的 version 输出拿到
+  # 实际镜像 tag;扫描仅针对 GHCR 镜像,结果上报 Security tab 不阻塞发布。
+  image-scan:
+    name: 容器镜像漏洞扫描 (Trivy image)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      security-events: write
+      packages: read
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull built image
+        run: docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
+
+      - name: Trivy 镜像扫描 (HIGH/CRITICAL, 免修复忽略)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          scan-ref: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-image.sarif
+          # 镜像层漏洞(系统包)常有基础镜像自带的,以上报+人工处置为主。
+          exit-code: "0"
+
+      - name: 上传 SARIF 到 Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
