@@ -79,7 +79,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onActivated } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import api from "@/api";
@@ -163,12 +163,8 @@ async function load() {
 }
 
 async function createFlow() {
-  try {
-    const res = await api.post("/rest/api/v1/flows", { name: "新音流" });
-    router.push(`/flows/${res.data.flow.id}`);
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "新建失败");
-  }
+  // 不立即创建(避免"没点保存就默认保存"):跳转新建模式,点保存才 POST 创建。
+  router.push("/flows/new");
 }
 function openEditor(f: any) { router.push(`/flows/${f.id}`); }
 
@@ -200,6 +196,9 @@ async function removeFlow(f: any) {
 }
 
 onMounted(() => { load(); loadPeers(); });
+// keep-alive 下组件复用,onMounted 不重跑;从编辑器保存返回时激活即刷新列表,
+// 无需手动刷新(参考 Playlists/index.vue 同模式)。
+onActivated(() => { load(); });
 </script>
 
 <style lang="scss" scoped>

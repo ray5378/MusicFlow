@@ -506,15 +506,49 @@ async function save() {
   if (contentNodes.some((n) => !n.id)) { ElMessage.warning("「播放内容」节点请选择要播放的内容(或删除该节点)"); return; }
   saving.value = true;
   try {
-    await api.put(`/rest/api/v1/flows/${flowId}`, { name, enabled: form.enabled, tokenId: form.tokenId, definition: toDefinition() });
-    ElMessage.success("已保存");
+    const body = { name, enabled: form.enabled, tokenId: form.tokenId, definition: toDefinition() };
+    if (isNew) {
+      // 新建模式:点保存才真正创建(避免"没点保存就默认保存")。
+      const res = await api.post("/rest/api/v1/flows", body);
+      ElMessage.success("已创建");
+    } else {
+      await api.put(`/rest/api/v1/flows/${flowId}`, body);
+      ElMessage.success("已保存");
+    }
     router.push("/flows");
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || "保存失败");
   } finally { saving.value = false; }
 }
 
-onMounted(() => { loadFlow(); loadPeers(); fetchContentOptions("playlist", ""); loadRecommendCards(); loadTokens(); });
+// 新建模式:路由 /flows/new(不立即创建,点保存才 POST)。
+const isNew = flowId === "new";
+
+function initNewFlow() {
+  form.name = "新音流";
+  form.enabled = true;
+  form.tokenId = "";
+  form.waitTimeoutSec = 0;
+  form.scanIntervalSec = 5;
+  // 默认模板:触发 → 目标 → 播放内容 → 设置音量(与后端 DEFAULT_DEFINITION 一致)。
+  nodes.value = [
+    defaultNode("trigger"),
+    defaultNode("target"),
+    defaultNode("content"),
+    defaultNode("volume"),
+  ];
+  webhookUrl.value = buildWebhookUrl();
+}
+
+onMounted(() => {
+  if (isNew) {
+    loadTokens();
+    initNewFlow();
+  } else {
+    loadFlow();
+  }
+  loadPeers(); fetchContentOptions("playlist", ""); loadRecommendCards();
+});
 </script>
 
 <style lang="scss" scoped>
