@@ -14,6 +14,8 @@ export const users = sqliteTable("users", {
   apiKeyHash: text("api_key_hash"),
   apiKeyExpiresAt: text("api_key_expires_at"),
   mustChangePassword: integer("must_change_password").default(0),
+  loginFailCount: integer("login_fail_count").default(0).notNull(),
+  lockedUntil: text("locked_until"),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
