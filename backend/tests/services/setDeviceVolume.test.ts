@@ -1,9 +1,9 @@
-// setDeviceVolume「回读确认 + 持续重发(时间窗口)」机制测试:
-//   1. SetVolume 后 GetVolume 回读命中目标 → 成功
-//   2. 设备未采纳(回读恒为旧值)→ 窗口内持续重发,窗口耗尽后抛错
-//   3. 设备 GetVolume 一直无回应 → 窗口内持续重发,窗口耗尽后抛错
-//   4. confirm:false → 只发 SetVolume,不回读
-// 窗口参数用短值加速测试(生产默认 timeoutMs=10000 / confirmIntervalMs=500)。
+// setDeviceVolume「秒发秒走 + 延迟对账 + 不对重发」机制测试:
+//   1. SetVolume 后等稳定,GetVolume 对账命中目标 → 成功(一次即命中)
+//   2. 设备未采纳(对账恒为旧值)→ 重发 SetVolume,attempts 次后抛错
+//   3. 设备 GetVolume 一直无回应 → 重发,attempts 次后抛错
+//   4. confirm:false → 只发 SetVolume,不对账
+// 参数用短值加速测试(生产默认 settleMs=1500 / attempts=6)。
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
@@ -15,8 +15,8 @@ const DEV = "vol-confirm-test-dev";
 const RC = "http://dev.local/rc";
 const AV = "http://dev.local/av";
 
-/** 快速参数:把确认窗口压到 500ms、回读间隔 50ms,避免测试慢。 */
-const fast = () => ({ timeoutMs: 500, confirmIntervalMs: 50, tolerance: 1 });
+/** 快速参数:稳定等待 50ms、重发 2 次,避免测试慢。 */
+const fast = (attempts = 2) => ({ settleMs: 50, attempts, tolerance: 1 });
 
 function injectDevice(): void {
   const arr = getCachedDevices();
@@ -69,8 +69,8 @@ afterEach(() => {
   getVolumeCalls = 0;
 });
 
-describe("setDeviceVolume 回读确认(时间窗口持续重发)", () => {
-  it("SetVolume 后 GetVolume 回读命中目标 → 成功(一次即确认,不重发)", async () => {
+describe("setDeviceVolume 秒发秒走 + 延迟对账", () => {
+  it("SetVolume 后等稳定,GetVolume 对账命中 → 成功(一次即命中)", async () => {
     fetchMock = vi.fn(async (_url: unknown, init?: any) => {
       const body = String(init?.body || "");
       if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
@@ -79,11 +79,11 @@ describe("setDeviceVolume 回读确认(时间窗口持续重发)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     await expect(setDeviceVolume(DEV, 20, fast())).resolves.toBeUndefined();
-    expect(setVolumeCalls).toBe(1);   // 一次即命中,窗口内不再重发
+    expect(setVolumeCalls).toBe(1);   // 一次即对账命中,不重发
     expect(getVolumeCalls).toBe(1);
   });
 
-  it("设备未采纳(回读恒为旧值)→ 窗口内持续重发 SetVolume,窗口耗尽后抛错", async () => {
+  it("设备未采纳(对账恒为旧值)→ 重发 SetVolume,attempts 次后抛错", async () => {
     fetchMock = vi.fn(async (_url: unknown, init?: any) => {
       const body = String(init?.body || "");
       if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
@@ -91,14 +91,11 @@ describe("setDeviceVolume 回读确认(时间窗口持续重发)", () => {
       throw new Error("unexpected action");
     });
     vi.stubGlobal("fetch", fetchMock);
-    const started = Date.now();
-    await expect(setDeviceVolume(DEV, 20, fast())).rejects.toThrow(/未获设备确认|最后回读 80/);
-    const elapsed = Date.now() - started;
-    expect(setVolumeCalls).toBeGreaterThan(3); // 持续重发(500ms 窗口 / 50ms 频率 ≈ 多轮)
-    expect(elapsed).toBeGreaterThanOrEqual(450); // 窗口确实跑满
+    await expect(setDeviceVolume(DEV, 20, fast(2))).rejects.toThrow(/对账失败|最后回读 80/);
+    expect(setVolumeCalls).toBe(2);   // attempts=2:重发一次后放弃
   });
 
-  it("设备 GetVolume 一直无回应 → 窗口内持续重发,窗口耗尽后抛错", async () => {
+  it("设备 GetVolume 一直无回应 → 重发,attempts 次后抛错", async () => {
     fetchMock = vi.fn(async (_url: unknown, init?: any) => {
       const body = String(init?.body || "");
       if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
@@ -106,12 +103,12 @@ describe("setDeviceVolume 回读确认(时间窗口持续重发)", () => {
       throw new Error("unexpected action");
     });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(setDeviceVolume(DEV, 20, fast())).rejects.toThrow(/未获设备确认|无响应/);
-    expect(setVolumeCalls).toBeGreaterThan(3); // 无回应也持续重发,直到窗口耗尽
-    expect(getVolumeCalls).toBeGreaterThan(3);
+    await expect(setDeviceVolume(DEV, 20, fast(2))).rejects.toThrow(/对账失败|无响应/);
+    expect(setVolumeCalls).toBe(2);   // attempts=2:重发一次后放弃
+    expect(getVolumeCalls).toBe(2);
   });
 
-  it("confirm:false → 只发一次 SetVolume,完全不回读 GetVolume", async () => {
+  it("confirm:false → 只发一次 SetVolume,完全不对账", async () => {
     fetchMock = vi.fn(async (_url: unknown, init?: any) => {
       const body = String(init?.body || "");
       if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }

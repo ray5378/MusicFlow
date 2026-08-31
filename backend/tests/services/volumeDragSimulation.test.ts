@@ -70,11 +70,10 @@ describe("音量拖拽高频调用模拟", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     // 模拟前端拖拽:2s 内并发发 30 个 setDeviceVolume(值 50→21),不等待完成。
-    // 用短确认窗口加速测试(timeoutMs=300 / intervalMs=30),保留放大关系。
-    const opts = { timeoutMs: 300, confirmIntervalMs: 30, attempts: 0 as any };
+    // 用短参数加速测试(settleMs=30 / attempts=3),保留放大关系。
     const promises: Promise<void>[] = [];
     for (let v = 50; v >= 21; v--) {
-      promises.push(setDeviceVolume(DEV, v, { timeoutMs: 300, confirmIntervalMs: 30 }).catch(() => {}));
+      promises.push(setDeviceVolume(DEV, v, { settleMs: 30, attempts: 3 }).catch(() => {}));
     }
     await Promise.all(promises);
 
@@ -93,7 +92,7 @@ describe("音量拖拽高频调用模拟", () => {
       throw new Error("unexpected");
     });
     vi.stubGlobal("fetch", fetchMock);
-    await setDeviceVolume(DEV, 20, { timeoutMs: 300, confirmIntervalMs: 30 });
+    await setDeviceVolume(DEV, 20, { settleMs: 30, attempts: 2 });
     const setCalls = soapLog.filter((x) => x === "SET").length;
     const getCalls = soapLog.filter((x) => x === "GET").length;
     console.log(`[sim] 单次请求 → SetVolume×${setCalls}, GetVolume×${getCalls}, SOAP 总数×${soapLog.length}`);

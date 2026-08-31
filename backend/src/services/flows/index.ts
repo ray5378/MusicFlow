@@ -300,27 +300,24 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
           break;
         }
         case "volume": {
-          // 默认作用于全部目标集。带「回读确认+持续重发」(setDeviceVolume 10s 窗口),
-          // 失败视为节点失败 → 中止流程。
+          // 默认作用于全部目标集。setDeviceVolume 内部带「秒发秒走 + 延迟对账 +
+          // 重发(最多 6 次)」;音量设置失败**不中止流程**(用户确认:直接触发下一
+          // 节点),仅记警告日志、继续对下一台目标或下一个节点尽力而为。
           const value = Math.max(0, Math.min(100, Math.round(node.value)));
           const step1 = Math.max(0, value - 1);
           for (const pid of activeTargets) {
             const parsed = parseOrThrow(pid);
-            let applied = false;
-            for (let vAttempt = 0; vAttempt < 3 && !applied; vAttempt++) {
-              try {
-                if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, step1);
-                else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", step1);
+            try {
+              if (parsed.kind === "dlna") {
+                await setDeviceVolume(parsed.id, step1);
                 await sleep(500);
-                if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, value);
-                else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", value);
-                applied = true;
-              } catch (e: any) {
-                log.warn(`[flow ${flow.name}] ${nameOf(pid)} 音量 ${value}% 设置未确认(第 ${vAttempt + 1} 轮):${e?.message || e}`);
-                await sleep(1500);
+                await setDeviceVolume(parsed.id, value);
+              } else if (parsed.kind === "group") {
+                await qc.transport(parsed.id, "volume", value);
               }
+            } catch (e: any) {
+              log.warn(`[flow ${flow.name}] ${nameOf(pid)} 音量 ${value}% 设置失败,继续执行下一节点:${e?.message || e}`);
             }
-            if (!applied) throw new Error(`${nameOf(pid)}: 音量 ${value}% 设置失败(设备未确认回读)`);
           }
           break;
         }
