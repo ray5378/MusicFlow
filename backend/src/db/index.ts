@@ -211,6 +211,27 @@ export function initDatabase() {
       FOREIGN KEY (song_id) REFERENCES songs(id)
     );
 
+    -- 专辑/艺人收藏表:与歌曲收藏相互独立,收藏专辑/艺人不再批量写歌曲。
+    CREATE TABLE IF NOT EXISTS user_favorite_albums (
+      user_id TEXT NOT NULL,
+      album_id TEXT NOT NULL,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (user_id, album_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (album_id) REFERENCES albums(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_fav_albums_album ON user_favorite_albums(album_id);
+
+    CREATE TABLE IF NOT EXISTS user_favorite_artists (
+      user_id TEXT NOT NULL,
+      artist_id TEXT NOT NULL,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (user_id, artist_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (artist_id) REFERENCES artists(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_fav_artists_artist ON user_favorite_artists(artist_id);
+
     -- 歌单收藏按用户隔离:谁收藏归谁。旧的 playlists.favorite 全局布尔列仅作
     -- 迁移前的兼容快照,新收藏一律写这张表;列表接口按当前用户过滤。
     CREATE TABLE IF NOT EXISTS playlist_favorites (

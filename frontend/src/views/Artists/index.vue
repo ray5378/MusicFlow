@@ -57,6 +57,14 @@
             <el-tag size="small" type="warning" class="missing-tag">缺信息</el-tag>
           </el-tooltip>
           <CoverPlay size="md" :label="`播放 ${g.item.name} 的歌曲`" :action="() => playAr(g.item)" />
+          <button
+            class="card-fav-btn"
+            :class="{ active: fav.isArtistFavorite(g.item.id) }"
+            :title="fav.isArtistFavorite(g.item.id) ? '取消收藏艺人' : '收藏艺人'"
+            @click.stop="toggleArtistFav(g.item)"
+          >
+            <MfIcon name="Heart" :filled="fav.isArtistFavorite(g.item.id)" :size="16" />
+          </button>
         </div>
         <div class="artist-name" @click="open(g.item)">{{ g.item.name }}</div>
         <div class="artist-meta" @click="open(g.item)">{{ formatAlbumCount(g.item.albumCount) }}</div>
@@ -143,12 +151,14 @@ import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { useEntitySearch, playRemoteCollection } from "@/composables/useEntitySearch";
 import { useCardGrid } from "@/composables/useCardGrid";
+import { useFavoritesStore } from "@/stores/favorites";
 import { coverUrl } from "@/utils/cover";
 import api from "@/api";
 
 const router = useRouter();
 const { openContextMenu, openActionSheet, menuGuard, artistActions } = useItemActions();
 const play = usePlayContent();
+const fav = useFavoritesStore();
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 artistSearch 就不出现在下拉里
 const {
@@ -177,6 +187,15 @@ async function playAr(artist: any) {
   const n = await play.playArtist(artist.id);
   if (n) ElMessage.success(`正在播放「${artist.name}」的 ${n} 首歌曲`);
   else ElMessage.warning("该艺人暂无可播放歌曲");
+}
+async function toggleArtistFav(artist: any) {
+  if (menuGuard()) return;
+  try {
+    const on = await fav.toggleArtistFavorite(artist.id);
+    ElMessage.success(on ? "已收藏艺人" : "已取消收藏艺人");
+  } catch {
+    ElMessage.error("操作失败");
+  }
 }
 
 // ===== 远程艺术家:悬浮播放(按名字搜歌,未入库直接播) + 点击头像/名字看详情 =====

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
-import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, playlistFavorites, playHistory, genres, deviceQueues } from "../../db/schema.js";
+import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, userFavoriteAlbums, userFavoriteArtists, playlistFavorites, playHistory, genres, deviceQueues } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
@@ -464,6 +464,8 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
     db.delete(playlists).where(inArray(playlists.id, owned.map(p => p.id))).run();
   }
   db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.userId, id)).run();
+  db.delete(userFavoriteAlbums).where(eq(userFavoriteAlbums.userId, id)).run();
+  db.delete(userFavoriteArtists).where(eq(userFavoriteArtists.userId, id)).run();
   db.delete(playlistFavorites).where(eq(playlistFavorites.userId, id)).run();
   db.delete(playHistory).where(eq(playHistory.userId, id)).run();
   db.delete(wishes).where(eq(wishes.userId, id)).run();
@@ -1095,10 +1097,19 @@ apiRoutes.get("/v1/albums", (c) => {
   const rows = where
     ? db.select().from(albums).where(where).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all()
     : db.select().from(albums).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all();
+  // 收藏标记:按当前页专辑 ID 批量查收藏表(避免每行一次查询)。
+  const albumUser = c.get("user");
+  const albumStarredSet = new Set<string>();
+  if (albumUser?.id && rows.length) {
+    const favs = db.select({ albumId: userFavoriteAlbums.albumId }).from(userFavoriteAlbums)
+      .where(and(eq(userFavoriteAlbums.userId, albumUser.id), inArray(userFavoriteAlbums.albumId, rows.map(r => r.id)))).all();
+    for (const f of favs) albumStarredSet.add(f.albumId);
+  }
   const items = rows.map(a => ({
     id: a.id, name: a.name, artist: a.artist, artistId: a.artistId, year: a.year,
     songCount: a.songCount, duration: a.duration, playCount: a.playCount,
     coverArt: albumCoverRef(a),
+    starred: albumStarredSet.has(a.id) ? true : undefined,
   }));
   return c.json({ total, page, pageSize, items });
 });
@@ -1116,9 +1127,18 @@ apiRoutes.get("/v1/artists", (c) => {
   const rows = (getArtistList(cacheKey) as typeof artists.$inferSelect[]) || buildArtistList(cacheKey, query);
   const total = rows.length;
   const start = (page - 1) * pageSize;
+  // 收藏标记:按当前页艺人 ID 批量查收藏表(避免每行一次查询)。
+  const artistUser = c.get("user");
+  const artistStarredSet = new Set<string>();
+  if (artistUser?.id && rows.length) {
+    const favs = db.select({ artistId: userFavoriteArtists.artistId }).from(userFavoriteArtists)
+      .where(and(eq(userFavoriteArtists.userId, artistUser.id), inArray(userFavoriteArtists.artistId, rows.map(r => r.id)))).all();
+    for (const f of favs) artistStarredSet.add(f.artistId);
+  }
   const items = rows.slice(start, start + pageSize).map(a => ({
     id: a.id, name: a.name, albumCount: a.albumCount, coverArt: a.coverArt ? `ar-${a.id}` : undefined,
     scrapeMissing: a.scrapeMissing === 1,
+    starred: artistStarredSet.has(a.id) ? true : undefined,
   }));
   return c.json({ total, page, pageSize, items });
 });

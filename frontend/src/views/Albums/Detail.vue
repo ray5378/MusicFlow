@@ -12,6 +12,14 @@
         <div class="info">{{ album.year || '' }} · {{ album.songCount }}首 · {{ formatDuration(album.duration) }}</div>
         <div class="actions">
           <el-button type="primary" @click="playAll">播放全部</el-button>
+          <el-button
+            class="detail-fav-btn"
+            :class="{ active: fav.isAlbumFavorite(album.id) }"
+            @click="toggleAlbumFav"
+          >
+            <MfIcon name="Heart" :filled="fav.isAlbumFavorite(album.id)" :size="15" />
+            {{ fav.isAlbumFavorite(album.id) ? '已收藏专辑' : '收藏专辑' }}
+          </el-button>
         </div>
       </div>
     </div>
@@ -25,6 +33,8 @@ import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import EmptyState from "@/components/EmptyState.vue";
+import { useFavoritesStore } from "@/stores/favorites";
+import { ElMessage } from "element-plus";
 import api from "@/api";
 import SongTable from "@/components/SongTable.vue";
 import { coverUrl } from "@/utils/cover";
@@ -32,6 +42,7 @@ import { coverUrl } from "@/utils/cover";
 const route = useRoute();
 const router = useRouter();
 const playerStore = usePlayerStore();
+const fav = useFavoritesStore();
 const album = ref<any>(null);
 const songs = ref<Song[]>([]);
 const loading = ref(false);
@@ -39,6 +50,15 @@ const loading = ref(false);
 function formatDuration(sec: number) { const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, "0")}`; }
 function playSong(song: Song) { playerStore.playSong(song); }
 function playAll() { if (songs.value.length > 0) playerStore.playQueue(songs.value); }
+async function toggleAlbumFav() {
+  if (!album.value) return;
+  try {
+    const on = await fav.toggleAlbumFavorite(album.value.id);
+    ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+  } catch {
+    ElMessage.error("操作失败");
+  }
+}
 
 async function loadAlbum() {
   loading.value = true;
@@ -66,7 +86,10 @@ onMounted(loadAlbum);
     h1 { font-size: 32px; font-weight: 700; margin: 8px 0; color: var(--fnos-text-primary); }
     .artist { color: var(--fnos-red); cursor: pointer; font-size: 16px; &:hover { text-decoration: underline; } }
     .info { color: var(--fnos-text-tertiary); margin-top: 8px; font-size: 14px; }
-    .actions { margin-top: 18px; }
+    .actions { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .actions .detail-fav-btn { display: inline-flex; align-items: center; gap: 6px; }
+    .actions .detail-fav-btn.active { color: var(--fnos-red); border-color: var(--fnos-red-ring); }
+    .actions .detail-fav-btn.active .mf-icon { color: var(--fnos-red); }
   }
 }
 @media (max-width: 768px) {

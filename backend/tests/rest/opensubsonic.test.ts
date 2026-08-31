@@ -229,6 +229,46 @@ describe("收藏与评分", () => {
     expect(sr(r)?.starred?.song ?? []).toHaveLength(0);
   });
 
+  it("star album/artist 独立入库:getStarred2 三段各自返回,不连坐歌曲", async () => {
+    await get("/rest/star?albumId=al1");
+    await get("/rest/star?artistId=ar1");
+    let r = await get("/rest/getStarred2");
+    const s2 = sr(r)?.starred2;
+    // 专辑/艺人收藏各自独立返回。
+    expect(s2?.album?.map((x: any) => x.id)).toContain("al1");
+    expect(s2?.artist?.map((x: any) => x.id)).toContain("ar1");
+    // 收藏专辑/艺人不会把其下歌曲标记为歌曲收藏。
+    expect(s2?.song ?? []).toHaveLength(0);
+    expect(s2?.albumTotal).toBe(1);
+    expect(s2?.artistTotal).toBe(1);
+    // 专辑/艺人详情接口回填 starred 标记。
+    r = await get("/rest/getAlbum?id=al1");
+    expect(sr(r)?.album?.starred).toBeTruthy();
+    r = await get("/rest/getArtist?id=ar1");
+    expect(sr(r)?.artist?.starred).toBeTruthy();
+    // getAlbumList type=starred 也按专辑收藏过滤。
+    r = await get("/rest/getAlbumList2?type=starred");
+    expect(sr(r)?.albumList2?.album?.map((x: any) => x.id)).toContain("al1");
+    await get("/rest/unstar?albumId=al1");
+    await get("/rest/unstar?artistId=ar1");
+  });
+
+  it("取消单曲收藏不影响专辑/艺人收藏;专辑/艺人收藏不污染歌曲收藏", async () => {
+    await get("/rest/star?id=s1");
+    await get("/rest/star?albumId=al1");
+    await get("/rest/unstar?id=s1");
+    let r = await get("/rest/getStarred2");
+    const s2 = sr(r)?.starred2;
+    // 取消歌曲收藏后,专辑收藏仍在。
+    expect(s2?.album?.map((x: any) => x.id)).toContain("al1");
+    expect(s2?.song ?? []).toHaveLength(0);
+    // 专辑收藏不会让歌曲出现在歌曲收藏里。
+    await get("/rest/star?albumId=al1");
+    r = await get("/rest/getStarred2");
+    expect(sr(r)?.starred2?.song ?? []).toHaveLength(0);
+    await get("/rest/unstar?albumId=al1");
+  });
+
   it("setRating 持久化并在 getSong/getAlbum 回填 userRating", async () => {
     await get("/rest/setRating?id=s1&rating=4");
     let r = await get("/rest/getSong?id=s1");

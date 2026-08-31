@@ -33,6 +33,14 @@
           <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48"  /></div>
           <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playAl(g.item)" />
+          <button
+            class="card-fav-btn"
+            :class="{ active: fav.isAlbumFavorite(g.item.id) }"
+            :title="fav.isAlbumFavorite(g.item.id) ? '取消收藏专辑' : '收藏专辑'"
+            @click.stop="toggleAlbumFav(g.item)"
+          >
+            <MfIcon name="Heart" :filled="fav.isAlbumFavorite(g.item.id)" :size="16" />
+          </button>
         </div>
         <div class="album-info" @click="open(g.item)">
           <div class="album-name">{{ g.item.name }}</div>
@@ -145,12 +153,14 @@ import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { useEntitySearch, playRemoteCollection } from "@/composables/useEntitySearch";
 import { useCardGrid } from "@/composables/useCardGrid";
+import { useFavoritesStore } from "@/stores/favorites";
 import api from "@/api";
 import { coverUrl } from "@/utils/cover";
 
 const router = useRouter();
 const { openContextMenu, openActionSheet, menuGuard, albumActions } = useItemActions();
 const play = usePlayContent();
+const fav = useFavoritesStore();
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 albumSearch 就不出现在下拉里
 const {
@@ -178,6 +188,15 @@ async function playAl(album: any) {
   const n = await play.playAlbum(album.id);
   if (n) ElMessage.success(`正在播放「${album.name}」`);
   else ElMessage.warning("该专辑暂无可播放歌曲");
+}
+async function toggleAlbumFav(album: any) {
+  if (menuGuard()) return;
+  try {
+    const on = await fav.toggleAlbumFavorite(album.id);
+    ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+  } catch {
+    ElMessage.error("操作失败");
+  }
 }
 
 // ===== 远程专辑:悬浮播放(未入库直接播) + 点击卡片看详情 =====

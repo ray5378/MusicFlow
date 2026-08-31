@@ -971,6 +971,58 @@ html.tab-hidden body.fnos-login::before, html.tab-hidden body.fnos-login::after 
 }
 
 /* =========================================================
+   卡片红心收藏按钮（全局工具类，专辑/艺人卡片共用）
+   用法：封面容器(.mf-coverwrap)内放置 <button class="card-fav-btn">
+   ========================================================= */
+.card-fav-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  background: rgba(12, 10, 18, 0.55);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 0.2s ease, transform 0.22s ease, background 0.2s ease, border-color 0.2s ease;
+
+  &.active {
+    color: var(--fnos-red);
+    border-color: rgba(246, 44, 85, 0.55);
+    .mf-icon { color: var(--fnos-red); }
+  }
+  &:hover {
+    background: rgba(34, 30, 46, 0.7);
+    border-color: rgba(255, 255, 255, 0.5);
+    transform: scale(1.08);
+  }
+  &:active { transform: scale(0.92); }
+}
+
+/* 桌面端：hover 封面才出现 */
+@media (hover: hover) and (pointer: fine) {
+  .mf-coverwrap:hover .card-fav-btn,
+  .mf-coverwrap:focus-within .card-fav-btn {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 移动端 / 触控：常驻显示 */
+@media (hover: none), (max-width: 768px) {
+  .card-fav-btn { opacity: 1; transform: scale(1); }
+}
+
+/* =========================================================
    移动端表格：只保留最有价值的信息，其余走「长按」面板
    ========================================================= */
 .m-title {

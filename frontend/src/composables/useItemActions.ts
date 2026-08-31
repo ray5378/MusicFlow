@@ -263,6 +263,18 @@ function albumActions(al: any): MenuAction[] {
       },
     },
     { divider: true },
+    {
+      label: fav.isAlbumFavorite(al.id) ? "取消收藏专辑" : "收藏专辑",
+      icon: Star,
+      onClick: async () => {
+        try {
+          const on = await fav.toggleAlbumFavorite(al.id);
+          ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+        } catch {
+          ElMessage.error("操作失败");
+        }
+      },
+    },
     { label: "查看专辑", icon: Folder, onClick: () => router.push(`/albums/${al.id}`) },
   ];
   if (al.artistId) {
@@ -281,6 +293,18 @@ function artistActions(ar: any): MenuAction[] {
       },
     },
     { divider: true },
+    {
+      label: fav.isArtistFavorite(ar.id) ? "取消收藏艺人" : "收藏艺人",
+      icon: Star,
+      onClick: async () => {
+        try {
+          const on = await fav.toggleArtistFavorite(ar.id);
+          ElMessage.success(on ? "已收藏艺人" : "已取消收藏艺人");
+        } catch {
+          ElMessage.error("操作失败");
+        }
+      },
+    },
     { label: "查看艺人", icon: User, onClick: () => router.push(`/artists/${ar.id}`) },
   ];
 }

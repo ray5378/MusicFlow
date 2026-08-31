@@ -11,6 +11,14 @@
         <div class="info">{{ formatAlbumCount(artist.albumCount) }}</div>
         <div class="actions">
           <el-button type="primary" @click="playAllSongs">播放全部歌曲</el-button>
+          <el-button
+            class="detail-fav-btn"
+            :class="{ active: fav.isArtistFavorite(artist.id) }"
+            @click="toggleArtistFav"
+          >
+            <MfIcon name="Heart" :filled="fav.isArtistFavorite(artist.id)" :size="15" />
+            {{ fav.isArtistFavorite(artist.id) ? '已收藏艺人' : '收藏艺人' }}
+          </el-button>
         </div>
       </div>
     </div>
@@ -28,6 +36,14 @@
           <img v-if="album.coverArt" :src="coverUrl(album.coverArt, 300)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="32"  /></div>
           <CoverPlay size="md" :label="`播放 ${album.name}`" :action="() => playAl(album)" />
+          <button
+            class="card-fav-btn"
+            :class="{ active: fav.isAlbumFavorite(album.id) }"
+            :title="fav.isAlbumFavorite(album.id) ? '取消收藏专辑' : '收藏专辑'"
+            @click.stop="toggleAlbumFav(album)"
+          >
+            <MfIcon name="Heart" :filled="fav.isAlbumFavorite(album.id)" :size="16" />
+          </button>
         </div>
         <div class="album-info" @click="open(album)">
           <div class="album-name">{{ album.name }}</div>
@@ -46,6 +62,7 @@ import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
+import { useFavoritesStore } from "@/stores/favorites";
 import api from "@/api";
 import { coverUrl } from "@/utils/cover";
 
@@ -54,6 +71,7 @@ const router = useRouter();
 const playerStore = usePlayerStore();
 const { openContextMenu, openActionSheet, menuGuard, albumActions } = useItemActions();
 const play = usePlayContent();
+const fav = useFavoritesStore();
 const artist = ref<any>(null);
 const albums = ref<any[]>([]);
 const loading = ref(false);
@@ -70,6 +88,24 @@ async function playAl(album: any) {
   const n = await play.playAlbum(album.id);
   if (n) ElMessage.success(`正在播放「${album.name}」`);
   else ElMessage.warning("该专辑暂无可播放歌曲");
+}
+async function toggleAlbumFav(album: any) {
+  if (menuGuard()) return;
+  try {
+    const on = await fav.toggleAlbumFavorite(album.id);
+    ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+  } catch {
+    ElMessage.error("操作失败");
+  }
+}
+async function toggleArtistFav() {
+  if (!artist.value) return;
+  try {
+    const on = await fav.toggleArtistFavorite(artist.value.id);
+    ElMessage.success(on ? "已收藏艺人" : "已取消收藏艺人");
+  } catch {
+    ElMessage.error("操作失败");
+  }
 }
 
 async function loadArtist() {
@@ -113,7 +149,10 @@ onMounted(loadArtist);
     .label { font-size: 12px; color: var(--fnos-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; }
     h1 { font-size: 28px; font-weight: 700; margin: 8px 0; color: var(--fnos-text-primary); }
     .info { color: var(--fnos-text-tertiary); font-size: 14px; }
-    .actions { margin-top: 16px; }
+    .actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .actions .detail-fav-btn { display: inline-flex; align-items: center; gap: 6px; }
+    .actions .detail-fav-btn.active { color: var(--fnos-red); border-color: var(--fnos-red-ring); }
+    .actions .detail-fav-btn.active .mf-icon { color: var(--fnos-red); }
   }
 }
 h3 { margin-bottom: 16px; color: var(--fnos-text-primary); font-size: 20px; font-weight: 600; }

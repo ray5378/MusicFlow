@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
-import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
+import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, userFavoriteAlbums, userFavoriteArtists, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
 import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
 import fs from "fs";
 import path from "node:path";
@@ -248,13 +248,12 @@ function albumToChild(a: any, starredSet?: Set<string>): any {
 
 function getAlbumStarredSet(userId?: string): Set<string> {
   if (!userId) return new Set();
-  // We only have song favorites in the schema; album/artist starred derive from song favorites
-  return new Set();
+  return new Set(db.select({ albumId: userFavoriteAlbums.albumId }).from(userFavoriteAlbums).where(eq(userFavoriteAlbums.userId, userId)).all().map(r => r.albumId));
 }
 
 function getArtistStarredSet(userId?: string): Set<string> {
   if (!userId) return new Set();
-  return new Set();
+  return new Set(db.select({ artistId: userFavoriteArtists.artistId }).from(userFavoriteArtists).where(eq(userFavoriteArtists.userId, userId)).all().map(r => r.artistId));
 }
 
 function paginate<T>(list: T[], offset: number, size: number): T[] {
@@ -525,11 +524,11 @@ function getAlbumListData(c: any) {
     case "byGenre": if (genre) allAlbums = allAlbums.filter(a => (a.genre || "") === genre); break;
     case "byYear": allAlbums = allAlbums.filter(a => (a.year || 0) >= fromYear && (a.year || 0) <= toYear); break;
     case "starred": {
-      const starredSet = getStarredSet(user?.id);
-      const starredAlbumIds = new Set<string>();
-      for (const s of db.select().from(songs).all()) {
-        if (s.albumId && starredSet.has(s.id)) starredAlbumIds.add(s.albumId);
-      }
+      // 专辑收藏独立读表(不再从歌曲收藏推导)。
+      const starredAlbumIds = new Set(
+        db.select({ albumId: userFavoriteAlbums.albumId }).from(userFavoriteAlbums)
+          .where(user?.id ? eq(userFavoriteAlbums.userId, user.id) : undefined).all().map(r => r.albumId)
+      );
       allAlbums = allAlbums.filter(a => starredAlbumIds.has(a.id));
       break;
     }
@@ -929,24 +928,18 @@ restRoutes.get("/star", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const ids = parseStarIds(getParam(c, "id"));
   const albumIds = parseStarIds(getParam(c, "albumId"));
   const artistIds = parseStarIds(getParam(c, "artistId"));
+  // 三类收藏相互独立:id=歌曲, albumId=专辑, artistId=艺人,互不连坐。
   for (const id of ids) {
     const existing = db.select().from(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, id))).get();
     if (!existing) db.insert(userFavoriteSongs).values({ userId: user.id, songId: id }).run();
   }
-  // Star all songs in albums/artists (schema only stores song favorites)
   for (const aid of albumIds) {
-    for (const s of db.select().from(songs).where(eq(songs.albumId, aid)).all()) {
-      const existing = db.select().from(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, s.id))).get();
-      if (!existing) db.insert(userFavoriteSongs).values({ userId: user.id, songId: s.id }).run();
-    }
+    const existing = db.select().from(userFavoriteAlbums).where(and(eq(userFavoriteAlbums.userId, user.id), eq(userFavoriteAlbums.albumId, aid))).get();
+    if (!existing) db.insert(userFavoriteAlbums).values({ userId: user.id, albumId: aid }).run();
   }
   for (const arid of artistIds) {
-    for (const a of db.select().from(albums).where(eq(albums.artistId, arid)).all()) {
-      for (const s of db.select().from(songs).where(eq(songs.albumId, a.id)).all()) {
-        const existing = db.select().from(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, s.id))).get();
-        if (!existing) db.insert(userFavoriteSongs).values({ userId: user.id, songId: s.id }).run();
-      }
-    }
+    const existing = db.select().from(userFavoriteArtists).where(and(eq(userFavoriteArtists.userId, user.id), eq(userFavoriteArtists.artistId, arid))).get();
+    if (!existing) db.insert(userFavoriteArtists).values({ userId: user.id, artistId: arid }).run();
   }
   return c.json(ok());
 });
@@ -957,19 +950,10 @@ restRoutes.get("/unstar", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const ids = parseStarIds(getParam(c, "id"));
   const albumIds = parseStarIds(getParam(c, "albumId"));
   const artistIds = parseStarIds(getParam(c, "artistId"));
+  // 只取消对应类型的收藏,不动其他类型(取消专辑收藏不会取消其下歌曲收藏)。
   for (const id of ids) db.delete(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, id))).run();
-  for (const aid of albumIds) {
-    for (const s of db.select().from(songs).where(eq(songs.albumId, aid)).all()) {
-      db.delete(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, s.id))).run();
-    }
-  }
-  for (const arid of artistIds) {
-    for (const a of db.select().from(albums).where(eq(albums.artistId, arid)).all()) {
-      for (const s of db.select().from(songs).where(eq(songs.albumId, a.id)).all()) {
-        db.delete(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, s.id))).run();
-      }
-    }
-  }
+  for (const aid of albumIds) db.delete(userFavoriteAlbums).where(and(eq(userFavoriteAlbums.userId, user.id), eq(userFavoriteAlbums.albumId, aid))).run();
+  for (const arid of artistIds) db.delete(userFavoriteArtists).where(and(eq(userFavoriteArtists.userId, user.id), eq(userFavoriteArtists.artistId, arid))).run();
   return c.json(ok());
 });
 
@@ -1003,15 +987,24 @@ restRoutes.get("/getStarred", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
   const starredSet = new Set(favs.map(f => f.songId));
   const favSongs = favs.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
-  return c.json(ok({ starred: { song: favSongs, album: [], artist: [] } }));
+  // 专辑/艺人收藏各自独立读表(不再从歌曲收藏推导)。
+  const albumSet = getAlbumStarredSet(user.id);
+  const favAlbums = db.select().from(userFavoriteAlbums).where(eq(userFavoriteAlbums.userId, user.id)).all()
+    .map(f => { const a = db.select().from(albums).where(eq(albums.id, f.albumId)).get(); return a ? albumToID3(a, albumSet) : null; }).filter(Boolean);
+  const artistSet = getArtistStarredSet(user.id);
+  const favArtists = db.select().from(userFavoriteArtists).where(eq(userFavoriteArtists.userId, user.id)).all()
+    .map(f => { const a = db.select().from(artists).where(eq(artists.id, f.artistId)).get(); return a ? artistToID3(a, artistSet) : null; }).filter(Boolean);
+  return c.json(ok({ starred: { song: favSongs, album: favAlbums, artist: favArtists } }));
 });
 
 restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
-  if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [], songTotal: 0 } }));
+  if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [], songTotal: 0, albumTotal: 0, artistTotal: 0 } }));
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
   const favIds = favs.map(f => f.songId);
   const q = (getParam(c, "query") || "").trim().toLowerCase();
+  const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
+  const size = parseInt(getParam(c, "size") || "0", 10) || 0;
   // 搜索:在整份最爱 ID 集上做 SQL 过滤(title/artist/album),再分页,保证 total 正确。
   let matched: Set<string> | null = null;
   if (q && favIds.length) {
@@ -1023,20 +1016,36 @@ restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const ordered = matched ? favs.filter(f => matched!.has(f.songId)) : favs;
   const songTotal = ordered.length;
   const starredSet = new Set(favIds);
-  const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
-  const size = parseInt(getParam(c, "size") || "0", 10) || 0;
   const slice = size > 0 ? ordered.slice(offset, offset + size) : ordered;
   // Only fetch the songs on the requested page (not the whole favorite list),
   // so a library with thousands of starred tracks doesn't pull them all at once.
   const favSongs = slice.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
-  // Starred album ids in ONE batched query (was N+1: a songs query per favorite).
-  const starredAlbumIds = new Set<string>();
-  if (favIds.length) {
-    const rows = db.select({ albumId: songs.albumId }).from(songs).where(inArray(songs.id, favIds)).all();
-    for (const r of rows) if (r.albumId) starredAlbumIds.add(r.albumId);
-  }
-  const favAlbums = Array.from(starredAlbumIds).map(id => { const a = db.select().from(albums).where(eq(albums.id, id)).get(); return a ? albumToID3(a) : null; }).filter(Boolean);
-  return c.json(ok({ starred2: { song: favSongs, album: favAlbums, artist: [], songTotal } }));
+
+  // 专辑收藏:独立读 user_favorite_albums,支持按名称/艺人搜索与分页。
+  const albumFavs = db.select().from(userFavoriteAlbums).where(eq(userFavoriteAlbums.userId, user.id)).all();
+  const albumIds = albumFavs.map(f => f.albumId);
+  const albumRows = albumIds.length ? db.select().from(albums).where(inArray(albums.id, albumIds)).all() : [];
+  const albumById = new Map(albumRows.map(a => [a.id, a]));
+  const orderedAlbums = albumFavs.map(f => albumById.get(f.albumId)).filter((a): a is NonNullable<typeof a> => Boolean(a));
+  const albumMatched = q ? orderedAlbums.filter(a => (a.name || "").toLowerCase().includes(q) || (a.artist || "").toLowerCase().includes(q)) : orderedAlbums;
+  const albumTotal = albumMatched.length;
+  const albumSlice = size > 0 ? albumMatched.slice(offset, offset + size) : albumMatched;
+  const starredAlbumSet = new Set(albumIds);
+  const favAlbums = albumSlice.map(a => albumToID3(a, starredAlbumSet));
+
+  // 艺人收藏:独立读 user_favorite_artists,支持按名称搜索与分页。
+  const artistFavs = db.select().from(userFavoriteArtists).where(eq(userFavoriteArtists.userId, user.id)).all();
+  const artistIds = artistFavs.map(f => f.artistId);
+  const artistRows = artistIds.length ? db.select().from(artists).where(inArray(artists.id, artistIds)).all() : [];
+  const artistById = new Map(artistRows.map(a => [a.id, a]));
+  const orderedArtists = artistFavs.map(f => artistById.get(f.artistId)).filter((a): a is NonNullable<typeof a> => Boolean(a));
+  const artistMatched = q ? orderedArtists.filter(a => (a.name || "").toLowerCase().includes(q)) : orderedArtists;
+  const artistTotal = artistMatched.length;
+  const artistSlice = size > 0 ? artistMatched.slice(offset, offset + size) : artistMatched;
+  const starredArtistSet = new Set(artistIds);
+  const favArtists = artistSlice.map(a => artistToID3(a, starredArtistSet));
+
+  return c.json(ok({ starred2: { song: favSongs, album: favAlbums, artist: favArtists, songTotal, albumTotal, artistTotal } }));
 });
 
 // ==================== Scrobble ====================

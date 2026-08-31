@@ -125,6 +125,24 @@ export const userFavoriteSongs = sqliteTable("user_favorite_songs", {
   pk: primaryKey({ columns: [t.userId, t.songId] }),
 }));
 
+// 专辑/艺人收藏与歌曲收藏相互独立:收藏一张专辑/一位艺人,不会把其下歌曲
+// 一并标记为歌曲收藏,反之亦然(OpenSubsonic 原生按 id/albumId/artistId 三类)。
+export const userFavoriteAlbums = sqliteTable("user_favorite_albums", {
+  userId: text("user_id").notNull(),
+  albumId: text("album_id").notNull(),
+  createdAt: text("created_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.albumId] }),
+}));
+
+export const userFavoriteArtists = sqliteTable("user_favorite_artists", {
+  userId: text("user_id").notNull(),
+  artistId: text("artist_id").notNull(),
+  createdAt: text("created_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.artistId] }),
+}));
+
 // 歌单收藏按用户隔离:谁收藏归谁(user_id + playlist_id 联合主键)。
 // 旧 playlists.favorite 全局列仅作迁移快照,新收藏一律写这张表。
 export const playlistFavorites = sqliteTable("playlist_favorites", {
