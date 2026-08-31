@@ -1210,10 +1210,22 @@ export const usePlayerStore = defineStore("player", () => {
     else localSeek(time);
   }
   function seekPercent(percent: number) { if (duration.value > 0) seek((percent / 100) * duration.value); }
+  // 音量拖拽防抖:el-slider @input 每拖拽一帧触发一次 setVolume,若每帧都发远程
+  // /volume,配合后端 setDeviceVolume 的「10s 确认窗口 + 持续重发」,会并发堆积成
+  // SOAP 请求轰炸(实测一次拖拽 30 帧 → 设备被发 450+ 次 SOAP),导致设备音量异常。
+  // 与 castSeek 一致,用 250ms trailing debounce:本地 UI/Howler 即时响应,
+  // 远程请求只发拖拽停止后的最后一次。
+  const volumeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   function setVolume(v: number) {
     volume.value = v; localStorage.setItem("volume", String(v));
     if (isRemotePeer.value && activeRemote.value) {
-      api.post(peerApi(activeRemote.value.peerId, "/volume"), { volume: Math.round(v * 100) }).catch(() => {});
+      const peerId = activeRemote.value.peerId;
+      const timer = volumeTimers.get(peerId);
+      if (timer) clearTimeout(timer);
+      volumeTimers.set(peerId, setTimeout(() => {
+        volumeTimers.delete(peerId);
+        api.post(peerApi(peerId, "/volume"), { volume: Math.round(v * 100) }).catch(() => {});
+      }, 250));
       return;
     }
     if (howl) howl.volume(v);
