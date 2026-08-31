@@ -100,8 +100,6 @@ export function initDatabase() {
       api_key_hash TEXT,
       api_key_expires_at TEXT,
       must_change_password INTEGER DEFAULT 0,
-      login_fail_count INTEGER NOT NULL DEFAULT 0,
-      locked_until TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
@@ -531,13 +529,6 @@ export function initDatabase() {
   // Migration: add source_plugin column to playlists (older DBs) — 插件同步歌单归属
   try {
     sqlite.exec("ALTER TABLE playlists ADD COLUMN source_plugin TEXT");
-  } catch {}
-  // Migration: 登录失败次数与锁定截止时间(older DBs)— 防爆破限流字段
-  try {
-    sqlite.exec("ALTER TABLE users ADD COLUMN login_fail_count INTEGER NOT NULL DEFAULT 0");
-  } catch {}
-  try {
-    sqlite.exec("ALTER TABLE users ADD COLUMN locked_until TEXT");
   } catch {}
   // Online-song columns (online source plugins, e.g. the official go-music-dl)
   for (const col of [
