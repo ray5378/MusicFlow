@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   qm: { setPlayMode: null as any, playFrom: null as any },
   qc: { transport: null as any },
   sdv: null as any,
+  gdv: null as any,
 }));
 
 vi.mock("../../src/services/peer.js", async (importOriginal) => {
@@ -49,7 +50,8 @@ vi.mock("../../src/services/player/index.js", async (importOriginal) => {
 vi.mock("../../src/services/dlna/control.js", async (importOriginal) => {
   const orig = await importOriginal<any>();
   h.sdv = vi.fn(async (_id: string, v: number) => { h.callLog.push("vol:" + v); });
-  return { ...orig, refreshDevices: vi.fn(async () => []), setDeviceVolume: h.sdv };
+  h.gdv = vi.fn(async () => 20); // 默认对账命中(音量 20)
+  return { ...orig, refreshDevices: vi.fn(async () => []), setDeviceVolume: h.sdv, getDeviceVolume: h.gdv };
 });
 
 vi.mock("../../src/services/content.js", async (importOriginal) => {
@@ -106,6 +108,7 @@ afterEach(() => {
   vi.clearAllMocks();
   h.callLog.length = 0;
   h.sdv.mockImplementation(async (_id: string, v: number) => { h.callLog.push("vol:" + v); });
+  h.gdv.mockImplementation(async () => 20);
 });
 
 describe("音流节点引擎", () => {
@@ -175,9 +178,9 @@ describe("音流节点引擎", () => {
         { type: "trigger", triggerType: "webhook" },
         { type: "target", targets: [DEV_A] },
         { type: "content", contentType: "playlist", id: "pl-x" },
-        { type: "volume", value: 20 },
+        { type: "volume", value: 20, windowMs: 500, pollMs: 100 },
         { type: "delay", ms: 100 },
-        { type: "volume", value: 30 },
+        { type: "volume", value: 30, windowMs: 500, pollMs: 100 },
       ],
     });
     await executeFlow("f-volfail", "http://test");
@@ -187,8 +190,40 @@ describe("音流节点引擎", () => {
     expect(h.callLog.some((x) => x === "vol:20")).toBe(false); // 失败的 20 未执行成功(只发送一次抛错)
   }, 20000);
 
-  it("trigger 节点无副作用,流程正常完成(手动触发语义)", async () => {
-    seedFlow("f-trigger", {
+  it("volume 对账命中:发送后回读对上 → 节点完成,不重发", async () => {
+    h.gdv.mockImplementation(async () => 20); // 设备实际 20,与目标一致
+    seedFlow("f-volok", {
+      waitTimeoutSec: 0, scanIntervalSec: 2,
+      nodes: [
+        { type: "target", targets: [DEV_A] },
+        { type: "volume", value: 20, windowMs: 2000, pollMs: 100 },
+      ],
+    });
+    await executeFlow("f-volok", "http://test");
+    expect(await waitStatus("f-volok")).toContain("success");
+    expect(h.sdv).toHaveBeenCalledTimes(1); // 只发一次,对上即完成不重发
+    expect(h.gdv).toHaveBeenCalledTimes(1); // 回读对账一次
+  });
+
+  it("volume 对账窗口结束未对上 → 不中止,窗口内持续重发,继续下一节点", async () => {
+    h.gdv.mockImplementation(async () => 80); // 设备恒 80,永远对不上
+    seedFlow("f-volwin", {
+      waitTimeoutSec: 0, scanIntervalSec: 2,
+      nodes: [
+        { type: "target", targets: [DEV_A] },
+        { type: "volume", value: 20, windowMs: 500, pollMs: 100 },
+        { type: "volume", value: 30, windowMs: 500, pollMs: 100 },
+      ],
+    });
+    await executeFlow("f-volwin", "http://test");
+    const st = await waitStatus("f-volwin");
+    expect(st).toContain("success");                    // 对账失败不中止流程
+    const vol20 = h.callLog.filter((x) => x === "vol:20").length;
+    expect(vol20).toBeGreaterThan(1);                   // 窗口内对不上 → 持续重发
+    expect(h.callLog.some((x) => x === "vol:30")).toBe(true); // 后续 volume(30)节点执行
+  }, 10000);
+
+  it("trigger 节点无副作用,流程正常完成(手动触发语义)", async () => {    seedFlow("f-trigger", {
       waitTimeoutSec: 0, scanIntervalSec: 2,
       nodes: [
         { type: "trigger", triggerType: "webhook" },

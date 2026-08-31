@@ -10,7 +10,7 @@ import { flows } from "../../db/schema.js";
 import { getPeerManager, parsePeerId } from "../peer.js";
 import { getQueueManager } from "../dlna/queue.js";
 import { getQueueController } from "../player/index.js";
-import { setDeviceVolume, refreshDevices } from "../dlna/control.js";
+import { setDeviceVolume, getDeviceVolume, refreshDevices } from "../dlna/control.js";
 import { resolveContentSongs, songsToQueueItems } from "../content.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../plugin/fixedRecommend.js";
 import { createLogger } from "../../utils/logger.js";
@@ -26,7 +26,7 @@ export type FlowNode =
   | { type: "target"; targets: string[] }
   | { type: "content"; contentType: FlowContentType; id: string; name?: string; startIndex?: number }
   | { type: "playmode"; mode: FlowPlayMode }
-  | { type: "volume"; value: number }
+  | { type: "volume"; value: number; windowMs?: number; pollMs?: number }
   | { type: "delay"; ms: number };
 
 export interface FlowDefinition {
@@ -300,16 +300,32 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
           break;
         }
         case "volume": {
-          // 默认作用于全部目标集。音量**只发送、不对账**(setDeviceVolume 发出即
-          // 返回);设置失败**不中止流程**(用户确认),仅记警告日志,继续下一节点。
+          // 默认作用于全部目标集。dlna 目标:发送后**自动对账**——在 windowMs
+          // (默认 10s)轮询窗口内每 pollMs(默认 500ms)回读 GetVolume,发现对不上
+          // (±1)就重发 SetVolume,直到对上或窗口结束;对账失败**不中止流程**
+          // (仅 warn),继续下一节点。group 仅发送(成员对账由各设备自理)。
           const value = Math.max(0, Math.min(100, Math.round(node.value)));
+          const windowMs = Math.max(500, Math.min(60000, typeof node.windowMs === "number" ? node.windowMs : 10000));
+          const pollMs = Math.max(100, Math.min(5000, typeof node.pollMs === "number" ? node.pollMs : 500));
+          const tolerance = 1;
           for (const pid of activeTargets) {
             const parsed = parseOrThrow(pid);
             try {
-              if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, value);
-              else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", value);
+              if (parsed.kind === "dlna") {
+                await setDeviceVolume(parsed.id, value);
+                const deadline = Date.now() + windowMs;
+                while (Date.now() < deadline) {
+                  await sleep(pollMs);
+                  let got = -1;
+                  try { got = await getDeviceVolume(parsed.id); } catch { got = -1; }
+                  if (got >= 0 && Math.abs(got - value) <= tolerance) break; // 对上
+                  if (Date.now() < deadline) await setDeviceVolume(parsed.id, value); // 对不上 → 重发
+                }
+              } else if (parsed.kind === "group") {
+                await qc.transport(parsed.id, "volume", value);
+              }
             } catch (e: any) {
-              log.warn(`[flow ${flow.name}] ${nameOf(pid)} 音量 ${value}% 设置失败,继续执行下一节点:${e?.message || e}`);
+              log.warn(`[flow ${flow.name}] ${nameOf(pid)} 音量 ${value}% 对账失败,继续执行下一节点:${e?.message || e}`);
             }
           }
           break;

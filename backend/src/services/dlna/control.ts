@@ -877,6 +877,22 @@ export async function setDeviceVolume(deviceId: string, volume: number): Promise
   } catch (e: any) { markFailed(deviceId, "SetVolume", e); throw e; }
 }
 
+/** 读取设备当前音量(0-100)。设备不支持 RenderingControl 或响应异常时抛错。
+ *  供音流 volume 节点做「发送后自动对账」回读。 */
+export async function getDeviceVolume(deviceId: string): Promise<number> {
+  const device = getDevice(deviceId);
+  if (!device?.renderingControlUrl) throw new Error("设备不支持音量控制");
+  const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetVolume", {
+    InstanceID: "0",
+    Channel: "Master",
+  });
+  const m = xml.match(/<CurrentVolume>([^<]*)<\/CurrentVolume>/i);
+  if (!m) throw new Error("GetVolume 响应缺少 CurrentVolume");
+  const v = parseInt(m[1].trim(), 10);
+  if (Number.isNaN(v)) throw new Error(`GetVolume 响应非数字:${m[1]}`);
+  return v;
+}
+
 /** 静音开关(RenderingControl SetMute)。与音量相互独立:静音不改变 Volume 值,
  *  取消静音后设备恢复原音量,所以不能用 "音量设 0" 来冒充静音。 */
 export async function setDeviceMute(deviceId: string, muted: boolean): Promise<void> {
