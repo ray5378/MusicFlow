@@ -1,9 +1,7 @@
-// setDeviceVolume「秒发秒走 + 延迟对账 + 不对重发」机制测试:
-//   1. SetVolume 后等稳定,GetVolume 对账命中目标 → 成功(一次即命中)
-//   2. 设备未采纳(对账恒为旧值)→ 重发 SetVolume,attempts 次后抛错
-//   3. 设备 GetVolume 一直无回应 → 重发,attempts 次后抛错
-//   4. confirm:false → 只发 SetVolume,不对账
-// 参数用短值加速测试(生产默认 settleMs=1500 / attempts=6)。
+// setDeviceVolume「只发送、不对账」机制测试:
+//   1. SetVolume 发出即返回(1 次 Set,0 次 GetVolume)
+//   2. SetVolume 网络/UPnP 失败 → 抛错
+// 不再有回读确认/延迟对账/重发/代际锁(用户:"直接清理对账的规则,只发送不对账了")。
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
@@ -11,17 +9,14 @@ import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from "vitest
 import { initDatabase } from "../../src/db/index.js";
 import { getCachedDevices, setDeviceVolume } from "../../src/services/dlna/control.js";
 
-const DEV = "vol-confirm-test-dev";
+const DEV = "vol-send-test-dev";
 const RC = "http://dev.local/rc";
 const AV = "http://dev.local/av";
-
-/** 快速参数:稳定等待 50ms、重发 2 次,避免测试慢。 */
-const fast = (attempts = 2) => ({ settleMs: 50, attempts, tolerance: 1 });
 
 function injectDevice(): void {
   const arr = getCachedDevices();
   if (!arr.some(d => d.id === DEV)) {
-    arr.push({ id: DEV, name: "音量确认测试", location: "", renderingControlUrl: RC, avTransportUrl: AV, lastSeen: Date.now(), available: true });
+    arr.push({ id: DEV, name: "音量只发送测试", location: "", renderingControlUrl: RC, avTransportUrl: AV, lastSeen: Date.now(), available: true });
   }
 }
 
@@ -44,13 +39,12 @@ function okSoap(action: string): Response {
   );
 }
 
-function volumeSoap(value: number): Response {
+function faultSoap(): Response {
   return new Response(
     `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
-    `<u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">` +
-    `<CurrentVolume>${value}</CurrentVolume></u:GetVolumeResponse>` +
+    `<s:Fault><errorCode>501</errorCode><errorDescription>Action Failed</errorDescription></s:Fault>` +
     `</s:Body></s:Envelope>`,
-    { status: 200, headers: { "Content-Type": "text/xml; charset=utf-8" } },
+    { status: 500, headers: { "Content-Type": "text/xml; charset=utf-8" } },
   );
 }
 
@@ -69,55 +63,40 @@ afterEach(() => {
   getVolumeCalls = 0;
 });
 
-describe("setDeviceVolume 秒发秒走 + 延迟对账", () => {
-  it("SetVolume 后等稳定,GetVolume 对账命中 → 成功(一次即命中)", async () => {
+describe("setDeviceVolume 只发送不对账", () => {
+  it("SetVolume 发出即返回(1 次 Set,0 次 GetVolume)", async () => {
     fetchMock = vi.fn(async (_url: unknown, init?: any) => {
       const body = String(init?.body || "");
       if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
-      if (body.includes("GetVolume")) { getVolumeCalls++; return volumeSoap(20); }
+      if (body.includes("GetVolume")) { getVolumeCalls++; return okSoap("GetVolume"); }
       throw new Error("unexpected action");
     });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(setDeviceVolume(DEV, 20, fast())).resolves.toBeUndefined();
-    expect(setVolumeCalls).toBe(1);   // 一次即对账命中,不重发
-    expect(getVolumeCalls).toBe(1);
-  });
-
-  it("设备未采纳(对账恒为旧值)→ 重发 SetVolume,attempts 次后抛错", async () => {
-    fetchMock = vi.fn(async (_url: unknown, init?: any) => {
-      const body = String(init?.body || "");
-      if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
-      if (body.includes("GetVolume")) { getVolumeCalls++; return volumeSoap(80); } // 设备一直报 80
-      throw new Error("unexpected action");
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(setDeviceVolume(DEV, 20, fast(2))).rejects.toThrow(/对账失败|最后回读 80/);
-    expect(setVolumeCalls).toBe(2);   // attempts=2:重发一次后放弃
-  });
-
-  it("设备 GetVolume 一直无回应 → 重发,attempts 次后抛错", async () => {
-    fetchMock = vi.fn(async (_url: unknown, init?: any) => {
-      const body = String(init?.body || "");
-      if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
-      if (body.includes("GetVolume")) { getVolumeCalls++; throw new Error("GetVolume unsupported"); }
-      throw new Error("unexpected action");
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(setDeviceVolume(DEV, 20, fast(2))).rejects.toThrow(/对账失败|无响应/);
-    expect(setVolumeCalls).toBe(2);   // attempts=2:重发一次后放弃
-    expect(getVolumeCalls).toBe(2);
-  });
-
-  it("confirm:false → 只发一次 SetVolume,完全不对账", async () => {
-    fetchMock = vi.fn(async (_url: unknown, init?: any) => {
-      const body = String(init?.body || "");
-      if (body.includes("SetVolume")) { setVolumeCalls++; return okSoap("SetVolume"); }
-      if (body.includes("GetVolume")) { getVolumeCalls++; return volumeSoap(20); }
-      throw new Error("unexpected action");
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(setDeviceVolume(DEV, 20, { ...fast(), confirm: false })).resolves.toBeUndefined();
+    await expect(setDeviceVolume(DEV, 20)).resolves.toBeUndefined();
     expect(setVolumeCalls).toBe(1);
+    expect(getVolumeCalls).toBe(0); // 完全不对账
+  });
+
+  it("SetVolume 失败(UPnP fault)→ 抛错", async () => {
+    fetchMock = vi.fn(async (_url: unknown, init?: any) => {
+      const body = String(init?.body || "");
+      if (body.includes("SetVolume")) { setVolumeCalls++; return faultSoap(); }
+      throw new Error("unexpected action");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(setDeviceVolume(DEV, 20)).rejects.toThrow(/UPnP error|501|Action Failed/);
+    expect(setVolumeCalls).toBe(1); // 只发一次,不重发
     expect(getVolumeCalls).toBe(0);
+  });
+
+  it("设备不支持音量控制(RenderingControl 缺失)→ 抛错", async () => {
+    const arr = getCachedDevices();
+    arr.push({ id: "no-rc-dev", name: "无RC", location: "", lastSeen: Date.now(), available: true });
+    try {
+      await expect(setDeviceVolume("no-rc-dev", 20)).rejects.toThrow("设备不支持音量控制");
+    } finally {
+      const i = arr.findIndex((d: any) => d.id === "no-rc-dev");
+      if (i >= 0) arr.splice(i, 1);
+    }
   });
 });

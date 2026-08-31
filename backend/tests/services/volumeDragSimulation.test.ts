@@ -1,8 +1,7 @@
-// 模拟「前端音量滑块拖拽 → 高频并发 setDeviceVolume」问题:
-// 前端 setVolume 无防抖,el-slider @input 每帧发一次 /volume 请求;后端每个请求
-// 都进入 setDeviceVolume 的「确认窗口 + 持续重发」循环。本测试模拟一次拖拽
-// (2s 内 30 个并发请求,值 50→21 递减),量化设备侧收到的 SOAP 请求总数,
-// 证明无防抖时确认循环会被并发放大成请求轰炸。
+// 音量「只发送、不对账」下的高频调用模拟:
+// 前端拖拽(2s 内 30 个并发请求)时,后端每个请求只发一次 SetVolume 即返回,
+// 无 GetVolume 对账、无重发 —— 设备侧 SOAP 总数 = 请求数,不再被放大轰炸。
+// 对比 v1.13.7/11 的确认窗口/延迟对账逻辑(30 并发 → 数百次 SOAP)。
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
@@ -31,23 +30,9 @@ function soapOk(action: string): Response {
   );
 }
 
-function volumeSoap(v: number): Response {
-  return new Response(
-    `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
-    `<u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">` +
-    `<CurrentVolume>${v}</CurrentVolume></u:GetVolumeResponse>` +
-    `</s:Body></s:Envelope>`,
-    { status: 200, headers: { "Content-Type": "text/xml" } },
-  );
-}
+beforeAll(() => { initDatabase(); });
 
-beforeAll(() => {
-  initDatabase();
-});
-
-beforeEach(() => {
-  injectDevice();
-});
+beforeEach(() => { injectDevice(); });
 
 afterEach(() => {
   const arr = getCachedDevices();
@@ -57,45 +42,27 @@ afterEach(() => {
   soapLog = [];
 });
 
-describe("音量拖拽高频调用模拟", () => {
-  it("无防抖:一次拖拽(30 并发请求)→ SOAP 请求被确认循环放大成数百次", async () => {
-    // 设备「顽固」:SetVolume 总是成功,但 GetVolume 恒返回旧值 80(不采纳),
-    // 触发每个 setDeviceVolume 的确认窗口内持续重发(最坏场景)。
+describe("音量拖拽高频调用(只发送)", () => {
+  it("30 个并发请求 → 每个只发 1 次 SetVolume,0 次 GetVolume(无放大)", async () => {
     const fetchMock = vi.fn(async (_url: unknown, init?: any) => {
       const body = String(init?.body || "");
       if (body.includes("SetVolume")) { soapLog.push("SET"); return soapOk("SetVolume"); }
-      if (body.includes("GetVolume")) { soapLog.push("GET"); return volumeSoap(80); }
+      if (body.includes("GetVolume")) { soapLog.push("GET"); return soapOk("GetVolume"); }
       throw new Error("unexpected");
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    // 模拟前端拖拽:2s 内并发发 30 个 setDeviceVolume(值 50→21),不等待完成。
-    // 用短参数加速测试(settleMs=30 / attempts=3),保留放大关系。
     const promises: Promise<void>[] = [];
     for (let v = 50; v >= 21; v--) {
-      promises.push(setDeviceVolume(DEV, v, { settleMs: 30, attempts: 3 }).catch(() => {}));
+      promises.push(setDeviceVolume(DEV, v).catch(() => {}));
     }
     await Promise.all(promises);
 
     const setCalls = soapLog.filter((x) => x === "SET").length;
     const getCalls = soapLog.filter((x) => x === "GET").length;
-    console.log(`[sim] 30 个并发请求 → SetVolume×${setCalls}, GetVolume×${getCalls}, SOAP 总数×${soapLog.length}`);
-    // 无防抖时,确认循环把 30 个请求放大成 30×(1 次 Set + N 次 Get/重发)的海量 SOAP。
-    expect(soapLog.length).toBeGreaterThan(100);
-  });
-
-  it("对照:单次请求(防抖后一次拖拽只发 1 个)→ SOAP 请求数受控", async () => {
-    const fetchMock = vi.fn(async (_url: unknown, init?: any) => {
-      const body = String(init?.body || "");
-      if (body.includes("SetVolume")) { soapLog.push("SET"); return soapOk("SetVolume"); }
-      if (body.includes("GetVolume")) { soapLog.push("GET"); return volumeSoap(20); } // 采纳 → 快速确认
-      throw new Error("unexpected");
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    await setDeviceVolume(DEV, 20, { settleMs: 30, attempts: 2 });
-    const setCalls = soapLog.filter((x) => x === "SET").length;
-    const getCalls = soapLog.filter((x) => x === "GET").length;
-    console.log(`[sim] 单次请求 → SetVolume×${setCalls}, GetVolume×${getCalls}, SOAP 总数×${soapLog.length}`);
-    expect(soapLog.length).toBeLessThanOrEqual(10); // 1 次 Set + 有限次确认轮询
+    console.log(`[sim] 30 并发 → SetVolume×${setCalls}, GetVolume×${getCalls}, SOAP 总数×${soapLog.length}`);
+    expect(setCalls).toBe(30);       // 一请求一发送
+    expect(getCalls).toBe(0);        // 完全不对账
+    expect(soapLog.length).toBe(30); // 无放大
   });
 });

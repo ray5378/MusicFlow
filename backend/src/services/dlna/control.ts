@@ -859,93 +859,22 @@ export async function alignDeviceToPosition(
 
 // Set volume (0-100). Requires RenderingControl service.
 //
-// 音量设置采用「秒发秒走 + 延迟对账」策略:SOAP SetVolume 立即发出(实时生效,不
-// 阻塞、不轰炸设备),等待 settleMs(默认 1.5s)让设备音量进入稳定态后,再回读
-// GetVolume 与目标值对账(±tolerance);对不上则重发 SetVolume 再等再对账,最多
-// attempts(默认 6)次。全部对账失败 → 抛错,由调用方(flow / announce / API)
-// 决定上报;同时把事件缓存纠正为设备真实音量,避免 HA / WS 误以为音量已生效。
-// 相比「10s 窗口内持续轮询重发」,本策略在拖拽/高频场景不会堆积并发确认循环。
-export interface SetVolumeOptions {
-  /** 是否回读对账设备真实音量,默认 true */
-  confirm?: boolean;
-  /** 每次 SetVolume 后等待设备音量稳定的时间 ms,默认 1500 */
-  settleMs?: number;
-  /** 重发上限(每次先 SetVolume → 等 settleMs → 回读对账),默认 6 */
-  attempts?: number;
-  /** 与目标值的允许偏差(设备步进/舍入),默认 1 */
-  tolerance?: number;
-}
-
-/** 读取设备当前音量(0-100)。设备不支持 RenderingControl 或响应异常时抛错。 */
-async function readDeviceVolume(deviceId: string): Promise<number> {
-  const device = getDevice(deviceId);
-  if (!device?.renderingControlUrl) throw new Error("设备不支持音量控制");
-  const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetVolume", {
-    InstanceID: "0",
-    Channel: "Master",
-  });
-  const m = xml.match(/<CurrentVolume>([^<]*)<\/CurrentVolume>/i);
-  if (!m) throw new Error("GetVolume 响应缺少 CurrentVolume");
-  const v = parseInt(m[1].trim(), 10);
-  if (Number.isNaN(v)) throw new Error(`GetVolume 响应非数字:${m[1]}`);
-  return v;
-}
-
-export async function setDeviceVolume(deviceId: string, volume: number, opts?: SetVolumeOptions): Promise<void> {
+// 音量**只发送、不对账**:SOAP SetVolume 发出即返回(实时生效),不做 GetVolume
+// 回读校验 / 延迟对账 / 重发 / 代际锁。事件缓存同步更新,HA / WS 侧即时可见。
+export async function setDeviceVolume(deviceId: string, volume: number): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.renderingControlUrl) throw new Error("设备不支持音量控制");
   const vol = Math.max(0, Math.min(100, Math.round(volume)));
-  const confirm = opts?.confirm ?? true;
-  const settleMs = Math.max(50, opts?.settleMs ?? 1500);
-  const attempts = Math.max(1, opts?.attempts ?? 6);
-  const tolerance = Math.max(0, opts?.tolerance ?? 1);
-  let lastGot = -1;
   try {
-    if (!confirm) {
-      // 不做对账:发一次即返回(向后兼容,如纯异步调用方自行管理)。
-      await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetVolume", {
-        InstanceID: "0",
-        Channel: "Master",
-        DesiredVolume: String(vol),
-      });
-      markOk(deviceId);
-      getEventManager().setVolume(deviceId, vol);
-      return;
-    }
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      // 1) 立即发 SetVolume(实时生效,不做任何等待式确认)。
-      try {
-        await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetVolume", {
-          InstanceID: "0",
-          Channel: "Master",
-          DesiredVolume: String(vol),
-        });
-        markOk(deviceId);
-        // 立刻把新音量写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
-        getEventManager().setVolume(deviceId, vol);
-      } catch (e: any) {
-        // SetVolume 本身失败 → 本轮重发(最后一轮除外)。
-        if (attempt === attempts - 1) throw e;
-        await sleep(settleMs);
-        continue;
-      }
-      // 2) 等设备音量进入稳定态,再回读对账一次。
-      await sleep(settleMs);
-      try {
-        lastGot = await readDeviceVolume(deviceId);
-      } catch {
-        lastGot = -1; // 读不到 → 视为未对上,重发。
-      }
-      if (lastGot >= 0 && Math.abs(lastGot - vol) <= tolerance) return; // 对账命中 → 成功
-    }
-  } finally {
-    // 对账失败:把事件缓存纠正为设备真实音量,避免 HA/WS 误以为音量已生效。
-    if (lastGot >= 0) getEventManager().setVolume(deviceId, lastGot);
-  }
-  // attempts 次对账全部失败 → 抛错。
-  const err = new Error(`音量 ${vol} 对账失败:${attempts} 次后设备回读 ${lastGot === -1 ? "无响应" : lastGot}`);
-  markFailed(deviceId, "SetVolume", err);
-  throw err;
+    await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "SetVolume", {
+      InstanceID: "0",
+      Channel: "Master",
+      DesiredVolume: String(vol),
+    });
+    markOk(deviceId);
+    // 立刻把新音量写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    getEventManager().setVolume(deviceId, vol);
+  } catch (e: any) { markFailed(deviceId, "SetVolume", e); throw e; }
 }
 
 /** 静音开关(RenderingControl SetMute)。与音量相互独立:静音不改变 Volume 值,

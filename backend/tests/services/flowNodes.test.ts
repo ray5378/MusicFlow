@@ -164,9 +164,9 @@ describe("音流节点引擎", () => {
   });
 
   it("volume 失败 → 不中止流程,继续执行后续节点", async () => {
-    // 目标值 20 恒失败(step1=19 正常),触发 setDeviceVolume 内部对账重发后抛错。
+    // 目标值 20 失败(只发送,setDeviceVolume 抛错),20 不记入 callLog。
     h.sdv.mockImplementation(async (_id: string, v: number) => {
-      if (v === 20) throw new Error("音量对账失败:期望 20,设备回读 80");
+      if (v === 20) throw new Error("SetVolume 失败");
       h.callLog.push("vol:" + v);
     });
     seedFlow("f-volfail", {
@@ -184,7 +184,7 @@ describe("音流节点引擎", () => {
     const st = await waitStatus("f-volfail");
     expect(st).toContain("success");                      // 音量失败不中止,流程照常完成
     expect(h.callLog.some((x) => x === "vol:30")).toBe(true); // 后续 volume(30)节点执行
-    expect(h.callLog.some((x) => x === "vol:19")).toBe(true); // 第一台的 step1 也发过
+    expect(h.callLog.some((x) => x === "vol:20")).toBe(false); // 失败的 20 未执行成功(只发送一次抛错)
   }, 20000);
 
   it("trigger 节点无副作用,流程正常完成(手动触发语义)", async () => {

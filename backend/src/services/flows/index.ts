@@ -300,21 +300,14 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
           break;
         }
         case "volume": {
-          // 默认作用于全部目标集。setDeviceVolume 内部带「秒发秒走 + 延迟对账 +
-          // 重发(最多 6 次)」;音量设置失败**不中止流程**(用户确认:直接触发下一
-          // 节点),仅记警告日志、继续对下一台目标或下一个节点尽力而为。
+          // 默认作用于全部目标集。音量**只发送、不对账**(setDeviceVolume 发出即
+          // 返回);设置失败**不中止流程**(用户确认),仅记警告日志,继续下一节点。
           const value = Math.max(0, Math.min(100, Math.round(node.value)));
-          const step1 = Math.max(0, value - 1);
           for (const pid of activeTargets) {
             const parsed = parseOrThrow(pid);
             try {
-              if (parsed.kind === "dlna") {
-                await setDeviceVolume(parsed.id, step1);
-                await sleep(500);
-                await setDeviceVolume(parsed.id, value);
-              } else if (parsed.kind === "group") {
-                await qc.transport(parsed.id, "volume", value);
-              }
+              if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, value);
+              else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", value);
             } catch (e: any) {
               log.warn(`[flow ${flow.name}] ${nameOf(pid)} 音量 ${value}% 设置失败,继续执行下一节点:${e?.message || e}`);
             }
