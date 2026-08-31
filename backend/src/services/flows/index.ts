@@ -1,7 +1,8 @@
 // 音流(MusicFlow)执行引擎。
-// 一条音流 = 目标设备/组(可多选)+ 等待上线 + 设音量 + 播放模式 + 播歌单。
-// 触发后异步在后台执行:持续扫描 DLNA → 任一目标上线即对其依次执行后续节点;
-// 执行状态写入 flows 表(页面可查看最近一次运行结果)。
+// 一条音流 = 按顺序执行的「节点」列表(trigger/target/content/playmode/volume/delay),
+// 节点可拖拽排序、任意位置插入、可重复。执行时:先收集所有 target 节点目标并等待任一
+// 上线,再按节点顺序逐一执行;任何节点抛错 → 整个流程中止(状态 error)。
+// 旧版固定配置(targets/volume/playmode/content)已作废,不再解析。
 import { randomUUID as uuidv4 } from "crypto";
 import { eq, and } from "drizzle-orm";
 import { db } from "../../db/index.js";
@@ -16,17 +17,25 @@ import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("INDEX");
 export type FlowPlayMode = "order" | "one" | "all" | "shuffle";
+export type FlowContentType = "playlist" | "album" | "artist" | "genre";
+
+/** 音流节点:触发 / 目标设备/组 / 播放内容 / 播放模式 / 设置音量 / 延迟。
+ *  节点按 nodes 数组顺序执行,可拖拽排序、任意位置插入、可重复。 */
+export type FlowNode =
+  | { type: "trigger"; triggerType: "webhook" }
+  | { type: "target"; targets: string[] }
+  | { type: "content"; contentType: FlowContentType; id: string; name?: string; startIndex?: number }
+  | { type: "playmode"; mode: FlowPlayMode }
+  | { type: "volume"; value: number }
+  | { type: "delay"; ms: number };
 
 export interface FlowDefinition {
-  /** 目标 peerId 列表:dlna:<deviceId> / group:<groupId> */
-  targets: string[];
+  /** 按顺序执行的节点列表。旧版 targets/volume/playmode/content 字段已作废(旧格式不再解析)。 */
+  nodes: FlowNode[];
   /** 等待设备上线超时(秒);0 = 无限等待 */
   waitTimeoutSec: number;
   /** 持续扫描间隔(秒),2..60 */
   scanIntervalSec: number;
-  volume: { enabled: boolean; value: number };
-  playmode: { enabled: boolean; mode: FlowPlayMode };
-  content: { enabled: boolean; type: "playlist" | "album" | "artist" | "genre"; id: string; name?: string; startIndex?: number };
 }
 
 export interface FlowRow {
@@ -46,19 +55,30 @@ export interface FlowRow {
   updatedAt: string;
 }
 
+function isValidNode(n: any): n is FlowNode {
+  if (!n || typeof n !== "object") return false;
+  switch (n.type) {
+    case "trigger": return n.triggerType === "webhook";
+    case "target": return Array.isArray(n.targets);
+    case "content": return ["playlist", "album", "artist", "genre"].includes(n.contentType) && typeof n.id === "string";
+    case "playmode": return ["order", "one", "all", "shuffle"].includes(n.mode);
+    case "volume": return typeof n.value === "number";
+    case "delay": return typeof n.ms === "number";
+    default: return false;
+  }
+}
+
 function parseDef(json: string): FlowDefinition {
   try {
     const raw = JSON.parse(json || "{}");
+    const nodes = Array.isArray(raw.nodes) ? raw.nodes.filter(isValidNode) : [];
     return {
-      targets: Array.isArray(raw.targets) ? raw.targets : [],
+      nodes,
       waitTimeoutSec: typeof raw.waitTimeoutSec === "number" ? raw.waitTimeoutSec : 0,
       scanIntervalSec: typeof raw.scanIntervalSec === "number" ? raw.scanIntervalSec : 5,
-      volume: { enabled: true, value: 80, ...(raw.volume || {}) },
-      playmode: { enabled: true, mode: "shuffle", ...(raw.playmode || {}) },
-      content: { enabled: true, type: "playlist", id: "", startIndex: 0, ...(raw.content || {}) },
     };
   } catch {
-    return { targets: [], waitTimeoutSec: 0, scanIntervalSec: 5, volume: { enabled: true, value: 80 }, playmode: { enabled: true, mode: "shuffle" }, content: { enabled: true, type: "playlist", id: "", startIndex: 0 } };
+    return { nodes: [], waitTimeoutSec: 0, scanIntervalSec: 5 };
   }
 }
 
@@ -161,10 +181,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * 异步执行一条音流。同一时间同一流程只允许一个运行实例(重复触发直接跳过)。
  * 执行过程:
- *   1) 校验内容(歌单)可解析;
+ *   1) 校验节点列表非空 + 至少一个 target 节点;
  *   2) 状态 → waiting:持续扫描(主动 refreshDevices + 读 peer 可用性),
  *      直到任一目标上线(waitTimeoutSec=0 时无限等待);
- *   3) 状态 → playing:对每个在线目标依次设音量、设播放模式、playFrom;
+ *   3) 状态 → playing:按顺序遍历节点执行(target 并集 → content 解析+播放 →
+ *      playmode / volume / delay 任意组合),任何节点失败即中止;
  *   4) 状态 → success / error / timeout,结果写回 flows 表。
  */
 export async function executeFlow(flowId: string, baseUrl: string): Promise<"started" | "already-running"> {
@@ -189,47 +210,37 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
   const qm = getQueueManager();
   const qc = getQueueController();
 
-  const targets = (def.targets || []).filter((t) => parsePeerId(t));
-  if (targets.length === 0) {
-    touchRunStatus(flowId, "error", "未配置目标设备/组");
+  const nodes = def.nodes || [];
+  if (nodes.length === 0) {
+    touchRunStatus(flowId, "error", "音流未配置节点(旧版固定配置已作废,请在编辑器中重新搭建节点流程)");
     return;
   }
 
-  // 预解析内容(歌单/专辑/艺人/风格)。
-  let items: any[] = [];
-  let contentName = "";
-  if (def.content?.enabled) {
-    // 固定推荐歌单(今日漫游/今日推荐/本地推荐)自愈:歌单缺失或暂无内容时,
-    // 自动触发生成(对应插件 runDailyJob)并等待可播条目——音流触发不依赖
-    // 每日调度时序,刚开机/当天未跑调度也能先生成再播。
-    if ((def.content.type || "playlist") === "playlist" && isFixedRecommendPlaylist(def.content.id)) {
-      const ensure = await ensureHomePlaylist(def.content.id);
-      if (!ensure.ok) {
-        touchRunStatus(flowId, "error", `推荐歌单「${def.content.name || def.content.id}」未就绪:${ensure.reason || "生成失败"}`);
-        return;
+  // 收集所有 target 节点声明的目标(并集,可多个 target 节点)。
+  const declaredTargets = new Set<string>();
+  for (const n of nodes) {
+    if (n.type === "target") {
+      for (const t of n.targets || []) {
+        if (parsePeerId(t)) declaredTargets.add(t);
       }
     }
-    const resolved = resolveContentSongs(def.content.type || "playlist", def.content.id);
-    if (!resolved || resolved.rows.length === 0) {
-      touchRunStatus(flowId, "error", `内容解析失败:${def.content.name ? `「${def.content.name}」` : "所选内容"}无可播放歌曲`);
-      return;
-    }
-    items = songsToQueueItems(resolved.rows);
-    contentName = resolved.name;
+  }
+  if (declaredTargets.size === 0) {
+    touchRunStatus(flowId, "error", "未配置目标设备/组节点");
+    return;
   }
 
-  // 阶段 1:持续扫描等待设备/组上线。
+  // 阶段 1:持续扫描等待任一目标上线(保留原等待语义)。
   touchRunStatus(flowId, "waiting", "");
   const intervalMs = Math.max(2, Math.min(60, def.scanIntervalSec || 5)) * 1000;
   const deadline = def.waitTimeoutSec > 0 ? Date.now() + def.waitTimeoutSec * 1000 : 0;
-  const online: string[] = [];
+  let online: string[] = [];
   while (true) {
     try { await refreshDevices(); } catch { /* 扫描失败下一轮重试 */ }
-    for (const pid of targets) {
-      if (online.includes(pid)) continue;
+    online = [...declaredTargets].filter((pid) => {
       const p = pm.get(pid);
-      if (p && p.available) online.push(pid);
-    }
+      return p && p.available;
+    });
     if (online.length > 0) break;
     if (deadline > 0 && Date.now() >= deadline) break;
     await sleep(intervalMs);
@@ -239,54 +250,90 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
     return;
   }
 
-  // 阶段 2:对每个在线目标执行 播放模式 → 播放 → 音量。
+  // 阶段 2:按顺序遍历节点执行。任何节点抛错 → 整个流程中止(状态 error)。
   touchRunStatus(flowId, "playing", "");
-  const errs: string[] = [];
-  for (const pid of online) {
-    const parsed = parsePeerId(pid)!;
-    const name = pm.get(pid)?.name || pid;
-    try {
-      if (def.playmode?.enabled && def.playmode.mode) {
-        qm.setPlayMode(parsed.id, def.playmode.mode);
-      }
-      if (items.length > 0) {
-        await qm.playFrom(parsed.id, items, def.content?.startIndex || 0, baseUrl);
-      }
-      if (def.volume?.enabled && typeof def.volume.value === "number") {
-        // 播放开始后等设备稳定再设音量,否则部分 DLNA 设备可能忽略音量指令。
-        // setDeviceVolume 内部已带「回读确认 + 持续重发」(SetVolume → GetVolume
-        // 校验,默认 10s 窗口内未确认就按 500ms 频率持续重发,直到设备真实音量
-        // 命中目标);此处再做 3 轮整体重试(19→20 两次跳变),确保设备真实音量
-        // 达到配置值,杜绝「SOAP 返回 200 但设备未采纳」导致实际音量不符
-        // (如 H5MKII 类 Linkplay 设备播放态静默忽略音量指令)。
-        const step1 = Math.max(0, def.volume.value - 1);
-        const doSetVolume = async (): Promise<void> => {
-          if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, step1);
-          else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", step1);
-          await sleep(500);
-          if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, def.volume.value);
-          else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", def.volume.value);
-        };
-        let volumeApplied = false;
-        for (let vAttempt = 0; vAttempt < 3 && !volumeApplied; vAttempt++) {
-          try {
-            await doSetVolume();
-            volumeApplied = true;
-          } catch (e: any) {
-            log.warn(`[flow ${flow.name}] 目标 ${name} 音量 ${def.volume.value}% 设置未确认(第 ${vAttempt + 1} 轮):${e?.message || e}`);
-            await sleep(1500);
+  const activeTargets = new Set<string>(online); // 当前目标集:target 节点并集 ∩ 在线
+  const nameOf = (pid: string) => pm.get(pid)?.name || pid;
+  const parseOrThrow = (pid: string) => {
+    const p = parsePeerId(pid);
+    if (!p) throw new Error(`无效目标:${pid}`);
+    return p;
+  };
+  try {
+    for (const node of nodes) {
+      switch (node.type) {
+        case "trigger": {
+          // 触发匹配在路由层完成(webhook token / 手动执行);节点本身无副作用,
+          // 作为流程的触发声明存在(未来可扩展 schedule 等其它触发类型)。
+          break;
+        }
+        case "target": {
+          for (const pid of node.targets || []) {
+            if (!activeTargets.has(pid) && pm.get(pid)?.available) activeTargets.add(pid);
           }
+          break;
         }
-        if (!volumeApplied) {
-          errs.push(`${name}: 音量 ${def.volume.value}% 设置失败(设备未确认回读)`);
+        case "content": {
+          if (activeTargets.size === 0) throw new Error("播放内容节点执行时无在线目标(请把目标设备/组节点放在播放内容之前)");
+          // 固定推荐歌单(今日漫游/今日推荐/本地推荐)自愈:缺失或暂无内容时自动生成。
+          if (node.contentType === "playlist" && isFixedRecommendPlaylist(node.id)) {
+            const ensure = await ensureHomePlaylist(node.id);
+            if (!ensure.ok) throw new Error(`推荐歌单「${node.name || node.id}」未就绪:${ensure.reason || "生成失败"}`);
+          }
+          const resolved = resolveContentSongs(node.contentType || "playlist", node.id);
+          if (!resolved || resolved.rows.length === 0) {
+            throw new Error(`内容解析失败:${node.name ? `「${node.name}」` : "所选内容"}无可播放歌曲`);
+          }
+          const items = songsToQueueItems(resolved.rows);
+          for (const pid of activeTargets) {
+            const parsed = parseOrThrow(pid);
+            await qm.playFrom(parsed.id, items, node.startIndex || 0, baseUrl);
+            console.log(`[flow ${flow.name}] 已播放:${nameOf(pid)} → 「${resolved.name}」`);
+          }
+          break;
+        }
+        case "playmode": {
+          for (const pid of activeTargets) {
+            const parsed = parseOrThrow(pid);
+            qm.setPlayMode(parsed.id, node.mode);
+          }
+          break;
+        }
+        case "volume": {
+          // 默认作用于全部目标集。带「回读确认+持续重发」(setDeviceVolume 10s 窗口),
+          // 失败视为节点失败 → 中止流程。
+          const value = Math.max(0, Math.min(100, Math.round(node.value)));
+          const step1 = Math.max(0, value - 1);
+          for (const pid of activeTargets) {
+            const parsed = parseOrThrow(pid);
+            let applied = false;
+            for (let vAttempt = 0; vAttempt < 3 && !applied; vAttempt++) {
+              try {
+                if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, step1);
+                else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", step1);
+                await sleep(500);
+                if (parsed.kind === "dlna") await setDeviceVolume(parsed.id, value);
+                else if (parsed.kind === "group") await qc.transport(parsed.id, "volume", value);
+                applied = true;
+              } catch (e: any) {
+                log.warn(`[flow ${flow.name}] ${nameOf(pid)} 音量 ${value}% 设置未确认(第 ${vAttempt + 1} 轮):${e?.message || e}`);
+                await sleep(1500);
+              }
+            }
+            if (!applied) throw new Error(`${nameOf(pid)}: 音量 ${value}% 设置失败(设备未确认回读)`);
+          }
+          break;
+        }
+        case "delay": {
+          const ms = Math.max(0, Math.min(3600000, Math.round(node.ms || 0)));
+          if (ms > 0) await sleep(ms);
+          break;
         }
       }
-      console.log(`[flow ${flow.name}] 已执行:${name}(${pid})${contentName ? ` → 「${contentName}」` : ""}`);
-    } catch (e: any) {
-      errs.push(`${name}: ${e?.message || e}`);
-      log.warn(`[flow ${flow.name}] 目标 ${pid} 执行失败:${e?.message || e}`);
     }
+    touchRunStatus(flowId, "success", "");
+  } catch (e: any) {
+    touchRunStatus(flowId, "error", e?.message || String(e));
+    log.warn(`[flow ${flow.name}] 节点执行失败:${e?.message || e}`);
   }
-  if (errs.length === 0) touchRunStatus(flowId, "success", "");
-  else touchRunStatus(flowId, "error", `部分失败:${errs.join("; ")}`);
 }

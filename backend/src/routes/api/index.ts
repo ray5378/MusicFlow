@@ -3171,12 +3171,15 @@ apiRoutes.post("/v1/play", async (c) => {
 // 通过唯一 token 的公开 webhook 链接(/api/v1/webhooks/flows/:token)异步触发。
 
 const DEFAULT_DEFINITION = {
-  targets: [],
+  // 节点化默认模板:触发 → 目标 → 播放内容 → 设置音量。
+  nodes: [
+    { type: "trigger", triggerType: "webhook" },
+    { type: "target", targets: [] },
+    { type: "content", contentType: "playlist", id: "", startIndex: 0 },
+    { type: "volume", value: 20 },
+  ],
   waitTimeoutSec: 0,
   scanIntervalSec: 5,
-  volume: { enabled: true, value: 80 },
-  playmode: { enabled: true, mode: "shuffle" },
-  content: { enabled: true, type: "playlist", id: "", startIndex: 0 },
 };
 
 // 对外可复制链接:用局域网可达 base,保证外部 webhook 能命中。/rest、/api 均受鉴权,

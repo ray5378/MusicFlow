@@ -5,8 +5,8 @@
       <el-button type="primary" @click="createFlow"><MfIcon name="Plus" />新建音流</el-button>
     </div>
     <div class="flows-tip">
-      音流是一条可反复触发的自动播放流程:外部通过下方「对外链接」（Webhook）触发后,项目会在后台持续扫描 DLNA 设备,
-      一旦指定的设备/设备组上线,就依次 设置音量 → 设置播放模式 → 播放指定内容(歌单/专辑/艺人/风格)。整条流程随两端节点编排,类似 Node-RED。
+      音流是一条可反复触发的自动播放流程,由「节点」按顺序编排(类似 Node-RED):触发、目标设备/组、播放内容、播放模式、设置音量、延迟,
+      节点可拖拽排序、任意位置插入、可重复;外部通过「对外链接」(Webhook)或网页上手动「运行」触发。旧版固定配置已作废,请重新搭建节点流程。
     </div>
 
     <!-- 通用播放器控制(独立模块,与音流流程解耦;音流的对外链接复用其渠道 token 做鉴权) -->
@@ -30,40 +30,20 @@
           <IdBadge :id="f.webhookUrl || ''" copy-label="对外链接" style="min-width: 0" />
         </div>
 
-        <!-- Node-RED 风格节点画线预览 -->
-        <div class="flow-steps">
-          <div class="step" :class="{ off: !hasTargets(f) }">
-            <span class="step-icon"><MfIcon name="Radar" /></span>
-            <span class="step-body">
-              <span class="step-title">目标设备/组</span>
-              <span class="step-desc">{{ targetSummary(f) }}</span>
-            </span>
-          </div>
-          <div class="step-arrow"><span class="step-arrow-line"></span></div>
-          <div class="step" :class="{ off: !f.definition.volume.enabled }">
-            <span class="step-icon"><MfIcon name="Speaker" /></span>
-            <span class="step-body">
-              <span class="step-title">音量</span>
-              <span class="step-desc">{{ f.definition.volume.enabled ? f.definition.volume.value + '%' : '未启用' }}</span>
-            </span>
-          </div>
-          <div class="step-arrow"><span class="step-arrow-line"></span></div>
-          <div class="step" :class="{ off: !f.definition.playmode.enabled }">
-            <span class="step-icon"><MfIcon name="Shuffle" /></span>
-            <span class="step-body">
-              <span class="step-title">播放模式</span>
-              <span class="step-desc">{{ f.definition.playmode.enabled ? modeText(f.definition.playmode.mode) : '未启用' }}</span>
-            </span>
-          </div>
-          <div class="step-arrow"><span class="step-arrow-line"></span></div>
-          <div class="step" :class="{ off: !f.definition.content.enabled }">
-            <span class="step-icon"><MfIcon name="List" /></span>
-            <span class="step-body">
-              <span class="step-title">播放内容</span>
-              <span class="step-desc">{{ contentSummary(f) }}</span>
-            </span>
-          </div>
+        <!-- 节点流程预览(节点化) -->
+        <div class="flow-steps" v-if="nodeList(f).length">
+          <template v-for="(n, i) in nodeList(f)" :key="i">
+            <div class="step">
+              <span class="step-icon" :style="{ background: nodeMeta(n.type).bg, color: nodeMeta(n.type).fg }"><MfIcon :name="nodeMeta(n.type).icon" /></span>
+              <span class="step-body">
+                <span class="step-title">{{ nodeMeta(n.type).title }}</span>
+                <span class="step-desc">{{ nodeSummary(n) }}</span>
+              </span>
+            </div>
+            <div v-if="i < nodeList(f).length - 1" class="step-arrow"><span class="step-arrow-line"></span></div>
+          </template>
         </div>
+        <div v-else class="flow-steps flow-steps--empty">未配置节点(旧版固定配置已作废,请编辑重新搭建)</div>
 
         <div class="flow-meta">
           <span v-if="f.lastRunAt" class="meta-time">最近运行:{{ formatTime(f.lastRunAt) }}</span>
@@ -115,23 +95,43 @@ const peers = ref<any[]>([]);
 const MODE_TEXT: Record<string, string> = { order: "顺序播放", shuffle: "随机播放", all: "列表循环", one: "单曲循环" };
 function modeText(m: string): string { return MODE_TEXT[m] || m; }
 
+const NODE_META: Record<string, { icon: string; title: string; bg: string; fg: string }> = {
+  trigger: { icon: "Zap", title: "触发 (Webhook)", bg: "rgba(255,197,45,0.18)", fg: "#ffc52d" },
+  target: { icon: "Radar", title: "目标设备/组", bg: "rgba(90,162,255,0.18)", fg: "#5aa2ff" },
+  content: { icon: "ListMusic", title: "播放内容", bg: "rgba(255,90,90,0.18)", fg: "var(--fnos-red)" },
+  playmode: { icon: "Shuffle", title: "播放模式", bg: "rgba(232,121,249,0.18)", fg: "#e879f9" },
+  volume: { icon: "Speaker", title: "设置音量", bg: "rgba(52,211,153,0.18)", fg: "#34d399" },
+  delay: { icon: "Clock", title: "延迟", bg: "rgba(34,211,238,0.18)", fg: "#22d3ee" },
+};
+
+function nodeMeta(t: string) { return NODE_META[t] || { icon: "Workflow", title: t, bg: "rgba(255,255,255,0.1)", fg: "var(--fnos-text-secondary)" }; }
+
+function nodeList(f: any): any[] { return f.definition?.nodes || []; }
+
+function nodeSummary(n: any): string {
+  switch (n.type) {
+    case "trigger": return "Webhook 触发(手动始终可用)";
+    case "target": {
+      const t = n.targets || [];
+      return t.length ? t.map(peerName).join("、") : "未选目标";
+    }
+    case "content": {
+      if (!n.id) return "未选择内容";
+      const prefix: Record<string, string> = { playlist: "歌单", album: "专辑", artist: "艺人", genre: "风格" };
+      return `${prefix[n.contentType] || "歌单"}:${n.name || n.id}`;
+    }
+    case "playmode": return modeText(n.mode);
+    case "volume": return `${n.value ?? 0}%`;
+    case "delay": return `${n.ms ?? 0}ms`;
+    default: return "";
+  }
+}
+
 function peerName(peerId: string): string {
   const p = peers.value.find((x) => x.peerId === peerId);
   if (p) return p.kind === "local" ? "本机" : p.name;
   const id = peerId.split(":")[1] || peerId;
   return id.slice(0, 8) + "…";
-}
-function targetSummary(f: any): string {
-  const t = f.definition.targets || [];
-  if (t.length === 0) return "未配置";
-  return t.map(peerName).join("、");
-}
-function contentSummary(f: any): string {
-  const c = f.definition.content || {};
-  if (!c.enabled || !c.id) return "未选择播放内容";
-  const prefix: Record<string, string> = { playlist: "歌单", album: "专辑", artist: "艺人", genre: "风格" };
-  const label = prefix[c.type] || prefix.playlist;
-  return `${label}:${c.name || c.id}`;
 }
 function statusText(f: any): string {
   if (!f.enabled) return "已停用";
@@ -144,7 +144,7 @@ function formatTime(t: string): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-function hasTargets(f: any): boolean { return (f.definition.targets || []).length > 0; }
+function hasTargets(f: any): boolean { return (f.definition?.nodes || []).some((n: any) => n.type === "target" && (n.targets || []).length > 0); }
 
 async function loadPeers() {
   try {
@@ -238,6 +238,7 @@ onMounted(() => { load(); loadPeers(); });
   }
   .flow-steps {
     background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px;
+    &.flow-steps--empty { font-size: 12px; color: var(--fnos-text-tertiary); text-align: center; padding: 14px; }
     .step { display: flex; align-items: center; gap: 8px; opacity: 1;
       &.off { opacity: 0.45; }
       .step-icon { width: 24px; height: 24px; border-radius: 6px; background: var(--fnos-red-soft); color: var(--fnos-red); display: inline-flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; }
