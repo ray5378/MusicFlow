@@ -30,6 +30,43 @@
       </button>
     </div>
 
+    <!-- ===== 歌单收藏(默认分区) ===== -->
+    <div v-show="tab === 'playlist'" class="fav-pane">
+      <EmptyState v-if="!loadingPlaylists && playlistTotal === 0" icon="List" title="还没有收藏的歌单" description="在歌单卡片点击红心即可收藏喜欢的歌单" compact />
+      <div v-else class="playlist-grid virt-grid" ref="playlistGridEl" v-loading="loadingPlaylists" :style="{ height: playlistFrameHeight }">
+        <template v-for="g in playlistViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
+          <div
+            v-if="g.item"
+            class="playlist-card"
+            :style="playlistCardStyle(g.idx)"
+            @contextmenu="openContextMenu($event, plActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
+            v-longpress="() => openActionSheet(plActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
+          >
+            <div class="playlist-cover mf-coverwrap" @click="openPl(g.item)">
+              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+              <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
+              <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playPl(g.item)" />
+              <button
+                class="card-fav-btn active"
+                title="取消收藏歌单"
+                @click.stop="togglePlFav(g.item)"
+              >
+                <MfIcon name="Heart" :filled="true" :size="16" />
+              </button>
+            </div>
+            <div class="playlist-info" @click="openPl(g.item)">
+              <div class="playlist-name">{{ g.item.name }}</div>
+              <div class="playlist-meta">{{ g.item.songCount }}首 · {{ formatDuration(g.item.duration) }}</div>
+            </div>
+          </div>
+          <div v-else class="playlist-card is-placeholder" :style="playlistCardStyle(g.idx)">
+            <div class="playlist-cover ph-cover"></div>
+            <div class="playlist-placeholder"><span class="ph-bar"></span><span class="ph-bar short"></span></div>
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- ===== 歌曲收藏 ===== -->
     <div v-show="tab === 'song'" class="fav-pane">
       <SongTable :songs="songs" :loading="loading" show-bitrate :on-window="onWindow" @play="playSong" />
@@ -119,7 +156,8 @@ import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
-import { useItemActions } from "@/composables/useItemActions";
+import { useItemActions, MenuAction } from "@/composables/useItemActions";
+import { Play, Folder, Heart } from "lucide-vue-next";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { useCardGrid } from "@/composables/useCardGrid";
 import { ElMessage } from "element-plus";
@@ -137,9 +175,10 @@ const play = usePlayContent();
 const fav = useFavoritesStore();
 
 // ===== 分区 =====
-type FavTab = "song" | "album" | "artist";
-const tab = ref<FavTab>("song");
+type FavTab = "playlist" | "song" | "album" | "artist";
+const tab = ref<FavTab>("playlist");
 const tabs = computed(() => [
+  { key: "playlist" as FavTab, label: "歌单", count: playlistTotal.value },
   { key: "song" as FavTab, label: "歌曲", count: total.value },
   { key: "album" as FavTab, label: "专辑", count: albumTotal.value },
   { key: "artist" as FavTab, label: "歌手", count: artistTotal.value },
@@ -152,8 +191,34 @@ function switchTab(key: FavTab) {
     if (key === "song") window.dispatchEvent(new Event("resize"));
     else if (key === "album") albumGrid.recomputeGrid();
     else if (key === "artist") artistGrid.recomputeGrid();
+    else if (key === "playlist") playlistGrid.recomputeGrid();
   });
 }
+
+// ===== 歌单收藏:窗口化分块加载(默认分区) =====
+const playlistGrid = useCardGrid<any>(
+  async (offset, size) => {
+    const page = Math.floor(offset / size) + 1;
+    const res = await api.get("/rest/api/v1/playlists", {
+      params: { page, pageSize: size, favorite: "1" },
+    });
+    const items = res.data.items || [];
+    return { items, total: res.data.total || 0 };
+  },
+  { chunk: 60, keepRows: 120, prefetchBlocks: 2, concurrency: 3, minTileWidth: 200, gap: 18, coverRatio: 1, rowFooter: 76 }
+);
+const playlistGridEl = playlistGrid.gridEl;
+const loadingPlaylists = playlistGrid.loading;
+const playlistTotal = playlistGrid.total;
+const playlistFrameHeight = playlistGrid.frameHeight;
+const playlistCardStyle = playlistGrid.cardStyle;
+const playlistViews = computed(() => {
+  const start = playlistGrid.startIndex.value;
+  const end = playlistGrid.endIndex.value;
+  const arr: { idx: number; item: any }[] = [];
+  for (let i = Math.max(0, start); i < end; i++) arr.push({ idx: i, item: playlistGrid.list.value[i] });
+  return arr;
+});
 
 // ===== 歌曲收藏:窗口化分块加载 =====
 const { list: songs, loading, total, reload: loadFavorites, onWindow } = useInfiniteList<any>(
@@ -285,7 +350,45 @@ async function toggleArtistFav(artist: any) {
   }
 }
 
+// ===== 歌单收藏操作 =====
+function formatDuration(sec: number) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`;
+}
+function openPl(pl: any) {
+  if (menuGuard()) return;
+  router.push(`/playlists/${pl.id}`);
+}
+async function playPl(pl: any) {
+  if (menuGuard()) return;
+  const n = await play.playPlaylist(pl.id);
+  if (n) ElMessage.success(`正在播放「${pl.name}」`);
+  else ElMessage.warning("该歌单暂无可播放歌曲");
+}
+async function togglePlFav(pl: any) {
+  if (menuGuard()) return;
+  try {
+    const res = await api.post(`/rest/api/v1/playlists/${pl.id}/favorite`, { favorite: false });
+    if (res.data.success) {
+      ElMessage.success(`已取消收藏「${pl.name}」`);
+      playlistGrid.reload();
+    }
+  } catch {
+    ElMessage.error("操作失败");
+  }
+}
+function plActions(pl: any): MenuAction[] {
+  return [
+    { label: "播放全部", icon: Play, onClick: () => playPl(pl) },
+    { label: "查看歌单", icon: Folder, onClick: () => openPl(pl) },
+    { divider: true },
+    { label: "取消收藏", icon: Heart, onClick: () => togglePlFav(pl) },
+  ];
+}
+
 function loadAll() {
+  playlistGrid.reload();
   loadFavorites();
   albumGrid.reload();
   artistGrid.reload();
@@ -296,9 +399,10 @@ onMounted(() => {
   fav.loadFavorites();
   loadPoolStatus();
   nextTick(() => {
+    playlistGrid.bindGrid();
     albumGrid.bindGrid();
     artistGrid.bindGrid();
-    // 默认歌曲分区(其窗口化由 SongTable 挂载时自绑定)
+    // 默认歌单分区(其窗口化渲染在挂载时自绑定)
   });
 });
 // 收藏状态在任何页面发生变化(点击我喜欢/取消收藏)后,列表实时重载。
@@ -392,6 +496,33 @@ watch(() => fav.revision, () => {
   }
 }
 
+/* ===== 歌单网格 ===== */
+.playlist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 18px; }
+.playlist-grid.virt-grid { display: block; position: relative; width: 100%; }
+.playlist-grid.virt-grid .playlist-card { box-sizing: border-box; }
+.playlist-card {
+  cursor: pointer; border-radius: var(--fnos-radius-lg); overflow: hidden;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
+  transition: transform 0.22s ease, background 0.22s ease, box-shadow 0.22s ease;
+  &:hover { transform: translateY(-5px); background: rgba(255,255,255,0.08); box-shadow: 0 14px 34px rgba(0,0,0,0.4); }
+  &:active { transform: translateY(-2px) scale(0.98); }
+  .playlist-cover { aspect-ratio: 1; overflow: hidden; position: relative;
+    img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.45s ease; }
+    .cover-placeholder { width: 100%; height: 100%; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; color: var(--fnos-text-muted); }
+  }
+  &:hover .playlist-cover img { transform: scale(1.05); }
+  .playlist-info { padding: 12px 14px 14px;
+    .playlist-name { font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fnos-text-primary); transition: color 0.18s ease; }
+    .playlist-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+  &.is-placeholder { cursor: default;
+    .ph-cover { width: 100%; aspect-ratio: 1; background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 37%, rgba(255,255,255,0.05) 63%); background-size: 400% 100%; animation: mf-ph 1.2s ease-in-out infinite; }
+    .playlist-placeholder { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px;
+      .ph-bar { height: 12px; width: 60%; border-radius: 6px; background: rgba(255,255,255,0.08); &.short { width: 40%; } }
+    }
+  }
+}
+
 @keyframes mf-ph { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 
 @media (max-width: 768px) {
@@ -404,6 +535,7 @@ watch(() => fav.revision, () => {
   .fav-tabs .fav-tab { flex: 1; justify-content: center; padding: 8px 10px; }
   .album-grid { grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .artist-grid { grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .playlist-grid { grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .album-card .album-info { padding: 10px 10px 12px; }
   .album-card .album-info .album-name { font-size: 13px; }
   .album-card .album-info .album-meta { display: none; }
