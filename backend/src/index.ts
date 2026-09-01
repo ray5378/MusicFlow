@@ -295,17 +295,35 @@ function scheduleNextDailyRun() {
   if (next <= now) next.setDate(next.getDate() + 1); // already past today's slot -> tomorrow
   const delay = next.getTime() - now.getTime();
   setTimeout(async () => {
-    await runDailyJobs();
-    // 原 6h 维护循环取消:歌单同步+歌手刮削+历史清理改为「每天定点任务完成后」执行一次。
-    await runMaintenanceOnce();
-    scheduleNextDailyRun(); // re-arm for the next day
+    // 防御:任何一步抛错都不能让 re-arm 丢失,否则定时器永久死锁,
+    // 每日推荐将从此停更(曾因 runMaintenanceOnce 抛错导致多天不更新)。
+    try {
+      await runDailyJobs();
+      // 原 6h 维护循环取消:歌单同步+歌手刮削+历史清理改为「每天定点任务完成后」执行一次。
+      await runMaintenanceOnce();
+    } catch (e: any) {
+      log.error("[DAILY-SCHEDULER] daily run error", { err: e?.message || e });
+    } finally {
+      scheduleNextDailyRun(); // re-arm for the next day (finally 保证永不丢失)
+    }
   }, delay);
   log.info(`[DAILY-SCHEDULER] next daily-recommend run at ${next.toLocaleString("zh-CN", { hour12: false })} (in ${Math.round(delay / 60000)} min)`);
 }
 
-// 去掉启动时立即刷新:不再做 daily catch-up,只在每天定点执行。启动仅把定时器挂上。
-// runDailyJobs 内部由 daily_recommend_enabled 主开关控制。
+// Boot-time catch-up:若服务在定点时刻(默认 03:00)之后才启动/重启,立即补跑一次
+// 当天的每日推荐管线,避免「错过了 3 点就当天停更」——容器每次重启都会重新挂
+// 定时器,但只有 catch-up 能补上重启当天错过的槽位。幂等:各插件 runDailyJob
+// 内部按当天日期判重(isGeneratedToday),已生成则直接跳过,重复启动无副作用。
 scheduleNextDailyRun();
+if (getDailyMasterEnabled()) {
+  (async () => {
+    try {
+      await runDailyJobs();
+    } catch (e: any) {
+      log.error("[DAILY-SCHEDULER] boot catch-up error", { err: e?.message || e });
+    }
+  })();
+}
 
 // 「随机歌曲」固定歌单后台自动刷新:按插件配置 refreshMinutes(默认 30 分钟)
 // 自适应循环触发;配合 getPlaylist 的惰性刷新,保证客户端/前端随时取到已备好的歌单。
@@ -317,7 +335,12 @@ startRandomSongsAutoRefresh();
 // (方案3),全局批量闸由 runBatchJob 持有,不阻塞主进程事件循环/内存。
 async function runMaintenanceOnce() {
   // play_history 保留期清理留在主进程(单条 DELETE,不构成内存峰)。
-  cleanupPlayHistory(getPlayHistoryRetentionDays());
+  // 单独 try/catch:任何异常都不能中断定时器 re-arm 链(见 scheduleNextDailyRun)。
+  try {
+    cleanupPlayHistory(getPlayHistoryRetentionDays());
+  } catch (e: any) {
+    log.error("[AUTO-SYNC] history cleanup error", { err: e?.message || e });
+  }
   try {
     await runBatchJob("maintenance", {});
   } catch (e: any) {

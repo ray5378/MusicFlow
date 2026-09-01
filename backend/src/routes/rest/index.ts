@@ -1699,6 +1699,13 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
   const size = Number(getParam(c, "size") || "300") || 300;
   const accept = c.req.header("Accept") || "";
   const wantWebp = accept.toLowerCase().includes("image/webp");
+  // pl- 歌单封面(每日推荐/自定义歌单)的内容会随歌单更新变化,而封面 URL 固定
+  // (前端恒为 /rest/getCoverArt?id=pl-<id>)。强缓存 1 天会让浏览器一直渲染
+  // 过期封面(连 If-None-Match 都不会发)。改用 no-cache:可缓存但强制每次
+  // revalidate,ETag 基于文件 mtime+size —— 封面一变立即返回新图,未变走 304。
+  const coverCacheControl = id.startsWith("pl-")
+    ? "no-cache"
+    : "public, max-age=86400, stale-while-revalidate=604800";
 
   // Resolve a cover ref to an on-disk file, trying the same extension
   // fallbacks the old handler used (jpg<->png, plus a webp variant).
@@ -1802,7 +1809,7 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
       const inm = c.req.header("If-None-Match");
       const headers: Record<string, string> = {
         "Content-Type": out.contentType,
-        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "Cache-Control": coverCacheControl,
         "ETag": out.etag,
         "Vary": "Accept",
       };

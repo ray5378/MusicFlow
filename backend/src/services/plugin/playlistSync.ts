@@ -234,6 +234,7 @@ export async function rebuildPlaylistEntries(
       const chunk = updates.slice(off, off + UPD_CHUNK);
       const ids = chunk.map((u) => u.id);
       const args: (number | string | null)[] = [];
+      sets.length = 0; // 每个 chunk 前必须清空,否则跨 chunk 累积占位符导致参数不足
       for (const [k, col] of cols) {
         sets.push(`${col} = CASE id ${chunk.map(() => "WHEN ? THEN ?").join(" ")} END`);
         for (const u of chunk) args.push(u.id, (u as any)[k] ?? null);

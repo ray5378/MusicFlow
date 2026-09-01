@@ -37,6 +37,7 @@ compare/
 compare2/
 compare3/
 compare4/
+compare5/
 conv_check/
 conv_check2/
 fnos_all/
@@ -49,3 +50,4 @@ mfos_v3/
 mfos_v4/
 mfos_v5/
 player_check/
+backend/scripts-local/
