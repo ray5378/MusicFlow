@@ -61,7 +61,7 @@
     </div>
 
     <!-- ===== 歌曲列表(本地模式,聚合模式下同样展示) ===== -->
-    <SongTable v-if="isLocalMode" :songs="songs" :loading="loading" :on-window="onWindow" @play="playSong" />
+    <SongTable v-if="isLocalMode" :songs="songs" :loading="loading" show-source :on-window="onWindow" @play="playSong" />
 
     <!-- ===== 聚合搜索结果(默认模式):本地在上,全网并用分节标题放在下 ===== -->
     <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">

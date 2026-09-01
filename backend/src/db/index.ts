@@ -565,6 +565,30 @@ export function initDatabase() {
   ]) {
     try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
   }
+  // Migration: 存量 web 歌曲 source 回填 —— 早期版本 source_data 可能缺失或未含 source
+  // (source_data 为 NULL / "{}")。从 path 约定 "web:<plugin>:<source>" 解析平台回填,
+  // 保证音乐库「来源」列对历史在线歌曲同样可见。幂等:已有 source 的跳过。
+  try {
+    const rows = sqlite.prepare(
+      "SELECT id, path, source_data FROM songs WHERE type = 'web'"
+    ).all() as any[];
+    for (const r of rows) {
+      let sd: any = null;
+      try { sd = JSON.parse(r.source_data || "{}"); } catch {}
+      if (sd && typeof sd.source === "string" && sd.source) continue;
+      const rest = (r.path || "").replace(/^web:/, "");
+      const idx = rest.lastIndexOf(":");
+      if (idx <= 0) continue;
+      const plugin = rest.slice(0, idx);
+      const source = rest.slice(idx + 1);
+      if (!source || source === plugin) continue; // 平台缺失或退化为插件 id,无法确定
+      const next = { ...(sd || {}), source };
+      try {
+        sqlite.prepare("UPDATE songs SET source_data = ? WHERE id = ?")
+          .run(JSON.stringify(next), r.id);
+      } catch {}
+    }
+  } catch {}
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.

@@ -13,6 +13,7 @@ import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../.
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
+import { songSourceInfo } from "../../utils/songSource.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
@@ -153,6 +154,7 @@ function albumCoverRef(a: any): string | undefined {
 // OpenSubsonic Child for a song
 function songToChild(s: any, starredSet?: Set<string>, rating?: number): any {
   const starred = starredSet?.has(s.id);
+  const src = songSourceInfo(s);
   return {
     id: s.id,
     parent: s.albumId || undefined,
@@ -183,6 +185,10 @@ function songToChild(s: any, starredSet?: Set<string>, rating?: number): any {
     userRating: rating ?? 0,
     isVideo: false,
     mediaType: "song",
+    // 来源:web 歌曲输出插件 id + 平台 id(前端「来源」列渲染徽标)
+    sourcePlatform: src.sourcePlatform,
+    sourcePluginId: src.sourcePluginId,
+    isWeb: src.isWeb,
   };
 }
 

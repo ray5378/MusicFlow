@@ -69,7 +69,7 @@
 
     <!-- ===== 歌曲收藏 ===== -->
     <div v-show="tab === 'song'" class="fav-pane">
-      <SongTable :songs="songs" :loading="loading" show-bitrate :on-window="onWindow" @play="playSong" />
+      <SongTable :songs="songs" :loading="loading" show-source show-bitrate :on-window="onWindow" @play="playSong" />
       <EmptyState v-if="!loading && total === 0" icon="Heart" title="还没有喜欢的歌曲" description="在歌曲列表点击红心即可收藏喜欢的音乐" compact />
     </div>
 

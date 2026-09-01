@@ -36,6 +36,7 @@
       :songs="list"
       :selectable="!isMobile"
       :loading="loading"
+      show-source
       allow-unmatched-play
       :extra-actions="playlistRowActions"
       :on-window="onWindow"

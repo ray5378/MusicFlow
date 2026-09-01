@@ -6,6 +6,7 @@
       </span>
       <span class="col col-index">#</span>
       <span class="col col-title">标题</span>
+      <span v-if="showSource" class="col col-source">来源</span>
       <span v-if="showArtist" class="col col-artist">艺术家</span>
       <span v-if="showAlbum" class="col col-album">专辑</span>
       <span v-if="showPlayedAt" class="col col-played-at">播放时间</span>
@@ -53,6 +54,12 @@
           <div class="song-mobile-meta">{{ [song.artist, song.album].filter(Boolean).join(' · ') || (song.isMatched === false ? '未匹配' : '—') }}</div>
         </div>
       </span>
+      <span v-if="showSource" class="col col-source">
+        <el-tooltip v-if="sourceMeta(song)" :content="sourceTooltip(song)" placement="top">
+          <span class="source-badge" :style="{ backgroundColor: sourceMeta(song)!.color }">{{ sourceMeta(song)!.label }}</span>
+        </el-tooltip>
+        <span v-else class="source-empty">—</span>
+      </span>
       <span v-if="showArtist" class="col col-artist">{{ song.artist || '—' }}</span>
       <span v-if="showAlbum" class="col col-album">{{ song.album || '—' }}</span>
       <span v-if="showPlayedAt" class="col col-played-at">{{ formatPlayedAt(song.playedAt) }}</span>
@@ -74,6 +81,7 @@
       <span v-if="selectable" class="col col-select"></span>
       <span class="col col-index"><span class="row-index">{{ (offset || 0) + rowGlobalIdx(i) + 1 }}</span></span>
       <span class="col col-title"><span class="loading-bar"></span></span>
+      <span v-if="showSource" class="col col-source">–</span>
       <span v-if="showArtist" class="col col-artist"><span class="loading-bar short"></span></span>
       <span v-if="showAlbum" class="col col-album"><span class="loading-bar"></span></span>
       <span v-if="showPlayedAt" class="col col-played-at">–</span>
@@ -97,6 +105,7 @@ import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { coverUrl } from "@/utils/cover";
+import api from "@/api";
 
 const props = withDefaults(
   defineProps<{
@@ -106,6 +115,8 @@ const props = withDefaults(
     showArtist?: boolean;
     showAlbum?: boolean;
     showBitrate?: boolean;
+    /** 音乐库页面显示「来源」列(web 歌曲:插件·平台徽标) */
+    showSource?: boolean;
     /** 历史页显示「播放时间」列 */
     showPlayedAt?: boolean;
     /** 歌单页多选（批量操作） */
@@ -131,6 +142,7 @@ const props = withDefaults(
     showArtist: true,
     showAlbum: true,
     showBitrate: true,
+    showSource: false,
     showPlayedAt: false,
     selectable: false,
     loading: false,
@@ -161,6 +173,61 @@ function coverSrc(song: any): string {
   return coverUrl(song.coverArt, 120);
 }
 
+// ==================== 来源列(web 歌曲:插件 · 平台徽标)====================
+// 平台中文名优先取已启用插件 manifest.platformLabels(合并),缺省走内置兜底映射;
+// 品牌色固定内置(manifest 不提供颜色)。插件 id → 插件名映射同样来自插件注册表。
+const FALLBACK_PLATFORMS: Record<string, { label: string; color: string }> = {
+  netease: { label: "网易云", color: "#e21a1a" },
+  qq: { label: "QQ音乐", color: "#12b7f5" },
+  kugou: { label: "酷狗", color: "#28c76f" },
+  kuwo: { label: "酷我", color: "#ff7f27" },
+  migu: { label: "咪咕", color: "#f26d21" },
+  qianqian: { label: "千千", color: "#8e44ad" },
+  soda: { label: "汽水", color: "#00b8a9" },
+  fivesing: { label: "5sing", color: "#4aa3df" },
+  jamendo: { label: "Jamendo", color: "#7f8c8d" },
+  joox: { label: "JOOX", color: "#ff4d4d" },
+  bilibili: { label: "Bilibili", color: "#fb7299" },
+  apple: { label: "Apple Music", color: "#fa57c1" },
+};
+// 模块级缓存:整页共享,只拉一次 /rest/api/v1/plugins
+let platformLabelsCache: Record<string, string> | null = null;
+let pluginNamesCache: Record<string, string> | null = null;
+async function ensurePluginMeta() {
+  if (platformLabelsCache && pluginNamesCache) return;
+  try {
+    const res = await api.get("/rest/api/v1/plugins");
+    const labels: Record<string, string> = {};
+    const names: Record<string, string> = {};
+    for (const p of (res.data || []) as any[]) {
+      const m = p.manifest;
+      if (m?.id) names[m.id] = m.name || m.id;
+      if (m?.platformLabels) Object.assign(labels, m.platformLabels);
+    }
+    platformLabelsCache = labels;
+    pluginNamesCache = names;
+  } catch {
+    platformLabelsCache = {};
+    pluginNamesCache = {};
+  }
+}
+function sourceMeta(song: any): { label: string; color: string; pluginName: string } | null {
+  const src = (song.sourcePlatform || "").toLowerCase();
+  if (!src || !song.isWeb) return null;
+  const mergedLabel = platformLabelsCache?.[src] || "";
+  const base = FALLBACK_PLATFORMS[src] || { label: src, color: "rgba(0,0,0,.55)" };
+  return {
+    label: mergedLabel || base.label,
+    color: base.color,
+    pluginName: pluginNamesCache?.[song.sourcePluginId] || song.sourcePluginId || "",
+  };
+}
+function sourceTooltip(song: any): string {
+  const meta = sourceMeta(song);
+  if (!meta) return "";
+  return meta.pluginName ? `${meta.pluginName} · ${meta.label}` : meta.label;
+}
+
 const slots = useSlots();
 // Playlist detail injects an extra "remove" row action via #row-actions; widen
 // the actions column so those buttons never overlap the duration column.
@@ -171,6 +238,7 @@ const gridColumns = computed(() => {
   if (props.selectable) cols.push("44px");
   cols.push("56px");
   cols.push("1fr");
+  if (props.showSource) cols.push("92px");
   if (props.showArtist) cols.push("180px");
   if (props.showAlbum) cols.push("200px");
   if (props.showPlayedAt) cols.push("160px");
@@ -364,6 +432,7 @@ watch(() => props.songs.length, () => {
 
 onMounted(() => {
   fav.loadFavorites();
+  void ensurePluginMeta();
   if (virtualized.value) bindScroll();
 });
 onBeforeUnmount(unbindScroll);
@@ -508,6 +577,20 @@ onBeforeUnmount(unbindScroll);
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .col-source {
+    .source-badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 16px;
+      white-space: nowrap;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+    }
+    .source-empty { font-size: 12px; color: var(--fnos-text-tertiary); }
+  }
   .col-duration {
     text-align: center;
     font-size: 12px;
@@ -573,7 +656,7 @@ onBeforeUnmount(unbindScroll);
   .list-header, .song-row {
     grid-template-columns: 48px 1fr 80px 90px !important;
   }
-  .col-artist, .col-album, .col-played-at { display: none; }
+  .col-artist, .col-album, .col-source, .col-played-at { display: none; }
   .col-actions { display: none !important; }
 }
 
