@@ -9,7 +9,6 @@ import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { JWT_SECRET, getDataDir } from "../utils/env.js";
 import { createLogger } from "../utils/logger.js";
-import { assignSongGroups } from "../utils/songGroup.js";
 
 const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
@@ -153,11 +152,25 @@ export function initDatabase() {
       genre TEXT DEFAULT '',
       size INTEGER DEFAULT 0,
       fingerprint TEXT,
+      -- 在线/插件源歌曲列:type('local'|'webdav'|'web')、URL、流请求头、来源平台数据、
+      -- 插件入口、缓存路径;lyrics 为落库歌词(歌词补全 B 选项),离线也能显示。
+      type TEXT DEFAULT 'local',
+      url TEXT,
+      stream_headers TEXT,
+      source_data TEXT,
+      plugin_entry TEXT,
+      cache_path TEXT,
+      lyrics TEXT,
+      -- 同曲多源归组:规范化标题+歌手相同且时长差 ≤3s 的行共享同一 group_id;
+      -- 组内优先级 local > webdav > web,播放优选/展示合并基于它。分组只附加列,不删行。
+      group_id TEXT,
+      group_key TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (artist_id) REFERENCES artists(id),
       FOREIGN KEY (album_id) REFERENCES albums(id)
     );
+    CREATE INDEX IF NOT EXISTS idx_songs_group_key ON songs(group_key);
 
     CREATE TABLE IF NOT EXISTS album_artists (
       album_id TEXT NOT NULL,
@@ -178,6 +191,8 @@ export function initDatabase() {
       song_count INTEGER DEFAULT 0,
       duration INTEGER DEFAULT 0,
       sync_enabled INTEGER DEFAULT 0,
+      favorite INTEGER DEFAULT 0,
+      source_plugin TEXT,
       source_url TEXT,
       source_platform TEXT,
       external_id TEXT,
@@ -508,126 +523,6 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_player_name_overrides_owner ON player_name_overrides(owner_user_id);
   `);
 
-  // Migration: add pass_enc column to existing users table (older DBs)
-  try {
-    sqlite.exec("ALTER TABLE users ADD COLUMN pass_enc TEXT");
-  } catch {}
-  // Migration: add scrape_missing column to artists table (older DBs)
-  try {
-    sqlite.exec("ALTER TABLE artists ADD COLUMN scrape_missing INTEGER DEFAULT 0");
-  } catch {}
-  // Migration: add must_change_password column to users table (older DBs)
-  try {
-    sqlite.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0");
-  } catch {}
-  // Migration: add token_id column to flows (older DBs) — 音流对外链接绑定渠道 token
-  try {
-    sqlite.exec("ALTER TABLE flows ADD COLUMN token_id TEXT DEFAULT ''");
-  } catch {}
-  // Migration: add owner_user_id column to flows (older DBs) — 音流按用户划分
-  try {
-    sqlite.exec("ALTER TABLE flows ADD COLUMN owner_user_id TEXT DEFAULT ''");
-  } catch {}
-  // Migration: 存量音流默认归属首个管理员(管理员原有音流保持可见)
-  try {
-    sqlite.exec("UPDATE flows SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1 LIMIT 1) WHERE owner_user_id = ''");
-  } catch {}
-  // Migration: add favorite column to playlists table (older DBs) — 收藏歌单标记
-  try {
-    sqlite.exec("ALTER TABLE playlists ADD COLUMN favorite INTEGER DEFAULT 0");
-  } catch {}
-  // Migration: 播放器群组按用户划分,给存量表加 owner_user_id(旧组无归属)。
-  try {
-    sqlite.exec("ALTER TABLE player_groups ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''");
-  } catch {}
-  // 存量/无归属的群组默认归属首个管理员(保留管理员原有群组可见)。
-  try {
-    sqlite.exec("UPDATE player_groups SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1 LIMIT 1) WHERE owner_user_id = ''");
-  } catch {}
-  // Migration: add disabled column to dlna_devices (older DBs) — 播放器页禁用设备
-  try {
-    sqlite.exec("ALTER TABLE dlna_devices ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0");
-  } catch {}
-  // Migration: add source_plugin column to playlists (older DBs) — 插件同步歌单归属
-  try {
-    sqlite.exec("ALTER TABLE playlists ADD COLUMN source_plugin TEXT");
-  } catch {}
-  // Online-song columns (online source plugins, e.g. the official go-music-dl)
-  for (const col of [
-    "type TEXT DEFAULT 'local'",
-    "url TEXT",
-    "stream_headers TEXT",
-    "source_data TEXT",
-    "plugin_entry TEXT",
-    "cache_path TEXT",
-    // 落库歌词(歌词补全 B 选项):在线/本地/WebDAV 拉到的 LRC 文本持久化于此,
-    // 离线也能显示、不依赖 provider 常驻。
-    "lyrics TEXT",
-  ]) {
-    try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
-  }
-  // Migration: 存量 web 歌曲 source 回填 —— 早期版本 source_data 可能缺失或未含 source
-  // (source_data 为 NULL / "{}")。从 path 约定 "web:<plugin>:<source>" 解析平台回填,
-  // 保证音乐库「来源」列对历史在线歌曲同样可见。幂等:已有 source 的跳过。
-  try {
-    const rows = sqlite.prepare(
-      "SELECT id, path, source_data FROM songs WHERE type = 'web'"
-    ).all() as any[];
-    for (const r of rows) {
-      let sd: any = null;
-      try { sd = JSON.parse(r.source_data || "{}"); } catch {}
-      if (sd && typeof sd.source === "string" && sd.source) continue;
-      const rest = (r.path || "").replace(/^web:/, "");
-      const idx = rest.lastIndexOf(":");
-      if (idx <= 0) continue;
-      const plugin = rest.slice(0, idx);
-      const source = rest.slice(idx + 1);
-      if (!source || source === plugin) continue; // 平台缺失或退化为插件 id,无法确定
-      const next = { ...(sd || {}), source };
-      try {
-        sqlite.prepare("UPDATE songs SET source_data = ? WHERE id = ?")
-          .run(JSON.stringify(next), r.id);
-      } catch {}
-    }
-  } catch {}
-
-  // ==================== 歌曲分组(同曲多源归组) ====================
-  // 本地/WebDAV 核心曲库与插件平台可能收录同一首歌:规范化标题+歌手相同且
-  // 时长差 ≤3s 的行归入同一 group_id。组内优先级 local > webdav > web,播放
-  // 优选/展示合并都基于它。分组只附加列,不删除任何行(引用不受影响)。
-  for (const col of ["group_id TEXT", "group_key TEXT"]) {
-    try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
-  }
-  try {
-    sqlite.exec("CREATE INDEX IF NOT EXISTS idx_songs_group_key ON songs(group_key)");
-  } catch {}
-  // 存量建组(幂等):只处理尚未有 group_id 的行,按「规范化标题+歌手+时长容差」
-  // 一次性分组回填。增量歌曲(导入/匹配)由 service.ts 插入时即时归组,不在此列。
-  try {
-    const ungrouped = sqlite.prepare(
-      "SELECT id, title, artist, duration FROM songs WHERE group_id IS NULL OR group_id = ''"
-    ).all() as { id: string; title: string; artist: string; duration: number | null }[];
-    if (ungrouped.length > 0) {
-      const assignments = assignSongGroups(ungrouped);
-      if (assignments.size > 0) {
-        const t = new Date().toISOString();
-        const stmt = sqlite.prepare("UPDATE songs SET group_id = ?, group_key = ?, updated_at = ? WHERE id = ?");
-        const upd = sqlite.transaction((rows: [string, string, string][]) => {
-          for (const [gid, gkey, sid] of rows) stmt.run(gid, gkey, t, sid);
-        });
-        const batch: [string, string, string][] = [];
-        for (const [id, a] of assignments) {
-          batch.push([a.groupId, a.groupKey, id]);
-          if (batch.length >= 500) { upd(batch); batch.length = 0; }
-        }
-        if (batch.length) upd(batch);
-        log.info(`歌曲分组迁移完成:${assignments.size} 首歌曲归入 ${new Set([...assignments.values()].map(a => a.groupId)).size} 组`);
-      }
-    }
-  } catch (e) {
-    log.error("歌曲分组迁移失败", { err: (e as Error)?.message || e });
-  }
-
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.
@@ -645,36 +540,6 @@ export function initDatabase() {
     `).run(id, "admin", passwordHash, salt, defaultSalt, encryptPassword("admin"));
     log.info("Default admin user created (admin/admin) — 请尽快登录并修改密码");
   }
-
-  // Migration: force password change for users still on the well-known default credentials
-  const admins = sqlite.prepare(
-    "SELECT id, password, subsonic_salt, pass_enc FROM users WHERE is_admin = 1 AND must_change_password = 0"
-  ).all() as any[];
-  for (const u of admins) {
-    const stillDefault = decryptPassword(u.pass_enc) === "admin" || u.password === md5("admin" + u.subsonic_salt);
-    if (stillDefault) {
-      sqlite.prepare("UPDATE users SET must_change_password = 1 WHERE id = ?").run(u.id);
-      log.warn("[SECURITY] 检测到 admin 仍在使用默认密码(admin/admin),已标记为必须修改密码");
-    }
-  }
-  // Migration: normalize legacy space-separated timestamps ('YYYY-MM-DD HH:MM:SS') to ISO 8601
-  // so lexicographic ordering/range comparisons are consistent across all rows.
-  const allTables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as any[];
-  for (const t of allTables) {
-    const cols = sqlite.prepare(`PRAGMA table_info("${t.name}")`).all() as any[];
-    for (const c of cols) {
-      if (!/.*_at$/.test(c.name) || c.type !== "TEXT") continue;
-      sqlite.exec(`UPDATE "${t.name}" SET "${c.name}" = replace("${c.name}", ' ', 'T') || 'Z' WHERE "${c.name}" LIKE '%-%-% %'`);
-    }
-  }
-  // Backfill pass_enc for the default admin (admin/admin) if missing
-  try {
-    const adminUser = sqlite.prepare("SELECT id, password, subsonic_salt FROM users WHERE username = 'admin' AND (pass_enc IS NULL OR pass_enc = '')").get() as any;
-    if (adminUser && adminUser.password === md5("admin" + adminUser.subsonic_salt)) {
-      sqlite.prepare("UPDATE users SET pass_enc = ?, must_change_password = 1 WHERE id = ?").run(encryptPassword("admin"), adminUser.id);
-      log.warn("[SECURITY] admin 仍在使用默认密码(admin/admin),已标记为必须修改密码");
-    }
-  } catch {}
 
   // Insert default settings
   const settingCount = sqlite.prepare("SELECT COUNT(*) as count FROM settings").get() as any;
@@ -704,20 +569,6 @@ export function initDatabase() {
   // so a static import here would create a load-time cycle. Doing it *inside*
   // initDatabase() guarantees the schema already exists.
   seedRegisteredPlugins();
-
-  // 歌单收藏按用户隔离迁移(一次性):旧的 playlists.favorite=1 是全局布尔,
-  // 没有用户归属。首次升级时把它们归给 admin 用户(谁最早接管的系统主账号),
-  // 写入新的 playlist_favorites 关系表;之后新收藏全部按 user_id 记录。
-  const legacyFavCount = (sqlite.prepare("SELECT COUNT(*) AS c FROM playlists WHERE favorite = 1").get() as any).c;
-  if ((legacyFavCount || 0) > 0) {
-    const admin = sqlite.prepare("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1").get() as any;
-    if (admin?.id) {
-      sqlite.prepare(
-        "INSERT OR IGNORE INTO playlist_favorites (user_id, playlist_id) SELECT ?, id FROM playlists WHERE favorite = 1"
-      ).run(admin.id);
-      log.info(`[MIGRATION] 歌单收藏按用户隔离:迁移 ${legacyFavCount} 个历史收藏到 admin 用户`);
-    }
-  }
 
   log.info("Database initialized successfully");
 }
