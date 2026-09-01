@@ -36,7 +36,6 @@ const routes = [
           { path: "sources", name: "AdminSources", component: () => import("@/views/admin/Sources/index.vue"), meta: { requiresAdmin: true } },
           { path: "users", name: "AdminUsers", component: () => import("@/views/admin/Users/index.vue"), meta: { requiresAdmin: true } },
           { path: "wish", name: "AdminWish", component: () => import("@/views/admin/Wish/index.vue"), meta: { requiresAdmin: true } },
-          { path: "settings", name: "AdminSettings", component: () => import("@/views/admin/Settings/index.vue"), meta: { requiresAdmin: true } },
         ],
       },
     ],
