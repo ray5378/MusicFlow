@@ -34,7 +34,7 @@ import { ensurePlayableStream } from "../../services/source/online/streamFallbac
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
-import { songSourceInfo, serializeSongRow, attachGroupSources } from "../../utils/songSource.js";
+import { songSourceInfo, serializeSongRow, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
 import { getArtistList, setArtistList, invalidateArtistList } from "../../utils/artistListCache.js";
 import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
@@ -1034,7 +1034,7 @@ apiRoutes.get("/v1/songs", (c) => {
   if (pageGroupIds.length) {
     try {
       const memberRows = db.select().from(songs).where(inArray(songs.groupId, pageGroupIds)).all();
-      attachGroupSources(items, memberRows);
+      attachGroupSources(items, memberRows, resolveSongCover);
     } catch (e) {
       // 组查询失败不影响列表主体,来源合并降级为单行展示
       log.error("歌曲组内多源查询失败", { err: (e as Error)?.message || e });
@@ -2017,7 +2017,7 @@ apiRoutes.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c
   if (trackGroupIds.length) {
     try {
       const memberRows = db.select().from(songs).where(inArray(songs.groupId, trackGroupIds)).all();
-      attachGroupSources(items as any, memberRows);
+      attachGroupSources(items as any, memberRows, resolveSongCover);
     } catch (e) {
       log.error("歌单曲目组内多源查询失败", { err: (e as Error)?.message || e });
     }

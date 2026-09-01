@@ -110,11 +110,27 @@ export function groupMemberSort(a: { type?: string | null; title?: string | null
 }
 
 /**
+ * 歌曲封面回退链(与主行/v1.13.24 统一规则):
+ * 自带封面 → so-<id>;否则专辑回退 al-<albumId>。专辑行即使不存在也照给,
+ * 图片解析交给 getCoverArt 的 al- 分支(404 时前端自动落占位)。
+ */
+export function resolveSongCover(song: any): string | undefined {
+  if (!song) return undefined;
+  return song.coverArt ? `so-${song.id}` : (song.albumId ? `al-${song.albumId}` : undefined);
+}
+
+/**
  * 给已序列化的行附加组内多源。调用方负责一次批量查组成员行(rows,含
  * groupId 列),这里按组合并、排序(local > webdav > web)后填入 item.sources。
  * 单成员组也会填(长度 1),前端统一按「有无多源」判断合并展示。
+ * resolveCover 可选:成员行封面解析(缺省回退自身 cover_art)。不传时 local
+ * 成员(无自带封面)会输出空 coverArt → 前端合并主行占位,故调用方务必传入。
  */
-export function attachGroupSources(items: ClientSongRow[], memberRows: any[]): void {
+export function attachGroupSources(
+  items: ClientSongRow[],
+  memberRows: any[],
+  resolveCover?: (song: any) => string | undefined,
+): void {
   const byGroup = new Map<string, any[]>();
   for (const r of memberRows) {
     if (!r.groupId) continue;
@@ -126,6 +142,8 @@ export function attachGroupSources(items: ClientSongRow[], memberRows: any[]): v
     if (!item.groupId) continue;
     const members = byGroup.get(item.groupId);
     if (!members || members.length === 0) continue;
-    item.sources = [...members].sort(groupMemberSort).map((m) => serializeSongRow(m));
+    item.sources = [...members].sort(groupMemberSort).map((m) =>
+      serializeSongRow(m, resolveCover ? resolveCover(m) : undefined),
+    );
   }
 }

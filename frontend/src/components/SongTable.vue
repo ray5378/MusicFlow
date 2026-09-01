@@ -39,9 +39,21 @@
       </span>
       <span class="col col-title">
         <div class="song-cover-wrap" @click.stop="emitPlay(row.song)">
-          <el-image v-if="row.song.coverArt" :src="coverSrc(row.song)" class="song-cover" fit="cover" lazy>
-            <template #error><div class="cover-placeholder"><MfIcon name="Headphones" /></div></template>
-          </el-image>
+          <!-- 用原生 <img loading="lazy"> 而非 el-image:
+               - 客户端(MusicFlow-client)用视口内构建+Image.network,Web 端对应
+                 行为就是视口内才加载。原生 loading="lazy" 由浏览器 IntersectionObserver
+                 驱动,比 el-image 的 useLazyLoad 在 SPA 嵌套滚动容器下判定更可靠
+                 (el-image 在专辑详情页的 main 滚动容器下曾不触发请求)。
+               - decoding="async" 避免解码阻塞首屏。 -->
+          <img
+            v-if="row.song.coverArt && !imgErrors.has(row.song.id)"
+            :src="coverSrc(row.song)"
+            class="song-cover"
+            loading="lazy"
+            decoding="async"
+            referrerpolicy="no-referrer"
+            @error="markCoverError(row.song.id)"
+          />
           <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
           <div class="cover-play"><MfIcon name="Play" :size="20" /></div>
         </div>
@@ -287,7 +299,9 @@ interface DisplayRow {
 const displayRows = computed<Array<DisplayRow | undefined>>(() => {
   const merging = props.showSource && !isMobile.value;
   const source = virtualized.value ? props.songs.slice(startIndex.value, endIndex.value) : props.songs;
-  if (!merging) return source as any;
+  // 非 merging 模式也必须包成 DisplayRow:模板统一按 row.song 取值,
+  // 直接返回裸 song 会让 row.song 变 undefined 导致整表渲染崩溃(v1.13.19 回归)。
+  if (!merging) return (source as any[]).map((s) => (s ? { song: s, isMain: false } : undefined));
   const out: Array<DisplayRow | undefined> = [];
   const seen = new Set<string>();
   for (const s of source) {
@@ -330,6 +344,14 @@ const gridColumns = computed(() => {
 });
 
 const selectedIds = ref<Set<string>>(new Set());
+// 行内封面加载失败的 song.id:改用 .cover-placeholder 兜底,避免空白/裂图。
+const imgErrors = ref<Set<string>>(new Set());
+function markCoverError(id: string) {
+  if (imgErrors.value.has(id)) return;
+  const next = new Set(imgErrors.value);
+  next.add(id);
+  imgErrors.value = next;
+}
 // 无限滚动模式下 songs 是全长稀疏数组,可能存在 undefined 未加载槽位,一律跳过。
 const filledSongs = computed(() => props.songs.filter((s) => !!s));
 const allSelected = computed(() => filledSongs.value.length > 0 && filledSongs.value.every((s) => isSelected(s.id)));

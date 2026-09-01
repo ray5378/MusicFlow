@@ -13,7 +13,7 @@ import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../.
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
-import { songSourceInfo, attachGroupSources } from "../../utils/songSource.js";
+import { songSourceInfo, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
 import { getSettingBool } from "../../services/settings.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
@@ -1051,7 +1051,7 @@ restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   if (favGroupIds.length) {
     try {
       const memberRows = db.select().from(songs).where(inArray(songs.groupId, favGroupIds)).all();
-      attachGroupSources(favSongs as any, memberRows);
+      attachGroupSources(favSongs as any, memberRows, resolveSongCover);
     } catch (e) {
       log.error("收藏页组内多源查询失败", { err: (e as Error)?.message || e });
     }
