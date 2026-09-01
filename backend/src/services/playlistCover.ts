@@ -245,17 +245,35 @@ export function firstPlayableCoverFile(playlistId: string, opts?: CoverPickOptio
  * 按天轮换取歌单封面:列表按 position 去重排序后,用「距 epoch 的天数」对列表
  * 长度取模 —— 同一天确定(内容不变则封面固定),跨天自动轮换一张(内容不变也换)。
  *
- * 封面互斥(可扩展):同一进程内所有固定推荐歌单当天生成时共享一张「已认领封面
- * 注册表」——每个歌单会自动跳过其它歌单当天已认领的封面 ref,保证任意数量固定
- * 歌单的封面两两不同;仅凭候选全部被占用时回退完整候选首项,保持有封面的行为。
- * opts.excludeRefs 可额外指定禁用的 ref。
+ * 封面源图 id 锁(数据库级互斥,取代旧的进程内认领表):固定推荐歌单的封面互斥
+ * 记录持久化在 playlist_cover_claims(date_key, playlist_id, cover_ref)——
+ *   - 锁单元 = 封面源图 ref(源歌曲/专辑封面文件名,封面直接引用源图 id,无独立拷贝);
+ *   - 任何进程(batch 子进程 / 主进程 / 手动刷新)与任何执行时序都共享同一把锁,
+ *     重启后依然有效,从根本杜绝「内存认领表跨进程失效」类问题;
+ *   - DB UNIQUE(date_key, cover_ref) 强约束:同一天一个源图 ref 至多被一个歌单占用;
+ *   - 候选全部被其它歌单占用时返回 null(该歌单当天无封面),绝不回退撞车。
+ * opts.excludeRefs 可额外指定禁用的 ref(供手动指定封面等场景)。
  * opts.dateStr 供调用方注入当日 YYYY-MM-DD(默认取系统当天,与 todayStr 同源)。
  */
-const claimedCoversByDay = new Map<string, Map<string, Set<string>>>();
+const CLAIMS_TTL_DAYS = 7; // 锁只保留最近 7 天,防止表无界增长
 
-/** 测试/重跑用:清空按天封面认领表。 */
+/** 测试/重跑用:清空全部封面源图 id 锁(仅清锁表,不动歌单封面)。 */
 export function resetDailyCoverClaims(): void {
-  claimedCoversByDay.clear();
+  sqlite.prepare("DELETE FROM playlist_cover_claims").run();
+}
+
+/**
+ * 幂等 skip 路径用:把歌单当天的实际封面同步进锁表(先删己再插,抢占式)。
+ * 保证「当天已生成、直接跳过」时锁表仍反映歌单真实封面,后续歌单生成时正确排除。
+ */
+export function syncCoverClaim(playlistId: string, dateKey: string, coverRef: string | null | undefined): void {
+  if (!dateKey) return;
+  sqlite.prepare("DELETE FROM playlist_cover_claims WHERE date_key = ? AND playlist_id = ?").run(dateKey, playlistId);
+  if (coverRef) {
+    sqlite.prepare(
+      "INSERT OR IGNORE INTO playlist_cover_claims (date_key, playlist_id, cover_ref, updated_at) VALUES (?, ?, ?, ?)"
+    ).run(dateKey, playlistId, coverRef, new Date().toISOString());
+  }
 }
 
 export function pickDailyRotatedCover(playlistId: string, opts?: CoverPickOptions & { dateStr?: string }): string | null {
@@ -264,38 +282,47 @@ export function pickDailyRotatedCover(playlistId: string, opts?: CoverPickOption
   const dateKey = s ?? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const dayIndex = Math.floor(Date.parse(`${dateKey}T00:00:00Z`) / 86400000);
 
-  // 当天已认领集合:其他歌单认领的 ref 全部排除,本歌单自己的认领不排除(可覆盖)。
-  let claims = claimedCoversByDay.get(dateKey);
-  if (!claims) {
-    claims = new Map();
-    claimedCoversByDay.set(dateKey, claims);
-  }
-  const others = new Set<string>();
-  for (const [pid, refs] of claims) {
-    if (pid !== playlistId) for (const r of refs) others.add(r);
-  }
-  for (const r of opts?.excludeRefs ?? []) others.add(r);
+  // 顺带清理过期锁(量小,每次调用一次 DELETE)。按「本次 dateKey 往前推 TTL」清理,
+  // 而非按当前时间 —— 回退日期生成 / 跨时区场景下本次使用的 dateKey 不会被误删,
+  // 该天的互斥锁始终完整保留。
+  const cutoffTs = Date.parse(`${dateKey}T00:00:00Z`) - CLAIMS_TTL_DAYS * 86400000;
+  const cutoff = new Date(cutoffTs);
+  const cutoffKey = `${cutoff.getUTCFullYear()}-${String(cutoff.getUTCMonth() + 1).padStart(2, "0")}-${String(cutoff.getUTCDate()).padStart(2, "0")}`;
+  sqlite.prepare("DELETE FROM playlist_cover_claims WHERE date_key < ?").run(cutoffKey);
 
-  const refs = listPlayableCoverRefs(playlistId, { preferSongId: opts?.preferSongId, excludeRefs: [...others] });
-  let pick: string | null;
-  if (refs.length === 0) {
-    // 候选全部被排除(库内可用封面有限)——回退到完整候选(不排挤),照常有封面。
-    const all = listPlayableCoverRefs(playlistId, { preferSongId: opts?.preferSongId });
-    pick = all[0] ?? null;
-  } else {
-    pick = refs[dayIndex % refs.length];
+  const extra = opts?.excludeRefs ?? [];
+  // 最多重试 3 次:极端并发下 INSERT OR IGNORE 可能被其它进程抢先认领同一 ref,
+  // 重读当前锁表重选(事务内读-选-删-插,SQLite 单写者串行化,竞态窗口极小)。
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const picked = sqlite.transaction((): string | null | "RETRY" => {
+      const others = (sqlite.prepare(
+        "SELECT cover_ref FROM playlist_cover_claims WHERE date_key = ? AND playlist_id <> ?"
+      ).all(dateKey, playlistId) as { cover_ref: string }[]).map((r) => r.cover_ref);
+      const exclude = new Set<string>([...others, ...extra]);
+
+      const refs = listPlayableCoverRefs(playlistId, { preferSongId: opts?.preferSongId, excludeRefs: [...exclude] });
+      let pick: string | null;
+      if (refs.length === 0) {
+        // 候选全部被其它固定歌单占用 → 当天无可用封面。返回 null 而非回退撞车,
+        // 从根本保证任意两张固定卡不会共用同一张源图。
+        pick = null;
+      } else {
+        pick = refs[dayIndex % refs.length];
+      }
+      if (!pick) return null;
+
+      // 先删自己的当天认领(允许更新自己的锁定 ref),再 INSERT OR IGNORE:
+      // 同歌单重复调用 → 正常覆盖;与其它歌单并发抢同一 ref → UNIQUE 冲突被忽略。
+      sqlite.prepare("DELETE FROM playlist_cover_claims WHERE date_key = ? AND playlist_id = ?").run(dateKey, playlistId);
+      const r = sqlite.prepare(
+        "INSERT OR IGNORE INTO playlist_cover_claims (date_key, playlist_id, cover_ref, updated_at) VALUES (?, ?, ?, ?)"
+      ).run(dateKey, playlistId, pick, new Date().toISOString());
+      if (r.changes === 0) return "RETRY"; // 同一天该 ref 已被其它歌单占用
+      return pick;
+    })();
+    if (picked !== "RETRY") return picked;
   }
-  if (pick) {
-    const mine = claims.get(playlistId) ?? new Set<string>();
-    mine.add(pick);
-    claims.set(playlistId, mine);
-  }
-  // 只保留最近 7 天,防止内存无界增长。
-  if (claimedCoversByDay.size > 7) {
-    const oldest = claimedCoversByDay.keys().next().value;
-    if (oldest !== undefined) claimedCoversByDay.delete(oldest);
-  }
-  return pick;
+  return null;
 }
 
 // Resolve playlist cover: serve the local cover image if it exists on disk.

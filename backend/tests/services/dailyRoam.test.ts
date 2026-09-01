@@ -225,4 +225,41 @@ describe("generateRoamPlaylist (今日漫游组合)", () => {
     sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art IN ('al-r1','al-r2','al-r3')").run();
     resetDailyCoverClaims();
   });
+
+  it("候选封面全部被其它歌单占用时返回 null(绝不回退撞车)", async () => {
+    const { pickDailyRotatedCover } = await import("../../src/services/playlistCover.js");
+    const covers = ["al-occ1", "al-occ2"];
+    for (const [i, ref] of covers.entries()) {
+      sqlite.prepare("UPDATE songs SET cover_art = ? WHERE id = ?").run(ref, `s${i}`);
+      fs.mkdirSync(path.join(process.env.DATA_DIR as string, "covers"), { recursive: true });
+      fs.writeFileSync(path.join(process.env.DATA_DIR as string, "covers", ref), "x");
+    }
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 2); // s0/s1 封面 al-occ1 / al-occ2
+    seedPlaylist("pl-other-a", "候选A", 0, 2);
+    seedPlaylist("pl-other-b", "候选B", 0, 2);
+    // 另两个歌单轮番认领,把当天两张候选全部占用(互斥:两两不同)。
+    const p1 = pickDailyRotatedCover("pl-other-a", { dateStr: "2026-08-25" });
+    const p2 = pickDailyRotatedCover("pl-other-b", { dateStr: "2026-08-25" });
+    expect(p1).not.toBeNull();
+    expect(new Set([p1, p2]).size).toBe(2);
+    // 第三个歌单候选与 today 完全相同 → 全部被占用 → 返回 null,绝不选撞车封面。
+    const p3 = pickDailyRotatedCover(FIXED_TODAY_ID, { dateStr: "2026-08-25" });
+    expect(p3).toBeNull();
+    sqlite.prepare("UPDATE songs SET cover_art = NULL WHERE cover_art IN ('al-occ1','al-occ2')").run();
+    resetDailyCoverClaims();
+  });
+
+  it("源歌单当天更新后漫游不再幂等跳过,跟随重建(封面互斥保持)", () => {
+    setRoamConfig({});
+    seedPlaylist(FIXED_TODAY_ID, "每日推荐", 0, 3);
+    const r1 = generateRoamPlaylist({ force: true });
+    expect(r1.skipped).toBe(false);
+    // 同一天再跑(源未变)→ 幂等 skip。
+    expect(generateRoamPlaylist().skipped).toBe(true);
+    // 模拟当天手动刷新「每日推荐」(updated_at 变新)→ 漫游必须跟随重建。
+    sqlite.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?")
+      .run(new Date(Date.now() + 5000).toISOString(), FIXED_TODAY_ID);
+    const r3 = generateRoamPlaylist();
+    expect(r3.skipped).toBe(false);
+  });
 });

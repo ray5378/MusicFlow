@@ -12,7 +12,7 @@
 import { sqlite } from "../../db/index.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { LocalRecommendPlugin, PluginManifest } from "../../plugins/types.js";
-import { pickDailyRotatedCover } from "../playlistCover.js";
+import { pickDailyRotatedCover, syncCoverClaim } from "../playlistCover.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("LOCAL-RECOMMEND");
@@ -414,6 +414,8 @@ export async function generateLocalDailyPlaylist(
   // 当天幂等:comment 含今天日期 = 今天已生成过(与 daily-recommend 同机制;
   // 不能用 created_at 前缀——行是固定的,created_at 始终是首次创建那天)
   if (!opts?.force && (row.comment || "").includes(dateStr)) {
+    // 幂等跳过:把当天实际封面同步进封面源图 id 锁表,保证后续固定歌单正确排除。
+    syncCoverClaim(LOCAL_FIXED_PLAYLIST_ID, dateStr, row.cover_art);
     return { date: dateStr, playlistId: LOCAL_FIXED_PLAYLIST_ID, name: NAME_LOCAL, total: 0, sourceUsers: 0, fallback: false, skipped: true };
   }
 

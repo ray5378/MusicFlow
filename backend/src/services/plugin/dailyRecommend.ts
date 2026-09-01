@@ -34,7 +34,7 @@ import { sqlite } from "../../db/index.js";
 import { importPlaylistFromUrl } from "./playlistImport.js";
 import { rebuildPlaylistEntries } from "./playlistSync.js";
 import { clearLibraryIndex } from "./libraryIndex.js";
-import { clearPlaylistCoverCache, pickDailyRotatedCover } from "../playlistCover.js";
+import { clearPlaylistCoverCache, pickDailyRotatedCover, syncCoverClaim } from "../playlistCover.js";
 import { getPluginConfig } from "../../plugins/registry.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
@@ -457,6 +457,9 @@ export async function generateDailyPlaylist(
   const todayRow = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
   // force=true 时跳过当天幂等,重新触发随机生成;seedSalt 混入随机种子让内容不同。
   if (!opts?.force && isGeneratedToday(todayRow, dateStr)) {
+    // 幂等跳过:把当天实际封面同步进封面源图 id 锁表(先删己再插,抢占式),
+    // 保证「今天已生成、直接跳过」时后续固定歌单(今日漫游等)仍能正确排除。
+    syncCoverClaim(FIXED_TODAY_ID, dateStr, todayRow?.cover_art);
     return {
       date: dateStr,
       playlistId: FIXED_TODAY_ID,

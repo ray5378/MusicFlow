@@ -18,7 +18,7 @@ import type { ComboPlaylistPlugin, PluginManifest } from "../../plugins/types.js
 import { FIXED_TODAY_ID } from "./dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "./localRecommend.js";
 import { todayStr, systemOwnerId } from "./shared.js";
-import { pickDailyRotatedCover } from "../playlistCover.js";
+import { pickDailyRotatedCover, syncCoverClaim } from "../playlistCover.js";
 
 export const DAILY_ROAM_PLUGIN_ID = "daily-roam";
 export const ROAM_PLAYLIST_ID = "pl-daily-roam";
@@ -85,8 +85,22 @@ export function generateRoamPlaylist(opts?: { force?: boolean }): RoamResult {
   const dateStr = todayStr();
   const row = ensureRoamPlaylist();
   // 当天幂等:comment 含今天日期 = 今天已生成过(force 跳过)。
+  // 例外:某个源歌单在漫游生成之后又更新过(如当天手动刷新「每日推荐」,封面/内容
+  // 已变)→ 跟随重建,否则漫游封面停留在旧值,可能与其源歌单的新封面撞车。
   if (!opts?.force && (row.comment || "").includes(dateStr)) {
-    return { date: dateStr, playlistId: ROAM_PLAYLIST_ID, name: NAME_ROAM, total: 0, sources: [], skipped: true };
+    // 每源一次轻量查询:同时判断「源歌单比漫游更新」与「封面与源歌单撞车」。
+    const srcRows = loadSources().map((src) =>
+      sqlite.prepare("SELECT cover_art, updated_at FROM playlists WHERE id = ?").get(src) as any
+    );
+    const srcNewer = srcRows.some((s) => s && s.updated_at > row.updated_at);
+    // 自愈:封面与任一源歌单相同(历史遗留/手动改动导致的撞车)→ 也重建,
+    // 让「都已跳过幂等」的存量撞车状态能被自动修复。
+    const coverClash = !!row.cover_art && srcRows.some((s) => s && s.cover_art === row.cover_art);
+    if (!srcNewer && !coverClash) {
+      // 幂等跳过:把当天实际封面同步进锁表,保证后续歌单生成时正确排除。
+      syncCoverClaim(ROAM_PLAYLIST_ID, dateStr, row.cover_art);
+      return { date: dateStr, playlistId: ROAM_PLAYLIST_ID, name: NAME_ROAM, total: 0, sources: [], skipped: true };
+    }
   }
 
   const sources = loadSources();
@@ -121,8 +135,10 @@ export function generateRoamPlaylist(opts?: { force?: boolean }): RoamResult {
 
   const totalDuration = merged.reduce((s, e) => s + (e.duration || 0), 0);
 
-  // 封面:取歌单自身可播条目中某首有封面歌曲的封面 ref(按天轮换;当天已被其它
-  // 固定歌单认领的封面自动跳过,保证各固定歌单封面两两不同)。
+  // 封面:取歌单自身可播条目中某首有封面歌曲的封面 ref(按天轮换)。封面互斥由
+  // 数据库级「封面源图 id 锁」(playlist_cover_claims)统一保证——当天已被其它
+  // 固定歌单认领的源图自动跳过,任何进程/时序下首页固定卡封面都两两不同;
+  // 候选全部被占用时返回 null(无封面),绝不回退撞车。
   let cover: string | null = null;
   if (merged.length > 0) {
     cover = pickDailyRotatedCover(ROAM_PLAYLIST_ID, { dateStr });

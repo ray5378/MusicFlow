@@ -364,6 +364,20 @@ export function initDatabase() {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_recommend_pool_unique ON recommend_pool(source_type, source_id);
 
+    -- 封面源图 id 锁:固定推荐歌单(每日推荐/今日漫游/本地推荐/随机)每天封面互斥。
+    -- 锁单元 = 封面源图 ref(源歌曲/专辑封面文件名,直接引用源图、无独立拷贝)。
+    -- 认领记录持久化在 DB:任何进程(batch 子进程/主进程/手动刷新)与任何时序共享
+    -- 同一把锁,重启后依然有效。UNIQUE(date_key, cover_ref) 数据库级强约束:同一天
+    -- 一个源图 ref 至多被一个固定歌单占用,从根本杜绝「两张固定卡同一张封面」。
+    CREATE TABLE IF NOT EXISTS playlist_cover_claims (
+      date_key TEXT NOT NULL,
+      playlist_id TEXT NOT NULL,
+      cover_ref TEXT NOT NULL,
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (date_key, playlist_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cover_claims_ref ON playlist_cover_claims(date_key, cover_ref);
+
     CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist_id);
     CREATE INDEX IF NOT EXISTS idx_songs_album ON songs(album_id);
     CREATE INDEX IF NOT EXISTS idx_songs_genre ON songs(genre);
