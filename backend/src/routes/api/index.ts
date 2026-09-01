@@ -1037,6 +1037,21 @@ apiRoutes.get("/v1/songs", (c) => {
   return c.json({ total, page, pageSize, items });
 });
 
+// 删除库内单曲(含插件匹配的 web 歌曲):级联清理歌单条目/收藏/播放历史后删除,
+// 再清理孤儿专辑/艺人。web 歌曲删除后需重新搜索匹配才会回来;本地歌曲由媒体源
+// 重新扫描时会自然恢复(删除只移除记录,不触碰源文件)。
+apiRoutes.delete("/v1/songs/:id", (c) => {
+  const id = c.req.param("id")!;
+  const song = db.select().from(songs).where(eq(songs.id, id)).get();
+  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  db.delete(playlistSongs).where(eq(playlistSongs.songId, id)).run();
+  db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.songId, id)).run();
+  db.delete(playHistory).where(eq(playHistory.songId, id)).run();
+  db.delete(songs).where(eq(songs.id, id)).run();
+  cleanupOrphans();
+  return c.json({ success: true });
+});
+
 function idToCoverArt(id: string | null, prefix: string): string | undefined {
   if (!id) return undefined;
   const album = db.select().from(albums).where(eq(albums.id, id)).get();

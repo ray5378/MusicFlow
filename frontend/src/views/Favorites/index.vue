@@ -152,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
@@ -404,12 +404,19 @@ onMounted(() => {
     artistGrid.bindGrid();
     // 默认歌单分区(其窗口化渲染在挂载时自绑定)
   });
+  window.addEventListener("mf:song-deleted", onSongDeleted);
 });
 // 收藏状态在任何页面发生变化(点击我喜欢/取消收藏)后,列表实时重载。
 watch(() => fav.revision, () => {
   loadAll();
   fav.loadFavorites();
 });
+// 右键「从音乐库删除」成功后刷新(收藏里的 web 歌曲被级联清除)
+function onSongDeleted() {
+  loadAll();
+  fav.loadFavorites();
+}
+onBeforeUnmount(() => window.removeEventListener("mf:song-deleted", onSongDeleted));
 </script>
 
 <style lang="scss" scoped>

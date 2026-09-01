@@ -2,10 +2,10 @@ import { reactive } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { usePlayContent } from "./usePlayContent";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import router from "@/router";
-import { Play, Plus, ListMusic, Star, Info, User, Folder } from "lucide-vue-next";
+import { Play, Plus, ListMusic, Star, Info, User, Folder, Trash2 } from "lucide-vue-next";
 
 export interface MenuAction {
   label?: string;
@@ -212,6 +212,29 @@ function songActions(song: any): MenuAction[] {
       label: "歌曲信息", icon: Info, onClick: () => openSongInfo(song),
     },
   ];
+  // 库内 web 歌曲(插件匹配入库)支持从音乐库删除:级联清歌单条目/收藏/历史。
+  // 远程搜索结果行(未入库,isWeb 为空)不显示;本地歌曲删除会随媒体源重扫恢复,也不在此入口。
+  if (song.isWeb) {
+    acts.push({
+      label: "从音乐库删除", icon: Trash2, danger: true,
+      onClick: async () => {
+        try {
+          await ElMessageBox.confirm(
+            `确定从音乐库删除「${song.title}」？\n该歌曲来自插件匹配,删除后需重新搜索匹配才会恢复。`,
+            "从音乐库删除",
+            { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", confirmButtonClass: "el-button--danger" },
+          );
+        } catch { return; }
+        try {
+          await api.delete(`/rest/api/v1/songs/${song.id}`);
+          ElMessage.success("已从音乐库删除");
+          window.dispatchEvent(new CustomEvent("mf:song-deleted", { detail: { songId: song.id } }));
+        } catch (e: any) {
+          ElMessage.error(e?.response?.data?.error || "删除失败");
+        }
+      },
+    });
+  }
   if (song.artistId) {
     acts.push({
       label: "查看艺人", icon: User, onClick: () => router.push(`/artists/${song.artistId}`),

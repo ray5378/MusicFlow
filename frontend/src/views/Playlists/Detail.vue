@@ -488,7 +488,11 @@ async function deletePlaylist() {
   } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
 }
 
-onMounted(loadPlaylist);
+onMounted(() => {
+  loadPlaylist();
+  // 右键「从音乐库删除」成功后刷新歌单(删除的 web 歌曲会级联清出本歌单)
+  window.addEventListener("mf:song-deleted", loadPlaylist);
+});
 
 // Cancel any in-flight match-progress poll when the page is left. Without this,
 // the recursive setTimeout keeps issuing /match-playlist/status requests after
@@ -498,6 +502,7 @@ onUnmounted(() => {
   matchPollCancelled = true;
   gmdlPollCancelled = true;
   if (gmdlPollTimer) clearTimeout(gmdlPollTimer);
+  window.removeEventListener("mf:song-deleted", loadPlaylist);
 });
 </script>
 

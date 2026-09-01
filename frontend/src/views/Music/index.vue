@@ -108,7 +108,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore, Song } from "@/stores/player";
 import { useItemActions } from "@/composables/useItemActions";
@@ -224,7 +224,11 @@ onMounted(() => {
   setAfterRemoteImport(loadSongs);    // 「加入库」成功后刷新本地列表
   loadSearchProviders();
   loadSongs();
+  window.addEventListener("mf:song-deleted", onSongDeleted);
 });
+// 右键「从音乐库删除」成功后刷新本地列表(删除的 web 歌曲级联清收藏/历史/歌单条目)
+function onSongDeleted() { loadSongs(); }
+onBeforeUnmount(() => window.removeEventListener("mf:song-deleted", onSongDeleted));
 </script>
 
 <style lang="scss" scoped>
