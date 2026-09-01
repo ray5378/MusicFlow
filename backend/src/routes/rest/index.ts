@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../../db/index.js";
 import { users, songs, albums, artists, playlists, playlistSongs, userFavoriteSongs, userFavoriteAlbums, userFavoriteArtists, playlistFavorites, playHistory, mediaSources, userRatings, userPlayQueues } from "../../db/schema.js";
-import { eq, like, sql, or, and, isNotNull, inArray, desc, gt } from "drizzle-orm";
+import { eq, like, sql, or, and, isNotNull, inArray, desc, gt, ne } from "drizzle-orm";
 import fs from "fs";
 import path from "node:path";
 import os from "node:os";
@@ -128,10 +128,24 @@ function getRatingValue(userId: string | undefined, itemType: string, itemId: st
     .get()?.rating ?? 0;
 }
 
+/**
+ * 曲目封面的回退链终点:专辑封面 ref。
+ *
+ * 只要专辑行存在就返回 `al-<albumId>`,**不在曲目侧判断专辑有没有封面** ——
+ * 最终图片一律由 getCoverArt 的 `al-` 分支解析:专辑自带封面用专辑封面,否则
+ * 回退到同专辑首支带封面曲目的封面(与专辑详情页头部 albumCoverRef() 完全同源)。
+ *
+ * 此前这里只认专辑自带封面(album.cover_art 非空才返回),而专辑头部走的是带
+ * 二级回退的 albumCoverRef(),于是出现「专辑头部有封面、下方曲目行却空白」的
+ * 不一致——头部那张图正是二级回退借来的。
+ *
+ * 统一由 getCoverArt 单点解析还有两个好处:曲目列表不需要为每首歌再查一次
+ * 「同专辑兄弟曲目」(避免 N+1);任何一处回退策略调整只改一处即可全链路生效。
+ */
 function resolveAlbumCover(albumId: string | null): string | undefined {
   if (!albumId) return undefined;
-  const album = db.select().from(albums).where(eq(albums.id, albumId)).get();
-  return album?.coverArt ? `al-${album.id}` : undefined;
+  const album = db.select({ id: albums.id }).from(albums).where(eq(albums.id, albumId)).get();
+  return album ? `al-${album.id}` : undefined;
 }
 
 // Web/online-imported albums (go-music-dl etc.) cache their artwork on the
@@ -139,7 +153,8 @@ function resolveAlbumCover(albumId: string | null): string | undefined {
 // album that carries a cover so album pages can inherit that artwork.
 function firstSongWithCover(albumId: string): string | undefined {
   const song = db.select({ id: songs.id }).from(songs)
-    .where(and(eq(songs.albumId, albumId), isNotNull(songs.coverArt)))
+    // 必须同时排除空串:cover_art = '' 的行会被 isNotNull 选中,但解析时拿不到文件。
+    .where(and(eq(songs.albumId, albumId), isNotNull(songs.coverArt), ne(songs.coverArt, "")))
     .limit(1).get();
   return song?.id;
 }
@@ -1731,8 +1746,11 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
     if (!coverRef && album) {
       // Web/online albums store artwork on their songs; fall back to the first
       // song-with-cover so direct al-<id> requests aren't blank.
+      // 这里是全链路封面的**唯一解析终点**:所有只给出 al-<id> 的调用方(专辑详情
+      // 头部、曲目行、歌单曲目、播放历史)最终都在此取图,因此任何回退策略只需改
+      // 这一处即可全站生效。空串 cover_art 必须排除,否则会选中拿不到文件的行。
       const song = db.select({ coverArt: songs.coverArt }).from(songs)
-        .where(and(eq(songs.albumId, album.id), isNotNull(songs.coverArt)))
+        .where(and(eq(songs.albumId, album.id), isNotNull(songs.coverArt), ne(songs.coverArt, "")))
         .limit(1).get();
       coverRef = song?.coverArt || null;
     }

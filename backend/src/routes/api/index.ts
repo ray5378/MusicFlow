@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
 import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, userFavoriteAlbums, userFavoriteArtists, playlistFavorites, playHistory, genres, deviceQueues } from "../../db/schema.js";
-import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count } from "drizzle-orm";
+import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, ne } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import { apiError, BusinessErrorCode } from "../../utils/errors.js";
@@ -1016,12 +1016,15 @@ apiRoutes.get("/v1/songs", (c) => {
     : (where
         ? db.select().from(songs).where(where).orderBy(songs.title).limit(pageSize).offset(start).all()
         : db.select().from(songs).orderBy(songs.title).limit(pageSize).offset(start).all());
-  // Batch album cover lookups for songs without their own cover (avoids N+1
-  // album queries on every page). Logic identical to idToCoverArt().
+  // Batch album existence lookups for songs without their own cover (avoids N+1
+  // album queries on every page). 这里只判定专辑行是否存在,不判断它有没有封面:
+  // 具体图片一律由 getCoverArt 的 al- 分支解析(专辑自带封面 → 回退同专辑首支带
+  // 封面曲目),与专辑详情页头部同源。此前在此判空,导致「专辑头部有封面、曲目行
+  // 却空白」——头部那张图正是二级回退借来的。
   const coverAlbumIds = [...new Set(pageSongs.filter((s) => !s.coverArt && s.albumId).map((s) => s.albumId as string))];
   const coverMap = coverAlbumIds.length
-    ? new Map(db.select().from(albums).where(inArray(albums.id, coverAlbumIds)).all().map((a) => [a.id, a.coverArt ? `al-${a.id}` : undefined as string | undefined]))
-    : new Map<string, string | undefined>();
+    ? new Map(db.select({ id: albums.id }).from(albums).where(inArray(albums.id, coverAlbumIds)).all().map((a) => [a.id, `al-${a.id}` as string]))
+    : new Map<string, string>();
   const items = pageSongs.map(s => serializeSongRow(
     s,
     s.coverArt ? `so-${s.id}` : (s.albumId ? coverMap.get(s.albumId) : undefined),
@@ -1067,7 +1070,8 @@ function idToCoverArt(id: string | null, prefix: string): string | undefined {
 function albumCoverRef(a: any): string | undefined {
   if (a?.coverArt) return `al-${a.id}`;
   const song = db.select({ id: songs.id }).from(songs)
-    .where(and(eq(songs.albumId, a?.id), isNotNull(songs.coverArt)))
+    // 同样排除空串:cover_art = '' 会被 isNotNull 选中却解析不出文件。
+    .where(and(eq(songs.albumId, a?.id), isNotNull(songs.coverArt), ne(songs.coverArt, "")))
     .limit(1).get();
   return song ? `so-${song.id}` : undefined;
 }
@@ -1992,7 +1996,11 @@ apiRoutes.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c
         return {
           ...serializeSongRow(
             song,
-            album?.coverArt ? `al-${album.id}` : (song.coverArt ? `so-${song.id}` : undefined),
+            // 歌曲自带封面优先;否则回退专辑封面。只要专辑行存在就给 al-<id>,
+            // 最终图片由 getCoverArt 的 al- 分支解析(专辑自带 → 同专辑首支带封面
+            // 曲目),与专辑详情页头部同源。此前要求专辑自带封面才给 al-,于是专辑
+            // 头部有图(二级回退)而歌单曲目行空白。
+            song.coverArt ? `so-${song.id}` : (album ? `al-${album.id}` : undefined),
           ),
           playable: true, isMatched: true,
         };
@@ -2045,7 +2053,9 @@ apiRoutes.get("/v1/history", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
       id: song.id, title: song.title, artist: song.artist, album: song.album,
       artistId: song.artistId, albumId: song.albumId, duration: song.duration || 0,
       bitRate: song.bitRate, suffix: song.suffix, contentType: song.contentType,
-      coverArt: album?.coverArt ? `al-${album.id}` : (song.coverArt ? `so-${song.id}` : undefined),
+      // 与歌单曲目同一回退链:歌曲自带 → 专辑封面(al- 的最终图片由 getCoverArt
+      // 解析,专辑无自带封面时借同专辑首支带封面曲目的图)。
+      coverArt: song.coverArt ? `so-${song.id}` : (album ? `al-${album.id}` : undefined),
       playedAt: h.playedAt || "",
     };
   }).filter(Boolean);
