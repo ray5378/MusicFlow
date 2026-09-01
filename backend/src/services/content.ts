@@ -2,6 +2,7 @@ import { eq, or, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { songs, albums, artists, playlists, playlistSongs, genres } from "../db/schema.js";
 import { suffixToMime } from "./dlna/queue.js";
+import { groupMemberSort } from "../utils/songSource.js";
 
 // Convert song rows into QueueItem objects (shared by the album/playlist play
 // endpoints and the flow runner).
@@ -45,6 +46,17 @@ export function resolveContentSongs(type: string, id: string): { rows: any[]; na
     // integration plays a single song through the same /v1/play endpoint.
     const s = db.select().from(songs).where(eq(songs.id, id)).get();
     if (!s) return null;
+    // 同曲多源组播放优选:歌曲属于多源组时,改播组内核心曲库源(local >
+    // webdav > web,与 Web 前端主行 = sources[0] 一致)。传任意组内 id 都
+    // 落到同一首歌,客户端/HA 集成无需自己选源。组内保留所有行供备选,
+    // 这里只把「主源」作为播放行返回。
+    if (s.groupId) {
+      const members = db.select().from(songs).where(eq(songs.groupId, s.groupId)).all();
+      if (members.length > 1) {
+        const sorted = [...members].sort(groupMemberSort);
+        return { rows: [sorted[0]], name: sorted[0].title || "未知" };
+      }
+    }
     return { rows: [s], name: s.title || "未知" };
   }
   if (type === "playlist") {
