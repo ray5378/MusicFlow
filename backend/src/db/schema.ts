@@ -71,8 +71,9 @@ export const songs = sqliteTable("songs", {
   sourceData: text("source_data"),
   pluginEntry: text("plugin_entry"),
   cachePath: text("cache_path"),
-  // 同曲多源归组:规范化标题+歌手相同且时长差 ≤3s 的行共享同一 group_id;
-  // 组内优先级 local > webdav > web,播放优选/展示合并基于它。分组只附加列。
+  // 同曲多源归组:规范化标题+歌手+专辑相同且时长差 ≤1s(秒级)的行共享同一
+  // group_id;组内优先级 local > webdav > web,播放优选/展示合并基于它。
+  // 分组只附加列,不删行。
   groupId: text("group_id"),
   groupKey: text("group_key"),
   createdAt: text("created_at").default(""),

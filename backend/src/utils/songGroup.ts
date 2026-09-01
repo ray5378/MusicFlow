@@ -1,8 +1,9 @@
 // ==================== 歌曲分组(同一首歌的多源归组) ====================
 //
 // 核心概念:本地/WebDAV 曲库与插件平台(go-music-dl 等)可能收录同一首歌,
-// 落库后成为多行独立记录。分组规则 = 「规范化标题 + 规范化歌手」完全相同
-// + 时长差 ≤ 3s(±3s 容差,防误合并不同版本)。组内成员按优先级
+// 落库后成为多行独立记录。分组规则 = 「规范化标题 + 规范化歌手 + 规范化
+// 专辑」完全相同 + 时长差 ≤ 1s(秒级容差,防误合并不同版本;专辑一致已
+// 承担版本区分,时长从 ±3s 收紧到秒级)。组内成员按优先级
 // local > webdav > web 排列,播放/展示可优选用核心曲库源。
 //
 // 时长规则:duration 为 0/空视为「未知时长」,不参与容差比较(两首未知时长
@@ -11,7 +12,7 @@
 // 分组不删除任何行:歌单条目/收藏/播放历史引用的仍是具体 songId,分组只是
 // 在 songs 表上附加 group_id 列,展示层按组合并、播放层按组优选。
 
-export const GROUP_DURATION_TOLERANCE = 3; // ±3s
+export const GROUP_DURATION_TOLERANCE = 1; // ±1s(秒级;v1.13.26 前为 ±3s)
 
 /** 规范化分组文本:去首尾空白、全角空格→半角、折叠内部空白、转小写。
  *  括号/引号/书名号等装饰符号全局删除但保留内部内容——(Live)/(Remix) 的
@@ -34,9 +35,9 @@ export function normalizeGroupText(s: string): string {
     .trim();
 }
 
-/** 分组 key = 规范化标题 + 规范化歌手(不可见分隔符防碰撞)。 */
-export function songGroupKey(title: string, artist: string): string {
-  return `${normalizeGroupText(title)}\u0001${normalizeGroupText(artist || "")}`;
+/** 分组 key = 规范化标题 + 规范化歌手 + 规范化专辑(不可见分隔符防碰撞)。 */
+export function songGroupKey(title: string, artist: string, album?: string | null): string {
+  return `${normalizeGroupText(title)}\u0001${normalizeGroupText(artist || "")}\u0001${normalizeGroupText(album || "")}`;
 }
 
 /** 两首时长是否在容差内:双方都必须 > 0(未知时长不参与容差比较)。 */
@@ -51,6 +52,7 @@ export interface GroupableSong {
   id: string;
   title: string;
   artist: string;
+  album?: string | null;
   duration?: number | null;
 }
 
@@ -61,8 +63,8 @@ export interface GroupAssignment {
 
 /**
  * 为一组歌曲分配组号(存量迁移用)。规则:
- *  1. 按 groupKey 分桶(规范化标题+歌手相同);
- *  2. 桶内按 duration 升序,union-find 两两比较,|d1-d2| ≤ 3s 的连成一组;
+ *  1. 按 groupKey 分桶(规范化标题+歌手+专辑相同);
+ *  2. 桶内按 duration 升序,union-find 两两比较,|d1-d2| ≤ 1s 的连成一组;
  *  3. 每生成一个组分配一个新的 groupId。
  * 返回 id → { groupId, groupKey } 映射;无标题(规范化后为空)的歌曲返回 null。
  */
@@ -72,8 +74,9 @@ export function assignSongGroups(rows: GroupableSong[]): Map<string, GroupAssign
   for (const r of rows) {
     const nt = normalizeGroupText(r.title);
     const na = normalizeGroupText(r.artist || "");
+    const nal = normalizeGroupText(r.album || "");
     if (!nt && !na) continue; // 无标题且无歌手,不参与分组
-    const key = `${nt}\u0001${na}`;
+    const key = `${nt}\u0001${na}\u0001${nal}`;
     let list = buckets.get(key);
     if (!list) { list = []; buckets.set(key, list); }
     list.push(r);
@@ -85,7 +88,7 @@ export function assignSongGroups(rows: GroupableSong[]): Map<string, GroupAssign
       out.set(r.id, { groupId: newGroupId(), groupKey: key });
       continue;
     }
-    // 桶内排序后 union-find:任意两两差 ≤3s 合并
+    // 桶内排序后 union-find:任意两两差 ≤1s 合并
     const sorted = [...list].sort((a, b) => Number(a.duration || 0) - Number(b.duration || 0));
     const parent = new Map<string, string>();
     const find = (x: string): string => {
@@ -128,8 +131,9 @@ export function newGroupId(): string {
 
 /**
  * 为新歌曲找可并入的已有组(导入/匹配时用):
- * 同 groupKey 的候选行按组聚合,若候选组内存在成员时长与新歌差 ≤3s,
- * 返回该组 groupId(多组命中取时长最接近的);否则返回 null(调用方新建组)。
+ * 同 groupKey(已含专辑)的候选行按组聚合,若候选组内存在成员时长与新歌差
+ * ≤1s(秒级),返回该组 groupId(多组命中取时长最接近的);否则返回 null
+ * (调用方新建组)。
  */
 export function findGroupForSong(
   candidates: { id: string; groupId: string | null; duration: number | null }[],

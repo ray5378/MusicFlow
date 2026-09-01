@@ -24,23 +24,28 @@ describe("normalizeGroupText", () => {
 });
 
 describe("songGroupKey", () => {
-  it("标题+歌手拼接,大小写不敏感", () => {
-    const a = songGroupKey("青花瓷", "周杰伦");
-    const b = songGroupKey(" 青花瓷 ", "周杰伦");
+  it("标题+歌手+专辑拼接,大小写不敏感", () => {
+    const a = songGroupKey("青花瓷", "周杰伦", "依然范特西");
+    const b = songGroupKey(" 青花瓷 ", "周杰伦", "依然范特西 ");
     expect(a).toBe(b);
     expect(songGroupKey("Stay", "The Kid LAROI")).not.toBe(songGroupKey("Stay", "Other"));
+    // 专辑不同 → key 不同(版本区分靠专辑)
+    expect(songGroupKey("Stay", "Kid LAROI", "A")).not.toBe(songGroupKey("Stay", "Kid LAROI", "B"));
+    // 专辑缺失与空串等价(web 导入可能没专辑)
+    expect(songGroupKey("Stay", "Kid LAROI")).toBe(songGroupKey("Stay", "Kid LAROI", ""));
   });
 });
 
 describe("durationInRange", () => {
-  it("±3s 内为 true", () => {
-    expect(durationInRange(210, 208)).toBe(true);
-    expect(durationInRange(210, 213)).toBe(true);
+  it("±1s 内为 true(秒级)", () => {
     expect(durationInRange(210, 210)).toBe(true);
+    expect(durationInRange(210, 211)).toBe(true);
+    expect(durationInRange(210, 209)).toBe(true);
   });
-  it("超 3s 为 false", () => {
-    expect(durationInRange(210, 214)).toBe(false);
-    expect(durationInRange(210, 205)).toBe(false);
+  it("超 1s 为 false", () => {
+    expect(durationInRange(210, 212)).toBe(false);
+    expect(durationInRange(210, 213)).toBe(false);
+    expect(durationInRange(210, 208)).toBe(false);
   });
   it("未知时长(0)不参与容差比较", () => {
     expect(durationInRange(0, 0)).toBe(false);
@@ -50,33 +55,47 @@ describe("durationInRange", () => {
 });
 
 describe("assignSongGroups", () => {
-  it("同 key 同 duration 归同组", () => {
+  it("同 key(标题+歌手+专辑)同 duration 归同组", () => {
     const m = assignSongGroups([
-      { id: "a", title: "Stay", artist: "Kid LAROI", duration: 210 },
-      { id: "b", title: "stay", artist: "kid laroi", duration: 210 },
+      { id: "a", title: "Stay", artist: "Kid LAROI", album: "F*CK LOVE", duration: 210 },
+      { id: "b", title: "stay", artist: "kid laroi", album: "f*ck love", duration: 210 },
     ]);
     expect(m.get("a")!.groupId).toBe(m.get("b")!.groupId);
-    expect(m.get("a")!.groupKey).toBe(songGroupKey("Stay", "Kid LAROI"));
+    expect(m.get("a")!.groupKey).toBe(songGroupKey("Stay", "Kid LAROI", "F*CK LOVE"));
   });
-  it("同 key 差 2s 归同组(容差内)", () => {
+  it("同 key 差 1s 归同组(秒级容差内)", () => {
     const m = assignSongGroups([
-      { id: "a", title: "X", artist: "Y", duration: 210 },
-      { id: "b", title: "X", artist: "Y", duration: 212 },
+      { id: "a", title: "X", artist: "Y", album: "Z", duration: 210 },
+      { id: "b", title: "X", artist: "Y", album: "Z", duration: 211 },
     ]);
     expect(m.get("a")!.groupId).toBe(m.get("b")!.groupId);
   });
-  it("同 key 差 5s 不归组(超容差)", () => {
+  it("同 key 差 2s 不归组(超秒级容差)", () => {
     const m = assignSongGroups([
-      { id: "a", title: "X", artist: "Y", duration: 210 },
-      { id: "b", title: "X", artist: "Y", duration: 215 },
+      { id: "a", title: "X", artist: "Y", album: "Z", duration: 210 },
+      { id: "b", title: "X", artist: "Y", album: "Z", duration: 212 },
     ]);
     expect(m.get("a")!.groupId).not.toBe(m.get("b")!.groupId);
   });
-  it("链式:180/182/184 两两相邻差≤3 全归一组", () => {
+  it("专辑不同不归组(版本靠专辑区分)", () => {
     const m = assignSongGroups([
-      { id: "a", title: "X", artist: "Y", duration: 180 },
-      { id: "b", title: "X", artist: "Y", duration: 182 },
-      { id: "c", title: "X", artist: "Y", duration: 184 },
+      { id: "a", title: "Stay", artist: "Kid LAROI", album: "F*CK LOVE", duration: 210 },
+      { id: "b", title: "Stay", artist: "Kid LAROI", album: "F*CK LOVE 3", duration: 210 },
+    ]);
+    expect(m.get("a")!.groupId).not.toBe(m.get("b")!.groupId);
+  });
+  it("专辑缺失与空串等价(同一张无专辑记录)", () => {
+    const m = assignSongGroups([
+      { id: "a", title: "X", artist: "Y", album: undefined, duration: 210 },
+      { id: "b", title: "X", artist: "Y", album: "", duration: 210 },
+    ]);
+    expect(m.get("a")!.groupId).toBe(m.get("b")!.groupId);
+  });
+  it("链式 180/181/182 相邻差≤1 全归一组", () => {
+    const m = assignSongGroups([
+      { id: "a", title: "X", artist: "Y", album: "Z", duration: 180 },
+      { id: "b", title: "X", artist: "Y", album: "Z", duration: 181 },
+      { id: "c", title: "X", artist: "Y", album: "Z", duration: 182 },
     ]);
     const gid = m.get("a")!.groupId;
     expect(m.get("b")!.groupId).toBe(gid);
@@ -84,20 +103,20 @@ describe("assignSongGroups", () => {
   });
   it("不同标题不归组", () => {
     const m = assignSongGroups([
-      { id: "a", title: "Stay", artist: "X", duration: 210 },
-      { id: "b", title: "Stay (Live)", artist: "X", duration: 210 },
+      { id: "a", title: "Stay", artist: "X", album: "Z", duration: 210 },
+      { id: "b", title: "Stay (Live)", artist: "X", album: "Z", duration: 210 },
     ]);
     expect(m.get("a")!.groupId).not.toBe(m.get("b")!.groupId);
   });
   it("未知时长(0)同名不合并", () => {
     const m = assignSongGroups([
-      { id: "a", title: "X", artist: "Y", duration: 0 },
-      { id: "b", title: "X", artist: "Y", duration: 0 },
+      { id: "a", title: "X", artist: "Y", album: "Z", duration: 0 },
+      { id: "b", title: "X", artist: "Y", album: "Z", duration: 0 },
     ]);
     expect(m.get("a")!.groupId).not.toBe(m.get("b")!.groupId);
   });
   it("单曲独立成组", () => {
-    const m = assignSongGroups([{ id: "a", title: "Solo", artist: "A", duration: 100 }]);
+    const m = assignSongGroups([{ id: "a", title: "Solo", artist: "A", album: "B", duration: 100 }]);
     expect(m.get("a")!.groupId).toMatch(/^g-/);
   });
   it("无标题/无歌手不参与分组", () => {
@@ -107,16 +126,16 @@ describe("assignSongGroups", () => {
 });
 
 describe("findGroupForSong", () => {
-  it("候选组内成员差 ≤3 返回该组", () => {
+  it("候选组内成员差 ≤1s 返回该组", () => {
     expect(findGroupForSong(
       [{ id: "x", groupId: "g-1", duration: 210 }],
       211,
     )).toBe("g-1");
   });
-  it("差超限返回 null", () => {
+  it("差超 1s 返回 null", () => {
     expect(findGroupForSong(
       [{ id: "x", groupId: "g-1", duration: 210 }],
-      215,
+      212,
     )).toBeNull();
   });
   it("未知时长不并入(保守)", () => {

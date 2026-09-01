@@ -129,15 +129,16 @@ async function planSongInsert(
   }
 
   // 同曲多源归组:与已有歌曲(本地/WebDAV 核心曲库或其它平台行)按「规范化标题
-  // + 歌手 + 时长 ±3s」并入同一组。组内保留所有行——web 行保留作备选源,
-  // 播放层可按开关优选用本地/WebDAV 源。未知时长(duration=0)不参与容差比较,
-  // 保守新建组,避免误合并不同版本。
+  // + 歌手 + 专辑 + 时长 ±1s(秒级)」并入同一组。组内保留所有行——web 行保留
+  // 作备选源,播放层可按开关优选用本地/WebDAV 源。未知时长(duration=0)不参与
+  // 容差比较,保守新建组,避免误合并不同版本。
   const nt = normalizeGroupText(song.name || "");
   const na = normalizeGroupText(song.artist || "");
+  const nal = normalizeGroupText(song.album || "");
   let groupId: string | null = null;
   let groupKey: string | null = null;
   if (nt || na) {
-    groupKey = `${nt}\u0001${na}`;
+    groupKey = `${nt}\u0001${na}\u0001${nal}`;
     try {
       const candidates = sqlite.prepare(
         "SELECT id, group_id, duration FROM songs WHERE group_key = ?"
