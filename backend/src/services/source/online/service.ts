@@ -15,13 +15,14 @@
 import { v4 as uuidv4 } from "uuid";
 import { db, sqlite } from "../../../db/index.js";
 import { songs, artists, albums } from "../../../db/schema.js";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and, isNotNull } from "drizzle-orm";
 import { cacheRemoteCover, copyOnlineCoverToRef } from "../../playlistCover.js";
 import { invalidateArtistList } from "../../../utils/artistListCache.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
 import { createLogger } from "../../../utils/logger.js";
+import { findGroupForSong, newGroupId, normalizeGroupText } from "../../../utils/songGroup.js";
 
 const log = createLogger("online-import");
 
@@ -127,6 +128,26 @@ async function planSongInsert(
     return { success: true, songId: existing, deduped: true };
   }
 
+  // 同曲多源归组:与已有歌曲(本地/WebDAV 核心曲库或其它平台行)按「规范化标题
+  // + 歌手 + 时长 ±3s」并入同一组。组内保留所有行——web 行保留作备选源,
+  // 播放层可按开关优选用本地/WebDAV 源。未知时长(duration=0)不参与容差比较,
+  // 保守新建组,避免误合并不同版本。
+  const nt = normalizeGroupText(song.name || "");
+  const na = normalizeGroupText(song.artist || "");
+  let groupId: string | null = null;
+  let groupKey: string | null = null;
+  if (nt || na) {
+    groupKey = `${nt}\u0001${na}`;
+    try {
+      const candidates = sqlite.prepare(
+        "SELECT id, group_id, duration FROM songs WHERE group_key = ?"
+      ).all(groupKey) as { id: string; groupId: string | null; duration: number | null }[];
+      groupId = findGroupForSong(candidates, song.duration || null) ?? newGroupId();
+    } catch {
+      groupId = newGroupId();
+    }
+  }
+
   // 批量导入时由外层波循环传共享时间戳,省去每首一次 new Date() 序列化(N 次→1 次);
   // 单首调用(importOnlineSong)不传,这里回退即时生成。
   const now = nowIn ?? new Date().toISOString();
@@ -200,6 +221,8 @@ async function planSongInsert(
           cover: song.cover || "",
         }),
         pluginEntry: providerId,
+        groupId,
+        groupKey,
         createdAt: now,
         updatedAt: now,
       },

@@ -15,20 +15,22 @@
     </div>
 
     <div class="list-body" ref="listBodyEl" :style="virtualized ? { paddingTop: padTop + 'px', paddingBottom: padBottom + 'px' } : undefined">
-    <template v-for="(song, i) in visibleSongs" :key="song ? (song.id || `ext-${rowGlobalIdx(i)}`) : `load-${rowGlobalIdx(i)}`">
+    <template v-for="(row, i) in visibleRows" :key="row && row.song ? (row.song.id || `ext-${rowGlobalIdx(i)}`) : `load-${rowGlobalIdx(i)}`">
     <div
-      v-if="song"
+      v-if="row"
       class="song-row"
       :class="{
-        active: isCurrent(song),
-        playing: isCurrent(song) && playerStore.isPlaying,
+        active: isCurrent(row.song),
+        playing: isCurrent(row.song) && playerStore.isPlaying,
+        'is-main-row': row.isMain,
+        'is-sub-row': !row.isMain && !!row.groupId,
       }"
-      @click="onRowClick(song)"
-      @contextmenu="onContext(song, $event)"
-      v-longpress="() => onLongPress(song)"
+      @click="onRowClick(row.song)"
+      @contextmenu="onContext(row.song, $event)"
+      v-longpress="() => onLongPress(row.song)"
     >
       <span v-if="selectable" class="col col-select" @click.stop>
-        <el-checkbox :model-value="isSelected(song.id)" @change="toggleOne(song, $event)" />
+        <el-checkbox :model-value="isSelected(row.song.id)" @change="toggleOne(row.song, $event)" />
       </span>
       <span class="col col-index">
         <span class="row-index">{{ (offset || 0) + rowGlobalIdx(i) + 1 }}</span>
@@ -36,43 +38,56 @@
         <span class="row-hover-play"><MfIcon name="Play" :size="16" /></span>
       </span>
       <span class="col col-title">
-        <div class="song-cover-wrap" @click.stop="emitPlay(song)">
-          <el-image v-if="song.coverArt" :src="coverSrc(song)" class="song-cover" fit="cover" lazy>
+        <div class="song-cover-wrap" @click.stop="emitPlay(row.song)">
+          <el-image v-if="row.song.coverArt" :src="coverSrc(row.song)" class="song-cover" fit="cover" lazy>
             <template #error><div class="cover-placeholder"><MfIcon name="Headphones" /></div></template>
           </el-image>
           <div v-else class="cover-placeholder"><MfIcon name="Headphones" /></div>
           <div class="cover-play"><MfIcon name="Play" :size="20" /></div>
         </div>
         <div class="title-meta">
-          <div class="song-title" :class="{ 'is-active': isCurrent(song) }">
-            {{ song.title }}
-            <el-tooltip v-if="song.isMatched === false" :content="song.unavailableReason || '曲库中未找到'" placement="top">
+          <div class="song-title" :class="{ 'is-active': isCurrent(row.song) }">
+            <MfIcon v-if="row.isMain && row.groupId" name="ChevronDown" class="group-caret" :class="{ open: isGroupExpanded(row.groupId) }" :size="14" @click.stop="toggleGroup(row.groupId)" />
+            <span class="sub-prefix" v-if="!row.isMain && row.groupId">{{ sourceShortLabel(row.song) }}</span>
+            {{ row.song.title }}
+            <el-tooltip v-if="row.song.isMatched === false" :content="row.song.unavailableReason || '曲库中未找到'" placement="top">
               <MfIcon name="TriangleAlert" class="unmatched-icon" :size="14" />
             </el-tooltip>
           </div>
-          <div class="song-bitrate" v-if="showBitrate && song.bitRate">{{ song.bitRate }}kbps · {{ (song.suffix || '').toUpperCase() }}</div>
-          <div class="song-mobile-meta">{{ [song.artist, song.album].filter(Boolean).join(' · ') || (song.isMatched === false ? '未匹配' : '—') }}</div>
+          <div class="song-bitrate" v-if="showBitrate && row.song.bitRate">{{ row.song.bitRate }}kbps · {{ (row.song.suffix || '').toUpperCase() }}</div>
+          <div class="song-mobile-meta">{{ [row.song.artist, row.song.album].filter(Boolean).join(' · ') || (row.song.isMatched === false ? '未匹配' : '—') }}</div>
         </div>
       </span>
       <span v-if="showSource" class="col col-source">
-        <el-tooltip v-if="sourceMeta(song)" :content="sourceTooltip(song)" placement="top">
-          <span class="source-badge" :style="{ backgroundColor: sourceMeta(song)!.color }">{{ sourceMeta(song)!.label }}</span>
-        </el-tooltip>
-        <span v-else class="source-empty">—</span>
+        <span
+          v-if="row.isMain && row.groupId && row.song.sources && row.song.sources.length > 1"
+          class="source-group"
+          :class="{ open: isGroupExpanded(row.groupId) }"
+          @click.stop="toggleGroup(row.groupId)"
+        >
+          <span class="source-badge" :style="{ backgroundColor: sourceLabelFor(row.song)!.color }">{{ sourceLabelFor(row.song)!.label }}</span>
+          <span class="source-count">{{ isGroupExpanded(row.groupId) ? '收起' : '+' + (row.song.sources.length - 1) }}</span>
+        </span>
+        <template v-else>
+          <el-tooltip v-if="sourceLabelFor(row.song)" :content="sourceTooltip(row.song)" placement="top">
+            <span class="source-badge" :style="{ backgroundColor: sourceLabelFor(row.song)!.color }">{{ sourceLabelFor(row.song)!.label }}</span>
+          </el-tooltip>
+          <span v-else class="source-empty">—</span>
+        </template>
       </span>
-      <span v-if="showArtist" class="col col-artist">{{ song.artist || '—' }}</span>
-      <span v-if="showAlbum" class="col col-album">{{ song.album || '—' }}</span>
-      <span v-if="showPlayedAt" class="col col-played-at">{{ formatPlayedAt(song.playedAt) }}</span>
-      <span class="col col-duration">{{ formatDuration(song.duration) }}</span>
+      <span v-if="showArtist" class="col col-artist">{{ row.song.artist || '—' }}</span>
+      <span v-if="showAlbum" class="col col-album">{{ row.song.album || '—' }}</span>
+      <span v-if="showPlayedAt" class="col col-played-at">{{ formatPlayedAt(row.song.playedAt) }}</span>
+      <span class="col col-duration">{{ formatDuration(row.song.duration) }}</span>
       <span class="col col-actions">
-        <slot name="row-actions" :row="song" />
-        <button v-if="!remote" class="row-btn" :class="{ active: fav.isFavorite(song.id) }" @click.stop="toggleFavorite(song)" :title="fav.isFavorite(song.id) ? '取消喜欢' : '我喜欢'">
-          <MfIcon name="Heart" :filled="fav.isFavorite(song.id)" :size="16" />
+        <slot name="row-actions" :row="row.song" />
+        <button v-if="!remote" class="row-btn" :class="{ active: fav.isFavorite(row.song.id) }" @click.stop="toggleFavorite(row.song)" :title="fav.isFavorite(row.song.id) ? '取消喜欢' : '我喜欢'">
+          <MfIcon name="Heart" :filled="fav.isFavorite(row.song.id)" :size="16" />
         </button>
-        <button v-if="!remote" class="row-btn" @click.stop="openAddToPlaylist(song)" title="添加到歌单">
+        <button v-if="!remote" class="row-btn" @click.stop="openAddToPlaylist(row.song)" title="添加到歌单">
           <MfIcon name="Plus" :size="16" />
         </button>
-        <button class="row-btn" @click.stop="onContext(song, $event)" title="更多操作">
+        <button class="row-btn" @click.stop="onContext(row.song, $event)" title="更多操作">
           <MfIcon name="MoreHorizontal" :size="16" />
         </button>
       </span>
@@ -228,6 +243,73 @@ function sourceTooltip(song: any): string {
   return meta.pluginName ? `${meta.pluginName} · ${meta.label}` : meta.label;
 }
 
+// 行来源标签:本地/WebDAV 用固定标签,web 走平台徽标(sourceMeta)。
+// 合并主行/子行与单源行的来源列统一走这里(行类型 local | webdav | web)。
+function sourceLabelFor(song: any): { label: string; color: string } | null {
+  const t = song?.type || song?.rowType || "local";
+  if (t === "local") return { label: "本地", color: "#3f7ef0" };
+  if (t === "webdav") return { label: "WebDAV", color: "#2ea46c" };
+  return sourceMeta(song);
+}
+// 展开子行标题前缀的短标签(仅本地/WebDAV 显示,web 子行徽标已在其来源列)
+function sourceShortLabel(song: any): string {
+  const t = song?.type || song?.rowType || "local";
+  if (t === "local") return "本地";
+  if (t === "webdav") return "WebDAV";
+  return "";
+}
+
+// ==================== 同曲多源合并展示 ====================
+// 后端序列化时组内成员行都带 sources(组内全部源,local > webdav > web)。
+// 组内多源(>1)时合并为一行主行(主行 = sources[0],核心曲库优先),来源标签
+// 显示「主源 +N」,点击展开/收起子行(每行可单独播放/删除)。单源行保持原样。
+// 仅 showSource 且非移动端启用;虚拟滚动模式在窗口切片内合并(组内成员行可能
+// 分布在未加载块,靠 sources 元数据仍能正确显示主行/子行)。
+const expandedGroups = ref<Set<string>>(new Set());
+function toggleGroup(groupId: string) {
+  const next = new Set(expandedGroups.value);
+  if (next.has(groupId)) next.delete(groupId);
+  else next.add(groupId);
+  expandedGroups.value = next;
+}
+function isGroupExpanded(groupId?: string) {
+  return !!groupId && expandedGroups.value.has(groupId);
+}
+
+interface DisplayRow {
+  song: any;
+  isMain: boolean;
+  groupId?: string;
+}
+
+// 显示行:组内多源合并(主行 + 可选展开子行),undefined 槽位保留给加载占位。
+// 非合并模式(remote/未开来源列/移动端)返回原行,行为与旧版完全一致。
+const displayRows = computed<Array<DisplayRow | undefined>>(() => {
+  const merging = props.showSource && !isMobile.value;
+  const source = virtualized.value ? props.songs.slice(startIndex.value, endIndex.value) : props.songs;
+  if (!merging) return source as any;
+  const out: Array<DisplayRow | undefined> = [];
+  const seen = new Set<string>();
+  for (const s of source) {
+    if (!s) { out.push(undefined); continue; }
+    if (seen.has(s.id)) continue;
+    const sources = Array.isArray(s.sources) && s.sources.length > 1 ? s.sources : null;
+    if (sources) {
+      const main = sources[0];
+      const gid = main.groupId || s.groupId || "";
+      out.push({ song: main, isMain: true, groupId: gid });
+      for (const m of sources) seen.add(m.id);
+      if (gid && isGroupExpanded(gid)) {
+        for (let k = 1; k < sources.length; k++) out.push({ song: sources[k], isMain: false, groupId: gid });
+      }
+    } else {
+      out.push({ song: s, isMain: false });
+      seen.add(s.id);
+    }
+  }
+  return out;
+});
+
 const slots = useSlots();
 // Playlist detail injects an extra "remove" row action via #row-actions; widen
 // the actions column so those buttons never overlap the duration column.
@@ -344,9 +426,9 @@ const scrollParentEl = ref<HTMLElement | Window | null>(null);
 const startIndex = ref(0);
 const endIndex = ref(0);
 const virtualized = computed(() => props.songs.length > VIRTUAL_THRESHOLD);
-const visibleSongs = computed(() =>
-  virtualized.value ? props.songs.slice(startIndex.value, endIndex.value) : props.songs
-);
+// 显示行 = displayRows(窗口切片 + 同曲多源合并);窗口/padding 仍按 props.songs
+// 原始索引计算(虚拟滚动范围不变,合并后行数略少 → 底部少量留白,无碍)。
+const visibleRows = computed(() => displayRows.value);
 /** 行号/索引换算:虚拟化时加上窗口起点,保证显示的行号仍是全局序号 */
 const rowGlobalIdx = (i: number) => (virtualized.value ? startIndex.value : 0) + i;
 const padTop = computed(() => startIndex.value * rowH.value);
@@ -590,6 +672,45 @@ onBeforeUnmount(unbindScroll);
       box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
     }
     .source-empty { font-size: 12px; color: var(--fnos-text-tertiary); }
+    // 同曲多源主行的「主源 +N」展开按钮
+    .source-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      padding: 1px 6px 1px 2px;
+      border-radius: 12px;
+      transition: background 0.15s;
+      &:hover { background: rgba(255, 255, 255, 0.08); }
+      &.open { background: rgba(255, 255, 255, 0.08); }
+      .source-count {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--fnos-text-secondary);
+        white-space: nowrap;
+      }
+    }
+  }
+  // 展开的子行(同曲其它来源):视觉降级,来源徽标明确展示各平台
+  &.is-sub-row {
+    background: rgba(255, 255, 255, 0.02);
+    .song-title { color: var(--fnos-text-secondary); font-weight: 400; }
+    .col-source { padding-left: 12px; }
+  }
+  // 主行标题前的组展开箭头
+  .group-caret {
+    color: var(--fnos-text-tertiary);
+    vertical-align: -2px;
+    cursor: pointer;
+    transition: transform 0.15s;
+    &.open { transform: rotate(180deg); }
+    &:hover { color: var(--fnos-text-primary); }
+  }
+  .sub-prefix {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--fnos-text-muted);
+    margin-right: 4px;
   }
   .col-duration {
     text-align: center;

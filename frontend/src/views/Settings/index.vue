@@ -73,6 +73,16 @@
 
     <el-card class="mt-card">
       <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">优先使用本地曲库源</div>
+          <div class="desc">同一首歌在本地/WebDAV 核心曲库和插件平台都有时，播放自动使用本地源（无损优先）；多来源行在音乐库合并展示，可展开查看各平台源</div>
+        </div>
+        <div class="setting-value"><el-switch v-model="preferLocal" @change="savePreferLocal" /></div>
+      </div>
+    </el-card>
+
+    <el-card class="mt-card">
+      <div class="setting-item">
         <div class="setting-label"><div class="title">清除缓存</div><div class="desc">重置本地设置并重新加载页面</div></div>
         <div class="setting-value"><el-button @click="clearCache">清除缓存</el-button></div>
       </div>
@@ -180,7 +190,26 @@ async function copyApiKey() {
   await copyText(apiKey.value);
 }
 
-onMounted(() => { loadApiKey(); loadVersion(); });
+// ---------- 播放优选(服务端开关,所有客户端统一生效) ----------
+const preferLocal = ref(true);
+async function loadPreferLocal() {
+  try {
+    const res = await api.get("/rest/api/v1/playback/settings");
+    preferLocal.value = res.data.preferLocal !== false;
+  } catch { /* 保持默认开启 */ }
+}
+async function savePreferLocal(v: string | number | boolean) {
+  const on = Boolean(v);
+  try {
+    await api.put("/rest/api/v1/playback/settings", { preferLocal: on });
+    ElMessage.success(on ? "已开启：优先使用本地曲库源" : "已关闭：按原来源播放");
+  } catch (e: any) {
+    preferLocal.value = !on; // 回滚
+    ElMessage.error(e.response?.data?.error || "保存失败");
+  }
+}
+
+onMounted(() => { loadApiKey(); loadVersion(); loadPreferLocal(); });
 const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 function toggleMotion(v: string | number | boolean) {

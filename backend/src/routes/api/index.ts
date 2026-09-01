@@ -34,7 +34,7 @@ import { ensurePlayableStream } from "../../services/source/online/streamFallbac
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
-import { songSourceInfo } from "../../utils/songSource.js";
+import { songSourceInfo, serializeSongRow, attachGroupSources } from "../../utils/songSource.js";
 import { getArtistList, setArtistList, invalidateArtistList } from "../../utils/artistListCache.js";
 import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
@@ -1022,18 +1022,21 @@ apiRoutes.get("/v1/songs", (c) => {
   const coverMap = coverAlbumIds.length
     ? new Map(db.select().from(albums).where(inArray(albums.id, coverAlbumIds)).all().map((a) => [a.id, a.coverArt ? `al-${a.id}` : undefined as string | undefined]))
     : new Map<string, string | undefined>();
-  const items = pageSongs.map(s => {
-    const src = songSourceInfo(s);
-    return {
-      id: s.id, title: s.title, artist: s.artist, album: s.album, artistId: s.artistId,
-      albumId: s.albumId, duration: s.duration, bitRate: s.bitRate, suffix: s.suffix,
-      contentType: s.contentType, size: s.size, playCount: s.playCount, genre: s.genre,
-      track: s.track, discNumber: s.discNumber,
-      coverArt: s.coverArt ? `so-${s.id}` : (s.albumId ? coverMap.get(s.albumId) : undefined),
-      // 来源:web 歌曲输出插件 id + 平台 id(前端「来源」列渲染徽标)
-      sourcePlatform: src.sourcePlatform, sourcePluginId: src.sourcePluginId, isWeb: src.isWeb,
-    };
-  });
+  const items = pageSongs.map(s => serializeSongRow(
+    s,
+    s.coverArt ? `so-${s.id}` : (s.albumId ? coverMap.get(s.albumId) : undefined),
+  ));
+  // 组内多源:一次查询页内所有 group_id 的成员行,按组合并附加(前端按此合并展示)
+  const pageGroupIds = [...new Set(pageSongs.filter((s) => s.groupId).map((s) => s.groupId as string))];
+  if (pageGroupIds.length) {
+    try {
+      const memberRows = db.select().from(songs).where(inArray(songs.groupId, pageGroupIds)).all();
+      attachGroupSources(items, memberRows);
+    } catch (e) {
+      // 组查询失败不影响列表主体,来源合并降级为单行展示
+      log.error("歌曲组内多源查询失败", { err: (e as Error)?.message || e });
+    }
+  }
   return c.json({ total, page, pageSize, items });
 });
 
@@ -1303,6 +1306,18 @@ apiRoutes.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
 // 请求指标:总请求数 / 慢请求数 / 端点调用计数(内存态,重启清零)。
 apiRoutes.get("/v1/admin/metrics", adminMiddleware, (c) => {
   return c.json({ success: true, ...getRequestMetrics() });
+});
+
+// ==================== Playback settings ====================
+// 播放优选:同一首歌(本地/WebDAV 核心曲库 + 插件平台多源)存在时,播放自动
+// 优先使用核心曲库源(无损优先)。全局开关,默认开,设置页可关。
+apiRoutes.get("/v1/playback/settings", adminMiddleware, (c) => c.json({
+  preferLocal: getSettingBool("playback.preferLocal", true),
+}));
+apiRoutes.put("/v1/playback/settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body.preferLocal === "boolean") setSetting("playback.preferLocal", body.preferLocal ? "true" : "false");
+  return c.json({ success: true });
 });
 
 // ==================== Lyrics / covers media-fetch settings + backfill ====================
@@ -1975,14 +1990,11 @@ apiRoutes.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c
       if (song) {
         const album = song.albumId ? albumMap.get(song.albumId) : undefined;
         return {
-          id: song.id, title: song.title, artist: song.artist, album: song.album,
-          artistId: song.artistId, albumId: song.albumId, duration: song.duration || 0,
-          bitRate: song.bitRate, suffix: song.suffix, contentType: song.contentType,
-          coverArt: album?.coverArt ? `al-${album.id}` : (song.coverArt ? `so-${song.id}` : undefined),
+          ...serializeSongRow(
+            song,
+            album?.coverArt ? `al-${album.id}` : (song.coverArt ? `so-${song.id}` : undefined),
+          ),
           playable: true, isMatched: true,
-          sourcePlatform: songSourceInfo(song).sourcePlatform,
-          sourcePluginId: songSourceInfo(song).sourcePluginId,
-          isWeb: songSourceInfo(song).isWeb,
         };
       }
     }
@@ -1992,6 +2004,16 @@ apiRoutes.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c
       playable: false, isMatched: false, unavailableReason: e.unavailableReason || "曲库中未找到",
     };
   });
+  // 组内多源:一次查询页内成员行,按组合并附加(前端按此合并展示/展开)
+  const trackGroupIds = [...new Set(items.filter((i) => (i as any).groupId).map((i) => (i as any).groupId as string))];
+  if (trackGroupIds.length) {
+    try {
+      const memberRows = db.select().from(songs).where(inArray(songs.groupId, trackGroupIds)).all();
+      attachGroupSources(items as any, memberRows);
+    } catch (e) {
+      log.error("歌单曲目组内多源查询失败", { err: (e as Error)?.message || e });
+    }
+  }
   return c.json({ total, matched, page, pageSize, items, playlist: { id: playlist.id, name: playlist.name, songCount: playlist.songCount || 0, matched, duration: playlist.duration || 0, coverArt: `pl-${playlist.id}`, sourcePlatform: playlist.sourcePlatform || "", isImported: isImportedPlaylist(playlist), pluginSynced: isPluginSyncPlaylist(playlist), sourcePluginId: playlist.sourcePlugin || "", syncEnabled: !!playlist.syncEnabled, public: !!playlist.isPublic, owner: playlist.ownerId, isDaily: isDailyRecommendPlaylist(playlist) } });
 });
 

@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { JWT_SECRET, getDataDir } from "../utils/env.js";
 import { createLogger } from "../utils/logger.js";
+import { assignSongGroups } from "../utils/songGroup.js";
 
 const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
@@ -589,6 +590,43 @@ export function initDatabase() {
       } catch {}
     }
   } catch {}
+
+  // ==================== 歌曲分组(同曲多源归组) ====================
+  // 本地/WebDAV 核心曲库与插件平台可能收录同一首歌:规范化标题+歌手相同且
+  // 时长差 ≤3s 的行归入同一 group_id。组内优先级 local > webdav > web,播放
+  // 优选/展示合并都基于它。分组只附加列,不删除任何行(引用不受影响)。
+  for (const col of ["group_id TEXT", "group_key TEXT"]) {
+    try { sqlite.exec(`ALTER TABLE songs ADD COLUMN ${col}`); } catch {}
+  }
+  try {
+    sqlite.exec("CREATE INDEX IF NOT EXISTS idx_songs_group_key ON songs(group_key)");
+  } catch {}
+  // 存量建组(幂等):只处理尚未有 group_id 的行,按「规范化标题+歌手+时长容差」
+  // 一次性分组回填。增量歌曲(导入/匹配)由 service.ts 插入时即时归组,不在此列。
+  try {
+    const ungrouped = sqlite.prepare(
+      "SELECT id, title, artist, duration FROM songs WHERE group_id IS NULL OR group_id = ''"
+    ).all() as { id: string; title: string; artist: string; duration: number | null }[];
+    if (ungrouped.length > 0) {
+      const assignments = assignSongGroups(ungrouped);
+      if (assignments.size > 0) {
+        const t = new Date().toISOString();
+        const stmt = sqlite.prepare("UPDATE songs SET group_id = ?, group_key = ?, updated_at = ? WHERE id = ?");
+        const upd = sqlite.transaction((rows: [string, string, string][]) => {
+          for (const [gid, gkey, sid] of rows) stmt.run(gid, gkey, t, sid);
+        });
+        const batch: [string, string, string][] = [];
+        for (const [id, a] of assignments) {
+          batch.push([a.groupId, a.groupKey, id]);
+          if (batch.length >= 500) { upd(batch); batch.length = 0; }
+        }
+        if (batch.length) upd(batch);
+        log.info(`歌曲分组迁移完成:${assignments.size} 首歌曲归入 ${new Set([...assignments.values()].map(a => a.groupId)).size} 组`);
+      }
+    }
+  } catch (e) {
+    log.error("歌曲分组迁移失败", { err: (e as Error)?.message || e });
+  }
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.

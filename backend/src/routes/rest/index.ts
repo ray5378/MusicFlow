@@ -13,7 +13,8 @@ import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../.
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
-import { songSourceInfo } from "../../utils/songSource.js";
+import { songSourceInfo, attachGroupSources } from "../../utils/songSource.js";
+import { getSettingBool } from "../../services/settings.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
@@ -189,6 +190,9 @@ function songToChild(s: any, starredSet?: Set<string>, rating?: number): any {
     sourcePlatform: src.sourcePlatform,
     sourcePluginId: src.sourcePluginId,
     isWeb: src.isWeb,
+    // 同曲多源归组:行类型 + 组号(前端合并展示/播放优选;sources 仅在收藏页附加)
+    rowType: s.type || "local",
+    groupId: s.groupId || undefined,
   };
 }
 
@@ -1026,6 +1030,17 @@ restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   // Only fetch the songs on the requested page (not the whole favorite list),
   // so a library with thousands of starred tracks doesn't pull them all at once.
   const favSongs = slice.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
+  // 组内多源:一次查询收藏页内所有 group_id 的成员行,按组合并附加
+  // (前端收藏页据此合并展示同一首歌的本地/WebDAV/平台多源)
+  const favGroupIds = [...new Set(favSongs.filter((s: any) => s.groupId).map((s: any) => s.groupId as string))];
+  if (favGroupIds.length) {
+    try {
+      const memberRows = db.select().from(songs).where(inArray(songs.groupId, favGroupIds)).all();
+      attachGroupSources(favSongs as any, memberRows);
+    } catch (e) {
+      log.error("收藏页组内多源查询失败", { err: (e as Error)?.message || e });
+    }
+  }
 
   // 专辑收藏:独立读 user_favorite_albums,支持按名称/艺人搜索与分页。
   const albumFavs = db.select().from(userFavoriteAlbums).where(eq(userFavoriteAlbums.userId, user.id)).all();
@@ -1358,8 +1373,27 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
 
 restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const id = getParam(c, "id") || "";
-  const song = db.select().from(songs).where(eq(songs.id, id)).get();
+  let song = db.select().from(songs).where(eq(songs.id, id)).get();
   if (!song) return c.json(fail(70, "Song not found"));
+
+  // 播放优选:web 歌曲(插件平台源)所在组内有本地/WebDAV 核心曲库源、且设置
+  // 「优先使用本地曲库源」开启(默认开)时,自动切换到本地源播放(无损优先)。
+  // 队列中显示的仍是用户点的那一行,只影响实际流的来源;关闭开关则按原源播放。
+  if ((song.type || "local") === "web" && song.groupId && getSettingBool("playback.preferLocal", true)) {
+    try {
+      const alt = db.select().from(songs)
+        .where(and(eq(songs.groupId, song.groupId), inArray(songs.type, ["local", "webdav"])))
+        .orderBy(sql`CASE ${songs.type} WHEN 'local' THEN 0 ELSE 1 END`)
+        .limit(1)
+        .get();
+      if (alt) {
+        log.info("播放优选:web 歌曲切换到核心曲库源", { webId: song.id, localId: alt.id, type: alt.type });
+        song = alt;
+      }
+    } catch (e) {
+      log.warn("播放优选查询失败,按原源播放", { id: song.id, err: (e as Error)?.message || e });
+    }
+  }
 
   const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
