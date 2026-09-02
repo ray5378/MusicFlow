@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import dgram from "dgram";
 import net from "net";
 import WebSocket from "ws";
-import { eq, like, or } from "drizzle-orm";
+import { and, eq, like, or } from "drizzle-orm";
 import { getDataDir } from "../utils/env.js";
 import { db, sqlite } from "../db/index.js";
 import { songs } from "../db/schema.js";
@@ -529,10 +529,20 @@ export async function discoverExternalPlugins(
             const q = String(query || "").trim();
             if (!q) return [];
             const limit = Math.min(Math.max(Number(options?.limit) || 50, 1), 200);
-            const likeQ = `%${q}%`;
-            return db.select().from(songs).where(
-              or(like(songs.title, likeQ), like(songs.artist, likeQ), like(songs.album, likeQ)),
-            ).limit(limit).all().map(toPluginSong);
+            // 分词 AND 搜索：按空白切词，每个词需命中 title/artist/album 任一，
+            // 词间 AND。替代旧的「整串 LIKE」——整串模式对 "歌名 歌手" 型多词
+            // 查询必 0 命中（任何单字段都不会含完整串），曾迫使全部外置插件回退
+            // 裸歌名搜索、歌手信息在第一轮丢失，导致榜单同名单曲错绑
+            // （QQ 热歌榜《唯一》被绑成王力宏版）——此处为根因层修复。
+            const tokens = q.split(/\s+/).filter(Boolean);
+            const matchToken = (tok: string) => {
+              const likeQ = `%${tok}%`;
+              return or(like(songs.title, likeQ), like(songs.artist, likeQ), like(songs.album, likeQ));
+            };
+            const conds = tokens.map(matchToken);
+            return db.select().from(songs)
+              .where(conds.length === 1 ? conds[0] : and(...conds))
+              .limit(limit).all().map(toPluginSong);
           },
           getById: async (songId: string) => {
             const s = db.select().from(songs).where(eq(songs.id, String(songId))).get();
