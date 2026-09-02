@@ -1543,8 +1543,9 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
 
   // 单插件手动刷新:任意声明 dailyPlaylist / localPlaylist / comboPlaylist /
-  // recommendPlaylist / playlistCleanup 能力的插件(内置或外置)都可经此入口强制重跑。传 force
-  // 绕过插件自身的间隔闸门。**异步任务通道**:任务在后台跑(沙箱用 manifest.longRunning
+  // recommendPlaylist / localPlatformRecommend / playlistCleanup 能力的插件
+  // (内置或外置)都可经此入口强制重跑。传 force 绕过插件自身的间隔闸门。
+  // **异步任务通道**:任务在后台跑(沙箱用 manifest.longRunning
   // 长预算),立即返回,前端轮询 GET /v1/plugins/:id/job 看结果——不再被沙箱 15s
   // 或前端 axios 15s 卡死。
   const pluginId = body?.pluginId;
@@ -1557,6 +1558,7 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
       caps.includes("localPlaylist") ||
       caps.includes("comboPlaylist") ||
       caps.includes("recommendPlaylist") ||
+      caps.includes("localPlatformRecommend") ||
       caps.includes("playlistCleanup");
     if (!isDaily) {
       return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "该插件不支持手动刷新(无推荐歌单能力)"), 400);

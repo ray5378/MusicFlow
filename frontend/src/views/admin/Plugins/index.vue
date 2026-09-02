@@ -690,10 +690,10 @@ function isSourcePlugin(plugin: any) {
   return parseManifest(plugin).type === "source";
 }
 
-/** 推荐歌单类插件(每日推荐 / 本地推荐 / 今日漫游 / 第三方推荐歌单如 ListenBrainz):支持手动刷新。 */
+/** 推荐歌单类插件(每日推荐 / 本地推荐 / 今日漫游 / 平台榜单入库如 QQ/网易/酷狗 / 第三方推荐歌单如 ListenBrainz):支持手动刷新。 */
 function isRecommenderPlugin(plugin: any): boolean {
   const caps = parseManifest(plugin).capabilities || [];
-  return ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist"].some((c) => caps.includes(c));
+  return ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist", "localPlatformRecommend"].some((c) => caps.includes(c));
 }
 
 /** 歌单清理类插件:支持手动触发清理。 */
@@ -854,6 +854,7 @@ const CAP_LABELS: Record<string, string> = {
   localPlaylist: "本地推荐生成",
   comboPlaylist: "组合歌单生成",
   recommendPlaylist: "推荐歌单生成",
+  localPlatformRecommend: "平台榜单入库",
   playlistSync: "歌单定时同步",
   autoMatch: "条目自动匹配",
   lyricProvider: "歌词提供方",
@@ -892,6 +893,7 @@ const CAP_DOCS: Record<string, string> = {
   localPlaylist: "基于播放历史与收藏口味生成本地推荐",
   comboPlaylist: "合并其他推荐歌单生成组合歌单(如 今日漫游)",
   recommendPlaylist: "定期生成/刷新插件自己的推荐歌单(可固定首页、手动刷新)",
+  localPlatformRecommend: "抓取平台官方榜单(QQ/网易云/酷狗等)并同步到本地库(可手动刷新)",
   playlistSync: "定期重新拉取已导入的远程歌单",
   autoMatch: "把歌单条目自动匹配到曲库或在线源",
   lyricProvider: "提供在线歌词的源",
