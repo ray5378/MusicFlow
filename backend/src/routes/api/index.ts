@@ -854,16 +854,19 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
   const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
   if (!p) return c.json({ error: "插件不存在" }, 404);
-  // core 内置插件不可通过状态开关停用:功能开关(多源组匹配规则 / 播放优选
-  // preferLocal、fallbackToWeb)在插件「配置」弹窗中调整,列表状态开关对 core
-  // 插件固定启用,仅普通插件可启停。
-  if (isCoreRow(p)) return c.json({ error: "内置核心插件不可停用,功能开关请在插件「配置」弹窗中调整" }, 400);
-  // 启用插件时若其已配置首页显示位次,与其它插件位次冲突则拒绝启用。
-  if (!p.enabled) {
-    let cfg: any = {};
-    try { cfg = p.config ? JSON.parse(p.config) : {}; } catch {}
-    const conflict = homePositionConflictForSave(p.id, cfg);
-    if (conflict) return c.json({ error: conflict }, 400);
+  // core 内置行为插件(同曲多源组 / 播放优选)也可通过状态开关整体停用:
+  // 总开关(列表)关 = 整个功能关闭(能力查询 isCapabilityEnabled 返回 false,
+  // 不再归组 / 不再优选,恢复按原源播放);配置弹窗中的功能子开关(多源组匹配
+  // 规则 / preferLocal、fallbackToWeb)保留,形成「总开关 + 子开关」两层控制。
+  // 注意:core 插件无首页位次,跳过下面的启用冲突检查。
+  if (!isCoreRow(p)) {
+    // 启用插件时若其已配置首页显示位次,与其它插件位次冲突则拒绝启用。
+    if (!p.enabled) {
+      let cfg: any = {};
+      try { cfg = p.config ? JSON.parse(p.config) : {}; } catch {}
+      const conflict = homePositionConflictForSave(p.id, cfg);
+      if (conflict) return c.json({ error: conflict }, 400);
+    }
   }
   const nextEnabled = p.enabled ? 0 : 1;
   db.update(plugins).set({ enabled: nextEnabled }).where(eq(plugins.id, p.id)).run();

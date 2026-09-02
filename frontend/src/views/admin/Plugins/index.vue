@@ -32,9 +32,8 @@
             </el-table-column>
             <el-table-column label="状态" width="104">
               <template #default="{ row }">
-                <!-- core 内置行为插件(多源组/播放优选):状态开关不控制,功能开关在「配置」弹窗 -->
-                <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
-                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <!-- core 内置行为插件(多源组/播放优选):列表开关 = 总开关(整体启停),功能子开关在「配置」弹窗 -->
+                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
               </template>
             </el-table-column>
             <el-table-column label="操作" width="210">
@@ -62,8 +61,7 @@
               </div>
               <div class="pc-desc m-sub">{{ parseManifest(row).description || row.description || "—" }}</div>
               <div class="pc-actions">
-                <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
-                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                 <el-button size="small" type="primary" plain @click="editPlugin(row)">
                   {{ hasConfig(row) ? "配置" : "详情" }}
                 </el-button>
@@ -162,9 +160,7 @@
                 <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
                 <el-table-column label="状态" width="104">
                   <template #default="{ row }">
-                    <!-- core 内置行为插件:状态开关不控制,功能开关在「配置」弹窗 -->
-                    <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
-                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                     <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                   </template>
                 </el-table-column>
@@ -198,8 +194,7 @@
                   <div class="pc-desc m-sub">{{ row.description }}</div>
                   <div class="pc-meta">
                     <span class="pc-ver">v{{ row.version }}</span>
-                    <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
-                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                     <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                   </div>
                   <div class="pc-actions">
@@ -220,7 +215,7 @@
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
           title="插件运行模型与安全提示"
-          description="内置插件随服务端发行:core 核心行为插件(同曲多源组/播放优选)固定启用,功能开关在其「配置」弹窗中调整;其余内置插件可通过状态开关启停,均不可删除。第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
+          description="内置插件随服务端发行:core 核心行为插件(同曲多源组/播放优选)默认启用,可用列表状态开关整体启停,功能子开关在其「配置」弹窗中调整;其余内置插件同样通过状态开关启停,均不可删除。第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
       </el-tab-pane>
 
       <!-- ============ Media fetch (lyrics / covers) — 能力级全局设置,独立于任何单个插件 ============ -->
@@ -805,8 +800,8 @@ function displayName(plugin: any): string {
   return parseManifest(plugin).name || plugin?.name || "";
 }
 
-/** core 内置行为插件(同曲多源组 / 播放优选等):状态开关不控制(固定启用),
- *  功能开关全部在插件「配置」弹窗的 configSchema 里(开关按钮由 manifest 声明)。 */
+/** core 内置行为插件(同曲多源组 / 播放优选等):列表状态开关 = 总开关(整体启停,
+ *  关 = 不再归组 / 不再优选),配置弹窗 configSchema = 功能子开关,两层叠加控制。 */
 function isCore(plugin: any): boolean {
   return parseManifest(plugin).type === "core";
 }
@@ -991,7 +986,7 @@ const TYPE_HINTS: Record<string, string> = {
   cover: "作为封面提供方参与「能力优先」调度,首个可用方胜出。",
   renderer: "提供 DLNA / 设备投屏能力,可在播放器中选择设备投放。",
   scrobbler: "在播放 / 记录事件时上报到外部服务(如 Last.fm)。",
-  core: "服务端内置行为插件,默认启用。功能开关(而非状态开关)在插件「配置」弹窗中调整,关闭对应功能项即恢复默认行为。",
+  core: "服务端内置行为插件,默认启用。列表状态开关可整体启停(总开关),功能子开关(多源组匹配规则 / 播放优选 preferLocal 等)在插件「配置」弹窗中调整,两层叠加控制。",
 };
 
 function pluginHint(plugin: any): string {
