@@ -3,6 +3,11 @@ import { db } from "../db/index.js";
 import { songs, albums, artists, playlists, playlistSongs, genres } from "../db/schema.js";
 import { suffixToMime } from "./dlna/queue.js";
 import { groupMemberSort } from "../utils/songSource.js";
+import { probeLocalSourceOk } from "../utils/localSourceProbe.js";
+import { playPreferenceActive, preferLocalEnabled, fallbackToWebEnabled } from "./plugin/core/playPreference.js";
+import { createLogger } from "../utils/logger.js";
+
+const log = createLogger("CONTENT");
 
 // Convert song rows into QueueItem objects (shared by the album/playlist play
 // endpoints and the flow runner).
@@ -39,21 +44,35 @@ export function songsToQueueItems(rows: any[]): any[] {
 
 // Resolve a content reference (song / playlist / artist / album / genre) into
 // song rows + a display name. Mirrors the frontend usePlayContent behavior.
-export function resolveContentSongs(type: string, id: string): { rows: any[]; name: string } | null {
+// async:多源组 song 分支需探测 local 源可用性(失败回退 web)。
+export async function resolveContentSongs(type: string, id: string): Promise<{ rows: any[]; name: string } | null> {
   if (type === "song") {
     // Single track. Kept here (rather than making callers hand-build a
     // QueueItem) so the mime/coverArt derivation stays in one place — the HA
     // integration plays a single song through the same /v1/play endpoint.
     const s = db.select().from(songs).where(eq(songs.id, id)).get();
     if (!s) return null;
-    // 同曲多源组播放优选:歌曲属于多源组时,改播组内核心曲库源(local >
-    // webdav > web,与 Web 前端主行 = sources[0] 一致)。传任意组内 id 都
-    // 落到同一首歌,客户端/HA 集成无需自己选源。组内保留所有行供备选,
-    // 这里只把「主源」作为播放行返回。
-    if (s.groupId) {
+    // 同曲多源组播放优选(服务端插件开关):歌曲属于多源组、且「播放优选」插件
+    // 开启(默认开)时,改播组内核心曲库源(local > webdav > web,与 Web 前端
+    // 主行 = sources[0] 一致)。传任意组内 id 都落到同一首歌,客户端/HA 集成
+    // 无需自己选源。组内保留所有行供备选,这里只把「主源」作为播放行返回。
+    // 插件关闭 → 恒走下方原行分支(按原源播放,与插件化前行为一致)。
+    if (s.groupId && playPreferenceActive() && preferLocalEnabled()) {
       const members = db.select().from(songs).where(eq(songs.groupId, s.groupId)).all();
       if (members.length > 1) {
         const sorted = [...members].sort(groupMemberSort);
+        // 首选 Local,失败回退平台:主源(local/webdav)探测不可用(文件缺失/
+        // WebDAV 拉不到)时,切组内 web 备选源,保证播放队列可播。
+        if ((sorted[0].type || "local") !== "web" && fallbackToWebEnabled()) {
+          const ok = await probeLocalSourceOk(sorted[0]);
+          if (!ok) {
+            const webAlt = sorted.find((m) => (m.type || "") === "web");
+            if (webAlt) {
+              log.info("播放回退:核心曲库源不可用,切组内 web 源", { localId: sorted[0].id, webId: webAlt.id, title: webAlt.title || "" });
+              return { rows: [webAlt], name: webAlt.title || "未知" };
+            }
+          }
+        }
         return { rows: [sorted[0]], name: sorted[0].title || "未知" };
       }
     }

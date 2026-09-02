@@ -44,6 +44,9 @@ import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/ren
 import { airplayRendererManifest, airplayRendererPlugin } from "../services/plugin/renderers/airplay.js";
 // ---- artist (artist info scraping) ----
 import { artistInfoManifest, artistInfoPlugin } from "../services/plugin/artistInfo.js";
+// ---- core (服务端内置行为开关:多源组 / 播放优选,端侧零改动) ----
+import { songGroupManifest, songGroupPlugin } from "../services/plugin/core/songGroup.js";
+import { playPreferenceManifest, playPreferencePlugin } from "../services/plugin/core/playPreference.js";
 
 export interface BuiltinPlugin {
   manifest: PluginManifest;
@@ -87,6 +90,12 @@ export const BUILTIN_ARTIST_PLUGINS: BuiltinPlugin[] = [
   { manifest: artistInfoManifest, impl: artistInfoPlugin },
 ];
 
+// ---- core (服务端内置行为插件:多源组 / 播放优选,端侧零改动,可随时开关) ----
+export const BUILTIN_CORE_PLUGINS: BuiltinPlugin[] = [
+  { manifest: songGroupManifest, impl: songGroupPlugin },
+  { manifest: playPreferenceManifest, impl: playPreferencePlugin },
+];
+
 /** All built-in plugins (any type). */
 export const BUILTIN_PLUGINS: BuiltinPlugin[] = [
   ...BUILTIN_SOURCE_PLUGINS,
@@ -97,6 +106,7 @@ export const BUILTIN_PLUGINS: BuiltinPlugin[] = [
   ...BUILTIN_COVER_PLUGINS,
   ...BUILTIN_RENDERER_PLUGINS,
   ...BUILTIN_ARTIST_PLUGINS,
+  ...BUILTIN_CORE_PLUGINS,
 ];
 
 let registered = false;

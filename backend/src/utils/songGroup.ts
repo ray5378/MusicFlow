@@ -13,7 +13,6 @@
 // 在 songs 表上附加 group_id 列,展示层按组合并、播放层按组优选。
 
 export const GROUP_DURATION_TOLERANCE = 1; // ±1s(秒级;v1.13.26 前为 ±3s)
-
 /** 规范化分组文本:去首尾空白、全角空格→半角、折叠内部空白、转小写。
  *  括号/引号/书名号等装饰符号全局删除但保留内部内容——(Live)/(Remix) 的
  *  版本词保留在正文中,靠标题差异天然分到不同组(符合「靠专辑或时长区分
@@ -41,11 +40,11 @@ export function songGroupKey(title: string, artist: string, album?: string | nul
 }
 
 /** 两首时长是否在容差内:双方都必须 > 0(未知时长不参与容差比较)。 */
-export function durationInRange(a: number | null | undefined, b: number | null | undefined): boolean {
+export function durationInRange(a: number | null | undefined, b: number | null | undefined, tolerance: number = GROUP_DURATION_TOLERANCE): boolean {
   const da = Number(a || 0);
   const db = Number(b || 0);
   if (da <= 0 || db <= 0) return false;
-  return Math.abs(da - db) <= GROUP_DURATION_TOLERANCE;
+  return Math.abs(da - db) <= tolerance;
 }
 
 export interface GroupableSong {
@@ -61,20 +60,34 @@ export interface GroupAssignment {
   groupKey: string;
 }
 
+export interface GroupOptions {
+  /** 时长容差(秒)。默认 GROUP_DURATION_TOLERANCE。 */
+  tolerance?: number;
+  /** 是否要求专辑一致(默认 true;false 时 key 退化为「标题+歌手」)。 */
+  albumRequired?: boolean;
+}
+
+/** 组装分组 key:albumRequired=false 时专辑维度恒为空(等价无专辑匹配)。 */
+export function buildGroupKey(title: string, artist: string, album: string | null | undefined, albumRequired: boolean): string {
+  return `${normalizeGroupText(title)}\u0001${normalizeGroupText(artist || "")}\u0001${albumRequired ? normalizeGroupText(album || "") : ""}`;
+}
+
 /**
  * 为一组歌曲分配组号(存量迁移用)。规则:
- *  1. 按 groupKey 分桶(规范化标题+歌手+专辑相同);
- *  2. 桶内按 duration 升序,union-find 两两比较,|d1-d2| ≤ 1s 的连成一组;
+ *  1. 按 groupKey 分桶(规范化标题+歌手+专辑相同,albumRequired 可关);
+ *  2. 桶内按 duration 升序,union-find 两两比较,|d1-d2| ≤ 容差(默认 1s)的连成一组;
  *  3. 每生成一个组分配一个新的 groupId。
  * 返回 id → { groupId, groupKey } 映射;无标题(规范化后为空)的歌曲返回 null。
  */
-export function assignSongGroups(rows: GroupableSong[]): Map<string, GroupAssignment> {
+export function assignSongGroups(rows: GroupableSong[], opts?: GroupOptions): Map<string, GroupAssignment> {
+  const tolerance = opts?.tolerance ?? GROUP_DURATION_TOLERANCE;
+  const albumRequired = opts?.albumRequired ?? true;
   const out = new Map<string, GroupAssignment>();
   const buckets = new Map<string, GroupableSong[]>();
   for (const r of rows) {
     const nt = normalizeGroupText(r.title);
     const na = normalizeGroupText(r.artist || "");
-    const nal = normalizeGroupText(r.album || "");
+    const nal = albumRequired ? normalizeGroupText(r.album || "") : "";
     if (!nt && !na) continue; // 无标题且无歌手,不参与分组
     const key = `${nt}\u0001${na}\u0001${nal}`;
     let list = buckets.get(key);
@@ -88,7 +101,7 @@ export function assignSongGroups(rows: GroupableSong[]): Map<string, GroupAssign
       out.set(r.id, { groupId: newGroupId(), groupKey: key });
       continue;
     }
-    // 桶内排序后 union-find:任意两两差 ≤1s 合并
+    // 桶内排序后 union-find:任意两两差 ≤容差 合并
     const sorted = [...list].sort((a, b) => Number(a.duration || 0) - Number(b.duration || 0));
     const parent = new Map<string, string>();
     const find = (x: string): string => {
@@ -101,7 +114,7 @@ export function assignSongGroups(rows: GroupableSong[]): Map<string, GroupAssign
     for (let i = 0; i < sorted.length; i++) {
       for (let j = i + 1; j < sorted.length; j++) {
         const a = sorted[i]!, b = sorted[j]!;
-        if (!durationInRange(a.duration, b.duration)) continue;
+        if (!durationInRange(a.duration, b.duration, tolerance)) continue;
         const ra = find(a.id), rb = find(b.id);
         if (ra !== rb) parent.set(ra, rb);
       }
@@ -138,6 +151,7 @@ export function newGroupId(): string {
 export function findGroupForSong(
   candidates: { id: string; groupId: string | null; duration: number | null }[],
   duration: number | null,
+  tolerance?: number,
 ): string | null {
   if (!candidates.length) return null;
   const groups = new Map<string, number[]>(); // groupId -> member durations
@@ -151,7 +165,7 @@ export function findGroupForSong(
   let bestDiff = Infinity;
   for (const [gid, durs] of groups) {
     for (const d of durs) {
-      if (!durationInRange(d, duration)) continue;
+      if (!durationInRange(d, duration, tolerance)) continue;
       const diff = Math.abs(Number(duration || 0) - d);
       if (diff < bestDiff) { bestDiff = diff; bestGroup = gid; }
     }

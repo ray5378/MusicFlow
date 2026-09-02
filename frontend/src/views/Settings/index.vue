@@ -83,10 +83,12 @@
       <h3>播放</h3>
       <div class="setting-item">
         <div class="setting-label">
-          <div class="title">优先使用本地曲库源</div>
-          <div class="desc">同一首歌在本地/WebDAV 核心曲库和插件平台都有时，播放自动使用本地源（无损优先）；多来源行在音乐库合并展示，可展开查看各平台源</div>
+          <div class="title">播放优选（首选 Local）</div>
+          <div class="desc">已并入「播放优选」内置核心插件：多源组歌曲自动播本地/WebDAV 无损源，Local 不可用时回退平台源。功能开关请在插件管理页的插件「配置」弹窗中调整</div>
         </div>
-        <div class="setting-value"><el-switch v-model="preferLocal" @change="savePreferLocal" /></div>
+        <div class="setting-value">
+          <el-button size="small" plain @click="$router.push('/admin/plugins')">前往插件管理</el-button>
+        </div>
       </div>
     </el-card>
 
@@ -280,25 +282,6 @@ async function copyApiKey() {
   await copyText(apiKey.value);
 }
 
-// ---------- 播放优选(服务端开关,所有客户端统一生效) ----------
-const preferLocal = ref(true);
-async function loadPreferLocal() {
-  try {
-    const res = await api.get("/rest/api/v1/playback/settings");
-    preferLocal.value = res.data.preferLocal !== false;
-  } catch { /* 保持默认开启 */ }
-}
-async function savePreferLocal(v: string | number | boolean) {
-  const on = Boolean(v);
-  try {
-    await api.put("/rest/api/v1/playback/settings", { preferLocal: on });
-    ElMessage.success(on ? "已开启：优先使用本地曲库源" : "已关闭：按原来源播放");
-  } catch (e: any) {
-    preferLocal.value = !on; // 回滚
-    ElMessage.error(e.response?.data?.error || "保存失败");
-  }
-}
-
 // ---------- 网络代理 ----------
 const proxyEnabled = ref(false);
 const proxyUrl = ref("");
@@ -441,7 +424,7 @@ async function changeUsername() {
   }
 }
 
-onMounted(() => { loadApiKey(); loadVersion(); loadPreferLocal(); loadProxy(); loadBatchPace(); loadMemorySettings(); });
+onMounted(() => { loadApiKey(); loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); });
 </script>
 
 <style lang="scss" scoped>

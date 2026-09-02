@@ -1,6 +1,7 @@
 // 在线(web)歌曲的来源解析:songs.source_data.source(平台 id)+ plugin_entry(插件 id)。
 // 所有歌曲序列化点统一经此函数暴露来源字段,供前端渲染「来源」列(平台徽标 + 插件名)。
 // 本地歌曲不是 web 类型,一律返回空来源(前端不显示徽标)。
+import { isCapabilityEnabled } from "../plugins/registry.js";
 export interface SongSourceInfo {
   isWeb: boolean;
   /** 平台 id,如 netease / qq / kugou;未知平台为空串 */
@@ -131,6 +132,9 @@ export function attachGroupSources(
   memberRows: any[],
   resolveCover?: (song: any) => string | undefined,
 ): void {
+  // 插件总开关:同曲多源组(songGroup)关闭时不输出 sources —— 前端/客户端
+  // 依赖 sources.length>1 判断合并,不输出即自然回到平铺展示,端侧零改动。
+  if (!isCapabilityEnabled("songGroup")) return;
   const byGroup = new Map<string, any[]>();
   for (const r of memberRows) {
     if (!r.groupId) continue;

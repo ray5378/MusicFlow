@@ -97,6 +97,12 @@ export function firstEnabledByCapability(cap: PluginCapability): RegisteredPlugi
   return getEnabledByCapability(cap)[0];
 }
 
+/** 是否有「已启用」插件声明该能力(核心行为开关,如 songGroup / playPreference)。
+ *  高频调用点(序列化/流播)用它做常量级判断,不拉插件实例。 */
+export function isCapabilityEnabled(cap: PluginCapability): boolean {
+  return getEnabledByCapability(cap).length > 0;
+}
+
 /** Read the stored config JSON for a plugin id (from the DB `plugins` row).
  *  只投影 name/enabled/config,避开 manifest 大 JSON 列。不做内存缓存(同上,
  *  配置/启用经原 SQL 写入需立即可见)。 */

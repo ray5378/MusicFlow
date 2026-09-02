@@ -32,8 +32,9 @@
             </el-table-column>
             <el-table-column label="状态" width="104">
               <template #default="{ row }">
-                <!-- 内置插件也可停用(服务生命周期联动);仅删除受限 -->
-                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <!-- core 内置行为插件(多源组/播放优选):状态开关不控制,功能开关在「配置」弹窗 -->
+                <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
+                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
               </template>
             </el-table-column>
             <el-table-column label="操作" width="210">
@@ -61,7 +62,8 @@
               </div>
               <div class="pc-desc m-sub">{{ parseManifest(row).description || row.description || "—" }}</div>
               <div class="pc-actions">
-                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
+                <el-switch v-else v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                 <el-button size="small" type="primary" plain @click="editPlugin(row)">
                   {{ hasConfig(row) ? "配置" : "详情" }}
                 </el-button>
@@ -160,8 +162,9 @@
                 <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
                 <el-table-column label="状态" width="104">
                   <template #default="{ row }">
-                    <!-- 内置插件也可停用(服务生命周期联动);仅删除受限 -->
-                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <!-- core 内置行为插件:状态开关不控制,功能开关在「配置」弹窗 -->
+                    <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
+                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                     <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                   </template>
                 </el-table-column>
@@ -195,7 +198,8 @@
                   <div class="pc-desc m-sub">{{ row.description }}</div>
                   <div class="pc-meta">
                     <span class="pc-ver">v{{ row.version }}</span>
-                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
+                    <el-tag v-if="isCore(row)" size="small" type="success" effect="light">启用</el-tag>
+                    <el-switch v-else-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                     <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
                   </div>
                   <div class="pc-actions">
@@ -216,7 +220,7 @@
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
           title="插件运行模型与安全提示"
-          description="内置插件随服务端发行,是核心功能(不可停用/删除);第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
+          description="内置插件随服务端发行:core 核心行为插件(同曲多源组/播放优选)固定启用,功能开关在其「配置」弹窗中调整;其余内置插件可通过状态开关启停,均不可删除。第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
       </el-tab-pane>
 
       <!-- ============ Media fetch (lyrics / covers) — 能力级全局设置,独立于任何单个插件 ============ -->
@@ -801,6 +805,12 @@ function displayName(plugin: any): string {
   return parseManifest(plugin).name || plugin?.name || "";
 }
 
+/** core 内置行为插件(同曲多源组 / 播放优选等):状态开关不控制(固定启用),
+ *  功能开关全部在插件「配置」弹窗的 configSchema 里(开关按钮由 manifest 声明)。 */
+function isCore(plugin: any): boolean {
+  return parseManifest(plugin).type === "core";
+}
+
 function hasConfig(plugin: any): boolean {
   return (parseManifest(plugin).configSchema || []).length > 0;
 }
@@ -823,6 +833,7 @@ const TYPE_LABELS: Record<string, string> = {
   cover: "封面",
   renderer: "设备投屏",
   scrobbler: "播放上报",
+  core: "内置核心",
 };
 const TYPE_COLORS: Record<string, string> = {
   source: "primary",
@@ -833,6 +844,7 @@ const TYPE_COLORS: Record<string, string> = {
   cover: "danger",
   renderer: "info",
   scrobbler: "info",
+  core: "warning",
 };
 const CAP_LABELS: Record<string, string> = {
   search: "在线搜索",
@@ -853,6 +865,8 @@ const CAP_LABELS: Record<string, string> = {
   coverProvider: "封面提供方",
   renderer: "设备投屏",
   scrobbler: "播放上报",
+  songGroup: "同曲多源组",
+  playPreference: "播放优选",
 };
 const PERM_LABELS: Record<string, string> = {
   log: "日志",
@@ -889,6 +903,8 @@ const CAP_DOCS: Record<string, string> = {
   coverProvider: "提供在线封面的源",
   renderer: "投屏到局域网播放设备（DLNA 等）",
   scrobbler: "把播放事件上报到 Last.fm / ListenBrainz 等",
+  songGroup: "把同一首歌的多个来源(本地/WebDAV/在线平台)按标题+歌手+专辑+时长秒级归为一组,各端自动合并展示",
+  playPreference: "播放自动优选组内 local/WebDAV 核心曲库源(无损优先),Local 不可用时自动回退平台源",
 };
 
 // 极简 markdown 渲染（文档为受控内容,先转义再套标签,防 XSS）
@@ -975,6 +991,7 @@ const TYPE_HINTS: Record<string, string> = {
   cover: "作为封面提供方参与「能力优先」调度,首个可用方胜出。",
   renderer: "提供 DLNA / 设备投屏能力,可在播放器中选择设备投放。",
   scrobbler: "在播放 / 记录事件时上报到外部服务(如 Last.fm)。",
+  core: "服务端内置行为插件,默认启用。功能开关(而非状态开关)在插件「配置」弹窗中调整,关闭对应功能项即恢复默认行为。",
 };
 
 function pluginHint(plugin: any): string {

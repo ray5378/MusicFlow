@@ -75,6 +75,7 @@ import {
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
 import { unregisterPlugin, firstEnabledByCapability, getEnabledByCapability, getPluginConfig, getPluginManifest, getPlugin } from "../../plugins/registry.js";
+import { preferLocalEnabled, PLAY_PREFERENCE_PLUGIN_ID } from "../../services/plugin/core/playPreference.js";
 import fs from "node:fs";
 import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
@@ -804,6 +805,12 @@ apiRoutes.get("/v1/sources/:id/scan-status", adminMiddleware, (c) => {
 // 内置插件 = 随服务端发行的功能:可停用(服务生命周期按插件联动)、不可删除、不可更新。
 const BUILTIN_IDS = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
 const isBuiltinRow = (r: any): boolean => BUILTIN_IDS.has(r?.id) || BUILTIN_IDS.has(r?.name);
+// core 内置插件(同曲多源组 / 播放优选等行为插件):不参与状态开关启停,功能开关
+// 全部收在插件「配置」弹窗的 configSchema 里(开关按钮由 manifest 声明)。
+const isCoreRow = (r: any): boolean => {
+  const m = getPluginManifest(r?.name) || (() => { try { return r?.manifest ? JSON.parse(r.manifest) : {}; } catch { return {}; } })();
+  return m.type === "core";
+};
 
 apiRoutes.get("/v1/plugins", adminMiddleware, (c) => {
   const rows = db.select().from(plugins).all() as any[];
@@ -847,6 +854,10 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
   const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
   if (!p) return c.json({ error: "插件不存在" }, 404);
+  // core 内置插件不可通过状态开关停用:功能开关(多源组匹配规则 / 播放优选
+  // preferLocal、fallbackToWeb)在插件「配置」弹窗中调整,列表状态开关对 core
+  // 插件固定启用,仅普通插件可启停。
+  if (isCoreRow(p)) return c.json({ error: "内置核心插件不可停用,功能开关请在插件「配置」弹窗中调整" }, 400);
   // 启用插件时若其已配置首页显示位次,与其它插件位次冲突则拒绝启用。
   if (!p.enabled) {
     let cfg: any = {};
@@ -1313,14 +1324,27 @@ apiRoutes.get("/v1/admin/metrics", adminMiddleware, (c) => {
 });
 
 // ==================== Playback settings ====================
-// 播放优选:同一首歌(本地/WebDAV 核心曲库 + 插件平台多源)存在时,播放自动
-// 优先使用核心曲库源(无损优先)。全局开关,默认开,设置页可关。
+// 播放优选(首选 Local)已并入「播放优选」内置插件(core-play-preference):
+// 该端点保留仅为兼容旧调用方,读写直接落到插件配置——
+// 关闭插件 = preferLocal 失效(按原源播放);插件的 preferLocal 子开关 = 旧版
+// 全局设置 playback.preferLocal 的唯一真源。UI 入口在「插件管理」页开关/配置。
 apiRoutes.get("/v1/playback/settings", adminMiddleware, (c) => c.json({
-  preferLocal: getSettingBool("playback.preferLocal", true),
+  preferLocal: preferLocalEnabled(),
 }));
 apiRoutes.put("/v1/playback/settings", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  if (typeof body.preferLocal === "boolean") setSetting("playback.preferLocal", body.preferLocal ? "true" : "false");
+  if (typeof body.preferLocal === "boolean") {
+    const p = db.select().from(plugins).where(eq(plugins.id, PLAY_PREFERENCE_PLUGIN_ID)).get();
+    if (p) {
+      let cfg: any = {};
+      try { cfg = p.config ? JSON.parse(p.config) : {}; } catch { /* keep {} */ }
+      cfg.preferLocal = body.preferLocal;
+      db.update(plugins)
+        .set({ config: JSON.stringify(cfg), updatedAt: new Date().toISOString() })
+        .where(eq(plugins.id, p.id))
+        .run();
+    }
+  }
   return c.json({ success: true });
 });
 
@@ -3219,7 +3243,7 @@ apiRoutes.post("/v1/play", async (c) => {
   }
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
-  const resolved = resolveContentSongs(type, id);
+  const resolved = await resolveContentSongs(type, id);
   if (!resolved) return c.json({ error: `无效的 ${type} id` }, 404);
   const items = songsToQueueItems(resolved.rows);
   if (items.length === 0) return c.json({ error: `「${resolved.name}」没有可播放的歌曲` }, 422);

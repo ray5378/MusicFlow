@@ -22,7 +22,8 @@ import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./in
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
 import { createLogger } from "../../../utils/logger.js";
-import { findGroupForSong, newGroupId, normalizeGroupText } from "../../../utils/songGroup.js";
+import { newGroupId, normalizeGroupText } from "../../../utils/songGroup.js";
+import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../../plugin/core/songGroup.js";
 
 const log = createLogger("online-import");
 
@@ -128,22 +129,22 @@ async function planSongInsert(
     return { success: true, songId: existing, deduped: true };
   }
 
-  // 同曲多源归组:与已有歌曲(本地/WebDAV 核心曲库或其它平台行)按「规范化标题
-  // + 歌手 + 专辑 + 时长 ±1s(秒级)」并入同一组。组内保留所有行——web 行保留
-  // 作备选源,播放层可按开关优选用本地/WebDAV 源。未知时长(duration=0)不参与
-  // 容差比较,保守新建组,避免误合并不同版本。
+  // 同曲多源归组(服务端插件开关,默认开):与已有歌曲(本地/WebDAV 核心曲库或
+  // 其它平台行)按「规范化标题 + 歌手 + 专辑 + 时长 ±容差」并入同一组。组内
+  // 保留所有行——web 行保留作备选源,播放层可按开关优选用本地/WebDAV 源。
+  // 插件关闭时 groupId/groupKey 恒为 null:新歌不再入组,平铺 + 按原源播放。
+  // 未知时长(duration=0)不参与容差比较,保守新建组,避免误合并不同版本。
   const nt = normalizeGroupText(song.name || "");
   const na = normalizeGroupText(song.artist || "");
-  const nal = normalizeGroupText(song.album || "");
   let groupId: string | null = null;
   let groupKey: string | null = null;
-  if (nt || na) {
-    groupKey = `${nt}\u0001${na}\u0001${nal}`;
+  if (songGroupEnabled() && (nt || na)) {
+    groupKey = groupKeyForConfig(song.name || "", song.artist || "", song.album || "");
     try {
       const candidates = sqlite.prepare(
         "SELECT id, group_id, duration FROM songs WHERE group_key = ?"
       ).all(groupKey) as { id: string; groupId: string | null; duration: number | null }[];
-      groupId = findGroupForSong(candidates, song.duration || null) ?? newGroupId();
+      groupId = findGroupForSongConfig(candidates, song.duration || null) ?? newGroupId();
     } catch {
       groupId = newGroupId();
     }

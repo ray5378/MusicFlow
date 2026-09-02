@@ -35,11 +35,11 @@
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
-        <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>系统设置</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>插件管理</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>媒体源</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><MfIcon name="User" /><template #title>用户管理</template></el-menu-item>
+        <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>系统设置</template></el-menu-item>
       </el-menu>
       <div class="sidebar-footer">
         <el-dropdown @command="handleCommand">

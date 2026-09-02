@@ -20,7 +20,8 @@ export type PluginType =
   | "cover"       // supplies cover art (coverProvider)
   | "renderer"    // casts audio to a device (DLNA / Chromecast / ...)
   | "scrobbler"   // reports plays to an external service (Last.fm / ListenBrainz)
-  | "artist";     // fetches artist info (bio / avatar) from a data source
+  | "artist"      // fetches artist info (bio / avatar) from a data source
+  | "core";       // 服务端内置行为插件(多源组 / 播放优选等,端侧零改动,可开关)
 
 /** Optional abilities a plugin may declare. The core only calls the matching
  *  method when the capability is present. */
@@ -58,7 +59,10 @@ export type PluginCapability =
   | "renderer" // casts audio to a device via discover/cast/control
   | "scrobbler" // reports playback events via onPlay/onScrobble
   // ---- artist plugins ----
-  | "artistInfo"; // fetches artist bio/avatar via fetchArtistInfo()
+  | "artistInfo" // fetches artist bio/avatar via fetchArtistInfo()
+  // ---- core plugins(服务端内置行为开关,端侧零改动) ----
+  | "songGroup" // 同曲多源组:匹配/写入 group_id + 序列化输出 groupId/sources
+  | "playPreference"; // 播放优选:首选 Local + local 失败回退平台
 
 export interface ConfigField {
   key: string;

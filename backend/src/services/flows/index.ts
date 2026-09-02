@@ -280,7 +280,7 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
             const ensure = await ensureHomePlaylist(node.id);
             if (!ensure.ok) throw new Error(`推荐歌单「${node.name || node.id}」未就绪:${ensure.reason || "生成失败"}`);
           }
-          const resolved = resolveContentSongs(node.contentType || "playlist", node.id);
+          const resolved = await resolveContentSongs(node.contentType || "playlist", node.id);
           if (!resolved || resolved.rows.length === 0) {
             throw new Error(`内容解析失败:${node.name ? `「${node.name}」` : "所选内容"}无可播放歌曲`);
           }

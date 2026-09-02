@@ -72,9 +72,9 @@ describe("plugin registry", () => {
     // 内置插件:go-music-dl 三合一(源/歌词/封面)已改回**外置**插件
     // (MusicFlow-plugins 仓库分发),因此内置插件已不再有 source 类型——
     // source 类型由外置插件在市场/官方注册表安装后提供。其余内置为
-    // importer/recommender/sync/renderer/artist。
+    // importer/recommender/sync/renderer/artist + core(多源组/播放优选行为插件)。
     expect([...types].sort()).toEqual([
-      "artist", "importer", "recommender", "renderer", "sync",
+      "artist", "core", "importer", "recommender", "renderer", "sync",
     ]);
   });
 
@@ -94,6 +94,9 @@ describe("plugin registry", () => {
     // 注意: go-music-dl-lyrics / go-music-dl-cover 已外置为官方市场插件,不再内置。
     expect(enabledFlag("dlna-renderer")).toBe(1);
     expect(enabledFlag("local-recommend")).toBe(1);
+    // core 行为插件(多源组 / 播放优选):随服务端发行,默认启用,功能开关在插件配置弹窗。
+    expect(enabledFlag("core-song-group")).toBe(1);
+    expect(enabledFlag("core-play-preference")).toBe(1);
   });
 
   it("re-seeding never duplicates or resets existing rows", () => {
