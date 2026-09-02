@@ -27,6 +27,8 @@ app.route("/rest", restRoutes);
 const fixtureDir = path.join(os.tmpdir(), `mf-dlna-ogg-${process.pid}`);
 let oggBytes: Buffer;
 let mpegBytes: Buffer;
+let m4aBytes: Buffer;
+let mp3Bytes: Buffer;
 
 // 真实 HTTP 上游:按 path 返回不同格式,统计 Range 探测请求次数。
 let probeCount = 0;
@@ -49,6 +51,26 @@ beforeAll(async () => {
 
   // 假 mp3(任意字节,仅验证透传不转码)。
   mpegBytes = Buffer.alloc(1000, 0x5a);
+
+  // 真实 M4A(AAC mp4 容器)——模拟 go-music-dl soda 源返回的格式。
+  const m4aPath = path.join(fixtureDir, "fixture.m4a");
+  const r2 = spawnSync(resolveFfmpeg(), [
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100",
+    "-ac", "2", "-c:a", "aac", "-f", "mp4", m4aPath,
+  ], { encoding: "utf8" });
+  if (r2.status !== 0) throw new Error(`m4a fixture 生成失败: ${r2.stderr?.slice(0, 500)}`);
+  m4aBytes = fs.readFileSync(m4aPath);
+
+  // 真实 mp3——验证 octet-stream + mp3 magic 应透传(仅修正 MIME)。
+  const mp3Path = path.join(fixtureDir, "fixture.mp3");
+  const r3 = spawnSync(resolveFfmpeg(), [
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100",
+    "-c:a", "libmp3lame", "-f", "mp3", mp3Path,
+  ], { encoding: "utf8" });
+  if (r3.status !== 0) throw new Error(`mp3 fixture 生成失败: ${r3.stderr?.slice(0, 500)}`);
+  mp3Bytes = fs.readFileSync(mp3Path);
 
   server = http.createServer((req, res) => {
     const u = new URL(req.url || "/", baseUrl || "http://x");
@@ -74,6 +96,10 @@ beforeAll(async () => {
     };
     if (u.pathname === "/ogg.ogg") { serve("audio/ogg", oggBytes); return; }
     if (u.pathname === "/mpeg.mp3") { serve("audio/mpeg", mpegBytes); return; }
+    // 模拟 go-music-dl soda 源:Content-Type 标错为 octet-stream,body 是真实 M4A。
+    if (u.pathname === "/soda.m4a") { serve("application/octet-stream", m4aBytes); return; }
+    // 模拟 octet-stream + 真实 mp3:应透传且修正 MIME。
+    if (u.pathname === "/soda_mp3.bin") { serve("application/octet-stream", mp3Bytes); return; }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
   });
@@ -93,6 +119,10 @@ beforeAll(async () => {
     { id: "wm", title: "Mpeg", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:qq", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-mpeg", groupKey: "k-mpeg", url: `${baseUrl}/mpeg.mp3` },
     // 缓存用例专用行(探测只应发生一次)。
     { id: "wc", title: "Cached", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:qq", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-cache", groupKey: "k-cache", url: `${baseUrl}/ogg.ogg` },
+    // 模拟 soda 源:Content-Type octet-stream + M4A body → 应兜底转码。
+    { id: "so", title: "SodaM4a", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:soda", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-soda", groupKey: "k-soda", url: `${baseUrl}/soda.m4a` },
+    // 模拟 octet-stream + 真实 mp3 → 应透传且修正 Content-Type。
+    { id: "sm", title: "SodaMp3", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:soda", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-sodamp3", groupKey: "k-sodamp3", url: `${baseUrl}/soda_mp3.bin` },
   ]).run();
 });
 
@@ -123,6 +153,27 @@ describe("/rest/dlna/stream/:token 音箱格式兜底转码", () => {
     expect(Number(res.headers.get("content-length"))).toBe(mpegBytes.length);
     const buf = Buffer.from(await res.arrayBuffer());
     expect(buf.equals(mpegBytes)).toBe(true);
+  });
+
+  it("上游 octet-stream + M4A(go-music-dl soda 源) → 兜底转 192k mp3", async () => {
+    const { token } = createCastSession("so", "dev1", "http://localhost:1");
+    const res = await app.request(`/rest/dlna/stream/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("audio/mpeg");
+    const buf = Buffer.from(await res.arrayBuffer());
+    expect(buf.length).toBeGreaterThan(1024); // 有实际转码音频数据
+    const hasId3 = buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33;
+    const hasMp3Sync = buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0;
+    expect(hasId3 || hasMp3Sync).toBe(true);
+  });
+
+  it("上游 octet-stream + 真实 mp3 → 透传并把 Content-Type 修正为 audio/mpeg", async () => {
+    const { token } = createCastSession("sm", "dev1", "http://localhost:1");
+    const res = await app.request(`/rest/dlna/stream/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("audio/mpeg");
+    const buf = Buffer.from(await res.arrayBuffer());
+    expect(buf.equals(mp3Bytes)).toBe(true); // 未转码,原样透传
   });
 
   it("探测结果缓存:同一行二次拉流只探测一次上游", async () => {

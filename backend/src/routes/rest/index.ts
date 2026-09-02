@@ -1225,7 +1225,8 @@ function getWebDAVUrl(sourceConfig: any, filePath: string): string {
 
 // Stream an online/plugin song. Serves the local cache file if present, otherwise
 // proxies the song's remote `url` applying its `streamHeaders` (e.g. Referer) + Range.
-async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null) {
+// contentTypeOverride:DLNA 端点用于把上游错误的 octet-stream 修正为真实格式 MIME。
+async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null, contentTypeOverride?: string | null) {
   try {
     const fs = await import("fs");
     if (song.cachePath && fs.existsSync(song.cachePath)) {
@@ -1241,7 +1242,7 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
           return new Response(stream as any, {
             status: 206,
             headers: {
-              "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
+              "Content-Type": contentTypeOverride || MIME_MAP[song.suffix || ""] || "application/octet-stream",
               "Content-Range": `bytes ${start}-${end}/${fileSize}`,
               "Content-Length": String(chunkSize),
               "Accept-Ranges": "bytes",
@@ -1253,7 +1254,7 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
       return new Response(stream as any, {
         status: 200,
         headers: {
-          "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
+          "Content-Type": contentTypeOverride || MIME_MAP[song.suffix || ""] || "application/octet-stream",
           "Content-Length": String(fileSize),
           "Accept-Ranges": "bytes",
           "Cache-Control": "public, max-age=3600",
@@ -1294,7 +1295,7 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
     }
 
     const respHeaders: Record<string, string> = {
-      "Content-Type": upstream.headers.get("content-type") || MIME_MAP[song.suffix || ""] || "application/octet-stream",
+      "Content-Type": contentTypeOverride || upstream.headers.get("content-type") || MIME_MAP[song.suffix || ""] || "application/octet-stream",
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, max-age=3600",
     };
@@ -1450,17 +1451,49 @@ const DLNA_UNSUPPORTED_MIME = [
   /^audio\/webm\b/i, /^video\/webm\b/i, /^audio\/x-ogg\b/i, /^application\/opus\b/i,
 ];
 
-/** 上游格式探测缓存(songId → content-type),TTL 5 分钟:固定 ogg 源避免每次拉流重复探测。 */
-const dlnaProbeCache = new Map<string, { ct: string | null; at: number }>();
+/** 上游格式探测缓存(songId → content-type + 文件头嗅探),TTL 5 分钟:固定源避免每次拉流重复探测。 */
+const dlnaProbeCache = new Map<string, { ct: string | null; magic: string | null; at: number }>();
 const DLNA_PROBE_TTL = 5 * 60 * 1000;
 
-/** 以 Range 0-0 只取上游响应头判定实际格式;探测失败返回 null(不阻断原逻辑)。 */
-async function probeUpstreamContentType(url: string, headers: Record<string, string>): Promise<string | null> {
+/** 音箱 DLNA 层可安全透传的格式(按文件头判定后修正 MIME 用)。 */
+const MAGIC_MIME: Record<string, string> = {
+  mp3: "audio/mpeg",
+  flac: "audio/flac",
+  wav: "audio/wav",
+  m4a: "audio/mp4",
+  ogg: "audio/ogg",
+};
+
+/** 按文件头 magic bytes 嗅探真实音频格式;未知返回 null。 */
+function sniffAudioMagic(head: Buffer): string | null {
+  if (!head || head.length < 12) return null;
+  const ascii = (o: number, n: number) => head.subarray(o, o + n).toString("ascii");
+  if (ascii(0, 4) === "OggS") return "ogg";
+  if (ascii(4, 4) === "ftyp") return "m4a"; // MP4/M4A 容器
+  if (ascii(0, 3) === "ID3") return "mp3";
+  if (ascii(0, 4) === "fLaC") return "flac";
+  if (ascii(0, 4) === "RIFF") return "wav";
+  if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return "mp3"; // MP3 sync 帧
+  return null;
+}
+
+/** 以 Range 0-31 取上游响应头 + 首 32 字节判定实际格式;探测失败返回 null(不阻断原逻辑)。 */
+async function probeUpstreamContentType(url: string, headers: Record<string, string>): Promise<{ ct: string | null; magic: string | null } | null> {
   try {
-    const resp = await fetch(url, { headers: { ...headers, Range: "bytes=0-0" } });
+    const resp = await fetch(url, { headers: { ...headers, Range: "bytes=0-31" } });
     const ct = resp.headers.get("content-type") || "";
-    await resp.body?.cancel(); // 上游忽略 Range 返回全量时丢弃 body,仅用响应头
-    return ct || null;
+    let head = Buffer.alloc(0);
+    try {
+      const reader = resp.body?.getReader();
+      if (reader) {
+        const { value } = await reader.read(); // 首个 chunk(几 KB~64KB),足够嗅探
+        await reader.cancel(); // 上游忽略 Range 返回全量时只读一个 chunk 即释放连接
+        if (value) head = Buffer.from(value).subarray(0, 32);
+      }
+    } catch {
+      // ignore body read error,仅用响应头
+    }
+    return { ct: ct || null, magic: sniffAudioMagic(head) };
   } catch {
     return null;
   }
@@ -1479,17 +1512,29 @@ async function serveDlnaWebStream(
   // 已下载缓存文件(格式受控)直接透传,跳过探测
   const hasCache = !!song.cachePath && fs.existsSync(song.cachePath);
   if (!hasCache && song.url) {
-    let ct: string | null;
+    let probe: { ct: string | null; magic: string | null } | null;
     const cached = dlnaProbeCache.get(song.id);
     if (cached && Date.now() - cached.at < DLNA_PROBE_TTL) {
-      ct = cached.ct;
+      probe = cached;
     } else {
-      ct = await probeUpstreamContentType(song.url, headers);
-      dlnaProbeCache.set(song.id, { ct, at: Date.now() });
+      probe = await probeUpstreamContentType(song.url, headers);
+      if (probe) dlnaProbeCache.set(song.id, { ...probe, at: Date.now() });
     }
-    if (ct && DLNA_UNSUPPORTED_MIME.some((re) => re.test(ct))) {
-      log.info("DLNA 兜底转码:上游格式音箱不支持,转 192k mp3", { id: song.id, contentType: ct });
+    const ct = probe?.ct || "";
+    const magic = probe?.magic || null;
+    const unsupported = DLNA_UNSUPPORTED_MIME.some((re) => re.test(ct));
+    // 未标 MIME 的裸流(application/octet-stream,如 go-music-dl soda 源固定
+    // 返回 M4A 但 Content-Type 标错):按文件头判定,非音箱安全格式(mp3/flac/wav)
+    // 一律兜底转码;安全格式则透传但把 Content-Type 改对(octet-stream 音箱不认)。
+    const octet = /^application\/octet-stream\b/i.test(ct);
+    const octetUnsupported = octet && magic !== "mp3" && magic !== "flac" && magic !== "wav";
+    if (unsupported || octetUnsupported) {
+      log.info("DLNA 兜底转码:上游格式音箱不支持,转 192k mp3", { id: song.id, contentType: ct, magic });
       return serveTranscodedSong(c, { source: song.url, headers }, { format: "mp3", bitrateKbps: 192, timeOffset });
+    }
+    if (octet && magic) {
+      // 透传但修正 MIME:音箱按 Content-Type 决定是否可播。
+      return serveWebSongStream(c, song, rangeHeader, MAGIC_MIME[magic]);
     }
   }
   return serveWebSongStream(c, song, rangeHeader);
