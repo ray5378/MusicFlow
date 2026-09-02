@@ -66,6 +66,8 @@ export interface ClientSongRow {
   sourcePluginId: string;
   isWeb: boolean;
   groupId?: string;
+  /** 入库时间(ISO 字符串;列表页排序维度之一,亦用于展示「入库时间」列) */
+  createdAt: string;
   /** 组内多源行(含自身;单成员组长度为 1)。仅 attachGroupSources 填充。 */
   sources?: ClientSongRow[];
 }
@@ -96,6 +98,7 @@ export function serializeSongRow(s: any, coverRef?: string): ClientSongRow {
     sourcePluginId: src.sourcePluginId,
     isWeb: src.isWeb,
     groupId: s.groupId || undefined,
+    createdAt: s.createdAt || "",
   };
 }
 

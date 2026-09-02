@@ -1003,6 +1003,20 @@ apiRoutes.get("/v1/songs", (c) => {
   // sort=recentAdded: 最新添加入库的歌曲（按入库时间倒序，封顶 500 首，新入库自动进入列表）
   const sort = (c.req.query("sort") || "").trim();
   const recentAdded = sort === "recentAdded";
+  // 通用排序:sortField(名称/时长/入库时间/艺术家/专辑/播放次数) + order(asc|desc)
+  const sortField = (c.req.query("sortField") || "").trim();
+  const sortOrder = (c.req.query("order") || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+  const SORT_COLUMNS: Record<string, unknown> = {
+    name: songs.title,
+    duration: songs.duration,
+    addedAt: songs.createdAt,
+    artist: songs.artist,
+    album: songs.album,
+    playCount: songs.playCount,
+  };
+  // 排序字段对应的排序列;未知字段回退为按名称
+  const sortCol = (SORT_COLUMNS[sortField] || songs.title) as any;
+  const orderBy = sortOrder === "desc" ? desc(sortCol) : asc(sortCol);
   // SQL-level filtering + pagination (avoids loading the whole table into memory)
   const conds = [];
   if (genre) conds.push(eq(songs.genre, genre));
@@ -1028,8 +1042,8 @@ apiRoutes.get("/v1/songs", (c) => {
         ? db.select().from(songs).where(where).orderBy(desc(songs.createdAt)).limit(pageSize).offset(safeStart).all()
         : db.select().from(songs).orderBy(desc(songs.createdAt)).limit(pageSize).offset(safeStart).all())
     : (where
-        ? db.select().from(songs).where(where).orderBy(songs.title).limit(pageSize).offset(start).all()
-        : db.select().from(songs).orderBy(songs.title).limit(pageSize).offset(start).all());
+        ? db.select().from(songs).where(where).orderBy(orderBy).limit(pageSize).offset(start).all()
+        : db.select().from(songs).orderBy(orderBy).limit(pageSize).offset(start).all());
   // Batch album existence lookups for songs without their own cover (avoids N+1
   // album queries on every page). 这里只判定专辑行是否存在,不判断它有没有封面:
   // 具体图片一律由 getCoverArt 的 al- 分支解析(专辑自带封面 → 回退同专辑首支带
@@ -1062,15 +1076,35 @@ apiRoutes.get("/v1/songs", (c) => {
 // 重新扫描时会自然恢复(删除只移除记录,不触碰源文件)。
 apiRoutes.delete("/v1/songs/:id", (c) => {
   const id = c.req.param("id")!;
+  const ok = deleteSongDb(id);
+  if (!ok) return c.json({ error: "歌曲不存在" }, 404);
+  return c.json({ success: true });
+});
+
+// 批量删除库内歌曲:级联清理歌单/收藏/播放历史后删除记录,并清理孤儿专辑/艺人。
+// 前端「多选 → 从音乐库删除」仅针对 web 歌曲;本地歌曲由媒体源重扫自动恢复。
+apiRoutes.post("/v1/songs/delete", async (c) => {
+  const body = await c.req.json().catch(() => ({}) as any);
+  const ids = Array.isArray(body?.ids) ? body.ids.map((v: unknown) => String(v)).filter(Boolean) : [];
+  if (ids.length === 0) return c.json({ success: true, deleted: 0 });
+  let deleted = 0;
+  for (const id of ids) {
+    if (deleteSongDb(id)) deleted++;
+  }
+  return c.json({ success: true, deleted });
+});
+
+// 删除单曲的级联清理:先清关联表,再删歌曲记录与孤儿数据。返回是否存在该曲。
+function deleteSongDb(id: string): boolean {
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
-  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  if (!song) return false;
   db.delete(playlistSongs).where(eq(playlistSongs.songId, id)).run();
   db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.songId, id)).run();
   db.delete(playHistory).where(eq(playHistory.songId, id)).run();
   db.delete(songs).where(eq(songs.id, id)).run();
   cleanupOrphans();
-  return c.json({ success: true });
-});
+  return true;
+}
 
 function idToCoverArt(id: string | null, prefix: string): string | undefined {
   if (!id) return undefined;

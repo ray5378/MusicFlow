@@ -59,7 +59,10 @@
 
     <!-- ===== Add to playlist dialog ===== -->
     <el-dialog v-model="addDlg.open" title="添加到歌单" width="420px" align-center @close="closeAddDlg" :append-to-body="true">
-      <div class="pl-dialog-song" v-if="addDlg.song">
+      <div class="pl-dialog-song" v-if="addDlg.songs && addDlg.songs.length > 1">
+        将 {{ addDlg.songs.length }} 首歌曲添加到：
+      </div>
+      <div class="pl-dialog-song" v-else-if="addDlg.song">
         将「{{ addDlg.song.title }} - {{ addDlg.song.artist }}」添加到：
       </div>
       <div class="pl-list" v-loading="addDlg.loading">

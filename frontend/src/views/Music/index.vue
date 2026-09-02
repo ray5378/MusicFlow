@@ -30,6 +30,22 @@
           @input="onSearchInput"
           @clear="onSearchClear"
         />
+        <el-dropdown trigger="click" @command="onSortCommand">
+          <el-button>{{ sortLabel }}<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="name">名称</el-dropdown-item>
+              <el-dropdown-item command="duration">时长</el-dropdown-item>
+              <el-dropdown-item command="addedAt">入库时间</el-dropdown-item>
+              <el-dropdown-item command="artist">艺术家</el-dropdown-item>
+              <el-dropdown-item command="album">专辑</el-dropdown-item>
+              <el-dropdown-item command="playCount">播放次数</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button class="sort-order-btn" @click="toggleSortOrder" :disabled="recentMode">
+          {{ sortOrder === "desc" ? "降序 ↓" : "升序 ↑" }}
+        </el-button>
         <el-button type="primary" class="play-all-btn" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />
           播放全部
         </el-button>
@@ -61,7 +77,25 @@
     </div>
 
     <!-- ===== 歌曲列表(本地模式,聚合模式下同样展示) ===== -->
-    <SongTable v-if="isLocalMode" :songs="songs" :loading="loading" show-source :on-window="onWindow" @play="playSong" />
+    <SongTable
+      v-if="isLocalMode"
+      :songs="songs"
+      :loading="loading"
+      show-source
+      :selectable="!isMobile"
+      :on-window="onWindow"
+      @play="playSong"
+      @select="onSelectionChange"
+    />
+    <!-- ===== 多选批量操作条 ===== -->
+    <div class="batch-bar" v-if="!isMobile && selectedSongs.length > 0">
+      <span class="batch-count">已选 {{ selectedSongs.length }} 首</span>
+      <el-button size="small" @click="playSelected"><MfIcon name="Play" />播放所选</el-button>
+      <el-button size="small" @click="batchAddToPlaylist"><MfIcon name="Plus" />添加到歌单</el-button>
+      <el-button size="small" type="danger" plain :disabled="selectedWebSongs.length === 0" @click="batchDelete" :loading="deleting">
+        <MfIcon name="Trash2" />从音乐库删除
+      </el-button>
+    </div>
 
     <!-- ===== 聚合搜索结果(默认模式):本地在上,全网并用分节标题放在下 ===== -->
     <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">
@@ -110,8 +144,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { usePlayerStore, Song } from "@/stores/player";
 import { useItemActions } from "@/composables/useItemActions";
+import { useIsMobile } from "@/composables/useIsMobile";
 import { useEntitySearch, remoteItemToSong } from "@/composables/useEntitySearch";
 import api from "@/api";
 import SongTable from "@/components/SongTable.vue";
@@ -120,7 +156,8 @@ import { useInfiniteList } from "@/composables/useInfiniteList";
 const playerStore = usePlayerStore();
 const route = useRoute();
 const router = useRouter();
-const { menuGuard } = useItemActions();
+const isMobile = useIsMobile();
+const { menuGuard, openAddToPlaylist } = useItemActions();
 const searchQuery = ref("");
 
 // 本地歌曲列表:窗口化分块加载(与 HA 卡片同构)。整页展示 + 滚动懒加载:
@@ -133,7 +170,10 @@ const { list: songs, loading, total, reload: loadSongs, onWindow } = useInfinite
         page,
         pageSize: size,
         query: searchQuery.value,
+        // 最近添加模式走后端 sort=recentAdded(入库时间倒序,封顶 500);否则走通用排序
         ...(recentMode.value ? { sort: "recentAdded" } : {}),
+        sortField: recentMode.value ? undefined : sortField.value,
+        order: recentMode.value ? undefined : sortOrder.value,
       },
     });
     return { items: res.data.items || [], total: res.data.total || 0 };
@@ -162,6 +202,86 @@ const aggregateSongs = computed(() => aggregateItems.value.map((it) => remoteIte
 
 // 最近添加模式：/songs?recent=1 → 展示最新入库的 500 首（后端 sort=recentAdded）
 const recentMode = computed(() => route.query.recent === "1");
+
+// ==================== 排序（名称/时长/入库时间/艺术家/专辑/播放次数）====================
+const SORT_LABELS: Record<string, string> = {
+  name: "名称", duration: "时长", addedAt: "入库时间", artist: "艺术家", album: "专辑", playCount: "播放次数",
+};
+const sortField = ref<string>("name");
+const sortOrder = ref<"asc" | "desc">("asc");
+// 最近添加模式固定「入库时间 降序」,下拉/按钮按此展示
+const sortLabel = computed(() => {
+  if (recentMode.value) return "入库时间";
+  return SORT_LABELS[sortField.value] || "名称";
+});
+async function applySort() {
+  // 最近添加模式:退出后由 route watch 触发重新加载,避免重复请求
+  if (recentMode.value) {
+    router.replace({ path: "/songs", query: {} });
+    return;
+  }
+  loadSongs();
+}
+async function onSortCommand(field: string) {
+  if (recentMode.value) {
+    sortField.value = field;
+    sortOrder.value = "asc";
+  } else if (sortField.value === field) {
+    // 再次点击同维度:升序/降序循环
+    sortOrder.value = sortOrder.value === "asc" ? "desc" : "asc";
+  } else {
+    sortField.value = field;
+    sortOrder.value = "asc";
+  }
+  applySort();
+}
+async function toggleSortOrder() {
+  sortOrder.value = sortOrder.value === "asc" ? "desc" : "asc";
+  applySort();
+}
+
+// ==================== 多选批量管理（批量播放/添加到歌单/从音乐库删除）====================
+const selectedSongs = ref<any[]>([]);
+const deleting = ref(false);
+function onSelectionChange(rows: any[]) {
+  selectedSongs.value = rows;
+}
+// 「从音乐库删除」仅对 web 歌曲生效(本地歌删除会被媒体源重扫恢复,不参与)
+const selectedWebSongs = computed(() => selectedSongs.value.filter((s) => s && s.isWeb));
+function playSelected() {
+  const list = selectedSongs.value.filter((s) => s && s.isMatched !== false);
+  if (list.length > 0) playerStore.playQueue(list);
+}
+function batchAddToPlaylist() {
+  if (selectedSongs.value.length === 0) return;
+  openAddToPlaylist(selectedSongs.value);
+}
+async function batchDelete() {
+  const web = selectedWebSongs.value.map((s) => s.id);
+  if (web.length === 0) {
+    ElMessage.warning("选中的均为本地歌曲，本地歌曲不参与删除");
+    return;
+  }
+  const localCount = selectedSongs.value.length - web.length;
+  let tip = `确定从音乐库删除选中的 ${web.length} 首歌曲？`;
+  if (localCount > 0) tip += `\n另有 ${localCount} 首本地歌曲不参与删除。`;
+  try {
+    await ElMessageBox.confirm(tip, "从音乐库删除", {
+      type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", confirmButtonClass: "el-button--danger",
+    });
+  } catch { return; }
+  deleting.value = true;
+  try {
+    await api.post("/rest/api/v1/songs/delete", { ids: web });
+    ElMessage.success(`已从音乐库删除 ${web.length} 首`);
+    window.dispatchEvent(new CustomEvent("mf:song-deleted"));
+    loadSongs();
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || "删除失败");
+  } finally {
+    deleting.value = false;
+  }
+}
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -398,6 +518,28 @@ onBeforeUnmount(() => window.removeEventListener("mf:song-deleted", onSongDelete
   margin-top: 24px;
   display: flex;
   justify-content: center;
+}
+
+/* ===== 排序按钮 ===== */
+.sort-order-btn { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ===== 多选批量操作条 ===== */
+.batch-bar {
+  position: sticky;
+  bottom: 120px;               /* 悬浮播放条之上 */
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: fit-content;
+  margin: 16px auto 0;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgba(24, 24, 32, 0.85);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  .batch-count { font-size: 13px; color: var(--fnos-text-secondary); white-space: nowrap; }
 }
 
 @media (max-width: 768px) {

@@ -32,6 +32,8 @@ const menu = reactive({
 const addDlg = reactive({
   open: false,
   song: null as any,
+  /** 待加入歌单的歌曲(支持批量多首;单首时长度为 1) */
+  songs: [] as any[],
   playlists: [] as any[],
   loading: false,
   addingId: "",
@@ -143,7 +145,8 @@ async function loadPlaylists() {
   }
 }
 function openAddToPlaylist(song: any) {
-  addDlg.song = song;
+  addDlg.songs = Array.isArray(song) ? song : [song];
+  addDlg.song = addDlg.songs[0] ?? null;
   addDlg.newName = "";
   addDlg.addingId = "";
   addDlg.open = true;
@@ -153,11 +156,11 @@ function closeAddDlg() {
   addDlg.open = false;
 }
 async function addToPlaylist(pl: any) {
-  if (!addDlg.song || addDlg.addingId) return;
+  if (!addDlg.songs.length || addDlg.addingId) return;
   addDlg.addingId = pl.id;
   try {
-    await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: addDlg.song.id });
-    ElMessage.success(`已添加到「${pl.name}」`);
+    await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: addDlg.songs.map((s) => s.id) });
+    ElMessage.success(`已添加 ${addDlg.songs.length} 首到「${pl.name}」`);
     closeAddDlg();
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || "添加失败");
@@ -166,11 +169,11 @@ async function addToPlaylist(pl: any) {
   }
 }
 async function createAndAdd() {
-  if (!addDlg.newName || !addDlg.song || addDlg.addingId) return;
+  if (!addDlg.newName || !addDlg.songs.length || addDlg.addingId) return;
   addDlg.addingId = "new";
   try {
-    await api.post("/rest/createPlaylist", { name: addDlg.newName, songId: addDlg.song.id });
-    ElMessage.success(`已创建并添加「${addDlg.newName}」`);
+    await api.post("/rest/createPlaylist", { name: addDlg.newName, songIds: addDlg.songs.map((s) => s.id) });
+    ElMessage.success(`已创建并添加 ${addDlg.songs.length} 首「${addDlg.newName}」`);
     closeAddDlg();
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || "创建失败");
