@@ -1438,6 +1438,63 @@ async function resolvePreferredSong(song: SongRow): Promise<SongRow> {
   return song;
 }
 
+// ==================== DLNA web 源格式兜底（音箱专用） ====================
+// 音箱(MUZO 2017 固件等)普遍不支持 Ogg/Opus/WebM 容器。web 源(在线插件)
+// 上游实际返回格式与 DB 记录可能不一致——如 go-music-dl 固定返回 Ogg Vorbis
+// 但入库 suffix 记 mp3,导致音箱拉到 ogg 静音。按上游实际 Content-Type 探测,
+// 命中音箱不支持格式时服务端 ffmpeg 实时转 192kbps mp3 再出流。
+// 仅 DLNA 端点生效(/rest/stream 面向软件播放器,支持 ogg,行为不变);
+// local/webdav 源是可控文件格式、且探测只对远程 URL 有意义,不参与。
+const DLNA_UNSUPPORTED_MIME = [
+  /^audio\/ogg\b/i, /^application\/ogg\b/i, /^audio\/opus\b/i,
+  /^audio\/webm\b/i, /^video\/webm\b/i, /^audio\/x-ogg\b/i, /^application\/opus\b/i,
+];
+
+/** 上游格式探测缓存(songId → content-type),TTL 5 分钟:固定 ogg 源避免每次拉流重复探测。 */
+const dlnaProbeCache = new Map<string, { ct: string | null; at: number }>();
+const DLNA_PROBE_TTL = 5 * 60 * 1000;
+
+/** 以 Range 0-0 只取上游响应头判定实际格式;探测失败返回 null(不阻断原逻辑)。 */
+async function probeUpstreamContentType(url: string, headers: Record<string, string>): Promise<string | null> {
+  try {
+    const resp = await fetch(url, { headers: { ...headers, Range: "bytes=0-0" } });
+    const ct = resp.headers.get("content-type") || "";
+    await resp.body?.cancel(); // 上游忽略 Range 返回全量时丢弃 body,仅用响应头
+    return ct || null;
+  } catch {
+    return null;
+  }
+}
+
+/** DLNA 端点 web 源出流:不支持格式兜底转 mp3,其余走原 serveWebSongStream 透传。 */
+async function serveDlnaWebStream(
+  c: any,
+  song: any,
+  rangeHeader: string | null | undefined,
+  timeOffset: number,
+): Promise<Response> {
+  const fs = await import("fs");
+  const headers: Record<string, string> = {};
+  try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
+  // 已下载缓存文件(格式受控)直接透传,跳过探测
+  const hasCache = !!song.cachePath && fs.existsSync(song.cachePath);
+  if (!hasCache && song.url) {
+    let ct: string | null;
+    const cached = dlnaProbeCache.get(song.id);
+    if (cached && Date.now() - cached.at < DLNA_PROBE_TTL) {
+      ct = cached.ct;
+    } else {
+      ct = await probeUpstreamContentType(song.url, headers);
+      dlnaProbeCache.set(song.id, { ct, at: Date.now() });
+    }
+    if (ct && DLNA_UNSUPPORTED_MIME.some((re) => re.test(ct))) {
+      log.info("DLNA 兜底转码:上游格式音箱不支持,转 192k mp3", { id: song.id, contentType: ct });
+      return serveTranscodedSong(c, { source: song.url, headers }, { format: "mp3", bitrateKbps: 192, timeOffset });
+    }
+  }
+  return serveWebSongStream(c, song, rangeHeader);
+}
+
 restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const id = getParam(c, "id") || "";
   let song = db.select().from(songs).where(eq(songs.id, id)).get();
@@ -1650,8 +1707,9 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
 
   // Online/plugin song (type="web", path like "web:provider:source"): proxy the
   // song's remote url (with per-song headers + Range), same as /rest/stream.
+  // 兜底:上游实际格式为 ogg/opus/webm 等音箱不支持格式时转 192k mp3 再出流。
   if (resolvedSong.type === "web") {
-    return serveWebSongStream(c, resolvedSong, rangeHeader);
+    return serveDlnaWebStream(c, resolvedSong, rangeHeader, timeOffset);
   }
 
   const parsed = parseSongPath(resolvedSong.path);
