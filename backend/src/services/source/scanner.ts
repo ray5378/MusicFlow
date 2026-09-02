@@ -9,6 +9,8 @@ import { getDataDir } from "../../utils/env.js";
 import { deleteSongLyric } from "../lyricsStore.js";
 import { invalidateArtistList } from "../../utils/artistListCache.js";
 import { createLogger } from "../../utils/logger.js";
+import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../plugin/core/songGroup.js";
+import { newGroupId, normalizeGroupText } from "../../utils/songGroup.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
 const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover art
@@ -472,26 +474,56 @@ function findOrCreateAlbum(name: string, artistId: string, artistName: string, y
   return id;
 }
 
-function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" | "skip" {
+/**
+ * 本地/WebDAV 歌曲归组(与 web 导入同规则,来源无关):按插件配置计算分组 key
+ * (规范化标题+歌手+专辑,albumRequired 可关),查全库候选,时长命中
+ * (durationTolerance,默认 ±1s)并入已有组,否则新建组。
+ * 插件关闭或标题歌手皆空时不归组(NULL)。
+ */
+export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; groupKey: string } | null {
+  const nt = normalizeGroupText(meta.title);
+  const na = normalizeGroupText(meta.artist || "");
+  if (!nt && !na) return null;
+  const groupKey = groupKeyForConfig(meta.title, meta.artist, meta.album);
+  try {
+    const candidates = sqlite.prepare(
+      "SELECT id, group_id, duration FROM songs WHERE group_key = ?"
+    ).all(groupKey) as { id: string; groupId: string | null; duration: number | null }[];
+    const groupId = findGroupForSongConfig(candidates, meta.duration || null) ?? newGroupId();
+    return { groupId, groupKey };
+  } catch {
+    return { groupId: newGroupId(), groupKey };
+  }
+}
+
+export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" | "skip" {
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
   const artistId = findOrCreateArtist(meta.artist) || null;
   const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture) || null;
   if (existing) {
+    // 同曲多源归组:已分组行保持组不变;历史 NULL 组行(归组启用前/插件关闭期
+    // 扫入的存量)在元数据更新时顺带补组,与 web 导入同规则。
+    const backfill = !existing.groupId && songGroupEnabled() ? resolveLocalGroup(meta) : null;
     db.update(songs).set({
       title: meta.title, artist: meta.artist, artistId, album: meta.album, albumId,
       duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
       suffix: meta.suffix, size: meta.size, genre: meta.genre,
       discNumber: meta.discNumber, track: meta.track, updatedAt: new Date().toISOString(),
+      ...(backfill ? { groupId: backfill.groupId, groupKey: backfill.groupKey } : {}),
       ...(fingerprint ? { fingerprint } : {}),
     }).where(eq(songs.id, existing.id)).run();
     return "updated";
   }
+  // 同曲多源归组(与 web 导入一致,受 core-song-group 插件开关门控):命中已有组
+  // 并入,否则新建;插件关闭时 NULL 平铺。
+  const group = songGroupEnabled() ? resolveLocalGroup(meta) : null;
   const songId = uuidv4();
   db.insert(songs).values({
     id: songId, title: meta.title, artist: meta.artist, artistId, album: meta.album, albumId,
     duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
     suffix: meta.suffix, path: songPath, size: meta.size, genre: meta.genre,
     discNumber: meta.discNumber, track: meta.track, playCount: 0,
+    ...(group ? { groupId: group.groupId, groupKey: group.groupKey } : {}),
     ...(fingerprint ? { fingerprint } : {}),
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   }).run();

@@ -156,9 +156,13 @@ export function findGroupForSong(
   if (!candidates.length) return null;
   const groups = new Map<string, number[]>(); // groupId -> member durations
   for (const c of candidates) {
-    if (!c.groupId) continue;
-    let arr = groups.get(c.groupId);
-    if (!arr) { arr = []; groups.set(c.groupId, arr); }
+    // 兼容 snake_case(原生 SQL 返回 group_id)与 camelCase:调用方可能直接传
+    // drizzle/原生查询行。此前只读 c.groupId 导致原生 SQL 行 groupId 恒为
+    // undefined → 永远新建组(web/本地导入归组从未真正命中已有组)。
+    const cid = (c as any).groupId ?? (c as any).group_id;
+    if (!cid) continue;
+    let arr = groups.get(cid);
+    if (!arr) { arr = []; groups.set(cid, arr); }
     arr.push(Number(c.duration || 0));
   }
   let bestGroup: string | null = null;
