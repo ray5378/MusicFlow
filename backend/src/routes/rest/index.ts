@@ -1388,11 +1388,11 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
   return { source: parsed.filePath };
 }
 
-restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
-  const id = getParam(c, "id") || "";
-  let song = db.select().from(songs).where(eq(songs.id, id)).get();
-  if (!song) return c.json(fail(70, "Song not found"));
+type SongRow = typeof songs.$inferSelect;
 
+// 播放优选 + 回退(web 行切组内 local/webdav;local/webdav 不可用回 web)。
+// /rest/stream 与 /rest/dlna/stream/:token 共用,受「播放优选」插件开关控制。
+async function resolvePreferredSong(song: SongRow): Promise<SongRow> {
   // 播放优选(服务端插件开关):web 歌曲(插件平台源)所在组内有本地/WebDAV
   // 核心曲库源、且「播放优选」插件开启(默认开)、其 preferLocal 子开关开启时,
   // 自动切换到本地源播放(无损优先)。队列中显示的仍是用户点的那一行,只影响
@@ -1409,7 +1409,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
         .get();
       if (alt) {
         log.info("播放优选:web 歌曲切换到核心曲库源", { webId: song.id, localId: alt.id, type: alt.type });
-        song = alt;
+        return alt;
       }
     } catch (e) {
       log.warn("播放优选查询失败,按原源播放", { id: song.id, err: (e as Error)?.message || e });
@@ -1431,10 +1431,18 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
         .get();
       if (alt) {
         log.info("流回退:核心曲库源不可用,切组内 web 源", { localId: song.id, webId: alt.id, title: alt.title || "" });
-        song = alt;
+        return alt;
       }
     }
   }
+  return song;
+}
+
+restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
+  const id = getParam(c, "id") || "";
+  let song = db.select().from(songs).where(eq(songs.id, id)).get();
+  if (!song) return c.json(fail(70, "Song not found"));
+  song = await resolvePreferredSong(song);
 
   const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
@@ -1611,6 +1619,11 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return c.text("Song not found", 404);
 
+  // DLNA 拉流同样走播放优选 + 回退(与 /rest/stream 一致):cast token 绑定的是
+  // 用户点的 web 行,实际出流切组内 local/webdav 无损源;local 不可用回 web。
+  // 队列/状态仍按原行上报,只影响音箱实际拉到的流。
+  const resolvedSong = await resolvePreferredSong(song);
+
   const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
   const requestedFormat = getParam(c, "format");
@@ -1621,11 +1634,11 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   const transcode = decideTranscode({
     requestedFormat,
     maxBitRate,
-    sourceFormat: song.suffix,
-    sourceBitRate: song.bitRate,
+    sourceFormat: resolvedSong.suffix,
+    sourceBitRate: resolvedSong.bitRate,
   });
   if (transcode.should && transcode.format) {
-    const input = await resolveTranscodeInput(c, song);
+    const input = await resolveTranscodeInput(c, resolvedSong);
     if (input) {
       return serveTranscodedSong(c, input, {
         format: transcode.format,
@@ -1637,11 +1650,11 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
 
   // Online/plugin song (type="web", path like "web:provider:source"): proxy the
   // song's remote url (with per-song headers + Range), same as /rest/stream.
-  if (song.type === "web") {
-    return serveWebSongStream(c, song, rangeHeader);
+  if (resolvedSong.type === "web") {
+    return serveWebSongStream(c, resolvedSong, rangeHeader);
   }
 
-  const parsed = parseSongPath(song.path);
+  const parsed = parseSongPath(resolvedSong.path);
   if (!parsed) return c.text("Invalid song path", 400);
 
   try {
@@ -1657,7 +1670,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
       if (rangeHeader) headers["Range"] = rangeHeader;
       const upstream = await fetch(downloadUrl, { headers });
       const respHeaders: Record<string, string> = {
-        "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
+        "Content-Type": MIME_MAP[resolvedSong.suffix || ""] || "application/octet-stream",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
       };
@@ -1674,7 +1687,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
       if (!fs.existsSync(filePath)) return c.text("File not found", 404);
       const stat = fs.statSync(filePath);
       const fileSize = stat.size;
-      const mime = MIME_MAP[song.suffix || ""] || "application/octet-stream";
+      const mime = MIME_MAP[resolvedSong.suffix || ""] || "application/octet-stream";
       if (rangeHeader) {
         const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
         if (match) {
