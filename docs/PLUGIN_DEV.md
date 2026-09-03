@@ -1,7 +1,7 @@
 # MusicFlow 外置插件开发指南（PLUGIN_DEV）
 
 > 适用版本：MusicFlow **沙箱运行时（QuickJS/WASM）1.3.0+**；核心按 `manifest.capabilities` 分发，**不写死任何插件名**。
-> 当前主项目 ≈ **v1.7.66**；实例插件 `go-music-dl` 需后端 **≥ 1.7.39**（`longRunning` / 异步任务通道）。
+> 当前主项目 ≈ **v1.13.40**；实例插件 `go-music-dl` 需后端 **≥ 1.7.39**（`longRunning` / 异步任务通道）。
 > 目标：教你自己写一个 drop-in 插件，丢进 `data/plugins/<id>/` 即可被后端加载，**无需改任何核心代码**。
 
 ---
@@ -67,6 +67,7 @@ globalThis.__mfPlugin = {
 | `sourcePreference` | ⬜ | source 插件专用：流兜底搜索的源排序偏好数组（越靠前越优先）。核心按此对兜底候选排序，缺省按插件返回顺序。 |
 | `minAppVersion` | ⬜ | 要求的最低 App 版本；低于此版本会被跳过（沙箱运行时自 **1.3.0** 起）。 |
 | `longRunning` | ⬜ | 方法级长耗时预算（毫秒）：`{ methodName: ms }`。声明的方法在沙箱调用时使用该预算（**上限 600000 = 10 分钟**），否则维持默认 15s 看门狗。用于拉取平台/外网歌单等慢网络操作（如 `go-music-dl` 的 `runDailyJob`/`playlistSongs`）。需后端 **≥ 1.7.39** 才生效，老后端会静默退化到 15s 并可能超时。 |
+| `schedules` | ⬜ | **定时能力声明**。指示本插件是否参与「每日定时同步 / 容器启动补拉」两条自动调度管线（见 §3.2）。取值 `true` / `false` / 对象 / 缺省（缺省按能力自动推断）。**涉及歌单能力的插件应显式声明它**。 |
 | `documentation` | ⬜ | **Markdown 字符串**，插件详情页的「功能介绍 + 处理逻辑」说明（用户点「详情」看到的内容）。建议每个插件都写：功能一句话 + 处理逻辑（数据来源 / 触发时机 / 边界）。未提供时前端按能力自动生成通用说明。 |
 | `author` / `homepage` / `icon` / `license` / `updateUrl` | ⬜ | 元数据，市场页展示。 |
 | `defaultEnabled` | ⬜ | 外置插件默认 `false`（用户手动开启）。 |
@@ -84,6 +85,49 @@ globalThis.__mfPlugin = {
 
 - `playlist-multi`：本地 + 平台导入歌单多选（可搜索），常用于「参考歌单」类配置（如本地推荐的 sourcePlaylists）。值 = 歌单 id 数组。
 - `candidate-list`：可增删替换的编辑行列表（每项 `{ platform, url, name? }`），用于「推荐榜单」类配置（如每日推荐的 candidates）。值 = 对象数组。
+
+### 3.2 定时能力声明（`schedules`）—— 涉及歌单能力的插件**必读**
+
+> **规则**：凡是会**自动同步 / 生成 / 拉取歌单**的插件，都应参与宿主的两条自动调度管线，并在插件清单里**声明这一能力**。宿主据此往你的配置页注入两个开关（归入「**定时同步**」分组的「参与每日定时同步」与「容器启动时拉取一次」），用户可在插件配置页关闭某条管线，或让某插件只在容器启动时补拉。
+
+两条自动管线（由 `backend/src/batch/jobs.ts` 的 `runSyncPipeline(gate)` / `maintenanceGated(gate)` 门控）：
+
+| 管线 | 触发时机 | 门控开关 | 默认 |
+|------|---------|---------|------|
+| **每日定时同步** | 每天定点（默认 `03:00`，可在「首页推荐」定时设置改） | `scheduleEnabled`（`true`=参与，`false`=跳过此行） | 参与 |
+| **容器启动补拉** | 每次 MusicFlow 启动/重启后 | `runOnBoot`（`true`=补拉一次） | 不补拉 |
+
+两个开关**手动刷新不受影响**——「立即刷新」按钮 / `POST /rest/api/v1/recommend/refresh` 永远可用，不会被这两个开关挡掉。
+
+#### `schedules` 的取值方式
+
+| 取值 | 效果 |
+|------|------|
+| `true` | 两个开关（`scheduleEnabled` + `runOnBoot`）都注入配置页。 |
+| `false` | 不注入任何开关，调度器也**不会**把它纳入两条管线。 |
+| `{ scheduleEnabled: true }` | 只显示「参与每日定时同步」开关。 |
+| `{ runOnBoot: true }` | 只显示「容器启动时拉取一次」开关。 |
+| `{ scheduleEnabled: true, runOnBoot: true }` | 两个开关都显示。 |
+| **缺省（推荐）** | 宿主按 `capabilities` **自动推断**：只要插件声明了下述任一**歌单能力**，就自动注入两个开关，无需手写 `schedules`。 |
+
+> **涉及歌单能力 = 命中以下 `SCHEDULED_CAPS` 名单中的任一项**（`backend/src/services/plugin/scheduleFields.ts`）：
+> `dailyPlaylist` / `localPlaylist` / `recommendPlaylist` / `localPlatformRecommend` / `comboPlaylist` / `playlistCleanup` / `recommend` / `webRotation` / `playlistSync` / `playlistImport` / `playlistFile` / `artistInfo`。
+> 即：每日推荐、本地推荐、通用推荐、本地随机(按平台)、组合歌单、歌单清理、在线源每日推荐同步(`recommend`)、网页歌轮换(`webRotation`)、歌单再同步(`playlistSync`)、歌单导入(`playlistImport`/`playlistFile`)、歌手资料抓取(`artistInfo`)。
+>
+> 只要命中任一，缺省即可让配置页出现这两个开关——**这就是「所有歌单配置页面都接入定时能力而不用担心漏插件」的实现方式**：注入发生在注册的唯一漏斗 `registerPlugin()`（`backend/src/plugins/registry.ts` → `withScheduleFields`），**内置与外置沙箱插件统一走这一条路**，不靠逐个插件手写。
+
+超时/自动推断之外，**外置插件想在 `plugin.json` 里显式声明**时，加一行即可（无需改 `index.js`，发现流程会把它合并进沙箱 manifest）：
+
+```jsonc
+// plugins/<id>/plugin.json
+{
+  "id": "my-playlist",
+  "capabilities": ["playlistSync"],
+  "schedules": true   // 或 { "scheduleEnabled": true, "runOnBoot": true } / false
+}
+```
+
+> `schedules` 只影响**配置页是否出现开关 + 调度器是否门控**；它不会替你决定歌单能力的有无——该跑的业务方法（`runDailyJob` / `runSyncJob` 等）仍然由 `capabilities` 决定是否暴露。**能力与方法成对声明、能力 + `schedules` 成对声明**，两者都是让插件按预期工作的前提。
 
 ---
 
@@ -355,9 +399,9 @@ cp -r my-plugin backend/data/plugins/
 
 | id | 版本 | type | capabilities | 说明 |
 |----|------|------|--------------|------|
-| `go-music-dl` | 1.2.18 | source | `search` / `playlistSearch` / `songSearch` / `albumSearch` / `recommend` / `playlistSongs` / `stream` / `webRotation` / `lyricProvider` / `coverProvider` / `recommendPlaylist` | 全网聚合（源+歌词+封面+推荐 四合一）；私人歌单经 `recommendPlaylist` 持久同步 |
-| `listenbrainz` | 1.5.6 | scrobbler | `scrobbler` / `recommendPlaylist` | **双功能**：播放记录上报（scrobbler）+ 协同过滤推荐歌单（recommendPlaylist，固定 `pl-lb-recommend`） |
-| `lastfm` | 1.0.1 | scrobbler | `scrobbler` / `recommendPlaylist` | 双功能：Last.fm 播放记录上报 + 推荐歌单 |
+| `go-music-dl` | 1.6.2 | source | `search` / `playlistSearch` / `songSearch` / `albumSearch` / `recommend` / `playlistSongs` / `stream` / `webRotation` / `lyricProvider` / `coverProvider` / `recommendPlaylist` | 全网聚合（源+歌词+封面+推荐 四合一）；私人歌单经 `recommendPlaylist` 持久同步 |
+| `listenbrainz` | 1.5.9 | scrobbler | `scrobbler` / `recommendPlaylist` | **双功能**：播放记录上报（scrobbler）+ 协同过滤推荐歌单（recommendPlaylist，固定 `pl-lb-recommend`） |
+| `lastfm` | 1.0.4 | scrobbler | `scrobbler` / `recommendPlaylist` | 双功能：Last.fm 播放记录上报 + 推荐歌单 |
 
 > `go-music-dl` 的歌词 / 封面能力随该外置 source 插件分发（`lyricProvider` / `coverProvider`），核心按能力遍历调用，不再内置独立的歌词/封面插件。
 
