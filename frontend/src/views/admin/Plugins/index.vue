@@ -332,7 +332,7 @@
     </el-dialog>
 
     <!-- Plugin detail dialog: 功能介绍 / 处理逻辑 / 能力 / 权限 / 配置 -->
-    <el-dialog v-model="showConfigDialog" :title="`插件详情 · ${displayName(editing)}`" width="720px" top="6vh" :append-to-body="true">
+    <el-dialog v-model="showConfigDialog" class="plugin-config-dialog" :title="`插件详情 · ${displayName(editing)}`" width="720px" top="6vh" :append-to-body="true">
       <div class="pd-head">
         <span class="pd-id">{{ editing?.id }}@{{ editing?.version }}</span>
         <el-tag size="small" :type="typeTagColor(editing)" effect="light">{{ typeLabel(editing) }}</el-tag>
@@ -1463,5 +1463,15 @@ onMounted(() => {
   .candidate-row .el-button { flex: 0 0 auto; }
   /* 媒体获取行的固定宽控件在窄屏占满 */
   .mf-media-row .el-select { width: 100% !important; }
+  /* 插件配置/详情弹窗在手机端限制最大高度,让内容区域内部滚动、footer 常驻可见,
+     避免弹窗(现含「定时同步」分组等较多内容)超出视口、中心点越界被误判为遮挡。 */
+  .plugin-config-dialog {
+    max-height: calc(100vh - 12vh);
+    display: flex;
+    flex-direction: column;
+  }
+  .plugin-config-dialog :deep(.el-dialog__header) { flex-shrink: 0; }
+  .plugin-config-dialog :deep(.el-dialog__body) { flex: 1 1 auto; overflow-y: auto; }
+  .plugin-config-dialog :deep(.el-dialog__footer) { flex-shrink: 0; }
 }
 </style>
