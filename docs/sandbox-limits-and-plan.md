@@ -1,6 +1,6 @@
 # 沙箱限制全景审计 + 插件能力增强完整方案
 
-> 状态：**P0 + P1 已实施（v1.7.39，2026-08-14 完成）**；P2/P3 按需排期。当前主项目 ≈ v1.7.66。
+> 状态：**P0 + P1 已实施（v1.7.39，2026-08-14 完成）**；P2/P3 按需排期。当前主项目 v1.13.42（批量任务已统一进一次性子进程，见 SPEC §1.3）。
 > 配套插件开发文档见 [`PLUGIN_DEV.md`](./PLUGIN_DEV.md)（含能力→方法白名单与 `stream` 必声明说明）。
 > 触发背景：go-music-dl 私人歌单同步 / ListenBrainz 推荐生成在生产环境反复「15s 超时」失败（`timeout of 15000ms exceeded`），定位为沙箱单次调用配额与前端 axios 超时双重限制叠加，且部分平台走非国内网络（joox/bilibili/apple/ListenBrainz/MusicBrainz）单请求极慢。
 

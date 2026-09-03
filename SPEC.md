@@ -7,7 +7,7 @@
 >
 > 核心理念：Spec 不是普通 PRD，而是 AI 可读、可验证的技术契约——把「做什么、不做什么、怎么验证」全部落成强制项，防止 AI 幻觉乱加功能、改错边界、留下不可验证的半成品。
 >
-> 版本：v1（2026-08-19，基线 v1.7.71）｜ 维护：ray（仓库 owner）｜ AI 改动本文档需经 ray 确认
+> 版本：v1（2026-08-19，基线 v1.13.42）｜ 维护：ray（仓库 owner）｜ AI 改动本文档需经 ray 确认
 
 ---
 
@@ -38,9 +38,9 @@
 - **代码位置**：后端 `backend/src/**`（88+ TS 文件，456 个 HTTP 端点全量编译入堆）；前端 `frontend/src/**`；测试 `backend/tests/**/*.test.ts`。
 - **脚本**：`dev`（tsx watch src/index.ts）｜ `build`（tsc）｜ `start`（node dist/index.js）｜ `test`（vitest run）｜ `db:generate/migrate/push`（drizzle-kit）。
 - **内存红线**：新增任何常驻 `Map`/`Set`/数组缓存，**必须**带上限（FIFO/LRU/字节预算）或清理机制（TTL/定期驱逐/孤儿回收），禁止只增不删（见 6.8）。
-- **批量任务红线（v1.7.75+，见 1.3）**：所有批量任务必须在一次性子进程执行（`runBatchJob`），**禁止**在主进程内联跑批量重活；子进程峰值内存不计入主进程常驻 RSS。
+- **批量任务红线（v1.13.42+，见 1.3）**：所有批量任务必须在一次性子进程执行（`runBatchJob`），**禁止**在主进程内联跑批量重活；子进程峰值内存不计入主进程常驻 RSS。
 
-### 1.3 批量子进程契约（方案3，v1.7.75+）
+### 1.3 批量子进程契约（方案3，v1.13.42+）
 
 > 目标：批量任务峰值内存随一次性子进程退出归还操作系统，主进程常驻 RSS 不被批量任务拉高。
 > 实现：`backend/src/batch/`（types.ts 协议 / jobs.ts 处理器 / child.ts 子进程引导 / runner.ts 父进程运行器）。验证基线见第 8 章：`[BATCH]` 日志输出「子进程峰值 + 主进程前后 RSS」。
@@ -74,7 +74,7 @@
 - **看门狗**：子进程 15min 无任何消息（心跳/progress/result 皆算）→ SIGKILL + `BatchJobError`；父进程 `abort` 发 `abort` 消息，宽限期 30s 后未退 → SIGKILL。
 - **收尾（成功与失败都必须）**：`clearLibraryIndex()` + `touch()`（子进程改了库 → 主进程缓存失效、标记活动），并记录子进程峰值 RSS 与主进程前后 RSS。
 - **状态/进度**：任务状态 Map 全部留在主进程（scanJobs/scrapeJobs/matchJobs/asyncTasks/jobRunner），子进程只回报 `progress`；前端轮询端点不变。
-- **异步入口契约（v1.7.75+）**：`POST /v1/recommend/refresh`（默认路径，不带 pluginId）与 `POST /v1/{lyrics,covers}/backfill` 均为异步。刷新返回 202 + taskId，前端轮询 `GET /v1/tasks/:id`，`task.result` = `{success, seedSalt, results}`（能力缺失仍同步 503）；批量补全沿用 `GET /v1/{lyrics,covers}/backfill/status` 轮询（`startBackfill` 契约不变：同步 `COUNT` 出 total，全量候选 + 逐首补全在子进程内跑）。
+- **异步入口契约（v1.13.42+）**：`POST /v1/recommend/refresh`（默认路径，不带 pluginId）与 `POST /v1/{lyrics,covers}/backfill` 均为异步。刷新返回 202 + taskId，前端轮询 `GET /v1/tasks/:id`，`task.result` = `{success, seedSalt, results}`（能力缺失仍同步 503）；批量补全沿用 `GET /v1/{lyrics,covers}/backfill/status` 轮询（`startBackfill` 契约不变：同步 `COUNT` 出 total，全量候选 + 逐首补全在子进程内跑）。
 - **插件调用仍经沙箱（边界不因子进程而削弱）**：子进程内调 `reg.impl[method]` 走与主进程相同的沙箱代理——外置插件权限授权（permissions）照常生效；单次调用预算由沙箱 `timeoutForMethod()` 落地（`manifest.longRunning` 或默认 15s），longRunning 方法路由到批量 worker（软看门狗）。子进程不绕过沙箱、不写死 provider id、不直接 import 插件实现（`scripts/check-core.mts` 覆盖 `batch/` 目录）。
 - **错误透传**：子进程失败携带 `sandboxCode`/`hint`（`BatchJobError`），jobRunner 的 PluginJobState 错误字段照常填充。
 
@@ -90,7 +90,7 @@
 - runner 单测用 `_setForkImplForTest` 注入假子进程（不真实 fork）；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 注入进程内直调。**这些钩子仅供测试，生产禁止。**
 - 内存验证基线：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`，要求批量执行期间主进程 RSS 平稳（B ≤ A + 5MB 或下降）。
 
-### 1.4 播放器双协议互斥契约（v1.7.76+，方案 A）
+### 1.4 播放器双协议互斥契约（v1.13.42+，方案 A）
 
 > Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay（音频输入互斥）。双协议会话**必须互斥**，否则残留会话抢占音频通道 → 设备"显示在播但无声"。
 
@@ -100,7 +100,7 @@
 - 音量/静音跨协议转发（`setAirPlayVolume` → DLNA RenderingControl）仍走既有 `dlnaPeerOfAirPlay` 逻辑，不受互斥影响。
 - 新增协议播放器（Cast 等）若与既有协议可能同设备，必须同样登记互斥（按 host IP 匹配），禁止只增不互斥。
 
-### 1.5 AirPlay 插件开关契约（v1.7.78+）
+### 1.5 AirPlay 插件开关契约（v1.13.42+）
 
 > AirPlay（RAOP）渲染器是**可停用内置插件**（`airplay-renderer`），**默认关闭**。未开启时不启动任何服务，零常驻资源。
 
@@ -110,9 +110,9 @@
 - **关闭时零常驻**：`stopAirPlayService()`（airplay/control.ts）——停全部会话（RAOP TEARDOWN + ffmpeg kill）、清 volumeState/lastCast、移除全部 `airplay:*` peer（`removeAirPlayPeers`）、注销 QueueController player（`unregisterAirPlayDevices`）、停 mDNS（`stopAirPlayDiscovery`：browser.stop + bonjour.destroy + clearInterval）并清空设备内存列表。**关闭后无网络监听/无定时器/无会话/无 peer/无 player 注册**。
 - **路由守卫**：`/v1/airplay/*` 全部端点挂 `use` 中间件，未启用返回 409（`CONFLICT`，"AirPlay 播放器已关闭"），防绕过。
 - **禁止**：未启用状态下任何代码路径调用 discovery/设备注册（mDNS 是唯一设备来源，关闭后设备列表为空，天然免疫）。
-- **内置插件均可停用**（v1.7.78+）：移除"内置不可停用"限制——`/v1/plugins` 的 toggle 对所有插件生效（内置插件仅不可删除/不可更新）。需要服务生命周期联动的内置插件（如 airplay-renderer → AirPlay 服务启停）在 toggle 端点特判 id 接线，禁止只改 DB 不联动。
+- **内置插件均可停用**（v1.13.42+）：移除"内置不可停用"限制——`/v1/plugins` 的 toggle 对所有插件生效（内置插件仅不可删除/不可更新）。需要服务生命周期联动的内置插件（如 airplay-renderer → AirPlay 服务启停）在 toggle 端点特判 id 接线，禁止只改 DB 不联动。
 
-### 1.6 首页推荐展示与歌曲处理解耦契约（v1.7.79+，根治方案）
+### 1.6 首页推荐展示与歌曲处理解耦契约（v1.13.42+，根治方案）
 
 > **问题**：榜单插件（QQ/酷狗/网易云）的 `recommend()` 曾做完整抓歌+匹配+在线补全（酷狗 TOP500 一次处理 500 首），但 `/v1/recommend` 首页只用到了 `id/name/cover/count`，处理出的 `songs` 被后端丢弃。于是**首页展示延迟被绑定在"插件处理了多少首歌"上**——冷启动下多个频道累积的几百次匹配/补全轻松超过前端默认 15s 超时，`/v1/recommend` 整单被中止 → go-music-dl 的频道与榜单频道一起消失。这是逻辑错误：首页只需元数据，却被设计成了"迷你同步"。
 >
@@ -154,7 +154,7 @@
 - 不新增缓存层，沿用既有 `recommendCache` 与并行聚合。
 - 不改变 `/v1/recommend` 的路径/返回结构/`success`/`providerId` 语义（遵守 3.5 行为契约）。
 
-### 1.6.1 首页歌单接口分流规则（v1.7.79+，根治「已入库仍被当作远程导入」）
+### 1.6.1 首页歌单接口分流规则（v1.13.42+，根治「已入库仍被当作远程导入」）
 
 > **问题**：三个榜单插件（QQ音乐榜单 / 酷狗榜单 / 网易云榜单）虽已把歌单同步入库（`runDailyJob` → `host.playlists.upsert`），但此前仍声明 `recommendPlaylist` 能力、走 `/v1/recommend` 首页链路。前端据此把卡片当作"待 go-music-dl 导入的远程歌单"，点击走 `importRecommendPlaylist` 导入路线 → 「已入库却仍被远程导入」→ 导入失败、无法播放。
 
@@ -278,7 +278,7 @@ OpenSubsonic 参数(u+t+s / u+p) → token 参数(流媒体 URL 场景)
 ```
 中间件：`backend/src/middleware/auth.ts`。WS 用 `authenticateWsToken`。
 
-**鉴权缓存（v1.7.72+）**：apiKey 用**内存索引**（`apiKeyHash(sha256) → { userId, expiresAt }`，懒构建 + 自愈回填存量明文），JWT 用户查库带 60s TTL 缓存，替代每请求全表扫。用户资料/apiKey 写操作后必须调用 `invalidateAuthCaches()`（生成/撤销 key、改密码、改名），否则缓存最多 60s 内过期收敛。
+**鉴权缓存（v1.13.42+）**：apiKey 用**内存索引**（`apiKeyHash(sha256) → { userId, expiresAt }`，懒构建 + 自愈回填存量明文），JWT 用户查库带 60s TTL 缓存，替代每请求全表扫。用户资料/apiKey 写操作后必须调用 `invalidateAuthCaches()`（生成/撤销 key、改密码、改名），否则缓存最多 60s 内过期收敛。
 
 ### 3.4 幂等与并发（必须遵守，防止重复副作用）
 
@@ -396,15 +396,15 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 
 ## 八、可观测性规范
 
-- **日志基础设施（v1.7.72+，新代码必须用）**：统一走 `utils/logger.ts` 的 `createLogger(prefix)`，禁止裸 `console.log/console.error`。
+- **日志基础设施（v1.13.42+，新代码必须用）**：统一走 `utils/logger.ts` 的 `createLogger(prefix)`，禁止裸 `console.log/console.error`。
   - 级别：`debug < info < warn < error`，`LOG_LEVEL` 环境变量控制（默认 info）。
   - 结构化：`log.error("任务失败", { pluginId, taskId, err })` → 输出 `[PLUGIN-JOB] ERROR 任务失败 pluginId=x taskId=y err=z`。
   - **强制**：所有 catch 块打 `error` 且**必须包含关键入参**（userId/songId/deviceId/playerId/pluginId/taskId/url 之一或多个），禁止吞异常、禁止仅 `console.error(e)` 无上下文。
 - **豁免条款（仅限以下场景，必须配注释）**：① 纯解析容错（`JSON.parse` 失败回落默认值）；② 幂等清理（`ALTER TABLE` 迁移失败跳过、socket/资源 close 失败）；③ 高频轮询兜底（设备状态/组状态查询失败走默认值，如 DLNA poll 失败继续轮询）。以上场景允许静默或 `log.debug`，**禁止**在关键业务路径（播放/导入/同步/鉴权）吞异常。
 - **日志前缀**（沿用既有标签习惯，新增标签先查重）：`[MEMORY-RECLAIM]`、`[ORPHAN-PRUNE]`、`[PLUGIN-JOB]`、`[PLUGIN-WORKER]`、`[PLUGIN-HOTRELOAD]`、`[SCANNER]`、`[DAILY-RECOMMEND]`、`[LOCAL-RECOMMEND]`、`[DAILY-SCHEDULER]`、`[ARTIST-SCRAPE]`、`[AUTO-SYNC]`、`[REGISTRY]`、`[batch-runner]`（批量子进程完成：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`）、`[batch-child]`（子进程引导/异常）、`[batch-job]`（子进程 handler 侧）、`[DLNA]`、`[peer]`、`[group]`、`[QueueController]`、`[SECRET]`、`[FATAL]`、`[SECURITY]`、`[PLAY-HISTORY]`、`[HTTP]`（慢请求）。
-- **请求 metrics（v1.7.72+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[HTTP] WARN 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
-- **内存观测（v1.7.72+）**：`GET /rest/api/v1/admin/memory-settings` 返回 `rssMB/heapUsedMB/externalMB/arrayBuffersMB/isIdle/isBatchBusy/lastReclaimAt/lastReclaim`；`POST /rest/api/v1/admin/memory/reclaim` 返回回收前后内存快照。发版后先看 `rssMB` 曲线定论（稳定高位=正常；持续上涨=查泄漏）。
-- **批量子进程内存观测（v1.7.75+）**：批量任务完成时 `[batch-runner]` 必打 `[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`（新增 `backfill` / `recommend-refresh` 等 kind 前缀同构）。验收基线：子进程峰值归一次性子进程所有（退出即归还 OS）；主进程 B ≤ A + 5MB（或下降）。批量执行期间抽样主进程 RSS 应平稳，不得随子进程工作增长。
+- **请求 metrics（v1.13.42+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[HTTP] WARN 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
+- **内存观测（v1.13.42+）**：`GET /rest/api/v1/admin/memory-settings` 返回 `rssMB/heapUsedMB/externalMB/arrayBuffersMB/isIdle/isBatchBusy/lastReclaimAt/lastReclaim`；`POST /rest/api/v1/admin/memory/reclaim` 返回回收前后内存快照。发版后先看 `rssMB` 曲线定论（稳定高位=正常；持续上涨=查泄漏）。
+- **批量子进程内存观测（v1.13.42+）**：批量任务完成时 `[batch-runner]` 必打 `[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`（新增 `backfill` / `recommend-refresh` 等 kind 前缀同构）。验收基线：子进程峰值归一次性子进程所有（退出即归还 OS）；主进程 B ≤ A + 5MB（或下降）。批量执行期间抽样主进程 RSS 应平稳，不得随子进程工作增长。
 - 入口/出口关键动作打 Info（含耗时可选）；分支判断 Debug。
 
 ---
@@ -415,9 +415,9 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 
 - 测试框架 vitest（`pool: forks`、每文件独立 DATA_DIR、shuffle）。
 - **单元测试**：核心业务逻辑（player/memory/plugins/group/source）必须覆盖；新增/修改逻辑**必须**附测试或更新既有测试。
-- **批量子进程测试（v1.7.75+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 进程内直调（测试专用钩子，生产禁止）。
+- **批量子进程测试（v1.13.42+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 进程内直调（测试专用钩子，生产禁止）。
 - **集成/冒烟**：行为类改动（新路由/新流程）用本地隔离实例实测（临时 DATA_DIR + 桩插件，跑通后端直连/代理/真浏览器三层），或至少补集成测试。
-- **一键 e2e（v1.7.72+）**：`bash scripts/e2e.sh` —— 临时 DATA_DIR 起服 + 登录 + 验证 `users/me`、`peers`、`groups`、`memory-settings`、`metrics`、OpenSubsonic 错误凭据契约，自动清理。交付前跑一遍。
+- **一键 e2e（v1.13.42+）**：`bash scripts/e2e.sh` —— 临时 DATA_DIR 起服 + 登录 + 验证 `users/me`、`peers`、`groups`、`memory-settings`、`metrics`、OpenSubsonic 错误凭据契约，自动清理。交付前跑一遍。
 - **交付门槛**：`tsc --noEmit` 0 错误 + 相关测试全绿 + 无回归；未附冒烟用例视为未完成。
 
 ### 9.2 AI 自检清单（交付前逐项勾选）
