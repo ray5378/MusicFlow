@@ -12,6 +12,7 @@
 
 import { sqlite } from "../db/index.js";
 import type { PluginManifest, PluginType, PluginCapability, LyricSongInput } from "./types.js";
+import { withScheduleFields } from "../services/plugin/scheduleFields.js";
 
 export interface RegisteredPlugin {
   manifest: PluginManifest;
@@ -20,9 +21,14 @@ export interface RegisteredPlugin {
 
 const registry = new Map<string, RegisteredPlugin>();
 
-/** Register a plugin (built-in or discovered). Safe to call multiple times. */
+/** Register a plugin (built-in or discovered). Safe to call multiple times.
+ *
+ *  这里是内置与外置(沙箱)插件注册的**唯一漏斗**:凡声明了歌单调度相关能力
+ *  (SCHEDULED_CAPS)的插件,在此统一注入「参与每日定时同步 / 容器启动补拉」两个
+ *  开关到 configSchema(幂等)。这样任何新增/第三方插件只要声明了能力,配置页就自动
+ *  出现定时开关,无需逐个插件手写。 */
 export function registerPlugin(manifest: PluginManifest, impl: any) {
-  registry.set(manifest.id, { manifest, impl });
+  registry.set(manifest.id, { manifest: withScheduleFields(manifest), impl });
 }
 
 /** Remove a plugin from the in-memory registry (used when uninstalling an

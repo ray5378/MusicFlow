@@ -595,6 +595,11 @@ export async function discoverExternalPlugins(
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       const manifest: PluginManifest = sandbox.manifest;
+      // plugin.json 的 schedules 声明优先于 index.js(让外置插件无需改 index.js
+      // 就能在 plugin.json 里声明定时开关能力)。index.js 未声明时用 plugin.json 的。
+      if (manifest.schedules === undefined && expectedManifest?.schedules !== undefined) {
+        manifest.schedules = expectedManifest.schedules;
+      }
       // P0 根因修复(权威来源 = index.js manifest.capabilities):无论 plugin.json
       // 是否声明 permissions,凡声明了网络型能力的插件都自动获得 `net`(同理
       // 文件型→fs、调度型→storage),与 plugin.json 声明权限、index.js 自身

@@ -9,10 +9,78 @@
 //   - runOnBoot       默认 false:启动补拉是新增行为,默认不打扰。
 // 存量安装的插件 config 里没有这两个键,宿主按缺失即默认处理(见 jobs.ts 注释)。
 
-import type { ConfigField } from "../../plugins/types.js";
+import type { ConfigField, PluginManifest } from "../../plugins/types.js";
 
 /** 分组标识,前端会把这两项圈进「定时同步」模块框。 */
 export const SCHEDULE_GROUP = "schedule";
+
+/** 参与「每日定时同步 / 容器启动补拉」门控的插件能力(见 batch/jobs.ts 的
+ *  runSyncPipeline 与 maintenanceHandler)。
+ *
+ *  只要插件声明了下列任一能力,宿主的注册表注入器(registry.ts 的 registerPlugin)
+ *  就会把 SCHEDULE_FIELDS 两个开关自动挂进它的 configSchema——内置与外置沙箱插件
+ *  统一走这一条路,**不再逐个插件手写**,保证「所有歌单配置页面都接入该能力」不会
+ *  漏插件。
+ *
+ *  覆盖范围与调度器实际遍历的能力一一对应:
+ *    - 推荐器:每日推荐 / 本地推荐 / 通用推荐歌单 / 本地随机(按平台)/ 组合歌单 / 歌单清理;
+ *    - 在线源:每日推荐同步(recommend)与网页歌轮换(webRotation);
+ *    - 歌单再同步:playlistSync(维护管线);
+ *    - 歌单导入:playlistImport / playlistFile(按需的 URL / 文件导入,纳入后配置页与
+ *      其它歌单插件保持一致地出现定时开关)。 */
+export const SCHEDULED_CAPS: string[] = [
+  "dailyPlaylist",
+  "localPlaylist",
+  "recommendPlaylist",
+  "localPlatformRecommend",
+  "comboPlaylist",
+  "playlistCleanup",
+  "recommend",
+  "webRotation",
+  "playlistSync",
+  "playlistImport",
+  "playlistFile",
+  // 歌手资料抓取(新歌手封面刮削):纳入后配置页同样出现定时开关,
+  // 与其它歌单/抓取插件保持一致(主持人可按 scheduleEnabled 门控其后台抓取)。
+  "artistInfo",
+];
+
+/** 按 manifest.schedules 声明,决定注入哪些 SCHEDULE_FIELDS。
+ *  返回要注入的字段子集;空数组 = 不注入。 */
+function resolveDesiredFields(manifest: PluginManifest): ConfigField[] {
+  const s = manifest.schedules;
+  // 缺省 → 按能力自动推断
+  if (s === undefined) {
+    return manifest.capabilities.some((c) => SCHEDULED_CAPS.includes(c))
+      ? SCHEDULE_FIELDS
+      : [];
+  }
+  // true → 全部注入
+  if (s === true) return SCHEDULE_FIELDS;
+  // false → 不注入
+  if (s === false) return [];
+  // 对象 → 逐项判断
+  const fields: ConfigField[] = [];
+  for (const f of SCHEDULE_FIELDS) {
+    if ((s as any)[f.key] === true) fields.push(f);
+  }
+  return fields;
+}
+
+/** 幂等地把 schedule 字段注入到 manifest.configSchema(仅注入缺失的键)。
+ *  由 registerPlugin 统一调用,内置与外置插件都经过它,返回同一 manifest 引用。 */
+export function withScheduleFields(manifest: PluginManifest): PluginManifest {
+  if (!manifest || !Array.isArray(manifest.configSchema) || !Array.isArray(manifest.capabilities)) {
+    return manifest;
+  }
+  const desired = resolveDesiredFields(manifest);
+  if (desired.length === 0) return manifest;
+  const keys = new Set(manifest.configSchema.map((f) => f.key));
+  for (const f of desired) {
+    if (!keys.has(f.key)) manifest.configSchema.push(f);
+  }
+  return manifest;
+}
 
 export const SCHEDULE_FIELDS: ConfigField[] = [
   {

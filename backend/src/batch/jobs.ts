@@ -28,6 +28,7 @@ import { dailyRecommendApi, localRecommendApi, comboPlaylistApi } from "../servi
 import type { BackfillKind } from "../services/backfill.js";
 import type { BatchJobKind } from "./types.js";
 import { createLogger } from "../utils/logger.js";
+import { getPluginManifest } from "../plugins/registry.js";
 
 const log = createLogger("batch-job");
 
@@ -60,15 +61,34 @@ async function runPluginMethod(pluginId: string, method: string, opts: any): Pro
 // 关键:配置**缺失一律按默认值**。默认值只在插件首次安装时落库,存量安装的
 // config 里没有这两个键,缺失即默认——保证老用户升级后行为连续(该跑的照跑)。
 
-/** 是否参与每日定点同步(缺失=开)。 */
+/** 插件是否声明了某项定时能力(manifest.schedules)。
+ *  返回 true = 该项开关存在且应由用户配置决定;false = 插件不参与此项调度。
+ *  这是宿主调度器对插件自身声明的尊重:即使 config 有这个键,schedules:false
+ *  或 schedules:{ runOnBoot:false } 的插件也不应该被该项调度跑。 */
+function pluginDeclaresSchedule(id: string, field: "scheduleEnabled" | "runOnBoot"): boolean {
+  const m = getPluginManifest(id);
+  if (!m) return true; // manifest 未知时宽松处理(按默认推断)
+  const s = m.schedules;
+  if (s === undefined) return true; // 缺省 = 宿主自动推断,视为参与
+  if (s === false) return false;
+  if (s === true) return true;
+  // 对象:按字段判断
+  return (s as any)[field] === true;
+}
+
+/** 是否参与每日定点同步(缺失=开)。插件声明 schedules:false 或
+ *  schedules:{ scheduleEnabled:false } 时强制不跑。 */
 function scheduleEnabledFor(id: string): boolean {
+  if (!pluginDeclaresSchedule(id, "scheduleEnabled")) return false;
   const cfg = getPluginConfig(id);
   if (!cfg) return true;
   return cfg.scheduleEnabled !== false;
 }
 
-/** 是否在启动时补拉一次(缺失=关)。 */
+/** 是否在启动时补拉一次(缺失=关)。插件声明 schedules:false 或
+ *  schedules:{ runOnBoot:false } 时强制不跑。 */
 function runOnBootFor(id: string): boolean {
+  if (!pluginDeclaresSchedule(id, "runOnBoot")) return false;
   const cfg = getPluginConfig(id);
   if (!cfg) return false;
   return cfg.runOnBoot === true;
@@ -153,30 +173,54 @@ async function dailyJobsHandler(_args: Record<string, any>, _ctx: BatchJobContex
   return runSyncPipeline(scheduleEnabledFor, "DAILY-SCHEDULER");
 }
 
-/** 启动补拉:只跑显式打开 runOnBoot 的插件(默认一个都不跑)。 */
+/** 启动补拉:只跑显式打开 runOnBoot 的插件(默认一个都不跑)。
+ *  除推荐管线外,还补跑「歌单自动同步 / 歌手资料抓取」(runOnBoot=true 才跑),让
+ *  这两类维护型插件同样受 runOnBoot 门控。 */
 async function bootSyncHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
-  return runSyncPipeline(runOnBootFor, "BOOT-SYNC");
+  const sync = await runSyncPipeline(runOnBootFor, "BOOT-SYNC");
+  const maint = await maintenanceGated(runOnBootFor, "BOOT-SYNC");
+  return { ok: true, ran: (sync.ran || 0) + (maint.ran || 0), skipped: (sync.skipped || 0) + (maint.skipped || 0) };
+}
+
+/** 维护型步骤(歌单自动同步 + 新歌手封面刮削)。gate 决定本次是否执行。
+ *  复用同一套 gate,让「每日定点」与「启动补拉」都能按插件自身配置门控:
+ *    - 歌单自动同步(playlistSync / runSyncJob) → scheduleEnabled / runOnBoot
+ *    - 歌手资料抓取(新歌手封面刮削)            → artistInfo 插件同开关 */
+async function maintenanceGated(gate: (id: string) => boolean, tag: string): Promise<{ ran: number; skipped: number }> {
+  let ran = 0;
+  let skipped = 0;
+  for (const { manifest, impl } of getEnabledByCapability("playlistSync")) {
+    if (typeof impl?.runSyncJob !== "function") continue;
+    if (!gate(manifest.id)) { skipped++; continue; }
+    try {
+      const summary = await impl.runSyncJob({});
+      ran++;
+      if (summary) log.info(`[${tag}] ${manifest.id}: ${summary}`);
+    } catch (e: any) {
+      log.error(`[${tag}] ${manifest.id} sync error`, { err: e?.message || e });
+    }
+  }
+  const artistInfo = getEnabledByCapability("artistInfo")[0];
+  if (artistInfo) {
+    if (!gate(artistInfo.manifest.id)) { skipped++; }
+    else {
+      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const recent = db.select().from(artists).all()
+        .filter(a => !a.coverArt && (a.createdAt || "") >= since);
+      if (recent.length > 0) {
+        ran++;
+        const r = await scrapeArtistList(recent.map(a => a.id));
+        log.info(`[${tag}] artist scrape: scraped ${r.scraped}, errors ${r.errors.length}`);
+      }
+    }
+  }
+  return { ran, skipped };
 }
 
 // ---------- 6h 维护(镜像 index.ts 维护循环;play_history 清理留在主进程) ----------
 async function maintenanceHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
-  for (const { manifest, impl } of getEnabledByCapability("playlistSync")) {
-    if (typeof impl?.runSyncJob !== "function") continue;
-    try {
-      const summary = await impl.runSyncJob({});
-      if (summary) log.info(`[AUTO-SYNC] ${manifest.id}: ${summary}`);
-    } catch (e: any) {
-      log.error(`[AUTO-SYNC] ${manifest.id} sync error`, { err: e.message || e });
-    }
-  }
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const recent = db.select().from(artists).all()
-    .filter(a => !a.coverArt && (a.createdAt || "") >= since);
-  if (recent.length > 0) {
-    const r = await scrapeArtistList(recent.map(a => a.id));
-    log.info(`[ARTIST-SCRAPE] scheduled run: scraped ${r.scraped}, skipped ${r.skipped}, errors ${r.errors.length}`);
-  }
-  return { ok: true };
+  const r = await maintenanceGated(scheduleEnabledFor, "AUTO-SYNC");
+  return { ok: true, ...r };
 }
 
 // ---------- 媒体源扫描 + 扫描后新增歌手刮削(与主进程路由一致) ----------

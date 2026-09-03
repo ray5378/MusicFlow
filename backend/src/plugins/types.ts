@@ -132,6 +132,25 @@ export interface PluginManifest {
   urlPatterns?: string[];
   /** Drives the admin config form (no more hardcoded baseUrl/sources fields). */
   configSchema: ConfigField[];
+  /** 插件自身声明的定时任务能力(由插件 manifest / plugin.json 声明,宿主尊重)。
+   *
+   *  取值:
+   *    - `true`:  声明全部参与 → configSchema 注入 scheduleEnabled + runOnBoot 两个开关;
+   *    - `false`: 声明不参与 → 不注入任何开关,调度器也不门控此插件;
+   *    - 对象:  按需逐项声明,只有显式标 `true` 的项才会出现在配置页:
+   *         { scheduleEnabled: true }               → 只显示「参与每日定时同步」开关;
+   *         { runOnBoot: true }                     → 只显示「容器启动时拉取一次」开关;
+   *         { scheduleEnabled: true, runOnBoot: true } → 两项都显示;
+   *    - 缺省:  宿主按 capabilities 自动推断(声明了 SCHEDULED_CAPS 里的能力就全部注入)。
+   *
+   *  外置插件在 plugin.json 里设 "schedules": true 即可主动让配置页出现定时开关,
+   *  无需依赖宿主硬编码的能力清单;也可按需只开一项。 */
+  schedules?: boolean | {
+    /** 是否在配置页显示「参与每日定时同步」开关 */
+    scheduleEnabled?: boolean;
+    /** 是否在配置页显示「容器启动时拉取一次」开关 */
+    runOnBoot?: boolean;
+  };
 }
 
 // ==================== Capability-specific impl contracts ====================
