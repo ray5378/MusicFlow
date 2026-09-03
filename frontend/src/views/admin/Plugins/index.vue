@@ -1463,15 +1463,22 @@ onMounted(() => {
   .candidate-row .el-button { flex: 0 0 auto; }
   /* 媒体获取行的固定宽控件在窄屏占满 */
   .mf-media-row .el-select { width: 100% !important; }
-  /* 插件配置/详情弹窗在手机端限制最大高度,让内容区域内部滚动、footer 常驻可见,
-     避免弹窗(现含「定时同步」分组等较多内容)超出视口、中心点越界被误判为遮挡。 */
+}
+</style>
+
+<style lang="scss">
+/* 非 scoped:el-dialog 经 teleport 渲染到 body,scoped 的 class 选择器带 [data-v] 匹配不到其根节点,
+   因此插件配置/详情弹窗的手机端高地适配必须放在全局作用域(用 .plugin-config-dialog 限定唯一)。
+   schedules 分组加入后弹窗内容变长,在 390/360 视口超出可视高度,中心点越界会被层级守卫误判为遮挡;
+   限制 max-height 让内容区内部滚动、footer 常驻可见,弹窗始终完整落在视口内。 */
+@media (max-width: 768px) {
   .plugin-config-dialog {
     max-height: calc(100vh - 12vh);
     display: flex;
     flex-direction: column;
   }
-  .plugin-config-dialog :deep(.el-dialog__header) { flex-shrink: 0; }
-  .plugin-config-dialog :deep(.el-dialog__body) { flex: 1 1 auto; overflow-y: auto; }
-  .plugin-config-dialog :deep(.el-dialog__footer) { flex-shrink: 0; }
+  .plugin-config-dialog .el-dialog__header,
+  .plugin-config-dialog .el-dialog__footer { flex-shrink: 0; }
+  .plugin-config-dialog .el-dialog__body { flex: 1 1 auto; overflow-y: auto; }
 }
 </style>
