@@ -315,6 +315,25 @@ button, a, [role="button"] {
   .el-popconfirm__action .el-button--primary:hover { background: var(--fnos-red-hover); border-color: var(--fnos-red-hover); }
 }
 
+/* TimePicker(时刻选择,定时任务等):输入框形态与 el-input 同源已覆写;
+   下拉面板是 el-popper 容器(通用暗色已覆写),这里补面板特有内容——时间滚动列、
+   取消/确定按钮——的暗色反馈,避免深色主题下出现 EP 默认浅色残留 */
+.el-time-picker {
+  .el-time-panel {
+    background: #1f1c2a;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+  .el-time-spinner__item { color: var(--fnos-text-primary-dim); }
+  .el-time-spinner__item:hover:not(.disabled):not(.active) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--fnos-text-primary);
+  }
+  .el-time-spinner__item.active:not(.disabled) { color: var(--fnos-red); font-weight: 600; }
+  .el-time-panel__btn { color: var(--fnos-text-secondary); }
+  .el-time-panel__btn.confirm { color: var(--fnos-red); font-weight: 600; }
+  .el-time-panel__footer { border-top-color: rgba(255, 255, 255, 0.08); }
+}
+
 /* ===== P1 表单/交互控件组件覆写 ===== */
 .el-segmented {
   background: rgba(255, 255, 255, 0.06) !important;
