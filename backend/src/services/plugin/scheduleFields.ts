@@ -103,11 +103,15 @@ export const SCHEDULE_FIELDS: ConfigField[] = [
 
 // ==================== 并行执行开关(批量任务并发) ====================
 //
-// 与定时开关不同,并行开关按插件是否声明 `longRunning`(长耗时批量方法)来注入。
+// 与定时开关同源:开关注入按「参与歌单批量任务的能力清单」判断(见下方 SCHEDULED_CAPS,
+// 或声明了 longRunning)。这样内置与外置**所有歌单/批量类插件**配置页都出现该开关,
+// 不会像只判 longRunning 那样漏掉内置(内置批量插件不声明 longRunning)。
+//
 // 语义:宿主把所有批量任务收进全局队列,默认 batchLimit=1 串行(FIFO)执行;
 // 用户在某插件上打开「允许并行执行」,该插件才被计入并发上限,可与其它的同行
-// 并行执行(利用多核,更快但 CPU 占用更高)。worker 线程本身仍为线程隔离而建,
-// 本开关只决定该 worker 是否贡献并发上限(见 batchPacer.ts 的 registerBatchWorker)。
+// 并行执行(批量任务跑在独立子进程/worker,利用多核,更快但 CPU 占用更高)。
+// 是否声明 longRunning 只影响它有没有独立 worker 线程(线程隔离),不影响本开关
+// 是否出现;本开关决定的是该插件是否贡献**全局并发上限**(见 batchPacer.ts)。
 
 /** 分组标识,前端会把这项圈进「批量执行」模块框。 */
 export const BATCH_GROUP = "batch";
@@ -122,13 +126,21 @@ export const BATCH_PARALLEL_FIELD: ConfigField = {
   help: "关闭(默认):本插件的定时/批量任务始终参与全局队列串行执行;开启:允许与其它开启此开关的插件并行执行(利用多核,更快但 CPU 占用更高)。",
 };
 
-/** 幂等地把并行开关注入到 manifest.configSchema(仅对声明 longRunning 的插件,
+/** 判断插件是否参与批量任务队列(会进全局闸、受并发上限约束):
+ *  声明了任一 SCHEDULED_CAPS 批量能力,或声明了 longRunning 长耗时批量方法。 */
+export function isBatchCapable(manifest: PluginManifest | undefined): boolean {
+  if (!manifest) return false;
+  if (Array.isArray(manifest.capabilities) && manifest.capabilities.some((c) => SCHEDULED_CAPS.includes(c))) {
+    return true;
+  }
+  return !!manifest.longRunning && Object.keys(manifest.longRunning).length > 0;
+}
+
+/** 幂等地把并行开关注入到 manifest.configSchema(仅对参与批量任务的插件,
  *  且仅注入缺失的 key)。由 registerPlugin 统一调用,内置与外置插件都经过它。 */
 export function withBatchParallelField(manifest: PluginManifest): PluginManifest {
-  if (!manifest || manifest.longRunning == null || Object.keys(manifest.longRunning).length === 0) {
-    return manifest;
-  }
-  if (!Array.isArray(manifest.configSchema)) return manifest;
+  if (!manifest || !Array.isArray(manifest.configSchema)) return manifest;
+  if (!isBatchCapable(manifest)) return manifest;
   const has = manifest.configSchema.some((f) => f.key === BATCH_PARALLEL_FIELD.key);
   if (!has) manifest.configSchema.push(BATCH_PARALLEL_FIELD);
   return manifest;

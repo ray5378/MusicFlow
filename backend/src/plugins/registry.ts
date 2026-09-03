@@ -25,9 +25,9 @@ const registry = new Map<string, RegisteredPlugin>();
  *
  *  这里是内置与外置(沙箱)插件注册的**唯一漏斗**:凡声明了歌单调度相关能力
  *  (SCHEDULED_CAPS)的插件,在此统一注入「参与每日定时同步 / 容器启动补拉」两个
- *  开关到 configSchema(幂等);凡声明了 `longRunning` 长耗时批量方法的插件,统一
- *  注入「允许并行执行」开关(默认关,见 withBatchParallelField)。这样任何新增/第三方
- *  插件只要声明了对应能力,配置页就自动出现对应开关,无需逐个插件手写。 */
+ *  开关到 configSchema(幂等);凡参与批量任务队列(SCHEDULED_CAPS 能力或声明
+ *  longRunning)的插件,统一注入「允许并行执行」开关(默认关,见 withBatchParallelField)。
+ *  这样任何新增/第三方插件只要声明了对应能力,配置页就自动出现对应开关,无需逐个插件手写。 */
 export function registerPlugin(manifest: PluginManifest, impl: any) {
   registry.set(manifest.id, { manifest: withBatchParallelField(withScheduleFields(manifest)), impl });
 }

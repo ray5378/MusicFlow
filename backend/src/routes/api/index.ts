@@ -77,6 +77,7 @@ import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
 import { unregisterPlugin, firstEnabledByCapability, getEnabledByCapability, getPluginConfig, getPluginManifest, getPlugin } from "../../plugins/registry.js";
 import { registerBatchWorker, unregisterBatchWorker } from "../../services/plugin/batchPacer.js";
+import { isBatchCapable } from "../../services/plugin/scheduleFields.js";
 import { preferLocalEnabled, PLAY_PREFERENCE_PLUGIN_ID } from "../../services/plugin/core/playPreference.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -851,19 +852,16 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
     name: typeof body.name === "string" ? body.name : p.name,
     updatedAt: new Date().toISOString(),
   }).where(eq(plugins.id, p.id)).run();
-  // 并行开关实时联动:该插件声明了 longRunning 批量方法 && 「允许并行执行」切换
+  // 并行开关实时联动:该插件参与批量任务队列 && 「允许并行执行」切换
   // → 同步批量并发上限(register/unregisterBatchWorker 幂等,无需重启,重复保存不重复计)。
-  if (body.config !== undefined) {
-    const m = getPluginManifest(p.name);
-    const hasLongRunning = !!m && !!m.longRunning && Object.keys(m.longRunning).length > 0;
-    if (hasLongRunning) {
-      let oldCfg: any = {};
-      try { oldCfg = p.config ? JSON.parse(p.config) : {}; } catch { /* keep {} */ }
-      const oldOn = oldCfg?.batchParallel === true;
-      const newOn = body.config?.batchParallel === true;
-      if (!oldOn && newOn) registerBatchWorker(p.id);
-      else if (oldOn && !newOn) unregisterBatchWorker(p.id);
-    }
+  // 内置与外置、声明与否 longRunning 一律按批量能力(isBatchCapable)纳入。
+  if (body.config !== undefined && isBatchCapable(getPluginManifest(p.name))) {
+    let oldCfg: any = {};
+    try { oldCfg = p.config ? JSON.parse(p.config) : {}; } catch { /* keep {} */ }
+    const oldOn = oldCfg?.batchParallel === true;
+    const newOn = body.config?.batchParallel === true;
+    if (!oldOn && newOn) registerBatchWorker(p.id);
+    else if (oldOn && !newOn) unregisterBatchWorker(p.id);
   }
   return c.json({ success: true });
 });
