@@ -67,7 +67,7 @@
 **B. 边界（禁止违反）**
 
 - **一次性子进程**：`child_process.fork`，每个子进程**只跑一个 job**，跑完 `sendAndExit`（`process.send` 回调后再 `process.exit`，防终结消息丢失）。
-- **全局串行**：`runBatchJob` 先持 `acquireBatchLock`（FIFO），同一时刻最多 1 个批量子进程；批量档位/交互让行对子进程生效——主进程交互窗口经 `pace` 消息同步给子进程。
+- **全局串行（默认，可并行）**：`runBatchJob` 先持 `acquireBatchLock`（FIFO），**默认同一时刻最多 1 个批量子进程**（全部任务排队串行）；某插件在配置页打开「允许并行执行」（`batchParallel`）后，并发上限 = 已开启该开关的插件数（利用多核，各任务跑在自己的批量 worker 上），默认关 → 1。批量档位/交互让行对子进程生效——主进程交互窗口经 `pace` 消息同步给子进程。
 - **args 必须 JSON 可序列化**：只传最小入参（id/url/mode/list…），**禁止**传函数/实例；子进程从自身注册表/DB 重建 provider/config/plugin（`getConfiguredProvider` / `getPluginConfig` / `getEnabledByCapability`）。
 - **子进程引导序列（child.ts，固定）**：`registerBuiltinPlugins()` → `initDatabase()` → `backfillGenres()` → `discoverExternalPlugins(APP_VERSION)`，然后上报 `ready`。子进程**不启动** HTTP/WS/播放器/DLNA/热重载/内存回收/调度器。
 - **IPC 协议**：父→子 `run{jobId,kind,args}` / `abort{jobId}` / `pace{active}`；子→父 `ready{pid}` / `heartbeat{pid}`（30s，unref）/ `progress{jobId,payload}` / `result{jobId,result,rss}` / `error{jobId,error,sandboxCode,hint}`。

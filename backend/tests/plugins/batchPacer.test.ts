@@ -160,10 +160,12 @@ describe("批量闸多核并发(worker 化后)", () => {
     leftover();
   });
 
-  it("registerBatchWorker 提升上限、unregister 回退", async () => {
+  it("registerBatchWorker 提升上限、unregister 回退(按 id 幂等)", async () => {
     _resetPacerForTest();
-    registerBatchWorker();
-    registerBatchWorker(); // 2 个 worker → 并发 2
+    registerBatchWorker("a");
+    registerBatchWorker("a"); // 同一 id 重复注册只算一次
+    registerBatchWorker("b"); // 2 个插件 → 并发 2
+    expect(_batchLimitForTest()).toBe(2);
     const r1 = await acquireBatchLock();
     const r2 = await acquireBatchLock();
     let thirdGot = false;
@@ -173,8 +175,10 @@ describe("批量闸多核并发(worker 化后)", () => {
     r1(); r2();
     await sleep(10);
     expect(thirdGot).toBe(true);
-    unregisterBatchWorker();
-    unregisterBatchWorker(); // 0 worker → 并发 1
+    unregisterBatchWorker("a");
+    unregisterBatchWorker("missing-id"); // 幂等删除不存在的 id,不影响上限
+    expect(_batchLimitForTest()).toBe(1);
+    unregisterBatchWorker("b"); // 全注销 → 并发 1
     expect(_batchLimitForTest()).toBe(1);
   });
 });

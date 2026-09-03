@@ -1336,9 +1336,20 @@ export class SandboxedPluginRemote {
   }
 }
 
+// 通用常量:并行开关的 key 与 scheduleFields.BATCH_PARALLEL_FIELD.key 保持一致。
+const BATCH_PARALLEL_KEY = "batchParallel";
+
+/** 读取插件配置里的「允许并行执行」开关(默认关)。 */
+function parallelEnabled(config: Record<string, any> | undefined): boolean {
+  return config?.[BATCH_PARALLEL_KEY] === true;
+}
+
 /** 加载沙箱插件:返回 manifest(与 plugin.json 校验过)与 impl 门面。
  *  插件声明了 longRunning 批量方法时,额外启动批量 worker(挂到 sandbox,dispose 联动),
- *  这些方法由 worker 线程执行;SANDBOX_WORKER_DISABLE=1 可关(测试/排障用)。 */
+ *  这些方法由 worker 线程执行——worker 线程是为**线程隔离**而建(主进程事件循环不卡),
+ *  不因并行开关而省略;但是否把该 worker 计入全局并发上限(registerBatchWorker)由插件
+ *  配置 `batchParallel` 门控:默认关 → 不提升并发,所有批量任务统一排队串行;
+ *  开 → 该插件被计入并发,可与其它的并行(利用多核)。SANDBOX_WORKER_DISABLE=1 可关。 */
 export async function loadSandboxedPlugin(
   id: string,
   code: string,
@@ -1354,9 +1365,11 @@ export async function loadSandboxedPlugin(
       worker = new SandboxedPluginRemote(id, env);
       // 延迟拿批量闸(避免 sandbox.ts 顶层拉入 batchPacer→settings→db 的模块链,worker 里会重复开 DB)。
       const pacer = await import("../services/plugin/batchPacer.js");
-      worker.setOnDispose(() => { try { pacer.unregisterBatchWorker(); } catch { /* ignore */ } });
+      worker.setOnDispose(() => { try { pacer.unregisterBatchWorker(id); } catch { /* ignore */ } });
       await worker.init(code, expectedManifest);
-      pacer.registerBatchWorker(); // 并发上限随 worker 数提升(多核并行批量任务)
+      // 并发注册由配置门控:默认关 → 不提升并发上限(全部任务排队串行);
+      // 开 → 该插件计入并发,可与其它的并行(幂等)。worker 线程仍为隔离而建。
+      if (parallelEnabled(env.getConfig())) pacer.registerBatchWorker(id);
       sandbox.attachWorker(worker);
     } catch (e: any) {
       console.warn(`[PLUGIN:${id}] 批量 worker 初始化失败,longRunning 方法回退主线程执行:`, e?.message || e);

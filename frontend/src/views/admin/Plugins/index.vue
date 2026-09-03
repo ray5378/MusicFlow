@@ -615,9 +615,10 @@ const configFields = computed<any[]>(() => parseManifest(editing.value).configSc
 /** 按 group 字段分组的配置项,每组渲染为带标题的模块框。无 group 的字段归入"其他"。 */
 const groupedConfigFields = computed(() => {
   const groups: Record<string, any[]> = {};
-  const groupOrder = ['schedule', 'backend', 'recommend', 'keyword', 'frontend'];
+  const groupOrder = ['schedule', 'batch', 'backend', 'recommend', 'keyword', 'frontend'];
   const groupLabels: Record<string, string> = {
     schedule: '定时同步',
+    batch: '批量执行',
     backend: '后端配置',
     recommend: '首页推荐',
     keyword: '关键词自动入库',

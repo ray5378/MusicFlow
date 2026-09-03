@@ -7,8 +7,10 @@
 //        只让事件循环插空、队列里全是本任务马上又回来跑(CPU 不减)。峰值摊平成
 //        均值,总量不变(无限任务无 deadline,慢一点换 CPU 平缓完全可接受)。
 //   P0-2 动态并发(batchConcurrency): 按档位返回基础并发;事件循环延迟高时降 1。
-//   P0-3 全局闸(acquireBatchLock): 全进程同时只跑 1 个批量任务(FIFO 排队),消除
-//        gmdl 同步 + listenbrainz 补全 + 后台 auto-match + 手动导入的多任务叠加。
+//   P0-3 全局闸(acquireBatchLock): 全进程只跑 batchLimit 个批量任务,默认 batchLimit=1
+//        (FIFO 排队串行),消除 gmdl 同步 + listenbrainz 补全 + 后台 auto-match +
+//        手动导入的多任务叠加;用户在某插件「允许并行执行」开关开启后,并发上限随之提升
+//        (利用多核,多个批量任务并行,各自跑在自己的批量 worker 上)。
 //   P0-4 交互优先(用户前端操作让行): 用户搜索/导入/手动同步时进入 interactive 窗口,
 //        后台批量任务主动退让——批间睡眠 ×4、并发压到 1,把 CPU/DB/带宽让给用户;
 //        交互操作本身走 interactiveConcurrency()(档位基础并发),不受退让影响。
@@ -163,17 +165,19 @@ export function interactiveConcurrency(): number {
   return PACE_PARAMS[currentPace()].concurrency;
 }
 
-// ---------- 全局批量闸(信号量;并发度 = 批量 worker 数,默认 1) ----------
+// ---------- 全局批量闸(信号量;并发度 = 已开启并行的插件数+1 兜底,默认 1) ----------
 // 单线程时代:全进程同时只跑 1 个批量任务(FIFO 互斥)。
 // worker 化后:沙箱批量方法在独立 worker 线程执行(不占主线程),同一时刻可以让多个
 // 批量任务并行(每个任务跑在自己的 worker 上,host 调用交替回主线程执行),真正用上
-// 多核。并发上限 = 已注册的批量 worker 数(registerBatchWorker),无 worker 时为 1(现状)。
+// 多核。并发上限 = 已开启「允许并行执行」(batchParallel)的插件数,默认关闭 → 1(串行排队)。
 let batchLimit = 1;              // 批量并发上限
 let holders = 0;                 // 当前持锁任务数
 let lockQueue: Array<() => void> = [];
 // 持锁者 + 排队者计数。isBatchBusy 的依据(语义:只要有批量任务在跑/排队,即 busy)。
 let pendingLocks = 0;
-let workerPlugins = 0;           // 已注册的批量 worker 数(批量并发上限依据)
+// 已加载长耗时 worker 且用户开启「允许并行执行」的插件 id 集合(并发上限依据)。
+// 用 id 集合而非计数,保证重复注册/注销幂等,配置页热切换不重复计。
+const batchParallelIds = new Set<string>();
 
 /**
  * 获取全局批量锁。最多 batchLimit 个任务同时持有,其余按 FIFO 排队等待。
@@ -211,16 +215,18 @@ export function setBatchConcurrencyLimit(n: number): void {
   pumpLock();
 }
 
-/** 注册一个批量 worker(沙箱插件加载成功时调用):并发上限随之提升。 */
-export function registerBatchWorker(): void {
-  workerPlugins++;
-  setBatchConcurrencyLimit(workerPlugins);
+/** 注册一个并行执行的批量 worker(插件加载成功且用户开启 batchParallel 时调用):
+ *  并发上限随之提升。幂等——同一 id 重复注册只算一次。 */
+export function registerBatchWorker(id: string): void {
+  batchParallelIds.add(id);
+  setBatchConcurrencyLimit(batchParallelIds.size);
 }
 
-/** 注销一个批量 worker(沙箱插件销毁时调用)。 */
-export function unregisterBatchWorker(): void {
-  workerPlugins = Math.max(0, workerPlugins - 1);
-  setBatchConcurrencyLimit(workerPlugins);
+/** 注销一个批量 worker 的并行资格(插件销毁 / 用户关闭 batchParallel 时调用)。
+ *  幂等——删除不存在的 id 无副作用。 */
+export function unregisterBatchWorker(id: string): void {
+  batchParallelIds.delete(id);
+  setBatchConcurrencyLimit(batchParallelIds.size);
 }
 
 /** 是否正有批量任务持有或排队等待全局闸(供状态端点/前端提示/空闲判定)。 */
@@ -239,7 +245,7 @@ export function _resetPacerForTest(): void {
   holders = 0;
   pendingLocks = 0;
   batchLimit = 1;
-  workerPlugins = 0;
+  batchParallelIds.clear();
   interactiveDepth = 0;
   remoteInteractive = false;
   interactiveListeners.length = 0;
