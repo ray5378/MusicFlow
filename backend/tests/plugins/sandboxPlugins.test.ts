@@ -122,9 +122,13 @@ beforeAll(async () => {
     songs: {
       list: async () => [],
       search: async (q: string) => {
-        // 标题出现在本地库映射里 → 返回对应 songId
+        // 标题出现在本地库映射里 → 返回对应 songId。artist 从查询串余下部分还原
+        // (插件本地匹配按「歌名+歌手硬」收紧后,固定 artist 过不了互含校验)。
         for (const [title, id] of Object.entries(localLibrary)) {
-          if (String(q || "").includes(title)) return [{ id, title, artist: "本地艺人", album: "本地专辑", duration: 200, coverArt: "so-x" }];
+          if (String(q || "").includes(title)) {
+            const rest = String(q || "").replace(title, "").trim();
+            return [{ id, title, artist: rest || "本地艺人", album: "本地专辑", duration: 200, coverArt: "so-x" }];
+          }
         }
         return [];
       },
@@ -357,7 +361,10 @@ describe("lastfm 外置插件(沙箱)", () => {
         list: async () => [],
         search: async (q: string) => {
           for (const [title, id] of Object.entries(lfLocal)) {
-            if (String(q || "").includes(title)) return [{ id, title, artist: "本地艺人", duration: 200 }];
+            if (String(q || "").includes(title)) {
+              const rest = String(q || "").replace(title, "").trim();
+              return [{ id, title, artist: rest || "本地艺人", duration: 200 }];
+            }
           }
           return [];
         },

@@ -29,6 +29,9 @@ import { seedDefaultRegistry } from "./plugins/registryCatalog.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
 import { startRandomSongsAutoRefresh } from "./services/plugin/randomSongs.js";
 import { runBatchJob } from "./batch/runner.js";
+import {
+  setDailyRunner, startDailyScheduler, getDailyMasterEnabled, formatDailyTime,
+} from "./services/dailyScheduler.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
 
 const app = new Hono();
@@ -255,72 +258,35 @@ startPluginHotReload();
 // Retention cleanup for play history (play_history grows with every play).
 cleanupPlayHistory(getPlayHistoryRetentionDays());
 
-// ==================== Daily-recommend scheduler (Plan A + Plan B) ====================
-// Runs at a fixed local hour every day (configurable via the `daily_recommend_hour`
-// setting). Uses setTimeout-recursive scheduling (not setInterval) so:
-//   - restarts recompute the next target time correctly (no drift accumulation)
-//   - it can hit a precise wall-clock hour instead of "every N ms"
-// On boot we also run a one-shot check: if today's daily playlist is missing
-// (e.g. the server was off at the scheduled time), generate it now.
-function getDailyHour(): number {
-  const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_hour") as any;
-  const h = parseInt(row?.value ?? "3", 10);
-  return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 3;
-}
-
-function getDailyMasterEnabled(): boolean {
-  const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_enabled") as any;
-  const v = row?.value ?? "true";
-  return v === "true" || v === "1";
-}
-
-async function runDailyJobs() {
-  // Master switch gates the combined daily-recommend job (remote + pool + local).
-  if (!getDailyMasterEnabled()) return;
-  // 每日推荐全管线在一次性批量子进程里执行(方案3):内置/外置推荐插件的
-  // runDailyJob + 组合歌单 + 平台每日推荐同步 + 网页歌清理,见 batch/jobs.ts。
-  // 全局批量闸由 runBatchJob 持有,主进程事件循环/内存不受批量任务影响。
+// ==================== Daily sync scheduler ====================
+// 每天在**可配置的具体时刻**触发一次全量同步管线(settings.daily_recommend_time
+// = "HH:MM",默认 03:00;旧版整点配置 daily_recommend_hour 仍兼容)。
+// 调度实现(setTimeout 递归 + 改配置即时 re-arm)见 services/dailyScheduler.ts。
+//
+// 到点跑什么:runBatchJob("daily-jobs")——内置/外置推荐插件的 runDailyJob +
+// 组合歌单 + 平台推荐同步 + 网页歌清理(见 batch/jobs.ts)。**每个插件是否参与
+// 由它自己的配置决定**(scheduleEnabled,默认开),不再是全局一把梭。
+setDailyRunner(async () => {
   try {
     await runBatchJob("daily-jobs", {});
   } catch (e: any) {
     log.error("[DAILY-SCHEDULER] daily job error", { err: e.message || e });
   }
-}
+  // 原 6h 维护循环取消:歌单同步+歌手刮削+历史清理改为「每天定点任务完成后」执行一次。
+  await runMaintenanceOnce();
+});
+startDailyScheduler();
+log.info(`[DAILY-SCHEDULER] 每日同步时刻: ${formatDailyTime()}`);
 
-function scheduleNextDailyRun() {
-  const hour = getDailyHour();
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(hour, 0, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1); // already past today's slot -> tomorrow
-  const delay = next.getTime() - now.getTime();
-  setTimeout(async () => {
-    // 防御:任何一步抛错都不能让 re-arm 丢失,否则定时器永久死锁,
-    // 每日推荐将从此停更(曾因 runMaintenanceOnce 抛错导致多天不更新)。
-    try {
-      await runDailyJobs();
-      // 原 6h 维护循环取消:歌单同步+歌手刮削+历史清理改为「每天定点任务完成后」执行一次。
-      await runMaintenanceOnce();
-    } catch (e: any) {
-      log.error("[DAILY-SCHEDULER] daily run error", { err: e?.message || e });
-    } finally {
-      scheduleNextDailyRun(); // re-arm for the next day (finally 保证永不丢失)
-    }
-  }, delay);
-  log.info(`[DAILY-SCHEDULER] next daily-recommend run at ${next.toLocaleString("zh-CN", { hour12: false })} (in ${Math.round(delay / 60000)} min)`);
-}
-
-// Boot-time catch-up:若服务在定点时刻(默认 03:00)之后才启动/重启,立即补跑一次
-// 当天的每日推荐管线,避免「错过了 3 点就当天停更」——容器每次重启都会重新挂
-// 定时器,但只有 catch-up 能补上重启当天错过的槽位。幂等:各插件 runDailyJob
-// 内部按当天日期判重(isGeneratedToday),已生成则直接跳过,重复启动无副作用。
-scheduleNextDailyRun();
+// 启动补拉:原先「只要总开关开就无条件全量跑一次」,改为 boot-sync——
+// 只跑把「容器启动时拉取一次」(runOnBoot)显式打开的插件,**默认一个都不跑**。
 if (getDailyMasterEnabled()) {
   (async () => {
     try {
-      await runDailyJobs();
+      const r: any = await runBatchJob("boot-sync", {});
+      log.info(`[BOOT-SYNC] ${r?.ran ?? 0} 个插件已补拉,${r?.skipped ?? 0} 个按配置跳过`);
     } catch (e: any) {
-      log.error("[DAILY-SCHEDULER] boot catch-up error", { err: e?.message || e });
+      log.error("[BOOT-SYNC] boot sync error", { err: e?.message || e });
     }
   })();
 }
@@ -335,7 +301,7 @@ startRandomSongsAutoRefresh();
 // (方案3),全局批量闸由 runBatchJob 持有,不阻塞主进程事件循环/内存。
 async function runMaintenanceOnce() {
   // play_history 保留期清理留在主进程(单条 DELETE,不构成内存峰)。
-  // 单独 try/catch:任何异常都不能中断定时器 re-arm 链(见 scheduleNextDailyRun)。
+  // 单独 try/catch:任何异常都不能中断定时器 re-arm 链(见 services/dailyScheduler.ts)。
   try {
     cleanupPlayHistory(getPlayHistoryRetentionDays());
   } catch (e: any) {

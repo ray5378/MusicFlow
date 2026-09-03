@@ -18,6 +18,7 @@
 
 export type BatchJobKind =
   | "daily-jobs"           // 每日推荐全管线(内置/外置推荐 + 组合歌单 + 平台推荐同步 + 网页歌清理)
+  | "boot-sync"            // 启动补拉:同一条管线,但只跑 runOnBoot=true 的插件
   | "maintenance"          // 6h 维护:playlistSync.runSyncJob 全部 + 新歌手信息刮削
   | "plugin-job"           // 单插件方法(手动刷新 / 聚合同步的 Path B)
   | "scan"                 // 媒体源扫描(webdav/local)+ 扫描后新增歌手刮削
@@ -37,6 +38,7 @@ export type BatchJobKind =
 /** 运行时任务类型列表(用于注册校验 / 日志)。 */
 export const jobKinds: readonly BatchJobKind[] = [
   "daily-jobs",
+  "boot-sync",
   "maintenance",
   "plugin-job",
   "scan",

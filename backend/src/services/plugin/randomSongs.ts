@@ -17,6 +17,7 @@ import { systemOwnerId } from "./shared.js";
 import { pickDailyRotatedCover } from "../playlistCover.js";
 import { createLogger } from "../../utils/logger.js";
 import type { PluginManifest } from "../../plugins/types.js";
+import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 
 const log = createLogger("RANDOM-SONGS");
 
@@ -337,6 +338,7 @@ export const randomSongsManifest: PluginManifest = {
     { key: "showOnHome", label: "在首页显示", type: "switch", default: false, help: "是否把「随机歌曲」歌单固定在首页顶部展示(按下方位次排序)" },
     { key: "homePosition", label: "首页显示位次", type: "number", default: 0, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
+    ...SCHEDULE_FIELDS,
   // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
   homePlaylistId: RANDOM_PLAYLIST_ID,
   documentation: `### 功能介绍

@@ -39,6 +39,7 @@ import { getPluginConfig } from "../../plugins/registry.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import type { PluginManifest, RecommenderPlugin } from "../../plugins/types.js";
 import { createLogger } from "../../utils/logger.js";
+import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 
 const log = createLogger("DAILY-RECOMMEND");
 export interface DailyCandidate {
@@ -699,6 +700,7 @@ export const dailyRecommendManifest: PluginManifest = {
     { key: "showOnHome", label: "在首页显示", type: "switch", default: false, help: "是否把本插件生成的歌单固定在首页顶部展示(按下方位次排序)" },
     { key: "homePosition", label: "首页显示位次", type: "number", default: 0, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
+    ...SCHEDULE_FIELDS,
   // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「每日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
   dailyTag: "每日推荐",
   // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。

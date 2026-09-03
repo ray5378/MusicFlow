@@ -143,6 +143,33 @@
       </el-card>
 
       <el-card class="mt-card">
+        <h3>定时任务</h3>
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">每日定时同步</div>
+            <div class="desc">总开关：到点执行每日推荐 / 榜单 / 歌单同步全管线。每个插件是否参与，由插件管理页「配置」里的「参与每日定时同步」开关决定（默认全参与）；容器重启是否补拉一次，由插件自己的「容器启动时拉取一次」开关决定（默认不补拉）</div>
+          </div>
+          <div class="setting-value"><el-switch v-model="dailyEnabled" @change="saveDailyConfig" /></div>
+        </div>
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">执行时刻</div>
+            <div class="desc">每天在此刻执行一次（原固定 03:00，现可精确到分钟）。改动立即生效，无需等待次日</div>
+          </div>
+          <div class="setting-value">
+            <el-time-picker
+              v-model="dailyTime"
+              format="HH:mm"
+              value-format="HH:mm"
+              placeholder="选择时刻"
+              style="width: 140px"
+              @change="saveDailyConfig"
+            />
+          </div>
+        </div>
+      </el-card>
+
+      <el-card class="mt-card">
         <h3>空闲内存回收</h3>
         <div class="setting-item">
           <div class="setting-label">
@@ -357,6 +384,37 @@ async function saveBatchPace(pace: string) {
   }
 }
 
+// ---------- 定时任务(每日同步时刻,HH:MM 可配) ----------
+const dailyEnabled = ref(true);
+const dailyTime = ref("03:00");
+let dailySaving = false; // 去抖:enabled/time 连续改动只发一次
+
+async function loadDailyConfig() {
+  try {
+    const res = await api.get("/rest/api/v1/daily-recommend");
+    dailyEnabled.value = !!res.data?.enabled;
+    if (typeof res.data?.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(res.data.time)) {
+      dailyTime.value = res.data.time;
+    }
+  } catch { /* 静默 */ }
+}
+
+async function saveDailyConfig() {
+  if (dailySaving) return;
+  dailySaving = true;
+  try {
+    await api.put("/rest/api/v1/daily-recommend/config", {
+      enabled: dailyEnabled.value,
+      time: dailyTime.value || "03:00",
+    });
+    ElMessage.success("定时任务设置已保存");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "保存失败");
+  } finally {
+    setTimeout(() => { dailySaving = false; }, 300);
+  }
+}
+
 // ---------- 空闲内存自动回收 ----------
 const memoryAutoReclaim = ref(true);
 const memoryIdleMinutes = ref(5);
@@ -424,7 +482,7 @@ async function changeUsername() {
   }
 }
 
-onMounted(() => { loadApiKey(); loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); });
+onMounted(() => { loadApiKey(); loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig(); });
 </script>
 
 <style lang="scss" scoped>

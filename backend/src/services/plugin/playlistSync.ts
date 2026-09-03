@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { importPlaylistFromUrl, findUrlImporter, ImportedPlaylist, ImportedTrack } from "./playlistImport.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
 import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
+import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 // 共享匹配/计数工具已收敛到 services/plugin/shared.ts(宿主中性模块),本插件只消费,
 // 不再持有定义,以免核心路由被迫直接 import 本实现文件(check-core 规则 B)。
 import { normalizeKey, matchPlaylistInBackground, refreshPlaylistCounts } from "./shared.js";
@@ -402,7 +403,7 @@ export const playlistSyncManifest: PluginManifest = {
   description: "定期重新拉取已开启同步的导入歌单,按曲库重建条目并自动匹配在线源",
   capabilities: ["playlistSync"],
   defaultEnabled: true,
-  configSchema: [],
+  configSchema: [...SCHEDULE_FIELDS],
   documentation: `### 功能介绍
 定期重新拉取「已开启同步」的导入歌单（QQ / 网易等），按当前曲库重建条目，并自动匹配可播放的在线源。
 

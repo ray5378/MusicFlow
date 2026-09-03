@@ -49,64 +49,113 @@ async function runPluginMethod(pluginId: string, method: string, opts: any): Pro
   return reg.impl[method](opts || {});
 }
 
-// ---------- 每日推荐全管线(镜像 index.ts runDailyJobs 的循环) ----------
-// 推荐插件直接在子进程内 await(不再经 jobRunner),组合歌单在源歌单之后跑,
-// 平台推荐/网页歌清理按 capability 遍历启用 source 插件。
-async function dailyJobsHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
+// ---------- 每日推荐全管线 / 启动补拉(同一条管线,两种门控) ----------
+//
+// 门控从「全局一把梭」细化为「按插件配置」:
+//   - scheduleEnabled(默认 true) :是否参与每日定点同步;
+//   - runOnBoot      (默认 false):容器/进程启动时是否补拉一次。
+// 两个键由各插件的 configSchema 声明(内置插件在代码里,外置插件在 plugin.json),
+// 用户可在插件配置页开关;未声明或未配置的插件按默认值处理。
+//
+// 关键:配置**缺失一律按默认值**。默认值只在插件首次安装时落库,存量安装的
+// config 里没有这两个键,缺失即默认——保证老用户升级后行为连续(该跑的照跑)。
+
+/** 是否参与每日定点同步(缺失=开)。 */
+function scheduleEnabledFor(id: string): boolean {
+  const cfg = getPluginConfig(id);
+  if (!cfg) return true;
+  return cfg.scheduleEnabled !== false;
+}
+
+/** 是否在启动时补拉一次(缺失=关)。 */
+function runOnBootFor(id: string): boolean {
+  const cfg = getPluginConfig(id);
+  if (!cfg) return false;
+  return cfg.runOnBoot === true;
+}
+
+/**
+ * 跑一遍全量同步管线。gate 决定每个插件本次是否参与,
+ * 从而让「每日定点」与「启动补拉」复用同一段编排逻辑。
+ */
+async function runSyncPipeline(gate: (id: string) => boolean, tag: string): Promise<any> {
+  let ran = 0;
+  let skipped = 0;
+  // 推荐插件直接在子进程内 await(不再经 jobRunner),组合歌单在源歌单之后跑,
+  // 平台推荐/网页歌清理按 capability 遍历启用 source 插件。
   for (const cap of ["dailyPlaylist", "localPlaylist", "recommendPlaylist", "localPlatformRecommend"] as const) {
     for (const { manifest, impl } of getEnabledByCapability(cap)) {
       if (typeof impl?.runDailyJob !== "function") continue;
+      if (!gate(manifest.id)) { skipped++; continue; }
       try {
         const summary = await impl.runDailyJob();
-        if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+        ran++;
+        if (summary) log.info(`[${tag}] ${manifest.id}: ${summary}`);
       } catch (e: any) {
-        log.error(`[DAILY-SCHEDULER] ${manifest.id} daily job error`, { err: e.message || e });
+        log.error(`[${tag}] ${manifest.id} daily job error`, { err: e.message || e });
       }
     }
   }
   for (const { manifest, impl } of getEnabledByCapability("comboPlaylist")) {
     if (typeof impl?.runDailyJob !== "function") continue;
+    if (!gate(manifest.id)) { skipped++; continue; }
     try {
       const summary = await impl.runDailyJob();
-      if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+      ran++;
+      if (summary) log.info(`[${tag}] ${manifest.id}: ${summary}`);
     } catch (e: any) {
-      log.error(`[DAILY-SCHEDULER] ${manifest.id} combo job error`, { err: e.message || e });
+      log.error(`[${tag}] ${manifest.id} combo job error`, { err: e.message || e });
     }
   }
   // 歌单清理插件(playlistCleanup):在每日推荐/同步之后执行,清理低歌曲数歌单。
   for (const { manifest, impl } of getEnabledByCapability("playlistCleanup")) {
     if (typeof impl?.runDailyJob !== "function") continue;
+    if (!gate(manifest.id)) { skipped++; continue; }
     try {
       const summary = await impl.runDailyJob();
-      if (summary) log.info(`[DAILY-SCHEDULER] ${manifest.id}: ${summary}`);
+      ran++;
+      if (summary) log.info(`[${tag}] ${manifest.id}: ${summary}`);
     } catch (e: any) {
-      log.error(`[DAILY-SCHEDULER] ${manifest.id} cleanup error`, { err: e.message || e });
+      log.error(`[${tag}] ${manifest.id} cleanup error`, { err: e.message || e });
     }
   }
   for (const { manifest } of getEnabledSourcePlugins()) {
     const caps = manifest.capabilities;
     if (caps.includes("recommend")) {
+      if (!gate(manifest.id)) { skipped++; continue; }
       try {
         const r = await syncAllRecommendPlaylists(manifest.id, {});
         if (r.synced > 0 || r.failed > 0) {
-          log.info(`[DAILY-SCHEDULER] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
+          log.info(`[${tag}] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
         }
       } catch (e: any) {
-        log.error(`[DAILY-SCHEDULER] ${manifest.id} recommend sync error`, { err: e.message || e });
+        log.error(`[${tag}] ${manifest.id} recommend sync error`, { err: e.message || e });
       }
     }
     if (caps.includes("webRotation")) {
+      if (!gate(manifest.id)) { skipped++; continue; }
       try {
         const r = purgeExpiredWebSongs(manifest.id);
         if (r.purged > 0 || r.errors > 0) {
-          log.info(`[DAILY-SCHEDULER] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
+          log.info(`[${tag}] ${manifest.id} web-song purge: ${r.purged} removed, ${r.covers} covers, errors: ${r.errors}`);
         }
       } catch (e: any) {
-        log.error(`[DAILY-SCHEDULER] ${manifest.id} web-song purge error`, { err: e.message || e });
+        log.error(`[${tag}] ${manifest.id} web-song purge error`, { err: e.message || e });
       }
     }
   }
-  return { ok: true };
+  log.info(`[${tag}] done: ${ran} plugin job(s) ran, ${skipped} skipped by config`);
+  return { ok: true, ran, skipped };
+}
+
+/** 每日定点:跑所有 scheduleEnabled 的插件(默认全参与)。 */
+async function dailyJobsHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
+  return runSyncPipeline(scheduleEnabledFor, "DAILY-SCHEDULER");
+}
+
+/** 启动补拉:只跑显式打开 runOnBoot 的插件(默认一个都不跑)。 */
+async function bootSyncHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
+  return runSyncPipeline(runOnBootFor, "BOOT-SYNC");
 }
 
 // ---------- 6h 维护(镜像 index.ts 维护循环;play_history 清理留在主进程) ----------
@@ -380,6 +429,7 @@ async function recommendRefreshHandler(args: Record<string, any>, ctx: BatchJobC
 /** 任务类型 → 处理器映射(子进程 dispatch 用)。 */
 export const batchJobHandlers: Record<BatchJobKind, BatchJobHandler> = {
   "daily-jobs": dailyJobsHandler,
+  "boot-sync": bootSyncHandler,
   "maintenance": maintenanceHandler,
   "plugin-job": async (args) => runPluginMethod(String(args.pluginId), String(args.method), args.opts || {}),
   "scan": scanHandler,

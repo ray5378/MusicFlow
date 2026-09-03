@@ -27,6 +27,7 @@ import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner
 import { currentPace, setPace, BatchPace, isBatchBusy } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask, getAsyncTask, anyTaskRunning } from "../../services/plugin/asyncTasks.js";
 import { runBatchJob } from "../../batch/runner.js";
+import { formatDailyTime, rearmDailyScheduler } from "../../services/dailyScheduler.js";
 import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
@@ -1467,6 +1468,7 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   return c.json({
     enabled: getBool("daily_recommend_enabled", true),
     hour: parseInt(get("daily_recommend_hour", "3"), 10) || 3,
+    time: formatDailyTime(),
     candidates,
     pickedToday: picked,
     today,
@@ -1476,7 +1478,10 @@ apiRoutes.get("/v1/daily-recommend", adminMiddleware, (c) => {
   });
 });
 
-// Update daily-recommend config (master switch, hour).
+// Update daily-recommend config (master switch + schedule time).
+// - `time`: "HH:MM"(新,可到分钟),写入 daily_recommend_time;
+// - `hour`: 0-23 整点(旧客户端兼容),等价于把 time 设为 "HH:00";
+// - 任一变更成功后立即 rearm,让下一次执行按新时刻重排(不必等 24h)。
 // Note: retention is no longer used — only one "每日推荐" playlist exists and
 // each run rebuilds it in place.
 apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
@@ -1484,13 +1489,29 @@ apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
   const set = (k: string, v: string) =>
     sqlite.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
       .run(k, v, new Date().toISOString());
-  if (typeof body.enabled === "boolean") set("daily_recommend_enabled", body.enabled ? "true" : "false");
-  if (body.hour !== undefined) {
-    const h = parseInt(body.hour, 10);
-    if (Number.isFinite(h) && h >= 0 && h <= 23) set("daily_recommend_hour", String(h));
-    else return c.json({ error: "hour 必须是 0-23 的整数" }, 400);
+  let changed = false;
+  if (typeof body.enabled === "boolean") {
+    set("daily_recommend_enabled", body.enabled ? "true" : "false");
+    changed = true;
   }
-  return c.json({ success: true });
+  if (typeof body.time === "string" && /^([01]?\d|2[0-3]):[0-5]\d$/.test(body.time.trim())) {
+    const [hh, mm] = body.time.trim().split(":");
+    set("daily_recommend_time", `${hh.padStart(2, "0")}:${mm}`);
+    changed = true;
+  } else if (body.time !== undefined) {
+    return c.json({ error: "time 必须是 HH:MM 格式(如 03:30)" }, 400);
+  } else if (body.hour !== undefined) {
+    // 旧客户端只发整点:等价于把 time 设为整点,保证新老配置同源生效。
+    const h = parseInt(body.hour, 10);
+    if (!(Number.isFinite(h) && h >= 0 && h <= 23)) {
+      return c.json({ error: "hour 必须是 0-23 的整数" }, 400);
+    }
+    set("daily_recommend_hour", String(h));
+    set("daily_recommend_time", `${String(h).padStart(2, "0")}:00`);
+    changed = true;
+  }
+  if (changed) rearmDailyScheduler();
+  return c.json({ success: true, time: formatDailyTime() });
 });
 
 // Update the candidate pool. Body: { candidates: [{platform, url, name?}] }

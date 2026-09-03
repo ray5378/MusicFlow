@@ -19,6 +19,7 @@ import { FIXED_TODAY_ID } from "./dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "./localRecommend.js";
 import { todayStr, systemOwnerId } from "./shared.js";
 import { pickDailyRotatedCover, syncCoverClaim } from "../playlistCover.js";
+import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 
 export const DAILY_ROAM_PLUGIN_ID = "daily-roam";
 export const ROAM_PLAYLIST_ID = "pl-daily-roam";
@@ -171,6 +172,7 @@ export const dailyRoamManifest: PluginManifest = {
     { key: "showOnHome", label: "在首页显示", type: "switch", default: true, help: "是否把本插件生成的歌单固定在首页顶部展示(按下方位次排序)" },
     { key: "homePosition", label: "首页显示位次", type: "number", default: 1, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
+    ...SCHEDULE_FIELDS,
   // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
   homePlaylistId: ROAM_PLAYLIST_ID,
   documentation: `### 功能介绍

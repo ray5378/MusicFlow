@@ -20,6 +20,7 @@ import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import type { PluginManifest } from "../../plugins/types.js";
 import { getPlaylistCover, listPlayableCoverRefs } from "../playlistCover.js";
+import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 
 const log = createLogger("LOCAL-PLATFORM-REC");
 
@@ -186,6 +187,7 @@ export const localPlatformRecommendManifest: PluginManifest = {
       help: "数值越小越靠前(1~100,默认 20)。影响首页推荐中「本地随机(按平台)」分区的位置。",
     },
   ],
+    ...SCHEDULE_FIELDS,
   documentation: `### 功能介绍
 从本地库按平台分组随机挑取已入库歌单,供首页「本地随机(按平台)」分区动态展示。解决 QQ/酷狗/酷我等平台上游精选固定不变的问题:这里不再依赖上游,每次刷新从本地库随机换歌单。
 
