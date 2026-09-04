@@ -1,16 +1,25 @@
 <template>
   <div class="settings-page">
-    <div class="page-header"><h2>系统设置</h2></div>
+    <div class="page-header"><h2>{{ t('settings.title') }}</h2></div>
 
     <!-- ===== 外观 ===== -->
     <el-card>
-      <h3>外观</h3>
+      <h3>{{ t('settings.appearance') }}</h3>
       <div class="setting-item">
-        <div class="setting-label"><div class="title">主题风格</div><div class="desc">当前使用飞牛音乐暗色玻璃主题</div></div>
-        <div class="setting-value"><el-tag size="small" type="info">FnOS Dark</el-tag></div>
+        <div class="setting-label"><div class="title">{{ t('language.label') }}</div><div class="desc">{{ t('settings.theme.desc') }}</div></div>
+        <div class="setting-value">
+          <el-select :model-value="localeStore.lang" style="width: 160px" @change="onLangChange">
+            <el-option label="简体中文" value="zh-CN" />
+            <el-option label="English" value="en-US" />
+          </el-select>
+        </div>
       </div>
       <div class="setting-item">
-        <div class="setting-label"><div class="title">减少动画</div><div class="desc">开启后减弱页面动效，适合敏感人群</div></div>
+        <div class="setting-label"><div class="title">{{ t('settings.theme.title') }}</div><div class="desc">{{ t('settings.theme.desc') }}</div></div>
+        <div class="setting-value"><el-tag size="small" type="info">{{ t('settings.theme.value') }}</el-tag></div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">{{ t('settings.reduceMotion.title') }}</div><div class="desc">{{ t('settings.reduceMotion.desc') }}</div></div>
         <div class="setting-value"><el-switch v-model="reduceMotion" @change="toggleMotion" /></div>
       </div>
     </el-card>
@@ -18,47 +27,47 @@
     <!-- ===== 系统（仅管理员） ===== -->
     <template v-if="authStore.isAdmin">
       <el-card class="mt-card">
-        <h3>系统信息</h3>
+        <h3>{{ t('settings.systemInfo') }}</h3>
         <el-descriptions :column="1" border size="small">
-          <el-descriptions-item label="服务器版本">{{ serverVersion }}</el-descriptions-item>
-          <el-descriptions-item label="哈希版本号">{{ gitCommit }}</el-descriptions-item>
-          <el-descriptions-item label="项目地址">
-            <a href="https://github.com/ray5378/MusicFlow" target="_blank" rel="noopener" class="gh-link">GitHub 仓库 ↗</a>
+          <el-descriptions-item :label="t('settings.serverVersion')">{{ serverVersion }}</el-descriptions-item>
+          <el-descriptions-item :label="t('settings.gitHash')">{{ gitCommit }}</el-descriptions-item>
+          <el-descriptions-item :label="t('settings.projectUrl')">
+            <a href="https://github.com/ray5378/MusicFlow" target="_blank" rel="noopener" class="gh-link">{{ t('settings.githubRepo') }} ↗</a>
           </el-descriptions-item>
         </el-descriptions>
       </el-card>
 
       <el-card class="mt-card">
-        <h3>网络代理</h3>
+        <h3>{{ t('settings.proxy') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
-            <div class="title">启用代理</div>
-            <div class="desc">用于插件市场拉取 GitHub 等源（registry / 插件包下载）。仅影响插件拉取，其它网络直连。</div>
+            <div class="title">{{ t('settings.proxyEnable.title') }}</div>
+            <div class="desc">{{ t('settings.proxyEnable.desc') }}</div>
           </div>
           <div class="setting-value"><el-switch v-model="proxyEnabled" /></div>
         </div>
         <div v-if="proxyEnabled" class="setting-item">
-          <div class="setting-label"><div class="title">代理地址</div><div class="desc">格式：http://ip:port、https://ip:port 或 socks5://ip:port，例如 http://192.168.1.10:7890 或 socks5://127.0.0.1:1080</div></div>
+          <div class="setting-label"><div class="title">{{ t('settings.proxyUrl.title') }}</div><div class="desc">{{ t('settings.proxyUrl.desc') }}</div></div>
           <div class="setting-value proxy-actions">
-            <el-input v-model="proxyUrl" placeholder="http://ip:port 或 socks5://ip:port" class="proxy-input" clearable />
-            <el-button :loading="proxyTesting" @click="testProxy">测试连接</el-button>
-            <el-button type="primary" :loading="proxySaving" @click="saveProxy">保存</el-button>
+            <el-input v-model="proxyUrl" :placeholder="t('settings.proxyPlaceholder')" class="proxy-input" clearable />
+            <el-button :loading="proxyTesting" @click="testProxy">{{ t('settings.testProxy') }}</el-button>
+            <el-button type="primary" :loading="proxySaving" @click="saveProxy">{{ t('common.save') }}</el-button>
           </div>
         </div>
       </el-card>
 
       <el-card class="mt-card">
-        <h3>后台任务限速</h3>
+        <h3>{{ t('settings.batchPace.title') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
-            <div class="title">批量任务档位</div>
-            <div class="desc">控制歌单同步 / 在线匹配 / 推荐补全等批量任务的 CPU 占用与速度。低速最省 CPU（白天在用电脑时推荐），全速最快但可能占用较高。</div>
+            <div class="title">{{ t('settings.batchPace.title') }}</div>
+            <div class="desc">{{ t('settings.batchPace.desc') }}</div>
           </div>
           <div class="setting-value batch-pace-actions">
-            <el-select v-model="batchPace" style="width: 160px" @change="saveBatchPace">
-              <el-option label="低速（最省 CPU）" value="slow" />
-              <el-option label="标准（推荐）" value="standard" />
-              <el-option label="全速（最快）" value="full" />
+            <el-select :model-value="batchPace" style="width: 160px" @change="saveBatchPace">
+              <el-option :label="t('settings.batchPace.slow')" value="slow" />
+              <el-option :label="t('settings.batchPace.standard')" value="standard" />
+              <el-option :label="t('settings.batchPace.full')" value="full" />
             </el-select>
             <span class="pace-hint">{{ batchPaceHint }}</span>
           </div>
@@ -66,25 +75,25 @@
       </el-card>
 
       <el-card class="mt-card">
-        <h3>定时任务</h3>
+        <h3>{{ t('settings.scheduled') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
-            <div class="title">每日定时同步</div>
-            <div class="desc">总开关：到点执行每日推荐 / 榜单 / 歌单同步全管线。每个插件是否参与，由插件管理页「配置」里的「参与每日定时同步」开关决定（默认全参与）；容器重启是否补拉一次，由插件自己的「容器启动时拉取一次」开关决定（默认不补拉）</div>
+            <div class="title">{{ t('settings.dailySync.title') }}</div>
+            <div class="desc">{{ t('settings.dailySync.desc') }}</div>
           </div>
           <div class="setting-value"><el-switch v-model="dailyEnabled" @change="saveDailyConfig" /></div>
         </div>
         <div class="setting-item">
           <div class="setting-label">
-            <div class="title">执行时刻</div>
-            <div class="desc">每天在此刻执行一次（原固定 03:00，现可精确到分钟）。改动立即生效，无需等待次日</div>
+            <div class="title">{{ t('settings.dailyTime.title') }}</div>
+            <div class="desc">{{ t('settings.dailyTime.desc') }}</div>
           </div>
           <div class="setting-value">
             <el-time-picker
               v-model="dailyTime"
               format="HH:mm"
               value-format="HH:mm"
-              placeholder="选择时刻"
+              :placeholder="t('settings.dailyTime.placeholder')"
               style="width: 140px"
               @change="saveDailyConfig"
             />
@@ -93,11 +102,11 @@
       </el-card>
 
       <el-card class="mt-card">
-        <h3>空闲内存回收</h3>
+        <h3>{{ t('settings.memoryReclaim.title') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
-            <div class="title">自动回收</div>
-            <div class="desc">没有播放活动、也没有歌单拉取/导入/同步/扫描等操作持续一段时间后，自动清理可重建缓存（曲库索引/封面/歌词等）并回收内存。</div>
+            <div class="title">{{ t('settings.memoryReclaim.autoTitle') }}</div>
+            <div class="desc">{{ t('settings.memoryReclaim.autoDesc') }}</div>
           </div>
           <div class="setting-value">
             <el-switch v-model="memoryAutoReclaim" @change="saveMemorySettings" />
@@ -105,13 +114,13 @@
         </div>
         <div class="setting-item">
           <div class="setting-label">
-            <div class="title">空闲阈值</div>
-            <div class="desc">连续多少分钟无活动后触发回收。</div>
+            <div class="title">{{ t('settings.memoryReclaim.idleTitle') }}</div>
+            <div class="desc">{{ t('settings.memoryReclaim.idleDesc') }}</div>
           </div>
           <div class="setting-value memory-actions">
             <el-input-number v-model="memoryIdleMinutes" :min="1" :max="60" size="small" @change="saveMemorySettings" />
-            <span class="pace-hint">分钟</span>
-            <el-button type="primary" :loading="reclaiming" @click="reclaimNow">立即回收</el-button>
+            <span class="pace-hint">{{ t('settings.memoryReclaim.idleUnit') }}</span>
+            <el-button type="primary" :loading="reclaiming" @click="reclaimNow">{{ t('settings.memoryReclaim.reclaimNow') }}</el-button>
           </div>
         </div>
       </el-card>
@@ -119,15 +128,15 @@
 
     <!-- ===== 通用 ===== -->
     <el-card class="mt-card">
-      <h3>通用</h3>
+      <h3>{{ t('settings.general') }}</h3>
       <div class="setting-item">
-        <div class="setting-label"><div class="title">清除缓存</div><div class="desc">重置本地设置并重新加载页面</div></div>
-        <div class="setting-value"><el-button @click="clearCache">清除缓存</el-button></div>
+        <div class="setting-label"><div class="title">{{ t('settings.clearCache.title') }}</div><div class="desc">{{ t('settings.clearCache.desc') }}</div></div>
+        <div class="setting-value"><el-button @click="clearCache">{{ t('settings.clearCache.title') }}</el-button></div>
       </div>
       <div class="setting-item">
-        <div class="setting-label"><div class="title">关于 MusicFlow</div><div class="desc">自托管音乐库播放器 · 飞牛风格重构版（版本号见「系统信息」）</div></div>
+        <div class="setting-label"><div class="title">{{ t('settings.about.title') }}</div><div class="desc">{{ t('settings.about.desc') }}</div></div>
         <div class="setting-value">
-          <a href="https://github.com/ray5378/MusicFlow" target="_blank" rel="noopener" class="gh-link">GitHub 仓库 ↗</a>
+          <a href="https://github.com/ray5378/MusicFlow" target="_blank" rel="noopener" class="gh-link">{{ t('settings.githubRepo') }} ↗</a>
         </div>
       </div>
     </el-card>
@@ -137,10 +146,20 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
+import { useLocaleStore } from "@/stores/locale";
+import type { AppLocale } from "@/locales";
+
+const { t } = useI18n();
 const authStore = useAuthStore();
+const localeStore = useLocaleStore();
+
+function onLangChange(lang: AppLocale) {
+  localeStore.setLang(lang);
+}
 
 // ---------- 版本 / 哈希（前后端 lockstep 绑定发布，仅展示后端版本） ----------
 const serverVersion = ref("—");
@@ -149,11 +168,11 @@ async function loadVersion() {
   try {
     const res = await api.get("/ping");
     const v = res.data?.version;
-    serverVersion.value = v ? (v === "dev" ? "dev" : `v${v}`) : "未知";
-    gitCommit.value = res.data?.commit || "未知";
+    serverVersion.value = v ? (v === "dev" ? "dev" : `v${v}`) : t("common.unknown");
+    gitCommit.value = res.data?.commit || t("common.unknown");
   } catch {
-    serverVersion.value = "未知";
-    gitCommit.value = "未知";
+    serverVersion.value = t("common.unknown");
+    gitCommit.value = t("common.unknown");
   }
 }
 
@@ -175,9 +194,9 @@ async function saveProxy() {
   proxySaving.value = true;
   try {
     await api.put("/rest/api/v1/proxy", { enabled: proxyEnabled.value, url: proxyUrl.value });
-    ElMessage.success("代理设置已保存");
+    ElMessage.success(t("settings.saved"));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
+    ElMessage.error(e.response?.data?.error || t("settings.saveFailed"));
   } finally {
     proxySaving.value = false;
   }
@@ -189,10 +208,10 @@ async function testProxy() {
   try {
     await api.put("/rest/api/v1/proxy", { enabled: proxyEnabled.value, url: proxyUrl.value });
     const res = await api.post("/rest/api/v1/proxy/test", {});
-    if (res.data?.success) ElMessage.success(res.data?.message || "代理可用");
-    else ElMessage.error(res.data?.message || res.data?.error || "代理不可用");
+    if (res.data?.success) ElMessage.success(res.data?.message || t("settings.proxyOk"));
+    else ElMessage.error(res.data?.message || res.data?.error || t("settings.proxyBad"));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.message || e.response?.data?.error || "测试失败");
+    ElMessage.error(e.response?.data?.message || e.response?.data?.error || t("settings.testFailed"));
   } finally {
     proxyTesting.value = false;
   }
@@ -200,11 +219,11 @@ async function testProxy() {
 
 // ---------- 后台任务限速档位 ----------
 const batchPace = ref<"slow" | "standard" | "full">("standard");
-const batchPaceHint = ref("并发 2、批间睡眠 120ms，前台忙时自动降速");
-const PACE_HINTS: Record<string, string> = {
-  slow: "并发 1、批间睡眠 120ms，最平缓",
-  standard: "并发 2、批间睡眠 120ms，前台忙时自动降速",
-  full: "并发 4、批间不睡眠，最快但占用高",
+const batchPaceHint = ref("");
+const PACE_HINT_KEYS: Record<string, string> = {
+  slow: "settings.batchPace.hintSlow",
+  standard: "settings.batchPace.hintStandard",
+  full: "settings.batchPace.hintFull",
 };
 
 async function loadBatchPace() {
@@ -213,7 +232,7 @@ async function loadBatchPace() {
     const p = res.data?.pace;
     if (p === "slow" || p === "standard" || p === "full") {
       batchPace.value = p;
-      batchPaceHint.value = PACE_HINTS[p];
+      batchPaceHint.value = t(PACE_HINT_KEYS[p]);
     }
   } catch { /* 静默 */ }
 }
@@ -222,13 +241,13 @@ async function saveBatchPace(pace: string) {
   try {
     const res = await api.put("/rest/api/v1/batch-pace", { pace });
     if (res.data?.success) {
-      batchPaceHint.value = PACE_HINTS[pace] || "";
-      ElMessage.success("限速档位已保存，立即生效");
+      batchPaceHint.value = PACE_HINT_KEYS[pace] ? t(PACE_HINT_KEYS[pace]) : "";
+      ElMessage.success(t("settings.batchPace.saved"));
     } else {
-      ElMessage.error(res.data?.error || "保存失败");
+      ElMessage.error(res.data?.error || t("settings.saveFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
+    ElMessage.error(e.response?.data?.error || t("settings.saveFailed"));
   }
 }
 
@@ -255,9 +274,9 @@ async function saveDailyConfig() {
       enabled: dailyEnabled.value,
       time: dailyTime.value || "03:00",
     });
-    ElMessage.success("定时任务设置已保存");
+    ElMessage.success(t("settings.dailyTime.saved"));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
+    ElMessage.error(e.response?.data?.error || t("settings.saveFailed"));
   } finally {
     setTimeout(() => { dailySaving = false; }, 300);
   }
@@ -281,9 +300,9 @@ async function saveMemorySettings() {
       enabled: memoryAutoReclaim.value,
       idleMinutes: memoryIdleMinutes.value,
     });
-    ElMessage.success("内存回收设置已保存");
+    ElMessage.success(t("settings.memoryReclaim.saved"));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
+    ElMessage.error(e.response?.data?.error || t("settings.saveFailed"));
   }
 }
 async function reclaimNow() {
@@ -292,9 +311,13 @@ async function reclaimNow() {
     const res = await api.post("/rest/api/v1/admin/memory/reclaim", {});
     const r = res.data || {};
     const n = (r.caches || []).length;
-    ElMessage.success(`已回收 ${n} 类缓存${r.gc ? "，已执行 GC" : ""}${r.checkpoint ? "，已合并 WAL" : ""}`);
+    const parts = [r.gc ? "reclaimedGc" : "", r.checkpoint ? "reclaimedWal" : ""].filter(Boolean);
+    let key = "settings.memoryReclaim.reclaimedFull";
+    if (parts.length === 0) key = "settings.memoryReclaim.reclaimed";
+    else if (parts.length === 1) key = `settings.memoryReclaim.${parts[0]}`;
+    ElMessage.success(t(key, { count: n }));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "回收失败");
+    ElMessage.error(e.response?.data?.error || t("settings.memoryReclaim.reclaimFailed"));
   } finally {
     reclaiming.value = false;
   }
@@ -308,12 +331,12 @@ function toggleMotion(v: string | number | boolean) {
   document.documentElement.style.setProperty('prefers-reduced-motion', on ? 'reduce' : 'no-preference');
   if (on) document.documentElement.classList.add('reduce-motion');
   else document.documentElement.classList.remove('reduce-motion');
-  ElMessage.success(on ? '已开启减弱动画' : '已关闭减弱动画');
+  ElMessage.success(on ? t('settings.reduceMotion.on') : t('settings.reduceMotion.off'));
 }
 
 function clearCache() {
   localStorage.clear();
-  ElMessage.success('本地缓存已清除，即将刷新');
+  ElMessage.success(t('settings.clearCache.done'));
   setTimeout(() => location.reload(), 800);
 }
 

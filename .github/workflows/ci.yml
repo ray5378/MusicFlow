@@ -5,7 +5,8 @@ name: ci
 #   2. 框架核心插件化合规(scripts/check-core.mts)——核心不写死平台/provider、不直连内置插件实现
 #   3. 前端插件隔离守卫(scripts/check-frontend-plugins.mjs)——插件配置/详情页仅渲染插件声明内容,
 #      核心全局功能(媒体获取等)不得耦合进单个插件弹窗
-#   4. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
+#   4. i18n 合规守卫(scripts/check-i18n.mjs)——zh/en 键完全对齐 + 源码无硬编码中文
+#   5. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -58,6 +59,10 @@ jobs:
       # fixedRecommend.ts 引用),防 ID 被改动导致音流断链。
       - name: 校验固定推荐歌单 ID 未被写死
         run: node backend/scripts/check-fixed-playlist-ids.mjs
+      # i18n 合规守卫:zh/en 键完全对齐 + 前端源码(剔除注释)无硬编码中文,
+      # 任何视图改动遗漏翻译/漏背 key 都归这里拦。
+      - name: 校验 i18n 键对齐且源码无硬编码中文
+        run: node backend/scripts/check-i18n.mjs
 
   test:
     name: 类型检查 + 全量测试

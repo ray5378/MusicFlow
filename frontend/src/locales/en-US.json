@@ -1,0 +1,100 @@
+{
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "confirm": "OK",
+    "loading": "Loading…",
+    "unknown": "Unknown",
+    "none": "None",
+    "enabled": "Enabled",
+    "disabled": "Disabled"
+  },
+  "language": {
+    "label": "Interface language",
+    "zh-CN": "简体中文",
+    "en-US": "English"
+  },
+  "settings": {
+    "title": "System Settings",
+    "appearance": "Appearance",
+    "theme": {
+      "title": "Theme",
+      "desc": "Currently using the FnOS dark glass theme",
+      "value": "FnOS Dark"
+    },
+    "reduceMotion": {
+      "title": "Reduce motion",
+      "desc": "Reduce page animations when enabled; suitable for sensitive users",
+      "on": "Reduced motion enabled",
+      "off": "Reduced motion disabled"
+    },
+    "systemInfo": "System Info",
+    "serverVersion": "Server version",
+    "gitHash": "Git commit",
+    "projectUrl": "Repository",
+    "githubRepo": "GitHub Repository",
+    "proxy": "Network Proxy",
+    "proxyEnable": {
+      "title": "Enable proxy",
+      "desc": "Used to fetch GitHub and other sources for the plugin marketplace (registry / plugin downloads). Only affects plugin fetching; other traffic connects directly."
+    },
+    "proxyUrl": {
+      "title": "Proxy address",
+      "desc": "Format: http://ip:port, https://ip:port or socks5://ip:port, e.g. http://192.168.1.10:7890 or socks5://127.0.0.1:1080"
+    },
+    "proxyPlaceholder": "http://ip:port or socks5://ip:port",
+    "testProxy": "Test",
+    "saved": "Proxy settings saved",
+    "saveFailed": "Failed to save",
+    "proxyOk": "Proxy is working",
+    "proxyBad": "Proxy is not working",
+    "testFailed": "Test failed",
+    "batchPace": {
+      "title": "Batch task pace",
+      "desc": "Controls CPU usage and speed of batch tasks such as playlist sync / online matching / recommendation backfill. Low is most CPU-friendly (recommended while the computer is in use); Full is fastest but heavier.",
+      "slow": "Low (CPU-friendly)",
+      "standard": "Standard (recommended)",
+      "full": "Full (fastest)",
+      "hintSlow": "Concurrency 1, 120ms batch sleep, smoothest",
+      "hintStandard": "Concurrency 2, 120ms batch sleep, auto-degrades when busy",
+      "hintFull": "Concurrency 4, no batch sleep, fastest but heavier",
+      "saved": "Pace saved and applied immediately"
+    },
+    "scheduled": "Scheduled Tasks",
+    "dailySync": {
+      "title": "Daily scheduled sync",
+      "desc": "Master switch: runs the full daily pipeline (recommendations / charts / playlist sync) at the set time. Whether each plugin participates is decided by its «Participate in daily sync» switch on the plugin config page (all on by default)."
+    },
+    "dailyTime": {
+      "title": "Execution time",
+      "desc": "Runs once at this time every day (originally fixed 03:00; now configurable to the minute). Takes effect immediately.",
+      "placeholder": "Pick a time",
+      "saved": "Schedule saved"
+    },
+    "memoryReclaim": {
+      "title": "Idle memory reclamation",
+      "autoTitle": "Auto reclaim",
+      "autoDesc": "After a period with no playback activity and no playlist fetch/import/sync/scan operations, automatically clears rebuildable caches (library index / covers / lyrics, etc.) to reclaim memory.",
+      "idleTitle": "Idle threshold",
+      "idleDesc": "Minutes of inactivity before reclamation is triggered.",
+      "idleUnit": "minutes",
+      "reclaimNow": "Reclaim now",
+      "reclaimed": "Reclaimed {count} cache group(s)",
+      "reclaimedGc": "Reclaimed {count} cache group(s) and ran GC",
+      "reclaimedWal": "Reclaimed {count} cache group(s) and merged WAL",
+      "reclaimedFull": "Reclaimed {count} cache group(s), ran GC, merged WAL",
+      "reclaimFailed": "Reclamation failed",
+      "saved": "Memory settings saved"
+    },
+    "general": "General",
+    "clearCache": {
+      "title": "Clear cache",
+      "desc": "Reset local settings and reload the page",
+      "done": "Local cache cleared, reloading"
+    },
+    "about": {
+      "title": "About MusicFlow",
+      "desc": "Self-hosted music library player · FnOS-style rebuild (version in \"System Info\")"
+    }
+  }
+}

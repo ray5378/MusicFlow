@@ -1,0 +1,100 @@
+{
+  "common": {
+    "save": "保存",
+    "cancel": "取消",
+    "confirm": "确定",
+    "loading": "加载中…",
+    "unknown": "未知",
+    "none": "无",
+    "enabled": "已启用",
+    "disabled": "已禁用"
+  },
+  "language": {
+    "label": "界面语言",
+    "zh-CN": "简体中文",
+    "en-US": "English"
+  },
+  "settings": {
+    "title": "系统设置",
+    "appearance": "外观",
+    "theme": {
+      "title": "主题风格",
+      "desc": "当前使用飞牛音乐暗色玻璃主题",
+      "value": "FnOS Dark"
+    },
+    "reduceMotion": {
+      "title": "减少动画",
+      "desc": "开启后减弱页面动效，适合敏感人群",
+      "on": "已开启减弱动画",
+      "off": "已关闭减弱动画"
+    },
+    "systemInfo": "系统信息",
+    "serverVersion": "服务器版本",
+    "gitHash": "哈希版本号",
+    "projectUrl": "项目地址",
+    "githubRepo": "GitHub 仓库",
+    "proxy": "网络代理",
+    "proxyEnable": {
+      "title": "启用代理",
+      "desc": "用于插件市场拉取 GitHub 等源（registry / 插件包下载）。仅影响插件拉取，其它网络直连。"
+    },
+    "proxyUrl": {
+      "title": "代理地址",
+      "desc": "格式：http://ip:port、https://ip:port 或 socks5://ip:port，例如 http://192.168.1.10:7890 或 socks5://127.0.0.1:1080"
+    },
+    "proxyPlaceholder": "http://ip:port 或 socks5://ip:port",
+    "testProxy": "测试连接",
+    "saved": "代理设置已保存",
+    "saveFailed": "保存失败",
+    "proxyOk": "代理可用",
+    "proxyBad": "代理不可用",
+    "testFailed": "测试失败",
+    "batchPace": {
+      "title": "批量任务档位",
+      "desc": "控制歌单同步 / 在线匹配 / 推荐补全等批量任务的 CPU 占用与速度。低速最省 CPU（白天在用电脑时推荐），全速最快但可能占用较高。",
+      "slow": "低速（最省 CPU）",
+      "standard": "标准（推荐）",
+      "full": "全速（最快）",
+      "hintSlow": "并发 1、批间睡眠 120ms，最平缓",
+      "hintStandard": "并发 2、批间睡眠 120ms，前台忙时自动降速",
+      "hintFull": "并发 4、批间不睡眠，最快但占用高",
+      "saved": "限速档位已保存，立即生效"
+    },
+    "scheduled": "定时任务",
+    "dailySync": {
+      "title": "每日定时同步",
+      "desc": "总开关：到点执行每日推荐 / 榜单 / 歌单同步全管线。每个插件是否参与，由插件管理页「配置」里的「参与每日定时同步」开关决定（默认全参与）。"
+    },
+    "dailyTime": {
+      "title": "执行时刻",
+      "desc": "每天在此刻执行一次（原固定 03:00，现可精确到分钟）。改动立即生效。",
+      "placeholder": "选择时刻",
+      "saved": "定时任务设置已保存"
+    },
+    "memoryReclaim": {
+      "title": "空闲内存回收",
+      "autoTitle": "自动回收",
+      "autoDesc": "没有播放活动、也没有歌单拉取/导入/同步/扫描等操作持续一段时间后，自动清理可重建缓存（曲库索引/封面/歌词等）并回收内存。",
+      "idleTitle": "空闲阈值",
+      "idleDesc": "连续多少分钟无活动后触发回收。",
+      "idleUnit": "分钟",
+      "reclaimNow": "立即回收",
+      "reclaimed": "已回收 {count} 类缓存",
+      "reclaimedGc": "已回收 {count} 类缓存，已执行 GC",
+      "reclaimedWal": "已回收 {count} 类缓存，已合并 WAL",
+      "reclaimedFull": "已回收 {count} 类缓存，已执行 GC，已合并 WAL",
+      "reclaimFailed": "回收失败",
+      "saved": "内存回收设置已保存"
+    },
+    "general": "通用",
+    "clearCache": {
+      "title": "清除缓存",
+      "desc": "重置本地设置并重新加载页面",
+      "done": "本地缓存已清除，即将刷新"
+    },
+    "about": {
+      "title": "关于 MusicFlow",
+      "desc": "自托管音乐库播放器 · 飞牛风格重构版（版本号见「系统信息」）"
+    }
+  }
+}
