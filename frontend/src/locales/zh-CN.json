@@ -1014,6 +1014,7 @@
       "processingLogic": "处理逻辑",
       "autoDocHint": "以上为按能力自动生成的处理说明",
       "noDocHint": "该插件未提供文档",
+      "capSep": "：",
       "capList": "能力清单",
       "permissionsTitle": "权限",
       "pluginTypeTitle": "类型: {type}",
@@ -1068,6 +1069,10 @@
       "capDoc": {
         "fallback": "参与对应能力的工作流",
         "search": "向在线源发起歌曲搜索并返回结果",
+        "playlistSearch": "按关键词搜索远程歌单",
+        "songSearch": "按关键词搜索单曲",
+        "artistSearch": "按关键词搜索艺人",
+        "albumSearch": "按关键词搜索专辑",
         "recommend": "生成平台每日推荐歌单并同步到本地",
         "playlistSongs": "拉取单个远程歌单的曲目列表",
         "stream": "构造歌曲的音频流地址供播放器拉流",
@@ -1082,12 +1087,14 @@
         "localPlatformRecommend": "抓取平台官方榜单(QQ/网易云/酷狗等)并同步到本地库(可手动刷新)",
         "playlistSync": "定期重新拉取已导入的远程歌单",
         "autoMatch": "把歌单条目自动匹配到曲库或在线源",
+        "playlistCleanup": "删除歌曲数量低于设定阈值的歌单",
         "lyricProvider": "提供在线歌词的源",
         "coverProvider": "提供在线封面的源",
         "renderer": "投屏到局域网播放设备（DLNA 等）",
         "scrobbler": "把播放事件上报到 Last.fm / ListenBrainz 等",
         "songGroup": "把同一首歌的多个来源按标题+歌手+专辑+时长归为一组,各端自动合并展示",
-        "playPreference": "播放自动优选组内 local/WebDAV 核心曲库源,不可用时自动回退平台源"
+        "playPreference": "播放自动优选组内 local/WebDAV 核心曲库源,不可用时自动回退平台源",
+        "artistInfo": "为曲库抓取艺人资料与封面"
       },
       "group": {
         "schedule": "定时同步",
@@ -1122,6 +1129,10 @@
       },
       "cap": {
         "search": "在线搜索",
+        "playlistSearch": "歌单搜索",
+        "songSearch": "歌曲搜索",
+        "artistSearch": "艺人搜索",
+        "albumSearch": "专辑搜索",
         "recommend": "平台推荐歌单",
         "playlistSongs": "远程歌单曲目",
         "stream": "音频流",
@@ -1136,12 +1147,14 @@
         "localPlatformRecommend": "平台榜单入库",
         "playlistSync": "歌单定时同步",
         "autoMatch": "条目自动匹配",
+        "playlistCleanup": "歌单清理",
         "lyricProvider": "歌词提供方",
         "coverProvider": "封面提供方",
         "renderer": "设备投屏",
         "scrobbler": "播放上报",
         "songGroup": "同曲多源组",
-        "playPreference": "播放优选"
+        "playPreference": "播放优选",
+        "artistInfo": "艺人资料"
       },
       "perm": {
         "log": "日志",

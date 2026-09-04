@@ -1014,6 +1014,7 @@
       "processingLogic": "Processing",
       "autoDocHint": "Auto-generated from the plugin's capabilities",
       "noDocHint": "This plugin provides no documentation",
+      "capSep": ": ",
       "capList": "Capabilities",
       "permissionsTitle": "Permissions",
       "pluginTypeTitle": "Type: {type}",
@@ -1068,6 +1069,10 @@
       "capDoc": {
         "fallback": "Participates in the corresponding capability workflow",
         "search": "Searches online sources and returns results",
+        "playlistSearch": "Searches remote playlists by keyword",
+        "songSearch": "Searches individual songs by keyword",
+        "artistSearch": "Searches artists by keyword",
+        "albumSearch": "Searches albums by keyword",
         "recommend": "Generates platform daily recommended playlists and syncs locally",
         "playlistSongs": "Fetches the track list of a remote playlist",
         "stream": "Builds audio stream URLs for the player",
@@ -1082,12 +1087,14 @@
         "localPlatformRecommend": "Fetches official platform charts and syncs them locally",
         "playlistSync": "Periodically re-fetches imported remote playlists",
         "autoMatch": "Auto-matches playlist entries to the library or online sources",
+        "playlistCleanup": "Deletes playlists whose song count falls below the configured threshold",
         "lyricProvider": "Provides online lyrics",
         "coverProvider": "Provides online covers",
         "renderer": "Casts to LAN playback devices (DLNA, etc.)",
         "scrobbler": "Reports playback to Last.fm / ListenBrainz etc.",
         "songGroup": "Groups multi-source instances of the same song across endpoints",
-        "playPreference": "Auto-prefers local/WebDAV library sources and falls back to platform sources"
+        "playPreference": "Auto-prefers local/WebDAV library sources and falls back to platform sources",
+        "artistInfo": "Fetches artist metadata and covers for the library"
       },
       "group": {
         "schedule": "Schedule",
@@ -1122,6 +1129,10 @@
       },
       "cap": {
         "search": "Online Search",
+        "playlistSearch": "Playlist Search",
+        "songSearch": "Song Search",
+        "artistSearch": "Artist Search",
+        "albumSearch": "Album Search",
         "recommend": "Platform Recommended Playlists",
         "playlistSongs": "Remote Playlist Tracks",
         "stream": "Audio Stream",
@@ -1136,12 +1147,14 @@
         "localPlatformRecommend": "Platform Charts",
         "playlistSync": "Playlist Sync",
         "autoMatch": "Auto Match",
+        "playlistCleanup": "Playlist Cleanup",
         "lyricProvider": "Lyrics Provider",
         "coverProvider": "Covers Provider",
         "renderer": "Casting",
         "scrobbler": "Scrobbling",
         "songGroup": "Multi-Source Group",
-        "playPreference": "Play Preference"
+        "playPreference": "Play Preference",
+        "artistInfo": "Artist Info"
       },
       "perm": {
         "log": "Logs",

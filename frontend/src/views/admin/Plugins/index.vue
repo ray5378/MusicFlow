@@ -351,7 +351,7 @@
         <div v-if="docMarkdown" class="pd-md" v-html="docMarkdown"></div>
         <template v-else>
           <ul class="pd-capdocs">
-            <li v-for="cap in capabilityList(editing)" :key="cap">{{ capLabel(cap) }}：{{ capDoc(cap) }}</li>
+            <li v-for="cap in capabilityList(editing)" :key="cap">{{ capLabel(cap) }}{{ t('admin.plugins.capSep') }}{{ capDoc(cap) }}</li>
           </ul>
           <p v-if="capabilityList(editing).length" class="pd-hint">{{ t('admin.plugins.autoDocHint') }}</p>
           <p v-else class="pd-hint">{{ t('admin.plugins.noDocHint') }}</p>
@@ -862,6 +862,10 @@ const TYPE_COLORS: Record<string, string> = {
 };
 const CAP_LABELS: Record<string, string> = {
   search: t('admin.plugins.cap.search'),
+  playlistSearch: t('admin.plugins.cap.playlistSearch'),
+  songSearch: t('admin.plugins.cap.songSearch'),
+  artistSearch: t('admin.plugins.cap.artistSearch'),
+  albumSearch: t('admin.plugins.cap.albumSearch'),
   recommend: t('admin.plugins.cap.recommend'),
   playlistSongs: t('admin.plugins.cap.playlistSongs'),
   stream: t('admin.plugins.cap.stream'),
@@ -876,12 +880,14 @@ const CAP_LABELS: Record<string, string> = {
   localPlatformRecommend: t('admin.plugins.cap.localPlatformRecommend'),
   playlistSync: t('admin.plugins.cap.playlistSync'),
   autoMatch: t('admin.plugins.cap.autoMatch'),
+  playlistCleanup: t('admin.plugins.cap.playlistCleanup'),
   lyricProvider: t('admin.plugins.cap.lyricProvider'),
   coverProvider: t('admin.plugins.cap.coverProvider'),
   renderer: t('admin.plugins.cap.renderer'),
   scrobbler: t('admin.plugins.cap.scrobbler'),
   songGroup: t('admin.plugins.cap.songGroup'),
   playPreference: t('admin.plugins.cap.playPreference'),
+  artistInfo: t('admin.plugins.cap.artistInfo'),
 };
 const PERM_LABELS: Record<string, string> = {
   log: t('admin.plugins.perm.log'),
@@ -901,6 +907,10 @@ const PERM_LABELS: Record<string, string> = {
 // 能力 → 处理逻辑说明(详情页在插件未提供 documentation 时按能力自动生成)
 const CAP_DOCS: Record<string, string> = {
   search: t('admin.plugins.capDoc.search'),
+  playlistSearch: t('admin.plugins.capDoc.playlistSearch'),
+  songSearch: t('admin.plugins.capDoc.songSearch'),
+  artistSearch: t('admin.plugins.capDoc.artistSearch'),
+  albumSearch: t('admin.plugins.capDoc.albumSearch'),
   recommend: t('admin.plugins.capDoc.recommend'),
   playlistSongs: t('admin.plugins.capDoc.playlistSongs'),
   stream: t('admin.plugins.capDoc.stream'),
@@ -915,12 +925,14 @@ const CAP_DOCS: Record<string, string> = {
   localPlatformRecommend: t('admin.plugins.capDoc.localPlatformRecommend'),
   playlistSync: t('admin.plugins.capDoc.playlistSync'),
   autoMatch: t('admin.plugins.capDoc.autoMatch'),
+  playlistCleanup: t('admin.plugins.capDoc.playlistCleanup'),
   lyricProvider: t('admin.plugins.capDoc.lyricProvider'),
   coverProvider: t('admin.plugins.capDoc.coverProvider'),
   renderer: t('admin.plugins.capDoc.renderer'),
   scrobbler: t('admin.plugins.capDoc.scrobbler'),
   songGroup: t('admin.plugins.capDoc.songGroup'),
   playPreference: t('admin.plugins.capDoc.playPreference'),
+  artistInfo: t('admin.plugins.capDoc.artistInfo'),
 };
 
 // 极简 markdown 渲染（文档为受控内容,先转义再套标签,防 XSS）
