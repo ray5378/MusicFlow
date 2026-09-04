@@ -169,7 +169,7 @@
         <div class="add-node-btn" @click.stop><MfIcon name="Plus" /> {{ t('flows.insertNode') }}</div>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item v-for="(m, t) in NODE_META" :key="t" :command="t"><MfIcon :name="m.icon" />{{ t(m.labelKey) }}</el-dropdown-item>
+            <el-dropdown-item v-for="(meta, type) in NODE_META" :key="type" :command="type"><MfIcon :name="meta.icon" />{{ t(meta.labelKey) }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -183,7 +183,7 @@
         <el-button type="primary"><MfIcon name="Plus" />{{ t('flows.addFirstNode') }}</el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item v-for="(m, t) in NODE_META" :key="t" :command="t"><MfIcon :name="m.icon" />{{ t(m.labelKey) }}</el-dropdown-item>
+            <el-dropdown-item v-for="(meta, type) in NODE_META" :key="type" :command="type"><MfIcon :name="meta.icon" />{{ t(meta.labelKey) }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>

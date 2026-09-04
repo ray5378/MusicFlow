@@ -383,7 +383,7 @@ const showManageMenu = ref(false);
 // 筛选选项动态构建自已启用插件的 filterPlatforms 配置,不再硬编码。
 const activeFilter = ref("");
 const filterOptions = computed(() => {
-  const opts = [
+  const opts: { key: string; labelKey?: string; label?: string }[] = [
     { key: "", labelKey: "playlists.filterAll" },
     { key: "local", labelKey: "playlists.filterLocal" },
   ];
@@ -683,6 +683,23 @@ function formatCreated(t: string): string {
   if (isNaN(d.getTime())) return "";
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function platformLabel(platform: string): string {
+  return platform === "qq" ? t("playlists.platform.qq") :
+    platform === "netease" ? t("playlists.platform.netease") :
+    platform === "kugou" ? t("playlists.platform.kugou") :
+    platform === "kuwo" ? t("playlists.platform.kuwo") :
+    platform === "soda" ? t("playlists.platform.soda") : platform;
+}
+function cardMetaShort(item: any): string {
+  const parts: string[] = [];
+  if (item.songCount) parts.push(t("playlists.songsCount", { count: item.songCount }));
+  if (item.duration) parts.push(formatDuration(item.duration));
+  return parts.join(" · ");
+}
+function cardMeta(item: any): string {
+  const base = cardMetaShort(item);
+  return item.created ? `${base} · ${formatCreated(item.created)}` : base;
 }
 
 // 重新拉取本地歌单(窗口化):更新推荐池状态后重置并补拉窗口所在块。
