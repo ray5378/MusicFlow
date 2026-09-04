@@ -24,6 +24,10 @@ backend/coverage/
 
 # local scratch / capture artifacts (not project source)
 .workbuddy/
+.trae/
+_staging/
+_*.mjs
+_*.py
 capture_*.cjs
 analyze_*.cjs
 analyze_*.py

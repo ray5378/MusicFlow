@@ -1,6 +1,7 @@
 # MusicFlow 面向 AI 编程的完整技术契约规范（SPEC）
 
 > 本文件是 MusicFlow 仓库内 **AI 协作者必须遵守的技术契约**。任何改动（新功能 / 修 bug / 重构）都必须：
+>
 > 1. 先对照「第 6 章 负面清单」划定边界；
 > 2. 按「第 5 章 AC 格式」写明验收；
 > 3. 交付前逐项勾选「第 9 章 AI 自检清单」。
@@ -9,85 +10,110 @@
 >
 > 版本：v1（2026-08-19，基线 v1.13.42）｜ 维护：ray（仓库 owner）｜ AI 改动本文档需经 ray 确认
 
----
+***
 
 ## 一、技术栈与工程约束
 
 ### 1.1 技术栈（实测确认，禁止脑补）
 
-| 层 | 选型 | 版本/备注 |
-|----|------|----------|
-| 语言 | TypeScript | `strict` 模式；target ES2022；module ESNext；moduleResolution bundler |
-| 后端框架 | Node.js + Hono + @hono/node-server | 部署基线 Node 22（Docker node:22-alpine，musl） |
-| 数据库 | SQLite（better-sqlite3 单连接）+ drizzle-orm | 迁移工具 drizzle-kit；**每进程一个 `new Database`（db/index.ts）**：批量任务跑在一次性子进程（`child_process.fork`），子进程自带独立 SQLite 连接，WAL + busy_timeout=5000 支撑多进程并发写 |
-| 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router + Howler（音频） | 构建产物 `frontend/dist`，**gitignore，不入库**；后端仅当静态资源吐给浏览器。**大列表虚拟滚动已在 `components/SongTable.vue` 内置**（桌面端 >200 首自动窗口化，行高 68px，无需新依赖） |
-| 插件运行时 | quickjs-emscripten（WASM 沙箱，主线程常驻）+ worker_threads（插件沙箱按需起）+ **批量任务子进程（`child_process.fork`，一次性，跑完 `process.exit(0)`）** | 每启用插件一份常驻沙箱（`pluginSandboxes`）；批量任务（每日推荐/扫描/导入/同步/匹配/清理/刮削）一律在隔离子进程执行，峰值内存随进程销毁归还 |
-| 网络 | ws（WebSocket）、undici（HTTP/代理）、bonjour-service（mDNS/DLNA）、sharp（图像）、music-metadata（音频标签） | |
-| 认证 | jsonwebtoken + md5 | 密码 md5+盐 / pass_enc 加密；API key 存 hash |
-| 测试 | vitest | `pool: "forks"`、每文件独立 DATA_DIR、`sequence.shuffle` |
-| 规范/观测基建 | `utils/logger.ts`（零依赖结构化日志）、`utils/errors.ts`（统一错误码）、`middleware/metrics.ts`（慢请求+端点计数）、`middleware/auth.ts`（鉴权缓存） | 新代码一律使用，禁止裸 console 裸错误体 |
+| 层       | 选型                                                                                                                          | 版本/备注                                                                                                                                             |
+| ------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 语言      | TypeScript                                                                                                                  | `strict` 模式；target ES2022；module ESNext；moduleResolution bundler                                                                                  |
+| 后端框架    | Node.js + Hono + @hono/node-server                                                                                          | 部署基线 Node 22（Docker node:22-alpine，musl）                                                                                                          |
+| 数据库     | SQLite（better-sqlite3 单连接）+ drizzle-orm                                                                                     | 迁移工具 drizzle-kit；**每进程一个** **`new Database`（db/index.ts）**：批量任务跑在一次性子进程（`child_process.fork`），子进程自带独立 SQLite 连接，WAL + busy\_timeout=5000 支撑多进程并发写 |
+| 前端      | Vue 3 + Vite + Element Plus + Pinia + Vue Router + Howler（音频）                                                               | 构建产物 `frontend/dist`，**gitignore，不入库**；后端仅当静态资源吐给浏览器。**大列表虚拟滚动已在** **`components/SongTable.vue`** **内置**（桌面端 >200 首自动窗口化，行高 68px，无需新依赖）           |
+| 插件运行时   | quickjs-emscripten（WASM 沙箱，主线程常驻）+ worker\_threads（插件沙箱按需起）+ **批量任务子进程（`child_process.fork`，一次性，跑完** **`process.exit(0)`）** | 每启用插件一份常驻沙箱（`pluginSandboxes`）；批量任务（每日推荐/扫描/导入/同步/匹配/清理/刮削）一律在隔离子进程执行，峰值内存随进程销毁归还                                                                 |
+| 网络      | ws（WebSocket）、undici（HTTP/代理）、bonjour-service（mDNS/DLNA）、sharp（图像）、music-metadata（音频标签）                                     | <br />                                                                                                                                            |
+| 认证      | jsonwebtoken + md5                                                                                                          | 密码 md5+盐 / pass\_enc 加密；API key 存 hash                                                                                                            |
+| 测试      | vitest                                                                                                                      | `pool: "forks"`、每文件独立 DATA\_DIR、`sequence.shuffle`                                                                                                |
+| 规范/观测基建 | `utils/logger.ts`（零依赖结构化日志）、`utils/errors.ts`（统一错误码）、`middleware/metrics.ts`（慢请求+端点计数）、`middleware/auth.ts`（鉴权缓存）           | 新代码一律使用，禁止裸 console 裸错误体                                                                                                                          |
 
 ### 1.2 硬性工程约束
 
 - **依赖管理**：严禁引入未授权的新第三方库、严禁升级现有依赖版本。缺能力 → 先说明理由，等确认。
+
 - **命名规范**：
+
   - 文件/目录：全小写 + 下划线（`playlist_sync.ts`、`streamFallback.ts`）
+
   - 类/接口/枚举：大驼峰（`QueueController`、`PlaybackState`）
+
   - 函数/变量：小驼峰（`registerDlnaDevice`、`isIdle`）
+
   - 常量：全大写 + 下划线（`ASYNC_TASK_KEEP_MAX`、`CACHE_TTL`）
+
 - **代码位置**：后端 `backend/src/**`（88+ TS 文件，456 个 HTTP 端点全量编译入堆）；前端 `frontend/src/**`；测试 `backend/tests/**/*.test.ts`。
+
 - **脚本**：`dev`（tsx watch src/index.ts）｜ `build`（tsc）｜ `start`（node dist/index.js）｜ `test`（vitest run）｜ `db:generate/migrate/push`（drizzle-kit）。
+
 - **内存红线**：新增任何常驻 `Map`/`Set`/数组缓存，**必须**带上限（FIFO/LRU/字节预算）或清理机制（TTL/定期驱逐/孤儿回收），禁止只增不删（见 6.8）。
+
 - **批量任务红线（v1.13.42+，见 1.3）**：所有批量任务必须在一次性子进程执行（`runBatchJob`），**禁止**在主进程内联跑批量重活；子进程峰值内存不计入主进程常驻 RSS。
+
+- **国际化红线（见第十一章）**：任何面向用户的新增文案**必须**接入 i18n（前端 `t()` / 后端 `errors.*` / 插件 `i18n.en`），禁止裸中文硬编码；zh/en 键集合必须完全一致。
 
 ### 1.3 批量子进程契约（方案3，v1.13.42+）
 
 > 目标：批量任务峰值内存随一次性子进程退出归还操作系统，主进程常驻 RSS 不被批量任务拉高。
 > 实现：`backend/src/batch/`（types.ts 协议 / jobs.ts 处理器 / child.ts 子进程引导 / runner.ts 父进程运行器）。验证基线见第 8 章：`[BATCH]` 日志输出「子进程峰值 + 主进程前后 RSS」。
 
-**A. 白名单：这些 kind 必须走 `runBatchJob(kind, args)`，禁止在主进程内联执行其逻辑**
+**A. 白名单：这些 kind 必须走** **`runBatchJob(kind, args)`，禁止在主进程内联执行其逻辑**
 
-| kind | 语义 |
-|------|------|
-| `daily-jobs` | 每日推荐全管线（推荐插件 runDailyJob + 组合歌单 + 平台推荐同步 + 网页歌清理） |
-| `maintenance` | 6h 维护（playlistSync.runSyncJob 全部 + 新歌手信息刮削） |
-| `plugin-job` | 单插件后台方法（手动刷新 / 聚合同步 Path B） |
-| `scan` | 媒体源扫描（webdav/local）+ 扫描后新增歌手刮削 |
-| `playlist-import` / `playlist-sync` | URL 歌单导入 / 手动同步一张歌单 |
-| `playlist-search-import` / `album-search-import` / `song-search-import` | 搜索「加入库」 |
-| `match-playlist` / `match-playlists` | 在线匹配一张 / 批量匹配全部含占位条目歌单 |
-| `recommend-sync-all` | 路径 A：平台每日推荐全量重导 |
-| `purge-web-songs` | 过期未引用网页歌曲清理 |
-| `scrape-artists` | 批量歌手信息刮削 |
-| `backfill` | 歌词/封面批量补全（C 按钮：候选查询 + 逐首补全，峰值随子进程退出归还） |
-| `recommend-refresh` | 推荐手动刷新默认路径（每日/本地/漫游，异步 202+轮询） |
+| kind                                                                    | 语义                                                |
+| ----------------------------------------------------------------------- | ------------------------------------------------- |
+| `daily-jobs`                                                            | 每日推荐全管线（推荐插件 runDailyJob + 组合歌单 + 平台推荐同步 + 网页歌清理） |
+| `maintenance`                                                           | 6h 维护（playlistSync.runSyncJob 全部 + 新歌手信息刮削）       |
+| `plugin-job`                                                            | 单插件后台方法（手动刷新 / 聚合同步 Path B）                       |
+| `scan`                                                                  | 媒体源扫描（webdav/local）+ 扫描后新增歌手刮削                    |
+| `playlist-import` / `playlist-sync`                                     | URL 歌单导入 / 手动同步一张歌单                               |
+| `playlist-search-import` / `album-search-import` / `song-search-import` | 搜索「加入库」                                           |
+| `match-playlist` / `match-playlists`                                    | 在线匹配一张 / 批量匹配全部含占位条目歌单                            |
+| `recommend-sync-all`                                                    | 路径 A：平台每日推荐全量重导                                   |
+| `purge-web-songs`                                                       | 过期未引用网页歌曲清理                                       |
+| `scrape-artists`                                                        | 批量歌手信息刮削                                          |
+| `backfill`                                                              | 歌词/封面批量补全（C 按钮：候选查询 + 逐首补全，峰值随子进程退出归还）            |
+| `recommend-refresh`                                                     | 推荐手动刷新默认路径（每日/本地/漫游，异步 202+轮询）                    |
 
 新增批量任务类型：先在此表补一行，并在 `batch/types.ts`（jobKinds）/ `batch/jobs.ts`（batchJobHandlers）注册。
 
 **B. 边界（禁止违反）**
 
 - **一次性子进程**：`child_process.fork`，每个子进程**只跑一个 job**，跑完 `sendAndExit`（`process.send` 回调后再 `process.exit`，防终结消息丢失）。
+
 - **全局串行（默认，可并行）**：`runBatchJob` 先持 `acquireBatchLock`（FIFO），**默认同一时刻最多 1 个批量子进程**（全部任务排队串行）；某插件在配置页打开「允许并行执行」（`batchParallel`）后，并发上限 = 已开启该开关的插件数（利用多核，各任务跑在自己的批量 worker 上），默认关 → 1。批量档位/交互让行对子进程生效——主进程交互窗口经 `pace` 消息同步给子进程。
+
 - **args 必须 JSON 可序列化**：只传最小入参（id/url/mode/list…），**禁止**传函数/实例；子进程从自身注册表/DB 重建 provider/config/plugin（`getConfiguredProvider` / `getPluginConfig` / `getEnabledByCapability`）。
+
 - **子进程引导序列（child.ts，固定）**：`registerBuiltinPlugins()` → `initDatabase()` → `backfillGenres()` → `discoverExternalPlugins(APP_VERSION)`，然后上报 `ready`。子进程**不启动** HTTP/WS/播放器/DLNA/热重载/内存回收/调度器。
+
 - **IPC 协议**：父→子 `run{jobId,kind,args}` / `abort{jobId}` / `pace{active}`；子→父 `ready{pid}` / `heartbeat{pid}`（30s，unref）/ `progress{jobId,payload}` / `result{jobId,result,rss}` / `error{jobId,error,sandboxCode,hint}`。
+
 - **看门狗**：子进程 15min 无任何消息（心跳/progress/result 皆算）→ SIGKILL + `BatchJobError`；父进程 `abort` 发 `abort` 消息，宽限期 30s 后未退 → SIGKILL。
+
 - **收尾（成功与失败都必须）**：`clearLibraryIndex()` + `touch()`（子进程改了库 → 主进程缓存失效、标记活动），并记录子进程峰值 RSS 与主进程前后 RSS。
+
 - **状态/进度**：任务状态 Map 全部留在主进程（scanJobs/scrapeJobs/matchJobs/asyncTasks/jobRunner），子进程只回报 `progress`；前端轮询端点不变。
+
 - **异步入口契约（v1.13.42+）**：`POST /v1/recommend/refresh`（默认路径，不带 pluginId）与 `POST /v1/{lyrics,covers}/backfill` 均为异步。刷新返回 202 + taskId，前端轮询 `GET /v1/tasks/:id`，`task.result` = `{success, seedSalt, results}`（能力缺失仍同步 503）；批量补全沿用 `GET /v1/{lyrics,covers}/backfill/status` 轮询（`startBackfill` 契约不变：同步 `COUNT` 出 total，全量候选 + 逐首补全在子进程内跑）。
+
 - **插件调用仍经沙箱（边界不因子进程而削弱）**：子进程内调 `reg.impl[method]` 走与主进程相同的沙箱代理——外置插件权限授权（permissions）照常生效；单次调用预算由沙箱 `timeoutForMethod()` 落地（`manifest.longRunning` 或默认 15s），longRunning 方法路由到批量 worker（软看门狗）。子进程不绕过沙箱、不写死 provider id、不直接 import 插件实现（`scripts/check-core.mts` 覆盖 `batch/` 目录）。
+
 - **错误透传**：子进程失败携带 `sandboxCode`/`hint`（`BatchJobError`），jobRunner 的 PluginJobState 错误字段照常填充。
 
 **C. 例外（允许留在主进程，量小或需前台同步返回）**
 
 - 在线搜索等同步前台小操作（search 端点、`importOnlineSongs` 同步路由）。
+
 - native 文件歌单导入（量小）。
+
 - `cleanupPlayHistory`（定时小清理）。
+
 - `matchPlaylistInBackground`（shared.ts）：父进程侧持 `acquireBatchLock` 排队，串行在批量子进程之后，不另 fork。
 
 **D. 测试契约**
 
 - runner 单测用 `_setForkImplForTest` 注入假子进程（不真实 fork）；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 注入进程内直调。**这些钩子仅供测试，生产禁止。**
+
 - 内存验证基线：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`，要求批量执行期间主进程 RSS 平稳（B ≤ A + 5MB 或下降）。
 
 ### 1.4 播放器双协议互斥契约（v1.13.42+，方案 A）
@@ -95,9 +121,13 @@
 > Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay（音频输入互斥）。双协议会话**必须互斥**，否则残留会话抢占音频通道 → 设备"显示在播但无声"。
 
 - **DLNA cast 前**：`castToDevice`（services/dlna/control.ts）按 device location 的 host 调 `stopAirPlaySessionsForHost(host)`（动态 import，防 dlna↔airplay 循环依赖），停止同 host 全部活跃 AirPlay 会话（RAOP TEARDOWN）。
-- **AirPlay cast 前**：`startSession`（services/airplay/control.ts）用 `dlnaPeerOfAirPlay` 找同 host DLNA renderer → `stopDevicePlayback(dlnaPeer)`（SOAP Stop + 清内存态 + player_refresh）。
+
+- **AirPlay cast 前**：`startSession`（services/airplay/control.ts）用 `dlnaPeerOfAirPlay` 找同 host DLNA renderer → `stopDevicePlayback(dlnaPeer)`（SOAP Stop + 清内存态 + player\_refresh）。
+
 - 互斥钩子**失败只记日志不阻断 cast**（warn 级，含 deviceId/host 上下文）。
+
 - 音量/静音跨协议转发（`setAirPlayVolume` → DLNA RenderingControl）仍走既有 `dlnaPeerOfAirPlay` 逻辑，不受互斥影响。
+
 - 新增协议播放器（Cast 等）若与既有协议可能同设备，必须同样登记互斥（按 host IP 匹配），禁止只增不互斥。
 
 ### 1.5 AirPlay 插件开关契约（v1.13.42+）
@@ -105,11 +135,17 @@
 > AirPlay（RAOP）渲染器是**可停用内置插件**（`airplay-renderer`），**默认关闭**。未开启时不启动任何服务，零常驻资源。
 
 - **开关入口**：插件管理页（`/v1/plugins` 的 `optionalBuiltin: true` 行显示开关按钮）→ `PUT /v1/plugins/:id` toggle。
+
 - **默认关闭**：manifest `defaultEnabled: false`；存量库已启用行保留（不强制关闭）。
+
 - **开启时才启动**：`index.ts` 启动门控 `isAirPlayEnabled()` → 才 `startAirPlayService()` + 持久化 wire + 设备注册。
+
 - **关闭时零常驻**：`stopAirPlayService()`（airplay/control.ts）——停全部会话（RAOP TEARDOWN + ffmpeg kill）、清 volumeState/lastCast、移除全部 `airplay:*` peer（`removeAirPlayPeers`）、注销 QueueController player（`unregisterAirPlayDevices`）、停 mDNS（`stopAirPlayDiscovery`：browser.stop + bonjour.destroy + clearInterval）并清空设备内存列表。**关闭后无网络监听/无定时器/无会话/无 peer/无 player 注册**。
+
 - **路由守卫**：`/v1/airplay/*` 全部端点挂 `use` 中间件，未启用返回 409（`CONFLICT`，"AirPlay 播放器已关闭"），防绕过。
+
 - **禁止**：未启用状态下任何代码路径调用 discovery/设备注册（mDNS 是唯一设备来源，关闭后设备列表为空，天然免疫）。
+
 - **内置插件均可停用**（v1.13.42+）：移除"内置不可停用"限制——`/v1/plugins` 的 toggle 对所有插件生效（内置插件仅不可删除/不可更新）。需要服务生命周期联动的内置插件（如 airplay-renderer → AirPlay 服务启停）在 toggle 端点特判 id 接线，禁止只改 DB 不联动。
 
 ### 1.6 首页推荐展示与歌曲处理解耦契约（v1.13.42+，根治方案）
@@ -120,38 +156,50 @@
 
 **A. 责任切分（禁止合职责）**
 
-| 时机 | 谁去做 | 做什么 | 是否访问上游 |
-|------|--------|--------|--------------|
-| 首页展示（每次 `/v1/recommend`） | 插件 `recommend()` | 只返回**轻量元数据**：`{ id, name, cover, creator }`；不 grep、不匹配、不补全、不做任何歌曲级处理 | **否** |
-| 每日一次（调度器） | 插件 `runDailyJob()` | 抓全量歌单→逐首匹配/补全→`host.playlists.upsert` 写入本地库 | 是 |
-| 点击卡片/进入歌单 | 既有 `/v1/online/:providerId/recommend/import`（`importRecommendPlaylist` → `provider.playlistSongs`） | 按需拉取该歌单歌曲并导入本地库 | 是（按需） |
+| 时机                       | 谁去做                                                                                                | 做什么                                                                  | 是否访问上游 |
+| ------------------------ | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------ |
+| 首页展示（每次 `/v1/recommend`） | 插件 `recommend()`                                                                                   | 只返回**轻量元数据**：`{ id, name, cover, creator }`；不 grep、不匹配、不补全、不做任何歌曲级处理 | **否**  |
+| 每日一次（调度器）                | 插件 `runDailyJob()`                                                                                 | 抓全量歌单→逐首匹配/补全→`host.playlists.upsert` 写入本地库                          | 是      |
+| 点击卡片/进入歌单                | 既有 `/v1/online/:providerId/recommend/import`（`importRecommendPlaylist` → `provider.playlistSongs`） | 按需拉取该歌单歌曲并导入本地库                                                      | 是（按需）  |
 
-**B. 数据契约（`/v1/recommend` 返回）**
+**B. 数据契约（`/v1/recommend`** **返回）**
 
 - 频道：`{ source, name, count, sortOrder, _pluginId, playlists }`。
+
 - 歌单卡片字段：
+
   - `id`：`pl-<plugin>-<rankid>`，与 `runDailyJob` upsert 的本地歌单 id 一致；
+
   - `name` / `cover` / `creator`：插件轻量元数据；
-  - `trackCount` / `imported`：**由后端用每日同步入库的本地歌单（`local.songCount` / 是否存在）覆盖**，不来自插件；
+
+  - `trackCount` / `imported`：**由后端用每日同步入库的本地歌单（`local.songCount`** **/ 是否存在）覆盖**，不来自插件；
+
   - 未入库（每日同步还没跑）时 `imported=false`、`trackCount=""`（首页显示"歌单"占位，点击即按需拉取）。
+
 - 聚合仍需并行（`Promise.all`，各插件独立 `try/catch`）并走后端 `recommendCache`；因各插件 `recommend()` 已零网络，冷缓存首次也秒级。
 
 **C. 插件侧硬约束（对 recommendPlaylist 能力插件）**
 
 - `recommend()` 不得调用上游、不得调用 `host.songs.search` / `host.sources.complete`、不得逐首处理歌曲——**只允许**基于配置（rankIds/chartIds + homeCount + sortOrder）拼装歌单元数据返回。
+
 - 单次 `recommend()` 必须是纯本地、同步秒回；若某频道失败，仅跳过该频道，不影响其它插件与 go-music-dl 主频道。
+
 - 严禁在 `recommend()` 内完成 `runDailyJob` 的职责；两方法职责不可互相侵入。
+
 - 明确每个发布版本保留 `manifest.longRunning.recommend` 预算即可，但实现上不应再触发长耗时逻辑。
 
 **D. 核心侧硬约束**
 
 - `/v1/recommend` 的 recommendPlaylist 聚合分支：`trackCount`/`imported` 一律以 `findLocalRemotePlaylist(id, source, name)` 的本地行为准；禁止回落到插件返回的歌曲数（插件不应再返回 song 级数据）。
+
 - 禁止因单插件慢而让整个响应超时/失败：聚合必须并行 + 独立 catch，任何一频道失败都不能吞掉 go-music-dl 主频道。
 
 **E. 边界（禁止违反）**
 
 - 不在首页链路里触发每日同步或歌曲拉取；首页与"爬取歌曲"彻底解耦。
+
 - 不新增缓存层，沿用既有 `recommendCache` 与并行聚合。
+
 - 不改变 `/v1/recommend` 的路径/返回结构/`success`/`providerId` 语义（遵守 3.5 行为契约）。
 
 ### 1.6.1 首页歌单接口分流规则（v1.13.42+，根治「已入库仍被当作远程导入」）
@@ -160,19 +208,22 @@
 
 > **根治**：按"歌单数据是否已在本地库"把首页接口彻底分成两路，任何歌单只属于其一，禁止混淆。
 
-| 歌单状态 | 首页接口（能力） | 端点 | 数据来源 | 点击行为 |
-|----------|------------------|------|----------|----------|
+| 歌单状态                                    | 首页接口（能力）                 | 端点                        | 数据来源                                                                                                            | 点击行为                                  |
+| --------------------------------------- | ------------------------ | ------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
 | **已入库**（`runDailyJob` 已把歌单 upsert 到本地库） | `localPlatformRecommend` | `GET /v1/local-recommend` | 插件 `recommendLocal()` 直接 `host.playlists.get(id)` 读**本地库真实字段**（`name`/`cover_art`/`song_count`），`imported:true` | 三端（Web/客户端/HA）经本地歌单 id 直接播放，**绝不走导入** |
-| **需实时导入**（歌单不在本地库，如 go-music-dl 私人歌单） | `recommendPlaylist` | `GET /v1/recommend` | 插件 `recommend()` 返回轻量元数据，后端按需 `importRecommendPlaylist` 导入 | 点击按需拉取并导入本地库 |
+| **需实时导入**（歌单不在本地库，如 go-music-dl 私人歌单）   | `recommendPlaylist`      | `GET /v1/recommend`       | 插件 `recommend()` 返回轻量元数据，后端按需 `importRecommendPlaylist` 导入                                                      | 点击按需拉取并导入本地库                          |
 
 **硬约束**
 
 - 三个榜单插件**必须**声明 `localPlatformRecommend`（已入库 → 走本地接口），**禁止**退回 `recommendPlaylist`。
+
 - `recommendLocal()` 只读本地库、零网络、同步秒回；未同步入库的榜单不展示（后端不兜底远程导入）。
+
 - go-music-dl 及任何"每次需导入"的播放源继续走 `recommendPlaylist`；两边能力、方法、端点互不复用、不混淆。
+
 - 后端 `CAP_METHODS` / `VALID_CAPS` / 每日调度器 / 插件校验脚本（`check.mjs`）必须同时识别 `localPlatformRecommend`（`recommendLocal` + `runDailyJob`），否则插件无法加载/被每日调度/通过校验。
 
----
+***
 
 ## 二、数据模型契约（SQLite）
 
@@ -180,36 +231,40 @@
 
 ### 2.1 表清单与关键约束
 
-| 表 | 主键 | 关键字段 / 硬约束 |
-|----|------|-------------------|
-| `users` | id(text uuid) | username **unique notNull**；password/salt/subsonicSalt notNull；isAdmin/isActive 0/1；apiKey + apiKeyHash + apiKeyExpiresAt（API key 与 JWT 双通道） |
-| `songs` | id(text uuid) | title/path notNull；type 默认 `"local"`（在线音源歌曲带 url/pluginEntry/sourceData/streamHeaders）；duration/bitRate/track/discNumber/size 为整数秒/字节；coverArt 可空 |
-| `albums` / `artists` | id(text uuid) | name notNull；playCount/songCount/duration 整数；coverArt/bio 可空 |
-| `album_artists` | (albumId, artistId) 复合 | role 默认 participant |
-| `playlists` | id(text uuid) | name/ownerId notNull；isPublic/favorite/syncEnabled 0/1；sourcePlatform/sourcePlugin/externalId 为平台歌单同步字段 |
-| `playlist_songs` | id(自增 integer) | playlistId notNull；position 整数；external* 字段存平台侧元数据；playable 0/1 |
-| `user_favorite_songs` | (userId, songId) 复合 | 收藏 |
-| `play_history` | id(自增 integer) | userId+songId+playedAt；写入去重窗口 10 分钟（HISTORY_DEDUPE_WINDOW_MS） |
-| `user_ratings` | (userId, itemType, itemId) 复合 | itemType ∈ song\|album\|artist；rating 0–5（0=删除评分） |
-| `user_play_queues` | userId | OpenSubsonic get/savePlayQueue 持久化；entryIdsJson 存 songId[] |
-| `media_sources` | id | type 默认 local；config 存 JSON 文本 |
-| `plugins` / `plugin_registries` | id | manifest/config 存 JSON 文本；enabled 0/1 |
-| `settings` | key | value 文本；**禁止新增表**，设置项直接加 key |
-| `recommend_pool` | id(自增) | sourceType ∈ playlist\|favorites；每日推荐池 |
-| `dlna_devices` | id(=UDN uuid) | 持久化设备（**离线/禁用设备保留**，供用户管理）；alias 用户自定义名 |
-| `device_queues` / `group_queues` / `local_queues` | device_id/group_id/peer_id | itemsJson 存 QueueItem[]；playMode ∈ order\|one\|all\|shuffle；local_queues.lastActiveAt 驱动 10 分钟失效清理 |
-| `player_groups` | id | memberIds 存 dlna deviceId[]（**成员只能是 DLNA 设备，组不能套组**）；name 限 50 字符 |
-| `genres` | id | name unique |
-| `flows` | id | token **unique**（免登录 webhook 凭据）；lastRunStatus ∈ waiting\|playing\|success\|error\|timeout |
-| `player_webhook_tokens` | id | token unique；enabled 0/1；ownerUserId |
-| `cleaning_rules` / `wishes` | id | wishes.status 默认 pending（枚举扩展需 spec 明确） |
+| 表                                                 | 主键                            | 关键字段 / 硬约束                                                                                                                                        |
+| ------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `users`                                           | id(text uuid)                 | username **unique notNull**；password/salt/subsonicSalt notNull；isAdmin/isActive 0/1；apiKey + apiKeyHash + apiKeyExpiresAt（API key 与 JWT 双通道）      |
+| `songs`                                           | id(text uuid)                 | title/path notNull；type 默认 `"local"`（在线音源歌曲带 url/pluginEntry/sourceData/streamHeaders）；duration/bitRate/track/discNumber/size 为整数秒/字节；coverArt 可空 |
+| `albums` / `artists`                              | id(text uuid)                 | name notNull；playCount/songCount/duration 整数；coverArt/bio 可空                                                                                      |
+| `album_artists`                                   | (albumId, artistId) 复合        | role 默认 participant                                                                                                                               |
+| `playlists`                                       | id(text uuid)                 | name/ownerId notNull；isPublic/favorite/syncEnabled 0/1；sourcePlatform/sourcePlugin/externalId 为平台歌单同步字段                                           |
+| `playlist_songs`                                  | id(自增 integer)                | playlistId notNull；position 整数；external\* 字段存平台侧元数据；playable 0/1                                                                                  |
+| `user_favorite_songs`                             | (userId, songId) 复合           | 收藏                                                                                                                                                |
+| `play_history`                                    | id(自增 integer)                | userId+songId+playedAt；写入去重窗口 10 分钟（HISTORY\_DEDUPE\_WINDOW\_MS）                                                                                  |
+| `user_ratings`                                    | (userId, itemType, itemId) 复合 | itemType ∈ song\|album\|artist；rating 0–5（0=删除评分）                                                                                                 |
+| `user_play_queues`                                | userId                        | OpenSubsonic get/savePlayQueue 持久化；entryIdsJson 存 songId\[]                                                                                       |
+| `media_sources`                                   | id                            | type 默认 local；config 存 JSON 文本                                                                                                                    |
+| `plugins` / `plugin_registries`                   | id                            | manifest/config 存 JSON 文本；enabled 0/1                                                                                                             |
+| `settings`                                        | key                           | value 文本；**禁止新增表**，设置项直接加 key                                                                                                                     |
+| `recommend_pool`                                  | id(自增)                        | sourceType ∈ playlist\|favorites；每日推荐池                                                                                                            |
+| `dlna_devices`                                    | id(=UDN uuid)                 | 持久化设备（**离线/禁用设备保留**，供用户管理）；alias 用户自定义名                                                                                                           |
+| `device_queues` / `group_queues` / `local_queues` | device\_id/group\_id/peer\_id | itemsJson 存 QueueItem\[]；playMode ∈ order\|one\|all\|shuffle；local\_queues.lastActiveAt 驱动 10 分钟失效清理                                              |
+| `player_groups`                                   | id                            | memberIds 存 dlna deviceId\[]（**成员只能是 DLNA 设备，组不能套组**）；name 限 50 字符                                                                                |
+| `genres`                                          | id                            | name unique                                                                                                                                       |
+| `flows`                                           | id                            | token **unique**（免登录 webhook 凭据）；lastRunStatus ∈ waiting\|playing\|success\|error\|timeout                                                        |
+| `player_webhook_tokens`                           | id                            | token unique；enabled 0/1；ownerUserId                                                                                                              |
+| `cleaning_rules` / `wishes`                       | id                            | wishes.status 默认 pending（枚举扩展需 spec 明确）                                                                                                           |
 
 ### 2.2 全库硬性约束（边界条件）
 
 - **时间格式**：一律 ISO 8601 文本 `new Date().toISOString()`（`yyyy-MM-ddTHH:mm:ss.sssZ`）。
+
 - **布尔**：integer `0|1`，禁止存 `true/false` 字符串。
+
 - **JSON 字段**：text 列存 JSON 序列化（config/manifest/itemsJson/memberIds/definitionJson），解析时 `try/catch` 容错。
+
 - **数值**：duration/size/位次等非负整数；rating 0–5；volume 0–100。
+
 - **NULL 纪律**：声明 notNull 的列不得写 NULL；可空列读取后必须容错（`?? ""` / `|| 0`）。
 
 ### 2.3 状态流转（必须穷举，禁止非法路径）
@@ -233,41 +288,45 @@ IDLE ⇄ PLAYING ⇄ PAUSED ⇄ BUFFERING
 
 **队列播放模式**：`order | one | all | shuffle`（切换只允许在这 4 值间进行）。
 
----
+***
 
 ## 三、API 接口契约
 
 ### 3.1 路由挂载（实测确认，写新路由必须对齐）
 
-| 前缀 | 归属 | 鉴权 |
-|------|------|------|
-| `POST /rest/api/v1/auth/login` | authRoutes | 无（登录本身） |
-| `/rest/api/*` | apiRoutes（管理/业务 API） | `authMiddleware` 全挂；`/v1/admin/*` 再叠 `adminMiddleware` |
-| `/rest/*` | restRoutes（OpenSubsonic/Subsonic 兼容，456 端点大面） | authMiddleware（Bearer / OpenSubsonic u+t+s / u+p / token） |
-| `/api/*` | navidromeRoutes | authMiddleware |
-| `/rest/dlna/*` | DLNA 控制/事件 | 设备回调/事件无需登录（NOTIFY） |
-| `/ws` | WebSocket（HTTP upgrade） | `?token=<apiKey|jwt>`，401 拒绝 |
+| 前缀                             | 归属                                            | 鉴权                                                        |               |
+| ------------------------------ | --------------------------------------------- | --------------------------------------------------------- | ------------- |
+| `POST /rest/api/v1/auth/login` | authRoutes                                    | 无（登录本身）                                                   |               |
+| `/rest/api/*`                  | apiRoutes（管理/业务 API）                          | `authMiddleware` 全挂；`/v1/admin/*` 再叠 `adminMiddleware`    |               |
+| `/rest/*`                      | restRoutes（OpenSubsonic/Subsonic 兼容，456 端点大面） | authMiddleware（Bearer / OpenSubsonic u+t+s / u+p / token） |               |
+| `/api/*`                       | navidromeRoutes                               | authMiddleware                                            |               |
+| `/rest/dlna/*`                 | DLNA 控制/事件                                    | 设备回调/事件无需登录（NOTIFY）                                       |               |
+| `/ws`                          | WebSocket（HTTP upgrade）                       | \`?token=\<apiKey                                         | jwt>\`，401 拒绝 |
 
-**新端点默认挂 `/rest/api/v1/...`**，除非 spec 明确是 OpenSubsonic 兼容端点（挂 `/rest/...` 并遵循 subsonic 返回格式）。
+**新端点默认挂** **`/rest/api/v1/...`**，除非 spec 明确是 OpenSubsonic 兼容端点（挂 `/rest/...` 并遵循 subsonic 返回格式）。
 
 ### 3.2 响应与错误格式（禁止发明第三种格式）
 
 - 业务 API：`{ "success": true, ...data }` 或 `{ "success": false, "code": <BusinessErrorCode>, "error": "中文可读信息" }`
+
 - **错误码（必带）**：所有业务错误响应必须带 `code` 字段，枚举定义在 `utils/errors.ts`：
 
-| code | 语义 | 典型场景 |
-|------|------|---------|
-| `INVALID_PARAM` | 入参缺失/类型错误/越界 | 空值、非法枚举、数值范围 |
-| `NOT_FOUND` | 资源不存在 | id 查不到行 |
-| `CONFLICT` | 状态冲突 | 重复扫描、重复导入 |
-| `BUSY` | 资源占用/超并发 | 批量锁被占、任务已在跑 |
-| `FORBIDDEN` | 权限不足 | 跨用户访问、非 admin |
-| `UPSTREAM_ERROR` | 外部依赖失败 | 插件/上游/网络 |
-| `INTERNAL` | 未预期异常 | 兜底(必须伴随 error 日志) |
+| code             | 语义           | 典型场景              |
+| ---------------- | ------------ | ----------------- |
+| `INVALID_PARAM`  | 入参缺失/类型错误/越界 | 空值、非法枚举、数值范围      |
+| `NOT_FOUND`      | 资源不存在        | id 查不到行           |
+| `CONFLICT`       | 状态冲突         | 重复扫描、重复导入         |
+| `BUSY`           | 资源占用/超并发     | 批量锁被占、任务已在跑       |
+| `FORBIDDEN`      | 权限不足         | 跨用户访问、非 admin     |
+| `UPSTREAM_ERROR` | 外部依赖失败       | 插件/上游/网络          |
+| `INTERNAL`       | 未预期异常        | 兜底(必须伴随 error 日志) |
 
-  新代码/新端点一律用 `apiError(code, message)` 构造错误体；禁止裸造 `{ success:false, error }`。
+新代码/新端点一律用 `apiError(code, message)` 构造错误体；禁止裸造 `{ success:false, error }`。
+
 - OpenSubsonic：`{ "subsonic-response": { "status": "ok"|"failed", "version": "1.16.1", "type": "MusicFlow", ...payload } }`
+
 - 鉴权失败 401：`code 40 Unauthorized`；无权限 403：`code 50 Admin required`（格式同 subsonic-response failed，**不归 BusinessErrorCode 管**）
+
 - **错误码纪律**：业务错误码不动态生成；错误信息中文、含可操作提示；沙箱类错误附 `sandboxCode`（如 `SANDBOX_TIMEOUT`）与 `hint`。
 
 ### 3.3 鉴权链（顺序固定，禁止跳过）
@@ -276,39 +335,48 @@ IDLE ⇄ PLAYING ⇄ PAUSED ⇄ BUFFERING
 X-API-Key → Authorization: Bearer(JWT→API key) → X-ND-Authorization: Bearer → 
 OpenSubsonic 参数(u+t+s / u+p) → token 参数(流媒体 URL 场景)
 ```
+
 中间件：`backend/src/middleware/auth.ts`。WS 用 `authenticateWsToken`。
 
 **鉴权缓存（v1.13.42+）**：apiKey 用**内存索引**（`apiKeyHash(sha256) → { userId, expiresAt }`，懒构建 + 自愈回填存量明文），JWT 用户查库带 60s TTL 缓存，替代每请求全表扫。用户资料/apiKey 写操作后必须调用 `invalidateAuthCaches()`（生成/撤销 key、改密码、改名），否则缓存最多 60s 内过期收敛。
 
 ### 3.4 幂等与并发（必须遵守，防止重复副作用）
 
-| 场景 | 机制 | 位置 |
-|------|------|------|
-| 异步任务（歌单导入/搜索导入/同步） | 同 kind+key 在跑 → `alreadyRunning`（runningKeys 去重） | `services/plugin/asyncTasks.ts` |
-| 媒体源扫描 | 同媒体源 running → 拒绝重复扫描 | `routes/api/index.ts` scanJobs |
+| 场景                   | 机制                                                                                   | 位置                                                  |
+| -------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| 异步任务（歌单导入/搜索导入/同步）   | 同 kind+key 在跑 → `alreadyRunning`（runningKeys 去重）                                     | `services/plugin/asyncTasks.ts`                     |
+| 媒体源扫描                | 同媒体源 running → 拒绝重复扫描                                                                | `routes/api/index.ts` scanJobs                      |
 | 全进程批量任务（同步/匹配/导入/推荐） | `acquireBatchLock` 全局 FIFO 锁，**必须 finally release**；由 `runBatchJob` 持有并串行化批量子进程（1.3） | `services/plugin/batchPacer.ts` + `batch/runner.ts` |
-| scrobble 派发 | 10min（scrobble）/ 60s（play）窗口去重 | `plugins/scrobblers.ts` |
-| 播放历史写入 | 10 分钟窗口去重 | rest 路由 HISTORY_DEDUPE_WINDOW_MS |
+| scrobble 派发          | 10min（scrobble）/ 60s（play）窗口去重                                                       | `plugins/scrobblers.ts`                             |
+| 播放历史写入               | 10 分钟窗口去重                                                                            | rest 路由 HISTORY\_DEDUPE\_WINDOW\_MS                 |
 
 ### 3.5 入参/出参纪律
 
 - 入参**必须**做空值/类型校验（`c.req.param/json/query` 均可能缺失）；非法入参返回 `success:false` 而非抛 500。
+
 - 数组/列表入参注意 SQLite `IN` 上限与空数组边界（空 → 直接返回空结果，不构造 `IN ()`）。
+
 - 分页/列表端点：不强制分页，但**禁止**一次加载全表后在前端过滤（大曲库红线）。
 
----
+***
 
 ## 四、异常处理与安全
 
 - **统一兜底**：Hono `app.use("*")` 链已含错误兜底；**新增路由不得裸抛**，业务错误转 `success:false` 返回，未捕获异常由兜底转 500。
+
 - **SQL 注入**：**必须**用 drizzle 绑定变量 / better-sqlite3 `prepare` 参数，**严禁**字符串拼接 SQL（历史教训：所有 `?` 参数位）。
+
 - **敏感字段**：日志**禁止**打印密码明文、`JWT_SECRET`、`apiKey`、`pass_enc`；错误信息不得回显完整密钥。
+
 - **XSS**：前端用 Vue 模板插值（自动转义）；**禁止** `v-html` 直插未净化内容。
+
 - **插件沙箱**：插件只能经能力门面（capability/permission）交互，业务逻辑**不得侵入核心**；长任务必须经 `jobRunner`（longRunning 预算），禁止在主线程沙箱跑重活。
+
 - **沙箱宿主文件约束**：`plugins/sandbox.ts` 被 worker 线程以 **node 原生 ESM** 加载（不认 `.js→.ts` 映射），**禁止**在其中新增任何 import 依赖（如 utils/logger），保持零新依赖；需要日志用 `console.error`（存量豁免）。
+
 - **连接/资源**：新增 socket/fetch/定时器必须考虑关闭路径（异常时 finally）；`AbortSignal.timeout` 是既有约定。
 
----
+***
 
 ## 五、验收标准（AC）格式
 
@@ -334,7 +402,7 @@ When  查询最早的任务 id
 Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 ```
 
----
+***
 
 ## 六、负面清单（边界划定，优先级最高，防幻觉核心）
 
@@ -353,31 +421,31 @@ Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 11. **禁止**把插件仓库（MusicFlow-plugins）的改动混入本仓库；核心与插件边界不可互相侵入。
 12. **禁止**在代码注释中编造不存在的 API / 配置项 / 环境变量 / 端点——写前先 grep 确认。
 
----
+***
 
 ## 七、文件索引与调用链
 
 ### 7.1 目录地图（后端 `backend/src/`）
 
-| 目录 | 职责 |
-|------|------|
-| `routes/api/` | 业务 API（index.ts 是主文件：159+ 端点；online.ts 在线搜索；entitySearch/playlistSearch） |
-| `routes/rest/` | OpenSubsonic 兼容（456 端点大面） |
-| `routes/auth/` | 登录 |
-| `routes/navidrome/` | Navidrome 兼容路由 |
-| `services/dlna/` | control（设备缓存/DB）、discovery（SSDP）、eventing（GENA）、announce、queue（兼容层） |
-| `services/player/` | PlayerController（去抖决策）、QueueController（队列/切歌）、UniversalPlayer、ProtocolPlayer、types |
-| `services/group/` | 播放器组（SyncGroup）、watchdog、protocolPlayer |
-| `services/plugin/` | 插件编排：registry、sandbox、discovery、jobRunner、asyncTasks、batchPacer、libraryIndex、dailyRecommend/localRecommend、playlistSync、comm、health、scrobblers 入口在 `plugins/` |
-| `services/memory/` | reclaim（空闲回收）、pruneOrphans（孤儿清理） |
-| `services/source/` | scanner（本地/WebDAV 扫描）、online/（在线搜索/匹配/导入/streamFallback） |
-| `batch/` | 批量子进程（1.3）：types.ts（kind + IPC 协议）、jobs.ts（处理器映射）、child.ts（子进程引导）、runner.ts（父进程运行器：锁/看门狗/abort/pace/收尾） |
-| `services/` | peer、settings、proxy、lyrics、covers、coverCache、coverImage、playlistCover、content、backfill、scraper、ws |
-| `plugins/` | 内建插件注册（builtins.ts 9 个）、沙箱宿主（sandbox.ts/sandboxWorker.ts）、registry、health、comm、scrobblers |
-| `utils/` | auth（JWT/md5/hashApiKey）、env、errors（BusinessErrorCode/apiError/apiOk）、logger（createLogger 结构化日志） |
-| `middleware/` | auth（鉴权链 + 缓存）、metrics（慢请求 + 端点计数，挂 app.use("*")） |
-| `db/` | schema.ts + 连接（唯一 `new Database`） |
-| `scripts/` | e2e.sh（本地一键 e2e：临时 DATA_DIR 起服 + 关键契约验证 + 自动清理） |
+| 目录                  | 职责                                                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `routes/api/`       | 业务 API（index.ts 是主文件：159+ 端点；online.ts 在线搜索；entitySearch/playlistSearch）                                                                                      |
+| `routes/rest/`      | OpenSubsonic 兼容（456 端点大面）                                                                                                                                     |
+| `routes/auth/`      | 登录                                                                                                                                                            |
+| `routes/navidrome/` | Navidrome 兼容路由                                                                                                                                                |
+| `services/dlna/`    | control（设备缓存/DB）、discovery（SSDP）、eventing（GENA）、announce、queue（兼容层）                                                                                           |
+| `services/player/`  | PlayerController（去抖决策）、QueueController（队列/切歌）、UniversalPlayer、ProtocolPlayer、types                                                                            |
+| `services/group/`   | 播放器组（SyncGroup）、watchdog、protocolPlayer                                                                                                                       |
+| `services/plugin/`  | 插件编排：registry、sandbox、discovery、jobRunner、asyncTasks、batchPacer、libraryIndex、dailyRecommend/localRecommend、playlistSync、comm、health、scrobblers 入口在 `plugins/` |
+| `services/memory/`  | reclaim（空闲回收）、pruneOrphans（孤儿清理）                                                                                                                              |
+| `services/source/`  | scanner（本地/WebDAV 扫描）、online/（在线搜索/匹配/导入/streamFallback）                                                                                                      |
+| `batch/`            | 批量子进程（1.3）：types.ts（kind + IPC 协议）、jobs.ts（处理器映射）、child.ts（子进程引导）、runner.ts（父进程运行器：锁/看门狗/abort/pace/收尾）                                                       |
+| `services/`         | peer、settings、proxy、lyrics、covers、coverCache、coverImage、playlistCover、content、backfill、scraper、ws                                                             |
+| `plugins/`          | 内建插件注册（builtins.ts 9 个）、沙箱宿主（sandbox.ts/sandboxWorker.ts）、registry、health、comm、scrobblers                                                                     |
+| `utils/`            | auth（JWT/md5/hashApiKey）、env、errors（BusinessErrorCode/apiError/apiOk）、logger（createLogger 结构化日志）                                                              |
+| `middleware/`       | auth（鉴权链 + 缓存）、metrics（慢请求 + 端点计数，挂 app.use("\*")）                                                                                                            |
+| `db/`               | schema.ts + 连接（唯一 `new Database`）                                                                                                                             |
+| `scripts/`          | e2e.sh（本地一键 e2e：临时 DATA\_DIR 起服 + 关键契约验证 + 自动清理）                                                                                                              |
 
 前端 `frontend/src/`：`api/`（axios 封装）、`stores/`（pinia）、`views/`、`components/`、`composables/`、`router/`、`utils/`、`layouts/`。
 
@@ -392,32 +460,46 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 
 **交付时**：在提交说明列出「本次涉及文件 + 上下游影响面」。
 
----
+***
 
 ## 八、可观测性规范
 
 - **日志基础设施（v1.13.42+，新代码必须用）**：统一走 `utils/logger.ts` 的 `createLogger(prefix)`，禁止裸 `console.log/console.error`。
+
   - 级别：`debug < info < warn < error`，`LOG_LEVEL` 环境变量控制（默认 info）。
+
   - 结构化：`log.error("任务失败", { pluginId, taskId, err })` → 输出 `[PLUGIN-JOB] ERROR 任务失败 pluginId=x taskId=y err=z`。
+
   - **强制**：所有 catch 块打 `error` 且**必须包含关键入参**（userId/songId/deviceId/playerId/pluginId/taskId/url 之一或多个），禁止吞异常、禁止仅 `console.error(e)` 无上下文。
+
 - **豁免条款（仅限以下场景，必须配注释）**：① 纯解析容错（`JSON.parse` 失败回落默认值）；② 幂等清理（`ALTER TABLE` 迁移失败跳过、socket/资源 close 失败）；③ 高频轮询兜底（设备状态/组状态查询失败走默认值，如 DLNA poll 失败继续轮询）。以上场景允许静默或 `log.debug`，**禁止**在关键业务路径（播放/导入/同步/鉴权）吞异常。
+
 - **日志前缀**（沿用既有标签习惯，新增标签先查重）：`[MEMORY-RECLAIM]`、`[ORPHAN-PRUNE]`、`[PLUGIN-JOB]`、`[PLUGIN-WORKER]`、`[PLUGIN-HOTRELOAD]`、`[SCANNER]`、`[DAILY-RECOMMEND]`、`[LOCAL-RECOMMEND]`、`[DAILY-SCHEDULER]`、`[ARTIST-SCRAPE]`、`[AUTO-SYNC]`、`[REGISTRY]`、`[batch-runner]`（批量子进程完成：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`）、`[batch-child]`（子进程引导/异常）、`[batch-job]`（子进程 handler 侧）、`[DLNA]`、`[peer]`、`[group]`、`[QueueController]`、`[SECRET]`、`[FATAL]`、`[SECURITY]`、`[PLAY-HISTORY]`、`[HTTP]`（慢请求）。
+
 - **请求 metrics（v1.13.42+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[HTTP] WARN 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
+
 - **内存观测（v1.13.42+）**：`GET /rest/api/v1/admin/memory-settings` 返回 `rssMB/heapUsedMB/externalMB/arrayBuffersMB/isIdle/isBatchBusy/lastReclaimAt/lastReclaim`；`POST /rest/api/v1/admin/memory/reclaim` 返回回收前后内存快照。发版后先看 `rssMB` 曲线定论（稳定高位=正常；持续上涨=查泄漏）。
+
 - **批量子进程内存观测（v1.13.42+）**：批量任务完成时 `[batch-runner]` 必打 `[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`（新增 `backfill` / `recommend-refresh` 等 kind 前缀同构）。验收基线：子进程峰值归一次性子进程所有（退出即归还 OS）；主进程 B ≤ A + 5MB（或下降）。批量执行期间抽样主进程 RSS 应平稳，不得随子进程工作增长。
+
 - 入口/出口关键动作打 Info（含耗时可选）；分支判断 Debug。
 
----
+***
 
 ## 九、测试映射策略与 AI 自检清单
 
 ### 9.1 测试纪律
 
-- 测试框架 vitest（`pool: forks`、每文件独立 DATA_DIR、shuffle）。
+- 测试框架 vitest（`pool: forks`、每文件独立 DATA\_DIR、shuffle）。
+
 - **单元测试**：核心业务逻辑（player/memory/plugins/group/source）必须覆盖；新增/修改逻辑**必须**附测试或更新既有测试。
+
 - **批量子进程测试（v1.13.42+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 进程内直调（测试专用钩子，生产禁止）。
-- **集成/冒烟**：行为类改动（新路由/新流程）用本地隔离实例实测（临时 DATA_DIR + 桩插件，跑通后端直连/代理/真浏览器三层），或至少补集成测试。
-- **一键 e2e（v1.13.42+）**：`bash scripts/e2e.sh` —— 临时 DATA_DIR 起服 + 登录 + 验证 `users/me`、`peers`、`groups`、`memory-settings`、`metrics`、OpenSubsonic 错误凭据契约，自动清理。交付前跑一遍。
+
+- **集成/冒烟**：行为类改动（新路由/新流程）用本地隔离实例实测（临时 DATA\_DIR + 桩插件，跑通后端直连/代理/真浏览器三层），或至少补集成测试。
+
+- **一键 e2e（v1.13.42+）**：`bash scripts/e2e.sh` —— 临时 DATA\_DIR 起服 + 登录 + 验证 `users/me`、`peers`、`groups`、`memory-settings`、`metrics`、OpenSubsonic 错误凭据契约，自动清理。交付前跑一遍。
+
 - **交付门槛**：`tsc --noEmit` 0 错误 + 相关测试全绿 + 无回归；未附冒烟用例视为未完成。
 
 ### 9.2 AI 自检清单（交付前逐项勾选）
@@ -435,9 +517,10 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 □ 10. 未提交/未 push/未打 tag（除非 ray 明确要求走发布流程）
 □ 11. 新代码/新端点使用 apiError(code, message) 与 createLogger()，未裸造错误体/裸 console
 □ 12. 鉴权写操作（apiKey/密码/用户名变更）已调用 invalidateAuthCaches()
+□ 13. 面向用户的文案已接入 i18n（前端 t() / 后端 errors.* / 插件 i18n.en），无裸中文硬编码，zh/en 键对齐
 ```
 
----
+***
 
 ## 十、需求对齐流程（动手前强制，防理解偏差）
 
@@ -450,7 +533,37 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 >
 > 执行阶段仍须遵守其余章节（负面清单 / AC / 测试纪律 / 提交发布管控）。
 
----
+***
+
+## 十一、国际化（i18n）契约（强制）
+
+> 语言方向：**中文默认 + English**。任何面向用户的新增文案必须接入 i18n，禁止裸中文硬编码；CI 守卫强制（未接入即红）。
+
+### 11.1 实现方式（各端总结）
+
+| 端      | 机制                                                                                                                                                                                                                              | 用法                                                                                           | CI 守卫                                                            |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| 前端 Web | vue-i18n 基座，默认中文 `zh-CN`，`en-US` 为英文包；`t()` 模板插值                                                                                                                                                                                | 模板 `{{ t('...') }}` / 脚本 `t('...')`，含 `{var}` 参数                                             | `backend/scripts/check-i18n.mjs`（zh/en 键集合完全一致 + 残留扫描）           |
+| 后端     | 响应层错误统一 catalog（`errors.*`，约 140 键，含模板参数插值）                                                                                                                                                                                     | 用户可见错误一律走 catalog 键，禁止裸 `throw new Error("中文")`                                              | `check-i18n.mjs` + `check-core.mts`（平台名耦合黑名单）                    |
+| 插件机制   | `PluginManifest.i18n`（`{ zh?, en? }`，默认中文、**zh 可省略只须补 en**），覆盖 `name / description / platformLabels / groups / configSchema` 的 `label / help / options` + `documentation` + 注入开关（`scheduleEnabled / runOnBoot / batchParallel`） | 前端经 `pluginI18n.ts`（`resolvePluginI18n / resolveField / localName / localDesc / localDoc`）渲染 | `backend/scripts/check-frontend-plugins.mjs`（弹窗渲染 manifest 声明内容） |
+
+### 11.2 硬性规定（新增功能必须遵守）
+
+- 前端新增面向用户文案：必须同时进 `zh-CN.json` + `en-US.json` 双语言包并用 `t()` 引用；禁止在模板/脚本硬编码中文。
+
+- 后端新增用户可见错误：必须进 `errors.*` catalog（zh + en 各一），禁止裸 `throw new Error("中文")`。
+
+- 插件 manifest：新增字段必须补 `i18n.en`（`label / help / options`）；**外置插件必须同时写入** **`plugin.json`** **与** **`index.js`** **的 manifest——沙箱以** **`index.js`** **的** **`__mfPlugin.manifest`** **为权威，只写 plugin.json 英文界面读不到**。
+
+- zh/en 键集合必须完全一致（缺失即 CI 红）；默认中文保证向后兼容。
+
+### 11.3 已知边界（记录在案，不视为待办）
+
+- 内部错误 `throw new Error("中文")`（`group/flows/playerWebhook` 等深度 throw）：非用户可见，不翻译。
+
+- HASS 集成侧 `BrowseMedia.title` 动态标题等 HASS 无标准本地化机制的内容：见 `hass-musicflow` 仓库说明。
+
+***
 
 ## 附：新功能开发时的 Spec 最小模板（喂给 AI 前先填）
 
@@ -466,4 +579,6 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 ## 8 可观测性（新增日志前缀/级别）
 ## 9 测试计划（单测/集成/冒烟步骤）
 ## 10 自检清单（勾选第九章 9.2）
+## 11 i18n（面向用户文案的本地化方案：zh + en 键、调用点，必须）
 ```
+
