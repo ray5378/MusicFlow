@@ -30,6 +30,24 @@ export const songGroupManifest: PluginManifest = {
     { key: "albumRequired", label: "专辑一致", type: "switch", default: true, help: "分组要求专辑也一致(版本区分靠专辑)。关闭后仅按标题+歌手+时长匹配" },
     { key: "durationTolerance", label: "时长容差(秒)", type: "number", default: 1, help: "组内成员时长差上限(秒级;默认 1,防误合并不同版本)" },
   ],
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Same-Track Multi-Source Group",
+      description:
+        "Group the same song from the local/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff <= tolerance), sorted local > webdav > web within a group. When on, all clients auto-merge the group for display and play the preferred source with zero client changes; when off, fall back to a flat list and source playback.",
+      fields: {
+        albumRequired: {
+          label: "Require matching album",
+          help: "Grouping requires the album to match too (album distinguishes versions). When off, match by title + artist + duration only.",
+        },
+        durationTolerance: {
+          label: "Duration tolerance (seconds)",
+          help: "Maximum duration difference among group members (second-level; default 1, to avoid merging different versions).",
+        },
+      },
+    },
+  },
   documentation: `### 同曲多源组(服务端内置)
 同一首歌可能同时存在于本地 / WebDAV 曲库与插件平台(QQ 音乐 / 网易云等)。本插件按「规范化标题 + 歌手 + 专辑一致 + 时长差 ≤ 容差」把它们归为同曲多源组,并写入 \`songs.group_id\` / \`group_key\`。
 

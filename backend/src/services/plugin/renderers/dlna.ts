@@ -42,6 +42,14 @@ export const dlnaRendererManifest: PluginManifest = {
   capabilities: ["renderer"],
   defaultEnabled: true,
   configSchema: [],
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "DLNA Renderer",
+      description:
+        "Cast music via DLNA/UPnP to speakers, TVs and other playback devices on the LAN",
+    },
+  },
   documentation: `### 功能介绍
 通过 DLNA/UPnP 把音乐投屏到局域网内的音箱、电视、功放等播放设备（renderer 能力）。
 

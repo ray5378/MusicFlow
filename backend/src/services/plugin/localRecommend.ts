@@ -507,6 +507,48 @@ export const localRecommendManifest: PluginManifest = {
     { key: "homePosition", label: "首页显示位次", type: "number", default: 0, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
     ...SCHEDULE_FIELDS,
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Local Recommendation Engine",
+      description:
+        "Generate the 'Local Recommendation' playlist independently from the local library every day based on play history and favorites",
+      fields: {
+        sourcePlaylists: {
+          label: "Reference playlists",
+          help: "Draw songs from these playlists to generate 'Local Recommendation' (supports both local and platform-imported playlists, multi-select, searchable). Leave empty to recommend from the whole library by taste.",
+        },
+        count: {
+          label: "Song count",
+          help: "Number of songs in the generated playlist (1–500, default 50).",
+        },
+        excludeRecent: {
+          label: "Exclude recently played",
+          help: "Exclude songs played in the last 30 days from the candidates so each day's recommendation feels fresher.",
+        },
+        showOnHome: {
+          label: "Show on home",
+          help: "Whether to pin this plugin's generated playlist at the top of the home page (ordered by home position).",
+        },
+        homePosition: {
+          label: "Home display position",
+          help: "The position (1-based) of this plugin's fixed card at the home top. 0 = not pinned. Cannot duplicate another plugin's position; auto-validated on save.",
+        },
+        scheduleEnabled: {
+          label: "Participate in daily scheduled sync",
+          help: "When off, the scheduled daily sync skips this plugin (manual refresh still works).",
+        },
+        runOnBoot: {
+          label: "Run once on container startup",
+          help: "When on, MusicFlow runs this plugin's playlist once on every startup/restart to keep it fresh.",
+        },
+        batchParallel: {
+          label: "Allow parallel execution",
+          help: "Off (default): this plugin's scheduled/batch jobs always run serially in the global queue; On: allowed to run in parallel with other plugins that enable this switch (uses more CPU but is faster).",
+        },
+      },
+    },
+  },
   // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
   homePlaylistId: LOCAL_FIXED_PLAYLIST_ID,
   documentation: `### 功能介绍

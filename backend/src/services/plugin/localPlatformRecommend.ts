@@ -188,6 +188,48 @@ export const localPlatformRecommendManifest: PluginManifest = {
     },
   ],
     ...SCHEDULE_FIELDS,
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Local Random (by Platform)",
+      description:
+        "Pick imported playlists from the local library by platform for the home 'Local Random' section (grouped random, different content on each refresh)",
+      platformLabels: {
+        netease: "NetEase Cloud",
+        qq: "QQ Music",
+        kugou: "Kugou",
+        kuwo: "Kuwo",
+        migu: "Migu",
+        ximalaya: "Ximalaya",
+        bytedance: "Douyin",
+        youtube: "YouTube",
+        soundcloud: "SoundCloud",
+        local: "Local",
+      },
+      fields: {
+        homeCount: {
+          label: "Playlists per platform",
+          help: "Number of playlists shown per platform in the home 'Local Random' section (1–50, default 6). The same value applies to all platforms.",
+        },
+        sortOrder: {
+          label: "Home display order",
+          help: "Smaller values appear first (1–100, default 20). Affects the position of the 'Local Random (by Platform)' section in the home recommendations.",
+        },
+        scheduleEnabled: {
+          label: "Participate in daily scheduled sync",
+          help: "When off, the scheduled daily sync skips this plugin (manual refresh still works).",
+        },
+        runOnBoot: {
+          label: "Run once on container startup",
+          help: "When on, MusicFlow runs this plugin's playlist once on every startup/restart to keep it fresh.",
+        },
+        batchParallel: {
+          label: "Allow parallel execution",
+          help: "Off (default): this plugin's scheduled/batch jobs always run serially in the global queue; On: allowed to run in parallel with other plugins that enable this switch (uses more CPU but is faster).",
+        },
+      },
+    },
+  },
   documentation: `### 功能介绍
 从本地库按平台分组随机挑取已入库歌单,供首页「本地随机(按平台)」分区动态展示。解决 QQ/酷狗/酷我等平台上游精选固定不变的问题:这里不再依赖上游,每次刷新从本地库随机换歌单。
 

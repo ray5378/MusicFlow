@@ -173,6 +173,40 @@ export const dailyRoamManifest: PluginManifest = {
     { key: "homePosition", label: "首页显示位次", type: "number", default: 1, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
     ...SCHEDULE_FIELDS,
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Today's Roam",
+      description:
+        "Merge Daily Recommendation and Local Recommendation into the Today's Roam combined playlist (deduplicated)",
+      fields: {
+        sourcePlaylists: {
+          label: "Combination source playlists",
+          help: "Merge these playlists to build Today's Roam (default: Daily Recommendation + Local Recommendation, multi-select, searchable). At least 1 required.",
+        },
+        showOnHome: {
+          label: "Show on home",
+          help: "Whether to pin this plugin's generated playlist at the top of the home page (ordered by home position).",
+        },
+        homePosition: {
+          label: "Home display position",
+          help: "The position (1-based) of this plugin's fixed card at the home top. 0 = not pinned. Cannot duplicate another plugin's position; auto-validated on save.",
+        },
+        scheduleEnabled: {
+          label: "Participate in daily scheduled sync",
+          help: "When off, the scheduled daily sync skips this plugin (manual refresh still works).",
+        },
+        runOnBoot: {
+          label: "Run once on container startup",
+          help: "When on, MusicFlow runs this plugin's playlist once on every startup/restart to keep it fresh.",
+        },
+        batchParallel: {
+          label: "Allow parallel execution",
+          help: "Off (default): this plugin's scheduled/batch jobs always run serially in the global queue; On: allowed to run in parallel with other plugins that enable this switch (uses more CPU but is faster).",
+        },
+      },
+    },
+  },
   // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
   homePlaylistId: ROAM_PLAYLIST_ID,
   documentation: `### 功能介绍

@@ -77,6 +77,28 @@ export const artistInfoManifest: PluginManifest = {
   capabilities: ["artistInfo"],
   defaultEnabled: true,
   configSchema: [],
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Artist Info Scraper",
+      description:
+        "Scrape artist avatars and bios from QQ Music / NetEase Cloud Music (QQ first, NetEase fallback)",
+      fields: {
+        scheduleEnabled: {
+          label: "Participate in daily scheduled sync",
+          help: "When off, the scheduled daily sync skips this plugin (manual refresh still works).",
+        },
+        runOnBoot: {
+          label: "Run once on container startup",
+          help: "When on, MusicFlow runs this plugin's playlist once on every startup/restart to keep it fresh.",
+        },
+        batchParallel: {
+          label: "Allow parallel execution",
+          help: "Off (default): this plugin's scheduled/batch jobs always run serially in the global queue; On: allowed to run in parallel with other plugins that enable this switch (uses more CPU but is faster).",
+        },
+      },
+    },
+  },
   documentation: `## 功能介绍\n为曲库歌手补充头像与简介(「设置 → 歌手信息抓取」触发)。\n\n## 处理逻辑\n1. 核心按 \`artistInfo\` 能力遍历启用插件,调 \`fetchArtistInfo(歌手名)\`;\n2. 本插件先查 QQ 音乐(搜歌找 singer mid → CDN 头像),无结果再查网易云(搜索歌手 + 详情简介);\n3. 返回纯数据(\`name/platform/coverArtUrl/bio\`),封面下载与数据库持久化由核心完成;\n4. 两平台都无结果时返回 null,核心回退到本地专辑封面并标记「待补充」。`,
 };
 

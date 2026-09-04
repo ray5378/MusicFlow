@@ -701,6 +701,44 @@ export const dailyRecommendManifest: PluginManifest = {
     { key: "homePosition", label: "首页显示位次", type: "number", default: 0, help: "首页顶部固定展示的第几张(1 起)。0 = 未固定。与其它开了「在首页显示」的插件位次不能重复,保存时会自动校验。" },
   ],
     ...SCHEDULE_FIELDS,
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Daily Recommendation",
+      description:
+        "Generate the 'Daily Recommendation' playlist every day: platform chart candidates + user recommend-pool members (discover new music online)",
+      fields: {
+        candidates: {
+          label: "Recommendation charts",
+          help: "Which platform charts the daily recommendation fetches candidates from (one playlist URL per entry). Pre-filled with common charts; can be replaced / added / removed, at least 1 required.",
+        },
+        homeCount: {
+          label: "Home random playlist count",
+          help: "Total number of playlists shown in the home top \"Today's Roam + random playlists\" section (includes the fixed roam card, 1–24, default 8).",
+        },
+        showOnHome: {
+          label: "Show on home",
+          help: "Whether to pin this plugin's generated playlist at the top of the home page (ordered by home position).",
+        },
+        homePosition: {
+          label: "Home display position",
+          help: "The position (1-based) of this plugin's fixed card at the home top. 0 = not pinned. Cannot duplicate another plugin's position; auto-validated on save.",
+        },
+        scheduleEnabled: {
+          label: "Participate in daily scheduled sync",
+          help: "When off, the scheduled daily sync skips this plugin (manual refresh still works).",
+        },
+        runOnBoot: {
+          label: "Run once on container startup",
+          help: "When on, MusicFlow runs this plugin's playlist once on every startup/restart to keep it fresh.",
+        },
+        batchParallel: {
+          label: "Allow parallel execution",
+          help: "Off (default): this plugin's scheduled/batch jobs always run serially in the global queue; On: allowed to run in parallel with other plugins that enable this switch (uses more CPU but is faster).",
+        },
+      },
+    },
+  },
   // 每日推荐歌单标识:OpenSubsonic 等核心侧据此识别「每日推荐」(原直连 DAILY_TAG 常量,现已声明化)。
   dailyTag: "每日推荐",
   // 首页展示时对应的固定歌单(核心按此聚合首页固定卡,不写死歌单 id)。
