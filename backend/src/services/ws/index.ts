@@ -42,6 +42,11 @@ import {
   filterPeersByAccess,
 } from "../access.js";
 import {
+  getHiddenPeerIds,
+  getNameOverrides,
+  isPeerHidden,
+} from "../playerPrefs.js";
+import {
   randomSongsEvents,
   RANDOM_SONGS_CHANGED_EVENT,
 } from "../plugin/randomSongs.js";
@@ -120,6 +125,16 @@ function sendPeerSnapshot(ws: WebSocket): void {
   const user: WsUser | undefined = (ws as any).__user;
   let peers = getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) }));
   peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers);
+  // 与 /v1/peers 完全对齐:剪掉该用户隐藏的 peer,并套用其显示名覆盖。
+  const hidden = getHiddenPeerIds(user?.id ?? "");
+  if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
+  const nameOverrides = getNameOverrides(user?.id ?? "");
+  if (nameOverrides.size > 0) {
+    peers = peers.map((p) => {
+      const override = nameOverrides.get(p.peerId);
+      return override ? { ...p, name: override } : p;
+    });
+  }
   send(ws, { type: "peer_snapshot", peers });
 }
 
@@ -175,7 +190,9 @@ function subscribeAndForward(ws: WebSocket): () => void {
   // Peer events: forward registration/availability/queue changes so the Web
   // client's player switcher stays live without polling /v1/peers.
   // 权限:非 admin 只转发「自己的本机 peer + 被授权的设备/群组」事件(canControlPeer)。
-  const canSeePeer = (peerId?: string) => canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId || "");
+  const canSeePeer = (peerId?: string) =>
+    !isPeerHidden(user?.id ?? "", peerId || "")
+    && canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId || "");
   const onPeerRegistered = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_registered", peer }); };
   const onPeerAvailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_available", peer }); };
   const onPeerUnavailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_unavailable", peer }); };
