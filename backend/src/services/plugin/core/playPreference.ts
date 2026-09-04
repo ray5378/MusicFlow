@@ -29,6 +29,13 @@ export const playPreferenceManifest: PluginManifest = {
       name: "Play Preference (prefer Local)",
       description:
         "When streaming a multi-source song group, auto-select the local/WebDAV source (lossless first); fall back to the platform source when the local source is unavailable. Disable to stream from the original source.",
+      documentation: `### Play Preference (built-in)
+Playback strategy for multi-source song groups, with zero client changes:
+
+- **Prefer Local**: when a web song's group has a local/WebDAV core-library source, streaming automatically switches to the core-library source (local lossless first);
+- **Fallback to platform**: when the core-library source is unavailable (missing local file / WebDAV fetch failure, failure remembered for 5 minutes), automatically falls back to the group's platform (web) source so the song always plays;
+- Applies to both \`/rest/stream\` (client / media-panel streaming) and \`/v1/play\` (HA integration / cast / queue);
+- When off, streams from the original source (no preference, no fallback).`,
       fields: {
         preferLocal: {
           label: "Prefer Local",

@@ -513,6 +513,15 @@ export const localRecommendManifest: PluginManifest = {
       name: "Local Recommendation Engine",
       description:
         "Generate the 'Local Recommendation' playlist independently from the local library every day based on play history and favorites",
+      documentation: `### Features
+Generates the "Local Recommendation" playlist (fixed id: \`pl-daily-local\`) independently from your local library every day, based on play history and favorites — a taste recap of what you often listen to.
+
+### How it works
+1. The timer calls this plugin's \`runDailyJob()\` via the \`localPlaylist\` capability (daily, same time as the Daily Recommendation; configurable in system settings);
+2. Draws songs per config:
+   - With "reference playlists" configured (local / platform-imported playlists, multi-select): deterministically random-picks from their songs; the total count is controlled by "song count";
+   - Without reference playlists: scores artists / albums / genres from recent play history and favorites (\`play_history\` / \`user_favorite_songs\`), then draws weighted by taste;
+3. Writes the "Local Recommendation" playlist (replacing the previous day's version).`,
       fields: {
         sourcePlaylists: {
           label: "Reference playlists",

@@ -707,6 +707,16 @@ export const dailyRecommendManifest: PluginManifest = {
       name: "Daily Recommendation",
       description:
         "Generate the 'Daily Recommendation' playlist every day: platform chart candidates + user recommend-pool members (discover new music online)",
+      documentation: `### Features
+Generates the "Daily Recommendation" playlist (id: \`pl-daily-today\`) every day, focused on discovering new music online: platform chart candidates + members of the user's recommendation pool.
+
+### How it works
+1. The timer calls this plugin's \`runDailyJob()\` via the \`dailyPlaylist\` capability (default 03:00, configurable in system settings);
+2. Collects tracks: members of the \`recommend_pool\` table (added when you click "Add to daily recommendation pool" on a playlist or in "Liked Music") + platform chart candidates;
+3. Merges and deduplicates, then writes \`pl-daily-today\` (replacing the previous day's version).
+
+### Notes
+- **Scope**: local-library taste recommendations are generated independently by the \`local-recommend\` plugin ("Local Recommendation"); this playlist does not add local random picks, so the two playlists never overlap.`,
       fields: {
         candidates: {
           label: "Recommendation charts",

@@ -179,6 +179,16 @@ export const dailyRoamManifest: PluginManifest = {
       name: "Today's Roam",
       description:
         "Merge Daily Recommendation and Local Recommendation into the Today's Roam combined playlist (deduplicated)",
+      documentation: `### Features
+Merges other recommended playlists into the "Today's Roam" combined playlist (fixed id: \`pl-daily-roam\`) — the pinned card at the top of the home page.
+
+### How it works
+1. After the daily / local recommendations are generated, the scheduler calls this plugin's \`runDailyJob()\` via the \`comboPlaylist\` capability;
+2. Reads the configured "combination source playlists" (default: Daily Recommendation + Local Recommendation), merges all playable entries and deduplicates by song;
+3. Rebuilds "Today's Roam" (replacing the previous day's version).
+
+### Notes
+- **Configurable sources**: add/remove source playlists in the plugin settings (two fixed recommended playlists by default).`,
       fields: {
         sourcePlaylists: {
           label: "Combination source playlists",

@@ -36,6 +36,12 @@ export const songGroupManifest: PluginManifest = {
       name: "Same-Track Multi-Source Group",
       description:
         "Group the same song from the local/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff <= tolerance), sorted local > webdav > web within a group. When on, all clients auto-merge the group for display and play the preferred source with zero client changes; when off, fall back to a flat list and source playback.",
+      documentation: `### Same-Track Multi-Source Group (built-in)
+Groups the same song from the local/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff ≤ tolerance), sorted local > webdav > web within a group.
+
+- When on, all clients automatically merge the group for display and play the preferred source with zero client changes;
+- When off, falls back to a flat list and source playback;
+- Applies to \`/rest/stream\` (client / media-panel streaming), \`/v1/play\` (HA integration / cast / queue) and the song lists returned to clients.`,
       fields: {
         albumRequired: {
           label: "Require matching album",

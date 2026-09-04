@@ -345,6 +345,16 @@ export const randomSongsManifest: PluginManifest = {
       name: "Random Songs",
       description:
         "Pick random songs from the whole library and keep a live-updating 'Random Songs' playlist (for client random playback / frontend)",
+      documentation: `### Features
+Randomly picks songs from the whole library and maintains a live-updating "Random Songs" playlist (used by the client's random playback / frontend). Refreshes every \`refreshMinutes\`, and lazily rebuilds when read — content changes in real time. Both the client and the main frontend read this playlist / random-songs API directly, with no per-client random implementation.
+
+**The client's "Random Songs" also honors this plugin's filters**: when the client fetches random songs via Subsonic \`getRandomSongs\` without explicit params, the unset filter dimensions default to this plugin's \`Genre filter\` / \`From year\` / \`To year\` presets, so the client's random songs also stay within the preset range.
+
+### Filters (optional)
+Besides "song count", three filter dimensions can narrow the candidate set (applied both to playlist generation and client \`getRandomSongs\`):
+- \`Genre filter\`: only draws songs from that genre (partial match, can hit multiple tags, e.g. \`Pop\` / \`Chinese\`); empty = no genre limit. Note: a song's genre comes from its own \`genre\` field.
+- \`From year\` / \`To year\`: only draws songs whose year (from the owning album's \`year\`) falls in the range; empty = no bound on that side. From > To is swapped automatically on save.
+- Random picks are always drawn only from the library satisfying all set conditions.`,
       fields: {
         count: {
           label: "Song count",

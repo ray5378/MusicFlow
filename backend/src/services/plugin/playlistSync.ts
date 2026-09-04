@@ -410,6 +410,14 @@ export const playlistSyncManifest: PluginManifest = {
       name: "Playlist Auto-Sync",
       description:
         "Periodically re-fetch imported playlists with sync enabled, rebuild entries against the library and auto-match online sources",
+      documentation: `### Features
+Periodically re-fetches imported playlists with "sync" enabled (QQ / NetEase etc.), rebuilds entries against the current library, and auto-matches playable online sources.
+
+### How it works
+1. Maintains a timer that calls \`runSyncJob()\` via the \`playlistSync\` capability (period per system settings);
+2. Iterates all playlists with a \`sourceUrl\` and sync enabled, and uses \`findUrlImporter(url)\` to find which importer plugin owns the link;
+3. Hands it to the matching importer to fetch the latest tracks and rebuild local entries (preserving liked / matched songs as much as possible);
+4. Playlists whose source is dead or not claimed by any importer are skipped, without interrupting the whole round.`,
       fields: {
         scheduleEnabled: {
           label: "Participate in daily scheduled sync",

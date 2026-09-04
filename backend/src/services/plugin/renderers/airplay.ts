@@ -36,6 +36,16 @@ export const airplayRendererManifest: PluginManifest = {
       name: "AirPlay Renderer",
       description:
         "Cast music via the AirPlay (RAOP) protocol to AirPlay speakers, TVs and other devices on the LAN",
+      documentation: `### Features
+Casts music via the AirPlay (RAOP) protocol to AirPlay speakers, TVs and other devices on the LAN.
+
+### How it works
+1. When enabled, starts AirPlay discovery / service (mDNS) so Apple-compatible devices can find MusicFlow as an AirPlay sender;
+2. Cast requests (from the client / HA integration / queue) are forwarded to the selected AirPlay device for playback;
+3. Playback state is synced back to the server.
+
+### Notes
+- **Disabled by default**: not everyone needs AirPlay (the mDNS listener costs CPU/memory). Enable it in the plugin page; discovery runs only while enabled — zero resident resources when off.`,
     },
   },
   documentation: `### 功能介绍

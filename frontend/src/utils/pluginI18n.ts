@@ -19,6 +19,8 @@ export interface ResolvedPluginText {
   /** 单语字典里的 name/description/platformLabels,未覆盖则为 undefined(用默认)。 */
   name?: string;
   description?: string;
+  /** 详情弹窗 documentation(Markdown),未覆盖则为 undefined(用默认)。 */
+  documentation?: string;
   platformLabels?: Record<string, string>;
   /** 配置分组 key → 标题(未被字典覆盖时前端回退核心分组翻译/分组名)。 */
   groupLabels: Record<string, string>;
@@ -39,6 +41,7 @@ export function resolvePluginI18n(manifest: any): ResolvedPluginText {
   return {
     name: text.name,
     description: text.description,
+    documentation: text.documentation,
     platformLabels: text.platformLabels,
     groupLabels: text.groups || {},
     fieldText: (key) => fields[key] || {},
@@ -67,4 +70,9 @@ export function localName(m: any, fallback: string): string {
 /** 便捷取用:取插件本地化简介(未覆盖回退默认)。 */
 export function localDesc(m: any, fallback: string): string {
   return resolvePluginI18n(m).description ?? fallback;
+}
+
+/** 便捷取用:取插件本地化 documentation(详情弹窗 Markdown,未覆盖回退默认)。 */
+export function localDoc(m: any, fallback: string): string {
+  return resolvePluginI18n(m).documentation ?? fallback;
 }

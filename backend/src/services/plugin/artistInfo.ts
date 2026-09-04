@@ -83,6 +83,14 @@ export const artistInfoManifest: PluginManifest = {
       name: "Artist Info Scraper",
       description:
         "Scrape artist avatars and bios from QQ Music / NetEase Cloud Music (QQ first, NetEase fallback)",
+      documentation: `## Features
+Enriches artists in your library with avatar and bio (triggered from Settings → Fetch Artist Info).
+
+## How it works
+1. The core walks enabled plugins with the \`artistInfo\` capability and calls \`fetchArtistInfo(artist name)\`;
+2. This plugin first queries QQ Music (search songs to find the singer mid → CDN avatar), then falls back to NetEase Cloud (artist search + detail bio);
+3. Returns pure data (\`name/platform/coverArtUrl/bio\`); cover download and database persistence are handled by the core;
+4. Returns null when both platforms have no result; the core then falls back to the local album cover and marks the artist as "pending".`,
       fields: {
         scheduleEnabled: {
           label: "Participate in daily scheduled sync",

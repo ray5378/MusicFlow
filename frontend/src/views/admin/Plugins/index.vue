@@ -181,7 +181,7 @@
                   <div class="pc-row">
                     <div class="pc-id">
                       <div class="plugin-name">
-                        {{ row.name }}
+                        {{ displayName(row) }}
                         <el-tag v-if="row.builtin" size="small" type="warning" effect="light">{{ t('admin.plugins.builtin') }}</el-tag>
                       </div>
                       <div class="plugin-id">{{ row.id }}</div>
@@ -191,7 +191,7 @@
                   <div class="cap-row">
                     <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
                   </div>
-                  <div class="pc-desc m-sub">{{ row.description }}</div>
+                  <div class="pc-desc m-sub">{{ displayDesc(row) || "—" }}</div>
                   <div class="pc-meta">
                     <span class="pc-ver">v{{ row.version }}</span>
                     <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
@@ -552,7 +552,7 @@ import EmptyState from "@/components/EmptyState.vue";
 import api, { formatApiError } from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { parseManifest, parseConfig } from "@/utils/plugin";
-import { resolveField, localName, localDesc, resolvePluginI18n } from "@/utils/pluginI18n";
+import { resolveField, localName, localDesc, localDoc, resolvePluginI18n } from "@/utils/pluginI18n";
 
 const { t } = useI18n();
 const activeTab = ref<"installed" | "market" | "media">("installed");
@@ -829,9 +829,9 @@ function hasConfig(plugin: any): boolean {
   return (parseManifest(plugin).configSchema || []).length > 0;
 }
 
-// 详情弹窗:处理逻辑(markdown)与配置可保存性
+// 详情弹窗:处理逻辑(markdown)与配置可保存性(文档按插件 i18n 字典本地化,缺省回退默认)
 const docMarkdown = computed(() => {
-  const md = parseManifest(editing.value).documentation;
+  const md = localDoc(parseManifest(editing.value), parseManifest(editing.value).documentation || "");
   return md ? renderMarkdown(md) : "";
 });
 const canSaveConfig = computed(() => !!editing.value && editing.value.installed !== false);
@@ -1021,7 +1021,7 @@ const TYPE_HINTS: Record<string, string> = {
 function pluginHint(plugin: any): string {
   const m = parseManifest(plugin);
   const extra = hasConfig(plugin) ? "" : t('admin.plugins.noConfigHint');
-  return [m.description, TYPE_HINTS[m.type], extra].filter(Boolean).join(" ");
+  return [localDesc(m, m.description || ""), TYPE_HINTS[m.type], extra].filter(Boolean).join(" ");
 }
 
 function providerId(plugin: any): string {

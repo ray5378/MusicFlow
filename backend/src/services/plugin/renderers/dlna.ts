@@ -48,6 +48,17 @@ export const dlnaRendererManifest: PluginManifest = {
       name: "DLNA Renderer",
       description:
         "Cast music via DLNA/UPnP to speakers, TVs and other playback devices on the LAN",
+      documentation: `### Features
+Casts music via DLNA/UPnP to speakers, TVs and other playback devices on the LAN.
+
+### How it works
+1. Enables the DLNA media server / renderer endpoints (\`/dlna\` etc.) so DLNA devices can discover MusicFlow as a renderer;
+2. Cast requests (from the client / HA integration / queue) are forwarded to the selected DLNA device for playback;
+3. Playback state (playing / paused / position / volume) is synced back to the server.
+
+### Notes
+- No configuration needed (empty \`configSchema\`), enabled by default;
+- Devices appear in the client's cast list once they respond on the LAN.`,
     },
   },
   documentation: `### 功能介绍

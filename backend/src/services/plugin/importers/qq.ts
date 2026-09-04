@@ -112,6 +112,19 @@ export const qqImporterManifest: PluginManifest = {
       name: "QQ Music Playlist Importer",
       description:
         "Parse QQ Music playlist / official chart share links and import the track list",
+      documentation: `### Features
+Parses QQ Music playlist / official chart share links and imports the track list (song name, artist, album, duration) into MusicFlow as a local playlist.
+
+### How it works
+1. On an import request, the core walks enabled plugins by the \`playlistImport\` capability, calling \`canHandle(url)\` on each to claim the link;
+2. This plugin claims QQ-related links via domain regex (y.qq.com / *.qq.com/playlist etc.);
+3. Extracts the playlist id (\`disstid\`) or chart id (\`topid\`) from the link, then calls \`fetchQQPlaylist\` / \`fetchQQToplist\` against QQ APIs;
+4. Converts the returned playlist info and track array into a uniform \`ImportedPlaylistShape\` for the core to build the playlist and write into the library.
+
+### Notes
+- No configuration needed (empty \`configSchema\`), enabled by default;
+- Links not claimed by this plugin (non-QQ domains) are skipped automatically and other importer plugins keep trying;
+- Imported playlists can enable "auto-sync", updated periodically by the \`playlist-sync\` plugin.`,
       fields: {
         scheduleEnabled: {
           label: "Participate in daily scheduled sync",

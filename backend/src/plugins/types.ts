@@ -90,6 +90,8 @@ export interface PluginConfigFieldI18n {
 export interface PluginI18nText {
   name?: string;
   description?: string;
+  /** 英文/多语 documentation(详情弹窗「处理逻辑」Markdown);缺省时回退 manifest.documentation。 */
+  documentation?: string;
   platformLabels?: Record<string, string>;
   /** 配置分组 key → 标题(优先级高于核心内置分组文案;缺词时回退核心翻译/分组名)。 */
   groups?: Record<string, string>;

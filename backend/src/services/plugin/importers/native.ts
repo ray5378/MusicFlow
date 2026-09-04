@@ -68,6 +68,17 @@ export const nativeImporterManifest: PluginManifest = {
       name: "MusicFlow Playlist File Importer",
       description:
         "Import MusicFlow-exported playlist JSON files (supports single playlists and full exports)",
+      documentation: `### Features
+Imports MusicFlow-exported playlist JSON files (supports single playlists and full exports).
+
+### How it works
+1. On an import request, the core walks enabled plugins by the \`playlistFile\` capability, calling \`canHandle(file)\` on each to claim the file;
+2. This plugin claims MusicFlow-exported \`musicflow-playlist.json\` / \`musicflow-export.json\` files by filename and JSON structure;
+3. Parses the JSON into a uniform \`ImportedPlaylistShape\` (one or many playlists) for the core to build the playlists and write into the library.
+
+### Notes
+- No configuration needed (empty \`configSchema\`), enabled by default;
+- Files not claimed by this plugin are skipped automatically and other importer plugins keep trying.`,
       fields: {
         scheduleEnabled: {
           label: "Participate in daily scheduled sync",

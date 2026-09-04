@@ -194,6 +194,17 @@ export const localPlatformRecommendManifest: PluginManifest = {
       name: "Local Random (by Platform)",
       description:
         "Pick imported playlists from the local library by platform for the home 'Local Random' section (grouped random, different content on each refresh)",
+      documentation: `### Features
+Randomly picks imported playlists from the local library, grouped by platform, for the home "Local Random (by Platform)" section. Solves the problem of fixed, stale upstream picks from QQ/Kugou/Kuwo etc.: no longer depends on upstream — every refresh randomly swaps playlists from the local library.
+
+### How it works
+1. Queries playlists whose \`source_platform\` is not empty in the playlists table (from platform search / shared-link import / daily recommendation sync);
+2. Groups by platform, shuffles each group randomly and takes the top \`homeCount\` (default 6, configurable);
+3. Every call reshuffles → the home page shows different content on each refresh;
+4. The core forwards via \`GET /v1/local-recommend\` using the \`localPlatformRecommend\` capability; all three clients (Web/client/HA) consume it uniformly.
+
+### Notes
+- Platform names shown in the UI come from the plugin's \`platformLabels\` mapping.`,
       platformLabels: {
         netease: "NetEase Cloud",
         qq: "QQ Music",
