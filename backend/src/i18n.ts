@@ -223,7 +223,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.scraper.busy": "A scrape is already in progress",
     "errors.scraper.failed": "Scrape failed",
 
-    "errors.artist.notFound": "No artist info found (no result from QQ or NetEase)",
+    "errors.artist.notFound": "No artist info found (no result from any online source)",
     "errors.artist.nameRequired": "Artist name required",
 
     "errors.plugin.notFound": "Plugin not found",

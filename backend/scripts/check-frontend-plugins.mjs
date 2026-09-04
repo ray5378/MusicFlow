@@ -117,7 +117,10 @@ if (dlgStart === -1) {
     crit(!leak, "规则2:插件详情弹窗未嵌入核心全局功能(媒体获取等)");
 
     // 正向保障:弹窗确实渲染插件声明内容(configSchema / documentation)。
-    const hasManifest = /\bconfigFields\b/.test(dlg) && /parseManifest/.test(dlg);
+    // configFields 是由 parseManifest(editing).configSchema 派生的计算属性,
+    // 弹窗模板渲染 configFields,parseManifest 在组件脚本里驱动它——二者共同保证弹窗由插件声明驱动。
+    const hasManifest =
+      /\bconfigFields\b/.test(dlg) && /parseManifest/.test(src);
     crit(hasManifest, "规则2b:插件弹窗渲染 manifest 声明内容(configSchema / documentation)");
   }
 }
