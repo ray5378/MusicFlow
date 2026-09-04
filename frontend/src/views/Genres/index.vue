@@ -1,11 +1,11 @@
 <template>
   <div class="genres-page">
     <div class="page-header">
-      <h2>风格</h2>
+      <h2>{{ t('genres.title') }}</h2>
       <div class="header-actions" v-if="currentGenre">
-        <el-button type="primary" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />播放全部</el-button>
-        <el-button :disabled="selectedSongs.length === 0" @click="openAddToPlaylistDialog"><MfIcon name="Plus" />添加到歌单({{ selectedSongs.length }})</el-button>
-        <el-button @click="clearGenre"><MfIcon name="X" />返回</el-button>
+        <el-button type="primary" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />{{ t('genres.playAll') }}</el-button>
+        <el-button :disabled="selectedSongs.length === 0" @click="openAddToPlaylistDialog"><MfIcon name="Plus" />{{ t('genres.addToPlaylist', { count: selectedSongs.length }) }}</el-button>
+        <el-button @click="clearGenre"><MfIcon name="X" />{{ t('genres.back') }}</el-button>
       </div>
     </div>
 
@@ -19,9 +19,9 @@
         @click="selectGenre(g)"
       >
         <span class="genre-name">{{ g.name }}</span>
-        <span class="genre-count">{{ g.songCount }}首</span>
+        <span class="genre-count">{{ t('genres.songsCount', { count: g.songCount }) }}</span>
       </div>
-      <div v-if="genres.length === 0 && !genresLoading" class="genre-empty">暂无风格标签(刮削歌曲时会根据标签自动分类)</div>
+      <div v-if="genres.length === 0 && !genresLoading" class="genre-empty">{{ t('genres.empty') }}</div>
     </div>
 
     <!-- Songs of selected genre -->
@@ -40,22 +40,22 @@
     </template>
 
     <!-- Add to playlist dialog -->
-    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px" :append-to-body="true">
-      <div class="playlist-dialog-song">将选中的 {{ selectedSongs.length }} 首歌曲添加到：</div>
+    <el-dialog v-model="showPlaylistDialog" :title="t('genres.addToPlaylistTitle')" width="420px" :append-to-body="true">
+      <div class="playlist-dialog-song">{{ t('genres.addToPlaylistHint', { count: selectedSongs.length }) }}</div>
       <div class="playlist-list" v-loading="playlistsLoading">
         <div v-for="pl in playlists" :key="pl.id" class="playlist-item" :class="{ active: addingPlaylistId === pl.id }" @click="addToPlaylist(pl)">
           <MfIcon name="List" class="pl-icon"  />
           <div class="pl-info">
             <div class="pl-name">{{ pl.name }}</div>
-            <div class="pl-meta">{{ pl.songCount }}首</div>
+            <div class="pl-meta">{{ t('genres.songsCount', { count: pl.songCount }) }}</div>
           </div>
           <MfIcon name="Loader2" v-if="addingPlaylistId === pl.id" class="is-loading"  spin />
         </div>
-        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">暂无歌单,先创建一个吧</div>
+        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">{{ t('genres.noPlaylists') }}</div>
       </div>
       <div class="create-playlist-row">
-        <el-input v-model="newPlaylistName" placeholder="新建歌单名称..." clearable @keyup.enter="createAndAdd" />
-        <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">新建并添加</el-button>
+        <el-input v-model="newPlaylistName" :placeholder="t('genres.newPlaylistPlaceholder')" clearable @keyup.enter="createAndAdd" />
+        <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">{{ t('genres.createAndAdd') }}</el-button>
       </div>
     </el-dialog>
   </div>
@@ -63,6 +63,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { usePlayerStore, Song } from "@/stores/player";
 import { ElMessage } from "element-plus";
 import api from "@/api";
@@ -70,6 +71,7 @@ import PagePagination from "@/components/PagePagination.vue";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
 const playerStore = usePlayerStore();
+const { t } = useI18n();
 const genres = ref<any[]>([]);
 const genresLoading = ref(false);
 const currentGenre = ref("");
@@ -151,10 +153,10 @@ async function addToPlaylist(pl: any) {
     for (const s of selectedSongs.value) {
       await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: s.id });
     }
-    ElMessage.success(`已添加 ${selectedSongs.value.length} 首到「${pl.name}」`);
+    ElMessage.success(t("genres.added", { count: selectedSongs.value.length, name: pl.name }));
     showPlaylistDialog.value = false;
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "添加失败");
+    ElMessage.error(e.response?.data?.error || t("genres.addFailed"));
   } finally {
     addingPlaylistId.value = "";
   }
@@ -172,10 +174,10 @@ async function createAndAdd() {
         await api.post("/rest/updatePlaylist", { playlistId: plId, songIdToAdd: s.id });
       }
     }
-    ElMessage.success(`已创建并添加 ${selectedSongs.value.length} 首`);
+    ElMessage.success(t("genres.createdAndAdded", { count: selectedSongs.value.length }));
     showPlaylistDialog.value = false;
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "创建失败");
+    ElMessage.error(e.response?.data?.error || t("genres.createFailed"));
   } finally {
     addingPlaylistId.value = "";
   }

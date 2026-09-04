@@ -78,6 +78,32 @@ export interface ConfigField {
   group?: string;
 }
 
+/** 插件配置字段的单语 i18n 文案(按字段 key 覆盖 manifest 默认文案)。 */
+export interface PluginConfigFieldI18n {
+  label?: string;
+  help?: string;
+  /** 选项文案:option value → 本地化 label。缺词时保留 manifest 默认。 */
+  options?: Record<string, string>;
+}
+
+/** 插件单语 i18n 文案。 */
+export interface PluginI18nText {
+  name?: string;
+  description?: string;
+  platformLabels?: Record<string, string>;
+  /** 配置分组 key → 标题(优先级高于核心内置分组文案;缺词时回退核心翻译/分组名)。 */
+  groups?: Record<string, string>;
+  /** 配置项 key → 文案。 */
+  fields?: Record<string, PluginConfigFieldI18n>;
+}
+
+/** 插件 manifest 内联 i18n 字典(zh / en)。缺词(未声明语言或未声明某 key)自动回退
+ *  manifest 默认文案;默认文案即为中文,故 zh 字典可省略、只补 en 即可。 */
+export interface PluginI18n {
+  zh?: PluginI18nText;
+  en?: PluginI18nText;
+}
+
 export interface PluginManifest {
   id: string; // unique, e.g. "go-music-dl"
   name: string; // display name
@@ -132,6 +158,10 @@ export interface PluginManifest {
   urlPatterns?: string[];
   /** Drives the admin config form (no more hardcoded baseUrl/sources fields). */
   configSchema: ConfigField[];
+  /** 插件侧 i18n 字典(zh/en):覆盖 name/description/platformLabels/groups 与
+   *  configSchema 各字段的 label/help/options 文案。缺词回退默认(中文)文案。
+   *  内置与 plugin.json 外置插件皆可声明;前端在渲染配置表单前按当前语言取用。 */
+  i18n?: PluginI18n;
   /** 插件自身声明的定时任务能力(由插件 manifest / plugin.json 声明,宿主尊重)。
    *
    *  取值:

@@ -1,4 +1,5 @@
 import { ElMessage } from "element-plus";
+import { gt } from "@/locales";
 
 /**
  * 复制文本到剪贴板。
@@ -7,9 +8,9 @@ import { ElMessage } from "element-plus";
  * 保证 Home Assistant 这类跑在内网 http 上的常驻客户端也能正常复制。
  * 失败时提示手动复制而不是直接静默失败。
  */
-export async function copyText(text: string, successMsg = "已复制到剪贴板"): Promise<boolean> {
+export async function copyText(text: string, successMsg = gt("clipboard.copied")): Promise<boolean> {
   if (text == null || text === "") {
-    ElMessage.warning("没有可复制的内容");
+    ElMessage.warning(gt("clipboard.empty"));
     return false;
   }
 
@@ -45,7 +46,7 @@ export async function copyText(text: string, successMsg = "已复制到剪贴板
     }
     throw new Error("execCommand returned false");
   } catch {
-    ElMessage.warning("自动复制失败，请手动选中文本后复制");
+    ElMessage.warning(gt("clipboard.fallbackFailed"));
     return false;
   }
 }

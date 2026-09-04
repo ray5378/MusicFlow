@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import router from "@/router";
 import { Play, Plus, ListMusic, Star, Info, User, Folder, Trash2 } from "lucide-vue-next";
+import { gt } from "@/locales";
 
 export interface MenuAction {
   label?: string;
@@ -160,10 +161,10 @@ async function addToPlaylist(pl: any) {
   addDlg.addingId = pl.id;
   try {
     await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: addDlg.songs.map((s) => s.id) });
-    ElMessage.success(`已添加 ${addDlg.songs.length} 首到「${pl.name}」`);
+    ElMessage.success(gt("genres.added", { count: addDlg.songs.length, name: pl.name }));
     closeAddDlg();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "添加失败");
+    ElMessage.error(e?.response?.data?.error || gt("genres.addFailed"));
   } finally {
     addDlg.addingId = "";
   }
@@ -173,10 +174,10 @@ async function createAndAdd() {
   addDlg.addingId = "new";
   try {
     await api.post("/rest/createPlaylist", { name: addDlg.newName, songIds: addDlg.songs.map((s) => s.id) });
-    ElMessage.success(`已创建并添加 ${addDlg.songs.length} 首「${addDlg.newName}」`);
+    ElMessage.success(gt("actions.createdAndAdded", { count: addDlg.songs.length, name: addDlg.newName }));
     closeAddDlg();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "创建失败");
+    ElMessage.error(e?.response?.data?.error || gt("genres.createFailed"));
   } finally {
     addDlg.addingId = "";
   }
@@ -187,65 +188,65 @@ function songActions(song: any): MenuAction[] {
   const matched = song.isMatched !== false; // 库内歌曲没有该字段，默认可播放
   const acts: MenuAction[] = [
     {
-      label: "播放", icon: Play, disabled: !matched, onClick: () => player.playSong(song),
+      label: gt("layout.play"), icon: Play, disabled: !matched, onClick: () => player.playSong(song),
     },
     {
-      label: "添加到播放队列", icon: ListMusic, disabled: !matched, onClick: () => {
+      label: gt("actions.addToQueue"), icon: ListMusic, disabled: !matched, onClick: () => {
         player.addToQueue(song);
-        ElMessage.success("已加入播放队列");
+        ElMessage.success(gt("actions.addedToQueue"));
       },
     },
     {
-      label: "添加到歌单", icon: Plus, onClick: () => openAddToPlaylist(song),
+      label: gt("layout.addToPlaylist"), icon: Plus, onClick: () => openAddToPlaylist(song),
     },
     { divider: true },
     {
-      label: fav.isFavorite(song.id) ? "从我喜欢的音乐移除" : "添加到我喜欢的音乐",
+      label: fav.isFavorite(song.id) ? gt("actions.removeFromFav") : gt("actions.addToFav"),
       icon: Star,
       onClick: async () => {
         try {
           const on = await fav.toggleFavorite(song.id);
-          ElMessage.success(on ? "已添加到我喜欢的音乐" : "已从我喜欢的音乐移除");
+          ElMessage.success(on ? gt("layout.favAdded") : gt("layout.favRemoved"));
         } catch {
-          ElMessage.error("操作失败");
+          ElMessage.error(gt("common.operationFailed"));
         }
       },
     },
     {
-      label: "歌曲信息", icon: Info, onClick: () => openSongInfo(song),
+      label: gt("actions.songInfo"), icon: Info, onClick: () => openSongInfo(song),
     },
   ];
   // 库内 web 歌曲(插件匹配入库)支持从音乐库删除:级联清歌单条目/收藏/历史。
   // 远程搜索结果行(未入库,isWeb 为空)不显示;本地歌曲删除会随媒体源重扫恢复,也不在此入口。
   if (song.isWeb) {
     acts.push({
-      label: "从音乐库删除", icon: Trash2, danger: true,
+      label: gt("music.deleteFromLibrary"), icon: Trash2, danger: true,
       onClick: async () => {
         try {
           await ElMessageBox.confirm(
-            `确定从音乐库删除「${song.title}」？\n该歌曲来自插件匹配,删除后需重新搜索匹配才会恢复。`,
-            "从音乐库删除",
-            { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", confirmButtonClass: "el-button--danger" },
+            gt("actions.deleteConfirmBody", { title: song.title }),
+            gt("music.deleteFromLibrary"),
+            { type: "warning", confirmButtonText: gt("common.delete"), cancelButtonText: gt("common.cancel"), confirmButtonClass: "el-button--danger" },
           );
         } catch { return; }
         try {
           await api.delete(`/rest/api/v1/songs/${song.id}`);
-          ElMessage.success("已从音乐库删除");
+          ElMessage.success(gt("actions.deletedFromLibrary"));
           window.dispatchEvent(new CustomEvent("mf:song-deleted", { detail: { songId: song.id } }));
         } catch (e: any) {
-          ElMessage.error(e?.response?.data?.error || "删除失败");
+          ElMessage.error(e?.response?.data?.error || gt("common.deleteFailed"));
         }
       },
     });
   }
   if (song.artistId) {
     acts.push({
-      label: "查看艺人", icon: User, onClick: () => router.push(`/artists/${song.artistId}`),
+      label: gt("actions.viewArtist"), icon: User, onClick: () => router.push(`/artists/${song.artistId}`),
     });
   }
   if (song.albumId) {
     acts.push({
-      label: "查看专辑", icon: Folder, onClick: () => router.push(`/albums/${song.albumId}`),
+      label: gt("actions.viewAlbum"), icon: Folder, onClick: () => router.push(`/albums/${song.albumId}`),
     });
   }
   return acts;
@@ -254,57 +255,57 @@ function songActions(song: any): MenuAction[] {
 function playlistActions(pl: any): MenuAction[] {
   return [
     {
-      label: "播放", icon: Play, onClick: async () => {
+      label: gt("layout.play"), icon: Play, onClick: async () => {
         const n = await play.playPlaylist(pl.id);
-        if (n) ElMessage.success(`正在播放「${pl.name}」`);
-        else ElMessage.warning("该歌单暂无可播放歌曲");
+        if (n) ElMessage.success(gt("playlists.playing", { name: pl.name }));
+        else ElMessage.warning(gt("playlists.noPlayable"));
       },
     },
     {
-      label: "添加到播放队列", icon: ListMusic, onClick: async () => {
+      label: gt("actions.addToQueue"), icon: ListMusic, onClick: async () => {
         const songs = await play.fetchPlaylistSongs(pl.id);
         songs.forEach((s: any) => player.addToQueue(s));
-        if (songs.length) ElMessage.success(`已加入队列（${songs.length} 首）`);
+        if (songs.length) ElMessage.success(gt("actions.addedToQueueCount", { count: songs.length }));
       },
     },
     { divider: true },
-    { label: "查看歌单", icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
+    { label: gt("playlists.viewPlaylist"), icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
   ];
 }
 
 function albumActions(al: any): MenuAction[] {
   const acts: MenuAction[] = [
     {
-      label: "播放", icon: Play, onClick: async () => {
+      label: gt("layout.play"), icon: Play, onClick: async () => {
         const n = await play.playAlbum(al.id);
-        if (n) ElMessage.success(`正在播放「${al.name}」`);
-        else ElMessage.warning("该专辑暂无可播放歌曲");
+        if (n) ElMessage.success(gt("albums.playing", { name: al.name }));
+        else ElMessage.warning(gt("albums.noPlayable"));
       },
     },
     {
-      label: "添加到播放队列", icon: ListMusic, onClick: async () => {
+      label: gt("actions.addToQueue"), icon: ListMusic, onClick: async () => {
         const songs = await play.fetchAlbumSongs(al.id);
         songs.forEach((s: any) => player.addToQueue(s));
-        if (songs.length) ElMessage.success(`已加入队列（${songs.length} 首）`);
+        if (songs.length) ElMessage.success(gt("actions.addedToQueueCount", { count: songs.length }));
       },
     },
     { divider: true },
     {
-      label: fav.isAlbumFavorite(al.id) ? "取消收藏专辑" : "收藏专辑",
+      label: fav.isAlbumFavorite(al.id) ? gt("albums.unfavorite") : gt("albums.favorite"),
       icon: Star,
       onClick: async () => {
         try {
           const on = await fav.toggleAlbumFavorite(al.id);
-          ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+          ElMessage.success(on ? gt("albums.favorited") : gt("albums.unfavorited"));
         } catch {
-          ElMessage.error("操作失败");
+          ElMessage.error(gt("common.operationFailed"));
         }
       },
     },
-    { label: "查看专辑", icon: Folder, onClick: () => router.push(`/albums/${al.id}`) },
+    { label: gt("actions.viewAlbum"), icon: Folder, onClick: () => router.push(`/albums/${al.id}`) },
   ];
   if (al.artistId) {
-    acts.push({ label: "查看艺人", icon: User, onClick: () => router.push(`/artists/${al.artistId}`) });
+    acts.push({ label: gt("actions.viewArtist"), icon: User, onClick: () => router.push(`/artists/${al.artistId}`) });
   }
   return acts;
 }
@@ -312,25 +313,25 @@ function albumActions(al: any): MenuAction[] {
 function artistActions(ar: any): MenuAction[] {
   return [
     {
-      label: "播放全部歌曲", icon: Play, onClick: async () => {
+      label: gt("artists.playAllSongs"), icon: Play, onClick: async () => {
         const n = await play.playArtist(ar.id);
-        if (n) ElMessage.success(`正在播放「${ar.name}」`);
-        else ElMessage.warning("该艺人暂无可播放歌曲");
+        if (n) ElMessage.success(gt("playlists.playing", { name: ar.name }));
+        else ElMessage.warning(gt("artists.noPlayable"));
       },
     },
     { divider: true },
     {
-      label: fav.isArtistFavorite(ar.id) ? "取消收藏艺人" : "收藏艺人",
+      label: fav.isArtistFavorite(ar.id) ? gt("artists.unfavorite") : gt("artists.favorite"),
       icon: Star,
       onClick: async () => {
         try {
           const on = await fav.toggleArtistFavorite(ar.id);
-          ElMessage.success(on ? "已收藏艺人" : "已取消收藏艺人");
+          ElMessage.success(on ? gt("artists.favorited") : gt("artists.unfavorited"));
         } catch {
-          ElMessage.error("操作失败");
+          ElMessage.error(gt("common.operationFailed"));
         }
       },
     },
-    { label: "查看艺人", icon: User, onClick: () => router.push(`/artists/${ar.id}`) },
+    { label: gt("actions.viewArtist"), icon: User, onClick: () => router.push(`/artists/${ar.id}`) },
   ];
 }

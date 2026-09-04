@@ -1,9 +1,9 @@
 <template>
   <div class="albums-page">
     <div class="page-header">
-      <h2>专辑<span class="song-count">{{ total }} 张</span></h2>
+      <h2>{{ t('albums.title') }}<span class="song-count">{{ t('albums.count', { count: total }) }}</span></h2>
       <div class="header-actions">
-        <span class="search-label">搜索</span>
+        <span class="search-label">{{ t('albums.search') }}</span>
         <el-dropdown trigger="click" @command="onSearchSourceCommand">
           <el-button>
             {{ currentSourceLabel }}
@@ -11,8 +11,8 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="aggregate">聚合</el-dropdown-item>
-              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item command="aggregate">{{ t('albums.aggregate') }}</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">{{ t('albums.local') }}</el-dropdown-item>
               <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -32,11 +32,11 @@
         <div class="album-cover mf-coverwrap" @click="open(g.item)">
           <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48"  /></div>
-          <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playAl(g.item)" />
+          <CoverPlay size="md" :label="t('albums.play', { name: g.item.name })" :action="() => playAl(g.item)" />
           <button
             class="card-fav-btn"
             :class="{ active: fav.isAlbumFavorite(g.item.id) }"
-            :title="fav.isAlbumFavorite(g.item.id) ? '取消收藏专辑' : '收藏专辑'"
+            :title="fav.isAlbumFavorite(g.item.id) ? t('albums.unfavorite') : t('albums.favorite')"
             @click.stop="toggleAlbumFav(g.item)"
           >
             <MfIcon name="Heart" :filled="fav.isAlbumFavorite(g.item.id)" :size="16" />
@@ -45,7 +45,7 @@
         <div class="album-info" @click="open(g.item)">
           <div class="album-name">{{ g.item.name }}</div>
           <div class="album-artist">{{ g.item.artist }}</div>
-          <div class="album-meta">{{ g.item.year || '' }} {{ g.item.songCount }}首</div>
+          <div class="album-meta">{{ g.item.year || '' }} {{ t('albums.songCount', { count: g.item.songCount }) }}</div>
         </div>
       </div>
       <div v-else class="album-card is-placeholder" :style="cardStyle(g.idx)">
@@ -59,12 +59,12 @@
     <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">
       <div v-if="aggregateItems.length === 0 && !aggregateSearching" class="remote-empty">
         <MfIcon name="Disc3" :size="40" />
-        <p>{{ searchQuery.trim() ? "没有找到相关全网专辑" : "输入关键词,同时搜索本地库与已启用插件的全网专辑" }}</p>
+        <p>{{ searchQuery.trim() ? t('albums.aggNoResult') : t('albums.aggHint') }}</p>
       </div>
       <template v-else>
         <div class="agg-head">
-          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
-          <span class="agg-meta">已启用插件的合并搜索,卡片带插件·平台标签</span>
+          <span class="agg-title"><MfIcon name="Globe" />{{ t('albums.webResult') }}</span>
+          <span class="agg-meta">{{ t('albums.aggMeta') }}</span>
         </div>
         <div class="album-grid" v-loading="aggregateSearching">
           <div class="album-card fnos-card-sheen" v-for="(item, i) in aggregateItems" :key="item.providerId + ':' + item.source + ':' + item.id">
@@ -72,12 +72,12 @@
               <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
               <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
               <span class="remote-source-tag">{{ item.providerName ? item.providerName + "·" : "" }}{{ item.platformLabel }}</span>
-              <CoverPlay size="md" :label="`播放 ${item.name}`" :action="() => playRemoteAl(item)" />
+              <CoverPlay size="md" :label="t('albums.play', { name: item.name })" :action="() => playRemoteAl(item)" />
             </div>
             <div class="album-info" @click="openRemote(item)">
               <div class="album-name">{{ item.name }}</div>
               <div class="album-artist">{{ item.artist }}</div>
-              <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? item.trackCount + "首" : "" }}</div>
+              <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? t('albums.songCount', { count: item.trackCount }) : "" }}</div>
             </div>
             <el-button
               class="remote-import-btn"
@@ -86,7 +86,7 @@
               :loading="importingId === item.source + ':' + item.id"
               :disabled="item._imported"
               @click="importAlbum(item, item.providerId)"
-            >{{ item._imported ? "已加入库" : "加入库" }}</el-button>
+            >{{ item._imported ? t('albums.inLibrary') : t('albums.addLibrary') }}</el-button>
           </div>
         </div>
       </template>
@@ -105,7 +105,7 @@
     <div v-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
       <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="Disc3" :size="40" />
-        <p>{{ searchQuery.trim() ? "没有找到相关专辑" : `输入关键词,搜索${currentProviderName}支持的全网专辑` }}</p>
+        <p>{{ searchQuery.trim() ? t('albums.noResult') : t('albums.remoteHint', { provider: currentProviderName }) }}</p>
       </div>
       <div v-else class="album-grid">
         <div class="album-card fnos-card-sheen" v-for="(item, i) in remoteItems" :key="i">
@@ -113,12 +113,12 @@
             <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
             <span class="remote-source-tag">{{ item.platformLabel }}</span>
-            <CoverPlay size="md" :label="`播放 ${item.name}`" :action="() => playRemoteAl(item)" />
+            <CoverPlay size="md" :label="t('albums.play', { name: item.name })" :action="() => playRemoteAl(item)" />
           </div>
           <div class="album-info" @click="openRemote(item)">
             <div class="album-name">{{ item.name }}</div>
             <div class="album-artist">{{ item.artist }}</div>
-            <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? item.trackCount + "首" : "" }}</div>
+            <div class="album-meta">{{ item.year || "" }} {{ item.trackCount ? t('albums.songCount', { count: item.trackCount }) : "" }}</div>
           </div>
           <el-button
             class="remote-import-btn"
@@ -127,7 +127,7 @@
             :loading="importingId === item.source + ':' + item.id"
             :disabled="item._imported"
             @click="importAlbum(item)"
-          >{{ item._imported ? "已加入库" : "加入库" }}</el-button>
+          >{{ item._imported ? t('albums.inLibrary') : t('albums.addLibrary') }}</el-button>
         </div>
       </div>
 
@@ -146,6 +146,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
 import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
@@ -158,6 +159,7 @@ import api from "@/api";
 import { coverUrl } from "@/utils/cover";
 
 const router = useRouter();
+const { t } = useI18n();
 const { openContextMenu, openActionSheet, menuGuard, albumActions } = useItemActions();
 const play = usePlayContent();
 const fav = useFavoritesStore();
@@ -170,8 +172,8 @@ const {
   setLocalLoader, setAfterRemoteImport,
 } = useEntitySearch("album");
 const searchPlaceholder = computed(() => {
-  if (isAggregateMode.value) return "搜索本地与全网专辑...";
-  return isRemoteMode.value ? `搜索${currentProviderName}全网专辑...` : "搜索专辑...";
+  if (isAggregateMode.value) return t('albums.searchAggAll');
+  return isRemoteMode.value ? t('albums.searchRemote', { provider: currentProviderName }) : t('albums.searchPlaceholder');
 });
 
 function open(album: any) {
@@ -179,23 +181,23 @@ function open(album: any) {
   router.push(`/albums/${album.id}`);
 }
 function albumMeta(album: any) {
-  return [album.artist, album.year, album.songCount ? `${album.songCount} 首` : ""]
+  return [album.artist, album.year, album.songCount ? t('albums.songCount', { count: album.songCount }) : ""]
     .filter(Boolean)
     .join(" · ");
 }
 async function playAl(album: any) {
   if (menuGuard()) return;
   const n = await play.playAlbum(album.id);
-  if (n) ElMessage.success(`正在播放「${album.name}」`);
-  else ElMessage.warning("该专辑暂无可播放歌曲");
+  if (n) ElMessage.success(t('albums.playing', { name: album.name }));
+  else ElMessage.warning(t('albums.noPlayable'));
 }
 async function toggleAlbumFav(album: any) {
   if (menuGuard()) return;
   try {
     const on = await fav.toggleAlbumFavorite(album.id);
-    ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+    ElMessage.success(on ? t('albums.favorited') : t('albums.unfavorited'));
   } catch {
-    ElMessage.error("操作失败");
+    ElMessage.error(t('common.operationFailed'));
   }
 }
 
@@ -213,8 +215,8 @@ function openRemote(item: any) {
 async function playRemoteAl(item: any) {
   if (menuGuard()) return;
   const n = await playRemoteCollection("album", item.providerId || searchMode.value, item);
-  if (n) ElMessage.success(`正在播放「${item.name}」`);
-  else ElMessage.warning("该专辑暂无可播放歌曲");
+  if (n) ElMessage.success(t('albums.playing', { name: item.name }));
+  else ElMessage.warning(t('albums.noPlayable'));
 }
 // 本地专辑网格:窗口化分块加载(与 HA 卡片同构),整页展示 + 滚动懒加载 + 越界剪枝。
 const cardGrid = useCardGrid<any>(

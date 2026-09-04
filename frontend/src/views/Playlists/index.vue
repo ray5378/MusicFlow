@@ -1,9 +1,9 @@
 <template>
   <div class="playlists-page">
     <div class="page-header">
-      <h2>歌单<span class="song-count">{{ total }} 个</span></h2>
+      <h2>{{ t('playlists.title') }}<span class="song-count">{{ t('playlists.count', { count: total }) }}</span></h2>
       <div class="search-area">
-        <span class="search-label">搜索</span>
+        <span class="search-label">{{ t('playlists.search') }}</span>
         <el-dropdown trigger="click" @command="onSearchSourceCommand">
           <el-button>
             {{ currentSourceLabel }}
@@ -11,8 +11,8 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="aggregate" :divided="false">聚合</el-dropdown-item>
-              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item command="aggregate" :divided="false">{{ t('playlists.searchSource.aggregate') }}</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">{{ t('playlists.searchSource.local') }}</el-dropdown-item>
               <el-dropdown-item v-for="p in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -21,51 +21,51 @@
       </div>
       <div class="header-actions">
         <el-button :type="activeFilter === 'favorite' ? 'danger' : ''" @click="toggleFavoriteFilter">
-          <el-icon class="fav-heart"><MfIcon name="Heart" :filled="activeFilter === 'favorite'" :size="16" /></el-icon>收藏的歌单
+          <el-icon class="fav-heart"><MfIcon name="Heart" :filled="activeFilter === 'favorite'" :size="16" /></el-icon>{{ t('playlists.favoritePlaylists') }}
         </el-button>
         <el-dropdown trigger="click" @command="onFilterCommand">
-          <el-button><MfIcon name="Library" />筛选歌单<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
+          <el-button><MfIcon name="Library" />{{ t('playlists.filterButton') }}<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item v-for="f in filterOptions" :key="f.key" :command="f.key">{{ f.label }}</el-dropdown-item>
+              <el-dropdown-item v-for="f in filterOptions" :key="f.key" :command="f.key">{{ f.labelKey ? t(f.labelKey) : f.label }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
         <el-dropdown trigger="click" @command="onSortCommand">
-          <el-button><MfIcon name="ListOrdered" />排序：{{ sortLabel }}<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
+          <el-button><MfIcon name="ListOrdered" />{{ t('playlists.sortLabel', { label: sortLabel }) }}<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item v-for="s in SORTS" :key="s.key" :command="s.key">{{ s.label }}</el-dropdown-item>
+              <el-dropdown-item v-for="s in SORTS" :key="s.key" :command="s.key">{{ t(s.labelKey) }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
         <el-popover placement="bottom-end" :width="200" trigger="click" v-model:visible="showManageMenu">
           <template #reference>
-            <el-button type="primary"><MfIcon name="Settings" />歌单管理</el-button>
+            <el-button type="primary"><MfIcon name="Settings" />{{ t('playlists.manage') }}</el-button>
           </template>
           <div class="manage-menu">
-            <div class="manage-item" @click="openManage('create')"><MfIcon name="Plus" />新建歌单</div>
-            <div class="manage-item" @click="openManage('import')"><MfIcon name="Upload" />导入歌单</div>
-            <div class="manage-item" @click="openManage('export')"><MfIcon name="Download" />导出全部歌单</div>
-            <div class="manage-item" @click="openManage('matchAll')"><MfIcon name="Search" />一键在线适配</div>
-            <div class="manage-item" @click="openManage('refreshPrivate')"><MfIcon name="RefreshCw" />一键刷新私人歌单</div>
-            <div class="manage-item" @click="openManage('sync')"><MfIcon name="RefreshCw" />同步所有平台</div>
-            <div v-if="authStore.isAdmin" class="manage-item" @click="openManage('wish')"><MfIcon name="MessageCircle" />未命中音乐</div>
+            <div class="manage-item" @click="openManage('create')"><MfIcon name="Plus" />{{ t('playlists.create') }}</div>
+            <div class="manage-item" @click="openManage('import')"><MfIcon name="Upload" />{{ t('playlists.import') }}</div>
+            <div class="manage-item" @click="openManage('export')"><MfIcon name="Download" />{{ t('playlists.exportAll') }}</div>
+            <div class="manage-item" @click="openManage('matchAll')"><MfIcon name="Search" />{{ t('playlists.matchAll') }}</div>
+            <div class="manage-item" @click="openManage('refreshPrivate')"><MfIcon name="RefreshCw" />{{ t('playlists.refreshPrivate') }}</div>
+            <div class="manage-item" @click="openManage('sync')"><MfIcon name="RefreshCw" />{{ t('playlists.syncAll') }}</div>
+            <div v-if="authStore.isAdmin" class="manage-item" @click="openManage('wish')"><MfIcon name="MessageCircle" />{{ t('playlists.unmatchedMusic') }}</div>
           </div>
         </el-popover>
       </div>
     </div>
     <el-alert v-if="systemBusy" type="info" :closable="false" class="busy-banner" show-icon>
-      <template #title>后台批量任务运行中（同步 / 导入 / 推荐刷新），操作可能短暂变慢，请稍候</template>
+      <template #title>{{ t('playlists.busyBanner') }}</template>
     </el-alert>
     <div v-if="activeFilter" class="platform-filter-bar">
-      <span class="platform-filter-label"><MfIcon name="Library" />筛选：{{ filterName(activeFilter) }}</span>
-      <el-button size="small" text @click="clearFilter"><MfIcon name="X" />清除</el-button>
+      <span class="platform-filter-label"><MfIcon name="Library" />{{ t('playlists.filterLabel', { name: filterName(activeFilter) }) }}</span>
+      <el-button size="small" text @click="clearFilter"><MfIcon name="X" />{{ t('playlists.clear') }}</el-button>
     </div>
     <!-- 聚合模式:本地结果置于全网结果上方,用与「全网结果」同款的标题栏区分两个分区 -->
     <div v-if="isAggregateMode" class="agg-head local-head">
-      <span class="agg-title"><MfIcon name="Library" />本地结果</span>
-      <span class="agg-meta">本地库匹配的歌单</span>
+      <span class="agg-title"><MfIcon name="Library" />{{ t('playlists.localResults') }}</span>
+      <span class="agg-meta">{{ t('playlists.localResultsMeta') }}</span>
     </div>
     <div v-if="showLocalGrid" class="playlist-grid virt-grid" ref="gridEl" v-loading="loading" :style="{ height: frameHeight }">
       <!-- User playlists (windowed: fixed-height spacer + absolutely positioned virtual tiles) -->
@@ -74,44 +74,44 @@
         v-if="g.item"
         class="playlist-card"
         :style="cardStyle(g.idx)"
-        @contextmenu="openContextMenu($event, cardActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
-        v-longpress="() => openActionSheet(cardActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
+        @contextmenu="openContextMenu($event, cardActions(g.item), g.item.name, cardMeta(g.item))"
+        v-longpress="() => openActionSheet(cardActions(g.item), g.item.name, cardMeta(g.item))"
       >
         <div class="playlist-cover mf-coverwrap" @click.stop="open(g.item)">
           <PlatformBadge :source="g.item.sourcePlatform" />
           <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
-          <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playAll(g.item)" />
+          <CoverPlay size="md" :label="t('playlists.play', { name: g.item.name })" :action="() => playAll(g.item)" />
         </div>
         <div class="playlist-info" @click="open(g.item)">
           <div class="playlist-name">
             {{ g.item.name }}
-            <el-tag v-if="g.item.sourcePlatform" size="small" style="margin-left: 4px">{{ g.item.sourcePlatform === 'qq' ? 'QQ' : g.item.sourcePlatform === 'netease' ? '网易云' : g.item.sourcePlatform === 'kugou' ? '酷狗' : g.item.sourcePlatform === 'kuwo' ? '酷我' : g.item.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag>
-            <el-tag v-if="g.item.public" size="small" type="success" style="margin-left: 4px">公开</el-tag>
+            <el-tag v-if="g.item.sourcePlatform" size="small" style="margin-left: 4px">{{ platformLabel(g.item.sourcePlatform) }}</el-tag>
+            <el-tag v-if="g.item.public" size="small" type="success" style="margin-left: 4px">{{ t('playlists.public') }}</el-tag>
           </div>
           <div class="playlist-meta">
-            <span>{{ g.item.songCount }}首 · {{ formatDuration(g.item.duration) }}</span>
+            <span>{{ cardMetaShort(g.item) }}</span>
             <MfIcon v-if="g.item.favorite" name="Heart" :filled="true" :size="13" class="pl-fav-heart" />
           </div>
-          <div class="playlist-sub" v-if="g.item.isImported && g.item.created">导入于 {{ formatCreated(g.item.created) }}</div>
+          <div class="playlist-sub" v-if="g.item.isImported && g.item.created">{{ t('playlists.importedOn', { date: formatCreated(g.item.created) }) }}</div>
         </div>
         <el-dropdown trigger="click" class="playlist-menu" @click.stop @command="(cmd: string) => handleCardCommand(cmd, g.item)">
           <el-button size="small" circle @click.stop><MfIcon name="MoreHorizontal" /></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="play"><MfIcon name="Play" />播放全部</el-dropdown-item>
-              <el-dropdown-item v-if="g.item.isImported" command="sync"><MfIcon name="RefreshCw" />同步</el-dropdown-item>
-              <el-dropdown-item v-else-if="g.item.pluginSynced" command="refresh"><MfIcon name="RefreshCw" />刷新</el-dropdown-item>
-              <el-dropdown-item v-if="g.item.isDaily" command="convertLocal"><MfIcon name="Pin" />转成本地永久歌单</el-dropdown-item>
-              <el-dropdown-item command="rename"><MfIcon name="Pencil" />重命名</el-dropdown-item>
-              <el-dropdown-item command="export"><MfIcon name="Download" />导出</el-dropdown-item>
+              <el-dropdown-item command="play"><MfIcon name="Play" />{{ t('playlists.playAll') }}</el-dropdown-item>
+              <el-dropdown-item v-if="g.item.isImported" command="sync"><MfIcon name="RefreshCw" />{{ t('playlists.sync') }}</el-dropdown-item>
+              <el-dropdown-item v-else-if="g.item.pluginSynced" command="refresh"><MfIcon name="RefreshCw" />{{ t('playlists.refresh') }}</el-dropdown-item>
+              <el-dropdown-item v-if="g.item.isDaily" command="convertLocal"><MfIcon name="Pin" />{{ t('playlists.convertLocal') }}</el-dropdown-item>
+              <el-dropdown-item command="rename"><MfIcon name="Pencil" />{{ t('playlists.rename') }}</el-dropdown-item>
+              <el-dropdown-item command="export"><MfIcon name="Download" />{{ t('playlists.export') }}</el-dropdown-item>
               <el-dropdown-item command="favorite">
-                <MfIcon name="Heart" :filled="g.item.favorite" :size="14" />{{ g.item.favorite ? '取消收藏' : '收藏歌单' }}
+                <MfIcon name="Heart" :filled="g.item.favorite" :size="14" />{{ g.item.favorite ? t('playlists.unfavorite') : t('playlists.favorite') }}
               </el-dropdown-item>
               <el-dropdown-item command="addToDaily" divided>
-                <MfIcon name="Wand2" />{{ g.item._inPool ? '移出每日推荐池' : '加入每日推荐池' }}
+                <MfIcon name="Wand2" />{{ g.item._inPool ? t('playlists.removeFromPool') : t('playlists.addToPool') }}
               </el-dropdown-item>
-              <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />删除歌单</el-dropdown-item>
+              <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />{{ t('playlists.deletePlaylist') }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -127,7 +127,7 @@
     <div v-else-if="isRemoteMode" class="remote-results" v-loading="remoteSearching">
       <div v-if="remoteResults.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="List" :size="40" />
-        <p>{{ searchQuery.trim() ? "没有找到相关歌单" : `输入关键词,搜索${currentProviderName}支持的全网歌单` }}</p>
+        <p>{{ searchQuery.trim() ? t('playlists.noResults') : t('playlists.remoteSearchHint', { name: currentProviderName }) }}</p>
       </div>
       <div class="playlist-grid">
         <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="i">
@@ -135,12 +135,12 @@
             <span class="remote-source-tag">{{ rp.providerName ? rp.providerName + "·" : "" }}{{ rp.platformLabel }}</span>
             <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
-            <CoverPlay size="md" :label="`播放 ${rp.name}`" :action="() => playRemotePl(rp)" />
+            <CoverPlay size="md" :label="t('playlists.play', { name: rp.name })" :action="() => playRemotePl(rp)" />
           </div>
           <div class="playlist-info" @click="openRemote(rp)">
             <div class="playlist-name">{{ rp.name }}</div>
             <div class="playlist-meta">
-              <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? rp.trackCount + "首" : "" }}</span>
+              <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? t('playlists.songsCount', { count: rp.trackCount }) : "" }}</span>
             </div>
           </div>
           <el-button
@@ -150,7 +150,7 @@
             :loading="importingId === rp.providerId + ':' + rp.source + ':' + rp.id"
             :disabled="rp._imported"
             @click="importRemote(rp)"
-          >{{ rp._imported ? "已加入库" : "加入库" }}</el-button>
+          >{{ rp._imported ? t('playlists.inLibrary') : t('playlists.library') }}</el-button>
         </div>
       </div>
 
@@ -168,12 +168,12 @@
     <div v-if="isAggregateMode" class="remote-results agg" v-loading="remoteSearching">
       <div v-if="remoteResults.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="List" :size="40" />
-        <p>{{ searchQuery.trim() ? "没有找到相关歌单(本地与全网)" : "输入关键词,同时搜索本地库与已启用插件的全网歌单" }}</p>
+        <p>{{ searchQuery.trim() ? t('playlists.noResultsAgg') : t('playlists.aggSearchHint') }}</p>
       </div>
       <template v-else>
         <div class="agg-head">
-          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
-          <span class="agg-meta">已启用插件的合并搜索,卡片带插件·平台标签</span>
+          <span class="agg-title"><MfIcon name="Globe" />{{ t('playlists.webResults') }}</span>
+          <span class="agg-meta">{{ t('playlists.webResultsMeta') }}</span>
         </div>
         <div class="playlist-grid">
         <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="rp.providerId + ':' + rp.source + ':' + rp.id">
@@ -181,12 +181,12 @@
             <span class="remote-source-tag">{{ rp.providerName ? rp.providerName + "·" : "" }}{{ rp.platformLabel }}</span>
             <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
-            <CoverPlay size="md" :label="`播放 ${rp.name}`" :action="() => playRemotePl(rp)" />
+            <CoverPlay size="md" :label="t('playlists.play', { name: rp.name })" :action="() => playRemotePl(rp)" />
           </div>
           <div class="playlist-info" @click="openRemote(rp)">
             <div class="playlist-name">{{ rp.name }}</div>
             <div class="playlist-meta">
-              <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? rp.trackCount + "首" : "" }}</span>
+              <span>{{ rp.creator ? rp.creator + " · " : "" }}{{ rp.trackCount ? t('playlists.songsCount', { count: rp.trackCount }) : "" }}</span>
             </div>
           </div>
           <el-button
@@ -196,39 +196,39 @@
             :loading="importingId === rp.providerId + ':' + rp.source + ':' + rp.id"
             :disabled="rp._imported"
             @click="importRemote(rp)"
-          >{{ rp._imported ? "已加入库" : "加入库" }}</el-button>
+          >{{ rp._imported ? t('playlists.inLibrary') : t('playlists.library') }}</el-button>
         </div>
       </div>
       </template>
     </div>
 
-    <el-dialog v-model="showCreateDialog" title="新建歌单" width="400px" :append-to-body="true">
-      <el-input v-model="newPlaylistName" placeholder="歌单名称" @keyup.enter="createPlaylist" />
+    <el-dialog v-model="showCreateDialog" :title="t('playlists.create')" width="400px" :append-to-body="true">
+      <el-input v-model="newPlaylistName" :placeholder="t('playlists.namePlaceholder')" @keyup.enter="createPlaylist" />
       <template #footer>
-        <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" @click="createPlaylist">创建</el-button>
+        <el-button @click="showCreateDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="createPlaylist">{{ t('playlists.createButton') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px" :append-to-body="true">
-      <el-input v-model="renamePlaylistName" placeholder="新歌单名称" @keyup.enter="renamePlaylist" />
+    <el-dialog v-model="showRenameDialog" :title="t('playlists.rename')" width="400px" :append-to-body="true">
+      <el-input v-model="renamePlaylistName" :placeholder="t('playlists.newNamePlaceholder')" @keyup.enter="renamePlaylist" />
       <template #footer>
-        <el-button @click="showRenameDialog = false">取消</el-button>
-        <el-button type="primary" @click="renamePlaylist">保存</el-button>
+        <el-button @click="showRenameDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="renamePlaylist">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showImportDialog" title="导入歌单" width="560px" :append-to-body="true">
+    <el-dialog v-model="showImportDialog" :title="t('playlists.import')" width="560px" :append-to-body="true">
       <!-- 支持的平台来自「已启用的导入插件」,不再写死:在插件页停用某个导入插件后
            这里的提示会同步变化。 -->
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
         {{ importHint }}
       </el-alert>
       <el-form label-width="80px">
-        <el-form-item label="歌单链接">
+        <el-form-item :label="t('playlists.importLink')">
           <el-input v-model="importUrl" :placeholder="importPlaceholder" type="textarea" :rows="2" />
         </el-form-item>
-        <el-form-item label="或选择文件">
+        <el-form-item :label="t('playlists.importSelectFile')">
           <el-upload
             drag
             :auto-upload="false"
@@ -240,20 +240,20 @@
             style="width: 100%"
           >
             <el-icon class="el-icon--upload"><MfIcon name="Upload" :size="36" /></el-icon>
-            <div class="el-upload__text">拖拽本项目的歌单 .json 文件到此处，或<em>点击选择</em></div>
+            <div class="el-upload__text">{{ t('playlists.importDragText') }}<em>{{ t('playlists.importDragClick') }}</em></div>
           </el-upload>
         </el-form-item>
-        <el-form-item label="歌单名称">
-          <el-input v-model="importName" placeholder="留空则使用原歌单名" />
+        <el-form-item :label="t('playlists.name')">
+          <el-input v-model="importName" :placeholder="t('playlists.importNamePlaceholder')" />
         </el-form-item>
-        <el-form-item label="自动同步" v-if="!nativeFile">
+        <el-form-item :label="t('playlists.autoSync')" v-if="!nativeFile">
           <el-switch v-model="importAutoSync" />
-          <span style="margin-left: 8px; font-size: 12px; color: #999">每 6 小时自动同步(需手动同步时也可在详情页操作)</span>
+          <span style="margin-left: 8px; font-size: 12px; color: #999">{{ t('playlists.autoSyncHint') }}</span>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showImportDialog = false">取消</el-button>
-        <el-button type="primary" :loading="importing" @click="importPlaylist">导入</el-button>
+        <el-button @click="showImportDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="importing" @click="importPlaylist">{{ t('playlists.importAction') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -261,6 +261,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
 import RemoteDetailDialog from "@/components/RemoteDetailDialog.vue";
@@ -278,6 +279,7 @@ import { useAuthStore } from "@/stores/auth";
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
+const { t } = useI18n();
 const { openContextMenu, openActionSheet, menuGuard } = useItemActions();
 
 function open(pl: any) {
@@ -288,24 +290,24 @@ function open(pl: any) {
 /** 歌单卡片的右键 / 长按操作集（复用页面已有的命令实现） */
 function cardActions(pl: any): MenuAction[] {
   const acts: MenuAction[] = [
-    { label: "播放全部", icon: Play, onClick: () => playAll(pl) },
-    { label: "查看歌单", icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
+    { label: t("playlists.playAll"), icon: Play, onClick: () => playAll(pl) },
+    { label: t("playlists.viewPlaylist"), icon: Folder, onClick: () => router.push(`/playlists/${pl.id}`) },
   ];
-  if (pl.isImported) acts.push({ label: "同步", icon: RefreshCw, onClick: () => syncPlaylist(pl) });
-  else if (pl.pluginSynced) acts.push({ label: "刷新", icon: RefreshCw, onClick: () => refreshPluginPlaylist(pl) });
+  if (pl.isImported) acts.push({ label: t("playlists.sync"), icon: RefreshCw, onClick: () => syncPlaylist(pl) });
+  else if (pl.pluginSynced) acts.push({ label: t("playlists.refresh"), icon: RefreshCw, onClick: () => refreshPluginPlaylist(pl) });
   if (pl.isDaily)
-    acts.push({ label: "转成本地永久歌单", icon: Pin, onClick: () => convertToLocal(pl) });
+    acts.push({ label: t("playlists.convertLocal"), icon: Pin, onClick: () => convertToLocal(pl) });
   acts.push({ divider: true });
-  acts.push({ label: "重命名", icon: Pencil, onClick: () => openRename(pl) });
-  acts.push({ label: "导出歌单", icon: Download, onClick: () => exportPlaylist(pl) });
-  acts.push({ label: pl.favorite ? "取消收藏" : "收藏歌单", icon: Heart, onClick: () => toggleFavorite(pl) });
+  acts.push({ label: t("playlists.rename"), icon: Pencil, onClick: () => openRename(pl) });
+  acts.push({ label: t("playlists.exportPlaylist"), icon: Download, onClick: () => exportPlaylist(pl) });
+  acts.push({ label: pl.favorite ? t("playlists.unfavorite") : t("playlists.favorite"), icon: Heart, onClick: () => toggleFavorite(pl) });
   acts.push({
-    label: pl._inPool ? "移出每日推荐池" : "加入每日推荐池",
+    label: pl._inPool ? t("playlists.removeFromPool") : t("playlists.addToPool"),
     icon: Wand2,
     onClick: () => togglePlaylistPool(pl),
   });
   acts.push({ divider: true });
-  acts.push({ label: "删除歌单", icon: Trash2, danger: true, onClick: () => deletePlaylist(pl) });
+  acts.push({ label: t("playlists.deletePlaylist"), icon: Trash2, danger: true, onClick: () => deletePlaylist(pl) });
   return acts;
 }
 
@@ -360,17 +362,17 @@ const isRemoteMode = computed(() => !isLocalMode.value && !isAggregateMode.value
 // 本地窗口化网格在「本地」与「聚合」两种模式都渲染(聚合时下方再接全网结果区)
 const showLocalGrid = computed(() => isLocalMode.value || isAggregateMode.value);
 const currentProvider = computed(() => searchProviders.value.find(p => p.id === searchMode.value));
-const currentProviderName = computed(() => currentProvider.value?.name || "平台");
+const currentProviderName = computed(() => currentProvider.value?.name || t("playlists.providerFallback"));
 // 搜索来源下拉按钮文案:聚合=「聚合」,本地=「本地」,插件模式=插件名
 const currentSourceLabel = computed(() => {
-  if (isAggregateMode.value) return "聚合";
-  if (isLocalMode.value) return "本地";
-  return currentProvider.value?.name || "本地";
+  if (isAggregateMode.value) return t("playlists.searchSource.aggregate");
+  if (isLocalMode.value) return t("playlists.searchSource.local");
+  return currentProvider.value?.name || t("playlists.searchSource.local");
 });
 const searchPlaceholder = computed(() => {
-  if (isAggregateMode.value) return "搜索本地与全网歌单...";
-  if (isLocalMode.value) return "搜索歌单...";
-  return `搜索${currentProviderName.value}全网歌单...`;
+  if (isAggregateMode.value) return t("playlists.searchPlaceholder.aggregate");
+  if (isLocalMode.value) return t("playlists.searchPlaceholder.local");
+  return t("playlists.searchPlaceholder.plugin", { name: currentProviderName.value });
 });
 // 远程歌单详情 / 加入库 / 播放要定位到具体插件:单插件模式=当前插件,聚合模式=结果自带 providerId
 const remoteDetailProviderId = ref("");
@@ -382,8 +384,8 @@ const showManageMenu = ref(false);
 const activeFilter = ref("");
 const filterOptions = computed(() => {
   const opts = [
-    { key: "", label: "全部歌单" },
-    { key: "local", label: "本地歌单" },
+    { key: "", labelKey: "playlists.filterAll" },
+    { key: "local", labelKey: "playlists.filterLocal" },
   ];
   const seen = new Set<string>();
   for (const p of searchProviders.value) {
@@ -405,8 +407,10 @@ const mergedPlatformLabels = computed(() => {
   return m;
 });
 function filterName(key: string) {
-  if (key === "favorite") return "收藏的歌单";
-  return filterOptions.value.find(f => f.key === key)?.label || mergedPlatformLabels.value[key] || key || "全部";
+  if (key === "favorite") return t("playlists.favoritePlaylists");
+  const f = filterOptions.value.find(o => o.key === key);
+  if (f?.labelKey) return t(f.labelKey);
+  return f?.label || mergedPlatformLabels.value[key] || key || t("playlists.all");
 }
 function onFilterCommand(key: string) {
   activeFilter.value = key;
@@ -423,14 +427,17 @@ function toggleFavoriteFilter() {
 }
 // 歌单排序:按创建时间/名称升序降序;空=后端默认(每日推荐优先+最近更新)
 const SORTS = [
-  { key: "", label: "默认(推荐优先)" },
-  { key: "created_desc", label: "创建时间(最新在前)" },
-  { key: "created_asc", label: "创建时间(最早在前)" },
-  { key: "name_asc", label: "名称(升序 A→Z)" },
-  { key: "name_desc", label: "名称(降序 Z→A)" },
+  { key: "", labelKey: "playlists.sort.default" },
+  { key: "created_desc", labelKey: "playlists.sort.createdDesc" },
+  { key: "created_asc", labelKey: "playlists.sort.createdAsc" },
+  { key: "name_asc", labelKey: "playlists.sort.nameAsc" },
+  { key: "name_desc", labelKey: "playlists.sort.nameDesc" },
 ];
 const sortMode = ref("");
-const sortLabel = computed(() => SORTS.find(s => s.key === sortMode.value)?.label || "默认(推荐优先)");
+const sortLabel = computed(() => {
+  const s = SORTS.find(o => o.key === sortMode.value);
+  return s ? t(s.labelKey) : t("playlists.sort.default");
+});
 function onSortCommand(key: string) {
   sortMode.value = key;
   loadPlaylists();
@@ -460,11 +467,11 @@ const enabledImportPlatformLabels = computed(() =>
 );
 const importHint = computed(() => {
   const links = enabledImportPlatformLabels.value;
-  const head = links ? `支持 ${links} 歌单分享链接` : "支持已启用导入插件对应的歌单分享链接";
-  return `${head},或本项目「导出」生成的 .json 歌单文件。导入时自动匹配本地曲库,匹配到的歌曲可直接播放;未匹配的歌曲加入未命中音乐`;
+  const head = links ? t("playlists.importHintHead", { links }) : t("playlists.importHintHeadFallback");
+  return head + t("playlists.importHintBody");
 });
 const importPlaceholder = computed(() =>
-  importPlatforms.value.length ? `粘贴 ${enabledImportPlatformLabels.value} 歌单分享链接...` : "粘贴歌单分享链接...",
+  importPlatforms.value.length ? t("playlists.importPlaceholder", { links: enabledImportPlatformLabels.value }) : t("playlists.importPlaceholderFallback"),
 );
 async function loadImportPlatforms() {
   try {
@@ -513,7 +520,7 @@ const matchAllCurrent = ref("");
 async function syncDailyAll() {
   if (!dailySourceId.value) await detectDailySource(); // 未探测到源,先尝试探测
   if (!dailySourceId.value) {
-    ElMessage.warning("未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件后再同步");
+    ElMessage.warning(t("playlists.noOnlineSourceSync"));
     return;
   }
   if (syncingDaily.value) return;
@@ -523,16 +530,16 @@ async function syncDailyAll() {
     const res = await api.post(`/rest/api/v1/online/${dailySourceId.value}/recommend/sync-all`);
     if (res.data?.success && res.data.started) {
       syncAllTasks.value = res.data.tasks || [];
-      ElMessage.success(`已开始同步:每日推荐 + ${(res.data.tasks || []).length} 个插件推荐,完成后自动提示`);
+      ElMessage.success(t("playlists.syncAllStarted", { count: (res.data.tasks || []).length }));
       pollSyncAll();
     } else if (res.data?.success && res.data?.alreadyRunning) {
-      ElMessage.info("同步任务已在后台进行中");
+      ElMessage.info(t("playlists.syncAllRunning"));
       syncingDaily.value = false;
     } else {
-      ElMessage.error(res.data?.error || "同步失败");
+      ElMessage.error(res.data?.error || t("playlists.syncFailed"));
       syncingDaily.value = false;
     }
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "同步失败"); syncingDaily.value = false; }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.syncFailed")); syncingDaily.value = false; }
 }
 
 // 轮询聚合同步:路径A状态 + 各插件 job 状态,全部结束后汇总提示。
@@ -555,8 +562,8 @@ function pollSyncAll() {
       syncingDaily.value = false;
       const failCount = pluginStates.filter((p) => p.job?.status === "error").length;
       const aResult = a?.data?.result;
-      const aSummary = aResult?.synced ? `每日推荐更新 ${aResult.synced} 个` : "每日推荐更新完成";
-      ElMessage.success(`${aSummary}${failCount ? `,${failCount} 个插件任务失败(详见插件页)` : ",插件任务全部完成"}`);
+      const aSummary = aResult?.synced ? t("playlists.dailyUpdated", { count: aResult.synced }) : t("playlists.dailySyncDone");
+      ElMessage.success(`${aSummary}${failCount ? t("playlists.pluginTasksFailed", { count: failCount }) : t("playlists.pluginTasksAllDone")}`);
       loadPlaylists();
     } catch {
       syncAllTimer.value = setTimeout(tick, 2000);
@@ -579,14 +586,14 @@ async function startGmdlRefresh(pluginId: string) {
   try {
     const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId });
     if (res.data?.success) {
-      ElMessage.success(res.data.alreadyRunning ? "刷新任务已在后台进行中,完成后自动提示" : "已开始后台刷新,完成后自动提示");
+      ElMessage.success(res.data.alreadyRunning ? t("playlists.refreshRunning") : t("playlists.refreshStarted"));
       pollGmdlJob(pluginId);
     } else {
-      ElMessage.error(res.data?.error || "刷新启动失败");
+      ElMessage.error(res.data?.error || t("playlists.refreshStartFailed"));
       gmdlRefreshing.value = false;
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "刷新启动失败");
+    ElMessage.error(e?.response?.data?.error || t("playlists.refreshStartFailed"));
     gmdlRefreshing.value = false;
   }
 }
@@ -599,11 +606,11 @@ function pollGmdlJob(pluginId: string) {
       gmdlRefreshing.value = false;
       if (job?.status === "ok") {
         const s = job.summary;
-        ElMessage.success(typeof s === "string" && s ? s : "私人歌单刷新完成");
+        ElMessage.success(typeof s === "string" && s ? s : t("playlists.privateRefreshDone"));
       } else if (job?.status === "error") {
-        ElMessage.error(job.error || "刷新失败");
+        ElMessage.error(job.error || t("playlists.refreshFailed"));
       } else {
-        ElMessage.info("刷新任务已结束");
+        ElMessage.info(t("playlists.refreshEnded"));
       }
       loadPlaylists();
     } catch {
@@ -617,7 +624,7 @@ function pollGmdlJob(pluginId: string) {
 async function matchAllPlaylists() {
   if (!dailySourceId.value) await detectDailySource();
   if (!dailySourceId.value) {
-    ElMessage.warning("未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件");
+    ElMessage.warning(t("playlists.noOnlineSourceMatch"));
     return;
   }
   if (matchAllRunning.value) return;
@@ -628,17 +635,17 @@ async function matchAllPlaylists() {
     if (res.data?.started) {
       matchAllBatchId.value = res.data.batchId;
       matchAllTotal.value = res.data.total || 0;
-      ElMessage.success(`已开始后台在线适配 ${res.data.total} 个歌单…`);
+      ElMessage.success(t("playlists.matchAllStarted", { count: res.data.total }));
       pollMatchAll();
     } else if (res.data?.alreadyMatched) {
-      ElMessage.success("所有歌单均已在线适配,无需处理");
+      ElMessage.success(t("playlists.matchAllDone"));
       matchAllRunning.value = false;
     } else {
-      ElMessage.error(res.data?.error || "启动失败");
+      ElMessage.error(res.data?.error || t("playlists.startFailed"));
       matchAllRunning.value = false;
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "启动失败");
+    ElMessage.error(e?.response?.data?.error || t("playlists.startFailed"));
     matchAllRunning.value = false;
   }
 }
@@ -657,10 +664,10 @@ function pollMatchAll() {
       matchAllRunning.value = false;
       if (d.status === "completed") {
         const failed = (d.results || []).filter((r: any) => r.error).length;
-        ElMessage.success(`在线适配完成:${d.total} 个歌单已处理${failed ? `,${failed} 个失败` : ""}`);
+        ElMessage.success(`${t("playlists.matchAllComplete", { count: d.total })}${failed ? t("playlists.matchAllFailed", { count: failed }) : ""}`);
         loadPlaylists();
       } else {
-        ElMessage.error(d.error || "在线适配失败");
+        ElMessage.error(d.error || t("playlists.matchAllFail"));
       }
     } catch {
       matchAllTimer.value = setTimeout(tick, 2000);
@@ -669,7 +676,7 @@ function pollMatchAll() {
   tick();
 }
 
-function formatDuration(sec: number) { const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`; }
+function formatDuration(sec: number) { const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60); return h > 0 ? t("playlists.duration.hm", { h, m }) : t("playlists.duration.m", { m }); }
 function formatCreated(t: string): string {
   if (!t) return "";
   const d = new Date(t);
@@ -755,11 +762,11 @@ async function doRemoteSearch() {
       }));
     } else {
       remoteResults.value = [];
-      ElMessage.error(res.data?.error || "搜索失败");
+      ElMessage.error(res.data?.error || t("playlists.searchFailed"));
     }
   } catch {
     remoteResults.value = [];
-    ElMessage.error("搜索失败:插件未启用或服务不可达");
+    ElMessage.error(t("playlists.searchFailedPlugin"));
   } finally {
     remoteSearching.value = false;
   }
@@ -776,11 +783,11 @@ async function doAggregateSearch() {
       remoteResults.value = (res.data.playlists || []).map((p: any) => ({ ...p, _imported: false }));
     } else {
       remoteResults.value = [];
-      ElMessage.error(res.data?.error || "聚合搜索失败");
+      ElMessage.error(res.data?.error || t("playlists.aggSearchFailed"));
     }
   } catch {
     remoteResults.value = [];
-    ElMessage.error("聚合搜索失败:无已启用插件或服务不可达");
+    ElMessage.error(t("playlists.aggSearchFailedPlugin"));
   } finally {
     remoteSearching.value = false;
   }
@@ -792,9 +799,9 @@ async function importRemote(rp: any) {
   const key = `${providerId}:${rp.source}:${rp.id}`;
   if (importingId.value === key) return;
   try {
-    await ElMessageBox.confirm(`将歌单「${rp.name}」加入本地库?`, "加入库", {
-      confirmButtonText: "加入",
-      cancelButtonText: "取消",
+    await ElMessageBox.confirm(t("playlists.importConfirmTitle", { name: rp.name }), t("playlists.library"), {
+      confirmButtonText: t("playlists.addBtn"),
+      cancelButtonText: t("common.cancel"),
       type: "info",
     });
   } catch { return; }
@@ -804,22 +811,22 @@ async function importRemote(rp: any) {
       source: rp.source, id: rp.id, name: rp.name, cover: rp.cover,
     });
     if (res.data?.alreadyRunning) {
-      ElMessage.warning("该歌单正在导入中,请稍候");
+      ElMessage.warning(t("playlists.importRunning"));
     } else if (res.data?.success && res.data.taskId) {
       // 异步任务:轮询直到完成(导入端点已异步化,触发即返回 taskId)
       const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
       if (r?.success) {
         rp._imported = true;
-        ElMessage.success(`已加入库:${r.name}(${r.trackCount}首,匹配 ${r.added})`);
+        ElMessage.success(t("playlists.imported", { name: r.name, count: r.trackCount, added: r.added }));
         loadPlaylists(); // 刷新本地列表(新歌单出现)
       } else {
-        ElMessage.error(r?.error || "导入失败");
+        ElMessage.error(r?.error || t("playlists.importFailed"));
       }
     } else {
-      ElMessage.error(res.data?.error || "导入失败");
+      ElMessage.error(res.data?.error || t("playlists.importFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e?.message || "导入失败:插件未启用或服务不可达");
+    ElMessage.error(e?.message || t("playlists.importFailedPlugin"));
   } finally {
     importingId.value = "";
   }
@@ -849,26 +856,26 @@ function openRemote(rp: any) {
 async function playRemotePl(rp: any) {
   if (menuGuard()) return;
   const n = await playRemoteCollection("playlist", rp.providerId || searchMode.value, rp);
-  if (n) ElMessage.success(`正在播放「${rp.name}」`);
-  else ElMessage.warning("该歌单暂无可播放歌曲");
+  if (n) ElMessage.success(t("playlists.playing", { name: rp.name }));
+  else ElMessage.warning(t("playlists.noPlayable"));
 }
 
 async function createPlaylist() {
-  if (!newPlaylistName.value) { ElMessage.warning("请输入歌单名称"); return; }
+  if (!newPlaylistName.value) { ElMessage.warning(t("playlists.enterName")); return; }
   try {
     const res = await api.post("/rest/createPlaylist", { name: newPlaylistName.value });
     showCreateDialog.value = false;
     newPlaylistName.value = "";
-    ElMessage.success("创建成功");
+    ElMessage.success(t("playlists.created"));
     if (res.data["subsonic-response"]?.playlist?.id) router.push(`/playlists/${res.data["subsonic-response"].playlist.id}`);
     loadPlaylists();
-  } catch { ElMessage.error("创建失败"); }
+  } catch { ElMessage.error(t("playlists.createFailed")); }
 }
 
 async function importPlaylist() {
   const hasUrl = importUrl.value.trim();
   const hasFile = !!nativeFile.value;
-  if (!hasUrl && !hasFile) { ElMessage.warning("请输入歌单链接或选择歌单文件"); return; }
+  if (!hasUrl && !hasFile) { ElMessage.warning(t("playlists.enterLinkOrFile")); return; }
   importing.value = true;
   try {
     const body: any = hasFile
@@ -879,11 +886,11 @@ async function importPlaylist() {
       if (res.data.taskId) {
         // URL 导入异步任务:轮询直到完成
         const r = await waitAsyncTask(res.data.taskId, { intervalMs: 1000 });
-        if (!r?.success) throw new Error(r?.error || "导入失败");
+        if (!r?.success) throw new Error(r?.error || t("playlists.importFailed"));
         if (r.created && r.created > 1) {
-          ElMessage.success(`导入 ${r.created} 个歌单成功: 共 ${r.trackCount} 首,匹配曲库 ${r.matched} 首,未匹配 ${r.unmatched} 首(已加入未命中音乐)`);
+          ElMessage.success(t("playlists.importSuccessMultiple", { count: r.created, tracks: r.trackCount, matched: r.matched, unmatched: r.unmatched }));
         } else {
-          ElMessage.success(`导入成功: 共 ${r.trackCount} 首,匹配曲库 ${r.matched} 首,未匹配 ${r.unmatched} 首(已加入未命中音乐)`);
+          ElMessage.success(t("playlists.importSuccess", { tracks: r.trackCount, matched: r.matched, unmatched: r.unmatched }));
         }
         showImportDialog.value = false;
         importUrl.value = "";
@@ -892,9 +899,9 @@ async function importPlaylist() {
         nativeFileList.value = [];
         loadPlaylists();
       } else if (res.data.created && res.data.created > 1) {
-        ElMessage.success(`导入 ${res.data.created} 个歌单成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入未命中音乐)`);
+        ElMessage.success(t("playlists.importSuccessMultiple", { count: res.data.created, tracks: res.data.trackCount, matched: res.data.matched, unmatched: res.data.unmatched }));
       } else {
-        ElMessage.success(`导入成功: 共 ${res.data.trackCount} 首,匹配曲库 ${res.data.matched} 首,未匹配 ${res.data.unmatched} 首(已加入未命中音乐)`);
+        ElMessage.success(t("playlists.importSuccess", { tracks: res.data.trackCount, matched: res.data.matched, unmatched: res.data.unmatched }));
       }
       showImportDialog.value = false;
       importUrl.value = "";
@@ -903,10 +910,10 @@ async function importPlaylist() {
       nativeFileList.value = [];
       loadPlaylists();
     } else {
-      ElMessage.error(res.data.error || "导入失败");
+      ElMessage.error(res.data.error || t("playlists.importFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || e?.message || "导入失败");
+    ElMessage.error(e?.response?.data?.error || e?.message || t("playlists.importFailed"));
   } finally {
     importing.value = false;
   }
@@ -923,7 +930,7 @@ function onNativeFileChange(file: any) {
       nativeFile.value = JSON.parse(reader.result as string);
     } catch {
       nativeFile.value = null;
-      ElMessage.error("无效的歌单文件，请选择本项目导出的 .json 歌单");
+      ElMessage.error(t("playlists.invalidFile"));
     }
   };
   reader.readAsText(raw);
@@ -949,7 +956,7 @@ async function exportPlaylist(pl: any) {
     a.remove();
     URL.revokeObjectURL(url);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.message || "导出失败");
+    ElMessage.error(e.response?.data?.message || t("playlists.exportFailed"));
   }
 }
 
@@ -963,13 +970,13 @@ async function exportAllPlaylists() {
     const m = cd.match(/filename\*=UTF-8''([^;]+)/);
     const a = document.createElement("a");
     a.href = url;
-    a.download = m ? decodeURIComponent(m[1]) : `MusicFlow全部歌单_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = m ? decodeURIComponent(m[1]) : `${t("playlists.exportAllFilename")}_${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.message || "导出失败");
+    ElMessage.error(e.response?.data?.message || t("playlists.exportFailed"));
   }
 }
 
@@ -978,21 +985,21 @@ async function syncPlaylist(pl: any) {
   try {
     const res = await api.post(`/rest/api/v1/playlists/${pl.id}/sync`);
     if (res.data?.alreadyRunning) {
-      ElMessage.warning("该歌单正在同步中,请稍候");
+      ElMessage.warning(t("playlists.syncingPlaylist"));
     } else if (res.data.success && res.data.taskId) {
       // 异步任务:轮询直到完成(手动同步已异步化,触发即返回 taskId)
       const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
       if (r?.total !== undefined) {
-        ElMessage.success(`同步完成: 共 ${r.total} 首,匹配 ${r.matched} 首,未匹配 ${r.unmatched} 首`);
+        ElMessage.success(t("playlists.syncComplete", { total: r.total, matched: r.matched, unmatched: r.unmatched }));
       } else {
-        ElMessage.success("同步完成");
+        ElMessage.success(t("playlists.synced"));
       }
       loadPlaylists();
     } else {
-      ElMessage.error(res.data.error || "同步失败");
+      ElMessage.error(res.data.error || t("playlists.syncFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || e?.message || "同步失败");
+    ElMessage.error(e?.response?.data?.error || e?.message || t("playlists.syncFailed"));
   } finally {
     syncingId.value = "";
   }
@@ -1003,20 +1010,20 @@ async function syncPlaylist(pl: any) {
 // (replaced/deleted) by the daily recommend sync anymore.
 async function convertToLocal(pl: any) {
   await ElMessageBox.confirm(
-    `确定将「${pl.name}」转成本地永久歌单？转换后将不再作为每日推荐被轮换,但歌曲内容保持不变。`,
-    "转成本地歌单",
-    { type: "warning", confirmButtonText: "转换", cancelButtonText: "取消" },
+    t("playlists.convertConfirmTitle", { name: pl.name }),
+    t("playlists.convertTitle"),
+    { type: "warning", confirmButtonText: t("playlists.convertAction"), cancelButtonText: t("common.cancel") },
   );
   try {
     const res = await api.post(`/rest/api/v1/playlists/${pl.id}/convert-to-local`);
     if (res.data.success) {
-      ElMessage.success(`「${pl.name}」已转为本地永久歌单`);
+      ElMessage.success(t("playlists.converted", { name: pl.name }));
       loadPlaylists();
     } else {
-      ElMessage.error(res.data.error || "转换失败");
+      ElMessage.error(res.data.error || t("playlists.convertFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "转换失败");
+    ElMessage.error(e.response?.data?.error || t("playlists.convertFailed"));
   }
 }
 
@@ -1042,14 +1049,14 @@ async function toggleFavorite(pl: any) {
       const nowFav = res.data.favorite === true;
       pl.favorite = nowFav;
       if (nowFav) {
-        ElMessage.success(pl.isImported ? `已收藏「${pl.name}」,已转本地并开启每天自动同步` : `已收藏「${pl.name}」`);
+        ElMessage.success(pl.isImported ? t("playlists.favoritedAutoSync", { name: pl.name }) : t("playlists.favorited", { name: pl.name }));
       } else {
-        ElMessage.success(`已取消收藏「${pl.name}」`);
+        ElMessage.success(t("playlists.unfavorited", { name: pl.name }));
       }
       loadPlaylists();
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
 }
 
@@ -1060,15 +1067,15 @@ async function togglePlaylistPool(pl: any) {
       await api.delete(`/rest/api/v1/recommend-pool/playlist/${pl.id}`);
       pl._inPool = false;
       poolPlaylistIds.value.delete(pl.id);
-      ElMessage.success(`已将「${pl.name}」移出每日推荐池`);
+      ElMessage.success(t("playlists.removedFromPool", { name: pl.name }));
     } else {
       const res = await api.post(`/rest/api/v1/recommend-pool/playlist/${pl.id}`);
       pl._inPool = true;
       poolPlaylistIds.value.add(pl.id);
-      ElMessage.success(res.data.message || `已将「${pl.name}」加入每日推荐池`);
+      ElMessage.success(res.data.message || t("playlists.addedToPool", { name: pl.name }));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
 }
 
@@ -1077,8 +1084,8 @@ async function playAll(pl: any) {
     const res = await api.get(`/rest/getPlaylist?id=${pl.id}&f=json`);
     const songs = res.data["subsonic-response"]?.playlist?.entry?.filter((e: any) => e.playable) || [];
     if (songs.length > 0) { const { usePlayerStore } = await import("@/stores/player"); usePlayerStore().playQueue(songs); }
-    else ElMessage.warning("歌单为空");
-  } catch { ElMessage.error("播放失败"); }
+    else ElMessage.warning(t("playlists.emptyPlaylist"));
+  } catch { ElMessage.error(t("playlists.playFailed")); }
 }
 
 function openRename(pl: any) {
@@ -1088,22 +1095,22 @@ function openRename(pl: any) {
 }
 
 async function renamePlaylist() {
-  if (!renamePlaylistName.value || !renameTarget.value) { ElMessage.warning("请输入名称"); return; }
+  if (!renamePlaylistName.value || !renameTarget.value) { ElMessage.warning(t("playlists.enterName")); return; }
   try {
     await api.post("/rest/updatePlaylist", { playlistId: renameTarget.value.id, name: renamePlaylistName.value });
     showRenameDialog.value = false;
-    ElMessage.success("已重命名");
+    ElMessage.success(t("playlists.renamed"));
     loadPlaylists();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "重命名失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.renameFailed")); }
 }
 
 async function deletePlaylist(pl: any) {
-  await ElMessageBox.confirm(`确定删除歌单「${pl.name}」？`, "确认删除", { type: "warning" });
+  await ElMessageBox.confirm(t("playlists.deleteConfirmTitle", { name: pl.name }), t("playlists.confirmDelete"), { type: "warning" });
   try {
     await api.post("/rest/deletePlaylist", { id: pl.id });
-    ElMessage.success("已删除");
+    ElMessage.success(t("playlists.deleted"));
     loadPlaylists();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.deleteFailed")); }
 }
 
 // 后端 busy 感知:批量任务(每日推荐/自动匹配/插件任务/异步导入同步)运行中显示横幅,

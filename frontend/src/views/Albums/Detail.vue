@@ -6,31 +6,32 @@
         <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="64"  /></div>
       </div>
       <div class="album-meta">
-        <div class="label">专辑</div>
+        <div class="label">{{ t('albums.label') }}</div>
         <h1>{{ album.name }}</h1>
         <div class="artist" v-if="album.artist" @click="router.push(`/artists/${album.artistId}`)">{{ album.artist }}</div>
-        <div class="info">{{ album.year || '' }} · {{ album.songCount }}首 · {{ formatDuration(album.duration) }}</div>
+        <div class="info">{{ album.year || '' }} · {{ t('albums.songCount', { count: album.songCount }) }} · {{ formatDuration(album.duration) }}</div>
         <div class="actions">
-          <el-button type="primary" @click="playAll">播放全部</el-button>
+          <el-button type="primary" @click="playAll">{{ t('albums.playAll') }}</el-button>
           <el-button
             class="detail-fav-btn"
             :class="{ active: fav.isAlbumFavorite(album.id) }"
             @click="toggleAlbumFav"
           >
             <MfIcon name="Heart" :filled="fav.isAlbumFavorite(album.id)" :size="15" />
-            {{ fav.isAlbumFavorite(album.id) ? '已收藏专辑' : '收藏专辑' }}
+            {{ fav.isAlbumFavorite(album.id) ? t('albums.favorited') : t('albums.favorite') }}
           </el-button>
         </div>
       </div>
     </div>
     <SongTable v-if="songs.length > 0" :songs="songs" :show-artist="false" show-bitrate @play="playSong" />
-    <EmptyState v-else icon="headphones" title="专辑暂无歌曲" description="该专辑下还没有可播放的曲目" compact />
+    <EmptyState v-else icon="headphones" :title="t('albums.emptyTitle')" :description="t('albums.emptyDesc')" compact />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { usePlayerStore, Song } from "@/stores/player";
 import EmptyState from "@/components/EmptyState.vue";
 import { useFavoritesStore } from "@/stores/favorites";
@@ -41,6 +42,7 @@ import { coverUrl } from "@/utils/cover";
 
 const route = useRoute();
 const router = useRouter();
+const { t } = useI18n();
 const playerStore = usePlayerStore();
 const fav = useFavoritesStore();
 const album = ref<any>(null);
@@ -54,9 +56,9 @@ async function toggleAlbumFav() {
   if (!album.value) return;
   try {
     const on = await fav.toggleAlbumFavorite(album.value.id);
-    ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+    ElMessage.success(on ? t('albums.favorited') : t('albums.unfavorited'));
   } catch {
-    ElMessage.error("操作失败");
+    ElMessage.error(t('common.operationFailed'));
   }
 }
 

@@ -1,5 +1,6 @@
 import { ref, readonly } from "vue";
 import { ElMessage } from "element-plus";
+import { gt } from "@/locales";
 
 const copiedText = ref("");
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -24,9 +25,9 @@ export function useCopy() {
   const copy = async (text: string, label?: string) => {
     try {
       await copyText(text);
-      if (label) ElMessage.success(`已复制 ${label}`);
+      if (label) ElMessage.success(gt("copy.success", { label }));
     } catch {
-      if (label) ElMessage.error("复制失败");
+      if (label) ElMessage.error(gt("copy.failed"));
       return;
     }
     copiedText.value = text;

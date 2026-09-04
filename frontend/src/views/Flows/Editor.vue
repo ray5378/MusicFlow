@@ -6,15 +6,15 @@
         <input
           v-model="form.name"
           class="editor-title-input"
-          placeholder="音流名称..."
+          :placeholder="t('flows.namePlaceholder')"
           maxlength="50"
           @keyup.enter="save"
         />
-        <span class="editor-tip">节点按顺序执行,可拖拽排序、任意插入;手动「立即执行」始终可用</span>
+        <span class="editor-tip">{{ t('flows.editorTip') }}</span>
       </div>
       <div class="editor-tools">
-        <el-switch v-model="form.enabled" active-text="启用" />
-        <el-button type="primary" :loading="saving" @click="save"><MfIcon name="Check" />保存</el-button>
+        <el-switch v-model="form.enabled" :active-text="t('flows.enable')" />
+        <el-button type="primary" :loading="saving" @click="save"><MfIcon name="Check" />{{ t('common.save') }}</el-button>
       </div>
     </div>
 
@@ -36,13 +36,13 @@
       >
         <div class="node-head">
           <span class="node-icon"><MfIcon :name="nodeMeta(node.type).icon" /></span>
-          <span class="node-name">{{ nodeMeta(node.type).label }}</span>
+          <span class="node-name">{{ t(nodeMeta(node.type).labelKey) }}</span>
           <span class="node-drag-hint">⠿</span>
           <span class="node-ops">
-            <el-button v-if="i > 0" link size="small" @click.stop="moveNode(i, -1)" title="上移"><MfIcon name="ChevronUp" /></el-button>
-            <el-button v-if="i < nodes.length - 1" link size="small" @click.stop="moveNode(i, 1)" title="下移"><MfIcon name="ChevronDown" /></el-button>
-            <el-button link size="small" @click.stop="duplicateNode(i)" title="复制"><MfIcon name="Copy" /></el-button>
-            <el-button link size="small" type="danger" @click.stop="removeNode(i)" title="删除"><MfIcon name="Trash2" /></el-button>
+            <el-button v-if="i > 0" link size="small" @click.stop="moveNode(i, -1)" :title="t('common.moveUp')"><MfIcon name="ChevronUp" /></el-button>
+            <el-button v-if="i < nodes.length - 1" link size="small" @click.stop="moveNode(i, 1)" :title="t('common.moveDown')"><MfIcon name="ChevronDown" /></el-button>
+            <el-button link size="small" @click.stop="duplicateNode(i)" :title="t('common.copy')"><MfIcon name="Copy" /></el-button>
+            <el-button link size="small" type="danger" @click.stop="removeNode(i)" :title="t('common.delete')"><MfIcon name="Trash2" /></el-button>
           </span>
         </div>
 
@@ -51,25 +51,25 @@
           <template v-if="node.type === 'trigger'">
             <div class="trigger-info">
               <div class="token-row">
-                <span class="token-label">鉴权渠道 Token</span>
-                <el-select v-model="form.tokenId" placeholder="选择渠道 token" size="small" style="width: 260px" @change="onTokenChange">
-                  <el-option v-for="t in tokens" :key="t.id" :label="`${t.name}${t.enabled ? '' : '(停用)'}`" :value="t.id" />
+                <span class="token-label">{{ t('flows.tokenLabel') }}</span>
+                <el-select v-model="form.tokenId" :placeholder="t('flows.tokenPlaceholder')" size="small" style="width: 260px" @change="onTokenChange">
+                  <el-option v-for="tk in tokens" :key="tk.id" :label="tk.name + (tk.enabled ? '' : '(' + t('flows.deactivated') + ')')" :value="tk.id" />
                 </el-select>
               </div>
               <div class="wh-row">
-                <span class="wh-label">对外链接</span>
-                <IdBadge :id="webhookUrl" copy-label="对外链接" style="min-width: 0" />
+                <span class="wh-label">{{ t('flows.webhookLabel') }}</span>
+                <IdBadge :id="webhookUrl" :copy-label="t('flows.webhookLabel')" style="min-width: 0" />
               </div>
-              <div v-if="!webhookUrl" class="wh-note">所选渠道 token 不存在或已停用,对外链接不可用。手动「立即执行」不受影响。</div>
-              <div v-else class="wh-note">链接内已包含所绑定的私有 Token,勿公开分享。手动触发始终可用。</div>
+              <div v-if="!webhookUrl" class="wh-note">{{ t('flows.whNoteDisabled') }}</div>
+              <div v-else class="wh-note">{{ t('flows.whNoteReady') }}</div>
             </div>
           </template>
 
           <!-- 目标设备/组 -->
           <template v-else-if="node.type === 'target'">
             <div class="field-row">
-              <span class="field-label">目标设备/组(可多选;多个目标节点取并集)</span>
-              <span class="field-hint">DLNA 设备与设备组自动列出,任一上线即继续</span>
+              <span class="field-label">{{ t('flows.targetFieldLabel') }}</span>
+              <span class="field-hint">{{ t('flows.targetFieldHint') }}</span>
             </div>
             <div class="target-list">
               <label
@@ -84,23 +84,23 @@
                   @change="(v: any) => setNodeTarget(node, p.peerId, !!v)"
                 />
                 <MfIcon :name="p.kind === 'group' ? 'Box' : 'Monitor'" class="target-icon" />
-                <span class="target-name">{{ p.kind === 'local' ? '本机' : p.name }}</span>
+                <span class="target-name">{{ p.kind === 'local' ? t('flows.localPeer') : p.name }}</span>
                 <span class="target-id">{{ p.peerId }}</span>
               </label>
               <label v-if="castTargets.length > 1" class="target-chip target-chip--all" :class="{ checked: nodeAllChecked(node) }">
                 <el-checkbox :model-value="nodeAllChecked(node)" size="small" @change="(v: any) => toggleNodeAllTargets(node, !!v)" />
-                <span class="target-name">全选</span>
+                <span class="target-name">{{ t('flows.selectAll') }}</span>
               </label>
-              <div v-if="castTargets.length === 0" class="target-empty">暂无可投播放器(DLNA / AirPlay / 群组)。可到「播放器」页查看在线设备。</div>
+              <div v-if="castTargets.length === 0" class="target-empty">{{ t('flows.noCastDevice') }}</div>
             </div>
           </template>
 
           <!-- 播放内容 -->
           <template v-else-if="node.type === 'content'">
             <div class="select-row">
-              <span class="select-label">内容类型</span>
+              <span class="select-label">{{ t('flows.contentType') }}</span>
               <el-select v-model="node.contentType" size="small" style="width: 140px" @change="onContentTypeChange(node)">
-                <el-option v-for="(label, val) in CONTENT_TYPE_OPTIONS" :key="val" :label="label" :value="val" />
+                <el-option v-for="(labelKey, val) in CONTENT_TYPE_OPTIONS" :key="val" :label="t(labelKey)" :value="val" />
               </el-select>
             </div>
             <div class="select-row select-row--content">
@@ -120,7 +120,7 @@
               </el-select>
             </div>
             <div v-if="node.contentType === 'playlist' && recommendCards.length" class="select-row select-row--recommend">
-              <span class="select-label">推荐歌单</span>
+              <span class="select-label">{{ t('flows.recommendPlaylist') }}</span>
               <div class="recommend-chips">
                 <el-tag
                   v-for="card in recommendCards"
@@ -140,7 +140,7 @@
           <template v-else-if="node.type === 'playmode'">
             <div class="select-row">
               <el-select v-model="node.mode" size="small" style="width: 220px">
-                <el-option v-for="(label, val) in MODE_OPTIONS" :key="val" :label="label" :value="val" />
+                <el-option v-for="(labelKey, val) in MODE_OPTIONS" :key="val" :label="t(labelKey)" :value="val" />
               </el-select>
             </div>
           </template>
@@ -156,7 +156,7 @@
           <template v-else-if="node.type === 'delay'">
             <div class="row-inline">
               <label class="inline-field">
-                <span class="inline-label">延迟(毫秒,0-3600000)</span>
+                <span class="inline-label">{{ t('flows.delayLabel') }}</span>
                 <el-input-number v-model="node.ms" :min="0" :max="3600000" :step="100" controls-position="right" size="small" style="width: 180px" />
               </label>
             </div>
@@ -166,10 +166,10 @@
 
       <!-- 每个节点下方:插入节点 -->
       <el-dropdown trigger="click" @command="(t: string) => insertNode(i + 1, t)">
-        <div class="add-node-btn" @click.stop><MfIcon name="Plus" /> 插入节点</div>
+        <div class="add-node-btn" @click.stop><MfIcon name="Plus" /> {{ t('flows.insertNode') }}</div>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item v-for="(m, t) in NODE_META" :key="t" :command="t"><MfIcon :name="m.icon" />{{ m.label }}</el-dropdown-item>
+            <el-dropdown-item v-for="(m, t) in NODE_META" :key="t" :command="t"><MfIcon :name="m.icon" />{{ t(m.labelKey) }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -177,30 +177,30 @@
 
     <!-- 空状态:无节点 -->
     <div v-if="nodes.length === 0" class="empty-nodes">
-      <div class="empty-title">还没有节点</div>
-      <div class="empty-desc">旧版固定配置已作废,请从下方添加节点开始搭建(建议:触发 → 目标 → 播放内容 → 延迟 → 音量)。手动触发始终可用。</div>
+      <div class="empty-title">{{ t('flows.noNodesTitle') }}</div>
+      <div class="empty-desc">{{ t('flows.noNodesDesc') }}</div>
       <el-dropdown trigger="click" @command="(t: string) => insertNode(0, t)">
-        <el-button type="primary"><MfIcon name="Plus" />添加第一个节点</el-button>
+        <el-button type="primary"><MfIcon name="Plus" />{{ t('flows.addFirstNode') }}</el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item v-for="(m, t) in NODE_META" :key="t" :command="t"><MfIcon :name="m.icon" />{{ m.label }}</el-dropdown-item>
+            <el-dropdown-item v-for="(m, t) in NODE_META" :key="t" :command="t"><MfIcon :name="m.icon" />{{ t(m.labelKey) }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
     </div>
 
-    <div v-else class="end-node">结束</div>
+    <div v-else class="end-node">{{ t('flows.end') }}</div>
 
     <!-- 高级设置:等待上线 -->
     <div class="adv-settings">
-      <div class="adv-title">高级设置 — 等待目标上线</div>
+      <div class="adv-title">{{ t('flows.advTitle') }}</div>
       <div class="row-inline">
         <label class="inline-field">
-          <span class="inline-label">等待超时(秒,0=无限)</span>
+          <span class="inline-label">{{ t('flows.waitTimeout') }}</span>
           <el-input-number v-model="form.waitTimeoutSec" :min="0" :max="86400" :step="10" controls-position="right" size="small" />
         </label>
         <label class="inline-field">
-          <span class="inline-label">扫描间隔(秒)</span>
+          <span class="inline-label">{{ t('flows.scanInterval') }}</span>
           <el-input-number v-model="form.scanIntervalSec" :min="2" :max="60" :step="1" controls-position="right" size="small" />
         </label>
       </div>
@@ -211,6 +211,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
@@ -218,6 +219,7 @@ import MfIcon from "@/components/MfIcon.vue";
 
 const route = useRoute();
 const router = useRouter();
+const { t } = useI18n();
 const flowId = route.params.id as string;
 
 type NodeType = "trigger" | "target" | "content" | "playmode" | "volume" | "delay";
@@ -236,13 +238,13 @@ interface FlowNode {
   ms?: number;
 }
 
-const NODE_META: Record<NodeType, { label: string; icon: string; cls: string }> = {
-  trigger: { label: "触发 (Webhook)", icon: "Zap", cls: "node--trigger" },
-  target: { label: "目标设备/组", icon: "Radar", cls: "node--target" },
-  content: { label: "播放内容", icon: "ListMusic", cls: "node--content" },
-  playmode: { label: "播放模式", icon: "Shuffle", cls: "node--mode" },
-  volume: { label: "设置音量", icon: "Speaker", cls: "node--volume" },
-  delay: { label: "延迟", icon: "Clock", cls: "node--delay" },
+const NODE_META: Record<NodeType, { labelKey: string; icon: string; cls: string }> = {
+  trigger: { labelKey: "flows.nodeTrigger", icon: "Zap", cls: "node--trigger" },
+  target: { labelKey: "flows.nodeTarget", icon: "Radar", cls: "node--target" },
+  content: { labelKey: "flows.nodeContent", icon: "ListMusic", cls: "node--content" },
+  playmode: { labelKey: "flows.nodePlaymode", icon: "Shuffle", cls: "node--mode" },
+  volume: { labelKey: "flows.nodeVolume", icon: "Speaker", cls: "node--volume" },
+  delay: { labelKey: "flows.nodeDelay", icon: "Clock", cls: "node--delay" },
 };
 
 function nodeMeta(t: NodeType) { return NODE_META[t]; }
@@ -264,17 +266,17 @@ let uidSeq = 0;
 function nextUid(): string { return "n" + Date.now().toString(36) + "-" + uidSeq++; }
 
 const MODE_OPTIONS: Record<string, string> = {
-  order: "顺序播放",
-  shuffle: "随机播放",
-  all: "列表循环",
-  one: "单曲循环",
+  order: "flows.modeOrder",
+  shuffle: "flows.modeShuffle",
+  all: "flows.modeAll",
+  one: "flows.modeOne",
 };
 
 const CONTENT_TYPE_OPTIONS: Record<string, string> = {
-  playlist: "歌单",
-  album: "专辑",
-  artist: "艺人",
-  genre: "风格",
+  playlist: "flows.contentPlaylist",
+  album: "flows.contentAlbum",
+  artist: "flows.contentArtist",
+  genre: "flows.contentGenre",
 };
 
 const loading = ref(false);
@@ -289,7 +291,7 @@ const contentLoading = ref(false);
 const recommendCards = ref<any[]>([]);
 
 const form = reactive({
-  name: "新音流",
+  name: t('flows.newFlowName'),
   enabled: true,
   tokenId: "",
   waitTimeoutSec: 0,
@@ -374,23 +376,23 @@ const CONTENT_ENDPOINTS: Record<string, string> = {
 };
 
 function contentPlaceholder(node: FlowNode): string {
-  const map: Record<string, string> = { playlist: "搜索并选择要播放的歌单", album: "搜索并选择专辑", artist: "搜索并选择艺人", genre: "搜索并选择风格" };
-  return map[node.contentType || "playlist"] || "搜索并选择内容";
+  const map: Record<string, string> = { playlist: "flows.contentPhPlaylist", album: "flows.contentPhAlbum", artist: "flows.contentPhArtist", genre: "flows.contentPhGenre" };
+  return t(map[node.contentType || "playlist"] || "flows.contentPhDefault");
 }
 
 function contentOptionLabel(item: any, type: string): string {
   switch (type) {
-    case "album": return `${item.name || ""}${item.artist ? ` — ${item.artist}` : ""}(${item.songCount || 0}首)`;
-    case "artist": return `${item.name || ""}(${item.albumCount || 0}张专辑)`;
-    case "genre": return `${item.name || ""}(${item.songCount || 0}首)`;
-    default: return `${item.name || ""}(${item.songCount || 0}首 — ${platformLabel(item.sourcePlatform)})`;
+    case "album": return `${item.name || ""}${item.artist ? ` — ${item.artist}` : ""}${t('flows.optSongs', { count: item.songCount || 0 })}`;
+    case "artist": return `${item.name || ""}${t('flows.optArtistSuffix', { count: item.albumCount || 0 })}`;
+    case "genre": return `${item.name || ""}${t('flows.optSongs', { count: item.songCount || 0 })}`;
+    default: return `${item.name || ""}${t('flows.optDefaultSuffix', { count: item.songCount || 0, platform: platformLabel(item.sourcePlatform) })}`;
   }
 }
 
 function platformLabel(platform?: string): string {
   if (platform === "qq") return "QQ";
-  if (platform === "netease") return "网易云";
-  return platform || "本地";
+  if (platform === "netease") return t('flows.platformNetease');
+  return platform || t('flows.localSource');
 }
 
 async function fetchContentOptions(type: string, query: string) {
@@ -471,7 +473,7 @@ async function loadFlow() {
     }
     webhookUrl.value = buildWebhookUrl();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "加载失败");
+    ElMessage.error(e.response?.data?.error || t('common.loadFailed'));
   } finally { loading.value = false; }
 }
 
@@ -497,27 +499,27 @@ function toDefinition() {
 
 async function save() {
   const name = form.name.trim();
-  if (!name) { ElMessage.warning("请填写音流名称"); return; }
-  if (nodes.value.length === 0) { ElMessage.warning("请至少添加一个节点"); return; }
+  if (!name) { ElMessage.warning(t('flows.needName')); return; }
+  if (nodes.value.length === 0) { ElMessage.warning(t('flows.needNode')); return; }
   const targetNodes = nodes.value.filter((n) => n.type === "target");
-  if (targetNodes.length === 0) { ElMessage.warning("请添加「目标设备/组」节点"); return; }
-  if (!targetNodes.some((n) => (n.targets || []).length > 0)) { ElMessage.warning("「目标设备/组」节点请至少勾选一个目标"); return; }
+  if (targetNodes.length === 0) { ElMessage.warning(t('flows.needTargetNode')); return; }
+  if (!targetNodes.some((n) => (n.targets || []).length > 0)) { ElMessage.warning(t('flows.needCheckTarget')); return; }
   const contentNodes = nodes.value.filter((n) => n.type === "content");
-  if (contentNodes.some((n) => !n.id)) { ElMessage.warning("「播放内容」节点请选择要播放的内容(或删除该节点)"); return; }
+  if (contentNodes.some((n) => !n.id)) { ElMessage.warning(t('flows.needContent')); return; }
   saving.value = true;
   try {
     const body = { name, enabled: form.enabled, tokenId: form.tokenId, definition: toDefinition() };
     if (isNew) {
       // 新建模式:点保存才真正创建(避免"没点保存就默认保存")。
       const res = await api.post("/rest/api/v1/flows", body);
-      ElMessage.success("已创建");
+      ElMessage.success(t('flows.created'));
     } else {
       await api.put(`/rest/api/v1/flows/${flowId}`, body);
-      ElMessage.success("已保存");
+      ElMessage.success(t('flows.saved'));
     }
     router.push("/flows");
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
+    ElMessage.error(e.response?.data?.error || t('flows.saveFailed'));
   } finally { saving.value = false; }
 }
 
@@ -525,7 +527,7 @@ async function save() {
 const isNew = flowId === "new";
 
 function initNewFlow() {
-  form.name = "新音流";
+  form.name = t('flows.newFlowName');
   form.enabled = true;
   form.tokenId = "";
   form.waitTimeoutSec = 0;

@@ -7,6 +7,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { coverUrl } from "@/utils/cover";
 import { waitAsyncTask } from "@/utils/asyncTask";
+import { gt } from "@/locales";
 
 export interface Song {
   id: string;
@@ -40,7 +41,7 @@ function songToQueueItem(song: Song): any {
   };
   return {
     songId: song.id,
-    title: song.title || "未知",
+    title: song.title || gt("common.unknown"),
     artist: song.artist || undefined,
     album: song.album || undefined,
     albumId: song.albumId || undefined,
@@ -88,7 +89,7 @@ function remoteSongPayload(song: Song): any {
 /** 远程歌拿到真实 DB songId 后构造的可播放 Song(去掉 streamUrl,DLNA peer 可播)。 */
 function remoteToDbSong(remote: Song, dbId: string): Song {
   return {
-    id: dbId, title: remote.title || "未知", artist: remote.artist || "",
+    id: dbId, title: remote.title || gt("common.unknown"), artist: remote.artist || "",
     album: remote.album || "", duration: remote.duration || 0,
     coverArt: remote.coverArt, suffix: "mp3",
   };
@@ -113,8 +114,8 @@ async function importRemoteForCast(songs: Song[]): Promise<Map<string, Song>> {
       .post(`/rest/api/v1/song-search/${encodeURIComponent(provider)}/import`, {
         songs: group.map(remoteSongPayload),
       })
-      .catch((e: any) => { throw new Error(e?.message || "远程歌曲导入失败"); });
-    if (!res.data?.success || !res.data.taskId) throw new Error(res.data?.error || "远程歌曲导入失败");
+      .catch((e: any) => { throw new Error(e?.message || gt("player.remoteImportFailed")); });
+    if (!res.data?.success || !res.data.taskId) throw new Error(res.data?.error || gt("player.remoteImportFailed"));
     const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
     const imported = Array.isArray(r?.imported) ? r.imported : [];
     const ids = Array.isArray(r?.ids) ? r.ids : [];
@@ -135,7 +136,7 @@ async function importRemoteForCast(songs: Song[]): Promise<Map<string, Song>> {
 function queueItemToSong(it: any): Song {
   const s: Song = {
     id: it.songId,
-    title: it.title || "未知",
+    title: it.title || gt("common.unknown"),
     artist: it.artist || "",
     album: it.album || "",
     albumId: it.albumId,
@@ -259,8 +260,8 @@ export const usePlayerStore = defineStore("player", () => {
       const raw: RemoteState = {
         peerId,
         kind,
-        name: name || (kind === "group" ? "播放器群组"
-          : kind === "airplay" ? "AirPlay 设备" : "播放器"),
+        name: name || (kind === "group" ? gt("player.device.group")
+          : kind === "airplay" ? gt("player.device.airplay") : gt("player.device.player")),
         queue: [],
         index: -1,
         isPlaying: false,
@@ -325,9 +326,9 @@ export const usePlayerStore = defineStore("player", () => {
   const currentPeer = computed(() => peers.value.find(p => p.peerId === currentPeerId.value));
   const currentPeerName = computed(() => {
     const p = currentPeer.value;
-    if (!p) return isRemotePeer.value ? castDeviceName.value : "本机";
-    if (p.kind === "local") return "本机";
-    const suffix = p.kind === "airplay" ? " AirPlay" : p.kind === "group" ? " 群组" : " DLNA";
+    if (!p) return isRemotePeer.value ? castDeviceName.value : gt("player.localPeer");
+    if (p.kind === "local") return gt("player.localPeer");
+    const suffix = p.kind === "airplay" ? " AirPlay" : p.kind === "group" ? gt("player.groupSuffix") : " DLNA";
     return `${p.name}${suffix}`;
   });
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -478,7 +479,7 @@ export const usePlayerStore = defineStore("player", () => {
       } else {
         localIndex.value = (localIndex.value + 1) % localQueue.value.length;
       }
-      console.warn(`[player] 跳过已确认不可播的歌曲: ${localQueue.value[localIndex.value]?.title || localQueue.value[localIndex.value]?.id}`);
+      console.warn(`[player] Skipping known-unplayable song: ${localQueue.value[localIndex.value]?.title || localQueue.value[localIndex.value]?.id}`);
     }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
@@ -528,9 +529,9 @@ export const usePlayerStore = defineStore("player", () => {
     try { howl?.unload(); } catch {}
     howl = null;
     localFailStreak++;
-    console.warn(`[player] 播放失败(${localFailStreak}) songId=${songId}, 自动跳过`);
+    console.warn(`[player] Playback failed (${localFailStreak}) songId=${songId}, auto-skipping`);
     if (localFailStreak >= LOCAL_MAX_FAIL_STREAK) {
-      console.warn("[player] 连续失败过多,停止自动跳过");
+      console.warn("[player] Too many consecutive failures, stopping auto-skip");
       localFailStreak = 0;
       localIsPlaying.value = false;
       stopLocalProgressTimer();
@@ -650,7 +651,7 @@ export const usePlayerStore = defineStore("player", () => {
         if (String(r.songId).startsWith("remote:")) continue;
         if (!r.ok) {
           deadSongs.add(r.songId);
-          console.warn(`[player] 预探测不可播,提前跳过: ${r.songId} (${r.reason || "无可用音源"})`);
+          console.warn(`[player] Pre-probe unplayable, skipping early: ${r.songId} (${r.reason || "no available source"})`);
         } else {
           deadSongs.delete(r.songId);
         }
@@ -1109,8 +1110,8 @@ export const usePlayerStore = defineStore("player", () => {
       for (const p of remotePeers) {
         if (remoteStates.has(p.peerId)) continue; // already tracked
         // 禁用设备后端 reconcile 已移出 peers 列表,这里不出现。
-        const name = p.name || (p.kind === "airplay" ? "播放器"
-          : p.kind === "group" ? "播放器群组" : "播放器");
+        const name = p.name || (p.kind === "airplay" ? gt("player.device.airplay")
+          : p.kind === "group" ? gt("player.device.group") : gt("player.device.player"));
         const st = ensureRemoteState(p.peerId, name);
         await syncCastQueueFromBackend(st);
         const song = st.queue[st.index];
@@ -1158,7 +1159,7 @@ export const usePlayerStore = defineStore("player", () => {
   // 导入为可播在线歌曲,拿到 DB songId 后才能入队播放。单首走 castPlaySong(追加播放),
   // 多首走 castPlayQueue(整队播放);导入失败的远程歌跳过并提示。
   async function playRemoteOnPeer(st: RemoteState, songs: Song[], index: number) {
-    if (castImportRunning) { ElMessage.warning("正在导入远程歌曲,请稍候"); return; }
+    if (castImportRunning) { ElMessage.warning(gt("player.importingRemote")); return; }
     castImportRunning = true;
     try {
       const map = await importRemoteForCast(songs);
@@ -1166,29 +1167,29 @@ export const usePlayerStore = defineStore("player", () => {
       if (songs.length === 1) {
         const db = map.get(songs[0].id);
         if (db) castPlaySong(st, db);
-        else ElMessage.error("远程歌曲导入失败,无法在所选设备播放");
+        else ElMessage.error(gt("player.remoteImportDeviceFailed"));
       } else {
         const resolved = songs.map((s) => (isRemoteSong(s) ? (map.get(s.id) || s) : s));
         castPlayQueue(st, resolved, index);
-        if (missing.length) ElMessage.warning(`${missing.length} 首远程歌曲导入失败,已跳过`);
+        if (missing.length) ElMessage.warning(gt("player.remoteImportSkipped", { count: missing.length }));
       }
     } catch (e: any) {
-      ElMessage.error(e?.message || "远程歌曲导入失败,无法播放");
+      ElMessage.error(e?.message || gt("player.remoteImportPlayFailed"));
     } finally {
       castImportRunning = false;
     }
   }
 
   async function addRemoteToPeerQueue(st: RemoteState, song: Song) {
-    if (castImportRunning) { ElMessage.warning("正在导入远程歌曲,请稍候"); return; }
+    if (castImportRunning) { ElMessage.warning(gt("player.importingRemote")); return; }
     castImportRunning = true;
     try {
       const map = await importRemoteForCast([song]);
       const db = map.get(song.id);
-      if (!db) { ElMessage.error("远程歌曲导入失败,无法加入队列"); return; }
+      if (!db) { ElMessage.error(gt("player.remoteImportQueueFailed")); return; }
       castAddToQueue(st, db);
     } catch (e: any) {
-      ElMessage.error(e?.message || "远程歌曲导入失败,无法加入队列");
+      ElMessage.error(e?.message || gt("player.remoteImportQueueFailed"));
     } finally {
       castImportRunning = false;
     }
@@ -1323,7 +1324,7 @@ export const usePlayerStore = defineStore("player", () => {
         peers.value.unshift({
           peerId: localPeerId.value,
           kind: "local",
-          name: "本机",
+          name: gt("player.localPeer"),
           available: true,
           lastActiveAt: Date.now(),
         });
@@ -1335,7 +1336,7 @@ export const usePlayerStore = defineStore("player", () => {
     const authStore = useAuthStore();
     if (!authStore.userId) return;
     try {
-      await api.post("/rest/api/v1/peers/register", { name: authStore.username || "本机" });
+      await api.post("/rest/api/v1/peers/register", { name: authStore.username || gt("player.localPeer") });
     } catch {}
     startHeartbeat();
   }
@@ -1406,8 +1407,8 @@ export const usePlayerStore = defineStore("player", () => {
       // it. 本机 Howl and all other peers are NOT touched.
       let st = remoteStates.get(peerId);
       if (!st) {
-        let name = peerId.startsWith("group:") ? "播放器群组"
-          : peerId.startsWith("airplay:") ? "AirPlay 设备" : "播放器";
+        let name = peerId.startsWith("group:") ? gt("player.device.group")
+          : peerId.startsWith("airplay:") ? gt("player.device.airplay") : gt("player.device.player");
         try {
           const p = peers.value.find(x => x.peerId === peerId);
           if (p?.name) name = p.name;
@@ -1481,7 +1482,7 @@ export const usePlayerStore = defineStore("player", () => {
         case "peer_snapshot":
           peers.value = filterVisiblePeers(msg.peers || []);
           if (!peers.value.find(p => p.peerId === localPeerId.value)) {
-            peers.value.unshift({ peerId: localPeerId.value, kind: "local", name: "本机", available: true, lastActiveAt: Date.now() });
+            peers.value.unshift({ peerId: localPeerId.value, kind: "local", name: gt("player.localPeer"), available: true, lastActiveAt: Date.now() });
           }
           // 启动 5s 内 peer 注册晚于前端恢复窗口:后端把队列恢复到内存后,
           // WS 一推 peer_snapshot 就再补一次恢复,幂等(remoteStates 已跟踪的

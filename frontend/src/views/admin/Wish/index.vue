@@ -1,23 +1,23 @@
 <template>
   <div class="admin-wish">
     <div class="page-header">
-      <h2>未命中音乐</h2>
+      <h2>{{ t('admin.wish.title') }}</h2>
       <div class="header-actions">
-        <el-button :loading="loadingChunks" @click="openWishList"><MfIcon name="Copy" />未命中音乐列表</el-button>
-        <el-input v-model="searchQuery" placeholder="搜索未命中音乐..." prefix-icon="Search" clearable style="width: 260px" @input="onSearchInput" @clear="onSearchClear" />
+        <el-button :loading="loadingChunks" @click="openWishList"><MfIcon name="Copy" />{{ t('admin.wish.list') }}</el-button>
+        <el-input v-model="searchQuery" :placeholder="t('admin.wish.searchPlaceholder')" prefix-icon="Search" clearable style="width: 260px" @input="onSearchInput" @clear="onSearchClear" />
       </div>
     </div>
     <template v-if="wishes.length > 0">
       <el-table v-if="!isMobile" :data="wishes" stripe v-loading="loading">
         <el-table-column type="index" width="60" label="#" :index="indexMethod" />
-        <el-table-column prop="songTitle" label="歌曲" min-width="200" />
-        <el-table-column prop="artist" label="艺术家" width="150" />
-        <el-table-column prop="album" label="专辑" width="150" />
-        <el-table-column prop="notes" label="来源" width="180" show-overflow-tooltip />
-        <el-table-column label="状态" width="100">
+        <el-table-column prop="songTitle" :label="t('admin.wish.song')" min-width="200" />
+        <el-table-column prop="artist" :label="t('admin.wish.artist')" width="150" />
+        <el-table-column prop="album" :label="t('admin.wish.album')" width="150" />
+        <el-table-column prop="notes" :label="t('admin.wish.source')" width="180" show-overflow-tooltip />
+        <el-table-column :label="t('admin.wish.status')" width="100">
           <template #default="{ row }">
             <el-tag :type="row.status === 'fulfilled' ? 'success' : row.status === 'pending' ? 'warning' : 'info'" size="small">
-              {{ row.status === 'fulfilled' ? '已实现' : row.status === 'pending' ? '未适配' : row.status }}
+              {{ row.status === 'fulfilled' ? t('admin.wish.fulfilled') : row.status === 'pending' ? t('admin.wish.pending') : row.status }}
             </el-tag>
           </template>
         </el-table-column>
@@ -32,12 +32,12 @@
             <div class="m-sub">{{ row.notes }}</div>
           </div>
           <el-tag :type="row.status === 'fulfilled' ? 'success' : row.status === 'pending' ? 'warning' : 'info'" size="small">
-            {{ row.status === 'fulfilled' ? '已实现' : row.status === 'pending' ? '未适配' : row.status }}
+            {{ row.status === 'fulfilled' ? t('admin.wish.fulfilled') : row.status === 'pending' ? t('admin.wish.pending') : row.status }}
           </el-tag>
         </div>
       </div>
     </template>
-    <EmptyState v-else icon="box" title="暂无未命中音乐" description="导入外部歌单时未匹配的歌曲会出现在这里" compact />
+    <EmptyState v-else icon="box" :title="t('admin.wish.emptyTitle')" :description="t('admin.wish.emptyDesc')" compact />
     <div class="pagination-bar">
       <el-pagination
         layout="total, sizes, prev, pager, next, jumper"
@@ -52,9 +52,9 @@
     </div>
 
     <!-- Wish list dialog: split into copyable chunks (<= 1000 chars) -->
-    <el-dialog v-model="showListDialog" title="未命中音乐列表" width="620px" :append-to-body="true">
+    <el-dialog v-model="showListDialog" :title="t('admin.wish.list')" width="620px" :append-to-body="true">
       <div class="wish-list-info" v-if="totalWishes > 0">
-        共 {{ totalWishes }} 首未命中音乐,已分成 {{ chunks.length }} 段(每段不超过 1000 字符)
+        {{ t('admin.wish.listInfo', { total: totalWishes, count: chunks.length }) }}
       </div>
       <div class="wish-chunks" v-loading="loadingChunks">
         <div
@@ -70,11 +70,11 @@
             @click="copyChunk(idx)"
           >
             <MfIcon name="Copy" />
-            {{ chunk.label }}（{{ chunk.end - chunk.start + 1 }}首）
+            {{ chunk.label }}{{ t('admin.wish.labelSuffix', { count: chunk.end - chunk.start + 1 }) }}
           </el-button>
-          <span v-if="copiedIdx === idx" class="copied-tip">已复制</span>
+          <span v-if="copiedIdx === idx" class="copied-tip">{{ t('admin.wish.copied') }}</span>
         </div>
-        <div v-if="chunks.length === 0 && !loadingChunks" class="wish-empty">暂无未命中音乐</div>
+        <div v-if="chunks.length === 0 && !loadingChunks" class="wish-empty">{{ t('admin.wish.emptyTitle') }}</div>
       </div>
     </el-dialog>
   </div>
@@ -82,11 +82,13 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 
+const { t } = useI18n();
 const wishes = ref<any[]>([]);
 const loading = ref(false);
 const currentPage = ref(1);
@@ -122,7 +124,7 @@ async function openWishList() {
     totalWishes.value = lines.length;
     chunks.value = splitChunks(lines);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "加载未命中音乐列表失败");
+    ElMessage.error(e.response?.data?.error || t("admin.wish.loadFailed"));
     chunks.value = [];
   } finally {
     loadingChunks.value = false;
@@ -142,7 +144,7 @@ function splitChunks(lines: string[]): { label: string; start: number; end: numb
     const lineLen = line.length + newlineLen;
     if (currentLen + lineLen > CHUNK_MAX_CHARS && current.length > 0) {
       result.push({
-        label: `${startLine + 1}-${i}首`,
+        label: `${startLine + 1}-${i}`,
         start: startLine,
         end: i - 1,
         text: current.join("\n"),
@@ -156,7 +158,7 @@ function splitChunks(lines: string[]): { label: string; start: number; end: numb
   }
   if (current.length > 0) {
     result.push({
-      label: `${startLine + 1}-${lines.length}首`,
+      label: `${startLine + 1}-${lines.length}`,
       start: startLine,
       end: lines.length - 1,
       text: current.join("\n"),
@@ -172,10 +174,10 @@ async function copyChunk(idx: number) {
   try {
     await copyText(chunk.text);
     copiedIdx.value = idx;
-    ElMessage.success(`已复制 ${chunk.label}(${chunk.end - chunk.start + 1}首)到剪贴板`);
+    ElMessage.success(t("admin.wish.copiedMessage", { label: chunk.label, count: chunk.end - chunk.start + 1 }));
     setTimeout(() => { if (copiedIdx.value === idx) copiedIdx.value = -1; }, 2000);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "复制失败");
+    ElMessage.error(e.response?.data?.error || t("admin.wish.copyFailed"));
   }
 }
 

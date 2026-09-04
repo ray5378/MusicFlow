@@ -1,12 +1,11 @@
 <template>
   <div class="flows-page">
     <div class="page-header">
-      <h2>音流</h2>
-      <el-button type="primary" @click="createFlow"><MfIcon name="Plus" />新建音流</el-button>
+      <h2>{{ t('flows.title') }}</h2>
+      <el-button type="primary" @click="createFlow"><MfIcon name="Plus" />{{ t('flows.new') }}</el-button>
     </div>
     <div class="flows-tip">
-      音流是一条可反复触发的自动播放流程,由「节点」按顺序编排(类似 Node-RED):触发、目标设备/组、播放内容、播放模式、设置音量、延迟,
-      节点可拖拽排序、任意位置插入、可重复;外部通过「对外链接」(Webhook)或网页上手动「运行」触发。旧版固定配置已作废,请重新搭建节点流程。
+      {{ t('flows.tip') }}
     </div>
 
     <!-- 通用播放器控制(独立模块,与音流流程解耦;音流的对外链接复用其渠道 token 做鉴权) -->
@@ -26,8 +25,8 @@
         </div>
 
         <div class="flow-webhook">
-          <span class="wh-label">对外链接</span>
-          <IdBadge :id="f.webhookUrl || ''" copy-label="对外链接" style="min-width: 0" />
+          <span class="wh-label">{{ t('flows.webhookLabel') }}</span>
+          <IdBadge :id="f.webhookUrl || ''" :copy-label="t('flows.webhookLabel')" style="min-width: 0" />
         </div>
 
         <!-- 节点流程预览(节点化) -->
@@ -36,43 +35,43 @@
             <div class="step">
               <span class="step-icon" :style="{ background: nodeMeta(n.type).bg, color: nodeMeta(n.type).fg }"><MfIcon :name="nodeMeta(n.type).icon" /></span>
               <span class="step-body">
-                <span class="step-title">{{ nodeMeta(n.type).title }}</span>
+                <span class="step-title">{{ t(nodeMeta(n.type).titleKey) }}</span>
                 <span class="step-desc">{{ nodeSummary(n) }}</span>
               </span>
             </div>
             <div v-if="i < nodeList(f).length - 1" class="step-arrow"><span class="step-arrow-line"></span></div>
           </template>
         </div>
-        <div v-else class="flow-steps flow-steps--empty">未配置节点(旧版固定配置已作废,请编辑重新搭建)</div>
+        <div v-else class="flow-steps flow-steps--empty">{{ t('flows.noNodes') }}</div>
 
         <div class="flow-meta">
-          <span v-if="f.lastRunAt" class="meta-time">最近运行:{{ formatTime(f.lastRunAt) }}</span>
+          <span v-if="f.lastRunAt" class="meta-time">{{ t('flows.lastRunAt', { time: formatTime(f.lastRunAt) }) }}</span>
           <span v-if="f.lastRunError" class="meta-error" :title="f.lastRunError">{{ f.lastRunError }}</span>
         </div>
 
         <div class="flow-actions">
-          <el-button size="small" type="primary" @click="openEditor(f)"><MfIcon name="Pencil" />编辑</el-button>
-          <el-button size="small" :disabled="!f.enabled" :loading="runningId === f.id" @click="runFlow(f)"><MfIcon name="Play" />运行</el-button>
+          <el-button size="small" type="primary" @click="openEditor(f)"><MfIcon name="Pencil" />{{ t('flows.edit') }}</el-button>
+          <el-button size="small" :disabled="!f.enabled" :loading="runningId === f.id" @click="runFlow(f)"><MfIcon name="Play" />{{ t('flows.run') }}</el-button>
           <el-button size="small" @click="toggleEnabled(f)">
             <MfIcon :name="f.enabled ? 'CircleSlash' : 'CircleCheck'" />
-            {{ f.enabled ? '停用' : '启用' }}
+            {{ f.enabled ? t('flows.disable') : t('flows.enable') }}
           </el-button>
           <el-popconfirm
-            title="确定删除该音流?触发链接将立即失效"
-            confirm-button-text="删除"
-            cancel-button-text="取消"
+            :title="t('flows.deleteConfirm')"
+            :confirm-button-text="t('common.delete')"
+            :cancel-button-text="t('common.cancel')"
             width="240"
             @confirm="removeFlow(f)"
           >
             <template #reference>
-              <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
+              <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('common.delete') }}</el-button>
             </template>
           </el-popconfirm>
         </div>
       </div>
 
-      <el-empty v-if="!loading && flows.length === 0" description="还没有音流">
-        <el-button type="primary" @click="createFlow"><MfIcon name="Plus" />新建音流</el-button>
+      <el-empty v-if="!loading && flows.length === 0" :description="t('flows.empty')">
+        <el-button type="primary" @click="createFlow"><MfIcon name="Plus" />{{ t('flows.new') }}</el-button>
       </el-empty>
     </div>
   </div>
@@ -81,44 +80,46 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
 import PlayerControl from "./PlayerControl.vue";
 
 const router = useRouter();
+const { t } = useI18n();
 const flows = ref<any[]>([]);
 const loading = ref(false);
 const runningId = ref("");
 const peers = ref<any[]>([]);
 
-const MODE_TEXT: Record<string, string> = { order: "顺序播放", shuffle: "随机播放", all: "列表循环", one: "单曲循环" };
-function modeText(m: string): string { return MODE_TEXT[m] || m; }
+const MODE_TEXT: Record<string, string> = { order: "flows.modeOrder", shuffle: "flows.modeShuffle", all: "flows.modeAll", one: "flows.modeOne" };
+function modeText(m: string): string { return MODE_TEXT[m] ? t(MODE_TEXT[m]) : m; }
 
-const NODE_META: Record<string, { icon: string; title: string; bg: string; fg: string }> = {
-  trigger: { icon: "Zap", title: "触发 (Webhook)", bg: "rgba(255,197,45,0.18)", fg: "#ffc52d" },
-  target: { icon: "Radar", title: "目标设备/组", bg: "rgba(90,162,255,0.18)", fg: "#5aa2ff" },
-  content: { icon: "ListMusic", title: "播放内容", bg: "rgba(255,90,90,0.18)", fg: "var(--fnos-red)" },
-  playmode: { icon: "Shuffle", title: "播放模式", bg: "rgba(232,121,249,0.18)", fg: "#e879f9" },
-  volume: { icon: "Speaker", title: "设置音量", bg: "rgba(52,211,153,0.18)", fg: "#34d399" },
-  delay: { icon: "Clock", title: "延迟", bg: "rgba(34,211,238,0.18)", fg: "#22d3ee" },
+const NODE_META: Record<string, { icon: string; titleKey: string; bg: string; fg: string }> = {
+  trigger: { icon: "Zap", titleKey: "flows.nodeTrigger", bg: "rgba(255,197,45,0.18)", fg: "#ffc52d" },
+  target: { icon: "Radar", titleKey: "flows.nodeTarget", bg: "rgba(90,162,255,0.18)", fg: "#5aa2ff" },
+  content: { icon: "ListMusic", titleKey: "flows.nodeContent", bg: "rgba(255,90,90,0.18)", fg: "var(--fnos-red)" },
+  playmode: { icon: "Shuffle", titleKey: "flows.nodePlaymode", bg: "rgba(232,121,249,0.18)", fg: "#e879f9" },
+  volume: { icon: "Speaker", titleKey: "flows.nodeVolume", bg: "rgba(52,211,153,0.18)", fg: "#34d399" },
+  delay: { icon: "Clock", titleKey: "flows.nodeDelay", bg: "rgba(34,211,238,0.18)", fg: "#22d3ee" },
 };
 
-function nodeMeta(t: string) { return NODE_META[t] || { icon: "Workflow", title: t, bg: "rgba(255,255,255,0.1)", fg: "var(--fnos-text-secondary)" }; }
+function nodeMeta(t: string) { return NODE_META[t] || { icon: "Workflow", titleKey: "", bg: "rgba(255,255,255,0.1)", fg: "var(--fnos-text-secondary)" }; }
 
 function nodeList(f: any): any[] { return f.definition?.nodes || []; }
 
 function nodeSummary(n: any): string {
   switch (n.type) {
-    case "trigger": return "Webhook 触发(手动始终可用)";
+    case "trigger": return t('flows.summaryTrigger');
     case "target": {
-      const t = n.targets || [];
-      return t.length ? t.map(peerName).join("、") : "未选目标";
+      const tgt = n.targets || [];
+      return tgt.length ? tgt.map(peerName).join("、") : t('flows.noTarget');
     }
     case "content": {
-      if (!n.id) return "未选择内容";
-      const prefix: Record<string, string> = { playlist: "歌单", album: "专辑", artist: "艺人", genre: "风格" };
-      return `${prefix[n.contentType] || "歌单"}:${n.name || n.id}`;
+      if (!n.id) return t('flows.noContent');
+      const prefix: Record<string, string> = { playlist: "flows.contentPlaylist", album: "flows.contentAlbum", artist: "flows.contentArtist", genre: "flows.contentGenre" };
+      return `${t(prefix[n.contentType] || "flows.contentPlaylist")}:${n.name || n.id}`;
     }
     case "playmode": return modeText(n.mode);
     case "volume": return `${n.value ?? 0}%`;
@@ -129,14 +130,14 @@ function nodeSummary(n: any): string {
 
 function peerName(peerId: string): string {
   const p = peers.value.find((x) => x.peerId === peerId);
-  if (p) return p.kind === "local" ? "本机" : p.name;
+  if (p) return p.kind === "local" ? t('flows.localPeer') : p.name;
   const id = peerId.split(":")[1] || peerId;
   return id.slice(0, 8) + "…";
 }
 function statusText(f: any): string {
-  if (!f.enabled) return "已停用";
-  const map: Record<string, string> = { waiting: "等待设备上线", playing: "播放中", success: "成功", error: "失败", timeout: "等待超时" };
-  return f.lastRunAt ? (map[f.lastRunStatus] || "未运行") : "未运行";
+  if (!f.enabled) return t('flows.statusDisabled');
+  const map: Record<string, string> = { waiting: "flows.statusWaiting", playing: "flows.statusPlaying", success: "flows.statusSuccess", error: "flows.statusError", timeout: "flows.statusTimeout" };
+  return f.lastRunAt ? (map[f.lastRunStatus] ? t(map[f.lastRunStatus]) : t('flows.statusNotRun')) : t('flows.statusNotRun');
 }
 function formatTime(t: string): string {
   if (!t) return "";
@@ -173,10 +174,10 @@ async function runFlow(f: any) {
   runningId.value = f.id;
   try {
     await api.post(`/rest/api/v1/flows/${f.id}/run`);
-    ElMessage.success("已触发,后台开始持续扫描设备");
+    ElMessage.success(t('flows.triggered'));
     setTimeout(load, 1500);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "触发失败");
+    ElMessage.error(e.response?.data?.error || t('flows.triggerFailed'));
   } finally { runningId.value = ""; }
 }
 
@@ -184,15 +185,15 @@ async function toggleEnabled(f: any) {
   try {
     await api.put(`/rest/api/v1/flows/${f.id}`, { enabled: !f.enabled });
     await load();
-  } catch { ElMessage.error("操作失败"); }
+  } catch { ElMessage.error(t('common.operationFailed')); }
 }
 
 async function removeFlow(f: any) {
   try {
     await api.delete(`/rest/api/v1/flows/${f.id}`);
-    ElMessage.success(`已删除「${f.name}」`);
+    ElMessage.success(t('flows.deleted', { name: f.name }));
     await load();
-  } catch { ElMessage.error("删除失败"); }
+  } catch { ElMessage.error(t('flows.deleteFailed')); }
 }
 
 onMounted(() => { load(); loadPeers(); });

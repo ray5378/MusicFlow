@@ -5,12 +5,12 @@
         <MfIcon name="Heart" :filled="true" :size="64" class="fav-heart" />
       </div>
       <div class="fav-meta">
-        <div class="label">我喜欢</div>
-        <h1>我喜欢</h1>
-        <div class="info">{{ total }}首 · 喜欢的音乐都在这里</div>
+        <div class="label">{{ t('favorites.title') }}</div>
+        <h1>{{ t('favorites.title') }}</h1>
+        <div class="info">{{ t('favorites.info', { count: total }) }}</div>
         <div class="actions">
-          <el-button type="primary" @click="playAll" :disabled="total === 0">播放全部</el-button>
-          <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
+          <el-button type="primary" @click="playAll" :disabled="total === 0">{{ t('favorites.playAll') }}</el-button>
+          <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? t('favorites.removeFromPool') : t('favorites.addToPool') }}</el-button>
         </div>
       </div>
     </div>
@@ -18,37 +18,37 @@
     <!-- 收藏分区:歌曲 / 专辑 / 歌手,同一页切换显示 -->
     <div class="fav-tabs" role="tablist">
       <button
-        v-for="t in tabs"
-        :key="t.key"
+        v-for="tb in tabs"
+        :key="tb.key"
         class="fav-tab"
-        :class="{ active: tab === t.key }"
+        :class="{ active: tab === tb.key }"
         role="tab"
-        :aria-selected="tab === t.key"
-        @click="switchTab(t.key)"
+        :aria-selected="tab === tb.key"
+        @click="switchTab(tb.key)"
       >
-        {{ t.label }}<span class="count">{{ t.count }}</span>
+        {{ tb.label }}<span class="count">{{ tb.count }}</span>
       </button>
     </div>
 
     <!-- ===== 歌单收藏(默认分区) ===== -->
     <div v-show="tab === 'playlist'" class="fav-pane">
-      <EmptyState v-if="!loadingPlaylists && playlistTotal === 0" icon="List" title="还没有收藏的歌单" description="在歌单卡片点击红心即可收藏喜欢的歌单" compact />
+      <EmptyState v-if="!loadingPlaylists && playlistTotal === 0" icon="List" :title="t('favorites.emptyPlaylistTitle')" :description="t('favorites.emptyPlaylistDesc')" compact />
       <div v-else class="playlist-grid virt-grid" ref="playlistGridEl" v-loading="loadingPlaylists" :style="{ height: playlistFrameHeight }">
         <template v-for="g in playlistViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
           <div
             v-if="g.item"
             class="playlist-card"
             :style="playlistCardStyle(g.idx)"
-            @contextmenu="openContextMenu($event, plActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
-            v-longpress="() => openActionSheet(plActions(g.item), g.item.name, `${g.item.songCount} 首 · ${formatDuration(g.item.duration)}`)"
+            @contextmenu="openContextMenu($event, plActions(g.item), g.item.name, playlistMeta(g.item))"
+            v-longpress="() => openActionSheet(plActions(g.item), g.item.name, playlistMeta(g.item))"
           >
             <div class="playlist-cover mf-coverwrap" @click="openPl(g.item)">
               <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
               <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
-              <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playPl(g.item)" />
+              <CoverPlay size="md" :label="t('favorites.play', { name: g.item.name })" :action="() => playPl(g.item)" />
               <button
                 class="card-fav-btn active"
-                title="取消收藏歌单"
+                :title="t('favorites.unfavPlaylist')"
                 @click.stop="togglePlFav(g.item)"
               >
                 <MfIcon name="Heart" :filled="true" :size="16" />
@@ -56,7 +56,7 @@
             </div>
             <div class="playlist-info" @click="openPl(g.item)">
               <div class="playlist-name">{{ g.item.name }}</div>
-              <div class="playlist-meta">{{ g.item.songCount }}首 · {{ formatDuration(g.item.duration) }}</div>
+              <div class="playlist-meta">{{ playlistMeta(g.item) }}</div>
             </div>
           </div>
           <div v-else class="playlist-card is-placeholder" :style="playlistCardStyle(g.idx)">
@@ -70,12 +70,12 @@
     <!-- ===== 歌曲收藏 ===== -->
     <div v-show="tab === 'song'" class="fav-pane">
       <SongTable :songs="songs" :loading="loading" show-source show-bitrate :on-window="onWindow" @play="playSong" />
-      <EmptyState v-if="!loading && total === 0" icon="Heart" title="还没有喜欢的歌曲" description="在歌曲列表点击红心即可收藏喜欢的音乐" compact />
+      <EmptyState v-if="!loading && total === 0" icon="Heart" :title="t('favorites.emptySongsTitle')" :description="t('favorites.emptySongsDesc')" compact />
     </div>
 
     <!-- ===== 专辑收藏 ===== -->
     <div v-show="tab === 'album'" class="fav-pane">
-      <EmptyState v-if="!loadingAlbums && albumTotal === 0" icon="Disc3" title="还没有收藏的专辑" description="在专辑封面点击红心即可收藏专辑" compact />
+      <EmptyState v-if="!loadingAlbums && albumTotal === 0" icon="Disc3" :title="t('favorites.emptyAlbumTitle')" :description="t('favorites.emptyAlbumDesc')" compact />
       <div v-else class="album-grid virt-grid" ref="albumGridEl" v-loading="loadingAlbums" :style="{ height: albumFrameHeight }">
         <template v-for="g in albumViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
           <div
@@ -88,11 +88,11 @@
             <div class="album-cover mf-coverwrap" @click="openAlbum(g.item)">
               <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
               <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
-              <CoverPlay size="md" :label="`播放 ${g.item.name}`" :action="() => playAl(g.item)" />
+              <CoverPlay size="md" :label="t('favorites.play', { name: g.item.name })" :action="() => playAl(g.item)" />
               <button
                 class="card-fav-btn"
                 :class="{ active: fav.isAlbumFavorite(g.item.id) }"
-                :title="fav.isAlbumFavorite(g.item.id) ? '取消收藏专辑' : '收藏专辑'"
+                :title="fav.isAlbumFavorite(g.item.id) ? t('favorites.unfavAlbum') : t('favorites.favAlbum')"
                 @click.stop="toggleAlbumFav(g.item)"
               >
                 <MfIcon name="Heart" :filled="fav.isAlbumFavorite(g.item.id)" :size="16" />
@@ -101,7 +101,7 @@
             <div class="album-info" @click="openAlbum(g.item)">
               <div class="album-name">{{ g.item.name }}</div>
               <div class="album-artist">{{ g.item.artist }}</div>
-              <div class="album-meta">{{ g.item.year || '' }} {{ g.item.songCount }}首</div>
+              <div class="album-meta">{{ g.item.year || '' }} {{ t('favorites.songsCount', { count: g.item.songCount }) }}</div>
             </div>
           </div>
           <div v-else class="album-card is-placeholder" :style="albumCardStyle(g.idx)">
@@ -114,7 +114,7 @@
 
     <!-- ===== 歌手收藏 ===== -->
     <div v-show="tab === 'artist'" class="fav-pane">
-      <EmptyState v-if="!loadingArtists && artistTotal === 0" icon="User" title="还没有收藏的歌手" description="在歌手头像点击红心即可收藏喜欢的歌手" compact />
+      <EmptyState v-if="!loadingArtists && artistTotal === 0" icon="User" :title="t('favorites.emptyArtistTitle')" :description="t('favorites.emptyArtistDesc')" compact />
       <div v-else class="artist-grid virt-grid" ref="artistGridEl" v-loading="loadingArtists" :style="{ height: artistFrameHeight }">
         <template v-for="g in artistViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
           <div
@@ -127,11 +127,11 @@
             <div class="artist-avatar mf-coverwrap" @click="openArtist(g.item)">
               <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
               <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
-              <CoverPlay size="md" :label="`播放 ${g.item.name} 的歌曲`" :action="() => playAr(g.item)" />
+              <CoverPlay size="md" :label="t('favorites.playArtist', { name: g.item.name })" :action="() => playAr(g.item)" />
               <button
                 class="card-fav-btn"
                 :class="{ active: fav.isArtistFavorite(g.item.id) }"
-                :title="fav.isArtistFavorite(g.item.id) ? '取消收藏艺人' : '收藏艺人'"
+                :title="fav.isArtistFavorite(g.item.id) ? t('favorites.unfavArtist') : t('favorites.favArtist')"
                 @click.stop="toggleArtistFav(g.item)"
               >
                 <MfIcon name="Heart" :filled="fav.isArtistFavorite(g.item.id)" :size="16" />
@@ -153,6 +153,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
@@ -170,6 +171,7 @@ import { coverUrl } from "@/utils/cover";
 
 const router = useRouter();
 const playerStore = usePlayerStore();
+const { t } = useI18n();
 const { openContextMenu, openActionSheet, menuGuard, albumActions, artistActions } = useItemActions();
 const play = usePlayContent();
 const fav = useFavoritesStore();
@@ -178,10 +180,10 @@ const fav = useFavoritesStore();
 type FavTab = "playlist" | "song" | "album" | "artist";
 const tab = ref<FavTab>("playlist");
 const tabs = computed(() => [
-  { key: "playlist" as FavTab, label: "歌单", count: playlistTotal.value },
-  { key: "song" as FavTab, label: "歌曲", count: total.value },
-  { key: "album" as FavTab, label: "专辑", count: albumTotal.value },
-  { key: "artist" as FavTab, label: "歌手", count: artistTotal.value },
+  { key: "playlist" as FavTab, label: t("favorites.tab.playlist"), count: playlistTotal.value },
+  { key: "song" as FavTab, label: t("favorites.tab.song"), count: total.value },
+  { key: "album" as FavTab, label: t("favorites.tab.album"), count: albumTotal.value },
+  { key: "artist" as FavTab, label: t("favorites.tab.artist"), count: artistTotal.value },
 ]);
 function switchTab(key: FavTab) {
   if (tab.value === key) return;
@@ -289,14 +291,14 @@ async function togglePool() {
     if (inPool.value) {
       await api.delete("/rest/api/v1/recommend-pool/favorites");
       inPool.value = false;
-      ElMessage.success("已将「我喜欢的音乐」移出每日推荐池");
+      ElMessage.success(t("favorites.poolRemoved"));
     } else {
       const res = await api.post("/rest/api/v1/recommend-pool/favorites");
       inPool.value = true;
-      ElMessage.success(res.data.message || "已将「我喜欢的音乐」加入每日推荐池");
+      ElMessage.success(res.data.message || t("favorites.poolAdded"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
 }
 
@@ -312,41 +314,40 @@ function openArtist(artist: any) {
   router.push(`/artists/${artist.id}`);
 }
 function albumMeta(album: any) {
-  return [album.artist, album.year, album.songCount ? `${album.songCount} 首` : ""].filter(Boolean).join(" · ");
+  return [album.artist, album.year, album.songCount ? t("favorites.songsCount", { count: album.songCount }) : ""].filter(Boolean).join(" · ");
 }
 function formatAlbumCount(n: number) {
   if (!n || n <= 0) return '';
-  if (n === 1) return '1 张专辑';
-  return `${n} 张专辑`;
+  return t("favorites.albumBanner", { count: n });
 }
 async function playAl(album: any) {
   if (menuGuard()) return;
   const n = await play.playAlbum(album.id);
-  if (n) ElMessage.success(`正在播放「${album.name}」`);
-  else ElMessage.warning("该专辑暂无可播放歌曲");
+  if (n) ElMessage.success(t("favorites.playing", { name: album.name }));
+  else ElMessage.warning(t("favorites.albumNoPlayable"));
 }
 async function playAr(artist: any) {
   if (menuGuard()) return;
   const n = await play.playArtist(artist.id);
-  if (n) ElMessage.success(`正在播放「${artist.name}」的 ${n} 首歌曲`);
-  else ElMessage.warning("该艺人暂无可播放歌曲");
+  if (n) ElMessage.success(t("favorites.playingArtist", { name: artist.name, count: n }));
+  else ElMessage.warning(t("favorites.artistNoPlayable"));
 }
 async function toggleAlbumFav(album: any) {
   if (menuGuard()) return;
   try {
     const on = await fav.toggleAlbumFavorite(album.id);
-    ElMessage.success(on ? "已收藏专辑" : "已取消收藏专辑");
+    ElMessage.success(on ? t("favorites.albumFaved") : t("favorites.albumUnfaved"));
   } catch {
-    ElMessage.error("操作失败");
+    ElMessage.error(t("common.operationFailed"));
   }
 }
 async function toggleArtistFav(artist: any) {
   if (menuGuard()) return;
   try {
     const on = await fav.toggleArtistFavorite(artist.id);
-    ElMessage.success(on ? "已收藏艺人" : "已取消收藏艺人");
+    ElMessage.success(on ? t("favorites.artistFaved") : t("favorites.artistUnfaved"));
   } catch {
-    ElMessage.error("操作失败");
+    ElMessage.error(t("common.operationFailed"));
   }
 }
 
@@ -354,7 +355,11 @@ async function toggleArtistFav(artist: any) {
 function formatDuration(sec: number) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  return h > 0 ? `${h}小时${m}分钟` : `${m}分钟`;
+  if (h > 0) return m > 0 ? t("favorites.duration.hm", { h, m }) : t("favorites.duration.h", { h });
+  return t("favorites.duration.m", { m });
+}
+function playlistMeta(pl: any) {
+  return `${t("favorites.songsCount", { count: pl.songCount })} · ${formatDuration(pl.duration)}`;
 }
 function openPl(pl: any) {
   if (menuGuard()) return;
@@ -363,27 +368,27 @@ function openPl(pl: any) {
 async function playPl(pl: any) {
   if (menuGuard()) return;
   const n = await play.playPlaylist(pl.id);
-  if (n) ElMessage.success(`正在播放「${pl.name}」`);
-  else ElMessage.warning("该歌单暂无可播放歌曲");
+  if (n) ElMessage.success(t("favorites.playing", { name: pl.name }));
+  else ElMessage.warning(t("favorites.playlistNoPlayable"));
 }
 async function togglePlFav(pl: any) {
   if (menuGuard()) return;
   try {
     const res = await api.post(`/rest/api/v1/playlists/${pl.id}/favorite`, { favorite: false });
     if (res.data.success) {
-      ElMessage.success(`已取消收藏「${pl.name}」`);
+      ElMessage.success(t("favorites.unfavorited", { name: pl.name }));
       playlistGrid.reload();
     }
   } catch {
-    ElMessage.error("操作失败");
+    ElMessage.error(t("common.operationFailed"));
   }
 }
 function plActions(pl: any): MenuAction[] {
   return [
-    { label: "播放全部", icon: Play, onClick: () => playPl(pl) },
-    { label: "查看歌单", icon: Folder, onClick: () => openPl(pl) },
+    { label: t("favorites.playAll"), icon: Play, onClick: () => playPl(pl) },
+    { label: t("favorites.viewPlaylist"), icon: Folder, onClick: () => openPl(pl) },
     { divider: true },
-    { label: "取消收藏", icon: Heart, onClick: () => togglePlFav(pl) },
+    { label: t("favorites.unfavorite"), icon: Heart, onClick: () => togglePlFav(pl) },
   ];
 }
 

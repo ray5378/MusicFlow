@@ -1,3 +1,5 @@
+import { translate } from "../i18n.js";
+
 // ==================== 统一业务错误码 ====================
 //
 // 背景:业务 API 之前只有 `success:false + 中文 message`,前端只能匹配中文字符串,
@@ -10,6 +12,9 @@
 //   - code 用**稳定字符串**而非数字(可读、可扩展、无版本冲突)。
 //   - 鉴权失败(401/403)仍走 OpenSubsonic subsonic-response 格式(code 40/50),
 //     不归本枚举管。
+//
+// i18n:apiError 的第二个参数既可是已入 i18n catalog 的 key(如 "errors.forbidden.operation",
+// 按请求语言渲染),也可继续传中文原文(未迁移时原样透传,zh 正确)。见 src/i18n.ts。
 export enum BusinessErrorCode {
   /** 入参缺失 / 类型错误 / 越界(空值、非法枚举、数值范围) */
   INVALID_PARAM = "INVALID_PARAM",
@@ -34,9 +39,9 @@ export interface ApiErrorBody {
   error: string;
 }
 
-/** 构造统一业务错误响应体。message 保持中文可读(前端既有匹配不受影响)。 */
-export function apiError(code: BusinessErrorCode, message: string): ApiErrorBody {
-  return { success: false, code, error: message };
+/** 构造统一业务错误响应体。message 既可是中文原文,也可是 i18n catalog key(按请求语言渲染)。 */
+export function apiError(code: BusinessErrorCode, message: string, params?: Record<string, string | number>): ApiErrorBody {
+  return { success: false, code, error: translate(message, params) };
 }
 
 /** 构造统一成功响应体(可选附加 data)。 */

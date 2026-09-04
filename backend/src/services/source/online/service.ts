@@ -18,6 +18,7 @@ import { songs, artists, albums } from "../../../db/schema.js";
 import { eq, inArray, and, isNotNull } from "drizzle-orm";
 import { cacheRemoteCover, copyOnlineCoverToRef } from "../../playlistCover.js";
 import { invalidateArtistList } from "../../../utils/artistListCache.js";
+import { translate } from "../../../i18n.js";
 import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./index.js";
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
@@ -111,7 +112,7 @@ async function planSongInsert(
   coverUrls: Map<string, string>,
   nowIn?: string,
 ): Promise<PlanResult> {
-  if (!configured || !provider) return { success: false, error: "在线源未启用或未配置" };
+  if (!configured || !provider) return { success: false, error: translate("errors.online.notConfigured") };
 
   const fingerprint = `${providerId}:${song.source}:${song.id}`;
   let existing = existingFingerprints.get(fingerprint);

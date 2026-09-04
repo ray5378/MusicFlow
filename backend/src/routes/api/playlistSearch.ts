@@ -15,6 +15,7 @@ import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
 import { createLogger } from "../../utils/logger.js";
+import { translate } from "../../i18n.js";
 
 const log = createLogger("PLAYLIST-SEARCH");
 export const playlistSearchRoutes = new Hono();
@@ -53,7 +54,7 @@ playlistSearchRoutes.post("/v1/playlist-search/aggregate/search", async (c) => {
   markInteractiveStart();
   try {
     const q = String((await c.req.json().catch(() => ({}))).q || "").trim();
-    if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+    if (!q) return c.json({ success: false, error: translate("errors.search.queryRequired") });
     const providers = getEnabledByCapability("playlistSearch").filter((p) => typeof p.impl?.searchPlaylists === "function");
     if (providers.length === 0) return c.json({ success: true, total: 0, providers: [], playlists: [] });
 
@@ -89,7 +90,7 @@ playlistSearchRoutes.post("/v1/playlist-search/aggregate/search", async (c) => {
       playlists,
     });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "搜索失败" });
+    return c.json({ success: false, error: e.message || translate("errors.search.failed") });
   } finally {
     markInteractiveEnd();
   }
@@ -104,11 +105,11 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/search", async (c) =>
   const providerId = c.req.param("providerId")!;
   const plugin = getEnabledByCapability("playlistSearch").find((p) => p.manifest.id === providerId);
   if (!plugin || typeof plugin.impl?.searchPlaylists !== "function") {
-    return c.json({ success: false, error: "未找到已启用的歌单搜索插件", providers: getEnabledByCapability("playlistSearch").map((p) => p.manifest.id) }, 404);
+    return c.json({ success: false, error: translate("errors.search.noPlaylistPlugin"), providers: getEnabledByCapability("playlistSearch").map((p) => p.manifest.id) }, 404);
   }
   const body = await c.req.json().catch(() => ({}));
   const q = String(body.q || "").trim();
-  if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+  if (!q) return c.json({ success: false, error: translate("errors.search.queryRequired") });
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
   const config = getPluginConfig(providerId) || {};
   const res = await plugin.impl.searchPlaylists(config, { query: q, sources });
@@ -126,7 +127,7 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/search", async (c) =>
     }));
     return c.json({ success: true, total: playlists.length, playlists });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "搜索失败" });
+    return c.json({ success: false, error: e.message || translate("errors.search.failed") });
   } finally {
     markInteractiveEnd();
   }
@@ -142,12 +143,12 @@ playlistSearchRoutes.post("/v1/playlist-search/:providerId/import", async (c) =>
   const providerId = c.req.param("providerId")!;
   const plugin = getEnabledByCapability("playlistSearch").find((p) => p.manifest.id === providerId);
   if (!plugin || typeof plugin.impl?.playlistSongs !== "function") {
-    return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取歌单歌曲)" }, 404);
+    return c.json({ success: false, error: translate("errors.plugin.noPlaylistSongs") }, 404);
   }
   const body = await c.req.json().catch(() => ({}));
   const source = String(body.source || "").trim();
   const id = String(body.id || "").trim();
-  if (!source || !id) return c.json({ success: false, error: "缺少歌单 source/id" });
+  if (!source || !id) return c.json({ success: false, error: translate("errors.playlist.refRequired") });
   const fallbackName = String(body.name || "").trim();
   const cover = String(body.cover || "").trim();
   const sourceUrl = syntheticSourceUrl(providerId, source, id);
@@ -170,11 +171,11 @@ playlistSearchRoutes.get("/v1/playlist-search/:providerId/items", async (c) => {
     const providerId = c.req.param("providerId")!;
     const plugin = getEnabledByCapability("playlistSearch").find((p) => p.manifest.id === providerId);
     if (!plugin || typeof plugin.impl?.playlistSongs !== "function") {
-      return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取歌单歌曲)" }, 404);
+      return c.json({ success: false, error: translate("errors.plugin.noPlaylistSongs") }, 404);
     }
     const source = String(c.req.query("source") || "").trim();
     const id = String(c.req.query("id") || "").trim();
-    if (!source || !id) return c.json({ success: false, error: "缺少歌单 source/id" });
+    if (!source || !id) return c.json({ success: false, error: translate("errors.playlist.refRequired") });
     const config = getPluginConfig(providerId) || {};
     const res = await plugin.impl.playlistSongs(config, source, id);
     const list = Array.isArray(res?.songs) ? res.songs : [];
@@ -193,7 +194,7 @@ playlistSearchRoutes.get("/v1/playlist-search/:providerId/items", async (c) => {
     }));
     return c.json({ success: true, total: items.length, items });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "拉取失败" });
+    return c.json({ success: false, error: e.message || translate("errors.plugin.fetchFailed") });
   } finally {
     markInteractiveEnd();
   }

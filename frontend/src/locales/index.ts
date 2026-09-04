@@ -18,3 +18,8 @@ export const i18n = createI18n({
     "en-US": enUS,
   },
 });
+
+// 供无组件上下文的 .ts 模块(utils/composables/stores)调用的全局翻译 helper。
+export function gt(key: string, params?: Record<string, unknown>): string {
+  return i18n.global.t(key, params || {});
+}

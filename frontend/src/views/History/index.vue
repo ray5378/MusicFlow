@@ -1,16 +1,16 @@
 <template>
   <div class="history-page">
     <div class="page-header">
-      <h2>播放历史<template v-if="total > 0">（{{ total }} 首）</template></h2>
+      <h2>{{ t('history.title') }}<template v-if="total > 0">{{ t('history.count', { count: total }) }}</template></h2>
       <el-popconfirm
-        title="确定清空所有播放历史？此操作不可恢复"
-        confirm-button-text="清空"
-        cancel-button-text="取消"
+        :title="t('history.clearConfirm')"
+        :confirm-button-text="t('history.clearAction')"
+        :cancel-button-text="t('common.cancel')"
         @confirm="clearAllHistory"
         width="220"
       >
         <template #reference>
-          <el-button type="danger" :loading="clearing" plain :disabled="total === 0"><MfIcon name="Trash2" />清空历史</el-button>
+          <el-button type="danger" :loading="clearing" plain :disabled="total === 0"><MfIcon name="Trash2" />{{ t('history.clearButton') }}</el-button>
         </template>
       </el-popconfirm>
     </div>
@@ -20,6 +20,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import api from "@/api";
@@ -27,6 +28,7 @@ import SongTable from "@/components/SongTable.vue";
 import { useInfiniteList } from "@/composables/useInfiniteList";
 
 const playerStore = usePlayerStore();
+const { t } = useI18n();
 const { list, loading, total, init, onWindow } = useInfiniteList<any>(
   async (offset, size) => {
     const page = Math.floor(offset / size) + 1;
@@ -47,9 +49,9 @@ async function clearAllHistory() {
   try {
     await api.delete("/rest/api/v1/history");
     init();
-    ElMessage.success("播放历史已清空");
+    ElMessage.success(t("history.cleared"));
   } catch {
-    ElMessage.error("清空失败,请重试");
+    ElMessage.error(t("history.clearFailed"));
   } finally {
     clearing.value = false;
   }

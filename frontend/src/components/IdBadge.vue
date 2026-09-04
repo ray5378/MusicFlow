@@ -1,5 +1,5 @@
 <template>
-  <span class="id-badge" :class="{ copied: copied === id }" :title="`点击复制:${id}`" @click.stop="onCopy">
+  <span class="id-badge" :class="{ copied: copied === id }" :title="t('idBadge.copyTip', { id })" @click.stop="onCopy">
     <span class="id-prefix">{{ prefix }}</span>
     <span class="id-value">{{ id }}</span>
     <MfIcon name="CopyDocument" class="id-copy-icon" />
@@ -8,8 +8,11 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import MfIcon from "./MfIcon.vue";
+
+const { t } = useI18n();
 
 const props = withDefaults(defineProps<{
   id: string;
@@ -35,11 +38,11 @@ async function onCopy() {
       document.body.removeChild(ta);
     }
     copied.value = props.id;
-    if (props.copyLabel) ElMessage.success(`已复制${props.copyLabel}`);
+    if (props.copyLabel) ElMessage.success(t("idBadge.copied", { label: props.copyLabel }));
     if (timer.value) clearTimeout(timer.value);
     timer.value = setTimeout(() => { copied.value = ""; }, 2000);
   } catch {
-    ElMessage.error("复制失败");
+    ElMessage.error(t("idBadge.copyFailed"));
   }
 }
 </script>

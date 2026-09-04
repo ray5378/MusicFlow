@@ -5,11 +5,11 @@
         <el-checkbox :model-value="allSelected" :indeterminate="someSelected" @change="toggleAll" />
       </span>
       <span class="col col-index">#</span>
-      <span class="col col-title">标题</span>
-      <span v-if="showSource" class="col col-source">来源</span>
-      <span v-if="showArtist" class="col col-artist">艺术家</span>
-      <span v-if="showAlbum" class="col col-album">专辑</span>
-      <span v-if="showPlayedAt" class="col col-played-at">播放时间</span>
+      <span class="col col-title">{{ t('songTable.title') }}</span>
+      <span v-if="showSource" class="col col-source">{{ t('songTable.source') }}</span>
+      <span v-if="showArtist" class="col col-artist">{{ t('songTable.artist') }}</span>
+      <span v-if="showAlbum" class="col col-album">{{ t('songTable.album') }}</span>
+      <span v-if="showPlayedAt" class="col col-played-at">{{ t('songTable.playedAt') }}</span>
       <span class="col col-duration"><MfIcon name="Clock" /></span>
       <span class="col col-actions"></span>
     </div>
@@ -62,12 +62,12 @@
             <MfIcon v-if="row.isMain && row.groupId" name="ChevronDown" class="group-caret" :class="{ open: isGroupExpanded(row.groupId) }" :size="14" @click.stop="toggleGroup(row.groupId)" />
             <span class="sub-prefix" v-if="!row.isMain && row.groupId">{{ sourceShortLabel(row.song) }}</span>
             {{ row.song.title }}
-            <el-tooltip v-if="row.song.isMatched === false" :content="row.song.unavailableReason || '曲库中未找到'" placement="top">
+            <el-tooltip v-if="row.song.isMatched === false" :content="row.song.unavailableReason || t('songTable.libraryNotFound')" placement="top">
               <MfIcon name="TriangleAlert" class="unmatched-icon" :size="14" />
             </el-tooltip>
           </div>
           <div class="song-bitrate" v-if="showBitrate && row.song.bitRate">{{ row.song.bitRate }}kbps · {{ (row.song.suffix || '').toUpperCase() }}</div>
-          <div class="song-mobile-meta">{{ [row.song.artist, row.song.album].filter(Boolean).join(' · ') || (row.song.isMatched === false ? '未匹配' : '—') }}</div>
+          <div class="song-mobile-meta">{{ [row.song.artist, row.song.album].filter(Boolean).join(' · ') || (row.song.isMatched === false ? t('songTable.unmatched') : '—') }}</div>
         </div>
       </span>
       <span v-if="showSource" class="col col-source">
@@ -78,7 +78,7 @@
           @click.stop="toggleGroup(row.groupId)"
         >
           <span class="source-badge" :style="{ backgroundColor: sourceLabelFor(row.song)!.color }">{{ sourceLabelFor(row.song)!.label }}</span>
-          <span class="source-count">{{ isGroupExpanded(row.groupId) ? '收起' : '+' + (row.song.sources.length - 1) }}</span>
+          <span class="source-count">{{ isGroupExpanded(row.groupId) ? t('layout.collapse') : '+' + (row.song.sources.length - 1) }}</span>
         </span>
         <template v-else>
           <el-tooltip v-if="sourceLabelFor(row.song)" :content="sourceTooltip(row.song)" placement="top">
@@ -93,13 +93,13 @@
       <span class="col col-duration">{{ formatDuration(row.song.duration) }}</span>
       <span class="col col-actions">
         <slot name="row-actions" :row="row.song" />
-        <button v-if="!remote" class="row-btn" :class="{ active: fav.isFavorite(row.song.id) }" @click.stop="toggleFavorite(row.song)" :title="fav.isFavorite(row.song.id) ? '取消喜欢' : '我喜欢'">
+        <button v-if="!remote" class="row-btn" :class="{ active: fav.isFavorite(row.song.id) }" @click.stop="toggleFavorite(row.song)" :title="fav.isFavorite(row.song.id) ? t('layout.unlike') : t('songTable.like')">
           <MfIcon name="Heart" :filled="fav.isFavorite(row.song.id)" :size="16" />
         </button>
-        <button v-if="!remote" class="row-btn" @click.stop="openAddToPlaylist(row.song)" title="添加到歌单">
+        <button v-if="!remote" class="row-btn" @click.stop="openAddToPlaylist(row.song)" :title="t('layout.addToPlaylist')">
           <MfIcon name="Plus" :size="16" />
         </button>
-        <button class="row-btn" @click.stop="onContext(row.song, $event)" title="更多操作">
+        <button class="row-btn" @click.stop="onContext(row.song, $event)" :title="t('songTable.moreActions')">
           <MfIcon name="MoreHorizontal" :size="16" />
         </button>
       </span>
@@ -120,13 +120,14 @@
 
     <div v-if="!loading && songs.length === 0" class="empty-state">
       <MfIcon name="Headphones" :size="48" />
-      <p>{{ emptyText || '暂无歌曲' }}</p>
+      <p>{{ emptyText || t('songTable.empty') }}</p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, useSlots } from "vue";
+import { useI18n } from "vue-i18n";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { useItemActions } from "@/composables/useItemActions";
@@ -191,6 +192,8 @@ const fav = useFavoritesStore();
 const isMobile = useIsMobile();
 const { openContextMenu, openActionSheet, menuGuard, songActions, openAddToPlaylist } = useItemActions();
 
+const { t } = useI18n();
+
 const isCurrent = (song: any) => !!playerStore.currentSong && playerStore.currentSong.id === song.id;
 
 // 封面地址:远程行(remote 或 coverArt 是完整 URL)直接用远程 URL,库内歌曲走后端取封
@@ -204,19 +207,23 @@ function coverSrc(song: any): string {
 // 平台中文名优先取已启用插件 manifest.platformLabels(合并),缺省走内置兜底映射;
 // 品牌色固定内置(manifest 不提供颜色)。插件 id → 插件名映射同样来自插件注册表。
 const FALLBACK_PLATFORMS: Record<string, { label: string; color: string }> = {
-  netease: { label: "网易云", color: "#e21a1a" },
-  qq: { label: "QQ音乐", color: "#12b7f5" },
-  kugou: { label: "酷狗", color: "#28c76f" },
-  kuwo: { label: "酷我", color: "#ff7f27" },
-  migu: { label: "咪咕", color: "#f26d21" },
-  qianqian: { label: "千千", color: "#8e44ad" },
-  soda: { label: "汽水", color: "#00b8a9" },
+  netease: { label: "platform.netease", color: "#e21a1a" },
+  qq: { label: "platform.qq", color: "#12b7f5" },
+  kugou: { label: "platform.kugou", color: "#28c76f" },
+  kuwo: { label: "platform.kuwo", color: "#ff7f27" },
+  migu: { label: "platform.migu", color: "#f26d21" },
+  qianqian: { label: "platform.qianqian", color: "#8e44ad" },
+  soda: { label: "platform.soda", color: "#00b8a9" },
   fivesing: { label: "5sing", color: "#4aa3df" },
   jamendo: { label: "Jamendo", color: "#7f8c8d" },
   joox: { label: "JOOX", color: "#ff4d4d" },
   bilibili: { label: "Bilibili", color: "#fb7299" },
   apple: { label: "Apple Music", color: "#fa57c1" },
 };
+// i18n keys referenced by FALLBACK_PLATFORMS (translated at render; non-key labels pass through)
+const FALLBACK_PLATFORM_LABEL_KEYS = new Set(
+  Object.values(FALLBACK_PLATFORMS).map((p) => p.label).filter((k) => k.startsWith("platform."))
+);
 // 模块级缓存:整页共享,只拉一次 /rest/api/v1/plugins
 let platformLabelsCache: Record<string, string> | null = null;
 let pluginNamesCache: Record<string, string> | null = null;
@@ -243,8 +250,10 @@ function sourceMeta(song: any): { label: string; color: string; pluginName: stri
   if (!src || !song.isWeb) return null;
   const mergedLabel = platformLabelsCache?.[src] || "";
   const base = FALLBACK_PLATFORMS[src] || { label: src, color: "rgba(0,0,0,.55)" };
+  // mergedLabel is a plugin-provided display name (pass through); base.label is an i18n key (translate).
+  const label = mergedLabel || (FALLBACK_PLATFORM_LABEL_KEYS.has(base.label) ? t(base.label) : base.label);
   return {
-    label: mergedLabel || base.label,
+    label,
     color: base.color,
     pluginName: pluginNamesCache?.[song.sourcePluginId] || song.sourcePluginId || "",
   };
@@ -258,16 +267,16 @@ function sourceTooltip(song: any): string {
 // 行来源标签:本地/WebDAV 用固定标签,web 走平台徽标(sourceMeta)。
 // 合并主行/子行与单源行的来源列统一走这里(行类型 local | webdav | web)。
 function sourceLabelFor(song: any): { label: string; color: string } | null {
-  const t = song?.type || song?.rowType || "local";
-  if (t === "local") return { label: "本地", color: "#3f7ef0" };
-  if (t === "webdav") return { label: "WebDAV", color: "#2ea46c" };
+  const st = song?.type || song?.rowType || "local";
+  if (st === "local") return { label: t("songTable.localSource"), color: "#3f7ef0" };
+  if (st === "webdav") return { label: "WebDAV", color: "#2ea46c" };
   return sourceMeta(song);
 }
 // 展开子行标题前缀的短标签(仅本地/WebDAV 显示,web 子行徽标已在其来源列)
 function sourceShortLabel(song: any): string {
-  const t = song?.type || song?.rowType || "local";
-  if (t === "local") return "本地";
-  if (t === "webdav") return "WebDAV";
+  const st = song?.type || song?.rowType || "local";
+  if (st === "local") return t("songTable.localSource");
+  if (st === "webdav") return "WebDAV";
   return "";
 }
 

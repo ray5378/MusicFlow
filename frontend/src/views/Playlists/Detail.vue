@@ -6,29 +6,29 @@
         <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">
-        <div class="label">歌单<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ playlist.sourcePlatform === 'qq' ? 'QQ 音乐' : playlist.sourcePlatform === 'netease' ? '网易云' : playlist.sourcePlatform === 'kugou' ? '酷狗' : playlist.sourcePlatform === 'kuwo' ? '酷我' : playlist.sourcePlatform === 'soda' ? '汽水' : '' }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">导入</el-tag><el-tag v-else-if="playlist.pluginSynced" size="small" type="info" style="margin-left: 4px">插件同步</el-tag></div>
+        <div class="label">{{ t('playlists.label') }}<el-tag v-if="playlist.sourcePlatform" size="small" style="margin-left: 8px">{{ platformLabel(playlist.sourcePlatform) }}</el-tag><el-tag v-if="playlist.isImported" size="small" type="warning" style="margin-left: 4px">{{ t('playlists.badgeImported') }}</el-tag><el-tag v-else-if="playlist.pluginSynced" size="small" type="info" style="margin-left: 4px">{{ t('playlists.badgePluginSynced') }}</el-tag></div>
         <h1>{{ playlist.name }}</h1>
-        <div class="info">{{ playlist.songCount }}首 · {{ formatTotalDuration(playlist.duration) }}</div>
+        <div class="info">{{ t('playlists.songsCount', { count: playlist.songCount }) }} · {{ formatTotalDuration(playlist.duration) }}</div>
         <div class="info" v-if="playlist.isImported && playlist.matched !== undefined">
-          <span class="matched-count">已匹配 {{ playlist.matched }} / {{ playlist.songCount }}</span>
+          <span class="matched-count">{{ t('playlists.matchedCount', { matched: playlist.matched, total: playlist.songCount }) }}</span>
         </div>
-        <div class="info" v-if="playlist.isImported && playlist.created">导入时间 {{ formatCreated(playlist.created) }}</div>
+        <div class="info" v-if="playlist.isImported && playlist.created">{{ t('playlists.importedAt', { date: formatCreated(playlist.created) }) }}</div>
         <div class="actions">
-          <el-button type="primary" @click="playAll">播放全部</el-button>
-          <el-button v-if="hasOnlineSource" :loading="matchingAll" @click="matchAllPlaylist"><MfIcon name="Search" />在线匹配未匹配</el-button>
-          <el-button @click="exportPlaylist"><MfIcon name="Download" />导出</el-button>
-          <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />重命名</el-button>
-          <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />同步</el-button>
-          <el-button v-else-if="playlist.pluginSynced" :loading="gmdlRefreshing" @click="refreshGmdlPlugin"><MfIcon name="RefreshCw" />刷新</el-button>
-          <el-button v-if="playlist.isDaily" @click="convertToLocal"><MfIcon name="Pin" />转成本地永久歌单</el-button>
-          <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? '移出每日推荐池' : '加入每日推荐池' }}</el-button>
-          <el-button type="danger" plain @click="deletePlaylist"><MfIcon name="Trash2" />删除歌单</el-button>
+          <el-button type="primary" @click="playAll">{{ t('playlists.playAll') }}</el-button>
+          <el-button v-if="hasOnlineSource" :loading="matchingAll" @click="matchAllPlaylist"><MfIcon name="Search" />{{ t('playlists.matchUnmatchedBtn') }}</el-button>
+          <el-button @click="exportPlaylist"><MfIcon name="Download" />{{ t('playlists.export') }}</el-button>
+          <el-button @click="showRenameDialog = true"><MfIcon name="Pencil" />{{ t('playlists.rename') }}</el-button>
+          <el-button v-if="playlist.isImported" :loading="syncing" @click="syncPlaylist"><MfIcon name="RefreshCw" />{{ t('playlists.sync') }}</el-button>
+          <el-button v-else-if="playlist.pluginSynced" :loading="gmdlRefreshing" @click="refreshGmdlPlugin"><MfIcon name="RefreshCw" />{{ t('playlists.refresh') }}</el-button>
+          <el-button v-if="playlist.isDaily" @click="convertToLocal"><MfIcon name="Pin" />{{ t('playlists.convertLocal') }}</el-button>
+          <el-button @click="togglePool"><MfIcon name="Wand2" />{{ inPool ? t('playlists.removeFromPool') : t('playlists.addToPool') }}</el-button>
+          <el-button type="danger" plain @click="deletePlaylist"><MfIcon name="Trash2" />{{ t('playlists.deletePlaylist') }}</el-button>
         </div>
         <div class="settings" v-if="playlist.isImported">
           <el-switch v-model="playlist.syncEnabled" @change="toggleSyncEnabled" />
-          <span class="setting-label">自动同步(每 6 小时)</span>
+          <span class="setting-label">{{ t('playlists.autoSyncLabel') }}</span>
           <el-switch v-model="playlist.public" @change="togglePublic" style="margin-left: 24px" />
-          <span class="setting-label">公开歌单</span>
+          <span class="setting-label">{{ t('playlists.publicPlaylistLabel') }}</span>
         </div>
       </div>
     </div>
@@ -44,37 +44,37 @@
       @select="onSelectionChange"
     >
       <template #row-actions="{ row }">
-        <button class="row-btn" @click.stop="removeSong(row)" title="从歌单移除">
+        <button class="row-btn" @click.stop="removeSong(row)" :title="t('playlists.removeSong')">
           <MfIcon name="Trash2" :size="16" />
         </button>
       </template>
     </SongTable>
     <div class="batch-bar" v-if="selectedSongs.length > 0">
-      <span>已选 {{ selectedSongs.length }} 首</span>
-      <el-button size="small" type="danger" plain @click="removeSelected">批量移除</el-button>
-      <el-button size="small" @click="playSelected">播放所选</el-button>
+      <span>{{ t('playlists.selectedCount', { count: selectedSongs.length }) }}</span>
+      <el-button size="small" type="danger" plain @click="removeSelected">{{ t('playlists.batchRemove') }}</el-button>
+      <el-button size="small" @click="playSelected">{{ t('playlists.playSelected') }}</el-button>
     </div>
 
-    <el-dialog v-model="showRenameDialog" title="重命名歌单" width="400px" :append-to-body="true">
-      <el-input v-model="newName" placeholder="新歌单名称" @keyup.enter="renamePlaylist" />
+    <el-dialog v-model="showRenameDialog" :title="t('playlists.renameDialogTitle')" width="400px" :append-to-body="true">
+      <el-input v-model="newName" :placeholder="t('playlists.newNamePlaceholder')" @keyup.enter="renamePlaylist" />
       <template #footer>
-        <el-button @click="showRenameDialog = false">取消</el-button>
-        <el-button type="primary" @click="renamePlaylist">保存</el-button>
+        <el-button @click="showRenameDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="renamePlaylist">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showMatchDialog" title="在线匹配" width="480px" :close-on-click-modal="false" :append-to-body="true">
+    <el-dialog v-model="showMatchDialog" :title="t('playlists.matchDialogTitle')" width="480px" :close-on-click-modal="false" :append-to-body="true">
       <div v-if="matchRunning" class="match-progress">
         <el-progress :percentage="matchPercent" />
-        <p class="match-hint">正在通过在线源匹配「{{ playlist?.name }}」中未收录的 {{ matchTotal }} 首...<br>已匹配 {{ matchDone }} / {{ matchTotal }} 首(耗时较长,可稍后查看)</p>
+        <p class="match-hint">{{ t('playlists.matchProgressA', { name: playlist?.name, total: matchTotal }) }}<br>{{ t('playlists.matchProgressB', { done: matchDone, total: matchTotal }) }}</p>
       </div>
       <div v-else-if="matchResult">
-        <p class="match-result">匹配完成: 成功 {{ matchResult.matched }} 首,未找到 {{ matchResult.noMatch }} 首,出错 {{ matchResult.error }} 首</p>
+        <p class="match-result">{{ t('playlists.matchResultMsg', { matched: matchResult.matched, noMatch: matchResult.noMatch, error: matchResult.error }) }}</p>
       </div>
-      <p v-else class="match-hint">将对该歌单中所有「曲库中未找到」的歌曲,通过在线源自动匹配并导入,匹配成功后即可直接播放。</p>
+      <p v-else class="match-hint">{{ t('playlists.matchHintIntro') }}</p>
       <template #footer>
-        <el-button @click="showMatchDialog = false" :disabled="matchRunning">关闭</el-button>
-        <el-button v-if="matchResult" type="primary" @click="closeMatchAndReload">完成</el-button>
+        <el-button @click="showMatchDialog = false" :disabled="matchRunning">{{ t('playlists.close') }}</el-button>
+        <el-button v-if="matchResult" type="primary" @click="closeMatchAndReload">{{ t('playlists.done') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -82,6 +82,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -97,6 +98,7 @@ import { coverUrl } from "@/utils/cover";
 const route = useRoute();
 const router = useRouter();
 const playerStore = usePlayerStore();
+const { t } = useI18n();
 const playlist = ref<any>(null);
 // Whether this playlist is in the daily-recommend pool.
 const inPool = ref(false);
@@ -137,18 +139,25 @@ const { list, loading, total, init: reloadTracks, onWindow } = useInfiniteList<a
 function playlistRowActions(row: any) {
   return [
     {
-      label: "从歌单移除",
+      label: t("playlists.removeSong"),
       icon: Trash2,
       danger: true,
       onClick: () => removeSong(row),
     },
   ];
 }
+function platformLabel(p: string): string {
+  return p === "qq" ? t("playlists.platform.qq") :
+    p === "netease" ? t("playlists.platform.netease") :
+    p === "kugou" ? t("playlists.platform.kugou") :
+    p === "kuwo" ? t("playlists.platform.kuwo") :
+    p === "soda" ? t("playlists.platform.soda") : "";
+}
 function formatTotalDuration(sec: number) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return m > 0 ? `${h}小时${m}分钟` : `${h}小时`;
-  return `${m}分钟`;
+  if (h > 0) return m > 0 ? t("playlists.duration.hm", { h, m }) : t("playlists.duration.h", { h });
+  return t("playlists.duration.m", { m });
 }
 function formatCreated(t: string): string {
   if (!t) return "";
@@ -188,20 +197,20 @@ async function playSelected() {
 // Auto-match an unmatched track via the online source, then play it.
 async function matchAndPlay(song: any) {
   const pid = onlineSourceId.value;
-  if (!pid || !song.entryId) { ElMessage.warning("未配置在线源,无法匹配该歌曲"); return; }
+  if (!pid || !song.entryId) { ElMessage.warning(t("playlists.noOnlineSourceTrack")); return; }
   matchingAll.value = true;
   try {
     const res = await api.post(`/rest/api/v1/online/${pid}/match-track`, { entryId: song.entryId });
     if (res.data?.success && res.data.songId) {
-      ElMessage.success(`已匹配「${song.title}」`);
+      ElMessage.success(t("playlists.matchedTrack", { title: song.title }));
       await reloadTracks();
       const updated = list.value.find(s => s && s.id === res.data.songId);
       if (updated) playerStore.playSong(updated);
     } else {
-      ElMessage.warning(`未匹配「${song.title}」: ${res.data?.message || "未找到可靠结果"}`);
+      ElMessage.warning(t("playlists.unmatchedTrack", { title: song.title, message: res.data?.message || t("playlists.noReliableResult") }));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "匹配失败");
+    ElMessage.error(e.response?.data?.error || t("playlists.matchTrackFailed"));
   } finally { matchingAll.value = false; }
 }
 
@@ -265,18 +274,18 @@ async function matchAllPlaylist() {
       }
     } else {
       matchRunning.value = false;
-      ElMessage.warning(res.data?.error || "在线源未配置或未启用");
+      ElMessage.warning(res.data?.error || t("playlists.onlineSourceUnavailable"));
     }
   } catch (e: any) {
     matchRunning.value = false;
-    ElMessage.error(e.response?.data?.error || "匹配启动失败");
+    ElMessage.error(e.response?.data?.error || t("playlists.matchStartFailed"));
   } finally { matchingAll.value = false; }
 }
 const matchPercent = computed(() => (matchTotal.value > 0 ? Math.min(100, Math.round((matchDone.value / matchTotal.value) * 100)) : 0));
 async function closeMatchAndReload() {
   showMatchDialog.value = false;
   await loadPlaylist();
-  ElMessage.success("匹配完成,未匹配歌曲已刷新");
+  ElMessage.success(t("playlists.matchDoneReload"));
 }
 function onSelectionChange(rows: any[]) { selectedSongs.value = rows; }
 async function exportPlaylist() {
@@ -295,7 +304,7 @@ async function exportPlaylist() {
     a.remove();
     URL.revokeObjectURL(url);
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.message || "导出失败");
+    ElMessage.error(e.response?.data?.message || t("playlists.exportFailed"));
   }
 }
 
@@ -331,14 +340,14 @@ async function togglePool() {
     if (inPool.value) {
       await api.delete(`/rest/api/v1/recommend-pool/playlist/${playlist.value.id}`);
       inPool.value = false;
-      ElMessage.success(`已将「${playlist.value.name}」移出每日推荐池`);
+      ElMessage.success(t("playlists.removedFromPool", { name: playlist.value.name }));
     } else {
       const res = await api.post(`/rest/api/v1/recommend-pool/playlist/${playlist.value.id}`);
       inPool.value = true;
-      ElMessage.success(res.data.message || `已将「${playlist.value.name}」加入每日推荐池`);
+      ElMessage.success(res.data.message || t("playlists.addedToPool", { name: playlist.value.name }));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
 }
 
@@ -347,21 +356,21 @@ async function syncPlaylist() {
   try {
     const res = await api.post(`/rest/api/v1/playlists/${route.params.id}/sync`);
     if (res.data?.alreadyRunning) {
-      ElMessage.warning("该歌单正在同步中,请稍候");
+      ElMessage.warning(t("playlists.syncingPlaylist"));
     } else if (res.data.success && res.data.taskId) {
       // 异步任务:轮询直到完成(手动同步已异步化,触发即返回 taskId)
       const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
       if (r?.total !== undefined) {
-        ElMessage.success(`同步完成: 共 ${r.total} 首,匹配 ${r.matched} 首,未匹配 ${r.unmatched} 首`);
+        ElMessage.success(t("playlists.syncComplete", { total: r.total, matched: r.matched, unmatched: r.unmatched }));
       } else {
-        ElMessage.success("同步完成");
+        ElMessage.success(t("playlists.synced"));
       }
       loadPlaylist();
     } else {
-      ElMessage.error(res.data.error || "同步失败");
+      ElMessage.error(res.data.error || t("playlists.syncFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || e?.message || "同步失败");
+    ElMessage.error(e?.response?.data?.error || e?.message || t("playlists.syncFailed"));
   } finally {
     syncing.value = false;
   }
@@ -378,14 +387,14 @@ async function refreshGmdlPlugin() {
   try {
     const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId });
     if (res.data?.success) {
-      ElMessage.success(res.data.alreadyRunning ? "刷新任务已在后台进行中,完成后自动提示" : "已开始后台刷新,完成后自动提示");
+      ElMessage.success(res.data.alreadyRunning ? t("playlists.refreshRunning") : t("playlists.refreshStarted"));
       pollGmdlJob(pluginId);
     } else {
-      ElMessage.error(res.data?.error || "刷新启动失败");
+      ElMessage.error(res.data?.error || t("playlists.refreshStartFailed"));
       gmdlRefreshing.value = false;
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "刷新启动失败");
+    ElMessage.error(e?.response?.data?.error || t("playlists.refreshStartFailed"));
     gmdlRefreshing.value = false;
   }
 }
@@ -400,11 +409,11 @@ function pollGmdlJob(pluginId: string) {
       gmdlRefreshing.value = false;
       if (job?.status === "ok") {
         const s = job.summary;
-        ElMessage.success(typeof s === "string" && s ? s : "刷新完成");
+        ElMessage.success(typeof s === "string" && s ? s : t("playlists.refreshed"));
       } else if (job?.status === "error") {
-        ElMessage.error(job.error || "刷新失败");
+        ElMessage.error(job.error || t("playlists.refreshFailed"));
       } else {
-        ElMessage.info("刷新任务已结束");
+        ElMessage.info(t("playlists.refreshEnded"));
       }
       loadPlaylist();
     } catch {
@@ -417,20 +426,20 @@ function pollGmdlJob(pluginId: string) {
 // Convert a daily-recommend imported playlist into a permanent local playlist.
 async function convertToLocal() {
   await ElMessageBox.confirm(
-    `确定将「${playlist.value?.name}」转成本地永久歌单？转换后将不再作为每日推荐被轮换,但歌曲内容保持不变。`,
-    "转成本地歌单",
-    { type: "warning", confirmButtonText: "转换", cancelButtonText: "取消" },
+    t("playlists.convertConfirmTitle", { name: playlist.value?.name }),
+    t("playlists.convertTitle"),
+    { type: "warning", confirmButtonText: t("playlists.convertAction"), cancelButtonText: t("common.cancel") },
   );
   try {
     const res = await api.post(`/rest/api/v1/playlists/${route.params.id}/convert-to-local`);
     if (res.data.success) {
-      ElMessage.success(`「${playlist.value?.name}」已转为本地永久歌单`);
+      ElMessage.success(t("playlists.converted", { name: playlist.value?.name }));
       loadPlaylist();
     } else {
-      ElMessage.error(res.data.error || "转换失败");
+      ElMessage.error(res.data.error || t("playlists.convertFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "转换失败");
+    ElMessage.error(e.response?.data?.error || t("playlists.convertFailed"));
   }
 }
 
@@ -438,25 +447,25 @@ async function toggleSyncEnabled(val: string | number | boolean) {
   const v = Boolean(val);
   try {
     await api.put(`/rest/api/v1/playlists/${route.params.id}`, { syncEnabled: v });
-    ElMessage.success(v ? "已启用自动同步" : "已关闭自动同步");
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "操作失败"); }
+    ElMessage.success(v ? t("playlists.autoSyncOn") : t("playlists.autoSyncOff"));
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.operationFailed")); }
 }
 
 async function togglePublic(val: string | number | boolean) {
   const v = Boolean(val);
   try {
     await api.put(`/rest/api/v1/playlists/${route.params.id}`, { isPublic: v });
-    ElMessage.success(v ? "歌单已设为公开" : "歌单已设为私有");
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "操作失败"); }
+    ElMessage.success(v ? t("playlists.publicSet") : t("playlists.privateSet"));
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.operationFailed")); }
 }
 
 async function removeSong(row: any) {
-  await ElMessageBox.confirm(`从歌单移除「${row.title}」？`, "确认移除", { type: "warning" });
+  await ElMessageBox.confirm(t("playlists.removeConfirmTitle", { name: row.title }), t("playlists.confirmRemove"), { type: "warning" });
   try {
     await api.post("/rest/updatePlaylist", { playlistId: route.params.id, songIdToRemove: row.id });
-    ElMessage.success("已移除");
+    ElMessage.success(t("playlists.removed"));
     loadPlaylist();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "移除失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.removeFailed")); }
 }
 
 async function removeSelected() {
@@ -464,28 +473,28 @@ async function removeSelected() {
     for (const s of selectedSongs.value) {
       await api.post("/rest/updatePlaylist", { playlistId: route.params.id, songIdToRemove: s.id });
     }
-    ElMessage.success(`已移除 ${selectedSongs.value.length} 首`);
+    ElMessage.success(t("playlists.removedCount", { count: selectedSongs.value.length }));
     loadPlaylist();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "移除失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.removeFailed")); }
 }
 
 async function renamePlaylist() {
-  if (!newName.value) { ElMessage.warning("请输入名称"); return; }
+  if (!newName.value) { ElMessage.warning(t("playlists.enterName")); return; }
   try {
     await api.post("/rest/updatePlaylist", { playlistId: route.params.id, name: newName.value });
     showRenameDialog.value = false;
-    ElMessage.success("已重命名");
+    ElMessage.success(t("playlists.renamed"));
     loadPlaylist();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "重命名失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.renameFailed")); }
 }
 
 async function deletePlaylist() {
-  await ElMessageBox.confirm(`确定删除歌单「${playlist.value?.name}」？`, "确认删除", { type: "warning" });
+  await ElMessageBox.confirm(t("playlists.deleteConfirmTitle", { name: playlist.value?.name }), t("playlists.confirmDelete"), { type: "warning" });
   try {
     await api.post("/rest/deletePlaylist", { id: route.params.id });
-    ElMessage.success("已删除");
+    ElMessage.success(t("playlists.deleted"));
     router.push("/playlists");
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.deleteFailed")); }
 }
 
 onMounted(() => {

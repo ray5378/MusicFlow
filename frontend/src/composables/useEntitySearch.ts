@@ -16,6 +16,7 @@
 import { ref, computed } from "vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
+import { gt } from "@/locales";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import { usePlayerStore, Song } from "@/stores/player";
 
@@ -72,12 +73,12 @@ export async function fetchRemoteCollectionSongs(
   try {
     const res = await api.get(`${base}/${providerId}/items?${qs.toString()}`);
     if (!res.data?.success) {
-      ElMessage.error(res.data?.error || "拉取失败");
+      ElMessage.error(res.data?.error || gt("entitySearch.fetchFailed"));
       return [];
     }
     return (res.data.items || []).map((it: any) => remoteItemToSong(it, providerId));
   } catch (e: any) {
-    ElMessage.error(e?.message || "拉取失败:插件未启用或服务不可达");
+    ElMessage.error(e?.message || gt("entitySearch.fetchFailedPlugin"));
     return [];
   }
 }
@@ -110,11 +111,11 @@ export function useEntitySearch(kind: EntitySearchKind) {
   const isRemoteMode = computed(() => searchMode.value !== "local" && searchMode.value !== "aggregate");
   const isLocalMode = computed(() => !isRemoteMode.value);
   const currentProvider = computed(() => searchProviders.value.find((p) => p.id === searchMode.value));
-  const currentProviderName = computed(() => currentProvider.value?.name || "平台");
+  const currentProviderName = computed(() => currentProvider.value?.name || gt("playlists.providerFallback"));
   // 下拉按钮文案:聚合=「聚合」,插件=插件名,本地=「本地」
   const currentSourceLabel = computed(() => {
-    if (isAggregateMode.value) return "聚合";
-    return isRemoteMode.value ? currentProvider.value?.name || "本地" : "本地";
+    if (isAggregateMode.value) return gt("music.aggregate");
+    return isRemoteMode.value ? currentProvider.value?.name || gt("music.local") : gt("music.local");
   });
 
   // 页面注入:切回本地模式 / 本地搜索时刷新本地列表
@@ -163,11 +164,11 @@ export function useEntitySearch(kind: EntitySearchKind) {
         remoteItems.value = res.data.items || [];
       } else {
         remoteItems.value = [];
-        ElMessage.error(res.data?.error || "搜索失败");
+        ElMessage.error(res.data?.error || gt("playlists.searchFailed"));
       }
     } catch {
       remoteItems.value = [];
-      ElMessage.error("搜索失败:插件未启用或服务不可达");
+      ElMessage.error(gt("playlists.searchFailedPlugin"));
     } finally {
       remoteSearching.value = false;
     }
@@ -188,11 +189,11 @@ export function useEntitySearch(kind: EntitySearchKind) {
         aggregateItems.value = res.data.items || [];
       } else {
         aggregateItems.value = [];
-        ElMessage.error(res.data?.error || "搜索失败");
+        ElMessage.error(res.data?.error || gt("playlists.searchFailed"));
       }
     } catch {
       aggregateItems.value = [];
-      ElMessage.error("聚合搜索失败:无已启用插件或服务不可达");
+      ElMessage.error(gt("playlists.aggSearchFailedPlugin"));
     } finally {
       aggregateSearching.value = false;
     }
@@ -206,22 +207,22 @@ export function useEntitySearch(kind: EntitySearchKind) {
     try {
       const res = await api.post(`${base}/${providerId || searchMode.value}/import`, { songs });
       if (res.data?.alreadyRunning) {
-        ElMessage.warning("正在导入中,请稍候");
+        ElMessage.warning(gt("entitySearch.importRunning"));
         return;
       }
       if (!res.data?.success || !res.data.taskId) {
-        ElMessage.error(res.data?.error || "导入失败");
+        ElMessage.error(res.data?.error || gt("playlists.importFailed"));
         return;
       }
       const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
       if (r?.success) {
-        ElMessage.success(`已加入库:${r.added} 首${r.deduped ? `,去重 ${r.deduped}` : ""}`);
+        ElMessage.success(`${gt("entitySearch.importedSongs", { count: r.added })}${r.deduped ? gt("entitySearch.dedupedSuffix", { deduped: r.deduped }) : ""}`);
         afterRemoteImport();
       } else {
-        ElMessage.error(r?.error || "导入失败");
+        ElMessage.error(r?.error || gt("playlists.importFailed"));
       }
     } catch (e: any) {
-      ElMessage.error(e?.message || "导入失败:插件未启用或服务不可达");
+      ElMessage.error(e?.message || gt("playlists.importFailedPlugin"));
     } finally {
       importingId.value = "";
     }
@@ -241,23 +242,23 @@ export function useEntitySearch(kind: EntitySearchKind) {
         cover: item.cover,
       });
       if (res.data?.alreadyRunning) {
-        ElMessage.warning("该专辑正在导入中,请稍候");
+        ElMessage.warning(gt("entitySearch.importingAlbum"));
         return;
       }
       if (!res.data?.success || !res.data.taskId) {
-        ElMessage.error(res.data?.error || "导入失败");
+        ElMessage.error(res.data?.error || gt("playlists.importFailed"));
         return;
       }
       const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
       if (r?.success) {
         item._imported = true;
-        ElMessage.success(`已加入库:${r.name}(${r.trackCount}首,匹配 ${r.added})`);
+        ElMessage.success(gt("entitySearch.importedAlbum", { name: r.name, count: r.trackCount, added: r.added }));
         afterRemoteImport();
       } else {
-        ElMessage.error(r?.error || "导入失败");
+        ElMessage.error(r?.error || gt("playlists.importFailed"));
       }
     } catch (e: any) {
-      ElMessage.error(e?.message || "导入失败:插件未启用或服务不可达");
+      ElMessage.error(e?.message || gt("playlists.importFailedPlugin"));
     } finally {
       importingId.value = "";
     }

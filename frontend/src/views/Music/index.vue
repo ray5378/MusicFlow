@@ -3,11 +3,11 @@
     <!-- ===== 页头 ===== -->
     <div class="page-header">
       <div class="page-title">
-        <h2>{{ recentMode ? "最近添加" : "音乐" }}</h2>
-        <span class="song-count">{{ total }} 首</span>
+        <h2>{{ recentMode ? t("music.recentAdded") : t("music.title") }}</h2>
+        <span class="song-count">{{ t("music.trackCount", { count: total }) }}</span>
       </div>
       <div class="header-actions">
-        <span class="search-label">搜索</span>
+        <span class="search-label">{{ t("music.search") }}</span>
         <el-dropdown trigger="click" @command="onSearchSourceCommand">
           <el-button>
             {{ currentSourceLabel }}
@@ -15,8 +15,8 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="aggregate">聚合</el-dropdown-item>
-              <el-dropdown-item command="local" :divided="true">本地</el-dropdown-item>
+              <el-dropdown-item command="aggregate">{{ t("music.aggregate") }}</el-dropdown-item>
+              <el-dropdown-item command="local" :divided="true">{{ t("music.local") }}</el-dropdown-item>
               <el-dropdown-item v-for="(p, i) in searchProviders" :key="p.id" :command="p.id">{{ p.name }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -34,20 +34,20 @@
           <el-button>{{ sortLabel }}<el-icon class="el-icon--right"><MfIcon name="ChevronDown" /></el-icon></el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="name">名称</el-dropdown-item>
-              <el-dropdown-item command="duration">时长</el-dropdown-item>
-              <el-dropdown-item command="addedAt">入库时间</el-dropdown-item>
-              <el-dropdown-item command="artist">艺术家</el-dropdown-item>
-              <el-dropdown-item command="album">专辑</el-dropdown-item>
-              <el-dropdown-item command="playCount">播放次数</el-dropdown-item>
+              <el-dropdown-item command="name">{{ t("music.sort.name") }}</el-dropdown-item>
+              <el-dropdown-item command="duration">{{ t("music.sort.duration") }}</el-dropdown-item>
+              <el-dropdown-item command="addedAt">{{ t("music.sort.addedAt") }}</el-dropdown-item>
+              <el-dropdown-item command="artist">{{ t("music.sort.artist") }}</el-dropdown-item>
+              <el-dropdown-item command="album">{{ t("music.sort.album") }}</el-dropdown-item>
+              <el-dropdown-item command="playCount">{{ t("music.sort.playCount") }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
         <el-button class="sort-order-btn" @click="toggleSortOrder" :disabled="recentMode">
-          {{ sortOrder === "desc" ? "降序 ↓" : "升序 ↑" }}
+          {{ sortOrder === "desc" ? t("music.desc") + " ↓" : t("music.asc") + " ↑" }}
         </el-button>
         <el-button type="primary" class="play-all-btn" @click="playAll" :disabled="songs.length === 0"><MfIcon name="Play" />
-          播放全部
+          {{ t("music.playAll") }}
         </el-button>
       </div>
     </div>
@@ -57,22 +57,22 @@
       <div class="tile tile-added" @click="goRecent">
         <div class="tile-glow"></div>
         <MfIcon name="Plus" class="tile-icon" :size="34"  />
-        <span class="tile-label">最近添加</span>
+        <span class="tile-label">{{ t("music.recentAdded") }}</span>
       </div>
       <div class="tile tile-recent" @click="$router.push('/history')">
         <div class="tile-glow"></div>
         <MfIcon name="Clock" class="tile-icon" :size="34"  />
-        <span class="tile-label">最近播放</span>
+        <span class="tile-label">{{ t("music.recentPlayed") }}</span>
       </div>
       <div class="tile tile-fav" @click="$router.push('/favorites')">
         <div class="tile-glow"></div>
         <MfIcon name="Heart" :filled="true" class="tile-icon" :size="34" />
-        <span class="tile-label">我喜欢的音乐</span>
+        <span class="tile-label">{{ t("music.favorites") }}</span>
       </div>
       <div class="tile tile-mix" @click="$router.push('/genres')">
         <div class="tile-glow"></div>
         <MfIcon name="Library" class="tile-icon" :size="34"  />
-        <span class="tile-label">风格</span>
+        <span class="tile-label">{{ t("music.genres") }}</span>
       </div>
     </div>
 
@@ -89,11 +89,11 @@
     />
     <!-- ===== 多选批量操作条 ===== -->
     <div class="batch-bar" v-if="!isMobile && selectedSongs.length > 0">
-      <span class="batch-count">已选 {{ selectedSongs.length }} 首</span>
-      <el-button size="small" @click="playSelected"><MfIcon name="Play" />播放所选</el-button>
-      <el-button size="small" @click="batchAddToPlaylist"><MfIcon name="Plus" />添加到歌单</el-button>
+      <span class="batch-count">{{ t("music.selectedCount", { count: selectedSongs.length }) }}</span>
+      <el-button size="small" @click="playSelected"><MfIcon name="Play" />{{ t("music.playSelected") }}</el-button>
+      <el-button size="small" @click="batchAddToPlaylist"><MfIcon name="Plus" />{{ t("music.addToPlaylist") }}</el-button>
       <el-button size="small" type="danger" plain :disabled="selectedWebSongs.length === 0" @click="batchDelete" :loading="deleting">
-        <MfIcon name="Trash2" />从音乐库删除
+        <MfIcon name="Trash2" />{{ t("music.deleteFromLibrary") }}
       </el-button>
     </div>
 
@@ -101,16 +101,16 @@
     <div v-if="isAggregateMode" class="remote-results agg" v-loading="aggregateSearching">
       <div v-if="aggregateItems.length === 0 && !aggregateSearching" class="remote-empty">
         <MfIcon name="Search" :size="40" />
-        <p>{{ searchQuery.trim() ? "没有找到相关全网音乐" : "输入关键词,同时搜索本地库与已启用插件的全网音乐" }}</p>
+        <p>{{ searchQuery.trim() ? t("music.noAggregateResult") : t("music.aggregateEmpty") }}</p>
       </div>
       <template v-else>
         <div class="agg-head">
-          <span class="agg-title"><MfIcon name="Globe" />全网结果</span>
-          <span class="agg-meta">已启用插件的合并搜索,歌曲带插件·平台标签</span>
+          <span class="agg-title"><MfIcon name="Globe" />{{ t("music.aggregateTitle") }}</span>
+          <span class="agg-meta">{{ t("music.aggregateMeta") }}</span>
         </div>
-        <SongTable :songs="aggregateSongs" remote :loading="aggregateSearching" empty-text="没有找到相关音乐" @play="playSong">
+        <SongTable :songs="aggregateSongs" remote :loading="aggregateSearching" :empty-text="t('music.noResult')" @play="playSong">
           <template #row-actions="{ row }">
-            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click.stop="importSongs([row._item], row._item.providerId)">加入库</el-button>
+            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click.stop="importSongs([row._item], row._item.providerId)">{{ t("music.addToLibrary") }}</el-button>
           </template>
         </SongTable>
       </template>
@@ -122,17 +122,17 @@
     <div v-if="isRemoteMode" class="remote-results">
       <div v-if="remoteItems.length === 0 && !remoteSearching" class="remote-empty">
         <MfIcon name="Search" :size="40" />
-        <p>{{ searchQuery.trim() ? "没有找到相关音乐" : `输入关键词,搜索${currentProviderName}支持的全网音乐` }}</p>
+        <p>{{ searchQuery.trim() ? t("music.noResult") : t("music.searchProvider", { provider: currentProviderName }) }}</p>
       </div>
       <template v-else>
         <div class="remote-toolbar">
           <el-button size="small" type="primary" :loading="importingId === 'all'" @click="importSongs(remoteItems)">
-            <MfIcon name="Download" />全部加入库
+            <MfIcon name="Download" />{{ t("music.importAll") }}
           </el-button>
         </div>
-        <SongTable :songs="remoteSongs" remote :loading="remoteSearching" empty-text="没有找到相关音乐" @play="playSong">
+        <SongTable :songs="remoteSongs" remote :loading="remoteSearching" :empty-text="t('music.noResult')" @play="playSong">
           <template #row-actions="{ row }">
-            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click.stop="importSongs([row._item])">加入库</el-button>
+            <el-button size="small" type="primary" plain :loading="importingId === 'all'" @click.stop="importSongs([row._item])">{{ t("music.addToLibrary") }}</el-button>
           </template>
         </SongTable>
       </template>
@@ -143,6 +143,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { usePlayerStore, Song } from "@/stores/player";
@@ -153,6 +154,7 @@ import api from "@/api";
 import SongTable from "@/components/SongTable.vue";
 import { useInfiniteList } from "@/composables/useInfiniteList";
 
+const { t } = useI18n();
 const playerStore = usePlayerStore();
 const route = useRoute();
 const router = useRouter();
@@ -192,8 +194,8 @@ const {
   setLocalLoader, setAfterRemoteImport,
 } = useEntitySearch("song");
 const searchPlaceholder = computed(() => {
-  if (isAggregateMode.value) return "搜索本地与全网音乐...";
-  return isRemoteMode.value ? `搜索${currentProviderName}全网音乐...` : "搜索音乐...";
+  if (isAggregateMode.value) return t("music.searchLocalAll");
+  return isRemoteMode.value ? t("music.searchProviderAll", { provider: currentProviderName }) : t("music.searchPlaceholder");
 });
 // 远程搜索结果 → 可播放 Song(带 streamUrl,未入库直接播;原始 item 挂 _item 供加入库)
 const remoteSongs = computed(() => remoteItems.value.map((it) => remoteItemToSong(it, searchMode.value)));
@@ -205,14 +207,14 @@ const recentMode = computed(() => route.query.recent === "1");
 
 // ==================== 排序（名称/时长/入库时间/艺术家/专辑/播放次数）====================
 const SORT_LABELS: Record<string, string> = {
-  name: "名称", duration: "时长", addedAt: "入库时间", artist: "艺术家", album: "专辑", playCount: "播放次数",
+  name: "music.sort.name", duration: "music.sort.duration", addedAt: "music.sort.addedAt", artist: "music.sort.artist", album: "music.sort.album", playCount: "music.sort.playCount",
 };
 const sortField = ref<string>("name");
 const sortOrder = ref<"asc" | "desc">("asc");
 // 最近添加模式固定「入库时间 降序」,下拉/按钮按此展示
 const sortLabel = computed(() => {
-  if (recentMode.value) return "入库时间";
-  return SORT_LABELS[sortField.value] || "名称";
+  if (recentMode.value) return t("music.sort.addedAt");
+  return t(SORT_LABELS[sortField.value] || "music.sort.name");
 });
 async function applySort() {
   // 最近添加模式:退出后由 route watch 触发重新加载,避免重复请求
@@ -259,25 +261,25 @@ function batchAddToPlaylist() {
 async function batchDelete() {
   const web = selectedWebSongs.value.map((s) => s.id);
   if (web.length === 0) {
-    ElMessage.warning("选中的均为本地歌曲，本地歌曲不参与删除");
+    ElMessage.warning(t("music.localOnlyDelete"));
     return;
   }
   const localCount = selectedSongs.value.length - web.length;
-  let tip = `确定从音乐库删除选中的 ${web.length} 首歌曲？`;
-  if (localCount > 0) tip += `\n另有 ${localCount} 首本地歌曲不参与删除。`;
+  let tip = t("music.deleteConfirm", { count: web.length });
+  if (localCount > 0) tip += t("music.deleteLocalNote", { count: localCount });
   try {
-    await ElMessageBox.confirm(tip, "从音乐库删除", {
-      type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", confirmButtonClass: "el-button--danger",
+    await ElMessageBox.confirm(tip, t("music.deleteFromLibrary"), {
+      type: "warning", confirmButtonText: t("music.delete"), cancelButtonText: t("common.cancel"), confirmButtonClass: "el-button--danger",
     });
   } catch { return; }
   deleting.value = true;
   try {
     await api.post("/rest/api/v1/songs/delete", { ids: web });
-    ElMessage.success(`已从音乐库删除 ${web.length} 首`);
+    ElMessage.success(t("music.deleted", { count: web.length }));
     window.dispatchEvent(new CustomEvent("mf:song-deleted"));
     loadSongs();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "删除失败");
+    ElMessage.error(e?.response?.data?.error || t("music.deleteFailed"));
   } finally {
     deleting.value = false;
   }

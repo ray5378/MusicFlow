@@ -2,88 +2,88 @@
   <!-- ==================== 通用播放器控制(与音流流程解耦) ==================== -->
   <div class="player-ctl">
     <div class="player-ctl-head">
-      <span class="player-ctl-title"><MfIcon name="SlidersHorizontal" />通用播放器控制</span>
-      <span class="player-ctl-tip">与音流(流程)无关:下方 URL 的参数就是配置,可直接控制已上线的 DLNA 音箱 / 播放器群组,无需内部流程。可手工增删改参数、可重复使用、支持一次串联多个动作。音流的对外链接也复用这里的渠道 token 做鉴权。</span>
+      <span class="player-ctl-title"><MfIcon name="SlidersHorizontal" />{{ t('flows.ctlTitle') }}</span>
+      <span class="player-ctl-tip">{{ t('flows.ctlTip') }}</span>
       <div class="player-ctl-tokenrow">
-        <el-select v-model="ctlTokenId" placeholder="选择渠道 token" style="width: 220px" @change="urlText = buildPlayerUrl()">
-          <el-option v-for="t in ctlTokens" :key="t.id" :label="`${t.name}${t.enabled ? '' : '(停用)'}`" :value="t.id" />
+        <el-select v-model="ctlTokenId" :placeholder="t('flows.tokenPlaceholder')" style="width: 220px" @change="urlText = buildPlayerUrl()">
+          <el-option v-for="tk in ctlTokens" :key="tk.id" :label="tk.name + (tk.enabled ? '' : '(' + t('flows.deactivated') + ')')" :value="tk.id" />
         </el-select>
-        <el-button size="small" plain :class="{ active: showTokens }" @click="showTokens = !showTokens"><MfIcon name="KeyRound" />管理 Token</el-button>
+        <el-button size="small" plain :class="{ active: showTokens }" @click="showTokens = !showTokens"><MfIcon name="KeyRound" />{{ t('flows.manageTokens') }}</el-button>
       </div>
     </div>
 
     <!-- Token 管理面板:独立多条 token,各自启用/停用/删除,有效性由用户自管 -->
     <div v-if="showTokens" class="player-tokens">
-      <div class="tokens-row" v-for="t in ctlTokens" :key="t.id">
+      <div class="tokens-row" v-for="tk in ctlTokens" :key="tk.id">
         <div class="tokens-info">
           <div class="tokens-name">
-            <span class="tokens-dot" :class="{ off: !t.enabled }"></span>
-            <span class="tokens-text">{{ t.name }}</span>
+            <span class="tokens-dot" :class="{ off: !tk.enabled }"></span>
+            <span class="tokens-text">{{ tk.name }}</span>
           </div>
-          <div class="tokens-token">{{ t.token }}</div>
-          <div class="tokens-meta">归属「{{ t.ownerName || '-' }}」 · 创建 {{ formatTime(t.createdAt) }}</div>
+          <div class="tokens-token">{{ tk.token }}</div>
+          <div class="tokens-meta">{{ t('flows.tokenBelongs', { owner: tk.ownerName || '-', time: formatTime(tk.createdAt) }) }}</div>
         </div>
         <div class="tokens-ops">
-          <el-switch v-model="t.enabled" :loading="busyToken === t.id" @change="(val: any) => toggleToken(t, !!val)" />
-          <el-button size="small" type="danger" plain :loading="busyToken === t.id" @click="removeToken(t)">删除</el-button>
+          <el-switch v-model="tk.enabled" :loading="busyToken === tk.id" @change="(val: any) => toggleToken(tk, !!val)" />
+          <el-button size="small" type="danger" plain :loading="busyToken === tk.id" @click="removeToken(tk)">{{ t('common.delete') }}</el-button>
         </div>
       </div>
       <div class="tokens-create">
-        <el-input v-model="newTokenName" placeholder="新 token 名称,如:客厅音箱/临时授权…" style="width: 260px" maxlength="40" @keyup.enter="createToken" />
-        <el-button size="small" type="primary" :loading="busyToken === 'new'" @click="createToken"><MfIcon name="Plus" />新建 token</el-button>
+        <el-input v-model="newTokenName" :placeholder="t('flows.newTokenPh')" style="width: 260px" maxlength="40" @keyup.enter="createToken" />
+        <el-button size="small" type="primary" :loading="busyToken === 'new'" @click="createToken"><MfIcon name="Plus" />{{ t('flows.newToken') }}</el-button>
       </div>
-      <div class="tokens-note">操作说明:每个 token 独立有效,停用 = 旧链接立即返回 403,删除 = 链接永久失效(401/404)。「我喜欢」归属各 token 创建者。已绑定该 token 的音流,其对外链接随之立即生效/失效。</div>
+      <div class="tokens-note">{{ t('flows.tokensNote') }}</div>
     </div>
 
     <div class="player-ctl-body">
       <div class="ctl-grid">
         <div class="ctl-field">
-          <span class="ctl-label">目标播放器</span>
-          <el-select v-model="ctl.device" placeholder="选择播放器(DLNA / AirPlay / 群组)" filterable clearable style="width: 100%">
-            <el-option label="全部在线播放器 (all)" value="all" />
-            <el-option v-for="p in ctlTargets" :key="p.peerId" :label="p.kind === 'group' ? `${p.name}(组)` : p.name" :value="p.peerId" />
+          <span class="ctl-label">{{ t('flows.ctlDevice') }}</span>
+          <el-select v-model="ctl.device" :placeholder="t('flows.ctlDevicePh')" filterable clearable style="width: 100%">
+            <el-option :label="t('flows.ctlAllDevices')" value="all" />
+            <el-option v-for="p in ctlTargets" :key="p.peerId" :label="p.kind === 'group' ? `${p.name}${t('flows.ctlGroup')}` : p.name" :value="p.peerId" />
           </el-select>
         </div>
 
         <div class="ctl-field">
-          <span class="ctl-label">播放模式</span>
-          <el-select v-model="ctl.mode" clearable placeholder="不改变" style="width: 100%">
-            <el-option v-for="(mn, mv) in MODE_TEXT" :key="mv" :label="mn" :value="mv" />
+          <span class="ctl-label">{{ t('flows.ctlMode') }}</span>
+          <el-select v-model="ctl.mode" clearable :placeholder="t('flows.modeKeep')" style="width: 100%">
+            <el-option v-for="(mnKey, mv) in MODE_TEXT" :key="mv" :label="t(mnKey)" :value="mv" />
           </el-select>
         </div>
 
         <div class="ctl-field">
-          <span class="ctl-label">音量(0-100 或 +N/-N)</span>
-          <el-input-number v-model="ctl.volume" :min="0" :max="100" :step="1" controls-position="right" placeholder="留空则不变" style="width: 100%" />
+          <span class="ctl-label">{{ t('flows.ctlVolume') }}</span>
+          <el-input-number v-model="ctl.volume" :min="0" :max="100" :step="1" controls-position="right" :placeholder="t('flows.volumeKeep')" style="width: 100%" />
         </div>
 
         <div class="ctl-field">
-          <span class="ctl-label">传输控制</span>
+          <span class="ctl-label">{{ t('flows.ctlTransport') }}</span>
           <div class="ctl-transport">
-            <el-checkbox v-model="ctl.play">播放</el-checkbox>
-            <el-checkbox v-model="ctl.pause">暂停</el-checkbox>
-            <el-checkbox v-model="ctl.stop">停止</el-checkbox>
-            <el-checkbox v-model="ctl.prev">上一首</el-checkbox>
-            <el-checkbox v-model="ctl.next">下一首</el-checkbox>
+            <el-checkbox v-model="ctl.play">{{ t('flows.ctlPlay') }}</el-checkbox>
+            <el-checkbox v-model="ctl.pause">{{ t('flows.ctlPause') }}</el-checkbox>
+            <el-checkbox v-model="ctl.stop">{{ t('flows.ctlStop') }}</el-checkbox>
+            <el-checkbox v-model="ctl.prev">{{ t('flows.ctlPrev') }}</el-checkbox>
+            <el-checkbox v-model="ctl.next">{{ t('flows.ctlNext') }}</el-checkbox>
           </div>
         </div>
 
         <div class="ctl-field">
-          <span class="ctl-label">动作</span>
-          <el-checkbox v-model="ctl.favorite">把当前播放曲加入「我喜欢」</el-checkbox>
+          <span class="ctl-label">{{ t('flows.ctlActions') }}</span>
+          <el-checkbox v-model="ctl.favorite">{{ t('flows.ctlFavorite') }}</el-checkbox>
         </div>
       </div>
 
       <div class="ctl-preview">
-        <span class="ctl-label">生成链接(可手工编辑参数)</span>
+        <span class="ctl-label">{{ t('flows.ctlGenLink') }}</span>
         <div class="ctl-url-row">
           <el-input v-model.trim="urlText" type="textarea" :rows="2" resize="vertical" readonly class="ctl-url" />
           <div class="ctl-url-actions">
-            <el-button size="small" @click="onCopyUrl"><MfIcon name="Copy" />复制</el-button>
-            <el-button size="small" type="primary" :loading="testing" @click="testUrl"><MfIcon name="Play" />执行测试</el-button>
+            <el-button size="small" @click="onCopyUrl"><MfIcon name="Copy" />{{ t('common.copy') }}</el-button>
+            <el-button size="small" type="primary" :loading="testing" @click="testUrl"><MfIcon name="Play" />{{ t('flows.ctlTest') }}</el-button>
           </div>
         </div>
-        <div class="ctl-order">执行顺序:播放模式 → 播放/暂停/停止/上一首/下一首 → 音量 → 收藏当前曲;参数留空即跳过,可任意组合。</div>
+        <div class="ctl-order">{{ t('flows.ctlOrder') }}</div>
       </div>
     </div>
   </div>
@@ -91,9 +91,11 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
+const { t } = useI18n();
 const ctl = ref({ device: "", mode: "", volume: null as number | null, play: false, pause: false, stop: false, prev: false, next: false, favorite: false });
 const ctlTokens = ref<any[]>([]);
 const ctlTokenId = ref("");
@@ -141,16 +143,16 @@ async function loadPlayerTokens() {
 
 async function createToken() {
   const name = newTokenName.value.trim() || "";
-  if (!name) { ElMessage.warning("请输入 token 名称"); return; }
+  if (!name) { ElMessage.warning(t('flows.needTokenName')); return; }
   busyToken.value = "new";
   try {
     const res = await api.post("/rest/api/v1/player-webhook/tokens", { name });
-    ElMessage.success(`已创建 token「${res.data?.name || name}」`);
+    ElMessage.success(t('flows.tokenCreated', { name: res.data?.name || name }));
     newTokenName.value = "";
     await loadPlayerTokens();
     ctlTokenId.value = ctlTokens.value.find(x => x.token === res.data?.token)?.id || ctlTokenId.value;
     urlText.value = buildPlayerUrl();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "创建失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t('flows.tokenCreateFailed')); }
   finally { busyToken.value = ""; }
 }
 
@@ -159,7 +161,7 @@ async function toggleToken(t: any, enabled: boolean) {
   try {
     await api.put(`/rest/api/v1/player-webhook/tokens/${t.id}`, { enabled });
     await loadPlayerTokens();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "操作失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t('common.operationFailed')); }
   finally { busyToken.value = ""; }
 }
 
@@ -167,9 +169,9 @@ async function removeToken(t: any) {
   busyToken.value = t.id;
   try {
     await api.delete(`/rest/api/v1/player-webhook/tokens/${t.id}`);
-    ElMessage.success("已删除该 token,此 token 的链接立即失效");
+    ElMessage.success(t('flows.tokenDeleted'));
     await loadPlayerTokens();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t('flows.deleteFailed')); }
   finally { busyToken.value = ""; }
 }
 
@@ -200,7 +202,7 @@ async function onCopyUrl() {
   const text = urlText.value;
   try {
     await navigator.clipboard.writeText(text);
-    ElMessage.success("已复制链接");
+    ElMessage.success(t('flows.copied'));
     return;
   } catch { /* fall through to legacy copy */ }
   // 旧浏览器/非安全上下文:clipboard API 不可用,退回 execCommand。
@@ -214,10 +216,10 @@ async function onCopyUrl() {
     ta.select();
     const ok = document.execCommand("copy");
     document.body.removeChild(ta);
-    if (ok) { ElMessage.success("已复制链接"); return; }
-    ElMessage.warning("复制失败,请手动选择复制");
+    if (ok) { ElMessage.success(t('flows.copied')); return; }
+    ElMessage.warning(t('flows.copyFailed'));
   } catch {
-    ElMessage.warning("复制失败,请手动选择复制");
+    ElMessage.warning(t('flows.copyFailed'));
   }
 }
 
@@ -229,18 +231,18 @@ async function testUrl() {
     const data = await res.json().catch(() => ({ raw: true }));
     ElMessage[data.success === false ? "warning" : "success"](formatResult(data));
   } catch (e: any) {
-    ElMessage.error(e?.message || "执行失败");
+    ElMessage.error(e?.message || t('flows.testFailed'));
   } finally { testing.value = false; }
 }
 
 function formatResult(d: any): string {
-  if (!d || typeof d !== "object") return "执行失败";
-  const parts = (d.results || []).map((r: any) => (r.ok ? r.op : `${r.op}:${r.detail || "失败"}`));
-  const s = parts.length ? parts.join("、") : (d.error || "成功");
-  return d.success === false ? `部分失败:${s}` : `成功:${s}`;
+  if (!d || typeof d !== "object") return t('flows.testFailed');
+  const parts = (d.results || []).map((r: any) => (r.ok ? r.op : `${r.op}:${r.detail || t('flows.failedLabel')}`));
+  const s = parts.length ? parts.join(t('flows.listSeparator')) : (d.error || t('flows.successLabel'));
+  return d.success === false ? t('flows.partialFail', { msg: s }) : t('flows.resultOk', { msg: s });
 }
 
-const MODE_TEXT: Record<string, string> = { order: "顺序播放", shuffle: "随机播放", all: "列表循环", one: "单曲循环" };
+const MODE_TEXT: Record<string, string> = { order: "flows.modeOrder", shuffle: "flows.modeShuffle", all: "flows.modeAll", one: "flows.modeOne" };
 
 function formatTime(t: string): string {
   if (!t) return "";

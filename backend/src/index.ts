@@ -33,8 +33,16 @@ import {
   setDailyRunner, startDailyScheduler, getDailyMasterEnabled, formatDailyTime,
 } from "./services/dailyScheduler.js";
 import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
+import { runWithLocale, parseLocale, translate } from "./i18n.js";
 
 const app = new Hono();
+
+// i18n:每个请求进来先按请求头(前端口语)确定语言,写入请求级上下文。之后
+// apiError/translate 会自动用该语言渲染错误文案;默认 zh-CN(缺头视为 zh)。
+app.use("*", async (c, next) => {
+  const locale = parseLocale(c.req.header("x-mf-lang") ?? c.req.header("accept-language"));
+  return runWithLocale(locale, () => next());
+});
 
 // Log only what's useful: auth failures get a readable Chinese hint, real
 // server errors (5xx) keep a bare record; everything else stays quiet.
@@ -110,28 +118,28 @@ app.get("/ping", (c) => c.json({ status: "ok", version: APP_VERSION, commit: APP
 app.all("/webhooks/flows/:id", async (c) => {
   const id = c.req.param("id") || "";
   const flow = getFlow(id);
-  if (!flow) return c.json({ success: false, error: "音流不存在" }, 404);
+  if (!flow) return c.json({ success: false, error: translate("errors.flow.notFound") }, 404);
 
   const q = c.req.queries();
   const flat: Record<string, string> = {};
   for (const [k, v] of Object.entries(q)) {
     if (v && v[0] !== undefined) flat[k] = String(v[0]);
   }
-  if (!flat.token) return c.json({ success: false, error: "缺少 token 参数" }, 401);
+  if (!flat.token) return c.json({ success: false, error: translate("errors.token.required") }, 401);
 
   // ① 令牌本身须存在且启用(与 /webhook/player 一致)。
   const auth = validatePlayerWebhookToken(flat.token);
   if (!auth) {
     const t = listPlayerWebhookTokens();
-    if (t.some(x => x.token === flat.token)) return c.json({ success: false, error: "该渠道 token 已停用" }, 403);
-    return c.json({ success: false, error: "无效的 token" }, 401);
+    if (t.some(x => x.token === flat.token)) return c.json({ success: false, error: translate("errors.token.disabled") }, 403);
+    return c.json({ success: false, error: translate("errors.token.invalid") }, 401);
   }
   // ② 令牌必须是对该音流绑定的那一个(新建音流时选择)。
   const bound = flow.tokenId ? getPlayerWebhookTokenById(flow.tokenId) : undefined;
   if (!bound || bound.token !== flat.token || !bound.enabled) {
-    return c.json({ success: false, error: "该渠道 token 与音流不匹配" }, 403);
+    return c.json({ success: false, error: translate("errors.flow.tokenMismatch") }, 403);
   }
-  if (!flow.enabled) return c.json({ success: false, error: "该音流已停用" }, 409);
+  if (!flow.enabled) return c.json({ success: false, error: translate("errors.flow.disabled") }, 409);
 
   const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
   return c.json({
@@ -155,13 +163,13 @@ app.all("/webhook/player", async (c) => {
     if (v && v[0] !== undefined) flat[k] = String(v[0]);
   }
   if (!flat.token) {
-    return c.json({ success: false, error: "缺少 token 参数" }, 401);
+    return c.json({ success: false, error: translate("errors.token.required") }, 401);
   }
   const auth = validatePlayerWebhookToken(flat.token);
   if (!auth) {
     const t = listPlayerWebhookTokens();
-    if (t.some(x => x.token === flat.token)) return c.json({ success: false, error: "该渠道 token 已停用" }, 403);
-    return c.json({ success: false, error: "无效的 token" }, 401);
+    if (t.some(x => x.token === flat.token)) return c.json({ success: false, error: translate("errors.token.disabled") }, 403);
+    return c.json({ success: false, error: translate("errors.token.invalid") }, 401);
   }
   let peers: string[];
   try {

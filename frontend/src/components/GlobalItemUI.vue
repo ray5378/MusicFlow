@@ -52,18 +52,18 @@
             <span class="sheet-icon"><component :is="a.icon" v-if="a.icon" /></span>
             <span class="sheet-label">{{ a.label }}</span>
           </button>
-          <button class="sheet-cancel" @click="closeMenu">取消</button>
+          <button class="sheet-cancel" @click="closeMenu">{{ t('common.cancel') }}</button>
         </div>
       </transition>
     </teleport>
 
     <!-- ===== Add to playlist dialog ===== -->
-    <el-dialog v-model="addDlg.open" title="添加到歌单" width="420px" align-center @close="closeAddDlg" :append-to-body="true">
+    <el-dialog v-model="addDlg.open" :title="t('layout.addToPlaylist')" width="420px" align-center @close="closeAddDlg" :append-to-body="true">
       <div class="pl-dialog-song" v-if="addDlg.songs && addDlg.songs.length > 1">
-        将 {{ addDlg.songs.length }} 首歌曲添加到：
+        {{ t('globalItem.addSongsCountPrompt', { count: addDlg.songs.length }) }}
       </div>
       <div class="pl-dialog-song" v-else-if="addDlg.song">
-        将「{{ addDlg.song.title }} - {{ addDlg.song.artist }}」添加到：
+        {{ t('layout.addToPlaylistPrompt', { title: addDlg.song.title, artist: addDlg.song.artist }) }}
       </div>
       <div class="pl-list" v-loading="addDlg.loading">
         <div
@@ -76,26 +76,26 @@
           <MfIcon name="List" class="pl-icon"  />
           <div class="pl-info">
             <div class="pl-name">{{ pl.name }}</div>
-            <div class="pl-meta">{{ pl.songCount }} 首</div>
+            <div class="pl-meta">{{ t('layout.trackCount', { count: pl.songCount }) }}</div>
           </div>
           <MfIcon name="Loader2" v-if="addDlg.addingId === pl.id" class="is-loading pl-spin"  spin />
         </div>
-        <div v-if="addDlg.playlists.length === 0 && !addDlg.loading" class="pl-empty">暂无歌单，先创建一个吧</div>
+        <div v-if="addDlg.playlists.length === 0 && !addDlg.loading" class="pl-empty">{{ t('layout.noPlaylistCreate') }}</div>
       </div>
       <div class="pl-create">
-        <el-input v-model="addDlg.newName" placeholder="新建歌单名称..." clearable @keyup.enter="createAndAdd" />
-        <el-button type="primary" @click="createAndAdd" :disabled="!addDlg.newName">新建并添加</el-button>
+        <el-input v-model="addDlg.newName" :placeholder="t('layout.newPlaylistPlaceholder')" clearable @keyup.enter="createAndAdd" />
+        <el-button type="primary" @click="createAndAdd" :disabled="!addDlg.newName">{{ t('layout.createAndAdd') }}</el-button>
       </div>
     </el-dialog>
 
     <!-- ===== Song info dialog ===== -->
-    <el-dialog v-model="infoDlg.open" title="歌曲信息" width="420px" align-center :append-to-body="true">
+    <el-dialog v-model="infoDlg.open" :title="t('globalItem.infoTitle')" width="420px" align-center :append-to-body="true">
       <div class="info-grid" v-if="infoDlg.song">
-        <div class="info-row"><span class="info-k">标题</span><span class="info-v">{{ infoDlg.song.title }}</span></div>
-        <div class="info-row"><span class="info-k">艺术家</span><span class="info-v">{{ infoDlg.song.artist || '—' }}</span></div>
-        <div class="info-row"><span class="info-k">专辑</span><span class="info-v">{{ infoDlg.song.album || '—' }}</span></div>
-        <div class="info-row"><span class="info-k">时长</span><span class="info-v">{{ fmt(infoDlg.song.duration) }}</span></div>
-        <div class="info-row" v-if="infoDlg.song.bitRate"><span class="info-k">码率</span><span class="info-v">{{ infoDlg.song.bitRate }}kbps · {{ (infoDlg.song.suffix || '').toUpperCase() }}</span></div>
+        <div class="info-row"><span class="info-k">{{ t('songTable.title') }}</span><span class="info-v">{{ infoDlg.song.title }}</span></div>
+        <div class="info-row"><span class="info-k">{{ t('songTable.artist') }}</span><span class="info-v">{{ infoDlg.song.artist || '—' }}</span></div>
+        <div class="info-row"><span class="info-k">{{ t('songTable.album') }}</span><span class="info-v">{{ infoDlg.song.album || '—' }}</span></div>
+        <div class="info-row"><span class="info-k">{{ t('songTable.duration') }}</span><span class="info-v">{{ fmt(infoDlg.song.duration) }}</span></div>
+        <div class="info-row" v-if="infoDlg.song.bitRate"><span class="info-k">{{ t('globalItem.bitrate') }}</span><span class="info-v">{{ infoDlg.song.bitRate }}kbps · {{ (infoDlg.song.suffix || '').toUpperCase() }}</span></div>
       </div>
     </el-dialog>
   </div>
@@ -103,8 +103,11 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
+
+const { t } = useI18n();
 
 const { menu, addDlg, infoDlg, closeMenu, addToPlaylist, createAndAdd, closeAddDlg } = useItemActions();
 

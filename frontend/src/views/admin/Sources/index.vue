@@ -1,8 +1,8 @@
 <template>
   <div class="admin-sources">
     <div class="page-header">
-      <h2>媒体源管理</h2>
-      <el-button type="primary" @click="showAddDialog = true">添加媒体源</el-button>
+      <h2>{{ t('admin.sources.title') }}</h2>
+      <el-button type="primary" @click="showAddDialog = true">{{ t('admin.sources.add') }}</el-button>
     </div>
     <div class="source-grid" v-if="sources.length > 0">
       <el-card v-for="source in sources" :key="source.id" class="source-card">
@@ -15,31 +15,31 @@
             <MfIcon name="MoreHorizontal" class="more-btn"  />
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="test"><MfIcon name="Cable" />测试连接</el-dropdown-item>
-                <el-dropdown-item command="scan"><MfIcon name="Play" />全库扫描</el-dropdown-item>
-                <el-dropdown-item command="scan-incremental"><MfIcon name="RefreshCw" />增量扫描</el-dropdown-item>
-                <el-dropdown-item command="edit"><MfIcon name="Pencil" />修改配置</el-dropdown-item>
-                <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />删除</el-dropdown-item>
+                <el-dropdown-item command="test"><MfIcon name="Cable" />{{ t('admin.sources.testConnection') }}</el-dropdown-item>
+                <el-dropdown-item command="scan"><MfIcon name="Play" />{{ t('admin.sources.fullScan') }}</el-dropdown-item>
+                <el-dropdown-item command="scan-incremental"><MfIcon name="RefreshCw" />{{ t('admin.sources.incrementalScan') }}</el-dropdown-item>
+                <el-dropdown-item command="edit"><MfIcon name="Pencil" />{{ t('admin.sources.editConfig') }}</el-dropdown-item>
+                <el-dropdown-item command="delete" divided><MfIcon name="Trash2" />{{ t('common.delete') }}</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
         </div>
         <div class="source-config">
           <p v-if="source.config?.url"><strong>URL:</strong> {{ source.config.url }}</p>
-          <p v-if="source.config?.root_path"><strong>根路径:</strong> {{ source.config.root_path }}</p>
-          <p v-if="source.config?.username"><strong>用户名:</strong> {{ source.config.username }}</p>
-          <p><strong>状态:</strong> <el-tag :type="source.enabled ? 'success' : 'info'" size="small">{{ source.enabled ? '已启用' : '已禁用' }}</el-tag></p>
+          <p v-if="source.config?.root_path"><strong>{{ t('admin.sources.rootPath') }}:</strong> {{ source.config.root_path }}</p>
+          <p v-if="source.config?.username"><strong>{{ t('common.username') }}:</strong> {{ source.config.username }}</p>
+          <p><strong>{{ t('common.status') }}:</strong> <el-tag :type="source.enabled ? 'success' : 'info'" size="small">{{ source.enabled ? t('common.enabled') : t('common.disabled') }}</el-tag></p>
         </div>
 
         <!-- Scan progress -->
         <div v-if="source._scanProgress" class="scan-progress">
           <div class="progress-header">
             <span class="progress-label">
-              {{ source._scanProgress.phase === 'traverse' ? '扫描目录中...' : source._scanProgress.phase === 'scanning' ? '刮削中...' : '扫描完成' }}
+              {{ source._scanProgress.phase === 'traverse' ? t('admin.sources.scanningDir') : source._scanProgress.phase === 'scanning' ? t('admin.sources.scraping') : t('admin.sources.scanDone') }}
             </span>
             <span class="progress-count" v-if="source._scanProgress.phase === 'scanning'">
               <el-tag size="small" :type="source._scanProgress.mode === 'incremental' ? 'warning' : 'primary'" class="mode-tag">
-                {{ source._scanProgress.mode === 'incremental' ? '增量' : '全库' }}
+                {{ source._scanProgress.mode === 'incremental' ? t('admin.sources.incremental') : t('admin.sources.full') }}
               </el-tag>
               {{ source._scanProgress.processedFiles }} / {{ source._scanProgress.totalFiles }}
               <span v-if="source._scanProgress.totalFiles > 0">({{ Math.round((source._scanProgress.processedFiles / source._scanProgress.totalFiles) * 100) }}%)</span>
@@ -59,85 +59,85 @@
           />
           <!-- Directory progress during scan -->
           <div v-if="source._scanProgress.phase === 'scanning'" class="dir-progress">
-            目录 {{ source._scanProgress.processedDirs }} / {{ source._scanProgress.totalDirs }}
+            {{ t('admin.sources.scanDir') }} {{ source._scanProgress.processedDirs }} / {{ source._scanProgress.totalDirs }}
           </div>
           <!-- Currently scraping track -->
           <div v-if="source._scanProgress.phase === 'scanning' && source._scanProgress.currentTrack" class="progress-current">
             <MfIcon name="Play" class="current-icon"  />
-            <span class="current-name">正在刮削: {{ source._scanProgress.currentTrack }}</span>
+            <span class="current-name">{{ t('admin.sources.scrapingTrack', { track: source._scanProgress.currentTrack }) }}</span>
           </div>
           <div class="progress-stats" v-if="source._scanProgress.phase !== 'traverse'">
-            <span>已刮削 {{ source._scanProgress.processedFiles || 0 }}</span>
-            <span>新增 {{ source._scanProgress.added || 0 }}</span>
-            <span>更新 {{ source._scanProgress.updated || 0 }}</span>
-            <span>跳过 {{ source._scanProgress.skipped || 0 }}</span>
+            <span>{{ t('admin.sources.scraped', { count: source._scanProgress.processedFiles || 0 }) }}</span>
+            <span>{{ t('admin.sources.added', { count: source._scanProgress.added || 0 }) }}</span>
+            <span>{{ t('admin.sources.updated', { count: source._scanProgress.updated || 0 }) }}</span>
+            <span>{{ t('admin.sources.skipped', { count: source._scanProgress.skipped || 0 }) }}</span>
           </div>
         </div>
 
         <div class="source-actions">
-          <el-button size="small" @click="testConnection(source)" :loading="source._testing">测试连接</el-button>
-          <el-button size="small" type="primary" @click="scanSource(source, 'full')" :loading="source._scanning" :disabled="source._scanning">全库扫描</el-button>
-          <el-button size="small" type="warning" @click="scanSource(source, 'incremental')" :loading="source._scanning" :disabled="source._scanning">增量扫描</el-button>
-          <el-button v-if="source._scanning" size="small" type="danger" @click="stopScan(source)">停止扫描</el-button>
+          <el-button size="small" @click="testConnection(source)" :loading="source._testing">{{ t('admin.sources.testConnection') }}</el-button>
+          <el-button size="small" type="primary" @click="scanSource(source, 'full')" :loading="source._scanning" :disabled="source._scanning">{{ t('admin.sources.fullScan') }}</el-button>
+          <el-button size="small" type="warning" @click="scanSource(source, 'incremental')" :loading="source._scanning" :disabled="source._scanning">{{ t('admin.sources.incrementalScan') }}</el-button>
+          <el-button v-if="source._scanning" size="small" type="danger" @click="stopScan(source)">{{ t('admin.sources.stopScan') }}</el-button>
         </div>
       </el-card>
     </div>
-    <EmptyState v-else icon="folder-open" title="暂无媒体源" description="添加本地目录或 WebDAV 以开始管理音乐库">
+    <EmptyState v-else icon="folder-open" :title="t('admin.sources.emptyTitle')" :description="t('admin.sources.emptyDesc')">
       <template #action>
-        <el-button type="primary" @click="showAddDialog = true">添加媒体源</el-button>
+        <el-button type="primary" @click="showAddDialog = true">{{ t('admin.sources.add') }}</el-button>
       </template>
     </EmptyState>
 
     <!-- Add dialog -->
-    <el-dialog v-model="showAddDialog" title="添加媒体源" width="500px" :append-to-body="true">
+    <el-dialog v-model="showAddDialog" :title="t('admin.sources.addDialogTitle')" width="500px" :append-to-body="true">
       <el-form label-width="100px">
-        <el-form-item label="名称"><el-input v-model="newSource.name" placeholder="我的音乐库" /></el-form-item>
-        <el-form-item label="类型">
+        <el-form-item :label="t('common.name')"><el-input v-model="newSource.name" :placeholder="t('admin.sources.namePlaceholder')" /></el-form-item>
+        <el-form-item :label="t('common.type')">
           <el-select v-model="newSource.type">
             <el-option label="WebDAV" value="webdav" />
-            <el-option label="本地目录" value="local" />
+            <el-option :label="t('admin.sources.localDir')" value="local" />
           </el-select>
         </el-form-item>
         <template v-if="newSource.type === 'webdav'">
           <el-form-item label="WebDAV URL"><el-input v-model="newSource.config.url" placeholder="http://192.168.1.100:5000/dav" /></el-form-item>
-          <el-form-item label="用户名"><el-input v-model="newSource.config.username" placeholder="可选" /></el-form-item>
-          <el-form-item label="密码"><el-input v-model="newSource.config.password" type="password" placeholder="可选" show-password /></el-form-item>
-          <el-form-item label="根路径"><el-input v-model="newSource.config.root_path" placeholder="/music" /></el-form-item>
+          <el-form-item :label="t('common.username')"><el-input v-model="newSource.config.username" :placeholder="t('common.optional')" /></el-form-item>
+          <el-form-item :label="t('common.password')"><el-input v-model="newSource.config.password" type="password" :placeholder="t('common.optional')" show-password /></el-form-item>
+          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" placeholder="/music" /></el-form-item>
         </template>
         <template v-else>
-          <el-form-item label="本地路径" description="容器内路径,需与 docker-compose.yml 的本地音乐目录挂载一致,默认填 /local/music">
+          <el-form-item :label="t('admin.sources.localPath')" :description="t('admin.sources.localPathDesc')">
             <el-input v-model="newSource.config.path" placeholder="/local/music" />
           </el-form-item>
         </template>
       </el-form>
       <template #footer>
-        <el-button @click="showAddDialog = false">取消</el-button>
-        <el-button type="primary" @click="addSource">添加</el-button>
+        <el-button @click="showAddDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="addSource">{{ t('common.add') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- Pencil dialog -->
-    <el-dialog v-model="showEditDialog" title="修改媒体源配置" width="500px" :append-to-body="true">
+    <el-dialog v-model="showEditDialog" :title="t('admin.sources.editDialogTitle')" width="500px" :append-to-body="true">
       <el-form label-width="100px">
-        <el-form-item label="名称"><el-input v-model="editSource.name" /></el-form-item>
+        <el-form-item :label="t('common.name')"><el-input v-model="editSource.name" /></el-form-item>
         <template v-if="editSource.type === 'webdav'">
           <el-form-item label="WebDAV URL"><el-input v-model="editSource.config.url" /></el-form-item>
-          <el-form-item label="用户名"><el-input v-model="editSource.config.username" /></el-form-item>
-          <el-form-item label="密码"><el-input v-model="editSource.config.password" type="password" show-password /></el-form-item>
-          <el-form-item label="根路径"><el-input v-model="editSource.config.root_path" /></el-form-item>
+          <el-form-item :label="t('common.username')"><el-input v-model="editSource.config.username" /></el-form-item>
+          <el-form-item :label="t('common.password')"><el-input v-model="editSource.config.password" type="password" show-password /></el-form-item>
+          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="editSource.config.root_path" /></el-form-item>
         </template>
         <template v-else>
-          <el-form-item label="本地路径" description="容器内路径,需与 docker-compose.yml 的本地音乐目录挂载一致,默认 /local/music">
+          <el-form-item :label="t('admin.sources.localPath')" :description="t('admin.sources.localPathDesc')">
             <el-input v-model="editSource.config.path" placeholder="/local/music" />
           </el-form-item>
         </template>
-        <el-form-item label="启用">
+        <el-form-item :label="t('common.enable')">
           <el-switch v-model="editSource.enabled" :active-value="1" :inactive-value="0" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showEditDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveEdit">保存</el-button>
+        <el-button @click="showEditDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="saveEdit">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -145,10 +145,12 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 
+const { t } = useI18n();
 const sources = ref<any[]>([]);
 const showAddDialog = ref(false);
 const showEditDialog = ref(false);
@@ -166,7 +168,7 @@ async function loadSources() {
 }
 
 async function addSource() {
-  if (!newSource.name) { ElMessage.warning("请输入名称"); return; }
+  if (!newSource.name) { ElMessage.warning(t("admin.sources.requiredName")); return; }
   try {
     await api.post("/rest/api/v1/sources", {
       name: newSource.name, type: newSource.type,
@@ -176,9 +178,9 @@ async function addSource() {
     });
     showAddDialog.value = false;
     newSource.name = ""; newSource.config = { url: "", username: "", password: "", root_path: "", path: "" };
-    ElMessage.success("添加成功");
+    ElMessage.success(t("common.addSuccess"));
     loadSources();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "添加失败"); }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.addFailed")); }
 }
 
 function handleCommand(cmd: string, source: any) {
@@ -195,9 +197,9 @@ async function testConnection(source: any) {
   source._testing = true;
   try {
     const res = await api.post(`/rest/api/v1/sources/${source.id}/test`);
-    if (res.data.success) ElMessage.success(`连接成功: ${res.data.message || "服务器可达"}`);
-    else ElMessage.error(`连接失败: ${res.data.error}`);
-  } catch (e: any) { ElMessage.error(`连接失败: ${e.response?.data?.error || e.message}`); }
+    if (res.data.success) ElMessage.success(t("admin.sources.connectionSuccess", { message: res.data.message || t("admin.sources.serverReachable") }));
+    else ElMessage.error(t("admin.sources.connectionFailed", { message: res.data.error }));
+  } catch (e: any) { ElMessage.error(t("admin.sources.connectionFailed", { message: e.response?.data?.error || e.message })); }
   finally { source._testing = false; }
 }
 
@@ -230,21 +232,21 @@ function startProgressPolling(source: any) {
         source._scanning = false;
         source._scanProgress = null;
         const r = data.result;
-        ElMessage.success(`扫描完成: 新增 ${r?.added || 0}，更新 ${r?.updated || 0}，删除 ${r?.removed || 0}`);
+        ElMessage.success(t("admin.sources.scanDoneSummary", { added: r?.added || 0, updated: r?.updated || 0, removed: r?.removed || 0 }));
         loadSources();
       } else if (data.status === "stopped") {
         clearInterval(progressTimers[source.id]);
         delete progressTimers[source.id];
         source._scanning = false;
         source._scanProgress = null;
-        ElMessage.info("扫描已停止");
+        ElMessage.info(t("admin.sources.scanStopped"));
         loadSources();
       } else if (data.status === "failed") {
         clearInterval(progressTimers[source.id]);
         delete progressTimers[source.id];
         source._scanning = false;
         source._scanProgress = null;
-        ElMessage.error(`扫描失败: ${data.error}`);
+        ElMessage.error(t("admin.sources.scanFailed", { error: data.error }));
       }
     } catch { /* ignore */ }
   }, 2000);
@@ -253,8 +255,8 @@ function startProgressPolling(source: any) {
 async function stopScan(source: any) {
   try {
     const res = await api.post(`/rest/api/v1/sources/${source.id}/scan-stop`);
-    if (res.data.success) ElMessage.info("正在停止扫描...");
-    else ElMessage.error(res.data.error || "停止失败");
+    if (res.data.success) ElMessage.info(t("admin.sources.stoppingScan"));
+    else ElMessage.error(res.data.error || t("admin.sources.stopFailed"));
   } catch (e: any) { ElMessage.error(e.response?.data?.error || e.message); }
 }
 
@@ -263,11 +265,11 @@ async function scanSource(source: any, mode: "full" | "incremental" = "full") {
   try {
     const res = await api.post(`/rest/api/v1/sources/${source.id}/scan`, { mode });
     if (res.data.success) {
-      ElMessage.info(mode === "incremental" ? "增量扫描已开始..." : "全库扫描已开始...");
+      ElMessage.info(mode === "incremental" ? t("admin.sources.incrementalScanStarted") : t("admin.sources.fullScanStarted"));
       startProgressPolling(source);
     } else {
       source._scanning = false;
-      ElMessage.error(res.data.error || "扫描启动失败");
+      ElMessage.error(res.data.error || t("admin.sources.scanStartFailed"));
     }
   } catch (e: any) {
     source._scanning = false;
@@ -284,14 +286,14 @@ function openEdit(source: any) {
 async function saveEdit() {
   try {
     await api.put(`/rest/api/v1/sources/${editSource.id}`, { name: editSource.name, enabled: editSource.enabled, config: editSource.config });
-    showEditDialog.value = false; ElMessage.success("保存成功"); loadSources();
-  } catch (e: any) { ElMessage.error(e.response?.data?.error || "保存失败"); }
+    showEditDialog.value = false; ElMessage.success(t("common.saveSuccess")); loadSources();
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.saveFailed")); }
 }
 
 async function deleteSource(source: any) {
-  await ElMessageBox.confirm(`确定删除媒体源「${source.name}」？`, "确认删除", { type: "warning" });
-  try { await api.delete(`/rest/api/v1/sources/${source.id}`); ElMessage.success("已删除"); loadSources(); }
-  catch (e: any) { ElMessage.error(e.response?.data?.error || "删除失败"); }
+  await ElMessageBox.confirm(t("admin.sources.confirmDeleteSource", { name: source.name }), t("common.confirmDelete"), { type: "warning" });
+  try { await api.delete(`/rest/api/v1/sources/${source.id}`); ElMessage.success(t("common.deleted")); loadSources(); }
+  catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.deleteFailed")); }
 }
 
 onMounted(loadSources);

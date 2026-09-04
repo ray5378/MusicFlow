@@ -6,6 +6,7 @@ import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, n
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import { apiError, BusinessErrorCode } from "../../utils/errors.js";
+import { translate } from "../../i18n.js";
 import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
 import { adminMiddleware, invalidateAuthCaches } from "../../middleware/auth.js";
@@ -386,7 +387,7 @@ apiRoutes.put("/v1/proxy", adminMiddleware, async (c) => {
   const enabled = !!body.enabled;
   const url = normalizeProxyUrl(String(body.url || ""));
   if (enabled && !url)
-    return c.json({ error: "代理地址格式应为 http://ip:port、https://ip:port 或 socks5://ip:port" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.proxyFormat"), 400);
   setSetting("proxy_enabled", enabled ? "true" : "false");
   setSetting("proxy_url", url);
   return c.json({ success: true, enabled, url });
@@ -410,7 +411,7 @@ apiRoutes.put("/v1/batch-pace", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const pace = String(body.pace || "standard");
   if (pace !== "slow" && pace !== "standard" && pace !== "full") {
-    return c.json({ error: "档位必须为 slow | standard | full" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.paceFormat"), 400);
   }
   setPace(pace as BatchPace);
   return c.json({ success: true, pace });
@@ -433,9 +434,9 @@ apiRoutes.post("/v1/users", adminMiddleware, async (c) => {
 apiRoutes.put("/v1/users/:id/password", async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
-  if (id !== user?.id && !user?.isAdmin) return c.json({ error: "无权修改该用户密码" }, 403);
+  if (id !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.changePasswordForbidden"), 403);
   const body = await c.req.json();
-  if (!body.newPassword) return c.json({ error: "新密码不能为空" }, 400);
+  if (!body.newPassword) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.user.passwordEmpty"), 400);
   const newSubsonicSalt = Math.random().toString(16).substring(2, 10);
   db.update(users).set({ password: md5(body.newPassword + newSubsonicSalt), subsonicSalt: newSubsonicSalt, passEnc: encryptPassword(body.newPassword), mustChangePassword: 0, apiKey: null, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
   invalidateAuthCaches(); // 密码变更会清空 apiKey → 重建鉴权索引
@@ -445,12 +446,12 @@ apiRoutes.put("/v1/users/:id/password", async (c) => {
 apiRoutes.put("/v1/users/:id/username", async (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
-  if (id !== user?.id && !user?.isAdmin) return c.json({ error: "无权修改该用户名" }, 403);
+  if (id !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.changeNameForbidden"), 403);
   const body = await c.req.json().catch(() => ({}));
   const name = String(body.username || "").trim();
-  if (!name) return c.json({ error: "用户名不能为空" }, 400);
+  if (!name) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.user.nameEmpty"), 400);
   const existing = db.select().from(users).where(eq(users.username, name)).get();
-  if (existing && existing.id !== id) return c.json({ error: "用户名已被占用" }, 409);
+  if (existing && existing.id !== id) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.user.nameTaken"), 409);
   db.update(users).set({ username: name, updatedAt: new Date().toISOString() }).where(eq(users.id, id)).run();
   invalidateAuthCaches(); // 用户名变更影响鉴权缓存
   return c.json({ success: true, username: name });
@@ -459,9 +460,9 @@ apiRoutes.put("/v1/users/:id/username", async (c) => {
 apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
   const user = c.get("user");
   const id = c.req.param("id")!;
-  if (id === user?.id) return c.json({ error: "不能删除当前登录账号" }, 400);
+  if (id === user?.id) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.user.selfDelete"), 400);
   const target = db.select().from(users).where(eq(users.id, id)).get();
-  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.user.notFound"), 404);
   const owned = db.select().from(playlists).where(eq(playlists.ownerId, id)).all();
   if (owned.length > 0) {
     db.delete(playlistSongs).where(inArray(playlistSongs.playlistId, owned.map(p => p.id))).run();
@@ -487,7 +488,7 @@ apiRoutes.delete("/v1/users/:id", adminMiddleware, (c) => {
 apiRoutes.get("/v1/users/:id/access", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   const target = db.select().from(users).where(eq(users.id, id)).get();
-  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.user.notFound"), 404);
   const view = effectiveAccessView(id, !!target.isAdmin);
   // 管理员无授权限制,rendererGrants 返回 null 由前端展示"管理员不限"。
   return c.json({ success: true, ...view });
@@ -496,7 +497,7 @@ apiRoutes.get("/v1/users/:id/access", adminMiddleware, (c) => {
 apiRoutes.put("/v1/users/:id/access", adminMiddleware, async (c) => {
   const id = c.req.param("id")!;
   const target = db.select().from(users).where(eq(users.id, id)).get();
-  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  if (!target) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.user.notFound"), 404);
   const body = await c.req.json().catch(() => ({}));
   if (body.permissions !== undefined && body.permissions !== null && typeof body.permissions === "object") {
     replaceUserPermissions(id, body.permissions);
@@ -604,18 +605,18 @@ function assertKeyAccess(c: Context, id: string) {
 
 apiRoutes.get("/v1/users/:id/api-key", (c) => {
   const id = c.req.param("id")!;
-  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权查看该用户的 API Key"), 403);
+  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.apikey.viewForbidden"), 403);
   const row = db.select().from(users).where(eq(users.id, id)).get();
-  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.user.notFound"), 404);
   return c.json({ apiKey: row.apiKey || null, expiresAt: row.apiKeyExpiresAt || null });
 });
 
 // body: { expiresInDays?: number }  — omit or 0 for a key that never expires
 apiRoutes.post("/v1/users/:id/api-key", async (c) => {
   const id = c.req.param("id")!;
-  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权签发该用户的 API Key"), 403);
+  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.apikey.issueForbidden"), 403);
   const row = db.select().from(users).where(eq(users.id, id)).get();
-  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "用户不存在"), 404);
+  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.user.notFound"), 404);
   const body = await c.req.json().catch(() => ({} as any));
   const days = Number(body?.expiresInDays) || 0;
   const apiKey = `mf_${randomBytes(24).toString("base64url")}`;
@@ -630,7 +631,7 @@ apiRoutes.post("/v1/users/:id/api-key", async (c) => {
 
 apiRoutes.delete("/v1/users/:id/api-key", (c) => {
   const id = c.req.param("id")!;
-  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权撤销该用户的 API Key"), 403);
+  if (!assertKeyAccess(c, id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.apikey.revokeForbidden"), 403);
   db.update(users)
     .set({ apiKey: null, apiKeyExpiresAt: null, updatedAt: new Date().toISOString() })
     .where(eq(users.id, id))
@@ -684,7 +685,7 @@ apiRoutes.delete("/v1/sources/:id", adminMiddleware, (c) => {
 apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "媒体源不存在"));
+  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"));
 
   const config = JSON.parse(source.config || "{}");
 
@@ -696,17 +697,17 @@ apiRoutes.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
       return c.json(result);
     } catch (e: any) {
       console.log("[TEST] Error:", e.message);
-      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "连接失败"));
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.source.connectFailed"));
     }
   } else if (source.type === "local") {
     const fs = await import("fs");
     if (fs.existsSync(config.path)) {
       return c.json({ success: true, message: `路径 ${config.path} 存在` });
     } else {
-      return c.json({ success: false, error: `路径 ${config.path} 不存在` });
+      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.source.pathMissing", { path: config.path }));
     }
   }
-  return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "不支持的媒体源类型"));
+  return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.source.unsupportedType"));
 });
 
 // Scan source
@@ -728,10 +729,10 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   touch(); // 标记活动:媒体源扫描
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "媒体源不存在"));
-  if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "媒体源已禁用"));
+  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"));
+  if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.source.disabled"));
   if (scanJobs.has(id) && scanJobs.get(id)!.status === "running") {
-    return c.json(apiError(BusinessErrorCode.CONFLICT, "扫描正在进行中"));
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.busy"));
   }
 
   const body = await c.req.json().catch(() => ({}));
@@ -760,7 +761,7 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
     }
     if (p.stage === "scrape-failed") {
       const cur = scrapeJobs.get(SCRAPE_JOB_ID);
-      if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: cur.startedAt, error: p.error || "刮削失败", progress: cur.progress });
+      if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: cur.startedAt, error: p.error || translate("errors.scraper.failed"), progress: cur.progress });
       return;
     }
     if (p.stage === "scrape") {
@@ -781,7 +782,7 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
       }
     } catch (e: any) {
       log.error("[SCANNER] Scan error", { err: e });
-      scanJobs.set(id, { status: "failed", error: e.message || "扫描失败", startedAt: job.startedAt, progress: job.progress, mode });
+      scanJobs.set(id, { status: "failed", error: e.message || translate("errors.scanner.failed"), startedAt: job.startedAt, progress: job.progress, mode });
     }
   })();
 
@@ -792,7 +793,7 @@ apiRoutes.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
 apiRoutes.post("/v1/sources/:id/scan-stop", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   const job = scanJobs.get(id);
-  if (!job || job.status !== "running") return c.json(apiError(BusinessErrorCode.CONFLICT, "没有正在运行的扫描"));
+  if (!job || job.status !== "running") return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.notRunning"));
   job.controller?.abort();
   return c.json({ success: true, message: "正在停止扫描..." });
 });
@@ -834,7 +835,7 @@ apiRoutes.get("/v1/plugins", adminMiddleware, (c) => {
 apiRoutes.post("/v1/plugins", adminMiddleware, async (c) => { const body = await c.req.json(); const id = uuidv4(); db.insert(plugins).values({ id, name: body.name, version: body.version || "", description: body.description || "", manifest: JSON.stringify(body.manifest || {}), enabled: body.enabled ? 1 : 0, config: JSON.stringify(body.config || {}) }).run(); return c.json({ id }); });
 apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
   const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
-  if (!p) return c.json({ error: "插件不存在" }, 404);
+  if (!p) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.notFound"), 404);
   const body = await c.req.json().catch(() => ({}));
   const builtin = isBuiltinRow(p);
   // 首页位次冲突预检:推荐插件保存 showOnHome/homePosition 时,与其它「显示在首页」
@@ -867,7 +868,7 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
 });
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
   const p = db.select().from(plugins).where(eq(plugins.id, c.req.param("id")!)).get();
-  if (!p) return c.json({ error: "插件不存在" }, 404);
+  if (!p) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.notFound"), 404);
   // core 内置行为插件(同曲多源组 / 播放优选)也可通过状态开关整体停用:
   // 总开关(列表)关 = 整个功能关闭(能力查询 isCapabilityEnabled 返回 false,
   // 不再归组 / 不再优选,恢复按原源播放);配置弹窗中的功能子开关(多源组匹配
@@ -896,8 +897,8 @@ apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
 apiRoutes.delete("/v1/plugins/:id", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   const p = db.select().from(plugins).where(eq(plugins.id, id)).get() as any;
-  if (!p) return c.json({ error: "插件不存在" }, 404);
-  if (isBuiltinRow(p)) return c.json({ error: "内置核心插件不可删除" }, 400);
+  if (!p) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.notFound"), 404);
+  if (isBuiltinRow(p)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.builtinPluginProtected"), 400);
   const sandbox = pluginSandboxes.get(p.id) || pluginSandboxes.get(p.name);
   if (sandbox) {
     try { sandbox.dispose(); } catch { /* ignore */ }
@@ -921,7 +922,7 @@ apiRoutes.get("/v1/plugins/health", adminMiddleware, async (c) => c.json({ healt
 apiRoutes.get("/v1/plugins/renderers", adminMiddleware, (c) => c.json({ renderers: getRendererPlugins() }));
 apiRoutes.get("/v1/plugins/renderers/devices", adminMiddleware, async (c) => {
   try { return c.json({ devices: await discoverRenderers() }); }
-  catch (e: any) { return c.json({ error: e.message || "发现设备失败" }, 500); }
+  catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.discovery.deviceFailed"), 500); }
 });
 
 // Scrobbler plugins (playback reporting).
@@ -948,14 +949,14 @@ apiRoutes.get("/v1/plugins/registry", adminMiddleware, async (c) => {
     });
     return c.json({ registries, plugins: merged });
   } catch (e: any) {
-    return c.json({ error: e.message || "拉取插件市场失败" }, 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.registryFetchFailed"), 500);
   }
 });
 apiRoutes.post("/v1/plugins/registry", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  if (!body?.url) return c.json({ error: "需要 registry URL" }, 400);
+  if (!body?.url) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.registryUrlRequired"), 400);
   try { return c.json({ id: addRegistry(body.url) }); }
-  catch (e: any) { return c.json({ error: e.message || "添加失败" }, 400); }
+  catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.addFailed"), 400); }
 });
 apiRoutes.delete("/v1/plugins/registry/:id", adminMiddleware, (c) => {
   removeRegistry(c.req.param("id")!);
@@ -963,12 +964,12 @@ apiRoutes.delete("/v1/plugins/registry/:id", adminMiddleware, (c) => {
 });
 apiRoutes.post("/v1/plugins/registry/install", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  if (!body?.downloadUrl) return c.json({ error: "需要 downloadUrl" }, 400);
+  if (!body?.downloadUrl) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.downloadUrlRequired"), 400);
   try {
     const r = await installPlugin(body.downloadUrl);
     return c.json({ success: true, ...r });
   } catch (e: any) {
-    return c.json({ error: e.message || "安装失败" }, 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.installFailed"), 500);
   }
 });
 
@@ -1091,7 +1092,7 @@ apiRoutes.get("/v1/songs", (c) => {
 apiRoutes.delete("/v1/songs/:id", (c) => {
   const id = c.req.param("id")!;
   const ok = deleteSongDb(id);
-  if (!ok) return c.json({ error: "歌曲不存在" }, 404);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
   return c.json({ success: true });
 });
 
@@ -1256,12 +1257,12 @@ apiRoutes.post("/v1/artists/scrape", async (c) => {
   try {
     if (name) {
       const result = await scrapeArtist(name, body.artistId || undefined);
-      if (!result) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "未找到歌手信息(QQ 和网易云均无结果)"));
+      if (!result) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.artist.notFound"));
       return c.json({ success: true, name: result.name, platform: result.platform, coverArt: result.coverArt, bio: result.bio || undefined });
     }
     // Full scrape: all artists missing covers, run in background with progress
     if (scrapeJobs.get(SCRAPE_JOB_ID)?.status === "running") {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "刮削正在进行中"));
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scraper.busy"));
     }
     const missing = artistsMissingCovers();
     const job = { status: "running", startedAt: new Date().toISOString(), progress: undefined as any };
@@ -1272,12 +1273,12 @@ apiRoutes.post("/v1/artists/scrape", async (c) => {
         const { result } = await runBatchJob("scrape-artists", { artistIds: missing.map(a => a.id) }, { onProgress });
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job.startedAt, finishedAt: new Date().toISOString(), progress: result });
       } catch (e: any) {
-        scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "刮削失败", progress: job.progress });
+        scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "errors.scraper.failed", progress: job.progress });
       }
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削" });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "刮削失败"));
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.scraper.failed"));
   }
 });
 
@@ -1293,7 +1294,7 @@ apiRoutes.get("/v1/artists/scrape-status", (c) => {
 apiRoutes.post("/v1/artists/scrape-missing", async (c) => {
   try {
     if (scrapeJobs.get(SCRAPE_JOB_ID)?.status === "running") {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "刮削正在进行中"));
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scraper.busy"));
     }
     const missing = artistsMissingInfo();
     if (missing.length === 0) {
@@ -1307,12 +1308,12 @@ apiRoutes.post("/v1/artists/scrape-missing", async (c) => {
         const { result } = await runBatchJob("scrape-artists", { artistIds: missing.map(a => a.id) }, { onProgress });
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job.startedAt, finishedAt: new Date().toISOString(), progress: result });
       } catch (e: any) {
-        scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "刮削失败", progress: job.progress });
+        scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "errors.scraper.failed", progress: job.progress });
       }
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削缺失歌手信息" });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "刮削失败"));
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.scraper.failed"));
   }
 });
 
@@ -1512,12 +1513,12 @@ apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
     set("daily_recommend_time", `${hh.padStart(2, "0")}:${mm}`);
     changed = true;
   } else if (body.time !== undefined) {
-    return c.json({ error: "time 必须是 HH:MM 格式(如 03:30)" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.timeHHMM"), 400);
   } else if (body.hour !== undefined) {
     // 旧客户端只发整点:等价于把 time 设为整点,保证新老配置同源生效。
     const h = parseInt(body.hour, 10);
     if (!(Number.isFinite(h) && h >= 0 && h <= 23)) {
-      return c.json({ error: "hour 必须是 0-23 的整数" }, 400);
+      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.hourRange"), 400);
     }
     set("daily_recommend_hour", String(h));
     set("daily_recommend_time", `${String(h).padStart(2, "0")}:00`);
@@ -1533,13 +1534,13 @@ apiRoutes.put("/v1/daily-recommend/config", adminMiddleware, async (c) => {
 apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const arr = Array.isArray(body.candidates) ? body.candidates : null;
-  if (!arr) return c.json({ error: "candidates 必须是数组" }, 400);
+  if (!arr) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.candidatesArray"), 400);
   const raw = arr
     .filter((x: any) => x && typeof x.url === "string" && typeof x.platform === "string" && x.platform.trim().length > 0)
     .map((x: any) => ({ platform: x.platform, url: x.url.trim(), name: typeof x.name === "string" ? x.name : undefined }));
   const blocked = raw.filter((x: any) => dailyApi()?.isCandidateBlocked(x) ?? false);
   const clean = raw.filter((x: any) => !(dailyApi()?.isCandidateBlocked(x) ?? false));
-  if (clean.length === 0) return c.json({ error: "候选池不能为空,且每项需要 platform + url" }, 400);
+  if (clean.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.candidatesEmpty"), 400);
   dailyApi()?.saveCandidates(clean);
   return c.json({ success: true, count: clean.length, blocked: blocked.length, blockedItems: blocked });
 });
@@ -1549,14 +1550,14 @@ apiRoutes.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
 // + local history mix. Idempotent: if today's playlist already exists, returns
 // skipped=true. With { force: true } it bypasses idempotency and re-randomizes.
 apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
-  if (!dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
+  if (!dailyApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.dailyRecommendDisabled"), 503);
   try {
     const body = await c.req.json().catch(() => ({}));
     const opts = { force: body?.force === true, seedSalt: body?.seedSalt };
     const result = await dailyApi().generateDailyPlaylist(new Date(), opts);
     return c.json({ success: true, result }, 200);
   } catch (e: any) {
-    const error = e.message || "每日推荐生成失败";
+    const error = e.message || translate("errors.recommend.genFailed");
     log.error("[DAILY-RECOMMEND] trigger error", { err: error });
     return c.json({ success: false, error }, 500);
   }
@@ -1568,9 +1569,9 @@ apiRoutes.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
 // 前端在发起异步刷新后轮询此端点,直到 running=false。
 apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
   const id = c.req.param("id");
-  if (!id) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "缺少插件 id"), 400);
+  if (!id) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.idRequired"), 400);
   const state = getPluginJobState(id);
-  if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "该插件尚无任务记录"), 404);
+  if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.noTask"), 404);
   return c.json({ success: true, pluginId: id, running: state.running, job: state });
 });
 
@@ -1585,7 +1586,7 @@ apiRoutes.post("/v1/stream/probe", async (c) => {
   const songIds = Array.isArray(body.songIds)
     ? body.songIds.filter((s: any) => typeof s === "string").slice(0, 5)
     : [];
-  if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "缺少 songIds"));
+  if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.songIdsRequired"));
   const results = await Promise.all(songIds.map(async (id: string) => {
     const song = db.select().from(songs).where(eq(songs.id, id)).get();
     if (!song) return { songId: id, ok: false, local: false, reason: "歌曲不存在" };
@@ -1619,7 +1620,7 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   const pluginId = body?.pluginId;
   if (pluginId) {
     const reg = getPlugin(pluginId);
-    if (!reg) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "插件不存在"), 404);
+    if (!reg) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.notFound"), 404);
     const caps: string[] = reg.manifest.capabilities || [];
     const isDaily =
       caps.includes("dailyPlaylist") ||
@@ -1629,22 +1630,22 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
       caps.includes("localPlatformRecommend") ||
       caps.includes("playlistCleanup");
     if (!isDaily) {
-      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "该插件不支持手动刷新(无推荐歌单能力)"), 400);
+      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.noRefresh"), 400);
     }
     // 未启用(或尚无 DB 行)视为不可用。
     if (getPluginConfig(pluginId) === null) {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "插件未启用"), 503);
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.plugin.notEnabled"), 503);
     }
     const impl = reg.impl;
     if (typeof impl?.runDailyJob !== "function") {
-      return c.json(apiError(BusinessErrorCode.INTERNAL, "插件未实现 runDailyJob"), 500);
+      return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.plugin.noDailyJob"), 500);
     }
     const { started, alreadyRunning } = runPluginJob(pluginId, "runDailyJob", { force: true, keywordOnly: !!body?.keywordOnly });
     if (alreadyRunning) {
       return c.json({ success: true, pluginId, alreadyRunning: true, message: "该插件刷新任务已在后台运行中" }, 200);
     }
     if (!started) {
-      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "任务启动失败"), 500);
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.task.startFailed"), 500);
     }
     return c.json({ success: true, pluginId, started: true, message: "已开始后台刷新,可通过 GET /v1/plugins/:id/job 查询进度" }, 202);
   }
@@ -1653,12 +1654,12 @@ apiRoutes.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   // 同步前置校验:能力不存在直接 503(契约保留)。实际生成在一次性批量子进程内跑
   // (recommend-refresh,方案3),峰值内存随子进程退出归还;前端 202 后轮询
   // GET /v1/tasks/:taskId 取结果(task.result = { success, seedSalt, results })。
-  if (targets.includes("daily") && !dailyApi()) return c.json({ error: "每日推荐插件未启用" }, 503);
+  if (targets.includes("daily") && !dailyApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.dailyRecommendDisabled"), 503);
   if (targets.includes("local") && (!localApi() || typeof localApi().generateLocalDailyPlaylist !== "function")) {
-    return c.json({ error: "本地推荐插件未启用" }, 503);
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.localRecommendDisabled"), 503);
   }
   if (targets.includes("roam") && (!comboApi() || typeof comboApi().generateComboPlaylist !== "function")) {
-    return c.json({ error: "今日漫游插件未启用" }, 503);
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.roamRecommendDisabled"), 503);
   }
   const seedSalt = Math.floor(Math.random() * 1_000_000);
   const started = startAsyncTask("recommend-refresh", `targets:${targets.join(",")}`, {
@@ -1695,7 +1696,7 @@ apiRoutes.post("/v1/recommend-pool/playlist/:playlistId", async (c) => {
   const user = c.get("user");
   const playlistId = c.req.param("playlistId");
   const row = sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(playlistId) as any;
-  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"), 404);
+  if (!row) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), 404);
   const added = dailyApi()?.addToRecommendPool("playlist", playlistId, row.name || "", user?.id || "") ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "该歌单已在推荐池中" });
 });
@@ -1716,7 +1717,7 @@ apiRoutes.get("/v1/recommend-pool/playlist/:playlistId/status", (c) => {
 // Add the current user's favorites ("我喜欢的音乐") to the pool.
 apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
   const user = c.get("user");
-  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "未登录"), 401);
+  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.auth.notLoggedIn"), 401);
   const added = dailyApi()?.addToRecommendPool("favorites", user.id, "我喜欢的音乐", user.id) ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "我喜欢的音乐已在推荐池中" });
 });
@@ -1724,7 +1725,7 @@ apiRoutes.post("/v1/recommend-pool/favorites", async (c) => {
 // Remove the current user's favorites from the pool.
 apiRoutes.delete("/v1/recommend-pool/favorites", (c) => {
   const user = c.get("user");
-  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "未登录"), 401);
+  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.auth.notLoggedIn"), 401);
   const removed = dailyApi()?.removeFromRecommendPool("favorites", user.id) ?? false;
   return c.json({ success: true, removed });
 });
@@ -1744,7 +1745,7 @@ apiRoutes.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), asy
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
   const native = body.native; // MusicFlow-exported JSON (object) for native files
-  if (!url && !native) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "请输入歌单链接或选择歌单文件"));
+  if (!url && !native) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.linkOrFileRequired"));
   if (native) {
       // Uploaded playlist file — routed to whichever enabled importer plugin
       // recognizes the payload (built-in: MusicFlow export, one or many playlists).
@@ -1760,7 +1761,7 @@ apiRoutes.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), asy
           sourceUrl: null, sourcePlatform: imp.platform, externalId: null,
           syncEnabled: 0,
         }).run();
-        if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
+        if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
         const result = await syncApi().rebuildPlaylistEntries(id, imp, {
           userId: user?.id,
           notes: `从本地歌单文件导入「${name}」`,
@@ -1786,9 +1787,9 @@ apiRoutes.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), asy
       });
     }
     if (syncApi()?.checkImportCooldown(user?.id || "", url) ?? false) {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "相同歌单刚导入过,请稍候再试"));
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.importDup"));
     }
-    if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
+    if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
     const ownerKey = `${url}:${user?.id || ""}`;
     // URL 导入跑在一次性批量子进程里(方案3):子进程内 importPlaylistFromUrl +
     // 增量重建,进度/结果经 IPC 回传;clearLibraryIndex/touch 由 runBatchJob 收尾。
@@ -1806,10 +1807,10 @@ apiRoutes.get("/v1/playlists/:id/export", permMiddleware(PERM.PLAYLIST_IMPORT), 
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ error: "歌单不存在" }, 404);
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权导出该歌单" }, 403);
+  if (!playlist) return c.json({ error: "errors.playlist.notFound" }, 404);
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.exportForbidden"), 403);
   const exported = syncApi()?.exportPlaylistEntries(id);
-  if (!exported) return c.json({ error: "歌单同步插件未启用" }, 503);
+  if (!exported) return c.json({ error: "errors.playlist.syncNotEnabled" }, 503);
   const { name, tracks } = exported;
   const payload = { app: NATIVE_APP, version: 1, exportedAt: new Date().toISOString(), name, tracks };
   const filename = `${(name || "歌单").replace(/[\\/:*?"<>|]/g, "_")}.json`;
@@ -1840,10 +1841,10 @@ apiRoutes.post("/v1/playlists/:id/sync", permMiddleware(PERM.PLAYLIST_IMPORT), a
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
   // Only owner (or admin) can sync
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权同步该歌单"));
-  if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "歌单同步插件未启用"), 503);
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.syncForbidden"));
+  if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
   const started = startAsyncTask("playlist-sync", `pl:${id}`, {
     kind: "playlist-sync",
     args: { playlistId: id, userId: user?.id },
@@ -1855,7 +1856,7 @@ apiRoutes.post("/v1/playlists/:id/sync", permMiddleware(PERM.PLAYLIST_IMPORT), a
 // 异步任务状态查询(前端轮询):GET /v1/tasks/:taskId
 apiRoutes.get("/v1/tasks/:taskId", (c) => {
   const state = getAsyncTask(c.req.param("taskId")!);
-  if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "任务不存在"), 404);
+  if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.task.notFound"), 404);
   return c.json({ success: true, task: state });
 });
 
@@ -1874,8 +1875,8 @@ apiRoutes.put("/v1/playlists/:id", permMiddleware(PERM.PLAYLIST_MANAGE), async (
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({}));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"));
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权修改该歌单"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
   const update: any = { updatedAt: new Date().toISOString() };
   if (body.name !== undefined) update.name = String(body.name).trim() || playlist.name;
   if (body.isPublic !== undefined) update.isPublic = body.isPublic ? 1 : 0;
@@ -1891,9 +1892,9 @@ apiRoutes.post("/v1/playlists/:id/convert-to-local", permMiddleware(PERM.PLAYLIS
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "歌单不存在"));
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权修改该歌单"));
-  if (!playlist.sourceUrl) return c.json(apiError(BusinessErrorCode.CONFLICT, "该歌单已是本地歌单,无需转换"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
+  if (!playlist.sourceUrl) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.alreadyLocal"));
   const update: any = {
     sourceUrl: null,
     externalId: null,
@@ -1922,7 +1923,7 @@ apiRoutes.post("/v1/playlists/:id/favorite", permMiddleware(PERM.FAVORITES_MANAG
   const body = await c.req.json().catch(() => ({}));
   const favorite = body.favorite === true;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ error: "歌单不存在" }, 404);
+  if (!playlist) return c.json({ error: "errors.playlist.notFound" }, 404);
 
   const now = new Date().toISOString();
   if (favorite) {
@@ -2045,7 +2046,7 @@ apiRoutes.get("/playlist", (c) => {
   }));
 });
 apiRoutes.get("/playlist/:id/tracks", (c) => c.json(db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, c.req.param("id"))).all().filter(e => e.playable && e.songId)));
-apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; if (isFixedRecommendPlaylist(id)) return c.json({ error: "固定推荐歌单(今日/本地/漫游)由插件每日重建,不可删除" }, 400); const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json({ error: "无权删除该歌单" }, 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
+apiRoutes.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; if (isFixedRecommendPlaylist(id)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.fixedNotDeleteable"), 400); const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.deleteForbidden"), 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
 
 // ==================== Playlist tracks (paginated) ====================
 apiRoutes.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
@@ -2252,9 +2253,9 @@ apiRoutes.put("/v1/dlna/devices/:deviceId", permMiddleware(PERM.RENDERER_MANAGE)
   const deviceId = c.req.param("deviceId")!;
   const body = await c.req.json().catch(() => ({}));
   const alias = typeof body.alias === "string" ? body.alias.trim() : "";
-  if (alias.length > 50) return c.json({ error: "名称不能超过 50 字符" }, 400);
+  if (alias.length > 50) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.nameTooLong"), 400);
   const dev = setDeviceAlias(deviceId, alias);
-  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  if (!dev) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
   // 立即触发 peer reconcile,让播放控件/HA 卡片显示新名字(不等 60s tick)。
   getPeerManager().reconcileDlnaPeers();
   return c.json({
@@ -2282,7 +2283,7 @@ apiRoutes.delete("/v1/dlna/devices/:deviceId", permMiddleware(PERM.RENDERER_MANA
   getPeerManager().removeDlnaPeer(deviceId);
   // 4. 删除缓存 + runtimes + DB 记录。
   const existed = deleteDeviceRecord(deviceId);
-  if (!existed) return c.json({ error: "设备不存在" }, 404);
+  if (!existed) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
   // 5. 广播设备列表变化(WS → 卡片/Web 刷新)。
   getEventManager().emitDeviceListChanged(getCachedDevices().length);
   return c.json({ success: true });
@@ -2303,7 +2304,7 @@ apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", permMiddleware(PERM.RENDERE
     db.delete(deviceQueues).where(eq(deviceQueues.deviceId, deviceId)).run();
   }
   const dev = setDeviceDisabled(deviceId, disabled);
-  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  if (!dev) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
   // 3. 立即同步 peer 列表(禁用→移除 peer 并推 peer_unavailable;启用→重新注册)。
   getPeerManager().reconcileDlnaPeers();
   // 4. 广播设备列表变化(WS → 卡片/Web 刷新)。
@@ -2331,9 +2332,9 @@ apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", permMiddleware(PERM.RENDERE
 apiRoutes.post("/v1/dlna/stream-url", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const songId = body.songId;
-  if (!songId) return c.json({ error: "需要 songId" }, 400);
+  if (!songId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.songIdRequired"), 400);
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
-  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
   const deviceId = typeof body.deviceId === "string" && body.deviceId ? body.deviceId : "client-cast";
   const { token, expiresAt } = createCastSession(songId, deviceId, getDlnaBaseUrl(c));
   return c.json({ token, streamUrl: `/rest/dlna/stream/${token}`, expiresAt });
@@ -2342,9 +2343,9 @@ apiRoutes.post("/v1/dlna/stream-url", async (c) => {
 apiRoutes.post("/v1/dlna/cast", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { songId, deviceId } = body;
-  if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  if (!songId || !deviceId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSongIdAndDeviceId"), 400);
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
-  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
   const mime = DLNA_MIME[song.suffix || ""] || "audio/mpeg";
   try {
     await castToDevice({
@@ -2358,7 +2359,7 @@ apiRoutes.post("/v1/dlna/cast", async (c) => {
     });
     return c.json({ success: true, message: `已投屏到设备` });
   } catch (e: any) {
-    return c.json({ error: e.message || "投屏失败" }, 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.screenFailed"), 500);
   }
 });
 
@@ -2368,9 +2369,9 @@ apiRoutes.post("/v1/dlna/cast", async (c) => {
 apiRoutes.post("/v1/dlna/enqueue", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { songId, deviceId } = body;
-  if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  if (!songId || !deviceId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSongIdAndDeviceId"), 400);
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
-  if (!song) return c.json({ error: "歌曲不存在" }, 404);
+  if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
   const mime = DLNA_MIME[song.suffix || ""] || "audio/mpeg";
   try {
     const supported = await enqueueNextTrack({
@@ -2384,14 +2385,14 @@ apiRoutes.post("/v1/dlna/enqueue", async (c) => {
     });
     return c.json({ success: true, enqueueSupported: supported });
   } catch (e: any) {
-    return c.json({ error: e.message || "预加载失败" }, 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.preloadFailed"), 500);
   }
 });
 
 // Transport controls.
 apiRoutes.post("/v1/dlna/devices/:deviceId/play", async (c) => {
   const deviceId = c.req.param("deviceId")!;
-  if (isDeviceDisabled(deviceId)) return c.json({ error: "设备已禁用" }, 403);
+  if (isDeviceDisabled(deviceId)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.deviceDisabled"), 403);
   try { await playDevice(deviceId); return c.json({ success: true }); }
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
@@ -2411,21 +2412,21 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/seek", async (c) => {
   // Accept either `seconds` (frontend) or `position` (HA integration) for
   // the seek target, in seconds.
   const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-  if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
+  if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
   try { await seekDevice(c.req.param("deviceId"), seconds); return c.json({ success: true }); }
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 
 apiRoutes.post("/v1/dlna/devices/:deviceId/volume", async (c) => {
   const { volume } = await c.req.json().catch(() => ({}));
-  if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+  if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
   try { await setDeviceVolume(c.req.param("deviceId"), volume); return c.json({ success: true }); }
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 
 apiRoutes.post("/v1/dlna/devices/:deviceId/mute", async (c) => {
   const { muted } = await c.req.json().catch(() => ({}));
-  if (typeof muted !== "boolean") return c.json({ error: "需要 muted(boolean)" }, 400);
+  if (typeof muted !== "boolean") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
   try { await setDeviceMute(c.req.param("deviceId"), muted); return c.json({ success: true }); }
   catch (e: any) { return c.json({ error: e.message }, 500); }
 });
@@ -2467,7 +2468,7 @@ apiRoutes.get("/v1/dlna/devices/:deviceId/queue", (c) => {
 apiRoutes.post("/v1/dlna/devices/:deviceId/queue/play", async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const { items, startIndex } = await c.req.json().catch(() => ({} as any));
-  if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
+  if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   try {
     await getQueueManager().playFrom(deviceId, items, startIndex || 0, getDlnaBaseUrl(c));
     return c.json({ success: true });
@@ -2479,7 +2480,7 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/queue/play", async (c) => {
 apiRoutes.post("/v1/dlna/devices/:deviceId/queue/enqueue", async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const { items } = await c.req.json().catch(() => ({} as any));
-  if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
+  if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   try {
     await getQueueManager().enqueue(deviceId, items, getDlnaBaseUrl(c));
     return c.json({ success: true });
@@ -2526,7 +2527,7 @@ apiRoutes.get("/v1/dlna/active", (c) => {
 // AirPlay 插件未启用(默认关闭)时,全部 airplay 管理端点拒绝(防绕过)。
 apiRoutes.use("/v1/airplay/*", async (c, next) => {
   if (!isAirPlayEnabled()) {
-    return c.json(apiError(BusinessErrorCode.CONFLICT, "AirPlay 播放器已关闭(插件管理页开启后可用)"), 409);
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.airplay.disabled"), 409);
   }
   await next();
 });
@@ -2548,9 +2549,9 @@ apiRoutes.put("/v1/airplay/devices/:deviceId", permMiddleware(PERM.RENDERER_MANA
   const deviceId = c.req.param("deviceId")!;
   const body = await c.req.json().catch(() => ({}));
   const alias = typeof body.alias === "string" ? body.alias.trim() : "";
-  if (alias.length > 50) return c.json({ error: "名称不能超过 50 字符" }, 400);
+  if (alias.length > 50) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.nameTooLong"), 400);
   const dev = setAirPlayAlias(deviceId, alias);
-  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  if (!dev) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
   return c.json({ success: true, device: { id: dev.id, alias: dev.alias || "" } });
 });
 
@@ -2567,7 +2568,7 @@ apiRoutes.delete("/v1/airplay/devices/:deviceId", permMiddleware(PERM.RENDERER_M
   try { await stopAirPlaySession(deviceId); } catch { /* ignore */ }
   // 4. 删除缓存 + DB 记录。
   const existed = deleteAirPlayDeviceRecord(deviceId);
-  if (!existed) return c.json({ error: "设备不存在" }, 404);
+  if (!existed) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
   return c.json({ success: true });
 });
 
@@ -2586,7 +2587,7 @@ apiRoutes.put("/v1/airplay/devices/:deviceId/disabled", permMiddleware(PERM.REND
     try { await stopAirPlaySession(deviceId); } catch { /* ignore */ }
   }
   const dev = setAirPlayDisabled(deviceId, disabled);
-  if (!dev) return c.json({ error: "设备不存在" }, 404);
+  if (!dev) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
   // 3. 立即同步 AirPlay peer 列表(与 DLNA 禁用一致:禁用→移除 peer 并推
   //    peer_unavailable;启用→重新注册),否则隐藏的设备会一直留在 HA 卡片/切换器。
   getPeerManager().reconcileAirPlayPeers();
@@ -2607,9 +2608,9 @@ apiRoutes.post("/v1/airplay/cast", async (c) => {
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const { songId, deviceId } = body as any;
-  if (!songId || !deviceId) return c.json({ error: "需要 songId 和 deviceId" }, 400);
+  if (!songId || !deviceId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSongIdAndDeviceId"), 400);
   if (!canUseRenderer(user?.id ?? "", !!user?.isAdmin, `airplay:${deviceId}`)) {
-    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权控制该播放器"), 403);
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.controlForbidden"), 403);
   }
   try {
     await castToAirPlayDevice({
@@ -2618,7 +2619,7 @@ apiRoutes.post("/v1/airplay/cast", async (c) => {
     });
     return c.json({ success: true, message: "已投放到 AirPlay 设备" });
   } catch (e: any) {
-    return c.json({ error: e.message || "投放失败" }, 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.airplayFailed"), 500);
   }
 });
 
@@ -2627,7 +2628,7 @@ apiRoutes.post("/v1/airplay/cast", async (c) => {
 apiRoutes.post("/v1/dlna/devices/:deviceId/play-mode", async (c) => {
   const { mode } = await c.req.json().catch(() => ({} as any));
   if (!["order", "one", "all", "shuffle"].includes(mode)) {
-    return c.json({ error: "无效的 mode" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidMode"), 400);
   }
   getQueueManager().setPlayMode(c.req.param("deviceId")!, mode);
   return c.json({ success: true });
@@ -2638,7 +2639,7 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/play-mode", async (c) => {
 apiRoutes.delete("/v1/dlna/devices/:deviceId/queue/:index", async (c) => {
   const deviceId = c.req.param("deviceId")!;
   const index = parseInt(c.req.param("index")!, 10);
-  if (Number.isNaN(index)) return c.json({ error: "无效的 index" }, 400);
+  if (Number.isNaN(index)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidIndex"), 400);
   getQueueManager().removeAt(deviceId, index, getDlnaBaseUrl(c));
   return c.json({ success: true });
 });
@@ -2713,7 +2714,7 @@ apiRoutes.put("/v1/player-prefs/hidden", async (c) => {
   const userId = c.get("user")?.id || "";
   const body = await c.req.json().catch(() => ({} as any));
   const peerId = typeof body?.peerId === "string" ? body.peerId.trim() : "";
-  if (!peerId) return c.json({ error: "缺少 peerId" }, 400);
+  if (!peerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
   setPeerHidden(userId, peerId, body?.hidden === true);
   return c.json({ ok: true, hidden: isPeerHidden(userId, peerId) });
 });
@@ -2732,9 +2733,9 @@ apiRoutes.put("/v1/player-prefs/names", permMiddleware(PERM.RENDERER_USE), async
   const userId = c.get("user")?.id || "";
   const body = await c.req.json().catch(() => ({} as any));
   const peerId = typeof body?.peerId === "string" ? body.peerId.trim() : "";
-  if (!peerId) return c.json({ error: "缺少 peerId" }, 400);
+  if (!peerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
   const name = typeof body?.name === "string" ? body.name.trim() : "";
-  if (name.length > 50) return c.json({ error: "名称不能超过 50 字符" }, 400);
+  if (name.length > 50) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.nameTooLong"), 400);
   setPeerNameOverride(userId, peerId, name);
   return c.json({ ok: true, displayName: getPeerNameOverride(userId, peerId) });
 });
@@ -2746,7 +2747,7 @@ apiRoutes.use("/v1/peers/:peerId/*", async (c, next) => {
   const user = c.get("user");
   const peerId = c.req.param("peerId") || "";
   if (canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)) return next();
-  return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
+  return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
 });
 
 apiRoutes.use("/v1/peers/:peerId", async (c, next) => {
@@ -2755,7 +2756,7 @@ apiRoutes.use("/v1/peers/:peerId", async (c, next) => {
   const peerId = c.req.param("peerId") || "";
   return canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)
     ? next()
-    : c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
+    : c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
 });
 
 // Register/refresh the calling user's local peer. Body: { name?: string }.
@@ -2781,7 +2782,7 @@ apiRoutes.post("/v1/peers/:peerId/heartbeat", (c) => {
 apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const snap = pm.getQueueSnapshot(peerId);
-  if (!snap) return c.json({ error: "无效的 peerId" }, 400);
+  if (!snap) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   // dlna peer:补 currentMedia(原 QueueSnapshot 字段,新 snapshot 改用 ended)。
   const parsed = parsePeerId(peerId);
   const currentMedia = parsed
@@ -2805,10 +2806,10 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
 apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
   const peerId = decodePeerId(c);
   const { items, startIndex } = await c.req.json().catch(() => ({} as any));
-  if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
+  if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   const start = typeof startIndex === "number" ? startIndex : 0;
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try {
       await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
@@ -2826,10 +2827,10 @@ apiRoutes.post("/v1/peers/:peerId/queue/jump", async (c) => {
   const peerId = decodePeerId(c);
   const { index } = await c.req.json().catch(() => ({} as any));
   if (typeof index !== "number" || !Number.isInteger(index)) {
-    return c.json({ error: "需要整数 index" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needIntegerIndex"), 400);
   }
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try {
       await getQueueManager().jumpTo(parsed.id, index, getDlnaBaseUrl(c));
@@ -2846,9 +2847,9 @@ apiRoutes.post("/v1/peers/:peerId/queue/jump", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/queue/enqueue", async (c) => {
   const peerId = decodePeerId(c);
   const { items } = await c.req.json().catch(() => ({} as any));
-  if (!Array.isArray(items)) return c.json({ error: "需要 items 数组" }, 400);
+  if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try {
       await getQueueManager().enqueue(parsed.id, items, getDlnaBaseUrl(c));
@@ -2863,7 +2864,7 @@ apiRoutes.post("/v1/peers/:peerId/queue/enqueue", async (c) => {
 apiRoutes.delete("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     getQueueManager().clear(parsed.id);
   } else {
@@ -2877,7 +2878,7 @@ apiRoutes.delete("/v1/peers/:peerId/queue", (c) => {
 apiRoutes.post("/v1/peers/:peerId/queue/deactivate", (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) getQueueManager().deactivate(parsed.id);
   return c.json({ success: true });
 });
@@ -2886,9 +2887,9 @@ apiRoutes.post("/v1/peers/:peerId/queue/deactivate", (c) => {
 apiRoutes.delete("/v1/peers/:peerId/queue/:index", async (c) => {
   const peerId = decodePeerId(c);
   const index = parseInt(c.req.param("index")!, 10);
-  if (Number.isNaN(index)) return c.json({ error: "无效的 index" }, 400);
+  if (Number.isNaN(index)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidIndex"), 400);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     getQueueManager().removeAt(parsed.id, index, getDlnaBaseUrl(c));
   } else {
@@ -2903,10 +2904,10 @@ apiRoutes.post("/v1/peers/:peerId/queue/reorder", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const { from, to } = body;
   if (typeof from !== "number" || typeof to !== "number" || !Number.isInteger(from) || !Number.isInteger(to)) {
-    return c.json({ error: "需要整数 from/to" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needIntegerFromTo"), 400);
   }
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     getQueueManager().reorder(parsed.id, from, to);
   } else {
@@ -2921,10 +2922,10 @@ apiRoutes.post("/v1/peers/:peerId/play-mode", async (c) => {
   const peerId = decodePeerId(c);
   const { mode } = await c.req.json().catch(() => ({} as any));
   if (!["order", "one", "all", "shuffle"].includes(mode)) {
-    return c.json({ error: "无效的 mode" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidMode"), 400);
   }
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     getQueueManager().setPlayMode(parsed.id, mode);
   } else {
@@ -2938,9 +2939,9 @@ apiRoutes.post("/v1/peers/:peerId/play-mode", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/queue/index", async (c) => {
   const peerId = decodePeerId(c);
   const { index } = await c.req.json().catch(() => ({} as any));
-  if (typeof index !== "number") return c.json({ error: "需要 index" }, 400);
+  if (typeof index !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needIndex"), 400);
   const parsed = parsePeerId(peerId);
-  if (!parsed || parsed.kind !== "local") return c.json({ error: "仅 local peer 支持" }, 400);
+  if (!parsed || parsed.kind !== "local") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.localPeerOnly"), 400);
   pm.localSetIndex(peerId, index);
   return c.json({ success: true });
 });
@@ -2953,7 +2954,7 @@ apiRoutes.post("/v1/peers/:peerId/queue/index", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     try {
       getQueueController().resumePlayback(parsed.id);
@@ -2984,7 +2985,7 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     try { await pauseDevice(parsed.id); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -3003,7 +3004,7 @@ apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     try {
       getQueueController().stopPlayback(parsed.id);
@@ -3034,7 +3035,7 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try { await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -3045,7 +3046,7 @@ apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/prev", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try { await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -3056,25 +3057,25 @@ apiRoutes.post("/v1/peers/:peerId/prev", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     const body = await c.req.json().catch(() => ({} as any));
     const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
+    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
     try { await seekDevice(parsed.id, seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
     const body = await c.req.json().catch(() => ({} as any));
     const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
+    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
     try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "airplay") {
     const body = await c.req.json().catch(() => ({} as any));
     const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json({ error: "需要 seconds 或 position" }, 400);
+    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
     try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
@@ -3084,22 +3085,22 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await setDeviceVolume(parsed.id, volume); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "group") {
     const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "airplay") {
     const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json({ error: "需要 volume" }, 400);
+    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
@@ -3113,10 +3114,10 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/announce", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   const body = await c.req.json().catch(() => ({} as any));
   const url = typeof body.url === "string" ? body.url : "";
-  if (!url) return c.json({ error: "需要 url" }, 400);
+  if (!url) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.urlRequired"), 400);
   const volume = typeof body.volume === "number" ? body.volume : undefined;
 
   if (body.blocking === true) {
@@ -3125,7 +3126,7 @@ apiRoutes.post("/v1/peers/:peerId/announce", async (c) => {
       return c.json({ success: true, ...r });
     } catch (e: any) { return c.json({ error: e.message }, 500); }
   }
-  if (isAnnouncing(peerId)) return c.json({ error: "该播放器正在播报中" }, 409);
+  if (isAnnouncing(peerId)) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.renderer.announcing"), 409);
   announceOnPeer({ peerId, url, volume }).catch((e: any) => {
     log.warn(`[announce] ${peerId}: ${e?.message || e}`);
   });
@@ -3139,9 +3140,9 @@ apiRoutes.post("/v1/peers/:peerId/announce", async (c) => {
 apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   const { muted } = await c.req.json().catch(() => ({} as any));
-  if (typeof muted !== "boolean") return c.json({ error: "需要 muted(boolean)" }, 400);
+  if (typeof muted !== "boolean") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
   if (parsed.kind === "dlna") {
     try { await setDeviceMute(parsed.id, muted); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -3150,12 +3151,12 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
     // 组没有自己的渲染器,静音要逐台成员下发。个别成员不支持静音时不应连累
     // 其余设备,所以全部并发执行后再汇总——只有全员失败才算失败。
     const members = gm.get(parsed.id)?.memberIds || [];
-    if (members.length === 0) return c.json({ error: "组内无成员" }, 400);
+    if (members.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.group.empty"), 400);
     const results = await Promise.allSettled(members.map(d => setDeviceMute(d, muted)));
     const ok = results.filter(r => r.status === "fulfilled").length;
     if (ok === 0) {
       const reason = results[0].status === "rejected" ? (results[0] as PromiseRejectedResult).reason : null;
-      return c.json({ error: reason?.message || "组内设备均不支持静音" }, 500);
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, reason?.message || "errors.group.muteUnsupported"), 500);
     }
     return c.json({ success: true, applied: ok, total: members.length });
   }
@@ -3172,14 +3173,14 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
 apiRoutes.get("/v1/peers/:peerId", (c) => {
   const peerId = decodePeerId(c);
   const p = getPeerManager().get(peerId);
-  if (!p) return c.json({ error: "无效的 peerId" }, 400);
+  if (!p) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   return c.json({ peer: { ...p, queue: getPeerManager().getQueueSnapshot(peerId) } });
 });
 
 apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     try {
       const deviceId = parsed.id;
@@ -3246,7 +3247,7 @@ apiRoutes.post("/v1/groups", permMiddleware(PERM.RENDERER_USE), async (c) => {
     const g = gm.createGroup(name, memberIds, user?.id ?? "");
     return c.json({ group: gm.getWithMembers(g.id) }, 201);
   } catch (e: any) {
-    return c.json({ error: e.message || "创建组失败" }, 400);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.createFailed"), 400);
   }
 });
 
@@ -3255,18 +3256,18 @@ apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), async (c) => 
   const user = c.get("user")!;
   const id = c.req.param("id")!;
   if (!gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
-    return c.json({ error: "组不存在或无权限" }, 404);
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
   }
   const body = await c.req.json().catch(() => ({} as any));
   try {
     if (typeof body.name === "string") {
       const renamed = gm.renameGroup(id, body.name);
-      if (!renamed) return c.json({ error: "组不存在" }, 404);
+      if (!renamed) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
     }
     if (Array.isArray(body.memberIds)) {
       const before = gm.get(id)?.memberIds || [];
       const updated = gm.setMembers(id, body.memberIds);
-      if (!updated) return c.json({ error: "组不存在" }, 404);
+      if (!updated) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
       const after = gm.get(id)?.memberIds || [];
       const added = after.filter(d => !before.includes(d));
       if (added.length > 0) {
@@ -3278,10 +3279,10 @@ apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), async (c) => 
       }
     }
     const g = gm.getWithMembers(id);
-    if (!g) return c.json({ error: "组不存在" }, 404);
+    if (!g) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
     return c.json({ group: g });
   } catch (e: any) {
-    return c.json({ error: e.message || "更新组失败" }, 400);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.updateFailed"), 400);
   }
 });
 
@@ -3290,10 +3291,10 @@ apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
   const user = c.get("user")!;
   const id = c.req.param("id")!;
   if (!gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
-    return c.json({ error: "组不存在或无权限" }, 404);
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
   }
   const ok = gm.deleteGroup(id);
-  if (!ok) return c.json({ error: "组不存在" }, 404);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
   return c.json({ success: true });
 });
 
@@ -3307,26 +3308,26 @@ apiRoutes.post("/v1/play", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const { peerId, type, id, startIndex, playMode, enqueue } = body || {};
   if (typeof peerId !== "string" || typeof type !== "string" || typeof id !== "string") {
-    return c.json({ error: "需要 peerId / type / id" }, 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.needPeerTypeId"), 400);
   }
   const user = c.get("user");
   // 细粒度播放器授权:非 admin 只能投放到被授权的 peer(含自己的 local)。
   if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)) {
-    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权操作该播放器"), 403);
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
   }
   const parsed = parsePeerId(peerId);
-  if (!parsed) return c.json({ error: "无效的 peerId" }, 400);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   const resolved = await resolveContentSongs(type, id);
-  if (!resolved) return c.json({ error: `无效的 ${type} id` }, 404);
+  if (!resolved) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.invalidTypeId", { type }), 404);
   const items = songsToQueueItems(resolved.rows);
-  if (items.length === 0) return c.json({ error: `「${resolved.name}」没有可播放的歌曲` }, 422);
+  if (items.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.noPlayableSongs", { name: resolved.name }), 422);
   const start = typeof startIndex === "number" && startIndex >= 0 && startIndex < items.length ? Math.floor(startIndex) : 0;
   const baseUrl = getDlnaBaseUrl(c);
   if (isCastPeer(parsed)) {
     try {
       if (enqueue) await getQueueManager().enqueue(parsed.id, items, baseUrl);
       else await getQueueManager().playFrom(parsed.id, items, start, baseUrl);
-    } catch (e: any) { return c.json({ error: e.message || "播放失败" }, 500); }
+    } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), 500); }
   } else {
     if (enqueue) pm.localEnqueue(peerId, c.get("user")?.id, items);
     else pm.localPlayFrom(peerId, c.get("user")?.id, items, start);
@@ -3398,21 +3399,21 @@ apiRoutes.get("/v1/flows", permMiddleware(PERM.FLOW_MANAGE), (c) => {
 
 apiRoutes.get("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), (c) => {
   const flow = getFlow(c.req.param("id")!, flowOwner(c));
-  if (!flow) return c.json({ error: "流程不存在" }, 404);
+  if (!flow) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.flow.notExist"), 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
 apiRoutes.post("/v1/flows", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const name = typeof body.name === "string" ? body.name.trim() : "";
-  if (!name) return c.json({ error: "需要 name" }, 400);
+  if (!name) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.flow.nameRequired"), 400);
   const user = c.get("user")!;
   // 绑定渠道 token:校验 body.tokenId 存在且(非管理员)归属本人;缺省自动绑定自己的启用渠道 token。
   let tokenId = "";
   if (body.tokenId) {
     const t = getPlayerWebhookTokenById(String(body.tokenId));
-    if (!t) return c.json({ error: "指定的渠道 token 不存在" }, 400);
-    if (!assertOwnToken(c, t.id)) return c.json({ error: "只能绑定属于自己的渠道 token" }, 403);
+    if (!t) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.flow.tokenNotFound"), 400);
+    if (!assertOwnToken(c, t.id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.flow.tokenOwnership"), 403);
     tokenId = t.id;
   } else {
     tokenId = resolveDefaultTokenId(user.isAdmin ? undefined : user.id);
@@ -3432,29 +3433,29 @@ apiRoutes.put("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   if (typeof body.tokenId === "string") {
     if (body.tokenId) {
       const t = getPlayerWebhookTokenById(body.tokenId);
-      if (!t) return c.json({ error: "指定的渠道 token 不存在" }, 400);
-      if (!assertOwnToken(c, t.id)) return c.json({ error: "只能绑定属于自己的渠道 token" }, 403);
+      if (!t) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.flow.tokenNotFound"), 400);
+      if (!assertOwnToken(c, t.id)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.flow.tokenOwnership"), 403);
       upd.tokenId = t.id;
     } else {
       upd.tokenId = "";
     }
   }
   const flow = updateFlow(c.req.param("id")!, flowOwner(c), upd);
-  if (!flow) return c.json({ error: "流程不存在" }, 404);
+  if (!flow) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.flow.notExist"), 404);
   return c.json({ flow: flowWithWebhook(flow) });
 });
 
 apiRoutes.delete("/v1/flows/:id", permMiddleware(PERM.FLOW_MANAGE), (c) => {
   const ok = deleteFlow(c.req.param("id")!, flowOwner(c));
-  if (!ok) return c.json({ error: "流程不存在" }, 404);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.flow.notExist"), 404);
   return c.json({ success: true });
 });
 
 // UI 手动触发(异步执行,返回当前运行状态)。
 apiRoutes.post("/v1/flows/:id/run", permMiddleware(PERM.FLOW_MANAGE), async (c) => {
   const flow = getFlow(c.req.param("id")!, flowOwner(c));
-  if (!flow) return c.json({ error: "流程不存在" }, 404);
-  if (!flow.enabled) return c.json({ error: "流程已停用" }, 409);
+  if (!flow) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.flow.notExist"), 404);
+  if (!flow.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.flow.disabledFlow"), 409);
   const started = await executeFlow(flow.id, getDlnaBaseUrl(c));
   return c.json({ success: true, started: started === "started", running: isFlowRunning(flow.id) });
 });
@@ -3494,19 +3495,19 @@ function tokenOfUser(c: any, id: string): { id: string } | undefined {
 
 apiRoutes.put("/v1/player-webhook/tokens/:id", async (c) => {
   const id = c.req.param("id")!;
-  if (!tokenOfUser(c, id)) return c.json({ error: "token 不存在" }, 404);
+  if (!tokenOfUser(c, id)) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.token.notExist"), 404);
   const body = await c.req.json().catch(() => ({} as any));
   const enabled = !!(body && body.enabled);
   const ok = setPlayerWebhookTokenEnabled(id, enabled);
-  if (!ok) return c.json({ error: "token 不存在" }, 404);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.token.notExist"), 404);
   return c.json({ success: true });
 });
 
 apiRoutes.delete("/v1/player-webhook/tokens/:id", (c) => {
   const id = c.req.param("id")!;
-  if (!tokenOfUser(c, id)) return c.json({ error: "token 不存在" }, 404);
+  if (!tokenOfUser(c, id)) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.token.notExist"), 404);
   const ok = deletePlayerWebhookToken(id);
-  if (!ok) return c.json({ error: "token 不存在" }, 404);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.token.notExist"), 404);
   return c.json({ success: true });
 });
 

@@ -21,29 +21,29 @@
 
       <el-form @submit.prevent="handleLogin" :model="form" class="login-form">
         <el-form-item>
-          <el-input v-model="form.username" placeholder="请输入用户名" prefix-icon="User" size="large" />
+          <el-input v-model="form.username" :placeholder="t('login.username')" prefix-icon="User" size="large" />
         </el-form-item>
         <el-form-item>
-          <el-input v-model="form.password" type="password" placeholder="请输入密码" prefix-icon="Lock" size="large" show-password @keyup.enter="handleLogin" />
+          <el-input v-model="form.password" type="password" :placeholder="t('login.password')" prefix-icon="Lock" size="large" show-password @keyup.enter="handleLogin" />
         </el-form-item>
-        <el-button type="primary" @click="handleLogin" :loading="loading" size="large" class="login-btn">登录</el-button>
+        <el-button type="primary" @click="handleLogin" :loading="loading" size="large" class="login-btn">{{ t('login.action') }}</el-button>
       </el-form>
     </div>
 
-    <el-dialog v-model="showPwdDialog" title="修改密码" width="420px" :close-on-click-modal="false" :show-close="false" append-to-body>
+    <el-dialog v-model="showPwdDialog" :title="t('login.pwd.title')" width="420px" :close-on-click-modal="false" :show-close="false" append-to-body>
       <el-alert type="warning" :closable="false" show-icon class="pwd-alert">
-        当前账号仍在使用默认密码(admin/admin),为安全起见请立即修改密码。
+        {{ t('login.pwd.alert') }}
       </el-alert>
       <el-form label-width="80px" class="pwd-form">
-        <el-form-item label="新密码">
-          <el-input v-model="pwdForm.newPassword" type="password" placeholder="请输入新密码" show-password />
+        <el-form-item :label="t('login.pwd.new')">
+          <el-input v-model="pwdForm.newPassword" type="password" :placeholder="t('login.pwd.newPlaceholder')" show-password />
         </el-form-item>
-        <el-form-item label="确认密码">
-          <el-input v-model="pwdForm.confirm" type="password" placeholder="请再次输入新密码" show-password @keyup.enter="submitPassword" />
+        <el-form-item :label="t('login.pwd.confirm')">
+          <el-input v-model="pwdForm.confirm" type="password" :placeholder="t('login.pwd.confirmPlaceholder')" show-password @keyup.enter="submitPassword" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button type="primary" :loading="pwdLoading" @click="submitPassword">确定修改</el-button>
+        <el-button type="primary" :loading="pwdLoading" @click="submitPassword">{{ t('login.pwd.submit') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -52,10 +52,12 @@
 <script setup lang="ts">
 import { ref, reactive } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { useAuthStore } from "@/stores/auth";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
+const { t } = useI18n();
 const router = useRouter();
 const authStore = useAuthStore();
 const loading = ref(false);
@@ -66,7 +68,7 @@ const pwdLoading = ref(false);
 const pwdForm = reactive({ newPassword: "", confirm: "" });
 
 async function handleLogin() {
-  if (!form.username || !form.password) { ElMessage.warning("请输入用户名和密码"); return; }
+  if (!form.username || !form.password) { ElMessage.warning(t("login.requireBoth")); return; }
   loading.value = true;
   try {
     const data = await authStore.login(form.username, form.password);
@@ -74,26 +76,26 @@ async function handleLogin() {
       showPwdDialog.value = true;
       return;
     }
-    ElMessage.success("登录成功");
+    ElMessage.success(t("login.success"));
     router.push("/");
   }
-  catch (e: any) { ElMessage.error(e.response?.data?.error || "登录失败"); }
+  catch (e: any) { ElMessage.error(e.response?.data?.error || t("login.failed")); }
   finally { loading.value = false; }
 }
 
 async function submitPassword() {
-  if (pwdForm.newPassword.length < 6) { ElMessage.warning("密码至少 6 位"); return; }
-  if (pwdForm.newPassword !== pwdForm.confirm) { ElMessage.warning("两次输入的密码不一致"); return; }
+  if (pwdForm.newPassword.length < 6) { ElMessage.warning(t("login.pwd.minLen")); return; }
+  if (pwdForm.newPassword !== pwdForm.confirm) { ElMessage.warning(t("login.pwd.mismatch")); return; }
   pwdLoading.value = true;
   try {
     await api.put(`/rest/api/v1/users/${authStore.userId}/password`, { newPassword: pwdForm.newPassword });
     await authStore.setPasswordChanged();
-    ElMessage.success("密码已修改");
+    ElMessage.success(t("login.pwd.changed"));
     showPwdDialog.value = false;
-    ElMessage.success("登录成功");
+    ElMessage.success(t("login.success"));
     router.push("/");
   }
-  catch (e: any) { ElMessage.error(e.response?.data?.error || "修改失败"); }
+  catch (e: any) { ElMessage.error(e.response?.data?.error || t("login.pwd.failed")); }
   finally { pwdLoading.value = false; }
 }
 </script>

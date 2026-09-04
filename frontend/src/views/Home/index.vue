@@ -3,9 +3,9 @@
     <!-- ===== 顶部：首页固定推荐卡(插件自治) + 并排随机歌单 ===== -->
     <section class="section">
       <div class="section-title">
-        <span>为你推荐</span>
-        <span class="section-sub">首页固定推荐歌单</span>
-        <span class="more" @click="go('/playlists?filter=favorite')">查看收藏的歌单 ›</span>
+        <span>{{ t('home.forYou') }}</span>
+        <span class="section-sub">{{ t('home.fixedPlaylists') }}</span>
+        <span class="more" @click="go('/playlists?filter=favorite')">{{ t('home.viewFavPlaylists') }} ›</span>
       </div>
 
       <div class="top-row">
@@ -16,18 +16,18 @@
           :key="card.pluginId"
           class="card fnos-card-sheen"
           :style="{ '--stagger': idx + 1 }"
-          @contextmenu="openContextMenu($event, playlistActions(card), card.playlistName, '歌单')"
-          v-longpress="() => openActionSheet(playlistActions(card), card.playlistName, '歌单')"
+          @contextmenu="openContextMenu($event, playlistActions(card), card.playlistName, t('home.playlist'))"
+          v-longpress="() => openActionSheet(playlistActions(card), card.playlistName, t('home.playlist'))"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + card.playlistId)">
             <img v-if="card.coverArt" :src="cover(card.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
             <span class="badge">{{ card.playlistName || card.name }}</span>
-            <CoverPlay size="md" :label="`播放 ${card.playlistName}`" :action="() => playPl(card)" />
+            <CoverPlay size="md" :label="t('home.play', { name: card.playlistName })" :action="() => playPl(card)" />
             <button
               v-if="card.isCombo"
               class="refresh-btn"
-              title="手动刷新(重新随机生成每日推荐/本地推荐并重组今日漫游)"
+              :title="t('home.refreshRoamTitle')"
               :disabled="refreshing"
               @click.stop="refreshRoam"
             >
@@ -36,7 +36,7 @@
           </div>
           <div class="card-body" @click="go(`/playlists/${card.playlistId}`)">
             <div class="card-title">{{ card.playlistName || card.name }}</div>
-            <div class="card-sub">{{ card.songCount ? card.songCount + ' 首' : '歌单' }}</div>
+            <div class="card-sub">{{ card.songCount ? t('home.trackCount', { count: card.songCount }) : t('home.playlist') }}</div>
           </div>
         </div>
 
@@ -46,17 +46,17 @@
           :key="pl.id"
           class="card fnos-card-sheen"
           :style="{ '--stagger': idx + 1 }"
-          @contextmenu="openContextMenu($event, playlistActions(pl), pl.name, '歌单')"
-          v-longpress="() => openActionSheet(playlistActions(pl), pl.name, '歌单')"
+          @contextmenu="openContextMenu($event, playlistActions(pl), pl.name, t('home.playlist'))"
+          v-longpress="() => openActionSheet(playlistActions(pl), pl.name, t('home.playlist'))"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
             <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
-            <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
+            <CoverPlay size="md" :label="t('home.play', { name: pl.name })" :action="() => playPl(pl)" />
           </div>
           <div class="card-body" @click="go(`/playlists/${pl.id}`)">
             <div class="card-title">{{ pl.name }}</div>
-            <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
+            <div class="card-sub">{{ pl.songCount ? t('home.trackCount', { count: pl.songCount }) : t('home.playlist') }}</div>
           </div>
         </div>
 
@@ -70,16 +70,16 @@
 
     <!-- 平台精选加载失败提示 -->
     <div v-if="recommendError && platformGroups.length === 0" class="recommend-error">
-      <MfIcon name="TriangleAlert" :size="16" /> 平台精选加载失败，请检查 go-music-dl 插件是否已启用并配置服务地址
+      <MfIcon name="TriangleAlert" :size="16" /> {{ t('home.recommendError') }}
     </div>
 
     <!-- ===== 首页推荐分区（按 sortOrder 排序，go-music-dl 推荐 + 本地随机混合排列） ===== -->
     <section class="section" v-for="group in sortedAllGroups" :key="group.type + '-' + group.source + '-' + (group._pluginId || '')">
       <template v-if="group.type === 'recommend'">
         <div class="section-title">
-          <span>{{ group.name }}精选</span>
-          <span class="section-sub">为你精选的 {{ group.name }} 歌单</span>
-          <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
+          <span>{{ group.name }}{{ t('home.featured') }}</span>
+          <span class="section-sub">{{ t('home.forYouSub', { name: group.name }) }}</span>
+          <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">{{ t('home.viewGroupPlaylists', { name: group.name }) }} ›</span>
         </div>
         <div class="grid-row">
           <div
@@ -91,11 +91,11 @@
               <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
               <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
               <PlatformBadge :source="group.source" />
-              <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => pl.imported ? playPl(pl) : playRemotePl(group, pl)" />
+              <CoverPlay size="md" :label="t('home.play', { name: pl.name })" :action="() => pl.imported ? playPl(pl) : playRemotePl(group, pl)" />
             </div>
             <div class="card-body" @click="pl.imported ? playPl(pl) : playRemotePl(group, pl)">
               <div class="card-title">{{ pl.name }}</div>
-              <div class="card-sub">{{ pl.trackCount ? pl.trackCount + ' 首' : '歌单' }}</div>
+              <div class="card-sub">{{ pl.trackCount ? t('home.trackCount', { count: pl.trackCount }) : t('home.playlist') }}</div>
             </div>
           </div>
           <div v-for="n in placeholderCount(null, group.playlists, 6)" :key="'ph-' + group.source + '-' + (group._pluginId || '') + '-' + n" class="card placeholder fnos-shimmer">
@@ -106,9 +106,9 @@
       </template>
       <template v-else>
         <div class="section-title">
-          <span>{{ group.subtag ? group.name + '·' + group.subtag : group.name + '·本地随机' }}</span>
+          <span>{{ group.subtag ? group.name + '·' + group.subtag : group.name + '·' + t('home.localRandom') }}</span>
           <span v-if="group.tagline" class="section-sub">{{ group.tagline }}</span>
-          <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">查看{{ group.name }}歌单 ›</span>
+          <span class="more" @click="go('/playlists?filter=' + encodeURIComponent(group.source))">{{ t('home.viewGroupPlaylists', { name: group.name }) }} ›</span>
         </div>
         <div class="grid-row">
           <div
@@ -120,11 +120,11 @@
               <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" />
               <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
               <PlatformBadge :source="group.source" />
-              <CoverPlay size="md" :label="`播放 ${pl.name}`" :action="() => playPl(pl)" />
+              <CoverPlay size="md" :label="t('home.play', { name: pl.name })" :action="() => playPl(pl)" />
             </div>
             <div class="card-body" @click="go('/playlists/' + pl.id)">
               <div class="card-title">{{ pl.name }}</div>
-              <div class="card-sub">{{ pl.songCount ? pl.songCount + ' 首' : '歌单' }}</div>
+              <div class="card-sub">{{ pl.songCount ? t('home.trackCount', { count: pl.songCount }) : t('home.playlist') }}</div>
             </div>
           </div>
         </div>
@@ -135,6 +135,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import api, { formatApiError } from "@/api";
 import { waitAsyncTask } from "@/utils/asyncTask";
@@ -144,6 +145,7 @@ import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { coverUrl } from "@/utils/cover";
 
+const { t } = useI18n();
 const router = useRouter();
 const {
   openContextMenu, openActionSheet, menuGuard,
@@ -174,8 +176,8 @@ function go(path: string) {
 async function playPl(pl: any) {
   if (menuGuard() || !pl) return;
   const n = await play.playPlaylist(pl.id);
-  if (n) ElMessage.success(`正在播放「${pl.name}」`);
-  else ElMessage.warning("该歌单暂无可播放歌曲");
+  if (n) ElMessage.success(t("home.playingPlaylist", { name: pl.name }));
+  else ElMessage.warning(t("home.playlistEmpty"));
 }
 
 // 首页固定推荐卡：由各推荐插件配置 showOnHome + homePosition 决定。
@@ -225,13 +227,13 @@ async function refreshRoam() {
   try {
     const res = await api.post("/rest/api/v1/recommend/refresh", {}, { timeout: 15000 });
     const taskId: string | undefined = res.data?.taskId;
-    if (!taskId) throw new Error("未返回任务 ID");
+    if (!taskId) throw new Error(t("home.noTaskId"));
     // 结果仅在任务完成时携带(每日/本地/漫游各生成一张歌单),耗时通常秒级。
     await waitAsyncTask(taskId, { timeoutMs: 600000 });
-    ElMessage.success("已重新生成今日漫游");
+    ElMessage.success(t("home.roamRegenerated"));
     await Promise.all([loadPlaylists(), loadHomeCards()]);
   } catch (e: any) {
-    ElMessage.error(formatApiError(e, "刷新失败"));
+    ElMessage.error(formatApiError(e, t("home.refreshFailed")));
   } finally {
     refreshing.value = false;
   }
@@ -243,7 +245,7 @@ const platformGroups = computed(() =>
   recommendChannels.value
     .map((ch: any) => ({
       source: ch.source || "",
-      name: (ch.name || ch.source || "").replace(/音乐$/, ""),
+      name: (ch.name || ch.source || "").replace(/\u97f3\u4e50$/, ""),
       playlists: ch.playlists || [],
     }))
     .filter((g) => g.playlists.length > 0)
@@ -259,7 +261,7 @@ const localRandomGroups = computed(() =>
     .map((ch: any) => ({
       type: "localRandom" as const,
       source: ch.source || "",
-      name: (ch.name || ch.source || "").replace(/音乐$/, ""),
+      name: (ch.name || ch.source || "").replace(/\u97f3\u4e50$/, ""),
       playlists: ch.playlists || [],
       sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
       subtag: ch.subtag,
@@ -275,7 +277,7 @@ const sortedAllGroups = computed(() => {
     .map((ch: any) => ({
       type: "recommend" as const,
       source: ch.source || "",
-      name: (ch.name || ch.source || "").replace(/音乐$/, ""),
+      name: (ch.name || ch.source || "").replace(/\u97f3\u4e50$/, ""),
       playlists: ch.playlists || [],
       sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
       _pluginId: ch._pluginId || "",
@@ -308,13 +310,13 @@ async function playRemotePl(group: any, pl: any) {
     });
     if (res.data?.playlistId) {
       const n = await play.playPlaylist(res.data.playlistId);
-      if (n) ElMessage.success(`正在播放「${pl.name}」`);
-      else ElMessage.warning("导入成功，但该歌单暂无可播放歌曲");
+      if (n) ElMessage.success(t("home.playingPlaylist", { name: pl.name }));
+      else ElMessage.warning(t("home.importedEmpty"));
     } else {
-      ElMessage.warning(res.data?.message || "导入失败");
+      ElMessage.warning(res.data?.message || t("home.importFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || e.message || "导入失败");
+    ElMessage.error(e.response?.data?.error || e.message || t("home.importFailed"));
   } finally {
     importingId.value = "";
   }

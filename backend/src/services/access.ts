@@ -54,23 +54,23 @@ export const PERM = {
 } as const;
 
 export const PERMISSION_CATALOG: PermDefinition[] = [
-  { key: PERM.LIBRARY_BROWSE, label: "浏览曲库", category: "曲库", desc: "查看歌曲、专辑、艺术家、风格列表与详情", defaultGranted: true },
-  { key: PERM.LIBRARY_SEARCH, label: "搜索", category: "曲库", desc: "本地搜索与在线/插件搜索", defaultGranted: true },
-  { key: PERM.LIBRARY_STREAM, label: "播放音频", category: "曲库", desc: "播放 / 试听 / 获取音频流(stream / download)", defaultGranted: true },
-  { key: PERM.PLAYLIST_VIEW, label: "查看歌单", category: "歌单", desc: "查看歌单与曲目列表", defaultGranted: true },
-  { key: PERM.PLAYLIST_MANAGE, label: "管理歌单", category: "歌单", desc: "创建、编辑、删除歌单", defaultGranted: true },
-  { key: PERM.PLAYLIST_IMPORT, label: "导入导出歌单", category: "歌单", desc: "URL / 文件导入、导出、平台同步", defaultGranted: true },
-  { key: PERM.FAVORITES_MANAGE, label: "我喜欢", category: "互动", desc: "收藏 / 取消收藏歌曲与歌单、查看我的喜欢", defaultGranted: true },
-  { key: PERM.HISTORY_MANAGE, label: "播放历史", category: "互动", desc: "查看与清空自己的播放历史", defaultGranted: true },
-  { key: PERM.LYRICS_VIEW, label: "歌词", category: "互动", desc: "查看歌词(在线 / 已落库)", defaultGranted: true },
-  { key: PERM.COVER_VIEW, label: "封面", category: "互动", desc: "查看封面图", defaultGranted: true },
-  { key: PERM.RECOMMEND_VIEW, label: "每日推荐", category: "推荐", desc: "每日推荐 / 首页平台精选 / 推荐池", defaultGranted: true },
-  { key: PERM.WISH_VIEW, label: "点歌台", category: "系统", desc: "查看点歌台(愿望单)", defaultGranted: false },
-  { key: PERM.RENDERER_USE, label: "使用播放器", category: "播放器", desc: "可控制被授权的 DLNA / AirPlay / 群组播放器", defaultGranted: false },
-  { key: PERM.RENDERER_MANAGE, label: "管理播放器", category: "播放器", desc: "扫描 / 改名 / 删除 / 禁用设备、管理群组", defaultGranted: false },
-  { key: PERM.FLOW_MANAGE, label: "音流管理", category: "系统", desc: "音流自动化流程的创建与触发", defaultGranted: false },
-  { key: PERM.SETTINGS_MANAGE, label: "系统设置", category: "系统", desc: "系统设置 / 代理 / 内存 / 歌词封面配置", defaultGranted: false },
-  { key: PERM.USER_MANAGE, label: "用户管理", category: "系统", desc: "用户增删改、API Key、权限分配", defaultGranted: false },
+  { key: PERM.LIBRARY_BROWSE, label: "浏览曲库", category: "library", desc: "查看歌曲、专辑、艺术家、风格列表与详情", defaultGranted: true },
+  { key: PERM.LIBRARY_SEARCH, label: "搜索", category: "library", desc: "本地搜索与在线/插件搜索", defaultGranted: true },
+  { key: PERM.LIBRARY_STREAM, label: "播放音频", category: "library", desc: "播放 / 试听 / 获取音频流(stream / download)", defaultGranted: true },
+  { key: PERM.PLAYLIST_VIEW, label: "查看歌单", category: "playlist", desc: "查看歌单与曲目列表", defaultGranted: true },
+  { key: PERM.PLAYLIST_MANAGE, label: "管理歌单", category: "playlist", desc: "创建、编辑、删除歌单", defaultGranted: true },
+  { key: PERM.PLAYLIST_IMPORT, label: "导入导出歌单", category: "playlist", desc: "URL / 文件导入、导出、平台同步", defaultGranted: true },
+  { key: PERM.FAVORITES_MANAGE, label: "我喜欢", category: "interaction", desc: "收藏 / 取消收藏歌曲与歌单、查看我的喜欢", defaultGranted: true },
+  { key: PERM.HISTORY_MANAGE, label: "播放历史", category: "interaction", desc: "查看与清空自己的播放历史", defaultGranted: true },
+  { key: PERM.LYRICS_VIEW, label: "歌词", category: "interaction", desc: "查看歌词(在线 / 已落库)", defaultGranted: true },
+  { key: PERM.COVER_VIEW, label: "封面", category: "interaction", desc: "查看封面图", defaultGranted: true },
+  { key: PERM.RECOMMEND_VIEW, label: "每日推荐", category: "recommend", desc: "每日推荐 / 首页平台精选 / 推荐池", defaultGranted: true },
+  { key: PERM.WISH_VIEW, label: "点歌台", category: "system", desc: "查看点歌台(愿望单)", defaultGranted: false },
+  { key: PERM.RENDERER_USE, label: "使用播放器", category: "player", desc: "可控制被授权的 DLNA / AirPlay / 群组播放器", defaultGranted: false },
+  { key: PERM.RENDERER_MANAGE, label: "管理播放器", category: "player", desc: "扫描 / 改名 / 删除 / 禁用设备、管理群组", defaultGranted: false },
+  { key: PERM.FLOW_MANAGE, label: "音流管理", category: "system", desc: "音流自动化流程的创建与触发", defaultGranted: false },
+  { key: PERM.SETTINGS_MANAGE, label: "系统设置", category: "system", desc: "系统设置 / 代理 / 内存 / 歌词封面配置", defaultGranted: false },
+  { key: PERM.USER_MANAGE, label: "用户管理", category: "system", desc: "用户增删改、API Key、权限分配", defaultGranted: false },
 ];
 
 const DEFAULTS: Record<string, boolean> = {};
@@ -246,7 +246,7 @@ export function permMiddleware(key: string) {
       return c.json({ "subsonic-response": { status: "failed", error: { code: 40, message: "Unauthorized" }, version: "1.16.1", type: "MusicFlow" } }, 401);
     }
     if (hasPerm(user.id, !!user.isAdmin, key)) return next();
-    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权执行该操作"), 403);
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.forbidden.operation"), 403);
   };
 }
 
@@ -264,6 +264,6 @@ export function rendererGrantParamMiddleware(kind: "dlna" | "airplay" | "group",
     if (user.isAdmin) return next();
     const id = c.req.param(paramName);
     if (canUseRenderer(user.id, false, `${kind}:${id}`)) return next();
-    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "无权控制该播放器"), 403);
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.forbidden.renderer"), 403);
   };
 }

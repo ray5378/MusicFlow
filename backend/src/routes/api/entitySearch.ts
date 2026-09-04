@@ -17,6 +17,7 @@ import { getEnabledByCapability, getPluginConfig } from "../../plugins/registry.
 import { markInteractiveStart, markInteractiveEnd } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask } from "../../services/plugin/asyncTasks.js";
 import { createLogger } from "../../utils/logger.js";
+import { translate } from "../../i18n.js";
 
 const log = createLogger("ENTITY-SEARCH");
 
@@ -102,7 +103,7 @@ for (const spec of SPECS) {
     markInteractiveStart();
     try {
       const q = String((await c.req.json().catch(() => ({}))).q || "").trim();
-      if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+      if (!q) return c.json({ success: false, error: translate("errors.search.queryRequired") });
       const plugins = getEnabledByCapability(spec.capability).filter((p) => typeof p.impl?.[spec.method] === "function");
       if (plugins.length === 0) return c.json({ success: true, total: 0, providers: [], items: [] });
 
@@ -142,7 +143,7 @@ for (const spec of SPECS) {
         items,
       });
     } catch (e: any) {
-      return c.json({ success: false, error: e.message || "搜索失败" });
+      return c.json({ success: false, error: e.message || translate("errors.search.failed") });
     } finally {
       markInteractiveEnd();
     }
@@ -157,13 +158,13 @@ for (const spec of SPECS) {
       const plugin = getEnabledByCapability(spec.capability).find((p) => p.manifest.id === providerId);
       if (!plugin || typeof plugin.impl?.[spec.method] !== "function") {
         return c.json(
-          { success: false, error: "未找到已启用的搜索插件", providers: getEnabledByCapability(spec.capability).map((p) => p.manifest.id) },
+          { success: false, error: translate("errors.search.noPlugin"), providers: getEnabledByCapability(spec.capability).map((p) => p.manifest.id) },
           404,
         );
       }
       const body = await c.req.json().catch(() => ({}));
       const q = String(body.q || "").trim();
-      if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+      if (!q) return c.json({ success: false, error: translate("errors.search.queryRequired") });
       const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
       const config = getPluginConfig(providerId) || {};
       const res = await plugin.impl[spec.method](config, { query: q, sources });
@@ -171,7 +172,7 @@ for (const spec of SPECS) {
       const items = mapItems(spec.kind, res?.[spec.resultKey], labels);
       return c.json({ success: true, total: items.length, items });
     } catch (e: any) {
-      return c.json({ success: false, error: e.message || "搜索失败" });
+      return c.json({ success: false, error: e.message || translate("errors.search.failed") });
     } finally {
       markInteractiveEnd();
     }
@@ -183,13 +184,13 @@ for (const spec of SPECS) {
       const user = c.get("user");
       const providerId = c.req.param("providerId")!;
       const plugin = getEnabledByCapability(spec.capability).find((p) => p.manifest.id === providerId);
-      if (!plugin) return c.json({ success: false, error: "未找到已启用的搜索插件" }, 404);
+      if (!plugin) return c.json({ success: false, error: translate("errors.search.noPlugin") }, 404);
       const body = await c.req.json().catch(() => ({}));
 
       if (spec.kind === "song") {
         // 歌曲:搜索结果的歌曲数据直接入库为可播在线歌曲(fingerprint 去重,重复导入无副作用)。
         const list = Array.isArray(body.songs) ? body.songs : [];
-        if (!list.length) return c.json({ success: false, error: "缺少 songs 列表" });
+        if (!list.length) return c.json({ success: false, error: translate("errors.search.songsRequired") });
         // 入库在一次性批量子进程里执行(方案3);子进程按 providerId 重建在线源。
         const started = startAsyncTask("song-search-import", `sg:${providerId}:${user?.id || ""}:${Date.now()}`, {
           kind: "song-search-import",
@@ -202,9 +203,9 @@ for (const spec of SPECS) {
       // album:调插件 playlistSongs 拉整专 → 以「专辑歌单」形式入库(合成 sourceUrl 幂等,重复导入=增量更新)。
       const source = String(body.source || "").trim();
       const id = String(body.id || "").trim();
-      if (!source || !id) return c.json({ success: false, error: "缺少专辑 source/id" });
+      if (!source || !id) return c.json({ success: false, error: translate("errors.album.refRequired") });
       if (typeof plugin.impl?.playlistSongs !== "function") {
-        return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取专辑歌曲)" }, 404);
+        return c.json({ success: false, error: translate("errors.plugin.noAlbumPlaylistSongs") }, 404);
       }
       // 专辑用独立 scheme,避免与同平台歌单 id 撞幂等键
       const sourceUrl = `${providerId}://album/${source}/${id}`;
@@ -237,7 +238,7 @@ for (const spec of SPECS) {
       try {
         const providerId = c.req.param("providerId")!;
         const plugin = getEnabledByCapability(spec.capability).find((p) => p.manifest.id === providerId);
-        if (!plugin) return c.json({ success: false, error: "未找到已启用的搜索插件" }, 404);
+        if (!plugin) return c.json({ success: false, error: translate("errors.search.noPlugin") }, 404);
         const source = String(c.req.query("source") || "").trim();
         const id = String(c.req.query("id") || "").trim();
         const name = String(c.req.query("name") || "").trim();
@@ -245,16 +246,16 @@ for (const spec of SPECS) {
         const labels = plugin.manifest.platformLabels || {};
         let raw: any[] = [];
         if (spec.kind === "album") {
-          if (!source || !id) return c.json({ success: false, error: "缺少专辑 source/id" });
+          if (!source || !id) return c.json({ success: false, error: translate("errors.album.refRequired") });
           if (typeof plugin.impl?.playlistSongs !== "function") {
-            return c.json({ success: false, error: "插件缺少 playlistSongs 能力(无法拉取专辑歌曲)" }, 404);
+            return c.json({ success: false, error: translate("errors.plugin.noAlbumPlaylistSongs") }, 404);
           }
           const res = await plugin.impl.playlistSongs(config, source, id);
           raw = Array.isArray(res?.songs) ? res.songs : [];
         } else {
-          if (!name) return c.json({ success: false, error: "缺少艺术家名称" });
+          if (!name) return c.json({ success: false, error: translate("errors.artist.nameRequired") });
           if (typeof plugin.impl?.searchSongs !== "function") {
-            return c.json({ success: false, error: "插件缺少 songSearch 能力(无法拉取歌手歌曲)" }, 404);
+            return c.json({ success: false, error: translate("errors.plugin.noSongSearch") }, 404);
           }
           const res = await plugin.impl.searchSongs(config, { query: name, sources: source ? [source] : undefined });
           raw = Array.isArray(res?.songs) ? res.songs : [];
@@ -262,7 +263,7 @@ for (const spec of SPECS) {
         const items = mapItems("song", raw, labels);
         return c.json({ success: true, total: items.length, items });
       } catch (e: any) {
-        return c.json({ success: false, error: e.message || "拉取失败" });
+        return c.json({ success: false, error: e.message || translate("errors.plugin.fetchFailed") });
       } finally {
         markInteractiveEnd();
       }

@@ -1,15 +1,15 @@
 <template>
   <div class="groups-page">
     <div class="page-header">
-      <h2>播放器</h2>
-      <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
+      <h2>{{ t('groups.title') }}</h2>
+      <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
     </div>
 
     <!-- DLNA 设备管理:在线 + 离线全部展示,可重命名 / 删除离线设备 -->
     <div class="devices-section">
       <div class="section-head">
-        <h3>DLNA 设备</h3>
-        <el-button v-if="canUse" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />扫描</el-button>
+        <h3>{{ t('groups.dlnaDevices') }}</h3>
+        <el-button v-if="canUse" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="devices-box" v-loading="loadingDevices">
         <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
@@ -17,28 +17,28 @@
           <div class="device-row-info">
             <div class="device-row-name">
               {{ deviceDisplayName(dev, `dlna:${dev.id}`) }}
-              <el-tag v-if="isDeviceRenamed(dev, `dlna:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
-              <span v-if="!dev.available" class="device-offline-tag">离线</span>
-              <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">已禁用</el-tag>
+              <el-tag v-if="isDeviceRenamed(dev, `dlna:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+              <span v-if="!dev.available" class="device-offline-tag">{{ t('groups.offline') }}</span>
+              <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">{{ t('common.disabled') }}</el-tag>
             </div>
-            <div class="device-row-meta">{{ dev.manufacturer || dev.model || "DLNA 设备" }}</div>
+            <div class="device-row-meta">{{ dev.manufacturer || dev.model || t('groups.dlnaDeviceMeta') }}</div>
           </div>
           <div class="device-row-actions">
-            <div class="device-hide-toggle" title="开启后不显示在我自己的播放器切换弹窗(仅影响我,不禁用设备,他人仍可用)">
+            <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
               <el-switch
                 :model-value="isHidden(`dlna:${dev.id}`)"
                 @change="(v: any) => setPeerHidden(`dlna:${dev.id}`, !!v)"
-                inline-prompt active-text="隐藏" inactive-text="显示" size="small"
+                inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
               />
             </div>
             <el-popconfirm
               v-if="canManage"
               :title="dev.disabled
-                ? `确定恢复启用「${deviceDisplayName(dev, `dlna:${dev.id}`)}」?`
-                : `确定禁用「${deviceDisplayName(dev, `dlna:${dev.id}`)}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列、移出群组`"
-              :confirm-button-text="dev.disabled ? '恢复' : '禁用'"
+                ? t('groups.enableConfirm', { name: deviceDisplayName(dev, `dlna:${dev.id}`) })
+                : t('groups.disableConfirm', { name: deviceDisplayName(dev, `dlna:${dev.id}`) })"
+              :confirm-button-text="dev.disabled ? t('groups.enable') : t('groups.disable')"
               :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
-              cancel-button-text="取消"
+              :cancel-button-text="t('common.cancel')"
               width="320"
               @confirm="toggleDisabled(dev, !dev.disabled)"
             >
@@ -49,27 +49,27 @@
                   :plain="!dev.disabled"
                   class="device-disable-btn"
                 >
-                  <MfIcon name="CircleSlash" />{{ dev.disabled ? "恢复" : "禁用" }}
+                  <MfIcon name="CircleSlash" />{{ dev.disabled ? t('groups.enable') : t('groups.disable') }}
                 </el-button>
               </template>
             </el-popconfirm>
-            <el-button v-if="canUse" size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
+            <el-button v-if="canUse" size="small" @click="openRenameDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
             <el-popconfirm
               v-if="canManage && !dev.available"
-              title="确定删除该设备?将同时从所有群组中移除"
-              confirm-button-text="删除"
-              cancel-button-text="取消"
+              :title="t('groups.deleteDeviceConfirm')"
+              :confirm-button-text="t('common.delete')"
+              :cancel-button-text="t('common.cancel')"
               width="240"
               @confirm="removeDevice(dev)"
             >
               <template #reference>
-                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
+                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('groups.delete') }}</el-button>
               </template>
             </el-popconfirm>
           </div>
         </div>
         <div v-if="!loadingDevices && dlnaDevices.length === 0" class="device-empty">
-          未发现 DLNA 设备。请确认设备已开启 DLNA 并处于同一局域网,点击「扫描」重新发现。
+          {{ t('groups.noDlnaDevices') }}
         </div>
       </div>
     </div>
@@ -77,40 +77,40 @@
     <!-- AirPlay 设备管理(mDNS 自动发现;可像 DLNA 设备一样重命名 / 禁用 / 删除) -->
     <div class="devices-section" style="margin-top: 28px">
       <div class="section-head">
-        <h3>AirPlay 设备</h3>
-        <el-button size="small" :loading="loadingAirPlay" @click="loadAirPlayDevices"><MfIcon name="RefreshCw" />刷新</el-button>
+        <h3>{{ t('groups.airplayDevices') }}</h3>
+        <el-button size="small" :loading="loadingAirPlay" @click="loadAirPlayDevices"><MfIcon name="RefreshCw" />{{ t('groups.refresh') }}</el-button>
       </div>
-      <div class="section-note">仅 AirPlay 1 (RAOP)。当前只在「阿音 WR320」上验证过,其他设备不保证兼容;不支持 AirPlay 2。</div>
+      <div class="section-note">{{ t('groups.airplayNote') }}</div>
       <div class="devices-box" v-loading="loadingAirPlay">
         <div v-for="dev in airplayDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
           <MfIcon name="Airplay" class="device-row-icon" :class="{ offline: !dev.available }"  />
           <div class="device-row-info">
             <div class="device-row-name">
               {{ deviceDisplayName(dev, `airplay:${dev.id}`) }}
-              <el-tag v-if="isDeviceRenamed(dev, `airplay:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">已改名</el-tag>
-              <span v-if="!dev.available" class="device-offline-tag">离线</span>
-              <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">已禁用</el-tag>
+              <el-tag v-if="isDeviceRenamed(dev, `airplay:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+              <span v-if="!dev.available" class="device-offline-tag">{{ t('groups.offline') }}</span>
+              <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">{{ t('common.disabled') }}</el-tag>
             </div>
             <div class="device-row-meta">
-              AirPlay 设备 · {{ dev.supportsRsa ? "RSA 加密" : "不支持加密" }} · {{ dev.host }}:{{ dev.port }}
+              {{ t('groups.airplayMeta', { enc: dev.supportsRsa ? t('groups.rsaEnc') : t('groups.noEnc'), host: dev.host, port: dev.port }) }}
             </div>
           </div>
           <div class="device-row-actions">
-            <div class="device-hide-toggle" title="开启后不显示在我自己的播放器切换弹窗(仅影响我,不禁用设备,他人仍可用)">
+            <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
               <el-switch
                 :model-value="isHidden(`airplay:${dev.id}`)"
                 @change="(v: any) => setPeerHidden(`airplay:${dev.id}`, !!v)"
-                inline-prompt active-text="隐藏" inactive-text="显示" size="small"
+                inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
               />
             </div>
             <el-popconfirm
               v-if="canManage"
               :title="dev.disabled
-                ? `确定恢复启用「${deviceDisplayName(dev, `airplay:${dev.id}`)}」?`
-                : `确定禁用「${deviceDisplayName(dev, `airplay:${dev.id}`)}」?禁用后将从所有播放器选择中消失,并停止播放、清空队列`"
-              :confirm-button-text="dev.disabled ? '恢复' : '禁用'"
+                ? t('groups.enableConfirm', { name: deviceDisplayName(dev, `airplay:${dev.id}`) })
+                : t('groups.disableConfirmAir', { name: deviceDisplayName(dev, `airplay:${dev.id}`) })"
+              :confirm-button-text="dev.disabled ? t('groups.enable') : t('groups.disable')"
               :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
-              cancel-button-text="取消"
+              :cancel-button-text="t('common.cancel')"
               width="320"
               @confirm="toggleAirPlayDisabled(dev, !dev.disabled)"
             >
@@ -121,38 +121,38 @@
                   :plain="!dev.disabled"
                   class="device-disable-btn"
                 >
-                  <MfIcon name="CircleSlash" />{{ dev.disabled ? "恢复" : "禁用" }}
+                  <MfIcon name="CircleSlash" />{{ dev.disabled ? t('groups.enable') : t('groups.disable') }}
                 </el-button>
               </template>
             </el-popconfirm>
-            <el-button v-if="canUse" size="small" @click="openRenameAirPlayDevice(dev)"><MfIcon name="Pencil" />重命名</el-button>
+            <el-button v-if="canUse" size="small" @click="openRenameAirPlayDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
             <el-popconfirm
               v-if="canManage && !dev.available"
-              title="确定删除该设备?"
-              confirm-button-text="删除"
-              cancel-button-text="取消"
+              :title="t('groups.deleteDeviceConfirmShort')"
+              :confirm-button-text="t('common.delete')"
+              :cancel-button-text="t('common.cancel')"
               width="240"
               @confirm="removeAirPlayDevice(dev)"
             >
               <template #reference>
-                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
+                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('groups.delete') }}</el-button>
               </template>
             </el-popconfirm>
           </div>
         </div>
         <div v-if="!loadingAirPlay && airplayDevices.length === 0" class="device-empty">
-          未发现 AirPlay 设备。请确认设备已开启 AirPlay 并处于同一局域网,mDNS 会自动发现。
+          {{ t('groups.noAirplayDevices') }}
         </div>
       </div>
     </div>
 
     <div class="section-head group-section-head">
-      <h3>播放器群组</h3>
+      <h3>{{ t('groups.groupsTitle') }}</h3>
     </div>
     <div class="groups-tip">
-      将多台 DLNA 设备加入一个群组,组持有自己的队列;播放时后端会并发向全部在线成员投递同一首歌(仿 Music Assistant Sync Group,不进行漂移校正)。
-      一台设备可同时加入多个群组(如「客厅组」+「所有设备组」);设备同一时刻只能渲染一路流,多个组同时播放时以最后一次命令为准。
-      组创建后可像单台设备一样在上方播放器切换器中选择并控制。
+      {{ t('groups.tip1') }}
+      {{ t('groups.tip2') }}
+      {{ t('groups.tip3') }}
     </div>
 
     <div class="group-list" v-loading="loading">
@@ -163,13 +163,13 @@
             <span class="group-name-text">{{ g.name }}</span>
           </div>
           <div class="group-meta">
-            <span>{{ g.members.length }} 台设备</span>
+            <span>{{ t('groups.deviceCount', { count: g.members.length }) }}</span>
             <span class="meta-dot">·</span>
-            <span :class="{ 'online': onlineCount(g) > 0 }">{{ onlineCount(g) }} 台在线</span>
+            <span :class="{ 'online': onlineCount(g) > 0 }">{{ t('groups.onlineCount', { count: onlineCount(g) }) }}</span>
           </div>
         </div>
         <div class="group-id-row">
-          <IdBadge :id="`group:${g.id}`" copy-label="群组 ID" />
+          <IdBadge :id="`group:${g.id}`" :copy-label="t('groups.groupId')" />
         </div>
         <div class="group-members">
           <template v-if="g.members.length > 0">
@@ -179,58 +179,58 @@
               class="member-chip"
               :class="{ offline: !m.available }"
               @click="copyPeer(`dlna:${m.deviceId}`, m.name)"
-              :title="`点击复制设备 ID:dlna:${m.deviceId}`"
+              :title="t('groups.copyDeviceId', { id: m.deviceId })"
             >
               {{ m.name }}
               <MfIcon name="CopyDocument" class="member-copy-icon"  />
-              <span v-if="!m.available" class="member-offline">离线</span>
+              <span v-if="!m.available" class="member-offline">{{ t('groups.offline') }}</span>
             </span>
           </template>
-          <span v-else class="member-empty">暂无成员,点击「编辑成员」添加设备</span>
+          <span v-else class="member-empty">{{ t('groups.noMembers') }}</span>
         </div>
         <div class="group-actions">
-          <div class="device-hide-toggle" title="开启后不显示在我自己的播放器切换弹窗(仅影响我,不禁用设备/群组,他人仍可用)">
+          <div class="device-hide-toggle" :title="t('groups.hideToggleGroupTitle')">
             <el-switch
               :model-value="isHidden(`group:${g.id}`)"
               @change="(v: any) => setPeerHidden(`group:${g.id}`, !!v)"
-              inline-prompt active-text="隐藏" inactive-text="显示" size="small"
+              inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
             />
           </div>
-          <el-button size="small" :disabled="onlineCount(g) === 0" @click="controlGroup(g)"><MfIcon name="Monitor" />控制</el-button>
-          <el-button v-if="canUse" size="small" @click="openEditMembers(g)"><MfIcon name="Pencil" />编辑成员</el-button>
-          <el-button v-if="canUse" size="small" @click="openRename(g)"><MfIcon name="Pencil" />重命名</el-button>
+          <el-button size="small" :disabled="onlineCount(g) === 0" @click="controlGroup(g)"><MfIcon name="Monitor" />{{ t('groups.control') }}</el-button>
+          <el-button v-if="canUse" size="small" @click="openEditMembers(g)"><MfIcon name="Pencil" />{{ t('groups.editMembers') }}</el-button>
+          <el-button v-if="canUse" size="small" @click="openRename(g)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
           <el-popconfirm
             v-if="canUse"
-            title="确定删除该群组?组队列与成员集合将一并删除"
-            confirm-button-text="删除"
-            cancel-button-text="取消"
+            :title="t('groups.deleteGroupConfirm')"
+            :confirm-button-text="t('common.delete')"
+            :cancel-button-text="t('common.cancel')"
             width="240"
             @confirm="removeGroup(g)"
           >
             <template #reference>
-              <el-button size="small" type="danger" plain><MfIcon name="Trash2" />删除</el-button>
+              <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('groups.delete') }}</el-button>
             </template>
           </el-popconfirm>
         </div>
       </div>
-      <el-empty v-if="!loading && groups.length === 0" description="暂无群组">
-        <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />新建群组</el-button>
+      <el-empty v-if="!loading && groups.length === 0" :description="t('groups.noGroups')">
+        <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
       </el-empty>
     </div>
 
     <!-- Create / edit group dialog (name + full member set) -->
     <el-dialog
       v-model="showDialog"
-      :title="editingGroup ? `编辑群组 - ${editingGroup.name}` : '新建群组'"
+      :title="editingGroup ? t('groups.editGroup', { name: editingGroup.name }) : t('groups.create')"
       width="480px"
       :append-to-body="true"
     >
       <div class="dialog-field">
-        <div class="dialog-label">群组名称</div>
-        <el-input v-model="formName" placeholder="输入群组名称(必填,≤50 字符)" maxlength="50" />
+        <div class="dialog-label">{{ t('groups.nameLabel') }}</div>
+        <el-input v-model="formName" :placeholder="t('groups.namePlaceholder')" maxlength="50" />
       </div>
       <div class="dialog-field">
-        <div class="dialog-label">成员设备</div>
+        <div class="dialog-label">{{ t('groups.memberDevicesLabel') }}</div>
         <div class="device-list">
           <div
             v-for="dev in selectableDevices"
@@ -248,45 +248,45 @@
             <div class="device-info">
               <div class="device-name">
                 {{ dev.name }}
-                <span v-if="!dev.available" class="device-offline-tag">离线</span>
+                <span v-if="!dev.available" class="device-offline-tag">{{ t('groups.offline') }}</span>
               </div>
               <div class="device-meta">
-                {{ dev.manufacturer || dev.model || "DLNA 设备" }}
+                {{ dev.manufacturer || dev.model || t('groups.dlnaDeviceMeta') }}
                 <span v-if="otherGroupsOf(dev.id).length > 0" class="device-group-tip">
-                  已在 {{ otherGroupsOf(dev.id).join("、") }}
+                  {{ t('groups.alreadyIn', { names: otherGroupsOf(dev.id).join("、") }) }}
                 </span>
               </div>
             </div>
           </div>
           <div v-if="selectableDevices.length === 0" class="device-empty">
-            未发现可用 DLNA 设备(禁用设备不可加入群组)。
+            {{ t('groups.noSelectableDevices') }}
           </div>
         </div>
       </div>
       <template #footer>
-        <el-button @click="showDialog = false">取消</el-button>
+        <el-button @click="showDialog = false">{{ t('common.cancel') }}</el-button>
         <el-button type="primary" :loading="saving" :disabled="!formName.trim()" @click="saveGroup">
-          {{ editingGroup ? "保存" : "创建" }}
+          {{ editingGroup ? t('common.save') : t('groups.createButton') }}
         </el-button>
       </template>
     </el-dialog>
 
     <!-- Rename-only dialog (quick action, keeps member edits untouched) -->
-    <el-dialog v-model="showRenameDialog" title="重命名群组" width="380px" :append-to-body="true">
-      <el-input v-model="renameName" placeholder="输入新的群组名称" maxlength="50" @keyup.enter="saveRename" />
+    <el-dialog v-model="showRenameDialog" :title="t('groups.renameGroup')" width="380px" :append-to-body="true">
+      <el-input v-model="renameName" :placeholder="t('groups.renamePlaceholder')" maxlength="50" @keyup.enter="saveRename" />
       <template #footer>
-        <el-button @click="showRenameDialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="!renameName.trim()" @click="saveRename">保存</el-button>
+        <el-button @click="showRenameDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="saving" :disabled="!renameName.trim()" @click="saveRename">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- Rename DLNA device (per-user display name) dialog -->
-    <el-dialog v-model="showRenameDeviceDialog" title="重命名设备" width="380px" :append-to-body="true">
-      <el-input v-model="renameDeviceName" placeholder="输入设备显示名(留空恢复为全局名称)" maxlength="50" @keyup.enter="saveRenameDevice" />
-      <div class="form-tip">该名称仅你自己可见,不影响其他用户与 HA 卡片</div>
+    <el-dialog v-model="showRenameDeviceDialog" :title="t('groups.renameDevice')" width="380px" :append-to-body="true">
+      <el-input v-model="renameDeviceName" :placeholder="t('groups.renameDevicePlaceholder')" maxlength="50" @keyup.enter="saveRenameDevice" />
+      <div class="form-tip">{{ t('groups.renameDeviceTip') }}</div>
       <template #footer>
-        <el-button @click="showRenameDeviceDialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveRenameDevice">保存</el-button>
+        <el-button @click="showRenameDeviceDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="saving" @click="saveRenameDevice">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -294,6 +294,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import { useAuthStore } from "@/stores/auth";
@@ -303,6 +304,7 @@ import IdBadge from "@/components/IdBadge.vue";
 import { useCopy } from "@/composables/useCopy";
 
 const { copy } = useCopy();
+const { t } = useI18n();
 
 const authStore = useAuthStore();
 // 使用能力:管理员或具 renderer.use。拥有 use 的普通用户可:新建/删除自己的群组、扫描、
@@ -313,7 +315,7 @@ const canUse = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDER
 const canManage = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE));
 
 function copyPeer(peerId: string, name: string) {
-  copy(peerId, `设备 ID(${name})`);
+  copy(peerId, t("groups.copyPeer", { name }));
 }
 
 const playerStore = usePlayerStore();
@@ -392,9 +394,9 @@ async function scanDevices(): Promise<void> {
   try {
     const res = await api.post("/rest/api/v1/dlna/scan");
     dlnaDevices.value = res.data?.devices || [];
-    ElMessage.success("扫描完成");
+    ElMessage.success(t("groups.scanDone"));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "扫描失败");
+    ElMessage.error(e.response?.data?.error || t("groups.scanFailed"));
   } finally { scanning.value = false; }
 }
 
@@ -414,24 +416,24 @@ async function saveRenameDevice() {
     // 按用户级改名:只改我自己看到的显示名,他人/设备原始名不受影响。
     const ok = await playerStore.setPeerName(peerId, alias);
     if (ok) {
-      ElMessage.success(alias ? "已重命名(仅我可见)" : "已恢复(显示为全局名称)");
+      ElMessage.success(alias ? t("groups.renamedSelf") : t("groups.renamedReset"));
       showRenameDeviceDialog.value = false;
     } else {
-      ElMessage.error("重命名失败,已回滚");
+      ElMessage.error(t("groups.renameFailedRollback"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "重命名失败");
+    ElMessage.error(e.response?.data?.error || t("groups.renameFailed"));
   } finally { saving.value = false; }
 }
 
 async function removeDevice(dev: any) {
   try {
     await api.delete(`/rest/api/v1/dlna/devices/${dev.id}`);
-    ElMessage.success(`已删除设备「${dev.displayName || dev.name}」`);
+    ElMessage.success(t("groups.deviceDeleted", { name: dev.displayName || dev.name }));
     await loadDlnaDevices();
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "删除失败");
+    ElMessage.error(e.response?.data?.error || t("groups.deleteFailed"));
   }
 }
 
@@ -441,12 +443,14 @@ async function toggleDisabled(dev: any, disabled: boolean) {
   try {
     const res = await api.put(`/rest/api/v1/dlna/devices/${dev.id}/disabled`, { disabled });
     if (res.data.success) {
-      ElMessage.success(disabled ? `已禁用「${dev.displayName || dev.name}」` : `已启用「${dev.displayName || dev.name}」`);
+      ElMessage.success(disabled
+        ? t("groups.disabledNamed", { name: dev.displayName || dev.name })
+        : t("groups.enabledNamed", { name: dev.displayName || dev.name }));
       await loadDlnaDevices();
       await loadGroups(); // 禁用会把设备移出群组,组列表需要刷新
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
 }
 
@@ -469,10 +473,10 @@ function openRenameAirPlayDevice(dev: any) {
 async function removeAirPlayDevice(dev: any) {
   try {
     await api.delete(`/rest/api/v1/airplay/devices/${dev.id}`);
-    ElMessage.success(`已删除设备「${dev.displayName || dev.name}」`);
+    ElMessage.success(t("groups.deviceDeleted", { name: dev.displayName || dev.name }));
     await loadAirPlayDevices();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "删除失败");
+    ElMessage.error(e.response?.data?.error || t("groups.deleteFailed"));
   }
 }
 
@@ -480,11 +484,13 @@ async function toggleAirPlayDisabled(dev: any, disabled: boolean) {
   try {
     const res = await api.put(`/rest/api/v1/airplay/devices/${dev.id}/disabled`, { disabled });
     if (res.data.success) {
-      ElMessage.success(disabled ? `已禁用「${dev.displayName || dev.name}」` : `已启用「${dev.displayName || dev.name}」`);
+      ElMessage.success(disabled
+        ? t("groups.disabledNamed", { name: dev.displayName || dev.name })
+        : t("groups.enabledNamed", { name: dev.displayName || dev.name }));
       await loadAirPlayDevices();
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "操作失败");
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
 }
 
@@ -498,8 +504,8 @@ function isHidden(peerId: string): boolean {
 async function setPeerHidden(peerId: string, hidden: boolean) {
   const ok = await playerStore.setPeerHidden(peerId, hidden);
   ElMessage[ok ? "success" : "error"](ok
-    ? (hidden ? "已隐藏(不再显示在我的播放器切换弹窗;未禁用,他人仍可用)" : "已设为显示(将出现在我的播放器切换弹窗)")
-    : "操作失败,已回滚");
+    ? (hidden ? t("groups.hiddenMsg") : t("groups.shownMsg"))
+    : t("groups.opFailedRollback"));
 }
 
 async function openCreate() {
@@ -537,7 +543,7 @@ function setChecked(deviceId: string, checked: boolean) {
 
 async function saveGroup() {
   const name = formName.value.trim();
-  if (!name) { ElMessage.warning("请填写群组名称"); return; }
+  if (!name) { ElMessage.warning(t("groups.enterName")); return; }
   if (saving.value) return;
   saving.value = true;
   try {
@@ -546,15 +552,15 @@ async function saveGroup() {
         name,
         memberIds: formMembers.value,
       });
-      ElMessage.success("群组已更新");
+      ElMessage.success(t("groups.updated"));
     } else {
       await api.post("/rest/api/v1/groups", { name, memberIds: formMembers.value });
-      ElMessage.success("群组已创建");
+      ElMessage.success(t("groups.groupCreated"));
     }
     showDialog.value = false;
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "保存失败");
+    ElMessage.error(e.response?.data?.error || t("groups.saveFailed"));
   } finally { saving.value = false; }
 }
 
@@ -565,21 +571,21 @@ async function saveRename() {
   saving.value = true;
   try {
     await api.put(`/rest/api/v1/groups/${renameGroup.value.id}`, { name });
-    ElMessage.success("已重命名");
+    ElMessage.success(t("groups.renamed"));
     showRenameDialog.value = false;
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "重命名失败");
+    ElMessage.error(e.response?.data?.error || t("groups.renameFailed"));
   } finally { saving.value = false; }
 }
 
 async function removeGroup(g: any) {
   try {
     await api.delete(`/rest/api/v1/groups/${g.id}`);
-    ElMessage.success(`已删除「${g.name}」`);
+    ElMessage.success(t("groups.groupDeleted", { name: g.name }));
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "删除失败");
+    ElMessage.error(e.response?.data?.error || t("groups.deleteFailed"));
   }
 }
 
@@ -587,7 +593,7 @@ async function removeGroup(g: any) {
 // and queue start routing to the group.
 function controlGroup(g: any) {
   playerStore.switchPeer(`group:${g.id}`).then(() => playerStore.refreshPeers());
-  ElMessage.success(`已切换到「${g.name}」`);
+  ElMessage.success(t("groups.switchedTo", { name: g.name }));
 }
 
 // Backend broadcasts group_changed / group_deleted over the WS channel; the

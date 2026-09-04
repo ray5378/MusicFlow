@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="item?.name || '远程内容'"
+    :title="item?.name || t('remoteDetail.title')"
     width="680px"
     :append-to-body="true"
     class="remote-detail-dialog"
@@ -21,10 +21,10 @@
         </div>
         <div class="rd-actions">
           <el-button type="primary" size="small" :loading="playing" @click="playAll">
-            <MfIcon name="Play" />播放全部
+            <MfIcon name="Play" />{{ t('music.playAll') }}
           </el-button>
           <el-button v-if="importable" size="small" type="primary" plain :loading="importing" :disabled="imported" @click="doImport">
-            <MfIcon name="Download" />{{ imported ? "已加入库" : "加入库" }}
+            <MfIcon name="Download" />{{ imported ? t('albums.inLibrary') : t('music.addToLibrary') }}
           </el-button>
           <span v-if="item.platformLabel" class="rd-tag">{{ item.platformLabel }}</span>
         </div>
@@ -33,20 +33,23 @@
 
     <!-- 歌曲列表:复用 SongTable(悬浮播放/点击播放),未入库歌曲直接播(streamUrl) -->
     <div class="rd-body" v-loading="loading">
-      <SongTable v-if="songs.length > 0" :songs="songs" remote :loading="loading" empty-text="该内容没有可播放的歌曲" @play="playSong" />
-      <div v-else-if="!loading" class="rd-empty">没有拉取到歌曲</div>
+      <SongTable v-if="songs.length > 0" :songs="songs" remote :loading="loading" :empty-text="t('remoteDetail.noPlayable')" @play="playSong" />
+      <div v-else-if="!loading" class="rd-empty">{{ t('remoteDetail.empty') }}</div>
     </div>
   </el-dialog>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { usePlayerStore, Song } from "@/stores/player";
 import { fetchRemoteCollectionSongs, remoteItemToSong } from "@/composables/useEntitySearch";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import SongTable from "@/components/SongTable.vue";
+
+const { t } = useI18n();
 
 const props = withDefaults(
   defineProps<{
@@ -78,9 +81,9 @@ const metaText = computed(() => {
   const parts: string[] = [];
   if (it.artist) parts.push(it.artist);
   if (it.creator) parts.push(it.creator);
-  if (it.trackCount) parts.push(`${it.trackCount}首`);
-  if (it.albumCount) parts.push(`${it.albumCount} 张专辑`);
-  if (it.songCount) parts.push(`${it.songCount} 首`);
+  if (it.trackCount) parts.push(t('remoteDetail.trackCount', { count: it.trackCount }));
+  if (it.albumCount) parts.push(t('remoteDetail.albumCount', { count: it.albumCount }));
+  if (it.songCount) parts.push(t('remoteDetail.trackCount', { count: it.songCount }));
   return parts.join(" · ");
 });
 
@@ -101,7 +104,7 @@ function playSong(song: Song) {
 async function playAll() {
   if (songs.value.length === 0) await open();
   if (songs.value.length === 0) {
-    ElMessage.warning("该内容暂无可播放歌曲");
+    ElMessage.warning(t("remoteDetail.noPlayableMsg"));
     return;
   }
   playing.value = true;
@@ -124,23 +127,23 @@ async function doImport() {
       cover: props.item.cover,
     });
     if (res.data?.alreadyRunning) {
-      ElMessage.warning("正在导入中,请稍候");
+      ElMessage.warning(t("remoteDetail.importing"));
       return;
     }
     if (!res.data?.success || !res.data.taskId) {
-      ElMessage.error(res.data?.error || "导入失败");
+      ElMessage.error(res.data?.error || t("playlists.importFailed"));
       return;
     }
     const r = await waitAsyncTask(res.data.taskId, { intervalMs: 800 });
     if (r?.success) {
       imported.value = true;
-      ElMessage.success(`已加入库:${r.name || props.item.name}(${r.trackCount}首,匹配 ${r.added})`);
+      ElMessage.success(t("playlists.imported", { name: r.name || props.item.name, count: r.trackCount, added: r.added }));
       emit("imported");
     } else {
-      ElMessage.error(r?.error || "导入失败");
+      ElMessage.error(r?.error || t("playlists.importFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e?.message || "导入失败:插件未启用或服务不可达");
+    ElMessage.error(e?.message || t("playlists.importFailedPlugin"));
   } finally {
     importing.value = false;
   }

@@ -1,4 +1,5 @@
 import api from "@/api";
+import { gt } from "@/locales";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -18,8 +19,8 @@ export async function waitAsyncTask(
     const res = await api.get(`/rest/api/v1/tasks/${taskId}`).catch(() => null);
     const task = res?.data?.task;
     if (task?.status === "ok") return task.result;
-    if (task?.status === "error") throw new Error(task.error || "任务失败");
-    if (Date.now() - t0 > timeout) throw new Error("任务超时");
+    if (task?.status === "error") throw new Error(task.error || gt("task.failed"));
+    if (Date.now() - t0 > timeout) throw new Error(gt("task.timeout"));
     await sleep(interval);
   }
 }

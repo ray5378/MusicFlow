@@ -16,6 +16,9 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const props = withDefaults(
   defineProps<{
@@ -27,7 +30,7 @@ const props = withDefaults(
     /** 异步播放动作，组件自动管理 loading 状态 */
     action?: () => any | Promise<any>;
   }>(),
-  { size: "md", corner: true, label: "播放" }
+  { size: "md", corner: true, label: t("layout.play") }
 );
 
 const emit = defineEmits<{ (e: "play"): void }>();

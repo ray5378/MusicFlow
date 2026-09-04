@@ -23,6 +23,24 @@ export const playPreferenceManifest: PluginManifest = {
     { key: "preferLocal", label: "首选 Local", type: "switch", default: true, help: "web 歌曲所在组有 local/WebDAV 源时自动切主源流播" },
     { key: "fallbackToWeb", label: "Local 失败回退平台", type: "switch", default: true, help: "local/WebDAV 主源不可用(文件缺失等)时自动回退组内 web 源,保证可播" },
   ],
+  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
+  i18n: {
+    en: {
+      name: "Play Preference (prefer Local)",
+      description:
+        "When streaming a multi-source song group, auto-select the local/WebDAV source (lossless first); fall back to the platform source when the local source is unavailable. Disable to stream from the original source.",
+      fields: {
+        preferLocal: {
+          label: "Prefer Local",
+          help: "Automatically switch to the local/WebDAV source for streaming when the song's group has one",
+        },
+        fallbackToWeb: {
+          label: "Fallback to platform on Local failure",
+          help: "Automatically fall back to the group's web source when the local/WebDAV source is unavailable (e.g. missing file)",
+        },
+      },
+    },
+  },
   documentation: `### 播放优选(服务端内置)
 多源组歌曲的播放策略,端侧零改动:
 

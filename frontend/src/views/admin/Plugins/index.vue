@@ -2,46 +2,46 @@
   <div class="admin-plugins">
     <el-tabs v-model="activeTab" @tab-change="onTabChange">
       <!-- ============ Installed plugins ============ -->
-      <el-tab-pane label="已安装" name="installed">
+      <el-tab-pane :label="t('admin.plugins.tabInstalled')" name="installed">
         <div class="page-header">
-          <h2>插件管理</h2>
-          <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
+          <h2>{{ t('admin.plugins.title') }}</h2>
+          <el-button type="primary" @click="showAddDialog = true">{{ t('admin.plugins.addPlugin') }}</el-button>
         </div>
 
         <template v-if="plugins.length > 0">
           <el-table v-if="!isMobile" :data="plugins" stripe v-loading="loading">
-            <el-table-column label="插件名称" min-width="200">
+            <el-table-column :label="t('admin.plugins.colName')" min-width="200">
               <template #default="{ row }">
                 <div class="plugin-name">{{ displayName(row) }}</div>
                 <div class="plugin-id">{{ row.name }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="类型" width="110">
+            <el-table-column :label="t('common.type')" width="110">
               <template #default="{ row }">
                 <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="version" label="版本" width="90" />
-            <el-table-column label="说明" min-width="220" show-overflow-tooltip>
-              <template #default="{ row }">{{ parseManifest(row).description || row.description || "—" }}</template>
+            <el-table-column prop="version" :label="t('admin.plugins.colVersion')" width="90" />
+            <el-table-column :label="t('admin.plugins.colDesc')" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">{{ displayDesc(row) || "—" }}</template>
             </el-table-column>
-            <el-table-column label="健康" width="96">
+            <el-table-column :label="t('admin.plugins.colHealth')" width="96">
               <template #default="{ row }">
                 <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="104">
+            <el-table-column :label="t('common.status')" width="104">
               <template #default="{ row }">
                 <!-- core 内置行为插件(多源组/播放优选):列表开关 = 总开关(整体启停),功能子开关在「配置」弹窗 -->
                 <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="210">
+            <el-table-column :label="t('common.actions')" width="210">
               <template #default="{ row }">
                 <el-button size="small" type="primary" plain @click="editPlugin(row)">
-                  {{ hasConfig(row) ? "配置" : "详情" }}
+                  {{ hasConfig(row) ? t('common.config') : t('common.detail') }}
                 </el-button>
-                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">删除</el-button>
+                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">{{ t('common.delete') }}</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -59,50 +59,50 @@
                 <span class="pc-ver">v{{ row.version }}</span>
                 <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
               </div>
-              <div class="pc-desc m-sub">{{ parseManifest(row).description || row.description || "—" }}</div>
+              <div class="pc-desc m-sub">{{ displayDesc(row) || "—" }}</div>
               <div class="pc-actions">
                 <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
                 <el-button size="small" type="primary" plain @click="editPlugin(row)">
-                  {{ hasConfig(row) ? "配置" : "详情" }}
+                  {{ hasConfig(row) ? t('common.config') : t('common.detail') }}
                 </el-button>
-                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">删除</el-button>
+                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">{{ t('common.delete') }}</el-button>
               </div>
             </div>
           </div>
         </template>
-        <EmptyState v-else icon="cable" title="暂无插件" description="插件用于扩展搜索、下载、刮削、歌词、封面、设备投屏等功能">
+        <EmptyState v-else icon="cable" :title="t('admin.plugins.emptyTitle')" :description="t('admin.plugins.emptyDesc')">
           <template #action>
-            <el-button type="primary" @click="showAddDialog = true">添加插件</el-button>
+            <el-button type="primary" @click="showAddDialog = true">{{ t('admin.plugins.addPlugin') }}</el-button>
           </template>
         </EmptyState>
       </el-tab-pane>
 
       <!-- ============ Plugin marketplace ============ -->
-      <el-tab-pane label="插件市场" name="market">
+      <el-tab-pane :label="t('admin.plugins.tabMarket')" name="market">
         <div class="page-header">
-          <h2>插件市场</h2>
-          <el-button type="primary" plain @click="loadMarketplace" :loading="marketLoading">刷新</el-button>
+          <h2>{{ t('admin.plugins.marketTitle') }}</h2>
+          <el-button type="primary" plain @click="loadMarketplace" :loading="marketLoading">{{ t('common.refresh') }}</el-button>
         </div>
 
         <el-card class="market-card" shadow="never">
           <template #header>
             <div class="card-head">
-              <span>注册表来源</span>
-              <el-button size="small" type="primary" plain @click="showRegDialog = true">添加注册表</el-button>
+              <span>{{ t('admin.plugins.registrySource') }}</span>
+              <el-button size="small" type="primary" plain @click="showRegDialog = true">{{ t('admin.plugins.addRegistry') }}</el-button>
             </div>
           </template>
           <template v-if="registries.length > 0">
             <el-table v-if="!isMobile" :data="registries" stripe size="small">
               <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
-              <el-table-column label="状态" width="120">
+              <el-table-column :label="t('common.status')" width="120">
                 <template #default="{ row }">
-                  <el-tag v-if="row.error" size="small" type="danger" effect="light">加载失败</el-tag>
-                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
+                  <el-tag v-if="row.error" size="small" type="danger" effect="light">{{ t('admin.plugins.loadFailed') }}</el-tag>
+                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? t('common.enable') : t('common.disable') }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="90">
+              <el-table-column :label="t('common.actions')" width="90">
                 <template #default="{ row }">
-                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">删除</el-button>
+                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">{{ t('common.delete') }}</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -110,23 +110,23 @@
               <div v-for="row in registries" :key="row.id" class="registry-card">
                 <div class="rc-url">{{ row.url }}</div>
                 <div class="rc-meta">
-                  <el-tag v-if="row.error" size="small" type="danger" effect="light">加载失败</el-tag>
-                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? "启用" : "停用" }}</el-tag>
-                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">删除</el-button>
+                  <el-tag v-if="row.error" size="small" type="danger" effect="light">{{ t('admin.plugins.loadFailed') }}</el-tag>
+                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? t('common.enable') : t('common.disable') }}</el-tag>
+                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">{{ t('common.delete') }}</el-button>
                 </div>
               </div>
             </div>
           </template>
-          <el-empty v-else description="尚未添加任何插件注册表" :image-size="60" />
+          <el-empty v-else :description="t('admin.plugins.noRegistry')" :image-size="60" />
         </el-card>
 
         <el-card class="market-card" shadow="never">
-          <template #header><span>插件市场（按注册表来源分组）</span></template>
+          <template #header><span>{{ t('admin.plugins.marketGrouped') }}</span></template>
           <div v-for="group in groupedMarket" :key="group.key" class="market-group">
             <div class="group-head">
               <span class="group-title">{{ group.title }}</span>
               <el-tag v-if="group.sourceLabel" size="small" type="primary" effect="plain">{{ group.sourceLabel }}</el-tag>
-              <el-tag v-if="group.error" size="small" type="danger" effect="plain">加载失败</el-tag>
+              <el-tag v-if="group.error" size="small" type="danger" effect="plain">{{ t('admin.plugins.loadFailed') }}</el-tag>
             </div>
             <el-alert
               v-if="group.error && group.items.length === 0"
@@ -134,21 +134,21 @@
               :closable="false"
               show-icon
               class="market-group-err"
-              title="该注册表加载失败"
-              :description="`${group.error}。请检查该地址是否可达，或当前网络是否能访问该托管平台（例如容器内访问 raw.githubusercontent.com 常因网络不可达而失败，可改用 Gitee 源）。`"
+              :title="t('admin.plugins.registryLoadFailedTitle')"
+              :description="t('admin.plugins.registryLoadFailedDesc', { error: group.error })"
             />
             <template v-if="group.items.length > 0">
               <el-table v-if="!isMobile" :data="group.items" stripe v-loading="marketLoading">
-                <el-table-column label="名称" min-width="200">
+                <el-table-column :label="t('admin.plugins.colName')" min-width="200">
                   <template #default="{ row }">
                     <div class="plugin-name">
                       {{ row.name }}
-                      <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                      <el-tag v-if="row.builtin" size="small" type="warning" effect="light">{{ t('admin.plugins.builtin') }}</el-tag>
                     </div>
                     <div class="plugin-id">{{ row.id }}</div>
                   </template>
                 </el-table-column>
-                <el-table-column label="类型 / 能力" min-width="200">
+                <el-table-column :label="t('admin.plugins.colTypeCap')" min-width="200">
                   <template #default="{ row }">
                     <div class="cap-row">
                       <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
@@ -156,22 +156,22 @@
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column prop="version" label="版本" width="86" />
-                <el-table-column prop="description" label="说明" min-width="200" show-overflow-tooltip />
-                <el-table-column label="状态" width="104">
+                <el-table-column prop="version" :label="t('admin.plugins.colVersion')" width="86" />
+                <el-table-column prop="description" :label="t('admin.plugins.colDesc')" min-width="200" show-overflow-tooltip />
+                <el-table-column :label="t('common.status')" width="104">
                   <template #default="{ row }">
                     <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                    <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
+                    <el-tag v-else size="small" type="info" effect="light">{{ t('admin.plugins.notInstalled') }}</el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="190">
+                <el-table-column :label="t('common.actions')" width="190">
                   <template #default="{ row }">
                     <template v-if="!row.builtin">
-                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
-                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
-                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.install') }}</el-button>
+                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.update') }}</el-button>
+                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.reinstall') }}</el-button>
                     </template>
-                    <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
+                    <el-button size="small" plain @click="editPlugin(row)">{{ t('common.detail') }}</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -182,7 +182,7 @@
                     <div class="pc-id">
                       <div class="plugin-name">
                         {{ row.name }}
-                        <el-tag v-if="row.builtin" size="small" type="warning" effect="light">内置</el-tag>
+                        <el-tag v-if="row.builtin" size="small" type="warning" effect="light">{{ t('admin.plugins.builtin') }}</el-tag>
                       </div>
                       <div class="plugin-id">{{ row.id }}</div>
                     </div>
@@ -195,68 +195,69 @@
                   <div class="pc-meta">
                     <span class="pc-ver">v{{ row.version }}</span>
                     <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                    <el-tag v-else size="small" type="info" effect="light">未安装</el-tag>
+                    <el-tag v-else size="small" type="info" effect="light">{{ t('admin.plugins.notInstalled') }}</el-tag>
                   </div>
                   <div class="pc-actions">
                     <template v-if="!row.builtin">
-                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">安装</el-button>
-                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">更新</el-button>
-                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">重装</el-button>
+                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.install') }}</el-button>
+                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.update') }}</el-button>
+                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.reinstall') }}</el-button>
                     </template>
-                    <el-button size="small" plain @click="editPlugin(row)">详情</el-button>
+                    <el-button size="small" plain @click="editPlugin(row)">{{ t('common.detail') }}</el-button>
                   </div>
                 </div>
               </div>
             </template>
-            <el-empty v-else description="该注册表暂无可用插件" :image-size="50" />
+            <el-empty v-else :description="t('admin.plugins.noPluginsInRegistry')" :image-size="50" />
           </div>
-          <p v-if="groupedMarket.length > 0" class="market-note">同一插件可来自多个注册表，按来源分组显示（来源 github / gitee / 自建），请选择你要安装的源头。</p>
-          <el-empty v-else description="尚未添加任何插件注册表" :image-size="60" />
+          <p v-if="groupedMarket.length > 0" class="market-note">{{ t('admin.plugins.marketNote') }}</p>
+          <el-empty v-else :description="t('admin.plugins.noRegistry')" :image-size="60" />
         </el-card>
         <el-alert type="info" :closable="false" show-icon class="market-warn"
-          title="插件运行模型与安全提示"
-          description="内置插件随服务端发行:core 核心行为插件(同曲多源组/播放优选)默认启用,可用列表状态开关整体启停,功能子开关在其「配置」弹窗中调整;其余内置插件同样通过状态开关启停,均不可删除。第三方插件在 QuickJS 沙箱中运行——拿不到 Node 进程能力,网络仅经受控的 host.http(需声明 net 权限),单插件内存/超时受限。但插件访问的外部服务地址仍由你配置,请仅从你信赖的注册表安装。" />
+          :title="t('admin.plugins.securityTitle')"
+          :description="t('admin.plugins.securityDesc')"
+        />
       </el-tab-pane>
 
       <!-- ============ Media fetch (lyrics / covers) — 能力级全局设置,独立于任何单个插件 ============ -->
-      <el-tab-pane label="媒体获取" name="media">
+      <el-tab-pane :label="t('admin.plugins.tabMedia')" name="media">
         <div class="page-header">
-          <h2>媒体获取</h2>
-          <span class="page-sub">歌词 / 封面按需获取与批量补全 —— 全局设置,不归属于任何单个插件,换插件不影响设置</span>
+          <h2>{{ t('admin.plugins.mediaTitle') }}</h2>
+          <span class="page-sub">{{ t('admin.plugins.mediaSub') }}</span>
         </div>
 
         <el-card class="mf-card" shadow="never">
           <template #header>
             <div class="card-head">
-              <span class="card-title">歌词获取</span>
-              <el-tag v-if="lyricProviderPlugins.length === 0" size="small" type="warning" effect="plain">未安装歌词提供方插件</el-tag>
+              <span class="card-title">{{ t('admin.plugins.lyricsFetch') }}</span>
+              <el-tag v-if="lyricProviderPlugins.length === 0" size="small" type="warning" effect="plain">{{ t('admin.plugins.noLyricProvider') }}</el-tag>
             </div>
           </template>
           <div v-if="lyricProviderPlugins.length === 0" class="mf-empty">
-            <el-empty description="未安装任何歌词提供方(lyricProvider)插件" :image-size="60">
-              <el-button size="small" type="primary" @click="activeTab = 'market'">前往插件市场安装</el-button>
+            <el-empty :description="t('admin.plugins.noLyricProviderDesc')" :image-size="60">
+              <el-button size="small" type="primary" @click="activeTab = 'market'">{{ t('admin.plugins.goMarket') }}</el-button>
             </el-empty>
           </div>
           <div v-else class="mf-media">
             <div class="mf-media-row">
-              <span class="mf-media-label">来源插件</span>
-              <el-select v-model="lyricsSettings.providerId" clearable placeholder="自动" style="width: 260px" @change="saveMediaSettings('lyrics')">
+              <span class="mf-media-label">{{ t('admin.plugins.sourcePlugin') }}</span>
+              <el-select v-model="lyricsSettings.providerId" clearable :placeholder="t('admin.plugins.auto')" style="width: 260px" @change="saveMediaSettings('lyrics')">
                 <el-option v-for="p in lyricProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
               </el-select>
-              <span class="field-hint">选择歌词来源插件;清空 = 自动(全部启用的歌词提供方)</span>
+              <span class="field-hint">{{ t('admin.plugins.sourcePluginHint') }}</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">按需获取</span>
+              <span class="mf-media-label">{{ t('admin.plugins.onDemand') }}</span>
               <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
-              <span class="field-hint">本地/WebDAV 歌曲缺歌词时,播放实时向所选插件获取</span>
+              <span class="field-hint">{{ t('admin.plugins.onDemandHintLyrics') }}</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">落库</span>
+              <span class="mf-media-label">{{ t('admin.plugins.persist') }}</span>
               <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
-              <span class="field-hint">获取到的歌词保存为本地文件(online-lyrics/),离线也能显示</span>
+              <span class="field-hint">{{ t('admin.plugins.persistHintLyrics') }}</span>
             </div>
             <div class="mf-media-row">
-              <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">批量补全</el-button>
+              <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">{{ t('admin.plugins.batchBackfill') }}</el-button>
               <span v-if="lyricsBackfill.total > 0" class="field-hint">{{ backfillText('lyrics') }}</span>
             </div>
           </div>
@@ -265,107 +266,107 @@
         <el-card class="mf-card" shadow="never">
           <template #header>
             <div class="card-head">
-              <span class="card-title">封面获取</span>
-              <el-tag v-if="coverProviderPlugins.length === 0" size="small" type="warning" effect="plain">未安装封面提供方插件</el-tag>
+              <span class="card-title">{{ t('admin.plugins.coverFetch') }}</span>
+              <el-tag v-if="coverProviderPlugins.length === 0" size="small" type="warning" effect="plain">{{ t('admin.plugins.noCoverProvider') }}</el-tag>
             </div>
           </template>
           <div v-if="coverProviderPlugins.length === 0" class="mf-empty">
-            <el-empty description="未安装任何封面提供方(coverProvider)插件" :image-size="60">
-              <el-button size="small" type="primary" @click="activeTab = 'market'">前往插件市场安装</el-button>
+            <el-empty :description="t('admin.plugins.noCoverProviderDesc')" :image-size="60">
+              <el-button size="small" type="primary" @click="activeTab = 'market'">{{ t('admin.plugins.goMarket') }}</el-button>
             </el-empty>
           </div>
           <div v-else class="mf-media">
             <div class="mf-media-row">
-              <span class="mf-media-label">来源插件</span>
-              <el-select v-model="coversSettings.providerId" clearable placeholder="自动" style="width: 260px" @change="saveMediaSettings('covers')">
+              <span class="mf-media-label">{{ t('admin.plugins.sourcePlugin') }}</span>
+              <el-select v-model="coversSettings.providerId" clearable :placeholder="t('admin.plugins.auto')" style="width: 260px" @change="saveMediaSettings('covers')">
                 <el-option v-for="p in coverProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
               </el-select>
-              <span class="field-hint">选择封面来源插件;清空 = 自动(全部启用的封面提供方)</span>
+              <span class="field-hint">{{ t('admin.plugins.sourcePluginHint') }}</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">按需获取</span>
+              <span class="mf-media-label">{{ t('admin.plugins.onDemand') }}</span>
               <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
-              <span class="field-hint">歌曲缺封面时,请求封面时实时向所选插件获取</span>
+              <span class="field-hint">{{ t('admin.plugins.onDemandHintCovers') }}</span>
             </div>
             <div class="mf-media-row">
-              <span class="mf-media-label">落库</span>
+              <span class="mf-media-label">{{ t('admin.plugins.persist') }}</span>
               <el-switch v-model="coversSettings.persist" @change="saveMediaSettings('covers')" />
-              <span class="field-hint">下载缓存封面到本地,一次获取永久命中</span>
+              <span class="field-hint">{{ t('admin.plugins.persistHintCovers') }}</span>
             </div>
             <div class="mf-media-row">
-              <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">批量补全</el-button>
+              <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">{{ t('admin.plugins.batchBackfill') }}</el-button>
               <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
             </div>
           </div>
         </el-card>
 
         <div class="mf-actions">
-          <el-button type="primary" :loading="savingMedia" @click="saveAllMedia">保存设置</el-button>
-          <span class="field-hint">修改即时生效;此按钮可一次性确认并保存「歌词获取」与「封面获取」全部设置。</span>
+          <el-button type="primary" :loading="savingMedia" @click="saveAllMedia">{{ t('admin.plugins.saveSettings') }}</el-button>
+          <span class="field-hint">{{ t('admin.plugins.saveSettingsHint') }}</span>
         </div>
       </el-tab-pane>
     </el-tabs>
 
     <!-- Add plugin dialog -->
-    <el-dialog v-model="showAddDialog" title="添加插件" width="500px" :append-to-body="true">
+    <el-dialog v-model="showAddDialog" :title="t('admin.plugins.addPlugin')" width="500px" :append-to-body="true">
       <el-form label-width="80px">
-        <el-form-item label="插件名称"><el-input v-model="newPlugin.name" /></el-form-item>
-        <el-form-item label="描述"><el-input v-model="newPlugin.description" type="textarea" /></el-form-item>
+        <el-form-item :label="t('admin.plugins.pluginName')"><el-input v-model="newPlugin.name" /></el-form-item>
+        <el-form-item :label="t('admin.plugins.description')"><el-input v-model="newPlugin.description" type="textarea" /></el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showAddDialog = false">取消</el-button>
-        <el-button type="primary" @click="addPlugin">添加</el-button>
+        <el-button @click="showAddDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="addPlugin">{{ t('common.add') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- Add registry dialog -->
-    <el-dialog v-model="showRegDialog" title="添加插件注册表" width="500px" :append-to-body="true">
+    <el-dialog v-model="showRegDialog" :title="t('admin.plugins.addRegistry')" width="500px" :append-to-body="true">
       <el-form label-width="80px">
         <el-form-item label="URL">
           <el-input v-model="newRegistryUrl" placeholder="https://example.com/registry.json" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showRegDialog = false">取消</el-button>
-        <el-button type="primary" :loading="addingReg" @click="addRegistry">添加</el-button>
+        <el-button @click="showRegDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="addingReg" @click="addRegistry">{{ t('common.add') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- Plugin detail dialog: 功能介绍 / 处理逻辑 / 能力 / 权限 / 配置 -->
-    <el-dialog v-model="showConfigDialog" class="plugin-config-dialog" :title="`插件详情 · ${displayName(editing)}`" width="720px" top="6vh" :append-to-body="true">
+    <el-dialog v-model="showConfigDialog" class="plugin-config-dialog" :title="`${t('admin.plugins.pluginDetail')} · ${displayName(editing)}`" width="720px" top="6vh" :append-to-body="true">
       <div class="pd-head">
         <span class="pd-id">{{ editing?.id }}@{{ editing?.version }}</span>
         <el-tag size="small" :type="typeTagColor(editing)" effect="light">{{ typeLabel(editing) }}</el-tag>
-        <el-tag v-if="editing?.builtin" size="small" type="warning" effect="light">内置</el-tag>
-        <el-tag v-else-if="editing" size="small" type="info" effect="light">外置</el-tag>
+        <el-tag v-if="editing?.builtin" size="small" type="warning" effect="light">{{ t('admin.plugins.builtin') }}</el-tag>
+        <el-tag v-else-if="editing" size="small" type="info" effect="light">{{ t('admin.plugins.external') }}</el-tag>
       </div>
 
       <div class="pd-section">
-        <h4>功能介绍</h4>
-        <p class="pd-desc">{{ parseManifest(editing).description || "—" }}</p>
+        <h4>{{ t('admin.plugins.funcIntro') }}</h4>
+        <p class="pd-desc">{{ displayDesc(editing) || "—" }}</p>
       </div>
 
       <div class="pd-section">
-        <h4>处理逻辑</h4>
+        <h4>{{ t('admin.plugins.processingLogic') }}</h4>
         <div v-if="docMarkdown" class="pd-md" v-html="docMarkdown"></div>
         <template v-else>
           <ul class="pd-capdocs">
             <li v-for="cap in capabilityList(editing)" :key="cap">{{ capLabel(cap) }}：{{ capDoc(cap) }}</li>
           </ul>
-          <p v-if="capabilityList(editing).length" class="pd-hint">该插件未提供详细文档，以上为按能力自动生成的说明。</p>
-          <p v-else class="pd-hint">该插件未提供详细文档。</p>
+          <p v-if="capabilityList(editing).length" class="pd-hint">{{ t('admin.plugins.autoDocHint') }}</p>
+          <p v-else class="pd-hint">{{ t('admin.plugins.noDocHint') }}</p>
         </template>
       </div>
 
       <div v-if="capabilityList(editing).length > 0" class="pd-section">
-        <h4>能力清单</h4>
+        <h4>{{ t('admin.plugins.capList') }}</h4>
         <div class="cap-row">
           <el-tag v-for="cap in capabilityList(editing)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
         </div>
       </div>
 
       <div v-if="permissionList(editing).length > 0" class="pd-section">
-        <h4>权限</h4>
+        <h4>{{ t('admin.plugins.permissionsTitle') }}</h4>
         <div class="cap-row">
           <el-tag v-for="perm in permissionList(editing)" :key="perm" size="small" type="warning" effect="plain">{{ permLabel(perm) }}</el-tag>
         </div>
@@ -384,11 +385,11 @@
                 <div v-if="f.key === 'keywords'" class="tag-input-wrap">
                   <el-input
                     v-model="tagInputValue"
-                    :placeholder="'输入关键词后按回车添加'"
+                    :placeholder="t('admin.plugins.tagPlaceholder')"
                     @keyup.enter="addTag(f.key)"
                   >
                     <template #append>
-                      <el-button @click="addTag(f.key)">添加</el-button>
+                      <el-button @click="addTag(f.key)">{{ t('common.add') }}</el-button>
                     </template>
                   </el-input>
                   <div v-if="getTags(f.key).length > 0" class="tag-list">
@@ -402,7 +403,7 @@
                   </div>
                   <div class="tag-actions">
                     <el-button type="primary" plain :loading="refreshingPlugin" @click="refreshPlugin">
-                      关键词搜索入库
+                      {{ t('admin.plugins.keywordSearchImport') }}
                     </el-button>
                     <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
                   </div>
@@ -452,7 +453,7 @@
                   filterable
                   collapse-tags
                   clearable
-                  placeholder="搜索并选择歌单(可多选)"
+                  :placeholder="t('admin.plugins.playlistPlaceholder')"
                   style="width: 100%"
                 >
                   <el-option v-for="o in playlistOptions" :key="o.value" :label="o.label" :value="o.value" />
@@ -461,21 +462,21 @@
                 <div v-else-if="f.type === 'candidate-list'" class="candidate-list">
                   <div v-for="(item, idx) in (editConfig[f.key] || [])" :key="idx" class="candidate-row">
                     <el-select v-model="item.platform" style="width: 104px; flex: none">
-                      <el-option label="网易云" value="netease" />
-                      <el-option label="QQ音乐" value="qq" />
+                      <el-option :label="t('admin.plugins.platformNetease')" value="netease" />
+                      <el-option :label="t('admin.plugins.platformQQ')" value="qq" />
                     </el-select>
-                    <el-input v-model="item.url" placeholder="榜单 URL" style="flex: 1; min-width: 0" />
-                    <el-input v-model="item.name" placeholder="显示名(可选)" style="width: 150px; flex: none" />
+                    <el-input v-model="item.url" :placeholder="t('admin.plugins.chartUrl')" style="flex: 1; min-width: 0" />
+                    <el-input v-model="item.name" :placeholder="t('admin.plugins.chartNamePlaceholder')" style="width: 150px; flex: none" />
                     <el-button
                       circle
                       text
                       type="danger"
                       :disabled="(editConfig[f.key] || []).length <= 1"
-                      title="删除该榜单"
+                      :title="t('admin.plugins.removeChartTitle')"
                       @click="removeCandidate(f.key, idx)"
                     >✕</el-button>
                   </div>
-                  <el-button text type="primary" @click="addCandidate(f.key)">+ 添加榜单</el-button>
+                  <el-button text type="primary" @click="addCandidate(f.key)">+ {{ t('admin.plugins.addChart') }}</el-button>
                 </div>
                 <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
                 <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
@@ -500,28 +501,28 @@
 
       <!-- 操作模块:独立于配置项,只要有相关操作能力的插件都显示 -->
       <div v-if="showOperationSection" class="pd-section">
-        <h4>操作</h4>
+        <h4>{{ t('admin.plugins.operations') }}</h4>
         <el-form label-width="120px">
           <el-form-item v-if="isSourcePlugin(editing) || hasWebRotation">
-            <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">测试连接</el-button>
-            <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">立即清理</el-button>
+            <el-button v-if="isSourcePlugin(editing)" type="success" plain :loading="testing" @click="testSource">{{ t('common.testConnection') }}</el-button>
+            <el-button v-if="hasWebRotation" type="warning" plain :loading="purging" @click="purgeWebSongs">{{ t('admin.plugins.purgeNow') }}</el-button>
             <span v-if="testResult" class="test-result" :class="{ ok: testResult.success }">{{ testResult.message }}</span>
           </el-form-item>
 
           <el-form-item v-if="isRecommenderPlugin(editing)">
             <el-button type="warning" plain :loading="refreshingPlugin" @click="refreshPlugin">
-              立即刷新
+              {{ t('admin.plugins.refreshNow') }}
             </el-button>
             <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-            <span class="field-hint">强制重新生成该插件的推荐歌单(同一天也可刷新),只影响它自己的歌单</span>
+            <span class="field-hint">{{ t('admin.plugins.refreshNowHint') }}</span>
           </el-form-item>
 
           <el-form-item v-if="isCleanupPlugin(editing)">
             <el-button type="danger" plain :loading="refreshingPlugin" @click="refreshPlugin">
-              立即清理
+              {{ t('admin.plugins.purgeNow') }}
             </el-button>
             <span v-if="pluginRefreshResult" class="test-result" :class="{ ok: pluginRefreshResult.success }">{{ pluginRefreshResult.message }}</span>
-            <span class="field-hint">按配置的阈值立即清理低歌曲数歌单</span>
+            <span class="field-hint">{{ t('admin.plugins.cleanupHint') }}</span>
           </el-form-item>
         </el-form>
       </div>
@@ -531,13 +532,13 @@
         type="info"
         :closable="false"
         show-icon
-        :title="`${typeLabel(editing)}插件`"
+        :title="t('admin.plugins.pluginTypeTitle', { type: typeLabel(editing) })"
         :description="pluginHint(editing)"
       />
 
       <template #footer>
-        <el-button @click="showConfigDialog = false">关闭</el-button>
-        <el-button v-if="canSaveConfig && configFields.length > 0" type="primary" :loading="saving" @click="() => saveConfig()">保存配置</el-button>
+        <el-button @click="showConfigDialog = false">{{ t('common.close') }}</el-button>
+        <el-button v-if="canSaveConfig && configFields.length > 0" type="primary" :loading="saving" @click="() => saveConfig()">{{ t('admin.plugins.saveConfig') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -545,12 +546,15 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api, { formatApiError } from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { parseManifest, parseConfig } from "@/utils/plugin";
+import { resolveField, localName, localDesc, resolvePluginI18n } from "@/utils/pluginI18n";
 
+const { t } = useI18n();
 const activeTab = ref<"installed" | "market" | "media">("installed");
 
 // 移动端(≤768)把 el-table 切换为卡片列表,避免横向滚动(见 frontend-responsive CI 守卫)。
@@ -609,21 +613,27 @@ const savingMedia = ref(false);
 // ---- health ----
 const healthMap = ref<Record<string, any>>({});
 
-/** Config fields rendered in the dialog — driven by the plugin manifest. */
-const configFields = computed<any[]>(() => parseManifest(editing.value).configSchema || []);
+/** Config fields rendered in the dialog — driven by the plugin manifest.
+ *  若 manifest 声明了 i18n 字典,按当前语言覆盖字段 label/help/options。 */
+const configFields = computed<any[]>(() => {
+  const m = parseManifest(editing.value);
+  return (m.configSchema || []).map((f: any) => resolveField(m, f));
+});
 
-/** 按 group 字段分组的配置项,每组渲染为带标题的模块框。无 group 的字段归入"其他"。 */
+/** 按 group 字段分组的配置项,每组渲染为带标题的模块框。无 group 的字段归入"其他"。
+ *  分组标题优先取插件 dict 覆盖,其次核心内置分组翻译,最后回退分组名。 */
 const groupedConfigFields = computed(() => {
   const groups: Record<string, any[]> = {};
   const groupOrder = ['schedule', 'batch', 'backend', 'recommend', 'keyword', 'frontend'];
   const groupLabels: Record<string, string> = {
-    schedule: '定时同步',
-    batch: '批量执行',
-    backend: '后端配置',
-    recommend: '首页推荐',
-    keyword: '关键词自动入库',
-    frontend: '前端显示',
+    schedule: t('admin.plugins.group.schedule'),
+    batch: t('admin.plugins.group.batch'),
+    backend: t('admin.plugins.group.backend'),
+    recommend: t('admin.plugins.group.recommend'),
+    keyword: t('admin.plugins.group.keyword'),
+    frontend: t('admin.plugins.group.frontend'),
   };
+  const dictGroups = resolvePluginI18n(parseManifest(editing.value)).groupLabels;
   for (const f of configFields.value) {
     const g = f.group || '_ungrouped';
     if (!groups[g]) groups[g] = [];
@@ -632,13 +642,13 @@ const groupedConfigFields = computed(() => {
   const result: any[] = [];
   for (const k of groupOrder) {
     if (groups[k]) {
-      result.push({ key: k, label: groupLabels[k] || k, fields: groups[k] });
+      result.push({ key: k, label: dictGroups[k] || groupLabels[k] || k, fields: groups[k] });
       delete groups[k];
     }
   }
   // 剩余未识别的 group 和未分组字段
   for (const k of Object.keys(groups).sort()) {
-    result.push({ key: k, label: k === '_ungrouped' ? '其他' : k, fields: groups[k] });
+    result.push({ key: k, label: k === '_ungrouped' ? t('admin.plugins.group.other') : dictGroups[k] || k, fields: groups[k] });
   }
   return result;
 });
@@ -685,7 +695,7 @@ const coverProviderPlugins = computed<any[]>(() =>
   plugins.value.filter((p) => (parseManifest(p).capabilities || []).includes("coverProvider")),
 );
 function providerLabel(p: any): string {
-  return `${displayName(p)}${p.enabled ? "" : "（已停用）"}`;
+  return `${displayName(p)}${p.enabled ? "" : t('admin.plugins.providerDisabled')}`;
 }
 
 function isSourcePlugin(plugin: any) {
@@ -768,9 +778,9 @@ async function refreshPlugin() {
   try {
     const res = await api.post("/rest/api/v1/recommend/refresh", { pluginId, keywordOnly: true });
     const d = res.data || {};
-    if (!d.success) { finish({ success: false, message: d.error || "刷新失败" }); return; }
-    if (!d.started && !d.alreadyRunning) { finish({ success: true, message: "刷新完成" }); return; }
-    finish({ success: true, message: d.alreadyRunning ? "任务已在后台运行,等待完成…" : "已开始后台刷新,等待完成…" });
+    if (!d.success) { finish({ success: false, message: d.error || t('admin.plugins.refreshFailed') }); return; }
+    if (!d.started && !d.alreadyRunning) { finish({ success: true, message: t('admin.plugins.refreshDone') }); return; }
+    finish({ success: true, message: d.alreadyRunning ? t('admin.plugins.refreshRunningQueued') : t('admin.plugins.refreshRunningStarted') });
     // 轮询任务状态(每 2s,上限 6 分钟;超过则提示仍在后台运行)
     let elapsed = 0;
     const POLL_MS = 2000;
@@ -780,26 +790,33 @@ async function refreshPlugin() {
         const st = await api.get(`/rest/api/v1/plugins/${pluginId}/job`, { timeout: 10000 });
         const job = st.data?.job;
         if (job?.status === "ok") {
-          finish({ success: true, message: job.summary ? String(job.summary) : "刷新完成" });
+          finish({ success: true, message: job.summary ? String(job.summary) : t('admin.plugins.refreshDone') });
         } else if (job?.status === "error") {
           const err = job.sandboxCode
-            ? `[${job.sandboxCode}] ${String(job.error || "刷新失败")}${job.hint ? "。" + String(job.hint) : ""}`
-            : String(job.error || "刷新失败");
+            ? `[${job.sandboxCode}] ${String(job.error || t('admin.plugins.refreshFailed'))}${job.hint ? t('admin.plugins.periodDot') + String(job.hint) : ""}`
+            : String(job.error || t('admin.plugins.refreshFailed'));
           finish({ success: false, message: err });
         } else if (elapsed >= MAX_POLL_MS) {
-          finish({ success: true, message: "任务仍在后台运行中,稍后可在插件页查看结果" });
+          finish({ success: true, message: t('admin.plugins.refreshStillRunning') });
         }
       } catch { /* 单次轮询失败忽略,下一轮再试 */ }
     };
     pluginJobPollTimer = setInterval(() => { elapsed += POLL_MS; poll().catch(() => {}); }, POLL_MS);
   } catch (e: any) {
-    finish({ success: false, message: formatApiError(e, "刷新失败") });
+    finish({ success: false, message: formatApiError(e, t('admin.plugins.refreshFailed')) });
   }
 }
 
-/** Manifest display name, falling back to the stored row name (= plugin id). */
+/** Manifest display name, falling back to the stored row name (= plugin id).
+ *  若 manifest 声明了 i18n 字典,按当前界面语言取本地化名字。 */
 function displayName(plugin: any): string {
-  return parseManifest(plugin).name || plugin?.name || "";
+  const name = parseManifest(plugin).name || plugin?.name || "";
+  return localName(parseManifest(plugin), name);
+}
+
+/** Manifest 简介文案(按字典本地化,未覆盖回退默认)。 */
+function displayDesc(plugin: any): string {
+  return localDesc(parseManifest(plugin), parseManifest(plugin).description || plugin?.description || "");
 }
 
 /** core 内置行为插件(同曲多源组 / 播放优选等):列表状态开关 = 总开关(整体启停,
@@ -822,15 +839,15 @@ const canSaveConfig = computed(() => !!editing.value && editing.value.installed 
 // Plugin taxonomy — labels only. The backend decides what each type can do via
 // manifest capabilities; the UI just renders whatever it declares.
 const TYPE_LABELS: Record<string, string> = {
-  source: "在线源",
-  importer: "歌单导入",
-  recommender: "推荐",
-  sync: "同步",
-  lyrics: "歌词",
-  cover: "封面",
-  renderer: "设备投屏",
-  scrobbler: "播放上报",
-  core: "内置核心",
+  source: t('admin.plugins.type.source'),
+  importer: t('admin.plugins.type.importer'),
+  recommender: t('admin.plugins.type.recommender'),
+  sync: t('admin.plugins.type.sync'),
+  lyrics: t('admin.plugins.type.lyrics'),
+  cover: t('admin.plugins.type.cover'),
+  renderer: t('admin.plugins.type.renderer'),
+  scrobbler: t('admin.plugins.type.scrobbler'),
+  core: t('admin.plugins.type.core'),
 };
 const TYPE_COLORS: Record<string, string> = {
   source: "primary",
@@ -844,66 +861,66 @@ const TYPE_COLORS: Record<string, string> = {
   core: "warning",
 };
 const CAP_LABELS: Record<string, string> = {
-  search: "在线搜索",
-  recommend: "平台推荐歌单",
-  playlistSongs: "远程歌单曲目",
-  stream: "音频流",
-  lyrics: "在线歌词",
-  webRotation: "在线歌曲轮换清理",
-  playlistImport: "分享链接导入",
-  playlistFile: "歌单文件导入",
-  dailyPlaylist: "每日歌单生成",
-  localPlaylist: "本地推荐生成",
-  comboPlaylist: "组合歌单生成",
-  recommendPlaylist: "推荐歌单生成",
-  localPlatformRecommend: "平台榜单入库",
-  playlistSync: "歌单定时同步",
-  autoMatch: "条目自动匹配",
-  lyricProvider: "歌词提供方",
-  coverProvider: "封面提供方",
-  renderer: "设备投屏",
-  scrobbler: "播放上报",
-  songGroup: "同曲多源组",
-  playPreference: "播放优选",
+  search: t('admin.plugins.cap.search'),
+  recommend: t('admin.plugins.cap.recommend'),
+  playlistSongs: t('admin.plugins.cap.playlistSongs'),
+  stream: t('admin.plugins.cap.stream'),
+  lyrics: t('admin.plugins.cap.lyrics'),
+  webRotation: t('admin.plugins.cap.webRotation'),
+  playlistImport: t('admin.plugins.cap.playlistImport'),
+  playlistFile: t('admin.plugins.cap.playlistFile'),
+  dailyPlaylist: t('admin.plugins.cap.dailyPlaylist'),
+  localPlaylist: t('admin.plugins.cap.localPlaylist'),
+  comboPlaylist: t('admin.plugins.cap.comboPlaylist'),
+  recommendPlaylist: t('admin.plugins.cap.recommendPlaylist'),
+  localPlatformRecommend: t('admin.plugins.cap.localPlatformRecommend'),
+  playlistSync: t('admin.plugins.cap.playlistSync'),
+  autoMatch: t('admin.plugins.cap.autoMatch'),
+  lyricProvider: t('admin.plugins.cap.lyricProvider'),
+  coverProvider: t('admin.plugins.cap.coverProvider'),
+  renderer: t('admin.plugins.cap.renderer'),
+  scrobbler: t('admin.plugins.cap.scrobbler'),
+  songGroup: t('admin.plugins.cap.songGroup'),
+  playPreference: t('admin.plugins.cap.playPreference'),
 };
 const PERM_LABELS: Record<string, string> = {
-  log: "日志",
-  storage: "存储",
-  net: "网络",
-  command: "命令",
-  fs: "文件系统",
-  "fs:music": "音乐目录",
-  "fs:external": "外部目录",
-  "songs:read": "读取歌曲",
-  "songs:write": "写入歌曲",
-  "playlists:read": "读取歌单",
-  "playlists:write": "写入歌单",
-  "inter-plugin": "插件间通信",
+  log: t('admin.plugins.perm.log'),
+  storage: t('admin.plugins.perm.storage'),
+  net: t('admin.plugins.perm.net'),
+  command: t('admin.plugins.perm.command'),
+  fs: t('admin.plugins.perm.fs'),
+  "fs:music": t('admin.plugins.perm.fsMusic'),
+  "fs:external": t('admin.plugins.perm.fsExternal'),
+  "songs:read": t('admin.plugins.perm.songsRead'),
+  "songs:write": t('admin.plugins.perm.songsWrite'),
+  "playlists:read": t('admin.plugins.perm.playlistsRead'),
+  "playlists:write": t('admin.plugins.perm.playlistsWrite'),
+  "inter-plugin": t('admin.plugins.perm.interPlugin'),
 };
 
 // 能力 → 处理逻辑说明(详情页在插件未提供 documentation 时按能力自动生成)
 const CAP_DOCS: Record<string, string> = {
-  search: "向在线源发起歌曲搜索并返回结果",
-  recommend: "生成平台每日推荐歌单并同步到本地",
-  playlistSongs: "拉取单个远程歌单的曲目列表",
-  stream: "构造歌曲的音频流地址供播放器拉流",
-  lyrics: "提供在线歌词（逐字/逐行）",
-  webRotation: "定期清理过期的在线歌曲（每日推荐轮换）",
-  playlistImport: "认领分享链接并解析成可导入的歌单",
-  playlistFile: "认领上传的歌单文件并解析",
-  dailyPlaylist: "每天定时生成「每日推荐」歌单",
-  localPlaylist: "基于播放历史与收藏口味生成本地推荐",
-  comboPlaylist: "合并其他推荐歌单生成组合歌单(如 今日漫游)",
-  recommendPlaylist: "定期生成/刷新插件自己的推荐歌单(可固定首页、手动刷新)",
-  localPlatformRecommend: "抓取平台官方榜单(QQ/网易云/酷狗等)并同步到本地库(可手动刷新)",
-  playlistSync: "定期重新拉取已导入的远程歌单",
-  autoMatch: "把歌单条目自动匹配到曲库或在线源",
-  lyricProvider: "提供在线歌词的源",
-  coverProvider: "提供在线封面的源",
-  renderer: "投屏到局域网播放设备（DLNA 等）",
-  scrobbler: "把播放事件上报到 Last.fm / ListenBrainz 等",
-  songGroup: "把同一首歌的多个来源(本地/WebDAV/在线平台)按标题+歌手+专辑+时长秒级归为一组,各端自动合并展示",
-  playPreference: "播放自动优选组内 local/WebDAV 核心曲库源(无损优先),Local 不可用时自动回退平台源",
+  search: t('admin.plugins.capDoc.search'),
+  recommend: t('admin.plugins.capDoc.recommend'),
+  playlistSongs: t('admin.plugins.capDoc.playlistSongs'),
+  stream: t('admin.plugins.capDoc.stream'),
+  lyrics: t('admin.plugins.capDoc.lyrics'),
+  webRotation: t('admin.plugins.capDoc.webRotation'),
+  playlistImport: t('admin.plugins.capDoc.playlistImport'),
+  playlistFile: t('admin.plugins.capDoc.playlistFile'),
+  dailyPlaylist: t('admin.plugins.capDoc.dailyPlaylist'),
+  localPlaylist: t('admin.plugins.capDoc.localPlaylist'),
+  comboPlaylist: t('admin.plugins.capDoc.comboPlaylist'),
+  recommendPlaylist: t('admin.plugins.capDoc.recommendPlaylist'),
+  localPlatformRecommend: t('admin.plugins.capDoc.localPlatformRecommend'),
+  playlistSync: t('admin.plugins.capDoc.playlistSync'),
+  autoMatch: t('admin.plugins.capDoc.autoMatch'),
+  lyricProvider: t('admin.plugins.capDoc.lyricProvider'),
+  coverProvider: t('admin.plugins.capDoc.coverProvider'),
+  renderer: t('admin.plugins.capDoc.renderer'),
+  scrobbler: t('admin.plugins.capDoc.scrobbler'),
+  songGroup: t('admin.plugins.capDoc.songGroup'),
+  playPreference: t('admin.plugins.capDoc.playPreference'),
 };
 
 // 极简 markdown 渲染（文档为受控内容,先转义再套标签,防 XSS）
@@ -932,12 +949,12 @@ function renderMarkdown(md: string): string {
 }
 
 function capDoc(cap: string): string {
-  return CAP_DOCS[cap] || "参与对应能力的工作流";
+  return t(CAP_DOCS[cap] || 'admin.plugins.capDoc.fallback');
 }
 
 function typeLabel(plugin: any): string {
-  const t = parseManifest(plugin).type;
-  return TYPE_LABELS[t] || t || "未知";
+  const ty = parseManifest(plugin).type;
+  return t(TYPE_LABELS[ty] || ty || 'admin.plugins.typeUnknown');
 }
 
 function typeTagColor(plugin: any): any {
@@ -961,11 +978,11 @@ function platformList(plugin: any): { slug: string; label: string }[] {
 }
 
 function capLabel(cap: string): string {
-  return CAP_LABELS[cap] || cap;
+  return t(CAP_LABELS[cap] || cap);
 }
 
 function permLabel(perm: string): string {
-  return PERM_LABELS[perm] || perm;
+  return t(PERM_LABELS[perm] || perm);
 }
 
 // Health status -> tag color / label.
@@ -978,24 +995,32 @@ function healthType(id: string): any {
 }
 function healthLabel(id: string): string {
   const s: string = healthMap.value[id]?.status || "none";
-  return ({ green: "正常", yellow: "波动", red: "异常", down: "离线", unknown: "未知", none: "未监控" } as Record<string, string>)[s] || "未监控";
+  const key: Record<string, string> = {
+    green: 'admin.plugins.health.green',
+    yellow: 'admin.plugins.health.yellow',
+    red: 'admin.plugins.health.red',
+    down: 'admin.plugins.health.down',
+    unknown: 'admin.plugins.health.unknown',
+    none: 'admin.plugins.health.none',
+  };
+  return t(key[s] || 'admin.plugins.health.none');
 }
 
 const TYPE_HINTS: Record<string, string> = {
-  source: "填写在线源服务地址后,即可在「在线音乐搜索」中搜索并导入为在线歌曲。",
-  importer: "停用后,对应平台的歌单分享链接 / 歌单文件将无法导入。",
-  recommender: "停用后,不再自动生成对应的推荐歌单。",
-  sync: "停用后,不再自动重新拉取已开启同步的歌单(手动同步仍可用)。",
-  lyrics: "作为歌词提供方参与「能力优先」调度,首个可用方胜出。",
-  cover: "作为封面提供方参与「能力优先」调度,首个可用方胜出。",
-  renderer: "提供 DLNA / 设备投屏能力,可在播放器中选择设备投放。",
-  scrobbler: "在播放 / 记录事件时上报到外部服务(如 Last.fm)。",
-  core: "服务端内置行为插件,默认启用。列表状态开关可整体启停(总开关),功能子开关(多源组匹配规则 / 播放优选 preferLocal 等)在插件「配置」弹窗中调整,两层叠加控制。",
+  source: t('admin.plugins.typeHint.source'),
+  importer: t('admin.plugins.typeHint.importer'),
+  recommender: t('admin.plugins.typeHint.recommender'),
+  sync: t('admin.plugins.typeHint.sync'),
+  lyrics: t('admin.plugins.typeHint.lyrics'),
+  cover: t('admin.plugins.typeHint.cover'),
+  renderer: t('admin.plugins.typeHint.renderer'),
+  scrobbler: t('admin.plugins.typeHint.scrobbler'),
+  core: t('admin.plugins.typeHint.core'),
 };
 
 function pluginHint(plugin: any): string {
   const m = parseManifest(plugin);
-  const extra = hasConfig(plugin) ? "" : "该插件无需额外配置,用开关启用/停用即可。";
+  const extra = hasConfig(plugin) ? "" : t('admin.plugins.noConfigHint');
   return [m.description, TYPE_HINTS[m.type], extra].filter(Boolean).join(" ");
 }
 
@@ -1044,7 +1069,7 @@ async function loadHealth() {
 
 async function togglePlugin(plugin: any) {
   await api.put(`/rest/api/v1/plugins/${plugin.id}/toggle`);
-  ElMessage.success("已更新");
+  ElMessage.success(t('common.updated'));
   loadHealth();
 }
 
@@ -1087,21 +1112,21 @@ function installKey(row: any): string {
 async function confirmDelete(row: any) {
   try {
     await ElMessageBox.confirm(
-      `删除「${displayName(row)}」后将移除其插件文件与记录,确定删除吗?`,
-      "删除插件",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+      t('admin.plugins.deleteConfirm', { name: displayName(row) }),
+      t('admin.plugins.deleteTitle'),
+      { type: "warning", confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') },
     );
   } catch {
     return; // 用户取消
   }
   try {
     await api.delete(`/rest/api/v1/plugins/${row.id}`);
-    ElMessage.success("已删除");
+    ElMessage.success(t('common.deleted'));
     loadPlugins();
     loadHealth();
     loadMarketplace();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "删除失败");
+    ElMessage.error(e?.response?.data?.error || t('common.deleteFailed'));
   }
 }
 
@@ -1148,9 +1173,9 @@ async function testSource() {
   try {
     await saveConfig({ silent: true });
     const res = await api.post(`/rest/api/v1/online/${providerId(editing.value)}/test`, {});
-    testResult.value = { success: res.data.success, message: res.data.message || res.data.error || "未知结果" };
+    testResult.value = { success: res.data.success, message: res.data.message || res.data.error || t('admin.plugins.unknownResult') };
   } catch (e: any) {
-    testResult.value = { success: false, message: e?.response?.data?.error || e.message || "连接失败" };
+    testResult.value = { success: false, message: e?.response?.data?.error || e.message || t('admin.plugins.connectionFailed') };
   } finally {
     testing.value = false;
   }
@@ -1174,7 +1199,7 @@ async function saveConfig(opts?: { silent?: boolean }) {
             name: (c.name || "").trim() || undefined,
           }));
         if (cleaned.length === 0) {
-          ElMessage.error("推荐榜单至少需要保留 1 个有效榜单");
+          ElMessage.error(t('admin.plugins.candidateRequired'));
           saving.value = false;
           return;
         }
@@ -1184,12 +1209,12 @@ async function saveConfig(opts?: { silent?: boolean }) {
     }
     await api.put(`/rest/api/v1/plugins/${editing.value.id}`, { config: cfg });
     if (!opts?.silent) {
-      ElMessage.success("已保存");
+      ElMessage.success(t('common.saveSuccess'));
       showConfigDialog.value = false;
       loadPlugins();
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "保存失败");
+    ElMessage.error(e?.response?.data?.error || t('common.saveFailed'));
   } finally {
     saving.value = false;
   }
@@ -1197,14 +1222,14 @@ async function saveConfig(opts?: { silent?: boolean }) {
 
 async function addPlugin() {
   if (!newPlugin.name) {
-    ElMessage.warning("请输入插件名称");
+    ElMessage.warning(t('admin.plugins.nameRequired'));
     return;
   }
   await api.post("/rest/api/v1/plugins", newPlugin);
   showAddDialog.value = false;
   newPlugin.name = "";
   newPlugin.description = "";
-  ElMessage.success("添加成功");
+  ElMessage.success(t('common.addSuccess'));
   loadPlugins();
 }
 
@@ -1216,15 +1241,15 @@ async function purgeWebSongs() {
     const res = await api.post(`/rest/api/v1/online/${providerId(editing.value)}/purge-web-songs`, {});
     if (res.data.success) {
       if (res.data.mode === "rotate") {
-        ElMessage.success(`已清理 ${res.data.purged} 首歌曲,${res.data.covers} 张封面`);
+        ElMessage.success(t('admin.plugins.purgeDone', { songs: res.data.purged, covers: res.data.covers }));
       } else {
-        ElMessage.info("当前为「永不过期」模式,未清理任何歌曲");
+        ElMessage.info(t('admin.plugins.purgeSkipNoExpiry'));
       }
     } else {
-      ElMessage.warning(res.data.error || "清理失败");
+      ElMessage.warning(res.data.error || t('admin.plugins.purgeFailed'));
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || e.message || "清理失败");
+    ElMessage.error(e?.response?.data?.error || e.message || t('admin.plugins.purgeFailed'));
   } finally {
     purging.value = false;
   }
@@ -1246,7 +1271,7 @@ async function saveMediaSettings(kind: "lyrics" | "covers"): Promise<boolean> {
     await api.put(`/rest/api/v1/${kind}/settings`, { providerId: s.providerId, onDemand: s.onDemand, persist: s.persist });
     return true;
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "设置保存失败");
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.mediaSaveFailed'));
     return false;
   }
 }
@@ -1256,7 +1281,7 @@ async function saveAllMedia() {
   savingMedia.value = true;
   const [a, b] = await Promise.all([saveMediaSettings("lyrics"), saveMediaSettings("covers")]);
   savingMedia.value = false;
-  if (a && b) ElMessage.success("已保存媒体获取设置");
+  if (a && b) ElMessage.success(t('admin.plugins.mediaSaved'));
 }
 
 async function startBackfill(kind: "lyrics" | "covers") {
@@ -1267,13 +1292,13 @@ async function startBackfill(kind: "lyrics" | "covers") {
     if (res.data.running) {
       st.running = true;
       if (res.data.total !== undefined) st.total = res.data.total;
-      ElMessage.success(`开始补全,共 ${st.total} 首缺${kind === "lyrics" ? "歌词" : "封面"}的歌曲`);
+      ElMessage.success(t('admin.plugins.backfillStarted', { total: st.total, kind: kind === "lyrics" ? t('admin.plugins.kindLyrics') : t('admin.plugins.kindCovers') }));
       pollBackfill(kind);
     } else if (res.data.accepted === false && res.data.error) {
       ElMessage.error(res.data.error);
     }
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "启动补全失败");
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.backfillStartFailed'));
   }
 }
 
@@ -1286,7 +1311,7 @@ function pollBackfill(kind: "lyrics" | "covers") {
       if (!res.data?.running) {
         window.clearInterval(timer);
         st.running = false;
-        ElMessage.success(`补全完成:成功 ${st.ok},失败 ${st.fail}${st.skipped ? `,跳过 ${st.skipped}` : ""}`);
+        ElMessage.success(t('admin.plugins.backfillDone', { ok: st.ok, fail: st.fail, skipped: st.skipped || 0 }));
       }
     } catch {
       window.clearInterval(timer);
@@ -1297,10 +1322,10 @@ function pollBackfill(kind: "lyrics" | "covers") {
 
 function backfillText(kind: "lyrics" | "covers"): string {
   const st = kind === "lyrics" ? lyricsBackfill : coversBackfill;
-  let t = `已处理 ${st.done}/${st.total},成功 ${st.ok},失败 ${st.fail}`;
-  if (st.skipped) t += `,跳过 ${st.skipped}`;
-  t += st.running ? ",进行中…" : ",已完成";
-  return t;
+  let tOut = t('admin.plugins.backfillProgress', { done: st.done, total: st.total, ok: st.ok, fail: st.fail });
+  if (st.skipped) tOut += t('admin.plugins.backfillSkipped', { skipped: st.skipped });
+  tOut += st.running ? t('admin.plugins.backfillRunning') : t('admin.plugins.backfillFinished');
+  return tOut;
 }
 
 // ---- marketplace ----
@@ -1311,7 +1336,7 @@ async function loadMarketplace() {
     registries.value = res.data?.registries || [];
     marketPlugins.value = res.data?.plugins || [];
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "拉取插件市场失败");
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.marketLoadFailed'));
     registries.value = [];
     marketPlugins.value = [];
   } finally {
@@ -1321,7 +1346,7 @@ async function loadMarketplace() {
 
 async function addRegistry() {
   if (!/^https?:\/\//.test(newRegistryUrl.value)) {
-    ElMessage.warning("注册表 URL 必须是 http(s) 链接");
+    ElMessage.warning(t('admin.plugins.registryUrlInvalid'));
     return;
   }
   addingReg.value = true;
@@ -1329,10 +1354,10 @@ async function addRegistry() {
     await api.post("/rest/api/v1/plugins/registry", { url: newRegistryUrl.value });
     newRegistryUrl.value = "";
     showRegDialog.value = false;
-    ElMessage.success("已添加");
+    ElMessage.success(t('admin.plugins.added'));
     loadMarketplace();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "添加失败");
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.addFailed'));
   } finally {
     addingReg.value = false;
   }
@@ -1341,10 +1366,10 @@ async function addRegistry() {
 async function removeRegistry(row: any) {
   try {
     await api.delete(`/rest/api/v1/plugins/registry/${row.id}`);
-    ElMessage.success("已删除");
+    ElMessage.success(t('common.deleted'));
     loadMarketplace();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "删除失败");
+    ElMessage.error(e?.response?.data?.error || t('common.deleteFailed'));
   }
 }
 
@@ -1353,12 +1378,12 @@ async function installPlugin(row: any) {
   installing.value = key;
   try {
     await api.post("/rest/api/v1/plugins/registry/install", { downloadUrl: row.downloadUrl || row.url });
-    ElMessage.success(`已安装 ${row.name}`);
+    ElMessage.success(t('admin.plugins.installed', { name: row.name }));
     loadMarketplace();
     loadPlugins();
     loadHealth();
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || "安装失败");
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.installFailed'));
   } finally {
     installing.value = "";
   }

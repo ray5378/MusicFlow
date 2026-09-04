@@ -6,7 +6,7 @@
     <div class="content-aurora" :class="pageTheme" aria-hidden="true"></div>
     <!-- ===== Mobile top bar ===== -->
     <header class="mobile-header" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
-      <button type="button" class="mobile-hamburger" aria-label="菜单" @click="mobileNavOpen = !mobileNavOpen">
+      <button type="button" class="mobile-hamburger" :aria-label="t('layout.menu')" @click="mobileNavOpen = !mobileNavOpen">
         <MfIcon name="Menu" :size="22"  />
       </button>
       <img src="/favicon.png" loading="lazy" decoding="async" alt="MusicFlow" class="mobile-brand-logo" @click="mobileNavOpen = false" />
@@ -25,28 +25,28 @@
         <span v-if="!sidebarCollapsed || isMobile" class="logo-text">MusicFlow</span>
       </div>
       <el-menu :default-active="activeMenu" :collapse="!isMobile && sidebarCollapsed" router class="sidebar-menu" @select="closeMobileNav">
-        <el-menu-item index="/"><MfIcon name="Home" /><template #title>首页</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.PLAYLIST_VIEW)" index="/playlists"><MfIcon name="List" /><template #title>歌单</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/songs"><MfIcon name="Headphones" /><template #title>音乐</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/artists"><MfIcon name="User" /><template #title>艺术家</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/albums"><MfIcon name="Disc3" /><template #title>专辑</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.FAVORITES_MANAGE)" index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>我喜欢</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/genres"><MfIcon name="Library" /><template #title>风格</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups"><MfIcon name="Speaker" /><template #title>播放器</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>音流</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>播放历史</template></el-menu-item>
+        <el-menu-item index="/"><MfIcon name="Home" /><template #title>{{ t('layout.home') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.PLAYLIST_VIEW)" index="/playlists"><MfIcon name="List" /><template #title>{{ t('layout.playlists') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/songs"><MfIcon name="Headphones" /><template #title>{{ t('layout.music') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/artists"><MfIcon name="User" /><template #title>{{ t('layout.artists') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/albums"><MfIcon name="Disc3" /><template #title>{{ t('layout.albums') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.FAVORITES_MANAGE)" index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>{{ t('layout.favorites') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/genres"><MfIcon name="Library" /><template #title>{{ t('layout.genres') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups"><MfIcon name="Speaker" /><template #title>{{ t('layout.players') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>{{ t('layout.flows') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>{{ t('layout.playHistory') }}</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>插件管理</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>媒体源</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><MfIcon name="User" /><template #title>用户管理</template></el-menu-item>
-        <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>系统设置</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>{{ t('layout.mediaSources') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><MfIcon name="User" /><template #title>{{ t('layout.userManage') }}</template></el-menu-item>
+        <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>{{ t('layout.systemSettings') }}</template></el-menu-item>
       </el-menu>
       <div class="sidebar-footer">
         <el-dropdown @command="handleCommand">
           <span class="user-info"><MfIcon name="User" /><span v-if="!sidebarCollapsed || isMobile">{{ authStore.username }}</span></span>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="logout">登出</el-dropdown-item>
+              <el-dropdown-item command="logout">{{ t('layout.logout') }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -61,12 +61,12 @@
     <transition name="fade">
     <aside v-if="isMobile && controlsDrawerOpen" class="sidebar mobile" :class="{ 'mobile-open': isMobile && controlsDrawerOpen }">
       <div class="logo controls-logo">
-        <span class="logo-text">播放控制</span>
+        <span class="logo-text">{{ t('layout.playControls') }}</span>
       </div>
       <div class="controls-scroll">
         <!-- 选择播放器 -->
         <div class="csec">
-          <div class="ctitle">选择播放器</div>
+          <div class="ctitle">{{ t('layout.selectPlayer') }}</div>
           <div class="controls-peer-list">
             <div
               v-for="p in playerStore.peers"
@@ -78,28 +78,28 @@
               <MfIcon name="Speaker" class="controls-peer-icon" />
               <div class="controls-peer-info">
                 <div class="controls-peer-name">
-                  {{ p.kind === 'local' ? '本机' : p.name }}
-                  <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? '群组' : 'DLNA' }}</span>
-                  <span v-if="!p.available" class="controls-peer-offline">离线</span>
+                  {{ p.kind === 'local' ? t('layout.localPeer') : p.name }}
+                  <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : 'DLNA' }}</span>
+                  <span v-if="!p.available" class="controls-peer-offline">{{ t('layout.offline') }}</span>
                 </div>
                 <div class="controls-peer-meta">
                   <span v-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
-                    {{ p.queue.total ?? p.queue.items?.length }} 首
+                    {{ p.queue.total ?? p.queue.items?.length }} {{ t('layout.tracksUnit') }}
                     <span v-if="p.queue.isActive">
-                      · 播放中
+                      · {{ t('layout.playing') }}
                       <span v-if="peerPlayingTitle(p)" class="controls-playing-title">· {{ peerPlayingTitle(p) }}</span>
                     </span>
                   </span>
-                  <span v-else>空闲</span>
+                  <span v-else>{{ t('layout.idle') }}</span>
                 </div>
               </div>
               <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId" class="controls-peer-check" />
             </div>
-            <div v-if="playerStore.peers.length === 0" class="controls-peer-empty">暂无可用播放器</div>
+            <div v-if="playerStore.peers.length === 0" class="controls-peer-empty">{{ t('layout.noPeerAvailable') }}</div>
           </div>
           <div class="controls-scan">
             <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
-              <MfIcon name="RefreshCw" />重新扫描播放器
+              <MfIcon name="RefreshCw" />{{ t('layout.rescanPlayer') }}
             </el-button>
           </div>
         </div>
@@ -129,16 +129,16 @@
 
         <!-- 工具：添加到歌单、喜欢、音量 -->
         <div class="csec ctools">
-          <el-tooltip content="添加到歌单" placement="top">
+          <el-tooltip :content="t('layout.addToPlaylist')" placement="top">
             <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
           </el-tooltip>
-          <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
+          <el-tooltip :content="isCurrentFavorite ? t('layout.unlike') : t('layout.favoritesMusic')" placement="top">
             <el-button circle size="small" class="fav-btn" :class="{ active: isCurrentFavorite }" @click="toggleCurrentFavorite">
               <MfIcon name="Heart" :filled="isCurrentFavorite" :size="16" />
             </el-button>
           </el-tooltip>
           <div class="cvolume">
-            <span class="cvol-label">音量</span>
+            <span class="cvol-label">{{ t('layout.volume') }}</span>
             <el-slider
               :model-value="playerStore.volume * 100"
               @input="(v: number | number[]) => playerStore.setVolume((Array.isArray(v) ? v[0] : v) / 100)"
@@ -174,10 +174,10 @@
         <div v-else class="mp-cover-ph"><MfIcon name="Headphones" :size="20"  /></div>
       </div>
       <div class="mp-info" @click="playerStore.togglePlayMode">
-        <div class="mp-title">{{ playerStore.currentSong ? playerStore.currentSong.title : '未在播放' }}</div>
+        <div class="mp-title">{{ playerStore.currentSong ? playerStore.currentSong.title : t('layout.notPlaying') }}</div>
         <div class="mp-artist">
           <span v-if="playerStore.currentLyricLine" class="mp-lyric">{{ playerStore.currentLyricLine }}</span>
-          <span v-else>{{ playerStore.currentSong ? playerStore.currentSong.artist : '选择一首歌曲开始播放' }}</span>
+          <span v-else>{{ playerStore.currentSong ? playerStore.currentSong.artist : t('layout.selectSongToPlay') }}</span>
         </div>
       </div>
       <div class="mp-controls">
@@ -186,7 +186,7 @@
           <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="24" />
         </button>
         <button type="button" class="mp-btn" @click="playerStore.next"><MfIcon name="SkipForward" :size="18" /></button>
-        <button type="button" class="mp-btn" :class="{ active: controlsDrawerOpen }" @click="controlsDrawerOpen = !controlsDrawerOpen" title="播放控制">
+        <button type="button" class="mp-btn" :class="{ active: controlsDrawerOpen }" @click="controlsDrawerOpen = !controlsDrawerOpen" :title="t('layout.playControls')">
           <MfIcon name="Headphones" :size="18" />
         </button>
       </div>
@@ -206,7 +206,7 @@
             </div>
           </div>
         </div>
-        <div class="np-progress-thin" title="拖动以定位播放进度">
+        <div class="np-progress-thin" :title="t('layout.dragToSeek')">
           <div class="np-progress-line">
             <div class="np-progress-fill" :style="{ width: playerStore.progress + '%' }"></div>
           </div>
@@ -221,8 +221,8 @@
         <div class="np-main">
           <div class="player-cover-placeholder"><MfIcon name="Headphones" :size="24"  /></div>
           <div class="player-song-info">
-            <div class="player-title player-title-empty">未在播放</div>
-            <div class="player-artist">选择一首歌曲开始播放</div>
+            <div class="player-title player-title-empty">{{ t('layout.notPlaying') }}</div>
+            <div class="player-artist">{{ t('layout.selectSongToPlay') }}</div>
           </div>
         </div>
       </div>
@@ -233,15 +233,15 @@
               <MfIcon :name="playModeIconName" :size="16" />
             </el-button>
           </el-tooltip>
-          <el-tooltip content="上一首" placement="top">
+          <el-tooltip :content="t('layout.prevTrack')" placement="top">
             <el-button circle @click="playerStore.prev" class="ctrl-btn"><MfIcon name="SkipBack" :size="20" /></el-button>
           </el-tooltip>
-          <el-tooltip :content="playerStore.isPlaying ? '暂停' : '播放'" placement="top">
+          <el-tooltip :content="playerStore.isPlaying ? t('layout.pause') : t('layout.play')" placement="top">
             <el-button circle @click="playerStore.togglePlay" type="primary" class="ctrl-btn play-btn">
               <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="26" />
             </el-button>
           </el-tooltip>
-          <el-tooltip content="下一首" placement="top">
+          <el-tooltip :content="t('layout.nextTrack')" placement="top">
             <el-button circle @click="playerStore.next" class="ctrl-btn"><MfIcon name="SkipForward" :size="20" /></el-button>
           </el-tooltip>
         </div>
@@ -260,13 +260,13 @@
           popper-class="peer-switcher-popover"
         >
 <template #reference>
-              <el-button class="peer-switch-btn" size="small" data-tip="切换播放器">
+              <el-button class="peer-switch-btn" size="small" :data-tip="t('layout.switchPlayer')">
                 <MfIcon name="Speaker" class="peer-switch-icon"  />
                 <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
               </el-button>
             </template>
           <div class="peer-switcher">
-            <div class="peer-switcher-title">选择播放器</div>
+            <div class="peer-switcher-title">{{ t('layout.selectPlayer') }}</div>
             <div class="peer-switcher-list">
               <div
                 v-for="p in playerStore.peers"
@@ -278,39 +278,39 @@
                 <MfIcon name="Speaker" class="psi-icon" />
                 <div class="psi-info">
                   <div class="psi-name">
-                    {{ p.kind === 'local' ? '本机' : p.name }}
-                    <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? '群组' : 'DLNA' }}</span>
-                    <span v-if="!p.available" class="psi-offline">离线</span>
+                    {{ p.kind === 'local' ? t('layout.localPeer') : p.name }}
+                    <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : 'DLNA' }}</span>
+                    <span v-if="!p.available" class="psi-offline">{{ t('layout.offline') }}</span>
                   </div>
                   <div class="psi-meta">
                     <span v-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
-                      {{ p.queue.total ?? p.queue.items?.length }} 首
+                      {{ p.queue.total ?? p.queue.items?.length }} {{ t('layout.tracksUnit') }}
                       <span v-if="p.queue.isActive">
-                        · 播放中
+                        · {{ t('layout.playing') }}
                         <span v-if="peerPlayingTitle(p)" class="psi-playing-title">· {{ peerPlayingTitle(p) }}</span>
                       </span>
                     </span>
-                    <span v-else>空闲</span>
+                    <span v-else>{{ t('layout.idle') }}</span>
                   </div>
                 </div>
                 <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId" class="psi-check"  />
               </div>
-              <div v-if="playerStore.peers.length === 0" class="peer-switcher-empty">暂无可用播放器</div>
+              <div v-if="playerStore.peers.length === 0" class="peer-switcher-empty">{{ t('layout.noPeerAvailable') }}</div>
             </div>
             <div class="peer-switcher-scan">
               <el-button size="small" :loading="dlnaScanning" @click="scanDlnaDevices">
-                <MfIcon name="RefreshCw" />重新扫描播放器
+                <MfIcon name="RefreshCw" />{{ t('layout.rescanPlayer') }}
               </el-button>
             </div>
-            <div class="peer-switcher-tip">切换播放器仅改变当前控制目标,不会停止其他播放器</div>
+            <div class="peer-switcher-tip">{{ t('layout.switchPlayerTip') }}</div>
           </div>
         </el-popover>
         <!-- 添加到歌单 -->
-        <el-tooltip content="添加到歌单" placement="top">
+        <el-tooltip :content="t('layout.addToPlaylist')" placement="top">
           <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
         </el-tooltip>
         <!-- 我喜欢的音乐 -->
-        <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
+        <el-tooltip :content="isCurrentFavorite ? t('layout.unlike') : t('layout.favoritesMusic')" placement="top">
           <el-button circle size="small" class="fav-btn" :class="{ active: isCurrentFavorite }" @click="toggleCurrentFavorite">
             <MfIcon name="Heart" :filled="isCurrentFavorite" :size="16" />
           </el-button>
@@ -318,12 +318,12 @@
         <!-- 音量：点击展开控制条（去掉常驻滑块，更清爽） -->
         <el-popover placement="top" :width="210" trigger="click" v-model:visible="volumePopoverVisible" popper-class="volume-popover">
           <template #reference>
-              <el-button circle size="small" :class="{ 'vol-active': volumePopoverVisible }" class="vol-btn" data-tip="音量">
+              <el-button circle size="small" :class="{ 'vol-active': volumePopoverVisible }" class="vol-btn" :data-tip="t('layout.volume')">
                 <MfIcon :name="playerStore.volume > 0 ? 'volume-2' : 'volume-x'" :size="16" />
               </el-button>
             </template>
           <div class="volume-popover-body">
-            <span class="vol-label">音量</span>
+            <span class="vol-label">{{ t('layout.volume') }}</span>
             <el-slider :model-value="playerStore.volume * 100" @input="(v: number | number[]) => playerStore.setVolume((Array.isArray(v) ? v[0] : v) / 100)" :format-tooltip="(v: number) => `${Math.round(v)}%`" class="volume-pop-slider" />
           </div>
         </el-popover>
@@ -333,12 +333,12 @@
     <!-- ===== Queue panel ===== -->
     <transition name="slide-right">
       <div class="queue-panel" v-if="playerStore.showPlaylist">
-        <button class="queue-hide-btn" @click="playerStore.togglePlaylistPanel" title="收起播放队列"><MfIcon name="ChevronRight" :size="16" /></button>
+        <button class="queue-hide-btn" @click="playerStore.togglePlaylistPanel" :title="t('layout.collapseQueue')"><MfIcon name="ChevronRight" :size="16" /></button>
         <div class="queue-header">
-          <span>播放队列 ({{ playerStore.queue.length }})</span>
+          <span>{{ t('layout.playbackQueue') }} ({{ playerStore.queue.length }})</span>
           <div class="queue-actions">
-            <el-button size="small" text class="queue-collapse-mobile" @click="playerStore.togglePlaylistPanel"><MfIcon name="ChevronDown" />收起</el-button>
-            <el-button size="small" text @click="playerStore.clearQueue">清空</el-button>
+            <el-button size="small" text class="queue-collapse-mobile" @click="playerStore.togglePlaylistPanel"><MfIcon name="ChevronDown" />{{ t('layout.collapse') }}</el-button>
+            <el-button size="small" text @click="playerStore.clearQueue">{{ t('layout.clear') }}</el-button>
           </div>
         </div>
         <div class="queue-list" ref="queueListEl">
@@ -362,13 +362,13 @@
             <div class="queue-duration">{{ formatTime(song.duration) }}</div>
             <el-button circle size="small" text class="queue-remove" @click.stop="removeFromQueue(idx)"><MfIcon name="X" /></el-button>
           </div>
-          <div v-if="playerStore.queue.length === 0" class="queue-empty">队列为空</div>
+          <div v-if="playerStore.queue.length === 0" class="queue-empty">{{ t('layout.queueEmpty') }}</div>
         </div>
       </div>
     </transition>
 
     <!-- ===== Queue expand button (shown when the panel is hidden) ===== -->
-    <button v-if="!playerStore.showPlaylist && playerStore.currentSong" class="queue-expand-btn" @click="playerStore.togglePlaylistPanel" title="展开播放队列">
+    <button v-if="!playerStore.showPlaylist && playerStore.currentSong" class="queue-expand-btn" @click="playerStore.togglePlaylistPanel" :title="t('layout.expandQueue')">
       <MfIcon name="List" :size="16" /><span class="queue-expand-count">{{ playerStore.queue.length }}</span>
     </button>
 
@@ -400,7 +400,7 @@
                 class="pm-lyric-line"
                 :class="{ active: i === playerStore.currentLyricIndex }"
               >{{ line.text }}</div>
-              <div v-if="playerStore.lyrics.length === 0" class="pm-lyrics-empty">暂无歌词</div>
+              <div v-if="playerStore.lyrics.length === 0" class="pm-lyrics-empty">{{ t('layout.noLyrics') }}</div>
             </div>
           </div>
         </div>
@@ -418,21 +418,21 @@
                 <MfIcon :name="playModeIconName" :size="18" />
               </el-button>
             </el-tooltip>
-            <el-tooltip content="上一首" placement="top">
+            <el-tooltip :content="t('layout.prevTrack')" placement="top">
               <el-button circle @click="playerStore.prev" class="ctrl-btn pm-nav-btn"><MfIcon name="SkipBack" :size="26" /></el-button>
             </el-tooltip>
-            <el-tooltip :content="playerStore.isPlaying ? '暂停' : '播放'" placement="top">
+            <el-tooltip :content="playerStore.isPlaying ? t('layout.pause') : t('layout.play')" placement="top">
               <el-button circle @click="playerStore.togglePlay" type="primary" class="ctrl-btn pm-play-btn">
                 <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="30" />
               </el-button>
             </el-tooltip>
-            <el-tooltip content="下一首" placement="top">
+            <el-tooltip :content="t('layout.nextTrack')" placement="top">
               <el-button circle @click="playerStore.next" class="ctrl-btn pm-nav-btn"><MfIcon name="SkipForward" :size="26" /></el-button>
             </el-tooltip>
-            <el-tooltip content="添加到歌单" placement="top">
+            <el-tooltip :content="t('layout.addToPlaylist')" placement="top">
               <el-button circle size="small" @click="openAddToPlaylist"><MfIcon name="Plus" /></el-button>
             </el-tooltip>
-            <el-tooltip :content="isCurrentFavorite ? '取消喜欢' : '我喜欢的音乐'" placement="top">
+            <el-tooltip :content="isCurrentFavorite ? t('layout.unlike') : t('layout.favoritesMusic')" placement="top">
               <el-button
                 circle
                 size="small"
@@ -449,9 +449,9 @@
     </transition>
 
     <!-- ===== Add to playlist dialog ===== -->
-    <el-dialog v-model="showPlaylistDialog" title="添加到歌单" width="420px" :append-to-body="true">
+    <el-dialog v-model="showPlaylistDialog" :title="t('layout.addToPlaylist')" width="420px" :append-to-body="true">
       <div class="playlist-dialog-song" v-if="playlistTargetSong">
-        将「{{ playlistTargetSong.title }} - {{ playlistTargetSong.artist }}」添加到：
+        {{ t('layout.addToPlaylistPrompt', { title: playlistTargetSong.title, artist: playlistTargetSong.artist }) }}
       </div>
       <div class="playlist-list" v-loading="playlistsLoading">
         <div
@@ -464,15 +464,15 @@
           <MfIcon name="List" class="pl-icon"  />
           <div class="pl-info">
             <div class="pl-name">{{ pl.name }}</div>
-            <div class="pl-meta">{{ pl.songCount }}首</div>
+            <div class="pl-meta">{{ t('layout.trackCount', { count: pl.songCount }) }}</div>
           </div>
           <MfIcon name="Loader2" v-if="addingPlaylistId === pl.id" class="is-loading"  spin />
         </div>
-        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">暂无歌单，先创建一个吧</div>
+        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">{{ t('layout.noPlaylistCreate') }}</div>
       </div>
       <div class="create-playlist-row">
-        <el-input v-model="newPlaylistName" placeholder="新建歌单名称..." clearable @keyup.enter="createAndAdd" />
-        <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">新建并添加</el-button>
+        <el-input v-model="newPlaylistName" :placeholder="t('layout.newPlaylistPlaceholder')" clearable @keyup.enter="createAndAdd" />
+        <el-button type="primary" @click="createAndAdd" :disabled="!newPlaylistName">{{ t('layout.createAndAdd') }}</el-button>
       </div>
     </el-dialog>
 
@@ -483,6 +483,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
@@ -493,6 +494,7 @@ import api from "@/api";
 import { PERM } from "@/utils/perms";
 import { coverUrl as coverArtUrl } from "@/utils/cover";
 
+const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
@@ -605,10 +607,10 @@ const playModeIconName = computed(() => {
 });
 const playModeTooltip = computed(() => {
   switch (playerStore.playMode) {
-    case "one": return "单曲循环";
-    case "all": return "列表循环";
-    case "shuffle": return "随机播放";
-    default: return "顺序播放";
+    case "one": return t("layout.playMode.one");
+    case "all": return t("layout.playMode.all");
+    case "shuffle": return t("layout.playMode.shuffle");
+    default: return t("layout.playMode.order");
   }
 });
 
@@ -648,10 +650,10 @@ async function addToPlaylist(pl: any) {
   addingPlaylistId.value = pl.id;
   try {
     await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: playlistTargetSong.value.id });
-    ElMessage.success(`已添加到「${pl.name}」`);
+    ElMessage.success(t("layout.addedToPlaylist", { name: pl.name }));
     showPlaylistDialog.value = false;
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "添加失败");
+    ElMessage.error(e.response?.data?.error || t("layout.addFailed"));
   } finally {
     addingPlaylistId.value = "";
   }
@@ -663,10 +665,10 @@ async function createAndAdd() {
   addingPlaylistId.value = "new";
   try {
     const res = await api.post("/rest/createPlaylist", { name: newPlaylistName.value, songId: playlistTargetSong.value.id });
-    ElMessage.success(`已创建并添加「${newPlaylistName.value}」`);
+    ElMessage.success(t("layout.createdAndAdded", { name: newPlaylistName.value }));
     showPlaylistDialog.value = false;
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "创建失败");
+    ElMessage.error(e.response?.data?.error || t("layout.createFailed"));
   } finally {
     addingPlaylistId.value = "";
   }
@@ -677,8 +679,8 @@ async function toggleCurrentFavorite() {
   if (!song) return;
   try {
     const fav = await favoritesStore.toggleFavorite(song.id);
-    ElMessage.success(fav ? "已添加到我喜欢的音乐" : "已从我喜欢的音乐移除");
-  } catch (e: any) { ElMessage.error(e.message || "操作失败"); }
+    ElMessage.success(fav ? t("layout.favAdded") : t("layout.favRemoved"));
+  } catch (e: any) { ElMessage.error(e.message || t("layout.operationFailed")); }
 }
 
 const dlnaScanning = ref(false);
@@ -794,9 +796,9 @@ async function scanDlnaDevices() {
     const res = await api.post("/rest/api/v1/dlna/scan");
     const count = (res.data.devices || []).length;
     await playerStore.refreshPeers();
-    ElMessage.success(`扫描完成,发现 ${count} 台 DLNA 设备`);
+    ElMessage.success(t("layout.scanComplete", { count }));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || "扫描失败");
+    ElMessage.error(e.response?.data?.error || t("layout.scanFailed"));
   } finally { dlnaScanning.value = false; }
 }
 

@@ -9,8 +9,8 @@
         <div class="setting-label"><div class="title">{{ t('language.label') }}</div><div class="desc">{{ t('settings.theme.desc') }}</div></div>
         <div class="setting-value">
           <el-select :model-value="localeStore.lang" style="width: 160px" @change="onLangChange">
-            <el-option label="简体中文" value="zh-CN" />
-            <el-option label="English" value="en-US" />
+            <el-option :label="t('language.zh-CN')" value="zh-CN" />
+            <el-option :label="t('language.en-US')" value="en-US" />
           </el-select>
         </div>
       </div>

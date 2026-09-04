@@ -23,6 +23,7 @@ import { touch } from "../../services/memory/reclaim.js";
 import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
 import { runPluginJob } from "../../services/plugin/jobRunner.js";
 import { runBatchJob } from "../../batch/runner.js";
+import { translate } from "../../i18n.js";
 
 export const onlineRoutes = new Hono();
 
@@ -61,11 +62,11 @@ const matchJobsSweep = setInterval(() => {
 // Connectivity test for an admin-configured provider instance.
 onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const provider = getOnlineProvider(providerId);
-  if (!provider) return c.json({ success: false, error: `未知的在线源: ${providerId}` });
+  if (!provider) return c.json({ success: false, error: translate("errors.online.unknownProvider", { providerId }) });
   const config = getSourcePluginConfig(providerId);
-  if (!config) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!config) return c.json({ success: false, error: translate("errors.online.notConfigured") });
   const result = await provider.test(config);
   return c.json({ success: result.success, message: result.message });
 });
@@ -74,12 +75,12 @@ onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
 // Body: { q: string, sources?: string[] } -> { songs: OnlineSongResult[] }
 onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_SEARCH), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少 provider id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
   const body = await c.req.json().catch(() => ({}));
   const q = String(body.q || "").trim();
-  if (!q) return c.json({ success: false, error: "请输入搜索关键词" });
+  if (!q) return c.json({ success: false, error: translate("errors.search.queryRequired") });
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
   try {
     const result = await configured.provider.search(configured.config, { query: q, sources });
@@ -92,7 +93,7 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
     }));
     return c.json({ success: true, total: songs.length, songs });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "搜索失败" });
+    return c.json({ success: false, error: e.message || translate("errors.search.failed") });
   }
 });
 
@@ -106,16 +107,16 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
 //   GET   .../match-playlist/status?jobId=  -> { status, progress, result?, error? }
 onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
 
   const body = await c.req.json().catch(() => ({}));
   const playlistId = typeof body.playlistId === "string" ? body.playlistId : null;
-  if (!playlistId) return c.json({ success: false, error: "缺少歌单 id" });
+  if (!playlistId) return c.json({ success: false, error: translate("errors.playlist.idRequired") });
 
   const pl = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
-  if (!pl) return c.json({ success: false, error: "歌单不存在" }, 404);
+  if (!pl) return c.json({ success: false, error: translate("errors.playlist.notFound") }, 404);
 
   const entryCount = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all()
     .filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim()).length;
@@ -127,7 +128,7 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
       const result = await matchUnmatchedPlaylistEntries(providerId, configured.config, configured.provider, playlistId);
       return c.json({ success: true, jobId: null, ...result });
     } catch (e: any) {
-      return c.json({ success: false, error: e.message || "匹配失败" });
+      return c.json({ success: false, error: e.message || translate("errors.online.matchFailed") });
     }
   }
 
@@ -142,7 +143,7 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
       });
       matchJobs.set(jobId, { status: "completed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: { done: entryCount, total: entryCount }, result, error: null });
     } catch (e: any) {
-      matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: e.message || "匹配失败" });
+      matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: e.message || translate("errors.online.matchFailed") });
     }
   })();
   return c.json({ success: true, jobId, running: true, progress: { done: 0, total: entryCount } });
@@ -151,9 +152,9 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
 // Poll status of a background match job.
 onlineRoutes.get("/v1/online/:providerId/match-playlist/status", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const jobId = c.req.query("jobId");
-  if (!jobId) return c.json({ success: false, error: "缺少 jobId" });
+  if (!jobId) return c.json({ success: false, error: translate("errors.task.jobIdRequired") });
   const job = matchJobs.get(jobId);
-  if (!job) return c.json({ success: false, error: "任务不存在" }, 404);
+  if (!job) return c.json({ success: false, error: translate("errors.task.notFound") }, 404);
   return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, progress: job.progress, result: job.result, error: job.error });
 });
 
@@ -163,9 +164,9 @@ onlineRoutes.get("/v1/online/:providerId/match-playlist/status", permMiddleware(
 //   GET  /v1/online/:providerId/match-playlists/status?batchId= -> { status, total, done, current, results, error }
 onlineRoutes.post("/v1/online/:providerId/match-playlists", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
 
   // 收集所有含未匹配条目的歌单(entryCount > 0)。
   // 单条 GROUP BY 聚合替代「每歌单全量扫描」的 N+1 查询。
@@ -208,9 +209,9 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", permMiddleware(PERM.
 
 onlineRoutes.get("/v1/online/:providerId/match-playlists/status", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const batchId = c.req.query("batchId");
-  if (!batchId) return c.json({ success: false, error: "缺少 batchId" });
+  if (!batchId) return c.json({ success: false, error: translate("errors.task.batchIdRequired") });
   const job = batchMatchJobs.get(batchId);
-  if (!job) return c.json({ success: false, error: "任务不存在" }, 404);
+  if (!job) return c.json({ success: false, error: translate("errors.task.notFound") }, 404);
   return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, total: job.total, done: job.done, current: job.current, results: job.results, error: job.error });
 });
 
@@ -218,16 +219,16 @@ onlineRoutes.get("/v1/online/:providerId/match-playlists/status", permMiddleware
 // Body: { entryId }
 onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
 
   const body = await c.req.json().catch(() => ({}));
   const entryId = Number(body.entryId);
-  if (!Number.isInteger(entryId) || entryId <= 0) return c.json({ success: false, error: "缺少条目 id" });
+  if (!Number.isInteger(entryId) || entryId <= 0) return c.json({ success: false, error: translate("errors.online.entryIdRequired") });
 
   const entry = db.select().from(playlistSongs).where(eq(playlistSongs.id, entryId)).get();
-  if (!entry) return c.json({ success: false, error: "条目不存在" }, 404);
+  if (!entry) return c.json({ success: false, error: translate("errors.online.entryNotFound") }, 404);
   if (entry.playable && entry.songId) return c.json({ success: true, alreadyPlayable: true });
 
   try {
@@ -241,7 +242,7 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
     });
     return c.json({ success: result.status === "matched", ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "匹配失败" });
+    return c.json({ success: false, error: e.message || translate("errors.online.matchFailed") });
   }
 });
 
@@ -250,7 +251,7 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
 onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   const playlistId = c.req.query("playlistId");
-  if (!providerId || !playlistId) return c.json({ success: false, error: "缺少参数" });
+  if (!providerId || !playlistId) return c.json({ success: false, error: translate("errors.common.paramsRequired") });
   try {
     const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
     const unmatched = entries.filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim());
@@ -258,25 +259,25 @@ onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIS
       id: e.id, title: e.externalTitle, artist: e.externalArtist, album: e.externalAlbum, duration: e.externalDuration,
     })) });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "查询失败" });
+    return c.json({ success: false, error: e.message || translate("errors.search.queryFailed") });
   }
 });
 // Body: { songs: OnlineSongResult[], playlistId?: string }
 // Returns per-song DB ids (deduped rows are reported too).
 onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
-  if (!getSourcePluginConfig(providerId)) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!getSourcePluginConfig(providerId)) return c.json({ success: false, error: translate("errors.online.notConfigured") });
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const songList: OnlineSongResult[] = Array.isArray(body.songs) ? body.songs : null;
-  if (!songList || songList.length === 0) return c.json({ success: false, error: "没有可导入的歌曲" });
+  if (!songList || songList.length === 0) return c.json({ success: false, error: translate("errors.import.noSongs") });
   const playlistId = typeof body.playlistId === "string" ? body.playlistId : undefined;
   try {
     const result = await importOnlineSongs(providerId, songList, { playlistId, userId: user?.id });
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "导入失败" });
+    return c.json({ success: false, error: e.message || translate("errors.import.failed") });
   }
 });
 
@@ -286,9 +287,9 @@ onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_
 // GET /v1/online/:providerId/recommend
 onlineRoutes.get("/v1/online/:providerId/recommend", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured || !configured.provider.recommend) return c.json({ success: false, error: "在线源不支持推荐歌单" });
+  if (!configured || !configured.provider.recommend) return c.json({ success: false, error: translate("errors.online.noRecommend") });
   try {
     const result = await configured.provider.recommend(configured.config);
     // Annotate each playlist with whether it's already imported locally.
@@ -299,7 +300,7 @@ onlineRoutes.get("/v1/online/:providerId/recommend", permMiddleware(PERM.RECOMME
     }
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "获取推荐歌单失败" });
+    return c.json({ success: false, error: e.message || translate("errors.online.fetchRecommendFailed") });
   }
 });
 
@@ -318,12 +319,12 @@ onlineRoutes.get("/v1/online/:providerId/recommend/local", permMiddleware(PERM.R
 // POST /v1/online/:providerId/recommend/import { source, id, name, cover, creator, trackCount }
 onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured?.provider.playlistSongs) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!configured?.provider.playlistSongs) return c.json({ success: false, error: translate("errors.online.notConfigured") });
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
-  if (!body.source || !body.id) return c.json({ success: false, error: "缺少推荐歌单 source/id" });
+  if (!body.source || !body.id) return c.json({ success: false, error: translate("errors.online.recommendRefRequired") });
   const info = { id: String(body.id), source: String(body.source), name: String(body.name || ""), creator: String(body.creator || ""), cover: String(body.cover || ""), trackCount: String(body.trackCount || ""), link: String(body.link || "") };
   try {
     const result = await importRecommendPlaylist(providerId, info, { userId: user?.id });
@@ -332,7 +333,7 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM
     // 沙箱限制错误透传 sandboxCode/hint,前端可展示「错误码 + 说明 + 修复提示」。
     return c.json({
       success: false,
-      error: e.message || "导入推荐歌单失败",
+      error: e.message || translate("errors.online.importRecommendFailed"),
       sandboxCode: e?.sandboxCode,
       hint: e?.hint,
     });
@@ -351,13 +352,13 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM
 onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   touch(); // 标记活动:聚合同步所有平台
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
 
   // ① 路径 A 推荐歌单重导(后台,状态存 syncAllState)。
   const existing = syncAllState.get(providerId);
-  if (existing?.running) return c.json({ success: false, error: "同步任务进行中,请稍候" }, 409);
+  if (existing?.running) return c.json({ success: false, error: translate("errors.online.syncBusy") }, 409);
   const state = { running: true, startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, result: null as any, error: null as string | null };
   syncAllState.set(providerId, state);
   (async () => {
@@ -387,7 +388,7 @@ onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", permMiddleware(PE
 onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", permMiddleware(PERM.RECOMMEND_VIEW), (c) => {
   const providerId = c.req.param("providerId");
   const st = syncAllState.get(providerId || "");
-  if (!st) return c.json({ success: false, error: "尚无同步记录" }, 404);
+  if (!st) return c.json({ success: false, error: translate("errors.online.noSyncRecord") }, 404);
   return c.json({ success: true, running: st.running, startedAt: st.startedAt, finishedAt: st.finishedAt, result: st.result, error: st.error });
 });
 
@@ -396,13 +397,13 @@ onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", permMiddlew
 // POST /v1/online/:providerId/purge-web-songs
 onlineRoutes.post("/v1/online/:providerId/purge-web-songs", adminMiddleware, async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: "缺少在线源 id" });
-  if (!getConfiguredProvider(providerId)) return c.json({ success: false, error: "在线源未启用或未配置" });
+  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!getConfiguredProvider(providerId)) return c.json({ success: false, error: translate("errors.online.notConfigured") });
   try {
     // 清理在一次性批量子进程里执行(方案3);结果经 IPC 回传。
     const { result } = await runBatchJob("purge-web-songs", { providerId });
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || "清理失败" });
+    return c.json({ success: false, error: e.message || translate("errors.online.purgeFailed") });
   }
 });

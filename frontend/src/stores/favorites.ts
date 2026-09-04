@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import api from "@/api";
+import { gt } from "@/locales";
 
 type FavoriteKind = "song" | "album" | "artist";
 
@@ -58,7 +59,7 @@ export const useFavoritesStore = defineStore("favorites", () => {
       // rollback on failure
       if (willFav) set.delete(itemId);
       else set.add(itemId);
-      throw new Error("操作失败");
+      throw new Error(gt("common.operationFailed"));
     }
     // 服务端已确认,Set 反映最新状态;标记未加载,下次 loadFavorites 重新与后端同步。
     loaded.value = false;
@@ -79,7 +80,7 @@ export const useFavoritesStore = defineStore("favorites", () => {
   async function removeFavoriteOf(kind: FavoriteKind, itemId: string) {
     const set = setOf(kind);
     set.delete(itemId);
-    try { await api.get(`/rest/unstar?${paramOf(kind)}=${itemId}`); } catch { set.add(itemId); throw new Error("操作失败"); }
+    try { await api.get(`/rest/unstar?${paramOf(kind)}=${itemId}`); } catch { set.add(itemId); throw new Error(gt("common.operationFailed")); }
     loaded.value = false;
     revision.value++;
   }

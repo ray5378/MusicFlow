@@ -1,8 +1,8 @@
 <template>
   <div class="admin-users">
     <div class="page-header">
-      <h2>用户管理</h2>
-      <el-button type="primary" @click="showAddDialog = true">新增用户</el-button>
+      <h2>{{ t('admin.users.title') }}</h2>
+      <el-button type="primary" @click="showAddDialog = true">{{ t('admin.users.addUser') }}</el-button>
     </div>
     <div class="user-grid" v-if="users.length > 0">
       <el-card v-for="user in users" :key="user.id" class="user-card">
@@ -10,62 +10,62 @@
           <div class="user-info">
             <h3>{{ user.username }}</h3>
             <div class="tags">
-              <el-tag :type="user.isAdmin ? 'danger' : undefined" size="small">{{ user.isAdmin ? '管理员' : '普通用户' }}</el-tag>
-              <el-tag :type="user.isActive ? 'success' : 'info'" size="small">{{ user.isActive ? '启用' : '失效' }}</el-tag>
+              <el-tag :type="user.isAdmin ? 'danger' : undefined" size="small">{{ user.isAdmin ? t('admin.users.admin') : t('admin.users.normal') }}</el-tag>
+              <el-tag :type="user.isActive ? 'success' : 'info'" size="small">{{ user.isActive ? t('admin.users.active') : t('admin.users.inactive') }}</el-tag>
               <el-tag v-if="user.apiKeySet" type="warning" size="small">API Key</el-tag>
             </div>
           </div>
         </div>
         <div class="user-actions">
-          <el-button size="small" type="primary" plain @click="openAccessDialog(user)">权限</el-button>
-          <el-button size="small" @click="showUsernameDialog(user)">修改用户名</el-button>
-          <el-button size="small" @click="showPasswordDialog(user)">修改密码</el-button>
+          <el-button size="small" type="primary" plain @click="openAccessDialog(user)">{{ t('admin.users.permission') }}</el-button>
+          <el-button size="small" @click="showUsernameDialog(user)">{{ t('admin.users.editUsername') }}</el-button>
+          <el-button size="small" @click="showPasswordDialog(user)">{{ t('admin.users.editPassword') }}</el-button>
           <el-button size="small" @click="openKeyDialog(user)">API Key</el-button>
-          <el-button size="small" type="danger" plain :disabled="user.id === authStore.userId" @click="deleteUser(user)">删除用户</el-button>
+          <el-button size="small" type="danger" plain :disabled="user.id === authStore.userId" @click="deleteUser(user)">{{ t('admin.users.deleteUser') }}</el-button>
         </div>
       </el-card>
     </div>
-    <EmptyState v-else icon="user" title="暂无用户" description="添加用户后即可多人共享音乐库">
+    <EmptyState v-else icon="user" :title="t('admin.users.emptyTitle')" :description="t('admin.users.emptyDesc')">
       <template #action>
-        <el-button type="primary" @click="showAddDialog = true">新增用户</el-button>
+        <el-button type="primary" @click="showAddDialog = true">{{ t('admin.users.addUser') }}</el-button>
       </template>
     </EmptyState>
 
-    <el-dialog v-model="showAddDialog" title="新增用户" width="400px" :append-to-body="true">
+    <el-dialog v-model="showAddDialog" :title="t('admin.users.addUser')" width="400px" :append-to-body="true">
       <el-form label-width="80px">
-        <el-form-item label="用户名"><el-input v-model="newUser.username" /></el-form-item>
-        <el-form-item label="密码"><el-input v-model="newUser.password" type="password" /></el-form-item>
+        <el-form-item :label="t('common.username')"><el-input v-model="newUser.username" /></el-form-item>
+        <el-form-item :label="t('common.password')"><el-input v-model="newUser.password" type="password" /></el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showAddDialog = false">取消</el-button>
-        <el-button type="primary" @click="addUser">创建</el-button>
+        <el-button @click="showAddDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="addUser">{{ t('admin.users.create') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showPwdDialog" title="修改密码" width="400px" :append-to-body="true">
+    <el-dialog v-model="showPwdDialog" :title="t('admin.users.editPassword')" width="400px" :append-to-body="true">
       <el-form label-width="80px">
-        <el-form-item label="新密码"><el-input v-model="pwdForm.newPassword" type="password" /></el-form-item>
+        <el-form-item :label="t('admin.users.newPassword')"><el-input v-model="pwdForm.newPassword" type="password" /></el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showPwdDialog = false">取消</el-button>
-        <el-button type="primary" @click="changePassword">确定</el-button>
+        <el-button @click="showPwdDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="changePassword">{{ t('common.confirm') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showNameDialog" title="修改用户名" width="400px" :append-to-body="true">
+    <el-dialog v-model="showNameDialog" :title="t('admin.users.editUsername')" width="400px" :append-to-body="true">
       <el-form label-width="80px">
-        <el-form-item label="新用户名"><el-input v-model="nameForm.username" /></el-form-item>
+        <el-form-item :label="t('admin.users.newUsername')"><el-input v-model="nameForm.username" /></el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showNameDialog = false">取消</el-button>
-        <el-button type="primary" @click="changeUsername">确定</el-button>
+        <el-button @click="showNameDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="changeUsername">{{ t('common.confirm') }}</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="showKeyDialog" :title="`API Key — ${keyForm.username}`" width="520px" :append-to-body="true">
       <div class="key-dialog" v-loading="keyForm.loading">
         <p class="key-desc">
-          供 Home Assistant 集成等常驻客户端使用的长期凭据。登录用的 JWT 24 小时过期，第三方客户端要用这里的 Key。
+          {{ t('admin.users.keyDesc') }}
         </p>
         <div v-if="keyForm.apiKey" class="key-box">
           <el-input
@@ -75,7 +75,7 @@
             :type="keyForm.visible ? 'text' : 'password'"
           >
             <template #append>
-              <el-button @click="keyForm.visible = !keyForm.visible">{{ keyForm.visible ? '隐藏' : '显示' }}</el-button>
+              <el-button @click="keyForm.visible = !keyForm.visible">{{ keyForm.visible ? t('admin.users.hide') : t('admin.users.show') }}</el-button>
             </template>
           </el-input>
           <el-button
@@ -84,53 +84,53 @@
             plain
             @click="copyKey"
           >
-            复制
+            {{ t('admin.users.copy') }}
           </el-button>
           <div class="key-meta">
-            有效期：{{ keyForm.expiresAt ? keyForm.expiresAt.slice(0, 10) + ' 到期' : '永不过期' }}
+            {{ t('admin.users.keyExpiry', { date: keyForm.expiresAt ? keyForm.expiresAt.slice(0, 10) : '', expires: keyForm.expiresAt ? t('admin.users.expiresOn') : t('admin.users.neverExpires') }) }}
           </div>
         </div>
-        <el-empty v-else description="该用户尚未生成 API Key" :image-size="60" />
+        <el-empty v-else :description="t('admin.users.noApiKey')" :image-size="60" />
 
         <el-form label-width="80px" class="key-form">
-          <el-form-item label="有效期">
+          <el-form-item :label="t('admin.users.expiry')">
             <el-select v-model="keyForm.expiresInDays" style="width: 160px">
-              <el-option label="永不过期" :value="0" />
-              <el-option label="30 天" :value="30" />
-              <el-option label="90 天" :value="90" />
-              <el-option label="365 天" :value="365" />
+              <el-option :label="t('admin.users.neverExpires')" :value="0" />
+              <el-option :label="t('admin.users.expiryDays', { days: 30 })" :value="30" />
+              <el-option :label="t('admin.users.expiryDays', { days: 90 })" :value="90" />
+              <el-option :label="t('admin.users.expiryDays', { days: 365 })" :value="365" />
             </el-select>
           </el-form-item>
         </el-form>
 
         <el-alert type="warning" :closable="false" show-icon>
-          修改该用户密码会自动使 Key 失效，请先改密码再生成。
+          {{ t('admin.users.revokePwdHint') }}
         </el-alert>
       </div>
       <template #footer>
-        <el-button @click="showKeyDialog = false">关闭</el-button>
-        <el-button v-if="keyForm.apiKey" type="danger" plain :loading="keyForm.loading" @click="revokeKey">撤销</el-button>
+        <el-button @click="showKeyDialog = false">{{ t('common.close') }}</el-button>
+        <el-button v-if="keyForm.apiKey" type="danger" plain :loading="keyForm.loading" @click="revokeKey">{{ t('admin.users.revoke') }}</el-button>
         <el-button type="primary" :loading="keyForm.loading" @click="generateKey">
-          {{ keyForm.apiKey ? '重新生成' : '生成' }}
+          {{ keyForm.apiKey ? t('admin.users.regenerate') : t('admin.users.generate') }}
         </el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showAccessDialog" :title="`权限设置 — ${accessForm.username}`" width="720px" :append-to-body="true" class="access-dialog">
+    <el-dialog v-model="showAccessDialog" :title="`${t('admin.users.permissionTitle')} — ${accessForm.username}`" width="720px" :append-to-body="true" class="access-dialog">
       <div v-loading="accessForm.loading" class="access-body">
         <el-alert v-if="accessForm.isAdmin" type="info" :closable="false" show-icon>
-          管理员不受细粒度权限限制，始终拥有全部功能权限与播放器控制权。
+          {{ t('admin.users.adminNotice') }}
         </el-alert>
         <template v-else>
-          <div class="access-section-title">功能权限</div>
+          <div class="access-section-title">{{ t('admin.users.funcPermissions') }}</div>
           <div v-for="cat in accessCategories" :key="cat" class="access-cat">
-            <div class="access-cat-name">{{ cat }}</div>
+            <div class="access-cat-name">{{ t(ACCESS_CATEGORY_LABEL_KEYS[cat] || cat) }}</div>
             <div class="access-perm-grid">
               <div v-for="p in accessForm.catalog.filter(x => x.category === cat)" :key="p.key" class="access-perm-item">
                 <el-checkbox v-model="accessForm.permissions[p.key]">
                   <span class="perm-label">{{ p.label }}</span>
                   <el-tag :type="p.defaultGranted ? 'success' : 'info'" size="small" effect="plain" class="perm-default-tag">
-                    {{ p.defaultGranted ? '默认开启' : '默认关闭' }}
+                    {{ p.defaultGranted ? t('admin.users.defaultOn') : t('admin.users.defaultOff') }}
                   </el-tag>
                 </el-checkbox>
                 <div class="perm-desc">{{ p.desc }}</div>
@@ -138,12 +138,12 @@
             </div>
           </div>
           <el-divider />
-          <div class="access-section-title">播放器授权</div>
+          <div class="access-section-title">{{ t('admin.users.playerAuth') }}</div>
           <el-alert v-if="!accessForm.permissions['renderer.use']" type="warning" :closable="false" show-icon class="renderer-hint">
-            尚未勾选「使用播放器」功能权限，下方的设备授权不会生效。请先在上方勾选。
+            {{ t('admin.users.rendererHint') }}
           </el-alert>
           <div v-if="accessForm.renderers.length === 0" class="no-renderers">
-            当前没有可授权的 DLNA / AirPlay 设备或播放器群组（扫描到设备后会出现在这里）。
+            {{ t('admin.users.noRenderers') }}
           </div>
           <div v-else class="access-renderer-grid">
             <el-checkbox
@@ -154,17 +154,17 @@
               @change="(v: any) => toggleRenderer(r.deviceKey, !!v)"
             >
               <el-tag :type="r.kind === 'group' ? 'warning' : (r.kind === 'airplay' ? 'success' : 'primary')" size="small" effect="plain" class="renderer-kind-tag">
-                {{ r.kind === 'group' ? '群组' : r.kind.toUpperCase() }}
+                {{ r.kind === 'group' ? t('admin.users.group') : r.kind.toUpperCase() }}
               </el-tag>
               <span class="renderer-name">{{ r.name }}</span>
-              <span v-if="r.kind === 'group' && r.memberCount" class="renderer-meta">（{{ r.memberCount }} 台）</span>
+              <span v-if="r.kind === 'group' && r.memberCount" class="renderer-meta">{{ t('admin.users.memberCount', { count: r.memberCount }) }}</span>
             </el-checkbox>
           </div>
         </template>
       </div>
       <template #footer>
-        <el-button @click="showAccessDialog = false">取消</el-button>
-        <el-button type="primary" :loading="accessForm.saving" :disabled="accessForm.isAdmin" @click="saveAccess">保存</el-button>
+        <el-button @click="showAccessDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="accessForm.saving" :disabled="accessForm.isAdmin" @click="saveAccess">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -172,12 +172,15 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 import { copyText } from "@/utils/clipboard";
+import { ACCESS_CATEGORIES, ACCESS_CATEGORY_LABEL_KEYS } from "@/config/accessCategories";
 
+const { t } = useI18n();
 const authStore = useAuthStore();
 const users = ref<any[]>([]);
 const showAddDialog = ref(false);
@@ -198,9 +201,9 @@ const keyForm = reactive({
   loading: false,
 });
 
-// 细粒度权限(功能权限 + 播放器授权)
+// 细粒度权限(功能权限 + 播放器授权);分类值来自后端("曲库/歌单/..." 数据契约),配置见 src/config/accessCategories.ts
 const showAccessDialog = ref(false);
-const accessCategories = ["曲库", "歌单", "互动", "推荐", "播放器", "系统"];
+const accessCategories = ACCESS_CATEGORIES;
 const accessForm = reactive<{
   userId: string;
   username: string;
@@ -242,7 +245,7 @@ async function openAccessDialog(user: any) {
     accessForm.rendererGrants = accessRes.data.rendererGrants || [];
     accessForm.renderers = rendererRes.data.renderers || [];
   } catch {
-    ElMessage.error("读取权限配置失败");
+    ElMessage.error(t("admin.users.loadAccessFailed"));
   } finally {
     accessForm.loading = false;
   }
@@ -265,10 +268,10 @@ async function saveAccess() {
       permissions: accessForm.permissions,
       renderers: accessForm.rendererGrants,
     });
-    ElMessage.success("权限已保存");
+    ElMessage.success(t("admin.users.permissionSaved"));
     showAccessDialog.value = false;
   } catch {
-    ElMessage.error("保存失败");
+    ElMessage.error(t("common.saveFailed"));
   } finally {
     accessForm.saving = false;
   }
@@ -277,30 +280,30 @@ async function saveAccess() {
 async function loadUsers() { try { users.value = (await api.get("/rest/api/v1/users")).data; } catch { users.value = []; } }
 
 async function addUser() {
-  if (!newUser.username || !newUser.password) { ElMessage.warning("请填写完整信息"); return; }
+  if (!newUser.username || !newUser.password) { ElMessage.warning(t("admin.users.fillRequired")); return; }
   await api.post("/rest/api/v1/users", newUser);
   showAddDialog.value = false;
   newUser.username = "";
   newUser.password = "";
-  ElMessage.success("创建成功");
+  ElMessage.success(t("admin.users.createSuccess"));
   loadUsers();
 }
 
 function showPasswordDialog(user: any) { pwdForm.userId = user.id; pwdForm.newPassword = ""; showPwdDialog.value = true; }
 async function changePassword() {
-  if (!pwdForm.newPassword) { ElMessage.warning("请输入新密码"); return; }
+  if (!pwdForm.newPassword) { ElMessage.warning(t("admin.users.enterNewPassword")); return; }
   await api.put(`/rest/api/v1/users/${pwdForm.userId}/password`, { newPassword: pwdForm.newPassword });
   showPwdDialog.value = false;
-  ElMessage.success("密码已修改");
+  ElMessage.success(t("admin.users.passwordChanged"));
 }
 
 function showUsernameDialog(user: any) { nameForm.userId = user.id; nameForm.username = user.username; showNameDialog.value = true; }
 async function changeUsername() {
-  if (!nameForm.username?.trim()) { ElMessage.warning("请输入新用户名"); return; }
+  if (!nameForm.username?.trim()) { ElMessage.warning(t("admin.users.enterNewUsername")); return; }
   const res = await api.put(`/rest/api/v1/users/${nameForm.userId}/username`, { username: nameForm.username.trim() });
   showNameDialog.value = false;
   if (nameForm.userId === authStore.userId) authStore.setUsername(res.data.username);
-  ElMessage.success("用户名已修改");
+  ElMessage.success(t("admin.users.usernameChanged"));
   loadUsers();
 }
 
@@ -318,7 +321,7 @@ async function openKeyDialog(user: any) {
     keyForm.apiKey = res.data.apiKey || "";
     keyForm.expiresAt = res.data.expiresAt || null;
   } catch {
-    ElMessage.error("读取 API Key 失败");
+    ElMessage.error(t("admin.users.loadKeyFailed"));
   } finally {
     keyForm.loading = false;
   }
@@ -328,8 +331,8 @@ async function generateKey() {
   if (keyForm.apiKey) {
     try {
       await ElMessageBox.confirm(
-        `重新生成会立即让「${keyForm.username}」现有的 Key 失效，正在使用它的客户端（如 Home Assistant）需要重新填写。`,
-        "重新生成 API Key",
+        t("admin.users.regenerateConfirm", { username: keyForm.username }),
+        t("admin.users.regenerateTitle"),
         { type: "warning" },
       );
     } catch { return; }
@@ -342,10 +345,10 @@ async function generateKey() {
     keyForm.apiKey = res.data.apiKey;
     keyForm.expiresAt = res.data.expiresAt || null;
     keyForm.visible = true;
-    ElMessage.success("已生成，请复制保存");
+    ElMessage.success(t("admin.users.generated"));
     loadUsers();
   } catch {
-    ElMessage.error("生成失败");
+    ElMessage.error(t("admin.users.generateFailed"));
   } finally {
     keyForm.loading = false;
   }
@@ -354,8 +357,8 @@ async function generateKey() {
 async function revokeKey() {
   try {
     await ElMessageBox.confirm(
-      `撤销后「${keyForm.username}」使用该 Key 的客户端会立即无法访问。`,
-      "撤销 API Key",
+      t("admin.users.revokeConfirm", { username: keyForm.username }),
+      t("admin.users.revokeTitle"),
       { type: "warning" },
     );
   } catch { return; }
@@ -365,10 +368,10 @@ async function revokeKey() {
     keyForm.apiKey = "";
     keyForm.expiresAt = null;
     keyForm.visible = false;
-    ElMessage.success("已撤销");
+    ElMessage.success(t("admin.users.revoked"));
     loadUsers();
   } catch {
-    ElMessage.error("撤销失败");
+    ElMessage.error(t("admin.users.revokeFailed"));
   } finally {
     keyForm.loading = false;
   }
@@ -380,10 +383,10 @@ async function copyKey() {
 
 async function deleteUser(user: any) {
   try {
-    await ElMessageBox.confirm(`确定删除用户「${user.username}」？该用户的歌单、收藏、播放历史将一并删除。`, "删除用户", { type: "warning" });
+    await ElMessageBox.confirm(t("admin.users.deleteUserConfirm", { username: user.username }), t("admin.users.deleteUser"), { type: "warning" });
   } catch { return; }
   await api.delete(`/rest/api/v1/users/${user.id}`);
-  ElMessage.success("已删除");
+  ElMessage.success(t("common.deleted"));
   loadUsers();
 }
 

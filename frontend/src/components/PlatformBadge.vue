@@ -6,6 +6,9 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   source?: string | null;
@@ -13,15 +16,18 @@ const props = defineProps<{
 
 // Platform display name + brand accent colour (visible at a glance on covers).
 const PLATFORMS: Record<string, { label: string; color: string }> = {
-  netease: { label: "网易云", color: "#e21a1a" },
-  qq: { label: "QQ音乐", color: "#12b7f5" },
-  kugou: { label: "酷狗", color: "#28c76f" },
-  kuwo: { label: "酷我", color: "#ff7f27" },
-  soda: { label: "汽水", color: "#00b8a9" },
+  netease: { label: "platform.netease", color: "#e21a1a" },
+  qq: { label: "platform.qq", color: "#12b7f5" },
+  kugou: { label: "platform.kugou", color: "#28c76f" },
+  kuwo: { label: "platform.kuwo", color: "#ff7f27" },
+  soda: { label: "platform.soda", color: "#00b8a9" },
 };
 
 const source = computed(() => (props.source || "").toLowerCase());
-const label = computed(() => PLATFORMS[source.value]?.label || "");
+const label = computed(() => {
+  const key = PLATFORMS[source.value]?.label;
+  return key ? t(key) : "";
+});
 const badgeStyle = computed(() => ({ backgroundColor: PLATFORMS[source.value]?.color || "rgba(0,0,0,.55)" }));
 </script>
 
