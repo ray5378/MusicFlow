@@ -140,6 +140,8 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.song.notFound": "歌曲不存在",
 
     "errors.renderer.invalidPeerId": "无效的 peerId",
+    "errors.renderer.castPeerOnly": "该操作仅对投屏/群组设备生效",
+    "errors.renderer.invalidDuration": "无效的定时时长",
     "errors.renderer.needsSecondsOrPosition": "需要 seconds 或 position",
     "errors.renderer.needsVolume": "需要 volume",
     "errors.renderer.needsMuted": "需要 muted(boolean)",
@@ -302,6 +304,8 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.song.notFound": "Song not found",
 
     "errors.renderer.invalidPeerId": "Invalid peerId",
+    "errors.renderer.castPeerOnly": "This operation only applies to cast/group devices",
+    "errors.renderer.invalidDuration": "Invalid sleep timer duration",
     "errors.renderer.needsSecondsOrPosition": "Need seconds or position",
     "errors.renderer.needsVolume": "Need volume",
     "errors.renderer.needsMuted": "Need muted (boolean)",

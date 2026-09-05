@@ -2934,6 +2934,44 @@ apiRoutes.post("/v1/peers/:peerId/play-mode", async (c) => {
   return c.json({ success: true });
 });
 
+// 服务器端定时暂停（sleep timer）。仅对投屏/群组(链路 A)生效:播放由服务器
+// 进行,只有服务器自己计时才可靠(客户端 App 关闭/掉线后定时仍生效)。
+// 本机/客户端 DLNA 直投的定时由客户端本地倒计时实现,此处返回不支持。
+// Body: { durationSeconds: number, finishSong?: boolean }
+// 设 0 / 无 body 无效;DELETE 取消。
+apiRoutes.post("/v1/peers/:peerId/sleep-timer", async (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed || !isCastPeer(parsed)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.castPeerOnly"), 400);
+  }
+  const body = await c.req.json().catch(() => ({} as any));
+  const seconds = Math.floor(Number(body?.durationSeconds));
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidDuration"), 400);
+  }
+  const finishSong = !!body?.finishSong;
+  getQueueManager().setSleepTimer(parsed.id, seconds * 1000, finishSong);
+  return c.json({ success: true, remainingMs: getQueueManager().sleepTimerRemaining(parsed.id) });
+});
+
+apiRoutes.delete("/v1/peers/:peerId/sleep-timer", (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (parsed && isCastPeer(parsed)) getQueueManager().clearSleepTimer(parsed.id);
+  return c.json({ success: true });
+});
+
+apiRoutes.get("/v1/peers/:peerId/sleep-timer", (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed || !isCastPeer(parsed)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.castPeerOnly"), 400);
+  }
+  const remaining = getQueueManager().sleepTimerRemaining(parsed.id);
+  return c.json(remaining == null ? { active: false } : { active: true, remainingMs: remaining });
+});
+
 // Report the current track index for a local peer (Web client → backend).
 // Body: { index: number }
 apiRoutes.post("/v1/peers/:peerId/queue/index", async (c) => {
