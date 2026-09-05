@@ -2937,7 +2937,7 @@ apiRoutes.post("/v1/peers/:peerId/play-mode", async (c) => {
 // 服务器端定时暂停（sleep timer）。仅对投屏/群组(链路 A)生效:播放由服务器
 // 进行,只有服务器自己计时才可靠(客户端 App 关闭/掉线后定时仍生效)。
 // 本机/客户端 DLNA 直投的定时由客户端本地倒计时实现,此处返回不支持。
-// Body: { durationSeconds: number, finishSong?: boolean }
+// Body: { durationSeconds: number }
 // 设 0 / 无 body 无效;DELETE 取消。
 apiRoutes.post("/v1/peers/:peerId/sleep-timer", async (c) => {
   const peerId = decodePeerId(c);
@@ -2950,8 +2950,7 @@ apiRoutes.post("/v1/peers/:peerId/sleep-timer", async (c) => {
   if (!Number.isFinite(seconds) || seconds <= 0) {
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidDuration"), 400);
   }
-  const finishSong = !!body?.finishSong;
-  getQueueManager().setSleepTimer(parsed.id, seconds * 1000, finishSong);
+  getQueueManager().setSleepTimer(parsed.id, seconds * 1000);
   return c.json({ success: true, remainingMs: getQueueManager().sleepTimerRemaining(parsed.id) });
 });
 

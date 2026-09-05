@@ -60,10 +60,8 @@ export class QueueController extends EventEmitter {
   // Per-player consecutive unplayable skips; reset on a successful cast.
   private skipCounters = new Map<string, number>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。finishSong=true 时
-  // 到点后等当前曲播完再暂停（在下一次切歌前暂停），保证暂停在可见的自然曲目边界。
-  private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number; finishSong: boolean }>();
-  private pendingPauseAfterTrack = new Set<string>();
+  // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。到点立即暂停。
+  private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number }>();
 
   constructor() { super(); this.setMaxListeners(50); }
 
@@ -197,18 +195,6 @@ export class QueueController extends EventEmitter {
     if (!q) return;
 
     if (decision === "advance" || decision === "track_changed") {
-      // 定时暂停且要求「播完整首再关」:到点后的下一次切歌前先暂停并清标志,
-      // 让暂停落在自然的曲目边界(当前曲已播完),不再切换下一首。
-      if (this.pendingPauseAfterTrack.has(id)) {
-        this.pendingPauseAfterTrack.delete(id);
-        this.clearSleepTimer(id);
-        try {
-          await this.players.get(id)?.pause();
-        } catch (e: any) {
-          log.warn(`[QueueController][sleepTimer] ${id}: pause after track failed: ${e?.message || e}`);
-        }
-        return;
-      }
       if (this.advancing.has(id)) return;
       this.advancing.add(id);
       try {
@@ -663,31 +649,20 @@ export class QueueController extends EventEmitter {
   }
 
   // ==================== 服务器端定时暂停（sleep timer） ====================
-  /** 设置该播放目标的定时暂停。durationMs 后暂停;finishSong=true 时等当前曲
-   *  播完再暂停(在下一次切歌前暂停)。重复调用会重置为新时长。 */
-  setSleepTimer(playerId: string, durationMs: number, finishSong = false): void {
+  /** 设置该播放目标的定时暂停。durationMs(ms) 后立即暂停;重复调用会重置为新时长。 */
+  setSleepTimer(playerId: string, durationMs: number): void {
     playerId = stripPlayerPrefix(playerId);
     this.clearSleepTimer(playerId);
-    this.pendingPauseAfterTrack.delete(playerId);
     const deadline = Date.now() + Math.max(0, durationMs);
     const timer = setTimeout(() => {
       this.sleepTimers.delete(playerId);
-      if (finishSong) {
-        // 等当前曲自然播完:标记待暂停,handleDecision 的切歌分支会暂停。
-        // 无激活队列时(未播放/已结束)直接暂停,避免永久悬挂。
-        const q = this.queues.get(playerId);
-        if (q?.isActive && q.currentIndex >= 0) {
-          this.pendingPauseAfterTrack.add(playerId);
-          return;
-        }
-      }
       this.transport(playerId, "pause").catch((e: any) => {
         log.warn(`[QueueController][sleepTimer] ${playerId}: pause failed: ${e?.message || e}`);
       });
     }, Math.max(0, durationMs));
     // Node 定时器在 duration 超长时自动转轮询;不 unref,确保服务器即使无其它
     // 引用也会到点触发(单测/短时任务不宜 unref)。
-    this.sleepTimers.set(playerId, { timer, deadline, finishSong });
+    this.sleepTimers.set(playerId, { timer, deadline });
   }
 
   /** 取当前剩余毫秒;未设置返回 null。 */
@@ -705,7 +680,6 @@ export class QueueController extends EventEmitter {
       clearTimeout(t.timer);
       this.sleepTimers.delete(playerId);
     }
-    this.pendingPauseAfterTrack.delete(playerId);
   }
 
   /** 组播放中新增成员:把当前曲目 cast 给新成员并 seek 到 leader 当前进度。
