@@ -205,7 +205,13 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
 
   it("completeFromSources 按 (config,{query}) 契约调用在线源(此前单参传字符串导致补全恒失败)", async () => {
     const searchCalls = await withMockSource(
-      (_config: any, _params: any) => ({ songs: [{ id: "w-1", source: "netease", name: "外部曲", artist: "外部人", album: "外部专辑", duration: 200 }] }),
+      // 导入命中门禁:候选须与期望(标题+歌手)全命中,按 query 回显对应候选。
+      (_config: any, params: any) => {
+        const q = String(params?.query || "");
+        if (q.includes("Y")) return { songs: [{ id: "w-1", source: "netease", name: "Y", artist: "X", album: "外部专辑", duration: 200 }] };
+        if (q.includes("外部曲")) return { songs: [{ id: "w-1b", source: "netease", name: "外部曲", artist: "外部人", album: "外部专辑", duration: 123 }] };
+        return { songs: [] };
+      },
       async (searchCalls) => {
         const reg = getPlugin("lb-test");
         expect(reg).toBeTruthy();
@@ -227,7 +233,13 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
 
   it("upsert 后剩余外部条目自动后台匹配(生成时未补全的,后台再经在线源补一轮)", async () => {
     const searchCalls = await withMockSource(
-      (_config: any, _params: any) => ({ songs: [{ id: "w-2", source: "netease", name: "外部曲", artist: "外部人", duration: 200 }] }),
+      // 导入命中门禁:候选须与期望(标题+歌手)全命中,按 query 回显对应候选。
+      (_config: any, params: any) => {
+        const q = String(params?.query || "");
+        if (q.includes("Y")) return { songs: [{ id: "w-2", source: "netease", name: "Y", artist: "X", duration: 200 }] };
+        if (q.includes("外部曲")) return { songs: [{ id: "w-2b", source: "netease", name: "外部曲", artist: "外部人", duration: 123 }] };
+        return { songs: [] };
+      },
       async (searchCalls) => {
         const reg = getPlugin("lb-test");
         await reg.impl.runDailyJob({ force: true }); // 生成轮:complete(X Y) + upsert 后触发 auto-match

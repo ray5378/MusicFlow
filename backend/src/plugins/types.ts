@@ -62,6 +62,7 @@ export type PluginCapability =
   | "artistInfo" // fetches artist bio/avatar via fetchArtistInfo()
   // ---- core plugins(服务端内置行为开关,端侧零改动) ----
   | "songGroup" // 同曲多源组:匹配/写入 group_id + 序列化输出 groupId/sources
+  | "importGate" // 导入命中门禁:在线导入/匹配须同时命中标题+歌手+专辑+时长才落库
   | "playPreference"; // 播放优选:首选 Local + local 失败回退平台
 
 export interface ConfigField {

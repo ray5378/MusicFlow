@@ -38,6 +38,7 @@ import { createComm } from "./comm.js";
 import { proxyFetch } from "../services/proxy.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 import { importOnlineSongs } from "../services/source/online/service.js";
+import { passesImportGate } from "../services/source/online/importGate.js";
 import { createLogger } from "../utils/logger.js";
 
 const VALID_TYPES: PluginType[] = [
@@ -742,11 +743,16 @@ async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?
   return sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(playlistId);
 }
 
-/** 未匹配本地的曲目,经已启用 source 插件(go-music-dl 等)搜索并导入本地库,返回可播 songId。 */
+/** 未匹配本地的曲目,经已启用 source 插件(go-music-dl 等)搜索并导入本地库,返回可播 songId。
+ *  候选必须通过导入命中门禁(passesImportGate:标题+歌手强制、专辑/时长按配置),
+ *  不再盲取搜索第一条——旧逻辑 songs[0] 直接导入是假源混入的第 3 条道。
+ *  opts 扩展:album/duration(秒)由调用方插件透传,提供后门禁按全维度核实。 */
 async function completeFromSources(opts: any): Promise<{ songId: string | null }> {
   const artist = String(opts?.artist || "").trim();
   const title = String(opts?.title || "").trim();
   if (!artist && !title) return { songId: null };
+  const wantAlbum = typeof opts?.album === "string" ? opts.album : "";
+  const wantDuration = Number(opts?.duration || 0); // 秒
   const query = [artist, title].filter(Boolean).join(" ");
   for (const { manifest, impl } of getEnabledByCapability("search")) {
     if (typeof impl?.search !== "function") continue;
@@ -757,20 +763,34 @@ async function completeFromSources(opts: any): Promise<{ songId: string | null }
       const config = getPluginConfig(manifest.id) || {};
       const res: any = await impl.search(config, { query });
       const songs: any[] = Array.isArray(res?.songs) ? res.songs : [];
-      const cand = songs[0];
-      if (!cand || !cand.id) continue;
-      // 归一化为 OnlineSongResult,容忍字段名差异(name/title)。
-      const normalized: any = {
-        id: cand.id,
-        source: cand.source || manifest.id,
-        name: cand.name || cand.title || title,
-        artist: cand.artist || artist,
-        album: cand.album || "",
-        duration: cand.duration || 0,
-        cover: cand.cover || "",
-        extra: cand.extra || null,
-      };
-      const imp = await importOnlineSongs(manifest.id, [normalized], { userId: systemOwnerId() });
+      // 归一化全部候选并按门禁过滤(不再盲取第一条),命中者中取时长最接近的。
+      let best: any = null;
+      let bestDurDiff = Infinity;
+      for (const cand of songs) {
+        if (!cand || !cand.id) continue;
+        const normalized: any = {
+          id: cand.id,
+          source: cand.source || manifest.id,
+          name: cand.name || cand.title || title,
+          artist: cand.artist || artist,
+          album: cand.album || "",
+          duration: cand.duration || 0,
+          cover: cand.cover || "",
+          extra: cand.extra || null,
+        };
+        const gate = passesImportGate(
+          { title, artist, album: wantAlbum, duration: wantDuration > 0 ? wantDuration : null },
+          normalized,
+        );
+          if (!gate.ok) continue;
+        // 排序:有期望时长取差值最小者;无期望时长取搜索序首位(diff=0 保证首个命中入选)。
+        const diff = wantDuration > 0 && normalized.duration > 0
+          ? Math.abs(normalized.duration - wantDuration)
+          : 0;
+        if (diff < bestDurDiff) { bestDurDiff = diff; best = normalized; }
+      }
+      if (!best) continue;
+      const imp = await importOnlineSongs(manifest.id, [best], { userId: systemOwnerId() });
       if (imp?.songs && imp.songs[0]?.id) return { songId: imp.songs[0].id };
     } catch { /* 单源失败跳过,试下一个 */ }
   }

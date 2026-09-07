@@ -80,6 +80,15 @@ function registerFakePlugin() {
           ],
         };
       },
+      // 导入命中门禁:crossVerifySongs 按「标题+歌手」搜索交叉比对,回显同元数据候选。
+      async search(_config: any, params: any) {
+        const q = params?.query || "";
+        const all = [
+          { id: "v-1", source: "netease", name: "Track 1", artist: "A", album: "", duration: 200, cover: "" },
+          { id: "v-2", source: "netease", name: "Track 2", artist: "A", album: "", duration: 210, cover: "" },
+        ];
+        return { songs: all.filter((s) => q.includes(s.name)) };
+      },
       streamUrl(config: any, song: any) {
         return "http://fake/stream";
       },

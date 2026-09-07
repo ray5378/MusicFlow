@@ -11,6 +11,7 @@ import { db } from "../../db/index.js";
 import { playlists } from "../../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { importOnlineSongs } from "../source/online/service.js";
+import { crossVerifySongs } from "../source/online/match.js";
 import { replacePlaylistSongs } from "../source/online/recommendImport.js";
 import { refreshPlaylistCounts } from "./shared.js";
 import { cacheRemoteCover } from "../playlistCover.js";
@@ -42,10 +43,17 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
     if (!Array.isArray(list) || list.length === 0) {
       throw new Error("该歌单没有可导入的歌曲");
     }
+    // 导入命中门禁:上游歌单自带 id/元数据不可信,逐首搜索交叉比对
+    // (标题+歌手+专辑+时长全命中才导),拒导的不进歌单。
+    const { verified, rejected } = await crossVerifySongs(providerId, config, plugin, list, { interactive: true });
     // 歌曲入库为在线歌曲(可播),返回 { songs, added, deduped, failed }
-    const imp = await importOnlineSongs(providerId, list, { userId, interactive: true });
+    const imp = await importOnlineSongs(providerId, verified, { userId, interactive: true });
     if (!imp?.songs?.length) {
-      throw new Error("歌曲入库失败,请检查在线源配置");
+      throw new Error(
+        rejected > 0
+          ? `没有歌曲通过导入门禁(标题/歌手/专辑/时长校验),拒导 ${rejected} 首`
+          : "歌曲入库失败,请检查在线源配置",
+      );
     }
 
     const fallbackName = (name && name.trim()) || `歌单 ${source}/${id}`;
@@ -95,6 +103,7 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
       added: imp.added,
       deduped: imp.deduped,
       failed: imp.failed,
+      rejected,
       created: !existing,
     };
   } finally {

@@ -1,7 +1,7 @@
-// Unit tests for services/source/online/match.ts — P0「已知平台 id 直通」。
-//   - onlineSongFromExternalId:source:id 解析(有效格式/非法格式)
-//   - matchUnmatchedPlaylistEntries:已知 source:id 的条目免搜索直通导入并链接;
-//     无 source:id 的条目仍走在线搜索(调用次数可验证)。
+// Unit tests for services/source/online/match.ts — 导入命中门禁时代。
+//   - matchUnmatchedPlaylistEntries:平台 id 直通已废除,所有条目(含带 source:id 的)
+//     一律在线搜索 + 门禁交叉比对;搜不到全命中候选 → no-match(保持未匹配占位)。
+//   - searchBestMatch:绑定门禁 = passesImportGate(标题+歌手强制、专辑一致、时长容差)。
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../../plugins/_env.js";
 
@@ -11,7 +11,6 @@ import { eq, and } from "drizzle-orm";
 import { songs, playlists, playlistSongs, users } from "../../../src/db/schema.js";
 import { registerPlugin, unregisterPlugin } from "../../../src/plugins/registry.js";
 import {
-  onlineSongFromExternalId,
   matchUnmatchedPlaylistEntries,
   searchBestMatch,
 } from "../../../src/services/source/online/match.js";
@@ -33,14 +32,14 @@ const manifestOf = {
 
 const fakeConfig = { baseUrl: "http://gm:18080" };
 
-function enableProvider() {
+function enableProvider(searchImpl?: (_config: any, params: any) => Promise<any>) {
   const searchCalls: string[] = [];
   const provider = {
     id: PROVIDER,
     manifest: manifestOf,
     search: async (_config: any, params: any) => {
       searchCalls.push(params.query || "");
-      return { songs: [] };
+      return searchImpl ? searchImpl(_config, params) : { songs: [] };
     },
     streamUrl: (_config: any, song: any) =>
       `http://gm:18080/music/download?id=${song.id}&source=${song.source}&name=${encodeURIComponent(song.name)}`,
@@ -61,7 +60,7 @@ function resetRows() {
   sqlite.prepare("DELETE FROM users WHERE id = ?").run(USER);
 }
 
-function seed(entries: { id: string; title: string; artist: string; extId: string | null }[]) {
+function seed(entries: { id: string; title: string; artist: string; album?: string; extId: string | null }[]) {
   db.insert(users).values({ id: USER, username: "match-test", password: "x", salt: "x", subsonicSalt: "x" }).run();
   db.insert(playlists).values({ id: PL, name: "match-test", ownerId: USER, createdAt: new Date().toISOString() }).run();
   entries.forEach((e, i) => {
@@ -73,6 +72,7 @@ function seed(entries: { id: string; title: string; artist: string; extId: strin
       externalSongId: e.extId,
       externalTitle: e.title,
       externalArtist: e.artist,
+      externalAlbum: e.album ?? null,
       externalDuration: 180000,
     }).run();
   });
@@ -88,71 +88,94 @@ afterAll(() => {
   unregisterPlugin(PROVIDER);
 });
 
-describe("onlineSongFromExternalId", () => {
-  it("解析合法 source:id 并映射字段(时长 ms→s)", () => {
-    const s = onlineSongFromExternalId({
-      externalSongId: "netease:123456",
-      externalTitle: "T",
-      externalArtist: "A",
-      externalAlbum: "AL",
-      externalDuration: 180000,
-    });
-    expect(s).toEqual({
-      id: "123456",
-      source: "netease",
-      name: "T",
-      artist: "A",
-      album: "AL",
-      duration: 180,
-      cover: "",
-    });
-  });
-
-  it("非法格式返回 null(走搜索兜底)", () => {
-    for (const bad of [null, "", "no-colon", ":id", "netease:", "has space:1", "http://x/y", "a.b:c"]) {
-      expect(onlineSongFromExternalId({ externalSongId: bad, externalTitle: "T", externalArtist: "A" }), `input=${bad}`).toBeNull();
-    }
-  });
-});
-
-describe("matchUnmatchedPlaylistEntries — 已知 source:id 直通", () => {
-  it("已知 source:id 条目免搜索直通导入并链接;无 id 条目仍走搜索", async () => {
-    const { searchCalls, provider } = enableProvider();
+describe("matchUnmatchedPlaylistEntries — 平台 id 直通已废除,一律搜索交叉比对", () => {
+  it("带 source:id 的条目也必须经搜索命中才导入(命中后以搜索验证过的候选落库)", async () => {
+    const { searchCalls, provider } = enableProvider(async (_c: any, params: any) => ({
+      songs: (params.query || "").includes("直通曲")
+        ? [{ id: "cand-1", source: "netease", name: "直通曲", artist: "直通人", album: "真专辑", duration: 180 }]
+        : [],
+    }));
     seed([
-      { id: "k1", title: "直通曲", artist: "直通人", extId: "netease:111" },
-      { id: "k2", title: "未知曲", artist: "未知人", extId: "ext-only" }, // 非 source:id → 走搜索
+      { id: "k1", title: "直通曲", artist: "直通人", album: "真专辑", extId: "netease:111" },
+      { id: "k2", title: "未知曲", artist: "未知人", extId: null },
     ]);
 
     const res = await matchUnmatchedPlaylistEntries(PROVIDER, fakeConfig, provider as any, PL);
 
-    // 直通条目:matched 且不触发搜索
-    const known = res.results.find((r) => r.entryId === (db.select().from(playlistSongs).where(and(eq(playlistSongs.playlistId, PL), eq(playlistSongs.externalSongId, "netease:111"))).get() as any).id);
-    expect(known?.status).toBe("matched");
-
-    // 无 id 条目:走了搜索(调用 1 次,空结果 → no-match)
-    expect(searchCalls.length).toBe(1);
-    expect(searchCalls[0]).toContain("未知曲");
-    const unknown = res.results.find((r) => r.status === "no-match");
-    expect(unknown).toBeTruthy();
-
-    // 直通条目已链接为可播 + 歌曲落库(fingerprint/streamUrl 正确构造)
+    // 两条目都发了真实搜索(直通已废除)。
+    expect(searchCalls.length).toBe(2);
+    // 带上游 id 的条目:搜索命中且过门禁 → matched。
     const row = db.select().from(playlistSongs).where(and(eq(playlistSongs.playlistId, PL), eq(playlistSongs.externalSongId, "netease:111"))).get() as any;
     expect(row.playable).toBe(1);
     expect(row.songId).toBeTruthy();
+    // 落库的是【搜索验证过的候选】,不是上游 id。
     const song = db.select().from(songs).where(eq(songs.id, row.songId)).get() as any;
-    expect(song).toBeTruthy();
-    expect(song.fingerprint).toBe("go-music-dl:netease:111");
+    expect(song.fingerprint).toBe("go-music-dl:netease:cand-1");
     expect(song.title).toBe("直通曲");
-    expect(song.artist).toBe("直通人");
-    expect(song.duration).toBe(180);
-    expect(song.url).toBe("http://gm:18080/music/download?id=111&source=netease&name=%E7%9B%B4%E9%80%9A%E6%9B%B2");
     expect(song.type).toBe("web");
+    // 无候选条目 → no-match,保持未匹配占位。
+    const row2 = db.select().from(playlistSongs).where(and(eq(playlistSongs.playlistId, PL), eq(playlistSongs.externalTitle, "未知曲"))).get() as any;
+    expect(row2.playable).toBe(0);
+    expect(row2.songId).toBeNull();
+    const unknown = res.results.find((r) => r.entryId === row2.id);
+    expect(unknown?.status).toBe("no-match");
+
+    resetRows();
+  });
+
+  it("搜索无候选(如元数据冒名的假源在搜索里不存在)→ 即使带 source:id 也拒导", async () => {
+    const { provider } = enableProvider(); // 恒空结果
+    seed([{ id: "f1", title: "我们的歌", artist: "王力宏", album: "K情歌 5", extId: "qq:fake-id" }]);
+
+    const res = await matchUnmatchedPlaylistEntries(PROVIDER, fakeConfig, provider as any, PL);
+
+    expect(res.matched).toBe(0);
+    expect(res.noMatch).toBe(1);
+    const row = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, PL)).get() as any;
+    expect(row.playable).toBe(0);
+    expect(row.songId).toBeNull();
+
+    resetRows();
+  });
+
+  it("假源回放:候选标题/歌手/时长全对上但专辑是合辑(与期望不一致)→ 门禁拒绑", async () => {
+    const { provider } = enableProvider(async (_c: any, params: any) => ({
+      songs: (params.query || "").includes("我们的歌")
+        ? [{ id: "fake-1", source: "qq", name: "我们的歌", artist: "王力宏", album: "K情歌 5", duration: 247 }]
+        : [],
+    }));
+    seed([{ id: "g1", title: "我们的歌", artist: "王力宏", album: "改变自己", extId: "qq:whatever" }]);
+
+    const res = await matchUnmatchedPlaylistEntries(PROVIDER, fakeConfig, provider as any, PL);
+
+    expect(res.matched).toBe(0);
+    expect(res.noMatch).toBe(1);
+    expect(res.results[0]!.message).toContain("album");
+    const row = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, PL)).get() as any;
+    expect(row.playable).toBe(0);
+    expect(row.songId).toBeNull();
+
+    resetRows();
+  });
+
+  it("候选无专辑字段(无法核实)→ 门禁拒绑", async () => {
+    const { provider } = enableProvider(async (_c: any, params: any) => ({
+      songs: (params.query || "").includes("某首歌")
+        ? [{ id: "na-1", source: "qq", name: "某首歌", artist: "某人", album: "", duration: 180 }]
+        : [],
+    }));
+    seed([{ id: "h1", title: "某首歌", artist: "某人", album: "正经专辑", extId: null }]);
+
+    const res = await matchUnmatchedPlaylistEntries(PROVIDER, fakeConfig, provider as any, PL);
+
+    expect(res.matched).toBe(0);
+    expect(res.results[0]!.message).toContain("album");
 
     resetRows();
   });
 });
 
-describe("searchBestMatch — 同名异曲(歌手不符)拒绑", () => {
+describe("searchBestMatch — 导入命中门禁", () => {
   function providerReturning(cands: any[]) {
     return {
       id: PROVIDER,
@@ -221,6 +244,47 @@ describe("searchBestMatch — 同名异曲(歌手不符)拒绑", () => {
     ]);
     const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
       entryId: 1, title: "听妈妈的话(Live)", artist: "周杰伦", duration: 180000,
+    });
+    expect(m.status).toBe("no-match");
+  });
+
+  it("期望带专辑而候选专辑不一致 → no-match(专辑门禁)", async () => {
+    const provider = providerReturning([
+      { id: "r7", source: "netease", name: "我们的歌", artist: "王力宏", album: "K情歌 5", duration: 247 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "我们的歌", artist: "王力宏", album: "改变自己", duration: 247000,
+    });
+    expect(m.status).toBe("no-match");
+  });
+
+  it("专辑一致(含括号/空白差异)→ matched", async () => {
+    const provider = providerReturning([
+      { id: "r8", source: "netease", name: "我们的歌", artist: "王力宏", album: "改变自己 (Change Me)", duration: 247 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "我们的歌", artist: "王力宏", album: "改变自己(Change Me)", duration: 247000,
+    });
+    expect(m.status).toBe("matched");
+    expect(m.best!.id).toBe("r8");
+  });
+
+  it("候选时长超容差 → no-match(时长门禁)", async () => {
+    const provider = providerReturning([
+      { id: "r9", source: "netease", name: "同名曲", artist: "期望歌手", album: "同专辑", duration: 300 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "同名曲", artist: "期望歌手", album: "同专辑", duration: 180000,
+    });
+    expect(m.status).toBe("no-match");
+  });
+
+  it("候选无时长但期望有时长 → no-match(无法核实不放过)", async () => {
+    const provider = providerReturning([
+      { id: "r10", source: "netease", name: "同名曲", artist: "期望歌手", album: "同专辑", duration: 0 },
+    ]);
+    const m = await searchBestMatch(PROVIDER, fakeConfig, provider as any, {
+      entryId: 1, title: "同名曲", artist: "期望歌手", album: "同专辑", duration: 180000,
     });
     expect(m.status).toBe("no-match");
   });

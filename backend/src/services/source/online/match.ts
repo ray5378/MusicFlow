@@ -13,6 +13,7 @@ import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js"
 import { runCoverBackfill } from "../../covers.js";
 import { OnlineSongResult } from "./types.js";
 import { importOnlineSong, importOnlineSongs } from "./service.js";
+import { passesImportGate } from "./importGate.js";
 
 export interface MatchTarget {
   entryId: number;
@@ -20,8 +21,7 @@ export interface MatchTarget {
   artist: string;
   album?: string;
   duration?: number; // ms
-  /** 已知平台 id(source:id 形式,如 "netease:123456")。存在时直通导入,免在线搜索。 */
-  externalSongId?: string;
+  // 注:曾有的 externalSongId(平台 id 直通)已废除——所有条目一律搜索+门禁交叉比对。
 }
 
 export interface MatchOutcome {
@@ -44,43 +44,12 @@ function artistTokens(artist: string): string[] {
 }
 
 /**
- * 已知平台 id 直通(免搜索)。
- *
- * 外置插件(go-music-dl 私人歌单等)写入的外部条目 external_song_id 形如
- * "netease:123456"(source:平台歌曲 id)——该 id 本就来自上游歌单页面,可直接
- * 构造歌曲记录交给 importOnlineSongs(与平台推荐 Path A 同路径)导入,无需按
- * 「歌名+歌手」重新在线搜索。修复前 auto-match 对每一首占位都发一次
- * /music/search(8587 首 = 8587 次冗余网络往返,CPU 平均 57%、全程 1~2 小时),
- * 直通后秒级完成、零冗余请求。
- *
- * 无法解析(非 source:id 格式、source 非法字符、id 为空)时返回 null,调用方
- * 回退在线搜索,行为与修复前一致。
+ * 已知平台 id 直通已废除(v2.3.0 导入命中门禁):
+ * 上游歌单自带的 source:id 不再免搜索直接导入——元数据冒名的假源(合辑冒名
+ * 翻唱等)正是经这条道混入库的(如 QQ 私人歌单里的《我们的歌》/K情歌 5)。
+ * 现在所有条目一律经在线搜索 + 导入命中门禁(passesImportGate)交叉比对,
+ * 搜不到全命中候选就保持未匹配占位,绝不落库。
  */
-export function onlineSongFromExternalId(entry: {
-  externalSongId?: string | null;
-  externalTitle?: string | null;
-  externalArtist?: string | null;
-  externalAlbum?: string | null;
-  externalDuration?: number | null;
-}): OnlineSongResult | null {
-  const raw = String(entry.externalSongId || "");
-  const colon = raw.indexOf(":");
-  if (colon <= 0) return null;
-  const source = raw.slice(0, colon).trim();
-  const id = raw.slice(colon + 1).trim();
-  // source 与 id 都必须是字母数字 _ -(平台 slug / 平台歌曲 id 均如此)——避免把
-  // 任意字符串(URL、含空格的描述串等)误当 source:id 而构造出无法流式播放的歌曲。
-  if (!/^[a-zA-Z0-9_-]+$/.test(source) || !/^[a-zA-Z0-9_-]+$/.test(id)) return null;
-  return {
-    id,
-    source,
-    name: String(entry.externalTitle || ""),
-    artist: String(entry.externalArtist || ""),
-    album: String(entry.externalAlbum || ""),
-    duration: (entry.externalDuration || 0) / 1000, // ms → 秒
-    cover: "",
-  };
-}
 
 // Score a provider candidate against a wanted track. Higher is better.
 function scoreCandidate(cand: OnlineSongResult, t: MatchTarget): number {
@@ -108,6 +77,12 @@ function scoreCandidate(cand: OnlineSongResult, t: MatchTarget): number {
     const diff = Math.abs(cand.duration * 1000 - t.duration);
     if (diff < 5000) score += 10;
     else if (diff < 15000) score += 5;
+  }
+
+  // 专辑软加分(仅排序用;硬门禁在 passesImportGate):同歌名同歌手多版本时,
+  // 专辑一致者优先——减少「K情歌合辑」类冒名候选排在前面挤掉正版的机会。
+  if (t.album && cand.album) {
+    if (normalizeTitleStrict(cand.album) === normalizeTitleStrict(t.album)) score += 6;
   }
 
   return score;
@@ -173,19 +148,21 @@ export async function searchBestMatch(
     .sort((a: { score: number }, b: { score: number }) => b.score - a.score);
 
   const best = ranked[0]!;
-  // Only auto-link when the title strictly matched (skip <15 即标题未全串对齐);
-  // a pure artist-with-different-song hit is too risky to auto-bind.
-  // 收紧两层:① 歌名只保留中英文归一后必须「全串相等」(后缀原样保留,有后缀只能配
-  // 带相同后缀、无后缀只能配无后缀);② 期望曲带歌手时,候选歌手必须与期望首位歌手
-  // 一致——否则同歌名异歌手/同后缀异歌名的结果会被误绑为「同名异曲」。
-  const wantArtists = artistTokens(want.artist);
-  const titleOk = best.s.name != null &&
-    normalizeTitleStrict(best.s.name) === normalizeTitleStrict(want.title || "");
-  const primary = wantArtists[0] || "";
-  const artistOk = !primary || artistTokens(best.s.artist || "")
-    .some((ca) => primary === ca || primary.includes(ca) || ca.includes(primary));
-  if (best.score < 15 || !titleOk || !artistOk) {
-    const out = { entryId: want.entryId, title: want.title, status: "no-match" as const, message: `未可靠匹配(${best.s.name})` };
+  // 绑定门禁 = 导入命中门禁(passesImportGate):规范化标题 + 歌手(强制)+
+  // 专辑一致(开关)+ 时长容差全命中才允许绑定/导入。此前只查标题全串相等 +
+  // 首位歌手 + score≥15,专辑/时长无门禁,合辑冒名假源(标题/歌手/时长全对上)
+  // 会被误绑——现统一收口到门禁,维度语义见 importGate.ts。
+  const gate = passesImportGate(
+    {
+      title: want.title || "",
+      artist: want.artist,
+      album: want.album,
+      duration: (want.duration || 0) / 1000, // ms → 秒
+    },
+    best.s,
+  );
+  if (!gate.ok) {
+    const out = { entryId: want.entryId, title: want.title, status: "no-match" as const, message: `未通过导入门禁[${gate.reason}]:${gate.detail || ""}(最佳候选:${best.s.name})` };
     if (cache) cache.set(cacheKey, { status: "no-match", message: out.message });
     return out;
   }
@@ -204,12 +181,8 @@ export async function matchToOnlineSong(
   want: MatchTarget,
 ): Promise<MatchOutcome> {
   try {
-    // P0:已知 source:id 直通(与批量 auto-match 同路径)——id 本就来自上游歌单,
-    // 免一次 /music/search 往返,避免「已知答案却再搜一遍」的浪费。
-    const known = onlineSongFromExternalId(want);
-    const m = known
-      ? { entryId: want.entryId, title: want.title, status: "matched" as const, best: known, score: 100 }
-      : await searchBestMatch(providerId, config, provider, want);
+    // 平台 id 直通已废除:一律走搜索 + 门禁交叉比对(假源正是从直通混入的)。
+    const m = await searchBestMatch(providerId, config, provider, want);
     if (m.status !== "matched" || !m.best) {
       return { entryId: want.entryId, title: want.title, status: m.status, message: m.message };
     }
@@ -263,9 +236,9 @@ export async function matchUnmatchedPlaylistEntries(
   let noMatch = 0, error = 0;
 
   // ---- 阶段1:并发搜索 + 打分(不落库),每 10 首让行 ----
-  // P0:有 source:id 的条目直通(构造歌曲,免搜索),只有真正需要搜索的才计入节流。
   // 批内结果缓存:同一歌单里重复 (title,artist)(同专辑多曲、多 source id 的同一首)
   // 只发一次真实在线搜索,后续命中直接沿用 first 结果(截断重复网络往返 + 打分 CPU)。
+  // 注意:平台 id 直通已废除——所有条目(含带 source:id 的)一律搜索 + 门禁交叉比对。
   const searchCache = new Map<string, SearchMatchCache>();
   let searchedSinceSleep = 0;
   const worker = async () => {
@@ -278,22 +251,15 @@ export async function matchUnmatchedPlaylistEntries(
         artist: e.externalArtist || "",
         album: e.externalAlbum || undefined,
         duration: e.externalDuration || undefined,
-        externalSongId: e.externalSongId || undefined,
       };
-      const known = onlineSongFromExternalId(e);
-      let m: { entryId: number; title: string; status: "matched" | "no-match" | "error"; best?: OnlineSongResult; score?: number; message?: string };
-      if (known) {
-        m = { entryId: target.entryId, title: target.title, status: "matched", best: known, score: 100 };
-      } else {
-        m = await searchBestMatch(providerId, config, provider, target, searchCache);
-        // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
-        // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。仅对真实网络搜索节流。
-        searchedSinceSleep++;
-        if (searchedSinceSleep % 10 === 0) await sleepBetweenBatch();
-      }
+      const m = await searchBestMatch(providerId, config, provider, target, searchCache);
+      // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
+      // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。
+      searchedSinceSleep++;
+      if (searchedSinceSleep % 10 === 0) await sleepBetweenBatch();
       if (m.status === "matched" && m.best) {
         matchedByEntry.set(e.id, { best: m.best, fp: `${providerId}:${m.best.source}:${m.best.id}`, title: target.title });
-        results[i] = { entryId: target.entryId, title: target.title, status: "matched", matchedSource: m.best.source, matchedName: m.best.name, message: known ? "已知平台id直通" : "搜索命中,待导入" };
+        results[i] = { entryId: target.entryId, title: target.title, status: "matched", matchedSource: m.best.source, matchedName: m.best.name, message: "搜索命中并通过导入门禁,待导入" };
       } else {
         results[i] = { entryId: target.entryId, title: target.title, status: m.status, message: m.message };
         if (m.status === "no-match") noMatch++;
@@ -359,4 +325,61 @@ export async function matchUnmatchedPlaylistEntries(
   }
 
   return { total: results.length, matched, noMatch, error, results };
+}
+
+/**
+ * 上游歌单/整单导入的批量交叉比对(导入命中门禁第 4 条道)。
+ *
+ * 每日推荐同步、歌单/专辑搜索「加入库」等路径拿到的歌曲自带上游平台 id 与
+ * 元数据,旧逻辑直接 importOnlineSongs 落库——元数据冒名的假源(如 QQ 私人
+ * 歌单里的《我们的歌》/K情歌 5 合辑翻唱)正是经这条道混入库的。现改为:
+ * 每首先按「标题+歌手」在线搜索,候选须通过导入命中门禁(passesImportGate),
+ * 命中的以【搜索验证过的候选】导入(替换原上游对象),搜不到全命中候选则拒导。
+ *
+ * 性能:批内 (title,artist) 结果缓存(重复标题只搜一次)+ batchConcurrency 并发
+ * + sleepBetweenBatch 节流,与 matchUnmatchedPlaylistEntries 同节奏。
+ */
+export async function crossVerifySongs(
+  providerId: string,
+  config: any,
+  provider: any,
+  songs: OnlineSongResult[],
+  opts?: { interactive?: boolean },
+): Promise<{ verified: OnlineSongResult[]; rejected: number }> {
+  const verified: OnlineSongResult[] = [];
+  let rejected = 0;
+  if (!Array.isArray(songs) || songs.length === 0) return { verified, rejected };
+
+  const cache = new Map<string, SearchMatchCache>();
+  let next = 0;
+  const worker = async () => {
+    while (next < songs.length) {
+      const i = next++;
+      const s = songs[i]!;
+      const m = await searchBestMatch(
+        providerId,
+        config,
+        provider,
+        {
+          entryId: i,
+          title: s.name || "",
+          artist: s.artist || "",
+          album: s.album || undefined,
+          duration: s.duration ? Math.round(s.duration * 1000) : undefined, // 秒 → ms
+        },
+        cache,
+      );
+      if (m.status === "matched" && m.best) {
+        verified.push(m.best);
+      } else {
+        rejected++;
+      }
+      // 节流:后台批量(每日推荐等)与 auto-match 同节奏(sleepBetweenBatch:档位 +
+      // ELD 自适应);交互式导入(搜索加入库)走全速,不 sleep。
+      if (!opts?.interactive) await sleepBetweenBatch();
+    }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(batchConcurrency(), songs.length)) }, () => worker());
+  await Promise.all(workers);
+  return { verified, rejected };
 }

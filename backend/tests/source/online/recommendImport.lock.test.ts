@@ -36,6 +36,11 @@ function registerProvider(calls: { recommend: number }) {
     async playlistSongs() {
       return { songs: [{ id: "101", source: "netease", name: "Song", artist: "Artist", album: "Album", duration: 200 }] };
     },
+    // 导入命中门禁:crossVerifySongs 会按「标题+歌手」搜索交叉比对,回显同元数据
+    // 候选(全命中)让验证通过。
+    async search(_config: any, params: any) {
+      return { songs: [{ id: "101", source: "netease", name: "Song", artist: "Artist", album: "Album", duration: 200 }] };
+    },
     streamUrl: (_c: any, s: any) => `http://p1/stream?id=${s.id}`,
   };
   registerPlugin(manifest as any, impl);

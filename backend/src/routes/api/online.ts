@@ -17,7 +17,7 @@ import { playlistSongs, playlists } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "../../services/source/online/index.js";
 import { importOnlineSongs } from "../../services/source/online/service.js";
-import { matchUnmatchedPlaylistEntries, matchToOnlineSong } from "../../services/source/online/match.js";
+import { matchUnmatchedPlaylistEntries, matchToOnlineSong, crossVerifySongs } from "../../services/source/online/match.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { touch } from "../../services/memory/reclaim.js";
 import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
@@ -238,7 +238,6 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
       artist: entry.externalArtist || "",
       album: entry.externalAlbum || undefined,
       duration: entry.externalDuration || undefined,
-      externalSongId: entry.externalSongId || undefined,
     });
     return c.json({ success: result.status === "matched", ...result });
   } catch (e: any) {
@@ -262,8 +261,10 @@ onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIS
     return c.json({ success: false, error: e.message || translate("errors.search.queryFailed") });
   }
 });
-// Body: { songs: OnlineSongResult[], playlistId?: string }
+// Body: { songs: OnlineSongResult[], playlistId?: string, verified?: boolean }
 // Returns per-song DB ids (deduped rows are reported too).
+// 导入命中门禁: songs 若来自用户亲选的搜索结果(verified=true)直接入库;
+// 否则(上游歌单条目等)逐首搜索交叉比对,全命中才导,拒导的不落库。
 onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
@@ -274,8 +275,20 @@ onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_
   if (!songList || songList.length === 0) return c.json({ success: false, error: translate("errors.import.noSongs") });
   const playlistId = typeof body.playlistId === "string" ? body.playlistId : undefined;
   try {
-    const result = await importOnlineSongs(providerId, songList, { playlistId, userId: user?.id });
-    return c.json({ success: true, ...result });
+    let toImport = songList;
+    let rejected = 0;
+    if (body.verified !== true) {
+      const configured = getConfiguredProvider(providerId);
+      if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+      const r = await crossVerifySongs(providerId, configured.config, configured.provider, songList);
+      toImport = r.verified;
+      rejected = r.rejected;
+      if (!toImport.length) {
+        return c.json({ success: false, error: `没有歌曲通过导入门禁(标题/歌手/专辑/时长校验),拒导 ${rejected} 首`, rejected });
+      }
+    }
+    const result = await importOnlineSongs(providerId, toImport, { playlistId, userId: user?.id });
+    return c.json({ success: true, rejected, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || translate("errors.import.failed") });
   }

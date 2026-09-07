@@ -6,7 +6,6 @@ import "../../plugins/_env.js";
 import { describe, it, expect } from "vitest";
 import { buildNeteaseTrack, extractNeteasePlaylistId } from "../../../src/services/plugin/importers/netease.js";
 import { parseQQSongs, extractQQPlaylistId, extractQQToplistId } from "../../../src/services/plugin/importers/qq.js";
-import { onlineSongFromExternalId } from "../../../src/services/source/online/match.js";
 
 describe("P4 netease importer 前缀", () => {
   it("buildNeteaseTrack 产出 netease:<id>,字段映射正确", () => {
@@ -25,14 +24,11 @@ describe("P4 netease importer 前缀", () => {
     expect(buildNeteaseTrack(null).externalId).toBe("");
   });
 
-  it("前缀 id 能被 P0 onlineSongFromExternalId 直通解析", () => {
-    const s = onlineSongFromExternalId({
-      externalSongId: "netease:123456",
-      externalTitle: "T",
-      externalArtist: "A",
-    });
-    expect(s?.source).toBe("netease");
-    expect(s?.id).toBe("123456");
+  it("前缀 id 保留在 externalId(直通已废除,由后台 auto-match 搜索交叉比对)", () => {
+    // v2.3.0 导入命中门禁:平台 id 直通已废除,前缀 id 仅作为歌单条目的外部标识,
+    // 匹配一律经在线搜索 + passesImportGate(importGate.test.ts 覆盖维度语义)。
+    const t = buildNeteaseTrack({ id: 123456, name: "T", ar: [{ name: "A" }], al: { name: "AL" }, dt: 200000 });
+    expect(t.externalId).toBe("netease:123456");
   });
 });
 
@@ -56,14 +52,9 @@ describe("P4 qq importer 前缀", () => {
     expect(list[0].externalId).toBe("");
   });
 
-  it("前缀 id 能被 P0 onlineSongFromExternalId 直通解析", () => {
-    const s = onlineSongFromExternalId({
-      externalSongId: "qq:M500abc",
-      externalTitle: "S",
-      externalArtist: "X",
-    });
-    expect(s?.source).toBe("qq");
-    expect(s?.id).toBe("M500abc");
+  it("前缀 id 保留在 externalId(直通已废除,由后台 auto-match 搜索交叉比对)", () => {
+    const list = parseQQSongs([{ songmid: "M500abc", songname: "S", singer: [{ name: "X" }], albumname: "B", interval: 210 }]);
+    expect(list[0].externalId).toBe("qq:M500abc");
   });
 });
 

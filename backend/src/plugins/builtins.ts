@@ -47,6 +47,7 @@ import { artistInfoManifest, artistInfoPlugin } from "../services/plugin/artistI
 // ---- core (服务端内置行为开关:多源组 / 播放优选,端侧零改动) ----
 import { songGroupManifest, songGroupPlugin } from "../services/plugin/core/songGroup.js";
 import { playPreferenceManifest, playPreferencePlugin } from "../services/plugin/core/playPreference.js";
+import { importGateManifest, importGatePlugin } from "../services/plugin/core/importGate.js";
 
 export interface BuiltinPlugin {
   manifest: PluginManifest;
@@ -94,6 +95,8 @@ export const BUILTIN_ARTIST_PLUGINS: BuiltinPlugin[] = [
 export const BUILTIN_CORE_PLUGINS: BuiltinPlugin[] = [
   { manifest: songGroupManifest, impl: songGroupPlugin },
   { manifest: playPreferenceManifest, impl: playPreferencePlugin },
+  // 导入命中门禁:在线导入/匹配的统一关卡(配置项:专辑一致/时长容差)。
+  { manifest: importGateManifest, impl: importGatePlugin },
 ];
 
 /** All built-in plugins (any type). */

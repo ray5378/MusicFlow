@@ -223,6 +223,26 @@
 
 - 后端 `CAP_METHODS` / `VALID_CAPS` / 每日调度器 / 插件校验脚本（`check.mjs`）必须同时识别 `localPlatformRecommend`（`recommendLocal` + `runDailyJob`），否则插件无法加载/被每日调度/通过校验。
 
+### 1.6.2 导入命中门禁（v2.3.0+，根治元数据冒名假源混入）
+
+> **问题**：QQ 私人歌单直通导入把元数据冒名的假源（如《我们的歌》/K情歌 5 合辑翻唱）带进曲库并经指纹去重扩散到 26 个歌单。旧链路五条导入道松紧不一：auto-match 只查标题+歌手、宿主补全 `host.sources.complete` 盲取搜索第一条、平台 id 直通与上游歌单整单导入零验证。
+
+> **根治**：所有在线歌曲导入/匹配统一经过「导入命中门禁」（`core-import-gate` 内置插件，配置独立）：候选必须同时命中 **规范化标题 + 规范化歌手（强制，不可关）+ 专辑一致（开关，默认开）+ 时长差 ≤ 容差（可设，默认 1s）** 才允许落库；任何一条不中，条目保持未匹配占位。
+
+| 导入道 | 旧行为 | 新行为 |
+| --- | --- | --- |
+| 歌单 auto-match / 单曲匹配（`match.ts searchBestMatch`） | 标题+歌手+score≥15 | 全门禁（`passesImportGate`），score 仅排序 + 专辑加分 |
+| 平台 id 直通（`onlineSongFromExternalId`） | 免搜索直接导入（**已废除**） | 一律在线搜索 + 门禁交叉比对，以搜索验证过的候选落库 |
+| 宿主补全（`host.sources.complete` → `completeFromSources`） | 盲取 `songs[0]` | 门禁过滤全部候选，取时长最接近命中者；插件透传 album/duration |
+| 上游歌单整单导入（每日推荐 / 歌单专辑「加入库」/ `/v1/online/import`） | 直接 `importOnlineSongs` | `crossVerifySongs` 逐首搜索交叉比对（批内缓存 + 节流；交互式直通不节流），拒导计数上报 |
+
+**硬约束**
+
+- 规范化统一用 `normalizeTitleStrict`（中英文归一、剔除符号空白；版本词 live/remix 保留），标题维度「全串相等」语义与旧 auto-match 一致。
+- 期望侧缺字段（无专辑/无歌手/无时长）→ 对应维度跳过；候选侧缺字段 → 视为无法核实，不命中（宁可拒导，不可错导）。
+- 用户亲选搜索结果的入库路径（`song-search import`）视为已验证，不重复比对。
+- 直通废除后带平台 id 的歌单条目匹配耗时增加属预期（批内缓存 + batchConcurrency + sleepBetweenBatch 兜底）；宿主补全/测试桩必须回显与期望元数据全命中的候选才能通过门禁。
+
 ***
 
 ## 二、数据模型契约（SQLite）

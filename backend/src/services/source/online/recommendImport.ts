@@ -16,6 +16,7 @@ import { playlists, playlistSongs } from "../../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { getConfiguredProvider } from "./index.js";
 import { importOnlineSongs } from "./service.js";
+import { crossVerifySongs } from "./match.js";
 import { OnlinePlaylistInfo } from "./types.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.js";
 import { refreshPlaylistCounts } from "../../plugin/shared.js";
@@ -187,7 +188,10 @@ export async function importRecommendPlaylist(
   }
 
   const { songs: list } = await configured.provider.playlistSongs(configured.config, info.source, info.id);
-  const imp = await importOnlineSongs(providerId, list, { userId: opts?.userId });
+  // 导入命中门禁:上游歌单自带 id/元数据不可信,逐首搜索交叉比对
+  // (标题+歌手+专辑+时长全命中才导),拒导的计入 rejected,绝不落库。
+  const { verified, rejected } = await crossVerifySongs(providerId, configured.config, configured.provider, list);
+  const imp = await importOnlineSongs(providerId, verified, { userId: opts?.userId });
   const displayName = truncateName(info.name);
 
   // 平台歌单音乐为 0(空歌单)→ 自动删除本地对应歌单,不保留空占位。
