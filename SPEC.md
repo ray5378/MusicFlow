@@ -239,9 +239,11 @@
 **硬约束**
 
 - 规范化统一用 `normalizeTitleStrict`（中英文归一、剔除符号空白；版本词 live/remix 保留），标题维度「全串相等」语义与旧 auto-match 一致。
+- **归一化盲区原文回退（v2.3.1+）**：`normalizeTitleStrict` 只保留英数字与汉字——假名/谚文/纯符号标题归一为空串，混合文字（如「サントラ盤」）会丢信息（只剩「盤」）。所有标题/专辑/歌手比对统一走 `strictNormEquals`（`shared.ts`）：原文全等即等；任一侧含会被剥离的字母数字（`\p{L}\p{N}` 判定）→ 归一化有损，按不等处理（宁可拒，不可错）；否则归一化比较容忍空白/符号/全半角差异。`searchBestMatch` 结果缓存键用原文 trim+lowercase（归一键会让所有假名歌共享同一缓存条目）。
 - 期望侧缺字段（无专辑/无歌手/无时长）→ 对应维度跳过；候选侧缺字段 → 视为无法核实，不命中（宁可拒导，不可错导）。
 - 用户亲选搜索结果的入库路径（`song-search import`）视为已验证，不重复比对。
 - 直通废除后带平台 id 的歌单条目匹配耗时增加属预期（批内缓存 + batchConcurrency + sleepBetweenBatch 兜底）；宿主补全/测试桩必须回显与期望元数据全命中的候选才能通过门禁。
+- **新增任何在线导入/匹配路径必须绑定门禁**：一律经 `passesImportGate` 或 `crossVerifySongs`，禁止「只搜不验」「盲取第一条」「平台 id 直通」形态；review 时把「该路径的候选是否全量过门禁」当作必查项（本条为 §1.6.2 根治契约的准入条件，违者按架构回退处理）。
 
 ***
 
@@ -538,6 +540,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 □ 11. 新代码/新端点使用 apiError(code, message) 与 createLogger()，未裸造错误体/裸 console
 □ 12. 鉴权写操作（apiKey/密码/用户名变更）已调用 invalidateAuthCaches()
 □ 13. 面向用户的文案已接入 i18n（前端 t() / 后端 errors.* / 插件 i18n.en），无裸中文硬编码，zh/en 键对齐
+□ 14. 新增任何在线歌曲导入/匹配路径必须绑定导入命中门禁（passesImportGate / crossVerifySongs，见 §1.6.2）；标题/专辑/歌手比对用 strictNormEquals（勿裸用 normalizeTitleStrict 相等比较——假名/谚文/纯符号归一化有损，会误判）
 ```
 
 ***

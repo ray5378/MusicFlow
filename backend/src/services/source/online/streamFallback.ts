@@ -15,7 +15,7 @@ import { db } from "../../../db/index.js";
 import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest } from "../../../plugins/registry.js";
-import { normalizeTitleStrict } from "../../plugin/shared.js";
+import { strictNormEquals } from "../../plugin/shared.js";
 
 // Bounded in-memory caches. Both grow with every web song played, so enforce a
 // FIFO cap to keep memory usage bounded on long-running servers.
@@ -85,7 +85,7 @@ export async function findFallbackStream(
   // 歌名单一匹配 + 歌手不符 → 不换源。
   const preference = getSourcePreference(providerId);
   const ranked = results
-    .filter(s => s.source !== failingSource && s.name && normalizeTitleStrict(s.name) === normalizeTitleStrict(title) && artistAgrees(artist, s.artist))
+    .filter(s => s.source !== failingSource && s.name && strictNormEquals(s.name, title) && artistAgrees(artist, s.artist))
     .sort((a, b) => {
       const ar = preference.indexOf(a.source);
       const br = preference.indexOf(b.source);

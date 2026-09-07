@@ -57,6 +57,34 @@ export function normalizeTitleStrict(title: string): string {
   return halfWidth(String(title || "")).toLowerCase().replace(/[^a-z0-9_\u4e00-\u9fa5]/g, "");
 }
 
+/**
+ * 规范化相等比较(带原文回退)。normalizeTitleStrict 只保留英数字与汉字,
+ * 假名/谚文等文字会被剥离,直接比较会产生三类事故:
+ * ①两侧都剥空 → 任意两个非中英文标题被判「相等」(误匹配);
+ * ②一侧空一侧非空 → 永远不等(误拒,门禁放行不了合法的假名歌);
+ * ③混合文字剥不空但丢信息 → 「サントラ盤」与「ベスト盤」都只剩「盤」被判相等。
+ *
+ * 规则:原文(trim+lowercase)相等 → 等;否则若任一侧含「会被归一化剥离的有意义
+ * 字符」(假名/谚文/西里尔等非中英文字母数字)→ 归一化有损,不等(宁可拒,不可错);
+ * 无有损字符时才用归一化比较(容忍空白/符号/全半角差异)。
+ */
+export function strictNormEquals(a: string, b: string): boolean {
+  const ra = halfWidth(String(a || "")).trim().toLowerCase();
+  const rb = halfWidth(String(b || "")).trim().toLowerCase();
+  if (!ra || !rb) return false;
+  if (ra === rb) return true;
+  if (hasStrippedLetters(ra) || hasStrippedLetters(rb)) return false;
+  const na = normalizeTitleStrict(ra);
+  const nb = normalizeTitleStrict(rb);
+  return na.length > 0 && na === nb;
+}
+
+/** 检测字符串是否含「会被 normalizeTitleStrict 剥离的字母/数字」
+ *  (假名/谚文/西里尔/希腊等):先移除英数字与汉字,再看剩下的是否还有字母数字。 */
+function hasStrippedLetters(s: string): boolean {
+  return /[\p{L}\p{N}]/u.test(s.replace(/[a-z0-9\u4e00-\u9fa5]/g, ""));
+}
+
 // Per-playlist auto-match guard: only one background match at a time per playlist.
 const autoMatchLocks = new Set<string>();
 

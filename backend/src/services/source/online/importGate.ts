@@ -7,12 +7,14 @@
 // - 规范化用 normalizeTitleStrict(中英文归一,剔除全部符号与空白)——比同曲多源组的
 //   normalizeGroupText 更严:元数据侧的空格/括号/全半角写法差异全部归一,防止
 //   「话 (Live)」vs「话(Live)」这类空白差异绕过比对;版本词(live/remix)同样保留。
+//   归一化盲区(假名/谚文/纯符号归一为空串)由 strictNormEquals 原文回退兜底:
+//   两侧都空时用原文全等判等,避免假名歌被误拒、任意假名歌互判相等;
 //   core-import-gate 内置插件的「专辑一致」开关与「时长容差」,不与 songGroup 共用;
 // - 标题/歌手为强制命中,无开关;期望侧缺字段(无专辑/无歌手/无时长)时对应维度
 //   无从比较,不否决(有比对对象才谈命中);
 // - 候选侧缺字段视为「无法核实」→ 不命中(宁可拒导,不可错导)。
 
-import { normalizeTitleStrict } from "../../plugin/shared.js";
+import { normalizeTitleStrict, strictNormEquals } from "../../plugin/shared.js";
 import { getPluginConfig } from "../../../plugins/registry.js";
 
 export const IMPORT_GATE_PLUGIN_ID = "core-import-gate";
@@ -57,11 +59,13 @@ export function getImportGateConfig(): ImportGateConfig {
   };
 }
 
-/** 歌手 token 化:合并歌手「A、B」拆分为规范化 token 集合(与 match.ts 同口径)。 */
+/** 歌手 token 化:合并歌手「A、B」拆分为规范化 token 集合(与 match.ts 同口径)。
+ *  纯假名/谚文 token 规范化为空串,回退保留原文(trim+lowercase),避免假名歌手
+ *  token 被静默丢弃导致歌手维度被跳过。 */
 function artistTokens(artist: string | null | undefined): string[] {
   return (artist || "")
     .split(/[/、&,；;，.&]|feat\.|ft\./i)
-    .map((s) => normalizeTitleStrict(s))
+    .map((s) => normalizeTitleStrict(s) || String(s || "").replace(/\s+/g, "").trim().toLowerCase())
     .filter(Boolean);
 }
 
@@ -82,10 +86,8 @@ export function passesImportGate(
 ): ImportGateResult {
   const cfg = cfgOverride ?? getImportGateConfig();
 
-  // 1. 标题(强制):规范化全串相等。
-  const nt = normalizeTitleStrict(want.title || "");
-  const nc = normalizeTitleStrict(cand.name || "");
-  if (!nt || nt !== nc) {
+  // 1. 标题(强制):规范化全串相等;假名/纯符号归一为空时原文回退全等。
+  if (!strictNormEquals(want.title || "", cand.name || "")) {
     return { ok: false, reason: "title", detail: `标题不一致 want="${want.title}" cand="${cand.name}"` };
   }
 
@@ -101,14 +103,15 @@ export function passesImportGate(
   }
 
   // 3. 专辑(开关,默认开;期望侧有专辑时必须核实)。
+  //    判等走 strictNormEquals(假名专辑原文回退);「有无专辑」按原文判断,
+  //    避免假名专辑被归一成空串后整维度被跳过。
   if (cfg.albumRequired) {
-    const wantAlbum = normalizeTitleStrict(want.album || "");
-    if (wantAlbum) {
-      const candAlbum = normalizeTitleStrict(cand.album || "");
-      if (!candAlbum) {
+    const wantAlbumRaw = String(want.album || "").trim();
+    if (wantAlbumRaw) {
+      if (!String(cand.album || "").trim()) {
         return { ok: false, reason: "album", detail: "候选无专辑,无法核实" };
       }
-      if (candAlbum !== wantAlbum) {
+      if (!strictNormEquals(wantAlbumRaw, String(cand.album || ""))) {
         return { ok: false, reason: "album", detail: `专辑不一致 want="${want.album}" cand="${cand.album}"` };
       }
     }

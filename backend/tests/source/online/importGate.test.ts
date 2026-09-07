@@ -75,6 +75,53 @@ describe("passesImportGate — 维度语义", () => {
   });
 });
 
+describe("passesImportGate — 归一化盲区(假名/谚文/纯符号原文回退)", () => {
+  // 假名/谚文/纯符号标题 normalizeTitleStrict 后是空串:旧行为下门禁要么永远
+  // 拒绝合法的假名歌(!nt → 拒),要么任意假名歌互判相等。strictNormEquals
+  // 原文回退后:原文全等才放行,不等照拒。
+  const jpWant: ImportGateWant = {
+    title: "ドラえもんのうた",
+    artist: "やなぎなぎ",
+    album: "サントラ盤",
+    duration: 180,
+  };
+  const jpCand = { name: "ドラえもんのうた", artist: "やなぎなぎ", album: "サントラ盤", duration: 180 };
+
+  it("假名标题原文全等 → ok(旧逻辑误拒)", () => {
+    expect(passesImportGate(jpWant, jpCand).ok).toBe(true);
+  });
+
+  it("假名标题不同 → 原文回退不等 → 拒(旧逻辑误判相等)", () => {
+    expect(passesImportGate(jpWant, { ...jpCand, name: "ドラえもんマーチ" }).reason).toBe("title");
+  });
+
+  it("假名标题 vs 中文标题 → 拒", () => {
+    expect(passesImportGate(jpWant, { ...jpCand, name: "我们的歌" }).reason).toBe("title");
+  });
+
+  it("假名歌手:token 原文回退,一致 ok(空白差异容忍)/不一致拒", () => {
+    expect(passesImportGate(jpWant, { ...jpCand, artist: "やなぎ なぎ" }).ok).toBe(true);
+    expect(passesImportGate(jpWant, { ...jpCand, artist: "米津玄師" }).reason).toBe("artist");
+  });
+
+  it("假名专辑:原文回退一致 ok / 不同专辑拒 / 候选无专辑拒", () => {
+    expect(passesImportGate(jpWant, { ...jpCand, album: "サントラ盤 " }).ok).toBe(true);
+    expect(passesImportGate(jpWant, { ...jpCand, album: "ベスト盤" }).reason).toBe("album");
+    expect(passesImportGate(jpWant, { ...jpCand, album: "" }).reason).toBe("album");
+  });
+
+  it("纯符号标题:两侧归一皆空 → 原文全等判等", () => {
+    expect(passesImportGate({ title: "☾", artist: "" }, { name: "☾" }).ok).toBe(true);
+    expect(passesImportGate({ title: "☾", artist: "" }, { name: "★" }).reason).toBe("title");
+  });
+
+  it("谚文标题原文全等 → ok;不同谚文 → 拒", () => {
+    const ko = { title: "사랑의 인사", artist: "아이유", duration: 200 };
+    expect(passesImportGate(ko, { name: "사랑의 인사", artist: "아이유", duration: 200 }).ok).toBe(true);
+    expect(passesImportGate(ko, { name: "이별의 인사", artist: "아이유", duration: 200 }).reason).toBe("title");
+  });
+});
+
 describe("getImportGateConfig — 默认值", () => {
   it("默认:专辑一致开 + 容差 1 秒", () => {
     const cfg = getImportGateConfig();

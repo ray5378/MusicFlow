@@ -8,7 +8,7 @@
 import { db, sqlite } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { refreshPlaylistCounts, normalizeTitleStrict } from "../../plugin/shared.js";
+import { refreshPlaylistCounts, strictNormEquals } from "../../plugin/shared.js";
 import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill } from "../../covers.js";
 import { OnlineSongResult } from "./types.js";
@@ -57,7 +57,9 @@ function scoreCandidate(cand: OnlineSongResult, t: MatchTarget): number {
 
   // 歌名严格对齐:只保留中英文归一后的全串相等(后缀原样保留,有后缀只能配带相同
   // 后缀、无后缀只能配无后缀),仅大小写/符号/空白/全角半角放宽。
-  const titleStrict = normalizeTitleStrict(cand.name) === normalizeTitleStrict(t.title || "");
+  // 假名/谚文/纯符号标题归一为空串,strictNormEquals 原文回退全等——否则任意
+  // 两个非中英文标题会被判成相等(+20 分误匹配)。
+  const titleStrict = strictNormEquals(cand.name, t.title || "");
   if (titleStrict) score += 20;
 
   const wantArtists = artistTokens(t.artist);
@@ -82,7 +84,7 @@ function scoreCandidate(cand: OnlineSongResult, t: MatchTarget): number {
   // 专辑软加分(仅排序用;硬门禁在 passesImportGate):同歌名同歌手多版本时,
   // 专辑一致者优先——减少「K情歌合辑」类冒名候选排在前面挤掉正版的机会。
   if (t.album && cand.album) {
-    if (normalizeTitleStrict(cand.album) === normalizeTitleStrict(t.album)) score += 6;
+    if (strictNormEquals(cand.album, t.album)) score += 6;
   }
 
   return score;
@@ -130,7 +132,9 @@ export async function searchBestMatch(
   cache?: Map<string, SearchMatchCache>,
 ): Promise<{ entryId: number; title: string; status: "matched" | "no-match" | "error"; best?: OnlineSongResult; score?: number; message?: string }> {
   // P0 直通已在上层(onlineSongFromExternalId)拦截;到这里的都是需要服务端搜索的。
-  const cacheKey = cache ? `${normalizeTitleStrict(want.title)}|${normalizeTitleStrict(want.artist || "")}` : "";
+  // 缓存键用原文 trim+lowercase(不用 normalizeTitleStrict):假名/纯符号标题
+  // 归一后全是空串,不同歌会共享同一缓存键导致跨歌错配;原文键永不碰撞。
+  const cacheKey = cache ? `${String(want.title || "").trim().toLowerCase()}|${String(want.artist || "").trim().toLowerCase()}` : "";
   if (cache && cache.has(cacheKey)) {
     const hit = cache.get(cacheKey)!;
     return { entryId: want.entryId, title: want.title, status: hit.status, best: hit.best, score: hit.score, message: hit.message };
