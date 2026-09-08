@@ -569,7 +569,8 @@
       "netease": "NetEase",
       "kugou": "Kugou",
       "kuwo": "Kuwo",
-      "soda": "Soda"
+      "soda": "Soda",
+      "huawei": "Huawei Music"
     },
     "noOnlineSourceSync": "No online source plugin detected. Configure baseUrl on the Plugins page and enable a source-type plugin first",
     "noOnlineSourceMatch": "No online source plugin detected. Configure baseUrl on the Plugins page and enable a source-type plugin",
@@ -1208,7 +1209,8 @@
     "kuwo": "Kuwo",
     "migu": "MiGu",
     "qianqian": "QianQian",
-    "soda": "Soda"
+    "soda": "Soda",
+    "huawei": "Huawei Music"
   },
   "remoteDetail": {
     "title": "Remote content",

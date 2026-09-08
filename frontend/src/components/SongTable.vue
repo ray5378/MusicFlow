@@ -219,6 +219,7 @@ const FALLBACK_PLATFORMS: Record<string, { label: string; color: string }> = {
   joox: { label: "JOOX", color: "#ff4d4d" },
   bilibili: { label: "Bilibili", color: "#fb7299" },
   apple: { label: "Apple Music", color: "#fa57c1" },
+  huawei: { label: "platform.huawei", color: "#0d5eff" },
 };
 // i18n keys referenced by FALLBACK_PLATFORMS (translated at render; non-key labels pass through)
 const FALLBACK_PLATFORM_LABEL_KEYS = new Set(

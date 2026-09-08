@@ -21,6 +21,7 @@ const PLATFORMS: Record<string, { label: string; color: string }> = {
   kugou: { label: "platform.kugou", color: "#28c76f" },
   kuwo: { label: "platform.kuwo", color: "#ff7f27" },
   soda: { label: "platform.soda", color: "#00b8a9" },
+  huawei: { label: "platform.huawei", color: "#0d5eff" },
 };
 
 const source = computed(() => (props.source || "").toLowerCase());
