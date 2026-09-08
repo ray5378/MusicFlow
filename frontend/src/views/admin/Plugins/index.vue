@@ -9,7 +9,13 @@
         </div>
 
         <template v-if="plugins.length > 0">
-          <el-table v-if="!isMobile" :data="plugins" stripe v-loading="loading">
+          <div v-for="sec in installedSections" :key="sec.key" class="installed-section">
+            <div class="section-header">
+              <span class="section-title">{{ sec.title }}</span>
+              <el-tag size="small" effect="plain" round>{{ sec.items.length }}</el-tag>
+              <span class="section-hint">{{ sec.hint }}</span>
+            </div>
+            <el-table v-if="!isMobile" :data="sec.items" stripe v-loading="loading">
             <el-table-column :label="t('admin.plugins.colName')" min-width="200">
               <template #default="{ row }">
                 <div class="plugin-name">{{ displayName(row) }}</div>
@@ -47,7 +53,7 @@
           </el-table>
           <!-- 移动端卡片列表:保留配置/详情/删除/启停,避免 el-table 横向滚动 -->
           <div v-else class="plugin-cards">
-            <div v-for="row in plugins" :key="row.name" class="plugin-card">
+            <div v-for="row in sec.items" :key="row.name" class="plugin-card">
               <div class="pc-row">
                 <div class="pc-id">
                   <div class="plugin-name">{{ displayName(row) }}</div>
@@ -69,6 +75,12 @@
               </div>
             </div>
           </div>
+          <!-- 外置插件模块为空:引导去插件市场 -->
+          <div v-if="sec.key === 'external' && sec.items.length === 0 && !loading" class="section-empty">
+            <span>{{ t('admin.plugins.sectionExternalEmpty') }}</span>
+            <el-button size="small" type="primary" plain @click="activeTab = 'market'">{{ t('admin.plugins.tabMarket') }}</el-button>
+          </div>
+        </div>
         </template>
         <EmptyState v-else icon="cable" :title="t('admin.plugins.emptyTitle')" :description="t('admin.plugins.emptyDesc')">
           <template #action>
@@ -563,6 +575,12 @@ const isMobile = useIsMobile();
 // ---- installed plugins ----
 const plugins = ref<any[]>([]);
 const loading = ref(false);
+
+/** 已安装列表按 内置/外置 拆成两个模块展示(行字段 builtin 由 /v1/plugins 下发)。 */
+const installedSections = computed(() => [
+  { key: "builtin", title: t('admin.plugins.sectionBuiltin'), hint: t('admin.plugins.sectionBuiltinHint'), items: plugins.value.filter((p) => p.builtin) },
+  { key: "external", title: t('admin.plugins.sectionExternal'), hint: t('admin.plugins.sectionExternalHint'), items: plugins.value.filter((p) => !p.builtin) },
+]);
 const showAddDialog = ref(false);
 const newPlugin = reactive({ name: "", description: "" });
 
@@ -1487,6 +1505,17 @@ onMounted(() => {
 .pc-ver { font-size: 12px; color: var(--fnos-text-tertiary); }
 .pc-desc { line-height: 1.5; word-break: break-word; }
 .pc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 已安装列表 内置/外置 两模块 */
+.installed-section { margin-bottom: 24px; }
+.section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.section-title { font-size: 16px; font-weight: 600; }
+.section-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
+.section-empty {
+  display: flex; align-items: center; gap: 12px; padding: 18px 16px;
+  border: 1px dashed var(--fnos-border-color, rgba(255, 255, 255, 0.12));
+  border-radius: var(--fnos-radius-lg);
+  font-size: 13px; color: var(--fnos-text-secondary);
+}
 .rc-url { font-size: 13px; color: var(--fnos-text-primary); word-break: break-all; line-height: 1.5; }
 .rc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
