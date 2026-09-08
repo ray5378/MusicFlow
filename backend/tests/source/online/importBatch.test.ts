@@ -176,6 +176,51 @@ describe("importOnlineSong — 单曲路径逐个 refresh", () => {
   });
 });
 
+describe("importOnlineSongs — 纯核实源(v2.3.6:provider 无 streamUrl 能力,空直链 web 行)", () => {
+  const NOSTREAM = "huawei-import-test";
+  const nosManifest = {
+    id: NOSTREAM,
+    name: NOSTREAM,
+    version: "1.0.0",
+    type: "source",
+    capabilities: ["search"], // 无 stream:门禁能核实、无公开直链
+    platforms: ["huawei"],
+    configSchema: [],
+    permissions: ["net"],
+  } as const;
+
+  it("provider 缺 streamUrl → 导入成功,url 为空(此前逐首抛 streamUrl is not a function 整单失败)", async () => {
+    registerPlugin(nosManifest as any, {
+      id: NOSTREAM,
+      manifest: nosManifest,
+      search: async () => ({ songs: [] }),
+    });
+    sqlite.prepare(`
+      INSERT INTO plugins (id, name, version, description, manifest, enabled, config, created_at, updated_at)
+      VALUES (?, ?, '1.0.0', '', ?, 1, ?, ?, ?)
+    `).run(NOSTREAM, NOSTREAM, JSON.stringify(nosManifest), JSON.stringify({}), new Date().toISOString(), new Date().toISOString());
+    try {
+      const res = await importOnlineSongs(NOSTREAM, [
+        { id: "h1", source: "huawei", name: "恋人", artist: "李荣浩", album: "黑马", duration: 275, cover: "" },
+      ], { gate: "skip" });
+
+      expect(res.failed).toBe(0);
+      expect(res.added).toBe(1);
+
+      const row = db.select().from(songs).where(eq(songs.pluginEntry, NOSTREAM)).get() as any;
+      expect(row).toBeTruthy();
+      expect(row.url ?? "").toBe("");
+      expect(row.type).toBe("web");
+    } finally {
+      sqlite.prepare("DELETE FROM songs WHERE plugin_entry = ?").run(NOSTREAM);
+      for (const a of ["批量歌手", "另一歌手"]) sqlite.prepare("DELETE FROM artists WHERE name = ?").run(a);
+      for (const a of ["同名专辑", "另张专辑", "黑马"]) sqlite.prepare("DELETE FROM albums WHERE name = ?").run(a);
+      sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(NOSTREAM);
+      unregisterPlugin(NOSTREAM);
+    }
+  });
+});
+
 describe("importOnlineSongs — 硬化门禁(v2.3.5:默认 verify,未挂门禁的调用方运行时兜底)", () => {
   it("默认 gate=verify:provider search 有响应但无命中候选 → 整批拒导,不落库", async () => {
     // 本文件的假 provider search 恒返回空 → 交叉比对无命中 → 全部拒导。

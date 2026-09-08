@@ -24,6 +24,9 @@ export interface OnlineSongResult {
   duration: number; // seconds
   cover: string; // remote cover URL
   extra?: Record<string, string> | null;
+  // 候选自带直链(罕见;一般由 provider.streamUrl 现解析)。纯核实源(无 stream
+  // 能力)导入时核心回落到此字段,通常为空 → 空直链 web 行,播放时兜底解析。
+  url?: string | null;
   // Optional details surfaced by the aggregator (may be empty)
   sortSize?: string;
   sortBitrate?: string;

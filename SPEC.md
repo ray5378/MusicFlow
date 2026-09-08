@@ -236,6 +236,7 @@
 | 宿主补全（`host.sources.complete` → `completeFromSources`） | 盲取 `songs[0]` | 门禁过滤全部候选，取时长最接近命中者；插件透传 album/duration |
 | 上游歌单整单导入（每日推荐 / 歌单专辑「加入库」/ `/v1/online/import`） | 直接 `importOnlineSongs` | `crossVerifySongs` 逐首搜索交叉比对（批内缓存 + 节流；交互式直通不节流），拒导计数上报 |
 | 播放换源兜底（`streamFallback.ts findFallbackStream`，v2.3.4+） | 仅「歌名严格相等 + 歌手首位名分」两维（无专辑/时长，且命中的替换 URL 被 `updateSongUrl` 持久化写回 `songs.url`） | 全门禁（`passesImportGate`，与导入同套断言）：候选须命中专辑一致 + 时长容差，期望侧缺字段维度跳过。**配置面（v2.3.5+，`core-stream-fallback` config-only 内置插件）**：`enabled` 总开关（关=原链失效即播放失败，不搜替代源）、`durationTolerance` 时长容差覆写（0=沿用导入门禁容差，>0 仅放宽时长维度，标题/歌手/专辑不可放宽）。**背景**：《恋人-李荣浩》QQ 原链 404 后被兜底换成网易云「李荣浩-、Montagem」funk remix（歌名相等、`'李荣浩-'.includes('李荣浩')` 恒真、旧两维拦不住）并持久化污染 `songs.url`——兜底是与导入并列的独立代码路径，同样必须绑门禁；兜底逻辑留在核心（播放可靠性契约），插件化需新增 `host.songs.url` 写回 API 反而扩大攻击面 |
+| 空直链 web 行（v2.3.6，纯曲库核实源导入，如 huawei-chart） | 不存在该形态：`importOnlineSongs` 无条件调 `provider.streamUrl`，缺该方法的 provider 逐首抛 `streamUrl is not a function` 整单失败 | `streamUrl` 降为**可选能力**：缺方法时回落候选自带 url（通常为空）→ 合法落库为空直链 web 行；播放首触发兜底解析（`resolveEmptyUrlStream`：跳过原链探测直接多源换源，命中回写 `songs.url`）。全链路打通：`/rest/stream`、转码 `resolveTranscodeInput`、`/v1/stream/probe`（不再把无 url 的 web 行误报为可播本地歌）、DLNA cast（`ensurePlayableStream`）、`/rest/stream-remote`（未入库远程歌曲按元数据兜底，不落库）。兜底 provider 缺 stream/search 能力时自动回退首个齐备源插件（`resolveStreamProvider`），不写死插件 id |
 
 **硬约束**
 

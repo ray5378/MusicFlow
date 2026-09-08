@@ -214,7 +214,11 @@ async function planSongInsert(
         size: 0,
         fingerprint,
         type: "web",
-        url: provider.streamUrl(configured, song),
+        // streamUrl 是可选能力:纯曲库核实源(huawei-chart 等,能搜索核实但无公开
+        // 直链)没有该方法——此前无条件调用直接抛 "provider.streamUrl is not a
+        // function" 整首导入失败。此时回落候选自带 url(通常为空),播放首触发
+        // streamFallback 空直链兜底解析并回写(见 streamFallback.resolveEmptyUrlStream)。
+        url: typeof provider.streamUrl === "function" ? provider.streamUrl(configured, song) : (song.url || null),
         streamHeaders: streamHeadersJson,
         sourceData: JSON.stringify({
           provider: providerId,

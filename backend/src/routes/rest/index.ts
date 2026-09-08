@@ -23,7 +23,7 @@ import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
-import { findFallbackStream } from "../../services/source/online/streamFallback.js";
+import { findFallbackStream, resolveEmptyUrlStream } from "../../services/source/online/streamFallback.js";
 import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { playPreferenceActive, preferLocalEnabled, fallbackToWebEnabled } from "../../services/plugin/core/playPreference.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
@@ -1263,7 +1263,13 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
     }
 
     // Remote proxy with per-song headers (e.g. Bilibili requires Referer).
-    if (!song.url) return c.json(fail(0, "No stream url"));
+    // 空直链 web 行(纯核实源导入,如 huawei-chart):先走多源兜底解析可播地址,
+    // 命中即回写 songs.url 并按正常链路代理;未命中维持原失败响应。
+    if (!song.url) {
+      const fbUrl = await resolveEmptyUrlStream(song);
+      if (!fbUrl) return c.json(fail(0, "No stream url"));
+      song.url = fbUrl;
+    }
     const headers: Record<string, string> = {};
     try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
     if (rangeHeader) headers["Range"] = rangeHeader;
@@ -1369,10 +1375,15 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
   if ((song.type || "local") === "web") {
     const fs = await import("fs");
     if (song.cachePath && fs.existsSync(song.cachePath)) return { source: song.cachePath };
-    if (!song.url) return null;
     const headers: Record<string, string> = {};
     try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
-    return { source: song.url, headers };
+    let url = song.url;
+    // 空直链 web 行(纯核实源导入):先兜底解析,命中再交给转码链路。
+    if (!url) {
+      url = await resolveEmptyUrlStream(song);
+      if (!url) return null;
+    }
+    return { source: url, headers };
   }
   const parsed = parseSongPath(song.path);
   if (!parsed) return null;
@@ -1668,7 +1679,19 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
     cover: getParam(c, "cover") || "",
   };
   try {
-    const streamUrl = cfg.provider.streamUrl(cfg.config, song);
+    // streamUrl 是可选能力:纯核实源(huawei-chart 等)无该方法,按元数据多源兜底
+    // 解析可播地址(不落库,仅本次代理;findFallbackStream 内部会回退到有 stream
+    // 能力的源插件,并按导入门禁过滤候选)。
+    let streamUrl: string | null = null;
+    if (typeof cfg.provider.streamUrl === "function") {
+      streamUrl = cfg.provider.streamUrl(cfg.config, song);
+    } else {
+      const fb = await findFallbackStream(
+        `remote:${providerId}:${source}:${id}`, song.name, song.artist, song.album,
+        Number(song.duration || 0), providerId, source,
+      );
+      streamUrl = fb?.url || null;
+    }
     if (!streamUrl) return c.json(fail(0, "No stream url"));
     const streamHeaders: Record<string, string> = {};
     if (source === "bilibili") streamHeaders["Referer"] = "https://www.bilibili.com/";

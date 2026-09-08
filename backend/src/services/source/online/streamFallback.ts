@@ -56,8 +56,38 @@ function setFallback(key: string, value: string | null) {
   fallbackCache.set(key, value);
   if (fallbackCache.size > FALLBACK_CACHE_MAX) {
     const oldest = fallbackCache.keys().next().value;
-    if (oldest !== undefined) fallbackCache.delete(oldest);
+    if (oldest === undefined) return;
+    fallbackCache.delete(oldest);
   }
+}
+
+/**
+ * 解析换源兜底用的 provider:优先 song.pluginEntry 本尊;本尊缺 stream 或 search
+ * 能力(纯曲库核实源,如 huawei-chart:有 search 能核实、无 stream 出直链)时,
+ * 回退首个「search + stream」齐备的启用源插件。都无 → null(不兜底,行为安全)。
+ */
+function resolveStreamProvider(providerId: string): { provider: any; config: Record<string, any> } | null {
+  const primary = getConfiguredProvider(providerId);
+  if (
+    primary?.provider &&
+    typeof primary.provider.streamUrl === "function" &&
+    typeof primary.provider.search === "function"
+  ) {
+    return primary;
+  }
+  for (const { manifest } of getEnabledSourcePlugins()) {
+    if (!manifest.capabilities.includes("stream") || !manifest.capabilities.includes("search")) continue;
+    if (manifest.id === providerId) continue; // 本尊已查过,不合格
+    const alt = getConfiguredProvider(manifest.id);
+    if (
+      alt?.provider &&
+      typeof alt.provider.streamUrl === "function" &&
+      typeof alt.provider.search === "function"
+    ) {
+      return alt;
+    }
+  }
+  return null;
 }
 
 export async function findFallbackStream(
@@ -81,8 +111,10 @@ export async function findFallbackStream(
   const fbCfg = getFallbackConfig();
   if (!fbCfg.enabled) return null;
 
-  const configured = getConfiguredProvider(providerId);
-  if (!configured?.provider.search) { setFallback(songId, null); return null; }
+  // provider 解析:pluginEntry 缺 stream/search 能力时自动回退首个齐备源插件
+  // (resolveStreamProvider),避免对纯核实源(huawei-chart 等)误判无兜底。
+  const configured = resolveStreamProvider(providerId);
+  if (!configured) { setFallback(songId, null); return null; }
 
   const query = [title, artist].filter(Boolean).join(" ");
   let results: OnlineSongResult[];
@@ -173,11 +205,35 @@ function addPlayable(songId: string) {
 }
 
 /**
+ * 空直链 web 行的兜底解析(纯曲库核实源导入,如 huawei-chart:门禁在华为曲库
+ * 核实通过,但华为无公开全曲直链,songs.url 为空)。跳过原链探测,直接多源换源;
+ * 命中即回写 songs.url,此后 /rest/stream 直用,不再每次播放都搜。
+ * 无 pluginEntry/sourceData 或兜底未命中 → null。
+ */
+export async function resolveEmptyUrlStream(song: {
+  id: string; title?: string | null; artist?: string | null; album?: string | null;
+  duration?: number | null; pluginEntry?: string | null; sourceData?: string | null;
+}): Promise<string | null> {
+  if (!song?.id || !song.pluginEntry) return null;
+  let sd: any = null;
+  try { sd = JSON.parse(song.sourceData || "{}"); } catch {}
+  const fb = await findFallbackStream(
+    song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
+    song.album || sd?.album || "", Number(song.duration || sd?.duration || 0),
+    song.pluginEntry, sd?.source || "",
+  );
+  if (!fb) return null;
+  updateSongUrl(song.id, fb.url);
+  return fb.url;
+}
+
+/**
  * Ensure a web song has a streamable URL before casting it to a renderer.
  *   - If the original URL probes OK, returns it (cached per songId).
  *   - Otherwise tries findFallbackStream (multi-source) and, on a hit,
  *     persists the replacement URL back into songs.url so future casts and
  *     /rest/stream proxies use it directly.
+ *   - Empty original URL (纯核实源导入行)直接走多源兜底,不再恒判不可播。
  *   - Returns null when no source is playable (caller should skip the track).
  */
 export async function ensurePlayableStream(
@@ -196,8 +252,8 @@ export async function ensurePlayableStream(
     return cached;
   }
 
-  // Original already missing → nothing to probe.
-  if (!song.url) return null;
+  // Original missing → 空直链兜底(命中回写),不再直接判死。
+  if (!song.url) return resolveEmptyUrlStream(song);
 
   if (await probe(song.url)) {
     addPlayable(song.id);

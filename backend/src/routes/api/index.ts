@@ -1590,8 +1590,10 @@ apiRoutes.post("/v1/stream/probe", async (c) => {
   const results = await Promise.all(songIds.map(async (id: string) => {
     const song = db.select().from(songs).where(eq(songs.id, id)).get();
     if (!song) return { songId: id, ok: false, local: false, reason: "歌曲不存在" };
-    // 本地歌曲(无 url 或已缓存文件):无需探测。
-    if (!song.url || song.cachePath) return { songId: id, ok: true, local: true };
+    // 本地歌曲(或已缓存文件的 web 歌曲):无需探测。
+    // 注意 web 行不再按「无 url」误判为本地——纯核实源(huawei-chart 等)导入的
+    // 歌曲就是空直链,须走 ensurePlayableStream 兜底解析(内部已处理空 url)。
+    if ((song.type || "local") !== "web" || song.cachePath) return { songId: id, ok: true, local: true };
     const original = song.url;
     try {
       const url = await ensurePlayableStream(song as any);

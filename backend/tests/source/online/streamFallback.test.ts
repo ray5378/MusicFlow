@@ -359,4 +359,83 @@ describe("ensurePlayableStream — 原 URL 失败换源并写回", () => {
     const row = db.select().from(songs).where(eq(songs.id, "fb-s2")).get() as any;
     expect(row.url).toBe("http://orig/broken.mp3");
   });
+
+  // ---- 空直链 web 行(v2.3.6:纯核实源导入,如 huawei-chart 无 stream 能力) ----
+
+  it("空直链 web 行 → 跳过探测直接换源,命中写回 songs.url", async () => {
+    enableProvider([
+      // 库内时长 218s(seedSong 固定),候选须命中时长容差
+      { id: "n1", name: "恋人", artist: "李荣浩", album: "黑马", duration: 218, source: "netease" },
+    ]);
+    seedSong("fb-empty", {
+      url: "",
+      title: "恋人",
+      artist: "李荣浩",
+      sourceData: JSON.stringify({ provider: "huawei-test", source: "huawei" }),
+    });
+    const songRow = db.select().from(songs).where(eq(songs.id, "fb-empty")).get() as any;
+
+    const url = await ensurePlayableStream(songRow);
+
+    expect(url).toBeTruthy();
+    const row = db.select().from(songs).where(eq(songs.id, "fb-empty")).get() as any;
+    expect(row.url).toBe(url);
+  });
+
+  it("空直链且无候选可换 → 返回 null", async () => {
+    enableProvider([
+      { id: "wrong", name: "恋人", artist: "王俊凯", album: "黑马", duration: 218, source: "netease" },
+    ]);
+    seedSong("fb-empty2", {
+      url: "",
+      title: "恋人",
+      artist: "李荣浩",
+      sourceData: JSON.stringify({ source: "huawei" }),
+    });
+    const songRow = db.select().from(songs).where(eq(songs.id, "fb-empty2")).get() as any;
+
+    expect(await ensurePlayableStream(songRow)).toBeNull();
+  });
+});
+
+describe("findFallbackStream — pluginEntry 缺 stream 能力时回退齐备源插件", () => {
+  const NOSTREAM = "huawei-fb-test";
+  const nosManifest = {
+    id: NOSTREAM,
+    name: NOSTREAM,
+    version: "1.0.0",
+    type: "source",
+    capabilities: ["search"], // 无 stream:纯曲库核实源形态
+    platforms: ["huawei"],
+    configSchema: [],
+    permissions: ["net"],
+  } as const;
+
+  afterEach(() => {
+    sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(NOSTREAM);
+    unregisterPlugin(NOSTREAM);
+  });
+
+  it("provider 只有 search 无 streamUrl → 自动回退到 search+stream 齐备的源插件换源", async () => {
+    // 先注册无 stream 的 provider(pluginEntry 本尊),再注册齐备 provider。
+    registerPlugin(nosManifest as any, {
+      id: NOSTREAM,
+      manifest: nosManifest,
+      search: async () => ({ songs: [] }), // 本尊即使能搜也出不了直链
+    });
+    sqlite.prepare(`
+      INSERT INTO plugins (id, name, version, description, manifest, enabled, config, created_at, updated_at)
+      VALUES (?, ?, '1.0.0', '', ?, 1, ?, ?, ?)
+    `).run(NOSTREAM, NOSTREAM, JSON.stringify(nosManifest), JSON.stringify({}), new Date().toISOString(), new Date().toISOString());
+
+    enableProvider([
+      { id: "n1", name: "恋人", artist: "李荣浩", album: "黑马", duration: 275, source: "netease" },
+    ]);
+
+    // providerId=无 stream 的本尊;期望侧 source=huawei,候选 netease 不被排除。
+    const fb = await findFallbackStream("s-nostream", "恋人", "李荣浩", "黑马", 275, NOSTREAM, "huawei");
+
+    expect(fb).toBeTruthy();
+    expect(fb!.url).toContain("id=n1");
+  });
 });
