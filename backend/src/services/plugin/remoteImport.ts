@@ -16,6 +16,7 @@ import { replacePlaylistSongs } from "../source/online/recommendImport.js";
 import { refreshPlaylistCounts } from "./shared.js";
 import { cacheRemoteCover } from "../playlistCover.js";
 import { clearLibraryIndex } from "./libraryIndex.js";
+import { matchSongsToLibrary } from "./libraryMatch.js";
 import { markInteractiveStart, markInteractiveEnd } from "./batchPacer.js";
 import { touch } from "../memory/reclaim.js";
 
@@ -46,9 +47,36 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
     // 导入命中门禁:上游歌单自带 id/元数据不可信,逐首搜索交叉比对
     // (标题+歌手+专辑+时长全命中才导),拒导的不进歌单。
     const { verified, rejected } = await crossVerifySongs(providerId, config, plugin, list, { interactive: true });
+
+    // 先匹配曲库已有行(方案A,与榜单同步 matchLocal 行为对齐):命中的歌直接
+    // 绑旧行、不再插新行——否则已在曲库的歌(指纹含平台外部 id,榜单/歌单两个
+    // 接口的 id 不同)会重复入库一行 source=本平台 的 web 行。未命中的才走入库。
+    const libHits = matchSongsToLibrary(verified);
+    const matchedIds = new Map<number, string>(); // verified 下标 → 已有 songId
+    const toImport: typeof verified = [];
+    verified.forEach((s, i) => {
+      const hit = libHits[i];
+      if (hit) matchedIds.set(i, hit);
+      else toImport.push(s);
+    });
+
     // 歌曲入库为在线歌曲(可播),返回 { songs, added, deduped, failed }
-    const imp = await importOnlineSongs(providerId, verified, { userId, interactive: true, gate: "verified" });
-    if (!imp?.songs?.length) {
+    const imp = await importOnlineSongs(providerId, toImport, { userId, interactive: true, gate: "verified" });
+
+    // 合成歌单条目(保持原歌单顺序):命中的绑已有行;入库的按 imp.songs 顺序
+    // 回填(importOnlineSongs 保序输出成功项,失败项自然跳过)。
+    const entries: { id: string; title: string }[] = [];
+    let impCursor = 0;
+    verified.forEach((s, i) => {
+      const hit = matchedIds.get(i);
+      if (hit) {
+        entries.push({ id: hit, title: s.name });
+        return;
+      }
+      const imported = imp.songs[impCursor++];
+      if (imported) entries.push({ id: imported.id, title: imported.title });
+    });
+    if (!entries.length) {
       throw new Error(
         rejected > 0
           ? `没有歌曲通过导入门禁(标题/歌手/专辑/时长校验),拒导 ${rejected} 首`
@@ -82,10 +110,11 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
       }).run();
     }
 
-    // 全量替换条目为本次拉取的歌曲(在线歌曲直接关联 songId,可播放)。
-    // replacePlaylistSongs 内部会 clearPlaylistCoverCache 清掉旧封面,故导入封面必须
-    // 在替换完成之后再缓存/回填,否则刚下载的歌单封面会被立即清空。
-    await replacePlaylistSongs(playlistId, imp.songs);
+    // 全量替换条目为本次拉取的歌曲(在线歌曲直接关联 songId,可播放;库内命中
+    // 的绑已有行)。replacePlaylistSongs 内部会 clearPlaylistCoverCache 清掉旧
+    // 封面,故导入封面必须在替换完成之后再缓存/回填,否则刚下载的歌单封面会被
+    // 立即清空。
+    await replacePlaylistSongs(playlistId, entries);
     refreshPlaylistCounts(playlistId);
 
     // 歌单封面:远程搜索命中时将该平台封面缓存到本地(失败静默,仍能回退到首曲封面)。
@@ -99,9 +128,10 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
       playlistId,
       name: fallbackName,
       platform: source,
-      trackCount: imp.songs.length,
+      trackCount: entries.length,
       added: imp.added,
       deduped: imp.deduped,
+      libraryMatched: matchedIds.size,
       failed: imp.failed,
       rejected,
       created: !existing,
