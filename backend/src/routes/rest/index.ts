@@ -1281,7 +1281,8 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
       try {
         const sd = JSON.parse(song.sourceData || "{}");
         const fb = await findFallbackStream(
-          song.id, song.title || sd?.title || "", song.artist || sd?.artist || "", song.album || "",
+          song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
+          song.album || sd?.album || "", Number(song.duration || sd?.duration || 0),
           song.pluginEntry, sd?.source || "",
         );
         if (fb) {

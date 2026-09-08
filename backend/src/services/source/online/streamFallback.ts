@@ -15,7 +15,7 @@ import { db } from "../../../db/index.js";
 import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest } from "../../../plugins/registry.js";
-import { strictNormEquals } from "../../plugin/shared.js";
+import { passesImportGate } from "./importGate.js";
 
 // Bounded in-memory caches. Both grow with every web song played, so enforce a
 // FIFO cap to keep memory usage bounded on long-running servers.
@@ -54,6 +54,7 @@ export async function findFallbackStream(
   title: string,
   artist: string,
   album: string,
+  duration: number,
   providerId: string,
   failingSource: string,
 ): Promise<{ url: string; source: string } | null> {
@@ -77,15 +78,22 @@ export async function findFallbackStream(
     return null;
   }
 
-  // Rank results: title must match exactly (strict full-string, suffix preserved:
-  // 只保留中英文归一后的全串相等——"Live/演唱会/版" 等后缀不会剥离,有后缀只能配
-  // 带相同后缀、无后缀只能配无后缀) and, when the wanted track carries an artist,
-  // the candidate's artist must agree — otherwise two same-named songs by different
-  // artists could swap streams (e.g. 点「七里香·周杰伦」实际换源到一首同歌名的歌)。
-  // 歌名单一匹配 + 歌手不符 → 不换源。
+  // 换源兜底与导入门禁同套断言(v2.3.4):候选必须通过 passesImportGate——
+  // 规范化标题+歌手(强制)+ 专辑一致(开关默认开)+ 时长差 ≤ 容差,全命中才允许换源。
+  // 此前兜底只有「歌名严格相等 + 歌手首位名分」两维,元数据冒名候选(如《恋人》
+  // 被换成网易云「李荣浩-、Montagem」的 funk remix:歌名相等、'李荣浩-'.includes
+  // ('李荣浩') 恒真)通过后还被 updateSongUrl 持久化污染 songs.url,此后每次播放
+  // 都直用错链。期望侧缺字段(无专辑/无时长)时对应维度自动跳过,与导入语义一致。
+  // 排序偏好(sourcePreference)不变。
   const preference = getSourcePreference(providerId);
   const ranked = results
-    .filter(s => s.source !== failingSource && s.name && strictNormEquals(s.name, title) && artistAgrees(artist, s.artist))
+    .filter(s => {
+      if (s.source === failingSource || !s.name) return false;
+      return passesImportGate(
+        { title, artist, album: album || null, duration: duration > 0 ? duration : null },
+        { name: s.name, artist: s.artist, album: s.album, duration: s.duration },
+      ).ok;
+    })
     .sort((a, b) => {
       const ar = preference.indexOf(a.source);
       const br = preference.indexOf(b.source);
@@ -120,23 +128,6 @@ async function probe(url: string): Promise<boolean> {
 
 export { probe as probeStream };
 
-// Split a combined-artist string ("周杰伦、温岚、吴宗宪" / "A feat. B") into tokens.
-function artistTokens(s: string): string[] {
-  return (s || "")
-    .split(/[/、&,；;，.&]|feat\.|ft\./i)
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
-// Strict artist agreement: 期望曲有歌手时,候选的艺人集必须包含期望的首位歌手。
-// 无期望歌手 → 视为通过(仅按歌名换源)。「首位名分」与 match.ts 的 firstMatch 判定一致。
-function artistAgrees(wantArtist: string, candArtist: string): boolean {
-  const want = artistTokens(wantArtist);
-  if (!want.length) return true;
-  const primary = want[0];
-  return artistTokens(candArtist).some((c) => primary === c || primary.includes(c) || c.includes(primary));
-}
-
 export function clearFallbackCache(songId?: string) {
   if (songId) fallbackCache.delete(songId);
   else fallbackCache.clear();
@@ -169,7 +160,7 @@ function addPlayable(songId: string) {
  *   - Returns null when no source is playable (caller should skip the track).
  */
 export async function ensurePlayableStream(
-  song: { id: string; title?: string | null; artist?: string | null; album?: string | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
+  song: { id: string; title?: string | null; artist?: string | null; album?: string | null; duration?: number | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
 ): Promise<string | null> {
   if (!song?.id) return null;
   if (playableCache.has(song.id)) return song.url || null;
@@ -197,7 +188,8 @@ export async function ensurePlayableStream(
   try { sd = JSON.parse(song.sourceData || "{}"); } catch {}
   const fb = await findFallbackStream(
     song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
-    song.album || "", defaultStreamProviderId(song.pluginEntry), sd?.source || "",
+    song.album || sd?.album || "", Number(song.duration || sd?.duration || 0),
+    defaultStreamProviderId(song.pluginEntry), sd?.source || "",
   );
   if (fb) {
     addPlayable(song.id);

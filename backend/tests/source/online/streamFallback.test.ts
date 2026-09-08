@@ -1,8 +1,10 @@
-// Unit tests for services/source/online/streamFallback.ts — 换源「歌名+歌手」严格匹配。
-//   - 同歌名同歌手 → 换源命中(按 sourcePreference 排序、排除失败源)
-//   - 同歌名不同歌手 → 不换源(null,防「点七里香实际播别首」)
+// Unit tests for services/source/online/streamFallback.ts — 换源兜底挂导入门禁
+// (passesImportGate:标题+歌手强制 + 专辑一致 + 时长容差,v2.3.4 起)。
+//   - 同歌名同歌手同专辑同时长 → 换源命中(按 sourcePreference 排序、排除失败源)
+//   - 同歌名不同歌手 / 专辑不符 / 时长超容差 / 候选缺字段 → 不换源(null)
 //   - 歌名有后缀(Live/演唱会版/伴奏)只能配带相同后缀,无后缀只能配无后缀
-//   - 期望曲无歌手 → 仅按歌名换源(向后兼容)
+//   - 期望曲无歌手/无专辑/无时长 → 对应维度跳过(向后兼容)
+//   - 「恋人-李荣浩」事故回归:元数据冒名候选(李荣浩-、Montagem)不得换源
 //   - ensurePlayableStream:原 URL 探测失败 → 换源并把替换 URL 写回 songs.url
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../../plugins/_env.js";
@@ -109,16 +111,16 @@ afterAll(() => {
   unregisterPlugin(PROVIDER);
 });
 
-describe("findFallbackStream — 换源严格「歌名+歌手」匹配", () => {
-  it("同歌名同歌手:换源到偏好源,排除失败源与同名异歌手候选", async () => {
+describe("findFallbackStream — 换源兜底挂导入门禁", () => {
+  it("同歌名同歌手同专辑同时长:换源到偏好源,排除失败源与同名异歌手候选", async () => {
     const { searchCalls } = enableProvider([
-      { id: "k1", name: "七里香", artist: "周杰伦", source: "kugou" },
-      { id: "n1", name: "七里香", artist: "周杰伦", source: "netease" },
-      { id: "q1", name: "七里香", artist: "周杰伦", source: "qq" }, // 失败源,应排除
-      { id: "wrong", name: "七里香", artist: "王俊凯", source: "kugou" }, // 同名异歌手,应排除
+      { id: "k1", name: "七里香", artist: "周杰伦", album: "七里香", duration: 240, source: "kugou" },
+      { id: "n1", name: "七里香", artist: "周杰伦", album: "七里香", duration: 240, source: "netease" },
+      { id: "q1", name: "七里香", artist: "周杰伦", album: "七里香", duration: 240, source: "qq" }, // 失败源,应排除
+      { id: "wrong", name: "七里香", artist: "王俊凯", album: "七里香", duration: 240, source: "kugou" }, // 同名异歌手,应排除
     ]);
 
-    const fb = await findFallbackStream("s-ok", "七里香", "周杰伦", "七里香", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-ok", "七里香", "周杰伦", "七里香", 240, PROVIDER, "qq");
 
     expect(searchCalls[0]).toBe("七里香 周杰伦");
     expect(fb).toBeTruthy();
@@ -128,62 +130,128 @@ describe("findFallbackStream — 换源严格「歌名+歌手」匹配", () => {
 
   it("同歌名不同歌手 → 不换源(防点七里香播别首)", async () => {
     enableProvider([
-      { id: "n1", name: "七里香", artist: "王俊凯", source: "netease" },
+      { id: "n1", name: "七里香", artist: "王俊凯", album: "七里香", duration: 240, source: "netease" },
     ]);
 
-    const fb = await findFallbackStream("s-wrong", "七里香", "周杰伦", "七里香", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-wrong", "七里香", "周杰伦", "七里香", 240, PROVIDER, "qq");
 
     expect(fb).toBeNull();
   });
 
-  it("期望曲无歌手 → 仍按歌名换源(向后兼容)", async () => {
+  it("期望曲无歌手/无专辑/无时长 → 仍按歌名换源(对应维度跳过,向后兼容)", async () => {
     enableProvider([
-      { id: "n1", name: "七里香", artist: "周杰伦", source: "netease" },
+      { id: "n1", name: "七里香", artist: "周杰伦", album: "", duration: 0, source: "netease" },
     ]);
 
-    const fb = await findFallbackStream("s-noartist", "七里香", "", "", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-noartist", "七里香", "", "", 0, PROVIDER, "qq");
 
     expect(fb).toBeTruthy();
     expect(fb!.url).toContain("id=n1");
   });
 
-  it("多歌手候选(合作)与期望首位歌手一致即可命中", async () => {
+  it("多歌手候选(合作)与期望歌手一致且专辑/时长命中 → 可换源", async () => {
     enableProvider([
-      { id: "n1", name: "珊瑚海", artist: "周杰伦、温岚、吴宗宪", source: "netease" },
+      { id: "n1", name: "珊瑚海", artist: "周杰伦、温岚、吴宗宪", album: "八度空间", duration: 283, source: "netease" },
     ]);
 
-    const fb = await findFallbackStream("s-coop", "珊瑚海", "周杰伦", "八度空间", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-coop", "珊瑚海", "周杰伦", "八度空间", 283, PROVIDER, "qq");
 
     expect(fb).toBeTruthy();
     expect(fb!.url).toContain("id=n1");
+  });
+
+  // ---- v2.3.4 门禁维度回归(此前兜底只有歌名+歌手两维,冒名候选漏网) ----
+
+  it("专辑不符 → 不换源(恋人事故:黑马专辑的《恋人》被换成冒名候选的《恋人》专辑)", async () => {
+    enableProvider([
+      // 元数据冒名:歌名相等、歌手 token 含「李荣浩」(normalize 剥掉尾部 -),
+      // 旧两维过滤全部放行——现被专辑维度拦下。
+      { id: "fake1", name: "恋人", artist: "李荣浩-、Montagem", album: "恋人", duration: 180, source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-lianren", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  it("时长超容差 → 不换源(即使标题/歌手/专辑全对)", async () => {
+    enableProvider([
+      { id: "dur1", name: "恋人", artist: "李荣浩", album: "黑马", duration: 180, source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-dur", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  it("候选缺专辑(期望有专辑)→ 不换源(无法核实即拒绝)", async () => {
+    enableProvider([
+      { id: "noalb", name: "恋人", artist: "李荣浩", album: "", duration: 275, source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-noalb", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  it("候选缺时长(期望有时长)→ 不换源(无法核实即拒绝)", async () => {
+    enableProvider([
+      { id: "nodur", name: "恋人", artist: "李荣浩", album: "黑马", duration: 0, source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-nodur", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  it("期望曲无专辑时,候选专辑任意 → 按标题/歌手换源(专辑维度跳过)", async () => {
+    enableProvider([
+      { id: "anyalb", name: "恋人", artist: "李荣浩", album: "别的专辑", duration: 275, source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-anyalb", "恋人", "李荣浩", "", 275, PROVIDER, "qq");
+
+    expect(fb).toBeTruthy();
+    expect(fb!.url).toContain("id=anyalb");
+  });
+
+  it("期望曲无时长时,候选时长任意 → 按标题/歌手/专辑换源(时长维度跳过)", async () => {
+    enableProvider([
+      { id: "anydur", name: "恋人", artist: "李荣浩", album: "黑马", duration: 999, source: "netease" },
+    ]);
+
+    const fb = await findFallbackStream("s-anydur", "恋人", "李荣浩", "黑马", 0, PROVIDER, "qq");
+
+    expect(fb).toBeTruthy();
+    expect(fb!.url).toContain("id=anydur");
   });
 
   it("期望无后缀 + 候选带(Live)后缀 → 不换源(严格全串对齐)", async () => {
     enableProvider([
-      { id: "live1", name: "听妈妈的话(Live)", artist: "周杰伦", source: "kuwo" },
+      { id: "live1", name: "听妈妈的话(Live)", artist: "周杰伦", album: "", duration: 0, source: "kuwo" },
     ]);
 
-    const fb = await findFallbackStream("s-suf1", "听妈妈的话", "周杰伦", "", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-suf1", "听妈妈的话", "周杰伦", "", 0, PROVIDER, "qq");
 
     expect(fb).toBeNull();
   });
 
   it("期望无后缀 + 候选带「演唱会版」后缀 → 不换源", async () => {
     enableProvider([
-      { id: "live2", name: "听妈妈的话-演唱会版", artist: "周杰伦", source: "netease" },
+      { id: "live2", name: "听妈妈的话-演唱会版", artist: "周杰伦", album: "", duration: 0, source: "netease" },
     ]);
 
-    const fb = await findFallbackStream("s-suf2", "听妈妈的话", "周杰伦", "", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-suf2", "听妈妈的话", "周杰伦", "", 0, PROVIDER, "qq");
 
     expect(fb).toBeNull();
   });
 
   it("期望带(Live) + 候选带相同后缀(大小写/空格/括号差异) → 换源", async () => {
     enableProvider([
-      { id: "live3", name: "听妈妈的话 (LIVE)", artist: "周杰伦", source: "kuwo" },
+      { id: "live3", name: "听妈妈的话 (LIVE)", artist: "周杰伦", album: "", duration: 0, source: "kuwo" },
     ]);
 
-    const fb = await findFallbackStream("s-suf3", "听妈妈的话(Live)", "周杰伦", "", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-suf3", "听妈妈的话(Live)", "周杰伦", "", 0, PROVIDER, "qq");
 
     expect(fb).toBeTruthy();
     expect(fb!.url).toContain("id=live3");
@@ -191,10 +259,10 @@ describe("findFallbackStream — 换源严格「歌名+歌手」匹配", () => {
 
   it("期望带(Live)但候选无后缀 → 不换源", async () => {
     enableProvider([
-      { id: "plain1", name: "听妈妈的话", artist: "周杰伦", source: "netease" },
+      { id: "plain1", name: "听妈妈的话", artist: "周杰伦", album: "", duration: 0, source: "netease" },
     ]);
 
-    const fb = await findFallbackStream("s-suf4", "听妈妈的话(Live)", "周杰伦", "", PROVIDER, "qq");
+    const fb = await findFallbackStream("s-suf4", "听妈妈的话(Live)", "周杰伦", "", 0, PROVIDER, "qq");
 
     expect(fb).toBeNull();
   });
@@ -203,8 +271,9 @@ describe("findFallbackStream — 换源严格「歌名+歌手」匹配", () => {
 describe("ensurePlayableStream — 原 URL 失败换源并写回", () => {
   it("原 URL 404 → 严格匹配的候选换源并把替换 URL 持久化到 songs.url", async () => {
     enableProvider([
-      { id: "n1", name: "七里香", artist: "周杰伦", source: "netease" },
-      { id: "wrong", name: "七里香", artist: "王俊凯", source: "netease" },
+      // 库内时长 218s(seedSong),候选须命中时长容差
+      { id: "n1", name: "七里香", artist: "周杰伦", album: "", duration: 218, source: "netease" },
+      { id: "wrong", name: "七里香", artist: "王俊凯", album: "", duration: 218, source: "netease" },
     ]);
     await seedSong("fb-s1", {
       url: "http://orig/broken.mp3",
@@ -224,7 +293,7 @@ describe("ensurePlayableStream — 原 URL 失败换源并写回", () => {
 
   it("搜不到歌手一致的候选时,不换源也不覆盖原 URL", async () => {
     enableProvider([
-      { id: "wrong", name: "七里香", artist: "王俊凯", source: "netease" },
+      { id: "wrong", name: "七里香", artist: "王俊凯", album: "", duration: 218, source: "netease" },
     ]);
     seedSong("fb-s2", {
       url: "http://orig/broken.mp3",

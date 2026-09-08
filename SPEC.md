@@ -235,6 +235,7 @@
 | 平台 id 直通（`onlineSongFromExternalId`） | 免搜索直接导入（**已废除**） | 一律在线搜索 + 门禁交叉比对，以搜索验证过的候选落库 |
 | 宿主补全（`host.sources.complete` → `completeFromSources`） | 盲取 `songs[0]` | 门禁过滤全部候选，取时长最接近命中者；插件透传 album/duration |
 | 上游歌单整单导入（每日推荐 / 歌单专辑「加入库」/ `/v1/online/import`） | 直接 `importOnlineSongs` | `crossVerifySongs` 逐首搜索交叉比对（批内缓存 + 节流；交互式直通不节流），拒导计数上报 |
+| 播放换源兜底（`streamFallback.ts findFallbackStream`，v2.3.4+） | 仅「歌名严格相等 + 歌手首位名分」两维（无专辑/时长，且命中的替换 URL 被 `updateSongUrl` 持久化写回 `songs.url`） | 全门禁（`passesImportGate`，与导入同套断言）：候选须命中专辑一致 + 时长容差，期望侧缺字段维度跳过。**背景**：《恋人-李荣浩》QQ 原链 404 后被兜底换成网易云「李荣浩-、Montagem」funk remix（歌名相等、`'李荣浩-'.includes('李荣浩')` 恒真、旧两维拦不住）并持久化污染 `songs.url`——兜底是与导入并列的独立代码路径，同样必须绑门禁 |
 
 **硬约束**
 
@@ -541,7 +542,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 □ 11. 新代码/新端点使用 apiError(code, message) 与 createLogger()，未裸造错误体/裸 console
 □ 12. 鉴权写操作（apiKey/密码/用户名变更）已调用 invalidateAuthCaches()
 □ 13. 面向用户的文案已接入 i18n（前端 t() / 后端 errors.* / 插件 i18n.en），无裸中文硬编码，zh/en 键对齐
-□ 14. 新增任何在线歌曲导入/匹配路径必须绑定导入命中门禁（passesImportGate / crossVerifySongs，见 §1.6.2）；标题/专辑/歌手比对用 strictNormEquals（勿裸用 normalizeTitleStrict 相等比较——假名/谚文/纯符号归一化有损，会误判）
+□ 14. 新增任何在线歌曲导入/匹配路径必须绑定导入命中门禁（passesImportGate / crossVerifySongs，见 §1.6.2）；标题/专辑/歌手比对用 strictNormEquals（勿裸用 normalizeTitleStrict 相等比较——假名/谚文/纯符号归一化有损，会误判）。**播放换源兜底（findFallbackStream）同属此契约**（v2.3.4 起已挂全门禁，含专辑/时长维度与歌手包含判断收紧）
 ```
 
 ***
