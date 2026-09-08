@@ -31,10 +31,43 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  # 阻塞发版的全量测试门禁:vitest(含导入门禁契约用例 importGate/match/streamFallback,
+  # 见 SPEC §1.6.2)全绿才允许构建镜像与发版。ci.yml 的 test 只覆盖 push main/PR,
+  # tag 触发的 build.yml 不经过它——此处独立重跑,保证「测试不过就发不了版」。
+  test:
+    name: 全量测试门禁 (vitest, 阻塞发版)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: cd backend && npm ci
+      - name: TypeScript 类型检查
+        run: cd backend && npx tsc --noEmit
+      - name: 全量测试(含导入门禁契约 + 转码链路契约)
+        shell: bash
+        run: |
+          set -o pipefail
+          cd backend
+          npx vitest run 2>&1 | tee /tmp/vitest.log
+      - name: 上传失败日志(便于排查顺序相关偶发)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-log
+          path: /tmp/vitest.log
+          if-no-files-found: ignore
+          retention-days: 3
+
   # Single-arch (amd64) build. No QEMU, no multi-arch manifest — the image is
   # pushed directly to <version> / :latest. ARM devices cannot run this image
   # (账号没有 ARM runner,与 V1 一致)。
   build:
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
