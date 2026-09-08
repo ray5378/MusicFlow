@@ -74,6 +74,7 @@ function makeWorkerEnv(permissions: string[]): SandboxHostEnv {
       list: (o) => hostCall("songs.list", [o]),
       search: (q, o) => hostCall("songs.search", [q, o]),
       getById: (id) => hostCall("songs.getById", [id]),
+      match: (list) => hostCall("songs.match", [list]),
     },
     plugin: {
       getHostUrl: () => hostCall("plugin.getHostUrl", []),

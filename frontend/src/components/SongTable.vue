@@ -225,38 +225,19 @@ const FALLBACK_PLATFORMS: Record<string, { label: string; color: string }> = {
 const FALLBACK_PLATFORM_LABEL_KEYS = new Set(
   Object.values(FALLBACK_PLATFORMS).map((p) => p.label).filter((k) => k.startsWith("platform."))
 );
-// 模块级缓存:整页共享,只拉一次 /rest/api/v1/plugins
-let platformLabelsCache: Record<string, string> | null = null;
-let pluginNamesCache: Record<string, string> | null = null;
-async function ensurePluginMeta() {
-  if (platformLabelsCache && pluginNamesCache) return;
-  try {
-    const res = await api.get("/rest/api/v1/plugins");
-    const labels: Record<string, string> = {};
-    const names: Record<string, string> = {};
-    for (const p of (res.data || []) as any[]) {
-      const m = p.manifest;
-      if (m?.id) names[m.id] = m.name || m.id;
-      if (m?.platformLabels) Object.assign(labels, m.platformLabels);
-    }
-    platformLabelsCache = labels;
-    pluginNamesCache = names;
-  } catch {
-    platformLabelsCache = {};
-    pluginNamesCache = {};
-  }
-}
+// 动态层:插件 manifest.platformLabels / 插件名(共享加载器,模块级缓存)
+import { ensurePluginMeta, platformLabelOf, pluginNameOf } from "@/utils/platformMeta";
 function sourceMeta(song: any): { label: string; color: string; pluginName: string } | null {
   const src = (song.sourcePlatform || "").toLowerCase();
   if (!src || !song.isWeb) return null;
-  const mergedLabel = platformLabelsCache?.[src] || "";
+  const mergedLabel = platformLabelOf(src);
   const base = FALLBACK_PLATFORMS[src] || { label: src, color: "rgba(0,0,0,.55)" };
   // mergedLabel is a plugin-provided display name (pass through); base.label is an i18n key (translate).
   const label = mergedLabel || (FALLBACK_PLATFORM_LABEL_KEYS.has(base.label) ? t(base.label) : base.label);
   return {
     label,
     color: base.color,
-    pluginName: pluginNamesCache?.[song.sourcePluginId] || song.sourcePluginId || "",
+    pluginName: pluginNameOf(song.sourcePluginId) || song.sourcePluginId || "",
   };
 }
 function sourceTooltip(song: any): string {

@@ -17,13 +17,10 @@
 //     再按时长差最小择优。
 //
 // 候选定位:group_key = 归一化标题 \u0001 归一化歌手 \u0001 归一化专辑。一次
-// 全量扫描(只取小列)构建「归一化标题 → 候选行」索引,单次导入 O(表大小)
-// 一次 + O(N) 匹配,不做逐首 LIKE(避免 N 次全表扫)。仅 group_key 非空的行
-// 可被匹配(同曲多源组默认开启,本地扫描/在线导入都会回填;关闭分组的存量行
-// 不可匹配,回退原行为直接入库)。
-//
-// 本索引为调用方局部变量(单次导入构建、用完即弃),不跨调用缓存——导入是
-// 离散交互操作,复用价值低于内存占用。
+// 全量扫描(只取小列)构建「归一化标题 → 候选行」索引并带空闲驱逐缓存,单次
+// 导入 O(表大小) 一次 + O(N) 匹配;宿主 API(host.songs.match)的插件逐首
+// 调用也复用同一缓存。仅 group_key 非空的行可被匹配(同曲多源组默认开启,
+// 本地扫描/在线导入都会回填;关闭分组的存量行不可匹配,回退原行为直接入库)。
 
 import { sqlite } from "../../db/index.js";
 import { normalizeGroupText } from "../../utils/songGroup.js";
@@ -34,6 +31,34 @@ interface LibCandidate {
   artist: string | null;
   album: string | null;
   duration: number | null;
+}
+
+// 进程级索引缓存:宿主 API(host.songs.match)支持插件逐首调用,逐首重建
+// 全表索引不可接受——缓存后单次导入/榜单同步只建一次。失效策略:
+//   - 每次 取索引 前 count+max(rowid) 探针(单条聚合查询,极轻量):有新增/
+//     删除立即重建,保证导入/同步过程中刚落的行可被匹配;
+//   - 空闲 60s 自动驱逐(兜底行内更新类变更,如专辑改名,最多延迟一个 TTL)。
+let idxCache: Map<string, LibCandidate[]> | null = null;
+let idxProbe = "";
+let idxLastUsedAt = 0;
+const IDX_IDLE_EVICT_MS = 60_000;
+
+function songsTableProbe(): string {
+  const r = sqlite.prepare("SELECT COUNT(*) AS c, COALESCE(MAX(rowid), 0) AS m FROM songs").get() as any;
+  return `${r?.c ?? 0}:${r?.m ?? 0}`;
+}
+
+function getTitleIndex(): Map<string, LibCandidate[]> {
+  let probe = "";
+  try { probe = songsTableProbe(); } catch { /* 引擎异常时走重建兜底 */ }
+  if (idxCache && probe && probe !== idxProbe) idxCache = null;
+  if (idxCache && Date.now() - idxLastUsedAt > IDX_IDLE_EVICT_MS) idxCache = null;
+  if (!idxCache) {
+    idxCache = buildTitleIndex();
+    idxProbe = probe;
+  }
+  idxLastUsedAt = Date.now();
+  return idxCache;
 }
 
 /**
@@ -47,8 +72,7 @@ function tight(s: string): string {
 }
 
 /** 归一化标题 → 候选行索引(从 group_key 前缀拆出标题)。 */
-function buildTitleIndex(): Map<string, LibCandidate[]> {
-  const rows = sqlite
+function buildTitleIndex(): Map<string, LibCandidate[]> {  const rows = sqlite
     .prepare("SELECT id, type, artist, album, duration, group_key FROM songs WHERE group_key IS NOT NULL AND group_key != ''")
     .all() as { id: string; type: string | null; artist: string | null; album: string | null; duration: number | null; group_key: string }[];
   const idx = new Map<string, LibCandidate[]>();
@@ -107,7 +131,7 @@ function matchOne(
 
 /**
  * 批量库内匹配:对每首歌返回已有行 songId 或 null(与入参等长、顺序对齐)。
- * 单次调用构建一次标题索引,适合整单导入前的一次性匹配。
+ * 标题索引带空闲驱逐缓存,单次导入/插件逐首调用共享同一份。
  */
 export function matchSongsToLibrary(
   songs: { name?: string | null; title?: string | null; artist?: string | null; album?: string | null; duration?: number | null }[],
@@ -115,7 +139,7 @@ export function matchSongsToLibrary(
   if (!songs.length) return [];
   let idx: Map<string, LibCandidate[]>;
   try {
-    idx = buildTitleIndex();
+    idx = getTitleIndex();
   } catch {
     // 索引构建失败(如引擎异常)时静默降级:全部不匹配,回退原入库行为。
     return songs.map(() => null);

@@ -209,6 +209,8 @@ export interface SandboxHostEnv {
     list(options?: { limit?: number; offset?: number }): Promise<any[]>;
     search(query: string, options?: { limit?: number }): Promise<any[]>;
     getById(id: string): Promise<any | null>;
+    /** 批量库内匹配(核心统一四维匹配器):入参/返回等长对齐,未命中为 null。 */
+    match(songs: { title?: string; artist?: string; album?: string; duration?: number }[]): Promise<(string | null)[]>;
   };
   /** host.plugin:宿主身份/地址信息(只读,低敏感,无需权限)。 */
   plugin: {
@@ -797,10 +799,12 @@ export class SandboxedPlugin {
     const songsList = this.hostAsync("list", (options: any) => this.env.songs.list(options || {}), "songs:read");
     const songsSearch = this.hostAsync("search", (query: any, options: any) => this.env.songs.search(String(query ?? ""), options || {}), "songs:read");
     const songsGetById = this.hostAsync("getById", (id: any) => this.env.songs.getById(String(id)), "songs:read");
+    const songsMatch = this.hostAsync("match", (list: any) => this.env.songs.match(Array.isArray(list) ? list : []), "songs:read");
     c.setProp(songsObj, "list", songsList);
     c.setProp(songsObj, "search", songsSearch);
     c.setProp(songsObj, "getById", songsGetById);
-    songsList.dispose(); songsSearch.dispose(); songsGetById.dispose();
+    c.setProp(songsObj, "match", songsMatch);
+    songsList.dispose(); songsSearch.dispose(); songsGetById.dispose(); songsMatch.dispose();
 
     // host.plugin(宿主身份/地址,只读低敏,无需权限)
     const pluginObj = c.newObject();

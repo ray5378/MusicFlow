@@ -34,6 +34,7 @@ import { systemOwnerId } from "../services/plugin/shared.js";
 import { firstPlayableCoverFile } from "../services/playlistCover.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
+import { matchSongsToLibrary } from "../services/plugin/libraryMatch.js";
 import { createComm } from "./comm.js";
 import { proxyFetch } from "../services/proxy.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
@@ -548,6 +549,13 @@ export async function discoverExternalPlugins(
           getById: async (songId: string) => {
             const s = db.select().from(songs).where(eq(songs.id, String(songId))).get();
             return s ? toPluginSong(s) : null;
+          },
+          // 批量库内匹配(方案A核心匹配器):插件榜单/推荐同步用——先匹配库、
+          // 缺了才进,各插件不再各自复制 matchLocal 四维评分。入参/返回等长
+          // 对齐,未命中为 null。语义与 remoteImport 导入前匹配完全同源。
+          match: async (list: any) => {
+            const arr = Array.isArray(list) ? list.slice(0, 2000) : [];
+            return matchSongsToLibrary(arr as any);
           },
         },
         playlists: {

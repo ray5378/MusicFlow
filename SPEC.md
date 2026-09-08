@@ -250,6 +250,23 @@
 - **新增任何在线导入/匹配路径必须绑定门禁**：一律经 `passesImportGate` 或 `crossVerifySongs`，禁止「只搜不验」「盲取第一条」「平台 id 直通」形态；review 时把「该路径的候选是否全量过门禁」当作必查项（本条为 §1.6.2 根治契约的准入条件，违者按架构回退处理；v2.3.5 起该约束已下沉为运行时默认，见上条）。
 - **CI 强制（三层闭环）**：① 运行时——宿主 `crossVerifySongs`/`passesImportGate` 是唯一咽喉，插件无法绕过；② 主仓库 `build.yml` 的 `build` job `needs: test`（vitest 全量含门禁契约用例，不过则不出镜像/不出 Release——tag 发版链此前不经过 ci.yml 的 test，此为补齐）；③ 插件仓库 `scripts/gate-check.mjs` 挂进 ci.yml 与 release.yml 发版循环——所有 `host.sources.complete` 调用必须透传 `album` + `duration`（秒），缺失即失败（宿主门禁会整批拒导且无报错）。
 
+### 1.6.3 插件通用能力契约（v2.3.9+，禁止插件复制核心能力）
+
+> **原则**：凡属「横切能力」（多个插件都需要、且与核心数据/播放正确性相关的逻辑），实现一律放核心并经 host API / capability 暴露；**插件侧禁止复制核心实现**——复制品会随核心语义演进腐化（门禁收紧、匹配规则调整时插件侧仍是旧逻辑），历史上已两次踩坑（huawei-chart 缺 `search` 整单拒导；6 个插件各自复制 `matchLocal` 四维评分）。插件侧本地实现仅允许作为**旧宿主回退**存在，且必须先尝试 host API。
+
+**已收敛为通用契约的能力**（新增同类型插件直接声明能力/调用 host API，零前端/核心改动接入）：
+
+| 通用能力 | 核心单点 | 插件接入方式 |
+| --- | --- | --- |
+| 歌曲搜索 + 导入门禁核实 | `crossVerifySongs`/`passesImportGate` | manifest 声明 `search` 能力 + 实现 `search(config, params)` |
+| 歌单/专辑/歌曲搜索聚合 | `playlistSearch`/`albumSearch`/`songSearch` capability | manifest 声明 + 实现对应方法,自动进「聚合」+单独搜索 |
+| 歌单导入 | `remoteImport`（门禁 → **库内匹配** → 入库） | manifest 声明 `playlistSongs`；无直链的源插件**无需** `streamUrl`（空直链 web 行合法落库,首播自动换源,v2.3.6+） |
+| 本地库匹配（先匹配库、缺了才进） | `libraryMatch.matchSongsToLibrary`（四维评分单点维护,带失效探针的索引缓存） | **`host.songs.match(songs[])`**（v2.3.9+,入参/返回等长对齐,未命中为 null;直连宿主与 QuickJS 沙箱 worker 双通道,需 `songs:read`） |
+| 播放换源兜底 | `streamFallback.findFallbackStream`（绑全门禁） | 核心自动,插件零接入 |
+| 前端平台角标/标签 | PlatformBadge/SongTable 静态映射 + manifest `platformLabels` 动态层 | manifest 声明 `platforms` + `platformLabels` 即显示,无需改前端 |
+
+**CI 强制**：① 主仓库 vitest `hostApiParity.test.ts`——新增 host API 必须**三处同步**（直连宿主 discovery.ts、沙箱类型+接线 sandbox.ts、后台 worker 通道 sandboxWorker.ts），缺一处即红；② 插件仓库 `check.mjs`——index.js 自带 `matchLocal` 却未接 `host.songs.match` 即红（复制检测）。
+
 ***
 
 ## 二、数据模型契约（SQLite）
@@ -546,6 +563,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 □ 12. 鉴权写操作（apiKey/密码/用户名变更）已调用 invalidateAuthCaches()
 □ 13. 面向用户的文案已接入 i18n（前端 t() / 后端 errors.* / 插件 i18n.en），无裸中文硬编码，zh/en 键对齐
 □ 14. 新增任何在线歌曲导入/匹配路径必须绑定导入命中门禁（passesImportGate / crossVerifySongs，见 §1.6.2）；标题/专辑/歌手比对用 strictNormEquals（勿裸用 normalizeTitleStrict 相等比较——假名/谚文/纯符号归一化有损，会误判）。**播放换源兜底（findFallbackStream）同属此契约**（v2.3.4 起已挂全门禁，含专辑/时长维度与歌手包含判断收紧；v2.3.5 起兜底开关/时长容差覆写在 core-stream-fallback 配置）。**v2.3.5 起 importOnlineSong(s) 默认 gate:"verify" 运行时兜底**——新调用方要么直接不传（吃默认门禁），要么已核实传 `gate:"verified"`，仅用户亲选道可显式 `gate:"skip"`（每加一个 skip 点都要在 §1.6.2 留痕）
+□ 15. 插件侧**禁止复制核心横切能力**（库内匹配/门禁/换源/角标等,见 §1.6.3）——必须经 host API / capability / manifest 字段接入；新增 host API 必须三处同步（discovery.ts 直连 + sandbox.ts 类型/接线 + sandboxWorker.ts worker 通道,hostApiParity 测试强制）,并同步补进 §1.6.3 通用能力表
 ```
 
 ***
