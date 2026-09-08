@@ -20,6 +20,27 @@ describe("songSourceInfo", () => {
     expect(info).toEqual({ isWeb: true, sourcePlatform: "netease", sourcePluginId: "go-music-dl" });
   });
 
+  it("extra.streamSource(换源实际出流平台)优先于登记来源", () => {
+    const info = songSourceInfo({
+      type: "web",
+      pluginEntry: "huawei-chart",
+      sourceData: JSON.stringify({
+        provider: "huawei-chart", source: "huawei", remoteId: "105897013",
+        extra: { streamSource: "migu" },
+      }),
+    });
+    expect(info).toEqual({ isWeb: true, sourcePlatform: "migu", sourcePluginId: "huawei-chart" });
+  });
+
+  it("extra.streamSource 为空串时不覆盖登记来源", () => {
+    const info = songSourceInfo({
+      type: "web",
+      pluginEntry: "huawei-chart",
+      sourceData: JSON.stringify({ source: "huawei", extra: { streamSource: "" } }),
+    });
+    expect(info.sourcePlatform).toBe("huawei");
+  });
+
   it("sourceData 缺失/为空时从 path 兜底解析", () => {
     expect(songSourceInfo({ type: "web", pluginEntry: "go-music-dl", sourceData: "", path: "web:go-music-dl:qq" }))
       .toEqual({ isWeb: true, sourcePlatform: "qq", sourcePluginId: "go-music-dl" });

@@ -22,6 +22,11 @@ export function songSourceInfo(song: {
   try {
     const sd = JSON.parse(song.sourceData || "{}");
     if (sd && typeof sd.source === "string") source = sd.source;
+    // 显示语义:换源解析的实际出流平台优先(extra.streamSource,由 streamFallback
+    // 换源命中回写时落库;不参与去重指纹,provider/source/remoteId 保持登记值)。
+    // 角标/来源列因此展示「当前真正在出流的源」,对本地/Subsonic/前端序列化全局生效。
+    const ss = sd?.extra?.streamSource;
+    if (typeof ss === "string" && ss) source = ss;
   } catch {
     // source_data 损坏则忽略,走 path 兜底
   }

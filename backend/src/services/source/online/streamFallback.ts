@@ -223,7 +223,7 @@ export async function resolveEmptyUrlStream(song: {
     song.pluginEntry, sd?.source || "",
   );
   if (!fb) return null;
-  updateSongUrl(song.id, fb.url);
+  updateSongUrl(song.id, fb.url, fb.source || undefined);
   return fb.url;
 }
 
@@ -270,14 +270,25 @@ export async function ensurePlayableStream(
   );
   if (fb) {
     addPlayable(song.id);
-    updateSongUrl(song.id, fb.url);
+    updateSongUrl(song.id, fb.url, fb.source || undefined);
     return fb.url;
   }
   return null;
 }
 
-function updateSongUrl(songId: string, url: string): void {
+function updateSongUrl(songId: string, url: string, streamSource?: string): void {
   try {
-    db.update(songs).set({ url }).where(eq(songs.id, songId)).run();
+    const patch: { url: string; sourceData?: string } = { url };
+    if (streamSource) {
+      // 显示语义:角标优先展示「实际出流平台」(extra.streamSource),不动
+      // provider/source/remoteId——它们参与去重指纹,改了会导致同一首歌被
+      // 反复重新导入。extra 其余键保留合并。
+      const row = db.select({ sourceData: songs.sourceData }).from(songs).where(eq(songs.id, songId)).get();
+      let sd: any = {};
+      try { sd = JSON.parse(row?.sourceData || "{}"); } catch {}
+      sd.extra = { ...(sd.extra || {}), streamSource };
+      patch.sourceData = JSON.stringify(sd);
+    }
+    db.update(songs).set(patch).where(eq(songs.id, songId)).run();
   } catch {}
 }

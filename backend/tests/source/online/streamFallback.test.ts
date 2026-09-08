@@ -380,6 +380,12 @@ describe("ensurePlayableStream — 原 URL 失败换源并写回", () => {
     expect(url).toBeTruthy();
     const row = db.select().from(songs).where(eq(songs.id, "fb-empty")).get() as any;
     expect(row.url).toBe(url);
+    // 换源命中回写时 extra.streamSource 记录实际出流平台(角标显示语义);
+    // provider/source 指纹字段保持登记值,不影响去重。
+    const sd = JSON.parse(row.sourceData || "{}");
+    expect(sd.extra.streamSource).toBe("netease");
+    expect(sd.source).toBe("huawei");
+    expect(sd.provider).toBe("huawei-test");
   });
 
   it("空直链且无候选可换 → 返回 null", async () => {
