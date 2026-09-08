@@ -244,6 +244,7 @@
 - 用户亲选搜索结果的入库路径（`song-search import`）视为已验证，不重复比对。
 - 直通废除后带平台 id 的歌单条目匹配耗时增加属预期（批内缓存 + batchConcurrency + sleepBetweenBatch 兜底）；宿主补全/测试桩必须回显与期望元数据全命中的候选才能通过门禁。
 - **新增任何在线导入/匹配路径必须绑定门禁**：一律经 `passesImportGate` 或 `crossVerifySongs`，禁止「只搜不验」「盲取第一条」「平台 id 直通」形态；review 时把「该路径的候选是否全量过门禁」当作必查项（本条为 §1.6.2 根治契约的准入条件，违者按架构回退处理）。
+- **CI 强制（三层闭环）**：① 运行时——宿主 `crossVerifySongs`/`passesImportGate` 是唯一咽喉，插件无法绕过；② 主仓库 `build.yml` 的 `build` job `needs: test`（vitest 全量含门禁契约用例，不过则不出镜像/不出 Release——tag 发版链此前不经过 ci.yml 的 test，此为补齐）；③ 插件仓库 `scripts/gate-check.mjs` 挂进 ci.yml 与 release.yml 发版循环——所有 `host.sources.complete` 调用必须透传 `album` + `duration`（秒），缺失即失败（宿主门禁会整批拒导且无报错）。
 
 ***
 
