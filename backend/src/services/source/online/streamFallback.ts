@@ -14,8 +14,19 @@ import { OnlineSongResult } from "./types.js";
 import { db } from "../../../db/index.js";
 import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { getEnabledSourcePlugins, getPluginManifest } from "../../../plugins/registry.js";
-import { passesImportGate } from "./importGate.js";
+import { getEnabledSourcePlugins, getPluginManifest, getPluginConfig } from "../../../plugins/registry.js";
+import { passesImportGate, getImportGateConfig, type ImportGateConfig } from "./importGate.js";
+import { STREAM_FALLBACK_PLUGIN_ID } from "../../plugin/core/streamFallbackPlugin.js";
+
+/** 读取换源兜底配置(core-stream-fallback 内置插件):enabled 总开关 + 时长容差覆写。 */
+function getFallbackConfig(): { enabled: boolean; durationTolerance: number } {
+  const cfg = (getPluginConfig(STREAM_FALLBACK_PLUGIN_ID) || {}) as Record<string, unknown>;
+  const tol = Number(cfg.durationTolerance);
+  return {
+    enabled: cfg.enabled !== false,
+    durationTolerance: Number.isFinite(tol) && tol > 0 ? tol : 0,
+  };
+}
 
 // Bounded in-memory caches. Both grow with every web song played, so enforce a
 // FIFO cap to keep memory usage bounded on long-running servers.
@@ -65,6 +76,11 @@ export async function findFallbackStream(
   }
   if (!title) { setFallback(songId, null); return null; }
 
+  // 总开关(core-stream-fallback):关闭时不再搜索替代源。不写负缓存——开关
+  // 随时可改,负缓存会让重新开启后首次播放仍误判无兜底。
+  const fbCfg = getFallbackConfig();
+  if (!fbCfg.enabled) return null;
+
   const configured = getConfiguredProvider(providerId);
   if (!configured?.provider.search) { setFallback(songId, null); return null; }
 
@@ -84,7 +100,11 @@ export async function findFallbackStream(
   // 被换成网易云「李荣浩-、Montagem」的 funk remix:歌名相等、'李荣浩-'.includes
   // ('李荣浩') 恒真)通过后还被 updateSongUrl 持久化污染 songs.url,此后每次播放
   // 都直用错链。期望侧缺字段(无专辑/无时长)时对应维度自动跳过,与导入语义一致。
-  // 排序偏好(sourcePreference)不变。
+  // 时长容差默认沿用导入门禁;core-stream-fallback.durationTolerance > 0 时覆写
+  // (仅放宽时长维度,标题/歌手/专辑不可放宽)。排序偏好(sourcePreference)不变。
+  const gateCfg: ImportGateConfig | undefined = fbCfg.durationTolerance > 0
+    ? { ...getImportGateConfig(), durationTolerance: fbCfg.durationTolerance }
+    : undefined;
   const preference = getSourcePreference(providerId);
   const ranked = results
     .filter(s => {
@@ -92,6 +112,7 @@ export async function findFallbackStream(
       return passesImportGate(
         { title, artist, album: album || null, duration: duration > 0 ? duration : null },
         { name: s.name, artist: s.artist, album: s.album, duration: s.duration },
+        gateCfg,
       ).ok;
     })
     .sort((a, b) => {

@@ -47,7 +47,7 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
     // (标题+歌手+专辑+时长全命中才导),拒导的不进歌单。
     const { verified, rejected } = await crossVerifySongs(providerId, config, plugin, list, { interactive: true });
     // 歌曲入库为在线歌曲(可播),返回 { songs, added, deduped, failed }
-    const imp = await importOnlineSongs(providerId, verified, { userId, interactive: true });
+    const imp = await importOnlineSongs(providerId, verified, { userId, interactive: true, gate: "verified" });
     if (!imp?.songs?.length) {
       throw new Error(
         rejected > 0

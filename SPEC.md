@@ -235,16 +235,17 @@
 | 平台 id 直通（`onlineSongFromExternalId`） | 免搜索直接导入（**已废除**） | 一律在线搜索 + 门禁交叉比对，以搜索验证过的候选落库 |
 | 宿主补全（`host.sources.complete` → `completeFromSources`） | 盲取 `songs[0]` | 门禁过滤全部候选，取时长最接近命中者；插件透传 album/duration |
 | 上游歌单整单导入（每日推荐 / 歌单专辑「加入库」/ `/v1/online/import`） | 直接 `importOnlineSongs` | `crossVerifySongs` 逐首搜索交叉比对（批内缓存 + 节流；交互式直通不节流），拒导计数上报 |
-| 播放换源兜底（`streamFallback.ts findFallbackStream`，v2.3.4+） | 仅「歌名严格相等 + 歌手首位名分」两维（无专辑/时长，且命中的替换 URL 被 `updateSongUrl` 持久化写回 `songs.url`） | 全门禁（`passesImportGate`，与导入同套断言）：候选须命中专辑一致 + 时长容差，期望侧缺字段维度跳过。**背景**：《恋人-李荣浩》QQ 原链 404 后被兜底换成网易云「李荣浩-、Montagem」funk remix（歌名相等、`'李荣浩-'.includes('李荣浩')` 恒真、旧两维拦不住）并持久化污染 `songs.url`——兜底是与导入并列的独立代码路径，同样必须绑门禁 |
+| 播放换源兜底（`streamFallback.ts findFallbackStream`，v2.3.4+） | 仅「歌名严格相等 + 歌手首位名分」两维（无专辑/时长，且命中的替换 URL 被 `updateSongUrl` 持久化写回 `songs.url`） | 全门禁（`passesImportGate`，与导入同套断言）：候选须命中专辑一致 + 时长容差，期望侧缺字段维度跳过。**配置面（v2.3.5+，`core-stream-fallback` config-only 内置插件）**：`enabled` 总开关（关=原链失效即播放失败，不搜替代源）、`durationTolerance` 时长容差覆写（0=沿用导入门禁容差，>0 仅放宽时长维度，标题/歌手/专辑不可放宽）。**背景**：《恋人-李荣浩》QQ 原链 404 后被兜底换成网易云「李荣浩-、Montagem」funk remix（歌名相等、`'李荣浩-'.includes('李荣浩')` 恒真、旧两维拦不住）并持久化污染 `songs.url`——兜底是与导入并列的独立代码路径，同样必须绑门禁；兜底逻辑留在核心（播放可靠性契约），插件化需新增 `host.songs.url` 写回 API 反而扩大攻击面 |
 
 **硬约束**
 
 - 规范化统一用 `normalizeTitleStrict`（中英文归一、剔除符号空白；版本词 live/remix 保留），标题维度「全串相等」语义与旧 auto-match 一致。
 - **归一化盲区原文回退（v2.3.1+）**：`normalizeTitleStrict` 只保留英数字与汉字——假名/谚文/纯符号标题归一为空串，混合文字（如「サントラ盤」）会丢信息（只剩「盤」）。所有标题/专辑/歌手比对统一走 `strictNormEquals`（`shared.ts`）：原文全等即等；任一侧含会被剥离的字母数字（`\p{L}\p{N}` 判定）→ 归一化有损，按不等处理（宁可拒，不可错）；否则归一化比较容忍空白/符号/全半角差异。`searchBestMatch` 结果缓存键用原文 trim+lowercase（归一键会让所有假名歌共享同一缓存条目）。
 - 期望侧缺字段（无专辑/无歌手/无时长）→ 对应维度跳过；候选侧缺字段 → 视为无法核实，不命中（宁可拒导，不可错导）。
-- 用户亲选搜索结果的入库路径（`song-search import`）视为已验证，不重复比对。
 - 直通废除后带平台 id 的歌单条目匹配耗时增加属预期（批内缓存 + batchConcurrency + sleepBetweenBatch 兜底）；宿主补全/测试桩必须回显与期望元数据全命中的候选才能通过门禁。
-- **新增任何在线导入/匹配路径必须绑定门禁**：一律经 `passesImportGate` 或 `crossVerifySongs`，禁止「只搜不验」「盲取第一条」「平台 id 直通」形态；review 时把「该路径的候选是否全量过门禁」当作必查项（本条为 §1.6.2 根治契约的准入条件，违者按架构回退处理）。
+- 用户亲选搜索结果的入库路径（`song-search import`）视为已验证，不重复比对。**可选二次门禁（v2.3.5+）**：`core-import-gate.reverifyUserPicked`（默认关）开启后，亲选歌入库前后台静默重验一次，未命中的仍入库（尊重亲选语义，不删）但在任务结果中标注未命中清单供人工甄别。
+- **入库函数自身设防（v2.3.5+）**：`importOnlineSong(s)` 默认 `gate:"verify"`——函数体内先跑 `crossVerifySongs`，只有过门禁的候选才落库；未来新增调用方即使忘了挂门禁，运行时也兜得住。调用方已核实过的路径显式传 `gate:"verified"`（避免双倍网络搜索）；仅用户亲选契约豁免道显式传 `gate:"skip"`（审计 grep `"gate: \"skip"` 即枚举全部豁免点）。provider 无 search 能力时 verify 降级放行并记警告（无比对对象无从核实）。
+- **新增任何在线导入/匹配路径必须绑定门禁**：一律经 `passesImportGate` 或 `crossVerifySongs`，禁止「只搜不验」「盲取第一条」「平台 id 直通」形态；review 时把「该路径的候选是否全量过门禁」当作必查项（本条为 §1.6.2 根治契约的准入条件，违者按架构回退处理；v2.3.5 起该约束已下沉为运行时默认，见上条）。
 - **CI 强制（三层闭环）**：① 运行时——宿主 `crossVerifySongs`/`passesImportGate` 是唯一咽喉，插件无法绕过；② 主仓库 `build.yml` 的 `build` job `needs: test`（vitest 全量含门禁契约用例，不过则不出镜像/不出 Release——tag 发版链此前不经过 ci.yml 的 test，此为补齐）；③ 插件仓库 `scripts/gate-check.mjs` 挂进 ci.yml 与 release.yml 发版循环——所有 `host.sources.complete` 调用必须透传 `album` + `duration`（秒），缺失即失败（宿主门禁会整批拒导且无报错）。
 
 ***
@@ -542,7 +543,7 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 □ 11. 新代码/新端点使用 apiError(code, message) 与 createLogger()，未裸造错误体/裸 console
 □ 12. 鉴权写操作（apiKey/密码/用户名变更）已调用 invalidateAuthCaches()
 □ 13. 面向用户的文案已接入 i18n（前端 t() / 后端 errors.* / 插件 i18n.en），无裸中文硬编码，zh/en 键对齐
-□ 14. 新增任何在线歌曲导入/匹配路径必须绑定导入命中门禁（passesImportGate / crossVerifySongs，见 §1.6.2）；标题/专辑/歌手比对用 strictNormEquals（勿裸用 normalizeTitleStrict 相等比较——假名/谚文/纯符号归一化有损，会误判）。**播放换源兜底（findFallbackStream）同属此契约**（v2.3.4 起已挂全门禁，含专辑/时长维度与歌手包含判断收紧）
+□ 14. 新增任何在线歌曲导入/匹配路径必须绑定导入命中门禁（passesImportGate / crossVerifySongs，见 §1.6.2）；标题/专辑/歌手比对用 strictNormEquals（勿裸用 normalizeTitleStrict 相等比较——假名/谚文/纯符号归一化有损，会误判）。**播放换源兜底（findFallbackStream）同属此契约**（v2.3.4 起已挂全门禁，含专辑/时长维度与歌手包含判断收紧；v2.3.5 起兜底开关/时长容差覆写在 core-stream-fallback 配置）。**v2.3.5 起 importOnlineSong(s) 默认 gate:"verify" 运行时兜底**——新调用方要么直接不传（吃默认门禁），要么已核实传 `gate:"verified"`，仅用户亲选道可显式 `gate:"skip"`（每加一个 skip 点都要在 §1.6.2 留痕）
 ```
 
 ***

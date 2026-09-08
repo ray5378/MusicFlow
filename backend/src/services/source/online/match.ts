@@ -190,7 +190,7 @@ export async function matchToOnlineSong(
     if (m.status !== "matched" || !m.best) {
       return { entryId: want.entryId, title: want.title, status: m.status, message: m.message };
     }
-    const res = await importOnlineSong(providerId, m.best, {});
+    const res = await importOnlineSong(providerId, m.best, { gate: "verified" });
     if (!res.success || !res.songId) {
       return { entryId: want.entryId, title: want.title, status: "error", message: res.error || "导入失败" };
     }
@@ -280,7 +280,7 @@ export async function matchUnmatchedPlaylistEntries(
   // ---- 阶段2:批量导入所有命中(批量 dedup + 计数去重刷新一次)+ 分块事务链接 ----
   let matched = 0;
   if (matchedByEntry.size > 0) {
-    const imp = await importOnlineSongs(providerId, Array.from(matchedByEntry.values()).map((v) => v.best), {});
+    const imp = await importOnlineSongs(providerId, Array.from(matchedByEntry.values()).map((v) => v.best), { gate: "verified" });
     const byFp = new Map<string, string>();
     for (const s of imp.songs) byFp.set(s.fingerprint, s.id);
 

@@ -287,7 +287,9 @@ onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_
         return c.json({ success: false, error: `没有歌曲通过导入门禁(标题/歌手/专辑/时长校验),拒导 ${rejected} 首`, rejected });
       }
     }
-    const result = await importOnlineSongs(providerId, toImport, { playlistId, userId: user?.id });
+    // verified=true 是用户亲选的搜索结果(SPEC 明文契约豁免)→ 显式 skip;
+    // 否则上方已跑 crossVerifySongs → verified,避免入库时二次网络核实。
+    const result = await importOnlineSongs(providerId, toImport, { playlistId, userId: user?.id, gate: body.verified === true ? "skip" : "verified" });
     return c.json({ success: true, rejected, ...result });
   } catch (e: any) {
     return c.json({ success: false, error: e.message || translate("errors.import.failed") });

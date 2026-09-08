@@ -191,7 +191,7 @@ export async function importRecommendPlaylist(
   // 导入命中门禁:上游歌单自带 id/元数据不可信,逐首搜索交叉比对
   // (标题+歌手+专辑+时长全命中才导),拒导的计入 rejected,绝不落库。
   const { verified, rejected } = await crossVerifySongs(providerId, configured.config, configured.provider, list);
-  const imp = await importOnlineSongs(providerId, verified, { userId: opts?.userId });
+  const imp = await importOnlineSongs(providerId, verified, { userId: opts?.userId, gate: "verified" });
   const displayName = truncateName(info.name);
 
   // 平台歌单音乐为 0(空歌单)→ 自动删除本地对应歌单,不保留空占位。

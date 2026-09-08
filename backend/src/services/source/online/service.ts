@@ -293,20 +293,62 @@ function flushArtistAlbumTail(
   return { artists: pendingArtists.length, albums: pendingAlbums.length };
 }
 
+/** gate="verify" 时的在线交叉比对:委托 crossVerifySongs(match.ts,动态 import 避免
+ *  与其「service.ts 导入」形成静态环)。provider 缺 search 能力时降级放行并记警告
+ *  (没有比对对象无从核实,与门禁「有比对对象才谈命中」语义一致)。 */
+async function gateVerify(
+  providerId: string,
+  configured: Record<string, any> | null | undefined,
+  provider: any,
+  list: OnlineSongResult[],
+  opts?: { interactive?: boolean },
+): Promise<{ verified: OnlineSongResult[]; rejected: number }> {
+  if (!provider || typeof provider.search !== "function" || !configured) {
+    log.warn("provider 无 search 能力,门禁 verify 降级为直接入库(无比对对象)", { providerId, count: list.length });
+    return { verified: list, rejected: 0 };
+  }
+  const { crossVerifySongs } = await import("./match.js");
+  const r = await crossVerifySongs(providerId, configured, provider, list, { interactive: opts?.interactive });
+  if (r.rejected > 0) log.warn("门禁 verify 拒导计数", { providerId, total: list.length, rejected: r.rejected });
+  return r;
+}
+
+/**
+ * 入库门禁模式(hardening,SPEC §1.6.2):
+ * - "verify"(默认):本函数内部先跑 crossVerifySongs 在线交叉比对,只有通过
+ *   导入门禁的候选才落库——未来新增调用方即使忘了挂门禁,运行时也兜得住;
+ * - "verified":调用方已逐首门禁核实(remoteImport/recommendImport/discovery 补全/
+ *   auto-match 等既有路径),直接入库,避免双倍网络搜索;
+ * - "skip":契约豁免道——用户亲选(歌曲搜索「加入库」,SPEC 明文视为已验证)。
+ *   仅显式传本值才放行,审计时可 grep "gate: \"skip\""。
+ * provider 无 search 能力(测试假 provider/未配置源)时 verify 降级为原样导入并记
+ * 警告——没有比对对象时无从核实,与门禁「有比对对象才谈命中」的语义一致。
+ */
+export type ImportGateMode = "verify" | "verified" | "skip";
+
 export async function importOnlineSong(
   providerId: string,
   song: OnlineSongResult,
-  opts?: { playlistId?: string; userId?: string },
+  opts?: { playlistId?: string; userId?: string; gate?: ImportGateMode },
 ): Promise<{ success: boolean; songId?: string; deduped?: boolean; error?: string; cover?: string }> {
+  // 解析一次配置与 provider,避免单首也逐 song 反复查 plugins 表 + 注册表。
+  const configured = getSourcePluginConfig(providerId);
+  const provider = getOnlineProvider(providerId);
+
+  if ((opts?.gate ?? "verify") === "verify") {
+    const g = await gateVerify(providerId, configured, provider, [song], { interactive: true });
+    if (!g.verified.length) {
+      return { success: false, error: `未通过导入门禁(标题/歌手/专辑/时长校验),拒导 ${g.rejected} 首` };
+    }
+    song = g.verified[0]!;
+  }
+
   const existingFingerprints = new Map<string, string>();
   const artistIds = new Map<string, string>();
   const albumIds = new Map<string, string>();
   const artistsPending: { id: string; name: string }[] = [];
   const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
 
-  // 解析一次配置与 provider,避免单首也逐 song 反复查 plugins 表 + 注册表。
-  const configured = getSourcePluginConfig(providerId);
-  const provider = getOnlineProvider(providerId);
   const plan = await planSongInsert(providerId, song, configured, provider, false, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, new Map<string, string>());
   if (!plan.success) return { success: false, error: plan.error };
   if (plan.deduped) return { success: true, songId: plan.songId, deduped: true };
@@ -326,8 +368,20 @@ export async function importOnlineSong(
 export async function importOnlineSongs(
   providerId: string,
   songList: OnlineSongResult[],
-  opts?: { playlistId?: string; userId?: string; interactive?: boolean },
-): Promise<{ added: number; deduped: number; failed: number; songs: { id: string; title: string; fingerprint: string }[] }> {
+  opts?: { playlistId?: string; userId?: string; interactive?: boolean; gate?: ImportGateMode },
+): Promise<{ added: number; deduped: number; failed: number; rejected?: number; songs: { id: string; title: string; fingerprint: string }[] }> {
+  // 硬化门禁(默认 "verify"):先在线交叉比对,只放行通过导入门禁的候选。
+  const configured = getSourcePluginConfig(providerId);
+  const provider = getOnlineProvider(providerId);
+  if ((opts?.gate ?? "verify") === "verify") {
+    const g = await gateVerify(providerId, configured, provider, songList, opts);
+    if (!g.verified.length) {
+      log.warn("整批未通过导入门禁,拒导", { providerId, total: songList.length, rejected: g.rejected });
+      return { added: 0, deduped: 0, failed: 0, rejected: g.rejected, songs: [] };
+    }
+    songList = g.verified;
+  }
+
   // One batched dedup query instead of one SELECT per song.
   const existingFingerprints = new Map<string, string>();
   let dedupPreloaded = false;
@@ -375,10 +429,6 @@ export async function importOnlineSongs(
     log.error("歌手/专辑预载失败,退回逐条解析", { providerId, stage: "entity-preload", err: (e as Error)?.message || e });
   }
 
-  // 解析一次配置与 provider,命中同一规则:整批复用,避免每首歌重复查
-  // plugins 表 + 注册表(大歌单时 O(N)→O(1))。
-  const configured = getSourcePluginConfig(providerId);
-  const provider = getOnlineProvider(providerId);
   const artistsPending: { id: string; name: string }[] = [];
   const albumsPending: { id: string; name: string; artistId: string | null; artist: string }[] = [];
   const insertedAlbums = new Set<string>();

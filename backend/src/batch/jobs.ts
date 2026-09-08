@@ -18,7 +18,7 @@ import { importRemotePlaylistLike } from "../services/plugin/remoteImport.js";
 import { cacheRemoteCover } from "../services/playlistCover.js";
 import { getConfiguredProvider } from "../services/source/online/index.js";
 import { importOnlineSongs } from "../services/source/online/service.js";
-import { matchUnmatchedPlaylistEntries } from "../services/source/online/match.js";
+import { matchUnmatchedPlaylistEntries, crossVerifySongs } from "../services/source/online/match.js";
 import { syncAllRecommendPlaylists } from "../services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "../services/source/online/purge.js";
 import { scanLocalSource, scanWebDAVSource } from "../services/source/scanner.js";
@@ -345,14 +345,40 @@ async function remoteImportHandler(args: Record<string, any>, _ctx: BatchJobCont
 }
 
 // ---------- 歌曲搜索「加入库」(fingerprint 去重) ----------
+// 用户亲选道:SPEC 契约豁免(用户点的歌视为已验证),importOnlineSongs 显式 gate:"skip"。
+// 可选二次门禁(core-import-gate.reverifyUserPicked,默认关):开启后先在线静默重验,
+// 不命中的歌仍然入库(尊重亲选语义,不删),但计数与明细上报到任务结果供人工甄别。
 async function songSearchImportHandler(args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
   const list: any[] = Array.isArray(args.songs) ? args.songs : [];
-  const imp = await importOnlineSongs(String(args.providerId), list, { userId: args.userId, interactive: true });
+  const providerId = String(args.providerId);
+  let reverify: { enabled: boolean; passed: number; rejected: number; rejectedTitles: string[] } | undefined;
+  const gateCfg = (getPluginConfig("core-import-gate") || {}) as Record<string, unknown>;
+  if (gateCfg.reverifyUserPicked === true && list.length) {
+    try {
+      const configured = getConfiguredProvider(providerId);
+      if (configured) {
+        const r = await crossVerifySongs(providerId, configured.config, configured.provider, list, { interactive: true });
+        const verifiedIds = new Set(r.verified.map((s: any) => `${s.source}:${s.id}`));
+        const rejectedSongs = list.filter((s: any) => !verifiedIds.has(`${s.source}:${s.id}`));
+        reverify = {
+          enabled: true,
+          passed: r.verified.length,
+          rejected: r.rejected,
+          rejectedTitles: rejectedSongs.slice(0, 50).map((s: any) => [s.name, s.artist].filter(Boolean).join(" - ")),
+        };
+        log.warn("亲选道二次门禁:存在未命中候选(仍按亲选语义入库)", { providerId, rejected: r.rejected, titles: reverify.rejectedTitles });
+      }
+    } catch (e: any) {
+      log.warn("亲选道二次门禁执行失败(不阻断导入)", { providerId, err: e?.message || e });
+    }
+  }
+  const imp = await importOnlineSongs(providerId, list, { userId: args.userId, interactive: true, gate: "skip" });
   if (!imp?.songs?.length) throw new Error("歌曲入库失败,请检查在线源配置");
   return {
     success: true, added: imp.added, deduped: imp.deduped, failed: imp.failed,
     trackCount: imp.songs.length, ids: imp.songs.map((s: any) => s.id),
     imported: imp.songs.map((s: any) => ({ id: s.id, fingerprint: s.fingerprint })),
+    ...(reverify ? { reverify } : {}),
   };
 }
 

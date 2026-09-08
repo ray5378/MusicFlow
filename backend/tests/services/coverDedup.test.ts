@@ -68,11 +68,12 @@ afterAll(() => {
 
 describe("importOnlineSongs — 批内封面去重(同一 URL 只下载一次,其余本地复制)", () => {
   it("共享同一封面 URL 的歌各得独立可解析 cover 文件,且字节一致", async () => {
+    // gate:"skip":本用例测封面去重机制(假 provider search 返回空,不承载门禁语义)。
     const res = await importOnlineSongs(PROVIDER, [
       { id: "d1", source: "netease", name: "歌1", artist: "封面歌手", album: "封面专辑", duration: 180, cover: SHARED_COVER },
       { id: "d2", source: "netease", name: "歌2", artist: "封面歌手", album: "封面专辑", duration: 200, cover: SHARED_COVER },
       { id: "d3", source: "netease", name: "歌3", artist: "封面歌手", album: "封面专辑", duration: 210, cover: SHARED_COVER },
-    ]);
+    ], { gate: "skip" });
 
     expect(res.added).toBe(3);
     expect(res.failed).toBe(0);

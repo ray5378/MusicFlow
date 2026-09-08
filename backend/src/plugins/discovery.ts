@@ -790,7 +790,7 @@ async function completeFromSources(opts: any): Promise<{ songId: string | null }
         if (diff < bestDurDiff) { bestDurDiff = diff; best = normalized; }
       }
       if (!best) continue;
-      const imp = await importOnlineSongs(manifest.id, [best], { userId: systemOwnerId() });
+      const imp = await importOnlineSongs(manifest.id, [best], { userId: systemOwnerId(), gate: "verified" });
       if (imp?.songs && imp.songs[0]?.id) return { songId: imp.songs[0].id };
     } catch { /* 单源失败跳过,试下一个 */ }
   }

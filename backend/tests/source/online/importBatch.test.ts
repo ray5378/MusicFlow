@@ -71,7 +71,7 @@ describe("importOnlineSongs — 批量导入(歌单/私人歌单路径)", () => 
       { id: "a1", source: "netease", name: "歌1", artist: "批量歌手", album: "同名专辑", duration: 180, cover: "" },
       { id: "a2", source: "netease", name: "歌2", artist: "批量歌手", album: "同名专辑", duration: 200, cover: "" },
       { id: "a2", source: "netease", name: "歌2", artist: "批量歌手", album: "同名专辑", duration: 200, cover: "" }, // a2 重复
-    ]);
+    ], { gate: "skip" }); // gate:"skip":本文件测批量导入机制,假 provider 不承载门禁语义
 
     expect(res.added).toBe(2);
     expect(res.deduped).toBe(1);
@@ -107,7 +107,7 @@ describe("importOnlineSongs — 批量导入(歌单/私人歌单路径)", () => 
     const res = await importOnlineSongs(PROVIDER, [
       { id: "b1", source: "netease", name: "歌X", artist: "批量歌手", album: "同名专辑", duration: 100, cover: "" },
       { id: "b2", source: "qq", name: "歌Y", artist: "另一歌手", album: "另张专辑", duration: 50, cover: "" },
-    ]);
+    ], { gate: "skip" });
 
     expect(res.added).toBe(2);
     expect(res.deduped).toBe(0);
@@ -133,7 +133,7 @@ describe("importOnlineSongs — 批量导入(歌单/私人歌单路径)", () => 
     // 末尾重复列表前 10 首,验证去重不受分波边界影响(预载已覆盖全列表指纹)
     for (let k = 0; k < 10; k++) list.push({ ...list[k] });
 
-    const res = await importOnlineSongs(PROVIDER, list);
+    const res = await importOnlineSongs(PROVIDER, list, { gate: "skip" });
     expect(res.added).toBe(n);
     expect(res.deduped).toBe(10);
     expect(res.failed).toBe(0);
@@ -163,7 +163,7 @@ describe("importOnlineSong — 单曲路径逐个 refresh", () => {
   it("插入单曲后 album/artist 计数即时刷新", async () => {
     const r = await importOnlineSong(PROVIDER, {
       id: "c1", source: "netease", name: "歌z", artist: "另一歌手", album: "另张专辑", duration: 10, cover: "",
-    });
+    }, { gate: "skip" });
     expect(r.success).toBe(true);
     expect(r.deduped).toBe(false);
 
@@ -173,5 +173,26 @@ describe("importOnlineSong — 单曲路径逐个 refresh", () => {
 
     const artist = db.select().from(artists).where(eq(artists.name, "另一歌手")).get();
     expect(artist?.albumCount).toBe(1);
+  });
+});
+
+describe("importOnlineSongs — 硬化门禁(v2.3.5:默认 verify,未挂门禁的调用方运行时兜底)", () => {
+  it("默认 gate=verify:provider search 有响应但无命中候选 → 整批拒导,不落库", async () => {
+    // 本文件的假 provider search 恒返回空 → 交叉比对无命中 → 全部拒导。
+    const res = await importOnlineSongs(PROVIDER, [
+      { id: "g1", source: "netease", name: "歌g", artist: "批量歌手", album: "同名专辑", duration: 180, cover: "" },
+    ]);
+    expect(res.added).toBe(0);
+    expect(res.rejected).toBe(1);
+    expect(res.songs.length).toBe(0);
+    expect(db.select().from(songs).where(eq(songs.pluginEntry, PROVIDER)).all().length).toBe(0);
+  });
+
+  it("gate=verified:调用方已门禁核实 → 直接入库,不触发搜索", async () => {
+    const res = await importOnlineSongs(PROVIDER, [
+      { id: "g2", source: "netease", name: "歌v", artist: "批量歌手", album: "同名专辑", duration: 180, cover: "" },
+    ], { gate: "verified" });
+    expect(res.added).toBe(1);
+    expect(res.rejected).toBeUndefined();
   });
 });

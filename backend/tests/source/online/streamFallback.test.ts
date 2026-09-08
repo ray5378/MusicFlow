@@ -102,6 +102,8 @@ afterEach(() => {
   clearStreamFallbackCache();
   sqlite.prepare("DELETE FROM songs WHERE plugin_entry = ?").run(PROVIDER);
   sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(PROVIDER);
+  // core-stream-fallback 配置行也清掉(用例随机顺序,不能让开关/覆写泄漏到其它用例)。
+  sqlite.prepare("DELETE FROM plugins WHERE id = 'core-stream-fallback'").run();
   unregisterPlugin(PROVIDER);
 });
 
@@ -200,6 +202,54 @@ describe("findFallbackStream — 换源兜底挂导入门禁", () => {
     ]);
 
     const fb = await findFallbackStream("s-nodur", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+  });
+
+  // ---- core-stream-fallback 配置插件(v2.3.5):开关 + 时长容差覆写 ----
+
+  /** 在测试 DB 里播种/更新 core-stream-fallback 行(免注册,配置纯 DB 驱动)。 */
+  function setFallbackConfig(cfg: Record<string, any>) {
+    const now = new Date().toISOString();
+    sqlite.prepare(`
+      INSERT INTO plugins (id, name, version, description, manifest, enabled, config, created_at, updated_at)
+      VALUES ('core-stream-fallback', 'core-stream-fallback', '1.0.0', '', '{}', 1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET enabled = 1, config = excluded.config
+    `).run(JSON.stringify(cfg), now, now);
+  }
+
+  it("总开关关闭(enabled=false)→ 不换源且不发搜索请求", async () => {
+    const { searchCalls } = enableProvider([
+      { id: "n1", name: "恋人", artist: "李荣浩", album: "黑马", duration: 275, source: "netease" },
+    ]);
+    setFallbackConfig({ enabled: false });
+
+    const fb = await findFallbackStream("s-disabled", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeNull();
+    expect(searchCalls.length).toBe(0);
+  });
+
+  it("时长容差覆写:默认容差拒掉的候选,覆写放宽后可换源(仅时长维度)", async () => {
+    // 15s 差:导入门禁默认容差 1s 必拒;覆写 20s 后放行。
+    enableProvider([
+      { id: "tol1", name: "恋人", artist: "李荣浩", album: "黑马", duration: 290, source: "netease" },
+    ]);
+    setFallbackConfig({ enabled: true, durationTolerance: 20 });
+
+    const fb = await findFallbackStream("s-tol", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
+
+    expect(fb).toBeTruthy();
+    expect(fb!.url).toContain("id=tol1");
+  });
+
+  it("时长容差覆写不放宽标题/歌手/专辑:冒名候选仍被拦", async () => {
+    enableProvider([
+      { id: "fake2", name: "恋人", artist: "李荣浩-、Montagem", album: "恋人", duration: 275, source: "netease" },
+    ]);
+    setFallbackConfig({ enabled: true, durationTolerance: 20 });
+
+    const fb = await findFallbackStream("s-tol2", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq");
 
     expect(fb).toBeNull();
   });

@@ -48,6 +48,7 @@ import { artistInfoManifest, artistInfoPlugin } from "../services/plugin/artistI
 import { songGroupManifest, songGroupPlugin } from "../services/plugin/core/songGroup.js";
 import { playPreferenceManifest, playPreferencePlugin } from "../services/plugin/core/playPreference.js";
 import { importGateManifest, importGatePlugin } from "../services/plugin/core/importGate.js";
+import { streamFallbackManifest, streamFallbackPlugin } from "../services/plugin/core/streamFallbackPlugin.js";
 
 export interface BuiltinPlugin {
   manifest: PluginManifest;
@@ -97,6 +98,8 @@ export const BUILTIN_CORE_PLUGINS: BuiltinPlugin[] = [
   { manifest: playPreferenceManifest, impl: playPreferencePlugin },
   // 导入命中门禁:在线导入/匹配的统一关卡(配置项:专辑一致/时长容差)。
   { manifest: importGateManifest, impl: importGatePlugin },
+  // 换源兜底:播放原链失效时的替代源开关/时长容差覆写(config-only,逻辑在核心)。
+  { manifest: streamFallbackManifest, impl: streamFallbackPlugin },
 ];
 
 /** All built-in plugins (any type). */
