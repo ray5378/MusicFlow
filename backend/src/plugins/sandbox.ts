@@ -316,12 +316,17 @@ export class SandboxedPlugin {
   private defers: QuickJSDeferredPromise[] = [];
   /** host.comm.on 注册的监听器包装(注册在 env.comm 上)。dispose 时必须 off,否则 hot-reload 重载插件会累积监听器,导致同一条消息被重复投递 N 次。 */
   private commListeners = new Map<QuickJSHandle, (message: any) => void>();
+  /** 墙钟基准:仅用于 init/重建代码执行(此期间无在途调用,activeCalls 为空)。
+   *  注意:不要在 invoke/invokeSync 里写这个字段——它曾是唯一的看门狗状态,
+   *  并发调用互相覆盖(8 worker 下 A 的 15s 配额被 B 重置、重建的 30s 预算被
+   *  在途调用踩回 15s → interrupt 误杀重建代码,沙箱半死,pass3 事故根因)。 */
   private deadline = Date.now() + INVOKE_TIMEOUT_MS;
-  /** 软看门狗状态:最近一次 host 调用完成时间(CPU 空转检测基准)、当前调用是否
-   *  longRunning(interrupt 按此选检测方式)、是否因 CPU 空转被杀(错误分类用)。 */
-  private lastHostProgressAt = Date.now();
-  private currentIsLong = false;
-  private cpuKilled = false;
+  /** 按调用登记的看门狗上下文:invoke 可并发(guest JS 在 await 边界交错执行,
+   *  各调用的 pump 循环共享同一 runtime),中断裁决必须按「活跃调用各自的状态」
+   *  判定,而不是单一共享字段。host 调用结算时刷新所有在途条目的进度基准
+   *  (无法归因到具体调用,刷新全部=与旧共享语义等价且不再互相覆盖配额)。 */
+  private activeCalls = new Map<number, { isLong: boolean; deadline: number; lastProgressAt: number; killed: boolean }>();
+  private callSeq = 0;
   private disposed = false;
   /** 自愈重建(内存超限后):dispose + 重新 init。init 入参缓存在此,重建无需上层重新读盘。 */
   private initCode: string | null = null;
@@ -351,19 +356,27 @@ export class SandboxedPlugin {
     this.runtime.setMemoryLimit(memoryLimitBytes());
     this.runtime.setMaxStackSize(STACK_LIMIT);
     this.runtime.setInterruptHandler(() => {
-      // 长耗时批量任务:软看门狗——只杀 CPU 空转(连续 JOB_CPU_IDLE_LIMIT_MS 无任何
-      // host 调用完成 = 死循环/超重计算);等网络/DB(await 挂起)期间 guest 不执行
-      // JS,interrupt 不触发,不计时 → 无限等待合法(歌单/封面/歌词数量不限)。
-      if (this.currentIsLong) {
-        if (this.cpuKilled) return true;
-        if (Date.now() - this.lastHostProgressAt > cpuIdleLimitMs()) {
-          this.cpuKilled = true;
+      // init/重建代码执行(无在途调用):墙钟看门狗,budget 见 REBUILD_TIMEOUT_MS。
+      if (this.rebuilding || this.activeCalls.size === 0) {
+        return Date.now() > this.deadline;
+      }
+      // 在途调用存在:任一活跃调用判定「该死」即中断(保守——单 runtime 无法区分
+      // 当前执行的 JS 属于哪个调用,但绝不放过任何一个超时/空转的调用)。
+      const now = Date.now();
+      for (const call of this.activeCalls.values()) {
+        if (call.killed) return true;
+        if (!call.isLong) {
+          // 交互型:墙钟 15s 配额(用户等一个搜索/歌词不该无限等待)。
+          if (now > call.deadline) return true;
+        } else if (now - call.lastProgressAt > cpuIdleLimitMs()) {
+          // 长耗时批量任务:软看门狗——连续 cpuIdleLimitMs 无任何 host 调用完成
+          // = 死循环/超重计算;等网络/DB(await 挂起)期间 guest 不执行 JS,
+          // interrupt 不触发,不计时 → 无限等待合法(歌单/封面/歌词数量不限)。
+          call.killed = true;
           return true;
         }
-        return false;
       }
-      // 交互型调用:维持墙钟 15s 看门狗(用户等一个搜索/歌词不该无限等待)。
-      return Date.now() > this.deadline;
+      return false;
     });
 
     this.ctx = this.runtime.newContext();
@@ -438,6 +451,10 @@ export class SandboxedPlugin {
     this.ctx.setProp(this.ctx.global, "__mfImpl", implHandle);
     implHandle.dispose();
     pluginHandle.dispose();
+    // init 完成:失效 init 期墙钟。此后 activeCalls 为空的 guest 执行只剩 comm
+    // 派发/事件回调,不再受陈旧 deadline 误杀(旧实现靠 invoke 反复刷新 deadline
+    // 间接掩盖;显式置无限后语义清晰:墙钟只属于 init/重建与在途调用)。
+    this.deadline = Number.MAX_SAFE_INTEGER;
   }
 
   /** 当前插件在 VM 里实现了哪些方法(用于 facade 只暴露存在的)。 */
@@ -453,6 +470,7 @@ export class SandboxedPlugin {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.activeCalls.clear();
     try { this.workerRemote?.dispose(); } catch { /* ignore */ }
     // 先移除 host.comm.on 注册的监听器,避免 hot-reload 累积导致消息重复投递
     for (const listener of this.commListeners.values()) {
@@ -509,6 +527,10 @@ export class SandboxedPlugin {
     if (!code) return;
     const manifest = this.initManifest;
     this.rebuilding = true;
+    // 清场:重建会销毁 runtime,所有在途调用的条目随旧 VM 一起失效——不清除的话,
+    // 它们的过期 deadline/空转状态会误杀重建代码(旧实现单共享字段的死法)。
+    // 在途调用本身会在旧 runtime 销毁后以沙箱错误结算,由上层重试。
+    this.activeCalls.clear();
     try {
       // 内存超限后 runtime.dispose() 会抛 QuickJS gc 断言异常(实测 abort 可捕获),
       // dispose 内部已 try/catch 吞掉;全新 init 不受旧 runtime 状态影响。
@@ -601,9 +623,11 @@ export class SandboxedPlugin {
   private removeDefer(d: QuickJSDeferredPromise): void {
     const i = this.defers.indexOf(d);
     if (i >= 0) this.defers.splice(i, 1);
-    // host 调用结算(成功/失败/拒绝)即视为任务有进展:重置 CPU 空转基准。
+    // host 调用结算(成功/失败/拒绝)即视为任务有进展:刷新所有在途调用的
+    // CPU 空转基准(无法归因到具体调用,刷新全部与旧共享语义等价)。
     // 批量任务只要持续有网络/DB 调用完成,就永不触发软看门狗。
-    this.lastHostProgressAt = Date.now();
+    const now = Date.now();
+    for (const call of this.activeCalls.values()) call.lastProgressAt = now;
   }
 
   /** 宿主异常兜底信封:必须带 status 字段,否则插件读 r.status 得 undefined
@@ -1045,14 +1069,16 @@ export class SandboxedPlugin {
     this.assertUsable();
     this.refreshConfig();
     const tmo = this.timeoutForMethod(method);
-    this.deadline = Date.now() + tmo;
-    // 软看门狗状态初始化:longRunning 方法无墙钟(等网络无限合法),只杀 CPU 空转。
-    this.currentIsLong = tmo !== INVOKE_TIMEOUT_MS;
-    this.cpuKilled = false;
-    this.lastHostProgressAt = Date.now();
+    // 按调用登记看门狗:并发 invoke 各自持有配额/进度,互不覆盖(见 activeCalls 注释)。
+    const callId = ++this.callSeq;
+    this.activeCalls.set(callId, { isLong: tmo !== INVOKE_TIMEOUT_MS, deadline: Date.now() + tmo, lastProgressAt: Date.now(), killed: false });
     const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
     const code = `(async () => { try { const v = await (${body}); return { ok: true, value: v }; } catch (e) { return { ok: false, error: { name: String(e && e.name || ""), message: String(e && e.message || String(e)), stack: String(e && e.stack || "") } }; } })()`;
-    return this.evalAsync(code, method, tmo);
+    try {
+      return await this.evalAsync(code, method, tmo, callId);
+    } finally {
+      this.activeCalls.delete(callId);
+    }
   }
 
   /** 方法级超时:manifest.longRunning[method] 声明的长耗时预算(cap 5 分钟),否则默认 15s。 */
@@ -1069,27 +1095,34 @@ export class SandboxedPlugin {
   invokeSync(method: string, args: any[]): any {
     this.assertUsable();
     this.refreshConfig();
-    this.deadline = Date.now() + INVOKE_TIMEOUT_MS;
-    const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
-    const code = `(() => { try { const v = (${body}); return { ok: true, value: v }; } catch (e) { return { ok: false, error: { name: String(e && e.name || ""), message: String(e && e.message || String(e)) } }; } })()`;
-    const result = this.ctx.evalCode(code);
-    if (result.error !== undefined) {
-      const e = this.ctx.dump(result.error);
-      result.error.dispose();
-      if (this.isOomMessage(e)) return this.handleOomSync(method);
-      throw new Error(`插件 ${this.id} ${method}() 执行失败: ${e}`);
+    // 同步调用同样登记看门狗:否则并发 async invoke 期间,同步 evalCode 的执行
+    // 归不进任何在途条目,且旧实现会覆盖共享 deadline(已废除)。
+    const callId = ++this.callSeq;
+    this.activeCalls.set(callId, { isLong: false, deadline: Date.now() + INVOKE_TIMEOUT_MS, lastProgressAt: Date.now(), killed: false });
+    try {
+      const body = `globalThis.__mfImpl[${JSON.stringify(method)}](${(args || []).map((a) => JSON.stringify(a === undefined ? null : a)).join(",")})`;
+      const code = `(() => { try { const v = (${body}); return { ok: true, value: v }; } catch (e) { return { ok: false, error: { name: String(e && e.name || ""), message: String(e && e.message || String(e)) } }; } })()`;
+      const result = this.ctx.evalCode(code);
+      if (result.error !== undefined) {
+        const e = this.ctx.dump(result.error);
+        result.error.dispose();
+        if (this.isOomMessage(e)) return this.handleOomSync(method);
+        throw new Error(`插件 ${this.id} ${method}() 执行失败: ${e}`);
+      }
+      const vh = this.ctx.unwrapResult(result);
+      const v = this.ctx.dump(vh);
+      vh.dispose();
+      if (v && v.ok === true) return v.value;
+      const syncErrMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
+      if (this.isOomMessage(syncErrMsg)) return this.handleOomSync(method);
+      console.error(`[PLUGIN:${this.id}] ${method}() 失败: ${syncErrMsg}`);
+      throw new Error(`插件 ${this.id} ${method}(): ${syncErrMsg}`);
+    } finally {
+      this.activeCalls.delete(callId);
     }
-    const vh = this.ctx.unwrapResult(result);
-    const v = this.ctx.dump(vh);
-    vh.dispose();
-    if (v && v.ok === true) return v.value;
-    const syncErrMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
-    if (this.isOomMessage(syncErrMsg)) return this.handleOomSync(method);
-    console.error(`[PLUGIN:${this.id}] ${method}() 失败: ${syncErrMsg}`);
-    throw new Error(`插件 ${this.id} ${method}(): ${syncErrMsg}`);
   }
 
-  private async evalAsync(code: string, method?: string, timeoutMs: number = INVOKE_TIMEOUT_MS): Promise<any> {
+  private async evalAsync(code: string, method?: string, timeoutMs: number = INVOKE_TIMEOUT_MS, callId?: number): Promise<any> {
     const result = this.ctx.evalCode(code);
     if (result.error !== undefined) {
       const e = this.ctx.dump(result.error);
@@ -1104,17 +1137,20 @@ export class SandboxedPlugin {
     // 长耗时批量任务:无墙钟硬超时——循环一直推进,退出靠 done(任务完成)或
     // interrupt 软看门狗(CPU 空转 60s 杀)。等网络/DB(await 挂起)无限合法,
     // 支持任意规模歌单/封面/歌词;交互型调用维持 15s 墙钟。
+    // 看门狗状态读自己的在途条目(callId);条目缺失(重建清场/上层未登记)时
+    // 该调用视为已失效,不再参与空转判定,循环仅靠 done/墙钟退出。
     const isLong = timeoutMs !== INVOKE_TIMEOUT_MS;
+    const call = callId !== undefined ? this.activeCalls.get(callId) : undefined;
     const t0 = Date.now();
     while (!done) {
-      if (isLong && !this.cpuKilled && Date.now() - this.lastHostProgressAt > cpuIdleLimitMs()) {
+      if (call && isLong && !call.killed && Date.now() - call.lastProgressAt > cpuIdleLimitMs()) {
         // 兜底:guest 挂起后 CPU 空转(理论上 interrupt 已杀,此处双保险)
-        this.cpuKilled = true;
+        call.killed = true;
       }
       if (this.runtime.hasPendingJob()) this.runtime.executePendingJobs(MAX_JOBS_PER_PUMP);
       await new Promise((r) => setImmediate(r));
       if (!isLong && Date.now() - t0 >= timeoutMs) break; // 交互:墙钟到点退出
-      if (isLong && this.cpuKilled) break;                 // 长任务:CPU 空转被杀退出
+      if (isLong && call && call.killed) break;           // 长任务:CPU 空转被杀退出
     }
     try {
       // 超时(在途未结算):明确告知是沙箱限制而非笼统"执行失败",附修复提示。
@@ -1134,7 +1170,7 @@ export class SandboxedPlugin {
         const msg = String((rr.rejected && (rr.rejected as any).message) || rr.rejected);
         if (this.isOomMessage(msg)) return this.handleOom(method);
         // 长任务被 CPU 空转中断(QuickJS interrupt):归为沙箱限制而非插件内部错误。
-        if (isLong && this.cpuKilled) {
+        if (isLong && call?.killed) {
           const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
           console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限,已中断`);
           throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
@@ -1148,7 +1184,7 @@ export class SandboxedPlugin {
       if (v && v.ok === true) return v.value;
       // 长任务被软看门狗中断(QuickJS interrupt 被 guest 外层 catch 收成普通信封):
       // 归为沙箱限制(CPU 空转超限),而非插件内部错误。
-      if (isLong && this.cpuKilled) {
+      if (isLong && call?.killed) {
         const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
         console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限,已中断`);
         throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);

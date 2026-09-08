@@ -495,6 +495,55 @@ describe("QuickJS 沙箱 · host.crypto.md5(签名工具)", () => {
   });
 });
 
+describe("并发调用看门狗隔离(按调用登记,不共享 deadline)", () => {
+  it("长任务与已完成交互调用共存:交互调用的墙钟不误杀仍在推进的长任务", async () => {
+    // 回归:旧实现单个共享 deadline/currentIsLong 字段被并发调用互相覆盖——
+    // 交互调用全部结束后,共享 deadline 冻结在「最后一个交互调用+15s」且
+    // currentIsLong=false,interrupt 把仍在等网络的批量任务按墙钟超时杀掉
+    // (8 worker 并发清理脚本实测沙箱雪崩、重建被误杀 "interrupted" 的根因)。
+    // 新实现按调用登记:批量任务每次 host.http 刷新自己的进度基准,完整跑完;
+    // 交互调用各自持有 15s 配额,互不越界。
+    const CODE = `
+      globalThis.__mfPlugin = {
+        manifest: { id: "demo-concurrent", name: "x", version: "1.0.0", type: "source", capabilities: ["search", "recommendPlaylist"], configSchema: [], permissions: ["net"], longRunning: { runDailyJob: 600000 } },
+        create(host) {
+          return {
+            async search(config, params) {
+              const r = await host.http("https://demo/search?q=" + params.query, {});
+              return { ok: !!(r && r.ok), q: params.query };
+            },
+            async runDailyJob(opts) {
+              for (let i = 0; i < 20; i++) {
+                const r = await host.http("https://demo/tick?i=" + i, {});
+                if (!r || !r.ok) throw new Error("tick fail");
+              }
+              return "batch-ok";
+            }
+          };
+        }
+      };`;
+    const env = makeEnv({
+      http: async (input) => {
+        const url = String(input);
+        await new Promise((r) => setTimeout(r, url.includes("/tick") ? 1000 : 2));
+        return { ok: true, status: 200, headers: { "content-type": "application/json" }, body: "{}" };
+      },
+    });
+    const { impl } = await loadSandboxedPlugin("demo-concurrent", CODE, env);
+    // 3 个交互调用先发出并在 ~10ms 内完成(总时长 ≪ 15s);批量任务随后独跑 ~20s。
+    // 旧实现下共享 deadline 冻结在 ~15.1s,interrupt 会在 ~15s 处杀掉批量任务。
+    const interactive = Promise.all([
+      impl.search({}, { query: "a" }),
+      impl.search({}, { query: "b" }),
+      impl.search({}, { query: "c" }),
+    ]);
+    const batch = impl.runDailyJob({ force: true });
+    const [searches, batchResult] = await Promise.all([interactive, batch]);
+    for (const s of searches) expect(s.ok).toBe(true);
+    expect(batchResult).toBe("batch-ok");
+  }, 30000);
+});
+
 describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
   it("内存超限抛 SANDBOX_MEMORY 并自动重建沙箱,重建后可继续正常调用", async () => {
     // 插件把搜索结果累积进模块级数组(模拟跨调用泄漏);小内存限制加速触顶。
