@@ -268,7 +268,7 @@ export interface SandboxHostEnv {
    *  来源标记,写入 playlists.source_platform / source_url——前端据此显示平台徽标。
    *  opts.externalId:远端平台歌单 ID,配合 findBySource 用于去重判断。 */
   playlists: {
-    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; sourcePlatform?: string; sourceUrl?: string; externalId?: string }): Promise<any>;
+    upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; coverUrl?: string; sourcePlatform?: string; sourceUrl?: string; externalId?: string }): Promise<any>;
     get(playlistId: string): Promise<any | null>;
     /** 列出所有歌单(脱敏视图,不含 entries)。 */
     list(): Promise<any[]>;

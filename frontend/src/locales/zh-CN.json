@@ -570,7 +570,8 @@
       "kugou": "酷狗",
       "kuwo": "酷我",
       "soda": "汽水",
-      "huawei": "华为音乐"
+      "huawei": "华为音乐",
+      "apple": "Apple Music"
     },
     "noOnlineSourceSync": "未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件后再同步",
     "noOnlineSourceMatch": "未检测到在线源插件,请先在「插件」页配置 baseUrl 并启用一个 source 类型插件",
@@ -1210,7 +1211,8 @@
     "migu": "咪咕",
     "qianqian": "千千",
     "soda": "汽水",
-    "huawei": "华为音乐"
+    "huawei": "华为音乐",
+    "apple": "Apple Music"
   },
   "remoteDetail": {
     "title": "远程内容",

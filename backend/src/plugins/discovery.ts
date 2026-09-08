@@ -31,7 +31,7 @@ import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
 import { matchPlaylistInBackground } from "../services/plugin/shared.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
-import { firstPlayableCoverFile } from "../services/playlistCover.js";
+import { cacheRemoteCover, firstPlayableCoverFile } from "../services/playlistCover.js";
 import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { matchSongsToLibrary } from "../services/plugin/libraryMatch.js";
@@ -732,10 +732,23 @@ async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?
     }
   });
   refreshPluginPlaylistCounts(playlistId);
-  // 封面:确定性选取——优先插件显式指定的 coverSongId;否则宿主自动从歌单自身
-  // 可播条目中按 position 取第一首有封面的歌(歌曲封面 > 专辑封面);都没有则
-  // 显式清空(避免残留上一次的旧封面,造成「封面不稳定」)。
-  const cover = firstPlayableCoverFile(playlistId, { preferSongId: opts?.coverSongId ? String(opts.coverSongId) : null });
+  // 封面:插件可传 coverUrl(官方榜单/歌单封面直链),优先下载缓存为歌单封面
+  // (ref=pl-<id>,force 每次刷新到最新官方图);失败或未传时回退确定性选取——
+  // 优先插件显式指定的 coverSongId;否则宿主自动从歌单自身可播条目中按
+  // position 取第一首有封面的歌(歌曲封面 > 专辑封面);都没有则显式清空
+  // (避免残留上一次的旧封面,造成「封面不稳定」)。
+  let cover: string | null = null;
+  const coverUrl = typeof opts?.coverUrl === "string" ? opts.coverUrl.trim() : "";
+  if (coverUrl && /^https?:\/\//i.test(coverUrl)) {
+    try {
+      cover = await cacheRemoteCover(coverUrl, `pl-${playlistId}`, true);
+    } catch {
+      cover = null;
+    }
+  }
+  if (!cover) {
+    cover = firstPlayableCoverFile(playlistId, { preferSongId: opts?.coverSongId ? String(opts.coverSongId) : null });
+  }
   sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, now, playlistId);
   // 生成后自动补匹配:仍存在外部(不可播)条目时,后台经已启用在线源再匹配一轮
   // (复用共享宿主服务 matchPlaylistInBackground,与导入歌单 rebuildPlaylistEntries

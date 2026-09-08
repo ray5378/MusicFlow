@@ -263,6 +263,7 @@
 | 歌单导入 | `remoteImport`（门禁 → **库内匹配** → 入库） | manifest 声明 `playlistSongs`；无直链的源插件**无需** `streamUrl`（空直链 web 行合法落库,首播自动换源,v2.3.6+） |
 | 本地库匹配（先匹配库、缺了才进） | `libraryMatch.matchSongsToLibrary`（四维评分单点维护,带失效探针的索引缓存） | **`host.songs.match(songs[])`**（v2.3.9+,入参/返回等长对齐,未命中为 null;直连宿主与 QuickJS 沙箱 worker 双通道,需 `songs:read`） |
 | 播放换源兜底 | `streamFallback.findFallbackStream`（绑全门禁） | 核心自动,插件零接入 |
+| 歌单官方封面 | `upsertPluginPlaylist` 封面单点 | `host.playlists.upsert` 传 **`coverUrl`**（v2.3.12+,官方榜单/歌单封面直链,核心下载缓存为 `pl-<id>`;失败回退歌内确定性选封）,不传保持歌内选封行为 |
 | 前端平台角标/标签 | PlatformBadge/SongTable 静态映射 + manifest `platformLabels` 动态层 | manifest 声明 `platforms` + `platformLabels` 即显示,无需改前端 |
 
 **CI 强制**：① 主仓库 vitest `hostApiParity.test.ts`——新增 host API 必须**三处同步**（直连宿主 discovery.ts、沙箱类型+接线 sandbox.ts、后台 worker 通道 sandboxWorker.ts），缺一处即红；② 插件仓库 `check.mjs`——index.js 自带 `matchLocal` 却未接 `host.songs.match` 即红（复制检测）。

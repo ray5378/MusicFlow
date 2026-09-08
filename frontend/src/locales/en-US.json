@@ -570,7 +570,8 @@
       "kugou": "Kugou",
       "kuwo": "Kuwo",
       "soda": "Soda",
-      "huawei": "Huawei Music"
+      "huawei": "Huawei Music",
+      "apple": "Apple Music"
     },
     "noOnlineSourceSync": "No online source plugin detected. Configure baseUrl on the Plugins page and enable a source-type plugin first",
     "noOnlineSourceMatch": "No online source plugin detected. Configure baseUrl on the Plugins page and enable a source-type plugin",
@@ -1210,7 +1211,8 @@
     "migu": "MiGu",
     "qianqian": "QianQian",
     "soda": "Soda",
-    "huawei": "Huawei Music"
+    "huawei": "Huawei Music",
+    "apple": "Apple Music"
   },
   "remoteDetail": {
     "title": "Remote content",
