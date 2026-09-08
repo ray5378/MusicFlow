@@ -8,7 +8,7 @@
       <span class="col col-title">{{ t('songTable.title') }}</span>
       <span v-if="showSource" class="col col-source">{{ t('songTable.source') }}</span>
       <span v-if="showArtist" class="col col-artist">{{ t('songTable.artist') }}</span>
-      <span v-if="showAlbum" class="col col-album">{{ t('songTable.album') }}</span>
+      <span v-if="showAlbumCol" class="col col-album">{{ t('songTable.album') }}</span>
       <span v-if="showPlayedAt" class="col col-played-at">{{ t('songTable.playedAt') }}</span>
       <span class="col col-duration"><MfIcon name="Clock" /></span>
       <span class="col col-actions"></span>
@@ -67,6 +67,7 @@
             </el-tooltip>
           </div>
           <div class="song-bitrate" v-if="showBitrate && row.song.bitRate">{{ row.song.bitRate }}kbps · {{ (row.song.suffix || '').toUpperCase() }}</div>
+          <div class="song-compact-meta" v-if="compact && row.song.album">{{ row.song.album }}</div>
           <div class="song-mobile-meta">{{ [row.song.artist, row.song.album].filter(Boolean).join(' · ') || (row.song.isMatched === false ? t('songTable.unmatched') : '—') }}</div>
         </div>
       </span>
@@ -88,7 +89,7 @@
         </template>
       </span>
       <span v-if="showArtist" class="col col-artist">{{ row.song.artist || '—' }}</span>
-      <span v-if="showAlbum" class="col col-album">{{ row.song.album || '—' }}</span>
+      <span v-if="showAlbumCol" class="col col-album">{{ row.song.album || '—' }}</span>
       <span v-if="showPlayedAt" class="col col-played-at">{{ formatPlayedAt(row.song.playedAt) }}</span>
       <span class="col col-duration">{{ formatDuration(row.song.duration) }}</span>
       <span class="col col-actions">
@@ -110,7 +111,7 @@
       <span class="col col-title"><span class="loading-bar"></span></span>
       <span v-if="showSource" class="col col-source">–</span>
       <span v-if="showArtist" class="col col-artist"><span class="loading-bar short"></span></span>
-      <span v-if="showAlbum" class="col col-album"><span class="loading-bar"></span></span>
+      <span v-if="showAlbumCol" class="col col-album"><span class="loading-bar"></span></span>
       <span v-if="showPlayedAt" class="col col-played-at">–</span>
       <span class="col col-duration">–</span>
       <span class="col col-actions"></span>
@@ -158,6 +159,11 @@ const props = withDefaults(
     /** 远程(未入库)搜索结果行:封面用远程 URL、隐藏「喜欢/加歌单」等依赖库内 id 的按钮 */
     remote?: boolean;
     /**
+     * 紧凑模式(窄容器场景,如 680px 预览弹窗):取消专辑列(专辑名并入歌名副行)、
+     * 艺术家/时长/操作列收窄。只改列模板,不改数据与交互;全宽页面不传即走原模板。
+     */
+    compact?: boolean;
+    /**
      * 无限滚动(窗口化加载)模式下的窗口回调:虚拟列表每次重算可见行区间后调用,
      * 由父级 useInfiniteList 据此按块预取 + 剪枝。传入后本表即视为「全长稀疏数组」,
      * 未加载槽位(songs[i] === undefined)渲染为占位行。
@@ -178,6 +184,7 @@ const props = withDefaults(
     extraActions: undefined,
     allowUnmatchedPlay: false,
     remote: false,
+    compact: false,
     onWindow: undefined,
   }
 );
@@ -320,7 +327,19 @@ const slots = useSlots();
 // the actions column so those buttons never overlap the duration column.
 const hasExtraRowActions = computed(() => !!slots["row-actions"]);
 
+// 紧凑模式(窄容器):专辑列取消(信息移到歌名副行),其余列收窄。
+const showAlbumCol = computed(() => props.showAlbum && !props.compact);
+
 const gridColumns = computed(() => {
+  if (props.compact) {
+    // 680px 弹窗内容区 ~648px:56+120+60+48=284 固定,标题 1fr ≈ 364px。
+    // 操作列远程行只有「更多」一个按钮(32px+padding),48px 足够。
+    const cols = ["56px", "1fr"];
+    if (props.showArtist) cols.push("120px");
+    cols.push("60px");
+    cols.push(hasExtraRowActions.value ? "64px" : "48px");
+    return cols.join(" ");
+  }
   const cols: string[] = [];
   if (props.selectable) cols.push("44px");
   cols.push("56px");
@@ -663,6 +682,15 @@ onBeforeUnmount(unbindScroll);
       color: var(--fnos-text-muted);
       margin-top: 2px;
       letter-spacing: 0.3px;
+    }
+    // 紧凑模式(窄容器弹窗):专辑名以小字副行显示,补偿被取消的专辑列
+    .song-compact-meta {
+      font-size: 11px;
+      color: var(--fnos-text-muted);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   }
   .col-artist, .col-album, .col-played-at {

@@ -31,9 +31,10 @@
       </div>
     </div>
 
-    <!-- 歌曲列表:复用 SongTable(悬浮播放/点击播放),未入库歌曲直接播(streamUrl) -->
+    <!-- 歌曲列表:复用 SongTable(悬浮播放/点击播放),未入库歌曲直接播(streamUrl)。
+         compact:680px 窄容器用紧凑列模板(无专辑列,专辑入副行),否则固定列合计超宽导致文字重叠 -->
     <div class="rd-body" v-loading="loading">
-      <SongTable v-if="songs.length > 0" :songs="songs" remote :loading="loading" :empty-text="t('remoteDetail.noPlayable')" @play="playSong" />
+      <SongTable v-if="songs.length > 0" :songs="songs" remote compact :loading="loading" :empty-text="t('remoteDetail.noPlayable')" @play="playSong" />
       <div v-else-if="!loading" class="rd-empty">{{ t('remoteDetail.empty') }}</div>
     </div>
   </el-dialog>
