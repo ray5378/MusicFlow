@@ -42,7 +42,7 @@ jobs:
         run: |
           set -o pipefail
           cd backend
-          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/player/QueueController.test.ts 2>&1 | tee /tmp/chain-guard.log
+          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/frontend/playerContract.test.ts 2>&1 | tee /tmp/chain-guard.log
 
       # 静态守卫：QueueController 的停播阈值（skipCounters/连跳 N 停）已按
       # 2026-09-09 决策整体移除（不可播逐曲移除、队列自然排空），回归即失败。
@@ -58,6 +58,25 @@ jobs:
             exit 1
           fi
           echo "OK: 无停播阈值/deadSongs 回归"
+
+      # 跨仓契约(服务端侧):客户端把「无可用音源」识别为 409 并转
+      # DlnaSongUnplayableException 后跳下一首。服务端哪天把 409 改成 404/400
+      # 或删掉 i18n key,两仓测试各自仍绿、线上直接失效 —— 这里钉死状态码与 key。
+      # 客户端侧对称断言见 MusicFlow-client 的 playback-chain-guard.yml。
+      - name: "Guard - 409 no-playable-source contract (cross-repo)"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -n "409" backend/src/routes/api/index.ts | grep -q "noPlayableSource"; then
+            echo "::error::跨仓契约回归:/v1/dlna/stream-url 必须在返回 409 的同时给出 errors.song.noPlayableSource"
+            miss=1
+          fi
+          if ! grep -q '"errors.song.noPlayableSource"' backend/src/i18n.ts; then
+            echo "::error::跨仓契约回归:i18n 缺少 errors.song.noPlayableSource(中英双语)"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 409 + i18n key 契约在位"; fi
+          exit "$miss"
 
       - name: Upload guard log on failure
         if: failure()
