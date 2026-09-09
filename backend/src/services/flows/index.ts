@@ -179,6 +179,36 @@ export function isFlowRunning(id: string): boolean {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * 对 dlna 设备发送 SetVolume 并在 windowMs 窗口内回读对账(±1 不符重发)。
+ * 返回设备最终确认的音量;窗口内始终对不上时返回 -1(不抛错,由调用方决定是否中止)。
+ * 全程带日志:成功记 info,超时记 warn —— 修复原先「成功不打日志、静默失败也不打」的可观测性盲区。
+ */
+async function applyVolumeWithReconcile(
+  deviceId: string,
+  value: number,
+  windowMs: number,
+  pollMs: number,
+  logTag: string,
+): Promise<number> {
+  await setDeviceVolume(deviceId, value);
+  let attempts = 1;
+  let got = -1;
+  const deadline = Date.now() + windowMs;
+  while (Date.now() < deadline) {
+    await sleep(pollMs);
+    try { got = await getDeviceVolume(deviceId); } catch { got = -1; }
+    if (got >= 0 && Math.abs(got - value) <= 1) break; // 对上
+    if (Date.now() < deadline) { await setDeviceVolume(deviceId, value); attempts++; }
+  }
+  if (got >= 0 && Math.abs(got - value) <= 1) {
+    log.info(`${logTag} SetVolume(${value}) 对账通过(发送${attempts}次,设备回读 ${got})`);
+    return got;
+  }
+  log.warn(`${logTag} SetVolume(${value}) 对账超时(${windowMs}ms 内发送${attempts}次,设备最终回读 ${got < 0 ? "失败" : got})`);
+  return -1;
+}
+
+/**
  * 异步执行一条音流。同一时间同一流程只允许一个运行实例(重复触发直接跳过)。
  * 执行过程:
  *   1) 校验节点列表非空 + 至少一个 target 节点;
@@ -260,6 +290,12 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
     return p;
   };
   try {
+    // 本次运行中各 dlna 目标最近一次设定的目标音量。用于起播后补偿重发:
+    // Linkplay 类设备(如 HiVi H5MKII/MUZO)在刚通电就位时会对 SetVolume「假接受」,
+    // 随后的 SetAVTransportURI/Play 起播流程会把实际输出音量重置回设备自己的值,
+    // 而 UPnP 状态仍保留设定值(对账显示成功)→ 听感上音量没生效。
+    // 因此 content 节点起播稳定后,需要把此前 volume 节点设过的音量再补发一次。
+    const volumeByTarget = new Map<string, number>();
     for (const node of nodes) {
       switch (node.type) {
         case "trigger": {
@@ -289,6 +325,18 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
             const parsed = parseOrThrow(pid);
             await qm.playFrom(parsed.id, items, node.startIndex || 0, baseUrl);
             console.log(`[flow ${flow.name}] 已播放:${nameOf(pid)} → 「${resolved.name}」`);
+            // 起播后音量补偿:设备在 SetAVTransportURI/Play 起播流程中可能重置实际输出
+            // 音量(UPnP 状态仍保留旧设定值,对账显示成功)。等 2 秒起播流程走完后,
+            // 把此前 volume 节点设过的目标音量补发一次。失败仅 warn,不中止流程。
+            const want = volumeByTarget.get(pid);
+            if (parsed.kind === "dlna" && want !== undefined) {
+              await sleep(2000);
+              try {
+                await applyVolumeWithReconcile(parsed.id, want, 5000, 500, `[flow ${flow.name}] ${nameOf(pid)} 起播后音量补偿`);
+              } catch (e: any) {
+                log.warn(`[flow ${flow.name}] ${nameOf(pid)} 起播后音量补偿 ${want}% 失败,继续:${e?.message || e}`);
+              }
+            }
           }
           break;
         }
@@ -304,23 +352,16 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
           // (默认 10s)轮询窗口内每 pollMs(默认 500ms)回读 GetVolume,发现对不上
           // (±1)就重发 SetVolume,直到对上或窗口结束;对账失败**不中止流程**
           // (仅 warn),继续下一节点。group 仅发送(成员对账由各设备自理)。
+          // 同时记录目标音量到 volumeByTarget,供 content 节点起播后补偿重发。
           const value = Math.max(0, Math.min(100, Math.round(node.value)));
           const windowMs = Math.max(500, Math.min(60000, typeof node.windowMs === "number" ? node.windowMs : 10000));
           const pollMs = Math.max(100, Math.min(5000, typeof node.pollMs === "number" ? node.pollMs : 500));
-          const tolerance = 1;
           for (const pid of activeTargets) {
             const parsed = parseOrThrow(pid);
             try {
               if (parsed.kind === "dlna") {
-                await setDeviceVolume(parsed.id, value);
-                const deadline = Date.now() + windowMs;
-                while (Date.now() < deadline) {
-                  await sleep(pollMs);
-                  let got = -1;
-                  try { got = await getDeviceVolume(parsed.id); } catch { got = -1; }
-                  if (got >= 0 && Math.abs(got - value) <= tolerance) break; // 对上
-                  if (Date.now() < deadline) await setDeviceVolume(parsed.id, value); // 对不上 → 重发
-                }
+                volumeByTarget.set(pid, value);
+                await applyVolumeWithReconcile(parsed.id, value, windowMs, pollMs, `[flow ${flow.name}] ${nameOf(pid)} 音量`);
               } else if (parsed.kind === "group") {
                 await qc.transport(parsed.id, "volume", value);
               }
