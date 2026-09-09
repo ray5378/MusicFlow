@@ -679,31 +679,37 @@ const playlistOptions = computed(() =>
     label: p.sourcePlatform ? `[${p.sourcePlatform}] ${p.name}` : p.name,
   })),
 );
-// 歌单多选器要能选到库里「任意」歌单:后端单页有上限(请求 pageSize=200 实际
-// 只返回 100),只拉一页会让超出的歌单既看不到、也搜不到 —— el-select 的
-// filterable 是本地过滤,只在已加载项里匹配。实测 761 个歌单时只能看到前 100 个,
-// 其余 661 个无法选中(今日漫游/本地推荐的「组合来源歌单」「参考歌单」均受影响)。
-// 因此循环分页拉全量;MAX_PAGES 兜底,避免异常分页把页面拖死。
+// 歌单多选器要能选到库里「任意」歌单,且搜索框(filterable 本地过滤)要能命中全部:
+// 只拉一页时后端单页上限 100,实测 761 个歌单只能看到/搜到前 100 个,其余 661 个
+// 既看不到也搜不到(今日漫游「组合来源歌单」、本地推荐「参考歌单」均受影响)。
+// 因此循环分页拉全量,让本地过滤的候选集 = 库里全部歌单。
+//
+// 翻页终止条件必须以服务端返回的 total 为准,不能靠「本页条数 < pageSize」:
+// 后端对 pageSize 有硬上限(旧版 100),请求 200 会被静默截断成 100 返回,
+// 按条数判断会在第一页就误判为最后一页,仍然只拿到 100 个。
 const PLAYLIST_OPTION_PAGE_SIZE = 200;
-const PLAYLIST_OPTION_MAX_PAGES = 20;
+// 兜底页数:后端实际每页最少 100 条,50 页可覆盖 5000 个歌单。
+const PLAYLIST_OPTION_MAX_PAGES = 50;
 
 async function loadPlaylistOptions() {
   if (allPlaylists.value.length) return;
-  const out: any[] = [];
+  const byId = new Map<string, any>();
   try {
+    let total = Number.POSITIVE_INFINITY;
     for (let page = 1; page <= PLAYLIST_OPTION_MAX_PAGES; page++) {
       const res = await api.get("/rest/api/v1/playlists", {
         params: { page, pageSize: PLAYLIST_OPTION_PAGE_SIZE },
       });
       const items = res.data?.items || [];
-      out.push(...items);
-      // 不足一页 = 已经是最后一页。
-      if (items.length < PLAYLIST_OPTION_PAGE_SIZE) break;
+      if (typeof res.data?.total === "number") total = res.data.total;
+      if (!items.length) break;
+      for (const p of items) if (p?.id) byId.set(p.id, p);
+      if (byId.size >= total) break;
     }
   } catch {
     // 中途失败也保留已拿到的部分,总比空列表好。
   }
-  allPlaylists.value = out;
+  allPlaylists.value = [...byId.values()];
 }
 
 /** Whether the plugin declares the web-rotation capability (shows the purge button). */
