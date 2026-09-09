@@ -1961,7 +1961,10 @@ apiRoutes.post("/v1/playlists/:id/favorite", permMiddleware(PERM.FAVORITES_MANAG
 // ==================== Playlists (paginated) ====================
 apiRoutes.get("/v1/playlists", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
+  // 单页上限 500:歌单选择器场景要一次性拿到全量(前端循环分页),100 太紧
+  // (实测 761 个歌单时选择器只能看到前 100 个)。查询本身是 SQL LIMIT/OFFSET
+  // + COUNT,放宽上限不增加额外开销。
+  const pageSize = Math.min(500, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
   const query = (c.req.query("query") || "").trim();
   const platform = (c.req.query("platform") || "").trim();
   const localOnly = (c.req.query("local") || "").trim() === "1";

@@ -679,14 +679,31 @@ const playlistOptions = computed(() =>
     label: p.sourcePlatform ? `[${p.sourcePlatform}] ${p.name}` : p.name,
   })),
 );
+// 歌单多选器要能选到库里「任意」歌单:后端单页有上限(请求 pageSize=200 实际
+// 只返回 100),只拉一页会让超出的歌单既看不到、也搜不到 —— el-select 的
+// filterable 是本地过滤,只在已加载项里匹配。实测 761 个歌单时只能看到前 100 个,
+// 其余 661 个无法选中(今日漫游/本地推荐的「组合来源歌单」「参考歌单」均受影响)。
+// 因此循环分页拉全量;MAX_PAGES 兜底,避免异常分页把页面拖死。
+const PLAYLIST_OPTION_PAGE_SIZE = 200;
+const PLAYLIST_OPTION_MAX_PAGES = 20;
+
 async function loadPlaylistOptions() {
   if (allPlaylists.value.length) return;
+  const out: any[] = [];
   try {
-    const res = await api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 200 } });
-    allPlaylists.value = res.data.items || [];
+    for (let page = 1; page <= PLAYLIST_OPTION_MAX_PAGES; page++) {
+      const res = await api.get("/rest/api/v1/playlists", {
+        params: { page, pageSize: PLAYLIST_OPTION_PAGE_SIZE },
+      });
+      const items = res.data?.items || [];
+      out.push(...items);
+      // 不足一页 = 已经是最后一页。
+      if (items.length < PLAYLIST_OPTION_PAGE_SIZE) break;
+    }
   } catch {
-    allPlaylists.value = [];
+    // 中途失败也保留已拿到的部分,总比空列表好。
   }
+  allPlaylists.value = out;
 }
 
 /** Whether the plugin declares the web-rotation capability (shows the purge button). */
