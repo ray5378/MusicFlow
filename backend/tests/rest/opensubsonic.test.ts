@@ -91,22 +91,27 @@ describe("OpenSubsonic 基础合规", () => {
 });
 
 describe("首页分区清单", () => {
-  it("/api/v1/home/sections 返回有序分区清单,随机歌曲可见、平台推荐不可见", async () => {
+  it("/api/v1/home/sections 返回有序分区清单,随机歌曲可见、插件推荐不可见", async () => {
     const r = await get("/rest/api/v1/home/sections");
     expect(r.res.status).toBe(200);
     expect(sr(r)?.status).toBe("ok");
     const sections = sr(r)?.homeSections?.sections ?? [];
-    // 顺序按 sortOrder 升序。
+    // 顺序按 sortOrder 升序;推荐两模块「平台推荐」(local-recommend,
+    // 本地库)在「插件推荐」(platform-recommend,插件提供方)之前。
     expect(sections.map((s: any) => s.sortOrder)).toEqual([1, 2, 3, 4, 5]);
     expect(sections.map((s: any) => s.key)).toEqual([
       "random-songs",
       "recent-playlists",
       "home-recommend",
-      "platform-recommend",
       "local-recommend",
+      "platform-recommend",
     ]);
-    // 测试库有歌曲但无平台导入歌单(sourceUrl 为空)。
+    // 推荐模块新定位:「平台推荐」= local-recommend,"插件推荐" =
+    // platform-recommend(原「平台推荐」)。
     const byKey = new Map(sections.map((s: any) => [s.key, s]));
+    expect(byKey.get("local-recommend").title).toBe("平台推荐");
+    expect(byKey.get("platform-recommend").title).toBe("插件推荐");
+    // 测试库有歌曲但无平台导入歌单(sourceUrl 为空)。
     expect(byKey.get("random-songs").visible).toBe(true);
     expect(byKey.get("home-recommend").visible).toBe(true);
     expect(byKey.get("platform-recommend").visible).toBe(false);
