@@ -46,7 +46,7 @@ jobs:
 
       # 静态守卫：QueueController 的停播阈值（skipCounters/连跳 N 停）已按
       # 2026-09-09 决策整体移除（不可播逐曲移除、队列自然排空），回归即失败。
-      - name: Guard: no stop threshold in QueueController
+      - name: "Guard - no stop threshold in QueueController"
         shell: bash
         run: |
           if grep -nE "skipCounters|连续 .* 首不可播,停止" backend/src/services/player/QueueController.ts ; then
