@@ -186,6 +186,17 @@ export function clearFallbackCache(songId?: string) {
   else fallbackCache.clear();
 }
 
+/**
+ * 拉流实测失败时逐出该歌的换源/可播缓存(由代理层在 upstream 真实 403/404/5xx
+ * 时调用)。插件源直链会过期(网易等约 20 分钟),而两个缓存命中即返回、不重探
+ * (probe 只发生在搜索候选时),过期链会被锁死到 FIFO 淘汰或重启 —— 逐出后下次
+ * findFallbackStream/ensurePlayableStream 重新走真实探测/换源。
+ */
+export function evictStreamFallbackCache(songId: string): void {
+  fallbackCache.delete(songId);
+  playableCache.delete(songId);
+}
+
 /** 清空全部回退缓存(含可播记忆,供空闲内存回收;下次使用会重新探测)。 */
 export function clearStreamFallbackCache(): void {
   fallbackCache.clear();

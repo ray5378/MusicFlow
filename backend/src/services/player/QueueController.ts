@@ -57,8 +57,6 @@ export class QueueController extends EventEmitter {
   private players = new Map<string, UniversalPlayer>();
   private ctrls = new Map<string, PlayerControllerLike>();
   private advancing = new Set<string>();
-  // Per-player consecutive unplayable skips; reset on a successful cast.
-  private skipCounters = new Map<string, number>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。到点立即暂停。
   private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number }>();
@@ -101,7 +99,6 @@ export class QueueController extends EventEmitter {
       this.players.delete(k);
       this.ctrls.delete(k);
       this.queues.delete(k);
-      this.skipCounters.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -126,7 +123,6 @@ export class QueueController extends EventEmitter {
       this.players.delete(key);
       this.ctrls.delete(key);
       this.queues.delete(key);
-      this.skipCounters.delete(key);
       this.clearSleepTimer(key);
       log.info(`[QueueController] unregistered AirPlay device: ${key}`);
     }
@@ -348,20 +344,12 @@ export class QueueController extends EventEmitter {
     // Web 歌曲(在线源)在 cast 前预检流是否真的可播:原 URL 探测失败但
     // 多源兜底命中则写回 songs.url;两头皆空(streamFallback 也找不到替代)
     // 则判定不可播 → 从队列移除并跳过,继续下一首。避免设备卡在拉不到流。
+    // 无停播阈值:不可播的逐曲移除,队列自然排空,坏歌无限跳(用户拍板)。
     const songRow = db.select().from(songs).where(eq(songs.id, item.songId)).get();
     if (songRow?.pluginEntry && typeof songRow.pluginEntry === "string") {
       const playable = await ensurePlayableStream(songRow as any);
       if (!playable) {
-        // 连续失败保护:整队列都不可播时停止,避免无限循环。
-        const skips = (this.skipCounters.get(deviceId) || 0) + 1;
-        this.skipCounters.set(deviceId, skips);
-        if (skips >= Math.max(3, q.items.length + 1)) {
-          log.warn(`[QueueController][playCurrent] ${deviceId}: 连续 ${skips} 首不可播,停止`);
-          this.skipCounters.delete(deviceId);
-          this.markEnded(deviceId);
-          return;
-        }
-        log.warn(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过并移除 (${skips})`);
+        log.warn(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过并移除`);
         this.removeAt(deviceId, q.currentIndex, baseUrl);
         return;
       }
@@ -377,7 +365,6 @@ export class QueueController extends EventEmitter {
       // 对照 MA:命令发出前先把 _attr_playback_state = PLAYING(乐观设态)。
       ctrl.beginOptimistic(playerId, "pending");
       const { mediaUri } = await player.playMedia(fullItem, baseUrl);
-      this.skipCounters.delete(deviceId);
       // cast 命令已发出,重置 tracker:清掉上一首的 prev 状态 + 残留去抖,
       // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
       // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。

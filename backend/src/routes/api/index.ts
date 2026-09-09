@@ -33,6 +33,7 @@ import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
 import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
+import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
@@ -2340,6 +2341,38 @@ apiRoutes.post("/v1/dlna/stream-url", async (c) => {
   if (!songId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.songIdRequired"), 400);
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
+  // 投前预检(P1-2):签发 token 前确认这首歌当前真的有可用音源,全类型覆盖 ——
+  //  - web 行(在线插件源):有本地缓存文件即可播;否则 ensurePlayableStream 做
+  //    Range 探测 + 多源换源(失败会回写可用链,命中即缓存,后续投播零成本);
+  //  - local/webdav 行:probeLocalSourceOk(本地 existsSync 零成本 / WebDAV HEAD
+  //    带 5 分钟失败记忆);主源不可用但组内有 web 备选时放行 —— 流播时会经
+  //    resolvePreferredSong 自动切换,预检不越权替它做决定。
+  // 验不过 → 409「无可用音源」:客户端收到后直接跳下一首,设备不再吃死链干等。
+  {
+    const fs = await import("fs");
+    let playable = false;
+    if ((song.type || "local") === "web") {
+      if (song.cachePath && fs.existsSync(song.cachePath)) {
+        playable = true;
+      } else if (song.pluginEntry) {
+        playable = !!(await ensurePlayableStream(song as any));
+      } else {
+        playable = !!song.url;
+      }
+    } else if (await probeLocalSourceOk(song as any)) {
+      playable = true;
+    } else if (song.groupId) {
+      playable = !!db
+        .select({ id: songs.id })
+        .from(songs)
+        .where(and(eq(songs.groupId, song.groupId), eq(songs.type, "web")))
+        .limit(1)
+        .get();
+    }
+    if (!playable) {
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.song.noPlayableSource"), 409);
+    }
+  }
   const deviceId = typeof body.deviceId === "string" && body.deviceId ? body.deviceId : "client-cast";
   const { token, expiresAt } = createCastSession(songId, deviceId, getDlnaBaseUrl(c));
   return c.json({ token, streamUrl: `/rest/dlna/stream/${token}`, expiresAt });

@@ -1,0 +1,69 @@
+name: Playback Chain Guard
+
+# 播放链路专用门禁（blocking），与 ci.yml 的全量测试互补、与 build.yml（v* tag 发版）解耦。
+# 钉死 2026-09-09 拍板的播放链路契约，防止被改坏：
+#   1. /v1/dlna/stream-url 投前预检：签发无鉴权 token 前必须全类型确认有可用音源
+#      （local 磁盘存在性 / web 探测换源；验不过 409，客户端直接跳下一首）
+#      —— tests/routes/dlnaStreamUrlGuard.test.ts 五分支；
+#   2. 服务端投 DLNA（QueueController）：不可播逐曲移除跳过，无停播阈值（队列自然排空）；
+#   3. 换源缓存逐出：拉流实测失败必须逐出 fallbackCache/playableCache 重探，
+#      插件源过期直链不得被缓存锁死（streamFallback 契约测试 + 全量回归）。
+# 客户端侧由 MusicFlow-client 仓库 .github/workflows/playback-chain-guard.yml 对称覆盖。
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: playback-chain-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  playback-chain-guard:
+    name: playback chain guard (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: cd backend && npm ci
+
+      - name: Run playback chain guard tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cd backend
+          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/player/QueueController.test.ts 2>&1 | tee /tmp/chain-guard.log
+
+      # 静态守卫：QueueController 的停播阈值（skipCounters/连跳 N 停）已按
+      # 2026-09-09 决策整体移除（不可播逐曲移除、队列自然排空），回归即失败。
+      - name: Guard: no stop threshold in QueueController
+        shell: bash
+        run: |
+          if grep -nE "skipCounters|连续 .* 首不可播,停止" backend/src/services/player/QueueController.ts ; then
+            echo "::error::播放链路契约回归:QueueController 不允许重新引入停播阈值(2026-09-09 拍板:不可播逐曲移除,无限跳)"
+            exit 1
+          fi
+          if grep -nE "deadSongs|localFailStreak|LOCAL_MAX_FAIL_STREAK" frontend/src/stores/player.ts ; then
+            echo "::error::播放链路契约回归:Web 前端不允许重新引入 deadSongs/失败连击停播(2026-09-09 拍板:无限跳)"
+            exit 1
+          fi
+          echo "OK: 无停播阈值/deadSongs 回归"
+
+      - name: Upload guard log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-guard-log
+          path: /tmp/chain-guard.log
+          if-no-files-found: ignore
+          retention-days: 3

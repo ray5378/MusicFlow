@@ -23,7 +23,7 @@ import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
-import { findFallbackStream, resolveEmptyUrlStream } from "../../services/source/online/streamFallback.js";
+import { findFallbackStream, resolveEmptyUrlStream, evictStreamFallbackCache } from "../../services/source/online/streamFallback.js";
 import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { playPreferenceActive, preferLocalEnabled, fallbackToWebEnabled } from "../../services/plugin/core/playPreference.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
@@ -1284,17 +1284,34 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
     // 未命中(无可播替代/normalize 失配)保留原始失败响应原样透传,避免把已锁定
     // 的 body 再交给 c.body() 抛错。
     if ((upstream.status === 404 || upstream.status === 403 || upstream.status >= 500) && song.pluginEntry && song.sourceData) {
-      try {
+      const fbArgs = () => {
         const sd = JSON.parse(song.sourceData || "{}");
-        const fb = await findFallbackStream(
+        return [
           song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
           song.album || sd?.album || "", Number(song.duration || sd?.duration || 0),
           song.pluginEntry, sd?.source || "",
-        );
+        ] as const;
+      };
+      try {
+        const fb = await findFallbackStream(...fbArgs());
         if (fb) {
           await upstream.body?.cancel();
           url = fb.url;
           upstream = await fetch(url, { headers });
+          // 换源命中后拉流仍失败,且该结果来自缓存(source 为空串 = fallbackCache
+          // 命中标记):插件源直链会过期而缓存命中不重探,失效链会被锁死到 FIFO
+          // 淘汰 —— 逐出该歌双缓存后重搜一次(真实探测候选),仍失败则透传失败响应。
+          if (
+            fb.source === "" &&
+            (upstream.status === 404 || upstream.status === 403 || upstream.status >= 500)
+          ) {
+            evictStreamFallbackCache(song.id);
+            const fb2 = await findFallbackStream(...fbArgs());
+            if (fb2) {
+              url = fb2.url;
+              upstream = await fetch(url, { headers });
+            }
+          }
         }
       } catch {
         // keep original upstream result

@@ -138,6 +138,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.source.pathMissing": "路径 {path} 不存在",
 
     "errors.song.notFound": "歌曲不存在",
+    "errors.song.noPlayableSource": "该歌曲当前无可用音源",
 
     "errors.renderer.invalidPeerId": "无效的 peerId",
     "errors.renderer.castPeerOnly": "该操作仅对投屏/群组设备生效",
@@ -302,6 +303,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.source.pathMissing": "Path {path} does not exist",
 
     "errors.song.notFound": "Song not found",
+    "errors.song.noPlayableSource": "No playable audio source for this song",
 
     "errors.renderer.invalidPeerId": "Invalid peerId",
     "errors.renderer.castPeerOnly": "This operation only applies to cast/group devices",

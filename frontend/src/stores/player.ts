@@ -193,10 +193,6 @@ export const usePlayerStore = defineStore("player", () => {
   const localCurrentLyricLine = ref("");
   const localCurrentLyricIndex = ref(-1);
   let howl: Howl | null = null;
-  // Consecutive load/play failures; reaching MAX stops auto-skipping to avoid an
-  // infinite loop when the whole queue is unplayable.
-  let localFailStreak = 0;
-  const LOCAL_MAX_FAIL_STREAK = 5;
 
   // ==================== Unified peer system (core refs, declared early) ====================
   // currentPeerId drives which state machine the UI shows/controls.
@@ -460,27 +456,6 @@ export const usePlayerStore = defineStore("player", () => {
   async function startLocalPlayback() {
     const mySeq = ++playbackSeq;
     if (howl) { howl.unload(); howl = null; }
-    // 预探测确认不可播的外部音源直接跳过(需求:提前跳过,不打断不卡顿)。
-    // guard 防死循环:整队都不可播时停止,交给失败连击上限兜底。
-    let skipGuard = 0;
-    while (localQueue.value[localIndex.value] && deadSongs.has(localQueue.value[localIndex.value].id)) {
-      if (++skipGuard > localQueue.value.length) break;
-      if (localPlayMode.value === "shuffle") {
-        // 沿洗牌序列前进跳过(序列生成时已排除 dead,此处兜底异步新标记的)
-        ensureShuffleReady();
-        if (shufflePos + 1 >= shuffleOrder.length) {
-          rebuildShuffle({ keepCurrent: true });
-          if (shuffleOrder.length === 0) break;
-          shufflePos = 0;
-        } else {
-          shufflePos++;
-        }
-        localIndex.value = shuffleOrder[shufflePos];
-      } else {
-        localIndex.value = (localIndex.value + 1) % localQueue.value.length;
-      }
-      console.warn(`[player] Skipping known-unplayable song: ${localQueue.value[localIndex.value]?.title || localQueue.value[localIndex.value]?.id}`);
-    }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song);
@@ -498,7 +473,6 @@ export const usePlayerStore = defineStore("player", () => {
       volume: volume.value,
       html5: true,
       onplay: () => {
-        localFailStreak = 0;
         localIsPlaying.value = true;
         localDuration.value = howl?.duration() || 0;
         startLocalProgressTimer();
@@ -523,20 +497,13 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   // Auto-skip when a song can't be fetched/played (e.g. no stream available on
-  // any source). Stops after LOCAL_MAX_FAIL_STREAK consecutive failures so a
-  // fully-unplayable queue doesn't spin forever.
+  // any source). No stop threshold: unplayable songs skip infinitely — each retry
+  // re-attempts for real (server-side source switch heals stale links), and an
+  // ordered queue naturally drains to the end.
   function localHandlePlaybackError(songId: string) {
     try { howl?.unload(); } catch {}
     howl = null;
-    localFailStreak++;
-    console.warn(`[player] Playback failed (${localFailStreak}) songId=${songId}, auto-skipping`);
-    if (localFailStreak >= LOCAL_MAX_FAIL_STREAK) {
-      console.warn("[player] Too many consecutive failures, stopping auto-skip");
-      localFailStreak = 0;
-      localIsPlaying.value = false;
-      stopLocalProgressTimer();
-      return;
-    }
+    console.warn(`[player] Playback failed songId=${songId}, auto-skipping`);
     localNext();
   }
 
@@ -596,12 +563,12 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  // ===== 播放前外部音源预探测(需求:下一首是外部音源前提前确认可用,含随机播放) =====
+  // ===== 播放前外部音源预探测 =====
   // 前端无法预知哪些歌是外部音源(Song 无 url 字段),故对「接下来可能播放的 3 首」
   // 无脑批量探测,后端对本地歌曲直接返回 ok:true(零开销)、对 web 歌曲做轻量
-  // Range 探测并自动换源写回;不可用的歌提前跳过(deadSongs),不打断播放。
+  // Range 探测并自动换源写回 —— 探测的价值在于「提前治愈」(服务端把失效链接
+  // 换成可用源并持久化),而不是预先跳歌;播不出的歌由播放失败兜底无限跳。
   const probeCache = new Map<string, boolean>(); // songId -> 可用性(session 内,重启失效)
-  const deadSongs = new Set<string>();           // 探测确认不可播 → 播放前直接跳过
   let probing = false;
   const PROBE_WINDOW = 3;
 
@@ -646,14 +613,8 @@ export const usePlayerStore = defineStore("player", () => {
       const results = res.data?.results || [];
       for (const r of results) {
         probeCache.set(r.songId, !!r.ok);
-        // 远程歌(remote: 前缀)按 DB songId 探测必判不可播,不可进 deadSongs(否则整队被跳过);
-        // 其可用性由播放时失败兜底处理。
-        if (String(r.songId).startsWith("remote:")) continue;
         if (!r.ok) {
-          deadSongs.add(r.songId);
-          console.warn(`[player] Pre-probe unplayable, skipping early: ${r.songId} (${r.reason || "no available source"})`);
-        } else {
-          deadSongs.delete(r.songId);
+          console.warn(`[player] Pre-probe unplayable (will rely on runtime skip/heal): ${r.songId} (${r.reason || "no available source"})`);
         }
       }
     } catch {
@@ -665,9 +626,9 @@ export const usePlayerStore = defineStore("player", () => {
 
   // ===== 洗牌序(随机播放 = 一轮内不重复的洗牌序列) =====
   // 主流播放器标准随机语义:开始播放时把队列打乱成固定顺序(shuffleOrder,存队列
-  // index),「下一首」= 序列中下一首,播完一轮重新洗牌;已知不可播(deadSongs)
-  // 的歌不进入序列。相比「每次切歌即时随机」,洗牌序让预探测窗口精确命中真正
-  // 要播的歌,且不会「刚播完的又马上回来」。队列增删(长度变化)时惰性重建。
+  // index),「下一首」= 序列中下一首,播完一轮重新洗牌。相比「每次切歌即时随机」,
+  // 洗牌序让预探测窗口精确命中真正要播的歌,且不会「刚播完的又马上回来」。
+  // 队列增删(长度变化)时惰性重建。
   let shuffleOrder: number[] = [];
   let shufflePos = -1;
   let shuffleLen = -1;
@@ -679,7 +640,6 @@ export const usePlayerStore = defineStore("player", () => {
       const s = localQueue.value[i];
       if (!s) continue;
       if (opts?.keepCurrent && i === localIndex.value) { idxs.unshift(i); continue; } // 当前曲固定序列头
-      if (deadSongs.has(s.id)) continue;                          // 已知不可播不进序列
       idxs.push(i);
     }
     // Fisher-Yates(不动头部当前曲)
