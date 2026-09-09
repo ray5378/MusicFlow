@@ -345,13 +345,12 @@
           <div
             v-for="(song, idx) in playerStore.queue"
             :key="song.id"
-            ref="queueItemEls"
             class="queue-item"
             :class="{ active: idx === playerStore.currentIndex }"
             @click="playFromQueue(idx)"
           >
             <div class="queue-cover">
-              <img v-if="song.coverArt" :src="coverArtUrl(song.coverArt, 80)" loading="lazy" decoding="async" />
+              <img v-if="song.coverArt && queueCoversReady" :src="coverArtUrl(song.coverArt, 80)" loading="lazy" decoding="async" />
               <div v-else class="queue-cover-ph"><MfIcon name="Headphones" /></div>
               <span v-if="idx === playerStore.currentIndex" class="playing-indicator" :class="{ paused: !playerStore.isPlaying }"></span>
             </div>
@@ -568,7 +567,6 @@ function onLogoClick() {
 function closeMobileNav() { if (isMobile.value) mobileNavOpen.value = false; }
 const lyricsContainer = ref<HTMLElement | null>(null);
 const queueListEl = ref<HTMLElement | null>(null);
-const queueItemEls = ref<HTMLElement[]>([]);
 
 // Add-to-playlist dialog state
 const showPlaylistDialog = ref(false);
@@ -822,23 +820,58 @@ watch(() => playerStore.currentLyricIndex, async (idx) => {
   container.scrollTo({ top: targetTop, behavior: "smooth" });
 });
 
-async function scrollQueueToCurrent() {
+// 队列打开定位(与客户端 play_queue_sheet 同一套语义):
+// 1) 一次精确定位 —— 行高恒定,用「当前项矩形 − 视口中心」直接算出目标
+//    scrollTop 一次赋值落地,不再 smooth 逐帧滚动(打开瞬间不该看到滚动过程);
+// 2) 封面延载 —— 定位落地前所有行只渲染占位块,零封面请求;落地后(下一帧)才
+//    解锁真 <img>,避免打开瞬间一屏封面请求挤占主线程/带宽把定位带偏。
+const queueCoversReady = ref(false);
+
+function centerQueueItem(list: HTMLElement, active: HTMLElement) {
+  const listRect = list.getBoundingClientRect();
+  const itemRect = active.getBoundingClientRect();
+  const target =
+    list.scrollTop +
+    (itemRect.top - listRect.top) -
+    list.clientHeight / 2 +
+    itemRect.height / 2;
+  const max = Math.max(0, list.scrollHeight - list.clientHeight);
+  list.scrollTop = Math.min(Math.max(target, 0), max);
+}
+
+async function scrollQueueToCurrent(options: { force?: boolean } = {}) {
   const idx = playerStore.currentIndex;
   if (idx < 0) return;
   await nextTick();
   const list = queueListEl.value;
   if (!list) return;
-  if (list.matches(":hover")) return;
-  const active = queueItemEls.value[idx];
+  const active = list.querySelector<HTMLElement>(".queue-item.active");
   if (!active) return;
-  const listRect = list.getBoundingClientRect();
-  const itemRect = active.getBoundingClientRect();
-  if (itemRect.top >= listRect.top && itemRect.bottom <= listRect.bottom) return;
-  const targetTop = active.offsetTop - list.clientHeight / 2 + active.clientHeight / 2;
-  list.scrollTo({ top: targetTop, behavior: "smooth" });
+  if (options.force != true) {
+    // 非打开触发(切歌):用户正悬停/浏览队列时不打断,仅目标不可见才定位。
+    if (list.matches(":hover")) return;
+    const listRect = list.getBoundingClientRect();
+    const itemRect = active.getBoundingClientRect();
+    if (itemRect.top >= listRect.top && itemRect.bottom <= listRect.bottom) return;
+  }
+  centerQueueItem(list, active);
+  // 兜底:面板带 slide-right 过渡,首帧测量可能早于布局稳定,下一帧再校一次。
+  requestAnimationFrame(() => {
+    const l = queueListEl.value;
+    const a = l?.querySelector<HTMLElement>(".queue-item.active");
+    if (l == null || a == null) return;
+    centerQueueItem(l, a);
+    // 定位落地:解锁真封面(此前所有行都是占位)。
+    queueCoversReady.value = true;
+  });
 }
-watch(() => playerStore.currentIndex, scrollQueueToCurrent);
-watch(() => playerStore.showPlaylist, (open) => { if (open) scrollQueueToCurrent(); });
+
+watch(() => playerStore.currentIndex, () => void scrollQueueToCurrent());
+watch(() => playerStore.showPlaylist, (open) => {
+  // 每次打开重走「定位 → 解锁封面」;关闭即回到未解锁,下次打开仍是零封面请求。
+  queueCoversReady.value = false;
+  if (open) void scrollQueueToCurrent({ force: true });
+});
 </script>
 
 <style lang="scss" scoped>
