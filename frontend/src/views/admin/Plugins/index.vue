@@ -468,7 +468,7 @@
                   :placeholder="t('admin.plugins.playlistPlaceholder')"
                   style="width: 100%"
                 >
-                  <el-option v-for="o in playlistOptions" :key="o.value" :label="o.label" :value="o.value" />
+                  <el-option v-for="o in orderedPlaylistOptions(f.key)" :key="o.value" :label="o.label" :value="o.value" />
                 </el-select>
                 <!-- candidate-list:推荐榜单(平台 + URL + 显示名)可增删替换,由 manifest configSchema 声明 -->
                 <div v-else-if="f.type === 'candidate-list'" class="candidate-list">
@@ -679,6 +679,18 @@ const playlistOptions = computed(() =>
     label: p.sourcePlatform ? `[${p.sourcePlatform}] ${p.name}` : p.name,
   })),
 );
+// 已选中的歌单置顶:打开下拉第一眼就能看到当前配置选了哪些(保持已选的相对
+// 顺序),其余歌单维持原有排序。按字段 key 取各自的已选集合——多个插件字段
+// (今日漫游「组合来源歌单」/本地推荐「参考歌单」)共用同一个选项源。
+function orderedPlaylistOptions(key: string) {
+  const opts = playlistOptions.value;
+  const selected = Array.isArray(editConfig[key]) ? new Set<string>(editConfig[key]) : null;
+  if (!selected?.size) return opts;
+  const chosen: typeof opts = [];
+  const rest: typeof opts = [];
+  for (const o of opts) (selected.has(o.value) ? chosen : rest).push(o);
+  return [...chosen, ...rest];
+}
 // 歌单多选器要能选到库里「任意」歌单,且搜索框(filterable 本地过滤)要能命中全部:
 // 只拉一页时后端单页上限 100,实测 761 个歌单只能看到/搜到前 100 个,其余 661 个
 // 既看不到也搜不到(今日漫游「组合来源歌单」、本地推荐「参考歌单」均受影响)。
