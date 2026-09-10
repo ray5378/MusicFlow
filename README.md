@@ -2,7 +2,7 @@
 
 自托管音乐库播放器，**插件化架构**。后端 Hono + SQLite，前端 Vue 3 + Element Plus。在线音乐源、歌单导入、每日推荐、歌词封面、DLNA 投屏等均以插件形式接入，核心按能力遍历，不耦合具体实现。
 
-> **定位**：Home Assistant 主链路（加载项 + 集成 + 卡片）的音乐服务内核，也支持独立部署运行。
+> **定位**：Home Assistant 主链路（集成 + 卡片）的音乐服务内核，也支持独立部署运行。
 
 ## 快速开始
 
@@ -71,7 +71,6 @@ networks: {}
 
 | 仓库 | 类型 | 作用 |
 |------|------|------|
-| [hassio-addons](https://github.com/ray5378/hassio-addons) | HA 加载项 | 把服务端跑在 Supervisor 下(不建议,封面会占用非常多的硬盘空间) |
 | [hass-musicflow](https://github.com/ray5378/hass-musicflow) | HACS 集成 | 将 DLNA 设备与播放组变为 `media_player` 实体 |
 | [hass-musicflow-card](https://github.com/ray5378/hass-musicflow-card) | HACS 前端卡片 | 原生 HA 卡片 媒体功能全面接入,需搭配上面的HACS集成使用  卡片样式 |
 

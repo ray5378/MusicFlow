@@ -147,8 +147,7 @@ const matchJobsSweep = setInterval(() => {
 ### 5.3 发布
 
 - 走常规流程：bump → tag → push → CI 镜像 → Release；
-- 建议：必做项单独发版（纯前端、无 API 变化）；可选项 A 可同版或下版；
-- hassio-addons 按既有约定不自动同步（除非明确指示）。
+- 建议：必做项单独发版（纯前端、无 API 变化）；可选项 A 可同版或下版。
 
 ---
 

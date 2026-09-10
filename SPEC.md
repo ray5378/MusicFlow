@@ -462,7 +462,7 @@ Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 7. **禁止**在 AI 交付物中新增无上限 / 无清理的常驻 Map、Set、数组、定时器（内存红线，见 1.2）。
 8. **禁止**吞异常：所有 catch 必须打 Error 日志且含关键入参（见第八章）。
 9. **禁止**碰 `.workbuddy/`、`node_modules/`、`dist/`、`backend/data/`、`.test-data/` 等目录；不删用户数据。
-10. **禁止**私自提交 / push / 打 tag / 发版（提交与发布流程由 ray 控制；发布走既有规范：仅推 ray5378 自有仓库、不触发 hassio-addons 自动发布、release notes 注明升级步骤、README 不维护版本映射）。
+10. **禁止**私自提交 / push / 打 tag / 发版（提交与发布流程由 ray 控制；发布走既有规范：仅推 ray5378 自有仓库、release notes 注明升级步骤、README 不维护版本映射）。
 11. **禁止**把插件仓库（MusicFlow-plugins）的改动混入本仓库；核心与插件边界不可互相侵入。
 12. **禁止**在代码注释中编造不存在的 API / 配置项 / 环境变量 / 端点——写前先 grep 确认。
 

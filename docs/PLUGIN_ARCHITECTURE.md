@@ -411,14 +411,16 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
   覆盖品牌/失败体/浏览/搜索/歌单 CRUD/收藏/评分/scrobble 去重/队列/头像。
   全量 vitest 185 用例绿。
 
-### 9.2 HA 主链路（addon + integration + card 全部对接）
+### 9.2 HA 主链路（integration + card 全部对接）
 
 | 环节  | 仓库                                                                                                          | 状态                 |
 | --- | ----------------------------------------------------------------------------------------------------------- | ------------------ |
 | 镜像  | `MusicFlow`（ghcr.io/ray5378/**musicflow**:1.2.0，仅 amd64）                                                    | ✅ 已发布              |
-| 加载项 | `hassio-addons/musicflow`（version 1.2.0，build\_from 钉镜像，arch 仅 amd64）                                       | ✅ 已对接              |
 | 集成  | `hass-musicflow` 1.3.7（契约 = `/v1/peers*`、`/v1/groups`、`/v1/play`、`/rest/*` + `/rest/api/*` 代理、`/ws?token=`） | ✅ e2e 12/12 通过，零改动 |
 | 卡片  | `hass-musicflow-card` v1.6.51（`/api/v1/peers`、`/api/v1/users/me`、代理 fallback、`/ws`）                         | ✅ API 面兼容，零改动      |
+
+> HA 加载项（原 `hassio-addons` 仓库）已于 2026-09-10 停用并删除，不再发布 HAOS 容器镜像。
+> HAOS 用户请改用 Docker 部署本条「镜像」行提供的服务端镜像。
 
 验证方式（无 Docker 环境的 e2e 套路）：`cd backend && npm run build` →
 `DATA_DIR=<tmp> PORT=46401 node dist/index.js` → 登录拿 JWT → 按集成契约逐项 curl。
