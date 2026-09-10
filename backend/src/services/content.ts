@@ -83,7 +83,13 @@ export async function resolveContentSongs(type: string, id: string): Promise<{ r
     if (!pl) return null;
     // Batch-load the playlist's songs in one query instead of N+1 (was one
     // songs query per entry). Order preserved via the id->row Map.
-    const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, id)).all()
+    // ORDER BY 是**必须**的：调用方(/v1/play、音流 content 节点)按 startIndex 取第 N 首，
+    // 该索引来自客户端/前端看到的行序(orderBy(position, id)，同 /v1/playlists/:id/tracks)。
+    // 此前无 ORDER BY 时 SQLite 返回 rowid 序，与排序序不一致 → 静默播错歌
+    // (2026-09-10 实测:24 个歌单抽样 6 个「同集异序」；且 /v1/play 的 startIndex 越界
+    // 会静默归 0，不给任何提示)。album/artist/genre 分支本来就都有 ORDER BY。
+    const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, id))
+      .orderBy(playlistSongs.position, playlistSongs.id).all()
       .filter(e => e.playable && e.songId);
     const songIds = entries.map(e => e.songId!);
     const songMap = songIds.length
