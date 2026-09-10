@@ -8,6 +8,13 @@ name: Playback Chain Guard
 #   2. 服务端投 DLNA（QueueController）：不可播逐曲移除跳过，无停播阈值（队列自然排空）；
 #   3. 换源缓存逐出：拉流实测失败必须逐出 fallbackCache/playableCache 重探，
 #      插件源过期直链不得被缓存锁死（streamFallback 契约测试 + 全量回归）。
+#   4. Web 前端投屏起播「主通道优先」：整份内容（歌单/专辑/艺人）点播必须走
+#      POST /rest/api/v1/play {peerId, type, id, songId}，不得退化成整队推送。
+#      原因：公网入口经 Lucky WAF，对 /queue/play 的大 JSON 数组有体积闸门
+#      （≈90KB ≈ 300 首即 403，响应体 `<title>403 - Lucky WAF</title>`，反代拒绝）
+#      —— 大歌单整队推送会直接起播失败。这是可用性要求，不是优化。
+#      守卫：tests/frontend/playContentContract.test.ts（含 payload 级断言，
+#      防止「请求体换成 startIndex 但 songId 变量还在」式漏检）。
 # 客户端侧由 MusicFlow-client 仓库 .github/workflows/playback-chain-guard.yml 对称覆盖。
 
 on:
@@ -42,7 +49,7 @@ jobs:
         run: |
           set -o pipefail
           cd backend
-          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/frontend/playerContract.test.ts 2>&1 | tee /tmp/chain-guard.log
+          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/frontend/playerContract.test.ts tests/frontend/playContentContract.test.ts tests/services/contentOrder.test.ts 2>&1 | tee /tmp/chain-guard.log
 
       # 静态守卫：QueueController 的停播阈值（skipCounters/连跳 N 停）已按
       # 2026-09-09 决策整体移除（不可播逐曲移除、队列自然排空），回归即失败。
@@ -58,6 +65,29 @@ jobs:
             exit 1
           fi
           echo "OK: 无停播阈值/deadSongs 回归"
+
+      # 静态守卫(不依赖 vitest):Web 前端「整份内容点播必须声明队列来源」。
+      # 声明来源的 plumbing 断了 → contentOrigin 恒为 null → 永远走整队推送 →
+      # 大歌单在 WAF 闸门上 403 起播失败。动态断言见 playContentContract.test.ts,
+      # 这里再加一道源码级防线(源码扫描,不需要跑 vue/vitest)。
+      - name: "Guard - Web main-channel-first origin plumbing"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -q "setContentOrigin" frontend/src/composables/usePlayContent.ts; then
+            echo "::error::契约回归:usePlayContent 必须声明队列来源(setContentOrigin),否则永远走整队推送"
+            miss=1
+          fi
+          if ! grep -q "/rest/api/v1/play" frontend/src/stores/player.ts; then
+            echo "::error::契约回归:player.ts 必须实现主通道 /rest/api/v1/play(整队推送会被 WAF 403)"
+            miss=1
+          fi
+          if ! grep -q "startCastPlaybackMainChannelFirst" frontend/src/stores/player.ts; then
+            echo "::error::契约回归:startCastPlayback 必须委派给主通道优先实现,不得直接整队推送"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 主通道优先 plumbing 在位"; fi
+          exit "$miss"
 
       # 跨仓契约(服务端侧):客户端把「无可用音源」识别为 409 并转
       # DlnaSongUnplayableException 后跳下一首。服务端哪天把 409 改成 404/400

@@ -241,6 +241,17 @@ export const usePlayerStore = defineStore("player", () => {
     tickTimer: ReturnType<typeof setInterval> | null;
     lastCastState: string;
     lastScrobbledSongId: string;
+    // 当前队列的「服务端内容来源」。非 null 时起播走主通道
+    // `POST /rest/api/v1/play {peerId, type, id, songId}`（几百字节），
+    // 由服务端自己 resolveContentSongs 解析队列 —— 客户端不搬运整队。
+    //
+    // 只有 playlist / album / artist「整份内容一次点播」才写它；首页随机、
+    // 搜索结果快照、本地任意队列这些服务端无从解析的队列保持 null → 走兜底通道。
+    // 队列里出现远程歌（未入库）时也会清空，因为服务端解析不出它们。
+    //
+    // ⚠️ 单曲点播也必须清空：服务端按 type/id 解析出的是**整份内容**，
+    // 传 songId 只能定位到该内容里已有的那首；单曲队列与内容队列不是一回事。
+    contentOrigin: { type: "playlist" | "album" | "artist"; id: string } | null;
   }
   // reactive Map so Vue tracks deep changes to each peer's state.
   const remoteStates = reactive(new Map<string, RemoteState>());
@@ -272,6 +283,7 @@ export const usePlayerStore = defineStore("player", () => {
         tickTimer: null,
         lastCastState: "STOPPED",
         lastScrobbledSongId: "",
+        contentOrigin: null,
       };
       remoteStates.set(peerId, raw);
       // IMPORTANT: reactive Map wraps the value in a proxy on set, so the
@@ -800,6 +812,10 @@ export const usePlayerStore = defineStore("player", () => {
   // Push a peer's queue to the backend as the authoritative queue and
   // start playing from the current index (dlna: casts to the device;
   // group: fans out to all online members).
+  //
+  // 兜底通道：payload 是整队 items（几千首 ≈ MB 级）。只在「服务端无从解析的队列」
+  // 场景使用（首页随机 / 搜索结果快照 / 本地任意队列），以及主通道失败时回落。
+  // 起播一律优先走 `playContentOnPeer`（主通道，几百字节）。
   async function pushCastQueueToBackend(st: RemoteState, startIndex: number): Promise<void> {
     const items = st.queue.map(songToQueueItem);
     try {
@@ -816,12 +832,52 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function startCastPlayback(st: RemoteState) {
-    pushCastQueueToBackend(st, st.index >= 0 ? st.index : 0);
+    void startCastPlaybackMainChannelFirst(st, st.index >= 0 ? st.index : 0);
     // 乐观置位:点击播放后立刻让按钮显示"暂停",不依赖后端轮询/事件。
     // 否则在「清空→重选设备→重新播放」场景下,GENA 事件缓存的 state 可能停在 STOPPED,
     // 导致轮询读到的 state 一直非 PLAYING 而按钮卡在"未播放"(进度条却仍在走)。
     st.isPlaying = true;
     autoshowQueue();
+  }
+
+  // 主通道优先起播。命中 contentOrigin（歌单/专辑/艺人整份内容点播）时只发
+  // {peerId, type, id, songId} —— 几百字节，服务端 resolveContentSongs 自己解析队列。
+  //
+  // 为什么必须主通道优先（不是「优化」而是「可用性」）：
+  // 公网入口经 Lucky WAF，WAF 对 /queue/play 的大 JSON 数组有体积闸门
+  // （≈90KB ≈ 300 首即 403，响应体是 `<title>403 - Lucky WAF</title>`，
+  // 反代拒绝、不是本服务端拒绝）。整队推送在大歌单上直接 403 → 起播失败。
+  // 闸门可被运维临时关闭；所以「测通了」不代表不存在，判据必须是响应体。
+  //
+  // 单曲/远程歌/随机/搜索快照 → contentOrigin 为 null → 兜底通道整队推送。
+  async function startCastPlaybackMainChannelFirst(st: RemoteState, startIndex: number): Promise<void> {
+    const origin = st.contentOrigin;
+    if (origin && st.queue.length > 0) {
+      const start = Math.min(Math.max(startIndex, 0), st.queue.length - 1);
+      const startSongId = st.queue[start]?.id;
+      // songId 是**身份**：服务端在自己解析出的队列里 findIndex 定位，与两侧排序无关。
+      // 绝不能只传 startIndex（行号）—— 两侧排序不同源会静默播错歌
+      // （后端已改为越界不再静默归 0，未命中返 404）。
+      if (startSongId) {
+        try {
+          await api.post("/rest/api/v1/play", {
+            peerId: st.peerId,
+            type: origin.type,
+            id: origin.id,
+            songId: startSongId,
+            playMode: st.playMode,
+          });
+          await api.post(peerApi(st.peerId, "/play-mode"), { mode: st.playMode }).catch(() => {});
+          return;
+        } catch (e: any) {
+          console.warn(
+            `[player] main channel play failed (${origin.type}:${origin.id}), falling back to full-queue push:`,
+            e?.response?.status || e?.message || e,
+          );
+        }
+      }
+    }
+    await pushCastQueueToBackend(st, startIndex);
   }
 
   async function loadCastLyrics(st: RemoteState, songId: string) {
@@ -1092,8 +1148,22 @@ export const usePlayerStore = defineStore("player", () => {
   // The UI calls these, so a single button works for whichever target is
   // selected.
 
+  // 「整份内容一次点播」入口（usePlayContent.playPlaylist/Album/Artist）声明来源，
+  // 使投屏起播走主通道。必须在 playQueue **之前**调用（RemoteState 由它创建）。
+  //
+  // 其余所有起播入口（playSong / 搜索快照 / 首页随机 / 本地任意队列 / 远程歌导入）
+  // 都会清空来源 —— 服务端无法按 (type,id) 解析出那些队列，只能走兜底整队推送。
+  function setContentOrigin(type: "playlist" | "album" | "artist", id: string) {
+    if (!id) return;
+    const st = activeRemote.value;
+    if (isRemotePeer.value && st) st.contentOrigin = { type, id };
+  }
+
   function playSong(song: Song) {
     if (isRemotePeer.value && activeRemote.value) {
+      // 单曲 ≠ 整份内容：服务端按 (type,id) 解析出的是整份内容，传 songId 只会在
+      // 那份内容里定位。单曲队列必须清空来源走兜底通道。
+      activeRemote.value.contentOrigin = null;
       if (isRemoteSong(song)) { void playRemoteOnPeer(activeRemote.value, [song], 0); return; }
       castPlaySong(activeRemote.value, song);
     }
@@ -1108,7 +1178,12 @@ export const usePlayerStore = defineStore("player", () => {
   }
   function playQueue(songs: Song[], index: number = 0) {
     if (isRemotePeer.value && activeRemote.value) {
-      if (songs.some(isRemoteSong)) { void playRemoteOnPeer(activeRemote.value, songs, index); return; }
+      // 队列里混入未入库的远程歌 → 服务端解析不出，清空来源走兜底通道。
+      if (songs.some(isRemoteSong)) {
+        activeRemote.value.contentOrigin = null;
+        void playRemoteOnPeer(activeRemote.value, songs, index);
+        return;
+      }
       castPlayQueue(activeRemote.value, songs, index);
     }
     else localPlayQueue(songs, index);
@@ -1550,7 +1625,7 @@ export const usePlayerStore = defineStore("player", () => {
     // group events (播放器群组页刷新信号)
     groupVersion,
     // UI-routed controls
-    playSong, addToQueue, playQueue, togglePlay, next, prev,
+    playSong, addToQueue, playQueue, setContentOrigin, togglePlay, next, prev,
     seek, seekPercent, setVolume, cyclePlayMode,
     removeFromQueue, clearQueue, getCoverUrl, loadLyrics, updateCurrentLyric,
     toggleLyrics, togglePlaylistPanel, togglePlayMode,
