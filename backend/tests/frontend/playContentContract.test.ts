@@ -75,6 +75,12 @@ describe("Web 前端投屏起播:主通道优先", () => {
     expect(payload, "主通道必须下发 type(服务端据此 resolveContentSongs)").toMatch(/\btype\s*:/);
     expect(payload, "主通道必须下发 id").toMatch(/\bid\s*:/);
     expect(payload, "主通道必须下发 peerId").toMatch(/\bpeerId\s*:/);
+    // 主通道**不得**携带整队 items —— 那是兜底通道的形态，一旦混入就退回 MB 级
+    // payload，重新落进 WAF 闸门。（客户端侧对称断言见 MusicFlow-client 的
+    // cast_peer_provider_test.dart「no slot verification round-trip」用例。）
+    expect(payload, "主通道 payload 不得包含整队 items(MB 级会撞 WAF 闸门)").not.toMatch(
+      /\bitems\s*:/,
+    );
   });
 
   it("主通道优先:先试主通道,失败才回落整队推送", () => {
