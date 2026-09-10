@@ -3408,7 +3408,10 @@ apiRoutes.post("/v1/play", async (c) => {
   // 起点定位：优先按 songId 身份查找（与两侧排序无关）；找不到或未传时才回落
   // startIndex 行号。songId 传了但队列里没有 → 视为调用方所指的歌不在该内容中，
   // 明确返 404 而不是静默从头播（历史上 startIndex 越界静默归 0 掩盖了大量错位）。
-  let start = 0;
+  //
+  // `start` 为 null 表示**调用方未指定起点** → 交给 QueueController.playFrom 在
+  // shuffle 模式下随机挑首（随机只发生在服务端这一处，客户端不再自行洗牌）。
+  let start: number | null = null;
   if (typeof songId === "string" && songId.length > 0) {
     const idx = items.findIndex((it) => it.songId === songId);
     if (idx < 0) {
@@ -3419,21 +3422,33 @@ apiRoutes.post("/v1/play", async (c) => {
     start = Math.floor(startIndex);
   }
   const baseUrl = getDlnaBaseUrl(c);
+  // 回执要给出**实际起播**位置：`start` 为 null 时由 playFrom 在 shuffle 下随机决定，
+  // 故用其返回值（playFrom 内部随机后把真实下标回传），避免客户端拿到 null 无从对齐。
+  let effectiveStart = start ?? 0;
   if (isCastPeer(parsed)) {
     try {
-      if (enqueue) await getQueueManager().enqueue(parsed.id, items, baseUrl);
-      else await getQueueManager().playFrom(parsed.id, items, start, baseUrl);
+      if (enqueue) { await getQueueManager().enqueue(parsed.id, items, baseUrl); effectiveStart = 0; }
+      else effectiveStart = await getQueueManager().playFrom(parsed.id, items, start, baseUrl);
     } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), 500); }
   } else {
-    if (enqueue) pm.localEnqueue(peerId, c.get("user")?.id, items);
-    else pm.localPlayFrom(peerId, c.get("user")?.id, items, start);
+    if (enqueue) { pm.localEnqueue(peerId, c.get("user")?.id, items); effectiveStart = 0; }
+    else pm.localPlayFrom(peerId, c.get("user")?.id, items, effectiveStart);
   }
   if (typeof playMode === "string" && ["order", "one", "all", "shuffle"].includes(playMode)) {
     const mode = playMode as "order" | "one" | "all" | "shuffle";
     if (isCastPeer(parsed)) getQueueManager().setPlayMode(parsed.id, mode);
     else pm.localSetPlayMode(peerId, mode);
   }
-  return c.json({ success: true, peerId, type, id, name: resolved.name, queued: items.length, startIndex: enqueue ? undefined : start, songId: enqueue ? undefined : items[start]?.songId });
+  const snap = isCastPeer(parsed) ? getQueueManager().snapshot(parsed.id) : null;
+  return c.json({
+    success: true, peerId, type, id, name: resolved.name,
+    queued: items.length,
+    startIndex: enqueue ? undefined : effectiveStart,
+    songId: enqueue ? undefined : items[effectiveStart]?.songId,
+    // 权威洗牌序列(客户端镜像用,免一次额外请求)。非 cast peer(local)不适用。
+    shuffleOrder: enqueue ? undefined : snap?.shuffleOrder,
+    shufflePos: enqueue ? undefined : snap?.shufflePos,
+  });
 });
 
 // ==================== 音流(MusicFlow) ====================

@@ -121,7 +121,11 @@ describe("QueueController", () => {
     const listener = vi.fn();
     qc.on("queue_changed", listener);
     qc.clear("d1");
-    expect(listener).toHaveBeenCalledWith("d1", { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false });
+    // 空快照含权威洗牌序列字段(客户端镜像用,见 PlayStartOwnership.test.ts)。
+    expect(listener).toHaveBeenCalledWith("d1", {
+      items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false,
+      shuffleOrder: [], shufflePos: -1,
+    });
   });
 
   describe("shuffle 上一首稳定性(v1.7.52 修复:当前曲固定在序列头,pos 可回退)", () => {

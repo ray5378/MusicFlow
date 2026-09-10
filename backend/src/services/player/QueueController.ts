@@ -421,21 +421,54 @@ export class QueueController extends EventEmitter {
     this.emit("queue_changed", playerId, this.snapshot(playerId));
   }
 
-  async playFrom(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): Promise<void> {
+  /**
+   * 用新队列替换当前队列并从 `startIndex` 开始播放。
+   *
+   * **起点归属（2026-09-10 拍板）：随机洗牌的唯一权威在服务端，但起播位置
+   * 由调用方决定 —— 服务端只在调用方「没有指定起点」时才随机。**
+   *
+   * 历史 bug：本方法曾在 shuffle 模式下无条件 `Math.random() * items.length`
+   * 自行挑首起播，把调用方传入的起点**整个丢掉** —— 客户端「投这个歌单的这首歌」
+   * 时设备却播了另一首（实测 3251 首歌单里 currentIndex 随机落在 560/3117/3206，
+   * 用户报告「客户端推的百分百不是当前播放的歌曲」）。
+   *
+   * 参数约定：
+   * - `startIndex` 为**非负整数** → 调用方明确指定起点，**必须尊重**，不随机；
+   * - `startIndex` 为 `null`/`undefined`/负数 → 调用方未指定，此时且仅在此时，
+   *   shuffle 模式下服务端随机挑首（保留「点歌单随机播放」体验，且随机只发生
+   *   在服务端一处，客户端不再自行洗牌）。
+   *
+   * 后续自动切歌一律走服务端 `shuffleOrder`（`pickNext`/`rebuildShuffle`），
+   * 并通过 `snapshot().shuffleOrder` 下发，客户端镜像显示。
+   */
+  async playFrom(
+    playerId: string,
+    items: QueueItem[],
+    startIndex: number | null | undefined,
+    baseUrl: string,
+  ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
-    // 随机播放模式下首曲也应随机而非固定队首。
-    const idx = mode === "shuffle" && items.length > 1 ? Math.floor(Math.random() * items.length) : startIndex;
+    const specified = typeof startIndex === "number" && Number.isInteger(startIndex) && startIndex >= 0;
+    // 未指定起点 + 随机模式 → 服务端随机（唯一的随机点）。
+    const idx = specified
+      ? (startIndex as number)
+      : mode === "shuffle" && items.length > 1
+        ? Math.floor(Math.random() * items.length)
+        : 0;
     this.setQueue(playerId, items, idx, baseUrl);
-    if (this.advancing.has(playerId)) return;
-    this.advancing.add(playerId);
-    try { await this.playCurrent(playerId, baseUrl); }
-    finally { this.advancing.delete(playerId); }
+    if (!this.advancing.has(playerId)) {
+      this.advancing.add(playerId);
+      try { await this.playCurrent(playerId, baseUrl); }
+      finally { this.advancing.delete(playerId); }
+    }
+    // 返回**实际起播下标**（可能是服务端随机的），供路由如实回执。
+    return this.queues.get(playerId)?.currentIndex ?? idx;
   }
 
   /** 用户从媒体库点某首歌 → 加入队列后"跳播"到该曲。即使处于随机模式也严格尊重
    *  指定索引(随机只作用于后续自动续播,显式"播这首歌"不应被随机化)。
-   *  与 playFrom 的区别:playFrom 在 shuffle 下会随机挑首起播,本方法跳到 index。 */
+   *  与 playFrom 的区别:playFrom 是**整队替换**并定位到起点,本方法只移动游标。 */
   async jumpTo(playerId: string, index: number, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId);
@@ -535,6 +568,9 @@ export class QueueController extends EventEmitter {
       playMode: q?.playMode || "shuffle",
       isActive: q?.isActive || false,
       ended: q?.ended || false,
+      // 权威洗牌序列随快照下发,客户端只做镜像(见 QueueSnapshot 文档)。
+      shuffleOrder: q?.shuffleOrder || [],
+      shufflePos: q?.shufflePos ?? -1,
     };
   }
 
