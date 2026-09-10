@@ -161,6 +161,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.renderer.announcing": "该播放器正在播报中",
     "errors.renderer.invalidTypeId": "无效的 {type} id",
     "errors.renderer.noPlayableSongs": "「{name}」没有可播放的歌曲",
+    "errors.renderer.songNotInContent": "指定的歌曲不在该 {type} 中",
 
     "errors.group.notFound": "组不存在",
     "errors.group.notFoundOrNoPerm": "组不存在或无权限",
@@ -326,6 +327,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.renderer.announcing": "This player is currently announcing",
     "errors.renderer.invalidTypeId": "Invalid {type} id",
     "errors.renderer.noPlayableSongs": "{name} has no playable songs",
+    "errors.renderer.songNotInContent": "The specified song is not in this {type}",
 
     "errors.group.notFound": "Group not found",
     "errors.group.notFoundOrNoPerm": "Group not found or no permission",

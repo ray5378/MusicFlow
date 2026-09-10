@@ -3374,14 +3374,23 @@ apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
 });
 
 // ==================== 统一内容点播(webhook / 外部 API) ====================
-// POST /v1/play { peerId, type: song|playlist|artist|album|genre, id, startIndex?, playMode?, enqueue? }
+// POST /v1/play { peerId, type: song|playlist|artist|album|genre, id, songId?, startIndex?, playMode?, enqueue? }
 // 服务器端把内容 ID 解析成歌曲队列并投递到指定播放器:
 //   - dlna / group → 直接开始播放(后端控制音频,无需浏览器)
 //   - local → 注入队列(音频仍由 Web 客户端 Howl 驱动)
+//
+// **起点定位：优先 songId，其次 startIndex**（遥控器语义）。
+// 调用方（客户端/HA 集成）只需告诉我们「播这个歌单里的这首歌」，不必先知道歌单
+// 里有哪些歌、更不该自己算行号：
+//   - songId 是**身份**，服务端在解析出的队列里 findIndex 定位，与两侧顺序无关；
+//   - startIndex 是**行号**，只有两侧顺序严格同源时才等价于身份。历史上
+//     resolveContentSongs('playlist') 缺 ORDER BY、以及悬空 songId 被静默过滤，
+//     都会让行号漂移 → 静默播错歌；且 startIndex 越界会静默归 0，不给任何提示。
+// 故新调用方一律传 songId；startIndex 保留给 Web 前端与 HA 集成的存量调用方。
 
 apiRoutes.post("/v1/play", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
-  const { peerId, type, id, startIndex, playMode, enqueue } = body || {};
+  const { peerId, type, id, songId, startIndex, playMode, enqueue } = body || {};
   if (typeof peerId !== "string" || typeof type !== "string" || typeof id !== "string") {
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.needPeerTypeId"), 400);
   }
@@ -3396,7 +3405,19 @@ apiRoutes.post("/v1/play", async (c) => {
   if (!resolved) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.invalidTypeId", { type }), 404);
   const items = songsToQueueItems(resolved.rows);
   if (items.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.noPlayableSongs", { name: resolved.name }), 422);
-  const start = typeof startIndex === "number" && startIndex >= 0 && startIndex < items.length ? Math.floor(startIndex) : 0;
+  // 起点定位：优先按 songId 身份查找（与两侧排序无关）；找不到或未传时才回落
+  // startIndex 行号。songId 传了但队列里没有 → 视为调用方所指的歌不在该内容中，
+  // 明确返 404 而不是静默从头播（历史上 startIndex 越界静默归 0 掩盖了大量错位）。
+  let start = 0;
+  if (typeof songId === "string" && songId.length > 0) {
+    const idx = items.findIndex((it) => it.songId === songId);
+    if (idx < 0) {
+      return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.songNotInContent", { songId, type }), 404);
+    }
+    start = idx;
+  } else if (typeof startIndex === "number" && startIndex >= 0 && startIndex < items.length) {
+    start = Math.floor(startIndex);
+  }
   const baseUrl = getDlnaBaseUrl(c);
   if (isCastPeer(parsed)) {
     try {
@@ -3412,7 +3433,7 @@ apiRoutes.post("/v1/play", async (c) => {
     if (isCastPeer(parsed)) getQueueManager().setPlayMode(parsed.id, mode);
     else pm.localSetPlayMode(peerId, mode);
   }
-  return c.json({ success: true, peerId, type, id, name: resolved.name, queued: items.length, startIndex: enqueue ? undefined : start });
+  return c.json({ success: true, peerId, type, id, name: resolved.name, queued: items.length, startIndex: enqueue ? undefined : start, songId: enqueue ? undefined : items[start]?.songId });
 });
 
 // ==================== 音流(MusicFlow) ====================
