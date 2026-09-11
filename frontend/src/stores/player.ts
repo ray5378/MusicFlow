@@ -458,6 +458,8 @@ export const usePlayerStore = defineStore("player", () => {
     const pid = localPeerId.value;
     if (!pid || !useAuthStore().userId) return;
     const items = localQueue.value.map(songToQueueItem);
+    // 整队替换 → 服务端会重建洗牌序列(当前曲钉在序列头),本地镜像作废。
+    invalidateServerShuffle();
     api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/queue/play`, {
       items,
       startIndex: localIndex.value >= 0 ? localIndex.value : 0,
@@ -641,12 +643,28 @@ export const usePlayerStore = defineStore("player", () => {
       return !!s && !s.streamUrl && !probeCache.has(s.id) && idx !== localIndex.value;
     };
     if (localPlayMode.value === "shuffle") {
-      // 随机模式:从洗牌序列取接下来 3 首(精确命中实际播放顺序,不浪费探测)。
-      ensureShuffleReady();
+      // 随机模式:优先沿**服务端权威序列**取接下来 3 首(精确命中实际播放顺序)。
+      // 序列不可用时先拉一次(这里是异步路径,不阻塞播放),再回退本地洗牌序。
+      if (!serverShuffleUsable()) await refreshServerShuffle();
       let used = 0;
-      for (let i = shufflePos + 1; i < shuffleOrder.length && used < PROBE_WINDOW; i++) {
-        const s = localQueue.value[shuffleOrder[i]];
-        if (s && !s.streamUrl && !probeCache.has(s.id)) { cands.push(s.id); used++; }
+      const order = serverShuffleUsable() ? (srvShuffleOrder as number[]) : null;
+      if (order) {
+        let pos = srvShufflePos;
+        if (pos < 0 || pos >= order.length || order[pos] !== localIndex.value) {
+          pos = order.indexOf(localIndex.value);
+        }
+        if (pos >= 0) {
+          for (let i = pos + 1; i < order.length && used < PROBE_WINDOW; i++) {
+            const s = localQueue.value[order[i]];
+            if (s && !s.streamUrl && !probeCache.has(s.id)) { cands.push(s.id); used++; }
+          }
+        }
+      } else {
+        ensureShuffleReady();
+        for (let i = shufflePos + 1; i < shuffleOrder.length && used < PROBE_WINDOW; i++) {
+          const s = localQueue.value[shuffleOrder[i]];
+          if (s && !s.streamUrl && !probeCache.has(s.id)) { cands.push(s.id); used++; }
+        }
       }
       // 序列剩余不足 3 首:为下一轮洗牌补随机未探测候选(渐进预热)。
       for (let tries = 0; tries < n && used < PROBE_WINDOW; tries++) {
@@ -738,10 +756,90 @@ export const usePlayerStore = defineStore("player", () => {
     return from; // 一圈全死 → 保持原样
   }
 
+  // ===== 服务端权威洗牌序列(2026-09-12 补齐 SPEC) =====
+  // 洗牌序列唯一权威在服务端(与投屏/客户端同一套):本机随机也读
+  // /v1/peers/:id/queue/shuffle 并沿序列推进,这样服务端预探测窗口才能精确
+  // 覆盖「接下来真正会播的歌」。拿不到(离线/未注册)→ 回退本地洗牌,语义不变。
+  let srvShuffleOrder: number[] | null = null;
+  let srvShufflePos = -1;
+  let srvShuffleFetching = false;
+
+  /** 缓存的服务端序列是否可直接使用(长度须与当前本机队列一致)。 */
+  function serverShuffleUsable(): boolean {
+    return !!srvShuffleOrder && srvShuffleOrder.length === localQueue.value.length;
+  }
+
+  /** 队列整体替换后旧序列作废(服务端也会重建),下一次推进重新拉取。 */
+  function invalidateServerShuffle(): void {
+    srvShuffleOrder = null;
+    srvShufflePos = -1;
+  }
+
+  async function refreshServerShuffle(opts?: { reshuffle?: boolean }): Promise<boolean> {
+    const pid = localPeerId.value;
+    if (!pid || !useAuthStore().userId) return false;
+    if (srvShuffleFetching) return serverShuffleUsable();
+    srvShuffleFetching = true;
+    try {
+      const base = `/rest/api/v1/peers/${encodeURIComponent(pid)}/queue`;
+      const res: any = opts?.reshuffle
+        ? await api.post(`${base}/reshuffle`)
+        : await api.get(`${base}/shuffle`);
+      const data: any = res?.data ?? res;
+      const raw = data?.shuffleOrder;
+      const order = Array.isArray(raw)
+        ? raw.filter((x: any) => Number.isInteger(x)).map((x: any) => x as number)
+        : null;
+      if (!order || order.length === 0) { invalidateServerShuffle(); return false; }
+      srvShuffleOrder = order;
+      const p = Number(data?.shufflePos);
+      srvShufflePos = Number.isInteger(p) ? p : -1;
+      return true;
+    } catch {
+      // 离线/未注册:清缓存,回退本地洗牌。
+      invalidateServerShuffle();
+      return false;
+    } finally {
+      srvShuffleFetching = false;
+    }
+  }
+
+  /** 沿服务端序列取下一首(越过已知死链)。拿不到/序列走到尾 → null(调用方回退本地)。 */
+  function pickServerShuffleNext(): number | null {
+    if (!serverShuffleUsable()) { void refreshServerShuffle(); return null; }
+    const order = srvShuffleOrder as number[];
+    const n = localQueue.value.length;
+    let pos = srvShufflePos;
+    if (pos < 0 || pos >= order.length || order[pos] !== localIndex.value) {
+      pos = order.indexOf(localIndex.value);
+    }
+    if (pos < 0) return null;
+    let p = pos + 1;
+    if (p >= order.length) {
+      // 序列尾:异步重洗,本次先回退本地洗牌(下次推进即吃到新序列)。
+      void refreshServerShuffle({ reshuffle: true });
+      return null;
+    }
+    let guard = 0;
+    while (p < order.length && isKnownUnplayableIdx(order[p]) && guard++ < order.length) p++;
+    if (p >= order.length) { void refreshServerShuffle({ reshuffle: true }); return null; }
+    srvShufflePos = p;
+    const idx = order[p];
+    return idx >= 0 && idx < n ? idx : null;
+  }
+
   function localNext() {
     if (localQueue.value.length === 0) return;
     if (localPlayMode.value === "one") { startLocalPlayback(); syncLocalIndex(); return; }
     if (localPlayMode.value === "shuffle") {
+      // 服务端权威序列优先;拿不到(离线/未注册/序列换版中)才回退本地洗牌。
+      const srvIdx = pickServerShuffleNext();
+      if (srvIdx !== null) {
+        localIndex.value = srvIdx;
+        startLocalPlayback();
+        syncLocalIndex();
+        return;
+      }
       ensureShuffleReady();
       if (shufflePos + 1 >= shuffleOrder.length) {
         // 一轮播完(或序列为空):重新洗牌(当前曲入新序列头),从其后继续
