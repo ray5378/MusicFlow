@@ -25,6 +25,7 @@ import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest, getPluginConfig } from "../../../plugins/registry.js";
 import { passesImportGate, getImportGateConfig, type ImportGateConfig } from "./importGate.js";
 import { STREAM_FALLBACK_PLUGIN_ID } from "../../plugin/core/streamFallbackPlugin.js";
+import { findGroupRescueStream } from "./groupRescue.js";
 
 /** 读取换源兜底配置(core-stream-fallback 内置插件):enabled 总开关 + 时长容差覆写。 */
 function getFallbackConfig(): { enabled: boolean; durationTolerance: number } {
@@ -360,6 +361,8 @@ export async function resolveEmptyUrlStream(
 export async function ensurePlayableStream(
   song: { id: string; title?: string | null; artist?: string | null; album?: string | null; duration?: number | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
   timeoutMs: number = PROBE_TIMEOUT_DEFAULT_MS,
+  /** 组级救援递归深度(内部用):超过上限即不再跨行救援,防 A→B→A。 */
+  rescueDepth: number = 0,
 ): Promise<string | null> {
   if (!song?.id) return null;
   if (isPlayableFresh(song.id)) return song.url || null;
@@ -375,8 +378,12 @@ export async function ensurePlayableStream(
     return cached;
   }
 
-  // Original missing → 空直链兜底(命中回写),不再直接判死。
-  if (!song.url) return resolveEmptyUrlStream(song, timeoutMs);
+  // Original missing → 空直链兜底(命中回写),不再直接判死;也没救则组级救援。
+  if (!song.url) {
+    const empty = await resolveEmptyUrlStream(song, timeoutMs);
+    if (empty) return empty;
+    return tryGroupRescue(song, rescueDepth, timeoutMs);
+  }
 
   if ((await probe(song.url, timeoutMs)) === "ok") {
     addPlayable(song.id);
@@ -396,7 +403,33 @@ export async function ensurePlayableStream(
     updateSongUrl(song.id, fb.url, fb.source || undefined);
     return fb.url;
   }
-  return null;
+
+  // 本行自身的多源兜底也没救 → 组级换源救援(见 tryGroupRescue 注释)。
+  return tryGroupRescue(song, rescueDepth, timeoutMs);
+}
+
+/**
+ * 组级换源救援(2026-09-12):同曲多源组里兄弟行(local / webdav / 其它平台的
+ * web 行)可播时顶上,避免「本行死链、兄弟行能播」被整体判成不可播。
+ * 命中只写内存缓存(挂在原 songId 下),不回写原行 URL —— 原行 url/sourceData
+ * 参与去重指纹与展示,改了会污染曲库。
+ */
+async function tryGroupRescue(
+  song: { id: string; title?: string | null; artist?: string | null; album?: string | null; duration?: number | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
+  depth: number,
+  timeoutMs: number,
+): Promise<string | null> {
+  try {
+    const rescue = await findGroupRescueStream(song, depth, (row, nextDepth) =>
+      ensurePlayableStream(row, timeoutMs, nextDepth),
+    );
+    if (!rescue) return null;
+    addPlayable(song.id);
+    setFallback(song.id, rescue.url);
+    return rescue.url;
+  } catch {
+    return null;
+  }
 }
 
 function updateSongUrl(songId: string, url: string, streamSource?: string): void {

@@ -128,6 +128,12 @@ apiRoutes.route("/", entitySearchRoutes);
 // 5min TTL 缓存避免每次首页加载都实时打插件网络请求；失败降级返回空 channels。
 const RECOMMEND_CACHE_TTL_MS = 5 * 60_000;
 const recommendCache = new Map<string, { ts: number; channels: any[] }>();
+/**
+ * POST /v1/stream/probe 单批最大歌曲数。
+ * 原为 5(只够客户端 _probeWindow=3 用);客户端现在会在「单曲临近结束」时
+ * 补探一次窗口(见 2026-09-12 时效修复),窗口要能扩到 8~10 首,故放宽到 20。
+ */
+const MAX_PROBE_BATCH = 20;
 /** 清空平台精选缓存(供测试/管理端"立即刷新"使用)。 */
 export function clearRecommendCache(): void {
   recommendCache.clear();
@@ -1581,7 +1587,7 @@ apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
 // 提前确认下一首可播(含随机播放)。本地歌曲直接 ok(不探测);web 歌曲经
 // ensurePlayableStream 探测原源(Range bytes=0-20000,失败自动换源并写回 DB),
 // 结果按 songId 内存缓存(playableCache/fallbackCache),短时间内不重复探测。
-//   POST /v1/stream/probe  body: { songIds: string[] }(≤5)
+//   POST /v1/stream/probe  body: { songIds: string[] }(≤MAX_PROBE_BATCH=20)
 //   -> { success, results: [{ songId, ok, local?, fallback?, verdict, reason? }] }
 //
 // `verdict` 为四态(2026-09-11 新增,与预探测调度器同一套 `getCachedPlayability` 判据):
@@ -1591,7 +1597,7 @@ apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
 apiRoutes.post("/v1/stream/probe", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const songIds = Array.isArray(body.songIds)
-    ? body.songIds.filter((s: any) => typeof s === "string").slice(0, 5)
+    ? body.songIds.filter((s: any) => typeof s === "string").slice(0, MAX_PROBE_BATCH)
     : [];
   if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.songIdsRequired"));
   const results = await Promise.all(songIds.map(async (id: string) => {
