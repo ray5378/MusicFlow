@@ -92,16 +92,26 @@ function defaultStreamProviderId(songPluginEntry?: string | null): string {
 
 // songId -> 换源结果。url=命中 URL / null=无替代源；at=写入时间；ttlMs=有效期
 // (负结果与网络异常两种)；transient=true 表示"这是网络异常，不是判定不可播"。
-type FallbackEntry = { url: string | null; at: number; ttlMs: number; transient: boolean };
+type FallbackEntry = {
+  url: string | null; at: number; ttlMs: number; transient: boolean;
+  /** 组级救援结果:只作「本次出流用哪条链」的记忆,**不得回写进 songs.url**
+   *  (救援 URL 可能是内部 /rest/stream?id=<兄弟行>,回写会污染去重指纹与展示)。 */
+  noPersist?: boolean;
+};
 const fallbackCache = new Map<string, FallbackEntry>();
 
-function setFallback(key: string, url: string | null, opts?: { transient?: boolean }) {
+function setFallback(
+  key: string,
+  url: string | null,
+  opts?: { transient?: boolean; ttlMs?: number; noPersist?: boolean },
+) {
   const transient = opts?.transient === true;
   fallbackCache.set(key, {
     url,
     at: Date.now(),
-    ttlMs: transient ? transientBackoffMs : negativeTtlMs,
+    ttlMs: opts?.ttlMs ?? (transient ? transientBackoffMs : negativeTtlMs),
     transient,
+    noPersist: opts?.noPersist === true,
   });
   if (fallbackCache.size > FALLBACK_CACHE_MAX) {
     const oldest = fallbackCache.keys().next().value;
@@ -370,10 +380,15 @@ export async function ensurePlayableStream(
   if (cachedEntry) {
     const cached = cachedEntry.url;
     if (cached) {
-      addPlayable(song.id);
+      // 组级救援结果**不标可播**:addPlayable 会让后续调用在首行走
+      // isPlayableFresh 直接返回原(死)链,救援就白做了。
+      if (!cachedEntry.noPersist) addPlayable(song.id);
       // Persist the previously-discovered replacement URL if the song still
       // carries the failing original (keeps /rest/stream fast on later plays).
-      if (song.url && cached !== song.url) updateSongUrl(song.id, cached);
+      // 救援 URL 例外(见 FallbackEntry.noPersist)。
+      if (song.url && cached !== song.url && !cachedEntry.noPersist) {
+        updateSongUrl(song.id, cached);
+      }
     }
     return cached;
   }
@@ -424,8 +439,9 @@ async function tryGroupRescue(
       ensurePlayableStream(row, timeoutMs, nextDepth),
     );
     if (!rescue) return null;
-    addPlayable(song.id);
-    setFallback(song.id, rescue.url);
+    // 只写「本次出流用哪条链」的记忆(正结果 TTL),**不标可播、不回写原行**:
+    // 标可播会让下次调用在首行直接返回原死链;回写会污染去重指纹与展示。
+    setFallback(song.id, rescue.url, { ttlMs: playableTtlMs, noPersist: true });
     return rescue.url;
   } catch {
     return null;
