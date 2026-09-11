@@ -98,6 +98,8 @@ networks: {}
 | [插件架构](docs/PLUGIN_ARCHITECTURE.md) | 想了解插件化设计的人 |
 | [插件开发](docs/PLUGIN_DEV.md) | 想写插件的开发者 |
 | [API 参考](docs/API.md) | 对接集成的开发者 |
+| [服务端预探测](docs/PRE_PROBE.md) | 想了解「三条链路共用一套判活/跳源」的人 |
+| [播放换源](docs/SOURCE_SWAP.md) | 想了解多源自动替换匹配规则的人 |
 | [开发指南](docs/DEVELOPER.md) | 扩展/修改本项目的开发者 |
 | [贡献指南](CONTRIBUTING.md) | 想提交代码的开发者 |
 | [插件市场仓库](https://github.com/ray5378/MusicFlow-plugins) | 想发布插件的人 |

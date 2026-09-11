@@ -68,9 +68,10 @@ export class QueueController extends EventEmitter {
     this.setMaxListeners(50);
     // 预探测状态变化 → 用既有的 queue_changed 重发一次快照即可,
     // **不新增事件类型**(快照里带 preProbe,两个下发通道都是展开语法,自动透传)。
-    getPreProbeScheduler().onChange = (id: string) => {
+    // 多监听:PeerManager 也会注册一份(本机链路走 peer_queue_changed),互不顶替。
+    getPreProbeScheduler().addOnChange((id: string) => {
       this.emit("queue_changed", id, this.snapshot(id));
-    };
+    });
   }
 
   /** 触发一次预探测(fire-and-forget;调度器内部做防抖/冷却/合并)。 */
@@ -341,6 +342,22 @@ export class QueueController extends EventEmitter {
     if (q.shuffleLen !== q.items.length) this.rebuildShuffle(q, { keepCurrent: true });
   }
 
+  /**
+   * 触发预探测前的洗牌序就绪(2026-09-11 修复)。
+   *
+   * `peekUpcomingPositions` 的 shuffle 分支依赖 `shuffleOrder`,而它此前**只在
+   * 「真的推进」(shuffleNextIndex)时才惰性重建**。于是那些「改队列/改模式后立即
+   * 触发预探测」的路径(enqueue / setPlayMode / removeAt)会拿着空或过期的序列去扫
+   * → shuffle 模式下 lookahead 静默扫 0 个位置。
+   *
+   * 实测(同一台设备、同为 shuffle):`queue/play`(playFrom→setQueue 已物化序列)
+   * 扫 4 个位置;`queue/enqueue`(从不物化)扫 0 个。修复即把既有的惰性重建提前到
+   * 被预探测看见的时刻 —— 不引入新的洗牌语义,重建结果与 shuffleNextIndex 一致。
+   */
+  private ensureShuffleForLookahead(q: QueueData): void {
+    if (q.playMode === "shuffle") this.ensureShuffleReady(q);
+  }
+
   /** 洗牌序下一首:沿序列前进,播完一轮自动重洗;无可播返回 -1。 */
   private shuffleNextIndex(q: QueueData): number {
     this.ensureShuffleReady(q);
@@ -596,6 +613,9 @@ export class QueueController extends EventEmitter {
     playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     q.playMode = mode;
+    // 切到 shuffle 时旧序列可能为空/过期(此前只在推进时惰性重建)→ 先物化,
+    // 否则紧随其后的预探测在 shuffle 分支拿空序列扫 0 个位置。
+    this.ensureShuffleForLookahead(q);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     // 改播放模式 → 窗口位置整体重算。**重算 ≠ 重探**:已探过的曲直接复用缓存,
@@ -701,6 +721,8 @@ export class QueueController extends EventEmitter {
       q.ended = false;
       await this.playCurrent(playerId, baseUrl);
     }
+    // 长度变了 → 洗牌序失效;预探测前先物化,否则 shuffle 下 lookahead 扫 0 个位置。
+    this.ensureShuffleForLookahead(q);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     this.schedulePreProbe(playerId);
@@ -729,6 +751,8 @@ export class QueueController extends EventEmitter {
       }
       this.playCurrent(playerId, baseUrl).catch(() => {});
     }
+    // 长度变了 → 洗牌序失效;预探测前先物化。
+    this.ensureShuffleForLookahead(q);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     this.schedulePreProbe(playerId);
@@ -744,6 +768,9 @@ export class QueueController extends EventEmitter {
     q.items.splice(to, 0, moved);
     // 当前播放曲目跟随移动(对象引用定位新下标)
     q.currentIndex = q.items.indexOf(moved);
+    // 长度未变,但「下标 → 歌曲」的映射变了:旧序列现在指向别的歌。
+    // 长度检查(ensureShuffleReady)看不出这种变化,故显式重建(保留当前曲在序列头)。
+    if (q.playMode === "shuffle") this.rebuildShuffle(q, { keepCurrent: true });
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     this.schedulePreProbe(playerId);

@@ -32,7 +32,7 @@ import { formatDailyTime, rearmDailyScheduler } from "../../services/dailySchedu
 import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
-import { ensurePlayableStream } from "../../services/source/online/streamFallback.js";
+import { ensurePlayableStream, getCachedPlayability } from "../../services/source/online/streamFallback.js";
 import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
@@ -1581,7 +1581,12 @@ apiRoutes.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
 // ensurePlayableStream 探测原源(Range bytes=0-20000,失败自动换源并写回 DB),
 // 结果按 songId 内存缓存(playableCache/fallbackCache),短时间内不重复探测。
 //   POST /v1/stream/probe  body: { songIds: string[] }(≤5)
-//   -> { success, results: [{ songId, ok, local?, fallback?, reason? }] }
+//   -> { success, results: [{ songId, ok, local?, fallback?, verdict, reason? }] }
+//
+// `verdict` 为四态(2026-09-11 新增,与预探测调度器同一套 `getCachedPlayability` 判据):
+//   playable | unplayable | transient | unknown
+// 客户端**只应在 verdict==="unplayable" 时预跳**;transient(网络抖动)/unknown(未探过)
+// 必须照常播放,由播放失败兜底。`ok` 字段保留(向后兼容旧客户端)。
 apiRoutes.post("/v1/stream/probe", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const songIds = Array.isArray(body.songIds)
@@ -1590,18 +1595,29 @@ apiRoutes.post("/v1/stream/probe", async (c) => {
   if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.songIdsRequired"));
   const results = await Promise.all(songIds.map(async (id: string) => {
     const song = db.select().from(songs).where(eq(songs.id, id)).get();
-    if (!song) return { songId: id, ok: false, local: false, reason: "歌曲不存在" };
+    if (!song) return { songId: id, ok: false, local: false, verdict: "unplayable" as const, reason: "歌曲不存在" };
     // 本地歌曲(或已缓存文件的 web 歌曲):无需探测。
     // 注意 web 行不再按「无 url」误判为本地——纯核实源(huawei-chart 等)导入的
     // 歌曲就是空直链,须走 ensurePlayableStream 兜底解析(内部已处理空 url)。
-    if ((song.type || "local") !== "web" || song.cachePath) return { songId: id, ok: true, local: true };
+    if ((song.type || "local") !== "web" || song.cachePath) {
+      return { songId: id, ok: true, local: true, verdict: "playable" as const };
+    }
     const original = song.url;
     try {
       const url = await ensurePlayableStream(song as any);
-      if (url) return { songId: id, ok: true, local: false, fallback: url !== original };
-      return { songId: id, ok: false, local: false, reason: "无可用音源" };
+      if (url) return { songId: id, ok: true, local: false, verdict: "playable" as const, fallback: url !== original };
+      // 返 null 必须再分「全平台无源」与「网络抖动」——把后者当死链跳掉是事故。
+      const cached = getCachedPlayability(id);
+      const verdict = cached === "unplayable" ? "unplayable" as const
+        : cached === "playable" ? "playable" as const
+          : cached === "transient" ? "transient" as const
+            : "unknown" as const;
+      return {
+        songId: id, ok: false, local: false, verdict,
+        reason: verdict === "unplayable" ? "无可用音源" : "探测未定(网络异常,不据此跳过)",
+      };
     } catch (e: any) {
-      return { songId: id, ok: false, local: false, reason: String(e?.message || e).slice(0, 120) };
+      return { songId: id, ok: false, local: false, verdict: "transient" as const, reason: String(e?.message || e).slice(0, 120) };
     }
   }));
   return c.json({ success: true, results });

@@ -9,6 +9,13 @@ import { coverUrl } from "@/utils/cover";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import { gt } from "@/locales";
 
+/**
+ * 服务端可播性四态判定(2026-09-11,/rest/api/v1/stream/probe 的 verdict)。
+ * 与后端 `getCachedPlayability` 同一套判据 —— 只有 "unplayable" 才允许预跳,
+ * "transient"(网络抖动) 与 "unknown"(未探过) 必须照常播放。
+ */
+export type ProbeVerdict = "playable" | "unplayable" | "transient" | "unknown";
+
 export interface Song {
   id: string;
   title: string;
@@ -192,6 +199,9 @@ export const usePlayerStore = defineStore("player", () => {
   const localLyrics = ref<LyricLine[]>([]);
   const localCurrentLyricLine = ref("");
   const localCurrentLyricIndex = ref(-1);
+  // 本机链路的服务端预探测状态位(2026-09-11):随 local 队列快照 / WS 透传。
+  // 与投屏远端共用同一份右上角轻提示(activePreProbe 在非远端时回落到它)。
+  const localPreProbe = ref<{ ready: number; scanned: number; misses: number; exhausted: boolean; cooldownUntil: number | null; at: number } | null>(null);
   let howl: Howl | null = null;
 
   // ==================== Unified peer system (core refs, declared early) ====================
@@ -326,9 +336,12 @@ export const usePlayerStore = defineStore("player", () => {
     return st && st.kind === "dlna" ? st.name : "";
   });
 
-  // 预探测状态(当前活跃远端 peer)。null = 本机播放 / 无状态。
-  const activePreProbe = computed(() => activeRemote.value?.preProbe ?? null);
-  const activePreProbePeerName = computed(() => activeRemote.value?.name ?? "");
+  // 预探测状态(当前活跃 peer)。投屏远端读其 RemoteState,本机播放读 localPreProbe
+  // —— 服务端现在同样为本机队列跑预探测,提示(含大面积无源)在本机也生效。
+  const activePreProbe = computed(() => isRemotePeer.value ? (activeRemote.value?.preProbe ?? null) : localPreProbe.value);
+  const activePreProbePeerName = computed(() =>
+    isRemotePeer.value ? (activeRemote.value?.name ?? "")
+      : (activePreProbe.value ? gt("player.localPeer") : ""));
 
   // ==================== Unified peer system (rest) ====================
   const peers = ref<any[]>([]);
@@ -582,14 +595,25 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  // ===== 播放前外部音源预探测 =====
-  // 前端无法预知哪些歌是外部音源(Song 无 url 字段),故对「接下来可能播放的 3 首」
-  // 无脑批量探测,后端对本地歌曲直接返回 ok:true(零开销)、对 web 歌曲做轻量
-  // Range 探测并自动换源写回 —— 探测的价值在于「提前治愈」(服务端把失效链接
-  // 换成可用源并持久化),而不是预先跳歌;播不出的歌由播放失败兜底无限跳。
-  const probeCache = new Map<string, boolean>(); // songId -> 可用性(session 内,重启失效)
+  // ===== 播放前外部音源预探测(服务端裁决)=====
+  //
+  // 前端无法预知哪些歌是外部音源(Song 无 url 字段),故把「接下来可能播放的 3 首」
+  // 的 songId 上报服务端取判定。服务端对本地歌曲零开销直返 playable,对 web 歌曲
+  // 走 `ensurePlayableStream`(Range 探测 + 自动换源写回 DB),返回**四态判定**:
+  //   playable / unplayable / transient / unknown
+  //
+  // 判定即「服务端预探测」的成果(与投屏链路共用同一份缓存与判据)。本机播放的
+  // 跳过决策按服务端判定执行:**只在 unplayable 时预跳**;transient(网络抖动)与
+  // unknown(未探过)一律照常播放,由播放失败兜底无限跳。
+  const probeCache = new Map<string, ProbeVerdict>(); // songId -> 服务端判定(session 内)
   let probing = false;
   const PROBE_WINDOW = 3;
+
+  /** 服务端已明确判定「不可播」→ 允许预跳。transient/unknown 绝不预跳。 */
+  function isKnownUnplayableIdx(idx: number): boolean {
+    const s = localQueue.value[idx];
+    return !!s && probeCache.get(s.id) === "unplayable";
+  }
 
   async function probeUpcoming() {
     if (probing || localQueue.value.length === 0) return;
@@ -631,9 +655,12 @@ export const usePlayerStore = defineStore("player", () => {
       const res = await api.post("/rest/api/v1/stream/probe", { songIds: cands });
       const results = res.data?.results || [];
       for (const r of results) {
-        probeCache.set(r.songId, !!r.ok);
-        if (!r.ok) {
-          console.warn(`[player] Pre-probe unplayable (will rely on runtime skip/heal): ${r.songId} (${r.reason || "no available source"})`);
+        const verdict: ProbeVerdict = (r.verdict as ProbeVerdict) || (r.ok ? "playable" : "unknown");
+        // 只固化「确定」的两态;transient/unknown 不写缓存 → 下次推进仍会重问,
+        // 网络恢复后自动复活(与后端 TTL 语义一致)。
+        if (verdict === "playable" || verdict === "unplayable") probeCache.set(r.songId, verdict);
+        if (verdict === "unplayable") {
+          console.warn(`[player] Pre-probe unplayable → 预跳: ${r.songId} (${r.reason || "no available source"})`);
         }
       }
     } catch {
@@ -678,6 +705,24 @@ export const usePlayerStore = defineStore("player", () => {
     if (shuffleLen !== localQueue.value.length) rebuildShuffle({ keepCurrent: true });
   }
 
+  /** 顺序/all 推进时越过「服务端已判定不可播」的歌,返回实际落点下标。
+   *  绕一圈仍全是死源 → 原地返回(不静默空转,交播放失败兜底)。 */
+  function skipKnownUnplayableOrder(from: number): number {
+    const n = localQueue.value.length;
+    if (n === 0 || from < 0 || from >= n) return from;
+    const wrap = localPlayMode.value === "all";
+    let idx = from;
+    for (let steps = 0; steps < n; steps++) {
+      if (!isKnownUnplayableIdx(idx)) return idx;
+      idx++;
+      if (idx >= n) {
+        if (!wrap) return from; // 不绕回:到头即止
+        idx = 0;
+      }
+    }
+    return from; // 一圈全死 → 保持原样
+  }
+
   function localNext() {
     if (localQueue.value.length === 0) return;
     if (localPlayMode.value === "one") { startLocalPlayback(); syncLocalIndex(); return; }
@@ -692,14 +737,22 @@ export const usePlayerStore = defineStore("player", () => {
       } else {
         shufflePos++;
       }
+      // 服务端判定不可播 → 沿序列继续前进(不改序列语义,只移动指针);
+      // 一轮到底仍不可播则停在下一首,交播放失败兜底。
+      for (let guard = 0; guard < shuffleOrder.length && isKnownUnplayableIdx(shuffleOrder[shufflePos]); guard++) {
+        if (shufflePos + 1 >= shuffleOrder.length) break;
+        shufflePos++;
+      }
       localIndex.value = shuffleOrder[shufflePos];
       startLocalPlayback();
       syncLocalIndex();
       return;
     }
-    if (localIndex.value < localQueue.value.length - 1) localIndex.value++;
-    else if (localPlayMode.value === "all") localIndex.value = 0;
-    else { localIsPlaying.value = false; syncLocalIndex(); return; }
+    const nextIdx = localIndex.value < localQueue.value.length - 1 ? localIndex.value + 1
+      : localPlayMode.value === "all" ? 0 : -1;
+    if (nextIdx < 0) { localIsPlaying.value = false; syncLocalIndex(); return; }
+    // 服务端裁决:排在后面且判定不可播的,推进时直接越过(仍有失败兜底)。
+    localIndex.value = skipKnownUnplayableOrder(nextIdx);
     startLocalPlayback();
     syncLocalIndex();
   }
@@ -1492,6 +1545,7 @@ export const usePlayerStore = defineStore("player", () => {
           localPlayMode.value = snap.playMode as PlayMode;
           localStorage.setItem("playMode", localPlayMode.value);
         }
+        localPreProbe.value = snap.preProbe ?? null;
         const song = localQueue.value[localIndex.value];
         if (song) loadLocalLyrics(song);
       }
@@ -1568,6 +1622,8 @@ export const usePlayerStore = defineStore("player", () => {
           // 预探测状态位透传 → 右上角轻提示实时跟随(含枯竭/恢复)。
           const pst = remoteStates.get(msg.peer_id);
           if (pst) pst.preProbe = msg.queue?.preProbe ?? null;
+          // 本机 peer:状态位存 localPreProbe(本机链路也吃服务端预探测)。
+          if (msg.peer_id === localPeerId.value) localPreProbe.value = msg.queue?.preProbe ?? null;
           break;
         }
         case "peer_queue_cleared": {

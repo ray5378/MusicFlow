@@ -35,6 +35,7 @@ import { getEventManager } from "./dlna/eventing.js";
 import { getGroupManager } from "./group/index.js";
 import { createLogger } from "../utils/logger.js";
 import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
+import { getPreProbeScheduler, type QueuePeekSource } from "./player/preProbeScheduler.js";
 
 const log = createLogger("peer");
 export type PeerKind = "local" | "dlna" | "group" | "airplay";
@@ -64,6 +65,13 @@ class PeerManager extends EventEmitter {
   constructor() {
     super();
     this.setMaxListeners(50);
+    // 预探测状态变化 → 本机链路用 peer_queue_changed 重发快照(快照里带 preProbe),
+    // 与 QueueController 的 queue_changed 通道互不干扰(调度器已支持多监听)。
+    // 只处理 local: 键 —— 投屏/组的键由 QueueController 自己广播。
+    getPreProbeScheduler().addOnChange((id: string) => {
+      if (!id.startsWith("local:")) return;
+      this.emit("peer_queue_changed", id, this.getQueueSnapshot(id));
+    });
   }
 
   /** Start the periodic inactivity cleanup. Call once at boot. */
@@ -366,8 +374,11 @@ class PeerManager extends EventEmitter {
       return getQueueManager().snapshot(parsed.id);
     }
     // local
+    // 预探测状态位随快照下发(与投屏链路同款):本机 Web/Flutter 据此显示
+    // 「大面积无源」提示,并可在推进前查判定结果(客户端仍保留失败兜底)。
+    const pp = getPreProbeScheduler().status(peerId);
     const row = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
-    if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false };
+    if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, preProbe: pp };
     try {
       return {
         items: JSON.parse(row.itemsJson || "[]") as QueueItem[],
@@ -375,10 +386,44 @@ class PeerManager extends EventEmitter {
         playMode: (row.playMode as PlayMode) || "order",
         isActive: !!row.isActive,
         ended: false,
+        preProbe: pp,
       };
     } catch {
-      return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false };
+      return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, preProbe: pp };
     }
+  }
+
+  // ==================== Local pre-probe (本机链路的服务端预探测)====================
+  //
+  // 让本机(Web / Flutter)队列也驱动服务端预探测调度器,和投屏链路共用同一颗大脑:
+  // 队列一变就向前扫描,把「已确认可播 / 明确不可播」的判定写进共享缓存,客户端
+  // 切歌时(经 /v1/stream/probe)零成本命中,坏源直接跳过。
+  //
+  // 本机队列**没有服务端洗牌序**(随机播放的顺序由客户端持有,见 SPEC:纯离线队列
+  // 由客户端洗牌),故 shuffle 模式下 peekUpcomingPositions 取不到位置流 —— 这是
+  // 有意为之:随机模式由客户端上报候选歌 id 走 /v1/stream/probe 取判定。order/all
+  // 模式下服务端按下标预扫,效果与投屏链路一致。
+
+  /** 从 local_queues 行构造只读 peek 源;无行/解析失败 → undefined(不扫)。 */
+  private localPeekSource(peerId: string): QueuePeekSource | undefined {
+    const row = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
+    if (!row) return undefined;
+    let items: QueueItem[];
+    try {
+      items = JSON.parse(row.itemsJson || "[]") as QueueItem[];
+    } catch {
+      return undefined;
+    }
+    return {
+      items: items.map(i => ({ songId: i.songId, duration: i.duration })),
+      currentIndex: row.currentIndex,
+      playMode: (row.playMode as PlayMode) || "order",
+    };
+  }
+
+  /** 本机队列变动后触发一次预探测(fire-and-forget;调度器内部做防抖/冷却/合并)。 */
+  private scheduleLocalPreProbe(peerId: string): void {
+    getPreProbeScheduler().schedule(peerId, () => this.localPeekSource(peerId));
   }
 
   // ----- Local queue CRUD (dlna queues are owned by queue.ts) -----
@@ -408,6 +453,7 @@ class PeerManager extends EventEmitter {
         },
       })
       .run();
+    this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -440,6 +486,7 @@ class PeerManager extends EventEmitter {
         },
       })
       .run();
+    this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -462,6 +509,7 @@ class PeerManager extends EventEmitter {
       lastActiveAt: now,
       updatedAt: now,
     }).where(eq(localQueues.peerId, peerId)).run();
+    this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -484,6 +532,7 @@ class PeerManager extends EventEmitter {
       lastActiveAt: now,
       updatedAt: now,
     }).where(eq(localQueues.peerId, peerId)).run();
+    this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -497,6 +546,8 @@ class PeerManager extends EventEmitter {
       lastActiveAt: now,
       updatedAt: now,
     }).where(eq(localQueues.peerId, peerId)).run();
+    // 队列清空 → 预探测状态一并清掉(否则快照还带着已失效的 exhausted 提示)。
+    getPreProbeScheduler().clear(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -507,14 +558,18 @@ class PeerManager extends EventEmitter {
     const existing = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
     if (!existing) return;
     db.update(localQueues).set({ playMode: mode, updatedAt: now }).where(eq(localQueues.peerId, peerId)).run();
+    // 播放模式变化 → 预探测窗口位置整体重算(已探过的曲复用缓存,只补缺口)。
+    this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
-  /** Update currentIndex for a local peer (Web client reports track change). */
+  /** Update currentIndex for a local peer (Web client reports track change).
+   *  游标一动 = 预探测窗口整体前移 → 重新扫描(滑动缓冲的「头随播放消费」)。 */
   localSetIndex(peerId: string, index: number): void {
     const now = new Date().toISOString();
     db.update(localQueues).set({ currentIndex: index, lastActiveAt: now, updatedAt: now })
       .where(eq(localQueues.peerId, peerId)).run();
+    this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 

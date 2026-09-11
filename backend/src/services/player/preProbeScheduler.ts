@@ -124,10 +124,32 @@ export function peekUpcomingPositions(
 }
 
 export class PreProbeScheduler {
-  /** 状态变化回调(由 QueueController 注入 → emit queue_changed)。 */
-  onChange: ((playerId: string) => void) | null = null;
+  /**
+   * 状态变化订阅者(2026-09-11 起为**多监听**)。
+   *
+   * 此前是单回调属性 `onChange`,只能挂一份 —— 而预探测现在同时服务两条独立链路:
+   *   - QueueController(投屏/DLNA/组):状态变化 → emit `queue_changed`(裸 deviceId 键);
+   *   - PeerManager(本机 Web/Flutter):状态变化 → emit `peer_queue_changed`(local: 键)。
+   * 单回调会让后注册者把先注册者顶掉(投屏或本机之一静默失效),故改 Set。
+   */
+  private changeHandlers = new Set<(playerId: string) => void>();
   /** 单次扫描完成回调(守卫测试用它精确等待扫描结束;也可用于将来看门狗)。 */
   onScanComplete: ((playerId: string) => void) | null = null;
+
+  /** 注册状态变化监听;返回取消函数。 */
+  addOnChange(fn: (playerId: string) => void): () => void {
+    this.changeHandlers.add(fn);
+    return () => { this.changeHandlers.delete(fn); };
+  }
+
+  /** 广播状态变化;单个订阅者抛错不影响其它订阅者与扫描流程。 */
+  private notifyChange(playerId: string): void {
+    for (const fn of this.changeHandlers) {
+      try { fn(playerId); } catch (e: any) {
+        log.warn(`[PreProbe] ${playerId}: onChange 订阅者异常: ${e?.message || e}`);
+      }
+    }
+  }
 
   private statuses = new Map<string, PreProbeStatus>();
   /** 同曲冷却:两次**真实探测**的最小间隔(songId → ms)。 */
@@ -190,7 +212,7 @@ export class PreProbeScheduler {
       at: now,
     });
     log.warn(`[PreProbe] ${playerId}: 整队无源,已停止推进并上报`);
-    this.onChange?.(playerId);
+    this.notifyChange(playerId);
   }
 
   /** 队列清空/设备注销时清状态(冷却与同曲记录保留,那是全局的)。
@@ -334,7 +356,7 @@ export class PreProbeScheduler {
       prev.scanned !== scanned ||
       prev.misses !== maxDeadRun ||
       prev.exhausted !== exhausted;
-    if (changed) this.onChange?.(playerId);
+    if (changed) this.notifyChange(playerId);
   }
 
   /**
