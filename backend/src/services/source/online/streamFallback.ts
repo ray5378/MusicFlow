@@ -25,7 +25,6 @@ import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest, getPluginConfig } from "../../../plugins/registry.js";
 import { passesImportGate, getImportGateConfig, type ImportGateConfig } from "./importGate.js";
 import { STREAM_FALLBACK_PLUGIN_ID } from "../../plugin/core/streamFallbackPlugin.js";
-import { findGroupRescueStream } from "./groupRescue.js";
 
 /** 读取换源兜底配置(core-stream-fallback 内置插件):enabled 总开关 + 时长容差覆写。 */
 function getFallbackConfig(): { enabled: boolean; durationTolerance: number } {
@@ -92,26 +91,16 @@ function defaultStreamProviderId(songPluginEntry?: string | null): string {
 
 // songId -> 换源结果。url=命中 URL / null=无替代源；at=写入时间；ttlMs=有效期
 // (负结果与网络异常两种)；transient=true 表示"这是网络异常，不是判定不可播"。
-type FallbackEntry = {
-  url: string | null; at: number; ttlMs: number; transient: boolean;
-  /** 组级救援结果:只作「本次出流用哪条链」的记忆,**不得回写进 songs.url**
-   *  (救援 URL 可能是内部 /rest/stream?id=<兄弟行>,回写会污染去重指纹与展示)。 */
-  noPersist?: boolean;
-};
+type FallbackEntry = { url: string | null; at: number; ttlMs: number; transient: boolean };
 const fallbackCache = new Map<string, FallbackEntry>();
 
-function setFallback(
-  key: string,
-  url: string | null,
-  opts?: { transient?: boolean; ttlMs?: number; noPersist?: boolean },
-) {
+function setFallback(key: string, url: string | null, opts?: { transient?: boolean; ttlMs?: number }) {
   const transient = opts?.transient === true;
   fallbackCache.set(key, {
     url,
     at: Date.now(),
     ttlMs: opts?.ttlMs ?? (transient ? transientBackoffMs : negativeTtlMs),
     transient,
-    noPersist: opts?.noPersist === true,
   });
   if (fallbackCache.size > FALLBACK_CACHE_MAX) {
     const oldest = fallbackCache.keys().next().value;
@@ -371,8 +360,6 @@ export async function resolveEmptyUrlStream(
 export async function ensurePlayableStream(
   song: { id: string; title?: string | null; artist?: string | null; album?: string | null; duration?: number | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
   timeoutMs: number = PROBE_TIMEOUT_DEFAULT_MS,
-  /** 组级救援递归深度(内部用):超过上限即不再跨行救援,防 A→B→A。 */
-  rescueDepth: number = 0,
 ): Promise<string | null> {
   if (!song?.id) return null;
   if (isPlayableFresh(song.id)) return song.url || null;
@@ -380,25 +367,16 @@ export async function ensurePlayableStream(
   if (cachedEntry) {
     const cached = cachedEntry.url;
     if (cached) {
-      // 组级救援结果**不标可播**:addPlayable 会让后续调用在首行走
-      // isPlayableFresh 直接返回原(死)链,救援就白做了。
-      if (!cachedEntry.noPersist) addPlayable(song.id);
+      addPlayable(song.id);
       // Persist the previously-discovered replacement URL if the song still
       // carries the failing original (keeps /rest/stream fast on later plays).
-      // 救援 URL 例外(见 FallbackEntry.noPersist)。
-      if (song.url && cached !== song.url && !cachedEntry.noPersist) {
-        updateSongUrl(song.id, cached);
-      }
+      if (song.url && cached !== song.url) updateSongUrl(song.id, cached);
     }
     return cached;
   }
 
-  // Original missing → 空直链兜底(命中回写),不再直接判死;也没救则组级救援。
-  if (!song.url) {
-    const empty = await resolveEmptyUrlStream(song, timeoutMs);
-    if (empty) return empty;
-    return tryGroupRescue(song, rescueDepth, timeoutMs);
-  }
+  // Original missing → 空直链兜底(命中回写),不再直接判死。
+  if (!song.url) return resolveEmptyUrlStream(song, timeoutMs);
 
   if ((await probe(song.url, timeoutMs)) === "ok") {
     addPlayable(song.id);
@@ -419,33 +397,7 @@ export async function ensurePlayableStream(
     return fb.url;
   }
 
-  // 本行自身的多源兜底也没救 → 组级换源救援(见 tryGroupRescue 注释)。
-  return tryGroupRescue(song, rescueDepth, timeoutMs);
-}
-
-/**
- * 组级换源救援(2026-09-12):同曲多源组里兄弟行(local / webdav / 其它平台的
- * web 行)可播时顶上,避免「本行死链、兄弟行能播」被整体判成不可播。
- * 命中只写内存缓存(挂在原 songId 下),不回写原行 URL —— 原行 url/sourceData
- * 参与去重指纹与展示,改了会污染曲库。
- */
-async function tryGroupRescue(
-  song: { id: string; title?: string | null; artist?: string | null; album?: string | null; duration?: number | null; url?: string | null; pluginEntry?: string | null; sourceData?: string | null },
-  depth: number,
-  timeoutMs: number,
-): Promise<string | null> {
-  try {
-    const rescue = await findGroupRescueStream(song, depth, (row, nextDepth) =>
-      ensurePlayableStream(row, timeoutMs, nextDepth),
-    );
-    if (!rescue) return null;
-    // 只写「本次出流用哪条链」的记忆(正结果 TTL),**不标可播、不回写原行**:
-    // 标可播会让下次调用在首行直接返回原死链;回写会污染去重指纹与展示。
-    setFallback(song.id, rescue.url, { ttlMs: playableTtlMs, noPersist: true });
-    return rescue.url;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function updateSongUrl(songId: string, url: string, streamSource?: string): void {
