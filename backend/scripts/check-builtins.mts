@@ -3,11 +3,17 @@
 // 用法：cd backend && DATA_DIR=<临时目录> npx tsx scripts/check-builtins.mts
 // （DATA_DIR 指向可写临时目录：部分内置插件模块 import db，加载时需可创建 SQLite 文件）
 //
-// 校验 7 个官方内置插件的 manifest 是否符合插件开发规范：
+// 校验全部官方内置插件的 manifest 是否符合插件开发规范：
 //   1. validateManifest（与 plugins/discovery.ts 同规则：字段/类型/能力/权限白名单）
 //   2. documentation 字段必填（插件详情页「功能介绍 + 处理逻辑」）
 //   3. capabilities 全部在 VALID_CAPS 白名单内
 //   4. 每项 capability 在 CAP_METHODS 中有方法映射（即能力被核心消费，声明不会静默失效）
+//      —— **例外**：CONFIG_ONLY_CAPS 里的 core 能力是纯配置面（逻辑在核心，无 impl 方法），
+//      不要求方法映射，但要求 CAP_DOC 说明其在核心的消费点。
+//
+// 2026-09-11 起**把 core 插件也纳入**：此前 BUILTINS 列表只覆盖非 core 内置插件，
+// 而 VALID_TYPES / VALID_CAPS 里都没有 "core" 与 core 能力 → core 插件
+// 「声明了能力但核心从不调用」可以静默发生（正是本脚本存在的意义）。
 //
 // 外置插件契约校验（含方法存在性）由 MusicFlow-plugins 仓库的 scripts/check.mjs 负责，
 // 插件仓库 CI 每次 push 自动执行。
@@ -20,14 +26,25 @@ import path from "path";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mf-check-builtins-"));
 
 // ---- 与 backend/src/plugins/discovery.ts 保持一致 ----
-const VALID_TYPES = ["source", "importer", "recommender", "sync", "lyrics", "cover", "renderer", "scrobbler", "artist"];
+const VALID_TYPES = ["source", "importer", "recommender", "sync", "lyrics", "cover", "renderer", "scrobbler", "artist", "core"];
 const VALID_CAPS = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
   "artistInfo",
+  // core 内置行为插件(配置面在插件、逻辑在核心)
+  "songGroup", "importGate", "streamFallback", "playPreference", "preProbe",
 ];
+// 纯配置型 core 能力:无 impl 方法(逻辑在核心),故豁免 CAP_METHODS 映射要求。
+// 每项必须写明「核心消费点」,便于人工核对"声明不会静默失效"。
+const CONFIG_ONLY_CAPS: Record<string, string> = {
+  songGroup: "services/plugin/core/songGroup.ts + 匹配/写入 group_id 的核心路径",
+  importGate: "services/source/online/importGate.ts(passesImportGate)",
+  streamFallback: "services/source/online/streamFallback.ts(ensurePlayableStream/findFallbackStream)",
+  playPreference: "routes/rest/index.ts(resolvePreferredSong)读 shouldPreferLocal/shouldFallbackToWeb",
+  preProbe: "services/player/QueueController.ts 预探测调度器读 readPreProbeConfig()",
+};
 // 与 backend/src/plugins/sandbox.ts 的 CAP_METHODS 保持一致（能力 → 方法映射）。
 const CAP_METHODS: Record<string, string[]> = {
   search: ["search"],
@@ -86,6 +103,12 @@ const BUILTINS: Array<{ id: string; file: string; exportName: string }> = [
   { id: "playlist-sync", file: "../src/services/plugin/playlistSync.js", exportName: "playlistSyncManifest" },
   { id: "dlna-renderer", file: "../src/services/plugin/renderers/dlna.js", exportName: "dlnaRendererManifest" },
   { id: "artist-info", file: "../src/services/plugin/artistInfo.js", exportName: "artistInfoManifest" },
+  // ---- core 内置行为插件(2026-09-11 起纳入校验；此前完全没被校验过) ----
+  { id: "core-song-group", file: "../src/services/plugin/core/songGroup.js", exportName: "songGroupManifest" },
+  { id: "core-play-preference", file: "../src/services/plugin/core/playPreference.js", exportName: "playPreferenceManifest" },
+  { id: "core-import-gate", file: "../src/services/plugin/core/importGate.js", exportName: "importGateManifest" },
+  { id: "core-stream-fallback", file: "../src/services/plugin/core/streamFallbackPlugin.js", exportName: "streamFallbackManifest" },
+  { id: "core-pre-probe", file: "../src/services/plugin/core/preProbe.js", exportName: "preProbeManifest" },
 ];
 
 const errors: string[] = [];
@@ -106,7 +129,9 @@ for (const { id, file, exportName } of BUILTINS) {
     }
 
     // 每项能力必须在 CAP_METHODS 有映射（否则声明不被核心消费 = 静默失效）
+    // 例外：纯配置型 core 能力（CONFIG_ONLY_CAPS）无 impl 方法，逻辑在核心。
     for (const cap of m.capabilities) {
+      if (CONFIG_ONLY_CAPS[cap]) continue;
       if (!CAP_METHODS[cap]) {
         errors.push(`[${id}] 能力 ${cap} 不在 CAP_METHODS 映射表中(核心不会调用它)`);
       }

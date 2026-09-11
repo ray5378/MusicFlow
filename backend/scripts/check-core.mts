@@ -32,6 +32,8 @@ const VALID_CAPS = [
   "playlistSync", "autoMatch",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
   "artistInfo",
+  // core 内置行为插件能力(2026-09-11 补齐:此前与 types.ts 不同步)
+  "songGroup", "importGate", "streamFallback", "playPreference", "preProbe",
 ];
 
 // ---- 白名单：全部存量已收口(Phase2),新增越界零容忍 ----

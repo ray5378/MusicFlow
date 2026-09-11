@@ -64,6 +64,7 @@ export type PluginCapability =
   | "songGroup" // 同曲多源组:匹配/写入 group_id + 序列化输出 groupId/sources
   | "importGate" // 导入命中门禁:在线导入/匹配须同时命中标题+歌手+专辑+时长才落库
   | "streamFallback" // 换源兜底:播放原链失效时搜索替代源换链(config-only 插件,逻辑在核心)
+  | "preProbe"       // 预探测:提前扫出"接下来 N 首已确认可播"的歌(config-only 插件,逻辑在核心)
   | "playPreference"; // 播放优选:首选 Local + local 失败回退平台
 
 export interface ConfigField {

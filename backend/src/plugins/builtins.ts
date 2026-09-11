@@ -49,6 +49,7 @@ import { songGroupManifest, songGroupPlugin } from "../services/plugin/core/song
 import { playPreferenceManifest, playPreferencePlugin } from "../services/plugin/core/playPreference.js";
 import { importGateManifest, importGatePlugin } from "../services/plugin/core/importGate.js";
 import { streamFallbackManifest, streamFallbackPlugin } from "../services/plugin/core/streamFallbackPlugin.js";
+import { preProbeManifest, preProbePlugin } from "../services/plugin/core/preProbe.js";
 
 export interface BuiltinPlugin {
   manifest: PluginManifest;
@@ -100,6 +101,8 @@ export const BUILTIN_CORE_PLUGINS: BuiltinPlugin[] = [
   { manifest: importGateManifest, impl: importGatePlugin },
   // 换源兜底:播放原链失效时的替代源开关/时长容差覆写(config-only,逻辑在核心)。
   { manifest: streamFallbackManifest, impl: streamFallbackPlugin },
+  // 预探测:提前扫出「接下来 N 首已确认可播」填进滑动缓冲(config-only,逻辑在核心)。
+  { manifest: preProbeManifest, impl: preProbePlugin },
 ];
 
 /** All built-in plugins (any type). */

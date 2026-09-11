@@ -1101,7 +1101,10 @@
         "scrobbler": "把播放事件上报到 Last.fm / ListenBrainz 等",
         "songGroup": "把同一首歌的多个来源按标题+歌手+专辑+时长归为一组,各端自动合并展示",
         "playPreference": "播放自动优选组内 local/WebDAV 核心曲库源,不可用时自动回退平台源",
-        "artistInfo": "为曲库抓取艺人资料与封面"
+        "artistInfo": "为曲库抓取艺人资料与封面",
+        "importGate": "导入命中门禁:在线导入/匹配须同时命中标题+歌手+专辑+时长才落库",
+        "streamFallback": "播放原链失效时自动搜索其它平台的替代源换链播放",
+        "preProbe": "提前扫描后续歌曲是否有可用音源,使切歌零等待(连续多首无源时暂停并提示)"
       },
       "group": {
         "schedule": "定时同步",
@@ -1161,7 +1164,10 @@
         "scrobbler": "播放上报",
         "songGroup": "同曲多源组",
         "playPreference": "播放优选",
-        "artistInfo": "艺人资料"
+        "artistInfo": "艺人资料",
+        "importGate": "导入命中门禁",
+        "streamFallback": "换源兜底",
+        "preProbe": "预探测"
       },
       "perm": {
         "log": "日志",

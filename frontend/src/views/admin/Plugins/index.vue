@@ -941,6 +941,9 @@ const CAP_LABELS: Record<string, string> = {
   songGroup: t('admin.plugins.cap.songGroup'),
   playPreference: t('admin.plugins.cap.playPreference'),
   artistInfo: t('admin.plugins.cap.artistInfo'),
+  importGate: t('admin.plugins.cap.importGate'),
+  streamFallback: t('admin.plugins.cap.streamFallback'),
+  preProbe: t('admin.plugins.cap.preProbe'),
 };
 const PERM_LABELS: Record<string, string> = {
   log: t('admin.plugins.perm.log'),
@@ -986,6 +989,9 @@ const CAP_DOCS: Record<string, string> = {
   songGroup: t('admin.plugins.capDoc.songGroup'),
   playPreference: t('admin.plugins.capDoc.playPreference'),
   artistInfo: t('admin.plugins.capDoc.artistInfo'),
+  importGate: t('admin.plugins.capDoc.importGate'),
+  streamFallback: t('admin.plugins.capDoc.streamFallback'),
+  preProbe: t('admin.plugins.capDoc.preProbe'),
 };
 
 // 极简 markdown 渲染（文档为受控内容,先转义再套标签,防 XSS）

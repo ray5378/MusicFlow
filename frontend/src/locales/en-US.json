@@ -1101,7 +1101,10 @@
         "scrobbler": "Reports playback to Last.fm / ListenBrainz etc.",
         "songGroup": "Groups multi-source instances of the same song across endpoints",
         "playPreference": "Auto-prefers local/WebDAV library sources and falls back to platform sources",
-        "artistInfo": "Fetches artist metadata and covers for the library"
+        "artistInfo": "Fetches artist metadata and covers for the library",
+        "importGate": "Online imports/matches must hit title + artist + album + duration before being saved",
+        "streamFallback": "Re-links to an alternative source on another platform when the original URL fails",
+        "preProbe": "Scans ahead for playable sources so track switches never wait (pauses and reports on a queue-wide outage)"
       },
       "group": {
         "schedule": "Schedule",
@@ -1161,7 +1164,10 @@
         "scrobbler": "Scrobbling",
         "songGroup": "Multi-Source Group",
         "playPreference": "Play Preference",
-        "artistInfo": "Artist Info"
+        "artistInfo": "Artist Info",
+        "importGate": "Import Match Gate",
+        "streamFallback": "Stream Fallback",
+        "preProbe": "Pre-probe"
       },
       "perm": {
         "log": "Logs",
