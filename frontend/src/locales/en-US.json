@@ -1279,9 +1279,10 @@
   },
   "player": {
     "preProbe": {
-      "title": "Many tracks in this queue have no playable source",
-      "exhaustedText": "{misses} consecutive tracks had no playable source. Pre-probing paused, retrying in ~{seconds}s.",
-      "readyText": "{ready} playable tracks cached ahead"
+      "title": "Pre-probe paused",
+      "exhaustedText": "{misses} consecutive tracks had no playable source. Pre-probe paused",
+      "retryIn": "Retrying in ~{seconds}s.",
+      "readyText": "{ready} playable tracks cached for you"
     },
     "importingRemote": "Importing remote songs, please wait...",
     "remoteImportFailed": "Failed to import remote songs",

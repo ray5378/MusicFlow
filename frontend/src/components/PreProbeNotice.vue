@@ -5,15 +5,16 @@
       class="preprobe-notice"
       :class="{ 'panel-open': playerStore.showPlaylist }"
       role="status"
+      aria-live="polite"
     >
       <div class="preprobe-body">
         <div class="preprobe-title">
-          <MfIcon name="TriangleAlert" :size="14" />
+          <span class="preprobe-warn"><MfIcon name="TriangleAlert" :size="14" /></span>
           <span>{{ t('player.preProbe.title') }}</span>
           <span v-if="peerName" class="preprobe-peer">{{ peerName }}</span>
         </div>
         <div class="preprobe-text">
-          {{ t('player.preProbe.exhaustedText', { misses: pp!.misses, seconds: remainingSeconds }) }}
+          {{ t('player.preProbe.exhaustedText', { misses: pp!.misses }) }}<template v-if="remainingSeconds > 0"> {{ t('player.preProbe.retryIn', { seconds: remainingSeconds }) }}</template>
         </div>
         <div class="preprobe-sub">{{ t('player.preProbe.readyText', { ready: pp!.ready }) }}</div>
       </div>
@@ -103,6 +104,11 @@ const remainingSeconds = computed(() => {
   gap: 6px;
   font-size: 13px;
   font-weight: 600;
+  color: var(--el-text-color-primary, #303133);
+}
+.preprobe-warn {
+  display: inline-flex;
+  align-items: center;
   color: var(--el-color-warning, #e6a23c);
 }
 .preprobe-peer {
