@@ -100,6 +100,9 @@ export interface QueueSnapshot {
   shuffleOrder?: number[];
   /** 当前曲在 `shuffleOrder` 中的位置；-1 表示未就绪。 */
   shufflePos?: number;
+  /** 洗牌序列版本号:服务端每次重建(整队替换/长度变化/显式重洗/重启后重建)+1。
+   *  客户端缓存序列时据此检测换版 —— epoch 变了必须重新定位当前曲在序列中的位置。 */
+  shuffleEpoch?: number;
   /**
    * 服务端预探测状态位（2026-09-11）。
    *

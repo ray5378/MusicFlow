@@ -424,6 +424,56 @@ class PeerManager extends EventEmitter {
 
   // ==================== Queue access (unified) ====================
 
+  /** 本机队列的**内存态**洗牌序列(对齐 QueueController 的投屏同款语义)。
+   *  SPEC(2026-09-10,player/types.ts):洗牌序列唯一权威在服务端,客户端只做
+   *  镜像 —— 此前只有投屏队列实现了,本机队列漏掉。现在补齐:
+   *  惰性物化(缺/长度变了自动重建 keepCurrent),epoch 每次重建 +1 供客户端
+   *  检测序列换版。服务端重启 → 内存丢失 → 下次访问重建(新 epoch,客户端
+   *  据此重新定位当前曲在序列中的位置)。 */
+  private localShuffle = new Map<string, { order: number[]; pos: number; len: number; epoch: number }>();
+
+  /** Fisher-Yates(与 QueueController.rebuildShuffle 同款):keepCurrent 时
+   *  当前曲固定在序列头、pos=0(上一首可沿序列回退);否则 pos=-1。 */
+  private rebuildLocalShuffle(peerId: string, currentIndex: number, len: number, keepCurrent: boolean): { order: number[]; pos: number; len: number; epoch: number } {
+    const idxs: number[] = [];
+    for (let i = 0; i < len; i++) {
+      if (keepCurrent && i === currentIndex) idxs.unshift(i);
+      else idxs.push(i);
+    }
+    for (let i = 1; i < idxs.length; i++) {
+      const j = 1 + Math.floor(Math.random() * i);
+      [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+    }
+    const prev = this.localShuffle.get(peerId);
+    const entry = {
+      order: idxs,
+      pos: keepCurrent && currentIndex >= 0 ? 0 : -1,
+      len,
+      epoch: (prev?.epoch ?? 0) + 1,
+    };
+    this.localShuffle.set(peerId, entry);
+    return entry;
+  }
+
+  private ensureLocalShuffle(peerId: string, currentIndex: number, len: number): { order: number[]; pos: number; len: number; epoch: number } {
+    const entry = this.localShuffle.get(peerId);
+    if (entry && entry.len === len) return entry;
+    return this.rebuildLocalShuffle(peerId, currentIndex, len, true);
+  }
+
+  /** 显式重洗(客户端在序列尾回绕时调用):全新序列,keepCurrent=false。 */
+  reshuffleLocal(peerId: string): QueueSnapshot | undefined {
+    const row = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
+    if (!row) return undefined;
+    let items: QueueItem[] = [];
+    try { items = JSON.parse(row.itemsJson || "[]") as QueueItem[]; } catch { /* keep empty */ }
+    if (items.length > 0) this.rebuildLocalShuffle(peerId, row.currentIndex, items.length, false);
+    this.scheduleLocalPreProbe(peerId);
+    const snap = this.getQueueSnapshot(peerId);
+    if (snap) this.emit("peer_queue_changed", peerId, snap);
+    return snap;
+  }
+
   /** Get the queue snapshot for a peer (local / dlna / group). */
   getQueueSnapshot(peerId: string): QueueSnapshot | undefined {
     const parsed = PeerManager.parse(peerId);
@@ -439,13 +489,20 @@ class PeerManager extends EventEmitter {
     const row = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
     if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, preProbe: pp };
     try {
+      const items = JSON.parse(row.itemsJson || "[]") as QueueItem[];
+      const playMode = (row.playMode as PlayMode) || "order";
+      // shuffle 模式下发服务端权威洗牌序列(对齐 SPEC;单曲/更少无需序列)。
+      if (playMode === "shuffle" && items.length > 1) {
+        const sh = this.ensureLocalShuffle(peerId, row.currentIndex, items.length);
+        return {
+          items, currentIndex: row.currentIndex, playMode,
+          isActive: !!row.isActive, ended: false, preProbe: pp,
+          shuffleOrder: sh.order, shufflePos: sh.pos, shuffleEpoch: sh.epoch,
+        };
+      }
       return {
-        items: JSON.parse(row.itemsJson || "[]") as QueueItem[],
-        currentIndex: row.currentIndex,
-        playMode: (row.playMode as PlayMode) || "order",
-        isActive: !!row.isActive,
-        ended: false,
-        preProbe: pp,
+        items, currentIndex: row.currentIndex, playMode,
+        isActive: !!row.isActive, ended: false, preProbe: pp,
       };
     } catch {
       return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, preProbe: pp };
@@ -473,11 +530,20 @@ class PeerManager extends EventEmitter {
     } catch {
       return undefined;
     }
-    return {
+    const playMode = (row.playMode as PlayMode) || "order";
+    const src: QueuePeekSource = {
       items: items.map(i => ({ songId: i.songId, duration: i.duration })),
       currentIndex: row.currentIndex,
-      playMode: (row.playMode as PlayMode) || "order",
+      playMode,
     };
+    // shuffle:惰性物化并带上序列 → peekUpcomingPositions 的 shuffle 分支
+    // 从此对本机队列生效(此前缺序列只能扫 0 个位置)。
+    if (playMode === "shuffle" && items.length > 1) {
+      const sh = this.ensureLocalShuffle(peerId, row.currentIndex, items.length);
+      src.shuffleOrder = sh.order;
+      src.shufflePos = sh.pos;
+    }
+    return src;
   }
 
   /** 本机队列变动后触发一次预探测(fire-and-forget;调度器内部做防抖/冷却/合并)。 */
@@ -490,6 +556,8 @@ class PeerManager extends EventEmitter {
   /** Replace the local queue and mark it active. */
   localPlayFrom(peerId: string, userId: string, items: QueueItem[], startIndex: number): void {
     const now = new Date().toISOString();
+    // 整队替换 → 旧洗牌序列失效(惰性重建,按新 currentIndex keepCurrent)。
+    this.localShuffle.delete(peerId);
     db.insert(localQueues)
       .values({
         peerId,
@@ -598,6 +666,7 @@ class PeerManager extends EventEmitter {
   /** Clear a local queue. */
   localClear(peerId: string): void {
     const now = new Date().toISOString();
+    this.localShuffle.delete(peerId);
     db.update(localQueues).set({
       itemsJson: "[]",
       currentIndex: -1,
@@ -616,6 +685,7 @@ class PeerManager extends EventEmitter {
     // Ensure the row exists so the mode isn't lost.
     const existing = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
     if (!existing) return;
+    if (mode !== "shuffle") this.localShuffle.delete(peerId);
     db.update(localQueues).set({ playMode: mode, updatedAt: now }).where(eq(localQueues.peerId, peerId)).run();
     // 播放模式变化 → 预探测窗口位置整体重算(已探过的曲复用缓存,只补缺口)。
     this.scheduleLocalPreProbe(peerId);
@@ -623,11 +693,17 @@ class PeerManager extends EventEmitter {
   }
 
   /** Update currentIndex for a local peer (Web client reports track change).
-   *  游标一动 = 预探测窗口整体前移 → 重新扫描(滑动缓冲的「头随播放消费」)。 */
+   *  游标一动 = 预探测窗口整体前移 → 重新扫描(滑动缓冲的「头随播放消费」)。
+   *  shuffle:同步序列位置(客户端沿序列推进,服务端据此保持预探测窗口对齐)。 */
   localSetIndex(peerId: string, index: number): void {
     const now = new Date().toISOString();
     db.update(localQueues).set({ currentIndex: index, lastActiveAt: now, updatedAt: now })
       .where(eq(localQueues.peerId, peerId)).run();
+    const sh = this.localShuffle.get(peerId);
+    if (sh) {
+      const pos = sh.order.indexOf(index);
+      if (pos >= 0) sh.pos = pos;
+    }
     this.scheduleLocalPreProbe(peerId);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }

@@ -3007,6 +3007,44 @@ apiRoutes.post("/v1/peers/:peerId/play-mode", async (c) => {
   return c.json({ success: true });
 });
 
+// 本机洗牌序列(轻量端点:只回序列与游标,不拖全队列 items)。
+// SPEC(player/types.ts):洗牌序列唯一权威在服务端,客户端只做镜像;
+// 客户端 shuffle 推进前 GET 一次,epoch 变了就重新定位当前曲位置。
+function localShuffleInfo(snap: any) {
+  return {
+    currentIndex: snap?.currentIndex ?? -1,
+    playMode: snap?.playMode ?? "order",
+    isActive: !!snap?.isActive,
+    shuffleOrder: Array.isArray(snap?.shuffleOrder) ? snap.shuffleOrder : [],
+    shufflePos: typeof snap?.shufflePos === "number" ? snap.shufflePos : -1,
+    shuffleEpoch: typeof snap?.shuffleEpoch === "number" ? snap.shuffleEpoch : 0,
+  };
+}
+apiRoutes.get("/v1/peers/:peerId/queue/shuffle", (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed || isCastPeer(parsed)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  }
+  const snap = pm.getQueueSnapshot(peerId);
+  if (!snap) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  return c.json(localShuffleInfo(snap));
+});
+
+// 显式重洗本机队列的洗牌序列(客户端在序列尾回绕时调用,自动重洗语义)。
+// 返回新序列(轻量形状,epoch +1 供客户端换版检测)。投屏/群组队列的重洗由
+// QueueController 在切歌时自管,不走这里。
+apiRoutes.post("/v1/peers/:peerId/queue/reshuffle", (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed || isCastPeer(parsed)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  }
+  const snap = pm.reshuffleLocal(peerId);
+  if (!snap) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  return c.json(localShuffleInfo(snap));
+});
+
 // 服务器端定时暂停（sleep timer）。仅对投屏/群组(链路 A)生效:播放由服务器
 // 进行,只有服务器自己计时才可靠(客户端 App 关闭/掉线后定时仍生效)。
 // 本机/客户端 DLNA 直投的定时由客户端本地倒计时实现,此处返回不支持。
