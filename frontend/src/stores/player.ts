@@ -40,12 +40,19 @@ export interface LyricLine {
 
 // Convert a frontend Song to the QueueItem shape the backend expects.
 // Kept in sync with backend's songsToQueueItems().
+// 队列项 <-> 音频格式互转表。服务端 QueueItem 契约只持久化 `mime`,**不存 suffix**;
+// 恢复队列时若不把 mime 还原成 suffix,Howler 会拿到 format=[](空)→ html5 音频直接
+// 加载失败 → 整条恢复队列都被「播放失败」兜底无限跳过(用户表现为「所有的歌都报错」)。
+const SUFFIX_MIME: Record<string, string> = {
+  mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
+  ogg: "audio/ogg", m4a: "audio/mp4", opus: "audio/opus",
+  wma: "audio/x-ms-wma", ape: "audio/ape",
+};
+const MIME_SUFFIX: Record<string, string> = Object.fromEntries(
+  Object.entries(SUFFIX_MIME).map(([suffix, mime]) => [mime, suffix]),
+);
+
 function songToQueueItem(song: Song): any {
-  const SUFFIX_MIME: Record<string, string> = {
-    mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
-    ogg: "audio/ogg", m4a: "audio/mp4", opus: "audio/opus",
-    wma: "audio/x-ms-wma", ape: "audio/ape",
-  };
   return {
     songId: song.id,
     title: song.title || gt("common.unknown"),
@@ -149,6 +156,8 @@ function queueItemToSong(it: any): Song {
     albumId: it.albumId,
     duration: it.duration || 0,
     coverArt: it.coverArt || (it.albumId ? `al-${it.albumId}` : undefined),
+    // 服务端队列项只有 mime → 还原成 suffix,保证 Howler 能定出 format(见上方注释)。
+    suffix: MIME_SUFFIX[(it.mime || "").toLowerCase()],
   };
   // 恢复的远程歌(id 为 remote:provider:source:rid)没有 streamUrl(同步到后端时只存了
   // songId),按 id 重新拼出 /rest/stream-remote 代理流,保证恢复队列里的远程歌可播。
@@ -585,7 +594,12 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function localTogglePlay() {
-    if (!howl) return;
+    if (!howl) {
+      // 刷新/重开标签页后队列会从服务端恢复,但恢复流程刻意不建 Howl(不自动续播)。
+      // 旧实现在这里直接 return → 恢复队列后播放键点不动。有当前曲就按「起播」处理。
+      if (localQueue.value.length > 0 && localIndex.value >= 0) startLocalPlayback();
+      return;
+    }
     if (localIsPlaying.value) {
       howl.pause();
     } else {
