@@ -24,8 +24,7 @@ import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
 import { findFallbackStream, resolveEmptyUrlStream, evictStreamFallbackCache } from "../../services/source/online/streamFallback.js";
-import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
-import { playPreferenceActive, preferLocalEnabled, fallbackToWebEnabled } from "../../services/plugin/core/playPreference.js";
+import { resolvePreferredSong } from "../../services/source/preferredSource.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
@@ -1418,55 +1417,11 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
   return { source: parsed.filePath };
 }
 
+// 播放优选 + 回退(web 行切组内 local/webdav;local/webdav 不可用回 web)已抽到
+// services/source/preferredSource.ts,供出流端点与流可播性探测共用,保证探测
+// 结论与实际出流一致(否则可播的歌会被判死、客户端白跳)。受「播放优选」插件
+// 开关控制:插件总开关关闭 = 完全恢复插件化前行为(按原源播放)。
 type SongRow = typeof songs.$inferSelect;
-
-// 播放优选 + 回退(web 行切组内 local/webdav;local/webdav 不可用回 web)。
-// /rest/stream 与 /rest/dlna/stream/:token 共用,受「播放优选」插件开关控制。
-async function resolvePreferredSong(song: SongRow): Promise<SongRow> {
-  // 播放优选(服务端插件开关):web 歌曲(插件平台源)所在组内有本地/WebDAV
-  // 核心曲库源、且「播放优选」插件开启(默认开)、其 preferLocal 子开关开启时,
-  // 自动切换到本地源播放(无损优先)。队列中显示的仍是用户点的那一行,只影响
-  // 实际流的来源;插件总开关关闭 = 完全恢复插件化前行为(按原源播放)。
-  // 旧全局设置 playback.preferLocal 已并入插件配置(preferLocal 子开关),此处
-  // 不再读 settings 表,唯一真源是插件配置。
-  if ((song.type || "local") === "web" && song.groupId
-      && playPreferenceActive() && preferLocalEnabled()) {
-    try {
-      const alt = db.select().from(songs)
-        .where(and(eq(songs.groupId, song.groupId), inArray(songs.type, ["local", "webdav"])))
-        .orderBy(sql`CASE ${songs.type} WHEN 'local' THEN 0 ELSE 1 END`)
-        .limit(1)
-        .get();
-      if (alt) {
-        log.info("播放优选:web 歌曲切换到核心曲库源", { webId: song.id, localId: alt.id, type: alt.type });
-        return alt;
-      }
-    } catch (e) {
-      log.warn("播放优选查询失败,按原源播放", { id: song.id, err: (e as Error)?.message || e });
-    }
-  }
-
-  // 多源组跨源回退(首选 Local,失败回退平台):local/WebDAV 主源不可用(文件
-  // 缺失/WebDAV HEAD 失败)时,自动切组内 web 备选源流播。与上面 preferLocal
-  // 方向相反但互补——web→local 优选 + local 不可用→web 回退,组内永远有可播源。
-  // 该探测对本地文件是零成本 existsSync,WebDAV 每次流播一次 HEAD(失败记忆
-  // 5 分钟,避免反复探测)。受「播放优选」插件总开关 + fallbackToWeb 子开关控制。
-  if ((song.type || "local") !== "web" && song.groupId
-      && playPreferenceActive() && fallbackToWebEnabled()) {
-    if (!(await probeLocalSourceOk(song))) {
-      const alt = db.select().from(songs)
-        .where(and(eq(songs.groupId, song.groupId), eq(songs.type, "web")))
-        .orderBy(songs.createdAt)
-        .limit(1)
-        .get();
-      if (alt) {
-        log.info("流回退:核心曲库源不可用,切组内 web 源", { localId: song.id, webId: alt.id, title: alt.title || "" });
-        return alt;
-      }
-    }
-  }
-  return song;
-}
 
 // ==================== DLNA web 源格式兜底（音箱专用） ====================
 // 音箱(MUZO 2017 固件等)普遍不支持 Ogg/Opus/WebM 容器。web 源(在线插件)

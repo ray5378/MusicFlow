@@ -25,6 +25,8 @@ import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest, getPluginConfig } from "../../../plugins/registry.js";
 import { passesImportGate, getImportGateConfig, type ImportGateConfig } from "./importGate.js";
 import { STREAM_FALLBACK_PLUGIN_ID } from "../../plugin/core/streamFallbackPlugin.js";
+import { resolvePreferredSong } from "../preferredSource.js";
+import { getEffectiveBaseUrl } from "../../dlna/control.js";
 
 /** 读取换源兜底配置(core-stream-fallback 内置插件):enabled 总开关 + 时长容差覆写。 */
 function getFallbackConfig(): { enabled: boolean; durationTolerance: number } {
@@ -397,7 +399,31 @@ export async function ensurePlayableStream(
     return fb.url;
   }
 
+  // 本行自身无可用源,但「播放优选」可能在出流时把它换成组内可播的兄弟行
+  // (web→local/webdav 优选,或 local 不可用→web 回退)。那种情况这首歌实际
+  // 能播 —— 之前探测不知道这件事,把可播的歌判成无可用音源,客户端照着判定
+  // 就白跳一首(实测 60 首 web 行里 5 首属此类)。这里复用出流同一份解析,
+  // 保证探测结论与实际出流一致。
+  // 返回 /rest/stream?id=<原行>:出流端点自己会再走一遍优选换源,所以这里
+  // 既不标可播(isPlayableFresh 会让后续调用直接返回原死链)、也不回写原行
+  // URL(会污染去重指纹与来源角标)。
+  const preferred = await resolvePreferredStreamUrl(song.id);
+  if (preferred) return preferred;
+
   return null;
+}
+
+/** 播放优选能在组内换成可播源时,返回「走服务端出流」的 URL;否则 null。 */
+async function resolvePreferredStreamUrl(songId: string): Promise<string | null> {
+  try {
+    const row = db.select().from(songs).where(eq(songs.id, songId)).get();
+    if (!row) return null;
+    const pref = await resolvePreferredSong(row);
+    if (!pref || pref.id === row.id) return null;
+    return `${getEffectiveBaseUrl()}/rest/stream?id=${songId}`;
+  } catch {
+    return null;
+  }
 }
 
 function updateSongUrl(songId: string, url: string, streamSource?: string): void {
