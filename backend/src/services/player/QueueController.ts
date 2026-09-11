@@ -12,7 +12,9 @@ import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
-import { ensurePlayableStream } from "../source/online/streamFallback.js";
+import { ensurePlayableStream, getCachedPlayability } from "../source/online/streamFallback.js";
+import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
+import { getPreProbeScheduler } from "./preProbeScheduler.js";
 import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from "../group/protocolPlayer.js";
 import { getGroupManager } from "../group/index.js";
 import { suffixToMime } from "../dlna/queue.js";
@@ -61,7 +63,20 @@ export class QueueController extends EventEmitter {
   // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。到点立即暂停。
   private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number }>();
 
-  constructor() { super(); this.setMaxListeners(50); }
+  constructor() {
+    super();
+    this.setMaxListeners(50);
+    // 预探测状态变化 → 用既有的 queue_changed 重发一次快照即可,
+    // **不新增事件类型**(快照里带 preProbe,两个下发通道都是展开语法,自动透传)。
+    getPreProbeScheduler().onChange = (id: string) => {
+      this.emit("queue_changed", id, this.snapshot(id));
+    };
+  }
+
+  /** 触发一次预探测(fire-and-forget;调度器内部做防抖/冷却/合并)。 */
+  private schedulePreProbe(playerId: string): void {
+    getPreProbeScheduler().schedule(playerId, () => this.queues.get(playerId));
+  }
 
   registerPlayer(playerId: string, player: UniversalPlayer, ctrl: PlayerControllerLike): void {
     this.players.set(playerId, player);
@@ -175,6 +190,7 @@ export class QueueController extends EventEmitter {
     } finally {
       this.advancing.delete(deviceId);
     }
+    this.schedulePreProbe(deviceId);
   }
 
   /** 由 PlayerController.onDecision 调用。playerId 形如 "dlna:<deviceId>" / "group:<groupId>"。 */
@@ -204,6 +220,8 @@ export class QueueController extends EventEmitter {
         await this.playCurrent(id, baseUrl);
         this.persist(id);
         this.emit("queue_changed", id, this.snapshot(id));
+        // 切歌后重算预探测窗口(滑动缓冲:头随播放消费,尾持续补探)。
+        this.schedulePreProbe(id);
       } finally {
         this.advancing.delete(id);
       }
@@ -263,6 +281,14 @@ export class QueueController extends EventEmitter {
     q.isActive = false;
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+  }
+
+  /** 整队无源:停止推进并上报。**不 markEnded、不删队列** —— 保留现场,
+   *  等负缓存(45s TTL)过期后,下一次推进(用户操作 / 设备决策)自然重试。
+   *  与「扫描枯竭」共用同一状态位 preProbe.exhausted,Web 端只需认一个布尔值。 */
+  private reportAllUnplayable(playerId: string): void {
+    getPreProbeScheduler().markAllUnplayable(playerId); // 内部经 onChange 广播 queue_changed
+    this.persist(playerId);
   }
 
   /** 组队列的"结束"决策在成员全离线时应被抑制:那是 leader 离线导致的假 IDLE,
@@ -331,29 +357,99 @@ export class QueueController extends EventEmitter {
     return q.shuffleOrder![q.shufflePos!];
   }
 
+  /**
+   * 判断某首是否应**跳过**。只有「明确的、未过期的不可播判定」才允许跳 ——
+   * 无记录 / 已过期 / 网络异常一律视为未知 → 照常播放。
+   *
+   * **绝不把「不知道」当成「死的」** —— 这是 2026-09-11 拆除永久拉黑时定下的边界。
+   */
+  private async judgePlayable(item: QueueItem): Promise<"skip" | "play"> {
+    // 1) 缓存判定(预探测的成果)→ 零成本。热路径上多数歌在这里就返回了。
+    const cached = getCachedPlayability(item.songId);
+    if (cached === "unplayable") return "skip";
+    if (cached === "playable") return "play";
+
+    let songRow: any;
+    try {
+      songRow = db.select().from(songs).where(eq(songs.id, item.songId)).get();
+    } catch {
+      return "play";
+    }
+    if (!songRow) return "play";
+
+    if (!songRow.pluginEntry || typeof songRow.pluginEntry !== "string") {
+      // 本地 / WebDAV 行。此前 playCurrent 只对 web 行做预检,本地行缺文件时
+      // 要等设备拉流 404 才发现 —— 这里补上对称的一次零成本存在性检查
+      // (本地 = existsSync;WebDAV = HEAD,自带 5 分钟失败记忆)。
+      try {
+        return (await probeLocalSourceOk(songRow)) ? "play" : "skip";
+      } catch {
+        return "play";
+      }
+    }
+
+    // web 在线源:即时裁决兜底(预探测已探过的会命中缓存,不会真的再探)。
+    // 超时沿用流播路径的 12s,与预探测路径的 probeTimeoutMs 有意不同。
+    const url = await ensurePlayableStream(songRow);
+    if (url) return "play";
+    // 返回 null 时再确认是「没有源」还是「网络抖动」—— 抖动不跳,照常试播。
+    return getCachedPlayability(item.songId) === "unplayable" ? "skip" : "play";
+  }
+
   private async playCurrent(deviceId: string, baseUrl: string): Promise<void> {
     const q = this.queues.get(deviceId);
     const player = this.players.get(deviceId);
     const ctrl = this.ctrls.get(deviceId);
     if (!q || !player || !ctrl) return;
-    const item = q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
+
+    // ==================== 不可播裁决 + 跳过循环 ====================
+    //
+    // **2026-09-11 拍板:留队列跳过,不再摘除。**
+    //
+    // 旧行为是「探不到就 removeAt 摘掉」,三个副作用:
+    //   1. 队列在播放中自己变短,与客户端 / Web 上看到的队列视图对不上;
+    //   2. 长度一变,下次 shuffleNextIndex 会 ensureShuffleReady → rebuildShuffle
+    //      整段重排 —— 用户听感是「随机播放听着听着顺序全变了」;
+    //   3. 不可逆:源恢复后该曲也回不来了(与「说不定以后就有有效源」冲突)。
+    //
+    // ⚠️ 旧实现的**隐式终止条件**是「摘除后队列越来越短,绕几圈自然收敛」。
+    //    改成留队列之后这个条件消失了 —— 整队死源 + all/shuffle = 无限循环。
+    //    所以必须有**绕过圈上限(= 队列长度)**。客户端早已有同款上限
+    //    (dlna_manager.dart 的 probeSkips >= _queue.length),服务端此前缺失。
+    const skipLimit = Math.max(1, q.items.length);
+    let skips = 0;
+    let item = q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
+    while (item) {
+      const verdict = await this.judgePlayable(item);
+      if (verdict === "play") break;
+
+      if (skips >= skipLimit) {
+        log.warn(`[QueueController][playCurrent] ${deviceId}: 整队无源(已跳过 ${skips} 首),停止推进`);
+        this.reportAllUnplayable(deviceId);
+        return;
+      }
+      const nextIdx = this.pickNext(q, false);
+      if (nextIdx === -1 || nextIdx === q.currentIndex) {
+        // order 播到末尾 / one 模式:无处可跳 → 停止推进。
+        log.warn(`[QueueController][playCurrent] ${deviceId}: 无可跳位置(数列末尾/单曲循环),停止推进`);
+        this.reportAllUnplayable(deviceId);
+        return;
+      }
+      log.info(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过(留在队列)`);
+      q.currentIndex = nextIdx;
+      skips++;
+      item = q.items[q.currentIndex];
+    }
     if (!item) return;
+    if (skips > 0) {
+      // 跳过改了游标 → 立即同步(客户端 / Web / HA 的界面要跟上)。
+      this.persist(deviceId);
+      this.emit("queue_changed", deviceId, this.snapshot(deviceId));
+    }
+
     // 只带 songId 的 item(HA/脚本下发)补全元数据,否则 castToDevice 的
     // buildDidlLite/escapeXml 会因 title/mime 缺失抛错。
     const fullItem = await this.resolveItem(item);
-    // Web 歌曲(在线源)在 cast 前预检流是否真的可播:原 URL 探测失败但
-    // 多源兜底命中则写回 songs.url;两头皆空(streamFallback 也找不到替代)
-    // 则判定不可播 → 从队列移除并跳过,继续下一首。避免设备卡在拉不到流。
-    // 无停播阈值:不可播的逐曲移除,队列自然排空,坏歌无限跳(用户拍板)。
-    const songRow = db.select().from(songs).where(eq(songs.id, item.songId)).get();
-    if (songRow?.pluginEntry && typeof songRow.pluginEntry === "string") {
-      const playable = await ensurePlayableStream(songRow as any);
-      if (!playable) {
-        log.warn(`[QueueController][playCurrent] ${deviceId}: song ${item.songId} 无可用音源,跳过并移除`);
-        this.removeAt(deviceId, q.currentIndex, baseUrl);
-        return;
-      }
-    }
     // PlayerController 的 key 取 player 自身完整 id(dlna:<id> 或 group:<gid>)。
     const playerId = player.playerId;
     log.info(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
@@ -417,8 +513,11 @@ export class QueueController extends EventEmitter {
     if (q.playMode === "shuffle" && items.length > 1) this.rebuildShuffle(q, { keepCurrent: true });
     q.isActive = true;
     q.ended = false;
+    // 整队替换 → 旧队列的预探测状态(含枯竭告警)全部作废。
+    getPreProbeScheduler().clear(playerId);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+    this.schedulePreProbe(playerId);
   }
 
   /**
@@ -461,6 +560,7 @@ export class QueueController extends EventEmitter {
       this.advancing.add(playerId);
       try { await this.playCurrent(playerId, baseUrl); }
       finally { this.advancing.delete(playerId); }
+      this.schedulePreProbe(playerId);
     }
     // 返回**实际起播下标**（可能是服务端随机的），供路由如实回执。
     return this.queues.get(playerId)?.currentIndex ?? idx;
@@ -486,6 +586,7 @@ export class QueueController extends EventEmitter {
       await this.playCurrent(playerId, baseUrl);
       this.persist(playerId);
       this.emit("queue_changed", playerId, this.snapshot(playerId));
+      this.schedulePreProbe(playerId);
     } finally {
       this.advancing.delete(playerId);
     }
@@ -497,6 +598,10 @@ export class QueueController extends EventEmitter {
     q.playMode = mode;
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+    // 改播放模式 → 窗口位置整体重算。**重算 ≠ 重探**:已探过的曲直接复用缓存,
+    // 只补缺口。同时清掉枯竭冷却 —— 队列构成/顺序变了,旧的"大面积无源"结论作废。
+    getPreProbeScheduler().clearCooldown(playerId);
+    this.schedulePreProbe(playerId);
   }
 
   async next(playerId: string, baseUrl: string): Promise<void> {
@@ -506,7 +611,7 @@ export class QueueController extends EventEmitter {
     if (idx === -1) { this.markEnded(playerId); return; }
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
-    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); }
+    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); }
     finally { this.advancing.delete(playerId); }
   }
 
@@ -530,6 +635,7 @@ export class QueueController extends EventEmitter {
       else if (q.currentIndex > 0) { q.currentIndex--; await this.playCurrent(playerId, baseUrl); }
       else if (q.playMode === "all") { q.currentIndex = q.items.length - 1; await this.playCurrent(playerId, baseUrl); }
       this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId));
+      this.schedulePreProbe(playerId);
     } finally { this.advancing.delete(playerId); }
   }
 
@@ -550,6 +656,9 @@ export class QueueController extends EventEmitter {
     } else {
       clearCurrentMedia(playerId);
     }
+    // 队列清空 → 预探测状态一并清掉。必须赶在发快照**之前**,
+    // 否则下发的快照还带着已失效的 exhausted 提示。
+    getPreProbeScheduler().clear(playerId);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     // 媒体已清空:显式推送,让所有客户端(HA 卡片/Web)立即清掉封面/歌词/进度,
@@ -571,6 +680,8 @@ export class QueueController extends EventEmitter {
       // 权威洗牌序列随快照下发,客户端只做镜像(见 QueueSnapshot 文档)。
       shuffleOrder: q?.shuffleOrder || [],
       shufflePos: q?.shufflePos ?? -1,
+      // 预探测状态位(仅 Web 端消费;HA 卡片不读该字段 → 天然不显示)。
+      preProbe: getPreProbeScheduler().status(playerId),
     };
   }
 
@@ -592,10 +703,15 @@ export class QueueController extends EventEmitter {
     }
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+    this.schedulePreProbe(playerId);
   }
 
   /** Remove a single item by index and keep playback coherent. 对照原
-   *  QueueManager.removeAt:删的是当前项则续播同 index 的下一首。 */
+   *  QueueManager.removeAt:删的是当前项则续播同 index 的下一首。
+   *
+   *  **2026-09-11 起它只服务「用户主动删歌」** —— 播放链路的坏源不再走摘除,
+   *  改为留队列 + 短 TTL 跳过(见 playCurrent)。长度变化必须重算洗牌序,
+   *  故一并触发预探测窗口重算。 */
   removeAt(playerId: string, index: number, baseUrl: string): void {
     playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId); if (!q) return;
@@ -615,6 +731,7 @@ export class QueueController extends EventEmitter {
     }
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+    this.schedulePreProbe(playerId);
   }
 
   /** 拖拽排序:搬移一条,当前播放曲目下标跟随到新位置(不打断播放)。 */
@@ -629,6 +746,7 @@ export class QueueController extends EventEmitter {
     q.currentIndex = q.items.indexOf(moved);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
+    this.schedulePreProbe(playerId);
   }
 
   /** Mark a device inactive without clearing the queue. 对照原 QueueManager.deactivate。 */

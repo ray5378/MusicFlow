@@ -1,4 +1,8 @@
 // MA 式 player 状态类型。对照 MA 的 PlaybackState + PlayerState + CompareState。
+//
+// 注意 `PreProbeStatus` 是 **type-only import**（编译后擦除）—— 与
+// preProbeScheduler ↔ types 之间不构成运行时循环。
+import type { PreProbeStatus } from "./preProbeScheduler.js";
 
 /** 播放状态机。对照 MA PlaybackState。 */
 export enum PlaybackState {
@@ -96,4 +100,18 @@ export interface QueueSnapshot {
   shuffleOrder?: number[];
   /** 当前曲在 `shuffleOrder` 中的位置；-1 表示未就绪。 */
   shufflePos?: number;
+  /**
+   * 服务端预探测状态位（2026-09-11）。
+   *
+   * 由 QueueController 从 `PreProbeScheduler.status()` 填入，随快照自动下发 ——
+   * `GET /v1/peers/:id/queue` 与 WS `queue_changed`/`peer_queue_changed`
+   * 都用展开语法透传，**无需新增事件类型**。
+   *
+   * 消费方约定：**仅 Web 端**渲染（右上角持久轻提示 + 缓冲水位）；
+   * HA 卡片不读该字段 ⇒ 天然不显示，不必改一行代码。
+   *
+   * `exhausted` 在冷却到期后由 `status()` 自动回落为 false ——
+   * 提示随状态消失，不留一条与事实不符的告警。
+   */
+  preProbe?: PreProbeStatus;
 }

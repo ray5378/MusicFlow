@@ -241,6 +241,8 @@ export const usePlayerStore = defineStore("player", () => {
     tickTimer: ReturnType<typeof setInterval> | null;
     lastCastState: string;
     lastScrobbledSongId: string;
+    // 服务端预探测状态位(2026-09-11):随 queue 快照/WS 透传,仅右上角轻提示消费。
+    preProbe: { ready: number; scanned: number; misses: number; exhausted: boolean; cooldownUntil: number | null; at: number } | null;
     // 当前队列的「服务端内容来源」。非 null 时起播走主通道
     // `POST /rest/api/v1/play {peerId, type, id, songId}`（几百字节），
     // 由服务端自己 resolveContentSongs 解析队列 —— 客户端不搬运整队。
@@ -284,6 +286,7 @@ export const usePlayerStore = defineStore("player", () => {
         lastCastState: "STOPPED",
         lastScrobbledSongId: "",
         contentOrigin: null,
+        preProbe: null,
       };
       remoteStates.set(peerId, raw);
       // IMPORTANT: reactive Map wraps the value in a proxy on set, so the
@@ -322,6 +325,10 @@ export const usePlayerStore = defineStore("player", () => {
     const st = activeRemote.value;
     return st && st.kind === "dlna" ? st.name : "";
   });
+
+  // 预探测状态(当前活跃远端 peer)。null = 本机播放 / 无状态。
+  const activePreProbe = computed(() => activeRemote.value?.preProbe ?? null);
+  const activePreProbePeerName = computed(() => activeRemote.value?.name ?? "");
 
   // ==================== Unified peer system (rest) ====================
   const peers = ref<any[]>([]);
@@ -1052,6 +1059,8 @@ export const usePlayerStore = defineStore("player", () => {
       }
       if (typeof snap.currentIndex === "number") st.index = snap.currentIndex;
       if (typeof snap.playMode === "string") st.playMode = snap.playMode as PlayMode;
+      // 预探测状态位(枯竭告警/缓冲水位)随快照透传。
+      st.preProbe = snap.preProbe ?? null;
     } catch {}
   }
 
@@ -1556,6 +1565,9 @@ export const usePlayerStore = defineStore("player", () => {
         case "peer_queue_changed": {
           const idx = peers.value.findIndex(x => x.peerId === msg.peer_id);
           if (idx >= 0) peers.value[idx].queue = msg.queue;
+          // 预探测状态位透传 → 右上角轻提示实时跟随(含枯竭/恢复)。
+          const pst = remoteStates.get(msg.peer_id);
+          if (pst) pst.preProbe = msg.queue?.preProbe ?? null;
           break;
         }
         case "peer_queue_cleared": {
@@ -1570,6 +1582,8 @@ export const usePlayerStore = defineStore("player", () => {
           const idx = peers.value.findIndex(x =>
             (x.peerId === `dlna:${devId}` || x.peerId === `group:${devId}` || x.peerId === `airplay:${devId}`));
           if (idx >= 0) peers.value[idx].queue = msg.queue;
+          const qst = idx >= 0 ? remoteStates.get(peers.value[idx].peerId) : undefined;
+          if (qst) qst.preProbe = msg.queue?.preProbe ?? null;
           break;
         }
         // Group events (播放器群组页 + 播放器切换器):refresh on create/rename/
@@ -1615,6 +1629,8 @@ export const usePlayerStore = defineStore("player", () => {
     volume, showLyrics, showPlaylist, playModeVisible,
     // cast indicators
     castActive, castDeviceName,
+    // 预探测状态位(右上角轻提示)
+    activePreProbe, activePreProbePeerName,
     // peer system
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
     switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,

@@ -330,6 +330,9 @@
       </div>
     </footer>
 
+    <!-- ===== 预探测「大面积无源」右上角持久轻提示(状态驱动,手动关闭) ===== -->
+    <PreProbeNotice />
+
     <!-- ===== Queue panel ===== -->
     <transition name="slide-right">
       <div class="queue-panel" v-if="playerStore.showPlaylist">
@@ -488,6 +491,7 @@ import { useAuthStore } from "@/stores/auth";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import GlobalItemUI from "@/components/GlobalItemUI.vue";
+import PreProbeNotice from "@/components/PreProbeNotice.vue";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { PERM } from "@/utils/perms";

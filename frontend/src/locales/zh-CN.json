@@ -1278,6 +1278,11 @@
     "timeout": "任务超时"
   },
   "player": {
+    "preProbe": {
+      "title": "当前队列大面积无源",
+      "exhaustedText": "连续 {misses} 首未找到可用音源,已暂停预探测,约 {seconds} 秒后自动重试。",
+      "readyText": "前方已缓存 {ready} 首可播"
+    },
     "importingRemote": "正在导入远程歌曲,请稍候",
     "remoteImportFailed": "远程歌曲导入失败",
     "remoteImportPlayFailed": "远程歌曲导入失败,无法播放",

@@ -4,6 +4,24 @@ import { PlaybackState } from "../../src/services/player/types.js";
 import type { UniversalPlayer } from "../../src/services/player/UniversalPlayer.js";
 import { sqlite } from "../../src/db/index.js";
 
+// 预探测在纯队列测试里一律关闭:vitest 共 worker 时插件内存注册表可能带着
+// 其它文件注册的 core 插件(preProbeActive() 变 true),异步扫描会污染
+// snapshot 断言。partial mock:只把 preProbeActive/readPreProbeConfig 换成
+// disabled,其余导出(manifest 等)保持原样。
+const PRE_PROBE_DISABLED_CFG = {
+  enabled: false, lookaheadSongs: 3, deadRunLimit: 50, exhaustedCooldownSeconds: 90,
+  probeTimeoutMs: 5000, probeCooldownSeconds: 60, windowMinutes: 8,
+  negativeTtlSeconds: 45, concurrency: 3,
+};
+vi.mock(import("../../src/services/plugin/core/preProbe.js"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    preProbeActive: () => false,
+    readPreProbeConfig: () => ({ ...PRE_PROBE_DISABLED_CFG }),
+  };
+});
+
 // 测试环境不会调 initDatabase(),手动建 device_queues 表以让 persist 可写。
 beforeAll(() => {
   sqlite.exec(`
@@ -122,9 +140,11 @@ describe("QueueController", () => {
     qc.on("queue_changed", listener);
     qc.clear("d1");
     // 空快照含权威洗牌序列字段(客户端镜像用,见 PlayStartOwnership.test.ts)。
+    // preProbe:预探测状态位(2026-09-11)—— clear 时一并清空,前端提示随之消失。
     expect(listener).toHaveBeenCalledWith("d1", {
       items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false,
       shuffleOrder: [], shufflePos: -1,
+      preProbe: { ready: 0, scanned: 0, misses: 0, exhausted: false, cooldownUntil: null, at: 0 },
     });
   });
 
