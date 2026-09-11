@@ -267,10 +267,14 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
   let online: string[] = [];
   while (true) {
     try { await refreshDevices(); } catch { /* 扫描失败下一轮重试 */ }
-    online = [...declaredTargets].filter((pid) => {
-      const p = pm.get(pid);
-      return p && p.available;
-    });
+    // 目标解析:本机播放器对外只有 local:<userId>(临时端 ID 不外露),这里按该用户
+    // 已注册的客户端实例解析成真实 peerId;客户端还没连上时保留原样下一轮再试。
+    online = [...declaredTargets]
+      .map((pid) => pm.resolveVisiblePeerId(pid))
+      .filter((pid) => {
+        const p = pm.get(pid);
+        return p && p.available;
+      });
     if (online.length > 0) break;
     if (deadline > 0 && Date.now() >= deadline) break;
     await sleep(intervalMs);

@@ -22,6 +22,7 @@ import { db } from "../db/index.js";
 import { userPermissions, userRendererGrants } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { apiError, BusinessErrorCode } from "../utils/errors.js";
+import { buildLocalPeerId, isOwnLocalPeer } from "../utils/peerId.js";
 import { getGroupManager } from "./group/index.js";
 
 export interface PermDefinition {
@@ -158,18 +159,41 @@ export function peerToDeviceKey(peerId: string): string | null {
   return null;
 }
 
-/** 该用户能看到的 cast peer 判定(含本机 local:<userId>)。 */
+/** 该用户能看到的 cast peer 判定(含本机 local:<userId>[:<clientId>])。
+ *  本机播放器按「同账号」放行 —— 同账号的多个客户端实例都是他自己在用。 */
 export function canControlPeer(userId: string, isAdmin: boolean, peerId: string): boolean {
   if (isAdmin) return true;
-  if (peerId === `local:${userId}`) return true;
+  if (isOwnLocalPeer(peerId, userId)) return true;
   const key = peerToDeviceKey(peerId);
   return key ? canUseRenderer(userId, false, key) : false;
 }
 
-/** 从完整 peer 列表里筛出当前用户可见的部分(管理员全量)。 */
-export function filterPeersByAccess<T extends { peerId: string }>(userId: string, isAdmin: boolean, peers: T[]): T[] {
-  if (isAdmin) return peers;
-  return peers.filter((p) => canControlPeer(userId, false, p.peerId));
+/** 单条 peer 对「这个调用方」是否可见 —— 与 filterPeersByAccess 同一口径。
+ *
+ *  本机(local)播放器是**按客户端实例**隔离的:同一账号在多个标签页 / 多个客户端
+ *  登录时,服务端为每个实例各存一条队列,但每个实例只应看到**自己那条** —— 所以
+ *  local 一律只放行 `local:<userId>[:<本次请求的 clientId>]`,连管理员也不例外
+ *  (否则切换器里会列出全服务器所有客户端的本机播放器)。
+ *  clientId 缺省 → 退回旧格式 `local:<userId>`(老客户端行为不变)。
+ *  dlna / airplay / group 仍按原规则(管理员全量,普通用户按授权)。 */
+export function peerVisibleTo(
+  userId: string,
+  isAdmin: boolean,
+  peerId: string,
+  clientId?: string | null,
+): boolean {
+  if (peerId.startsWith("local:")) return !!userId && peerId === buildLocalPeerId(userId, clientId);
+  return isAdmin ? true : canControlPeer(userId, false, peerId);
+}
+
+/** 从完整 peer 列表里筛出当前调用方可见的部分(口径见 peerVisibleTo)。 */
+export function filterPeersByAccess<T extends { peerId: string }>(
+  userId: string,
+  isAdmin: boolean,
+  peers: T[],
+  clientId?: string | null,
+): T[] {
+  return peers.filter((p) => peerVisibleTo(userId, isAdmin, p.peerId, clientId));
 }
 
 // ==================== 写侧(管理员调用) ====================

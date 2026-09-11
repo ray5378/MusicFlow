@@ -7,6 +7,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { coverUrl } from "@/utils/cover";
 import { waitAsyncTask } from "@/utils/asyncTask";
+import { getClientId } from "@/utils/clientId";
 import { gt } from "@/locales";
 
 /**
@@ -1585,7 +1586,9 @@ export const usePlayerStore = defineStore("player", () => {
     if (!authStore.token) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     try {
-      peerWs = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(authStore.token)}`);
+      // clientId = 本标签页的临时端 ID,WS 侧据此只推「本实例自己的」本机播放器事件
+      // (同账号其它标签页/客户端的队列变动不会串到这里)。
+      peerWs = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(authStore.token)}&clientId=${encodeURIComponent(getClientId())}`);
     } catch { return; }
     peerWs.onmessage = (ev) => {
       let msg: any;

@@ -2,6 +2,7 @@ import axios from "axios";
 import { useAuthStore } from "@/stores/auth";
 import router from "@/router";
 import { gt, i18n } from "@/locales";
+import { getClientId } from "@/utils/clientId";
 
 const api = axios.create({ baseURL: "", timeout: 15000 });
 
@@ -12,6 +13,9 @@ api.interceptors.request.use((config) => {
   }
   // 随请求携带界面语言,后端据此渲染错误文案(默认 zh-CN)。
   config.headers["x-mf-lang"] = String(i18n.global.locale.value || "zh-CN");
+  // 本播放端的临时端 ID:服务端用它把同账号多个播放端的队列隔离开
+  // (只在服务端内部使用,响应里不会回显 —— 见 backend utils/peerId.ts)。
+  config.headers["x-mf-client-id"] = getClientId();
   return config;
 });
 

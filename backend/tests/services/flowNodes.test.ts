@@ -29,6 +29,8 @@ vi.mock("../../src/services/peer.js", async (importOriginal) => {
     ...orig,
     getPeerManager: () => ({
       get: (pid: string) => (available.get(pid) === false ? undefined : { peerId: pid, name: pid, available: true }),
+      // 本机播放器对外只有 local:<userId>(临时端 ID 不出服务端),此处 mock 不做解析。
+      resolveVisiblePeerId: (pid: string) => pid,
     }),
     __setAvailable: (pid: string, on: boolean) => available.set(pid, on),
   };

@@ -1,10 +1,16 @@
 // Unified player peer manager.
 //
 // A "peer" is any playback target the UI/HA can switch between and control:
-//   - local:<userId>  → a Web client's local playback (one per user). Audio
-//                       runs on the Web client (Howl); the backend only stores
-//                       the queue metadata so the user can close/reopen the
-//                       tab and find their queue again.
+//   - local:<userId>[:<clientId>] → a client's local playback. Audio runs on
+//                       the client (Howl / Flutter); the backend only stores
+//                       the queue metadata so the client can close/reopen and
+//                       find its queue again. The optional clientId is a
+//                       client-generated *temporary* id (one per browser tab /
+//                       per app install) that keeps each client instance's
+//                       queue apart — several Web tabs / Flutter clients can
+//                       be logged in at once without overwriting each other.
+//                       The isolation is a server-side ledger only: every
+//                       client still sees just its own local peer.
 //   - dlna:<deviceId> → a DLNA renderer. Audio runs on the device; the backend
 //                       owns the queue + auto-advance (see dlna/queue.ts).
 //   - group:<groupId> → a player group (SyncGroup) that aggregates DLNA devices.
@@ -15,19 +21,25 @@
 //   - DLNA discovery (control.ts refreshDevices) registers/refreshes dlna peers
 //   - player groups (group/index.ts) register/refresh group peers
 //
-// Inactivity cleanup (10-min timeout, runs every 60s):
-//   - local peer:  no heartbeat for 10 min → mark unavailable + clear its
-//                  local_queues row (so a stale tab doesn't keep a phantom
-//                  peer alive forever).
-//   - dlna peer:   device went offline (markDlnaUnavailable) for 10 min →
-//                  clear its device_queues row.
-//   - group peer:  permanent — never cleaned up (groups exist independent of
-//                  playback).
-// A peer that still has an active queue is kept (just marked unavailable) so
-// the UI can show "last seen" state; only the queue is cleared on timeout.
+// Liveness vs. queue lifetime (both run every 60s):
+//   - Liveness (10-min idle): a local peer with no heartbeat for 10 min is only
+//     marked unavailable — its queue is NOT touched. (DLNA/AirPlay availability
+//     keeps coming from discovery.)
+//   - Queue reclaim (6-h idle): a queue row is reclaimed only when BOTH the
+//     queue itself has not changed for 6 h AND its peer has been offline for
+//     6 h. So a client that is still connected (heartbeat / discovery) keeps
+//     its queue no matter how quiet it is — e.g. one song on repeat for hours
+//     no longer gets wiped. The same sweep runs once right after boot, so rows
+//     left behind by a container restart are reclaimed too (a peer that
+//     reconnects within the grace window keeps its queue).
+// Applies to local_queues, device_queues (dlna + airplay) and group_queues.
+// A peer entry itself is never auto-removed (UI shows "last seen" state).
 import { EventEmitter } from "events";
-import { db, sqlite } from "../db/index.js";
-import { localQueues } from "../db/schema.js";
+import { db } from "../db/index.js";
+import { localQueues, users, deviceQueues, groupQueues } from "../db/schema.js";
+import {
+  buildLocalPeerId, clientIdOfLocalPeer, userIdOfLocalPeer,
+} from "../utils/peerId.js";
 import { eq } from "drizzle-orm";
 import { getQueueManager, type QueueItem, type PlayMode, type QueueSnapshot } from "./dlna/queue.js";
 import { getCachedDevices } from "./dlna/control.js";
@@ -55,8 +67,10 @@ export interface PeerWithQueue extends Peer {
   queue?: QueueSnapshot;
 }
 
-const INACTIVE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
-const CLEANUP_INTERVAL_MS = 60 * 1000;       // 1 min
+const PEER_IDLE_TIMEOUT_MS = 10 * 60 * 1000;      // 10 min —— 仅把 local peer 标成「不在线」
+const QUEUE_TTL_MS = 6 * 60 * 60 * 1000;          // 6 h  —— 队列静默回收门槛(队列 + 播放端双条件)
+const CLEANUP_INTERVAL_MS = 60 * 1000;            // 1 min
+const BOOT_SWEEP_DELAY_MS = 20 * 1000;            // 启动后 20s:等发现/重连落位,再清扫陈旧队列
 
 class PeerManager extends EventEmitter {
   private peers = new Map<string, Peer>();
@@ -89,6 +103,19 @@ class PeerManager extends EventEmitter {
     }, CLEANUP_INTERVAL_MS);
     // Run once shortly after boot so the peer list is populated immediately.
     setTimeout(() => { this.reconcileDlnaPeers(); this.reconcileGroupPeers(); this.reconcileAirPlayPeers(); }, 5000);
+    // 重启清扫:容器重启后 DLNA/群组 peer 要等发现落位、本机 peer 要等客户端重连,
+    // 故推迟到 20s 再跑第一轮 —— 队列「6h 未变动 + 播放端离线 6h」才回收,刚播过
+    // 或刚好重连上来的队列不会被动。
+    setTimeout(() => {
+      try {
+        this.reconcileDlnaPeers();
+        this.reconcileGroupPeers();
+        this.reconcileAirPlayPeers();
+        this.runCleanup();
+      } catch (e: any) {
+        log.error(`[peer] boot queue sweep failed: ${e?.message || e}`);
+      }
+    }, BOOT_SWEEP_DELAY_MS);
     // Bridge DLNA discovery → peer availability. Whenever the device list
     // changes (refreshDevices / SSDP sweep), re-sync the dlna peer set so the
     // switcher popup and cleanup timer see fresh availability without waiting
@@ -109,9 +136,12 @@ class PeerManager extends EventEmitter {
 
   // ==================== Registration ====================
 
-  /** Register or refresh a local (Web client) peer. Returns the peer. */
-  registerLocal(userId: string, name: string): Peer {
-    const peerId = `local:${userId}`;
+  /** Register or refresh a local (Web / Flutter client) peer. Returns the peer.
+   *  clientId 是客户端自己生成并存在本地的临时端 ID:同一账号的多个客户端实例
+   *  (多个网页标签页 / 多个 Flutter 客户端)因此各占一条独立队列,互不覆盖。
+   *  不传(旧客户端)→ 退回 `local:<userId>`。 */
+  registerLocal(userId: string, name: string, clientId?: string | null): Peer {
+    const peerId = buildLocalPeerId(userId, clientId);
     const now = Date.now();
     let p = this.peers.get(peerId);
     if (!p) {
@@ -128,10 +158,22 @@ class PeerManager extends EventEmitter {
     return p;
   }
 
-  /** Heartbeat: mark the peer as alive right now. */
+  /** Heartbeat: mark the peer as alive right now.
+   *  服务端重启后 peer 表是空的,而客户端未必会立刻重新 register —— 这里对
+   *  本机 peerId 做「就地复活」:解析出 userId/clientId 后重新登记,心跳不断则
+   *  队列永远不会因静默被回收。非本机 peerId 仍返回 false(由发现流程管理)。 */
   heartbeat(peerId: string): boolean {
-    const p = this.peers.get(peerId);
-    if (!p) return false;
+    let p = this.peers.get(peerId);
+    if (!p) {
+      const uid = userIdOfLocalPeer(peerId);
+      if (!uid) return false;
+      const u = db.select().from(users).where(eq(users.id, uid)).get();
+      if (!u) return false;
+      const revived = this.registerLocal(uid, u.username || uid, clientIdOfLocalPeer(peerId));
+      if (revived.peerId !== peerId) return false;
+      log.info(`[peer] revived local peer ${peerId} from heartbeat`);
+      return true;
+    }
     const wasAvailable = p.available;
     p.available = true;
     p.lastActiveAt = Date.now();
@@ -352,6 +394,23 @@ class PeerManager extends EventEmitter {
 
   get(peerId: string): Peer | undefined {
     return this.peers.get(peerId);
+  }
+
+  /** 「对外视角」peerId → 真实 peerId。
+   *  本机播放器对外只有 `local:<userId>`(临时端 ID 不出服务端),而真实行带着
+   *  临时端 ID —— 这里在该用户已注册的实例里挑最近活跃的那一个;一个都没有
+   *  (客户端还没连上)则原样返回,等下一轮再解析。其余 kind 原样返回。 */
+  resolveVisiblePeerId(peerId: string): string {
+    if (!peerId.startsWith("local:")) return peerId;
+    if (this.peers.has(peerId)) return peerId;
+    const uid = userIdOfLocalPeer(peerId);
+    if (!uid) return peerId;
+    let best: Peer | null = null;
+    for (const p of this.peers.values()) {
+      if (p.kind !== "local" || p.userId !== uid) continue;
+      if (!best || p.lastActiveAt > best.lastActiveAt) best = p;
+    }
+    return best ? best.peerId : peerId;
   }
 
   /** Parse a peerId into its kind + raw id. Returns null if malformed. */
@@ -584,41 +643,111 @@ class PeerManager extends EventEmitter {
 
   private runCleanup(): void {
     const now = Date.now();
+    // 1) liveness:一台静默 10 分钟的本机播放器只标「不在线」(切歌器显示离线态),
+    //    队列不动 —— 队列生命周期由下面的 6h 双条件清扫决定。
+    //    DLNA/AirPlay 的可用性来自发现流程(reconcile*),不在这里改。
     for (const p of this.peers.values()) {
-      // group peers are permanent (groups exist independent of playback)
-      if (p.kind === "group") continue;
-      const idleMs = now - p.lastActiveAt;
-      if (idleMs < INACTIVE_TIMEOUT_MS) continue;
-      // Peer has been inactive past the threshold.
-      if (p.kind === "local") {
-        // Clear the local queue and mark unavailable. Keep the peer entry so
-        // a returning client can re-register; just drop its stale queue.
-        if (p.available || this.localQueueIsActive(p.peerId)) {
-          this.localClear(p.peerId);
-          p.available = false;
-          this.emit("peer_unavailable", p);
-          this.emit("peer_queue_cleared", p.peerId);
-          log.info(`[peer] local peer ${p.peerId} inactive ${Math.round(idleMs / 1000)}s, queue cleared`);
-        }
-      } else {
-        // dlna / airplay: only clear the device queue if the device is offline.
-        // 设备条目不再自动移除(由用户在「播放器」页手动删除)。
-        if (!p.available) {
-          const snap = getQueueManager().snapshot(p.deviceId!);
-          if (snap && (snap.isActive || snap.items.length > 0)) {
-            getQueueManager().clear(p.deviceId!);
-            this.emit("peer_queue_cleared", p.peerId);
-log.info(`[peer] ${p.kind} peer ${p.peerId} offline ${Math.round(idleMs / 1000)}s, queue cleared`);
-          }
-        }
+      if (p.kind !== "local") continue;
+      if (p.available && now - p.lastActiveAt >= PEER_IDLE_TIMEOUT_MS) {
+        p.available = false;
+        this.emit("peer_unavailable", p);
       }
+    }
+    // 2) queue reclaim.
+    this.sweepStaleQueues(now);
+  }
+
+  /** 队列回收:队列「6 小时未变动」且「对应播放端离线 6 小时」两个条件同时满足
+   *  才清。客户端只要还连着(本机心跳 / DLNA-AirPlay 发现在线),队列无论多安静
+   *  都保留 —— 单曲循环、长时间暂停都不会被误清。
+   *  覆盖 local_queues / device_queues(dlna+airplay)/ group_queues;启动后也会跑
+   *  一轮(重启也要清理陈旧行)。 */
+  private sweepStaleQueues(now: number): void {
+    // ---- 本机队列 ----
+    for (const r of db.select().from(localQueues).all()) {
+      if (!hasQueueItems(r.itemsJson)) continue;
+      const touched = latestTs(r.updatedAt, r.lastActiveAt);
+      if (now - touched < QUEUE_TTL_MS) continue;
+      if (this.peerActiveWithin(r.peerId, QUEUE_TTL_MS)) continue;
+      this.localClear(r.peerId);
+      this.emit("peer_queue_cleared", r.peerId);
+      log.info(`[peer] reclaim local queue ${r.peerId} (idle ${hours(now - touched)}h)`);
+    }
+    // ---- 投屏(dlna/airplay)与群组队列 ----
+    const castRows: Array<{ id: string; itemsJson: string | null; updatedAt: string | null }> = [
+      ...db.select().from(deviceQueues).all().map(r => ({ id: r.deviceId, itemsJson: r.itemsJson, updatedAt: r.updatedAt })),
+      ...db.select().from(groupQueues).all().map(r => ({ id: r.groupId, itemsJson: r.itemsJson, updatedAt: r.updatedAt })),
+    ];
+    for (const r of castRows) {
+      if (!hasQueueItems(r.itemsJson)) continue;
+      const touched = latestTs(r.updatedAt, "");
+      if (now - touched < QUEUE_TTL_MS) continue;
+      const peerId = this.findPeerIdForBareId(r.id);
+      // 找不到 peer 条目(设备/组已删除,或重启后尚未被重新发现)→ 视为离线。
+      if (peerId && this.peerActiveWithin(peerId, QUEUE_TTL_MS)) continue;
+      // clear() 停播 + 清内存队列 + 写一条空行;设备/组已被删除时(pruneOrphans 只清
+      // 内存、留着 DB 行)内存里取不到 → clear() 直接 return,这里再补删 DB 行,
+      // 避免陈旧行永久残留。
+      getQueueManager().clear(r.id);
+      deletePersistedQueue(r.id);
+      if (peerId) this.emit("peer_queue_cleared", peerId);
+      log.info(`[peer] reclaim ${peerId || r.id} queue (idle ${hours(now - touched)}h)`);
     }
   }
 
-  private localQueueIsActive(peerId: string): boolean {
-    const row = sqlite.prepare("SELECT is_active FROM local_queues WHERE peer_id = ?").get(peerId) as any;
-    return !!row?.is_active;
+  /** 该 peer 在 windowMs 内是否「活着」:存在、可用,且最后活跃时间够新。
+   *  local 的 lastActiveAt 由心跳刷新;dlna/airplay/group 由发现轮询刷新。 */
+  private peerActiveWithin(peerId: string, windowMs: number): boolean {
+    const p = this.peers.get(peerId);
+    if (!p) return false;
+    return p.available && Date.now() - p.lastActiveAt < windowMs;
   }
+
+  /** 裸 id(deviceId / groupId)→ 它当前的 peerId(优先 dlna,其次 airplay/group)。 */
+  private findPeerIdForBareId(bareId: string): string | null {
+    let fallback: string | null = null;
+    for (const p of this.peers.values()) {
+      if (p.groupId === bareId) return p.peerId;
+      if (p.deviceId === bareId) {
+        if (p.kind === "dlna") return p.peerId;
+        fallback = fallback || p.peerId;
+      }
+    }
+    return fallback;
+  }
+}
+
+/** 删掉设备/组队列的持久化行(group_queues 优先,其次 device_queues)。
+ *  设备/组已从内存/设备表删除时 clear() 够不着,靠这一步兜底清干净。 */
+function deletePersistedQueue(bareId: string): void {
+  try {
+    db.delete(groupQueues).where(eq(groupQueues.groupId, bareId)).run();
+    db.delete(deviceQueues).where(eq(deviceQueues.deviceId, bareId)).run();
+  } catch (e: any) {
+    log.error(`[peer] delete persisted queue ${bareId} failed: ${e?.message || e}`);
+  }
+}
+
+/** 队列 JSON 里是否真的还有条目(空队列/脏数据不参与回收)。 */
+function hasQueueItems(itemsJson: string | null): boolean {
+  if (!itemsJson) return false;
+  const s = itemsJson.trim();
+  return s !== "" && s !== "[]";
+}
+
+/** 取两个 ISO 时间戳里更晚的一个(ms);都无效 → 0。 */
+function latestTs(a: string | null | undefined, b: string | null | undefined): number {
+  let t = 0;
+  for (const v of [a, b]) {
+    if (!v) continue;
+    const ms = Date.parse(v);
+    if (Number.isFinite(ms) && ms > t) t = ms;
+  }
+  return t;
+}
+
+function hours(ms: number): number {
+  return Math.round(ms / 3600_000);
 }
 
 let instance: PeerManager | null = null;

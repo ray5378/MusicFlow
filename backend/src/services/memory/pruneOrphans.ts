@@ -12,6 +12,7 @@ import { getEventManager } from "../dlna/eventing.js";
 import { getGroupManager } from "../group/index.js";
 import { getAirPlayDevices } from "../airplay/discovery.js";
 import { getPlayerController, getQueueController } from "../player/index.js";
+import { getPeerManager } from "../peer.js";
 import { sweepScrobbleDedupe } from "../../plugins/scrobblers.js";
 import { db } from "../../db/index.js";
 import { users } from "../../db/schema.js";
@@ -40,9 +41,15 @@ export function pruneOrphansOnce(): void {
   getEventManager().pruneOrphans(deviceIds);
   getQueueController().pruneOrphans(deviceIds, groupIds);
 
-  // PlayerController 的 key 是 playerId(local:<uid> / dlna:<deviceId> / group:<groupId> / airplay:<deviceId>)。
+  // PlayerController 的 key 是 playerId(local:<uid>[:<clientId>] / dlna:<deviceId> /
+  // group:<groupId> / airplay:<deviceId>)。
+  // 本机播放器现在每个客户端实例一条(local:<uid>:<clientId>),必须把**已注册的**
+  // 那些也放进合法集合,否则每 10 分钟一轮的清理会把正在播的实例当孤儿删掉。
   const playerIds = new Set<string>();
   for (const uid of userIds) playerIds.add(`local:${uid}`);
+  for (const p of getPeerManager().list()) {
+    if (p.kind === "local") playerIds.add(p.peerId);
+  }
   for (const did of deviceIds) playerIds.add(`dlna:${did}`);
   for (const did of airplayIds) playerIds.add(`airplay:${did}`);
   for (const gid of groupIds) playerIds.add(`group:${gid}`);

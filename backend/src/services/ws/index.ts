@@ -36,9 +36,10 @@ import {
 import { getPeerManager } from "../peer.js";
 import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken, WsUser } from "./auth.js";
+import { sanitizeClientId, maskLocalPeerId } from "../../utils/peerId.js";
 import {
   canUseRenderer,
-  canControlPeer,
+  peerVisibleTo,
   filterPeersByAccess,
 } from "../access.js";
 import {
@@ -73,8 +74,12 @@ export function initWebSocketServer(server: import("http").Server): void {
       socket.destroy();
       return;
     }
+    // 客户端实例的临时端 ID(?clientId=)—— 与 /v1/peers 同款,本机 peer 快照
+    // 只回给发起连接的这个实例,同账号其它标签页/客户端互不可见。
+    const clientId = sanitizeClientId(url.searchParams.get("clientId"));
     wss!.handleUpgrade(req, socket, head, (ws) => {
       (ws as any).__user = user;
+      (ws as any).__clientId = clientId;
       wss!.emit("connection", ws, req);
     });
   });
@@ -123,8 +128,9 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
 // (与 /v1/peers 一致,filterPeersByAccess)。
 function sendPeerSnapshot(ws: WebSocket): void {
   const user: WsUser | undefined = (ws as any).__user;
+  const clientId: string | null = (ws as any).__clientId ?? null;
   let peers = getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) }));
-  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers);
+  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers, clientId);
   // 与 /v1/peers 完全对齐:剪掉该用户隐藏的 peer,并套用其显示名覆盖。
   const hidden = getHiddenPeerIds(user?.id ?? "");
   if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
@@ -135,6 +141,8 @@ function sendPeerSnapshot(ws: WebSocket): void {
       return override ? { ...p, name: override } : p;
     });
   }
+  // 出口打码:本机 peer 的临时端 ID 只留在服务端(与 /v1/peers 完全一致)。
+  peers = peers.map((p) => ({ ...p, peerId: maskLocalPeerId(p.peerId) }));
   send(ws, { type: "peer_snapshot", peers });
 }
 
@@ -189,15 +197,20 @@ function subscribeAndForward(ws: WebSocket): () => void {
 
   // Peer events: forward registration/availability/queue changes so the Web
   // client's player switcher stays live without polling /v1/peers.
-  // 权限:非 admin 只转发「自己的本机 peer + 被授权的设备/群组」事件(canControlPeer)。
+  // 权限:只转发「这个客户端实例自己的本机播放器 + 被授权的设备/群组」事件。
+  // 本机 peer 按客户端实例判定(peerVisibleTo)—— 同账号的另一个标签页/客户端的
+  // 队列事件不会被推到这里,避免多端互相串门。
+  // 事件里的 peerId 同样要打码(maskLocalPeerId),临时端 ID 不出服务端。
+  const clientId: string | null = (ws as any).__clientId ?? null;
   const canSeePeer = (peerId?: string) =>
     !isPeerHidden(user?.id ?? "", peerId || "")
-    && canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId || "");
-  const onPeerRegistered = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_registered", peer }); };
-  const onPeerAvailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_available", peer }); };
-  const onPeerUnavailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_unavailable", peer }); };
-  const onPeerQueue = (peerId: string, queue: any) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_changed", peer_id: peerId, queue: summarizeQueue(queue) }); };
-  const onPeerQueueCleared = (peerId: string) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_cleared", peer_id: peerId }); };
+    && peerVisibleTo(user?.id ?? "", !!user?.isAdmin, peerId || "", clientId);
+  const masked = (peer: any) => (peer ? { ...peer, peerId: maskLocalPeerId(peer.peerId) } : peer);
+  const onPeerRegistered = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_registered", peer: masked(peer) }); };
+  const onPeerAvailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_available", peer: masked(peer) }); };
+  const onPeerUnavailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_unavailable", peer: masked(peer) }); };
+  const onPeerQueue = (peerId: string, queue: any) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_changed", peer_id: maskLocalPeerId(peerId), queue: summarizeQueue(queue) }); };
+  const onPeerQueueCleared = (peerId: string) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_cleared", peer_id: maskLocalPeerId(peerId) }); };
 
   // Group events: 组创建/改名/成员变更 → 前端群组页刷新;组删除 → 移除条目。
   // 权限:群组属于播放器管理,非 admin 不转发。

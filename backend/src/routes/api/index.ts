@@ -6,6 +6,7 @@ import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, n
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import { apiError, BusinessErrorCode } from "../../utils/errors.js";
+import { sanitizeClientId, resolveLocalPeerId, maskLocalPeerId } from "../../utils/peerId.js";
 import { translate } from "../../i18n.js";
 import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
@@ -2722,8 +2723,17 @@ apiRoutes.post("/v1/dlna/devices/:deviceId/deactivate", (c) => {
 // layer, so HA and Web share the exact same queue + auto-advance logic.
 const pm = getPeerManager();
 
+/** 取出调用方上报的临时端 ID(请求头优先,其次 query)。它只在服务端内部使用,
+ *  不会出现在任何响应里(见 utils/peerId.ts 的 maskLocalPeerId)。 */
+function clientIdOf(c: any): string | null {
+  return sanitizeClientId(c.req.header("x-mf-client-id")) ?? sanitizeClientId(c.req.query("clientId"));
+}
+
+/** 解出 peerId,并把「调用方视角」的本机 peerId(local:<userId>)换算成该客户端实例
+ *  真正那一行(local:<userId>:<clientId>)。除本机外其余 peer 原样返回。 */
 function decodePeerId(c: any): string {
-  return decodeURIComponent(c.req.param("peerId") || "");
+  const raw = decodeURIComponent(c.req.param("peerId") || "");
+  return resolveLocalPeerId(raw, c.get("user")?.id ?? "", clientIdOf(c));
 }
 
 // 可投屏/可控制 peer:dlna 设备、播放器群组(group)与 AirPlay 设备(airplay)。
@@ -2740,7 +2750,9 @@ function isCastPeer(parsed: { kind: string }): boolean {
 apiRoutes.get("/v1/peers", (c) => {
   const user = c.get("user");
   let peers = pm.listWithQueues();
-  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers);
+  // 本机播放器按「调用方自己的客户端实例」过滤(见 filterPeersByAccess):
+  // 临时端 ID 由客户端以 X-MF-Client-Id 头 / ?clientId= 上报,缺省时退回旧格式。
+  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers, clientIdOf(c));
   // 按用户级隐藏:该用户在不显示自己切换弹窗里的设备/群组(不禁用,他人仍可用)。
   const hidden = getHiddenPeerIds(user?.id ?? "");
   if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
@@ -2752,6 +2764,9 @@ apiRoutes.get("/v1/peers", (c) => {
       return override ? { ...p, name: override } : p;
     });
   }
+  // 出口打码:本机 peer 的临时端 ID 只留在服务端,对客户端一律呈现规范形式
+  // local:<userId>(客户端因此完全不需要知道临时 ID 的存在)。
+  peers = peers.map((p) => ({ ...p, peerId: maskLocalPeerId(p.peerId) }));
   return c.json({ peers });
 });
 
@@ -2813,14 +2828,18 @@ apiRoutes.use("/v1/peers/:peerId", async (c, next) => {
     : c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
 });
 
-// Register/refresh the calling user's local peer. Body: { name?: string }.
+// Register/refresh the calling client's local peer. Body: { name?: string }.
 // name defaults to the username so the switcher shows a friendly label.
-apiRoutes.post("/v1/peers/register", (c) => {
+// 调用方的临时端 ID(clientId)由客户端以 X-MF-Client-Id 头 / ?clientId= 上报(也接受
+// body.clientId):每个客户端实例因此各占一条独立队列,同账号多个标签页/客户端同时
+// 登录互不覆盖。它只在服务端内部使用 —— 响应里的 peerId 一律打码回 local:<userId>。
+apiRoutes.post("/v1/peers/register", async (c) => {
   const user = c.get("user")!;
-  const body = c.req.json().catch(() => ({})) as any;
+  const body = (await c.req.json().catch(() => ({}))) as any;
   const name = (body && typeof body.name === "string" && body.name) || user.username;
-  const peer = pm.registerLocal(user.id, name);
-  return c.json({ peer });
+  const clientId = sanitizeClientId(body?.clientId) ?? clientIdOf(c);
+  const peer = pm.registerLocal(user.id, name, clientId);
+  return c.json({ peer: { ...peer, peerId: maskLocalPeerId(peer.peerId) } });
 });
 
 // Heartbeat: keep a local peer alive. Called periodically by the Web client.

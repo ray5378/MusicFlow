@@ -16,6 +16,7 @@ import {
   canControlPeer,
   peerToDeviceKey,
   filterPeersByAccess,
+  peerVisibleTo,
   getUserPermissions,
   getUserRendererGrants,
   setUserPermission,
@@ -205,10 +206,13 @@ describe("peer 判定", () => {
     expect(peerToDeviceKey("no-colon")).toBe(null);
   });
 
-  it("本机播放器 local:<userId> 恒可用", () => {
+  it("本机播放器 local:<userId>[:<clientId>] 恒可用", () => {
     const uid = mkUser();
     expect(canControlPeer(uid, false, `local:${uid}`)).toBe(true);
+    // 同一账号的任意客户端实例(带临时端 ID)也算自己的。
+    expect(canControlPeer(uid, false, `local:${uid}:web-abc123`)).toBe(true);
     expect(canControlPeer(uid, false, "local:other")).toBe(false);
+    expect(canControlPeer(uid, false, "local:other:web-abc123")).toBe(false);
   });
 
   it("filterPeersByAccess 按授权过滤(管理员全量)", () => {
@@ -223,7 +227,34 @@ describe("peer 判定", () => {
     ];
     const visible = filterPeersByAccess(uid, false, peers as any);
     expect(visible.map((p) => p.peerId).sort()).toEqual(["dlna:d1", `local:${uid}`]);
-    expect(filterPeersByAccess(uid, true, peers as any).length).toBe(4);
+    // 管理员看到全部 dlna/group/airplay…但**本机播放器只在调用方自己那条**:
+    // 管理员也看不到别的账号的本机播放器。
+    expect(filterPeersByAccess(uid, true, peers as any).map((p) => p.peerId).sort())
+      .toEqual(["dlna:d1", "dlna:d2", `local:${uid}`]);
+  });
+
+  it("本机队列按客户端实例隔离:每个端只看到自己那条(临时代理 ID 不出服务端)", () => {
+    const uid = mkUser();
+    const peers = [
+      { peerId: `local:${uid}:web-aaaaaa` },
+      { peerId: `local:${uid}:web-bbbbbb` },
+      { peerId: "dlna:d1" },
+    ];
+    // 各实例只看到自己那一条。
+    expect(filterPeersByAccess(uid, true, peers as any, "web-aaaaaa").map((p) => p.peerId))
+      .toEqual([`local:${uid}:web-aaaaaa`, "dlna:d1"]);
+    expect(filterPeersByAccess(uid, true, peers as any, "web-bbbbbb").map((p) => p.peerId))
+      .toEqual([`local:${uid}:web-bbbbbb`, "dlna:d1"]);
+    // 没上报 clientId 的老客户端 → 只认旧格式 local:<userId>(不带临时端 ID)。
+    expect(filterPeersByAccess(uid, true, peers as any).map((p) => p.peerId)).toEqual(["dlna:d1"]);
+  });
+
+  it("peerVisibleTo 与 filterPeersByAccess 同口径(WS 事件过滤复用)", () => {
+    const uid = mkUser();
+    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`, "web-aaaaaa")).toBe(true);
+    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`, "web-bbbbbb")).toBe(false);
+    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`, null)).toBe(false);
+    expect(peerVisibleTo(uid, true, "dlna:d1", null)).toBe(true);
   });
 });
 
