@@ -660,7 +660,7 @@ export const usePlayerStore = defineStore("player", () => {
         // 网络恢复后自动复活(与后端 TTL 语义一致)。
         if (verdict === "playable" || verdict === "unplayable") probeCache.set(r.songId, verdict);
         if (verdict === "unplayable") {
-          console.warn(`[player] Pre-probe unplayable → 预跳: ${r.songId} (${r.reason || "no available source"})`);
+          console.warn(`[player] Pre-probe unplayable → skip: ${r.songId} (${r.reason || "no available source"})`);
         }
       }
     } catch {
