@@ -160,6 +160,17 @@ describe("本机(local)队列接入服务端预探测", () => {
     expect(snap.preProbe!.ready).toBeGreaterThan(0);
   }, 20000);
 
+  it("本机快照带 updatedAt(客户端启动恢复新鲜度竞速依赖此字段)", async () => {
+    for (const id of ["t1", "t2"]) seed(id);
+    const pm = getPeerManager();
+    pm.localPlayFrom("local:u1", "u1", ["t1", "t2"].map(id => ({ songId: id, title: id })), 0);
+    const snap = pm.getQueueSnapshot("local:u1")!;
+    const now = Date.now();
+    // updated_at 由 SQLite 默认值(strftime ISO)生成 → 解析后应接近当前时间。
+    expect(snap.updatedAt ?? 0).toBeGreaterThan(now - 60_000);
+    expect(snap.updatedAt ?? 0).toBeLessThanOrEqual(now + 60_000);
+  }, 20000);
+
   it("localSetIndex(切歌)后重新扫描窗口", async () => {
     for (const id of ["m1", "m2", "m3", "m4"]) seed(id);
     const pm = getPeerManager();

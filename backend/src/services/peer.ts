@@ -487,25 +487,28 @@ class PeerManager extends EventEmitter {
     // 「大面积无源」提示,并可在推进前查判定结果(客户端仍保留失败兜底)。
     const pp = getPreProbeScheduler().status(peerId);
     const row = db.select().from(localQueues).where(eq(localQueues.peerId, peerId)).get();
-    if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, preProbe: pp };
+    if (!row) return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, updatedAt: 0, preProbe: pp };
     try {
       const items = JSON.parse(row.itemsJson || "[]") as QueueItem[];
       const playMode = (row.playMode as PlayMode) || "order";
+      // updatedAt:供客户端启动恢复做「本地会话 vs 服务端队列」新鲜度竞速
+      // (本地会话文件可能因历史 bug 整体陈旧,无脑信任本地会反杀服务端新队列)。
+      const updatedAt = Date.parse(row.updatedAt || "") || 0;
       // shuffle 模式下发服务端权威洗牌序列(对齐 SPEC;单曲/更少无需序列)。
       if (playMode === "shuffle" && items.length > 1) {
         const sh = this.ensureLocalShuffle(peerId, row.currentIndex, items.length);
         return {
           items, currentIndex: row.currentIndex, playMode,
-          isActive: !!row.isActive, ended: false, preProbe: pp,
+          isActive: !!row.isActive, ended: false, updatedAt, preProbe: pp,
           shuffleOrder: sh.order, shufflePos: sh.pos, shuffleEpoch: sh.epoch,
         };
       }
       return {
         items, currentIndex: row.currentIndex, playMode,
-        isActive: !!row.isActive, ended: false, preProbe: pp,
+        isActive: !!row.isActive, ended: false, updatedAt, preProbe: pp,
       };
     } catch {
-      return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, preProbe: pp };
+      return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, updatedAt: 0, preProbe: pp };
     }
   }
 
