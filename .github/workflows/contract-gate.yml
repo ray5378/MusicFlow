@@ -1,0 +1,72 @@
+name: contract-gate
+
+# 播放端契约门禁(与 MusicFlow-client 的 server-contract.yml 配对):
+# 发主仓 tag(v2.3.*)时 ——
+#   1. 起一个隔离后端实例,跑 scripts/contract_smoke.cjs(真实 HTTP 端到端,
+#      锁定「临时端 ID 打码 / 各端只见自己 / 队列按实例隔离 / 心跳复活 / 老端兼容」);
+#   2. 通过后 repository_dispatch 通知 MusicFlow-client 跑它那一侧的契约校验
+#      (需要 repo secret DISPATCH_PAT;未配置时只跳过通知,不阻断本仓门禁)。
+
+on:
+  push:
+    tags:
+      - "v2.3.*"
+  workflow_dispatch:
+
+concurrency:
+  group: contract-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-contract-smoke:
+    name: 播放端契约冒烟(真实实例端到端)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        run: cd backend && npm ci
+      - name: Build backend
+        run: cd backend && npm run build
+      - name: Start isolated backend instance
+        run: |
+          cd backend
+          DATA_DIR=$(mktemp -d) PORT=46999 node dist/index.js > /tmp/mf-smoke.log 2>&1 &
+          echo $! > /tmp/mf-smoke.pid
+      - name: Wait for backend health
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:46999/ || true)
+            if [ "$code" = "200" ]; then echo "backend healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "backend not healthy, log:"
+          tail -50 /tmp/mf-smoke.log
+          exit 1
+      - name: Run contract smoke
+        run: MF_BASE=http://127.0.0.1:46999 node scripts/contract_smoke.cjs
+      - name: Notify client repo to run its side
+        if: success()
+        env:
+          DISPATCH_PAT: ${{ secrets.DISPATCH_PAT }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$DISPATCH_PAT" ]; then
+            echo "WARN: secret DISPATCH_PAT 未配置,跳过跨仓通知(client 侧可手动 workflow_dispatch)"
+            exit 0
+          fi
+          code=$(curl -s -o /tmp/dispatch.out -w "%{http_code}" -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $DISPATCH_PAT" \
+            https://api.github.com/repos/ray5378/MusicFlow-client/dispatches \
+            -d "{\"event_type\":\"server-released\",\"client_payload\":{\"tag\":\"$TAG\"}}")
+          echo "dispatch http=$code"
+          cat /tmp/dispatch.out || true
+          if [ "$code" != "204" ]; then echo "WARN: dispatch 未成功(=$code),不影响本仓门禁"; fi
+      - name: Dump backend log on failure
+        if: failure()
+        run: tail -80 /tmp/mf-smoke.log
