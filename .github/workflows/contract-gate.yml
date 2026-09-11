@@ -39,8 +39,9 @@ jobs:
           echo $! > /tmp/mf-smoke.pid
       - name: Wait for backend health
         run: |
+          # 探 /rest/ping(CI 无前端构建,/ 会 404)
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:46999/ || true)
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:46999/rest/ping || true)
             if [ "$code" = "200" ]; then echo "backend healthy"; exit 0; fi
             sleep 2
           done
