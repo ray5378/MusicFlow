@@ -42,6 +42,7 @@ import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/pla
 // ---- renderer (device casting) ----
 import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";
 import { airplayRendererManifest, airplayRendererPlugin } from "../services/plugin/renderers/airplay.js";
+import { sendspinRendererManifest, sendspinRendererPlugin } from "../services/plugin/renderers/sendspin.js";
 // ---- artist (artist info scraping) ----
 import { artistInfoManifest, artistInfoPlugin } from "../services/plugin/artistInfo.js";
 // ---- core (服务端内置行为开关:多源组 / 播放优选,端侧零改动) ----
@@ -87,6 +88,7 @@ export const BUILTIN_COVER_PLUGINS: BuiltinPlugin[] = [];
 export const BUILTIN_RENDERER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dlnaRendererManifest, impl: dlnaRendererPlugin },
   { manifest: airplayRendererManifest, impl: airplayRendererPlugin },
+  { manifest: sendspinRendererManifest, impl: sendspinRendererPlugin },
 ];
 
 export const BUILTIN_ARTIST_PLUGINS: BuiltinPlugin[] = [
