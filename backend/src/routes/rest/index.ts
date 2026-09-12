@@ -1377,7 +1377,14 @@ async function serveTranscodedSong(
     }
   });
 
-  return new Response(child.stdout as any, {
+  // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream。
+  // 直接把 child.stdout(Node Readable) 丢进 new Response() 时,undici 在流结束处
+  // 会对 ReadableByteStreamController 调用两次 close()(child_process 的 stdout
+  // 既发 'end' 又发 'close'),在 Node 22 上抛
+  // "ReadableStream is already closed"(ERR_INVALID_STATE),导致 DLNA 音箱拉到的
+  // 转码流(ogg→mp3)直接 500、无声。toWeb 单源 close,规避该重复关闭竞态。
+  const webStream = Readable.toWeb(child.stdout as any) as any;
+  return new Response(webStream, {
     status: 200,
     headers: {
       "Content-Type": TRANSCODE_MIME[opts.format],
