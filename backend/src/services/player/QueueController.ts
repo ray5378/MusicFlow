@@ -12,6 +12,7 @@ import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
+import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { ensurePlayableStream, getCachedPlayability } from "../source/online/streamFallback.js";
 import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
@@ -30,6 +31,7 @@ function stripPlayerPrefix(playerId: string): string {
   if (playerId.startsWith("dlna:")) return playerId.slice(5);
   if (playerId.startsWith("group:")) return playerId.slice(6);
   if (playerId.startsWith("airplay:")) return playerId.slice(8);
+  if (playerId.startsWith("sendspin:")) return playerId.slice(9);
   return playerId;
 }
 
@@ -141,6 +143,30 @@ export class QueueController extends EventEmitter {
       this.queues.delete(key);
       this.clearSleepTimer(key);
       log.info(`[QueueController] unregistered AirPlay device: ${key}`);
+    }
+  }
+
+  /** Sendspin 客户端连接后注册:创建 UniversalPlayer + 绑定 Sendspin ProtocolPlayer。
+   *  与 registerDlnaDevice/registerAirPlayDevice 完全同构 —— 队列/切歌/恢复全走同一套
+   *  QueueController,满足服务端权威的所有播放模式/自动换源/跳过。 */
+  registerSendspinDevice(clientId: string, name: string): void {
+    if (this.players.has(clientId)) return;
+    const up = new UniversalPlayer(`sendspin:${clientId}`, name);
+    up.attachProtocol(createSendspinProtocolPlayer(clientId));
+    this.registerPlayer(clientId, up, getPlayerController());
+    log.info(`[QueueController] registered Sendspin client: ${clientId} (${name})`);
+  }
+
+  /** 注销全部 Sendspin player 与其队列(Sendspin 插件关闭时调用,零残留)。 */
+  unregisterSendspinDevices(): void {
+    for (const key of Array.from(this.players.keys())) {
+      const up = this.players.get(key);
+      if (!up || !up.playerId.startsWith("sendspin:")) continue;
+      this.players.delete(key);
+      this.ctrls.delete(key);
+      this.queues.delete(key);
+      this.clearSleepTimer(key);
+      log.info(`[QueueController] unregistered Sendspin client: ${key}`);
     }
   }
 

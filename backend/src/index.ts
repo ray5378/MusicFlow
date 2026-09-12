@@ -380,6 +380,20 @@ if (isAirPlayEnabled()) {
   }
 }
 
+// ==================== Sendspin (server role) renderer ====================
+// Sendspin 渲染器插件默认关闭:开启才实例化 SendspinServer 并注册客户端播放器;
+// 关闭时零常驻资源。与 DLNA/AirPlay 同为服务器权威播放器(QueueController 统一队列)。
+import { startSendspinService, stopSendspinService, isSendspinEnabled } from "./services/sendspin/index.js";
+if (isSendspinEnabled()) {
+  startSendspinService().catch((e) =>
+    log.error("[sendspin] start failed", { err: (e as Error)?.message || e }),
+  );
+}
+// 进程退出时收敛(测试/前端宿主进程优雅关闭),避免残留连接与组。
+process.once("beforeExit", () => {
+  if (isSendspinEnabled()) void stopSendspinService();
+});
+
 const port = parseInt(process.env.PORT || "46400", 10);
 
 // ==================== HA integration: WebSocket + mDNS + queue auto-next ====================

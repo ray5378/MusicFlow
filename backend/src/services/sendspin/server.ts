@@ -171,6 +171,8 @@ export class SendspinGroup {
   muted = false;
   positionMs = 0;
   timelineBaseUs = 0n;
+  /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
+  current: { songId: string; title?: string; artist?: string; durationMs: number } | null = null;
   private encoders = new Map<string, FfmpegPcmEncoder>();
 
   constructor(name: string, server: SendspinServer) {
