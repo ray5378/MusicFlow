@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "src/services/sendspin/**/*.test.ts"],
     environment: "node",
     globals: false,
     // 覆盖率报告: npm run test:coverage。阈值仅提示不阻断(存量代码未全覆盖)。
