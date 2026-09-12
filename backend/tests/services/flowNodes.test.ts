@@ -192,36 +192,36 @@ describe("音流节点引擎", () => {
     expect(h.callLog.some((x) => x === "vol:20")).toBe(false); // 失败的 20 未执行成功(只发送一次抛错)
   }, 20000);
 
-  it("volume 对账命中:发送后回读对上 → 节点完成,不重发", async () => {
-    h.gdv.mockImplementation(async () => 20); // 设备实际 20,与目标一致
+  it("volume 节点:常规路径只发一次 SetVolume,不回读不对账", async () => {
     seedFlow("f-volok", {
       waitTimeoutSec: 0, scanIntervalSec: 2,
       nodes: [
         { type: "target", targets: [DEV_A] },
-        { type: "volume", value: 20, windowMs: 2000, pollMs: 100 },
+        { type: "volume", value: 20 },
       ],
     });
     await executeFlow("f-volok", "http://test");
     expect(await waitStatus("f-volok")).toContain("success");
-    expect(h.sdv).toHaveBeenCalledTimes(1); // 只发一次,对上即完成不重发
-    expect(h.gdv).toHaveBeenCalledTimes(1); // 回读对账一次
+    expect(h.sdv).toHaveBeenCalledTimes(1); // 只发一次,常规路径,无回读/对账
+    expect(h.gdv).not.toHaveBeenCalled();   // 不再回读 GetVolume
   });
 
-  it("volume 对账窗口结束未对上 → 不中止,窗口内持续重发,继续下一节点", async () => {
-    h.gdv.mockImplementation(async () => 80); // 设备恒 80,永远对不上
+  it("volume 节点:发送一次即完事,失败后不中止,继续下一节点", async () => {
+    // 旧实现会在窗口内持续重发(gdv 恒 80 对不上);新实现只发一次,不重试、不回读。
     seedFlow("f-volwin", {
       waitTimeoutSec: 0, scanIntervalSec: 2,
       nodes: [
         { type: "target", targets: [DEV_A] },
-        { type: "volume", value: 20, windowMs: 500, pollMs: 100 },
-        { type: "volume", value: 30, windowMs: 500, pollMs: 100 },
+        { type: "volume", value: 20 },
+        { type: "volume", value: 30 },
       ],
     });
     await executeFlow("f-volwin", "http://test");
     const st = await waitStatus("f-volwin");
-    expect(st).toContain("success");                    // 对账失败不中止流程
+    expect(st).toContain("success");                          // 不中止流程
     const vol20 = h.callLog.filter((x) => x === "vol:20").length;
-    expect(vol20).toBeGreaterThan(1);                   // 窗口内对不上 → 持续重发
+    expect(vol20).toBe(1);                                   // 仅发送一次,不重试
+    expect(h.gdv).not.toHaveBeenCalled();                    // 不回读对账
     expect(h.callLog.some((x) => x === "vol:30")).toBe(true); // 后续 volume(30)节点执行
   }, 10000);
 
