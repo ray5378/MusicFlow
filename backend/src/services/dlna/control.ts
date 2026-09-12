@@ -614,9 +614,23 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   getEventManager().emit("media_changed", opts.deviceId, rt.currentMedia);
   // 起播信号:让 HA 卡片等客户端立即强制拉取最新状态(不依赖 GENA 事件/轮询周期)。
   getEventManager().emit("player_refresh", opts.deviceId, { reason: "play_started" });
-  // 新歌开始即清空位置基线(与上面 songId 检测双保险),确保 position 从 0 起算,
-  // 不会把上一首的进度带进新歌。
-  positionEstimates.delete(opts.deviceId);
+  // 新歌开始即重置位置基线为「起播锚点」:pos=0 / at=现在 / dur=歌曲时长。
+  // 某些设备(MUZO 固件)播放实时转码 chunked 流时 GetPositionInfo 恒回
+  // RelTime=0/TrackDuration=0,若基线只允许从「设备可信采样(>0)」起步,
+  // 外推永不启动,前端每 2s 轮询把进度打回 0(表现:进度条在前几秒反复回滚)。
+  // 以起播时刻为锚点,设备不报位置也能按墙上时钟单调外推;正常设备上报
+  // 真实 position 后仍以设备采样为准(见 getDeviceStatus)。
+  positionEstimates.set(opts.deviceId, {
+    pos: 0,
+    at: Date.now(),
+    dur: (() => {
+      try {
+        const row = sqlite.prepare("SELECT duration FROM songs WHERE id = ?").get(opts.songId) as any;
+        return Math.max(0, Math.round(Number(row?.duration) || 0));
+      } catch { return 0; }
+    })(),
+    trackUri: streamUrl,
+  });
 
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
@@ -925,7 +939,7 @@ export interface DeviceStatus {
 // would make the Web/HA progress bar snap back to 0 on each 2s poll. We cache
 // the last credible SOAP sample and, while PLAYING, advance it by wall-clock
 // elapsed so the reported position keeps increasing smoothly between polls.
-const positionEstimates = new Map<string, { pos: number; at: number; dur: number; trackUri?: string }>();
+const positionEstimates = new Map<string, { pos: number; at: number; dur: number; trackUri?: string; pausedAt?: number }>();
 const POSITION_ESTIMATE_MAX_AGE_MS = 30_000; // 超过此时长不再外推,避免暂停久后跳变
 
 // 记录每台设备"当前已加载曲目"的 songId,用于在不依赖 TrackURI 的情况下检测换歌,
@@ -994,7 +1008,7 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   }
   positionEstimateSong.set(deviceId, curSong);
 
-  // ---- 单调位置估计(修 DLNA 进度不前进) ----
+  // ---- 单调位置估计(修 DLNA 进度不前进/反复回滚) ----
   // 切歌(TrackURI 变化)则重置基线,避免用上一首的进度外推。
   const cachedBaseline = positionEstimates.get(deviceId);
   if (cachedBaseline && state.trackUri && cachedBaseline.trackUri && cachedBaseline.trackUri !== state.trackUri) {
@@ -1004,23 +1018,45 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   if (state.state === "PLAYING") {
     if (state.position > 0) {
       // 本次 SOAP 采样可信 -> 作为新基线(顺带记下 duration 用于封顶/兜底)。
-      positionEstimates.set(deviceId, { pos: state.position, at: sampledAt, dur: state.duration, trackUri: state.trackUri });
-    } else {
-      // 设备本次未上报 position(返回 0/未实现) -> 用上次基线 + 墙上时钟外推。
-      if (base && base.pos > 0 && Date.now() - base.at < POSITION_ESTIMATE_MAX_AGE_MS) {
-        let adv = base.pos + (Date.now() - base.at) / 1000;
+      positionEstimates.set(deviceId, { pos: state.position, at: sampledAt, dur: state.duration || base?.dur || 0, trackUri: state.trackUri });
+    } else if (base) {
+      // 设备本次未上报 position(返回 0/未实现,MUZO 播转码 chunked 流时恒如此)
+      // -> 用基线 + 墙上时钟外推。基线允许 pos=0(起播锚点)。
+      if (base.pausedAt || Date.now() - base.at >= POSITION_ESTIMATE_MAX_AGE_MS) {
+        // 暂停后恢复 / 基线过老:从冻结读数重新起算,避免把暂停时长算进进度。
+        positionEstimates.set(deviceId, { pos: base.pos, at: sampledAt, dur: base.dur, trackUri: base.trackUri });
+        state.position = base.pos;
+      } else {
+        let adv = base.pos + (sampledAt - base.at) / 1000;
         if (base.dur > 0) adv = Math.min(adv, base.dur);
         state.position = adv;
         // 刷新基线时间戳,让外推持续前进(下一次若仍 0 继续接力)。
-        positionEstimates.set(deviceId, { pos: adv, at: Date.now(), dur: base.dur, trackUri: base.trackUri });
+        positionEstimates.set(deviceId, { pos: adv, at: sampledAt, dur: base.dur, trackUri: base.trackUri });
       }
-      // 否则从未拿到过可信 position -> 保持 0
+    } else {
+      // 从未有过基线(非 castToDevice 起播,如设备自播/播报):就地播种,
+      // 让进度至少开始单调前进,而不是永远卡 0。
+      positionEstimates.set(deviceId, { pos: 0, at: sampledAt, dur: state.duration, trackUri: state.trackUri });
     }
     // duration 缺失(设备不报 TrackDuration)时用基线里记住的 duration 兜底,
     // 否则前端 tickTimer 因 duration<=0 不本地插值,进度只能靠 2s 轮询跳进。
     if (state.duration <= 0 && base && base.dur > 0) state.duration = base.dur;
+  } else if (state.state === "PAUSED_PLAYBACK" || state.state === "TRANSITIONING") {
+    // 暂停/缓冲:冻结基线而不是清除 —— 设备在这些态常回 0,若清基线,
+    // 恢复播放后外推从 0 重爬,前端表现为进度反复回滚到前几秒。
+    if (base && !base.pausedAt && state.position <= 0) {
+      // 进入暂停:把当前外推读数冻结为基线。
+      let frozen = base.pos + (sampledAt - base.at) / 1000;
+      if (base.dur > 0) frozen = Math.min(frozen, base.dur);
+      positionEstimates.set(deviceId, { pos: frozen, at: sampledAt, dur: base.dur, trackUri: base.trackUri, pausedAt: sampledAt });
+      state.position = frozen;
+    } else if (base && state.position <= 0) {
+      // 暂停持续中:回读冻结读数,不推进。
+      state.position = base.pos;
+    }
+    if (state.duration <= 0 && base && base.dur > 0) state.duration = base.dur;
   } else {
-    // 非播放态不外推,清掉基线,下次播放从 0 重新起算。
+    // 真正停止:清掉基线,下次播放从 0 重新起算。
     positionEstimates.delete(deviceId);
   }
 
