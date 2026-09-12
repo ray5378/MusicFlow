@@ -18,7 +18,7 @@ import { x25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha256";
 import { hmac } from "@noble/hashes/hmac";
 import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { aes256gcm } from "@noble/ciphers/aes.js";
+import { gcm } from "@noble/ciphers/aes.js";
 import { bytesToHex } from "./util.js";
 import { SENTINEL_PSK_HEX, SENTINEL_PSK_ID_HEX } from "./constants.js";
 
@@ -86,12 +86,12 @@ function nonceTo12(n: number, suite: NoiseSuite): Uint8Array {
 }
 
 function seal(suite: NoiseSuite, key: Uint8Array, nonce: Uint8Array, ad: Uint8Array, pt: Uint8Array): Uint8Array {
-  const c = suite === "25519_ChaChaPoly_SHA256" ? chacha20poly1305(key, nonce, ad) : aes256gcm(key, nonce, ad);
+  const c = suite === "25519_ChaChaPoly_SHA256" ? chacha20poly1305(key, nonce, ad) : gcm(key, nonce, ad);
   return c.encrypt(pt);
 }
 
 function open(suite: NoiseSuite, key: Uint8Array, nonce: Uint8Array, ad: Uint8Array, ct: Uint8Array): Uint8Array {
-  const c = suite === "25519_ChaChaPoly_SHA256" ? chacha20poly1305(key, nonce, ad) : aes256gcm(key, nonce, ad);
+  const c = suite === "25519_ChaChaPoly_SHA256" ? chacha20poly1305(key, nonce, ad) : gcm(key, nonce, ad);
   return c.decrypt(ct);
 }
 
@@ -99,7 +99,10 @@ function open(suite: NoiseSuite, key: Uint8Array, nonce: Uint8Array, ad: Uint8Ar
 export class CipherState {
   k: Uint8Array | null = null;
   n = 0;
-  constructor(private readonly suite: NoiseSuite) {}
+  readonly suite: NoiseSuite;
+  constructor(suite: NoiseSuite) {
+    this.suite = suite;
+  }
 
   hasKey(): boolean {
     return this.k !== null;
