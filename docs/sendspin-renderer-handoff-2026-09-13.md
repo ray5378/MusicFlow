@@ -162,7 +162,7 @@ Python responder 的握手互操作验证。结论：**两边手握手哈希完�
 - [x] **【P1】端到端真测试**（4 台真实 aiosendspin 玩家：握手 / server-hello→client/hello→activate / 收真实音频帧）。
 - [x] **【P1】构建/启动真实 MusicFlow**（sendspin 插件）验证注册与播放（`npm run dev` 插件启用→发现→`/v1/play`→真实推流 300 帧）。
 - [x] **额外 — peer 接口 + 客户端切换器接入**（后端 peer 补齐 + `/status`；`MusicFlow-client` `kindLabel`/徽章支持 sendspin，已 push `ffc7c4b`）。
-- [ ] **【P1】服务端权威队列全模式复测（真实设备端到端）**：自动下一曲/切歌跟随、换源回退、跳过、暂停/恢复/拖动、断连重连。
+- [x] **【P1】服务端权威队列全模式复测（真实设备端到端）**：自动下一曲/切歌跟随、换源回退、跳过、暂停/恢复/拖动、断连重连。
 - [ ] **【P2】go-music-dl 外置服务**配真实歌单并联网验证。
 - [ ] **回归与收尾**：`tsc` build + `vitest` 全部通过；输出最终报告（含客户端推送记录）。
 
