@@ -127,7 +127,7 @@ export class GroupPump {
     if (!pcm) { this.running = false; return; }
     const frameSamples = Math.floor((SAMPLE_RATE * CHANNELS * FRAME_MS) / 1000);
     const total = Math.ceil(pcm.length / frameSamples);
-    const baseTs = this.server.timelineStartUs;
+    const baseTs = this.group.timelineBaseUs;
     try {
       while (this.running && this.epoch === myEpoch) {
         // 暂停时挂起,等待 resume。

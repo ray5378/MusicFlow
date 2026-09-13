@@ -38,25 +38,27 @@ export function getSendspinServer(): SendspinServer | null {
  *  player/index → QueueController → sendspin 的模块环(TDZ on `registered`)。 */
 async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnection): Promise<void> {
   const { getQueueController } = await import("../player/index.js");
+  if (!conn.clientId) return; // activate 前不会有 clientId;防御
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   getQueueController().registerSendspinDevice(conn.clientId, conn.clientId);
 }
 
-/** 启动 Sendspin server(幂等):身份 → 实例 → 拨号已登记设备 → 注册播放器。 */
+/** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :8927/sendspin。每个客户端
+ *  完成 handshake+activate 后经 onActivated 回调注册为 QueueController 播放器。 */
 export async function startSendspinService(): Promise<SendspinRuntime> {
   const cur = getServer();
   if (cur) {
     return { server: cur, identity: cur.identity };
   }
   const identity = await loadOrCreateIdentity(path.join(identityDir));
-  const srv = await SendspinServer.create({ pairkeys: identity, identityDir, serverName: "MusicFlow Sendspin" });
+  const srv = await SendspinServer.create({
+    pairkeys: identity,
+    identityDir,
+    serverName: "MusicFlow Sendspin",
+    onActivated: (conn) => void registerServerPlayer(srv, conn),
+  });
   setServer(srv);
-
-  // 拨号当前已登记设备;就绪后注册播放器。拨号失败/离线不影响服务启动。
-  await srv.dialAll().catch((e) => log.warn(`sendspin dialAll: ${e?.message || e}`));
-  for (const conn of srv.clients.values()) {
-    if (conn.ready) await registerServerPlayer(srv, conn);
-  }
+  await srv.listen(); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
   log.info(`sendspin server started: ${srv.serverId}`);
   return { server: srv, identity };
 }

@@ -19,7 +19,8 @@ import { sha256 } from "@noble/hashes/sha256";
 import { hmac } from "@noble/hashes/hmac";
 import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { gcm } from "@noble/ciphers/aes.js";
-import { bytesToHex } from "./util.js";
+import { Buffer } from "node:buffer";
+import { b64urlEncode, bytesToHex } from "./util.js";
 import { SENTINEL_PSK_HEX, SENTINEL_PSK_ID_HEX } from "./constants.js";
 
 export type NoiseSuite = "25519_ChaChaPoly_SHA256" | "25519_AESGCM_SHA256";
@@ -430,9 +431,12 @@ export function asInitiator(args: {
   });
 }
 
-/** The plaintext JSON payload sent as handshake msg1. */
+/** The plaintext JSON payload sent as handshake msg1.
+ *  `psk_id` is transmitted base64url — the exact form the client's psk_resolver
+ *  keys on (see aiosendspin `psk_id_for`, which returns b64url). */
 export function handshakePayload1(pskHex: string): Uint8Array {
-  const pskId = pskHex === SENTINEL_PSK_HEX ? SENTINEL_PSK_ID_HEX : "";
+  const pskId =
+    pskHex === SENTINEL_PSK_HEX ? b64urlEncode(Buffer.from(SENTINEL_PSK_ID_HEX, "hex")) : "";
   return new TextEncoder().encode(
     JSON.stringify({ psk_id: pskId, psk_category: "sn" }),
   );

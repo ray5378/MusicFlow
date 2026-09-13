@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { x25519 } from "@noble/curves/ed25519";
 import { asInitiator, asResponder, type NoiseSession } from "./handshake.js";
-import { PROLOGUE } from "./server.js";
 import { SENTINEL_PSK_HEX } from "./constants.js";
 
 const psk = Buffer.from(SENTINEL_PSK_HEX, "hex");
+// 自环测试用任意固定 prologue(与线上 client/init+server/init 拼接无关)。
+const PROLOGUE = "prologue";
 
 /** 双方用同一套 code 自环,验证 KKpsk2 协商 + 传输加解密全对。 */
 describe("sendspin handshake roundtrip", () => {

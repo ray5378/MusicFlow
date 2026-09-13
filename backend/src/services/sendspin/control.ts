@@ -19,7 +19,7 @@ import type { QueueItem } from "../player/types.js";
 export async function listSendspinPlayers(): Promise<RendererDevice[]> {
   const srv = getSendspinServer();
   if (!srv) return [];
-  const ids = new Set([...srv.clients.keys(), ...srv.registry.keys()]);
+  const ids = new Set([...srv.clients.keys()]);
   return [...ids].map((clientId) => ({
     id: clientId,
     name: clientId,
