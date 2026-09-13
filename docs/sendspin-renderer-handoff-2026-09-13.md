@@ -10,6 +10,33 @@
 
 ---
 
+## 0. 进度更新（每个阶段性任务完成后追加最新一条，勿覆盖历史）
+
+- **2026-09-13 — peer 接口补齐 + musicflow-client 切换器接入（已完成并把客户端改动推送到 GitHub）**
+  - 后端：`PeerKind` 加 `sendspin`；`peer.ts` 新增 `registerSendspin/removeSendspinPeer(s)`、`parse` 支持 `sendspin:`、
+    `KIND_RANK` 与 dlna/airplay 同级；`access.ts::peerToDeviceKey`、`api/index.ts::isCastPeer` 支持 sendspin；
+    `/v1/peers/:id` 的 play/pause/stop/seek/volume 加 sendspin 分支。
+  - sendspin 播放器注册时同步 `registerSendspin` peer，断开/停服时移除 → 前端切换器与 `/v1/play` 可发现并投送。
+  - **关键补齐**：`/v1/peers/:id/status` 原对 sendspin 落到队列快照（无 state/position/duration）→ 新增
+    `QueueController.getPlayerState()` + `/status` sendspin 分支（由推流引擎驱动 position/duration）。客户端 `_tick` 进度条恢复。
+  - 客户端（`ray5378/MusicFlow-client`，遥控模式本已 kind 无关）：`PeerInfo.kindLabel` 加 `'sendspin' => 'Sendspin'`；
+    切换器徽章 `_DlnaBadge`（写死「DLNA」）改为 `_PeerBadge(label: peer.kindLabel)`，顺带修掉 airplay/group 被误标 DLNA。
+  - 客户端改动已提交 `ffc7c4b` 并 push `origin/main`（`dd16253..ffc7c4b`）。
+  - 回归：`tsc --noEmit` ✅ 0 错误；`vitest run tests/sendspin` ✅ 13/13。注：沙箱无 Flutter SDK，客户端未跑 `flutter analyze`。
+
+- **2026-09-13 — 真实主进程全链路（npm run dev 走插件启用→发现→播放）**
+  - `npm run dev` 起真实 MusicFlow :46400；`PUT /plugins/sendspin-renderer/toggle` 联动拉起 8927 sendspin 监听器。
+  - 4 台真实 aiosendspin 玩家直连：handshake OK → server/hello → server/activate(player@v1)，各注册为 QueueController 播放器；
+    `/v1/peers` 返回 4 个 `kind=sendspin, available=true`。
+  - `POST /v1/play` 投送 → 客户端实测收到 **300 帧 opus（0.24MB，0→2.98s，整首 3s）**，进程内 @discordjs/opus 逐帧编码 + 真实时间推流。
+
+- **2026-09-13（交接前已达成）**：P0 重写 `server.ts` 为 WebSocket 监听器（明文 TEXT `client/init`→`server/init`，
+  服务端做 Noise initiator，加密 transport 收发框架+分片）；post-handshake（`server/hello`→`client/hello`→`server/activate`）；
+  P1 推流接通（`streamEngine` 解码→PCM→@discordjs/opus 逐帧编码→`group.pushFrame`，真实时间推进驱动 auto-advance）；
+  队列全模式单元级复测（`tests/sendspin/queueModes` 及 `protocolPlayer.test.ts`）。
+
+---
+
 ## 1. 目标（原始需求）
 
 1. 启动**真实的 MusicFlow** 并加载 Sendspin 插件，而不只是跑单元测试。
@@ -90,30 +117,20 @@ Python responder 的握手互操作验证。结论：**两边手握手哈希完�
 
 ---
 
-## 4. 待办（按依赖顺序）
+## 4. 待办（已按进度勾选完成项；未勾者为剩余任务）
 
-> ⚠️ **最重要的一句话**：当前 `server.ts` 走的是「服务端主动拨号、滚回二进制帧做 initiator」的**错误模型**。
-> 真实 aiosendspin 协议是**客户端拨入 + 服务端做 Noise initiator + 明文 TEXT 帧交换 init**。这是必须重写的地方。
+> 当前 `server.ts` 已按监听器模型运行，进度见第 0 节；以下为剩余待办。
 
-1. **【P0】重写 `server.ts` 为 WebSocket 监听器**（`ws` 的 `WebSocketServer`，监听 `:8927/sendspin`）。
-   - 接收客户端 `client/init`（TEXT）→ 回 `server/init`（TEXT）。
-   - `prologue = client_init_text + server_init_text`（原始 UTF-8 拼接）。
-   - 服务端做 Noise initiator：写消息1（负载 `JSON.stringify({psk_id})`）→ 读消息2（明文部分预期 `{}`）。
-   - 之后进入加密 transport 模式（JSON 帧 = `[0x00]+json`；二进制帧由调用方带类型字节）。
-   - `index.ts#startSendspinService` 相应从「拨号已登记设备」改为「listen + 连接就绪时注册播放器」。
-   - 明文阶段全部用 **TEXT 帧 + JSON 信封**：`{type, payload}`；`noise/handshake` 的 `data` 为 base64url。
-2. **【P0】post-handshake 应用协议**（`messages.ts`/`roles/` 补齐）：
-   - 服务端先发 `server/hello{payload:{name}}`；等客户端 `client/hello`（带 `supported_roles`/`client_id` 等）；
-     回 `server/activate{payload:{activities:[...]}}`。
-   - 之后处理 `client/state`、`server/time`（时间同步）等；至少不崩、能解析。
-3. **【P1】接通推流**：`streamEngine` 解码→PCM→分帧，经 `group.pushFrame(baseTs + t, pcm)` 推给各客户端
-   （加密 + `0x04` + 时间戳 + PCM/编码数据），并同步 `group.positionMs/current` 以驱动真实 auto-advance。
-   `protocolPlayer.pause/resume/seek` 目前是 stub→接 `GroupPump` 的 pause/resume/seek。
-4. **【P1】端到端真测试**：用真实 aiosendspin 在**本机起 4 台接收播放器**（`ws://127.0.0.1:8927`），
-   验证：(a) 真握手成功；(b) 收到 server/hello→发 client/hello→收到 activate；(c) 收到真实音频帧。
-5. **【P1】构建/启动真实 MusicFlow**（sendspin 插件）验证注册与播放。
-6. **【P1】服务端权威队列全模式复测**（顺序/单曲/循环/随机、自动下一曲、换源回退、跳过、暂停/恢复/拖动）。
-7. **【P2】go-music-dl 外置服务**配真实歌单并联网验证；回归 `tsc` build + `vitest` 全部通过；输出最终报告。
+- [x] **【P0】重写 `server.ts` 为 WebSocket 监听器**（`ws` 的 `WebSocketServer`，监听 `:8927/sendspin`）。
+- [x] **【P0】post-handshake 应用协议**（`server/hello`→`client/hello`→`server/activate`、`client/state`、`server/time`）。
+- [x] **【P1】接通推流**（`streamEngine` 解码→PCM→@discordjs/opus 逐帧编码→推给 4 台玩家；`group.positionMs` 驱动真实 auto-advance；
+  `protocolPlayer.pause/resume/seek` 接 GroupPump）。
+- [x] **【P1】端到端真测试**（4 台真实 aiosendspin 玩家：握手 / server-hello→client/hello→activate / 收真实音频帧）。
+- [x] **【P1】构建/启动真实 MusicFlow**（sendspin 插件）验证注册与播放（`npm run dev` 插件启用→发现→`/v1/play`→真实推流 300 帧）。
+- [x] **额外 — peer 接口 + 客户端切换器接入**（后端 peer 补齐 + `/status`；`MusicFlow-client` `kindLabel`/徽章支持 sendspin，已 push `ffc7c4b`）。
+- [ ] **【P1】服务端权威队列全模式复测（真实设备端到端）**：自动下一曲/切歌跟随、换源回退、跳过、暂停/恢复/拖动、断连重连。
+- [ ] **【P2】go-music-dl 外置服务**配真实歌单并联网验证。
+- [ ] **回归与收尾**：`tsc` build + `vitest` 全部通过；输出最终报告（含客户端推送记录）。
 
 ---
 
