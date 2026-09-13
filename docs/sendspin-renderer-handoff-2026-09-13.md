@@ -12,6 +12,22 @@
 
 ## 0. 进度更新（每个阶段性任务完成后追加最新一条，勿覆盖历史）
 
+- **2026-09-13 — P2 终验：模拟 sendspin 客户端实播 go-music-dl 歌曲（成功收到真实音频帧）**
+  - 背景：P2 的真正验收是「**通过启动模拟 sendspin 播放并确认成功播出**」，不止步于歌单同步/网提取流。
+  - 链路：同一后端 :46401 同时启用 **sendspin-renderer**（拉起 :8927）与 **go-music-dl**（真歌单入库）。
+    - `PUT /v1/plugins/sendspin-renderer/toggle` → 8927 监听拉起；身份在 `backend/data/sendspin/identity.key`
+      （sendspin 读 `MUSICFLOW_DATA_DIR`，与后端 `DATA_DIR` 不同；server_id=`ybpcwCAJ316UkjZiJeWtCp9yPwxZV14Mb-bmFlkTjW4`，
+      psk 走默认 `pairingPskHex` 常量 `1b5e24db…27b9d3`）。
+    - 忠实协议客户端 `scripts/sendspin-client-sim.mjs <server_id> <psk_hex>` 以 Noise KKpsk2 responder 直连
+      :8927/sendspin，`client/init→noise→activate` 注册为 `sendspin:Eob7pTpU…` peer（`available:true`）。
+  - **实播**：`POST /v1/play {peerId:"sendspin:Eob7pTpU…", type:"song", id:"35a19b54-130d-4a18-8144-7a8d73d575cd",
+    playMode:"order"}` → 投送真实 go-music-dl 在线歌「有梦可待」（网易源，`206 audio/mpeg`）。
+    - 客户端**实时续收真实 opus 音频帧**：550+ 帧，ts 推进至 ~11s，每帧 ~770B，`active=true` 持续增长。
+    - `/v1/peers/:peerId/status` → `{state:"PLAYING", position:18.4, duration:228.99}`（服务端权威推流驱动）。
+  - 说明：取库内 go-music-dl 歌直连探测时随机命中 206 的比例约 1/6~1/8（平台对部分歌曲流解析失败返回 404），
+    需选一首 `206 audio/mpeg` 的入库歌投送；streamEngine fetch→ffmpeg 解码→@discordjs/opus 编码→推流全链路在真实曲目上成立。
+  - 回归：`tsc --noEmit` + `vitest run tests/plugins`（沙箱 mock host.http 用例重演同解析路径）。
+
 - **2026-09-13 — P2 go-music-dl 外置服务配真实歌单并联网验证（已完成，全绿）**
   - 环境：外置 go-music-dl 服务部署于 **:18090**（源码 `guohuiyuan/go-music-dl` Go 编译，`/music` 为 Web 基路径，
     `web --port 18090 --no-browser`）；后端真实主进程 `DATA_DIR=/tmp/mf-p2-e2e PORT=46401`。
