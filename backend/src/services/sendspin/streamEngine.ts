@@ -145,9 +145,13 @@ export class GroupPump {
           break; // 连接断开等:停止推流(状态由 QueueController 处理)。
         }
         this.group.positionMs = Math.min(this.durationMs, i * FRAME_MS + FRAME_MS);
-        // 按真实时间推进(倍速压缩 sleep)。
-        const target = (i + 1) * FRAME_MS / this.speed;
-        if (target > 0) await sleep(target - Math.min(this.durationMs / this.speed, target));
+        // 按真实时间推进: 每推一帧 sleep 一帧的真实墙钟时长(倍速压缩)。
+        // ⚠️ 此前 `sleep((i+1)*FRAME_MS/speed - min(duration/speed, ...))` 对所有
+        // start<duration 的帧算出 sleep(0) → 整个音频瞬间推完 → poll 先于乐观窗口
+        // 错过 PLAYING → 5s 后 stalled 重播当前首,队列永不自动切歌(见引擎头部说明)。
+        // 正确节奏 = FRAME_MS 一帧,总墙钟 ≈ durationMs/speed,PLAYING 在结束前可观测。
+        const perFrameMs = FRAME_MS / this.speed;
+        await sleep(perFrameMs);
       }
       if (this.epoch === myEpoch) {
         this.running = false;

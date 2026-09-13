@@ -46,8 +46,14 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       g.positionMs = 0;
       g.current = null;
     },
-    async pause() {},
-    async resume() {},
+    async pause() {
+      const srv = getServer();
+      if (srv) pumpFor(srv, srv.group(clientId)).pause();
+    },
+    async resume() {
+      const srv = getServer();
+      if (srv) pumpFor(srv, srv.group(clientId)).resume();
+    },
     async seek(seconds: number) {
       const g = groupOf(clientId);
       g.positionMs = Math.max(0, seconds * 1000);
