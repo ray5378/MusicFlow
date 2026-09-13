@@ -32,6 +32,11 @@
     （平台对受版权/区域/DRM 歌曲流解析失败，属单曲正常失败，不影响整体）。
   - 说明：关键词同步任务为长任务（多关键词 × 多平台 × 每 playlist 逐曲拉取），触发后持续在后台推进；
     任务经 `GET /v1/plugins/go-music-dl/job` 轮询（`runDailyJob` 长预算，不在 15s 沙箱墙钟内卡死）。
+    - **真实发现（资源限制）**：本次全量爬取最终以 `job.status=error` 结束，`error="批量子进程异常退出
+      (code=null, signal=SIGKILL)"`，发生在已入库 **282 张歌单 / 1075 首歌曲**之后 → 大批量多平台聚合时批量子进程
+      **内存超限被 OOM SIGKILL**（QuickJS 沙箱并行持有大量曲目元数据）。同步幂等可续：已入库歌单/歌曲自动跳过，
+      重触 `POST /v1/recommend/refresh {pluginId}` 即可续爬增补。后续优化方向：缩少 `sources` 平台数 / 关键词，
+      或分平台多次 run 以控内存。
   - 回归：`tsc --noEmit` + `vitest run tests/plugins`（沙箱 mock host.http 用例重演同解析路径）。
 
 - **2026-09-13 — P1#6 真实设备断连重连复测 + 修复断连清理 Bug（P1#6 至此全量含断连重连验收完成）**
