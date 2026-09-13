@@ -2810,6 +2810,28 @@ apiRoutes.post("/v1/sendspin/approve", adminMiddleware, async (c) => {
   return c.json({ success: true });
 });
 
+// 服务端主动拨号:给监听中的播放器(:8928)打过去(见 spec server-initiated)。
+// Body: { host: "192.168.1.50", port?: 8928 }。走完全套 Noise+激活,成功即注册 peer。
+apiRoutes.post("/v1/sendspin/dial", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const host = typeof body.host === "string" ? body.host.trim() : "";
+  const port = body.port === undefined ? 8928 : Number(body.port);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.badDialTarget"), 400);
+  }
+  if (/[^a-zA-Z0-9.\-_:]/.test(host)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.badDialTarget"), 400);
+  }
+  try {
+    const conn = await srv.dialPlayer(`ws://${host}:${port}/sendspin`);
+    return c.json({ success: true, clientId: conn.clientId, name: conn.name });
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.dialFailed"), 500);
+  }
+});
+
 apiRoutes.post("/v1/sendspin/unpair", adminMiddleware, async (c) => {
   const srv = sendspinServerOr404(c);
   if (!srv?.pairingStore) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);

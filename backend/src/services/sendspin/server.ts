@@ -124,6 +124,45 @@ export class SendspinServer {
     this.log("info", `new connection from ${ws.url ?? "(client)"}`);
   }
 
+  /** 服务端主动拨号(见 spec server-initiated):拨玩家 :8928/sendspin。
+   *  WS 方向反转而已,后续 client/init→Noise→hello/activate 与拨入完全一致
+   *  (Noise initiator 恒为服务端)。成功返回激活后的连接(已注册 peer)。 */
+  async dialPlayer(url: string, timeoutMs = 15000): Promise<SendspinConnection> {
+    const ws = new WebSocket(url);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        try { ws.terminate(); } catch { /* ignore */ }
+        reject(new Error("dial timeout"));
+      }, timeoutMs);
+      ws.once("open", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.once("error", (e) => {
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error("dial failed"));
+      });
+    });
+    const before = new Set(this.clients.keys());
+    const conn = new SendspinConnection(this, ws);
+    this.log("info", `dialed ${url},等激活`);
+    const t0 = Date.now();
+    for (;;) {
+      for (const [id, c] of this.clients) {
+        if (!before.has(id) && c === conn) return c;
+      }
+      // 连接已死直接报错,不傻等超时。
+      if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        throw new Error("连接在激活前断开(对方可能拒绝了握手)");
+      }
+      if (Date.now() - t0 > timeoutMs) {
+        try { ws.terminate(); } catch { /* ignore */ }
+        throw new Error("activation timeout");
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
   /** 连接完成 server/activate 后注册为可播播放器(由 index.ts 注入)。 */
   onConnectionActivated(conn: SendspinConnection): void {
     this.clients.set(conn.clientId!, conn);

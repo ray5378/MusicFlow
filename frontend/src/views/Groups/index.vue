@@ -146,6 +146,59 @@
       </div>
     </div>
 
+    <!-- Sendspin 设备管理(客户端拨入为主;也可手动拨号添加;配对/批准在设置页) -->
+    <div class="devices-section" style="margin-top: 28px">
+      <div class="section-head">
+        <h3>{{ t('groups.sendspinDevices') }}</h3>
+        <el-button size="small" :loading="loadingSendspin" @click="loadSendspinClients"><MfIcon name="RefreshCw" />{{ t('groups.refresh') }}</el-button>
+        <el-button v-if="canManage" size="small" type="primary" @click="showDialDialog = true"><MfIcon name="Plus" />{{ t('groups.sendspinAdd') }}</el-button>
+      </div>
+      <div class="section-note">{{ t('groups.sendspinNote', { url: sendspinUrl }) }}</div>
+      <div class="devices-box" v-loading="loadingSendspin">
+        <div v-for="dev in sendspinClients" :key="dev.clientId" class="device-row">
+          <MfIcon name="Speaker" class="device-row-icon" />
+          <div class="device-row-info">
+            <div class="device-row-name">
+              {{ deviceDisplayName(dev, `sendspin:${dev.clientId}`) }}
+              <el-tag v-if="isDeviceRenamed(dev, `sendspin:${dev.clientId}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+              <el-tag v-if="dev.paired" size="small" type="success" style="margin-left: 6px">{{ t('groups.sendspinPaired') }}</el-tag>
+              <el-tag v-else-if="dev.legacy" size="small" type="warning" style="margin-left: 6px">{{ t('groups.sendspinLegacy') }}</el-tag>
+              <el-tag v-else size="small" type="info" style="margin-left: 6px">{{ t('groups.sendspinUnpaired') }}</el-tag>
+              <el-tag v-if="!dev.paired && !dev.legacy && dev.approved" size="small" style="margin-left: 6px">{{ t('groups.sendspinApproved') }}</el-tag>
+            </div>
+            <div class="device-row-meta">{{ shortClientId(dev.clientId) }} · {{ (dev.roles || []).join(", ") }}</div>
+          </div>
+          <div class="device-row-actions">
+            <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
+              <el-switch
+                :model-value="isHidden(`sendspin:${dev.clientId}`)"
+                @change="(v: any) => setPeerHidden(`sendspin:${dev.clientId}`, !!v)"
+                inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
+              />
+            </div>
+            <el-button v-if="canUse && !dev.paired && !dev.legacy" size="small" @click="goPairing"><MfIcon name="KeyRound" />{{ t('groups.sendspinPair') }}</el-button>
+            <el-button v-if="canManage && !dev.paired && !dev.legacy" size="small" @click="approveSendspin(dev, !dev.approved)">{{ dev.approved ? t('groups.sendspinUnapprove') : t('groups.sendspinApprove') }}</el-button>
+            <el-popconfirm
+              v-if="canManage && dev.paired"
+              :title="t('groups.sendspinUnpairConfirm', { name: deviceDisplayName(dev, `sendspin:${dev.clientId}`) })"
+              :confirm-button-text="t('common.confirm')"
+              :cancel-button-text="t('common.cancel')"
+              width="280"
+              @confirm="unpairSendspin(dev)"
+            >
+              <template #reference>
+                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('groups.sendspinUnpair') }}</el-button>
+              </template>
+            </el-popconfirm>
+            <el-button v-if="canUse" size="small" @click="openRenameSendspinDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
+          </div>
+        </div>
+        <div v-if="!loadingSendspin && sendspinClients.length === 0" class="device-empty">
+          {{ t('groups.noSendspinDevices') }}
+        </div>
+      </div>
+    </div>
+
     <div class="section-head group-section-head">
       <h3>{{ t('groups.groupsTitle') }}</h3>
     </div>
@@ -289,12 +342,26 @@
         <el-button type="primary" :loading="saving" @click="saveRenameDevice">{{ t('common.save') }}</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showDialDialog" :title="t('groups.sendspinAdd')" width="420px" :append-to-body="true">
+      <div class="form-tip">{{ t('groups.sendspinDialTip') }}</div>
+      <el-input v-model="dialHost" :placeholder="t('groups.sendspinDialPh')" clearable @keyup.enter="dialPlayer" />
+      <div style="margin-top: 10px; display: flex; gap: 8px; align-items: center">
+        <span style="font-size: 12px; color: var(--fnos-text-secondary)">{{ t('groups.sendspinDialPort') }}</span>
+        <el-input-number v-model="dialPort" :min="1" :max="65535" size="small" />
+      </div>
+      <template #footer>
+        <el-button @click="showDialDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :loading="dialing" @click="dialPlayer">{{ t('common.confirm') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
+import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import { useAuthStore } from "@/stores/auth";
@@ -305,6 +372,7 @@ import { useCopy } from "@/composables/useCopy";
 
 const { copy } = useCopy();
 const { t } = useI18n();
+const router = useRouter();
 
 const authStore = useAuthStore();
 // 使用能力:管理员或具 renderer.use。拥有 use 的普通用户可:新建/删除自己的群组、扫描、
@@ -410,7 +478,10 @@ async function saveRenameDevice() {
   const alias = renameDeviceName.value.trim();
   if (!renameDeviceTarget.value || saving.value) return;
   const isAirPlay = !!renameDeviceTarget.value.isAirPlay;
-  const peerId = `${isAirPlay ? "airplay" : "dlna"}:${renameDeviceTarget.value.id}`;
+  const isSendspin = !!renameDeviceTarget.value.isSendspin;
+  const peerId = renameDeviceTarget.value.isSendspin
+    ? `sendspin:${renameDeviceTarget.value.id}`
+    : `${isAirPlay ? "airplay" : "dlna"}:${renameDeviceTarget.value.id}`;
   saving.value = true;
   try {
     // 按用户级改名:只改我自己看到的显示名,他人/设备原始名不受影响。
@@ -468,6 +539,80 @@ function openRenameAirPlayDevice(dev: any) {
   renameDeviceTarget.value = { ...dev, isAirPlay: true };
   renameDeviceName.value = playerStore.getPeerName(`airplay:${dev.id}`) || dev.alias || "";
   showRenameDeviceDialog.value = true;
+}
+
+// ---- Sendspin 设备管理(在线客户端;拨入为主,也可手动拨号添加) ----
+const sendspinClients = ref<any[]>([]);
+const loadingSendspin = ref(false);
+const showDialDialog = ref(false);
+const dialHost = ref("");
+const dialPort = ref(8928);
+const dialing = ref(false);
+
+const sendspinUrl = computed(() => `ws://${window.location.hostname}:8927/sendspin`);
+
+function shortClientId(id: string) {
+  return id && id.length > 20 ? `${id.slice(0, 10)}…${id.slice(-6)}` : (id || "");
+}
+
+async function loadSendspinClients(): Promise<void> {
+  loadingSendspin.value = true;
+  try {
+    const res = await api.get("/rest/api/v1/sendspin/clients");
+    sendspinClients.value = res.data?.clients || [];
+  } catch { sendspinClients.value = []; }
+  finally { loadingSendspin.value = false; }
+}
+
+async function dialPlayer(): Promise<void> {
+  const host = dialHost.value.trim();
+  if (!host || dialing.value) return;
+  dialing.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/sendspin/dial", { host, port: dialPort.value });
+    if (res.data?.success) {
+      ElMessage.success(t("groups.sendspinDialOk", { name: res.data?.name || res.data?.clientId || host }));
+      showDialDialog.value = false;
+      dialHost.value = "";
+      await loadSendspinClients();
+    } else {
+      ElMessage.error(res.data?.error || t("groups.sendspinDialFailed"));
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("groups.sendspinDialFailed"));
+  } finally {
+    dialing.value = false;
+  }
+}
+
+function openRenameSendspinDevice(dev: any) {
+  renameDeviceTarget.value = { ...dev, id: dev.clientId, isSendspin: true };
+  renameDeviceName.value = playerStore.getPeerName(`sendspin:${dev.clientId}`) || dev.name || "";
+  showRenameDeviceDialog.value = true;
+}
+
+async function approveSendspin(dev: any, approved: boolean): Promise<void> {
+  try {
+    await api.post("/rest/api/v1/sendspin/approve", { clientId: dev.clientId, approved });
+    ElMessage.success(t("settings.saved"));
+    await loadSendspinClients();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+  }
+}
+
+async function unpairSendspin(dev: any): Promise<void> {
+  try {
+    await api.post("/rest/api/v1/sendspin/unpair", { clientId: dev.clientId });
+    ElMessage.success(t("settings.saved"));
+    await loadSendspinClients();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+  }
+}
+
+function goPairing(): void {
+  router.push({ name: "Settings" });
 }
 
 async function removeAirPlayDevice(dev: any) {
@@ -600,7 +745,7 @@ function controlGroup(g: any) {
 // player store bumps groupVersion so this page reloads live (no polling).
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
-onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); playerStore.loadHiddenPrefs(); playerStore.loadNamePrefs(); });
+onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); loadSendspinClients(); playerStore.loadHiddenPrefs(); playerStore.loadNamePrefs(); });
 </script>
 
 <style lang="scss" scoped>
