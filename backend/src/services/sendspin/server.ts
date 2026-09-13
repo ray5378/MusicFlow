@@ -27,7 +27,7 @@ import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
-import { FfmpegPcmEncoder, type SendspinCodec } from "./encoding.js";
+import { createChunkEncoder, type ChunkEncoder, OPUS_FRAME_MS, type SendspinCodec } from "./encoding.js";
 import { computeCommonSendAhead } from "./group.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 
@@ -170,7 +170,7 @@ export class SendspinGroup {
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
   current: { songId: string; title?: string; artist?: string; durationMs: number } | null = null;
-  private encoders = new Map<string, FfmpegPcmEncoder>();
+  private encoders = new Map<string, ChunkEncoder>();
 
   constructor(name: string, server: SendspinServer) {
     this.name = name;
@@ -189,11 +189,11 @@ export class SendspinGroup {
     if (this.muted || c.muted) return 0;
     return Math.min(100, Math.max(0, Math.round((c.volume * this.volume) / 100)));
   }
-  encoderFor(c: SendspinConnection): FfmpegPcmEncoder {
+  encoderFor(c: SendspinConnection): ChunkEncoder {
     const key = `${c.clientId}:${c.codec}`;
     let e = this.encoders.get(key);
     if (!e) {
-      e = new FfmpegPcmEncoder(c.codec);
+      e = createChunkEncoder(c.codec);
       this.encoders.set(key, e);
     }
     return e;
@@ -209,8 +209,11 @@ export class SendspinGroup {
     for (const c of this.members) {
       const gain = c.appliedGain();
       const enc = this.encoderFor(c);
-      const data = await enc.encode(this.scalePcm(pcm, gain));
-      if (data.length > 0) c.sendAudio(tsUs, data);
+      const chunks = await enc.encode(this.scalePcm(pcm, gain));
+      // opus 每 20ms 一裸包;多包时时间戳按帧长递增,对齐 MA 每包一次性的 psg 推送。
+      chunks.forEach((data, i) => {
+        c.sendAudio(tsUs + BigInt(i * OPUS_FRAME_MS) * 1000n, data);
+      });
     }
   }
   close(): void {

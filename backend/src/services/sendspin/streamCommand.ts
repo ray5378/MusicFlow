@@ -44,7 +44,7 @@ export function buildStreamStart(params: StreamParams): { type: string; payload:
   } else if (codec === "flac") {
     payload.containers = ["flac"];
   } else if (codec === "opus") {
-    payload.containers = ["ogg"];
+    // 裸 opus 包,无容器(对标 MusicAssistant)。不加 containers 字段。
   }
   return { type: "server/command.stream." + codec, payload };
 }
