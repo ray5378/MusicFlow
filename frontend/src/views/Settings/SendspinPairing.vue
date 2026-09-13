@@ -10,7 +10,7 @@
       <div class="setting-value"><el-button size="small" :loading="loading" @click="load">{{ t('settings.sendspin.refresh') }}</el-button></div>
     </div>
     <div v-if="!enabled" class="sp-hint">{{ t('settings.sendspin.disabled') }}</div>
-    <el-table v-else :data="clients" size="small" style="width: 100%" :empty-text="t('settings.sendspin.empty')">
+    <el-table v-else :data="visibleClients" size="small" style="width: 100%" :empty-text="t('settings.sendspin.empty')">
       <el-table-column prop="name" :label="t('settings.sendspin.colName')" min-width="140">
         <template #default="{ row }">
           <div>{{ row.name }}</div>
@@ -59,12 +59,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 
 const { t } = useI18n();
+
+// 弹窗复用:传 clientId 则只显示该设备(播放器页配对弹窗);不传显示全部(兼容独立使用)。
+const props = defineProps<{ clientId?: string }>();
 
 interface SpClient {
   clientId: string;
@@ -84,6 +87,10 @@ const clients = ref<SpClient[]>([]);
 const attempts = ref<PairAttempt[]>([]);
 const enabled = ref(true);
 const loading = ref(false);
+// 单设备模式:只显示弹窗指定的客户端。
+const visibleClients = computed(() =>
+  props.clientId ? clients.value.filter((c) => c.clientId === props.clientId) : clients.value,
+);
 const pairing = ref<Record<string, { mode: "code" | "token"; method: string; code: string; token: string; busy: boolean; started: boolean }>>({});
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 

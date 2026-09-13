@@ -848,7 +848,8 @@
     "sendspinApprove": "Approve",
     "sendspinUnapprove": "Revoke",
     "sendspinUnpair": "Unpair",
-    "sendspinUnpairConfirm": "Unpair {name} and disconnect it?"
+    "sendspinUnpairConfirm": "Unpair {name} and disconnect it?",
+    "sendspinPairTitle": "Pair Sendspin device"
   },
   "genres": {
     "title": "Genres",

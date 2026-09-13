@@ -176,7 +176,7 @@
                 inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
               />
             </div>
-            <el-button v-if="canUse && !dev.paired && !dev.legacy" size="small" @click="goPairing"><MfIcon name="KeyRound" />{{ t('groups.sendspinPair') }}</el-button>
+            <el-button v-if="canUse && !dev.paired && !dev.legacy" size="small" @click="openPairDialog(dev)"><MfIcon name="KeyRound" />{{ t('groups.sendspinPair') }}</el-button>
             <el-button v-if="canManage && !dev.paired && !dev.legacy" size="small" @click="approveSendspin(dev, !dev.approved)">{{ dev.approved ? t('groups.sendspinUnapprove') : t('groups.sendspinApprove') }}</el-button>
             <el-popconfirm
               v-if="canManage && dev.paired"
@@ -355,24 +355,27 @@
         <el-button type="primary" :loading="dialing" @click="dialPlayer">{{ t('common.confirm') }}</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showPairDialog" :title="t('groups.sendspinPairTitle')" width="760px" :append-to-body="true" @closed="loadSendspinClients">
+      <SendspinPairing :client-id="pairTarget" />
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
 import { useAuthStore } from "@/stores/auth";
 import { PERM } from "@/utils/perms";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
+import SendspinPairing from "@/views/Settings/SendspinPairing.vue";
 import { useCopy } from "@/composables/useCopy";
 
 const { copy } = useCopy();
 const { t } = useI18n();
-const router = useRouter();
 
 const authStore = useAuthStore();
 // 使用能力:管理员或具 renderer.use。拥有 use 的普通用户可:新建/删除自己的群组、扫描、
@@ -611,8 +614,12 @@ async function unpairSendspin(dev: any): Promise<void> {
   }
 }
 
-function goPairing(): void {
-  router.push({ name: "Settings" });
+const showPairDialog = ref(false);
+const pairTarget = ref("");
+
+function openPairDialog(dev: any): void {
+  pairTarget.value = dev.clientId;
+  showPairDialog.value = true;
 }
 
 async function removeAirPlayDevice(dev: any) {

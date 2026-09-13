@@ -848,7 +848,8 @@
     "sendspinApprove": "批准",
     "sendspinUnapprove": "撤销批准",
     "sendspinUnpair": "解绑",
-    "sendspinUnpairConfirm": "解绑 {name} 并断开它吗？"
+    "sendspinUnpairConfirm": "解绑 {name} 并断开它吗？",
+    "sendspinPairTitle": "Sendspin 配对"
   },
   "genres": {
     "title": "风格",
