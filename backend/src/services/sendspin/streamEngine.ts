@@ -40,6 +40,7 @@ export const FRAME_MS = 100;
 /** 默认音源:查库 → ensurePlayableStream(多源兜底) → fetch 字节 → ffmpeg 解码。
  *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。 */
 async function defaultSource(songId: string): Promise<GroupAudio> {
+  const tS = Date.now();
   const { db } = await import("../../db/index.js");
   const { songs } = await import("../../db/schema.js");
   const { eq } = await import("drizzle-orm");
@@ -47,12 +48,19 @@ async function defaultSource(songId: string): Promise<GroupAudio> {
 
   const row: any = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!row) throw new Error(`song not found: ${songId}`);
+  console.log(`[streamEngine][src] t=${Date.now()} ${songId}: db lookup ms=${Date.now()-tS}, url=${row.url}, pluginEntry=${row.pluginEntry}`);
+  const u0 = Date.now();
   const url = await ensurePlayableStream(row);
+  console.log(`[streamEngine][src] t=${Date.now()} ${songId}: ensurePlayableStream ms=${Date.now()-u0} -> ${url}`);
   if (!url) throw new Error(`no playable stream for ${songId}`);
+  const f0 = Date.now();
   const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
   if (!res.ok) throw new Error(`fetch stream failed ${res.status} for ${songId}`);
   const buf = Buffer.from(await res.arrayBuffer());
+  console.log(`[streamEngine][src] t=${Date.now()} ${songId}: fetch ms=${Date.now()-f0} bytes=${buf.length}`);
+  const d0 = Date.now();
   const pcm = await decodeToF32(buf);
+  console.log(`[streamEngine][src] t=${Date.now()} ${songId}: decode ms=${Date.now()-d0}`);
   const durationMs = bufferDurationMs(pcm);
   return { pcm, durationMs };
 }

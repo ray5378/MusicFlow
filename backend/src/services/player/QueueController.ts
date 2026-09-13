@@ -207,6 +207,7 @@ export class QueueController extends EventEmitter {
         const state = await player.pollState();
         // state.playerId 已是 "dlna:<deviceId>",直接上报 PlayerController。
         this.ctrls.get(deviceId)?.reportState(state);
+        log.info(`[QueueController][pollDBG] t=${Date.now()} ${deviceId}: state=${state.playbackState} pos=${state.position} dur=${state.duration}`);
       } catch (e: any) {
         log.warn(`[QueueController][poll] ${deviceId}: ${e?.message || e}`);
       }
@@ -504,7 +505,7 @@ export class QueueController extends EventEmitter {
     const fullItem = await this.resolveItem(item);
     // PlayerController 的 key 取 player 自身完整 id(dlna:<id> 或 group:<gid>)。
     const playerId = player.playerId;
-    log.info(`[QueueController][playCurrent] ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
+    log.info(`[QueueController][playCurrent] t=${Date.now()} ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
     try {
       // 乐观窗口必须在 cast 之前开启:castToDevice 内部 Stop→SetAVTransportURI→Play
       // 会触发 GENA STOPPED/TRANSITIONING/PLAYING 事件。若窗口在 cast 之后才开,

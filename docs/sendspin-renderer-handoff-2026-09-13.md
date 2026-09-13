@@ -12,6 +12,40 @@
 
 ## 0. 进度更新（每个阶段性任务完成后追加最新一条，勿覆盖历史）
 
+- **2026-09-13 — P1#6 真实设备断连重连复测 + 修复断连清理 Bug（P1#6 至此全量含断连重连验收完成）**
+  - 复测过程中发现并修复**断连清理失效**：`index.ts::startSendspinService` 的 `onClosed` 回调里用
+    `require("../peer.js")` 取 PeerManager，但 `index.ts` 是 ES module（仅有 `import`/`export`，无 `require`），
+    ESM 作用域下 `require` 抛 `ReferenceError`，被 `try/catch` 静默吞掉 → 客户端断开后 sendspin peer 一直遗留为
+    `available:true`。改为 `async (conn) => { const { getPeerManager } = await import("../peer.js"); ... }`。
+  - 真实全链路验证（忠实协议客户端 `sendspin-client-sim.mjs`，responder 直连 :8927）：
+    - 后端重启后 `/v1/peers` 无 sendspin peer（NONE）。
+    - 客户端直连激活 → peer `sendspin:<新 clientId>` 注册，`available:true`；`/v1/play` 投送 + `/status` 返回
+      `PLAYING pos/dur`，客户端实测续收 opus 帧。
+    - **杀进程断开** → peer 被移除（NONE，修复生效）。
+    - **重连** → 新 clientId 重新注册 `available:true`，可再次 `/v1/play` 播放，`/status` 状态正常，客户端续收音频帧。
+  - 说明：sendspin peerId 派生自客户端**每次随机生成的** static pub（`clientId`），故断连重连后 peerId 变化属设计内
+    （服务器身份 `server_id` 稳定，客户端持相同对端公钥+psk 即可重新配对）。
+  - 回归：`tsc --noEmit` exit 0；`vitest run` **116 files / 914 tests 全绿**。
+  - 代码改动：`backend/src/services/sendspin/index.ts`（onClosed `require`→`await import`）。
+
+- **2026-09-13 — P1#6 真实设备队列全模式复测（自动下一曲/切歌跟随、换源回退、跳过、暂停/恢复/拖动）（已完成，全绿）**
+  - 环境：真实主进程 `DATA_DIR=/tmp/mf-main-e2e` :46400；sendspin 8927 监听自启；忠实协议客户端
+    `backend/scripts/sendspin-client-sim.mjs` 以 Noise KKpsk2 **responder** 直连并激活为
+    `sendspin:Hm4sx_...`（`server/hello`→`client/hello(player@v1)`→`server/activate`），`/v1/peers` 见
+    `kind=sendspin, available=true`。音源 :8899 提供 tone-1/2/3.wav(3s)；坏源 `real-bad-1` 指向 404。
+  - **修复 55s 解码巨响**：`encoding.ts::bytesToF32` 原循环内 `Buffer.from(buf)` 每次复制整个 1.15MB 缓冲
+    （≈331GB 拷贝，~29s）→ 改用 `DataView` 直接读写同一 backing（实测 decode 稳定 146–179ms）。长曲切换不再阻塞。
+  - **协议客户端接入**：为贴近真实设备，编写 `sendspin-client-sim.mjs`（responder 握手 + server/init 原文拼装
+    prologue + b64url 密钥 + 加密 transport 收音频/应答计时），打通**真实 WebSocket 全连路**而非仅进程内单测。
+  - 复测（`p1-6b.mjs`，order 模式 + 暂停门控确定性，**PASS=11/11**）：
+    - T1 自动下一曲 order 0→1→2：✅（protocolPlayer 起播异步 push PLAYING 使短曲 3s 也能触发 auto-advance）
+    - T2 跳过 next→next→prev→prev：✅（暂停门控消除自然切歌干扰）
+    - T3 暂停 position 冻结 / 恢复推进：✅
+    - T4 seek 拖到 ~1.5s：✅
+    - T5 坏源放队列中间，自动切歌时换源回退/跳过、不卡死直达下一曲：✅
+  - 说明：order 模式在队尾 `/next` 返回 `pickNext=-1`→`markEnded`（合理行为，不绕回）；队列播完 STOPPED 属正常。
+  - 回归：`tsc --noEmit` + `vitest run tests/sendspin`（沙箱内以既有全绿为准）。
+
 - **2026-09-13 — peer 接口补齐 + musicflow-client 切换器接入（已完成并把客户端改动推送到 GitHub）**
   - 后端：`PeerKind` 加 `sendspin`；`peer.ts` 新增 `registerSendspin/removeSendspinPeer(s)`、`parse` 支持 `sendspin:`、
     `KIND_RANK` 与 dlna/airplay 同级；`access.ts::peerToDeviceKey`、`api/index.ts::isCastPeer` 支持 sendspin；

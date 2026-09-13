@@ -61,11 +61,11 @@ export async function startSendspinService(): Promise<SendspinRuntime> {
     identityDir,
     serverName: "MusicFlow Sendspin",
     onActivated: (conn) => void registerServerPlayer(srv, conn),
-    onClosed: (conn) => {
+    onClosed: async (conn) => {
       // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
       if (!conn.clientId) return;
       try {
-        const { getPeerManager } = require("../peer.js") as typeof import("../peer.js");
+        const { getPeerManager } = await import("../peer.js");
         getPeerManager().removeSendspinPeer(conn.clientId);
       } catch { /* peer 层未就绪时忽略 */ }
     },

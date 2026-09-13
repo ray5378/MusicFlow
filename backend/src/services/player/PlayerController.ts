@@ -44,6 +44,7 @@ export class PlayerController {
   reportState(state: PlayerState): void {
     touch(); // 标记活动:播放状态上报(有设备在播/切歌/seek 都算活跃)
     this.latest.set(state.playerId, state);
+    console.log(`[PlayerController][reportDBG] ${state.playerId}: ${state.playbackState} pos=${state.position} dur=${state.duration} opt=${!!this.optimistic.get(state.playerId)}`);
     // 乐观窗口:若该 player 正在切歌,忽略 IDLE/异常上报,只接受 PLAYING(确认成功)
     const opt = this.optimistic.get(state.playerId);
     if (opt) {
@@ -88,6 +89,7 @@ export class PlayerController {
     const decision = this.pendingDecision.get(playerId);
     this.pendingDecision.delete(playerId);
     if (decision && decision !== "none") {
+      console.log(`[PlayerController][evaluateDBG] t=${Date.now()} ${playerId}: decision=${decision}`);
       this.onDecision(decision, playerId);
     }
   }

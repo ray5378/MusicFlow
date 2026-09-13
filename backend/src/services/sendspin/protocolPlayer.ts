@@ -9,6 +9,7 @@ import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } 
 import { createCastSession } from "../dlna/control.js";
 import { getServer } from "./runtime.js";
 import { pumpFor } from "./streamEngine.js";
+import { getPlayerController } from "../player/index.js";
 
 /** 单个 sendspin 客户端抽象成一个 ProtocolPlayer。 */
 export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
@@ -37,6 +38,25 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
         g.current = null;
         getServer()?.log("warn", `sendspin play ${item.songId} failed: ${(e as Error)?.message || e}`);
       });
+      // 服务端权威起播即上报 PLAYING:sendspin 没有 GENA/秒级上报,PlaybackTracker 只能靠
+      // QueueController 每 5s 的轮询喂 PLAYING。曲目短于轮询间隔(如 3s 测试曲)时,唯一那次
+      // 轮询常在自然结束后才到 → lastPlaying 从没置位 → 自然结束(auto-advance)永不触发,
+      // 队列卡死(见 streamEngine.ts 头部注)。这里在起播瞬间 push 一次 PLAYING,让
+      // tracker 立即记下 lastPlaying(并关闭乐观窗口),之后 poll 到 IDLE 即确定性 advance。
+      // ⚠️ 必须异步(setTimeout 0)上报:playCurrent 在 `await player.playMedia(...)` 之后
+      // 同步调用 resetTracker(清掉"上一首"的 lastPlaying 防误 advance)。若这里同步上报,
+      // 刚置上的 lastPlaying 会被 resetTracker 清掉 → 自然结束的 IDLE 又无 lastPlaying →
+      // 卡死(见 QueueController.playCurrent 注释)。setTimeout 回调是宏任务,必然晚于
+      // resetTracker(该同步调用所在的微任务),从而保住本首的 PLAYING。
+      setTimeout(() => {
+        getPlayerController().reportState({
+          playerId,
+          playbackState: PlaybackState.PLAYING,
+          position: g.positionMs / 1000,
+          duration: (g.current?.durationMs ?? (item.duration ?? 0) * 1000) / 1000,
+          updatedAt: Date.now(),
+        });
+      }, 0);
       return { mediaUri: streamUrl };
     },
     async stop() {

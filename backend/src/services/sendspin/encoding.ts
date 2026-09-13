@@ -50,8 +50,12 @@ export function f32ToBytes(f32: Float32Array): Buffer {
 
 /** F32 立体声 interleaved ← raw bytes (f32le)。 */
 export function bytesToF32(buf: Uint8Array): Float32Array {
+  // 关键:用 DataView 直接读写同一块 backing 内存,逐样本零拷贝。
+  // 每个样本都用 Buffer.from(buf) 会复制整个缓冲 → 288k 次 × 缓冲大小
+  // (≈331GB 拷贝,实测约 29s),是解码链路最大的非必要拖慢源。
   const out = new Float32Array(Math.floor(buf.length / 4));
-  for (let i = 0; i < out.length; i++) out[i] = Buffer.from(buf).readFloatLE(i * 4);
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  for (let i = 0; i < out.length; i++) out[i] = view.getFloat32(i * 4, true);
   return out;
 }
 
