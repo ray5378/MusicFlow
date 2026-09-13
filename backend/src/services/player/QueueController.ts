@@ -7,7 +7,7 @@ import { EventEmitter } from "events";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { albums, deviceQueues, groupQueues, songs } from "../../db/schema.js";
-import { PlayMode, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
+import { PlayMode, PlayerState, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
@@ -180,6 +180,15 @@ export class QueueController extends EventEmitter {
     else if (op === "stop") await player.stop();
     else if (op === "seek") await player.seek(arg!);
     else if (op === "volume") await player.setVolume(arg!);
+  }
+
+  /** 读取已注册播放器的实时状态(供 /status 路由;sendspin 等无 SOAP 的设备)。
+   *  playerId 支持裸 id 或带前缀,返回 undefined 表示未注册。 */
+  async getPlayerState(playerId: string): Promise<PlayerState | undefined> {
+    playerId = stripPlayerPrefix(playerId);
+    const player = this.players.get(playerId);
+    if (!player) return undefined;
+    return player.pollState();
   }
 
   /** Fallback poll:对照 MA force_poll,GENA 不可用时主动 poll 设备状态上报 PlayerController。

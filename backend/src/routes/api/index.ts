@@ -58,7 +58,7 @@ import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
-import { startSendspinService, stopSendspinService } from "../../services/sendspin/index.js";
+import { startSendspinService, stopSendspinService, getSendspinServer } from "../../services/sendspin/index.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
@@ -68,6 +68,7 @@ import { getGroupManager } from "../../services/group/index.js";
 import { getHiddenPeerIds, setPeerHidden, isPeerHidden, getNameOverrides, getPeerNameOverride, setPeerNameOverride } from "../../services/playerPrefs.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
+import { PlaybackState } from "../../services/player/types.js";
 import { onlineRoutes } from "./online.js";
 import { playlistSearchRoutes } from "./playlistSearch.js";
 import { entitySearchRoutes } from "./entitySearch.js";
@@ -3409,6 +3410,26 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
   }
   if (parsed.kind === "airplay") {
     return c.json(getAirPlayPeerStatus(parsed.id));
+  }
+  // sendspin:进程内播放器的实时状态(Position/Duration 由推流引擎驱动)。
+  if (parsed.kind === "sendspin") {
+    try {
+      const st = await getQueueController().getPlayerState(parsed.id);
+      if (!st) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 404);
+      const srv = getSendspinServer();
+      const volume = srv?.clients.get(parsed.id)?.volume;
+      return c.json({
+        state: st.playbackState === PlaybackState.PLAYING ? "PLAYING"
+          : st.playbackState === PlaybackState.PAUSED ? "PAUSED_PLAYBACK"
+          : st.playbackState === PlaybackState.BUFFERING ? "BUFFERING"
+          : "STOPPED",
+        position: st.position,
+        duration: st.duration,
+        updatedAt: st.updatedAt,
+        volume: typeof volume === "number" ? volume : undefined,
+        muted: false,
+      });
+    } catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   // local: return queue snapshot as "status"
   return c.json(pm.getQueueSnapshot(peerId) || {});
