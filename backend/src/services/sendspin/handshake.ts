@@ -66,8 +66,8 @@ function noiseHkdf(ck: Uint8Array, ikm: Uint8Array, num: 2 | 3): Uint8Array[] {
   return [o1, o2, o3];
 }
 
-/** 12-byte AEAD nonce. AESGCM: 4 zero bytes + 8-byte big-endian counter.
- *  ChaCha: 4 zero bytes + 8-byte little-endian counter (mirrors the library). */
+/** 12-byte AEAD nonce = [4 zero prefix bytes][8-byte counter].
+ *  AESGCM: counter big-endian; ChaCha: counter little-endian (mirrors library). */
 function nonceTo12(n: number, suite: NoiseSuite): Uint8Array {
   const out = new Uint8Array(NONCELEN);
   const big = suite === "25519_AESGCM_SHA256";
@@ -77,10 +77,11 @@ function nonceTo12(n: number, suite: NoiseSuite): Uint8Array {
     bytes[i] = v & 0xff;
     v = Math.floor(v / 256);
   }
+  const off = 4; // after the 4-byte zero prefix
   if (big) {
-    for (let i = 0; i < 8; i++) out[8 + i] = bytes[7 - i];
+    for (let i = 0; i < 8; i++) out[off + i] = bytes[7 - i];
   } else {
-    out.set(bytes, 8);
+    out.set(bytes, off);
   }
   return out;
 }
@@ -213,19 +214,24 @@ class HandshakeState {
     remoteStaticPub: Uint8Array,
     prologue: Uint8Array,
     protocolName: Uint8Array,
+    psk: Uint8Array,
   ) {
     this.initiator = initiator;
     this.s = localStaticPriv;
     this.sPub = toPub(localStaticPriv);
     this.rs = remoteStaticPub;
+    this.psk = psk;
     this.ss = new SymmetricState(suite, protocolName);
     this.ss.mixHash(prologue);
 
-    // pre-messages: KK pre-shares both statics. Initiator's static mixed first.
-    this.ss.mixHash(this.sPub);
-    this.ss.mixHash(this.rs);
+    // KK pre-messages: **initiator's static first, then responder's static** —
+    // both roles must hash in the SAME order regardless of who holds which key.
+    const initStatic = initiator ? this.sPub : this.rs;
+    const respStatic = initiator ? this.rs : this.sPub;
+    this.ss.mixHash(initStatic);
+    this.ss.mixHash(respStatic);
 
-    // Pattern tokens (KKpsk2, psk2 modifier appends PSK to message 2).
+    // Pattern tokens (KKpsk2 — the `psk` token lives at the end of message 2).
     this.messagePatterns = [
       [TOK_E, TOK_ES, TOK_SS],
       [TOK_E, TOK_EE, TOK_SE, TOK_PSK],
@@ -233,6 +239,7 @@ class HandshakeState {
   }
 
   private isPsk = true; // only KKpsk* used here
+  private psk: Uint8Array;
 
   private mixPsk(psk: Uint8Array): void {
     this.ss.mixKeyAndHash(psk);
@@ -262,7 +269,8 @@ class HandshakeState {
       } else if (token === TOK_SS) {
         this.ss.mixKey(dh(this.s, this.rs));
       } else if (token === TOK_PSK) {
-        // caller pre-mixes via setPsk below on the initiator; responder sets per-message
+        // mix the pairing PSK at the pattern's `psk` token position (message 2)
+        this.mixPsk(this.psk);
       }
     }
     void msg;
@@ -297,7 +305,8 @@ class HandshakeState {
       } else if (token === TOK_SS) {
         this.ss.mixKey(dh(this.s, this.rs));
       } else if (token === TOK_PSK) {
-        // psk set via setPsk before this message is processed
+        // mix the pairing PSK at the pattern's `psk` token position (message 2)
+        this.mixPsk(this.psk);
       }
     }
     const payload = this.ss.decryptAndHash(rest);
@@ -327,13 +336,11 @@ class HandshakeState {
   }
 }
 
-/** Pre-mix the PSK into the state at the psk token position for THIS step.
- *  Because psk2 mixes before the second (final) message, we inject it right
- *  before reading/writing that message. On both roles the primary PSK is
- *  supplied up-front (as the reference does for the initiator). */
-function pskForStep(stepIndex: number, psk: Uint8Array | null): Uint8Array | null {
-  // psk2 → mixed when stepIndex === 1 (the second message)
-  return stepIndex === 1 ? psk : null;
+/** Pre-mix the PSK into the state at the psk token position. Since KKpsk2's
+ *  `psk` token lives at the end of message 2, on BOTH roles it is now handled
+ *  inside HandshakeState when the token is hit — no per-step injection needed. */
+function pskForStep(_stepIndex: number, _psk: Uint8Array | null): Uint8Array | null {
+  return null;
 }
 
 // ---- public API ----
@@ -362,6 +369,7 @@ export class NoiseSession {
       inputs.remoteStaticPub,
       inputs.prologue,
       protocolName,
+      inputs.psk,
     );
   }
 
@@ -428,4 +436,24 @@ export function handshakePayload1(pskHex: string): Uint8Array {
   return new TextEncoder().encode(
     JSON.stringify({ psk_id: pskId, psk_category: "sn" }),
   );
+}
+
+/** Create a client-side (responder) Noise session that answers a dialing
+ *  initiator. Mirror of `NoiseSession.as_responder` in the reference. Only the
+ *  `initiator` flag differs; every token/DH/HKDF step is shared. */
+export function asResponder(args: {
+  suite: NoiseSuite;
+  localStaticPriv: Uint8Array;
+  remoteStaticPub: Uint8Array; // initiator(server) 的静态公钥
+  prologue: Uint8Array;
+  psk: Uint8Array;
+}): NoiseSession {
+  return new NoiseSession(args.suite, {
+    suite: args.suite,
+    initiator: false,
+    localStaticPriv: args.localStaticPriv,
+    remoteStaticPub: args.remoteStaticPub,
+    prologue: args.prologue,
+    psk: args.psk,
+  });
 }

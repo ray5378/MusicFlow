@@ -8,6 +8,7 @@
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createCastSession } from "../dlna/control.js";
 import { getServer } from "./runtime.js";
+import { pumpFor } from "./streamEngine.js";
 
 /** 单个 sendspin 客户端抽象成一个 ProtocolPlayer。 */
 export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
@@ -20,15 +21,28 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       const conn = srv.clients.get(clientId);
       // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
       const g = srv.group(clientId);
+      const pump = pumpFor(srv, g);
+      pump.stop(); // 打断上一首,避免重叠推流
       g.positionMs = 0;
       g.current = { songId: item.songId, title: item.title, artist: item.artist, durationMs: (item.duration ?? 0) * 1000 };
       // mediaUri:token 流地址,仅供 track_changed 检测;音频走内部推流。
       const streamUrl = createCastSession(item.songId, clientId, baseUrl).streamUrl;
-      if (conn) conn.group = g;
+      if (conn) {
+        conn.group = g;
+        g.add(conn); // 成员入组,推流才真正下发
+      }
+      // 后台起播:解码→按组时间线推流。不阻塞 playMedia 返回(pollState 反映进度)。
+      void pump.play(item.songId).catch((e) => {
+        // 无可播源等:置空 current,交 QueueController 走跳过/换源。
+        g.current = null;
+        getServer()?.log("warn", `sendspin play ${item.songId} failed: ${(e as Error)?.message || e}`);
+      });
       return { mediaUri: streamUrl };
     },
     async stop() {
       const g = groupOf(clientId);
+      const srv = getServer();
+      if (srv) pumpFor(srv, srv.group(clientId)).stop();
       g.positionMs = 0;
       g.current = null;
     },
