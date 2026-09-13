@@ -41,6 +41,11 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   if (!conn.clientId) return; // activate 前不会有 clientId;防御
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   getQueueController().registerSendspinDevice(conn.clientId, conn.clientId);
+  // 同步到 peer 层(sendspin:<clientId>)—— 前端切换器 / /v1/peers / /v1/play 才能发现并投送。
+  try {
+    const { getPeerManager } = await import("../peer.js");
+    getPeerManager().registerSendspin(conn.clientId, conn.clientId, true);
+  } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
 }
 
 /** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :8927/sendspin。每个客户端
@@ -56,6 +61,14 @@ export async function startSendspinService(): Promise<SendspinRuntime> {
     identityDir,
     serverName: "MusicFlow Sendspin",
     onActivated: (conn) => void registerServerPlayer(srv, conn),
+    onClosed: (conn) => {
+      // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
+      if (!conn.clientId) return;
+      try {
+        const { getPeerManager } = require("../peer.js") as typeof import("../peer.js");
+        getPeerManager().removeSendspinPeer(conn.clientId);
+      } catch { /* peer 层未就绪时忽略 */ }
+    },
   });
   setServer(srv);
   await srv.listen(); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
@@ -69,6 +82,10 @@ export async function stopSendspinService(): Promise<void> {
   if (!srv) return;
   const { getQueueController } = await import("../player/index.js");
   getQueueController().unregisterSendspinDevices();
+  try {
+    const { getPeerManager } = await import("../peer.js");
+    getPeerManager().removeSendspinPeers();
+  } catch { /* peer 层未就绪时忽略 */ }
   srv.stop();
   setServer(null);
   log.info("sendspin server stopped");

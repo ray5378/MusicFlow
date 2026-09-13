@@ -155,7 +155,7 @@ export function peerToDeviceKey(peerId: string): string | null {
   if (idx <= 0) return null;
   const kind = peerId.slice(0, idx);
   const id = peerId.slice(idx + 1);
-  if (kind === "dlna" || kind === "airplay" || kind === "group") return `${kind}:${id}`;
+  if (kind === "dlna" || kind === "airplay" || kind === "group" || kind === "sendspin") return `${kind}:${id}`;
   return null;
 }
 

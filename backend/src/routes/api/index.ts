@@ -58,6 +58,7 @@ import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId } from "../../services/peer.js";
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
+import { startSendspinService, stopSendspinService } from "../../services/sendspin/index.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
@@ -893,11 +894,15 @@ apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
   }
   const nextEnabled = p.enabled ? 0 : 1;
   db.update(plugins).set({ enabled: nextEnabled }).where(eq(plugins.id, p.id)).run();
-  // 内置插件的服务生命周期联动:airplay-renderer 开关 → 启动/停止 AirPlay 服务
-  // (开启才启动 mDNS discovery;关闭时停全部会话 + 清 peer/player + 释放 socket,零常驻资源)。
+  // 内置插件的服务生命周期联动:airplay-renderer / sendspin-renderer 开关 → 启动/停止服务
+  // (开启才启动监听/mDNS;关闭时停全部会话 + 清 peer/player + 释放 socket,零常驻资源)。
   if (p.id === "airplay-renderer" || p.name === "airplay-renderer") {
     if (nextEnabled) startAirPlayService();
     else void stopAirPlayService();
+  }
+  if (p.id === "sendspin-renderer" || p.name === "sendspin-renderer") {
+    if (nextEnabled) startSendspinService().catch((e: any) => console.error("[sendspin] toggle start failed", e));
+    else void stopSendspinService();
   }
   return c.json({ success: true });
 });
@@ -2746,7 +2751,7 @@ function decodePeerId(c: any): string {
 // dlna/group/airplay 队列都归 QueueController 管(内部按裸 id),
 // 传输控制 dlna 走 control.ts、group 走组扇出、airplay 走 airplay/control.ts。
 function isCastPeer(parsed: { kind: string }): boolean {
-  return parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay";
+  return parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay" || parsed.kind === "sendspin";
 }
 
 // List all known peers (local + dlna + group + airplay) with their queue
@@ -3133,6 +3138,14 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
     }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "sendspin") {
+    try {
+      getQueueController().resumePlayback(parsed.id);
+      await getQueueController().transport(parsed.id, "play");
+      return c.json({ success: true });
+    }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true }); // local: no-op
 });
 
@@ -3149,6 +3162,10 @@ apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "airplay") {
+    try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "sendspin") {
     try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
@@ -3176,6 +3193,14 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "airplay") {
+    try {
+      getQueueController().stopPlayback(parsed.id);
+      await getQueueController().transport(parsed.id, "stop");
+      return c.json({ success: true });
+    }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "sendspin") {
     try {
       getQueueController().stopPlayback(parsed.id);
       await getQueueController().transport(parsed.id, "stop");
@@ -3233,6 +3258,13 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
     try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "sendspin") {
+    const body = await c.req.json().catch(() => ({} as any));
+    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
+    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
+    try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
@@ -3253,6 +3285,12 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "airplay") {
+    const { volume } = await c.req.json().catch(() => ({} as any));
+    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
+    try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "sendspin") {
     const { volume } = await c.req.json().catch(() => ({} as any));
     if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }

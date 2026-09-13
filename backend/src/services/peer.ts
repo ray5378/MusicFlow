@@ -50,7 +50,7 @@ import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
 import { getPreProbeScheduler, type QueuePeekSource } from "./player/preProbeScheduler.js";
 
 const log = createLogger("peer");
-export type PeerKind = "local" | "dlna" | "group" | "airplay";
+export type PeerKind = "local" | "dlna" | "group" | "airplay" | "sendspin";
 
 export interface Peer {
   peerId: string;
@@ -290,6 +290,50 @@ class PeerManager extends EventEmitter {
     }
   }
 
+  // ==================== Sendspin peers ====================
+
+  /** Register or refresh a Sendspin peer when a client activates. Same shape as
+   *  registerDlna — the peer registry is kind-agnostic from here on. A Sendspin
+   *  client is a server-role playback target: once paired/activated it is a
+   *  controllable player exactly like a DLNA/AirPlay renderer. */
+  registerSendspin(clientId: string, name: string, available: boolean): Peer {
+    const peerId = `sendspin:${clientId}`;
+    const now = Date.now();
+    let p = this.peers.get(peerId);
+    if (!p) {
+      p = { peerId, kind: "sendspin", name, available, lastActiveAt: now, deviceId: clientId };
+      this.peers.set(peerId, p);
+      this.emit("peer_registered", p);
+    } else {
+      const wasAvailable = p.available;
+      p.name = name;
+      p.available = available;
+      if (available) p.lastActiveAt = now;
+      if (available && !wasAvailable) this.emit("peer_available", p);
+      else if (!available && wasAvailable) this.emit("peer_unavailable", p);
+    }
+    return p;
+  }
+
+  /** Remove a Sendspin peer entirely (client disconnected / plugin stopped). */
+  removeSendspinPeer(clientId: string): void {
+    const peerId = `sendspin:${clientId}`;
+    const p = this.peers.get(peerId);
+    if (!p) return;
+    if (p.available) this.emit("peer_unavailable", p);
+    this.peers.delete(peerId);
+  }
+
+  /** Remove ALL Sendspin peers (Sendspin 插件关闭时调用,播放器列表不再出现)。 */
+  removeSendspinPeers(): void {
+    for (const [peerId, p] of Array.from(this.peers.entries())) {
+      if (p.kind === "sendspin") {
+        if (p.available) this.emit("peer_unavailable", p);
+        this.peers.delete(peerId);
+      }
+    }
+  }
+
   // ==================== Reconciliation ====================
 
   /** Sync the DLNA peer set from the device cache. New devices are registered,
@@ -383,7 +427,7 @@ class PeerManager extends EventEmitter {
 
   /** Peers sorted: local first, then dlna, then group by name. Includes queue snapshot. */
   listWithQueues(): PeerWithQueue[] {
-    const KIND_RANK: Record<PeerKind, number> = { local: 0, dlna: 1, airplay: 1, group: 2 };
+    const KIND_RANK: Record<PeerKind, number> = { local: 0, dlna: 1, sendspin: 1, airplay: 1, group: 2 };
     return this.list()
       .sort((a, b) => {
         if (a.kind !== b.kind) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
@@ -419,6 +463,7 @@ class PeerManager extends EventEmitter {
     if (peerId.startsWith("dlna:")) return { kind: "dlna", id: peerId.slice(5) };
     if (peerId.startsWith("group:")) return { kind: "group", id: peerId.slice(6) };
     if (peerId.startsWith("airplay:")) return { kind: "airplay", id: peerId.slice(8) };
+    if (peerId.startsWith("sendspin:")) return { kind: "sendspin", id: peerId.slice(9) };
     return null;
   }
 
@@ -478,8 +523,8 @@ class PeerManager extends EventEmitter {
   getQueueSnapshot(peerId: string): QueueSnapshot | undefined {
     const parsed = PeerManager.parse(peerId);
     if (!parsed) return undefined;
-    if (parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay") {
-      // dlna / group / airplay 队列都归 QueueController 管,内部按裸 id 作 key。
+    if (parsed.kind === "dlna" || parsed.kind === "group" || parsed.kind === "airplay" || parsed.kind === "sendspin") {
+      // dlna / group / airplay / sendspin 队列都归 QueueController 管,内部按裸 id 作 key。
       return getQueueManager().snapshot(parsed.id);
     }
     // local
