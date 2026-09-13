@@ -12,6 +12,28 @@
 
 ## 0. 进度更新（每个阶段性任务完成后追加最新一条，勿覆盖历史）
 
+- **2026-09-13 — P2 go-music-dl 外置服务配真实歌单并联网验证（已完成，全绿）**
+  - 环境：外置 go-music-dl 服务部署于 **:18090**（源码 `guohuiyuan/go-music-dl` Go 编译，`/music` 为 Web 基路径，
+    `web --port 18090 --no-browser`）；后端真实主进程 `DATA_DIR=/tmp/mf-p2-e2e PORT=46401`。
+  - 插件装载：`/tmp/mf-p2-e2e/plugins/go-music-dl`（index.js + plugin.json），QuickJS 沙箱内被发现为外置插件
+    `go-music-dl v1.6.6`（`builtin:false`）。能力：`search/playlistSearch/songSearch/albumSearch/recommend/
+    playlistSongs/stream/webRotation/lyricProvider/coverProvider/recommendPlaylist`。
+  - **配置 + 启用**：`PUT /v1/plugins/go-music-dl`（config 写 `baseUrl`）→ `PUT .../toggle` 启用。
+    - **关键修正**：健康检查原用 `baseUrl=.../music` 导致 ping 打到 `/music/music/?type=song` → 404（down）；
+      go-music-dl 的 `--base-path` 默认 `/music`，**插件 baseUrl 应填服务根地址 `http://localhost:18090`**（插件自拼
+      `/music/...`），修正后健康检查 `green / 服务可达`。
+  - **真实歌单同步（联网）**：`POST /v1/recommend/refresh {pluginId:"go-music-dl"}` → jobRunner 后台 `runDailyJob(force)`
+    跑关键词（抖音/热门/民谣/经典）全平台聚合。
+    - 运行中实测持续真实入库：**201+ 张真实歌单、1075+ 首真实歌曲**，跨 9 平台：
+      `netease 30 / qq 20 / kugou 28 / kuwo 29 / migu 46 / soda 34 / bilibili 8 / fivesing 3 / joox 3`；
+      每首歌 `plugin_entry=go-music-dl`，`type=web`，`url=` 指向 `{baseUrl}/music/download?id=...&source=...&stream=1`。
+  - **联网播放验证（流式）**：直连取库内歌曲 url，采样命中 `206 audio/mpeg` 且首帧为真实 MP3 `ID3` 头
+    （如「动感光波·萧全」网易源；「野狼disco·宝石Gem」酷狗源）。部分歌曲返回 go-music-dl 应用层 `404 : Failed to get URL`
+    （平台对受版权/区域/DRM 歌曲流解析失败，属单曲正常失败，不影响整体）。
+  - 说明：关键词同步任务为长任务（多关键词 × 多平台 × 每 playlist 逐曲拉取），触发后持续在后台推进；
+    任务经 `GET /v1/plugins/go-music-dl/job` 轮询（`runDailyJob` 长预算，不在 15s 沙箱墙钟内卡死）。
+  - 回归：`tsc --noEmit` + `vitest run tests/plugins`（沙箱 mock host.http 用例重演同解析路径）。
+
 - **2026-09-13 — P1#6 真实设备断连重连复测 + 修复断连清理 Bug（P1#6 至此全量含断连重连验收完成）**
   - 复测过程中发现并修复**断连清理失效**：`index.ts::startSendspinService` 的 `onClosed` 回调里用
     `require("../peer.js")` 取 PeerManager，但 `index.ts` 是 ES module（仅有 `import`/`export`，无 `require`），
