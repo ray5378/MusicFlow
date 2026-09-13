@@ -276,6 +276,19 @@ export class SendspinGroup {
   }
 }
 
+/** 按客户端 player_support 协商编码(尊重客户端优先级顺序)。
+ *  只协商 codec(管线恒定 48kHz 立体声,见 encoding.ts);都不支持则回退 opus。
+ *  不协商的后果:9.x 等客户端直接拒收 opus(only PCM and FLAC are supported)。 */
+function negotiateCodec(payload: any): SendspinCodec {
+  const list = payload?.player_support?.supported_formats;
+  if (!Array.isArray(list)) return "opus";
+  for (const f of list) {
+    const codec = String(f?.codec || "").toLowerCase();
+    if (codec === "opus" || codec === "flac" || codec === "pcm") return codec;
+  }
+  return "opus";
+}
+
 export class SendspinConnection {
   id: string;
   clientId: string | null = null;
@@ -473,6 +486,7 @@ export class SendspinConnection {
     this.name = typeof payload?.name === "string" && payload.name ? String(payload.name).slice(0, 128) : clientId;
     this.roles = negotiateRoles(supported);
     this.clientHello = payload ?? {};
+    this.codec = negotiateCodec(payload);
     this.legacy = true;
     this.handshakeDone = true;
     this.phase = "ready";
@@ -690,7 +704,8 @@ export class SendspinConnection {
     const supported = Array.isArray(hello.supported_roles) ? hello.supported_roles : [];
     this.roles = negotiateRoles(supported);
     this.name = typeof hello.name === "string" ? hello.name : (this.clientId ?? "");
-    this.server.log("info", `activated ${this.clientId} name=${this.name} roles=${this.roles.join(",")}`);
+    this.codec = negotiateCodec(payload);
+    this.server.log("info", `activated ${this.clientId} name=${this.name} roles=${this.roles.join(",")} codec=${this.codec}`);
     this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
     this.server.onConnectionActivated(this);
   }
@@ -744,15 +759,10 @@ export class SendspinConnection {
   }
 
   /** 新曲起播宣告流格式。真实播放器(9.x / sendspin-cpp / legacy)在收到
-   *  stream/start 前会丢弃音频(无 format 不播)——之前从没发过,导致任何
-   *  合规播放器都无声。playMedia 起播时调一次即可(格式不变无需重发)。 */
+   *  stream/start 前会丢弃音频(无 format 不播)。codec 取连接协商结果,
+   *  管线恒定 48kHz 立体声 16bit。 */
   announceStream(): void {
-    const player =
-      this.codec === "flac"
-        ? { codec: "flac", sample_rate: 48000, channels: 2, bit_depth: 16 }
-        : this.codec === "pcm"
-          ? { codec: "pcm", sample_rate: 48000, channels: 2, bit_depth: 16 }
-          : { codec: "opus", sample_rate: 48000, channels: 2, bit_depth: 16 };
+    const player = { codec: this.codec, sample_rate: 48000, channels: 2, bit_depth: 16 };
     this.sendJson("stream/start", { player });
   }
   private _sendPlain(body: Uint8Array): void {

@@ -28,6 +28,20 @@ export const CHANNELS = 2;
 export const OPUS_FRAME_MS = 20;
 export const OPUS_FRAME_SAMPLES = (SAMPLE_RATE * CHANNELS * OPUS_FRAME_MS) / 1000;
 
+/** ffmpeg 二进制定位:FFMPEG_PATH 环境变量 → ffmpeg-static 内置 → PATH。
+ *  与 transcode.ts resolveFfmpeg 同约定。之前此处硬编码 spawn("ffmpeg"),
+ *  容器内无系统 ffmpeg 时 ENOENT,导致 sendspin 全曲跳过(DLNA 不转码故正常)。 */
+export function ffmpegBin(): string {
+  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
+  try {
+    const p = require("ffmpeg-static") as string | undefined;
+    if (p) return p;
+  } catch {
+    /* 未安装 → 回退 PATH */
+  }
+  return "ffmpeg";
+}
+
 /** 统一 chunk 编码器接口:encode() 返回 0..N 个独立可发送包(裸包/帧)。 */
 export interface ChunkEncoder {
   encode(pcmF32: Float32Array): Promise<Uint8Array[]>;
@@ -74,7 +88,7 @@ function params(a1: string[], a2?: string[]): string[] {
 
 function pipeThroughFfmpeg(args: string[], input: Uint8Array): Promise<Float32Array> {
   return new Promise((resolve, reject) => {
-    const p = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn(ffmpegBin(), args, { stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     p.stdout.on("data", (d: Buffer) => out.push(d));
@@ -207,7 +221,7 @@ export class FfmpegPcmEncoder implements ChunkEncoder {
       "-fflags", "+flush_packets", // 最佳努力:尽力让 muxer 每包 flush(实测对 ogg/raw 无效,保留)。
     ];
     if (c.codecName === "libopus") args.push("-b:a", `${bitrateKbps}k`);
-    const p = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn(ffmpegBin(), args, { stdio: ["pipe", "pipe", "pipe"] });
     this.p = p;
     p.on("error", () => this.settleAll());
     p.on("close", () => this.settleAll());
