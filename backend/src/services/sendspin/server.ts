@@ -278,9 +278,11 @@ export class SendspinGroup {
 
 /** 按客户端 player_support 协商编码(尊重客户端优先级顺序)。
  *  只协商 codec(管线恒定 48kHz 立体声,见 encoding.ts);都不支持则回退 opus。
- *  不协商的后果:9.x 等客户端直接拒收 opus(only PCM and FLAC are supported)。 */
-function negotiateCodec(payload: any): SendspinCodec {
-  const list = payload?.player_support?.supported_formats;
+ *  不协商的后果:9.x 等客户端直接拒收 opus(only PCM and FLAC are supported)。
+ *  键名兼容:9.x 线上为 player@v1_support(别名),老版本为 player_support。 */
+export function negotiateCodec(payload: any): SendspinCodec {
+  // 9.x 线上键名为 player@v1_support(别名),老版本为 player_support,都认。
+  const list = payload?.["player@v1_support"]?.supported_formats ?? payload?.player_support?.supported_formats;
   if (!Array.isArray(list)) return "opus";
   for (const f of list) {
     const codec = String(f?.codec || "").toLowerCase();

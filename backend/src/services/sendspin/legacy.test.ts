@@ -155,3 +155,14 @@ describe("sendspin legacy 明文直通", () => {
     }
   });
 });
+
+describe("negotiateCodec 键名兼容", () => {
+  it("9.x 别名 player@v1_support 与老 player_support 都认", async () => {
+    const { negotiateCodec } = await import("./server.js");
+    const fmts = [{ codec: "flac", channels: 2, sample_rate: 48000, bit_depth: 16 }];
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: fmts } })).toBe("flac");
+    expect(negotiateCodec({ player_support: { supported_formats: fmts } })).toBe("flac");
+    expect(negotiateCodec({})).toBe("opus");
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "mp3" }] } })).toBe("opus");
+  });
+});
