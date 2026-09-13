@@ -11,6 +11,9 @@
 import path from "node:path";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { SendspinServer, type SendspinConnection } from "./server.js";
+import { WS_PORT } from "./constants.js";
+import { PairingStore } from "./pairingStore.js";
+import { PairingCoordinator } from "./pairServer.js";
 import { setServer, getServer } from "./runtime.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
@@ -39,27 +42,47 @@ export function getSendspinServer(): SendspinServer | null {
 async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnection): Promise<void> {
   const { getQueueController } = await import("../player/index.js");
   if (!conn.clientId) return; // activate 前不会有 clientId;防御
+  // 显示名用客户端上报的 name(如 ESPHome 的 "Speaker Media Player"),无则回退 clientId。
+  const displayName = conn.name || conn.clientId;
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
-  getQueueController().registerSendspinDevice(conn.clientId, conn.clientId);
+  getQueueController().registerSendspinDevice(conn.clientId, displayName);
   // 同步到 peer 层(sendspin:<clientId>)—— 前端切换器 / /v1/peers / /v1/play 才能发现并投送。
+  // legacy 明文客户端标记 unencrypted(配对不可用,前端可据此提示)。
   try {
     const { getPeerManager } = await import("../peer.js");
-    getPeerManager().registerSendspin(conn.clientId, conn.clientId, true);
+    getPeerManager().registerSendspin(conn.clientId, displayName, true, conn.legacy);
   } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
 }
 
+/** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。 */
+function readSendspinPluginConfig(): { allowLegacyClients: boolean } {
+  try {
+    const row = sqlite
+      .prepare("SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'")
+      .get() as any;
+    const cfg = row?.config ? JSON.parse(row.config) : {};
+    return { allowLegacyClients: cfg?.allow_legacy_clients !== false };
+  } catch {
+    return { allowLegacyClients: true };
+  }
+}
+
 /** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :8927/sendspin。每个客户端
- *  完成 handshake+activate 后经 onActivated 回调注册为 QueueController 播放器。 */
-export async function startSendspinService(): Promise<SendspinRuntime> {
+ *  完成 handshake+activate 后经 onActivated 回调注册为 QueueController 播放器。
+ *  port 仅测试覆盖(默认 8927,避免多套件并行抢端口)。 */
+export async function startSendspinService(port?: number): Promise<SendspinRuntime> {
   const cur = getServer();
   if (cur) {
     return { server: cur, identity: cur.identity };
   }
   const identity = await loadOrCreateIdentity(path.join(identityDir));
+  const pluginCfg = readSendspinPluginConfig();
+  const pairingStore = await PairingStore.open(identityDir);
   const srv = await SendspinServer.create({
     pairkeys: identity,
     identityDir,
     serverName: "MusicFlow Sendspin",
+    allowLegacyClients: pluginCfg.allowLegacyClients,
     onActivated: (conn) => void registerServerPlayer(srv, conn),
     onClosed: async (conn) => {
       // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
@@ -71,7 +94,9 @@ export async function startSendspinService(): Promise<SendspinRuntime> {
     },
   });
   setServer(srv);
-  await srv.listen(); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
+  srv.pairingStore = pairingStore;
+  srv.pairing = new PairingCoordinator(srv, pairingStore);
+  await srv.listen(port ?? WS_PORT); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
   log.info(`sendspin server started: ${srv.serverId}`);
   return { server: srv, identity };
 }

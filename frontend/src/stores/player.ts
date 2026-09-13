@@ -219,6 +219,7 @@ export const usePlayerStore = defineStore("player", () => {
   //   local:<userId>  → 本机 state machine (Howl audio + backend-stored queue)
   //   dlna:<deviceId> → that device's RemoteState (backend-owned queue + auto-advance)
   //   airplay:<deviceId> → that AirPlay device's RemoteState (same backend machinery)
+  //   sendspin:<clientId> → that Sendspin client's RemoteState (server-push audio)
   //   group:<groupId> → that player group's RemoteState (MA SyncGroup 同款:队列/状态归组,
   //                     播放时后端并发向在线成员 cast)
   // Declared here (before the remote state machine) because activeRemotePeerId
@@ -227,7 +228,7 @@ export const usePlayerStore = defineStore("player", () => {
   const localPeerId = computed(() => `local:${useAuthStore().userId}`);
   const isRemotePeer = computed(() => {
     const pid = currentPeerId.value;
-    return pid.startsWith("dlna:") || pid.startsWith("group:") || pid.startsWith("airplay:");
+    return pid.startsWith("dlna:") || pid.startsWith("group:") || pid.startsWith("airplay:") || pid.startsWith("sendspin:");
   });
 
   // ==================== Remote (DLNA cast + player group) state machine ====================
@@ -237,8 +238,8 @@ export const usePlayerStore = defineStore("player", () => {
   // backend device_queues / group_queues tables are the single source of truth
   // per peer; the frontend only mirrors state via per-peer polling + REST.
   interface RemoteState {
-    peerId: string; // "dlna:<deviceId>" | "group:<groupId>" | "airplay:<deviceId>"
-    kind: "dlna" | "group" | "airplay";
+    peerId: string; // "dlna:<deviceId>" | "group:<groupId>" | "airplay:<deviceId>" | "sendspin:<clientId>"
+    kind: "dlna" | "group" | "airplay" | "sendspin";
     name: string;
     queue: Song[];
     index: number;
@@ -285,7 +286,8 @@ export const usePlayerStore = defineStore("player", () => {
     let st = remoteStates.get(peerId);
     if (!st) {
       const kind: RemoteState["kind"] = peerId.startsWith("group:") ? "group"
-        : peerId.startsWith("airplay:") ? "airplay" : "dlna";
+        : peerId.startsWith("airplay:") ? "airplay"
+        : peerId.startsWith("sendspin:") ? "sendspin" : "dlna";
       const raw: RemoteState = {
         peerId,
         kind,
@@ -366,7 +368,7 @@ export const usePlayerStore = defineStore("player", () => {
     const p = currentPeer.value;
     if (!p) return isRemotePeer.value ? castDeviceName.value : gt("player.localPeer");
     if (p.kind === "local") return gt("player.localPeer");
-    const suffix = p.kind === "airplay" ? " AirPlay" : p.kind === "group" ? gt("player.groupSuffix") : " DLNA";
+    const suffix = p.kind === "airplay" ? " AirPlay" : p.kind === "group" ? gt("player.groupSuffix") : p.kind === "sendspin" ? " Sendspin" : " DLNA";
     return `${p.name}${suffix}`;
   });
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -1319,7 +1321,7 @@ export const usePlayerStore = defineStore("player", () => {
 
   // ==================== UI-routed control functions ====================
   // These route to the active state machine based on currentPeerId. For
-  // remote peers (dlna / group), they pass the active peer's RemoteState.
+  // remote peers (dlna / group / airplay / sendspin), they pass the active peer's RemoteState.
   // The UI calls these, so a single button works for whichever target is
   // selected.
 
@@ -1485,7 +1487,7 @@ export const usePlayerStore = defineStore("player", () => {
 
   // ==================== Peer management ====================
 
-  // 离线 DLNA 设备 / 成员全离线的群组不显示;local(本机)恒显示。
+  // 离线 DLNA 设备 / 成员全离线的群组 / 断开的 sendspin 客户端不显示;local(本机)恒显示。
   // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
   // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权),并应用
   // 该用户的「按用户级改名」(REST 与 WS 推送统一在此应用,保证改名不被 WS 覆盖)。
@@ -1494,7 +1496,7 @@ export const usePlayerStore = defineStore("player", () => {
     const overrides = nameOverrides.value;
     return (list || [])
       .filter((p) =>
-        (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay"))
+        (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay" && p.kind !== "sendspin"))
         && !hidden.has(p.peerId))
       .map((p) => (overrides[p.peerId] ? { ...p, name: overrides[p.peerId] } : p));
   }
@@ -1609,9 +1611,9 @@ export const usePlayerStore = defineStore("player", () => {
   // selected peer's state machine.
   async function switchPeer(peerId: string): Promise<void> {
     if (peerId === currentPeerId.value) return;
-    if (peerId.startsWith("dlna:") || peerId.startsWith("group:") || peerId.startsWith("airplay:")) {
-      // Switching UI to control a remote peer (DLNA device, player group or
-      // AirPlay device). If we don't yet have a RemoteState for it (e.g. it's a
+    if (peerId.startsWith("dlna:") || peerId.startsWith("group:") || peerId.startsWith("airplay:") || peerId.startsWith("sendspin:")) {
+      // Switching UI to control a remote peer (DLNA device, player group,
+      // AirPlay device or Sendspin client). If we don't yet have a RemoteState for it (e.g. it's a
       // device HA started playing on, or a group that was playing), create one
       // and pull its queue so the UI mirrors what's playing, and start polling
       // it. 本机 Howl and all other peers are NOT touched.
@@ -1747,11 +1749,11 @@ export const usePlayerStore = defineStore("player", () => {
           break;
         }
         case "queue_changed": {
-          // DLNA 设备 / 播放器群组 / AirPlay 设备的队列变更(src 发裸 device_id=裸 id):
+          // DLNA 设备 / 播放器群组 / AirPlay 设备 / Sendspin 客户端的队列变更(src 发裸 device_id=裸 id):
           // 同步播放器切换器列表中的队列显示,无需手动刷新。
           const devId = msg.device_id;
           const idx = peers.value.findIndex(x =>
-            (x.peerId === `dlna:${devId}` || x.peerId === `group:${devId}` || x.peerId === `airplay:${devId}`));
+            (x.peerId === `dlna:${devId}` || x.peerId === `group:${devId}` || x.peerId === `airplay:${devId}` || x.peerId === `sendspin:${devId}`));
           if (idx >= 0) peers.value[idx].queue = msg.queue;
           const qst = idx >= 0 ? remoteStates.get(peers.value[idx].peerId) : undefined;
           if (qst) qst.preProbe = msg.queue?.preProbe ?? null;

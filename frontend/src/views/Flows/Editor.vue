@@ -342,7 +342,7 @@ function duplicateNode(i: number) {
 
 // ---------- 目标选择 ----------
 const castTargets = computed(() =>
-  (peers.value || []).filter((p: any) => (p.kind === "dlna" || p.kind === "group" || p.kind === "airplay") && p.name),
+  (peers.value || []).filter((p: any) => (p.kind === "dlna" || p.kind === "group" || p.kind === "airplay" || p.kind === "sendspin") && p.name),
 );
 
 function setNodeTarget(node: FlowNode, peerId: string, checked: boolean) {

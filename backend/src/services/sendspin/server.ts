@@ -10,6 +10,7 @@
 // 分组同步推流保留:解码 → 逐客户端独立编码 → 按组公共时间戳下发(group.pushFrame)。
 
 import WebSocket, { WebSocketServer } from "ws";
+import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
@@ -22,6 +23,7 @@ import {
   BIN_FRAGMENT_END,
   MAX_TRANSPORT_PLAINTEXT,
   MAX_REASSEMBLED_BYTES,
+  SENTINEL_PSK_HEX,
 } from "./constants.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
@@ -30,6 +32,8 @@ import { negotiateRoles } from "./roles/registry.js";
 import { createChunkEncoder, type ChunkEncoder, OPUS_FRAME_MS, type SendspinCodec } from "./encoding.js";
 import { computeCommonSendAhead } from "./group.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
+import type { PairingStore } from "./pairingStore.js";
+import type { PairingCoordinator } from "./pairServer.js";
 
 export interface SendspinServerOptions {
   pairkeys: Identity;
@@ -37,6 +41,10 @@ export interface SendspinServerOptions {
   pairingPskHex?: string;
   serverName?: string;
   log?: SendspinLog;
+  /** 允许 legacy 明文客户端(无 Noise 加密,前加密时代协议,如 ESPHome/sendspin-cpp
+   *  与 aiosendspin<7)。缺省 true(与 Music Assistant 的 allow_legacy_clients 一致)。
+   *  关闭后明文 client/hello 直接 fail,仅合规加密客户端可连。 */
+  allowLegacyClients?: boolean;
   /** 连接完成 server/activate（播放器可用）后的回调——用于注册 QueueController 播放器。 */
   onActivated?: (conn: SendspinConnection) => void;
   /** 连接关闭（含握手失败/断流）后的清理回调。 */
@@ -59,6 +67,12 @@ export class SendspinServer {
   readonly groups = new Map<string, SendspinGroup>();
   pairingPsk: Uint8Array;
   serverName: string;
+  /** 运行时可热更新(插件配置页开关,见 PUT /v1/plugins/:id)。 */
+  allowLegacyClients: boolean;
+  /** 配对记录(长配对 PSK / 未配对批准)。无则握手恒走 sentinel(配对功能关闭)。 */
+  pairingStore: PairingStore | null = null;
+  /** 配对编排(由 index.ts 在 store 就绪后注入;无则 pair/* 直接忽略)。 */
+  pairing: PairingCoordinator | null = null;
   router = new MessageRouter();
   port: number;
   wss: WebSocketServer | null = null;
@@ -73,6 +87,7 @@ export class SendspinServer {
       "hex",
     );
     this.serverName = opts.serverName ?? "MusicFlow Sendspin";
+    this.allowLegacyClients = opts.allowLegacyClients !== false;
     this.port = WS_PORT;
     this.onActivated = opts.onActivated;
     this.onClosed = opts.onClosed;
@@ -230,6 +245,11 @@ export class SendspinConnection {
   private ws: WebSocket;
   noise: NoiseSession | null = null;
   handshakeDone = false;
+  /** 本次握手混入的 PSK 类别(sn/lt/pr),决定会话权限与配对走向。 */
+  handshakePskCategory: "sn" | "lt" | "pr" = "sn";
+  /** legacy 明文客户端(无 Noise):client/hello 直连,全程 TEXT/RAW BINARY,无加密。
+   *  配对不可用(与 MA 的 legacy transition-mode 一致),peer 标记 unencrypted。 */
+  legacy = false;
   group: SendspinGroup | null = null;
   codec: SendspinCodec = "opus";
   volume = 100;
@@ -243,6 +263,16 @@ export class SendspinConnection {
   private phase: "init" | "handshake" | "ready" = "init";
   private clientInitText = "";
   private serverInitText = "";
+  private hsRemotePub: Uint8Array | null = null;
+  /** pairing server/activate 计数(上次 Noise 握手以来),进 PAKE sid。 */
+  private pairingActivations = 0;
+  private rehandshaking: {
+    session: NoiseSession;
+    category: "sn" | "lt" | "pr";
+    resolve: () => void;
+    reject: (e: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   private reasm: Buffer | null = null;
   private reasmType = 0;
 
@@ -261,10 +291,91 @@ export class SendspinConnection {
     return this.ws.readyState === WebSocket.OPEN && this.handshakeDone;
   }
 
+  /** 协商套件名(当前恒定默认套件,供配对 wrapping 选 AEAD)。 */
+  suiteName(): string {
+    return DEFAULT_SUITE;
+  }
+
+  /** 取下一次 pairing activate 的 pairing_index(PAKE sid 用,每次自增)。 */
+  nextPairingIndex(): number {
+    this.pairingActivations += 1;
+    return this.pairingActivations;
+  }
+
+  /** 带内 re-handshake(见 spec connection.md):不断 WS,直接换会话密钥。
+   *  用途:配对后提到长配对 PSK / 切到配对 PSK / 长连接轮换。完成后重走
+   *  hello/activate(对端按新会话重新激活)。 */
+  rehandshakeTo(pskHex: string, category: "sn" | "lt" | "pr"): Promise<void> {
+    if (this.legacy || !this.noise || !this.hsRemotePub) {
+      return Promise.reject(new Error("re-handshake 仅加密连接可用"));
+    }
+    if (this.rehandshaking) return Promise.reject(new Error("re-handshake 已在进行"));
+    const h = this.noise.handshakeHash;
+    if (!h || h.length !== 32) return Promise.reject(new Error("no handshake hash"));
+    const session = asInitiator({
+      suite: DEFAULT_SUITE,
+      localStaticPriv: this.server.identity.privateKey,
+      remoteStaticPub: this.hsRemotePub,
+      prologue: new Uint8Array(h),
+      psk: Buffer.from(pskHex, "hex"),
+    });
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rehandshaking = null;
+        reject(new Error("re-handshake timeout"));
+      }, 30_000);
+      this.rehandshaking = { session, category, resolve, reject, timer };
+      // msg1 走旧密钥加密通道;之后禁应用消息,直到新 activate。
+      const msg1 = session.writeMessage(handshakePayload1(pskHex, category));
+      this.sendJson("noise/handshake", { data: b64urlEncode(msg1) });
+    });
+  }
+
+  /** transport 期收到的 noise/handshake(= re-handshake 的 msg2)。 */
+  private onRehandshakeMsg2(dataB64: string): void {
+    const rh = this.rehandshaking;
+    if (!rh) return;
+    let msg2: Uint8Array;
+    try {
+      msg2 = typeof dataB64 === "string" ? b64urlDecode(dataB64) : new Uint8Array();
+    } catch {
+      this.failRehandshake(new Error("malformed re-handshake msg2"));
+      return;
+    }
+    try {
+      rh.session.readMessage(msg2);
+    } catch {
+      this.failRehandshake(new Error("re-handshake msg2 auth failed"));
+      return;
+    }
+    clearTimeout(rh.timer);
+    this.rehandshaking = null;
+    this.noise = rh.session;
+    this.handshakePskCategory = rh.category;
+    this.pairingActivations = 0; // 新握手,配对计数清零
+    if (rh.category === "lt" && this.clientId) void this.server.pairingStore?.touchRecord(this.clientId);
+    rh.resolve();
+    // 新密钥就位:重走 hello/activate(对端按新会话激活,peer 注册幂等刷新)。
+    this.sendJson("server/hello", { name: this.server.serverName });
+  }
+
+  private failRehandshake(e: Error): void {
+    const rh = this.rehandshaking;
+    this.rehandshaking = null;
+    if (rh) {
+      clearTimeout(rh.timer);
+      rh.reject(e);
+    }
+  }
+
   /** 明文期(TEXT)与加密期(BINARY)的统一入口。 */
   async onFrame(data: Buffer, isBinary: boolean): Promise<void> {
     if (!this.handshakeDone) {
       this.handleCleartext(data, isBinary);
+      return;
+    }
+    if (this.legacy) {
+      this.handleLegacyFrame(data, isBinary);
       return;
     }
     let plain: Uint8Array;
@@ -284,6 +395,8 @@ export class SendspinConnection {
   }
 
   // ---- 明文期: client/init → server/init+msg1; noise msg2 → 加密期 ----
+  // legacy 明文客户端(前加密时代,如 ESPHome/sendspin-cpp、aiosendspin<7):
+  // 首帧直接发 client/hello → 若 allowLegacyClients 则走 legacy 直通(无 Noise)。
 
   private handleCleartext(data: Buffer, isBinary: boolean): void {
     if (isBinary) return this.fail("unexpected binary frame during cleartext handshake");
@@ -300,9 +413,63 @@ export class SendspinConnection {
     } else if (t === "noise/handshake") {
       if (this.phase !== "handshake") return this.fail("unexpected noise/handshake");
       this.completeHandshake(msg?.payload?.data);
+    } else if (t === "client/hello" && this.phase === "init") {
+      // 前加密时代客户端:无 client/init,直接明文 hello 等 server/hello。
+      if (!this.server.allowLegacyClients) return this.fail("legacy clients disabled");
+      this.beginLegacy(msg.payload);
     } else {
       this.fail(`unexpected cleartext frame: ${t}`);
     }
+  }
+
+  /** legacy 明文直通:无 Noise,会话全程明文。配对不可用;peer 标记 unencrypted。
+   *  对照 MA 的 allow_legacy_clients transition-mode(默认开,纯过渡兼容)。 */
+  private beginLegacy(payload: any): void {
+    const rawId = typeof payload?.client_id === "string" ? payload.client_id.trim() : "";
+    // sendspin-cpp 默认用网卡 MAC 作 client_id(重启稳定);无则合成一个。
+    const clientId = rawId.length >= 4 ? rawId.slice(0, 128) : `legacy-${randomBytes(8).toString("hex")}`;
+    const supported = Array.isArray(payload?.supported_roles) ? payload.supported_roles : [];
+    this.clientId = clientId;
+    this.id = clientId;
+    this.name = typeof payload?.name === "string" && payload.name ? String(payload.name).slice(0, 128) : clientId;
+    this.roles = negotiateRoles(supported);
+    this.clientHello = payload ?? {};
+    this.legacy = true;
+    this.handshakeDone = true;
+    this.phase = "ready";
+    this.server.log("warn", `legacy unencrypted client: ${clientId} name=${this.name} (明文直通,配对不可用)`);
+    // legacy 客户端只认 TEXT 帧:明文 server/hello(字段需齐,sendspin-cpp 严格校验)。
+    this.sendCleartext("server/hello", {
+      server_id: this.server.serverId,
+      name: this.server.serverName,
+      version: PROTOCOL_VERSION,
+      active_roles: this.roles,
+      connection_reason: "legacy_transition",
+    });
+    this.server.onConnectionActivated(this);
+  }
+
+  /** legacy 会话的明文 JSON 入站:与加密期 _dispatch 同语义(client/time 计时,
+   *  其余走 MessageRouter;音频等上行二进制 legacy 客户端不发,直接忽略)。 */
+  private handleLegacyFrame(data: Buffer, isBinary: boolean): void {
+    if (isBinary) return; // legacy 客户端无上行二进制
+    let msg: any;
+    try {
+      msg = JSON.parse(data.toString("utf8"));
+    } catch {
+      return;
+    }
+    const t = msg?.type;
+    if (t === "client/hello") return; // 重复 hello 直接忽略(不断连)
+    if (t === "client/time") {
+      this.respondServerTime(msg?.payload ?? {});
+      return;
+    }
+    if (t === "client/goodbye") {
+      try { this.ws.close(); } catch { /* ignore */ }
+      return;
+    }
+    void this.server.router.handle(t, { ...(msg?.payload ?? {}), _conn: this });
   }
 
   private beginHandshake(clientInitText: string, payload: any): void {
@@ -328,6 +495,13 @@ export class SendspinConnection {
     });
     this.clientInitText = clientInitText;
     this.serverInitText = serverInitText;
+    this.hsRemotePub = new Uint8Array(clientPub);
+    // 有配对记录 → 长配对 PSK(lt) 建会话;无 → pairing PSK(默认 sentinel,sn)。
+    // 记录按 client/init 的 client_id 查找(客户端此时已自报身份)。
+    const rec = this.server.pairingStore?.getRecord(clientId);
+    const pskHex = rec?.pskHex ?? Buffer.from(this.server.pairingPsk).toString("hex");
+    const category = rec ? "lt" : "sn";
+    this.handshakePskCategory = category;
     const prologue = new Uint8Array(
       Buffer.concat([Buffer.from(clientInitText, "utf8"), Buffer.from(serverInitText, "utf8")]),
     );
@@ -336,15 +510,51 @@ export class SendspinConnection {
       localStaticPriv: this.server.identity.privateKey,
       remoteStaticPub: clientPub,
       prologue,
-      psk: this.server.pairingPsk,
+      psk: Buffer.from(pskHex, "hex"),
     });
     this.phase = "handshake";
 
     // server/init 紧跟 msg1(中间不等客户端,见参考 run_handshake_server)。
     this.sendCleartext(serverInitText);
-    const msg1Pt = handshakePayload1(Buffer.from(this.server.pairingPsk).toString("hex"));
+    const msg1Pt = handshakePayload1(pskHex, category);
     const msg1Ct = this.noise!.writeMessage(msg1Pt);
     this.sendCleartext("noise/handshake", { data: b64urlEncode(msg1Ct) });
+  }
+
+  /** Sentinel Fallback 后的凭证失配标记:有配对记录但客户端用 sentinel 进来。
+   *  按 spec 保持空 activities(不注册 peer、不给播放),等重新配对。 */
+  sentinelMismatch = false;
+
+  /** Sentinel Fallback 验证:成功返回 true(会话已切换为 sentinel,标记失配)。 */
+  private trySentinelFallback(msg2Ct: Uint8Array): boolean {
+    try {
+      const eph = this.noise?.ephemeralPriv;
+      if (!eph || !this.hsRemotePub || !this.clientInitText || !this.serverInitText) return false;
+      const prologue = new Uint8Array(
+        Buffer.concat([Buffer.from(this.clientInitText, "utf8"), Buffer.from(this.serverInitText, "utf8")]),
+      );
+      const fb = asInitiator({
+        suite: DEFAULT_SUITE,
+        localStaticPriv: this.server.identity.privateKey,
+        remoteStaticPub: this.hsRemotePub,
+        prologue,
+        psk: Buffer.from(SENTINEL_PSK_HEX, "hex"),
+        ephemeralPriv: eph,
+      });
+      // 推进到 step1(字节丢弃,只为内部状态与原会话对齐)再验 msg2。
+      fb.writeMessage(handshakePayload1(SENTINEL_PSK_HEX, "sn"));
+      fb.readMessage(msg2Ct);
+      this.noise = fb;
+      this.handshakePskCategory = "sn";
+      this.sentinelMismatch = true;
+      this.handshakeDone = true;
+      this.phase = "ready";
+      this.server.log("warn", `sentinel fallback: ${this.clientId} 丢了配对记录,保持未配对(需重新配对才给播放)`);
+      this.sendJson("server/hello", { name: this.server.serverName });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private completeHandshake(dataB64: string): void {
@@ -358,11 +568,20 @@ export class SendspinConnection {
     try {
       payload = this.noise!.readMessage(msg2Ct);
     } catch {
+      // Sentinel Fallback(见 spec connection.md):服务端引用了长配对 PSK,但
+      // 客户端已丢失记录 → 它会用 sentinel 发 msg2。用 sentinel 把同一 msg2
+      // 再验一次(复用原 ephemeral,EE 才能对上);成功即"凭证失配"信号成立。
+      if (this.handshakePskCategory === "lt" && this.trySentinelFallback(msg2Ct)) return;
       return this.fail("noise message 2 failed authentication");
     }
     this.handshakeDone = true;
     this.phase = "ready";
+    this.pairingActivations = 0; // 新握手,配对计数清零
     this.server.log("info", `handshake ok: ${this.clientId}`);
+    // 长配对 PSK 会话:刷新记录活跃时间。
+    if (this.handshakePskCategory === "lt" && this.clientId) {
+      void this.server.pairingStore?.touchRecord(this.clientId);
+    }
     // server/hello (加密)
     this.sendJson("server/hello", { name: this.server.serverName });
   }
@@ -387,12 +606,29 @@ export class SendspinConnection {
   private _dispatch(body: Uint8Array): void {
     if (body[0] === BIN_JSON) {
       const m = unpackJsonBody(body);
+      // re-handshake 期间只收握手与 hello/activate(见 spec),应用消息暂禁。
+      if (this.rehandshaking) {
+        if (m.type === "noise/handshake") {
+          this.onRehandshakeMsg2(m.payload?.data);
+          return;
+        }
+        if (m.type === "client/hello") {
+          this.onClientHello(m.payload);
+          return;
+        }
+        return;
+      }
+      if (m.type === "noise/handshake") return; // 非 re-handshake 期忽略
       if (m.type === "client/hello") {
         this.onClientHello(m.payload);
         return;
       }
       if (m.type === "client/time") {
         this.respondServerTime(m.payload);
+        return;
+      }
+      if (m.type === "pair/abort" || m.type.startsWith("client/pair")) {
+        void this.server.pairing?.onPairMessage(this, m.type, m.payload ?? {});
         return;
       }
       void this.server.router.handle(m.type, { ...m.payload, _conn: this });
@@ -403,6 +639,15 @@ export class SendspinConnection {
   private onClientHello(payload: any): void {
     this.clientHello = payload ?? {};
     const hello: Record<string, any> = this.clientHello ?? {};
+    // 凭证失配(Sentinel Fallback 成功但有配对记录):按 spec 保持空 activities,
+    // 不注册 peer、不给播放,等重新配对。
+    if (this.sentinelMismatch) {
+      this.roles = [];
+      this.name = typeof hello.name === "string" ? hello.name : (this.clientId ?? "");
+      this.server.log("warn", `credential mismatch held: ${this.clientId} (空激活,等重新配对)`);
+      this.sendJson("server/activate", { activities: [], active_roles: [] });
+      return;
+    }
     const supported = Array.isArray(hello.supported_roles) ? hello.supported_roles : [];
     this.roles = negotiateRoles(supported);
     this.name = typeof hello.name === "string" ? hello.name : (this.clientId ?? "");
@@ -412,10 +657,12 @@ export class SendspinConnection {
   }
 
   private respondServerTime(payload: any): void {
+    // nowUs() 是 bigint(JSON 序列化直接炸,之前收到 client/time 必崩,见 pairE2E):
+    // 线上改为 Number(微秒,53 位内安全约 285 年)。
     this.sendJson("server/time", {
       client_transmitted: payload?.client_transmitted ?? 0,
-      server_received: nowUs(),
-      server_transmitted: nowUs(),
+      server_received: Number(nowUs()),
+      server_transmitted: Number(nowUs()),
     });
   }
 
@@ -431,13 +678,43 @@ export class SendspinConnection {
   }
 
   sendJson(type: string, payload?: Record<string, any>): void {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    // legacy 客户端只认 TEXT 明文 JSON(无 Noise):加密帧它们解析不了。
+    if (this.legacy) {
+      this.ws.send(JSON.stringify({ type, payload: payload ?? {} }));
+      return;
+    }
     this._sendPlain(packJsonBody({ type, payload: payload ?? {} } as JsonMessage));
   }
   sendBinary(body: Uint8Array): void {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    // legacy:单帧 RAW BINARY 直发(不分片;opus 20ms 包本来就小)。
+    if (this.legacy) {
+      this.ws.send(Buffer.from(body), { binary: true });
+      return;
+    }
     this._sendPlain(body);
   }
   sendAudio(tsUs: bigint, codecData: Uint8Array): void {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.legacy) {
+      this.ws.send(Buffer.from(packAudioChunk(tsUs, codecData)), { binary: true });
+      return;
+    }
     this._sendPlain(packAudioChunk(tsUs, codecData));
+  }
+
+  /** 新曲起播宣告流格式。真实播放器(9.x / sendspin-cpp / legacy)在收到
+   *  stream/start 前会丢弃音频(无 format 不播)——之前从没发过,导致任何
+   *  合规播放器都无声。playMedia 起播时调一次即可(格式不变无需重发)。 */
+  announceStream(): void {
+    const player =
+      this.codec === "flac"
+        ? { codec: "flac", sample_rate: 48000, channels: 2, bit_depth: 16 }
+        : this.codec === "pcm"
+          ? { codec: "pcm", sample_rate: 48000, channels: 2, bit_depth: 16 }
+          : { codec: "opus", sample_rate: 48000, channels: 2, bit_depth: 16 };
+    this.sendJson("stream/start", { player });
   }
   private _sendPlain(body: Uint8Array): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;

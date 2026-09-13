@@ -79,7 +79,7 @@
               <div class="controls-peer-info">
                 <div class="controls-peer-name">
                   {{ p.kind === 'local' ? t('layout.localPeer') : p.name }}
-                  <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : 'DLNA' }}</span>
+                  <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA' }}</span>
                   <span v-if="!p.available" class="controls-peer-offline">{{ t('layout.offline') }}</span>
                 </div>
                 <div class="controls-peer-meta">
@@ -279,7 +279,7 @@
                 <div class="psi-info">
                   <div class="psi-name">
                     {{ p.kind === 'local' ? t('layout.localPeer') : p.name }}
-                    <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : 'DLNA' }}</span>
+                    <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA' }}</span>
                     <span v-if="!p.available" class="psi-offline">{{ t('layout.offline') }}</span>
                   </div>
                   <div class="psi-meta">

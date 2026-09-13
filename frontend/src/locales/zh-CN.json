@@ -145,6 +145,31 @@
     "about": {
       "title": "关于 MusicFlow",
       "desc": "自托管音乐库播放器 · 飞牛风格重构版（版本号见「系统信息」）"
+    },
+    "sendspin": {
+      "title": "Sendspin 设备与配对",
+      "desc": "在线 Sendspin 客户端一览、配对码 / Token 配对、批准与解绑(仅管理员)",
+      "descDetail": "加密客户端需配对或批准后才建议播放;legacy 明文设备(ESPHome 等)直连即播,配对不可用。",
+      "refresh": "刷新",
+      "disabled": "Sendspin 插件未启用,先在插件页打开 sendspin-renderer。",
+      "empty": "暂无在线客户端",
+      "colName": "设备",
+      "colStatus": "状态",
+      "colAction": "操作",
+      "paired": "已配对",
+      "legacy": "明文直连",
+      "unpaired": "未配对",
+      "approved": "已批准",
+      "pair": "配对",
+      "pairToken": "Token 配对",
+      "approve": "批准",
+      "unapprove": "撤销批准",
+      "unpair": "解绑",
+      "staticCode": "静态码(8位)",
+      "dynamicCode": "动态码(6位)",
+      "codePh": "输入配对码",
+      "tokenPh": "粘贴 SP:0… token",
+      "codeSent": "已提交,等待设备端完成"
     }
   },
   "layout": {

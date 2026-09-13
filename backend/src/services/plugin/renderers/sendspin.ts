@@ -31,7 +31,15 @@ export const sendspinRendererManifest: PluginManifest = {
   // 默认关闭:Sendspin 服务端需要常驻监听 8927 端口 + mDNS 广播(CPU/端口开销),
   // 与 AirPlay 同样按需开启;关闭时零常驻资源。
   defaultEnabled: false,
-  configSchema: [],
+  configSchema: [
+    {
+      key: "allow_legacy_clients",
+      label: "允许 legacy 明文客户端",
+      type: "switch",
+      default: true,
+      help: "兼容前加密时代客户端(如 ESPHome/sendspin-cpp、aiosendspin<7):它们发明文 client/hello、无 Noise 加密。开启后这类设备可直连播(配对不可用,流量明文);关闭则仅合规加密客户端可连。对照 MA 的 allow_legacy_clients(默认开)。",
+    },
+  ],
   i18n: {
     en: {
       name: "Sendspin Player",
@@ -48,7 +56,8 @@ Makes MusicFlow a **Sendspin Server** (port 8927) that Sendspin clients — Xbox
 
 ### Notes
 - **Disabled by default**: the server holds a listening port + mDNS. Enable it in the plugin page;
-- Clients must be paired before they can stream (three pairing methods supported).`,
+- Legacy (pre-encryption) clients such as ESPHome/sendspin-cpp are accepted by default (\`allow_legacy_clients\`, mirroring Music Assistant): they play as-is over cleartext, pairing is unavailable for them and LAN traffic can be intercepted;
+- Encrypted spec-compliant clients stream after pairing (pairing flows landing progressively).`,
     },
   },
   documentation: `### 功能介绍
@@ -62,7 +71,8 @@ Makes MusicFlow a **Sendspin Server** (port 8927) that Sendspin clients — Xbox
 
 ### 说明
 - **默认关闭**:服务端常驻占用监听端口与 mDNS,与 AirPlay 一致按需开启,关闭时零常驻资源;
-- 客户端需绑定配对才可拉流。`,
+- 前加密时代客户端(如 ESPHome/sendspin-cpp)默认允许直连(\`allow_legacy_clients\`,对齐 Music Assistant):明文播放,配对不可用,局域网流量可被截获;
+- 合规加密客户端需配对后拉流(配对流程分批落地)。`,
 };
 
 export const sendspinRendererPlugin: RendererPlugin = {

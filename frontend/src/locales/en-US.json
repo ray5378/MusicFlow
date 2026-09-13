@@ -145,6 +145,31 @@
     "about": {
       "title": "About MusicFlow",
       "desc": "Self-hosted music library player · FnOS-style rebuild (version in \"System Info\")"
+    },
+    "sendspin": {
+      "title": "Sendspin devices & pairing",
+      "desc": "Online Sendspin clients, code / token pairing, approval and unpairing (admin only)",
+      "descDetail": "Encrypted clients should be paired or approved before playback; legacy cleartext devices (ESPHome etc.) play as-is, pairing unavailable.",
+      "refresh": "Refresh",
+      "disabled": "Sendspin plugin is disabled, enable sendspin-renderer on the plugins page first.",
+      "empty": "No online clients",
+      "colName": "Device",
+      "colStatus": "Status",
+      "colAction": "Actions",
+      "paired": "Paired",
+      "legacy": "Cleartext",
+      "unpaired": "Unpaired",
+      "approved": "Approved",
+      "pair": "Pair",
+      "pairToken": "Token pair",
+      "approve": "Approve",
+      "unapprove": "Revoke",
+      "unpair": "Unpair",
+      "staticCode": "Static code (8-digit)",
+      "dynamicCode": "Dynamic code (6-digit)",
+      "codePh": "Enter pairing code",
+      "tokenPh": "Paste SP:0… token",
+      "codeSent": "Submitted, waiting for the device"
     }
   },
   "layout": {

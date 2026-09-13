@@ -874,6 +874,15 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
     if (!oldOn && newOn) registerBatchWorker(p.id);
     else if (oldOn && !newOn) unregisterBatchWorker(p.id);
   }
+  // sendspin legacy 开关热更新:运行时直接改 server 标志,已连会话不受影响,
+  // 新连按新值执行(无需重启插件)。
+  if (body.config !== undefined && (p.id === "sendspin-renderer" || p.name === "sendspin-renderer")) {
+    try {
+      const { getSendspinServer } = await import("../../services/sendspin/index.js");
+      const srv = getSendspinServer();
+      if (srv) srv.allowLegacyClients = (body.config as any)?.allow_legacy_clients !== false;
+    } catch { /* 服务未运行时忽略,下次启动读配置 */ }
+  }
   return c.json({ success: true });
 });
 apiRoutes.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
@@ -2688,6 +2697,133 @@ apiRoutes.post("/v1/airplay/cast", async (c) => {
   } catch (e: any) {
     return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.airplayFailed"), 500);
   }
+});
+
+// ==================== Sendspin 客户端与配对管理 ====================
+//
+// - clients:在线连接一览(配对态/批准态/legacy 标记,供前端设备页)
+// - pairing/*:三种配对法的服务端编排(static/dynamic 码输入、pairing token、取消)
+// - approve/unpair:未配对批准管理与配对解除
+// 配对与审批属管理操作,统一 adminMiddleware;clients 列表沿用全局登录鉴权。
+function sendspinServerOr404(c: any) {
+  const srv = getSendspinServer();
+  if (!srv) return null;
+  return srv;
+}
+
+apiRoutes.get("/v1/sendspin/clients", async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv) return c.json({ clients: [], enabled: false });
+  const store = srv.pairingStore;
+  const clients = [...srv.clients.values()]
+    .filter((conn) => !!conn.clientId)
+    .map((conn) => {
+      const clientId = conn.clientId!;
+      const rec = store?.getRecord(clientId);
+      return {
+        clientId,
+        name: conn.name || clientId,
+        roles: conn.roles,
+        legacy: conn.legacy,
+        paired: !!rec,
+        pairedAt: rec?.createdAt ?? null,
+        lastUsedAt: rec?.lastUsedAt ?? null,
+        approved: store?.isApproved(clientId) ?? false,
+        pairing: srv.pairing?.getAttempt(clientId) ?? null,
+      };
+    });
+  return c.json({ clients, enabled: true });
+});
+
+apiRoutes.get("/v1/sendspin/pairing/attempts", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv) return c.json({ attempts: [], enabled: false });
+  return c.json({ attempts: srv.pairing?.listAttempts() ?? [], enabled: true });
+});
+
+apiRoutes.post("/v1/sendspin/pairing/start", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv?.pairing) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { clientId, method, format } = body;
+  if (typeof clientId !== "string" || !clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  if (format !== undefined && format !== "digits" && format !== "qr_code") {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.badFormat"), 400);
+  }
+  try {
+    await srv.pairing.start(clientId, method, format ?? "digits");
+    return c.json({ success: true });
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.pairStartFailed"), 500);
+  }
+});
+
+apiRoutes.post("/v1/sendspin/pairing/code", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv?.pairing) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { clientId, code } = body;
+  if (typeof clientId !== "string" || !clientId || typeof code !== "string" || !code) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientIdAndCode"), 400);
+  }
+  try {
+    await srv.pairing.enterCode(clientId, code);
+    return c.json({ success: true });
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.codeFailed"), 500);
+  }
+});
+
+apiRoutes.post("/v1/sendspin/pairing/token", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv?.pairing) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { clientId, token } = body;
+  if (typeof clientId !== "string" || !clientId || typeof token !== "string" || !token) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientIdAndToken"), 400);
+  }
+  try {
+    await srv.pairing.pairWithToken(clientId, token);
+    return c.json({ success: true });
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.tokenFailed"), 500);
+  }
+});
+
+apiRoutes.post("/v1/sendspin/pairing/cancel", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv?.pairing) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { clientId } = body;
+  if (typeof clientId !== "string" || !clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  srv.pairing.cancel(clientId);
+  return c.json({ success: true });
+});
+
+apiRoutes.post("/v1/sendspin/approve", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv?.pairingStore) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { clientId, approved } = body;
+  if (typeof clientId !== "string" || !clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  await srv.pairingStore.setApproved(clientId, approved !== false);
+  return c.json({ success: true });
+});
+
+apiRoutes.post("/v1/sendspin/unpair", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv?.pairingStore) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { clientId } = body;
+  if (typeof clientId !== "string" || !clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  await srv.pairingStore.removeRecord(clientId);
+  // 解绑即断开该客户端现存连接:下次连回落到 sentinel,走重新配对/批准。
+  for (const conn of [...srv.clients.values()]) {
+    if (conn.clientId === clientId) {
+      try { conn.close(); } catch { /* ignore */ }
+    }
+  }
+  return c.json({ success: true });
 });
 
 // Set the play mode (order | one | all | shuffle) for a device's queue.

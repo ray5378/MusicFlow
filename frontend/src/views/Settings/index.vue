@@ -124,6 +124,8 @@
           </div>
         </div>
       </el-card>
+
+      <SendspinPairing />
     </template>
 
     <!-- ===== 通用 ===== -->
@@ -152,6 +154,7 @@ import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 import { useLocaleStore } from "@/stores/locale";
 import type { AppLocale } from "@/locales";
+import SendspinPairing from "./SendspinPairing.vue";
 
 const { t } = useI18n();
 const authStore = useAuthStore();

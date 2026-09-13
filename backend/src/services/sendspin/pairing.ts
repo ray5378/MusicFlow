@@ -16,14 +16,15 @@ export function generateSessionPsk(): string {
   return randomBytes(32).toString("hex");
 }
 
-/** 生成动态码(6 位数字)。 */
+/** 生成动态码(6 位数字,见 spec pairing.md)。 */
 export function generateDynamicCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
-/** 生成静态码(6 位数字)。 */
+/** 生成静态码(8 位数字,见 spec pairing.md;无屏设备出厂预置,印机身标签)。
+ *  注意与动态码(6 位)区分:之前误用 6 位,已按 spec 修正。 */
 export function generateStaticCode(): string {
-  return generateDynamicCode();
+  return String(Math.floor(10000000 + Math.random() * 90000000));
 }
 
 export class StaticCodeGate {

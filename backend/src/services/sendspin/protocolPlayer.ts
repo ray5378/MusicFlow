@@ -31,6 +31,9 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       if (conn) {
         conn.group = g;
         g.add(conn); // 成员入组,推流才真正下发
+        // 起播宣告流格式:真实播放器无 stream/start 会丢弃音频(之前从没发过,
+        // 导致任何合规播放器都无声)。放 g.add 之后、pump.play 之前,首帧必在其后。
+        conn.announceStream();
       }
       // 后台起播:解码→按组时间线推流。不阻塞 playMedia 返回(pollState 反映进度)。
       void pump.play(item.songId).catch((e) => {

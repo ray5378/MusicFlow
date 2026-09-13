@@ -61,6 +61,7 @@ export interface Peer {
   userId?: string;      // local peers only
   deviceId?: string;    // dlna / airplay peers only
   groupId?: string;     // group peers only
+  unencrypted?: boolean; // sendspin legacy 明文客户端(无 Noise,配对不可用)
 }
 
 export interface PeerWithQueue extends Peer {
@@ -296,18 +297,19 @@ class PeerManager extends EventEmitter {
    *  registerDlna — the peer registry is kind-agnostic from here on. A Sendspin
    *  client is a server-role playback target: once paired/activated it is a
    *  controllable player exactly like a DLNA/AirPlay renderer. */
-  registerSendspin(clientId: string, name: string, available: boolean): Peer {
+  registerSendspin(clientId: string, name: string, available: boolean, unencrypted = false): Peer {
     const peerId = `sendspin:${clientId}`;
     const now = Date.now();
     let p = this.peers.get(peerId);
     if (!p) {
-      p = { peerId, kind: "sendspin", name, available, lastActiveAt: now, deviceId: clientId };
+      p = { peerId, kind: "sendspin", name, available, lastActiveAt: now, deviceId: clientId, unencrypted: unencrypted || undefined };
       this.peers.set(peerId, p);
       this.emit("peer_registered", p);
     } else {
       const wasAvailable = p.available;
       p.name = name;
       p.available = available;
+      p.unencrypted = unencrypted || undefined;
       if (available) p.lastActiveAt = now;
       if (available && !wasAvailable) this.emit("peer_available", p);
       else if (!available && wasAvailable) this.emit("peer_unavailable", p);

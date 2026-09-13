@@ -216,6 +216,7 @@ class HandshakeState {
     prologue: Uint8Array,
     protocolName: Uint8Array,
     psk: Uint8Array,
+    ephemeralPriv?: Uint8Array,
   ) {
     this.initiator = initiator;
     this.s = localStaticPriv;
@@ -237,6 +238,14 @@ class HandshakeState {
       [TOK_E, TOK_ES, TOK_SS],
       [TOK_E, TOK_EE, TOK_SE, TOK_PSK],
     ];
+    // Sentinel Fallback / re-handshake 需要复用同一 ephemeral(否则 EE 对不上):
+    // 调用方可预置,未预置则首次 write 时随机。
+    if (ephemeralPriv && ephemeralPriv.length === PKLEN) this.e = new Uint8Array(ephemeralPriv);
+  }
+
+  /** 已生成的本地 ephemeral 私钥(Sentinel Fallback 重放 msg2 时复用)。 */
+  get ephemeralPriv(): Uint8Array | null {
+    return this.e ? new Uint8Array(this.e) : null;
   }
 
   private isPsk = true; // only KKpsk* used here
@@ -353,6 +362,8 @@ export interface NoiseSessionInputs {
   remoteStaticPub: Uint8Array;
   prologue: Uint8Array;
   psk: Uint8Array;
+  /** 预置 ephemeral(Sentinel Fallback:复用原会话的 e,使 EE 能对上)。 */
+  ephemeralPriv?: Uint8Array;
 }
 
 /** High-level Noise session mirroring `NoiseSession` from the reference. */
@@ -371,6 +382,7 @@ export class NoiseSession {
       inputs.prologue,
       protocolName,
       inputs.psk,
+      inputs.ephemeralPriv,
     );
   }
 
@@ -399,6 +411,9 @@ export class NoiseSession {
   get handshakeHash(): Uint8Array {
     return this.hs.handshakeHash;
   }
+  get ephemeralPriv(): Uint8Array | null {
+    return this.hs.ephemeralPriv;
+  }
 
   encrypt(plaintext: Uint8Array): Uint8Array {
     const cs = this.hs.encryptState;
@@ -420,6 +435,7 @@ export function asInitiator(args: {
   remoteStaticPub: Uint8Array;
   prologue: Uint8Array;
   psk: Uint8Array;
+  ephemeralPriv?: Uint8Array;
 }): NoiseSession {
   return new NoiseSession(args.suite, {
     suite: args.suite,
@@ -428,17 +444,22 @@ export function asInitiator(args: {
     remoteStaticPub: args.remoteStaticPub,
     prologue: args.prologue,
     psk: args.psk,
+    ephemeralPriv: args.ephemeralPriv,
   });
 }
 
 /** The plaintext JSON payload sent as handshake msg1.
  *  `psk_id` is transmitted base64url — the exact form the client's psk_resolver
- *  keys on (see aiosendspin `psk_id_for`, which returns b64url). */
-export function handshakePayload1(pskHex: string): Uint8Array {
+ *  keys on (see aiosendspin `psk_id_for`, which returns b64url).
+ *  category: "sn" sentinel(默认) / "lt" 长配对 PSK(有配对记录时引用)。 */
+export function handshakePayload1(pskHex: string, category: "sn" | "lt" | "pr" = "sn"): Uint8Array {
+  const norm = pskHex.toLowerCase();
   const pskId =
-    pskHex === SENTINEL_PSK_HEX ? b64urlEncode(Buffer.from(SENTINEL_PSK_ID_HEX, "hex")) : "";
+    norm === SENTINEL_PSK_HEX
+      ? b64urlEncode(Buffer.from(SENTINEL_PSK_ID_HEX, "hex"))
+      : b64urlEncode(sha256(new Uint8Array([...Buffer.from("sendspin-psk-id-v1", "utf8"), ...Buffer.from(norm, "hex")])));
   return new TextEncoder().encode(
-    JSON.stringify({ psk_id: pskId, psk_category: "sn" }),
+    JSON.stringify({ psk_id: pskId, psk_category: category }),
   );
 }
 
