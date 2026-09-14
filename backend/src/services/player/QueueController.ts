@@ -13,8 +13,7 @@ import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
-import { ensurePlayableStream, getCachedPlayability } from "../source/online/streamFallback.js";
-import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
+import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
 import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from "../group/protocolPlayer.js";
 import { getGroupManager } from "../group/index.js";
@@ -430,21 +429,17 @@ export class QueueController extends EventEmitter {
     }
     if (!songRow) return "play";
 
-    if (!songRow.pluginEntry || typeof songRow.pluginEntry !== "string") {
-      // 本地 / WebDAV 行。此前 playCurrent 只对 web 行做预检,本地行缺文件时
-      // 要等设备拉流 404 才发现 —— 这里补上对称的一次零成本存在性检查
-      // (本地 = existsSync;WebDAV = HEAD,自带 5 分钟失败记忆)。
-      try {
-        return (await probeLocalSourceOk(songRow)) ? "play" : "skip";
-      } catch {
-        return "play";
-      }
+    // 2) 统一裁决(与 /rest/stream 同口径,见 source/resolveAudio):
+    //    快缓存 → 优选换行(含验证) → 本行探测 → 本行复核。
+    //    definitive(本地文件确死)直接判 skip;未知走宽容尾巴(旧语义不变)。
+    const { resolvePlayableRow } = await import("../source/resolveAudio.js");
+    const r = await resolvePlayableRow(item.songId);
+    if (r.row) return "play";
+    if (r.definitive) {
+      log.info(`[QueueController][judge] ${item.songId}: 确定无源(${r.reason}),跳过`);
+      return "skip";
     }
-
-    // web 在线源:即时裁决兜底(预探测已探过的会命中缓存,不会真的再探)。
-    // 超时沿用流播路径的 12s,与预探测路径的 probeTimeoutMs 有意不同。
-    const url = await ensurePlayableStream(songRow);
-    if (url) return "play";
+    log.info(`[QueueController][judge] ${item.songId}: 无可播行(${r.reason}),进宽容尾巴`);
     // 返回 null 时再确认是「没有源」还是「网络抖动」—— 抖动不跳,照常试播。
     return getCachedPlayability(item.songId) === "unplayable" ? "skip" : "play";
   }
