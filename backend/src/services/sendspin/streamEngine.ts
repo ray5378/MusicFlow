@@ -123,7 +123,7 @@ export class GroupPump {
     this.durationMs = durationMs;
     this.songId = songId;
     this.endedNaturally = false;
-    this.group.current = { songId, durationMs, title: this.group.current?.title, artist: this.group.current?.artist };
+    this.group.current = { songId, durationMs, title: this.group.current?.title, artist: this.group.current?.artist, album: this.group.current?.album, coverArt: this.group.current?.coverArt };
     this.group.positionMs = 0;
     this.resumeWaiter = null;
     // 主循环不阻塞调用方(playMedia 需尽快返回,由 pollState 反映进度)。

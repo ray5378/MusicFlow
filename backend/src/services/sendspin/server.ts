@@ -196,6 +196,14 @@ export class SendspinServer {
     return g;
   }
 
+  /** 当前曲媒体信息(供 /status media 与 /queue currentMedia)。
+   *  前端与 HA 靠 media.songId 变化触发歌词/封面刷新;缺了切歌后还挂着第一首。 */
+  currentMedia(clientId: string): { songId: string; title?: string; artist?: string; album?: string; coverArt?: string } | undefined {
+    const cur = this.groups.get(clientId)?.current;
+    if (!cur) return undefined;
+    return { songId: cur.songId, title: cur.title, artist: cur.artist, album: cur.album, coverArt: cur.coverArt };
+  }
+
   broadcastGroupState(g: SendspinGroup): void {
     const sendAhead = computeCommonSendAhead([...g.members].map((c) => ({ latencyFuncMs: c.latencyFuncMs })));
     const stamp = nowUs();
@@ -230,7 +238,7 @@ export class SendspinGroup {
   positionMs = 0;
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
-  current: { songId: string; title?: string; artist?: string; durationMs: number } | null = null;
+  current: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; durationMs: number } | null = null;
   private encoders = new Map<string, ChunkEncoder>();
 
   constructor(name: string, server: SendspinServer) {

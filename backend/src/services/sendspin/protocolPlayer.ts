@@ -25,7 +25,9 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       const pump = pumpFor(srv, g);
       pump.stop(); // 打断上一首,避免重叠推流
       g.positionMs = 0;
-      g.current = { songId: item.songId, title: item.title, artist: item.artist, durationMs: (item.duration ?? 0) * 1000 };
+      // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
+      // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
+      g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, durationMs: (item.duration ?? 0) * 1000 };
       // mediaUri:token 流地址,仅供 track_changed 检测;音频走内部推流。
       const streamUrl = createCastSession(item.songId, clientId, baseUrl).streamUrl;
       if (conn) {

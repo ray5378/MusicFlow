@@ -3081,7 +3081,9 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
       ? getCurrentMedia(parsed.id)
       : parsed.kind === "airplay"
         ? getAirPlayPeerStatus(parsed.id).media
-        : undefined
+        : parsed.kind === "sendspin"
+          ? getSendspinServer()?.currentMedia(parsed.id)
+          : undefined
     : undefined;
   const items = Array.isArray(snap.items) ? snap.items : [];
   const total = items.length;
@@ -3634,6 +3636,8 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         updatedAt: st.updatedAt,
         volume: typeof volume === "number" ? volume : undefined,
         muted: false,
+        // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
+        media: srv?.currentMedia(parsed.id),
       });
     } catch (e: any) { return c.json({ error: e.message }, 500); }
   }
