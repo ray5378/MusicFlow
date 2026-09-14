@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.17] - 2026-09-14
+
+### Bug 修复
+- **流探测（`probe()`）补 content-type 校验**：200/206 但 content-type 明确非音频
+  （`application/json`、`*+json`、`text/*`）改判 `gone`，不再把「HTTP 200 包 JSON 错误体」
+  的假活死链当可播。
+  - 实锤案例：migu 源挂时 music-dl 透传 `HTTP 200 + {"code":"200002","info":"PE参数格式错误"}`
+    （47 字节），原判定判 ok → 设备拉到垃圾后 MUZO 永久卡 BUFFERING（主卧《带我走》卡在前几秒）。
+  - 判 `gone` 后 `ensurePlayableStream` 自动走 `findFallbackStream` 跨平台换源并回写 URL，
+    死源歌曲下一次投屏即自动落到同曲可用 web 源（无需手工修数据）。
+  - 黑名单式校验：content-type 缺失、`audio/*`、`application/octet-stream`、`application/ogg`
+    等模糊值保守放行（宁漏杀不错杀）。
+
+### 测试
+- `streamFallbackTtl.test.ts` 新增 3 用例（200+JSON → gone / text+json → gone / 缺失与
+  octet-stream 放行）；4 个测试文件的 fetch mock 显式音频 content-type（undici 对字符串
+  body 自动补 `text/plain;charset=UTF-8`，会被新校验判 gone）。全量 960/960 绿。
+
+### 镜像
+- `ghcr.io/ray5378/musicflow:3.0.17`（同步 `ray5378/musicflow:3.0.17`）
+
 ## [3.0.16] - 2026-09-14
 
 ### 行为变更
