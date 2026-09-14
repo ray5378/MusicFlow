@@ -574,13 +574,14 @@ function openRenameAirPlayDevice(dev: any) {
 // ---- Sendspin 设备管理(在线客户端;拨入为主,也可手动拨号添加) ----
 const sendspinClients = ref<any[]>([]);
 const loadingSendspin = ref(false);
+const sendspinPort = ref(8927);
 const dialTargets = ref<any[]>([]);
 const showDialDialog = ref(false);
 const dialHost = ref("");
 const dialPort = ref(8928);
 const dialing = ref(false);
 
-const sendspinUrl = computed(() => `ws://${window.location.hostname}:8927/sendspin`);
+const sendspinUrl = computed(() => `ws://${window.location.hostname}:${sendspinPort.value}/sendspin`);
 
 function shortClientId(id: string) {
   return id && id.length > 20 ? `${id.slice(0, 10)}…${id.slice(-6)}` : (id || "");
@@ -591,6 +592,7 @@ async function loadSendspinClients(): Promise<void> {
   try {
     const res = await api.get("/rest/api/v1/sendspin/clients");
     sendspinClients.value = res.data?.clients || [];
+    if (Number.isInteger(res.data?.port)) sendspinPort.value = res.data.port;
   } catch { sendspinClients.value = []; }
   try {
     const res = await api.get("/rest/api/v1/sendspin/dial-targets");

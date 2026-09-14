@@ -882,6 +882,20 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
       const srv = getSendspinServer();
       if (srv) srv.allowLegacyClients = (body.config as any)?.allow_legacy_clients !== false;
     } catch { /* 服务未运行时忽略,下次启动读配置 */ }
+    // 端口变更需重启监听才生效:自动重启服务(已连客户端断开后按记住目标重拨)。
+    try {
+      const cfg = (body.config as any) || {};
+      const { getSendspinServer: getSrv, stopSendspinService, startSendspinService } =
+        await import("../../services/sendspin/index.js");
+      const srv = getSrv();
+      if (srv && cfg.port !== undefined) {
+        const want = Number(cfg.port);
+        if (Number.isInteger(want) && want >= 1 && want <= 65535 && want !== srv.port) {
+          await stopSendspinService();
+          await startSendspinService(want);
+        }
+      }
+    } catch { /* 重启失败忽略,下次切开关时按配置启动 */ }
   }
   return c.json({ success: true });
 });
@@ -2732,7 +2746,7 @@ apiRoutes.get("/v1/sendspin/clients", async (c) => {
         pairing: srv.pairing?.getAttempt(clientId) ?? null,
       };
     });
-  return c.json({ clients, enabled: true });
+  return c.json({ clients, enabled: true, port: srv.port });
 });
 
 apiRoutes.get("/v1/sendspin/pairing/attempts", adminMiddleware, async (c) => {

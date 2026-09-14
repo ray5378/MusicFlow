@@ -33,6 +33,13 @@ export const sendspinRendererManifest: PluginManifest = {
   defaultEnabled: false,
   configSchema: [
     {
+      key: "port",
+      label: "监听端口",
+      type: "number",
+      default: 8927,
+      help: "Sendspin 服务端 WebSocket 监听端口(默认 8927)。修改后自动重启服务生效,已连客户端会断开重连。",
+    },
+    {
       key: "allow_legacy_clients",
       label: "允许 legacy 明文客户端",
       type: "switch",

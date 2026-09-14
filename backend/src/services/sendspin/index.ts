@@ -55,22 +55,27 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
 }
 
-/** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。 */
-function readSendspinPluginConfig(): { allowLegacyClients: boolean } {
+/** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。
+ *  导出供单测覆盖默认/非法回退。 */
+export function readSendspinPluginConfig(): { allowLegacyClients: boolean; port: number } {
   try {
     const row = sqlite
       .prepare("SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'")
       .get() as any;
     const cfg = row?.config ? JSON.parse(row.config) : {};
-    return { allowLegacyClients: cfg?.allow_legacy_clients !== false };
+    const port = Number(cfg?.port);
+    return {
+      allowLegacyClients: cfg?.allow_legacy_clients !== false,
+      port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : WS_PORT,
+    };
   } catch {
-    return { allowLegacyClients: true };
+    return { allowLegacyClients: true, port: WS_PORT };
   }
 }
 
 /** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :8927/sendspin。每个客户端
  *  完成 handshake+activate 后经 onActivated 回调注册为 QueueController 播放器。
- *  port 仅测试覆盖(默认 8927,避免多套件并行抢端口)。 */
+ *  port 仅测试覆盖(默认读插件配置 port,缺省 8927,避免多套件并行抢端口)。 */
 export async function startSendspinService(port?: number): Promise<SendspinRuntime> {
   const cur = getServer();
   if (cur) {
@@ -97,7 +102,7 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   setServer(srv);
   srv.pairingStore = pairingStore;
   srv.pairing = new PairingCoordinator(srv, pairingStore);
-  await srv.listen(port ?? WS_PORT); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
+  await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:<port>/sendspin(客户端拨入)
   // 记住的拨号目标:启动即拨 + 每 60s 补拨掉线的。
   if (dialTargetsLoadedFor !== identityDir) await loadDialTargets();
   void dialRemembered(srv);
