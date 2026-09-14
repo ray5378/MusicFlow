@@ -38,7 +38,14 @@ export function overridePumpSource(fn: PumpSource | null): void {
 export const FRAME_MS = 100;
 
 /** 默认音源:查库 → ensurePlayableStream(多源兜底) → fetch 字节 → ffmpeg 解码。
- *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。 */
+ *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。
+ *
+ *  兜底链(与 /rest/stream 同口径,缺一不可):
+ *  1. 原链路(曲库 web 行等);
+ *  2. 播放优选换行(resolvePreferredSong,如 web→本地兄弟行);
+ *  3. 本行直取(local/webdav 行按 path 取字节,如歌单直接引用无 url 本地行)。
+ *  缺 2)3) 时:DLNA 靠设备拉流晚绑定(出流时才换行)能播,sendspin pump 必须
+ *  事先拿到字节,就会把"有兄弟源/本地源"的歌误判死源跳过。 */
 async function defaultSource(songId: string): Promise<GroupAudio> {
   const tS = Date.now();
   const { db } = await import("../../db/index.js");
@@ -52,17 +59,99 @@ async function defaultSource(songId: string): Promise<GroupAudio> {
   const u0 = Date.now();
   const url = await ensurePlayableStream(row);
   console.log(`[streamEngine][src] t=${Date.now()} ${songId}: ensurePlayableStream ms=${Date.now()-u0} -> ${url}`);
-  if (!url) throw new Error(`no playable stream for ${songId}`);
-  const f0 = Date.now();
-  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-  if (!res.ok) throw new Error(`fetch stream failed ${res.status} for ${songId}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  console.log(`[streamEngine][src] t=${Date.now()} ${songId}: fetch ms=${Date.now()-f0} bytes=${buf.length}`);
-  const d0 = Date.now();
-  const pcm = await decodeToF32(buf);
-  console.log(`[streamEngine][src] t=${Date.now()} ${songId}: decode ms=${Date.now()-d0}`);
-  const durationMs = bufferDurationMs(pcm);
-  return { pcm, durationMs };
+  if (url) {
+    const buf = await fetchBytes(url, songId);
+    if (buf) {
+      const d0 = Date.now();
+      const pcm = await decodeToF32(buf);
+      console.log(`[streamEngine][src] t=${Date.now()} ${songId}: decode ms=${Date.now()-d0}`);
+      return { pcm, durationMs: bufferDurationMs(pcm) };
+    }
+    console.log(`[streamEngine][src] ${songId}: 原链取流失败,继续优选/本行兜底`);
+  }
+  // 2) 播放优选换行(同 /rest/stream)。
+  try {
+    const { resolvePreferredSong } = await import("../source/preferredSource.js");
+    const alt: any = await resolvePreferredSong(row);
+    if (alt && alt.id !== row.id) {
+      const bytes = await fetchRowBytes(alt);
+      if (bytes) {
+        console.log(`[streamEngine][src] ${songId}: 优选换行 -> ${alt.id} (${alt.type})`);
+        const pcm = await decodeToF32(bytes);
+        return { pcm, durationMs: bufferDurationMs(pcm) };
+      }
+    }
+  } catch (e) {
+    console.log(`[streamEngine][src] ${songId}: 优选换行失败 ${(e as Error)?.message || e}`);
+  }
+  // 3) 本行直取(playlist 直接引用无 url 本地行时,优选不换行,直接读本行 path)。
+  const self = await fetchRowBytes(row);
+  if (self) {
+    console.log(`[streamEngine][src] ${songId}: 本行直取 ${(self.length / 1024).toFixed(0)}KB`);
+    const pcm = await decodeToF32(self);
+    return { pcm, durationMs: bufferDurationMs(pcm) };
+  }
+  throw new Error(`no playable stream for ${songId}`);
+}
+
+/** 取 URL 字节(60s 超时,非 2xx 即 null,不抛)。 */
+async function fetchBytes(url: string, songId: string): Promise<Buffer | null> {
+  try {
+    const f0 = Date.now();
+    const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    console.log(`[streamEngine][src] t=${Date.now()} ${songId}: fetch ms=${Date.now()-f0} bytes=${buf.length}`);
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+/** 与 /rest/stream 同口径的行取字节:web 行走 url(+stream_headers)/cachePath;
+ *  local/webdav 行按 path 解析(webdav 带源鉴权,本地读文件)。取不到返回 null。 */
+async function fetchRowBytes(row: any): Promise<Buffer | null> {
+  try {
+    if (!row) return null;
+    if ((row.type || "local") === "web") {
+      if (row.cachePath) {
+        try {
+          const fs = await import("fs");
+          if (fs.existsSync(row.cachePath)) return fs.readFileSync(row.cachePath);
+        } catch { /* 继续走 url */ }
+      }
+      if (!row.url) return null;
+      let headers: Record<string, string> = {};
+      try { headers = JSON.parse(row.stream_headers || "{}"); } catch { /* ignore */ }
+      const res = await fetch(row.url, { headers, signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) return null;
+      return Buffer.from(await res.arrayBuffer());
+    }
+    const { parseSongPath } = await import("../../utils/localSourceProbe.js");
+    const parsed = parseSongPath(row.path || "");
+    if (!parsed) return null;
+    if (parsed.type === "w") {
+      const { db } = await import("../../db/index.js");
+      const { mediaSources } = await import("../../db/schema.js");
+      const { eq } = await import("drizzle-orm");
+      const source: any = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
+      if (!source) return null;
+      const config = JSON.parse(source.config || "{}");
+      const origin = new URL(config.url).origin;
+      const headers: Record<string, string> = {};
+      if (config.username && config.password) {
+        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+      }
+      const res = await fetch(origin + parsed.filePath, { headers, signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) return null;
+      return Buffer.from(await res.arrayBuffer());
+    }
+    const fs = await import("fs");
+    if (!fs.existsSync(parsed.filePath)) return null;
+    return fs.readFileSync(parsed.filePath);
+  } catch {
+    return null;
+  }
 }
 
 function bufferDurationMs(pcm: Float32Array): number {
