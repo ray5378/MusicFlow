@@ -158,10 +158,6 @@ export class GroupPump {
           break; // 连接断开等:停止推流(状态由 QueueController 处理)。
         }
         this.group.positionMs = Math.min(this.durationMs, i * FRAME_MS + FRAME_MS);
-        // 元数据时长与实际解码长度常差几十 ms:解码偏长时 i 永远到不了 total,
-        // positionMs 又被 clamp 在 durationMs → 同一尾帧无限重推、永不结束。
-        // 到达元数据时长即视为播完(退出后 endedNaturally 照常置空 current 触发切歌)。
-        if (this.durationMs > 0 && this.group.positionMs >= this.durationMs) { contentEnded = true; break; }
         // 按真实时间推进: 每推一帧 sleep 一帧的真实墙钟时长(倍速压缩)。
         // ⚠️ 此前 `sleep((i+1)*FRAME_MS/speed - min(duration/speed, ...))` 对所有
         // start<duration 的帧算出 sleep(0) → 整个音频瞬间推完 → poll 先于乐观窗口
@@ -169,6 +165,12 @@ export class GroupPump {
         // 正确节奏 = FRAME_MS 一帧,总墙钟 ≈ durationMs/speed,PLAYING 在结束前可观测。
         const perFrameMs = FRAME_MS / this.speed;
         await sleep(perFrameMs);
+        // 元数据时长与实际解码长度常差几十 ms:解码偏长时 i 永远到不了 total,
+        // positionMs 又被 clamp 在 durationMs → 同一尾帧无限重推、永不结束。
+        // 到达元数据时长即视为播完(退出后 endedNaturally 照常置空 current 触发切歌)。
+        // 注意 break 必须在 sleep 之后(保持旧 pacing):提前跳过末帧 sleep 会打乱
+        // 乐观窗口/自然结束的时序判定,导致切歌变重播(见 queueModes 回归)。
+        if (this.durationMs > 0 && this.group.positionMs >= this.durationMs) { contentEnded = true; break; }
       }
       if (this.epoch === myEpoch) {
         this.running = false;
