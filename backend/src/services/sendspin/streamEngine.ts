@@ -177,6 +177,8 @@ export class GroupPump {
         this.endedNaturally = contentEnded;
         // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
         if (this.endedNaturally) this.group.current = null;
+        // 整首 PCM 到此无用,立即释放(长曲上百 MB),不等下一首覆盖。
+        this.pcm = null;
       }
     } catch {
       this.running = false;
@@ -189,6 +191,8 @@ export class GroupPump {
     this.running = false;
     this.resumeWaiter?.();
     this.resumeWaiter = null;
+    // 旧曲 PCM 立即释放(切歌瞬间,不等新解码覆盖)。
+    this.pcm = null;
   }
 
   pause(): void {
@@ -223,4 +227,14 @@ export function pumpFor(server: SendspinServer, group: SendspinGroup): GroupPump
     pumpByGroup.set(group, p);
   }
   return p;
+}
+
+/** 停掉某组的 pump 并摘除(组空/断开清理用)。停后重播走 pumpFor 重建。
+ *  注意只停音频生产,不碰队列(重连恢复靠队列,见 QueueController)。 */
+export function stopGroupPump(group: SendspinGroup): void {
+  const p = pumpByGroup.get(group);
+  if (p) {
+    try { p.stop(); } catch { /* ignore */ }
+    pumpByGroup.delete(group);
+  }
 }

@@ -30,6 +30,7 @@ import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
 import { createChunkEncoder, type ChunkEncoder, OPUS_FRAME_MS, type SendspinCodec } from "./encoding.js";
+import { stopGroupPump } from "./streamEngine.js";
 import { computeCommonSendAhead } from "./group.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
@@ -182,7 +183,14 @@ export class SendspinServer {
       const g = conn.group;
       conn.group = null;
       g.remove(conn);
-      if (g.empty) this.groups.delete(g.name);
+      if (g.empty) {
+        // 组空即停 pump(放掉整首 PCM)+ 关编码器(杀 ffmpeg),队列不动(重连恢复)。
+        // 不做:无听众还继续解完整队歌,是标准的内存/CPU 双泄漏。
+        stopGroupPump(g);
+        const n = g.close();
+        this.groups.delete(g.name);
+        if (n > 0) this.log("info", `group ${g.name} 空了,关 ${n} 个编码器`);
+      }
     }
     this.onClosed?.(conn);
   }
@@ -285,9 +293,15 @@ export class SendspinGroup {
       });
     }
   }
-  close(): void {
-    for (const e of this.encoders.values()) e.close();
+  /** 关闭全部编码器(含 flac 的 ffmpeg 持续进程),返回关掉的数量(供回收上报)。 */
+  close(): number {
+    let n = 0;
+    for (const e of this.encoders.values()) {
+      try { e.close(); } catch { /* ignore */ }
+      n++;
+    }
     this.encoders.clear();
+    return n;
   }
 }
 

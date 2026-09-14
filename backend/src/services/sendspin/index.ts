@@ -15,6 +15,30 @@ import { SendspinServer, type SendspinConnection } from "./server.js";
 import { WS_PORT } from "./constants.js";
 import { PairingStore } from "./pairingStore.js";
 import { PairingCoordinator } from "./pairServer.js";
+import { stopGroupPump } from "./streamEngine.js";
+// 类型-only 导入(编译期擦除,零运行时边):缓存单例的类型推导,
+// 避开 player/index ↔ sendspin 的模块环(TDZ,见下 ensureControllers 注释)。
+import type * as PlayerIndex from "../player/index.js";
+import type * as PeerModule from "../peer.js";
+
+type QC = ReturnType<typeof PlayerIndex.getQueueController>;
+type PM = ReturnType<typeof PeerModule.getPeerManager>;
+let qcSingleton: QC | null = null;
+let pmSingleton: PM | null = null;
+
+/** 启动期一次抓取控制器单例并 fail-fast:激活/停止/断开等热路径不再动态
+ *  import(关闭期动态 import 在特定求值时序下可挂起,见 reclaim.test.ts 排查)。
+ *  此处仍是动态 import(不新增静态边),只是提前到启动时 await。 */
+async function ensureControllers(): Promise<void> {
+  if (!qcSingleton) {
+    const { getQueueController } = await import("../player/index.js");
+    qcSingleton = getQueueController();
+  }
+  if (!pmSingleton) {
+    const { getPeerManager } = await import("../peer.js");
+    pmSingleton = getPeerManager();
+  }
+}
 import { setServer, getServer } from "./runtime.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
@@ -38,20 +62,19 @@ export function getSendspinServer(): SendspinServer | null {
 }
 
 /** 对每个就绪连接的客户端,注册为 QueueController 服务器权威播放器(幂等)。
- *  player/index 动态 import:避免 sendspin/index 在 builtins 初始化期被静态拉入
- *  player/index → QueueController → sendspin 的模块环(TDZ on `registered`)。 */
+ *  用启动期缓存的单例,不再动态 import(见 ensureControllers)。 */
 async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnection): Promise<void> {
-  const { getQueueController } = await import("../player/index.js");
+  const qc = qcSingleton;
+  const pm = pmSingleton;
+  if (!qc || !pm) return; // 服务未走完启动,直接忽略(播放器注册不受影响是旧语义,现启动必备)
   if (!conn.clientId) return; // activate 前不会有 clientId;防御
   // 显示名用客户端上报的 name(如 ESPHome 的 "Speaker Media Player"),无则回退 clientId。
   const displayName = conn.name || conn.clientId;
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
-  getQueueController().registerSendspinDevice(conn.clientId, displayName);
+  qc.registerSendspinDevice(conn.clientId, displayName);
   // 同步到 peer 层(sendspin:<clientId>)—— 前端切换器 / /v1/peers / /v1/play 才能发现并投送。
-  // legacy 明文客户端标记 unencrypted(配对不可用,前端可据此提示)。
   try {
-    const { getPeerManager } = await import("../peer.js");
-    getPeerManager().registerSendspin(conn.clientId, displayName, true, conn.legacy);
+    pm.registerSendspin(conn.clientId, displayName, true, conn.legacy);
   } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
 }
 
@@ -83,6 +106,8 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   }
   const identity = await loadOrCreateIdentity(path.join(identityDir));
   const pluginCfg = readSendspinPluginConfig();
+  // 控制器单例启动期一次抓取并 fail-fast:热路径(激活/停止/断开)不再动态 import。
+  await ensureControllers();
   const pairingStore = await PairingStore.open(identityDir);
   const srv = await SendspinServer.create({
     pairkeys: identity,
@@ -94,15 +119,14 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
       // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
       if (!conn.clientId) return;
       try {
-        const { getPeerManager } = await import("../peer.js");
-        getPeerManager().removeSendspinPeer(conn.clientId);
+        pmSingleton?.removeSendspinPeer(conn.clientId);
       } catch { /* peer 层未就绪时忽略 */ }
     },
   });
   setServer(srv);
   srv.pairingStore = pairingStore;
   srv.pairing = new PairingCoordinator(srv, pairingStore);
-  await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:<port>/sendspin(客户端拨入)
+  await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
   // 记住的拨号目标:启动即拨 + 每 60s 补拨掉线的。
   if (dialTargetsLoadedFor !== identityDir) await loadDialTargets();
   void dialRemembered(srv);
@@ -111,6 +135,8 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     const s = getServer();
     if (s) void dialRemembered(s);
   }, REDIAL_INTERVAL_MS);
+  // 空闲回收兜底(进程级去重注册):清无成员组。
+  void ensureCleanerRegistered();
   log.info(`sendspin server started: ${srv.serverId}`);
   return { server: srv, identity };
 }
@@ -123,11 +149,9 @@ export async function stopSendspinService(): Promise<void> {
   }
   const srv = getServer();
   if (!srv) return;
-  const { getQueueController } = await import("../player/index.js");
-  getQueueController().unregisterSendspinDevices();
+  qcSingleton?.unregisterSendspinDevices();
   try {
-    const { getPeerManager } = await import("../peer.js");
-    getPeerManager().removeSendspinPeers();
+    pmSingleton?.removeSendspinPeers();
   } catch { /* peer 层未就绪时忽略 */ }
   srv.stop();
   setServer(null);
@@ -146,6 +170,7 @@ let dialTargets: DialTarget[] = [];
 let dialTargetsLoadedFor: string | null = null;
 let redialTimer: ReturnType<typeof setInterval> | null = null;
 const REDIAL_INTERVAL_MS = 60_000;
+let cleanerRegistered = false;
 
 function dialTargetsFile(): string {
   return path.join(identityDir, "sendspin", "dial_targets.json");
@@ -219,6 +244,34 @@ async function dialRemembered(srv: SendspinServer): Promise<void> {
   }
 }
 
+/** 空闲回收兜底:清掉无成员的组(pump 已停+编码器已关,双重保险)并上报。
+ *  日常路径由 onConnectionClosed 即时处理;这里只扫异常残留(如 stop 期间的竞态)。 */
+export function reclaimSendspinOrphans(): string {
+  const srv = getServer();
+  if (!srv) return "sendspin:未运行";
+  let groups = 0;
+  let encoders = 0;
+  for (const g of [...srv.groups.values()]) {
+    if (g.members.size > 0) continue;
+    stopGroupPump(g);
+    encoders += g.close();
+    srv.groups.delete(g.name);
+    groups++;
+  }
+  return `sendspin:清${groups}空组/${encoders}编码器`;
+}
+
+async function ensureCleanerRegistered(): Promise<void> {
+  if (cleanerRegistered) return;
+  cleanerRegistered = true;
+  // 动态导入:reclaim 侧依赖重,不进 sendspin 的静态图。
+  const { registerCacheCleaner } = await import("../memory/reclaim.js");
+  registerCacheCleaner(() => {
+    try {
+      log.info(`[sendspin] idle 回收:${reclaimSendspinOrphans()}`);
+    } catch { /* ignore */ }
+  });
+}
 /** 插件是否已启用:读 plugins 表 sendspin-renderer 行(enabled==1)。 */
 export function isSendspinEnabled(): boolean {
   try {
