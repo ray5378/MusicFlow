@@ -3565,6 +3565,19 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
     try { await setAirPlayMuted(parsed.id, muted); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "sendspin") {
+    // 与 DLNA RenderingControl SetMute 同语义:独立于音量的开关,取消恢复原音量。
+    // 组即该客户端专属组(见 protocolPlayer),两处都置位;离线重连后组标记仍有效。
+    try {
+      const srv = getSendspinServer();
+      if (!srv) throw new Error("sendspin 服务未运行");
+      srv.group(parsed.id).muted = muted;
+      const conn = srv.clients.get(parsed.id);
+      if (conn) conn.muted = muted;
+      return c.json({ success: true });
+    }
+    catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
   return c.json({ success: true });
 });
 
@@ -3626,6 +3639,7 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       if (!st) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 404);
       const srv = getSendspinServer();
       const volume = srv?.clients.get(parsed.id)?.volume;
+      const muted = srv?.clients.get(parsed.id)?.muted ?? srv?.groups.get(parsed.id)?.muted ?? false;
       return c.json({
         state: st.playbackState === PlaybackState.PLAYING ? "PLAYING"
           : st.playbackState === PlaybackState.PAUSED ? "PAUSED_PLAYBACK"
@@ -3635,7 +3649,7 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         duration: st.duration,
         updatedAt: st.updatedAt,
         volume: typeof volume === "number" ? volume : undefined,
-        muted: false,
+        muted,
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
         media: srv?.currentMedia(parsed.id),
       });

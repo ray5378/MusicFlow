@@ -23,6 +23,12 @@ import {
 } from "./control.js";
 import { getQueueController } from "../player/index.js";
 import { getGroupManager } from "../group/index.js";
+import {
+  getAirPlayStatus,
+  setAirPlayVolume,
+  castToAirPlayDevice,
+} from "../airplay/control.js";
+import { PlaybackState } from "../player/types.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("ANNOUNCE");
@@ -63,8 +69,21 @@ export async function announceOnPeer(opts: AnnounceOptions): Promise<{ targets: 
   const { peerId, url } = opts;
   if (!/^https?:\/\//i.test(url)) throw new Error("播报 URL 必须是 http(s) 绝对地址");
 
+  // 按 kind 分流:dlna/group 走经典路径,airplay/sendspin 各走自己的发声通道。
+  // 并发保护与 URL 校验在各路径入口之前统一做一次。
+  if (peerId.startsWith("airplay:") || peerId.startsWith("sendspin:")) {
+    if (running.has(peerId)) throw new Error("该播放器正在播报中");
+    running.add(peerId);
+    try {
+      if (peerId.startsWith("airplay:")) return await announceAirPlay(opts);
+      return await announceSendspin(opts);
+    } finally {
+      running.delete(peerId);
+    }
+  }
+
   const targets = resolveTargets(peerId);
-  if (targets.length === 0) throw new Error("该播放器不支持播报(仅 DLNA 设备与组)");
+  if (targets.length === 0) throw new Error("该播放器不支持播报");
   if (running.has(peerId)) throw new Error("该播放器正在播报中");
   running.add(peerId);
 
@@ -136,6 +155,145 @@ export async function announceOnPeer(opts: AnnounceOptions): Promise<{ targets: 
       }
     }
     return { targets: targets.length };
+  } finally {
+    running.delete(peerId);
+  }
+}
+
+// ==================== AirPlay 播报 ====================
+//
+// 同样的保存→冻结→播报→还原→恢复语义,发声通道换成 RAOP:
+//   - 状态/音量经 airplay/control(音量对 LinkPlay 会转发到同机 DLNA);
+//   - TTS 外链由 castToAirPlayDevice 直接起 RAOP 会话(传 streamUrl,不走曲库);
+//   - 播完用状态轮询收敛(playbackState 回到 IDLE 即会话终结)。
+async function announceAirPlay(opts: AnnounceOptions): Promise<{ targets: number }> {
+  const { peerId, url } = opts;
+  const deviceId = peerId.slice(8);
+  const saved = { volume: 80, wasPlaying: false, position: 0 };
+  try {
+    const st = getAirPlayStatus(deviceId);
+    saved.volume = st.volume;
+    saved.wasPlaying = st.playbackState === PlaybackState.PLAYING;
+    saved.position = st.position;
+  } catch { /* 取不到按静默 idle 处理 */ }
+
+  const qc = getQueueController();
+  const snap = qc.snapshot(peerId);
+  const wasActive = snap.isActive && snap.currentIndex >= 0;
+  try {
+    if (wasActive) qc.deactivate(peerId);
+    if (typeof opts.volume === "number") {
+      const v = Math.max(0, Math.min(100, Math.round(opts.volume)));
+      await setAirPlayVolume(deviceId, v).catch((e: any) =>
+        log.warn(`[announce] ${deviceId} 播报音量 ${v} 未确认:${e?.message || e}`));
+    }
+    await castToAirPlayDevice({
+      deviceId,
+      songId: `__announce__${Date.now()}`,
+      title: "Announcement",
+      streamUrl: url,
+    });
+    await waitUntilAirPlayIdle(deviceId, opts.timeoutMs ?? 300000);
+    if (typeof opts.volume === "number") {
+      await setAirPlayVolume(deviceId, saved.volume).catch((e: any) =>
+        log.warn(`[announce] 还原音量失败:${e?.message || e}`));
+    }
+    if (wasActive && saved.wasPlaying) {
+      const baseUrl = getEffectiveBaseUrl();
+      await qc.playFrom(peerId, snap.items, snap.currentIndex, baseUrl);
+      if (saved.position > 2) {
+        await new Promise(r => setTimeout(r, 1200));
+        await qc.transport(peerId, "seek", saved.position).catch(() => {});
+      }
+    }
+    return { targets: 1 };
+  } finally {
+    running.delete(peerId);
+  }
+}
+
+/** 轮询 AirPlay 会话状态直到 IDLE(会话终结)或超时。对照 waitUntilStopped。 */
+async function waitUntilAirPlayIdle(deviceId: string, budgetMs = 300000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  // 起播要时间,先给 1.5s 缓冲再判定,否则读到旧 IDLE 误判成已播完。
+  await new Promise(r => setTimeout(r, 1500));
+  while (Date.now() < deadline) {
+    try {
+      const st = getAirPlayStatus(deviceId);
+      if (st.playbackState === PlaybackState.IDLE) return;
+    } catch { /* 设备抖动,继续等 */ }
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+// ==================== Sendspin 播报 ====================
+//
+// 服务端自有推流管线:TTS 外链拉回解码成 PCM,直接按组时间线推给客户端,
+// 不经过曲库 pump。暂停/恢复/进度走通用 QueueController(队列冻结 + playFrom + seek)。
+async function announceSendspin(opts: AnnounceOptions): Promise<{ targets: number }> {
+  const { peerId, url } = opts;
+  const { getSendspinServer } = await import("../sendspin/index.js");
+  const { decodeToF32, SAMPLE_RATE, CHANNELS } = await import("../sendspin/encoding.js");
+  const srv = getSendspinServer();
+  if (!srv) throw new Error("sendspin 服务未运行");
+  const clientId = peerId.slice(9);
+  const conn = srv.clients.get(clientId);
+  const g = srv.group(clientId);
+  const qc = getQueueController();
+  const snap = qc.snapshot(peerId);
+  const wasActive = snap.isActive && snap.currentIndex >= 0;
+  const wasPlaying = !!g.current;
+
+  // 现场:音量(连接+组)与进度。无 current(闲置Coordinator)则进度从 0 起。
+  const savedVol = conn?.volume ?? 100;
+  const savedGroupVol = g.volume;
+  const savedPos = g.current ? g.positionMs : 0;
+  try {
+    if (wasActive) qc.deactivate(peerId);
+    if (typeof opts.volume === "number") {
+      const v = Math.max(0, Math.min(100, Math.round(opts.volume)));
+      if (conn) conn.volume = v;
+      g.volume = v;
+    }
+    // 拉 TTS → 解码 48k 立体声。外链抓取 15s 超时,失败直接进恢复流程抛错。
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!resp.ok) throw new Error(`TTS 拉取失败: HTTP ${resp.status}`);
+    const pcm = await decodeToF32(new Uint8Array(await resp.arrayBuffer()));
+    // 入组(之前没在播就没成员)+ 宣告流格式,否则帧无处下发 / 客户端无格式丢弃。
+    // 播完后若是新加的则摘掉,恢复播报前成员原样。
+    let joined = false;
+    if (conn && !g.members.has(conn)) {
+      g.add(conn);
+      joined = true;
+    }
+    if (conn) conn.announceStream();
+    try {
+      const frameSamples = SAMPLE_RATE * CHANNELS * 100 / 1000;
+      const endCap = g.current && g.current.durationMs > 0 ? Math.max(0, g.current.durationMs - 500) : Infinity;
+      const baseTs = g.timelineBaseUs;
+      const deadline = Date.now() + (opts.timeoutMs ?? 300000);
+      for (let off = 0; off < pcm.length; off += frameSamples) {
+        if (Date.now() > deadline) break;
+        const slice = pcm.subarray(off, Math.min(off + frameSamples, pcm.length));
+        const posMs = Math.min(savedPos + Math.round((off / frameSamples) * 100), endCap);
+        g.positionMs = posMs;
+        await g.pushFrame(baseTs + BigInt(posMs * 1000), slice);
+        await new Promise(r => setTimeout(r, 100));
+      }
+    } finally {
+      if (joined && conn) g.remove(conn);
+    }
+    if (conn) conn.volume = savedVol;
+    g.volume = savedGroupVol;
+    if (wasActive && wasPlaying) {
+      const baseUrl = getEffectiveBaseUrl();
+      await qc.playFrom(peerId, snap.items, snap.currentIndex, baseUrl);
+      if (savedPos > 2000) {
+        await new Promise(r => setTimeout(r, 1200));
+        await qc.transport(peerId, "seek", Math.floor(savedPos / 1000)).catch(() => {});
+      }
+    }
+    return { targets: 1 };
   } finally {
     running.delete(peerId);
   }

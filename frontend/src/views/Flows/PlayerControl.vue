@@ -195,6 +195,12 @@ async function loadCtlTargets() {
       out.push({ peerId: `airplay:${it.id}`, name: it.name || it.id, kind: "airplay", available: it.available });
     }
   } catch {}
+  try {
+    const s = await api.get("/rest/api/v1/sendspin/clients");
+    for (const it of s.data?.clients || []) {
+      out.push({ peerId: `sendspin:${it.clientId}`, name: it.name || it.clientId, kind: "sendspin", available: true });
+    }
+  } catch {}
   ctlTargets.value = out;
 }
 
