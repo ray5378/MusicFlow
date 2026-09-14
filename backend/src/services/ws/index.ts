@@ -167,12 +167,13 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const unsubs: Array<() => void> = [];
   const user: WsUser | undefined = (ws as any).__user;
 
-  // 设备状态/队列事件:管理员全量;非 admin 只收到被授权设备(dlna:/airplay: 授权)
+  // 设备状态/队列事件:管理员全量;非 admin 只收到被授权设备(dlna:/airplay:/sendspin: 授权)
   // 的事件,其余不推送(避免泄漏别人播放器的状态)。
   const canSeeDevice = (deviceId: string) =>
     !user || user.isAdmin
     || canUseRenderer(user.id, false, `dlna:${deviceId}`)
-    || canUseRenderer(user.id, false, `airplay:${deviceId}`);
+    || canUseRenderer(user.id, false, `airplay:${deviceId}`)
+    || canUseRenderer(user.id, false, `sendspin:${deviceId}`);
   const onState = (deviceId: string, st: any) => {
     if (!canSeeDevice(deviceId)) return;
     const media = getCurrentMedia(deviceId);

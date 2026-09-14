@@ -64,6 +64,29 @@ describe("Sendspin 服务器权威集成", () => {
     expect((await p.pollState()).playbackState).toBe(PlaybackState.IDLE);
   });
 
+  it("playMedia 起播即推 media_changed(HA 卡片歌词/封面即时跟随)", async () => {
+    const { getQueueController } = await import("../../src/services/player/index.js");
+    const qc = getQueueController();
+    const got: any[] = [];
+    const handler = (id: any, media: any) => { got.push([id, media]); };
+    qc.on("media_changed", handler);
+    try {
+      const p = createSendspinProtocolPlayer("mc1");
+      await p.playMedia(
+        { songId: "ms1", title: "T", artist: "Ar", album: "Al", coverArt: "cov", mime: "audio/opus", duration: 10 },
+        "http://192.168.1.5:46400",
+      );
+      await new Promise((r) => setTimeout(r, 300)); // 等动态 import + emit
+      const hit = got.find(([id]) => id === "mc1");
+      expect(hit).toBeTruthy();
+      expect(hit[1].songId).toBe("ms1");
+      expect(hit[1].title).toBe("T");
+      expect(hit[1].coverArt).toBe("cov");
+    } finally {
+      qc.off("media_changed", handler);
+    }
+  });
+
   it("unregisterSendspinDevices 注销全部 sendspin 播放器", () => {
     const qc = new QueueController();
     qc.registerSendspinDevice("c1", "a");

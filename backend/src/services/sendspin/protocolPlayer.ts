@@ -37,6 +37,22 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
         // 导致任何合规播放器都无声)。放 g.add 之后、pump.play 之前,首帧必在其后。
         conn.announceStream();
       }
+      // 起播即推 media_changed(HA 卡片歌词/封面即时跟随,不必等 2s 轮询;
+      // 对齐 DLNA castToDevice 的 media_changed + player_refresh)。
+      // 经 QueueController 事件总线 → ws 转发(device_id=裸 clientId)。
+      // player/index 动态导入:避免 sendspin/protocolPlayer 在模块初始化期被
+      // 静态拉入 player/index → sendspin 的模块环。
+      void import("../player/index.js").then(({ getQueueController }) => {
+        try {
+          getQueueController().emit("media_changed", clientId, {
+            songId: item.songId,
+            title: item.title,
+            artist: item.artist,
+            album: item.album,
+            coverArt: item.coverArt,
+          });
+        } catch { /* 控制器未就绪时忽略 */ }
+      }).catch(() => {});
       // 后台起播:解码→按组时间线推流。不阻塞 playMedia 返回(pollState 反映进度)。
       void pump.play(item.songId).catch((e) => {
         // 无可播源等:置空 current,交 QueueController 走跳过/换源。
