@@ -849,7 +849,11 @@
     "sendspinUnapprove": "Revoke",
     "sendspinUnpair": "Unpair",
     "sendspinUnpairConfirm": "Unpair {name} and disconnect it?",
-    "sendspinPairTitle": "Pair Sendspin device"
+    "sendspinPairTitle": "Pair Sendspin device",
+    "online": "Online",
+    "sendspinRemembered": "Remembered players (auto-reconnect on restart)",
+    "sendspinReconnect": "Connect",
+    "sendspinForgetConfirm": "Forget {name}? It will no longer auto-reconnect."
   },
   "genres": {
     "title": "Genres",

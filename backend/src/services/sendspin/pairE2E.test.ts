@@ -14,7 +14,7 @@ import { getPeerManager } from "../peer.js";
 
 const PORT = 18928;
 const PY = process.env.MF_SENDSPIN_E2E_PY || "/tmp/opencode/sendspin-venv/bin/python";
-const SIM = "/tmp/opencode/mf-sim-player.py";
+const SIM = path.join(import.meta.dirname, "..", "..", "..", "scripts", "sendspin-sim-player.py");
 const PIN = "12345678";
 
 async function waitFor(fn: () => boolean, ms: number, what: string): Promise<void> {

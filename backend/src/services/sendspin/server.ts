@@ -145,6 +145,13 @@ export class SendspinServer {
     });
     const before = new Set(this.clients.keys());
     const conn = new SendspinConnection(this, ws);
+    // 记住拨号来源:掉线重拨与忘记目标时定位用。
+    try {
+      const u = new URL(url);
+      conn.dialed = true;
+      conn.dialHost = u.hostname;
+      conn.dialPort = u.port ? parseInt(u.port, 10) : 80;
+    } catch { /* URL 非法已在上游校验 */ }
     this.log("info", `dialed ${url},等激活`);
     const t0 = Date.now();
     for (;;) {
@@ -304,6 +311,10 @@ export class SendspinConnection {
   /** legacy 明文客户端(无 Noise):client/hello 直连,全程 TEXT/RAW BINARY,无加密。
    *  配对不可用(与 MA 的 legacy transition-mode 一致),peer 标记 unencrypted。 */
   legacy = false;
+  /** 本连接是否由服务端主动拨出;是则 dialHost/dialPort 记录目标(掉线重拨用)。 */
+  dialed = false;
+  dialHost = "";
+  dialPort = 0;
   group: SendspinGroup | null = null;
   codec: SendspinCodec = "opus";
   volume = 100;

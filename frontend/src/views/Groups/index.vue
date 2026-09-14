@@ -197,6 +197,33 @@
           {{ t('groups.noSendspinDevices') }}
         </div>
       </div>
+      <div v-if="dialTargets.length" class="remembered-box">
+        <div class="remembered-title">{{ t('groups.sendspinRemembered') }}</div>
+        <div v-for="tg in dialTargets" :key="`${tg.host}:${tg.port}`" class="device-row">
+          <MfIcon name="Speaker" class="device-row-icon" :class="{ offline: !tg.online }" />
+          <div class="device-row-info">
+            <div class="device-row-name">
+              {{ tg.host }}:{{ tg.port }}
+              <el-tag v-if="tg.online" size="small" type="success" style="margin-left: 6px">{{ t('groups.online') }}</el-tag>
+              <el-tag v-else size="small" type="info" style="margin-left: 6px">{{ t('groups.offline') }}</el-tag>
+            </div>
+          </div>
+          <div class="device-row-actions">
+            <el-button v-if="!tg.online" size="small" @click="redialTarget(tg)">{{ t('groups.sendspinReconnect') }}</el-button>
+            <el-popconfirm
+              :title="t('groups.sendspinForgetConfirm', { name: `${tg.host}:${tg.port}` })"
+              :confirm-button-text="t('common.delete')"
+              :cancel-button-text="t('common.cancel')"
+              width="260"
+              @confirm="forgetTarget(tg)"
+            >
+              <template #reference>
+                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('common.delete') }}</el-button>
+              </template>
+            </el-popconfirm>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="section-head group-section-head">
@@ -547,6 +574,7 @@ function openRenameAirPlayDevice(dev: any) {
 // ---- Sendspin 设备管理(在线客户端;拨入为主,也可手动拨号添加) ----
 const sendspinClients = ref<any[]>([]);
 const loadingSendspin = ref(false);
+const dialTargets = ref<any[]>([]);
 const showDialDialog = ref(false);
 const dialHost = ref("");
 const dialPort = ref(8928);
@@ -564,7 +592,35 @@ async function loadSendspinClients(): Promise<void> {
     const res = await api.get("/rest/api/v1/sendspin/clients");
     sendspinClients.value = res.data?.clients || [];
   } catch { sendspinClients.value = []; }
+  try {
+    const res = await api.get("/rest/api/v1/sendspin/dial-targets");
+    dialTargets.value = res.data?.targets || [];
+  } catch { dialTargets.value = []; }
   finally { loadingSendspin.value = false; }
+}
+
+async function redialTarget(tg: any): Promise<void> {
+  try {
+    const res = await api.post("/rest/api/v1/sendspin/dial", { host: tg.host, port: tg.port });
+    if (res.data?.success) {
+      ElMessage.success(t("groups.sendspinDialOk", { name: res.data?.name || `${tg.host}:${tg.port}` }));
+      await loadSendspinClients();
+    } else {
+      ElMessage.error(res.data?.error || t("groups.sendspinDialFailed"));
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("groups.sendspinDialFailed"));
+  }
+}
+
+async function forgetTarget(tg: any): Promise<void> {
+  try {
+    await api.delete("/rest/api/v1/sendspin/dial-targets", { data: { host: tg.host, port: tg.port } });
+    ElMessage.success(t("settings.saved"));
+    await loadSendspinClients();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+  }
 }
 
 async function dialPlayer(): Promise<void> {
@@ -788,6 +844,8 @@ onMounted(() => { loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); loadSen
 .group-actions .device-hide-toggle { margin-right: 2px; }
 .group-actions .el-button { margin-left: 0; }
 .device-empty { text-align: center; color: var(--fnos-text-tertiary); font-size: 12px; padding: 22px 0; }
+.remembered-box { margin-top: 10px; }
+.remembered-title { font-size: 12px; font-weight: 600; color: var(--fnos-text-secondary); margin: 2px 2px 6px; }
 .form-tip { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 6px; }
 .groups-tip {
   font-size: 12px; color: var(--fnos-text-tertiary); background: rgba(255,255,255,0.04);

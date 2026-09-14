@@ -2826,10 +2826,44 @@ apiRoutes.post("/v1/sendspin/dial", adminMiddleware, async (c) => {
   }
   try {
     const conn = await srv.dialPlayer(`ws://${host}:${port}/sendspin`);
+    try {
+      const { rememberDialTarget } = await import("../../services/sendspin/index.js");
+      await rememberDialTarget(host, port);
+    } catch { /* 记住失败不影响已建连接 */ }
     return c.json({ success: true, clientId: conn.clientId, name: conn.name });
   } catch (e: any) {
     return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.dialFailed"), 500);
   }
+});
+
+// 记住的拨号目标:重启/掉线自动重拨。GET 带在线状态;DELETE 忘记(在线则一并断开)。
+apiRoutes.get("/v1/sendspin/dial-targets", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv) return c.json({ targets: [], enabled: false });
+  const { listDialTargets } = await import("../../services/sendspin/index.js");
+  const online = new Set(
+    [...srv.clients.values()]
+      .filter((conn) => conn.dialed && conn.clientId)
+      .map((conn) => `${conn.dialHost}:${conn.dialPort}`),
+  );
+  return c.json({
+    enabled: true,
+    targets: listDialTargets().map((t) => ({ ...t, online: online.has(`${t.host}:${t.port}`) })),
+  });
+});
+
+apiRoutes.delete("/v1/sendspin/dial-targets", adminMiddleware, async (c) => {
+  const srv = sendspinServerOr404(c);
+  if (!srv) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.notEnabled"), 404);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { host, port } = body;
+  if (typeof host !== "string" || !host || !Number.isInteger(port)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.badDialTarget"), 400);
+  }
+  const { forgetDialTarget } = await import("../../services/sendspin/index.js");
+  const ok = await forgetDialTarget(host, port);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.sendspin.noSuchTarget"), 404);
+  return c.json({ success: true });
 });
 
 apiRoutes.post("/v1/sendspin/unpair", adminMiddleware, async (c) => {

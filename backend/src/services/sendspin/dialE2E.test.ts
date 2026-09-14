@@ -11,7 +11,7 @@ import { getPeerManager } from "../peer.js";
 const PORT = 18930;
 const LISTEN_PORT = 18931;
 const PY = process.env.MF_SENDSPIN_E2E_PY || "/tmp/opencode/sendspin-venv/bin/python";
-const SIM = "/tmp/opencode/mf-listen-player.py";
+const SIM = path.join(import.meta.dirname, "..", "..", "..", "scripts", "sendspin-sim-listener.py");
 
 async function waitFor(fn: () => boolean, ms: number, what: string): Promise<void> {
   const t0 = Date.now();
