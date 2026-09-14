@@ -268,6 +268,20 @@
 
 **CI 强制**：① 主仓库 vitest `hostApiParity.test.ts`——新增 host API 必须**三处同步**（直连宿主 discovery.ts、沙箱类型+接线 sandbox.ts、后台 worker 通道 sandboxWorker.ts），缺一处即红；② 插件仓库 `check.mjs`——index.js 自带 `matchLocal` 却未接 `host.songs.match` 即红（复制检测）。
 
+### 1.7 统一音源裁决与取流抽象（`resolveAudio`，所有播放链路强制入口）
+
+> 单点模块 `backend/src/services/source/resolveAudio.ts` 是全系统「这一首歌最终播哪个行、字节从哪来」的**唯一真相源（唯一权威）**。它把此前各链路分散、口径不一致的裁决收敛为一条固定序列：
+> **快缓存 → 本行探测 → 优选换行（含验证）→ 本行复核**，每一步都带 `reason` 便于定位判死位置；只返回可播行，字节统一走 `fetchRowBytes`。
+
+- **抽离后的公共接口（已抽成所有链路共用，禁止各自内联复刻）**：
+  - `resolvePlayableRow(songId) -> PlayableRowResult`：裁决某首歌的可播行（本地行失败会换组内 web 兄弟行）；`row` 为可播行；`reason` 标记判定路径（`fresh-cache/ensure-ok/local-probe-ok/preferred-swap/reverify-ok/...-failed`）；`definitive:true` = 确定无源（本地文件确死）可判 skip，`false` = 未知（网络抖动/缓存过期）调用方须**宽容放行**、不可判死。
+  - `fetchRowBytes(row) -> Buffer|null`：与 `/rest/stream` **同口径**取行字节（web 行走 `url`+`cachePath`、webdav 按 `path` 解析并带源鉴权、local 读文件）。
+- **强制接入点（现有链路）**：
+  - 切歌前裁决：`QueueController.judgePlayable` → `resolvePlayableRow`；
+  - sendspin pump 出流：`sendspin/streamEngine.ts` → `resolvePlayableRow` + `fetchRowBytes`；
+  - DLNA 设备拉流 `/rest/stream`、`/rest/stream-remote`、`/rest/dlna/stream/:token`：换源/取签与 `/rest/stream` **同口径**（共用决策层 `preferredSource.resolvePreferredSong`）。
+- **⚠️ 硬性约束（防回归）**：**以后开发不同的播放器或新增出流/取流链路，一律复用 `resolvePlayableRow`/`fetchRowBytes`（或其上层统一决策），不得把换源/取字节逻辑内联重写。** 否则同一首歌在 judge / pump / stream 之间的判死口径会再度漂移——历史「周深小美满案」：歌单引用无 `url` 本地行、WebDAV 明明可达，sendspin 却判死跳歌，根因正是各链路各自实现、口径不一致。任何新链路都要回归「同一首歌在各链路 verdict 一致」这一验收点。
+
 ***
 
 ## 二、数据模型契约（SQLite）
