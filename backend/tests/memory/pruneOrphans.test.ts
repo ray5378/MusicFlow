@@ -70,3 +70,39 @@ describe("pruneOrphansOnce 冒烟", () => {
     expect(() => pruneOrphansOnce()).not.toThrow();
   });
 });
+
+describe("pruneOrphansOnce 回归:sendspin 客户端不得被当孤儿", () => {
+  // 线上事故:每 10 分钟一轮的清理把播着的 sendspin 播放器 + 队列 + tracker
+  // 整个删掉(合法集合只认 DLNA/AirPlay/组/用户),表现为"播完一首就停、队列清空"。
+  it("在线 sendspin peer 的播放器/队列/状态在清理后保留", async () => {
+    const { getPeerManager } = await import("../../src/services/peer.js");
+    const { getQueueController } = await import("../../src/services/player/index.js");
+    const { getPlayerController } = await import("../../src/services/player/index.js");
+    const pm = getPeerManager();
+    const qc = getQueueController();
+    const pc = getPlayerController();
+    const cid = "e2e-prune-test-" + Date.now();
+    const peerId = `sendspin:${cid}`;
+    const mockPlayer = { playerId: peerId } as any;
+    const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {} };
+
+    pm.registerSendspin(cid, "Prune Test", true);
+    qc.registerPlayer(cid, mockPlayer, mockCtrl);
+    (qc as any).queues.set(cid, { items: [{ songId: "s1" }], currentIndex: 0, playMode: "order", isActive: true, ended: false });
+    pc.reportState({ playerId: peerId, playbackState: PlaybackState.PLAYING, position: 1, duration: 100, mediaUri: "u", updatedAt: Date.now() });
+
+    pruneOrphansOnce();
+
+    expect(pm.get(peerId)).toBeDefined();
+    expect((qc as any).players.has(cid)).toBe(true);
+    expect((qc as any).queues.get(cid)?.items).toHaveLength(1);
+    expect(pc.getLatest(peerId)).toBeDefined();
+
+    // 清理:不污染同文件其他用例
+    pm.removeSendspinPeer(cid);
+    qc.pruneOrphans(new Set(["__cleanup__"]), new Set());
+    pc.pruneOrphans(new Set(["__cleanup__"]));
+    expect((qc as any).players.has(cid)).toBe(false);
+    expect(pc.getLatest(peerId)).toBeUndefined();
+  });
+});

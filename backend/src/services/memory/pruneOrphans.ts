@@ -37,12 +37,24 @@ export function pruneOrphansOnce(): void {
   const deviceIds = new Set([...getCachedDevices().map((d) => d.id), ...airplayIds]);
   const groupIds = new Set(getGroupManager().list().map((g) => g.id));
   const userIds = new Set(db.select().from(users).all().map((u) => u.id));
+  // Sendspin 客户端同理:裸 clientId 作 QueueController key 且有独立队列,
+  // 不并入合法集合会被当孤儿删掉(播放中直接掐断,表现为"播完一首就停")。
+  // 以 peer 注册表为准(deviceId 即裸 clientId,见 peer.registerSendspin)。
+  const sendspinIds: string[] = [];
+  const sendspinPeerIds: string[] = [];
+  for (const p of getPeerManager().list()) {
+    if (p.kind === "sendspin" && p.deviceId) {
+      sendspinIds.push(p.deviceId);
+      sendspinPeerIds.push(p.peerId);
+    }
+  }
+  for (const id of sendspinIds) deviceIds.add(id);
 
   getEventManager().pruneOrphans(deviceIds);
   getQueueController().pruneOrphans(deviceIds, groupIds);
 
   // PlayerController 的 key 是 playerId(local:<uid>[:<clientId>] / dlna:<deviceId> /
-  // group:<groupId> / airplay:<deviceId>)。
+  // group:<groupId> / airplay:<deviceId> / sendspin:<clientId>)。
   // 本机播放器现在每个客户端实例一条(local:<uid>:<clientId>),必须把**已注册的**
   // 那些也放进合法集合,否则每 10 分钟一轮的清理会把正在播的实例当孤儿删掉。
   const playerIds = new Set<string>();
@@ -53,6 +65,7 @@ export function pruneOrphansOnce(): void {
   for (const did of deviceIds) playerIds.add(`dlna:${did}`);
   for (const did of airplayIds) playerIds.add(`airplay:${did}`);
   for (const gid of groupIds) playerIds.add(`group:${gid}`);
+  for (const pid of sendspinPeerIds) playerIds.add(pid);
   getPlayerController().pruneOrphans(playerIds);
 
   sweepScrobbleDedupe();
