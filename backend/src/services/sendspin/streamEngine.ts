@@ -136,6 +136,11 @@ export class GroupPump {
     const frameSamples = Math.floor((SAMPLE_RATE * CHANNELS * FRAME_MS) / 1000);
     const total = Math.ceil(pcm.length / frameSamples);
     const baseTs = this.group.timelineBaseUs;
+    // 内容耗尽(任一边界)即自然结束:解码长度与元数据时长常差几十 ms,
+    // 两个方向都会卡死(偏长→同一尾帧无限重推,因 clamp 锁住下标;偏短→
+    // positionMs 到不了 durationMs,endedNaturally 恒 false)。统一按耗尽判定,
+    // 中断(pushFrame 抛错)则保持未结束(断线恢复用)。
+    let contentEnded = false;
     try {
       while (this.running && this.epoch === myEpoch) {
         // 暂停时挂起,等待 resume。
@@ -144,7 +149,7 @@ export class GroupPump {
           continue;
         }
         const i = Math.floor(this.group.positionMs / FRAME_MS);
-        if (i >= total) break; // 自然播完
+        if (i >= total) { contentEnded = true; break; } // 解码耗尽
         const lo = i * frameSamples;
         const hi = Math.min(lo + frameSamples, pcm.length);
         try {
@@ -153,6 +158,10 @@ export class GroupPump {
           break; // 连接断开等:停止推流(状态由 QueueController 处理)。
         }
         this.group.positionMs = Math.min(this.durationMs, i * FRAME_MS + FRAME_MS);
+        // 元数据时长与实际解码长度常差几十 ms:解码偏长时 i 永远到不了 total,
+        // positionMs 又被 clamp 在 durationMs → 同一尾帧无限重推、永不结束。
+        // 到达元数据时长即视为播完(退出后 endedNaturally 照常置空 current 触发切歌)。
+        if (this.durationMs > 0 && this.group.positionMs >= this.durationMs) { contentEnded = true; break; }
         // 按真实时间推进: 每推一帧 sleep 一帧的真实墙钟时长(倍速压缩)。
         // ⚠️ 此前 `sleep((i+1)*FRAME_MS/speed - min(duration/speed, ...))` 对所有
         // start<duration 的帧算出 sleep(0) → 整个音频瞬间推完 → poll 先于乐观窗口
@@ -163,7 +172,7 @@ export class GroupPump {
       }
       if (this.epoch === myEpoch) {
         this.running = false;
-        this.endedNaturally = this.group.positionMs >= this.durationMs;
+        this.endedNaturally = contentEnded;
         // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
         if (this.endedNaturally) this.group.current = null;
       }
