@@ -4,7 +4,7 @@
 //   - 负结果(所有平台都无候选)在 negativeTtl 过期后会**重新探测**（≠ 永久拉黑）
 //   - 正结果(确认可播)在 1 小时内不重探、超过后重新探测
 //   - 网络异常/超时**不判定不可播**，只短期退避后重试
-//   - probeStream 三态：ok / gone(403,404,410) / transient(429,5xx,异常)
+//   - probeStream 三态：ok / gone(403,404,410 + 200/206 但 content-type 明确非音频) / transient(429,5xx,异常)
 //   - getCachedPlayability 四态（unknown / playable / unplayable / transient）
 //   - configureStreamFallbackCache 覆写生效
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
@@ -44,7 +44,12 @@ let nowShift = 0;
 const realNow = Date.now;
 
 // ---- 可控的 fetch ----
-let fetchHandler: (url: string) => Response | Promise<Response> = () => new Response("bytes", { status: 206 });
+// 注意:new Response(字符串) 会被 undici 自动补 `content-type: text/plain;charset=UTF-8`,
+// 而 probeStream 现在会把 200/206 + 明确非音频 content-type 判 gone —— 所有期望
+// "可播"的 mock 必须显式带音频 content-type(走 audioResponse)。
+const AUDIO_HEADERS = { "content-type": "audio/mpeg" };
+const audioResponse = (status: number, body = "bytes") => new Response(body, { status, headers: AUDIO_HEADERS });
+let fetchHandler: (url: string) => Response | Promise<Response> = () => audioResponse(206);
 const fetchCalls: string[] = [];
 
 vi.stubGlobal("fetch", async (url: string) => {
@@ -114,7 +119,7 @@ beforeAll(() => {
 afterEach(() => {
   nowShift = 0;
   fetchCalls.length = 0;
-  fetchHandler = () => new Response("bytes", { status: 206 });
+  fetchHandler = () => audioResponse(206);
   clearStreamFallbackCache();
   configureStreamFallbackCache({
     playableTtlMs: 60 * 60 * 1000,
@@ -150,7 +155,7 @@ describe("缓存 TTL — 负结果不是永久拉黑", () => {
     const { searchCalls } = enableProvider([MISMATCHED_CAND]);
     seedSong("ttl-revive", { url: "http://orig/broken.mp3", title: "恋人", artist: "李荣浩" });
     // 原链一律 404（触发换源），候选 URL 一律 206（可播）。
-    fetchHandler = (url) => new Response("", { status: url.includes("orig") ? 404 : 206 });
+    fetchHandler = (url) => audioResponse(url.includes("orig") ? 404 : 206);
 
     expect(await ensurePlayableStream(songRowOf("ttl-revive"))).toBeNull();
     expect(searchCalls.length).toBe(1);
@@ -170,7 +175,7 @@ describe("缓存 TTL — 正结果 1 小时", () => {
   it("1 小时内不重探；超过 1 小时后重新探测", async () => {
     enableProvider([]);
     seedSong("ttl-pos", { url: "http://orig/good.mp3", title: "恋人", artist: "李荣浩" });
-    fetchHandler = () => new Response("bytes", { status: 206 });
+    fetchHandler = () => audioResponse(206);
     const countOrigProbes = () => fetchCalls.filter(u => u.includes("good")).length;
 
     expect(await ensurePlayableStream(songRowOf("ttl-pos"))).toBe("http://orig/good.mp3");
@@ -227,10 +232,38 @@ describe("缓存 TTL — 网络异常不判定不可播", () => {
 });
 
 describe("probeStream — 三态判定", () => {
-  it("200/206 → ok", async () => {
-    fetchHandler = () => new Response("bytes", { status: 206 });
+  it("200/206 + 音频 content-type → ok", async () => {
+    fetchHandler = () => audioResponse(206);
     expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("ok");
-    fetchHandler = () => new Response("bytes", { status: 200 });
+    fetchHandler = () => audioResponse(200);
+    expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("ok");
+  });
+
+  it("200/206 + content-type 明确非音频 → gone(migu 200002 实锤:200 包 JSON 错误体)", async () => {
+    fetchHandler = () => new Response('{"code":"200002","info":"PE参数格式错误"}', {
+      status: 200,
+      headers: { "content-type": "application/json;charset=utf-8" },
+    });
+    expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("gone");
+    fetchHandler = () => new Response("<html>error</html>", {
+      status: 206,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+    expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("gone");
+    fetchHandler = () => new Response('{"error":1}', {
+      status: 200,
+      headers: { "content-type": "application/problem+json" },
+    });
+    expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("gone");
+  });
+
+  it("content-type 缺失/模糊 → 保守放行(宁漏杀不错杀)", async () => {
+    fetchHandler = () => new Response("bytes", { status: 200, headers: { "content-type": "application/octet-stream" } });
+    expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("ok");
+    fetchHandler = () => new Response("bytes", { status: 206, headers: { "content-type": "application/ogg" } });
+    expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("ok");
+    // null body 不会触发 undici 自动补 text/plain → 模拟"无 content-type"
+    fetchHandler = () => new Response(null, { status: 206 });
     expect(await probeStream("http://x/a", PROBE_TIMEOUT_DEFAULT_MS)).toBe("ok");
   });
 
@@ -265,7 +298,7 @@ describe("getCachedPlayability — 四态", () => {
     enableProvider([MISMATCHED_CAND]);
     seedSong("ttl-play", { url: "http://orig/good.mp3", title: "恋人", artist: "李荣浩" });
     seedSong("ttl-dead", { url: "http://orig/broken.mp3", title: "恋人", artist: "李荣浩" });
-    fetchHandler = (url) => new Response("", { status: url.includes("good") ? 206 : 404 });
+    fetchHandler = (url) => audioResponse(url.includes("good") ? 206 : 404);
 
     expect(await ensurePlayableStream(songRowOf("ttl-play"))).toBeTruthy();
     expect(getCachedPlayability("ttl-play")).toBe("playable");

@@ -238,9 +238,24 @@ export async function findFallbackStream(
 export type ProbeOutcome = "ok" | "gone" | "transient";
 
 /**
+ * content-type 明确非音频 → 判 gone(2026-09-14「带我走-杨丞琳」实锤:migu 源挂掉时
+ * music-dl 透传上游 `HTTP 200 + application/json {"code":"200002","info":"PE参数格式错误"}`,
+ * 仅凭状态码判 ok → 死链当可播 → 设备拉到 47 字节垃圾后 MUZO 永久卡 BUFFERING)。
+ * 黑名单只拦"明确不是音频"的信号(json/text);缺失、audio/*、octet-stream、application/ogg
+ * 等模糊值保守放行 —— 正规 CDN 存在无 content-type / octet-stream 的合法音频响应,
+ * 宁漏杀不错杀。
+ */
+function isExplicitNonAudioContentType(contentType: string | null): boolean {
+  const ct = (contentType || "").split(";")[0].trim().toLowerCase();
+  if (!ct) return false;
+  return ct === "application/json" || ct.endsWith("+json") || ct.startsWith("text/");
+}
+
+/**
  * 探测一个流 URL 是否可播。
- *   - "ok"        200/206 → 可播;
- *   - "gone"      403/404/410 → **明确不存在/无权限**,可据此判定不可播;
+ *   - "ok"        200/206 且 content-type 非明确非音频 → 可播;
+ *   - "gone"      403/404/410,或 200/206 但 content-type 明确非音频(JSON/text 错误体)
+ *                 → **明确不可播**,可据此判定不可播并触发多源兜底;
  *   - "transient" 429/5xx/网络异常/超时 → **不可判定**,调用方不得据此写负缓存。
  * 此前把三者一律算 false(2026-09-11 前),一次网络抖动就能把一首歌永久判死。
  */
@@ -249,8 +264,12 @@ async function probe(url: string, timeoutMs: number = PROBE_TIMEOUT_DEFAULT_MS):
   try {
     const res = await fetch(url, { headers: { Range: "bytes=0-20000" }, signal: AbortSignal.timeout(timeoutMs) });
     const status = res.status;
+    const contentType = res.headers.get("content-type");
     await res.body?.cancel();
-    if (status === 200 || status === 206) return "ok";
+    if (status === 200 || status === 206) {
+      if (isExplicitNonAudioContentType(contentType)) return "gone";
+      return "ok";
+    }
     if (status === 403 || status === 404 || status === 410) return "gone";
     return "transient";
   } catch {

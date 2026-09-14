@@ -21,7 +21,7 @@ import type { UniversalPlayer } from "../../src/services/player/UniversalPlayer.
 import { getPeerManager } from "../../src/services/peer.js";
 
 // 原链一律 206 → 每首歌都是"可播",不触发换源搜索。
-vi.stubGlobal("fetch", async () => new Response("bytes", { status: 206 }));
+vi.stubGlobal("fetch", async () => new Response("bytes", { status: 206, headers: { "content-type": "audio/mpeg" } }));
 
 const PROVIDER = "lp-test";
 const manifestOf = {

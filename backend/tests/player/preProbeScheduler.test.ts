@@ -39,7 +39,7 @@ beforeAll(() => { Date.now = () => realNow() + nowShift; });
 vi.stubGlobal("fetch", async (url: string) => {
   const u = String(url);
   if (u.includes("/dead/")) return new Response("gone", { status: 404 });
-  return new Response("bytes", { status: 206 });
+  return new Response("bytes", { status: 206, headers: { "content-type": "audio/mpeg" } });
 });
 
 // ---- 可控的探测:预热阶段决定每首歌的"命运",扫描阶段全部命中缓存(0 次真实探测) ----

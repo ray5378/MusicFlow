@@ -45,7 +45,7 @@ vi.stubGlobal(
   async (url: string) =>
     String(url).includes("orig")
       ? new Response("not found", { status: 404 })
-      : new Response("stream-bytes", { status: 206 }),
+      : new Response("stream-bytes", { status: 206, headers: { "content-type": "audio/mpeg" } }),
 );
 
 function enableProvider(cands: any[]) {

@@ -43,7 +43,7 @@ vi.stubGlobal(
   "fetch",
   async (_url: string) => {
     probeCount++;
-    return new Response("stream-bytes", { status: 206 });
+    return new Response("stream-bytes", { status: 206, headers: { "content-type": "audio/mpeg" } });
   },
 );
 
