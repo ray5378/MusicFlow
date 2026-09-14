@@ -1,22 +1,22 @@
-// 起点归属契约守卫（2026-09-10 ray 拍板：**洗牌唯一权威在服务端，但起播位置由调用方决定**）。
+// 起点归属契约守卫（2026-09-14 ray 拍板，对齐纯 web 前端：**洗牌唯一权威在服务端，
+// 起播位置「整列表播放」随机挑首，「指定居中某首」调用方说了算**）。
 //
-// 背景（客户端实测复现的严重 bug）：
-// QueueController.playFrom 曾在 shuffle 模式下**无条件** `Math.random() * items.length`
-// 自行挑首起播，把调用方传入的 startIndex 整个丢掉。客户端「投今日漫游歌单的第 N 首」
-// 时设备却播了另一首 —— 实测 3251 首队列里 currentIndex 随机落在 560 / 3117 / 3206，
-// 用户报告「客户端推的百分百不是当前播放的歌曲」。
+// 背景（历史两次反向修导致摇摆）：
+// - 2026-09-10 曾把 playFrom 改成"调用方指定了起点(≥0) 就绝不随机"，于是整列表播放
+//   默认把第 1 首 pin 给服务端 → shuffle 下"列表总是第一首开头"（非 web 前端也如是）。
+// - 纯 web 前端(localPlayQueue / castPlayQueue)本就是"整列表 shuffle 无条件随机"。
+//   2026-09-14 服务端收敛为同一语义，同时保住"指定居中某首"的旧契约。
 //
-// 更早的痕迹：三份既有测试（tests/player/integration.test.ts、
-// tests/group/GroupPlayback.test.ts、tests/group/GroupWatchdog.test.ts）都不得不
-// **手工把 playMode 钉成 "order"** 才能让断言确定 —— 现在它们可以去掉那个 workaround。
-//
-// 本守卫锁死三条契约：
-//   1. **调用方指定了起点（非负整数）→ 绝不随机**，即使 playMode=shuffle；
-//   2. 调用方未指定（null/undefined/负数）且 shuffle → 服务端随机（唯一的随机点）；
-//   3. 随机只作用于**首曲**；后续自动切歌仍沿服务端 shuffleOrder，且 shuffleOrder
+// 本守卫锁死契约：
+//   1. **整列表播放**（startIndex 为 null/undefined/负数/0）且 shuffle 且 >1 首 →
+//      服务端随机挑首（与 web 前端一致）；
+//   2. **指定居中某首**（startIndex 为正整数，如音流/HA 投歌单第 N 首）且 shuffle →
+//      严格尊重该下标，绝不随机；
+//   3. 非 shuffle / 只有 1 首 → 回落 0（不随机）；
+//   4. 随机只作用于**首曲**；后续自动切歌仍沿服务端 shuffleOrder，且 shuffleOrder
 //      通过 snapshot() 下发（客户端镜像用，不再自行洗牌）。
 //
-// 把 playFrom 里的 `specified` 分支去掉（恢复无条件随机）即红。
+// 把 playFrom 里的 `listStart` 分支去掉（恢复无条件随机 或 恢复无条件尊重）即红。
 import "../plugins/_env.js";
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
@@ -100,25 +100,34 @@ function setup(deviceId = "d1") {
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-describe("playFrom 起点归属（调用方指定 → 不随机）", () => {
-  it("★ 调用方指定起点 0 时，shuffle 模式下也必须播第 0 首（历史 bug 复现点）", async () => {
+describe("playFrom 起点归属（整列表播放 random / 指定居中尊重）", () => {
+  it("★ 整列表播放（startIndex=0）且 shuffle → 服务端随机挑首，不是固定第 0 首", async () => {
     const { qc, device } = setup();
-    // 队列默认 playMode = "shuffle" —— 这正是历史 bug 的触发条件。
+    // 队列默认 playMode = "shuffle"。start=0 = "整列表播放"，shuffle 下必须随机。
     expect(qc.snapshot("d1").playMode).toBe("shuffle");
-    // 连续 8 次：旧实现必然出现 currentIndex != 0（随机），新实现必须恒为 0。
-    for (let i = 0; i < 8; i++) {
+    const seen = new Set<number>();
+    for (let i = 0; i < 40; i++) {
       const idx = await qc.playFrom("d1", makeItems(200), 0, "http://base");
-      expect(idx).toBe(0);
-      expect(qc.snapshot("d1").currentIndex).toBe(0);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(200);
+      expect(qc.snapshot("d1").currentIndex).toBe(idx);
+      seen.add(idx);
     }
-    expect(device.played.every((s) => s === "s1")).toBe(true);
+    // 40 次全落在同一个下标几乎不可能 → 证明确实随机（复现点：不再恒为 0）。
+    expect(seen.size).toBeGreaterThan(1);
+    expect(device.played.length).toBeGreaterThan(0);
   });
 
-  it("★ 调用方指定中间下标时，shuffle 下精确命中该下标", async () => {
+  it("★ 调用方指定中间下标（>0）时，shuffle 下精确命中该下标（不随机）", async () => {
     const { qc } = setup();
-    const idx = await qc.playFrom("d1", makeItems(50), 17, "http://base");
-    expect(idx).toBe(17);
-    expect(qc.snapshot("d1").currentIndex).toBe(17);
+    const seen = new Set<number>();
+    for (let i = 0; i < 20; i++) {
+      const idx = await qc.playFrom("d1", makeItems(50), 17, "http://base");
+      expect(idx).toBe(17);
+      expect(qc.snapshot("d1").currentIndex).toBe(17);
+      seen.add(idx);
+    }
+    expect(seen.size).toBe(1); // 恒为 17
   });
 
   it("未指定起点（null）且 shuffle → 服务端随机（唯一随机点）", async () => {
@@ -152,7 +161,7 @@ describe("playFrom 起点归属（调用方指定 → 不随机）", () => {
     const { qc } = setup();
     const specified = await qc.playFrom("d1", makeItems(100), 42, "http://base");
     expect(specified).toBe(42);
-    const random = await qc.playFrom("d1", makeItems(100), null, "http://base");
+    const random = await qc.playFrom("d1", makeItems(100), 0, "http://base");
     expect(random).toBe(qc.snapshot("d1").currentIndex);
   });
 });

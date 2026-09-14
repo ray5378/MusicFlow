@@ -333,6 +333,11 @@ IDLE ⇄ PLAYING ⇄ PAUSED ⇄ BUFFERING
 
 **队列播放模式**：`order | one | all | shuffle`（切换只允许在这 4 值间进行）。
 
+**shuffle 起播归属（2026-09-14）**：洗牌唯一权威在服务端；起播位置按「整列表播放 vs 指定居中某首」区分——
+- 整列表播放（未给起点，或 `startIndex≤0`）且 shuffle 且多于 1 首 → 服务端**随机挑首**（与纯 web 前端一致）；
+- 指定居中某首（`startIndex` 为正整数，如音流/HA 投歌单第 N 首）或恢复断点（`currentIndex` 续播）→ 严格尊重，不随机。
+后续自动切歌一律沿服务端 `shuffleOrder`（一轮不重复），经 `snapshot().shuffleOrder` 下发镜像。
+
 ***
 
 ## 三、API 接口契约

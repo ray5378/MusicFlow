@@ -571,19 +571,23 @@ export class QueueController extends EventEmitter {
   /**
    * 用新队列替换当前队列并从 `startIndex` 开始播放。
    *
-   * **起点归属（2026-09-10 拍板）：随机洗牌的唯一权威在服务端，但起播位置
-   * 由调用方决定 —— 服务端只在调用方「没有指定起点」时才随机。**
+   * **起点归属（2026-09-14 拍板，对齐纯 web 前端）：随机洗牌的唯一权威在服务端，
+   * 起播位置「整列表播放」时服务端随机挑首，「指定某首」时调用方说了算。**
    *
-   * 历史 bug：本方法曾在 shuffle 模式下无条件 `Math.random() * items.length`
-   * 自行挑首起播，把调用方传入的起点**整个丢掉** —— 客户端「投这个歌单的这首歌」
-   * 时设备却播了另一首（实测 3251 首歌单里 currentIndex 随机落在 560/3117/3206，
-   * 用户报告「客户端推的百分百不是当前播放的歌曲」）。
+   * 分界线：起播是"整列表播放"还是"指定某首"，以 `startIndex` 是否**指向居中的
+   * 具体一首**为准 ——
+   * - `startIndex` 为 `null`/`undefined`/负数/`0`（未给起点，或默认从第 1 首开始）
+   *   → 视为**整列表播放**：shuffle 且多于 1 首时，服务端随机挑首（随机只发生在
+   *   服务端这一处，客户端不再自行洗牌；与纯 web 前端 `localPlayQueue`/`castPlayQueue`
+   *   的"整列表 shuffle 无条件随机"一致）;
+   * - `startIndex` 为**正整数**（如音流/HA 投"这首歌单的第 N 首"）与**恢复断点**
+   *   （`snapshot().currentIndex` 续播）→ 调用方明确指定了居中某首，**必须尊重**，
+   *   不随机化起播位置。
    *
-   * 参数约定：
-   * - `startIndex` 为**非负整数** → 调用方明确指定起点，**必须尊重**，不随机；
-   * - `startIndex` 为 `null`/`undefined`/负数 → 调用方未指定，此时且仅在此时，
-   *   shuffle 模式下服务端随机挑首（保留「点歌单随机播放」体验，且随机只发生
-   *   在服务端一处，客户端不再自行洗牌）。
+   * 历史 bug（2026-09-10 曾反向修过一次，现已按上拆解重新收敛）：本方法曾在
+   * shuffle 下无条件 `Math.random() * items.length` 自行挑首，把调用方指定的居中
+   * 起点整个丢掉（客户端投歌单第 560/3117/3206 首却播了别的）。修正为只对
+   * "整列表播放"随机，居中指定的仍尊重。
    *
    * 后续自动切歌一律走服务端 `shuffleOrder`（`pickNext`/`rebuildShuffle`），
    * 并通过 `snapshot().shuffleOrder` 下发，客户端镜像显示。
@@ -596,9 +600,10 @@ export class QueueController extends EventEmitter {
   ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
-    const specified = typeof startIndex === "number" && Number.isInteger(startIndex) && startIndex >= 0;
-    // 未指定起点 + 随机模式 → 服务端随机（唯一的随机点）。
-    const idx = specified
+    // 整列表播放 = 未给起点 / startIndex<=0（默认从第 1 首开始）。指定居中某首(>0)则尊重。
+    const listStart = !(typeof startIndex === "number" && Number.isInteger(startIndex) && startIndex > 0);
+    // 整列表播放 + 随机模式 + 多于 1 首 → 服务端随机挑首（唯一的随机点）。
+    const idx = !listStart
       ? (startIndex as number)
       : mode === "shuffle" && items.length > 1
         ? Math.floor(Math.random() * items.length)

@@ -203,7 +203,8 @@ describe("Sendspin 队列全模式", () => {
       { songId: "r3", title: "t3", mime: "audio/opus" },
       { songId: "r4", title: "t4", mime: "audio/opus" },
     ], 0, BASE);
-    expect(played[0]).toBe("r1");
+    // 整列表播放 + shuffle → 服务端随机挑首(不再固定 r1)。
+    expect(["r1", "r2", "r3", "r4"]).toContain(played[0]);
 
     // 连播 6 首:shuffleOrder 保证一轮 4 首不重复推进。
     await crankUntil(pc, p, () => played.length >= 6, "shuffle 推进", 400);

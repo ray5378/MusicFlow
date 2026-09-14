@@ -3773,6 +3773,10 @@ apiRoutes.post("/v1/play", async (c) => {
   //
   // `start` 为 null 表示**调用方未指定起点** → 交给 QueueController.playFrom 在
   // shuffle 模式下随机挑首（随机只发生在服务端这一处，客户端不再自行洗牌）。
+  //
+  // 2026-09-14 起：`songId`/`startIndex` 命中**居中的具体某首（>0）**仍在 playFrom
+  // 内严格尊重；命中**第 1 首（=0）**的"整列表播放"在 shuffle 下也会被服务端随机
+  // 挑首（见 playFrom 的 listStart 判定），与纯 web 前端整列表 shuffle 行为对齐。
   let start: number | null = null;
   if (typeof songId === "string" && songId.length > 0) {
     const idx = items.findIndex((it) => it.songId === songId);
