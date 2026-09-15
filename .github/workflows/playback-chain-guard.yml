@@ -49,7 +49,7 @@ jobs:
         run: |
           set -o pipefail
           cd backend
-          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/player/queueChangedLeakGuard.test.ts tests/rest/scrobbleMethodGuard.test.ts tests/frontend/playerContract.test.ts tests/frontend/playContentContract.test.ts tests/services/contentOrder.test.ts 2>&1 | tee /tmp/chain-guard.log
+          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/player/queueChangedLeakGuard.test.ts tests/rest/scrobbleMethodGuard.test.ts tests/routes/queueTransfer.test.ts tests/frontend/playerContract.test.ts tests/frontend/playContentContract.test.ts tests/services/contentOrder.test.ts 2>&1 | tee /tmp/chain-guard.log
 
       # 静态守卫：QueueController 的停播阈值（skipCounters/连跳 N 停）已按
       # 2026-09-09 决策整体移除（不可播逐曲移除、队列自然排空），回归即失败。
@@ -106,6 +106,29 @@ jobs:
             miss=1
           fi
           if [ "$miss" -eq 0 ]; then echo "OK: 409 + i18n key 契约在位"; fi
+          exit "$miss"
+
+      # 队列流转端点(2026-09-16):快捷区拖拽「把 A 的队列给 B」的服务端侧。
+      # 红线是**请求体不收 items** —— 队列实体本就在服务端(device_queues / local_queues),
+      # 客户端零上传,几千首也是一次请求;若哪天被改成"客户端传 items",
+      # 大歌单流转会在公网入口撞体积闸门而必然失败。
+      - name: "Guard - queue transfer keeps zero-upload contract"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -q 'queue/transfer-from' backend/src/routes/api/index.ts; then
+            echo "::error::队列流转回归:缺少 /peers/:peerId/queue/transfer-from 端点"
+            miss=1
+          fi
+          if ! grep -q 'resolveBodyPeerId(c, from' backend/src/routes/api/index.ts; then
+            echo "::error::队列流转回归:from 是 body 里的 peerId,必须经 resolveBodyPeerId 解析(否则把对外掩码当真实键,查不到队列)"
+            miss=1
+          fi
+          if grep -q "req.json().*items.*from" backend/src/routes/api/index.ts; then
+            echo "::error::队列流转回归:流转端点不得接收 items(零上传设计红线)"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 队列流转端点 + 零上传契约在位"; fi
           exit "$miss"
 
       # —— 客户端(安卓 / Windows)链路守卫(2026-09-15) ——
