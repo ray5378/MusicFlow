@@ -3172,6 +3172,73 @@ apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
   return c.json({ success: true });
 });
 
+// 队列流转:把**另一个播放端**的队列整体搬到目标端,并从同一位置起播。
+//
+// 与 /queue/play 的区别:那条是「客户端把队列交给我」,这条是「服务端自己从别人那儿取」。
+// 请求体**不收 items** —— 队列实体本就由服务端持有(device_queues / local_queues 的
+// items_json),所以零上传、任意规模队列(几千首)都是一次请求搞定,也不存在公网入口
+// 对大队列 JSON 的体积闸门问题。
+//
+// 目标端的写入分派与 /queue/play **完全一致**(cast → playFrom / local → localPlayFrom),
+// 播放模式也随队列一起带过去,保证流转后行为与原端一致。
+//
+// 源端停止**不在这里做**:由客户端在成功后复用 POST /peers/:id/stop —— 与既有的
+// pullPeerToLocal(读队列 → 停源 → 目标起播)同款两步语义,避免在此重写各 kind 的停止分支。
+//
+// Body: { from: string }  from = 源端完整对外 peerId
+apiRoutes.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
+  const toPeerId = decodePeerId(c);
+  const { from } = await c.req.json().catch(() => ({} as any));
+  if (typeof from !== "string" || !from.trim()) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  }
+  // from 是 **body 里的 peerId**,必须与 URL 参数走同一套解析(见 resolveBodyPeerId 注释):
+  // 不解析就把对外掩码当真实键,查不到任何队列。
+  const fromPeerId = resolveBodyPeerId(c, from.trim());
+  if (fromPeerId === toPeerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+
+  // 源端**必须真实存在**。
+  // 注意:resolveLocalPeerId 对「实例键反查不到」的情况会退回「本次请求的 clientId」
+  // —— 那会让一个不存在的实例静默变成「调用方自己那条」,造成自我覆盖。故这里显式再判一次:
+  // local 看 PeerManager 是否持有该实例;cast 端看 QueueController 是否有它的快照
+  // (getQueueSnapshot 对未注册的 cast 端返回 undefined,但对 local 会返回空快照,不能当判据)。
+  const srcSnap = pm.getQueueSnapshot(fromPeerId);
+  const srcIsLocal = parsePeerId(fromPeerId)?.kind === "local";
+  const srcExists = srcIsLocal ? !!pm.get(fromPeerId) : !!srcSnap;
+  if (!srcExists) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+
+  const src = srcSnap!;
+  const items = Array.isArray(src.items) ? src.items : [];
+  // 源端没内容:不算错误(与「搬了个空队列」等价),回 0 让调用方自行处理提示。
+  if (items.length === 0) return c.json({ success: true, transferred: 0 });
+
+  const start = typeof src.currentIndex === "number" && src.currentIndex >= 0 && src.currentIndex < items.length
+    ? src.currentIndex
+    : 0;
+
+  const parsedTo = parsePeerId(toPeerId);
+  if (!parsedTo) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  if (isCastPeer(parsedTo)) {
+    try {
+      await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
+    } catch (e: any) { return c.json({ error: e.message }, 500); }
+  } else {
+    pm.localPlayFrom(toPeerId, c.get("user")!.id, items, start);
+  }
+
+  // 播放模式随队列流转(队列换了模式却留在原端会显得"没搬全")。
+  // 失败不影响流转本身 —— 队列与起播已经完成。
+  const srcMode = typeof src.playMode === "string" ? src.playMode : null;
+  if (srcMode && ["order", "one", "all", "shuffle"].includes(srcMode)) {
+    try {
+      if (isCastPeer(parsedTo)) getQueueManager().setPlayMode(parsedTo.id, srcMode as any);
+      else pm.localSetPlayMode(toPeerId, srcMode as any);
+    } catch { /* best-effort */ }
+  }
+
+  return c.json({ success: true, transferred: items.length, startIndex: start });
+});
+
 // 跳播到指定索引并立即播放。即使随机模式也尊重 index(随机仅作用于后续自动续播)。
 // Body: { index: number }
 apiRoutes.post("/v1/peers/:peerId/queue/jump", async (c) => {
