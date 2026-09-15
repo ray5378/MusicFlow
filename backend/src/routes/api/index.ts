@@ -6,14 +6,14 @@ import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, n
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import { apiError, BusinessErrorCode } from "../../utils/errors.js";
-import { sanitizeClientId, resolveLocalPeerId, maskLocalPeerId } from "../../utils/peerId.js";
+import { sanitizeClientId, resolveLocalPeerId, maskLocalPeerId, buildLocalPeerId } from "../../utils/peerId.js";
 import { translate } from "../../i18n.js";
 import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
 import { adminMiddleware, invalidateAuthCaches } from "../../middleware/auth.js";
 import {
   PERM, PERMISSION_CATALOG, permMiddleware, rendererGrantParamMiddleware,
-  hasPerm, canUseRenderer, canControlPeer, filterPeersByAccess, peerToDeviceKey,
+  hasPerm, canUseRenderer, canControlPeer, decoratePeersForClient, peerToDeviceKey,
   getUserPermissions, getUserRendererGrants, effectiveAccessView,
   replaceUserPermissions, replaceRendererGrants, grantRenderer, revokeRenderer, invalidateAccessCaches,
 } from "../../services/access.js";
@@ -2947,11 +2947,27 @@ function clientIdOf(c: any): string | null {
   return sanitizeClientId(c.req.header("x-mf-client-id")) ?? sanitizeClientId(c.req.query("clientId"));
 }
 
-/** 解出 peerId,并把「调用方视角」的本机 peerId(local:<userId>)换算成该客户端实例
- *  真正那一行(local:<userId>:<clientId>)。除本机外其余 peer 原样返回。 */
+/** 规整客户端上报的「设备名片」字段(platform / model):仅字符串、去空白、限长;
+ *  非法或空 → undefined(前端退回兜底显示,不报错)。 */
+function sanitizeLabel(raw: unknown, max: number): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const v = raw.trim();
+  return v ? v.slice(0, max) : undefined;
+}
+
+/** 解出 peerId,并把「调用方视角」的本机 peerId 换算成服务端真实那一行。两种形式:
+ *  - `local:<userId>:<instanceKey>`(新)→ 按实例键反查真实 peerId(可指向同账号的
+ *    任意实例,不限于自己那条);
+ *  - `local:<userId>`(旧客户端)→ 退回本次请求上报的 clientId 对应那行。
+ *  除本机外其余 peer 原样返回。 */
 function decodePeerId(c: any): string {
   const raw = decodeURIComponent(c.req.param("peerId") || "");
-  return resolveLocalPeerId(raw, c.get("user")?.id ?? "", clientIdOf(c));
+  return resolveLocalPeerId(
+    raw,
+    c.get("user")?.id ?? "",
+    clientIdOf(c),
+    (uid, key) => pm.resolveMaskedLocalPeerId(uid, key),
+  );
 }
 
 // 可投屏/可控制 peer:dlna 设备、播放器群组(group)与 AirPlay 设备(airplay)。
@@ -2967,24 +2983,9 @@ function isCastPeer(parsed: { kind: string }): boolean {
 // 其余 peer 一律不可见(见 services/access.ts 的 filterPeersByAccess)。
 apiRoutes.get("/v1/peers", (c) => {
   const user = c.get("user");
-  let peers = pm.listWithQueues();
-  // 本机播放器按「调用方自己的客户端实例」过滤(见 filterPeersByAccess):
-  // 临时端 ID 由客户端以 X-MF-Client-Id 头 / ?clientId= 上报,缺省时退回旧格式。
-  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers, clientIdOf(c));
-  // 按用户级隐藏:该用户在不显示自己切换弹窗里的设备/群组(不禁用,他人仍可用)。
-  const hidden = getHiddenPeerIds(user?.id ?? "");
-  if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
-  // 按用户级显示名覆盖:该用户给自己视角下的设备/群组起的名,只影响本人切换器。
-  const nameOverrides = getNameOverrides(user?.id ?? "");
-  if (nameOverrides.size > 0) {
-    peers = peers.map((p) => {
-      const override = nameOverrides.get(p.peerId);
-      return override ? { ...p, name: override } : p;
-    });
-  }
-  // 出口打码:本机 peer 的临时端 ID 只留在服务端,对客户端一律呈现规范形式
-  // local:<userId>(客户端因此完全不需要知道临时 ID 的存在)。
-  peers = peers.map((p) => ({ ...p, peerId: maskLocalPeerId(p.peerId) }));
+  // 单一出口(与 WS peer_snapshot 共用):可见性 → 打码/self → 按用户级隐藏 → 改名。
+  // 本机播放器的临时端 ID 由客户端以 X-MF-Client-Id 头 / ?clientId= 上报,缺省退回旧格式。
+  const peers = decoratePeersForClient(pm.listWithQueues(), user?.id ?? "", !!user?.isAdmin, clientIdOf(c));
   return c.json({ peers });
 });
 
@@ -3056,8 +3057,13 @@ apiRoutes.post("/v1/peers/register", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as any;
   const name = (body && typeof body.name === "string" && body.name) || user.username;
   const clientId = sanitizeClientId(body?.clientId) ?? clientIdOf(c);
-  const peer = pm.registerLocal(user.id, name, clientId);
-  return c.json({ peer: { ...peer, peerId: maskLocalPeerId(peer.peerId) } });
+  // 设备名片(可选):平台 + 机型/电脑名,供「播放器」页把本机实例分进
+  // 「客户端」/「Web 播放器」模块并按视角显示名字。网页拿不到电脑名属正常。
+  const platform = sanitizeLabel(body?.platform, 32);
+  const model = sanitizeLabel(body?.model, 64);
+  const peer = pm.registerLocal(user.id, name, clientId, platform, model);
+  // 注册的这条必然是自己 → self 恒 true。
+  return c.json({ peer: { ...peer, peerId: maskLocalPeerId(peer.peerId), self: true } });
 });
 
 // Heartbeat: keep a local peer alive. Called periodically by the Web client.

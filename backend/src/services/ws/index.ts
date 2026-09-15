@@ -36,17 +36,13 @@ import {
 import { getPeerManager } from "../peer.js";
 import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken, WsUser } from "./auth.js";
-import { sanitizeClientId, maskLocalPeerId } from "../../utils/peerId.js";
+import { sanitizeClientId, maskLocalPeerId, buildLocalPeerId } from "../../utils/peerId.js";
 import {
   canUseRenderer,
   peerVisibleTo,
-  filterPeersByAccess,
+  decoratePeersForClient,
 } from "../access.js";
-import {
-  getHiddenPeerIds,
-  getNameOverrides,
-  isPeerHidden,
-} from "../playerPrefs.js";
+import { isPeerHidden } from "../playerPrefs.js";
 import {
   randomSongsEvents,
   RANDOM_SONGS_CHANGED_EVENT,
@@ -129,20 +125,10 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
 function sendPeerSnapshot(ws: WebSocket): void {
   const user: WsUser | undefined = (ws as any).__user;
   const clientId: string | null = (ws as any).__clientId ?? null;
-  let peers = getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) }));
-  peers = filterPeersByAccess(user?.id ?? "", !!user?.isAdmin, peers, clientId);
-  // 与 /v1/peers 完全对齐:剪掉该用户隐藏的 peer,并套用其显示名覆盖。
-  const hidden = getHiddenPeerIds(user?.id ?? "");
-  if (hidden.size > 0) peers = peers.filter((p) => !hidden.has(p.peerId));
-  const nameOverrides = getNameOverrides(user?.id ?? "");
-  if (nameOverrides.size > 0) {
-    peers = peers.map((p) => {
-      const override = nameOverrides.get(p.peerId);
-      return override ? { ...p, name: override } : p;
-    });
-  }
-  // 出口打码:本机 peer 的临时端 ID 只留在服务端(与 /v1/peers 完全一致)。
-  peers = peers.map((p) => ({ ...p, peerId: maskLocalPeerId(p.peerId) }));
+  const raw = getPeerManager().listWithQueues().map(p => ({ ...p, queue: summarizeQueue(p.queue) }));
+  // 与 /v1/peers 走**同一个出口函数**(顺序:可见性 → 打码/self → 按用户级隐藏 → 改名),
+  // 避免两处各写一遍先后顺序而再度错位。
+  const peers = decoratePeersForClient(raw, user?.id ?? "", !!user?.isAdmin, clientId);
   send(ws, { type: "peer_snapshot", peers });
 }
 
@@ -198,9 +184,9 @@ function subscribeAndForward(ws: WebSocket): () => void {
 
   // Peer events: forward registration/availability/queue changes so the Web
   // client's player switcher stays live without polling /v1/peers.
-  // 权限:只转发「这个客户端实例自己的本机播放器 + 被授权的设备/群组」事件。
-  // 本机 peer 按客户端实例判定(peerVisibleTo)—— 同账号的另一个标签页/客户端的
-  // 队列事件不会被推到这里,避免多端互相串门。
+  // 权限:转发「同账号的全部本机实例 + 被授权的设备/群组」事件 —— 与 /v1/peers
+  // 同一口径(peerVisibleTo)。「播放器」页要按「客户端」/「Web 播放器」把同账号
+  // 多个端各列一行,状态必须能实时跟到;别账号的本机播放器仍不转发。
   // 事件里的 peerId 同样要打码(maskLocalPeerId),临时端 ID 不出服务端。
   const clientId: string | null = (ws as any).__clientId ?? null;
   const canSeePeer = (peerId?: string) =>

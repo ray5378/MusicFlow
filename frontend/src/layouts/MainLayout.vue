@@ -69,7 +69,7 @@
           <div class="ctitle">{{ t('layout.selectPlayer') }}</div>
           <div class="controls-peer-list">
             <div
-              v-for="p in playerStore.peers"
+              v-for="p in playerStore.peersForSwitcher"
               :key="p.peerId"
               class="controls-peer-item"
               :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
@@ -78,8 +78,8 @@
               <MfIcon name="Speaker" class="controls-peer-icon" />
               <div class="controls-peer-info">
                 <div class="controls-peer-name">
-                  {{ p.kind === 'local' ? t('layout.localPeer') : p.name }}
-                  <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA' }}</span>
+                  {{ playerStore.peerDisplayName(p) }}
+                  <span class="peer-kind-tag" :class="{ 'peer-self-tag': playerStore.isSelfPeer(p) }">{{ playerStore.isSelfPeer(p) ? t('layout.localPeer') : (p.kind === 'local' ? localPlatformTag(p) : (p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA')) }}</span>
                   <span v-if="!p.available" class="controls-peer-offline">{{ t('layout.offline') }}</span>
                 </div>
                 <div class="controls-peer-meta">
@@ -269,7 +269,7 @@
             <div class="peer-switcher-title">{{ t('layout.selectPlayer') }}</div>
             <div class="peer-switcher-list">
               <div
-                v-for="p in playerStore.peers"
+                v-for="p in playerStore.peersForSwitcher"
                 :key="p.peerId"
                 class="peer-switcher-item"
                 :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
@@ -278,8 +278,8 @@
                 <MfIcon name="Speaker" class="psi-icon" />
                 <div class="psi-info">
                   <div class="psi-name">
-                    {{ p.kind === 'local' ? t('layout.localPeer') : p.name }}
-                    <span v-if="p.kind !== 'local'" class="peer-kind-tag">{{ p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA' }}</span>
+                    {{ playerStore.peerDisplayName(p) }}
+                    <span class="peer-kind-tag" :class="{ 'peer-self-tag': playerStore.isSelfPeer(p) }">{{ playerStore.isSelfPeer(p) ? t('layout.localPeer') : (p.kind === 'local' ? localPlatformTag(p) : (p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA')) }}</span>
                     <span v-if="!p.available" class="psi-offline">{{ t('layout.offline') }}</span>
                   </div>
                   <div class="psi-meta">
@@ -789,6 +789,18 @@ function peerPlayingTitle(p: any): string {
   const idx = p.queue.currentIndex;
   if (idx >= 0 && items[idx]?.title) return items[idx].title;
   return "";
+}
+
+// 别的本机实例(不是自己那条)的类别标签:按客户端上报的 platform 显示。
+// 网页端拿不到电脑名,platform 恒为 web → 「Web」;安卓/Windows 客户端各自上报。
+function localPlatformTag(p: any): string {
+  const pf = (p?.platform || "").toLowerCase();
+  if (pf === "web") return "Web";
+  if (pf === "android") return "Android";
+  if (pf === "windows") return "Windows";
+  if (pf === "ios") return "iOS";
+  if (pf === "macos") return "macOS";
+  return t("layout.localPeer");
 }
 
 async function scanDlnaDevices() {

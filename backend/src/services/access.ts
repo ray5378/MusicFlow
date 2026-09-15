@@ -22,8 +22,9 @@ import { db } from "../db/index.js";
 import { userPermissions, userRendererGrants } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { apiError, BusinessErrorCode } from "../utils/errors.js";
-import { buildLocalPeerId, isOwnLocalPeer } from "../utils/peerId.js";
+import { buildLocalPeerId, isOwnLocalPeer, maskLocalPeerId, userIdOfLocalPeer } from "../utils/peerId.js";
 import { getGroupManager } from "./group/index.js";
+import { getHiddenPeerIds, getNameOverrides } from "./playerPrefs.js";
 
 export interface PermDefinition {
   key: string;
@@ -170,19 +171,23 @@ export function canControlPeer(userId: string, isAdmin: boolean, peerId: string)
 
 /** 单条 peer 对「这个调用方」是否可见 —— 与 filterPeersByAccess 同一口径。
  *
- *  本机(local)播放器是**按客户端实例**隔离的:同一账号在多个标签页 / 多个客户端
- *  登录时,服务端为每个实例各存一条队列,但每个实例只应看到**自己那条** —— 所以
- *  local 一律只放行 `local:<userId>[:<本次请求的 clientId>]`,连管理员也不例外
- *  (否则切换器里会列出全服务器所有客户端的本机播放器)。
- *  clientId 缺省 → 退回旧格式 `local:<userId>`(老客户端行为不变)。
+ *  本机(local)播放器是**按账号**可见的:同账号在多个标签页 / 多个客户端登录时,
+ *  服务端为每个实例各存一条队列;「播放器」页要把它们在「客户端」/「Web 播放器」
+ *  两个模块里各列一行,所以同账号的全部实例都放行。
+ *  **别账号的本机播放器仍不可见**(管理员也不例外)——否则切换器会列出全服务器
+ *  所有客户端的本机播放器。
+ *  对外标识用不可逆实例键(`local:<userId>:<instanceKey>`,见 utils/peerId.ts);
+ *  「哪条是我自己」由服务端打 `self` 标记,不靠调用方比对 clientId。
  *  dlna / airplay / group 仍按原规则(管理员全量,普通用户按授权)。 */
 export function peerVisibleTo(
   userId: string,
   isAdmin: boolean,
   peerId: string,
-  clientId?: string | null,
+  _clientId?: string | null,
 ): boolean {
-  if (peerId.startsWith("local:")) return !!userId && peerId === buildLocalPeerId(userId, clientId);
+  if (peerId.startsWith("local:")) {
+    return !!userId && userIdOfLocalPeer(peerId) === userId;
+  }
   return isAdmin ? true : canControlPeer(userId, false, peerId);
 }
 
@@ -194,6 +199,46 @@ export function filterPeersByAccess<T extends { peerId: string }>(
   clientId?: string | null,
 ): T[] {
   return peers.filter((p) => peerVisibleTo(userId, isAdmin, p.peerId, clientId));
+}
+
+/**
+ * 服务端真实 peer 列表 → 调用方视角列表(`/v1/peers` 与 WS `peer_snapshot` 的**唯一出口**)。
+ *
+ * 顺序至关重要:可见性 → **打码 + self 标记** → 隐藏剪枝 → 显示名覆盖。
+ * 偏好(隐藏 / 改名)一律以**对外 id** 为键存储与比对,而打码是它的前置条件 ——
+ * 若在打码前套偏好,本机实例的真实 peerId(`local:<uid>:<clientId>`)与客户端手里
+ * 的对外 id 永远对不上,针对客户端 / Web 播放器的改名与隐藏就会静默失效。
+ *
+ * 对外 id 的两种形态(与前端 `localPeerId` 规范一致):
+ *   - 「调用方自己那条」→ `local:<userId>`,前端据 self 渲染角标并置顶;
+ *   - 同账号的其它实例 → `local:<userId>:<instanceKey>`,各占一行;
+ *   - dlna / airplay / group / sendspin → 原样(打码对它们恒等)。
+ */
+export function decoratePeersForClient<T extends { peerId: string; kind?: string; name?: string }>(
+  peers: T[],
+  userId: string,
+  isAdmin: boolean,
+  clientId?: string | null,
+): (T & { self: boolean })[] {
+  const myLocalPeerId = buildLocalPeerId(userId, clientId);
+  const seen = new Set<string>();
+  const out: (T & { self: boolean })[] = [];
+  for (const p of filterPeersByAccess(userId, isAdmin, peers, clientId)) {
+    const self = p.kind === "local" && p.peerId === myLocalPeerId;
+    // 自己那条归一化成规范形式;同账号的旧格式遗留行会与之撞 id,故此处去重(self 优先)。
+    const peerId = self ? `local:${userId}` : maskLocalPeerId(p.peerId);
+    if (seen.has(peerId)) continue;
+    seen.add(peerId);
+    out.push({ ...p, peerId, self });
+  }
+  const hidden = getHiddenPeerIds(userId);
+  const visible = hidden.size > 0 ? out.filter((p) => !hidden.has(p.peerId)) : out;
+  const overrides = getNameOverrides(userId);
+  if (overrides.size === 0) return visible;
+  return visible.map((p) => {
+    const override = overrides.get(p.peerId);
+    return override ? { ...p, name: override } : p;
+  });
 }
 
 // ==================== 写侧(管理员调用) ====================

@@ -7,6 +7,7 @@ import {
   isOwnLocalPeer,
   resolveLocalPeerId,
   maskLocalPeerId,
+  instanceKeyOfLocalPeer,
 } from "../../src/utils/peerId.js";
 
 describe("临时端 ID 编解码(peerId)", () => {
@@ -60,18 +61,40 @@ describe("临时端 ID 编解码(peerId)", () => {
     expect(resolveLocalPeerId("local:u1", "", "web-abc")).toBe("local:u1");
   });
 
-  it("maskLocalPeerId:真实行 → 对外视角(临时端 ID 不出服务端)", () => {
-    expect(maskLocalPeerId("local:u1:web-abc")).toBe("local:u1");
+  it("maskLocalPeerId:真实行 → 对外的不可逆实例键(临时端 ID 不出服务端)", () => {
+    const real = "local:u1:web-abc";
+    const masked = maskLocalPeerId(real);
+    // 输出里不含原 clientId,而是派生出的实例键 —— 同账号多实例因此可各占一行。
+    expect(masked).not.toContain("web-abc");
+    expect(masked).toMatch(/^local:u1:[0-9a-f]{12}$/);
+    expect(masked).toBe(`local:u1:${instanceKeyOfLocalPeer(real)}`);
+    // 旧格式(无 clientId)/ 非本机 peer 保持原样。
     expect(maskLocalPeerId("local:u1")).toBe("local:u1");
     expect(maskLocalPeerId("dlna:d1")).toBe("dlna:d1");
     expect(maskLocalPeerId("group:g1")).toBe("group:g1");
     expect(maskLocalPeerId("airplay:a1")).toBe("airplay:a1");
   });
 
-  it("resolve 与 mask 互为往返(同一个端点来回一趟不变形状)", () => {
-    const canonical = "local:u1";
-    const real = resolveLocalPeerId(canonical, "u1", "web-abc");
-    expect(real).toBe("local:u1:web-abc");
-    expect(maskLocalPeerId(real)).toBe(canonical);
+  it("instanceKeyOfLocalPeer:同实例稳定、跨实例/跨账号可区分、旧格式无键", () => {
+    const k = instanceKeyOfLocalPeer("local:u1:web-abc");
+    expect(k).toMatch(/^[0-9a-f]{12}$/);
+    expect(instanceKeyOfLocalPeer("local:u1:web-abc")).toBe(k);            // 稳定
+    expect(instanceKeyOfLocalPeer("local:u1:web-xyz")).not.toBe(k);        // 不同实例不同
+    expect(instanceKeyOfLocalPeer("local:u2:web-abc")).not.toBe(k);        // 不同账号不同
+    expect(instanceKeyOfLocalPeer("local:u1")).toBe(null);                 // 旧格式无实例键
+    expect(instanceKeyOfLocalPeer("dlna:d1")).toBe(null);
+  });
+
+  it("resolve 与 mask 可往返:对外实例键 → 真实行;查不到则退回本次 clientId", () => {
+    const real = "local:u1:web-abc";
+    const masked = maskLocalPeerId(real);
+    // 入口:按实例键反查(模拟 PeerManager.resolveMaskedLocalPeerId)。
+    const resolved = resolveLocalPeerId(masked, "u1", null, (uid, key) =>
+      uid === "u1" && key === instanceKeyOfLocalPeer(real) ? real : null);
+    expect(resolved).toBe(real);
+    // 反查不到(实例已断线)→ 退回本次请求上报的 clientId 那行。
+    expect(resolveLocalPeerId(masked, "u1", "web-zzz")).toBe("local:u1:web-zzz");
+    // 不带反查函数时,带键的入参也退回本次 clientId(旧调用点行为不变)。
+    expect(resolveLocalPeerId(masked, "u1", "web-zzz")).toBe("local:u1:web-zzz");
   });
 });

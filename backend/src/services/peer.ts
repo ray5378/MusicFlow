@@ -38,7 +38,7 @@ import { EventEmitter } from "events";
 import { db } from "../db/index.js";
 import { localQueues, users, deviceQueues, groupQueues } from "../db/schema.js";
 import {
-  buildLocalPeerId, clientIdOfLocalPeer, userIdOfLocalPeer,
+  buildLocalPeerId, clientIdOfLocalPeer, userIdOfLocalPeer, instanceKeyOfLocalPeer,
 } from "../utils/peerId.js";
 import { eq } from "drizzle-orm";
 import { getQueueManager, type QueueItem, type PlayMode, type QueueSnapshot } from "./dlna/queue.js";
@@ -59,9 +59,18 @@ export interface Peer {
   available: boolean;
   lastActiveAt: number; // ms epoch
   userId?: string;      // local peers only
-  deviceId?: string;    // dlna / airplay peers only
+  deviceId?: string;    // dlna / airplay / sendspin peers only
   groupId?: string;     // group peers only
   unencrypted?: boolean; // sendspin legacy 明文客户端(无 Noise,配对不可用)
+  /**
+   * 设备名片(2026-09-15,本机 peer 才有):客户端注册时上报。
+   *  - `platform`:android / windows / web / ios / macos ... —— 前端据此把本机实例
+   *    分进「客户端」或「Web 播放器」模块;
+   *  - `model`:安卓机型名 / Windows 电脑名;网页取不到(浏览器硬限制)时缺省。
+   * 旧客户端不上报 → 两者皆 undefined,前端退回「本机播放」兜底,行为不变。
+   */
+  platform?: string;
+  model?: string;
 }
 
 export interface PeerWithQueue extends Peer {
@@ -140,18 +149,33 @@ class PeerManager extends EventEmitter {
   /** Register or refresh a local (Web / Flutter client) peer. Returns the peer.
    *  clientId 是客户端自己生成并存在本地的临时端 ID:同一账号的多个客户端实例
    *  (多个网页标签页 / 多个 Flutter 客户端)因此各占一条独立队列,互不覆盖。
-   *  不传(旧客户端)→ 退回 `local:<userId>`。 */
-  registerLocal(userId: string, name: string, clientId?: string | null): Peer {
+   *  不传(旧客户端)→ 退回 `local:<userId>`。
+   *  platform/model 是**设备名片**(可选):前端据此把本机实例分进「客户端」/
+   *  「Web 播放器」模块并按视角显示名字。旧客户端不传 → 保持 undefined。 */
+  registerLocal(
+    userId: string,
+    name: string,
+    clientId?: string | null,
+    platform?: string | null,
+    model?: string | null,
+  ): Peer {
     const peerId = buildLocalPeerId(userId, clientId);
     const now = Date.now();
     let p = this.peers.get(peerId);
     if (!p) {
-      p = { peerId, kind: "local", name, available: true, lastActiveAt: now, userId };
+      p = {
+        peerId, kind: "local", name, available: true, lastActiveAt: now, userId,
+        platform: platform || undefined,
+        model: model || undefined,
+      };
       this.peers.set(peerId, p);
       this.emit("peer_registered", p);
     } else {
       const wasAvailable = p.available;
       p.name = name;
+      // 名片可空上报:只在有新值时覆盖,避免旧客户端把已登记的名片抹掉。
+      if (platform) p.platform = platform;
+      if (model) p.model = model;
       p.available = true;
       p.lastActiveAt = now;
       if (!wasAvailable) this.emit("peer_available", p);
@@ -440,6 +464,18 @@ class PeerManager extends EventEmitter {
 
   get(peerId: string): Peer | undefined {
     return this.peers.get(peerId);
+  }
+
+  /** 实例键 → 该用户那条本机 peer 的真实 peerId(对外打码形式的逆查)。
+   *  入口解码用:客户端持 `local:<userId>:<instanceKey>`,服务端据此找回真实行,
+   *  从而可以对**同账号的任意实例**发指令,而不只是自己那条。找不到 → null。 */
+  resolveMaskedLocalPeerId(userId: string, instanceKey: string): string | null {
+    if (!userId || !instanceKey) return null;
+    for (const p of this.peers.values()) {
+      if (p.kind !== "local" || p.userId !== userId) continue;
+      if (instanceKeyOfLocalPeer(p.peerId) === instanceKey) return p.peerId;
+    }
+    return null;
   }
 
   /** 「对外视角」peerId → 真实 peerId。

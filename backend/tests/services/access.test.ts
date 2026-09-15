@@ -233,28 +233,31 @@ describe("peer 判定", () => {
       .toEqual(["dlna:d1", "dlna:d2", `local:${uid}`]);
   });
 
-  it("本机队列按客户端实例隔离:每个端只看到自己那条(临时代理 ID 不出服务端)", () => {
+  it("本机播放器按账号可见:同账号全部实例各占一行,别账号不可见", () => {
     const uid = mkUser();
     const peers = [
       { peerId: `local:${uid}:web-aaaaaa` },
       { peerId: `local:${uid}:web-bbbbbb` },
+      { peerId: "local:other:web-cccccc" },
       { peerId: "dlna:d1" },
     ];
-    // 各实例只看到自己那一条。
-    expect(filterPeersByAccess(uid, true, peers as any, "web-aaaaaa").map((p) => p.peerId))
-      .toEqual([`local:${uid}:web-aaaaaa`, "dlna:d1"]);
-    expect(filterPeersByAccess(uid, true, peers as any, "web-bbbbbb").map((p) => p.peerId))
-      .toEqual([`local:${uid}:web-bbbbbb`, "dlna:d1"]);
-    // 没上报 clientId 的老客户端 → 只认旧格式 local:<userId>(不带临时端 ID)。
-    expect(filterPeersByAccess(uid, true, peers as any).map((p) => p.peerId)).toEqual(["dlna:d1"]);
+    // 同账号的两个实例都可见 —— 「播放器」页要按「客户端」/「Web 播放器」
+    // 两个模块把它们各列一行(不再按调用方自己的 clientId 过滤)。
+    expect(filterPeersByAccess(uid, true, peers as any).map((p) => p.peerId).sort())
+      .toEqual([`local:${uid}:web-aaaaaa`, `local:${uid}:web-bbbbbb`, "dlna:d1"].sort());
+    // 管理员视角同样**不含**别账号的本机播放器(否则会列出全服务器的本机播放器)。
+    expect(filterPeersByAccess(uid, true, peers as any).some((p) => p.peerId.startsWith("local:other")))
+      .toBe(false);
   });
 
   it("peerVisibleTo 与 filterPeersByAccess 同口径(WS 事件过滤复用)", () => {
     const uid = mkUser();
-    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`, "web-aaaaaa")).toBe(true);
-    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`, "web-bbbbbb")).toBe(false);
-    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`, null)).toBe(false);
-    expect(peerVisibleTo(uid, true, "dlna:d1", null)).toBe(true);
+    // 同账号的任意实例都可见(含不是本次调用方自己的那条)。
+    expect(peerVisibleTo(uid, true, `local:${uid}:web-aaaaaa`)).toBe(true);
+    expect(peerVisibleTo(uid, true, `local:${uid}:web-bbbbbb`)).toBe(true);
+    // 别账号的本机播放器恒不可见(管理员也不例外)。
+    expect(peerVisibleTo(uid, true, "local:other:web-aaaaaa")).toBe(false);
+    expect(peerVisibleTo(uid, true, "dlna:d1")).toBe(true);
   });
 });
 

@@ -8,6 +8,7 @@ import { useIsMobile } from "@/composables/useIsMobile";
 import { coverUrl } from "@/utils/cover";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import { getClientId } from "@/utils/clientId";
+import { getDeviceCard } from "@/utils/deviceCard";
 import { gt } from "@/locales";
 
 /**
@@ -1487,6 +1488,47 @@ export const usePlayerStore = defineStore("player", () => {
 
   // ==================== Peer management ====================
 
+  // 服务端对同账号的每个本机实例各返回一行,「自己那条」带 self:true(peerId 形如
+  // local:<userId>:<instanceKey>)。前端内部一律用规范形式 `local:<userId>` 表示
+  // 「我这条本机播放器」(发指令时带 X-MF-Client-Id 头,服务端会换算回真实实例行),
+  // 因此这里把 self 那行的 peerId 归一化回来;其余实例保留各自的实例键 id。
+  //
+  // 顺带保证「自己那条」优先入列:同 id 的重复行(如旧格式 local:<userId> 的遗留行)
+  // 会被丢弃,不会出现两行「本机」。
+  // 服务端给「自己那条」本机实例分配的对外 id(local:<userId>:<instanceKey>)。
+  // WS 事件里带的 peer_id 是服务端形态,这里记下来做归一化比对(见 normPeerId)。
+  let ownServerPeerId = "";
+
+  function normSelfPeer(p: any): any {
+    if (!p?.self) return p;
+    ownServerPeerId = p.peerId;
+    return { ...p, peerId: localPeerId.value };
+  }
+
+  /** WS 事件里的 peer_id → 前端内部 id(「自己那条」换算回 local:<userId>)。 */
+  function normPeerId(id: string): string {
+    return id && ownServerPeerId && id === ownServerPeerId ? localPeerId.value : id;
+  }
+
+  function normalizeOwnLocalPeer(list: any[]): any[] {
+    const arr = list || [];
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (const p of arr) {
+      if (!p?.self) continue;
+      const mapped = normSelfPeer(p);
+      seen.add(mapped.peerId);
+      out.push(mapped);
+    }
+    for (const p of arr) {
+      if (p?.self) continue;
+      if (seen.has(p.peerId)) continue;
+      seen.add(p.peerId);
+      out.push(p);
+    }
+    return out;
+  }
+
   // 离线 DLNA 设备 / 成员全离线的群组 / 断开的 sendspin 客户端不显示;local(本机)恒显示。
   // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
   // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权),并应用
@@ -1499,6 +1541,34 @@ export const usePlayerStore = defineStore("player", () => {
         (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay" && p.kind !== "sendspin"))
         && !hidden.has(p.peerId))
       .map((p) => (overrides[p.peerId] ? { ...p, name: overrides[p.peerId] } : p));
+  }
+
+  // ==================== 切换器视图:本机置顶 + 显示名 ====================
+  // 服务端现在会返回同账号的多个本机实例(客户端 / Web),「自己那条」必须排在最顶端
+  // (与「本机」角标一起构成视角标识),其余保持后端顺序。
+  const peersForSwitcher = computed(() => {
+    const list = peers.value || [];
+    const own = localPeerId.value;
+    const i = list.findIndex((p: any) => p.peerId === own);
+    if (i <= 0) return list;
+    return [list[i], ...list.slice(0, i), ...list.slice(i + 1)];
+  });
+
+  /** 切换器一行的显示名:
+   *  - 非本机 peer → 设备名(name,已套用用户改名);
+   *  - 自己的本机实例 → 用户改的名,没改过则「本机」;
+   *  - 别的本机实例 → 设备名片(model,如「Xiaomi 14」/「Chrome · Windows」),
+   *    取不到再退回用户改的名 / 上报名 / 「本机播放」兜底。 */
+  function peerDisplayName(p: any): string {
+    if (p?.kind !== "local") return p?.name || "";
+    const renamed = nameOverrides.value[p.peerId] || "";
+    if (p.peerId === localPeerId.value) return renamed || gt("player.localPeer");
+    return p?.model || renamed || p?.name || gt("player.localPeer");
+  }
+
+  /** 该行是否是「调用方自己那条」本机实例(用于渲染「本机」角标)。 */
+  function isSelfPeer(p: any): boolean {
+    return p?.kind === "local" && p?.peerId === localPeerId.value;
   }
 
   // ==================== 按用户级隐藏偏好 ====================
@@ -1531,7 +1601,7 @@ export const usePlayerStore = defineStore("player", () => {
   async function refreshPeers(): Promise<void> {
     try {
       const res = await api.get("/rest/api/v1/peers");
-      peers.value = filterVisiblePeers(res.data?.peers || []);
+      peers.value = filterVisiblePeers(normalizeOwnLocalPeer(res.data?.peers || []));
       if (!peers.value.find(p => p.peerId === localPeerId.value)) {
         peers.value.unshift({
           peerId: localPeerId.value,
@@ -1548,7 +1618,14 @@ export const usePlayerStore = defineStore("player", () => {
     const authStore = useAuthStore();
     if (!authStore.userId) return;
     try {
-      await api.post("/rest/api/v1/peers/register", { name: authStore.username || gt("player.localPeer") });
+      // 连同「设备名片」一起上报:服务端据此把本机实例分进「客户端」/「Web 播放器」
+      // 模块,并按视角显示名字(网页端只能给「浏览器 · 系统」,见 utils/deviceCard)。
+      const card = getDeviceCard();
+      await api.post("/rest/api/v1/peers/register", {
+        name: authStore.username || gt("player.localPeer"),
+        platform: card.platform,
+        model: card.model,
+      });
     } catch {}
     startHeartbeat();
   }
@@ -1695,7 +1772,7 @@ export const usePlayerStore = defineStore("player", () => {
       try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
         case "peer_snapshot":
-          peers.value = filterVisiblePeers(msg.peers || []);
+          peers.value = filterVisiblePeers(normalizeOwnLocalPeer(msg.peers || []));
           if (!peers.value.find(p => p.peerId === localPeerId.value)) {
             peers.value.unshift({ peerId: localPeerId.value, kind: "local", name: gt("player.localPeer"), available: true, lastActiveAt: Date.now() });
           }
@@ -1709,7 +1786,7 @@ export const usePlayerStore = defineStore("player", () => {
           break;
         case "peer_registered":
         case "peer_available": {
-          const p = msg.peer;
+          const p = msg.peer ? normSelfPeer(msg.peer) : null;
           if (!p) break;
           const idx = peers.value.findIndex(x => x.peerId === p.peerId);
           if (idx >= 0) peers.value[idx] = { ...peers.value[idx], ...p, ...(nameOverrides.value[p.peerId] ? { name: nameOverrides.value[p.peerId] } : {}) };
@@ -1718,7 +1795,17 @@ export const usePlayerStore = defineStore("player", () => {
         }
         case "peer_unavailable": {
           const p = msg.peer;
-          if (!p || p.kind === "local") break; // 本机恒在列表
+          if (!p) break;
+          if (p.kind === "local") {
+            // 本机实例(客户端 / Web 播放器):**不删行**,只标离线。
+            // 切换器里「自己那条」必须恒在(删了播放器 UI 会失去落点),而
+            // 「播放器」页的客户端 / Web 播放器模块按 available 过滤,离线实例
+            // 因此自动消失;重新心跳/注册时由 peer_available 把状态置回。
+            const pid = normPeerId(p.peerId || "");
+            const i = peers.value.findIndex(x => x.peerId === pid);
+            if (i >= 0) peers.value[i] = { ...peers.value[i], available: false };
+            break;
+          }
           // 离线设备从列表移除(不再置灰显示)。
           peers.value = peers.value.filter(x => x.peerId !== p.peerId);
           // 当前播放设备离线 → 自动切换到下一个可用设备;无可用则回本机。
@@ -1734,17 +1821,19 @@ export const usePlayerStore = defineStore("player", () => {
           break;
         }
         case "peer_queue_changed": {
-          const idx = peers.value.findIndex(x => x.peerId === msg.peer_id);
+          const pid = normPeerId(msg.peer_id);
+          const idx = peers.value.findIndex(x => x.peerId === pid);
           if (idx >= 0) peers.value[idx].queue = msg.queue;
           // 预探测状态位透传 → 右上角轻提示实时跟随(含枯竭/恢复)。
-          const pst = remoteStates.get(msg.peer_id);
+          const pst = remoteStates.get(pid);
           if (pst) pst.preProbe = msg.queue?.preProbe ?? null;
           // 本机 peer:状态位存 localPreProbe(本机链路也吃服务端预探测)。
-          if (msg.peer_id === localPeerId.value) localPreProbe.value = msg.queue?.preProbe ?? null;
+          if (pid === localPeerId.value) localPreProbe.value = msg.queue?.preProbe ?? null;
           break;
         }
         case "peer_queue_cleared": {
-          const idx = peers.value.findIndex(x => x.peerId === msg.peer_id);
+          const pid = normPeerId(msg.peer_id);
+          const idx = peers.value.findIndex(x => x.peerId === pid);
           if (idx >= 0) peers.value[idx].queue = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false };
           break;
         }
@@ -1806,6 +1895,7 @@ export const usePlayerStore = defineStore("player", () => {
     activePreProbe, activePreProbePeerName,
     // peer system
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
+    peersForSwitcher, peerDisplayName, isSelfPeer,
     switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,
     // 按用户级隐藏
     hiddenPeers, loadHiddenPrefs, isPeerHidden, setPeerHidden,
