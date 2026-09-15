@@ -70,7 +70,17 @@ export class QueueController extends EventEmitter {
     // 预探测状态变化 → 用既有的 queue_changed 重发一次快照即可,
     // **不新增事件类型**(快照里带 preProbe,两个下发通道都是展开语法,自动透传)。
     // 多监听:PeerManager 也会注册一份(本机链路走 peer_queue_changed),互不顶替。
+    //
+    // ⚠️ 只为**本控制器持有的队列**重发(裸 deviceId / groupId)。
+    // 预探测调度器是全局的,本机(local)链路也用它,而本机队列按**完整 peerId** 调度
+    // (`local:<userId>:<clientId>`) —— 不设这道守卫的话,本机预探测状态一变就会从这里
+    // 发出一条 `queue_changed`,把带明文 clientId 的完整 peerId 塞进 WS 的 `device_id`
+    // (既违反「clientId 永不出服务端」,语义也是错的:本机队列的状态通道是 PeerManager 的
+    // `peer_queue_changed`,Web/客户端据此镜像;`queue_changed` 是设备型事件)。
+    // 2026-09-15 实测:客户端起播触发本机预探测 → WS 收到
+    // `queue_changed device_id=local:<uid>:app-xxxxxxxx`。
     getPreProbeScheduler().addOnChange((id: string) => {
+      if (!this.queues.has(id)) return;
       this.emit("queue_changed", id, this.snapshot(id));
     });
   }

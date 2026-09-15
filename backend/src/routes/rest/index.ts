@@ -1123,7 +1123,12 @@ restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
 // 10 秒内存 Map 去重。songs.playCount 仍按真实播放次数累加。
 const HISTORY_DEDUPE_WINDOW_MS = 10 * 60 * 1000; // 10 分钟
 
-restRoutes.get("/scrobble", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
+// 播放记录上报。Subsonic/OpenSubsonic 规范是 **GET**;客户端实现里则两种都有
+// (Web 前端与多数第三方客户端用 GET,MusicFlow-client ≤v5.0.1 用 POST)。
+// 这里同时接受 GET 与 POST:只听 GET 会让那些客户端一直 404、播放记录静默丢失
+// (2026-09-15 实测日志:`POST /rest/scrobble` → 404,历史里查不到播放)。
+// 参数仍从 query 读(`getParam`),POST + queryParameters 的调用方式天然兼容。
+restRoutes.on(["GET", "POST"], "/scrobble", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
   const user = c.get("user");
   const id = getParam(c, "id");
   const nowIso = new Date().toISOString();
