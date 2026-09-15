@@ -1,16 +1,20 @@
 name: contract-gate
 
 # 播放端契约门禁(与 MusicFlow-client 的 server-contract.yml 配对):
-# 发主仓 tag(v2.3.*)时 ——
+# 发主仓 tag 时 ——
 #   1. 起一个隔离后端实例,跑 scripts/contract_smoke.cjs(真实 HTTP 端到端,
 #      锁定「临时端 ID 打码 / 各端只见自己 / 队列按实例隔离 / 心跳复活 / 老端兼容」);
 #   2. 通过后 repository_dispatch 通知 MusicFlow-client 跑它那一侧的契约校验
 #      (需要 repo secret DISPATCH_PAT;未配置时只跳过通知,不阻断本仓门禁)。
+#
+# 触发 tag 用 `v*` 而**不锚定具体版本线**:此前写死 `v2.3.*`,主仓版本线走到
+# v3.0.x 之后本门禁就再没触发过(跨仓契约校验静默失效),而 client 侧的
+# server-contract.yml 仍在按 tag 联动 —— 两侧脱钩。版本线由 tag 决定,门禁不该跟着改。
 
 on:
   push:
     tags:
-      - "v2.3.*"
+      - "v*"
   workflow_dispatch:
 
 concurrency:
