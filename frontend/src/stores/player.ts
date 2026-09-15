@@ -1542,6 +1542,83 @@ export const usePlayerStore = defineStore("player", () => {
     return out;
   }
 
+  // ==================== 客户端实例(local)的自动轮询 ====================
+  //
+  // 为什么 Web 必须自己轮询客户端(而不是等推送):
+  //   1) WS 推的 `peer_queue_changed` 是**摘要态** —— 大队列(>200)items 被置空
+  //      (见 services/ws 的 summarizeQueue),而选择播放器的歌名取自
+  //      `queue.items[currentIndex].title` → 那行永远没有歌名;
+  //   2) `player_state_changed` / `media_changed` 是**设备型**事件(canSeeDevice 只放行
+  //      dlna/airplay/sendspin),客户端实例根本没有这类推送。
+  //   于是此前只有点「重新扫描播放器」(全量拉一次 /v1/peers,带 items)才显示真实状态
+  //   —— 用户实测反馈:「能显示但必须手动扫描才显示」。
+  //
+  // 现在按固定间隔整体刷新一次 peers(与手动扫描同一条调用),并顺带做客户端专属判定:
+  //   · 队列/在播/歌名 → 自动跟上,无需手动扫描;
+  //   · 客户端**已退出** → 用 lastActiveAt(客户端每 30s 心跳)判活:超过
+  //     LOCAL_PEER_STALE_MS 没心跳即视为离线,标 available=false → 选择列表自动踢出。
+  //     服务端自身的 idle 判定是 10min(PEER_IDLE_TIMEOUT_MS),对"关掉 App 后弹窗里
+  //     还挂着这台客户端"太慢,故这里用同一字段、更短的阈值,只对 local 生效。
+  //
+  // 边界:只对 `kind === "local"` 生效 —— 其它 kind 的 peer 行一个字段都不改,
+  // 可用性仍由服务端 WS 事件(dlna/airplay/sendspin/group 的 peer_unavailable)驱动。
+  const LOCAL_PEER_STALE_MS = 90_000;   // 3 次心跳(30s)未到即判离线
+  const LOCAL_PEERS_POLL_MS = 20_000;
+  let localPeersTimer: ReturnType<typeof setInterval> | null = null;
+  let localPeersRefreshing = false;
+
+  /** 客户端实例是否已"失联"(仅 local;非 local 恒 false,不动它们的可用性)。 */
+  function isStaleLocalPeer(p: any): boolean {
+    if (p?.kind !== "local" || isSelfPeer(p)) return false;
+    const at = typeof p?.lastActiveAt === "number" ? p.lastActiveAt : 0;
+    return at > 0 && Date.now() - at > LOCAL_PEER_STALE_MS;
+  }
+
+  /** 把失联的客户端实例标为离线(下一帧选择列表即把它踢出;服务端行仍在,不删)。 */
+  function markStaleLocalPeersOffline(list: any[]): any[] {
+    return list.map((p) => (isStaleLocalPeer(p) && p.available !== false ? { ...p, available: false } : p));
+  }
+
+  /** 正在遥控的目标是不是「已失联的客户端实例」→ 停轮询 + 回本机。
+   *
+   *  与 WS peer_unavailable 对设备型 peer 的处理同款(见 connectPeerWs 里的
+   *  removeRemoteState):不清理的话,那台客户端残留的 2s status 轮询 + 250ms
+   * 插值 tick 会一直空转,UI 也停在一个已经下线的目标上。
+   *  客户端实例不能像 DLNA 那样直接删行(「自己那条」必须恒在),故这里只负责
+   *  「控制目标」与「轮询」两侧的收尾,不走删行。 */
+  function dropCurrentIfStaleLocal(): void {
+    const cur = peers.value.find((p: any) => p.peerId === currentPeerId.value);
+    if (!cur || !isStaleLocalPeer(cur)) return;
+    removeRemoteState(cur.peerId);
+    currentPeerId.value = localPeerId.value;
+  }
+
+  async function refreshLocalPeersOnce(): Promise<void> {
+    await refreshPeers();
+    dropCurrentIfStaleLocal();
+  }
+
+  function startLocalPeersPoll(): void {
+    if (localPeersTimer) return;
+    localPeersTimer = setInterval(() => {
+      // 后台标签页不轮询(省流量);回到前台由下一次 tick 补上。
+      // 正在投屏时也跳过:那一刻 startCastPoll 已在 2s 拉目标状态,别叠加请求。
+      if (document.hidden || remoteStates.size > 0 || localPeersRefreshing) return;
+      localPeersRefreshing = true;
+      void refreshLocalPeersOnce().catch(() => {}).finally(() => { localPeersRefreshing = false; });
+    }, LOCAL_PEERS_POLL_MS);
+  }
+  function stopLocalPeersPoll(): void {
+    if (localPeersTimer) { clearInterval(localPeersTimer); localPeersTimer = null; }
+  }
+  /** 打开「选择播放器」时立刻刷一次(不等下一个 tick)。 */
+  async function refreshPeersNow(): Promise<void> {
+    if (localPeersRefreshing) return;
+    localPeersRefreshing = true;
+    try { await refreshLocalPeersOnce(); } catch { /* 网络失败保持上次列表 */ }
+    finally { localPeersRefreshing = false; }
+  }
+
   // 离线 DLNA 设备 / 成员全离线的群组 / 断开的 sendspin 客户端不显示;local(本机)恒显示。
   // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
   // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权),并应用
@@ -1549,7 +1626,7 @@ export const usePlayerStore = defineStore("player", () => {
   function filterVisiblePeers(list: any[]): any[] {
     const hidden = hiddenPeers.value;
     const overrides = nameOverrides.value;
-    return (list || [])
+    return markStaleLocalPeersOffline(list || [])
       .filter((p) =>
         (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay" && p.kind !== "sendspin"))
         && !hidden.has(p.peerId))
@@ -1559,8 +1636,14 @@ export const usePlayerStore = defineStore("player", () => {
   // ==================== 切换器视图:本机置顶 + 显示名 ====================
   // 服务端现在会返回同账号的多个本机实例(客户端 / Web),「自己那条」必须排在最顶端
   // (与「本机」角标一起构成视角标识),其余保持后端顺序。
+  //
+  // 客户端实例**离线即从选择列表消失**(与 DLNA 设备同语义):服务端对 local 只标
+  // available=false、不删行(「自己那条」必须恒在,它是播放器 UI 的落点,见 WS 的
+  // peer_unavailable 分支),故在这里按 available 剪掉**别的**离线客户端。
   const peersForSwitcher = computed(() => {
-    const list = peers.value || [];
+    const list = (peers.value || []).filter(
+      (p: any) => !(p.kind === "local" && !isSelfPeer(p) && p.available === false),
+    );
     const own = localPeerId.value;
     const i = list.findIndex((p: any) => p.peerId === own);
     if (i <= 0) return list;
@@ -1775,6 +1858,9 @@ export const usePlayerStore = defineStore("player", () => {
     await loadHiddenPrefs();
     await refreshPeers();
     connectPeerWs();
+    // 客户端实例的状态靠轮询自动跟上(WS 推的是摘要,取不到当前曲),并负责把
+    // 已退出的客户端从选择列表踢出(见 refreshLocalPeersOnce)。
+    startLocalPeersPoll();
   }
 
   function connectPeerWs(): void {
@@ -1909,6 +1995,7 @@ export const usePlayerStore = defineStore("player", () => {
     stopHeartbeat();
     // Stop polling every tracked remote peer.
     remoteStates.forEach(st => stopCastPoll(st));
+    stopLocalPeersPoll();
     disconnectPeerWs();
   }
 
@@ -1930,7 +2017,7 @@ export const usePlayerStore = defineStore("player", () => {
     // peer system
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
     peersForSwitcher, peerDisplayName, isSelfPeer,
-    switchPeer, refreshPeers, initLocalPeer, restoreLocalPeer, teardownPeer,
+    switchPeer, refreshPeers, refreshPeersNow, initLocalPeer, restoreLocalPeer, teardownPeer,
     // 按用户级隐藏
     hiddenPeers, loadHiddenPrefs, isPeerHidden, setPeerHidden,
     // 按用户级改名

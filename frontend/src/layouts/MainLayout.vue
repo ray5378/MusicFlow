@@ -887,6 +887,17 @@ watch(() => playerStore.showPlaylist, (open) => {
   queueCoversReady.value = false;
   if (open) void scrollQueueToCurrent({ force: true });
 });
+
+// 「选择播放器」打开时立刻刷一次 peers。
+// 客户端实例(安卓 / Windows)的当前曲在 WS 推送里是**摘要态**(大队列 items 置空)
+// 拿不到,只有全量刷新才有;轮询间隔内打开弹窗时先补这一下,避免看到过期状态。
+// 只有「打开」才拉,关闭不拉;失败静默(store 内保持上一次列表)。
+watch(peerSwitcherVisible, (open) => {
+  if (open) void playerStore.refreshPeersNow();
+});
+watch(controlsDrawerOpen, (open) => {
+  if (open) void playerStore.refreshPeersNow();
+});
 </script>
 
 <style lang="scss" scoped>
