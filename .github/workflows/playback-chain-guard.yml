@@ -139,7 +139,10 @@ jobs:
         shell: bash
         run: |
           miss=0
-          for pat in LOCAL_PEER_STALE_MS LOCAL_PEERS_POLL_MS isStaleLocalPeer startLocalPeersPoll stopLocalPeersPoll refreshPeersNow; do
+          # 后三项是「命令影子」(2026-09-16):客户端实例的音量/播放态与 position 一样是
+          # 周期上报的采样,下发命令后轮询读到的仍是旧值,会把刚设的值顶回去
+          # (音量 20→50→30 跳回 50;点了暂停又自己播起来)。单测覆盖不到,扫源码兜住。
+          for pat in LOCAL_PEER_STALE_MS LOCAL_PEERS_POLL_MS isStaleLocalPeer startLocalPeersPoll stopLocalPeersPoll refreshPeersNow COMMAND_SHADOW_WINDOW_MS isStaleSample volumeIssuedAt transportIssuedAt; do
             if ! grep -q "$pat" frontend/src/stores/player.ts; then
               echo "::error::Web 前端客户端链路回归:player.ts 缺少 $pat(客户端实例状态不会自动更新)"
               miss=1

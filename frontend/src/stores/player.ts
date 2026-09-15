@@ -1098,6 +1098,7 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function castTogglePlay(st: RemoteState) {
+    transportIssuedAt = Date.now(); // 播放态也是周期上报的,别被滞后值顶回去
     if (st.isPlaying) {
       api.post(peerApi(st.peerId, "/pause")).catch(() => {});
       st.isPlaying = false;
@@ -1152,6 +1153,25 @@ export const usePlayerStore = defineStore("player", () => {
     api.post(peerApi(st.peerId, "/play-mode"), { mode: st.playMode }).catch(() => {});
   }
 
+  // ==================== 命令影子(滞后上报保护) ====================
+  // 客户端实例(local)的音量 / 静音 / 播放态与 position 一样,都是**周期性上报**
+  // 的采样(实测约 4s 一次)。本端下发命令后,在下一个上报到达前,轮询读到的仍是
+  // 旧值,直接采纳会把用户刚设的值**顶回去** —— 典型表现:音量从 20 拖到 50、
+  // 再拖到 30,结果跳回 50(上报回来的还是上一拍的 50);点了暂停也会自己又播起来。
+  //
+  // 判据与 seek / 进度外推同款:采样时刻(`reportedAt`)早于命令下发时刻,且仍在
+  // 保护窗口内。无 `reportedAt` 的设备型 peer(走实时查询)→ 恒 false,
+  // **设备链路行为完全不变**。
+  const COMMAND_SHADOW_WINDOW_MS = 8000;
+  function isStaleSample(s: any, commandAt: number): boolean {
+    if (!commandAt) return false;
+    if (Date.now() - commandAt > COMMAND_SHADOW_WINDOW_MS) return false;
+    const at = s?.reportedAt;
+    return typeof at === "number" && at < commandAt;
+  }
+  let volumeIssuedAt = 0; // 最近一次下发音量命令的时刻(ms)
+  let transportIssuedAt = 0; // 最近一次下发播放/暂停命令的时刻(ms)
+
   // Per-peer poll: mirrors backend transport state + queue into the peer's
   // RemoteState. Each peer has its own timer, so multiple targets are tracked
   // simultaneously without interfering with each other. For groups the status
@@ -1186,11 +1206,17 @@ export const usePlayerStore = defineStore("player", () => {
           //    state=STOPPED 却 position 仍在前进(进度条在走)。此时以"position 真实前进"
           //    作为在播的权威证据,强制 isPlaying=true,避免按钮卡在"未播放"。
           const statePlaying = s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
-          const advancing = st.duration > 0 && st.currentTime > lastPos && st.currentTime < st.duration;
-          st.isPlaying = statePlaying || advancing;
+          // 传输类命令刚下发时,陈旧上报的 position 仍在前进,若照常做
+          // 「position 前进 → 判在播」自愈,会把刚点的**暂停**改回播放中 → 窗口内停用。
+          const transportStale = isStaleSample(s, transportIssuedAt);
+          const advancing = !transportStale && st.duration > 0 && st.currentTime > lastPos && st.currentTime < st.duration;
+          st.isPlaying = transportStale ? st.isPlaying : (statePlaying || advancing);
           if (typeof s.position === "number") lastPos = s.position;
           // 同步设备真实音量(含 外部 webhook / 其它端 改的)。仅当当前正控制该 peer。
-          if (typeof s.volume === "number" && currentPeerId.value === st.peerId) {
+          // 但刚下发过音量命令时,要忽略「命令之前采样」的上报 —— 连续拖动
+          // (20→50→30)时回传的可能还是上一拍的 50,会把手上的 30 顶掉。
+          const volumeStale = isStaleSample(s, volumeIssuedAt);
+          if (typeof s.volume === "number" && currentPeerId.value === st.peerId && !volumeStale) {
             volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
           }
 
@@ -1449,6 +1475,7 @@ export const usePlayerStore = defineStore("player", () => {
       if (timer) clearTimeout(timer);
       volumeTimers.set(peerId, setTimeout(() => {
         volumeTimers.delete(peerId);
+        volumeIssuedAt = Date.now(); // 窗口从真正下发的时刻算起
         api.post(peerApi(peerId, "/volume"), { volume: Math.round(v * 100) }).catch(() => {});
       }, 250));
       return;
