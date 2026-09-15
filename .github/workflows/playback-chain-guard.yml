@@ -49,7 +49,7 @@ jobs:
         run: |
           set -o pipefail
           cd backend
-          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/frontend/playerContract.test.ts tests/frontend/playContentContract.test.ts tests/services/contentOrder.test.ts 2>&1 | tee /tmp/chain-guard.log
+          npx vitest run tests/routes/dlnaStreamUrlGuard.test.ts tests/routes/streamRemoteFallback.test.ts tests/source/online/streamFallback.test.ts tests/source/online/streamFallbackEvict.test.ts tests/player/QueueController.test.ts tests/player/queueChangedLeakGuard.test.ts tests/rest/scrobbleMethodGuard.test.ts tests/frontend/playerContract.test.ts tests/frontend/playContentContract.test.ts tests/services/contentOrder.test.ts 2>&1 | tee /tmp/chain-guard.log
 
       # 静态守卫：QueueController 的停播阈值（skipCounters/连跳 N 停）已按
       # 2026-09-09 决策整体移除（不可播逐曲移除、队列自然排空），回归即失败。
@@ -106,6 +106,46 @@ jobs:
             miss=1
           fi
           if [ "$miss" -eq 0 ]; then echo "OK: 409 + i18n key 契约在位"; fi
+          exit "$miss"
+
+      # —— 客户端(安卓 / Windows)链路守卫(2026-09-15) ——
+      # 两条都是**静默失效**:WS 里多出一条 device_id 前端会直接忽略;scrobble 的 404
+      # 被客户端 catch 吞掉 —— 都不会让任何既有测试变红,只能靠这里钉死。
+      # 动态断言见 tests/player/queueChangedLeakGuard.test.ts 与
+      # tests/rest/scrobbleMethodGuard.test.ts(均已做变异验证:回退修复即对应用例转红)。
+      - name: "Guard - client link (queue_changed leak + scrobble method)"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -q 'this.queues.has(id)' backend/src/services/player/QueueController.ts; then
+            echo "::error::客户端链路回归:预探测 onChange 必须只为已注册队列重发 queue_changed(this.queues.has(id) 守卫),否则本机链路会把带明文 clientId 的完整 peerId 塞进 WS device_id"
+            miss=1
+          fi
+          if ! grep -q 'restRoutes.on(\["GET", "POST"\], "/scrobble"' backend/src/routes/rest/index.ts; then
+            echo "::error::客户端链路回归:/rest/scrobble 必须同时接受 GET 与 POST;只听 GET 会让 ≤v5.0.1 的客户端静默丢失播放记录(404 被吞)"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 客户端链路契约在位"; fi
+          exit "$miss"
+
+      # Web 前端「客户端实例状态自动跟上 + 离线自动踢出选择播放器」(v3.0.19):
+      # 客户端实例**没有任何携带当前曲的状态推送** —— 定时推的 peer_queue_changed 是
+      # 摘要态(大队列 items 置空),而 player_state_changed / media_changed 是设备型事件
+      # (canSeeDevice 只放行 dlna/airplay/sendspin)。所以只能靠定时刷新拉取全量
+      # /v1/peers;关掉 App 后服务端要 10min 才判 idle,弹窗里会一直挂着那台客户端,
+      # 故前端另用 lastActiveAt(30s 心跳)短阈值踢出。这几处 plumbing 任缺其一,
+      # 表现都是「必须手动点重新扫描播放器」,单测覆盖不到,用源码扫描兜住。
+      - name: "Guard - Web client peer auto-refresh + stale kick"
+        shell: bash
+        run: |
+          miss=0
+          for pat in LOCAL_PEER_STALE_MS LOCAL_PEERS_POLL_MS isStaleLocalPeer startLocalPeersPoll stopLocalPeersPoll refreshPeersNow; do
+            if ! grep -q "$pat" frontend/src/stores/player.ts; then
+              echo "::error::Web 前端客户端链路回归:player.ts 缺少 $pat(客户端实例状态不会自动更新)"
+              miss=1
+            fi
+          done
+          if [ "$miss" -eq 0 ]; then echo "OK: 客户端实例自动刷新/离线踢出 plumbing 在位"; fi
           exit "$miss"
 
       - name: Upload guard log on failure
