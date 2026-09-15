@@ -104,10 +104,38 @@ export const useFavoritesStore = defineStore("favorites", () => {
     revision.value++;
   }
 
+  /**
+   * 应用「其它端」的收藏变更(服务端 song_starred 定向推送)。
+   *
+   * 纯本地同步:不写服务端、不调接口 —— 服务端已经是变更来源,回写会打回环。
+   * 幂等且**只在真的变了才 bump revision**,否则本端自己点红心时服务端把同一
+   * 状态又推回来,会导致 Favorites 页多余的整页重载。
+   */
+  function applyExternalStarred(
+    songIds: string[],
+    starred: boolean,
+    albumIds: string[] = [],
+    artistIds: string[] = [],
+  ): void {
+    let changed = false;
+    const apply = (set: Set<string>, ids: string[]) => {
+      for (const id of ids) {
+        if (!id) continue;
+        if (starred && !set.has(id)) { set.add(id); changed = true; }
+        else if (!starred && set.has(id)) { set.delete(id); changed = true; }
+      }
+    };
+    apply(favoriteSongIds.value, songIds);
+    apply(favoriteAlbumIds.value, albumIds);
+    apply(favoriteArtistIds.value, artistIds);
+    if (changed) revision.value++;
+  }
+
   return {
     favoriteSongIds, favoriteAlbumIds, favoriteArtistIds, revision, loaded, loading,
     loadFavorites, isFavorite, isAlbumFavorite, isArtistFavorite,
     toggleFavorite, toggleAlbumFavorite, toggleArtistFavorite,
     removeFavorite, removeAlbumFavorite, removeArtistFavorite, clearFavorites,
+    applyExternalStarred,
   };
 });

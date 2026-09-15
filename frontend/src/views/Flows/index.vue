@@ -84,6 +84,7 @@ import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
+import { peerKindLabel as peerKindLabelOf } from "@/utils/peerLabel";
 import PlayerControl from "./PlayerControl.vue";
 
 const router = useRouter();
@@ -130,7 +131,11 @@ function nodeSummary(n: any): string {
 
 function peerName(peerId: string): string {
   const p = peers.value.find((x) => x.peerId === peerId);
-  if (p) return p.kind === "local" ? t('flows.localPeer') : p.name;
+  if (p) {
+    // 本机实例走统一口径:与自己同一个 peerId 才叫「本机」,其余显示所属模块
+    // (客户端 / 本机)—— 不能再把所有 local peer 都当「本机」。
+    return p.kind === "local" ? peerKindLabelOf(p, t) : p.name;
+  }
   const id = peerId.split(":")[1] || peerId;
   return id.slice(0, 8) + "…";
 }

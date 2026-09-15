@@ -18,6 +18,10 @@
 //   { type: "peer_unavailable",     peer: <Peer> }
 //   { type: "peer_queue_changed",   peer_id, queue: <QueueSnapshot> }
 //   { type: "peer_queue_cleared",   peer_id }
+//   { type: "peer_command",         peer_id, action, payload }
+//     —— **定向**消息(只发给 peer_id 对应的那个本机实例,见 sendToLocalPeer),
+//        Web/HA 遥控安卓/Windows 客户端的通道:action ∈ play|pause|stop|next|prev|seek|volume。
+//        接收端按自身实例身份执行;权威队列变更另由 peer_queue_changed 广播 + updatedAt 仲裁。
 //
 // Auth: ?token=<apiKey|jwt> on the upgrade URL. The same Bearer logic as
 // auth.ts (JWT first, then API key) applies, so HA integrations present the
@@ -36,13 +40,14 @@ import {
 import { getPeerManager } from "../peer.js";
 import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken, WsUser } from "./auth.js";
-import { sanitizeClientId, maskLocalPeerId, buildLocalPeerId } from "../../utils/peerId.js";
+import { sanitizeClientId, maskLocalPeerId, buildLocalPeerId, clientIdOfLocalPeer, userIdOfLocalPeer } from "../../utils/peerId.js";
 import {
   canUseRenderer,
   peerVisibleTo,
   decoratePeersForClient,
 } from "../access.js";
 import { isPeerHidden } from "../playerPrefs.js";
+import { createLogger } from "../../utils/logger.js";
 import {
   randomSongsEvents,
   RANDOM_SONGS_CHANGED_EVENT,
@@ -53,6 +58,7 @@ let wss: WebSocketServer | null = null;
 export function initWebSocketServer(server: import("http").Server): void {
   if (wss) return;
   wss = new WebSocketServer({ noServer: true });
+  const log = createLogger("ws");
 
   // 「随机歌曲」歌单变动广播:插件(后台定时 / 惰性刷新)重建歌单后 emit,
   // 此处转发给所有已连接客户端,客户端收到后按需重拉歌单,不再轮询。
@@ -62,10 +68,14 @@ export function initWebSocketServer(server: import("http").Server): void {
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url || "", `http://${req.headers.host}`);
-    if (url.pathname !== "/ws") return; // other upgrades handled elsewhere
+    if (url.pathname !== "/ws") {
+      log.info(`upgrade ignored path=${url.pathname} from=${req.socket.remoteAddress}`);
+      return; // other upgrades handled elsewhere
+    }
     const token = url.searchParams.get("token") || "";
     const user = authenticateWsToken(token);
     if (!user) {
+      log.warn(`upgrade 401 from=${req.socket.remoteAddress} tokenLen=${token.length} q=${url.searchParams.toString().slice(0, 120)}`);
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
@@ -73,6 +83,7 @@ export function initWebSocketServer(server: import("http").Server): void {
     // 客户端实例的临时端 ID(?clientId=)—— 与 /v1/peers 同款,本机 peer 快照
     // 只回给发起连接的这个实例,同账号其它标签页/客户端互不可见。
     const clientId = sanitizeClientId(url.searchParams.get("clientId"));
+    log.info(`upgrade ok from=${req.socket.remoteAddress} clientId=${clientId ?? "-"} raw=${url.searchParams.get("clientId") ?? "-"}`);
     wss!.handleUpgrade(req, socket, head, (ws) => {
       (ws as any).__user = user;
       (ws as any).__clientId = clientId;
@@ -81,6 +92,25 @@ export function initWebSocketServer(server: import("http").Server): void {
   });
 
   wss.on("connection", (ws) => {
+    // 连接身份快照:遥控本机实例靠 (userId, clientId) 定向投递,新连接没带上
+    // clientId 就永远收不到指令 —— 出现「能看状态、按钮无反应」时先看这行。
+    log.info(`ws open user=${(ws as any).__user?.id ?? "-"} clientId=${(ws as any).__clientId ?? "-"} total=${wss!.clients.size}`);
+    ws.on("close", () => {
+      log.info(`ws close clientId=${(ws as any).__clientId ?? "-"} total=${wss!.clients.size}`);
+      // 该实例的**最后一条**连接关闭 → 立即标离线(不等 10 分钟心跳空闲扫描)。
+      // 否则客户端切换器里会残留一条已关闭的 Web 播放器/客户端。同一 clientId
+      // 的其它连接(同浏览器多标签页共享 clientId)还在时不算离线。
+      const u = (ws as any).__user;
+      const cid = (ws as any).__clientId;
+      if (u?.id && cid) {
+        let remaining = 0;
+        for (const c of wss!.clients) {
+          if (c === ws || (c as any).readyState !== WebSocket.OPEN) continue;
+          if ((c as any).__user?.id === u.id && (c as any).__clientId === cid) remaining++;
+        }
+        if (remaining === 0) getPeerManager().markLocalOfflineByClient(u.id, cid);
+      }
+    });
     // Initial snapshot so the client has full state before any delta events.
     sendSnapshot(ws).catch(() => {});
     sendPeerSnapshot(ws);
@@ -251,4 +281,72 @@ export function broadcastToClients(msg: any): void {
       try { client.send(JSON.stringify(msg)); } catch { /* ignore */ }
     }
   }
+}
+
+/**
+ * 向「某个用户的所有连接」推送 —— 用于**用户私有**状态的跨端同步。
+ *
+ * 典型场景:收藏(我喜欢)是 per-user 的(userFavoriteSongs),用户在 Web 端点红心后,
+ * 同账号的其它播放端(Windows / 安卓客户端、其它标签页)的那颗红心也该亮起来。
+ * 这类消息绝不能 broadcastToClients —— 那会把 A 的收藏变动推给 B 的连接。
+ *
+ * @returns 实际投递到的连接数
+ */
+export function sendToUser(userId: string, msg: unknown): number {
+  if (!wss || !userId) return 0;
+  let n = 0;
+  for (const client of wss.clients as Iterable<any>) {
+    if (client.__user?.id !== userId) continue;
+    if (client.readyState !== WebSocket.OPEN) continue;
+    send(client, msg);
+    n++;
+  }
+  return n;
+}
+
+/**
+ * 向「某个本机实例」定向推送 —— 按 userId + clientId 精确匹配连接。
+ *
+ * 用途:Web / HA 遥控另一台客户端(安卓 / Windows)时,把指令或权威状态推给
+ * **目标实例自己**,而不是广播。广播会把指令也送回 Web 端自己,形成
+ * 「服务端→客户端→客户端上报→服务端再广播」的回环。
+ *
+ * clientId 必须**精确匹配**:缺失时一律不投递(peerId 是旧格式 `local:<uid>`、
+ * 或旧客户端从未上报 clientId)。宁可下发失败,也不能把指定给某台客户端的指令
+ * 误送给同账号的其它连接(网页标签页也在同一账号下)。
+ *
+ * @returns 实际投递到的连接数;0 = 目标离线,调用方据此回 delivered:false
+ */
+export function sendToLocalInstance(userId: string, clientId: string | null, msg: unknown): number {
+  if (!wss || !userId || !clientId) return 0;
+  const targets = pickInstanceConnections(wss.clients as Iterable<any>, userId, clientId);
+  for (const ws of targets) send(ws, msg);
+  return targets.length;
+}
+
+/**
+ * 从连接集合里挑出「指定用户的指定实例」的连接 —— 纯函数,便于单测。
+ * 匹配规则见 sendToLocalInstance 注释:userId 与 clientId 都必须精确相等,
+ * clientId 为空直接返回空集(不做「发全部连接」的降级)。
+ */
+export function pickInstanceConnections<T extends { __user?: WsUser; __clientId?: string | null }>(
+  clients: Iterable<T>,
+  userId: string,
+  clientId: string | null,
+): T[] {
+  if (!userId || !clientId) return [];
+  const out: T[] = [];
+  for (const c of clients) {
+    const u = c.__user;
+    if (!u || u.id !== userId) continue;
+    if ((c.__clientId ?? null) !== clientId) continue;
+    out.push(c);
+  }
+  return out;
+}
+
+/** 按 peerId(内部规范形式 `local:<uid>[:<clientId>]`)定向下发。0 = 目标离线。 */
+export function sendToLocalPeer(peerId: string, msg: unknown): number {
+  if (!peerId || !peerId.startsWith("local:")) return 0;
+  return sendToLocalInstance(userIdOfLocalPeer(peerId) ?? "", clientIdOfLocalPeer(peerId), msg);
 }

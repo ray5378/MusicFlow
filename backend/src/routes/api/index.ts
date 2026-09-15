@@ -44,6 +44,7 @@ import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
+import { sendToLocalPeer } from "../../services/ws/index.js";
 import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
@@ -56,7 +57,7 @@ import { announceOnPeer, isAnnouncing } from "../../services/dlna/announce.js";
 import { markStaleDevices } from "../../services/dlna/discovery.js";
 import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
-import { getPeerManager, parsePeerId } from "../../services/peer.js";
+import { getPeerManager, parsePeerId, type LocalPlaybackReport } from "../../services/peer.js";
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
 import { startSendspinService, stopSendspinService, getSendspinServer } from "../../services/sendspin/index.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
@@ -2970,6 +2971,19 @@ function decodePeerId(c: any): string {
   );
 }
 
+/** **body 里**带 peerId 的端点专用(如 `/v1/play`):与 `decodePeerId` 完全同一套解析。
+ *  调用方(Web / HA / 客户端)只看得到对外形式 `local:<userId>:<instanceKey>`,不解析
+ *  就会把掩码当真实键直接落库,凭空造出一条无人读的僵尸队列行 —— 目标实例读的是自己
+ *  那条真实行,于是「投到这台客户端」变成投给了一个幻影(2026-09-15 实测)。 */
+function resolveBodyPeerId(c: any, raw: string): string {
+  return resolveLocalPeerId(
+    raw,
+    c.get("user")?.id ?? "",
+    clientIdOf(c),
+    (uid, key) => pm.resolveMaskedLocalPeerId(uid, key),
+  );
+}
+
 // 可投屏/可控制 peer:dlna 设备、播放器群组(group)与 AirPlay 设备(airplay)。
 // dlna/group/airplay 队列都归 QueueController 管(内部按裸 id),
 // 传输控制 dlna 走 control.ts、group 走组扇出、airplay 走 airplay/control.ts。
@@ -2985,7 +2999,13 @@ apiRoutes.get("/v1/peers", (c) => {
   const user = c.get("user");
   // 单一出口(与 WS peer_snapshot 共用):可见性 → 打码/self → 按用户级隐藏 → 改名。
   // 本机播放器的临时端 ID 由客户端以 X-MF-Client-Id 头 / ?clientId= 上报,缺省退回旧格式。
-  const peers = decoratePeersForClient(pm.listWithQueues(), user?.id ?? "", !!user?.isAdmin, clientIdOf(c));
+  //
+  // ?includeHidden=1:侧边栏·播放器**管理页**专用 —— 隐藏的 peer 不剪掉,改打 hidden 标记。
+  // 管理页的每一行都必须恒在(与 DLNA 设备行同构),否则用户拨了「隐藏」开关后行就从
+  // 列表消失,再无落点取消隐藏,强刷也恢复不了(隐藏行本就不在默认响应里)。
+  // 切换器 / 选择器不带该参数,行为与从前完全一致(隐藏即不出现在可选目标里)。
+  const includeHidden = c.req.query("includeHidden") === "1";
+  const peers = decoratePeersForClient(pm.listWithQueues(), user?.id ?? "", !!user?.isAdmin, clientIdOf(c), includeHidden);
   return c.json({ peers });
 });
 
@@ -3071,6 +3091,38 @@ apiRoutes.post("/v1/peers/:peerId/heartbeat", (c) => {
   const peerId = decodePeerId(c);
   const ok = pm.heartbeat(peerId);
   return c.json({ success: ok });
+});
+
+/** 只把有限数字收下,其余(undefined / NaN / 字符串)→ undefined(字段级合并时沿用旧值)。 */
+function finiteNumOrUndefined(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+// 本机实例的播放状态上报:state / position(秒) / duration(秒) / volume(0-100) / songId。
+//
+// 为什么需要它:本机播放的传输状态权威在客户端本地播放器,服务端只有队列元数据。
+// 当**别的**播放端(Web / HA / 另一台客户端)遥控这台本机实例时,它靠轮询
+// `GET /v1/peers/:peerId/status` 镜像进度条与播放按钮 —— 没有这份上报,轮询只能
+// 拿到队列快照,进度条恒为 0、按钮恒显示「未播放」。
+//
+// 只对 local 有效(DLNA/组/airplay/sendspin 的状态由各自链路实时查询,不走上报),
+// 只存进程内存,TTL 30s(见 PeerManager.getLocalStatusReport)。
+apiRoutes.post("/v1/peers/:peerId/local-status", async (c) => {
+  const peerId = decodePeerId(c);
+  const body = (await c.req.json().catch(() => ({}))) as any;
+  const rawState = typeof body?.state === "string" ? body.state.toUpperCase() : "";
+  const state = rawState === "PLAYING" || rawState === "PAUSED_PLAYBACK" || rawState === "STOPPED"
+    ? (rawState as LocalPlaybackReport["state"])
+    : undefined;
+  const rep = pm.reportLocalStatus(peerId, {
+    state,
+    position: finiteNumOrUndefined(body?.position),
+    duration: finiteNumOrUndefined(body?.duration),
+    volume: finiteNumOrUndefined(body?.volume),
+    songId: typeof body?.songId === "string" && body.songId ? body.songId : undefined,
+  });
+  if (!rep) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  return c.json({ success: true, reportedAt: rep.reportedAt });
 });
 
 // Get a peer's queue snapshot (local: from local_queues; dlna/group: from queue manager).
@@ -3321,9 +3373,23 @@ apiRoutes.post("/v1/peers/:peerId/queue/index", async (c) => {
 });
 
 // ==================== Peer transport controls ====================
-// For dlna peers these command the device. For local peers they are no-ops
-// server-side (the Web client owns the audio) — they exist only so HA can use
-// a single URL shape; local-peer playback is not controllable from HA.
+// 对 dlna / airplay / sendspin / group:直接命令设备。
+// 对 local(安卓 / Windows / 浏览器的本机实例):**定向下发**给目标实例自己的 WS
+// 连接,由它执行 —— 此处曾经是 no-op(旧假设「Web 客户端自己持有音频」,只为了让
+// HA 复用同一套 URL 形状);本机实例接入播放器体系后改为真下发。
+// 返回 delivered:目标离线(无 WS 连接)时为 false —— 前端据此给「设备离线」反馈,
+// 而不是假装成功。队列类操作(点歌/加歌/清空/切歌)不走这里:它们直接写服务端权威
+// 队列,由 peer_queue_changed 广播 + updatedAt 仲裁让目标实例跟随。
+function dispatchPeerCommand(peerId: string, action: string, payload?: Record<string, unknown>) {
+  // 方案收敛:Web 播放器不再是被控端 —— 即便调用方持有历史 peerId,指令也不下发。
+  // (列表已隐藏 web 实例,这里是防御性兜底,防缓存直呼。)
+  const target = pm.get(peerId);
+  if (target?.kind === "local" && target.platform === "web") {
+    return { success: true, delivered: false };
+  }
+  const delivered = sendToLocalPeer(peerId, { type: "peer_command", action, payload }) > 0;
+  return { success: true, delivered };
+}
 
 apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
   const peerId = decodePeerId(c);
@@ -3361,7 +3427,8 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
     }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
-  return c.json({ success: true }); // local: no-op
+  if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "play"));
+  return c.json({ success: true });
 });
 
 apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
@@ -3384,6 +3451,7 @@ apiRoutes.post("/v1/peers/:peerId/pause", async (c) => {
     try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "pause"));
   return c.json({ success: true });
 });
 
@@ -3423,6 +3491,7 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
     }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "stop"));
   return c.json({ success: true });
 });
 
@@ -3434,6 +3503,7 @@ apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
     try { await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "next"));
   return c.json({ success: true });
 });
 
@@ -3445,6 +3515,7 @@ apiRoutes.post("/v1/peers/:peerId/prev", async (c) => {
     try { await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "prev"));
   return c.json({ success: true });
 });
 
@@ -3480,6 +3551,12 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
     try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
+  if (parsed.kind === "local") {
+    const body = await c.req.json().catch(() => ({} as any));
+    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
+    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
+    return c.json(dispatchPeerCommand(peerId, "seek", { seconds }));
+  }
   return c.json({ success: true });
 });
 
@@ -3510,6 +3587,11 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
     if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
+  }
+  if (parsed.kind === "local") {
+    const { volume } = await c.req.json().catch(() => ({} as any));
+    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
+    return c.json(dispatchPeerCommand(peerId, "volume", { volume }));
   }
   return c.json({ success: true });
 });
@@ -3661,8 +3743,24 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       });
     } catch (e: any) { return c.json({ error: e.message }, 500); }
   }
-  // local: return queue snapshot as "status"
-  return c.json(pm.getQueueSnapshot(peerId) || {});
+  // local:队列快照(权威队列)+ 本机实例上报的传输状态(state / position / duration /
+  // volume)。上报是**附加**字段:对端轮询时据此镜像进度条与播放按钮;无上报(该端
+  // 旧版本 / 已离线)则只得队列,前端退回「未播放」——队列镜像与恢复不受影响。
+  // 注意 updatedAt 保持队列行的值(客户端用它做恢复新鲜度竞速,不能被上报时间盖掉)。
+  const localSnap = pm.getQueueSnapshot(peerId);
+  if (!localSnap) return c.json({});
+  const rep = pm.getLocalStatusReport(peerId);
+  if (!rep) return c.json(localSnap);
+  return c.json({
+    ...localSnap,
+    state: rep.state,
+    position: rep.position,
+    duration: rep.duration,
+    ...(typeof rep.volume === "number" ? { volume: rep.volume } : {}),
+    reportedAt: rep.reportedAt,
+    // 对端靠 media.songId 变化刷新歌词/封面(与 dlna/sendspin 同构)。
+    ...(rep.songId ? { media: { songId: rep.songId } } : {}),
+  });
 });
 
 // ==================== 播放器群组 API ====================
@@ -3758,17 +3856,29 @@ apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
 
 apiRoutes.post("/v1/play", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
-  const { peerId, type, id, songId, startIndex, playMode, enqueue } = body || {};
-  if (typeof peerId !== "string" || typeof type !== "string" || typeof id !== "string") {
+  const { peerId: rawPeerId, type, id, songId, startIndex, playMode, enqueue } = body || {};
+  if (typeof rawPeerId !== "string" || typeof type !== "string" || typeof id !== "string") {
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.needPeerTypeId"), 400);
   }
   const user = c.get("user");
+  // body 里的本机 peerId 可能是**对外掩码形式**(`local:<userId>:<instanceKey>`)——调用方
+  // 只会看到这个形式。必须与路径端点(`decodePeerId`)走同一套解析,否则掩码形式会被当成
+  // **真实键**原样落库 → 给该实例凭空多出一条僵尸队列行,而目标实例读的是自己那条真行,
+  // 于是「Web 端点歌单让某台客户端播 → 客户端毫无反应、队列看起来被吞了」(2026-09-15 实测)。
+  const peerId = resolveBodyPeerId(c, rawPeerId);
   // 细粒度播放器授权:非 admin 只能投放到被授权的 peer(含自己的 local)。
   if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)) {
     return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
   }
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  // 方案收敛:Web 播放器不再是被控端,拒绝向其投放内容(列表已隐藏,这里兜底防缓存直呼)。
+  if (parsed.kind === "local") {
+    const target = pm.get(peerId);
+    if (target?.platform === "web") {
+      return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
+    }
+  }
   const resolved = await resolveContentSongs(type, id);
   if (!resolved) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.invalidTypeId", { type }), 404);
   const items = songsToQueueItems(resolved.rows);
@@ -3813,7 +3923,10 @@ apiRoutes.post("/v1/play", async (c) => {
   }
   const snap = isCastPeer(parsed) ? getQueueManager().snapshot(parsed.id) : null;
   return c.json({
-    success: true, peerId, type, id, name: resolved.name,
+    // 回执里的 peerId 必须是**对外形式**:local 的真实行带着 clientId,直接回显会把它
+    // 泄给调用方(设计约束:clientId 永不出服务端)。cast peer 的 id 无此问题,原样返回。
+    success: true, peerId: parsed.kind === "local" ? maskLocalPeerId(peerId) : peerId,
+    type, id, name: resolved.name,
     queued: items.length,
     startIndex: enqueue ? undefined : effectiveStart,
     songId: enqueue ? undefined : items[effectiveStart]?.songId,

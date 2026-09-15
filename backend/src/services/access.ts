@@ -214,30 +214,48 @@ export function filterPeersByAccess<T extends { peerId: string }>(
  *   - 同账号的其它实例 → `local:<userId>:<instanceKey>`,各占一行;
  *   - dlna / airplay / group / sendspin → 原样(打码对它们恒等)。
  */
-export function decoratePeersForClient<T extends { peerId: string; kind?: string; name?: string }>(
+export function decoratePeersForClient<T extends { peerId: string; kind?: string; name?: string; platform?: string }>(
   peers: T[],
   userId: string,
   isAdmin: boolean,
   clientId?: string | null,
-): (T & { self: boolean })[] {
+  includeHidden = false,
+): (T & { self: boolean; hidden?: boolean; instancePeerId?: string })[] {
   const myLocalPeerId = buildLocalPeerId(userId, clientId);
   const seen = new Set<string>();
-  const out: (T & { self: boolean })[] = [];
+  const out: (T & { self: boolean; instancePeerId?: string })[] = [];
   for (const p of filterPeersByAccess(userId, isAdmin, peers, clientId)) {
     const self = p.kind === "local" && p.peerId === myLocalPeerId;
+    // 播放器统一化方案收敛:Web 播放器不再作为「可被遥控端」。对外列表一律隐藏
+    // 其它 web 本机实例(自己那条 self 行保留 —— Web 前端仍靠它归一化本机队列)。
+    // 客户端切换器、Web 切换器、管理页由此统一看不到「Web 播放器」,
+    // 客户端→Web 遥控从源头断掉;Web→客户端、客户端→客户端不受影响。
+    if (p.kind === "local" && !self && p.platform === "web") continue;
+    const masked = maskLocalPeerId(p.peerId);
     // 自己那条归一化成规范形式;同账号的旧格式遗留行会与之撞 id,故此处去重(self 优先)。
-    const peerId = self ? `local:${userId}` : maskLocalPeerId(p.peerId);
+    const peerId = self ? `local:${userId}` : masked;
     if (seen.has(peerId)) continue;
     seen.add(peerId);
-    out.push({ ...p, peerId, self });
+    // self 行额外带**按实例**的键供管理页写偏好用:规范形式 local:<uid> 是账号级的,
+    // 拿它改名/隐藏会串到该账号的其它设备(手机上给「本机」改名,电脑上的「本机」跟着变)。
+    // 管理页(侧边栏·播放器)读写一律用 instancePeerId;渲染仍用 peerId。
+    out.push({ ...p, peerId, self, ...(self && masked !== peerId ? { instancePeerId: masked } : {}) });
   }
   const hidden = getHiddenPeerIds(userId);
-  const visible = hidden.size > 0 ? out.filter((p) => !hidden.has(p.peerId)) : out;
   const overrides = getNameOverrides(userId);
-  if (overrides.size === 0) return visible;
-  return visible.map((p) => {
-    const override = overrides.get(p.peerId);
-    return override ? { ...p, name: override } : p;
+  // 隐藏语义有两副面孔,由 includeHidden 决定:
+  //  - 默认(切换器 / 选择器):剪掉该用户隐藏的 peer —— 隐藏即「不出现在我可选目标里」。
+  //  - includeHidden(侧边栏·播放器管理页):**不剪**,改为逐条打 hidden 标记。
+  //    管理页的行必须恒在(与 DLNA 设备行同构),否则「隐藏」开关一拨,行就从列表消失、
+  //    再也没有落点去取消隐藏;刷新后更是无法恢复。
+  // 偏好键统一取 instancePeerId ?? peerId:本机实例一律按**实例**存偏好,self 行的
+  // 规范形式 local:<uid> 只用于渲染与前端的「自己那条」判定,不作为偏好键。
+  const prefKey = (p: { peerId: string; instancePeerId?: string }) => p.instancePeerId ?? p.peerId;
+  const rows = includeHidden ? out : out.filter((p) => !hidden.has(prefKey(p)));
+  return rows.map((p) => {
+    const override = overrides.get(prefKey(p));
+    const named = override ? { ...p, name: override } : p;
+    return includeHidden ? { ...named, hidden: hidden.has(prefKey(p)) } : named;
   });
 }
 

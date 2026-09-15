@@ -77,6 +77,27 @@ export interface PeerWithQueue extends Peer {
   queue?: QueueSnapshot;
 }
 
+/**
+ * 本机实例的实时播放状态上报(内存,进程内;见 PeerManager.reportLocalStatus)。
+ *
+ * 状态/进度/音量的权威在客户端本地播放器,服务端只做「暂存 + 回吐」,供**别的**
+ * 播放端轮询 /status 时镜像进度条与播放按钮。
+ */
+export interface LocalPlaybackReport {
+  /** 对齐 DLNA/UPnP 的传输状态口径,前端 poll 直接照读。 */
+  state: "PLAYING" | "PAUSED_PLAYBACK" | "STOPPED";
+  /** 秒(浮点)。 */
+  position: number;
+  /** 秒(浮点);未知为 0。 */
+  duration: number;
+  /** 0-100(与前端 / DLNA 音量同量纲);未上报则缺省。 */
+  volume?: number;
+  /** 当前曲 id;供对端轮询到切歌时刷新歌词 / 封面。 */
+  songId?: string;
+  /** 本地接收时刻(ms epoch),用于 TTL 判定。 */
+  reportedAt: number;
+}
+
 const PEER_IDLE_TIMEOUT_MS = 10 * 60 * 1000;      // 10 min —— 仅把 local peer 标成「不在线」
 const QUEUE_TTL_MS = 6 * 60 * 60 * 1000;          // 6 h  —— 队列静默回收门槛(队列 + 播放端双条件)
 const CLEANUP_INTERVAL_MS = 60 * 1000;            // 1 min
@@ -204,6 +225,20 @@ class PeerManager extends EventEmitter {
     p.lastActiveAt = Date.now();
     if (!wasAvailable) this.emit("peer_available", p);
     return true;
+  }
+
+  /** WS 断开即离线:该 (userId, clientId) 的**最后一条** WS 连接关闭时,立即把
+   *  对应本机实例标成「不在线」并广播 peer_unavailable —— 不等 10 分钟心跳空闲
+   *  扫描,否则客户端切换器里会残留一条已关闭的 Web 播放器/客户端(用户实测:
+   *  关掉网页后最长 10 分钟内仍显示在线)。队列不动,重开标签页照常恢复。 */
+  markLocalOfflineByClient(userId: string, clientId: string): void {
+    if (!userId || !clientId) return;
+    const peerId = `local:${userId}:${clientId}`;
+    const p = this.peers.get(peerId);
+    if (!p || p.kind !== "local" || !p.available) return;
+    p.available = false;
+    log.info(`[peer] local peer ${peerId} marked offline (last ws connection closed)`);
+    this.emit("peer_unavailable", p);
   }
 
   /** Register or refresh a DLNA peer from discovery. */
@@ -593,6 +628,53 @@ class PeerManager extends EventEmitter {
     } catch {
       return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, updatedAt: 0, preProbe: pp };
     }
+  }
+
+  // ==================== 本机实例播放状态上报(内存账本)====================
+  //
+  // 本机播放的「是否在播 / 播到第几秒 / 音量」权威在客户端(Web 的 Howl、Flutter 的
+  // just_audio),服务端只持有队列元数据(见 getQueueSnapshot)—— 光靠队列快照答不出
+  // 传输状态。当**另一个**播放端(Web / HA / 另一台客户端)遥控这台本机实例时,它靠
+  // 轮询 `GET /v1/peers/:peerId/status` 镜像进度条与播放按钮;没有这份上报,轮询只能
+  // 读到队列快照,进度条恒为 0、按钮恒显示未播放 —— 遥控就变成了盲操。
+  //
+  // 所以本端按「事件(播放/暂停/切歌)+ 播放中周期」上报,服务端进程内存着,读
+  // /status 时回吐。**只存内存**:它是瞬时状态,重启后由下一次上报自然补齐;TTL 兜底
+  // 掉线端,避免僵尸端永远显示「播放中」。
+  private localReports = new Map<string, LocalPlaybackReport>();
+
+  /** 上报有效期:超过此窗口没再上报,视为该端已离线/不再播放(读时忽略)。 */
+  private static readonly LOCAL_REPORT_TTL_MS = 30_000;
+
+  /** 记录一次本机实例的状态上报(字段级合并:未给的字段沿用上次)。 */
+  reportLocalStatus(
+    peerId: string,
+    patch: Partial<Omit<LocalPlaybackReport, "reportedAt">>,
+  ): LocalPlaybackReport | undefined {
+    const parsed = PeerManager.parse(peerId);
+    if (!parsed || parsed.kind !== "local") return undefined;
+    const prev = this.localReports.get(peerId);
+    const report: LocalPlaybackReport = {
+      state: patch.state ?? prev?.state ?? "STOPPED",
+      position: typeof patch.position === "number" && patch.position >= 0
+        ? patch.position : (prev?.position ?? 0),
+      duration: typeof patch.duration === "number" && patch.duration >= 0
+        ? patch.duration : (prev?.duration ?? 0),
+      volume: typeof patch.volume === "number"
+        ? Math.max(0, Math.min(100, patch.volume)) : prev?.volume,
+      songId: patch.songId ?? prev?.songId,
+      reportedAt: Date.now(),
+    };
+    this.localReports.set(peerId, report);
+    return report;
+  }
+
+  /** 读取本机实例最近一次上报;无 / 已过期 → undefined。 */
+  getLocalStatusReport(peerId: string): LocalPlaybackReport | undefined {
+    const r = this.localReports.get(peerId);
+    if (!r) return undefined;
+    if (Date.now() - r.reportedAt > PeerManager.LOCAL_REPORT_TTL_MS) return undefined;
+    return r;
   }
 
   // ==================== Local pre-probe (本机链路的服务端预探测)====================

@@ -5,72 +5,44 @@
       <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
     </div>
 
-    <!-- 客户端(Android / Windows 原生客户端的本机播放):与 DLNA 设备同级管理。
-         本机实例按「账号」可见:同账号的每个客户端各占一行,各带自己的队列。
-         此处**不判本机**(不置顶、不打「本机」角标)——谁是本机只在「能播放的选择器」
-         界面里判定;这一页只按设备名片显示。离线实例由服务端标记后直接不渲染。 -->
+    <!-- 客户端(Android / Windows 原生客户端的本机播放):**与 DLNA 设备行完全同构**。
+         数据源同 DLNA —— 页面本地列表(取自 /v1/peers?includeHidden=1,未按隐藏剪枝),
+         所以「隐藏」开关拨动后行仍在、可反复切换;离线实例保留显示并打「离线」标签,
+         与 DLNA 离线设备的表现一致(不消失)。
+         本机实例按「账号」可见:同账号的每个客户端各占一行,各带自己的播放队列。
+         此处**不判本机**(不置顶、不打「本机」角标)—— 谁是本机只在「能播放的选择器」
+         界面里判定;这一页只按设备名片显示,同一个实例在客户端上显示机型名、在网页上
+         显示「浏览器 · 系统」。 -->
     <div class="devices-section">
       <div class="section-head">
         <h3>{{ t('groups.clientPlayers') }}</h3>
+        <el-button size="small" :loading="loadingClients" @click="loadLocalPlayers"><MfIcon name="RefreshCw" />{{ t('groups.refresh') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.clientPlayersNote') }}</div>
-      <div class="devices-box">
+      <div class="devices-box" v-loading="loadingClients">
         <div v-for="p in clientPlayers" :key="p.peerId" class="device-row">
-          <MfIcon :name="localPeerIcon(p)" class="device-row-icon" />
+          <MfIcon :name="localPeerIcon(p)" class="device-row-icon" :class="{ offline: p.available === false }" />
           <div class="device-row-info">
             <div class="device-row-name">
               {{ localPeerLabel(p) }}
               <el-tag v-if="isLocalPeerRenamed(p)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+              <span v-if="p.available === false" class="device-offline-tag">{{ t('groups.offline') }}</span>
             </div>
             <div class="device-row-meta">{{ localPeerMeta(p) }}</div>
           </div>
           <div class="device-row-actions">
             <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
               <el-switch
-                :model-value="isHidden(p.peerId)"
-                @change="(v: any) => setPeerHidden(p.peerId, !!v)"
+                :model-value="isHidden(localPeerPrefKey(p))"
+                @change="(v: any) => setPeerHidden(localPeerPrefKey(p), !!v)"
                 inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
               />
             </div>
             <el-button v-if="canUse" size="small" @click="openRenameLocalPeer(p)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
           </div>
         </div>
-        <div v-if="clientPlayers.length === 0" class="device-empty">
+        <div v-if="!loadingClients && clientPlayers.length === 0" class="device-empty">
           {{ t('groups.noClientPlayers') }}
-        </div>
-      </div>
-    </div>
-
-    <!-- Web 播放器(浏览器标签页 / Web 端的本机播放)。与「客户端」同构,
-         仅按 platform 分流;网页拿不到电脑名,名字取「浏览器 · 系统」。 -->
-    <div class="devices-section" style="margin-top: 28px">
-      <div class="section-head">
-        <h3>{{ t('groups.webPlayers') }}</h3>
-      </div>
-      <div class="section-note">{{ t('groups.webPlayersNote') }}</div>
-      <div class="devices-box">
-        <div v-for="p in webPlayers" :key="p.peerId" class="device-row">
-          <MfIcon name="Globe" class="device-row-icon" />
-          <div class="device-row-info">
-            <div class="device-row-name">
-              {{ localPeerLabel(p) }}
-              <el-tag v-if="isLocalPeerRenamed(p)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
-            </div>
-            <div class="device-row-meta">{{ localPeerMeta(p) }}</div>
-          </div>
-          <div class="device-row-actions">
-            <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
-              <el-switch
-                :model-value="isHidden(p.peerId)"
-                @change="(v: any) => setPeerHidden(p.peerId, !!v)"
-                inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
-              />
-            </div>
-            <el-button v-if="canUse" size="small" @click="openRenameLocalPeer(p)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
-          </div>
-        </div>
-        <div v-if="webPlayers.length === 0" class="device-empty">
-          {{ t('groups.noWebPlayers') }}
         </div>
       </div>
     </div>
@@ -524,28 +496,49 @@ function isDeviceRenamed(dev: any, peerId: string): boolean {
   return !!playerStore.getPeerName(peerId) || !!dev.alias;
 }
 
-// ---- 本机播放器实例(「客户端」/「Web 播放器」两个模块) ----
+// ---- 本机播放器实例(仅「客户端」模块) ----
 // 服务端把同账号的每个本机实例各返一行(kind === "local"),自带设备名片
-// platform/model。两模块按 platform 分流(web → Web 播放器,其余 → 客户端)。
+// platform/model。本机实例只列「客户端」(web 平台经 clientPlayers 过滤排除)。
+//
+// **与 DLNA 设备模块同构**:数据源是页面本地列表(同 DLNA 的 dlnaDevices),不订阅 WS;
+// 行**不因隐藏而消失**,离线实例保留显示并打「离线」标签。因此这里用
+// `/v1/peers?includeHidden=1` —— 服务端在这种模式下不剪掉该用户隐藏的行,改为逐条打
+// hidden 标记。用默认的 /v1/peers 会拿不到隐藏行,表现为「一拨隐藏,行就没了,
+// 再也取消不回来」(强刷也救不回,因为隐藏行本就不在默认响应里)。
 //
 // 这一页**不判本机**:不置顶、不打「本机」角标 —— 谁是本机只在「能播放的选择器」
 // 界面里判定(MainLayout 的切换器)。此处名字一律取「用户改名 → 设备名片 → 上报名的
 // 兜底」,所以同一个实例在客户端上显示机型名、在网页上显示「浏览器 · 系统」。
-//
-// 离线即消失:实例闲置后服务端标记 available=false,这里直接不渲染(同 DLNA 切换器),
-// 不做墓碑 —— 本机实例没有「删除设备」的概念,重新连上会自动回来。
-const localPlayers = computed(() =>
-  (playerStore.peers || []).filter((p: any) => p.kind === "local" && p.available !== false)
-);
-const clientPlayers = computed(() => localPlayers.value.filter((p: any) => p.platform !== "web"));
-const webPlayers = computed(() => localPlayers.value.filter((p: any) => p.platform === "web"));
+const playerInstances = ref<any[]>([]);
+const loadingClients = ref(false);
+
+/** 本机实例的**偏好键**(隐藏 / 改名都按它存):一律按「实例」而非「账号」。
+ *  自己那条的对外 peerId 是账号级的 local:<uid>,拿它当偏好键会串味 ——
+ *  在手机上给「本机」改名,电脑上的「本机」会跟着变。服务端为此额外下发
+ *  instancePeerId(不可逆实例键),它才是稳定且唯一的那把钥匙。 */
+function localPeerPrefKey(p: any): string {
+  return p?.instancePeerId || p?.peerId || "";
+}
+
+async function loadLocalPlayers(): Promise<void> {
+  loadingClients.value = true;
+  try {
+    const res = await api.get("/rest/api/v1/peers?includeHidden=1");
+    playerInstances.value = (res.data?.peers || []).filter((p: any) => p.kind === "local");
+  } catch { playerInstances.value = []; }
+  finally { loadingClients.value = false; }
+}
+
+// 本机实例只列「客户端」(windows/macos/linux/android 等);web 平台不在此展示
+// (播放器统一化方案收敛:Web 仅作遥控面 + 自身本机播放,不再作为可管理/被控端)。
+const clientPlayers = computed(() => playerInstances.value.filter((p: any) => p.platform !== "web"));
 
 /** 本机实例的显示名:我改过的名优先,其次设备名片(机型名 / 浏览器·系统),最后上报名。 */
 function localPeerLabel(p: any): string {
-  return playerStore.getPeerName(p.peerId) || p.model || p.name || t("groups.localPlayerFallback");
+  return playerStore.getPeerName(localPeerPrefKey(p)) || p.model || p.name || t("groups.localPlayerFallback");
 }
 function isLocalPeerRenamed(p: any): boolean {
-  return !!playerStore.getPeerName(p.peerId);
+  return !!playerStore.getPeerName(localPeerPrefKey(p));
 }
 
 /** 平台标签:Android / Windows / iOS / macOS / 网页,未知时原样回显平台串。 */
@@ -573,9 +566,10 @@ function localPeerMeta(p: any): string {
 }
 
 function openRenameLocalPeer(p: any) {
-  // 直接把对外 peerId 带进弹窗:本机实例不是 dlna/airplay/sendspin,拼不出前缀 id。
-  renameDeviceTarget.value = { ...p, peerId: p.peerId };
-  renameDeviceName.value = playerStore.getPeerName(p.peerId) || "";
+  // 本机实例不是 dlna/airplay/sendspin,拼不出前缀 id —— 直接把**偏好键**带进弹窗,
+  // 提交时原样使用(见 saveRenameDevice 的 peerId 分支)。
+  renameDeviceTarget.value = { ...p, isLocalPeer: true, peerId: localPeerPrefKey(p) };
+  renameDeviceName.value = playerStore.getPeerName(localPeerPrefKey(p)) || "";
   showRenameDeviceDialog.value = true;
 }
 
@@ -634,9 +628,15 @@ async function saveRenameDevice() {
   if (!renameDeviceTarget.value || saving.value) return;
   const isAirPlay = !!renameDeviceTarget.value.isAirPlay;
   const isSendspin = !!renameDeviceTarget.value.isSendspin;
-  const peerId = renameDeviceTarget.value.isSendspin
-    ? `sendspin:${renameDeviceTarget.value.id}`
-    : `${isAirPlay ? "airplay" : "dlna"}:${renameDeviceTarget.value.id}`;
+  // 本机实例(安卓 / Windows / 网页)在 openRenameLocalPeer 里已经带了**偏好键**,
+  // 原样使用即可 —— 绝不能落到下面的 dlna: 分支(那会拼出 "dlna:undefined",
+  // 写进偏好表等于凭空造了个不存在的键,表现为「改名保存了但界面毫无变化」)。
+  const target = renameDeviceTarget.value;
+  const peerId = target.isLocalPeer && target.peerId
+    ? target.peerId
+    : (isSendspin
+        ? `sendspin:${target.id}`
+        : `${isAirPlay ? "airplay" : "dlna"}:${target.id}`);
   saving.value = true;
   try {
     // 按用户级改名:只改我自己看到的显示名,他人/设备原始名不受影响。
@@ -937,9 +937,11 @@ watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
 onMounted(() => {
   loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); loadSendspinClients();
+  // 隐藏/改名的偏好是本机实例(「客户端」模块)开关回位与名字回显的依据,先加载。
   playerStore.loadHiddenPrefs(); playerStore.loadNamePrefs();
-  // 拉一次 peer 列表:客户端 / Web 播放器两模块的数据源(WS 快照到达前也有内容)。
-  playerStore.refreshPeers();
+  // 本机实例列表:与 DLNA 设备一样走页面本地加载(includeHidden=1,隐藏行不剪),
+  // 行因此恒在、开关可反复切换。
+  loadLocalPlayers();
 });
 </script>
 

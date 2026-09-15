@@ -21,8 +21,8 @@ import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
 import { v4 as uuidv4 } from "uuid";
-import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
-import { users, localQueues, songs, playerPrefs, playerNameOverrides } from "../../src/db/schema.js";
+import { db, initDatabase, encryptPassword, sqlite } from "../../src/db/index.js";
+import { users, localQueues, songs, playerPrefs, playerNameOverrides, playlists, playlistSongs, userFavoriteSongs, playHistory } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes } from "../../src/routes/api/index.js";
@@ -72,10 +72,17 @@ beforeAll(() => {
   initDatabase();
 });
 beforeEach(() => {
-  // 偏好表(隐藏 / 改名)有指向 users 的外键,必须先清,否则删 users 会撞外键约束。
+  // 清理顺序必须尊重外键:指向 songs 的表(playlist_songs / user_favorite_songs /
+  // play_history)与指向 playlists 的表要先删;vitest 配了 sequence.shuffle,
+  // 本文件内播种歌单的用例(/v1/play)可能跑到任何用例之前,漏删会让后续用例的
+  // beforeEach 撞 FOREIGN KEY 约束。
   db.delete(playerNameOverrides).run();
   db.delete(playerPrefs).run();
   db.delete(localQueues).run();
+  db.delete(playlistSongs).run();
+  db.delete(playlists).run();
+  db.delete(userFavoriteSongs).run();
+  db.delete(playHistory).run();
   db.delete(songs).run();
   db.delete(users).run();
 });
@@ -174,7 +181,7 @@ describe("peers 列表契约:同账号实例互相可见 + self 标记", () => {
     expect(localsB.find((p) => !p.self)!.peerId).not.toBe(localsA.find((p) => !p.self)!.peerId);
   });
 
-  // 「播放器」页要给客户端 / Web 播放器模块提供与 DLNA 同款的改名 + 隐藏。
+  // 「播放器」页要给客户端实例提供与 DLNA 同款的改名 + 隐藏。
   // 偏好(hidden / names)以**对外 id** 为键,故服务端必须「先打码、后套偏好」——
   // 早期实现是反的,导致针对本机实例的改名/隐藏静默失效(键对不上)。此用例锁死顺序。
   it("按用户级改名 / 隐藏对本机实例同样生效(偏好键 = 对外 id)", async () => {
@@ -183,17 +190,24 @@ describe("peers 列表契约:同账号实例互相可见 + self 标记", () => {
       await app.request("/rest/api/v1/peers/register", {
         method: "POST",
         headers: authHeaders(uid),
-        body: JSON.stringify({ clientId: cid, platform: "web", model: "Chrome · Windows" }),
+        body: JSON.stringify({ clientId: cid, platform: "windows", model: "ThinkPad · Windows" }),
       });
     }
     const other = await app.request("/rest/api/v1/peers", { headers: authHeaders(uid, "web-aaaaaa") });
-    const otherPeerId = ((await other.json()).peers as any[]).find((p) => !p.self).peerId as string;
+    const beforeList = (await other.json()).peers as any[];
+    const selfRow = beforeList.find((p) => p.self)!;
+    const otherPeerId = beforeList.find((p) => !p.self).peerId as string;
+    // 「自己那条」渲染用账号级规范形式 local:<uid>,但**偏好键必须是实例级**:
+    // 否则在手机上给「本机」改名,该账号的电脑上「本机」会跟着变。
+    expect(selfRow.peerId).toBe(`local:${uid}`);
+    const myInstanceKey = selfRow.instancePeerId as string;
+    expect(myInstanceKey).toMatch(new RegExp(`^local:${uid}:[0-9a-f]{12}$`));
 
-    // 1) 给「自己那条」改名:键就是规范形式 local:<uid>,服务端存与列表出口必须一致。
+    // 1) 给「自己那条」改名:按实例键存,服务端存与列表出口必须一致。
     await app.request("/rest/api/v1/player-prefs/names", {
       method: "PUT",
       headers: authHeaders(uid, "web-aaaaaa"),
-      body: JSON.stringify({ peerId: `local:${uid}`, name: "我的笔记本" }),
+      body: JSON.stringify({ peerId: myInstanceKey, name: "我的笔记本" }),
     });
     // 2) 隐藏「对方那个实例」:用它的对外实例键 id。
     await app.request("/rest/api/v1/player-prefs/hidden", {
@@ -210,9 +224,46 @@ describe("peers 列表契约:同账号实例互相可见 + self 标记", () => {
     // 隐藏生效:对方实例已从列表消失(仅剩自己那条)。
     expect(locals).toHaveLength(1);
     expect(locals[0].peerId).toBe(`local:${uid}`);
-    // 设备名片随本机实例一起下发 —— 「播放器」页据此把实例分进客户端 / Web 播放器模块。
-    expect(locals[0].platform).toBe("web");
-    expect(locals[0].model).toBe("Chrome · Windows");
+    // 设备名片随本机实例一起下发 —— 「播放器」页据此显示平台/机型。
+    expect(locals[0].platform).toBe("windows");
+    expect(locals[0].model).toBe("ThinkPad · Windows");
+
+    // 3) 管理页取数(?includeHidden=1):隐藏的行**不剪掉**,改打 hidden 标记。
+    //    「客户端 / Web 播放器」两模块的行必须恒在 —— 否则一拨隐藏开关,行就从列表消失,
+    //    开关失去落点,取消隐藏与管理都无从下手(强刷也救不回)。
+    const mgmt = await app.request("/rest/api/v1/peers?includeHidden=1", { headers: authHeaders(uid, "web-aaaaaa") });
+    const mgmtLocals = ((await mgmt.json()).peers as any[]).filter((p) => p.peerId.startsWith("local:"));
+    expect(mgmtLocals).toHaveLength(2);
+    const hiddenRow = mgmtLocals.find((p) => p.peerId === otherPeerId)!;
+    expect(hiddenRow.hidden).toBe(true);
+    // 未隐藏的那条不打 hidden(或为 false),避免管理页把开关全渲染成「已隐藏」。
+    expect(!!mgmtLocals.find((p) => p.peerId === `local:${uid}`)!.hidden).toBe(false);
+    // 改名也在这条路径上生效(管理页要能回显用户改过的名)。
+    expect(mgmtLocals.find((p) => p.peerId === `local:${uid}`)!.name).toBe("我的笔记本");
+  });
+
+  // 播放器统一化方案收敛:Web 播放器不再作为可被遥控端。对外的 peers 列表
+  // (含管理页 includeHidden 模式)一律隐藏**其它** web 本机实例;请求方自己的
+  // self 行保留(Web 前端靠它归一化本机队列)。
+  it("其它 web 实例从列表隐藏(含管理页),自己的 self 行保留", async () => {
+    const uid = seedUser();
+    for (const cid of ["web-cccccc", "web-dddddd", "app-eeeeee"]) {
+      await app.request("/rest/api/v1/peers/register", {
+        method: "POST",
+        headers: authHeaders(uid),
+        body: JSON.stringify({ clientId: cid, platform: cid.startsWith("web") ? "web" : "windows" }),
+      });
+    }
+    // 视角 = web-cccccc:看不到 web-dddddd,能看到 windows 实例和自己。
+    const res = await app.request("/rest/api/v1/peers", { headers: authHeaders(uid, "web-cccccc") });
+    const locals = ((await res.json()).peers as any[]).filter((p) => p.peerId.startsWith("local:"));
+    expect(locals).toHaveLength(2);
+    expect(locals.some((p) => p.self)).toBe(true);
+    expect(locals.every((p) => p.platform !== "web" || p.self)).toBe(true);
+    // 管理页同样隐藏(方案收敛后 web 行不需要任何管理入口)。
+    const mgmt = await app.request("/rest/api/v1/peers?includeHidden=1", { headers: authHeaders(uid, "web-cccccc") });
+    const mgmtLocals = ((await mgmt.json()).peers as any[]).filter((p) => p.peerId.startsWith("local:"));
+    expect(mgmtLocals).toHaveLength(2);
   });
 
   it("老客户端无 clientId → 注册旧格式后仍能看到 local:<uid>", async () => {
@@ -312,5 +363,76 @@ describe("队列操作契约:打码 id + 头 ⇒ 实例隔离", () => {
     const hit = rows.find((x) => (x.itemsJson || "").includes("z1"));
     expect(hit).toBeTruthy();
     expect(hit.peerId).toBe(`${pid}:web-bbbbbb`); // 落库到 B,而不是调用方 A
+  });
+});
+
+// ==================== POST /v1/play 的 body peerId 解析 ====================
+//
+// 2026-09-15 实测缺陷:调用方(Web / HA / 客户端)只看得到**对外形式**
+// `local:<userId>:<instanceKey>`,而 `/v1/play` 的 peerId 来自 **body**(不是路径参数),
+// 当时没走与 `decodePeerId` 同一套实例键反查 —— 掩码形式被当成**真实键直接落库**,
+// 给该实例凭空造出一条僵尸队列行;目标实例读的是自己那条真行,于是表现为
+// 「Web 端点歌单让这台客户端播 → 客户端毫无反应、队列像被吞了」(用户 2026-09-15 实测)。
+describe("POST /v1/play:body 里的打码实例键必须反查到真实行", () => {
+  const PL = "pl-body-peer-guard";
+
+  function seedContent() {
+    sqlite
+      .prepare(
+        "INSERT OR REPLACE INTO songs (id, title, artist, album_id, artist_id, track, disc_number, duration, path, suffix, type) " +
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run("bp-1", "契约曲", "测试歌手", null, null, null, null, 200, "l:src:/tmp/bp-1.mp3", "mp3", "local");
+    sqlite
+      .prepare("INSERT OR REPLACE INTO users (id, username, password, salt, subsonic_salt) VALUES (?,?,?,?,?)")
+      .run("u-body-peer", "u-body-peer", "x", "x", "x");
+    const now = new Date().toISOString();
+    sqlite
+      .prepare(
+        "INSERT OR REPLACE INTO playlists (id, name, owner_id, source_url, source_platform, song_count, created_at, updated_at) " +
+          "VALUES (?,?,?,?,?,?,?,?)",
+      )
+      .run(PL, "body peer 契约歌单", "u-body-peer", "https://test/bp", "qq", 1, now, now);
+    sqlite
+      .prepare("INSERT INTO playlist_songs (playlist_id, song_id, position, playable) VALUES (?,?,?,1)")
+      .run(PL, "bp-1", 0);
+  }
+
+  it("传打码实例键 → 落到目标实例真行,不产生僵尸行,回执不回显 clientId", async () => {
+    const uid = seedUser();
+    for (const cid of ["web-aaaaaa", "web-bbbbbb"]) {
+      await app.request("/rest/api/v1/peers/register", {
+        method: "POST",
+        headers: authHeaders(uid),
+        body: JSON.stringify({ clientId: cid }),
+      });
+    }
+    const list = (
+      await (await app.request("/rest/api/v1/peers", { headers: authHeaders(uid, "web-aaaaaa") })).json()
+    ).peers as any[];
+    // A 视角下 non-self 的本机行 = B,且是打码形式(调用方唯一看得到的形状)
+    const targetMasked = list
+      .filter((p) => p.peerId.startsWith("local:"))
+      .find((p) => !p.self)!.peerId;
+    expect(targetMasked).toMatch(new RegExp(`^local:${uid}:[0-9a-f]{12}$`));
+    seedContent();
+
+    const res = await app.request("/rest/api/v1/play", {
+      method: "POST",
+      headers: authHeaders(uid, "web-aaaaaa"),
+      body: JSON.stringify({ peerId: targetMasked, type: "playlist", id: PL }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // 回执必须是对外形式,且不得把 clientId 明文带出来
+    expect(body.peerId).toBe(targetMasked);
+    expect(JSON.stringify(body)).not.toContain("web-bbbbbb");
+
+    const rows = db.select().from(localQueues).where(eq(localQueues.userId, uid)).all() as any[];
+    const hit = rows.find((x) => (x.itemsJson || "").includes("bp-1"));
+    expect(hit, "队列必须落到目标实例的真实行").toBeTruthy();
+    expect(hit.peerId).toBe(`local:${uid}:web-bbbbbb`);
+    // 掩码形式**不得**被当作真实键落库(僵尸行)
+    expect(rows.some((x) => x.peerId === targetMasked)).toBe(false);
   });
 });

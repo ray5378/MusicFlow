@@ -79,7 +79,7 @@
               <div class="controls-peer-info">
                 <div class="controls-peer-name">
                   {{ playerStore.peerDisplayName(p) }}
-                  <span class="peer-kind-tag" :class="{ 'peer-self-tag': playerStore.isSelfPeer(p) }">{{ playerStore.isSelfPeer(p) ? t('layout.localPeer') : (p.kind === 'local' ? localPlatformTag(p) : (p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA')) }}</span>
+                  <span class="peer-kind-tag" :class="{ 'peer-self-tag': playerStore.isSelfPeer(p) }">{{ peerKindLabel(p) }}</span>
                   <span v-if="!p.available" class="controls-peer-offline">{{ t('layout.offline') }}</span>
                 </div>
                 <div class="controls-peer-meta">
@@ -279,7 +279,7 @@
                 <div class="psi-info">
                   <div class="psi-name">
                     {{ playerStore.peerDisplayName(p) }}
-                    <span class="peer-kind-tag" :class="{ 'peer-self-tag': playerStore.isSelfPeer(p) }">{{ playerStore.isSelfPeer(p) ? t('layout.localPeer') : (p.kind === 'local' ? localPlatformTag(p) : (p.kind === 'airplay' ? 'AirPlay' : p.kind === 'group' ? t('layout.groupPeer') : p.kind === 'sendspin' ? 'Sendspin' : 'DLNA')) }}</span>
+                    <span class="peer-kind-tag" :class="{ 'peer-self-tag': playerStore.isSelfPeer(p) }">{{ peerKindLabel(p) }}</span>
                     <span v-if="!p.available" class="psi-offline">{{ t('layout.offline') }}</span>
                   </div>
                   <div class="psi-meta">
@@ -496,6 +496,7 @@ import { ElMessage } from "element-plus";
 import api from "@/api";
 import { PERM } from "@/utils/perms";
 import { coverUrl as coverArtUrl } from "@/utils/cover";
+import { peerKindLabel as peerKindLabelOf } from "@/utils/peerLabel";
 
 const { t } = useI18n();
 const route = useRoute();
@@ -793,14 +794,12 @@ function peerPlayingTitle(p: any): string {
 
 // 别的本机实例(不是自己那条)的类别标签:按客户端上报的 platform 显示。
 // 网页端拿不到电脑名,platform 恒为 web → 「Web」;安卓/Windows 客户端各自上报。
-function localPlatformTag(p: any): string {
-  const pf = (p?.platform || "").toLowerCase();
-  if (pf === "web") return "Web";
-  if (pf === "android") return "Android";
-  if (pf === "windows") return "Windows";
-  if (pf === "ios") return "iOS";
-  if (pf === "macos") return "macOS";
-  return t("layout.localPeer");
+// 播放端类别标签:唯一口径见 utils/peerLabel(与 Flows 目标选择器共用)。
+// 关键:「本机」只属于**与自己同一个 peerId**那台;别的实例显示它所属的模块
+// (客户端 / 本机)。历史 bug 是此处兜底返回「本机」,而调用它的条件恰恰
+// 是「不是自己那条」,于是另一台客户端被谎报成「本机」。
+function peerKindLabel(p: any): string {
+  return peerKindLabelOf(p, t, playerStore.localPeerId);
 }
 
 async function scanDlnaDevices() {

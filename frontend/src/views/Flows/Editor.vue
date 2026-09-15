@@ -84,7 +84,7 @@
                   @change="(v: any) => setNodeTarget(node, p.peerId, !!v)"
                 />
                 <MfIcon :name="p.kind === 'group' ? 'Box' : 'Monitor'" class="target-icon" />
-                <span class="target-name">{{ p.kind === 'local' ? t('flows.localPeer') : p.name }}</span>
+                <span class="target-name">{{ p.kind === 'local' ? peerKindLabelOf(p, t) : p.name }}</span>
                 <span class="target-id">{{ p.peerId }}</span>
               </label>
               <label v-if="castTargets.length > 1" class="target-chip target-chip--all" :class="{ checked: nodeAllChecked(node) }">
@@ -215,6 +215,7 @@ import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
+import { peerKindLabel as peerKindLabelOf } from "@/utils/peerLabel";
 import MfIcon from "@/components/MfIcon.vue";
 
 const route = useRoute();

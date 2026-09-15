@@ -4,6 +4,7 @@ import { Howl } from "howler";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
+import { useFavoritesStore } from "@/stores/favorites";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { coverUrl } from "@/utils/cover";
 import { waitAsyncTask } from "@/utils/asyncTask";
@@ -229,7 +230,10 @@ export const usePlayerStore = defineStore("player", () => {
   const localPeerId = computed(() => `local:${useAuthStore().userId}`);
   const isRemotePeer = computed(() => {
     const pid = currentPeerId.value;
-    return pid.startsWith("dlna:") || pid.startsWith("group:") || pid.startsWith("airplay:") || pid.startsWith("sendspin:");
+    if (pid.startsWith("dlna:") || pid.startsWith("group:") || pid.startsWith("airplay:") || pid.startsWith("sendspin:")) return true;
+    // 另一台本机实例(安卓 / Windows / 别的浏览器标签页)也是「远端」:它是独立播放端,
+    // 本端只能遥控它(REST 指令下发),不能按本机处理 —— 否则会去驱动自己的 Howl。
+    return pid.startsWith("local:") && pid !== localPeerId.value;
   });
 
   // ==================== Remote (DLNA cast + player group) state machine ====================
@@ -240,7 +244,7 @@ export const usePlayerStore = defineStore("player", () => {
   // per peer; the frontend only mirrors state via per-peer polling + REST.
   interface RemoteState {
     peerId: string; // "dlna:<deviceId>" | "group:<groupId>" | "airplay:<deviceId>" | "sendspin:<clientId>"
-    kind: "dlna" | "group" | "airplay" | "sendspin";
+    kind: "dlna" | "group" | "airplay" | "sendspin" | "local";
     name: string;
     queue: Song[];
     index: number;
@@ -286,7 +290,10 @@ export const usePlayerStore = defineStore("player", () => {
   function ensureRemoteState(peerId: string, name: string = ""): RemoteState {
     let st = remoteStates.get(peerId);
     if (!st) {
-      const kind: RemoteState["kind"] = peerId.startsWith("group:") ? "group"
+      // local:<...> —— 另一台本机实例(安卓 / Windows 客户端 / 别的浏览器标签页)。
+      // 它同样是一个**独立播放端**:本端用遥控方式驱动它(REST 指令),绝不碰本机 Howl。
+      const kind: RemoteState["kind"] = peerId.startsWith("local:") ? "local"
+        : peerId.startsWith("group:") ? "group"
         : peerId.startsWith("airplay:") ? "airplay"
         : peerId.startsWith("sendspin:") ? "sendspin" : "dlna";
       const raw: RemoteState = {
@@ -346,7 +353,8 @@ export const usePlayerStore = defineStore("player", () => {
   });
   const castDeviceName = computed(() => {
     const st = activeRemote.value;
-    return st && st.kind === "dlna" ? st.name : "";
+    // local(另一台本机实例)与 dlna 都有可显示的设备名;airplay/group/sendspin 走别的兜底。
+    return st && (st.kind === "dlna" || st.kind === "local") ? st.name : "";
   });
 
   // 预探测状态(当前活跃 peer)。投屏远端读其 RemoteState,本机播放读 localPreProbe
@@ -368,7 +376,10 @@ export const usePlayerStore = defineStore("player", () => {
   const currentPeerName = computed(() => {
     const p = currentPeer.value;
     if (!p) return isRemotePeer.value ? castDeviceName.value : gt("player.localPeer");
-    if (p.kind === "local") return gt("player.localPeer");
+    // 本机实例统一走 peerDisplayName:只有 peerId 与本端一致那台算「本机」,
+    // 别的实例显示自己的名字(改名 / 设备名片 / 上报名)。此前这里一律返回「本机」,
+    // 于是在 Web 上选中另一台客户端后,控制栏仍显示「本机」——设备身份被谎报。
+    if (p.kind === "local") return peerDisplayName(p);
     const suffix = p.kind === "airplay" ? " AirPlay" : p.kind === "group" ? gt("player.groupSuffix") : p.kind === "sendspin" ? " Sendspin" : " DLNA";
     return `${p.name}${suffix}`;
   });
@@ -1507,7 +1518,9 @@ export const usePlayerStore = defineStore("player", () => {
 
   /** WS 事件里的 peer_id → 前端内部 id(「自己那条」换算回 local:<userId>)。 */
   function normPeerId(id: string): string {
-    return id && ownServerPeerId && id === ownServerPeerId ? localPeerId.value : id;
+    if (!id) return id;
+    if (ownServerPeerId && id === ownServerPeerId) return localPeerId.value;
+    return id;
   }
 
   function normalizeOwnLocalPeer(list: any[]): any[] {
@@ -1554,16 +1567,19 @@ export const usePlayerStore = defineStore("player", () => {
     return [list[i], ...list.slice(0, i), ...list.slice(i + 1)];
   });
 
-  /** 切换器一行的显示名:
+  /** 切换器一行的显示名(优先级:**用户改名 > 设备名片 > 上报名 > 兜底**):
    *  - 非本机 peer → 设备名(name,已套用用户改名);
-   *  - 自己的本机实例 → 用户改的名,没改过则「本机」;
-   *  - 别的本机实例 → 设备名片(model,如「Xiaomi 14」/「Chrome · Windows」),
-   *    取不到再退回用户改的名 / 上报名 / 「本机播放」兜底。 */
+   *  - 自己的本机实例(peerId 与本端一致)→ 用户改的名,没改过则「本机」;
+   *  - 别的本机实例 → 同上,改过名就用改的名(名片退居副标题,不覆盖用户意图)。
+   *  取名时优先按 instancePeerId 查:本机实例的改名/隐藏一律按「实例」存,
+   *  而自己那条的 peerId 是账号级的 local:<uid>(专用于渲染与「自己那条」判定)。
+   *  ⚠️ 末尾兜底绝不能是「本机」:「本机」是**只有 peerId 与本端一致时**才能用的
+   *  身份词,别条实例兜底成它等于谎报设备;退回「客户端」由类别标签再补模块名。 */
   function peerDisplayName(p: any): string {
     if (p?.kind !== "local") return p?.name || "";
-    const renamed = nameOverrides.value[p.peerId] || "";
+    const renamed = (p?.instancePeerId ? nameOverrides.value[p.instancePeerId] : "") || nameOverrides.value[p.peerId] || "";
     if (p.peerId === localPeerId.value) return renamed || gt("player.localPeer");
-    return p?.model || renamed || p?.name || gt("player.localPeer");
+    return renamed || p?.model || p?.name || gt("layout.clientPeer");
   }
 
   /** 该行是否是「调用方自己那条」本机实例(用于渲染「本机」角标)。 */
@@ -1618,8 +1634,8 @@ export const usePlayerStore = defineStore("player", () => {
     const authStore = useAuthStore();
     if (!authStore.userId) return;
     try {
-      // 连同「设备名片」一起上报:服务端据此把本机实例分进「客户端」/「Web 播放器」
-      // 模块,并按视角显示名字(网页端只能给「浏览器 · 系统」,见 utils/deviceCard)。
+      // 连同「设备名片」一起上报:服务端据此把本机实例识别为「客户端」类别
+      // (网页端只能给「浏览器 · 系统」,见 utils/deviceCard)。
       const card = getDeviceCard();
       await api.post("/rest/api/v1/peers/register", {
         name: authStore.username || gt("player.localPeer"),
@@ -1688,9 +1704,12 @@ export const usePlayerStore = defineStore("player", () => {
   // selected peer's state machine.
   async function switchPeer(peerId: string): Promise<void> {
     if (peerId === currentPeerId.value) return;
-    if (peerId.startsWith("dlna:") || peerId.startsWith("group:") || peerId.startsWith("airplay:") || peerId.startsWith("sendspin:")) {
+    // 「另一台本机实例」(安卓 / Windows / 别的浏览器标签页)与 DLNA 等一样是独立播放端,
+    // 走同一条遥控路径;只有「自己那条」才留在本机分支。
+    const isOtherLocal = peerId.startsWith("local:") && peerId !== localPeerId.value;
+    if (peerId.startsWith("dlna:") || peerId.startsWith("group:") || peerId.startsWith("airplay:") || peerId.startsWith("sendspin:") || isOtherLocal) {
       // Switching UI to control a remote peer (DLNA device, player group,
-      // AirPlay device or Sendspin client). If we don't yet have a RemoteState for it (e.g. it's a
+      // AirPlay device, Sendspin client or another local instance). If we don't yet have a RemoteState for it (e.g. it's a
       // device HA started playing on, or a group that was playing), create one
       // and pull its queue so the UI mirrors what's playing, and start polling
       // it. 本机 Howl and all other peers are NOT touched.
@@ -1700,7 +1719,8 @@ export const usePlayerStore = defineStore("player", () => {
           : peerId.startsWith("airplay:") ? gt("player.device.airplay") : gt("player.device.player");
         try {
           const p = peers.value.find(x => x.peerId === peerId);
-          if (p?.name) name = p.name;
+          // 统一取显示名:本机实例(改名 > 设备名片 > 上报名)/ 其它设备(name)。
+          if (p) name = peerDisplayName(p);
         } catch {}
         st = ensureRemoteState(peerId, name);
         await syncCastQueueFromBackend(st);
@@ -1797,9 +1817,9 @@ export const usePlayerStore = defineStore("player", () => {
           const p = msg.peer;
           if (!p) break;
           if (p.kind === "local") {
-            // 本机实例(客户端 / Web 播放器):**不删行**,只标离线。
+            // 本机实例(客户端 / 网页):**不删行**,只标离线。
             // 切换器里「自己那条」必须恒在(删了播放器 UI 会失去落点),而
-            // 「播放器」页的客户端 / Web 播放器模块按 available 过滤,离线实例
+            // 「播放器」页的「客户端」模块按 available 过滤,离线实例
             // 因此自动消失;重新心跳/注册时由 peer_available 把状态置回。
             const pid = normPeerId(p.peerId || "");
             const i = peers.value.findIndex(x => x.peerId === pid);
@@ -1828,7 +1848,9 @@ export const usePlayerStore = defineStore("player", () => {
           const pst = remoteStates.get(pid);
           if (pst) pst.preProbe = msg.queue?.preProbe ?? null;
           // 本机 peer:状态位存 localPreProbe(本机链路也吃服务端预探测)。
-          if (pid === localPeerId.value) localPreProbe.value = msg.queue?.preProbe ?? null;
+          if (pid === localPeerId.value) {
+            localPreProbe.value = msg.queue?.preProbe ?? null;
+          }
           break;
         }
         case "peer_queue_cleared": {
@@ -1856,6 +1878,18 @@ export const usePlayerStore = defineStore("player", () => {
           groupVersion.value++;
           refreshPeers();
           break;
+        // 收藏(我喜欢)是 per-user 状态:同账号的 Windows / 安卓客户端、
+        // 其它标签页点了红心,服务端用 sendToUser 定向推到这里,本端 Set 跟着变,
+        // 红心实时亮/灭,无需轮询 getStarred2。
+        case "song_starred": {
+          useFavoritesStore().applyExternalStarred(
+            Array.isArray(msg.songIds) ? msg.songIds : [],
+            !!msg.starred,
+            Array.isArray(msg.albumIds) ? msg.albumIds : [],
+            Array.isArray(msg.artistIds) ? msg.artistIds : [],
+          );
+          break;
+        }
       }
     };
     peerWs.onclose = () => {

@@ -30,6 +30,7 @@ import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
 import { decideTranscode, spawnTranscoder, acquireTranscodeSlot, releaseTranscodeSlot, TRANSCODE_MIME } from "../../services/transcode.js";
 import { createLogger } from "../../utils/logger.js";
+import { sendToUser } from "../../services/ws/index.js";
 
 const log = createLogger("REST-STREAM");
 
@@ -948,6 +949,34 @@ function parseStarIds(raw: string | undefined): string[] {
   return String(raw).split(",").filter(Boolean);
 }
 
+/**
+ * 收藏变动 → 推给**同一用户**的所有 WS 连接(`song_starred`)。
+ *
+ * 为什么需要:收藏是用户私有状态,但各家客户端只在本地做乐观更新 —— 在 Web 端点红心,
+ * 被遥控的 Windows/安卓客户端那颗红心不会动(它的 `Song.starred` 是入队时的快照,
+ * 队列项本身不带 starred)。用户 2026-09-15 实测反馈即此。
+ *
+ * 只推给同账号连接:收藏是 per-user 的,推给别人既泄漏又不正确。
+ */
+function notifyStarredChanged(
+  userId: string,
+  songIds: string[],
+  starred: boolean,
+  albumIds: string[] = [],
+  artistIds: string[] = [],
+): void {
+  if (songIds.length === 0 && albumIds.length === 0 && artistIds.length === 0) return;
+  try {
+    sendToUser(userId, {
+      type: "song_starred",
+      songIds,
+      starred,
+      albumIds,
+      artistIds,
+    });
+  } catch { /* WS 不可用时静默:客户端下次全量拉取自会一致 */ }
+}
+
 restRoutes.get("/star", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json(fail(40, "Unauthorized"));
@@ -967,6 +996,7 @@ restRoutes.get("/star", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
     const existing = db.select().from(userFavoriteArtists).where(and(eq(userFavoriteArtists.userId, user.id), eq(userFavoriteArtists.artistId, arid))).get();
     if (!existing) db.insert(userFavoriteArtists).values({ userId: user.id, artistId: arid }).run();
   }
+  notifyStarredChanged(user.id, ids, true, albumIds, artistIds);
   return c.json(ok());
 });
 
@@ -980,6 +1010,7 @@ restRoutes.get("/unstar", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   for (const id of ids) db.delete(userFavoriteSongs).where(and(eq(userFavoriteSongs.userId, user.id), eq(userFavoriteSongs.songId, id))).run();
   for (const aid of albumIds) db.delete(userFavoriteAlbums).where(and(eq(userFavoriteAlbums.userId, user.id), eq(userFavoriteAlbums.albumId, aid))).run();
   for (const arid of artistIds) db.delete(userFavoriteArtists).where(and(eq(userFavoriteArtists.userId, user.id), eq(userFavoriteArtists.artistId, arid))).run();
+  notifyStarredChanged(user.id, ids, false, albumIds, artistIds);
   return c.json(ok());
 });
 
