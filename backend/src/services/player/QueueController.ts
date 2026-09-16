@@ -13,7 +13,7 @@ import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
-import { getCachedPlayability, demoteStalledSong } from "../source/online/streamFallback.js";
+import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
 import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from "../group/protocolPlayer.js";
 import { getGroupManager } from "../group/index.js";
@@ -309,10 +309,6 @@ export class QueueController extends EventEmitter {
       const stallCount = prev && prev.songId === curSongId ? prev.count + 1 : 1;
       this.stallCounters.set(id, { songId: curSongId, count: stallCount });
       if (stallCount >= 2 && curSongId !== undefined) {
-        // 预探测判断缺口补齐:同一首真实连续卡死第 2 次 → 落实进共享可播缓存
-        // (删正记忆 + 短 TTL 负记忆),让 judgePlayable / 预探测之后的跳过逻辑
-        // 与「同曲卡死」证据一致,不再把死源当「已确认可播」反复重投。
-        demoteStalledSong(curSongId); // 内部只对在线(pluginEntry)行降级
         const q = this.queues.get(id);
         if (q) {
           const nextIdx = this.pickNext(q, false);
