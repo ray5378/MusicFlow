@@ -654,15 +654,22 @@ class PeerManager extends EventEmitter {
     const parsed = PeerManager.parse(peerId);
     if (!parsed || parsed.kind !== "local") return undefined;
     const prev = this.localReports.get(peerId);
+    const state = patch.state ?? prev?.state ?? "STOPPED";
     const report: LocalPlaybackReport = {
-      state: patch.state ?? prev?.state ?? "STOPPED",
+      state,
       position: typeof patch.position === "number" && patch.position >= 0
         ? patch.position : (prev?.position ?? 0),
       duration: typeof patch.duration === "number" && patch.duration >= 0
         ? patch.duration : (prev?.duration ?? 0),
       volume: typeof patch.volume === "number"
         ? Math.max(0, Math.min(100, patch.volume)) : prev?.volume,
-      songId: patch.songId ?? prev?.songId,
+      // STOPPED = 没有当前曲,一律清空 songId。
+      //
+      // 这里是**字段级合并**(省略的字段沿用上次),而客户端停止时根本不发 songId
+      // 字段(Flutter: `if (songId != null && songId.isNotEmpty) 'songId': songId`)。
+      // 沿用旧值 = 已停止的端在 GET /status 里永远挂着上一首 —— 对端据此刷新
+      // 封面/歌词,表现为「这台还在播」,且客户端每 4s 续报、TTL 永不失效。
+      songId: state === "STOPPED" ? undefined : (patch.songId ?? prev?.songId),
       reportedAt: Date.now(),
     };
     this.localReports.set(peerId, report);
@@ -675,6 +682,17 @@ class PeerManager extends EventEmitter {
     if (!r) return undefined;
     if (Date.now() - r.reportedAt > PeerManager.LOCAL_REPORT_TTL_MS) return undefined;
     return r;
+  }
+
+  /**
+   * 丢弃某端的本机状态上报(流转「搬走」/ 回收站「销毁」的源端收尾)。
+   *
+   * 清掉后 GET /status 只回队列快照(已空),不再叠加 state / position / songId
+   * —— 否则队列虽然空了,该端仍被报成「在播某一首」。仅靠 30s TTL 是不够的:
+   * 客户端每 4s 续报一次,TTL 永远不会到期。
+   */
+  clearLocalStatusReport(peerId: string): void {
+    this.localReports.delete(peerId);
   }
 
   // ==================== Local pre-probe (本机链路的服务端预探测)====================

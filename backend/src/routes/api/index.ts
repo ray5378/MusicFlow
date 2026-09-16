@@ -3562,6 +3562,46 @@ apiRoutes.post("/v1/peers/:peerId/stop", async (c) => {
   return c.json({ success: true });
 });
 
+// 彻底重置一个播放端的播放状态(流转播放「搬走」/ 回收站「销毁」的源端收尾)。
+//
+// 与 DELETE /queue 的区别:那条只清队列实体,**运行态各留各的** ——
+//   - cast 端:设备传输本身、设备端媒体缓存、洗牌序列、定时暂停、预探测;
+//   - local 端:本机实例的 /local-status 上报(state / position / volume / songId)。
+// 于是「队列已空」却在 GET /status 里仍被报成在播 —— 这正是流转后源端残留的来源。
+// 本端点一次做完「停止 + 清空 + 清运行态」,语义 = 「这个端现在什么都没在播」。
+//
+// **刻意保留**:peer 注册(列表里还在,不会消失)、playMode(用户设定,
+// 不该被一次搬移或销毁带走)。
+apiRoutes.post("/v1/peers/:peerId/reset", async (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+
+  if (isCastPeer(parsed)) {
+    // 先停传输(与 /stop 同款分支),再 clear —— clear 内部还会清 items / 游标 /
+    // isActive / ended / 洗牌序列 / 设备端 currentMedia / 预探测 / 定时暂停,
+    // 并广播 media_changed 让所有客户端立刻清掉封面与歌词,不必等下一轮轮询。
+    try {
+      if (parsed.kind === "dlna") {
+        getQueueController().stopPlayback(parsed.id);
+        await stopDevice(parsed.id);
+      } else {
+        getQueueController().stopPlayback(parsed.id);
+        await getQueueController().transport(parsed.id, "stop");
+      }
+      getQueueController().clear(parsed.id);
+    } catch (e: any) {
+      return c.json({ error: e.message }, 500);
+    }
+    return c.json({ success: true });
+  }
+
+  // local:清队列元数据 + 丢弃该端的状态上报(否则 /status 仍叠加旧 state / songId)。
+  pm.localClear(peerId);
+  pm.clearLocalStatusReport(peerId);
+  return c.json({ success: true });
+});
+
 apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
