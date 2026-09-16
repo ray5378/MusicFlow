@@ -6,7 +6,7 @@
 //   → POST /reset → 断言队列空 / 运行态清 / playMode 保留 / peer 保留 / 幂等 / 非法 id 400
 //
 // 用法(服务端已用隔离 DATA_DIR 起在 46400):
-//   node tool/e2e_peer_reset.mjs
+//   node scripts/e2e_peer_reset.mjs
 const BASE = process.env.MF_BASE || "http://127.0.0.1:46400";
 const CLIENT_A = "e2e-src-aaaa";
 const CLIENT_B = "e2e-dst-bbbb";
