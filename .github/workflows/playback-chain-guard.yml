@@ -151,7 +151,7 @@ jobs:
           if [ "$miss" -eq 0 ]; then echo "OK: 客户端链路契约在位"; fi
           exit "$miss"
 
-      # Web 前端「客户端实例状态自动跟上 + 离线自动踢出选择播放器」(v3.0.19):
+      # Web 前端「客户端实例状态自动跟上 + 离线自动踢出流转播放」(v3.0.19):
       # 客户端实例**没有任何携带当前曲的状态推送** —— 定时推的 peer_queue_changed 是
       # 摘要态(大队列 items 置空),而 player_state_changed / media_changed 是设备型事件
       # (canSeeDevice 只放行 dlna/airplay/sendspin)。所以只能靠定时刷新拉取全量

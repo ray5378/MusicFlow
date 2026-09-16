@@ -663,7 +663,7 @@ async function removeDevice(dev: any) {
   }
 }
 
-// 禁用/启用设备:禁用后设备从所有选择播放器的地方消失(切换器/HA 卡片/投屏),
+// 禁用/启用设备:禁用后设备从所有流转播放的地方消失(切换器/HA 卡片/投屏),
 // 后端会停止播放、清队列、移出群组并广播 peer_unavailable。
 async function toggleDisabled(dev: any, disabled: boolean) {
   try {

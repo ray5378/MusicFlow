@@ -1,6 +1,6 @@
 // DLNA 设备禁用(播放器页开关)端到端测试:
 //   - setDeviceDisabled 持久化 disabled(DB) + 同步内存缓存 + isDeviceDisabled 查询
-//   - reconcileDlnaPeers 跳过禁用设备(不在任何选择播放器的地方出现),启用后重新注册
+//   - reconcileDlnaPeers 跳过禁用设备(不在任何流转播放的入口出现),启用后重新注册
 //   - castToDevice 拒绝禁用设备(防绕过:不仅 UI 不可见,直接调 API 也拒绝)
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
@@ -59,7 +59,7 @@ describe("DLNA 设备禁用", () => {
     pm.reconcileDlnaPeers();
     expect(pm.list().some(p => p.peerId === `dlna:${TEST_DEV}`)).toBe(false);
 
-    // 启用 → 重新注册,出现在选择播放器的列表里
+    // 启用 → 重新注册,出现在流转播放的列表里
     setDeviceDisabled(TEST_DEV, false);
     pm.reconcileDlnaPeers();
     expect(pm.list().some(p => p.peerId === `dlna:${TEST_DEV}`)).toBe(true);

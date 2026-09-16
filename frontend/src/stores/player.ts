@@ -1573,7 +1573,7 @@ export const usePlayerStore = defineStore("player", () => {
   //
   // 为什么 Web 必须自己轮询客户端(而不是等推送):
   //   1) WS 推的 `peer_queue_changed` 是**摘要态** —— 大队列(>200)items 被置空
-  //      (见 services/ws 的 summarizeQueue),而选择播放器的歌名取自
+  //      (见 services/ws 的 summarizeQueue),而流转播放的歌名取自
   //      `queue.items[currentIndex].title` → 那行永远没有歌名;
   //   2) `player_state_changed` / `media_changed` 是**设备型**事件(canSeeDevice 只放行
   //      dlna/airplay/sendspin),客户端实例根本没有这类推送。
@@ -1638,7 +1638,7 @@ export const usePlayerStore = defineStore("player", () => {
   function stopLocalPeersPoll(): void {
     if (localPeersTimer) { clearInterval(localPeersTimer); localPeersTimer = null; }
   }
-  /** 打开「选择播放器」时立刻刷一次(不等下一个 tick)。 */
+  /** 打开「流转播放」时立刻刷一次(不等下一个 tick)。 */
   async function refreshPeersNow(): Promise<void> {
     if (localPeersRefreshing) return;
     localPeersRefreshing = true;

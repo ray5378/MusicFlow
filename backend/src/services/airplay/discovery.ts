@@ -18,7 +18,7 @@ export interface AirPlayDevice {
   id: string;          // stable id (service-name token before `@`, else fqdn)
   name: string;        // friendly name from mDNS (@ 之后部分,剥离 ID 前缀)
   alias?: string;      // 用户自定义显示名(持久化于 airplay_devices.alias),空则用 name
-  disabled?: boolean;  // 用户手动禁用(持久化于 airplay_devices.disabled):不出现在任何选择播放器的地方
+  disabled?: boolean;  // 用户手动禁用(持久化于 airplay_devices.disabled):不出现在任何流转播放的入口
   host: string;        // routable host/IP
   port: number;        // RTSP port (4515 on LinkPlay devices, 5000 classic)
   pk?: string;         // TXT pk — device RSA public key (base64)

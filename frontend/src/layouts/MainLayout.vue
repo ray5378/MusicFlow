@@ -64,9 +64,9 @@
         <span class="logo-text">{{ t('layout.playControls') }}</span>
       </div>
       <div class="controls-scroll">
-        <!-- 选择播放器 -->
+        <!-- 流转播放 -->
         <div class="csec">
-          <div class="ctitle">{{ t('layout.selectPlayer') }}</div>
+          <div class="ctitle">{{ t('layout.transferPlayback') }}</div>
           <div class="controls-peer-list">
             <div
               v-for="p in playerStore.peersForSwitcher"
@@ -260,13 +260,13 @@
           popper-class="peer-switcher-popover"
         >
 <template #reference>
-              <el-button class="peer-switch-btn" size="small" :data-tip="t('layout.switchPlayer')">
+              <el-button class="peer-switch-btn" size="small" :data-tip="t('layout.transferPlaybackBtn')">
                 <MfIcon name="Speaker" class="peer-switch-icon"  />
                 <span class="peer-switch-label">{{ playerStore.currentPeerName }}</span>
               </el-button>
             </template>
           <div class="peer-switcher">
-            <div class="peer-switcher-title">{{ t('layout.selectPlayer') }}</div>
+            <div class="peer-switcher-title">{{ t('layout.transferPlayback') }}</div>
             <div class="peer-switcher-list">
               <div
                 v-for="p in playerStore.peersForSwitcher"
@@ -302,7 +302,7 @@
                 <MfIcon name="RefreshCw" />{{ t('layout.rescanPlayer') }}
               </el-button>
             </div>
-            <div class="peer-switcher-tip">{{ t('layout.switchPlayerTip') }}</div>
+            <div class="peer-switcher-tip">{{ t('layout.transferPlaybackTip') }}</div>
           </div>
         </el-popover>
         <!-- 添加到歌单 -->
@@ -888,7 +888,7 @@ watch(() => playerStore.showPlaylist, (open) => {
   if (open) void scrollQueueToCurrent({ force: true });
 });
 
-// 「选择播放器」打开时立刻刷一次 peers。
+// 「流转播放」打开时立刻刷一次 peers。
 // 客户端实例(安卓 / Windows)的当前曲在 WS 推送里是**摘要态**(大队列 items 置空)
 // 拿不到,只有全量刷新才有;轮询间隔内打开弹窗时先补这一下,避免看到过期状态。
 // 只有「打开」才拉,关闭不拉;失败静默(store 内保持上一次列表)。
@@ -1175,7 +1175,7 @@ watch(controlsDrawerOpen, (open) => {
   }
   .player-title-empty { color: var(--fnos-text-muted); }
 
-  /* 较窄的桌面宽度下，切换播放器按钮收起为纯图标，避免与下一首重叠 */
+  /* 较窄的桌面宽度下，流转播放按钮收起为纯图标，避免与下一首重叠 */
   @media (max-width: 1000px) {
     .peer-switch-btn {
       max-width: 38px; padding: 0; justify-content: center;

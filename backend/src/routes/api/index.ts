@@ -2348,7 +2348,7 @@ apiRoutes.delete("/v1/dlna/devices/:deviceId", permMiddleware(PERM.RENDERER_MANA
   return c.json({ success: true });
 });
 
-// 禁用/启用 DLNA 设备。禁用后:从所有选择播放器的地方消失(peer 移除 + WS 不推送)、
+// 禁用/启用 DLNA 设备。禁用后:从所有流转播放的入口消失(peer 移除 + WS 不推送)、
 // 停止播放并清空队列、从所有播放器群组移除、不可投屏(castToDevice 校验);启用则恢复。
 // 管理播放器能力:renderer.manage。
 apiRoutes.put("/v1/dlna/devices/:deviceId/disabled", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
@@ -2663,7 +2663,7 @@ apiRoutes.delete("/v1/airplay/devices/:deviceId", permMiddleware(PERM.RENDERER_M
   return c.json({ success: true });
 });
 
-// 禁用/启用 AirPlay 设备。禁用后:从所有选择播放器的地方消失(peer 移除)、
+// 禁用/启用 AirPlay 设备。禁用后:从所有流转播放的入口消失(peer 移除)、
 // 停止播放并清空队列、不可投屏;启用则恢复。
 // 管理播放器能力:renderer.manage。
 apiRoutes.put("/v1/airplay/devices/:deviceId/disabled", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
