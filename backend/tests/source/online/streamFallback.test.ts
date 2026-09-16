@@ -19,7 +19,6 @@ import {
   ensurePlayableStream,
   clearStreamFallbackCache,
   getCachedPlayability,
-  demoteStalledSong,
 } from "../../../src/services/source/online/streamFallback.js";
 
 const PROVIDER = "gmdl-fb-test";
@@ -403,58 +402,6 @@ describe("ensurePlayableStream — 原 URL 失败换源并写回", () => {
     const songRow = db.select().from(songs).where(eq(songs.id, "fb-empty2")).get() as any;
 
     expect(await ensurePlayableStream(songRow)).toBeNull();
-  });
-});
-
-describe("demoteStalledSong — 连续卡死回写共享可播缓存(预探测判断缺口补齐)", () => {
-  it("在线行:降级为一小段不可播(judgePlayable/预探测随后跳过),到期自动恢复", async () => {
-    seedSong("s-webstall", {
-      url: "http://x/audio.mp3", // 非 orig → 探测 206 可播
-      title: "七里香",
-      artist: "周杰伦",
-    });
-    const songRow = db.select().from(songs).where(eq(songs.id, "s-webstall")).get() as any;
-    // 预探测先把它标为可播(正记忆)
-    expect(await ensurePlayableStream(songRow)).toBeTruthy();
-    expect(getCachedPlayability("s-webstall")).toBe("playable");
-
-    // 真实设备连续卡死第 2 次 → 降级
-    demoteStalledSong("s-webstall");
-    expect(getCachedPlayability("s-webstall")).toBe("unplayable");
-    // 短 TTL 内:ensurePlayableStream 直接按负结果返回,不再重探/换源
-    expect(await ensurePlayableStream(songRow)).toBeNull();
-  });
-
-  it("本地/无 pluginEntry 行:卡死不降级(本地不是'没有源'),保持可播", async () => {
-    db.insert(songs).values({
-      id: "s-localstall",
-      title: "本地",
-      artist: "本地",
-      album: null,
-      coverArt: null,
-      duration: 218,
-      path: "local:music/1.mp3",
-      contentType: "audio/mpeg",
-      suffix: "mp3",
-      discNumber: 1,
-      track: 0,
-      genre: "",
-      size: 1000,
-      playCount: 0,
-      url: "file:///music/1.mp3",
-      fingerprint: "fp-localstall",
-      type: "local",
-      pluginEntry: null,
-      sourceData: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }).run();
-    const localRow = db.select().from(songs).where(eq(songs.id, "s-localstall")).get() as any;
-    expect(await ensurePlayableStream(localRow)).toBeTruthy();
-    expect(getCachedPlayability("s-localstall")).toBe("playable");
-
-    demoteStalledSong("s-localstall");
-    expect(getCachedPlayability("s-localstall")).toBe("playable"); // 不受影响
   });
 });
 

@@ -23,6 +23,8 @@ import {
   configureStreamFallbackCache,
   ensurePlayableStream,
   getCachedPlayability,
+  probeStream,
+  evictStreamFallbackCache,
 } from "../source/online/streamFallback.js";
 import { preProbeActive, readPreProbeConfig, type PreProbeConfig } from "../plugin/core/preProbe.js";
 import type { PlayMode } from "./types.js";
@@ -376,12 +378,63 @@ export class PreProbeScheduler {
     if (!songId) return "unknown";
 
     const cached = getCachedPlayability(songId);
-    if (cached === "playable") return "playable";
     if (cached === "unplayable") return "unplayable";
     // transient = 网络抖动,退避期内不重探,也不判定「这首歌没有源」。
     if (cached === "transient") return "unknown";
 
     const now = Date.now();
+
+    // ── 正缓存复核(2026-09-16)──────────────────────────────────────────
+    // 正缓存(可播记忆,TTL 1 小时)命中即短路、不再 probe。一首歌一旦在某时刻
+    // 被探出可播(如直链还活着),之后直链变死(酷狗直链 404、组内无兄弟源、
+    // 远程重搜 15 秒也无门禁认可的替代)时,预探测仍把它当「已确认可播」填进
+    // 缓冲,直到 TTL 过期才重探 —— 死链被顶 1 小时,播放端反复拉 404 卡死。
+    // 这里对「正缓存可播的在线直链」做一次受同曲冷却节制的轻量复核:probe 报
+    // gone(404/403/410 或明确非音频)即逐出正缓存,改走 ensurePlayableStream
+    // 真查(404→多源换源→写负缓存→判不可播),让「判断死链」不再被正缓存遮蔽。
+    if (cached === "playable") {
+      let row: any;
+      try {
+        row = db.select().from(songs).where(eq(songs.id, songId)).get();
+      } catch {
+        return "playable"; // 读库异常按原判处理
+      }
+      const url = row?.url;
+      const isOnlineDirect = typeof url === "string" && url.length > 0 && typeof row?.pluginEntry === "string" && !!row.pluginEntry;
+      if (!isOnlineDirect) return "playable"; // 本地/WebDAV 或空直链行,维持原判
+      const last0 = this.lastProbeAt.get(songId);
+      if (cfg.probeCooldownSeconds > 0 && last0 && now - last0 < cfg.probeCooldownSeconds * 1000) {
+        return "playable"; // 冷却期内不重探(防探测风暴)
+      }
+      let outcome: "ok" | "gone" | "transient";
+      try {
+        outcome = await probeStream(url, cfg.probeTimeoutMs);
+      } catch {
+        return "playable"; // 复核本身异常,不误判死链
+      }
+      if (outcome === "ok") {
+        this.lastProbeAt.set(songId, now);
+        return "playable"; // 直链仍可播,维持正缓存
+      }
+      if (outcome === "transient") return "playable"; // 网络抖动,不判定死链
+      // gone → 直链已死:逐出正缓存改走真查,确认后写负缓存并判不可播。
+      evictStreamFallbackCache(songId);
+      this.lastProbeAt.set(songId, now);
+      try {
+        const realUrl = await ensurePlayableStream(row, cfg.probeTimeoutMs);
+        if (realUrl) {
+          this.lastVerdict.set(songId, "playable");
+          return "playable"; // 换到兄弟/远程可播替代,仍是可播
+        }
+      } catch {
+        return "playable";
+      }
+      const after = getCachedPlayability(songId);
+      if (after === "transient") return "unknown";
+      this.lastVerdict.set(songId, "unplayable");
+      return "unplayable"; // 确认死链且无可播替代 → 预探测判不可播并跳过
+    }
+
     const last = this.lastProbeAt.get(songId);
     if (last && cfg.probeCooldownSeconds > 0 && now - last < cfg.probeCooldownSeconds * 1000) {
       const prev = this.lastVerdict.get(songId);
