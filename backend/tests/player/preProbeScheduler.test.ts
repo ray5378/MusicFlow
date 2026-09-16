@@ -287,6 +287,30 @@ describe("扫描:连续无源计数(命中即归零)", () => {
     await (s as any).scan("d1", q, readPreProbeConfig());
     expect(searchCalls.length).toBe(base + 1);
   });
+
+  it("正缓存可播的在线直链变 404:复核命中 gone → 逐出正缓存改判不可播(不再顶 TTL)", async () => {
+    // 场景:酷狗直链 404、组内无兄弟源可换、远程重搜也无门禁认可的候选 ——
+    // 这首歌被 probe 的 404 判死,关键是**此前被正缓存标的"可播"不再遮蔽它**。
+    const { getCachedPlayability } = await import("../../src/services/source/online/streamFallback.js");
+    await seed("x2", false); // /alive/x2.mp3 探 206 → 正缓存 playable
+    expect(getCachedPlayability("x2")).toBe("playable");
+
+    const q: Q = { items: [{ songId: "x2", duration: 0 }], currentIndex: 0, playMode: "one" };
+    const s = makeScheduler();
+    await (s as any).scan("d1", q, readPreProbeConfig());
+    expect(s.status("d1").ready).toBe(1);
+
+    // 直链变死 + 无替代:酷狗直链 404、组内无兄弟源、重搜候选为空。
+    db.update(songs).set({ url: "http://gm:18080/dead/x2.mp3" }).where(eq(songs.id, "x2")).run();
+    providerCands = []; // 门禁认可候选为空 → ensurePlayableStream 真查写负缓存
+
+    // 先过同曲冷却(默认 60s)让复核真正触发;仍远在正缓存 TTL(1h)内,
+    // 否则冷却不过直接判 playable、TTL 过期才轮到重探 —— 都测不到本次修复。
+    nowShift += 61 * 1000;
+    await (s as any).scan("d1", q, readPreProbeConfig());
+    expect(getCachedPlayability("x2")).toBe("unplayable"); // 死链不再被顶"可播"
+    expect(s.status("d1").ready).toBe(0); // 不计入可播缓冲 → 切歌不会选中它
+  });
 });
 
 // ==================== C. 触底 ≠ 枯竭 ====================
