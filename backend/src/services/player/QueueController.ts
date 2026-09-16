@@ -63,6 +63,9 @@ export class QueueController extends EventEmitter {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。到点立即暂停。
   private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number }>();
+  /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
+   *  同一首连续卡死第 2 次即放行切歌,而不是 2-3 秒无限重播(见 handleDecision)。 */
+  private stallCounters = new Map<string, { songId: string | undefined; count: number }>();
 
   constructor() {
     super();
@@ -126,6 +129,7 @@ export class QueueController extends EventEmitter {
       this.players.delete(k);
       this.ctrls.delete(k);
       this.queues.delete(k);
+      this.stallCounters.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -289,10 +293,42 @@ export class QueueController extends EventEmitter {
         if (state?.playbackState === PlaybackState.PLAYING) {
           this.ctrls.get(id)?.endOptimistic(playerId);
           this.ctrls.get(id)?.resetTracker(playerId);
+          // 确认在播:清掉卡死计数(之前若有抖动攒的数作废)。
+          this.stallCounters.delete(id);
           return;
         }
       } catch (e: any) {
         log.warn("切歌前状态检查失败,继续播放", { playerId, err: e?.message || e });
+      }
+      // 同一首连续卡死计数:第 1 次重投兜 transient,第 2 次起放行切歌。
+      // 否则死源(404/解码失败)会 2-3 秒无限重播同一首,队列永远不推进。
+      const q0 = this.queues.get(id);
+      const curSongId: string | undefined =
+        q0 && q0.currentIndex >= 0 ? q0.items[q0.currentIndex]?.songId : undefined;
+      const prev = this.stallCounters.get(id);
+      const stallCount = prev && prev.songId === curSongId ? prev.count + 1 : 1;
+      this.stallCounters.set(id, { songId: curSongId, count: stallCount });
+      if (stallCount >= 2 && curSongId !== undefined) {
+        const q = this.queues.get(id);
+        if (q) {
+          const nextIdx = this.pickNext(q, false);
+          if (nextIdx !== -1 && nextIdx !== q.currentIndex) {
+            log.warn(`[QueueController] ${id}: ${curSongId} 连续卡死 ${stallCount} 次,放行切歌`);
+            this.stallCounters.delete(id);
+            this.advancing.add(id);
+            try {
+              q.currentIndex = nextIdx;
+              q.ended = false;
+              await this.playCurrent(id, baseUrl);
+              this.persist(id);
+              this.emit("queue_changed", id, this.snapshot(id));
+              this.schedulePreProbe(id);
+            } finally {
+              this.advancing.delete(id);
+            }
+            return;
+          }
+        }
       }
       this.advancing.add(id);
       try {
