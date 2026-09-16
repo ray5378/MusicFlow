@@ -98,4 +98,59 @@ describe("本机实例播放状态上报 PeerManager.reportLocalStatus", () => {
     vi.setSystemTime(new Date("2026-09-15T10:00:31Z"));
     expect(pm.getLocalStatusReport(id)).toBeUndefined();
   });
+
+  it("STOPPED 清空 songId —— 客户端停止时根本不发 songId 字段,不能沿用上一首", () => {
+    const pm = getPeerManager();
+    const id = "local:u1:stop-clear-song";
+    // 先播起来,账本里留下曲目。
+    pm.reportLocalStatus(id, {
+      state: "PLAYING", position: 12, duration: 200, songId: "s-old",
+    });
+    expect(pm.getLocalStatusReport(id)?.songId).toBe("s-old");
+    // 客户端停止:只报 state —— 见客户端 _pushLocalStatus,songId 为空时整个字段不发。
+    pm.reportLocalStatus(id, { state: "STOPPED" });
+    const read = pm.getLocalStatusReport(id);
+    expect(read?.state).toBe("STOPPED");
+    // 回归点:字段级合并若沿用旧值,已停止的端会在 /status 里永远挂着上一首,
+    // 对端据此刷新封面/歌词,表现为「这台还在播」。且客户端每 4s 续报,
+    // 30s TTL 永不到期 —— 只能靠这里显式清空。
+    expect(read?.songId).toBeUndefined();
+  });
+
+  it("STOPPED 只清曲目,不整条作废(音量/时长仍沿用)", () => {
+    const pm = getPeerManager();
+    const id = "local:u1:stop-keep-volume";
+    pm.reportLocalStatus(id, {
+      state: "PLAYING", position: 30, duration: 180, volume: 40, songId: "s-1",
+    });
+    pm.reportLocalStatus(id, { state: "STOPPED" });
+    const read = pm.getLocalStatusReport(id);
+    expect(read?.volume).toBe(40);
+    expect(read?.duration).toBe(180);
+    expect(read?.songId).toBeUndefined();
+  });
+
+  it("PAUSED_PLAYBACK 保留 songId(暂停=曲目没变,与 STOPPED 区别对待)", () => {
+    const pm = getPeerManager();
+    const id = "local:u1:paused-keep-song";
+    pm.reportLocalStatus(id, {
+      state: "PLAYING", position: 8, duration: 100, songId: "s-keep",
+    });
+    pm.reportLocalStatus(id, { state: "PAUSED_PLAYBACK" });
+    expect(pm.getLocalStatusReport(id)?.songId).toBe("s-keep");
+  });
+
+  it("clearLocalStatusReport 丢弃整条上报 —— 流转/销毁收尾后 /status 只回队列快照", () => {
+    const pm = getPeerManager();
+    const id = "local:u1:clear-report";
+    pm.reportLocalStatus(id, {
+      state: "PLAYING", position: 9, duration: 90, songId: "s-gone",
+    });
+    expect(pm.getLocalStatusReport(id)).toBeTruthy();
+    pm.clearLocalStatusReport(id);
+    expect(pm.getLocalStatusReport(id)).toBeUndefined();
+    // 幂等:重复清 / 清一个从没上报过的端,都不报错。
+    expect(() => pm.clearLocalStatusReport(id)).not.toThrow();
+    expect(() => pm.clearLocalStatusReport("local:u1:never-reported")).not.toThrow();
+  });
 });

@@ -6,6 +6,9 @@ dist/
 backend/data/
 data/
 .test-data/
+# 本地起服务实测用的临时数据目录（带后缀的变体同样不进提交，
+# 里面是真实库结构的 DB + 自动生成的 JWT secret）
+.test-data*/
 *.db
 *.db-wal
 *.db-shm
