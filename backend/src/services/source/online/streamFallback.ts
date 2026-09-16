@@ -301,6 +301,34 @@ export function clearStreamFallbackCache(): void {
   playableCache.clear();
 }
 
+/**
+ * 把「真实设备连续卡死(stalled)」判定落实进共享可播缓存(2026-09-16)。
+ *
+ * 预探测与播放共用同一份可播记忆。一首被预探测判 `playable` 的歌,可能在真实
+ * 播放时仍卡死(probe 拿到 200 + 音频 mime,但设备解码失败 / BUFFERING 不推进)——
+ * 这正是 3.0.23「连续 stalled 第 2 次起放行切歌」要杀的场景。若切歌时**不回写**,
+ * 缓存会继续把它当「已确认可播」:all 模式绕圈 / 洗牌重排 / 换设备再投时,
+ * 同一首又被 cast → 又卡,缺口流向预探测从来不往下兼容。
+ *
+ * 这里删除正记忆,并写入一条**短 TTL 负记忆**(沿用 core-pre-probe 的
+ * `negativeTtlSeconds`),让其后的 `getCachedPlayability` 判 `unplayable`、
+ * `judgePlayable`/预探测直接跳过、不再把它当可播缓冲 —— 但照常自动恢复
+ * (TTL 过期重新探测)。
+ *
+ * 仅对在线(有 `pluginEntry`)行生效:本地文件的卡死不是「没有源」,绝不降级。
+ */
+export function demoteStalledSong(songId: string): void {
+  if (!songId) return;
+  try {
+    const row = db.select({ pluginEntry: songs.pluginEntry }).from(songs).where(eq(songs.id, songId)).get();
+    if (!row || !row.pluginEntry) return;
+  } catch {
+    return;
+  }
+  playableCache.delete(songId);
+  setFallback(songId, null); // 非 transient → 明确不可播(短 TTL,到期自动复活)
+}
+
 // songId -> 确认可播的时间戳（带 TTL,见文件头说明）。
 const playableCache = new Map<string, number>();
 
