@@ -25,6 +25,13 @@ const SERVICE_TYPE = "musicflow";
 const PROTO = "tcp";
 
 const log = createLogger("mDNS");
+
+/** 共享 Bonjour 实例(供插件复用,如 sendspin 浏览 _sendspin._tcp 设备)。
+ *  只给 socket,不懂业务;避免各插件自建实例抢 5353 端口。 */
+export function getSharedBonjour(): Bonjour {
+  if (!bonjour) bonjour = new Bonjour();
+  return bonjour;
+}
 export function startMdnsBroadcast(port: number): void {
   if (bonjour) return;
   bonjour = new Bonjour();

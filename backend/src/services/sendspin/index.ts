@@ -17,6 +17,7 @@ import { PairingStore } from "./pairingStore.js";
 import { PairingCoordinator } from "./pairServer.js";
 import { stopGroupPump } from "./streamEngine.js";
 import { advertiseSendspinServer, unadvertiseSendspinServer } from "./advertise.js";
+import { startPlayerDiscovery, stopPlayerDiscovery } from "./discover.js";
 // 类型-only 导入(编译期擦除,零运行时边):缓存单例的类型推导,
 // 避开 player/index ↔ sendspin 的模块环(TDZ,见下 ensureControllers 注释)。
 import type * as PlayerIndex from "../player/index.js";
@@ -81,7 +82,7 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
 
 /** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。
  *  导出供单测覆盖默认/非法回退。 */
-export function readSendspinPluginConfig(): { allowLegacyClients: boolean; port: number } {
+export function readSendspinPluginConfig(): { allowLegacyClients: boolean; port: number; autoDiscover: boolean } {
   try {
     const row = sqlite
       .prepare("SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'")
@@ -91,9 +92,10 @@ export function readSendspinPluginConfig(): { allowLegacyClients: boolean; port:
     return {
       allowLegacyClients: cfg?.allow_legacy_clients !== false,
       port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : WS_PORT,
+      autoDiscover: cfg?.auto_discover !== false,
     };
   } catch {
-    return { allowLegacyClients: true, port: WS_PORT };
+    return { allowLegacyClients: true, port: WS_PORT, autoDiscover: true };
   }
 }
 
@@ -139,6 +141,9 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     const s = getServer();
     if (s) void dialRemembered(s);
   }, REDIAL_INTERVAL_MS);
+  // 播放器自动发现:浏览 _sendspin._tcp,新设备出现即拨号(只发现不自动播)。
+  // 与记忆重拨互补:没拨过的设备靠这个首次出现。
+  if (pluginCfg.autoDiscover) startPlayerDiscovery(srv);
   // 空闲回收兜底(进程级去重注册):清无成员组。
   void ensureCleanerRegistered();
   log.info(`sendspin server started: ${srv.serverId}`);
@@ -151,6 +156,7 @@ export async function stopSendspinService(): Promise<void> {
     clearInterval(redialTimer);
     redialTimer = null;
   }
+  stopPlayerDiscovery();
   const srv = getServer();
   if (!srv) return;
   unadvertiseSendspinServer();

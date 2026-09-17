@@ -46,6 +46,13 @@ export const sendspinRendererManifest: PluginManifest = {
       default: true,
       help: "兼容前加密时代客户端(如 ESPHome/sendspin-cpp、aiosendspin<7):它们发明文 client/hello、无 Noise 加密。开启后这类设备可直连播(配对不可用,流量明文);关闭则仅合规加密客户端可连。对照 MA 的 allow_legacy_clients(默认开)。",
     },
+    {
+      key: "auto_discover",
+      label: "自动发现播放器",
+      type: "switch",
+      default: true,
+      help: "浏览局域网 _sendspin._tcp,新设备出现即自动拨号接入(只发现、不自动播放)。关闭则只靠手工拨号与记忆重拨。",
+    },
   ],
   i18n: {
     en: {

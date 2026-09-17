@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.28] - 2026-09-17
+
+### 新功能
+- **Sendspin 播放器自动发现**：浏览局域网 `_sendspin._tcp`，新设备出现即自动拨号
+  接入（只发现、不自动播放），前端播放目标列表自动出现，无需手工 dial。
+  与记忆重拨互补：没拨过的设备靠这个首次出现；`another_server` 等拒绝过的不再骚扰；
+  同目标 60s 去抖；插件配置加 `auto_discover` 开关（默认开）。
+  - 边界：发现逻辑归 `services/sendspin/discover.ts`；mDNS 层只加通用共享实例
+    `getSharedBonjour()`（无业务认知）。
+
+### 测试
+- 新增 `discover.test.ts`（IPv4 优选/回退、启停幂等）；`pluginConfig.test.ts` 补
+  `auto_discover` 缺省与开关；sendspin 相关 71/71 绿。
+
+### 镜像
+- `ghcr.io/ray5378/musicflow:3.0.28`（同步 `ray5378/musicflow:3.0.28`）
+
 ## [3.0.27] - 2026-09-17
 
 ### Bug 修复（ESPHome Sendspin 真机联调，全部经 ESP32-S3 真机逐条确认）
