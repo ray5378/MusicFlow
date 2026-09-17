@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.33] - 2026-09-18
+
+### 文档
+
+- 新增 **FLAC 链路专项开发任务书** `docs/SENDSPIN_FLAC_ROADMAP.md`:核心矛盾
+  (25ms 喂料 vs libFLAC 块攒样脉冲)、真机基线验证步骤、消脉冲方案阶梯
+  (compression 0 → 块对齐喂料)、micro-flac `BAD_BLOCK_SIZE` 约束、验收清单;
+  链接真相文档与踩坑录,作为后续 FLAC 打磨的唯一起点。
+
 ## [3.0.32] - 2026-09-18
 
 ### Bug 修复 —— Sendspin 音量「回退」与增益标度
