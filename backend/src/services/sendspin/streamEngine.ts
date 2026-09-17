@@ -165,7 +165,11 @@ export class GroupPump {
         this.running = false;
         this.endedNaturally = contentEnded;
         // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
-        if (this.endedNaturally) this.group.current = null;
+        // 同时宣告流结束:缺 stream/end + group/update(stopped),客户端永远卡 PLAYING。
+        if (this.endedNaturally) {
+          this.group.current = null;
+          this.group.finishPlayback();
+        }
         // 整首 PCM 到此无用,立即释放(长曲上百 MB),不等下一首覆盖。
         this.pcm = null;
       }

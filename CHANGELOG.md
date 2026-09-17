@@ -2,6 +2,34 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.27] - 2026-09-17
+
+### Bug 修复（ESPHome Sendspin 真机联调，全部经 ESP32-S3 真机逐条确认）
+- **legacy 握手补 `server/activate` + `group/update`**：此前只发 `server/hello`，
+  设备 nursery 30 秒超时、每次准时 `goodbye(another_server)` 离开。
+- **`server/hello` 五字段对齐严格校验**：`server_id/name/version/active_roles/
+  connection_reason` 缺一或枚举非法即整条作废；`connection_reason` 取 `discovery`
+ （对照 sendspin-cpp `protocol.cpp` 源码；多 server 仲裁下不抢占已有 playback 方）。
+- **`stream/start` 补 FLAC `codec_header`**：base64(`fLaC`+0x80+u24(34)+34B STREAMINFO)
+  定值合成（48k/立体声/16bit，块大小 4608 与 ffmpeg 实际一致）；缺头整条作废、之后每块音频全灭。
+- **协商顺序改为 opus > pcm > flac**：ffmpeg flac 管道输出只在 EOF flush，
+  实时推流每帧拿空包；flac 真正逐帧可用前绝不主动选。空包不上 wire。
+- **曲终/停止/失败补 `stream/end` + `group/update(stopped)`**：此前设备永远卡 PLAYING。
+- **`goodbye` 打日志 + `another_server` 等不自动重拨**（spec 语义，手动 dial 解除）；
+  同目标拨号单飞（并发双连接触发设备仲裁踢人）。
+- **广播 `_sendspin-server._tcp`**（供客户端发现；mDNS 层只加通用 `publishExtraService`，
+  业务参数归 sendspin 包内 `advertise.ts`——包边界收敛，无核心改动）。
+
+### 文档
+- 新增 `docs/SENDSPIN_ESPHOME_DEBUG.md`：原生 API 看日志 / 抓包速查 / mDNS 速查 / 坑位表。
+
+### 测试
+- 新增 `encoding.test.ts`（STREAMINFO 结构锁死）、`legacy.test.ts` 加 activate+group/update
+  顺序与 hello 五字段用例；sendspin 相关 69/69 绿。
+
+### 镜像
+- `ghcr.io/ray5378/musicflow:3.0.27`（同步 `ray5378/musicflow:3.0.27`）
+
 ## [3.0.17] - 2026-09-14
 
 ### Bug 修复

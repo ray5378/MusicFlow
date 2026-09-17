@@ -36,6 +36,8 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
         // 起播宣告流格式:真实播放器无 stream/start 会丢弃音频(之前从没发过,
         // 导致任何合规播放器都无声)。放 g.add 之后、pump.play 之前,首帧必在其后。
         conn.announceStream();
+        // playback_state 变了(spec:group/update 字段变化即重发)。
+        conn.sendGroupUpdate();
       }
       // 起播即推 media_changed(HA 卡片歌词/封面即时跟随,不必等 2s 轮询;
       // 对齐 DLNA castToDevice 的 media_changed + player_refresh)。
@@ -56,7 +58,9 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       // 后台起播:解码→按组时间线推流。不阻塞 playMedia 返回(pollState 反映进度)。
       void pump.play(item.songId).catch((e) => {
         // 无可播源等:置空 current,交 QueueController 走跳过/换源。
+        // stream/start 已发过,必须 stream/end 收尾,否则客户端空等。
         g.current = null;
+        g.finishPlayback();
         getServer()?.log("warn", `sendspin play ${item.songId} failed: ${(e as Error)?.message || e}`);
       });
       // 服务端权威起播即上报 PLAYING:sendspin 没有 GENA/秒级上报,PlaybackTracker 只能靠
@@ -86,6 +90,10 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       if (srv) pumpFor(srv, srv.group(clientId)).stop();
       g.positionMs = 0;
       g.current = null;
+      // 流结束 + playback_state → stopped,组状态同步给客户端(自然结束走 pump)。
+      const live = srv?.group(clientId);
+      if (live) live.finishPlayback();
+      else srv?.clients.get(clientId)?.sendGroupUpdate();
     },
     async pause() {
       const srv = getServer();

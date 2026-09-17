@@ -55,6 +55,34 @@ export function encodeCodecParams(codec: SendspinCodec): { format: string; codec
   return { format: "s16le", codecName: "pcm_s16le" };
 }
 
+/** FLAC stream/start 用 codec_header:base64("fLaC"+0x80+u24(34)+STREAMINFO)。
+ *  约定对标 aiosendspin reference(FlacEncoder.get_header:extradata 前加 fLaC 块头)。
+ *  管线恒定 48kHz/立体声/16bit,STREAMINFO 定值合成(MD5/帧长/总数填 0,流式编码惯例):
+ *  严格客户端(sendspin-cpp)无此头直接拒收整个 stream/start,之后每块音频全灭
+ *  (2026-09-17 ESPHome 真机:"FLAC requires codec_header")。opus/pcm 自描述,不需要。 */
+export function flacCodecHeaderB64(
+  sampleRate = SAMPLE_RATE,
+  channels = CHANNELS,
+  bitDepth = 16,
+): string {
+  const info = Buffer.alloc(34, 0);
+  info.writeUInt16BE(4608, 0); // min block size(与 ffmpeg flac 在 48kHz 下的实际值一致)
+  info.writeUInt16BE(4608, 2); // max block size(声明偏小会导致严格解码器拒帧)
+  // min/max frame size(3+3B)与 total samples 填 0:流式未知,解码器接受。
+  const pack =
+    (BigInt(sampleRate) << 44n) |
+    (BigInt(channels - 1) << 41n) |
+    (BigInt(bitDepth - 1) << 36n);
+  for (let i = 0; i < 8; i++) info[10 + i] = Number((pack >> BigInt(8 * (7 - i))) & 0xffn);
+  // MD5(16B)全 0。
+  const header = Buffer.concat([Buffer.from("fLaC", "ascii"), Buffer.from([0x80]), (() => {
+    const len = Buffer.alloc(3);
+    len.writeUIntBE(info.length, 0, 3);
+    return len;
+  })(), info]);
+  return header.toString("base64");
+}
+
 /** F32 立体声 interleaved → raw bytes (f32le)。 */
 export function f32ToBytes(f32: Float32Array): Buffer {
   const buf = Buffer.allocUnsafe(f32.length * 4);

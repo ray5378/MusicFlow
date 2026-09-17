@@ -2841,6 +2841,8 @@ apiRoutes.post("/v1/sendspin/dial", adminMiddleware, async (c) => {
   }
   try {
     const conn = await srv.dialPlayer(`ws://${host}:${port}/sendspin`);
+    // 手动拨号 = 运营商明确意图:清除自动重拨抑制(another_server 等拒绝过)。
+    srv.clearNoRedial(host, port);
     try {
       const { rememberDialTarget } = await import("../../services/sendspin/index.js");
       await rememberDialTarget(host, port);

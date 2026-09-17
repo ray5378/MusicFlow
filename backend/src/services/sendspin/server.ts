@@ -29,7 +29,7 @@ import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
-import { createChunkEncoder, type ChunkEncoder, OPUS_FRAME_MS, type SendspinCodec } from "./encoding.js";
+import { createChunkEncoder, flacCodecHeaderB64, type ChunkEncoder, OPUS_FRAME_MS, type SendspinCodec } from "./encoding.js";
 import { stopGroupPump } from "./streamEngine.js";
 import { computeCommonSendAhead } from "./group.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
@@ -66,6 +66,14 @@ export class SendspinServer {
   log: SendspinLog;
   readonly clients = new Map<string, SendspinConnection>();
   readonly groups = new Map<string, SendspinGroup>();
+  /** 不再自动重拨的目标 host:port → goodbye reason(手动 dial 清除,见 goodbye 分支)。 */
+  readonly noAutoRedial = new Map<string, string>();
+  /** 手动拨号清除指定目标的重拨抑制(运营商明确意图,供路由层调用)。 */
+  clearNoRedial(host: string, port: number): void {
+    this.noAutoRedial.delete(`${host}:${port}`);
+  }
+  /** 进行中的拨号 url → 任务(同目标单飞,见 dialPlayer)。 */
+  private readonly pendingDials = new Map<string, Promise<SendspinConnection>>();
   pairingPsk: Uint8Array;
   serverName: string;
   /** 运行时可热更新(插件配置页开关,见 PUT /v1/plugins/:id)。 */
@@ -127,8 +135,24 @@ export class SendspinServer {
 
   /** 服务端主动拨号(见 spec server-initiated):拨玩家 :8928/sendspin。
    *  WS 方向反转而已,后续 client/init→Noise→hello/activate 与拨入完全一致
-   *  (Noise initiator 恒为服务端)。成功返回激活后的连接(已注册 peer)。 */
+   *  (Noise initiator 恒为服务端)。成功返回激活后的连接(已注册 peer)。
+   *  同一目标单飞:并发重拨会形成双连接,设备仲裁踢掉一个(2026-09-17 真机
+   *  another_server 风暴)。进行中的同目标拨号直接复用,不另开 socket。 */
   async dialPlayer(url: string, timeoutMs = 15000): Promise<SendspinConnection> {
+    const singleKey = `dial:${url}`;
+    const pending = this.pendingDials.get(singleKey);
+    if (pending) {
+      this.log("info", `dial ${url} 已在进行中,复用(避免双连接仲裁)`);
+      return pending;
+    }
+    const task = this.dialPlayerInner(url, timeoutMs).finally(() => {
+      if (this.pendingDials.get(singleKey) === task) this.pendingDials.delete(singleKey);
+    });
+    this.pendingDials.set(singleKey, task);
+    return task;
+  }
+
+  private async dialPlayerInner(url: string, timeoutMs = 15000): Promise<SendspinConnection> {
     const ws = new WebSocket(url);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -289,8 +313,22 @@ export class SendspinGroup {
       const chunks = await enc.encode(this.scalePcm(pcm, gain));
       // opus 每 20ms 一裸包;多包时时间戳按帧长递增,对齐 MA 每包一次性的 psg 推送。
       chunks.forEach((data, i) => {
+        // 空包必跳过:ffmpeg flac 在 EOF 前常吐空缓冲,空包上 wire 会被严格
+        // 客户端判 Invalid data(2026-09-17 ESPHome 真机)。
+        if (!data || data.length === 0) return;
         c.sendAudio(tsUs + BigInt(i * OPUS_FRAME_MS) * 1000n, data);
       });
+    }
+  }
+  /** 曲终/停止:对全员发 stream/end(结束全部角色流) + group/update(stopped)。
+   *  缺了客户端永远卡 PLAYING(2026-09-17 ESPHome 真机:播完 30s 还 PLAYING)。
+   *  调用前先把 current 置空,sendGroupUpdate 才能报出 stopped。 */
+  finishPlayback(): void {
+    for (const c of this.members) {
+      const reg = c.clientId ? this.server.clients.get(c.clientId) : undefined;
+      this.server.log("info", `finishPlayback member=${c.clientId} legacy=${c.legacy} ws=${(c as any).ws?.readyState} registered=${reg === c}`);
+      c.sendJson("stream/end", {});
+      c.sendGroupUpdate();
     }
   }
   /** 关闭全部编码器(含 flac 的 ffmpeg 持续进程),返回关掉的数量(供回收上报)。 */
@@ -305,18 +343,21 @@ export class SendspinGroup {
   }
 }
 
-/** 按客户端 player_support 协商编码(尊重客户端优先级顺序)。
- *  只协商 codec(管线恒定 48kHz 立体声,见 encoding.ts);都不支持则回退 opus。
+/** 按客户端 player_support 协商编码(管线恒定 48kHz 立体声,见 encoding.ts)。
+ *  优先级 opus > pcm > flac(不按客户端列表顺序):
+ *  flac 的 ffmpeg 管道输出只在 EOF 时 flush,实时推流每帧都拿空包,名存实亡
+ *  (2026-09-17 实测:101 帧全空,音频只在曲终 flush 块里,真机全程 Invalid data)。
+ *  在 flac 真正逐帧可用前,绝不主动选它;只支持 flac 的客户端仍给 flac(有胜于无)。
  *  不协商的后果:9.x 等客户端直接拒收 opus(only PCM and FLAC are supported)。
  *  键名兼容:9.x 线上为 player@v1_support(别名),老版本为 player_support。 */
 export function negotiateCodec(payload: any): SendspinCodec {
   // 9.x 线上键名为 player@v1_support(别名),老版本为 player_support,都认。
   const list = payload?.["player@v1_support"]?.supported_formats ?? payload?.player_support?.supported_formats;
   if (!Array.isArray(list)) return "opus";
-  for (const f of list) {
-    const codec = String(f?.codec || "").toLowerCase();
-    if (codec === "opus" || codec === "flac" || codec === "pcm") return codec;
-  }
+  const have = new Set(list.map((f: any) => String(f?.codec || "").toLowerCase()));
+  if (have.has("opus")) return "opus";
+  if (have.has("pcm")) return "pcm";
+  if (have.has("flac")) return "flac";
   return "opus";
 }
 
@@ -526,14 +567,24 @@ export class SendspinConnection {
     this.handshakeDone = true;
     this.phase = "ready";
     this.server.log("warn", `legacy unencrypted client: ${clientId} name=${this.name} (明文直通,配对不可用)`);
-    // legacy 客户端只认 TEXT 帧:明文 server/hello(字段需齐,sendspin-cpp 严格校验)。
+    // legacy 客户端只认 TEXT 帧:明文 server/hello。
+    // ⚠️ 五字段必须齐全(server_id/name/version/active_roles/connection_reason):
+    // sendspin-cpp 逐个严格校验,缺任一或枚举非法则整个 hello 作废 → 握手永不完成
+    // → 30s nursery 超时被踢(2026-09-17 ESPHome 真机,见 protocol.cpp)。
+    // connection_reason 决定多 server 仲裁优先级:discovery=礼貌探路(不抢占
+    // 已有 playback 方,两边共存友好);playback=宣示播放权(会切换)。拨号用 discovery。
     this.sendCleartext("server/hello", {
       server_id: this.server.serverId,
       name: this.server.serverName,
       version: PROTOCOL_VERSION,
       active_roles: this.roles,
-      connection_reason: "legacy_transition",
+      connection_reason: "discovery",
     });
+    // spec: provisional 连接 30s 内无 server/activate 即被 drop —— 真机(legacy)
+    // 此前永远收不到 activate,每次 30.0s 准时 goodbye(another_server)离开。
+    // Noise 路径在 onClientHello 发,这里补齐,同语义。
+    this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
+    this.sendGroupUpdate();
     this.server.onConnectionActivated(this);
   }
 
@@ -554,6 +605,18 @@ export class SendspinConnection {
       return;
     }
     if (t === "client/goodbye") {
+      // 真机(sendspin-cpp)会用 goodbye 踢掉第二个 server(reason=another_server):
+      // 必须打日志,否则 reason 只能靠抓包才看得见(2026-09-17 ESPHome 真机联调教训)。
+      const reason = String((msg?.payload as any)?.reason ?? "");
+      this.server.log("warn", `client/goodbye from ${this.clientId ?? "?"}: ${JSON.stringify(msg?.payload ?? {})}`);
+      // spec:another_server/shutdown/user_request/unpaired/unauthorized/
+      // pairing_required → SHOULD NOT auto-reconnect(之前无脑 60s 重拨,
+      // 与设备"切换 server"打架,形成 dial→踢→重拨死循环)。记入抑制表,
+      // 手动 dial 清除(运营商明确意图)。restart/concurrent_attempt 不抑制。
+      if (this.dialed && this.dialHost && ["another_server", "shutdown", "user_request", "unpaired", "unauthorized", "pairing_required"].includes(reason)) {
+        this.server.noAutoRedial.set(`${this.dialHost}:${this.dialPort}`, reason);
+        this.server.log("warn", `auto-redial suppressed for ${this.dialHost}:${this.dialPort} (goodbye: ${reason});手动 dial 可恢复`);
+      }
       try { this.ws.close(); } catch { /* ignore */ }
       return;
     }
@@ -742,6 +805,9 @@ export class SendspinConnection {
     this.codec = negotiateCodec(payload);
     this.server.log("info", `activated ${this.clientId} name=${this.name} roles=${this.roles.join(",")} codec=${this.codec}`);
     this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
+    // spec MUST:首次 activate 后立即下发 group/update(真实客户端如 sendspin-cpp
+    // 在收到它之前不认 server;此前从没发过,ESPHome 真机 ~30s 后 goodbye 离开)。
+    this.sendGroupUpdate();
     this.server.onConnectionActivated(this);
   }
 
@@ -795,10 +861,24 @@ export class SendspinConnection {
 
   /** 新曲起播宣告流格式。真实播放器(9.x / sendspin-cpp / legacy)在收到
    *  stream/start 前会丢弃音频(无 format 不播)。codec 取连接协商结果,
-   *  管线恒定 48kHz 立体声 16bit。 */
+   *  管线恒定 48kHz 立体声 16bit。
+   *  FLAC 必须带 codec_header(STREAMINFO 的 base64):严格客户端无此头直接
+   *  判整个 stream/start 非法,之后每块音频全灭(2026-09-17 ESPHome 真机)。
+   *  opus/pcm 自描述,不带。 */
   announceStream(): void {
-    const player = { codec: this.codec, sample_rate: 48000, channels: 2, bit_depth: 16 };
+    const player: Record<string, unknown> = { codec: this.codec, sample_rate: 48000, channels: 2, bit_depth: 16 };
+    if (this.codec === "flac") player.codec_header = flacCodecHeaderB64();
     this.sendJson("stream/start", { player });
+  }
+  /** spec MUST 的组状态:首次 activate 后立即发,字段变化时重发。
+   *  未入组(idle)时按其默认组(clientId)报 stopped,给客户端稳定的组身份。 */
+  sendGroupUpdate(): void {
+    const g = this.group;
+    this.sendJson("group/update", {
+      playback_state: g?.current ? "playing" : "stopped",
+      group_id: g?.name ?? this.clientId ?? "",
+      group_name: g?.name ?? this.name,
+    });
   }
   private _sendPlain(body: Uint8Array): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;

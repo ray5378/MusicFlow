@@ -16,6 +16,7 @@ import { WS_PORT } from "./constants.js";
 import { PairingStore } from "./pairingStore.js";
 import { PairingCoordinator } from "./pairServer.js";
 import { stopGroupPump } from "./streamEngine.js";
+import { advertiseSendspinServer, unadvertiseSendspinServer } from "./advertise.js";
 // 类型-only 导入(编译期擦除,零运行时边):缓存单例的类型推导,
 // 避开 player/index ↔ sendspin 的模块环(TDZ,见下 ensureControllers 注释)。
 import type * as PlayerIndex from "../player/index.js";
@@ -127,6 +128,9 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   srv.pairingStore = pairingStore;
   srv.pairing = new PairingCoordinator(srv, pairingStore);
   await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
+  // spec Client Initiated:广播 _sendspin-server._tcp,客户端经 mDNS 发现本服务端。
+  // (此前只广播 _musicflow._tcp,ESPHome 真机永远发现不了 server。)
+  advertiseSendspinServer(port ?? pluginCfg.port, "MusicFlow Sendspin");
   // 记住的拨号目标:启动即拨 + 每 60s 补拨掉线的。
   if (dialTargetsLoadedFor !== identityDir) await loadDialTargets();
   void dialRemembered(srv);
@@ -149,6 +153,7 @@ export async function stopSendspinService(): Promise<void> {
   }
   const srv = getServer();
   if (!srv) return;
+  unadvertiseSendspinServer();
   qcSingleton?.unregisterSendspinDevices();
   try {
     pmSingleton?.removeSendspinPeers();
@@ -235,6 +240,12 @@ async function dialRemembered(srv: SendspinServer): Promise<void> {
       (c) => c.dialed && c.dialHost === t.host && c.dialPort === t.port,
     );
     if (online) continue;
+    // spec:设备明确拒绝重连的 reason(another_server 等)不再自动骚扰,手动 dial 恢复。
+    const suppressed = srv.noAutoRedial.get(`${t.host}:${t.port}`);
+    if (suppressed) {
+      log.info(`sendspin 跳过重拨(设备已拒绝:${suppressed}): ${t.host}:${t.port}`);
+      continue;
+    }
     try {
       await srv.dialPlayer(`ws://${t.host}:${t.port}/sendspin`, 10_000);
       log.info(`sendspin 重拨成功: ${t.host}:${t.port}`);

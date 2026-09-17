@@ -73,7 +73,9 @@ describe("sendspin legacy 明文直通", () => {
       expect(typeof hello.name).toBe("string");
       expect(hello.version).toBe(1);
       expect(hello.active_roles).toContain("player@v1");
-      expect(typeof hello.connection_reason).toBe("string");
+      // connection_reason 必须在且合法(discovery/playback 二选一):
+      // sendspin-cpp 要求五字段齐全,缺失或非法都判整个 hello 作废(2026-09-17 真机)。
+      expect(["discovery", "playback"]).toContain(hello.connection_reason);
       // 连接标记 legacy,peer 注册且名为 hello 名、标 unencrypted。
       const srv = getSendspinServer()!;
       await waitFor(() => srv.clients.get(LEGACY_ID)?.legacy === true);

@@ -17,6 +17,9 @@ import { createLogger } from "../../utils/logger.js";
 
 let bonjour: Bonjour | null = null;
 let service: any = null;
+// 额外服务(插件用):与主广播共用一个 Bonjour 实例,避免多实例抢 5353 端口。
+// key 由调用方定,同一 key 重复 publish 先撤旧的。mdns 层只管发布,不懂业务。
+const extraServices = new Map<string, any>();
 
 const SERVICE_TYPE = "musicflow";
 const PROTO = "tcp";
@@ -50,9 +53,44 @@ export function startMdnsBroadcast(port: number): void {
 
 export function stopMdnsBroadcast(): void {
   try { service?.stop(); } catch {}
+  for (const [key, svc] of extraServices) {
+    try { svc?.stop(); } catch {}
+    extraServices.delete(key);
+  }
   try { bonjour?.destroy(); } catch {}
   bonjour = null;
   service = null;
+}
+
+/** 发布一个额外 mDNS 服务(供内置插件如 sendspin 用)。
+ *  参数全由调用方给(名/类型/端口/txt),mdns 层不掺任何业务认知。
+ *  返回 key,stopExtraService(key) 撤销。 */
+export function publishExtraService(
+  key: string,
+  opts: { name: string; type: string; port: number; txt?: Record<string, string> },
+): void {
+  unpublishExtraService(key);
+  if (!bonjour) bonjour = new Bonjour();
+  try {
+    const svc = bonjour.publish({
+      name: opts.name,
+      type: opts.type,
+      protocol: PROTO,
+      port: opts.port,
+      txt: opts.txt ?? {},
+    });
+    extraServices.set(key, svc);
+    log.info(`[mDNS] broadcasting _${opts.type}._${PROTO}.local. on :${opts.port}`);
+  } catch (e: any) {
+    log.error("extra publish failed", { key, err: e.message });
+  }
+}
+
+export function unpublishExtraService(key: string): void {
+  const svc = extraServices.get(key);
+  if (!svc) return;
+  try { svc?.stop(); } catch {}
+  extraServices.delete(key);
 }
 
 function getServerUuid(): string {
