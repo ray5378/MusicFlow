@@ -421,12 +421,21 @@
                   </div>
                   <span v-if="f.help" class="field-hint">{{ f.help }}</span>
                 </div>
-                <el-input
-                  v-else-if="f.type === 'text' || f.type === 'url'"
-                  v-model="editConfig[f.key]"
-                  :placeholder="f.help"
-                  style="width: 100%"
-                />
+                <template v-else-if="f.type === 'text' || f.type === 'url'">
+                  <el-input
+                    v-model="editConfig[f.key]"
+                    :placeholder="f.help"
+                    style="width: 100%"
+                  />
+                  <!-- 行内自测动作:常显于输入框下方,让用户**保存前**就能验证填的值。
+                       由 manifest ConfigField.action 声明,避免前端硬编码字段 key。 -->
+                  <div v-if="f.action === 'esphome-test'" class="field-action-row">
+                    <el-button type="primary" plain :loading="testingEsphome" @click="testEsphome()">
+                      {{ t('admin.plugins.testConnection') }}
+                    </el-button>
+                    <span v-if="esphomeTestResult" class="test-result" :class="{ ok: esphomeTestResult.success }">{{ esphomeTestResult.message }}</span>
+                  </div>
+                </template>
                 <el-input
                   v-else-if="f.type === 'password'"
                   v-model="editConfig[f.key]"
@@ -814,6 +823,52 @@ function stopPluginJobPoll() {
   if (pluginJobPollTimer) { clearInterval(pluginJobPollTimer); pluginJobPollTimer = null; }
 }
 onUnmounted(stopPluginJobPoll);
+
+// ESPHome 6053 密钥自测(「测试连接」按钮):保存前先真实握手一次。
+// host 不用传 —— 后端自动代入当前已连 Sendspin 设备的 IP。
+const testingEsphome = ref(false);
+const esphomeTestResult = ref<{ success: boolean; message: string } | null>(null);
+
+async function testEsphome() {
+  if (testingEsphome.value) return;
+  const psk = String(editConfig["esphome_psk"] ?? "").trim();
+  if (!psk) {
+    esphomeTestResult.value = { success: false, message: t("admin.plugins.esphomeTestMissingKey") };
+    return;
+  }
+  testingEsphome.value = true;
+  esphomeTestResult.value = null;
+  try {
+    const res = await api.post("/rest/api/v1/sendspin/esphome/test", { psk }, { timeout: 20000 });
+    const d = res.data || {};
+    if (!d.ok) {
+      esphomeTestResult.value = {
+        success: false,
+        message: t("admin.plugins.esphomeTestFailed", { error: d.error || "unknown" }),
+      };
+      return;
+    }
+    const name = d.deviceName || d.host || "";
+    const version = d.esphomeVersion || "";
+    const p = Array.isArray(d.players) && d.players.length ? d.players[0] : null;
+    esphomeTestResult.value = p
+      ? {
+          success: true,
+          message: t("admin.plugins.esphomeTestOkWithState", {
+            host: d.host,
+            name,
+            version,
+            state: p.stateName,
+            volume: Math.round((p.volume || 0) * 100),
+          }),
+        }
+      : { success: true, message: t("admin.plugins.esphomeTestOk", { host: d.host, name, version }) };
+  } catch (e: any) {
+    esphomeTestResult.value = { success: false, message: formatApiError(e) };
+  } finally {
+    testingEsphome.value = false;
+  }
+}
 
 async function refreshPlugin() {
   if (!editing.value || refreshingPlugin.value) return;
@@ -1489,6 +1544,8 @@ onMounted(() => {
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
 .tag-input-wrap { width: 100%; }
 .tag-input-wrap .tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.field-action-row { margin-top: 10px; }
+.field-action-row .test-result { margin-left: 12px; }
 .tag-input-wrap .tag-actions { margin-top: 10px; }
 .tag-input-wrap .tag-actions .test-result { margin-left: 12px; }
 .field-links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 0 12px; }

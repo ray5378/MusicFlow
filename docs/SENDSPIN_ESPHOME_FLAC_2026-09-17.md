@@ -1,255 +1,196 @@
-# Sendspin 专项修复记录 —— ESP32 真机出声(FLAC 推流实测)
+# Sendspin × ESPHome 真机排障与修复(ESP32-S3 / esp32-player-meet)
 
-> 日期:2026-09-17
-> 目标:让 MusicFlow 内置 sendspin 服务在 ESPHome 真机 `esp32-player-meet`(192.168.10.245,esphome 2026.9.0 内置 sendspin client)上**真正出声**。
-> 参照系(金标准):Music Assistant(mass 容器,host 网络,独占 8927)用 FLAC 推流可让该设备进 PLAYING 出声。
-> 当前状态:**✅ 已出声**。设备走完 FLAC 全链路,`speaker_mixer Starting` / `i2s_audio.speaker Starting` /
-> `96000 ring_buffer [speaker_task]` 全部出现,切歌时扬声器不拆、position 连续推进(见第七节「最终修复」)。
-
----
-
-## 一、背景与目标
-
-MusicFlow 的 sendspin **内置服务**(非 market 插件,代码是 `backend/src/services/sendspin/*` 编译进镜像的 `dist/*.js`)是 Sendspin 协议的**服务端 + Noise initiator**。ESPHome 设备(endspin-cpp / aiosendspin 风格)作为客户端,经 mDNS 发现服务端后主动连入、legacy 明文直连或在握手后加密。
-
-此前 MUSIC 一直无法让 `esp32-player-meet` 进 PLAYING 出声:音频协商选了 opus/PCM,设备拒收或始终停在非 PLAYING 状态。
-
-金标准实证(MA 推流时的设备日志 `devstate.out`):
-
-```
-Group update - state: playing, id: 7d71c3fa-..., name: 3C:0F:02:F9:69:E4
-Stream Started
-Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
-speaker_mixer Starting / i2s_audio.speaker Starting / ring_buffer created
-State changed to PLAYING
-```
-
-**结论:设备期望 FLAC 48000/2ch/16bit,且必须先进组(playing)再开 stream/start。**
+> 最后更新:2026-09-18
+> 目标设备:`esp32-player-meet`(ESP32-S3, MAC `3C:0F:02:F9:69:E4`, IP `192.168.10.245`, ESPHome **2026.9.0**)
+> 当前状态:**出声 ✅ 且零卡顿 ✅**(用户亲耳验证 + 设备侧自报 `state=2 (PLAYING)` 双重确认)
+> ⚠️ 本文件于 2026-09-18 **重写**。此前版本记载的「13B 帧头」「STREAMINFO block size 是决定性根因」
+> 「用固定 `-frame_size` 对齐 MA」「MA 靠连 6053 才不重启」等结论均经设备端源码取证**推翻**,已删除。
+>
+> 📌 **踩坑录(错误判断与教训)另见 [`SENDSPIN_PITFALLS_2026-09-18.md`](./SENDSPIN_PITFALLS_2026-09-18.md)**
+> —— 走错的路记在那里,本文件只保留验证过的真相。改这套链路前建议先看一眼。
 
 ---
 
-## 二、已落地的源码改动(本次实测使用的版本)
+## 一、角色与端口分工(先把这事钉死)
 
-运行时代码修改后需重新 `tsc` 编译并在容器内 `docker cp` 覆盖 `dist/*.js`。
+| 端口 | 归属 | 作用 |
+|---|---|---|
+| **38927** | **MusicFlow 的 Sendspin server** | 控制 + 音频**共用一条 WebSocket**(刻意避开 MA 的 8927) |
+| 8927 | Music Assistant 的 Sendspin server | 同上(MA 用) |
+| 8928 | Sendspin client(每台设备自监听) | 服务端主动拨设备时连这里 |
+| **6053** | ESPHome **Native API** | 控制面(实体/状态/服务)。**只有 HA、ESPHome Dashboard 连它**;音乐流完全不走这里 |
+| 8095 / 8097 | MA Web API / MA Stream Server | 与 Sendspin 无关 |
 
-### 1. 端口:8927 → 38927(避开 MA 独占的 8927)
-
-- `backend/src/services/sendspin/constants.ts`: `WS_PORT = 38927`(监听 `ws://:38927/sendspin`)
-- `backend/src/services/plugin/renderers/sendspin.ts`: `configSchema[port]` default/help、zh/en `documentation` 全部 8927→38927;“MA 的 8927”字样保留为说明
-- `frontend/src/views/Groups/index.vue`: `sendspinPort` ref 8927→38927(dial 端口 8928 保留)
-- `backend/src/services/sendspin/pluginConfig.test.ts`: 默认/非法回退断言 8927→38927(独立 legacy.test.ts 用 18927 保留)
-- 注释/脚本/文档同步:server.ts、index.ts、advertise.ts、queueModes.test.ts、5 份 docs 等全部 8927→38927(设备侧 8928、测试 18927 保留)
-
-> 端口运行时来源:`index.ts`(sendspin)读插件 `cfg.port`,无则回落 `WS_PORT`。**DB 里 `sendspin-renderer` 的 config 仅 `{"allow_legacy_clients":true}`,无 port 持久化** → 直接走新默认 38927,无需改 DB。
-
-### 2. 音频协商:强制 FLAC(默认 flac,对齐 MA 金标准)
-
-`backend/src/services/sendspin/server.ts` `negotiateCodec(payload)`:
-
-```ts
-// 只从 PCM/FLAC 里选,flac 优先、默认 flac(裸 opus 常被这类客户端拒收)。
-if (!Array.isArray(list)) return "flac";
-const have = new Set(list.map(f => String(f?.codec||"").toLowerCase()));
-if (have.has("flac")) return "flac";
-if (have.has("pcm")) return "pcm";
-return "flac";
-```
-
-键名兼容 `player@v1_support`(9.x 别名)与 `player_support`(老版本)。
-管线恒定 48kHz/立体声/16bit(`encoding.ts` SAMPLE_RATE/CHANNELS)。
-
-### 3. 音频二进制帧头:9B → 13B(`>BqI`,对齐 aiosendspin 金标准)
-
-`backend/src/services/sendspin/framing.ts`:
-
-```ts
-// 1B msg_type(0x04) + 8B 大端微秒时间戳 + 4B 大端 send_ahead(ms)
-export const packAudioChunk = (timestampUs, data, sendAheadMs = 0) => {
-  const head = Buffer.allocUnsafe(13);
-  head[0] = 0x04;                      // BIN_PLAYER_AUDIO
-  head.writeBigInt64BE(timestampUs, 1);
-  head.writeUInt32BE(sendAheadMs, 9);  // send_ahead
-  return new Uint8Array(Buffer.concat([head, Buffer.from(data)]));
-};
-```
-
-`parseAudioChunk` 同步改为 `subarray(13)`,返回含 `sendAheadMs`。
-> 此前 9B 头缺 send_ahead 4B,严格客户端按帧长/SEND 校验不符。
-
-### 4. `sendAudio` 填充 send_ahead
-
-`server.ts` `sendAudio(tsUs, codecData)`:
-
-```ts
-const ahead = this.group
-  ? computeCommonSendAhead([...this.group.members].map(m => ({ latencyFuncMs: m.latencyFuncMs })))
-  : 0;
-const pkt = packAudioChunk(tsUs, codecData, ahead);
-```
-
-`computeCommonSendAhead`(已 import,`group.ts`)基于成员 `latencyFuncMs`(默认 30ms)算公共值。
-send_ahead 单位推断为毫秒(与 stream/start、server/state 的 send_ahead 同源),实测中校正。
-
-### 5. 推流帧空包跳过 + FLAC 空缓冲
-
-`server.ts pushFrame`:`if (!data || data.length === 0) return;` —— ffmpeg flac 在 EOF 前常吐空缓冲,空包上 wire 会被严格客户端判 `Invalid data`。
+**38927 与 6053 是互不相干的两套协议。** 别指望 6053 能管音频,也别指望 sendspin 能读设备实体。
 
 ---
 
-## 三、部署方式(容器无代码卷挂载,代码打进镜像)
+## 二、四个真正的根因(全部真机取证,按发现顺序)
 
-1. 本地 `cd backend && npm run build`(tsc → `dist/*.js`)
-2. 挑 4 个改动文件:`dist/services/sendspin/{constants,server,framing}.js` + `dist/services/plugin/renderers/sendspin.js`
-3. scp 到宿主(192.168.10.240),解压到 `/root/mf_distpatch/...`(保持相对路径)
-4. `docker cp <补丁文件> $CID:/app/backend/dist/<同路径>` 逐文件覆盖(容器实例基于镜像,代码在容器盘;docker cp 对停止/运行容器均有效)
-5. `docker start musicflow`
+### ① 音频二进制帧头**必须是 9B** —— 决定性根因,曾导致完全无声
 
-> 注意:容器启动脚本是 `entrypoint.sh → su-exec musicflow node dist/index.js`,**跑的是编译后 dist**,src 不会实时生效。sendspin 不是市场插件(preloaded-plugins 里只有 go-music-dl)。
+设备 `sendspin-cpp` 的处理链:
+
+```
+client.cpp:process_binary_message()   只剥 1B type
+player_role.cpp:26   static constexpr size_t BINARY_TIMESTAMP_SIZE = 8;
+player_role.cpp:244  send_audio_chunk(data + 8, len - 8, timestamp, CHUNK_TYPE_ENCODED_AUDIO);
+```
+
+即:**8 字节时间戳之后,设备一律当作编码音频**。
+
+此前实现按「对齐 aiosendspin」在时间戳后又塞了 4 字节 `send_ahead`(共 13B),这 4 字节
+于是落在 payload 头部 —— 首字节 `0x00` 而不是 FLAC 同步字 `0xFF`,每包都被判坏:
+
+```
+Serious error decoding FLAC file → Failed to decode audio chunk → 无声
+```
+
+**`send_ahead` 根本不是 wire 字段** —— 整个 sendspin-cpp 源码库中 `send_ahead` **零出现**。
+它只应参与**时间线锚点**的计算(服务端内部),不下发给设备。
+
+### ② 时间线必须**按实际产出**推进(不能按喂入量)
+
+编码器攒样期(libFLAC 要攒满一块才吐帧)若把"喂进去但没吐出来"的量算成已播出,
+时间线会超前约 75ms → 设备报 `Lost sync (75006us off)` → 往音乐里**插静音**补空 → 听感卡顿。
+
+```
+produced > 0 ? 按产出推进 : 不推进
+```
+
+零产出超过 `STALL_GRACE_US`(500ms)才降级为按喂入量推进,避免编码器真坏时时间线冻结。
+
+### ③ pacing 必须**绝对时刻调度**(固定 sleep 会累积漂移)
+
+`await sleep(25)` 之外还有 encode/send 开销,实际周期约 26ms 而时间戳只推 25ms →
+每包落后 1~1.8ms 并**单向累积**(实测跑到 −611ms)。设备 hard sync 阈值只有 **5ms**
+(`sync_task.cpp:36 HARD_SYNC_THRESHOLD_US = 5000`),越界就插静音 → 「一卡一卡」。
+
+```
+dueMs = paceWallMs0 + (i * FRAME_MS) / speed;
+await sleep(dueMs - Date.now());   // 自校正,±0.5ms 振荡
+```
+
+### ④ codec **PCM 优先,FLAC 兜底**
+
+- **FLAC**:服务端 libFLAC 要攒满 4096 样本才吐帧(85ms),而喂料是 25ms 粒度 —— 天然错位;
+  设备端还要每 85ms 用 micro-flac 解一帧。
+- **PCM**:设备走 `CHUNK_TYPE_PCM_DUMMY_HEADER`,`decode_audio_chunk()` 里只是一条 `std::memcpy`
+  —— 零解码、零攒样。代价只有带宽(48k/2ch/16bit ≈ 1.536 Mbps),局域网完全可接受。
+
+FLAC 链路在上述 ①②③ 修复后同样可用,作为「设备不支持 PCM」时的兜底。
+默认偏好已做成**插件配置项 `preferred_codec`**,可在 Sendspin 播放器插件页切换。
 
 ---
 
-## 四、已验证结果(本次实测,设备日志 devstate.out)
+## 三、仍然成立的事实(这些是真机量出来的,别再重新试错)
 
-设备已成功连到 MusicFlow Sendspin,并走完 FLAC 播放链路:
+**ffmpeg 链路**
+- 容器内 ffmpeg = `/app/backend/node_modules/ffmpeg-static/ffmpeg`(**无系统 ffmpeg**,7.0.2-static)。
+- flac 编码器 sample_fmt 支持 `s16 s32`;必须带 `-sample_fmt s16`(否则 f32le 默认编 s32 → 24bit)。
+- 常驻 ffmpeg 输出带容器头:`fLaC` + STREAMINFO(4+34) + VORBIS_COMMENT + 8KB PADDING = **8288B**,
+  首帧 sync 在偏移 8288,必须剥掉。
+- 首帧前有 **~1.1s lookahead 零输出**,`-flush_packets 1` 无效 → 短音频(≤1.1s)必须 `flush()` 逼尾帧。
+- STREAMINFO 应**从真实流提取**,不要硬编码。
+- ffmpeg 48kHz 自选 block size = **4608**;libFLAC 默认 = 4096(compression≥1)。两者不同源,别混为一谈。
 
-```
-Connected to server MusicFlow Sendspin with id Ru0wsx9... (reason: discovery)
-Group update - state: playing, id: 3C:0F:02:F9:69:E4
-Stream Started
-Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
-speaker_source_media_player State changed to PLAYING
-speaker_mixer Starting / i2s_audio.session Starting / ring_buffer created (96000)
-State changed to PLAYING
-```
+**时间戳模型**
+- `ts = 锚点 + 累计实际样本数 / SR`(样本精确,**绝不按调度粒度**)。
+- 锚点 = `nowUs() + SendspinGroup.commonSendAheadUs()`。
+- `commonSendAheadUs()` 是**唯一出口**:`sendAudio` 与锚点都必须用它。曾有版本误把 MA 的
+  `DEFAULT_INITIAL_DELAY_US=250ms` 当独立常量 → 锚点 250ms vs send_ahead 800ms → `delta` 恒 −550ms
+  → 设备收首块即判「已过期」→ 立即吐字节 → underrun → **日志全绿但无声**。
+- 设备上报 `output_delay/required_lead/min_buffer` 为 0 时必须视为「未提供」回落缺省 800ms
+  (ESPHome 实测恒报 0,是表达能力缺失,不是真的不需要 buffer)。
 
-- MusicFlow 视角:设备持续 `PLAYING`,pos 连续推进(`pos=26.3→31.2→…`),一曲结束后 `playCurrent idx=280` 自动续播下一首(pos 归 0 dur=263 再推进)。
-- 说明:**协议层、组状态、stream 生命周期、FLAC codec_header 全部被设备接受** —— 相比改动前只停在 init/idle 已是根本性突破。
-- 设备日志中曾出现一次 `sendspin.player: Failed to send audio chunk`(见风险点)。
+**不要等设备回 `server/activate`** —— 真机明确 `Unhandled server message type: server/activate`,
+永不回;等它 = 15s activation timeout 自杀连接。
+
+**服务端不要拨设备自身端口(8928)** —— 被判竞争第二个 server,回 `goodbye: another_server`
+并被永久抑制重拨。正确方向是**设备经 mDNS 自行拨入 38927**。
 
 ---
 
-## 五、✅ 最终修复(2026-09-17 闭环)— 三个根因
+## 四、出声判据(设备侧)
 
-「无声音」不是一个 bug,是**三个独立缺口叠加**。全部修完后真机出声。
+| 层 | 判据 |
+|---|---|
+| 协议 | `Processed new codec header: <codec>, 48000 Hz, 2 ch, 16-bit` |
+| 播放器 | `State changed to PLAYING` |
+| **出声三件套** | `speaker_mixer Starting` → `i2s_audio.speaker Starting` → `96000 ring_buffer [speaker_task]` |
+| **6053 只读面** | `media_player state=2 (PLAYING)`(见第六节) |
 
-### 根因 1(决定性):FLAC STREAMINFO 的 block size 写错,严格解码器逐帧拒收
+注意 `speaker_mixer Starting` 只在**首次**打印;`19200 ring_buffer` 早于三件套出现。
 
-`flacCodecHeaderB64()` 的 `min/max block size` 写成 **4608**。实测 ffmpeg:
+---
+
+## 五、ffmpeg 端坑:接口原则
+
+- 鉴权失败会**静默返回空 result**(不抛错)→ 手动为空要当失败处理,并显式审计Mock。
+- 不要信任 `result[0]`,用 `result.find(...)` 按 `"xxx"` 精确定位。
+- 付费/会员歌曲缺源是正常的,**不要重试也不要递归调用**;判空/判 `"xxx"` 直接返回 null。
+- 接口返回的结构务必**先看真实响应再写代码**,别靠猜字段名。
+
+---
+
+## 六、ESPHome 只读监控(6053)—— 新增能力
+
+**设备没有被当做 FLAC 这条路为了让服务端能自证「推的流真的在播」,反向建立一条 6053 只读连接。**
+
+配置:插件页 `Sendspin 播放器` → `ESPHome 只读监控(6053)` 开关 + `ESPHome API 加密密钥`。
+设备 IP **自动派生**(取自 Sendspin 连接的对端地址),无需填写。
+
+实测出来的能力边界(`featureFlags = 0x12520d`):
+
+| 能做 | 不能做 |
+|---|---|
+| 读 `state`(`NONE/IDLE/PLAYING/PAUSED/...`) | ❌ `SEEK` —— 设备未宣告 |
+| 读 `volume`(speaker 硬件输出音量) | ❌ `NEXT_TRACK` / `PREVIOUS_TRACK` |
+| PAUSE / STOP | ❌ `PLAY` —— **只能停不能起** |
+| 保活(喂 `reboot_timeout` 计时) | ❌ 音量不建议在这里设(与 Sendspin group volume 相乘会打架) |
+
+根因:6053 上能看到的实体是 `platform: speaker_source` 的 `Speaker Media Player`
+(yaml 里 `platform: sendspin` 那个没写 `name`,ESPHome **不会暴露无 name 的实体**),
+它面前只有一条 PCM 流,**没有曲目和队列的概念**。切歌与进度的权威天然在服务端。
+
+查询出口:`GET /v1/sendspin/esphome`(**不回显 PSK**),或在服务端日志看 `[Esphome] 6053 已连接 ...`。
+
+**设备周期性重启的真凶**(曾每 15 分钟 `No clients; rebooting`):
+`api.reboot_timeout` 默认 15min,只认 6053 上的连接。修法是固件 `api: reboot_timeout: 0s`
+(`0s` = 关闭,**`60s` 是反方向**会变成每分钟重启),或由 HA 的 ESPHome 集成常驻。
+⚠️ 调过这部分的话注意:**调试脚本自己连着 6053 时就是一个 client,会掩盖这个问题。**
+
+---
+
+## 七、部署方式(容器无代码卷挂载)
 
 ```bash
-ffmpeg -ar 48000 -ac 2 -f f32le -i seg.pcm -c:a flac -f flac seg.flac
-# STREAMINFO: 664c6143 00000022 1000 1000 ...
-#                              ^^^^ ^^^^ min=max=0x1000=4096
+# 本机
+cd backend && npx tsc
+scp -P 35320 -i "E:\SSH私钥\mykey\mykey" dist/... root@192.168.10.240:/root/
+# 服务器
+docker cp /root/xxx.js musicflow:/app/backend/xxx.js
+docker exec musicflow chown -R musicflow:musicflow /app/backend
+docker restart musicflow
 ```
 
-设备日志的**精确截断点**是判据:
-
-```
-State changed to PLAYING
-Created ring buffer with size 19200     ← 解码环形区建好了
-                                        ← 到此为止!下面三行永不出现:
-                                        speaker_mixer Starting
-                                        i2s_audio.speaker Starting
-                                        Created ring buffer with size 96000 [speaker_task]
-```
-
-解码器按 STREAMINFO 校验每个 frame header 的 block size,不符即整帧作废 →
-解不出音频 → 不启动输出链路 → 无声但状态是 PLAYING(极具迷惑性)。
-
-改成 **4096/4096** 后,三条关键日志立刻出现。断言已锁进 `encoding.test.ts`
-(注释写明「改回 4608 会重现无声」)。
-
-### 根因 2:冷起播是空操作(热路径缺口,与 FLAC 无关)
-
-`POST /peers/:id/play` → `transport("play")` → `player.resume()`,而 sendspin 的:
-
-```ts
-async resume() { if (srv) pumpFor(srv, srv.group(clientId)).resume(); }  // 旧
-```
-
-在没有 pump 时是**空操作**。`resumePlayback()` 见 `q.isActive === true` 直接早退
-(currentIndex 有效但从未起播)→ 无 `playMedia`、无 `stream/start`、无 pump = 静默。
-
-对照 DLNA:它的 `resume() = playDevice()`(重发 SetAVTransportURI)= 真起播,
-所以 DLNA 从未暴露这个缺口。sendspin 必须自己补「冷起播走 playMedia」:
-
-```ts
-async resume() {
-  const pump = pumpFor(srv, srv.group(clientId));
-  if (pump.active) { pump.resume(); return; }   // 在跑 → 原地恢复
-  const snap = getQueueController().snapshot(clientId);      // 没跑 → 真起播
-  const item = snap.currentIndex >= 0 ? snap.items[snap.currentIndex] : undefined;
-  if (!item) return;
-  await this.playMedia(await getQueueController().resolveItem(item), getEffectiveBaseUrl());
-}
-```
-
-配套:`QueueController.resolveItem` 由 `private` 改 `public`(补全 songId-only item 的元数据)。
-
-### 根因 3:脏 dial 目标导致 `goodbye: another_server` 死循环
-
-`dial_targets.json` 里残留了设备**自身端口** `192.168.10.245:8928`。服务端每 60s 拨过去,
-设备判为「竞争第二个 server」→ `goodbye: another_server` 踢回 → 我们把它记进 `noAutoRedial`
-永久抑制 → 表现为「每 5~6 分钟重拨一次、连上就被踢」的假重连循环。
-
-正确方向是**设备经 mDNS 发现服务端后自己拨入 38927**(Client-Initiated),
-不是服务端拨设备。删除该 dial 目标后链路自愈。
-
-> 附带教训:`dialPlayerInner` 曾等设备回 `server/activate` 才认定激活 —— 真机永不回
-> (它明确打 `Unhandled server message type: server/activate`),会 15s activation timeout 自杀连接。
-
-### 验证结果(设备侧日志,已验证序列见 `SENDSPIN_ESPHOME_DEBUG.md` §4.1)
-
-```
-Stream Started
-Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
-sendspin_id: current
-State changed to PLAYING
-Created ring buffer with size 19200
-speaker_mixer:369 Starting                        ← 修复后才出现
-i2s_audio.speaker:070 Starting                    ← 修复后才出现
-Created ring buffer with size 96000 [speaker_task] ← 修复后才出现
-```
-
-连续切歌 2 次:`Stream ended → IDLE → Stream Started → PLAYING`,**零 `Stopped` 事件**,
-扬声器保持不拆;服务端 FLAC 分段稳定输出(~100KB/0.5s);设备 status 持续 PLAYING、position 连续推进。
+⚠️ **只能用 `docker restart`** —— `docker compose up --force-recreate` 会抹掉 docker cp 的补丁。
 
 ---
 
-## 五·附 原始怀疑项(保留作背景,均已被上述结论取代)
+## 八、环境速查
 
-### A. ffmpeg flac EOF 前零输出 → **已修,见上文分段 FLAC**
-
-单条持续 ffmpeg flac 确实只在 EOF flush,必须**分段 FLAC**(每段独立 `fLaC`+STREAMINFO)。
-`encoding.ts` 的 `FfmpegPcmEncoder` 已改为按 `SEGMENT_PCM_BYTES`(0.5s f32 = 192000B)关段吐流。
-> 注意:分段解决的是「有没有音频字节」;它**不能**解决根因 1 的 STREAMINFO 失配 ——
-> 两者叠加才导致「分段流已下发但设备仍无声」。
-
-### B. `send_ahead` 单位 **未证实为根因**,按毫秒填(默认 30ms)保持现状。
-
-### C. 设备 `Failed to send audio chunk` **低优先级**,未影响下行出声,未再复现。
-
-### D. 换 FLAC 编码实现 **不需要** —— ffmpeg 分段 + 正确 STREAMINFO 已可出声。
+- 宿主:`192.168.10.240`,`ssh -i "E:\SSH私钥\mykey\mykey" -p 35320 root@192.168.10.240`
+- 容器:`musicflow`(镜像 `ray5378/musicflow:latest`,`entrypoint.sh → node dist/index.js`)
+- 数据卷:`/vol1/1000/SSD/docker/musicflow/data`(`musicflow.db`、`sendspin/{identity.key,dial_targets.json,pairing_store.json}`)
+- 设备 Native API PSK:`esp32-player-meet` yaml 中 `api: encryption: key` 的值
+- 设备日志采集:`aioesphomeapi` 连 6053 订阅 VERBOSE
 
 ---
 
-## 六、风险点与注意事项
+## 九、已知遗留
 
-1. **ffmpeg flac 流式输出缺失**(见五·A)是最大风险,是“无声”最可能根因。此风险在会话中已被预判(`FfmpegPcmEncoder` 结构 `f32→持续 ffmpeg→60ms 兜底`),需改造后重测。
-2. **容器部署无代码卷挂载**:每次改代码要 `tsc` + `docker cp` 覆盖,易漏文件/路径。建议记录当前部署的 dist 文件集,或日后改回代码卷映射以便热更。
-3. **端口 38927 与 MA 8927 共存**:设备同一时刻连到哪个 sendspin server 由 mDNS/`last played server` 决定;设备日志出现 `Persisted last played server hash`,若反复横跳需确认 MA 是否仍在广播。
-4. **DB 持久化**:sendspin-renderer 的 `port` 若未来被写入 plugins.config,会覆盖新默认;当前未持久化 port,仅 `allow_legacy_clients`。
-5. **版本同步**:改完代码记得 `backend/package.json` + `CHANGELOG.md` 升版并打 tag,镜像 CI 才产新版本;文档(PLUGIN_DEV/ARCHITECTURE/README)同步。
-6. **测试无法本地跑**:本机 node_modules/better-sqlite3 原生模块 `NODE_MODULE_VERSION` 127 ≠ 本机 Node 137,预先存在的环境问题,未擅自 npm rebuild;本次未在本地跑测试。
-7. **real test 与模拟器差异**:本地脚本(sendspin-sim-*.py/mjs)为协议自洽而设计,可能未模拟 ESPHome 的严格校验(帧长/FLAC 段/编解码),真机验证仍以上述设备日志为准。
-
----
-
-## 七、环境速查
-
-- 宿主:192.168.10.240,`ssh -i E:\SSH私钥\mykey\mykey -p 35320 root@192.168.10.240`
-- 容器:`docker ps -aq --filter name=musicflow`(镜像 `ray5378/musicflow:latest`;启动 `entrypoint.sh→ node dist/index.js`)
-- 数据卷:`/vol1/1000/SSD/docker/musicflow/data`(含 `musicflow.db`、`sendspin/{identity.key,dial_targets.json,pairing_store.json}`)
-- 设备:192.168.10.245,`esp32-player-meet`(3C:0F:02:F9:69:E4),esphome 2026.9.0,设备 ws `ws://192.168.10.245:8928/sendspin`(dial 端口)
-- 设备日志采集:240 上 `bash /root/devstate_run.sh`(aioesphomeapi 订阅 media_player 状态+verbose,写 `/root/devstate.out`)
-- MA 金标准:mass 容器 host 网络,独占 8927/web 8095,账号 xyz5378(见 MA web)——只做金标准,不改其配置
+- `stream/end` 之后缺「丢弃已过期音频」的守卫(对应 MA `_stream_started`)。
+- 切歌时 `finishPlayback` 会被调用两次。
+- `broadcastGroupState` 是死代码(`PlayerStatePayload` 是 client → server 方向)。
+- FLAC 优先模式在本轮修复后**尚未**重跑完整真机流畅度验证(默认已是 PCM)。

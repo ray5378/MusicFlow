@@ -122,14 +122,15 @@ describe("sendspin legacy 明文直通", () => {
       // FLAC 必须带 codec_header(STREAMINFO 的 base64),否则严格客户端拒收整条 stream/start。
       expect(typeof start.payload.player.codec_header).toBe("string");
       expect(start.payload.player.codec_header.length).toBeGreaterThan(0);
-      // 音频:单帧 RAW BINARY,不分片不加密。13B 头 = [0x04][i64 μs][u32 send_ahead],data 从 13 起。
+      // 音频:单帧 RAW BINARY,不分片不加密。**9B 头** = [0x04][i64 μs],data 从 9 起。
+      // ⚠️ 不得是 13B(多 4B send_ahead)—— 设备侧会把那 4B 当 FLAC 数据 → 每包解码失败。
       conn.sendAudio(123456789n, new Uint8Array([1, 2, 3]));
       await waitFor(() => binaries.length > 0);
       const f = binaries[0];
       expect(f[0]).toBe(0x04);
       expect(f.readBigInt64BE(1)).toBe(123456789n);
-      expect(f.readUInt32BE(9)).toBe(0); // 无组时 send_ahead = 0
-      expect([...f.subarray(13)]).toEqual([1, 2, 3]);
+      expect([...f.subarray(9)]).toEqual([1, 2, 3]);
+      expect(f.length).toBe(9 + 3);
       // 真推流:合成 20ms PCM 经组协商编码器(默认 flac)下发,legacy 端收到帧为 0x04 头。
       binaries.length = 0;
       const srv2 = getSendspinServer()!;
@@ -142,7 +143,7 @@ describe("sendspin legacy 明文直通", () => {
       if (af) {
         expect(af[0]).toBe(0x04);
         expect(af.readBigInt64BE(1)).toBe(987654321n);
-        expect(af.length).toBeGreaterThan(13);
+        expect(af.length).toBeGreaterThan(9);
       }
     } finally {
       ws.terminate();
@@ -173,13 +174,31 @@ describe("negotiateCodec 键名兼容", () => {
     const fmts = [{ codec: "flac", channels: 2, sample_rate: 48000, bit_depth: 16 }];
     expect(negotiateCodec({ "player@v1_support": { supported_formats: fmts } })).toBe("flac");
     expect(negotiateCodec({ player_support: { supported_formats: fmts } })).toBe("flac");
-    // 无声明/非法声明 → 默认 flac(2026-09-17 真机:flac 优先,不再回落 pcm)。
+    // 无声明/非法声明 → 默认 flac(带 codec_header,严格客户端唯一稳妥解)。
     expect(negotiateCodec({})).toBe("flac");
     expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "mp3" }] } })).toBe("flac");
-    // flac 优先:同时声明 flac+pcm 必选 flac;仅 opus 时次选 pcm;默认 flac。
+    // **PCM 优先**(2026-09-17 改,真机实测):设备 FP32 解码 FLAC 每 85ms 要解
+    // 4096 样本帧,CPU 峰值高且易失步;PCM 零解码(memcpy)、零攒样,是 ESPHome 最优解。
     expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "opus" }, { codec: "flac" }] } })).toBe("flac");
-    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "flac" }, { codec: "pcm" }] } })).toBe("flac");
+    // 同时声明 flac+pcm → **必须选 pcm**(这是本次改动的核心断言)
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "flac" }, { codec: "pcm" }] } })).toBe("pcm");
     expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "opus" }, { codec: "pcm" }] } })).toBe("pcm");
     expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "opus" }] } })).toBe("flac");
+  });
+
+  it("preferred_codec=flac 时反转为 FLAC 优先,设备不支持仍自动回落", async () => {
+    const { negotiateCodec, normalizeCodecPreference } = await import("./server.js");
+    const both = { "player@v1_support": { supported_formats: [{ codec: "flac" }, { codec: "pcm" }] } };
+    // 偏好 flac → 即便设备也支持 pcm,仍选 flac。
+    expect(negotiateCodec(both, "flac")).toBe("flac");
+    // 同一个 payload,偏好 pcm → 选 pcm(与上一行构成「顺序由偏好决定」的完整对)。
+    expect(negotiateCodec(both, "pcm")).toBe("pcm");
+    // 偏好只是**优先**不是强制:设备不支持首选就退到另一种。
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "pcm" }] } }, "flac")).toBe("pcm");
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "flac" }] } }, "pcm")).toBe("flac");
+    // 非法/缺失偏好一律收敛到 pcm,绝不产出 undefined 让下游走错分支。
+    expect(normalizeCodecPreference(undefined)).toBe("pcm");
+    expect(normalizeCodecPreference("opus")).toBe("pcm");
+    expect(normalizeCodecPreference("FLAC")).toBe("flac");
   });
 });

@@ -29,6 +29,8 @@ import {
   castToAirPlayDevice,
 } from "../airplay/control.js";
 import { PlaybackState } from "../player/types.js";
+import { nowUs } from "../sendspin/clock.js";
+import { FIRST_FRAME_LEAD_US } from "../sendspin/streamEngine.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("ANNOUNCE");
@@ -268,18 +270,50 @@ async function announceSendspin(opts: AnnounceOptions): Promise<{ targets: numbe
     }
     if (conn) conn.announceStream();
     try {
-      const frameSamples = SAMPLE_RATE * CHANNELS * 100 / 1000;
+      // 固定 20ms 喂料(960 样本/声道):播报要短延迟出首声,粒度越小越早凑满首块。
+      // MA `chunk_duration_us = 25_000` 是**稳态推流**的粒度,播报属一次性短音频,
+      // 粒度取 20ms 让 libFLAC 尽快凑满 4096 样本的块(≈85ms)并回调首帧。
+      // ⚠️ 2026-09-17:此处已不再依赖任何编码器前瞻 —— flac 走**进程内 libFLAC**
+      // (`LibFlacEncoder`),`process_interleaved()` 同步返回、每回调恰好一帧,
+      // 无管道、无 ~1.1s 前瞻。flush() 只用于冲掉不足一块的尾帧。
+      const frameSamples = SAMPLE_RATE * CHANNELS * 20 / 1000;
       const endCap = g.current && g.current.durationMs > 0 ? Math.max(0, g.current.durationMs - 500) : Infinity;
-      const baseTs = g.timelineBaseUs;
+      let cursor = g.timelineBaseUs;
+      let firstFrame = true;
       const deadline = Date.now() + (opts.timeoutMs ?? 300000);
       for (let off = 0; off < pcm.length; off += frameSamples) {
         if (Date.now() > deadline) break;
         const slice = pcm.subarray(off, Math.min(off + frameSamples, pcm.length));
-        const posMs = Math.min(savedPos + Math.round((off / frameSamples) * 100), endCap);
+        const posMs = Math.min(savedPos + Math.round((off / frameSamples) * 20), endCap);
         g.positionMs = posMs;
-        await g.pushFrame(baseTs + BigInt(posMs * 1000), slice);
-        await new Promise(r => setTimeout(r, 100));
+        // 时间戳与曲库推流同一套模型(MA `push_stream.py:1313`):
+        // 首块锚在「当时墙钟 + 组公共 send_ahead」,之后**按实际产出样本数**累加。
+        // 锚点必须用与帧头同源的 send_ahead,否则 delta≠0 → 设备立即吐字节 → 断流。
+        if (firstFrame) {
+          firstFrame = false;
+          const aheadUs = g.commonSendAheadUs();
+          cursor = nowUs() + BigInt(Math.max(aheadUs, FIRST_FRAME_LEAD_US));
+        }
+        const produced = Number(await g.pushFrame(cursor, slice)) || 0;
+        cursor += BigInt(Math.round(((produced > 0 ? produced : Math.floor(slice.length / CHANNELS)) / SAMPLE_RATE) * 1_000_000));
+        g.timelineBaseUs = cursor;
+        await new Promise(r => setTimeout(r, 20));
       }
+      // 逼出编码器内部尚未吐出的尾帧:不 flush 则 ≤1.1s 的短播报可能一帧都没出去
+      // (ffmpeg 前瞻窗口,与调度粒度无关);顺带让首段拿到真实 STREAMINFO。
+      for (const c of [...g.members]) {
+        const enc = g.encoderFor(c);
+        if (!enc.flush) continue;
+        try {
+          const tail = await enc.flush();
+          for (const ck of tail) {
+            if (!ck?.data || ck.data.length === 0) continue;
+            c.sendAudio(cursor, ck.data);
+            cursor += BigInt(Math.round(((ck.frameSamples ?? 0) / SAMPLE_RATE) * 1_000_000));
+          }
+        } catch { /* 尾帧失败不影响主流程 */ }
+      }
+      g.timelineBaseUs = cursor;
     } finally {
       if (joined && conn) g.remove(conn);
     }

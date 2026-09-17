@@ -11,13 +11,14 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
-import { SendspinServer, type SendspinConnection } from "./server.js";
+import { SendspinServer, type SendspinConnection, type SendspinCodecPreference, normalizeCodecPreference } from "./server.js";
 import { WS_PORT } from "./constants.js";
 import { PairingStore } from "./pairingStore.js";
 import { PairingCoordinator } from "./pairServer.js";
 import { stopGroupPump } from "./streamEngine.js";
 import { advertiseSendspinServer, unadvertiseSendspinServer } from "./advertise.js";
 import { startPlayerDiscovery, stopPlayerDiscovery } from "./discover.js";
+import { esphomeBridge, ESPHOME_API_PORT, type EsphomeDeviceMirror } from "./esphomeBridge.js";
 // 类型-only 导入(编译期擦除,零运行时边):缓存单例的类型推导,
 // 避开 player/index ↔ sendspin 的模块环(TDZ,见下 ensureControllers 注释)。
 import type * as PlayerIndex from "../player/index.js";
@@ -72,6 +73,10 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   if (!conn.clientId) return; // activate 前不会有 clientId;防御
   // 显示名用客户端上报的 name(如 ESPHome 的 "Speaker Media Player"),无则回退 clientId。
   const displayName = conn.name || conn.clientId;
+  // ESPHome 6053 **只读桥接**:设备 IP 从 Sendspin 连接里自动派生(见 server.ts
+  // normalizeRemoteHost),用户无需手工填 host。这里只负责登记目标,真正的连接
+  // 由 esphomeBridge 按插件配置决定是否建立。
+  esphomeBridge.attach(conn.remoteHost);
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   qc.registerSendspinDevice(conn.clientId, displayName);
   // 同步到 peer 层(sendspin:<clientId>)—— 前端切换器 / /v1/peers / /v1/play 才能发现并投送。
@@ -82,20 +87,44 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
 
 /** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。
  *  导出供单测覆盖默认/非法回退。 */
-export function readSendspinPluginConfig(): { allowLegacyClients: boolean; port: number; autoDiscover: boolean } {
+export function readSendspinPluginConfig(): {
+  allowLegacyClients: boolean;
+  port: number;
+  autoDiscover: boolean;
+  preferredCodec: SendspinCodecPreference;
+  esphomeMirror: boolean;
+  esphomePsk: string;
+  esphomePort: number;
+} {
+  const fallback = {
+    allowLegacyClients: true,
+    port: WS_PORT,
+    autoDiscover: true,
+    preferredCodec: "pcm" as SendspinCodecPreference,
+    esphomeMirror: false,
+    esphomePsk: "",
+    esphomePort: ESPHOME_API_PORT,
+  };
   try {
     const row = sqlite
       .prepare("SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'")
       .get() as any;
     const cfg = row?.config ? JSON.parse(row.config) : {};
     const port = Number(cfg?.port);
+    const apiPort = Number(cfg?.esphome_port);
     return {
       allowLegacyClients: cfg?.allow_legacy_clients !== false,
       port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : WS_PORT,
       autoDiscover: cfg?.auto_discover !== false,
+      // 只认 pcm / flac 两个值,非法或缺省一律 pcm(2026-09-17 ESP32 真机实测最优)。
+      preferredCodec: normalizeCodecPreference(cfg?.preferred_codec),
+      // ESPHome 6053 只读桥接:默认关闭(需要设备 api.encryption.key 才能工作)。
+      esphomeMirror: cfg?.esphome_mirror === true,
+      esphomePsk: typeof cfg?.esphome_psk === "string" ? cfg.esphome_psk.trim() : "",
+      esphomePort: Number.isInteger(apiPort) && apiPort >= 1 && apiPort <= 65535 ? apiPort : ESPHOME_API_PORT,
     };
   } catch {
-    return { allowLegacyClients: true, port: WS_PORT, autoDiscover: true };
+    return fallback;
   }
 }
 
@@ -112,11 +141,19 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   // 控制器单例启动期一次抓取并 fail-fast:热路径(激活/停止/断开)不再动态 import。
   await ensureControllers();
   const pairingStore = await PairingStore.open(identityDir);
+  // ESPHome 6053 只读桥接:按插件配置决定是否常驻 Native API 客户端(保活 + 状态镜像)。
+  // 必须在 listen 之前:设备上线时 attach 才能立即建连接。
+  esphomeBridge.configure({
+    enabled: pluginCfg.esphomeMirror,
+    psk: pluginCfg.esphomePsk,
+    port: pluginCfg.esphomePort,
+  });
   const srv = await SendspinServer.create({
     pairkeys: identity,
     identityDir,
     serverName: "MusicFlow Sendspin",
     allowLegacyClients: pluginCfg.allowLegacyClients,
+    preferredCodec: pluginCfg.preferredCodec,
     onActivated: (conn) => void registerServerPlayer(srv, conn),
     onClosed: async (conn) => {
       // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
@@ -157,6 +194,8 @@ export async function stopSendspinService(): Promise<void> {
     redialTimer = null;
   }
   stopPlayerDiscovery();
+  // 插件停用 → 断开全部 6053 只读连接,零常驻资源(与 socket/mDNS 一致)。
+  esphomeBridge.stop();
   const srv = getServer();
   if (!srv) return;
   unadvertiseSendspinServer();
@@ -297,4 +336,19 @@ export function isSendspinEnabled(): boolean {
   } catch {
     return false;
   }
+}
+
+/** ESPHome 6053 只读桥接状态快照(供 /v1/sendspin/esphome 与排障日志消费)。 */
+export function listEsphomeMirror(): EsphomeDeviceMirror[] {
+  return esphomeBridge.snapshot();
+}
+
+/** 插件配置保存后的热更新入口:重读配置并重配 6053 桥接。PSK/端口变化会重建连接。 */
+export function reconfigureEsphomeMirror(): void {
+  const cfg = readSendspinPluginConfig();
+  esphomeBridge.configure({
+    enabled: cfg.esphomeMirror,
+    psk: cfg.esphomePsk,
+    port: cfg.esphomePort,
+  });
 }

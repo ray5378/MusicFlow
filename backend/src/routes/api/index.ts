@@ -881,7 +881,18 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
     try {
       const { getSendspinServer } = await import("../../services/sendspin/index.js");
       const srv = getSendspinServer();
-      if (srv) srv.allowLegacyClients = (body.config as any)?.allow_legacy_clients !== false;
+      if (srv) {
+        srv.allowLegacyClients = (body.config as any)?.allow_legacy_clients !== false;
+        // 默认编码热切换:只影响**之后**建立的新连接/新起播流,当前这条流不断
+        // (改完后重新投一次即可按新 codec 出声)。
+        const { normalizeCodecPreference } = await import("../../services/sendspin/server.js");
+        srv.preferredCodec = normalizeCodecPreference((body.config as any)?.preferred_codec);
+      }
+      // ESPHome 6053 只读桥接热更新:开关 / PSK / 端口变化会重建连接(详见 esphomeBridge)。
+      try {
+        const { reconfigureEsphomeMirror } = await import("../../services/sendspin/index.js");
+        reconfigureEsphomeMirror();
+      } catch { /* 服务未运行时忽略 */ }
     } catch { /* 服务未运行时忽略,下次启动读配置 */ }
     // 端口变更需重启监听才生效:自动重启服务(已连客户端断开后按记住目标重拨)。
     try {
@@ -2748,6 +2759,42 @@ apiRoutes.get("/v1/sendspin/clients", async (c) => {
       };
     });
   return c.json({ clients, enabled: true, port: srv.port });
+});
+
+apiRoutes.get("/v1/sendspin/esphome", async (c) => {
+  // ESPHome 6053 **只读桥接**状态:设备侧真实回眸的 media_player state / volume。
+  // 用途 = 服务端之外的独立判据(「推的流有没有真的在播」),不可用于控制
+  // (设备未宣告 SEEK / NEXT_TRACK / PLAY,且音量应留在 Sendspin group volume)。
+  const { getSendspinServer } = await import("../../services/sendspin/index.js");
+  const { esphomeBridge } = await import("../../services/sendspin/esphomeBridge.js");
+  const srv = getSendspinServer();
+  const cfg = esphomeBridge.currentConfig();
+  return c.json({
+    enabled: srv ? cfg.enabled : false,
+    // ⚠️ 永远不要把 PSK 回显给前端,只回报是否配置。
+    pskConfigured: !!cfg.psk,
+    port: cfg.port,
+    devices: srv ? esphomeBridge.snapshot() : [],
+  });
+});
+
+apiRoutes.post("/v1/sendspin/esphome/test", adminMiddleware, async (c) => {
+  // 一次性握手探针:用用户**此刻填的** PSK 立即验证,不影响常驻桥接实例。
+  // host 不必传 —— 默认取当前任意已连 Sendspin 设备的对端 IP(见 remoteHost)。
+  const { probeEsphome } = await import("../../services/sendspin/esphomeBridge.js");
+  const { getSendspinServer } = await import("../../services/sendspin/index.js");
+  const body = await c.req.json().catch(() => ({} as any));
+  const psk = typeof body?.psk === "string" ? body.psk.trim() : "";
+  const portRaw = Number(body?.port);
+  const port = Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535 ? portRaw : 6053;
+  let host = typeof body?.host === "string" ? body.host.trim() : "";
+  if (!host) {
+    const srv = getSendspinServer();
+    host = srv ? [...srv.clients.values()].map((conn) => conn.remoteHost).find(Boolean) ?? "" : "";
+  }
+  const r = await probeEsphome(host, psk, port, 10_000);
+  // 失败不 500:这是「测试」语义,把原因交给前端展示即可。
+  return c.json(r);
 });
 
 apiRoutes.get("/v1/sendspin/pairing/attempts", adminMiddleware, async (c) => {

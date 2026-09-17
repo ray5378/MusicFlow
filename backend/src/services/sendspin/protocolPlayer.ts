@@ -43,12 +43,19 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       if (conn) {
         conn.group = g;
         g.add(conn); // 成员入组,推流才真正下发
-        // 起播宣告:先组状态(playing)再 stream/start,对齐 aiosendspin 的
+        // 起播宣告:先组状态(playing),**再** stream/start —— 对齐 aiosendspin 的
         // `group/update(playing) → stream/start`(见 MA 真机:前者先到)。此前我们
         // 反着发(stream/start 在前),组状态仍 stopped 时设备端直接忽略 stream/start,
         // 无 format 不播 → ESPHome 真机一直不进入 PLAYING 的根因在此。
+        //
+        // ⚠️ stream/start **不能在这里立刻发**:下面 pump.play() 要先解析网络源 + ffmpeg
+        // 解码整曲,实测耗时可达 **10s**(长曲更久)。若 stream/start 先发而首块音频
+        // 10s 后才到,设备侧会在等待中丢弃该流 —— 表现为收到 `Stream Started` 但
+        // **不做 codec header 处理**、扬声器不启动 = 无声(2026-09-17 真机实锤)。
+        // MA 的解法(player/v1.py `_pending_stream_start`)正是把这个消息**推迟到
+        // 第一块音频到达时**才发 —— 我们同样用 pump 的 onFirstFrame 回调触发。
         conn.sendGroupUpdate();
-        conn.announceStream();
+        g.pendingAnnounce = conn;
       }
       // 起播即推 media_changed(HA 卡片歌词/封面即时跟随,不必等 2s 轮询;
       // 对齐 DLNA castToDevice 的 media_changed + player_refresh)。

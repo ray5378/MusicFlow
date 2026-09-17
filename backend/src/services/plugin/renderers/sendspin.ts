@@ -47,11 +47,39 @@ export const sendspinRendererManifest: PluginManifest = {
       help: "兼容前加密时代客户端(如 ESPHome/sendspin-cpp、aiosendspin<7):它们发明文 client/hello、无 Noise 加密。开启后这类设备可直连播(配对不可用,流量明文);关闭则仅合规加密客户端可连。对照 MA 的 allow_legacy_clients(默认开)。",
     },
     {
+      key: "preferred_codec",
+      label: "默认音频编码",
+      type: "select",
+      default: "pcm",
+      options: [
+        { label: "PCM(推荐,零延迟)", value: "pcm" },
+        { label: "FLAC(省带宽)", value: "flac" },
+      ],
+      help: "推流优先使用的编码。PCM:服务端不编码、设备侧 memcpy 直接播,延迟最低、ESP32 实测零卡顿,代价是带宽约 1.5 Mbps/设备;FLAC:带宽仅约 1/3,但设备每 85ms 要解一个 4096 样本帧,低端 ESP32 可能失步卡顿。若所选编码设备不支持会自动退到另一种;切换后重新投一次歌曲生效(当前正在播的不中断)。",
+    },
+    {
       key: "auto_discover",
       label: "自动发现播放器",
       type: "switch",
       default: true,
       help: "浏览局域网 _sendspin._tcp,新设备出现即自动拨号接入(只发现、不自动播放)。关闭则只靠手工拨号与记忆重拨。",
+    },
+    {
+      key: "esphome_mirror",
+      label: "ESPHome 只读监控(6053)",
+      type: "switch",
+      default: false,
+      help: "对已连接的 ESPHome 设备反向建立一条 Native API(端口 6053)连接,用于保活与只读状态镜像。作用:①设备掉网后不会因 api.reboot_timeout 看门狗自愈重启;②读回设备侧真实播放状态与 speaker 音量,作为「推的流有没有真的播出去」的独立判据。需要填写设备的 api.encryption.key。注意:这条链路只做只读与保活,**不用于控制**——设备的 media_player 不支持切歌/进度,音量也请继续用 Sendspin 组音量。",
+    },
+    {
+      key: "esphome_psk",
+      label: "ESPHome API 加密密钥",
+      type: "text",
+      default: "",
+      // 输入框下方常显「测试连接」按钮(见 ConfigField.action):保存前就能验证密钥。
+      // host 不用填 —— 取当前已连 Sendspin 设备的 IP,由服务端自动代入。
+      action: "esphome-test",
+      help: "设备固件 api: encryption: key 的值(32 字节 base64),与 ESPHome Dashboard 里的一致。填好后点下方「测试连接」即可验证是否正确。设备 IP 由服务端自动带入,无需填写。",
     },
   ],
   i18n: {
@@ -72,6 +100,24 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
 - **Disabled by default**: the server holds a listening port + mDNS. Enable it in the plugin page;
 - Legacy (pre-encryption) clients such as ESPHome/sendspin-cpp are accepted by default (\`allow_legacy_clients\`, mirroring Music Assistant): they play as-is over cleartext, pairing is unavailable for them and LAN traffic can be intercepted;
 - Encrypted spec-compliant clients stream after pairing (pairing flows landing progressively).`,
+      fields: {
+        preferred_codec: {
+          label: "Default audio codec",
+          help: "Preferred codec for streaming. PCM: no server-side encoding and a plain memcpy on the device — lowest latency, verified stutter-free on ESP32, costs ~1.5 Mbps per player. FLAC: ~1/3 the bandwidth, but the device must decode a 4096-sample frame every 85 ms, which can desync low-end ESP32 boards. Falls back to the other codec if the device does not support the selected one; takes effect on the next track you cast (the stream currently playing is untouched).",
+          options: {
+            pcm: "PCM (recommended, zero latency)",
+            flac: "FLAC (saves bandwidth)",
+          },
+        },
+        esphome_mirror: {
+          label: "ESPHome read-only monitor (6053)",
+          help: "Opens a Native API (port 6053) connection back to each connected ESPHome device for keep-alive and read-only state mirroring. It stops the device from rebooting itself via the api.reboot_timeout watchdog when it loses network, and reads the device's real playback state and speaker volume so you can verify that streamed audio is actually playing. Requires the device's api.encryption.key. This link is read-only plus keep-alive, NOT for control: the device's media_player reports no SEEK / NEXT_TRACK support, and volume should stay on the Sendspin group volume.",
+        },
+        esphome_psk: {
+          label: "ESPHome API encryption key",
+          help: "The value of `api: encryption: key` in the device firmware (32-byte base64), same as shown in the ESPHome Dashboard. Use the \"Test connection\" button below to verify it before saving. The device IP is derived from its Sendspin connection, so there is no host field.",
+        },
+      },
     },
   },
   documentation: `### 功能介绍

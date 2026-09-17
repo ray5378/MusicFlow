@@ -80,21 +80,23 @@ describe("sendspin 内存回收", () => {
       const g = srv.group(CID);
       conn.group = g;
       g.add(conn);
-      // 起 pump(30s 静音) + 建一个 flac 编码器(真 ffmpeg 进程)
+      // 起 pump(30s 静音) + 建一个 flac 编码器
+      // ⚠️ 2026-09-17:flac 编码器已从「常驻 ffmpeg 子进程」改为**进程内 libFLAC**
+      //   (`LibFlacEncoder`),不再有 `p.pid` 可查。回收断言相应改为
+      //   「编码器 `closed` 标志被置位」(等价语义:资源已释放)。
       const pump = pumpFor(srv, g);
       const enc: any = g.encoderFor({ clientId: CID, codec: "flac" } as any);
-      const ffPid: number | undefined = enc?.p?.pid;
-      expect(ffPid).toBeGreaterThan(0);
+      expect(enc.closed).toBe(false);
       await pump.play("reclaim-song");
       await waitFor(() => pump.active, 5000, "pump 起播");
       expect((pump as any).pcm).not.toBeNull();
 
       ws.terminate();
       await waitFor(() => !srv.groups.has(CID), 8000, "组摘除");
-      // pump 停了,pcm 放了,ffmpeg 杀了
+      // pump 停了,pcm 放了,编码器关了
       expect(pump.active).toBe(false);
       expect((pump as any).pcm).toBeNull();
-      await waitFor(() => procDead(ffPid!), 8000, "ffmpeg 已杀");
+      expect(enc.closed).toBe(true);
     } finally {
       try { ws.terminate(); } catch { /* ignore */ }
     }

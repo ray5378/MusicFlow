@@ -39,6 +39,8 @@ function stubGroup() {
     positionMs: 0,
     timelineBaseUs: 0n,
     current: null,
+    // 时间线锚点用(与帧头同源;见 group.ts computeCommonSendAhead)。
+    commonSendAheadUs: () => 800_000,
     async pushFrame(ts: bigint, _pcm: Float32Array) {
       frames.push(ts);
     },

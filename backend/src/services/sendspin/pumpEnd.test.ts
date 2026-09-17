@@ -12,8 +12,15 @@ function stubGroup() {
     positionMs: 0,
     timelineBaseUs: 0n,
     current: { songId: "s", durationMs: 0 } as any,
-    async pushFrame(ts: bigint, _pcm: Float32Array) {
+    // 时间线锚点用(与帧头同源):stub 给 0 表示「无设备上报参数」,
+    // 实机走 computeCommonSendAhead 回落 800ms(见 group.ts)。
+    commonSendAheadUs: () => 800_000,
+    // ⚠️ 必须返回**本批实际产出样本数**(单声道口径) —— 真实编码器都这么做,
+    // pushLoop 靠它推进时间线。返回 undefined(=0)会被判「编码器零产出」,
+    // 时间线只在连续 500ms 后降级(SALL_GRACE_US),属故障路径,不是常规范例。
+    async pushFrame(ts: bigint, pcm: Float32Array) {
       frames.push(ts);
+      return Math.floor(pcm.length / 2); // 模拟 PCM 编码器:喂多少吐多少
     },
   };
   return { group, frames };
@@ -35,7 +42,7 @@ describe("GroupPump 自然结束", () => {
     // 1.0s PCM,元数据只报 500ms(线上 320.639s 案的微缩版)
     overridePumpSource(async () => ({ pcm: new Float32Array(48000 * 2 * 1), durationMs: 500 }));
     const { group, frames } = stubGroup();
-    const pump = new GroupPump({} as any, group);
+    const pump = new GroupPump({ log() {} } as any, group);
     await pump.play("s1");
     await waitInactive(pump, 8000, "解码偏长");
     expect(group.current).toBeNull();
@@ -48,7 +55,7 @@ describe("GroupPump 自然结束", () => {
   it("解码比元数据短:耗尽即结束并置空 current", async () => {
     overridePumpSource(async () => ({ pcm: new Float32Array(48000 * 2), durationMs: 2000 }));
     const { group, frames } = stubGroup();
-    const pump = new GroupPump({} as any, group);
+    const pump = new GroupPump({ log() {} } as any, group);
     await pump.play("s2");
     await waitInactive(pump, 8000, "解码偏短");
     expect(group.current).toBeNull();
