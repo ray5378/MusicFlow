@@ -1163,13 +1163,22 @@ export const usePlayerStore = defineStore("player", () => {
   // 保护窗口内。无 `reportedAt` 的设备型 peer(走实时查询)→ 恒 false,
   // **设备链路行为完全不变**。
   const COMMAND_SHADOW_WINDOW_MS = 8000;
+  /** 设备型 peer(无 reportedAt)在命令下发后的**短保护窗**:窗口内轮询一律视为
+   *  陈旧采样。覆盖 250ms 音量防抖 + 请求 RTT,防止「拖 20 → 立刻拖 30」时
+   *  2s 轮询把服务端仍停在的 20 顶回 UI(实测回退)。窗后恢复同步,
+   *  设备端自己的改动(外按键/旋钮)仍能及时镜像。 */
+  const DEVICE_ECHO_GUARD_MS = 1500;
   function isStaleSample(s: any, commandAt: number): boolean {
     if (!commandAt) return false;
-    if (Date.now() - commandAt > COMMAND_SHADOW_WINDOW_MS) return false;
+    const elapsed = Date.now() - commandAt;
+    if (elapsed > COMMAND_SHADOW_WINDOW_MS) return false;
     const at = s?.reportedAt;
-    return typeof at === "number" && at < commandAt;
+    if (typeof at === "number") return at < commandAt;
+    // 无 reportedAt 的设备型 peer(sendspin / DLNA):无法判采样新旧,
+    // 短窗内保守按陈旧处理。
+    return elapsed < DEVICE_ECHO_GUARD_MS;
   }
-  let volumeIssuedAt = 0; // 最近一次下发音量命令的时刻(ms)
+  const volumeIssuedAt = new Map<string, number>(); // 每设备最近一次下发音量的时刻(ms)
   let transportIssuedAt = 0; // 最近一次下发播放/暂停命令的时刻(ms)
 
   // Per-peer poll: mirrors backend transport state + queue into the peer's
@@ -1215,7 +1224,8 @@ export const usePlayerStore = defineStore("player", () => {
           // 同步设备真实音量(含 外部 webhook / 其它端 改的)。仅当当前正控制该 peer。
           // 但刚下发过音量命令时,要忽略「命令之前采样」的上报 —— 连续拖动
           // (20→50→30)时回传的可能还是上一拍的 50,会把手上的 30 顶掉。
-          const volumeStale = isStaleSample(s, volumeIssuedAt);
+          // 按设备各自记录下发时刻:切换播放端后旧设备的保护窗不会误伤新设备。
+          const volumeStale = isStaleSample(s, volumeIssuedAt.get(st.peerId) || 0);
           if (typeof s.volume === "number" && currentPeerId.value === st.peerId && !volumeStale) {
             volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
           }
@@ -1475,7 +1485,8 @@ export const usePlayerStore = defineStore("player", () => {
       if (timer) clearTimeout(timer);
       volumeTimers.set(peerId, setTimeout(() => {
         volumeTimers.delete(peerId);
-        volumeIssuedAt = Date.now(); // 窗口从真正下发的时刻算起
+        // 窗口从真正下发的时刻算起;按设备记录,轮询陈旧保护按设备各自生效。
+        volumeIssuedAt.set(peerId, Date.now());
         api.post(peerApi(peerId, "/volume"), { volume: Math.round(v * 100) }).catch(() => {});
       }, 250));
       return;

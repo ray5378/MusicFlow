@@ -152,9 +152,11 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       g.positionMs = Math.max(0, seconds * 1000);
     },
     async setVolume(vol: number) {
-      const srv = getServer();
-      const conn = srv?.clients.get(clientId);
-      if (conn) conn.volume = Math.min(100, Math.max(0, vol));
+      // 只写**组音量**(Sendspin 单设备组的权威音量标度)。
+      // ⚠️ 此前同时写 conn.volume 与 group.volume,而 appliedGain = 两者乘积/100
+      //    ⇒ 实际下发增益 = vol²/100(拖 50 实得 25)。每连接 trim(conn.volume)
+      //    保持缺省 100,组音量即最终增益;PCM 链路在 pushFrame 的 scalePcm 里
+      //    按帧生效,无需额外广播。
       groupOf(clientId).volume = Math.min(100, Math.max(0, vol));
     },
     async pollState(): Promise<PlayerState> {

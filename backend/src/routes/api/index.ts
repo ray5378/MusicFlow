@@ -3882,7 +3882,8 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       const st = await getQueueController().getPlayerState(parsed.id);
       if (!st) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 404);
       const srv = getSendspinServer();
-      const volume = srv?.clients.get(parsed.id)?.volume;
+      // 音量权威 = 组音量(setVolume 只写组;conn.volume 是每连接 trim,恒 100)。
+      const volume = srv?.groups.get(parsed.id)?.volume ?? srv?.clients.get(parsed.id)?.volume;
       const muted = srv?.clients.get(parsed.id)?.muted ?? srv?.groups.get(parsed.id)?.muted ?? false;
       return c.json({
         state: st.playbackState === PlaybackState.PLAYING ? "PLAYING"

@@ -2,6 +2,33 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.32] - 2026-09-18
+
+### Bug 修复 —— Sendspin 音量「回退」与增益标度
+
+- **音量增益平方根因**:`setVolume` 此前同时写 `conn.volume` 与 `group.volume`,
+  而 `appliedGain = conn.volume × group.volume / 100` ⇒ 实际下发增益 **= vol²/100**
+  (拖 50 实得 25)。现只写**组音量**(单设备组的权威标度),每连接 trim 保持缺省 100;
+  PCM 链路在 `pushFrame` 的 `scalePcm` 里按帧生效。
+- **`/status` 音量回读源改为组音量**:原先回读 `conn.volume`(恒 100),会把前端
+  刚拖的值顶回去。
+- **前端轮询陈旧保护**(插件 `isStaleSample`):无 `reportedAt` 的设备型 peer
+  (sendspin / DLNA)在命令下发后 **1.5s 短窗**内一律视为陈旧采样,防止
+  「拖 20 → 立刻拖 30」时 2s 轮询把服务端仍停在的 20 顶回 UI;
+  下发时刻改为**按设备**记录(切换播放端互不误伤)。窗后恢复同步,
+  设备端自己的改动仍能及时镜像。
+
+### 附带
+
+- **ESPHome 6053 只读监控(在 sendspin-renderer 插件内)**:设备 IP 从 Sendspin
+  拨入连接自动派生(无需手填);插件配置页新增 `esphome_mirror` 开关、
+  `esphome_psk` 密钥(带常显「测试连接」按钮,保存前即可验证,成功回显
+  设备名/版本/播放状态,失败给出原因);`GET /v1/sendspin/esphome` 只读查询
+  (绝不回显 PSK)。依赖 `esphome-client@^2.0.0`(零第三方依赖)。
+- 插件配置页新增 `preferred_codec`(PCM / FLAC 下拉,默认 PCM)。
+- 文档:`docs/SENDSPIN_ESPHOME_FLAC_2026-09-17.md` 重写为验证过的真相版;
+  被推翻的旧结论沉淀为 `docs/SENDSPIN_PITFALLS_2026-09-18.md`。
+
 ## [3.0.31] - 2026-09-18
 
 > 本条合并了此前**预写但从未发布**的 `[3.0.30]` 与 `[3.0.31]` 两个条目 —— 它们都只写了 CHANGELOG
