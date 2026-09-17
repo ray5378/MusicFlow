@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 MusicFlow 作为一个完整对齐 Music Assistant 的 **Sendspin Server**（`ws://:8927/sendspin` + mDNS），支持全角色(player/source/controller/metadata/artwork/visualizer/color)、三配对法、多房样本级同步、每客户端独立 opus/flac/pcm 编码、每播放器 DSP 音量，让 Xbox/Android App/硬件音箱直接发现并点播 MusicFlow 曲库。
+**Goal:** 让 MusicFlow 作为一个完整对齐 Music Assistant 的 **Sendspin Server**（`ws://:38927/sendspin` + mDNS），支持全角色(player/source/controller/metadata/artwork/visualizer/color)、三配对法、多房样本级同步、每客户端独立 opus/flac/pcm 编码、每播放器 DSP 音量，让 Xbox/Android App/硬件音箱直接发现并点播 MusicFlow 曲库。
 
 **Architecture:** 仿 AirPlay 插件的"平行子系统 + 薄 renderer 适配器"。协议服务端自含于 `backend/src/services/sendspin/`（身份/Noise KKpsk2 握手/角色/消息/推流/时钟/组/配对）；`backend/src/services/plugin/renderers/sendspin.ts` 是其 renderer 薄壳。播放队列/状态机/自动切歌**复用**现有 `services/player/*`（UniversalPlayer + QueueController + PlayerController）：每个 sendspin 客户端（或样本同步的客户端组）以 `ProtocolPlayer` 形式挂进这些复用层。
 
@@ -42,7 +42,7 @@
 - `stream.ts` — 推流引擎（ffmpeg 解码→PCM→逐客户端编码→按时钟切块）。
 - `encoding.ts` — opus/flac/pcm 编码器包装。
 - `pairing.ts` — 三配对法 + PSK store + `unpaired_access` + re-handshake。
-- `server.ts` — WS 8927 监听、连接生命周期、明文期流程、mDNS 发布、装配。
+- `server.ts` — WS 38927 监听、连接生命周期、明文期流程、mDNS 发布、装配。
 - `protocolPlayer.ts` — `createSendspinProtocolPlayer` 对接复用层。
 
 **修改：**
@@ -102,7 +102,7 @@ Expected: FAIL — 模块不存在。
 ```ts
 export const PROTOCOL_VERSION = 1;
 export const WS_PATH = "/sendspin";
-export const WS_PORT = 8927;
+export const WS_PORT = 38927;
 export const LEGACY_WS_PORT = 8928;
 export const MDNS_TYPE_SERVER = "sendspin-server";   // _sendspin-server._tcp.local.
 export const MDNS_TYPE_CLIENT = "sendspin";          // _sendspin._tcp.local.
@@ -476,7 +476,7 @@ export function buildHandshakeMessage1(pskHex: string) {
 （正式的 msg1 密文 + transport encrypt/decrypt + Sentinel 回退在**本 Task Step 3** 内完成，`buildHandshakeMessage1` 是抽出供单测的纯函数。）
 
 - [ ] **Step 4: 通过**
-- [ ] **Step 5: 实现 server.ts 明文期流程 + 绑定 8927 + mDNS**
+- [ ] **Step 5: 实现 server.ts 明文期流程 + 绑定 38927 + mDNS**
 
 `server.ts` 骨架（TDD 第 5/6 步）：
 1. import `WebSocketServer` from `ws`；`new WebSocketServer({ port: WS_PORT, path: WS_PATH })`（独立 TCP 监听，非主 HTTP）。
@@ -1031,7 +1031,7 @@ export const parseSourceChunk = (b: Uint8Array): { timestampUs: bigint; data: Ui
 - Create: `backend/tests/manual/sendspin/`（握手冒烟 / 播放 / 同步 / 配对脚本）
 
 - [ ] **Step 1: 握手冒烟（双 suite + hello/activate/time）**
-用 `Sendspin/spec` 参考客户端或 `aiosendspin` 客户端脚本打 `ws://local:8927/sendspin`，断言：既跑 `25519_ChaChaPoly_SHA256` 也跑 `25519_AESGCM_SHA256`；收 `server/hello`+`server/activate`；连续 3 次 `server/time` 三字段递增；随后收到 `stream/start` 与首个 type 4 音频块。
+用 `Sendspin/spec` 参考客户端或 `aiosendspin` 客户端脚本打 `ws://local:38927/sendspin`，断言：既跑 `25519_ChaChaPoly_SHA256` 也跑 `25519_AESGCM_SHA256`；收 `server/hello`+`server/activate`；连续 3 次 `server/time` 三字段递增；随后收到 `stream/start` 与首个 type 4 音频块。
 - [ ] **Step 2: 播放链路**：真机（Xbox / Android App）经 mDNS 发现 "MusicFlow Sendspin"，投一首歌、seek（观察 `stream/clear` 无 `stream/end`）、音量、暂停/恢复、自然播完自动切歌。
 - [ ] **Step 3: 同步验证**：两设备加入同组，用 `sync_check.ts` 断言行间开始时间差 `<20ms` 且漂移稳定（Task 13 Step 7）。
 - [ ] **Step 4: 配对三法各走一遍 + unpaired_access 同意流**；re-handshake 后 volume 仍生效。

@@ -28,7 +28,7 @@ export const sendspinRendererManifest: PluginManifest = {
   type: "renderer",
   description: "将 MusicFlow 作为 Sendspin Server,让 Xbox/Android 音箱等 Sendspin 客户端直接播放曲库",
   capabilities: ["renderer"],
-  // 默认关闭:Sendspin 服务端需要常驻监听 8927 端口 + mDNS 广播(CPU/端口开销),
+  // 默认关闭:Sendspin 服务端需要常驻监听 38927 端口 + mDNS 广播(CPU/端口开销),
   // 与 AirPlay 同样按需开启;关闭时零常驻资源。
   defaultEnabled: false,
   configSchema: [
@@ -36,8 +36,8 @@ export const sendspinRendererManifest: PluginManifest = {
       key: "port",
       label: "监听端口",
       type: "number",
-      default: 8927,
-      help: "Sendspin 服务端 WebSocket 监听端口(默认 8927)。修改后自动重启服务生效,已连客户端会断开重连。",
+      default: 38927,
+      help: "Sendspin 服务端 WebSocket 监听端口(默认 38927,避开 Music Assistant 的 8927)。修改后自动重启服务生效,已连客户端会断开重连。",
     },
     {
       key: "allow_legacy_clients",
@@ -60,10 +60,10 @@ export const sendspinRendererManifest: PluginManifest = {
       description:
         "Turn MusicFlow into a Sendspin Server so Sendspin clients (Xbox, Android speakers, ...) can play the library directly",
       documentation: `### Features
-Makes MusicFlow a **Sendspin Server** (port 8927) that Sendspin clients — Xbox, Android cast speakers, etc. — discover over mDNS and connect to for multi-room synchronized playback.
+Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbox, Android cast speakers, etc. — discover over mDNS and connect to for multi-room synchronized playback.
 
 ### How it works
-1. When enabled, starts the Sendspin WebSocket server (port 8927) and advertises it via mDNS as a \`sendspin-server\`;
+1. When enabled, starts the Sendspin WebSocket server (port 38927) and advertises it via mDNS as a \`sendspin-server\`;
 2. Sendspin clients connect and pair (PSK / dynamic code / static code);
 3. MusicFlow decodes tracks with ffmpeg → PCM and re-encodes for each client (opus / flac / pcm) with sample-accurate multi-room sync;
 4. Playback state and group volume are managed per client group.
@@ -75,10 +75,10 @@ Makes MusicFlow a **Sendspin Server** (port 8927) that Sendspin clients — Xbox
     },
   },
   documentation: `### 功能介绍
-把 MusicFlow 变成 **Sendspin 服务端**(端口 8927),让 Xbox、Android 音箱等 Sendspin 客户端通过 mDNS 发现并连接,直接播放曲库,支持多房同步。
+把 MusicFlow 变成 **Sendspin 服务端**(端口 38927),让 Xbox、Android 音箱等 Sendspin 客户端通过 mDNS 发现并连接,直接播放曲库,支持多房同步。
 
 ### 处理逻辑
-1. 启用后启动 Sendspin WebSocket 服务(端口 8927),并以 \`sendspin-server\` 类型经 mDNS 广播;
+1. 启用后启动 Sendspin WebSocket 服务(端口 38927),并以 \`sendspin-server\` 类型经 mDNS 广播;
 2. Sendspin 客户端连入并按三种配对方式之一完成配对(配对码 / 动态码 / 静态码);
 3. 由系统 ffmpeg 解码任意音源 → PCM,再按每个客户端支持的格式独立编码(opus / flac / pcm),按组公共时钟做样本级多房同步;
 4. 播放状态与组音量按客户端分组统一管理。

@@ -14,12 +14,12 @@
 
 - **2026-09-13 — P2 终验：模拟 sendspin 客户端实播 go-music-dl 歌曲（成功收到真实音频帧）**
   - 背景：P2 的真正验收是「**通过启动模拟 sendspin 播放并确认成功播出**」，不止步于歌单同步/网提取流。
-  - 链路：同一后端 :46401 同时启用 **sendspin-renderer**（拉起 :8927）与 **go-music-dl**（真歌单入库）。
-    - `PUT /v1/plugins/sendspin-renderer/toggle` → 8927 监听拉起；身份在 `backend/data/sendspin/identity.key`
+  - 链路：同一后端 :46401 同时启用 **sendspin-renderer**（拉起 :38927）与 **go-music-dl**（真歌单入库）。
+    - `PUT /v1/plugins/sendspin-renderer/toggle` → 38927 监听拉起；身份在 `backend/data/sendspin/identity.key`
       （sendspin 读 `MUSICFLOW_DATA_DIR`，与后端 `DATA_DIR` 不同；server_id=`ybpcwCAJ316UkjZiJeWtCp9yPwxZV14Mb-bmFlkTjW4`，
       psk 走默认 `pairingPskHex` 常量 `1b5e24db…27b9d3`）。
     - 忠实协议客户端 `scripts/sendspin-client-sim.mjs <server_id> <psk_hex>` 以 Noise KKpsk2 responder 直连
-      :8927/sendspin，`client/init→noise→activate` 注册为 `sendspin:Eob7pTpU…` peer（`available:true`）。
+      :38927/sendspin，`client/init→noise→activate` 注册为 `sendspin:Eob7pTpU…` peer（`available:true`）。
   - **实播**：`POST /v1/play {peerId:"sendspin:Eob7pTpU…", type:"song", id:"35a19b54-130d-4a18-8144-7a8d73d575cd",
     playMode:"order"}` → 投送真实 go-music-dl 在线歌「有梦可待」（网易源，`206 audio/mpeg`）。
     - 客户端**实时续收真实 opus 音频帧**：550+ 帧，ts 推进至 ~11s，每帧 ~770B，`active=true` 持续增长。
@@ -60,7 +60,7 @@
     `require("../peer.js")` 取 PeerManager，但 `index.ts` 是 ES module（仅有 `import`/`export`，无 `require`），
     ESM 作用域下 `require` 抛 `ReferenceError`，被 `try/catch` 静默吞掉 → 客户端断开后 sendspin peer 一直遗留为
     `available:true`。改为 `async (conn) => { const { getPeerManager } = await import("../peer.js"); ... }`。
-  - 真实全链路验证（忠实协议客户端 `sendspin-client-sim.mjs`，responder 直连 :8927）：
+  - 真实全链路验证（忠实协议客户端 `sendspin-client-sim.mjs`，responder 直连 :38927）：
     - 后端重启后 `/v1/peers` 无 sendspin peer（NONE）。
     - 客户端直连激活 → peer `sendspin:<新 clientId>` 注册，`available:true`；`/v1/play` 投送 + `/status` 返回
       `PLAYING pos/dur`，客户端实测续收 opus 帧。
@@ -72,7 +72,7 @@
   - 代码改动：`backend/src/services/sendspin/index.ts`（onClosed `require`→`await import`）。
 
 - **2026-09-13 — P1#6 真实设备队列全模式复测（自动下一曲/切歌跟随、换源回退、跳过、暂停/恢复/拖动）（已完成，全绿）**
-  - 环境：真实主进程 `DATA_DIR=/tmp/mf-main-e2e` :46400；sendspin 8927 监听自启；忠实协议客户端
+  - 环境：真实主进程 `DATA_DIR=/tmp/mf-main-e2e` :46400；sendspin 38927 监听自启；忠实协议客户端
     `backend/scripts/sendspin-client-sim.mjs` 以 Noise KKpsk2 **responder** 直连并激活为
     `sendspin:Hm4sx_...`（`server/hello`→`client/hello(player@v1)`→`server/activate`），`/v1/peers` 见
     `kind=sendspin, available=true`。音源 :8899 提供 tone-1/2/3.wav(3s)；坏源 `real-bad-1` 指向 404。
@@ -102,7 +102,7 @@
   - 回归：`tsc --noEmit` ✅ 0 错误；`vitest run tests/sendspin` ✅ 13/13。注：沙箱无 Flutter SDK，客户端未跑 `flutter analyze`。
 
 - **2026-09-13 — 真实主进程全链路（npm run dev 走插件启用→发现→播放）**
-  - `npm run dev` 起真实 MusicFlow :46400；`PUT /plugins/sendspin-renderer/toggle` 联动拉起 8927 sendspin 监听器。
+  - `npm run dev` 起真实 MusicFlow :46400；`PUT /plugins/sendspin-renderer/toggle` 联动拉起 38927 sendspin 监听器。
   - 4 台真实 aiosendspin 玩家直连：handshake OK → server/hello → server/activate(player@v1)，各注册为 QueueController 播放器；
     `/v1/peers` 返回 4 个 `kind=sendspin, available=true`。
   - `POST /v1/play` 投送 → 客户端实测收到 **300 帧 opus（0.24MB，0→2.98s，整首 3s）**，进程内 @discordjs/opus 逐帧编码 + 真实时间推流。
@@ -198,7 +198,7 @@ Python responder 的握手互操作验证。结论：**两边手握手哈希完�
 
 > 当前 `server.ts` 已按监听器模型运行，进度见第 0 节；以下为剩余待办。
 
-- [x] **【P0】重写 `server.ts` 为 WebSocket 监听器**（`ws` 的 `WebSocketServer`，监听 `:8927/sendspin`）。
+- [x] **【P0】重写 `server.ts` 为 WebSocket 监听器**（`ws` 的 `WebSocketServer`，监听 `:38927/sendspin`）。
 - [x] **【P0】post-handshake 应用协议**（`server/hello`→`client/hello`→`server/activate`、`client/state`、`server/time`）。
 - [x] **【P1】接通推流**（`streamEngine` 解码→PCM→@discordjs/opus 逐帧编码→推给 4 台玩家；`group.positionMs` 驱动真实 auto-advance；
   `protocolPlayer.pause/resume/seek` 接 GroupPump）。
@@ -265,7 +265,7 @@ TS initiator ↔ Python responder，固定密钥，比对 `handshake_hash`。
 2. `noise-handshake`（npm 包）当前**未使用**，代码用 `@noble` 自写并已验证；不要重复引入两套，避免歧义。
 3. 音频格式：真实 aiosendspin 玩家期望的编码（PCM s16le vs 协商 codec）需在 P1 推流时实测确认，
    以参考实现 `server/roles/player/v1.py#on_audio_chunk`、`server/audio*.py`、`push_stream.py` 为准。
-4. mDNS 通报 `_sendspin-server._tcp.local.`(8927) 本机起 4 玩家时可不依赖（玩家直连 127.0.0.1:8927），
+4. mDNS 通报 `_sendspin-server._tcp.local.`(38927) 本机起 4 玩家时可不依赖（玩家直连 127.0.0.1:38927），
    但要提供给真硬件客户端。
 5. 沙箱插件（外置 go-music-dl）无 Node 能力，不能承载协议；sendspin 必须是内置插件（同 DLNA/AirPlay）。
 

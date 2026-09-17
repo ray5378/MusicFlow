@@ -99,9 +99,9 @@ export function readSendspinPluginConfig(): { allowLegacyClients: boolean; port:
   }
 }
 
-/** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :8927/sendspin。每个客户端
+/** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :38927/sendspin。每个客户端
  *  完成 handshake+activate 后经 onActivated 回调注册为 QueueController 播放器。
- *  port 仅测试覆盖(默认读插件配置 port,缺省 8927,避免多套件并行抢端口)。 */
+ *  port 仅测试覆盖(默认读插件配置 port,缺省 WS_PORT=38927,避免多套件并行抢端口)。 */
 export async function startSendspinService(port?: number): Promise<SendspinRuntime> {
   const cur = getServer();
   if (cur) {
@@ -129,7 +129,7 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   setServer(srv);
   srv.pairingStore = pairingStore;
   srv.pairing = new PairingCoordinator(srv, pairingStore);
-  await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:8927/sendspin(客户端拨入)
+  await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:38927/sendspin(客户端拨入)
   // spec Client Initiated:广播 _sendspin-server._tcp,客户端经 mDNS 发现本服务端。
   // (此前只广播 _musicflow._tcp,ESPHome 真机永远发现不了 server。)
   advertiseSendspinServer(port ?? pluginCfg.port, "MusicFlow Sendspin");

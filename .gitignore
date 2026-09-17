@@ -29,8 +29,13 @@ backend/coverage/
 .workbuddy/
 .trae/
 _staging/
+_goldstd/
 _*.mjs
 _*.py
+aiogrep.py
+ma_probe.py
+ma_rest_probe.py
+scripts/_local_*
 capture_*.cjs
 analyze_*.cjs
 analyze_*.py

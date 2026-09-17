@@ -1,6 +1,6 @@
 """最小 Sendspin 模拟播放器(拨入模式,基于官方 aiosendspin 9.x,含 Noise 加密握手)。
 
-用途:连上局域网内 MusicFlow 容器的 sendspin 服务端(:8927),
+用途:连上局域网内 MusicFlow 容器的 sendspin 服务端(:38927),
 注册为 sendspin:<clientId> peer,接收并统计推流音频帧,验证"发现+推流"链路。
 e2e 测试与手工联调共用。
 用法: python sendspin-sim-player.py [ws_url] [static_pin]
@@ -19,7 +19,7 @@ from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import InMemoryClientPairingStore
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "ws://192.168.10.240:8927/sendspin"
+URL = sys.argv[1] if len(sys.argv) > 1 else "ws://192.168.10.240:38927/sendspin"
 STATIC_PIN = sys.argv[2] if len(sys.argv) > 2 else ""
 
 logging.basicConfig(

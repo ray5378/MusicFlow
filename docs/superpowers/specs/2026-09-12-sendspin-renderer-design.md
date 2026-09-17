@@ -8,7 +8,7 @@
 ## 1. 背景与目标
 
 Sendspin Audio Protocol（Open Home Foundation / Music Assistant 原生协议）是基于 WebSocket 的多房
-同步音频协议。本插件让 MusicFlow 扮演**完整对齐 MA 的 Sendspin Server**（`ws://:8927` + mDNS），
+同步音频协议。本插件让 MusicFlow 扮演**完整对齐 MA 的 Sendspin Server**（`ws://:38927` + mDNS），
 让 Xbox、Android App、硬件音箱等 Sendspin 客户端直接发现并点播 MusicFlow 曲库，并回报播放/音量/进度。
 
 蓝本：Music Assistant `providers/sendspin`（内部 `aiosendspin` 服务端库）+ MA Core 的 Player/Queue/Group 层。
@@ -25,8 +25,8 @@ Sendspin Audio Protocol（Open Home Foundation / Music Assistant 原生协议）
 | 队列 / 播放状态机 / 自动切歌 | **复用** | `services/player/QueueController.ts`、`PlayerController.ts`、`UniversalPlayer.ts`、`PlaybackTracker.ts`。与 DLNA/AirPlay/Group 同一套（见 `registerAirPlayDevices`、`createAirPlayProtocolPlayer` 的用法） |
 | ProtocolPlayer 契约 | **复用** | `services/player/types.ts` 的 `ProtocolPlayer` 接口，sendspin 提供 `services/sendspin/protocolPlayer.ts` 的 `createSendspinProtocolPlayer(clientId|groupId)` 实现它（对照 `airplay/protocolPlayer.ts`） |
 | 帧/流 URL 生成 | **复用（基础）** | `dlna/control.ts#createCastSession`（token 流地址）可作报给上游的 mediaUri 占位；sendspin 真正走内部推流 |
-| WebSocket 服务端原语 | **复用** | `ws` v8 依赖；Sendspin WS 监听 8927 为独立 TCP 监听器，不挂主 HTTP 服务 |
-| mDNS | **复用** | `services/discovery/mdns.ts`（bonjour-service）：通报 `_sendspin-server._tcp.local.`(8927) 供客户端发起；监听 `_sendspin._tcp`(8928) 供服务端发起 |
+| WebSocket 服务端原语 | **复用** | `ws` v8 依赖；Sendspin WS 监听 38927 为独立 TCP 监听器，不挂主 HTTP 服务 |
+| mDNS | **复用** | `services/discovery/mdns.ts`（bonjour-service）：通报 `_sendspin-server._tcp.local.`(38927) 供客户端发起；监听 `_sendspin._tcp`(8928) 供服务端发起 |
 | 曲库 / 封面 / 元数据 | **复用** | `db`、artwork 端点（metadata/artwork 角色需拉取） |
 | 加密原语 / 身份 | **复用(Node crypto)** | X25519/HKDF/ChaChaPoly/AES-GCM/SHA-256/base64url，Node `crypto` 直接可做 |
 | 解码→PCM | **新增管线** | 现有 `transcode.ts#decideTranscode/spawnTranscoder` 仅 mp3/aac。sendspin 需 ffmpeg 解码 → PCM(F32/48k) + opus/flac 编码之独立管线（可复刻 `airplay/control.ts` 的 ffmpeg→RAW 编码推流写法） |
@@ -39,7 +39,7 @@ Sendspin Audio Protocol（Open Home Foundation / Music Assistant 原生协议）
 ```
 backend/src/services/sendspin/
 ├── index.ts             # 装配/生命周期:启动 WS+mdns+配对存储;stop 关闭全部
-├── server.ts            # SendspinServer:bind 8927、连接生命周期、明文期流程、re-handshake
+├── server.ts            # SendspinServer:bind 38927、连接生命周期、明文期流程、re-handshake
 ├── identity.ts          # 静态身份密钥(crypto randomBytes) 持久化/加载(数据目录 0600)
 ├── handshake.ts         # Noise_KKpsk2 initiator 双 suite;Sentinel;配对后 re-handshake
 ├── framing.ts           # 加密后帧封装;分片(type1);二进制/JSON 编解码
@@ -132,7 +132,7 @@ WS text 明文期:
 
 ## 11. 落地清单（全量，里程碑不拆交付）
 
-1. 服务骨架：`index/server/identity`，bind 8927 + mdns；明文期 + Noise 握手（双 suite + Sentinel）。
+1. 服务骨架：`index/server/identity`，bind 38927 + mdns；明文期 + Noise 握手（双 suite + Sentinel）。
 2. 角色/消息/路由层：`roles/* + messages + framing`；player+controller 先通，其余随后。
 3. 流引擎 + 编码：`stream + encoding`（ffmpeg→PCM→opus/flac/pcm），时间戳块 + 组公共 send-ahead。
 4. 对接复用层：`protocolPlayer` + `QueueController#registerSendspinPlayer`；自动切歌闭环。

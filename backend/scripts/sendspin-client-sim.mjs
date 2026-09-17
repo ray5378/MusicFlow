@@ -1,6 +1,6 @@
 // ==================== Sendspin 忠实协议客户端(模拟真实播放器) ====================
 // 扮演 Noise KKpsk2 **responder**(服务器是 initiator)。用于 P1#6 真实设备复测:
-//   ws://127.0.0.1:8927/sendspin + client/init → server/init+msg1 → msg2 → client/hello
+//   ws://127.0.0.1:38927/sendspin + client/init → server/init+msg1 → msg2 → client/hello
 //   → server/activate → 持续收加密音频 (BIN_PLAYER_AUDIO) 并应答计时。
 // 用法: node scripts/sendspin-client-sim.mjs <server_id> <psk_hex> [ws_url]
 import WebSocket from "ws";
@@ -12,7 +12,7 @@ import * as framing from "../src/services/sendspin/framing.js";
 
 const serverId = process.argv[2];
 const pskHex = process.argv[3];
-const WS_URL = process.argv[4] ?? "ws://127.0.0.1:8927/sendspin";
+const WS_URL = process.argv[4] ?? "ws://127.0.0.1:38927/sendspin";
 if (!serverId || !pskHex) { console.error("usage: node sendspin-client-sim.mjs <server_id> <psk_hex> [ws_url]"); process.exit(1); }
 
 const serverPub = b64urlDecode(serverId);

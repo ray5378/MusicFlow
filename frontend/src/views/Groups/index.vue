@@ -699,7 +699,7 @@ function openRenameAirPlayDevice(dev: any) {
 // ---- Sendspin 设备管理(在线客户端;拨入为主,也可手动拨号添加) ----
 const sendspinClients = ref<any[]>([]);
 const loadingSendspin = ref(false);
-const sendspinPort = ref(8927);
+const sendspinPort = ref(38927);
 const dialTargets = ref<any[]>([]);
 const showDialDialog = ref(false);
 const dialHost = ref("");

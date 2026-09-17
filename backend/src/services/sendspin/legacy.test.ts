@@ -113,7 +113,7 @@ describe("sendspin legacy 明文直通", () => {
       await waitFor(() => texts.some((m) => m?.type === "stream/start"));
       const start = texts.find((m) => m?.type === "stream/start");
       // stream/start player 对象字段需齐(sendspin-cpp 校验缺字段即拒收)。
-      expect(start.payload.player.codec).toBe("opus");
+      expect(start.payload.player.codec).toBe("pcm");
       expect(start.payload.player.sample_rate).toBe(48000);
       expect(start.payload.player.channels).toBe(2);
       expect(start.payload.player.bit_depth).toBe(16);
@@ -134,7 +134,7 @@ describe("sendspin legacy 明文直通", () => {
       const af = binaries[0];
       expect(af[0]).toBe(0x04);
       expect(af.readBigInt64BE(1)).toBe(987654321n);
-      expect(af.length).toBeGreaterThan(9); // opus 编码体非空
+      expect(af.length).toBeGreaterThan(9); // pcm 编码体非空
     } finally {
       ws.terminate();
     }
@@ -164,7 +164,10 @@ describe("negotiateCodec 键名兼容", () => {
     const fmts = [{ codec: "flac", channels: 2, sample_rate: 48000, bit_depth: 16 }];
     expect(negotiateCodec({ "player@v1_support": { supported_formats: fmts } })).toBe("flac");
     expect(negotiateCodec({ player_support: { supported_formats: fmts } })).toBe("flac");
-    expect(negotiateCodec({})).toBe("opus");
-    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "mp3" }] } })).toBe("opus");
+    expect(negotiateCodec({})).toBe("pcm");
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "mp3" }] } })).toBe("pcm");
+    // ESPHome 声明 flac/opus/pcm:默认应落在 pcm(跳过 opus)。
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "opus" }, { codec: "flac" }] } })).toBe("flac");
+    expect(negotiateCodec({ "player@v1_support": { supported_formats: [{ codec: "opus" }] } })).toBe("pcm");
   });
 });

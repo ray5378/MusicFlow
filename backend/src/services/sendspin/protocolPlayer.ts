@@ -33,11 +33,12 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       if (conn) {
         conn.group = g;
         g.add(conn); // 成员入组,推流才真正下发
-        // 起播宣告流格式:真实播放器无 stream/start 会丢弃音频(之前从没发过,
-        // 导致任何合规播放器都无声)。放 g.add 之后、pump.play 之前,首帧必在其后。
-        conn.announceStream();
-        // playback_state 变了(spec:group/update 字段变化即重发)。
+        // 起播宣告:先组状态(playing)再 stream/start,对齐 aiosendspin 的
+        // `group/update(playing) → stream/start`(见 MA 真机:前者先到)。此前我们
+        // 反着发(stream/start 在前),组状态仍 stopped 时设备端直接忽略 stream/start,
+        // 无 format 不播 → ESPHome 真机一直不进入 PLAYING 的根因在此。
         conn.sendGroupUpdate();
+        conn.announceStream();
       }
       // 起播即推 media_changed(HA 卡片歌词/封面即时跟随,不必等 2s 轮询;
       // 对齐 DLNA castToDevice 的 media_changed + player_refresh)。

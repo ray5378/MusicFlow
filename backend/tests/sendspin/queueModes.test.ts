@@ -1,7 +1,7 @@
 // ==================== Sendspin 服务器权威 —— 队列全模式端到端复测 ====================
 //
 // 链路(全真实,不 mock):
-//   real sendspin server(绑 :8927) + createSendspinProtocolPlayer(真实传输层)
+//   real sendspin server(绑 :38927) + createSendspinProtocolPlayer(真实传输层)
 //     → UniversalPlayer → QueueController(队列/切歌/模式) ↔ PlayerController(乐观窗口+决策)
 //     → PlaybackTracker(自然结束判定)→ handleDecision → 自动切歌。
 //

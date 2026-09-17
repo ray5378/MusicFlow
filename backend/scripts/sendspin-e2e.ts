@@ -1,5 +1,5 @@
 // ==================== Sendspin 真实端到端(server 侧) ====================
-// 启动真实 SendspinServer(绑 :8927/sendspin) + 真实 QueueController/PlayerController
+// 启动真实 SendspinServer(绑 :38927/sendspin) + 真实 QueueController/PlayerController
 // 决策链,配真实 @discordjs/opus 编码器。等待真实 aiosendspin 客户端拨入并 activate,
 // 然后给每个已激活客户端 playFrom 一组 3 首合成曲,靠事件驱动 pollState 自动切歌,
 // 打印每首起播与结束,供外部真实客户端验证「握手/hello/activate + 真实推流 + 切歌跟随」。

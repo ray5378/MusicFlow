@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 1;
 export const WS_PATH = "/sendspin";
-export const WS_PORT = 8927;
+export const WS_PORT = 38927;
 export const LEGACY_WS_PORT = 8928;
 export const MDNS_TYPE_SERVER = "sendspin-server"; // _sendspin-server._tcp.local.
 export const MDNS_TYPE_CLIENT = "sendspin"; // _sendspin._tcp.local.

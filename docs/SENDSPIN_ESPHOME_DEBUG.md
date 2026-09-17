@@ -83,7 +83,7 @@ tcpdump -i any -U -w esphome.pcap "host 192.168.10.245"
 | 主体 | 服务类型 | 端口 | 说明 |
 |---|---|---|---|
 | 设备(播放器) | `_sendspin._tcp` | 8928(txt `path=/sendspin`) | 服务端发现设备→主动拨号 |
-| 服务端 | `_sendspin-server._tcp` | 8927(txt `path=/sendspin`) | 设备发现服务端→自己拨号 |
+| 服务端 | `_sendspin-server._tcp` | 38927(txt `path=/sendspin`) | 设备发现服务端→自己拨号 |
 
 node 单行浏览(仓库自带 `bonjour-service`):
 

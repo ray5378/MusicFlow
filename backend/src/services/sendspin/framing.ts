@@ -8,16 +8,20 @@ export const packJsonBody = (m: JsonMessage): Uint8Array =>
 export const unpackJsonBody = (b: Uint8Array): JsonMessage =>
   JSON.parse(Buffer.from(b.subarray(1)).toString("utf8"));
 
-export const packAudioChunk = (timestampUs: bigint, data: Uint8Array): Uint8Array => {
-  const head = Buffer.allocUnsafe(9);
+// 音频二进制帧头 = aiosendspin 金标准:1B msg_type(0x04) + 8B 大端微秒时间戳 + 4B 大端 send_ahead(ms)。
+// 此前缺 send_ahead 4B(9B 头)导致严格客户端校验帧长不符;13B 头对齐 MA wire(`>BqI`)。
+export const packAudioChunk = (timestampUs: bigint, data: Uint8Array, sendAheadMs = 0): Uint8Array => {
+  const head = Buffer.allocUnsafe(13);
   head[0] = 0x04;
   head.writeBigInt64BE(timestampUs, 1);
+  head.writeUInt32BE(sendAheadMs, 9);
   return new Uint8Array(Buffer.concat([head, Buffer.from(data)]));
 };
 
-export const parseAudioChunk = (b: Uint8Array): { timestampUs: bigint; data: Uint8Array } => {
+export const parseAudioChunk = (b: Uint8Array): { timestampUs: bigint; sendAheadMs: number; data: Uint8Array } => {
   const ts = Buffer.from(b.subarray(1, 9)).readBigInt64BE(0);
-  return { timestampUs: ts, data: b.subarray(9) };
+  const ahead = Buffer.from(b.subarray(9, 13)).readUInt32BE(0);
+  return { timestampUs: ts, sendAheadMs: ahead, data: b.subarray(13) };
 };
 
 export function fragment(data: Uint8Array, origType: number): Uint8Array[] {

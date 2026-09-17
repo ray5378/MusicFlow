@@ -21,7 +21,7 @@ python3 -m venv /tmp/sendspin-venv
 
 ```bash
 /tmp/sendspin-venv/bin/python backend/scripts/sendspin-sim-player.py \
-  ws://<服务端IP>:8927/sendspin [静态配对码]
+  ws://<服务端IP>:38927/sendspin [静态配对码]
 ```
 
 - 不带配对码:以未配对访问(UNPAIRED)上线,能播(需服务端允许未配对播放)。
@@ -57,7 +57,7 @@ python3 -m venv /tmp/sendspin-venv
   服务端按客户端优先级协商 opus/flac/pcm,协商失败客户端拒收。
 - **`pairing_required` 被拒**：未配对会话要开客户端 `unpaired_access`
   (拨入模拟器默认已开),或走正式配对流程。
-- **连不上 8927**：先确认服务端插件 `sendspin-renderer` 已启用、
-  端口配置(默认 8927)与防火墙;`curl` 能拿到 `101` 即 WS 通路正常。
+- **连不上 38927**：先确认服务端插件 `sendspin-renderer` 已启用、
+  端口配置(默认 38927)与防火墙;`curl` 能拿到 `101` 即 WS 通路正常。
 - **拨号模式连不上 8928**：确认模拟器在监听(`ss -tlnp | grep 8928`),
   服务端 `POST /v1/sendspin/dial` 填的是播放器 IP、端口 8928。

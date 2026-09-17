@@ -1,7 +1,7 @@
 // ==================== Sendspin 服务端 (WebSocket 监听 + Noise initiator) ====================
 //
 // 服务器是 Sendspin 协议里的 **监听方 + Noise initiator**:
-//   - 用 `ws` 的 `WebSocketServer` 监听 `:8927/sendspin`,接受客户端拨入;
+//   - 用 `ws` 的 `WebSocketServer` 监听 `:38927/sendspin`,接受客户端拨入;
 //   - 明文 TEXT 期:收 `client/init` → 回 `server/init`（prologue = 二者原文拼接）;
 //   - 服务端做 initiator:写 msg1（负载 `{psk_id, psk_category}`）→ 读 msg2（明文 `{}`）;
 //   - 之后进入加密 transport 期(JSON 帧 = [0x00]+json;二进制帧由调用方带类型字节);
@@ -344,21 +344,19 @@ export class SendspinGroup {
 }
 
 /** 按客户端 player_support 协商编码(管线恒定 48kHz 立体声,见 encoding.ts)。
- *  优先级 opus > pcm > flac(不按客户端列表顺序):
- *  flac 的 ffmpeg 管道输出只在 EOF 时 flush,实时推流每帧都拿空包,名存实亡
- *  (2026-09-17 实测:101 帧全空,音频只在曲终 flush 块里,真机全程 Invalid data)。
- *  在 flac 真正逐帧可用前,绝不主动选它;只支持 flac 的客户端仍给 flac(有胜于无)。
- *  不协商的后果:9.x 等客户端直接拒收 opus(only PCM and FLAC are supported)。
+ *  只从 PCM / FLAC 里选,**flac 优先、默认 flac**(对齐 MA 金标准:2026-09-17 真机
+ *  MA 用 FLAC 48000/2ch/16bit 播到 esp32-player-meet 才进 PLAYING,而此前的 pcm 流
+ *  始终不进 PLAYING)。裸 opus 常被这类客户端拒收(9.x:"only PCM and FLAC are supported"),
+ *  硬编码跳过 opus。只声明其他 codec(仅 opus/mp3 等)的也回落到 flac。
  *  键名兼容:9.x 线上为 player@v1_support(别名),老版本为 player_support。 */
 export function negotiateCodec(payload: any): SendspinCodec {
   // 9.x 线上键名为 player@v1_support(别名),老版本为 player_support,都认。
   const list = payload?.["player@v1_support"]?.supported_formats ?? payload?.player_support?.supported_formats;
-  if (!Array.isArray(list)) return "opus";
+  if (!Array.isArray(list)) return "flac";
   const have = new Set(list.map((f: any) => String(f?.codec || "").toLowerCase()));
-  if (have.has("opus")) return "opus";
-  if (have.has("pcm")) return "pcm";
   if (have.has("flac")) return "flac";
-  return "opus";
+  if (have.has("pcm")) return "pcm";
+  return "flac";
 }
 
 export class SendspinConnection {
@@ -379,7 +377,7 @@ export class SendspinConnection {
   dialHost = "";
   dialPort = 0;
   group: SendspinGroup | null = null;
-  codec: SendspinCodec = "opus";
+  codec: SendspinCodec = "pcm";
   volume = 100;
   muted = false;
   roles: string[] = [];
@@ -852,11 +850,16 @@ export class SendspinConnection {
   }
   sendAudio(tsUs: bigint, codecData: Uint8Array): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
+    // 音频帧头 4B send_ahead:与 stream/start、server/state 同源(组公共 send_ahead,ms)。
+    const ahead = this.group
+      ? computeCommonSendAhead([...this.group.members].map((m) => ({ latencyFuncMs: m.latencyFuncMs })))
+      : 0;
+    const pkt = packAudioChunk(tsUs, codecData, ahead);
     if (this.legacy) {
-      this.ws.send(Buffer.from(packAudioChunk(tsUs, codecData)), { binary: true });
+      this.ws.send(Buffer.from(pkt), { binary: true });
       return;
     }
-    this._sendPlain(packAudioChunk(tsUs, codecData));
+    this._sendPlain(pkt);
   }
 
   /** 新曲起播宣告流格式。真实播放器(9.x / sendspin-cpp / legacy)在收到

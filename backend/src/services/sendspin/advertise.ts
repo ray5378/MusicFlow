@@ -2,7 +2,7 @@
 //
 // 边界:一切 sendspin 认知(服务类型/端口/txt path)归本包;发布动作走共享
 // discovery/mdns 的通用 publishExtraService(它不懂业务,只管发布)。
-// 见 spec Client Initiated Connections:port 为 server WS 监听端口(推荐 8927),
+// 见 spec Client Initiated Connections:port 为 server WS 监听端口(推荐 38927),
 // txt 必须带 path(推荐 /sendspin)。
 import { publishExtraService, unpublishExtraService } from "../discovery/mdns.js";
 
