@@ -6,10 +6,10 @@
 // 与 DLNA 一样,报给上游的 mediaUri 复用 createCastSession 的 token 流地址(供
 // PlayerController 检测曲目切换),真正音频走内部推流,不依赖设备回连拉流。
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
-import { createCastSession } from "../dlna/control.js";
+import { createCastSession, getEffectiveBaseUrl } from "../dlna/control.js";
 import { getServer } from "./runtime.js";
 import { pumpFor } from "./streamEngine.js";
-import { getPlayerController } from "../player/index.js";
+import { getPlayerController, getQueueController } from "../player/index.js";
 
 /** 单个 sendspin 客户端抽象成一个 ProtocolPlayer。 */
 export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
@@ -24,6 +24,16 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
       const g = srv.group(clientId);
       const pump = pumpFor(srv, g);
       pump.stop(); // 打断上一首,避免重叠推流
+      // ⚠️ 切歌必须先 stream/end 收尾旧流,再 stream/start 起新流(成对)。
+      // 只发 stream/start 会让设备把新流塞进「旧解码上下文」——它认为扬声器已在跑,
+      // 不重建 ring buffer/speaker task,新流音频无从解码 → 链路上一切正常但**无声**
+      // (2026-09-17 ESPHome 真机:重发 stream/start 后只剩 codec header 一行日志)。
+      // MA 金标准同样是 `Stream ended` → `Stream Started` 成对出现。
+      // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end;
+      // 关掉旧编码器同时清掉残留分段(否则旧段字节会混进新歌首帧)。
+      g.current = null;
+      g.close();
+      g.finishPlayback();
       g.positionMs = 0;
       // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
       // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
@@ -102,7 +112,33 @@ export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
     },
     async resume() {
       const srv = getServer();
-      if (srv) pumpFor(srv, srv.group(clientId)).resume();
+      if (!srv) return;
+      const g = srv.group(clientId);
+      const pump = pumpFor(srv, g);
+      // 已在推流(暂停中) → 原地恢复即可,不动流(不会重发 stream/start)。
+      if (pump.active) {
+        pump.resume();
+        return;
+      }
+      // 无推流在跑(冷起播 / 上次 stop 之后)=**真正的起播**。
+      //
+      // ⚠️ 这里曾只调 pump.resume()(空操作),后果是「点播放没声音」:
+      //   POST /peers/:id/play → transport("play") → player.resume();
+      //   而 resumePlayback() 见 q.isActive=true 直接早退(currentIndex 有效但从未起播),
+      //   于是没有 playMedia、没有 stream/start、没有 pump → 全链路静默
+      //   (2026-09-17 ESPHome 真机实测:服务端无 pushFrame、设备端停在 IDLE)。
+      //   对照 DLNA:它的 resume() = playDevice()(重发 SetAVTransportURI)= 真起播,
+      //   所以 DLNA 从未暴露这个缺口 —— sendspin 必须自己补上「冷起播走 playMedia」。
+      const qc = getQueueController();
+      const snap = qc.snapshot(clientId);
+      const item = snap.currentIndex >= 0 ? snap.items[snap.currentIndex] : undefined;
+      if (!item) {
+        srv.log("warn", `sendspin resume: ${clientId} 无当前曲(队列空或未选曲),忽略`);
+        return;
+      }
+      // 只带 songId 的 item 需补全元数据(coverArt/mime 等),否则组状态缺字段。
+      const fullItem = await qc.resolveItem(item);
+      await this.playMedia(fullItem, getEffectiveBaseUrl());
     },
     async seek(seconds: number) {
       const g = groupOf(clientId);

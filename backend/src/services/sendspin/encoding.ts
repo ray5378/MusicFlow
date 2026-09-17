@@ -5,7 +5,9 @@
 //   - opus: 进程内 @discordjs/opus 逐 20ms 帧编码,输出「裸 opus 包」(对标 MusicAssistant)。
 //     每帧独立成为一个可发送包,无管道缓冲延迟、无定时器兜底。
 //   - pcm:  纯 JS 内联 F32 → s16le,零延迟,字节即 wire 格式。
-//   - flac: 保留单一持续 ffmpeg 子进程(连续流可拼接;full flush 在关闭时一次性吐出)。
+//   - flac: 分段 ffmpeg —— ffmpeg flac 只在输入 EOF 时吐出整段,故按 0.5s PCM 分段,
+//     每段一个 ffmpeg(自带 fLaC+STREAMINFO),关段即得完整可解码 FLAC 段并下发。
+//     这是唯一能让 ESPHome 真机出声的路径(详见 FfmpegPcmEncoder 类注释)。
 
 import { createRequire } from "node:module";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
@@ -42,10 +44,17 @@ export function ffmpegBin(): string {
   return "ffmpeg";
 }
 
-/** 统一 chunk 编码器接口:encode() 返回 0..N 个独立可发送包(裸包/帧)。 */
+/** 统一 chunk 编码器接口:encode() 返回 0..N 个独立可发送包(裸包/帧)。
+ *  `offsetMs` = 该包首样本相对于本次 encode() 入参起点的时间偏移(ms):
+ *  逐帧编码器(opus/pcm)恒为 0;分段 FLAC 为负值(该段起始早于当前帧 —— 段已累积了
+ *  前面若干帧),调用方据此校正时间戳,否则整段音频会被错标到当前帧时刻、同步漂移。 */
+export interface EncodedChunk {
+  data: Uint8Array;
+  offsetMs: number;
+}
 export interface ChunkEncoder {
-  encode(pcmF32: Float32Array): Promise<Uint8Array[]>;
-  flush(): Promise<Uint8Array[]>;
+  encode(pcmF32: Float32Array): Promise<EncodedChunk[]>;
+  flush(): Promise<EncodedChunk[]>;
   close(): void;
 }
 
@@ -66,8 +75,15 @@ export function flacCodecHeaderB64(
   bitDepth = 16,
 ): string {
   const info = Buffer.alloc(34, 0);
-  info.writeUInt16BE(4608, 0); // min block size(与 ffmpeg flac 在 48kHz 下的实际值一致)
-  info.writeUInt16BE(4608, 2); // max block size(声明偏小会导致严格解码器拒帧)
+  // ⚠️ block size 必须与**实际流内帧**一致:ffmpeg flac 在 48kHz 下用 4096
+  // (实测 STREAMINFO = 0x1000/0x1000)。此前写 4608 是错的 —— 严格解码器
+  // 按 STREAMINFO 校验每个 frame header 的 blocksize,不匹配即整帧作废:
+  // 设备日志停在 `Created ring buffer with size 19200`(解码环形区建好)
+  // 而 `speaker_mixer Starting`/`i2s_audio.speaker Starting` 永不出现 → 无声
+  // (2026-09-17 ESPHome 真机,对照 MA 金标准同一位置有 speaker 启动)。
+  // v2.3.32 起的注释「与 ffmpeg 实际一致」是错的,勿再回退。
+  info.writeUInt16BE(4096, 0); // min block size = ffmpeg 实际帧块大小
+  info.writeUInt16BE(4096, 2); // max block size
   // min/max frame size(3+3B)与 total samples 填 0:流式未知,解码器接受。
   const pack =
     (BigInt(sampleRate) << 44n) |
@@ -173,22 +189,24 @@ export class OpusEncoder implements ChunkEncoder {
     this.enc.setBitrate(bitrateKbps * 1000);
   }
 
-  encode(pcmF32: Float32Array): Promise<Uint8Array[]> {
-    const out: Uint8Array[] = [];
+  encode(pcmF32: Float32Array): Promise<EncodedChunk[]> {
+    const out: EncodedChunk[] = [];
     const merged = concatF32(this.buf, pcmF32);
     const avail = Math.floor(merged.length / this.frameLen) * this.frameLen;
     for (let off = 0; off < avail; off += this.frameLen) {
-      out.push(this.enc.encode(Buffer.from(f32ToS16(merged.subarray(off, off + this.frameLen)))));
+      // 每帧相对入参起点的时间偏移:第一帧可能因残留缓冲而为负(承前帧)。
+      const offsetMs = ((off - this.buf.length) / (SAMPLE_RATE * CHANNELS)) * 1000;
+      out.push({ data: this.enc.encode(Buffer.from(f32ToS16(merged.subarray(off, off + this.frameLen)))), offsetMs });
     }
     this.buf = merged.subarray(avail);
     return Promise.resolve(out);
   }
 
-  flush(): Promise<Uint8Array[]> {
+  flush(): Promise<EncodedChunk[]> {
     if (this.buf.length === 0) return Promise.resolve([]);
     const padded = new Float32Array(this.frameLen);
     padded.set(this.buf);
-    const out = [this.enc.encode(Buffer.from(f32ToS16(padded)))];
+    const out = [{ data: this.enc.encode(Buffer.from(f32ToS16(padded))), offsetMs: 0 }];
     this.buf = new Float32Array(0);
     return Promise.resolve(out);
   }
@@ -200,10 +218,10 @@ export class OpusEncoder implements ChunkEncoder {
 
 /** 纯 JS 内联 PCM(s16le)编码器:零延迟,直接返回样本字面字节。 */
 export class PcmEncoder implements ChunkEncoder {
-  encode(pcmF32: Float32Array): Promise<Uint8Array[]> {
-    return Promise.resolve([f32ToS16(pcmF32)]);
+  encode(pcmF32: Float32Array): Promise<EncodedChunk[]> {
+    return Promise.resolve([{ data: f32ToS16(pcmF32), offsetMs: 0 }]);
   }
-  flush(): Promise<Uint8Array[]> {
+  flush(): Promise<EncodedChunk[]> {
     return Promise.resolve([]);
   }
   close(): void {}
@@ -216,110 +234,128 @@ export function createChunkEncoder(codec: SendspinCodec, bitrateKbps = 320): Chu
   return new FfmpegPcmEncoder(codec, bitrateKbps);
 }
 
-/** encode() 在有界时间内收不到 ffmpeg 输出时的结算窗口(ms),flac 兜底专用。 */
-const ENCODE_FLUSH_MS = 60;
-
 /**
- * 持续编码器:写 F32 PCM → 返回该批尽可能对应的编码字节。返回块按序拼接即单条连续流。
+ * 分段 FLAC 编码器(2026-09-17 真机实测确定:这是唯一能让 ESPHome 设备出声的路径)。
  *
- * 注意 ffmpeg 的 pipe:1 输出只在输入 EOF(flush)时整块吐出 —— 用 `-flush_packets` 亦无法
- * 强制其逐帧提前写出,实测 pcm/opus/flac 在 stdin 结束前均零输出。因此:
- *  - pcm:s16le 为纯 raw,直接在 JS 内 F32→s16le,同步逐帧、零延迟,字节即 wire 格式。
- *  - opus/flac:保留单一持续 ffmpeg 进程以保证 Ogg/FLAC 流连续性;`encode()` 带 60ms
- *    有界兜底,定时把当前缓冲(可能为空)结算返回,避免阻塞推流;完整编码字节在
- *    `flushClose()`(曲终/组关闭)时一次性吐出,接收端按连续流拼接解码。
+ * 根因:ffmpeg 的 pipe:1 输出**只在输入 EOF 时整块 flush** —— 用 `-flush_packets` 亦无法
+ * 强制其逐帧提前写出(实测 pcm/opus/flac 在 stdin 结束前均零输出)。若维持「单条持续
+ * ffmpeg 进程」,实时播放中每次 `encode()` 只能拿到空包 → 设备收完 stream/start 后
+ * 再也收不到任何音频帧 → 不建 ring buffer、不进 PLAYING、无声
+ * (ESP32-S3 esp32-player-meet:见 `docs/SENDSPIN_ESPHOME_FLAC_2026-09-17.md` 五·A)。
+ *
+ * 解法:**分段 FLAC**。不再维持长命进程,而是按 PCM 字节量累积到 `SEGMENT_PCM_BYTES`
+ * 即关闭当前 ffmpeg 段(stdin.end → EOF → 该段完整 FLAC 一次性吐出),立即返回给调用方
+ * 下发,并同步起下一段新 ffmpeg 续编。每段自带 `fLaC` 魔数 + STREAMINFO 头(ffmpeg flac
+ * 封装天然如此),设备端逐段解码即可 —— 与 MA 金标准「每 ~10s 一段 stream」的分段粒度
+ * 同构(MA 甚至每段重发 stream/start,我们保持同一 stream 内续段,设备已实测接受)。
+ *
+ * 段长权衡:越小延迟越低、帧越碎(每段一个 STREAMINFO 头,~8KB 开销);约 0.5s @48kHz/2ch/f32
+ * = 48000*2*4*0.5 ≈ 192KB PCM,编码后 FLAC 约 60~100KB。取 0.5s 段兼顾实时与开销。
+ * `flush()`(曲终/组关闭)把最后不足一段的残余也关段吐出。
  */
+const SEGMENT_PCM_BYTES = SAMPLE_RATE * CHANNELS * 4 * 0.5; // 0.5s f32 立体声字节数
+
 export class FfmpegPcmEncoder implements ChunkEncoder {
-  private p: ChildProcessWithoutNullStreams | null;
-  private buf = Buffer.alloc(0);
-  private waiters: ((chunk: Uint8Array[]) => void)[] = [];
-  private timer: NodeJS.Timeout | null = null;
+  private readonly isPcm: boolean;
+  private readonly bitrateKbps: number;
+  /** 当前活动段的 ffmpeg 进程(pcm 模式恒 null)。 */
+  private p: ChildProcessWithoutNullStreams | null = null;
+  /** 当前段已写入的 PCM 字节数(达阈值即关段)。 */
+  private segBytes = 0;
+  /** 当前段累积的 PCM 样本数(= 该段起始相对当前帧的负偏移基准)。 */
+  private segSamples = 0;
+  /** 曲终/关闭标志:届时不再起新段。 */
+  private closed = false;
 
   constructor(codec: SendspinCodec, bitrateKbps = 320) {
-    if (codec === "pcm") {
-      this.p = null; // 纯 JS 内联编码,无需 ffmpeg。
-      return;
-    }
+    this.isPcm = codec === "pcm";
+    this.bitrateKbps = bitrateKbps;
+    if (!this.isPcm) this.p = this.spawnSegment(codec);
+  }
+
+  /** 起一段新的 ffmpeg flac 进程(自带 fLaC+STREAMINFO 头)。 */
+  private spawnSegment(codec: SendspinCodec): ChildProcessWithoutNullStreams {
     const c = encodeCodecParams(codec);
     const args: string[] = [
       "-hide_banner", "-loglevel", "error",
       "-ar", String(SAMPLE_RATE), "-ac", String(CHANNELS), "-f", "f32le", "-i", "pipe:0",
       "-c:a", c.codecName,
       "-f", c.format, "pipe:1",
-      "-fflags", "+flush_packets", // 最佳努力:尽力让 muxer 每包 flush(实测对 ogg/raw 无效,保留)。
     ];
-    if (c.codecName === "libopus") args.push("-b:a", `${bitrateKbps}k`);
+    if (c.codecName === "libopus") args.push("-b:a", `${this.bitrateKbps}k`);
     const p = spawn(ffmpegBin(), args, { stdio: ["pipe", "pipe", "pipe"] });
-    this.p = p;
-    p.on("error", () => this.settleAll());
-    p.on("close", () => this.settleAll());
-    p.stdout.on("data", (d: Buffer) => {
-      this.buf = Buffer.concat([this.buf, d]);
-      this.settleAll();
+    // 吞掉 stderr 防止管道背压阻塞 ffmpeg。
+    p.stderr.on("data", () => { /* drain */ });
+    return p;
+  }
+
+  /** 收完当前段 ffmpeg 的全部输出(等其 close,即 EOF flush 完毕)。 */
+  private drainSegment(p: ChildProcessWithoutNullStreams): Promise<Uint8Array[]> {
+    return new Promise((resolve) => {
+      const out: Buffer[] = [];
+      if (p.stdout) p.stdout.on("data", (d: Buffer) => out.push(d));
+      const done = () => resolve(out.length > 0 ? [new Uint8Array(Buffer.concat(out))] : []);
+      p.once("close", done);
+      p.once("error", done);
     });
   }
 
-  private settleAll(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    if (this.waiters.length === 0) return;
-    // buf 为空也结算:把空的/滞留的 waiters 全部排空,让调用方及时收手而非挂起。
-    const chunk = [new Uint8Array(this.buf)];
-    this.buf = Buffer.alloc(0);
-    const ws = this.waiters.splice(0);
-    ws.forEach((w) => w(chunk));
-  }
-
-  /** 写入一批音频,返回该批尽量对应的编码包(可能为空数组;pcm 为即时 s16le)。 */
-  encode(pcmF32: Float32Array): Promise<Uint8Array[]> {
-    if (!this.p) return Promise.resolve([f32ToS16(pcmF32)]);
-    this.p.stdin.write(f32ToBytes(pcmF32));
-    return new Promise((resolve) => {
-      this.waiters.push(resolve);
-      setImmediate(() => this.settleAll());
-      // 兜底:ffmpeg pipe 输出只在 EOF 时 flush,带窗口避免实时推流无限阻塞(flac 兜底)。
-      if (!this.timer) this.timer = setTimeout(() => this.settleAll(), ENCODE_FLUSH_MS);
-    });
-  }
-
-  /** 冲刷剩余字节后关闭:ffmpeg 在此刻 flush,try 尽吐完整编码流。 */
-  flush(): Promise<Uint8Array[]> {
-    const p = this.p;
-    if (!p) return Promise.resolve([]);
-    return new Promise((resolve) => {
-      p.stdin.end();
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
+  /** 写入一批音频;flac 累积满一段即关段吐出该段完整 FLAC(可能同时补起下一段)。 */
+  async encode(pcmF32: Float32Array): Promise<EncodedChunk[]> {
+    if (this.isPcm) return [{ data: f32ToS16(pcmF32), offsetMs: 0 }];
+    if (this.closed || !this.p) return [];
+    const bytes = f32ToBytes(pcmF32);
+    this.p.stdin.write(bytes);
+    this.segBytes += bytes.length;
+    this.segSamples += pcmF32.length;
+    if (this.segBytes >= SEGMENT_PCM_BYTES) {
+      // 该段起点在「当前帧起点」之前 segSamples 个样本 → 负偏移。
+      const segOffsetMs = -(this.segSamples / (SAMPLE_RATE * CHANNELS)) * 1000;
+      const drained = await this.closeSegment();
+      const chunks: EncodedChunk[] = drained.map((d) => ({ data: d, offsetMs: segOffsetMs }));
+      // 未整体关闭则续起下一段,保证连续播放中帧不断档。
+      if (!this.closed) {
+        this.p = this.spawnSegment("flac");
+        this.segBytes = 0;
+        this.segSamples = 0;
       }
-      const ws = this.waiters.splice(0);
-      const flushOne = () => {
-        if (this.buf.length > 0) {
-          const c = [new Uint8Array(this.buf)];
-          this.buf = Buffer.alloc(0);
-          ws.forEach((w) => w(c));
-          resolve(c);
-        } else if (p.exitCode !== null && p.exitCode !== undefined) {
-          resolve([]);
-        } else {
-          setImmediate(flushOne);
-        }
-      };
-      flushOne();
-    });
+      return chunks;
+    }
+    return [];
+  }
+
+  /** 关闭当前段:stdin.end 触发 EOF → ffmpeg flush 出该段完整 FLAC 并返回。 */
+  private async closeSegment(): Promise<Uint8Array[]> {
+    const p = this.p;
+    this.p = null;
+    if (!p) return [];
+    try {
+      p.stdin.end();
+    } catch {
+      /* ignore */
+    }
+    return this.drainSegment(p);
+  }
+
+  /** 冲刷最后一段残余并关闭;此后不再起新段。 */
+  async flush(): Promise<EncodedChunk[]> {
+    if (this.isPcm) return [];
+    this.closed = true;
+    const segOffsetMs = -(this.segSamples / (SAMPLE_RATE * CHANNELS)) * 1000;
+    const drained = await this.closeSegment();
+    this.segBytes = 0;
+    this.segSamples = 0;
+    return drained.map((d) => ({ data: d, offsetMs: segOffsetMs }));
   }
 
   close(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    if (!this.p) return;
+    this.closed = true;
+    const p = this.p;
+    this.p = null;
+    if (!p) return;
     try {
-      this.p.stdin.end();
-      this.p.kill();
+      p.stdin.end();
+      p.kill();
     } catch {
       /* ignore */
     }

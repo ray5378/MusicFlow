@@ -2,6 +2,64 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.31] - 2026-09-17
+
+### Bug 修复 —— ESP32 真机**真正出声**（三个根因，均已真机验证）
+
+> 权威记录:`docs/SENDSPIN_ESPHOME_FLAC_2026-09-17.md` §五;排查手册:`docs/SENDSPIN_ESPHOME_DEBUG.md` §4。
+
+- **① FLAC STREAMINFO 的 block size 失配（决定性根因）**：`flacCodecHeaderB64()` 的
+  min/max block size 原写 **4608**，实测 ffmpeg 48kHz 输出恒为 **4096**。严格解码器按
+  STREAMINFO 校验每个 frame header 的 block size，不符即**整帧作废** —— 设备建好 19200
+  解码环形区后 `speaker_mixer Starting` / `i2s_audio.speaker Starting` /
+  `96000 ring_buffer [speaker_task]` **永不出现**，链路全绿但无声。
+  改为 4096/4096 后三条关键日志立即出现。断言锁进 `encoding.test.ts`。
+- **② 冷起播是空操作**：`POST /peers/:id/play` → `transport("play")` → `player.resume()`，
+  而 sendspin 旧 `resume()` 只调 `pumpFor(...).resume()`，在「队列 `isActive=true` 但从未起播」
+  时是空操作（`resumePlayback()` 见 `q.isActive` 早退）→ 无 `playMedia`/无 `stream/start`/无 pump = 静默。
+  改为：`pump.active` 则原地 resume，否则走 `playMedia` 冷起播。对照 DLNA 的
+  `resume() = playDevice()`（真起播）故不暴露此缺口。
+  - 配套:`QueueController.resolveItem` 由 `private` 改 `public`（补全 songId-only item 元数据）。
+- **③ 脏 dial 目标致 `goodbye: another_server` 死循环**：`dial_targets.json` 残留设备自身端口
+  `192.168.10.245:8928`，服务端每 60s 拨过去被设备判为竞争第二个 server 并踢回，
+  继而触发 `noAutoRedial` 永久抑制 → 假重连循环。正确方向是**设备经 mDNS 自行拨入 38927**。
+  - `dialPlayerInner` 不再等设备回 `server/activate`（真机明确 `Unhandled`，永不回，
+    否则 15s activation timeout 自杀连接）。
+
+### 清理
+- 移除临时 `SENDSPIN_DEBUG` 调试日志（`pushFrame` / `playMedia`）与 compose 中的对应环境变量。
+
+### 实测结果（ESP32-S3 `esp32-player-meet`）
+
+- 完整金标准序列出现并连续保持：`Stream Started` → `codec header: flac, 48000 Hz, 2 ch, 16-bit`
+  → `sendspin_id: current` → `State changed to PLAYING` → `19200 ring_buffer`
+  → **`speaker_mixer:369 Starting`** → **`i2s_audio.speaker:070 Starting`**
+  → **`96000 ring_buffer [speaker_task]`**。
+- 连续切歌 2 次：`Stream ended → IDLE → Stream Started → PLAYING`，**零 `Stopped` 事件**，
+  扬声器不拆；服务端 FLAC 分段稳定 ~100KB/0.5s；`/status` 持续 PLAYING、position 连续推进。
+- 测试:`backend` sendspin 全部 25 文件 / 71 用例通过。
+
+## [3.0.30] - 2026-09-17
+
+### Bug 修复（唯一权威 = `docs/SENDSPIN_ESPHOME_FLAC_2026-09-17.md`）
+> ⚠️ 本版仅完成「分段 FLAC」这一半；**真正的无声根因在 3.0.31**（STREAMINFO block size 失配等）。
+> 分段解决的是「有没有音频字节」，它不能解决 STREAMINFO 失配 —— 两者叠加才是完整答案。
+
+- **协商顺序断言/文档全线更正为 flac 优先**：此前多处（`legacy.test.ts`、`SENDSPIN_ESPHOME_DEBUG.md`、
+  本文件 3.0.27 条）误记 "opus > pcm > flac" / 默认落 pcm。真机检验结论是
+  **flac 优先 → pcm 次选 → 默认 flac**，凡与之冲突者一律按错误过时处理。
+  - `negotiateCodec` 断言：无声明/非法/仅 opus → flac；flac+pcm → flac；opus+pcm → pcm。
+  - `legacy.test.ts` stream/start 断言：codec 由 pcm 改 flac，并补 `codec_header` 存在性校验。
+- **`framing.test.ts` 帧头断言 9B → 13B**：对齐权威文档 §2.3（`>BqI`：1B `0x04` + 8B 大端微秒
+  时间戳 + 4B send_ahead），补 `sendAheadMs` 取值与缺省 0 校验。
+- **分段 FLAC 编码器**（`FfmpegPcmEncoder` 改造）：ffmpeg flac 管道输出只在输入 EOF flush，
+  单条持续进程在实时播放中逐帧 encode 恒为空包 → 设备收不到可解码帧。改为**分段编码**：
+  每段独立 ffmpeg（自带 `fLaC`+STREAMINFO），按 PCM 字节量达阈值即关闭该段 ffmpeg、flush 出
+  完整 FLAC 段并即时下发，随即起下一段续播。保证播放过程中帧持续流动。
+
+### 文档
+- `docs/SENDSPIN_ESPHOME_DEBUG.md` §4.4 更正；本文件 3.0.27 条更正。
+
 ## [3.0.29] - 2026-09-17
 
 ### 变更（Sendspin ESPHome 真机出声联调 — FLAC 推流对齐 MA 金标准）
@@ -56,8 +114,9 @@
  （对照 sendspin-cpp `protocol.cpp` 源码；多 server 仲裁下不抢占已有 playback 方）。
 - **`stream/start` 补 FLAC `codec_header`**：base64(`fLaC`+0x80+u24(34)+34B STREAMINFO)
   定值合成（48k/立体声/16bit，块大小 4608 与 ffmpeg 实际一致）；缺头整条作废、之后每块音频全灭。
-- **协商顺序改为 opus > pcm > flac**：ffmpeg flac 管道输出只在 EOF flush，
-  实时推流每帧拿空包；flac 真正逐帧可用前绝不主动选。空包不上 wire。
+- **协商顺序定为 flac 优先 → pcm 次选 → 默认 flac**（2026-09-17 真机实锤：MA 金标准用 FLAC 才进
+  PLAYING，opus 被这类客户端拒收）。⚠️ 当时误判为 "opus > pcm > flac"，已更正（见 3.0.30）。
+  ffmpeg flac 管道输出只在 EOF flush，实时推流每帧拿空包 → 空包不上 wire，随后改分段 FLAC。
 - **曲终/停止/失败补 `stream/end` + `group/update(stopped)`**：此前设备永远卡 PLAYING。
 - **`goodbye` 打日志 + `another_server` 等不自动重拨**（spec 语义，手动 dial 解除）；
   同目标拨号单飞（并发双连接触发设备仲裁踢人）。

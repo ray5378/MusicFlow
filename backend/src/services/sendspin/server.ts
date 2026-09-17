@@ -311,12 +311,14 @@ export class SendspinGroup {
       const gain = c.appliedGain();
       const enc = this.encoderFor(c);
       const chunks = await enc.encode(this.scalePcm(pcm, gain));
-      // opus 每 20ms 一裸包;多包时时间戳按帧长递增,对齐 MA 每包一次性的 psg 推送。
-      chunks.forEach((data, i) => {
-        // 空包必跳过:ffmpeg flac 在 EOF 前常吐空缓冲,空包上 wire 会被严格
-        // 客户端判 Invalid data(2026-09-17 ESPHome 真机)。
+      // opus 每 20ms 一裸包;分段 FLAC 每 ~0.5s 一整段。
+      // 时间戳 = 本帧基准 ts + 该包相对入参起点的偏移(offsetMs,分段时为首样本时刻修正,
+      // 否则整段会被错标到当前帧 → 设备同步漂移)。逐帧编码器 offsetMs 恒 0。
+      chunks.forEach((ck) => {
+        const data = ck.data;
+        // 空包必跳过:严格客户端收空包会判 Invalid data(2026-09-17 ESPHome 真机)。
         if (!data || data.length === 0) return;
-        c.sendAudio(tsUs + BigInt(i * OPUS_FRAME_MS) * 1000n, data);
+        c.sendAudio(tsUs + BigInt(Math.round((ck.offsetMs ?? 0) * 1000)), data);
       });
     }
   }

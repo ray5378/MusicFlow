@@ -566,8 +566,10 @@ export class QueueController extends EventEmitter {
     }
   }
 
-  /** 只带 songId 的 item(HA/脚本/持久化恢复)在 cast 前补全元数据。 */
-  private async resolveItem(item: QueueItem): Promise<QueueItem> {
+  /** 只带 songId 的 item(HA/脚本/持久化恢复)在 cast 前补全元数据。
+   *  public:sendspin 的 ProtocolPlayer.resume() 冷起播要自行补全后再 playMedia
+   *  (见 protocolPlayer.ts 注释),不能只依赖 playCurrent 内部调用。 */
+  async resolveItem(item: QueueItem): Promise<QueueItem> {
     if (item.title && item.mime) return item;
     try {
       const s = db.select().from(songs).where(eq(songs.id, item.songId)).get();

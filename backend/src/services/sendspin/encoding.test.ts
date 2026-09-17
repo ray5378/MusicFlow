@@ -11,8 +11,13 @@ describe("flacCodecHeaderB64", () => {
     expect(h[4]).toBe(0x80); // last-block + STREAMINFO type 0
     expect(h.readUIntBE(5, 3)).toBe(34);
     const info = h.subarray(8);
-    expect(info.readUInt16BE(0)).toBe(4608); // 与 ffmpeg flac 实际块大小一致
-    expect(info.readUInt16BE(2)).toBe(4608);
+    // ⚠️ 必须 4096:实测 `ffmpeg -ar 48000 -ac 2 -f f32le -i - -c:a flac -f flac`
+    // 产出的 STREAMINFO 就是 0x1000/0x1000。此前断言 4608 是错的 —— 声明值与
+    // 实际帧块大小不符会被严格解码器逐帧拒收:设备建好 19200 解码环形区却永不
+    // 启动 speaker task(speaker_mixer/i2s_audio.speaker 一直不 Starting)= 无声
+    // (2026-09-17 ESPHome 真机实锤)。改回 4608 会重现无声,勿动。
+    expect(info.readUInt16BE(0)).toBe(4096);
+    expect(info.readUInt16BE(2)).toBe(4096);
     // 10..17B:rate(20b)|ch-1(3b)|bps-1(5b)|总数(36b)
     let pack = 0n;
     for (let i = 0; i < 8; i++) pack = (pack << 8n) | BigInt(info[10 + i]);

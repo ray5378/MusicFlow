@@ -8,12 +8,14 @@ describe("framing", () => {
     expect(b[0]).toBe(BIN_JSON);
     expect(unpackJsonBody(b)).toEqual({ type: "server/hello", payload: { name: "x" } });
   });
-  it("音频块 = [04][i64 BE μs][data], 9B 头", () => {
+  it("音频块 = [04][i64 BE μs][u32 BE send_ahead][data], 13B 头", () => {
     const data = new Uint8Array([1, 2, 3]);
-    const b = packAudioChunk(1_700_000_000n, data);
+    const b = packAudioChunk(1_700_000_000n, data, 30);
     expect(b[0]).toBe(BIN_PLAYER_AUDIO);
-    expect(parseAudioChunk(b)).toEqual({ timestampUs: 1_700_000_000n, data });
-    expect(b.length).toBe(9 + 3);
+    expect(parseAudioChunk(b)).toEqual({ timestampUs: 1_700_000_000n, sendAheadMs: 30, data });
+    expect(b.length).toBe(13 + 3);
+    // send_ahead 缺省 0(不传即零超前)。
+    expect(parseAudioChunk(packAudioChunk(1n, data)).sendAheadMs).toBe(0);
   });
   it("分片 2/3 重组", () => {
     const big = new Uint8Array(70_000).map((_, i) => i & 0xff);

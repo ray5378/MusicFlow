@@ -99,12 +99,62 @@ setTimeout(() => process.exit(0), 10000);
 1. **server/hello 五字段**:缺一或枚举非法 → 整条作废 → 30s 被踢。不要加 spec 之外的字段。
 2. **legacy 无 activate 推进**:真机直接 `Unhandled server message type: server/activate`,
    靠 hello 完成握手;`group/update` 照常处理。
-3. **FLAC 要 codec_header**:base64(`fLaC`+0x80+u24(34)+34B STREAMINFO);
-   后端 `flacCodecHeaderB64()` 定值合成(48k/立体声/16bit,块大小 4608 与 ffmpeg 实际一致)。
-4. **FLAC 实时流已死**:ffmpeg flac 管道输出只在 EOF flush,逐帧 encode 全是空包。
-   后端协商顺序已改为 opus > pcm > flac;空包不上 wire(`pushFrame` 过滤)。
+   ⚠️ **不要在 `dialPlayerInner` 里等设备回 `server/activate` 才认为激活成功** —— 真机永不回,
+   会 15s activation timeout 后自杀连接,表现为「每 5~6 分钟重拨一次」的假重连循环
+   (2026-09-17 实锤:设备侧 `Connection closed callback` 与我们 timeout 时刻精确对齐)。
+3. **FLAC 要 codec_header**:base64(`fLaC`+0x80+u24(34)+34B STREAMINFO)。
+   后端 `flacCodecHeaderB64()` 定值合成。
+   ⚠️ **STREAMINFO 的 min/max block size 必须 = 4096**(实测 ffmpeg 48kHz 输出值),
+   写 4608 会让严格解码器逐帧拒收:设备建好 19200 解码环形区后**永不启动 speaker**
+   (`speaker_mixer`/`i2s_audio.speaker` 一直不 `Starting`,也没有 96000 的 speaker_task ring buffer)
+   —— 链路全绿但无声,这是 2026-09-17 前长期「无声音」的真根因。断言见 `encoding.test.ts`。
+4. **FLAC 是唯一能出声的 codec(2026-09-17 真机实锤)**:协商顺序 = **flac 优先 → pcm 次选 → 默认 flac**。
+   opus 被这类客户端拒收(9.x 明说 "only PCM and FLAC are supported"),永远不要协商到 opus。
+   代码见 `server.ts` `negotiateCodec()`;键名兼容 `player@v1_support`(9.x 别名)与 `player_support`(老版)。
+   ⚠️ **ffmpeg flac 管道输出只在 EOF flush,逐帧 encode 全是空包** —— 所以不能指望「单条持续 ffmpeg 流」实时出声,
+   必须改**分段 FLAC**(每段独立 `fLaC`+STREAMINFO,输入 EOF 即 flush 整段)。MA 金标准也是每 ~10s 一段 stream。
+   当前 `pushFrame` 已过滤空包(空包上 wire 会被严格客户端判 Invalid data)。
 5. **曲终必须 `stream/end` + `group/update(stopped)`**,否则设备卡 PLAYING。
 6. **并发拨号必死**:同一目标单飞(`pendingDials`),否则设备仲裁踢掉一个。
 7. **`another_server` 不自动重拨**(spec),手动 dial 清除抑制;`restart` 才重拨。
 8. **先有音频再谈记住**:设备 `Persisted last played server` 只认真正播过的 server;
    靠"连上"混不成记住,不配对就用播放把它拿下。
+9. **冷起播必须走 `playMedia`,不能只 `pump.resume()`**:`POST /peers/:id/play` →
+   `QueueController.transport(play)` → `player.resume()`。sendspin 的 `resume()` 若只调
+   `pumpFor(...).resume()`,在「队列 isActive=true 但从未起播」时是**空操作**
+   (`resumePlayback()` 见 `q.isActive` 直接早退)→ 无 playMedia/无 stream/start/无 pump = 静默。
+   对照 DLNA:它的 `resume() = playDevice()`(重发 SetAVTransportURI)= 真起播,所以 DLNA 不暴露此缺口。
+   修法:`protocolPlayer.resume()` 判 `pump.active` —— 在跑就原地 resume,没跑就走 `playMedia` 冷起播
+   (需 `QueueController.resolveItem` 公开,补全 songId-only 的 item 元数据)。
+10. **不存在的 dial 目标要删干净**:`MUSICFLOW_DATA_DIR/sendspin/dial_targets.json` 里若留着
+   设备自身端口(如 `192.168.10.245:8928`),服务端每 60s 拨过去会被设备判为「竞争第二个 server」
+   而 `goodbye: another_server` 踢回,并触发 `noAutoRedial` 永久抑制。
+   正常方向是**设备经 mDNS 发现服务端后自己拨入 38927**(Client-Initiated),不是服务端拨设备。
+
+### 4.1 正确出声的完整设备侧序列(2026-09-17 验证,可作基准比对)
+
+```
+Group update - state: playing, id: 3C:0F:02:F9:69:E4
+Stream Started
+Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
+sendspin_id: current
+State changed to PLAYING
+Created ring buffer with size 19200              ← 解码环形区
+speaker_mixer:369 Starting                        ← 输出链路起来(关键标志)
+i2s_audio.speaker:070 Starting                    ← I2S 输出起来(关键标志)
+Created ring buffer with size 96000 [speaker_task] ← 输出环形区(关键标志)
+```
+
+切歌时(扬声器**不拆**):
+```
+Stream ended - player:1 artwork:1 visualizer:1
+Group update - state: playing
+State changed to IDLE
+Stream Started
+Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
+sendspin_id: current
+State changed to PLAYING
+Created ring buffer with size 19200
+```
+> `speaker_mixer Starting` / `i2s_audio.speaker Starting` / `96000 ring_buffer` **只在首次出现一次**,
+> 后续切歌不再打印 —— 这是正常的,不代表掉链。判「有没有掉」看有没有 `stopped`。
