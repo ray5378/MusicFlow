@@ -48,6 +48,12 @@
 >   新增 `alignGroupMembers`（dlna 新增走 `rejoinMembers`、sendspin 新增走
 >   `sendspinGroupJoin` 直播沿、sendspin 摘除走 `sendspinGroupLeave`，
 >   best-effort）；PUT 改调同一钩子（保留 `setMembers` 精确顺序）。
+> - [x] **T2 sendspin 组 player＋transport/poll helper**（已合入）：
+>   `index.ts` 新增 `sendspinGroupTransport/Poll/Muted/PumpActive`
+>   （transport/poll/mute core 本就 group-name 无关，fork 经既有 op 下发，
+>   子进程零改动）；`protocolPlayer.ts` 新增 `createSendspinGroupPlayer`
+>   （组内成员共享单 pump；`./index.js` 只许动态导入，
+>   禁环见 runtime.ts 注释；`group/index` 静态可）。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，

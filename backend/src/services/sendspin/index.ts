@@ -420,6 +420,63 @@ export async function sendspinGroupLeave(groupName: string, clientId: string): P
   return leaveGroupCore(getServer(), groupName, clientId);
 }
 
+/** 用户组传输指令(stop/pause/resume/seek/volume):core 函数本就 group-name 无关
+ *  (经 srv.group(name)),fork 经既有 transport op 下发,子进程零改动。 */
+export async function sendspinGroupTransport(
+  groupName: string,
+  op: "stop" | "pause" | "resume" | "seek" | "volume",
+  arg?: number,
+): Promise<void> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
+    await sendspinSupervisor.rpc("transport", { clientId: groupName, op, arg });
+    return;
+  }
+  const { stopGroupCore, pauseCore, resumePumpCore, seekCore, setVolumeCore } = await import("./playerCore.js");
+  const srv = getServer();
+  switch (op) {
+    case "stop": stopGroupCore(srv, groupName); break;
+    case "pause": if (srv) pauseCore(srv, groupName); break;
+    case "resume": if (srv) resumePumpCore(srv, groupName); break;
+    case "seek": if (srv) seekCore(srv, groupName, Number(arg) || 0); break;
+    case "volume": if (srv) setVolumeCore(srv, groupName, Number(arg) || 0); break;
+  }
+}
+
+/** 用户组轮询(播放在播/位置/时长):供组 player pollState 与组状态派生。 */
+export async function sendspinGroupPoll(
+  groupName: string,
+): Promise<{ playing: boolean; positionMs: number; durationMs: number }> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return { playing: false, positionMs: 0, durationMs: 0 };
+    return sendspinSupervisor.rpc("poll", { clientId: groupName });
+  }
+  const { pollCore } = await import("./playerCore.js");
+  return pollCore(getServer(), groupName);
+}
+
+/** 用户组静音(组＋成员连接同置,取消恢复原音量;离线重连后组标记仍有效)。 */
+export async function sendspinGroupMuted(groupName: string, muted: boolean): Promise<void> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
+    await sendspinSupervisor.rpc("setMuted", { clientId: groupName, muted });
+    return;
+  }
+  const { setMutedCore } = await import("./playerCore.js");
+  setMutedCore(getServer(), groupName, muted);
+}
+
+/** 用户组 pump 是否在推流(供 resume 冷起播/原地恢复判定)。 */
+export async function sendspinGroupPumpActive(groupName: string): Promise<boolean> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return false;
+    return sendspinSupervisor.rpc<boolean>("pumpActive", { clientId: groupName }).catch(() => false);
+  }
+  const { pumpActiveCore } = await import("./playerCore.js");
+  const srv = getServer();
+  return srv ? pumpActiveCore(srv, groupName) : false;
+}
+
 /** 记住的拨号目标: dial route 成功即记入,重启/掉线后自动重拨。
  *  存 MUSICFLOW_DATA_DIR/sendspin/dial_targets.json(设备记录,非插件配置)。
  *  fork 模式下文件归子进程所有(重拨循环在子进程),主进程经 RPC 读写。 */

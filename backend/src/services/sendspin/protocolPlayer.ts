@@ -23,16 +23,104 @@ import {
   setVolumeCore,
   pollCore,
   pumpActiveCore,
+  sendspinGroupName,
   ephemeralGroup,
   type SendspinGroupLike,
 } from "./playerCore.js";
 import { sendspinSupervisor } from "./supervisor.js";
 import { getPlayerController, getQueueController } from "../player/index.js";
+import { getGroupManager, splitMemberId } from "../group/index.js";
 
 /** 单个 sendspin 客户端抽象成一个 ProtocolPlayer。 */
 export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
   if (isForkMode()) return createSendspinProxyPlayer(clientId);
   return createSendspinInprocPlayer(clientId);
+}
+
+// ==================== 用户组 player(多房间共享 pump) ====================
+//
+// 组内 sendspin 成员共用一个推流管线(`ug:<groupId>` 组＋单 pump 同一时间线),
+// 与"每成员一个 pump"的扇出有本质区别 —— 后者不同步。
+// 双模式:命令经 index.ts fork-aware helper(内部已分流),本文件不直接碰 server,
+// 因此 in-proc/proxy 无需两套实现(与单设备 player 的双实现不同)。
+// ⚠️ ./index.js 只许动态导入(禁环见 runtime.ts 注释);playerCore/group 静态可。
+
+/** 组内 sendspin 在线成员(裸 clientId)。命名空间写法与裸写法都认作 sendspin。 */
+async function onlineSendspinMembers(userGroupId: string): Promise<string[]> {
+  const g = getGroupManager().get(userGroupId);
+  if (!g) return [];
+  const ids = g.memberIds
+    .map(m => splitMemberId(m))
+    .filter(s => s !== null && s.kind === "sendspin")
+    .map(s => (s as { id: string }).id);
+  if (ids.length === 0) return [];
+  const { getSendspinFront } = await import("./index.js");
+  const front = getSendspinFront();
+  if (!front) return [];
+  return ids.filter(id => {
+    const c = front.clients.get(id) as any;
+    return !!c && c.ready !== false;
+  });
+}
+
+/** 用户组抽象成一个 ProtocolPlayer(仅覆盖组内 sendspin 成员;dlna 成员由组 player 另行扇出)。 */
+export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
+  const playerId = `group:${userGroupId}`;
+  const groupName = sendspinGroupName(userGroupId);
+  return {
+    playerId,
+    async playMedia(item: QueueItem, baseUrl: string) {
+      const members = await onlineSendspinMembers(userGroupId);
+      if (members.length === 0) {
+        throw new Error(`组 ${userGroupId} 无在线 sendspin 成员,无法播放`);
+      }
+      // castSession/token 是主进程状态(track_changed 检测用),必须本侧生成。
+      const streamUrl = createCastSession(item.songId, playerId, baseUrl).streamUrl;
+      const { sendspinGroupPlay } = await import("./index.js");
+      await sendspinGroupPlay(groupName, members, item);
+      schedulePlayingReport(playerId, item.duration ?? 0);
+      return { mediaUri: streamUrl };
+    },
+    async stop() {
+      const { sendspinGroupTransport } = await import("./index.js");
+      await sendspinGroupTransport(groupName, "stop");
+    },
+    async pause() {
+      const { sendspinGroupTransport } = await import("./index.js");
+      await sendspinGroupTransport(groupName, "pause");
+    },
+    async resume() {
+      const { sendspinGroupPumpActive, sendspinGroupTransport } = await import("./index.js");
+      if (await sendspinGroupPumpActive(groupName).catch(() => false)) {
+        await sendspinGroupTransport(groupName, "resume");
+        return;
+      }
+      await coldStartResume(
+        createSendspinGroupPlayer(userGroupId),
+        userGroupId,
+        (msg) => console.warn(`[Sendspin] ${msg}`),
+      );
+    },
+    async seek(seconds: number) {
+      const { sendspinGroupTransport } = await import("./index.js");
+      await sendspinGroupTransport(groupName, "seek", seconds);
+    },
+    async setVolume(vol: number) {
+      const { sendspinGroupTransport } = await import("./index.js");
+      await sendspinGroupTransport(groupName, "volume", vol);
+    },
+    async pollState(): Promise<PlayerState> {
+      const { sendspinGroupPoll } = await import("./index.js");
+      const st = await sendspinGroupPoll(groupName).catch(() => ({ playing: false, positionMs: 0, durationMs: 0 }));
+      return {
+        playerId,
+        playbackState: st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE,
+        position: st.positionMs / 1000,
+        duration: st.durationMs / 1000,
+        updatedAt: Date.now(),
+      };
+    },
+  };
 }
 
 // ==================== 共用主进程侧动作 ====================
