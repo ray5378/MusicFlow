@@ -54,6 +54,12 @@
 >   子进程零改动）；`protocolPlayer.ts` 新增 `createSendspinGroupPlayer`
 >   （组内成员共享单 pump；`./index.js` 只许动态导入，
 >   禁环见 runtime.ts 注释；`group/index` 静态可）。
+> - [x] **T3 组 player kind 分流＋status/leader**（已合入）：
+>   `splitGroupMembers`/`getOnlineSendspinIds`/`hasOnlineMember`/`getGroupLeader`
+>   新增；`playMedia` 按 kind 分流（sendspin 子集单 pump、dlna 逐成员 cast，
+>   任一成功即成功）；transport 全量双路；`pollState`/`getGroupStatus` 按 leader
+>   kind 派生；`getOnlineMemberIds` 保持 DLNA 口径（看门狗/QC 调用点零改）；
+>   QC 结束抑制改 `hasOnlineMember`。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，

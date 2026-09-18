@@ -15,7 +15,7 @@ import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
-import { createGroupProtocolPlayer, getGroupStatus, getOnlineMemberIds } from "../group/protocolPlayer.js";
+import { createGroupProtocolPlayer, getGroupStatus, hasOnlineMember } from "../group/protocolPlayer.js";
 import { getGroupManager } from "../group/index.js";
 import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
@@ -374,10 +374,11 @@ export class QueueController extends EventEmitter {
   }
 
   /** 组队列的"结束"决策在成员全离线时应被抑制:那是 leader 离线导致的假 IDLE,
-   *  队列要保留给看门狗做"悬挂 + 成员回归自动恢复"。在线时正常结束(自然播完/用户停止)。 */
+   *  队列要保留给看门狗做"悬挂 + 成员回归自动恢复"。在线判定跨 kind
+   *  (dlna 可达或 sendspin 在线任一)。 */
   private shouldSuppressGroupEnd(id: string): boolean {
     if (!getGroupManager().get(id)) return false;
-    return getOnlineMemberIds(id).length === 0;
+    return !hasOnlineMember(id);
   }
 
   private pickNext(q: QueueData, nativeGapless: boolean): number {
