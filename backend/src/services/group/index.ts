@@ -1,17 +1,39 @@
 // 播放器群组(SyncGroup)管理服务。仿 MA sync_group provider:
-//   - 组 = 多台 DLNA 设备的集合,组持有自己的队列(在 QueueController 接 group:<id> 后生效)
-//   - 成员只能是 DLNA 设备(裸 deviceId);组不能套组
+//   - 组 = 多台设备的集合,组持有自己的队列(在 QueueController 接 group:<id> 后生效)
+//   - 成员用带命名空间的 peer 成员 id:`sendspin:<clientId>` / `dlna:<deviceId>` /
+//     裸 id(历史数据,一律视为 DLNA);组不能套组(`group:` 前缀拒绝)
 //   - 一台设备可同时加入多个组(如"客厅组"+ "所有设备组"),设备同一时刻只能渲染一路流,
 //     多个组同时向同一设备投递时以最后一次命令为准(物理限制,非漂移校正范畴)
-//   - 组名必填、非空、限长;成员用全量替换(前端勾选框提交完整列表)
-//   - 成员变更通过 EventEmitter 广播(WS 推送在 ws/index.ts 订阅,前端据此刷新)
+//   - 组名必填、非空、限长;成员用全量替换(前端勾选框提交完整列表)或增量
+//     (applyMemberDelta,供移动端随时加减)
+//   - 成员变更通过 EventEmitter 广播(WS 推送在 services/ws 订阅,前端据此刷新)
 import { EventEmitter } from "events";
 import { v4 as uuidv4 } from "uuid";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { playerGroups } from "../../db/schema.js";
 import { getCachedDevices } from "../dlna/control.js";
+import { getServer as getSendspinServer } from "../sendspin/runtime.js";
+import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { createLogger } from "../../utils/logger.js";
+
+/** 成员 kind:dlna(默认,裸 id 亦属此) / sendspin。airplay/local 暂不支持进组。 */
+export type GroupMemberKind = "dlna" | "sendspin";
+
+/** 拆成员 id 为 kind＋裸 id。`group:`/`local:` 前缀返回 null(组不能套组/含本机)。 */
+export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } | null {
+  if (typeof m !== "string" || !m) return null;
+  if (m.startsWith("group:") || m.startsWith("local:")) return null;
+  if (m.startsWith("sendspin:")) {
+    const id = m.slice("sendspin:".length);
+    return id ? { kind: "sendspin", id } : null;
+  }
+  if (m.startsWith("dlna:")) {
+    const id = m.slice("dlna:".length);
+    return id ? { kind: "dlna", id } : null;
+  }
+  return { kind: "dlna", id: m }; // 裸 id = 历史数据,视为 DLNA
+}
 
 const log = createLogger("group");
 export interface PlayerGroup {
@@ -36,9 +58,9 @@ export interface PlayerGroupWithMembers extends PlayerGroup {
 const GROUP_NAME_MAX = 50;
 
 export class GroupManager extends EventEmitter {
+  // 组=用户级数量,成员归属查询直接全量扫描(命名空间写法下裸 id/全称都要命中,
+  // 倒排索引省不下双写一致性麻烦,此处刻意不用索引)。
   private groups = new Map<string, PlayerGroup>();
-  // deviceId → 所属组 id 集合。多组约束:一台设备可同时加入多个组。
-  private memberIndex = new Map<string, Set<string>>();
 
   constructor() {
     super();
@@ -48,7 +70,6 @@ export class GroupManager extends EventEmitter {
   /** 启动时从 DB 加载全部组。 */
   loadFromDb(): void {
     this.groups.clear();
-    this.memberIndex.clear();
     const rows = db.select().from(playerGroups).all();
     for (const r of rows) {
       let memberIds: string[] = [];
@@ -61,7 +82,6 @@ export class GroupManager extends EventEmitter {
         createdAt: r.createdAt || "",
         updatedAt: r.updatedAt || "",
       });
-      for (const m of memberIds) this.addToIndex(m, r.id);
     }
     log.info(`[group] loaded ${this.groups.size} player group(s) from DB`);
   }
@@ -109,7 +129,6 @@ export class GroupManager extends EventEmitter {
     const g: PlayerGroup = { id, ownerUserId, name: this.normalizeName(name), memberIds: [...memberIds], createdAt: now, updatedAt: now };
     this.persist(g);
     this.groups.set(id, g);
-    for (const m of g.memberIds) this.addToIndex(m, id);
     this.emit("group_created", g);
     return g;
   }
@@ -128,63 +147,104 @@ export class GroupManager extends EventEmitter {
   setMembers(id: string, memberIds: string[]): PlayerGroup | undefined {
     const g = this.groups.get(id);
     if (!g) return undefined;
-    // 先把本组从原成员的归属集合中移除,再校验并写回新集合(设备仍可能在别的组)。
-    for (const m of g.memberIds) this.removeFromIndex(m, id);
     this.assertMembersAvailable(memberIds);
     g.memberIds = [...memberIds];
     g.updatedAt = new Date().toISOString();
-    for (const m of g.memberIds) this.addToIndex(m, id);
     this.persist(g);
     this.emit("group_updated", g);
     return g;
+  }
+
+  /** 增量变更成员(移动端随时加减):先删后加,结果去重保序(原成员相对顺序不变,
+   *  新增 append)。PUT 全量替换与新增 delta 口都走这里,语义单源。
+   *  返回实际生效的 added/removed(已在组内的 add / 不在组内的 remove 为 no-op)。 */
+  applyMemberDelta(
+    id: string,
+    delta: { add?: string[]; remove?: string[] },
+  ): { group: PlayerGroup; added: string[]; removed: string[] } | undefined {
+    const g = this.groups.get(id);
+    if (!g) return undefined;
+    const add = Array.isArray(delta.add) ? delta.add : [];
+    const remove = Array.isArray(delta.remove) ? delta.remove : [];
+    const removeSet = new Set(remove);
+    const kept = g.memberIds.filter(m => !removeSet.has(m));
+    const removed = g.memberIds.filter(m => removeSet.has(m));
+    const keptSet = new Set(kept);
+    const added: string[] = [];
+    for (const m of add) {
+      if (typeof m !== "string" || keptSet.has(m)) continue; // 非法/已在组内按 no-op 跳过
+      keptSet.add(m);
+      kept.push(m);
+      added.push(m);
+    }
+    this.assertMembersAvailable(kept);
+    g.memberIds = kept;
+    g.updatedAt = new Date().toISOString();
+    this.persist(g);
+    this.emit("group_updated", g);
+    return { group: g, added, removed };
   }
 
   deleteGroup(id: string): boolean {
     const g = this.groups.get(id);
     if (!g) return false;
     this.groups.delete(id);
-    for (const m of g.memberIds) this.removeFromIndex(m, id);
     db.delete(playerGroups).where(eq(playerGroups.id, id)).run();
     this.emit("group_deleted", id);
     return true;
   }
 
-  /** 设备当前属于哪些组(可多个)。 */
+  /** 设备当前属于哪些组(可多个)。deviceId 可为裸 id 或命名空间 id,
+   *  按裸 id 比对(成员两种写法都命中)。 */
   groupsOfDevice(deviceId: string): string[] {
-    return Array.from(this.memberIndex.get(deviceId) ?? []);
+    const bare = splitMemberId(deviceId)?.id ?? deviceId;
+    const out: string[] = [];
+    for (const [gid, g] of this.groups) {
+      if (g.memberIds.some(m => splitMemberId(m)?.id === bare)) out.push(gid);
+    }
+    return out;
   }
 
   // ==================== 内部 ====================
 
-  private addToIndex(deviceId: string, groupId: string): void {
-    let s = this.memberIndex.get(deviceId);
-    if (!s) { s = new Set(); this.memberIndex.set(deviceId, s); }
-    s.add(groupId);
-  }
-
-  private removeFromIndex(deviceId: string, groupId: string): void {
-    const s = this.memberIndex.get(deviceId);
-    if (!s) return;
-    s.delete(groupId);
-    if (s.size === 0) this.memberIndex.delete(deviceId);
-  }
-
   private resolveMembers(memberIds: string[]): GroupMemberInfo[] {
     const cache = new Map(getCachedDevices().map(d => [d.id, d]));
-    return memberIds.map(deviceId => {
-      const d = cache.get(deviceId);
-      return { deviceId, name: d ? (d.alias || d.name) : deviceId, available: !!d?.available };
+    return memberIds.map(memberId => {
+      const split = splitMemberId(memberId);
+      if (!split) return { deviceId: memberId, name: memberId, available: false };
+      if (split.kind === "sendspin") return { deviceId: memberId, ...this.resolveSendspinMember(split.id) };
+      const d = cache.get(split.id);
+      return { deviceId: memberId, name: d ? (d.alias || d.name) : memberId, available: !!d?.available };
     });
   }
 
-  /** 从所有群组中移除一台设备(删除设备时调用),并持久化+广播。 */
+  /** sendspin 成员展示信息:in-proc 读真实 server,fork 读 supervisor 镜像,
+   *  都没有(服务未运行)则离线占位 —— 组可持久化,成员在线状态动态解析。 */
+  private resolveSendspinMember(clientId: string): { name: string; available: boolean } {
+    try {
+      const srv = getSendspinServer();
+      if (srv) {
+        const c = srv.clients.get(clientId);
+        if (c) return { name: (c as any).name || clientId, available: (c as any).ready !== false };
+      }
+      if (sendspinSupervisor.isRunning()) {
+        const mc = sendspinSupervisor.mirror.clients.get(clientId);
+        if (mc) return { name: (mc as any).name || clientId, available: (mc as any).ready !== false };
+      }
+    } catch { /* 解析失败即离线占位 */ }
+    return { name: clientId, available: false };
+  }
+
+  /** 从所有群组中移除一台设备(删除设备时调用),并持久化+广播。
+   *  deviceId 可为裸 id 或命名空间 id,按裸 id 比对(两种写法都清掉)。 */
   removeDeviceFromAllGroups(deviceId: string): void {
-    for (const groupId of this.groupsOfDevice(deviceId)) {
-      const g = this.groups.get(groupId);
-      if (!g) continue;
-      g.memberIds = g.memberIds.filter(m => m !== deviceId);
+    const bare = splitMemberId(deviceId)?.id ?? deviceId;
+    for (const [groupId, g] of this.groups) {
+      const before = g.memberIds;
+      const after = before.filter(m => splitMemberId(m)?.id !== bare);
+      if (after.length === before.length) continue;
+      g.memberIds = after;
       g.updatedAt = new Date().toISOString();
-      this.removeFromIndex(deviceId, groupId);
       this.persist(g);
       this.emit("group_updated", g);
     }
@@ -204,10 +264,14 @@ export class GroupManager extends EventEmitter {
       if (typeof m !== "string") throw new Error("成员必须是字符串 id");
       if (seen.has(m)) throw new Error("成员列表不能重复");
       seen.add(m);
-      if (m.startsWith("group:") || m.startsWith("local:")) {
-        throw new Error(`成员 ${m} 不是 DLNA 设备`);
+      const split = splitMemberId(m);
+      // 组不能套组/含本机/airplay 暂不支持进组(旧报错口径保留)。
+      if (!split) throw new Error(`成员 ${m} 不是 DLNA 设备`);
+      if (split.kind === "sendspin") {
+        // sendspin 成员只校验格式(在线状态动态解析):组可持久化,设备离线仍可建组。
+        continue;
       }
-      const known = getCachedDevices().some(d => d.id === m);
+      const known = getCachedDevices().some(d => d.id === split.id);
       if (!known) throw new Error(`设备 ${m} 不是已知的 DLNA 设备`);
     }
   }

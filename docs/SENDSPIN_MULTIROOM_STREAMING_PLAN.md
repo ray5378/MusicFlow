@@ -1,8 +1,72 @@
 # Sendspin 真多房间组 + 流式解码方案
 
-> 状态：方案（未开工）。目标版本待定。
+> 状态：AMB 施工中（A 完工已合入；B 核心层完工、路由/扇出层待续）。
 > 产品目标：**多 ESP32 真多房间组、设备可中途加入**；Flutter 客户端可随时加减播放器。
 > 约束：时间线/编码器/IPC 不动；3.0.28→3.0.35 的 Sendspin 链路只保不改行为。
+
+## 进度与交接（2026-09-18，未发版）
+
+> 本次提交到 main 主线，不打 tag、不发版（`SENDSPIN_STREAM_SOURCE` 默认关，
+> 组播放入口无调用方，线上行为零变化）。
+
+### 已合入 main
+
+- `6cad0c6` 阶段 A（流式解码）：`streamSource.ts`（PcmWindow 滑动窗口＋真背压）、
+  `GroupPump` 接线（窗口取数/EOF/淘汰重取/超时语义/stop 释放/时长未知不钳制）、
+  `resolveRowInput`、开关默认关、单测 9 个。全量回归 144 文件 / 1069 用例绿。
+
+### 本次合入（B 核心层，`playerGroup.test.ts` 3/3，真链路同 ts 断言过）
+
+| 文件 | 改动 |
+|---|---|
+| `sendspin/playerCore.ts` | 新增 `sendspinGroupName`（`ug:<id>` 映射）、`playGroupCore`（共享组＋单 pump，逐成员 stream/start 排队）、`stopGroupCore`、`joinGroupCore`（直播沿加入/空闲登记/幂等）、`leaveGroupCore`（单成员 stream/end＋移出）；`playCore` 切 `pendingAnnounces` 数组 |
+| `sendspin/server.ts` | `pendingAnnounce` 单字段 → `pendingAnnounces` 数组，`announcePending()` 逐个兑现（单成员退化一致） |
+| `sendspin/childMain.ts` | 新增 RPC：`groupPlay` / `groupStop` / `groupJoin` / `groupLeave`（协议 op 自由字符串，ipcProtocol 零改动） |
+| `sendspin/index.ts` | 新增 fork-aware helper：`sendspinGroupPlay/Stop/Join/Leave`（fork 走 RPC，in-proc 直调 core；playerCore 动态导入防模块环） |
+| `services/group/index.ts` | 成员 id 命名空间化（`splitMemberId`：`sendspin:`/`dlna:`/裸 id＝DLNA；`group:`/`local:` 拒绝）；`assertMembersAvailable` 按 kind 分流（sendspin 只验格式，组可持久化）；`resolveMembers` 按 kind 解析（in-proc 读真 server，fork 读 supervisor 镜像，缺省离线占位）；新增 `applyMemberDelta`（先删后加、去重保序、added/removed 回报）；`groupsOfDevice` 按裸 id 全量扫描；**删 `memberIndex` 倒排索引**（命名空间双写下一致性麻烦，用户级数据量直接扫描）；`removeDeviceFromAllGroups` 按裸 id 通配两种写法 |
+| `playerGroup.test.ts`（新） | 真服务＋双 legacy 客户端：双成员首帧同 ts／空闲加入＋播中加入＋摘除收 stream/end／播中加入从直播沿收帧 |
+
+`tsc` 干净。transport/poll/volume/mute 等 core 函数本就 group-name 无关（经 `srv.group(name)`），无需改动。
+
+### 与方案原文的偏差（已决策）
+
+1. PUT 不再改走 delta：PUT 全量替换语义含**精确顺序**（leader＝首个在线成员），
+   走 delta 会变成"旧序保留＋新增 append"，leader 语义漂移。改为：
+   PUT 保留 `setMembers`（精确顺序），POST 增量口走 `applyMemberDelta`，
+   两者共享 `assertMembersAvailable` 校验＋同一个"added→加入对齐"钩子
+   （待做，见下）。
+2. `resolveRowInput` 与 `fetchRowBytes` 分支同构（注释已标"改一处对另一处"）。
+3. `PcmWindow.seekTo` 杀旧进程时唤醒等数者（否则挂 15 秒超时）；
+   `durationMs=0` 不钳制 position（否则恒 0 无限重推饿死事件循环）——修时附带，
+   覆盖整包/流式两条路径。
+
+### 待续（按顺序接）
+
+1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
+   PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，
+   sendspin 走 `sendspinGroupJoin` 直播沿；摘除的 sendspin 成员走 `sendspinGroupLeave`）。
+2. `group/protocolPlayer.ts` 按 kind 分流：dlna 子集沿用逐成员 cast；
+   sendspin 子集走**一个**共享 pump（`createSendspinGroupPlayer`，in-proc/proxy 双模式，
+   注意经动态导入避开 QC→group→sendspin→player/index→QC 模块环）；
+   `getOnlineMemberIds` 返回存储原文（在线判定按 kind），
+   `getGroupStatus`/leader 补 sendspin 分支；watchdog 探活/对齐仅 dlna 成员。
+3. `group:<id>` mute/volume/status 路由扇出补 sendspin 分支
+   （transport 类经 QC 零改动；mute 逐成员按 kind 分发）。
+4. 前端群组对话框成员选择器加入 sendspin 设备（`sendspin:<id>` 形式，
+   `selectableDevices` 处加）。
+5. 测试：childMain 组 RPC 用例、路由增量口用例（已有 playerGroup 真链路用例打底）。
+6. 全量回归＋240 soak（内存曲线＋双 ESP32 加减成员演练）后再定发版。
+
+### 验证命令
+
+```bash
+cd backend
+npx tsc --noEmit
+npx vitest run src/services/sendspin/playerGroup.test.ts
+npx vitest run tests/sendspin/ src/services/sendspin/
+```
+
+---
 
 ---
 

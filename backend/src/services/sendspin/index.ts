@@ -365,6 +365,61 @@ export async function sendspinUnpair(clientId: string): Promise<boolean> {
   return ok;
 }
 
+/** 用户组播放入口(多房间同步):fork 经 RPC 在子进程执行, in-proc 直调 core。
+ *  供路由层(成员变更)/组 player(起播)调用;调用方零分叉。
+ *  groupName 统一用 playerCore.sendspinGroupName(userGroupId) 映射。 */
+export async function sendspinGroupPlay(
+  groupName: string,
+  memberIds: string[],
+  item: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; duration?: number },
+): Promise<void> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
+    await sendspinSupervisor.rpc("groupPlay", { group: groupName, members: memberIds, item });
+    return;
+  }
+  const { playGroupCore } = await import("./playerCore.js");
+  const srv = getServer();
+  if (!srv) throw new Error("sendspin 服务未运行");
+  playGroupCore(srv, groupName, memberIds, item as any, (cid, songId, message) => {
+    log.warn(`sendspin group play ${songId} failed(group=${cid}): ${message}`);
+  });
+}
+
+/** 用户组停止(成员保留,下次起播复用)。 */
+export async function sendspinGroupStop(groupName: string): Promise<void> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return;
+    await sendspinSupervisor.rpc("groupStop", { group: groupName });
+    return;
+  }
+  const { stopGroupCore } = await import("./playerCore.js");
+  stopGroupCore(getServer(), groupName);
+}
+
+/** 用户组成员加入(播中走直播沿,空闲仅登记)。 */
+export async function sendspinGroupJoin(
+  groupName: string,
+  clientId: string,
+): Promise<{ joined: boolean; live: boolean }> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return { joined: false, live: false };
+    return sendspinSupervisor.rpc("groupJoin", { group: groupName, clientId });
+  }
+  const { joinGroupCore } = await import("./playerCore.js");
+  return joinGroupCore(getServer(), groupName, clientId);
+}
+
+/** 用户组成员摘除(给该成员 stream/end 后移出,不影响其余成员)。 */
+export async function sendspinGroupLeave(groupName: string, clientId: string): Promise<boolean> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return false;
+    return sendspinSupervisor.rpc<boolean>("groupLeave", { group: groupName, clientId });
+  }
+  const { leaveGroupCore } = await import("./playerCore.js");
+  return leaveGroupCore(getServer(), groupName, clientId);
+}
+
 /** 记住的拨号目标: dial route 成功即记入,重启/掉线后自动重拨。
  *  存 MUSICFLOW_DATA_DIR/sendspin/dial_targets.json(设备记录,非插件配置)。
  *  fork 模式下文件归子进程所有(重拨循环在子进程),主进程经 RPC 读写。 */

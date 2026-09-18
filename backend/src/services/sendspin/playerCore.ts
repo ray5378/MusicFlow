@@ -39,6 +39,12 @@ export function ephemeralGroup(clientId: string): SendspinGroupLike {
 /** pump.play 失败回调(in-proc=打日志;child=IPC 通知主进程)。 */
 export type PlayFailedSink = (clientId: string, songId: string, message: string) => void;
 
+/** 用户组 → sendspin 组名映射:与单设备组(clientId 裸名)互不碰撞。
+ *  路由层/组 player/测试统一走这里,不要手拼前缀。 */
+export function sendspinGroupName(userGroupId: string): string {
+  return `ug:${userGroupId}`;
+}
+
 /** 起播核心:对应原 ProtocolPlayer.playMedia 的「推流侧」段落。同步段执行完即返回,
  *  解码/推流在 pump 内异步进行;失败经 onPlayFailed 上抛(不 throw —— 与原行为一致,
  *  playMedia 不因解码失败阻塞 QC,清理由核心内完成)。 */
@@ -83,7 +89,7 @@ export function playCore(
     // MA 的解法(player/v1.py `_pending_stream_start`)正是把这个消息**推迟到
     // 第一块音频到达时**才发 —— 我们同样用 pump 的 onFirstFrame 回调触发。
     conn.sendGroupUpdate();
-    g.pendingAnnounce = conn;
+    g.pendingAnnounces.push(conn);
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
   void pump.play(item.songId).catch((e) => {
@@ -96,8 +102,7 @@ export function playCore(
 }
 
 /** 停止核心(原 stop():打断 pump + 清组状态 + stream/end 成对收尾)。 */
-export function stopCore(srv: SendspinServer | null, clientId: string): void {
-  const g = ephemeralOrReal(srv, clientId);
+export function stopCore(srv: SendspinServer | null, clientId: string): void {  const g = ephemeralOrReal(srv, clientId);
   if (srv) pumpFor(srv, srv.group(clientId)).stop();
   g.positionMs = 0;
   g.current = null;
@@ -105,6 +110,94 @@ export function stopCore(srv: SendspinServer | null, clientId: string): void {
   const live = srv?.group(clientId);
   if (live) live.finishPlayback();
   else srv?.clients.get(clientId)?.sendGroupUpdate();
+}
+
+/** 用户组起播核心:与 playCore 同步序(收尾旧流 → 元数据 → 入组宣告 → 后台 pump),
+ *  区别是组 = 用户组名映射的共享组,成员 = 在线 conn 全集,共用一个 pump 同一时间线。
+ *  各成员的 stream/start 由 pushFrame 首帧前逐个兑现(pendingAnnounces),与单设备
+ *  时序一致 —— 新成员首块同样拿到真实 codec_header,不走合成回退。
+ *  离线成员直接跳过(回归由重连/看门狗覆盖,不在此阻塞起播)。 */
+export function playGroupCore(
+  srv: SendspinServer | null,
+  groupName: string,
+  memberIds: string[],
+  item: QueueItem,
+  onPlayFailed: PlayFailedSink = () => {},
+): void {
+  if (!srv) return;
+  const g = srv.group(groupName);
+  const pump = pumpFor(srv, g);
+  pump.stop(); // 打断上一首,避免重叠推流
+  // stream/end 收尾旧流(成对)＋关旧编码器清残留分段:与 playCore 同因(无声事故)。
+  g.current = null;
+  g.close();
+  g.finishPlayback();
+  g.positionMs = 0;
+  g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, durationMs: (item.duration ?? 0) * 1000 };
+  for (const id of memberIds) {
+    const conn = srv.clients.get(id);
+    if (!conn) continue;
+    conn.group = g;
+    g.add(conn); // 成员入组,推流才真正下发
+    // 组状态先行、stream/start 延迟到首帧前兑现:与 playCore 单成员时序逐项一致。
+    conn.sendGroupUpdate();
+    g.pendingAnnounces.push(conn);
+  }
+  // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
+  void pump.play(item.songId).catch((e) => {
+    g.current = null;
+    g.finishPlayback();
+    onPlayFailed(groupName, item.songId, (e as Error)?.message || String(e));
+  });
+}
+
+/** 用户组停止核心:打断 pump＋清状态＋stream/end(成员保留,下次起播复用)。 */
+export function stopGroupCore(srv: SendspinServer | null, groupName: string): void {
+  if (!srv) return;
+  const g = srv.group(groupName);
+  pumpFor(srv, g).stop();
+  g.positionMs = 0;
+  g.current = null;
+  g.finishPlayback();
+}
+
+export interface GroupJoinResult {
+  joined: boolean;
+  /** true=组正在播,新成员从直播沿入流;false=组空闲,仅登记,下次起播生效。 */
+  live: boolean;
+}
+
+/** 用户组成员直播沿加入:组在播 → 新成员立即拿 stream/start＋组状态,从当前
+ *  cursor 收帧(与 announce 临时入流同构,无需历史);组空闲 → 仅登记。
+ *  幂等(已在组内直接返回),离线 conn 返回 joined:false。 */
+export function joinGroupCore(srv: SendspinServer | null, groupName: string, clientId: string): GroupJoinResult {
+  if (!srv) return { joined: false, live: false };
+  const conn = srv.clients.get(clientId);
+  if (!conn) return { joined: false, live: false };
+  const g = srv.group(groupName);
+  if (g.members.has(conn)) return { joined: false, live: !!g.current };
+  conn.group = g;
+  g.add(conn);
+  if (!g.current) return { joined: true, live: false };
+  conn.sendGroupUpdate();
+  conn.announceStream();
+  return { joined: true, live: true };
+}
+
+/** 用户组成员摘除:给该成员发 stream/end＋组状态后移出(播中摘除不断其他成员)。
+ *  按 clientId 在组成员里找(不依赖 clients 表,重连换 conn 引用仍可摘)。
+ *  返回是否真的摘掉了一个成员。 */
+export function leaveGroupCore(srv: SendspinServer | null, groupName: string, clientId: string): boolean {
+  if (!srv) return false;
+  const g = srv.group(groupName);
+  for (const c of [...g.members]) {
+    if (c.clientId !== clientId) continue;
+    try { c.sendJson("stream/end", {}); } catch { /* ignore */ }
+    try { c.sendGroupUpdate(); } catch { /* ignore */ }
+    g.remove(c);
+    return true;
+  }
+  return false;
 }
 
 /** 暂停核心(打断节奏循环,不断连接;恢复走 resumePumpCore)。 */

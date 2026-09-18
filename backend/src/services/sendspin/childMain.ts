@@ -25,7 +25,9 @@ import {
 import type { SendspinServer } from "./server.js";
 import {
   playCore,
+  playGroupCore,
   stopCore,
+  stopGroupCore,
   pauseCore,
   resumePumpCore,
   seekCore,
@@ -35,6 +37,8 @@ import {
   pumpActiveCore,
   announceCore,
   announceProbeCore,
+  joinGroupCore,
+  leaveGroupCore,
 } from "./playerCore.js";
 import type { QueueItem } from "../player/types.js";
 
@@ -203,6 +207,34 @@ export class SendspinChildController {
         setMutedCore(srv, String(p.clientId), !!p.muted);
         this.requestSnapshot(true);
         return null;
+      }
+      case "groupPlay": {
+        // 用户组起播:共享组＋单 pump 同一时间线(多房间同步),成员离线自动跳过。
+        if (!srv) throw new Error("sendspin server 未运行");
+        const members = Array.isArray(p.members) ? p.members.map(String) : [];
+        playGroupCore(srv, String(p.group), members, p.item as QueueItem, (cid, songId, message) => {
+          this.send({ t: "playFailed", clientId: cid, songId, message });
+        });
+        this.requestSnapshot(true);
+        return null;
+      }
+      case "groupStop": {
+        stopGroupCore(srv, String(p.group));
+        this.requestSnapshot(true);
+        return null;
+      }
+      case "groupJoin": {
+        // 播中加入走直播沿(无需历史),空闲仅登记。调用方(路由层)据 live 决定提示。
+        if (!srv) throw new Error("sendspin server 未运行");
+        const r = joinGroupCore(srv, String(p.group), String(p.clientId));
+        this.requestSnapshot(true);
+        return r;
+      }
+      case "groupLeave": {
+        if (!srv) throw new Error("sendspin server 未运行");
+        const removed = leaveGroupCore(srv, String(p.group), String(p.clientId));
+        this.requestSnapshot(true);
+        return removed;
       }
       case "poll": {
         const st = pollCore(srv, String(p.clientId));
