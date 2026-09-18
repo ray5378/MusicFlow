@@ -15,6 +15,7 @@ import { playerGroups } from "../../db/schema.js";
 import { getCachedDevices } from "../dlna/control.js";
 import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
+import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
 
 /** 成员 kind:dlna(默认,裸 id 亦属此) / sendspin。airplay/local 暂不支持进组。 */
@@ -49,6 +50,11 @@ export interface GroupMemberInfo {
   deviceId: string;
   name: string;
   available: boolean;
+  /** sendspin 成员专属:音量/静音回显(Groups 页成员迷你音量条)。
+   *  离线时不缺席 —— 回退持久库值,灰态仍可调,调完即持久、重连生效。
+   *  其它 kind 不填,前端按存在性渲染。 */
+  volume?: number;
+  muted?: boolean;
 }
 
 export interface PlayerGroupWithMembers extends PlayerGroup {
@@ -219,20 +225,23 @@ export class GroupManager extends EventEmitter {
   }
 
   /** sendspin 成员展示信息:in-proc 读真实 server,fork 读 supervisor 镜像,
-   *  都没有(服务未运行)则离线占位 —— 组可持久化,成员在线状态动态解析。 */
-  private resolveSendspinMember(clientId: string): { name: string; available: boolean } {
+   *  都没有(服务未运行)则离线占位 —— 组可持久化,成员在线状态动态解析。
+   *  音量/静音一并回显(实时优先、离线回退持久库值,见 getSendspinDeviceVolume)。 */
+  private resolveSendspinMember(clientId: string): { name: string; available: boolean; volume: number; muted: boolean } {
+    // 与 peer 列表 / /status 同源取值:在线取组实时值,离线取 sendspin_device_state。
+    const vol = getSendspinDeviceVolume(clientId);
     try {
       const srv = getSendspinServer();
       if (srv) {
         const c = srv.clients.get(clientId);
-        if (c) return { name: (c as any).name || clientId, available: (c as any).ready !== false };
+        if (c) return { name: (c as any).name || clientId, available: (c as any).ready !== false, volume: vol.volume, muted: vol.muted };
       }
       if (sendspinSupervisor.isRunning()) {
         const mc = sendspinSupervisor.mirror.clients.get(clientId);
-        if (mc) return { name: (mc as any).name || clientId, available: (mc as any).ready !== false };
+        if (mc) return { name: (mc as any).name || clientId, available: (mc as any).ready !== false, volume: vol.volume, muted: vol.muted };
       }
     } catch { /* 解析失败即离线占位 */ }
-    return { name: clientId, available: false };
+    return { name: clientId, available: false, volume: vol.volume, muted: vol.muted };
   }
 
   /** 从所有群组中移除一台设备(删除设备时调用),并持久化+广播。

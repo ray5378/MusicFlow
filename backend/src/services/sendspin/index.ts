@@ -106,6 +106,30 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   try {
     pm.registerSendspin(conn.clientId, displayName, true, conn.legacy);
   } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
+  // 恢复持久音量(无行则沿用缺省,不发声不断流,见 applyPersistedDeviceVolume)。
+  await applyPersistedDeviceVolume(conn.clientId);
+}
+
+/** 应用某设备持久音量/静音(重连/重启后无感恢复)。
+ *  in-proc 直写内存组;fork 经既有 transport/setMuted RPC 下发子进程。
+ *  全程 best-effort:恢复失败不影响设备上线。 */
+export async function applyPersistedDeviceVolume(clientId: string): Promise<void> {
+  try {
+    if (!clientId || clientId.startsWith("ug:")) return;
+    const { getDeviceVolumeState } = await import("./deviceState.js");
+    const st = getDeviceVolumeState(clientId);
+    if (!st) return;
+    if (isForkMode()) {
+      if (!sendspinSupervisor.isRunning()) return;
+      await sendspinSupervisor.rpc("transport", { clientId, op: "volume", arg: st.volume });
+      await sendspinSupervisor.rpc("setMuted", { clientId, muted: st.muted });
+    } else {
+      const { setVolumeCore, setMutedCore } = await import("./playerCore.js");
+      const srv = getServer();
+      setVolumeCore(srv, clientId, st.volume, false);
+      setMutedCore(srv, clientId, st.muted, false);
+    }
+  } catch { /* 恢复失败不影响上线 */ }
 }
 
 /** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。
@@ -128,7 +152,7 @@ export function readSendspinPluginConfig(): {
     esphomeMirror: false,
     esphomePsk: "",
     esphomePort: ESPHOME_API_PORT,
-    streamSource: false,
+    streamSource: true,
   };
   try {
     const row = sqlite
@@ -147,8 +171,9 @@ export function readSendspinPluginConfig(): {
       esphomeMirror: cfg?.esphome_mirror === true,
       esphomePsk: typeof cfg?.esphome_psk === "string" ? cfg.esphome_psk.trim() : "",
       esphomePort: Number.isInteger(apiPort) && apiPort >= 1 && apiPort <= 65535 ? apiPort : ESPHOME_API_PORT,
-      // 流式解码:只认显式 true,缺省/非法一律整包(3.0.36 灰度,稳后转默认)。
-      streamSource: cfg?.stream_source === true,
+      // 流式解码:默认开(3.0.36 灰度验证稳定后转正);只有**显式 false** 才关
+      // (老用户此前手关闭仍保持关)。缺省/非布尔一律按默认开。
+      streamSource: cfg?.stream_source !== false,
     };
   } catch {
     return fallback;
@@ -270,6 +295,8 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     onActivated: (clientId, name, legacy) => {
       try { qcSingleton?.registerSendspinDevice(clientId, name); } catch { /* ignore */ }
       try { pmSingleton?.registerSendspin(clientId, name, true, legacy); } catch { /* peer 未就绪忽略 */ }
+      // 恢复持久音量(与 in-proc registerServerPlayer 尾部同构,见上)。
+      void applyPersistedDeviceVolume(clientId);
     },
     onClosed: (clientId) => {
       try { pmSingleton?.removeSendspinPeer(clientId); } catch { /* ignore */ }
@@ -366,6 +393,11 @@ export async function sendspinUnpair(clientId: string): Promise<boolean> {
       try { conn.close(); } catch { /* ignore */ }
     }
   }
+  // 解绑即"删除播放器":配对行已删,持久音量行一并清(重连按缺省来)。
+  try {
+    const { deleteDeviceVolumeState } = await import("./deviceState.js");
+    deleteDeviceVolumeState(clientId);
+  } catch { /* ignore */ }
   return ok;
 }
 
@@ -560,6 +592,13 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
   if (srv) {
     for (const conn of [...srv.clients.values()]) {
       if (conn.dialed && conn.dialHost === host && conn.dialPort === port) {
+        // 忘记设备即"删除播放器":持久音量行一并清(重连按缺省来)。
+        if (conn.clientId) {
+          try {
+            const { deleteDeviceVolumeState } = await import("./deviceState.js");
+            deleteDeviceVolumeState(conn.clientId);
+          } catch { /* ignore */ }
+        }
         try { conn.close(); } catch { /* ignore */ }
       }
     }

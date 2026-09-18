@@ -535,6 +535,15 @@ export function initDatabase() {
       FOREIGN KEY (owner_user_id) REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_player_name_overrides_owner ON player_name_overrides(owner_user_id);
+
+    -- Sendspin 播放器按设备全局音量/静音(client_id 裸 id 主键):重连/重启自动恢复,
+    -- 只在解绑/忘记设备时清行。子进程与主进程直写(WAL 多进程安全)。
+    CREATE TABLE IF NOT EXISTS sendspin_device_state (
+      client_id TEXT PRIMARY KEY,
+      volume INTEGER NOT NULL DEFAULT 100,
+      muted INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT ''
+    );
   `);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

@@ -422,3 +422,14 @@ export const playerNameOverrides = sqliteTable("player_name_overrides", {
 }, (t) => ({
   pk: primaryKey({ columns: [t.ownerUserId, t.peerId] }),
 }));
+
+// sendspin_device_state:Sendspin 播放器「按设备全局」音量/静音持久化(clientId 裸 id)。
+// 与 player_prefs(按用户)不同,音量是设备属性,跟人不跟账号:任何用户调完都落同一行,
+// 重连/重启后自动恢复。只在"删除播放器"(解绑 unpair / 忘记拨号目标)时清行;
+// 断开/重启/服务停都不碰。子进程直写(WAL 多进程安全,同 readSendspinPluginConfig 模式)。
+export const sendspinDeviceState = sqliteTable("sendspin_device_state", {
+  clientId: text("client_id").primaryKey(),
+  volume: integer("volume").notNull().default(100),
+  muted: integer("muted").notNull().default(0),
+  updatedAt: text("updated_at").default(""),
+});

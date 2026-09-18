@@ -18,6 +18,9 @@
 //   { type: "peer_unavailable",     peer: <Peer> }
 //   { type: "peer_queue_changed",   peer_id, queue: <QueueSnapshot> }
 //   { type: "peer_queue_cleared",   peer_id }
+//   { type: "peer_volume_changed",  peer_id, volume, muted }
+//     —— sendspin 设备音量/静音变化(用户在 Web/HA/客户端改音量后即时同步到
+//        其它端的音量条,不必等下一次 /status 轮询)。非 sendspin 设备不广播。
 //   { type: "peer_command",         peer_id, action, payload }
 //     —— **定向**消息(只发给 peer_id 对应的那个本机实例,见 sendToLocalPeer),
 //        Web/HA 遥控安卓/Windows 客户端的通道:action ∈ play|pause|stop|next|prev|seek|volume。
@@ -228,6 +231,11 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const onPeerUnavailable = (peer: any) => { if (canSeePeer(peer?.peerId)) send(ws, { type: "peer_unavailable", peer: masked(peer) }); };
   const onPeerQueue = (peerId: string, queue: any) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_changed", peer_id: maskLocalPeerId(peerId), queue: summarizeQueue(queue) }); };
   const onPeerQueueCleared = (peerId: string) => { if (canSeePeer(peerId)) send(ws, { type: "peer_queue_cleared", peer_id: maskLocalPeerId(peerId) }); };
+  // 音量/静音变化:与队列事件同口径(可见性过滤 + 打码),让同账号其它端的
+  // 音量条实时跟随,无需等 /status 轮询。非 sendspin 设备不发此事件。
+  const onPeerVolume = (peerId: string, volume: number, muted: boolean) => {
+    if (canSeePeer(peerId)) send(ws, { type: "peer_volume_changed", peer_id: maskLocalPeerId(peerId), volume, muted });
+  };
 
   // Group events: 组创建/改名/成员变更 → 前端群组页刷新;组删除 → 移除条目。
   // 权限:群组属于播放器管理,非 admin 不转发。
@@ -245,6 +253,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
   pm.on("peer_unavailable", onPeerUnavailable);
   pm.on("peer_queue_changed", onPeerQueue);
   pm.on("peer_queue_cleared", onPeerQueueCleared);
+  pm.on("peer_volume_changed", onPeerVolume);
   gm.on("group_created", onGroupChanged);
   gm.on("group_updated", onGroupChanged);
   gm.on("group_deleted", onGroupDeleted);
@@ -260,6 +269,7 @@ function subscribeAndForward(ws: WebSocket): () => void {
   unsubs.push(() => pm.off("peer_unavailable", onPeerUnavailable));
   unsubs.push(() => pm.off("peer_queue_changed", onPeerQueue));
   unsubs.push(() => pm.off("peer_queue_cleared", onPeerQueueCleared));
+  unsubs.push(() => pm.off("peer_volume_changed", onPeerVolume));
   unsubs.push(() => gm.off("group_created", onGroupChanged));
   unsubs.push(() => gm.off("group_updated", onGroupChanged));
   unsubs.push(() => gm.off("group_deleted", onGroupDeleted));

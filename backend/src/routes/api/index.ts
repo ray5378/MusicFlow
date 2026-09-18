@@ -61,6 +61,7 @@ import { getPeerManager, parsePeerId, type LocalPlaybackReport } from "../../ser
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
 import { startSendspinService, stopSendspinService, getSendspinFront, sendspinGroupJoin, sendspinGroupLeave } from "../../services/sendspin/index.js";
 import { sendspinGroupName } from "../../services/sendspin/playerCore.js";
+import { getSendspinDeviceVolume } from "../../services/sendspin/peerVolume.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
@@ -3702,6 +3703,18 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
   return c.json({ success: true });
 });
 
+/** sendspin 音量/静音写成功后广播 WS peer_volume_changed(其它端音量条即时同步)。
+ *  载荷 = 当前快照 + 本次 patch:fork 模式下主进程镜像可能尚未随 RPC 刷新,
+ *  以本次写入值为准可避免广播出旧值。非 sendspin / 解析失败静默跳过。 */
+function broadcastSendspinVolume(peerId: string, patch: { volume?: number; muted?: boolean }): void {
+  const parsed = parsePeerId(peerId);
+  if (!parsed || parsed.kind !== "sendspin") return;
+  const cur = getSendspinDeviceVolume(parsed.id);
+  const volume = Math.min(100, Math.max(0, Math.round(patch.volume ?? cur.volume)));
+  const muted = patch.muted ?? cur.muted;
+  try { pm.notifyPeerVolume(peerId, volume, !!muted); } catch { /* 广播失败不影响写入 */ }
+}
+
 apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
@@ -3727,7 +3740,12 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
   if (parsed.kind === "sendspin") {
     const { volume } = await c.req.json().catch(() => ({} as any));
     if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
-    try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
+    try {
+      await getQueueController().transport(parsed.id, "volume", volume);
+      // 落库在 setVolumeCore(播控唯一咽喉)内完成;这里只管写成功后的回显广播。
+      broadcastSendspinVolume(peerId, { volume });
+      return c.json({ success: true });
+    }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "local") {
@@ -3814,6 +3832,7 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
 
 // sendspin 单成员静音(组/连接双置位,见上;用户组成员与单设备共用语义):
 // 组 mute 即设备级 mute(对照 DLNA setDeviceMute 逐台下发)。
+// 落库与 setMutedCore 同(路由 in-proc 直接置位不经过 core,在此补持久化)。
 async function setSendspinMemberMuted(clientId: string, muted: boolean): Promise<void> {
   const srv = getSendspinFront();
   if (!srv) throw new Error("sendspin 服务未运行");
@@ -3821,6 +3840,13 @@ async function setSendspinMemberMuted(clientId: string, muted: boolean): Promise
   srv.group(clientId).muted = muted;
   const conn = srv.clients.get(clientId);
   if (conn) conn.muted = muted;
+  try {
+    const { saveDeviceVolumeState } = await import("../../services/sendspin/deviceState.js");
+    saveDeviceVolumeState(clientId, { muted });
+  } catch { /* 持久化失败不影响本次静音 */ }
+  // 置位成功后广播回显(组静音与单设备静音共用本函数,故一并覆盖)。
+  const peerId = `sendspin:${clientId}`;
+  broadcastSendspinVolume(peerId, { muted });
 }
 
 // Peer status: for dlna returns the device transport state; for groups the
@@ -3881,8 +3907,9 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
       if (!st) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 404);
       const srv = getSendspinFront();
       // 音量权威 = 组音量(setVolume 只写组;conn.volume 是每连接 trim,恒 100)。
-      const volume = srv?.groups.get(parsed.id)?.volume ?? srv?.clients.get(parsed.id)?.volume;
-      const muted = srv?.clients.get(parsed.id)?.muted ?? srv?.groups.get(parsed.id)?.muted ?? false;
+      // 离线(组缺席 / 服务未跑)回退持久库值 —— 已离线端也看得到上次音量,
+      // 无行则 100/false(与「首次上线缺省 100」一致)。取值口径与 peer 列表回显同源。
+      const vol = getSendspinDeviceVolume(parsed.id);
       return c.json({
         state: st.playbackState === PlaybackState.PLAYING ? "PLAYING"
           : st.playbackState === PlaybackState.PAUSED ? "PAUSED_PLAYBACK"
@@ -3891,8 +3918,8 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
         position: st.position,
         duration: st.duration,
         updatedAt: st.updatedAt,
-        volume: typeof volume === "number" ? volume : undefined,
-        muted,
+        volume: vol.volume,
+        muted: vol.muted,
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
         media: srv?.currentMedia(parsed.id),
       });

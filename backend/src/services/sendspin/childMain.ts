@@ -288,6 +288,11 @@ export class SendspinChildController {
             try { conn.close(); } catch { /* ignore */ }
           }
         }
+        // 解绑即"删除播放器":持久音量行一并清(与 in-proc sendspinUnpair 同语义)。
+        try {
+          const { deleteDeviceVolumeState } = await import("./deviceState.js");
+          deleteDeviceVolumeState(String(p.clientId));
+        } catch { /* ignore */ }
         this.requestSnapshot(true);
         return ok;
       }

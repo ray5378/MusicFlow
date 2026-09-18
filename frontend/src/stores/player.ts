@@ -1983,6 +1983,21 @@ export const usePlayerStore = defineStore("player", () => {
           if (idx >= 0) peers.value[idx].queue = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false };
           break;
         }
+        // sendspin 设备音量/静音变化(别的端/HA/客户端改了音量):同步 peer 缓存里的
+        // 音量条,无需等下一次 /status。**当前受控设备不动** —— 它的音量由 status 轮询
+        // ＋ volumeIssuedAt 防抖统一管(见 startCastPoll),这里再写会与拖拽下发窗口打架。
+        case "peer_volume_changed": {
+          const pid = normPeerId(msg.peer_id);
+          const idx = peers.value.findIndex(x => x.peerId === pid);
+          if (idx >= 0 && pid !== currentPeerId.value) {
+            peers.value[idx] = {
+              ...peers.value[idx],
+              ...(typeof msg.volume === "number" ? { volume: msg.volume } : {}),
+              ...(typeof msg.muted === "boolean" ? { muted: msg.muted } : {}),
+            };
+          }
+          break;
+        }
         case "queue_changed": {
           // DLNA 设备 / 播放器群组 / AirPlay 设备 / Sendspin 客户端的队列变更(src 发裸 device_id=裸 id):
           // 同步播放器切换器列表中的队列显示,无需手动刷新。

@@ -15,6 +15,7 @@ import { pumpFor } from "./streamEngine.js";
 import { FIRST_FRAME_LEAD_US, FRAME_MS } from "./streamEngine.js";
 import { nowUs } from "./clock.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
+import { saveDeviceVolumeState } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -220,18 +221,26 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
 
 /** 音量核心:**只写组音量**(Sendspin 单设备组的权威音量标度)。
  *  ⚠️ 不可同时写 conn.volume 与 group.volume —— appliedGain = 两者乘积/100,
- *  双写即平方增益(拖 50 实得 25,v3.0.32 已修)。 */
-export function setVolumeCore(srv: SendspinServer | null, clientId: string, vol: number): void {
+ *  双写即平方增益(拖 50 实得 25,v3.0.32 已修)。
+ *  persist=true 时同步落库(按设备持久,重连恢复);`ug:` 用户组 volume 不落库
+ *  (组成员关系临时,落库只认裸设备 id);announce 播报不走本函数(临时双写不持久)。 */
+export function setVolumeCore(srv: SendspinServer | null, clientId: string, vol: number, persist = true): void {
   const g = ephemeralOrReal(srv, clientId);
   g.volume = Math.min(100, Math.max(0, vol));
+  if (persist && !clientId.startsWith("ug:")) {
+    saveDeviceVolumeState(clientId, { volume: g.volume });
+  }
 }
 
-/** 静音核心:组与连接两侧同置(离线重连后组标记仍有效)。 */
-export function setMutedCore(srv: SendspinServer | null, clientId: string, muted: boolean): void {
+/** 静音核心:组与连接两侧同置(离线重连后组标记仍有效)。落库语义同 setVolumeCore。 */
+export function setMutedCore(srv: SendspinServer | null, clientId: string, muted: boolean, persist = true): void {
   const g = ephemeralOrReal(srv, clientId);
   g.muted = muted;
   const conn = srv?.clients.get(clientId);
   if (conn) conn.muted = muted;
+  if (persist && !clientId.startsWith("ug:")) {
+    saveDeviceVolumeState(clientId, { muted });
+  }
 }
 
 /** 轮询核心:逻辑播放状态以「组当前曲」为准(已注册播放器在投/续播即视为播放中);

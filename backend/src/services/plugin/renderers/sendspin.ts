@@ -68,8 +68,8 @@ export const sendspinRendererManifest: PluginManifest = {
       key: "stream_source",
       label: "流式解码(省内存)",
       type: "switch",
-      default: false,
-      help: "推流解码改走滑动窗口:边解边播,子进程只驻留约 60 秒音频(~23MB),与曲长无关;关闭时整曲一次解完进内存(320 秒约 122MB,切歌瞬间翻倍,超长单曲可能顶爆内存)。开启后下一首生效(正在播的不中断);seek 回跳超出窗口时会重建解码(约 1 秒空窗)。3.0.36 起灰度,观察稳定后再默认开启。",
+      default: true,
+      help: "推流解码走滑动窗口:边解边播,子进程只驻留约 60 秒音频(~23MB),与曲长无关。关闭后整曲一次解完进内存(320 秒约 122MB,切歌瞬间翻倍,超长单曲可能顶爆内存)。开启后下一首生效(正在播的不中断);seek 回跳超出窗口时会重建解码(约 1 秒空窗)。**默认开启**(3.0.36 灰度验证稳定后转正);如需排障可临时关闭。",
     },
     {
       key: "esphome_mirror",
@@ -126,7 +126,7 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
         },
         stream_source: {
           label: "Streaming decode (save memory)",
-          help: "Decode while streaming through a sliding window: the child process only holds ~60s of audio (~23MB) regardless of track length. When off, each track is fully decoded into memory at once (~122MB for a 320s track, doubled briefly at track changes, and extra-long tracks may exhaust memory). Takes effect on the next track (the one currently playing is untouched); seeking back beyond the window rebuilds the decoder (~1s gap).",
+          help: "Decode while streaming through a sliding window: the child process only holds ~60s of audio (~23MB) regardless of track length. When off, each track is fully decoded into memory at once (~122MB for a 320s track, doubled briefly at track changes, and extra-long tracks may exhaust memory). Takes effect on the next track (the one currently playing is untouched); seeking back beyond the window rebuilds the decoder (~1s gap). On by default; turn it off only for troubleshooting.",
         },
       },
     },

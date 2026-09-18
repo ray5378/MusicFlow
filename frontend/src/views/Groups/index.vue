@@ -295,18 +295,44 @@
         </div>
         <div class="group-members">
           <template v-if="g.members.length > 0">
-            <span
-              v-for="m in g.members"
-              :key="m.deviceId"
-              class="member-chip"
-              :class="{ offline: !m.available }"
-              @click="copyPeer(`dlna:${m.deviceId}`, m.name)"
-              :title="t('groups.copyDeviceId', { id: m.deviceId })"
-            >
-              {{ m.name }}
-              <MfIcon name="CopyDocument" class="member-copy-icon"  />
-              <span v-if="!m.available" class="member-offline">{{ t('groups.offline') }}</span>
-            </span>
+            <template v-for="m in g.members" :key="m.deviceId">
+              <span
+                class="member-chip"
+                :class="{ offline: !m.available }"
+                @click="copyPeer(memberPeerId(m), m.name)"
+                :title="t('groups.copyDeviceId', { id: m.deviceId })"
+              >
+                {{ m.name }}
+                <MfIcon name="CopyDocument" class="member-copy-icon"  />
+                <span v-if="!m.available" class="member-offline">{{ t('groups.offline') }}</span>
+              </span>
+              <!-- sendspin 成员:迷你音量条 + 静音键。离线成员显示持久库值(灰态),
+                   但**仍可调节** —— 调完即落库,设备重连后按此生效。 -->
+              <span
+                v-if="isSendspinMember(m)"
+                class="member-volume"
+                :class="{ offline: !m.available }"
+                :title="t('groups.memberVolumeTitle')"
+              >
+                <MfIcon
+                  :name="memberMuted(m) ? 'VolumeX' : 'Volume2'"
+                  :size="15"
+                  class="member-vol-icon"
+                  :class="{ muted: memberMuted(m) }"
+                  @click="toggleMemberMute(m)"
+                />
+                <el-slider
+                  class="member-vol-slider"
+                  :model-value="displayMemberVolume(m)"
+                  :min="0"
+                  :max="100"
+                  :show-tooltip="false"
+                  size="small"
+                  @input="(v: number | number[]) => onMemberVolumeInput(m, v)"
+                />
+                <span class="member-vol-num">{{ displayMemberVolume(m) }}</span>
+              </span>
+            </template>
           </template>
           <span v-else class="member-empty">{{ t('groups.noMembers') }}</span>
         </div>
@@ -488,6 +514,94 @@ const renameDeviceName = ref("");
 
 function onlineCount(g: any): number {
   return (g.members || []).filter((m: any) => m.available).length;
+}
+
+// ---- 群组成员音量(sendspin 成员;Groups 页迷你音量条) ----
+// 成员 deviceId 是**命名空间化** id:`sendspin:<clientId>` / `dlna:<deviceId>` / 历史裸 id(=DLNA)。
+/** 成员的 peerId(sendspin 成员本身已带前缀,其余补 dlna:)。 */
+function memberPeerId(m: any): string {
+  const id = typeof m?.deviceId === "string" ? m.deviceId : "";
+  return id.includes(":") ? id : `dlna:${id}`;
+}
+function isSendspinMember(m: any): boolean {
+  return typeof m?.deviceId === "string" && m.deviceId.startsWith("sendspin:");
+}
+
+/** 取 player store 里该 peer 的实时音量/静音(WS peer_volume_changed 已同步)。
+ *  离线成员不在 store 的 peers 里(离线即从列表移除)→ 返回空,退回组快照的持久库值
+ *  (后端 /v1/groups 对 sendspin 成员已做「实时优先、离线回退库值」)。 */
+function storeVolumeOf(m: any): { volume?: number; muted?: boolean } {
+  const p = (playerStore.peers as any[]).find((x) => x?.peerId === m?.deviceId);
+  return p || {};
+}
+// 拖拽/静音中的本地草稿:优先于实时值,保证手感跟手、图标即时翻转,不被回声顶回。
+const memberVolDraft = ref<Record<string, number>>({});
+const memberMutedDraft = ref<Record<string, boolean>>({});
+const memberVolTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function displayMemberVolume(m: any): number {
+  const draft = memberVolDraft.value[m?.deviceId];
+  if (typeof draft === "number") return draft;
+  const live = storeVolumeOf(m).volume;
+  if (typeof live === "number") return live;
+  return typeof m?.volume === "number" ? m.volume : 100;
+}
+function memberMuted(m: any): boolean {
+  const draft = memberMutedDraft.value[m?.deviceId];
+  if (typeof draft === "boolean") return draft;
+  const live = storeVolumeOf(m).muted;
+  if (typeof live === "boolean") return live;
+  return !!m?.muted;
+}
+
+/** 清某成员草稿(延迟:等 WS 回声 / 快照回写落位后再交回,避免滑块回弹)。 */
+function clearMemberDraft(map: { value: Record<string, any> }, key: string) {
+  setTimeout(() => {
+    const next = { ...map.value };
+    delete next[key];
+    map.value = next;
+  }, 600);
+}
+
+/** 拖拽:本地即时反馈 + 250ms 防抖下发(与 player store setVolume 同款,避免一帧一 POST)。 */
+function onMemberVolumeInput(m: any, v: number | number[]) {
+  const val = Math.round(Array.isArray(v) ? v[0] : v);
+  memberVolDraft.value = { ...memberVolDraft.value, [m.deviceId]: val };
+  const key = String(m.deviceId);
+  const timer = memberVolTimers.get(key);
+  if (timer) clearTimeout(timer);
+  memberVolTimers.set(key, setTimeout(() => {
+    memberVolTimers.delete(key);
+    void postMemberVolume(m, val);
+  }, 250));
+}
+
+async function postMemberVolume(m: any, val: number) {
+  const clamped = Math.min(100, Math.max(0, Math.round(val)));
+  try {
+    // sendspin:<id> 直调单设备音量端点(写内存组 + 落库,由 setVolumeCore 收敛)。
+    await api.post(`/rest/api/v1/peers/${encodeURIComponent(memberPeerId(m))}/volume`, { volume: clamped });
+    m.volume = clamped; // 乐观回写快照:离线成员不在 store,只有快照能立刻反映新值
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("groups.memberVolumeFailed"));
+    loadGroups().catch(() => {});
+  } finally {
+    clearMemberDraft(memberVolDraft, String(m.deviceId));
+  }
+}
+
+async function toggleMemberMute(m: any) {
+  const next = !memberMuted(m);
+  memberMutedDraft.value = { ...memberMutedDraft.value, [m.deviceId]: next };
+  try {
+    await api.post(`/rest/api/v1/peers/${encodeURIComponent(memberPeerId(m))}/mute`, { muted: next });
+    m.muted = next;
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("groups.memberMuteFailed"));
+    loadGroups().catch(() => {});
+  } finally {
+    clearMemberDraft(memberMutedDraft, String(m.deviceId));
+  }
 }
 
 // 每用户显示名:优先用「我」的改名覆盖,其次全局 alias,最后原始名。
@@ -1026,6 +1140,31 @@ onMounted(() => {
       .member-offline { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
     }
     .member-empty { color: var(--fnos-text-muted); font-size: 12px; align-self: center; }
+    // sendspin 成员迷你音量条:与 member-chip 同排。只压缩尺寸,颜色交给 global.scss 的
+    // el-slider 全局覆写(红条 + 红环白点),避免与那边的 !important 打架。
+    .member-volume {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 26px; padding: 0 9px 0 7px; align-self: center;
+      background: rgba(255,255,255,0.06); border-radius: 13px;
+      // EP 滑块几何变量的作用域覆写:20px 把手区 + 4px 轨道 → 居中偏移 (4-20)/2 = -8
+      --el-slider-button-size: 9px;
+      --el-slider-button-wrapper-size: 20px;
+      --el-slider-button-wrapper-offset: -8px;
+      .member-vol-icon {
+        flex: none; color: var(--fnos-text-secondary); cursor: pointer; transition: color 0.15s;
+        &:hover { color: var(--fnos-text-primary); }
+        &.muted { color: var(--fnos-red); }
+      }
+      .member-vol-slider {
+        flex: none; width: 84px; height: 20px;
+        :deep(.el-slider__runway) { height: 4px; margin: 8px 0; }
+      }
+      .member-vol-num {
+        flex: none; min-width: 22px; text-align: right;
+        font-size: 11px; color: var(--fnos-text-tertiary); font-variant-numeric: tabular-nums;
+      }
+      &.offline { opacity: 0.6; }
+    }
   }
   .group-actions { display: flex; gap: 8px; }
 }

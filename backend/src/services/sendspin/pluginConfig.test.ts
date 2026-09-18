@@ -15,8 +15,8 @@ describe("readSendspinPluginConfig", () => {
       esphomeMirror: false,
       esphomePsk: "",
       esphomePort: 6053,
-      // 流式解码默认关(整包路径),灰度观察后再转默认。
-      streamSource: false,
+      // 流式解码默认开(3.0.36 灰度验证稳定后转正)。
+      streamSource: true,
     });
   });
 
@@ -32,7 +32,7 @@ describe("readSendspinPluginConfig", () => {
       esphomeMirror: false,
       esphomePsk: "",
       esphomePort: 6053,
-      streamSource: false,
+      streamSource: true,
     });
   });
 
@@ -109,21 +109,27 @@ describe("readSendspinPluginConfig", () => {
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 
-  it("stream_source 缺省关,只有显式 true 才开", () => {
+  it("stream_source 缺省开,只有显式 false 才关", () => {
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
     const write = (cfg: any) =>
       sqlite
         .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
         .run(JSON.stringify(cfg));
-    expect(readSendspinPluginConfig().streamSource).toBe(false);
+    // 无行 / 空配置 → 默认开
+    expect(readSendspinPluginConfig().streamSource).toBe(true);
     write({});
-    expect(readSendspinPluginConfig().streamSource).toBe(false);
-    write({ stream_source: "true" });
-    expect(readSendspinPluginConfig().streamSource).toBe(false);
-    write({ stream_source: 1 });
-    expect(readSendspinPluginConfig().streamSource).toBe(false);
+    expect(readSendspinPluginConfig().streamSource).toBe(true);
+    // 非布尔(字符串/数字)不算显式关闭 → 仍按默认开
+    write({ stream_source: "false" });
+    expect(readSendspinPluginConfig().streamSource).toBe(true);
+    write({ stream_source: 0 });
+    expect(readSendspinPluginConfig().streamSource).toBe(true);
+    // 显式 true → 开
     write({ stream_source: true });
     expect(readSendspinPluginConfig().streamSource).toBe(true);
+    // 显式 false(老用户手关过)→ 保持关
+    write({ stream_source: false });
+    expect(readSendspinPluginConfig().streamSource).toBe(false);
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 });

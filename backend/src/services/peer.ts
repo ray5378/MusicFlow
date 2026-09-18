@@ -62,6 +62,10 @@ export interface Peer {
   deviceId?: string;    // dlna / airplay / sendspin peers only
   groupId?: string;     // group peers only
   unencrypted?: boolean; // sendspin legacy 明文客户端(无 Noise,配对不可用)
+  /** sendspin 音量/静音快照(列表与 peer_snapshot 回显用;离线时为持久值)。
+   *  其它 kind 暂不填,前端按存在性渲染。由 attachSendspinPeerVolumes 填充。 */
+  volume?: number;
+  muted?: boolean;
   /**
    * 设备名片(2026-09-15,本机 peer 才有):客户端注册时上报。
    *  - `platform`:android / windows / web / ios / macos ... —— 前端据此把本机实例
@@ -393,6 +397,14 @@ class PeerManager extends EventEmitter {
         this.peers.delete(peerId);
       }
     }
+  }
+
+  /** 广播某 sendspin 设备(或用户组)的音量/静音变化 —— 写成功后由路由调用。
+   *  本方法只 emit,不做可见性过滤:WS 层按 peerVisibleTo 逐连接转发
+   *  (与 peer_queue_changed / peer_registered 等同款),避免把变化泄漏给无权用户。 */
+  notifyPeerVolume(peerId: string, volume: number, muted: boolean): void {
+    if (!peerId) return;
+    this.emit("peer_volume_changed", peerId, volume, muted);
   }
 
   // ==================== Reconciliation ====================

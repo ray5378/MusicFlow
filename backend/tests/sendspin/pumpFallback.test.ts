@@ -62,6 +62,13 @@ describe("pump 取源兜底(/rest/stream 同口径)", () => {
 
   beforeAll(() => {
     if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
+    // 固化取源为「整包」路径:本 fixture 只 stub 了 `globalThis.fetch`,
+    // 而流式窗口(streamSource)把输入**直接交给 ffmpeg 子进程** —— 子进程看不到
+    // stub,真连 127.0.0.1:18777 必然 ECONNREFUSED。用例只验证「取源裁决 + 兜底换行」
+    // 语义(与 /rest/stream 同口径),与解码路径无关,故显式走整包取字节。
+    // 流式输入解析(resolveRowInput,含 WebDAV 源鉴权头)另见
+    // tests/source/resolveRowInput.test.ts 的纯函数单测。
+    process.env.SENDSPIN_STREAM_SOURCE = "0";
     registerBuiltinPlugins();
     sqlite.prepare("INSERT INTO plugins (id, name, enabled, config) VALUES ('core-play-preference', 'core-play-preference', 1, '{\"preferLocal\":true,\"fallbackToWeb\":true}') ON CONFLICT(id) DO UPDATE SET enabled=1, config=excluded.config").run();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pumpfallback-"));
@@ -86,6 +93,7 @@ describe("pump 取源兜底(/rest/stream 同口径)", () => {
   afterAll(() => {
     vi.unstubAllGlobals();
     overridePumpSource(null);
+    delete process.env.SENDSPIN_STREAM_SOURCE;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 

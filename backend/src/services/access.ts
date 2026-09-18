@@ -25,6 +25,10 @@ import { apiError, BusinessErrorCode } from "../utils/errors.js";
 import { buildLocalPeerId, isOwnLocalPeer, maskLocalPeerId, userIdOfLocalPeer } from "../utils/peerId.js";
 import { getGroupManager } from "./group/index.js";
 import { getHiddenPeerIds, getNameOverrides } from "./playerPrefs.js";
+// sendspin 音量回显取值(实时优先/离线回退持久值)。此处只做「补齐字段」,
+// 不引入 sendspin 运行时依赖(peerVolume 内部才碰 sendspin/index);
+// 依赖方向 access → group → sendspin 本就存在,不新增环。
+import { attachSendspinPeerVolumes } from "./sendspin/peerVolume.js";
 
 export interface PermDefinition {
   key: string;
@@ -213,6 +217,10 @@ export function filterPeersByAccess<T extends { peerId: string }>(
  *   - 「调用方自己那条」→ `local:<userId>`,前端据 self 渲染角标并置顶;
  *   - 同账号的其它实例 → `local:<userId>:<instanceKey>`,各占一行;
  *   - dlna / airplay / group / sendspin → 原样(打码对它们恒等)。
+ *
+ * 另:sendspin 行的 volume/muted 在**入口**补齐(attachSendspinPeerVolumes),
+ * 与「可见性/打码/隐藏/改名」四条正交 —— 它只是给原始行添两个展示字段,
+ * 不参与 id 规范与筛选,故放在最先执行不影响既有顺序语义。
  */
 export function decoratePeersForClient<T extends { peerId: string; kind?: string; name?: string; platform?: string }>(
   peers: T[],
@@ -220,11 +228,13 @@ export function decoratePeersForClient<T extends { peerId: string; kind?: string
   isAdmin: boolean,
   clientId?: string | null,
   includeHidden = false,
-): (T & { self: boolean; hidden?: boolean; instancePeerId?: string })[] {
+): (T & { self: boolean; hidden?: boolean; instancePeerId?: string; volume?: number; muted?: boolean })[] {
   const myLocalPeerId = buildLocalPeerId(userId, clientId);
   const seen = new Set<string>();
-  const out: (T & { self: boolean; instancePeerId?: string })[] = [];
-  for (const p of filterPeersByAccess(userId, isAdmin, peers, clientId)) {
+  // sendspin 音量/静音回显：在这个**唯一出口**补齐（实时优先、离线回退持久库值），
+  // 后面的可见性/打码/隐藏剪枝/改名都不改变取值口径；其它 kind 不带这两个字段。
+  const out: (T & { self: boolean; instancePeerId?: string; volume?: number; muted?: boolean })[] = [];
+  for (const p of filterPeersByAccess(userId, isAdmin, attachSendspinPeerVolumes(peers), clientId)) {
     const self = p.kind === "local" && p.peerId === myLocalPeerId;
     // 播放器统一化方案收敛:Web 播放器不再作为「可被遥控端」。对外列表一律隐藏
     // 其它 web 本机实例(自己那条 self 行保留 —— Web 前端仍靠它归一化本机队列)。
