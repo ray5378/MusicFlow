@@ -22,9 +22,12 @@
 //   - player groups (group/index.ts) register/refresh group peers
 //
 // Liveness vs. queue lifetime (both run every 60s):
-//   - Liveness (10-min idle): a local peer with no heartbeat for 10 min is only
-//     marked unavailable — its queue is NOT touched. (DLNA/AirPlay availability
-//     keeps coming from discovery.)
+//   - Liveness (2-min idle by default, configurable via `peer_idle_minutes`): a
+//     local peer with no heartbeat past the threshold is only marked unavailable
+//     — its queue is NOT touched. Closing a tab is normally detected instantly
+//     from the last WebSocket close (see markLocalOfflineByClient); this sweep is
+//     the backstop for crashes / network drops where no FIN ever arrives.
+//     (DLNA/AirPlay availability keeps coming from discovery.)
 //   - Queue reclaim (6-h idle): a queue row is reclaimed only when BOTH the
 //     queue itself has not changed for 6 h AND its peer has been offline for
 //     6 h. So a client that is still connected (heartbeat / discovery) keeps
@@ -48,6 +51,7 @@ import { getGroupManager } from "./group/index.js";
 import { createLogger } from "../utils/logger.js";
 import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
 import { getPreProbeScheduler, type QueuePeekSource } from "./player/preProbeScheduler.js";
+import { getSetting } from "./settings.js";
 
 const log = createLogger("peer");
 export type PeerKind = "local" | "dlna" | "group" | "airplay" | "sendspin";
@@ -102,10 +106,23 @@ export interface LocalPlaybackReport {
   reportedAt: number;
 }
 
-const PEER_IDLE_TIMEOUT_MS = 10 * 60 * 1000;      // 10 min —— 仅把 local peer 标成「不在线」
+// 本机播放端「多久没心跳就算离线」的缺省值(分钟)。
+// 关掉页面时后端本可以靠 WS close 秒级感知(见 markLocalOfflineByClient);这里只是
+// **兜底** —— 兜住断网、崩溃、休眠唤醒等「没打招呼就消失」的情况(WS 半开时 TCP 不会
+// 立刻报 FIN)。原值 10 分钟偏长,切歌器里会残留一条已关闭的 Web 播放器。
+const DEFAULT_PEER_IDLE_MINUTES = 2;
 const QUEUE_TTL_MS = 6 * 60 * 60 * 1000;          // 6 h  —— 队列静默回收门槛(队列 + 播放端双条件)
 const CLEANUP_INTERVAL_MS = 60 * 1000;            // 1 min
 const BOOT_SWEEP_DELAY_MS = 20 * 1000;            // 启动后 20s:等发现/重连落位,再清扫陈旧队列
+
+/** 读「本机播放端心跳空闲门槛」(分钟 → ms)。可配:设置项 `peer_idle_minutes`,
+ *  读不到/非法值回退缺省 2 分钟。与 reclaim.ts 的 idleMinutes() 同款读法。
+ *  (导出以便测试直接锁定「可配 + 非法值回退」契约。) */
+export function peerIdleTimeoutMs(): number {
+  const v = parseInt(getSetting("peer_idle_minutes", String(DEFAULT_PEER_IDLE_MINUTES)), 10);
+  const mins = Number.isFinite(v) && v > 0 ? v : DEFAULT_PEER_IDLE_MINUTES;
+  return mins * 60 * 1000;
+}
 
 class PeerManager extends EventEmitter {
   private peers = new Map<string, Peer>();
@@ -231,18 +248,33 @@ class PeerManager extends EventEmitter {
     return true;
   }
 
+  /** 把一台本机播放端标成离线,并顺手清掉**只跟「有人在听」相关**的内存态。
+   *
+   *  清理范围严格限定为「页面关掉后还在空转的东西」——目前是预探测状态:
+   *  没人听了还继续探测下一首纯属白烧 CPU/网络,回来时会重新调度。
+   *
+   *  **队列一律不动**:`local_queues` 是服务端权威数据,它的生命周期与页面开不开
+   *  无关(关掉页面只是「没人听了」,不等于这个端的播放列表作废)。重开标签页靠
+   *  稳定的 clientId 认领回同一条队列。
+   */
+  private markLocalOffline(p: Peer): void {
+    if (!p.available) return;
+    p.available = false;
+    try { getPreProbeScheduler().clear(p.peerId); } catch { /* 预探测清理失败不阻断下线 */ }
+    this.emit("peer_unavailable", p);
+  }
+
   /** WS 断开即离线:该 (userId, clientId) 的**最后一条** WS 连接关闭时,立即把
-   *  对应本机实例标成「不在线」并广播 peer_unavailable —— 不等 10 分钟心跳空闲
-   *  扫描,否则客户端切换器里会残留一条已关闭的 Web 播放器/客户端(用户实测:
+   *  对应本机实例标成「不在线」并广播 peer_unavailable —— 不等心跳空闲扫描,
+   *  否则客户端切换器里会残留一条已关闭的 Web 播放器/客户端(用户实测:
    *  关掉网页后最长 10 分钟内仍显示在线)。队列不动,重开标签页照常恢复。 */
   markLocalOfflineByClient(userId: string, clientId: string): void {
     if (!userId || !clientId) return;
     const peerId = `local:${userId}:${clientId}`;
     const p = this.peers.get(peerId);
     if (!p || p.kind !== "local" || !p.available) return;
-    p.available = false;
     log.info(`[peer] local peer ${peerId} marked offline (last ws connection closed)`);
-    this.emit("peer_unavailable", p);
+    this.markLocalOffline(p);
   }
 
   /** Register or refresh a DLNA peer from discovery. */
@@ -917,15 +949,14 @@ class PeerManager extends EventEmitter {
 
   private runCleanup(): void {
     const now = Date.now();
-    // 1) liveness:一台静默 10 分钟的本机播放器只标「不在线」(切歌器显示离线态),
-    //    队列不动 —— 队列生命周期由下面的 6h 双条件清扫决定。
+    // 1) liveness:一台静默超过门槛(缺省 2 分钟,可配 peer_idle_minutes)的本机播放器
+    //    只标「不在线」(切歌器显示离线态),队列不动 —— 队列生命周期由下面的
+    //    6h 双条件清扫决定,与页面开不开无关。
     //    DLNA/AirPlay 的可用性来自发现流程(reconcile*),不在这里改。
+    const idleMs = peerIdleTimeoutMs();
     for (const p of this.peers.values()) {
       if (p.kind !== "local") continue;
-      if (p.available && now - p.lastActiveAt >= PEER_IDLE_TIMEOUT_MS) {
-        p.available = false;
-        this.emit("peer_unavailable", p);
-      }
+      if (p.available && now - p.lastActiveAt >= idleMs) this.markLocalOffline(p);
     }
     // 2) queue reclaim.
     this.sweepStaleQueues(now);

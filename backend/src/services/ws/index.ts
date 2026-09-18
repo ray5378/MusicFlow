@@ -100,18 +100,13 @@ export function initWebSocketServer(server: import("http").Server): void {
     log.info(`ws open user=${(ws as any).__user?.id ?? "-"} clientId=${(ws as any).__clientId ?? "-"} total=${wss!.clients.size}`);
     ws.on("close", () => {
       log.info(`ws close clientId=${(ws as any).__clientId ?? "-"} total=${wss!.clients.size}`);
-      // 该实例的**最后一条**连接关闭 → 立即标离线(不等 10 分钟心跳空闲扫描)。
+      // 该实例的**最后一条**连接关闭 → 立即标离线(不等心跳空闲扫描)。
       // 否则客户端切换器里会残留一条已关闭的 Web 播放器/客户端。同一 clientId
       // 的其它连接(同浏览器多标签页共享 clientId)还在时不算离线。
       const u = (ws as any).__user;
       const cid = (ws as any).__clientId;
-      if (u?.id && cid) {
-        let remaining = 0;
-        for (const c of wss!.clients) {
-          if (c === ws || (c as any).readyState !== WebSocket.OPEN) continue;
-          if ((c as any).__user?.id === u.id && (c as any).__clientId === cid) remaining++;
-        }
-        if (remaining === 0) getPeerManager().markLocalOfflineByClient(u.id, cid);
+      if (u?.id && cid && countLiveConnections(u.id, cid, ws) === 0) {
+        getPeerManager().markLocalOfflineByClient(u.id, cid);
       }
     });
     // Initial snapshot so the client has full state before any delta events.
@@ -281,6 +276,28 @@ function send(ws: WebSocket, msg: any): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }
+}
+
+/**
+ * 统计某个本机实例(userId + clientId)当前还活着几条 WS 连接。
+ *
+ * 为什么需要它:`mf_client_id` 存在 localStorage,同浏览器**多个标签页共用同一个
+ * clientId**,因此「关掉一个标签页」≠「这个端下线」——必须按连接数引用计数,
+ * 归零才算真走。WS close 回调与 `POST /v1/peers/:peerId/offline` 共用这一个
+ * 判定,避免两处各写一套导致口径不一致。
+ *
+ * @param exclude 排除某条连接(WS close 回调里要排掉**正在关闭的那条自己**;
+ *                HTTP 下线端点没有 WS 身份,传 undefined 即可)。
+ */
+export function countLiveConnections(userId: string, clientId: string, exclude?: unknown): number {
+  if (!wss || !userId || !clientId) return 0;
+  let n = 0;
+  for (const c of wss.clients as Iterable<any>) {
+    if (exclude !== undefined && c === exclude) continue;
+    if (c.readyState !== WebSocket.OPEN) continue;
+    if (c.__user?.id === userId && c.__clientId === clientId) n++;
+  }
+  return n;
 }
 
 /** 向所有已连接客户端广播(供后台任务进度等全局事件推送,如匹配进度)。 */

@@ -1817,6 +1817,36 @@ export const usePlayerStore = defineStore("player", () => {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   }
 
+  /**
+   * 主动告别:关标签页 / 页面卸载时告诉服务端「这个实例没人听了」。
+   *
+   * 为什么用 `fetch(..., { keepalive: true })` 而不是 `navigator.sendBeacon`:
+   * sendBeacon **发不了自定义请求头**,而本接口要带 `Authorization: Bearer` 和
+   * `x-mf-client-id`(后端靠后者定位是哪条实例)。keepalive fetch 是专门给
+   * 「需要比页面活得更久、还要带头的请求」设计的,sendBeacon 的现代替代。
+   *
+   * 失败一律静默:这只是个优化通知,WS close 与 2 分钟心跳兜底仍会接管。
+   */
+  function reportOffline(): void {
+    const pid = localPeerId.value;
+    const token = useAuthStore().token;
+    if (!pid || !token) return;
+    try {
+      void fetch(`/rest/api/v1/peers/${encodeURIComponent(pid)}/offline`, {
+        method: "POST",
+        keepalive: true,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "x-mf-client-id": getClientId(),
+        },
+        body: "{}",
+      }).catch(() => {});
+    } catch {
+      /* 页面正在卸载,发不出去就算了 */
+    }
+  }
+
   // Switch the player bar + queue panel to a different peer.
   // This is a PURE UI operation: it only changes currentPeerId. Neither
   // state machine is touched — 本机 keeps playing, every DLNA device and
@@ -2071,6 +2101,7 @@ export const usePlayerStore = defineStore("player", () => {
     currentPeerId, peers, localPeerId, currentPeer, currentPeerName,
     peersForSwitcher, peerDisplayName, isSelfPeer,
     switchPeer, refreshPeers, refreshPeersNow, initLocalPeer, restoreLocalPeer, teardownPeer,
+    reportOffline,
     // 按用户级隐藏
     hiddenPeers, loadHiddenPrefs, isPeerHidden, setPeerHidden,
     // 按用户级改名

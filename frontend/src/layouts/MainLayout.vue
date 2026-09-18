@@ -549,10 +549,19 @@ function resumeFromGesture() {
     document.documentElement.classList.remove("tab-hidden");
   }
 }
+// 关标签页时给服务端发一条「主动告别」，让本实例立刻转为离线（清掉预探测等空转开销），
+// 不必等心跳超时。用 keepalive fetch：普通 fetch 在页面卸载时会被浏览器直接砍掉。
+// 注意 bfcache：pagehide 也可能只是页面进了前进/后退缓存（persisted=true），此时页面
+// 并没真的消失。那种情况下后端会短暂标离线，回到页面后下一次心跳（≤30s）自动恢复，
+// 队列始终不受影响，所以这里统一发、不做 persisted 分流。
+function reportOfflineOnPageHide() {
+  playerStore.reportOffline();
+}
 document.addEventListener("visibilitychange", syncTabVisibility);
 window.addEventListener("blur", pauseForGesture);
 window.addEventListener("focus", resumeFromGesture);
 window.addEventListener("pagehide", pauseForGesture);
+window.addEventListener("pagehide", reportOfflineOnPageHide);
 window.addEventListener("freeze", pauseForGesture);
 syncTabVisibility();
 onUnmounted(() => {
@@ -561,6 +570,7 @@ onUnmounted(() => {
   window.removeEventListener("blur", pauseForGesture);
   window.removeEventListener("focus", resumeFromGesture);
   window.removeEventListener("pagehide", pauseForGesture);
+  window.removeEventListener("pagehide", reportOfflineOnPageHide);
   window.removeEventListener("freeze", pauseForGesture);
   document.documentElement.classList.remove("tab-hidden");
 });

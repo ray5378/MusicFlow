@@ -6,7 +6,14 @@ import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, n
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import { apiError, BusinessErrorCode } from "../../utils/errors.js";
-import { sanitizeClientId, resolveLocalPeerId, maskLocalPeerId, buildLocalPeerId } from "../../utils/peerId.js";
+import {
+  sanitizeClientId,
+  resolveLocalPeerId,
+  maskLocalPeerId,
+  buildLocalPeerId,
+  userIdOfLocalPeer,
+  clientIdOfLocalPeer,
+} from "../../utils/peerId.js";
 import { translate } from "../../i18n.js";
 import { getRequestMetrics } from "../../middleware/metrics.js";
 import md5 from "md5";
@@ -44,7 +51,7 @@ import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
-import { sendToLocalPeer } from "../../services/ws/index.js";
+import { sendToLocalPeer, countLiveConnections } from "../../services/ws/index.js";
 import { isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { scrapeArtist, artistsMissingCovers, artistsMissingInfo } from "../../services/scraper/artist.js";
 import {
@@ -3174,6 +3181,31 @@ apiRoutes.post("/v1/peers/:peerId/heartbeat", (c) => {
   const peerId = decodePeerId(c);
   const ok = pm.heartbeat(peerId);
   return c.json({ success: ok });
+});
+
+// 页面主动告别:关标签页时用 `fetch(..., { keepalive: true })` 通知服务端
+// 「这个实例没人听了」。
+//
+// 它与 WS close 是**互补**的两条路,不是替代:
+//   - 正常关标签页 → WS close 引用计数归零 → 秒级标离线(services/ws/index.ts);
+//   - 来不及发 FIN(浏览器被强杀 / 断网)→ 本端点在 pagehide 时抢在连接拆除前发到。
+//
+// 为什么不早退就误伤:`mf_client_id` 存 localStorage,**同浏览器多个标签页共用同一个
+// clientId**。所以「关掉一个标签页」≠「这个端下线」,必须按连接数引用计数:
+// 还剩 ≥2 条活连接时直接跳过(本次告别者自己的那条可能还没断)。
+//
+// 只做内存态清理(在线标记 + 预探测),**队列一律不动** —— local_queues 是服务端
+// 权威数据,关页面只是「没人听了」,重开靠稳定的 clientId 认领回同一条队列。
+apiRoutes.post("/v1/peers/:peerId/offline", (c) => {
+  const peerId = decodePeerId(c);
+  const uid = userIdOfLocalPeer(peerId);
+  const cid = clientIdOfLocalPeer(peerId);
+  // 旧格式 local:<userId>(无 clientId)或非本机 peer:没有实例维度可判,忽略。
+  if (!uid || !cid) return c.json({ ok: false, offline: false, reason: "not-local-instance" }, 400);
+  const live = countLiveConnections(uid, cid);
+  if (live > 1) return c.json({ ok: true, offline: false, reason: "other-connections-alive", live });
+  pm.markLocalOfflineByClient(uid, cid);
+  return c.json({ ok: true, offline: true, live });
 });
 
 /** 只把有限数字收下,其余(undefined / NaN / 字符串)→ undefined(字段级合并时沿用旧值)。 */
