@@ -14,7 +14,7 @@
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { initDatabase, db, sqlite } from "../../src/db/index.js";
 import { songs } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
@@ -107,6 +107,11 @@ beforeEach(() => {
   db.delete(songs).run();
   unregisterPlugin("preprobe-gate");
   registerPlugin(gateManifest as any, {});
+});
+
+afterAll(() => {
+  // 模块级 vi.stubGlobal("fetch") 会污染同进程后续测试文件:文件结束即还原。
+  vi.unstubAllGlobals();
 });
 
 /** seed 一首歌。dead = 预热成"所有平台都无候选"(→ 负缓存);alive = 有候选且 206(→ 正缓存)。 */

@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.35] - 2026-09-18
+
+### Bug 修复 —— Sendspin 链路两处回归 + CI 测试隔离
+
+- **mute 接口 500**(`index.ts`):`getSendspinFront()` 把 `isForkMode()` 误传给形参
+  `inProc`，布尔反转导致双模式下恒返回 null，`/v1/peers/:id/mute` 报"服务未运行"。
+  改为 `!isForkMode()`，一行恢复（生产 fork 模式的 mute 同 bug 同修）。
+- **第二次播报卡死**(`encoding.ts`):`LibFlacEncoder.flush()` 调
+  `FLAC__stream_encoder_finish` 终结编码流，而组编码器在多次播报/切歌间复用，
+  之后再 `encode` 在 asm 堆内空转永不返回，卡死整进程事件循环（一次 FLAC 播报后
+  后续播报/推流全挂）。现 flush 取走尾帧后原地重建新流，对象保持可用，
+  `codec_header` 照常重建；音乐推流路径从不 flush，行为不变。
+- **测试间 fetch 污染**(6 个测试文件):模块级 `vi.stubGlobal("fetch")` 从不还原，
+  同进程串行时 `proxy` 直连测试读到 `"stream-bytes"`、TTS 拉取进 ffmpeg 报错。
+  各文件 `afterAll` 加 `vi.unstubAllGlobals()`，生产代码零改动。
+- 全量验证：`tsc` + `vitest` 142 文件 / 1060 用例全绿。
+
 ## [3.0.34] - 2026-09-18
 
 ### 架构 —— Sendspin 强制独立子进程(fork 隔离)

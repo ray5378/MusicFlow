@@ -115,6 +115,8 @@ afterAll(() => {
   sqlite.prepare("DELETE FROM songs WHERE plugin_entry = ?").run(PROVIDER);
   sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(PROVIDER);
   unregisterPlugin(PROVIDER);
+  // 模块级 vi.stubGlobal("fetch") 会污染同进程后续测试文件:文件结束即还原。
+  vi.unstubAllGlobals();
 });
 
 describe("evictStreamFallbackCache — 失效源缓存逐出契约", () => {

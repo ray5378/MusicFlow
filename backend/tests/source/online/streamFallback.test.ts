@@ -111,6 +111,9 @@ afterAll(() => {
   sqlite.prepare("DELETE FROM songs WHERE plugin_entry = ?").run(PROVIDER);
   sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(PROVIDER);
   unregisterPlugin(PROVIDER);
+  // 模块级 vi.stubGlobal("fetch") 会污染同进程后续测试文件(如 proxy 直连测试、
+  // sendspin TTS 拉取):文件结束即还原,单测跑 singleFork/forks 均安全。
+  vi.unstubAllGlobals();
 });
 
 describe("findFallbackStream — 换源兜底挂导入门禁", () => {

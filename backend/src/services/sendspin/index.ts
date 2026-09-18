@@ -297,7 +297,7 @@ export async function stopSendspinService(): Promise<void> {
  *  proxy.ts 静态导入(index → proxy → supervisor → ipcProtocol,无环):模式内部判定,
  *  调用方零分叉,不存在"注册完成前返回 null"的装配竞态。 */
 export function getSendspinFront(): import("./proxy.js").SendspinServerLike | null {
-  return getSendspinFrontImpl(isForkMode());
+  return getSendspinFrontImpl(!isForkMode());
 }
 
 /** ESPHome 6053 只读桥接状态(fork 走 RPC,in-proc 直读桥接单例)。 */

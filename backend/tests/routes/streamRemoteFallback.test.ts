@@ -9,7 +9,7 @@
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
-import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { initDatabase, db, sqlite } from "../../src/db/index.js";
 import { users } from "../../src/db/schema.js";
@@ -94,6 +94,11 @@ afterEach(() => {
   fetchMock.mockClear();
   sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(PROVIDER);
   unregisterPlugin(PROVIDER);
+});
+
+afterAll(() => {
+  // 模块级 vi.stubGlobal("fetch") 会污染同进程后续测试文件:文件结束即还原。
+  vi.unstubAllGlobals();
 });
 
 describe("/rest/stream-remote 多源换源", () => {

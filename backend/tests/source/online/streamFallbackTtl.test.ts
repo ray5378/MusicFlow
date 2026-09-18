@@ -10,7 +10,7 @@
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../../plugins/_env.js";
 
-import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { initDatabase, db, sqlite } from "../../../src/db/index.js";
 import { songs } from "../../../src/db/schema.js";
 import { eq } from "drizzle-orm";
@@ -129,6 +129,11 @@ afterEach(() => {
   sqlite.prepare("DELETE FROM songs WHERE plugin_entry = ?").run(PROVIDER);
   sqlite.prepare("DELETE FROM plugins WHERE id = ?").run(PROVIDER);
   unregisterPlugin(PROVIDER);
+});
+
+afterAll(() => {
+  // 模块级 vi.stubGlobal("fetch") 会污染同进程后续测试文件:文件结束即还原。
+  vi.unstubAllGlobals();
 });
 
 describe("缓存 TTL — 负结果不是永久拉黑", () => {

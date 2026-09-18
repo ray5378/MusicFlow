@@ -942,7 +942,13 @@ export class LibFlacEncoder implements ChunkEncoder {
         "libFLAC 尚未就绪:请在服务启动时 await waitFlacEncoderReady() 预热(见 encoding.ts)",
       );
     }
-    this.encId = this.Flac.create_libflac_encoder(
+    this.openStream();
+  }
+
+  /** 建一条新的 libFLAC 编码流并挂写回调(构造 + flush 重建共用)。
+   *  失败抛错:构造期由调用方处理;flush 重建失败则编码器停用(encode/flush 放空)。 */
+  private openStream(): void {
+    const id = this.Flac.create_libflac_encoder(
       SAMPLE_RATE,
       CHANNELS,
       FLAC_BIT_DEPTH,
@@ -951,7 +957,8 @@ export class LibFlacEncoder implements ChunkEncoder {
       true, // verify:编码器内部自校验,出错的帧会被 libFLAC 拒绝
       0, // block_size 0 = 编码器自选(对齐 MA:MA 明确不指定 block size)
     );
-    if (!this.encId) throw new Error("libflacjs 编码器创建失败(create_libflac_encoder 返回 0)");
+    if (!id) throw new Error("libflacjs 编码器创建失败(create_libflac_encoder 返回 0)");
+    this.encId = id;
     this.Flac.init_encoder_stream(this.encId, (data, nbytes, samples, frame) => {
       this.onEncoded(data, nbytes, samples, frame);
     });
@@ -1040,7 +1047,12 @@ export class LibFlacEncoder implements ChunkEncoder {
     return Promise.resolve(out);
   }
 
-  /** 收尾:告知 libFLAC 不再有新样本,冲掉不足一块的尾帧(libFLAC 会以合法帧头写出)。 */
+  /** 收尾:告知 libFLAC 不再有新样本,冲掉不足一块的尾帧(libFLAC 会以合法帧头写出)。
+   *  ⚠️ `finish` 会**终结整条编码流** —— 之后再 `process_interleaved` 实测在
+   *  asm 堆内空转永不返回(卡死整进程事件循环,连看门狗定时器都不触发)。
+   *  而组编码器缓存在多次播报/切歌间复用(`SendspinGroup.encoderFor`),播报每次必
+   *  flush → 不重建则第二次播报起全链卡死。因此 flush 在取走尾帧后**原地重建**
+   *  一条新流,对象保持可用;新流的元数据回调照常重建 `codec_header`。 */
   flush(): Promise<EncodedChunk[]> {
     if (this.closed || !this.encId) return Promise.resolve([]);
     this.out = [];
@@ -1048,6 +1060,20 @@ export class LibFlacEncoder implements ChunkEncoder {
     if (!ok) console.warn("[sendspin][flac] libFLAC finish 返回失败");
     const out = this.out;
     this.out = [];
+    // 旧流已终结:先删后建,之后的新流与构造期行为一致。
+    try {
+      this.Flac.FLAC__stream_encoder_delete(this.encId);
+    } catch { /* ignore */ }
+    this.encId = 0;
+    this.metaChunks = [];
+    this.metaLen = 0;
+    this.metaDone = false;
+    this.realHeaderB64 = null;
+    try {
+      this.openStream();
+    } catch (e) {
+      console.warn(`[sendspin][flac] flush 后重建编码流失败,本编码器停用: ${(e as Error)?.message || e}`);
+    }
     return Promise.resolve(out);
   }
 

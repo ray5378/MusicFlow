@@ -9,7 +9,7 @@
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
 
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { initDatabase, db, sqlite } from "../../src/db/index.js";
 import { songs, localQueues, users } from "../../src/db/schema.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
@@ -70,6 +70,11 @@ beforeEach(() => {
   s.onScanComplete = null;
   unregisterPlugin("lp-gate");
   registerPlugin(gateManifest as any, {});
+});
+
+afterAll(() => {
+  // 模块级 vi.stubGlobal("fetch") 会污染同进程后续测试文件:文件结束即还原。
+  vi.unstubAllGlobals();
 });
 
 /** 存一首 web 歌(pluginEntry 齐备 → 预探测会真的走 ensurePlayableStream)。 */
