@@ -538,13 +538,26 @@ export function initDatabase() {
 
     -- Sendspin 播放器按设备全局音量/静音(client_id 裸 id 主键):重连/重启自动恢复,
     -- 只在解绑/忘记设备时清行。子进程与主进程直写(WAL 多进程安全)。
+    -- disabled 与 DLNA 同语义:用户手动禁用(持久化),不出现在任何流转播放入口。
     CREATE TABLE IF NOT EXISTS sendspin_device_state (
       client_id TEXT PRIMARY KEY,
       volume INTEGER NOT NULL DEFAULT 100,
       muted INTEGER NOT NULL DEFAULT 0,
+      disabled INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT DEFAULT ''
     );
   `);
+
+  // 迁移:老库的 sendspin_device_state 没有 disabled 列(CREATE TABLE IF NOT EXISTS
+  // 不会补列)。PRAGMA 探测后幂等补列 —— 与 DLNA 的 disabled 同语义。
+  try {
+    const cols = sqlite.prepare("PRAGMA table_info(sendspin_device_state)").all() as any[];
+    if (!cols.some((c) => c?.name === "disabled")) {
+      sqlite.exec("ALTER TABLE sendspin_device_state ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0");
+    }
+  } catch (e: any) {
+    console.warn(`[db] sendspin_device_state.disabled 迁移失败(忽略,读取仍回退缺省): ${e?.message || e}`);
+  }
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.

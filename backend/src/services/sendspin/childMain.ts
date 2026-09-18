@@ -279,6 +279,19 @@ export class SendspinChildController {
         this.requestSnapshot(true);
         return null;
       }
+      case "disconnect": {
+        // 断开某客户端现存连接(不删配对记录):禁用设备时用 —— 配对照旧保留,
+        // 设备下次连按禁用态决定是否注册 peer(见 registerServerPlayer)。
+        if (!srv) throw new Error("sendspin server 未运行");
+        let n = 0;
+        for (const conn of [...srv.clients.values()]) {
+          if (conn.clientId === String(p.clientId)) {
+            try { conn.close(); n++; } catch { /* ignore */ }
+          }
+        }
+        this.requestSnapshot(true);
+        return n;
+      }
       case "unpair": {
         if (!srv?.pairingStore) throw new Error("sendspin server 未运行");
         const ok = await srv.pairingStore.removeRecord(String(p.clientId));

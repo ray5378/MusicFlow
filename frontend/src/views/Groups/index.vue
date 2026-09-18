@@ -188,7 +188,9 @@
       </div>
     </div>
 
-    <!-- Sendspin 设备管理(客户端拨入为主;也可手动拨号添加;配对/批准在设置页) -->
+    <!-- Sendspin 设备管理:行结构与 DLNA **完全同构**(在线高亮/离线变暗 + 禁用/重命名)。
+         列表 = 在线客户端 ＋ 已记住但当前离线的拨号目标(合并为一列,不再单列「已记住的播放器」)。
+         删除语义 = `解绑`(常显):解绑后本行保留、标签回落「未配对」、按钮回落「配对」。 -->
     <div class="devices-section" style="margin-top: 28px">
       <div class="section-head">
         <h3>{{ t('groups.sendspinDevices') }}</h3>
@@ -197,18 +199,39 @@
       </div>
       <div class="section-note">{{ t('groups.sendspinNote', { url: sendspinUrl }) }}</div>
       <div class="devices-box" v-loading="loadingSendspin">
-        <div v-for="dev in sendspinClients" :key="dev.clientId" class="device-row">
-          <MfIcon name="Speaker" class="device-row-icon" />
+        <div
+          v-for="dev in sendspinRows"
+          :key="dev.rowKey"
+          class="device-row"
+          :class="{ 'is-disabled': dev.disabled }"
+        >
+          <MfIcon name="Speaker" class="device-row-icon" :class="{ offline: !dev.available }" />
           <div class="device-row-info">
             <div class="device-row-name">
-              {{ deviceDisplayName(dev, `sendspin:${dev.clientId}`) }}
-              <el-tag v-if="isDeviceRenamed(dev, `sendspin:${dev.clientId}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
-              <el-tag v-if="dev.paired" size="small" type="success" style="margin-left: 6px">{{ t('groups.sendspinPaired') }}</el-tag>
-              <el-tag v-else-if="dev.legacy" size="small" type="warning" style="margin-left: 6px">{{ t('groups.sendspinLegacy') }}</el-tag>
-              <el-tag v-else size="small" type="info" style="margin-left: 6px">{{ t('groups.sendspinUnpaired') }}</el-tag>
-              <el-tag v-if="!dev.paired && !dev.legacy && dev.approved" size="small" style="margin-left: 6px">{{ t('groups.sendspinApproved') }}</el-tag>
+              <!-- 在线,或「已禁用且离线但已知 clientId」:两者都有 clientId,显示设备名。 -->
+              <template v-if="dev.clientId">
+                {{ deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) }}
+                <el-tag v-if="isDeviceRenamed({ clientId: dev.clientId }, `sendspin:${dev.clientId}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+                <template v-if="dev.online">
+                  <el-tag v-if="dev.paired" size="small" type="success" style="margin-left: 6px">{{ t('groups.sendspinPaired') }}</el-tag>
+                  <el-tag v-else-if="dev.legacy" size="small" type="warning" style="margin-left: 6px">{{ t('groups.sendspinLegacy') }}</el-tag>
+                  <el-tag v-else size="small" type="info" style="margin-left: 6px">{{ t('groups.sendspinUnpaired') }}</el-tag>
+                  <el-tag v-if="!dev.paired && !dev.legacy && dev.approved" size="small" style="margin-left: 6px">{{ t('groups.sendspinApproved') }}</el-tag>
+                </template>
+                <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">{{ t('common.disabled') }}</el-tag>
+                <span v-if="!dev.online" class="device-offline-tag">{{ t('groups.offline') }}</span>
+              </template>
+              <!-- 纯拨号目标(未连上,无 clientId):只能显示 host:port。 -->
+              <template v-else>
+                {{ dev.host }}:{{ dev.port }}
+                <span class="device-offline-tag">{{ t('groups.offline') }}</span>
+              </template>
             </div>
-            <div class="device-row-meta">{{ shortClientId(dev.clientId) }} · {{ (dev.roles || []).join(", ") }}</div>
+            <div class="device-row-meta">
+              <template v-if="dev.online">{{ shortClientId(dev.clientId) }} · {{ (dev.roles || []).join(", ") }}</template>
+              <template v-else-if="dev.host">{{ dev.host }}:{{ dev.port }}</template>
+              <template v-else>{{ shortClientId(dev.clientId) }}</template>
+            </div>
           </div>
           <div class="device-row-actions">
             <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
@@ -218,55 +241,108 @@
                 inline-prompt :active-text="t('groups.hide')" :inactive-text="t('groups.show')" size="small"
               />
             </div>
-            <el-button v-if="canUse && !dev.paired && !dev.legacy" size="small" @click="openPairDialog(dev)"><MfIcon name="KeyRound" />{{ t('groups.sendspinPair') }}</el-button>
-            <el-button v-if="canManage && !dev.paired && !dev.legacy" size="small" @click="approveSendspin(dev, !dev.approved)">{{ dev.approved ? t('groups.sendspinUnapprove') : t('groups.sendspinApprove') }}</el-button>
-            <el-popconfirm
-              v-if="canManage && dev.paired"
-              :title="t('groups.sendspinUnpairConfirm', { name: deviceDisplayName(dev, `sendspin:${dev.clientId}`) })"
-              :confirm-button-text="t('common.confirm')"
-              :cancel-button-text="t('common.cancel')"
-              width="280"
-              @confirm="unpairSendspin(dev)"
-            >
-              <template #reference>
-                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('groups.sendspinUnpair') }}</el-button>
+            <!-- 在线:禁用/恢复 → 配对/解绑 → 重命名(与 DLNA 同序)。 -->
+            <template v-if="dev.online">
+              <el-popconfirm
+                v-if="canManage"
+                :title="dev.disabled
+                  ? t('groups.enableConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })
+                  : t('groups.disableConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                :confirm-button-text="dev.disabled ? t('groups.enable') : t('groups.disable')"
+                :confirm-button-type="dev.disabled ? 'primary' : 'danger'"
+                :cancel-button-text="t('common.cancel')"
+                width="320"
+                @confirm="toggleSendspinDisabled(dev, !dev.disabled)"
+              >
+                <template #reference>
+                  <el-button
+                    size="small"
+                    :type="dev.disabled ? 'danger' : ''"
+                    :plain="!dev.disabled"
+                    class="device-disable-btn"
+                  >
+                    <MfIcon name="CircleSlash" />{{ dev.disabled ? t('groups.enable') : t('groups.disable') }}
+                  </el-button>
+                </template>
+              </el-popconfirm>
+              <el-button
+                v-if="canUse && !dev.disabled && !dev.paired && !dev.legacy"
+                size="small"
+                @click="openPairDialog(dev)"
+              ><MfIcon name="KeyRound" />{{ t('groups.sendspinPair') }}</el-button>
+              <el-button
+                v-if="canManage && !dev.disabled && !dev.paired && !dev.legacy"
+                size="small"
+                @click="approveSendspin(dev, !dev.approved)"
+              >{{ dev.approved ? t('groups.sendspinUnapprove') : t('groups.sendspinApprove') }}</el-button>
+              <!-- 解绑常显(= 删除):解绑后本行保留,标签回落「未配对」、按钮回落「配对」。 -->
+              <el-popconfirm
+                v-if="canManage && dev.paired && !dev.disabled"
+                :title="t('groups.sendspinUnpairConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                :confirm-button-text="t('common.confirm')"
+                :cancel-button-text="t('common.cancel')"
+                width="280"
+                @confirm="unpairSendspin(dev)"
+              >
+                <template #reference>
+                  <el-button size="small" type="danger" plain><MfIcon name="Link2Off" />{{ t('groups.sendspinUnpair') }}</el-button>
+                </template>
+              </el-popconfirm>
+              <el-button v-if="canUse" size="small" @click="openRenameSendspinDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
+            </template>
+            <!-- 离线:① 已禁用且离线(有 clientId)→ 恢复;② 记住的拨号目标 → 重连 / 遗忘。 -->
+            <template v-else>
+              <el-popconfirm
+                v-if="canManage && dev.clientId && dev.disabled"
+                :title="t('groups.enableConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                :confirm-button-text="t('groups.enable')"
+                confirm-button-type="primary"
+                :cancel-button-text="t('common.cancel')"
+                width="320"
+                @confirm="toggleSendspinDisabled(dev, false)"
+              >
+                <template #reference>
+                  <el-button size="small" type="danger" class="device-disable-btn">
+                    <MfIcon name="CircleSlash" />{{ t('groups.enable') }}
+                  </el-button>
+                </template>
+              </el-popconfirm>
+              <template v-if="dev.host">
+                <el-button size="small" @click="redialTarget(dev)"><MfIcon name="RefreshCw" />{{ t('groups.sendspinReconnect') }}</el-button>
+                <el-popconfirm
+                  v-if="canManage"
+                  :title="t('groups.sendspinForgetConfirm', { name: `${dev.host}:${dev.port}` })"
+                  :confirm-button-text="t('common.delete')"
+                  :cancel-button-text="t('common.cancel')"
+                  width="260"
+                  @confirm="forgetTarget(dev)"
+                >
+                  <template #reference>
+                    <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('common.delete') }}</el-button>
+                  </template>
+                </el-popconfirm>
               </template>
-            </el-popconfirm>
-            <el-button v-if="canUse" size="small" @click="openRenameSendspinDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
+              <el-popconfirm
+                v-if="canManage && dev.clientId && dev.paired"
+                :title="t('groups.sendspinUnpairConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                :confirm-button-text="t('common.confirm')"
+                :cancel-button-text="t('common.cancel')"
+                width="280"
+                @confirm="unpairSendspin(dev)"
+              >
+                <template #reference>
+                  <el-button size="small" type="danger" plain><MfIcon name="Link2Off" />{{ t('groups.sendspinUnpair') }}</el-button>
+                </template>
+              </el-popconfirm>
+            </template>
           </div>
         </div>
-        <div v-if="!loadingSendspin && sendspinClients.length === 0" class="device-empty">
+        <div v-if="!loadingSendspin && sendspinRows.length === 0" class="device-empty">
           {{ t('groups.noSendspinDevices') }}
         </div>
       </div>
-      <div v-if="dialTargets.length" class="remembered-box">
-        <div class="remembered-title">{{ t('groups.sendspinRemembered') }}</div>
-        <div v-for="tg in dialTargets" :key="`${tg.host}:${tg.port}`" class="device-row">
-          <MfIcon name="Speaker" class="device-row-icon" :class="{ offline: !tg.online }" />
-          <div class="device-row-info">
-            <div class="device-row-name">
-              {{ tg.host }}:{{ tg.port }}
-              <el-tag v-if="tg.online" size="small" type="success" style="margin-left: 6px">{{ t('groups.online') }}</el-tag>
-              <el-tag v-else size="small" type="info" style="margin-left: 6px">{{ t('groups.offline') }}</el-tag>
-            </div>
-          </div>
-          <div class="device-row-actions">
-            <el-button v-if="!tg.online" size="small" @click="redialTarget(tg)">{{ t('groups.sendspinReconnect') }}</el-button>
-            <el-popconfirm
-              :title="t('groups.sendspinForgetConfirm', { name: `${tg.host}:${tg.port}` })"
-              :confirm-button-text="t('common.delete')"
-              :cancel-button-text="t('common.cancel')"
-              width="260"
-              @confirm="forgetTarget(tg)"
-            >
-              <template #reference>
-                <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('common.delete') }}</el-button>
-              </template>
-            </el-popconfirm>
-          </div>
-        </div>
-      </div>
     </div>
+
 
     <div class="section-head group-section-head">
       <h3>{{ t('groups.groupsTitle') }}</h3>
@@ -833,6 +909,48 @@ const dialing = ref(false);
 
 const sendspinUrl = computed(() => `ws://${window.location.hostname}:${sendspinPort.value}/sendspin`);
 
+/** 合并列表(对齐 DLNA 单列表):在线客户端为主体,追加两类离线行 ——
+ *  ① 服务端标记 offline 的设备(已禁用且当前离线,保留在列表里才有入口重新启用);
+ *  ② 已记住但当前不在线的拨号目标(仅服务端 /dial 才 remember,与拨入设备不相交)。
+ *  在线行可 显示/禁用/配对解绑/重命名;离线行可 重连/遗忘,已禁用的可 恢复。 */
+const sendspinRows = computed<any[]>(() => {
+  const online = (sendspinClients.value || [])
+    .filter((c: any) => !c.offline)
+    .map((c: any) => ({
+      ...c,
+      rowKey: `c:${c.clientId}`,
+      online: true,
+      available: true,
+    }));
+  const onlineDialKeys = new Set(
+    (sendspinClients.value || [])
+      .filter((c: any) => c.dialed && c.host)
+      .map((c: any) => `${c.host}:${c.port}`),
+  );
+  // ① 已禁用且离线(来自 /clients 的 offline 标记)。
+  const offlineKnown = (sendspinClients.value || [])
+    .filter((c: any) => !!c.offline)
+    .map((c: any) => ({
+      ...c,
+      rowKey: `k:${c.clientId}`,
+      online: false,
+      available: false,
+    }));
+  // ② 记住的拨号目标但当前离线(排除已知设备与在线拨号)。
+  const knownIds = new Set(offlineKnown.map((k: any) => k.clientId));
+  const offlineTargets = (dialTargets.value || [])
+    .filter((tg: any) => !tg.online && !onlineDialKeys.has(`${tg.host}:${tg.port}`))
+    .map((tg: any) => ({
+      ...tg,
+      rowKey: `t:${tg.host}:${tg.port}`,
+      online: false,
+      available: false,
+      clientId: "", // 未连上,无 clientId
+    }))
+    .filter((tg: any) => !knownIds.has(tg.clientId));
+  return [...online, ...offlineKnown, ...offlineTargets];
+});
+
 function shortClientId(id: string) {
   return id && id.length > 20 ? `${id.slice(0, 10)}…${id.slice(-6)}` : (id || "");
 }
@@ -907,6 +1025,25 @@ async function approveSendspin(dev: any, approved: boolean): Promise<void> {
     await api.post("/rest/api/v1/sendspin/approve", { clientId: dev.clientId, approved });
     ElMessage.success(t("settings.saved"));
     await loadSendspinClients();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+  }
+}
+
+/** 禁用/启用 Sendspin 设备(对齐 DLNA toggleDisabled):
+ *  禁用 = 设备级持久偏好 → 后端断连接 + 停播清队列 + 移出群组 + 从 peer 层移除,
+ *  设备从所有流转播放入口消失(切换器 / Flows / HA 卡片)。 */
+async function toggleSendspinDisabled(dev: any, disabled: boolean): Promise<void> {
+  if (!dev.clientId) return;
+  try {
+    const res = await api.put(`/rest/api/v1/sendspin/devices/${encodeURIComponent(dev.clientId)}/disabled`, { disabled });
+    if (res.data?.success) {
+      ElMessage.success(disabled
+        ? t("groups.disabledNamed", { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })
+        : t("groups.enabledNamed", { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) }));
+      await loadSendspinClients();
+      await loadGroups(); // 禁用会把设备移出群组,组列表需要刷新
+    }
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
@@ -1105,8 +1242,6 @@ onMounted(() => {
 .group-actions .device-hide-toggle { margin-right: 2px; }
 .group-actions .el-button { margin-left: 0; }
 .device-empty { text-align: center; color: var(--fnos-text-tertiary); font-size: 12px; padding: 22px 0; }
-.remembered-box { margin-top: 10px; }
-.remembered-title { font-size: 12px; font-weight: 600; color: var(--fnos-text-secondary); margin: 2px 2px 6px; }
 .form-tip { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 6px; }
 .groups-tip {
   font-size: 12px; color: var(--fnos-text-tertiary); background: rgba(255,255,255,0.04);

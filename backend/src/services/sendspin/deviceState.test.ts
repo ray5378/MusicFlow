@@ -2,7 +2,13 @@
 // 表在 tests/setup.ts 的 initDatabase() 里随全量 schema 一起建好。
 import { describe, it, expect, beforeEach } from "vitest";
 import { sqlite } from "../../db/index.js";
-import { getDeviceVolumeState, saveDeviceVolumeState, deleteDeviceVolumeState } from "./deviceState.js";
+import {
+  getDeviceVolumeState,
+  saveDeviceVolumeState,
+  deleteDeviceVolumeState,
+  getDeviceDisabled,
+  saveDeviceDisabled,
+} from "./deviceState.js";
 
 describe("sendspin deviceState (按设备持久音量)", () => {
   const CID = "dev-state-test-1";
@@ -50,5 +56,46 @@ describe("sendspin deviceState (按设备持久音量)", () => {
     expect(getDeviceVolumeState(CID)).toBeNull();
     deleteDeviceVolumeState(CID);
     expect(getDeviceVolumeState(CID)).toBeNull();
+  });
+
+  // ---- 禁用态(与 DLNA dlna_devices.disabled 同语义) ----
+
+  it("禁用态缺省 false(无行即启用)", () => {
+    expect(getDeviceDisabled(CID)).toBe(false);
+    expect(getDeviceDisabled("")).toBe(false);
+  });
+
+  it("写禁用态后可读回;不产生第二行", () => {
+    saveDeviceDisabled(CID, true);
+    expect(getDeviceDisabled(CID)).toBe(true);
+    expect(rowCount()).toBe(1);
+    saveDeviceDisabled(CID, false);
+    expect(getDeviceDisabled(CID)).toBe(false);
+    expect(rowCount()).toBe(1);
+  });
+
+  it("禁用态与音量互不覆盖(同一行两个独立字段)", () => {
+    saveDeviceVolumeState(CID, { volume: 33, muted: true });
+    saveDeviceDisabled(CID, true);
+    // 写禁用不该动音量/静音
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: 33, muted: true });
+    expect(getDeviceDisabled(CID)).toBe(true);
+    // 写音量不该动禁用
+    saveDeviceVolumeState(CID, { volume: 44 });
+    expect(getDeviceDisabled(CID)).toBe(true);
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: 44, muted: true });
+    expect(rowCount()).toBe(1);
+  });
+
+  it("无行时直接写禁用态也能建行(volume/muted 取缺省)", () => {
+    saveDeviceDisabled(CID, true);
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: 100, muted: false });
+    expect(getDeviceDisabled(CID)).toBe(true);
+  });
+
+  it("解绑(删行)会一并清掉禁用态 —— 与「解绑即删除播放器」一致", () => {
+    saveDeviceDisabled(CID, true);
+    deleteDeviceVolumeState(CID);
+    expect(getDeviceDisabled(CID)).toBe(false);
   });
 });

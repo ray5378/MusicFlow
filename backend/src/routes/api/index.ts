@@ -2734,10 +2734,13 @@ apiRoutes.get("/v1/sendspin/clients", async (c) => {
   const srv = sendspinServerOr404(c);
   if (!srv) return c.json({ clients: [], enabled: false });
   const store = srv.pairingStore;
+  const { getDeviceDisabled, listDisabledDeviceIds } = await import("../../services/sendspin/deviceState.js");
+  const live = new Set<string>();
   const clients = [...srv.clients.values()]
     .filter((conn) => !!conn.clientId)
     .map((conn) => {
       const clientId = conn.clientId!;
+      live.add(clientId);
       const rec = store?.getRecord(clientId);
       return {
         clientId,
@@ -2748,10 +2751,54 @@ apiRoutes.get("/v1/sendspin/clients", async (c) => {
         pairedAt: rec?.createdAt ?? null,
         lastUsedAt: rec?.lastUsedAt ?? null,
         approved: store?.isApproved(clientId) ?? false,
+        // 与 DLNA 设备行同款:用户手动禁用(持久化),行置灰 + 「已禁用」标签。
+        disabled: getDeviceDisabled(clientId),
+        // 拨号来源(前端合并「已记住的播放器」列表时去重用):dialed=true 表示本连接
+        // 由服务端主动拨出,host/port 即已记住的拨号目标。
+        dialed: !!conn.dialed,
+        host: conn.dialed ? conn.dialHost : "",
+        port: conn.dialed ? conn.dialPort : 0,
         pairing: srv.pairing?.getAttempt(clientId) ?? null,
       };
     });
+  // 已禁用但当前离线的设备补回列表:否则禁用(会断连接)后该设备从列表消失,
+  // 用户再无入口把它启用回来。与 DLNA loadPersistedDevices 恢复禁用设备同效。
+  for (const clientId of listDisabledDeviceIds()) {
+    if (live.has(clientId)) continue;
+    clients.push({
+      clientId,
+      name: clientId,
+      roles: [],
+      legacy: false,
+      paired: !!store?.getRecord(clientId),
+      pairedAt: store?.getRecord(clientId)?.createdAt ?? null,
+      lastUsedAt: store?.getRecord(clientId)?.lastUsedAt ?? null,
+      approved: store?.isApproved(clientId) ?? false,
+      disabled: true,
+      dialed: false,
+      host: "",
+      port: 0,
+      pairing: null,
+      offline: true, // 前端据此渲染为离线行(变暗 + 不显示在线专属按钮)
+    } as any);
+  }
   return c.json({ clients, enabled: true, port: srv.port });
+});
+
+// 禁用/启用某 Sendspin 设备(对齐 DLNA /v1/dlna/devices/:id/disabled 语义):
+// 禁用 = 设备级持久偏好 → 断连接 + 停播清队列 + 移出所有群组 + 从 peer 层移除,
+// 不出现在任何流转播放入口(切换器 / Flows / HA 卡片)。启用只写状态,等设备重连。
+apiRoutes.put("/v1/sendspin/devices/:clientId/disabled", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  const disabled = !!body?.disabled;
+  const { sendspinSetDisabled } = await import("../../services/sendspin/index.js");
+  const ok = await sendspinSetDisabled(clientId, disabled);
+  if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
+  // 广播设备列表变化(WS → 卡片 / Web 刷新),与 DLNA 端点同款。
+  try { getEventManager().emitDeviceListChanged(getCachedDevices().length); } catch { /* ignore */ }
+  return c.json({ success: true, disabled });
 });
 
 apiRoutes.get("/v1/sendspin/esphome", async (c) => {

@@ -431,5 +431,6 @@ export const sendspinDeviceState = sqliteTable("sendspin_device_state", {
   clientId: text("client_id").primaryKey(),
   volume: integer("volume").notNull().default(100),
   muted: integer("muted").notNull().default(0),
+  disabled: integer("disabled").notNull().default(0),
   updatedAt: text("updated_at").default(""),
 });

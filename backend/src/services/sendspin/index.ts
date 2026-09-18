@@ -103,9 +103,20 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   qc.registerSendspinDevice(conn.clientId, displayName);
   // 同步到 peer 层(sendspin:<clientId>)—— 前端切换器 / /v1/peers / /v1/play 才能发现并投送。
+  // 被用户禁用的设备**不注册为 peer**(与 DLNA reconcileDlnaPeers 同语义):
+  // 禁用设备不出现在任何流转播放入口;解除禁用后重连即自动回来。
+  let disabled = false;
   try {
-    pm.registerSendspin(conn.clientId, displayName, true, conn.legacy);
-  } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
+    const { getDeviceDisabled } = await import("./deviceState.js");
+    disabled = getDeviceDisabled(conn.clientId);
+  } catch { /* 读禁用态失败按启用处理,不阻断设备上线 */ }
+  if (disabled) {
+    try { pm.removeSendspinPeer(conn.clientId); } catch { /* ignore */ }
+  } else {
+    try {
+      pm.registerSendspin(conn.clientId, displayName, true, conn.legacy);
+    } catch { /* peer 层未就绪时忽略(播放器注册不受影响) */ }
+  }
   // 恢复持久音量(无行则沿用缺省,不发声不断流,见 applyPersistedDeviceVolume)。
   await applyPersistedDeviceVolume(conn.clientId);
 }
@@ -376,6 +387,53 @@ export async function applySendspinConfigHotUpdate(): Promise<void> {
     psk: cfg.esphomePsk,
     port: cfg.esphomePort,
   });
+}
+
+/** 设置某 Sendspin 设备禁用态(对齐 DLNA `setDeviceDisabled` 语义)。
+ *
+ *  禁用 = 设备级持久偏好:落 sendspin_device_state.disabled,并从 peer 层移除
+ *  (不出现在切换器 / Flows / HA 卡片等任何流转播放入口);同时停播 + 清队列 +
+ *  断开现有连接 + 移出所有群组。启用只写状态 —— Sendspin 是设备主动拨入,
+ *  服务端无法反向叫醒,设备重连时 registerServerPlayer 会按新状态重新注册 peer。
+ *
+ *  fork 模式下 peer/队列/群组都属主进程,sendspin 子进程只负责连接与播控:
+ *  - 状态落库在主进程直写(WAL 多进程安全);
+ *  - 断连接经 RPC 下发子进程;
+ *  - 返回是否找到该设备(路由层据此判 404)。 */
+export async function sendspinSetDisabled(clientId: string, disabled: boolean): Promise<boolean> {
+  if (!clientId) return false;
+  const { saveDeviceDisabled } = await import("./deviceState.js");
+  saveDeviceDisabled(clientId, disabled);
+
+  const pm = pmSingleton;
+  const qc = qcSingleton;
+
+  if (disabled) {
+    // 1. 立即断开该客户端现存连接(子进程持有连接)。
+    try {
+      if (isForkMode()) {
+        if (sendspinSupervisor.isRunning()) await sendspinSupervisor.rpc("disconnect", { clientId });
+      } else {
+        const srv = getServer();
+        for (const conn of [...(srv?.clients.values() ?? [])]) {
+          if (conn.clientId === clientId) { try { conn.close(); } catch { /* ignore */ } }
+        }
+      }
+    } catch { /* 断连失败不影响禁用状态 */ }
+    // 2. 移出所有用户组 + 停播清队列(与 DLNA 端点同款)。
+    try {
+      const { getGroupManager } = await import("../group/index.js");
+      getGroupManager().removeDeviceFromAllGroups(clientId);
+    } catch { /* 组管理器未就绪时忽略 */ }
+    try { qc?.clear(clientId); } catch { /* ignore */ }
+  }
+
+  // 3. peer 层同步:禁用 → 移除 peer(推 peer_unavailable,卡片实时消失);
+  //    启用 → 等设备重连时 registerServerPlayer 自动注册(此处不凭空造 peer)。
+  if (disabled) {
+    try { pm?.removeSendspinPeer(clientId); } catch { /* ignore */ }
+  }
+  return true;
 }
 
 /** 解除配对(fork 经 RPC 在子进程执行):删配对记录 + 断开该客户端现存连接

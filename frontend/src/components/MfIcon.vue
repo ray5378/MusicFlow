@@ -16,7 +16,7 @@ import { computed } from "vue";
 import {
   ArrowLeft, Box, Cable, Check, ChevronDown, ChevronRight, CircleCheck, CircleSlash,
   Clock, Copy, Disc3, Download, FolderOpen, Globe, Headphones, Heart, Home, Info,
-  KeyRound, Laptop, Library, List, ListMusic, ListOrdered, Loader2, Menu,
+  KeyRound, Laptop, Library, Link2Off, List, ListMusic, ListOrdered, Loader2, Menu,
   MessageCircle, Monitor, MoreHorizontal, Pause, Pencil, Play, Plus, Radar, RefreshCw,
   Repeat, Repeat1, RotateCcw, Search, Settings, Shuffle, SkipBack, SkipForward,
   SlidersHorizontal, Smartphone, Speaker, Trash2, TriangleAlert, Upload, User,
@@ -72,7 +72,7 @@ const ALIAS: Record<string, string> = {
 const ICONS: Record<string, any> = {
   ArrowLeft, Box, Cable, Check, ChevronDown, ChevronRight, CircleCheck, CircleSlash,
   Clock, Copy, Disc3, Download, FolderOpen, Globe, Headphones, Heart, Home, Info,
-  KeyRound, Laptop, Library, List, ListMusic, ListOrdered, Loader2, Menu,
+  KeyRound, Laptop, Library, Link2Off, List, ListMusic, ListOrdered, Loader2, Menu,
   MessageCircle, Monitor, MoreHorizontal, Pause, Pencil, Play, Plus, Radar, RefreshCw,
   Repeat, Repeat1, RotateCcw, Search, Settings, Shuffle, SkipBack, SkipForward,
   SlidersHorizontal, Smartphone, Speaker, Trash2, TriangleAlert, Upload, User,
