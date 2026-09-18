@@ -19,15 +19,18 @@ export default defineConfig({
     // 残留数据会让测试依赖"运气"(运行顺序/历史运行次数),CI 全新环境才暴露。
     // pool 必须是 "forks":默认 threads 池下反复加载 better-sqlite3 原生模块,
     // 跑完在进程退出阶段段错误(exit 139);forks 每个文件独立子进程,无此问题。
-    fileParallelism: false,
+    fileParallelism: true,
     pool: "forks",
-    // singleFork: 单个 fork 进程串行跑完全部测试文件。多 worker 并行时,forks 池在
-    // 文件派发阶段会偶发死锁(多个各自加载 better-sqlite3 的原生 worker 已完成一批文件,
-    // 调度器却不再派发新文件,worker 空转零输出直至 timeout)。该现象与并发 worker 数无关
-    // (3→2 均复现),与具体文件无关(单文件本地均通过),只能靠单进程串行从根上规避。
-    // 配套: setup.ts 的每文件独立 DATA_DIR 改用纯 uuid 区分(pid 在单进程下会恒定)。
+    // 单 worker 串行:forks 池多 worker 并行时,在文件派发阶段会偶发死锁(多个各自加载
+    // better-sqlite3 的原生 worker 已完成一批文件,调度器却不再派发新文件,worker 空转零
+    // 输出直至 timeout;与并发 worker 数 3→2 无关、与具体文件无关)。maxWorkers=1 后只剩
+    // 一个 worker,不存在多 worker 派发死锁,又保留 forks 池「每个测试文件跑在独立 fork
+    // 子进程」的进程级隔离——避免 singleFork(单进程串行)下 sendspin 服务单例 / ffmpeg /
+    // 沙箱等模块级全局跨文件残留导致的偶发污染。串行跑全集留给 CI 20 分钟足够。
+    maxWorkers: 1,
+    minWorkers: 1,
     poolOptions: {
-      forks: { singleFork: true },
+      forks: { singleFork: false },
     },
     setupFiles: ["tests/setup.ts"],
     // 打乱测试(文件内)顺序,让任何隐藏的顺序/共享状态依赖显式暴露,而不是被
