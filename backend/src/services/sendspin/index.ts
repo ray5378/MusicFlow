@@ -636,7 +636,21 @@ export async function rememberDialTarget(host: string, port: number): Promise<vo
   }
 }
 
-/** 忘记拨号目标;若在线(本服务拨出的)则一并断开,不再重拨。 */
+/**
+ * 撤销「添加播放器」(= 前端统一的「解绑」):只撤回服务端对这台设备的**记住**,
+ * **不删设备本身** —— 设备仍在线、行仍留在列表里。
+ *
+ * 具体做三件事:
+ *   1. 从 dial_targets 移除 → 重启/掉线后不再自动重拨;
+ *   2. 清掉该设备的持久音量/静音 —— 撤销添加即不留档案,重连按缺省来;
+ *   3. 抹掉这条连接上的 dialed 标记(前端据此回落「解绑」按钮)。
+ *
+ * ⚠️ **刻意不断开连接**:Sendspin 的客户端列表是**连接派生**的(`srv.clients`),
+ * 一旦 close,这台设备就整个从列表消失 —— 用户想再操作它都没入口。之前这里会
+ * close,表现为「一遗忘设备就没了」,与「行要留着」的预期相反(2026-09-19 修正)。
+ *
+ * 改名由前端一并清除(见 Groups 页 unbindSendspin)。
+ */
 export async function forgetDialTarget(host: string, port: number): Promise<boolean> {
   if (isForkMode()) {
     if (!sendspinSupervisor.isRunning()) return false;
@@ -650,14 +664,16 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
   if (srv) {
     for (const conn of [...srv.clients.values()]) {
       if (conn.dialed && conn.dialHost === host && conn.dialPort === port) {
-        // 忘记设备即"删除播放器":持久音量行一并清(重连按缺省来)。
         if (conn.clientId) {
           try {
             const { deleteDeviceVolumeState } = await import("./deviceState.js");
             deleteDeviceVolumeState(conn.clientId);
           } catch { /* ignore */ }
         }
-        try { conn.close(); } catch { /* ignore */ }
+        // 撤回「已添加」标记,连接保持 —— 行还在,只是不再是记住的拨号目标。
+        conn.dialed = false;
+        conn.dialHost = "";
+        conn.dialPort = 0;
       }
     }
   }

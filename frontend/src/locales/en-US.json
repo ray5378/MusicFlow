@@ -863,7 +863,7 @@
     "online": "Online",
     "sendspinRemembered": "Remembered players (auto-reconnect on restart)",
     "sendspinReconnect": "Connect",
-    "sendspinForgetConfirm": "Forget {name}? It will no longer auto-reconnect."
+    "sendspinUnbindTargetConfirm": "Unbind {name}? The server will forget it and stop auto-reconnecting."
   },
   "genres": {
     "title": "Genres",

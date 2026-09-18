@@ -863,7 +863,7 @@
     "online": "在线",
     "sendspinRemembered": "已记住的播放器（重启自动重连）",
     "sendspinReconnect": "连接",
-    "sendspinForgetConfirm": "忘记 {name}？不再自动重连。"
+    "sendspinUnbindTargetConfirm": "解绑 {name}？服务端不再记住它，也不再自动重连。"
   },
   "genres": {
     "title": "风格",

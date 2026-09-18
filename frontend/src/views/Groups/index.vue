@@ -275,14 +275,18 @@
                 size="small"
                 @click="approveSendspin(dev, !dev.approved)"
               >{{ dev.approved ? t('groups.sendspinUnapprove') : t('groups.sendspinApprove') }}</el-button>
-              <!-- 解绑常显(= 删除):解绑后本行保留,标签回落「未配对」、按钮回落「配对」。 -->
+              <!-- 解绑(统一名称,= 删除):明文直连 legacy 没有配对记录可解,它解的是
+                   「被服务端记住的拨号目标」—— 撤销添加 + 清改名,连接保持、行仍在线。
+                   两种解绑共用同一个按钮与入口,不再另设「遗忘」。 -->
               <el-popconfirm
-                v-if="canManage && dev.paired && !dev.disabled"
-                :title="t('groups.sendspinUnpairConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                v-if="canManage && !dev.disabled && sendspinBindable(dev)"
+                :title="dev.paired && dev.clientId
+                  ? t('groups.sendspinUnpairConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })
+                  : t('groups.sendspinUnbindTargetConfirm', { name: `${dev.host}:${dev.port}` })"
                 :confirm-button-text="t('common.confirm')"
                 :cancel-button-text="t('common.cancel')"
-                width="280"
-                @confirm="unpairSendspin(dev)"
+                width="300"
+                @confirm="unbindSendspin(dev)"
               >
                 <template #reference>
                   <el-button size="small" type="danger" plain><MfIcon name="Link2Off" />{{ t('groups.sendspinUnpair') }}</el-button>
@@ -307,28 +311,18 @@
                   </el-button>
                 </template>
               </el-popconfirm>
-              <template v-if="dev.host">
-                <el-button size="small" @click="redialTarget(dev)"><MfIcon name="RefreshCw" />{{ t('groups.sendspinReconnect') }}</el-button>
-                <el-popconfirm
-                  v-if="canManage"
-                  :title="t('groups.sendspinForgetConfirm', { name: `${dev.host}:${dev.port}` })"
-                  :confirm-button-text="t('common.delete')"
-                  :cancel-button-text="t('common.cancel')"
-                  width="260"
-                  @confirm="forgetTarget(dev)"
-                >
-                  <template #reference>
-                    <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('common.delete') }}</el-button>
-                  </template>
-                </el-popconfirm>
-              </template>
+              <!-- 记住的拨号目标(离线):先「连接」,再可「解绑」。 -->
+              <el-button v-if="dev.host" size="small" @click="redialTarget(dev)"><MfIcon name="RefreshCw" />{{ t('groups.sendspinReconnect') }}</el-button>
+              <!-- 与在线行同一个「解绑」按钮:有配对记录就清配对,只是被记住就撤销添加。 -->
               <el-popconfirm
-                v-if="canManage && dev.clientId && dev.paired"
-                :title="t('groups.sendspinUnpairConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                v-if="canManage && sendspinBindable(dev)"
+                :title="dev.paired && dev.clientId
+                  ? t('groups.sendspinUnpairConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })
+                  : t('groups.sendspinUnbindTargetConfirm', { name: `${dev.host}:${dev.port}` })"
                 :confirm-button-text="t('common.confirm')"
                 :cancel-button-text="t('common.cancel')"
-                width="280"
-                @confirm="unpairSendspin(dev)"
+                width="300"
+                @confirm="unbindSendspin(dev)"
               >
                 <template #reference>
                   <el-button size="small" type="danger" plain><MfIcon name="Link2Off" />{{ t('groups.sendspinUnpair') }}</el-button>
@@ -983,16 +977,6 @@ async function redialTarget(tg: any): Promise<void> {
   }
 }
 
-async function forgetTarget(tg: any): Promise<void> {
-  try {
-    await api.delete("/rest/api/v1/sendspin/dial-targets", { data: { host: tg.host, port: tg.port } });
-    ElMessage.success(t("settings.saved"));
-    await loadSendspinClients();
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
-  }
-}
-
 async function dialPlayer(): Promise<void> {
   const host = dialHost.value.trim();
   if (!host || dialing.value) return;
@@ -1057,6 +1041,42 @@ async function unpairSendspin(dev: any): Promise<void> {
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
   }
+}
+
+/**
+ * 统一的「解绑」入口 —— 三类设备都叫解绑,但各自解的是不同那层:
+ *   - 已配对(加密设备)      → 清配对记录(后端会断开,设备重连后回落「未配对」);
+ *   - 被服务端记住的拨号目标 → 撤销「添加播放器」:删拨号目标 + 清改名,
+ *                             **连接保持**,行仍在线(只是不再自动重拨)。
+ *
+ * 一次只解一层、且配对优先:已配对且又被记住的设备,第一次点解的是配对(标签回落
+ * 「未配对」,行还在),再点一次才是撤销添加。这样不会出现「一点就把设备删没了」,
+ * 也符合「解绑后仍保留在这一行」。
+ */
+async function unbindSendspin(dev: any): Promise<void> {
+  const hasPairing = !!dev.paired && !!dev.clientId;
+  const hasTarget = !!dev.dialed && !!dev.host;
+  if (!hasPairing && !hasTarget) return;
+  try {
+    if (hasPairing) {
+      await api.post("/rest/api/v1/sendspin/unpair", { clientId: dev.clientId });
+    } else {
+      // 撤销添加:持久音量由后端一并清;改名在这边清(两者都是「添加」留下的痕迹)。
+      await api.delete("/rest/api/v1/sendspin/dial-targets", {
+        data: { host: dev.host, port: dev.port },
+      });
+      if (dev.clientId) await playerStore.setPeerName(`sendspin:${dev.clientId}`, "");
+    }
+    ElMessage.success(t("settings.saved"));
+    await loadSendspinClients();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+  }
+}
+
+/** 该行是否还有可解的绑定(配对记录 / 记住的拨号目标)。 */
+function sendspinBindable(dev: any): boolean {
+  return (!!dev.paired && !!dev.clientId) || (!!dev.dialed && !!dev.host);
 }
 
 const showPairDialog = ref(false);
