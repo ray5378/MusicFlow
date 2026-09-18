@@ -6,8 +6,10 @@
 //
 // 恢复前的防重入检查:若设备已在播(GENA/轮询已确认 PLAYING),说明用户已手动恢复,
 // 不重复触发续播,避免双重 cast。
-import { getGroupManager } from "./index.js";
-import { getOnlineMemberIds, getGroupStatus } from "./protocolPlayer.js";
+import { getGroupManager, splitMemberId } from "./index.js";
+import { getOnlineMemberIds, getOnlineSendspinIds, getGroupStatus } from "./protocolPlayer.js";
+import { sendspinGroupJoin } from "../sendspin/index.js";
+import { sendspinGroupName } from "../sendspin/playerCore.js";
 import { getQueueController } from "../player/index.js";
 import { getEffectiveBaseUrl, alignDeviceToPosition, getDeviceStatus } from "../dlna/control.js";
 import { createLogger } from "../../utils/logger.js";
@@ -56,13 +58,17 @@ export async function runGroupWatchdogTick(): Promise<void> {
       continue;
     }
     // 探活:组 pollState 只探 leader,非 leader 成员离线的 runtime available 不会翻转。
-    // 这里对每个成员做一次轻量状态查询(失败会把 runtime available 置 false,成功置 true),
-    // 让 getOnlineMemberIds(基于 isDeviceAvailable)在本次巡检里就看到真实可达性。
-    for (const d of g.memberIds) {
-      try { await getDeviceStatus(d); } catch {}
+    // 这里对每个 DLNA 成员做一次轻量状态查询(失败会把 runtime available 置 false,
+    // 成功置 true),让 getOnlineMemberIds(基于 isDeviceAvailable)在本次巡检里就看到
+    // 真实可达性。sendspin 成员不探(SOAP 不适用,在线走 front ready 判定)。
+    for (const m of g.memberIds) {
+      const s = splitMemberId(m);
+      if (!s || s.kind !== "dlna") continue;
+      try { await getDeviceStatus(s.id); } catch {}
     }
     const online = getOnlineMemberIds(g.id);
-    if (online.length === 0) {
+    const spinOnline = getOnlineSendspinIds(g.id);
+    if (online.length === 0 && spinOnline.length === 0) {
       // 全员离线:记录最后位置并进入悬挂(队列保留在 DB,isActive 不变)。
       if (!suspended.has(g.id)) {
         suspended.add(g.id);
@@ -88,9 +94,14 @@ export async function runGroupWatchdogTick(): Promise<void> {
       await qc.resumeActive(g.id, getEffectiveBaseUrl());
       if (resumePos > 0) {
         // resumeActive 里的 cast 会让成员从头播,cast 后立刻 seek 在部分渲染器上
-        // 会静默失效,这里对每个在线成员做校准 seek(seek+轮询收敛到目标位置)。
+        // 会静默失效,这里对每个在线 DLNA 成员做校准 seek(seek+轮询收敛到目标位置)。
         const online = getOnlineMemberIds(g.id);
         await Promise.allSettled(online.map(d => alignDeviceToPosition(d, resumePos)));
+      }
+      // 回归的 sendspin 成员重新入组(断开时已从组成员摘除):播中走直播沿,
+      // 空闲仅登记。resumeActive 已恢复组 pump(如组在播)。
+      for (const cid of getOnlineSendspinIds(g.id)) {
+        try { await sendspinGroupJoin(sendspinGroupName(g.id), cid); } catch {}
       }
       continue;
     }

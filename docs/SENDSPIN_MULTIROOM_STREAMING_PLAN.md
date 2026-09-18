@@ -60,6 +60,12 @@
 >   任一成功即成功）；transport 全量双路；`pollState`/`getGroupStatus` 按 leader
 >   kind 派生；`getOnlineMemberIds` 保持 DLNA 口径（看门狗/QC 调用点零改）；
 >   QC 结束抑制改 `hasOnlineMember`。
+> - [x] **T4 mute 扇出＋watchdog kind 感知**（已合入）：
+>   组 mute 按 kind 分发（dlna 走 RenderingControl，sendspin 走组/连接双置位，
+>   抽 `setSendspinMemberMuted` 与单播共用；play/pause/stop/seek/volume
+>   本就经 QC transport→组 player，零改动）；watchdog 探活/对齐仅 dlna 成员，
+>   悬挂判定含 sendspin 在线，回归时在线 spin 成员重新入组；
+>   断开清理已验证（单 group 指针＋空组删 pump，见 server.ts）。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，

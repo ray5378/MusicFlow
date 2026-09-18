@@ -3781,9 +3781,14 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
   if (parsed.kind === "group") {
     // 组没有自己的渲染器,静音要逐台成员下发。个别成员不支持静音时不应连累
     // 其余设备,所以全部并发执行后再汇总——只有全员失败才算失败。
+    // 成员按 kind 分流:dlna 走 RenderingControl,sendspin 走组/连接双置位。
     const members = gm.get(parsed.id)?.memberIds || [];
     if (members.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.group.empty"), 400);
-    const results = await Promise.allSettled(members.map(d => setDeviceMute(d, muted)));
+    const results = await Promise.allSettled(members.map(m => {
+      const s = splitMemberId(m);
+      if (s?.kind === "sendspin") return setSendspinMemberMuted(s.id, muted);
+      return setDeviceMute(s?.id ?? m, muted);
+    }));
     const ok = results.filter(r => r.status === "fulfilled").length;
     if (ok === 0) {
       const reason = results[0].status === "rejected" ? (results[0] as PromiseRejectedResult).reason : null;
@@ -3799,18 +3804,24 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
     // 与 DLNA RenderingControl SetMute 同语义:独立于音量的开关,取消恢复原音量。
     // 组即该客户端专属组(见 protocolPlayer),两处都置位;离线重连后组标记仍有效。
     try {
-      const srv = getSendspinFront();
-      if (!srv) throw new Error("sendspin 服务未运行");
-      // 镜像视图的 muted setter = 本地即时更新 + RPC 下发子进程(fork 模式)。
-      srv.group(parsed.id).muted = muted;
-      const conn = srv.clients.get(parsed.id);
-      if (conn) conn.muted = muted;
+      await setSendspinMemberMuted(parsed.id, muted);
       return c.json({ success: true });
     }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   return c.json({ success: true });
 });
+
+// sendspin 单成员静音(组/连接双置位,见上;用户组成员与单设备共用语义):
+// 组 mute 即设备级 mute(对照 DLNA setDeviceMute 逐台下发)。
+async function setSendspinMemberMuted(clientId: string, muted: boolean): Promise<void> {
+  const srv = getSendspinFront();
+  if (!srv) throw new Error("sendspin 服务未运行");
+  // 镜像视图的 muted setter = 本地即时更新 + RPC 下发子进程(fork 模式)。
+  srv.group(clientId).muted = muted;
+  const conn = srv.clients.get(clientId);
+  if (conn) conn.muted = muted;
+}
 
 // Peer status: for dlna returns the device transport state; for groups the
 // leader's state (MA 同款:组状态从 leader 派生);for local returns the stored
