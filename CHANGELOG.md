@@ -2,6 +2,62 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.38] - 2026-09-19
+
+### 新功能 —— ESPHome 6053 密钥独立入口（与设备音量彻底分开）
+
+- 播放器页 Sendspin 设备行原本把「密钥 / 端口 / 测试连接」和设备音量滑杆挤在同一个
+  弹窗里，现拆成两个独立弹窗：新增**「ESPHome 密钥」**按钮与独立弹窗，行内两个按钮
+  各自反映连接状态。
+- 密钥回显分级：`GET /v1/sendspin/devices/:clientId/esphome` 仅对持有
+  `renderer.manage` 的账号回明文 `psk`（管理员恒有），其余账号只拿到
+  `pskConfigured` 布尔值；**设备列表端点始终不回显** —— 一次列表把所有设备的密钥
+  全吐出去毫无必要，弹窗打开时按需单取一台。
+- 设备行内「解绑」与「重命名」两个按钮互换位置。
+
+### 新功能 —— AirPlay 主动扫描（与 DLNA 扫描语义对齐）
+
+- 新增 `POST /v1/airplay/scan`（`renderer.use`）：立刻重发一次 mDNS(`_raop._tcp`)
+  查询，并把命中的接收端 `upsert`（新增 + 落库 + alive 事件）—— 刚上电、常驻
+  browser 还没捞到的接收端，点一下就出来。插件关闭时是**立即 resolve 的 no-op**，
+  随后回当前列表。
+- `services/airplay/discovery.ts` 抽出 `spinQuery()`：常驻 30 秒续期与主动扫描共用同一条
+  「短命新 browser 句柄」通路，避免两套发现逻辑各改各的。
+
+### 优化 —— 四个设备区块头部统一为「扫描」
+
+- 客户端 / DLNA / AirPlay / Sendspin 四个区块头部只保留一个贴右边缘的「扫描」按钮
+  （原来 AirPlay / Sendspin 叫「刷新」）。根因：`.section-head` 是
+  `justify-content: space-between`，Sendspin 头部有 3 个孩子时中间那个必然被挤离右边缘。
+- 「添加播放器」保留不删，从头部移到 Sendspin 列表盒子下方、右对齐。
+- 修正客户端区块说明与实现不符：「离线后自动消失」→「离线后该行保留并打「离线」标记」
+  （后端对 local peer 只 `markLocalOffline()`，从不删行）。
+
+### 优化 —— 流式解码窗口高水位 60 → 30 秒（与 MA 对齐）
+
+- `WINDOW_HIGH_SEC` 60 → 30：PCM 窗口内存上限 ~23MB → **~11.5MB**（＋5 秒历史环 ~2MB），
+  与 MA 的 `sleep_to_limit_buffer(30 秒)` 齐平；`WINDOW_LOW_SEC` 保持 20。
+  代价：seek 回跳更可能落出窗口、按 `-ss` 重建解码（约 1 秒空窗），越界频率继续在
+  240 soak 观察。插件配置页帮助文案与 `docs/SENDSPIN_MULTIROOM_STREAMING_PLAN.md`
+  的内存对照表同步。
+
+### 验证
+
+- `tsc --noEmit` 0；`vue-tsc` + `vite build` 0；`check-i18n` 0；
+  `vitest run` **154 文件 / 1162 用例全绿**；7 项门禁
+  （frontend-plugins / overlays / element-overrides / fixed-playlist-ids / core / i18n）全 0。
+- 新增 `backend/tests/airplay/rescan.test.ts`：守住「插件关闭时扫描立即返回、不卡 loading」。
+
+## [3.0.37] - 2026-09-18
+
+（本节为补记：该版打 tag 时未写 CHANGELOG 条目，内容据 `v3.0.36..v3.0.37` 提交历史整理。）
+
+### 新功能 —— Sendspin 设备音量持久化 + 流式解码开关进配置页
+
+- 设备音量（6053 桥）持久化并全端回显（`sendspin_device_state` + `peerVolume.ts` + WS 广播）。
+- 流式解码开关（`stream_source`）进插件配置页，默认开启。
+- 文档补解码内存与 MA 的对照结论。
+
 ## [3.0.36] - 2026-09-18
 
 ### 新功能 —— Sendspin 真多房间组（与 DLNA 组统一语义）
