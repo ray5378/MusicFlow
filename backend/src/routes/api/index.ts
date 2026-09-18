@@ -59,13 +59,14 @@ import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId, type LocalPlaybackReport } from "../../services/peer.js";
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
-import { startSendspinService, stopSendspinService, getSendspinFront } from "../../services/sendspin/index.js";
+import { startSendspinService, stopSendspinService, getSendspinFront, sendspinGroupJoin, sendspinGroupLeave } from "../../services/sendspin/index.js";
+import { sendspinGroupName } from "../../services/sendspin/playerCore.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
 } from "../../services/player/playerWebhook.js";
-import { getGroupManager } from "../../services/group/index.js";
+import { getGroupManager, splitMemberId } from "../../services/group/index.js";
 import { getHiddenPeerIds, setPeerHidden, isPeerHidden, getNameOverrides, getPeerNameOverride, setPeerNameOverride } from "../../services/playerPrefs.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
@@ -3907,10 +3908,48 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
 });
 
 // ==================== 播放器群组 API ====================
-// 一个组聚合多台 DLNA 设备(组持队列、播放时并发向成员 cast 同一首歌,
-// 仿 MA Sync Group / Universal Group)。成员勾选提交全量 memberIds(PUT)。
-// 组播放控制复用 peer API:peerId = "group:<groupId>"(阶段 2 接入)。
+// 一个组聚合多台设备(组持队列,播放时向成员投递同一首歌,
+// 仿 MA Sync Group / Universal Group)。成员勾选提交全量 memberIds(PUT),
+// 移动端随时加减走增量口(POST members)。成员 id 命名空间化:
+// `sendspin:<clientId>` / `dlna:<deviceId>` / 裸 id(历史数据＝DLNA)。
+// 组播放控制复用 peer API:peerId = "group:<groupId>"。
 const gm = getGroupManager();
+
+/** 成员变更后对齐(新增→加入当前播放,摘除→断开):PUT 与 POST 增量口共用,语义单源。
+ *  - dlna 新增:现有 rejoinMembers(cast 当前曲＋seek 到 leader 进度);
+ *  - sendspin 新增:直播沿加入(无需历史,见 sendspinGroupJoin);
+ *  - sendspin 摘除:stream/end 后移出(不断其余成员);
+ *  - dlna 摘除:沿用旧行为(不主动停成员设备)。
+ *  全部 best-effort:单个成员失败记日志,不影响其余成员与接口成功。 */
+async function alignGroupMembers(groupId: string, added: string[], removed: string[]): Promise<void> {
+  const kindOf = (m: string) => splitMemberId(m)?.kind ?? "dlna";
+  const bareOf = (m: string) => splitMemberId(m)?.id ?? m;
+  const dlnaAdded = added.filter(m => kindOf(m) === "dlna").map(bareOf);
+  const spinAdded = added.filter(m => kindOf(m) === "sendspin").map(bareOf);
+  const spinRemoved = removed.filter(m => kindOf(m) === "sendspin").map(bareOf);
+  if (dlnaAdded.length > 0) {
+    // 成员加入播放中的组:把当前曲 cast 给新成员并 seek 到 leader 进度
+    // (仅加入时一次,不做周期漂移校正——纯 MA 忠实策略)。
+    getQueueController().rejoinMembers(groupId, dlnaAdded).catch((e: any) => {
+      log.warn(`[group] ${groupId}: 成员加入对齐失败: ${e?.message || e}`);
+    });
+  }
+  const sg = sendspinGroupName(groupId);
+  for (const cid of spinAdded) {
+    try {
+      await sendspinGroupJoin(sg, cid);
+    } catch (e: any) {
+      log.warn(`[group] ${groupId}: sendspin 成员 ${cid} 加入失败: ${e?.message || e}`);
+    }
+  }
+  for (const cid of spinRemoved) {
+    try {
+      await sendspinGroupLeave(sg, cid);
+    } catch (e: any) {
+      log.warn(`[group] ${groupId}: sendspin 成员 ${cid} 摘除失败: ${e?.message || e}`);
+    }
+  }
+}
 
 // 列出全部组(含成员设备信息:名称/可用性)。
 // 播放器群组按用户划分:管理员看到全部;普通用户只看到自己创建的组(ownerUserId === 本人)。
@@ -3954,17 +3993,38 @@ apiRoutes.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), async (c) => 
       if (!updated) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
       const after = gm.get(id)?.memberIds || [];
       const added = after.filter(d => !before.includes(d));
-      if (added.length > 0) {
-        // 成员加入播放中的组:把当前曲 cast 给新成员并 seek 到 leader 进度
-        // (仅加入时一次,不做周期漂移校正——纯 MA 忠实策略)。
-        getQueueController().rejoinMembers(id, added).catch((e: any) => {
-          log.warn(`[group] ${id}: 成员加入对齐失败: ${e?.message || e}`);
-        });
+      const removed = before.filter(d => !after.includes(d));
+      // 新增→加入对齐 / 摘除→断开:与增量口共用 alignGroupMembers(语义单源)。
+      if (added.length > 0 || removed.length > 0) {
+        void alignGroupMembers(id, added, removed);
       }
     }
     const g = gm.getWithMembers(id);
     if (!g) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
     return c.json({ group: g });
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.updateFailed"), 400);
+  }
+});
+
+// 增量变更成员(移动端随时加减)。Body: { add?: string[], remove?: string[] }。
+// 单成员幂等(add 已在组内/remove 不在组内均为 no-op),无 read-modify-write,
+// 两台手机同时加不同设备不丢成员;弱网重试安全。先删后加,原子执行一次,
+// 返回更新后 group(含成员详情,免二次 GET)。同样走 alignGroupMembers 对齐。
+apiRoutes.post("/v1/groups/:id/members", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user")!;
+  const id = c.req.param("id")!;
+  if (!gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
+  }
+  const body = await c.req.json().catch(() => ({} as any));
+  try {
+    const r = gm.applyMemberDelta(id, { add: body.add, remove: body.remove });
+    if (!r) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
+    if (r.added.length > 0 || r.removed.length > 0) {
+      void alignGroupMembers(id, r.added, r.removed);
+    }
+    return c.json({ group: gm.getWithMembers(id), added: r.added, removed: r.removed });
   } catch (e: any) {
     return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.updateFailed"), 400);
   }

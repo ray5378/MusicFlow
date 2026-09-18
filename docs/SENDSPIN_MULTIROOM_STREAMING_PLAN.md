@@ -40,11 +40,19 @@
    `durationMs=0` 不钳制 position（否则恒 0 无限重推饿死事件循环）——修时附带，
    覆盖整包/流式两条路径。
 
-### 待续（按顺序接）
+### 待续（按顺序接，每任务一提交）
+
+> 施工日志：
+> - [x] **T1 路由增量口＋PUT 对齐钩子**（已合入）：`POST /v1/groups/:id/members`
+>   （`{add,remove}` 原子执行，返回更新后 group＋added/removed）；
+>   新增 `alignGroupMembers`（dlna 新增走 `rejoinMembers`、sendspin 新增走
+>   `sendspinGroupJoin` 直播沿、sendspin 摘除走 `sendspinGroupLeave`，
+>   best-effort）；PUT 改调同一钩子（保留 `setMembers` 精确顺序）。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，
    sendspin 走 `sendspinGroupJoin` 直播沿；摘除的 sendspin 成员走 `sendspinGroupLeave`）。
+   [T1 已做，见上]
 2. `group/protocolPlayer.ts` 按 kind 分流：dlna 子集沿用逐成员 cast；
    sendspin 子集走**一个**共享 pump（`createSendspinGroupPlayer`，in-proc/proxy 双模式，
    注意经动态导入避开 QC→group→sendspin→player/index→QC 模块环）；
