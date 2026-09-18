@@ -6,14 +6,14 @@
 //
 //   - 每首歌一个长命 ffmpeg(`-i <源> -ar 48k -ac 2 -f f32le pipe:1`),
 //     后台持续排入窗口;消费(`GroupPump.pushLoop`)按 25ms 切片取数;
-//   - 背压:未消费前沿超 60 秒即 `stdout.pause()`,ffmpeg 被管道憋住;
+//   - 背压:未消费前沿超 30 秒(与 MA 一致)即 `stdout.pause()`,ffmpeg 被管道憋住;
 //     低于 20 秒恢复。窗口 ＋ 管道总量有界;
 //   - 偏移全是**曲首起算的绝对交错样本**(与整包 `Float32Array` 下标同口径),
 //     `pushLoop` 的 `lo = i*frameSamples` 无需换算;
 //   - seek 回放点在窗口内只动下标(调用方行为);窗口外由 `seekTo()` 按 `-ss` 重起
 //     ffmpeg,绝对偏移保持连续,调用方同样只改 `positionMs`。
 //
-// 内存上限:窗口 60 秒 ≈ 23MB ＋ ffmpeg 常驻 ~15MB,和曲长无关。
+// 内存上限:窗口 30 秒 ≈ 11.5MB ＋ ffmpeg 常驻 ~15MB,和曲长无关。
 // 历史保留:已消费数据保留最近 5 秒(`HISTORY_KEEP_SEC`,后续按房间 DSP 预热用)。
 //
 // 与整包路径的关系:`GroupAudio` 加可选 `stream` 字段(见 streamEngine),
@@ -22,8 +22,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { SAMPLE_RATE, CHANNELS, ffmpegBin } from "./encoding.js";
 export const BYTES_PER_SAMPLE = 4;
-/** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。 */
-export const WINDOW_HIGH_SEC = 60;
+/** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
+ *  2026-09-19 由 60 收到 30 —— 与 MA 的缓冲上限(`sleep_to_limit_buffer(30秒)`)对齐:
+ *  窗口收窄后内存上限从 ~23MB 降到 ~11.5MB,代价是 seek 回跳更可能落出窗口、
+ *  要按 `-ss` 重起 ffmpeg(越界频率在 240 soak 里继续观察)。 */
+export const WINDOW_HIGH_SEC = 30;
 /** 背压低水位(秒):低于即恢复读取。 */
 export const WINDOW_LOW_SEC = 20;
 /** 已消费历史保留(秒):后续 DSP 预热的地基,现在只记不播。 */
