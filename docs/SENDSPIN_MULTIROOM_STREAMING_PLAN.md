@@ -75,6 +75,10 @@
 >   stream/end、groupPlay 建组挂成员、groupStop 清状态；fake 组补最小形状）；
 >   `groupsMembers.test.ts` 新 3 例（增量加/幂等/摘除＋added/removed 回报、
 >   非法 400/未知 404、PUT 精确顺序兼容）。
+> - [x] **T7 全量回归＋发版 v3.0.36**：
+>   组测试 mock 补 `splitMemberId`（`importOriginal` 部分 mock，随源码演进）；
+>   全量 146 文件 / 1080 用例绿＋`tsc`＋`vue-tsc`。
+>   待 soak：240 内存曲线（流式开关）＋双 ESP32 加减成员演练。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，

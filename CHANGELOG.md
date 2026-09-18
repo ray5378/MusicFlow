@@ -2,6 +2,21 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.36] - 2026-09-18
+
+### 新功能 —— Sendspin 真多房间组（与 DLNA 组统一语义）
+
+- **流式解码**（默认关，`SENDSPIN_STREAM_SOURCE=1` 开启）：`PcmWindow` 滑动窗口
+  （长命 ffmpeg＋60 秒窗口＋真背压），子进程内存预计从 ~300–570MB 降到 ~120MB；
+  `GroupPump` 双路径（整包/窗口），时长未知不钳制 position。
+- **用户组多房间**：成员 id 命名空间化（`sendspin:`/`dlna:`/裸 id＝DLNA）；
+  组内 sendspin 成员共享单 pump 同一时间线（`ug:<组id>` 组），双成员首帧同 ts；
+  播中加入走直播沿（无需历史），摘除收 stream/end；离线可建组。
+- **组管理 API**：`POST /v1/groups/:id/members` 增量原子口（幂等、无读写竞态，
+  供 Flutter 随时加减）；PUT 沿用精确顺序并共用加入对齐钩子；
+  mute/volume/status/playback 按 kind 扇出；群组对话框可选 sendspin 设备。
+- 全量验证：`tsc`＋`vue-tsc`＋`vitest` 146 文件 / 1080 用例全绿。
+
 ## [3.0.35] - 2026-09-18
 
 ### Bug 修复 —— Sendspin 链路两处回归 + CI 测试隔离

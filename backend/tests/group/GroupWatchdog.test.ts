@@ -56,14 +56,19 @@ vi.mock("../../src/services/dlna/control.js", () => ({
   },
 }));
 
-vi.mock("../../src/services/group/index.js", () => ({
-  getGroupManager: () => ({
-    get: (id: string) => h.groupStore.get(id),
-    groupOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId),
-    groupsOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId) || [],
-    list: () => Array.from(h.groupStore.values()),
-  }),
-}));
+vi.mock("../../src/services/group/index.js", async (importOriginal) => {
+  // 部分 mock:只替 getGroupManager,splitMemberId 等纯函数走真实实现(随源码演进)。
+  const actual = await importOriginal<any>();
+  return {
+    getGroupManager: () => ({
+      get: (id: string) => h.groupStore.get(id),
+      groupOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId),
+      groupsOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId) || [],
+      list: () => Array.from(h.groupStore.values()),
+    }),
+    splitMemberId: actual.splitMemberId,
+  };
+});
 
 vi.mock("../../src/services/player/index.js", () => ({
   getQueueController: () => h.qcRef.current,
