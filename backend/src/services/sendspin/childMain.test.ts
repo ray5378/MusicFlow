@@ -46,12 +46,30 @@ function makeFakeServer(): any {
     clientId: "PC-1", name: "客厅", roles: ["player@v1"], legacy: false, ready: true,
     remoteHost: "192.0.2.1", dialed: true, dialHost: "192.0.2.1", dialPort: 8928,
     volume: 40, muted: false, closed: false, close() { this.closed = true; },
+    group: null as any,
+    sent: [] as string[],
+    sendGroupUpdate() { (this as any).sent.push("group-update"); },
+    announceStream() { (this as any).sent.push("stream/start"); },
+    sendJson(type: string) { (this as any).sent.push(type); },
+    sendAudio() {},
   });
   // 预置在播现场:announceProbe 应捕获到它(deactivate 之前)
   const g = srv.group("PC-1");
   g.current = { songId: "s1", title: "T", durationMs: 100000 };
   g.positionMs = 4321;
   return srv;
+}
+
+/** 给假组补齐组播放入口所需的最小形状(add/remove/close/finishPlayback/pushFrame)。 */
+function asPlayableGroup(g: any): any {
+  g.add = (c: any) => { g.members.add(c); };
+  g.remove = (c: any) => { g.members.delete(c); };
+  g.close = () => 0;
+  g.finishPlayback = () => {};
+  g.commonSendAheadUs = () => 0;
+  g.pendingAnnounces = [];
+  g.pushFrame = async (_ts: bigint, pcm: Float32Array) => Math.floor(pcm.length / 2);
+  return g;
 }
 
 describe("SendspinChildController(IPC 桥)", () => {
@@ -137,5 +155,73 @@ describe("SendspinChildController(IPC 桥)", () => {
     // dispatch 先 send stopped,handleReq 再回 res —— 两者都必须在
     expect(sent.map((m) => m.t)).toEqual(["stopped", "res"]);
     expect(stopRuntimeCalls).toBe(1);
+  });
+
+  it("groupJoin 空闲组仅登记、无流;幂等;离线拒绝", async () => {
+    const srv = (ctl as any).deps.getServer();
+    const g = asPlayableGroup(srv.group("ug:t1"));
+    const r1: any = await rpc("groupJoin", { group: "ug:t1", clientId: "PC-1" });
+    expect(r1.ok).toBe(true);
+    expect(r1.result).toEqual({ joined: true, live: false });
+    expect(g.members.size).toBe(1);
+    // 空闲加入不发 stream/start
+    expect((srv.clients.get("PC-1") as any).sent).not.toContain("stream/start");
+    // 幂等:已在组内再次加入返回 joined:false
+    const r2: any = await rpc("groupJoin", { group: "ug:t1", clientId: "PC-1" });
+    expect(r2.result).toEqual({ joined: false, live: false });
+    // 离线 conn 拒绝
+    const r3: any = await rpc("groupJoin", { group: "ug:t1", clientId: "NOBODY" });
+    expect(r3.result).toEqual({ joined: false, live: false });
+  });
+
+  it("groupJoin 播中走直播沿(拿 stream/start)", async () => {
+    const srv = (ctl as any).deps.getServer();
+    const g = asPlayableGroup(srv.group("ug:t2"));
+    g.current = { songId: "s9", title: "T", durationMs: 200000 };
+    const r: any = await rpc("groupJoin", { group: "ug:t2", clientId: "PC-1" });
+    expect(r.result).toEqual({ joined: true, live: true });
+    const conn = srv.clients.get("PC-1") as any;
+    expect(conn.sent).toContain("stream/start");
+    expect(conn.group).toBe(g);
+  });
+
+  it("groupLeave 摘除并发 stream/end", async () => {
+    const srv = (ctl as any).deps.getServer();
+    const g = asPlayableGroup(srv.group("ug:t3"));
+    await rpc("groupJoin", { group: "ug:t3", clientId: "PC-1" });
+    const r: any = await rpc("groupLeave", { group: "ug:t3", clientId: "PC-1" });
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe(true);
+    expect(g.members.size).toBe(0);
+    expect((srv.clients.get("PC-1") as any).sent).toContain("stream/end");
+    // 摘不存在的返回 false
+    const r2: any = await rpc("groupLeave", { group: "ug:t3", clientId: "PC-1" });
+    expect(r2.result).toBe(false);
+  });
+
+  it("groupPlay 建共享组挂成员(离线跳过)", async () => {
+    const srv = (ctl as any).deps.getServer();
+    asPlayableGroup(srv.group("ug:t4"));
+    // pump 异步起播会走默认音源(DB 无行 → playFailed 上报,不抛);
+    // 此处只断言同步段:建组＋挂在线成员＋current 落定。
+    const r: any = await rpc("groupPlay", {
+      group: "ug:t4",
+      members: ["PC-1", "GHOST"],
+      item: { songId: "sx", title: "T", duration: 100 },
+    });
+    expect(r.ok).toBe(true);
+    const g = srv.group("ug:t4");
+    expect(g.members.size).toBe(1);
+    expect(g.current?.songId).toBe("sx");
+  });
+
+  it("groupStop 停 pump 清状态(成员保留)", async () => {
+    const srv = (ctl as any).deps.getServer();
+    const g = asPlayableGroup(srv.group("ug:t5"));
+    g.current = { songId: "s9", title: "T", durationMs: 200000 };
+    const r: any = await rpc("groupStop", { group: "ug:t5" });
+    expect(r.ok).toBe(true);
+    expect(g.current).toBeNull();
+    expect(g.positionMs).toBe(0);
   });
 });

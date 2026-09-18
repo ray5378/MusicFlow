@@ -70,6 +70,11 @@
 >   `selectableDevices` 并入在线 sendspin 客户端（`sendspin:<id>` 形式，
 >   与后端命名空间一致；裸 id 仍视为 DLNA）；对话框加载时同步拉取；
 >   行内区分显示＋改名覆盖；`vue-tsc` 过。
+> - [x] **T6 测试 childMain 组 RPC＋路由增量口**（已合入）：
+>   `childMain.test.ts` 加 5 例（join 空闲/直播/幂等/离线拒绝、leave 摘除＋
+>   stream/end、groupPlay 建组挂成员、groupStop 清状态；fake 组补最小形状）；
+>   `groupsMembers.test.ts` 新 3 例（增量加/幂等/摘除＋added/removed 回报、
+>   非法 400/未知 404、PUT 精确顺序兼容）。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，
