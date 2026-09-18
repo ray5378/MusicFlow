@@ -8,12 +8,14 @@
 //
 // 本文件**不启动 sendspin 服务** —— 全程走「设备离线」路径,不产生任何真实 6053 网络
 // 连接。锁定的契约:
-//   1. 密钥按 clientId 落库;GET 只回报 pskConfigured/port/connected,**永不回显 PSK**;
-//   2. psk 传空串 = 撤销这一台,不影响其它设备;
-//   3. 没有桥接时写设备音量/静音 → 200 + code:"no-bridge"(不 5xx,文案交前端映射);
-//   4. 参数校验:volume 非数字 / muted 非布尔 → 400;
-//   5. 设备离线时探针 → 200 + ok:false + errorCode:"no_host"(绝不去试别人的 IP);
-//   6. 旧的全局端点 POST /v1/sendspin/esphome/test 已删除(404),GET 也不再回全局开关。
+//   1. 密钥按 clientId 落库;GET 回报 pskConfigured/port/connected,**明文 psk 只回给
+//      有 RENDERER_MANAGE 的账号**(管理员恒有),普通账号拿到 `psk: null`;
+//   2. 设备列表端点(/v1/sendspin/clients)**任何角色都不回显**明文;
+//   3. psk 传空串 = 撤销这一台,不影响其它设备;
+//   4. 没有桥接时写设备音量/静音 → 200 + code:"no-bridge"(不 5xx,文案交前端映射);
+//   5. 参数校验:volume 非数字 / muted 非布尔 → 400;
+//   6. 设备离线时探针 → 200 + ok:false + errorCode:"no_host"(绝不去试别人的 IP);
+//   7. 旧的全局端点 POST /v1/sendspin/esphome/test 已删除(404),GET 也不再回全局开关。
 //
 // ⚠️ 本仓 vitest 开了 `sequence.shuffle`(见 vitest.config),**用例顺序是随机的** ——
 // 每个 it 必须自己铺前置状态,不许依赖上一个 it 留下的行。
@@ -142,14 +144,19 @@ describe("PUT/GET /v1/sendspin/devices/:clientId/esphome", () => {
     expect(getDeviceEsphome(A)).toEqual({ psk: "key-a", port: 6054 });
   });
 
-  it("GET 只回报 pskConfigured/port/connected,绝不回显 PSK", async () => {
+  it("GET:管理员可回显密钥明文(供弹窗核对/复制),其余字段照旧", async () => {
     await setCreds(A, "key-secret", 6054);
     const res = await get(A);
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body).toEqual({ pskConfigured: true, port: 6054, connected: false, volume: null, muted: false });
-    // 整个响应体里不许出现密钥明文
-    expect(JSON.stringify(body)).not.toContain("key-secret");
+    expect(body).toEqual({
+      pskConfigured: true,
+      psk: "key-secret",
+      port: 6054,
+      connected: false,
+      volume: null,
+      muted: false,
+    });
   });
 
   it("每台设备各存各的:改 A 不动 B", async () => {
@@ -180,7 +187,7 @@ describe("PUT/GET /v1/sendspin/devices/:clientId/esphome", () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
 
-  it("非管理员无 RENDERER_MANAGE → 403,且密钥原样不动;GET 状态不受此限", async () => {
+  it("非管理员无 RENDERER_MANAGE → 写 403 且密钥原样不动;读得到状态但**拿不到密钥明文**", async () => {
     await setCreds(A, "key-guarded", 6053);
     const denied = await put(A, plainId, false, { psk: "hack" });
     expect(denied.status).toBe(403);
@@ -189,6 +196,19 @@ describe("PUT/GET /v1/sendspin/devices/:clientId/esphome", () => {
 
     const state = await get(A, plainId, false);
     expect(state.status).toBe(200);
+    const body = (await state.json()) as any;
+    // 状态仍可见(弹窗要显示「已配置」),但明文必须为 null —— 密钥等价设备第二把钥匙
+    expect(body.pskConfigured).toBe(true);
+    expect(body.psk).toBeNull();
+    expect(JSON.stringify(body)).not.toContain("key-guarded");
+  });
+
+  it("设备列表端点(/clients)永不回显密钥明文(单取一台才回显)", async () => {
+    await setCreds(A, "key-listcheck", 6053);
+    const res = await app.request("/rest/api/v1/sendspin/clients", { headers: headers(adminId, true) });
+    expect(res.status).toBe(200);
+    // 列表里连管理员也不该看到明文 —— 避免「一次列表吐光所有设备密钥」
+    expect(await res.text()).not.toContain("key-listcheck");
   });
 });
 

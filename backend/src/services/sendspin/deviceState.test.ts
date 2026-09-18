@@ -1,7 +1,9 @@
 // sendspin 按设备音量持久化:表读写 / 字段合并 / 夹取 / 删除(解绑与忘记设备时调)。
 // 表在 tests/setup.ts 的 initDatabase() 里随全量 schema 一起建好。
-import { describe, it, expect, beforeEach } from "vitest";
-import { sqlite } from "../../db/index.js";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
+import { sqlite, db, encryptPassword } from "../../db/index.js";
+import { users, playerNameOverrides, playerPrefs } from "../../db/schema.js";
+import { eq } from "drizzle-orm";
 import {
   getDeviceVolumeState,
   saveDeviceVolumeState,
@@ -13,6 +15,7 @@ import {
   listEsphomeCreds,
   readLegacyPluginEsphome,
   inheritLegacyEsphomePsk,
+  purgeDeviceArtifacts,
 } from "./deviceState.js";
 
 describe("sendspin deviceState (按设备持久音量)", () => {
@@ -241,5 +244,95 @@ describe("sendspin deviceState (按设备持久音量)", () => {
     writePluginCfg({ esphome_psk: "legacy-key" });
     expect(inheritLegacyEsphomePsk("")).toBe(false);
     clearPluginCfg();
+  });
+});
+
+// 解绑的完整语义:清掉服务端为这台设备保存过的**一切**。
+// 与 deleteDeviceVolumeState(只删状态行)的区别是本组的核心 —— 改名/隐藏偏好同样要被清,
+// 否则设备重连后会带着旧名字「复活」(用户以为已经清干净了)。
+describe("purgeDeviceArtifacts(解绑 = 清掉这台设备的所有痕迹)", () => {
+  const U1 = "purge-owner-1";
+  const U2 = "purge-owner-2";
+  const DEV = "purge-dev-1";
+  const OTHER = "purge-dev-other";
+  const peer = (cid: string) => "sendspin:" + cid;
+
+  beforeAll(() => {
+    for (const id of [U1, U2]) {
+      sqlite.prepare("DELETE FROM users WHERE id = ?").run(id);
+      db.insert(users).values({
+        id,
+        username: id + "-" + Date.now(),
+        password: "",
+        salt: "salt",
+        subsonicSalt: "subsalt",
+        passEnc: encryptPassword("pw"),
+        isAdmin: 0,
+        isActive: 1,
+        email: "",
+      }).run();
+    }
+  });
+
+  afterAll(() => {
+    for (const p of [peer(DEV), peer(OTHER)]) {
+      db.delete(playerNameOverrides).where(eq(playerNameOverrides.peerId, p)).run();
+      db.delete(playerPrefs).where(eq(playerPrefs.peerId, p)).run();
+    }
+    sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id IN (?, ?)").run(DEV, OTHER);
+    sqlite.prepare("DELETE FROM users WHERE id IN (?, ?)").run(U1, U2);
+  });
+
+  /** 给 DEV 铺满「保存过的配置」:状态行 + 两个用户的改名 + 一个隐藏偏好。 */
+  function seed(): void {
+    saveDeviceVolumeState(DEV, { volume: 33, muted: true });
+    saveDeviceDisabled(DEV, true);
+    saveDeviceEsphome(DEV, "purge-key", 6054);
+    for (const uid of [U1, U2]) {
+      db.insert(playerNameOverrides)
+        .values({ ownerUserId: uid, peerId: peer(DEV), displayName: "我的设备-" + uid, updatedAt: new Date().toISOString() })
+        .run();
+    }
+    db.insert(playerPrefs)
+      .values({ ownerUserId: U1, peerId: peer(DEV), hidden: 1, updatedAt: new Date().toISOString() })
+      .run();
+  }
+
+  it("清掉状态行:音量/静音/禁用/6053 密钥/端口 全回缺省", () => {
+    seed();
+    purgeDeviceArtifacts(DEV);
+    expect(getDeviceVolumeState(DEV)).toBeNull();
+    expect(getDeviceDisabled(DEV)).toBe(false);
+    expect(getDeviceEsphome(DEV)).toEqual({ psk: "", port: 0 });
+  });
+
+  it("清掉**所有用户**的改名与隐藏偏好(不只发起人那一份)", () => {
+    seed();
+    purgeDeviceArtifacts(DEV);
+    expect(db.select().from(playerNameOverrides).where(eq(playerNameOverrides.peerId, peer(DEV))).all()).toEqual([]);
+    expect(db.select().from(playerPrefs).where(eq(playerPrefs.peerId, peer(DEV))).all()).toEqual([]);
+  });
+
+  it("只清这一台:别的设备的行一动不动", () => {
+    saveDeviceVolumeState(OTHER, { volume: 44, muted: false });
+    saveDeviceEsphome(OTHER, "other-key", 6053);
+    db.insert(playerNameOverrides)
+      .values({ ownerUserId: U1, peerId: peer(OTHER), displayName: "别人", updatedAt: new Date().toISOString() })
+      .run();
+
+    seed();
+    purgeDeviceArtifacts(DEV);
+
+    expect(getDeviceVolumeState(OTHER)).toEqual({ volume: 44, muted: false });
+    expect(getDeviceEsphome(OTHER)).toEqual({ psk: "other-key", port: 6053 });
+    expect(db.select().from(playerNameOverrides).where(eq(playerNameOverrides.peerId, peer(OTHER))).all()).toHaveLength(1);
+  });
+
+  it("幂等:设备本就没被配置过 / 空 clientId ⇒ 不报错", () => {
+    const fresh = "purge-never-configured";
+    expect(() => purgeDeviceArtifacts(fresh)).not.toThrow();
+    expect(() => purgeDeviceArtifacts(fresh)).not.toThrow();
+    expect(() => purgeDeviceArtifacts("")).not.toThrow();
+    expect(getDeviceVolumeState(fresh)).toBeNull();
   });
 });

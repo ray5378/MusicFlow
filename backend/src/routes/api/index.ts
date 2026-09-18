@@ -66,6 +66,7 @@ import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId, type LocalPlaybackReport } from "../../services/peer.js";
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
+import { rescanAirPlayDevices } from "../../services/airplay/discovery.js";
 import { startSendspinService, stopSendspinService, getSendspinFront, sendspinGroupJoin, sendspinGroupLeave } from "../../services/sendspin/index.js";
 import { sendspinGroupName } from "../../services/sendspin/playerCore.js";
 import { getSendspinDeviceVolume } from "../../services/sendspin/peerVolume.js";
@@ -2643,6 +2644,20 @@ apiRoutes.get("/v1/airplay/devices", (c) => {
   return c.json({ devices });
 });
 
+// 主动重扫 AirPlay 设备:立刻重发一次 mDNS(_raop._tcp) 查询,把刚上电、常驻 browser
+// 还没捞到的接收端捞进来。与 `POST /v1/dlna/scan` 对齐 —— 两个区块的「扫描」按钮因此
+// 语义一致(都真的去发现设备,而不是只重拉一次列表)。
+// 播放控制能力:renderer.use。
+apiRoutes.post("/v1/airplay/scan", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user");
+  await rescanAirPlayDevices();
+  let devices = listAirPlayDevices();
+  if (user && !user.isAdmin) {
+    devices = devices.filter((d) => !d.disabled && canUseRenderer(user.id, false, `airplay:${d.id}`));
+  }
+  return c.json({ devices });
+});
+
 // 重命名 AirPlay 设备(自定义显示名 alias)。Body: { alias } — 空串恢复原始名。
 // alias 会同步到播放控件 / HA 卡片显示(peer.name = alias || name)。
 // 管理播放器能力:renderer.manage。
@@ -2848,7 +2863,15 @@ apiRoutes.put("/v1/sendspin/devices/:clientId/disabled", permMiddleware(PERM.REN
 // (Sendspin group volume,见 POST /v1/peers/:peerId/volume)是**两个旋钮**,
 // 实际响度 = 两者相乘,所以 UI 上分开,不要合并。
 
-/** 某一台设备的 6053 状态(⚠️ 永不回显 PSK,只回报「有没有配」)。 */
+/** 某一台设备的 6053 状态 + 已保存的密钥(供弹窗回显、便于核对与复制)。
+ *
+ *  🔐 回显分级:明文 `psk` **只回给有 RENDERER_MANAGE 的账号**(管理员恒有),
+ *  其余账号只拿到 `pskConfigured` 布尔值、`psk` 为 null。
+ *  理由:这把密钥等价于设备的第二把钥匙(拿到即可直连 6053 控制设备),
+ *  而普通账号本来就没有管理权限、弹窗里密钥框也是禁用的 —— 没必要给它明文。
+ *
+ *  设备列表端点(/v1/sendspin/clients)**始终不回显** —— 一次列表就把所有设备的
+ *  密钥全吐出去毫无必要,弹窗按需单取一台即可。 */
 apiRoutes.get("/v1/sendspin/devices/:clientId/esphome", async (c) => {
   const clientId = c.req.param("clientId")!;
   if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
@@ -2856,8 +2879,11 @@ apiRoutes.get("/v1/sendspin/devices/:clientId/esphome", async (c) => {
   const { sendspinGetEsphomeVolume } = await import("../../services/sendspin/index.js");
   const creds = getDeviceEsphome(clientId);
   const v = await sendspinGetEsphomeVolume(clientId);
+  const user = c.get("user");
+  const canReadKey = hasPerm(user?.id ?? "", !!user?.isAdmin, PERM.RENDERER_MANAGE);
   return c.json({
     pskConfigured: !!creds.psk,
+    psk: canReadKey ? creds.psk : null,
     port: creds.port || 6053,
     connected: !!v,
     volume: v?.volume ?? null,

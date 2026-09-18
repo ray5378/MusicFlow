@@ -72,3 +72,19 @@ export function setPeerNameOverride(ownerUserId: string, peerId: string, name: s
   if (existing) db.update(playerNameOverrides).set({ displayName, updatedAt: now }).where(cond).run();
   else db.insert(playerNameOverrides).values({ ownerUserId, peerId, displayName, updatedAt: now }).run();
 }
+
+/** 抹掉某 peerId 在**所有用户**名下的显示名覆盖与隐藏偏好。
+ *
+ *  用于「解绑 / 删除设备」:设备既然被解绑,谁都不该再保留它的改名与隐藏 ——
+ *  否则它下次连上来会带着旧名字「复活」,而用户以为自己已经清干净了。
+ *  刻意不按 ownerUserId 过滤 —— 解绑是设备级动作,不该只清发起人的那一份。
+ *  peerId 为空或不存在时静默返回(幂等)。 */
+export function purgePeerPrefsAllOwners(peerId: string): void {
+  if (!peerId) return;
+  try {
+    db.delete(playerNameOverrides).where(eq(playerNameOverrides.peerId, peerId)).run();
+    db.delete(playerPrefs).where(eq(playerPrefs.peerId, peerId)).run();
+  } catch {
+    /* 清理失败不该阻断解绑主流程 */
+  }
+}

@@ -16,7 +16,15 @@ import WebSocket from "ws";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { initDatabase } from "../../src/db/index.js";
+import { initDatabase, db, sqlite, encryptPassword } from "../../src/db/index.js";
+import { users, playerNameOverrides } from "../../src/db/schema.js";
+import { eq } from "drizzle-orm";
+import {
+  getDeviceVolumeState,
+  getDeviceEsphome,
+  saveDeviceVolumeState,
+  saveDeviceEsphome,
+} from "../../src/services/sendspin/deviceState.js";
 import {
   setSendspinIdentityDir,
   startSendspinService,
@@ -139,5 +147,43 @@ describe("forgetDialTarget = 解绑(撤销添加)", () => {
     expect(JSON.parse(fs.readFileSync(file, "utf8"))).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ host: "198.51.100.10", port: 8928 })])
     );
+  });
+
+  // 解绑 = 这台设备从没被配置过。端到端锁这条:状态行(音量/静音/禁用/6053 密钥)
+  // 与**改名覆盖**都必须一起消失 —— 只删状态行而留下改名,设备会带着旧名字"复活"。
+  it("解绑顺带清掉该设备保存过的一切:状态行 + 6053 密钥 + 改名覆盖", async () => {
+    const uid = "forget-owner-1";
+    const peerId = `sendspin:${CID}`;
+    sqlite.prepare("DELETE FROM users WHERE id = ?").run(uid);
+    db.insert(users).values({
+      id: uid,
+      username: `forget-owner-${Date.now()}`,
+      password: "",
+      salt: "salt",
+      subsonicSalt: "subsalt",
+      passEnc: encryptPassword("pw"),
+      isAdmin: 0,
+      isActive: 1,
+      email: "",
+    }).run();
+    // 铺满「保存过的配置」。
+    saveDeviceVolumeState(CID, { volume: 42, muted: true });
+    saveDeviceEsphome(CID, "forget-key", 6054);
+    db.insert(playerNameOverrides)
+      .values({ ownerUserId: uid, peerId, displayName: "我的音箱", updatedAt: new Date().toISOString() })
+      .run();
+    // 前一个用例可能已把目标撤掉,这里重新铺一遍再解绑。
+    markAsDialed();
+    await rememberDialTarget(HOST, PORT_T);
+
+    expect(await forgetDialTarget(HOST, PORT_T)).toBe(true);
+
+    expect(getDeviceVolumeState(CID)).toBeNull();
+    expect(getDeviceEsphome(CID)).toEqual({ psk: "", port: 0 });
+    expect(db.select().from(playerNameOverrides).where(eq(playerNameOverrides.peerId, peerId)).all()).toEqual([]);
+    // 连接仍保持(解绑不断开) —— 与第 2 个用例同一条契约。
+    expect(ws!.readyState).toBe(WebSocket.OPEN);
+
+    sqlite.prepare("DELETE FROM users WHERE id = ?").run(uid);
   });
 });

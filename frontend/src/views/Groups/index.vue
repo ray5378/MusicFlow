@@ -16,7 +16,7 @@
     <div class="devices-section">
       <div class="section-head">
         <h3>{{ t('groups.clientPlayers') }}</h3>
-        <el-button size="small" :loading="loadingClients" @click="loadLocalPlayers"><MfIcon name="RefreshCw" />{{ t('groups.refresh') }}</el-button>
+        <el-button size="small" :loading="loadingClients" @click="loadLocalPlayers()"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.clientPlayersNote') }}</div>
       <div class="devices-box" v-loading="loadingClients">
@@ -120,7 +120,7 @@
     <div class="devices-section" style="margin-top: 28px">
       <div class="section-head">
         <h3>{{ t('groups.airplayDevices') }}</h3>
-        <el-button size="small" :loading="loadingAirPlay" @click="loadAirPlayDevices"><MfIcon name="RefreshCw" />{{ t('groups.refresh') }}</el-button>
+        <el-button v-if="canUse" size="small" :loading="scanningAirPlay" @click="scanAirPlayDevices"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.airplayNote') }}</div>
       <div class="devices-box" v-loading="loadingAirPlay">
@@ -194,8 +194,7 @@
     <div class="devices-section" style="margin-top: 28px">
       <div class="section-head">
         <h3>{{ t('groups.sendspinDevices') }}</h3>
-        <el-button size="small" :loading="loadingSendspin" @click="loadSendspinClients"><MfIcon name="RefreshCw" />{{ t('groups.refresh') }}</el-button>
-        <el-button v-if="canManage" size="small" type="primary" @click="showDialDialog = true"><MfIcon name="Plus" />{{ t('groups.sendspinAdd') }}</el-button>
+        <el-button size="small" :loading="loadingSendspin" @click="loadSendspinClients()"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.sendspinNote', { url: sendspinUrl }) }}</div>
       <div class="devices-box" v-loading="loadingSendspin">
@@ -217,6 +216,21 @@
                   <el-tag v-else-if="dev.legacy" size="small" type="warning" style="margin-left: 6px">{{ t('groups.sendspinLegacy') }}</el-tag>
                   <el-tag v-else size="small" type="info" style="margin-left: 6px">{{ t('groups.sendspinUnpaired') }}</el-tag>
                   <el-tag v-if="!dev.paired && !dev.legacy && dev.approved" size="small" style="margin-left: 6px">{{ t('groups.sendspinApproved') }}</el-tag>
+                  <!-- 设备 API(ESPHome 6053)连接状态:与「明文直连」**并排的独立指示**,
+                       不并进标签文字里(标签说的是「怎么连的」,这里说的是「现在通没通」)。
+                       绿点=已连接 / 灰点=未连接,取自服务端桥接快照的**实际握手结果**,
+                       而不是「有没有填密钥」—— 填了也可能连不上(密钥错/设备侧没开 API),
+                       那种情况必须显示「未连接」,否则状态条就是在骗人。 -->
+                  <span
+                    v-if="dev.legacy"
+                    class="device-link-status"
+                    :class="dev.esphome?.connected ? 'is-on' : 'is-off'"
+                    :title="dev.esphome?.connected
+                      ? t('groups.sendspinLinkOnTitle', { port: dev.esphome?.port || 6053 })
+                      : t('groups.sendspinLinkOffTitle')"
+                  >
+                    <span class="dot" />{{ dev.esphome?.connected ? t('groups.sendspinLinkOn') : t('groups.sendspinLinkOff') }}
+                  </span>
                 </template>
                 <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">{{ t('common.disabled') }}</el-tag>
                 <span v-if="!dev.online" class="device-offline-tag">{{ t('groups.offline') }}</span>
@@ -258,6 +272,20 @@
               >
                 <MfIcon :name="dev.esphome?.connected ? 'Volume2' : 'VolumeX'" />{{ t('groups.sendspinDeviceVolume') }}
               </el-button>
+              <!-- ESPHome 密钥:与「设备音量」并排的独立入口(只为 legacy/ESPHome 设备,
+                   它们才有 6053 设备 API)。一次性配置,不该混进日常调音量的弹窗。 -->
+              <el-button
+                v-if="canManage && dev.clientId"
+                size="small"
+                class="device-key-btn"
+                :class="{ 'is-ready': dev.esphome?.connected }"
+                :title="dev.esphome?.connected
+                  ? t('groups.sendspinLinkOnTitle', { port: dev.esphome?.port || 6053 })
+                  : t('groups.sendspinLinkOffTitle')"
+                @click="openEsphomeKey(dev)"
+              >
+                <MfIcon name="KeyRound" />{{ t('groups.sendspinEsphomeKey') }}
+              </el-button>
               <el-popconfirm
                 v-if="canManage"
                 :title="dev.disabled
@@ -290,6 +318,9 @@
                 size="small"
                 @click="approveSendspin(dev, !dev.approved)"
               >{{ dev.approved ? t('groups.sendspinUnapprove') : t('groups.sendspinApprove') }}</el-button>
+              <!-- 重命名(每用户显示名)放在解绑之前:改名的使用频率远高于解绑,
+                   且解绑是破坏性操作,按惯例留在最右。 -->
+              <el-button v-if="canUse" size="small" @click="openRenameSendspinDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
               <!-- 解绑(统一名称,= 删除):明文直连 legacy 没有配对记录可解,它解的是
                    「被服务端记住的拨号目标」—— 撤销添加 + 清改名,连接保持、行仍在线。
                    两种解绑共用同一个按钮与入口,不再另设「遗忘」。 -->
@@ -307,7 +338,6 @@
                   <el-button size="small" type="danger" plain><MfIcon name="Link2Off" />{{ t('groups.sendspinUnpair') }}</el-button>
                 </template>
               </el-popconfirm>
-              <el-button v-if="canUse" size="small" @click="openRenameSendspinDevice(dev)"><MfIcon name="Pencil" />{{ t('groups.rename') }}</el-button>
             </template>
             <!-- 离线:① 已禁用且离线(有 clientId)→ 恢复;② 记住的拨号目标 → 重连 / 遗忘。 -->
             <template v-else>
@@ -349,6 +379,11 @@
         <div v-if="!loadingSendspin && sendspinRows.length === 0" class="device-empty">
           {{ t('groups.noSendspinDevices') }}
         </div>
+      </div>
+      <!-- 「添加播放器」从标题行挪到列表下方(右对齐):标题行只留一个贴右边缘的「扫描」,
+           与 DLNA / AirPlay 两个区块的按钮位置完全对齐。 -->
+      <div class="section-foot">
+        <el-button v-if="canManage" size="small" type="primary" @click="showDialDialog = true"><MfIcon name="Plus" />{{ t('groups.sendspinAdd') }}</el-button>
       </div>
     </div>
 
@@ -539,7 +574,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showPairDialog" :title="t('groups.sendspinPairTitle')" width="760px" :append-to-body="true" @closed="loadSendspinClients">
+    <el-dialog v-model="showPairDialog" :title="t('groups.sendspinPairTitle')" width="760px" :append-to-body="true" @closed="loadSendspinClients()">
       <SendspinPairing :client-id="pairTarget" />
     </el-dialog>
 
@@ -550,7 +585,7 @@
       :title="t('groups.sendspinDeviceVolumeTitle', { name: deviceVolumeName })"
       width="480px"
       :append-to-body="true"
-      @closed="resetDeviceVolumeDialog"
+      @closed="onDeviceVolumeClosed"
     >
       <div class="form-tip">{{ t('groups.sendspinDeviceVolumeTip') }}</div>
 
@@ -576,7 +611,37 @@
       <div v-if="!deviceVolumeReady" class="device-vol-hint">{{ t('groups.sendspinDeviceVolumeOffHint') }}</div>
       <div v-else class="device-vol-hint ok">{{ t('groups.sendspinDeviceVolumeOnHint', { port: deviceVolumePort }) }}</div>
 
-      <el-divider />
+      <!-- 状态 + 「去配置密钥」:密钥不在这个弹窗里改(它是**一次性配置**,音量是
+           日常操作,混在一起会让人以为调一次音量就得动一次密钥)。 -->
+      <div class="device-vol-foot">
+        <span class="device-link-status" :class="deviceVolumeReady ? 'is-on' : 'is-off'">
+          <span class="dot" />{{ deviceVolumeReady ? t('groups.sendspinLinkOn') : t('groups.sendspinLinkOff') }}
+        </span>
+        <el-button v-if="canManage" size="small" text @click="openEsphomeKeyFromVolume">
+          <MfIcon name="KeyRound" />{{ t('groups.sendspinEsphomeKey') }}
+        </el-button>
+      </div>
+    </el-dialog>
+
+    <!-- ESPHome 密钥(设备 API 6053):独立入口。这里只干三件事 ——
+         看状态、填/测密钥、清除密钥。音量滑杆不在这里。 -->
+    <el-dialog
+      v-model="showEsphomeKey"
+      :title="t('groups.sendspinEsphomeDialogTitle', { name: esphomeDialogName })"
+      width="520px"
+      :append-to-body="true"
+      @closed="onEsphomeKeyClosed"
+    >
+      <div class="device-esphome-state">
+        <span class="device-link-status" :class="esphomeConnected ? 'is-on' : 'is-off'">
+          <span class="dot" />{{ esphomeConnected ? t('groups.sendspinLinkOn') : t('groups.sendspinLinkOff') }}
+        </span>
+        <span class="device-esphome-state-text">
+          {{ esphomeConnected
+            ? t('groups.sendspinEsphomeOnHint', { port: esphomePort })
+            : t('groups.sendspinEsphomeOffHint') }}
+        </span>
+      </div>
 
       <div class="device-esphome-title">{{ t('groups.sendspinEsphomeTitle') }}</div>
       <div class="device-esphome-desc">{{ t('groups.sendspinEsphomeDesc') }}</div>
@@ -616,7 +681,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
@@ -648,6 +713,8 @@ const groups = ref<any[]>([]);
 const dlnaDevices = ref<any[]>([]);
 const airplayDevices = ref<any[]>([]);
 const loadingAirPlay = ref(false);
+/** 「扫描」进行中(后端正在重发 mDNS 查询,约 2.5s) —— 与 loadingAirPlay(拉列表)分开。 */
+const scanningAirPlay = ref(false);
 const loading = ref(false);
 const saving = ref(false);
 
@@ -969,6 +1036,21 @@ async function loadAirPlayDevices(): Promise<void> {
   finally { loadingAirPlay.value = false; }
 }
 
+/** 「扫描」= 让后端**立刻重发一次 mDNS 查询**(与 DLNA 的扫描同义,不是只重拉列表):
+ *  刚上电、常驻 browser 还没捞到的接收端,点一下就能出现。 */
+async function scanAirPlayDevices(): Promise<void> {
+  scanningAirPlay.value = true;
+  try {
+    const res = await api.post("/rest/api/v1/airplay/scan");
+    airplayDevices.value = res.data?.devices || [];
+    ElMessage.success(t("groups.scanDone"));
+  } catch (e: any) {
+    // 后端可能回 i18n key(如插件被关时的 errors.airplay.disabled),原样弹给用户没意义 → 回退通用文案。
+    const raw = e?.response?.data?.error;
+    ElMessage.error(typeof raw === "string" && !raw.startsWith("errors.") ? raw : t("groups.scanFailed"));
+  } finally { scanningAirPlay.value = false; }
+}
+
 // ---- AirPlay 设备管理(对标 DLNA) ----
 function openRenameAirPlayDevice(dev: any) {
   renameDeviceTarget.value = { ...dev, isAirPlay: true };
@@ -1034,18 +1116,43 @@ function shortClientId(id: string) {
   return id && id.length > 20 ? `${id.slice(0, 10)}…${id.slice(-6)}` : (id || "");
 }
 
-async function loadSendspinClients(): Promise<void> {
-  loadingSendspin.value = true;
+/** 拉 Sendspin 设备列表。
+ *
+ *  @param silent 后台轮询用:① 不打 loading 遮罩(否则每 20s 整块列表闪一次);
+ *                ② **失败不清空**已有列表 —— 一次网络抖动不该把整列设备抹掉,
+ *                宁可显示上一次的真实快照(下一轮 poll 会自愈)。 */
+async function loadSendspinClients(silent = false): Promise<void> {
+  if (!silent) loadingSendspin.value = true;
   try {
     const res = await api.get("/rest/api/v1/sendspin/clients");
     sendspinClients.value = res.data?.clients || [];
     if (Number.isInteger(res.data?.port)) sendspinPort.value = res.data.port;
-  } catch { sendspinClients.value = []; }
+  } catch { if (!silent) sendspinClients.value = []; }
   try {
     const res = await api.get("/rest/api/v1/sendspin/dial-targets");
     dialTargets.value = res.data?.targets || [];
-  } catch { dialTargets.value = []; }
-  finally { loadingSendspin.value = false; }
+  } catch { if (!silent) dialTargets.value = []; }
+  finally { if (!silent) loadingSendspin.value = false; }
+}
+
+/** 设备 API(6053)的连接状态是**服务端后台**在维护的:设备重启、ESPHome 侧没开 API、
+ *  密钥被改,都会让桥接自己断开/重连,而这些都不经过本页面。只靠打开页面时那一次
+ *  请求,状态条很快就会和实际情况脱节(显示「已连接」其实早断了)。
+ *  所以页面可见时静默轮询 —— 状态条的全部价值就是「与实际对齐」。 */
+const SENDSPIN_POLL_MS = 20_000;
+let sendspinPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startSendspinPolling(): void {
+  if (sendspinPollTimer) return;
+  sendspinPollTimer = setInterval(() => {
+    // 后台标签页不发请求(省流量,也避免用户切回来时看到一串过期响应)。
+    if (document.visibilityState !== "visible") return;
+    void loadSendspinClients(true);
+  }, SENDSPIN_POLL_MS);
+}
+
+function stopSendspinPolling(): void {
+  if (sendspinPollTimer) { clearInterval(sendspinPollTimer); sendspinPollTimer = null; }
 }
 
 async function redialTarget(tg: any): Promise<void> {
@@ -1128,12 +1235,21 @@ const deviceVolumeClientId = ref("");
 const deviceVolumeName = ref("");
 const deviceVolume = ref(0);
 const deviceVolumeMuted = ref(false);
-/** 桥连上且拿到过设备侧真值。false ⇒ 滑杆置灰,引导先配密钥/等设备上线。 */
+/** 桥连上且拿到过设备侧真值。false ⇒ 滑杆置灰,引导先去「ESPHome 密钥」配置。 */
 const deviceVolumeReady = ref(false);
 const deviceVolumePort = ref(6053);
+
+// ---- ESPHome 密钥(设备 API 6053):**独立弹窗**,与音量弹窗各管一段 ----
+// 拆开的理由:密钥是「一次性配置」,音量是「日常操作」。混在一个弹窗里既会让
+// 用户以为调音量要动密钥,也会让密钥输入框在每次开音量时被无谓地拉一次。
+const showEsphomeKey = ref(false);
+const esphomeDialogClientId = ref("");
+const esphomeDialogName = ref("");
 const esphomePsk = ref("");
 const esphomePort = ref(6053);
 const esphomePskConfigured = ref(false);
+/** 桥接的**实际**握手结果(不是「有没有填密钥」)。 */
+const esphomeConnected = ref(false);
 const esphomeTesting = ref(false);
 const esphomeSaving = ref(false);
 const esphomeResult = ref<{ success: boolean; message: string } | null>(null);
@@ -1162,6 +1278,37 @@ function esphomeProbeMessage(d: any): string {
   }
 }
 
+/** 取某台设备的 6053 状态(失败 → null,调用方保持现状,不打断已渲染的 UI)。 */
+async function fetchDeviceEsphomeState(clientId: string): Promise<any | null> {
+  if (!clientId) return null;
+  try {
+    const res = await api.get(`/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome`);
+    return res.data || null;
+  } catch { return null; }
+}
+
+/** 应用到「设备音量」弹窗:滑杆要的是设备侧**真值**。 */
+function applyVolumeState(d: any): void {
+  if (!d) return;
+  deviceVolumePort.value = Number(d.port) || 6053;
+  deviceVolumeReady.value = !!d.connected;
+  if (typeof d.volume === "number") deviceVolume.value = d.volume;
+  deviceVolumeMuted.value = !!d.muted;
+}
+
+/** 应用到「ESPHome 密钥」弹窗。
+ *
+ *  @param withPsk 只在「刚打开、用户还没输入」时回填密钥 —— 保存/测试之后的刷新
+ *  也走这个函数,那时回填会把用户刚敲进去的**新**值覆盖回库里的旧值。
+ *  后端对无 RENDERER_MANAGE 的账号回 `psk: null`(只给 pskConfigured),留空即可。 */
+function applyEsphomeState(d: any, withPsk: boolean): void {
+  if (!d) return;
+  esphomePskConfigured.value = !!d.pskConfigured;
+  esphomeConnected.value = !!d.connected;
+  esphomePort.value = Number(d.port) || 6053;
+  if (withPsk && typeof d.psk === "string") esphomePsk.value = d.psk;
+}
+
 function openDeviceVolume(dev: any) {
   const e = dev.esphome || {};
   deviceVolumeClientId.value = dev.clientId || "";
@@ -1170,21 +1317,62 @@ function openDeviceVolume(dev: any) {
   deviceVolume.value = typeof e.volume === "number" ? e.volume : 0;
   deviceVolumeMuted.value = !!e.muted;
   deviceVolumePort.value = Number(e.port) || 6053;
-  esphomePort.value = Number(e.port) || 6053;
-  esphomePskConfigured.value = !!e.pskConfigured;
-  esphomePsk.value = ""; // 密钥永不回显:留空 = 不改动,要清空走「清除密钥」
-  esphomeResult.value = null;
   showDeviceVolume.value = true;
+  // 行数据是上一轮列表拉的(最长 20s 前),开窗时按服务端真值再校一次。
+  void fetchDeviceEsphomeState(deviceVolumeClientId.value).then(applyVolumeState);
 }
 
 function resetDeviceVolumeDialog() {
   if (deviceVolumeTimer) { clearTimeout(deviceVolumeTimer); deviceVolumeTimer = null; }
   deviceVolumeClientId.value = "";
   deviceVolumeName.value = "";
+}
+
+/** 关窗对齐一次:窗口开着时桥可能自己掉了(设备重启),行内状态条不该停在旧值。 */
+function onDeviceVolumeClosed() {
+  const had = deviceVolumeClientId.value;
+  resetDeviceVolumeDialog();
+  if (had) void loadSendspinClients(true);
+}
+
+/** 打开「ESPHome 密钥」弹窗(设备行按钮 / 音量弹窗内跳转共用同一条路径)。 */
+function openEsphomeKey(dev: any) {
+  const e = dev.esphome || {};
+  esphomeDialogClientId.value = dev.clientId || "";
+  esphomeDialogName.value = deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`);
+  esphomePskConfigured.value = !!e.pskConfigured;
+  esphomeConnected.value = !!e.connected;
+  esphomePort.value = Number(e.port) || 6053;
+  // 列表端点不含密钥(避免一次列表把所有设备的密钥都吐出去),打开后再单取这一台。
+  esphomePsk.value = "";
+  esphomeResult.value = null;
+  showEsphomeKey.value = true;
+  void fetchDeviceEsphomeState(esphomeDialogClientId.value).then((d) => applyEsphomeState(d, true));
+}
+
+/** 「设备音量」里点「ESPHome 密钥」:同一台设备换个弹窗继续(先取 clientId,
+ *  因为关窗的 @closed 回调会把 deviceVolumeClientId 清掉)。 */
+function openEsphomeKeyFromVolume() {
+  const clientId = deviceVolumeClientId.value;
+  const name = deviceVolumeName.value;
+  showDeviceVolume.value = false;
+  if (clientId) openEsphomeKey({ clientId, name });
+}
+
+function resetEsphomeKeyDialog() {
+  esphomeDialogClientId.value = "";
+  esphomeDialogName.value = "";
   esphomePsk.value = "";
   esphomeResult.value = null;
   esphomeTesting.value = false;
   esphomeSaving.value = false;
+}
+
+/** 关窗:立刻把行内状态条对齐(密钥刚被改过,不必等下一轮 20s 轮询)。 */
+function onEsphomeKeyClosed() {
+  const had = esphomeDialogClientId.value;
+  resetEsphomeKeyDialog();
+  if (had) void loadSendspinClients(true);
 }
 
 function onDeviceVolumeInput(v: number | number[]) {
@@ -1224,25 +1412,16 @@ async function toggleDeviceMute(): Promise<void> {
   }
 }
 
-/** 重新拉这台设备的桥接状态(保存密钥 / 设备重连后同步 UI)。 */
-async function refreshDeviceVolumeState(): Promise<void> {
-  const clientId = deviceVolumeClientId.value;
-  if (!clientId) return;
-  try {
-    const res = await api.get(`/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome`);
-    const d = res.data || {};
-    esphomePskConfigured.value = !!d.pskConfigured;
-    deviceVolumePort.value = Number(d.port) || 6053;
-    deviceVolumeReady.value = !!d.connected;
-    if (typeof d.volume === "number") deviceVolume.value = d.volume;
-    deviceVolumeMuted.value = !!d.muted;
-  } catch { /* 取不到就保持现状,不影响已渲染的滑杆 */ }
+/** 重新拉这台设备的桥接状态(保存密钥 / 清除密钥 / 测试连接后同步弹窗内的状态行)。
+ *  ⚠️ 不回填密钥 —— 会把用户刚敲进去的新值覆盖回库里的旧值。 */
+async function refreshEsphomeKeyState(): Promise<void> {
+  applyEsphomeState(await fetchDeviceEsphomeState(esphomeDialogClientId.value), false);
 }
 
 /** 保存密钥/端口。**留空不提交** —— 空串会让后端撤销这台设备的桥接,
  *  那是「清除密钥」按钮的语义,不该被一次误点的保存顺手做掉。 */
 async function saveDeviceEsphome(): Promise<void> {
-  const clientId = deviceVolumeClientId.value;
+  const clientId = esphomeDialogClientId.value;
   if (!clientId || esphomeSaving.value) return;
   const psk = esphomePsk.value.trim();
   if (!psk) {
@@ -1266,8 +1445,8 @@ async function saveDeviceEsphome(): Promise<void> {
           // 设备离线时密钥已落库,等它下次拨入自动带上 —— 说明白,免得用户以为没生效。
           : t("groups.sendspinEsphomeSavedOffline"),
       };
-      await refreshDeviceVolumeState();
-      await loadSendspinClients();
+      await refreshEsphomeKeyState();
+      await loadSendspinClients(true);
     }
   } catch (e: any) {
     esphomeResult.value = { success: false, message: e.response?.data?.error || t("common.operationFailed") };
@@ -1278,7 +1457,7 @@ async function saveDeviceEsphome(): Promise<void> {
 
 /** 清除该设备的密钥(显式传空串)。断开这一台的桥,不影响其它设备。 */
 async function clearDeviceEsphome(): Promise<void> {
-  const clientId = deviceVolumeClientId.value;
+  const clientId = esphomeDialogClientId.value;
   if (!clientId || esphomeSaving.value) return;
   esphomeSaving.value = true;
   esphomeResult.value = null;
@@ -1290,7 +1469,9 @@ async function clearDeviceEsphome(): Promise<void> {
     if (res.data?.success) {
       esphomePskConfigured.value = false;
       esphomeResult.value = { success: true, message: t("groups.sendspinEsphomeCleared") };
-      await refreshDeviceVolumeState();
+      await refreshEsphomeKeyState();
+      // 桥已断 → 状态条要立刻翻成「未连接」,别只刷新弹窗内那几行。
+      await loadSendspinClients(true);
     }
   } catch (e: any) {
     esphomeResult.value = { success: false, message: e.response?.data?.error || t("common.operationFailed") };
@@ -1302,7 +1483,7 @@ async function clearDeviceEsphome(): Promise<void> {
 /** 测试连接:用**这台设备**当前填的密钥走一次性握手探针。
  *  host 不用传 —— 后端按 clientId 从连接派生,填 A 的密钥绝不会去试 B 的门。 */
 async function testDeviceEsphome(): Promise<void> {
-  const clientId = deviceVolumeClientId.value;
+  const clientId = esphomeDialogClientId.value;
   if (!clientId || esphomeTesting.value) return;
   const psk = esphomePsk.value.trim();
   if (!psk && !esphomePskConfigured.value) {
@@ -1337,8 +1518,8 @@ async function testDeviceEsphome(): Promise<void> {
           }),
         }
       : { success: true, message: t("groups.sendspinTestOk", { host: d.host, name, version }) };
-    // 探针成功说明凭据可用:顺手把状态刷新一遍,滑杆就能立即可用。
-    await refreshDeviceVolumeState();
+    // 探针成功说明凭据可用:顺手把状态刷新一遍,状态行立即可信。
+    await refreshEsphomeKeyState();
   } catch (e: any) {
     esphomeResult.value = { success: false, message: e.response?.data?.error || t("groups.sendspinTestFailed", { error: "unknown" }) };
   } finally {
@@ -1374,12 +1555,14 @@ async function unbindSendspin(dev: any): Promise<void> {
     if (hasPairing) {
       await api.post("/rest/api/v1/sendspin/unpair", { clientId: dev.clientId });
     } else {
-      // 撤销添加:持久音量由后端一并清;改名在这边清(两者都是「添加」留下的痕迹)。
       await api.delete("/rest/api/v1/sendspin/dial-targets", {
         data: { host: dev.host, port: dev.port },
       });
-      if (dev.clientId) await playerStore.setPeerName(`sendspin:${dev.clientId}`, "");
     }
+    // 后端已在解绑时把该设备的**所有**痕迹清掉(状态行 / 6053 密钥 / 改名 / 隐藏偏好)。
+    // 这里额外清一次**本地** store 的改名缓存,让名字当场回落 —— 否则要等下一次
+    // loadNamePrefs 才会变,用户会以为没清干净。
+    if (dev.clientId) await playerStore.setPeerName(`sendspin:${dev.clientId}`, "");
     ElMessage.success(t("settings.saved"));
     await loadSendspinClients();
   } catch (e: any) {
@@ -1539,7 +1722,11 @@ onMounted(() => {
   // 本机实例列表:与 DLNA 设备一样走页面本地加载(includeHidden=1,隐藏行不剪),
   // 行因此恒在、开关可反复切换。
   loadLocalPlayers();
+  // 6053 连接状态条要与实际情况对齐 → 页面可见时静默轮询(离开页面即停,不留定时器)。
+  startSendspinPolling();
 });
+
+onBeforeUnmount(() => { stopSendspinPolling(); });
 </script>
 
 <style lang="scss" scoped>
@@ -1552,6 +1739,8 @@ onMounted(() => {
 }
 .group-section-head { margin-top: 28px; }
 .section-note { color: var(--fnos-text-tertiary); font-size: 12px; margin: -4px 0 12px; line-height: 1.6; }
+/* 区块底部操作行:贴在设备列表盒子下方、右对齐(与标题行按钮同一竖线)。 */
+.section-foot { display: flex; justify-content: flex-end; margin-top: 10px; }
 .devices-box { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 6px; background: rgba(0,0,0,0.15); min-height: 60px; }
 .device-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; transition: background 0.15s, border-color 0.15s; border: 1px solid transparent;
   &:hover { background: rgba(255,255,255,0.05); }
@@ -1663,6 +1852,30 @@ onMounted(() => {
 // ---- 设备自身音量弹窗(ESPHome 6053)----
 // 配色沿用成员音量条那套:几何在本地覆写,滑块颜色交给 global.scss 的 el-slider 全局覆写。
 .device-vol-btn.is-ready { color: var(--fnos-red); }
+/* 设备 API(6053)连接状态:与「明文直连」标签并排的独立指示。做成独立的 pill + 圆点
+   而不是复用 el-tag —— 它跟「配对/明文直连」是**两个维度**(连接方式 vs 当前通断),
+   视觉上必须能一眼分开看。 */
+.device-link-status {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 6px; padding: 0 7px; border-radius: 8px;
+  font-size: 11px; line-height: 18px; white-space: nowrap;
+  border: 1px solid transparent;
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+  &.is-on { color: var(--fnos-green); background: rgba(107, 171, 69, 0.14); border-color: rgba(107, 171, 69, 0.35); }
+  &.is-off { color: var(--fnos-text-muted); background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.1); }
+}
+/* 「设备音量」弹窗底部:状态条 + 跳去「ESPHome 密钥」的入口。
+   密钥不在音量弹窗里改 —— 用一条跳转把两件事串起来,又保持各自独立。 */
+.device-vol-foot { margin-top: 14px; display: flex; align-items: center; gap: 8px;
+  .device-link-status { margin-left: 0; }
+}
+/* 「ESPHome 密钥」弹窗顶部状态行:先看「现在通没通」,再看下面的输入框。 */
+.device-esphome-state { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;
+  .device-link-status { margin-left: 0; }
+  .device-esphome-state-text { font-size: 12px; color: var(--fnos-text-tertiary); }
+}
+/* 与「设备音量」并排的密钥入口:连上时同样点亮,一眼看出这台设备两种能力都就绪。 */
+.device-key-btn.is-ready { color: var(--fnos-red); }
 .device-vol-row {
   display: flex; align-items: center; gap: 10px; margin-top: 14px;
   .device-vol-icon {

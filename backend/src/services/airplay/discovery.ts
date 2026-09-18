@@ -142,17 +142,13 @@ export function startAirPlayDiscovery(): void {
   // browser that only refreshes lastSeen (its query also reaches the
   // persistent browser, which handles alive/up/down events as usual).
   tick = setInterval(() => {
-    try {
-      const refresh = bonjour?.find({ type: "raop" }, (svc: Service) => {
-        const dev = devices.get(deviceIdOf(svc));
-        if (dev) {
-          dev.lastSeen = Date.now();
-          dev.available = true;
-        }
-      }) as Browser | undefined;
-      const stop = setTimeout(() => { try { refresh?.stop(); } catch { /* ignore */ } }, 3000);
-      stop.unref?.();
-    } catch { /* ignore */ }
+    spinQuery(3000, (svc: Service) => {
+      const dev = devices.get(deviceIdOf(svc));
+      if (dev) {
+        dev.lastSeen = Date.now();
+        dev.available = true;
+      }
+    });
   }, 30_000);
   tick.unref?.();
   log.info("mDNS discovery started (_raop._tcp)");
@@ -167,6 +163,43 @@ export function stopAirPlayDiscovery(): void {
   browser = null;
   bonjour = null;
   log.info("mDNS discovery stopped (_raop._tcp)");
+}
+
+/** 开一个**短命的新** browser 句柄发一次 PTR/SRV 查询,`lifeMs` 后收掉(见上面 tick 的注释:
+ *  常驻句柄上的 `update()` 重查会被部分接收端忽略,所以每次「刷新」都得换新句柄)。
+ *  `onHit` 决定命中后的处理:
+ *    - 30s 续期只续 `lastSeen`(alive/up/down 仍由常驻 browser 负责);
+ *    - 手动重扫走 upsert,刚上电、常驻 browser 还没捞到的接收端因此立刻出现。 */
+function spinQuery(lifeMs: number, onHit: (svc: Service) => void): void {
+  try {
+    const b = bonjour?.find({ type: "raop" }, onHit) as Browser | undefined;
+    const stop = setTimeout(() => { try { b?.stop(); } catch { /* ignore */ } }, lifeMs);
+    stop.unref?.();
+  } catch { /* ignore */ }
+}
+
+/** 手动重扫:立刻再发一次 mDNS(_raop._tcp) 查询,收集 `windowMs` 后收掉句柄再 resolve。
+ *
+ *  与 30s 续期走同一条通路,区别只在命中后走 upsert(新增设备 + 落库 + 发 alive 事件),
+ *  所以点完「扫描」马上能看到刚上电的接收端 —— 语义与 DLNA 的 `POST /v1/dlna/scan` 一致。
+ *  discovery 未运行(插件关闭 / mDNS 不可用)时直接 resolve,由调用方回当前列表。 */
+export function rescanAirPlayDevices(windowMs = 2500): Promise<void> {
+  const bj = bonjour;
+  if (!bj) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    let refresh: Browser;
+    try {
+      refresh = bj.find({ type: "raop" }, (svc: Service) => upsert(svc, true)) as Browser;
+    } catch (e: any) {
+      log.warn("mDNS 重扫失败", { err: e?.message });
+      finish();
+      return;
+    }
+    // 这里刻意**不** unref:调用方就是在等这个窗口把本轮应答收完。
+    setTimeout(() => { try { refresh.stop(); } catch { /* ignore */ } finish(); }, windowMs);
+  });
 }
 
 /** Current device list (with staleness applied at read time). */

@@ -296,15 +296,19 @@ export class SendspinChildController {
         if (!srv?.pairingStore) throw new Error("sendspin server 未运行");
         const ok = await srv.pairingStore.removeRecord(String(p.clientId));
         // 解绑即断开该客户端现存连接:下次连回落 sentinel,走重新配对/批准。
+        const { esphomeBridge } = await import("./esphomeBridge.js");
         for (const conn of [...srv.clients.values()]) {
           if (conn.clientId === String(p.clientId)) {
+            // 6053 桥按 host 登记:连接还在时先解挂,免得库里密钥已删、桥仍用旧密钥连着。
+            try { esphomeBridge.syncDevice(conn.remoteHost, "", 0); } catch { /* ignore */ }
             try { conn.close(); } catch { /* ignore */ }
           }
         }
-        // 解绑即"删除播放器":持久音量行一并清(与 in-proc sendspinUnpair 同语义)。
+        // 解绑 = 这台设备从没被配置过(状态行/6053 密钥/改名/隐藏全清;
+        // 连接保持在线,故不动播放队列与群组成员)。与 in-proc sendspinUnpair 同语义。
         try {
-          const { deleteDeviceVolumeState } = await import("./deviceState.js");
-          deleteDeviceVolumeState(String(p.clientId));
+          const { purgeDeviceArtifacts } = await import("./deviceState.js");
+          purgeDeviceArtifacts(String(p.clientId));
         } catch { /* ignore */ }
         this.requestSnapshot(true);
         return ok;

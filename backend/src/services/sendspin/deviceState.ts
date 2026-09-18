@@ -6,11 +6,14 @@
 //     announce 播报的临时双写不落库(见 persist 参数);
 //   - 只在"删除播放器"时清行:解绑 unpair / 忘记拨号目标;断开/重启/停服务都不碰;
 //   - disabled 与 DLNA `dlna_devices.disabled` 同语义:用户手动禁用,持久化,
-//     禁用设备不注册为 peer、不出现在任何流转播放入口;解绑**不清** disabled
-//     (禁用是设备级偏好,与配对状态无关);
+//     禁用设备不注册为 peer、不出现在任何流转播放入口;
+//   - ⚠️ **解绑 = 清掉这一整行**(含 disabled 与 6053 密钥/端口),见
+//     purgeDeviceArtifacts —— 解绑的语义是「这台设备从没被配置过」,不是「只是不配对」。
+//     若只解配对却留着禁用态/密钥,设备会带着旧设置「复活」,与用户预期相反;
 //   - 主进程与子进程直写(WAL 多进程安全,与 readSendspinPluginConfig 同模式);
 //   - 读失败一律回退(无行/null),绝不阻断播控热路径。
 import { sqlite } from "../../db/index.js";
+import { purgePeerPrefsAllOwners } from "../playerPrefs.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -85,6 +88,33 @@ export function deleteDeviceVolumeState(clientId: string): void {
     sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id = ?").run(clientId);
   } catch (e: any) {
     log.warn(`[device-state] 删 ${clientId} 失败: ${e?.message || e}`);
+  }
+}
+
+/** 解绑一台 Sendspin 设备:清掉服务端为它保存过的**一切**。
+ *
+ *  与 deleteDeviceVolumeState(只删状态行)的区别 —— 这是「解绑」的完整语义:
+ *  播放器行仍在(设备**保持在线**、连接不断),但「被配置过」的痕迹全部抹掉,
+ *  等价于从没在这台设备上做过任何设置。
+ *
+ *  清理项:
+ *    1. `sendspin_device_state` 行 —— 音量 / 静音 / 禁用 / 6053 密钥 / 6053 端口;
+ *    2. 所有用户的改名覆盖(`player_name_overrides`,peer = `sendspin:<clientId>`);
+ *    3. 所有用户的隐藏偏好(`player_prefs`,peer 同上)。
+ *
+ *  **刻意不清**(边界,别顺手加):
+ *    - 播放队列(`device_queues`):那是播放**状态**不是配置,清掉会打断正在播的歌;
+ *    - 群组成员关系:解绑后设备仍在线,从群组摘掉会破坏一个原本可用的配置 ——
+ *      那是「删除设备」(如 DLNA 的 `DELETE /v1/dlna/devices/:id`)才做的事。
+ *
+ *  6053 桥接的解挂由调用方按 host 处理(本模块只认 clientId,不知道 host)。 */
+export function purgeDeviceArtifacts(clientId: string): void {
+  if (!clientId) return;
+  deleteDeviceVolumeState(clientId);
+  try {
+    purgePeerPrefsAllOwners(`sendspin:${clientId}`);
+  } catch (e: any) {
+    log.warn(`[device-state] 清 ${clientId} 改名/隐藏偏好失败: ${e?.message || e}`);
   }
 }
 

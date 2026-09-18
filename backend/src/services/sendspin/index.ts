@@ -536,13 +536,17 @@ export async function sendspinUnpair(clientId: string): Promise<boolean> {
   const ok = await srv.pairingStore.removeRecord(clientId);
   for (const conn of [...srv.clients.values()]) {
     if (conn.clientId === clientId) {
+      // 6053 桥是按 **host** 登记的:连接还在时先把它解挂,否则库里密钥已删、
+      // 桥却仍攥着旧密钥连着设备(音量按钮显示"已连接",与"已清掉"自相矛盾)。
+      try { esphomeBridge.syncDevice(conn.remoteHost, "", 0); } catch { /* ignore */ }
       try { conn.close(); } catch { /* ignore */ }
     }
   }
-  // 解绑即"删除播放器":配对行已删,持久音量行一并清(重连按缺省来)。
+  // 解绑 = 这台设备从没被配置过:状态行(音量/静音/禁用/6053 密钥)+ 改名 + 隐藏
+  // 一并清掉。连接保持在线,所以不动播放队列与群组成员(见 purgeDeviceArtifacts)。
   try {
-    const { deleteDeviceVolumeState } = await import("./deviceState.js");
-    deleteDeviceVolumeState(clientId);
+    const { purgeDeviceArtifacts } = await import("./deviceState.js");
+    purgeDeviceArtifacts(clientId);
   } catch { /* ignore */ }
   return ok;
 }
@@ -753,9 +757,11 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
     for (const conn of [...srv.clients.values()]) {
       if (conn.dialed && conn.dialHost === host && conn.dialPort === port) {
         if (conn.clientId) {
+          // 6053 桥按 host 登记,先解挂再清库(与 sendspinUnpair 同款,理由见那里)。
+          try { esphomeBridge.syncDevice(conn.remoteHost, "", 0); } catch { /* ignore */ }
           try {
-            const { deleteDeviceVolumeState } = await import("./deviceState.js");
-            deleteDeviceVolumeState(conn.clientId);
+            const { purgeDeviceArtifacts } = await import("./deviceState.js");
+            purgeDeviceArtifacts(conn.clientId);
           } catch { /* ignore */ }
         }
         // 撤回「已添加」标记,连接保持 —— 行还在,只是不再是记住的拨号目标。
