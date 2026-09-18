@@ -37,10 +37,9 @@ jobs:
   test:
     name: 全量测试门禁 (vitest, 阻塞发版)
     runs-on: ubuntu-latest
-    # vitest 套件存在偶发"挂起不结束"(better-sqlite3 在本机/CI 的 forks 池下退出异常)。
-    # 实测挂死约在跑 3 分钟后发作(forks 队列不再派发新文件),故压到 7 分钟让失败尽快返回
-    # 并上传日志,避免默认 360 分钟(及过长的 15 分钟)静默挂死挡住发版。
-    timeout-minutes: 7
+    # vitest 已切 singleFork 单进程串行(规避 forks 多 worker 派发死锁),故不存在挂死,
+    # 只需为串行跑全集留足裕量(含 QuickJS 沙箱数十秒级用例),给 20 分钟。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

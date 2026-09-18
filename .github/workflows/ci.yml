@@ -67,9 +67,9 @@ jobs:
   test:
     name: 类型检查 + 全量测试
     runs-on: ubuntu-latest
-    # 与 build.yml 保持一致:vitest 套件存在偶发"挂起不结束"(forks 池队列挂死,
-    # 实测约跑 3 分钟后不再派发新文件),故收到 7 分钟让失败尽快返回并上传日志。
-    timeout-minutes: 7
+    # 与 build.yml 保持一致:vitest 已切 singleFork 单进程串行(规避 forks 多 worker
+    # 派发死锁),故无挂死风险,给 20 分钟为串行跑全集留足裕量。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
