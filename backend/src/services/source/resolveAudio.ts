@@ -18,6 +18,7 @@ import {
 } from "./online/streamFallback.js";
 import { resolvePreferredSong } from "./preferredSource.js";
 import { probeLocalSourceOk, parseSongPath } from "../../utils/localSourceProbe.js";
+import { existsSync } from "node:fs";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RESOLVE-AUDIO");
@@ -48,8 +49,7 @@ async function verifyRow(row: SongRow): Promise<boolean> {
 
 /** 与 /rest/stream 同口径的行取字节:web 行走 url(+stream_headers)/cachePath;
  *  local/webdav 行按 path 解析(webdav 带源鉴权,本地读文件)。取不到返回 null。
- *  (原为 pump 内联,抽到此处供所有链路复用。) */
-export async function fetchRowBytes(row: SongRow): Promise<Buffer | null> {
+ *  (原为 pump 内联,抽到此处供所有链路复用。) */export async function fetchRowBytes(row: SongRow): Promise<Buffer | null> {
   try {
     if (!row) return null;
     if ((row.type || "local") === "web") {
@@ -89,6 +89,41 @@ export async function fetchRowBytes(row: SongRow): Promise<Buffer | null> {
   }
 }
 
+/** 与 fetchRowBytes 同口径的行取输入:返回 ffmpeg 可直读的输入(文件/URL＋头),
+ *  不读字节。供 sendspin 流式窗口用——分支逻辑与 fetchRowBytes 保持同构,
+ *  改一处必须对另一处(见 sendspin/streamSource)。取不到返回 null。 */
+export function resolveRowInput(row: SongRow): { input: string; headers?: Record<string, string> } | null {
+  try {
+    if (!row) return null;
+    if ((row.type || "local") === "web") {
+      if ((row as any).cachePath) {
+        try {
+          if (existsSync((row as any).cachePath)) return { input: (row as any).cachePath };
+        } catch { /* 继续走 url */ }
+      }
+      if (!row.url) return null;
+      let headers: Record<string, string> = {};
+      try { headers = JSON.parse((row as any).stream_headers || "{}"); } catch { /* ignore */ }
+      return { input: row.url, headers };
+    }
+    const parsed = parseSongPath((row as any).path || "");
+    if (!parsed) return null;
+    if (parsed.type === "w") {
+      const source: any = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
+      if (!source) return null;
+      const config = JSON.parse(source.config || "{}");
+      const origin = new URL(config.url).origin;
+      const headers: Record<string, string> = {};
+      if (config.username && config.password) {
+        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+      }
+      return { input: origin + parsed.filePath, headers };
+    }
+    return { input: parsed.filePath };
+  } catch {
+    return null;
+  }
+}
 /** 裁决某首歌的可播行(可能是兄弟行)。调用方:
  *  - judge 要 verdict:row ? "play" : (cached-unplayable ? "skip" : "play")(宽容不变);
  *  - pump 要字节:row ? fetchRowBytes(row) : throw。

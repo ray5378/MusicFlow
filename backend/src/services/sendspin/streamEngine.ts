@@ -20,11 +20,19 @@
 
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
 import { nowUs } from "./clock.js";
+import { PcmWindow, WindowEvictedError, type WindowSource } from "./streamSource.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
 
 export interface GroupAudio {
   pcm: Float32Array;
   durationMs: number;
+  /** 流式窗口(阶段二):有则走窗口取数,无则走整包 pcm。announce/测试保持整包。 */
+  stream?: PcmWindow | null;
+}
+
+/** 流式音源开关(阶段二灰度):1 = 默认走滑动窗口,默认关(整包路径零改动)。 */
+export function isStreamSource(): boolean {
+  return process.env.SENDSPIN_STREAM_SOURCE === "1";
 }
 
 /** 解析某首歌的可播字节(默认真实);测试可注入。 */
@@ -68,11 +76,32 @@ async function defaultSource(songId: string): Promise<GroupAudio> {
   const { resolvePlayableRow, fetchRowBytes } = await import("../source/resolveAudio.js");
   const r = await resolvePlayableRow(songId);
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
+  if (isStreamSource()) return streamingSource(r.row as any);
   const bytes = await fetchRowBytes(r.row);
   if (!bytes) throw new Error(`fetch bytes failed for ${songId} (${r.reason})`);
   const pcm = await decodeToF32(bytes);
   const durationMs = bufferDurationMs(pcm);
   return { pcm, durationMs };
+}
+
+/** 流式音源:行 → ffmpeg 直读输入 → 滑动窗口。首帧只等 2 秒预缓冲,
+ *  不再等整曲解完(此前起播解码实测可达 7.4s)。时长取元数据(秒→ms),
+ *  缺失则为 0(结束只靠 EOF＋耗尽,见 pushLoop)。 */
+async function streamingSource(row: { duration?: number | null }): Promise<GroupAudio> {
+  const { resolveRowInput } = await import("../source/resolveAudio.js");
+  const input = resolveRowInput(row as any);
+  if (!input) throw new Error("no streamable input for row");
+  const window = new PcmWindow(input);
+  try {
+    await window.ready();
+  } catch (e) {
+    window.close();
+    throw e;
+  }
+  const durationMs = typeof row.duration === "number" && row.duration > 0
+    ? Math.round(row.duration * 1000)
+    : 0;
+  return { pcm: new Float32Array(0), durationMs, stream: window };
 }
 
 function bufferDurationMs(pcm: Float32Array): number {
@@ -117,6 +146,7 @@ export class GroupPump {
   private paused = false;
   private epoch = 0;
   private pcm: Float32Array | null = null;
+  private window: PcmWindow | null = null;
   private durationMs = 0;
   private songId = "";
   // 暂停时被唤醒的等待器。
@@ -138,11 +168,12 @@ export class GroupPump {
   /** 播放一个音频缓冲:按组时间线切帧推送,推进 positionMs。 */
   async play(songId: string): Promise<void> {
     const source = injectedSource ?? defaultSource;
-    const { pcm, durationMs } = await source(songId);
+    const { pcm, durationMs, stream } = await source(songId);
     const myEpoch = ++this.epoch;
     this.running = true;
     this.paused = false;
     this.pcm = pcm;
+    this.window = stream ?? null;
     this.durationMs = durationMs;
     this.songId = songId;
     this.endedNaturally = false;
@@ -153,12 +184,23 @@ export class GroupPump {
     void this.pushLoop(myEpoch);
   }
 
+  /** 释放音频持有(整包缓冲 / 流式窗口＋ffmpeg 二选一,调用方无需区分)。 */
+  private releaseAudio(): void {
+    this.pcm = null;
+    if (this.window) {
+      try { this.window.close(); } catch { /* ignore */ }
+      this.window = null;
+    }
+  }
+
   /** 推流主循环:按真实墙钟节奏取 PCM 段 → 编码 → 下发,时间戳按**实测样本数**推进。 */
   private async pushLoop(myEpoch: number): Promise<void> {
+    const win = this.window;
     const pcm = this.pcm;
-    if (!pcm) { this.running = false; return; }
+    if (!win && !pcm) { this.running = false; return; }
     const frameSamples = Math.floor((SAMPLE_RATE * CHANNELS * FRAME_MS) / 1000);
-    const total = Math.ceil(pcm.length / frameSamples);
+    // 流式无全长:total 仅整包路径用,窗口路径靠 EOF＋耗尽结束。
+    const total = win ? Infinity : Math.ceil(pcm!.length / frameSamples);
     let contentEnded = false;
     let firstFrame = true;
     // ---- 时间线锚点(第三次无声事故的修复核心)----
@@ -201,10 +243,24 @@ export class GroupPump {
           continue;
         }
         const i = Math.floor(this.group.positionMs / FRAME_MS);
-        if (i >= total) { contentEnded = true; break; } // 解码耗尽
         const lo = i * frameSamples;
-        const hi = Math.min(lo + frameSamples, pcm.length);
-        const seg = pcm.subarray(lo, hi);
+        let seg: Float32Array;
+        if (win) {
+          try {
+            seg = await win.slice(lo, lo + frameSamples);
+          } catch (e) {
+            // 淘汰 == 回放点已不在窗口:只发生在 seekTo 重定位竞态里,
+            // 重定位已完成,按新 position 重取即可。
+            if (e instanceof WindowEvictedError) continue;
+            // 超时/失败 → 外层 catch 停 pump(同整包解码失败语义,不静默)。
+            throw e;
+          }
+          // EOF 耗尽(短片/空):与整包 `i >= total` 同义。
+          if (seg.length === 0) { contentEnded = true; break; }
+        } else {
+          if (i >= total) { contentEnded = true; break; } // 解码耗尽
+          seg = pcm!.subarray(lo, Math.min(lo + frameSamples, pcm!.length));
+        }
 
         if (firstFrame) {
           firstFrame = false;
@@ -283,7 +339,10 @@ export class GroupPump {
         }
         this.group.timelineBaseUs = cursorUs;
 
-        this.group.positionMs = Math.min(this.durationMs, i * FRAME_MS + FRAME_MS);
+        this.group.positionMs = this.durationMs > 0
+          ? Math.min(this.durationMs, i * FRAME_MS + FRAME_MS)
+          : i * FRAME_MS + FRAME_MS; // 时长未知(流式元数据缺失):不钳制,
+        // 否则 position 恒 0 → 同一片无限重推 ＋ pacing 永不 sleep,饿死事件循环
         // ⚠️⚠️ 必须用**绝对时刻调度**,不能用「每轮固定 sleep(FRAME_MS)」(2026-09-17 实锤)。
         //
         // 固定 sleep 的致命缺陷:`await sleep(25)` 之外还有 encode/send/pushFrame 本身的开销,
@@ -309,14 +368,19 @@ export class GroupPump {
       if (this.epoch === myEpoch) {
         this.running = false;
         this.endedNaturally = contentEnded;
-        // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
-        // 同时宣告流结束:缺 stream/end + group/update(stopped),客户端永远卡 PLAYING。
-        if (this.endedNaturally) {
-          this.group.current = null;
-          this.group.finishPlayback();
+        try {
+          // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
+          // 同时宣告流结束:缺 stream/end + group/update(stopped),客户端永远卡 PLAYING。
+          if (this.endedNaturally) {
+            this.group.current = null;
+            this.group.finishPlayback();
+          }
+        } finally {
+          // 整首音频到此无用,立即释放(长曲上百 MB),不等下一首覆盖。
+          // 放 finally:finishPlayback 抛错(最小 stub 组/嵌入式场景)也不能跳过释放,
+          // 否则整包 PCM/流式 ffmpeg 永久残留。
+          this.releaseAudio();
         }
-        // 整首 PCM 到此无用,立即释放(长曲上百 MB),不等下一首覆盖。
-        this.pcm = null;
       }
     } catch (e) {
       // 外抛异常(解码失败/源不可播等)同样不能静默,否则推流停摆无迹可循。
@@ -331,8 +395,8 @@ export class GroupPump {
     this.running = false;
     this.resumeWaiter?.();
     this.resumeWaiter = null;
-    // 旧曲 PCM 立即释放(切歌瞬间,不等新解码覆盖)。
-    this.pcm = null;
+    // 旧曲音频立即释放(切歌瞬间,不等新解码覆盖):整包清引用,流式杀进程。
+    this.releaseAudio();
   }
 
   pause(): void {
@@ -346,9 +410,16 @@ export class GroupPump {
     this.resumeWaiter = null;
   }
 
-  /** 跳转(秒)。改写 positionMs 即可:主循环按 position 取帧。 */
+  /** 跳转(秒)。改写 positionMs 即可:主循环按 position 取帧。
+   *  流式时目标若在窗口外,先 `seekTo` 按 `-ss` 重起 ffmpeg(绝对偏移连续,
+   *  主循环下标算法不变);窗口内则纯改下标,与整包零成本同构。 */
   seek(seconds: number): void {
-    const targetMs = Math.max(0, Math.min(this.durationMs, Math.round(seconds * 1000)));
+    const wantMs = Math.max(0, Math.round(seconds * 1000));
+    const targetMs = this.durationMs > 0 ? Math.min(this.durationMs, wantMs) : wantMs;
+    if (this.window) {
+      // 同步状态重置(无 await 点),随后 positionMs 赋值即一致;失败(如已停)忽略。
+      void this.window.seekTo(targetMs).catch(() => {});
+    }
     this.group.positionMs = targetMs;
     if (this.running) {
       this.resume();
