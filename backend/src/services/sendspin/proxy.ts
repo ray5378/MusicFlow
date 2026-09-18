@@ -12,6 +12,7 @@
 import type { SendspinServer } from "./server.js";
 import { getServer } from "./runtime.js";
 import { sendspinSupervisor } from "./supervisor.js";
+import { AssertImplements, rpcFireAndForget } from "../rendererHost/front.js";
 
 /** 连接视图:真实 SendspinConnection 与镜像行的公共字段(主进程侧只许用这些)。 */
 export interface ConnView {
@@ -92,7 +93,7 @@ class MirrorConnView implements ConnView {
   get muted() { return this.d.muted; }
   set muted(v: boolean) {
     this.d.muted = v;
-    void this.sup.rpc("setMuted", { clientId: this.d.clientId, muted: v }).catch(() => {});
+    rpcFireAndForget(this.sup, "setMuted", { clientId: this.d.clientId, muted: v });
   }
 }
 
@@ -102,7 +103,7 @@ class MirrorGroupView implements GroupView {
   get muted() { return this.d.muted; }
   set muted(v: boolean) {
     this.d.muted = v;
-    void this.sup.rpc("setMuted", { clientId: this.name, muted: v }).catch(() => {});
+    rpcFireAndForget(this.sup, "setMuted", { clientId: this.name, muted: v });
   }
   get current() { return this.d.current; }
 }
@@ -142,7 +143,7 @@ class ProxyPairing {
     await this.sup.rpc("pairToken", { clientId, token });
   }
   cancel(clientId: string): void {
-    void this.sup.rpc("pairCancel", { clientId }).catch(() => {});
+    rpcFireAndForget(this.sup, "pairCancel", { clientId });
   }
 }
 
@@ -177,7 +178,7 @@ class SendspinServerProxy implements SendspinServerLike {
     return this.sup.rpc<{ clientId: string | null; name: string }>("dial", { url, timeoutMs }, (timeoutMs ?? 15_000) + 10_000);
   }
   clearNoRedial(host: string, port: number): void {
-    void this.sup.rpc("clearNoRedial", { host, port }).catch(() => {});
+    rpcFireAndForget(this.sup, "clearNoRedial", { host, port });
   }
   group(name: string): GroupView {
     const g = this.sup.mirror.groups.get(name);
@@ -215,4 +216,4 @@ export function proxyEsphomeStatus(): Promise<{ devices: unknown[] }> {
 
 /** 类型兼容哨兵:真实 SendspinServer 必须满足 SendspinServerLike(编译期验证,
  *  server.ts 结构变动时第一时间在这里爆,而不是路由运行时才炸)。 */
-export type AssertServerLike = SendspinServer extends SendspinServerLike ? true : never;
+export type AssertServerLike = AssertImplements<SendspinServer, SendspinServerLike>;

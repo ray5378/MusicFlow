@@ -6,7 +6,9 @@ name: ci
 #   3. 前端插件隔离守卫(scripts/check-frontend-plugins.mjs)——插件配置/详情页仅渲染插件声明内容,
 #      核心全局功能(媒体获取等)不得耦合进单个插件弹窗
 #   4. i18n 合规守卫(scripts/check-i18n.mjs)——zh/en 键完全对齐 + 源码无硬编码中文
-#   5. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
+#   5. 渲染器进程隔离守卫(scripts/check-renderer-host.mjs)——墙钟节拍驱动的推流运行时
+#      (sendspin/airplay)必须托管在 rendererHost 通用层的常驻子进程里,且不许自建 fork
+#   6. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -63,6 +65,19 @@ jobs:
       # 任何视图改动遗漏翻译/漏背 key 都归这里拦。
       - name: 校验 i18n 键对齐且源码无硬编码中文
         run: node backend/scripts/check-i18n.mjs
+
+  # 渲染器进程隔离守卫:凡是「墙钟节拍驱动」的推流运行时(sendspin 25ms / airplay 7.98ms),
+  # 必须托管在 backend/src/services/rendererHost 的常驻子进程里 —— 留在主进程会被 Web 请求、
+  # 封面渲染、后台批量任务阻塞成掉帧断音。在此之前这条约定只有注释和 CHANGELOG 背书,
+  # 没有任何 CI 拦它(2026-09-19 实测 7 个 check 脚本 + 8 个 workflow 关键词扫描 0 命中)。
+  # 零依赖 node 脚本,秒级完成;同时禁止各业务自建 fork(必须复用通用宿主)。
+  renderer-host-guard:
+    name: 渲染器进程隔离守卫(节拍运行时必须在子进程)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验渲染器均接入通用宿主且节拍循环不在主进程
+        run: node backend/scripts/check-renderer-host.mjs
 
   test:
     name: 类型检查 + 全量测试

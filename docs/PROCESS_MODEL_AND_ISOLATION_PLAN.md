@@ -5,6 +5,16 @@
 >
 > 相关文档：`docs/sandbox-limits-and-plan.md`（插件沙箱限制与 P3 规划）、
 > `SPEC.md` §1.3（批量任务子进程红线）。
+>
+> **落地状态（2026-09-19 晚，随 v3.0.39 一并实施）**：
+> - §4 的两步主干已落地 —— 通用层 `backend/src/services/rendererHost/` 就位，Sendspin 已迁移
+>   （行为不变，靠既有 39 文件 / 221 用例守），AirPlay 已接入同一宿主；
+> - §3 B1（AirPlay 进程化）**代码就位但默认关闭**：开发机无 AirPlay 设备可端到端验证，
+>   故先只把能力接上，显式 `MUSICFLOW_AIRPLAY_FORK=1` 才启用；真机验证后可把
+>   `services/airplay/mode.ts` 的 `defaultFork` 翻成 `true`，与 sendspin 对齐；
+> - §7 的 ② 静态门禁已落地为 `backend/scripts/check-renderer-host.mjs`
+>   （CI job `renderer-host-guard`）；① 的 supervisor 真 fork 冒烟测试仍未做（见 §7）；
+> - 逐条状态见 §5 路线图。
 
 ---
 
@@ -224,17 +234,18 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 
 | 阶段 | 内容 | 触发条件 | 前置 |
 |---|---|---|---|
-| **P0**（已完成） | Sendspin fork 隔离；批量子进程；转码并发槽 | — | — |
-| **P1** | 抽通用渲染器子进程宿主 + Sendspin 迁移 | 可随时做（纯重构，收益是后续成本） | 现有 sendspin 测试全绿 |
-| **P1'** | AirPlay 接入宿主 | §3 B1 三条触发条件任一命中 | P1 |
+| **P0**（✅ 已完成） | Sendspin fork 隔离；批量子进程；转码并发槽 | — | — |
+| **P1**（✅ 已完成，v3.0.39） | 抽通用渲染器子进程宿主 `services/rendererHost/` + Sendspin 迁移 | 已做（纯重构，行为不变） | — |
+| **P1'**（✅ 代码就位，⏸ 默认关闭） | AirPlay 接入宿主 | 代码已落地；生产启用需 `MUSICFLOW_AIRPLAY_FORK=1`，真机验证后把 `airplay/mode.ts` 的 `defaultFork` 翻 `true` | P1 |
 | **P2** | sharp 下沉 worker 线程 | 出现一次 sharp 相关崩溃即做 | 无 |
 | **P2'** | sharp 升级为进程 | worker 中崩溃仍带走进程（实测） | P2 |
 | **P3** | 插件沙箱进程化 | §3 B3 三条触发条件任一命中 | 有实测数据 |
 
 **顺手可做的低成本项**（不依赖上述任何阶段）：
 
-- 把 AirPlay 的 `reanchors` / `maxGapMs` 从「结束才打一行日志」提升为**可观测指标**
-  （或至少在超过阈值时 warn）。P1' 的触发条件要靠它，现在只有事后日志拿不到趋势。
+- ~~把 AirPlay 的 `reanchors` / `maxGapMs` 从「结束才打一行日志」提升为**可观测指标**~~
+  —— **仍未做**。P1' 已按「触发条件未命中也要先接好架构」的路线提前落地，但启用决策仍要靠
+  它：现在依然只有事后日志拿不到趋势，建议在真机开 `MUSICFLOW_AIRPLAY_FORK=1` 前先补上。
 - 补 `supervisor` 冒烟测试（见 §7）—— 目前 fork 路径零覆盖。
 
 ---

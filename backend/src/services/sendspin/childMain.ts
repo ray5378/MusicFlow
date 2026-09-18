@@ -1,26 +1,24 @@
 // ==================== Sendspin 子进程控制器(RPC 分发 + 快照推送) ====================
 //
-// child.ts(fork 入口)把消息交给本模块处理;独立成文件是为了可单测(不 fork 也能
+// child.ts(fork 入口)把消息交给本类处理;独立成文件是为了可单测(不 fork 也能
 // 用真实 in-proc server 驱动同一套 handler,保证测试路径 = 生产路径)。
 //
-// 职责:
-//  - 处理主进程 RPC:playMedia/transport/poll/pumpActive/announce/dial/配对/静音/6053 状态;
-//  - 维护「状态快照」推送:clients/groups(镜像字段)/配对记录(**剥离 pskHex/pskId**)/
-//    配对 attempts。脏了立即推(150ms 节流),另有 1s 兜底扫(捕捉 pump 自然结束等无钩子变化);
-//  - 生命周期:init(cfg+port)→ 起 in-proc 运行时(index.ts startSendspinInProcess)→
-//    mainReady;stop → 清干净 → stopped → 退出由入口执行。
+// 与业务无关的那部分(心跳、快照节流/兜底扫、req→res 回包、stop 生命周期)已抽到
+// `../rendererHost/childHost.js` 的 ChildRpcHost;本文件只声明 sendspin 的业务:
+//  - buildState:srv → 快照消息(clients/groups(镜像字段)/配对记录(**剥离 pskHex/pskId**)/
+//    配对 attempts);
+//  - dispatch:RPC op 表(playMedia/transport/poll/pumpActive/announce/dial/配对/静音/6053);
+//  - onStop:清干净 in-proc 运行时(不碰主进程 QC/PM)。
+import { ChildRpcHost } from "../rendererHost/childHost.js";
 import type {
   ParentToSendspinChild,
   SendspinChildToParent,
+  SendspinSnapshot,
+  SendspinStateEnvelope,
   SendspinIpcConfig,
   ClientMirrorMsg,
   GroupMirrorMsg,
   PairRecordMirrorMsg,
-} from "./ipcProtocol.js";
-import {
-  SENDSPIN_SNAPSHOT_THROTTLE_MS,
-  SENDSPIN_SNAPSHOT_SWEEP_MS,
-  SENDSPIN_HEARTBEAT_MS,
 } from "./ipcProtocol.js";
 import type { SendspinServer } from "./server.js";
 import {
@@ -52,70 +50,24 @@ export interface ChildControllerDeps {
   stopRuntime: () => Promise<void>;
 }
 
-export class SendspinChildController {
-  private send: ChildSend;
-  private deps: ChildControllerDeps;
+export class SendspinChildController extends ChildRpcHost<SendspinChildToParent, SendspinSnapshot> {
+  private readonly deps: ChildControllerDeps;
   private seq = 0;
-  private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
-  private snapshotDirty = false;
-  private sweep: ReturnType<typeof setInterval>;
-  private heartbeat: ReturnType<typeof setInterval>;
-  private ready = false;
 
   constructor(deps: ChildControllerDeps, send: ChildSend) {
+    super({
+      send,
+      buildState: () => this.buildState(),
+      dispatch: (op, payload) => this.dispatch(op, payload),
+      onStop: () => deps.stopRuntime(),
+    });
     this.deps = deps;
-    this.send = send;
-    // 兜底扫描:无钩子的状态变化(如 pump 自然结束清 current)1s 内可见。
-    this.sweep = setInterval(() => {
-      if (this.ready) this.requestSnapshot(true);
-    }, SENDSPIN_SNAPSHOT_SWEEP_MS);
-    this.sweep.unref?.();
-    // 心跳:主进程看门狗据此判断卡死。
-    this.heartbeat = setInterval(() => {
-      this.send({ t: "heartbeat", pid: process.pid });
-    }, SENDSPIN_HEARTBEAT_MS);
-    this.heartbeat.unref?.();
   }
 
-  markReady(): void {
-    this.ready = true;
-    this.requestSnapshot(true);
-  }
-
-  dispose(): void {
-    clearInterval(this.sweep);
-    clearInterval(this.heartbeat);
-    if (this.snapshotTimer) {
-      clearTimeout(this.snapshotTimer);
-      this.snapshotTimer = null;
-    }
-  }
-
-  /** 请求推送快照:脏标记 + 节流(150ms);force 跳过节流立即推。 */
-  requestSnapshot(force = false): void {
-    this.snapshotDirty = true;
-    if (this.snapshotTimer && !force) return;
-    if (this.snapshotTimer) {
-      clearTimeout(this.snapshotTimer);
-      this.snapshotTimer = null;
-    }
-    if (force) {
-      this.snapshotDirty = false;
-      this.pushSnapshot();
-      return;
-    }
-    this.snapshotTimer = setTimeout(() => {
-      this.snapshotTimer = null;
-      if (!this.snapshotDirty) return;
-      this.snapshotDirty = false;
-      this.pushSnapshot();
-    }, SENDSPIN_SNAPSHOT_THROTTLE_MS);
-  }
-
-  /** 组装并发送快照。⚠️ 配对记录剥离 pskHex/pskId —— 配对密钥永不出子进程。 */
-  pushSnapshot(): void {
+  /** 组装快照消息。⚠️ 配对记录剥离 pskHex/pskId —— 配对密钥永不出子进程。 */
+  buildState(): SendspinStateEnvelope | null {
     const srv = this.deps.getServer();
-    if (!srv) return;
+    if (!srv) return null;
     const clients: ClientMirrorMsg[] = [...srv.clients.values()]
       .filter((c) => !!c.clientId)
       .map((c) => ({
@@ -144,26 +96,7 @@ export class SendspinChildController {
       approved: srv.pairingStore?.isApproved(r.clientId) ?? false,
     }));
     const attempts = srv.pairing?.listAttempts() ?? [];
-    this.send({ t: "state", clients, groups, records, attempts });
-  }
-
-  /** 处理主进程消息;RPC 请求在此分发并回 res。返回 true 表示消息已消费。 */
-  async handleMessage(raw: ParentToSendspinChild): Promise<boolean> {
-    if (!raw || typeof raw !== "object") return false;
-    if (raw.t === "req") {
-      await this.handleReq(raw.id, raw.op, raw.payload);
-      return true;
-    }
-    return false;
-  }
-
-  private async handleReq(id: number, op: string, payload: any): Promise<void> {
-    try {
-      const result = await this.dispatch(op, payload);
-      this.send({ t: "res", id, ok: true, result: result ?? null });
-    } catch (e: any) {
-      this.send({ t: "res", id, ok: false, error: String(e?.message || e) });
-    }
+    return { t: "state", clients, groups, records, attempts };
   }
 
   private async dispatch(op: string, p: any): Promise<unknown> {
@@ -174,7 +107,7 @@ export class SendspinChildController {
         const clientId = String(p.clientId);
         const item = p.item as QueueItem;
         playCore(srv, clientId, item, (cid, songId, message) => {
-          this.send({ t: "playFailed", clientId: cid, songId, message });
+          this.emit({ t: "playFailed", clientId: cid, songId, message });
         });
         this.requestSnapshot(true); // current 元数据变化立即可见(前端歌词/封面跟随)
         return null; // pump 异步起播,不等待解码
@@ -213,7 +146,7 @@ export class SendspinChildController {
         if (!srv) throw new Error("sendspin server 未运行");
         const members = Array.isArray(p.members) ? p.members.map(String) : [];
         playGroupCore(srv, String(p.group), members, p.item as QueueItem, (cid, songId, message) => {
-          this.send({ t: "playFailed", clientId: cid, songId, message });
+          this.emit({ t: "playFailed", clientId: cid, songId, message });
         });
         this.requestSnapshot(true);
         return null;
@@ -376,7 +309,7 @@ export class SendspinChildController {
         // 主进程的 stop:清干净 → 回应 → 入口收到 res 后自行退出。
         await this.deps.stopRuntime();
         this.dispose();
-        this.send({ t: "stopped" });
+        this.emit({ t: "stopped" });
         return null;
       default:
         throw new Error(`未知 sendspin rpc op: ${op}`);
@@ -402,3 +335,6 @@ export class SendspinChildController {
     return ++this.seq;
   }
 }
+
+/** 供 child.ts 复用的消息类型别名(保持既有引用不变)。 */
+export type SendspinChildMessage = ParentToSendspinChild;

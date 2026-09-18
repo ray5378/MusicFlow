@@ -9,37 +9,24 @@
 // stream URL (`/rest/dlna/stream/:token`) — the same endpoint DLNA renderers
 // already pull from — and feed it to ffmpeg. Nothing in services/dlna/* is
 // modified.
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { createRequire } from "module";
+import { type ChildProcessWithoutNullStreams } from "child_process";
 import { PlaybackState } from "../player/types.js";
-import { RaopPlayer, type RaopSession, PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
+import { RaopPlayer, type RaopSession } from "./raop.js";
+import { makeProducer, spawnDecoder, degreesToDb } from "./decoder.js";
+import { isAirPlayForkMode } from "./mode.js";
+import { airplaySupervisor } from "./supervisor.js";
+import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
 import { createCastSession, getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 
+// 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
+// airplay 子进程要复用同一份实现,但不能经由本模块(会拖进 DB/DLNA/peer 等主进程态)。
+// re-export 保持既有引用可见(tests/services/airplayProducer.test.ts 从本模块导入)。
+export { makeProducer } from "./decoder.js";
+
 const log = createLogger("AIRPLAY");
-
-// Jitter buffer (Music Assistant style): decode as fast as possible into a
-// buffer, then let the RAOP sender pull *paced* chunks on a real-time clock.
-// The prefill guarantees a few seconds of audio ahead of the sender, so short
-// decode/network stalls (cloud WebDAV, ffmpeg startup) never starve the
-// receiver's ~250ms RAOP buffer. The old loop (`sleep(7ms)` per 7.98ms chunk
-// inside the producer) had NO read-ahead and ran slightly slower than realtime
-// → the device buffer slowly drained → audible stutter.
-const PREFILL_MS = 1500; // target decoded-audio lead before the first packet
-const PREFILL_BYTES = Math.round((PREFILL_MS / 1000) * SAMPLE_RATE * 2 * 2); // 44100×16bit stereo
-
-// Upper bound for the decoded-PCM read-ahead queue. ffmpeg decodes at max
-// speed, so WITHOUT a cap the producer buffers the ENTIRE track in memory
-// (34MB for a 193s song, ~1.2GB for a 2h one) and plays it out over minutes.
-// Instead we apply backpressure: once buffered PCM crosses MAX_BUFFER_BYTES we
-// pause ffmpeg's stdout (it then blocks inside the pipe write), and resume as
-// soon as it drains below the low-water mark. Cap ≈ 10s of audio (176.4KB/s),
-// which still rides out long stalls without stutter while keeping memory small.
-const MAX_BUFFER_MS = 10_000;
-const MAX_BUFFER_BYTES = Math.round((MAX_BUFFER_MS / 1000) * SAMPLE_RATE * 2 * 2); // 176400 B/s × 10s
-const RESUME_BUFFER_BYTES = Math.round(MAX_BUFFER_BYTES / 2);
 
 export interface AirPlayCastOptions {
   deviceId: string;
@@ -87,169 +74,34 @@ interface ActiveSession {
   ended: boolean;
 }
 
+// ==================== 进程模型(fork / in-proc) ====================
+//
+// fork 模式(MUSICFLOW_AIRPLAY_FORK=1)下,推流会话跑在 airplay 子进程里:
+//   - 主进程仍持有编排态(volumeState / lastCast / 设备与 peer 注册 / DLNA 互斥);
+//   - 真正的推流对象(RaopPlayer / ffmpeg / RTSP 会话)在子进程,主进程读**镜像**;
+//   - 命令写一律走 RPC,读状态读镜像(同步,不阻塞调用方)。
+// in-proc(默认)下一切照旧 —— 两条路径共用 decoder.ts 与 raop.ts 的同一份实现。
+//
+// 判活不靠 IPC:镜像里有 sessions 的键集合,`hasActiveSession()` 同步可答。
+
 const sessions = new Map<string, ActiveSession>();
 const volumeState = new Map<string, { volume: number; muted: boolean; supportsRsa: boolean }>();
 const lastCast = new Map<string, { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; durationSec?: number; streamUrl: string }>();
 
-function degreesToDb(volume: number): number {
-  const v = Math.max(0, Math.min(100, volume));
-  if (v <= 0) return -144;
-  return -30 + (v / 100) * 30; // 0→-30dB … 100→0dB
+/** 该设备是否有活跃推流会话(fork 看子进程镜像的会话表;in-proc 看本地 sessions)。 */
+function hasActiveSession(deviceId: string): boolean {
+  if (isAirPlayForkMode()) return airplaySupervisor.mirror.sessions.has(deviceId);
+  return sessions.has(deviceId);
 }
 
-const require_ = createRequire(import.meta.url);
-
-function ffmpegBin(): string {
-  try {
-    const p = require_("ffmpeg-static") as string | undefined;
-    if (p) return p;
-  } catch {
-    /* not installed — fall back to PATH */
-  }
-  return process.env.FFMPEG_PATH || "ffmpeg";
-}
-
-/** Spawn ffmpeg decoding `url` to raw stereo s16le 44100 PCM on stdout. */
-function spawnDecoder(url: string, seekSec?: number): ChildProcessWithoutNullStreams {
-  const args = ["-loglevel", "error", "-hide_banner"];
-  if (seekSec && seekSec > 0) args.push("-ss", String(seekSec));
-  args.push("-i", url, "-f", "s16le", "-ac", "2", "-ar", String(SAMPLE_RATE), "pipe:1");
-  const ff = spawn(ffmpegBin(), args);
-  let errBuf = "";
-  ff.stderr.on("data", (d: Buffer) => {
-    errBuf += d.toString();
-    if (errBuf.length > 4096) errBuf = errBuf.slice(-4096);
-  });
-  ff.on("exit", (code, signal) => {
-    if (code !== 0 && code !== null) {
-      log.info(`ffmpeg exit code=${code} signal=${signal} stderr=${errBuf.slice(0, 800)}`);
-    }
-  });
-  return ff;
-}
-
-/** Build a buffered PCM producer around an ffmpeg decoder.
- *
- *  The producer is *not* paced: it decodes as fast as ffmpeg can and returns a
- *  1408-byte chunk as soon as one is available (resolving on the next stdout
- *  data event, not an 8ms poll). Real-time pacing happens in RaopPlayer.stream()
- *  against the wall clock; the `PREFILL_MS` lead is what absorbs jitter.
- *
- *  Buffering uses an efficient chunk queue: stdout is sliced into fixed
- *  1408-byte chunks right away (O(1) subarray + one small copy each) and pulled
- *  from the front. A single growing `Buffer.concat` accumulator would re-copy
- *  the entire buffered PCM on *every* data event — once decode blasts ahead of
- *  realtime (a fast cloud source decodes a whole track in seconds) that turns
- *  into dozens of MB of copies per second and multi-hundred-ms GC pauses that
- *  stall the sender and make the receiver stutter. */
-export function makeProducer(ff: ChildProcessWithoutNullStreams): () => Promise<Buffer | null> {
-  const ready: Buffer[] = [];
-  let carry = Buffer.alloc(0); // <1408B remainder awaiting the next data event
-  let readIdx = 0;
-  let ended = false;
-  let done = false;
-  let prefilled = false;
-  let wake: (() => void) | null = null;
-  let totalBytes = 0;
-
-  const bufferedBytes = (): number =>
-    (ready.length - readIdx) * PCM_BYTES_PER_CHUNK + carry.length;
-
-  ff.stdout.on("data", (d0: Buffer) => {
-    totalBytes += d0.length;
-    let d = d0;
-    if (carry.length) {
-      const need = PCM_BYTES_PER_CHUNK - carry.length;
-      if (d.length >= need) {
-        ready.push(Buffer.from(Buffer.concat([carry, d.subarray(0, need)])));
-        d = d.subarray(need);
-        carry = Buffer.alloc(0);
-      } else {
-        carry = Buffer.concat([carry, d]);
-        d = Buffer.alloc(0);
-      }
-    }
-    while (d.length >= PCM_BYTES_PER_CHUNK) {
-      ready.push(Buffer.from(d.subarray(0, PCM_BYTES_PER_CHUNK)));
-      d = d.subarray(PCM_BYTES_PER_CHUNK);
-    }
-    if ((d as Buffer).length) carry = Buffer.from(d as Buffer);
-    if (wake) { const w = wake; wake = null; w(); }
-    // Backpressure: stop pulling from ffmpeg before the buffered PCM grows past
-    // MAX_BUFFER_BYTES. pause() stops our 'data' events, the pipe fills up and
-    // ffmpeg blocks on its write — zero data lost, no audio skipped, and memory
-    // stays bounded to ~10s instead of an entire track.
-    if (!ended && bufferedBytes() >= MAX_BUFFER_BYTES) ff.stdout.pause();
-  });
-  ff.stdout.on("end", () => { ended = true; log.info(`producer stdout end: totalBytes=${totalBytes} (${(totalBytes / (SAMPLE_RATE * 4)).toFixed(1)}s audio)`); if (wake) { const w = wake; wake = null; w(); } });
-  ff.on("exit", (code, signal) => { ended = true; log.info(`producer ffmpeg exit code=${code} signal=${signal} totalBytes=${totalBytes}`); if (wake) { const w = wake; wake = null; w(); } });
-
-  const waitData = (timeoutMs: number): Promise<boolean> =>
-    new Promise((resolve) => {
-      // Only resolve on the next stdout chunk (or stream end). Early-resolving
-      // on buffer fullness here would busy-spin the prefill loop (every call
-      // returns immediately once ≥1 chunk is buffered, before ffmpeg's data
-      // events ever get a chance to run → 100% CPU stall).
-      if (ended) return resolve(true);
-      const t = setTimeout(() => { wake = null; resolve(false); }, timeoutMs);
-      wake = () => { clearTimeout(t); resolve(true); };
-    });
-
-  const nextChunk = (): Buffer | null => {
-    if (readIdx < ready.length) {
-      const c = ready[readIdx];
-      ready[readIdx] = (null as unknown) as Buffer;
-      readIdx++;
-      // Compact the consumed head periodically to avoid an ever-growing array.
-      if (readIdx > 2048 && readIdx * 2 > ready.length) {
-        ready.splice(0, readIdx);
-        readIdx = 0;
-      }
-      return c;
-    }
-    // consume the partial tail only when the stream has ended
-    if (ended && carry.length) {
-      const tail = carry;
-      carry = Buffer.alloc(0);
-      return tail;
-    }
-    return null;
-  };
-
-  // Resume ffmpeg once the buffered PCM has drained below the low-water mark
-  // (half the cap). Called on every pull so backpressure never dead-locks: pause
-  // only kicks in while the queue is at/above the cap, and every consumed chunk
-  // is an opportunity to restart the pipe.
-  const maybeResume = (): void => {
-    if (ff.stdout.isPaused() && bufferedBytes() <= RESUME_BUFFER_BYTES) ff.stdout.resume();
-  };
-
-  return async (): Promise<Buffer | null> => {
-    if (done) return null;
-    maybeResume();
-    if (!prefilled) {
-      // First pull: wait until enough decoded audio is buffered to ride out
-      // short stalls (decode start, WebDAV hiccup) without an audible gap.
-      while (!ended && bufferedBytes() < PREFILL_BYTES) {
-        const ok = await waitData(30000);
-        if (!ok) { done = true; return null; }
-      }
-      prefilled = true;
-    }
-    const c = nextChunk();
-    if (c) return c;
-    if (!ended) {
-      if (!(await waitData(30000))) { done = true; return null; }
-      maybeResume();
-      const c2 = nextChunk();
-      if (c2) return c2;
-    }
-    done = true;
-    return null;
-  };
-}
-
+/** 停止一个会话:fork 走 RPC(子进程内 TEARDOWN + kill ffmpeg);in-proc 就地停。 */
 async function stopSession(deviceId: string): Promise<void> {
+  if (isAirPlayForkMode()) {
+    try {
+      await airplaySupervisor.rpc("stopSession", { deviceId });
+    } catch { /* 子进程没跑 → 本来就没有会话 */ }
+    return;
+  }
   const s = sessions.get(deviceId);
   if (!s) return;
   sessions.delete(deviceId);
@@ -266,7 +118,7 @@ export async function stopAirPlaySessionsForHost(host: string): Promise<string[]
   if (!host) return stopped;
   const h = host.toLowerCase();
   for (const d of getAirPlayDevices()) {
-    if (d.host && d.host.toLowerCase() === h && sessions.has(d.id)) {
+    if (d.host && d.host.toLowerCase() === h && hasActiveSession(d.id)) {
       await stopSession(d.id);
       stopped.push(d.id);
     }
@@ -316,7 +168,10 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
   }
 
   const ff = spawnDecoder(streamUrl, seekSec);
-  const producer = makeProducer(ff);
+  // ⚠️ 这里**不要**再 makeProducer(ff):runStream 内部会建唯一一份 producer。
+  // 旧实现先建一份又丢弃(变量未使用),但那个 producer 的 stdout data 监听器仍在,
+  // 会把整首歌的 PCM 再缓存一份且无人消费(内存翻倍),还会与真 producer 争抢
+  // pause/resume 背压 → 间歇性卡顿。
   const active: ActiveSession = {
     deviceId: opts.deviceId,
     player,
@@ -552,17 +407,120 @@ export async function castToAirPlayDevice(opts: AirPlayCastOptions): Promise<{ m
   if (isAirPlayDeviceDisabled(opts.deviceId)) {
     throw new Error("该 AirPlay 设备已被禁用");
   }
+  if (isAirPlayForkMode()) {
+    await castViaChild(opts);
+    return { mediaUri: opts.streamUrl || "" };
+  }
   await startSession(opts, opts.seekSec);
   return { mediaUri: opts.streamUrl || "" };
 }
 
+// ==================== fork 模式:主进程侧前戏 + 子进程推流 ====================
+//
+// 「建会话前必须发生在主进程」的四件事(与 in-proc 路径同语义,顺序也一致):
+//   1) 设备解析(getAirPlayDevice → host/port/pk/et 来自 mDNS 发现);
+//   2) 双协议互斥(同 host 的 DLNA 播放先停,否则 Linkplay/HiVi 类设备音频输入互斥);
+//   3) token 化 streamUrl(createCastSession 会写 token 会话 → 属主进程 DB 职责);
+//   4) lastCast 登记(供 peerStatus.media 与「无会话时重播上一首」)。
+// 之后 host/streamUrl 一并交给子进程,由它做 RTSP 握手与 7.98ms 节拍推流。
+
+let hostStarting: Promise<void> | null = null;
+
+/** 会话结束后向 PlayerController 上报 IDLE(等价 DLNA 的 GENA 事件):
+ *  让 QueueController 不必等下一次 5s fallback poll 就能感知"这首已结束"并自动续播。
+ *  fork 模式下由子进程的 sessionEnded 事件触发。 */
+function reportAirPlayIdle(deviceId: string): void {
+  // ===== 注意用动态 import 避免静态循环依赖 =====
+  import("../player/index.js").then(({ getPlayerController }) => {
+    getPlayerController().reportState({
+      playerId: `airplay:${deviceId}`,
+      playbackState: PlaybackState.IDLE,
+      position: 0,
+      duration: 0,
+      updatedAt: Date.now(),
+    });
+  }).catch((e) => {
+    log.error("reportState IDLE 上报失败", { deviceId, err: (e as Error)?.message || e });
+  });
+}
+
+/** 确保 airplay 子进程在跑(fork 模式)。懒启动兜底:服务启动时的 start 是 fire-and-forget;
+ *  in-flight 去重,避免并发投屏各 fork 一个。 */
+async function ensureAirplayHost(): Promise<void> {
+  if (airplaySupervisor.isRunning()) return;
+  hostStarting ??= (async () => {
+    airplaySupervisor.setHooks({
+      onSessionEnded: (deviceId) => reportAirPlayIdle(deviceId),
+    });
+    await airplaySupervisor.start();
+  })().finally(() => { hostStarting = null; });
+  await hostStarting;
+}
+
+async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
+  const dev = getAirPlayDevice(opts.deviceId);
+  if (!dev) throw new Error("AirPlay 设备不在线或未发现");
+
+  const dlnaPeer = dlnaPeerOfAirPlay(opts.deviceId);
+  if (dlnaPeer) {
+    try {
+      await stopDevicePlayback(dlnaPeer);
+      log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放", { deviceId: opts.deviceId, dlnaPeer });
+    } catch (e) {
+      log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId: opts.deviceId, err: (e as Error)?.message || e });
+    }
+  }
+
+  const baseUrl = opts.baseUrl || getEffectiveBaseUrl();
+  if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");
+  const streamUrl = opts.streamUrl || createCastSession(opts.songId, opts.deviceId, baseUrl).streamUrl;
+
+  await ensureAirplayHost();
+  await airplaySupervisor.rpc("cast", {
+    deviceId: opts.deviceId,
+    host: dev.host,
+    port: dev.port,
+    pk: dev.pk,
+    et: dev.et,
+    streamUrl,
+    seekSec: opts.seekSec,
+    title: opts.title,
+    artist: opts.artist,
+    album: opts.album,
+    durationSec: opts.durationSec,
+  });
+  lastCast.set(opts.deviceId, {
+    songId: opts.songId,
+    title: opts.title,
+    artist: opts.artist,
+    album: opts.album,
+    coverArt: opts.coverArt,
+    durationSec: opts.durationSec,
+    streamUrl,
+  });
+}
+
 export async function pauseAirPlay(deviceId: string): Promise<void> {
+  if (isAirPlayForkMode()) {
+    try { await airplaySupervisor.rpc("pause", { deviceId }); } catch { /* 子进程没跑 → 无会话 */ }
+    return;
+  }
   const s = sessions.get(deviceId);
   if (!s) return;
   s.player.pause();
 }
 
 export async function resumeAirPlay(deviceId: string): Promise<void> {
+  if (isAirPlayForkMode()) {
+    // 子进程里会话还在(暂停态)→ 直接恢复推进;否则回落到「重播上一首」。
+    const resumed = airplaySupervisor.isRunning()
+      ? await airplaySupervisor.rpc<boolean>("resume", { deviceId }).catch(() => false)
+      : false;
+    if (resumed) return;
+    const last = lastCast.get(deviceId);
+    if (last) await castToAirPlayDevice({ ...last, deviceId });
+    return;
+  }
   const s = sessions.get(deviceId);
   if (s) {
     // Session alive (paused): simply resume pushing chunks.
@@ -591,6 +549,17 @@ export async function stopAirPlay(deviceId: string): Promise<void> {
  *  restart path (e.g. a raw api.seek right after stop). */
 export async function seekAirPlay(deviceId: string, seconds: number): Promise<void> {
   const t = Math.max(0, seconds);
+  if (isAirPlayForkMode()) {
+    // 子进程内原地 seek(RTSP 会话与 RTP socket 不动,只换 decoder);拿不到可原地
+    // seek 的会话(无会话 / 已被拆)则回落到「带 seekSec 重投」。
+    const inPlace = airplaySupervisor.isRunning()
+      ? await airplaySupervisor.rpc<boolean>("seek", { deviceId, seconds: t }).catch(() => false)
+      : false;
+    if (inPlace) return;
+    const last = lastCast.get(deviceId);
+    if (last) await castToAirPlayDevice({ ...last, deviceId, seekSec: t });
+    return;
+  }
   const s = sessions.get(deviceId);
   if (!s || s.ended || !s.player.isStreaming) {
     const last = lastCast.get(deviceId);
@@ -679,11 +648,7 @@ export async function setAirPlayVolume(deviceId: string, volume: number): Promis
 
   const dev = getAirPlayDevice(deviceId);
   if (dev) st.supportsRsa = dev.supportsRsa;
-  const s = sessions.get(deviceId);
-  if (s) {
-    const db = st.muted || st.volume === 0 ? -144 : degreesToDb(st.volume);
-    s.player.setVolumeDb(db);
-  }
+  applyVolumeDb(deviceId, st.muted || st.volume === 0 ? -144 : degreesToDb(st.volume));
 }
 
 export async function setAirPlayMuted(deviceId: string, muted: boolean): Promise<void> {
@@ -700,16 +665,63 @@ export async function setAirPlayMuted(deviceId: string, muted: boolean): Promise
       log.warn(`DLNA mute forward failed (${(e as Error)?.message}), falling back to SET_PARAMETER`);
     }
   }
-  const s = sessions.get(deviceId);
-  if (s) {
-    const db = muted || st.volume === 0 ? -144 : degreesToDb(st.volume);
-    s.player.setVolumeDb(db);
+  applyVolumeDb(deviceId, muted || st.volume === 0 ? -144 : degreesToDb(st.volume));
+}
+
+/** RAOP SET_PARAMETER 音量回落:fork 走 RPC(子进程内写自己的 RaopPlayer);
+ *  in-proc 直接写本地会话。DLNA 同 host 转发成功时不会走到这里。 */
+function applyVolumeDb(deviceId: string, db: number): void {
+  if (isAirPlayForkMode()) {
+    if (airplaySupervisor.isRunning()) rpcFireAndForget(airplaySupervisor, "setVolumeDb", { deviceId, db });
+    return;
   }
+  const s = sessions.get(deviceId);
+  if (s) s.player.setVolumeDb(db);
+}
+
+/** 会话态的统一读取视图:in-proc 读本地会话对象;fork 读子进程镜像。
+ *  **同步**可读 —— getAirPlayStatus 会被 QC 每 5s、DLNA announce 每 500ms 调用,
+ *  绝不能每次都打一次 IPC。 */
+interface SessionView {
+  ended: boolean;
+  paused: boolean;
+  positionSec: number;
+  durationSec: number;
+  title?: string;
+  artist?: string;
+  album?: string;
+}
+
+function sessionView(deviceId: string): SessionView | null {
+  if (isAirPlayForkMode()) {
+    const r = airplaySupervisor.mirror.sessions.get(deviceId);
+    if (!r) return null;
+    return {
+      ended: r.ended,
+      paused: r.playbackState === "paused",
+      positionSec: r.positionSec,
+      durationSec: r.durationSec,
+      title: r.title,
+      artist: r.artist,
+      album: r.album,
+    };
+  }
+  const s = sessions.get(deviceId);
+  if (!s) return null;
+  return {
+    ended: s.ended,
+    paused: s.player.isPaused,
+    positionSec: Math.max(0, s.player.positionSec),
+    durationSec: s.duration || s.player.durationSec,
+    title: s.title,
+    artist: s.artist,
+    album: s.album,
+  };
 }
 
 export function getAirPlayStatus(deviceId: string): AirPlayDeviceStatus {
   const dev = getAirPlayDevice(deviceId);
-  const s = sessions.get(deviceId);
+  const s = sessionView(deviceId);
   const vol = volumeState.get(deviceId) || { volume: 80, muted: false, supportsRsa: !!dev?.supportsRsa };
   if (!s || s.ended) {
     return {
@@ -727,13 +739,13 @@ export function getAirPlayStatus(deviceId: string): AirPlayDeviceStatus {
       updatedAt: Date.now(),
     };
   }
-  const state = s.player.isPaused ? PlaybackState.PAUSED : PlaybackState.PLAYING;
+  const state = s.paused ? PlaybackState.PAUSED : PlaybackState.PLAYING;
   return {
     available: !!dev?.available,
     name: dev?.name || deviceId,
     playbackState: state,
-    position: Math.max(0, s.player.positionSec),
-    duration: s.duration || s.player.durationSec,
+    position: s.positionSec,
+    duration: s.durationSec,
     title: s.title,
     artist: s.artist,
     album: s.album,
@@ -778,10 +790,13 @@ export function startAirPlayService(): void {
   onAirPlayEvent((e) => {
     if (e.type === "byebye") {
       // Device vanished → force-stop any active session.
-      const s = sessions.get(e.id);
-      if (s) void stopSession(e.id);
+      if (hasActiveSession(e.id)) void stopSession(e.id);
     }
   });
+  // fork 模式:顺带把推流子进程拉起来(不阻塞启动流程;投屏时还有懒启动兜底)。
+  if (isAirPlayForkMode()) {
+    void ensureAirplayHost().catch((err) => log.error("airplay 子进程启动失败", { err: (err as Error)?.message || err }));
+  }
 }
 
 /** AirPlay renderer 插件是否启用(plugins 表 airplay-renderer 行)。 */
@@ -798,6 +813,10 @@ export function isAirPlayEnabled(): boolean {
  *  目标是零常驻资源(无网络监听/无定时器/无会话/无 peer/无 player 注册)。幂等。
  *  由插件管理页关闭 airplay-renderer 或启动时未启用时调用。 */
 export async function stopAirPlayService(): Promise<void> {
+  // 0. fork 模式:先停推流子进程(其 stop 语义 = 停全部会话 + TEARDOWN + kill ffmpeg)。
+  if (isAirPlayForkMode()) {
+    try { await airplaySupervisor.stop(); } catch { /* ignore */ }
+  }
   // 1. 停掉全部活跃会话(RAOP TEARDOWN + ffmpeg kill),释放音频资源。
   const activeIds = Array.from(sessions.keys());
   for (const id of activeIds) {
