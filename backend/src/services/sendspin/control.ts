@@ -7,7 +7,7 @@
 //                            与 DLNA/AirPlay 同一契约,复用 QueueController 的服务器权威逻辑;
 //   - controlSendspin()      把 play/pause/stop/seek/volume/mute 映射到 ProtocolPlayer。
 
-import { getSendspinServer, startSendspinService } from "./index.js";
+import { getSendspinFront, startSendspinService } from "./index.js";
 import type { RendererDevice } from "../../plugins/types.js";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
@@ -17,7 +17,8 @@ import type { QueueItem } from "../player/types.js";
 
 /** 枚举当前已连接/已登记的 Sendspin 客户端,渲染为可投屏的"播放器"设备。 */
 export async function listSendspinPlayers(): Promise<RendererDevice[]> {
-  const srv = getSendspinServer();
+  // fork 模式走镜像代理,in-proc 走真实 server —— 零分叉。
+  const srv = getSendspinFront();
   if (!srv) return [];
   const ids = new Set([...srv.clients.keys()]);
   return [...ids].map((clientId) => ({
@@ -37,7 +38,7 @@ export async function listSendspinPlayers(): Promise<RendererDevice[]> {
  *  Sendspin 是服务端角色,播放应走 QueueController(服务器权威的队列/自动切歌/换源);
  *  这里仅作为 renderer 契约的便捷入口:解析歌曲 → 构造 QueueItem → 经 ProtocolPlayer.playMedia。 */
 export async function castSendspin(deviceId: string, songId: string): Promise<{ mediaUri: string }> {
-  if (!getSendspinServer()) await startSendspinService();
+  if (!getSendspinFront()) await startSendspinService();
   const baseUrl = getEffectiveBaseUrl();
   const row: any = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!row) throw new Error("歌曲不存在");

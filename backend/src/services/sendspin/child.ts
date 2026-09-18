@@ -1,0 +1,115 @@
+// ==================== Sendspin 专属子进程入口 ====================
+//
+// 由 supervisor.ts fork(prod: dist/services/sendspin/child.js;dev: src/child.ts,
+// tsx loader 经 fork 继承)。与 batch/child.ts 同款「与主进程一致的 bootstrap,
+// 不启 HTTP/调度器」思路,但**常驻**而非一次性:
+//
+//   bootstrap(插件注册 + DB 建表/回填 + 外置插件发现,音源解析要用)
+//     → startSendspinInProcess(hooks)(WS 38927 + mDNS + 拨号 + 6053 桥 + 推流引擎)
+//     → mainReady(主进程 supervisor 解除等待)
+//     → 消息循环:RPC(playMedia/transport/poll/配对/拨号/6053…)+ cfg 热更新 + stop
+//
+// 事件回流:设备激活/断开/起播失败 → IPC → 主进程注册/注销 QC/PM 播放器。
+// 状态镜像:周期+脏触发推 state(150ms 节流 / 1s 兜底扫),主进程同步读。
+// 日志:stdio inherit → 与主进程同汇 docker logs。崩溃退出 → supervisor 退避重启。
+//
+// ⚠️ 本进程**不 import** ../player/*(QueueController/PlayerController 属主进程);
+//    播放操作一律走 playerCore(纯 server 内存对象),队列语义由主进程编排后下指令。
+
+import { registerBuiltinPlugins } from "../../plugins/builtins.js";
+import { initDatabase, backfillGenres } from "../../db/index.js";
+import { discoverExternalPlugins } from "../../plugins/discovery.js";
+import { createLogger } from "../../utils/logger.js";
+import { getServer, setServer } from "./runtime.js";
+import type { SendspinChildToParent, ParentToSendspinChild } from "./ipcProtocol.js";
+
+const log = createLogger("sendspin-child");
+const APP_VERSION = process.env.APP_VERSION || "dev";
+
+function send(msg: SendspinChildToParent): void {
+  if (typeof process.send === "function") process.send(msg);
+}
+
+let controller: import("./childMain.js").SendspinChildController | null = null;
+
+async function main(): Promise<void> {
+  const { startSendspinInProcess, stopSendspinInProcess } = await import("./index.js");
+  const { esphomeBridge } = await import("./esphomeBridge.js");
+  const { SendspinChildController } = await import("./childMain.js");
+
+  controller = new SendspinChildController(
+    {
+      getServer: () => getServer(),
+      stopRuntime: () => stopSendspinInProcess(childHooks),
+    },
+    send,
+  );
+
+  const childHooks = {
+    onActivated: (conn: any) => {
+      // 6053 只读桥接:设备 IP 从 Sendspin 连接自动派生(与主进程 registerServerPlayer 同款)。
+      esphomeBridge.attach(conn.remoteHost);
+      if (conn.clientId) {
+        send({
+          t: "activated",
+          clientId: conn.clientId,
+          name: conn.name || conn.clientId,
+          legacy: conn.legacy,
+        });
+      }
+      controller?.requestSnapshot(true);
+    },
+    onClosed: (conn: any) => {
+      if (!conn.clientId) return;
+      send({ t: "closed", clientId: conn.clientId });
+      controller?.requestSnapshot(true);
+    },
+  };
+
+  // 起 in-proc 运行时(端口/codec/6053 配置自读 DB —— WAL 多进程安全)。
+  await startSendspinInProcess(undefined, childHooks);
+  const srv = getServer();
+  send({ t: "mainReady", serverId: srv?.serverId ?? "", port: srv?.port ?? 0 });
+  controller.markReady();
+
+  process.on("message", async (raw: ParentToSendspinChild) => {
+    if (!raw || typeof raw !== "object") return;
+    try {
+      if (raw.t === "cfg") {
+        // 兼容旧路径:配置热更新统一走 RPC applyCfg;这里保留直发通道(免等 RPC 应答)。
+        await controller?.handleMessage({ t: "req", id: -1, op: "applyCfg", payload: raw.cfg });
+        return;
+      }
+      await controller?.handleMessage(raw);
+      if (raw.t === "stop") {
+        // stopRuntime 已在 req 处理内完成;给消息一拍冲刷时间后自杀(supervisor 兜底强杀)。
+        setTimeout(() => process.exit(0), 200);
+      }
+    } catch (e: any) {
+      log.error(`子进程消息处理失败: ${e?.message || e}`);
+    }
+  });
+}
+
+// ---- bootstrap(与 batch/child.ts 一致;音源解析/换源探测需要插件与库结构) ----
+process.on("uncaughtException", (e: any) => {
+  log.error(`sendspin 子进程未捕获异常,退出等重启: ${e?.message || e}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (e: any) => {
+  log.error(`sendspin 子进程未处理的 Promise 拒绝,退出等重启: ${(e as Error)?.message || e}`);
+  process.exit(1);
+});
+
+registerBuiltinPlugins();
+initDatabase();
+backfillGenres();
+discoverExternalPlugins(APP_VERSION)
+  .then(() => main())
+  .catch((e: any) => {
+    log.error("sendspin 子进程 bootstrap 失败", { err: e?.message || e });
+    process.exit(1);
+  });
+
+// setServer 引用保持(运行时装配在 index.ts 内完成;此处仅确保模块图完整)。
+void setServer;

@@ -29,8 +29,6 @@ import {
   castToAirPlayDevice,
 } from "../airplay/control.js";
 import { PlaybackState } from "../player/types.js";
-import { nowUs } from "../sendspin/clock.js";
-import { FIRST_FRAME_LEAD_US } from "../sendspin/streamEngine.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("ANNOUNCE");
@@ -232,102 +230,58 @@ async function waitUntilAirPlayIdle(deviceId: string, budgetMs = 300000): Promis
 //
 // 服务端自有推流管线:TTS 外链拉回解码成 PCM,直接按组时间线推给客户端,
 // 不经过曲库 pump。暂停/恢复/进度走通用 QueueController(队列冻结 + playFrom + seek)。
+// 双模式:sendspin 运行时已 fork 到专属子进程 —— 推帧/编码走子进程(RPC),
+// 队列冻结/恢复(QC)留主进程。in-proc(单测/子进程自身)直接调 playerCore。
 async function announceSendspin(opts: AnnounceOptions): Promise<{ targets: number }> {
   const { peerId, url } = opts;
-  const { getSendspinServer } = await import("../sendspin/index.js");
-  const { decodeToF32, SAMPLE_RATE, CHANNELS } = await import("../sendspin/encoding.js");
-  const srv = getSendspinServer();
-  if (!srv) throw new Error("sendspin 服务未运行");
-  const clientId = peerId.slice(9);
-  const conn = srv.clients.get(clientId);
-  const g = srv.group(clientId);
+  const { isForkMode } = await import("../sendspin/mode.js");
   const qc = getQueueController();
   const snap = qc.snapshot(peerId);
   const wasActive = snap.isActive && snap.currentIndex >= 0;
-  const wasPlaying = !!g.current;
-
-  // 现场:音量(连接+组)与进度。无 current(闲置Coordinator)则进度从 0 起。
-  const savedVol = conn?.volume ?? 100;
-  const savedGroupVol = g.volume;
-  const savedPos = g.current ? g.positionMs : 0;
+  // 现场(在播?进度?)必须在 deactivate **之前**捕获 —— deactivate 会停流清 current。
+  let probe: { wasPlaying: boolean; savedPos: number };
+  if (isForkMode()) {
+    const { sendspinSupervisor } = await import("../sendspin/supervisor.js");
+    if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
+    probe = await sendspinSupervisor.rpc("announceProbe", { peerId });
+  } else {
+    const { getSendspinServer } = await import("../sendspin/index.js");
+    const { announceProbeCore } = await import("../sendspin/playerCore.js");
+    const srv = getSendspinServer();
+    if (!srv) throw new Error("sendspin 服务未运行");
+    probe = announceProbeCore(srv, peerId);
+  }
   try {
     if (wasActive) qc.deactivate(peerId);
-    if (typeof opts.volume === "number") {
-      const v = Math.max(0, Math.min(100, Math.round(opts.volume)));
-      if (conn) conn.volume = v;
-      g.volume = v;
+    let result: { targets: number };
+    if (isForkMode()) {
+      const { sendspinSupervisor } = await import("../sendspin/supervisor.js");
+      // 播报可能长达数分钟(TTS 长文),RPC 超时放宽到 6min(内部另有 deadline 300s)。
+      result = await sendspinSupervisor.rpc(
+        "announce",
+        { peerId, url, volume: opts.volume, timeoutMs: opts.timeoutMs, savedPos: probe.savedPos },
+        360_000,
+      );
+    } else {
+      const { getSendspinServer } = await import("../sendspin/index.js");
+      const { announceCore } = await import("../sendspin/playerCore.js");
+      const srv = getSendspinServer();
+      if (!srv) throw new Error("sendspin 服务未运行");
+      result = await announceCore(srv, peerId, url, {
+        volume: opts.volume,
+        timeoutMs: opts.timeoutMs,
+        savedPos: probe.savedPos,
+      });
     }
-    // 拉 TTS → 解码 48k 立体声。外链抓取 15s 超时,失败直接进恢复流程抛错。
-    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
-    if (!resp.ok) throw new Error(`TTS 拉取失败: HTTP ${resp.status}`);
-    const pcm = await decodeToF32(new Uint8Array(await resp.arrayBuffer()));
-    // 入组(之前没在播就没成员)+ 宣告流格式,否则帧无处下发 / 客户端无格式丢弃。
-    // 播完后若是新加的则摘掉,恢复播报前成员原样。
-    let joined = false;
-    if (conn && !g.members.has(conn)) {
-      g.add(conn);
-      joined = true;
-    }
-    if (conn) conn.announceStream();
-    try {
-      // 固定 20ms 喂料(960 样本/声道):播报要短延迟出首声,粒度越小越早凑满首块。
-      // MA `chunk_duration_us = 25_000` 是**稳态推流**的粒度,播报属一次性短音频,
-      // 粒度取 20ms 让 libFLAC 尽快凑满 4096 样本的块(≈85ms)并回调首帧。
-      // ⚠️ 2026-09-17:此处已不再依赖任何编码器前瞻 —— flac 走**进程内 libFLAC**
-      // (`LibFlacEncoder`),`process_interleaved()` 同步返回、每回调恰好一帧,
-      // 无管道、无 ~1.1s 前瞻。flush() 只用于冲掉不足一块的尾帧。
-      const frameSamples = SAMPLE_RATE * CHANNELS * 20 / 1000;
-      const endCap = g.current && g.current.durationMs > 0 ? Math.max(0, g.current.durationMs - 500) : Infinity;
-      let cursor = g.timelineBaseUs;
-      let firstFrame = true;
-      const deadline = Date.now() + (opts.timeoutMs ?? 300000);
-      for (let off = 0; off < pcm.length; off += frameSamples) {
-        if (Date.now() > deadline) break;
-        const slice = pcm.subarray(off, Math.min(off + frameSamples, pcm.length));
-        const posMs = Math.min(savedPos + Math.round((off / frameSamples) * 20), endCap);
-        g.positionMs = posMs;
-        // 时间戳与曲库推流同一套模型(MA `push_stream.py:1313`):
-        // 首块锚在「当时墙钟 + 组公共 send_ahead」,之后**按实际产出样本数**累加。
-        // 锚点必须用与帧头同源的 send_ahead,否则 delta≠0 → 设备立即吐字节 → 断流。
-        if (firstFrame) {
-          firstFrame = false;
-          const aheadUs = g.commonSendAheadUs();
-          cursor = nowUs() + BigInt(Math.max(aheadUs, FIRST_FRAME_LEAD_US));
-        }
-        const produced = Number(await g.pushFrame(cursor, slice)) || 0;
-        cursor += BigInt(Math.round(((produced > 0 ? produced : Math.floor(slice.length / CHANNELS)) / SAMPLE_RATE) * 1_000_000));
-        g.timelineBaseUs = cursor;
-        await new Promise(r => setTimeout(r, 20));
-      }
-      // 逼出编码器内部尚未吐出的尾帧:不 flush 则 ≤1.1s 的短播报可能一帧都没出去
-      // (ffmpeg 前瞻窗口,与调度粒度无关);顺带让首段拿到真实 STREAMINFO。
-      for (const c of [...g.members]) {
-        const enc = g.encoderFor(c);
-        if (!enc.flush) continue;
-        try {
-          const tail = await enc.flush();
-          for (const ck of tail) {
-            if (!ck?.data || ck.data.length === 0) continue;
-            c.sendAudio(cursor, ck.data);
-            cursor += BigInt(Math.round(((ck.frameSamples ?? 0) / SAMPLE_RATE) * 1_000_000));
-          }
-        } catch { /* 尾帧失败不影响主流程 */ }
-      }
-      g.timelineBaseUs = cursor;
-    } finally {
-      if (joined && conn) g.remove(conn);
-    }
-    if (conn) conn.volume = savedVol;
-    g.volume = savedGroupVol;
-    if (wasActive && wasPlaying) {
+    if (wasActive && probe.wasPlaying) {
       const baseUrl = getEffectiveBaseUrl();
       await qc.playFrom(peerId, snap.items, snap.currentIndex, baseUrl);
-      if (savedPos > 2000) {
-        await new Promise(r => setTimeout(r, 1200));
-        await qc.transport(peerId, "seek", Math.floor(savedPos / 1000)).catch(() => {});
+      if (probe.savedPos > 2000) {
+        await new Promise((r) => setTimeout(r, 1200));
+        await qc.transport(peerId, "seek", Math.floor(probe.savedPos / 1000)).catch(() => {});
       }
     }
-    return { targets: 1 };
+    return { targets: result.targets };
   } finally {
     running.delete(peerId);
   }

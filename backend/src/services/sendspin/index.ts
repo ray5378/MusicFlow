@@ -1,6 +1,15 @@
 // ==================== Sendspin 生命周期装配(renderer 插件) ====================
 //
-// 把 SendspinServer(services/sendspin/*)装配成核心可用的单例:插件启用时
+// 双运行模式(2026-09-18 起):
+//  - **fork 模式(生产默认)**:整个 sendspin 运行时(WS 38927 + 解码/编码/推流 +
+//    mDNS + 拨号 + 6053 桥)跑在**专属常驻子进程**,与主进程(前端 API/后台任务/批量)
+//    的事件循环彻底隔离 —— 推流 25ms 节奏不再被任何主进程阻塞干扰。主进程通过
+//    supervisor(IPC 桥)+ proxy(状态镜像)访问;播放器注册/注销经事件回调在主进程完成。
+//  - **in-proc 模式(单测/MUSICFLOW_SENDSPIN_INPROC=1)**:现状装配,QC/PM 直接注册,
+//    测试无需 fork。子进程自身(MUSICFLOW_SENDSPIN_CHILD=1)也走本模式 —— 它就是
+//    "运行时本体",只是 QC/PM 状态改由 IPC 事件回传主进程。
+//
+// 插件启用时:
 //  1. 加载/创建静态身份(数据目录 0600);
 //  2. 实例化 SendspinServer(initiator,主动拨号已配对/登记的 responder);
 //  3. 连接就绪后,把每个客户端注册为 QueueController 里的服务器权威播放器,
@@ -43,14 +52,26 @@ async function ensureControllers(): Promise<void> {
   }
 }
 import { setServer, getServer } from "./runtime.js";
+import { getSendspinFront as getSendspinFrontImpl } from "./proxy.js";
+import { sendspinSupervisor } from "./supervisor.js";
+import { isForkMode } from "./mode.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
 
+// ==================== 运行模式判定(实现在 leaf mode.ts,re-export 保持旧路径) ====================
+export { isForkMode };
+
 export interface SendspinRuntime {
   server: SendspinServer;
   identity: Identity;
+}
+
+/** 生命周期钩子:child 模式用它把激活/断开事件回传主进程(替代 QC/PM 直注册)。 */
+export interface SendspinBootHooks {
+  onActivated?: (conn: SendspinConnection) => void;
+  onClosed?: (conn: SendspinConnection) => void;
 }
 
 /** 数据目录(可被测试覆盖)。 */
@@ -60,12 +81,14 @@ export function setSendspinIdentityDir(dir: string): void {
   identityDir = dir;
 }
 
+/** 真实 server 引用(仅 in-proc/child 模式非空;fork 模式下主进程没有 server 实例)。 */
 export function getSendspinServer(): SendspinServer | null {
   return getServer();
 }
 
 /** 对每个就绪连接的客户端,注册为 QueueController 服务器权威播放器(幂等)。
- *  用启动期缓存的单例,不再动态 import(见 ensureControllers)。 */
+ *  用启动期缓存的单例,不再动态 import(见 ensureControllers)。
+ *  fork 模式下主进程侧的等价逻辑在 startSendspinService 的 supervisor hooks 里。 */
 async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnection): Promise<void> {
   const qc = qcSingleton;
   const pm = pmSingleton;
@@ -75,7 +98,7 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   const displayName = conn.name || conn.clientId;
   // ESPHome 6053 **只读桥接**:设备 IP 从 Sendspin 连接里自动派生(见 server.ts
   // normalizeRemoteHost),用户无需手工填 host。这里只负责登记目标,真正的连接
-  // 由 esphomeBridge 按插件配置决定是否建立。
+  // 由 esphomeBridge 按插件配置决定是否建立。(child 模式由 child hooks 自行 attach。)
   esphomeBridge.attach(conn.remoteHost);
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   qc.registerSendspinDevice(conn.clientId, displayName);
@@ -86,7 +109,7 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
 }
 
 /** 读 sendspin-renderer 插件配置(plugins 表 config JSON)。缺省全开(MA 对齐)。
- *  导出供单测覆盖默认/非法回退。 */
+ *  导出供单测覆盖默认/非法回退。主进程与子进程各读各的连接(WAL 多进程安全)。 */
 export function readSendspinPluginConfig(): {
   allowLegacyClients: boolean;
   port: number;
@@ -128,10 +151,9 @@ export function readSendspinPluginConfig(): {
   }
 }
 
-/** 启动 Sendspin server(幂等):身份 → 实例 → 监听 :38927/sendspin。每个客户端
- *  完成 handshake+activate 后经 onActivated 回调注册为 QueueController 播放器。
- *  port 仅测试覆盖(默认读插件配置 port,缺省 WS_PORT=38927,避免多套件并行抢端口)。 */
-export async function startSendspinService(port?: number): Promise<SendspinRuntime> {
+/** in-proc 装配(当前实现原样;child 子进程与单测共用这条路径)。
+ *  hooks:child 模式传入(激活/断开事件走 IPC);缺省 = 主进程直注册 QC/PM。 */
+export async function startSendspinInProcess(port?: number, hooks?: SendspinBootHooks): Promise<SendspinRuntime> {
   const cur = getServer();
   if (cur) {
     return { server: cur, identity: cur.identity };
@@ -139,7 +161,8 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   const identity = await loadOrCreateIdentity(path.join(identityDir));
   const pluginCfg = readSendspinPluginConfig();
   // 控制器单例启动期一次抓取并 fail-fast:热路径(激活/停止/断开)不再动态 import。
-  await ensureControllers();
+  // child 模式不抓(QC/PM 属主进程,子进程拿了也没用,还引入重依赖图)。
+  if (!hooks) await ensureControllers();
   const pairingStore = await PairingStore.open(identityDir);
   // ESPHome 6053 只读桥接:按插件配置决定是否常驻 Native API 客户端(保活 + 状态镜像)。
   // 必须在 listen 之前:设备上线时 attach 才能立即建连接。
@@ -154,8 +177,18 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     serverName: "MusicFlow Sendspin",
     allowLegacyClients: pluginCfg.allowLegacyClients,
     preferredCodec: pluginCfg.preferredCodec,
-    onActivated: (conn) => void registerServerPlayer(srv, conn),
+    onActivated: (conn) => {
+      if (hooks?.onActivated) {
+        hooks.onActivated(conn);
+        return;
+      }
+      void registerServerPlayer(srv, conn);
+    },
     onClosed: async (conn) => {
+      if (hooks?.onClosed) {
+        hooks.onClosed(conn);
+        return;
+      }
       // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
       if (!conn.clientId) return;
       try {
@@ -181,14 +214,21 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   // 播放器自动发现:浏览 _sendspin._tcp,新设备出现即拨号(只发现不自动播)。
   // 与记忆重拨互补:没拨过的设备靠这个首次出现。
   if (pluginCfg.autoDiscover) startPlayerDiscovery(srv);
-  // 空闲回收兜底(进程级去重注册):清无成员组。
-  void ensureCleanerRegistered();
+  // 空闲回收兜底:主进程挂到内存回收总线;child 进程自挂周期清扫(无人驱动 reclaim)。
+  if (hooks) {
+    const t = setInterval(() => {
+      try { reclaimSendspinOrphans(); } catch { /* ignore */ }
+    }, 600_000);
+    t.unref?.();
+  } else {
+    void ensureCleanerRegistered();
+  }
   log.info(`sendspin server started: ${srv.serverId}`);
   return { server: srv, identity };
 }
 
-/** 停止 Sendspin server(幂等):反注册全部 sendspin 播放器 + 关闭连接/组。 */
-export async function stopSendspinService(): Promise<void> {
+/** in-proc 卸载(关服务/停 mDNS/停桥接/停定时器;QC/PM 反注册仅主进程默认路径)。 */
+export async function stopSendspinInProcess(hooks?: SendspinBootHooks): Promise<void> {
   if (redialTimer) {
     clearInterval(redialTimer);
     redialTimer = null;
@@ -199,17 +239,135 @@ export async function stopSendspinService(): Promise<void> {
   const srv = getServer();
   if (!srv) return;
   unadvertiseSendspinServer();
-  qcSingleton?.unregisterSendspinDevices();
-  try {
-    pmSingleton?.removeSendspinPeers();
-  } catch { /* peer 层未就绪时忽略 */ }
+  if (!hooks) {
+    qcSingleton?.unregisterSendspinDevices();
+    try {
+      pmSingleton?.removeSendspinPeers();
+    } catch { /* peer 层未就绪时忽略 */ }
+  }
   srv.stop();
   setServer(null);
   log.info("sendspin server stopped");
 }
 
+/** 启动 Sendspin 服务(幂等,模式自适应):
+ *  fork 模式 = 拉起/复用专属子进程(播放器注册经事件回主进程);
+ *  in-proc 模式 = 直装配(单测/子进程自身)。 */
+export async function startSendspinService(port?: number): Promise<SendspinRuntime | null> {
+  if (!isForkMode()) {
+    return startSendspinInProcess(port);
+  }
+  // ---- fork 模式:主进程侧只管 IPC 桥 ----
+  if (sendspinSupervisor.isRunning()) return null;
+  const pluginCfg = readSendspinPluginConfig();
+  // QC/PM 注册发生在 supervisor 事件回调里,单例必须先就绪。
+  await ensureControllers();
+  sendspinSupervisor.setHooks({
+    onActivated: (clientId, name, legacy) => {
+      try { qcSingleton?.registerSendspinDevice(clientId, name); } catch { /* ignore */ }
+      try { pmSingleton?.registerSendspin(clientId, name, true, legacy); } catch { /* peer 未就绪忽略 */ }
+    },
+    onClosed: (clientId) => {
+      try { pmSingleton?.removeSendspinPeer(clientId); } catch { /* ignore */ }
+    },
+    onPlayFailed: (clientId, songId, message) => {
+      log.warn(`sendspin play ${songId} failed(client=${clientId}): ${message}`);
+    },
+  });
+  await sendspinSupervisor.start(port ?? pluginCfg.port);
+  return null;
+}
+
+/** 停止 Sendspin 服务(幂等):反注册全部 sendspin 播放器 + 关连接/组 + 杀子进程。 */
+export async function stopSendspinService(): Promise<void> {
+  if (isForkMode()) {
+    await sendspinSupervisor.stop();
+    qcSingleton?.unregisterSendspinDevices();
+    try {
+      pmSingleton?.removeSendspinPeers();
+    } catch { /* peer 层未就绪时忽略 */ }
+    log.info("sendspin 服务已停止(子进程已退出)");
+    return;
+  }
+  await stopSendspinInProcess();
+}
+
+/** 主进程侧 sendspin 外观:fork=镜像代理;in-proc=真实 server。未运行返回 null。
+ *  ⚠️ 路由/外围代码一律用它,不要用 getSendspinServer()(后者 fork 模式恒 null)。
+ *  proxy.ts 静态导入(index → proxy → supervisor → ipcProtocol,无环):模式内部判定,
+ *  调用方零分叉,不存在"注册完成前返回 null"的装配竞态。 */
+export function getSendspinFront(): import("./proxy.js").SendspinServerLike | null {
+  return getSendspinFrontImpl(isForkMode());
+}
+
+/** ESPHome 6053 只读桥接状态(fork 走 RPC,in-proc 直读桥接单例)。 */
+export async function sendspinEsphomeStatus(): Promise<{
+  enabled: boolean;
+  pskConfigured: boolean;
+  port: number;
+  devices: unknown[];
+}> {
+  if (isForkMode()) {
+    const { proxyEsphomeStatus } = await import("./proxy.js");
+    return proxyEsphomeStatus();
+  }
+  const srv = getServer();
+  const cfg = esphomeBridge.currentConfig();
+  return {
+    enabled: srv ? cfg.enabled : false,
+    // ⚠️ 永远不要把 PSK 回显给前端,只回报是否配置。
+    pskConfigured: !!cfg.psk,
+    port: cfg.port,
+    devices: srv ? esphomeBridge.snapshot() : [],
+  };
+}
+
+/** 插件配置热更新:preferredCodec / allowLegacyClients / 6053 桥接,一条路径覆盖
+ *  in-proc 与 fork(fork 经 RPC 让子进程自应用)。端口变更不在此 —— 需重启监听,
+ *  由路由层走 stop/start(杀子进程重建)。 */
+export async function applySendspinConfigHotUpdate(): Promise<void> {
+  const cfg = readSendspinPluginConfig();
+  if (isForkMode()) {
+    try {
+      await sendspinSupervisor.rpc("applyCfg", cfg);
+    } catch (e: any) {
+      log.warn(`sendspin 配置热更新下发失败(子进程未运行?下次启动读配置): ${e?.message || e}`);
+    }
+    return;
+  }
+  const srv = getServer();
+  if (srv) {
+    srv.allowLegacyClients = cfg.allowLegacyClients;
+    srv.preferredCodec = cfg.preferredCodec;
+  }
+  esphomeBridge.configure({
+    enabled: cfg.esphomeMirror,
+    psk: cfg.esphomePsk,
+    port: cfg.esphomePort,
+  });
+}
+
+/** 解除配对(fork 经 RPC 在子进程执行):删配对记录 + 断开该客户端现存连接
+ *  (下次连回落 sentinel,走重新配对/批准 —— 与子进程内 unpair op 同语义)。 */
+export async function sendspinUnpair(clientId: string): Promise<boolean> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return false;
+    return sendspinSupervisor.rpc<boolean>("unpair", { clientId });
+  }
+  const srv = getServer();
+  if (!srv?.pairingStore) return false;
+  const ok = await srv.pairingStore.removeRecord(clientId);
+  for (const conn of [...srv.clients.values()]) {
+    if (conn.clientId === clientId) {
+      try { conn.close(); } catch { /* ignore */ }
+    }
+  }
+  return ok;
+}
+
 /** 记住的拨号目标: dial route 成功即记入,重启/掉线后自动重拨。
- *  存 MUSICFLOW_DATA_DIR/sendspin/dial_targets.json(设备记录,非插件配置)。 */
+ *  存 MUSICFLOW_DATA_DIR/sendspin/dial_targets.json(设备记录,非插件配置)。
+ *  fork 模式下文件归子进程所有(重拨循环在子进程),主进程经 RPC 读写。 */
 export interface DialTarget {
   host: string;
   port: number;
@@ -250,12 +408,22 @@ async function saveDialTargets(): Promise<void> {
   } catch { /* 忽略落盘失败 */ }
 }
 
-export function listDialTargets(): DialTarget[] {
+/** 列出拨号目标(fork 经 RPC 问子进程 —— 文件所有权在子进程)。 */
+export async function listDialTargets(): Promise<DialTarget[]> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return [];
+    return sendspinSupervisor.rpc<DialTarget[]>("dialList");
+  }
   return dialTargets.map((t) => ({ ...t }));
 }
 
 /** 记住拨号目标(幂等,host+port 去重)。 */
 export async function rememberDialTarget(host: string, port: number): Promise<void> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return;
+    await sendspinSupervisor.rpc("dialRemember", { host, port });
+    return;
+  }
   if (!dialTargets.some((t) => t.host === host && t.port === port)) {
     dialTargets.push({ host, port, addedAt: Date.now() });
     await saveDialTargets();
@@ -264,6 +432,10 @@ export async function rememberDialTarget(host: string, port: number): Promise<vo
 
 /** 忘记拨号目标;若在线(本服务拨出的)则一并断开,不再重拨。 */
 export async function forgetDialTarget(host: string, port: number): Promise<boolean> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return false;
+    return sendspinSupervisor.rpc<boolean>("dialForget", { host, port });
+  }
   const before = dialTargets.length;
   dialTargets = dialTargets.filter((t) => !(t.host === host && t.port === port));
   if (dialTargets.length === before) return false;
@@ -280,7 +452,7 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
 }
 
 async function dialRemembered(srv: SendspinServer): Promise<void> {
-  for (const t of listDialTargets()) {
+  for (const t of dialTargets.map((x) => ({ ...x }))) {
     const online = [...srv.clients.values()].some(
       (c) => c.dialed && c.dialHost === t.host && c.dialPort === t.port,
     );
@@ -301,8 +473,10 @@ async function dialRemembered(srv: SendspinServer): Promise<void> {
 }
 
 /** 空闲回收兜底:清掉无成员的组(pump 已停+编码器已关,双重保险)并上报。
- *  日常路径由 onConnectionClosed 即时处理;这里只扫异常残留(如 stop 期间的竞态)。 */
+ *  日常路径由 onConnectionClosed 即时处理;这里只扫异常残留(如 stop 期间的竞态)。
+ *  fork 模式下回收在子进程内自治,主进程侧只回报说明。 */
 export function reclaimSendspinOrphans(): string {
+  if (isForkMode()) return "sendspin:子进程模式(回收自治)";
   const srv = getServer();
   if (!srv) return "sendspin:未运行";
   let groups = 0;
@@ -340,15 +514,9 @@ export function isSendspinEnabled(): boolean {
 
 /** ESPHome 6053 只读桥接状态快照(供 /v1/sendspin/esphome 与排障日志消费)。 */
 export function listEsphomeMirror(): EsphomeDeviceMirror[] {
+  if (isForkMode()) return [];
   return esphomeBridge.snapshot();
 }
 
-/** 插件配置保存后的热更新入口:重读配置并重配 6053 桥接。PSK/端口变化会重建连接。 */
-export function reconfigureEsphomeMirror(): void {
-  const cfg = readSendspinPluginConfig();
-  esphomeBridge.configure({
-    enabled: cfg.esphomeMirror,
-    psk: cfg.esphomePsk,
-    port: cfg.esphomePort,
-  });
-}
+/** 兼容别名:热更新统一走 applySendspinConfigHotUpdate。 */
+export const reconfigureEsphomeMirror = applySendspinConfigHotUpdate;

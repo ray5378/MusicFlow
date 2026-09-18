@@ -59,12 +59,12 @@ describe("sendspin 拨号目标持久化", () => {
   it("remember → 落盘 → 重启服务自动重拨;forget 清掉", async () => {
     if (!child) return;
     await rememberDialTarget("127.0.0.1", LISTEN_PORT);
-    expect(listDialTargets()).toEqual([
+    expect(await listDialTargets()).toEqual([
       expect.objectContaining({ host: "127.0.0.1", port: LISTEN_PORT }),
     ]);
     // 幂等:重复记住不翻倍
     await rememberDialTarget("127.0.0.1", LISTEN_PORT);
-    expect(listDialTargets().length).toBe(1);
+    expect((await listDialTargets()).length).toBe(1);
 
     await startSendspinService(PORT);
     // 启动即拨(后台):peer 出现
@@ -80,7 +80,7 @@ describe("sendspin 拨号目标持久化", () => {
 
     // forget:删记录 + 断开在线连接
     expect(await forgetDialTarget("127.0.0.1", LISTEN_PORT)).toBe(true);
-    expect(listDialTargets().length).toBe(0);
+    expect((await listDialTargets()).length).toBe(0);
     await waitFor(() => !peerPresent(), 15000, "等忘掉后断开");
     expect(await forgetDialTarget("127.0.0.1", LISTEN_PORT)).toBe(false);
     void srv;

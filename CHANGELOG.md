@@ -2,6 +2,37 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.34] - 2026-09-18
+
+### 架构 —— Sendspin 强制独立子进程(fork 隔离)
+
+- **动机**:sendspin 推流是 25ms 节奏的硬实时循环(解码 → FLAC 编码 → 逐帧下发),
+  与主进程(API 路由 / 后台批量任务 / 前端状态轮询)共享事件循环时,任何长任务都会
+  顶住推流节奏,表现为真机端周期性卡顿。现把**整个 sendspin 运行时**(WS 38927 +
+  mDNS + 拨号重拨 + 解码/编码/推流 + ESPHome 6053 只读桥)fork 进**专属常驻子进程**,
+  事件循环与主进程彻底隔离。
+- **通信协议**(`ipcProtocol.ts`):状态读走「快照推送」(脏了立即推,150ms 节流 +
+  1s 兜底扫);命令写走 RPC(自增 id 回填,超时 25s / stop 15s / announce 360s);
+  心跳 30s,主进程看门狗 3 周期无心跳即判定卡死并退避重启(3s→30s,稳定 5min 复位)。
+  `positionMs` 高频字段**不进快照**,走 poll 轮询,防 IPC 风暴。
+- **状态镜像 + 命令代理**(`proxy.ts`):主进程不再持有 server 实例 —— 路由/外围代码
+  统一经 `getSendspinFront()`:fork 模式返回镜像代理(同步读快照、写走 RPC、mute
+  setter 本地即时反馈),in-proc(单测/子进程自身)返回真实 server,调用方**零分叉**。
+  类型哨兵 `AssertServerLike` 编译期锁定代理与真实 server 的公共结构。
+- **核心下沉**(`playerCore.ts`):推流操作核心(play/stop/pause/seek/volume/poll/
+  announce 等)从 protocolPlayer / announce.ts 原样抽取,跟随真实 server 进程运行,
+  不 import QueueController/PlayerManager —— 主进程状态(队列冻结/恢复/播放器注册)
+  留在主进程。播报现场(在播/进度)拆出 `announceProbeCore`,必须在 `qc.deactivate`
+  **之前**捕获(时序坑:deactivate 清 current,之后捕获恒为零)。
+- **配对密钥不外泄**:镜像快照**剥离 `pskHex`/`pskId`** —— 配对密钥永不出子进程;
+  端口变更等配置热更新经 RPC `applyCfg` 下发,主进程 DB 仍是配置单一可信源。
+- **崩溃自愈**:子进程 uncaughtException → exit(1),supervisor 退避重启;`stop` 走
+  优雅关停(反注册/关连接/停 mDNS)后退出。单测与子进程共用 `MUSICFLOW_SENDSPIN_INPROC=1`
+  装配路径,测试路径 = 生产路径(新增 `childMain.test.ts` 8 例:快照剥离 PSK /
+  RPC 回包契约 / announceProbe 时序 / unpair 断连)。
+- 文档:`docs/SENDSPIN_FLAC_ROADMAP.md` 标记完成(任务 1 真机基线一次达标:flac +
+  codec_header 协商生效,零 Lost sync / 零解码报错 / 零 underrun,任务 2 无需进行)。
+
 ## [3.0.33] - 2026-09-18
 
 ### 文档

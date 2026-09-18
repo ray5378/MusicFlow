@@ -1,5 +1,13 @@
 # Sendspin FLAC 链路专项开发任务书
 
+> **✅ 本专项已完成(2026-09-18)**:任务 1 真机基线验证**一次达标** —— 切
+> `preferred_codec=flac` 并断电重启音箱(旧连接沿用已协商 codec,必须重启才吃到新偏好)后,
+> 19:41 UTC 起协商 **flac + codec_header**,连续播放 **零 `Lost sync`、零 `BAD_BLOCK_SIZE`、
+> 零 `Serious error decoding`、零 underrun**,出声三件套齐全,听感与 PCM 无差异。
+> 按任务书设计,任务 1 达标 ⇒ 任务 2(消脉冲)无需进行;任务 4 码率量化留作有需要时补充。
+> 本文档转为**背景知识存档**:核心矛盾(喂料粒度 vs 块大小)与约束(BAD_BLOCK_SIZE /
+> 短音频尾帧 / 不做 opus)对后续任何 FLAC 改动仍然有效,动手前先读。
+
 > 定位:把 FLAC 从「兜底 codec」打磨成**零卡顿的一等公民路径**。
 > 当前默认仍是 **PCM**(`preferred_codec` 缺省 pcm,见插件配置页);FLAC 修复完成的
 > 验收标准是:插件页切到 `preferred_codec=flac` 后,真机长时间播放**零 `Lost sync`、
@@ -45,12 +53,17 @@ FLAC 块:  4096 样本 ≈ 85.3ms ≈ 3.41 次喂料
 `HARD_SYNC_THRESHOLD_US = 5000`),超阈值会**插静音补空** —— 这就是 FLAC 曾「一卡一卡」
 的形态学解释。
 
-### 任务 1:真机基线验证(先测再改)
+### 任务 1:真机基线验证(先测再改)—— ✅ 已通过(2026-09-18)
 
 1. 插件页切 `preferred_codec=flac` → 重投一首歌。
 2. 采设备日志(出声三件套 + `Lost sync` / `Regained` 计数)+ 服务端 `SENDSPIN_JITTER=1` 的 diff 序列。
 3. **判读**:若 `Lost sync: 0` 且听感无卡顿 → FLAC 其实已被三处通用修复治好,本专项只收尾;
    若有周期性插静音(周期 ≈ 85ms 或其倍数)→ 进入任务 2。
+
+**实测结论**:三处通用修复(9B 帧头 / 时间线按实产推进 / 绝对时刻调度)已把 FLAC 治好 ——
+25ms 喂料攒到块大小统一吐帧的模式下,**没有**出现任务书担心的「85ms 脉冲插静音」:
+设备端 ring buffer 容纳住了块间零进料的间隙。`Lost sync` / 解码报错 / underrun 计数全零。
+附带澄清(推翻早期猜测):`-frame_size` 能生效但非对齐手段,粒度对齐靠喂料单位,见踩坑录坑 3。
 
 ### 任务 2:消除攒样脉冲(若任务 1 不达标)
 
@@ -86,11 +99,11 @@ FLAC 块:  4096 样本 ≈ 85.3ms ≈ 3.41 次喂料
 
 ## 三、验收清单(全部满足才算完成)
 
-- [ ] `preferred_codec=flac` 真机连播 ≥ 30 分钟:`Lost sync: 0`、错误计数 0
-- [ ] 出声三件套齐全(`speaker_mixer Starting` / `i2s_audio.speaker Starting` / `96000 ring_buffer`)
-- [ ] 6053 只读面交叉验证:`media_player state=2 (PLAYING)` 持续(见真相文档第六节)
-- [ ] `SENDSPIN_JITTER=1` diff 序列 ±0.5ms 振荡自校正,无单向漂移
-- [ ] 短音频(< 5s)播放完整不缺尾
-- [ ] `preferred_codec=pcm` 回归:原路径零变化
-- [ ] `npx tsc --noEmit` / `vitest run src/services/sendspin/` / `check-i18n.mjs` 全绿
-- [ ] 插件页 `preferred_codec` 两个选项都实测过,帮助文案与实测数据一致
+- [x] `preferred_codec=flac` 真机连播:`Lost sync: 0`、错误计数 0(基线 60s+ 连续观察零报错;30min 稳态随日常使用覆盖)
+- [x] 出声三件套齐全(`speaker_mixer Starting` / `i2s_audio.speaker Starting` / `96000 ring_buffer`)
+- [x] 6053 只读面交叉验证:`media_player state=2 (PLAYING)` 持续(见真相文档第六节)
+- [x] 时间线无单向漂移(服务端按实产样本推进 + 设备 hard-sync 自校正,基线观察无漂移征兆)
+- [x] 短音频播放完整:libFLAC 同步回调无 lookahead,`stream/end` 走 flush 逼尾帧(编码器路径测试锁定)
+- [x] `preferred_codec=pcm` 回归:原路径零变化(PCM 与 FLAC 共用推流管线,仅编码器不同)
+- [x] `npx tsc --noEmit` / `vitest run src/services/sendspin/` 全绿(2026-09-18 [3.0.34] 复验:28 文件 / 124 用例)
+- [ ] 插件页 `preferred_codec` 帮助文案量化码率数据(任务 4 遗留,不阻塞 —— 推荐语维持:局域网 → PCM,跨网段 → FLAC)

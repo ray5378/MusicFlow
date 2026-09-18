@@ -59,7 +59,7 @@ import { getEventManager } from "../../services/dlna/eventing.js";
 import { getQueueManager } from "../../services/dlna/queue.js";
 import { getPeerManager, parsePeerId, type LocalPlaybackReport } from "../../services/peer.js";
 import { listAirPlayDevices, castToAirPlayDevice, getAirPlayPeerStatus, setAirPlayMuted, setAirPlayAlias, setAirPlayDisabled, deleteAirPlayDeviceRecord, isAirPlayDeviceDisabled, stopAirPlaySession, isAirPlayEnabled, startAirPlayService, stopAirPlayService } from "../../services/airplay/control.js";
-import { startSendspinService, stopSendspinService, getSendspinServer } from "../../services/sendspin/index.js";
+import { startSendspinService, stopSendspinService, getSendspinFront } from "../../services/sendspin/index.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
@@ -878,28 +878,18 @@ apiRoutes.put("/v1/plugins/:id", adminMiddleware, async (c) => {
   // sendspin legacy 开关热更新:运行时直接改 server 标志,已连会话不受影响,
   // 新连按新值执行(无需重启插件)。
   if (body.config !== undefined && (p.id === "sendspin-renderer" || p.name === "sendspin-renderer")) {
+    // 配置热更新(codec/legacy/6053 桥接)统一入口:sendspin 运行时已 fork 到子进程,
+    // 这里经 RPC 把整份配置下发给子进程自应用(in-proc 模式直接改 server 字段)。
     try {
-      const { getSendspinServer } = await import("../../services/sendspin/index.js");
-      const srv = getSendspinServer();
-      if (srv) {
-        srv.allowLegacyClients = (body.config as any)?.allow_legacy_clients !== false;
-        // 默认编码热切换:只影响**之后**建立的新连接/新起播流,当前这条流不断
-        // (改完后重新投一次即可按新 codec 出声)。
-        const { normalizeCodecPreference } = await import("../../services/sendspin/server.js");
-        srv.preferredCodec = normalizeCodecPreference((body.config as any)?.preferred_codec);
-      }
-      // ESPHome 6053 只读桥接热更新:开关 / PSK / 端口变化会重建连接(详见 esphomeBridge)。
-      try {
-        const { reconfigureEsphomeMirror } = await import("../../services/sendspin/index.js");
-        reconfigureEsphomeMirror();
-      } catch { /* 服务未运行时忽略 */ }
+      const { applySendspinConfigHotUpdate } = await import("../../services/sendspin/index.js");
+      await applySendspinConfigHotUpdate();
     } catch { /* 服务未运行时忽略,下次启动读配置 */ }
-    // 端口变更需重启监听才生效:自动重启服务(已连客户端断开后按记住目标重拨)。
+    // 端口变更需重启监听才生效:杀子进程重建(已连客户端断开后按记住目标重拨)。
     try {
       const cfg = (body.config as any) || {};
-      const { getSendspinServer: getSrv, stopSendspinService, startSendspinService } =
+      const { getSendspinFront, stopSendspinService, startSendspinService } =
         await import("../../services/sendspin/index.js");
-      const srv = getSrv();
+      const srv = getSendspinFront();
       if (srv && cfg.port !== undefined) {
         const want = Number(cfg.port);
         if (Number.isInteger(want) && want >= 1 && want <= 65535 && want !== srv.port) {
@@ -2732,7 +2722,8 @@ apiRoutes.post("/v1/airplay/cast", async (c) => {
 // - approve/unpair:未配对批准管理与配对解除
 // 配对与审批属管理操作,统一 adminMiddleware;clients 列表沿用全局登录鉴权。
 function sendspinServerOr404(c: any) {
-  const srv = getSendspinServer();
+  // fork 模式下这是「镜像代理」:同步读走子进程推送的状态快照,写走 RPC。
+  const srv = getSendspinFront();
   if (!srv) return null;
   return srv;
 }
@@ -2765,16 +2756,15 @@ apiRoutes.get("/v1/sendspin/esphome", async (c) => {
   // ESPHome 6053 **只读桥接**状态:设备侧真实回眸的 media_player state / volume。
   // 用途 = 服务端之外的独立判据(「推的流有没有真的在播」),不可用于控制
   // (设备未宣告 SEEK / NEXT_TRACK / PLAY,且音量应留在 Sendspin group volume)。
-  const { getSendspinServer } = await import("../../services/sendspin/index.js");
-  const { esphomeBridge } = await import("../../services/sendspin/esphomeBridge.js");
-  const srv = getSendspinServer();
-  const cfg = esphomeBridge.currentConfig();
+  // 6053 桥接跑在 sendspin 子进程内:fork 模式经 RPC 取状态,in-proc 直读单例。
+  const { sendspinEsphomeStatus } = await import("../../services/sendspin/index.js");
+  const st = await sendspinEsphomeStatus();
   return c.json({
-    enabled: srv ? cfg.enabled : false,
+    enabled: st.enabled,
     // ⚠️ 永远不要把 PSK 回显给前端,只回报是否配置。
-    pskConfigured: !!cfg.psk,
-    port: cfg.port,
-    devices: srv ? esphomeBridge.snapshot() : [],
+    pskConfigured: st.pskConfigured,
+    port: st.port,
+    devices: st.devices,
   });
 });
 
@@ -2782,14 +2772,13 @@ apiRoutes.post("/v1/sendspin/esphome/test", adminMiddleware, async (c) => {
   // 一次性握手探针:用用户**此刻填的** PSK 立即验证,不影响常驻桥接实例。
   // host 不必传 —— 默认取当前任意已连 Sendspin 设备的对端 IP(见 remoteHost)。
   const { probeEsphome } = await import("../../services/sendspin/esphomeBridge.js");
-  const { getSendspinServer } = await import("../../services/sendspin/index.js");
   const body = await c.req.json().catch(() => ({} as any));
   const psk = typeof body?.psk === "string" ? body.psk.trim() : "";
   const portRaw = Number(body?.port);
   const port = Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535 ? portRaw : 6053;
   let host = typeof body?.host === "string" ? body.host.trim() : "";
   if (!host) {
-    const srv = getSendspinServer();
+    const srv = getSendspinFront();
     host = srv ? [...srv.clients.values()].map((conn) => conn.remoteHost).find(Boolean) ?? "" : "";
   }
   const r = await probeEsphome(host, psk, port, 10_000);
@@ -2912,7 +2901,7 @@ apiRoutes.get("/v1/sendspin/dial-targets", adminMiddleware, async (c) => {
   );
   return c.json({
     enabled: true,
-    targets: listDialTargets().map((t) => ({ ...t, online: online.has(`${t.host}:${t.port}`) })),
+    targets: (await listDialTargets()).map((t) => ({ ...t, online: online.has(`${t.host}:${t.port}`) })),
   });
 });
 
@@ -2936,13 +2925,9 @@ apiRoutes.post("/v1/sendspin/unpair", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const { clientId } = body;
   if (typeof clientId !== "string" || !clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
-  await srv.pairingStore.removeRecord(clientId);
-  // 解绑即断开该客户端现存连接:下次连回落到 sentinel,走重新配对/批准。
-  for (const conn of [...srv.clients.values()]) {
-    if (conn.clientId === clientId) {
-      try { conn.close(); } catch { /* ignore */ }
-    }
-  }
+  // 解绑即断开该客户端现存连接(连接归 sendspin 子进程管,fork 模式经 RPC 一并处理)。
+  const { sendspinUnpair } = await import("../../services/sendspin/index.js");
+  await sendspinUnpair(clientId);
   return c.json({ success: true });
 });
 
@@ -3189,7 +3174,7 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
       : parsed.kind === "airplay"
         ? getAirPlayPeerStatus(parsed.id).media
         : parsed.kind === "sendspin"
-          ? getSendspinServer()?.currentMedia(parsed.id)
+          ? getSendspinFront()?.currentMedia(parsed.id)
           : undefined
     : undefined;
   const items = Array.isArray(snap.items) ? snap.items : [];
@@ -3813,8 +3798,9 @@ apiRoutes.post("/v1/peers/:peerId/mute", async (c) => {
     // 与 DLNA RenderingControl SetMute 同语义:独立于音量的开关,取消恢复原音量。
     // 组即该客户端专属组(见 protocolPlayer),两处都置位;离线重连后组标记仍有效。
     try {
-      const srv = getSendspinServer();
+      const srv = getSendspinFront();
       if (!srv) throw new Error("sendspin 服务未运行");
+      // 镜像视图的 muted setter = 本地即时更新 + RPC 下发子进程(fork 模式)。
       srv.group(parsed.id).muted = muted;
       const conn = srv.clients.get(parsed.id);
       if (conn) conn.muted = muted;
@@ -3881,7 +3867,7 @@ apiRoutes.get("/v1/peers/:peerId/status", async (c) => {
     try {
       const st = await getQueueController().getPlayerState(parsed.id);
       if (!st) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 404);
-      const srv = getSendspinServer();
+      const srv = getSendspinFront();
       // 音量权威 = 组音量(setVolume 只写组;conn.volume 是每连接 trim,恒 100)。
       const volume = srv?.groups.get(parsed.id)?.volume ?? srv?.clients.get(parsed.id)?.volume;
       const muted = srv?.clients.get(parsed.id)?.muted ?? srv?.groups.get(parsed.id)?.muted ?? false;
