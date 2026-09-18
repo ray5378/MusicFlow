@@ -66,6 +66,10 @@
 >   本就经 QC transport→组 player，零改动）；watchdog 探活/对齐仅 dlna 成员，
 >   悬挂判定含 sendspin 在线，回归时在线 spin 成员重新入组；
 >   断开清理已验证（单 group 指针＋空组删 pump，见 server.ts）。
+> - [x] **T5 前端群组对话框 sendspin 成员**（已合入）：
+>   `selectableDevices` 并入在线 sendspin 客户端（`sendspin:<id>` 形式，
+>   与后端命名空间一致；裸 id 仍视为 DLNA）；对话框加载时同步拉取；
+>   行内区分显示＋改名覆盖；`vue-tsc` 过。
 
 1. 路由层：`POST /v1/groups/:id/members`（增量原子口，返回更新后 group）；
    PUT 改调共享"added→加入对齐"钩子（dlna 走 `rejoinMembers` cast＋seek，

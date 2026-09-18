@@ -369,11 +369,14 @@
             <MfIcon name="Monitor" class="device-icon" :class="{ offline: !dev.available }"  />
             <div class="device-info">
               <div class="device-name">
-                {{ dev.name }}
+                {{ dev.kind === "sendspin" ? deviceDisplayName(dev, dev.id) : dev.name }}
                 <span v-if="!dev.available" class="device-offline-tag">{{ t('groups.offline') }}</span>
               </div>
               <div class="device-meta">
-                {{ dev.manufacturer || dev.model || t('groups.dlnaDeviceMeta') }}
+                <template v-if="dev.kind === 'sendspin'">Sendspin</template>
+                <template v-else>
+                  {{ dev.manufacturer || dev.model || t('groups.dlnaDeviceMeta') }}
+                </template>
                 <span v-if="otherGroupsOf(dev.id).length > 0" class="device-group-tip">
                   {{ t('groups.alreadyIn', { names: otherGroupsOf(dev.id).join("、") }) }}
                 </span>
@@ -573,10 +576,18 @@ function openRenameLocalPeer(p: any) {
   showRenameDeviceDialog.value = true;
 }
 
-// 群组编辑对话框可选成员:排除禁用设备(禁用设备不可加入/保留在群组中)。
-const selectableDevices = computed(() =>
-  (dlnaDevices.value || []).filter((d: any) => !d.disabled)
-);
+// 群组编辑对话框可选成员:排除禁用 DLNA 设备(禁用设备不可加入/保留在群组中)。
+// sendspin 在线客户端以 `sendspin:<id>` 形式并入(与后端命名空间一致,裸 id 仍视为 DLNA)。
+const selectableDevices = computed(() => {
+  const dlna = (dlnaDevices.value || []).filter((d: any) => !d.disabled);
+  const spin = (sendspinClients.value || []).map((c: any) => ({
+    id: `sendspin:${c.clientId}`,
+    name: c.name || c.clientId,
+    available: true,
+    kind: "sendspin",
+  }));
+  return [...dlna, ...spin];
+});
 
 // deviceId → 除当前编辑组外,还属于哪些组(仅展示提示,不阻止多组加入)。
 function otherGroupsOf(deviceId: string): string[] {
@@ -848,6 +859,7 @@ async function openCreate() {
   formName.value = "";
   formMembers.value = [];
   if (dlnaDevices.value.length === 0) await loadDlnaDevices();
+  if (sendspinClients.value.length === 0) await loadSendspinClients();
   showDialog.value = true;
 }
 
@@ -856,6 +868,7 @@ async function openEditMembers(g: any) {
   formName.value = g.name;
   formMembers.value = [...(g.memberIds || [])];
   if (dlnaDevices.value.length === 0) await loadDlnaDevices();
+  if (sendspinClients.value.length === 0) await loadSendspinClients();
   showDialog.value = true;
 }
 
