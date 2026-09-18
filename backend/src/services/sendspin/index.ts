@@ -103,7 +103,10 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   // 密钥按 **clientId** 从库里读 —— 每台设备各自一把,host 会被 DHCP 换掉而
   // clientId 不会。没填密钥 ⇒ syncDevice 不建连接(等于这台不启用 6053)。
   try {
-    const { getDeviceEsphome } = await import("./deviceState.js");
+    const { getDeviceEsphome, inheritLegacyEsphomePsk } = await import("./deviceState.js");
+    // 升级迁移:旧版插件页那把全局密钥,在启动窗口内继承给连上来的设备
+    // (否则升级后设备行密钥为空 → 静默失联),详见 deviceState.inheritLegacyEsphomePsk。
+    inheritLegacyEsphomePsk(conn.clientId);
     const creds = getDeviceEsphome(conn.clientId);
     esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
   } catch { /* 读凭据失败按「不连」处理,不阻断设备上线 */ }
