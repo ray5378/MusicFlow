@@ -21,6 +21,12 @@ export default defineConfig({
     // 跑完在进程退出阶段段错误(exit 139);forks 每个文件独立子进程,无此问题。
     fileParallelism: true,
     pool: "forks",
+    // 并发上限压到 2 个 fork worker:即便每文件独立子进程(pid 隔离完好),
+    // 同时跑太多 better-sqlite3 原生子进程会在 worker 退出阶段偶发挂死
+    // (CI 实测 3 个 fork worker 存活不返回)。限制总数降低该偶发概率,
+    // 时长约翻倍但仍远低于 test job 的 15min timeout。
+    maxWorkers: 2,
+    minWorkers: 1,
     setupFiles: ["tests/setup.ts"],
     // 打乱测试(文件内)顺序,让任何隐藏的顺序/共享状态依赖显式暴露,而不是被
     // 固定顺序掩盖后偶发放炮。

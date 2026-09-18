@@ -67,6 +67,9 @@ jobs:
   test:
     name: 类型检查 + 全量测试
     runs-on: ubuntu-latest
+    # 与 build.yml 保持一致:vitest 套件存在偶发"挂起不结束"(better-sqlite3 在 forks
+    # 池下 worker 退出异常)。触犯此上限直接失败并上传日志,避免默认 360 分钟静默挂死。
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -87,8 +90,8 @@ jobs:
           set -o pipefail
           cd backend
           npx vitest run 2>&1 | tee /tmp/vitest.log
-      - name: 上传失败日志(便于排查顺序相关偶发)
-        if: failure()
+      - name: 上传失败日志(便于排查顺序相关偶发;含挂起被取消场景,取消防台同样回传)
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: vitest-log
