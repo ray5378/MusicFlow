@@ -24,7 +24,6 @@ import {
   type ClientMirrorMsg,
   type GroupMirrorMsg,
   type PairRecordMirrorMsg,
-  type SendspinIpcConfig,
 } from "./ipcProtocol.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -304,16 +303,3 @@ class SendspinSupervisor {
 }
 
 export const sendspinSupervisor = new SendspinSupervisor();
-
-/** 构造热更新配置(主进程 DB 为单一可信源,child 不读 plugins 表)。 */
-export function sendspinIpcConfigFrom(cfg: {
-  port: number;
-  allowLegacyClients: boolean;
-  preferredCodec: "pcm" | "flac";
-  autoDiscover: boolean;
-  esphomeMirror: boolean;
-  esphomePsk: string;
-  esphomePort: number;
-}): SendspinIpcConfig {
-  return { ...cfg };
-}

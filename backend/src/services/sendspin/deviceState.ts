@@ -103,6 +103,84 @@ export function getDeviceDisabled(clientId: string): boolean {
   }
 }
 
+export interface DeviceEsphomeCreds {
+  /** 设备固件 `api: encryption: key`(base64)。空串 = 不连 6053。 */
+  psk: string;
+  /** 6053 端口;0 或非法值 = 用缺省 6053。 */
+  port: number;
+}
+
+/** 读某设备的 ESPHome 6053 凭据:无行/读失败返回空凭据(即不连)。
+ *
+ *  ⚠️ 为什么按 clientId 而不是按 host 存:ESPHome 每台设备的密钥是各自生成的,
+ *  而设备 IP 会被 DHCP 换掉 —— 按 host 存的话换一次地址就失联一次,用户得重填。
+ *  clientId 是设备自报的稳定标识,host 每次连上由服务端自动代入。 */
+export function getDeviceEsphome(clientId: string): DeviceEsphomeCreds {
+  try {
+    if (!clientId) return { psk: "", port: 0 };
+    const row = sqlite
+      .prepare("SELECT esphome_psk, esphome_port FROM sendspin_device_state WHERE client_id = ?")
+      .get(clientId) as any;
+    if (!row) return { psk: "", port: 0 };
+    const psk = typeof row.esphome_psk === "string" ? row.esphome_psk.trim() : "";
+    const n = Number(row.esphome_port);
+    return { psk, port: Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0 };
+  } catch (e: any) {
+    log.warn(`[device-state] 读 ESPHome 凭据 ${clientId} 失败: ${e?.message || e}`);
+    return { psk: "", port: 0 };
+  }
+}
+
+/** 写某设备的 ESPHome 6053 凭据(按字段合并,不动 volume/muted/disabled)。
+ *  psk 传空串 = 撤销(不再连这台)。与其余 save* 同款 UPSERT。 */
+export function saveDeviceEsphome(clientId: string, psk: string, port = 0): void {
+  try {
+    if (!clientId) return;
+    const cur = getDeviceVolumeState(clientId);
+    const curDisabled = getDeviceDisabled(clientId);
+    const n = Number(port);
+    sqlite
+      .prepare(
+        `INSERT INTO sendspin_device_state (client_id, volume, muted, disabled, esphome_psk, esphome_port, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET
+         esphome_psk = excluded.esphome_psk, esphome_port = excluded.esphome_port,
+         updated_at = excluded.updated_at`,
+      )
+      .run(
+        clientId,
+        cur?.volume ?? 100,
+        (cur?.muted ?? false) ? 1 : 0,
+        curDisabled ? 1 : 0,
+        String(psk ?? "").trim(),
+        Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0,
+        new Date().toISOString(),
+      );
+  } catch (e: any) {
+    log.warn(`[device-state] 写 ESPHome 凭据 ${clientId} 失败: ${e?.message || e}`);
+  }
+}
+
+/** 列出所有已填 ESPHome 密钥的设备(供启动时批量 attach)。 */
+export function listEsphomeCreds(): { clientId: string; psk: string; port: number }[] {
+  try {
+    const rows = sqlite
+      .prepare(
+        "SELECT client_id, esphome_psk, esphome_port FROM sendspin_device_state WHERE esphome_psk <> ''",
+      )
+      .all() as any[];
+    return rows
+      .map((r) => ({
+        clientId: String(r.client_id ?? ""),
+        psk: String(r.esphome_psk ?? "").trim(),
+        port: Number(r.esphome_port) || 0,
+      }))
+      .filter((r) => r.clientId && r.psk);
+  } catch (e: any) {
+    log.warn(`[device-state] 列 ESPHome 凭据失败: ${e?.message || e}`);
+    return [];
+  }
+}
+
 /** 写某设备禁用态(按字段合并,不动 volume/muted)。
  *  与 `saveDeviceVolumeState` 同款 UPSERT:无行则补一行(volume/muted 取缺省)。 */
 export function saveDeviceDisabled(clientId: string, disabled: boolean): void {

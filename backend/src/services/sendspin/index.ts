@@ -27,7 +27,10 @@ import { PairingCoordinator } from "./pairServer.js";
 import { stopGroupPump } from "./streamEngine.js";
 import { advertiseSendspinServer, unadvertiseSendspinServer } from "./advertise.js";
 import { startPlayerDiscovery, stopPlayerDiscovery } from "./discover.js";
-import { esphomeBridge, ESPHOME_API_PORT, type EsphomeDeviceMirror } from "./esphomeBridge.js";
+import {
+  esphomeBridge,
+  type EsphomeWriteResult,
+} from "./esphomeBridge.js";
 // 类型-only 导入(编译期擦除,零运行时边):缓存单例的类型推导,
 // 避开 player/index ↔ sendspin 的模块环(TDZ,见下 ensureControllers 注释)。
 import type * as PlayerIndex from "../player/index.js";
@@ -96,10 +99,14 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   if (!conn.clientId) return; // activate 前不会有 clientId;防御
   // 显示名用客户端上报的 name(如 ESPHome 的 "Speaker Media Player"),无则回退 clientId。
   const displayName = conn.name || conn.clientId;
-  // ESPHome 6053 **只读桥接**:设备 IP 从 Sendspin 连接里自动派生(见 server.ts
-  // normalizeRemoteHost),用户无需手工填 host。这里只负责登记目标,真正的连接
-  // 由 esphomeBridge 按插件配置决定是否建立。(child 模式由 child hooks 自行 attach。)
-  esphomeBridge.attach(conn.remoteHost);
+  // ESPHome 6053 桥接:IP 从 Sendspin 连接自动派生(见 server.ts normalizeRemoteHost),
+  // 密钥按 **clientId** 从库里读 —— 每台设备各自一把,host 会被 DHCP 换掉而
+  // clientId 不会。没填密钥 ⇒ syncDevice 不建连接(等于这台不启用 6053)。
+  try {
+    const { getDeviceEsphome } = await import("./deviceState.js");
+    const creds = getDeviceEsphome(conn.clientId);
+    esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
+  } catch { /* 读凭据失败按「不连」处理,不阻断设备上线 */ }
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   qc.registerSendspinDevice(conn.clientId, displayName);
   // 同步到 peer 层(sendspin:<clientId>)—— 前端切换器 / /v1/peers / /v1/play 才能发现并投送。
@@ -150,9 +157,6 @@ export function readSendspinPluginConfig(): {
   port: number;
   autoDiscover: boolean;
   preferredCodec: SendspinCodecPreference;
-  esphomeMirror: boolean;
-  esphomePsk: string;
-  esphomePort: number;
   streamSource: boolean;
 } {
   const fallback = {
@@ -160,9 +164,6 @@ export function readSendspinPluginConfig(): {
     port: WS_PORT,
     autoDiscover: true,
     preferredCodec: "pcm" as SendspinCodecPreference,
-    esphomeMirror: false,
-    esphomePsk: "",
-    esphomePort: ESPHOME_API_PORT,
     streamSource: true,
   };
   try {
@@ -171,17 +172,14 @@ export function readSendspinPluginConfig(): {
       .get() as any;
     const cfg = row?.config ? JSON.parse(row.config) : {};
     const port = Number(cfg?.port);
-    const apiPort = Number(cfg?.esphome_port);
     return {
       allowLegacyClients: cfg?.allow_legacy_clients !== false,
       port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : WS_PORT,
       autoDiscover: cfg?.auto_discover !== false,
       // 只认 pcm / flac 两个值,非法或缺省一律 pcm(2026-09-17 ESP32 真机实测最优)。
       preferredCodec: normalizeCodecPreference(cfg?.preferred_codec),
-      // ESPHome 6053 只读桥接:默认关闭(需要设备 api.encryption.key 才能工作)。
-      esphomeMirror: cfg?.esphome_mirror === true,
-      esphomePsk: typeof cfg?.esphome_psk === "string" ? cfg.esphome_psk.trim() : "",
-      esphomePort: Number.isInteger(apiPort) && apiPort >= 1 && apiPort <= 65535 ? apiPort : ESPHOME_API_PORT,
+      // 注:ESPHome 6053 的开关/密钥/端口**已从这里移除** —— 它们是每台设备各自的,
+      // 存在 sendspin_device_state(clientId → psk/port),见 deviceState.ts。
       // 流式解码:默认开(3.0.36 灰度验证稳定后转正);只有**显式 false** 才关
       // (老用户此前手关闭仍保持关)。缺省/非布尔一律按默认开。
       streamSource: cfg?.stream_source !== false,
@@ -204,13 +202,8 @@ export async function startSendspinInProcess(port?: number, hooks?: SendspinBoot
   // child 模式不抓(QC/PM 属主进程,子进程拿了也没用,还引入重依赖图)。
   if (!hooks) await ensureControllers();
   const pairingStore = await PairingStore.open(identityDir);
-  // ESPHome 6053 只读桥接:按插件配置决定是否常驻 Native API 客户端(保活 + 状态镜像)。
-  // 必须在 listen 之前:设备上线时 attach 才能立即建连接。
-  esphomeBridge.configure({
-    enabled: pluginCfg.esphomeMirror,
-    psk: pluginCfg.esphomePsk,
-    port: pluginCfg.esphomePort,
-  });
+  // ESPHome 6053:不再有全局开关/密钥。连接是**每台设备**上线时按 clientId 查到
+  // 自己的密钥才建立(见 registerServerPlayer 的 syncDevice),启动时无事可做。
   const srv = await SendspinServer.create({
     pairkeys: identity,
     identityDir,
@@ -342,31 +335,127 @@ export function getSendspinFront(): import("./proxy.js").SendspinServerLike | nu
   return getSendspinFrontImpl(!isForkMode());
 }
 
-/** ESPHome 6053 只读桥接状态(fork 走 RPC,in-proc 直读桥接单例)。 */
+/** ESPHome 6053 桥接状态(fork 走 RPC,in-proc 直读桥接单例)。
+ *
+ *  已无「全局开关 / 全局密钥」—— 每台设备各连各的,是否启用与端口挂在单设备
+ *  快照的 `pskConfigured` / `port` 上(⚠️ PSK 本身永不回显)。
+ *  只有填了密钥且已建连的设备才会出现在 devices 里。 */
 export async function sendspinEsphomeStatus(): Promise<{
-  enabled: boolean;
-  pskConfigured: boolean;
-  port: number;
   devices: unknown[];
 }> {
   if (isForkMode()) {
     const { proxyEsphomeStatus } = await import("./proxy.js");
-    return proxyEsphomeStatus();
+    const r = (await proxyEsphomeStatus()) as any;
+    return { devices: r?.devices ?? [] };
   }
   const srv = getServer();
-  const cfg = esphomeBridge.currentConfig();
-  return {
-    enabled: srv ? cfg.enabled : false,
-    // ⚠️ 永远不要把 PSK 回显给前端,只回报是否配置。
-    pskConfigured: !!cfg.psk,
-    port: cfg.port,
-    devices: srv ? esphomeBridge.snapshot() : [],
-  };
+  return { devices: srv ? esphomeBridge.snapshot() : [] };
 }
 
-/** 插件配置热更新:preferredCodec / allowLegacyClients / 6053 桥接,一条路径覆盖
+/** 按 clientId 找该设备当前的对端 IP(6053 的连接目标)。
+ *  前端只认 clientId —— host 是连接派生的、会被 DHCP 换掉,不该由前端持有。 */
+export function resolveEsphomeHost(clientId: string): string {
+  if (!clientId) return "";
+  try {
+    const front = getSendspinFront() as any;
+    const clients = front?.clients;
+    if (clients && typeof clients.values === "function") {
+      for (const conn of clients.values()) {
+        if (conn?.clientId === clientId && conn?.remoteHost) return String(conn.remoteHost);
+      }
+    }
+  } catch { /* 取不到就当离线处理 */ }
+  return "";
+}
+
+/** 保存某台设备的 ESPHome 6053 凭据(**每台设备各自一把**,不是全局)。
+ *
+ *  - 落库按 clientId(host 会变,clientId 不会);
+ *  - 设备当前在线 ⇒ 立即让桥生效(填了就连 / 清空就断);
+ *  - 离线 ⇒ 只落库,等设备重连时由 registerServerPlayer 的 syncDevice 自动带上。
+ *  返回实际作用到的 host(空串 = 设备当前离线)。 */
+export async function sendspinSaveEsphomeCreds(
+  clientId: string,
+  psk: string,
+  port = 0,
+): Promise<{ ok: boolean; host: string }> {
+  if (!clientId) return { ok: false, host: "" };
+  const { saveDeviceEsphome } = await import("./deviceState.js");
+  saveDeviceEsphome(clientId, psk, port);
+  const host = resolveEsphomeHost(clientId);
+  if (!host) return { ok: true, host: "" };
+  if (isForkMode()) {
+    try {
+      await sendspinSupervisor.rpc("esphomeSync", { host, psk: String(psk ?? ""), port });
+    } catch (e: any) {
+      log.warn(`esphomeSync 下发失败(子进程未运行?设备重连时会补上): ${e?.message || e}`);
+    }
+  } else {
+    esphomeBridge.syncDevice(host, psk, port);
+  }
+  return { ok: true, host };
+}
+
+/** 设**设备自身**音量(0..100 → 0..1),走 6053 的 speaker 硬件输出,
+ *  与音乐采样增益(Sendspin group volume)是两个旋钮,实际响度 = 两者相乘。 */
+export async function sendspinSetEsphomeVolume(
+  clientId: string,
+  volume: number,
+): Promise<EsphomeWriteResult> {
+  const host = resolveEsphomeHost(clientId);
+  if (!host) return { ok: false, code: "no-bridge", sent: 0 };
+  if (isForkMode()) {
+    try {
+      const r = (await sendspinSupervisor.rpc("esphomeVolume", { host, volume })) as EsphomeWriteResult;
+      return r ?? { ok: false, code: "send-failed", sent: 0 };
+    } catch {
+      return { ok: false, code: "send-failed", sent: 0 };
+    }
+  }
+  return esphomeBridge.setVolume(host, volume / 100);
+}
+
+/** 设**设备自身**静音(同上)。 */
+export async function sendspinSetEsphomeMuted(
+  clientId: string,
+  muted: boolean,
+): Promise<EsphomeWriteResult> {
+  const host = resolveEsphomeHost(clientId);
+  if (!host) return { ok: false, code: "no-bridge", sent: 0 };
+  if (isForkMode()) {
+    try {
+      const r = (await sendspinSupervisor.rpc("esphomeMute", { host, muted })) as EsphomeWriteResult;
+      return r ?? { ok: false, code: "send-failed", sent: 0 };
+    } catch {
+      return { ok: false, code: "send-failed", sent: 0 };
+    }
+  }
+  return esphomeBridge.setMuted(host, muted);
+}
+
+/** 读某台设备镜像到的自身音量(0..100)与静音态;没连上返回 null。
+ *  这是**设备侧真值**(外部判据),不是服务端记的采样增益。 */
+export async function sendspinGetEsphomeVolume(
+  clientId: string,
+): Promise<{ volume: number; muted: boolean } | null> {
+  const host = resolveEsphomeHost(clientId);
+  if (!host) return null;
+  if (isForkMode()) {
+    try {
+      const r = (await sendspinSupervisor.rpc("esphomeReadVolume", { host })) as any;
+      return r ?? null;
+    } catch {
+      return null;
+    }
+  }
+  const v = esphomeBridge.mirroredVolume(host);
+  return v ? { volume: Math.round(v.volume * 100), muted: v.muted } : null;
+}
+
+/** 插件配置热更新:preferredCodec / allowLegacyClients,一条路径覆盖
  *  in-proc 与 fork(fork 经 RPC 让子进程自应用)。端口变更不在此 —— 需重启监听,
- *  由路由层走 stop/start(杀子进程重建)。 */
+ *  由路由层走 stop/start(杀子进程重建)。
+ *  注:ESPHome 6053 已无全局配置,每台设备的连断由 syncDevice 各自管理。 */
 export async function applySendspinConfigHotUpdate(): Promise<void> {
   const cfg = readSendspinPluginConfig();
   if (isForkMode()) {
@@ -382,11 +471,7 @@ export async function applySendspinConfigHotUpdate(): Promise<void> {
     srv.allowLegacyClients = cfg.allowLegacyClients;
     srv.preferredCodec = cfg.preferredCodec;
   }
-  esphomeBridge.configure({
-    enabled: cfg.esphomeMirror,
-    psk: cfg.esphomePsk,
-    port: cfg.esphomePort,
-  });
+  // 6053 不再有全局配置可应用:每台设备的连断由 syncDevice 各自管理。
 }
 
 /** 设置某 Sendspin 设备禁用态(对齐 DLNA `setDeviceDisabled` 语义)。
@@ -740,12 +825,3 @@ export function isSendspinEnabled(): boolean {
     return false;
   }
 }
-
-/** ESPHome 6053 只读桥接状态快照(供 /v1/sendspin/esphome 与排障日志消费)。 */
-export function listEsphomeMirror(): EsphomeDeviceMirror[] {
-  if (isForkMode()) return [];
-  return esphomeBridge.snapshot();
-}
-
-/** 兼容别名:热更新统一走 applySendspinConfigHotUpdate。 */
-export const reconfigureEsphomeMirror = applySendspinConfigHotUpdate;

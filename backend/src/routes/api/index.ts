@@ -2741,7 +2741,20 @@ apiRoutes.get("/v1/sendspin/clients", async (c) => {
   const srv = sendspinServerOr404(c);
   if (!srv) return c.json({ clients: [], enabled: false });
   const store = srv.pairingStore;
-  const { getDeviceDisabled, listDisabledDeviceIds } = await import("../../services/sendspin/deviceState.js");
+  const { getDeviceDisabled, listDisabledDeviceIds, listEsphomeCreds } = await import("../../services/sendspin/deviceState.js");
+  // 6053 是每台设备各连各的:按 clientId 建「已填密钥 → 端口」索引,按 host 建桥接
+  // 快照索引(remoteHost 是连接派生的,前端拿不到,所以由后端在这里替前端对齐)。
+  const esphomePortByClient = new Map<string, number>(
+    (listEsphomeCreds() ?? []).map((c) => [c.clientId, Number(c.port) || 6053]),
+  );
+  const esphomeByHost = new Map<string, any>();
+  try {
+    const { sendspinEsphomeStatus } = await import("../../services/sendspin/index.js");
+    const st = await sendspinEsphomeStatus();
+    for (const d of (st?.devices ?? []) as any[]) {
+      if (d?.host) esphomeByHost.set(String(d.host), d);
+    }
+  } catch { /* 读不到就当都没连上,不影响设备行本身 */ }
   const live = new Set<string>();
   const clients = [...srv.clients.values()]
     .filter((conn) => !!conn.clientId)
@@ -2766,6 +2779,19 @@ apiRoutes.get("/v1/sendspin/clients", async (c) => {
         host: conn.dialed ? conn.dialHost : "",
         port: conn.dialed ? conn.dialPort : 0,
         pairing: srv.pairing?.getAttempt(clientId) ?? null,
+        // ESPHome 6053(设备自身音量):前端据此决定音量按钮是可用还是置灰提示。
+        // ⚠️ 只回报「是否填了密钥 / 连没连上 / 设备侧真值音量」,绝不回显 PSK。
+        esphome: (() => {
+          const eh = esphomeByHost.get(String(conn.remoteHost || ""));
+          const p0 = eh?.players?.[0];
+          return {
+            pskConfigured: esphomePortByClient.has(clientId),
+            port: esphomePortByClient.get(clientId) ?? 6053,
+            connected: !!eh?.connected,
+            volume: typeof p0?.volume === "number" ? Math.round(p0.volume * 100) : null,
+            muted: !!p0?.muted,
+          };
+        })(),
       };
     });
   // 已禁用但当前离线的设备补回列表:否则禁用(会断连接)后该设备从列表消失,
@@ -2808,38 +2834,110 @@ apiRoutes.put("/v1/sendspin/devices/:clientId/disabled", permMiddleware(PERM.REN
   return c.json({ success: true, disabled });
 });
 
-apiRoutes.get("/v1/sendspin/esphome", async (c) => {
-  // ESPHome 6053 **只读桥接**状态:设备侧真实回眸的 media_player state / volume。
-  // 用途 = 服务端之外的独立判据(「推的流有没有真的在播」),不可用于控制
-  // (设备未宣告 SEEK / NEXT_TRACK / PLAY,且音量应留在 Sendspin group volume)。
-  // 6053 桥接跑在 sendspin 子进程内:fork 模式经 RPC 取状态,in-proc 直读单例。
-  const { sendspinEsphomeStatus } = await import("../../services/sendspin/index.js");
-  const st = await sendspinEsphomeStatus();
+// ==================== ESPHome 6053(每台设备各自一把密钥)====================
+//
+// 背景:ESPHome 每台设备的 `api.encryption.key` 都是各自生成的,一把全局密钥只能
+// 连上一台;早期版本还把「测试连接」实现成取「任意一台已连设备的 IP」,于是填 A 的
+// 密钥却拿 B 的门去试,必然 auth 失败。现全部下放到**设备行**:
+//  - 前端只认 clientId(host 会随 DHCP 变,不该由前端持有);
+//  - host 由后端从当前连接派生(resolveEsphomeHost);
+//  - 密钥/端口按 clientId 落库(sendspin_device_state)。
+//
+// 作用有两个:①读设备侧 media_player 真值(「推的流有没有真的在播」的独立判据
+// + 音量回显);②写**设备自身**音量(speaker 硬件输出)。注意这与音乐采样增益
+// (Sendspin group volume,见 POST /v1/peers/:peerId/volume)是**两个旋钮**,
+// 实际响度 = 两者相乘,所以 UI 上分开,不要合并。
+
+/** 某一台设备的 6053 状态(⚠️ 永不回显 PSK,只回报「有没有配」)。 */
+apiRoutes.get("/v1/sendspin/devices/:clientId/esphome", async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const { getDeviceEsphome } = await import("../../services/sendspin/deviceState.js");
+  const { sendspinGetEsphomeVolume } = await import("../../services/sendspin/index.js");
+  const creds = getDeviceEsphome(clientId);
+  const v = await sendspinGetEsphomeVolume(clientId);
   return c.json({
-    enabled: st.enabled,
-    // ⚠️ 永远不要把 PSK 回显给前端,只回报是否配置。
-    pskConfigured: st.pskConfigured,
-    port: st.port,
-    devices: st.devices,
+    pskConfigured: !!creds.psk,
+    port: creds.port || 6053,
+    connected: !!v,
+    volume: v?.volume ?? null,
+    muted: v?.muted ?? false,
   });
 });
 
-apiRoutes.post("/v1/sendspin/esphome/test", adminMiddleware, async (c) => {
-  // 一次性握手探针:用用户**此刻填的** PSK 立即验证,不影响常驻桥接实例。
-  // host 不必传 —— 默认取当前任意已连 Sendspin 设备的对端 IP(见 remoteHost)。
-  const { probeEsphome } = await import("../../services/sendspin/esphomeBridge.js");
+/** 保存某台设备的 6053 密钥/端口。
+ *  psk 传空串 = 撤销这一台(断开并停止保活),不影响其它设备。 */
+apiRoutes.put("/v1/sendspin/devices/:clientId/esphome", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
   const body = await c.req.json().catch(() => ({} as any));
   const psk = typeof body?.psk === "string" ? body.psk.trim() : "";
   const portRaw = Number(body?.port);
-  const port = Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535 ? portRaw : 6053;
-  let host = typeof body?.host === "string" ? body.host.trim() : "";
-  if (!host) {
-    const srv = getSendspinFront();
-    host = srv ? [...srv.clients.values()].map((conn) => conn.remoteHost).find(Boolean) ?? "" : "";
-  }
+  const port = Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535 ? portRaw : 0;
+  const { sendspinSaveEsphomeCreds } = await import("../../services/sendspin/index.js");
+  const r = await sendspinSaveEsphomeCreds(clientId, psk, port);
+  // host 为空 = 设备当前离线:密钥已落库,等它下次重连时 registerServerPlayer 自动带上。
+  return c.json({ success: true, host: r.host, online: !!r.host });
+});
+
+/** 一次性握手探针:用**这台设备此刻填的**密钥立即验证。
+ *  刻意不落库、也不复用常驻桥接 —— 测试不该改变常态连接,失败了也不留残余。
+ *  body.psk 传空串(显式清空未保存就走测试)⇒ 按 no_psk 失败,不回落库里的旧密钥。 */
+apiRoutes.post("/v1/sendspin/devices/:clientId/esphome/test", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  const { getDeviceEsphome } = await import("../../services/sendspin/deviceState.js");
+  const { resolveEsphomeHost } = await import("../../services/sendspin/index.js");
+  const { probeEsphome, ESPHOME_API_PORT } = await import("../../services/sendspin/esphomeBridge.js");
+  const creds = getDeviceEsphome(clientId);
+  const psk = typeof body?.psk === "string" ? body.psk.trim() : creds.psk;
+  const portRaw = Number(body?.port);
+  const port = Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535
+    ? portRaw
+    : (creds.port || ESPHOME_API_PORT);
+  // host 由连接派生:设备离线时是空串,探针会以 no_host 失败(而不是去试别人的 IP)。
+  const host = resolveEsphomeHost(clientId);
   const r = await probeEsphome(host, psk, port, 10_000);
-  // 失败不 500:这是「测试」语义,把原因交给前端展示即可。
+  // 失败不 5xx:这是「测试」语义,把原因交给前端展示。
   return c.json(r);
+});
+
+/** 写**设备自身**音量(0..100,speaker 硬件输出)。
+ *  失败不 5xx:返回机器可读 code(no-bridge / not-connected / no-entity /
+ *  send-failed),由前端映射提示文案 —— 后端不写死语言。 */
+apiRoutes.put("/v1/sendspin/devices/:clientId/esphome/volume", async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const { volume } = await c.req.json().catch(() => ({} as any));
+  if (typeof volume !== "number" || !Number.isFinite(volume)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
+  }
+  const v = Math.min(100, Math.max(0, Math.round(volume)));
+  const { sendspinSetEsphomeVolume } = await import("../../services/sendspin/index.js");
+  const r = await sendspinSetEsphomeVolume(clientId, v);
+  return c.json({ success: r.ok, code: r.code, sent: r.sent, volume: v });
+});
+
+/** 写**设备自身**静音(同上)。 */
+apiRoutes.put("/v1/sendspin/devices/:clientId/esphome/muted", async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const { muted } = await c.req.json().catch(() => ({} as any));
+  if (typeof muted !== "boolean") {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
+  }
+  const { sendspinSetEsphomeMuted } = await import("../../services/sendspin/index.js");
+  const r = await sendspinSetEsphomeMuted(clientId, muted);
+  return c.json({ success: r.ok, code: r.code, sent: r.sent, muted });
+});
+
+/** 聚合快照(排障用):每台**填了密钥**的设备各自的桥接状态。
+ *  ⚠️ 无全局开关/密钥 —— 填了密钥就连,没填就不连。 */
+apiRoutes.get("/v1/sendspin/esphome", async (c) => {
+  const { sendspinEsphomeStatus } = await import("../../services/sendspin/index.js");
+  const st = await sendspinEsphomeStatus();
+  return c.json({ devices: st.devices });
 });
 
 apiRoutes.get("/v1/sendspin/pairing/attempts", adminMiddleware, async (c) => {

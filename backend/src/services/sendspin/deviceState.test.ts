@@ -8,6 +8,9 @@ import {
   deleteDeviceVolumeState,
   getDeviceDisabled,
   saveDeviceDisabled,
+  getDeviceEsphome,
+  saveDeviceEsphome,
+  listEsphomeCreds,
 } from "./deviceState.js";
 
 describe("sendspin deviceState (按设备持久音量)", () => {
@@ -97,5 +100,66 @@ describe("sendspin deviceState (按设备持久音量)", () => {
     saveDeviceDisabled(CID, true);
     deleteDeviceVolumeState(CID);
     expect(getDeviceDisabled(CID)).toBe(false);
+  });
+
+  // ---- ESPHome 6053 凭据(每台设备各自一把;按 clientId 存,不按会变的 host) ----
+
+  it("无行返回空凭据 psk='' / port=0(即「不连 6053」)", () => {
+    expect(getDeviceEsphome(CID)).toEqual({ psk: "", port: 0 });
+    expect(getDeviceEsphome("")).toEqual({ psk: "", port: 0 });
+  });
+
+  it("写密钥后可读回;端口非法回退 0(=用缺省 6053);psk 去空白", () => {
+    saveDeviceEsphome(CID, "  secret-key  ", 6054);
+    expect(getDeviceEsphome(CID)).toEqual({ psk: "secret-key", port: 6054 });
+    // 非法端口:0 / 越界 / 小数 / 非数字 一律落 0,交给上层回退 6053
+    for (const p of [0, -1, 70000, 1.5, Number.NaN]) {
+      saveDeviceEsphome(CID, "k", p as number);
+      expect(getDeviceEsphome(CID).port).toBe(0);
+    }
+    saveDeviceEsphome(CID, "k", 6053);
+    expect(getDeviceEsphome(CID).port).toBe(6053);
+  });
+
+  it("关键:每台设备各存各的密钥,互不覆盖(不是全局一把)", () => {
+    const A = "dev-state-esp-a";
+    const B = "dev-state-esp-b";
+    sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id IN (?, ?)").run(A, B);
+    saveDeviceEsphome(A, "key-a", 6053);
+    saveDeviceEsphome(B, "key-b", 6054);
+    expect(getDeviceEsphome(A)).toEqual({ psk: "key-a", port: 6053 });
+    expect(getDeviceEsphome(B)).toEqual({ psk: "key-b", port: 6054 });
+    // 清 A 不影响 B
+    saveDeviceEsphome(A, "", 0);
+    expect(getDeviceEsphome(A)).toEqual({ psk: "", port: 0 });
+    expect(getDeviceEsphome(B)).toEqual({ psk: "key-b", port: 6054 });
+    sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id IN (?, ?)").run(A, B);
+  });
+
+  it("写密钥不动 volume / muted / disabled(同一行四个独立字段)", () => {
+    saveDeviceVolumeState(CID, { volume: 21, muted: true });
+    saveDeviceDisabled(CID, true);
+    saveDeviceEsphome(CID, "k", 6053);
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: 21, muted: true });
+    expect(getDeviceDisabled(CID)).toBe(true);
+    expect(getDeviceEsphome(CID)).toEqual({ psk: "k", port: 6053 });
+    expect(rowCount()).toBe(1);
+  });
+
+  it("无行时直接写密钥也能建行(volume/muted 取缺省)", () => {
+    saveDeviceEsphome(CID, "k", 6053);
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: 100, muted: false });
+    expect(rowCount()).toBe(1);
+  });
+
+  it("listEsphomeCreds 只列已填密钥的设备,空串一律排除", () => {
+    const A = "dev-state-esp-list-a";
+    const B = "dev-state-esp-list-b";
+    sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id IN (?, ?)").run(A, B);
+    saveDeviceEsphome(A, "key-a", 6053);
+    saveDeviceEsphome(B, "", 6053); // 没填 → 不该出现在列表里
+    const listed = listEsphomeCreds().filter((c) => c.clientId === A || c.clientId === B);
+    expect(listed).toEqual([{ clientId: A, psk: "key-a", port: 6053 }]);
+    sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id IN (?, ?)").run(A, B);
   });
 });

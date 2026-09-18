@@ -432,5 +432,9 @@ export const sendspinDeviceState = sqliteTable("sendspin_device_state", {
   volume: integer("volume").notNull().default(100),
   muted: integer("muted").notNull().default(0),
   disabled: integer("disabled").notNull().default(0),
+  /** ESPHome Native API(6053)加密密钥,每台设备各自一把。空 = 不连。 */
+  esphomePsk: text("esphome_psk").notNull().default(""),
+  /** 6053 端口,0 = 用缺省 6053。 */
+  esphomePort: integer("esphome_port").notNull().default(0),
   updatedAt: text("updated_at").default(""),
 });

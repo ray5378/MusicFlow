@@ -11,10 +11,8 @@ describe("readSendspinPluginConfig", () => {
       port: 38927,
       autoDiscover: true,
       preferredCodec: "pcm",
-      // ESPHome 6053 只读桥接默认全关 + 空 PSK(需要用户显式配置才启用)。
-      esphomeMirror: false,
-      esphomePsk: "",
-      esphomePort: 6053,
+      // 注:ESPHome 6053 的开关/密钥/端口**已不在插件配置里**(每台设备各自一把,
+      // 见下面「6053 开关/密钥不再属于插件配置」用例)。
       // 流式解码默认开(3.0.36 灰度验证稳定后转正)。
       streamSource: true,
     });
@@ -29,9 +27,6 @@ describe("readSendspinPluginConfig", () => {
       port: 8931,
       autoDiscover: true,
       preferredCodec: "pcm",
-      esphomeMirror: false,
-      esphomePsk: "",
-      esphomePort: 6053,
       streamSource: true,
     });
   });
@@ -56,34 +51,20 @@ describe("readSendspinPluginConfig", () => {
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 
-  it("esphome 只读桥接:默认全关,psk 去空白,非法端口回落 6053", () => {
+  it("6053 开关/密钥不再属于插件配置(已改为每台设备各自一把)", () => {
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
     const write = (cfg: any) =>
       sqlite
         .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
         .run(JSON.stringify(cfg));
-    // 缺省关闭 + 空 PSK(桥接建立不了,index.ts 的 attach 会跳过)
-    expect(readSendspinPluginConfig().esphomeMirror).toBe(false);
-    expect(readSendspinPluginConfig().esphomePsk).toBe("");
-    expect(readSendspinPluginConfig().esphomePort).toBe(6053);
-    write({});
-    expect(readSendspinPluginConfig().esphomeMirror).toBe(false);
-    // 只有显式 === true 才开(字符串 "true" 不算)
-    write({ esphome_mirror: "true" });
-    expect(readSendspinPluginConfig().esphomeMirror).toBe(false);
-    write({ esphome_mirror: true, esphome_psk: "  abcd  " });
-    expect(readSendspinPluginConfig().esphomeMirror).toBe(true);
-    expect(readSendspinPluginConfig().esphomePsk).toBe("abcd");
-    // 非字符串 psk 一律当空,避免把对象塞进握手
-    write({ esphome_mirror: true, esphome_psk: { a: 1 } });
-    expect(readSendspinPluginConfig().esphomePsk).toBe("");
-    // 端口越界/非整数 → 回落
-    for (const p of [0, -1, 70000, 6.5, "abc", null]) {
-      write({ esphome_port: p });
-      expect(readSendspinPluginConfig().esphomePort).toBe(6053);
-    }
-    write({ esphome_port: 6054 });
-    expect(readSendspinPluginConfig().esphomePort).toBe(6054);
+    // ⚠️ 6053 的开关/密钥/端口**已不在插件配置里** —— 它们是每台设备各自的,
+    // 存 sendspin_device_state(clientId → psk/port)。这里锁死「即便插件配置里
+    // 残留旧字段也不再被读出来」,防止哪天有人手滑把全局开关加回来。
+    write({ esphome_mirror: true, esphome_psk: "abcd", esphome_port: 6054 });
+    const cfg = readSendspinPluginConfig() as any;
+    expect(cfg.esphomeMirror).toBeUndefined();
+    expect(cfg.esphomePsk).toBeUndefined();
+    expect(cfg.esphomePort).toBeUndefined();
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 

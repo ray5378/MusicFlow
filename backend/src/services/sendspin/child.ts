@@ -35,6 +35,7 @@ let controller: import("./childMain.js").SendspinChildController | null = null;
 async function main(): Promise<void> {
   const { startSendspinInProcess, stopSendspinInProcess } = await import("./index.js");
   const { esphomeBridge } = await import("./esphomeBridge.js");
+  const { getDeviceEsphome } = await import("./deviceState.js");
   const { SendspinChildController } = await import("./childMain.js");
 
   controller = new SendspinChildController(
@@ -47,8 +48,10 @@ async function main(): Promise<void> {
 
   const childHooks = {
     onActivated: (conn: any) => {
-      // 6053 只读桥接:设备 IP 从 Sendspin 连接自动派生(与主进程 registerServerPlayer 同款)。
-      esphomeBridge.attach(conn.remoteHost);
+      // 6053:设备 IP 从 Sendspin 连接自动派生,密钥按 clientId 逐台读 ——
+      // 每台设备各自一把,没填就不连(与主进程 registerServerPlayer 同款)。
+      const creds = conn.clientId ? getDeviceEsphome(conn.clientId) : { psk: "", port: 0 };
+      esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
       if (conn.clientId) {
         send({
           t: "activated",

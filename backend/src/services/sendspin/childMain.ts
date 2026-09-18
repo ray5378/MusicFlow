@@ -333,29 +333,38 @@ export class SendspinChildController {
         return null;
       }
       case "esphomeStatus": {
+        // 6053 已无全局配置:只回每台设备各自的快照(pskConfigured/port 在单设备里)。
         const { esphomeBridge } = await import("./esphomeBridge.js");
-        const cfg = esphomeBridge.currentConfig();
-        return {
-          enabled: srv ? cfg.enabled : false,
-          // ⚠️ 永远不要把 PSK 传回主进程/前端,只回报是否配置。
-          pskConfigured: !!cfg.psk,
-          port: cfg.port,
-          devices: srv ? esphomeBridge.snapshot() : [],
-        };
+        return { devices: srv ? esphomeBridge.snapshot() : [] };
+      }
+      // 单台设备的 6053 凭据变更:填了密钥就连,清空就断。
+      case "esphomeSync": {
+        const { esphomeBridge } = await import("./esphomeBridge.js");
+        esphomeBridge.syncDevice(String(p.host ?? ""), String(p.psk ?? ""), Number(p.port) || 0);
+        this.requestSnapshot(true);
+        return null;
+      }
+      case "esphomeVolume": {
+        const { esphomeBridge } = await import("./esphomeBridge.js");
+        // 入参 0..100(与前端滑杆一致),桥内部按 0..1 发给设备。
+        return esphomeBridge.setVolume(String(p.host ?? ""), Number(p.volume) / 100);
+      }
+      case "esphomeMute": {
+        const { esphomeBridge } = await import("./esphomeBridge.js");
+        return esphomeBridge.setMuted(String(p.host ?? ""), p.muted === true);
+      }
+      case "esphomeReadVolume": {
+        const { esphomeBridge } = await import("./esphomeBridge.js");
+        const v = esphomeBridge.mirroredVolume(String(p.host ?? ""));
+        return v ? { volume: Math.round(v.volume * 100), muted: v.muted } : null;
       }
       case "applyCfg": {
-        // 配置热更新(主进程 DB 为单一可信源):server 字段 + 6053 桥接重建。
-        const { esphomeBridge } = await import("./esphomeBridge.js");
+        // 配置热更新(主进程 DB 为单一可信源):只管 server 字段。
         const cfg = p as SendspinIpcConfig;
         if (srv) {
           srv.allowLegacyClients = cfg.allowLegacyClients;
           srv.preferredCodec = cfg.preferredCodec;
         }
-        esphomeBridge.configure({
-          enabled: cfg.esphomeMirror,
-          psk: cfg.esphomePsk,
-          port: cfg.esphomePort,
-        });
         this.requestSnapshot(true);
         return null;
       }

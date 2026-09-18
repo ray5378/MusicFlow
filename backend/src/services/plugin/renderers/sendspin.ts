@@ -71,23 +71,12 @@ export const sendspinRendererManifest: PluginManifest = {
       default: true,
       help: "推流解码走滑动窗口:边解边播,子进程只驻留约 60 秒音频(~23MB),与曲长无关。关闭后整曲一次解完进内存(320 秒约 122MB,切歌瞬间翻倍,超长单曲可能顶爆内存)。开启后下一首生效(正在播的不中断);seek 回跳超出窗口时会重建解码(约 1 秒空窗)。**默认开启**(3.0.36 灰度验证稳定后转正);如需排障可临时关闭。",
     },
-    {
-      key: "esphome_mirror",
-      label: "ESPHome 只读监控(6053)",
-      type: "switch",
-      default: false,
-      help: "对已连接的 ESPHome 设备反向建立一条 Native API(端口 6053)连接,用于保活与只读状态镜像。作用:①设备掉网后不会因 api.reboot_timeout 看门狗自愈重启;②读回设备侧真实播放状态与 speaker 音量,作为「推的流有没有真的播出去」的独立判据。需要填写设备的 api.encryption.key。注意:这条链路只做只读与保活,**不用于控制**——设备的 media_player 不支持切歌/进度,音量也请继续用 Sendspin 组音量。",
-    },
-    {
-      key: "esphome_psk",
-      label: "ESPHome API 加密密钥",
-      type: "text",
-      default: "",
-      // 输入框下方常显「测试连接」按钮(见 ConfigField.action):保存前就能验证密钥。
-      // host 不用填 —— 取当前已连 Sendspin 设备的 IP,由服务端自动代入。
-      action: "esphome-test",
-      help: "设备固件 api: encryption: key 的值(32 字节 base64),与 ESPHome Dashboard 里的一致。填好后点下方「测试连接」即可验证是否正确。设备 IP 由服务端自动带入,无需填写。",
-    },
+    // ⚠️ 这里**没有** ESPHome(6053)的开关/密钥输入框,是刻意的 ——
+    // ESPHome 每台设备的 api.encryption.key 是各自生成的,一把全局密钥只能连上
+    // 一台;而且早期版本「测试连接」取的是「任意一台已连设备的 IP」,填 A 的密钥
+    // 却拿 B 的门去试,必然 auth 失败。现改为**每台设备各自配置**:
+    // 播放器页 Sendspin 设备行上填自己的密钥 + 测试连接 + 设备音量,
+    // 存 sendspin_device_state(clientId → psk/port),见 services/sendspin/deviceState.ts。
   ],
   i18n: {
     en: {
@@ -115,14 +104,6 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
             pcm: "PCM (recommended, zero latency)",
             flac: "FLAC (saves bandwidth)",
           },
-        },
-        esphome_mirror: {
-          label: "ESPHome read-only monitor (6053)",
-          help: "Opens a Native API (port 6053) connection back to each connected ESPHome device for keep-alive and read-only state mirroring. It stops the device from rebooting itself via the api.reboot_timeout watchdog when it loses network, and reads the device's real playback state and speaker volume so you can verify that streamed audio is actually playing. Requires the device's api.encryption.key. This link is read-only plus keep-alive, NOT for control: the device's media_player reports no SEEK / NEXT_TRACK support, and volume should stay on the Sendspin group volume.",
-        },
-        esphome_psk: {
-          label: "ESPHome API encryption key",
-          help: "The value of `api: encryption: key` in the device firmware (32-byte base64), same as shown in the ESPHome Dashboard. Use the \"Test connection\" button below to verify it before saving. The device IP is derived from its Sendspin connection, so there is no host field.",
         },
         stream_source: {
           label: "Streaming decode (save memory)",

@@ -67,15 +67,15 @@ export type SendspinChildToParent =
   | { t: "res"; id: number; ok: boolean; result?: unknown; error?: string }
   | { t: "stopped" };
 
-/** 热更新配置(主进程读 DB 后下发;child 不自己读 plugins 表,单一可信源在主进程)。 */
+/** 热更新配置(主进程读 DB 后下发;child 不自己读 plugins 表,单一可信源在主进程)。
+ *
+ *  注:ESPHome 6053 的开关/密钥/端口**不在这里** —— 它们是每台设备各自的,
+ *  存 sendspin_device_state(clientId → psk/port),经 `esphomeSync` 逐台下发。 */
 export interface SendspinIpcConfig {
   port: number;
   allowLegacyClients: boolean;
   preferredCodec: "pcm" | "flac";
   autoDiscover: boolean;
-  esphomeMirror: boolean;
-  esphomePsk: string;
-  esphomePort: number;
 }
 
 /** rpc 超时缺省:控制面操作(dial 需要 15s+ 宽限)。 */

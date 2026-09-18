@@ -77,9 +77,6 @@ export interface ConfigField {
   default?: unknown;
   options?: { label: string; value: string }[];
   help?: string;
-  /** 可选的行内动作按钮,由前端渲染「放在输入框下方、常显」,点击后调用对应自测 API。
-   *  例如 esphome_psk 的 `esphome-test` —— 让用户在保存前先验证密钥是否正确。 */
-  action?: "esphome-test";
   /** 配置分组标识,前端按此字段将配置项圈入带标题的功能模块框。如 "backend","recommend","keyword","frontend"。 */
   group?: string;
 }

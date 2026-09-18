@@ -243,6 +243,21 @@
             </div>
             <!-- 在线:禁用/恢复 → 配对/解绑 → 重命名(与 DLNA 同序)。 -->
             <template v-if="dev.online">
+              <!-- 设备音量(6053):调的是**设备自身**的硬件输出,与音乐采样增益
+                   (组音量)是两个旋钮,实际响度 = 两者相乘,所以入口独立、不并进组音量。
+                   未配密钥时**照常显示**并置灰徽标 —— 藏起来用户就找不到填密钥的地方。 -->
+              <el-button
+                v-if="canUse && dev.clientId"
+                size="small"
+                class="device-vol-btn"
+                :class="{ 'is-ready': dev.esphome?.connected }"
+                :title="dev.esphome?.connected
+                  ? t('groups.sendspinDeviceVolumeReady', { volume: dev.esphome?.volume ?? 0 })
+                  : t('groups.sendspinDeviceVolumeOff')"
+                @click="openDeviceVolume(dev)"
+              >
+                <MfIcon :name="dev.esphome?.connected ? 'Volume2' : 'VolumeX'" />{{ t('groups.sendspinDeviceVolume') }}
+              </el-button>
               <el-popconfirm
                 v-if="canManage"
                 :title="dev.disabled
@@ -526,6 +541,76 @@
 
     <el-dialog v-model="showPairDialog" :title="t('groups.sendspinPairTitle')" width="760px" :append-to-body="true" @closed="loadSendspinClients">
       <SendspinPairing :client-id="pairTarget" />
+    </el-dialog>
+
+    <!-- 设备音量(ESPHome 6053,每台设备各自一把密钥)。
+         两个旋钮的关系必须写清楚:这条滑杆 = 播放器自己的硬件音量,音乐音量另算。 -->
+    <el-dialog
+      v-model="showDeviceVolume"
+      :title="t('groups.sendspinDeviceVolumeTitle', { name: deviceVolumeName })"
+      width="480px"
+      :append-to-body="true"
+      @closed="resetDeviceVolumeDialog"
+    >
+      <div class="form-tip">{{ t('groups.sendspinDeviceVolumeTip') }}</div>
+
+      <div class="device-vol-row">
+        <MfIcon
+          :name="deviceVolumeMuted ? 'VolumeX' : 'Volume2'"
+          :size="18"
+          class="device-vol-icon"
+          :class="{ muted: deviceVolumeMuted, 'is-off': !deviceVolumeReady }"
+          @click="toggleDeviceMute"
+        />
+        <el-slider
+          class="device-vol-slider"
+          :model-value="deviceVolume"
+          :min="0"
+          :max="100"
+          :show-tooltip="false"
+          :disabled="!deviceVolumeReady"
+          @input="onDeviceVolumeInput"
+        />
+        <span class="device-vol-num" :class="{ 'is-off': !deviceVolumeReady }">{{ deviceVolume }}</span>
+      </div>
+      <div v-if="!deviceVolumeReady" class="device-vol-hint">{{ t('groups.sendspinDeviceVolumeOffHint') }}</div>
+      <div v-else class="device-vol-hint ok">{{ t('groups.sendspinDeviceVolumeOnHint', { port: deviceVolumePort }) }}</div>
+
+      <el-divider />
+
+      <div class="device-esphome-title">{{ t('groups.sendspinEsphomeTitle') }}</div>
+      <div class="device-esphome-desc">{{ t('groups.sendspinEsphomeDesc') }}</div>
+      <div class="device-esphome-fields">
+        <el-input
+          v-model="esphomePsk"
+          type="password"
+          show-password
+          clearable
+          :placeholder="t('groups.sendspinEsphomeKeyPh')"
+          :disabled="!canManage"
+        />
+        <el-input-number v-model="esphomePort" :min="1" :max="65535" size="small" style="width: 120px" :disabled="!canManage" />
+      </div>
+      <div class="device-esphome-actions">
+        <el-button size="small" :loading="esphomeTesting" :disabled="!canManage" @click="testDeviceEsphome">
+          <MfIcon name="Cable" />{{ t('groups.sendspinTest') }}
+        </el-button>
+        <el-button size="small" type="primary" :loading="esphomeSaving" :disabled="!canManage" @click="saveDeviceEsphome">
+          {{ t('groups.sendspinEsphomeSave') }}
+        </el-button>
+        <el-button
+          v-if="esphomePskConfigured"
+          size="small"
+          type="danger"
+          plain
+          :loading="esphomeSaving"
+          :disabled="!canManage"
+          @click="clearDeviceEsphome"
+        >{{ t('groups.sendspinEsphomeClear') }}</el-button>
+      </div>
+      <div v-if="esphomeResult" class="test-result" :class="{ ok: esphomeResult.success }">{{ esphomeResult.message }}</div>
+      <div v-else-if="esphomePskConfigured" class="device-esphome-status">{{ t('groups.sendspinEsphomeConfigured') }}</div>
+      <div v-if="!canManage" class="form-tip">{{ t('groups.sendspinEsphomeAdminOnly') }}</div>
     </el-dialog>
   </div>
 </template>
@@ -1033,6 +1118,234 @@ async function toggleSendspinDisabled(dev: any, disabled: boolean): Promise<void
   }
 }
 
+// ---- Sendspin **设备自身**音量(ESPHome 6053;每台设备各自一把密钥) ----
+// 与组音量/成员音量条的区别必须清楚:那条是**音乐采样增益**(Sendspin group
+// volume),这条是**设备硬件输出**(6053 的 media_player volume)。实际响度 =
+// 两者相乘,所以 UI 不合并、端点也不共用(/v1/peers/:id/volume vs
+// /v1/sendspin/devices/:id/esphome/volume)。
+const showDeviceVolume = ref(false);
+const deviceVolumeClientId = ref("");
+const deviceVolumeName = ref("");
+const deviceVolume = ref(0);
+const deviceVolumeMuted = ref(false);
+/** 桥连上且拿到过设备侧真值。false ⇒ 滑杆置灰,引导先配密钥/等设备上线。 */
+const deviceVolumeReady = ref(false);
+const deviceVolumePort = ref(6053);
+const esphomePsk = ref("");
+const esphomePort = ref(6053);
+const esphomePskConfigured = ref(false);
+const esphomeTesting = ref(false);
+const esphomeSaving = ref(false);
+const esphomeResult = ref<{ success: boolean; message: string } | null>(null);
+/** 拖拽防抖:本地即时反馈 + 250ms 一 POST(与成员音量条同款节流)。 */
+let deviceVolumeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 写失败结果码 → 文案。后端刻意只回机器可读 code(不在后端写死语言)。 */
+function esphomeWriteMessage(code: string): string {
+  switch (code) {
+    case "no-bridge": return t("groups.sendspinWriteNoBridge");
+    case "not-connected": return t("groups.sendspinWriteNotConnected");
+    case "no-entity": return t("groups.sendspinWriteNoEntity");
+    default: return t("groups.sendspinWriteFailed");
+  }
+}
+
+/** 探针失败原因码 → 文案(与 esphomeBridge 的 errorCode 一一对应)。 */
+function esphomeProbeMessage(d: any): string {
+  switch (d?.errorCode) {
+    case "no_psk": return t("groups.sendspinTestMissingKey");
+    case "no_host": return t("groups.sendspinTestOffline");
+    case "timeout": return t("groups.sendspinTestTimeout");
+    case "auth": return t("groups.sendspinTestAuth");
+    case "network": return t("groups.sendspinTestNetwork");
+    default: return t("groups.sendspinTestFailed", { error: d?.error || "unknown" });
+  }
+}
+
+function openDeviceVolume(dev: any) {
+  const e = dev.esphome || {};
+  deviceVolumeClientId.value = dev.clientId || "";
+  deviceVolumeName.value = deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`);
+  deviceVolumeReady.value = !!e.connected;
+  deviceVolume.value = typeof e.volume === "number" ? e.volume : 0;
+  deviceVolumeMuted.value = !!e.muted;
+  deviceVolumePort.value = Number(e.port) || 6053;
+  esphomePort.value = Number(e.port) || 6053;
+  esphomePskConfigured.value = !!e.pskConfigured;
+  esphomePsk.value = ""; // 密钥永不回显:留空 = 不改动,要清空走「清除密钥」
+  esphomeResult.value = null;
+  showDeviceVolume.value = true;
+}
+
+function resetDeviceVolumeDialog() {
+  if (deviceVolumeTimer) { clearTimeout(deviceVolumeTimer); deviceVolumeTimer = null; }
+  deviceVolumeClientId.value = "";
+  deviceVolumeName.value = "";
+  esphomePsk.value = "";
+  esphomeResult.value = null;
+  esphomeTesting.value = false;
+  esphomeSaving.value = false;
+}
+
+function onDeviceVolumeInput(v: number | number[]) {
+  const val = Array.isArray(v) ? v[0] : v;
+  deviceVolume.value = val;
+  if (deviceVolumeTimer) clearTimeout(deviceVolumeTimer);
+  deviceVolumeTimer = setTimeout(() => { void postDeviceVolume(val); }, 250);
+}
+
+async function postDeviceVolume(val: number): Promise<void> {
+  const clientId = deviceVolumeClientId.value;
+  if (!clientId) return;
+  try {
+    const res = await api.put(
+      `/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome/volume`,
+      { volume: val },
+    );
+    if (!res.data?.success) ElMessage.error(esphomeWriteMessage(res.data?.code || ""));
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("groups.sendspinWriteFailed"));
+  }
+}
+
+async function toggleDeviceMute(): Promise<void> {
+  const clientId = deviceVolumeClientId.value;
+  if (!clientId || !deviceVolumeReady.value) return;
+  const next = !deviceVolumeMuted.value;
+  try {
+    const res = await api.put(
+      `/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome/muted`,
+      { muted: next },
+    );
+    if (res.data?.success) deviceVolumeMuted.value = next;
+    else ElMessage.error(esphomeWriteMessage(res.data?.code || ""));
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("groups.sendspinWriteFailed"));
+  }
+}
+
+/** 重新拉这台设备的桥接状态(保存密钥 / 设备重连后同步 UI)。 */
+async function refreshDeviceVolumeState(): Promise<void> {
+  const clientId = deviceVolumeClientId.value;
+  if (!clientId) return;
+  try {
+    const res = await api.get(`/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome`);
+    const d = res.data || {};
+    esphomePskConfigured.value = !!d.pskConfigured;
+    deviceVolumePort.value = Number(d.port) || 6053;
+    deviceVolumeReady.value = !!d.connected;
+    if (typeof d.volume === "number") deviceVolume.value = d.volume;
+    deviceVolumeMuted.value = !!d.muted;
+  } catch { /* 取不到就保持现状,不影响已渲染的滑杆 */ }
+}
+
+/** 保存密钥/端口。**留空不提交** —— 空串会让后端撤销这台设备的桥接,
+ *  那是「清除密钥」按钮的语义,不该被一次误点的保存顺手做掉。 */
+async function saveDeviceEsphome(): Promise<void> {
+  const clientId = deviceVolumeClientId.value;
+  if (!clientId || esphomeSaving.value) return;
+  const psk = esphomePsk.value.trim();
+  if (!psk) {
+    esphomeResult.value = { success: false, message: t("groups.sendspinEsphomeKeyEmpty") };
+    return;
+  }
+  esphomeSaving.value = true;
+  esphomeResult.value = null;
+  try {
+    const res = await api.put(
+      `/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome`,
+      { psk, port: esphomePort.value },
+    );
+    if (res.data?.success) {
+      esphomePskConfigured.value = true;
+      esphomePsk.value = "";
+      esphomeResult.value = {
+        success: true,
+        message: res.data?.online
+          ? t("groups.sendspinEsphomeSavedOnline")
+          // 设备离线时密钥已落库,等它下次拨入自动带上 —— 说明白,免得用户以为没生效。
+          : t("groups.sendspinEsphomeSavedOffline"),
+      };
+      await refreshDeviceVolumeState();
+      await loadSendspinClients();
+    }
+  } catch (e: any) {
+    esphomeResult.value = { success: false, message: e.response?.data?.error || t("common.operationFailed") };
+  } finally {
+    esphomeSaving.value = false;
+  }
+}
+
+/** 清除该设备的密钥(显式传空串)。断开这一台的桥,不影响其它设备。 */
+async function clearDeviceEsphome(): Promise<void> {
+  const clientId = deviceVolumeClientId.value;
+  if (!clientId || esphomeSaving.value) return;
+  esphomeSaving.value = true;
+  esphomeResult.value = null;
+  try {
+    const res = await api.put(
+      `/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome`,
+      { psk: "", port: esphomePort.value },
+    );
+    if (res.data?.success) {
+      esphomePskConfigured.value = false;
+      esphomeResult.value = { success: true, message: t("groups.sendspinEsphomeCleared") };
+      await refreshDeviceVolumeState();
+    }
+  } catch (e: any) {
+    esphomeResult.value = { success: false, message: e.response?.data?.error || t("common.operationFailed") };
+  } finally {
+    esphomeSaving.value = false;
+  }
+}
+
+/** 测试连接:用**这台设备**当前填的密钥走一次性握手探针。
+ *  host 不用传 —— 后端按 clientId 从连接派生,填 A 的密钥绝不会去试 B 的门。 */
+async function testDeviceEsphome(): Promise<void> {
+  const clientId = deviceVolumeClientId.value;
+  if (!clientId || esphomeTesting.value) return;
+  const psk = esphomePsk.value.trim();
+  if (!psk && !esphomePskConfigured.value) {
+    esphomeResult.value = { success: false, message: t("groups.sendspinTestMissingKey") };
+    return;
+  }
+  esphomeTesting.value = true;
+  esphomeResult.value = null;
+  try {
+    const res = await api.post(
+      `/rest/api/v1/sendspin/devices/${encodeURIComponent(clientId)}/esphome/test`,
+      { psk, port: esphomePort.value },
+      { timeout: 20000 },
+    );
+    const d = res.data || {};
+    if (!d.ok) {
+      esphomeResult.value = { success: false, message: esphomeProbeMessage(d) };
+      return;
+    }
+    const name = d.deviceName || d.host || "";
+    const version = d.esphomeVersion || "";
+    const p = Array.isArray(d.players) && d.players.length ? d.players[0] : null;
+    esphomeResult.value = p
+      ? {
+          success: true,
+          message: t("groups.sendspinTestOkWithState", {
+            host: d.host,
+            name,
+            version,
+            state: p.stateName,
+            volume: Math.round((p.volume || 0) * 100),
+          }),
+        }
+      : { success: true, message: t("groups.sendspinTestOk", { host: d.host, name, version }) };
+    // 探针成功说明凭据可用:顺手把状态刷新一遍,滑杆就能立即可用。
+    await refreshDeviceVolumeState();
+  } catch (e: any) {
+    esphomeResult.value = { success: false, message: e.response?.data?.error || t("groups.sendspinTestFailed", { error: "unknown" }) };
+  } finally {
+    esphomeTesting.value = false;
+  }
+}
+
 async function unpairSendspin(dev: any): Promise<void> {
   try {
     await api.post("/rest/api/v1/sendspin/unpair", { clientId: dev.clientId });
@@ -1346,6 +1659,35 @@ onMounted(() => {
 .dialog-field { margin-bottom: 16px;
   .dialog-label { font-size: 13px; font-weight: 500; color: var(--fnos-text-secondary); margin-bottom: 8px; }
 }
+
+// ---- 设备自身音量弹窗(ESPHome 6053)----
+// 配色沿用成员音量条那套:几何在本地覆写,滑块颜色交给 global.scss 的 el-slider 全局覆写。
+.device-vol-btn.is-ready { color: var(--fnos-red); }
+.device-vol-row {
+  display: flex; align-items: center; gap: 10px; margin-top: 14px;
+  .device-vol-icon {
+    flex: none; color: var(--fnos-text-secondary); cursor: pointer; transition: color 0.15s;
+    &:hover { color: var(--fnos-text-primary); }
+    &.muted { color: var(--fnos-red); }
+    &.is-off { color: var(--fnos-text-muted); cursor: not-allowed; }
+  }
+  .device-vol-slider { flex: 1; }
+  .device-vol-num {
+    flex: none; min-width: 34px; text-align: right;
+    font-size: 13px; color: var(--fnos-text-secondary); font-variant-numeric: tabular-nums;
+    &.is-off { color: var(--fnos-text-muted); }
+  }
+}
+.device-vol-hint {
+  margin-top: 4px; font-size: 12px; color: var(--fnos-text-muted);
+  &.ok { color: var(--fnos-text-tertiary); }
+}
+.device-esphome-title { font-size: 13px; font-weight: 600; color: var(--fnos-text-primary); }
+.device-esphome-desc { margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--fnos-text-tertiary); }
+.device-esphome-fields { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+.device-esphome-actions { margin-top: 10px; display: flex; gap: 8px; }
+.device-esphome-status { margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); }
+.test-result { margin-top: 8px; font-size: 13px; color: var(--el-color-danger); &.ok { color: var(--el-color-success); } }
 .device-list { max-height: 300px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 4px; background: rgba(0,0,0,0.2); }
 .device-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
   &:hover { background: rgba(255,255,255,0.06); }

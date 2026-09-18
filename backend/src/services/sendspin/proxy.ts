@@ -203,10 +203,12 @@ export function getSendspinFront(inProc: boolean): SendspinServerLike | null {
   return getServer();
 }
 
-/** 代理侧 ESPHome 状态(fork 专用;index.ts 的 sendspinEsphomeStatus() 分模式调用)。 */
-export function proxyEsphomeStatus(): Promise<{ enabled: boolean; pskConfigured: boolean; port: number; devices: unknown[] }> {
+/** 代理侧 ESPHome 状态(fork 专用;index.ts 的 sendspinEsphomeStatus() 分模式调用)。
+ *  ⚠️ 已无全局开关/密钥/端口 —— 只有逐台的桥接快照(是否连上、设备侧真值音量),
+ *  且快照本身不含 PSK。 */
+export function proxyEsphomeStatus(): Promise<{ devices: unknown[] }> {
   if (!sendspinSupervisor.isRunning()) {
-    return Promise.resolve({ enabled: false, pskConfigured: false, port: 6053, devices: [] });
+    return Promise.resolve({ devices: [] });
   }
   return sendspinSupervisor.rpc("esphomeStatus");
 }
