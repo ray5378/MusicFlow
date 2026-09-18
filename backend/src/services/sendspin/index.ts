@@ -118,6 +118,7 @@ export function readSendspinPluginConfig(): {
   esphomeMirror: boolean;
   esphomePsk: string;
   esphomePort: number;
+  streamSource: boolean;
 } {
   const fallback = {
     allowLegacyClients: true,
@@ -127,6 +128,7 @@ export function readSendspinPluginConfig(): {
     esphomeMirror: false,
     esphomePsk: "",
     esphomePort: ESPHOME_API_PORT,
+    streamSource: false,
   };
   try {
     const row = sqlite
@@ -145,6 +147,8 @@ export function readSendspinPluginConfig(): {
       esphomeMirror: cfg?.esphome_mirror === true,
       esphomePsk: typeof cfg?.esphome_psk === "string" ? cfg.esphome_psk.trim() : "",
       esphomePort: Number.isInteger(apiPort) && apiPort >= 1 && apiPort <= 65535 ? apiPort : ESPHOME_API_PORT,
+      // 流式解码:只认显式 true,缺省/非法一律整包(3.0.36 灰度,稳后转默认)。
+      streamSource: cfg?.stream_source === true,
     };
   } catch {
     return fallback;

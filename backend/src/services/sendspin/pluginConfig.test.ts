@@ -15,6 +15,8 @@ describe("readSendspinPluginConfig", () => {
       esphomeMirror: false,
       esphomePsk: "",
       esphomePort: 6053,
+      // 流式解码默认关(整包路径),灰度观察后再转默认。
+      streamSource: false,
     });
   });
 
@@ -30,6 +32,7 @@ describe("readSendspinPluginConfig", () => {
       esphomeMirror: false,
       esphomePsk: "",
       esphomePort: 6053,
+      streamSource: false,
     });
   });
 
@@ -103,6 +106,24 @@ describe("readSendspinPluginConfig", () => {
     expect(readSendspinPluginConfig().preferredCodec).toBe("flac");
     write({ preferred_codec: "FLAC" });
     expect(readSendspinPluginConfig().preferredCodec).toBe("flac");
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
+  });
+
+  it("stream_source 缺省关,只有显式 true 才开", () => {
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
+    const write = (cfg: any) =>
+      sqlite
+        .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
+        .run(JSON.stringify(cfg));
+    expect(readSendspinPluginConfig().streamSource).toBe(false);
+    write({});
+    expect(readSendspinPluginConfig().streamSource).toBe(false);
+    write({ stream_source: "true" });
+    expect(readSendspinPluginConfig().streamSource).toBe(false);
+    write({ stream_source: 1 });
+    expect(readSendspinPluginConfig().streamSource).toBe(false);
+    write({ stream_source: true });
+    expect(readSendspinPluginConfig().streamSource).toBe(true);
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 });

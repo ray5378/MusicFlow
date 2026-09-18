@@ -30,9 +30,33 @@ export interface GroupAudio {
   stream?: PcmWindow | null;
 }
 
-/** 流式音源开关(阶段二灰度):1 = 默认走滑动窗口,默认关(整包路径零改动)。 */
-export function isStreamSource(): boolean {
-  return process.env.SENDSPIN_STREAM_SOURCE === "1";
+/** 流式音源开关:插件配置 `stream_source` 为单一可信源(配置页开关,下一首生效);
+ *  环境变量仅做显式覆盖(1=强制开,0=强制关,供测试/排障)。
+ *  注意 ./index.js 只许动态导入(禁环:index → 本文件静态导入 stopGroupPump)。 */
+export async function isStreamSource(): Promise<boolean> {
+  if (process.env.SENDSPIN_STREAM_SOURCE === "1") return true;
+  if (process.env.SENDSPIN_STREAM_SOURCE === "0") return false;
+  return readSendspinStreamSource();
+}
+
+let streamSourceCache: { value: boolean; at: number } | null = null;
+const STREAM_SOURCE_CACHE_MS = 5000;
+
+/** 读插件配置的流式开关(5s 缓存:每首歌只查一次 DB,开关翻转最多延迟 5s 生效)。 */
+async function readSendspinStreamSource(): Promise<boolean> {
+  const now = Date.now();
+  if (streamSourceCache && now - streamSourceCache.at < STREAM_SOURCE_CACHE_MS) {
+    return streamSourceCache.value;
+  }
+  let value = false;
+  try {
+    const { readSendspinPluginConfig } = await import("./index.js");
+    value = readSendspinPluginConfig().streamSource === true;
+  } catch {
+    value = false;
+  }
+  streamSourceCache = { value, at: now };
+  return value;
 }
 
 /** 解析某首歌的可播字节(默认真实);测试可注入。 */
@@ -76,7 +100,7 @@ async function defaultSource(songId: string): Promise<GroupAudio> {
   const { resolvePlayableRow, fetchRowBytes } = await import("../source/resolveAudio.js");
   const r = await resolvePlayableRow(songId);
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
-  if (isStreamSource()) return streamingSource(r.row as any);
+  if (await isStreamSource()) return streamingSource(r.row as any);
   const bytes = await fetchRowBytes(r.row);
   if (!bytes) throw new Error(`fetch bytes failed for ${songId} (${r.reason})`);
   const pcm = await decodeToF32(bytes);

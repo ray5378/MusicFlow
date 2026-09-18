@@ -65,6 +65,13 @@ export const sendspinRendererManifest: PluginManifest = {
       help: "浏览局域网 _sendspin._tcp,新设备出现即自动拨号接入(只发现、不自动播放)。关闭则只靠手工拨号与记忆重拨。",
     },
     {
+      key: "stream_source",
+      label: "流式解码(省内存)",
+      type: "switch",
+      default: false,
+      help: "推流解码改走滑动窗口:边解边播,子进程只驻留约 60 秒音频(~23MB),与曲长无关;关闭时整曲一次解完进内存(320 秒约 122MB,切歌瞬间翻倍,超长单曲可能顶爆内存)。开启后下一首生效(正在播的不中断);seek 回跳超出窗口时会重建解码(约 1 秒空窗)。3.0.36 起灰度,观察稳定后再默认开启。",
+    },
+    {
       key: "esphome_mirror",
       label: "ESPHome 只读监控(6053)",
       type: "switch",
@@ -116,6 +123,10 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
         esphome_psk: {
           label: "ESPHome API encryption key",
           help: "The value of `api: encryption: key` in the device firmware (32-byte base64), same as shown in the ESPHome Dashboard. Use the \"Test connection\" button below to verify it before saving. The device IP is derived from its Sendspin connection, so there is no host field.",
+        },
+        stream_source: {
+          label: "Streaming decode (save memory)",
+          help: "Decode while streaming through a sliding window: the child process only holds ~60s of audio (~23MB) regardless of track length. When off, each track is fully decoded into memory at once (~122MB for a 320s track, doubled briefly at track changes, and extra-long tracks may exhaust memory). Takes effect on the next track (the one currently playing is untouched); seeking back beyond the window rebuilds the decoder (~1s gap).",
         },
       },
     },
