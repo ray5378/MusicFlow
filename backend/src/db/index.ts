@@ -557,6 +557,28 @@ export function initDatabase() {
       headers_json TEXT NOT NULL DEFAULT '',
       exp INTEGER NOT NULL
     );
+    -- 每源一行的响度/节奏/频谱测量值(MA AudioAnalysisData 对齐),供②段静态增益取值。
+    -- row_id 指向 songs.id:同曲多源各有自己的一行,不按 group 合并。
+    -- 写侧纪律见 D8:仅 local/webdav 行回写,网络源永不入库(永远走实时 loudnorm)。
+    -- 无 CASCADE:删除 songs 行由业务侧同事务清理,避免一次源抖动连带抹掉测量值(P0-6)。
+    CREATE TABLE IF NOT EXISTS audio_analysis (
+      row_id TEXT PRIMARY KEY,
+      loudness_integrated REAL,
+      loudness_album REAL,
+      loudness_range REAL,
+      true_peak REAL,
+      bpm REAL,
+      beats TEXT,
+      downbeats TEXT,
+      beats_per_bar INTEGER,
+      key TEXT,
+      mode TEXT,
+      rms_energy TEXT,
+      spectral_centroid TEXT,
+      energy REAL,
+      measured_at TEXT DEFAULT '',
+      FOREIGN KEY (row_id) REFERENCES songs(id)
+    );
   `);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

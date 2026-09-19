@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, primaryKey } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
@@ -437,4 +437,33 @@ export const sendspinDeviceState = sqliteTable("sendspin_device_state", {
   /** 6053 端口,0 = 用缺省 6053。 */
   esphomePort: integer("esphome_port").notNull().default(0),
   updatedAt: text("updated_at").default(""),
+});
+
+// audio_analysis:每个「源行」一条响度/节奏/频谱测量值,字段对齐 MA
+// models/audio_analysis.py::AudioAnalysisData(taskands 2026-09-19 dev 76c2fcb)。
+// 键是 songs.id,不是曲目、也不是 group_id:songs 表一行 = 一个源(type 分 local/webdav/web),
+// 同曲多源各有各的测量值,按分组合并会让②段的静态增益失去意义(见 plan §4)。
+// 序列类字段(beats/downbeats/rms_energy/spectral_centroid)与 MA 一样是普通数组,这里存 JSON 文本。
+// 回填纪律见 D8:仅 local/webdav 行回写,网络源一律不写、永远走实时 loudnorm。
+// 删除 songs 行时由业务侧同事务清理(本项目外键不带 CASCADE,见 P0-6)。
+export const audioAnalysis = sqliteTable("audio_analysis", {
+  rowId: text("row_id").primaryKey(),
+  // 响度 —— EBU R128 / ITU-R BS.1770-4
+  loudnessIntegrated: real("loudness_integrated"),
+  loudnessAlbum: real("loudness_album"),
+  loudnessRange: real("loudness_range"),
+  truePeak: real("true_peak"),
+  // 节奏
+  bpm: real("bpm"),
+  beats: text("beats"),
+  downbeats: text("downbeats"),
+  beatsPerBar: integer("beats_per_bar"),
+  // 调性
+  key: text("key"),
+  mode: text("mode"),
+  // 频谱与能量
+  rmsEnergy: text("rms_energy"),
+  spectralCentroid: text("spectral_centroid"),
+  energy: real("energy"),
+  measuredAt: text("measured_at").default(""),
 });

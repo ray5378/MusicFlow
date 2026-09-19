@@ -357,9 +357,10 @@
 | `genres`                                          | id                            | name unique                                                                                                                                       |
 | `flows`                                           | id                            | token **unique**（免登录 webhook 凭据）；lastRunStatus ∈ waiting\|playing\|success\|error\|timeout                                                        |
 | `player_webhook_tokens`                           | id                            | token unique；enabled 0/1；ownerUserId                                                                                                              |
-| `cleaning_rules` / `wishes`                       | id                            | wishes.status 默认 pending（枚举扩展需 spec 明确） |
+| `cleaning_rules` / `wishes`                       | id                            | wishes.status 默认 pending（枚举扩展需 spec 明确）                                                                                                      |
+| `audio_analysis`                                  | row\_id(=`songs.id`)          | 每**源行**一条响度/节奏/频谱测量值（对齐 MA `AudioAnalysisData`）；序列列 `beats`/`downbeats`/`rms_energy`/`spectral_centroid` 存 JSON 文本；**仅 local/webdav 行回写，网络源不入库**（D8）；删 `songs` 行由业务侧同事务清理（外键无 CASCADE） |
 
-> **上表只列核心表 —— 全库共 38 张**（`db/schema.ts` 34 张 + 仅写在 `db/index.ts` 的 3 张 + `plugins/storage.ts` 自建的 1 张）。其余按用途归组，细节以 `db/schema.ts` 为准：
+> **上表只列核心表 —— 全库共 39 张**（`db/schema.ts` 35 张 + 仅写在 `db/index.ts` 的 3 张 + `plugins/storage.ts` 自建的 1 张）。其余按用途归组，细节以 `db/schema.ts` 为准：
 > 收藏扩展 `user_favorite_albums` / `user_favorite_artists` / `playlist_favorites`；权限与授权 `user_permissions` / `user_renderer_grants`；
 > 播放器 `player_name_overrides` / `player_prefs`；渲染器 `sendspin_device_state` / `airplay_devices`；
 > 固定推荐歌单封面锁 `playlist_cover_claims`（唯一索引 date_key+cover_ref）；外置插件 KV `plugin_storage`（**不在** `db/index.ts` 建表清单里，由 `plugins/storage.ts` 自建）；
