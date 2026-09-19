@@ -51,22 +51,23 @@
 
 | 阶段 | 主题 | 完成度 | 状态 | DoD 一句话 |
 |---|---|---|---|---|
-| **P0** | 数据层与响度核心 | 0 / 7 | ⬜ | 三个纯函数可单测，**不改任何播放行为**，可独立上线 |
+| **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
 | **P1** | 管道骨架 + Sendspin / AirPlay | 0 / 7 | ⬜ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
 | **P2** | HTTP 通道实时管道化 | 0 / 7 | ⬜ | 客户端 / Web / DLNA 走管道，**客户端拖动进度实测通过**，删净直传分支 |
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **0 / 38** | ⬜ 尚未开工 | 验收总口径见 plan §8 |
+| **合计** | | **6 / 38** | 🟡 P0 收尾中 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**0 / 38（0%）**
+**6 / 38（16%）**
 
 ### 2.3 当前焦点
 
-**尚未开工。** 下一步从 **P0-1** 起手：建表对齐 MA `AudioAnalysisData`（`backend/src/db/schema.ts`）。
-纯数据层改动、不动播放路径、风险最低，且后续所有阶段都要吃它的数据。
+**P0 剩 P0-4 接线（待 P1 管道 stderr 落点）。** 下一步从 **P1-1** 起手：
+新增 `AudioPipeline`（解码 F32＋`-af` 链＋编码），同时把 P0-4 的
+`reportPlaybackLoudness(rowId, stderr)` 接到各通道流结束处。
 
 ### 2.4 阶段依赖
 
@@ -79,7 +80,7 @@ P0（数据层，可独立上线）
 
 ---
 
-## 3. P0 · 数据层与响度核心 — 0 / 7 ⬜
+## 3. P0 · 数据层与响度核心 — 6 / 7 🟡
 
 **为什么先做它**
 当前没有任何响度元数据字段（`db/schema.ts` 全表零命中），于是：① 曲库响度参差不齐但服务端无从得知差值；② 需要在「静态 `volume`」与「实时 `loudnorm`」之间决策却没有依据。先把数据层与三个纯函数做掉，后续管道才能直接取用；本阶段不动播放路径，风险最低、可单独上线。
@@ -97,15 +98,15 @@ P0（数据层，可独立上线）
 
 | 状态 | # | 任务 | 落点 | commit | 完成日期 | 备注 |
 |---|---|---|---|---|---|---|
-| ⬜ | P0-1 | 建表对齐 MA `AudioAnalysisData`：`loudness_integrated` / `loudness_album` / `loudness_range` / `true_peak` / `bpm` / `beats` / `downbeats` / `beats_per_bar` / `key` / `mode` / `rms_energy` / `spectral_centroid` / `energy` + `measured_at`，行级 + drizzle 迁移 | `backend/src/db/schema.ts` | — | — | DB 表 38 → **39**，同步改 SPEC §2.1 表清单数字 |
-| ⬜ | P0-2 | `parseLoudnorm()`：解析 ffmpeg stderr 的 loudnorm JSON（照 `helpers/audio.py:881-901`） | 新增 `services/audio/loudness.ts` | — | — | 纯函数之一 |
-| ⬜ | P0-3 | `chooseMode()` 模式决策 + `computeGainDb()` 增益计算 | 同上 | — | — | 纯函数，必须可单测 |
-| ⬜ | P0-4 | 边播边测回写：**仅 `local` / `webdav` 行**按 `row.id` 入库；网络源行解析后丢弃（D8） | 同上 + 播放结束钩子 | — | — | 键必须是 **row.id**，不能用 songId |
-| ⬜ | P0-5 | 单测：JSON 解析（含 -inf / 解析失败）、模式选择全分支、增益限幅、行级绑定 | 新增 `tests/services/loudness.test.ts` | — | — | 阶段主力测试 |
-| ⬜ | P0-6 | 回写清理联动：删行同事务删回写；扫描差集删除仅在源探测成功后执行，失败跳过并记 warning | 源清理 / 扫描逻辑 + `loudness.ts` | — | — | 防一次源抖动抹掉整库测量值 |
-| ⬜ | P0-7 | 单测：网络源不回写（断言 DB 无记录）、源不可达时清理不执行、行删除后回写归零 | `tests/services/loudness.test.ts` 扩展 | — | — | 成功标准 4–6 的断言在这 |
+| ✅ | P0-1 | 建表对齐 MA `AudioAnalysisData`：`loudness_integrated` / `loudness_album` / `loudness_range` / `true_peak` / `bpm` / `beats` / `downbeats` / `beats_per_bar` / `key` / `mode` / `rms_energy` / `spectral_centroid` / `energy` + `measured_at`，行级 + drizzle 迁移 | `backend/src/db/schema.ts` | （建表时已合入） | 2026-09-20 | 表已存在，逐字段核对齐；DB 表 38 → **39**，SPEC §2.1 已同步 |
+| ✅ | P0-2 | `parseLoudnorm()`：解析 ffmpeg stderr 的 loudnorm JSON（照 `helpers/audio.py:881-901`） | 新增 `services/audio/loudness.ts` | （已合入） | 2026-09-20 | 纯函数之一 |
+| ✅ | P0-3 | `chooseMode()` 模式决策 + `computeGainDb()` 增益计算 | 同上 | （已合入） | 2026-09-20 | 纯函数，必须可单测 |
+| 🟡 | P0-4 | 边播边测回写：**仅 `local` / `webdav` 行**按 `row.id` 入库；网络源行解析后丢弃（D8） | `analysisStore.reportPlaybackLoudness(rowId, stderr)` + 播放结束钩子 | — | — | **入口＋单测已就绪；各通道"流结束"接线待 P1 管道 stderr 落点**（P1 起把各通道 loudnorm stderr 传进来即可，签名稳定） |
+| ✅ | P0-5 | 单测：JSON 解析（含 -inf / 解析失败）、模式选择全分支、增益限幅、行级绑定 | 新增 `tests/services/loudness.test.ts` | （已合入） | 2026-09-20 | 24 用例全绿，分支覆盖见文件 |
+| ✅ | P0-6 | 回写清理联动：删行同事务删回写；扫描差集删除仅在源探测成功后执行，失败跳过并记 warning | 源清理 / 扫描逻辑 + `loudness.ts` | （本轮） | 2026-09-20 | 5 处落点：webdav 差集（visited>0 门）/local 差集（走完即算可达）/源删除/单曲删除；purge 只删 web 行，按 D8 永无回写故不碰。顺序一律**先回写后歌曲行**（FK 无 CASCADE，反了直接抛错——外键把顺序 bug 变成了 loud error）。`Statements` 类型顺手修（`ReturnType<typeof prepare>` 命中单参数重载） |
+| ✅ | P0-7 | 单测：网络源不回写（断言 DB 无记录）、源不可达时清理不执行、行删除后回写归零 | `tests/services/loudness.test.ts` 扩展 | （本轮） | 2026-09-20 | 新文件 `tests/services/analysisStore.test.ts` 5 例全绿：入库门 3 例＋删行联动 1 例＋本地扫描 E2E 1 例（真 mp3＋真扫描：删文件重扫行/回写双清、源目录消失抛错回写保留） |
 
-**验收结果**：*待填（实测数据 / 结论 / 日期）*
+**验收结果**：`reportPlaybackLoudness`：local 行有效报告入库（-9.54）、web 行丢弃、垃圾/-inf/无行均 false 且无记录；`deleteSongDb` 删单曲回写归零；本地扫描 E2E：文件删→重扫行/回写双清，源目录消失→抛错且回写保留（-6.0）。全量 159 文件 / 1204 用例绿（2026-09-20）。
 
 ---
 
@@ -283,6 +284,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 日期 | commit | 变更内容 |
 |---|---|---|
 | 2026-09-20 | — | 本文件建立。任务自 plan §6 拆出 38 项并整合六个阶段的「为什么做 / 成功标准 / 依赖 / 注意」于一篇。前序：`3257606` D9/D10 与两段式修正、`8781b6e` MA 源码逐行复核、`ba2dcac` 行号收紧。**尚未开工，全部 ⬜** |
+| 2026-09-20 | （本轮） | P0 收尾：P0-1/2/3/5 核对完成（表/纯函数/24 单测均已在仓）；新增 `reportPlaybackLoudness` 入口（P0-4 待 P1 管道 stderr）；P0-6 五处删行联动（顺序先回写后行，FK 强制）；P0-7 新 `analysisStore.test.ts` 5 例。全量 159/1204 绿。P0-4 标 🟡 待 P1。 |
 
 ---
 

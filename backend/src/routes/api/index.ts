@@ -41,6 +41,7 @@ import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
 import { ensurePlayableStream, getCachedPlayability } from "../../services/source/online/streamFallback.js";
+import { deleteAnalysis, deleteAnalysisMany } from "../../services/audio/analysisStore.js";
 import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
 import { sqlite } from "../../db/index.js";
@@ -695,6 +696,9 @@ apiRoutes.delete("/v1/sources/:id", adminMiddleware, (c) => {
     db.delete(playlistSongs).where(inArray(playlistSongs.songId, songIds)).run();
     db.delete(userFavoriteSongs).where(inArray(userFavoriteSongs.songId, songIds)).run();
     db.delete(playHistory).where(inArray(playHistory.songId, songIds)).run();
+    // P0-6:源整个删掉,回写跟删(行永久消失,不存在"源抖动误删",无需可达门)。
+    // 顺序:先回写后歌曲行(FK 无 CASCADE,反了抛错)。
+    deleteAnalysisMany(songIds);
     db.delete(songs).where(inArray(songs.id, songIds)).run();
     cleanupOrphans();
   }
@@ -1159,12 +1163,17 @@ apiRoutes.post("/v1/songs/delete", async (c) => {
 });
 
 // 删除单曲的级联清理:先清关联表,再删歌曲记录与孤儿数据。返回是否存在该曲。
-function deleteSongDb(id: string): boolean {
+// export 供单测直调(P0-6 回写联动不断言路由层,只断言"删行即清回写")。
+export function deleteSongDb(id: string): boolean {
   const song = db.select().from(songs).where(eq(songs.id, id)).get();
   if (!song) return false;
   db.delete(playlistSongs).where(eq(playlistSongs.songId, id)).run();
   db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.songId, id)).run();
   db.delete(playHistory).where(eq(playHistory.songId, id)).run();
+  // P0-6:单曲删除是用户显式意图,回写跟删。顺序:先回写后歌曲行
+  // (audio_analysis.row_id 有 FK 无 CASCADE,反了会直接抛错;崩溃也只留下
+  // "无测量的歌",下次照常重测,反方向则是幽灵数据)。
+  deleteAnalysis(id);
   db.delete(songs).where(eq(songs.id, id)).run();
   cleanupOrphans();
   return true;

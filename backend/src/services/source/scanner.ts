@@ -7,6 +7,7 @@ import path from "path";
 import { parseBuffer } from "music-metadata";
 import { getDataDir } from "../../utils/env.js";
 import { deleteSongLyric } from "../lyricsStore.js";
+import { deleteAnalysisMany } from "../audio/analysisStore.js";
 import { invalidateArtistList } from "../../utils/artistListCache.js";
 import { createLogger } from "../../utils/logger.js";
 import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../plugin/core/songGroup.js";
@@ -306,10 +307,28 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   if (signal?.aborted) return { added, updated, removed: 0, skipped, aborted: true };
   const existingSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`w:${sourceId}:`));
   let removed = 0;
+  const removedIds: string[] = [];
   for (const s of existingSongs) {
     if (!seenPaths.has(s.path)) {
-      db.delete(songs).where(eq(songs.id, s.id)).run();
+      removedIds.push(s.id);
       removed++;
+    }
+  }
+  if (removedIds.length > 0) {
+    // P0-6:行删了回写跟删。但仅在源可达时执行 —— 至少一个目录列举成功才说明
+    // 这次看到的是"源的真实全貌"而非"源挂了所以啥也没列出来";否则一次源抖动
+    // 就会把整库测量值抹掉。探测失败时跳过并记 warning,回写原样保留。
+    // 顺序:先回写后歌曲行(audio_analysis.row_id 有 FK 无 CASCADE)。
+    if (visited.size > 0) {
+      deleteAnalysisMany(removedIds);
+      for (const id of removedIds) {
+        db.delete(songs).where(eq(songs.id, id)).run();
+      }
+    } else {
+      log.warn(`[SCANNER] WebDAV ${mode} scan: 源 ${sourceId} 本次零目录可达,回写保留(仅删歌曲行)`);
+      for (const id of removedIds) {
+        db.delete(songs).where(eq(songs.id, id)).run();
+      }
     }
   }
   if (removed > 0) cleanupOrphans();
@@ -626,12 +645,23 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
   // Fetch only this source's songs via LIKE (instead of loading the whole library)
   const existingSongs = sqlite.prepare("SELECT id, path FROM songs WHERE path LIKE ?").all(`l:${sourceId}:%`) as { id: string; path: string }[];
   let removed = 0;
+  const removedIds: string[] = [];
   const deleteStmt = sqlite.prepare("DELETE FROM songs WHERE id = ?");
   for (const s of existingSongs) {
     if (!seenPaths.has(s.path)) {
-      deleteStmt.run(s.id);
-      deleteSongLyric(s.id);
+      removedIds.push(s.id);
       removed++;
+    }
+  }
+  // P0-6:本地源走到这里=目录存在且完整遍历过(缺目录早抛错、中断早返回),
+  // 源可达成立,回写跟删。顺序:先回写后歌曲行(FK 无 CASCADE)。
+  if (removedIds.length > 0) {
+    deleteAnalysisMany(removedIds);
+    for (const s of existingSongs) {
+      if (!seenPaths.has(s.path)) {
+        deleteStmt.run(s.id);
+        deleteSongLyric(s.id);
+      }
     }
   }
   if (removed > 0) cleanupOrphans();
