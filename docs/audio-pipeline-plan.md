@@ -125,7 +125,7 @@
 
 | 项 | 内容 |
 |---|---|
-| **MA 实证** | 解码产物进 `AudioBuffer`，格式 `decoded_pcm_format()`（`helpers/audio.py:803-826`）= **跟随源位深与采样率**（16bit 源→s16 不浪费内存 upcast），仅 DSD 分支返回 F32（`helpers/audio.py:815`）。**F32 是后面 `_pick_pcm_bit_depth()` 按「是否要跑处理」决定的**（`streams/audio.py:4550-4581`）：crossfade / overlay / 归一化 / DSP 任一开启 → `INTERNAL_PCM_FORMAT`（`constants.py:935`，F32/32bit）取 headroom；全关 → 复用源位深。采样率 **snap-down**（`streams/audio.py:1444-1450`）：取播放器支持的最高速率 **且 ≤ 源速率**，**绝不升采样**；flow 模式才按 `CONF_FLOW_MODE_SAMPLE_RATE`（smart / bit_perfect / 48k / 96k / highest）锚定（`streams/audio.py:1503-1541`） |
+| **MA 实证** | 解码产物进 `AudioBuffer`，格式 `decoded_pcm_format()`（`helpers/audio.py:803-826`）= **跟随源位深与采样率**（16bit 源→s16 不浪费内存 upcast），仅 DSD 分支返回 F32（`helpers/audio.py:815`）。**F32 是后面 `_pick_pcm_bit_depth()` 按「是否要跑处理」决定的**（`streams/audio.py:4550-4581`）：crossfade / overlay / 归一化 / DSP 任一开启 → `INTERNAL_PCM_FORMAT`（`constants.py:935`，F32/32bit）取 headroom；全关 → 复用源位深。采样率 **snap-down**（`streams/audio.py:1443-1450`）：取播放器支持的最高速率 **且 ≤ 源速率**，**绝不升采样**；flow 模式才按 `CONF_FLOW_MODE_SAMPLE_RATE`（smart / bit_perfect / 48k / 96k / highest）锚定（`streams/audio.py:1503-1541`） |
 | **我们现状** | Sendspin 硬编码 `-ar 48000 -ac 2`；AirPlay 硬编码 `-ar 44100` s16le；HTTP 两条链路**根本不解码** |
 | **目标** | 解码段只负责解码 → 写进 buffer（跟随源）；**F32 由②⑤是否启用决定**；采样率按通道 `snap-down`（≤ 源速率且通道支持），不再硬编码 48k / 44.1k |
 
@@ -290,7 +290,7 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 
 - `limit` **直接用 dB 表达**（不是线性值）；`level=false` = 不做自动电平补偿、保持纯天花板语义；`asc=true` 抗削波；`latency=true` 重对齐 lookahead 缓冲。
 - 它是 **`SafetyLimiterFilter`，由用户放置的 DSP filter**，不是无条件硬编码在链尾。
-- 参考用例 `providers/ai_radio/rendering.py:177` 是**同类写法**（`alimiter=limit=…dB:level=false:latency=true`，**未带** `asc=true`）；DSP 滤镜那条（带 `asc=true`）在 `helpers/dsp.py:223`。
+- 参考用例 `providers/ai_radio/rendering.py:177` 是**同类写法**（`alimiter=limit=…dB:level=false:latency=true`，**未带** `asc=true`）；DSP 滤镜那条（带 `asc=true`）在 `helpers/dsp.py:222`。
 
 **我们现状**：**无任何削波保护**（现在不削波只是因为从不加增益）。
 
@@ -300,7 +300,7 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 
 ### 3.6 ⑥ Output 传输（编码 + 协议）
 
-**MA 实证（`helpers/ffmpeg.py:490-517 get_ffmpeg_resample_filter()`）**：
+**MA 实证（`helpers/ffmpeg.py:489-517 get_ffmpeg_resample_filter()`）**：
 
 - 重采样/dither **只在需要时加**：采样率不同，或 `输入位深 > 16 且输出位深 == 16`。
 - 采样器：有 libsoxr 且链中没有 loudnorm → `aresample=resampler=soxr:precision=30`；否则 `resample=swr`（loudnorm 冲突，ffmpeg ticket 11323）。
