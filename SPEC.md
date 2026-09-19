@@ -316,6 +316,12 @@
 `403 Invalid or expired cast token` = token 注册表跨进程不可见（必须落库）。
 新代码给 ffmpeg 喂输入前先对照本节；`serveTranscodedSong` 入口有回环护栏日志。
 
+> ⚠️ **本条约束的是「取源」环节**（Node 从远端取字节时不自行解码/转码），**不等于
+> 「服务端永不转码」**。输出侧自音频流水线改造起统一走服务端实时管道：
+> 解码 F32 → 响度标准化 → DSP → 交叉淡入 → 限制器 → 按通道编码，
+> 客户端 / Web / DLNA 三条 HTTP 链路同样经过该管道（不再是原样直出）。
+> 权威定义见 `docs/audio-pipeline-plan.md`；两者冲突时以后者为准。
+
 ## 二、数据模型契约（SQLite）
 
 > 定义在 `backend/src/db/schema.ts`。**改表必须**走 drizzle-kit 迁移，并评估既有库兼容（启动时是真实存量库）。**禁止**在 AI 交付物中私自 `ALTER TABLE` 或内联建表（测试除外）。
