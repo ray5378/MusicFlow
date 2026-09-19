@@ -285,6 +285,29 @@
 
 ***
 
+### 1.8 ffmpeg 子进程取流契约（2026-09-19 事故沉淀，硬性不变量）
+
+所有 ffmpeg 子进程（Sendspin 推流 `PcmWindow`、服务端转码 `serveTranscodedSong`、AirPlay 解码）的输入**只允许两类**：
+
+1. 本地文件路径（local 行 / 已下载缓存）；
+2. 本进程回环 token URL：`http://127.0.0.1:${PORT}/rest/dlna/stream/<token>?raw=1`
+   （songs 表内歌曲走 `createCastSession`；插件直链等虚拟行走 `mintRawStreamToken`
+   注册表，见 `services/dlna/control.ts`）。
+
+**为什么（两个结构性坑；AirPlay 早已用 token URL 绕开，其余链路 2026-09-19 起对齐）**：
+
+- 静态 ffmpeg（ffmpeg-static）是 glibc 静态构建，在 Alpine(musl) 容器里 NSS/DNS
+  不可用 → 任何带域名的输入（**含跟随 302 跳出的 CDN 域名**）一律
+  `Failed to resolve hostname ...: System error`，exit 251；
+- ffmpeg 跟随 302 时会把 `Authorization` 头原样带给跳转目标（curl/fetch 跨主机
+  跳转会自动剥头，ffmpeg 不会）→ openlist 的 Basic 头打到天翼 OBS 返回
+  400 `InvalidAuthType`（Unsupported Authorization Type）。
+
+因此 Dockerfile 用 ffmpeg-static（不装系统 ffmpeg、不设 `FFMPEG_PATH`）；鉴权、
+302、播放优选全部由 Node 在 `?raw=1` 分支内完成（直透原始字节，不嗅探不转码）。
+违反本契约的症状对照：`System error` = 域名输入；`400 InvalidAuthType` = 直链跨 302。
+新代码给 ffmpeg 喂输入前先对照本节；`serveTranscodedSong` 入口有回环护栏日志。
+
 ## 二、数据模型契约（SQLite）
 
 > 定义在 `backend/src/db/schema.ts`。**改表必须**走 drizzle-kit 迁移，并评估既有库兼容（启动时是真实存量库）。**禁止**在 AI 交付物中私自 `ALTER TABLE` 或内联建表（测试除外）。

@@ -49,20 +49,17 @@ FROM node:22-alpine AS runtime
 # 让用户确认当前跑的到底是哪个版本和哪次提交。
 ARG APP_VERSION=dev
 ARG GIT_COMMIT=unknown
-# FFMPEG_PATH=musl 系统版 ffmpeg:ffmpeg-static 是 glibc 静态构建,在 Alpine(musl)
-# 容器里 NSS/DNS 不可用 → 任何带域名的直链(如 WebDAV 302 到公网 CDN)一律报
-# "Failed to resolve hostname ...: System error"。该变量让 sendspin/encoding.ts、
-# transcode.ts、airplay/decoder.ts 三处 ffmpegBin() 全部优先用系统版
-# (含 libopus 编码 / flac 解码)。
+# ffmpeg 输入硬性只允许回环 token URL / 本地路径(见 SPEC §1.8 与
+# services/dlna/control.ts 注释),域名与 302 全部由 Node 侧处理,
+# 故运行时用 ffmpeg-static 即可,无需系统 ffmpeg。
 ENV NODE_ENV=production \
     PORT=46400 \
     TZ=Asia/Shanghai \
     UV_USE_IO_URING=0 \
-    FFMPEG_PATH=/usr/bin/ffmpeg \
     APP_VERSION=${APP_VERSION} \
     APP_COMMIT=${GIT_COMMIT}
 WORKDIR /app/backend
-RUN apk add --no-cache ffmpeg su-exec \
+RUN apk add --no-cache su-exec \
  && addgroup -S musicflow && adduser -S musicflow -G musicflow
 COPY --from=backend-build /app/backend/package.json /app/backend/package-lock.json ./
 COPY --from=backend-build /app/backend/node_modules ./node_modules

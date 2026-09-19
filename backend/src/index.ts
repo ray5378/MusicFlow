@@ -26,7 +26,7 @@ import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
 import { seedDefaultRegistry } from "./plugins/registryCatalog.js";
-import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices } from "./services/dlna/control.js";
+import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices, setRuntimePort } from "./services/dlna/control.js";
 import { startRandomSongsAutoRefresh } from "./services/plugin/randomSongs.js";
 import { runBatchJob } from "./batch/runner.js";
 import {
@@ -468,6 +468,7 @@ startOrphanPruner();
 
 server.listen(port, "0.0.0.0", () => {
   log.info(`MusicFlow backend listening on http://0.0.0.0:${port}`);
+  setRuntimePort(port); // 回环取流(loopbackBase)按实际端口打
   // Broadcast via mDNS so the HA integration can auto-discover this instance.
   startMdnsBroadcast(port);
   // Resume active queues after a short delay so SSDP discovery has time to

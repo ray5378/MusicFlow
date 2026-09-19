@@ -462,6 +462,49 @@ export function resolveCastToken(token: string): string | null {
   return s.songId;
 }
 
+// ==================== 内部 ffmpeg 回环取流(2026-09-19 事故沉淀) ====================
+// ffmpeg 子进程吃外部 URL 有两个结构性坑:
+//   ① ffmpeg-static 是 glibc 静态构建,在 Alpine(musl) 容器里 NSS/DNS 不可用,
+//      任何带域名的输入(含跟随 302 跳出的 CDN 域名)一律 "Failed to resolve hostname";
+//   ② ffmpeg 跟随 302 时会把 Authorization 头原样带给跳转目标(openlist Basic →
+//      天翼 OBS 直接 400 InvalidAuthType);curl/fetch 跨主机跳转会自动剥头,ffmpeg 不会。
+// 硬性契约:**ffmpeg 的输入只能是回环 token URL 或本地文件路径**(详见 SPEC §1.8)。
+// 鉴权/302/播放优选全部由 Node 在 /rest/dlna/stream/:token?raw=1 内完成。
+// songs 表内歌曲走 createCastSession;插件直链等虚拟行走下面的 raw-stream 注册表。
+const rawStreams = new Map<string, { url: string; headers?: Record<string, string>; exp: number }>();
+const RAW_STREAM_TTL_MS = 30 * 60 * 1000;
+
+/** 为一条任意直链(无需存在于 songs 表)注册回环取流凭证,返回 token。 */
+export function mintRawStreamToken(url: string, headers?: Record<string, string>): string {
+  const token = randomBytes(16).toString("hex");
+  const now = Date.now();
+  rawStreams.set(token, { url, headers, exp: now + RAW_STREAM_TTL_MS });
+  for (const [k, v] of rawStreams) if (v.exp < now) rawStreams.delete(k);
+  return token;
+}
+
+export function resolveRawStreamToken(token: string): { url: string; headers?: Record<string, string> } | null {
+  const s = rawStreams.get(token);
+  if (!s) return null;
+  if (s.exp < Date.now()) { rawStreams.delete(token); return null; }
+  return s;
+}
+
+let runtimePort: number | undefined;
+/** 进程实际监听端口(入口 listen 后回填;测试起在随机端口也必须回填,否则回环流打不通)。 */
+export function setRuntimePort(port: number): void { runtimePort = port; }
+
+/** 本服务回环 base(ffmpeg 与本进程同容器;优先运行时实际端口,再退 env/默认)。 */
+export function loopbackBase(): string {
+  return `http://127.0.0.1:${runtimePort ?? process.env.PORT ?? CURRENT_PORT}`;
+}
+
+/** 任意直链的回环取流 URL(raw=1 直透原始字节,不嗅探不转码)。 */
+export function loopbackRawStreamUrl(url: string, headers?: Record<string, string>): string {
+  const token = mintRawStreamToken(url, headers);
+  return `${loopbackBase()}/rest/dlna/stream/${token}?raw=1`;
+}
+
 export interface CastOptions {
   songId: string;
   title: string;

@@ -21,7 +21,7 @@ import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
-import { resolveCastToken } from "../../services/dlna/control.js";
+import { resolveCastToken, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
 import { findFallbackStream, resolveEmptyUrlStream, evictStreamFallbackCache } from "../../services/source/online/streamFallback.js";
 import { resolvePreferredSong } from "../../services/source/preferredSource.js";
@@ -1378,6 +1378,10 @@ async function serveTranscodedSong(
   input: { source: string; headers?: Record<string, string> },
   opts: { format: "mp3" | "aac"; bitrateKbps: number; timeOffset?: number },
 ) {
+  // ffmpeg 输入硬契约:回环 token URL 或本地路径(见 services/dlna/control.ts 注释 / SPEC §1.8)。
+  if (/^https?:\/\//i.test(input.source) && !input.source.startsWith(loopbackBase())) {
+    log.warn("ffmpeg 输入应为回环 token URL,外部直链会踩 DNS / 302+Auth 坑", { source: input.source.slice(0, 120) });
+  }
   await acquireTranscodeSlot();
   if (c.req.raw.signal.aborted) {
     releaseTranscodeSlot();
@@ -1442,7 +1446,7 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
       url = await resolveEmptyUrlStream(song);
       if (!url) return null;
     }
-    return { source: url, headers };
+    return { source: loopbackRawStreamUrl(url, headers) };
   }
   const parsed = parseSongPath(song.path);
   if (!parsed) return null;
@@ -1455,7 +1459,7 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
     if (config.username && config.password) {
       headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
     }
-    return { source: downloadUrl, headers };
+    return { source: loopbackRawStreamUrl(downloadUrl, headers) };
   }
   return { source: parsed.filePath };
 }
@@ -1557,7 +1561,7 @@ async function serveDlnaWebStream(
     const octetUnsupported = octet && magic !== "mp3" && magic !== "flac" && magic !== "wav";
     if (unsupported || octetUnsupported) {
       log.info("DLNA 兜底转码:上游格式音箱不支持,转 192k mp3", { id: song.id, contentType: ct, magic });
-      return serveTranscodedSong(c, { source: song.url, headers }, { format: "mp3", bitrateKbps: 192, timeOffset });
+      return serveTranscodedSong(c, { source: loopbackRawStreamUrl(song.url, headers) }, { format: "mp3", bitrateKbps: 192, timeOffset });
     }
     if (octet && magic) {
       // 透传但修正 MIME:音箱按 Content-Type 决定是否可播。
@@ -1719,7 +1723,7 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
       sourceBitRate: parseInt(getParam(c, "bitRate") || "0") || null,
     });
     if (transcode.should && transcode.format) {
-      return serveTranscodedSong(c, { source: streamUrl, headers: streamHeaders }, {
+      return serveTranscodedSong(c, { source: loopbackRawStreamUrl(streamUrl, streamHeaders) }, {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0,
@@ -1754,6 +1758,25 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
 // then streams the file exactly like /rest/stream. Registered without auth.
 restRoutes.get("/dlna/stream/:token", async (c) => {
   const token = c.req.param("token");
+  const raw = getParam(c, "raw") === "1";
+  // raw=1:内部 ffmpeg 回环取流(契约见 services/dlna/control.ts 顶部注释)。
+  // 先查 raw-stream 注册表(插件直链/虚拟行,不经 songs 表),Node 代理直透原始字节。
+  const rawEntry = resolveRawStreamToken(token);
+  if (rawEntry) {
+    const headers: Record<string, string> = { ...(rawEntry.headers || {}) };
+    const rangeHeader = c.req.header("range");
+    if (rangeHeader) headers["Range"] = rangeHeader;
+    const upstream = await fetch(rawEntry.url, { headers });
+    const respHeaders: Record<string, string> = { "Cache-Control": "no-cache" };
+    const ct = upstream.headers.get("content-type");
+    if (ct) respHeaders["Content-Type"] = ct;
+    const cl = upstream.headers.get("content-length");
+    if (cl) respHeaders["Content-Length"] = cl;
+    const cr = upstream.headers.get("content-range");
+    if (cr) respHeaders["Content-Range"] = cr;
+    if (upstream.headers.get("accept-ranges")) respHeaders["Accept-Ranges"] = "bytes";
+    return c.body(upstream.body as any, upstream.status as any, respHeaders);
+  }
   const songId = resolveCastToken(token);
   if (!songId) return c.text("Invalid or expired cast token", 403);
 
@@ -1793,6 +1816,8 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   // song's remote url (with per-song headers + Range), same as /rest/stream.
   // 兜底:上游实际格式为 ogg/opus/webm 等音箱不支持格式时转 192k mp3 再出流。
   if (resolvedSong.type === "web") {
+    // raw=1(内部 ffmpeg 回环):直透原始字节,跳过嗅探与兜底转码(外层自己转)。
+    if (raw) return serveWebSongStream(c, resolvedSong, rangeHeader);
     return serveDlnaWebStream(c, resolvedSong, rangeHeader, timeOffset);
   }
 

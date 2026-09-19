@@ -4,6 +4,7 @@ import "../plugins/_env.js";
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Hono } from "hono";
+import { getRequestListener } from "@hono/node-server";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +15,7 @@ import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, artists, albums, songs } from "../../src/db/schema.js";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
 import { restRoutes } from "../../src/routes/rest/index.js";
-import { createCastSession } from "../../src/services/dlna/control.js";
+import { createCastSession, setRuntimePort } from "../../src/services/dlna/control.js";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
 
 // DLNA 音箱格式兜底契约:web 源(在线插件)上游实际返回 Ogg/Opus/WebM 等音箱
@@ -33,6 +34,7 @@ let mp3Bytes: Buffer;
 // 真实 HTTP 上游:按 path 返回不同格式,统计 Range 探测请求次数。
 let probeCount = 0;
 let server: http.Server;
+let appServer: http.Server;
 let baseUrl = "";
 
 beforeAll(async () => {
@@ -105,6 +107,11 @@ beforeAll(async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  // 转码输入现走本进程回环 token URL(SPEC §1.8):app 必须有真实回环 socket,
+  // runtimePort 指向 app(不是上游 mock)。
+  appServer = http.createServer(getRequestListener(app.fetch));
+  await new Promise<void>((resolve) => appServer.listen(0, "127.0.0.1", resolve));
+  setRuntimePort((appServer.address() as AddressInfo).port);
 
   initDatabase();
   registerBuiltinPlugins();
@@ -128,6 +135,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => appServer.close(() => resolve()));
   fs.rmSync(fixtureDir, { recursive: true, force: true });
 });
 
