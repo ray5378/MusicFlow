@@ -1972,9 +1972,10 @@ export const usePlayerStore = defineStore("player", () => {
           if (!p) break;
           if (p.kind === "local") {
             // 本机实例(客户端 / 网页):**不删行**,只标离线。
-            // 切换器里「自己那条」必须恒在(删了播放器 UI 会失去落点),而
-            // 「播放器」页的「客户端」模块按 available 过滤,离线实例
-            // 因此自动消失;重新心跳/注册时由 peer_available 把状态置回。
+            // 「自己那条」必须恒在(删了播放器 UI 会失去落点);管理页的
+            // 「客户端」模块仍列出该行并打「离线」标签(与 DLNA 区块一致),
+            // 只有「流转播放」的选择器(peersForSwitcher)会剪掉**别的**离线客户端。
+            // 重新心跳/注册时由 peer_available 把状态置回。
             const pid = normPeerId(p.peerId || "");
             const i = peers.value.findIndex(x => x.peerId === pid);
             if (i >= 0) peers.value[i] = { ...peers.value[i], available: false };

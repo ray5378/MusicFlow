@@ -3,7 +3,12 @@
 // 用法：cd backend && DATA_DIR=<临时目录> npx tsx scripts/check-builtins.mts
 // （DATA_DIR 指向可写临时目录：部分内置插件模块 import db，加载时需可创建 SQLite 文件）
 //
-// 校验全部官方内置插件的 manifest 是否符合插件开发规范：
+// 校验「已纳入下方 BUILTINS 清单」的内置插件 manifest 是否符合插件开发规范：
+//   ⚠️ 该清单目前**只覆盖 13 / 18 个**内置插件（缺 daily-roam / random-songs /
+//      local-platform-recommend / airplay-renderer / sendspin-renderer）。
+//      补齐需要同时扩展本文件的 VALID_CAPS / CAP_METHODS / KNOWN_PERMISSIONS
+//      （缺 comboPlaylist / localPlatformRecommend / playlistCleanup /
+//       recommendPlaylist 能力映射，KNOWN_PERMISSIONS 还漏了 crypto）。
 //   1. validateManifest（与 plugins/discovery.ts 同规则：字段/类型/能力/权限白名单）
 //   2. documentation 字段必填（插件详情页「功能介绍 + 处理逻辑」）
 //   3. capabilities 全部在 VALID_CAPS 白名单内

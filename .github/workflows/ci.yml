@@ -33,7 +33,7 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
         run: cd backend && npm ci
-      - name: 校验 7 个内置插件 manifest 符合开发规范
+      - name: 校验纳入清单的内置插件 manifest 符合开发规范
         run: cd backend && DATA_DIR=$(mktemp -d) npx tsx scripts/check-builtins.mts
       - name: 校验框架核心符合功能插件化规范(不越界)
         run: cd backend && npx tsx scripts/check-core.mts
