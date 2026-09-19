@@ -83,11 +83,35 @@ export function limiterFilter(ceilingDb: number = LIMITER_CEILING_DB): string {
   return `alimiter=limit=${ceilingDb}dB:level=false:asc=true:latency=true`;
 }
 
+// ==================== 输入合规(SPEC §1.8/P1-1b) ====================
+
+export interface FfmpegInput {
+  input: string;
+  headers?: Record<string, string>;
+}
+
+/**
+ * ffmpeg 输入硬合规门(原 streamEngine.resolveFfmpegInput,下沉到 audio 层):
+ * http(s) 直链一律包成本进程回环 token URL —— 静态 ffmpeg 在 Alpine 解析不了
+ * 域名(含 302 跳转目标),且跟 302 会把 Authorization 头带给 CDN;
+ * 本地文件路径原样放行。空输入直接抛错(早失败,别等 ffmpeg 报).
+ * 注意动态导入 dlna/control:audio 层不允许静态依赖上层路由模块(禁环)。
+ */
+export async function resolvePipelineInput(direct: FfmpegInput): Promise<FfmpegInput> {
+  if (/^https?:\/\//i.test(direct.input)) {
+    const { loopbackRawStreamUrl } = await import("../dlna/control.js");
+    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
+  }
+  if (!direct.input) {
+    throw new Error("ffmpeg 输入为空(本地文件路径或回环 token URL 二选一)");
+  }
+  return direct;
+}
+
 // ==================== ⑥ 输出(重采样 + dither + 编码) ====================
 
 export interface OutputRequest {
-  /** 源采样率/位深(解码段跟随源的实际值;未知传 null → 保守处理)。 */
-  sourceRate: number | null;
+  /** 源采样率/位深(解码段跟随源的实际值;未知传 null → 保守处理)。 */  sourceRate: number | null;
   sourceBits: number | null;
   targetRate: number;
   targetBits: number;

@@ -114,15 +114,13 @@ async function defaultSource(songId: string): Promise<GroupAudio> {
 /** ffmpeg 输入硬契约(见 services/dlna/control.ts 注释 / SPEC §1.8):http(s) 直链
  *  一律改走本进程回环 token URL —— 静态 ffmpeg 在 Alpine 解析不了域名(含 302
  *  跳转目标),且跟随 302 会把 Authorization 头带给 CDN(OBS 400 InvalidAuthType)。
- *  独立导出供契约测试锁定(ffmpegInputContract);改本函数必须同步该测试。 */
+ *  独立导出供契约测试锁定(ffmpegInputContract);改本函数必须同步该测试。
+ *  实现已下沉到 audio/pipeline.resolvePipelineInput,此处仅保留别名(调用方零改动)。 */
 export async function resolveFfmpegInput(
   direct: { input: string; headers?: Record<string, string> }
 ): Promise<{ input: string; headers?: Record<string, string> }> {
-  if (/^https?:\/\//i.test(direct.input)) {
-    const { loopbackRawStreamUrl } = await import("../dlna/control.js");
-    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
-  }
-  return direct;
+  const { resolvePipelineInput } = await import("../audio/pipeline.js");
+  return resolvePipelineInput(direct);
 }
 
 async function streamingSource(row: { duration?: number | null }): Promise<GroupAudio> {

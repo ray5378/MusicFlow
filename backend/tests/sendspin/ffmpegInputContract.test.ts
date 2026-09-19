@@ -39,3 +39,36 @@ describe("ffmpeg input contract (SPEC §1.8): http input must be loopback-wrappe
     expect(out.headers).toBeUndefined();
   });
 });
+
+describe("pipeline 输入合规门(P1-1b):resolvePipelineInput 与 decodeArgs 联动", () => {
+  it("IP 字面量 http + 鉴权头同样包回环,原始 IP 不进参数", async () => {
+    const { resolvePipelineInput, decodeArgs } = await import("../../src/services/audio/pipeline.js");
+    const out = await resolvePipelineInput({
+      input: "http://192.168.10.240:5444/dav/a.flac",
+      headers: { Authorization: "Basic eDp5" },
+    });
+    expect(out.input).toMatch(LOOPBACK_RE);
+    expect(out.input).not.toContain("192.168.10.240");
+    const args = decodeArgs({ input: out.input });
+    const joined = args.join(" ");
+    expect(joined).not.toContain("192.168.10.240");
+    expect(joined).toContain("127.0.0.1");
+  });
+
+  it("大写 HTTPS scheme 同样被包", async () => {
+    const { resolvePipelineInput } = await import("../../src/services/audio/pipeline.js");
+    const out = await resolvePipelineInput({ input: "HTTPS://cdn.example.com/x.mp3" });
+    expect(out.input).toMatch(LOOPBACK_RE);
+  });
+
+  it("空输入直接抛错(不等 ffmpeg 报)", async () => {
+    const { resolvePipelineInput } = await import("../../src/services/audio/pipeline.js");
+    await expect(resolvePipelineInput({ input: "" })).rejects.toThrow();
+  });
+
+  it("相对路径本地文件原样放行", async () => {
+    const { resolvePipelineInput } = await import("../../src/services/audio/pipeline.js");
+    const out = await resolvePipelineInput({ input: "music/a.flac" });
+    expect(out.input).toBe("music/a.flac");
+  });
+});
