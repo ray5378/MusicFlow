@@ -294,18 +294,26 @@
    （songs 表内歌曲走 `createCastSession`；插件直链等虚拟行走 `mintRawStreamToken`
    注册表，见 `services/dlna/control.ts`）。
 
-**为什么（两个结构性坑；AirPlay 早已用 token URL 绕开，其余链路 2026-09-19 起对齐）**：
+**为什么（三个结构性坑；AirPlay 早已用 token URL 绕开前两个，其余链路 2026-09-19 起对齐）**：
 
 - 静态 ffmpeg（ffmpeg-static）是 glibc 静态构建，在 Alpine(musl) 容器里 NSS/DNS
   不可用 → 任何带域名的输入（**含跟随 302 跳出的 CDN 域名**）一律
   `Failed to resolve hostname ...: System error`，exit 251；
 - ffmpeg 跟随 302 时会把 `Authorization` 头原样带给跳转目标（curl/fetch 跨主机
   跳转会自动剥头，ffmpeg 不会）→ openlist 的 Basic 头打到天翼 OBS 返回
-  400 `InvalidAuthType`（Unsupported Authorization Type）。
+  400 `InvalidAuthType`（Unsupported Authorization Type）；
+- **回环 token 的注册表必须跨进程可见**：Sendspin 生产默认 fork 模式，
+  `streamEngine` 在**子进程**里 mint、`/rest/dlna/stream/:token` 路由在
+  **主进程**里 resolve —— 进程内存 Map 互相看不见 → ffmpeg 恒收 403
+  `Invalid or expired cast token`。注册表因此落 SQLite `raw_stream_tokens`
+  表（WAL 多进程安全）；⚠️ vitest 恒 in-proc，这类跨进程 bug **测试发现不了**，
+  只在线上炸。同理：任何「A 进程写、B 进程读」的运行时状态都必须落库或走 IPC，
+  不能放进程内存。
 
 因此 Dockerfile 用 ffmpeg-static（不装系统 ffmpeg、不设 `FFMPEG_PATH`）；鉴权、
 302、播放优选全部由 Node 在 `?raw=1` 分支内完成（直透原始字节，不嗅探不转码）。
-违反本契约的症状对照：`System error` = 域名输入；`400 InvalidAuthType` = 直链跨 302。
+违反本契约的症状对照：`System error` = 域名输入；`400 InvalidAuthType` = 直链跨 302；
+`403 Invalid or expired cast token` = token 注册表跨进程不可见（必须落库）。
 新代码给 ffmpeg 喂输入前先对照本节；`serveTranscodedSong` 入口有回环护栏日志。
 
 ## 二、数据模型契约（SQLite）
@@ -338,10 +346,11 @@
 | `player_webhook_tokens`                           | id                            | token unique；enabled 0/1；ownerUserId                                                                                                              |
 | `cleaning_rules` / `wishes`                       | id                            | wishes.status 默认 pending（枚举扩展需 spec 明确） |
 
-> **上表只列核心表 —— 全库共 37 张**（`db/schema.ts` 34 张 + 仅写在 `db/index.ts` 的 2 张 + `plugins/storage.ts` 自建的 1 张）。其余按用途归组，细节以 `db/schema.ts` 为准：
+> **上表只列核心表 —— 全库共 38 张**（`db/schema.ts` 34 张 + 仅写在 `db/index.ts` 的 3 张 + `plugins/storage.ts` 自建的 1 张）。其余按用途归组，细节以 `db/schema.ts` 为准：
 > 收藏扩展 `user_favorite_albums` / `user_favorite_artists` / `playlist_favorites`；权限与授权 `user_permissions` / `user_renderer_grants`；
 > 播放器 `player_name_overrides` / `player_prefs`；渲染器 `sendspin_device_state` / `airplay_devices`；
-> 固定推荐歌单封面锁 `playlist_cover_claims`（唯一索引 date_key+cover_ref）；外置插件 KV `plugin_storage`（**不在** `db/index.ts` 建表清单里，由 `plugins/storage.ts` 自建）。
+> 固定推荐歌单封面锁 `playlist_cover_claims`（唯一索引 date_key+cover_ref）；外置插件 KV `plugin_storage`（**不在** `db/index.ts` 建表清单里，由 `plugins/storage.ts` 自建）；
+> ffmpeg 回环取流凭证 `raw_stream_tokens`（短 TTL，token→url+headers，**主/子进程共享**，见 §1.8 第三坑）。
 >
 > ⚠️ `sendspin_device_state.esphome_psk` 是**明文密钥**：排查时只查 `LENGTH(esphome_psk)`，勿 `SELECT *`；查 `plugins.config` 同理用 `LIKE` 探字段，别把整行打出来。                                                                                                           |
 
