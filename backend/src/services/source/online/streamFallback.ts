@@ -279,6 +279,37 @@ async function probe(url: string, timeoutMs: number = PROBE_TIMEOUT_DEFAULT_MS):
 
 export { probe as probeStream };
 
+/**
+ * 在线直链轻量复核(预探测扫描与 judge 播前裁决**共用同一把尺子**)。
+ *
+ * 背景:正缓存(可播记忆,TTL 1 小时)命中即短路 —— 一首歌扫描时活、播时死
+ * (酷狗直链 404),judge 若盲信正缓存就会把死链推给播放器。2026-09-16 的复核
+ * 只长在扫描路径,judge 没份,两把尺子量同一个"可播"。
+ *
+ * 语义:仅对「在线直链行」(有 url ＋ pluginEntry)做一次短超时 probe;
+ * 非在线行(本地/WebDAV/空直链)返回 "skip",调用方按原逻辑走。
+ *   - "ok"        直链仍活,维持原判;
+ *   - "gone"      直链明确已死(404/403/410 或显式非音频) —— 这是知识不是未知,
+ *                 调用方应逐出正缓存、找替代,无替代可判跳过;
+ *   - "transient" 网络抖动,维持原判(绝不据此写负缓存);
+ *   - "skip"      非在线直链行,调用方按原逻辑走。
+ */
+export async function recheckOnlineDirect(
+  row: { url?: string | null; pluginEntry?: string | null } | null | undefined,
+  timeoutMs: number,
+): Promise<"ok" | "gone" | "transient" | "skip"> {
+  const url = row?.url;
+  const isOnlineDirect =
+    typeof url === "string" && url.length > 0 &&
+    typeof row?.pluginEntry === "string" && !!row.pluginEntry;
+  if (!isOnlineDirect) return "skip";
+  try {
+    return await probe(url, timeoutMs);
+  } catch {
+    return "transient";
+  }
+}
+
 export function clearFallbackCache(songId?: string) {
   if (songId) fallbackCache.delete(songId);
   else fallbackCache.clear();

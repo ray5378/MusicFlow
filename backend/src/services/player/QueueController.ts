@@ -464,9 +464,28 @@ export class QueueController extends EventEmitter {
    */
   private async judgePlayable(item: QueueItem): Promise<"skip" | "play"> {
     // 1) 缓存判定(预探测的成果)→ 零成本。热路径上多数歌在这里就返回了。
+    //    正缓存(1 小时 TTL)不盲信:扫描时活、播时死是常态(直链下架),在线直链
+    //    做一次短超时复核 —— 与预探测扫描共用 recheckOnlineDirect(同一把尺子)。
     const cached = getCachedPlayability(item.songId);
     if (cached === "unplayable") return "skip";
-    if (cached === "playable") return "play";
+    if (cached === "playable") {
+      let songRow: any = null;
+      try {
+        songRow = db.select().from(songs).where(eq(songs.id, item.songId)).get();
+      } catch { /* 读库异常按原判放行 */ }
+      const { recheckOnlineDirect, evictStreamFallbackCache, ensurePlayableStream } =
+        await import("../source/online/streamFallback.js");
+      const rc = await recheckOnlineDirect(songRow, 2500);
+      if (rc !== "gone") return "play";
+      // 直链明确已死:逐出正缓存,找兄弟/远程替代;无替代 → skip。
+      // 这是知识(404 照妖镜),不是"未知" —— 不违"不把不知道当成死的"边界。
+      evictStreamFallbackCache(item.songId);
+      try {
+        if (await ensurePlayableStream(songRow ?? { id: item.songId }, 8000)) return "play";
+      } catch { /* 落到跳过 */ }
+      log.info(`[QueueController][judge] ${item.songId}: 直链已死且无替代,跳过`);
+      return "skip";
+    }
 
     let songRow: any;
     try {

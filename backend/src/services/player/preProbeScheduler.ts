@@ -23,7 +23,6 @@ import {
   configureStreamFallbackCache,
   ensurePlayableStream,
   getCachedPlayability,
-  probeStream,
   evictStreamFallbackCache,
 } from "../source/online/streamFallback.js";
 import { preProbeActive, readPreProbeConfig, type PreProbeConfig } from "../plugin/core/preProbe.js";
@@ -405,24 +404,18 @@ export class PreProbeScheduler {
       } catch {
         return "playable"; // 读库异常按原判处理
       }
-      const url = row?.url;
-      const isOnlineDirect = typeof url === "string" && url.length > 0 && typeof row?.pluginEntry === "string" && !!row.pluginEntry;
-      if (!isOnlineDirect) return "playable"; // 本地/WebDAV 或空直链行,维持原判
       const last0 = this.lastProbeAt.get(songId);
       if (cfg.probeCooldownSeconds > 0 && last0 && now - last0 < cfg.probeCooldownSeconds * 1000) {
         return "playable"; // 冷却期内不重探(防探测风暴)
       }
-      let outcome: "ok" | "gone" | "transient";
-      try {
-        outcome = await probeStream(url, cfg.probeTimeoutMs);
-      } catch {
-        return "playable"; // 复核本身异常,不误判死链
-      }
+      // 与 judge 共用 recheckOnlineDirect(同一把尺子,见 streamFallback)。
+      const { recheckOnlineDirect } = await import("../source/online/streamFallback.js");
+      const outcome = await recheckOnlineDirect(row, cfg.probeTimeoutMs);
       if (outcome === "ok") {
         this.lastProbeAt.set(songId, now);
         return "playable"; // 直链仍可播,维持正缓存
       }
-      if (outcome === "transient") return "playable"; // 网络抖动,不判定死链
+      if (outcome !== "gone") return "playable"; // transient / 非在线行:维持原判
       // gone → 直链已死:逐出正缓存改走真查,确认后写负缓存并判不可播。
       evictStreamFallbackCache(songId);
       this.lastProbeAt.set(songId, now);

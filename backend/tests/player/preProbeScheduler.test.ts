@@ -401,8 +401,27 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
     expect(snap.currentIndex).toBe(2); // 跳过了 k1,k2(k0=k1 是 index0)
   }, 20000);
 
-  it("整队死源 + all 模式:绕过圈上限(= 队列长度)内停止,不 markEnded、不删队列", async () => {
-    const items = Array.from({ length: 4 }, (_, i) => ({ id: `z${i}`, dead: true }));
+  it("正缓存命中但直链已死404 → judge 复核 gone、无替代则跳过(不推给播放器)", async () => {
+    // seed 活歌写正缓存,随后把直链掐成 404 并掐掉换源替代,模拟"扫描时活、播时死"
+    seed("r1", false);
+    seed("r2", false);
+    providerCands = [];
+    db.update(songs).set({ url: `http://gm:18080/dead/r1.mp3` }).where(eq(songs.id, "r1")).run();
+    const qc = new QueueController();
+    const player = makePlayer("dd");
+    qc.registerPlayer("dd", player, ctrl as any);
+    qc.setQueue("dd", [
+      { songId: "r1", title: "r1", mime: "audio/mpeg" },
+      { songId: "r2", title: "r2", mime: "audio/mpeg" },
+    ], 0, "http://base");
+    qc.setPlayMode("dd", "order");
+    await qc.next("dd", "http://base");
+    // r1 被跳过(留在队列),只播了 r2:playMedia 恰一次且游标落在 1
+    expect(player.calls.filter(c => c === "playMedia")).toHaveLength(1);
+    expect(qc.snapshot("dd").currentIndex).toBe(1);
+  }, 20000);
+
+  it("整队死源 + all 模式:绕过圈上限(= 队列长度)内停止,不 markEnded、不删队列", async () => {    const items = Array.from({ length: 4 }, (_, i) => ({ id: `z${i}`, dead: true }));
     const { qc, player } = setup(items, "all");
     const snapBefore = qc.snapshot("dd");
     searchCalls.length = 0;
