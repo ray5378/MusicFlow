@@ -60,12 +60,12 @@ sample_res() {
   echo "$cpu $mem $main_rss $child_rss $ff_n"
 }
 
-# ---- 增量日志 ----
-LAST_TS=$(date +%s)
+# ---- 增量日志(注意:必须直接调、用全局 NEWLOG 传回;$(...) 子 shell 会丢 LAST_TS) ----
+NEWLOG=""
 fetch_new_logs() {
   local now
   now=$(date +%s)
-  docker logs --since "$LAST_TS" "$CONTAINER" 2>&1 | grep -v "^$" || true
+  NEWLOG=$(docker logs --since "$LAST_TS" "$CONTAINER" 2>&1 | grep -v "^$" | tail -3000 || true)
   LAST_TS=$now
 }
 
@@ -139,7 +139,8 @@ sample_once() {
   ts=$(date '+%F %T')
   res=$(sample_res) || { log_event "ERROR" "容器 $CONTAINER stats 失败(没在跑?)"; return 1; }
   read -r cpu mem main child ff <<< "$res"
-  newlog=$(fetch_new_logs)
+  fetch_new_logs
+  newlog="$NEWLOG"
   local playing
   playing=$(echo "$newlog" | grep -c "state=PLAYING" || true)
   local stall=0
