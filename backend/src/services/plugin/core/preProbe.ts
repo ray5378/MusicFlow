@@ -46,7 +46,7 @@ export const preProbeManifest: PluginManifest = {
     { key: "probeTimeoutMs", label: "预探测单曲超时(毫秒)", type: "number", default: 5000, help: "预探测路径的单曲探测超时(不阻塞播放,可比流播路径更短)。范围 1000-30000,默认 5000。流播路径仍用 12 秒,不受此项影响" },
     { key: "probeCooldownSeconds", label: "同曲探测冷却(秒)", type: "number", default: 60, help: "同一首歌两次「真实探测」的最小间隔,防止探测风暴。范围 0-600,0 = 不限制。默认 60。建议不小于「探不到记住时长」" },
     { key: "windowMinutes", label: "向前覆盖时长(分钟)", type: "number", default: 8, help: "预探测向前覆盖的时间上限(分钟),与「前方保持可播首数」取更小者。避免一首长歌把窗口撑出音源直链有效期。范围 1-60,默认 8" },
-    { key: "negativeTtlSeconds", label: "探不到记住时长(秒)", type: "number", default: 45, help: "「探不到可用音源」这个判断的有效期(秒),过期即重新探测 —— 音源恢复后自动复活。范围 10-600,默认 45" },
+    { key: "negativeTtlSeconds", label: "探不到记住时长(秒)", type: "number", default: 7200, help: "「探不到可用音源」这个判断的有效期(秒),过期即重新探测 —— 音源恢复后自动复活。持久死链(如已下架的直链)建议设长(7200=2小时),播到即跳过,不再每次重试几十秒;抖动源恢复最长延迟该时长。范围 10-86400,默认 7200" },
     { key: "concurrency", label: "并发探测数", type: "number", default: 3, help: "每波同时探测几首。范围 1-5,默认 3" },
   ],
   // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
@@ -98,7 +98,7 @@ Unplayable songs are **never removed from the queue and never blacklisted**; the
         },
         negativeTtlSeconds: {
           label: "Remember 'no source' for (seconds)",
-          help: "How long a 'no playable source' result stays valid; it is re-probed after that, so the song revives automatically once a source is back. Range 10-600, default 45.",
+          help: "How long a 'no playable source' result stays valid; it is re-probed after that, so the song revives automatically once a source is back. Use a long value (7200 = 2h) for persistently dead links so they are skipped instead of retried for tens of seconds each time. Range 10-86400, default 7200.",
         },
         concurrency: {
           label: "Probe concurrency",
@@ -115,7 +115,7 @@ Unplayable songs are **never removed from the queue and never blacklisted**; the
 - **大面积无源后暂停**:判定后暂停预探测多久(0-600 秒,0 = 不暂停,默认 90);
 - **预探测单曲超时 / 同曲冷却**:前者只作用于预探测路径(流播路径仍 12 秒),后者限制同一首歌两次真实探测的最小间隔;
 - **向前覆盖时长**:按时间封顶扫描范围,与 N 取更小者;
-- **探不到记住时长**:负结果有效期(10-600 秒,默认 45),过期即重新探测 —— **音源恢复自动复活**;
+- **探不到记住时长**:负结果有效期(10-86400 秒,默认 7200),过期即重新探测 —— **音源恢复自动复活**;
 - **并发探测数**:每波并行探测几首(1-5,默认 3)。
 
 不可播的歌**既不摘除队列、也不拉黑**,只在判定仍有效时于播放时跳过。`,
@@ -150,7 +150,7 @@ export const PRE_PROBE_DEFAULTS: PreProbeConfig = {
   probeTimeoutMs: 5000,
   probeCooldownSeconds: 60,
   windowMinutes: 8,
-  negativeTtlSeconds: 45,
+  negativeTtlSeconds: 7200,
   concurrency: 3,
 };
 
@@ -183,7 +183,7 @@ export function readPreProbeConfig(host?: PluginHost | null): PreProbeConfig {
     // 同曲冷却 0 也是合法值(不限制)。
     probeCooldownSeconds: num(raw.probeCooldownSeconds, PRE_PROBE_DEFAULTS.probeCooldownSeconds, 0, 600),
     windowMinutes: num(raw.windowMinutes, PRE_PROBE_DEFAULTS.windowMinutes, 1, 60),
-    negativeTtlSeconds: num(raw.negativeTtlSeconds, PRE_PROBE_DEFAULTS.negativeTtlSeconds, 10, 600),
+    negativeTtlSeconds: num(raw.negativeTtlSeconds, PRE_PROBE_DEFAULTS.negativeTtlSeconds, 10, 86400),
     concurrency: num(raw.concurrency, PRE_PROBE_DEFAULTS.concurrency, 1, 5),
   };
 }

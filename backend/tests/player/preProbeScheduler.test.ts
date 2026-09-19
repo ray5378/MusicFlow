@@ -19,7 +19,7 @@ import { initDatabase, db, sqlite } from "../../src/db/index.js";
 import { songs } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
-import { clearStreamFallbackCache, ensurePlayableStream } from "../../src/services/source/online/streamFallback.js";
+import { clearStreamFallbackCache, ensurePlayableStream, configureStreamFallbackCache } from "../../src/services/source/online/streamFallback.js";
 import {
   peekUpcomingPositions,
   PreProbeScheduler,
@@ -104,6 +104,15 @@ beforeEach(() => {
   providerCands = [];
   searchCalls.length = 0;
   clearStreamFallbackCache();
+  // 模块负缓存 TTL 是全局态(schedule() 会按当时配置覆写,现默认 7200s);
+  // 门交互用例按 45s 时间线设计,此处显式 pin 住,与默认解耦。
+  configureStreamFallbackCache({ negativeTtlMs: 45_000 });
+  // 配置行恢复(本文件有用例删行;beforeAll 只插一次,乱序下后续用例会读到缺省)。
+  sqlite.prepare(`
+    INSERT INTO plugins (id, name, version, description, manifest, enabled, config, created_at, updated_at)
+    VALUES ('core-pre-probe', 'core-pre-probe', '1.0.0', '', '{}', 1, '{}', ?, ?)
+    ON CONFLICT(id) DO UPDATE SET enabled = 1, config = '{}'
+  `).run(new Date().toISOString(), new Date().toISOString());
   db.delete(songs).run();
   unregisterPlugin("preprobe-gate");
   registerPlugin(gateManifest as any, {});
@@ -408,4 +417,24 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
     expect(snap.ended).toBe(false); // 不 markEnded(保留现场)
     expect(snap.preProbe?.exhausted).toBe(true); // 上报
   }, 30000);
+});
+
+describe("负缓存 TTL 默认 2 小时(持久死链播到即跳)", () => {
+  it("缺省/非法回落 7200,上限 86400", async () => {
+    const { readPreProbeConfig, PRE_PROBE_DEFAULTS } = await import("../../src/services/plugin/core/preProbe.js");
+    expect(PRE_PROBE_DEFAULTS.negativeTtlSeconds).toBe(7200);
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'core-pre-probe'").run();
+    expect(readPreProbeConfig().negativeTtlSeconds).toBe(7200);
+    const write = (cfg: any) =>
+      sqlite
+        .prepare("INSERT INTO plugins (id, name, version, description, manifest, enabled, config, created_at, updated_at) VALUES ('core-pre-probe', 'core-pre-probe', '1.0.0', '', '{}', 1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET enabled = 1, config = excluded.config")
+        .run(JSON.stringify(cfg), new Date().toISOString(), new Date().toISOString());
+    write({ negativeTtlSeconds: 45 });
+    expect(readPreProbeConfig().negativeTtlSeconds).toBe(45);
+    write({ negativeTtlSeconds: 100000 });
+    expect(readPreProbeConfig().negativeTtlSeconds).toBe(86400);
+    write({ negativeTtlSeconds: "abc" });
+    expect(readPreProbeConfig().negativeTtlSeconds).toBe(7200);
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'core-pre-probe'").run();
+  });
 });

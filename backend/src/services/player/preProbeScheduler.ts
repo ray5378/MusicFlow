@@ -359,6 +359,12 @@ export class PreProbeScheduler {
       prev.misses !== maxDeadRun ||
       prev.exhausted !== exhausted;
     if (changed) this.notifyChange(playerId);
+    // 扫描完成一行 info(预探测成功本是静默的,监控靠它实证扫描在跑;
+    // 量级与 judge/playCurrent 同级,每切歌几次一行)。
+    log.info(
+      `[PreProbe] ${playerId}: 扫描完成 ready=${collected} scanned=${scanned} ` +
+      `deadRun=${maxDeadRun} exhausted=${exhausted}`,
+    );
   }
 
   /**
