@@ -52,22 +52,21 @@
 | 阶段 | 主题 | 完成度 | 状态 | DoD 一句话 |
 |---|---|---|---|---|
 | **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
-| **P1** | 管道骨架 + Sendspin / AirPlay | 0 / 7 | ⬜ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
+| **P1** | 管道骨架 + Sendspin / AirPlay | 1 / 7 | 🟡 | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
 | **P2** | HTTP 通道实时管道化 | 0 / 7 | ⬜ | 客户端 / Web / DLNA 走管道，**客户端拖动进度实测通过**，删净直传分支 |
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **6 / 38** | 🟡 P0 收尾中 | 验收总口径见 plan §8 |
+| **合计** | | **7 / 38** | 🟡 P1 施工中 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**6 / 38（16%）**
+**7 / 38（18%）**
 
 ### 2.3 当前焦点
 
-**P0 剩 P0-4 接线（待 P1 管道 stderr 落点）。** 下一步从 **P1-1** 起手：
-新增 `AudioPipeline`（解码 F32＋`-af` 链＋编码），同时把 P0-4 的
-`reportPlaybackLoudness(rowId, stderr)` 接到各通道流结束处。
+**P1-1 已合入。下一步 P1-1b**：解码段输入 SPEC §1.8 合规（回环 token / 本地路径），
+`ffmpegInputContract.test.ts` 扩展锁死。
 
 ### 2.4 阶段依赖
 
@@ -127,7 +126,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 | 状态 | # | 任务 | 落点 | commit | 完成日期 | 备注 |
 |---|---|---|---|---|---|---|
-| ⬜ | P1-1 | 新增 `AudioPipeline`：**两段式**（① 解码 → PCM `AudioBuffer`；② 出流 ffmpeg 吃 stdin PCM + `-af` 链 + 输出格式） | 新增 `services/audio/pipeline.ts` + `audio/buffer.ts` | — | — | 两段式是 flow / 交叉淡入 / 边播边测的前提 |
+| ✅ | P1-1 | 新增 `AudioPipeline`：**两段式**（① 解码 → PCM `AudioBuffer`；② 出流 ffmpeg 吃 stdin PCM + `-af` 链 + 输出格式） | 新增 `services/audio/pipeline.ts` + `audio/buffer.ts` | （本轮） | 2026-09-20 | 本轮只做纯参数拼装（decode/loudness/limiter/output/codec）＋哑容器 AudioBuffer，零进程零副作用；`decodeArgs` 无 `-ar/-ac`（跟随源）；dither 仅 >16→16 加 `triangular_hp`；loudnorm 在链时重采样降级 `swr` |
 | ⬜ | P1-1b | 解码段输入必须遵守 **SPEC §1.8**（回环 token URL / 本地文件路径），并加契约测试锁死 | `pipeline.ts` + `tests/sendspin/ffmpegInputContract.test.ts` | — | — | 契约锁住两个老坑回归：Alpine DNS 全坏 / 302 带 Authorization 头给 CDN |
 | ⬜ | P1-2 | Sendspin 接入（替换 `ffmpegArgs()` 的硬编码 48k 解码） | `sendspin/streamSource.ts` | — | — | |
 | ⬜ | P1-3 | AirPlay 接入 | `airplay/decoder.ts` | — | — | 原为硬编码 44100 s16le |
