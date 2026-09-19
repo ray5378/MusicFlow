@@ -4,11 +4,9 @@
 // （DATA_DIR 指向可写临时目录：部分内置插件模块 import db，加载时需可创建 SQLite 文件）
 //
 // 校验「已纳入下方 BUILTINS 清单」的内置插件 manifest 是否符合插件开发规范：
-//   ⚠️ 该清单目前**只覆盖 13 / 18 个**内置插件（缺 daily-roam / random-songs /
-//      local-platform-recommend / airplay-renderer / sendspin-renderer）。
-//      补齐需要同时扩展本文件的 VALID_CAPS / CAP_METHODS / KNOWN_PERMISSIONS
-//      （缺 comboPlaylist / localPlatformRecommend / playlistCleanup /
-//       recommendPlaylist 能力映射，KNOWN_PERMISSIONS 还漏了 crypto）。
+//   ✅ 2026-09-19 起覆盖**全部 18 个**内置插件（BUILTINS 13 → 18，
+//      补 daily-roam / random-songs / local-random-recommend /
+//      airplay-renderer / sendspin-renderer，并同步扩了能力/权限白名单）。
 //   1. validateManifest（与 plugins/discovery.ts 同规则：字段/类型/能力/权限白名单）
 //   2. documentation 字段必填（插件详情页「功能介绍 + 处理逻辑」）
 //   3. capabilities 全部在 VALID_CAPS 白名单内
@@ -36,6 +34,8 @@ const VALID_CAPS = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
+  // 组合/通用推荐与清理能力(types.ts 有、sandbox.ts CAP_METHODS 亦有,此前漏列)
+  "comboPlaylist", "recommendPlaylist", "localPlatformRecommend", "playlistCleanup",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
   "artistInfo",
   // core 内置行为插件(配置面在插件、逻辑在核心)
@@ -50,7 +50,9 @@ const CONFIG_ONLY_CAPS: Record<string, string> = {
   playPreference: "routes/rest/index.ts(resolvePreferredSong)读 shouldPreferLocal/shouldFallbackToWeb",
   preProbe: "services/player/QueueController.ts 预探测调度器读 readPreProbeConfig()",
 };
-// 与 backend/src/plugins/sandbox.ts 的 CAP_METHODS 保持一致（能力 → 方法映射）。
+// 能力 → 方法映射:与 sandbox.ts CAP_METHODS 基本一致,但以核心真实消费点为准
+// （renderer 经 rendererHost/discover,sandbox.ts 未列;comboPlaylist 经
+//   pluginAccess.comboPlaylistApi() 调 runDailyJob,sandbox.ts 也未列）。
 const CAP_METHODS: Record<string, string[]> = {
   search: ["search"],
   recommend: ["recommend"],
@@ -68,12 +70,16 @@ const CAP_METHODS: Record<string, string[]> = {
   dailyPlaylist: ["runDailyJob"],
   localPlaylist: ["runDailyJob"],
   playlistSync: ["runSyncJob"],
+  comboPlaylist: ["runDailyJob"],
+  recommendPlaylist: ["runDailyJob", "recommend"],
+  localPlatformRecommend: ["runDailyJob", "recommendLocal"],
+  playlistCleanup: ["runDailyJob"],
 };
 // 与 backend/src/plugins/host.ts 的 KNOWN_PERMISSIONS 保持一致。
 const KNOWN_PERMISSIONS = [
   "log", "storage", "net", "command", "fs", "fs:music", "fs:external",
   "websocket", "jsenv",
-  "songs:read", "songs:write", "playlists:read", "playlists:write", "inter-plugin",
+  "songs:read", "songs:write", "playlists:read", "playlists:write", "inter-plugin", "crypto",
 ];
 
 function validateManifest(m: any): string | null {
@@ -106,7 +112,12 @@ const BUILTINS: Array<{ id: string; file: string; exportName: string }> = [
   { id: "daily-recommend", file: "../src/services/plugin/dailyRecommend.js", exportName: "dailyRecommendManifest" },
   { id: "local-recommend", file: "../src/services/plugin/localRecommend.js", exportName: "localRecommendManifest" },
   { id: "playlist-sync", file: "../src/services/plugin/playlistSync.js", exportName: "playlistSyncManifest" },
+  { id: "daily-roam", file: "../src/services/plugin/dailyRoam.js", exportName: "dailyRoamManifest" },
+  { id: "random-songs", file: "../src/services/plugin/randomSongs.js", exportName: "randomSongsManifest" },
+  { id: "local-random-recommend", file: "../src/services/plugin/localPlatformRecommend.js", exportName: "localPlatformRecommendManifest" },
   { id: "dlna-renderer", file: "../src/services/plugin/renderers/dlna.js", exportName: "dlnaRendererManifest" },
+  { id: "airplay-renderer", file: "../src/services/plugin/renderers/airplay.js", exportName: "airplayRendererManifest" },
+  { id: "sendspin-renderer", file: "../src/services/plugin/renderers/sendspin.js", exportName: "sendspinRendererManifest" },
   { id: "artist-info", file: "../src/services/plugin/artistInfo.js", exportName: "artistInfoManifest" },
   // ---- core 内置行为插件(2026-09-11 起纳入校验；此前完全没被校验过) ----
   { id: "core-song-group", file: "../src/services/plugin/core/songGroup.js", exportName: "songGroupManifest" },
