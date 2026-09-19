@@ -13,8 +13,6 @@ import {
   getDeviceEsphome,
   saveDeviceEsphome,
   listEsphomeCreds,
-  readLegacyPluginEsphome,
-  inheritLegacyEsphomePsk,
   purgeDeviceArtifacts,
 } from "./deviceState.js";
 
@@ -166,84 +164,6 @@ describe("sendspin deviceState (按设备持久音量)", () => {
     const listed = listEsphomeCreds().filter((c) => c.clientId === A || c.clientId === B);
     expect(listed).toEqual([{ clientId: A, psk: "key-a", port: 6053 }]);
     sqlite.prepare("DELETE FROM sendspin_device_state WHERE client_id IN (?, ?)").run(A, B);
-  });
-
-  // ---- 升级迁移:旧版「插件页全局密钥」→ 每台设备各自的密钥 ----
-  // 背景:密钥从「插件页一把全局」改成「每台设备各自一把」后,老用户设备行上是空的。
-  // 不做继承,升级后会静默失联(桥不再连、音量按钮置灰),得为每台设备重填一遍。
-
-  const writePluginCfg = (cfg: any) =>
-    sqlite
-      .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
-      .run(JSON.stringify(cfg));
-  const clearPluginCfg = () =>
-    sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
-  /** 每个用例换一个 clientId:继承是「同一设备只一次」的进程内记忆,复用会互相干扰。 */
-  let seq = 0;
-  const freshId = () => `dev-state-legacy-${++seq}`;
-
-  it("readLegacyPluginEsphome 读得到旧字段;无行/空值 = 空凭据", () => {
-    clearPluginCfg();
-    expect(readLegacyPluginEsphome()).toEqual({ psk: "", port: 0 });
-    writePluginCfg({ esphome_psk: " legacy-key ", esphome_port: 6054 });
-    expect(readLegacyPluginEsphome()).toEqual({ psk: "legacy-key", port: 6054 });
-    // 非法端口落 0(上层回退 6053)
-    writePluginCfg({ esphome_psk: "legacy-key", esphome_port: 70000 });
-    expect(readLegacyPluginEsphome().port).toBe(0);
-    clearPluginCfg();
-  });
-
-  it("窗口期内、设备还没有自己的密钥 ⇒ 继承旧全局密钥并落库", () => {
-    const cid = freshId();
-    writePluginCfg({ esphome_psk: "legacy-key", esphome_port: 6054 });
-    expect(inheritLegacyEsphomePsk(cid)).toBe(true);
-    expect(getDeviceEsphome(cid)).toEqual({ psk: "legacy-key", port: 6054 });
-    clearPluginCfg();
-  });
-
-  it("已有自己密钥的设备不被覆盖(继承只补空缺)", () => {
-    const cid = freshId();
-    saveDeviceEsphome(cid, "own-key", 6053);
-    writePluginCfg({ esphome_psk: "legacy-key", esphome_port: 6054 });
-    expect(inheritLegacyEsphomePsk(cid)).toBe(false);
-    expect(getDeviceEsphome(cid)).toEqual({ psk: "own-key", port: 6053 });
-    clearPluginCfg();
-  });
-
-  it("设备行已记过的端口优先于旧全局端口", () => {
-    const cid = freshId();
-    saveDeviceEsphome(cid, "", 6100); // 只留端口
-    writePluginCfg({ esphome_psk: "legacy-key", esphome_port: 6054 });
-    expect(inheritLegacyEsphomePsk(cid)).toBe(true);
-    expect(getDeviceEsphome(cid)).toEqual({ psk: "legacy-key", port: 6100 });
-    clearPluginCfg();
-  });
-
-  it("同一设备只继承一次(第二次直接 false,不重写)", () => {
-    const cid = freshId();
-    writePluginCfg({ esphome_psk: "legacy-key", esphome_port: 6054 });
-    expect(inheritLegacyEsphomePsk(cid)).toBe(true);
-    // 用户随后清掉自己的密钥 —— 不该被「再继承一次」偷偷写回来
-    saveDeviceEsphome(cid, "", 6054);
-    expect(inheritLegacyEsphomePsk(cid)).toBe(false);
-    expect(getDeviceEsphome(cid).psk).toBe("");
-    clearPluginCfg();
-  });
-
-  it("窗口期已过 ⇒ 不再继承(避免旧密钥泼给之后新加的设备)", () => {
-    const cid = freshId();
-    writePluginCfg({ esphome_psk: "legacy-key", esphome_port: 6054 });
-    expect(inheritLegacyEsphomePsk(cid, -1)).toBe(false);
-    expect(getDeviceEsphome(cid)).toEqual({ psk: "", port: 0 });
-    clearPluginCfg();
-  });
-
-  it("没有旧全局密钥 ⇒ 不继承;空 clientId ⇒ 不继承", () => {
-    clearPluginCfg();
-    expect(inheritLegacyEsphomePsk(freshId())).toBe(false);
-    writePluginCfg({ esphome_psk: "legacy-key" });
-    expect(inheritLegacyEsphomePsk("")).toBe(false);
-    clearPluginCfg();
   });
 });
 

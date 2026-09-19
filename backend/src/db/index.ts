@@ -550,25 +550,6 @@ export function initDatabase() {
     );
   `);
 
-  // 迁移:老库的 sendspin_device_state 缺新列(CREATE TABLE IF NOT EXISTS 不会补列)。
-  // PRAGMA 探测后幂等补列 —— 与 disabled 同一套路。
-  for (const [col, ddl] of [
-    ["disabled", "disabled INTEGER NOT NULL DEFAULT 0"],
-    // ESPHome Native API(6053)按设备各自的密钥:ip 会变(DHCP),clientId 不会,
-    // 所以密钥挂在 clientId 上,host 每次连上自动更新。
-    ["esphome_psk", "esphome_psk TEXT NOT NULL DEFAULT ''"],
-    ["esphome_port", "esphome_port INTEGER NOT NULL DEFAULT 0"],
-  ] as const) {
-    try {
-      const cols = sqlite.prepare("PRAGMA table_info(sendspin_device_state)").all() as any[];
-      if (!cols.some((c) => c?.name === col)) {
-        sqlite.exec(`ALTER TABLE sendspin_device_state ADD COLUMN ${ddl}`);
-      }
-    } catch (e: any) {
-      console.warn(`[db] sendspin_device_state.${col} 迁移失败(忽略,读取仍回退缺省): ${e?.message || e}`);
-    }
-  }
-
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.

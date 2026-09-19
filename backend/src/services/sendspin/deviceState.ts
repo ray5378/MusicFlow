@@ -190,69 +190,6 @@ export function saveDeviceEsphome(clientId: string, psk: string, port = 0): void
   }
 }
 
-// ---- 升级迁移:旧版「插件页全局密钥」→ 每台设备各自的密钥 ----
-
-/** 服务启动时刻(迁移窗口起点)。模块加载即视为服务启动。 */
-const BOOT_AT = Date.now();
-/** 继承窗口:服务启动后 10 分钟内连上来的设备 = 升级重启后的那波重连潮。 */
-const LEGACY_PSK_INHERIT_WINDOW_MS = 10 * 60_000;
-/** 同一设备只继承一次(避免反复重写)。 */
-const inheritedClientIds = new Set<string>();
-
-/** 读**旧版插件页全局密钥**(已废弃字段,仅迁移期读一次)。
- *  插件配置的解析在 services/sendspin/index.ts,但迁移判定在这里 —— 因此直读
- *  plugins 表的原始 JSON,不复用 readSendspinPluginConfig(它已刻意丢掉这些字段)。 */
-export function readLegacyPluginEsphome(): { psk: string; port: number } {
-  try {
-    const row = sqlite
-      .prepare("SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'")
-      .get() as any;
-    const cfg = row?.config ? JSON.parse(row.config) : {};
-    const psk = typeof cfg?.esphome_psk === "string" ? cfg.esphome_psk.trim() : "";
-    const n = Number(cfg?.esphome_port);
-    return { psk, port: Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0 };
-  } catch {
-    return { psk: "", port: 0 };
-  }
-}
-
-/** 升级迁移:把旧版「插件页全局密钥」继承成**这台设备自己的**密钥。
- *
- *  为什么需要:6053 密钥从「插件页一把全局」改成「每台设备各自一把」后,老用户的
- *  设备行上密钥是空的 —— 不做继承,升级后会**静默失联**(桥不再连、音量按钮置灰),
- *  用户得为每台设备重填一遍。这里让升级瞬间就连上来的设备沿用旧密钥,「像没升级过
- *  一样」继续工作。
- *
- *  边界(避免把一台设备的密钥永久泼给之后新加的每台设备):
- *   - 只在窗口期内生效 —— 默认服务启动后 10 分钟,即升级重启后的重连潮;
- *   - 已有自己密钥的设备**不覆盖**;
- *   - 同一设备只继承一次;
- *   - 窗口期过后旧字段彻底不再被读取,各设备只认自己那行(用户改/清都以后者为准)。
- *
- *  窗口长度可通过 `withinMs` 覆盖(测试用;传负数即模拟「窗口已过」)。 */
-export function inheritLegacyEsphomePsk(
-  clientId: string,
-  withinMs = LEGACY_PSK_INHERIT_WINDOW_MS,
-): boolean {
-  try {
-    if (!clientId) return false;
-    if (inheritedClientIds.has(clientId)) return false;
-    if (Date.now() - BOOT_AT > withinMs) return false;
-    const cur = getDeviceEsphome(clientId);
-    if (cur.psk) return false;
-    const legacy = readLegacyPluginEsphome();
-    if (!legacy.psk) return false;
-    inheritedClientIds.add(clientId);
-    // 端口:设备行已记录过就用它,否则沿用旧全局端口(0 = 缺省 6053)。
-    saveDeviceEsphome(clientId, legacy.psk, cur.port || legacy.port);
-    log.info(`[device-state] 旧版全局密钥已继承为设备 ${clientId} 的 6053 密钥(迁移窗口内一次性)`);
-    return true;
-  } catch (e: any) {
-    log.warn(`[device-state] 继承旧版全局密钥失败 ${clientId}: ${e?.message || e}`);
-    return false;
-  }
-}
-
 /** 列出所有已填 ESPHome 密钥的设备(供启动时批量 attach)。 */
 export function listEsphomeCreds(): { clientId: string; psk: string; port: number }[] {
   try {

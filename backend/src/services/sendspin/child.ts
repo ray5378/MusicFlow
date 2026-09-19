@@ -39,7 +39,7 @@ let controller: SendspinChildController | null = null;
 async function main(): Promise<void> {
   const { startSendspinInProcess, stopSendspinInProcess } = await import("./index.js");
   const { esphomeBridge } = await import("./esphomeBridge.js");
-  const { getDeviceEsphome, inheritLegacyEsphomePsk } = await import("./deviceState.js");
+  const { getDeviceEsphome } = await import("./deviceState.js");
   const { SendspinChildController } = await import("./childMain.js");
 
   controller = new SendspinChildController(
@@ -54,10 +54,8 @@ async function main(): Promise<void> {
     onActivated: (conn: any) => {
       // 6053:设备 IP 从 Sendspin 连接自动派生,密钥按 clientId 逐台读 ——
       // 每台设备各自一把,没填就不连(与主进程 registerServerPlayer 同款)。
-      // 含升级迁移:启动窗口内把旧版插件页全局密钥继承成这台自己的(见 deviceState)。
       const creds = (() => {
         if (!conn.clientId) return { psk: "", port: 0 };
-        inheritLegacyEsphomePsk(conn.clientId);
         return getDeviceEsphome(conn.clientId);
       })();
       esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
