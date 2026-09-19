@@ -577,19 +577,10 @@ export function initDatabase() {
   // Daily-recommend default config (idempotent — only fills keys that don't exist)
   // daily_recommend_enabled: master switch ("true"/"false")
   // daily_recommend_hour:    local hour (0-23) to run, default 3 (off-peak)
-  // daily_recommend_retention: how many days of past daily playlists to keep
-  // daily_recommend_candidates: JSON array of {platform, url, name} pool to rotate
   // daily_recommend_local_enabled: also build a local-history-based playlist ("true"/"false")
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_enabled", "true");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
-  sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_retention", "7");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
-  // Default candidate pool: a mix of NetEase editorial charts + QQ Music
-  // official toplists. Each day the scheduler picks one via
-  // `dayOfYear(today) % pool.length`, so the daily mix rotates across charts.
-  // Replace via the admin API (PUT /rest/api/v1/daily-recommend/candidates).
-  // QQ toplist URLs use the form https://y.qq.com/n/ryqq/toplist/<id> and are
-  // routed to a dedicated toplist fetcher (different API from QQ playlists).
 
   // Seed DB rows for every registered plugin (manifest-driven, idempotent).
   // Deferred require-style import: the registry imports `db` from this module,

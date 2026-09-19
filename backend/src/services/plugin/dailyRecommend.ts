@@ -65,7 +65,6 @@ export interface DailyRecommendResult {
 }
 
 export const DAILY_TAG = "[daily-recommend]";
-export const DAILY_TAG_LOCAL = "[daily-recommend-local]";
 
 // Fixed playlist id — this NEVER changes, so clients can reference the daily
 // playlist by a stable id.
@@ -167,16 +166,13 @@ const DEFAULT_CANDIDATES: DailyCandidate[] = [
   { platform: "netease", url: "https://music.163.com/playlist?id=2884035", name: "网易云·原创榜" },
 ];
 
-// 读取候选榜单的优先级(UI 配置的权威来源是插件 config JSON 的 candidates 字段):
+// 读取候选榜单(UI 配置的权威来源是插件 config JSON 的 candidates 字段):
 //   1) 插件配置(plugin config 的 candidates)——用户在插件设置页手动配置/替换;
-//   2) 旧的 settings 表(daily_recommend_candidates)——向后兼容旧 admin API;
-//   3) 内置 DEFAULT_CANDIDATES——全新安装,且从未手动配置过。
+//   2) 内置 DEFAULT_CANDIDATES——全新安装,且从未手动配置过。
 // 任意一层都会被 isCandidateBlocked 过滤(新歌/欧美等始终排除)。
 export function loadCandidates(): DailyCandidate[] {
   const fromConfig = loadCandidatesFromPluginConfig();
   if (fromConfig) return fromConfig;
-  const fromSettings = loadCandidatesFromSettings();
-  if (fromSettings) return fromSettings;
   return DEFAULT_CANDIDATES.filter((c) => !isCandidateBlocked(c));
 }
 
@@ -185,19 +181,6 @@ function loadCandidatesFromPluginConfig(): DailyCandidate[] | null {
   if (!cfg || !Array.isArray(cfg.candidates)) return null;
   const clean = cleanCandidates(cfg.candidates);
   return clean.length > 0 ? clean : null;
-}
-
-function loadCandidatesFromSettings(): DailyCandidate[] | null {
-  const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("daily_recommend_candidates") as any;
-  if (!row?.value) return null;
-  try {
-    const arr = JSON.parse(row.value);
-    if (!Array.isArray(arr)) return null;
-    const clean = cleanCandidates(arr);
-    return clean.length > 0 ? clean : null;
-  } catch {
-    return null;
-  }
 }
 
 // 仅保留合法项(platform + url 必填)、排除黑名单(新歌/欧美等)、统一字段形状。
@@ -209,11 +192,8 @@ function cleanCandidates(arr: any[]): DailyCandidate[] {
 }
 
 export function saveCandidates(candidates: DailyCandidate[]): void {
-  const clean = cleanCandidates(candidates);
-  // 写入插件配置(UI 权威来源)与旧 settings 表(向后兼容)两处,保持一致。
-  setPluginConfigCandidates(clean);
-  sqlite.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
-    .run("daily_recommend_candidates", JSON.stringify(clean), new Date().toISOString());
+  // 只写插件配置(UI 权威来源);旧 settings 表的双写已移除(本项目不考虑向后兼容)。
+  setPluginConfigCandidates(cleanCandidates(candidates));
 }
 
 // 把候选榜单写回插件 config JSON(candidates 字段),其余配置项保持不变。
@@ -248,11 +228,6 @@ export function pickDailyCandidate(date = new Date()): DailyCandidate | null {
   return pool[seed % pool.length];
 }
 
-function findPlaylistByName(name: string, tag: string): any | null {
-  const rows = sqlite.prepare("SELECT * FROM playlists WHERE name = ? AND comment LIKE ?").all(name, `%${tag}%`) as any[];
-  return rows[0] || null;
-}
-
 // True once today's combined playlist has already been (re)generated today.
 // We stamp the generation date into the playlist's comment, so idempotency no
 // longer depends on created_at (which is now fixed, since the row is reused).
@@ -260,35 +235,16 @@ function isGeneratedToday(playlist: any, dateStr: string): boolean {
   return !!(playlist && (playlist.comment || "").includes(dateStr));
 }
 
-// Ensure the fixed-id daily playlist exists. On first run (or after an upgrade
-// from the old two-playlist scheme) this:
-//   - adopts any existing "[daily-recommend]" tagged "今日推荐" playlist into
-//     the fixed id (so no content is lost and no duplicate playlists appear), and
-//   - creates the fixed row if it's still missing.
-//
-// Note: existing "昨日推荐" playlists are intentionally NOT deleted here — the
-// user may delete them manually. The daily generator simply stops creating or
-// updating them.
+// Ensure the fixed-id daily playlist exists — create the fixed row if missing.
 function ensureDailyPlaylists(): void {
   const todayFixed = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(FIXED_TODAY_ID) as any;
-  if (!todayFixed) {
-    const ownerId = systemOwnerId();
-    const now = new Date().toISOString();
-    const legacy = findPlaylistByName(NAME_TODAY, DAILY_TAG);
-    if (legacy) {
-      sqlite.prepare("UPDATE playlists SET id = ?, name = ?, comment = ? WHERE id = ?")
-        .run(FIXED_TODAY_ID, NAME_TODAY, `${DAILY_TAG} (migrated)`, legacy.id);
-    } else {
-      sqlite.prepare(`
-        INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
-        VALUES (?, ?, ?, 1, ?, NULL, NULL, 'mixed', NULL, 0, ?, ?)
-      `).run(FIXED_TODAY_ID, NAME_TODAY, ownerId, `${DAILY_TAG}`, now, now);
-    }
-  } else if (todayFixed.name !== NAME_TODAY) {
-    // 2026-08-13 歌单名「今日推荐」→「每日推荐」:升级用户已存在的固定行同步改名。
-    sqlite.prepare("UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?")
-      .run(NAME_TODAY, new Date().toISOString(), FIXED_TODAY_ID);
-  }
+  if (todayFixed) return;
+  const ownerId = systemOwnerId();
+  const now = new Date().toISOString();
+  sqlite.prepare(`
+    INSERT INTO playlists (id, name, owner_id, is_public, comment, cover_art, source_url, source_platform, external_id, sync_enabled, created_at, updated_at)
+    VALUES (?, ?, ?, 1, ?, NULL, NULL, 'mixed', NULL, 0, ?, ?)
+  `).run(FIXED_TODAY_ID, NAME_TODAY, ownerId, `${DAILY_TAG}`, now, now);
 }
 
 // Pick the FIRST covered song from a playlist's OWN playable entries (by
@@ -664,11 +620,6 @@ export async function runDailyRecommendJob(opts?: { force?: boolean; seedSalt?: 
     log.error("error", { err: e.message || e });
     return null;
   }
-}
-
-// Backward-compat no-op (rename mechanism handles retention).
-export function purgeOldDailyPlaylists(_retentionDays: number): number {
-  return 0;
 }
 
 // ==================== Plugin (recommender) ====================
