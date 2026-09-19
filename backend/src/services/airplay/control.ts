@@ -11,7 +11,7 @@
 // modified.
 import { type ChildProcessWithoutNullStreams } from "child_process";
 import { PlaybackState } from "../player/types.js";
-import { RaopPlayer, type RaopSession } from "./raop.js";
+import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
 import { makeProducer, spawnDecoder, degreesToDb } from "./decoder.js";
 import { isAirPlayForkMode } from "./mode.js";
 import { airplaySupervisor } from "./supervisor.js";
@@ -54,6 +54,9 @@ export interface AirPlayDeviceStatus {
   muted: boolean;
   supportsRsa: boolean;
   updatedAt: number;
+  /** 推流节拍健康度(可观测指标):`reanchors` 越大 / `maxGapMs` 越接近或超过 ~8ms,
+   *  说明推流节拍正被事件循环拖累。无活跃推流时缺省不返回。 */
+  stream?: RaopRealtimeStats;
 }
 
 interface ActiveSession {
@@ -690,6 +693,7 @@ interface SessionView {
   title?: string;
   artist?: string;
   album?: string;
+  stream?: RaopRealtimeStats;
 }
 
 function sessionView(deviceId: string): SessionView | null {
@@ -704,6 +708,7 @@ function sessionView(deviceId: string): SessionView | null {
       title: r.title,
       artist: r.artist,
       album: r.album,
+      stream: r.stream,
     };
   }
   const s = sessions.get(deviceId);
@@ -716,6 +721,7 @@ function sessionView(deviceId: string): SessionView | null {
     title: s.title,
     artist: s.artist,
     album: s.album,
+    stream: s.player.realtimeStats ?? undefined,
   };
 }
 
@@ -753,6 +759,8 @@ export function getAirPlayStatus(deviceId: string): AirPlayDeviceStatus {
     muted: vol.muted,
     supportsRsa: !!dev?.supportsRsa,
     updatedAt: Date.now(),
+    // 可观测指标:播放中随时可读,不必等 stream() 收尾那一行日志。
+    stream: s.stream,
   };
 }
 
@@ -762,6 +770,8 @@ export function getAirPlayPeerStatus(deviceId: string): {
   state: string; position: number; duration: number; volume: number; muted: boolean;
   updatedAt: number; trackUri: string;
   media?: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string };
+  /** 推流节拍健康度(可观测指标);无活跃推流时不返回。 */
+  stream?: RaopRealtimeStats;
 } {
   const s = getAirPlayStatus(deviceId);
   const last = lastCast.get(deviceId);
@@ -773,6 +783,7 @@ export function getAirPlayPeerStatus(deviceId: string): {
     muted: s.muted,
     updatedAt: Date.now(),
     trackUri: last?.streamUrl || "",
+    stream: s.stream,
     media: last ? {
       songId: last.songId,
       title: last.title,

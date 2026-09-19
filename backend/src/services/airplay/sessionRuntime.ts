@@ -9,11 +9,15 @@
 // 于是本模块可以整体跑在 rendererHost 的常驻子进程里:RAOP 的 7.98ms 墙钟节拍
 // 不再与 Web 请求、封面渲染、后台批量任务争抢主进程事件循环。
 import type { ChildProcessWithoutNullStreams } from "child_process";
-import { RaopPlayer, type RaopSession } from "./raop.js";
+import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
 import { spawnDecoder, makeProducer } from "./decoder.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("AIRPLAY");
+
+/** 节拍健康度打点周期;以及「单次发包间隔」告警阈值(节拍 ≈7.98ms,超 50ms 即明显被拖)。 */
+const HEALTH_LOG_INTERVAL_MS = 15_000;
+const HEALTH_WARN_GAP_MS = 50;
 
 /** 镜像给主进程的会话态(读侧只用这些字段,够 getAirPlayStatus/peerStatus 用)。 */
 export interface AirplaySessionMirrorRow {
@@ -27,6 +31,8 @@ export interface AirplaySessionMirrorRow {
   album?: string;
   streamUrl: string;
   startedAt: number;
+  /** 推流节拍健康度(可观测指标;见 `raop.ts::realtimeStats`)。 */
+  stream?: RaopRealtimeStats;
 }
 
 export interface AirplayCastArgs {
@@ -60,6 +66,8 @@ interface ActiveSession {
   streamUrl: string;
   startedAt: number;
   ended: boolean;
+  /** 节拍健康度周期打点(仅流存续期间存在)。 */
+  healthTimer?: ReturnType<typeof setInterval> | null;
 }
 
 export interface AirplayRuntimeHooks {
@@ -134,11 +142,15 @@ export class AirplaySessionRuntime {
   private runStream(active: ActiveSession, session: RaopSession): void {
     const ff = active.ffmpeg;
     const producer = makeProducer(ff);
+    // 节拍健康度周期打点:让 `reanchors` / `maxGap` 的**趋势**在播放过程中就可见
+    // (原先只有 stream() 收尾那一行,出问题只能事后归因、也拿不到「何时开始变差」)。
+    this.startHealthLog(active);
     const p = active.player.stream(producer, session)
       .catch((e) => {
         log.error("airplay stream failed", { deviceId: active.deviceId, err: (e as Error)?.message || e });
       })
       .finally(() => {
+        this.stopHealthLog(active);
         if (active.seekReplace) {
           active.seekReplace = false;
           try { ff.kill(); } catch { /* ignore */ }
@@ -159,11 +171,37 @@ export class AirplaySessionRuntime {
     active.streamPromise = p;
   }
 
+  /** 每 15s 打一行节拍健康度(趋势);有补发或明显长间隔就升级为 warn,便于日志过滤。 */
+  private startHealthLog(active: ActiveSession): void {
+    this.stopHealthLog(active);
+    active.healthTimer = setInterval(() => {
+      const st = active.player.realtimeStats;
+      if (!st) return;
+      const line =
+        `[${active.deviceId}] ${st.chunks} chunks / ${(st.elapsedMs / 1000).toFixed(0)}s` +
+        `, reanchors=${st.reanchors}, maxGap=${st.maxGapMs.toFixed(0)}ms, loss=${st.lossRequests}`;
+      if (st.reanchors > 0 || st.maxGapMs > HEALTH_WARN_GAP_MS) {
+        log.warn(`airplay 节拍健康度(有抖动): ${line}`);
+      } else {
+        log.info(`airplay 节拍健康度: ${line}`);
+      }
+    }, HEALTH_LOG_INTERVAL_MS);
+    active.healthTimer.unref?.();
+  }
+
+  private stopHealthLog(active: ActiveSession): void {
+    if (active.healthTimer) {
+      clearInterval(active.healthTimer);
+      active.healthTimer = null;
+    }
+  }
+
   async stop(deviceId: string): Promise<void> {
     const s = this.sessions.get(deviceId);
     if (!s) return;
     this.sessions.delete(deviceId);
     s.ended = true;
+    this.stopHealthLog(s);
     try { s.ffmpeg?.kill(); } catch { /* ignore */ }
     await s.player.stop().catch(() => {});
     this.hooks.onChanged?.();
@@ -259,6 +297,7 @@ export class AirplaySessionRuntime {
         album: s.album,
         streamUrl: s.streamUrl,
         startedAt: s.startedAt,
+        stream: s.player.realtimeStats ?? undefined,
       });
     }
     return { sessions };

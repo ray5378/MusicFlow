@@ -30,6 +30,20 @@ export const PCM_BYTES_PER_CHUNK = CHUNK_LEN * CHANNELS * (SAMPLE_SIZE / 8); // 
 export const RAOP_LATENCY_MIN = 11025;     // frames (libraop's LATENCY_MIN)
 export const NTP_EPOCH_DELTA = 2208988800; // seconds 1970→1900
 
+/** 推流节拍健康度(可观测指标,由 `RaopPlayer.realtimeStats` 暴露)。 */
+export interface RaopRealtimeStats {
+  /** 已发出的 RTP 音频包数。 */
+  chunks: number;
+  /** 因解码/调度跟不上墙钟而「立即补发」(而非按节拍等待)的次数 —— 越大说明事件循环被拖累越重。 */
+  reanchors: number;
+  /** 相邻两次发包的最大间隔(ms)。chunkDurMs ≈ 7.98ms,远超即说明节拍被打断过。 */
+  maxGapMs: number;
+  /** 本次 `stream()` 已运行时长(ms)。 */
+  elapsedMs: number;
+  /** 接收端请求重传(RTP loss)的次数。 */
+  lossRequests: number;
+}
+
 // ---------------------------------------------------------------------------
 // NTP / timestamp helpers (mirror libraop macros)
 // ---------------------------------------------------------------------------
@@ -285,6 +299,26 @@ export class RaopPlayer {
   get encrypted(): boolean { return this.rsa; }
   get isStreaming(): boolean { return this.streaming; }
   get isPaused(): boolean { return this.paused; }
+
+  /**
+   * 推流节拍健康度快照(可观测指标)。
+   *
+   * 此前 `reanchors` / `maxGapMs` 只在 `stream()` 收尾时打一行日志 —— 只能事后归因,
+   * 拿不到趋势,也无法在**播放中**判断「此刻是不是已经被拖垮」。现在它是随时可读的指标:
+   * 状态接口读它(`getAirPlayStatus().stream`),会话运行期还会周期打点(log)。
+   * 没有进行中的流时返回 null。
+   */
+  get realtimeStats(): RaopRealtimeStats | null {
+    const s = this.stats;
+    if (!s) return null;
+    return {
+      chunks: s.chunks,
+      reanchors: s.reanchors,
+      maxGapMs: s.maxGapMs,
+      elapsedMs: Math.max(0, Date.now() - s.startMs),
+      lossRequests: this.lossRequests,
+    };
+  }
 
   private async bindUdp(): Promise<void> {
     const mk = (reuse: boolean) =>
