@@ -20,9 +20,9 @@
 | ------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 语言      | TypeScript                                                                                                                  | `strict` 模式；target ES2022；module ESNext；moduleResolution bundler                                                                                  |
 | 后端框架    | Node.js + Hono + @hono/node-server                                                                                          | 部署基线 Node 22（Docker node:22-alpine，musl）                                                                                                          |
-| 数据库     | SQLite（better-sqlite3 单连接）+ drizzle-orm                                                                                     | 迁移工具 drizzle-kit；**每进程一个** **`new Database`（db/index.ts）**：批量任务跑在一次性子进程（`child_process.fork`），子进程自带独立 SQLite 连接，WAL + busy\_timeout=5000 支撑多进程并发写 |
+| 数据库     | SQLite（better-sqlite3 单连接）+ drizzle-orm                                                                                     | 迁移工具 drizzle-kit；**每进程一个** **`new Database`（db/index.ts）**：批量任务跑在一次性子进程（`child_process.fork`），子进程自带独立 SQLite 连接，WAL + busy\_timeout=5000 支撑多进程并发写。**渲染器常驻子进程**（Sendspin / AirPlay）同样各自持有连接（AirPlay 子进程刻意只用协议栈、不碰 DB） |
 | 前端      | Vue 3 + Vite + Element Plus + Pinia + Vue Router + Howler（音频）                                                               | 构建产物 `frontend/dist`，**gitignore，不入库**；后端仅当静态资源吐给浏览器。**大列表虚拟滚动已在** **`components/SongTable.vue`** **内置**（桌面端 >200 首自动窗口化，行高 68px，无需新依赖）           |
-| 插件运行时   | quickjs-emscripten（WASM 沙箱，主线程常驻）+ worker\_threads（插件沙箱按需起）+ **批量任务子进程（`child_process.fork`，一次性，跑完** **`process.exit(0)`）** | 每启用插件一份常驻沙箱（`pluginSandboxes`）；批量任务（每日推荐/扫描/导入/同步/匹配/清理/刮削）一律在隔离子进程执行，峰值内存随进程销毁归还                                                                 |
+| 插件运行时   | quickjs-emscripten（WASM 沙箱，主线程常驻）+ worker\_threads（插件沙箱按需起）+ **批量任务子进程（`child_process.fork`，一次性，跑完** **`process.exit(0)`）** | 每启用插件一份常驻沙箱（`pluginSandboxes`）；批量任务（每日推荐/扫描/导入/同步/匹配/清理/刮削）一律在隔离子进程执行，峰值内存随进程销毁归还。**渲染器常驻子进程**（Sendspin / AirPlay，由 `services/rendererHost/` 托管）另计一路：fork 后长驻，承载硬实时推流运行时与原生 addon/WASM                                                                 |
 | 网络      | ws（WebSocket）、undici（HTTP/代理）、bonjour-service（mDNS/DLNA）、sharp（图像）、music-metadata（音频标签）                                     | <br />                                                                                                                                            |
 | 认证      | jsonwebtoken + md5                                                                                                          | 密码 md5+盐 / pass\_enc 加密；API key 存 hash                                                                                                            |
 | 测试      | vitest                                                                                                                      | `pool: "forks"`、每文件独立 DATA\_DIR、`sequence.shuffle`                                                                                                |
@@ -34,7 +34,7 @@
 
 - **命名规范**：
 
-  - 文件/目录：全小写 + 下划线（`playlist_sync.ts`、`streamFallback.ts`）
+  - 文件/目录：**小驼峰**（`playlistSync.ts`、`streamFallback.ts`、`dailyRecommend.ts`）；目录同（`rendererHost/`、`source/online/`）。**实测仓库内没有任何下划线文件名**，新增一律沿用驼峰
 
   - 类/接口/枚举：大驼峰（`QueueController`、`PlaybackState`）
 
@@ -42,7 +42,7 @@
 
   - 常量：全大写 + 下划线（`ASYNC_TASK_KEEP_MAX`、`CACHE_TTL`）
 
-- **代码位置**：后端 `backend/src/**`（88+ TS 文件，456 个 HTTP 端点全量编译入堆）；前端 `frontend/src/**`；测试 `backend/tests/**/*.test.ts`。
+- **代码位置**：后端 `backend/src/**`（约 218 个 TS 文件、其中 33 个 `.test.ts`；HTTP 端点全量编译入堆）；前端 `frontend/src/**`；测试 `backend/tests/**/*.test.ts`。
 
 - **脚本**：`dev`（tsx watch src/index.ts）｜ `build`（tsc）｜ `start`（node dist/index.js）｜ `test`（vitest run）｜ `db:generate/migrate/push`（drizzle-kit）。
 
@@ -141,6 +141,7 @@
 - **开启时才启动**：`index.ts` 启动门控 `isAirPlayEnabled()` → 才 `startAirPlayService()` + 持久化 wire + 设备注册。
 
 - **关闭时零常驻**：`stopAirPlayService()`（airplay/control.ts）——停全部会话（RAOP TEARDOWN + ffmpeg kill）、清 volumeState/lastCast、移除全部 `airplay:*` peer（`removeAirPlayPeers`）、注销 QueueController player（`unregisterAirPlayDevices`）、停 mDNS（`stopAirPlayDiscovery`：browser.stop + bonjour.destroy + clearInterval）并清空设备内存列表。**关闭后无网络监听/无定时器/无会话/无 peer/无 player 注册**。
+  若走 fork 模式（`MUSICFLOW_AIRPLAY_FORK=1`），额外停掉 `airplaySupervisor` 的常驻子进程（心跳看门狗与退避重启一并停），不留孤儿进程。
 
 - **路由守卫**：`/v1/airplay/*` 全部端点挂 `use` 中间件，未启用返回 409（`CONFLICT`，"AirPlay 播放器已关闭"），防绕过。
 
@@ -312,7 +313,14 @@
 | `genres`                                          | id                            | name unique                                                                                                                                       |
 | `flows`                                           | id                            | token **unique**（免登录 webhook 凭据）；lastRunStatus ∈ waiting\|playing\|success\|error\|timeout                                                        |
 | `player_webhook_tokens`                           | id                            | token unique；enabled 0/1；ownerUserId                                                                                                              |
-| `cleaning_rules` / `wishes`                       | id                            | wishes.status 默认 pending（枚举扩展需 spec 明确）                                                                                                           |
+| `cleaning_rules` / `wishes`                       | id                            | wishes.status 默认 pending（枚举扩展需 spec 明确） |
+
+> **上表只列核心表 —— 全库共 37 张**（`db/schema.ts` 34 张 + 仅写在 `db/index.ts` 的 2 张 + `plugins/storage.ts` 自建的 1 张）。其余按用途归组，细节以 `db/schema.ts` 为准：
+> 收藏扩展 `user_favorite_albums` / `user_favorite_artists` / `playlist_favorites`；权限与授权 `user_permissions` / `user_renderer_grants`；
+> 播放器 `player_name_overrides` / `player_prefs`；渲染器 `sendspin_device_state` / `airplay_devices`；
+> 固定推荐歌单封面锁 `playlist_cover_claims`（唯一索引 date_key+cover_ref）；外置插件 KV `plugin_storage`（**不在** `db/index.ts` 建表清单里，由 `plugins/storage.ts` 自建）。
+>
+> ⚠️ `sendspin_device_state.esphome_psk` 是**明文密钥**：排查时只查 `LENGTH(esphome_psk)`，勿 `SELECT *`；查 `plugins.config` 同理用 `LIKE` 探字段，别把整行打出来。                                                                                                           |
 
 ### 2.2 全库硬性约束（边界条件）
 
@@ -362,7 +370,7 @@ IDLE ⇄ PLAYING ⇄ PAUSED ⇄ BUFFERING
 | ------------------------------ | --------------------------------------------- | --------------------------------------------------------- | ------------- |
 | `POST /rest/api/v1/auth/login` | authRoutes                                    | 无（登录本身）                                                   |               |
 | `/rest/api/*`                  | apiRoutes（管理/业务 API）                          | `authMiddleware` 全挂；`/v1/admin/*` 再叠 `adminMiddleware`    |               |
-| `/rest/*`                      | restRoutes（OpenSubsonic/Subsonic 兼容，456 端点大面） | authMiddleware（Bearer / OpenSubsonic u+t+s / u+p / token） |               |
+| `/rest/*`                      | restRoutes（OpenSubsonic/Subsonic 兼容，51 个端点） | authMiddleware（Bearer / OpenSubsonic u+t+s / u+p / token） |               |
 | `/api/*`                       | navidromeRoutes                               | authMiddleware                                            |               |
 | `/rest/dlna/*`                 | DLNA 控制/事件                                    | 设备回调/事件无需登录（NOTIFY）                                       |               |
 | `/ws`                          | WebSocket（HTTP upgrade）                       | \`?token=\<apiKey                                         | jwt>\`，401 拒绝 |
@@ -493,8 +501,8 @@ Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 
 | 目录                  | 职责                                                                                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `routes/api/`       | 业务 API（index.ts 是主文件：159+ 端点；online.ts 在线搜索；entitySearch/playlistSearch）                                                                                      |
-| `routes/rest/`      | OpenSubsonic 兼容（456 端点大面）                                                                                                                                     |
+| `routes/api/`       | 业务 API（index.ts 主文件 209 个端点；online.ts 在线搜索 15 个；entitySearch/playlistSearch）                                                                                      |
+| `routes/rest/`      | OpenSubsonic 兼容（51 个端点）                                                                                                                                     |
 | `routes/auth/`      | 登录                                                                                                                                                            |
 | `routes/navidrome/` | Navidrome 兼容路由                                                                                                                                                |
 | `services/dlna/`    | control（设备缓存/DB）、discovery（SSDP）、eventing（GENA）、announce、queue（兼容层）                                                                                           |
@@ -505,7 +513,10 @@ Then  getAsyncTask 返回 null（FIFO 修剪生效）；最近 50 条仍可查
 | `services/source/`  | scanner（本地/WebDAV 扫描）、online/（在线搜索/匹配/导入/streamFallback）                                                                                                      |
 | `batch/`            | 批量子进程（1.3）：types.ts（kind + IPC 协议）、jobs.ts（处理器映射）、child.ts（子进程引导）、runner.ts（父进程运行器：锁/看门狗/abort/pace/收尾）                                                       |
 | `services/`         | peer、settings、proxy、lyrics、covers、coverCache、coverImage、playlistCover、content、backfill、scraper、ws                                                             |
-| `plugins/`          | 内建插件注册（builtins.ts 9 个）、沙箱宿主（sandbox.ts/sandboxWorker.ts）、registry、health、comm、scrobblers                                                                     |
+| `plugins/`          | 内建插件注册（builtins.ts **18 个**）、沙箱宿主（sandbox.ts/sandboxWorker.ts）、registry、health、comm、scrobblers                                                                     |
+| `services/rendererHost/` | **常驻渲染器子进程通用宿主**：supervisor（fork/握手/心跳看门狗/退避重启/RPC）、childHost（子进程侧 req→res 回填 + 快照节流 + 心跳）、ipcProtocol（通用信封 + 常量）、mode（三态 isRendererForkMode）、front、childBootstrap、paths。**新接渲染器照 index.ts 顶部六步清单走** |
+| `services/sendspin/` | Sendspin 渲染器运行时（WS 38927 / mDNS / 拨号重拨 / ESPHome 6053 桥 / FLAC·opus 编码推流）+ 子进程接线（child/childMain/supervisor） |
+| `services/airplay/` | AirPlay 渲染器运行时（raop 节拍循环 / sessionRuntime 纯推流会话 / decoder / 子进程接线）；fork 模式默认关闭，见 1.5 |
 | `utils/`            | auth（JWT/md5/hashApiKey）、env、errors（BusinessErrorCode/apiError/apiOk）、logger（createLogger 结构化日志）                                                              |
 | `middleware/`       | auth（鉴权链 + 缓存）、metrics（慢请求 + 端点计数，挂 app.use("\*")）                                                                                                            |
 | `db/`               | schema.ts + 连接（唯一 `new Database`）                                                                                                                             |
@@ -559,6 +570,8 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 - **单元测试**：核心业务逻辑（player/memory/plugins/group/source）必须覆盖；新增/修改逻辑**必须**附测试或更新既有测试。
 
 - **批量子进程测试（v1.13.42+）**：`tests/batch/` 覆盖 runner IPC 编排（假子进程注入 `_setForkImplForTest`）与 jobs 处理器注册契约；路由/插件测试用 `_setBatchRunnerForTest` / `_setPluginJobExecForTest` / `_setBackfillRunnerForTest` 进程内直调（测试专用钩子，生产禁止）。
+
+- **渲染器宿主测试（v3.0.40+）**：`tests/rendererHost/supervisorFork.test.ts`（10 例）+ 夹具 `tests/rendererHost/fixtures/stubRendererChild.mjs` —— **真 fork** 一条纯 JS 夹具子进程，覆盖 mainReady 握手 / RPC 往返（断言 pid 属于子进程）/ 快照进镜像 / `kill -9` 退避重启 / 优雅 stop / 启动即退失败分支。注意：`mode.ts` 见到 `VITEST` 一律返回 in-proc，**业务侧测试永远不可能真 fork**，该用例因此刻意绕开 `isRendererForkMode()` 直接构造 `RendererHostSupervisor`。
 
 - **集成/冒烟**：行为类改动（新路由/新流程）用本地隔离实例实测（临时 DATA\_DIR + 桩插件，跑通后端直连/代理/真浏览器三层），或至少补集成测试。
 

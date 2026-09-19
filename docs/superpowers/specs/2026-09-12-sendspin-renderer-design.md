@@ -4,6 +4,8 @@
 状态：设计待复核
 范围：**P1+P2+P3 全部一次规划**——完整对齐 Music Assistant 的 Sendspin Server（全角色 / 三配对法 / 多房同步 / 每客户端独立编码 / 每播放器 DSP 音量）。
 关联：`docs/superpowers/plans/2026-08-05-dlna-ma-style-player-controller.md`（MA 式 player 控制器的既有基准）。
+>
+> **⏳ 历史快照（2026-09-19 标注）**：本文是当时的一次性计划 / 设计稿，对应任务**已完成**，**不是现行规范**。落地后的真实形态以代码为准：架构总览见 `docs/DEVELOPER.md`，进程 / 隔离模型见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。请勿按本文直接施工。
 
 ## 1. 背景与目标
 

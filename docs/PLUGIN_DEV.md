@@ -1,7 +1,7 @@
 # MusicFlow 外置插件开发指南（PLUGIN\_DEV）
 
 > 适用版本：MusicFlow **沙箱运行时（QuickJS/WASM）1.3.0+**；核心按 `manifest.capabilities` 分发，**不写死任何插件名**。
-> 当前主项目 ≈ **v1.13.40**；实例插件 `go-music-dl` 需后端 **≥ 1.7.39**（`longRunning` / 异步任务通道）。
+> 当前主项目主线 **v3.0.x**（沙箱运行时自 1.3.0 起）；配套实例插件 `go-music-dl` 需后端 **≥ 1.7.39**（`longRunning` / 异步任务通道）。
 > 目标：教你自己写一个 drop-in 插件，丢进 `data/plugins/<id>/` 即可被后端加载，**无需改任何核心代码**。
 
 ***
@@ -44,7 +44,7 @@ globalThis.__mfPlugin = {
 
 **插件拿不到 Node 的任何能力**：没有 `import`/`require`/`fetch`/`fs`/`process`。网络只能走 `host.http` / `host.net` / `host.ws`（均自带超时与权限点），存储走 `host.storage`，文件走 `host.fs`（限插件目录），日志走 `host.log`。`permissions` 在宿主函数调用点强制执行——不再只是契约，是真实的运行时边界。
 
-> 沙箱内**禁止使用** **`eval`** **/** **`new Function`**（QuickJS 下即使用到也碰不到宿主，但核心直接拒绝此类代码）。
+> 沙箱内**不要使用** `eval` / `new Function`：QuickJS 里它们即便可用也**触达不到宿主**（沙箱内没有可逃逸的宿主对象），且**核心并不做源码扫描拦截** —— 这条是约定而非运行时防线。
 
 ***
 
@@ -55,7 +55,7 @@ globalThis.__mfPlugin = {
 | `id`                                                     | ✅  | 全局唯一，正则 `^[a-zA-Z0-9][a-zA-Z0-9-]*$`，且必须与目录名一致。                                                                                                                                                                                                                                                                    |
 | `name`                                                   | ✅  | 展示名（插件页显示）。                                                                                                                                                                                                                                                                                                        |
 | `version`                                                | ✅  | 插件版本，语义化版本串。**必须与 plugin.json 的 version 一致**，否则拒绝加载。                                                                                                                                                                                                                                                               |
-| `type`                                                   | ✅  | `"source" \| "importer" \| "recommender" \| "sync" \| "lyrics" \| "cover" \| "renderer" \| "scrobbler" \| "artist"` 之一。                                                                                                                                                                                            |
+| `type`                                                   | ✅  | `"source" \| "importer" \| "recommender" \| "sync" \| "lyrics" \| "cover" \| "renderer" \| "scrobbler" \| "artist" \| "core"` 之一。`core` 为服务端内置行为开关（配置面在插件、逻辑在核心），一般只用于内置插件。                                                                                                                                                                                            |
 | `capabilities`                                           | ✅  | 非空数组，声明本插件提供的能力（见 §4，**沙箱据此白名单暴露 impl 方法**）。                                                                                                                                                                                                                                                                       |
 | `configSchema`                                           | ✅  | 数组（可为空 `[]`）。描述插件配置项，自动渲染成插件页表单。                                                                                                                                                                                                                                                                                   |
 | `description`                                            | ⬜  | 描述。                                                                                                                                                                                                                                                                                                                |
@@ -197,7 +197,9 @@ globalThis.__mfPlugin = {
 
 ### 4.0 通用调用约定
 
-- **方法签名注意**：`source` 系方法（search\*/recommend/playlistSongs/streamUrl）核心以 `(config, …)` 调用，`config` 即时刷新；而 `lyricProvider` / `coverProvider` / `scrobbler` / `artistInfo` 的方法，核心以 `(host, …)` 调用，但**沙箱门面会剥掉第一个 host 参数**——插件方法里直接用 `create(host)` 闭包捕获的 `host`（始终实时）。
+- **方法签名注意**：`source` 系方法（search\*/recommend/playlistSongs/streamUrl）核心以 `(config, …)` 调用，`config` 即时刷新。
+- 只有 **`searchLyrics` / `searchCover` / `onPlay` / `onScrobble`** 这四个方法核心以 `(host, …)` 调用，沙箱门面按 `STRIP_HOST_FIRST`（`sandbox.ts`）**剥掉第一个 host 参数**——插件侧用 `create(host)` 闭包捕获的 `host`（始终实时）即可。
+- **其余方法（含 `artistInfo` 的 `fetchArtistInfo`）核心直接以业务参数调用**（如 `fetchArtistInfo(name)`），**不会**传 host。
 
 - **同步方法**：`streamUrl` / `lyricUrl` / `canHandle` / `canHandleFile` 是纯同步的（构造 URL / 判断 URL 是否可处理），**不得发起网络**。
 
@@ -243,6 +245,8 @@ globalThis.__mfPlugin = {
 | `localPlaylist`     | `runDailyJob(): Promise<string\|null>`（可选 `generateLocalDailyPlaylist(...)`）                | 本地推荐（如 `pl-daily-local`）        |
 | `comboPlaylist`     | `runDailyJob(): Promise<string\|null>`（可选 `generateComboPlaylist({force})`）                 | 组合歌单（如 `pl-daily-roam`，合并前两者去重） |
 | `recommendPlaylist` | `runDailyJob(opts?): Promise<string\|null>`                                                 | **通用推荐歌单（第三方插件自管）**             |
+| `localPlatformRecommend` | `runDailyJob(): Promise<string\|null>`（可选 `recommendLocal(...)`）                                     | 本地随机(按平台)，首页动态分区数据源（如 `pl-local-platform-*`） |
+| `playlistCleanup`   | `runDailyJob(): Promise<string\|null>`                                                      | 歌单清理（删除低歌曲数歌单）                  |
 
 > `recommendPlaylist` 与上面三个内置调度类的区别：它是**给外置插件用的通用推荐入口**——插件自己拥有并维护一张固定歌单（通过 `manifest.homePlaylistId` 声明，如 `pl-lb-recommend`），核心不关心其内容来源。go-music-dl（私人歌单）与 listenbrainz（协同过滤推荐）都走这个 capability。`runDailyJob` 返回摘要行或 `null`（无操作）；手动刷新 `POST /v1/recommend/refresh` 传 `pluginId` 会以 `force` 强制重跑（走后端异步任务通道）。
 
@@ -334,10 +338,14 @@ first-match-wins（首个返回非空结果的胜出）。封面下载与数据�
 | `playlistFile`      | `canHandleFile`, `parseFile` |
 | `dailyPlaylist`     | `runDailyJob`                |
 | `localPlaylist`     | `runDailyJob`                |
-| `recommendPlaylist` | `runDailyJob`                |
+| `recommendPlaylist` | `runDailyJob`, `recommend`   |
+| `localPlatformRecommend` | `runDailyJob`, `recommendLocal` |
+| `playlistCleanup`   | `runDailyJob`                |
 | `playlistSync`      | `runSyncJob`                 |
 
 > 记住：**这张表就是「声明了某 capability，核心才会去找对应方法」的依据。** impl 上最终只保留「capability 要求 + 插件实际实现」的交集。
+>
+> 表里**没有** `lyrics` 与 `webRotation`：`lyrics`（老 `lyricUrl` 路径）在沙箱 `CAP_METHODS` 中**没有映射**，声明它不会暴露任何方法（歌词请走 `lyricProvider`）；`webRotation` 无需方法，由核心 purge 逻辑触发。
 
 ***
 
@@ -425,7 +433,10 @@ host.comm.broadcast({ type: "tick" });
 
 加载外置插件时：
 
-1. **QuickJS 沙箱**：代码在独立 VM 里运行，拿不到 Node 能力；内存上限 256MB、栈上限 1MB、单次调用超时 15s（长耗时方法见 `longRunning`）、中断处理器可切断死循环。
+1. **QuickJS 沙箱（两层线程模型）**：外置插件代码跑在独立 QuickJS/WASM VM 里，拿不到 Node 能力。
+   - **主线程常驻 VM**：跑交互型调用（`search*` / `streamUrl` / `lyricUrl` / `canHandle` 等），15s 看门狗；内存上限 256MB（`setMemoryLimit` 硬上限，触顶 OOM 自动重建沙箱，重建预算 30s）、栈上限 1MB、中断处理器可切断死循环。
+   - **worker 线程（仅 `manifest.longRunning` 非空时创建，每插件一条）**：把批量/慢方法的计算挪出主线程 event loop（根治同步刷新时前端假死）。注意这是**线程隔离，不是进程隔离** —— 只隔离 V8 堆与事件循环，**worker 的峰值内存不归还 OS**；`SANDBOX_WORKER_DISABLE=1` 可整体关闭，init 失败会自动回退主线程执行。
+   - 真正的「峰值内存归还 OS」发生在**批量任务子进程**（`batch/runner.ts`，一次性 fork）与**渲染器常驻子进程**（`services/rendererHost/`），那是宿主侧机制、与插件沙箱无关。
 2. **路径白名单**：只能加载 `<data>/plugins/<id>/index.js`，路径穿越拒绝。
 3. **Manifest 校验**：id / type / capabilities / configSchema 必须合规；`index.js` 与 `plugin.json` 不一致拒绝加载。
 4. **权限执行点**：`host.http` 无 `net` 权限直接拒绝，不发起请求。
@@ -473,7 +484,7 @@ cp -r my-plugin backend/data/plugins/
 
 > `go-music-dl` 的歌词 / 封面能力随该外置 source 插件分发（`lyricProvider` / `coverProvider`），核心按能力遍历调用，不再内置独立的歌词/封面插件。
 
-源码在 [ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)，发布前跑 `node scripts/check.mjs <id>`。
+源码在 [ray5378/MusicFlow-plugins](https://github.com/ray5378/MusicFlow-plugins)，发布前跑 **该仓库的** `node scripts/check.mjs <id>`（当前仓库里的 `backend/scripts/check-builtins.mts` 只校验**内置**插件清单）。
 插件目录结构、打包（`pack.sh`）、Release 资产上传与 `registry.json` 登记的**完整发布流程见该仓库的
 [README](https://github.com/ray5378/MusicFlow-plugins/blob/master/README.md)**；想贡献新插件也建议先读它。
 

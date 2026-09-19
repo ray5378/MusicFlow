@@ -17,6 +17,7 @@
 > - §5 的两项低成本项（`reanchors`/`maxGapMs` 可观测化、supervisor 冒烟测试）**均已完成**；
 > - **部署不在本规划范围**（用户 2026-09-19 明确「以后都不用管部署」），本文档不涉及
 >   主实例的发布/部署步骤；
+> - §0/§1/§3/§4 的**代码行号已于 2026-09-19 随重构校正**（附录保留起草时的快照，刻意不改）；
 > - 逐条状态见 §5 路线图。
 
 ---
@@ -28,13 +29,14 @@
 | **保持**（已进程化） | Sendspin 运行时（常驻 fork） | 25ms 硬实时节拍，已隔离 |
 | **保持**（已进程化） | 批量任务（一次性 fork） | 内存峰值＋不可信插件代码 |
 | **保持**（已进程化） | ffmpeg 解码/转码子进程 | CPU 天然出进程 |
-| **应进程化 P1** | **AirPlay RAOP 推流** | 7.98ms 节拍＋进程内加密，与 Sendspin 同构却仍在主进程 |
+| **已接宿主，待启用** | **AirPlay RAOP 推流** | 7.98ms 节拍＋进程内加密；v3.0.39 起接入 `rendererHost`，默认 in-proc，真机验证后启用 |
 | **应下沉 P2** | 封面渲染（sharp） | 原生 addon 在主进程，一次段错误全站挂 |
 | **暂缓 P3** | 插件沙箱进程化 | 已被批量子进程削弱，缺实测数据触发 |
 | **保留现状** | HTTP/WS 路由、QC/PM 编排、调度器、<br>转码编排、DLNA 拉流、插件交互调用 | 状态密集或 I/O 密集，IPC 化是净损失 |
 
-**一句话**：现在的边界**大体正确**，唯一的真错位是 **AirPlay** —— 它是 Sendspin 的同类负载，
-却被留在了主进程里。
+**一句话**：边界**大体正确**。起草时唯一的真错位是 **AirPlay**（Sendspin 的同类负载却留在主进程），
+该错位已于 v3.0.39 接入通用宿主、默认关闭等待真机验证 —— **当前没有「应该动手但没动」的项**，
+剩下的 P2/P3 全部带触发条件（等信号）。
 
 ---
 
@@ -47,14 +49,16 @@
 ├─ dailyScheduler                   仅 setTimeout 重排下一次
 ├─ 插件沙箱 QuickJS WASM            主线程常驻，内存硬上限 256MB
 ├─ worker 线程（仅 longRunning）     线程隔离，非进程
-├─ **AirPlay RAOP 推流**            ⚠️ 墙钟节拍 + 进程内 ALAC/加密
+├─ **AirPlay RAOP 推流**            ⚠️ 默认在进程内；`MUSICFLOW_AIRPLAY_FORK=1` 时改走子进程
+│                                    墙钟节拍 + 进程内 ALAC/加密
 ├─ sharp 封面渲染                    ⚠️ 原生 addon 在主进程
 ├─ transcode.ts 编排                 ffmpeg 子进程（≤4 并发闸）
 │
-├─ fork ─→ sendspin 专属常驻子进程
-│           ├─ WS 38927 / mDNS / 拨号重拨 / ESPHome 6053 桥
-│           ├─ 解码/FLAC/opus 编码/推流（25ms 硬实时）
-│           └─ spawn ─→ ffmpeg（每次 seek 重启 / 单次解码）
+├─ fork ─→ 渲染器专属常驻子进程（统一由 rendererHost 托管）
+│           ├─ sendspin：WS 38927 / mDNS / 拨号重拨 / ESPHome 6053 桥
+│           │            解码 / FLAC·opus 编码 / 推流（25ms 硬实时）
+│           └─ airplay：RAOP 推流（7.98ms 节拍）—— 仅当 fork 开关打开
+│          （两者的 ffmpeg 均由各自 spawn：每次 seek 重启 / 单次解码）
 │
 └─ fork ─→ 批量一次性子进程（fork → run → exit，全局 FIFO 只跑 1 个）
             scan / daily-jobs / boot-sync / maintenance
@@ -65,10 +69,12 @@
 
 | 机制 | 位置 |
 |---|---|
-| Sendspin 常驻 fork | `services/sendspin/supervisor.ts:161`、入口 `child.ts` |
-| 模式判定 | `services/sendspin/mode.ts::isForkMode()`（leaf，零依赖） |
-| 批量子进程 | `batch/runner.ts`；调用方 `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、`routes/api/index.ts` 扫描入口 |
-| AirPlay ffmpeg + 节拍 | `services/airplay/control.ts:117`（spawn）、`raop.ts:616`（`while` 节拍循环）、`raop.ts:584`（sync `setInterval`） |
+| 通用渲染器宿主（fork / 握手 / 看门狗 / 退避重启） | `services/rendererHost/supervisor.ts:178`（`fork()` 调用点；import 在 `:21`） |
+| 常驻 fork 的业务入口 | `services/sendspin/child.ts`、`services/airplay/child.ts` |
+| 模式判定 | 通用 `services/rendererHost/mode.ts::isRendererForkMode()`；业务壳 `sendspin/mode.ts::isForkMode()`、`airplay/mode.ts::isAirPlayForkMode()`（均 leaf，零依赖） |
+| AirPlay 宿主接线 | `services/airplay/supervisor.ts`、`childMain.ts`、`sessionRuntime.ts`（纯推流运行时，零主进程态） |
+| 批量子进程 | `src/batch/runner.ts`；调用方 `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、`routes/api/index.ts:798`（扫描入口） |
+| AirPlay ffmpeg + 节拍 | `services/airplay/decoder.ts:52`（spawn）、`raop.ts:650`（`while` 节拍循环）、`raop.ts:618`（sync `setInterval`） |
 | DLNA 拉流 | `routes/rest/index.ts:1755`（字节代理 + Range，无重活） |
 | 转码 | `services/transcode.ts`（ffmpeg 子进程 + 并发槽） |
 | 封面 | `services/coverImage.ts:29`（`import("sharp")`，32MB 渲染缓存） |
@@ -112,11 +118,13 @@
 
 ### A. 已进程化且判断正确 —— 保持
 
-**A1. Sendspin 常驻子进程**（`supervisor.ts` + `child.ts` + `proxy.ts` + `ipcProtocol.ts`）
+**A1. Sendspin 常驻子进程**（业务侧 `child.ts` + `childMain.ts` + `proxy.ts` + `ipcProtocol.ts`；
+宿主为 `services/rendererHost/`）
 
 命中 G1（25ms 节拍）＋ G3（`libflacjs` WASM、`@discordjs/opus` 原生 addon 都在子进程内跑）。
 状态经快照镜像（150ms 节流 + 1s 兜底扫）、命令走 RPC —— 满足 G4。
 **结论：不动。** 注意 `CHANGELOG [3.0.34]` 写的「强制独立子进程」是准确描述。
+v3.0.39 已迁到通用宿主，行为不变（sendspin 全套 39 文件 / 221 用例零改动通过）。
 
 **A2. 批量任务一次性子进程**（`batch/runner.ts`）
 
@@ -135,30 +143,37 @@ ffmpeg 本身就是独立二进制，解码/转码的 CPU 天然在进程外。
 
 ---
 
-### B. 应进程化
+### B. 进程化候选（B1 已实施、待启用；B2/B3 待触发）
 
-**B1. AirPlay RAOP 推流（P1，最高优先级）**
+**B1. AirPlay RAOP 推流（P1 —— ✅ 已接入宿主，⏸ 默认关闭）**
 
 | 项 | 事实 |
 |---|---|
-| 节拍 | `raop.ts:616` `while (this.streaming && !this.destroying)`，每 chunk 352 帧 ≈ **7.98ms** |
-| 每 chunk 的工作 | JS 手写 ALAC 位打包（`pcm_to_alac_raw` 移植）＋ `createCipheriv("aes-128-cbc")` ＋ RTP 包封装 ＋ socket 发送 |
-| 位置 | **主进程**。ffmpeg 是子进程，但节拍循环、编码、加密、发送全在主进程 |
-| 已有的自证 | `raop.ts` 自己维护 `stats.reanchors`（「跟不上墙钟、立即追赶」的次数）与 `maxGapMs`，并在结束时打日志 |
+| 节拍 | `raop.ts:650` `while (this.streaming && !this.destroying)`，每 chunk `CHUNK_LEN`=352 帧（`raop.ts:28`）≈ **7.98ms** |
+| 每 chunk 的工作 | JS 手写 ALAC 位打包（`pcm_to_alac_raw` 移植，`raop.ts:105`）＋ `createCipheriv("aes-128-cbc")`（`:213`）＋ RTP 包封装 ＋ socket 发送 |
+| 位置 | **默认仍在主进程**；`MUSICFLOW_AIRPLAY_FORK=1` 时整条运行时（节拍 / 编码 / 加密 / 发送）在专属子进程 |
+| 已有的自证 | `RaopPlayer.realtimeStats` 暴露 `{chunks, reanchors, maxGapMs, elapsedMs, lossRequests}`；15s 周期打点，`reanchors > 0` 或 `maxGap > 50ms` 升级 `warn` |
 
-这是**与 Sendspin 完全同类的负载**（G1 甚至更紧：7.98ms vs 25ms），却留在主进程。
+这是**与 Sendspin 完全同类的负载**（G1 甚至更紧：7.98ms vs 25ms），起草时留在主进程。
 Web API 的一次长阻塞、一次 sharp 缩图、一次批量任务排队，都会直接体现为
 `reanchors++` / 真机断音。多设备同时投屏时是 N 条这样的循环并行。
 
-**建议**：进程化，且**复用 Sendspin 已经验证的那套宿主模式**（见 §4），不要另起一套。
-RPC 面比 Sendspin 小得多：cast / stop / pause / resume / seek / volume / mute / probe。
-DLNA 的 `createCastSession()` 只在**建会话时**需要（拿到 token 化 streamUrl 后传进子进程），
-不需要子进程碰 DB。
+**已实施（v3.0.39）**：复用 §4 抽出的通用宿主，未另起一套。AirPlay 的 RPC 面比 Sendspin 小：
+`cast` / `stop` / `stopAll` / `pause` / `resume` / `seek` / `setVolumeDb` / `snapshot`。
+DLNA 的 `createCastSession()` 只在**建会话时**由主进程调用（拿到 token 化 streamUrl 后传进子进程），
+子进程不碰 DB（`airplay/child.ts` 刻意**不做**数据层 bootstrap —— 它是纯协议推流）。
 
-**触发条件（满足任一即立项）**：
-1. 多设备同时 AirPlay 投屏时，`raop` 日志出现 `reanchors` 持续非零或 `maxGap` 抬升；
+**为什么默认关闭**：开发机没有 AirPlay 真机。`defaultFork` 若为 `true`，等于把一条**无法端到端
+验证**的路径直接推上生产。故与 Sendspin（`defaultFork: true`）不同，AirPlay 走显式开关；
+真机验证通过后把 `services/airplay/mode.ts` 的 `defaultFork` 翻成 `true` 即与 Sendspin 对齐。
+
+**启用触发条件（满足任一 → 把 `airplay/mode.ts` 的 `defaultFork` 翻 `true`）**：
+1. 多设备同时 AirPlay 投屏时，日志出现 `reanchors` 持续非零或 `maxGap` 抬升；
 2. AirPlay 投屏期间 Web API P95 延迟明显抬升（前端可感知的卡顿）；
 3. 投屏期间跑批量任务（扫描/推荐）会引发可复现的断音。
+
+（注：这三条原本是「**要不要立项做**进程化」的判据；进程化代码既已就位，现转为
+「**要不要默认启用**」的判据 —— 前两条现在可直接从 `realtimeStats` 的 15s 打点里读。）
 
 **B2. 封面渲染（sharp）（P2）**
 
@@ -167,9 +182,18 @@ DLNA 的 `createCastSession()` 只在**建会话时**需要（拿到 token 化 s
 
 但要注意：libvips 内部自带线程池，**它对事件循环的占用（G1/K3）其实很小**，
 所以这里的诉求**只是崩溃隔离**，不是节拍隔离。
-**建议**：优先下沉到 **worker 线程**（成本低得多，libvips 线程池照常工作）；
-只有当「worker 里跑原生 addon 仍会带走进程」被实测证实时，才升级为进程。
+
+**⚠️ 一个必须说清的边界**：**worker 线程挡不住段错误** —— 它与主线程共享同一进程、
+同一地址空间（这正是 §2 反模式「用 worker 线程冒充进程隔离」所指）。
+worker 能真正隔离的只有 **V8 堆**（独立 isolate + 独立 heap 上限）和**事件循环争抢**。
+所以本项的收益要如实描述：**下沉 worker ≠ 满足 G3**，它只是让 sharp 的解码内存不再进主 V8 堆；
+**要满足 G3（崩溃隔离）必须进程化。**
+
+**建议**：先做 worker（成本低、收益确定：堆隔离 + 事件循环解耦），但**不要把「已下沉 worker」
+当成崩溃隔离已解决** —— 一旦真出现段错误，直接跳到 P2' 进程化，不要在 worker 这层反复试。
 另需保留现有降级路径（`sharp` 缺失 → 回退原始字节），别把降级逻辑弄丢。
+顺带说明现有容错的边界：`coverImage.ts::getSharp()` 的 `try/catch` 只覆盖「**加载失败**」
+（`.node` 与运行时 ABI 不匹配等），**覆盖不了「跑起来之后崩」** —— 后者才是真风险。
 
 **B3. 插件沙箱进程化（P3，暂缓）**
 
@@ -217,19 +241,26 @@ DLNA 的 `createCastSession()` 只在**建会话时**需要（拿到 token 化 s
 ## 4. 最关键的一条：抽象通用「常驻渲染器子进程」宿主
 
 B1 和 A1 是**同构**的：都是「常驻子进程 + 快照镜像 + RPC 命令 + 崩溃退避重启 + 心跳看门狗」。
-Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore.ts` 这套写完了。
+Sendspin 早已把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` 这套写完了。
 
 **如果 AirPlay 直接复制一遍，就等于把最难维护的一块（IPC 契约 + 看门狗 + 退避重启）复制成两份
-且开始各自漂移。** 建议顺序：
+且开始各自漂移。** 实施顺序（**已于 v3.0.39 完成，见 §5 的 P1 / P1'**）：
 
-1. 先把 Sendspin 那套**抽出通用层**（建议 `services/rendererHost/`）：
+1. ✅ 先把 Sendspin 那套**抽出通用层** `services/rendererHost/`（8 个文件）：
    - `supervisor`：fork / mainReady 握手 / 心跳看门狗 / 退避重启 / 优雅 stop；
-   - `proxy`：`getXxxFront()` 的镜像代理 + 类型哨兵（`AssertServerLike` 的思路可直接复用）；
-   - `ipcProtocol`：`req/res` 按 id 回填 + 快照节流推送的**通用信封**，业务载荷各自定义。
-2. 让 Sendspin **先切到通用层**（行为不变，靠现有测试守住：`childMain.test.ts` 8 例等）。
-3. 再把 AirPlay 接上去。
+   - `childHost`：子进程侧的 `req→res` 按 id 回填 + 快照节流 + 心跳 + stop 生命周期；
+   - `ipcProtocol`：**通用信封** + 常量（业务载荷用交叉类型承载，消息运行时形状与重构前完全一致）；
+   - `mode`：三态 `isRendererForkMode`（child / in-proc / fork，只有默认值不同）；
+   - `front`：`createFrontAccessor`（fork→代理、in-proc→真实实例）+ `AssertImplements` 类型哨兵
+     + `rpcFireAndForget`；
+   - `childBootstrap` / `paths`：子进程数据层装配、子进程入口路径解析（prod `.js` / dev `.ts`）；
+   - `index.ts` 顶部写明「**新接渲染器六步清单**」（为 airplay2 / cast / roon 铺路）。
+     注：起草时提到的 `playerCore.ts` **并未进通用层** —— 它是 sendspin 的业务实现，不属于宿主。
+2. ✅ 让 Sendspin **先切到通用层**（行为不变，靠现有测试守住：`childMain.test.ts` 8 例等）。
+3. ✅ 再把 AirPlay 接上去。
 
 **顺序不能颠倒**：先抽象再迁移，比先复制再合并便宜得多（后者要同时改两处已验证的行为）。
+实测这条判断成立 —— 迁移 Sendspin 时全套 39 文件 / 221 用例**零改动**通过，等价性有据可依。
 
 ---
 
@@ -240,7 +271,7 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 | **P0**（✅ 已完成） | Sendspin fork 隔离；批量子进程；转码并发槽 | — | — |
 | **P1**（✅ 已完成，v3.0.39） | 抽通用渲染器子进程宿主 `services/rendererHost/` + Sendspin 迁移 | 已做（纯重构，行为不变） | — |
 | **P1'**（✅ 代码就位，⏸ 默认关闭） | AirPlay 接入宿主 | 代码已落地；生产启用需 `MUSICFLOW_AIRPLAY_FORK=1`，真机验证后把 `airplay/mode.ts` 的 `defaultFork` 翻 `true` | P1 |
-| **P2** | sharp 下沉 worker 线程 | 出现一次 sharp 相关崩溃即做 | 无 |
+| **P2** | sharp 下沉 worker 线程（只解耦堆与事件循环，**不满足 G3** —— 见 §3 B2） | 出现一次 sharp 相关崩溃即做 | 无 |
 | **P2'** | sharp 升级为进程 | worker 中崩溃仍带走进程（实测） | P2 |
 | **P3** | 插件沙箱进程化 | §3 B3 三条触发条件任一命中 | 有实测数据 |
 
@@ -269,7 +300,7 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 | 4 | **内存可归**：长跑后子进程退出，峰值 RSS 归还 OS（G2 的核心诉求） |
 | 5 | **无 DB 反向依赖**：子进程不新开 SQLite 连接 |
 | 6 | **日志同汇**：stdio 继承，`docker logs` 排障路径不变 |
-| 7 | **门禁全绿**：`tsc` / `check-i18n` / 7 项静态检查 / 全量 vitest / 前端 build |
+| 7 | **门禁全绿**：`tsc` / 8 项静态检查（含 `check-renderer-host.mjs`）/ 全量 vitest / 前端 build |
 
 ---
 
@@ -277,7 +308,8 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 
 起草时的现状：对 7 个 `check-*.mts|mjs` + 8 个 workflow 搜
 `spawn|child_process|独立进程|子进程|转码|解码|transcode|ffmpeg|decode` → **0 命中**，
-即「重活落独立进程」只是惯例，CI 一行都不拦。两项补齐均已完成：
+即「重活落独立进程」只是惯例，CI 一行都不拦。两项补齐均已完成（现共 **8 个 check 脚本**，
+加 `check-renderer-host.mjs`）：
 
 **① ✅ fork 路径冒烟测试**
 
@@ -312,15 +344,19 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 
 ---
 
-## 附：本次核查的证据清单
+## 附：本次核查的证据清单（**起草时快照 —— 行号刻意不随重构校正**）
 
-| 断言 | 证据 |
-|---|---|
-| 主进程侧只有 2 条 fork 线 | `grep -rn "fork(" backend/src` → 仅 `sendspin/supervisor.ts:161`；批量在 `batch/runner.ts` |
-| AirPlay 节拍在主进程 | `airplay/raop.ts:616` `while` 循环 + `:584` sync `setInterval` + `:117` spawn |
-| AirPlay 进程内加密/ALAC | `raop.ts:91`（`pcm_to_alac_raw` 移植）、`:199` `createCipheriv` |
-| Sendspin 原生/WASM 在子进程 | `sendspin/encoding.ts:20`（`@discordjs/opus`）、`server.ts:160`（libFLAC） |
-| sharp 在主进程 | `coverImage.ts:29` `await import("sharp")` |
-| DLNA 无重活 | `routes/rest/index.ts:1755`（Range 字节代理） |
-| 批量任务全覆盖 | `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、扫描路由 `runBatchJob("scan", …)` |
-| 无进程相关门禁（起草时） | 7 个 check 脚本 + 8 个 workflow 关键词扫描 0 命中；**v3.0.39 起已由 `check-renderer-host.mjs` 兜住**（见 §7） |
+> ⚠️ 下表记录的是 2026-09-19 起草时的实测位置，用途是保留「当时是怎么核出来的」这层证据，
+> 所以**不随后续重构更新**。要看现行位置请查 §1 的「关键代码位置」表；
+> 右列仅作对照，方便理解重构把哪些东西搬到了哪里。
+
+| 断言 | 证据（起草时） | 现行位置（对照） |
+|---|---|---|
+| 主进程侧只有 2 条 fork 线 | `grep -rn "fork(" backend/src` → 仅 `sendspin/supervisor.ts:161`；批量在 `batch/runner.ts` | `rendererHost/supervisor.ts:178`；`src/batch/runner.ts` |
+| AirPlay 节拍在主进程 | `airplay/raop.ts:616` `while` 循环 + `:584` sync `setInterval` + `:117` spawn | `raop.ts:650` / `raop.ts:618` / `decoder.ts:52` |
+| AirPlay 进程内加密/ALAC | `raop.ts:91`（`pcm_to_alac_raw` 移植）、`:199` `createCipheriv` | `raop.ts:105` / `raop.ts:213` |
+| Sendspin 原生/WASM 在子进程 | `sendspin/encoding.ts:20`（`@discordjs/opus`）、`server.ts:160`（libFLAC） | `encoding.ts:20`（未变）/ `server.ts:158`（预热调用点） |
+| sharp 在主进程 | `coverImage.ts:29` `await import("sharp")` | 未变 |
+| DLNA 无重活 | `routes/rest/index.ts:1755`（Range 字节代理） | 未变 |
+| 批量任务全覆盖 | `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、扫描路由 `runBatchJob("scan", …)` | 同上；扫描入口 = `routes/api/index.ts:798` |
+| 无进程相关门禁（起草时） | 7 个 check 脚本 + 8 个 workflow 关键词扫描 0 命中；**v3.0.39 起已由 `check-renderer-host.mjs` 兜住**（见 §7） | 现共 8 个 check 脚本 |

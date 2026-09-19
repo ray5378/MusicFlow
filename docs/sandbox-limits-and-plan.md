@@ -1,6 +1,7 @@
 # 沙箱限制全景审计 + 插件能力增强完整方案
 
-> 状态：**P0 + P1 已实施（v1.7.39，2026-08-14 完成）**；P2/P3 按需排期。当前主项目 v1.13.42（批量任务已统一进一次性子进程，见 SPEC §1.3）。
+> 状态：**P0 + P1 已实施**（P0 随 v1.7.39、P1 随后一并落地）；**P2 / P3 均未做**，按需排期。当前主项目主线 **v3.0.x**（批量任务已统一进一次性子进程，见 SPEC §1.3）。
+> **2026-09-19 复核（对照现网代码）**：P1-1 `MAX_DEFERS` 现值 **256**；P1-2 `host.songs.list` limit 上限 **2000**；P1-3 `host.http` 响应上限 **20MB**（`discovery.ts` 的 `MAX_BODY`）；P1-5 `playlistSync` 单例陷阱已修。**P3 的「沙箱进程化」只落地了一半**：`manifest.longRunning` 声明的方法已挪进独立 **worker 线程**（`plugins/sandboxWorker.ts`）—— 那是**线程隔离而非进程隔离**（只隔离 V8 堆与事件循环，峰值内存不归还 OS）；「可长驻的 worker **进程**」仍是未做项，详见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。
 > 配套插件开发文档见 [`PLUGIN_DEV.md`](./PLUGIN_DEV.md)（含能力→方法白名单与 `stream` 必声明说明）。
 > 触发背景：go-music-dl 私人歌单同步 / ListenBrainz 推荐生成在生产环境反复「15s 超时」失败（`timeout of 15000ms exceeded`），定位为沙箱单次调用配额与前端 axios 超时双重限制叠加，且部分平台走非国内网络（joox/bilibili/apple/ListenBrainz/MusicBrainz）单请求极慢。
 
@@ -22,7 +23,8 @@ const CAP_METHODS = {
   scrobbler: ["onPlay", "onScrobble"], artistInfo: ["fetchArtistInfo"],
   playlistImport: ["canHandle", "fetchPlaylist"], playlistFile: ["canHandleFile", "parseFile"],
   dailyPlaylist: ["runDailyJob"], localPlaylist: ["runDailyJob"],
-  recommendPlaylist: ["runDailyJob"], playlistSync: ["runSyncJob"],
+  recommendPlaylist: ["runDailyJob", "recommend"], playlistSync: ["runSyncJob"],
+  localPlatformRecommend: ["runDailyJob", "recommendLocal"], playlistCleanup: ["runDailyJob"],
   // ...
 };
 function makeImpl() {
@@ -43,13 +45,13 @@ function makeImpl() {
 - **播放类插件必须声明 `stream` capability**，否则 impl 上没有 `streamUrl`，核心在 `/rest/stream-remote` 调 `cfg.provider.streamUrl(...)` 会抛 **`streamUrl is not a function`**（`catch` 后返回「streamUrl is not a function」），前端/HA 卡片「搜索即播」直接失败。
 - 同一规则适用于全部 capability：声明 `lyricProvider` 才有 `searchLyrics`，声明 `recommendPlaylist` 才有 `runDailyJob`，声明 `albumSearch` 才有 `searchAlbums`。
 - **测试桩也受此约束**：任何要验证播放（`stream-remote` / 在线源「搜索即播」）的桩插件，`manifest.capabilities` 必须含 `stream` 且 `create(host)` 必须返回 `streamUrl`；否则会得到「is not a function」而非「插件未实现」。
-- 校验脚本 `scripts/check.mjs` 会反向警告「有方法但没声明能力」，但**不会**拦截「声明了能力却因缺失 capability 而方法未暴露」——后者只在运行时表现为调用失败。能力与方法必须成对声明。
+- 插件仓库的校验脚本 `scripts/check.mjs`（`MusicFlow-plugins` 仓）会反向警告「有方法但没声明能力」，但**不会**拦截「声明了能力却因缺失 capability 而方法未暴露」——后者只在运行时表现为调用失败。能力与方法必须成对声明。
 
 ---
 
 ## 一、问题链回顾（为什么要做）
 
-1. 沙箱 `INVOKE_TIMEOUT_MS=15000`（`backend/src/plugins/sandbox.ts:27`）对**所有方法**一刀切：`search`/`searchLyrics` 与 `runDailyJob`（批量同步几十个歌单）共用同一预算。
+1. 沙箱 `INVOKE_TIMEOUT_MS=15000`（`backend/src/plugins/sandbox.ts`，起草时 :27、现 :30）对**所有方法**一刀切：`search`/`searchLyrics` 与 `runDailyJob`（批量同步几十个歌单）共用同一预算。
 2. 批量任务本质分钟级，15s 只够同步 ~15 个优化过的歌单或完成 ~4 次在线补全 → 被强杀，且**在途 await 一并中断**，插件必须靠持久化游标抢救进度。
 3. 前端 axios 全局 `timeout: 15000`（`frontend/src/api/index.ts:5`）→ 即使后端压线返回，HTTP 请求也已断开，用户看到 `timeout of 15000ms exceeded`。
 4. 插件侧已做的兜底（go-music-dl v1.2.8 分批滚动 + 后台 auto-match；listenbrainz v1.5.4 补全预算闸）**能用但慢**：一次刷新只能推进一批，全量需多次点击或等 3~5 天。
@@ -67,7 +69,7 @@ function makeImpl() {
 
 | # | 限制 | 现状 | 影响 | 度 |
 |---|---|---|---|---|
-| A1 | 单次调用超时 | `INVOKE_TIMEOUT_MS=15000` 全方法一刀切（sandbox.ts:23） | 批量任务（同步/生成歌单）差一个数量级；交互调用其实够用 | 🔴 |
+| A1 | 单次调用超时 | `INVOKE_TIMEOUT_MS=15000` 全方法一刀切（sandbox.ts，起草时 :23、现 :30；现已由 `manifest.longRunning` 分档） | 批量任务（同步/生成歌单）差一个数量级；交互调用其实够用 | 🔴 |
 | A2 | 超时杀死模型 | 墙钟到点即中断**在途 await**（evalAsync 循环 `Date.now()-t0 < INVOKE_TIMEOUT_MS`），不区分 CPU 空转与等网络 | 插件「等慢请求」也被判死刑，被迫游标持久化 | 🔴 |
 | A3 | 同步方法 | `invokeSync`（streamUrl/lyricUrl/canHandle/canHandleFile）同 15s 且必须纯同步 | 契约合理（URL 构造不应等网络） | 🟢 |
 | A4 | MB 限流兼容 | 沙箱无 setTimeout → 插件只能用忙等 sleep（listenbrainz `mbSleep` 1.1s spin） | 忙等 CPU 空转仍占预算且浪费 CPU | 🟡 |
@@ -217,14 +219,14 @@ longRunning: { runDailyJob: 120000 }
 | P1 | 1.7.40 | — | 并发/数据接口回归 |
 | P2 | 1.8.x | — | 调度回归 |
 
-- 主项目发版流程照常：CI（check-core + 测试）→ tag → Release（addon 同步需用户明确授权）。
+- 主项目发版流程照常：push main + `v*` tag → CI（8 项静态检查 + `tsc --noEmit` + 全量 vitest）→ 自动构建镜像并创建 GitHub Release。**（HA 加载项仓库已于 2026-09-10 停用删除，「addon 同步」这一步不存在了。）**
 - 插件发版照常：`scripts/check.mjs` → `pack.sh` → commit + tag + gitee/GitHub 双端推送。
 
 ## 五、风险与回退
 
 | 风险 | 说明 | 对策 |
 |---|---|---|
-| 长任务占沙箱 | 恶意/异常插件可长占 VM | `longRunning` 上限 300s + jobRunner per-plugin 串行锁 + 仅对声明方法生效 |
+| 长任务占沙箱 | 恶意/异常插件可长占 VM | `longRunning` 上限 **600s**（`JOB_TIMEOUT_CAP_MS=600000`）+ jobRunner per-plugin 串行锁 + 仅对声明方法生效 |
 | 软中断（P1-4） | 连环 host 调用可能让墙钟失效 | 保守实现：仅在「有在途 await 且是 job 方法」时续期，且续期总上限=预算；CPU 空转仍按预算杀 |
 | jobRunner 状态膨胀 | 内存 Map 存结果 | 只存最近 1 条（或 TTL 清理，复用 matchJobs 的 30min sweep 模式） |
 | 插件 minAppVersion 门控 | 老后端忽略 longRunning → 退化 15s | 插件 bump minAppVersion，老后端明确拒绝加载（而非静默退化） |
@@ -243,5 +245,5 @@ longRunning: { runDailyJob: 120000 }
 7. [x] 主项目版本 1.7.39 发版（commit 707f273 + tag v1.7.39 已推送；GitHub Release 发布与 addon 同步待用户授权）
 8. [x] 插件仓发版（check/pack/commit/tag/双端推送：go-music-dl-v1.2.9、listenbrainz-v1.5.5）
 9. [x] P1：MAX_DEFERS 256 / songs.list 2000 / http 20MB 护栏 / playlistSync 单例陷阱修复（随 v1.7.39 一并落地）
-10. [ ] P2 按需排期（任务节律 manifest 化 / 大 upsert 分块 / WS 进度事件）
-11. [ ] P3 按需排期（市场 UI 徽标 / 失败重试 / worker 进程化沙箱）
+10. [ ] P2 按需排期（任务节律 manifest 化 / 大 upsert 分块 / WS 进度事件） —— 2026-09-19 复核：**仍未做**。
+11. [ ] P3 按需排期（市场 UI 徽标 / 失败重试 / worker 进程化沙箱） —— 「长耗时方法挪出主线程」已以 **worker 线程**形式落地；「常驻 **worker 进程**」仍未做（见头部 2026-09-19 复核）。

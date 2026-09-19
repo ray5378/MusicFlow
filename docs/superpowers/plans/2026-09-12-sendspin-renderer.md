@@ -1,6 +1,8 @@
 # Sendspin 渲染器插件实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **⏳ 历史快照（2026-09-19 标注）**：本文是当时的一次性计划 / 设计稿，对应任务**已完成**，**不是现行规范**。落地后的真实形态以代码为准：架构总览见 `docs/DEVELOPER.md`，进程 / 隔离模型见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。请勿按本文直接施工。
 
 **Goal:** 让 MusicFlow 作为一个完整对齐 Music Assistant 的 **Sendspin Server**（`ws://:38927/sendspin` + mDNS），支持全角色(player/source/controller/metadata/artwork/visualizer/color)、三配对法、多房样本级同步、每客户端独立 opus/flac/pcm 编码、每播放器 DSP 音量，让 Xbox/Android App/硬件音箱直接发现并点播 MusicFlow 曲库。
 

@@ -4,6 +4,8 @@
 - 分支：`dev`（本交接基于当前工作分支 `trae/agent-qcz6Nv` 的已提交代码创建）
 - 仓库：`github.com/ray5378/MusicFlow`
 - 关联设计：`docs/superpowers/specs/2026-09-12-sendspin-renderer-design.md`、`docs/superpowers/plans/2026-09-12-sendspin-renderer.md`
+>
+> **⏳ 历史快照（2026-09-19 标注）**：本文基于 2026-09-13 的 `dev` 分支。此后 Sendspin 渲染器已落到 `services/sendspin/`，并在 **v3.0.34** 整体迁入**常驻子进程**（supervisor + IPC + 心跳看门狗 + 退避重启）、**v3.0.39** 起改用通用渲染器宿主 `services/rendererHost/`。**文中「剩余差距 / 下一步该做什么」已不代表当前状态。**
 
 > 本文档是**任务进度交接**，不是最终交付报告。它如实记录：目标、已完成的验证、现行代码与真实
 > aiosendspin 协议之间的**剩余差距**、下一步该做什么、以及每一步的**验证方式**。接收人据此可直接继续。

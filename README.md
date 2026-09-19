@@ -53,9 +53,9 @@ networks: {}
 |------|------|
 | 音乐库管理 | 本地音乐扫描、在线音乐源（QQ / 网易云等）、多音质切换、流回退、来源徽标、同曲多源归组与本地曲库优先 |
 | 歌单 | 创建管理、每日推荐、本地推荐、歌单导入/同步、歌单同步至在线平台 |
-| 播放 | DLNA 投屏、群组播放、AirPlay、歌词与封面展示、播放历史 |
+| 播放 | DLNA 投屏、群组播放、AirPlay、Sendspin（ESPHome 等设备直连推流）、歌词与封面展示、播放历史 |
 | 兼容性 | **OpenSubsonic 兼容**，支持 箭头音乐(强烈推荐) / Symfonik / DSub / 音流等第三方客户端连接 |
-| 插件 | 九类插件能力，外置插件运行在 QuickJS 沙箱中，安全隔离 |
+| 插件 | 九类插件能力；外置插件跑 QuickJS 沙箱（主线程 VM / longRunning 走 worker 线程 / 批量任务走一次性子进程） |
 | 首页展示 | 插件驱动首页卡片，每日推荐、本地推荐、今日漫游等 |
 
 ## 客户端
@@ -89,7 +89,7 @@ networks: {}
   - 客户端 / 卡片在入队前还按 `sources[0]` 再选一次，双保险；
 - **封面回退链**：歌曲自带封面（`so-<id>`）→ 专辑封面（`al-<albumId>`），专辑无封面时 `getCoverArt` 取同专辑首个带封面曲目，成员行与主行同规则。
 
-分组规则调整后需对存量数据重算分组（`scripts-local/regroup-songs.cjs` 模式），见发布记录。
+分组规则调整后需对存量数据重算一次分组（一次性本地脚本，用完即删，故不随仓库分发），见对应发布记录。
 
 ## 文档导航
 
@@ -100,13 +100,17 @@ networks: {}
 | [API 参考](docs/API.md) | 对接集成的开发者 |
 | [服务端预探测](docs/PRE_PROBE.md) | 想了解「三条链路共用一套判活/跳源」的人 |
 | [播放换源](docs/SOURCE_SWAP.md) | 想了解多源自动替换匹配规则的人 |
+| [进程模型与隔离规划](docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md) | 想了解主/子进程边界与「该不该进程化」判定标准的人 |
+| [插件沙箱限制](docs/sandbox-limits-and-plan.md) | 想了解沙箱能力边界与已知限制的人 |
 | [开发指南](docs/DEVELOPER.md) | 扩展/修改本项目的开发者 |
 | [贡献指南](CONTRIBUTING.md) | 想提交代码的开发者 |
 | [插件市场仓库](https://github.com/ray5378/MusicFlow-plugins) | 想发布插件的人 |
 
 ## 镜像
 
-打 `v*` tag 时 CI 自动构建到（仅 **linux/amd64**）：
+打 `v*` tag 时 CI 自动构建推送（仅 **linux/amd64**）并创建 GitHub Release：
 
-- `ghcr.io/ray5378/musicflow:<版本>`
-- `ghcr.io/ray5378/musicflow:latest`
+| Registry | 地址 |
+|------|------|
+| Docker Hub | `ray5378/musicflow:<版本>`、`ray5378/musicflow:latest` |
+| GHCR | `ghcr.io/ray5378/musicflow:<版本>`、`ghcr.io/ray5378/musicflow:latest` |

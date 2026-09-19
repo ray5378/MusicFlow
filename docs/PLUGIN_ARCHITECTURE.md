@@ -2,15 +2,24 @@
 
 > 版本：基于 MusicFlow 复制基线（v1.1.29）重构
 > 目标：把内置的 `go-music-dl` 从「深度耦合」改造成「真正的插件」，核心代码不再写死任何具体在线源实现；并搭建一套可扩展的统一插件框架，为后续把「歌单导入 / 每日推荐 / 歌单同步」也插件化预留接口。
+>
+> **⏳ 本文性质（2026-09-19 标注）**：这是**插件化改造的设计记录 + 分阶段进度台账**，起点为 v1.1.29 复制基线。**第 4 节的类型/能力清单与第 7 节的完成度数字都是起草时的快照**，此后已随迭代扩充：
+>
+> - `PluginType` 由 4 种扩到 **10 种**：新增 `lyrics` / `cover` / `renderer` / `scrobbler` / `artist` / `core`；
+> - `PluginCapability` 由 6 项扩到 **约 25 项**：新增 `playlistSearch` / `songSearch` / `artistSearch` / `albumSearch` / `localPlatformRecommend` / `comboPlaylist` / `playlistCleanup` / `lyricProvider` / `coverProvider` / `renderer` / `scrobbler` / `artistInfo` + 5 项 core 能力；
+> - 内置插件由 8 个长到 **18 个**；内置 source 插件已清零（`go-music-dl` 改回**外置**分发，走官方注册表 / 市场安装）；
+> - OpenSubsonic `/rest` 端点为 **51 个**；插件运行时已由「in-process 契约」升级为 **QuickJS/WASM 真沙箱**（见 §9.4）。
+>
+> **现行契约的唯一真相源是代码**：`backend/src/plugins/types.ts`（类型 / 能力）、`backend/src/plugins/sandbox.ts` 的 `CAP_METHODS`（能力 → impl 方法）、`backend/src/plugins/host.ts` 的 `KNOWN_PERMISSIONS`（权限白名单）；面向插件作者的手册见 `docs/PLUGIN_DEV.md`。**本文与代码冲突时一律以代码为准。**
 
 > **定位（2026-08-12 明确）**：**MusicFlow 完整实现音乐服务器的功能与逻辑，并以插件化解耦**。
 > 即：核心不再写死任何具体在线源 / 平台实现，而是作为 HA
 > 加载项（addon）+ 集成（hass-musicflow）+ 卡片（hass-musicflow-card）这条主链路的内核。
 > 已核实的兼容性基线：
 >
-> - 原生 `/v1` API：在 OpenSubsonic 兼容之上额外提供 8 个插件端点
+> - 原生 `/v1` API：在 OpenSubsonic 兼容之上额外提供插件管理 / 市场 / 健康等端点（清单见 `docs/API.md`）
 >
-> - OpenSubsonic `/rest`：46 端点完整兼容（品牌、失败体、getAvatar/setRating/savePlayQueue 等均合规）
+> - OpenSubsonic `/rest`：51 端点完整兼容（品牌、失败体、getAvatar/setRating/savePlayQueue 等均合规）
 >
 > - HA 链路：addon 构建自 `ghcr.io/ray5378/musicflow`；集成/卡片契约逐项 e2e 通过
 
@@ -120,8 +129,10 @@
 ### 4.1 `plugins/types.ts`（新增，统一 Manifest）
 
 ```ts
+// ⚠️ Phase 0 快照（当时 4 种）；现行 10 种 —— 见 types.ts 与本文顶部说明。
 export type PluginType = "source" | "importer" | "recommender" | "sync";
 
+// ⚠️ Phase 0 快照（当时 6 项）；现行约 25 项 —— 以 types.ts 为准。
 export type PluginCapability =
   | "search"          // 支持在线搜索
   | "recommend"       // 支持每日推荐歌单
@@ -133,6 +144,7 @@ export type PluginCapability =
 export interface ConfigField {
   key: string;
   label: string;
+  // ⚠️ Phase 0 快照；现行另含 "playlist-multi"（参考歌单多选）与 "candidate-list"（推荐榜单编辑行）。
   type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch";
   required?: boolean;
   default?: unknown;
@@ -260,7 +272,7 @@ Phase 0 + 1 全部完成；**Phase 2 全量插件化已收口（v1.5.0）**。�
 | `db/index.ts` 硬编码平台榜单种子                                      | 迁移为 `daily-recommend` 插件内部 `DEFAULT_CANDIDATES`，`loadCandidates()` 无配置时 fallback     |
 | `scraper/artist.ts` 写死 QQ/网易云抓取                              | 新增**内置插件** **`artist-info`**（新类型 `artist`、新能力 `artistInfo`，QQ 优先网易云兜底），核心按能力遍历       |
 
-新增能力/类型：`artist`（PluginType）、`artistInfo`（capability，方法 `fetchArtistInfo`）。内置插件增至 **8 个**。
+新增能力/类型：`artist`（PluginType）、`artistInfo`（capability，方法 `fetchArtistInfo`）。内置插件增至 **8 个**（**现为 18 个**，见本文顶部说明）。
 核心访问内置插件能力的唯一路径：`getEnabledByCapability(...)` / `services/pluginAccess.ts` 门面——`check-core.mts` 规则 B 强制。
 
 ### 7.2 Phase 2（全量插件化：importer / recommender / sync / artist）
@@ -389,7 +401,7 @@ Phase 0 + 1 全部完成；**Phase 2 全量插件化已收口（v1.5.0）**。�
 
 ## 9. OpenSubsonic 服务端与 HA 主链路（2026-08-12 收口）
 
-### 9.1 OpenSubsonic 服务端（`routes/rest/index.ts`，46+ 端点）
+### 9.1 OpenSubsonic 服务端（`routes/rest/index.ts`，51 端点）
 
 MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenSubsonic 扩展），
 第三方客户端（Symfonik / DSub / MA / libopensonic）可直接连接播放曲库。本轮（v1.2.0）完整化：
@@ -432,7 +444,8 @@ MusicFlow 同时作为 **OpenSubsonic 服务端**（Subsonic API v1.16.1 + OpenS
   **workflow\_dispatch 手动触发也自动构建** **`:latest`**（版本号由 git describe 自动生成，
   无需手动指定升级版本）并附 `:main` 便于回溯；镜像仅 amd64（账号无 ARM runner）。
 
-- 发版流程：MusicFlow 打新 tag → addon 的 `build.yaml` build\_from + `config.yaml` version 同步 → addon 仓库发版。
+- 发版流程：**只打 MusicFlow 的 `v*` tag** —— `build-and-push` 出 `ghcr.io/ray5378/musicflow:<版本>` + `:latest`，并自动建 GitHub Release。
+- ~~addon 的 `build.yaml` / `config.yaml` 同步发版~~ —— HA 加载项仓库已于 2026-09-10 停用删除（见 §9.2 注），此步骤**不再存在**。
 
 ### 9.4 外置插件 QuickJS 沙箱（v1.3.0）
 

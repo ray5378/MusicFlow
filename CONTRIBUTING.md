@@ -7,7 +7,7 @@
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| Node.js | ≥ 20（推荐 22 LTS） | `backend` 与 `frontend` 均需要 |
+| Node.js | ≥ 22（LTS） | `backend` 与 `frontend` 均需要；Docker 基线为 `node:22-alpine` |
 | npm | ≥ 10 | — |
 | Python（可选） | — | 仅个别测试/脚本用 |
 
@@ -43,7 +43,7 @@ DATA_DIR=<data目录> node dist/index.js   # 先 npm run build 出 dist
 ```bash
 cd backend
 npx tsc --noEmit          # 后端类型检查，必须 0 错
-npx vitest run            # 全量测试（当前 218 用例，含 OpenSubsonic 路由级、插件沙箱专项）
+npx vitest run            # 全量测试（当前 155 文件 / 1165 用例，约 3.5 分钟）
 
 cd frontend
 npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
@@ -56,20 +56,34 @@ npx vue-tsc --noEmit      # 前端类型检查，必须 0 错
 
 - **TypeScript strict**：新增代码必须类型完整（禁 `any` 滥用，确需时加注释说明）。
 - **路由分层**：`routes/` 只做参数解析/鉴权/响应；业务逻辑在 `services/`。
-- **插件化铁律**：核心代码**禁止写死任何 providerId / 平台字符串**。加平台 = 写插件（见 `docs/PLUGIN_DEV.md`）。CI 强制校验：`backend/scripts/check-core.mts`（核心不越界，新增越界零容忍）+ `check-builtins.mts`（内置插件 manifest 规范）。
-- **DB 变更**：改 `db/schema.ts`（drizzle）时，同步改 `db/index.ts` 的 `CREATE TABLE IF NOT EXISTS`（无迁移框架，旧库靠 IF NOT EXISTS 自动补齐）；两者必须一致。
+- **插件化铁律**：核心代码**禁止写死任何 providerId / 平台字符串**。加平台 = 写插件（见 `docs/PLUGIN_DEV.md`）。
+- **进程隔离红线**：硬实时推流运行时必须挂在 `services/rendererHost/` 上；批量任务必须在一次性子进程里跑
+  （`SPEC.md` §1.3）。不要在 `services/` 下自建 `child_process.fork`。
+- **CI 静态守卫（8 项，必须全绿）**：`check-builtins.mts`（内置插件 manifest 规范 / 能力白名单）、
+  `check-core.mts`（核心不越界，新增越界零容忍）、`check-frontend-plugins.mjs`、`check-frontend-overlays.mjs`、
+  `check-element-overrides.mjs`、`check-fixed-playlist-ids.mjs`、`check-i18n.mjs`（zh/en 键对齐 + 源码无硬编码中文）、
+  `check-renderer-host.mjs`（渲染器必须接通用宿主；节拍循环必须落在本业务 child 闭包内）。
+- **DB 变更**：改 `db/schema.ts`（drizzle）时，同步改 `db/index.ts` 的 `CREATE TABLE IF NOT EXISTS`，两者必须一致。
+  **本项目自用，不写向后兼容的迁移代码** —— 新增字段直接改建表语句，老库自行重建；
+  `ALTER TABLE ... ADD COLUMN` 补列、「旧字段继承」这类逻辑已全部移除，不要再加回来。
 - **错误处理**：`/rest`（OpenSubsonic）失败体用 `status:"failed"` + 错误码（40/50/70/10/0）；原生 `/v1` 失败体返回 `{ error }` 字符串或 `{ success:false, error }`，不抛 500。
 
 ## 提交规范
 
 - 提交信息：`<type>(<scope>): <subject>`，如 `feat(plugins): ...` / `fix(rest): ...` / `docs: ...` / `ci: ...`。
 - 消息含 `${...}` 时用**单引号**包住，避免 bash 展开。
-- 发版：改完推 `main` → 本地 `git tag v<版本>` 并推送 → CI 构建镜像 `ghcr.io/ray5378/musicflow:<版本>`（仅 amd64）→ 建 GitHub Release（正文「变更」由 `scripts/gen-changelog.sh` 按提交类型自动分组生成，无需手写；本地可先跑 `bash scripts/gen-changelog.sh` 预览）。详细见 `~/.workbuddy/skills/musicflow-release/SKILL.md`。
+- 发版：改完推 `main` → `git tag v<版本>` 并推送 → CI 构建镜像（`ray5378/musicflow:<版本>` +
+  `ghcr.io/ray5378/musicflow:<版本>`，仅 amd64）并自动创建 GitHub Release（正文「变更」由
+  `scripts/gen-changelog.sh` 按提交类型自动分组生成，无需手写；本地可先跑 `bash scripts/gen-changelog.sh` 预览）。
 
 ## 文档规范
 
-- 改代码/发版后，**同步更新** `README.md`（版本配套表、镜像、能力说明）与 `docs/` 下相关文档——版本号、测试数、端点清单最易脱节，提交前 grep 一遍旧版本号。
+- 改代码/发版后，**同步更新** `README.md` 与 `docs/` 下相关文档 —— **测试用例数、端点个数、
+  内置插件数、表数量**最易脱节，提交前 grep 一遍旧数字与旧版本号。
+- README **不再维护「主项目 ↔ 插件版本配套表」**（版本各自独立演进），只保留镜像与能力说明。
 - 插件相关改动同步更新 `docs/PLUGIN_DEV.md`（host.* 表、权限白名单、示例）与插件仓库。
+- `docs/` 下**带日期的交班/排查记录属于历史快照**，不随代码更新；要写现状请改
+  `DEVELOPER.md` / `SPEC.md` / `PLUGIN_ARCHITECTURE.md` / `PLUGIN_DEV.md` 这类活文档。
 - 新增能力时在 README 补一句，并保持 README 与插件仓库 README 的跳转链接闭环。
 
 ## PR 流程

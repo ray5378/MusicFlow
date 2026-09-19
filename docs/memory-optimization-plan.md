@@ -2,6 +2,13 @@
 
 > 依据：2026-08-13 对主项目前后端的三轮内存分析（初查 → 二次确认 → 源码级终核）。
 > 范围：仅内存治理，不涉及任何 API/功能变更。
+>
+> **✅ 执行状态（2026-09-19 复核）：三项全部已落地。**
+> - **必做项**（前端 `peer_unavailable` 补 `removeRemoteState`）：已落地 —— `frontend/src/stores/player.ts` 的 `peer_unavailable` 分支末尾调用 `removeRemoteState(p.peerId)`；客户端实例另经 `dropCurrentIfStaleLocal()` 做同款收尾。
+> - **可选项 A**（`matchJobs` TTL 清理）：已落地 —— `backend/src/routes/api/online.ts` 的 `MATCH_JOB_TTL_MS` + `matchJobsSweep`，同时覆盖 `batchMatchJobs`。
+> - **可选项 B**（`SongTable` 虚拟滚动）：已落地，且**未引入 `vue-virtual-scroller`**，而是自实现窗口化（`frontend/src/components/SongTable.vue` 的 `virtualized` / `VIRTUAL_THRESHOLD` / `recomputeWindow`）。
+>
+> 下文保留为当时的分析与设计记录（行号已随迭代变化，仅供参考）。
 
 ---
 

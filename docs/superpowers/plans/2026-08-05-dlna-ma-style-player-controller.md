@@ -1,6 +1,8 @@
 # DLNA MA 式上层 Player Controller 重构实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **⏳ 历史快照（2026-09-19 标注）**：本文是当时的一次性计划 / 设计稿，对应任务**已完成**，**不是现行规范**。落地后的真实形态以代码为准：架构总览见 `docs/DEVELOPER.md`，进程 / 隔离模型见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。请勿按本文直接施工。
 
 **Goal:** 把 DLNA 的"播放结束自动下一首"决策从 player 层上移到独立的 Queue Controller,移植 Music Assistant 的可靠性机制(双层去抖、状态迁移判断、瞬态屏蔽、乐观设态、卡死兜底、play 超时),解决"播 1 秒停/进度不动/级联误切"问题。
 

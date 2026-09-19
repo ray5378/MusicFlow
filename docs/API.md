@@ -1,8 +1,8 @@
 # MusicFlow API 参考（API）
 
-> 适用 v1.4.0+。三套接口面：
+> 适用于 **v3.0.x（当前主线）**。三套接口面：
 > - **原生 API**：`/rest/api/v1/*`（内部 REST 别名，前端与 HA 集成使用；`/api/v1/*` 经 Navidrome 兼容层同样可达）
-> - **OpenSubsonic**：`/rest/*`（46+ 端点，第三方 Subsonic 客户端）
+> - **OpenSubsonic**：`/rest/*`（51 个端点，第三方 Subsonic 客户端）
 > - **WebSocket**：`/ws?token=`
 >
 > 基址：`http://<host>:46400`（addon 为 HA 地址 46400 端口）。
@@ -104,7 +104,7 @@
 
 ## 3. OpenSubsonic（`/rest/*`）
 
-兼容 Subsonic **v1.16.1** + OpenSubsonic 扩展，46+ 端点（浏览/搜索/播放/歌单/收藏/评分/歌词/上报/播放队列/头像）。
+兼容 Subsonic **v1.16.1** + OpenSubsonic 扩展，51 个端点（浏览/搜索/播放/歌单/收藏/评分/歌词/上报/播放队列/头像）。
 第三方客户端（Symfonik / DSub / MA / libopensonic）直接连接本服务即可。
 
 要点：
