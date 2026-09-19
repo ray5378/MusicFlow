@@ -548,6 +548,15 @@ export function initDatabase() {
       esphome_port INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT DEFAULT ''
     );
+    -- 内部 ffmpeg 回环取流凭证(见 services/dlna/control.ts)。
+    -- 必须落库而非进程内存:Sendspin 生产 fork 模式下子进程 mint、主进程路由 resolve,
+    -- 内存 Map 跨进程不可见(2026-09-19 事故)。短 TTL 凭证,非用户数据。
+    CREATE TABLE IF NOT EXISTS raw_stream_tokens (
+      token TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      headers_json TEXT NOT NULL DEFAULT '',
+      exp INTEGER NOT NULL
+    );
   `);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

@@ -471,23 +471,37 @@ export function resolveCastToken(token: string): string | null {
 // 硬性契约:**ffmpeg 的输入只能是回环 token URL 或本地文件路径**(详见 SPEC §1.8)。
 // 鉴权/302/播放优选全部由 Node 在 /rest/dlna/stream/:token?raw=1 内完成。
 // songs 表内歌曲走 createCastSession;插件直链等虚拟行走下面的 raw-stream 注册表。
-const rawStreams = new Map<string, { url: string; headers?: Record<string, string>; exp: number }>();
+// ⚠️ 注册表必须落 SQLite(raw_stream_tokens 表),不能用进程内存:Sendspin 生产默认
+// fork 模式,streamEngine 在**子进程**里 mint,而 /rest/dlna/stream 路由由**主进程**
+// 处理 —— 内存 Map 跨进程不可见,ffmpeg 恒收 403 "Invalid or expired cast token"
+// (2026-09-19 事故;vitest 恒 in-proc 所以测试发现不了,见 SPEC §1.8)。
 const RAW_STREAM_TTL_MS = 30 * 60 * 1000;
 
-/** 为一条任意直链(无需存在于 songs 表)注册回环取流凭证,返回 token。 */
+/** 为一条任意直链(无需存在于 songs 表)注册回环取流凭证,返回 token。跨进程安全。 */
 export function mintRawStreamToken(url: string, headers?: Record<string, string>): string {
   const token = randomBytes(16).toString("hex");
   const now = Date.now();
-  rawStreams.set(token, { url, headers, exp: now + RAW_STREAM_TTL_MS });
-  for (const [k, v] of rawStreams) if (v.exp < now) rawStreams.delete(k);
+  sqlite.prepare("DELETE FROM raw_stream_tokens WHERE exp < ?").run(now);
+  sqlite
+    .prepare("INSERT INTO raw_stream_tokens (token, url, headers_json, exp) VALUES (?, ?, ?, ?)")
+    .run(token, url, headers ? JSON.stringify(headers) : "", now + RAW_STREAM_TTL_MS);
   return token;
 }
 
 export function resolveRawStreamToken(token: string): { url: string; headers?: Record<string, string> } | null {
-  const s = rawStreams.get(token);
-  if (!s) return null;
-  if (s.exp < Date.now()) { rawStreams.delete(token); return null; }
-  return s;
+  const row = sqlite
+    .prepare("SELECT url, headers_json, exp FROM raw_stream_tokens WHERE token = ?")
+    .get(token) as { url: string; headers_json: string; exp: number } | undefined;
+  if (!row) return null;
+  if (row.exp < Date.now()) {
+    sqlite.prepare("DELETE FROM raw_stream_tokens WHERE token = ?").run(token);
+    return null;
+  }
+  let headers: Record<string, string> | undefined;
+  if (row.headers_json) {
+    try { headers = JSON.parse(row.headers_json); } catch { /* 坏行按无头直取 */ }
+  }
+  return { url: row.url, headers };
 }
 
 let runtimePort: number | undefined;
