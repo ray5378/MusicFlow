@@ -2,6 +2,26 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.44] - 2026-09-19
+
+### 修复 —— ffmpeg 回环流恒 403（raw-stream 凭证跨进程不可见）
+
+**症状**：v3.0.43 镜像（含 48ad83d 回环架构）上线后，Sendspin 播放仍失败，
+ffmpeg 报 `Error opening input: Server returned 403 Forbidden`，输入已是
+回环 URL `http://127.0.0.1:<port>/rest/dlna/stream/<token>?raw=1`。
+
+**根因**：回环 token 的 raw-stream 注册表是**主进程内存 Map**，而 Sendspin
+生产默认 **fork 模式** —— `streamEngine` 在**子进程**里 mint token、
+`/rest/dlna/stream/:token` 路由在**主进程**里 resolve，Map 跨进程不可见，
+token 永远查不到 → 恒 403。vitest 恒 in-proc（同进程共享内存），测试无法暴露。
+
+**修法**：注册表落 SQLite `raw_stream_tokens` 表（WAL 多进程安全，与
+`sendspin_device_state` 同模式），mint/resolve 全部走 DB，TTL 仍 30 分钟、
+mint 顺带清理过期行。新增 `tests/services/rawStreamToken.test.ts` 回归锚点。
+
+**验证**：tsc 0 错；vitest 156 文件 / 1170 用例全绿；240 实例注入修复后实测
+Sendspin 音箱（ESP32）连续正常播放（pos 持续推进，403 消失）。
+
 ## [3.0.43] - 2026-09-19
 
 ### 修复 —— Sendspin / 转码 / 投屏链路带域名直链全部播放失败（ffmpeg DNS）
