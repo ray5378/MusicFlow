@@ -2,12 +2,11 @@
 
 > 状态：**D2 / D5 / D7 已定，D1 / D3 / D4 / D6 采纳推荐值（见 §5）**，可进入开发交接
 > 取证对象一：`ray5378/MusicFlow`（服务端 / Web 前端，main 快照 2026-09-20）+ `MusicFlow-client`（Flutter，当前工作区）—— 我们的现状
-> 取证对象二：`music-assistant/server` **dev 分支 commit `76c2fcb`（2026-09-19）** —— MA 的真实实现
-> MA 引证以 `music-assistant/server@dev commit 76c2fcb` 为准，本地 refs 已清理，核对请按 commit 拉取
+> 取证对象二：`music-assistant/server` **dev 分支 commit `76c2fcb`（2026-09-19）**，源码已下载到 **`refs/music-assistant-server/`**（索引见其 `REF-INDEX.md`）—— MA 的真实实现
 > 目标：把我们现有的每条输出通道，改造成与 MA 同构的 **六段流水线**。
 > **本轮改造的核心价值：实时生效。曲库以网络歌曲为主、无法预先测量，所以响度标准化必须在播放时当场生效，而不是等离线回填。**
 > 本文件是播放链路音频处理的**唯一标准**；`docs/` 下其它文档中与之冲突的断言一律以本文件为准（§9 列出被取代的旧断言）。
-> 文中所有 MA 行为都标注了 **`文件:行`**，按上述 commit 拉取源码后可直接核对。
+> 文中所有 MA 行为都标注了 **`文件:行`**，可在 `refs/music-assistant-server/` 中直接核对。
 
 ---
 
@@ -15,7 +14,7 @@
 
 | # | 段 | MA 的真实行为（源码实证） | 我们要达到的状态 |
 |---|---|---|---|
-| 1 | **Input 解码** | FFmpeg 解码为 **F32 PCM**（`ContentType.PCM_F32LE`，`helpers/audio.py:815`），采样率与声道**跟随源** | 全通道统一服务端解码为 F32，不再硬编码 48k / 44.1k |
+| 1 | **Input 解码** | 解码产物写进 **`AudioBuffer`**（`streams/audio_buffer.py`），格式由 `decoded_pcm_format()` 决定（`helpers/audio.py:803-826`）：**跟随源位深/采样率**（源 16bit 就是 s16），仅 DSD 强制 F32；声道折叠到 ≤2。**F32 是「有处理时才加」的 headroom 选择**，见 `_pick_pcm_bit_depth()`（`streams/audio.py:4550-4581`）+ `INTERNAL_PCM_FORMAT`（`constants.py:935`） | 解码段跟随源；**F32 由「是否要跑处理」决定**（我们归一化恒开 → 恒 F32），不再硬编码 48k / 44.1k |
 | 2 | **Processing 响度标准化** | 模式选择由 `get_normalization_mode()` 决定（`helpers/audio.py:902-967`）：**无测量值 → `FALLBACK_DYNAMIC` → 实时 `loudnorm`**；有测量值 → `MEASUREMENT_ONLY` → 静态 `volume=XdB`；目标默认 **−14 LUFS**（`constants.py:464`） | **默认走实时 loudnorm，首播即生效**；仅**本地 / WebDAV 行**测过后降级为静态增益（网络源不回写，永远走实时） |
 | 3 | **Processing DSP** | 段式链路：各类 filter → ffmpeg 滤镜，见 `helpers/dsp.py:70-260` | 每播放器可配，滤镜映射照抄 MA |
 | 4 | **Processing Smart Fades** | `CrossfadeMode.DISABLED / STANDARD_CROSSFADE / SMART_CROSSFADE`；混音控制器 `streams/smart_fades/`（planner/renderer/filters），分析层是 **ML provider** | **本轮做 L0 = `STANDARD_CROSSFADE`**：flow mode + 固定时长 PCM 混合（不做 ML 分析） |
@@ -24,6 +23,24 @@
 
 **关键认知：前四段对所有输出通道完全共用，差异只发生在第 5、6 段。**
 这就是为什么必须先把 HTTP 链路（客户端 / Web / DLNA）从「原样直出」改造成服务端实时管道 —— 否则它们根本不经过第 1–5 段，谈不上对齐。
+
+> ### 🔴 硬要求（本轮定调）：**不保留任何「直传 / 直透」分支**
+>
+> 所有链路（客户端 / Web / DLNA / Sendspin / AirPlay）**一律走管道**，没有「原样把源字节发给对端」的旁路。
+> 对齐 MA：`get_stream()` 里唯一的免处理条件是 **`没有滤镜 且 输入输出格式完全一致`**（`audio_buffer.py:295`），
+> 我们照抄这**一条**——即「关闭归一化 + 无 DSP + 输出格式与 buffer 一致」时免掉第二条 ffmpeg，
+> 而不是保留一条「绕过管道直出源文件」的分支。真正的直传在 MA 里只给 **realtime AudioSource（直播流）**
+> （`streams/audio.py:1432`、`_select_audio_source_pcm_format`），我们没有这类源。
+>
+> ### 🔴 MA 是**两段式**，不是「一条 ffmpeg `-af` 链」
+>
+> ```
+> ① 解码 ffmpeg:  源 → PCM（跟随源）→ 写进 AudioBuffer（保留 chunk 供分析/交叉淡入预取）
+> ② 出流 ffmpeg:  AudioBuffer（stdin 喂 PCM）→ -af 滤镜链(②③④⑤) → 输出格式(⑥)
+> ```
+> 依据：`audio_buffer.py:277-311 get_stream()` → `helpers/ffmpeg.py:400 get_ffmpeg_stream()`。
+> **两段式是 flow mode / 交叉淡入 / 边播边测三件事的前提**（buffer 可被二次消费、可按时间重放、可跨曲拼接），
+> 所以我们的 `pipeline.ts` 也必须做成两段，而不是把六段塞进一条 `-af`。
 
 ---
 
@@ -108,20 +125,28 @@
 
 | 项 | 内容 |
 |---|---|
-| **MA 实证** | 内部统一为 **32-bit float PCM**：`content_type=ContentType.PCM_F32LE`（`helpers/audio.py:815`，注释明确说明 8-bit 源也请求 F32 以保证后续处理的精度与 headroom）；采样率与声道跟随源，重采样下沉到输出段 |
+| **MA 实证** | 解码产物进 `AudioBuffer`，格式 `decoded_pcm_format()`（`helpers/audio.py:803-826`）= **跟随源位深与采样率**（16bit 源→s16 不浪费内存 upcast），仅 DSD 分支返回 F32（`helpers/audio.py:815`）。**F32 是后面 `_pick_pcm_bit_depth()` 按「是否要跑处理」决定的**（`streams/audio.py:4550-4581`）：crossfade / overlay / 归一化 / DSP 任一开启 → `INTERNAL_PCM_FORMAT`（`constants.py:935`，F32/32bit）取 headroom；全关 → 复用源位深。采样率 **snap-down**（`streams/audio.py:1444-1450`）：取播放器支持的最高速率 **且 ≤ 源速率**，**绝不升采样**；flow 模式才按 `CONF_FLOW_MODE_SAMPLE_RATE`（smart / bit_perfect / 48k / 96k / highest）锚定（`streams/audio.py:1503-1541`） |
 | **我们现状** | Sendspin 硬编码 `-ar 48000 -ac 2`；AirPlay 硬编码 `-ar 44100` s16le；HTTP 两条链路**根本不解码** |
-| **目标** | 解码段只负责解码：输出 F32，不加 `-ar`/`-ac`（跟随源），重采样与位深收敛全部下沉到 ⑥ |
+| **目标** | 解码段只负责解码 → 写进 buffer（跟随源）；**F32 由②⑤是否启用决定**；采样率按通道 `snap-down`（≤ 源速率且通道支持），不再硬编码 48k / 44.1k |
 
 ```
+# ① 解码段（源 → PCM buffer）
 ffmpeg -hide_banner -loglevel error [-ss <timeOffset>] -i <rowInput> \
-  -vn -sn -dn -map 0:a:0 -f f32le pipe:1
+  -vn -sn -dn -map 0:a:0 -f <pcm_fmt> pipe:1
+
+# ② 出流段（buffer PCM → 滤镜链 → 输出格式）见 §4
 ```
 
 - `-ss` 放在 `-i` **之前**（输入定位快）；timeOffset seek 复用客户端现有的重拉机制。
 - 输入源由 `resolveRowInput(row)` 统一给出，**必须是 `resolvePlayableRow()` 之后实际出流的那一行**。网络源走远程 URL / `cachePath`，与本地行同一入口。
+- 🔴 **喂给 ffmpeg 的输入必须遵守 SPEC §1.8 硬契约**：只允许**回环 token URL**（`http://127.0.0.1:<port>/rest/dlna/stream/<token>?raw=1`）或**本地文件路径**。
+  原因不是架构偏好，是容器环境：ffmpeg-static 是 glibc 静态构建，**在 Alpine(musl) 里 DNS 全坏**（带域名的输入一律 `System error`），
+  且 **ffmpeg 跟随 302 会把 `Authorization` 头带给 CDN**（openlist Basic → 天翼 OBS `400 InvalidAuthType`）。
+  MA 能直接喂真实 URL（`helpers/ffmpeg.py:545-566` 还给 http 源加了 `-reconnect*` 系列参数）是因为它跑在 glibc 环境；
+  **我们「取源」这一步由 Node 代劳（鉴权 / 302 / 优选），ffmpeg 只吃回环 IP**。这条只约束 ① 的**输入**，不影响 ⑥ 的输出必须走管道。
 - ④ 交叉淡入时是**两路解码并存**，解码段要能同时开两条（见 §3.4 的 CPU 风险）。
 
-**落点**：新增 `backend/src/services/audio/pipeline.ts`（`decodeArgs()`），`sendspin/streamSource.ts`、`airplay/decoder.ts` 复用。
+**落点**：新增 `backend/src/services/audio/pipeline.ts`（`decodeArgs()` + 两段编排），`sendspin/streamSource.ts`、`airplay/decoder.ts` 复用。
 
 > ⚠️ Sendspin 现在解码即 48k，`encoding.ts` 的 `SAMPLE_RATE=48000` 可能与解码段耦合。改造时先确认编码层接受非 48k 输入并重采样，否则「跟随源」先在 HTTP 通道落地（列为 P1-4 确认项）。
 
@@ -298,11 +323,20 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 | 2 | 时长/元数据：无 `Content-Length` | ICY 注入曲目信息 | 我们的 UI 进度来自服务端状态 / WS 推送（DLNA 有 `GetPositionInfo` + eventing），**UI 不受影响**；只有音箱/电视自带屏显缺时长 —— 与 MA 同类 |
 | 3 | CPU / 首字节 / 并发 | 每播放器一条常驻 ffmpeg 管道 | `TRANSCODE_MAX_CONCURRENT=4` 上调；归一化管道设**独立并发池**，不与用户主动选的音质转码互抢槽；交叉淡入再预留槽位；首字节目标 < 500 ms |
 
+**HTTP 出流响应头 —— 照抄 MA 的四条对策（`controllers/streams/controller.py:1296-1318`）**，比「接受退化」更优，本轮一并做：
+
+| 对策 | MA 源码 | 作用 |
+|---|---|---|
+| **`Content-Type` 由实际输出格式算出** | `get_mime_type(output_format.output_format_str)` | 与 §1.5 坑 2 呼应：**MIME 必须随实际格式同步**，否则设备拒播 |
+| **`contentFeatures.dlna.org: DLNA.ORG_FLAGS=81700000…`** | `DLNA_CONTENT_FEATURES_REALTIME`（`constants.py:925`） | 告诉 DLNA 设备这是**实时流**，别按静态文件去探测时长/seek |
+| **ICY 只在设备要时才给** | `request.headers.get("Icy-MetaData") == "1"` 且配置未禁用 → 加 `ICY_HEADERS` + `icy-metaint`（16384 / 256000） | 避免给不吃 ICY 的设备塞无关头 |
+| **`http_profile` 两档** | `forced_content_length`：`resp.content_length = calculate_content_length(fmt, 12h)`（**给一个 12 小时的假长度**）；`chunked`：`enable_chunked_encoding()` | **解决「无 Content-Length 设备不敢播」**——比单纯接受退化更好，DLNA 默认走 `forced_content_length` |
+
 ---
 
 ## 4. 统一管道的实现
 
-新增 `backend/src/services/audio/pipeline.ts`，把六段串成**一条 ffmpeg 参数**；四条通道都只是「取行输入 → 走管道 → 按通道编码 → 按协议下发」：
+新增 `backend/src/services/audio/pipeline.ts`，**照 MA 做成两段**（不是一条 `-af`）；四条通道都只是「取行输入 → 走管道 → 按通道编码 → 按协议下发」：
 
 ```ts
 interface PipelineRequest {
@@ -316,23 +350,28 @@ interface PipelineRequest {
   fade?: FadeConfig;        // ④ L0：crossfade_duration / 静音剥离
 }
 
-buildArgs(req): string[] {
-  // ① 解码
-  args.push("-ss", t, "-i", row.input, "-vn", "-sn", "-dn", "-map", "0:a:0");
-  // ② 响度（有测量 → volume；无测量 → loudnorm；源已归一化 → 跳过）
-  // ③ DSP（preamp → filters → output gain）
-  // ⑤ 限制器（链尾）
-  // ⑥ 重采样 + dither（按需）→ 编码
-  const af = [...].filter(Boolean).join(",");
-  args.push("-af", af);
-  args.push(...codecArgs(target));
+// ① 解码段：源 → PCM buffer（输入必须遵守 SPEC §1.8 回环/本地文件契约）
+decodeArgs(req): string[] {
+  return ["-ss", t, "-i", row.input, "-vn", "-sn", "-dn", "-map", "0:a:0", "-f", pcmFmt, "pipe:1"];
+}
+
+// ② 出流段：buffer PCM(stdin) → 滤镜链 → 输出格式
+outArgs(req, bufferFmt): string[] {
+  const af = [
+    loudnessFilter(req),   // ② 有测量 → volume=XdB；无测量 → loudnorm；源已归一化 → 跳过
+    ...dspFilters(req),    // ③ preamp → filters → output gain
+    limiterFilter(req),    // ⑤ alimiter=limit=-1dB:level=false:asc=true:latency=true
+    resampleFilter(req),   // ⑥ 按需：aresample(有 loudnorm 时降级 swr) + osf=s16:dither_method=triangular_hp
+  ].filter(Boolean).join(",");
+  return ["-f", bufferFmt, "-i", "pipe:0", "-af", af, ...codecArgs(req.target), "pipe:1"];
 }
 ```
 
-- **Sendspin / AirPlay**：管道输出 F32 交给既有编码层，只多一条 `-af`，几乎零额外成本 → **最先见效**。
-- **客户端 / Web / DLNA**：管道输出直接作为 HTTP 响应体流式下发，替代「原样拉流」分支。
-- ④ 在管道**之上**（两路管道 → 混合器 → 单路输出），不是 `-af` 链内的一环。
-- 开关：全局 + 每通道独立（落 `services/settings.ts`）。关闭 = 回到今天的行为。
+- **Sendspin / AirPlay**：出流段输出 PCM/目标编码交给既有编码层 → **最先见效**（增量仍只是一条 `-af`）。
+- **客户端 / Web / DLNA**：出流段的 stdout 直接作为 HTTP 响应体流式下发；**删掉「原样拉流 / `?raw=1` 直透」分支**（D9）。
+- ④ 在两段**之上**：两路解码 buffer → PCM 混合器（`StreamingCrossfadeFilter` 同构）→ 单路出流 ffmpeg。
+- 开关：全局 + 每通道独立（落 `services/settings.ts`）。**关闭 = 滤镜链为空**（对齐 MA 的 `needs_ffmpeg`）：
+  若输出格式与 buffer 格式一致则免掉第二条 ffmpeg；**不会退回「绕过管道直出源文件」** —— 那条分支本轮删除。
 
 ---
 
@@ -348,6 +387,8 @@ buildArgs(req): string[] {
 | **D6** | DSP 首期范围 | ⏳ **Gain + 3 段 ToneControl + 多段参量 EQ + Balance**（MA filter 集合中最常用的四个） |
 | **D7** | Smart Fades 本轮做不做 | ✅ **本轮做 L0 = `STANDARD_CROSSFADE`**（flow mode + 固定时长 PCM 混合 + 静音剥离）；**不做** ML 智能混音（L1/L2） |
 | **D8** | 边播边测的回写范围 | ✅ **只写 `local` / `webdav` 源**；**网络源一律不写**（URL 有时效/换源风险，缓存值会错配）。回写随行删除**同事务清理**，且**仅在该源探测有效时**才执行清理 |
+| **D9** | 是否保留「直传 / 直透」分支 | ✅ **不保留**：所有链路一律走管道（含 DLNA，删掉 `?raw=1` 直透）。唯一免处理条件对齐 MA：无滤镜 **且** 输出格式与 buffer 格式一致时免第二条 ffmpeg（`audio_buffer.py:295`）。旧断言「HTTP 直出 / DLNA 不实时转码 / 直透原始字节」**全部作废**（见 §9） |
+| **D10** | 解码段喂给 ffmpeg 的输入 | ✅ **必须遵守 SPEC §1.8**：只允许回环 token URL 或本地文件路径（Alpine 静态 ffmpeg DNS 全坏 + 302 带 Auth 头两个坑）。这是**取源环节**的约束，与「输出侧必须走管道」不冲突 |
 
 ---
 
@@ -371,7 +412,8 @@ buildArgs(req): string[] {
 
 | # | 任务 | 落点 |
 |---|---|---|
-| P1-1 | 新增 `AudioPipeline`：解码 F32（跟随源）+ `-af` 链 + 编码 | 新增 `backend/src/services/audio/pipeline.ts` |
+| P1-1 | 新增 `AudioPipeline`：**两段式**（① 解码 → PCM `AudioBuffer`；② 出流 ffmpeg 吃 stdin PCM、`-af` 链、输出格式）。格式决策照 MA：F32 由「是否跑处理」决定；采样率 **snap-down** | 新增 `backend/src/services/audio/pipeline.ts` + `audio/buffer.ts` |
+| P1-1b | **解码段输入必须遵守 SPEC §1.8**（回环 token URL / 本地文件路径），并加契约测试锁死 | `pipeline.ts` + `tests/sendspin/ffmpegInputContract.test.ts` |
 | P1-2 | Sendspin 接入（替换 `ffmpegArgs()` 的硬编码 48k 解码） | `sendspin/streamSource.ts` |
 | P1-3 | AirPlay 接入 | `airplay/decoder.ts` |
 | P1-4 | 输出段：`osf=s16:dither_method=triangular_hp`（仅 >16bit→16bit）；确认 Sendspin 编码层对非 48k 输入的处理 | `sendspin/encoding.ts` |
@@ -384,12 +426,13 @@ buildArgs(req): string[] {
 
 | # | 任务 | 落点 |
 |---|---|---|
-| P2-1 | `/rest/stream` 走管道；响应加 **`X-MusicFlow-Transcoded: 1`** 头 | `backend/src/routes/rest/index.ts` |
-| P2-2 | `/rest/dlna/stream/:token` 走管道；**MIME 同步**（`DLNA_MIME` 与 `buildDidlLite()` 按实际输出格式给） | 同上 + `plugin/renderers/dlna.ts` + `dlna/control.ts` |
+| P2-1 | `/rest/stream` 走管道；**删除「原样拉流」分支**；响应加 **`X-MusicFlow-Transcoded: 1`** 头（D9） | `backend/src/routes/rest/index.ts` |
+| P2-2 | `/rest/dlna/stream/:token` 走管道；**删除 `?raw=1` 直透分支**（D9）；**MIME 同步**（`DLNA_MIME` 与 `buildDidlLite()` 按实际输出格式给） | 同上 + `plugin/renderers/dlna.ts` + `dlna/control.ts` |
+| P2-2b | HTTP 出流响应头四项（照 MA）：`Content-Type` 随实际格式、`contentFeatures.dlna.org` realtime 标记、**ICY 仅当设备请求 `Icy-MetaData:1`**、`http_profile`（默认 `forced_content_length` 给 12h 假长度 / `chunked`） | `backend/src/routes/rest/index.ts` + `dlna/control.ts` |
 | P2-3 | **客户端 seek 判定改造（必做）**：改为按响应头 / 服务端能力判定 | `lib/providers/player/transcoded_stream_seek.dart` + `player_playback_helpers.dart` |
 | P2-4 | Web 端 seek 适配：Howler 无 Range 时按 `timeOffset` 重建 URL，进度用 offset 补偿 | `frontend/src/stores/player.ts` |
 | P2-5 | 并发池：上调 + 归一化独立并发，不抢音质转码的槽 | `services/transcode.ts` |
-| P2-6 | 契约测试：开关开/关、换源行后增益变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退 | 新增 `backend/tests/services/pipeline.test.ts` |
+| P2-6 | 契约测试：开关开/关、换源行后增益变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退、**断言 `/rest/stream` 与 `/rest/dlna/stream` 都不再有原样直出路径** | 新增 `backend/tests/services/pipeline.test.ts` |
 
 **验收**：客户端与 DLNA 连播 10 首网络源差异 ≤ 1 LU；**客户端拖动进度实测通过**；首字节 < 500 ms。
 
@@ -403,7 +446,8 @@ buildArgs(req): string[] {
 | P3-4 | **`normalization_override`**：过渡期间 pin 住两首歌各自的归一化模式，防增益跳变（照 `streams/audio.py:1683`、1749） | `flow.ts` + `loudness.ts` |
 | P3-5 | DLNA 侧 flow mode + **ICY 元数据**注入 | `dlna/control.ts` |
 | P3-6 | 并发池为交叉淡入预留额外槽位（过渡期 CPU 翻倍） | `services/transcode.ts` |
-| P3-7 | 单测：混合权重曲线、静音剥离、**过渡期间增益不跳变**、开关关闭回到逐首播放 | 新增 `backend/tests/services/fades.test.ts` |
+| P3-7 | 单测：混合权重曲线、静音剥离、**过渡期间增益不跳变**、开关关闭回到逐首播放（**仍走管道，D9**） | 新增 `backend/tests/services/fades.test.ts` |
+| P3-8 | 重叠长度必须**按帧对齐取整**（照 `fades.py:389-394`）：`crossfade_size = bytes // frame_size * frame_size`，否则混合器静默不出声 | `fades.ts` |
 
 **验收**：连播无间隙、无爆音；过渡窗口内回录 LUFS 波动 ≤ 1 LU；关闭开关回到现状行为。
 
@@ -446,7 +490,8 @@ buildArgs(req): string[] {
 | 源已归一化却被二次归一化 | 响度被抬两次、可能削波 | 照 MA：标记 `source_normalized` 时跳过 ② |
 | 解码改为跟随源采样率 | Sendspin 编码层可能假设 48k | P1-4 明确确认；必要时 HTTP 通道先行 |
 
-**回退**：全局开关一键关闭即回到今天的行为（全通道原样直出 + 逐首播放）。P0 只加字段与纯函数，不改变任何播放行为。
+**回退**：全局开关一键关闭 = **滤镜链为空 + 无交叉淡入**（逐首播放、不做归一化与 DSP），**但仍走管道**（D9，不再有「原样直出」这条路可退）。
+输出格式与 buffer 一致时免掉第二条 ffmpeg（对齐 MA `needs_ffmpeg`）。P0 只加字段与纯函数，不改变任何播放行为。
 
 ---
 
@@ -480,3 +525,9 @@ buildArgs(req): string[] {
 | 「交叉淡入属远期，本轮不做」 | ✅ 已定：**本轮做 L0 标准交叉淡入**（§3.4、P3） |
 | 「边播边测对所有源都回写（听过一次即固化）」 | 收窄：**仅 `local` / `webdav` 行回写**；网络源一律不写，永远走实时 loudnorm（§3.2、D8） |
 | 「回写值随歌曲长期保留」 | 回写依附于**行**：行删除即同事务删除，且仅在源探测有效时才执行差集清理（§3.2、P0-6） |
+| **「DLNA `?raw=1` 直透原始字节（不嗅探不转码）」** | ✅ **作废（D9）**：本约束只保留在**取源环节**（喂给 ffmpeg 的输入，见 SPEC §1.8 修订版）；**输出侧一律走管道**，DLNA 无直传分支 |
+| **「HTTP 客户端/Web 原样直出 = 零 CPU 的设计选择」** | ✅ **作废（D9）**：管道为唯一路径；关闭开关只是滤镜为空，不回到「绕过管道」 |
+| 「MA 内部统一 F32 PCM」 | 修正：**有条件** F32 —— 只有 crossfade / overlay / 归一化 / DSP 任一开启才用 F32 取 headroom，否则复用源位深（`streams/audio.py:4550-4581` + `constants.py:935`）。我们归一化恒开 → 恒 F32（§0、§3.1） |
+| 「解码采样率跟随源」 | 修正：**snap-down** —— 取通道支持的最高速率 **且 ≤ 源速率，绝不升采样**；flow 模式才按配置锚定（`streams/audio.py:1444-1450`、1503-1541） |
+| 「六段串成一条 ffmpeg `-af` 链」 | 修正：MA 是**两段式**（解码 → `AudioBuffer` → 出流 ffmpeg），两段式是 flow / 交叉淡入 / 边播边测的前提（§0、§4） |
+| 「实时流没有 Content-Length 只能接受退化」 | 修正：MA 有 `http_profile=forced_content_length`（给 12 小时假长度）与 `chunked` 两档，外加 `contentFeatures.dlna.org` realtime 标记与按需 ICY（§3.6） |
