@@ -2,6 +2,36 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.40] - 2026-09-19
+
+### 测试 —— 补上渲染器子进程 fork 路径的冒烟测试（此前零覆盖）
+
+`mode.ts` 见到 `VITEST` 一律返回 false，业务侧测试**永远不可能真的 fork** —— 于是
+「生产里 supervisor 到底有没有 fork 起子进程」此前只由注释与 CHANGELOG 背书，一条断言都没有。
+本版绕开 `isRendererForkMode()`，直接构造通用宿主 `RendererHostSupervisor` 并指向一个纯 JS
+夹具子进程，真的过一遍这条路径：fork → mainReady 握手（断言载荷真的过了 IPC 边界）→ RPC 往返
+（断言响应里的 pid 就是被 fork 的子进程）→ 快照进镜像 → `kill -9` → 退避重启（新 pid 可继续
+服务）→ 优雅 `stop` → 「启动即退」的失败分支。整套约 3.5s。
+
+夹具用 `.mjs` 而非 `.ts`（`tests/rendererHost/fixtures/stubRendererChild.mjs`）：`fork()` 直接跑
+node，不依赖任何 TS loader，因此与 vitest 的 `process.execArgv` 完全解耦。
+
+### 可观测 —— AirPlay 推流节拍指标 `reanchors` / `maxGapMs` 对外可见
+
+这两个数此前只在 `stream()` 收尾时打一行日志：只能事后归因、拿不到趋势，也无法在播放**过程中**
+判断「此刻是不是已经被拖垮」。现在：
+
+- `RaopPlayer.realtimeStats` 暴露 `{ chunks, reanchors, maxGapMs, elapsedMs, lossRequests }`；
+- 进会话镜像 → `getAirPlayStatus().stream` 与 `getAirPlayPeerStatus().stream`（HTTP 可直接 curl），
+  fork 与 in-proc 两条路径读同一份语义；
+- 会话运行期每 15s 打点一行趋势；`reanchors > 0` 或 `maxGap > 50ms` 升级为 warn，便于日志过滤。
+
+至此开启 `MUSICFLOW_AIRPLAY_FORK=1` 的两个前提（架构就位 + 可观测）都已具备。
+
+### 验证
+
+`tsc` + 9 项静态门禁 + 全量回归（155 文件 / 1172 用例，较 3.0.39 新增 1 文件 / 10 用例）全绿。
+
 ## [3.0.39] - 2026-09-19
 
 ### 重构 —— 抽出「常驻渲染器子进程」通用宿主 `services/rendererHost/`
