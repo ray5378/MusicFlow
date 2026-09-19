@@ -111,18 +111,25 @@ async function defaultSource(songId: string): Promise<GroupAudio> {
 /** 流式音源:行 → ffmpeg 直读输入 → 滑动窗口。首帧只等 2 秒预缓冲,
  *  不再等整曲解完(此前起播解码实测可达 7.4s)。时长取元数据(秒→ms),
  *  缺失则为 0(结束只靠 EOF＋耗尽,见 pushLoop)。 */
+/** ffmpeg 输入硬契约(见 services/dlna/control.ts 注释 / SPEC §1.8):http(s) 直链
+ *  一律改走本进程回环 token URL —— 静态 ffmpeg 在 Alpine 解析不了域名(含 302
+ *  跳转目标),且跟随 302 会把 Authorization 头带给 CDN(OBS 400 InvalidAuthType)。
+ *  独立导出供契约测试锁定(ffmpegInputContract);改本函数必须同步该测试。 */
+export async function resolveFfmpegInput(
+  direct: { input: string; headers?: Record<string, string> }
+): Promise<{ input: string; headers?: Record<string, string> }> {
+  if (/^https?:\/\//i.test(direct.input)) {
+    const { loopbackRawStreamUrl } = await import("../dlna/control.js");
+    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
+  }
+  return direct;
+}
+
 async function streamingSource(row: { duration?: number | null }): Promise<GroupAudio> {
   const { resolveRowInput } = await import("../source/resolveAudio.js");
   const direct = resolveRowInput(row as any);
   if (!direct) throw new Error("no streamable input for row");
-  // ffmpeg 输入硬契约(见 services/dlna/control.ts 注释 / SPEC §1.8):http(s) 直链
-  // 一律改走本进程回环 token URL —— 静态 ffmpeg 在 Alpine 解析不了域名(含 302
-  // 跳转目标),且跟随 302 会把 Authorization 头带给 CDN(OBS 400 InvalidAuthType)。
-  let source: { input: string; headers?: Record<string, string> } = direct;
-  if (/^https?:\/\//i.test(direct.input)) {
-    const { loopbackRawStreamUrl } = await import("../dlna/control.js");
-    source = { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
-  }
+  const source = await resolveFfmpegInput(direct);
   const window = new PcmWindow(source);
   try {
     await window.ready();
