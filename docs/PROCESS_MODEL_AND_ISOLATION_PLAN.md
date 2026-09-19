@@ -6,14 +6,17 @@
 > 相关文档：`docs/sandbox-limits-and-plan.md`（插件沙箱限制与 P3 规划）、
 > `SPEC.md` §1.3（批量任务子进程红线）。
 >
-> **落地状态（2026-09-19 晚，随 v3.0.39 一并实施）**：
+> **落地状态（2026-09-19，随 v3.0.39 发布）**：
 > - §4 的两步主干已落地 —— 通用层 `backend/src/services/rendererHost/` 就位，Sendspin 已迁移
 >   （行为不变，靠既有 39 文件 / 221 用例守），AirPlay 已接入同一宿主；
 > - §3 B1（AirPlay 进程化）**代码就位但默认关闭**：开发机无 AirPlay 设备可端到端验证，
 >   故先只把能力接上，显式 `MUSICFLOW_AIRPLAY_FORK=1` 才启用；真机验证后可把
 >   `services/airplay/mode.ts` 的 `defaultFork` 翻成 `true`，与 sendspin 对齐；
-> - §7 的 ② 静态门禁已落地为 `backend/scripts/check-renderer-host.mjs`
->   （CI job `renderer-host-guard`）；① 的 supervisor 真 fork 冒烟测试仍未做（见 §7）；
+> - §7 两项（fork 冒烟测试 / 静态守卫）**均已落地**；守卫为
+>   `backend/scripts/check-renderer-host.mjs`（CI job `renderer-host-guard`）；
+> - §5 的两项低成本项（`reanchors`/`maxGapMs` 可观测化、supervisor 冒烟测试）**均已完成**；
+> - **部署不在本规划范围**（用户 2026-09-19 明确「以后都不用管部署」），本文档不涉及
+>   主实例的发布/部署步骤；
 > - 逐条状态见 §5 路线图。
 
 ---
@@ -241,12 +244,16 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 | **P2'** | sharp 升级为进程 | worker 中崩溃仍带走进程（实测） | P2 |
 | **P3** | 插件沙箱进程化 | §3 B3 三条触发条件任一命中 | 有实测数据 |
 
-**顺手可做的低成本项**（不依赖上述任何阶段）：
+**顺手可做的低成本项**（两项均已于 2026-09-19 第二轮补完）：
 
-- ~~把 AirPlay 的 `reanchors` / `maxGapMs` 从「结束才打一行日志」提升为**可观测指标**~~
-  —— **仍未做**。P1' 已按「触发条件未命中也要先接好架构」的路线提前落地，但启用决策仍要靠
-  它：现在依然只有事后日志拿不到趋势，建议在真机开 `MUSICFLOW_AIRPLAY_FORK=1` 前先补上。
-- 补 `supervisor` 冒烟测试（见 §7）—— 目前 fork 路径零覆盖。
+- ✅ 把 AirPlay 的 `reanchors` / `maxGapMs` 从「结束才打一行日志」提升为**可观测指标**：
+  `RaopPlayer.realtimeStats`（`raop.ts`）→ 进会话镜像 `AirplaySessionMirrorRow.stream`
+  → `getAirPlayStatus().stream` 与 `getAirPlayPeerStatus().stream`（HTTP 可直接 curl）；
+  另有 15s 周期打点，`reanchors > 0` 或 `maxGap > 50ms` 时升级为 `warn`，趋势在播放过程中
+  就可见，不必等收尾。
+- ✅ 补 `supervisor` 真 fork 冒烟测试（见 §7）：`tests/rendererHost/supervisorFork.test.ts`（10 例）
+  + 夹具 `tests/rendererHost/fixtures/stubRendererChild.mjs`。启用
+  `MUSICFLOW_AIRPLAY_FORK=1` 前的两个前提（架构 + 可观测）现在都齐了。
 
 ---
 
@@ -266,32 +273,42 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 
 ---
 
-## 7. 门禁补齐建议（承接 2026-09-19 全量核查）
+## 7. 门禁与覆盖补齐（两项均已落地）
 
-现状：对 7 个 `check-*.mts|mjs` + 8 个 workflow 搜
-`spawn|child_process|独立进程|子进程|转码|解码|transcode|ffmpeg|decode` → **0 命中**。
-即：**「重活落独立进程」目前是惯例，CI 一行都不拦。**
+起草时的现状：对 7 个 `check-*.mts|mjs` + 8 个 workflow 搜
+`spawn|child_process|独立进程|子进程|转码|解码|transcode|ffmpeg|decode` → **0 命中**，
+即「重活落独立进程」只是惯例，CI 一行都不拦。两项补齐均已完成：
 
-建议分两步，先做低误报的那个：
+**① ✅ fork 路径冒烟测试**
 
-**① 给 Sendspin 的 fork 路径补冒烟测试（零误报，立刻可做）**
+`tests/rendererHost/supervisorFork.test.ts`（10 例）+ 夹具
+`tests/rendererHost/fixtures/stubRendererChild.mjs`。
 
-现有 `childMain.test.ts` 8 例跑的是 in-proc 控制器，且 `mode.ts` 见到 `VITEST` 直接
-`return false` —— **测试永远不可能真的 fork**，「生产是否真 fork」只有注释和 CHANGELOG 背书。
-补一个真 fork 的用例：起 supervisor → 断言 `mainReady` 收到且子进程存活 →
-`kill -9` → 断言按退避重启 → `stop` → 断言退出。
+关键点：`mode.ts` 见到 `VITEST` 一律 `return false`，所以业务侧测试**永远不可能真 fork** ——
+本用例因此**绕开 `isRendererForkMode()`，直接构造 `RendererHostSupervisor` 并指向一个
+纯 JS 夹具子进程**。夹具故意用 `.mjs`：`fork()` 直接跑 node，不依赖任何 TS loader，
+与 vitest 的 `process.execArgv` 解耦（实测 vitest worker 里 `execArgv` 为
+`["--conditions","node","--conditions","development"]`，对 `.mjs` 无害）。
+覆盖链：fork → mainReady 握手（断言载荷真的过了 IPC 边界）→ RPC 往返（断言响应里的 pid
+就是被 fork 的子进程）→ 快照进镜像 → `kill -9` → 退避重启（新 pid 可继续服务）→ 优雅 `stop`
+→ 「启动即退」的失败分支。整套约 3.5s。
 
-**② 新增 `check-process-isolation.mts`（静态，需配合豁免机制）**
+**② ✅ 静态守卫 `check-renderer-host.mjs`（CI job `renderer-host-guard`）**
 
-只扫**渲染器/推流链路**目录，规则定向到 G1 的**形态特征**而非关键词：
+取代了原计划中的 `check-process-isolation.mts`，规则定向到 G1 的**形态特征**而非关键词：
 
-- 命中信号：`setTimeout` 递归自排 + `performance.now()` 差值裁决 + 固定 chunk 常量
-  （如 `CHUNK_LEN`/`FRAME`）出现在同一函数内 → 判定为 deadline-driven 循环；
-- 命中后要求：该模块**要么已由 `rendererHost` 托管**，要么带显式豁免注释
-  （沿用本仓既有的 `// allow-process-isolation-exempt: <理由>` 风格）。
+- **R1** `backend/src/services` 下只允许 `rendererHost/supervisor.ts` 出现 `child_process.fork`；
+- **R2** 命中「墙钟取时 + `setTimeout` 自排 + 定长分块（`CHUNK`/`FRAME`/`SAMPLE`）」三条全中的
+  文件，必须落在**本业务** `child.ts` 的 import 闭包内。判定按
+  `backend/src/services/<biz>/` 目录归属做（`bizOf`），不能只判「任一闭包包含」——
+  实测 sendspin 的 child 闭包会跨业务拖进 `airplay/raop.ts`，共 135 个文件，
+  只判「任一闭包」会让「airplay 谁都没接宿主」蒙混过关；
+- **R3** 声明为渲染器业务的目录必须具备 `child.ts` + 使用 `RendererHostSupervisor` 的
+  `supervisor.ts` + 使用 `isRendererForkMode` 的 `mode.ts`。
 
-纯关键词扫描（扫 `ffmpeg`/`transcode`）误报会偏高 —— 因为 `command` 权限本就允许外部命令，
-而且 DLNA/AirPlay/转码**都合法地**调用 ffmpeg。所以必须先有①，再加②。
+纯关键词扫描（扫 `ffmpeg`/`transcode`）误报偏高 —— `command` 权限本就允许外部命令，
+且 DLNA/AirPlay/转码**都合法地**调用 ffmpeg。所以守卫只认「节拍形态」不认目录名；
+**DLNA 有意豁免**：字节代理 + Range，渲染器自己回连拉流，实测无节拍循环。
 
 ---
 
@@ -306,4 +323,4 @@ Sendspin 已经把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` / `playerCore
 | sharp 在主进程 | `coverImage.ts:29` `await import("sharp")` |
 | DLNA 无重活 | `routes/rest/index.ts:1755`（Range 字节代理） |
 | 批量任务全覆盖 | `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、扫描路由 `runBatchJob("scan", …)` |
-| 无进程相关门禁 | 7 个 check 脚本 + 8 个 workflow 关键词扫描 0 命中 |
+| 无进程相关门禁（起草时） | 7 个 check 脚本 + 8 个 workflow 关键词扫描 0 命中；**v3.0.39 起已由 `check-renderer-host.mjs` 兜住**（见 §7） |
