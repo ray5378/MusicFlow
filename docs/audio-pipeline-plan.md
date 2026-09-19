@@ -2,11 +2,14 @@
 
 > 状态：**D2 / D5 / D7 已定，D1 / D3 / D4 / D6 采纳推荐值（见 §5）**，可进入开发交接
 > 取证对象一：`ray5378/MusicFlow`（服务端 / Web 前端，main 快照 2026-09-20）+ `MusicFlow-client`（Flutter，当前工作区）—— 我们的现状
-> 取证对象二：`music-assistant/server` **dev 分支 commit `76c2fcb`（2026-09-19）**，源码已下载到 **`refs/music-assistant-server/`**（索引见其 `REF-INDEX.md`）—— MA 的真实实现
+> 取证对象二：`music-assistant/server` **dev 分支 commit `76c2fcb`（2026-09-19）** —— MA 的真实实现。
+> **核对方式：按 commit 拉取**，不依赖本地快照 ——
+> `git clone https://github.com/music-assistant/server && git checkout 76c2fcb`。
+> （曾在 `refs/music-assistant-server/` 存过 18MB 裁剪副本，已于 **v3.0.46 从本仓删除**，证明材料不入版本库。）
 > 目标：把我们现有的每条输出通道，改造成与 MA 同构的 **六段流水线**。
 > **本轮改造的核心价值：实时生效。曲库以网络歌曲为主、无法预先测量，所以响度标准化必须在播放时当场生效，而不是等离线回填。**
 > 本文件是播放链路音频处理的**唯一标准**；`docs/` 下其它文档中与之冲突的断言一律以本文件为准（§9 列出被取代的旧断言）。
-> 文中所有 MA 行为都标注了 **`文件:行`**，可在 `refs/music-assistant-server/` 中直接核对。
+> 文中所有 MA 行为都标注了 **`文件:行`**，拉取上面那个 commit 后可逐条核对。
 
 ---
 
