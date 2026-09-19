@@ -2,6 +2,36 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [3.0.42] - 2026-09-19
+
+### 清理 —— dailyRecommend 的旧表 / 旧设置兼容代码（接续 3.0.41 的「不考虑向后兼容」）
+
+接续上一版定调，把每日推荐里最后一批只为「升级用户」存在的兼容分支删掉：
+
+- **`services/plugin/dailyRecommend.ts`**：删除 `loadCandidatesFromSettings()` / `findPlaylistByName()` /
+  `purgeOldDailyPlaylists()` / `DAILY_TAG_LOCAL`；`saveCandidates()` 不再往 settings 表双写候选；
+  `ensureDailyPlaylists()` 简化为「缺则建」，移除旧歌单认领与「今日推荐」→「每日推荐」的改名逻辑
+  （+12 / −61）。
+- **`db/index.ts`**：移除 `daily_recommend_candidates` / `daily_recommend_retention` 两条种子语句（−9）。
+  候选与保留期现在只由 `dailyRecommend` 自己的表承载，老库重建即可。
+
+### 文档 —— 全仓文档时效性梳理（25 个文件）
+
+- **校准硬数字**：OpenSubsonic `/rest` **51** 端点、DB **37** 张表、内置插件 **18** 个（source 0，
+  go-music-dl 已外置）、`PluginType` **10**、`PluginCapability` **≈25**；文件名统一小驼峰。
+- **修正 4 处与实现相反的描述**，含 1 处代码注释：播放器管理页的离线实例并非「自动消失」，而是
+  **保留该行并打「离线」标签**（只有队列会被回收、只有流转选择器会剪掉别的离线实例）。
+- **回标落地状态**：3 份方案类文档（player-unification / memory-optimization / sandbox-limits）补
+  「已落地 / 部分 / 未做」；**8 份带日期的历史文档**顶部加「⏳ 历史快照」横幅（内容不重写）。
+- **删除 2 处已失效的发版步骤**：PLUGIN_ARCHITECTURE / sandbox-limits 里指向已删除 addon 仓库的
+  同步发布步骤。
+
+### 修正 —— 两处名不副实的 CI 文案 + 一处与实现相反的注释
+
+- `backend/scripts/check-builtins.mts` 头注释与 `ci.yml` 的 step 名原写「校验 7 个内置插件 manifest」，
+  而该清单实际只覆盖 18 个内置插件中的 **13 个** → 改为据实描述（**未扩清单**；扩清单需连带改插件
+  manifest、能力白名单与权限白名单，属独立改动）。
+
 ## [3.0.41] - 2026-09-19
 
 ### 清理 —— 删除 DB 字段迁移 / 兼容代码（项目自用，不考虑向后兼容）
