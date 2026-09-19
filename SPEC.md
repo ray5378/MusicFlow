@@ -315,7 +315,8 @@
   不能放进程内存。
 
 因此 Dockerfile 用 ffmpeg-static（不装系统 ffmpeg、不设 `FFMPEG_PATH`）；鉴权、
-302、播放优选全部由 Node 在 `?raw=1` 分支内完成（直透原始字节，不嗅探不转码）。
+302、播放优选全部由 Node 在 `?raw=1` 分支内完成（**该分支只服务 ffmpeg 喂料**：
+直透原始字节、不嗅探不转码 —— 这是「取源」侧行为，与下条「输出侧一律走管道」不冲突）。
 违反本契约的症状对照：`System error` = 域名输入；`400 InvalidAuthType` = 直链跨 302；
 `403 Invalid or expired cast token` = token 注册表跨进程不可见（必须落库）。
 新代码给 ffmpeg 喂输入前先对照本节；`serveTranscodedSong` 入口有回环护栏日志。

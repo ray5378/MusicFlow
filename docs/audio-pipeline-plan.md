@@ -15,11 +15,11 @@
 | # | 段 | MA 的真实行为（源码实证） | 我们要达到的状态 |
 |---|---|---|---|
 | 1 | **Input 解码** | 解码产物写进 **`AudioBuffer`**（`streams/audio_buffer.py`），格式由 `decoded_pcm_format()` 决定（`helpers/audio.py:803-826`）：**跟随源位深/采样率**（源 16bit 就是 s16），仅 DSD 强制 F32；声道折叠到 ≤2。**F32 是「有处理时才加」的 headroom 选择**，见 `_pick_pcm_bit_depth()`（`streams/audio.py:4550-4581`）+ `INTERNAL_PCM_FORMAT`（`constants.py:935`） | 解码段跟随源；**F32 由「是否要跑处理」决定**（我们归一化恒开 → 恒 F32），不再硬编码 48k / 44.1k |
-| 2 | **Processing 响度标准化** | 模式选择由 `get_normalization_mode()` 决定（`helpers/audio.py:902-967`）：**无测量值 → `FALLBACK_DYNAMIC` → 实时 `loudnorm`**；有测量值 → `MEASUREMENT_ONLY` → 静态 `volume=XdB`；目标默认 **−14 LUFS**（`constants.py:464`） | **默认走实时 loudnorm，首播即生效**；仅**本地 / WebDAV 行**测过后降级为静态增益（网络源不回写，永远走实时） |
-| 3 | **Processing DSP** | 段式链路：各类 filter → ffmpeg 滤镜，见 `helpers/dsp.py:70-260` | 每播放器可配，滤镜映射照抄 MA |
-| 4 | **Processing Smart Fades** | `CrossfadeMode.DISABLED / STANDARD_CROSSFADE / SMART_CROSSFADE`；混音控制器 `streams/smart_fades/`（planner/renderer/filters），分析层是 **ML provider** | **本轮做 L0 = `STANDARD_CROSSFADE`**：flow mode + 固定时长 PCM 混合（不做 ML 分析） |
+| 2 | **Processing 响度标准化** | 模式选择由 `get_normalization_mode()` 决定（`helpers/audio.py:904-970`）：**无测量值 → `FALLBACK_DYNAMIC` → 实时 `loudnorm`**；有测量值 → `MEASUREMENT_ONLY` → 静态 `volume=XdB`；目标默认 **−14 LUFS**（`constants.py:464`） | **默认走实时 loudnorm，首播即生效**；仅**本地 / WebDAV 行**测过后降级为静态增益（网络源不回写，永远走实时） |
+| 3 | **Processing DSP** | 段式链路：各类 filter → ffmpeg 滤镜，见 `helpers/dsp.py:70-283` | 每播放器可配，滤镜映射照抄 MA |
+| 4 | **Processing Smart Fades** | `CrossfadeMode.DISABLED / STANDARD_CROSSFADE / SMART_CROSSFADE`；混音控制器 `streams/smart_fades/`（planner/renderer/filters），分析层是独立的 **`audio_analysis` provider `providers/smart_fades/`**（torch 栈，见 §6 P5） | **本轮做 L0 = `STANDARD_CROSSFADE`**：flow mode + 固定时长 PCM 混合（不做 ML 分析） |
 | 5 | **Output 限制器** | `alimiter=limit={ceiling}dB:level=false:asc=true:latency=true`（`helpers/dsp.py:222`） | 全通道统一，dB 单位、`level=false` |
-| 6 | **Output 传输** | 按播放器能力编码；重采样 + dither 只在需要时加：`osf=s16:dither_method=triangular_hp`（`helpers/ffmpeg.py:490-517`） | 按通道编码表统一，MIME 随实际格式同步 |
+| 6 | **Output 传输** | 按播放器能力编码；重采样 + dither 只在需要时加：`osf=s16:dither_method=triangular_hp`（`helpers/ffmpeg.py:489-517`） | 按通道编码表统一，MIME 随实际格式同步 |
 
 **关键认知：前四段对所有输出通道完全共用，差异只发生在第 5、6 段。**
 这就是为什么必须先把 HTTP 链路（客户端 / Web / DLNA）从「原样直出」改造成服务端实时管道 —— 否则它们根本不经过第 1–5 段，谈不上对齐。
@@ -152,7 +152,7 @@ ffmpeg -hide_banner -loglevel error [-ss <timeOffset>] -i <rowInput> \
 
 ### 3.2 ② Processing 响度标准化（**本轮核心**）
 
-**MA 实证 —— 模式选择是一个专门的决策函数（`helpers/audio.py:902-967`）**，这正是为「没有预测量」准备的：
+**MA 实证 —— 模式选择是一个专门的决策函数（`helpers/audio.py:904-970`）**，这正是为「没有预测量」准备的：
 
 ```python
 def get_normalization_mode(preference, enabled, streamdetails, source_normalized):
@@ -231,7 +231,7 @@ else                             → loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:
 
 ### 3.3 ③ Processing DSP
 
-**MA 实证（`helpers/dsp.py:70-260` `filter_to_ffmpeg_params()`）—— 照抄映射即可：**
+**MA 实证（`helpers/dsp.py:70-283` `filter_to_ffmpeg_params()`）—— 照抄映射即可：**
 
 | DSP 项 | MA 的 ffmpeg 写法 | 备注 |
 |---|---|---|
@@ -275,7 +275,7 @@ else                             → loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:
 3. **配置项**：`crossfade_mode`（`disabled` / `standard`）、`crossfade_duration`（默认建议 **8 秒**，下限对齐 MA 的 3 秒）。
 4. **静音剥离**：照 MA 的 `StandardCrossFade`，曲尾静音段不计入过渡窗口，否则会出现"淡出完还在放静音"。
 5. **⚠️ 与 ② 的耦合（最易漏）**：MA 在交叉淡入期间用 `normalization_override` **pin 住** intro/body 的归一化模式（`streams/audio.py:1683`、1749），因为 capacity reselection 会返回**重新解析过的** streamdetails。**我们必须照做**：过渡期间两首歌保持各自已确定的增益，不能因重解析而跳变 —— 否则过渡瞬间音量会突然变。
-6. **与 ⑥**：DLNA 侧需 flow mode + **ICY 元数据**注入（连续流里设备拿不到曲目边界）；客户端/Web 的进度用 offset 补偿（客户端已有 `addPlaybackPositionOffset`）。
+6. **与 ⑥**：DLNA 侧需 flow mode + **ICY 元数据**注入（连续流里设备拿不到曲目边界）；客户端/Web 的进度用 offset 补偿 —— 客户端**已经是这个模型**（`_sourcePositionOffset` / `_setSourcePositionOffset`，`lib/providers/player/player_seek.dart:215-232`；seek 时把 `seekTarget.serverOffset` 写进新的流上下文，UI 进度按 `当前流位置 + offset` 显示），改造面是让服务端出流与它对齐，不是新造机制。
 7. **CPU**：过渡期间是**两路解码同时跑**，并发池必须为交叉淡入预留额外槽位，否则切歌瞬间卡顿。
 
 **验收**：连播时两曲之间无间隙、无爆音；过渡期间响度不跳变（回录 LUFS 在过渡窗口内波动 ≤ 1 LU）；关闭开关后回到"播完再播下一首"。
@@ -290,7 +290,7 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 
 - `limit` **直接用 dB 表达**（不是线性值）；`level=false` = 不做自动电平补偿、保持纯天花板语义；`asc=true` 抗削波；`latency=true` 重对齐 lookahead 缓冲。
 - 它是 **`SafetyLimiterFilter`，由用户放置的 DSP filter**，不是无条件硬编码在链尾。
-- 参考用例 `providers/ai_radio/rendering.py:177` 同样用这个写法。
+- 参考用例 `providers/ai_radio/rendering.py:177` 是**同类写法**（`alimiter=limit=…dB:level=false:latency=true`，**未带** `asc=true`）；DSP 滤镜那条（带 `asc=true`）在 `helpers/dsp.py:223`。
 
 **我们现状**：**无任何削波保护**（现在不削波只是因为从不加增益）。
 
@@ -310,7 +310,7 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 
 | 通道 | 协议 | 目标编码 | 采样率 / 位深 | 现状 → 目标 |
 |---|---|---|---|---|
-| **Sendspin（ESP32-S3）** | WebSocket | **FLAC 优先**（协议要求服务端支持 flac/opus/pcm） | 48k / 16-bit（MA 的 Sendspin 实现目前也是 16-bit） | 补增益 + 限制器 + dither |
+| **Sendspin（ESP32-S3）** | WebSocket | **FLAC 优先**（协议要求服务端支持 flac/opus/pcm） | 48k / 16-bit —— **这是我们的协议目标，不要写成「MA 也是 16-bit」**：MA 的 Sendspin 会话内部**恒用 F32 / 32-bit float** 取 DSP headroom（`providers/sendspin/playback.py:1295-1325` `_select_session_pcm_formats()`，有损 codec 时仅把采样率压到 ≤48k），wire 位深由**客户端 preferred_format** 决定；`BRIDGE_BIT_DEPTH = 16`（`providers/sendspin/bridge_role.py:39`）只是**没有 preferred 的 bridge 客户端**的兜底 | 补增益 + 限制器 + dither |
 | **AirPlay（RAOP）** | RAOP（非 HTTP） | 无损 PCM，可选 ALAC | **44.1k / 16-bit 硬上限** | 同上 |
 | **HTTP · 客户端 / Web** | HTTP | **跟随源族**：无损源 → FLAC；有损源 → 同族高码率（mp3 320 / aac 256） | 跟随源 | 「原样直出」→ 实时管道出流 |
 | **HTTP · DLNA** | HTTP | 按设备能力：FLAC 优先，不吃则回退 mp3 320（复用现有 ogg→mp3 兜底） | 跟随源 | 同上；**MIME 必须随实际格式同步**，flow mode 下加 ICY |
@@ -328,7 +328,7 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 | 对策 | MA 源码 | 作用 |
 |---|---|---|
 | **`Content-Type` 由实际输出格式算出** | `get_mime_type(output_format.output_format_str)` | 与 §1.5 坑 2 呼应：**MIME 必须随实际格式同步**，否则设备拒播 |
-| **`contentFeatures.dlna.org: DLNA.ORG_FLAGS=81700000…`** | `DLNA_CONTENT_FEATURES_REALTIME`（`constants.py:925`） | 告诉 DLNA 设备这是**实时流**，别按静态文件去探测时长/seek |
+| **`contentFeatures.dlna.org: DLNA.ORG_FLAGS=81700000…`** | `DLNA_CONTENT_FEATURES_REALTIME`（`constants.py:927`） | 告诉 DLNA 设备这是**实时流**，别按静态文件去探测时长/seek |
 | **ICY 只在设备要时才给** | `request.headers.get("Icy-MetaData") == "1"` 且配置未禁用 → 加 `ICY_HEADERS` + `icy-metaint`（16384 / 256000） | 避免给不吃 ICY 的设备塞无关头 |
 | **`http_profile` 两档** | `forced_content_length`：`resp.content_length = calculate_content_length(fmt, 12h)`（**给一个 12 小时的假长度**）；`chunked`：`enable_chunked_encoding()` | **解决「无 Content-Length 设备不敢播」**——比单纯接受退化更好，DLNA 默认走 `forced_content_length` |
 
@@ -465,7 +465,7 @@ outArgs(req, bufferFmt): string[] {
 - 全局 + 每通道开关 UI（服务端 `settings.ts` + Web 设置页 + 客户端入口）
 - DLNA 单设备回退开关（某台设备不接受实时流时单独关闭）
 - **可选优化层（默认关）**：热点曲目输出缓存 / 本地行离线预测量
-- **远期，本轮不做**：Smart Fades L1 beat-aligned、L2 智能混音（MA 用 torch + Beat This + madmom DBN + ChromaNet + FireRed，推荐 6 GB RAM，**不可复刻**）。分析字段已按 `AudioAnalysisData` 预留，将来要接也不改表
+- **远期，本轮不做**：Smart Fades L1 beat-aligned、L2 智能混音。MA 侧是独立 **`audio_analysis` provider**（`providers/smart_fades/manifest.json`）：依赖 `beat-this==1.1.0` / `kaldi-native-fbank` / `nnAudio`（torch + torchaudio），madmom `DBNDownBeatTrackingProcessor` 的 **drop-in 替代**见 `dbn_postprocessor.py:17`，调性用 skey、人声用 FireRedVAD；启动门槛 **`MIN_RAM_GB = 4.0`**（`providers/smart_fades/__init__.py:24`，`verify_system_meets_requirements`）—— 整套 torch 栈**不可复刻**。分析字段已按 `AudioAnalysisData` 预留，将来要接也不改表
 - 文档：本文件转正 + CHANGELOG
 
 ---
