@@ -21,6 +21,19 @@
 //   · IDLE 不来 → 卡死在结尾。不报位置的设备(实测 HiVi)进度全靠外推,
 //     外推封顶在时长就再也涨不动,设备又不报结束 → 631s 仍在 PLAYING、永不切歌。
 // 两侧同因:缺少"以已知时长为准"的判据。故这里引入 expectedDuration(见下)。
+//
+// ── 与 MA 三层防御的对应(2026-09-21 按 MA 补齐第 2·3 层) ──
+// MA(76c2fcb)判定"这一首/这一队列确实结束了"靠三层,缺一层就出现上面那两类症状:
+//   ① 时长判据  _handle_end_of_queue:567 `seconds_played >= duration - 5`
+//      → 设备报 IDLE 只是**触发**,真伪由时长定。本仓 = 下面的 idle_early/overrun。
+//   ② 持续确认  _settle_or_resume_delayed:453-470 五次 1s 轮询,期间任何反证即取消。
+//      → 本仓 = 下面「位置已到时长」后必须**持续**满足 END_GRACE_MS 才判结束
+//        (窗口内设备报回落后段位置/换曲/转 PAUSED 都会撤销,见 overrunAt)。[已对齐]
+//   ③ 本地节拍  players/controller.py:_poll_players:3202-3216,对 PLAYING 的 player
+//      每 0.5s 把**本地推算**的 corrected_elapsed_time 推给队列侧,不等设备上报。
+//      → 本仓 = 下面的 `tick()`。此前只在 reportState(设备采样,本仓 5s)时判,
+//        而 DLNA 位置外推**只在采样点推进**(dlna/control.ts:1141),于是
+//        「位置到时长 + END_GRACE_MS」被采样粒度拖成 ~10s 才生效。
 import { CompareState, PlaybackState } from "./types.js";
 
 // 卡死兜底阈值(我方设计,不是现版 MA 的机制 —— 见下)。
@@ -130,6 +143,40 @@ export class PlaybackTracker {
     // BUFFERING / PAUSED:不作为结束(瞬态屏蔽)。lastPlaying 保持,便于后续 IDLE 落入上方分支。
     this.prev = neww;
     return decision;
+  }
+
+  /**
+   * 本地节拍推进(PlayerController 每 500ms 调一次,不触设备)。
+   *
+   * 对照 MA `players/controller.py:_poll_players`(3202-3216):MA 只对 PLAYING 的
+   * player 每 0.5s 把**本地推算**的 `corrected_elapsed_time` 推给队列侧,不等设备
+   * 上报 —— 设备采样只负责纠偏,不负责决定切歌时刻。
+   *
+   * 本仓缺口:结束判定原先只在 reportState 时跑,而 DLNA 的位置外推只在采样点推进
+   * (`dlna/control.ts:1141`),于是「位置到时长 + END_GRACE_MS」被 5s 采样粒度拖成
+   * ~10s 才生效(用户观感 = 唱完了还停着不动)。这里用「末次 PLAYING 快照 + 墙上
+   * 时钟」自行外推,把判定接回 0.5s 节拍,总延迟回到 END_GRACE_MS 量级。
+   *
+   * 只读不写:不动 prev(否则污染状态迁移比较),而对外推有意义的只有末次 PLAYING
+   * 快照。判结束后必须清掉时长 —— 设备多半仍报 PLAYING,不清就会同一首反复 advance。
+   */
+  tick(nowMs: number): TrackDecision {
+    const dur = this.expectedDuration;
+    const cur = this.prev;
+    // 非 PLAYING(PAUSED/BUFFERING/IDLE)不推进:暂停期间的墙钟不该算进宽限,
+    // 恢复播放后重新起算,避免「暂停前已等 7s」导致刚恢复就判结束。
+    if (dur <= 0 || !cur || cur.playbackState !== PlaybackState.PLAYING) return "none";
+    const pos = cur.position + (nowMs - cur.updatedAt) / 1000;
+    if (pos < dur) {
+      this.overrunAt = null;
+      return "none";
+    }
+    if (this.overrunAt === null) this.overrunAt = nowMs;
+    if (nowMs - this.overrunAt < END_GRACE_MS) return "none";
+    this.lastPlaying = null;
+    this.overrunAt = null;
+    this.expectedDuration = 0;
+    return "advance";
   }
 
   reset(): void {

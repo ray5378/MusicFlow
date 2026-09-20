@@ -154,4 +154,64 @@ describe("PlaybackTracker", () => {
     const r = t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 300)));
     expect(r).toBe("advance");
   });
+
+  // ── 本地节拍(对照 MA _poll_players 0.5s 推送) ──
+  // 设备采样(本仓 5s)只负责纠偏;结束判定不该被采样粒度拖慢,否则
+  // 「位置到时长 + 8s 宽限」要等下一次采样才发现,实际 ~10s 才切歌。
+  describe("tick(本地节拍推进,不触设备)", () => {
+    it("恒 PLAYING 且位置已到时长: 宽限到期即 advance(期间无任何设备上报)", () => {
+      const t = new PlaybackTracker();
+      t.setExpectedDuration(100);
+      t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+      const t0 = Date.now();
+      expect(t.tick(t0 + 500)).toBe("none");
+      expect(t.tick(t0 + 7_500)).toBe("none");
+      expect(t.tick(t0 + 8_500)).toBe("advance");
+    });
+
+    it("位置未到时长: 按墙上时钟外推,到点后才起算宽限", () => {
+      const t = new PlaybackTracker();
+      t.setExpectedDuration(100);
+      t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 90, 100)));
+      const t0 = Date.now();
+      expect(t.tick(t0 + 5_000)).toBe("none");   // 外推 95s
+      expect(t.tick(t0 + 9_500)).toBe("none");   // 外推 99.5s
+      expect(t.tick(t0 + 11_000)).toBe("none");  // 到点 1s,宽限刚开始
+      expect(t.tick(t0 + 19_000)).toBe("advance"); // 到点后已过 8s
+    });
+
+    it("暂停中(PAUSED)不推进: 暂停期间的墙钟不算进宽限", () => {
+      const t = new PlaybackTracker();
+      t.setExpectedDuration(100);
+      t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+      const t0 = Date.now();
+      t.update(toCompareState(st(PlaybackState.PAUSED, "u1", 100, 100)));
+      expect(t.tick(t0 + 60_000)).toBe("none");
+    });
+
+    it("时长未知(flow 连续流会话注入 0): 不介入", () => {
+      const t = new PlaybackTracker();
+      t.setExpectedDuration(0);
+      t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 5, 300)));
+      expect(t.tick(Date.now() + 600_000)).toBe("none");
+    });
+
+    it("判结束后不再重复 advance(时长判据用后即清)", () => {
+      const t = new PlaybackTracker();
+      t.setExpectedDuration(100);
+      t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+      const t0 = Date.now();
+      expect(t.tick(t0 + 9_000)).toBe("advance");
+      expect(t.tick(t0 + 60_000)).toBe("none");
+    });
+
+    it("不改状态迁移快照: 之后 PLAYING→IDLE 仍正常判 advance", () => {
+      const t = new PlaybackTracker();
+      t.setExpectedDuration(100);
+      t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+      t.tick(Date.now() + 1_000);
+      expect(t.getPrev()?.playbackState).toBe(PlaybackState.PLAYING);
+      expect(t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 100)))).toBe("advance");
+    });
+  });
 });

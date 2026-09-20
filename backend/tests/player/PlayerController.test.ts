@@ -17,7 +17,7 @@ describe("PlayerController", () => {
     ctrl = new PlayerController();
     ctrl.onDecision = onDecision;
   });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { ctrl?.stopOverrunTicker(); vi.useRealTimers(); });
 
   it("reportState 后 0.25s 去抖,再 0.5s 转发决策", () => {
     ctrl.reportState(st(PlaybackState.PLAYING));
@@ -53,5 +53,39 @@ describe("PlayerController", () => {
     expect(onDecision).not.toHaveBeenCalled();
     vi.advanceTimersByTime(5000); // 超出 5s play 超时
     expect(onDecision).toHaveBeenCalledWith("stalled", "dlna:d1");
+  });
+
+  // ── PLAYING 期本地节拍(对照 MA _poll_players 0.5s 推送) ──
+  // 设备采样是 5s 一次,若结束判定只挂在采样上,「位置到时长 + 8s 宽限」会被
+  // 采样粒度拖成 ~10s。下面三条都刻意**不再喂任何设备上报**。
+  it("本地节拍推进结束判定: 不再有设备上报也能在宽限后派发 advance", () => {
+    ctrl.startOverrunTicker();
+    ctrl.setExpectedDuration("dlna:d1", 100);
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1", 100)); // 设备不报结束,位置恒等于时长
+    vi.advanceTimersByTime(1000); // 让这次上报自己的去抖窗口落地(它只能给出 none)
+    expect(onDecision).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(8000);
+    expect(onDecision).toHaveBeenCalledWith("advance", "dlna:d1");
+  });
+
+  it("本地节拍派发的决策不被随后到场的设备采样覆盖,也不重复", () => {
+    ctrl.startOverrunTicker();
+    ctrl.setExpectedDuration("dlna:d1", 100);
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1", 100));
+    vi.advanceTimersByTime(8500);
+    expect(onDecision).toHaveBeenCalledTimes(1);
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1", 100)); // 设备仍报"到顶"
+    vi.advanceTimersByTime(1000);
+    expect(onDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it("暂停中本地节拍不误判结束", () => {
+    ctrl.startOverrunTicker();
+    ctrl.setExpectedDuration("dlna:d1", 100);
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1", 100));
+    vi.advanceTimersByTime(1000);
+    ctrl.reportState(st(PlaybackState.PAUSED, "u1", 100));
+    vi.advanceTimersByTime(30000);
+    expect(onDecision).not.toHaveBeenCalled();
   });
 });

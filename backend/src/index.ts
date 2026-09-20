@@ -404,7 +404,7 @@ const port = parseInt(process.env.PORT || "46400", 10);
 // adaptor's request handler directly.
 import { initWebSocketServer } from "./services/ws/index.js";
 import { startMdnsBroadcast, stopMdnsBroadcast } from "./services/discovery/mdns.js";
-import { getQueueController, wirePlayerQueueControllers } from "./services/player/index.js";
+import { getPlayerController, getQueueController, wirePlayerQueueControllers } from "./services/player/index.js";
 import { getCachedDevices } from "./services/dlna/control.js";
 import { getEventManager } from "./services/dlna/eventing.js";
 import { getPeerManager } from "./services/peer.js";
@@ -456,6 +456,10 @@ wirePlayerQueueControllers();
 // Fallback poll:对照 MA force_poll,GENA 不可用时主动 poll 设备状态上报 PlayerController。
 // 由 QueueController 持有轮询,间隔 5s(MA 是 30s,本地设备事件支持差,用 5s 平衡)。
 getQueueController().startPollLoop(() => getEffectiveBaseUrl());
+
+// PLAYING 期本地节拍:对照 MA _poll_players 的 0.5s 推送。设备采样(上面 5s)只负责
+// 纠偏,结束判定不该被采样粒度拖慢 —— 否则"唱完还停着"要等 ~10s 才切歌。
+getPlayerController().startOverrunTicker();
 
 // 空闲内存自动回收:无播放活动且无批量任务(导入/同步/扫描等)时,自动清理
 // 可重建缓存 + 主动 GC + SQLite WAL checkpoint。60s 检查一轮,幂等启动。

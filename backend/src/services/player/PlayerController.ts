@@ -12,6 +12,11 @@ import { touch } from "../memory/reclaim.js";
 const DEBOUNCE_LAYER1_MS = 250;  // player 层去抖
 const DEBOUNCE_LAYER2_MS = 500;  // → queue 层去抖
 const PLAY_TIMEOUT_MS = 5000;    // 乐观窗口上限
+// PLAYING 期本地节拍。对照 MA `players/controller.py:_poll_players`(3210-3216):
+// MA 每 0.5s 把本地推算的 corrected_elapsed_time 推给队列侧,不等设备上报。
+// 本仓设备状态采样是 5s(QueueController.startPollLoop),若结束判定只看采样点,
+// 「位置到时长 + END_GRACE_MS」会被采样粒度拖成 ~10s 才生效。
+const OVERRUN_TICK_MS = 500;
 
 type DecisionFn = (decision: TrackDecision, playerId: string) => void;
 
@@ -31,6 +36,8 @@ export class PlayerController {
   // 关键:tracker 在 reportState 时即时喂入,这样同一去抖窗口内的
   // PLAYING→IDLE 迁移也能被捕获(否则 evaluate 只看到合并后的 IDLE)。
   private pendingDecision = new Map<string, TrackDecision>();
+  /** PLAYING 期本地节拍的定时器(见 OVERRUN_TICK_MS)。 */
+  private overrunTimer: ReturnType<typeof setInterval> | null = null;
   /** 由 QueueController 注入。 */
   onDecision: DecisionFn = () => {};
 
@@ -136,16 +143,46 @@ export class PlayerController {
    *  仅重置 tracker + pending + 去抖定时器,不清乐观窗口(由 beginOptimistic 管理),不清 latest。 */
   resetTracker(playerId: string): void {
     this.trackerOf(playerId).reset();
-    this.pendingDecision.delete(playerId);
-    const d = this.debounceTimers.get(playerId); if (d) { clearTimeout(d); this.debounceTimers.delete(playerId); }
-    const f = this.forwardTimers.get(playerId); if (f) { clearTimeout(f); this.forwardTimers.delete(playerId); }
+    this.clearPending(playerId);
   }
 
   reset(playerId: string): void {
     this.trackerOf(playerId).reset();
     this.latest.delete(playerId);
-    this.pendingDecision.delete(playerId);
+    this.clearPending(playerId);
     this.clearOptimistic(playerId);
+  }
+
+  /** 启动 PLAYING 期的本地节拍(对照 MA `_poll_players`)。幂等,由 index.ts 启动时调一次。
+   *  节拍本身**不触设备**,只让 tracker 用「末次快照 + 墙上时钟」推进结束判定 ——
+   *  否则设备采样 5s 一次时,「唱完还停着」要等采样 + 宽限 ≈ 10s 才切歌。 */
+  startOverrunTicker(): void {
+    if (this.overrunTimer) return;
+    this.overrunTimer = setInterval(() => this.tickTrackers(Date.now()), OVERRUN_TICK_MS);
+  }
+
+  stopOverrunTicker(): void {
+    if (this.overrunTimer) { clearInterval(this.overrunTimer); this.overrunTimer = null; }
+  }
+
+  private tickTrackers(now: number): void {
+    for (const [playerId, tracker] of this.trackers) {
+      const decision = tracker.tick(now);
+      if (decision === "none") continue;
+      // 去抖窗口里已有非 none 决策在等转发 → 交给它,避免同一首派发两次。
+      const pending = this.pendingDecision.get(playerId);
+      if (pending && pending !== "none") continue;
+      // 本地节拍不经过设备事件去抖(它天生无风暴:每 tick 每 player 至多一条),
+      // 而走 pendingDecision 会被窗口内后到的 reportState 用 "none" 覆盖掉。
+      this.clearPending(playerId);
+      console.log(`[PlayerController][overrunDBG] t=${now} ${playerId}: decision=${decision}`);
+      this.onDecision(decision, playerId);
+    }
+  }
+
+  /** 清掉该 player 未派发的决策与两层去抖定时器。 */
+  private clearPending(playerId: string): void {
+    this.pendingDecision.delete(playerId);
     const d = this.debounceTimers.get(playerId); if (d) { clearTimeout(d); this.debounceTimers.delete(playerId); }
     const f = this.forwardTimers.get(playerId); if (f) { clearTimeout(f); this.forwardTimers.delete(playerId); }
   }
