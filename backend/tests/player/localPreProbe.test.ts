@@ -109,7 +109,7 @@ function makePlayer(id: string): UniversalPlayer & { calls: string[] } {
 }
 const ctrl = {
   beginOptimistic: () => {}, endOptimistic: () => {},
-  reportState: () => {}, resetTracker: () => {},
+  reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {},
 };
 
 // ==================== A. shuffle 模式下 enqueue 也要物化洗牌序 ====================

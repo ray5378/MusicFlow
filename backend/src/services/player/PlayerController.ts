@@ -119,6 +119,18 @@ export class PlayerController {
     return this.latest.get(playerId);
   }
 
+  /**
+   * 起播前注入当前曲的**已知时长(秒)**,供 PlaybackTracker 判「是否真播完」。
+   *
+   * 由 QueueController.playCurrent 在 cast **之前**调用(早于 resetTracker),
+   * 这样 cast 期间设备上报的瞬态也带着正确时长。
+   * reset()/resetTracker() **不清**此值 —— 它们是"清上一首的迁移状态",
+   * 而时长属于"当前曲"的固有属性(stalled 重投同一首时仍需它)。
+   */
+  setExpectedDuration(playerId: string, seconds: number): void {
+    this.trackerOf(playerId).setExpectedDuration(seconds);
+  }
+
   /** 切歌后重置 tracker 的 prev 状态 + 残留去抖。对照 MA:play_index 后清空 prev_state,
    *  避免上一首的 PLAYING→IDLE 迁移在切歌瞬态再次触发 advance 决策。
    *  仅重置 tracker + pending + 去抖定时器,不清乐观窗口(由 beginOptimistic 管理),不清 latest。 */

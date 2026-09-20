@@ -18,7 +18,7 @@ function setup() {
       return { mediaUri: "x" };
     },
   } as any;
-  const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {} };
+  const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {} };
   qc.registerPlayer("stalltest", mockPlayer, mockCtrl);
   qc.setQueue("stalltest", [
     { songId: "s1", title: "t1", mime: "audio/mpeg", duration: 180 },

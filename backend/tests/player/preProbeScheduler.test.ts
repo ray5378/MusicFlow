@@ -374,7 +374,7 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
   }
   const ctrl = {
     beginOptimistic: () => {}, endOptimistic: () => {},
-    reportState: () => {}, resetTracker: () => {},
+    reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {},
   };
 
   function setup(items: Array<{ id: string; dead: boolean }>, mode: "all" | "order" | "shuffle") {

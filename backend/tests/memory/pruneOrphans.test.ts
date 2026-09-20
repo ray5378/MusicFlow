@@ -32,7 +32,7 @@ describe("QueueController.pruneOrphans", () => {
   it("删除已不在设备/组表中的注册播放器,空集合不动", () => {
     const qc = new QueueController();
     const mockPlayer = { playerId: "d1" } as any;
-    const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {} };
+    const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {} };
 
     qc.registerPlayer("d1", mockPlayer, mockCtrl);
     expect((qc as any).players.has("d1")).toBe(true);
@@ -84,7 +84,7 @@ describe("pruneOrphansOnce 回归:sendspin 客户端不得被当孤儿", () => {
     const cid = "e2e-prune-test-" + Date.now();
     const peerId = `sendspin:${cid}`;
     const mockPlayer = { playerId: peerId } as any;
-    const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {} };
+    const mockCtrl = { beginOptimistic: () => {}, endOptimistic: () => {}, reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {} };
 
     pm.registerSendspin(cid, "Prune Test", true);
     qc.registerPlayer(cid, mockPlayer, mockCtrl);

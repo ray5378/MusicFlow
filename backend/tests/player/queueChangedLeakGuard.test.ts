@@ -98,6 +98,7 @@ describe("QueueController 预探测转发守卫", () => {
       endOptimistic: () => {},
       reportState: () => {},
       resetTracker: () => {},
+      setExpectedDuration: () => {},
     } as any);
     qc.setQueue(
       "d1",

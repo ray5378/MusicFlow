@@ -53,6 +53,8 @@ interface PlayerControllerLike {
   reportState(state: any): void;
   /** 切歌后重置 tracker,避免上一首的 PLAYING→IDLE 迁移再次触发 advance。 */
   resetTracker(playerId: string): void;
+  /** 起播前注入当前曲已知时长(秒),供结束判定使用。 */
+  setExpectedDuration(playerId: string, seconds: number): void;
 }
 
 export class QueueController extends EventEmitter {
@@ -265,9 +267,29 @@ export class QueueController extends EventEmitter {
     // SetAVTransportURI 会打断正在播的流(听感 = 每次切歌都断一次)。队列推进改由出流侧
     // 在曲目边界调 `flowAdvance()` 静默完成,切歌决策在这里一律吞掉。
     // `ended` 不吞:流自然结束(= 会话跑完)时仍要走 markEnded,否则 UI 永远停在"播放中"。
-    if (this.flowOwned.has(id) && (decision === "advance" || decision === "track_changed")) return;
+    // `idle_early` 也吞:同一原因 —— 这条流的位置/时长不对应单曲,按单曲时长的判据在这里无意义。
+    if (this.flowOwned.has(id)
+        && (decision === "advance" || decision === "track_changed" || decision === "idle_early")) return;
 
-    if (decision === "advance" || decision === "track_changed") {
+    if (decision === "idle_early") {
+      // IDLE 但进度远未到已知时长 → 高度怀疑是误报(SOAP 抖动 / 链路瞬断)。
+      // 不直接切歌:立刻复查一次设备真实状态 ——
+      //   · 复查到 PLAYING → 确认误报,重置 tracker 后静默返回(这首歌继续播);
+      //   · 复查仍非 PLAYING → 设备确实停了(用户按停 / 真的播不动),放行切歌。
+      // 没有这道复查的话,真停了的场景要等 60s 的 stalled 兜底才推进。
+      try {
+        const st = await this.players.get(id)?.pollState();
+        if (st?.playbackState === PlaybackState.PLAYING) {
+          this.ctrls.get(id)?.resetTracker(playerId);
+          log.warn(`[QueueController][idle_early] ${playerId}: IDLE 误报已撤销(pos=${Math.round(st.position)}/${Math.round(st.duration)}),继续播放`);
+          return;
+        }
+      } catch (e: any) {
+        log.warn(`[QueueController][idle_early] ${playerId}: 复查失败,按真结束处理`, { err: e?.message || e });
+      }
+      log.warn(`[QueueController][idle_early] ${playerId}: 复查确认已停,放行切歌`);
+    }
+    if (decision === "advance" || decision === "track_changed" || decision === "idle_early") {
       if (this.advancing.has(id)) return;
       this.advancing.add(id);
       try {
@@ -579,6 +601,13 @@ export class QueueController extends EventEmitter {
     const playerId = player.playerId;
     log.info(`[QueueController][playCurrent] t=${Date.now()} ${playerId}: idx=${q.currentIndex} songId=${item.songId}`);
     try {
+      // 注入本曲已知时长(供结束判定)。必须在 cast 之前:castToDevice 期间的
+      // GENA 瞬态也会喂给 tracker,那时就要有正确的时长;且 resetTracker 不清此值。
+      // flow 会话驱动的设备注入 0(= 未知):它拉的是一条多曲连续流,设备侧的
+      // position/duration 不对应单曲,按单曲时长判定必然误判(见 flowOwned 注释)。
+      // 用可选调用:这是纯内存注入,即便调用方(测试替身)未实现该方法,也绝不能
+      // 影响起播 —— 静默跳过即退化为"时长未知"(= 改动前的行为)。
+      ctrl.setExpectedDuration?.(playerId, this.flowOwned.has(deviceId) ? 0 : this.knownDuration(fullItem));
       // 乐观窗口必须在 cast 之前开启:castToDevice 内部 Stop→SetAVTransportURI→Play
       // 会触发 GENA STOPPED/TRANSITIONING/PLAYING 事件。若窗口在 cast 之后才开,
       // 设备在 cast 期间上报的 PLAYING 会先于窗口开启到达 → 窗口永远等不到 PLAYING
@@ -595,6 +624,17 @@ export class QueueController extends EventEmitter {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);
     }
+  }
+
+  /** 当前曲的已知时长(秒):队列项自带 → 曲库兜底 → 0(未知)。
+   *  只用曲库/队列项的值,不采信设备自报 duration(有设备恒 0 或乱报)。 */
+  private knownDuration(item: QueueItem): number {
+    if (typeof item.duration === "number" && item.duration > 0) return item.duration;
+    try {
+      const row = db.select({ duration: songs.duration }).from(songs).where(eq(songs.id, item.songId)).get();
+      if (typeof row?.duration === "number" && row.duration > 0) return row.duration;
+    } catch { /* 库不可读 → 未知 */ }
+    return 0;
   }
 
   /** 只带 songId 的 item(HA/脚本/持久化恢复)在 cast 前补全元数据。

@@ -83,4 +83,75 @@ describe("PlaybackTracker", () => {
     const r = t.update(toCompareState(st(PlaybackState.PLAYING)));
     expect(r).toBe("none");
   });
+
+  // ==================== 以已知时长为准的结束判定(2026-09-21) ====================
+  // 背景:只靠 PLAYING→IDLE 判结束,IDLE 一误报就提前切歌、IDLE 不来就卡死在
+  // 结尾。以下用例锁住"注入时长后"的新判据;未注入时行为与旧版完全一致
+  // (见上方用例 —— 它们不注入,仍期望 advance)。
+
+  it("已知 300s 只播到 100s 就 IDLE: 返回 idle_early(判误报,不切歌)", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(300);
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 300)));
+    // 设备报 IDLE 时 position 常回 0 —— 判据必须取末次 PLAYING 的读数
+    const r = t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 300)));
+    expect(r).toBe("idle_early");
+  });
+
+  it("已知 300s 播到 295s 才 IDLE: 返回 advance(确实播完了)", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(300);
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 295, 300)));
+    const r = t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 300)));
+    expect(r).toBe("advance");
+  });
+
+  it("设备不报结束(恒 PLAYING)且位置已到时长: 宽限 8s 后返回 advance(治卡死)", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(100);
+    // 外推封顶后读数恒等于时长,读数是"到顶"而非"超过",故只能靠持续时长判定
+    expect(t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)))).toBe("none");
+    vi.advanceTimersByTime(3_000);
+    expect(t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)))).toBe("none");
+    vi.advanceTimersByTime(6_000);
+    expect(t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)))).toBe("advance");
+  });
+
+  it("误报撤销后歌曲继续播到时长: 仍能 advance(不被 idle_early 永久卡住)", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(100);
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 10, 100)));
+    expect(t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 100)))).toBe("idle_early");
+    // 设备其实还在播(QueueController 的复查会撤销这次误报),重新进入 PLAYING 并播到结尾
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+    vi.advanceTimersByTime(9_000);
+    expect(t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)))).toBe("advance");
+  });
+
+  it("播到时长才 IDLE 且无下一首: 返回 ended", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(100);
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+    const r = t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 100)), false);
+    expect(r).toBe("ended");
+  });
+
+  it("已判结束后不再重复 advance(时长判据用后即清)", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(100);
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)));
+    vi.advanceTimersByTime(9_000);
+    expect(t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)))).toBe("advance");
+    // 未注入新曲时长前,同样的"到顶"读数不该再触发一次
+    vi.advanceTimersByTime(20_000);
+    expect(t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 100, 100)))).toBe("none");
+  });
+
+  it("注入 0(未知时长,如 flow 连续流会话): 回退旧行为,直接 advance", () => {
+    const t = new PlaybackTracker();
+    t.setExpectedDuration(0);
+    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 5, 300)));
+    const r = t.update(toCompareState(st(PlaybackState.IDLE, "u1", 0, 300)));
+    expect(r).toBe("advance");
+  });
 });
