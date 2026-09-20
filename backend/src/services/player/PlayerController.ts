@@ -2,9 +2,14 @@
 //   - players/controller.py trigger_player_update (0.25s 去抖)
 //   - call_later(0.5s) 转发到 player_queues.on_player_update
 //
-// 乐观窗口:cast 期间(beginOptimistic)忽略 IDLE 上报,屏蔽切歌瞬态。
-//   对照 MA 乐观设态:命令发出前先把 _attr_playback_state = PLAYING。
-// 5s play 超时:对照 MA PLAYBACK_START_TIMEOUT=5.0。
+// 乐观窗口(两段,2026-09-21 拆开):
+//   阶段 1 beginOptimistic —— cast 命令发出**前**调用,只做「屏蔽切歌瞬态」
+//     (对照 MA 乐观设态:命令发出前先把 _attr_playback_state = PLAYING)。
+//   阶段 2 armOptimisticTimeout —— cast **成功返回后**调用,起 5s「等设备确认 PLAYING」
+//     (对照 MA PLAYBACK_START_TIMEOUT = 5.0)。
+//   拆开的理由:合在一起时那 5s 覆盖了 Stop→SetAVTransportURI→Play 三次 SOAP 往返
+//   (单次超时 8s),窗口必然在 cast 返回前先到点 —— 判出的 stalled 只是「命令还没发出去」,
+//   语义与 MA 根本不是一回事(MA 那个 5s 从命令送达后起算)。
 import { PlaybackTracker, type TrackDecision } from "./PlaybackTracker.js";
 import { PlaybackState, PlayerState, toCompareState } from "./types.js";
 import { touch } from "../memory/reclaim.js";
@@ -23,7 +28,8 @@ type DecisionFn = (decision: TrackDecision, playerId: string) => void;
 interface OptimisticState {
   mediaUri: string;
   startedAt: number;
-  timeoutTimer: ReturnType<typeof setTimeout>;
+  /** 5s「等 PLAYING」窗口的定时器。cast 命令**送达前**为 null —— 见 beginOptimistic。 */
+  timeoutTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export class PlayerController {
@@ -101,23 +107,34 @@ export class PlayerController {
     }
   }
 
-  /** 开始乐观窗口:cast 命令发出前调用。屏蔽此期间的 IDLE 上报。 */
+  /** 开始乐观窗口(阶段 1):cast 命令发出**前**调用。屏蔽此期间的 IDLE/STOPPED 瞬态上报。
+   *  此处**不计时** —— 计时在 cast 送达后由 armOptimisticTimeout 起(见文件头注释)。 */
   beginOptimistic(playerId: string, mediaUri: string): void {
     this.clearOptimistic(playerId);
-    const timeoutTimer = setTimeout(() => {
-      // 5s 内未确认 PLAYING → 视为卡死
+    this.optimistic.set(playerId, { mediaUri, startedAt: Date.now(), timeoutTimer: null });
+  }
+
+  /** 阶段 2:cast 命令已送达,开始 5s「等设备确认 PLAYING」计时。
+   *  窗口若已在 cast 期间被 PLAYING 关掉(设备抢在 cast 返回前就报了 PLAYING),
+   *  说明 cast 已经成功,不需要也不再计时。 */
+  armOptimisticTimeout(playerId: string): void {
+    const opt = this.optimistic.get(playerId);
+    if (!opt || opt.timeoutTimer) return;
+    opt.timeoutTimer = setTimeout(() => {
       this.optimistic.delete(playerId);
       this.onDecision("stalled", playerId);
     }, PLAY_TIMEOUT_MS);
-    this.optimistic.set(playerId, { mediaUri, startedAt: Date.now(), timeoutTimer });
   }
 
   private clearOptimistic(playerId: string): void {
     const opt = this.optimistic.get(playerId);
-    if (opt) { clearTimeout(opt.timeoutTimer); this.optimistic.delete(playerId); }
+    if (!opt) return;
+    if (opt.timeoutTimer) clearTimeout(opt.timeoutTimer);
+    this.optimistic.delete(playerId);
   }
 
-  /** 显式结束乐观窗口(cast 成功/失败都调)。 */
+  /** 显式结束乐观窗口(cast 失败 / 显式撤销时调)。cast **成功**不调这个 ——
+   *  那时应调 armOptimisticTimeout 进入阶段 2,把窗口留给「等设备确认 PLAYING」。 */
   endOptimistic(playerId: string): void {
     this.clearOptimistic(playerId);
   }

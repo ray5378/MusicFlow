@@ -55,20 +55,63 @@ describe("PlaybackTracker", () => {
     expect(r).toBe("track_changed");
   });
 
-  it("IDLE 持续超过 60s: 返回 stalled(卡死兜底)", () => {
-    const t = new PlaybackTracker();
-    t.update(toCompareState(st(PlaybackState.IDLE)));
-    vi.advanceTimersByTime(61_000);
-    const r = t.update(toCompareState(st(PlaybackState.IDLE)));
-    expect(r).toBe("stalled");
-  });
+  // ── 卡死兜底(2026-09-21 二次订正:60s「上报间隔」死判据 → 15s 墙钟累积) ──
+  // 旧判据 `neww.updatedAt - prev.updatedAt > 60_000` 要求「连续两次 IDLE 上报间隔超 60s」,
+  // 而生产采样固定 5s、每帧都把 updatedAt 刷成当前时刻 → 差值恒为 5s,**永远触发不了**。
+  // 下面刻意按**生产形态**喂(每帧间隔 5s),这才是真守住兜底的用例;旧的两条手工隔 61s,
+  // 测的是一个生产不存在的输入。
+  describe("卡死兜底(墙钟累积,生产 5s 采样形态)", () => {
+    it("IDLE 持续 15s: tick 返回 stalled(兜底真能触发)", () => {
+      const t = new PlaybackTracker();
+      const t0 = Date.now();
+      t.update(toCompareState(st(PlaybackState.IDLE)));
+      // 生产形态:每 5s 一帧上报,updatedAt 每帧都刷新
+      for (let n = 0; n < 2; n++) {
+        vi.advanceTimersByTime(5_000);
+        expect(t.update(toCompareState(st(PlaybackState.IDLE)))).toBe("none");
+      }
+      expect(t.tick(t0 + 10_000)).toBe("none");    // 未到 15s
+      expect(t.tick(t0 + 15_000)).toBe("stalled"); // 到点
+    });
 
-  it("IDLE 未超 60s: 返回 none(等待设备恢复)", () => {
-    const t = new PlaybackTracker();
-    t.update(toCompareState(st(PlaybackState.IDLE)));
-    vi.advanceTimersByTime(10_000);
-    const r = t.update(toCompareState(st(PlaybackState.IDLE)));
-    expect(r).toBe("none");
+    it("同一次卡死只报一次: 后续 tick 不重复派发", () => {
+      const t = new PlaybackTracker();
+      const t0 = Date.now();
+      t.update(toCompareState(st(PlaybackState.IDLE)));
+      expect(t.tick(t0 + 15_000)).toBe("stalled");
+      expect(t.tick(t0 + 16_000)).toBe("none");
+      expect(t.tick(t0 + 60_000)).toBe("none");
+    });
+
+    it("离开 IDLE 即清零: 恢复播放后再停需重新计满 15s", () => {
+      const t = new PlaybackTracker();
+      const t0 = Date.now();
+      t.update(toCompareState(st(PlaybackState.IDLE)));
+      expect(t.tick(t0 + 14_000)).toBe("none");
+      // 设备恢复播放(哪怕只是一帧 PLAYING)→ 计时清零
+      vi.advanceTimersByTime(14_000);
+      t.update(toCompareState(st(PlaybackState.PLAYING)));
+      t.update(toCompareState(st(PlaybackState.IDLE)));
+      expect(t.tick(t0 + 20_000)).toBe("none");    // 新的 IDLE 才 6s
+      expect(t.tick(t0 + 29_500)).toBe("stalled"); // 新的 IDLE 已 15.5s
+    });
+
+    it("PAUSED 不算卡死: 暂停的墙钟不进计时", () => {
+      const t = new PlaybackTracker();
+      const t0 = Date.now();
+      t.update(toCompareState(st(PlaybackState.IDLE)));
+      vi.advanceTimersByTime(1_000);
+      t.update(toCompareState(st(PlaybackState.PAUSED)));
+      expect(t.tick(t0 + 60_000)).toBe("none");
+    });
+
+    it("reset() 清空卡死计时: 重投同一首不会立刻被判卡死", () => {
+      const t = new PlaybackTracker();
+      const t0 = Date.now();
+      t.update(toCompareState(st(PlaybackState.IDLE)));
+      t.reset();
+      expect(t.tick(t0 + 60_000)).toBe("none");
+    });
   });
 
   it("首次 update: 返回 none(仅 seed 状态)", () => {

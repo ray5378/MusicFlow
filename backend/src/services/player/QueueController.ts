@@ -49,6 +49,9 @@ interface QueueData {
 
 interface PlayerControllerLike {
   beginOptimistic(playerId: string, mediaUri: string): void;
+  /** cast 命令**送达后**起 5s「等设备确认 PLAYING」计时(乐观窗口阶段 2,见 PlayerController)。
+   *  可选:纯内存操作,测试替身未实现时静默跳过(= 只保留阶段 1 的瞬态屏蔽),绝不影响起播。 */
+  armOptimisticTimeout?(playerId: string): void;
   endOptimistic(playerId: string): void;
   reportState(state: any): void;
   /** 切歌后重置 tracker,避免上一首的 PLAYING→IDLE 迁移再次触发 advance。 */
@@ -68,6 +71,12 @@ export class QueueController extends EventEmitter {
   /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
    *  同一首连续卡死第 2 次即放行切歌,而不是 2-3 秒无限重播(见 handleDecision)。 */
   private stallCounters = new Map<string, { songId: string | undefined; count: number }>();
+  /** 连续 cast **抛错**计数(key=裸 id),只在 cast 成功返回时清零。
+   *  与 stallCounters 互补:后者按「同一首」计数,而 songId 一变就归 1 ——
+   *  整队每首都投不出去时,它会在 all/shuffle 下随切歌不断重置 → 无界绕圈。
+   *  这个计数跨曲累积,上限 = 一整圈(stallCounters 允许每首 2 次,故取 2×曲数),
+   *  达到即判「整队都投不出去」,停止推进等负缓存过期(与 playCurrent 的 skipLimit 同口径)。 */
+  private castFailStreak = new Map<string, number>();
   /** 正由 flow 会话(连续流,P3-1)驱动的设备:设备拉的是**一条多曲流**,
    *  它报的 position/duration 不再对应单曲 → 切歌决策由出流侧在曲目边界静默推进
    *  (见 flowAdvance / handleDecision 入口的拦截)。 */
@@ -136,6 +145,7 @@ export class QueueController extends EventEmitter {
       this.ctrls.delete(k);
       this.queues.delete(k);
       this.stallCounters.delete(k);
+      this.castFailStreak.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -315,7 +325,11 @@ export class QueueController extends EventEmitter {
       return;
     }
     if (decision === "stalled") {
-      // 卡死兜底:重试当前首一次
+      // 已结束 / 未激活的队列不重投(2026-09-21 新增护栏)。
+      // 卡死阈值从(生产里不可达的)60s 降到 15s 后这条路径才**真正可达**,而它原先
+      // 全程不看 q.isActive/q.ended —— 触发时会把一个「整队已播完」的队列重新 cast 起来。
+      // 放在最前:先于任何 pollState / 计数 / 重投,零副作用。
+      if (!q.isActive || q.ended) return;
       if (this.advancing.has(id)) return;
       // 回归修复:乐观窗口 5s 未确认 PLAYING 会触发 stalled,但 HiVi 等真实设备的
       // PLAYING 确认(GENA 或 5s 轮询,cast 期间 advancing 还会跳过轮询)常晚于 5s。
@@ -615,6 +629,12 @@ export class QueueController extends EventEmitter {
       // 对照 MA:命令发出前先把 _attr_playback_state = PLAYING(乐观设态)。
       ctrl.beginOptimistic(playerId, "pending");
       const { mediaUri } = await player.playMedia(fullItem, baseUrl);
+      // cast 命令已送达 → 断开连续失败链(下面的 catch 才计失败)。
+      this.castFailStreak.delete(deviceId);
+      // 乐观窗口阶段 2:命令已送达,现在才起 5s「等设备确认 PLAYING」计时。
+      // 拆开的理由见 PlayerController 文件头 —— 合在一起时那 5s 会被 Stop→SetURI→Play
+      // 三次 SOAP 往返吃掉,判出的 stalled 只是「命令还没发出去」。
+      ctrl.armOptimisticTimeout?.(playerId);
       // cast 命令已发出,重置 tracker:清掉上一首的 prev 状态 + 残留去抖,
       // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
       // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。
@@ -623,6 +643,21 @@ export class QueueController extends EventEmitter {
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);
+      // cast 失败**不能静默**:endOptimistic 关掉了乐观窗口的兜底,若这里什么都不做,
+      // 这首既不会重投也不会切歌 —— 队列就此停死(设备瞬时离线时表现为"再也不播了")。
+      // 先按「一整圈」封顶:stallCounters 允许每首 2 次重投,故连续失败上限取 2×曲数,
+      // 到顶说明整队都投不出去 → 停止推进,等负缓存(45s)过期后由用户操作自然重试。
+      const streak = (this.castFailStreak.get(deviceId) ?? 0) + 1;
+      this.castFailStreak.set(deviceId, streak);
+      if (streak >= Math.max(2, 2 * q.items.length)) {
+        log.warn(`[QueueController][playCurrent] ${deviceId}: 连续 ${streak} 次 cast 失败,整队投不出去,停止推进`);
+        this.reportAllUnplayable(deviceId);
+        return;
+      }
+      // 交给既有 stalled 通道:pollState 复查 → 每首最多重投 1 次 → 第 2 次放行切歌。
+      // 必须延到下一个宏任务:此刻调用方的 `advancing` 尚未释放(playCurrent 是在
+      // try/finally 里被 await 的),直接调会被 handleDecision 的 advancing 守卫吞掉。
+      setTimeout(() => { void this.handleDecision("stalled", playerId); }, 0);
     }
   }
 
@@ -675,6 +710,8 @@ export class QueueController extends EventEmitter {
     playerId = stripPlayerPrefix(playerId);
     // 整队替换 → 旧队列上的 flow 会话作废（它的曲目列表已经不是这条队列了）。
     this.flowOwned.delete(playerId);
+    // 整队替换 → 上一轮队列攒的连续 cast 失败计数一起作废(新队列是一次全新的尝试)。
+    this.castFailStreak.delete(playerId);
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.items = items;

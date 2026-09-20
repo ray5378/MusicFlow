@@ -4,7 +4,7 @@
 // 返回值:
 //   "advance"      — 自然结束(PLAYING→IDLE),应推进下一首
 //   "ended"        — 整队列播完(PLAYING→IDLE 且无下一首,由 QueueController 判断后传入)
-//   "stalled"      — IDLE 卡死超 60s,异常兜底
+//   "stalled"      — IDLE 卡死超 STALL_TIMEOUT_MS(15s),异常兜底
 //   "track_changed"— 同为 PLAYING 但 uri 变了(设备 native gapless 切歌)
 //   "idle_early"   — 收到 IDLE 但进度远未到已知时长:判为 IDLE 误报,**不切歌**
 //                    (由 QueueController 复查设备真实状态后决定放行还是撤销)
@@ -40,7 +40,20 @@ import { CompareState, PlaybackState } from "./types.js";
 // 2026-09-21 复核 MA `76c2fcb`:全仓 `stall` 只剩 `constants.py:944 STREAM_STALL_TIMEOUT = 20`,
 // 那是**流**级别"多久没新 chunk 就当源卡住",与"播放卡死"无关;原先注里写的
 // `elapsed_time_last_updated > 60s` 只存在于 2026-08 那版 MA(当时据此实现),上游已移除。本仓有意保留。
-const STALL_TIMEOUT_MS = 60_000;
+//
+// ── 2026-09-21 二次订正:60s → 15s,且改「墙钟累积」 ──
+// 旧判据是 `neww.updatedAt - prev.updatedAt > 60_000`,要求**连续两次 IDLE 上报间隔超 60s**。
+// 但设备采样固定 5s(QueueController.startPollLoop),而每次上报都把 updatedAt 刷成当前时刻
+// (DLNA poll 用采样时刻 / AirPlay 用 Date.now() / sendspin 用 Date.now())→ 差值恒为 5s,
+// **生产里永远触发不了**(实测:5s 轮询喂 120 次 IDLE,stalled 0 次;单测能过只是因为它手工把
+// 两次 update 隔了 61s —— 用例测的是一个生产不成立的输入)。更糟的是它唯一的可达旁路
+// (队列停轮询 / advancing 占用超 60s)触发时,恰好会去重投一个**已经播完**的队列。
+// 现在改为「进入 IDLE 记一个时刻、离开即清」的墙钟累积,在 tick() 里判 —— 与设备采样频率、
+// 与 updatedAt 那个「一字段四义」的字段彻底解耦。
+// 阈值取 15s 的依据:dlna/control.ts 的 TRANSPORT_STATE_CACHE_MS = 15000 ——
+// 「SOAP 读不到时沿用最近一次成功读数」的最长窗口就是它,过了这个窗口才有资格认定
+// 设备确实没在播,而不是"我们读不到"。
+const STALL_TIMEOUT_MS = 15_000;
 
 /** 播到已知时长后,再宽限多久才认定"设备不会报结束了"。
  *  取 8s:外推起点是 cast 时刻,设备实际出声常晚 1~3s,外推读数会略超前于真实
@@ -65,7 +78,7 @@ export class PlaybackTracker {
   private prev: CompareState | null = null;
   // 上一次"确实在播放"的状态。BUFFERING(TRANSITIONING)/PAUSED 瞬态不覆盖它。
   // 关键:DLNA 设备自然结束时常 PLAYING→TRANSITIONING→STOPPED。若只盯 prev,
-  // "BUFFERING→IDLE" 会被判为瞬态 → advance 丢失 → 队列卡死 → 60s 后 stalled 重播当前首。
+  // "BUFFERING→IDLE" 会被判为瞬态 → advance 丢失 → 队列卡死 → STALL_TIMEOUT_MS 后 stalled 重播当前首。
   // 用 lastPlaying 记住"这首歌确实在播放",之后无论经过多少瞬态,一旦落到 IDLE 即算结束。
   private lastPlaying: CompareState | null = null;
   /**
@@ -79,6 +92,11 @@ export class PlaybackTracker {
   /** 首次观察到「位置已达已知时长」的时刻(ms)。用于上面的 END_GRACE_MS 计时 ——
    *  外推会把位置封顶在时长,读数是「到顶」而非「超过」,所以只能靠持续时长判定。 */
   private overrunAt: number | null = null;
+  /** 进入 IDLE 的时刻(ms),用于卡死兜底的墙钟累积。只在 IDLE 期间累积,离开即清。 */
+  private idleSinceAt: number | null = null;
+  /** 本次 IDLE 期间是否已派发过 stalled。同一次卡死只报一次 —— 否则 500ms 的 tick
+   *  会每拍重复派发;「再来一次」由 QueueController 重投后的 resetTracker 释放。 */
+  private idleStallSignaled = false;
 
   /** 起播时注入本曲已知时长(秒)。0/无效值 = 未知。 */
   setExpectedDuration(seconds: number): void {
@@ -133,14 +151,20 @@ export class PlaybackTracker {
           this.expectedDuration = 0;
         }
         this.lastPlaying = null;
-      } else if (prev && prev.playbackState === PlaybackState.IDLE
-               && (neww.updatedAt - prev.updatedAt) > STALL_TIMEOUT_MS) {
-        // 卡死兜底:从未播放 / 已结尾,IDLE 持续超 60s
-        decision = "stalled";
       }
-      // 其余:无 lastPlaying 的单发 IDLE 不误判(首次 update / 纯净 IDLE)
+      // 其余:无 lastPlaying 的单发 IDLE 不误判(首次 update / 纯净 IDLE)。
+      // 卡死兜底不在这里判 —— 它要的是「持续了多久」,而 update 是事件驱动(5s 采样),
+      // 给不出采样粒度以下的时刻;改由 tick() 用墙钟累积判(见 STALL_TIMEOUT_MS)。
     }
     // BUFFERING / PAUSED:不作为结束(瞬态屏蔽)。lastPlaying 保持,便于后续 IDLE 落入上方分支。
+    // 卡死计时:只在 IDLE 期间累积,一旦离开 IDLE(PLAYING/PAUSED/BUFFERING)即清零 ——
+    // 暂停/缓冲的墙钟不该算进「卡住多久」,与 MA 只对 PLAYING 计时的口径一致。
+    if (cur === PlaybackState.IDLE) {
+      if (this.idleSinceAt === null) this.idleSinceAt = Date.now();
+    } else {
+      this.idleSinceAt = null;
+      this.idleStallSignaled = false;
+    }
     this.prev = neww;
     return decision;
   }
@@ -159,13 +183,30 @@ export class PlaybackTracker {
    *
    * 只读不写:不动 prev(否则污染状态迁移比较),而对外推有意义的只有末次 PLAYING
    * 快照。判结束后必须清掉时长 —— 设备多半仍报 PLAYING,不清就会同一首反复 advance。
+   *
+   * 这里同时承担**卡死兜底**(与结束判定共用同一节拍,不再依赖设备上报时刻):
+   * 见下方 IDLE 分支与 STALL_TIMEOUT_MS。
    */
   tick(nowMs: number): TrackDecision {
-    const dur = this.expectedDuration;
     const cur = this.prev;
-    // 非 PLAYING(PAUSED/BUFFERING/IDLE)不推进:暂停期间的墙钟不该算进宽限,
+    if (!cur) return "none";
+
+    // ① 卡死兜底:进入 IDLE 后墙钟累积超过 STALL_TIMEOUT_MS 仍未离开 → 报 stalled。
+    //    这是唯一能真正触发它的地方 —— 设备采样只有 5s 粒度,而 updatedAt 一字段四义
+    //    (DLNA poll=采样时刻 / DLNA GENA=事件时刻 / AirPlay=快照时刻 / sendspin=now),
+    //    任何「按上报时间差」的判据都会随来源漂移。
+    if (cur.playbackState === PlaybackState.IDLE) {
+      if (this.idleSinceAt === null || this.idleStallSignaled) return "none";
+      if (nowMs - this.idleSinceAt < STALL_TIMEOUT_MS) return "none";
+      this.idleStallSignaled = true; // 同一次卡死只报一次,等 reset()/离开 IDLE 释放
+      return "stalled";
+    }
+
+    // ② 结束兜底:PLAYING 且位置已到已知时长,持续一个宽限期仍不报结束 → 判结束。
+    const dur = this.expectedDuration;
+    // 非 PLAYING(PAUSED/BUFFERING)不推进:暂停期间的墙钟不该算进宽限,
     // 恢复播放后重新起算,避免「暂停前已等 7s」导致刚恢复就判结束。
-    if (dur <= 0 || !cur || cur.playbackState !== PlaybackState.PLAYING) return "none";
+    if (dur <= 0 || cur.playbackState !== PlaybackState.PLAYING) return "none";
     const pos = cur.position + (nowMs - cur.updatedAt) / 1000;
     if (pos < dur) {
       this.overrunAt = null;
@@ -183,6 +224,10 @@ export class PlaybackTracker {
     this.prev = null;
     this.lastPlaying = null;
     this.overrunAt = null;
+    // 卡死计时一并清:新一轮播放(stalled 重投 / 切歌)时若不清,上一次 IDLE 累积的
+    // 墙钟会立刻让新队列被判卡死。同时释放 idleStallSignaled,让新的一轮还能再报。
+    this.idleSinceAt = null;
+    this.idleStallSignaled = false;
   }
 
   getPrev(): CompareState | null {

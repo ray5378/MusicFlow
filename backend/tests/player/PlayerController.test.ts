@@ -44,15 +44,42 @@ describe("PlayerController", () => {
     expect(onDecision).toHaveBeenCalledWith("track_changed", "dlna:d1");
   });
 
-  it("5s play 超时:乐观窗口超时后若仍 IDLE,触发 stalled", () => {
+  it("5s play 超时:cast 送达后 5s 仍未确认 PLAYING,触发 stalled", () => {
     ctrl.reportState(st(PlaybackState.PLAYING, "u1"));
     vi.advanceTimersByTime(800);
     ctrl.beginOptimistic("dlna:d1", "u2");
     ctrl.reportState(st(PlaybackState.IDLE, "u2"));
     vi.advanceTimersByTime(800); // 乐观窗口内,忽略
     expect(onDecision).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(5000); // 超出 5s play 超时
+    ctrl.armOptimisticTimeout("dlna:d1"); // cast 命令送达 → 阶段 2 开始计时
+    vi.advanceTimersByTime(4000);
+    expect(onDecision).not.toHaveBeenCalled(); // 未满 5s
+    vi.advanceTimersByTime(1000);
     expect(onDecision).toHaveBeenCalledWith("stalled", "dlna:d1");
+  });
+
+  // ── 乐观窗口两段(2026-09-21 拆分):阶段 1 屏蔽瞬态、阶段 2 才计时 ──
+  // 旧实现把 5s 计时压在与阶段 1 同一个调用里,于是那 5s 覆盖了 Stop→SetURI→Play
+  // 三次 SOAP 往返(单次超时 8s,见 dlna/control.ts),窗口必然在 cast 返回前先到点 ——
+  // 判出的 stalled 只是「命令还没发出去」,与 MA PLAYBACK_START_TIMEOUT 语义不同。
+  it("cast 在途不计时: 命令送达前无论等多久都不判卡死", () => {
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1"));
+    vi.advanceTimersByTime(800);
+    ctrl.beginOptimistic("dlna:d1", "u2");
+    vi.advanceTimersByTime(30_000); // 最坏:三次 SOAP 往返
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
+  it("cast 期间设备抢报 PLAYING: 窗口已关,cast 返回后不再起计时", () => {
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1"));
+    vi.advanceTimersByTime(800);
+    ctrl.beginOptimistic("dlna:d1", "u2");
+    ctrl.reportState(st(PlaybackState.PLAYING, "u2", 1)); // 设备先确认成功
+    vi.advanceTimersByTime(1_000); // track_changed 派发完
+    onDecision.mockClear();
+    ctrl.armOptimisticTimeout("dlna:d1"); // cast 返回,但窗口已被 PLAYING 关掉
+    vi.advanceTimersByTime(10_000);
+    expect(onDecision).not.toHaveBeenCalled();
   });
 
   // ── PLAYING 期本地节拍(对照 MA _poll_players 0.5s 推送) ──
