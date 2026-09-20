@@ -29,6 +29,22 @@ export const FADE_MAX_SEC = 15;
 /** 静音剥离默认阈值（dBFS）：低于它视为静音。 */
 export const FADE_DEFAULT_SILENCE_DB = -60;
 
+/**
+ * **引擎级**最小过渡窗口（秒）。对照 MA `controllers/streams/audio.py:184`
+ * `MIN_CROSSFADE_DURATION = 3`。
+ *
+ * ⚠️ 与 `FADE_MIN_SEC` 是**两件不同的事**，不要合并：
+ *   - `FADE_MIN_SEC` = 设置项 `range[0]`：**面板能填到多小**（MA 是 1，照 `constants.py:475-483`）；
+ *   - 本常量 = **引擎执行门槛**：窗口短于 3s 就**不做**过渡。MA 两处落点 ——
+ *     `audio.py:2007-2008`（`if crossfade_buffer_duration < MIN_CROSSFADE_DURATION: …… = 0`）
+ *     与 `audio.py:4145-4146`（`if window < MIN_CROSSFADE_DURATION: return CrossfadeMode.DISABLED`）。
+ *
+ * 为什么必须分开（2026-09-21 复核）：面板区间对齐 MA 的 1…15 时，把原先写在
+ * `FADE_MIN_SEC` 上的 3 一起改成了 1 —— 于是 1s / 2s 的窗口也会真去混。而 1~2s 的
+ * "过渡"不是过渡，只是把两首歌各削一刀；MA 对这段长度是**直接拒绝**的。
+ */
+export const MIN_CROSSFADE_DURATION_SEC = 3;
+
 export interface FadeConfig {
   /** 过渡时长（秒，整秒）。会被夹到 [FADE_MIN_SEC, FADE_MAX_SEC]。 */
   durationSec: number;
@@ -120,6 +136,44 @@ export function crossfadeSamples(durationSec: number, sampleRate: number, channe
   return alignToFrame(bytes, frameBytesOf(ch)) / F32_BYTES_PER_SAMPLE;
 }
 
+// ==================== 窗口决策（MA 的两道引擎边界） ====================
+
+/**
+ * 本边界**实际能用的过渡窗口秒数**。照抄 MA `controllers/streams/audio.py:4136-4146`
+ * 的决策顺序（`window` 的两次夹取 + 一次下限判断）：
+ *
+ *   1. `window = min(配置时长, 可用的曲尾缓冲长度)` —— 「可用缓冲」那道在字节层，
+ *      由调用方用 `effectiveFadeFrames()` 表达，本函数只管时间；
+ *   2. 已知**下一曲**总时长时：`window = min(window, remaining_media / speed / 2)`。
+ *      MA 原话：「a short incoming track cannot supply a long overlap, and blending into
+ *      more than half of it would leave the listener **no clean part of it**」
+ *      ⇒ 不允许把下一曲吃掉超过一半（否则用户从头到尾听不到它任何一段干净的）；
+ *   3. `if window < MIN_CROSSFADE_DURATION_SEC → 不做过渡`。
+ *
+ * 本仓无变速播放（`speed` 恒 1），flow 会话也不支持 seek（`timeOffset > 0` 一律不走 flow，
+ * P3-5）⇒ `remaining_media` 即 `incomingTotalSec`，无需减 `seek_position`。
+ *
+ * @param configuredSec    设置项里的时长（已由 `normalizeFadeConfig` 夹到 [1,15]）
+ * @param incomingTotalSec 下一曲**总**时长（秒）；未知/非正 ⇒ 不施加第 2 步
+ * @returns 实际窗口秒数；**返回 0 = 不做过渡** ⇒ 调用方（`flow.ts` 边界段）的
+ *          `mixWantFrames` 归 0：上一曲尾段**照常全部播出**、本曲首段原样跟上（首尾相接、
+ *          无重叠）。⚠️ 此时**曲尾静音仍然照剥**（`preFrames = availFrames - 0`，
+ *          静音段已从 `availFrames` 里排除）—— 与「窗口被静音吃光」走同一条路径；
+ *          只有「交叉淡入整体关闭」（`fadeBytes === 0`，压根进不了边界分支）才不剥。
+ */
+export function resolveCrossfadeWindowSec(
+  configuredSec: number,
+  incomingTotalSec?: number | null,
+): number {
+  const cfg = typeof configuredSec === "number" && Number.isFinite(configuredSec) ? configuredSec : 0;
+  if (cfg <= 0) return 0;
+  let win = cfg;
+  if (typeof incomingTotalSec === "number" && Number.isFinite(incomingTotalSec) && incomingTotalSec > 0) {
+    win = Math.min(win, incomingTotalSec / 2);
+  }
+  return win < MIN_CROSSFADE_DURATION_SEC ? 0 : win;
+}
+
 // ==================== 权重曲线 ====================
 
 /**
@@ -181,22 +235,28 @@ export function trailingSilenceFrames(
 }
 
 /**
- * 本次过渡实际可用的帧数（P3-3）：配置窗口 ∩ 实际可用长度，再扣掉曲尾静音。
- * - `outgoingFrames`：上一曲持有的尾段长度（帧）；
- * - `incomingFrames`：下一曲已解码出/可用的首段长度（帧，未知则给 Infinity）；
- * 任一为 0 → 0（不做过渡，直接接上，也就没有空隙）。
+ * 过渡窗口的**实际帧数**（P3-3）：时间维度的窗口 ∩ 曲尾实际可用长度，再扣掉曲尾静音。
+ *
+ * **生产路径唯一入口** —— `flow.ts` 的过渡段直接调它。⚠️ 早先 `flow.ts` 内联了一份
+ * 等价实现、本函数**只被单测调用**，于是「数学层 26 例」测的不是出货的那份、还多了一个
+ * 生产从不传的 `incomingFrames`（2026-09-21 复核发现并合一，见 progress §10）。
+ *
+ * - `wantFrames`：时间维度已定下的窗口帧数（`resolveCrossfadeWindowSec` → `crossfadeFrames`）；
+ * - `outgoingFrames`：上一曲持有的尾段长度（帧，**含**曲尾静音）；
+ * - `silenceFrames`：其中属于曲尾静音的帧数。
+ *
+ * 返回 0 = 不做过渡（直接接上，也就没有空隙）。
+ *
+ * 「下一曲首段**实际到货**多少」不在这里表达 —— 那是流式到货量（调用方读到多少算多少），
+ * 与「下一曲**总时长**」是两回事；后者已由 `resolveCrossfadeWindowSec` 的「一半」规则处理。
  */
 export function effectiveFadeFrames(opts: {
   wantFrames: number;
   outgoingFrames: number;
-  incomingFrames?: number;
   silenceFrames?: number;
 }): number {
   const want = Math.max(0, Math.floor(opts.wantFrames) || 0);
-  const avail = Math.min(
-    Math.max(0, Math.floor(opts.outgoingFrames) || 0),
-    Number.isFinite(opts.incomingFrames ?? Infinity) ? Math.max(0, Math.floor(opts.incomingFrames as number)) : Infinity,
-  );
+  const avail = Math.max(0, Math.floor(opts.outgoingFrames) || 0);
   const silent = Math.max(0, Math.floor(opts.silenceFrames || 0));
   // 静音占比不能超过窗口：整段静音时窗口归零（宁可不混，也不要淡一段静音）。
   return Math.max(0, Math.min(want, Math.max(0, avail - silent)));

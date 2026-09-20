@@ -27,10 +27,14 @@ import { acquireTranscodeSlot, resolveFfmpeg } from "../transcode.js";
 import { codecArgs, decodeArgs, limiterFilter, outputFilters, type ChannelCodec } from "./pipeline.js";
 import {
   F32_BYTES_PER_SAMPLE,
+  MIN_CROSSFADE_DURATION_SEC,
+  crossfadeFrames,
   crossfadeSamples,
+  effectiveFadeFrames,
   frameBytesOf,
   mixCrossfade,
   normalizeFadeConfig,
+  resolveCrossfadeWindowSec,
   trailingSilenceFrames,
   type FadeConfig,
 } from "./fades.js";
@@ -237,10 +241,12 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
   const crossfade = opts.crossfade === true;
   const fade = normalizeFadeConfig(opts.fade ?? null);
   const frameBytes = frameBytesOf(channels);
-  // 过渡窗口：按时长算出**采样数**（已按帧对齐），再换成字节做切片。
-  const fadeSamples = crossfade ? crossfadeSamples(fade.durationSec, sampleRate, channels) : 0;
-  const fadeFrames = fadeSamples / channels;
-  const fadeBytes = fadeSamples * F32_BYTES_PER_SAMPLE;
+  // 过渡窗口的**配置上限**：按配置时长算出采样数（已帧对齐），再换成字节。
+  // 它是"最多"扣住 / 预取这么多（`pumpHoldBack` 的 holdBytes、预取点），
+  // **真正参与混合的窗口是每个曲目边界现场算的** —— 因为还要看「下一曲总时长的一半」
+  // 与 3s 引擎下限（MA `streams/audio.py:4136-4146`，见下面 `winFrames`）。
+  const fadeSamplesCfg = crossfade ? crossfadeSamples(fade.durationSec, sampleRate, channels) : 0;
+  const fadeBytes = fadeSamplesCfg * F32_BYTES_PER_SAMPLE;
 
   const stats: FlowStats = { emittedFrames: 0, crossfades: 0, skipped: 0, decoders: 0 };
   const live = new Set<Decoder>();
@@ -358,11 +364,28 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
         const carryFrames = Math.floor(carry.length / frameBytes);
         const silentFrames = trailingSilenceFrames(f32View(carry), channels, fade.silenceThresholdDb);
         const availFrames = Math.max(0, carryFrames - silentFrames);
+        // 本边界的实际窗口。`item` 正是本边界的**下一曲**（carry = 上一曲尾段）。
+        //   时间维度：配置时长 → 两道 MA 引擎边界（下一曲**总时长的一半** / 3s 下限），
+        //             见 `resolveCrossfadeWindowSec`（`streams/audio.py:4136-4146`）；
+        //   字节维度：再 ∩ 曲尾实际可用长度、扣掉曲尾静音（`effectiveFadeFrames`）。
+        // 任一维度否决 → `mixWantFrames = 0` ⇒ 上一曲尾段照常全部播出、本曲首段原样跟上
+        // （首尾相接、无重叠），曲尾静音照旧剥离 —— 与「窗口被静音吃光」时完全同一条路径。
+        const winSec = resolveCrossfadeWindowSec(fade.durationSec, item.durationSec);
+        const win = winSec > 0
+          ? effectiveFadeFrames({
+              wantFrames: crossfadeFrames(winSec, sampleRate),
+              outgoingFrames: carryFrames,
+              silenceFrames: silentFrames,
+            })
+          : 0;
+        // 3s 下限的第二道判断：按「下一曲一半」夹短之后，**真正会被混的那段**可能已不足 3s
+        // （MA 的顺序也是先夹可用长度、再判下限 —— `audio.py:2000-2008`）。
+        const mixWantFrames = Math.floor(win / sampleRate) >= MIN_CROSSFADE_DURATION_SEC ? win : 0;
         // 1) 过渡窗口之前的那段照常播出（它是上一曲正常的后半段）
-        const preFrames = Math.max(0, availFrames - fadeFrames);
+        const preFrames = Math.max(0, availFrames - mixWantFrames);
         if (preFrames > 0) await emit(carry.subarray(0, preFrames * frameBytes));
         // 2) 读本曲首段（最多一个过渡窗口）用于混合
-        const wantBytes = Math.min(fadeFrames, availFrames) * frameBytes;
+        const wantBytes = mixWantFrames * frameBytes;
         let head = Buffer.alloc(0);
         while (head.length < wantBytes) {
           const { value, done } = await iter.next();

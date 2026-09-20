@@ -16,6 +16,7 @@ import {
   FADE_DEFAULT_SEC,
   FADE_MAX_SEC,
   FADE_MIN_SEC,
+  MIN_CROSSFADE_DURATION_SEC,
   alignToFrame,
   crossfadeFrames,
   crossfadeSamples,
@@ -26,6 +27,7 @@ import {
   frameBytesOf,
   mixCrossfade,
   normalizeFadeConfig,
+  resolveCrossfadeWindowSec,
   trailingSilenceFrames,
 } from "../../src/services/audio/fades.js";
 
@@ -148,12 +150,49 @@ describe("P3-3 静音剥离", () => {
   });
 
   it("有效窗口 = min(配置, 可用) − 静音，且不会为负", () => {
-    expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 400000, incomingFrames: 400000, silenceFrames: 0 })).toBe(384000);
+    expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 400000, silenceFrames: 0 })).toBe(384000);
     expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 100000, silenceFrames: 0 })).toBe(100000);
-    expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 400000, incomingFrames: 50000, silenceFrames: 0 })).toBe(50000);
     // 静音占比不能超过窗口 → 宁可不混，也不要淡一段静音
-    expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 400000, incomingFrames: 400000, silenceFrames: 396000 })).toBe(4000);
+    expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 400000, silenceFrames: 396000 })).toBe(4000);
     expect(effectiveFadeFrames({ wantFrames: 384000, outgoingFrames: 1000, silenceFrames: 5000 })).toBe(0);
+  });
+});
+
+describe("P3-2 引擎级窗口边界（MA streams/audio.py:4136-4146）", () => {
+  it("下一曲短于两倍窗口 → 封顶到「其一半」，不吃掉整首", () => {
+    // MA 原话：blending into more than half of it would leave the listener no clean part of it
+    expect(resolveCrossfadeWindowSec(8, 40)).toBe(8);   // 长曲不受影响
+    expect(resolveCrossfadeWindowSec(8, 16)).toBe(8);   // 恰好两倍 → 仍是 8
+    expect(resolveCrossfadeWindowSec(8, 14)).toBe(7);   // 14/2 = 7
+    expect(resolveCrossfadeWindowSec(8, 10)).toBe(5);   // 10/2 = 5
+  });
+
+  it("下一曲时长未知/非正 → 不施加「一半」那道", () => {
+    for (const d of [undefined, null, 0, -5, NaN]) {
+      expect(resolveCrossfadeWindowSec(8, d as number)).toBe(8);
+    }
+  });
+
+  it("夹完「一半」之后 < 3s → 返回 0 = 不做过渡（不是混一个 0 长度）", () => {
+    expect(MIN_CROSSFADE_DURATION_SEC).toBe(3);
+    // 5s 的下一曲 → 5/2 = 2.5 < 3 → 放弃
+    expect(resolveCrossfadeWindowSec(8, 5)).toBe(0);
+    // 6s 的下一曲 → 恰好 3 → 保留
+    expect(resolveCrossfadeWindowSec(8, 6)).toBe(3);
+  });
+
+  it("配置时长本身非法/非正 → 0（快路径，不进混合）", () => {
+    for (const c of [0, -1, NaN, Infinity]) {
+      expect(resolveCrossfadeWindowSec(c as number, 300)).toBe(0);
+    }
+  });
+
+  it("⚠️ 面板下限(1s) != 引擎下限(3s)：设置成 1/2 秒时引擎仍拒绝", () => {
+    // 这是两个不同的东西，别合并（见 fades.ts MIN_CROSSFADE_DURATION_SEC 注释）
+    expect(FADE_MIN_SEC).toBe(1);
+    expect(resolveCrossfadeWindowSec(1, 300)).toBe(0);
+    expect(resolveCrossfadeWindowSec(2, 300)).toBe(0);
+    expect(resolveCrossfadeWindowSec(3, 300)).toBe(3);
   });
 });
 

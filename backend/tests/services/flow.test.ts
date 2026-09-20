@@ -124,11 +124,13 @@ describe("P3-4 命令组装：af 一次算定、限制器只在编码段", () =>
 });
 
 describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
-  it("两曲 5s、过渡 3s：总长 ≈ 5+5−3 = 7s，crossfades=1，decoders=2（预取真并存）", async () => {
-    const a = makeWav("a.wav", { freq: 440, seconds: 5 });
-    const b = makeWav("b.wav", { freq: 660, seconds: 5 });
+  it("两曲 10s、过渡 3s：总长 ≈ 10+10−3 = 17s，crossfades=1，decoders=2（预取真并存）", async () => {
+    // 两曲都必须够长：MA 的「窗口 ≤ 下一曲总时长的一半」规则下，5s 的下一曲配 3s 窗口
+    // 会被夹到 2.5s 再被 3s 下限否决（见下一个用例），那样就测不到混合了。
+    const a = makeWav("a.wav", { freq: 440, seconds: 10 });
+    const b = makeWav("b.wav", { freq: 660, seconds: 10 });
     const statsTrace: number[] = [];
-    const session = await startFlowSession([item("a", a, [], 5), item("b", b, [], 5)], {
+    const session = await startFlowSession([item("a", a, [], 10), item("b", b, [], 10)], {
       codec: { codec: "mp3", bitrateKbps: 192, container: "mp3", mime: "audio/mpeg" },
       crossfade: true,
       fade: { durationSec: 3 },
@@ -139,15 +141,35 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     const st = session.stats();
 
     expect(out.length).toBeGreaterThan(0);
-    expect(outputSeconds(out)).toBeCloseTo(7, 0); // ±0.5s（编码器 padding 容差）
+    expect(outputSeconds(out)).toBeCloseTo(17, 0); // ±0.5s（编码器 padding 容差）
     expect(st.crossfades).toBe(1);
     // 有 durationSec → 预取拉起第二路，两路解码并存过
     expect(st.decoders).toBe(2);
     expect(st.skipped).toBe(0);
-    expect(st.emittedFrames / RATE).toBeCloseTo(7, 0);
+    expect(st.emittedFrames / RATE).toBeCloseTo(17, 0);
     expect(statsTrace).toEqual([0, 1]);
     expect(session.currentIndex()).toBe(1);
-  });
+  }, 30000);
+
+  it("下一曲太短：窗口被「一半」夹到 < 3s → 直接不做过渡（照 MA streams/audio.py:4140-4146）", async () => {
+    // 两个 5s 的曲 + 3s 窗口：MA 先夹到 5/2 = 2.5s，再判 < MIN_CROSSFADE_DURATION(3) ⇒ DISABLED。
+    // 理由是「blending into more than half of the incoming track leaves the listener no
+    // clean part of it」——不许把下一曲整首吃进过渡窗口。
+    const a = makeWav("a6.wav", { freq: 440, seconds: 5 });
+    const b = makeWav("b6.wav", { freq: 660, seconds: 5 });
+    const session = await startFlowSession([item("a", a, [], 5), item("b", b, [], 5)], {
+      codec: { codec: "mp3", bitrateKbps: 192, container: "mp3", mime: "audio/mpeg" },
+      crossfade: true,
+      fade: { durationSec: 3 },
+    });
+    const out = await collect(session.stream);
+    await session.done;
+    const st = session.stats();
+    expect(st.crossfades).toBe(0);            // 引擎拒绝 → 没有混合
+    expect(outputSeconds(out)).toBeCloseTo(10, 0); // 两曲首尾相接，完整播出
+    expect(st.emittedFrames / RATE).toBeCloseTo(10, 0);
+    expect(st.skipped).toBe(0);
+  }, 30000);
 
   it("关掉交叉淡入 = 直通拼接（仍走管道）：总长 ≈ 10s、crossfades=0", async () => {
     const a = makeWav("a2.wav", { freq: 440, seconds: 5 });
@@ -164,9 +186,11 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
 
   it("曲尾静音不计入过渡窗口（P3-3）：尾部 3s 静音 → 不成过渡，静音被丢掉", async () => {
     // 4s 正弦 + 3s 静音（共 7s）。过渡窗口正好 3s，理应被静音吃光 → crossfades=0。
+    // 下一曲声明 10s：先让「窗口 ≤ 下一曲一半」那道通过（10/2 = 5 ≥ 3），
+    // 这样本用例唯一能拦住混合的原因才确实是**静音**，而不是被「一半」规则顺带挡掉。
     const a = makeWav("a3.wav", { freq: 440, seconds: 4, padSec: 3 });
     const b = makeWav("b3.wav", { freq: 660, seconds: 5 });
-    const session = await startFlowSession([item("a", a, [], 7), item("b", b, [], 5)], {
+    const session = await startFlowSession([item("a", a, [], 7), item("b", b, [], 10)], {
       codec: { codec: "mp3", bitrateKbps: 192, container: "mp3", mime: "audio/mpeg" },
       crossfade: true,
       fade: { durationSec: 3 },
@@ -183,9 +207,13 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     // 5s + 1s、过渡窗口 3s：下一曲只够混 1s，剩下 2s 的上一曲尾段必须**照常播出**。
     // 修复前这段既没 emit 也没参与混合，被 `carry = Buffer.alloc(0)` 静默吞掉
     // → 总长只剩 ≈3s，且**没有任何报错**（凭听感才知道少了一段）。
+    //
+    // ⚠️ 下一曲的 `durationSec` 必须声明成 ≥ 6s，否则会被「窗口 ≤ 下一曲一半」的规则
+    // （MA `audio.py:4140-4143`）先否决掉、根本走不到混合 —— 这个用例要测的是
+    // 「**实际到货**的首段短于窗口」（解码失败 / 空流 / 提前 EOF），文件名 → 真实 1s。
     const a = makeWav("a5.wav", { freq: 440, seconds: 5 });
     const b = makeWav("b5.wav", { freq: 660, seconds: 1 });
-    const session = await startFlowSession([item("a", a, [], 5), item("b", b, [], 1)], {
+    const session = await startFlowSession([item("a", a, [], 5), item("b", b, [], 10)], {
       codec: { codec: "mp3", bitrateKbps: 192, container: "mp3", mime: "audio/mpeg" },
       crossfade: true,
       fade: { durationSec: 3 },
