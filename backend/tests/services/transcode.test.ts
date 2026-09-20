@@ -191,23 +191,38 @@ describe("resolveFfmpeg", () => {
   });
 });
 
-describe("并发池（P2-5）", () => {
-  it("上限按核数派生：quality 为核数(下限 4/上限 8)，pipeline 为核数×2(下限 6)", () => {
-    expect(resolveSlotLimits(8, {})).toEqual({ quality: 8, pipeline: 16 });
-    // 小机器：quality 保底 4，pipeline 保底 6
-    expect(resolveSlotLimits(2, {})).toEqual({ quality: 4, pipeline: 6 });
-    // 大机器：quality 封顶 8（编码重，不无限开），pipeline 跟着核数走
-    expect(resolveSlotLimits(32, {})).toEqual({ quality: 8, pipeline: 64 });
+describe("并发池（P2-5 / P3-6）", () => {
+  it("上限按核数派生：quality=核数(下限4/上限8)、pipeline=核数×2(下限6)、flow=核数(下限4)", () => {
+    expect(resolveSlotLimits(8, {})).toEqual({ quality: 8, pipeline: 16, flow: 8 });
+    // 小机器：quality 保底 4，pipeline 保底 6，flow 保底 4
+    expect(resolveSlotLimits(2, {})).toEqual({ quality: 4, pipeline: 6, flow: 4 });
+    // 大机器：quality 封顶 8（编码重，不无限开），pipeline / flow 跟着核数走
+    expect(resolveSlotLimits(32, {})).toEqual({ quality: 8, pipeline: 64, flow: 32 });
     // 核数取不到 → 按 4 核兜底
-    expect(resolveSlotLimits(NaN, {})).toEqual({ quality: 4, pipeline: 8 });
+    expect(resolveSlotLimits(NaN, {})).toEqual({ quality: 4, pipeline: 8, flow: 4 });
   });
 
   it("环境变量可覆盖，非法 / 非正数回退默认", () => {
     expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "3" }).quality).toBe(3);
     expect(resolveSlotLimits(8, { TRANSCODE_PIPELINE_MAX_CONCURRENT: "5" }).pipeline).toBe(5);
+    expect(resolveSlotLimits(8, { TRANSCODE_FLOW_MAX_CONCURRENT: "2" }).flow).toBe(2);
     expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "0" }).quality).toBe(8);
     expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "abc" }).quality).toBe(8);
     expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "-2" }).quality).toBe(8);
+    expect(resolveSlotLimits(8, { TRANSCODE_FLOW_MAX_CONCURRENT: "-1" }).flow).toBe(8);
+  });
+
+  it("flow 池独立：交叉淡入的解码器不挤占实时管道（P3-6 的全部意义）", async () => {
+    // 占满 flow 池（模拟"多个会话同时处在过渡期"）
+    for (let i = 0; i < slotLimit("flow"); i++) await hold("flow");
+    expect(activeTranscodeCount("flow")).toBe(slotLimit("flow"));
+    // 实时管道池一点没被吃掉 → 普通出流不受交叉淡入影响
+    expect(activeTranscodeCount("pipeline")).toBe(0);
+    const p = await acquireTranscodeSlot("pipeline");
+    heldLeases.push(p);
+    expect(activeTranscodeCount("pipeline")).toBe(1);
+    // 合计计数把三池都算上（兼容旧调用点）
+    expect(activeTranscodeCount()).toBe(slotLimit("flow") + 1);
   });
 
   it("租约配平后回到 0，且释放幂等", async () => {

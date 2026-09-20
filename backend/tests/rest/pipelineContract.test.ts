@@ -34,6 +34,10 @@ import { setSetting } from "../../src/services/settings.js";
 //      不允许再出现「原样直出」手段（`createReadStream` / `Accept-Ranges` /
 //      `getParam(c,"raw")` / `c.body(` / `serveDlnaWebStream` / `serveWebSongStream`）。
 //      P2-7 补的是第三处（搜索即播的未入库远程歌），它曾是唯一还在整段代理上游字节的路。
+//   ④ P3-1/P3-5 之后多了一个出流点：`serveFlowQueue`（队列连续流 + 交叉淡入）。
+//      它**也是一个管道出口**（六段里的 ①②③④⑤⑥ 全在同一会话内完成），
+//      所以 X 头从"只定义一次"改成"只在两个管道出口各定义一次"，并且
+//      flow 只能由开关把关、只作为回退链的一环出现 —— 不许出现"第三条"出流。
 //
 // ⚠️ DLNA 路由里**保留**的回环 `raw` 分支（`resolveRawStreamToken`）是喂给 ffmpeg 的
 // 取源通道（SPEC §1.8 第三个坑的落库注册表），**不是**面向用户的直透 —— 结构锁因此
@@ -59,6 +63,11 @@ describe("P2-6 结构锁:两个路由都不再有原样直出路径（D9 回归�
     expect(seg).not.toContain("createReadStream");
     expect(seg).not.toContain("Accept-Ranges");
     expect(seg).not.toMatch(/getParam\(c,\s*"raw"\)/);
+    // P3-1(HTTP 侧):flow 只作为**显式 opt-in** 存在(`flow=1` + `peerId=`),
+    // 且必须过开关;两条出口都落在管道里(单曲 / 连续流),没有第三条。
+    expect(seg).toMatch(/getParam\(c,\s*"flow"\)/);
+    expect(seg).toContain("serveFlowQueue(");
+    expect(seg).toContain("resolveFlowSettings(");
   });
 
   it("/rest/dlna/stream handler 段的 cast 分支后无原样直出手段", () => {
@@ -67,15 +76,29 @@ describe("P2-6 结构锁:两个路由都不再有原样直出路径（D9 回归�
     // 回环取源分支必须挂在本进程注册表上（发给 ffmpeg 用），不能被换成别的签发来源
     expect(seg).toContain("resolveRawStreamToken(token)");
     // cast token（用户可见路径）之后一律走管道
-    const afterCast = seg.slice(seg.indexOf("resolveCastToken(token)"));
+    const afterCast = seg.slice(seg.indexOf("resolveCastSession(token)"));
     expect(afterCast.length).toBeGreaterThan(0);
     expect(afterCast).not.toContain("createReadStream");
     expect(afterCast).not.toContain("Accept-Ranges");
     expect(afterCast).toContain("servePipelinedSong(");
+    // P3-5:DLNA 侧默认由服务端接管队列 → flow 出口必须**开关把关**（缺省关）
+    // 且会话内部仍是六段管道（serveFlowQueue 就是管道出口，不是旁路）。
+    expect(afterCast).toContain("resolveFlowSettings(");
+    expect(afterCast).toContain("serveFlowQueue(");
+    // 设备在流内 seek（timeOffset>0）时连续流没有稳定语义 → 必须落回单曲管道
+    expect(afterCast).toMatch(/timeOffset === 0/);
   });
 
-  it("X-MusicFlow-Transcoded 头只在管道出口定义一次（所有出流同一出口）", () => {
-    expect((restSrc.match(/"X-MusicFlow-Transcoded":/g) || []).length).toBe(1);
+  it("X-MusicFlow-Transcoded 头只在两个管道出口定义（单曲管道 / flow 连续流，没有第三条）", () => {
+    const single = sliceBetween(restSrc, "async function serveFfmpegPipe(", "function icyFrameStream(");
+    const flowExit = sliceBetween(restSrc, "async function serveFlowQueue(", "async function resolveTranscodeInput(");
+    const count = (s: string) => (s.match(/"X-MusicFlow-Transcoded":/g) || []).length;
+    expect(count(single)).toBe(1);
+    expect(count(flowExit)).toBe(1);
+    // 文件总计 = 2 ⇒ 两个出口之外不可能再有别的出流点
+    expect(count(restSrc)).toBe(2);
+    // flow 出口额外自报家门（便于线上分辨设备拉到的是连续流还是单曲流）
+    expect(flowExit).toContain('"X-MusicFlow-Flow": "1"');
   });
 
   it("被删掉的直出实现不许复活", () => {

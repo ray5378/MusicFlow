@@ -159,26 +159,35 @@ export function spawnTranscoder(opts: TranscodeSpawnOptions): ChildProcessByStdi
 // 因此按「谁决定的输出格式」分池，两池互不抢槽：
 //   quality : 客户端显式指定 format / maxBitRate（音质转码）—— 编码最重，池小但受保护
 //   pipeline: 默认实时管道（解码 → loudnorm → 同族编码）—— 数量最多，池子开大
+//   flow    : 交叉淡入会话的**解码器**（P3-6）—— 过渡期两路并存，故上限按"解码器数"计
 // 上限默认值照 MA 的派生方式按 CPU 核数算（constants.py:211
 // `_default_background_scan_concurrency` 同为「按核数派生 + 封顶」），
 // 并允许环境变量覆盖（容器编排里固定值时用）。
-// 注：P3-6 会给交叉淡入在此之上再预留槽位，届时只调池上限、不动调用方。
 
-export type TranscodeSlotKind = "quality" | "pipeline";
+export type TranscodeSlotKind = "quality" | "pipeline" | "flow";
 
 export interface SlotLimits {
   /** 音质转码池上限（客户端显式要档位）。 */
   quality: number;
   /** 归一化管道池上限（默认实时管道）。 */
   pipeline: number;
+  /**
+   * 交叉淡化会话的**解码器**上限（P3-6）。
+   * 一个 flow 会话稳态占 1 个（当前曲），过渡窗口内占 2 个（当前曲 + 预取曲），
+   * 所以"会话数 × 2 = 解码器数"—— 上限按解码器数给，等于**为过渡峰值预留了
+   * 一倍余量**，交叉淡入不会因为抢不到槽而在接缝处停顿。
+   */
+  flow: number;
 }
 
 /**
- * 由核数与环境变量算出两池上限（纯函数，供单测锁定）。
+ * 由核数与环境变量算出三池上限（纯函数，供单测锁定）。
  *   - quality ：核数，下限 4、上限 8（编码重，不无限开）
  *   - pipeline：核数 ×2，下限 6（解码+loudnorm 很轻，但数量多，实时性优先）
+ *   - flow    ：核数，下限 4（按解码器数；8 核 = 4 个会话同时处于过渡期）
  * 环境变量：`TRANSCODE_MAX_CONCURRENT`（沿用旧名，现只约束音质池）、
- * `TRANSCODE_PIPELINE_MAX_CONCURRENT`（新增）。非正数 / 非法值一律回退默认。
+ * `TRANSCODE_PIPELINE_MAX_CONCURRENT`、`TRANSCODE_FLOW_MAX_CONCURRENT`。
+ * 非正数 / 非法值一律回退默认。
  */
 export function resolveSlotLimits(cpuCount: number, env: Record<string, string | undefined>): SlotLimits {
   const cores = Number.isFinite(cpuCount) && cpuCount > 0 ? Math.floor(cpuCount) : 4;
@@ -189,6 +198,7 @@ export function resolveSlotLimits(cpuCount: number, env: Record<string, string |
   return {
     quality: pick(env.TRANSCODE_MAX_CONCURRENT, Math.max(4, Math.min(cores, 8))),
     pipeline: pick(env.TRANSCODE_PIPELINE_MAX_CONCURRENT, Math.max(6, cores * 2)),
+    flow: pick(env.TRANSCODE_FLOW_MAX_CONCURRENT, Math.max(4, cores)),
   };
 }
 
@@ -207,6 +217,7 @@ const SLOT_LIMITS: SlotLimits = resolveSlotLimits(
 const slotPools: Record<TranscodeSlotKind, SlotPool> = {
   quality: { limit: SLOT_LIMITS.quality, active: 0, waiters: [] },
   pipeline: { limit: SLOT_LIMITS.pipeline, active: 0, waiters: [] },
+  flow: { limit: SLOT_LIMITS.flow, active: 0, waiters: [] },
 };
 
 /**
@@ -249,8 +260,8 @@ export function slotLimit(kind: TranscodeSlotKind): number {
   return slotPools[kind].limit;
 }
 
-/** 指定池的占用数；不传 kind 时为两池合计（兼容旧调用）。 */
+/** 指定池的占用数；不传 kind 时为三池合计（兼容旧调用）。 */
 export function activeTranscodeCount(kind?: TranscodeSlotKind): number {
   if (kind) return slotPools[kind].active;
-  return slotPools.quality.active + slotPools.pipeline.active;
+  return slotPools.quality.active + slotPools.pipeline.active + slotPools.flow.active;
 }

@@ -14,14 +14,14 @@ import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCov
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { songSourceInfo, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
-import { getSettingBool } from "../../services/settings.js";
+import { getSetting, getSettingBool } from "../../services/settings.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
-import { resolveCastToken, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
+import { resolveCastToken, resolveCastSession, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
 import { findFallbackStream, resolveEmptyUrlStream, resolveRemoteStreamUrl } from "../../services/source/online/streamFallback.js";
 import { resolvePreferredSong } from "../../services/source/preferredSource.js";
@@ -29,6 +29,10 @@ import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
 import { decideTranscode, spawnTranscoder, TRANSCODE_MIME } from "../../services/transcode.js";
+// 类型专用导入（编译期擦除，不引入运行时依赖；实现体一律动态 import，见各出流函数）。
+import type { ChannelCodec } from "../../services/audio/pipeline.js";
+import type { FadeConfig } from "../../services/audio/fades.js";
+import type { FlowItem } from "../../services/audio/flow.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendToUser } from "../../services/ws/index.js";
 
@@ -1386,10 +1390,15 @@ async function serveFfmpegPipe(
 }
 
 /**
- * ICY 间隔装帧(P2-2):每 metaint 音频字节后插 1 字节 0x00(元数据长度 0 = 无更新)。
- * 只在设备请求 Icy-MetaData:1 且响应宣告 icy-metaint 时启用。
+ * ICY 间隔装帧(P2-2):每 metaint 音频字节后插元数据块。
+ *
+ * `metadataFor` 缺省 = 插 1 字节 0x00(长度 0 = 无更新),逐字节与 P2-2 行为一致;
+ * flow 会话(P3-5)传一个"当前曲目"的取值函数 → 每次间隔发出真实
+ * `StreamTitle='…';` 块,**连续流里的曲目边界就靠它告诉设备**
+ * (否则设备从流里分不出换歌,屏显永远是第一首)。
+ * 取值函数每次间隔现读一次,所以曲目边界一到,下一个间隔就切到新标题。
  */
-function icyFrameStream(source: any, metaint: number): any {
+function icyFrameStream(source: any, metaint: number, metadataFor?: () => Buffer | null | undefined): any {
   let pending = 0;
   return source.pipeThrough(new TransformStream({
     transform(chunk: any, controller: any) {
@@ -1400,13 +1409,16 @@ function icyFrameStream(source: any, metaint: number): any {
         buf = buf.subarray(take);
         pending += take;
         if (pending >= metaint) {
-          controller.enqueue(new Uint8Array([0]));
+          controller.enqueue(metadataFor?.() ?? EMPTY_ICY_METADATA);
           pending = 0;
         }
       }
     },
   }));
 }
+
+/** 长度 0 的 ICY 元数据块（无更新）—— 单例复用，避免每 16 KB 分配一次。 */
+const EMPTY_ICY_METADATA = new Uint8Array([0]);
 
 /**
  * 管道出流(P2-1):解码→af→按源族编码,单 ffmpeg 进程直出 HTTP。
@@ -1441,6 +1453,128 @@ async function servePipelinedSong(
     slot: "pipeline",
     ...(opts.extraHeaders ? { extraHeaders: opts.extraHeaders } : {}),
     ...(opts.icyMetaint ? { icyMetaint: opts.icyMetaint } : {}),
+  });
+}
+
+/**
+ * flow 会话里**每曲**的 -af 链：与 `resolveRequestAf` 同源，但**不含量限器**。
+ * 原因：两路信号在混合后才可能超 0 dBFS，限幅必须落在混合之后（⑤ 在 ④ 之后，plan §3.1）；
+ * 每曲各加一次等于对同一信号限幅两次（白烧 CPU，第二次还是空转）。
+ * 通道开关（`pipeline.http`）关闭 → 空链，与逐首路径语义一致（D9：只是链为空，不绕管道）。
+ */
+async function resolveFlowAf(song: { id?: string } | null): Promise<string[]> {
+  if (!getSettingBool("pipeline.http", true)) return [];
+  const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
+  return resolveLoudnessAf({ ...(song?.id ? { rowId: song.id } : {}), includeLimiter: false });
+}
+
+/**
+ * flow 出流（P3-1 · D7 的 L0 落地）：把队列从 `songId` 起**连续拼成一条不间断流**，
+ * 会话内部两路解码并存、按片加权混合（④），限制器落在混合之后（⑤）。
+ * 与 `servePipelinedSong` 的区别：那是**一首歌一条流**，这里是一**条流多首歌**。
+ *
+ * 返回 `null` = 本次不适合走 flow（没有队列 / 队列里找不到这首歌 / playMode 不是顺序播放 /
+ * 只有一首 / 首曲解析不出输入），调用方**必须**回退 `servePipelinedSong`。
+ * 回退不是"绕过管道"：逐首仍是完整六段（D9），只是没有重叠窗口。
+ */
+async function serveFlowQueue(
+  c: any,
+  opts: {
+    deviceId: string;
+    songId: string;
+    codec: ChannelCodec;
+    fade: FadeConfig;
+    icyMetaint?: number;
+    extraHeaders?: Record<string, string>;
+    maxItems?: number;
+  },
+): Promise<Response | null> {
+  const { getQueueManager } = await import("../../services/dlna/queue.js");
+  const { selectFlowCandidates, icyMetadataBlock } = await import("../../services/audio/flowSource.js");
+  const qm = getQueueManager();
+  const snapshot = qm.snapshot(opts.deviceId);
+  const candidates = selectFlowCandidates(snapshot, opts.songId, opts.maxItems);
+  if (candidates.length < 2) return null; // 只此一首 → 会话无意义，交回单曲管道
+
+  // 逐首解析输入 + af。af **一次算定**（P3-4 的 pin）：会话内部只读不重算，
+  // 过渡途中不会因重解析（loudnorm 容量重选 / 换源行）而改增益 —— 那正是
+  // "过渡瞬间音量跳变"的来源，且只在换歌时出现、极难复现。
+  const items: FlowItem[] = [];
+  for (const cand of candidates) {
+    const row = db.select().from(songs).where(eq(songs.id, cand.songId)).get();
+    if (!row) continue;
+    const resolved = await resolvePreferredSong(row);
+    const input = await resolveTranscodeInput(c, resolved);
+    if (!input) continue;
+    items.push({
+      key: resolved.id,
+      input: input.source,
+      ...(input.headers ? { headers: input.headers } : {}),
+      af: await resolveFlowAf(resolved),
+      title: cand.title || resolved.title || "",
+      artist: cand.artist || resolved.artist || "",
+      ...(typeof cand.duration === "number" && cand.duration > 0 ? { durationSec: cand.duration } : {}),
+    });
+  }
+  // 首曲解析失败（文件丢失 / 源全挂）→ 交回单曲管道走它既有的 404 与换源处理，
+  // 不在这里另造一套语义。首曲必须成功，否则会话从"第二首"开始播 = 用户点了没反应。
+  if (items.length < 2 || items[0].key !== opts.songId) return null;
+
+  const startIndex = snapshot.items.findIndex((it) => it.songId === opts.songId);
+  // ICY 当前标题：由 onItemStart 改写，装帧器每个间隔现读一次（见 icyFrameStream）。
+  let metadata: Buffer | null = null;
+  const { startFlowSession } = await import("../../services/audio/flow.js");
+  const session = await startFlowSession(items, {
+    codec: opts.codec,
+    crossfade: true,
+    fade: opts.fade,
+    onItemStart: (i, item) => {
+      metadata = icyMetadataBlock(item.title, item.artist);
+      // 静默推进队列位置 + 广播快照（见 QueueController.flowAdvance 注释）。
+      try { qm.flowAdvance(opts.deviceId, startIndex + i); } catch { /* 队列已被改，忽略 */ }
+    },
+    onItemEnd: (_i, item, stderr, ok) => {
+      // P0-4 在 flow 模式下的唯一落点：每首歌有自己的解码 stderr，可逐首上报边播边测。
+      if (!ok) return;
+      void (async () => {
+        try {
+          const { reportPlaybackLoudness } = await import("../../services/audio/analysisStore.js");
+          reportPlaybackLoudness(item.key, stderr);
+        } catch { /* 入库失败不影响已发出的流 */ }
+      })();
+    },
+  });
+
+  const signal = c.req.raw.signal;
+  qm.setFlowOwned(opts.deviceId, true);
+  const onAbort = () => session.abort();
+  if (signal.aborted) {
+    session.abort();
+    qm.setFlowOwned(opts.deviceId, false);
+    return new Response(null, { status: 499 });
+  }
+  signal.addEventListener("abort", onAbort, { once: true });
+  // 会话结束（自然放完 / 中止）→ 摘掉 flow 所有权，否则该设备的切歌决策被永久吞掉。
+  void session.done.then(() => {
+    signal.removeEventListener("abort", onAbort);
+    qm.setFlowOwned(opts.deviceId, false);
+  });
+
+  const { Readable: NodeReadable } = await import("node:stream");
+  let webStream: any = NodeReadable.toWeb(session.stream as any);
+  const metaint = opts.icyMetaint ?? 0;
+  if (metaint > 0) webStream = icyFrameStream(webStream, metaint, () => metadata);
+
+  return new Response(webStream, {
+    status: 200,
+    headers: {
+      "Content-Type": opts.codec.mime,
+      "Cache-Control": "no-cache",
+      "X-MusicFlow-Transcoded": "1",
+      "X-MusicFlow-Flow": "1",
+      ...(metaint > 0 ? { "icy-metaint": String(metaint), "icy-name": "MusicFlow" } : {}),
+      ...(opts.extraHeaders || {}),
+    },
   });
 }
 
@@ -1530,6 +1664,30 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
       if (parsedLocal.type !== "w") {
         const fs = await import("fs");
         if (!fs.existsSync(parsedLocal.filePath)) return c.json(fail(70, "File not found"));
+      }
+    }
+
+    // P3-1(HTTP 侧):调用方显式 opt-in(`flow=1` + `peerId=`)且开关打开时出队列连续流。
+    // **为什么 HTTP 必须显式 opt-in,而 DLNA 可以默认接管**:HTTP 客户端的"下一首"是
+    // 客户端自己在推进(Web 用 Howler / Flutter 用自己的队列),服务端替它拼流会让两边
+    // 各推进一次 → 跳歌。DLNA 的队列本就由服务端持有(QueueController),所以能默认接管。
+    // 关闭 / 不适用 → 落回下面的单曲管道(逐首仍是完整六段,D9)。
+    if (timeOffset === 0 && getParam(c, "flow") === "1") {
+      const peerId = getParam(c, "peerId") || "";
+      if (peerId) {
+        const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
+        const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d));
+        if (flowCfg.enabled && flowCfg.crossfade) {
+          const { resolveChannelCodec } = await import("../../services/audio/pipeline.js");
+          const flowResp = await serveFlowQueue(c, {
+            deviceId: peerId,
+            songId: song.id,
+            codec: resolveChannelCodec(song.suffix),
+            fade: flowCfg.fade,
+            ...((c.req.header("icy-metadata") || "") === "1" ? { icyMetaint: 16384 } : {}),
+          });
+          if (flowResp) return flowResp;
+        }
       }
     }
     return servePipelinedSong(c, song, input, {
@@ -1650,8 +1808,9 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
     if (upstream.headers.get("accept-ranges")) respHeaders["Accept-Ranges"] = "bytes";
     return c.body(upstream.body as any, upstream.status as any, respHeaders);
   }
-  const songId = resolveCastToken(token);
-  if (!songId) return c.text("Invalid or expired cast token", 403);
+  const castSession = resolveCastSession(token);
+  if (!castSession) return c.text("Invalid or expired cast token", 403);
+  const songId = castSession.songId;
 
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return c.text("Song not found", 404);
@@ -1712,6 +1871,28 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
       "Content-Length": String(Math.ceil(rateKbps * 1000 / 8 * 12 * 3600)),
     };
     const icyRequested = (c.req.header("icy-metadata") || "") === "1";
+
+    // P3-5:D7 的 L0 落地 —— 开关打开时(缺省**关**,见 flowSource.resolveFlowSettings)
+    // 出「队列连续流」:cast token 里带着 deviceId,能直接取到该设备的**权威队列**,
+    // 从当前首往后接着拼,曲目边界靠 ICY StreamTitle 告诉设备(连续流里设备分不出换歌)。
+    // timeOffset>0(设备在流内 seek 重拉)一律不走 flow:连续流没有"第 N 秒"这个稳定语义,
+    // 交回单曲管道(P2-4 的 timeOffset 路径)。
+    if (timeOffset === 0 && castSession.deviceId) {
+      const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
+      const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d));
+      if (flowCfg.enabled && flowCfg.crossfade) {
+        const flowResp = await serveFlowQueue(c, {
+          deviceId: castSession.deviceId,
+          songId: resolvedSong.id,
+          codec: dlnaCodec,
+          fade: flowCfg.fade,
+          extraHeaders,
+          ...(icyRequested ? { icyMetaint: 16384 } : {}),
+        });
+        if (flowResp) return flowResp;
+      }
+    }
+
     return servePipelinedSong(c, resolvedSong, input, {
       timeOffset,
       af: await resolveRequestAf(resolvedSong),

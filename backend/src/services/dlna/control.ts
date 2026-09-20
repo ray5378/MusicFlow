@@ -454,12 +454,22 @@ export function createCastSession(songId: string, deviceId: string, baseUrl: str
 }
 
 export function resolveCastToken(token: string): string | null {
+  return resolveCastSession(token)?.songId ?? null;
+}
+
+/**
+ * cast token 的完整会话（P3-5）：出流路由需要 `deviceId` 才能拿到该设备的**权威队列**
+ * —— 队列连续拼接（flow mode）就是"从当前首往后接着拼"，没有 deviceId 就无从取后续曲目。
+ * 与 `resolveCastToken` 同一份会话表，只是多带一个字段（token 里的 deviceId 一直在，
+ * 之前只是没往外暴露）。
+ */
+export function resolveCastSession(token: string): { songId: string; deviceId: string } | null {
   const s = sessions.get(token);
   if (!s || s.expiresAt < Date.now()) {
     if (s) sessions.delete(token);
     return null;
   }
-  return s.songId;
+  return { songId: s.songId, deviceId: s.deviceId };
 }
 
 // ==================== 内部 ffmpeg 回环取流(2026-09-19 事故沉淀) ====================

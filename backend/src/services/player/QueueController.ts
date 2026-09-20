@@ -66,6 +66,10 @@ export class QueueController extends EventEmitter {
   /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
    *  同一首连续卡死第 2 次即放行切歌,而不是 2-3 秒无限重播(见 handleDecision)。 */
   private stallCounters = new Map<string, { songId: string | undefined; count: number }>();
+  /** 正由 flow 会话(连续流,P3-1)驱动的设备:设备拉的是**一条多曲流**,
+   *  它报的 position/duration 不再对应单曲 → 切歌决策由出流侧在曲目边界静默推进
+   *  (见 flowAdvance / handleDecision 入口的拦截)。 */
+  private flowOwned = new Set<string>();
 
   constructor() {
     super();
@@ -255,6 +259,13 @@ export class QueueController extends EventEmitter {
     if (this.isMemberOfActiveGroup(id)) return;
     const q = this.queues.get(id);
     if (!q) return;
+
+    // P3-1:flow 会话驱动的设备 —— 它拉的是一条多曲连续流,设备侧上报的 position/duration
+    // 不再对应单曲,tracker 必然算出"该切歌",但那条流自己会接着播下一首。此时重投
+    // SetAVTransportURI 会打断正在播的流(听感 = 每次切歌都断一次)。队列推进改由出流侧
+    // 在曲目边界调 `flowAdvance()` 静默完成,切歌决策在这里一律吞掉。
+    // `ended` 不吞:流自然结束(= 会话跑完)时仍要走 markEnded,否则 UI 永远停在"播放中"。
+    if (this.flowOwned.has(id) && (decision === "advance" || decision === "track_changed")) return;
 
     if (decision === "advance" || decision === "track_changed") {
       if (this.advancing.has(id)) return;
@@ -622,6 +633,8 @@ export class QueueController extends EventEmitter {
   /** 仅设数据,不触发播放(供测试 + playFrom 复用)。 */
   setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): void {
     playerId = stripPlayerPrefix(playerId);
+    // 整队替换 → 旧队列上的 flow 会话作废（它的曲目列表已经不是这条队列了）。
+    this.flowOwned.delete(playerId);
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.items = items;
@@ -765,6 +778,7 @@ export class QueueController extends EventEmitter {
 
   clear(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);
+    this.flowOwned.delete(playerId); // 队列清空 → 进行中的 flow 会话作废
     const q = this.queues.get(playerId); if (!q) return;
     // 清空队列同时停止实际播放(dlna=stopDevice,group=扇出各成员)。
     // 成员设备个人清空不打断归属的进行中群组播放。
@@ -807,6 +821,41 @@ export class QueueController extends EventEmitter {
       // 预探测状态位(仅 Web 端消费;HA 卡片不读该字段 → 天然不显示)。
       preProbe: getPreProbeScheduler().status(playerId),
     };
+  }
+
+  // ==================== flow mode（P3-1：把队列连续曲目拼成一条不间断流） ====================
+  // 出流侧（`/rest/dlna/stream/:token`、`/rest/stream?flow=1`）在起会话 / 结束时调用下面
+  // 三个方法。它们只动队列状态,不发任何传输指令 —— 设备拉的就是同一条流。
+
+  /** 标记/解除「该设备正由 flow 会话驱动」。会话结束（含客户端断开）必须传 false。 */
+  setFlowOwned(playerId: string, owned: boolean): void {
+    const id = stripPlayerPrefix(playerId);
+    if (owned) this.flowOwned.add(id);
+    else this.flowOwned.delete(id);
+  }
+
+  isFlowOwned(playerId: string): boolean {
+    return this.flowOwned.has(stripPlayerPrefix(playerId));
+  }
+
+  /**
+   * flow 会话走到第 `index` 首：静默把队列位置推过去。
+   *
+   * 为什么"静默"：设备拉的是同一条流，重投 `SetAVTransportURI` 会打断正在播的流
+   * （听感就是每次切歌都断一次）。所以这里只改 `currentIndex` 并广播快照，
+   * 让 Web / HA / ICY 元数据跟上真实播放位置。
+   * 越界（播放途中队列被用户改短）直接忽略，避免把位置推到不存在的曲目上。
+   */
+  flowAdvance(playerId: string, index: number): void {
+    const id = stripPlayerPrefix(playerId);
+    const q = this.queues.get(id);
+    if (!q || index < 0 || index >= q.items.length) return;
+    if (q.currentIndex === index && !q.ended) return;
+    q.currentIndex = index;
+    q.ended = false;
+    this.persist(id);
+    this.emit("queue_changed", id, this.snapshot(id));
+    this.schedulePreProbe(id);
   }
 
   /** Append items without switching playback. If the queue was empty, start
@@ -883,6 +932,7 @@ export class QueueController extends EventEmitter {
   /** Mark a device inactive without clearing the queue. 对照原 QueueManager.deactivate。 */
   deactivate(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);
+    this.flowOwned.delete(playerId); // 停投 → flow 会话由出流侧 abort（这里先摘所有权）
     const q = this.queues.get(playerId); if (!q) return;
     q.isActive = false;
     this.persist(playerId);
@@ -900,6 +950,7 @@ export class QueueController extends EventEmitter {
    *  resetTracker 清掉 prev 状态,避免冻结前后的残留迁移在下次播放时再触发 advance。 */
   stopPlayback(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);
+    this.flowOwned.delete(playerId); // 用户停止 → 会话由出流侧 abort
     const q = this.queues.get(playerId);
     this.ctrls.get(playerId)?.resetTracker(this.players.get(playerId)?.playerId ?? playerId);
     if (!q || !q.isActive) return;

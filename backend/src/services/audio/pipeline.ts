@@ -243,13 +243,20 @@ export interface LoudnessAfOpts {
   targetLoudness?: number;
   /** 逃生舱 env 名(如 "SENDSPIN_LOUDNESS"):设为 "0" 即整条 -af 不加。 */
   escapeEnvVar?: string;
+  /**
+   * 是否在链尾追加限制器(缺省 true)。
+   * **flow/交叉淡入必须传 false**(P3-1):两路信号相加后仍可能超 0 dBFS,
+   * 限制器只能落在混合**之后**(⑤ 在 ④ 之后,plan §3.1),由 flow 的编码段统一加。
+   * 若两处都加,等于对同一信号限幅两次(白烧 CPU + 第二次是空转)。
+   */
+  includeLimiter?: boolean;
 }
 
 /**
  * 响度段 af:[响度?,限制器](sendspin/airplay 共用同一语义,见 P1-2/P1-3):
  * - 逃生舱/单源关闭 → []（与旧命令逐字节一致）;
  * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume;
- * - 末尾恒跟限制器(-1dB,MA 同构)。
+ * - 末尾跟限制器(-1dB,MA 同构),除非 `includeLimiter:false`(flow/交叉淡入用,见该字段注释)。
  * 注意需要 DB(loadAnalysis),在测试/嵌入式场景 DB 未就绪时回落无测量。
  */
 export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
@@ -277,7 +284,7 @@ export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
       : undefined;
   const lf = loudnessFilter({ mode, gainDb, targetLoudness: target });
   if (lf) out.push(lf);
-  out.push(limiterFilter());
+  if (opts.includeLimiter !== false) out.push(limiterFilter());
   return out;
 }
 

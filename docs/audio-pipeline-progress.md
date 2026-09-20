@@ -54,18 +54,18 @@
 | **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
 | **P1** | 管道骨架 + Sendspin / AirPlay | 7 / 7 | ✅ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
 | **P2** | HTTP 通道实时管道化 | 8 / 8 | ✅ | 客户端 / Web / DLNA 走管道，**客户端 + Web 拖动进度可用**，删净直传分支（含搜索即播的 `/stream-remote`） |
-| **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
+| **P3** | Smart Fades L0 | 8 / 8 | ✅ | flow 会话（两路解码并存 + F32 逐片加权混合）+ 队列静默推进，开关缺省关 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **21 / 39** | 🟡 P2 收官，进 P3 | 验收总口径见 plan §8 |
+| **合计** | | **29 / 39** | 🟡 P3 收官，进 P4 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**21 / 39（54%）**
+**29 / 39（74%）**
 
 ### 2.3 当前焦点
 
-**P2 收官（8/8）**：五条链路（客户端 / Web / DLNA / Sendspin / AirPlay）现在**全部**走服务端实时管道，D9 成立 —— 最后一块是 P2-7 的搜索即播（`/rest/stream-remote`）。**下一步 P3-1**（flow mode：把队列连续曲目拼成一条不间断流，是交叉淡入的前置）。
+**P3 收官（8/8）**：交叉淡入的引擎（`services/audio/flow.ts`）＋数学层（`fades.ts`）＋接线层（`flowSource.ts`，开关/队列选曲/ICY）＋DLNA 与 HTTP 两条出口全部就位，`flow` 独立并发池不再与实时管道抢槽。**开关缺省关**（`crossfade.mode` 缺省 `disabled`）—— 打开才拼连续流，关着逐字节等价 P2 的逐首管道。**下一步 P4-1**（`buildFilterChain()`：照 MA 的滤镜映射做 Gain / ToneControl / 参量 EQ / Balance）。
 
 ### 2.4 阶段依赖
 
@@ -181,7 +181,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 ---
 
-## 6. P3 · Smart Fades L0（标准交叉淡入）— 0 / 8 ⬜
+## 6. P3 · Smart Fades L0（标准交叉淡入）— 8 / 8 ✅
 
 **为什么做**
 这是六段里的第 ④ 段，也是用户最能直接感知的一层：连播从「一首结束 → 短暂静默 → 下一首开始」变成平滑过渡。MA 是把多条 ffmpeg 流在时序上拼接、对重叠窗口做加权混合；我们能落的最小可行版本就是 L0 标准交叉淡入，**不做 ML 智能混音**。
@@ -199,21 +199,25 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 | 状态 | # | 任务 | 落点 | commit | 完成日期 | 备注 |
 |---|---|---|---|---|---|---|
-| ⬜ | P3-1 | **flow mode**：把队列连续曲目拼成一条不间断流（两路解码并存） | 新增 `services/audio/flow.ts` | — | — | 内存约 2×11.5 MB + 2 个 ffmpeg，仍封顶 |
-| ⬜ | P3-2 | **标准交叉淡入**：F32 逐片加权混合，时长可配 | 新增 `services/audio/fades.ts` | — | — | 不做 ML 智能混音（L1/L2 属远期） |
-| ⬜ | P3-3 | **静音剥离**：曲尾静音不计入过渡窗口 | `fades.ts` | — | — | |
-| ⬜ | P3-4 | **`normalization_override`**：过渡期间 pin 住两首歌各自的归一化模式 | `flow.ts` + `loudness.ts` | — | — | 风险表「过渡期增益跳变」的唯一解 |
-| ⬜ | P3-5 | DLNA 侧 flow mode + ICY 元数据注入 | `dlna/control.ts` | — | — | 连续流里设备拿不到曲目边界 |
-| ⬜ | P3-6 | 并发池预留额外槽位（过渡期 CPU 翻倍） | `services/transcode.ts` | — | — | |
-| ⬜ | P3-7 | 单测：混合权重曲线、静音剥离、增益不跳变、开关关闭行为 | 新增 `tests/services/fades.test.ts` | — | — | |
-| ⬜ | P3-8 | 重叠长度**按帧对齐取整**（照 `fades.py:389-394`） | `fades.ts` | — | — | 否则混合器静默不出声，不读源码想不到 |
+| ✅ | P3-1 | **flow mode**：把队列连续曲目拼成一条不间断流（两路解码并存） | 新增 `services/audio/flow.ts`＋`services/audio/flowSource.ts` | （本轮） | 2026-09-20 | 引擎：一条编码 ffmpeg + 每曲一条解码 ffmpeg（**懒预取**：距本曲结束「过渡窗口 + 2s」时拉起下一路）；`pumpHoldBack()` 扣住尾部过渡窗口字节，等下一曲首段到齐再混。接线：`flowSource.selectFlowCandidates()` 从**服务端权威队列**（`QueueController.snapshot`）取「当前首起、顺序连续」的曲目；`serveFlowQueue()`（`routes/rest/index.ts`）逐首解析输入 + af 并起会话。**HTTP 侧必须显式 opt-in**（`flow=1`＋`peerId=`）—— HTTP 客户端的"下一首"由客户端自己推进，服务端替它拼流会两边各推进一次 → 跳歌；**DLNA 侧**队列本就由服务端持有（`cast token` 带 `deviceId`，新增 `resolveCastSession()`），故可默认接管。内存仍封顶（两路解码 × F32 交错，会话级不缓存整曲） |
+| ✅ | P3-2 | **标准交叉淡入**：F32 逐片加权混合，时长可配 | 新增 `services/audio/fades.ts` | （本轮） | 2026-09-20 | `mixCrossfade()` 逐帧 `outgoing×w_out + incoming×w_in`；权重曲线 `equal_power`（cos/sin，`w_out²+w_in²≡1`，缺省）/ `linear`；时长缺省 8s、**下限 3s**（对齐 MA `MIN_CROSSFADE_DURATION = 3`）。**不用 ffmpeg `acrossfade`**：它要求两个输入预对齐且长度已知，而两路是流式、长度未知（plan §3.4-2） |
+| ✅ | P3-3 | **静音剥离**：曲尾静音不计入过渡窗口 | `fades.ts`（`trailingSilenceFrames` / `effectiveFadeFrames`） | （本轮） | 2026-09-20 | 阈值缺省 −60 dBFS（`FADE_DEFAULT_SILENCE_DB`）；逐帧判「**所有**声道都低于阈值」才算静音（单声道有声即非静音）。有效窗口 = `min(配置, 可用) − 静音`，且不为负 ⇒ 整段静音时窗口归零（宁可不混，也不要淡一段静音）。会话里实测：尾部 3s 静音 ⇒ `crossfades=0` 且静音被丢弃（不再"淡出完还在放静音"） |
+| ✅ | P3-4 | **`normalization_override`**：过渡期间 pin 住两首歌各自的归一化模式 | `flow.ts` + `routes/rest/index.ts`（`resolveFlowAf`） | （本轮） | 2026-09-20 | 做法比 MA 更彻底：**每曲的 af 链在会话启动前一次算定**（`FlowItem.af` 必填），会话内部只读不重算 —— flow.ts **不 import** 任何响度/分析/设置模块（结构锁断言），过渡途中不可能因重解析而改增益。限幅器**不**进每曲的 af（`resolveLoudnessAf({includeLimiter:false})`）：两路相加后才可能超 0 dBFS，限幅必须在混合之后（⑤ 在 ④ 之后） |
+| ✅ | P3-5 | DLNA 侧 flow mode + ICY 元数据注入 | `dlna/control.ts`（`resolveCastSession`）＋`routes/rest/index.ts` | （本轮） | 2026-09-20 | cast token 一直在会话表里带 `deviceId`，只是没往外暴露；`resolveCastSession()` 暴露后 DLNA 路由即可取该设备队列。`icyFrameStream()` 增加**动态元数据提供者**：每个 `icy-metaint`（16384）间隔现读一次「当前曲目」→ 发真实 `StreamTitle='Artist - Title';` 块（长度字节 = 16 字节分片数，块 = `1 + N×16`）；无提供者时逐字节等价 P2-2 的 1 字节 `0x00`。`timeOffset > 0` 一律不走 flow（连续流没有稳定的"第 N 秒"语义） |
+| ✅ | P3-6 | 并发池预留额外槽位（过渡期 CPU 翻倍） | `services/transcode.ts` | （本轮） | 2026-09-20 | 新增**第三个池 `flow`**（上限 `TRANSCODE_FLOW_MAX_CONCURRENT`，缺省 `max(4, 核数)`），计费单位 = **存活解码器数**（稳态 1 / 过渡期 2）⇒ 8 核可同时有 4 个会话处在过渡期。交叉淡入**不占 `pipeline` 池**：不这么做则过渡瞬间的额外一路会去抢普通出流的槽（plan §3.4-7） |
+| ✅ | P3-7 | 单测：混合权重曲线、静音剥离、增益不跳变、开关关闭行为 | 新增 `tests/services/fades.test.ts`＋`tests/services/flow.test.ts`＋`tests/services/flowSource.test.ts` | （本轮） | 2026-09-20 | 三层各锁一段：**数学层** 26 例（帧对齐取整 / 曲线起止点与单调性 / 等功率功率守恒 / 静音剥离 / 不等长与未帧对齐抛错 / 配置归一化）；**会话层** 8 例（真 ffmpeg：两路解码并存 `decoders=2`、5s+5s−3s=7s、关开关=10s 直通、尾静音不成过渡、单曲同实现、abort 幂等且 `done` 收敛、命令组装、**结构锁**）；**接线层** 13 例（开关缺省全关 / 队列选曲只在顺序播放 / ICY 块格式与分片数） |
+| ✅ | P3-8 | 重叠长度**按帧对齐取整**（照 `fades.py:389-394`） | `fades.ts`（`alignToFrame` / `crossfadeSamples`） | （本轮） | 2026-09-20 | `crossfade_size = bytes // frame_size * frame_size`；`frameBytesOf(ch) = ch × 4`（F32）。窗口按整帧算 ⇒ 采样数必为声道数整数倍；`mixCrossfade()` 对未帧对齐/不等长**直接抛错**（不"容错"——静默错位的声场比报错难查得多）。单测专门盯「采样数 % channels === 0」这条契约 |
 
 **依赖与注意**
 - 依赖 P1（flow 需要两段式 `AudioBuffer`）；DLNA ICY 注入依赖 P2 的基础设施（可降级自带最小注入）。
 - **P3-4 与 P3-8 两个必做都别跳** —— 前者对应增益跳变，后者对应「静默不出声」，后者尤其阴险（无报错）。
 - L1 beat-aligned / L2 智能混音属远期（P5-4）：MA 侧依赖 torch 栈、`MIN_RAM_GB=4.0`，不可复刻。
+- **开关缺省关（重要，别误判"交叉淡入没生效"）**：`crossfade.mode` 缺省 `disabled`（`pipeline.flow` 只是"允许"）。plan 的 D7 只定"本轮做 L0"，没定"缺省打开"；自用场景下先手动开。开关 UI 在 P5-1，`flowSource.resolveFlowSettings()` 就是它未来的读取口。
+- **队列推进必须"静默"**：flow 会话驱动的设备拉的是**一条多曲流**，设备侧上报的 position/duration 不再对应单曲 —— tracker 必然算出"该切歌"，但那条流自己会接着播下一首。所以 `QueueController.handleDecision` 在 `flowOwned` 时吞掉 `advance`/`track_changed`，队列位置改由出流侧在曲目边界调 `flowAdvance()` 静默推进（重投 `SetAVTransportURI` 会打断正在播的流，听感 = 每次切歌都断一次）。`ended` **不吞**（流自然结束仍要走 `markEnded`）。
+- **`playMode` 必须是 `order` 才拼流**：`shuffle` 的下一首由洗牌序决定、`one`/`all` 会回卷，都不是"队列下标 +1"，会话内推进必然与设备真实顺序打架。队列默认 `playMode` 就是 `shuffle` ⇒ 不改模式时不会拼流。
+- **EPIPE 必须吃掉**：客户端断开 → 我们 SIGKILL 编码器 → 正在飞行中的那次 `stdin.write()` 会异步回 EPIPE，`writeOut` 里的可写性检查拦不住；Node 对没有 `'error'` 监听的流会抛未捕获异常（生产里是进程级崩溃）。已在编码器 stdin / 解码器 stdout 上各挂一个空 `error` 监听。
 
-**验收结果**：*待填*
+**验收结果**：引擎与接线全绿 —— `tests/services/fades.test.ts` 26 例、`tests/services/flow.test.ts` 8 例（真 ffmpeg：5s+5s−3s=7s、`decoders=2`、`crossfades=1`；关开关 10s 直通；尾静音 3s ⇒ `crossfades=0`；单曲同实现；abort 幂等且 `done` 收敛）、`tests/services/flowSource.test.ts` 13 例、`tests/services/transcode.test.ts` 40 例（含 flow 池独立不抢管道）。契约锁扩到第四个出口：`serveFlowQueue` 也是**管道出口**（六段全在会话内完成），`X-MusicFlow-Transcoded` 从"只定义一次"改为"只在两个管道出口各定义一次"，并断言 flow 只由开关把关、只作为回退链一环（不许出现第三条出流）。tsc 0、7 个静态门禁 0。全量 **166 文件 / 1326 用例**绿。**真机连播听感（无间隙/无爆音）与回录 LUFS ≤ 1 LU 仍待人工验收** —— 需先打开 `crossfade.mode=standard`。
 
 ---
 
@@ -296,6 +300,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 2026-09-20 | （本轮） | P2-5：并发槽由单池 4 槽拆为**两个独立池**——`quality`（客户端显式要 format/maxBitRate，上限按核数派生、下限 4 上限 8）／`pipeline`（默认实时管道，核数 ×2、下限 6），8 核机即 8 / 16；派生方式照 MA `constants.py:211`。acquire 改**租约制**（返回释放函数 + 幂等 `released` 标志，防分池后释放落错池 / 一次出流还三次额度）；`serveFfmpegPipe` 的 `slot` 必填（音质转码 quality、默认管道 pipeline），避免默认值静默降级；实际排队时记一次日志（首字节延迟可观测）。单测重写为 6 例（派生公式 / env 覆盖与非法值回退 / 幂等 / 池内排队 / 两池互不抢槽 / 合计计数）。`docs/audio-pipeline-plan.md` §1.3 与 §6 P2 表、`docs/DEVELOPER.md` 环境变量表同步。全量 162/1267 绿。总值 19/38。 |
 | 2026-09-20 | （本轮） | P2-6：新增契约锁 `tests/rest/pipelineContract.test.ts` 8 例 —— 结构锁（两 handler 段内无 `createReadStream`/`Accept-Ranges`/`raw` 用户分支，DLNA 仅从 `resolveCastToken` 后断言以保住回环取源分支；X 头全文件只定义一次）+ 开关开/关（关掉 `pipeline.http` 两路由仍走管道）+ 换源行增益按 `row.id`。为此导出 `resolveRequestAf`。**本轮新发现第三处直出**：`/rest/stream-remote` 仍原样代理上游字节（`serveWebSongStream`，唯一调用点），搜索即播路径无响度标准化 → **新增任务 P2-7**（含前端 `probeRemoteFormat` 联动），总数 38 → 39。顺带修 2 处与实现不符的注释。tsc 0；本文件 8/8 绿。总值 20/39。 |
 | 2026-09-20 | （本轮） | P2-7：`/rest/stream-remote`（搜索即播·未入库远程歌）改走 `servePipelinedSong`，`serveWebSongStream` 整段删除（D9 第三处直出清除）；补 `timeOffset` 透传；**换源前移**为出流前的 `resolveRemoteStreamUrl`（probe 三态：ok→原链 / gone→多源换源 / gone 且无替代→404 / transient→原链不判死）；前端删 `probeRemoteFormat`＋`remoteFmtCache`＋`playbackSeq`、`useEntitySearch` 的 `_suffixKnown` 一并删除，远程歌固定按 mp3 起播（避免探测拉起常驻 ffmpeg 烧槽）。结构锁扩到第三个路由 + 前端源码锁；`streamRemoteFallback.test.ts` 重写为真 HTTP 上游 + 真 ffmpeg（fetch stub 拦不住子进程）。文档同步：`PLUGIN_DEV.md` §5 格式契约（两条路径对 `suffix` 的用法不同）、`SOURCE_SWAP.md` 换源发生点、`plan §6` P2 表。全量 163/1278 绿。总值 **21/39**，P2 收官 8/8。 |
+| 2026-09-20 | （本轮） | P3-1~P3-8：**Smart Fades L0（标准交叉淡入）收官 8/8**。新增三层：数学层 `services/audio/fades.ts`（帧对齐取整 P3-8 / 等功率·线性权重曲线 / 静音剥离 P3-3 / F32 逐片加权混合，未帧对齐或不等长**直接抛错**）、进程编排 `services/audio/flow.ts`（一条编码 + 每曲一条解码，**懒预取**下一路 + `pumpHoldBack()` 扣住过渡窗口字节，稳态 1 路 / 过渡期 2 路）、接线层 `services/audio/flowSource.ts`（开关缺省**关** / 从权威队列选曲 / ICY 元数据块）。**P3-4 用"一次算定"替代 MA 的运行时 pin**：每曲 af 在会话启动前算定且 `flow.ts` 不 import 任何响度模块（结构锁），限幅器只落在混合之后（⑤ 在 ④ 之后）。**P3-5**：`resolveCastSession()` 暴露 cast token 里的 `deviceId` → DLNA 可默认接管队列；`icyFrameStream()` 增加动态元数据提供者（每 16384 字节发真实 `StreamTitle`）。**P3-6**：并发池加第三池 `flow`（上限 `max(4,核数)`，按存活解码器计费），交叉淡入不抢 `pipeline` 池。**队列静默推进**：`QueueController.flowOwned` + `flowAdvance()`，flow 期间吞掉 `advance`/`track_changed`（重投传输指令会打断连续流），`ended` 不吞。**EPIPE 吃掉**（客户端断开后飞行中的 stdin 写会异步 EPIPE，无监听则进程级崩溃）。出口接线：DLNA 默认接管、HTTP 必须 `flow=1&peerId=` 显式 opt-in（HTTP 客户端的"下一首"由客户端推进，替它拼流会两边各推一次 → 跳歌）。契约锁扩到第四个出口（`serveFlowQueue` 也是管道出口）。新增 `fades.test.ts` 26 例 / `flow.test.ts` 8 例（真 ffmpeg）/ `flowSource.test.ts` 13 例 / `transcode.test.ts` +1 例（flow 池不抢管道）；tsc 0、7 门禁 0。总值 **29/39**，P3 收官 8/8。 |
 
 ---
 
