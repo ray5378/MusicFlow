@@ -7,7 +7,7 @@
 **最终目标**：把 **客户端 / Web / DLNA / Sendspin / AirPlay** 五条链路统一走服务端实时管道
 （解码 F32 → 响度标准化 → DSP → 交叉淡入 → 限制器 → 通道编码），**响度标准化全覆盖、不留任何直传旁路**（D9）。
 
-创建：2026-09-20 ｜ 最后更新：**2026-09-20（文档建立，尚未开工）** ｜ main 位置 `ba2dcac`（plan 与 SPEC 已对齐 MA 源码，CI 7/7 绿）
+创建：2026-09-20 ｜ 最后更新：**2026-09-20（P2-4 Web seek 适配完成）** ｜ main 位置 `65fe662`（P0/P1/P2 共 13 提交在 230 本地已提交、**未 push**，见 §10）
 
 ---
 
@@ -53,19 +53,19 @@
 |---|---|---|---|---|
 | **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
 | **P1** | 管道骨架 + Sendspin / AirPlay | 7 / 7 | ✅ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
-| **P2** | HTTP 通道实时管道化 | 1 / 7 | 🟡 | 客户端 / Web / DLNA 走管道，**客户端拖动进度实测通过**，删净直传分支 |
+| **P2** | HTTP 通道实时管道化 | 5 / 7 | 🟡 | 客户端 / Web / DLNA 走管道，**客户端 + Web 拖动进度可用**，删净直传分支 |
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **16 / 38** | 🟡 P2 施工中 | 验收总口径见 plan §8 |
+| **合计** | | **18 / 38** | 🟡 P2 施工中 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**16 / 38（42%）**
+**18 / 38（47%）**
 
 ### 2.3 当前焦点
 
-**P2-2/2b 已合入。下一步 P2-3**：客户端 seek 判定改造（跨仓库 MusicFlow-client，按 `X-MusicFlow-Transcoded` 判据走 timeOffset 重拉）。
+**P2-4 已合入（Web 端 seek 适配）。下一步 P2-5**：并发池上调 + 归一化独立并发（`services/transcode.ts`），随后 P2-6 契约锁（断言两路由无原样直出）。Web 端拖动进度待真机验收（见 §5 备注）。
 
 ### 2.4 阶段依赖
 
@@ -142,7 +142,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 ---
 
-## 5. P2 · HTTP 通道实时管道化 — 3 / 7 🟡
+## 5. P2 · HTTP 通道实时管道化 — 5 / 7 🟡
 
 **为什么做**
 现在客户端 / Web 拿到源文件的原始字节，完全绕开响度标准化段；DLNA 侧还有一条 `?raw=1` 直透分支。要让「五条链路全覆盖」成立，这三条必须全部改道。
@@ -162,14 +162,15 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | ✅ | P2-1 | `/rest/stream` 走管道；**删除原样拉流分支**；响应加 `X-MusicFlow-Transcoded: 1` 头（D9） | `backend/src/routes/rest/index.ts` | （本轮） | 2026-09-20 | 新增 `servePipelinedSong`（解码→af→按源族编码单进程）＋`serveFfmpegPipe` 公用出流（并发槽/abort/stderr/P0-4）；`serveTranscodedSong` 改走 `transcodeArgs`＋af 透传；D4 跟随源族（wav→FLAC 等，`resolveChannelCodec`）；Range 一律全流 200（P2-3 接）；缺文件仍 404；P0-4 双路径自然播完上报 |
 | ✅ | P2-2 | `/rest/dlna/stream/:token` 走管道；**删除 `?raw=1` 直透分支**（D9）；MIME 同步 | 同上 + `plugin/renderers/dlna.ts` + `dlna/control.ts` | （本轮） | 2026-09-20 | web/webdav/本地统一 `servePipelinedSong`（codecOverride=`resolveDlnaOutput`：ogg 系→mp3 320，其余跟随源族）；旧嗅探/探测/`serveDlnaWebStream` 整段删除（上游错标由 ffmpeg 自适应）；cast/enqueue/DIDL mime 共用 `resolveDlnaOutput`（三处 `DLNA_MIME` 表删除）；tier 转码分支补 songId（P0-4）。全量 161/1251 绿 |
 | ✅ | P2-2b | HTTP 出流响应头四项（照 MA `streams/controller.py:1296-1318`） | `routes/rest/index.ts` + `dlna/control.ts` | （本轮） | 2026-09-20 | `contentFeatures.dlna.org`＋12h 假 Content-Length 恒带（flac 按 1411k 估）；ICY 仅设备请求时给（`icy-metaint: 16384`＋`TransformStream` 空元数据装帧，零块步长 16385）；`serveFfmpegPipe` 新增 `extraHeaders`/`icyMetaint` |
-| ⬜ | P2-3 | **客户端 seek 判定改造（必做）**：改为按响应头 / 服务端能力判定 | MusicFlow-client：`lib/providers/player/transcoded_stream_seek.dart` + `player_playback_helpers.dart` | — | — | 跨仓库；判据是存在 `X-MusicFlow-Transcoded` → 走 timeOffset 重拉 |
-| ⬜ | P2-4 | Web 端 seek 适配：无 Range 时按 `timeOffset` 重建 URL，进度用 offset 补偿 | `frontend/src/stores/player.ts` | — | — | |
+| ✅ | P2-3 | **客户端 seek 判定改造（必做）**：改为按响应头 / 服务端能力判定 | MusicFlow-client：`lib/providers/player/transcoded_stream_seek.dart` + `player_playback_helpers.dart` | （本轮） | 2026-09-20 | `shouldUseServerTimeOffsetSeek` 新增 `serverPipelinedHttp` 开关（true 无条件 timeOffset 重拉）；`serverPipesAllHttpStreams` 版本门控（MusicFlow ≥ 3.0.47，Navidrome/老版/未知保守 false）；三处调用点叠加；预览/离线不受影响；共享契约表默认行为不变。客户端仓库已推 main，本机无 Flutter SDK，`flutter test` 待客户端 CI |
+| ✅ | P2-4 | Web 端 seek 适配：无 Range 时按 `timeOffset` 重建 URL，进度用 offset 补偿 | `frontend/src/stores/player.ts` + 新增 `frontend/src/utils/transcodedSeek.ts` | （本轮） | 2026-09-20 | `localSeek` 改为带 `timeOffset` 重拉（服务端 `-ss` 前置定位），**250ms trailing debounce**（el-slider `@input` 每帧触发，不防抖一次拖拽会起几十个 ffmpeg）；`localStreamOffset` 补偿进度 / 时长 / 歌词（`toLogicalPosition`，时长按 `howl.duration()+offset` 还原全曲）；同一整秒内的微调不重拉；暂停态拖动只重建不自动播；seek 重建不重复 scrobble；纯函数 `utils/transcodedSeek.ts` + 12 单测。`vue-tsc --noEmit` 0。**真机拖动进度待人工验收** |
 | ⬜ | P2-5 | 并发池上调 + 归一化独立并发，不抢音质转码的槽 | `services/transcode.ts` | — | — | |
 | ⬜ | P2-6 | 契约测试：开关开/关、换源行增益变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退、**断言两个路由都不再有原样直出路径** | 新增 `tests/services/pipeline.test.ts` | — | — | 最后一条是 D9 的回归锁 |
 
 **依赖与注意**
 - 依赖 P1 —— 三条链路复用同一套 `AudioPipeline` 与响度决策。
 - **P2-3 漏做 = 客户端拖动进度直接失败**：客户端现有判定依据是「是否支持 Range」，实时流不再给字节 Range，必须改按响应头判定。还要跨仓库改 MusicFlow-client。
+- **P2-4 Web 端同源问题**：Howler 的 `howl.seek(t)` 同样依赖字节 Range → 已改为带 `timeOffset` 重拉。因前端资源随镜像发布、与后端同版本，**无需 P2-3 那样的版本门控**；但 `el-slider @input` 每帧触发，**必须 250ms 防抖**，否则一次拖拽会起几十个 ffmpeg。
 - DLNA 的 `REL_TIME` seek 退化是**已接受代价（D5）** —— UI 进度走服务端状态 / WS 推送不受影响；保留单设备回退开关（P5-2）。
 
 **验收结果**：*待填（含客户端拖动进度的实测结论）*
@@ -287,6 +288,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 2026-09-20 | （本轮） | P1-5/6：转码走管道装配（同进程编码＋af，stderr 排空）＋单测补齐；对照本地 MA 源码回查：aresample 合并单滤镜、增益去限幅、`isSoundEffect`、描述子字段补齐（存量库 PRAGMA 补列）。P1 收官 7/7。全量 161/1244 绿。总值 13/38。 |
 | 2026-09-20 | （本轮） | P2-1：`/rest/stream` 默认走管道（D4 跟随源族＋af＋X 头，Range 全流 200，缺文件 404 保留）；`serveTranscodedSong` 改走统一组装＋af/P0-4。原样拉流分支删除（D9）。全量 161/1246 绿。总值 14/38。 |
 | 2026-09-20 | （本轮） | P2-2/2b：`/rest/dlna/stream/:token` 全通道走管道（web/webdav/本地统一 `servePipelinedSong`＋`resolveDlnaOutput`；旧嗅探/探测/`serveDlnaWebStream`/`?raw=1` 直透删除；cast/enqueue/DIDL mime 三处同步；tier 转码补 songId）；音箱兼容头（contentFeatures＋12h 假长度恒带，ICY 按需＋空元数据装帧）。`dlnaOggFallback` 重写 7 例＋`dlnaStreamPrefer` 更新＋`resolveDlnaOutput` 3 单测。全量 161/1251 绿。总值 16/38。 |
+| 2026-09-20 | （本轮） | P2-3（客户端仓库 `81eda97`，已推 main）：seek 判定改按服务端能力（`serverPipelinedHttp` 直通 + `serverPipesAllHttpStreams` 版本门控 ≥3.0.47，Navidrome/老版/未知保守 false）。P2-4：Web 端 Howler 无字节 Range → 改带 `timeOffset` 重拉；新增纯函数 `frontend/src/utils/transcodedSeek.ts`（`seekTargetFromLogical` / `toLogicalPosition` / `withTimeOffset`）＋`player.ts` 250ms 防抖重建＋进度/时长/歌词 offset 补偿＋跨包单测 `tests/services/transcodedSeek.test.ts` 12 例。`vue-tsc --noEmit` 0。总值 18/38。 |
 
 ---
 

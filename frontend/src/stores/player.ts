@@ -10,6 +10,7 @@ import { coverUrl } from "@/utils/cover";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import { getClientId } from "@/utils/clientId";
 import { getDeviceCard } from "@/utils/deviceCard";
+import { seekTargetFromLogical, toLogicalPosition, withTimeOffset } from "@/utils/transcodedSeek";
 import { gt } from "@/locales";
 
 /**
@@ -214,7 +215,14 @@ export const usePlayerStore = defineStore("player", () => {
   // 本机链路的服务端预探测状态位(2026-09-11):随 local 队列快照 / WS 透传。
   // 与投屏远端共用同一份右上角轻提示(activePreProbe 在非远端时回落到它)。
   const localPreProbe = ref<{ ready: number; scanned: number; misses: number; exhausted: boolean; cooldownUntil: number | null; at: number } | null>(null);
+  // P2-4：当前本机实时流的起始偏移（秒）。后端 P2-1 起 /rest/stream 全通道走实时
+  // 管道（无字节 Range）→ 拖动进度只能带 timeOffset 重拉；而重拉后的流内位置从 0
+  // 起算，需加回该偏移才是逻辑位置（进度显示 / 歌词 / 时长）。换歌 / 正常起播时归 0。
+  const localStreamOffset = ref(0);
   let howl: Howl | null = null;
+  // 拖动 seek 的 trailing debounce：el-slider @input 每帧触发，不防抖会让一次拖拽
+  // 起几十个 ffmpeg 转码（与 setVolume / castSeek 同款 250ms）。
+  let localSeekTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ==================== Unified peer system (core refs, declared early) ====================
   // currentPeerId drives which state machine the UI shows/controls.
@@ -410,14 +418,14 @@ export const usePlayerStore = defineStore("player", () => {
   const progress = computed(() => duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0);
 
   // 播放源 URL:远程歌(带 streamUrl)直接用它(需补 token),否则走后端 /rest/stream?id=。
-  function getStreamUrl(song: Song): string {
+  // timeOffsetSec > 0 时追加 `timeOffset`(整秒)让服务端 ffmpeg 从该位置起出流(P2-4)。
+  function getStreamUrl(song: Song, timeOffsetSec = 0): string {
     const authStore = useAuthStore();
     const token = authStore.token || "";
-    if (song.streamUrl) {
-      const sep = song.streamUrl.includes("?") ? "&" : "?";
-      return `${song.streamUrl}${sep}token=${encodeURIComponent(token)}`;
-    }
-    return `/rest/stream?id=${song.id}&token=${encodeURIComponent(token)}`;
+    const base = song.streamUrl
+      ? `${song.streamUrl}${song.streamUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`
+      : `/rest/stream?id=${song.id}&token=${encodeURIComponent(token)}`;
+    return withTimeOffset(base, timeOffsetSec);
   }
   function getCoverUrl(id: string | undefined) { return coverUrl(id, 300); }
 
@@ -511,8 +519,14 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
-  async function startLocalPlayback() {
+  async function startLocalPlayback(opts?: { timeOffsetSec?: number; autoplay?: boolean }) {
     const mySeq = ++playbackSeq;
+    // P2-4：拖动 seek 带 timeOffset 重拉；换歌 / 正常起播为 0。offset>0 表示这是
+    // 「同一首的 seek 重建」，据此避免重复 scrobble（详见 onplay 内注释）。
+    const offset = Math.max(0, Math.floor(opts?.timeOffsetSec ?? 0));
+    const autoplay = opts?.autoplay !== false;
+    if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
+    localStreamOffset.value = offset;
     if (howl) { howl.unload(); howl = null; }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
@@ -525,24 +539,37 @@ export const usePlayerStore = defineStore("player", () => {
       if (mySeq !== playbackSeq) return;
       fmt = probed || fmt || "mp3";
     }
+    // seek 重拉后 howl.duration() 返回「剩余时长」，加回 offset 才是全曲时长（P2-4）。
+    // 未 load 完时 howl.duration() 可能为 0 → 不覆盖，避免进度条时长跳变。
+    const syncDuration = () => {
+      const raw = howl?.duration() || 0;
+      if (raw > 0) localDuration.value = toLogicalPosition(raw, offset);
+    };
     howl = new Howl({
-      src: [getStreamUrl(song)],
+      src: [getStreamUrl(song, offset)],
       format: fmt ? [fmt] : [],
       volume: volume.value,
       html5: true,
       onplay: () => {
         localIsPlaying.value = true;
-        localDuration.value = howl?.duration() || 0;
+        syncDuration();
         startLocalProgressTimer();
         // 远程歌(未入库)不 scrobble:后端按 songId 写播放记录,remote: 伪 id 会外键报错。
-        if (!song.streamUrl) api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
+        // offset>0 是 seek 重建（同一首），不重复上报（换歌时 offset=0 照常上报）。
+        if (!song.streamUrl && offset === 0) api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       },
       onpause: () => { localIsPlaying.value = false; stopLocalProgressTimer(); },
       onend: () => { localNext(); },
-      onload: () => { localDuration.value = howl?.duration() || 0; },
+      onload: syncDuration,
       onloaderror: () => { localHandlePlaybackError(song.id); },
       onplayerror: () => { localHandlePlaybackError(song.id); },
     });
+    if (!autoplay) {
+      // 暂停态下拖动：只重建流、不自动播（管道有背压，不会空跑），保持暂停外观。
+      localIsPlaying.value = false;
+      localCurrentTime.value = toLogicalPosition(0, offset);
+      return;
+    }
     howl.play();
     // 乐观置位:点击播放后立即让按钮显示"暂停",不再单纯依赖浏览器 onplay 事件。
     // html5 自动播放策略下 onplay 偶发迟到/丢失,会导致"在播但按钮仍是播放"的偶发 bug;
@@ -913,8 +940,27 @@ export const usePlayerStore = defineStore("player", () => {
     }).catch(() => {});
   }
 
+  // P2-4：本机流自 P2-1 起是全通道实时管道（无字节 Range），`howl.seek(t)` 无法定位；
+  // 改为带 `timeOffset` 重拉（服务端 ffmpeg `-ss` 前置定位）。el-slider @input 每帧
+  // 触发 → 250ms trailing debounce，只在拖拽停止后重建一次（与 setVolume/castSeek 同款，
+  // 否则一次拖拽会起几十个 ffmpeg 转码）。
   function localSeek(time: number) {
-    if (howl) { howl.seek(time); localCurrentTime.value = time; }
+    if (!howl) return;
+    const target = seekTargetFromLogical(time);
+    localCurrentTime.value = target.logicalPosition; // UI 立即跟手；重拉在防抖后发生
+    if (localSeekTimer) clearTimeout(localSeekTimer);
+    localSeekTimer = setTimeout(() => {
+      localSeekTimer = null;
+      const h = howl; // 收窄到局部常量：闭包内 howl 可能已被换歌清空
+      if (!h) return;
+      // 与当前流起点同一整秒（< 1s 的微调）：不重建，省一次转码；把显示拉回实际位置。
+      if (target.serverOffset === localStreamOffset.value) {
+        localCurrentTime.value = toLogicalPosition(h.seek() as number || 0, localStreamOffset.value, localDuration.value);
+        return;
+      }
+      // 播放/暂停状态在执行时取（拖动期间用户可能已切换），避免拖完暂停却被重新拉起。
+      startLocalPlayback({ timeOffsetSec: target.serverOffset, autoplay: h.playing() });
+    }, 250);
   }
 
   function localRemoveFromQueue(index: number) {
@@ -925,6 +971,8 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function localClearQueue() {
+    if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
+    localStreamOffset.value = 0;
     if (howl) { howl.unload(); howl = null; }
     stopLocalProgressTimer();
     localQueue.value = []; localIndex.value = -1; localIsPlaying.value = false;
@@ -961,7 +1009,7 @@ export const usePlayerStore = defineStore("player", () => {
       const playing = howl.playing();
       if (playing !== localIsPlaying.value) localIsPlaying.value = playing;
       if (playing) {
-        localCurrentTime.value = howl.seek() as number || 0;
+        localCurrentTime.value = toLogicalPosition(howl.seek() as number || 0, localStreamOffset.value, localDuration.value);
         updateLocalLyric();
       }
     }, 250);
