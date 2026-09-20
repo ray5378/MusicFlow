@@ -126,8 +126,33 @@ describe("PcmWindow 流式对拍整包解码", () => {
   }, 60_000);
 });
 
-describe("PcmWindow 进程与背压", () => {
-  it("close 杀掉 ffmpeg、无残留,等待中 slice 抛 Closed", async () => {
+describe("PcmWindow 输出恒 48k 立体声(P1-4)", () => {
+  it("44.1k 源经链内 aresample 后输出为 48k(长度比≈48000/44100)", async () => {
+    const wav44 = path.join(tmpDir, "tone-44k.wav");
+    execFileSync(ffmpegBin(), [
+      "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", "sine=frequency=440:duration=5:sample_rate=44100",
+      "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", "-y", wav44,
+    ]);
+    // loudness 关掉:只验证重采样,不掺增益
+    const w = new PcmWindow({ input: wav44, loudness: { enabled: false } });
+    try {
+      await w.ready();
+      const got = await readAll(w);
+      const expectLen = SPOOK(5);
+      // 允许重采样边界 ±0.5% 误差
+      expect(Math.abs(got.length - expectLen) / expectLen).toBeLessThan(0.005);
+      // 有声(非静音):均方根显著大于 0
+      let s = 0;
+      for (let i = 0; i < got.length; i += 100) s += got[i] * got[i];
+      expect(Math.sqrt(s / Math.ceil(got.length / 100))).toBeGreaterThan(0.05);
+    } finally {
+      w.close();
+    }
+  }, 60_000);
+});
+
+describe("PcmWindow 进程与背压", () => {  it("close 杀掉 ffmpeg、无残留,等待中 slice 抛 Closed", async () => {
     const w = new PcmWindow({ input: wav30, loudness: { enabled: false } });
     try {
       await w.ready();

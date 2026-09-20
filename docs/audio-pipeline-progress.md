@@ -57,17 +57,16 @@
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **10 / 38** | 🟡 P1 施工中 | 验收总口径见 plan §8 |
+| **合计** | | **11 / 38** | 🟡 P1 施工中 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**10 / 38（26%）**
+**11 / 38（29%）**
 
 ### 2.3 当前焦点
 
-**P1-3 已合入（含 P0-4 AirPlay 双模式落点）。下一步 P1-4**：输出段收尾
-（dither triangular_hp 已有；确认 Sendspin 编码层对非 48k 输入的处理，
-决定 forceRate/forceChannels 拿掉的时机）。
+**P1-4 已合入。下一步 P1-5**：客户端/Web 已选音质档位并入同一次转码
+（`transcode.ts spawnTranscoder()`，不额外起进程）。
 
 ### 2.4 阶段依赖
 
@@ -110,7 +109,7 @@ P0（数据层，可独立上线）
 
 ---
 
-## 4. P1 · 管道骨架 + Sendspin / AirPlay（①②⑤⑥）— 4 / 7 🟡
+## 4. P1 · 管道骨架 + Sendspin / AirPlay（①②⑤⑥）— 5 / 7 🟡
 
 **为什么做**
 Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都不做响度处理；P0 只产出数据与增益值，需要一条真实的管道把它们吃进去。这两条链路本来就跑 ffmpeg（只是多一条 `-af`），改造成本最低、见效最快。
@@ -131,7 +130,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | ✅ | P1-1b | 解码段输入必须遵守 **SPEC §1.8**（回环 token URL / 本地文件路径），并加契约测试锁死 | `pipeline.ts` + `tests/sendspin/ffmpegInputContract.test.ts` | （本轮） | 2026-09-20 | 合规门下沉到 audio 层 `resolvePipelineInput`（`streamEngine` 旧函数改走别名，调用方零改动；audio 不反向依赖 sendspin）；锁死 IP 字面量＋鉴权头包回环、大写 scheme、空输入早抛、相对路径放行 |
 | ✅ | P1-2 | Sendspin 接入（替换 `ffmpegArgs()` 的硬编码 48k 解码） | `sendspin/streamSource.ts` | （本轮） | 2026-09-20 | `resolveSendspinAf()`：逃生舱/单源关→空链（与旧命令逐字节一致）；缺省 D2 实时 loudnorm＋限制器，有测量走静态 volume；48k 立体声由 forceRate/Channels 保证（P1-4 再拿掉）；`decodeArgs` 补 headers/inputFormat/af 透传；loudnorm 在链时 loglevel 提 info（否则 JSON 被过滤，P0-4 实测抓到的坑）；stderr 全量保留＋`stderrText()`；自然播完调 `reportPlaybackLoudness`（P0-4 sendspin 落点，stop/异常无 JSON 即 false） |
 | ✅ | P1-3 | AirPlay 接入 | `airplay/decoder.ts` | （本轮） | 2026-09-20 | `buildAirplayAf`（响度＋限制器＋44100 pin＋triangular_hp，44.1k/16bit/stereo 是 RAOP 协议硬性要求、非过渡）；输入合规门（非回环 http 直接抛）＋调用点回环包装（fork 在主进程包，子进程信任回环）；stderr 全量＋`stderrText`；P0-4 双模式：in-proc 会话结束直调、fork 经 sessionEnded 事件带 stderr（子进程不碰 DB，主进程按 lastCast 落库）；`handleAirplaySessionEnded` 导出可测 |
-| ⬜ | P1-4 | 输出段 dither `triangular_hp`（仅 >16bit→16bit）；确认 Sendspin 编码层对非 48k 输入的处理 | `sendspin/encoding.ts` | — | — | dither 是 `triangular_hp`，**不是** `triangular` |
+| ✅ | P1-4 | 输出段 dither `triangular_hp`（仅 >16bit→16bit）；确认 Sendspin 编码层对非 48k 输入的处理 | `sendspin/encoding.ts` | （本轮） | 2026-09-20 | 确认结论：Opus 帧常量/libFLAC 实例率/时间线数学全是 48k 硬编码，真跟随源要重写三处，不划算 → sendspin 输出**恒 48k 立体声**（ESP32 固定 I2S），但重采样点从输出选项挪进 af 链（loudnorm 跑在源采样率，单次重采样）；`outputFilters` 加 `forceChannels`（aformat）；44.1k→48k 实测长度比正确；对拍（swr 直通透明）仍过 |
 | ⬜ | P1-5 | 客户端/Web 已选音质档位时并入同一次转码，**不额外起进程** | `services/transcode.ts` `spawnTranscoder()` | — | — | |
 | ⬜ | P1-6 | 单测：参数拼装、模式切换、限制器/dither 随位深开关、loudnorm 时重采样降级 `swr` | `tests/sendspin/ffmpegInputContract.test.ts` 扩展 | — | — | `swr` 降级是 ffmpeg ticket 11323 的规避 |
 
@@ -285,6 +284,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 |---|---|---|
 | 2026-09-20 | — | 本文件建立。任务自 plan §6 拆出 38 项并整合六个阶段的「为什么做 / 成功标准 / 依赖 / 注意」于一篇。前序：`3257606` D9/D10 与两段式修正、`8781b6e` MA 源码逐行复核、`ba2dcac` 行号收紧。**尚未开工，全部 ⬜** |
 | 2026-09-20 | （本轮） | P0 收尾：P0-1/2/3/5 核对完成（表/纯函数/24 单测均已在仓）；新增 `reportPlaybackLoudness` 入口（P0-4 待 P1 管道 stderr）；P0-6 五处删行联动（顺序先回写后行，FK 强制）；P0-7 新 `analysisStore.test.ts` 5 例。全量 159/1204 绿。P0-4 标 🟡 待 P1。 |
+| 2026-09-20 | （本轮） | P1-1/1b/2/3：参数骨架＋输入合规门＋Sendspin/AirPlay 接入 af 链（P0-4 双模式落点）。P1-4：输出段收尾，sendspin 输出恒 48k 立体声（编码层硬编码确认），重采样点挪进 af 链。全量 161/1239 绿。总值 11/38。 |
 
 ---
 

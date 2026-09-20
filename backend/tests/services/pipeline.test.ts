@@ -142,6 +142,13 @@ describe("outputFilters ⑥重采样 + dither(按需)", () => {
       "aresample=osf=s16:dither_method=triangular_hp",
     ]);
   });
+
+  it("forceChannels 追加 aformat 声道布局", () => {
+    expect(outputFilters({ ...base, sourceRate: 48000, sourceBits: 32, targetRate: 48000, targetBits: 32, forceChannels: "stereo" })).toEqual([
+      "aformat=channel_layouts=stereo",
+    ]);
+    expect(outputFilters({ ...base, sourceRate: 48000, sourceBits: 16, targetRate: 48000, targetBits: 16 })).toEqual([]);
+  });
 });
 
 describe("codecArgs 通道编码", () => {

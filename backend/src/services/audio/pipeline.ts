@@ -172,6 +172,8 @@ export interface OutputRequest {
   /** 协议硬性采样率(如 RAOP 恒 44100):设置即无视 sourceRate 恒发 aresample。
    *  与"跟随源"冲突时以它为准,调用方必须在注释写明协议依据。 */
   forceRate?: number;
+  /** 协议硬性声道布局(如 RAOP/ESP32 恒 stereo):设置即追加 aformat。 */
+  forceChannels?: "stereo" | "mono";
 }
 
 /**
@@ -194,6 +196,9 @@ export function outputFilters(req: OutputRequest): string[] {
     const rate = forced ? Math.round(req.forceRate as number) : req.targetRate;
     const resampler = !req.hasLoudnorm && req.soxrAvailable !== false ? "soxr:precision=30" : "swr";
     out.push(`aresample=${rate}:resampler=${resampler}`);
+  }
+  if (req.forceChannels) {
+    out.push(`aformat=channel_layouts=${req.forceChannels}`);
   }
   const needDither =
     typeof req.sourceBits === "number" &&

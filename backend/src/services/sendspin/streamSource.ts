@@ -23,12 +23,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { SAMPLE_RATE, CHANNELS, ffmpegBin } from "./encoding.js";
 import {
   decodeArgs,
-  loudnessFilter,
-  limiterFilter,
-  DEFAULT_TARGET_LUFS,
+  outputFilters,
+  resolveLoudnessAf,
 } from "../audio/pipeline.js";
-import { chooseMode, computeGainDb } from "../audio/loudness.js";
-import { loadAnalysis } from "../audio/analysisStore.js";
 export const BYTES_PER_SAMPLE = 4;
 /** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
  *  2026-09-19 由 60 收到 30 —— 与 MA 的缓冲上限(`sleep_to_limit_buffer(30秒)`)对齐:
@@ -65,35 +62,15 @@ export interface WindowSource {
  *   ffmpeg 命令与 P1-2 之前逐字节一致;
  * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume,
  *   末尾恒跟限制器(-1dB,MA 同构)。
- * 过渡期 48k 立体声由 decodeArgs 的 forceRate/forceChannels 保证(P1-4 再拿掉)。
+ * 输出 48k 立体声恒定(P1-4 确认结论,见 spawn):编码层/时间线全是 48k 硬编码。
  */
 export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness">): string[] {
-  if (process.env.SENDSPIN_LOUDNESS === "0") return [];
-  if (source.loudness?.enabled === false) return [];
-  const target = source.loudness?.targetLoudness ?? DEFAULT_TARGET_LUFS;
-  let measured: number | null = null;
-  if (source.rowId) {
-    try {
-      measured = loadAnalysis(source.rowId)?.loudnessIntegrated ?? null;
-    } catch {
-      measured = null;
-    }
-  }
-  const mode = chooseMode({
-    enabled: true,
-    preference: "fallback_dynamic",
-    targetLoudness: target,
-    measuredLoudness: measured,
+  return resolveLoudnessAf({
+    rowId: source.rowId,
+    enabled: source.loudness?.enabled,
+    targetLoudness: source.loudness?.targetLoudness,
+    escapeEnvVar: "SENDSPIN_LOUDNESS",
   });
-  const out: string[] = [];
-  const gainDb =
-    mode === "measurement_only" || mode === "fixed_gain"
-      ? computeGainDb(target, measured)
-      : undefined;
-  const lf = loudnessFilter({ mode, gainDb, targetLoudness: target });
-  if (lf) out.push(lf);
-  out.push(limiterFilter());
-  return out;
 }
 
 export class WindowEvictedError extends Error {
@@ -237,17 +214,28 @@ export class PcmWindow {
   // ==================== 内部 ====================
 
   private spawn(startSec: number): void {
-    // P1-2:参数经统一管道装配;af 缺省含响度(loudnorm)＋限制器,
-    // 48k 立体声由 forceRate/forceChannels 保证(P1-4 确认后再跟随源)。
-    const af = resolveSendspinAf(this.source);
+    // P1-4 确认结论:sendspin 输出恒 48k 立体声(ESP32 固定 48k I2S ＋
+    // Opus 帧常量/libFLAC 实例率/时间线数学全是 48k 硬编码,真跟随源要重写三处,
+    // 不划算)—— 但重采样点从输出选项挪进 af 链:loudnorm 跑在源采样率(单次重采样,
+    // 质量更好),末尾 aresample 到 48k。输出 F32 交窗口,位深不变故无 dither。
+    const loudAf = resolveSendspinAf(this.source);
+    const hasLoudnorm = loudAf.some(f => f.startsWith("loudnorm"));
+    const outAf = outputFilters({
+      sourceRate: null,
+      sourceBits: 32,
+      targetRate: SAMPLE_RATE,
+      targetBits: 32,
+      hasLoudnorm,
+      forceRate: SAMPLE_RATE,
+      forceChannels: "stereo",
+    });
+    const af = [...loudAf, ...outAf];
     const args = decodeArgs({
       input: this.source.input,
       headers: this.source.headers,
       inputFormat: this.source.inputFormat,
       timeOffsetSec: Math.max(0, startSec),
       ...(af.length > 0 ? { af } : {}),
-      forceRate: SAMPLE_RATE,
-      forceChannels: CHANNELS,
     });
     let proc: ChildProcessWithoutNullStreams;
     try {
