@@ -26,6 +26,7 @@ import {
   outputFilters,
   resolveLoudnessAf,
 } from "../audio/pipeline.js";
+import { isChannelEnabled } from "../audio/pipelineSwitches.js";
 export const BYTES_PER_SAMPLE = 4;
 /** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
  *  2026-09-19 由 60 收到 30 —— 与 MA 的缓冲上限(`sleep_to_limit_buffer(30秒)`)对齐:
@@ -58,6 +59,7 @@ export interface WindowSource {
 
 /**
  * sendspin 推流 -af 链:[响度?,限制器](P1-2)。
+ * - 通道开关 `pipeline.sendspin` 关(P5-1) → []，**仍走管道**（不是绕过，D9）;
  * - 逃生舱 `SENDSPIN_LOUDNESS=0` 或单源 `loudness.enabled=false` → []，
  *   ffmpeg 命令与 P1-2 之前逐字节一致;
  * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume,
@@ -65,6 +67,8 @@ export interface WindowSource {
  * 输出 48k 立体声恒定(P1-4 确认结论,见 spawn):编码层/时间线全是 48k 硬编码。
  */
 export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness">): string[] {
+  // P5-1:通道开关。判定放在本函数里而不是调用点，是为了让"哪条通道被关"只有一处真相。
+  if (!isChannelEnabled("sendspin")) return [];
   return resolveLoudnessAf({
     rowId: source.rowId,
     enabled: source.loudness?.enabled,

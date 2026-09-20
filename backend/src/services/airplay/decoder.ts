@@ -20,6 +20,7 @@ import {
   resolveLoudnessAf,
   isLoopbackUrl,
 } from "../audio/pipeline.js";
+import { isChannelEnabled } from "../audio/pipelineSwitches.js";
 
 const log = createLogger("AIRPLAY");
 
@@ -64,6 +65,8 @@ export interface AirplayDecodeOpts {
 
 /**
  * 组装 AirPlay 解码 af:[响度?,限制器,aresample=44100,dither](P1-3,导出供单测):
+ * - 通道开关 `pipeline.airplay` 关(P5-1) → 不带响度段,**仍走管道**(不是绕过,D9):
+ *   输出段的 pin(44.1k/16bit/stereo)是 RAOP 协议硬性要求,与开关无关,照旧;
  * - 44.1k/16-bit/stereo 是 RAOP 协议硬性要求,恒定 pin(非过渡,与 sendspin 的
  *   forceRate 不同);
  * - 重采样规则与输出段一致:链中有 loudnorm → swr,否则 soxr(见 outputFilters)。
@@ -72,12 +75,14 @@ export function buildAirplayAf(opts: Pick<AirplayDecodeOpts, "rowId" | "loudness
   af: string[];
   hasLoudnorm: boolean;
 } {
-  const loud = resolveLoudnessAf({
-    rowId: opts.rowId,
-    enabled: opts.loudness?.enabled,
-    targetLoudness: opts.loudness?.targetLoudness,
-    escapeEnvVar: "AIRPLAY_LOUDNESS",
-  });
+  const loud = isChannelEnabled("airplay")
+    ? resolveLoudnessAf({
+        rowId: opts.rowId,
+        enabled: opts.loudness?.enabled,
+        targetLoudness: opts.loudness?.targetLoudness,
+        escapeEnvVar: "AIRPLAY_LOUDNESS",
+      })
+    : [];
   const hasLoudnorm = loud.some(f => f.startsWith("loudnorm"));
   // 输出段:源位深按 F32 解码口径(恒 dither 到 16bit);采样率恒 pin 44100,
   // 声道恒 stereo(RAOP 协议硬性要求,非过渡——与 sendspin 的 forceRate 不同)。

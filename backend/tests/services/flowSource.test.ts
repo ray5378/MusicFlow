@@ -67,6 +67,17 @@ describe("resolveFlowSettings：缺省必须全关", () => {
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "abc" })).fade.durationSec).toBe(8);
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "-4" })).fade.durationSec).toBe(8);
   });
+
+  it("P5-1：管道开关关掉 ⇒ 不拼流（effectsOn=false 一票否决，与 pipeline.flow 无关）", () => {
+    const cfg = settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [FLOW_ENABLED_KEY]: "1" });
+    expect(resolveFlowSettings(cfg, { effectsOn: true }).enabled).toBe(true);
+    const off = resolveFlowSettings(cfg, { effectsOn: false });
+    expect(off.enabled).toBe(false);
+    // crossfade 只如实反映配置，由调用方用 enabled 把关（与本文件既有约定一致）
+    expect(off.crossfade).toBe(true);
+    // 缺省 = 不传该项 = 沿用原语义（逐首管道时代的行为不变）
+    expect(resolveFlowSettings(cfg).enabled).toBe(true);
+  });
 });
 
 describe("selectFlowCandidates：只在顺序播放、且歌在队列里时才拼流", () => {

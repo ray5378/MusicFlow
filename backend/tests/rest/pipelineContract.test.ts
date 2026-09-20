@@ -211,6 +211,32 @@ describe("P2-6 开关:pipeline.http 关掉也只等于「滤镜链为空」（D9
     }
   });
 
+  // P5-1：全局总开关与每通道开关是**相乘**的判定，且只影响判定、不改"仍走管道"这件事。
+  it("P5-1：单通道关只影响自己；全局关则所有通道空链（重开即恢复）", async () => {
+    try {
+      setSetting("pipeline.dlna", "0");
+      expect(await resolveRequestAf(null, undefined, "dlna")).toEqual([]);
+      // HTTP 通道不受 DLNA 通道开关影响
+      expect((await resolveRequestAf(null))[0]).toContain("loudnorm=I=-14");
+      setSetting("pipeline.dlna", "1");
+      expect((await resolveRequestAf(null, undefined, "dlna")).length).toBeGreaterThan(0);
+
+      setSetting("pipeline.enabled", "0");
+      expect(await resolveRequestAf(null)).toEqual([]);
+      expect(await resolveRequestAf(null, undefined, "dlna")).toEqual([]);
+      setSetting("pipeline.enabled", "1");
+      expect((await resolveRequestAf(null)).length).toBeGreaterThan(0);
+    } finally {
+      setSetting("pipeline.enabled", "1");
+      setSetting("pipeline.dlna", "1");
+      setSetting("pipeline.http", "1");
+    }
+  });
+
+  it("P5-2：channel=null 表示调用方已判定本次不带滤镜链（DLNA 单设备回退）", async () => {
+    expect(await resolveRequestAf(null, undefined, null)).toEqual([]);
+  });
+
   it("关闭时 /rest/stream 仍走管道出 FLAC（X 头在、无 Content-Length）", async () => {
     setSetting("pipeline.http", "0");
     try {

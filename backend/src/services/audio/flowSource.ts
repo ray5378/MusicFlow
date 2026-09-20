@@ -39,13 +39,20 @@ export interface FlowSettings {
  * 读开关与配置。`get(key, def)` 由调用方注入（路由传 `getSetting`，测试传纯 Map 查询），
  * 这样本函数不依赖 settings 模块的 DB / 缓存，测试里能直接断言"缺省 = 全关"。
  *
+ * `opts.effectsOn`（缺省 `true`）由调用方算好传入 —— **管道开关关掉时不做交叉淡入**
+ * （plan §7「回退」：全局关 = 滤镜链为空 + 无交叉淡入；DLNA 单设备回退亦然）。
+ * 判定不写在这里是为了保持本文件**纯函数**（不 import settings，见文件头）。
+ *
  * 缺省策略（**必须记住，否则会误以为交叉淡入坏了**）：
  *   - `pipeline.flow` 缺省 `1`（开关语义上"允许"），但 `crossfade.mode` 缺省 `disabled`
  *     → `crossfade=false` ⇒ 调用方不会走 flow ⇒ 行为与 P2 逐首管道逐字节一致；
  *   - 只有把 `crossfade.mode` 显式设成 `standard` 才会真拼连续流。
  */
-export function resolveFlowSettings(get: (key: string, def: string) => string): FlowSettings {
-  const enabled = get(FLOW_ENABLED_KEY, "1") !== "0";
+export function resolveFlowSettings(
+  get: (key: string, def: string) => string,
+  opts: { effectsOn?: boolean } = {},
+): FlowSettings {
+  const enabled = opts.effectsOn !== false && get(FLOW_ENABLED_KEY, "1") !== "0";
   const rawMode = (get(CROSSFADE_MODE_KEY, "disabled") || "").trim().toLowerCase();
   const mode: CrossfadeMode = rawMode === "standard" ? "standard" : "disabled";
   const rawDur = Number.parseInt(get(CROSSFADE_DURATION_KEY, ""), 10);

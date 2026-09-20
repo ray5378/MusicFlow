@@ -102,6 +102,8 @@
 | GET/POST/PUT/DELETE | `/sources`、`/sources/:id`、`/sources/:id/scan`、`/scan-stop`、`/scan-status`、`/test` | 音乐库目录管理 |
 | GET/POST/DELETE | `/recommend-pool`、`/recommend-pool/favorites`、`/recommend-pool/playlist/:playlistId` | 推荐池 |
 | GET/PUT | `/player-prefs/dsp`、`/player-prefs/dsp/:peerId` | 每台播放器的音色（③ 段 DSP：Gain / 三段音色 / 参量 EQ / Balance）。GET 全量或单台；PUT 单台（body 即配置，服务端归一化后回显；传 `{}` 即清除该台配置）。需 `renderer.use`，**下一次起播生效** |
+| GET/PUT | `/pipeline/switches` | 音频管道开关（P5-1）。GET 一次给全：全局总开关 `pipeline.enabled` + 四通道 `pipeline.{http,dlna,sendspin,airplay}` + 交叉淡入配置（`flow.enabled` / `mode` / `durationSec`）+ DLNA 设备回退表；PUT 部分更新（`{switches:{enabled,channels:{...}}, flow:{enabled,mode,durationSec}}`，未传字段保持不动、非法值忽略）。**关闭 = 滤镜链为空、仍走管道**，不是恢复直出。需 **admin** |
+| PUT | `/pipeline/dlna/:deviceId` | 某台 DLNA 设备的单独回退（P5-2，D5 配套兜底）。Body `{fallback: boolean}`；只改这台设备，其它设备与该设备其它行为不受影响。需 **admin** |
 
 ## 3. OpenSubsonic（`/rest/*`）
 

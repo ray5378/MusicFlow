@@ -79,6 +79,12 @@ import {
 import { getGroupManager, splitMemberId } from "../../services/group/index.js";
 import { getHiddenPeerIds, setPeerHidden, isPeerHidden, getNameOverrides, getPeerNameOverride, setPeerNameOverride } from "../../services/playerPrefs.js";
 import { getPlayerDspConfig, setPlayerDspConfig, listPlayerDspConfigs } from "../../services/playerDsp.js";
+import {
+  readPipelineSwitches, updatePipelineSwitches, isDlnaFallback, setDlnaFallback,
+} from "../../services/audio/pipelineSwitches.js";
+import {
+  resolveFlowSettings, FLOW_ENABLED_KEY, CROSSFADE_MODE_KEY, CROSSFADE_DURATION_KEY,
+} from "../../services/audio/flowSource.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { PlaybackState } from "../../services/player/types.js";
@@ -3299,6 +3305,51 @@ apiRoutes.put("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE),
   } catch {
     return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.dsp.saveFailed"), 500);
   }
+});
+
+// ===== 音频管道开关（P5-1）+ DLNA 单设备回退（P5-2）=====
+// 语义照 D9：**关闭 = 滤镜链为空（+ 不再拼交叉淡入流），仍走管道** —— 不是恢复直透。
+// 全是服务端全局播放行为，故一律 admin（与 /v1/settings、/v1/proxy 一致）。
+// GET 一次给全：开关 + 交叉淡入配置 + DLNA 设备回退表（面板一次渲染完，省 N 次请求）。
+apiRoutes.get("/v1/pipeline/switches", adminMiddleware, (c) => {
+  const flow = resolveFlowSettings((k, d) => getSetting(k, d));
+  return c.json({
+    switches: readPipelineSwitches(),
+    flow: { enabled: flow.enabled, mode: flow.mode, crossfade: flow.crossfade, durationSec: flow.fade.durationSec },
+    devices: getCachedDevices().map((d) => ({
+      deviceId: d.id,
+      name: d.name || d.id,
+      fallback: isDlnaFallback(d.id),
+    })),
+  });
+});
+// PUT：部分更新。`{switches:{enabled,channels:{...}}, flow:{enabled,mode,durationSec}}`。
+// 未传的字段保持不动；非法值忽略（逐项提交，不该一条手抖把整次保存打回）。
+apiRoutes.put("/v1/pipeline/switches", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  updatePipelineSwitches(body?.switches ?? body);
+  const flow = body?.flow;
+  if (flow && typeof flow === "object") {
+    if (typeof flow.enabled === "boolean") setSetting(FLOW_ENABLED_KEY, flow.enabled ? "1" : "0");
+    if (flow.mode === "standard" || flow.mode === "disabled") setSetting(CROSSFADE_MODE_KEY, flow.mode);
+    const dur = Number(flow.durationSec);
+    if (Number.isFinite(dur) && dur > 0) setSetting(CROSSFADE_DURATION_KEY, String(Math.round(dur)));
+  }
+  const resolved = resolveFlowSettings((k, d) => getSetting(k, d));
+  return c.json({
+    ok: true,
+    switches: readPipelineSwitches(),
+    flow: { enabled: resolved.enabled, mode: resolved.mode, crossfade: resolved.crossfade, durationSec: resolved.fade.durationSec },
+  });
+});
+// PUT：某台 DLNA 设备的单独回退（D5 配套兜底）。Body: { fallback: boolean }。
+// 只作用于这台设备：其它 DLNA 设备与该设备的其它行为（音量/队列/解绑）都不受影响。
+apiRoutes.put("/v1/pipeline/dlna/:deviceId", adminMiddleware, async (c) => {
+  const deviceId = c.req.param("deviceId") || "";
+  if (!deviceId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.paramsRequired"), 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  setDlnaFallback(deviceId, body?.fallback === true);
+  return c.json({ ok: true, deviceId, fallback: isDlnaFallback(deviceId) });
 });
 
 // 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。

@@ -124,6 +124,68 @@
           </div>
         </div>
       </el-card>
+
+      <!-- ===== 音频管道（P5-1 开关 + P5-2 DLNA 单独回退）=====
+           与「音色」不同：这是**服务端全局**播放行为（所有账号、所有设备一致），故仅管理员可见。
+           语义照 D9：关掉任一开关只等于「该链路滤镜链为空」，播放仍走管道 —— 不恢复「原样直出」。 -->
+      <el-card class="mt-card">
+        <h3>{{ t('settings.pipeline.title') }}</h3>
+        <div class="dsp-desc">{{ t('settings.pipeline.desc') }}</div>
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.pipeline.master') }}</div>
+            <div class="desc">{{ t('settings.pipeline.masterDesc') }}</div>
+          </div>
+          <div class="setting-value"><el-switch v-model="pipelineSwitches.enabled" @change="savePipeline" /></div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label"><div class="title">{{ t('settings.pipeline.channels') }}</div></div>
+          <div class="setting-value pipe-channels">
+            <label v-for="ch in PIPELINE_CHANNEL_KEYS" :key="ch" class="pipe-ch">
+              <el-switch v-model="pipelineSwitches.channels[ch]" size="small" :disabled="!pipelineSwitches.enabled" @change="savePipeline" />
+              <span>{{ t(`settings.pipeline.channel${PIPELINE_CHANNEL_LABEL[ch]}`) }}</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.pipeline.flow') }}</div>
+            <div class="desc">{{ t('settings.pipeline.flowDesc') }}</div>
+          </div>
+          <div class="setting-value"><el-switch v-model="flowForm.enabled" :disabled="!pipelineSwitches.enabled" @change="savePipeline" /></div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label"><div class="title">{{ t('settings.pipeline.crossfade') }}</div></div>
+          <div class="setting-value pipe-row">
+            <span class="dsp-mini">{{ t('settings.pipeline.mode') }}</span>
+            <el-select v-model="flowForm.mode" size="small" style="width: 170px" :disabled="!pipelineSwitches.enabled" @change="savePipeline">
+              <el-option :label="t('settings.pipeline.modeDisabled')" value="disabled" />
+              <el-option :label="t('settings.pipeline.modeStandard')" value="standard" />
+            </el-select>
+            <span class="dsp-mini">{{ t('settings.pipeline.duration') }}</span>
+            <el-input-number v-model="flowForm.durationSec" :min="3" :max="30" :step="1" size="small" controls-position="right" style="width: 110px" :disabled="!pipelineSwitches.enabled || flowForm.mode !== 'standard'" @change="savePipeline" />
+            <span class="dsp-mini">{{ t('settings.pipeline.seconds') }}</span>
+          </div>
+        </div>
+
+        <div class="setting-item pipe-block">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.pipeline.deviceFallback') }}</div>
+            <div class="desc">{{ t('settings.pipeline.deviceFallbackDesc') }}</div>
+          </div>
+          <div class="setting-value pipe-channels pipe-devices">
+            <div v-if="pipelineDevices.length === 0" class="dsp-mini">{{ t('settings.pipeline.noDevices') }}</div>
+            <label v-for="d in pipelineDevices" :key="d.deviceId" class="pipe-ch">
+              <el-switch v-model="d.fallback" size="small" @change="saveDeviceFallback(d)" />
+              <span>{{ d.name }}</span>
+            </label>
+          </div>
+        </div>
+      </el-card>
     </template>
 
     <!-- ===== 音色（每台设备，P4-3）=====
@@ -552,7 +614,102 @@ async function clearDsp(): Promise<void> {
   }
 }
 
-onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig(); });
+// ---------- 音频管道开关 + DLNA 单设备回退（P5-1 / P5-2）----------
+// 服务端**全局**播放行为（所有账号、所有设备一致），端点均 admin ⇒ 面板只挂在管理员区块。
+// 语义照 D9：关掉 = 滤镜链为空（仍走管道），不是恢复直出。
+// 与「音色」面板同一套做法：保存后用响应回写，**归一化的真相源在服务端**。
+const pipelineSwitches = reactive<{ enabled: boolean; channels: Record<string, boolean> }>({
+  enabled: true,
+  channels: { http: true, dlna: true, sendspin: true, airplay: true },
+});
+// flow.enabled 是「允许拼连续流」（P3 的读取口），mode/durationSec 才是真正生效的交叉淡入。
+const flowForm = reactive<{ enabled: boolean; mode: "disabled" | "standard"; durationSec: number }>({
+  enabled: true,
+  mode: "disabled",
+  durationSec: 8,
+});
+const pipelineDevices = ref<Array<{ deviceId: string; name: string; fallback: boolean }>>([]);
+// 面板是一串独立开关，连点时逐条 PUT 会让「后发的响应」被「先发的响应」回写覆盖（回滚错觉）。
+// 照本仓既有做法（`setVolume` / `dailySaving`）做 250ms trailing 去抖，合并成一次提交。
+let pipelineTimer: ReturnType<typeof setTimeout> | null = null;
+
+const PIPELINE_CHANNEL_KEYS = ["http", "dlna", "sendspin", "airplay"] as const;
+// i18n 后缀 → 键名 `settings.pipeline.channel${suffix}`（首字母大写，与既有键命名一致）。
+const PIPELINE_CHANNEL_LABEL: Record<string, string> = {
+  http: "Http",
+  dlna: "Dlna",
+  sendspin: "Sendspin",
+  airplay: "Airplay",
+};
+
+/** 用服务端返回值回写面板。`devices` 缺席时保持原样（PUT 响应不返回设备表）。 */
+function applyPipelineSettings(res: any): void {
+  const sw = res?.switches;
+  if (sw) {
+    pipelineSwitches.enabled = sw.enabled !== false;
+    for (const ch of PIPELINE_CHANNEL_KEYS) {
+      pipelineSwitches.channels[ch] = sw.channels?.[ch] !== false;
+    }
+  }
+  const fl = res?.flow;
+  if (fl) {
+    flowForm.enabled = fl.enabled !== false;
+    flowForm.mode = fl.mode === "standard" ? "standard" : "disabled";
+    const dur = Number(fl.durationSec);
+    flowForm.durationSec = Number.isFinite(dur) && dur > 0 ? dur : 8;
+  }
+  if (Array.isArray(res?.devices)) {
+    pipelineDevices.value = res.devices
+      .map((d: any) => ({
+        deviceId: String(d?.deviceId || ""),
+        name: String(d?.name || d?.deviceId || ""),
+        fallback: d?.fallback === true,
+      }))
+      .filter((d: { deviceId: string }) => !!d.deviceId);
+  }
+}
+
+async function loadPipeline(): Promise<void> {
+  try {
+    const res = await api.get("/rest/api/v1/pipeline/switches");
+    applyPipelineSettings(res.data);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("settings.pipeline.loadFailed"));
+  }
+}
+
+async function savePipeline(): Promise<void> {
+  if (pipelineTimer) clearTimeout(pipelineTimer);
+  pipelineTimer = setTimeout(() => { void commitPipeline(); }, 250);
+}
+
+async function commitPipeline(): Promise<void> {
+  pipelineTimer = null;
+  try {
+    const res = await api.put("/rest/api/v1/pipeline/switches", {
+      switches: { enabled: pipelineSwitches.enabled, channels: { ...pipelineSwitches.channels } },
+      flow: { enabled: flowForm.enabled, mode: flowForm.mode, durationSec: flowForm.durationSec },
+    });
+    applyPipelineSettings(res.data);
+    ElMessage.success(t("settings.pipeline.saved"));
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("settings.pipeline.saveFailed"));
+  }
+}
+
+/** 单设备回退：失败时把开关拨回去，避免界面显示的与库里存的不一致。 */
+async function saveDeviceFallback(d: { deviceId: string; name: string; fallback: boolean }): Promise<void> {
+  try {
+    const res = await api.put(`/rest/api/v1/pipeline/dlna/${encodeURIComponent(d.deviceId)}`, { fallback: d.fallback });
+    d.fallback = res.data?.fallback === true;
+    ElMessage.success(t("settings.pipeline.saved"));
+  } catch (e: any) {
+    d.fallback = !d.fallback;
+    ElMessage.error(e.response?.data?.error || t("settings.pipeline.saveFailed"));
+  }
+}
+
+onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig(); if (authStore.isAdmin) loadPipeline(); });
 </script>
 
 <style lang="scss" scoped>
@@ -583,6 +740,12 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: var(--fnos-text-
 .dsp-eq { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; width: 100%; }
 .dsp-eq-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .dsp-foot { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding-top: 14px; }
+// 音频管道面板（P5-1 / P5-2）
+.pipe-channels { display: flex; align-items: center; gap: 6px 16px; flex-wrap: wrap; justify-content: flex-end; }
+.pipe-ch { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fnos-text-secondary); white-space: nowrap; }
+.pipe-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pipe-block { flex-direction: column; }
+.pipe-devices { width: 100%; justify-content: flex-end; }
 
 @media (max-width: 768px) {
   .settings-page { padding: 20px 16px; }
@@ -592,5 +755,6 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: var(--fnos-text-
   .proxy-actions { flex-wrap: wrap; }
   .dsp-eq { align-items: stretch; }
   .dsp-eq-row { justify-content: flex-start; }
+  .pipe-channels { justify-content: flex-start; }
 }
 </style>

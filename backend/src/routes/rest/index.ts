@@ -14,7 +14,7 @@ import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCov
 import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { songSourceInfo, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
-import { getSetting, getSettingBool } from "../../services/settings.js";
+import { getSetting } from "../../services/settings.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
@@ -33,6 +33,7 @@ import { decideTranscode, spawnTranscoder, TRANSCODE_MIME } from "../../services
 import type { ChannelCodec } from "../../services/audio/pipeline.js";
 import type { FadeConfig } from "../../services/audio/fades.js";
 import type { FlowItem } from "../../services/audio/flow.js";
+import type { PipelineChannel } from "../../services/audio/pipelineSwitches.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendToUser } from "../../services/ws/index.js";
 
@@ -1305,17 +1306,25 @@ async function serveTranscodedSong(
 
 /**
  * 本次出流的 -af 链(P2-1):D2 默认实时 loudnorm(有测量走静态)＋限制器。
- * 开关 `pipeline.http`(缺省开,见 D5):关 = 空链(仍走管道,只是无滤镜——
- * 按 D9,"关闭开关只等于滤镜链为空,不回到绕过管道")。
+ * 开关(P5-1/P5-2):`channel` 决定用哪个通道的开关判定 ——
+ * `"http"`(缺省,`/rest/stream` 与 `/stream-remote`)/ `"dlna"`;传 `null` 表示
+ * **调用方已判定本次不带滤镜链**(该设备的 DLNA 单设备回退) ⇒ 直接空链。
+ * 关掉只等于空链(仍走管道,不是绕过管道 —— D9)。
  * song 为空(stream-remote 未入库行)时按无测量处理。
  *
- * 第 3 个入参(P4-2)是**该播放器的 DSP 配置**(`dlna:<id>` / `local:<clientId>` …);
+ * 第 2 个入参(P4-2)是**该播放器的 DSP 配置**(`dlna:<id>` / `local:<clientId>` …);
  * 命中时插在**响度之后、限制器之前**(② → ③ → ⑤,plan §3.1)。传空串 = 无 per-player
  * 音色(HTTP 调用方没自报 peerId —— 与"没配置"同义,不是错误)。
  * 导出仅为 P2-6 契约测试能直接验证「开关关闭 = 空链」这条 D9 语义。
  */
-export async function resolveRequestAf(song: { id?: string } | null, peerId?: string): Promise<string[]> {
-  if (!getSettingBool("pipeline.http", true)) return [];
+export async function resolveRequestAf(
+  song: { id?: string } | null,
+  peerId?: string,
+  channel: PipelineChannel | null = "http",
+): Promise<string[]> {
+  if (channel === null) return [];
+  const { isChannelEnabled } = await import("../../services/audio/pipelineSwitches.js");
+  if (!isChannelEnabled(channel)) return [];
   const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
   const { playerDspFilters } = await import("../../services/playerDsp.js");
   const extraFilters = playerDspFilters(peerId, {});
@@ -1473,9 +1482,18 @@ async function servePipelinedSong(
  *
  * per-player DSP（P4-2）走 `{ flow: true }`：flow 解码段已 `-ar 48000 -ac 2`（见
  * `playerDspFilters`），不再补 resample/aformat —— 补了就是白过一遍滤镜。
+ *
+ * `channel` 语义与 `resolveRequestAf` 一致（P5-1/P5-2）；flow 的通道开关判定还与
+ * `resolveFlowSettings({ effectsOn })` 呼应 —— 关掉时连流都不拼。
  */
-async function resolveFlowAf(song: { id?: string } | null, peerId?: string): Promise<string[]> {
-  if (!getSettingBool("pipeline.http", true)) return [];
+async function resolveFlowAf(
+  song: { id?: string } | null,
+  peerId?: string,
+  channel: PipelineChannel | null = "http",
+): Promise<string[]> {
+  if (channel === null) return [];
+  const { isChannelEnabled } = await import("../../services/audio/pipelineSwitches.js");
+  if (!isChannelEnabled(channel)) return [];
   const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
   const { playerDspFilters } = await import("../../services/playerDsp.js");
   const extraFilters = playerDspFilters(peerId, { flow: true });
@@ -1507,6 +1525,8 @@ async function serveFlowQueue(
     maxItems?: number;
     /** per-player DSP 的查键（P4-2）。DLNA 传 `dlna:<deviceId>`，HTTP 直接传 peerId。 */
     dspPeerId?: string;
+    /** 本会话的管道通道（P5-1/P5-2）：每曲 af 链的开关判定用它，`null` = 不带滤镜链。 */
+    flowChannel?: PipelineChannel | null;
   },
 ): Promise<Response | null> {
   const { getQueueManager } = await import("../../services/dlna/queue.js");
@@ -1519,6 +1539,9 @@ async function serveFlowQueue(
   // 逐首解析输入 + af。af **一次算定**（P3-4 的 pin）：会话内部只读不重算，
   // 过渡途中不会因重解析（loudnorm 容量重选 / 换源行）而改增益 —— 那正是
   // "过渡瞬间音量跳变"的来源，且只在换歌时出现、极难复现。
+  // ⚠️ 不能写 `opts.flowChannel ?? "http"`：`null` 是有意义的值（=不带滤镜链），
+  // 只有「没传」(undefined) 才回落到缺省的 http 通道。
+  const flowChannel: PipelineChannel | null = opts.flowChannel === undefined ? "http" : opts.flowChannel;
   const items: FlowItem[] = [];
   for (const cand of candidates) {
     const row = db.select().from(songs).where(eq(songs.id, cand.songId)).get();
@@ -1530,7 +1553,7 @@ async function serveFlowQueue(
       key: resolved.id,
       input: input.source,
       ...(input.headers ? { headers: input.headers } : {}),
-      af: await resolveFlowAf(resolved, opts.dspPeerId),
+      af: await resolveFlowAf(resolved, opts.dspPeerId, flowChannel),
       title: cand.title || resolved.title || "",
       artist: cand.artist || resolved.artist || "",
       ...(typeof cand.duration === "number" && cand.duration > 0 ? { durationSec: cand.duration } : {}),
@@ -1699,7 +1722,9 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
       const peerId = dspPeerId;
       if (peerId) {
         const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
-        const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d));
+        const { isChannelEnabled } = await import("../../services/audio/pipelineSwitches.js");
+        // P5-1:管道开关关掉时**不拼连续流**（plan §7「回退」：全局关 = 滤镜链为空 + 无交叉淡入）。
+        const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d), { effectsOn: isChannelEnabled("http") });
         if (flowCfg.enabled && flowCfg.crossfade) {
           const { resolveChannelCodec } = await import("../../services/audio/pipeline.js");
           const flowResp = await serveFlowQueue(c, {
@@ -1852,6 +1877,10 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   // P4-2:DLNA 侧 per-player DSP 用 `dlna:<deviceId>` 作查键 —— 音箱自己不会自报,
   // 但 cast token 里带着 deviceId(= 它由哪台设备投屏而来),所以这里天然知道"是谁在播"。
   const dspPeerId = castSession.deviceId ? `dlna:${castSession.deviceId}` : "";
+  // P5-1/P5-2:本设备的滤镜链是否生效 —— 通道开关(`pipeline.dlna`)开 **且** 该设备
+  // 未被单独回退。`null` 表示本次不带滤镜链(仍是完整管道，只是空 af：D9)。
+  const { isDlnaEffectsEnabled } = await import("../../services/audio/pipelineSwitches.js");
+  const dlnaChannel: PipelineChannel | null = isDlnaEffectsEnabled(castSession.deviceId) ? "dlna" : null;
 
   // 与 /rest/stream 一致支持 format/maxBitRate/timeOffset 服务端实时转码；
   // 音箱默认不带这些参数 → 走下面的实时管道(不是原样拉流)。
@@ -1868,7 +1897,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset,
-        af: await resolveRequestAf(resolvedSong, dspPeerId),
+        af: await resolveRequestAf(resolvedSong, dspPeerId, dlnaChannel),
         songId: resolvedSong.id,
       });
     }
@@ -1908,7 +1937,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
     // 交回单曲管道(P2-4 的 timeOffset 路径)。
     if (timeOffset === 0 && castSession.deviceId) {
       const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
-      const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d));
+      const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d), { effectsOn: dlnaChannel !== null });
       if (flowCfg.enabled && flowCfg.crossfade) {
         const flowResp = await serveFlowQueue(c, {
           deviceId: castSession.deviceId,
@@ -1917,6 +1946,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
           fade: flowCfg.fade,
           extraHeaders,
           dspPeerId,
+          flowChannel: dlnaChannel,
           ...(icyRequested ? { icyMetaint: 16384 } : {}),
         });
         if (flowResp) return flowResp;
@@ -1925,7 +1955,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
 
     return servePipelinedSong(c, resolvedSong, input, {
       timeOffset,
-      af: await resolveRequestAf(resolvedSong, dspPeerId),
+      af: await resolveRequestAf(resolvedSong, dspPeerId, dlnaChannel),
       codecOverride: dlnaCodec,
       extraHeaders,
       ...(icyRequested ? { icyMetaint: 16384 } : {}),
