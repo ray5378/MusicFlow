@@ -82,6 +82,9 @@ export interface ChooseModeInput {
   sourceNormalized?: boolean;
   /** 直播/实时源：响度归上游负责，本端没有可收敛的测量值。 */
   liveSource?: boolean;
+  /** 短音效(TTS/提示音)：动态 fallback 会压缩短片段，无测量时直接关。
+   *  照 MA SOUND_EFFECT 分支；当前各通道尚未传入，保持缺省 false。 */
+  isSoundEffect?: boolean;
 }
 
 /**
@@ -96,6 +99,8 @@ export function chooseMode(input: ChooseModeInput): VolumeNormalizationMode {
   if (input.liveSource) return "disabled";
   // 源侧已对齐再校正 = 校正两次（且校的还是它输出的结果）。
   if (input.sourceNormalized) return "source";
+  // 短音效：动态 fallback 会压缩短片段，且从无测量可收敛 —— 照 MA SOUND_EFFECT 分支直接关。
+  if (input.isSoundEffect) return "disabled";
   if (input.targetLoudness === null || !Number.isFinite(input.targetLoudness)) return "disabled";
 
   const { preference, measuredLoudness } = input;
@@ -120,23 +125,17 @@ export function chooseMode(input: ChooseModeInput): VolumeNormalizationMode {
   return preference;
 }
 
-/** 静态增益的限幅：±12 dB。防止个别异常测量值把音量拉到失真或闷到听不见。 */
-export const MAX_GAIN_DB = 12;
-
 /**
- * 由「目标响度 − 已测响度」算出静态增益 dB，并限幅到 ±maxDb。
- * 任一侧缺失/非有限一律返回 0 —— 拿不到依据就不动音量，而不是猜一个值。
+ * 由「目标响度 − 已测响度」算出静态增益 dB。照 MA:裸差值 round 2 位,**
+ * 不做限幅**(全面对齐 MA —— 削波防护交给 ⑤ 限制器与 loudnorm 自带 TP,
+ * 不在增益计算里保守处理)。
+ * 任一侧缺失/非有限一律返回 0 —— 拿不到依据就不动音量,而不是猜一个值。
  */
 export function computeGainDb(
   targetLoudness: number | null,
   measuredLoudness: number | null,
-  maxDb: number = MAX_GAIN_DB,
 ): number {
   if (targetLoudness === null || measuredLoudness === null) return 0;
   if (!Number.isFinite(targetLoudness) || !Number.isFinite(measuredLoudness)) return 0;
-  const limit = Math.abs(maxDb);
-  const gain = targetLoudness - measuredLoudness;
-  if (gain > limit) return limit;
-  if (gain < -limit) return -limit;
-  return gain;
+  return Math.round((targetLoudness - measuredLoudness) * 100) / 100;
 }

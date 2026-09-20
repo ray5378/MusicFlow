@@ -6,7 +6,6 @@ import {
   parseLoudnorm,
   chooseMode,
   computeGainDb,
-  MAX_GAIN_DB,
   type NormalizationPreference,
 } from "../../src/services/audio/loudness.js";
 
@@ -87,6 +86,11 @@ describe("chooseMode —— 归一化模式决策（顺序照 MA get_normalizati
     expect(chooseMode({ ...base, sourceNormalized: true })).toBe("source");
   });
 
+  it("短音效 → disabled（照 MA SOUND_EFFECT，动态压缩不碰短片段）", () => {
+    expect(chooseMode({ ...base, isSoundEffect: true })).toBe("disabled");
+    expect(chooseMode({ ...base, isSoundEffect: true, measuredLoudness: -9 })).toBe("disabled");
+  });
+
   it("没设目标响度 → disabled", () => {
     expect(chooseMode({ ...base, targetLoudness: null })).toBe("disabled");
     expect(chooseMode({ ...base, targetLoudness: Number.NaN })).toBe("disabled");
@@ -128,7 +132,7 @@ describe("chooseMode —— 归一化模式决策（顺序照 MA get_normalizati
   });
 });
 
-describe("computeGainDb —— 静态增益与限幅", () => {
+describe("computeGainDb —— 静态增益(全面对齐 MA,不限幅)", () => {
   it("目标比实测低则衰减（负增益）", () => {
     expect(computeGainDb(-16, -9.5)).toBeCloseTo(-6.5, 5);
   });
@@ -137,19 +141,11 @@ describe("computeGainDb —— 静态增益与限幅", () => {
     expect(computeGainDb(-16, -22)).toBeCloseTo(6, 5);
   });
 
-  it(`上限截断到 +${MAX_GAIN_DB} dB（实测远低于目标 → 需要大幅拉升）`, () => {
-    // -16 - (-40) = +24 dB，超出允许范围
-    expect(computeGainDb(-16, -40)).toBe(MAX_GAIN_DB);
-  });
-
-  it(`下限截断到 -${MAX_GAIN_DB} dB（实测远高于目标 → 需要大幅压低）`, () => {
-    // -16 - 0 = -16 dB，超出允许范围
-    expect(computeGainDb(-16, 0)).toBe(-MAX_GAIN_DB);
-  });
-
-  it("限幅值可配，且对负值输入同样取绝对值", () => {
-    expect(computeGainDb(-16, -40, 6)).toBe(6);
-    expect(computeGainDb(-16, -40, -6)).toBe(6);
+  it("大差值不限幅(照 MA 裸差值 round 2 位,削波由⑤限制器兜底)", () => {
+    // -16 - (-40) = +24 dB,照 MA 原样输出
+    expect(computeGainDb(-16, -40)).toBe(24);
+    expect(computeGainDb(-16, 0)).toBe(-16);
+    expect(computeGainDb(-14.567, -9.123)).toBeCloseTo(-5.44, 2);
   });
 
   it("任一侧缺失或非有限 → 0 dB（拿不到依据就不动音量）", () => {
