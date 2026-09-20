@@ -1,10 +1,13 @@
 /**
  * P2-4：Web 端（Howler）实时管道流的 seek 位置换算。
  *
- * 背景：后端 P2-1 起 `/rest/stream`、`/rest/stream-remote` 全通道走实时管道
- * （D9：无直传旁路），响应不再支持字节 Range（一律全流 200）。Howler 的
+ * 背景：后端 P2-1/P2-2 起 `/rest/stream` 与 `/rest/dlna/stream/:token` 全通道走
+ * 实时管道（D9：无直传旁路），响应不再支持字节 Range（一律全流 200）。Howler 的
  * `howl.seek(t)` 依赖 HTML5 audio 的字节 Range 请求定位 → 在实时流上失效，
  * 拖动进度会直接失败。
+ * ⚠️ `/rest/stream-remote`（搜索即播的未入库远程歌）**仍是原样代理**，Range 尚可用，
+ * 见 progress §5 的 P2-7；它改走管道后，本文件的换算会自动适用（前端无需再改判定——
+ * 这里的 URL 重建是统一入口 `getStreamUrl()` 之后的字符串拼接）。
  *
  * 对策：与外层客户端 P2-3（`lib/providers/player/transcoded_stream_seek.dart`）
  * 同款语义 —— 不用 `howl.seek()` 跳转，而是带 `timeOffset`（整秒）重新拉流

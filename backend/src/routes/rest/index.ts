@@ -1414,8 +1414,9 @@ async function serveTranscodedSong(
  * 开关 `pipeline.http`(缺省开,见 D5):关 = 空链(仍走管道,只是无滤镜——
  * 按 D9,"关闭开关只等于滤镜链为空,不回到绕过管道")。
  * song 为空(stream-remote 未入库行)时按无测量处理。
+ * 导出仅为 P2-6 契约测试能直接验证「开关关闭 = 空链」这条 D9 语义。
  */
-async function resolveRequestAf(song: { id?: string } | null): Promise<string[]> {
+export async function resolveRequestAf(song: { id?: string } | null): Promise<string[]> {
   if (!getSettingBool("pipeline.http", true)) return [];
   const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
   return resolveLoudnessAf(song?.id ? { rowId: song.id } : {});
@@ -1767,7 +1768,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
 
   // 与 /rest/stream 一致支持 format/maxBitRate/timeOffset 服务端实时转码；
-  // DLNA 渲染器默认不带这些参数 → 走原样拉流，行为不变。
+  // 音箱默认不带这些参数 → 走下面的实时管道(不是原样拉流)。
   const transcode = decideTranscode({
     requestedFormat,
     maxBitRate,
