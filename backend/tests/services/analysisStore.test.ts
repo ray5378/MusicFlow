@@ -70,6 +70,28 @@ describe("reportPlaybackLoudness 入库门", () => {
     expect(loadAnalysis("rep-bad")).toBeNull();
     db.delete(songs).where(eq(songs.id, "rep-bad")).run();
   });
+
+  it("高层描述子 + extra_data round-trip(MA 全字段对齐)", () => {
+    seedRow("rep-desc", "local");
+    expect(saveAnalysis("rep-desc", "local", {
+      danceability: 0.7, valence: 0.3, arousal: 0.9, speechiness: 0.1,
+      instrumentalness: 0.8, acousticness: 0.2, brightness: 0.6,
+      harmonicComplexity: 0.4, roughness: 0.15, rhythmicRegularity: 0.95,
+      extraData: JSON.stringify({ provider: "x", v: 1 }),
+    })).toBe(true);
+    const rec = loadAnalysis("rep-desc")!;
+    expect(rec.danceability).toBeCloseTo(0.7, 6);
+    expect(rec.valence).toBeCloseTo(0.3, 6);
+    expect(rec.rhythmicRegularity).toBeCloseTo(0.95, 6);
+    expect(JSON.parse(rec.extraData!)).toEqual({ provider: "x", v: 1 });
+    // 合并语义:后写响度不抹描述子
+    expect(reportPlaybackLoudness("rep-desc", GOOD)).toBe(true);
+    const rec2 = loadAnalysis("rep-desc")!;
+    expect(rec2.loudnessIntegrated).toBeCloseTo(-9.54, 2);
+    expect(rec2.danceability).toBeCloseTo(0.7, 6);
+    deleteAnalysis("rep-desc");
+    db.delete(songs).where(eq(songs.id, "rep-desc")).run();
+  });
 });
 
 describe("删行联动清回写", () => {

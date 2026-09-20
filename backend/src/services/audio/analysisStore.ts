@@ -36,6 +36,19 @@ export interface AnalysisData {
   rmsEnergy: number[] | null;
   spectralCentroid: number[] | null;
   energy: number | null;
+  /** 高层描述子(MA 全对齐,0.0-1.0;远期 L1/L2 用,现阶段只存不用)。 */
+  danceability: number | null;
+  valence: number | null;
+  arousal: number | null;
+  speechiness: number | null;
+  instrumentalness: number | null;
+  acousticness: number | null;
+  brightness: number | null;
+  harmonicComplexity: number | null;
+  roughness: number | null;
+  rhythmicRegularity: number | null;
+  /** 提供方私有扩展(MA extra_data 同构,JSON 文本透存)。 */
+  extraData: string | null;
 }
 
 export interface AnalysisRecord extends AnalysisData {
@@ -59,6 +72,17 @@ type DbRow = {
   rms_energy: string | null;
   spectral_centroid: string | null;
   energy: number | null;
+  danceability: number | null;
+  valence: number | null;
+  arousal: number | null;
+  speechiness: number | null;
+  instrumentalness: number | null;
+  acousticness: number | null;
+  brightness: number | null;
+  harmonic_complexity: number | null;
+  roughness: number | null;
+  rhythmic_regularity: number | null;
+  extra_data: string | null;
   measured_at: string | null;
 };
 
@@ -98,6 +122,17 @@ function dbToRecord(row: DbRow): AnalysisRecord {
     rmsEnergy: seqFromDb(row.rms_energy),
     spectralCentroid: seqFromDb(row.spectral_centroid),
     energy: numFromDb(row.energy),
+    danceability: numFromDb(row.danceability),
+    valence: numFromDb(row.valence),
+    arousal: numFromDb(row.arousal),
+    speechiness: numFromDb(row.speechiness),
+    instrumentalness: numFromDb(row.instrumentalness),
+    acousticness: numFromDb(row.acousticness),
+    brightness: numFromDb(row.brightness),
+    harmonicComplexity: numFromDb(row.harmonic_complexity),
+    roughness: numFromDb(row.roughness),
+    rhythmicRegularity: numFromDb(row.rhythmic_regularity),
+    extraData: typeof row.extra_data === "string" ? row.extra_data : null,
     measuredAt: row.measured_at ?? "",
   };
 }
@@ -119,8 +154,11 @@ function stmts(): Statements {
       INSERT INTO audio_analysis (
         row_id, loudness_integrated, loudness_album, loudness_range, true_peak,
         bpm, beats, downbeats, beats_per_bar, key, mode,
-        rms_energy, spectral_centroid, energy, measured_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        rms_energy, spectral_centroid, energy,
+        danceability, valence, arousal, speechiness, instrumentalness,
+        acousticness, brightness, harmonic_complexity, roughness,
+        rhythmic_regularity, extra_data, measured_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(row_id) DO UPDATE SET
         loudness_integrated = excluded.loudness_integrated,
         loudness_album = excluded.loudness_album,
@@ -135,6 +173,17 @@ function stmts(): Statements {
         rms_energy = excluded.rms_energy,
         spectral_centroid = excluded.spectral_centroid,
         energy = excluded.energy,
+        danceability = excluded.danceability,
+        valence = excluded.valence,
+        arousal = excluded.arousal,
+        speechiness = excluded.speechiness,
+        instrumentalness = excluded.instrumentalness,
+        acousticness = excluded.acousticness,
+        brightness = excluded.brightness,
+        harmonic_complexity = excluded.harmonic_complexity,
+        roughness = excluded.roughness,
+        rhythmic_regularity = excluded.rhythmic_regularity,
+        extra_data = excluded.extra_data,
         measured_at = excluded.measured_at
     `),
     del: sqlite.prepare("DELETE FROM audio_analysis WHERE row_id = ?"),
@@ -172,10 +221,21 @@ export function saveAnalysis(
         beatsPerBar: numFromDb(prev.beats_per_bar),
         key: prev.key ?? null,
         mode: prev.mode ?? null,
-        rmsEnergy: seqFromDb(prev.rms_energy),
-        spectralCentroid: seqFromDb(prev.spectral_centroid),
-        energy: numFromDb(prev.energy),
-      }
+    rmsEnergy: seqFromDb(prev.rms_energy),
+    spectralCentroid: seqFromDb(prev.spectral_centroid),
+    energy: numFromDb(prev.energy),
+    danceability: numFromDb(prev.danceability),
+    valence: numFromDb(prev.valence),
+    arousal: numFromDb(prev.arousal),
+    speechiness: numFromDb(prev.speechiness),
+    instrumentalness: numFromDb(prev.instrumentalness),
+    acousticness: numFromDb(prev.acousticness),
+    brightness: numFromDb(prev.brightness),
+    harmonicComplexity: numFromDb(prev.harmonic_complexity),
+    roughness: numFromDb(prev.roughness),
+    rhythmicRegularity: numFromDb(prev.rhythmic_regularity),
+    extraData: typeof prev.extra_data === "string" ? prev.extra_data : null,
+  }
     : emptyAnalysis();
 
   const merged: AnalysisData = { ...base };
@@ -201,6 +261,17 @@ export function saveAnalysis(
     seqToDb(merged.rmsEnergy),
     seqToDb(merged.spectralCentroid),
     merged.energy,
+    merged.danceability,
+    merged.valence,
+    merged.arousal,
+    merged.speechiness,
+    merged.instrumentalness,
+    merged.acousticness,
+    merged.brightness,
+    merged.harmonicComplexity,
+    merged.roughness,
+    merged.rhythmicRegularity,
+    typeof merged.extraData === "string" ? merged.extraData : null,
     new Date().toISOString(),
   );
   return true;
@@ -221,6 +292,17 @@ function emptyAnalysis(): AnalysisData {
     rmsEnergy: null,
     spectralCentroid: null,
     energy: null,
+    danceability: null,
+    valence: null,
+    arousal: null,
+    speechiness: null,
+    instrumentalness: null,
+    acousticness: null,
+    brightness: null,
+    harmonicComplexity: null,
+    roughness: null,
+    rhythmicRegularity: null,
+    extraData: null,
   };
 }
 

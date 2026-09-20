@@ -9,8 +9,9 @@ describe("buildAirplayAf(P1-3)", () => {
     expect(hasLoudnorm).toBe(true);
     expect(af[0]).toContain("loudnorm=I=-14");
     expect(af).toContain("alimiter=limit=-1dB:level=false:asc=true:latency=true");
-    expect(af).toContain("aresample=44100:resampler=swr");
-    expect(af).toContain("aresample=osf=s16:dither_method=triangular_hp");
+    // 重采样＋dither 合并进同一个 aresample(与 MA 同构,分开写跑两遍)
+    expect(af).toContain("aresample=resampler=swr:osr=44100:osf=s16:dither_method=triangular_hp");
+    expect(af).toContain("aformat=channel_layouts=stereo");
   });
 
   it("逃生舱/单源关闭 → 响度段空,输出段保留(协议硬性要求)", () => {
@@ -18,15 +19,15 @@ describe("buildAirplayAf(P1-3)", () => {
     try {
       const { af } = buildAirplayAf({});
       expect(af).toEqual([
-        "aresample=44100:resampler=soxr:precision=30",
-        "aresample=osf=s16:dither_method=triangular_hp",
+        "aresample=resampler=soxr:precision=30:osr=44100:osf=s16:dither_method=triangular_hp",
+        "aformat=channel_layouts=stereo",
       ]);
     } finally {
       delete process.env.AIRPLAY_LOUDNESS;
     }
     expect(buildAirplayAf({ loudness: { enabled: false } }).af).toEqual([
-      "aresample=44100:resampler=soxr:precision=30",
-      "aresample=osf=s16:dither_method=triangular_hp",
+      "aresample=resampler=soxr:precision=30:osr=44100:osf=s16:dither_method=triangular_hp",
+      "aformat=channel_layouts=stereo",
     ]);
   });
 

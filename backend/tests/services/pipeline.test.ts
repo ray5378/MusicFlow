@@ -99,17 +99,17 @@ describe("outputFilters ⑥重采样 + dither(按需)", () => {
 
   it("变采样率:无 loudnorm 走 soxr,有 loudnorm 降级 swr", () => {
     expect(outputFilters({ ...base, sourceRate: 44100, sourceBits: 16 })).toEqual([
-      "aresample=48000:resampler=soxr:precision=30",
+      "aresample=resampler=soxr:precision=30:osr=48000",
     ]);
     expect(outputFilters({ ...base, sourceRate: 44100, sourceBits: 16, hasLoudnorm: true })).toEqual([
-      "aresample=48000:resampler=swr",
+      "aresample=resampler=swr:osr=48000",
     ]);
     expect(outputFilters({ ...base, sourceRate: 44100, sourceBits: 16, soxrAvailable: false })).toEqual([
-      "aresample=48000:resampler=swr",
+      "aresample=resampler=swr:osr=48000",
     ]);
   });
 
-  it("仅 >16bit→16bit 加 triangular_hp(不是 triangular)", () => {
+  it("仅 >16bit→16bit 加 dither(同滤镜内 osf,不另起 aresample)", () => {
     expect(outputFilters({ ...base, sourceRate: 48000, sourceBits: 24 })).toEqual([
       "aresample=osf=s16:dither_method=triangular_hp",
     ]);
@@ -121,10 +121,9 @@ describe("outputFilters ⑥重采样 + dither(按需)", () => {
     expect(outputFilters({ ...base, sourceRate: null, sourceBits: 16 })).toEqual([]);
   });
 
-  it("变采样率 + 降位深同时成立时两条都出且有序", () => {
+  it("变采样率 + 降位深同时成立时合并进同一个 aresample(分开写会跑两遍)", () => {
     expect(outputFilters({ ...base, sourceRate: 96000, sourceBits: 24 })).toEqual([
-      "aresample=48000:resampler=soxr:precision=30",
-      "aresample=osf=s16:dither_method=triangular_hp",
+      "aresample=resampler=soxr:precision=30:osr=48000:osf=s16:dither_method=triangular_hp",
     ]);
   });
 
@@ -132,14 +131,12 @@ describe("outputFilters ⑥重采样 + dither(按需)", () => {
     expect(
       outputFilters({ ...base, sourceRate: null, sourceBits: 32, targetRate: 44100, targetBits: 16, forceRate: 44100 }),
     ).toEqual([
-      "aresample=44100:resampler=soxr:precision=30",
-      "aresample=osf=s16:dither_method=triangular_hp",
+      "aresample=resampler=soxr:precision=30:osr=44100:osf=s16:dither_method=triangular_hp",
     ]);
     expect(
       outputFilters({ ...base, sourceRate: 48000, sourceBits: 32, targetRate: 44100, targetBits: 16, forceRate: 44100, hasLoudnorm: true }),
     ).toEqual([
-      "aresample=44100:resampler=swr",
-      "aresample=osf=s16:dither_method=triangular_hp",
+      "aresample=resampler=swr:osr=44100:osf=s16:dither_method=triangular_hp",
     ]);
   });
 
@@ -186,5 +183,61 @@ describe("AudioBuffer 下标数学", () => {
     b.reset();
     b.append(new Float32Array([7]));
     expect(Array.from(b.slice(0, 1))).toEqual([7]);
+  });
+});
+
+describe("resolveLoudnessAf(P1-6):模式切换", () => {
+  it("逃生舱/关闭 → 空链;缺省实时 loudnorm＋限制器", async () => {
+    const { resolveLoudnessAf } = await import("../../src/services/audio/pipeline.js");
+    process.env.SENDSPIN_LOUDNESS = "0";
+    try {
+      expect(resolveLoudnessAf({ escapeEnvVar: "SENDSPIN_LOUDNESS" })).toEqual([]);
+    } finally {
+      delete process.env.SENDSPIN_LOUDNESS;
+    }
+    expect(resolveLoudnessAf({ enabled: false, escapeEnvVar: "SENDSPIN_LOUDNESS" })).toEqual([]);
+    const af = resolveLoudnessAf({});
+    expect(af[0]).toContain("loudnorm=I=-14");
+    expect(af[af.length - 1]).toContain("alimiter=limit=-1dB");
+  });
+
+  it("有测量走静态 volume(自定义目标透传)", async () => {
+    const { resolveLoudnessAf } = await import("../../src/services/audio/pipeline.js");
+    const { saveAnalysis, deleteAnalysis } = await import("../../src/services/audio/analysisStore.js");
+    const { db } = await import("../../src/db/index.js");
+    const { songs } = await import("../../src/db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    db.insert(songs).values({
+      id: "af-pipe", title: "p", artist: "a", duration: 10,
+      path: "/music/p.mp3", contentType: "audio/mpeg", type: "local",
+    } as any).run();
+    saveAnalysis("af-pipe", "local", { loudnessIntegrated: -10 });
+    try {
+      expect(resolveLoudnessAf({ rowId: "af-pipe" })[0]).toBe("volume=-4dB");
+      expect(resolveLoudnessAf({ rowId: "af-pipe", targetLoudness: -16 })[0]).toBe("volume=-6dB");
+      expect(resolveLoudnessAf({ rowId: "no-such-row" })[0]).toContain("loudnorm");
+    } finally {
+      deleteAnalysis("af-pipe");
+      db.delete(songs).where(eq(songs.id, "af-pipe")).run();
+    }
+  });
+});
+
+describe("整命令段序(P1-6):解码 → af → 编码", () => {
+  it("sendspin 式整命令:-ss < -i < -af < -ar < -ac < -f pipe", async () => {
+    const { resolveLoudnessAf } = await import("../../src/services/audio/pipeline.js");
+    const af = [
+      ...resolveLoudnessAf({}),
+      ...outputFilters({ sourceRate: null, sourceBits: 32, targetRate: 48000, targetBits: 32, hasLoudnorm: true, forceRate: 48000, forceChannels: "stereo" }),
+    ];
+    const cmd = decodeArgs({ input: "/m/a.flac", timeOffsetSec: 5, af, forceRate: 48000, forceChannels: 2 });
+    const idx = (s: string) => cmd.indexOf(s);
+    expect(idx("-ss")).toBeGreaterThan(-1);
+    expect(idx("-ss")).toBeLessThan(idx("-i"));
+    expect(idx("-i")).toBeLessThan(idx("-af"));
+    expect(idx("-af")).toBeLessThan(idx("-ar"));
+    expect(idx("-ar")).toBeLessThan(idx("-ac"));
+    expect(idx("-ac")).toBeLessThan(idx("-f"));
+    expect(cmd[cmd.length - 1]).toBe("pipe:1");
   });
 });

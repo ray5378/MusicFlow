@@ -11,6 +11,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createRequire } from "node:module";
 import type { Readable } from "node:stream";
 import { createLogger } from "../utils/logger.js";
+import { decodeArgs, codecArgs } from "./audio/pipeline.js";
 
 const log = createLogger("TRANSCODE");
 const require_ = createRequire(import.meta.url);
@@ -113,24 +114,39 @@ export interface TranscodeSpawnOptions {
   format: "mp3" | "aac";
   bitrateKbps: number;
   timeOffsetSec?: number;
+  /**
+   * 管道 -af 链(响度/DSP/限制器,P1-5):与编码同一次 ffmpeg 进程完成,
+   * 不再为"先转码、再处理"起第二个进程。缺省空 = 与旧命令逐字节一致。
+   * 有 loudnorm 时 decodeArgs 自动提 loglevel 到 info(供 P0-4 读 JSON)。
+   */
+  af?: string[];
+}
+
+/** 转码命令拼装(纯函数,供单测锁定;spawnTranscoder 原样使用)。
+ *  无 af 时与旧命令逐字节一致(除 -headers 尾部多余 CRLF 归一化掉、
+ *  新增无害的 -map 0:a:0);有 af 时响度/DSP/限制器与编码同一次进程完成。 */
+export function transcodeArgs(opts: TranscodeSpawnOptions): string[] {
+  const head = decodeArgs({
+    input: opts.source,
+    headers: opts.headers,
+    timeOffsetSec: opts.timeOffsetSec,
+    ...(opts.af && opts.af.length > 0 ? { af: opts.af } : {}),
+  });
+  head.splice(-3);
+  const container = opts.format === "mp3" ? "mp3" : "adts";
+  return [...head, ...codecArgs(opts.format, opts.bitrateKbps), "-f", container, "-"];
 }
 
 /** 拉起 ffmpeg 把 source 实时转成目标格式输出到 stdout（pipe）。 */
 export function spawnTranscoder(opts: TranscodeSpawnOptions): ChildProcessByStdio<null, Readable, Readable> {
-  const args = ["-hide_banner", "-loglevel", "error"];
-  const hdrs = Object.entries(opts.headers || {}).filter(([, v]) => v != null && v !== "");
-  if (hdrs.length) {
-    args.push("-headers", hdrs.map(([k, v]) => `${k}: ${v}`).join("\r\n") + "\r\n");
-  }
-  if (opts.timeOffsetSec && opts.timeOffsetSec > 0) args.push("-ss", String(opts.timeOffsetSec));
-  args.push("-i", opts.source);
-  args.push("-vn", "-sn", "-dn"); // 丢弃封面/字幕/数据流，只转音频
-  if (opts.format === "mp3") {
-    args.push("-c:a", "libmp3lame", "-b:a", `${opts.bitrateKbps}k`, "-f", "mp3", "-");
-  } else {
-    args.push("-c:a", "aac", "-b:a", `${opts.bitrateKbps}k`, "-f", "adts", "-");
-  }
-  return spawn(resolveFfmpeg(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  const args = transcodeArgs(opts);
+  const child = spawn(resolveFfmpeg(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  // stderr 常开排空:无读者时管道满(64KB)会憋住 ffmpeg(长会话必踩,此前靠
+  // -loglevel error 输出极少侥幸避开;loudnorm 开启后 info 输出变多)。
+  // P0-4 HTTP 落点要读 JSON 时再加捕获,此处只保活。
+  child.stderr.on("data", () => {});
+  child.stderr.resume();
+  return child;
 }
 
 // ---------------- 并发限制 ----------------

@@ -465,5 +465,18 @@ export const audioAnalysis = sqliteTable("audio_analysis", {
   rmsEnergy: text("rms_energy"),
   spectralCentroid: text("spectral_centroid"),
   energy: real("energy"),
+  // 高层描述子(MA AudioAnalysisData 全对齐,0.0-1.0 归一化;供远期 L1/L2,现阶段只存不用)
+  danceability: real("danceability"),
+  valence: real("valence"),
+  arousal: real("arousal"),
+  speechiness: real("speechiness"),
+  instrumentalness: real("instrumentalness"),
+  acousticness: real("acousticness"),
+  brightness: real("brightness"),
+  harmonicComplexity: real("harmonic_complexity"),
+  roughness: real("roughness"),
+  rhythmicRegularity: real("rhythmic_regularity"),
+  // 提供方私有扩展(JSON 文本,MA extra_data 同构)
+  extraData: text("extra_data"),
   measuredAt: text("measured_at").default(""),
 });

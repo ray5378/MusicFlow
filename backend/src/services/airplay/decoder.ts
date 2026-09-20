@@ -79,8 +79,8 @@ export function buildAirplayAf(opts: Pick<AirplayDecodeOpts, "rowId" | "loudness
     escapeEnvVar: "AIRPLAY_LOUDNESS",
   });
   const hasLoudnorm = loud.some(f => f.startsWith("loudnorm"));
-  // 输出段:源位深按 F32 解码口径(恒 dither 到 16bit);采样率恒 pin 44100
-  // (RAOP 协议硬性要求,非过渡——与 sendspin 的 forceRate 不同)。
+  // 输出段:源位深按 F32 解码口径(恒 dither 到 16bit);采样率恒 pin 44100,
+  // 声道恒 stereo(RAOP 协议硬性要求,非过渡——与 sendspin 的 forceRate 不同)。
   const out = outputFilters({
     sourceRate: null,
     sourceBits: 32,
@@ -88,6 +88,7 @@ export function buildAirplayAf(opts: Pick<AirplayDecodeOpts, "rowId" | "loudness
     targetBits: 16,
     hasLoudnorm,
     forceRate: SAMPLE_RATE,
+    forceChannels: "stereo",
   });
   return { af: [...loud, ...out], hasLoudnorm };
 }
@@ -114,7 +115,7 @@ export function spawnDecoder(
     timeOffsetSec: seekSec,
     ...(af.length > 0 ? { af } : {}),
     outputFormat: "s16le",
-    forceChannels: 2,
+    // 注:声道 pin 在 af 里的 aformat(见 buildAirplayAf),此处不再重复 -ac。
   });
   const ff = spawn(ffmpegBin(), args);
   let errBuf = "";

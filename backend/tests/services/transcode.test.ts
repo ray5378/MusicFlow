@@ -11,6 +11,7 @@ import {
   acquireTranscodeSlot,
   releaseTranscodeSlot,
   activeTranscodeCount,
+  transcodeArgs,
 } from "../../src/services/transcode.js";
 
 afterEach(() => {
@@ -211,5 +212,40 @@ describe("并发槽", () => {
     // 清理剩余 4 个槽位。
     for (let i = 0; i < 4; i++) releaseTranscodeSlot();
     expect(activeTranscodeCount()).toBe(0);
+  });
+});
+
+describe("transcodeArgs(P1-5):音质档位与af同一次进程", () => {
+  it("无 af 时与旧命令一致(mp3/headers/seek/-map)", () => {
+    expect(
+      transcodeArgs({
+        source: "/m/a.flac",
+        headers: { Authorization: "Basic eDp5" },
+        format: "mp3",
+        bitrateKbps: 192,
+        timeOffsetSec: 30,
+      }),
+    ).toEqual([
+      "-hide_banner", "-loglevel", "error",
+      "-ss", "30",
+      "-headers", "Authorization: Basic eDp5",
+      "-i", "/m/a.flac",
+      "-vn", "-sn", "-dn", "-map", "0:a:0",
+      "-c:a", "libmp3lame", "-b:a", "192k",
+      "-f", "mp3", "-",
+    ]);
+  });
+
+  it("aac 容器是 adts;有 af 时响度链与编码同进程且提 loglevel", () => {
+    const a = transcodeArgs({
+      source: "/m/a.flac",
+      format: "aac",
+      bitrateKbps: 256,
+      af: ["loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json", "alimiter=limit=-1dB:level=false:asc=true:latency=true"],
+    });
+    expect(a.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "info", "-i"]);
+    expect(a).toContain("-af");
+    expect(a.slice(-7)).toEqual(["-c:a", "aac", "-b:a", "256k", "-f", "adts", "-"]);
+    expect(a).not.toContain("pipe:1");
   });
 });

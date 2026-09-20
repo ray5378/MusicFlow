@@ -184,7 +184,6 @@ export interface OutputRequest {
  *   (是 triangular_hp,不是 triangular)。
  */
 export function outputFilters(req: OutputRequest): string[] {
-  const out: string[] = [];
   const forced = req.forceRate !== undefined && Number.isFinite(req.forceRate) && req.forceRate > 0;
   const rateDiffers =
     forced ||
@@ -192,21 +191,30 @@ export function outputFilters(req: OutputRequest): string[] {
       Number.isFinite(req.sourceRate) &&
       req.sourceRate > 0 &&
       req.sourceRate !== req.targetRate);
-  if (rateDiffers) {
-    const rate = forced ? Math.round(req.forceRate as number) : req.targetRate;
-    const resampler = !req.hasLoudnorm && req.soxrAvailable !== false ? "soxr:precision=30" : "swr";
-    out.push(`aresample=${rate}:resampler=${resampler}`);
-  }
-  if (req.forceChannels) {
-    out.push(`aformat=channel_layouts=${req.forceChannels}`);
-  }
   const needDither =
     typeof req.sourceBits === "number" &&
     Number.isFinite(req.sourceBits) &&
     (req.sourceBits as number) > 16 &&
     req.targetBits === 16;
-  if (needDither) {
-    out.push("aresample=osf=s16:dither_method=triangular_hp");
+  if (!rateDiffers && !needDither && !req.forceChannels) return [];
+  // 与 MA 同构:单个 aresample 承载 resample＋osr＋osf,分开写会跑两遍重采样。
+  // 无需变采样率时不带 resampler 参数(只做 osf 转换)。
+  // forceChannels 是另一个 filter(aformat),独立元素。
+  const out: string[] = [];
+  if (rateDiffers || needDither) {
+    const opts: string[] = [];
+    if (rateDiffers) {
+      const rate = forced ? Math.round(req.forceRate as number) : req.targetRate;
+      const resampler = !req.hasLoudnorm && req.soxrAvailable !== false ? "soxr:precision=30" : "swr";
+      opts.push(`resampler=${resampler}`, `osr=${rate}`);
+    }
+    if (needDither) {
+      opts.push("osf=s16", "dither_method=triangular_hp");
+    }
+    out.push(`aresample=${opts.join(":")}`);
+  }
+  if (req.forceChannels) {
+    out.push(`aformat=channel_layouts=${req.forceChannels}`);
   }
   return out;
 }
