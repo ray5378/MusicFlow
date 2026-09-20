@@ -85,6 +85,9 @@ import {
 import {
   resolveFlowSettings, FLOW_ENABLED_KEY, CROSSFADE_MODE_KEY, CROSSFADE_DURATION_KEY,
 } from "../../services/audio/flowSource.js";
+import {
+  getMeasureStatus, setOfflineMeasureEnabled, startOfflineMeasure,
+} from "../../services/audio/offlineMeasure.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { PlaybackState } from "../../services/player/types.js";
@@ -3350,6 +3353,27 @@ apiRoutes.put("/v1/pipeline/dlna/:deviceId", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   setDlnaFallback(deviceId, body?.fallback === true);
   return c.json({ ok: true, deviceId, fallback: isDlnaFallback(deviceId) });
+});
+
+// ===== 离线预测量（P5-3，可选优化层，默认关）=====
+// 只对 **local** 行做事：预跑 loudnorm 把集成响度/真峰值落进 audio_analysis，
+// 之后起播走静态增益（省掉实时分析）。web 源永不测（D8：字节不保证一致）。
+// 与上面的管道开关同理，属服务端全局行为 ⇒ 一律 admin。
+apiRoutes.get("/v1/pipeline/measure", adminMiddleware, (c) => {
+  return c.json(getMeasureStatus());
+});
+// PUT：只切开关。开启/关闭都不影响已有测量值（关掉只是不再新增）。
+apiRoutes.put("/v1/pipeline/measure", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  if (typeof body?.enabled === "boolean") setOfflineMeasureEnabled(body.enabled);
+  return c.json(getMeasureStatus());
+});
+// POST：手动触发一批（异步跑，立即返回），前端轮询 GET 看 running/progress。
+// 开关没开、或已有一批在跑时返回 started:false + reason，不静默吞掉。
+apiRoutes.post("/v1/pipeline/measure/run", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const r = startOfflineMeasure(body?.limit);
+  return c.json({ ...r, ...getMeasureStatus() });
 });
 
 // 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。

@@ -201,7 +201,15 @@
       "noDevices": "No DLNA devices",
       "saved": "Pipeline settings saved",
       "saveFailed": "Failed to save",
-      "loadFailed": "Failed to load the pipeline settings"
+      "loadFailed": "Failed to load the pipeline settings",
+      "measure": "Offline pre-measurement (optional)",
+      "measureDesc": "Measure loudness for local library rows ahead of time and store it, so playback uses a static gain instead of realtime analysis. Off by default; network sources are never pre-measured.",
+      "measureStatus": "Measured {done} / {total}",
+      "measureRun": "Start measuring",
+      "measureRunning": "Measuring {done}/{total}…",
+      "measureStarted": "Measurement started",
+      "measureBusy": "A measurement run is already in progress",
+      "measureDisabled": "Turn the switch on first"
     },
     "general": "General",
     "clearCache": {

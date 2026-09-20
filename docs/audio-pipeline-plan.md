@@ -472,7 +472,8 @@ outArgs(req, bufferFmt): string[] {
 
 - 全局 + 每通道开关 UI（服务端 `settings.ts` + Web 设置页 + 客户端入口）
 - DLNA 单设备回退开关（某台设备不接受实时流时单独关闭）
-- **可选优化层（默认关）**：热点曲目输出缓存 / 本地行离线预测量
+- **可选优化层（默认关）**：本地行离线预测量（`services/audio/offlineMeasure.ts`）——预跑一遍分析把响度落进 `audio_analysis`，之后起播走静态增益。**只测 local 行**（web 源字节不保证一致，D8）、**默认关**（§3.2：预测量是可选优化、不是前置条件）。
+  原列的「热点曲目输出缓存」**不放进本方案**：见 §2 核心原则「不做『预渲染缓存』这类旁路：MA 没有这一层」——缓存命中即等于绕过 ②–⑤，且改一次目标响度/DSP 就得整库失效。真到实测 CPU 不可接受那天再单独评估。
 - **远期，本轮不做**：Smart Fades L1 beat-aligned、L2 智能混音。MA 侧是独立 **`audio_analysis` provider**（`providers/smart_fades/manifest.json`）：依赖 `beat-this==1.1.0` / `kaldi-native-fbank` / `nnAudio`（torch + torchaudio），madmom `DBNDownBeatTrackingProcessor` 的 **drop-in 替代**见 `dbn_postprocessor.py:17`，调性用 skey、人声用 FireRedVAD；启动门槛 **`MIN_RAM_GB = 4.0`**（`providers/smart_fades/__init__.py:24`，`verify_system_meets_requirements`）—— 整套 torch 栈**不可复刻**。分析字段已按 `AudioAnalysisData` 预留，将来要接也不改表
 - 文档：本文件转正 + CHANGELOG
 

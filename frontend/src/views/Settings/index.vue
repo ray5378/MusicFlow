@@ -185,6 +185,18 @@
             </label>
           </div>
         </div>
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.pipeline.measure') }}</div>
+            <div class="desc">{{ t('settings.pipeline.measureDesc') }}</div>
+          </div>
+          <div class="setting-value pipe-row">
+            <el-switch v-model="measureEnabled" size="small" @change="saveMeasureEnabled" />
+            <span class="dsp-mini">{{ measureStatusText }}</span>
+            <el-button size="small" :disabled="!measureEnabled" :loading="measureRunning" @click="runMeasure">{{ t('settings.pipeline.measureRun') }}</el-button>
+          </div>
+        </div>
       </el-card>
     </template>
 
@@ -300,7 +312,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
@@ -709,7 +721,83 @@ async function saveDeviceFallback(d: { deviceId: string; name: string; fallback:
   }
 }
 
-onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig(); if (authStore.isAdmin) loadPipeline(); });
+// ---------- 离线预测量（P5-3，可选优化层，默认关）----------
+// 服务端异步跑（一批可能几十首），所以这里只发「开始」+ 轮询进度 ——
+// 同步等结果会撞上 api 的 15s 超时（axios timeout）。
+const measureEnabled = ref(false);
+const measureRunning = ref(false);
+const measureCounts = reactive({ total: 0, measured: 0, pending: 0 });
+const measureProgress = reactive({ done: 0, total: 0 });
+let measurePoll: ReturnType<typeof setInterval> | null = null;
+
+const measureStatusText = computed(() =>
+  measureRunning.value
+    ? t("settings.pipeline.measureRunning", { done: measureProgress.done, total: measureProgress.total })
+    : t("settings.pipeline.measureStatus", { done: measureCounts.measured, total: measureCounts.total }),
+);
+
+function stopMeasurePoll(): void {
+  if (!measurePoll) return;
+  clearInterval(measurePoll);
+  measurePoll = null;
+}
+
+function startMeasurePoll(): void {
+  if (measurePoll) return;
+  measurePoll = setInterval(() => { void loadMeasure(); }, 1000);
+}
+
+function applyMeasureState(s: any): void {
+  if (!s || typeof s !== "object") return;
+  measureEnabled.value = s.enabled === true;
+  measureRunning.value = s.running === true;
+  if (Number.isFinite(s.total)) measureCounts.total = Number(s.total);
+  if (Number.isFinite(s.measured)) measureCounts.measured = Number(s.measured);
+  if (Number.isFinite(s.pending)) measureCounts.pending = Number(s.pending);
+  if (s.progress && typeof s.progress === "object") {
+    measureProgress.done = Number(s.progress.done) || 0;
+    measureProgress.total = Number(s.progress.total) || 0;
+  }
+  // 服务端还在跑就保持轮询，跑完自动停（不用用户手动刷新）
+  if (measureRunning.value) startMeasurePoll();
+  else stopMeasurePoll();
+}
+
+async function loadMeasure(): Promise<void> {
+  try {
+    const res = await api.get("/rest/api/v1/pipeline/measure");
+    applyMeasureState(res.data);
+  } catch { /* 静默：轮询期间失败不刷屏，面板其余部分已单独报错 */ }
+}
+
+async function saveMeasureEnabled(): Promise<void> {
+  try {
+    const res = await api.put("/rest/api/v1/pipeline/measure", { enabled: measureEnabled.value });
+    applyMeasureState(res.data);
+    ElMessage.success(t("settings.pipeline.saved"));
+  } catch (e: any) {
+    measureEnabled.value = !measureEnabled.value; // 失败回拨，别让界面与库里不一致
+    ElMessage.error(e.response?.data?.error || t("settings.pipeline.saveFailed"));
+  }
+}
+
+async function runMeasure(): Promise<void> {
+  try {
+    const res = await api.post("/rest/api/v1/pipeline/measure/run", {});
+    applyMeasureState(res.data);
+    if (res.data?.started) ElMessage.success(t("settings.pipeline.measureStarted"));
+    else if (res.data?.reason === "busy") ElMessage.warning(t("settings.pipeline.measureBusy"));
+    else if (res.data?.reason === "disabled") ElMessage.warning(t("settings.pipeline.measureDisabled"));
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("settings.pipeline.saveFailed"));
+  }
+}
+
+onMounted(() => {
+  loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig();
+  if (authStore.isAdmin) { loadPipeline(); loadMeasure(); }
+});
+onUnmounted(stopMeasurePoll);
 </script>
 
 <style lang="scss" scoped>

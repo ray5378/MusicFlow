@@ -201,7 +201,15 @@
       "noDevices": "暂无 DLNA 设备",
       "saved": "管道设置已保存",
       "saveFailed": "保存失败",
-      "loadFailed": "读取管道设置失败"
+      "loadFailed": "读取管道设置失败",
+      "measure": "离线预测量（可选）",
+      "measureDesc": "对本地曲库预先测一遍响度并落库，起播改用静态增益（省掉实时分析）。默认关；网络源永不预测量。",
+      "measureStatus": "已测 {done} / 共 {total}",
+      "measureRun": "开始测量",
+      "measureRunning": "测量中 {done}/{total}…",
+      "measureStarted": "已开始测量",
+      "measureBusy": "已有测量任务在进行",
+      "measureDisabled": "请先打开开关"
     },
     "general": "通用",
     "clearCache": {
