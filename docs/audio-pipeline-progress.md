@@ -55,17 +55,17 @@
 | **P1** | 管道骨架 + Sendspin / AirPlay | 7 / 7 | ✅ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
 | **P2** | HTTP 通道实时管道化 | 8 / 8 | ✅ | 客户端 / Web / DLNA 走管道，**客户端 + Web 拖动进度可用**，删净直传分支（含搜索即播的 `/stream-remote`） |
 | **P3** | Smart Fades L0 | 8 / 8 | ✅ | flow 会话（两路解码并存 + F32 逐片加权混合）+ 队列静默推进，开关缺省关 |
-| **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
+| **P4** | DSP | 4 / 4 | ✅ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **29 / 39** | 🟡 P3 收官，进 P4 | 验收总口径见 plan §8 |
+| **合计** | | **33 / 39** | 🟡 P4 收官，进 P5 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**29 / 39（74%）**
+**33 / 39（85%）**
 
 ### 2.3 当前焦点
 
-**P3 收官（8/8）**：交叉淡入的引擎（`services/audio/flow.ts`）＋数学层（`fades.ts`）＋接线层（`flowSource.ts`，开关/队列选曲/ICY）＋DLNA 与 HTTP 两条出口全部就位，`flow` 独立并发池不再与实时管道抢槽。**开关缺省关**（`crossfade.mode` 缺省 `disabled`）—— 打开才拼连续流，关着逐字节等价 P2 的逐首管道。**下一步 P4-1**（`buildFilterChain()`：照 MA 的滤镜映射做 Gain / ToneControl / 参量 EQ / Balance）。
+**P4 收官（4/4）**：③ 段 DSP 三层齐备 —— 纯函数层 `services/audio/dsp.ts`（`buildFilterChain()` 照 MA `helpers/dsp.py`，Gain / 3 段 ToneControl / 六种参量 EQ biquad / Balance 只衰减）＋ 存取层 `services/playerDsp.ts`（新表 `player_dsp_configs`，按 peerId 全局）＋ 接线层（三处出流入口 `resolveRequestAf` / `resolveFlowAf` / `serveFlowQueue` 全部带上 peerId）＋ Web 设置页面板。插在**响度之后、限制器之前**（②→③→⑤），**空配置 = 零滤镜**（不往 ffmpeg 加任何 `-af`）。**下一步 P5-1**（全局 + 每通道开关 UI）。
 
 ### 2.4 阶段依赖
 
@@ -221,7 +221,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 ---
 
-## 7. P4 · DSP — 0 / 4 ⬜
+## 7. P4 · DSP — 4 / 4 ✅
 
 **为什么做**
 ② 段负责「每首歌一样响」，③ 段负责「按口味调音色」—— 两者职责不同、不可互换。UI 里的音量滑块是**用户偏好**，不属于流水线；音色塑形必须在服务端做，才能对所有链路（含音箱类 DLNA / Sendspin 设备）生效。这是六段里偏「可选项」的一段，但对有固定听音口味的用户价值最高。
@@ -237,18 +237,29 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 | 状态 | # | 任务 | 落点 | commit | 完成日期 | 备注 |
 |---|---|---|---|---|---|---|
-| ⬜ | P4-1 | `buildFilterChain()`：照抄 MA 的滤镜映射 | 新增 `services/audio/dsp.ts` | — | — | D6 首期四项 |
-| ⬜ | P4-2 | per-player 配置存储 + 设置 API | `services/settings.ts` + 新增表 | — | — | DB 表数再 +1，同步 SPEC §2.1 |
-| ⬜ | P4-3 | Web 设置页面板 + 客户端设置入口 | `frontend/src/`、`lib/features/settings/` | — | — | 客户端仓库联动 |
-| ⬜ | P4-4 | 单测：滤镜串接顺序、空配置不加滤镜、分组成组按 MA 规则禁用 | 新增 `tests/services/dsp.test.ts` | — | — | |
+| ✅ | P4-1 | `buildFilterChain()`：照抄 MA 的滤镜映射 | 新增 `services/audio/dsp.ts` | （本轮） | 2026-09-20 | D6 首期四项：Gain（preamp / 分声道 / 输出增益）、3 段 ToneControl、六种参量 EQ（biquad 手算）、Balance（只衰减）。**纯函数层**：零进程/零 IO/零 DB。MA 取证 `music-assistant/server@76c2fcb` `helpers/dsp.py`，三处**与 plan §3.3 表格不同**的按源码改正（见「依赖与注意」） |
+| ✅ | P4-2 | per-player 配置存储 + 设置 API | **落点偏离**：新增 `services/playerDsp.ts`（非 `services/settings.ts`）＋ `player_dsp_configs` 表 ＋ `/v1/player-prefs/dsp` 三个端点 | （本轮） | 2026-09-20 | 见「依赖与注意」的落点说明。键 = `peerId`（按设备全局，不跟账号走）。读路径**永不抛**（在出流热路径上）、写路径**必须抛**（设置面板要能回 500）。归一化后「没活可干」→ 删行，库里不留空配置行 |
+| ✅ | P4-3 | Web 设置页面板 + 客户端设置入口 | `frontend/src/views/Settings/index.vue`（＋`locales/{zh-CN,en-US}.json`） | （本轮） | 2026-09-20 | Web 侧「音色（每台设备）」卡片：设备下拉（来自 `playerStore.peers`）＋ preamp / 三段音色 / 平衡 / 输出增益 / 参量 EQ 段列表（可增删、可选声道）+ 保存 / 清除。**保存后一律用响应里的 `config` 回写表单** —— 归一化的真相在服务端。**客户端（Flutter）入口本轮未做**：客户端是独立仓库，本机与 230 上都没有它的检出，见下 |
+| ✅ | P4-4 | 单测：滤镜串接顺序、空配置不加滤镜、分组成组按 MA 规则禁用 | 新增 `tests/services/dsp.test.ts`（20 例）＋ `tests/services/playerDsp.test.ts`（12 例） | （本轮） | 2026-09-20 | 分两层锁：**纯函数层**锁零开销 / 顺序 / 六种 biquad 系数**逐字符 golden**（golden 由 MA 公式在 Python 里独立复算，两份实现互证，不是照实现抄期望值）/ Balance 只衰减且系数恒 ≤ 1 / 越界钳位 / 单声道 pan 变体 / 分组禁用；**存取层**锁归一化（字符串数字接受、NaN 与未知段丢弃）、空配置删行、批量读取只回非空、`playerDspFilters` 的三种返回形态 |
 
 **依赖与注意**
 - 依赖 P1（DSP 挂在第二段 ffmpeg 的 `-af` 链上，没有出流管道就无处落点）。
+- **落点偏离（P4-2）**：任务表原写 `services/settings.ts`，实际新开 `services/playerDsp.ts`。理由：`settings.ts` 是**全局单键** KV（`key → value`），per-player 配置塞进去要么拼 key 前缀（`"dsp:dlna:xxx"`）要么改它的语义；仓里已有 `playerPrefs.ts` 这个「per-player 设置」先例，故新开同层文件，职责更单一。**DB 表数 38 → 39**（`player_dsp_configs`）；全仓 `grep` 过没有「N 张表」这类硬数字，故无需同步 SPEC。
 - 参量 EQ 在 MA 侧是用 `biquad` 手算系数（照 `helpers/dsp.py` 的 slope / width_type=h 处理），别用 ffmpeg 的 `equalizer` 草草代替，否则 Q 值与 MA 不一致。
-- **Balance 必须只衰减不提升**，否则会把已归一化的信号重新推出 headroom。
+- **Balance 必须只衰减不提升**，否则会把已归一化的信号重新推出 headroom。⚠️ 代码里这一项是**线性系数**（`(100-|b|)/100`），**不是 dB** —— 套 `dbToGain()` 会得到 `1*FL`（0.7 dB ≈ 1.08）反而成了正增益，与「只衰减」完全相反。单测专门断言系数恒 ≤ 1。
 - 本项目用户拥有 HiVi H5 MKII 有源音箱 + ESP32-S3 Sendspin 终端，per-device 配置实用价值最高 —— API 设计要考虑单设备与设备组两种粒度。
+- **锚定采样率（不是近似，是精确）**：biquad 系数与采样率绑定（`alpha = sin(2πf/fs)/(2Q)`）。MA 拿**每首歌真实的** `AudioFormat` 现算系数；我们没有「起播前已知实际格式」的通道（webdav/本地/在线源的真实采样率要么得 ffprobe 一次、要么由 ffmpeg 自己发现），故固定锚定值 `DSP_FILTER_RATE = 48000`，并在链首补 `aresample=48000` + `aformat=channel_layouts=stereo`（非 flow 路径）⇒ 系数与信号同源，结果精确。**flow 会话不补这两条**（解码段本来就 `-ar 48000 -ac 2`），见 `playerDspFilters(peerId, {flow:true})`。
+- **MA 三处与 plan §3.3 表格不同（以源码为准）**：① ToneControl 三段的 width 是 200 / **1800** / **18000**（表格只给了低段的 200）；② 任何一段电平为 0 → **该段不加滤镜**（不是加个 `gain=0`）；③ Balance 在**单声道源**上另有一套写法（`pan=stereo|FL=…*c0`，mono 没有 FL/FR 可 pan）。
+- **成组的成员设备自动禁用**：`buildFilterChain(cfg, fmt, { grouped: true })` 整体返回空（照 MA / plan §3.3 的 ⚠️）—— 成组后音色由组的输出统一决定，成员各自染一遍会 N 次叠加。API **不拦保存**（用户可能先存后组，拦了反而丢配置）。
+- **客户端入口未做（P4-3 的一半）**：`lib/features/settings/` 在独立仓库 `MusicFlow-client`，本机与 230 上都没有它的检出 ⇒ 本轮只落了 Web 面板。客户端开工时补即可，**API 已就绪**（`GET/PUT /v1/player-prefs/dsp[/:peerId]`，三个端点，需 `renderer.use`）。
 
-**验收结果**：*待填*
+**验收结果**
+- **纯函数层**：`tests/services/dsp.test.ts` **20 例**全绿 —— 零开销（`null`/`undefined`/`{}`/全 0 一律 `[]`）、片段顺序（preamp → 音色 → 参量 EQ → Balance → 输出增益）、三段音色常量照 MA、六种 biquad **逐字符 golden**（PEAK/低架/高架/陷波/高通/低通，含 `:c=FL` 变体）、Balance 只衰减（含越界钳位与单声道变体）、分组禁用、`fmtNum` 数字文本稳定。
+- **存取层**：`tests/services/playerDsp.test.ts` **12 例**全绿 —— 往返只留非 0 字段、重复写是覆盖不是插行、字符串数字接受而 NaN/未知段丢弃、落库 JSON 与归一化结果逐字段一致、全 0 与「只有 disabled 段」都删行、批量读取只回非空、`playerDspFilters` 三种形态（无配置 `[]` / 单曲带 `aresample`+`aformat` 前缀 / flow 不带）。
+- **接线层**：三处出流入口全部带上 peerId —— `resolveRequestAf(song, peerId)`（`/rest/stream` 用 `peerId` 参数、`/stream-remote` 同、DLNA 用 `dlna:<deviceId>` 从 cast token 推）、`resolveFlowAf(song, dspPeerId)`（flow 每曲 af）、`serveFlowQueue()` 新增 `dspPeerId` 透传。**插在响度之后、限制器之前**（②→③→⑤）由 `pipeline.resolveLoudnessAf({extraFilters})` 单点负责，避免某个调用点接反。
+- **Web 面板**：设置页「音色（每台设备）」卡片（P4-3 的 Web 半边），`vue-tsc && vite build` 通过。
+- **门禁**：`tsc --noEmit` 0；7 个静态检查脚本全 0（含 `check-i18n`：前端 1308 键对齐、后端 catalog 145 键对齐、源码无硬编码中文）。
+- **全量回归**：**168 文件 / 1358 用例**中 1357 通过；`tests/services/flow.test.ts` 的「abort 幂等且让 `done` 收敛」在**满载全量跑**时超时一次（15s 墙钟），单跑 859ms 通过、干净 HEAD worktree 全量跑（166 文件）也通过、8 核满载压测连跑 2 次均通过 ⇒ 判定为**满载下的偶发**（该用例断言的是真实子进程被 SIGKILL 后 `close` 的收敛时间，属墙钟敏感），**非 P4 引入**（P4 未触碰 `flow.ts`）。**第二次全量复跑 168 文件 / 1358 用例全绿**，确认偶发。⚠️ 该用例仍是满载下最先被拖垮的一个，将来在 CI 上再见到它超时，先看是不是并发/磁盘，别先怀疑 flow 会话本身。
 
 ---
 

@@ -423,6 +423,18 @@ export const playerNameOverrides = sqliteTable("player_name_overrides", {
   pk: primaryKey({ columns: [t.ownerUserId, t.peerId] }),
 }));
 
+// player_dsp_configs:每个播放器(peerId)一条 DSP 配置(③ 段,plan §3.3 / D6 四项:
+// Gain / 三段 ToneControl / 参量 EQ / Balance)。**按设备全局**,与 sendspin_device_state
+// 同理 —— 音色是设备属性(书架箱/耳机各自的补偿曲线),不跟账号走。
+// config 存 JSON(services/audio/dsp.ts 的 DspConfig);读时一律过 normalizeDspConfig:
+// 坏值绝不能变成 NaN 混进 ffmpeg 命令(那会让整条流失败,而用户只看到"这首歌放不出来")。
+// 归一化后"没活可干"(全 0 / 空段)的行不留,写入即删行。
+export const playerDspConfigs = sqliteTable("player_dsp_configs", {
+  peerId: text("peer_id").primaryKey(),
+  config: text("config").notNull().default(""),
+  updatedAt: text("updated_at").default(""),
+});
+
 // sendspin_device_state:Sendspin 播放器「按设备全局」音量/静音持久化(clientId 裸 id)。
 // 与 player_prefs(按用户)不同,音量是设备属性,跟人不跟账号:任何用户调完都落同一行,
 // 重连/重启后自动恢复。只在"删除播放器"(解绑 unpair / 忘记拨号目标)时清行;

@@ -126,6 +126,99 @@
       </el-card>
     </template>
 
+    <!-- ===== 音色（每台设备，P4-3）=====
+         与「响度归一化」职责不同：② 段管「每首歌一样响」，这里管「按口味调音色」。
+         音色是设备属性（书架箱/耳机各自的补偿曲线），故按 peerId 存、不跟账号走。
+         全部留 0 = 不做任何处理（服务端零滤镜、零开销）。 -->
+    <el-card class="mt-card">
+      <h3>{{ t('settings.dsp.title') }}</h3>
+      <div class="dsp-desc">{{ t('settings.dsp.desc') }}</div>
+      <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">{{ t('settings.dsp.device') }}</div>
+          <div v-if="dspDevices.length === 0" class="desc">{{ t('settings.dsp.noDevice') }}</div>
+        </div>
+        <div class="setting-value">
+          <el-select v-model="dspPeerId" style="width: 240px" :placeholder="t('settings.dsp.devicePlaceholder')" @change="loadDsp">
+            <el-option v-for="d in dspDevices" :key="d.peerId" :label="d.label" :value="d.peerId" />
+          </el-select>
+        </div>
+      </div>
+
+      <template v-if="dspPeerId">
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.dsp.preamp') }}</div>
+            <div class="desc">{{ t('settings.dsp.preampDesc') }}</div>
+          </div>
+          <div class="setting-value">
+            <el-input-number v-model="dspForm.preampDb" :min="-30" :max="30" :step="0.5" :precision="1" size="small" controls-position="right" style="width: 120px" />
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label"><div class="title">{{ t('settings.dsp.tone') }}</div></div>
+          <div class="setting-value dsp-row">
+            <span class="dsp-mini">{{ t('settings.dsp.toneBass') }}</span>
+            <el-input-number v-model="dspForm.bassDb" :min="-12" :max="12" :step="1" size="small" controls-position="right" style="width: 110px" />
+            <span class="dsp-mini">{{ t('settings.dsp.toneMid') }}</span>
+            <el-input-number v-model="dspForm.midDb" :min="-12" :max="12" :step="1" size="small" controls-position="right" style="width: 110px" />
+            <span class="dsp-mini">{{ t('settings.dsp.toneTreble') }}</span>
+            <el-input-number v-model="dspForm.trebleDb" :min="-12" :max="12" :step="1" size="small" controls-position="right" style="width: 110px" />
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.dsp.balance') }}</div>
+            <div class="desc">{{ t('settings.dsp.balanceDesc') }}</div>
+          </div>
+          <div class="setting-value dsp-row">
+            <span class="dsp-mini">{{ t('settings.dsp.balanceLeft') }}</span>
+            <el-slider v-model="dspForm.balance" :min="-100" :max="100" :step="5" style="width: 220px" />
+            <span class="dsp-mini">{{ t('settings.dsp.balanceRight') }}</span>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label"><div class="title">{{ t('settings.dsp.gain') }}</div><div class="desc">{{ t('settings.dsp.gainDesc') }}</div></div>
+          <div class="setting-value">
+            <el-input-number v-model="dspForm.gainDb" :min="-30" :max="30" :step="0.5" :precision="1" size="small" controls-position="right" style="width: 120px" />
+          </div>
+        </div>
+
+        <div class="setting-item dsp-eq-block">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.dsp.eq') }}</div>
+            <div class="desc">{{ dspForm.bands.length === 0 ? t('settings.dsp.eqEmpty') : t('settings.dsp.eqDesc') }}</div>
+          </div>
+          <div class="setting-value dsp-eq">
+            <div v-for="(b, i) in dspForm.bands" :key="i" class="dsp-eq-row">
+              <el-select v-model="b.type" size="small" style="width: 110px">
+                <el-option v-for="tp in DSP_EQ_TYPES" :key="tp.value" :label="t(`settings.dsp.type${tp.label}`)" :value="tp.value" />
+              </el-select>
+              <el-input-number v-model="b.frequency" :min="20" :max="20000" :step="10" size="small" controls-position="right" style="width: 120px" />
+              <el-input-number v-model="b.gainDb" :min="-24" :max="24" :step="0.5" :precision="1" size="small" controls-position="right" style="width: 110px" />
+              <el-input-number v-model="b.q" :min="0.1" :max="20" :step="0.1" :precision="1" size="small" controls-position="right" style="width: 100px" />
+              <el-select v-model="b.channel" size="small" style="width: 92px">
+                <el-option :label="t('settings.dsp.eqAll')" value="all" />
+                <el-option label="FL" value="FL" />
+                <el-option label="FR" value="FR" />
+              </el-select>
+              <el-button link type="danger" size="small" @click="dspForm.bands.splice(i, 1)">{{ t('settings.dsp.eqRemove') }}</el-button>
+            </div>
+            <el-button size="small" @click="addDspBand">{{ t('settings.dsp.eqAdd') }}</el-button>
+          </div>
+        </div>
+
+        <div class="dsp-foot">
+          <span class="dsp-mini">{{ dspDeviceLabel }}</span>
+          <el-button :loading="dspSaving" @click="clearDsp">{{ t('settings.dsp.clear') }}</el-button>
+          <el-button type="primary" :loading="dspSaving" @click="saveDsp">{{ t('settings.dsp.save') }}</el-button>
+        </div>
+      </template>
+    </el-card>
+
     <!-- ===== 通用 ===== -->
     <el-card class="mt-card">
       <h3>{{ t('settings.general') }}</h3>
@@ -145,12 +238,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, reactive, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
 import { useAuthStore } from "@/stores/auth";
 import { useLocaleStore } from "@/stores/locale";
+import { usePlayerStore } from "@/stores/player";
 import type { AppLocale } from "@/locales";
 
 const { t } = useI18n();
@@ -340,6 +434,124 @@ function clearCache() {
   setTimeout(() => location.reload(), 800);
 }
 
+// ---------- 音色：per-player DSP（③ 段，P4-3）----------
+// 服务端按 peerId 存（音色是设备属性，不跟账号走），出流时插在响度之后、限制器之前。
+// 这里只做「读—改—写」：**归一化的真相在服务端**（normalizeDspConfig），
+// 所以保存后一律用响应里的 config 回写表单 —— 用户看到的就是真正生效的值。
+const playerStore = usePlayerStore();
+const dspPeerId = ref("");
+const dspSaving = ref(false);
+const dspForm = reactive({
+  preampDb: 0,
+  bassDb: 0,
+  midDb: 0,
+  trebleDb: 0,
+  balance: 0,
+  gainDb: 0,
+  bands: [] as Array<{ type: string; frequency: number; gainDb: number; q: number; channel: string }>,
+});
+
+const DSP_EQ_TYPES = [
+  { value: "peak", label: "Peak" },
+  { value: "low_shelf", label: "LowShelf" },
+  { value: "high_shelf", label: "HighShelf" },
+  { value: "high_pass", label: "HighPass" },
+  { value: "low_pass", label: "LowPass" },
+  { value: "notch", label: "Notch" },
+];
+
+/** 可选设备列表（来自播放器 store：REST /v1/peers + WS 心跳共同维护）。 */
+const dspDevices = computed(() =>
+  (playerStore.peers as any[])
+    .filter((p) => typeof p?.peerId === "string" && p.peerId)
+    .map((p) => ({ peerId: p.peerId as string, label: playerStore.getPeerName(p.peerId) || p.name || p.peerId })),
+);
+const dspDeviceLabel = computed(() => dspDevices.value.find((d) => d.peerId === dspPeerId.value)?.label || "");
+
+function dspUrl(): string {
+  return `/rest/api/v1/player-prefs/dsp/${encodeURIComponent(dspPeerId.value)}`;
+}
+
+function applyDspConfig(cfg: any): void {
+  dspForm.preampDb = Number(cfg?.preampDb) || 0;
+  dspForm.bassDb = Number(cfg?.tone?.bassDb) || 0;
+  dspForm.midDb = Number(cfg?.tone?.midDb) || 0;
+  dspForm.trebleDb = Number(cfg?.tone?.trebleDb) || 0;
+  dspForm.balance = Number(cfg?.balance) || 0;
+  dspForm.gainDb = Number(cfg?.gainDb) || 0;
+  dspForm.bands = (Array.isArray(cfg?.parametricEq?.bands) ? cfg.parametricEq.bands : []).map((b: any) => ({
+    type: String(b?.type || "peak"),
+    frequency: Number(b?.frequency) || 1000,
+    gainDb: Number(b?.gainDb) || 0,
+    q: Number(b?.q) || 1,
+    channel: b?.channel === "FL" || b?.channel === "FR" ? b.channel : "all",
+  }));
+}
+
+/** 切换设备：先把表单清回"无处理"，再拉该设备的配置（避免把上一台的残留带过去）。 */
+async function loadDsp(): Promise<void> {
+  applyDspConfig(null);
+  if (!dspPeerId.value) return;
+  try {
+    const res = await api.get(dspUrl());
+    applyDspConfig(res.data?.config);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("settings.dsp.loadFailed"));
+  }
+}
+
+function addDspBand(): void {
+  dspForm.bands.push({ type: "peak", frequency: 1000, gainDb: 0, q: 1, channel: "all" });
+}
+
+// 直接把表单原文发给服务端归一化（0 / 空段由服务端丢弃），再用返回值回写 —— 单一真相源。
+function dspPayload(): Record<string, unknown> {
+  return {
+    preampDb: dspForm.preampDb,
+    tone: { bassDb: dspForm.bassDb, midDb: dspForm.midDb, trebleDb: dspForm.trebleDb },
+    balance: dspForm.balance,
+    gainDb: dspForm.gainDb,
+    parametricEq: {
+      bands: dspForm.bands.map((b) => ({
+        type: b.type,
+        frequency: b.frequency,
+        gainDb: b.gainDb,
+        q: b.q,
+        ...(b.channel !== "all" ? { channel: b.channel } : {}),
+      })),
+    },
+  };
+}
+
+async function saveDsp(): Promise<void> {
+  if (!dspPeerId.value) return;
+  dspSaving.value = true;
+  try {
+    const res = await api.put(dspUrl(), dspPayload());
+    applyDspConfig(res.data?.config);
+    ElMessage.success(t("settings.dsp.saved"));
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("settings.dsp.saveFailed"));
+  } finally {
+    dspSaving.value = false;
+  }
+}
+
+async function clearDsp(): Promise<void> {
+  if (!dspPeerId.value) return;
+  dspSaving.value = true;
+  try {
+    // 空配置 → 服务端归一化为 null 并**删行**（库里不留"等于没配置"的行）。
+    const res = await api.put(dspUrl(), {});
+    applyDspConfig(res.data?.config);
+    ElMessage.success(t("settings.dsp.cleared"));
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || t("settings.dsp.saveFailed"));
+  } finally {
+    dspSaving.value = false;
+  }
+}
+
 onMounted(() => { loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig(); });
 </script>
 
@@ -363,6 +575,14 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: var(--fnos-text-
 .batch-pace-actions { display: flex; gap: 10px; align-items: center; }
 .memory-actions { display: flex; gap: 10px; align-items: center; }
 .pace-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
+// 音色面板（P4-3）
+.dsp-desc { font-size: 12px; color: var(--fnos-text-tertiary); margin: 6px 0 4px; line-height: 1.6; }
+.dsp-mini { font-size: 12px; color: var(--fnos-text-tertiary); white-space: nowrap; }
+.dsp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsp-eq-block { flex-direction: column; }
+.dsp-eq { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; width: 100%; }
+.dsp-eq-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.dsp-foot { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding-top: 14px; }
 
 @media (max-width: 768px) {
   .settings-page { padding: 20px 16px; }
@@ -370,5 +590,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: var(--fnos-text-
   .setting-item { flex-direction: column; gap: 10px; }
   .proxy-input { width: 100%; }
   .proxy-actions { flex-wrap: wrap; }
+  .dsp-eq { align-items: stretch; }
+  .dsp-eq-row { justify-content: flex-start; }
 }
 </style>

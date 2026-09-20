@@ -1308,12 +1308,21 @@ async function serveTranscodedSong(
  * 开关 `pipeline.http`(缺省开,见 D5):关 = 空链(仍走管道,只是无滤镜——
  * 按 D9,"关闭开关只等于滤镜链为空,不回到绕过管道")。
  * song 为空(stream-remote 未入库行)时按无测量处理。
+ *
+ * 第 3 个入参(P4-2)是**该播放器的 DSP 配置**(`dlna:<id>` / `local:<clientId>` …);
+ * 命中时插在**响度之后、限制器之前**(② → ③ → ⑤,plan §3.1)。传空串 = 无 per-player
+ * 音色(HTTP 调用方没自报 peerId —— 与"没配置"同义,不是错误)。
  * 导出仅为 P2-6 契约测试能直接验证「开关关闭 = 空链」这条 D9 语义。
  */
-export async function resolveRequestAf(song: { id?: string } | null): Promise<string[]> {
+export async function resolveRequestAf(song: { id?: string } | null, peerId?: string): Promise<string[]> {
   if (!getSettingBool("pipeline.http", true)) return [];
   const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
-  return resolveLoudnessAf(song?.id ? { rowId: song.id } : {});
+  const { playerDspFilters } = await import("../../services/playerDsp.js");
+  const extraFilters = playerDspFilters(peerId, {});
+  return resolveLoudnessAf({
+    ...(song?.id ? { rowId: song.id } : {}),
+    ...(extraFilters.length > 0 ? { extraFilters } : {}),
+  });
 }
 
 /**
@@ -1461,11 +1470,20 @@ async function servePipelinedSong(
  * 原因：两路信号在混合后才可能超 0 dBFS，限幅必须落在混合之后（⑤ 在 ④ 之后，plan §3.1）；
  * 每曲各加一次等于对同一信号限幅两次（白烧 CPU，第二次还是空转）。
  * 通道开关（`pipeline.http`）关闭 → 空链，与逐首路径语义一致（D9：只是链为空，不绕管道）。
+ *
+ * per-player DSP（P4-2）走 `{ flow: true }`：flow 解码段已 `-ar 48000 -ac 2`（见
+ * `playerDspFilters`），不再补 resample/aformat —— 补了就是白过一遍滤镜。
  */
-async function resolveFlowAf(song: { id?: string } | null): Promise<string[]> {
+async function resolveFlowAf(song: { id?: string } | null, peerId?: string): Promise<string[]> {
   if (!getSettingBool("pipeline.http", true)) return [];
   const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
-  return resolveLoudnessAf({ ...(song?.id ? { rowId: song.id } : {}), includeLimiter: false });
+  const { playerDspFilters } = await import("../../services/playerDsp.js");
+  const extraFilters = playerDspFilters(peerId, { flow: true });
+  return resolveLoudnessAf({
+    ...(song?.id ? { rowId: song.id } : {}),
+    includeLimiter: false,
+    ...(extraFilters.length > 0 ? { extraFilters } : {}),
+  });
 }
 
 /**
@@ -1487,6 +1505,8 @@ async function serveFlowQueue(
     icyMetaint?: number;
     extraHeaders?: Record<string, string>;
     maxItems?: number;
+    /** per-player DSP 的查键（P4-2）。DLNA 传 `dlna:<deviceId>`，HTTP 直接传 peerId。 */
+    dspPeerId?: string;
   },
 ): Promise<Response | null> {
   const { getQueueManager } = await import("../../services/dlna/queue.js");
@@ -1510,7 +1530,7 @@ async function serveFlowQueue(
       key: resolved.id,
       input: input.source,
       ...(input.headers ? { headers: input.headers } : {}),
-      af: await resolveFlowAf(resolved),
+      af: await resolveFlowAf(resolved, opts.dspPeerId),
       title: cand.title || resolved.title || "",
       artist: cand.artist || resolved.artist || "",
       ...(typeof cand.duration === "number" && cand.duration > 0 ? { durationSec: cand.duration } : {}),
@@ -1630,6 +1650,9 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
+  // P4-2:per-player DSP 的查键。HTTP 客户端必须自报(Web 用 `local:<uuid>`),
+  // 不自报就没有 per-device 音色 —— 服务端无从知道"这是哪台设备在播"。
+  const dspPeerId = getParam(c, "peerId") || "";
 
   // OpenSubsonic 转码语义：客户端要求 format=mp3/aac，或 maxBitRate 低于源码率 → 服务端实时转码。
   // 转码流不可按字节 seek，客户端会用 timeOffset 重新拉流（对应已宣告的 transcodeOffset 扩展）。
@@ -1646,7 +1669,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset,
-        af: await resolveRequestAf(song),
+        af: await resolveRequestAf(song, dspPeerId),
         songId: song.id,
       });
     }
@@ -1673,7 +1696,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
     // 各推进一次 → 跳歌。DLNA 的队列本就由服务端持有(QueueController),所以能默认接管。
     // 关闭 / 不适用 → 落回下面的单曲管道(逐首仍是完整六段,D9)。
     if (timeOffset === 0 && getParam(c, "flow") === "1") {
-      const peerId = getParam(c, "peerId") || "";
+      const peerId = dspPeerId;
       if (peerId) {
         const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
         const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d));
@@ -1684,6 +1707,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
             songId: song.id,
             codec: resolveChannelCodec(song.suffix),
             fade: flowCfg.fade,
+            dspPeerId: peerId,
             ...((c.req.header("icy-metadata") || "") === "1" ? { icyMetaint: 16384 } : {}),
           });
           if (flowResp) return flowResp;
@@ -1692,7 +1716,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
     }
     return servePipelinedSong(c, song, input, {
       timeOffset,
-      af: await resolveRequestAf(song),
+      af: await resolveRequestAf(song, dspPeerId),
     });
   } catch (e: any) {
     return c.json(fail(0, e.message || "Stream failed"));
@@ -1721,6 +1745,8 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
     duration: parseInt(getParam(c, "duration") || "0") || 0,
     cover: getParam(c, "cover") || "",
   };
+  // P4-2:与 /rest/stream 一致支持 per-player DSP(调用方自报 peerId 才生效)。
+  const dspPeerId = getParam(c, "peerId") || "";
   try {
     // streamUrl 是可选能力:纯核实源(huawei-chart 等)无该方法,按元数据多源兜底
     // 解析可播地址(不落库,仅本次代理;findFallbackStream 内部会回退到有 stream
@@ -1751,7 +1777,7 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0,
-        af: await resolveRequestAf(null),
+        af: await resolveRequestAf(null, dspPeerId),
       });
     }
 
@@ -1777,7 +1803,7 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
       c,
       { suffix: "mp3" },
       { source: loopbackRawStreamUrl(playUrl, streamHeaders) },
-      { timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0, af: await resolveRequestAf(null) },
+      { timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0, af: await resolveRequestAf(null, dspPeerId) },
     );
   } catch (e: any) {
     return c.json(fail(0, e.message || "Remote stream failed"));
@@ -1823,6 +1849,9 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
+  // P4-2:DLNA 侧 per-player DSP 用 `dlna:<deviceId>` 作查键 —— 音箱自己不会自报,
+  // 但 cast token 里带着 deviceId(= 它由哪台设备投屏而来),所以这里天然知道"是谁在播"。
+  const dspPeerId = castSession.deviceId ? `dlna:${castSession.deviceId}` : "";
 
   // 与 /rest/stream 一致支持 format/maxBitRate/timeOffset 服务端实时转码；
   // 音箱默认不带这些参数 → 走下面的实时管道(不是原样拉流)。
@@ -1839,7 +1868,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset,
-        af: await resolveRequestAf(resolvedSong),
+        af: await resolveRequestAf(resolvedSong, dspPeerId),
         songId: resolvedSong.id,
       });
     }
@@ -1887,6 +1916,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
           codec: dlnaCodec,
           fade: flowCfg.fade,
           extraHeaders,
+          dspPeerId,
           ...(icyRequested ? { icyMetaint: 16384 } : {}),
         });
         if (flowResp) return flowResp;
@@ -1895,7 +1925,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
 
     return servePipelinedSong(c, resolvedSong, input, {
       timeOffset,
-      af: await resolveRequestAf(resolvedSong),
+      af: await resolveRequestAf(resolvedSong, dspPeerId),
       codecOverride: dlnaCodec,
       extraHeaders,
       ...(icyRequested ? { icyMetaint: 16384 } : {}),

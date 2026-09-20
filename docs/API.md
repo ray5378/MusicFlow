@@ -101,6 +101,7 @@
 | GET | `/settings`、`/stats` |
 | GET/POST/PUT/DELETE | `/sources`、`/sources/:id`、`/sources/:id/scan`、`/scan-stop`、`/scan-status`、`/test` | 音乐库目录管理 |
 | GET/POST/DELETE | `/recommend-pool`、`/recommend-pool/favorites`、`/recommend-pool/playlist/:playlistId` | 推荐池 |
+| GET/PUT | `/player-prefs/dsp`、`/player-prefs/dsp/:peerId` | 每台播放器的音色（③ 段 DSP：Gain / 三段音色 / 参量 EQ / Balance）。GET 全量或单台；PUT 单台（body 即配置，服务端归一化后回显；传 `{}` 即清除该台配置）。需 `renderer.use`，**下一次起播生效** |
 
 ## 3. OpenSubsonic（`/rest/*`）
 

@@ -78,6 +78,7 @@ import {
 } from "../../services/player/playerWebhook.js";
 import { getGroupManager, splitMemberId } from "../../services/group/index.js";
 import { getHiddenPeerIds, setPeerHidden, isPeerHidden, getNameOverrides, getPeerNameOverride, setPeerNameOverride } from "../../services/playerPrefs.js";
+import { getPlayerDspConfig, setPlayerDspConfig, listPlayerDspConfigs } from "../../services/playerDsp.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
 import { PlaybackState } from "../../services/player/types.js";
@@ -3267,6 +3268,37 @@ apiRoutes.put("/v1/player-prefs/names", permMiddleware(PERM.RENDERER_USE), async
   if (name.length > 50) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.nameTooLong"), 400);
   setPeerNameOverride(userId, peerId, name);
   return c.json({ ok: true, displayName: getPeerNameOverride(userId, peerId) });
+});
+
+// ===== per-player DSP 配置（③ 段，P4-2）=====
+// 音色是**设备属性**（书架箱 / 耳机各自的补偿曲线），故不按用户分：任何账号改完都落
+// 同一行，谁进来看到的都是同一套 EQ（与 sendspin_device_state 的音量同理）。
+// 需要 renderer.use（普通用户被授予播放器使用能力后可调自己那台）。
+// 生效时机：**下一次起播**（出流侧在起流时一次性算定 af 链，见 P3-4 的 pin）。
+// 成组的成员设备即使有配置也不会生效（`playerDspFilters` 里按 MA 规则禁用），
+// 但这里**不拦保存** —— 用户可能先存后组，拦了反而丢配置。
+// GET:返回全部非空配置 { {peerId}: DspConfig }（设置面板一次拿全，省 N 次请求）。
+apiRoutes.get("/v1/player-prefs/dsp", permMiddleware(PERM.RENDERER_USE), (c) => {
+  return c.json({ configs: listPlayerDspConfigs() });
+});
+// GET:单台设备的配置（无配置回 null，前端据此显示"未启用"）。
+apiRoutes.get("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), (c) => {
+  const peerId = c.req.param("peerId") || "";
+  if (!peerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  return c.json({ peerId, config: getPlayerDspConfig(peerId) });
+});
+// PUT:设置单台设备的配置。Body 即 DspConfig（任意形状，服务端归一化）。
+// 归一化后"没活可干"（全 0 / 空段）→ 删行并回 null —— 前端表单可直接用返回值纠正显示。
+apiRoutes.put("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const peerId = c.req.param("peerId") || "";
+  if (!peerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  const body = await c.req.json().catch(() => null);
+  try {
+    const config = setPlayerDspConfig(peerId, body);
+    return c.json({ ok: true, peerId, config });
+  } catch {
+    return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.dsp.saveFailed"), 500);
+  }
 });
 
 // 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。

@@ -536,6 +536,15 @@ export function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_player_name_overrides_owner ON player_name_overrides(owner_user_id);
 
+    -- 每台播放器(peerId)一条 DSP 配置(③ 段,plan §3.3 / D6):JSON 文本。
+    -- 按设备全局(音色是设备属性,不跟账号走),与 sendspin_device_state 同理。
+    -- 读时一律过 normalizeDspConfig,坏值绝不进 ffmpeg 命令;归一化后没活可干即删行。
+    CREATE TABLE IF NOT EXISTS player_dsp_configs (
+      peer_id TEXT PRIMARY KEY,
+      config TEXT NOT NULL DEFAULT '',
+      updated_at TEXT DEFAULT ''
+    );
+
     -- Sendspin 播放器按设备全局音量/静音(client_id 裸 id 主键):重连/重启自动恢复,
     -- 只在解绑/忘记设备时清行。子进程与主进程直写(WAL 多进程安全)。
     -- disabled 与 DLNA 同语义:用户手动禁用(持久化),不出现在任何流转播放入口。

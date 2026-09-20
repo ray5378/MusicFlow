@@ -250,6 +250,14 @@ export interface LoudnessAfOpts {
    * 若两处都加,等于对同一信号限幅两次(白烧 CPU + 第二次是空转)。
    */
   includeLimiter?: boolean;
+  /**
+   * ③ 段 DSP 片段(`services/audio/dsp.ts::buildFilterChain` 的产物,P4-2)。
+   * 插在**响度之后、限制器之前**:顺序是 ② → ③ → ⑤(plan §3.1)——
+   * DSP 必须作用在"已经一样响"的信号上,反过来的话响度归一化会把调好的音色重新抹平。
+   * 注意逃生舱语义:本函数在 `enabled:false` / `escapeEnvVar=0` 时**整条返回空**,
+   * 此时 `extraFilters` 也一并丢弃 —— 与 D9/D5「关闭开关 = 滤镜链为空」一致。
+   */
+  extraFilters?: string[];
 }
 
 /**
@@ -284,6 +292,9 @@ export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
       : undefined;
   const lf = loudnessFilter({ mode, gainDb, targetLoudness: target });
   if (lf) out.push(lf);
+  // ③ 段 DSP(P4-2):响度之后、限制器之前。放在这里而不是由调用方自行拼接,
+  // 是为了让"②→③→⑤"这个顺序只有一个落点,不会被某个调用点接反。
+  if (opts.extraFilters?.length) out.push(...opts.extraFilters);
   if (opts.includeLimiter !== false) out.push(limiterFilter());
   return out;
 }

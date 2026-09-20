@@ -163,6 +163,8 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.renderer.noPlayableSongs": "「{name}」没有可播放的歌曲",
     "errors.renderer.songNotInContent": "指定的歌曲不在该 {type} 中",
 
+    "errors.dsp.saveFailed": "音色配置保存失败",
+
     "errors.group.notFound": "组不存在",
     "errors.group.notFoundOrNoPerm": "组不存在或无权限",
     "errors.group.empty": "组内无成员",
@@ -328,6 +330,8 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.renderer.invalidTypeId": "Invalid {type} id",
     "errors.renderer.noPlayableSongs": "{name} has no playable songs",
     "errors.renderer.songNotInContent": "The specified song is not in this {type}",
+
+    "errors.dsp.saveFailed": "Failed to save the tone settings",
 
     "errors.group.notFound": "Group not found",
     "errors.group.notFoundOrNoPerm": "Group not found or no permission",
