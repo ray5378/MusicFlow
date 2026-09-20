@@ -78,13 +78,41 @@ function hasMpegFrameSync(buf: Buffer): boolean {
 }
 
 describe("OpenSubsonic /rest/stream 转码端到端（真实 ffmpeg）", () => {
-  it("无参数 → 原样返回 WAV（Content-Type/Content-Length/字节一致）", async () => {
+  it("无参数 → 走管道出 FLAC（P2-1:D9 删除原样直出分支）", async () => {
     const { res, buf } = await stream("");
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("audio/wav");
-    expect(res.headers.get("content-length")).toBe(String(wavSize));
-    expect(buf.length).toBe(wavSize);
-    expect(buf.equals(fs.readFileSync(wavPath))).toBe(true);
+    // D4 跟随源族:wav 无损 → FLAC
+    expect(res.headers.get("content-type")).toBe("audio/flac");
+    expect(res.headers.get("x-musicflow-transcoded")).toBe("1");
+    // 实时流无字节总量,不返回 Content-Length
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(buf.length).toBeGreaterThan(1000);
+    // FLAC 容器头 fLaC
+    expect(buf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+  }, 30000);
+
+  it("Range 在管道流上被忽略(全流 200,改走 timeOffset,P2-3)", async () => {
+    const res = await app.request(`/rest/stream?id=sw&${authQS()}`, {
+      headers: { Range: "bytes=0-999" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("audio/flac");
+    await res.arrayBuffer();
+  }, 30000);
+
+  it("P0-4:本地行播完上报 loudness 入库", async () => {
+    const { loadAnalysis, deleteAnalysis } = await import("../../src/services/audio/analysisStore.js");
+    deleteAnalysis("sw");
+    await stream("");
+    const t0 = Date.now();
+    for (;;) {
+      const rec = loadAnalysis("sw");
+      if (rec && Number.isFinite(rec.loudnessIntegrated as number)) break;
+      if (Date.now() - t0 > 8000) throw new Error("回写未落库");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(loadAnalysis("sw")!.loudnessIntegrated).toBeLessThan(0);
+    deleteAnalysis("sw");
   }, 30000);
 
   it("format=mp3 → 实时转码 mp3（audio/mpeg、无 Content-Length、MPEG 帧同步头）", async () => {

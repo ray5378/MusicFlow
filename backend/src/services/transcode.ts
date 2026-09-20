@@ -137,6 +137,11 @@ export function transcodeArgs(opts: TranscodeSpawnOptions): string[] {
   return [...head, ...codecArgs(opts.format, opts.bitrateKbps), "-f", container, "-"];
 }
 
+/** 用已组装好的参数直接拉起 ffmpeg(供统一管道组装调用方)。 */
+export function spawnTranscoderWithArgs(args: string[]): ChildProcessByStdio<null, Readable, Readable> {
+  return spawn(resolveFfmpeg(), args, { stdio: ["ignore", "pipe", "pipe"] });
+}
+
 /** 拉起 ffmpeg 把 source 实时转成目标格式输出到 stdout（pipe）。 */
 export function spawnTranscoder(opts: TranscodeSpawnOptions): ChildProcessByStdio<null, Readable, Readable> {
   const args = transcodeArgs(opts);

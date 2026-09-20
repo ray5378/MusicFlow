@@ -1376,24 +1376,64 @@ async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null
 async function serveTranscodedSong(
   c: any,
   input: { source: string; headers?: Record<string, string> },
-  opts: { format: "mp3" | "aac"; bitrateKbps: number; timeOffset?: number },
+  opts: { format: "mp3" | "aac"; bitrateKbps: number; timeOffset?: number; af?: string[]; songId?: string },
 ) {
   // ffmpeg 输入硬契约:回环 token URL 或本地路径(见 services/dlna/control.ts 注释 / SPEC §1.8)。
   if (/^https?:\/\//i.test(input.source) && !input.source.startsWith(loopbackBase())) {
     log.warn("ffmpeg 输入应为回环 token URL,外部直链会踩 DNS / 302+Auth 坑", { source: input.source.slice(0, 120) });
   }
-  await acquireTranscodeSlot();
-  if (c.req.raw.signal.aborted) {
-    releaseTranscodeSlot();
-    return new Response(null, { status: 499 });
-  }
-  const child = spawnTranscoder({
+  const { transcodeArgs } = await import("../../services/transcode.js");
+  const args = transcodeArgs({
     source: input.source,
     headers: input.headers,
     format: opts.format,
     bitrateKbps: opts.bitrateKbps,
     timeOffsetSec: opts.timeOffset,
+    ...(opts.af && opts.af.length > 0 ? { af: opts.af } : {}),
   });
+  // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream。
+  // 直接把 child.stdout(Node Readable) 丢进 new Response() 时,undici 在流结束处
+  // 会对 ReadableByteStreamController 调用两次 close()(child_process 的 stdout
+  // 既发 'end' 又发 'close'),在 Node 22 上抛
+  // "ReadableStream is already closed"(ERR_INVALID_STATE),导致 DLNA 音箱拉到的
+  // 转码流(ogg→mp3)直接 500、无声。toWeb 单源 close 在 serveFfmpegPipe 内处理。
+  // (出流公用逻辑见 serveFfmpegPipe:并发槽/abort 联动/stderr 排空/P0-4 上报。)
+  return serveFfmpegPipe(c, {
+    songId: opts.songId,
+    mime: TRANSCODE_MIME[opts.format],
+    sourceLabel: input.source.slice(0, 120),
+    args,
+  });
+}
+
+/**
+ * 本次出流的 -af 链(P2-1):D2 默认实时 loudnorm(有测量走静态)＋限制器。
+ * 开关 `pipeline.http`(缺省开,见 D5):关 = 空链(仍走管道,只是无滤镜——
+ * 按 D9,"关闭开关只等于滤镜链为空,不回到绕过管道")。
+ * song 为空(stream-remote 未入库行)时按无测量处理。
+ */
+async function resolveRequestAf(song: { id?: string } | null): Promise<string[]> {
+  if (!getSettingBool("pipeline.http", true)) return [];
+  const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
+  return resolveLoudnessAf(song?.id ? { rowId: song.id } : {});
+}
+
+/**
+ * 通用 ffmpeg 管道出流(转码/管道出流共用):并发槽＋abort 联动＋stderr 排空＋
+ * P0-4(自然播完上报边播边测)＋toWeb 单源 close。调用方只负责组装 args 与 MIME。
+ */
+async function serveFfmpegPipe(
+  c: any,
+  opts: { songId?: string; mime: string; sourceLabel: string; args: string[] },
+) {
+  const { spawnTranscoderWithArgs, acquireTranscodeSlot, releaseTranscodeSlot } =
+    await import("../../services/transcode.js");
+  await acquireTranscodeSlot();
+  if (c.req.raw.signal.aborted) {
+    releaseTranscodeSlot();
+    return new Response(null, { status: 499 });
+  }
+  const child = spawnTranscoderWithArgs(opts.args);
   const signal = c.req.raw.signal;
   let releasedSlot = false;
   const killChild = () => { try { child.kill("SIGKILL"); } catch {} };
@@ -1408,28 +1448,66 @@ async function serveTranscodedSong(
   child.once("error", release);
   child.stdout.on("close", () => { killChild(); release(); });
 
-  // 排空 stderr 防止管道写满阻塞 ffmpeg，保留末尾便于排障
+  // 排空 stderr 防止管道写满阻塞 ffmpeg,保留末尾(供 P0-4 解析 loudnorm JSON)。
   let errBuf = "";
-  child.stderr.on("data", (d: Buffer) => { errBuf = (errBuf + d.toString()).slice(-4096); });
-  child.on("exit", (code, sig) => {
+  child.stderr.on("data", (d: Buffer) => { errBuf = (errBuf + d.toString()).slice(-8192); });
+  child.on("exit", (code) => {
     if (code !== 0 && code !== null) {
-      log.error("ffmpeg 转码退出异常", { code, signal: sig, stderr: errBuf.slice(0, 800), source: input.source });
+      log.error("ffmpeg 出流退出异常", { code, stderr: errBuf.slice(0, 800), source: opts.sourceLabel });
+    }
+    // P0-4 HTTP 落点:自然播完(exit 0 且客户端没断开)上报边播边测。
+    if (code === 0 && !signal.aborted && opts.songId) {
+      void (async () => {
+        try {
+          const { reportPlaybackLoudness } = await import("../../services/audio/analysisStore.js");
+          reportPlaybackLoudness(opts.songId as string, errBuf);
+        } catch { /* 入库失败不影响已完成的响应 */ }
+      })();
     }
   });
 
-  // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream。
-  // 直接把 child.stdout(Node Readable) 丢进 new Response() 时,undici 在流结束处
-  // 会对 ReadableByteStreamController 调用两次 close()(child_process 的 stdout
-  // 既发 'end' 又发 'close'),在 Node 22 上抛
-  // "ReadableStream is already closed"(ERR_INVALID_STATE),导致 DLNA 音箱拉到的
-  // 转码流(ogg→mp3)直接 500、无声。toWeb 单源 close,规避该重复关闭竞态。
-  const webStream = Readable.toWeb(child.stdout as any) as any;
+  // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream(规避 undici
+  // 重复 close 竞态,见 serveTranscodedSong 处注释)。
+  const { Readable: NodeReadable } = await import("node:stream");
+  const webStream = NodeReadable.toWeb(child.stdout as any) as any;
   return new Response(webStream, {
     status: 200,
     headers: {
-      "Content-Type": TRANSCODE_MIME[opts.format],
+      "Content-Type": opts.mime,
       "Cache-Control": "no-cache",
+      "X-MusicFlow-Transcoded": "1",
     },
+  });
+}
+
+/**
+ * 管道出流(P2-1):解码→af→按源族编码,单 ffmpeg 进程直出 HTTP。
+ * 与原样拉流的区别:无 Content-Length/Range(实时流),带 X-MusicFlow-Transcoded 头。
+ * Range 请求一律按全流 200 返回(字节 Range 在实时流上无意义,客户端改走 timeOffset,P2-3)。
+ */
+async function servePipelinedSong(
+  c: any,
+  song: any,
+  input: { source: string; headers?: Record<string, string> },
+  opts: { timeOffset?: number; af: string[] },
+) {
+  const { resolveChannelCodec, buildPipelineCommand, resolvePipelineInput } =
+    await import("../../services/audio/pipeline.js");
+  const ch = resolveChannelCodec(song?.suffix);
+  const compliant = await resolvePipelineInput({ input: input.source, headers: input.headers });
+  const args = buildPipelineCommand({
+    input: compliant.input,
+    headers: compliant.headers,
+    timeOffsetSec: opts.timeOffset,
+    ...(opts.af.length > 0 ? { af: opts.af } : {}),
+    codec: ch.codec,
+    bitrateKbps: ch.bitrateKbps,
+  });
+  return serveFfmpegPipe(c, {
+    songId: song?.id,
+    mime: ch.mime,
+    sourceLabel: compliant.input.slice(0, 120),
+    args,
   });
 }
 
@@ -1577,7 +1655,8 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   if (!song) return c.json(fail(70, "Song not found"));
   song = await resolvePreferredSong(song);
 
-  const rangeHeader = c.req.header("range");
+  // P2-1:Range 在实时管道流上无意义(无字节总量可供续传),一律忽略走全流 200;
+  // 客户端改走 timeOffset 重拉(P2-3),Web 端见 P2-4。
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
@@ -1597,80 +1676,30 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset,
+        af: await resolveRequestAf(song),
+        songId: song.id,
       });
     }
   }
 
-  // 原样拉流（支持 Range / 本地缓存 / 远程代理）。
-  // Online song (built-in source plugin): serve local cache first, else proxy `url` with its headers.
-  if ((song.type || "local") === "web") {
-    return serveWebSongStream(c, song, rangeHeader);
-  }
-  const parsed = parseSongPath(song.path);
-  if (!parsed) return c.json(fail(0, "Invalid song path"));
-
+  // P2-1:默认走服务端实时管道(解码→af→按源族编码),删除原样直出分支(D9)。
+  // Range 在实时流上无意义:一律全流 200(客户端改走 timeOffset,P2-3)。
+  // 本地缺文件仍 404(与旧行为一致,避免 ffmpeg 空跑后才断流)。
   try {
-    if (parsed.type === "w") {
-      const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-      if (!source) return c.json(fail(0, "Source not found"));
-      const config = JSON.parse(source.config || "{}");
-      const downloadUrl = getWebDAVUrl(config, parsed.filePath);
-      const headers: Record<string, string> = {};
-      if (config.username && config.password) {
-        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+    const input = await resolveTranscodeInput(c, song);
+    if (!input) return c.json(fail(0, "No playable stream"));
+    if ((song.type || "local") !== "web") {
+      const parsedLocal = parseSongPath(song.path);
+      if (!parsedLocal) return c.json(fail(0, "Invalid song path"));
+      if (parsedLocal.type !== "w") {
+        const fs = await import("fs");
+        if (!fs.existsSync(parsedLocal.filePath)) return c.json(fail(70, "File not found"));
       }
-      if (rangeHeader) headers["Range"] = rangeHeader;
-
-      const upstream = await fetch(downloadUrl, { headers });
-      const respHeaders: Record<string, string> = {};
-      const ct = upstream.headers.get("content-type");
-      if (ct) respHeaders["Content-Type"] = ct;
-      else respHeaders["Content-Type"] = MIME_MAP[song.suffix || ""] || "application/octet-stream";
-      const cl = upstream.headers.get("content-length");
-      if (cl) respHeaders["Content-Length"] = cl;
-      const cr = upstream.headers.get("content-range");
-      if (cr) respHeaders["Content-Range"] = cr;
-      respHeaders["Accept-Ranges"] = "bytes";
-      respHeaders["Cache-Control"] = "public, max-age=3600";
-
-      return c.body(upstream.body as any, upstream.status as any, respHeaders);
-    } else {
-      const fs = await import("fs");
-      const filePath = parsed.filePath;
-      if (!fs.existsSync(filePath)) return c.json(fail(70, "File not found"));
-      const stat = fs.statSync(filePath);
-      const fileSize = stat.size;
-
-      if (rangeHeader) {
-        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-        if (match) {
-          const start = parseInt(match[1]);
-          const end = match[2] ? parseInt(match[2]) : fileSize - 1;
-          const chunkSize = end - start + 1;
-          const stream = fs.createReadStream(filePath, { start, end });
-          return new Response(stream as any, {
-            status: 206,
-            headers: {
-              "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
-              "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-              "Content-Length": String(chunkSize),
-              "Accept-Ranges": "bytes",
-            },
-          });
-        }
-      }
-
-      const stream = fs.createReadStream(filePath);
-      return new Response(stream as any, {
-        status: 200,
-        headers: {
-          "Content-Type": MIME_MAP[song.suffix || ""] || "application/octet-stream",
-          "Content-Length": String(fileSize),
-          "Accept-Ranges": "bytes",
-          "Cache-Control": "public, max-age=3600",
-        },
-      });
     }
+    return servePipelinedSong(c, song, input, {
+      timeOffset,
+      af: await resolveRequestAf(song),
+    });
   } catch (e: any) {
     return c.json(fail(0, e.message || "Stream failed"));
   }
@@ -1727,6 +1756,7 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0,
+        af: await resolveRequestAf(null),
       });
     }
 
@@ -1808,6 +1838,8 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset,
+        af: await resolveRequestAf(resolvedSong),
+        songId: resolvedSong.id,
       });
     }
   }

@@ -219,8 +219,7 @@ export function outputFilters(req: OutputRequest): string[] {
   return out;
 }
 
-/** 通道编码参数(flac 无损 / mp3 320 / aac 256;DLNA 拒 FLAC 回退 mp3 由调用方决策)。 */
-export function codecArgs(codec: "flac" | "mp3" | "aac" | "opus" | "pcm", bitrateKbps?: number): string[] {
+/** 通道编码参数(flac 无损 / mp3 320 / aac 256;DLNA 拒 FLAC 回退 mp3 由调用方决策)。 */export function codecArgs(codec: "flac" | "mp3" | "aac" | "opus" | "pcm", bitrateKbps?: number): string[] {
   switch (codec) {
     case "mp3":
       return ["-c:a", "libmp3lame", "-b:a", `${bitrateKbps ?? 320}k`];
@@ -280,4 +279,50 @@ export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
   if (lf) out.push(lf);
   out.push(limiterFilter());
   return out;
+}
+
+// ==================== ⑥ 通道编码决策(D4/P2-1) ====================
+
+/** 通道输出编码。container 是 ffmpeg muxer 名(aac 用 adts),mime 是响应头。 */
+export interface ChannelCodec {
+  codec: "flac" | "mp3" | "aac" | "opus";
+  bitrateKbps?: number;
+  container: "flac" | "mp3" | "adts" | "ogg";
+  mime: string;
+}
+
+/**
+ * 按源后缀定输出编码(D4 跟随源族):
+ * 无损(flac/wav/alac/aiff/ape)→FLAC;mp3→mp3 320;acc 系(m4a/aac)→aac 256;
+ * ogg 系(ogg/oga/opus)→opus 128;未知兜底 mp3 320(最广兼容)。
+ */
+export function resolveChannelCodec(suffix: string | null | undefined): ChannelCodec {
+  const s = String(suffix || "").trim().toLowerCase().replace(/^\./, "");
+  if (["flac", "wav", "alac", "aiff", "ape"].includes(s)) {
+    return { codec: "flac", container: "flac", mime: "audio/flac" };
+  }
+  if (s === "mp3") return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
+  if (s === "aac" || s === "m4a") return { codec: "aac", bitrateKbps: 256, container: "adts", mime: "audio/aac" };
+  if (s === "ogg" || s === "oga" || s === "opus") {
+    return { codec: "opus", bitrateKbps: 128, container: "ogg", mime: "audio/ogg" };
+  }
+  return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
+}
+
+export interface PipelineCommandRequest extends DecodeRequest {
+  codec: ChannelCodec["codec"];
+  bitrateKbps?: number;
+}
+
+/**
+ * 整命令组装:解码段 ＋ af 链 ＋ 通道编码 ＋ 容器输出到 stdout(P2-1)。
+ * 调用方(servePipelinedSong/serveTranscodedSong)只传声明式参数,不再手拼 ffmpeg。
+ */
+export function buildPipelineCommand(req: PipelineCommandRequest): string[] {
+  const head = decodeArgs(req);
+  // decodeArgs 尾是 ["-f","f32le","pipe:1"],出流输出替换为编码＋容器。
+  head.splice(-3);
+  const container =
+    req.codec === "mp3" ? "mp3" : req.codec === "aac" ? "adts" : req.codec === "opus" ? "ogg" : "flac";
+  return [...head, ...codecArgs(req.codec, req.bitrateKbps), "-f", container, "-"];
 }

@@ -53,20 +53,20 @@
 |---|---|---|---|---|
 | **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
 | **P1** | 管道骨架 + Sendspin / AirPlay | 7 / 7 | ✅ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
-| **P2** | HTTP 通道实时管道化 | 0 / 7 | ⬜ | 客户端 / Web / DLNA 走管道，**客户端拖动进度实测通过**，删净直传分支 |
+| **P2** | HTTP 通道实时管道化 | 1 / 7 | 🟡 | 客户端 / Web / DLNA 走管道，**客户端拖动进度实测通过**，删净直传分支 |
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **13 / 38** | 🟡 P2 待开工 | 验收总口径见 plan §8 |
+| **合计** | | **14 / 38** | 🟡 P2 施工中 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**13 / 38（34%）**
+**14 / 38（37%）**
 
 ### 2.3 当前焦点
 
-**P1 收官（7/7）。下一步 P2-1**：`/rest/stream` 走管道＋`X-MusicFlow-Transcoded` 头
-（D9：删原样拉流分支；P1-5 的 transcodeArgs 即为本任务的装配入口）。
+**P2-1 已合入。下一步 P2-2**：`/rest/dlna/stream/:token` 走管道＋MIME 同步
+（DLNA 拒 FLAC 回退 mp3 320；`?raw=1` 直透分支删除）。
 
 ### 2.4 阶段依赖
 
@@ -143,7 +143,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 ---
 
-## 5. P2 · HTTP 通道实时管道化 — 0 / 7 ⬜
+## 5. P2 · HTTP 通道实时管道化 — 1 / 7 🟡
 
 **为什么做**
 现在客户端 / Web 拿到源文件的原始字节，完全绕开响度标准化段；DLNA 侧还有一条 `?raw=1` 直透分支。要让「五条链路全覆盖」成立，这三条必须全部改道。
@@ -160,7 +160,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 | 状态 | # | 任务 | 落点 | commit | 完成日期 | 备注 |
 |---|---|---|---|---|---|---|
-| ⬜ | P2-1 | `/rest/stream` 走管道；**删除原样拉流分支**；响应加 `X-MusicFlow-Transcoded: 1` 头（D9） | `backend/src/routes/rest/index.ts` | — | — | SPEC §1.8 已注明输出侧不再「原样直出」 |
+| ✅ | P2-1 | `/rest/stream` 走管道；**删除原样拉流分支**；响应加 `X-MusicFlow-Transcoded: 1` 头（D9） | `backend/src/routes/rest/index.ts` | （本轮） | 2026-09-20 | 新增 `servePipelinedSong`（解码→af→按源族编码单进程）＋`serveFfmpegPipe` 公用出流（并发槽/abort/stderr/P0-4）；`serveTranscodedSong` 改走 `transcodeArgs`＋af 透传；D4 跟随源族（wav→FLAC 等，`resolveChannelCodec`）；Range 一律全流 200（P2-3 接）；缺文件仍 404；P0-4 双路径自然播完上报 |
 | ⬜ | P2-2 | `/rest/dlna/stream/:token` 走管道；**删除 `?raw=1` 直透分支**（D9）；MIME 同步 | 同上 + `plugin/renderers/dlna.ts` + `dlna/control.ts` | — | — | 「直透原始字节」旧断言已作废 |
 | ⬜ | P2-2b | HTTP 出流响应头四项（照 MA `streams/controller.py:1296-1318`） | `routes/rest/index.ts` + `dlna/control.ts` | — | — | 比「只能接受无 Content-Length 退化」更优 |
 | ⬜ | P2-3 | **客户端 seek 判定改造（必做）**：改为按响应头 / 服务端能力判定 | MusicFlow-client：`lib/providers/player/transcoded_stream_seek.dart` + `player_playback_helpers.dart` | — | — | 跨仓库；判据是存在 `X-MusicFlow-Transcoded` → 走 timeOffset 重拉 |
@@ -286,6 +286,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 2026-09-20 | （本轮） | P0 收尾：P0-1/2/3/5 核对完成（表/纯函数/24 单测均已在仓）；新增 `reportPlaybackLoudness` 入口（P0-4 待 P1 管道 stderr）；P0-6 五处删行联动（顺序先回写后行，FK 强制）；P0-7 新 `analysisStore.test.ts` 5 例。全量 159/1204 绿。P0-4 标 🟡 待 P1。 |
 | 2026-09-20 | （本轮） | P1-1/1b/2/3：参数骨架＋输入合规门＋Sendspin/AirPlay 接入 af 链（P0-4 双模式落点）。P1-4：输出段收尾，sendspin 输出恒 48k 立体声（编码层硬编码确认），重采样点挪进 af 链。全量 161/1239 绿。总值 11/38。 |
 | 2026-09-20 | （本轮） | P1-5/6：转码走管道装配（同进程编码＋af，stderr 排空）＋单测补齐；对照本地 MA 源码回查：aresample 合并单滤镜、增益去限幅、`isSoundEffect`、描述子字段补齐（存量库 PRAGMA 补列）。P1 收官 7/7。全量 161/1244 绿。总值 13/38。 |
+| 2026-09-20 | （本轮） | P2-1：`/rest/stream` 默认走管道（D4 跟随源族＋af＋X 头，Range 全流 200，缺文件 404 保留）；`serveTranscodedSong` 改走统一组装＋af/P0-4。原样拉流分支删除（D9）。全量 161/1246 绿。总值 14/38。 |
 
 ---
 
