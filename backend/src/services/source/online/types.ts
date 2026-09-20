@@ -2,8 +2,9 @@
 //
 // A "source provider" bridges MusicFlow to an external online-music aggregator
 // (like the user-deployed go-music-dl web service). Search results are stored
-// as DB songs with type="web" and streams are served by proxying the provider's
-// /music/download stream URL from /rest/stream (see serveWebSongStream).
+// as DB songs with type="web" and streams are served by the server-side
+// realtime pipeline from /rest/stream (un-imported search results via
+// /rest/stream-remote) — see routes/rest/index.ts.
 //
 // Providers implement this interface AND carry a self-describing `manifest`
 // (declaring their capabilities, supported platforms, config schema, and the

@@ -22,7 +22,7 @@ import { createCastSession, setRuntimePort } from "../../src/services/dlna/contr
 import { resolveFfmpeg } from "../../src/services/transcode.js";
 import { setSetting } from "../../src/services/settings.js";
 
-// ==================== P2-6 契约锁（D9 的可执行版本） ====================
+// ==================== P2-6 / P2-7 契约锁（D9 的可执行版本） ====================
 // 「不留直传旁路」这条决定（D9）在本文件里被钉成三条，其余出流细节
 // （MIME 随格式、响应头四项、DLNA 拒 FLAC 回退）由 transcodeStream.test.ts /
 // dlnaOggFallback.test.ts / services/pipeline.test.ts 覆盖，本文件不重复。
@@ -30,8 +30,10 @@ import { setSetting } from "../../src/services/settings.js";
 //   ① 开关开/关：关掉 `pipeline.http` **只等于滤镜链为空**，不回到绕过管道（D9）；
 //   ② 换源行后增益变化：测量键是 **row.id** —— 同一首歌换到另一行 = 换增益来源，
 //      没有测量的行必须回实时 loudnorm，不会复用上一行的增益；
-//   ③ 结构锁：两个路由的源码里不允许再出现「原样直出」手段
-//      （`createReadStream` / `Accept-Ranges` / `getParam(c,"raw")` / `serveDlnaWebStream`）。
+//   ③ 结构锁：三个出流路由（/stream、/dlna/stream/:token、/stream-remote）的源码里
+//      不允许再出现「原样直出」手段（`createReadStream` / `Accept-Ranges` /
+//      `getParam(c,"raw")` / `c.body(` / `serveDlnaWebStream` / `serveWebSongStream`）。
+//      P2-7 补的是第三处（搜索即播的未入库远程歌），它曾是唯一还在整段代理上游字节的路。
 //
 // ⚠️ DLNA 路由里**保留**的回环 `raw` 分支（`resolveRawStreamToken`）是喂给 ffmpeg 的
 // 取源通道（SPEC §1.8 第三个坑的落库注册表），**不是**面向用户的直透 —— 结构锁因此
@@ -80,6 +82,37 @@ describe("P2-6 结构锁:两个路由都不再有原样直出路径（D9 回归�
     expect(restSrc).not.toContain("serveDlnaWebStream");
     const controlSrc = readSrc("services/dlna/control.ts");
     expect(controlSrc).not.toContain("serveDlnaWebStream");
+    // P2-7：搜索即播的原样代理实现整段删除，连函数名都不许再出现（注释里的
+    // 历史引用不算，所以锁调用/定义形态而不是裸名字）。
+    expect(restSrc).not.toContain("serveWebSongStream(");
+  });
+
+  // P2-7：搜索即播（未入库远程歌）是第三处直出 —— 它曾整段代理上游字节
+  // （`c.body(upstream.body)` + 上游 Content-Length + Accept-Ranges），
+  // Web 搜索结果与 HA 卡片都走它，因此这条锁是「五条链路全覆盖」的最后一块。
+  it("/rest/stream-remote handler 段内走管道且无原样直出手段", () => {
+    const seg = sliceBetween(restSrc, 'restRoutes.get("/stream-remote"', 'restRoutes.get("/dlna/stream/:token"');
+    expect(seg).toContain("servePipelinedSong(");
+    // 换源在交给 ffmpeg 之前做完（子进程报错就再没机会换源）
+    expect(seg).toContain("resolveRemoteStreamUrl(");
+    expect(seg).not.toContain("createReadStream");
+    expect(seg).not.toContain("Accept-Ranges");
+    expect(seg).not.toContain("upstream");
+    expect(seg).not.toMatch(/c\.body\(/);
+    // seek：管道流无字节 Range，必须按 timeOffset 重拉
+    expect(seg).toMatch(/getParam\(c,\s*"timeOffset"\)/);
+  });
+
+  // 前端联动锁（P2-7）：输出格式固定 mp3 ⇒ 前端必须固定按 mp3 建 Howl，
+  // 且**不能再探测** —— 那条 `Range: bytes=0-0` 的 GET 会拉起一个常驻
+  // ffmpeg 转码槽而 body 被丢着不读。
+  it("前端远程歌不再探测格式、固定按 mp3 建 Howl", () => {
+    const playerSrc = fs.readFileSync(
+      fileURLToPath(new URL("../../../frontend/src/stores/player.ts", import.meta.url)), "utf8",
+    );
+    expect(playerSrc).toContain('isRemoteSong(song) ? "mp3"');
+    expect(playerSrc).not.toContain("probeRemoteFormat");
+    expect(playerSrc).not.toContain('Range: "bytes=0-0"');
   });
 });
 

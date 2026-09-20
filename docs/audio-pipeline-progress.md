@@ -7,7 +7,7 @@
 **最终目标**：把 **客户端 / Web / DLNA / Sendspin / AirPlay** 五条链路统一走服务端实时管道
 （解码 F32 → 响度标准化 → DSP → 交叉淡入 → 限制器 → 通道编码），**响度标准化全覆盖、不留任何直传旁路**（D9）。
 
-创建：2026-09-20 ｜ 最后更新：**2026-09-20（P2-6 契约锁完成，并新发现第三处直出 `/rest/stream-remote` → 新增 P2-7）** ｜ 截至本轮开工 main 位置 `da50e5e`（P0/P1/P2 共 15 提交在 230 本地已提交、**未 push**，见 §10）
+创建：2026-09-20 ｜ 最后更新：**2026-09-20（P2-7 完成 → P2 收官 8/8，五条链路全部走管道）** ｜ 截至本轮开工 main 位置 `da50e5e`（P0/P1/P2 共 16 提交在 230 本地已提交、**未 push**，见 §10）
 
 ---
 
@@ -53,19 +53,19 @@
 |---|---|---|---|---|
 | **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
 | **P1** | 管道骨架 + Sendspin / AirPlay | 7 / 7 | ✅ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
-| **P2** | HTTP 通道实时管道化 | 7 / 8 | 🟡 | 客户端 / Web / DLNA 走管道，**客户端 + Web 拖动进度可用**，删净直传分支（P2-7 补 `/stream-remote`） |
+| **P2** | HTTP 通道实时管道化 | 8 / 8 | ✅ | 客户端 / Web / DLNA 走管道，**客户端 + Web 拖动进度可用**，删净直传分支（含搜索即播的 `/stream-remote`） |
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **20 / 39** | 🟡 P2 收尾（P2-7 系新发现缺口） | 验收总口径见 plan §8 |
+| **合计** | | **21 / 39** | 🟡 P2 收官，进 P3 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**20 / 39（51%）**
+**21 / 39（54%）**
 
 ### 2.3 当前焦点
 
-**P2-6 已合入（契约锁：开关开/关、换源行增益、两路由结构锁）。下一步 P2-7**（本轮新发现，文档外补充）：`/rest/stream-remote`（搜索即播 · 未入库远程歌）**仍是原样代理上游字节** —— 这是 D9 之后残留的**第三处直出**，Web 端搜索结果与 HA 卡片都走它，全链路覆盖缺这一块。随后进 P3。
+**P2 收官（8/8）**：五条链路（客户端 / Web / DLNA / Sendspin / AirPlay）现在**全部**走服务端实时管道，D9 成立 —— 最后一块是 P2-7 的搜索即播（`/rest/stream-remote`）。**下一步 P3-1**（flow mode：把队列连续曲目拼成一条不间断流，是交叉淡入的前置）。
 
 ### 2.4 阶段依赖
 
@@ -142,7 +142,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 ---
 
-## 5. P2 · HTTP 通道实时管道化 — 7 / 8 🟡
+## 5. P2 · HTTP 通道实时管道化 — 8 / 8 ✅
 
 **为什么做**
 现在客户端 / Web 拿到源文件的原始字节，完全绕开响度标准化段；DLNA 侧还有一条 `?raw=1` 直透分支。要让「五条链路全覆盖」成立，这三条必须全部改道。
@@ -166,7 +166,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | ✅ | P2-4 | Web 端 seek 适配：无 Range 时按 `timeOffset` 重建 URL，进度用 offset 补偿 | `frontend/src/stores/player.ts` + 新增 `frontend/src/utils/transcodedSeek.ts` | （本轮） | 2026-09-20 | `localSeek` 改为带 `timeOffset` 重拉（服务端 `-ss` 前置定位），**250ms trailing debounce**（el-slider `@input` 每帧触发，不防抖一次拖拽会起几十个 ffmpeg）；`localStreamOffset` 补偿进度 / 时长 / 歌词（`toLogicalPosition`，时长按 `howl.duration()+offset` 还原全曲）；同一整秒内的微调不重拉；暂停态拖动只重建不自动播；seek 重建不重复 scrobble；纯函数 `utils/transcodedSeek.ts` + 12 单测。`vue-tsc --noEmit` 0。**真机拖动进度待人工验收** |
 | ✅ | P2-5 | 并发池上调 + 归一化独立并发，不抢音质转码的槽 | `services/transcode.ts`（＋`routes/rest/index.ts` 接线） | （本轮） | 2026-09-20 | 单池 4 槽 → **两个独立池**：`quality`（客户端显式要 format/maxBitRate 的音质转码，上限 `TRANSCODE_MAX_CONCURRENT`，默认**核数**、下限 4 上限 8）／`pipeline`（默认实时管道，上限 `TRANSCODE_PIPELINE_MAX_CONCURRENT`，默认**核数 ×2**、下限 6）——8 核机即 8 / 16，均照 MA `constants.py:211` 的按核数派生方式。acquire 改**租约制**（返回释放函数、幂等）以防分池后释放落错池；`serveFfmpegPipe` 的 `slot` 必填（音质转码传 quality、默认管道传 pipeline），避免默认值把音质请求静默降级；实际排队时记一次日志（首字节延迟可观测）。单测重写 6 例（派生公式 / env 覆盖与非法值回退 / 幂等 / 池内排队 / **两池互不抢槽** / 合计计数） |
 | ✅ | P2-6 | 契约测试：开关开/关、换源行增益变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退、**断言两个路由都不再有原样直出路径** | 新增 `tests/rest/pipelineContract.test.ts`（＋`resolveRequestAf` 导出） | （本轮） | 2026-09-20 | 8 例：①**结构锁**（D9 回归锁）—— 按文本标记切出两个 handler 源码段，断言段内无 `createReadStream` / `Accept-Ranges` / `getParam(c,"raw")`，DLNA 段**只从 `resolveCastToken` 之后**断言（回环 `raw` 分支是 ffmpeg 取源通道，SPEC §1.8，必须留）；`X-MusicFlow-Transcoded` 全文件只定义一次 ⇒ 所有出流同一出口；`serveDlnaWebStream` 不许复活。②**开关**：`pipeline.http=0` → `resolveRequestAf` 空链，且两个路由**仍**返回管道出流（X 头 + FLAC 容器 + 无 Content-Length + 音箱兼容头）⇒「关开关 ≠ 绕过管道」。③**换源行增益**：同曲两行各写测量 → `volume=6dB` / `volume=-6dB`，换到无测量行回 loudnorm 且 DB 无记录。MIME 随格式 / 响应头 / DLNA 拒 FLAC 回退已由 `transcodeStream.test.ts`、`dlnaOggFallback.test.ts`、`services/pipeline.test.ts` 覆盖，本文件不重复。顺带修 2 处与实现不符的注释（DLNA 路由「走原样拉流，行为不变」、`transcodedSeek.ts` 谎称 `/stream-remote` 已走管道） |
-| ⬜ | P2-7 | **新发现（文档外补充）：`/rest/stream-remote` 走管道，删 `serveWebSongStream` 直出** —— 搜索即播的未入库远程歌仍是原样代理上游字节（`c.body(upstream.body)`＋`Accept-Ranges`＋上游 Content-Length），**无响度标准化**，是 D9 之后残留的第三处直出 | `backend/src/routes/rest/index.ts`（唯一调用点）、`frontend/src/stores/player.ts`（`probeRemoteFormat`） | — | — | 影响面：Web 搜索结果（`useEntitySearch` 把 `streamUrl` 指向它）与 HA 卡片都走这条；该路由目前**不读 `timeOffset`**（seek 靠 Range），改管道后 Range 一律全流 200 → 必须补 `timeOffset` 透传（否则搜索即播无法拖动进度）；输入必须按 SPEC §1.8 包 `loopbackRawStreamUrl`；合成的 `remote:…` id 无 DB 行，`reportPlaybackLoudness` 已守卫（查不到行直接 return false）。**前端联动不能漏**：`probeRemoteFormat()` 发 `Range: bytes=0-0` 只读响应头 —— 改管道后它**仍能拿到对的 Content-Type**，但那条 GET 的 body 被丢着不读 ＝ **常驻烧一个转码槽**；正确改法是**干脆不探测**（该路由 `suffix` 硬编码 `mp3` → 输出格式确定是 mp3，Howler 直接按 mp3 给 format 即可）。顺带清理 `serveWebSongStream` 的 `cachePath` 死分支（唯一调用方恒传 `cachePath:null`）；结构锁把该路由一并覆盖 |
+| ✅ | P2-7 | **新发现（文档外补充）：`/rest/stream-remote` 走管道，删 `serveWebSongStream` 直出** —— 搜索即播的未入库远程歌仍是原样代理上游字节（`c.body(upstream.body)`＋`Accept-Ranges`＋上游 Content-Length），**无响度标准化**，是 D9 之后残留的第三处直出 | `backend/src/routes/rest/index.ts`（唯一调用点）、`frontend/src/stores/player.ts`（`probeRemoteFormat`） | （本轮） | 2026-09-20 | ① **出流改管道**：`serveWebSongStream` 整段删除（含 `cachePath` 死分支），`/stream-remote` 与 `/rest/stream` 共用 `servePipelinedSong`＋`resolveRequestAf(null)`（无 DB 行 → 无测量 → 实时 loudnorm）；补 `timeOffset` 透传（管道流无字节 Range，不补则搜索即播拖不动）。② **换源前移**（关键，文档原先没写）：URL 交 ffmpeg 后主进程再没换源机会，故新增 `resolveRemoteStreamUrl()`（`streamFallback.ts`）在出流前用**一次轻量 probe**（`Range: bytes=0-20000`，带 TTL 正缓存）裁决 —— ok→原链、gone→多源换源、gone 且换不到→**null → 404**（不再起注定失败的空管道）、transient→原链（网络抖动绝不判死；这是与 `ensurePlayableStream` 的有意分歧）。③ **前端联动**：`probeRemoteFormat`＋`remoteFmtCache`＋`playbackSeq` 整段删除 —— 那条 `Range: bytes=0-0` 的 GET 在管道化后会把 body 丢着不读、**常驻烧一个转码槽**；改为 `isRemoteSong(song) ? "mp3"` 直接定格式，`useEntitySearch` 的 `_suffixKnown` 随之作废删除。④ **决策：输出固定 mp3 320** —— 该路由的"源格式"只有插件的 `suffix` 提示（现无内置插件给出），不可靠，而 Howler 必须**起播前**知道 format；固定值免掉跨语言格式协商（代价：上游无损源不再按 flac 直出，见 §9 后续项）。⑤ 结构锁扩到第三个路由 + 前端源码锁（不再出现 `probeRemoteFormat` / `Range: bytes=0-0`）；`streamRemoteFallback.test.ts` 重写为**真 HTTP 上游**（stub 的 fetch 拦不住 ffmpeg 子进程）
 
 **依赖与注意**
 - 依赖 P1 —— 三条链路复用同一套 `AudioPipeline` 与响度决策。
@@ -174,10 +174,10 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 - **P2-4 Web 端同源问题**：Howler 的 `howl.seek(t)` 同样依赖字节 Range → 已改为带 `timeOffset` 重拉。因前端资源随镜像发布、与后端同版本，**无需 P2-3 那样的版本门控**；但 `el-slider @input` 每帧触发，**必须 250ms 防抖**，否则一次拖拽会起几十个 ffmpeg。
 - DLNA 的 `REL_TIME` seek 退化是**已接受代价（D5）** —— UI 进度走服务端状态 / WS 推送不受影响；保留单设备回退开关（P5-2）。
 - **并发池归属别弄反（P2-5）**：`quality` 池＝「客户端显式要了 `format` / `maxBitRate`」，`pipeline` 池＝「默认实时管道（含 DLNA 按设备能力选输出）」。判据是**谁决定的输出格式**，不是「是否真的在编码」。P3-6 给交叉淡入预留槽位时只调 `pipeline` 池上限，**不要**把交叉淡入记进 `quality` 池 —— 那会把用户显式点的高码率请求挡在队列里（正是拆池要避免的事）。
-- **P2-7 不是可选（本轮新发现）**：`/rest/stream-remote` 是「搜索即播」的唯一入口，Web 搜索结果（`useEntitySearch`）与 HA 卡片都把 `streamUrl` 指向它。不补则「五条链路全覆盖」不成立 —— 未入库远程歌永远绕过响度标准化，而这类歌（在线源、未预测量）恰恰最需要归一化。
-- **P2-7 的前端联动不能漏**：`probeRemoteFormat()`（`frontend/src/stores/player.ts`）发的是 `Range: bytes=0-0` 且**只读响应头** —— 它不要求 206，所以改管道后仍能拿到对的 `Content-Type`；**真正的坑是它把 body 丢着不读**，而管道流是被拉起的 ffmpeg 进程 → 每次探测都在**常驻烧一个转码槽**。正确改法是**不再探测**：该路由 `suffix` 硬编码 `mp3`，输出格式确定，Howler 直接按 mp3 给 `format` 即可。
+- **P2-7 收口记录**：`/rest/stream-remote` 是「搜索即播」的唯一入口（Web 搜索结果 `useEntitySearch` 与 HA 卡片都把 `streamUrl` 指向它），不做则「五条链路全覆盖」不成立 —— 未入库远程歌永远绕过响度标准化，而这类歌（在线源、未预测量）恰恰最需要归一化。两条踩过的坑已固化：**①换源必须前移到出流前**（ffmpeg 只会报错退出，主进程再无机会换源）；**②旧的 `Range: bytes=0-0` 格式探测必须删**（管道流拉起的是真 ffmpeg，body 不读 = 常驻烧一个转码槽），输出格式改为服务端定死、前端直接采用。
+- **有意取舍（备查，非本轮任务）**：搜索即播的输出固定 mp3 320，上游若是无损源（go-music-dl flac 等）不再按源族直出无损耗。理由是「源格式」在该路由上只有插件的 `suffix` 提示、且**现无任何内置插件给出**，按它定格式等于猜；真要跟随，需要一条「服务端定格式 → 前端起播前可知」的协商通道，收益不确定，故不做。
 
-**验收结果**：*待填（含客户端拖动进度的实测结论）*
+**验收结果**：`/rest/stream`＋`/rest/dlna/stream/:token`＋`/rest/stream-remote` 三个出流路由全部走 `servePipelinedSong`／`serveFfmpegPipe`（`X-MusicFlow-Transcoded: 1` 全文件只定义一次）；`pipeline.http=0` 时两路由仍返回管道出流 ⇒「关开关 ≠ 绕过管道」。`tests/rest/pipelineContract.test.ts` 10 例（含三路由结构锁 + 前端源码锁）、`tests/routes/streamRemoteFallback.test.ts` 5 例（真 HTTP 上游 + 真 ffmpeg：原链可播走管道、404→严格换源、无一致候选→404、Live 后缀严格对齐）全绿。全量 **163 文件 / 1278 用例**绿。**客户端 / Web 真机拖动进度仍待人工验收**。
 
 ---
 
@@ -295,6 +295,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 2026-09-20 | （本轮） | P2-3（客户端仓库 `81eda97`，已推 main）：seek 判定改按服务端能力（`serverPipelinedHttp` 直通 + `serverPipesAllHttpStreams` 版本门控 ≥3.0.47，Navidrome/老版/未知保守 false）。P2-4：Web 端 Howler 无字节 Range → 改带 `timeOffset` 重拉；新增纯函数 `frontend/src/utils/transcodedSeek.ts`（`seekTargetFromLogical` / `toLogicalPosition` / `withTimeOffset`）＋`player.ts` 250ms 防抖重建＋进度/时长/歌词 offset 补偿＋跨包单测 `tests/services/transcodedSeek.test.ts` 12 例。`vue-tsc --noEmit` 0。总值 18/38。 |
 | 2026-09-20 | （本轮） | P2-5：并发槽由单池 4 槽拆为**两个独立池**——`quality`（客户端显式要 format/maxBitRate，上限按核数派生、下限 4 上限 8）／`pipeline`（默认实时管道，核数 ×2、下限 6），8 核机即 8 / 16；派生方式照 MA `constants.py:211`。acquire 改**租约制**（返回释放函数 + 幂等 `released` 标志，防分池后释放落错池 / 一次出流还三次额度）；`serveFfmpegPipe` 的 `slot` 必填（音质转码 quality、默认管道 pipeline），避免默认值静默降级；实际排队时记一次日志（首字节延迟可观测）。单测重写为 6 例（派生公式 / env 覆盖与非法值回退 / 幂等 / 池内排队 / 两池互不抢槽 / 合计计数）。`docs/audio-pipeline-plan.md` §1.3 与 §6 P2 表、`docs/DEVELOPER.md` 环境变量表同步。全量 162/1267 绿。总值 19/38。 |
 | 2026-09-20 | （本轮） | P2-6：新增契约锁 `tests/rest/pipelineContract.test.ts` 8 例 —— 结构锁（两 handler 段内无 `createReadStream`/`Accept-Ranges`/`raw` 用户分支，DLNA 仅从 `resolveCastToken` 后断言以保住回环取源分支；X 头全文件只定义一次）+ 开关开/关（关掉 `pipeline.http` 两路由仍走管道）+ 换源行增益按 `row.id`。为此导出 `resolveRequestAf`。**本轮新发现第三处直出**：`/rest/stream-remote` 仍原样代理上游字节（`serveWebSongStream`，唯一调用点），搜索即播路径无响度标准化 → **新增任务 P2-7**（含前端 `probeRemoteFormat` 联动），总数 38 → 39。顺带修 2 处与实现不符的注释。tsc 0；本文件 8/8 绿。总值 20/39。 |
+| 2026-09-20 | （本轮） | P2-7：`/rest/stream-remote`（搜索即播·未入库远程歌）改走 `servePipelinedSong`，`serveWebSongStream` 整段删除（D9 第三处直出清除）；补 `timeOffset` 透传；**换源前移**为出流前的 `resolveRemoteStreamUrl`（probe 三态：ok→原链 / gone→多源换源 / gone 且无替代→404 / transient→原链不判死）；前端删 `probeRemoteFormat`＋`remoteFmtCache`＋`playbackSeq`、`useEntitySearch` 的 `_suffixKnown` 一并删除，远程歌固定按 mp3 起播（避免探测拉起常驻 ffmpeg 烧槽）。结构锁扩到第三个路由 + 前端源码锁；`streamRemoteFallback.test.ts` 重写为真 HTTP 上游 + 真 ffmpeg（fetch stub 拦不住子进程）。文档同步：`PLUGIN_DEV.md` §5 格式契约（两条路径对 `suffix` 的用法不同）、`SOURCE_SWAP.md` 换源发生点、`plan §6` P2 表。全量 163/1278 绿。总值 **21/39**，P2 收官 8/8。 |
 
 ---
 

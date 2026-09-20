@@ -9,11 +9,11 @@ MusicFlow 会**自动搜索同一插件提供的可播平台候选**,把这首�
 
 以下播放链路在原源失败(`404` / `403` / `>=500`)时触发换源:
 
-| 链路 | 入口 | 说明 |
+| 链路 | 入口 | 换源发生点（2026-09-20 起） |
 |---|---|---|
-| 本机播放(已入库 web 歌) | `GET /rest/stream` | 经 `serveWebSongStream` |
-| 本机播放(未入库远程歌,搜索即播) | `GET /rest/stream-remote` | 经 `serveWebSongStream`,本次补齐字段后与入库歌行为一致 |
-| DLNA 投屏 | `GET /dlna/stream/:token` | 导入后经 `serveWebSongStream` |
+| 本机播放(已入库 web 歌) | `GET /rest/stream` | **播放前**:队列判词 / 预探测走 `ensurePlayableStream`，命中即写回 `songs.url`，之后出流直用新链 —— 出流本身走服务端实时管道，**不再在代理里换源**（P2-1/D9） |
+| 本机播放(未入库远程歌,搜索即播) | `GET /rest/stream-remote` | **出流前**:`resolveRemoteStreamUrl`（P2-7）—— URL 交给 ffmpeg 后主进程再没换源机会，故换源必须前移；明确不可播且换不到替代 → 404 |
+| DLNA 投屏 | `GET /dlna/stream/:token` | 同「已入库」：投屏前置检查 `ensurePlayableStream` 换源并写回；出流走管道（P2-2） |
 | 预探测/投屏前置检查 | `ensurePlayableStream` | `/v1/stream/probe` 等使用 |
 
 换源结果按歌曲(合成 key,含 `remote:` 前缀隔离缓存)伺服内存缓存,不重复搜索。
@@ -57,15 +57,20 @@ MusicFlow 会**自动搜索同一插件提供的可播平台候选**,把这首�
 ## 候选排序与探测
 
 候选按插件声明的 `manifest.sourcePreference`(平台偏好顺序)排序,依次 Range 探测:
-任一首返回 `200`/`206` 即采用;全部失败则该歌不换源,原失败响应原样透传
-(不会把已锁定的 body 重新发出去造成 `200` 误响应)。
+任一首返回 `200`/`206` 即采用;全部候选都明确不可播(403/404/410 或 content-type
+明确非音频)则**该歌判定不可播** —— 未入库远程歌(搜索即播)直接回 `404`;
+已入库行的换源在播放前完成,失败由队列判词跳过该曲。网络异常/超时
+(`transient`)一律**不判死**,照原链播放。
+
+> 探测口径与 `probe()` 一致:三态 `ok` / `gone` / `transient`,任何"不可判定"的情形
+> 都不写负结果 —— 一次抖动不该把一首歌永久判死。
 
 ## 代码位置
 
 - 匹配核心:`backend/src/services/plugin/shared.ts` — `normalizeTitleStrict`
-- 换源逻辑:`backend/src/services/source/online/streamFallback.ts` — `findFallbackStream` / `ensurePlayableStream`
+- 换源逻辑:`backend/src/services/source/online/streamFallback.ts` — `findFallbackStream` / `ensurePlayableStream` / `resolveRemoteStreamUrl`（出流前裁决，P2-7）
 - auto-match 导入:`backend/src/services/source/online/match.ts` — `scoreCandidate` / `searchBestMatch`
-- 播放代理:`backend/src/routes/rest/index.ts` — `serveWebSongStream`(含 `/rest/stream-remote`)
+- 出流:`backend/src/routes/rest/index.ts` — `servePipelinedSong`（三个出流路由共用服务端实时管道，D9）
 - 插件端 go-music-dl `matchInPool` 使用同款「只保留中英文」规则,无需额外改动。
 
 ## 测试

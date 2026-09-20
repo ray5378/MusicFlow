@@ -491,36 +491,7 @@ export const usePlayerStore = defineStore("player", () => {
     }).catch(() => {});
   }
 
-  // 远程歌(/rest/stream-remote 代理流)格式探测:Range 请求拿上游 Content-Type → 真实格式。
-  // 不写死 mp3(go-music-dl 等插件可能返回 flac/wav/aac/ogg);结果按 URL 缓存。
-  const remoteFmtCache = new Map<string, string>();
-  let playbackSeq = 0; // 防 async 探测乱序覆盖更新的播放请求
-  async function probeRemoteFormat(url: string): Promise<string> {
-    if (remoteFmtCache.has(url)) return remoteFmtCache.get(url)!;
-    try {
-      const res = await fetch(url, { method: "GET", headers: { Range: "bytes=0-0" } });
-      const ct = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-      const map: Record<string, string> = {
-        "audio/mpeg": "mp3", "audio/mp3": "mp3",
-        "audio/flac": "flac", "audio/x-flac": "flac",
-        "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
-        "audio/aac": "aac", "audio/aacp": "aac",
-        "audio/ogg": "ogg", "audio/opus": "opus", "application/ogg": "ogg",
-        "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/m4a": "m4a",
-        "audio/aiff": "aiff", "audio/x-aiff": "aiff",
-        "audio/x-ms-wma": "wma", "audio/ape": "ape",
-      };
-      const fmt = map[ct] || "";
-      remoteFmtCache.set(url, fmt);
-      return fmt;
-    } catch {
-      remoteFmtCache.set(url, "");
-      return "";
-    }
-  }
-
   async function startLocalPlayback(opts?: { timeOffsetSec?: number; autoplay?: boolean }) {
-    const mySeq = ++playbackSeq;
     // P2-4：拖动 seek 带 timeOffset 重拉；换歌 / 正常起播为 0。offset>0 表示这是
     // 「同一首的 seek 重建」，据此避免重复 scrobble（详见 onplay 内注释）。
     const offset = Math.max(0, Math.floor(opts?.timeOffsetSec ?? 0));
@@ -531,14 +502,11 @@ export const usePlayerStore = defineStore("player", () => {
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song);
-    let fmt = (song.suffix || "").toLowerCase();
-    // 插件在 item 上明确给了格式(_suffixKnown)则直接采用,不探测;否则 Range 探测
-    // 上游 Content-Type 确认真实格式(占位 mp3 只是 DLNA mime 兜底,本机不沿用)。
-    if (song.streamUrl && !(song as any)._suffixKnown) {
-      const probed = await probeRemoteFormat(getStreamUrl(song));
-      if (mySeq !== playbackSeq) return;
-      fmt = probed || fmt || "mp3";
-    }
+    // 远程歌(/rest/stream-remote)格式恒为 mp3:该路由固定按 mp3 320 出流(P2-7)。
+    // 曾经这里发一次 `Range: bytes=0-0` 探测上游 Content-Type —— 出流改管道后那条
+    // GET 会拉起一个 ffmpeg 转码槽而 body 被丢着不读(常驻烧槽),且输出格式已由
+    // 服务端定死,探测不再有任何信息量,故整段删除(frontend 侧契约见后端路由注释)。
+    const fmt = isRemoteSong(song) ? "mp3" : (song.suffix || "").toLowerCase();
     // seek 重拉后 howl.duration() 返回「剩余时长」，加回 offset 才是全曲时长（P2-4）。
     // 未 load 完时 howl.duration() 可能为 0 → 不覆盖，避免进度条时长跳变。
     const syncDuration = () => {

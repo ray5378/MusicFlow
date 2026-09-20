@@ -46,13 +46,13 @@ export function remoteItemToSong(item: any, providerId: string): Song {
     duration: item.duration || 0,
     coverArt: item.cover || undefined,
     // 格式契约:插件可在搜索结果的 item 上携带 suffix(它最清楚自己后端输出的格式,
-    // 如 mp3/flac/wav)——带则优先采用,本机播放不探测;不带则占位 mp3(仅 DLNA 队列
-    // mime 推导用),本机播放会 Range 探测上游 Content-Type 确认真实格式(兼容所有格式)。
+    // 如 mp3/flac/wav)。**本机播放不用它** —— /rest/stream-remote 固定按 mp3 320
+    // 出流(P2-7),Howler 的 format 由 stores/player.ts 直接给 mp3;这里的 suffix
+    // 只用于入队/DLNA 的 mime 推导。
     suffix: item.suffix || "mp3",
     // 远程歌(未入库):streamUrl 指向 /rest/stream-remote 代理流。
     streamUrl: `/rest/stream-remote?${qs.toString()}`,
   };
-  (song as any)._suffixKnown = !!item.suffix; // 插件是否明确给了格式(探测只发生在未给时)
   (song as any)._item = item;
   return song;
 }

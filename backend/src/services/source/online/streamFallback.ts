@@ -372,6 +372,45 @@ export function getCachedPlayability(songId: string): "playable" | "unplayable" 
 }
 
 /**
+ * 远程(**未入库**)行的出流前可播地址裁决(P2-7)。
+ *
+ * 为什么必须放在「交给管道之前」:出流改走服务端实时管道后,URL 是交给 ffmpeg
+ * 子进程去取的 —— 上游 401/403/404 只会让 ffmpeg 报错退出,主进程再无机会换源。
+ * 旧 `serveWebSongStream` 的「多源换源」(原平台 404/VIP 时按歌名-歌手换平台)
+ * 就长在那次代理 fetch 上,改管道后会整段丢掉,所以把它前移成一次轻量裁决。
+ *
+ * 判定(与 judge 同一把尺子,`probe` 语义见上):
+ *   - "ok"                  → 返回原链;
+ *   - "gone"                → 原链明确不可播,试多源换源,命中返回替代链;
+ *   - "gone" 且换源未命中   → 返回 **null**(明确不可播,交调用方回 404,别起注定
+ *                             失败的空管道);
+ *   - "transient"           → 返回原链(一次网络抖动不该把能播的源换成别的平台,
+ *                             更不该判死 —— 成败交给 ffmpeg)。
+ *
+ * cacheKey 用调用方的合成 id(`remote:provider:source:id`),与库内真实行隔离;
+ * 正缓存(TTL)让同一首搜索即播在 TTL 内不再重复探测。
+ */
+export async function resolveRemoteStreamUrl(
+  url: string,
+  meta: { cacheKey: string; title?: string; artist?: string; album?: string; duration?: number; provider: string; source: string },
+  timeoutMs: number = PROBE_TIMEOUT_DEFAULT_MS,
+): Promise<string | null> {
+  if (!url) return null;
+  const outcome: ProbeOutcome =
+    getCachedPlayability(meta.cacheKey) === "playable" ? "ok" : await probe(url, timeoutMs);
+  if (outcome === "ok") {
+    addPlayable(meta.cacheKey);
+    return url;
+  }
+  if (outcome !== "gone") return url;
+  const fb = await findFallbackStream(
+    meta.cacheKey, meta.title || "", meta.artist || "", meta.album || "",
+    Number(meta.duration || 0), meta.provider, meta.source, timeoutMs,
+  );
+  return fb?.url || null;
+}
+
+/**
  * 空直链 web 行的兜底解析(纯曲库核实源导入,如 huawei-chart:门禁在华为曲库
  * 核实通过,但华为无公开全曲直链,songs.url 为空)。跳过原链探测,直接多源换源;
  * 命中即回写 songs.url,此后 /rest/stream 直用,不再每次播放都搜。

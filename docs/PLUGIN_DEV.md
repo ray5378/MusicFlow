@@ -353,13 +353,20 @@ first-match-wins（首个返回非空结果的胜出）。封面下载与数据�
 
 > 与「`stream` capability 必须声明」同等重要——否则即使 `streamUrl` 存在，播放也可能因格式未知失败。
 
-- **插件最清楚自己后端的输出格式**：`searchSongs` / `playlistSongs` 返回的歌曲对象**应带** **`suffix`** **字段**（如 `"flac"` / `"mp3"` / `"wav"` / `"aac"` / `"ogg"`）。前端优先用 `suffix` 决定解码格式，**不要求 URL 带扩展名**。
+- **插件最清楚自己后端的输出格式**：`searchSongs` / `playlistSongs` 返回的歌曲对象**应带** **`suffix`** **字段**（如 `"flac"` / `"mp3"` / `"wav"` / `"aac"` / `"ogg"`）。
 
 - **核心** **`mapItems`** **会原样透传** **`suffix`**（不会丢弃），后端 → 前端链路都保留该字段。
 
-- 若插件不提供 `suffix`，前端会对 `/rest/stream-remote` 做一次 `Range: bytes=0-0` 探测，读上游 `Content-Type` 推断格式（缓存，失败回退 `mp3`）。**探针路径更慢且依赖上游返回正确的 Content-Type**，所以播放类插件尽量带上 `suffix`。
+- **两条播放路径对 `suffix` 的用法不同，别混**：
 
-- 该契约使 MusicFlow 兼容**所有音频格式**（mp3/flac/wav/aac/ogg...），而非硬编码 mp3。
+  | 路径 | 谁定输出格式 | `suffix` 的作用 |
+  |---|---|---|
+  | `/rest/stream?id=`（**已入库**的 web 行） | **该行的 `suffix`** 经 `resolveChannelCodec` 定输出族：无损(flac/wav/alac/aiff/ape)→FLAC、mp3→mp3 320、aac/m4a→aac 256、ogg/oga/opus→opus 128 | **直接决定出流格式** —— 导入时填错会真的换错编码 |
+  | `/rest/stream-remote`（**未入库**·搜索即播） | **服务端定死 mp3 320**（前端 Howler 固定按 mp3 起播） | 不参与出流；只影响入队 mime / 来源角标 |
+
+- **未入库搜索即播为什么不用 `suffix` 定格式**（2026-09-20，P2-7）：起播前必须能确定 format（Howler 在发请求前就要 `format`），而 `suffix` 是可缺省字段、服务端无法验证；旧实现曾发一次 `Range: bytes=0-0` 探测上游 `Content-Type` 来推断，出流改服务端实时管道后那条 GET 会拉起 ffmpeg 却把 body 丢着不读（**常驻烧一个转码槽**），已整段删除。故插件**不需要**为「搜索即播能播」而填 `suffix`。
+
+- 已入库行**没有任何 `suffix`** 时按最广兼容兜底 mp3 320。
 
 ***
 

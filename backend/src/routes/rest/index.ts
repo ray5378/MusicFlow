@@ -23,7 +23,7 @@ import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
-import { findFallbackStream, resolveEmptyUrlStream, evictStreamFallbackCache } from "../../services/source/online/streamFallback.js";
+import { findFallbackStream, resolveEmptyUrlStream, resolveRemoteStreamUrl } from "../../services/source/online/streamFallback.js";
 import { resolvePreferredSong } from "../../services/source/preferredSource.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
@@ -1258,116 +1258,6 @@ function getWebDAVUrl(sourceConfig: any, filePath: string): string {
   return origin + filePath;
 }
 
-// Stream an online/plugin song. Serves the local cache file if present, otherwise
-// proxies the song's remote `url` applying its `streamHeaders` (e.g. Referer) + Range.
-// contentTypeOverride:DLNA 端点用于把上游错误的 octet-stream 修正为真实格式 MIME。
-async function serveWebSongStream(c: any, song: any, rangeHeader?: string | null, contentTypeOverride?: string | null) {
-  try {
-    const fs = await import("fs");
-    if (song.cachePath && fs.existsSync(song.cachePath)) {
-      const filePath = song.cachePath;
-      const fileSize = fs.statSync(filePath).size;
-      if (rangeHeader) {
-        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-        if (match) {
-          const start = parseInt(match[1]);
-          const end = match[2] ? parseInt(match[2]) : fileSize - 1;
-          const chunkSize = end - start + 1;
-          const stream = fs.createReadStream(filePath, { start, end });
-          return new Response(stream as any, {
-            status: 206,
-            headers: {
-              "Content-Type": contentTypeOverride || MIME_MAP[song.suffix || ""] || "application/octet-stream",
-              "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-              "Content-Length": String(chunkSize),
-              "Accept-Ranges": "bytes",
-            },
-          });
-        }
-      }
-      const stream = fs.createReadStream(filePath);
-      return new Response(stream as any, {
-        status: 200,
-        headers: {
-          "Content-Type": contentTypeOverride || MIME_MAP[song.suffix || ""] || "application/octet-stream",
-          "Content-Length": String(fileSize),
-          "Accept-Ranges": "bytes",
-          "Cache-Control": "public, max-age=3600",
-        },
-      });
-    }
-
-    // Remote proxy with per-song headers (e.g. Bilibili requires Referer).
-    // 空直链 web 行(纯核实源导入,如 huawei-chart):先走多源兜底解析可播地址,
-    // 命中即回写 songs.url 并按正常链路代理;未命中维持原失败响应。
-    if (!song.url) {
-      const fbUrl = await resolveEmptyUrlStream(song);
-      if (!fbUrl) return c.json(fail(0, "No stream url"));
-      song.url = fbUrl;
-    }
-    const headers: Record<string, string> = {};
-    try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
-    if (rangeHeader) headers["Range"] = rangeHeader;
-
-    let url = song.url;
-    let upstream = await fetch(url, { headers });
-
-    // If the original platform could not resolve this song, try an automatic
-    // multi-source fallback (search the same provider for a working alternative).
-    // 触发条件含 403(地区版权封锁)与 404/5xx,全代理链路(本机 /rest/stream、
-    // /rest/stream-remote、/dlna/stream)统一命中。仅当换源命中时才 cancel 原 body;
-    // 未命中(无可播替代/normalize 失配)保留原始失败响应原样透传,避免把已锁定
-    // 的 body 再交给 c.body() 抛错。
-    if ((upstream.status === 404 || upstream.status === 403 || upstream.status >= 500) && song.pluginEntry && song.sourceData) {
-      const fbArgs = () => {
-        const sd = JSON.parse(song.sourceData || "{}");
-        return [
-          song.id, song.title || sd?.title || "", song.artist || sd?.artist || "",
-          song.album || sd?.album || "", Number(song.duration || sd?.duration || 0),
-          song.pluginEntry, sd?.source || "",
-        ] as const;
-      };
-      try {
-        const fb = await findFallbackStream(...fbArgs());
-        if (fb) {
-          await upstream.body?.cancel();
-          url = fb.url;
-          upstream = await fetch(url, { headers });
-          // 换源命中后拉流仍失败,且该结果来自缓存(source 为空串 = fallbackCache
-          // 命中标记):插件源直链会过期而缓存命中不重探,失效链会被锁死到 FIFO
-          // 淘汰 —— 逐出该歌双缓存后重搜一次(真实探测候选),仍失败则透传失败响应。
-          if (
-            fb.source === "" &&
-            (upstream.status === 404 || upstream.status === 403 || upstream.status >= 500)
-          ) {
-            evictStreamFallbackCache(song.id);
-            const fb2 = await findFallbackStream(...fbArgs());
-            if (fb2) {
-              url = fb2.url;
-              upstream = await fetch(url, { headers });
-            }
-          }
-        }
-      } catch {
-        // keep original upstream result
-      }
-    }
-
-    const respHeaders: Record<string, string> = {
-      "Content-Type": contentTypeOverride || upstream.headers.get("content-type") || MIME_MAP[song.suffix || ""] || "application/octet-stream",
-      "Accept-Ranges": "bytes",
-      "Cache-Control": "public, max-age=3600",
-    };
-    const cl = upstream.headers.get("content-length");
-    if (cl) respHeaders["Content-Length"] = cl;
-    const cr = upstream.headers.get("content-range");
-    if (cr) respHeaders["Content-Range"] = cr;
-    return c.body(upstream.body as any, upstream.status as any, respHeaders);
-  } catch (e: any) {
-    return c.json(fail(0, e.message || "Stream failed"));
-  }
-}
-
 // ==================== 转码拉流（OpenSubsonic /rest/stream 语义） ====================
 // 需要转码时用系统 ffmpeg 把音源实时转成目标格式输出为分块流：
 //   - 转码流不可按字节 Range 断点续传 → 不返回 Content-Length / Accept-Ranges，
@@ -1653,9 +1543,10 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
 
 // ==================== Remote stream proxy (未入库远程歌曲直播) ====================
 // 搜索结果的远程歌曲(尚未「加入库」,无 DB 行)直接播放:按 provider/source/id 现场
-// 调用插件的 streamUrl() 拿到真实流地址,再复用 serveWebStreamSong 的代理逻辑
-// (Range + 按源补 Referer 等 headers)。主项目前端与 HA 卡片「搜索即播」都走这里,
-// 播放不要求先入库。参数: provider, source, id, title, artist, album, duration, cover
+// 调用插件的 streamUrl() 拿到真实流地址,**再走与 /rest/stream 同一条服务端实时管道**
+// (P2-7/D9 —— 此前是「原样代理上游字节」,搜索即播永远绕过响度标准化)。
+// 主项目前端与 HA 卡片「搜索即播」都走这里,播放不要求先入库。
+// 参数: provider, source, id, title, artist, album, duration, cover, timeOffset(可选)
 restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const providerId = getParam(c, "provider") || "";
   const source = getParam(c, "source") || "";
@@ -1706,23 +1597,30 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
       });
     }
 
-    // 现场构造 web-song 形状(无 cachePath/未缓存),并补 pluginEntry/sourceData 让
-    // serveWebSongStream 复用与 /rest/stream 同一套「多源换源」:原平台 404/VIP 时按
-    // 严格「歌名-歌手」换到其它平台可播候选(与本机 DLNA 本地播放行为一致)。
-    // id 用合成 key 隔离换源缓存,避免与库内真实歌曲混淆(无 DB 行,写回为 no-op)。
-    return serveWebSongStream(c, {
-      id: `remote:${providerId}:${source}:${id}`,
+    // P2-7:与 /rest/stream 一致走服务端实时管道(解码 → af 链 → 编码),删除原样直出。
+    // 输出格式**固定 mp3 320**:该路由的"源格式"只由插件的 `suffix` 提示给出(可缺省、
+    // 且现无内置插件给出),不可靠;而前端 Howler 必须在起播前就知道 format,固定值让
+    // 两侧无需格式协商(前端见 stores/player.ts 的 isRemoteSong 分支,勿再改成探测)。
+    const remoteKey = `remote:${providerId}:${source}:${id}`;
+    // 多源换源前移(旧 serveWebSongStream 的能力不能丢):URL 交给 ffmpeg 之后,上游
+    // 403/404 只会让子进程报错退出,主进程再无换源机会 —— 故在这里先轻量裁决一次。
+    // null = 明确不再可播(且换不到替代源) → 直接 404,别起注定失败的空管道。
+    const playUrl = await resolveRemoteStreamUrl(streamUrl, {
+      cacheKey: remoteKey,
       title: song.name,
       artist: song.artist,
       album: song.album,
-      suffix: "mp3",
-      type: "web",
-      url: streamUrl,
-      streamHeaders: JSON.stringify(streamHeaders),
-      cachePath: null,
-      pluginEntry: providerId,
-      sourceData: JSON.stringify({ source, title: song.name, artist: song.artist }),
-    }, c.req.header("range"));
+      duration: song.duration,
+      provider: providerId,
+      source,
+    });
+    if (!playUrl) return c.text("No playable stream", 404);
+    return servePipelinedSong(
+      c,
+      { suffix: "mp3" },
+      { source: loopbackRawStreamUrl(playUrl, streamHeaders) },
+      { timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0, af: await resolveRequestAf(null) },
+    );
   } catch (e: any) {
     return c.json(fail(0, e.message || "Remote stream failed"));
   }

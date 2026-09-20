@@ -438,9 +438,11 @@ outArgs(req, bufferFmt): string[] {
 | P2-3 | **客户端 seek 判定改造（必做）**：改为按响应头 / 服务端能力判定 | `lib/providers/player/transcoded_stream_seek.dart` + `player_playback_helpers.dart` |
 | P2-4 | Web 端 seek 适配：Howler 无 Range 时按 `timeOffset` 重建 URL，进度用 offset 补偿 | `frontend/src/stores/player.ts` |
 | P2-5 | 并发池：上调 + 归一化独立并发，不抢音质转码的槽 | `services/transcode.ts` |
-| P2-6 | 契约测试：开关开/关、换源行后增益变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退、**断言 `/rest/stream` 与 `/rest/dlna/stream` 都不再有原样直出路径** | 新增 `backend/tests/services/pipeline.test.ts` |
+| P2-6 | 契约测试：开关开/关、换源行后增益按 `row.id` 变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退、**断言三个出流路由都不再有原样直出路径** | 新增 `backend/tests/rest/pipelineContract.test.ts` |
+| P2-7 | **`/rest/stream-remote`（搜索即播·未入库远程歌）走管道，删原样代理直出**（D9 的第三处）；换源前移到出流前（`resolveRemoteStreamUrl`）；补 `timeOffset` 透传；前端删 `probeRemoteFormat` 探测、固定按 mp3 起播 | `backend/src/routes/rest/index.ts` + `services/source/online/streamFallback.ts` + `frontend/src/stores/player.ts` |
 
-**验收**：客户端与 DLNA 连播 10 首网络源差异 ≤ 1 LU；**客户端拖动进度实测通过**；首字节 < 500 ms。
+**验收**：客户端与 DLNA 连播 10 首网络源差异 ≤ 1 LU；**客户端拖动进度实测通过**；首字节 < 500 ms；
+三个出流路由（`/rest/stream`、`/rest/dlna/stream/:token`、`/rest/stream-remote`）全部走管道。
 
 ### P3 · ④ Smart Fades L0（本轮做）
 
