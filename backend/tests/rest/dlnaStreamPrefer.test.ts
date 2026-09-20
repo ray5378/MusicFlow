@@ -25,12 +25,11 @@ app.route("/rest", restRoutes);
 
 const fixtureDir = path.join(os.tmpdir(), `mf-dlna-prefer-${process.pid}`);
 const wavPath = path.join(fixtureDir, "local.wav");
-let wavSize = 0;
 
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
 
-  // 真实 WAV 作为组内 local 源(优选成功时应直出该文件字节)。
+  // 真实 WAV 作为组内 local 源(优选成功时管道按 suffix wav 出 FLAC)。
   fs.mkdirSync(fixtureDir, { recursive: true });
   const r = spawnSync(resolveFfmpeg(), [
     "-hide_banner", "-loglevel", "error", "-y",
@@ -40,7 +39,6 @@ beforeAll(() => {
   if (r.status !== 0) {
     throw new Error(`ffmpeg fixture 生成失败: ${r.stderr?.slice(0, 500)}`);
   }
-  wavSize = fs.statSync(wavPath).size;
 
   initDatabase();
   registerBuiltinPlugins(); // 播种 core 插件(core-play-preference enabled=1)
@@ -57,25 +55,27 @@ beforeAll(() => {
 });
 
 describe("/rest/dlna/stream/:token 播放优选", () => {
-  it("web 行拉流自动切换到组内 local 源(直出 WAV 字节)", async () => {
+  it("web 行拉流自动切换到组内 local 源(管道出 FLAC,P2-2)", async () => {
     const { token } = createCastSession("sw", "dev1", "http://localhost:1");
     const res = await app.request(`/rest/dlna/stream/${token}`);
     expect(res.status).toBe(200);
-    expect(Number(res.headers.get("content-length"))).toBe(wavSize);
+    // P2-2:优选切到 local WAV 行后同样走管道(suffix wav → FLAC),不再直出文件字节。
+    expect(res.headers.get("content-type")).toBe("audio/flac");
+    expect(res.headers.get("x-musicflow-transcoded")).toBe("1");
+    expect(res.headers.get("contentfeatures.dlna.org")).toContain("DLNA.ORG_OP=01");
+    expect(Number(res.headers.get("content-length"))).toBe(Math.ceil(1411 * 1000 / 8 * 12 * 3600));
     const buf = await res.arrayBuffer();
-    // WAV 文件头 "RIFF"
-    expect(new TextDecoder().decode(new Uint8Array(buf.slice(0, 4)))).toBe("RIFF");
+    // FLAC 文件头 "fLaC"
+    expect(new TextDecoder().decode(new Uint8Array(buf.slice(0, 4)))).toBe("fLaC");
   });
 
-  it("关闭播放优选插件后按原 web 源拉流(不直出 local 文件)", async () => {
+  it("关闭播放优选插件后按原 web 源拉流(无 url → 404,绝非音频字节)", async () => {
     db.update(plugins).set({ enabled: 0 }).where(eq(plugins.id, "core-play-preference")).run();
     try {
       const { token } = createCastSession("sw", "dev1", "http://localhost:1");
       const res = await app.request(`/rest/dlna/stream/${token}`);
-      // web 行无 url → serveWebSongStream 返回 JSON 错误(200),绝非 WAV 字节。
-      const buf = await res.arrayBuffer();
-      const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 4)));
-      expect(head).not.toBe("RIFF");
+      // web 行无 url → 管道无输入,404(旧行为是 serveWebSongStream 返回 JSON 错误)。
+      expect(res.status).toBe(404);
     } finally {
       db.update(plugins).set({ enabled: 1 }).where(eq(plugins.id, "core-play-preference")).run();
     }

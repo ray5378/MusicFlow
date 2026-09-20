@@ -1421,10 +1421,13 @@ async function resolveRequestAf(song: { id?: string } | null): Promise<string[]>
 /**
  * 通用 ffmpeg 管道出流(转码/管道出流共用):并发槽＋abort 联动＋stderr 排空＋
  * P0-4(自然播完上报边播边测)＋toWeb 单源 close。调用方只负责组装 args 与 MIME。
+ * extraHeaders:调用方附加头(DLNA 的 contentFeatures/forced-length/icy-metaint)。
+ * icyMetaint>0 时把 stdout 按 ICY 间隔装帧(每 N 音频字节插 1 字节 0x00 空元数据):
+ * 宣告了 icy-metaint 的设备会按间隔解析,不装帧会把音频字节误读成元数据长度。
  */
 async function serveFfmpegPipe(
   c: any,
-  opts: { songId?: string; mime: string; sourceLabel: string; args: string[] },
+  opts: { songId?: string; mime: string; sourceLabel: string; args: string[]; extraHeaders?: Record<string, string>; icyMetaint?: number },
 ) {
   const { spawnTranscoderWithArgs, acquireTranscodeSlot, releaseTranscodeSlot } =
     await import("../../services/transcode.js");
@@ -1469,31 +1472,59 @@ async function serveFfmpegPipe(
   // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream(规避 undici
   // 重复 close 竞态,见 serveTranscodedSong 处注释)。
   const { Readable: NodeReadable } = await import("node:stream");
-  const webStream = NodeReadable.toWeb(child.stdout as any) as any;
+  let webStream = NodeReadable.toWeb(child.stdout as any) as any;
+  const metaint = opts.icyMetaint ?? 0;
+  if (metaint > 0) webStream = icyFrameStream(webStream, metaint);
   return new Response(webStream, {
     status: 200,
     headers: {
       "Content-Type": opts.mime,
       "Cache-Control": "no-cache",
       "X-MusicFlow-Transcoded": "1",
+      ...(opts.icyMetaint && opts.icyMetaint > 0 ? { "icy-metaint": String(opts.icyMetaint), "icy-name": "MusicFlow" } : {}),
+      ...(opts.extraHeaders || {}),
     },
   });
+}
+
+/**
+ * ICY 间隔装帧(P2-2):每 metaint 音频字节后插 1 字节 0x00(元数据长度 0 = 无更新)。
+ * 只在设备请求 Icy-MetaData:1 且响应宣告 icy-metaint 时启用。
+ */
+function icyFrameStream(source: any, metaint: number): any {
+  let pending = 0;
+  return source.pipeThrough(new TransformStream({
+    transform(chunk: any, controller: any) {
+      let buf = Buffer.from(chunk as any);
+      while (buf.length > 0) {
+        const take = Math.min(buf.length, metaint - pending);
+        controller.enqueue(buf.subarray(0, take));
+        buf = buf.subarray(take);
+        pending += take;
+        if (pending >= metaint) {
+          controller.enqueue(new Uint8Array([0]));
+          pending = 0;
+        }
+      }
+    },
+  }));
 }
 
 /**
  * 管道出流(P2-1):解码→af→按源族编码,单 ffmpeg 进程直出 HTTP。
  * 与原样拉流的区别:无 Content-Length/Range(实时流),带 X-MusicFlow-Transcoded 头。
  * Range 请求一律按全流 200 返回(字节 Range 在实时流上无意义,客户端改走 timeOffset,P2-3)。
+ * codecOverride(P2-2):DLNA 等通道覆盖输出编码(如 ogg 系回退 mp3),mime 同步取覆盖值。
  */
 async function servePipelinedSong(
   c: any,
   song: any,
   input: { source: string; headers?: Record<string, string> },
-  opts: { timeOffset?: number; af: string[] },
+  opts: { timeOffset?: number; af: string[]; codecOverride?: { codec: "flac" | "mp3" | "aac" | "opus"; bitrateKbps?: number; mime: string }; extraHeaders?: Record<string, string>; icyMetaint?: number },
 ) {
   const { resolveChannelCodec, buildPipelineCommand, resolvePipelineInput } =
     await import("../../services/audio/pipeline.js");
-  const ch = resolveChannelCodec(song?.suffix);
+  const ch = opts.codecOverride ?? resolveChannelCodec(song?.suffix);
   const compliant = await resolvePipelineInput({ input: input.source, headers: input.headers });
   const args = buildPipelineCommand({
     input: compliant.input,
@@ -1508,6 +1539,8 @@ async function servePipelinedSong(
     mime: ch.mime,
     sourceLabel: compliant.input.slice(0, 120),
     args,
+    ...(opts.extraHeaders ? { extraHeaders: opts.extraHeaders } : {}),
+    ...(opts.icyMetaint ? { icyMetaint: opts.icyMetaint } : {}),
   });
 }
 
@@ -1548,106 +1581,9 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
 // 开关控制:插件总开关关闭 = 完全恢复插件化前行为(按原源播放)。
 type SongRow = typeof songs.$inferSelect;
 
-// ==================== DLNA web 源格式兜底（音箱专用） ====================
-// 音箱(MUZO 2017 固件等)普遍不支持 Ogg/Opus/WebM 容器。web 源(在线插件)
-// 上游实际返回格式与 DB 记录可能不一致——如 go-music-dl 固定返回 Ogg Vorbis
-// 但入库 suffix 记 mp3,导致音箱拉到 ogg 静音。按上游实际 Content-Type 探测,
-// 命中音箱不支持格式时服务端 ffmpeg 实时转 192kbps mp3 再出流。
-// 仅 DLNA 端点生效(/rest/stream 面向软件播放器,支持 ogg,行为不变);
-// local/webdav 源是可控文件格式、且探测只对远程 URL 有意义,不参与。
-const DLNA_UNSUPPORTED_MIME = [
-  /^audio\/ogg\b/i, /^application\/ogg\b/i, /^audio\/opus\b/i,
-  /^audio\/webm\b/i, /^video\/webm\b/i, /^audio\/x-ogg\b/i, /^application\/opus\b/i,
-];
-
-/** 上游格式探测缓存(songId → content-type + 文件头嗅探),TTL 5 分钟:固定源避免每次拉流重复探测。 */
-const dlnaProbeCache = new Map<string, { ct: string | null; magic: string | null; at: number }>();
-const DLNA_PROBE_TTL = 5 * 60 * 1000;
-
-/** 音箱 DLNA 层可安全透传的格式(按文件头判定后修正 MIME 用)。 */
-const MAGIC_MIME: Record<string, string> = {
-  mp3: "audio/mpeg",
-  flac: "audio/flac",
-  wav: "audio/wav",
-  m4a: "audio/mp4",
-  ogg: "audio/ogg",
-};
-
-/** 按文件头 magic bytes 嗅探真实音频格式;未知返回 null。 */
-function sniffAudioMagic(head: Buffer): string | null {
-  if (!head || head.length < 12) return null;
-  const ascii = (o: number, n: number) => head.subarray(o, o + n).toString("ascii");
-  if (ascii(0, 4) === "OggS") return "ogg";
-  if (ascii(4, 4) === "ftyp") return "m4a"; // MP4/M4A 容器
-  if (ascii(0, 3) === "ID3") return "mp3";
-  if (ascii(0, 4) === "fLaC") return "flac";
-  if (ascii(0, 4) === "RIFF") return "wav";
-  if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return "mp3"; // MP3 sync 帧
-  return null;
-}
-
-/** 以 Range 0-31 取上游响应头 + 首 32 字节判定实际格式;探测失败返回 null(不阻断原逻辑)。 */
-async function probeUpstreamContentType(url: string, headers: Record<string, string>): Promise<{ ct: string | null; magic: string | null } | null> {
-  try {
-    const resp = await fetch(url, { headers: { ...headers, Range: "bytes=0-31" } });
-    const ct = resp.headers.get("content-type") || "";
-    let head = Buffer.alloc(0);
-    try {
-      const reader = resp.body?.getReader();
-      if (reader) {
-        const { value } = await reader.read(); // 首个 chunk(几 KB~64KB),足够嗅探
-        await reader.cancel(); // 上游忽略 Range 返回全量时只读一个 chunk 即释放连接
-        if (value) head = Buffer.from(value).subarray(0, 32);
-      }
-    } catch {
-      // ignore body read error,仅用响应头
-    }
-    return { ct: ct || null, magic: sniffAudioMagic(head) };
-  } catch {
-    return null;
-  }
-}
-
-/** DLNA 端点 web 源出流:不支持格式兜底转 mp3,其余走原 serveWebSongStream 透传。 */
-async function serveDlnaWebStream(
-  c: any,
-  song: any,
-  rangeHeader: string | null | undefined,
-  timeOffset: number,
-): Promise<Response> {
-  const fs = await import("fs");
-  const headers: Record<string, string> = {};
-  try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
-  // 已下载缓存文件(格式受控)直接透传,跳过探测
-  const hasCache = !!song.cachePath && fs.existsSync(song.cachePath);
-  if (!hasCache && song.url) {
-    let probe: { ct: string | null; magic: string | null } | null;
-    const cached = dlnaProbeCache.get(song.id);
-    if (cached && Date.now() - cached.at < DLNA_PROBE_TTL) {
-      probe = cached;
-    } else {
-      probe = await probeUpstreamContentType(song.url, headers);
-      if (probe) dlnaProbeCache.set(song.id, { ...probe, at: Date.now() });
-    }
-    const ct = probe?.ct || "";
-    const magic = probe?.magic || null;
-    const unsupported = DLNA_UNSUPPORTED_MIME.some((re) => re.test(ct));
-    // 未标 MIME 的裸流(application/octet-stream,如 go-music-dl soda 源固定
-    // 返回 M4A 但 Content-Type 标错):按文件头判定,非音箱安全格式(mp3/flac/wav)
-    // 一律兜底转码;安全格式则透传但把 Content-Type 改对(octet-stream 音箱不认)。
-    const octet = /^application\/octet-stream\b/i.test(ct);
-    const octetUnsupported = octet && magic !== "mp3" && magic !== "flac" && magic !== "wav";
-    if (unsupported || octetUnsupported) {
-      log.info("DLNA 兜底转码:上游格式音箱不支持,转 192k mp3", { id: song.id, contentType: ct, magic });
-      return serveTranscodedSong(c, { source: loopbackRawStreamUrl(song.url, headers) }, { format: "mp3", bitrateKbps: 192, timeOffset });
-    }
-    if (octet && magic) {
-      // 透传但修正 MIME:音箱按 Content-Type 决定是否可播。
-      return serveWebSongStream(c, song, rangeHeader, MAGIC_MIME[magic]);
-    }
-  }
-  return serveWebSongStream(c, song, rangeHeader);
-}
+// P2-2 备注:旧「DLNA web 源格式兜底」(上游嗅探 + ogg→192k mp3)已删除 ——
+// DLNA 全通道走管道后输出格式只由 resolveDlnaOutput 定(ogg 系一律 mp3 320),
+// 不再依赖上游实际格式探测;上游错标(suffix 与实际不符)由 ffmpeg 解码器自适应。
 
 restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   const id = getParam(c, "id") || "";
@@ -1788,9 +1724,8 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
 // then streams the file exactly like /rest/stream. Registered without auth.
 restRoutes.get("/dlna/stream/:token", async (c) => {
   const token = c.req.param("token");
-  const raw = getParam(c, "raw") === "1";
-  // raw=1:内部 ffmpeg 回环取流(契约见 services/dlna/control.ts 顶部注释)。
-  // 先查 raw-stream 注册表(插件直链/虚拟行,不经 songs 表),Node 代理直透原始字节。
+  // raw=1 回环取流走上面的 raw-stream 注册表分支(plugins/ffmpeg 内部用);
+  // cast token 绑定的歌曲一律走下面管道出流,不再有直传旁路(P2-2/D9)。
   const rawEntry = resolveRawStreamToken(token);
   if (rawEntry) {
     const headers: Record<string, string> = { ...(rawEntry.headers || {}) };
@@ -1818,7 +1753,6 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   // 队列/状态仍按原行上报,只影响音箱实际拉到的流。
   const resolvedSong = await resolvePreferredSong(song);
 
-  const rangeHeader = c.req.header("range");
   const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
@@ -1844,73 +1778,39 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
     }
   }
 
-  // Online/plugin song (type="web", path like "web:provider:source"): proxy the
-  // song's remote url (with per-song headers + Range), same as /rest/stream.
-  // 兜底:上游实际格式为 ogg/opus/webm 等音箱不支持格式时转 192k mp3 再出流。
-  if (resolvedSong.type === "web") {
-    // raw=1(内部 ffmpeg 回环):直透原始字节,跳过嗅探与兜底转码(外层自己转)。
-    if (raw) return serveWebSongStream(c, resolvedSong, rangeHeader);
-    return serveDlnaWebStream(c, resolvedSong, rangeHeader, timeOffset);
-  }
-
-  const parsed = parseSongPath(resolvedSong.path);
-  if (!parsed) return c.text("Invalid song path", 400);
-
+  // P2-2:DLNA 不再有直传旁路(D9)。web/webdav/本地统一走服务端实时管道:
+  // cast 时 DIDL mime 与出流 Content-Type 共用它(天然同步);Range 在实时流上
+  // 无意义一律忽略走全流 200(客户端改走 timeOffset)。
   try {
-    if (parsed.type === "w") {
-      const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-      if (!source) return c.text("Source not found", 404);
-      const config = JSON.parse(source.config || "{}");
-      const downloadUrl = getWebDAVUrl(config, parsed.filePath);
-      const headers: Record<string, string> = {};
-      if (config.username && config.password) {
-        headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
+    const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
+    const dlnaCodec = resolveDlnaOutput(resolvedSong.suffix);
+    const input = await resolveTranscodeInput(c, resolvedSong);
+    if (!input) return c.text("No playable stream", 404);
+    if ((resolvedSong.type || "local") !== "web") {
+      const parsedLocal = parseSongPath(resolvedSong.path);
+      if (!parsedLocal) return c.text("Invalid song path", 400);
+      if (parsedLocal.type !== "w") {
+        const fs = await import("fs");
+        if (!fs.existsSync(parsedLocal.filePath)) return c.text("File not found", 404);
       }
-      if (rangeHeader) headers["Range"] = rangeHeader;
-      const upstream = await fetch(downloadUrl, { headers });
-      const respHeaders: Record<string, string> = {
-        "Content-Type": MIME_MAP[resolvedSong.suffix || ""] || "application/octet-stream",
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "no-cache",
-      };
-      const ct = upstream.headers.get("content-type");
-      if (ct) respHeaders["Content-Type"] = ct;
-      const cl = upstream.headers.get("content-length");
-      if (cl) respHeaders["Content-Length"] = cl;
-      const cr = upstream.headers.get("content-range");
-      if (cr) respHeaders["Content-Range"] = cr;
-      return c.body(upstream.body as any, upstream.status as any, respHeaders);
-    } else {
-      const fs = await import("fs");
-      const filePath = parsed.filePath;
-      if (!fs.existsSync(filePath)) return c.text("File not found", 404);
-      const stat = fs.statSync(filePath);
-      const fileSize = stat.size;
-      const mime = MIME_MAP[resolvedSong.suffix || ""] || "application/octet-stream";
-      if (rangeHeader) {
-        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-        if (match) {
-          const start = parseInt(match[1]);
-          const end = match[2] ? parseInt(match[2]) : fileSize - 1;
-          const chunkSize = end - start + 1;
-          const stream = fs.createReadStream(filePath, { start, end });
-          return new Response(stream as any, {
-            status: 206,
-            headers: {
-              "Content-Type": mime,
-              "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-              "Content-Length": String(chunkSize),
-              "Accept-Ranges": "bytes",
-            },
-          });
-        }
-      }
-      const stream = fs.createReadStream(filePath);
-      return new Response(stream as any, {
-        status: 200,
-        headers: { "Content-Type": mime, "Content-Length": String(fileSize), "Accept-Ranges": "bytes" },
-      });
     }
+    // 音箱兼容头:http_profile 等价语义 —— contentFeatures 宣告 OP/CI/FLAGS,
+    // forced_content_length 给 12h 假总量(部分老固件无 Content-Length 拒播),
+    // ICY 仅当设备请求 Icy-MetaData:1 时给(icy-metaint + 空元数据装帧)。
+    const flacEstimateKbps = 1411;
+    const rateKbps = dlnaCodec.codec === "flac" ? flacEstimateKbps : (dlnaCodec.bitrateKbps ?? 320);
+    const extraHeaders: Record<string, string> = {
+      "contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+      "Content-Length": String(Math.ceil(rateKbps * 1000 / 8 * 12 * 3600)),
+    };
+    const icyRequested = (c.req.header("icy-metadata") || "") === "1";
+    return servePipelinedSong(c, resolvedSong, input, {
+      timeOffset,
+      af: await resolveRequestAf(resolvedSong),
+      codecOverride: dlnaCodec,
+      extraHeaders,
+      ...(icyRequested ? { icyMetaint: 16384 } : {}),
+    });
   } catch (e: any) {
     return c.text(e.message || "Stream failed", 500);
   }

@@ -7,6 +7,7 @@ import {
   limiterFilter,
   outputFilters,
   codecArgs,
+  resolveDlnaOutput,
   DEFAULT_TARGET_LUFS,
   LIMITER_CEILING_DB,
 } from "../../src/services/audio/pipeline.js";
@@ -239,5 +240,26 @@ describe("整命令段序(P1-6):解码 → af → 编码", () => {
     expect(idx("-ar")).toBeLessThan(idx("-ac"));
     expect(idx("-ac")).toBeLessThan(idx("-f"));
     expect(cmd[cmd.length - 1]).toBe("pipe:1");
+  });
+});
+
+describe("resolveDlnaOutput(P2-2):DLNA 输出决策", () => {
+  it("ogg 系一律回退 mp3 320(音箱不认 Ogg/Opus)", async () => {
+    for (const s of ["ogg", "oga", "opus"]) {
+      const o = resolveDlnaOutput(s);
+      expect(o.codec).toBe("mp3");
+      expect(o.bitrateKbps).toBe(320);
+      expect(o.mime).toBe("audio/mpeg");
+    }
+  });
+  it("其余跟随源族,与 resolveChannelCodec 一致", async () => {
+    const { resolveChannelCodec } = await import("../../src/services/audio/pipeline.js");
+    for (const s of ["mp3", "flac", "wav", "m4a", "aac", "wma", "ape", null, undefined, ""]) {
+      expect(resolveDlnaOutput(s)).toEqual(resolveChannelCodec(s));
+    }
+  });
+  it("cast 时 DIDL mime 与出流 mime 同一来源(天然同步)", async () => {
+    expect(resolveDlnaOutput("ogg").mime).toBe("audio/mpeg");
+    expect(resolveDlnaOutput("flac").mime).toBe("audio/flac");
   });
 });

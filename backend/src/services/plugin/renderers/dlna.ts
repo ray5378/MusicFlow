@@ -25,11 +25,8 @@ import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import type { RendererPlugin, RendererDevice, PluginManifest } from "../../../plugins/types.js";
 
-const DLNA_MIME: Record<string, string> = {
-  mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
-  ogg: "audio/ogg", m4a: "audio/mp4", wma: "audio/x-ms-wma", ape: "audio/ape",
-  aiff: "audio/aiff", opus: "audio/opus",
-};
+// P2-2 MIME 同步:cast 时 DIDL mime 不再查本地表,直接用 resolveDlnaOutput
+// (与 /rest/dlna/stream 出流 Content-Type 同一来源,ogg 系回退 mp3)。
 
 export const DLNA_RENDERER_ID = "dlna-renderer";
 
@@ -96,13 +93,15 @@ export const dlnaRendererPlugin: RendererPlugin = {
     if (!baseUrl) throw new Error("未确定 DLNA 流地址(请先进行一次投屏或设置 DLNA_BASE_URL)");
     const song: any = db.select().from(songs).where(eq(songs.id, songId)).get();
     if (!song) throw new Error("歌曲不存在");
+    // P2-2 MIME 同步:DIDL mime 必须等于出流实际格式(resolveDlnaOutput,ogg 系回退 mp3)。
+    const { resolveDlnaOutput } = await import("../../../services/audio/pipeline.js");
     return castToDevice({
       deviceId,
       songId,
       title: song.title || "未知",
       artist: song.artist || undefined,
       album: song.album || undefined,
-      mime: DLNA_MIME[song.suffix || ""] || "audio/mpeg",
+      mime: resolveDlnaOutput(song.suffix).mime,
       baseUrl,
       coverArt: song.coverArt || undefined,
     });

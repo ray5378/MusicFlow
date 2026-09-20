@@ -309,6 +309,20 @@ export function resolveChannelCodec(suffix: string | null | undefined): ChannelC
   return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
 }
 
+/**
+ * DLNA 输出决策(P2-2):跟随源族,但 ogg 系(ogg/oga/opus)一律回退 mp3 320 ——
+ * 音箱(MUZO 2017 固件等)普遍不支持 Ogg/Opus 容器(沿用旧 serveDlnaWebStream 兜底
+ * 规则,码率按 D4 取 320)。返回 ChannelCodec,cast 时 DIDL mime 与出流
+ * Content-Type 共用它,天然同步(P2-2 MIME 同步要求)。
+ */
+export function resolveDlnaOutput(suffix: string | null | undefined): ChannelCodec {
+  const s = String(suffix || "").trim().toLowerCase().replace(/^\./, "");
+  if (s === "ogg" || s === "oga" || s === "opus") {
+    return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
+  }
+  return resolveChannelCodec(suffix);
+}
+
 export interface PipelineCommandRequest extends DecodeRequest {
   codec: ChannelCodec["codec"];
   bitrateKbps?: number;

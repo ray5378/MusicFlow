@@ -2249,11 +2249,7 @@ apiRoutes.delete("/v1/history", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
 });
 
 // ==================== DLNA cast ====================
-const DLNA_MIME: Record<string, string> = {
-  mp3: "audio/mpeg", flac: "audio/flac", wav: "audio/wav", aac: "audio/aac",
-  ogg: "audio/ogg", m4a: "audio/mp4", wma: "audio/x-ms-wma", ape: "audio/ape",
-  aiff: "audio/aiff", opus: "audio/opus",
-};
+// P2-2 MIME 同步:cast/enqueue 的 DIDL mime 用 resolveDlnaOutput(与出流同一来源)。
 
 // Derive the LAN base URL the DLNA renderer should use to pull the stream.
 // Uses the request Host header's hostname + the backend's actual listening
@@ -2457,7 +2453,8 @@ apiRoutes.post("/v1/dlna/cast", async (c) => {
   if (!songId || !deviceId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSongIdAndDeviceId"), 400);
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
-  const mime = DLNA_MIME[song.suffix || ""] || "audio/mpeg";
+  const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
+  const mime = resolveDlnaOutput(song.suffix).mime;
   try {
     await castToDevice({
       songId, deviceId,
@@ -2483,7 +2480,8 @@ apiRoutes.post("/v1/dlna/enqueue", async (c) => {
   if (!songId || !deviceId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSongIdAndDeviceId"), 400);
   const song = db.select().from(songs).where(eq(songs.id, songId)).get();
   if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
-  const mime = DLNA_MIME[song.suffix || ""] || "audio/mpeg";
+  const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
+  const mime = resolveDlnaOutput(song.suffix).mime;
   try {
     const supported = await enqueueNextTrack({
       songId, deviceId,
