@@ -1,6 +1,7 @@
 # 播放端统一化管理与遥控 方案（PLAYER_UNIFICATION）
 
-> 状态：**部分落地（步骤 1 / 3 / 4 已部分实现），方案已收敛**。（2026-09-19 复核：本文「现状 / 缺口」一节已按当前代码校正，**行可见性**的正确口径见 §4.1 / §4.2 / §9。）
+> 状态：**部分落地（步骤 1 / 3 / 4 已部分实现），方案已收敛**。（2026-09-19 复核：本文「现状 / 缺口」一节已按当前代码校正，**行可见性**的正确口径见 §4.1 / §4.2 / §9。
+> **2026-09-21 二次订正**：§2 里仍残留 **3 条与代码相反**的断言（transport 是 no-op / WS 已推送 local 状态 / 本机 peerId 含 `clientId` 明文），且都与本文 §7.1 自相矛盾 —— 已逐条改正并标注；另修正 `PeerKind` 行号、`kind → 实现` if 链规模（6+ → 约 34）与 `diag_*.cjs` 不存在的问题。）
 > 一句话目标：把**所有能出声的播放端**统一成服务端"认识、可列出、可遥控、可读状态"的同一种对象，
 > 并在**播放器页**与**流转播放界面**里同等呈现、同等遥控。
 >
@@ -31,21 +32,31 @@
 ## 2. 现状与缺口（代码事实）
 
 **已受管（现状即目标形态）**
-- 类型集合：`PeerKind = local | dlna | group | airplay | sendspin`（`backend/src/services/peer.ts`，约 :53）。
+- 类型集合：`PeerKind = local | dlna | group | airplay | sendspin`（`backend/src/services/peer.ts:57`）。
 - 统一契约：`ProtocolPlayer`（`backend/src/services/player/types.ts`，约 :67）——
   `playMedia / stop / pause / resume / seek / setVolume / pollState`，DLNA / AirPlay / Sendspin / 群组同形实现。
 - 注册：经 `UniversalPlayer.attachProtocol` 注册进 `QueueController`，随即获得**队列 + 自动切歌 + 状态轮询**。
-- 本机 peerId 为三段式 `local:<userId>:<clientId>`，唯一权威在 `backend/src/utils/peerId.ts`，
+- 本机 peerId 对外是**不可逆实例键 `local:<userId>:<instanceKey>`**，唯一权威在 `backend/src/utils/peerId.ts:101-106`
+  （⚠️ 2026-09-21 订正：**不是** `local:<userId>:<clientId>` —— `clientId` **明文不出服务端**，
+  同文件 `:8-11` 有明确说明；§7.1 :257-258 的写法是对的，此处原先与它自相矛盾）。
   配套四处消费：`canControlPeer / filterPeersByAccess / pruneOrphans / canSeePeer`。
 
 **缺口（已补 / 已收敛）**
-1. **local 现已只指客户端**：音频在客户端（Flutter），服务端只存队列元数据；
-  transport 为 no-op（`backend/src/routes/api/index.ts`，约 :3358），status 只有队列快照（约 :3659）。
+1. **local 现已只指客户端**：音频在客户端（Flutter），服务端只存队列元数据。
+  ⚠️ **2026-09-21 订正（原文与代码相反）**：原文写「transport 为 no-op（`routes/api/index.ts`，约 :3358），
+  status 只有队列快照（约 :3659）」—— 现实际是 `dispatchPeerCommand(peerId,"play")`（同文件 `:3889`，
+  该行注释自述「**曾经**是 no-op」；`:3358` 已是 `PUT /v1/pipeline/switches`），`/status` 也已合并本机上报
+  （`:4291-4300`）⇒ 两条断言都已过期，且与本文 §7.1 步骤 3 直接冲突。
   **本机真状态经 local-status 回报**已落地（见 §7.1）。
 2. **无法被远程遥控** → **客户端已被遥控打通**（指令下发 + 状态回报 + 前端遥控路径）；
   **Web 作为被控端已明确不做**（见 §7.1 收敛记录）。
-3. **状态不统一** → WS 已全类型推送 local 实例的状态回报。
-4. **控制面重复** → 路由层 6+ 条重复的 `kind → 实现` if 链待收敛（步骤 2，未开始）。
+3. **状态不统一** → ⚠️ **2026-09-21 订正**：原文写「WS 已全类型推送 local 实例的状态回报」—— **不成立**。
+  `services/ws/index.ts:7-24` 的消息类型表里**没有任何 local 状态推送**；本机状态实为
+  `POST /v1/peers/:peerId/local-status`（`routes/api/index.ts:3502`）写内存 + 对端 `GET /status`
+  （`:4218`）轮询合并 —— 是**拉**不是**推**。
+4. **控制面重复** → 路由层重复的 `kind → 实现` if 链待收敛（步骤 2，未开始）。
+  ⚠️ **2026-09-21 订正**：原文写「6+ 条」—— 实际 `routes/api/index.ts` 内 `parsed.kind ===` 分支约 **34** 处
+  （如 `:3857-3881`），规模比原文大一个量级。
 5. **重复工具**：`stripPlayerPrefix` 与 `parsePeerId` 职责重叠，待清理（未开始）。
 6. **旁路**：`/v1/dlna/cast`、client-cast stream-url、插件 renderer 的 `control(action)` 第三套控制面待收敛（未开始）。
 7. **UI 缺位** → **播放器页已新增「客户端」模块**（按 `platform !== "web"` 列出本机实例）；
@@ -210,10 +221,13 @@ Web 不经此模型——它不是播放端。Web 作为遥控面，复用与 DL
 - **④ 顺带收敛**：`_follow()` 在「歌曲序列与本机一致」时也走整队 `playQueue` → 切一下随机就把正在播的
   歌从头重启。修：新增 `_sameSongIds()`，序列一致时只套外层（模式 / 游标），不再整队重建。
 
-**验证手段（可复用）**：`diag_remote.cjs`（列 peer + 实测 `delivered`）、`diag_self.cjs`
-（带 `x-mf-client-id` 实测 `self` 唯一且正确、`platform/model` 是否下发）、`diag_playmode.cjs`
-（像 Web 那样直接改目标实例的权威播放模式）、`diag_star_push.cjs`（独立 WS 连接冒充同账号另一端，
-`unstar→star` 还原式取证推送，不污染数据）。实测结论：`delivered: true`；客户端日志出现
+**验证手段（可复用）**：⚠️ **2026-09-21 订正** —— 原文列的 `diag_remote.cjs` / `diag_self.cjs` /
+`diag_playmode.cjs` / `diag_star_push.cjs` 在**本仓不存在**（全仓 `find -iname "diag_*"` 零命中），
+当轮是在工作区临时脚本里跑的、**从未入库**，照抄这几个名字会扑空。可复用的等价手段：
+列 peer 与 `delivered` 走 `GET /v1/peers` + WS 抓包；`self`/`platform`/`model` 走
+`GET /v1/peers?includeHidden=1`（本机行的 `self` 掩码与 `platform` 字段直接可见）；
+播放模式与星标推送直接对 `PUT /v1/peers/:id/queue/...` 与 `POST /v1/peers/:id/star` 取证即可。
+**当轮实测结论照旧有效**：`delivered: true`；客户端日志出现
 `queue truncated (total=3217), apply outer fields only` + `apply authoritative play mode: xxx`；
 `song_starred` 两向各推 1 条。
 **已知残留**：同一 `peer_queue_changed` 会被处理两次（客户端日志成对出现、`sid` 连续两次自增），
@@ -259,7 +273,9 @@ Web 不经此模型——它不是播放端。Web 作为遥控面，复用与 DL
 - **前端** 播放器页新增「客户端」模块（按 `platform` 分流：`platform !== "web"` → 客户端；
   **Web 播放器模块已移除**）。模块**不判本机**（不置顶、不打角标），名字取「改名 → 设备名片 → 上报名」；
   支持改名与按用户级隐藏；实例离线（idle 超时）后**管理页仍保留该行并打「离线」标签**（与 DLNA 区块一致），重新心跳即恢复可用 —— 只有「流转播放」选择器会剪掉别的离线客户端。
-- **验证**：后端 `963 passed / 130 files`（新增契约用例锁死「先打码后套偏好」与 self 规范形式）、
+- **验证**：后端 `963 passed / 130 files`（当轮数；⚠️ **2026-09-21 订正**：这是**当轮**的计数，
+  现基线已涨到 **139** 个 `*.test.ts`（`backend/tests` 下实测，含约 1243 处 `it/test`），
+  引用「130 files」会低估覆盖面）（新增契约用例锁死「先打码后套偏好」与 self 规范形式）、
   前端 `vue-tsc` 0 错、`check-i18n` / `check-core` / 前端浮层与插件隔离守卫全绿。
 
 ---

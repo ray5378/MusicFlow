@@ -7,14 +7,16 @@
 **最终目标**：把 **客户端 / Web / DLNA / Sendspin / AirPlay** 五条链路统一走服务端实时管道
 （解码 F32 → 响度标准化 → DSP → 交叉淡入 → 限制器 → 通道编码），**响度标准化全覆盖、不留任何直传旁路**（D9）。
 
-创建：2026-09-20 ｜ 最后更新：**2026-09-20（P5-5 文档收口 → 36/39，仅余发版时补 CHANGELOG）** ｜ 截至本轮开工 main 位置 `3a57f62`（P0–P4 各阶段提交均在 230 本地已提交、**未 push**，见 §10）
+创建：2026-09-20 ｜ 最后更新：**2026-09-21（发版回填 → 38/39；并补回 fades 两道 MA 引擎边界）** ｜ 已发版 **v4.0.0**（`be7a964`）
 
-> **结项标记（2026-09-20）**：P0–P5 已落地 **36 / 39** 项 —— 未完成的两项都是有意为之：
-> **P5-4** ⏭ 远期不做（Smart Fades L1/L2，MA 侧 torch 栈不可复刻）、**P5-5** 🟡 文档部分已做，
-> 其中 CHANGELOG 按项目约定「**未发版不提前写**」留到发版时补。
-> 代码现状：全部改动在 **230 `/workspace/MusicFlow` 本地已提交、未 push**；`v*` tag / GitHub Release
-> 属发布动作，**需用户明确放行**后再做（tag → CI 出镜像 → 自动建 Release）。
-> 本文件此后**只做两件事**：发版时回填版本号与 CHANGELOG 指向、以及新增任务时追加条目。
+> **结项标记（2026-09-21 更新）**：P0–P5 已落地 **38 / 39** 项，唯一未做的是有意为之：
+> **P5-4** ⏭ 远期不做（Smart Fades L1/L2，MA 侧 torch 栈不可复刻，门槛 `MIN_RAM_GB=4.0`）。
+> **P0-4 与 P5-5 已收口**（2026-09-21 回标，原先都标 🟡）：
+> P0-4 的四处 stderr 落点其实早已接完（HTTP/flow 在 `routes/rest/index.ts:1385`/`:1584`、
+> sendspin 在 `streamSource`/`streamEngine`、AirPlay 在 `airplay/control.ts:475`）——
+> 标 🟡 是没回标的残留；P5-5 的 CHANGELOG 随 **v4.0.0** 写入（`be7a964`），plan 已转正。
+> **发版形态**：`v4.0.0` tag → CI 出镜像 → 自动建 Release（版本号 3.0.x → 4.0.0）。
+> 本文件此后**只做两件事**：新增任务时追加条目、以及每次发版时回填版本号与 CHANGELOG 指向。
 
 ---
 
@@ -58,21 +60,30 @@
 
 | 阶段 | 主题 | 完成度 | 状态 | DoD 一句话 |
 |---|---|---|---|---|
-| **P0** | 数据层与响度核心 | 6 / 7 | 🟡 | P0-4 入口就绪待 P1 管道喂 stderr，其余全绿 |
+| **P0** | 数据层与响度核心 | 7 / 7 | ✅ | 四处 stderr 落点全接完（HTTP / flow / sendspin / AirPlay），D8 门按行类型 |
 | **P1** | 管道骨架 + Sendspin / AirPlay | 7 / 7 | ✅ | ESP32 / AirPlay 首播即被归一化，回录曲目间差 ≤ 1 LU |
 | **P2** | HTTP 通道实时管道化 | 8 / 8 | ✅ | 客户端 / Web / DLNA 走管道，**客户端 + Web 拖动进度可用**，删净直传分支（含搜索即播的 `/stream-remote`） |
 | **P3** | Smart Fades L0 | 8 / 8 | ✅ | flow 会话（两路解码并存 + F32 逐片加权混合）+ 队列静默推进，开关缺省关 |
 | **P4** | DSP | 4 / 4 | ✅ | 四个常用滤镜可用，空配置零开销 |
-| **P5** | 收尾与远期 | 3 / 5 | 🟡 | P5-1/5-2/5-3 已落地；P5-4 ⏭ 远期不做；P5-5 🟡 文档已转正 + 结项，CHANGELOG 待发版 |
-| **合计** | | **36 / 39** | 🟡 P5 进行中 | 验收总口径见 plan §8 |
+| **P5** | 收尾与远期 | 4 / 5 | 🟡 | P5-1/5-2/5-3 已落地；P5-4 ⏭ 远期不做；P5-5 ✅ 随 v4.0.0 收口（CHANGELOG 已写） |
+| **合计** | | **38 / 39** | 🟡 仅剩 P5-4 ⏭ | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**36 / 39（92%）**
+**38 / 39（97%）**
 
 ### 2.3 当前焦点
 
-**P5-3 收官（可选优化层）**：实时 `loudnorm` 是主路径，但**自持源**（local 行）的文件今天明天都一样，可以把这次分析提前做掉、以后走静态增益。新增 `services/audio/offlineMeasure.ts`（**默认关**）：只选 `l:` 前缀的 local 行、只选**还没测过**的（重复触发幂等），跑一次 `loudnorm … print_format=json -f null -` 把集成响度/真峰值经 `saveAnalysis()` 落进 `audio_analysis` —— 用的是**实时路径同一个解析器** `parseLoudnorm()`，两条路的测量口径因此按构造成对。串行执行（模块级 `running` 闸门=唯一并发闸门，不占 playback 池），手动触发为异步 + 前端轮询进度。**「热点曲目输出缓存」按 plan §2 决策不做**（缓存命中即绕过 ②–⑤，且改一次目标响度/DSP 就整库失效）。**随后 P5-5 已把文档收口**：plan 转正为「规格 · 已落地」、本文件加结项标记；余下只有「发版时写 CHANGELOG + 回填版本号」这一件事（P5-4 按设计 ⏭ 远期不做）。
+**已结项。** 唯一挂起的是 **P5-4 ⏭ 远期**（Smart Fades L1 beat-aligned / L2 智能混音 —— MA 侧依赖 torch 栈、门槛 `MIN_RAM_GB=4.0`，不可复刻；分析字段已预留，将来接不改表）。
+
+**2026-09-21 复核补记**：对照 MA `76c2fcb` 复核本轮落地代码时，在 ④ 段发现**两处 MA 引擎边界被漏掉**，已补回（详见 §10 末行）：
+- `MIN_CROSSFADE_DURATION = 3`（`streams/audio.py:184`）—— **窗口短于 3s 就不做过渡**。
+  与「面板可配下限」是两件事：面板照 MA `constants.py:475-483` 是 1…15，引擎门槛是 3。
+  早先面板对齐 MA 时把 `FADE_MIN_SEC` 从 3 改成 1，顺带把这道理**一起**放掉了。
+- `window = min(window, remaining_media / speed / 2)`（`audio.py:4140-4143`）—— 未接：
+  **不允许把下一曲吃掉超过一半**（否则用户听不到它任何一段干净的）。
+- 同时把 `fades.ts::effectiveFadeFrames` 从「只被单测调用」改成生产唯一入口
+  （原先 `flow.ts` 内联了一份等价实现，且多了一个生产从不传的 `incomingFrames`）。
 
 ### 2.4 阶段依赖
 
@@ -85,7 +96,7 @@ P0（数据层，可独立上线）
 
 ---
 
-## 3. P0 · 数据层与响度核心 — 6 / 7 🟡
+## 3. P0 · 数据层与响度核心 — 7 / 7 ✅
 
 **为什么先做它**
 当前没有任何响度元数据字段（`db/schema.ts` 全表零命中），于是：① 曲库响度参差不齐但服务端无从得知差值；② 需要在「静态 `volume`」与「实时 `loudnorm`」之间决策却没有依据。先把数据层与三个纯函数做掉，后续管道才能直接取用；本阶段不动播放路径，风险最低、可单独上线。
@@ -106,7 +117,7 @@ P0（数据层，可独立上线）
 | ✅ | P0-1 | 建表对齐 MA `AudioAnalysisData`：`loudness_integrated` / `loudness_album` / `loudness_range` / `true_peak` / `bpm` / `beats` / `downbeats` / `beats_per_bar` / `key` / `mode` / `rms_energy` / `spectral_centroid` / `energy` + `measured_at`，行级 + drizzle 迁移 | `backend/src/db/schema.ts` | （建表时已合入） | 2026-09-20 | 表已存在，逐字段核对齐；DB 表 38 → **39**，SPEC §2.1 已同步。**回查补漏（对照本地 MA 源码）**：首版漏了 10 个高层描述子＋`extra_data`，已补；存量库 PRAGMA 探列补加 |
 | ✅ | P0-2 | `parseLoudnorm()`：解析 ffmpeg stderr 的 loudnorm JSON（照 `helpers/audio.py:881-901`） | 新增 `services/audio/loudness.ts` | （已合入） | 2026-09-20 | 纯函数之一 |
 | ✅ | P0-3 | `chooseMode()` 模式决策 + `computeGainDb()` 增益计算 | 同上 | （已合入） | 2026-09-20 | 纯函数，必须可单测；判定顺序与 MA `get_normalization_mode` 逐项一致（含后补的 `isSoundEffect→disabled`）；增益**不限幅**（全面对齐 MA：裸差值 round 2 位，削波由⑤限制器兜底）；`prefer_album_loudness` 暂不支持（字段已存，待用） |
-| 🟡 | P0-4 | 边播边测回写：**仅 `local` / `webdav` 行**按 `row.id` 入库；网络源行解析后丢弃（D8） | `analysisStore.reportPlaybackLoudness(rowId, stderr)` + 播放结束钩子 | — | — | **入口＋单测已就绪；sendspin 自然播完已接入（P1-2），其余通道待 P2/P3 管道 stderr 落点** |
+| ✅ | P0-4 | 边播边测回写：**仅 `local` / `webdav` 行**按 `row.id` 入库；网络源行解析后丢弃（D8） | `analysisStore.reportPlaybackLoudness(rowId, stderr)` + 播放结束钩子 | （已合入） | 2026-09-21（回标） | **四处落点全部接完**：HTTP/Web 与 DLNA/flow 在 `routes/rest/index.ts:1385-1386`（`serveFfmpegPipe` 退出码 0 且未 abort）与 `:1584-1585`（flow 的 `onItemEnd` 逐首带各自解码 stderr）；sendspin 在 `streamEngine` 自然播完处；AirPlay 在 `airplay/control.ts:474-475`（in-proc 直调 / fork 经 sessionEnded）。D8 门在 `reportPlaybackLoudness` 内部按 `songs.type` 判（`remote:` 键查无行 → 直接 false）。**原标 🟡 是「落点在 P2/P3 接完但没回标」的残留**，非未做 |
 | ✅ | P0-5 | 单测：JSON 解析（含 -inf / 解析失败）、模式选择全分支、增益限幅、行级绑定 | 新增 `tests/services/loudness.test.ts` | （已合入） | 2026-09-20 | 24 用例全绿，分支覆盖见文件 |
 | ✅ | P0-6 | 回写清理联动：删行同事务删回写；扫描差集删除仅在源探测成功后执行，失败跳过并记 warning | 源清理 / 扫描逻辑 + `loudness.ts` | （本轮） | 2026-09-20 | 5 处落点：webdav 差集（visited>0 门）/local 差集（走完即算可达）/源删除/单曲删除；purge 只删 web 行，按 D8 永无回写故不碰。顺序一律**先回写后歌曲行**（FK 无 CASCADE，反了直接抛错——外键把顺序 bug 变成了 loud error）。`Statements` 类型顺手修（`ReturnType<typeof prepare>` 命中单参数重载） |
 | ✅ | P0-7 | 单测：网络源不回写（断言 DB 无记录）、源不可达时清理不执行、行删除后回写归零 | `tests/services/loudness.test.ts` 扩展 | （本轮） | 2026-09-20 | 新文件 `tests/services/analysisStore.test.ts` 5 例全绿：入库门 3 例＋删行联动 1 例＋本地扫描 E2E 1 例（真 mp3＋真扫描：删文件重扫行/回写双清、源目录消失抛错回写保留） |
@@ -173,7 +184,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | ✅ | P2-4 | Web 端 seek 适配：无 Range 时按 `timeOffset` 重建 URL，进度用 offset 补偿 | `frontend/src/stores/player.ts` + 新增 `frontend/src/utils/transcodedSeek.ts` | （本轮） | 2026-09-20 | `localSeek` 改为带 `timeOffset` 重拉（服务端 `-ss` 前置定位），**250ms trailing debounce**（el-slider `@input` 每帧触发，不防抖一次拖拽会起几十个 ffmpeg）；`localStreamOffset` 补偿进度 / 时长 / 歌词（`toLogicalPosition`，时长按 `howl.duration()+offset` 还原全曲）；同一整秒内的微调不重拉；暂停态拖动只重建不自动播；seek 重建不重复 scrobble；纯函数 `utils/transcodedSeek.ts` + 12 单测。`vue-tsc --noEmit` 0。**真机拖动进度待人工验收** |
 | ✅ | P2-5 | 并发池上调 + 归一化独立并发，不抢音质转码的槽 | `services/transcode.ts`（＋`routes/rest/index.ts` 接线） | （本轮） | 2026-09-20 | 单池 4 槽 → **两个独立池**：`quality`（客户端显式要 format/maxBitRate 的音质转码，上限 `TRANSCODE_MAX_CONCURRENT`，默认**核数**、下限 4 上限 8）／`pipeline`（默认实时管道，上限 `TRANSCODE_PIPELINE_MAX_CONCURRENT`，默认**核数 ×2**、下限 6）——8 核机即 8 / 16，均照 MA `constants.py:211` 的按核数派生方式。acquire 改**租约制**（返回释放函数、幂等）以防分池后释放落错池；`serveFfmpegPipe` 的 `slot` 必填（音质转码传 quality、默认管道传 pipeline），避免默认值把音质请求静默降级；实际排队时记一次日志（首字节延迟可观测）。单测重写 6 例（派生公式 / env 覆盖与非法值回退 / 幂等 / 池内排队 / **两池互不抢槽** / 合计计数） |
 | ✅ | P2-6 | 契约测试：开关开/关、换源行增益变化、MIME 随格式变化、响应头存在、DLNA 拒 FLAC 回退、**断言两个路由都不再有原样直出路径** | 新增 `tests/rest/pipelineContract.test.ts`（＋`resolveRequestAf` 导出） | （本轮） | 2026-09-20 | 8 例：①**结构锁**（D9 回归锁）—— 按文本标记切出两个 handler 源码段，断言段内无 `createReadStream` / `Accept-Ranges` / `getParam(c,"raw")`，DLNA 段**只从 `resolveCastToken` 之后**断言（回环 `raw` 分支是 ffmpeg 取源通道，SPEC §1.8，必须留）；`X-MusicFlow-Transcoded` 全文件只定义一次 ⇒ 所有出流同一出口；`serveDlnaWebStream` 不许复活。②**开关**：`pipeline.http=0` → `resolveRequestAf` 空链，且两个路由**仍**返回管道出流（X 头 + FLAC 容器 + 无 Content-Length + 音箱兼容头）⇒「关开关 ≠ 绕过管道」。③**换源行增益**：同曲两行各写测量 → `volume=6dB` / `volume=-6dB`，换到无测量行回 loudnorm 且 DB 无记录。MIME 随格式 / 响应头 / DLNA 拒 FLAC 回退已由 `transcodeStream.test.ts`、`dlnaOggFallback.test.ts`、`services/pipeline.test.ts` 覆盖，本文件不重复。顺带修 2 处与实现不符的注释（DLNA 路由「走原样拉流，行为不变」、`transcodedSeek.ts` 谎称 `/stream-remote` 已走管道） |
-| ✅ | P2-7 | **新发现（文档外补充）：`/rest/stream-remote` 走管道，删 `serveWebSongStream` 直出** —— 搜索即播的未入库远程歌仍是原样代理上游字节（`c.body(upstream.body)`＋`Accept-Ranges`＋上游 Content-Length），**无响度标准化**，是 D9 之后残留的第三处直出 | `backend/src/routes/rest/index.ts`（唯一调用点）、`frontend/src/stores/player.ts`（`probeRemoteFormat`） | （本轮） | 2026-09-20 | ① **出流改管道**：`serveWebSongStream` 整段删除（含 `cachePath` 死分支），`/stream-remote` 与 `/rest/stream` 共用 `servePipelinedSong`＋`resolveRequestAf(null)`（无 DB 行 → 无测量 → 实时 loudnorm）；补 `timeOffset` 透传（管道流无字节 Range，不补则搜索即播拖不动）。② **换源前移**（关键，文档原先没写）：URL 交 ffmpeg 后主进程再没换源机会，故新增 `resolveRemoteStreamUrl()`（`streamFallback.ts`）在出流前用**一次轻量 probe**（`Range: bytes=0-20000`，带 TTL 正缓存）裁决 —— ok→原链、gone→多源换源、gone 且换不到→**null → 404**（不再起注定失败的空管道）、transient→原链（网络抖动绝不判死；这是与 `ensurePlayableStream` 的有意分歧）。③ **前端联动**：`probeRemoteFormat`＋`remoteFmtCache`＋`playbackSeq` 整段删除 —— 那条 `Range: bytes=0-0` 的 GET 在管道化后会把 body 丢着不读、**常驻烧一个转码槽**；改为 `isRemoteSong(song) ? "mp3"` 直接定格式，`useEntitySearch` 的 `_suffixKnown` 随之作废删除。④ **决策：输出固定 mp3 320** —— 该路由的"源格式"只有插件的 `suffix` 提示（现无内置插件给出），不可靠，而 Howler 必须**起播前**知道 format；固定值免掉跨语言格式协商（代价：上游无损源不再按 flac 直出，见 §9 后续项）。⑤ 结构锁扩到第三个路由 + 前端源码锁（不再出现 `probeRemoteFormat` / `Range: bytes=0-0`）；`streamRemoteFallback.test.ts` 重写为**真 HTTP 上游**（stub 的 fetch 拦不住 ffmpeg 子进程）
+| ✅ | P2-7 | **新发现（文档外补充）：`/rest/stream-remote` 走管道，删 `serveWebSongStream` 直出** —— 搜索即播的未入库远程歌仍是原样代理上游字节（`c.body(upstream.body)`＋`Accept-Ranges`＋上游 Content-Length），**无响度标准化**，是 D9 之后残留的第三处直出 | `backend/src/routes/rest/index.ts`（唯一调用点）、`frontend/src/stores/player.ts`（`probeRemoteFormat`） | （本轮） | 2026-09-20 | ① **出流改管道**：`serveWebSongStream` 整段删除（含 `cachePath` 死分支），`/stream-remote` 与 `/rest/stream` 共用 `servePipelinedSong`＋`resolveRequestAf(null)`（无 DB 行 → 无测量 → 实时 loudnorm）；补 `timeOffset` 透传（管道流无字节 Range，不补则搜索即播拖不动）。② **换源前移**（关键，文档原先没写）：URL 交 ffmpeg 后主进程再没换源机会，故新增 `resolveRemoteStreamUrl()`（`streamFallback.ts`）在出流前用**一次轻量 probe**（`Range: bytes=0-20000`，带 TTL 正缓存）裁决 —— ok→原链、gone→多源换源、gone 且换不到→**null → 404**（不再起注定失败的空管道）、transient→原链（网络抖动绝不判死；这是与 `ensurePlayableStream` 的有意分歧）。③ **前端联动**：`probeRemoteFormat`＋`remoteFmtCache`＋`playbackSeq` 整段删除 —— 那条 `Range: bytes=0-0` 的 GET 在管道化后会把 body 丢着不读、**常驻烧一个转码槽**；改为 `isRemoteSong(song) ? "mp3"` 直接定格式，`useEntitySearch` 的 `_suffixKnown` 随之作废删除。④ **决策：输出固定 mp3 320** —— 该路由的"源格式"只有插件的 `suffix` 提示（现无内置插件给出），不可靠，而 Howler 必须**起播前**知道 format；固定值免掉跨语言格式协商（代价：上游无损源不再按 flac 直出，见 §9 后续项）。⑤ 结构锁扩到第三个路由 + 前端源码锁（不再出现 `probeRemoteFormat` / `Range: bytes=0-0`）；`streamRemoteFallback.test.ts` 重写为**真 HTTP 上游**（stub 的 fetch 拦不住 ffmpeg 子进程） |
 
 **依赖与注意**
 - 依赖 P1 —— 三条链路复用同一套 `AudioPipeline` 与响度决策。
@@ -195,7 +206,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 **成功标准**
 1. 连播**无间隙、无爆音**；过渡窗口内回录 LUFS 波动 ≤ 1 LU。
-2. 混合时长可配（默认 8s，下限 3s 对齐 MA），权重曲线连续。
+2. 混合时长可配（默认 8s，面板 1…15s；**引擎门槛**：实际窗口短于 3s 就不做过渡，对齐 MA `MIN_CROSSFADE_DURATION = 3`），权重曲线连续。
 3. **过渡期间增益不跳变** —— 必须实现 `normalization_override` pin 住两首歌各自的归一化模式（照 MA `streams/audio.py:1683`、1749）。
 4. 重叠长度必须**按帧对齐**：`crossfade_size = bytes // frame_size * frame_size`（照 `fades.py:389-394`），否则混合器**静默不出声**且无任何报错。
 5. 曲尾静音不计入过渡窗口（静音剥离有效）。
@@ -207,8 +218,8 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 状态 | # | 任务 | 落点 | commit | 完成日期 | 备注 |
 |---|---|---|---|---|---|---|
 | ✅ | P3-1 | **flow mode**：把队列连续曲目拼成一条不间断流（两路解码并存） | 新增 `services/audio/flow.ts`＋`services/audio/flowSource.ts` | （本轮） | 2026-09-20 | 引擎：一条编码 ffmpeg + 每曲一条解码 ffmpeg（**懒预取**：距本曲结束「过渡窗口 + 2s」时拉起下一路）；`pumpHoldBack()` 扣住尾部过渡窗口字节，等下一曲首段到齐再混。接线：`flowSource.selectFlowCandidates()` 从**服务端权威队列**（`QueueController.snapshot`）取「当前首起、顺序连续」的曲目；`serveFlowQueue()`（`routes/rest/index.ts`）逐首解析输入 + af 并起会话。**HTTP 侧必须显式 opt-in**（`flow=1`＋`peerId=`）—— HTTP 客户端的"下一首"由客户端自己推进，服务端替它拼流会两边各推进一次 → 跳歌；**DLNA 侧**队列本就由服务端持有（`cast token` 带 `deviceId`，新增 `resolveCastSession()`），故可默认接管。内存仍封顶（两路解码 × F32 交错，会话级不缓存整曲） |
-| ✅ | P3-2 | **标准交叉淡入**：F32 逐片加权混合，时长可配 | 新增 `services/audio/fades.ts` | （本轮） | 2026-09-20 | `mixCrossfade()` 逐帧 `outgoing×w_out + incoming×w_in`；权重曲线 `equal_power`（cos/sin，`w_out²+w_in²≡1`，缺省）/ `linear`；时长缺省 8s、**下限 3s**（对齐 MA `MIN_CROSSFADE_DURATION = 3`）。**不用 ffmpeg `acrossfade`**：它要求两个输入预对齐且长度已知，而两路是流式、长度未知（plan §3.4-2） |
-| ✅ | P3-3 | **静音剥离**：曲尾静音不计入过渡窗口 | `fades.ts`（`trailingSilenceFrames` / `effectiveFadeFrames`） | （本轮） | 2026-09-20 | 阈值缺省 −60 dBFS（`FADE_DEFAULT_SILENCE_DB`）；逐帧判「**所有**声道都低于阈值」才算静音（单声道有声即非静音）。有效窗口 = `min(配置, 可用) − 静音`，且不为负 ⇒ 整段静音时窗口归零（宁可不混，也不要淡一段静音）。会话里实测：尾部 3s 静音 ⇒ `crossfades=0` 且静音被丢弃（不再"淡出完还在放静音"） |
+| ✅ | P3-2 | **标准交叉淡入**：F32 逐片加权混合，时长可配 | 新增 `services/audio/fades.ts` | （本轮） | 2026-09-20 | `mixCrossfade()` 逐帧 `outgoing×w_out + incoming×w_in`；权重曲线 `equal_power`（cos/sin，`w_out²+w_in²≡1`，缺省）/ `linear`；时长缺省 8s（MA `CONF_ENTRY_CROSSFADE_DURATION`）。**不用 ffmpeg `acrossfade`**：它要求两个输入预对齐且长度已知，而两路是流式、长度未知（plan §3.4-2）。**⚠️ 2026-09-21 订正**：本行原写「**下限 3s**（对齐 MA `MIN_CROSSFADE_DURATION = 3`）」—— 那是把**面板下限**（MA 的 `range=(1,15)`，即 1）与**引擎门槛**（`MIN_CROSSFADE_DURATION = 3`，短于它**不做**过渡）当成了同一件事；随后「面板对齐 MA」把 `FADE_MIN_SEC` 改成 1 时，引擎门槛也被一起放掉了。现已拆成两个常量（`FADE_MIN_SEC = 1` / `MIN_CROSSFADE_DURATION_SEC = 3`）并补回门槛 + 「窗口 ≤ 下一曲总时长的一半」（`audio.py:4140-4146`），见 §10 末行 |
+| ✅ | P3-3 | **静音剥离**：曲尾静音不计入过渡窗口 | `fades.ts`（`trailingSilenceFrames` / `effectiveFadeFrames`） | （本轮） | 2026-09-20 | 阈值缺省 −60 dBFS（`FADE_DEFAULT_SILENCE_DB`）；逐帧判「**所有**声道都低于阈值」才算静音（单声道有声即非静音）。有效窗口 = `min(配置, 可用) − 静音`，且不为负 ⇒ 整段静音时窗口归零（宁可不混，也不要淡一段静音）。会话里实测：尾部 3s 静音 ⇒ `crossfades=0` 且静音被丢弃（不再"淡出完还在放静音"）。**⚠️ 2026-09-21 订正**：`effectiveFadeFrames` 原先是**只被单测调用**的（生产走 `flow.ts` 一份内联副本，且多了一个生产从不传的 `incomingFrames`）⇒ 上面那句「有效窗口 = …」当时并非出货行为；现已改成 `flow.ts` 的**生产唯一入口**并删掉 `incomingFrames`（下一曲的约束改由 `resolveCrossfadeWindowSec` 的「一半」规则表达，见 §10 末行） |
 | ✅ | P3-4 | **`normalization_override`**：过渡期间 pin 住两首歌各自的归一化模式 | `flow.ts` + `routes/rest/index.ts`（`resolveFlowAf`） | （本轮） | 2026-09-20 | 做法比 MA 更彻底：**每曲的 af 链在会话启动前一次算定**（`FlowItem.af` 必填），会话内部只读不重算 —— flow.ts **不 import** 任何响度/分析/设置模块（结构锁断言），过渡途中不可能因重解析而改增益。限幅器**不**进每曲的 af（`resolveLoudnessAf({includeLimiter:false})`）：两路相加后才可能超 0 dBFS，限幅必须在混合之后（⑤ 在 ④ 之后） |
 | ✅ | P3-5 | DLNA 侧 flow mode + ICY 元数据注入 | `dlna/control.ts`（`resolveCastSession`）＋`routes/rest/index.ts` | （本轮） | 2026-09-20 | cast token 一直在会话表里带 `deviceId`，只是没往外暴露；`resolveCastSession()` 暴露后 DLNA 路由即可取该设备队列。`icyFrameStream()` 增加**动态元数据提供者**：每个 `icy-metaint`（16384）间隔现读一次「当前曲目」→ 发真实 `StreamTitle='Artist - Title';` 块（长度字节 = 16 字节分片数，块 = `1 + N×16`）；无提供者时逐字节等价 P2-2 的 1 字节 `0x00`。`timeOffset > 0` 一律不走 flow（连续流没有稳定的"第 N 秒"语义） |
 | ✅ | P3-6 | 并发池预留额外槽位（过渡期 CPU 翻倍） | `services/transcode.ts` | （本轮） | 2026-09-20 | 新增**第三个池 `flow`**（上限 `TRANSCODE_FLOW_MAX_CONCURRENT`，缺省 `max(4, 核数)`），计费单位 = **存活解码器数**（稳态 1 / 过渡期 2）⇒ 8 核可同时有 4 个会话处在过渡期。交叉淡入**不占 `pipeline` 池**：不这么做则过渡瞬间的额外一路会去抢普通出流的槽（plan §3.4-7） |
@@ -270,7 +281,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 
 ---
 
-## 8. P5 · 收尾与远期 — 3 / 5 🟡
+## 8. P5 · 收尾与远期 — 4 / 5 🟡
 
 **为什么做**
 管道生效后，用户需要一处能「关掉」的地方 —— 特别是 DLNA：某些设备（电视、老旧音箱）不接受实时流，必须能单独降级。另外 plan 目前是「方案」口吻，落地后要转正，避免半年后有人误以为它仍是未决事项。
@@ -290,12 +301,12 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | ✅ | P5-2 | DLNA 单设备回退开关 | `services/audio/pipelineSwitches.ts` + `/v1/pipeline/dlna/:deviceId` + Web 设置页 | （本轮） | 2026-09-20 | D5 配套兜底。键 `pipeline.dlna.fallback.<deviceId>`（设备数个位数，不单开表，与 `pipeline.*` 同族同类缓存）。判定 `isDlnaEffectsEnabled(deviceId)` = **通道开 且 未被单独回退**（两层相乘，不是替代）。DLNA 路由用 cast token 里的 `deviceId` 算 `dlnaChannel`，故同一台设备其它行为（音量/队列/解绑）完全不受影响。面板里逐设备一个开关，失败时把开关拨回去 |
 | ✅ | P5-3 | 可选优化层（**默认关**）：热点曲目输出缓存 / 本地行离线预测量 | 新增 `services/audio/offlineMeasure.ts` + `routes/api/index.ts` 三个端点 + Web 设置页 | （本轮） | 2026-09-20 | **只做了「本地行离线预测量」，「热点曲目输出缓存」按 plan §2 决策不做**（plan 原文：不做「预渲染缓存」这类旁路，MA 没有这一层；缓存命中即绕过 ②–⑤，且改一次目标响度/DSP 就整库失效）—— 已在 plan §6 P5 条写明。实现要点：只选 `l:` 前缀 local 行 + 只选未测量的（幂等），`loudnorm … print_format=json -f null -`（不出音频）→ 复用实时路径同一个 `parseLoudnorm()` 落库；串行执行、`running` 是唯一并发闸门、**不占 playback 池**（否则一次批量会把客户端音质转码顶到队尾）；触发走异步 + 轮询（同步等会撞前端 15s 超时）。Web 侧只加了开关 + 「开始测量」+ 进度文案 |
 | ⏭ | P5-4 | **远期，本轮不做**：Smart Fades L1 beat-aligned / L2 智能混音 | — | — | — | MA 侧是 torch 栈，门槛 `MIN_RAM_GB=4.0`，不可复刻；字段已预留，将来接不改表 |
-| 🟡 | P5-5 | 文档：plan 转正 + CHANGELOG + 本文件结项标记 | `docs/audio-pipeline-plan.md`、本文件（CHANGELOG 待发版） | （本轮） | 2026-09-20（部分） | **plan 转正**：标题改「规格」、状态行改「D1–D10 已定；P0–P5 已落地」并指向本文件、§6 标题去「交接用」；**本文件结项标记**已加（见顶部引述块）。**CHANGELOG 按项目约定「未发版不提前写」留到发版** ⇒ 本项随发版收口，不单独占提交 |
+| ✅ | P5-5 | 文档：plan 转正 + CHANGELOG + 本文件结项标记 | `docs/audio-pipeline-plan.md`、本文件、`CHANGELOG.md` | `be7a964` | 2026-09-21 | **plan 转正**：标题改「规格」、状态行改「D1–D10 已定；P0–P5 已落地」并指向本文件、§6 标题去「交接用」；**本文件结项标记**已加（见顶部引述块）。**CHANGELOG 已随 v4.0.0 写入**（`be7a964 chore: release v4.0.0`，版本号 3.0.x → 4.0.0，`backend/package.json` 同步）⇒ 本项已收口，不再是 🟡 |
 
 **验收结果**
 - **服务端**：新增 `services/audio/pipelineSwitches.ts`（唯一判定入口）+ 3 个 admin 端点（`GET/PUT /v1/pipeline/switches`、`PUT /v1/pipeline/dlna/:deviceId`）+ 四出口接线（HTTP/Web、DLNA、Sendspin、AirPlay）。语义照 D9：关闭 = 滤镜链为空、仍走管道（`channel = null` 时 `resolveRequestAf` / `resolveFlowAf` 返回空链，但路由**仍出管道流**）。DLNA 通道值由 cast token 里的 `deviceId` 推出，再叠一层单设备回退。
 - **单测**：`tests/services/pipelineSwitches.test.ts` **12 例**（缺省全开 / 全局关覆盖每通道 / 部分更新忽略非法值 / DLNA 单设备回退「通道开 且 未回退」两层相乘 / 键前缀）+ `tests/services/flowSource.test.ts` **+1 例**（`effectsOn:false` 否决 flow）+ `tests/rest/pipelineContract.test.ts` **+2 例**（P5-1 通道开关、P5-2 `channel=null`）；该文件既有 12 例契约锁全绿。
-- **Web 面板**：设置页「音频管道」卡片（P5-1/P5-2 的 Web 半边）—— 总开关 / 四通道开关（总开关关闭时置灰）/ 连续流 / 交叉淡入模式与时长（时长下限 3s 对齐 MA）/ DLNA 逐设备回退；保存 250ms 去抖并按响应回写，回退失败把开关拨回。`vue-tsc --noEmit` 0、`vite build` 通过。
+- **Web 面板**：设置页「音频管道」卡片（P5-1/P5-2 的 Web 半边）—— 总开关 / 四通道开关（总开关关闭时置灰）/ 连续流 / 交叉淡入模式与时长（面板 1…15s 照 MA `range=(1,15)`；**引擎门槛 3s** 另算，见 §6 P3-2 订正）/ DLNA 逐设备回退；保存 250ms 去抖并按响应回写，回退失败把开关拨回。`vue-tsc --noEmit` 0、`vite build` 通过。
 - **门禁**：`tsc --noEmit` 0；7 个静态检查脚本全 0（`check-i18n`：前端 1331 键对齐、后端 catalog 145 键对齐、源码无硬编码中文）。
 - **全量回归**：**170 文件 / 1385 用例逐个通过**（P4 基线 168/1358 → 累计 +2 文件 / +27 例：P5-1/5-2 的 +1 文件/+15 例，P5-3 的 +1 文件/+12 例）。
   ⚠️ **230 这台机只有 2.9 GB 内存**：`tests/plugins/sandbox.test.ts` 单文件 fork 峰值 RSS ≈ 2.5 GB，整包（甚至某个大批）跑会被内核 OOM 杀掉（`dmesg` 见 `Out of memory: Killed process (node (vitest 1))`），症状是 `ERR_IPC_CHANNEL_CLOSED` 且**不打印任何 pass/fail 汇总** —— **看着像失败，其实没跑到结论**。故本轮按目录分段跑（段间 `rm -rf /tmp/mf-test-data` + `drop_caches`）：`sandbox` 单跑 **1 文件/27 例**、`airplay~rendererHost` **25/168**、`plugins`（去 sandbox）**22/200**、`services` **36/386**；余下 `rest/routes/sendspin/source/utils` 与 `src/services/sendspin` 的 **86 文件/604 例** 在一次 122 文件大批里全过（该批唯一的失败是 `flow.test.ts`，见下条；而它在 `services` 段里已全绿）。合计 **170/1385**。将来在 230 上跑全量若再见 `ERR_IPC_CHANNEL_CLOSED`，先按「内存不够 → 分段跑」处理，别怀疑代码。
@@ -307,10 +318,10 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 - **单测**：`tests/services/offlineMeasure.test.ts` **12 例全绿** —— 命令形态（null muxer、无 `pipe:1`、复用 `LOUDNORM_ARGS`）、`limit` 归一化（非法回落 / 超限钳位 / 取整）、可测路径只认 `l:`、默认关 + 开关往返、候选集只含 local 且未测量（web / webdav / 相对路径全排除）、`saveAnalysis` 对 web 行拒绝（D8 双保险）、**真 ffmpeg 端到端**（生成 -20 dB 正弦 → 实测值落在合理区间且落库）、文件不存在计 failed 不抛、`running` 闸门第二次触发被拒（busy）。
 - **Web 面板**：管道卡片末尾加一行 —— 开关 + 「开始测量」+ 「已测 N / 共 M」（跑动时切「测量中 N/M…」并 1s 轮询，跑完自动停）。
 
-**P5-5 · 文档转正 + 结项（🟡 部分完成）**
+**P5-5 · 文档转正 + 结项（✅ 已完成，2026-09-21）**
 - `docs/audio-pipeline-plan.md` 从「实施方案 / 可进入开发交接」**转正为「规格 · 已落地」**：标题、状态行（「D1–D10 已定；P0–P5 已落地」+ 指向本文件为进度真相源）、§6 标题（去「交接用」，改「已落地 —— 逐项状态 / commit / 验收见 progress」）。**正文的 MA 源码实证与决策点 D1–D10 一字未动** —— 那些是设计依据，不是待办。
-- 本文件顶部加**结项标记**引述块（P0–P5 = 36/39；P5-4 远期不做、P5-5 待发版收口；代码未 push；发版需用户放行）。
-- **CHANGELOG 未写**：项目约定「未发版不提前写 CHANGELOG」，发版时随 tag 一并写入并回填版本号 —— 这是 P5-5 唯一未完成的部分，**不是遗漏**。
+- 本文件顶部加**结项标记**引述块（2026-09-21 已更新为 P0–P5 = **38/39**，唯一未做的是 P5-4 ⏭ 远期；发版形态 `v4.0.0` tag → CI 出镜像 → 自动建 Release）。
+- **CHANGELOG 已写**（2026-09-21）：随 `v4.0.0` 发版提交 `be7a964` 一并写入，`CHANGELOG.md` 顶部为 `## [4.0.0] - 2026-09-20`，`backend/package.json` 版本号同步为 `4.0.0`。
 
 **审核修复（2026-09-20 · P0–P5 交付后全量审核 → 3 个 P1，详见 §10 对应行）**
 - **P1-1 交叉淡入丢尾段**：`flow.ts` 补「2.5) 未参与混合的那段照常播出」。新增用例 5s + 1s、窗口 3s，断言总长 ≈ 5s；旧行为实测 **3.024s**（正是丢掉的那 2s）。
@@ -338,6 +349,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 - **② 段响度归一化改为可配**（本轮唯一**新增的后端能力**，其余都只是搬位置）：新增 `services/audio/normalization.ts` 作唯一落点 —— 键 `loudness.normalization`（缺省**开**：P0 起就是「始终归一化」，加开关不该顺手改缺省行为）+ `loudness.targetLufs`（-30…-5、缺省 -14）。区间与缺省**逐项对齐 MA `CONF_ENTRY_VOLUME_NORMALIZATION_TARGET`**（`constants.py:459-468`，`range=(-30,-5)` / `default_value=-14`）。⚠️ **一处有意与 MA 不同、别写成「与 MA 一致」**：MA 这两项是**队列级**配置（挂 queue、按 `queue_id` 取），本仓 ② 段的 af 链是**起流时一次算定**（`resolveLoudnessAf` 只认 `rowId`），没有队列层可挂 ⇒ 收敛成**服务端全局一项**，与 `pipeline.*` 同族同缓存。
 - **② 段单关 ≠ 整链逃生舱**：`LoudnessAfOpts` 新增 `normalization` 字段，`false` 时把 ② 段 mode 置 `disabled`（`loudnessFilter` 回 null）而**不是提前 `return []`** —— 提前返回会把 ③ 段 DSP 与 ⑤ 段限制器一起丢掉。`enabled:false`（逃生舱）才整链丢，两者方向相反，测试里各锁一条。目标响度与开关**只在 `resolveLoudnessAf` 里读一次设置**，不散到四个调用点（否则 DLNA 与 AirPlay 迟早各配各的）。
 - **交叉淡入时长对齐 MA 的 1…15 秒**：`fades.ts` 的 `FADE_MIN_SEC` 3→1、新增 `FADE_MAX_SEC=15`，`normalizeFadeConfig` 夹到 `[1,15]`（`CONF_ENTRY_CROSSFADE_DURATION` `range=(1,15)` / `default=8`）；早先下限写 3 是「低于 3 秒不像过渡」，但与 MA 面板不一致会让人以为改了没生效。`PUT /v1/pipeline/switches` **落库前就夹**（库里留个读不出来的值是最难查的那种「配置没生效」）。前端 `:min` 同步改 1。
+  **⚠️ 2026-09-21 订正（本条当时只对了一半）**：MA 的「3」**并没有消失**，它只是从**面板范围**（`range=(1,15)`）挪到了**引擎门槛** `MIN_CROSSFADE_DURATION = 3`（`streams/audio.py:184`，短于它的窗口直接 `DISABLED`）。本仓当时把两件事当成了一件 —— 面板改成 1 的同时，引擎门槛也一起没了（1s / 2s 也会真去混）。现已拆成 `FADE_MIN_SEC = 1`（面板）/ `MIN_CROSSFADE_DURATION_SEC = 3`（引擎）两个常量，并把「窗口 ≤ 下一曲总时长的一半」一并补回，见 §10 末行。
 - **顺带订正一处测试断言**：`flowSource.test.ts` 原用例写「时长夹到下限 3s」，随区间改成 `[1,15]` 并补上界用例；新增一条**护栏**注明库值走 `parseInt`（写 `"0.4"` 先被截成 0 = 非正 → 回缺省 8，而不是变成 1 秒）—— 哪天换成 `Number("0.4")` 行为会变，必须有人看见。
 - **新增测试 14 例（1 例为订正）**：`tests/services/normalization.test.ts` **14 例** —— 空库缺省（开 + -14）且区间常量与 MA 逐项一致、键名锁定（改名＝用户配置失效）、越界夹边界/非数值回缺省、**库里脏值也夹**（读到 -99 不能把 loudnorm 目标设成 -99）、只改传进来的字段、非布尔 `enabled` 忽略（`"0"`/`0`/`null` 都不算关）、`normalization:false` 只摘 ② 段而 DSP+限制器照旧、`enabled:false` 才连 DSP 一起丢、设置真进决策（库里 -20、测得 -10 → `volume=-10dB`）、调用方显式值优先。
 - **负向验证**：把「② 段单关」改回错误实现（提前 `return []`）+ 去掉淡入上限夹取 → **4 例精确变红**（含「DSP 与限制器照旧」那条）；restore 后复核 diff 回到修复版。
@@ -375,6 +387,8 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 | 2026-09-20 | （审核修复） | **全量代码审核（21 提交 `65fe662`→`a2694df`、59 个代码文件）+ 3 个 P1 修复**。审核报告落在工作区 `CODE_REVIEW_audio_pipeline_2026-09-20.md`（非仓库文件）。修的三处：①**`flow.ts` 交叉淡入静默丢上一曲尾段** —— `carry` 恒 ≤ 一个过渡窗口（`pumpHoldBack` 的 `holdBytes = fadeBytes`）⇒ `preFrames` 恒为 0；而下一曲首段**短于**过渡窗口时（下一曲很短 / 解码失败 / 空流），`carry` 里那段没参与混合的音频既没 emit 也没混，被循环末尾 `carry = Buffer.alloc(0)` 吞掉（最长丢一个窗口、**零报错**）；补 2.5) 段照常播出，自 `preFrames` 起算避免与 ① 重叠。②**stderr 保留方向反了**（`sendspin/streamSource.ts` 128KB、`airplay/decoder.ts` 64KB 两处都写「到上限就不再追加」⇒ 冻结在**流的开头**），而 loudnorm 报告打在**末尾**（本仓 `parseLoudnorm` 用 `lastIndexOf`；MA `music-assistant/server@76c2fcb` `helpers/audio.py:881-901` `parse_loudnorm` 用 `rfind("[Parsed_loudnorm_")`，注释原文 the report is the **last** thing the filter logs）⇒ 上机实测实时播放 stderr ≈ **190 B/s**（`-re` 12s → 2275B / 25 次 stats 更新），AirPlay >约 5.7 min、Sendspin >约 11.5 min 的曲目**永远解析不到测量值**且不报错（静默失败）；新增共用类 `services/audio/stderrTail.ts`（超限丢开头、末尾永远在）把三处统一（第三处 `offlineMeasure.captureFfmpegStderr` 本来就是对的写法）。③**`db/index.ts` 删掉 `audio_analysis` 的 `PRAGMA table_info` 探列 + `ALTER TABLE ADD COLUMN` 补列块（19 行）** —— 违反既定约定「向后兼容不在范围内，PRAGMA 探测补列一律不留」，且 `CREATE TABLE` 已含全部列。**补两条测试且都做了负向验证**（先把修复改回旧行为，确认**确实变红**，再 restore）：`flow.test.ts` +1 例「下一曲首段短于过渡窗口 → 上一曲尾段照常播出」（旧行为 `expected 3.024 to be close to 5`）、`streamSource.test.ts` +1 例「stderr 超上限仍保留末尾」（注入假 ffmpeg 刷 >128KB + 末尾报告；旧行为 `expected 'padding-87-…' to contain '[Parsed_loudnorm_'`）—— 真 ffmpeg 攒够 128KB stderr 要实时播约 11 分钟，故用假 ffmpeg 才测得起。MA 核对按 `git clone` + `checkout 76c2fcb` 拉取（**不入库**，符合项目约定）。tsc 0、7 门禁 0、`airplay~rendererHost` 24 例绿、`services` 36 文件 386/387。任务总数不变（修缺陷，不新增任务）⇒ 仍 **36/39**。 |
 | 2026-09-20 | （审核修复 · 第二批） | **审核报告剩余项全部收口：2-4 / 2-5 / 次要 5 项**。①**2-4 高/低通陡度**：核对 `music-assistant-models@1.1.212` 后**先纠正原报告前提** —— `ParametricEQBand.q` 默认本就是 **1.0**，「默认 q=1 而非 Butterworth 0.707」**不是偏差**；MA 真正有**两个**高/低通入口，本仓缺的是独立的 `HighLowPassFilter`（`slope ∈ {12,24,48}` dB/oct ⇒ `order = slope/6` 节**级联**，第 s 节 `q = 1/(2·cos(π(2s+1)/(2·order)))`，`helpers/dsp.py:237-249`）。`EqBand` 加可选 `slope`、`eqBandFilters()` 给合法 slope 时展成级联（golden 与 Python 独立复算**逐字符一致**），否则单节用 `q` ⇒ **不填时输出与改动前逐字节一致**；前端每段 EQ 行加「陡度」下拉（默认「用 Q 值」＝现状，选 12/24/48 时 `q` 置灰）。②**2-5 DSP 端点设备级授权**：补 `canControlPeer`（音色是**设备属性**，原实现任何有播放能力的账号都能改全服务器每台设备的 EQ）；全量端点按可见性**过滤**。⚠️ 刻意取舍：**DB 键仍用原始路径参数，只有权限判定走 `decodePeerId`**（键的形式与出流侧 `?peerId=` 自报共用，改掉会让已设过音色的本机实例突然不生效）。③**次要 5 项**：`pipeline.ts` JSDoc 拆行、`analysisStore.ts` 缩进对齐（顺手把每条播放测量都跑的 `SELECT type FROM songs` 纳入 `stmts()` 惰性缓存）、`transcodedSeek.ts` 名不副实注释订正（`/rest/stream-remote` 自 P2-7 起已走实时管道）、`readPipelineSwitches` 注释订正（`channels[ch]` 是**该通道自己的值**，生效值 = `isChannelEnabled()` 两层与）、前端抽 `utils/apiError.ts::apiErrorText()` 挡 `errors.` 裸 key（`Settings` 13 处 + `Groups` 23 处）。新增 `tests/routes/dspPerm.test.ts` **8 例**（刻意授予 `renderer.use` 让 403 只可能来自 `canControlPeer`）+ `tests/services/dsp.test.ts` **+9 例**，**两批都负向验证**（级联改回单节 → 2 例红；去掉权限门 → 5 例红）。tsc 0、7 门禁 0、前端 build 通过、`routes` 26/183 + `services` 36/395 绿。仍 **36/39**。 |
 | 2026-09-20 | （前端「音频」模块） | **把本轮落地的服务端能力收进一个可配页面（对照 MA 前端可设置项）**。新增侧边栏「音频」页 `views/Audio/index.vue`（`SlidersHorizontal`），「音频管道」「设备音色」两卡片从设置页**整块搬迁**（设置页删卡片同时删脚本/样式，不留死代码）；路由 `/audio` + `meta.perm`。**② 段响度归一化改为可配**（本轮唯一新增的后端能力）：新增 `services/audio/normalization.ts` —— 键 `loudness.normalization`（缺省**开**）+ `loudness.targetLufs`（-30…-5、缺省 -14），区间与缺省**逐项对齐 MA `CONF_ENTRY_VOLUME_NORMALIZATION_TARGET`**（`constants.py:459-468`）。⚠️ **一处有意与 MA 不同、别写成一致**：MA 这两项是**队列级**（挂 queue），本仓 ② 段 af 是**起流时一次算定**（只认 `rowId`）⇒ 收敛成服务端全局一项。`LoudnessAfOpts` 新增 `normalization`，`false` 只把 ② 段 mode 置 `disabled`（**不是提前 `return []`**，那会把 ③ DSP 与 ⑤ 限制器一起丢）；目标与开关**只在 `resolveLoudnessAf` 读一次**，不散到四个调用点。**交叉淡入时长对齐 MA 1…15 秒**：`FADE_MIN_SEC` 3→1、新增 `FADE_MAX_SEC=15`（`CONF_ENTRY_CROSSFADE_DURATION` `range=(1,15)` / default 8），`PUT` 落库前就夹；前端 `:min` 同步。新增 `tests/services/normalization.test.ts` **14 例**；订正 `flowSource.test.ts` 过期断言（原写「夹到下限 3s」）并加护栏注明库值走 `parseInt`（`"0.4"` → 回缺省 8 而非 1 秒）。**负向验证 4 例精确变红**。tsc 0、7 门禁 0（`check-i18n` **1347** 键）、前端 `vue-tsc && vite build` 通过（12s）、`services` 37/**409** + `routes` 26/183 + `airplay~rendererHost` 5/24 全绿。仍 **36/39**。 |
+| 2026-09-20 | `be7a964` | **v4.0.0 发版（版本号 3.0.x → 4.0.0）**。`chore: release v4.0.0 —— 音频出流全面管道化（六段流水线 + Web「音频」页）`：落点 `backend/package.json` + `CHANGELOG.md`（顶部 `## [4.0.0] - 2026-09-20`，含「已清掉全部直出旁路（`?raw=1` 直透 / `serveWebSongStream` / `serveDlnaWebStream`）」与「修复：全量代码审核抓出的 5 处缺陷」）。**P5-5 的 CHANGELOG 事项就此收口**；tag → CI 出镜像 → 自动建 Release。本行补记于 2026-09-21（发版本轮漏记，导致文件顶部一度仍写「未 push」） |
+| 2026-09-21 | （本轮复核） | **对照 MA `76c2fcb` 复核本轮落地代码 → 补回 ④ 段两道 MA 引擎边界 + 文档回标**。①`fades.ts` 新增 `MIN_CROSSFADE_DURATION_SEC = 3` 与 `resolveCrossfadeWindowSec()`：窗口先按「**下一曲总时长的一半**」夹（MA `streams/audio.py:4140-4143`，原话 a short incoming track cannot supply a long overlap…no clean part of it），再判 `< 3s` 则**不做过渡**（MA `:2007-2008` + `:4145-4146` 的 `MIN_CROSSFADE_DURATION = 3`）；`FADE_MIN_SEC = 1`（面板，照 `constants.py:475-483`）与 `MIN_CROSSFADE_DURATION_SEC`（引擎）**拆成两个常量** —— 早先「面板对齐 MA」把下限从 3 改成 1 时，把引擎门槛一起放掉了。②`flow.ts` 的窗口改为**每个曲目边界现场算**（`fadeBytes` 退为 holdBytes/预取的配置上限），任一道否决即整段不混。③`effectiveFadeFrames` 由「只被单测调用」改为**生产唯一入口**（原先 `flow.ts` 内联一份等价实现、且多了一个生产从不传的 `incomingFrames`）⇒ 「数学层 26 例」测的终于是出货那份。**测试**：`fades.test.ts` 31 例（+6：一半封顶 / 未知时长不夹 / 3s 门槛 / 非法配置 / 面板≠引擎门槛）、`flow.test.ts` 10 例（+1「下一曲太短 ⇒ 不做过渡」；原「两曲 5s」改用 10s 曲目以绕开新的 ½ 规则；静音与 P1-1 两例的 `durationSec` 声明对齐规则）。**负向验证**：移除两道守卫 → 3 例精确变红（含会话级 `crossfades` 从 1 变 0），restore 后复核 diff 回到修复版。**文档回标**：P0-4 🟡→✅（四处 stderr 落点 `rest/index.ts:1385`/`:1584` + sendspin + `airplay/control.ts:475` 早已接完，只是没回标）、P5-5 🟡→✅（随 v4.0.0 收口）、`be7a964` 入 §10、P3-2 与「面板下限」三处「下限 3s 对齐 MA」订正为「面板 1 / 引擎 3」。**门禁/回归**：`tsc --noEmit` 0、8 个静态脚本全 0；`tests/services` 37 文件 / 415 例中 414 通过，唯一失败是既有墙钟 flake「abort 幂等且让 done 收敛」（单跑 10/10 通过，与本文件 §8 记录的同名现象一致）。**进度 36/39 → 38/39** |
 | 2026-09-21 | `703ffc4` | **播放结束判定改以「已知时长」为准**（非音频管道，但与 P3-1 flow 强相关）。原判据只看设备报的 `PLAYING→IDLE`，于是两侧都错：IDLE 一误报就**提前切歌**（DLNA `GetTransportInfo` 失败即留初值 `STOPPED` → 映射 IDLE；实测 271s 的歌在 200s 被切），IDLE 不来就**卡死在结尾**（不报位置的设备走外推，而封顶写的是 `if (base.dur > 0)`，dur=0 时不封顶 → 346s 的歌播到 631s 仍在 `PLAYING`）。修四处：①`PlaybackTracker` 新增 `expectedDuration`（**只认 QueueController 注入的曲库时长**，不采信设备自报）+ 新决策 `idle_early`（IDLE 但位置距时长还差 `max(5s, 10%)` → 判误报、不切歌）+「位置已达时长并持续 8s 仍无 IDLE → 主动 advance」；②`PlayerController.setExpectedDuration` 透传，`reset()`/`resetTracker()` 不清它；③`QueueController.playCurrent` 在 cast 前注入 `knownDuration`，**flow 设备注入 0 走旧路径**（其位置/时长不对应单曲），`handleDecision` 对 `idle_early` 复查一次 `pollState()` 再撤销或放行；④`dlna/control.ts` 让 `GetTransportInfo` 失败时沿用 15s 内成功读数（不让「不知道」被当成「已停止」），并修掉 **`castToDevice` 播下的位置基线被换歌检测立刻 `delete`** —— 这才是 `dur` 恒 0 的真因（另存 `mediaDuration` 供基线缺失时兜底封顶）。新增 7 例 `PlaybackTracker` 用例锁判据，既有 10 例因「未注入 = 旧行为」而零改动通过。tsc 0、8 个静态门禁 0、后端全量 **139 文件 / 1243 例**绿。 |
 
 ---

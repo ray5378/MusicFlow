@@ -3,6 +3,18 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > **⏳ 历史快照（2026-09-19 标注）**：本文是当时的一次性计划 / 设计稿，对应任务**已完成**，**不是现行规范**。落地后的真实形态以代码为准：架构总览见 `docs/DEVELOPER.md`，进程 / 隔离模型见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。请勿按本文直接施工。
+>
+> **⚠️ 事实订正（2026-09-21 复核）** —— 本文 3 处引用的**文件名 / 函数名 / 签名不实**（正文按当时草稿写的，落地后改了名或换了形态），按本文搜索会扑空，**一律以代码为准**：
+>
+> | 本文写法 | 真实实现（取证） |
+> |---|---|
+> | Task 9「Modify `QueueController.ts:122`（`registerAirPlayDevices` 附近）」，目标函数 `registerSendspinPlayer` | `:122` 实为 `registerGroupPlayer`；sendspin 注册实名 **`registerSendspinDevice`**（`backend/src/services/player/QueueController.ts:171`），且 AirPlay 侧实名 **`registerAirPlayDevice`**（`:145`）—— `registerSendspinPlayer` / `registerAirPlayDevices` 全仓 0 命中 |
+> | Task 11 Step 3 `distributeGroupVolume(vols: number[], target: number): number[]`（单测 `[10,90],60 → [60,60]`） | 实名同但**签名与语义完全不同**：`distributeGroupVolume(members: PlayerGain[])` 返回 `{ members, scale, stagger }`，位置在 **`backend/src/services/sendspin/group.ts:9`**（**不是** `services/group/`）。文末「自检」把它列为跨任务一致符号，该条同样失效 |
+> | Task 14 把 `pskIdFor/classifyPsk/isPairingToken/parsePairingToken/isStaticCode/verifyStaticWindow` 都算作 `pairing.ts` | `pairing.ts` 只有 `generateDynamicCode` / `generateStaticCode` / `StaticCodeGate` / `attemptStaticCode`；`pskIdForHex` 在 **`pairingStore.ts:24`**、`SP:` token 解析在 **`pairServer.ts:106`** |
+>
+> 另与设计稿同源的两处**帧格式事实相反**（分片 type「1」应为 2/3；音频块 13B 头含 `send_ahead` 实为 **9B 无该字段**，且该误信曾导致真机无声）—— 详见 `docs/superpowers/specs/2026-09-12-sendspin-renderer-design.md` 顶部订正块。
+>
+> **核对为真**：`constants.ts` 的 SENTINEL、`packAudioChunk` 的 9B 头与「分片 2/3 非 1」、`builtins.ts:91` 注册、`control.ts` 三导出、`renderers/sendspin.ts` 均与实现一致。
 
 **Goal:** 让 MusicFlow 作为一个完整对齐 Music Assistant 的 **Sendspin Server**（`ws://:38927/sendspin` + mDNS），支持全角色(player/source/controller/metadata/artwork/visualizer/color)、三配对法、多房样本级同步、每客户端独立 opus/flac/pcm 编码、每播放器 DSP 音量，让 Xbox/Android App/硬件音箱直接发现并点播 MusicFlow 曲库。
 

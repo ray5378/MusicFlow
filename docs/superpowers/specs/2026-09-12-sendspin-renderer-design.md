@@ -6,6 +6,17 @@
 关联：`docs/superpowers/plans/2026-08-05-dlna-ma-style-player-controller.md`（MA 式 player 控制器的既有基准）。
 >
 > **⏳ 历史快照（2026-09-19 标注）**：本文是当时的一次性计划 / 设计稿，对应任务**已完成**，**不是现行规范**。落地后的真实形态以代码为准：架构总览见 `docs/DEVELOPER.md`，进程 / 隔离模型见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。请勿按本文直接施工。
+>
+> **⚠️ 事实订正（2026-09-21 复核）** —— 本文有 4 处与实现**相反或不实**，**一律以代码为准**，不要照抄本文：
+>
+> | 本文写法 | 真实实现（取证） |
+> |---|---|
+> | §3「framing.ts——分片（type1）」、§4「首字节 type：0=JSON、**1=分片**」 | 分片是 **2 = MORE / 3 = END**（`services/sendspin/constants.ts:21-22`；`0=JSON`、`4=音频块` 这两条**是对的**）；1 **不是**分片 |
+> | §4「4 = player 音频块 `[4][ts_i64_be][send_ahead_u32_be][data]`」（13 字节头） | **9 字节头、且没有 `send_ahead`**（`framing.ts` 的 `packAudioChunk`）。⚠️ 这条曾造成**真机无声事故**：代码注释专门记录了「误信 13B / `send_ahead`」的排查过程 —— 而本文正是那次误信的源头 |
+> | §7「新增 `QueueController.ts#registerSendspinPlayer`」 | 实名 **`registerSendspinDevice`**（`QueueController.ts:171`）；`registerSendspinPlayer` 全仓 0 命中（另 `registerAirPlayDevices` 实名 `registerAirPlayDevice`，`:145`） |
+> | §3「`pairing.ts`——三配对法 + PSK store + `unpaired_access` + `SP:` token 编解码」 | `pairing.ts` 只有码生成与 `StaticCodeGate`；**PSK store 在 `pairingStore.ts`**（`pskIdForHex` 见 `:24`）、**`SP:` token 编解码在 `pairServer.ts`**（`:106`） |
+>
+> 其余核对为**真**：文件树（`index`/`server`/`identity`/`handshake`/`messages`/`clock`/`group`/`stream`/`encoding`/`protocolPlayer`、`roles/*`）、`discovery/mdns.ts`、CPACE-X25519-SHA512（`cpace.ts:1`/`:15`）均存在。
 
 ## 1. 背景与目标
 

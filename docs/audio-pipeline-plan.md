@@ -267,7 +267,9 @@ else                             → loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:
 | 项 | MA 的实现 | 位置 |
 |---|---|---|
 | 模式枚举 | `CrossfadeMode.DISABLED / STANDARD_CROSSFADE / SMART_CROSSFADE` | `streams/audio.py`（`CrossfadeHandover.crossfade_mode`，约 220-232 行） |
-| 时长下限 | `MIN_CROSSFADE_DURATION = 3`（秒） | `streams/audio.py:184` |
+| 时长下限（**引擎门槛**） | `MIN_CROSSFADE_DURATION = 3`（秒）—— 实际窗口短于它 ⇒ `CrossfadeMode.DISABLED`，**不做**过渡 | `streams/audio.py:184`（判定在 `:2007-2008` 与 `:4145-4146`） |
+| 时长可配区间（**面板**） | `range=(1, 15)`，`default_value=8` —— ⚠️ 与上一行**不是同一件事**：面板能填到 1，但引擎在 < 3s 时不混 | `constants.py:475-483` `CONF_ENTRY_CROSSFADE_DURATION` |
+| 短曲保护 | `window = min(window, remaining_media / playback_speed / 2)` —— **不允许把下一曲吃掉超过一半**（原话：blending into more than half of it would leave the listener *no clean part of it*） | `streams/audio.py:4140-4143` |
 | 交接等待 | `CROSSFADE_HANDOFF_WAIT = 30.0` | `streams/audio.py:196` |
 | 标准淡入淡出 | `StandardCrossFade`：固定时长重叠 + **静音剥离**（silence stripping） | `streams/smart_fades/fades.py` |
 | 混音方式 | **Python 侧流式 PCM 逐片混合**（`helpers.audio.iter_pcm_slices`），不是 ffmpeg 滤镜 | `streams/smart_fades/filters.py` `StreamingCrossfadeFilter` |
@@ -450,7 +452,7 @@ outArgs(req, bufferFmt): string[] {
 | # | 任务 | 落点 |
 |---|---|---|
 | P3-1 | **flow mode**：服务端把队列连续曲目拼成一条不间断流（两路解码并存） | 新增 `backend/src/services/audio/flow.ts` |
-| P3-2 | **标准交叉淡入**：F32 逐片加权混合，时长可配（默认 8s，下限 3s 对齐 MA） | 新增 `backend/src/services/audio/fades.ts` |
+| P3-2 | **标准交叉淡入**：F32 逐片加权混合，时长可配（面板 1…15s / 默认 8s 照 MA `range=(1,15)`；**引擎门槛 3s** —— 实际窗口短于 3s 不做过渡，照 `MIN_CROSSFADE_DURATION`；另按「下一曲总时长的一半」封顶，见 §3.4 实证表） | 新增 `backend/src/services/audio/fades.ts` |
 | P3-3 | **静音剥离**：曲尾静音不计入过渡窗口 | `fades.ts` |
 | P3-4 | **`normalization_override`**：过渡期间 pin 住两首歌各自的归一化模式，防增益跳变（照 `streams/audio.py:1683`、1749） | `flow.ts` + `loudness.ts` |
 | P3-5 | DLNA 侧 flow mode + **ICY 元数据**注入 | `dlna/control.ts` |

@@ -6,6 +6,12 @@
 > 相关文档：`docs/sandbox-limits-and-plan.md`（插件沙箱限制与 P3 规划）、
 > `SPEC.md` §1.3（批量任务子进程红线）。
 >
+> **2026-09-21 行号/事实订正**：§1 与 §(对照表) 里有 3 处 `文件:行` 指向了无关代码（`routes/rest/index.ts`
+> 的 DLNA 路由 1755→**1842**、`airplay/decoder.ts` 的 spawn 52→**126**、`routes/api/index.ts` 的扫描入口
+> 798→**816**），另 `childMain.test.ts` **在本仓不存在**（对应守门人现为 `tests/rendererHost/supervisorFork.test.ts`）。
+> 更重要的一条：**「DLNA 无重活」已不成立** —— v4.0.0（P2）起 DLNA 出流也走完整 ffmpeg 管道。
+> 逐条已在原处标注；架构判断（不额外 fork、AirPlay 节拍仍在主进程）未变。
+>
 > **落地状态（2026-09-19，随 v3.0.39 发布）**：
 > - §4 的两步主干已落地 —— 通用层 `backend/src/services/rendererHost/` 就位，Sendspin 已迁移
 >   （行为不变，靠既有 39 文件 / 221 用例守），AirPlay 已接入同一宿主；
@@ -73,9 +79,9 @@
 | 常驻 fork 的业务入口 | `services/sendspin/child.ts`、`services/airplay/child.ts` |
 | 模式判定 | 通用 `services/rendererHost/mode.ts::isRendererForkMode()`；业务壳 `sendspin/mode.ts::isForkMode()`、`airplay/mode.ts::isAirPlayForkMode()`（均 leaf，零依赖） |
 | AirPlay 宿主接线 | `services/airplay/supervisor.ts`、`childMain.ts`、`sessionRuntime.ts`（纯推流运行时，零主进程态） |
-| 批量子进程 | `src/batch/runner.ts`；调用方 `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、`routes/api/index.ts:798`（扫描入口） |
-| AirPlay ffmpeg + 节拍 | `services/airplay/decoder.ts:52`（spawn）、`raop.ts:650`（`while` 节拍循环）、`raop.ts:618`（sync `setInterval`） |
-| DLNA 拉流 | `routes/rest/index.ts:1755`（字节代理 + Range，无重活） |
+| 批量子进程 | `src/batch/runner.ts`；调用方 `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、`routes/api/index.ts:816`（扫描入口） |
+| AirPlay ffmpeg + 节拍 | `services/airplay/decoder.ts:126`（spawn）、`raop.ts:650`（`while` 节拍循环）、`raop.ts:618`（sync `setInterval`） |
+| DLNA 拉流 | `routes/rest/index.ts:1842`（`/dlna/stream/:token`）。⚠️ **2026-09-21 订正**：原文写「字节代理 + Range，无重活」—— 自 **P2-2/P2-7（v4.0.0）** 起 **D9 已删净全部直出旁路**，该路由与 `/rest/stream` 共用 `servePipelinedSong`／`serveFfmpegPipe`，**每路出流都起真 ffmpeg**（重活，与 HTTP 通道同构）；`:1850-1859` 那几行 Range/`Accept-Ranges` 是**回环取源分支**（喂给 ffmpeg 的 token URL 通道，SPEC §1.8），不是给设备的字节代理。原文按此重估「DLNA 无重活」的结论 |
 | 转码 | `services/transcode.ts`（ffmpeg 子进程 + 并发槽） |
 | 封面 | `services/coverImage.ts:29`（`import("sharp")`，32MB 渲染缓存） |
 
@@ -256,7 +262,11 @@ Sendspin 早已把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` 这套写完�
    - `childBootstrap` / `paths`：子进程数据层装配、子进程入口路径解析（prod `.js` / dev `.ts`）；
    - `index.ts` 顶部写明「**新接渲染器六步清单**」（为 airplay2 / cast / roon 铺路）。
      注：起草时提到的 `playerCore.ts` **并未进通用层** —— 它是 sendspin 的业务实现，不属于宿主。
-2. ✅ 让 Sendspin **先切到通用层**（行为不变，靠现有测试守住：`childMain.test.ts` 8 例等）。
+2. ✅ 让 Sendspin **先切到通用层**（行为不变，靠现有测试守住）。⚠️ **2026-09-21 订正**：原文写
+   「`childMain.test.ts` 8 例」—— **本仓没有 `childMain.test.ts`**（`find tests -iname "*child*"` 只命中
+   `tests/rendererHost/fixtures/stubRendererChild.mjs`）。今天的对应守门人是
+   `tests/rendererHost/supervisorFork.test.ts`（实测 **10** 例，另加 `childMain` 那类「子进程主体」用例
+   散在 `tests/sendspin/protocolPlayer.test.ts` 等）；引用死文件名会让人以为覆盖丢了。
 3. ✅ 再把 AirPlay 接上去。
 
 **顺序不能颠倒**：先抽象再迁移，比先复制再合并便宜得多（后者要同时改两处已验证的行为）。
@@ -353,10 +363,10 @@ Sendspin 早已把 `supervisor.ts` / `proxy.ts` / `ipcProtocol.ts` 这套写完�
 | 断言 | 证据（起草时） | 现行位置（对照） |
 |---|---|---|
 | 主进程侧只有 2 条 fork 线 | `grep -rn "fork(" backend/src` → 仅 `sendspin/supervisor.ts:161`；批量在 `batch/runner.ts` | `rendererHost/supervisor.ts:178`；`src/batch/runner.ts` |
-| AirPlay 节拍在主进程 | `airplay/raop.ts:616` `while` 循环 + `:584` sync `setInterval` + `:117` spawn | `raop.ts:650` / `raop.ts:618` / `decoder.ts:52` |
+| AirPlay 节拍在主进程 | `airplay/raop.ts:616` `while` 循环 + `:584` sync `setInterval` + `:117` spawn | `raop.ts:650` / `raop.ts:618` / `decoder.ts:126`（2026-09-21 订正行号，原写 `:52`） |
 | AirPlay 进程内加密/ALAC | `raop.ts:91`（`pcm_to_alac_raw` 移植）、`:199` `createCipheriv` | `raop.ts:105` / `raop.ts:213` |
 | Sendspin 原生/WASM 在子进程 | `sendspin/encoding.ts:20`（`@discordjs/opus`）、`server.ts:160`（libFLAC） | `encoding.ts:20`（未变）/ `server.ts:158`（预热调用点） |
 | sharp 在主进程 | `coverImage.ts:29` `await import("sharp")` | 未变 |
-| DLNA 无重活 | `routes/rest/index.ts:1755`（Range 字节代理） | 未变 |
-| 批量任务全覆盖 | `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、扫描路由 `runBatchJob("scan", …)` | 同上；扫描入口 = `routes/api/index.ts:798` |
+| DLNA ~~无重活~~ → **已变重活** | `routes/rest/index.ts:1755`（Range 字节代理） | ⚠️ **2026-09-21 订正**：v4.0.0（P2-2/P2-7）起该路由改走 `servePipelinedSong`，**每路出流都起 ffmpeg**（§1 同项）—— 「DLNA 无重活」的前提已不成立；`ffmpeg` 本身是独立子进程，故进程模型结论（不额外 fork）不变，但**主进程的事件循环/内存占用按管道流的量重估** |
+| 批量任务全覆盖 | `index.ts:279/294/319`、`plugin/jobRunner.ts:38`、`plugin/asyncTasks.ts:43`、扫描路由 `runBatchJob("scan", …)` | 同上；扫描入口 = `routes/api/index.ts:816`（2026-09-21 订正，原写 `:798`） |
 | 无进程相关门禁（起草时） | 7 个 check 脚本 + 8 个 workflow 关键词扫描 0 命中；**v3.0.39 起已由 `check-renderer-host.mjs` 兜住**（见 §7） | 现共 8 个 check 脚本 |
