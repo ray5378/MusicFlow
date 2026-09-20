@@ -9,6 +9,7 @@
 // 转码二进制：优先 FFMPEG_PATH 环境变量（便于运维注入与测试隔离），其次 ffmpeg-static（AirPlay 投屏已用），最后 PATH。
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createRequire } from "node:module";
+import os from "node:os";
 import type { Readable } from "node:stream";
 import { createLogger } from "../utils/logger.js";
 import { decodeArgs, codecArgs } from "./audio/pipeline.js";
@@ -24,11 +25,7 @@ export const TRANSCODE_MIME: Record<string, string> = {
   aac: "audio/aac",
 };
 
-/** 同时进行的转码进程上限，超出后排队等待（环境变量可覆盖）。 */
-const MAX_CONCURRENT_TRANSCODES = Math.max(1, Number(process.env.TRANSCODE_MAX_CONCURRENT || 4));
-
-let activeTranscodes = 0;
-const transcodeWaiters: Array<() => void> = [];
+/** 同时进行的 ffmpeg 进程上限见文末「并发限制」（P2-5：两个独立池）。 */
 
 // ---------------- 工具 ----------------
 
@@ -154,28 +151,106 @@ export function spawnTranscoder(opts: TranscodeSpawnOptions): ChildProcessByStdi
   return child;
 }
 
-// ---------------- 并发限制 ----------------
+// ---------------- 并发限制（P2-5：两个独立池） ----------------
+//
+// 为什么要分池：实时管道化之后，「用户主动要了音质档位」的转码和「默认管道」
+// 走的是同一条出流函数，若共用一个池，多设备连播 / 后续交叉淡入（过渡期两路
+// 解码）会把池占满，导致用户显式点的高码率请求排队卡在首字节。
+// 因此按「谁决定的输出格式」分池，两池互不抢槽：
+//   quality : 客户端显式指定 format / maxBitRate（音质转码）—— 编码最重，池小但受保护
+//   pipeline: 默认实时管道（解码 → loudnorm → 同族编码）—— 数量最多，池子开大
+// 上限默认值照 MA 的派生方式按 CPU 核数算（constants.py:211
+// `_default_background_scan_concurrency` 同为「按核数派生 + 封顶」），
+// 并允许环境变量覆盖（容器编排里固定值时用）。
+// 注：P3-6 会给交叉淡入在此之上再预留槽位，届时只调池上限、不动调用方。
 
-/** 占用一个转码并发槽（超出上限则排队等待）。 */
-export function acquireTranscodeSlot(): Promise<void> {
-  if (activeTranscodes < MAX_CONCURRENT_TRANSCODES) {
-    activeTranscodes++;
-    return Promise.resolve();
+export type TranscodeSlotKind = "quality" | "pipeline";
+
+export interface SlotLimits {
+  /** 音质转码池上限（客户端显式要档位）。 */
+  quality: number;
+  /** 归一化管道池上限（默认实时管道）。 */
+  pipeline: number;
+}
+
+/**
+ * 由核数与环境变量算出两池上限（纯函数，供单测锁定）。
+ *   - quality ：核数，下限 4、上限 8（编码重，不无限开）
+ *   - pipeline：核数 ×2，下限 6（解码+loudnorm 很轻，但数量多，实时性优先）
+ * 环境变量：`TRANSCODE_MAX_CONCURRENT`（沿用旧名，现只约束音质池）、
+ * `TRANSCODE_PIPELINE_MAX_CONCURRENT`（新增）。非正数 / 非法值一律回退默认。
+ */
+export function resolveSlotLimits(cpuCount: number, env: Record<string, string | undefined>): SlotLimits {
+  const cores = Number.isFinite(cpuCount) && cpuCount > 0 ? Math.floor(cpuCount) : 4;
+  const pick = (raw: string | undefined, fallback: number): number => {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  };
+  return {
+    quality: pick(env.TRANSCODE_MAX_CONCURRENT, Math.max(4, Math.min(cores, 8))),
+    pipeline: pick(env.TRANSCODE_PIPELINE_MAX_CONCURRENT, Math.max(6, cores * 2)),
+  };
+}
+
+interface SlotPool {
+  limit: number;
+  active: number;
+  /** FIFO 排队者：被唤醒时先占槽再 resolve。 */
+  waiters: Array<() => void>;
+}
+
+const SLOT_LIMITS: SlotLimits = resolveSlotLimits(
+  os.availableParallelism?.() ?? os.cpus?.().length ?? 4,
+  process.env,
+);
+
+const slotPools: Record<TranscodeSlotKind, SlotPool> = {
+  quality: { limit: SLOT_LIMITS.quality, active: 0, waiters: [] },
+  pipeline: { limit: SLOT_LIMITS.pipeline, active: 0, waiters: [] },
+};
+
+/**
+ * 占用一个并发槽，返回**该槽的释放函数**（幂等，重复调用无副作用）。
+ * 用租约而不是 acquire/release 两个函数成对调用，是为了让释放必然落到
+ * 申请时那个池 —— 分池之后「释放到错误池」会静默把另一个池的额度吃掉。
+ * 与 `plugin/batchPacer.ts::acquireBatchLock()` 同一形态。
+ */
+export function acquireTranscodeSlot(kind: TranscodeSlotKind = "quality"): Promise<() => void> {
+  const pool = slotPools[kind];
+  // released 闭包标志:租约必须幂等 —— 出流路径上 abort/exit/close 三种终态都会
+  // 调 release,不挡住的话一次出流会还掉三个额度(池子被悄悄放大)。
+  let released = false;
+  const lease = () => {
+    if (released) return;
+    released = true;
+    releaseTranscodeSlot(pool);
+  };
+  if (pool.active < pool.limit) {
+    pool.active++;
+    return Promise.resolve(lease);
   }
-  return new Promise((resolve) => transcodeWaiters.push(() => {
-    activeTranscodes++;
-    resolve();
+  // 排队是可观测事件（首字节延迟的直接来源），只在实际排队时记一次。
+  log.info("转码槽排队等待", { kind, limit: pool.limit, queue: pool.waiters.length + 1 });
+  return new Promise((resolve) => pool.waiters.push(() => {
+    pool.active++;
+    resolve(lease);
   }));
 }
 
-/** 释放一个转码并发槽并唤醒下一个排队者。 */
-export function releaseTranscodeSlot(): void {
-  activeTranscodes = Math.max(0, activeTranscodes - 1);
-  const next = transcodeWaiters.shift();
+/** 释放一个槽并唤醒下一个排队者（内部使用；外部请用 acquire 返回的租约）。 */
+function releaseTranscodeSlot(pool: SlotPool): void {
+  pool.active = Math.max(0, pool.active - 1);
+  const next = pool.waiters.shift();
   if (next) next();
 }
 
-/** 供测试获取当前并发数。 */
-export function activeTranscodeCount(): number {
-  return activeTranscodes;
+/** 当前生效的池上限（供测试与排障读取真实值）。 */
+export function slotLimit(kind: TranscodeSlotKind): number {
+  return slotPools[kind].limit;
+}
+
+/** 指定池的占用数；不传 kind 时为两池合计（兼容旧调用）。 */
+export function activeTranscodeCount(kind?: TranscodeSlotKind): number {
+  if (kind) return slotPools[kind].active;
+  return slotPools.quality.active + slotPools.pipeline.active;
 }

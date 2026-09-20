@@ -28,7 +28,7 @@ import { resolvePreferredSong } from "../../services/source/preferredSource.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
-import { decideTranscode, spawnTranscoder, acquireTranscodeSlot, releaseTranscodeSlot, TRANSCODE_MIME } from "../../services/transcode.js";
+import { decideTranscode, spawnTranscoder, TRANSCODE_MIME } from "../../services/transcode.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendToUser } from "../../services/ws/index.js";
 
@@ -1403,6 +1403,9 @@ async function serveTranscodedSong(
     mime: TRANSCODE_MIME[opts.format],
     sourceLabel: input.source.slice(0, 120),
     args,
+    // P2-5:这里进「音质转码」池 —— 走到本函数的前提就是客户端显式要了
+    // format / maxBitRate(decideTranscode 判定),不能被默认管道挤占。
+    slot: "quality",
   });
 }
 
@@ -1421,19 +1424,23 @@ async function resolveRequestAf(song: { id?: string } | null): Promise<string[]>
 /**
  * 通用 ffmpeg 管道出流(转码/管道出流共用):并发槽＋abort 联动＋stderr 排空＋
  * P0-4(自然播完上报边播边测)＋toWeb 单源 close。调用方只负责组装 args 与 MIME。
+ * slot(P2-5):申请哪个并发池 —— 「客户端显式要了档位」传 quality,默认实时管道传
+ * pipeline;两池独立,互不抢槽(见 services/transcode.ts 并发限制段)。必填,
+ * 免得默认值把音质转码误记成管道而悄悄失去保护。
  * extraHeaders:调用方附加头(DLNA 的 contentFeatures/forced-length/icy-metaint)。
  * icyMetaint>0 时把 stdout 按 ICY 间隔装帧(每 N 音频字节插 1 字节 0x00 空元数据):
  * 宣告了 icy-metaint 的设备会按间隔解析,不装帧会把音频字节误读成元数据长度。
  */
 async function serveFfmpegPipe(
   c: any,
-  opts: { songId?: string; mime: string; sourceLabel: string; args: string[]; extraHeaders?: Record<string, string>; icyMetaint?: number },
+  opts: { songId?: string; mime: string; sourceLabel: string; args: string[]; slot: "quality" | "pipeline"; extraHeaders?: Record<string, string>; icyMetaint?: number },
 ) {
-  const { spawnTranscoderWithArgs, acquireTranscodeSlot, releaseTranscodeSlot } =
+  const { spawnTranscoderWithArgs, acquireTranscodeSlot } =
     await import("../../services/transcode.js");
-  await acquireTranscodeSlot();
+  // 租约式占用:释放必然落到申请时那个池(分池后 release 传错池会静默吃额度)。
+  const releaseSlot = await acquireTranscodeSlot(opts.slot);
   if (c.req.raw.signal.aborted) {
-    releaseTranscodeSlot();
+    releaseSlot();
     return new Response(null, { status: 499 });
   }
   const child = spawnTranscoderWithArgs(opts.args);
@@ -1444,7 +1451,7 @@ async function serveFfmpegPipe(
     if (releasedSlot) return;
     releasedSlot = true;
     signal.removeEventListener("abort", killChild);
-    releaseTranscodeSlot();
+    releaseSlot();
   };
   signal.addEventListener("abort", killChild, { once: true });
   child.once("exit", release);
@@ -1539,6 +1546,8 @@ async function servePipelinedSong(
     mime: ch.mime,
     sourceLabel: compliant.input.slice(0, 120),
     args,
+    // P2-5:默认实时管道进「归一化管道」池(与用户显式要的音质档位分开算)。
+    slot: "pipeline",
     ...(opts.extraHeaders ? { extraHeaders: opts.extraHeaders } : {}),
     ...(opts.icyMetaint ? { icyMetaint: opts.icyMetaint } : {}),
   });

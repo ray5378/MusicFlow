@@ -69,7 +69,10 @@
 - 只在两种情况下转码：显式 `format=mp3/aac`，或 `maxBitRate` 低于源码率；白名单**仅 mp3 / aac**。
 - `spawnTranscoder()` 的 ffmpeg 参数只有 `-c:a libmp3lame/aac -b:a …`，**没有任何音频滤镜**（无 volume / loudnorm / alimiter / dither）。
 - ffmpeg 解析顺序 `FFMPEG_PATH` → `ffmpeg-static` → `PATH`（`resolveFfmpeg()`）。
-- 并发上限 `TRANSCODE_MAX_CONCURRENT=4`；代码注释已写明：**转码流无法按字节 Range 续传**，seek 只能靠 `timeOffset` 重拉。
+- 并发上限**两个独立池**（P2-5 已落地，见 `services/transcode.ts` 文末）：`quality`（音质转码，
+  `TRANSCODE_MAX_CONCURRENT`，默认按核数派生、下限 4 上限 8）与 `pipeline`（默认实时管道，
+  `TRANSCODE_PIPELINE_MAX_CONCURRENT`，默认核数 ×2、下限 6）互不抢槽；代码注释已写明：
+  **转码流无法按字节 Range 续传**，seek 只能靠 `timeOffset` 重拉。
 
 ### 1.4 数据层现状（`db/schema.ts`）
 
@@ -324,7 +327,7 @@ alimiter=limit={ceiling}dB:level=false:asc=true:latency=true
 |---|---|---|---|
 | 1 | seek：实时流没有字节 Range | flow mode 按时间定位；DLNA 上接受代价 | 客户端已有 timeOffset 重拉（**判定要改**，P2-3）；Web 端 Howler 补 offset 重建 URL；DLNA 接受设备端拖动退化 |
 | 2 | 时长/元数据：无 `Content-Length` | ICY 注入曲目信息 | 我们的 UI 进度来自服务端状态 / WS 推送（DLNA 有 `GetPositionInfo` + eventing），**UI 不受影响**；只有音箱/电视自带屏显缺时长 —— 与 MA 同类 |
-| 3 | CPU / 首字节 / 并发 | 每播放器一条常驻 ffmpeg 管道 | `TRANSCODE_MAX_CONCURRENT=4` 上调；归一化管道设**独立并发池**，不与用户主动选的音质转码互抢槽；交叉淡入再预留槽位；首字节目标 < 500 ms |
+| 3 | CPU / 首字节 / 并发 | 每播放器一条常驻 ffmpeg 管道 | **P2-5 已落地**：并发上限按核数派生（照 MA `constants.py:211` 的派生方式）并拆成 `quality` / `pipeline` 两个**独立池**，互不抢槽；交叉淡入再预留槽位（P3-6）；首字节目标 < 500 ms |
 
 **HTTP 出流响应头 —— 照抄 MA 的四条对策（`controllers/streams/controller.py:1296-1318`）**，比「接受退化」更优，本轮一并做：
 

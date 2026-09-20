@@ -9,14 +9,23 @@ import {
   normalizeTargetFormat,
   resolveFfmpeg,
   acquireTranscodeSlot,
-  releaseTranscodeSlot,
   activeTranscodeCount,
+  slotLimit,
+  resolveSlotLimits,
   transcodeArgs,
 } from "../../src/services/transcode.js";
 
+// 并发槽不允许跨用例泄漏：本文件申请到的租约统一在 afterEach 释放，
+// 释放完必须归零（顺带把「谁忘了配对」这类回归钉住）。
+const heldLeases: Array<() => void> = [];
+async function hold(kind?: "quality" | "pipeline"): Promise<() => void> {
+  const release = await acquireTranscodeSlot(kind);
+  heldLeases.push(release);
+  return release;
+}
 afterEach(() => {
-  // 并发槽不允许跨用例泄漏：兜底释放（正常情况下各用例已自行配平）。
-  while (activeTranscodeCount() > 0) releaseTranscodeSlot();
+  while (heldLeases.length) heldLeases.pop()!();
+  expect(activeTranscodeCount()).toBe(0);
 });
 
 describe("normalizeBitRateKbps", () => {
@@ -182,36 +191,71 @@ describe("resolveFfmpeg", () => {
   });
 });
 
-describe("并发槽", () => {
-  it("acquire/release 配平后回到 0", async () => {
-    await acquireTranscodeSlot();
-    await acquireTranscodeSlot();
-    expect(activeTranscodeCount()).toBe(2);
-    releaseTranscodeSlot();
-    releaseTranscodeSlot();
-    expect(activeTranscodeCount()).toBe(0);
+describe("并发池（P2-5）", () => {
+  it("上限按核数派生：quality 为核数(下限 4/上限 8)，pipeline 为核数×2(下限 6)", () => {
+    expect(resolveSlotLimits(8, {})).toEqual({ quality: 8, pipeline: 16 });
+    // 小机器：quality 保底 4，pipeline 保底 6
+    expect(resolveSlotLimits(2, {})).toEqual({ quality: 4, pipeline: 6 });
+    // 大机器：quality 封顶 8（编码重，不无限开），pipeline 跟着核数走
+    expect(resolveSlotLimits(32, {})).toEqual({ quality: 8, pipeline: 64 });
+    // 核数取不到 → 按 4 核兜底
+    expect(resolveSlotLimits(NaN, {})).toEqual({ quality: 4, pipeline: 8 });
   });
 
-  it("超出上限排队，释放后唤醒", async () => {
-    // 默认上限 4（TRANSCODE_MAX_CONCURRENT）。先占满。
-    const held: Promise<void>[] = [];
-    for (let i = 0; i < 4; i++) held.push(acquireTranscodeSlot());
-    await Promise.all(held);
-    expect(activeTranscodeCount()).toBe(4);
+  it("环境变量可覆盖，非法 / 非正数回退默认", () => {
+    expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "3" }).quality).toBe(3);
+    expect(resolveSlotLimits(8, { TRANSCODE_PIPELINE_MAX_CONCURRENT: "5" }).pipeline).toBe(5);
+    expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "0" }).quality).toBe(8);
+    expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "abc" }).quality).toBe(8);
+    expect(resolveSlotLimits(8, { TRANSCODE_MAX_CONCURRENT: "-2" }).quality).toBe(8);
+  });
 
-    let fifthResolved = false;
-    const fifth = acquireTranscodeSlot().then(() => { fifthResolved = true; });
-    // 同步断言：第 5 个请求仍在排队。
-    expect(fifthResolved).toBe(false);
+  it("租约配平后回到 0，且释放幂等", async () => {
+    const a = await hold("quality");
+    await hold("quality");
+    expect(activeTranscodeCount("quality")).toBe(2);
+    a();
+    a(); // 幂等：重复释放不会把额度多还回去
+    expect(activeTranscodeCount("quality")).toBe(1);
+  });
 
-    releaseTranscodeSlot();
-    await fifth;
-    expect(fifthResolved).toBe(true);
-    expect(activeTranscodeCount()).toBe(4);
+  it("池内超出上限排队，释放后唤醒", async () => {
+    const limit = slotLimit("pipeline");
+    for (let i = 0; i < limit; i++) await hold("pipeline");
+    expect(activeTranscodeCount("pipeline")).toBe(limit);
 
-    // 清理剩余 4 个槽位。
-    for (let i = 0; i < 4; i++) releaseTranscodeSlot();
-    expect(activeTranscodeCount()).toBe(0);
+    let extraAcquired = false;
+    const extra = acquireTranscodeSlot("pipeline").then((r) => { extraAcquired = true; heldLeases.push(r); });
+    // 同步断言：第 limit+1 个仍在排队。
+    expect(extraAcquired).toBe(false);
+
+    heldLeases.shift()!(); // 放掉一个
+    await extra;
+    expect(extraAcquired).toBe(true);
+    expect(activeTranscodeCount("pipeline")).toBe(limit);
+  });
+
+  it("两池互不抢槽：管道占满不影响音质转码，反之亦然", async () => {
+    const drain = () => { while (heldLeases.length) heldLeases.pop()!(); };
+
+    // A. 占满管道池 → 音质池仍能立即取到槽（不被管道池的排队挡住）
+    for (let i = 0; i < slotLimit("pipeline"); i++) await hold("pipeline");
+    await expect(hold("quality")).resolves.toBeTypeOf("function");
+    expect(activeTranscodeCount("quality")).toBe(1);
+    drain();
+
+    // B. 占满音质池 → 管道池仍能立即取到槽
+    for (let i = 0; i < slotLimit("quality"); i++) await hold("quality");
+    await expect(hold("pipeline")).resolves.toBeTypeOf("function");
+    expect(activeTranscodeCount("pipeline")).toBe(1);
+  });
+
+  it("不传 kind 时统计两池合计（兼容旧调用点）", async () => {
+    await hold("quality");
+    await hold("pipeline");
+    expect(activeTranscodeCount()).toBe(2);
+    expect(activeTranscodeCount("quality")).toBe(1);
+    expect(activeTranscodeCount("pipeline")).toBe(1);
   });
 });
 
