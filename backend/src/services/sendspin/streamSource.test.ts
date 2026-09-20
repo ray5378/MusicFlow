@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { PcmWindow, WindowClosedError, WINDOW_HIGH_SEC, resolveSendspinAf } from "./streamSource.js";
 import { decodeToF32, ffmpegBin, SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { saveAnalysis, deleteAnalysis } from "../audio/analysisStore.js";
+import { parseLoudnorm } from "../audio/loudness.js";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
@@ -247,4 +248,59 @@ describe("PcmWindow 响度链实际生效", () => {
       w.close();
     }
   }, 60_000);
+});
+
+describe("stderr 尾部保留(P1-2 修复):长曲边播边测不再静默失效", () => {
+  // 真 ffmpeg 攒够 128KB stderr 要**实时**播约 11 分钟(上机实测 ≈190 B/s),
+  // 测试里不可能真等 —— 用一个「假 ffmpeg」直接刷 >128KB,开头放哨兵、末尾打报告,
+  // 锁住「超限丢开头、末尾永远在」这个方向(旧写法有 `length < KEEP` 守卫 → 冻结在开头)。
+  it("stderr 超上限后仍保留末尾的 loudnorm 报告(旧写法只能拿到流开头)", async () => {
+    const fake = path.join(tmpDir, "fake-ffmpeg.sh");
+    fs.writeFileSync(
+      fake,
+      [
+        "#!/bin/sh",
+        "# 开头哨兵:超限后必须被淘汰",
+        'echo "HEAD_SENTINEL_SHOULD_BE_EVICTED" >&2',
+        "i=0",
+        'while [ $i -lt 2500 ]; do echo "padding-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" >&2; i=$((i+1)); done',
+        "# 末尾:loudnorm 报告(parseLoudnorm 用 lastIndexOf 找它)",
+        'echo "[Parsed_loudnorm_0 @ 0x55f0] {" >&2',
+        "echo '    \"input_i\" : \"-13.98\",' >&2",
+        "echo '    \"input_tp\" : \"-1.31\"' >&2",
+        "echo '}' >&2",
+        "# 多活一会儿:避免 proc.stdin.end() 撞上已退出的进程回 EPIPE",
+        "sleep 2",
+        "exit 0",
+      ].join("\n") + "\n",
+    );
+    fs.chmodSync(fake, 0o755);
+
+    const prev = process.env.FFMPEG_PATH;
+    process.env.FFMPEG_PATH = fake; // 必须在 PcmWindow 构造(spawn)之前生效
+    const w = new PcmWindow({ input: path.join(tmpDir, "ignored.wav"), loudness: { enabled: false } });
+    try {
+      // 轮询等假进程把 stderr 写完(窗口本身 EOF/失败都无所谓,只取 stderrText)
+      const deadline = Date.now() + 10_000;
+      let text = "";
+      while (Date.now() < deadline) {
+        text = w.stderrText();
+        if (text.includes("input_i")) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // 上限仍在(不是把 stderr 全量囤着)—— streamSource.ts 的 STDERR_KEEP_BYTES = 128KB
+      expect(text.length).toBeLessThanOrEqual(128 * 1024);
+      expect(text.length).toBeGreaterThan(64 * 1024); // 确实攒下了很多,否则测不到「超限」这条路径
+      // 丢的是**开头**
+      expect(text).not.toContain("HEAD_SENTINEL_SHOULD_BE_EVICTED");
+      expect(text).toContain("[Parsed_loudnorm_");
+      // 末尾报告端到端可解析 —— 这正是长曲边播边测要拿的东西
+      expect(parseLoudnorm(text)?.inputI).toBeCloseTo(-13.98, 2);
+      expect(parseLoudnorm(text)?.inputTp).toBeCloseTo(-1.31, 2);
+    } finally {
+      w.close();
+      if (prev === undefined) delete process.env.FFMPEG_PATH;
+      else process.env.FFMPEG_PATH = prev;
+    }
+  }, 30_000);
 });

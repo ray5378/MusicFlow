@@ -27,6 +27,7 @@ import {
   resolveLoudnessAf,
 } from "../audio/pipeline.js";
 import { isChannelEnabled } from "../audio/pipelineSwitches.js";
+import { StderrTail } from "../audio/stderrTail.js";
 export const BYTES_PER_SAMPLE = 4;
 /** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
  *  2026-09-19 由 60 收到 30 —— 与 MA 的缓冲上限(`sleep_to_limit_buffer(30秒)`)对齐:
@@ -98,14 +99,18 @@ function samplesOfSec(sec: number): number {
  * 单消费者假设(pushLoop)＋seek/close 可在任意时刻调;
  * `slice()` 是唯一的等待点。
  */
+/** PcmWindow 的 stderr 保留上限:loudnorm 报告打在 stderr 末尾 → 超限丢开头、保末尾
+ *  （见 audio/stderrTail.ts）。128KB 对报告本身绰绰有余，只是给长命令输出留余量。 */
+const STDERR_KEEP_BYTES = 128 * 1024;
+
 export class PcmWindow {
   private readonly source: WindowSource;
   private proc: ChildProcessWithoutNullStreams | null = null;
   private stderrTail = Buffer.alloc(0);
-  /** 全量 stderr(截断 128KB):P0-4 解析 loudnorm JSON 用(只在正常 EOF 末尾打印)。
+  /** stderr 尾部(上限 STDERR_KEEP_BYTES):P0-4 解析 loudnorm JSON 用 —— 报告打在 stderr
+   *  **最末尾**,超限丢开头保末尾(audio/stderrTail.ts;旧写法"到上限就不再追加"会冻结在流开头)。
    *  close() 不清它(对象 GC 时释放),调用方在 releaseAudio 前取。 */
-  private stderrFull = Buffer.alloc(0);
-  private static readonly STDERR_KEEP = 128 * 1024;
+  private readonly stderrFull = new StderrTail(STDERR_KEEP_BYTES);
   /** 上次 stdout 读剩的不足一个 float 的尾巴(0-3B),下次拼接,防跨包拆分错位。 */
   private carry: Uint8Array = new Uint8Array(0);
   /** chunks[0][0] 对应的绝对交错样本下标。 */
@@ -133,9 +138,9 @@ export class PcmWindow {
   }
 
   get decoded(): number { return this.decodedSamples; }
-  /** 进程全部 stderr 文本(截断 128KB):供 P0-4 解析 loudnorm JSON。 */
+  /** stderr 尾部文本(上限 128KB):供 P0-4 解析 loudnorm JSON。 */
   stderrText(): string {
-    return this.stderrFull.toString("utf8");
+    return this.stderrFull.text();
   }
   get eof(): boolean { return this.eofSample !== null; }
   get bufferedBytes(): number { return this.chunksBytes; }
@@ -255,9 +260,8 @@ export class PcmWindow {
     this.paused = false;
     proc.stderr.on("data", (d: Buffer) => {
       this.stderrTail = Buffer.concat([this.stderrTail, d]).subarray(-300);
-      if (this.stderrFull.length < PcmWindow.STDERR_KEEP) {
-        this.stderrFull = Buffer.concat([this.stderrFull, d]).subarray(-PcmWindow.STDERR_KEEP);
-      }
+      // 每次都留末尾（旧写法有 "length < KEEP 才追加" 的守卫 → 到上限后冻结在流开头）。
+      this.stderrFull.push(d);
     });
     proc.stdout.on("data", (d: Buffer) => this.onData(d));
     proc.on("error", (e: Error) => {

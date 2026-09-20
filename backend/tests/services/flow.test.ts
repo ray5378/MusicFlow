@@ -179,6 +179,27 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     expect(outputSeconds(out)).toBeCloseTo(4 + 5, 0);
   }, 30000);
 
+  it("下一曲首段短于过渡窗口：上一曲尾段照常播出，不静默丢弃（P1-1 修复）", async () => {
+    // 5s + 1s、过渡窗口 3s：下一曲只够混 1s，剩下 2s 的上一曲尾段必须**照常播出**。
+    // 修复前这段既没 emit 也没参与混合，被 `carry = Buffer.alloc(0)` 静默吞掉
+    // → 总长只剩 ≈3s，且**没有任何报错**（凭听感才知道少了一段）。
+    const a = makeWav("a5.wav", { freq: 440, seconds: 5 });
+    const b = makeWav("b5.wav", { freq: 660, seconds: 1 });
+    const session = await startFlowSession([item("a", a, [], 5), item("b", b, [], 1)], {
+      codec: { codec: "mp3", bitrateKbps: 192, container: "mp3", mime: "audio/mpeg" },
+      crossfade: true,
+      fade: { durationSec: 3 },
+    });
+    const out = await collect(session.stream);
+    await session.done;
+    const st = session.stats();
+    expect(st.crossfades).toBe(1); // 交叉确实发生了（只是窗口被下一曲的长度卡短）
+    // 上一曲完整 5s = 前 2s 直出 + 中间 2s 补播 + 末 1s 与下一曲交叉。修复前只有 ≈3s。
+    expect(outputSeconds(out)).toBeCloseTo(5, 0);
+    expect(st.emittedFrames / RATE).toBeCloseTo(5, 0);
+    expect(st.skipped).toBe(0);
+  }, 30000);
+
   it("单曲也走同一条实现（等价一次普通管道出流）", async () => {
     const a = makeWav("a4.wav", { freq: 440, seconds: 4 });
     const session = await startFlowSession([item("a", a, [], 4)], {

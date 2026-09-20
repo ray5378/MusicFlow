@@ -27,6 +27,7 @@ import { resolveFfmpeg } from "../transcode.js";
 import { saveAnalysis } from "./analysisStore.js";
 import { parseLoudnorm } from "./loudness.js";
 import { LOUDNORM_ARGS } from "./pipeline.js";
+import { StderrTail, STDERR_KEEP_BYTES } from "./stderrTail.js";
 
 const log = createLogger("Measure");
 
@@ -40,9 +41,6 @@ export const MEASURE_MAX_LIMIT = 500;
 /** 单曲测量墙钟上限。整曲分析在 8 核机约 20~60x 实时，1 小时长曲也够；
  *  超过即判失败并杀掉进程（避免一个卡死的 ffmpeg 把串行队列堵住）。 */
 export const MEASURE_TIMEOUT_MS = 5 * 60 * 1000;
-
-/** stderr 保留窗口。JSON 报告在最后，只留尾部即可（避免长命令输出把内存吃穿）。 */
-const STDERR_KEEP_BYTES = 64 * 1024;
 
 export function isOfflineMeasureEnabled(): boolean {
   return getSettingBool(MEASURE_ENABLED_KEY, false);
@@ -140,25 +138,23 @@ export function measureCounts(): MeasureCounts {
 /** 跑一次 ffmpeg 并只收集 stderr 尾部（JSON 报告在最后）。 */
 function captureFfmpegStderr(args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
-    let tail = "";
+    // 本次已把 sendspin / airplay / 这里三处统一到同一个「留末尾」实现（stderrTail.ts）。
+    const tail = new StderrTail(STDERR_KEEP_BYTES);
     let settled = false;
     const child = spawn(resolveFfmpeg(), args, { stdio: ["ignore", "ignore", "pipe"] });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       try { child.kill("SIGKILL"); } catch { /* 已退出 */ }
-      resolve(tail);
+      resolve(tail.text());
     }, timeoutMs);
     const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(tail);
+      resolve(tail.text());
     };
-    child.stderr?.on("data", (chunk: Buffer) => {
-      tail += chunk.toString("utf8");
-      if (tail.length > STDERR_KEEP_BYTES) tail = tail.slice(-STDERR_KEEP_BYTES);
-    });
+    child.stderr?.on("data", (chunk: Buffer) => { tail.push(chunk); });
     // 没有 error 监听时 spawn 失败(EACCES/ENOENT)会抛成未捕获异常(进程级崩溃)。
     child.on("error", (e) => {
       log.warn("ffmpeg 拉起失败", { message: e?.message });

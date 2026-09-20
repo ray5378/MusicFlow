@@ -601,25 +601,6 @@ export function initDatabase() {
     );
   `);
 
-  // audio_analysis 列演进:建表时缺高层描述子(MA 全对齐补齐),存量库无此列则加列。
-  // 表内尚无生产数据(回写随 P1 各通道上线),直接 ADD COLUMN 安全;PRAGMA 探列幂等。
-  try {
-    const existing = new Set(
-      (sqlite.prepare("PRAGMA table_info(audio_analysis)").all() as any[]).map(c => c.name),
-    );
-    const additions: Array<[string, string]> = [
-      ["danceability", "REAL"], ["valence", "REAL"], ["arousal", "REAL"],
-      ["speechiness", "REAL"], ["instrumentalness", "REAL"], ["acousticness", "REAL"],
-      ["brightness", "REAL"], ["harmonic_complexity", "REAL"], ["roughness", "REAL"],
-      ["rhythmic_regularity", "REAL"], ["extra_data", "TEXT"],
-    ];
-    for (const [name, type] of additions) {
-      if (!existing.has(name)) sqlite.exec(`ALTER TABLE audio_analysis ADD COLUMN ${name} ${type}`);
-    }
-  } catch (e: any) {
-    log.warn(`audio_analysis 列演进跳过: ${e?.message || e}`);
-  }
-
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.

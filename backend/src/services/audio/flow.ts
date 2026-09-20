@@ -370,6 +370,16 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
           if (value && value.length > 0) head = Buffer.concat([head, value]);
         }
         const mixFrames = Math.floor(Math.min(wantBytes, Math.max(0, head.length - (head.length % frameBytes))) / frameBytes);
+        // 2.5) 混合窗口之前、又还没播出的那段：照常播出。
+        //      `carry` 恒 ≤ 一个过渡窗口（pumpHoldBack 的 holdBytes = fadeBytes）⇒ preFrames 恒为 0；
+        //      但下一曲首段可能**短于**过渡窗口（下一曲很短 / 解码失败 / 空流），此时
+        //      mixFrames < availFrames，中间这段既没 emit 也没参与混合，会被循环末尾的
+        //      `carry = Buffer.alloc(0)` 直接丢掉 —— 最长丢一个窗口且**完全不报错**（2026-09-20 审出）。
+        //      自 preFrames 起算，保证与 ① 播出的区间不重叠。
+        const unMergedFrames = Math.max(0, availFrames - mixFrames);
+        if (unMergedFrames > preFrames) {
+          await emit(carry.subarray(preFrames * frameBytes, unMergedFrames * frameBytes));
+        }
         if (mixFrames > 0) {
           const outStart = (availFrames - mixFrames) * frameBytes;
           const outSlice = carry.subarray(outStart, outStart + mixFrames * frameBytes);

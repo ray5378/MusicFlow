@@ -21,6 +21,7 @@ import {
   isLoopbackUrl,
 } from "../audio/pipeline.js";
 import { isChannelEnabled } from "../audio/pipelineSwitches.js";
+import { StderrTail } from "../audio/stderrTail.js";
 
 const log = createLogger("AIRPLAY");
 
@@ -103,7 +104,7 @@ export function buildAirplayAf(opts: Pick<AirplayDecodeOpts, "rowId" | "loudness
  * P1-3:参数经统一管道装配(响度＋限制器＋协议输出段);输入必须是合规的
  * (SPEC §1.8:本地路径或回环 token URL),否则直接抛错 —— 调用方先过
  * resolvePipelineInput,禁止静默直连远端(Alpine DNS 全坏＋鉴权头泄漏)。
- * 返回的 proc 挂 `stderrText()`(全量 stderr 截断 64KB,供 P0-4 解析 loudnorm)。
+ * 返回的 proc 挂 `stderrText()`(stderr **尾部**,上限 64KB,供 P0-4 解析 loudnorm)。
  */
 export function spawnDecoder(
   input: string,
@@ -124,17 +125,17 @@ export function spawnDecoder(
   });
   const ff = spawn(ffmpegBin(), args);
   let errBuf = "";
-  let errFull = "";
+  // P0-4:loudnorm JSON 打在 stderr **末尾** → 保留尾部(上限 64KB)。旧写法
+  // "length < 64KB 才追加"会冻结在流开头,实时播放 >约 5.7 分钟的曲目永远测不到
+  // (见 audio/stderrTail.ts;MA `helpers/audio.py:881` parse_loudnorm 同样是 rfind 末尾)。
+  const errFull = new StderrTail(64 * 1024);
   ff.stderr.on("data", (d: Buffer) => {
     const s = d.toString();
     errBuf += s;
     if (errBuf.length > 4096) errBuf = errBuf.slice(-4096);
-    if (errFull.length < 64 * 1024) {
-      errFull += s;
-      if (errFull.length > 64 * 1024) errFull = errFull.slice(-64 * 1024);
-    }
+    errFull.push(s);
   });
-  (ff as any).stderrText = () => errFull;
+  (ff as any).stderrText = () => errFull.text();
   ff.on("exit", (code, signal) => {
     if (code !== 0 && code !== null) {
       log.info(`ffmpeg exit code=${code} signal=${signal} stderr=${errBuf.slice(0, 800)}`);
