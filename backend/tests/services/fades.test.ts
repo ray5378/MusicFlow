@@ -14,6 +14,7 @@ import {
   DEFAULT_FADE_CONFIG,
   F32_BYTES_PER_SAMPLE,
   FADE_DEFAULT_SEC,
+  FADE_MAX_SEC,
   FADE_MIN_SEC,
   alignToFrame,
   crossfadeFrames,
@@ -241,10 +242,18 @@ describe("配置归一化", () => {
     expect(DEFAULT_FADE_CONFIG.durationSec).toBe(FADE_DEFAULT_SEC);
   });
 
-  it("时长夹到下限 3s（D7 对齐 MA），取整秒", () => {
-    expect(normalizeFadeConfig({ durationSec: 1 }).durationSec).toBe(FADE_MIN_SEC);
+  it("时长夹到 MA 的区间 [1, 15]（`CONF_ENTRY_CROSSFADE_DURATION` range=(1,15)），取整秒", () => {
+    // 常量本身就是对齐契约：这三项改了就等于与 MA 脱钩，直接锁死。
+    expect([FADE_MIN_SEC, FADE_MAX_SEC, FADE_DEFAULT_SEC]).toEqual([1, 15, 8]);
+    // 下限：0.4s 取整成 0 再夹到 1（`durationSec <= 0` 才算"没给"，走缺省 8）。
+    expect(normalizeFadeConfig({ durationSec: 0.4 }).durationSec).toBe(FADE_MIN_SEC);
+    expect(normalizeFadeConfig({ durationSec: 1 }).durationSec).toBe(1);
+    // 上限：旧面板能填到 30 —— 30s 的窗口会把整首歌当过渡，落库/入参一律夹回 15。
+    expect(normalizeFadeConfig({ durationSec: 30 }).durationSec).toBe(FADE_MAX_SEC);
+    expect(normalizeFadeConfig({ durationSec: 15 }).durationSec).toBe(15);
     expect(normalizeFadeConfig({ durationSec: 7.6 }).durationSec).toBe(8);
     expect(normalizeFadeConfig({ durationSec: NaN }).durationSec).toBe(FADE_DEFAULT_SEC);
+    expect(normalizeFadeConfig({ durationSec: 0 }).durationSec).toBe(FADE_DEFAULT_SEC);
   });
 
   it("曲线只认两个值；阈值可用 null 显式关闭剥离，非法值回退默认", () => {

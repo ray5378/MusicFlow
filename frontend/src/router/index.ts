@@ -28,6 +28,8 @@ const routes = [
       { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "history", name: "History", component: () => import("@/views/History/index.vue"), meta: { perm: PERM.HISTORY_MANAGE } },
+      // 「音频」：② 响度归一化 + 滤镜链开关（均 admin 可见）+ ③ 设备音色（renderer.use）。
+      { path: "audio", name: "Audio", component: () => import("@/views/Audio/index.vue"), meta: { perm: PERM.RENDERER_USE } },
       { path: "settings", name: "Settings", component: () => import("@/views/Settings/index.vue") },
       {
         path: "admin",

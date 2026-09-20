@@ -14,10 +14,14 @@ import { describe, it, expect } from "vitest";
 import {
   TONE_BANDS,
   buildFilterChain,
+  butterworthSectionQs,
   dbToGain,
   eqBandFilter,
+  eqBandFilters,
   fmtNum,
   hasDspWork,
+  normalizeDspConfig,
+  passOrder,
   type DspConfig,
 } from "../../src/services/audio/dsp.js";
 
@@ -33,6 +37,16 @@ const G = {
   notch60q4: "biquad=b0=1:b1=-1.9999383153:b2=1:a0=1.0009817376:a1=-1.9999383153:a2=0.9990182624",
   highPass80: "biquad=b0=0.9999725847:b1=-1.9999451694:b2=0.9999725847:a0=1.0074057879:a1=-1.9998903387:a2=0.9925942121",
   lowPass12000: "biquad=b0=0.5:b1=1:b2=0.5:a0=1.7072135785:a1=0:a2=0.2927864215",
+  // P4-5 级联陡度（MA `HighLowPassFilter`）：order = slope/6 节，每节 Q 不同。
+  // 注意 slope=12 的 hp80 **与上面 `highPass80`（q=0.707）不同** —— 它用的是精确
+  // Butterworth 极点 Q 0.7071067811865475，见下面 `butterworthSectionQs` 那条用例。
+  hp80s12: "biquad=b0=0.9999725847:b1=-1.9999451694:b2=0.9999725847:a0=1.0074046696:a1=-1.9998903387:a2=0.9925953304",
+  hp80s24a: "biquad=b0=0.9999725847:b1=-1.9999451694:b2=0.9999725847:a0=1.009674667:a1=-1.9998903387:a2=0.990325333",
+  hp80s24b: "biquad=b0=0.9999725847:b1=-1.9999451694:b2=0.9999725847:a0=1.0040073783:a1=-1.9998903387:a2=0.9959926217",
+  lp12k48a: "biquad=b0=0.5:b1=1:b2=0.5:a0=1.9807852804:a1=0:a2=0.0192147196",
+  lp12k48b: "biquad=b0=0.5:b1=1:b2=0.5:a0=1.8314696123:a1=0:a2=0.1685303877",
+  lp12k48c: "biquad=b0=0.5:b1=1:b2=0.5:a0=1.555570233:a1=0:a2=0.444429767",
+  lp12k48d: "biquad=b0=0.5:b1=1:b2=0.5:a0=1.195090322:a1=0:a2=0.804909678",
 };
 
 describe("P4-1 零开销：空配置不加任何滤镜", () => {
@@ -232,5 +246,92 @@ describe("fmtNum：滤镜参数里的数字文本必须稳定", () => {
     expect(fmtNum(Infinity)).toBe("0");
     expect(fmtNum(0.7071067811865476)).toBe("0.7071067812");
     expect(fmtNum(-1.9828897227468877)).toBe("-1.9828897227");
+  });
+});
+
+// ==================== P4-5：高/低通的陡度（对齐 MA `HighLowPassFilter`） ====================
+//
+// MA 有**两个**高/低通入口，别混（`helpers/dsp.py` + `music-assistant-models@1.1.212`）：
+//   ① 参量 EQ band 的 `high_pass`/`low_pass`：单节、用 band 的 `q`（`ParametricEQBand.q` **默认 1.0**）；
+//   ② 独立的 `HighLowPassFilter`：用 `slope`（12/24/48 dB/oct）⇒ `order = slope/6` 节
+//      **级联 Butterworth**，第 s 节 `q = 1/(2·cos(π(2s+1)/(2·order)))`（`dsp.py:237-249`）。
+// 本仓 `EqBand.slope` 就是 ②，不填即等价 ① —— 故下面既锁级联，也锁"不填仍是单节"。
+describe("P4-5 高/低通陡度：slope ⇒ 级联 Butterworth（MA `HighLowPassFilter`）", () => {
+  it("passOrder：只认 12/24/48（MA `HighLowPassSlope`），其余一律 0", () => {
+    expect(passOrder(12)).toBe(2);
+    expect(passOrder(24)).toBe(4);
+    expect(passOrder(48)).toBe(8);
+    expect(passOrder(0)).toBe(0);
+    expect(passOrder(18)).toBe(0); // 非 6 的整数倍
+    expect(passOrder(-12)).toBe(0);
+    expect(passOrder(undefined)).toBe(0);
+    expect(passOrder("24")).toBe(0); // 只认数字（字符串转换是 normalizeDspConfig 那一层的事）
+  });
+
+  it("butterworthSectionQs：各节极点 Q 与 MA 公式复算一致", () => {
+    expect(butterworthSectionQs(2)).toEqual([0.7071067811865475]);
+    expect(butterworthSectionQs(4)).toEqual([0.541196100146197, 1.3065629648763764]);
+    expect(butterworthSectionQs(8)).toEqual([
+      0.5097955791041592,
+      0.6013448869350453,
+      0.8999762231364156,
+      2.5629154477415055,
+    ]);
+    // 奇数阶 / 过小 → 空（不能拼出"半个节"）
+    expect(butterworthSectionQs(3)).toEqual([]);
+    expect(butterworthSectionQs(1)).toEqual([]);
+    expect(butterworthSectionQs(0)).toEqual([]);
+    expect(butterworthSectionQs(NaN)).toEqual([]);
+  });
+
+  it("给了 slope 就展成 order 节（golden 与 Python 独立复算逐字符一致）", () => {
+    expect(eqBandFilters({ type: "high_pass", frequency: 80, slope: 12, q: 1 }, 48000)).toEqual([G.hp80s12]);
+    expect(eqBandFilters({ type: "high_pass", frequency: 80, slope: 24, q: 1 }, 48000)).toEqual([
+      G.hp80s24a,
+      G.hp80s24b,
+    ]);
+    expect(eqBandFilters({ type: "low_pass", frequency: 12000, slope: 48, q: 1 }, 48000)).toEqual([
+      G.lp12k48a,
+      G.lp12k48b,
+      G.lp12k48c,
+      G.lp12k48d,
+    ]);
+  });
+
+  it("级联 ≠ 把同一节重复 N 次（各节 Q 不同，这正是 Butterworth 的要点）", () => {
+    const cascaded = eqBandFilters({ type: "high_pass", frequency: 80, slope: 24, q: 1 }, 48000);
+    expect(cascaded).toHaveLength(2);
+    expect(cascaded[0]).not.toBe(cascaded[1]);
+    const single = eqBandFilters({ type: "high_pass", frequency: 80, q: 1 }, 48000);
+    expect(single).toHaveLength(1);
+    expect(cascaded).not.toContain(single[0]);
+  });
+
+  it("slope 生效时 band 的 q 被忽略（改 q 结果不变）", () => {
+    const a = eqBandFilters({ type: "low_pass", frequency: 500, slope: 24, q: 0.3 }, 48000);
+    const b = eqBandFilters({ type: "low_pass", frequency: 500, slope: 24, q: 12 }, 48000);
+    expect(a).toEqual(b);
+  });
+
+  it("不给 slope ⇒ 仍是单节、用 band 的 q（MA 参量 EQ band 语义）", () => {
+    expect(eqBandFilters({ type: "high_pass", frequency: 80, q: 0.707 }, 48000)).toEqual([G.highPass80]);
+    expect(eqBandFilters({ type: "low_pass", frequency: 12000, q: 0.707 }, 48000)).toEqual([G.lowPass12000]);
+    // 单节入口 = 首片
+    expect(eqBandFilter({ type: "high_pass", frequency: 80, q: 0.707 }, 48000)).toBe(G.highPass80);
+  });
+
+  it("buildFilterChain 把级联逐节落链（顺序即节序）", () => {
+    const chain = buildFilterChain(
+      { parametricEq: { bands: [{ type: "high_pass", frequency: 80, slope: 24 }] } },
+      F48,
+    );
+    expect(chain).toEqual([G.hp80s24a, G.hp80s24b]);
+  });
+
+  it("normalizeDspConfig：合法 slope 保留，非法值丢弃（不静默回落 12）", () => {
+    const ok = normalizeDspConfig({ parametricEq: { bands: [{ type: "high_pass", frequency: 80, slope: 24 }] } });
+    expect(ok?.parametricEq?.bands?.[0]?.slope).toBe(24);
+    const bad = normalizeDspConfig({ parametricEq: { bands: [{ type: "low_pass", frequency: 80, slope: 18 }] } });
+    expect(bad?.parametricEq?.bands?.[0]?.slope).toBeUndefined();
   });
 });

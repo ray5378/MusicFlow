@@ -51,7 +51,13 @@ export interface PipelineSwitchSnapshot {
   channels: Record<PipelineChannel, boolean>;
 }
 
-/** 设置面板一次读全（各自生效值，不是原始键）。 */
+/**
+ * 设置面板一次读全：全局总开关的生效值 + **各通道自己的开关值**。
+ *
+ * ⚠️ `channels[ch]` **不含全局**（读的是该通道键自己的生效值，缺省 true）——
+ * 该通道是否真的出滤镜链，要看 `isChannelEnabled(ch)`（= 全局 AND 该值）。
+ * 面板用这份快照渲染「总开关 + 每通道开关」两级 UI，勾选状态不能当成"已生效"。
+ */
 export function readPipelineSwitches(): PipelineSwitchSnapshot {
   const channels = {} as Record<PipelineChannel, boolean>;
   for (const ch of PIPELINE_CHANNELS) channels[ch] = getSettingBool(PIPELINE_CHANNEL_KEYS[ch], true);

@@ -18,6 +18,7 @@ import {
   resolveFlowSettings,
   selectFlowCandidates,
 } from "../../src/services/audio/flowSource.js";
+import { FADE_DEFAULT_SEC, FADE_MAX_SEC, FADE_MIN_SEC } from "../../src/services/audio/fades.js";
 import type { QueueItem } from "../../src/services/player/types.js";
 
 /** 造一个假队列快照（只带被测字段）。 */
@@ -59,11 +60,18 @@ describe("resolveFlowSettings：缺省必须全关", () => {
     expect(vetoed.crossfade).toBe(true); // 开关状态如实反映配置,由调用方用 enabled 把关
   });
 
-  it("非法/越界配置收敛：模式只认 standard，时长夹到下限 3s、非法值回缺省", () => {
+  // 时长区间 [1,15] 对齐 MA `CONF_ENTRY_CROSSFADE_DURATION`（range=(1,15)、default=8）：
+  // 早先下限写 3 是"低于 3 秒不像过渡",但 MA 允许 1 秒,面板与后端不一致会让人以为改了没生效。
+  it("非法/越界配置收敛：模式只认 standard，时长夹到 [1,15]、非法值回缺省", () => {
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "SMART_CROSSFADE" })).mode).toBe("disabled");
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: " Standard " })).mode).toBe("standard");
-    expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "1" })).fade.durationSec).toBe(3);
+    expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "1" })).fade.durationSec).toBe(FADE_MIN_SEC);
+    // 库值按 parseInt 取整数秒：写成 "0.4" 先被截成 0（非正）→ 回缺省，而不是变成 1 秒。
+    // 这条是护栏：哪天把 parseInt 换成 Number("0.4")，行为会从"回缺省"变成"1 秒"，必须有人看见。
+    expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "0.4" })).fade.durationSec).toBe(FADE_DEFAULT_SEC);
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "8" })).fade.durationSec).toBe(8);
+    expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "99" })).fade.durationSec).toBe(FADE_MAX_SEC);
+    // 非正数 / 非数值不当成"要一个极短过渡",而是回缺省(设置项脏了不该让听感突变)
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "abc" })).fade.durationSec).toBe(8);
     expect(resolveFlowSettings(settingsFrom({ [CROSSFADE_MODE_KEY]: "standard", [CROSSFADE_DURATION_KEY]: "-4" })).fade.durationSec).toBe(8);
   });

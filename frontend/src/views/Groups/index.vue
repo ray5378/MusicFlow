@@ -691,6 +691,7 @@ import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
 import SendspinPairing from "@/views/Settings/SendspinPairing.vue";
 import { useCopy } from "@/composables/useCopy";
+import { apiErrorText } from "@/utils/apiError";
 
 const { copy } = useCopy();
 const { t } = useI18n();
@@ -805,7 +806,7 @@ async function postMemberVolume(m: any, val: number) {
     await api.post(`/rest/api/v1/peers/${encodeURIComponent(memberPeerId(m))}/volume`, { volume: clamped });
     m.volume = clamped; // 乐观回写快照:离线成员不在 store,只有快照能立刻反映新值
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || t("groups.memberVolumeFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.memberVolumeFailed")));
     loadGroups().catch(() => {});
   } finally {
     clearMemberDraft(memberVolDraft, String(m.deviceId));
@@ -819,7 +820,7 @@ async function toggleMemberMute(m: any) {
     await api.post(`/rest/api/v1/peers/${encodeURIComponent(memberPeerId(m))}/mute`, { muted: next });
     m.muted = next;
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || t("groups.memberMuteFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.memberMuteFailed")));
     loadGroups().catch(() => {});
   } finally {
     clearMemberDraft(memberMutedDraft, String(m.deviceId));
@@ -960,7 +961,7 @@ async function scanDevices(): Promise<void> {
     dlnaDevices.value = res.data?.devices || [];
     ElMessage.success(t("groups.scanDone"));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.scanFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.scanFailed")));
   } finally { scanning.value = false; }
 }
 
@@ -995,7 +996,7 @@ async function saveRenameDevice() {
       ElMessage.error(t("groups.renameFailedRollback"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.renameFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.renameFailed")));
   } finally { saving.value = false; }
 }
 
@@ -1006,7 +1007,7 @@ async function removeDevice(dev: any) {
     await loadDlnaDevices();
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.deleteFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.deleteFailed")));
   }
 }
 
@@ -1023,7 +1024,7 @@ async function toggleDisabled(dev: any, disabled: boolean) {
       await loadGroups(); // 禁用会把设备移出群组,组列表需要刷新
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+    ElMessage.error(apiErrorText(e, t("common.operationFailed")));
   }
 }
 
@@ -1045,9 +1046,8 @@ async function scanAirPlayDevices(): Promise<void> {
     airplayDevices.value = res.data?.devices || [];
     ElMessage.success(t("groups.scanDone"));
   } catch (e: any) {
-    // 后端可能回 i18n key(如插件被关时的 errors.airplay.disabled),原样弹给用户没意义 → 回退通用文案。
-    const raw = e?.response?.data?.error;
-    ElMessage.error(typeof raw === "string" && !raw.startsWith("errors.") ? raw : t("groups.scanFailed"));
+    // 后端可能回 i18n key(如插件被关时的 errors.airplay.disabled):由 apiErrorText 统一挡掉。
+    ElMessage.error(apiErrorText(e, t("groups.scanFailed")));
   } finally { scanningAirPlay.value = false; }
 }
 
@@ -1165,7 +1165,7 @@ async function redialTarget(tg: any): Promise<void> {
       ElMessage.error(res.data?.error || t("groups.sendspinDialFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.sendspinDialFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.sendspinDialFailed")));
   }
 }
 
@@ -1184,7 +1184,7 @@ async function dialPlayer(): Promise<void> {
       ElMessage.error(res.data?.error || t("groups.sendspinDialFailed"));
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.sendspinDialFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.sendspinDialFailed")));
   } finally {
     dialing.value = false;
   }
@@ -1202,7 +1202,7 @@ async function approveSendspin(dev: any, approved: boolean): Promise<void> {
     ElMessage.success(t("settings.saved"));
     await loadSendspinClients();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+    ElMessage.error(apiErrorText(e, t("common.operationFailed")));
   }
 }
 
@@ -1221,7 +1221,7 @@ async function toggleSendspinDisabled(dev: any, disabled: boolean): Promise<void
       await loadGroups(); // 禁用会把设备移出群组,组列表需要刷新
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+    ElMessage.error(apiErrorText(e, t("common.operationFailed")));
   }
 }
 
@@ -1392,7 +1392,7 @@ async function postDeviceVolume(val: number): Promise<void> {
     );
     if (!res.data?.success) ElMessage.error(esphomeWriteMessage(res.data?.code || ""));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.sendspinWriteFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.sendspinWriteFailed")));
   }
 }
 
@@ -1408,7 +1408,7 @@ async function toggleDeviceMute(): Promise<void> {
     if (res.data?.success) deviceVolumeMuted.value = next;
     else ElMessage.error(esphomeWriteMessage(res.data?.code || ""));
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.sendspinWriteFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.sendspinWriteFailed")));
   }
 }
 
@@ -1449,7 +1449,7 @@ async function saveDeviceEsphome(): Promise<void> {
       await loadSendspinClients(true);
     }
   } catch (e: any) {
-    esphomeResult.value = { success: false, message: e.response?.data?.error || t("common.operationFailed") };
+    esphomeResult.value = { success: false, message: apiErrorText(e, t("common.operationFailed")) };
   } finally {
     esphomeSaving.value = false;
   }
@@ -1474,7 +1474,7 @@ async function clearDeviceEsphome(): Promise<void> {
       await loadSendspinClients(true);
     }
   } catch (e: any) {
-    esphomeResult.value = { success: false, message: e.response?.data?.error || t("common.operationFailed") };
+    esphomeResult.value = { success: false, message: apiErrorText(e, t("common.operationFailed")) };
   } finally {
     esphomeSaving.value = false;
   }
@@ -1521,7 +1521,7 @@ async function testDeviceEsphome(): Promise<void> {
     // 探针成功说明凭据可用:顺手把状态刷新一遍,状态行立即可信。
     await refreshEsphomeKeyState();
   } catch (e: any) {
-    esphomeResult.value = { success: false, message: e.response?.data?.error || t("groups.sendspinTestFailed", { error: "unknown" }) };
+    esphomeResult.value = { success: false, message: apiErrorText(e, t("groups.sendspinTestFailed", { error: "unknown" })) };
   } finally {
     esphomeTesting.value = false;
   }
@@ -1533,7 +1533,7 @@ async function unpairSendspin(dev: any): Promise<void> {
     ElMessage.success(t("settings.saved"));
     await loadSendspinClients();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+    ElMessage.error(apiErrorText(e, t("common.operationFailed")));
   }
 }
 
@@ -1566,7 +1566,7 @@ async function unbindSendspin(dev: any): Promise<void> {
     ElMessage.success(t("settings.saved"));
     await loadSendspinClients();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+    ElMessage.error(apiErrorText(e, t("common.operationFailed")));
   }
 }
 
@@ -1589,7 +1589,7 @@ async function removeAirPlayDevice(dev: any) {
     ElMessage.success(t("groups.deviceDeleted", { name: dev.displayName || dev.name }));
     await loadAirPlayDevices();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.deleteFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.deleteFailed")));
   }
 }
 
@@ -1603,7 +1603,7 @@ async function toggleAirPlayDisabled(dev: any, disabled: boolean) {
       await loadAirPlayDevices();
     }
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("common.operationFailed"));
+    ElMessage.error(apiErrorText(e, t("common.operationFailed")));
   }
 }
 
@@ -1675,7 +1675,7 @@ async function saveGroup() {
     showDialog.value = false;
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.saveFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.saveFailed")));
   } finally { saving.value = false; }
 }
 
@@ -1690,7 +1690,7 @@ async function saveRename() {
     showRenameDialog.value = false;
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.renameFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.renameFailed")));
   } finally { saving.value = false; }
 }
 
@@ -1700,7 +1700,7 @@ async function removeGroup(g: any) {
     ElMessage.success(t("groups.groupDeleted", { name: g.name }));
     await loadGroups();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || t("groups.deleteFailed"));
+    ElMessage.error(apiErrorText(e, t("groups.deleteFailed")));
   }
 }
 

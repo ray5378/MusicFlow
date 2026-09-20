@@ -156,6 +156,7 @@
       "eqFreq": "频率",
       "eqGain": "增益",
       "eqQ": "Q",
+      "slopeQ": "用 Q 值",
       "eqChannel": "声道",
       "eqAll": "全部",
       "eqRemove": "删除",
@@ -177,6 +178,14 @@
       "cleared": "已清除该设备的音色配置",
       "loadFailed": "读取音色配置失败",
       "saveFailed": "保存音色配置失败"
+    },
+    "normalization": {
+      "title": "音量归一化",
+      "desc": "把每首歌拉到同一个目标响度，解决「这首很小声、下一首很大声」。关闭后不再做归一化，音色与限制器照旧生效。",
+      "enable": "启用归一化",
+      "enableDesc": "缺省开启。关掉后响度段的滤镜为空（不再加 loudnorm / 静态增益），音色与限制器不受影响。",
+      "target": "目标响度",
+      "targetDesc": "可选 -30 ~ -5 LUFS，缺省 -14（与 MA 默认值一致）。数值越大听得越响，-14 是流媒体通用值。"
     },
     "pipeline": {
       "title": "音频管道",
@@ -259,6 +268,7 @@
     "players": "播放器",
     "flows": "音流",
     "playHistory": "播放历史",
+    "audio": "音频",
     "pluginManage": "插件管理",
     "mediaSources": "媒体源",
     "userManage": "用户管理",

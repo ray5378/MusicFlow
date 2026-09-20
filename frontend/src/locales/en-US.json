@@ -156,6 +156,7 @@
       "eqFreq": "Frequency",
       "eqGain": "Gain",
       "eqQ": "Q",
+      "slopeQ": "Use Q",
       "eqChannel": "Channel",
       "eqAll": "All",
       "eqRemove": "Remove",
@@ -177,6 +178,14 @@
       "cleared": "Tone settings cleared for this device",
       "loadFailed": "Failed to load the tone settings",
       "saveFailed": "Failed to save the tone settings"
+    },
+    "normalization": {
+      "title": "Volume normalization",
+      "desc": "Brings every track to the same target loudness, so a quiet track is not followed by a much louder one. Turned off, nothing is normalized — tone and limiter still apply.",
+      "enable": "Enable normalization",
+      "enableDesc": "On by default. When off, the loudness stage is empty (no loudnorm / static gain); tone and limiter are unaffected.",
+      "target": "Target loudness",
+      "targetDesc": "-30 to -5 LUFS, default -14 (matching Music Assistant). Higher sounds louder; -14 is the streaming standard."
     },
     "pipeline": {
       "title": "Audio pipeline",
@@ -259,6 +268,7 @@
     "players": "Players",
     "flows": "Flows",
     "playHistory": "History",
+    "audio": "Audio",
     "pluginManage": "Plugins",
     "mediaSources": "Media Sources",
     "userManage": "Users",

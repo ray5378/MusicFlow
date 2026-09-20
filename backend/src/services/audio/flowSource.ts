@@ -30,7 +30,7 @@ export interface FlowSettings {
   enabled: boolean;
   /** 是否做交叉淡入。false = flow 会话退化为"连续直通"（无重叠），或干脆不走 flow。 */
   crossfade: boolean;
-  /** 归一化后的过渡配置（时长已夹到 [3s, ∞)、曲线已收敛到闭集）。 */
+  /** 归一化后的过渡配置（时长已夹到 [FADE_MIN_SEC, FADE_MAX_SEC]、曲线已收敛到闭集）。 */
   fade: FadeConfig;
   mode: CrossfadeMode;
 }

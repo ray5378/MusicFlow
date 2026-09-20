@@ -85,6 +85,10 @@ import {
 import {
   resolveFlowSettings, FLOW_ENABLED_KEY, CROSSFADE_MODE_KEY, CROSSFADE_DURATION_KEY,
 } from "../../services/audio/flowSource.js";
+import { FADE_MIN_SEC, FADE_MAX_SEC } from "../../services/audio/fades.js";
+import {
+  readNormalizationSettings, updateNormalizationSettings,
+} from "../../services/audio/normalization.js";
 import {
   getMeasureStatus, setOfflineMeasureEnabled, startOfflineMeasure,
 } from "../../services/audio/offlineMeasure.js";
@@ -3282,43 +3286,68 @@ apiRoutes.put("/v1/player-prefs/names", permMiddleware(PERM.RENDERER_USE), async
 // ===== per-player DSP 配置（③ 段，P4-2）=====
 // 音色是**设备属性**（书架箱 / 耳机各自的补偿曲线），故不按用户分：任何账号改完都落
 // 同一行，谁进来看到的都是同一套 EQ（与 sendspin_device_state 的音量同理）。
-// 需要 renderer.use（普通用户被授予播放器使用能力后可调自己那台）。
+// 权限：**设备级** —— `RENDERER_USE` 只说明"能播放"，不能说明"能动别人的音色"，
+// 故再收一层 `canControlPeer`（非 admin：自己的本机播放器 + 被授权的设备/群组），
+// 与 `/v1/peers/*` 同一口径。不收紧的话，任何被授予 renderer.use 的账号都能改
+// 全服务器每台设备的 EQ —— 那是**别人的听感**，属越权。
 // 生效时机：**下一次起播**（出流侧在起流时一次性算定 af 链，见 P3-4 的 pin）。
 // 成组的成员设备即使有配置也不会生效（`playerDspFilters` 里按 MA 规则禁用），
 // 但这里**不拦保存** —— 用户可能先存后组，拦了反而丢配置。
 // GET:返回全部非空配置 { {peerId}: DspConfig }（设置面板一次拿全，省 N 次请求）。
 apiRoutes.get("/v1/player-prefs/dsp", permMiddleware(PERM.RENDERER_USE), (c) => {
-  return c.json({ configs: listPlayerDspConfigs() });
+  const user = c.get("user");
+  const all = listPlayerDspConfigs();
+  if (user?.isAdmin) return c.json({ configs: all });
+  // 非 admin：按"能控制谁"过滤（不是拒绝 —— 全量视图对普通用户只是"我这些设备"）。
+  const configs = Object.fromEntries(
+    Object.entries(all).filter(([peerId]) => canControlPeer(user?.id ?? "", false, peerId)),
+  );
+  return c.json({ configs });
 });
 // GET:单台设备的配置（无配置回 null，前端据此显示"未启用"）。
+// ⚠️ **DB 键用原始参数、权限判定用解析后的 id**，两者刻意不同：
+//   - 键的形式是"设置面板"与"出流侧 `?peerId=` 自报"共用的历史约定，改掉会让
+//     已经设过音色的客户端（本机 `local:` 实例）突然不生效；
+//   - 权限判定必须解析——掩码 `local:<uid>:<instanceKey>` 要认出"这是我自己的本机播放器"
+//     （`canControlPeer` 的 `isOwnLocalPeer` 两种形式都认，但走 `decodePeerId` 与
+//     `/v1/play` 同一套纪律，免得以后有人只照着这里抄出个不解析的版本）。
 apiRoutes.get("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), (c) => {
-  const peerId = c.req.param("peerId") || "";
-  if (!peerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
-  return c.json({ peerId, config: getPlayerDspConfig(peerId) });
+  const raw = c.req.param("peerId") || "";
+  if (!raw) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  const user = c.get("user");
+  if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, decodePeerId(c))) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
+  }
+  return c.json({ peerId: raw, config: getPlayerDspConfig(raw) });
 });
 // PUT:设置单台设备的配置。Body 即 DspConfig（任意形状，服务端归一化）。
 // 归一化后"没活可干"（全 0 / 空段）→ 删行并回 null —— 前端表单可直接用返回值纠正显示。
 apiRoutes.put("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), async (c) => {
-  const peerId = c.req.param("peerId") || "";
-  if (!peerId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  const raw = c.req.param("peerId") || "";
+  if (!raw) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  const user = c.get("user");
+  if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, decodePeerId(c))) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
+  }
   const body = await c.req.json().catch(() => null);
   try {
-    const config = setPlayerDspConfig(peerId, body);
-    return c.json({ ok: true, peerId, config });
+    const config = setPlayerDspConfig(raw, body);
+    return c.json({ ok: true, peerId: raw, config });
   } catch {
     return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.dsp.saveFailed"), 500);
   }
 });
 
-// ===== 音频管道开关（P5-1）+ DLNA 单设备回退（P5-2）=====
-// 语义照 D9：**关闭 = 滤镜链为空（+ 不再拼交叉淡入流），仍走管道** —— 不是恢复直透。
+// ===== 音频管道开关（P5-1）+ DLNA 单设备回退（P5-2）+ 响度归一化 =====
+// 语义照 D9：**关闭 = 该段滤镜链为空（+ 不再拼交叉淡入流），仍走管道** —— 不是恢复直透。
 // 全是服务端全局播放行为，故一律 admin（与 /v1/settings、/v1/proxy 一致）。
-// GET 一次给全：开关 + 交叉淡入配置 + DLNA 设备回退表（面板一次渲染完，省 N 次请求）。
+// GET 一次给全：开关 + 交叉淡入配置 + DLNA 设备回退表 + ② 段归一化（面板一次渲染完，省 N 次请求）。
 apiRoutes.get("/v1/pipeline/switches", adminMiddleware, (c) => {
   const flow = resolveFlowSettings((k, d) => getSetting(k, d));
   return c.json({
     switches: readPipelineSwitches(),
     flow: { enabled: flow.enabled, mode: flow.mode, crossfade: flow.crossfade, durationSec: flow.fade.durationSec },
+    normalization: readNormalizationSettings(),
     devices: getCachedDevices().map((d) => ({
       deviceId: d.id,
       name: d.name || d.id,
@@ -3326,7 +3355,8 @@ apiRoutes.get("/v1/pipeline/switches", adminMiddleware, (c) => {
     })),
   });
 });
-// PUT：部分更新。`{switches:{enabled,channels:{...}}, flow:{enabled,mode,durationSec}}`。
+// PUT：部分更新。
+// `{switches:{enabled,channels:{...}}, flow:{enabled,mode,durationSec}, normalization:{enabled,targetLufs}}`。
 // 未传的字段保持不动；非法值忽略（逐项提交，不该一条手抖把整次保存打回）。
 apiRoutes.put("/v1/pipeline/switches", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
@@ -3336,13 +3366,22 @@ apiRoutes.put("/v1/pipeline/switches", adminMiddleware, async (c) => {
     if (typeof flow.enabled === "boolean") setSetting(FLOW_ENABLED_KEY, flow.enabled ? "1" : "0");
     if (flow.mode === "standard" || flow.mode === "disabled") setSetting(CROSSFADE_MODE_KEY, flow.mode);
     const dur = Number(flow.durationSec);
-    if (Number.isFinite(dur) && dur > 0) setSetting(CROSSFADE_DURATION_KEY, String(Math.round(dur)));
+    // 落库前就按 MA 的区间夹（`CONF_ENTRY_CROSSFADE_DURATION` range=(1,15)），
+    // 别把 30 存进库再靠读取端兜 —— 库里留个读不出来的值是最难查的那种"配置没生效"。
+    if (Number.isFinite(dur) && dur > 0) {
+      setSetting(CROSSFADE_DURATION_KEY, String(Math.min(FADE_MAX_SEC, Math.max(FADE_MIN_SEC, Math.round(dur)))));
+    }
+  }
+  // ② 段归一化（目标响度区间 -30…-5 LUFS）。与上面同套纪律：夹在写入口。
+  if (body?.normalization && typeof body.normalization === "object") {
+    updateNormalizationSettings(body.normalization);
   }
   const resolved = resolveFlowSettings((k, d) => getSetting(k, d));
   return c.json({
     ok: true,
     switches: readPipelineSwitches(),
     flow: { enabled: resolved.enabled, mode: resolved.mode, crossfade: resolved.crossfade, durationSec: resolved.fade.durationSec },
+    normalization: readNormalizationSettings(),
   });
 });
 // PUT：某台 DLNA 设备的单独回退（D5 配套兜底）。Body: { fallback: boolean }。

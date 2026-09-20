@@ -141,6 +141,8 @@ interface Statements {
   select: Statement;
   insert: Statement;
   del: Statement;
+  /** 查 songs.type（判 D8 是否需要回写）。P0-4 边播边测每条消息都调，必须走缓存。 */
+  songType: Statement;
 }
 
 // prepared stmt 惰性建：模块加载时表可能尚未建好（import 顺序不定），
@@ -187,6 +189,7 @@ function stmts(): Statements {
         measured_at = excluded.measured_at
     `),
     del: sqlite.prepare("DELETE FROM audio_analysis WHERE row_id = ?"),
+    songType: sqlite.prepare("SELECT type FROM songs WHERE id = ?"),
   };
   return cached;
 }
@@ -221,21 +224,21 @@ export function saveAnalysis(
         beatsPerBar: numFromDb(prev.beats_per_bar),
         key: prev.key ?? null,
         mode: prev.mode ?? null,
-    rmsEnergy: seqFromDb(prev.rms_energy),
-    spectralCentroid: seqFromDb(prev.spectral_centroid),
-    energy: numFromDb(prev.energy),
-    danceability: numFromDb(prev.danceability),
-    valence: numFromDb(prev.valence),
-    arousal: numFromDb(prev.arousal),
-    speechiness: numFromDb(prev.speechiness),
-    instrumentalness: numFromDb(prev.instrumentalness),
-    acousticness: numFromDb(prev.acousticness),
-    brightness: numFromDb(prev.brightness),
-    harmonicComplexity: numFromDb(prev.harmonic_complexity),
-    roughness: numFromDb(prev.roughness),
-    rhythmicRegularity: numFromDb(prev.rhythmic_regularity),
-    extraData: typeof prev.extra_data === "string" ? prev.extra_data : null,
-  }
+        rmsEnergy: seqFromDb(prev.rms_energy),
+        spectralCentroid: seqFromDb(prev.spectral_centroid),
+        energy: numFromDb(prev.energy),
+        danceability: numFromDb(prev.danceability),
+        valence: numFromDb(prev.valence),
+        arousal: numFromDb(prev.arousal),
+        speechiness: numFromDb(prev.speechiness),
+        instrumentalness: numFromDb(prev.instrumentalness),
+        acousticness: numFromDb(prev.acousticness),
+        brightness: numFromDb(prev.brightness),
+        harmonicComplexity: numFromDb(prev.harmonic_complexity),
+        roughness: numFromDb(prev.roughness),
+        rhythmicRegularity: numFromDb(prev.rhythmic_regularity),
+        extraData: typeof prev.extra_data === "string" ? prev.extra_data : null,
+      }
     : emptyAnalysis();
 
   const merged: AnalysisData = { ...base };
@@ -353,9 +356,7 @@ export function reportPlaybackLoudness(
 ): boolean {
   try {
     if (!rowId) return false;
-    const row = sqlite
-      .prepare("SELECT type FROM songs WHERE id = ?")
-      .get(rowId) as { type?: string | null } | undefined;
+    const row = stmts().songType.get(rowId) as { type?: string | null } | undefined;
     // 行没了(如播完即被删):无处可挂,不写。
     if (!row) return false;
     // D8:网络源一律不回写。

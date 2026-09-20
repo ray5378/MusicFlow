@@ -35,6 +35,7 @@
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups"><MfIcon name="Speaker" /><template #title>{{ t('layout.players') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>{{ t('layout.flows') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>{{ t('layout.playHistory') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.RENDERER_USE)" index="/audio"><MfIcon name="SlidersHorizontal" /><template #title>{{ t('layout.audio') }}</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>{{ t('layout.mediaSources') }}</template></el-menu-item>

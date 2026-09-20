@@ -30,8 +30,20 @@ export interface EqBand {
   frequency: number;
   /** 增益（dB）；PEAK / 两个 SHELF 用得上，其余忽略。 */
   gainDb?: number;
-  /** Q 值（`alpha = sin(w0)/(2Q)`）。 */
+  /** Q 值（`alpha = sin(w0)/(2Q)`）。缺省 **1.0**，与 MA `ParametricEQBand.q` 的默认一致。 */
   q?: number;
+  /**
+   * 高/低通的**陡度**（dB/oct，仅 `high_pass` / `low_pass` 有意义）。
+   *
+   * 对齐 MA 的**另一个**滤波器 `HighLowPassFilter`（`helpers/dsp.py:237-249`）：
+   * 合法值 12 / 24 / 48 ⇒ `order = slope/6` 个二阶 Butterworth 节**级联**，
+   * 每节截止频率相同、Q 按 `1/(2·cos(π(2s+1)/(2·order)))` 取，此时 `q` 被忽略。
+   * 不给（或非法值）⇒ 回到**单节**、用 `q` —— 也就是 MA 参量 EQ band 的语义。
+   *
+   * 两种写法在 MA 里本就并存（独立的 HighLowPassFilter vs 参量 EQ band），
+   * 不是新旧版本差异；别把 `q` 的缺省 1.0 当 bug 改成 0.707。
+   */
+  slope?: number;
   /** 缺省启用；false = 该段跳过。 */
   enabled?: boolean;
   /** 缺省 `all`；非 all 时加 `:c=<channel>` 只作用于该声道。 */
@@ -197,29 +209,87 @@ export function biquadPass(
   return biquad(b0, b1, b2, 1 + alpha, -2 * cosW0, 1 - alpha, opts.channels ?? "");
 }
 
-/** 单段参量 EQ → 滤镜片段（`enabled === false` 时返回 null）。 */
-export function eqBandFilter(band: EqBand, sampleRate: number): string | null {
-  if (band.enabled === false) return null;
-  if (!Number.isFinite(band.frequency) || band.frequency <= 0) return null;
+/** high/low-pass 的陡度（dB/oct）。MA `HighLowPassSlope` 只认这三档（`IntEnum`，非法值回落 12）。 */
+export const PASS_SLOPES: ReadonlyArray<number> = [12, 24, 48];
+
+/**
+ * 陡度 → 级联阶数 `order = slope / 6`（MA `helpers/dsp.py:242`）。
+ * 非 12 / 24 / 48（含未给、非法）→ `0`，表示**不做级联**、退回单节（用 band 自己的 `q`）。
+ */
+export function passOrder(slope: unknown): number {
+  return typeof slope === "number" && PASS_SLOPES.includes(slope) ? slope / 6 : 0;
+}
+
+/**
+ * `order` 阶 Butterworth 拆成 `order/2` 个二阶节的**各节极点 Q**
+ * （MA `helpers/dsp.py:245-247`：第 s 节 `q = 1/(2·cos(π(2s+1)/(2·order)))`）。
+ * 例：order=2 → `[0.7071]`；order=4 → `[0.5412, 1.3066]`；order=8 → `[0.5098, 0.6013, 0.8999, 2.5629]`。
+ */
+export function butterworthSectionQs(order: number): number[] {
+  const n = Number.isFinite(order) ? Math.floor(order) : 0;
+  if (n < 2 || n % 2 !== 0) return [];
+  const out: number[] = [];
+  for (let s = 0; s < n / 2; s++) {
+    out.push(1 / (2 * Math.cos((Math.PI * (2 * s + 1)) / (2 * n))));
+  }
+  return out;
+}
+
+/**
+ * 高/低通的片段：**给了合法 `slope` 走 MA `HighLowPassFilter` 的级联 Butterworth**
+ * （`order` 节，每节同截止频率、不同 Q）；否则单节、用 `q`（缺省 1.0 = MA 参量 EQ band 的默认）。
+ */
+function passSections(
+  mode: "highpass" | "lowpass",
+  frequency: number,
+  slope: unknown,
+  q: number,
+  sampleRate: number,
+  channels: string,
+): string[] {
+  const order = passOrder(slope);
+  const qs = order > 0 ? butterworthSectionQs(order) : [q];
+  return qs.map((qq) => biquadPass({ mode, frequency, q: qq, sampleRate, channels }));
+}
+
+/**
+ * 单段参量 EQ → 滤镜片段**数组**（`[]` = 该段不产生任何片段）。
+ *
+ * 返回数组是因为高/低通可以是级联（见 `EqBand.slope`）。⚠️ 两条路径分别对齐 MA 的
+ * **两个**滤波器，别混：
+ *   - 只给 `q` → 单节（MA 参量 EQ band 的 `ParametricEQBand.q`，models 默认 **1.0**）；
+ *   - 给了合法 `slope` → `order = slope/6` 节级联（MA 独立的 `HighLowPassFilter`，默认 12 dB/oct）。
+ */
+export function eqBandFilters(band: EqBand, sampleRate: number): string[] {
+  if (band.enabled === false) return [];
+  if (!Number.isFinite(band.frequency) || band.frequency <= 0) return [];
   const channels = band.channel && band.channel !== "all" ? `:c=${band.channel}` : "";
   const gain = Number.isFinite(band.gainDb) ? (band.gainDb as number) : 0;
-  const q = Number.isFinite(band.q) ? (band.q as number) : 1;
+  const q = Number.isFinite(band.q) && (band.q as number) > 0 ? (band.q as number) : 1;
   switch (band.type) {
     case "peak":
-      return biquadPeak(band.frequency, gain, q, sampleRate, channels);
+      return [biquadPeak(band.frequency, gain, q, sampleRate, channels)];
     case "low_shelf":
-      return biquadLowShelf(band.frequency, gain, q, sampleRate, channels);
+      return [biquadLowShelf(band.frequency, gain, q, sampleRate, channels)];
     case "high_shelf":
-      return biquadHighShelf(band.frequency, gain, q, sampleRate, channels);
+      return [biquadHighShelf(band.frequency, gain, q, sampleRate, channels)];
     case "notch":
-      return biquadNotch(band.frequency, q, sampleRate, channels);
+      return [biquadNotch(band.frequency, q, sampleRate, channels)];
     case "high_pass":
-      return biquadPass({ mode: "highpass", frequency: band.frequency, q, sampleRate, channels });
+      return passSections("highpass", band.frequency, band.slope, q, sampleRate, channels);
     case "low_pass":
-      return biquadPass({ mode: "lowpass", frequency: band.frequency, q, sampleRate, channels });
+      return passSections("lowpass", band.frequency, band.slope, q, sampleRate, channels);
     default:
-      return null;
+      return [];
   }
+}
+
+/**
+ * 单节入口（= `eqBandFilters` 的首片；无片段回 `null`）。
+ * **级联场景请直接用 `eqBandFilters`** —— 这里只拿得到第一节。
+ */
+export function eqBandFilter(band: EqBand, sampleRate: number): string | null {
+  return eqBandFilters(band, sampleRate)[0] ?? null;
 }
 
 /** 非 0 的有限数；其余（含 NaN / undefined）一律 0。 */
@@ -285,11 +355,10 @@ export function buildFilterChain(
     out.push(`equalizer=frequency=${band.frequency}:width=${band.width}:width_type=h:gain=${fmtNum(level)}`);
   }
 
-  // ---- 多段参量 EQ ----
+  // ---- 多段参量 EQ（高/低通可级联 ⇒ 一段可能出多条片段）----
   for (const b of cfg.parametricEq?.bands ?? []) {
     if (!b) continue;
-    const f = eqBandFilter(b, sampleRate);
-    if (f) out.push(f);
+    out.push(...eqBandFilters(b, sampleRate));
   }
 
   // ---- Balance（**只衰减**：不做正增益 ⇒ 不把已归一化的信号再推出 headroom）----
@@ -389,12 +458,16 @@ export function normalizeDspConfig(raw: unknown): DspConfig | null {
       if (frequency === undefined || frequency <= 0) continue;
       const gainDb = finite((b as any).gainDb);
       const q = finite((b as any).q);
+      const slope = finite((b as any).slope);
       const channel = (b as any).channel;
       bands.push({
         type: type as EqBandType,
         frequency,
         ...(gainDb !== undefined ? { gainDb } : {}),
         ...(q !== undefined && q > 0 ? { q } : {}),
+        // 陡度只认 12/24/48（MA `HighLowPassSlope`）——非法值丢掉而不是"回落到 12"，
+        // 免得用户填错时静默变成另一种滤波器。
+        ...(slope !== undefined && PASS_SLOPES.includes(slope) ? { slope } : {}),
         ...((b as any).enabled === false ? { enabled: false } : {}),
         ...(channel === "FL" || channel === "FR" ? { channel } : {}),
       });

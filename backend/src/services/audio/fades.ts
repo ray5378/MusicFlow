@@ -16,15 +16,21 @@
 /** F32 单声道单采样字节数。 */
 export const F32_BYTES_PER_SAMPLE = 4;
 
-/** D7 默认过渡时长（秒）。MA 默认 8s（`smart_fades` 配置项），下限 3s。 */
+/** 默认过渡时长（秒）= MA `CONF_ENTRY_CROSSFADE_DURATION.default_value`（`constants.py:475-483`）。 */
 export const FADE_DEFAULT_SEC = 8;
-/** 过渡时长下限（对齐 MA，低于此听感上不像"过渡"而像"接缝"）。 */
-export const FADE_MIN_SEC = 3;
+/**
+ * 过渡时长下限（秒）= MA 同一 ConfigEntry 的 `range[0]`。
+ * 注：这里曾是 3 并在注释里写「下限 3s、对齐 MA」，与 MA 实际取值不符
+ * （`constants.py:477` 是 `range=(1, 15)`，8 是 default）；已按 MA 修正为 1。
+ */
+export const FADE_MIN_SEC = 1;
+/** 过渡时长上限（秒）= MA 同一 ConfigEntry 的 `range[1]`。早先没有上限，面板可填到 30。 */
+export const FADE_MAX_SEC = 15;
 /** 静音剥离默认阈值（dBFS）：低于它视为静音。 */
 export const FADE_DEFAULT_SILENCE_DB = -60;
 
 export interface FadeConfig {
-  /** 过渡时长（秒）。会被夹到 [FADE_MIN_SEC, +∞)。 */
+  /** 过渡时长（秒，整秒）。会被夹到 [FADE_MIN_SEC, FADE_MAX_SEC]。 */
   durationSec: number;
   /** 权重曲线：`equal_power`（等功率，默认，听感最平滑）/ `linear`（线性）。 */
   curve: FadeCurve;
@@ -44,7 +50,8 @@ export const DEFAULT_FADE_CONFIG: FadeConfig = {
 };
 
 /**
- * 归一化外部配置：时长取整秒并夹到下限；阈值非法则回退默认；曲线只认两个值。
+ * 归一化外部配置：时长取整秒并夹到 [FADE_MIN_SEC, FADE_MAX_SEC]（两端都夹，
+ * 面板/设置库里塞进来的 30s 不会一路进到混合窗口）；阈值非法则回退默认；曲线只认两个值。
  * 传 `null`/`undefined` 的字段一律取默认 —— 设置项缺失不应让交叉淡入失效。
  */
 export function normalizeFadeConfig(partial?: Partial<FadeConfig> | null): FadeConfig {
@@ -60,7 +67,7 @@ export function normalizeFadeConfig(partial?: Partial<FadeConfig> | null): FadeC
         ? raw.silenceThresholdDb
         : FADE_DEFAULT_SILENCE_DB;
   return {
-    durationSec: Math.max(FADE_MIN_SEC, dur),
+    durationSec: Math.min(FADE_MAX_SEC, Math.max(FADE_MIN_SEC, dur)),
     curve: raw.curve === "linear" ? "linear" : "equal_power",
     silenceThresholdDb: thr,
   };

@@ -10,12 +10,25 @@
 import type { VolumeNormalizationMode } from "./loudness.js";
 import { chooseMode, computeGainDb } from "./loudness.js";
 import { loadAnalysis } from "./analysisStore.js";
+import { DEFAULT_TARGET_LUFS, readNormalizationSettings } from "./normalization.js";
 
-/** D1 推荐值:目标响度(MA constants.py:464 默认 -14,采纳推荐值前保持可配)。 */
-export const DEFAULT_TARGET_LUFS = -14;
+/**
+ * D1 推荐值:目标响度(缺省 -14)。
+ * **常量本体已挪到 `normalization.ts`** —— 它同时是设置项 `loudness.targetLufs` 的缺省值,
+ * 与可选区间 `[TARGET_LUFS_MIN, TARGET_LUFS_MAX]` 必须同处一地(MA 也是同一个 ConfigEntry
+ * 同时给出 range 与 default)。这里 re-export 只为不破坏既有引用。
+ */
+export { DEFAULT_TARGET_LUFS };
 /** D5:限制器阈值。 */
 export const LIMITER_CEILING_DB = -1;
-/** 动态 loudnorm 固定参数(MA controllers/streams/audio.py:1753-1782 同构)。 */
+/**
+ * 离线预测量（P5-3）用的 loudnorm 参数。
+ * ⚠️ 这里的 `I=-14` **与设置项 `loudness.targetLufs` 无关,也不该跟着它变**:
+ * 测量批只解析 stderr 里的 JSON(`input_i` = **输入**的集成响度),`I=` 只影响输出增益,
+ * 而该批的输出字节被直接丢弃 —— 即 `I=` 在这一趟里是**惰性的**。别"顺手对齐"成设置的
+ * 目标值,那会让「改了目标响度 → 测量批的 ffmpeg 命令行变了 → 像是测量结果也该变」这种
+ * 假因果被人照着抄。真正的目标值只在出流侧 `loudnessFilter` 里拼(MA 同构)。
+ */
 export const LOUDNORM_ARGS = "I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json";
 
 // ==================== ① 解码 ====================
@@ -219,7 +232,8 @@ export function outputFilters(req: OutputRequest): string[] {
   return out;
 }
 
-/** 通道编码参数(flac 无损 / mp3 320 / aac 256;DLNA 拒 FLAC 回退 mp3 由调用方决策)。 */export function codecArgs(codec: "flac" | "mp3" | "aac" | "opus" | "pcm", bitrateKbps?: number): string[] {
+/** 通道编码参数(flac 无损 / mp3 320 / aac 256;DLNA 拒 FLAC 回退 mp3 由调用方决策)。 */
+export function codecArgs(codec: "flac" | "mp3" | "aac" | "opus" | "pcm", bitrateKbps?: number): string[] {
   switch (codec) {
     case "mp3":
       return ["-c:a", "libmp3lame", "-b:a", `${bitrateKbps ?? 320}k`];
@@ -239,8 +253,18 @@ export interface LoudnessAfOpts {
   rowId?: string;
   /** 缺省启用(D2);false = 整条 -af 不加(与旧命令逐字节一致,单测/逃生用)。 */
   enabled?: boolean;
-  /** 目标 LUFS(缺省 D1 推荐 -14)。 */
+  /** 目标 LUFS(缺省读全局设置 `loudness.targetLufs`,再缺省 -14)。 */
   targetLoudness?: number;
+  /**
+   * ② 段(响度归一化)**自己**的开关,缺省读全局设置 `loudness.normalization`(缺省开)。
+   *
+   * ⚠️ **与上面的 `enabled` 不是一回事,别混用**:
+   *   - `enabled:false` 是**整条链的逃生舱**(单测对拍 / 老命令逐字节一致),
+   *     `extraFilters` 与限制器一并丢弃;
+   *   - `normalization:false` 只摘掉 ② 段(不加 loudnorm、也不加静态增益),
+   *     **③ 段 DSP 与 ⑤ 段限制器照旧** —— 用户关掉"音量归一化"不该顺带丢掉音色与削波保护。
+   */
+  normalization?: boolean;
   /** 逃生舱 env 名(如 "SENDSPIN_LOUDNESS"):设为 "0" 即整条 -af 不加。 */
   escapeEnvVar?: string;
   /**
@@ -262,15 +286,22 @@ export interface LoudnessAfOpts {
 
 /**
  * 响度段 af:[响度?,限制器](sendspin/airplay 共用同一语义,见 P1-2/P1-3):
- * - 逃生舱/单源关闭 → []（与旧命令逐字节一致）;
- * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume;
+ * - 逃生舱(`enabled:false` / `escapeEnvVar=0`)→ []（与旧命令逐字节一致）;
+ * - 默认 D2:无测量走实时 loudnorm,有测量(rowId 命中)走静态 volume;
+ *   目标响度与 ② 段开关缺省读**全局设置**(`loudness.targetLufs` / `loudness.normalization`);
+ * - `normalization:false` 只摘 ② 段,DSP 与限制器照旧(见该字段注释);
  * - 末尾跟限制器(-1dB,MA 同构),除非 `includeLimiter:false`(flow/交叉淡入用,见该字段注释)。
  * 注意需要 DB(loadAnalysis),在测试/嵌入式场景 DB 未就绪时回落无测量。
  */
 export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
   if (opts.escapeEnvVar && process.env[opts.escapeEnvVar] === "0") return [];
   if (opts.enabled === false) return [];
-  const target = opts.targetLoudness ?? DEFAULT_TARGET_LUFS;
+  // ② 段的两个可配置值:调用方显式传的优先,否则读全局设置(`loudness.normalization` /
+  // `loudness.targetLufs`)。**读在这里、不散到四个调用点**,与 `isChannelEnabled` 同一套
+  // "唯一判定入口"纪律(否则 DLNA 与 AirPlay 迟早各配各的)。
+  const norm = readNormalizationSettings();
+  const target = opts.targetLoudness ?? norm.targetLufs;
+  const normalizationOn = opts.normalization ?? norm.enabled;
   let measured: number | null = null;
   if (opts.rowId) {
     try {
@@ -279,12 +310,16 @@ export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
       measured = null;
     }
   }
-  const mode = chooseMode({
-    enabled: true,
-    preference: "fallback_dynamic",
-    targetLoudness: target,
-    measuredLoudness: measured,
-  });
+  // 关掉 ② 段 = `mode: "disabled"`(loudnessFilter 回 null),**不是**提前 return []——
+  // 提前返回会把 ③/⑤ 一起丢掉,见 `normalization` 字段的注释。
+  const mode = normalizationOn
+    ? chooseMode({
+        enabled: true,
+        preference: "fallback_dynamic",
+        targetLoudness: target,
+        measuredLoudness: measured,
+      })
+    : "disabled";
   const out: string[] = [];
   const gainDb =
     mode === "measurement_only" || mode === "fixed_gain"
