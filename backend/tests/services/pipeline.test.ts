@@ -30,6 +30,31 @@ describe("decodeArgs ①解码(跟随源)", () => {
     expect(decodeArgs({ input: "/m/a.flac", timeOffsetSec: 0 })).not.toContain("-ss");
     expect(decodeArgs({ input: "/m/a.flac", timeOffsetSec: -3 })).not.toContain("-ss");
   });
+
+  it("链里有 loudnorm 才提 loglevel 到 info(否则 JSON 被过滤,P0-4 拿不到测量)", () => {
+    const plain = decodeArgs({ input: "/m/a.flac" });
+    expect(plain.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "error", "-i"]);
+    const withNorm = decodeArgs({
+      input: "/m/a.flac",
+      af: ["loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json", "alimiter=limit=-1dB:level=false:asc=true:latency=true"],
+    });
+    expect(withNorm.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "info", "-i"]);
+  });
+
+  it("headers/inputFormat 透传;af 在 -i 之后;forceRate/Channels 以输出选项追加", () => {
+    const chain = "loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json";
+    const a = decodeArgs({
+      input: "/m/a.flac",
+      headers: { Authorization: "Basic eDp5" },
+      inputFormat: "mp3",
+      af: [chain],
+      forceRate: 48000,
+      forceChannels: 2,
+    });
+    expect(a.indexOf("-headers")).toBeLessThan(a.indexOf("-i"));
+    expect(a.indexOf("-af")).toBeGreaterThan(a.indexOf("-i"));
+    expect(a.slice(-9)).toEqual(["-af", chain, "-ar", "48000", "-ac", "2", "-f", "f32le", "pipe:1"]);
+  });
 });
 
 describe("loudnessFilter ②响度", () => {

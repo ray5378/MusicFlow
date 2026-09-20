@@ -123,12 +123,12 @@ export async function resolveFfmpegInput(
   return resolvePipelineInput(direct);
 }
 
-async function streamingSource(row: { duration?: number | null }): Promise<GroupAudio> {
+async function streamingSource(row: { id?: string; duration?: number | null }): Promise<GroupAudio> {
   const { resolveRowInput } = await import("../source/resolveAudio.js");
   const direct = resolveRowInput(row as any);
   if (!direct) throw new Error("no streamable input for row");
   const source = await resolveFfmpegInput(direct);
-  const window = new PcmWindow(source);
+  const window = new PcmWindow({ ...source, rowId: typeof row.id === "string" ? row.id : undefined });
   try {
     await window.ready();
   } catch (e) {
@@ -416,7 +416,20 @@ export class GroupPump {
           // 整首音频到此无用,立即释放(长曲上百 MB),不等下一首覆盖。
           // 放 finally:finishPlayback 抛错(最小 stub 组/嵌入式场景)也不能跳过释放,
           // 否则整包 PCM/流式 ffmpeg 永久残留。
+          const win = this.window;
+          const songId = this.songId;
+          const natural = this.endedNaturally;
           this.releaseAudio();
+          // P0-4 sendspin 落点:自然播完(ffmpeg 正常 EOF,末尾打出 loudnorm JSON)
+          // 时上报边播边测;stop/异常/时长钳制(ffmpeg 被杀,无 JSON)解析失败即 false。
+          if (natural && win) {
+            void (async () => {
+              try {
+                const { reportPlaybackLoudness } = await import("../audio/analysisStore.js");
+                reportPlaybackLoudness(songId, win.stderrText());
+              } catch { /* 入库失败不影响切歌 */ }
+            })();
+          }
         }
       }
     } catch (e) {

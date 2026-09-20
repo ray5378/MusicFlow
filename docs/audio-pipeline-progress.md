@@ -57,17 +57,16 @@
 | **P3** | Smart Fades L0 | 0 / 8 | ⬜ | 连播无间隙无爆音，过渡窗口增益不跳变 |
 | **P4** | DSP | 0 / 4 | ⬜ | 四个常用滤镜可用，空配置零开销 |
 | **P5** | 收尾与远期 | 0 / 5 | ⬜ | 开关 UI 齐备、文档转正 |
-| **合计** | | **8 / 38** | 🟡 P1 施工中 | 验收总口径见 plan §8 |
+| **合计** | | **9 / 38** | 🟡 P1 施工中 | 验收总口径见 plan §8 |
 
 ### 2.2 总体进度
 
-**8 / 38（21%）**
+**9 / 38（24%）**
 
 ### 2.3 当前焦点
 
-**P1-1、P1-1b 已合入。下一步 P1-2**：Sendspin 接入（`streamSource.ts` 的
-`ffmpegArgs()` 改走管道解码＋`-af` 链，注意 PcmWindow/编码层对非 48k 的处理
-按 P1-4 确认项先行）。
+**P1-2 已合入（含 P0-4 sendspin 落点）。下一步 P1-3**：AirPlay 接入
+（`airplay/decoder.ts`，原硬编码 44100 s16le；af 链与 sendspin 同构）。
 
 ### 2.4 阶段依赖
 
@@ -101,7 +100,7 @@ P0（数据层，可独立上线）
 | ✅ | P0-1 | 建表对齐 MA `AudioAnalysisData`：`loudness_integrated` / `loudness_album` / `loudness_range` / `true_peak` / `bpm` / `beats` / `downbeats` / `beats_per_bar` / `key` / `mode` / `rms_energy` / `spectral_centroid` / `energy` + `measured_at`，行级 + drizzle 迁移 | `backend/src/db/schema.ts` | （建表时已合入） | 2026-09-20 | 表已存在，逐字段核对齐；DB 表 38 → **39**，SPEC §2.1 已同步 |
 | ✅ | P0-2 | `parseLoudnorm()`：解析 ffmpeg stderr 的 loudnorm JSON（照 `helpers/audio.py:881-901`） | 新增 `services/audio/loudness.ts` | （已合入） | 2026-09-20 | 纯函数之一 |
 | ✅ | P0-3 | `chooseMode()` 模式决策 + `computeGainDb()` 增益计算 | 同上 | （已合入） | 2026-09-20 | 纯函数，必须可单测 |
-| 🟡 | P0-4 | 边播边测回写：**仅 `local` / `webdav` 行**按 `row.id` 入库；网络源行解析后丢弃（D8） | `analysisStore.reportPlaybackLoudness(rowId, stderr)` + 播放结束钩子 | — | — | **入口＋单测已就绪；各通道"流结束"接线待 P1 管道 stderr 落点**（P1 起把各通道 loudnorm stderr 传进来即可，签名稳定） |
+| 🟡 | P0-4 | 边播边测回写：**仅 `local` / `webdav` 行**按 `row.id` 入库；网络源行解析后丢弃（D8） | `analysisStore.reportPlaybackLoudness(rowId, stderr)` + 播放结束钩子 | — | — | **入口＋单测已就绪；sendspin 自然播完已接入（P1-2），其余通道待 P2/P3 管道 stderr 落点** |
 | ✅ | P0-5 | 单测：JSON 解析（含 -inf / 解析失败）、模式选择全分支、增益限幅、行级绑定 | 新增 `tests/services/loudness.test.ts` | （已合入） | 2026-09-20 | 24 用例全绿，分支覆盖见文件 |
 | ✅ | P0-6 | 回写清理联动：删行同事务删回写；扫描差集删除仅在源探测成功后执行，失败跳过并记 warning | 源清理 / 扫描逻辑 + `loudness.ts` | （本轮） | 2026-09-20 | 5 处落点：webdav 差集（visited>0 门）/local 差集（走完即算可达）/源删除/单曲删除；purge 只删 web 行，按 D8 永无回写故不碰。顺序一律**先回写后歌曲行**（FK 无 CASCADE，反了直接抛错——外键把顺序 bug 变成了 loud error）。`Statements` 类型顺手修（`ReturnType<typeof prepare>` 命中单参数重载） |
 | ✅ | P0-7 | 单测：网络源不回写（断言 DB 无记录）、源不可达时清理不执行、行删除后回写归零 | `tests/services/loudness.test.ts` 扩展 | （本轮） | 2026-09-20 | 新文件 `tests/services/analysisStore.test.ts` 5 例全绿：入库门 3 例＋删行联动 1 例＋本地扫描 E2E 1 例（真 mp3＋真扫描：删文件重扫行/回写双清、源目录消失抛错回写保留） |
@@ -110,7 +109,7 @@ P0（数据层，可独立上线）
 
 ---
 
-## 4. P1 · 管道骨架 + Sendspin / AirPlay（①②⑤⑥）— 2 / 7 🟡
+## 4. P1 · 管道骨架 + Sendspin / AirPlay（①②⑤⑥）— 3 / 7 🟡
 
 **为什么做**
 Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都不做响度处理；P0 只产出数据与增益值，需要一条真实的管道把它们吃进去。这两条链路本来就跑 ffmpeg（只是多一条 `-af`），改造成本最低、见效最快。
@@ -129,7 +128,7 @@ Sendspin 现在硬编码 `-ar 48000 -ac 2`、AirPlay 硬编码 44100 s16le，都
 |---|---|---|---|---|---|---|
 | ✅ | P1-1 | 新增 `AudioPipeline`：**两段式**（① 解码 → PCM `AudioBuffer`；② 出流 ffmpeg 吃 stdin PCM + `-af` 链 + 输出格式） | 新增 `services/audio/pipeline.ts` + `audio/buffer.ts` | （本轮） | 2026-09-20 | 本轮只做纯参数拼装（decode/loudness/limiter/output/codec）＋哑容器 AudioBuffer，零进程零副作用；`decodeArgs` 无 `-ar/-ac`（跟随源）；dither 仅 >16→16 加 `triangular_hp`；loudnorm 在链时重采样降级 `swr` |
 | ✅ | P1-1b | 解码段输入必须遵守 **SPEC §1.8**（回环 token URL / 本地文件路径），并加契约测试锁死 | `pipeline.ts` + `tests/sendspin/ffmpegInputContract.test.ts` | （本轮） | 2026-09-20 | 合规门下沉到 audio 层 `resolvePipelineInput`（`streamEngine` 旧函数改走别名，调用方零改动；audio 不反向依赖 sendspin）；锁死 IP 字面量＋鉴权头包回环、大写 scheme、空输入早抛、相对路径放行 |
-| ⬜ | P1-2 | Sendspin 接入（替换 `ffmpegArgs()` 的硬编码 48k 解码） | `sendspin/streamSource.ts` | — | — | |
+| ✅ | P1-2 | Sendspin 接入（替换 `ffmpegArgs()` 的硬编码 48k 解码） | `sendspin/streamSource.ts` | （本轮） | 2026-09-20 | `resolveSendspinAf()`：逃生舱/单源关→空链（与旧命令逐字节一致）；缺省 D2 实时 loudnorm＋限制器，有测量走静态 volume；48k 立体声由 forceRate/Channels 保证（P1-4 再拿掉）；`decodeArgs` 补 headers/inputFormat/af 透传；loudnorm 在链时 loglevel 提 info（否则 JSON 被过滤，P0-4 实测抓到的坑）；stderr 全量保留＋`stderrText()`；自然播完调 `reportPlaybackLoudness`（P0-4 sendspin 落点，stop/异常无 JSON 即 false） |
 | ⬜ | P1-3 | AirPlay 接入 | `airplay/decoder.ts` | — | — | 原为硬编码 44100 s16le |
 | ⬜ | P1-4 | 输出段 dither `triangular_hp`（仅 >16bit→16bit）；确认 Sendspin 编码层对非 48k 输入的处理 | `sendspin/encoding.ts` | — | — | dither 是 `triangular_hp`，**不是** `triangular` |
 | ⬜ | P1-5 | 客户端/Web 已选音质档位时并入同一次转码，**不额外起进程** | `services/transcode.ts` `spawnTranscoder()` | — | — | |

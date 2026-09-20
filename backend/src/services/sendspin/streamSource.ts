@@ -21,6 +21,14 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { SAMPLE_RATE, CHANNELS, ffmpegBin } from "./encoding.js";
+import {
+  decodeArgs,
+  loudnessFilter,
+  limiterFilter,
+  DEFAULT_TARGET_LUFS,
+} from "../audio/pipeline.js";
+import { chooseMode, computeGainDb } from "../audio/loudness.js";
+import { loadAnalysis } from "../audio/analysisStore.js";
 export const BYTES_PER_SAMPLE = 4;
 /** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
  *  2026-09-19 由 60 收到 30 —— 与 MA 的缓冲上限(`sleep_to_limit_buffer(30秒)`)对齐:
@@ -41,6 +49,51 @@ export interface WindowSource {
   headers?: Record<string, string>;
   /** 输入格式(缺省按扩展名/协议自动识别);测试可用 `lavfi` 直接合成音频,免固件。 */
   inputFormat?: string;
+  /** 分析行 id(= songs.id):供响度决策取已测量值;不传则一律走实时 loudnorm。 */
+  rowId?: string;
+  /** 响度段开关(缺省启用,D2 默认实时 loudnorm):false = 整条 -af 不加,
+   *  与 P1-2 之前逐字节一致(单测对拍/逃生用)。 */
+  loudness?: {
+    enabled?: boolean;
+    targetLoudness?: number;
+  };
+}
+
+/**
+ * sendspin 推流 -af 链:[响度?,限制器](P1-2)。
+ * - 逃生舱 `SENDSPIN_LOUDNESS=0` 或单源 `loudness.enabled=false` → []，
+ *   ffmpeg 命令与 P1-2 之前逐字节一致;
+ * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume,
+ *   末尾恒跟限制器(-1dB,MA 同构)。
+ * 过渡期 48k 立体声由 decodeArgs 的 forceRate/forceChannels 保证(P1-4 再拿掉)。
+ */
+export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness">): string[] {
+  if (process.env.SENDSPIN_LOUDNESS === "0") return [];
+  if (source.loudness?.enabled === false) return [];
+  const target = source.loudness?.targetLoudness ?? DEFAULT_TARGET_LUFS;
+  let measured: number | null = null;
+  if (source.rowId) {
+    try {
+      measured = loadAnalysis(source.rowId)?.loudnessIntegrated ?? null;
+    } catch {
+      measured = null;
+    }
+  }
+  const mode = chooseMode({
+    enabled: true,
+    preference: "fallback_dynamic",
+    targetLoudness: target,
+    measuredLoudness: measured,
+  });
+  const out: string[] = [];
+  const gainDb =
+    mode === "measurement_only" || mode === "fixed_gain"
+      ? computeGainDb(target, measured)
+      : undefined;
+  const lf = loudnessFilter({ mode, gainDb, targetLoudness: target });
+  if (lf) out.push(lf);
+  out.push(limiterFilter());
+  return out;
 }
 
 export class WindowEvictedError extends Error {
@@ -57,22 +110,6 @@ function samplesOfSec(sec: number): number {
   return Math.floor(sec * SAMPLE_RATE * CHANNELS);
 }
 
-function ffmpegArgs(source: WindowSource, startSec: number): string[] {
-  const args = ["-hide_banner", "-loglevel", "error"];
-  if (startSec > 0) args.push("-ss", String(startSec));
-  if (source.headers && Object.keys(source.headers).length > 0) {
-    const lines = Object.entries(source.headers).map(([k, v]) => `${k}: ${v}`);
-    args.push("-headers", lines.join("\r\n"));
-  }
-  if (source.inputFormat) args.push("-f", source.inputFormat);
-  args.push(
-    "-i", source.input,
-    "-ar", String(SAMPLE_RATE), "-ac", String(CHANNELS),
-    "-f", "f32le", "pipe:1",
-  );
-  return args;
-}
-
 /**
  * 滑动窗口 PCM 源。偏移口径:曲首起算的绝对交错样本数
  * (Float32Array 下标,F32/48k 立体声 interleaved)。
@@ -84,6 +121,10 @@ export class PcmWindow {
   private readonly source: WindowSource;
   private proc: ChildProcessWithoutNullStreams | null = null;
   private stderrTail = Buffer.alloc(0);
+  /** 全量 stderr(截断 128KB):P0-4 解析 loudnorm JSON 用(只在正常 EOF 末尾打印)。
+   *  close() 不清它(对象 GC 时释放),调用方在 releaseAudio 前取。 */
+  private stderrFull = Buffer.alloc(0);
+  private static readonly STDERR_KEEP = 128 * 1024;
   /** 上次 stdout 读剩的不足一个 float 的尾巴(0-3B),下次拼接,防跨包拆分错位。 */
   private carry: Uint8Array = new Uint8Array(0);
   /** chunks[0][0] 对应的绝对交错样本下标。 */
@@ -111,6 +152,10 @@ export class PcmWindow {
   }
 
   get decoded(): number { return this.decodedSamples; }
+  /** 进程全部 stderr 文本(截断 128KB):供 P0-4 解析 loudnorm JSON。 */
+  stderrText(): string {
+    return this.stderrFull.toString("utf8");
+  }
   get eof(): boolean { return this.eofSample !== null; }
   get bufferedBytes(): number { return this.chunksBytes; }
   /** 子进程 pid(测试断言无残留/运维日志用)。 */
@@ -192,7 +237,18 @@ export class PcmWindow {
   // ==================== 内部 ====================
 
   private spawn(startSec: number): void {
-    const args = ffmpegArgs(this.source, Math.max(0, startSec));
+    // P1-2:参数经统一管道装配;af 缺省含响度(loudnorm)＋限制器,
+    // 48k 立体声由 forceRate/forceChannels 保证(P1-4 确认后再跟随源)。
+    const af = resolveSendspinAf(this.source);
+    const args = decodeArgs({
+      input: this.source.input,
+      headers: this.source.headers,
+      inputFormat: this.source.inputFormat,
+      timeOffsetSec: Math.max(0, startSec),
+      ...(af.length > 0 ? { af } : {}),
+      forceRate: SAMPLE_RATE,
+      forceChannels: CHANNELS,
+    });
     let proc: ChildProcessWithoutNullStreams;
     try {
       // stdin 用 pipe 占位(与 encoding.pipeThroughFfmpeg 同口径,实际不写)。
@@ -207,6 +263,9 @@ export class PcmWindow {
     this.paused = false;
     proc.stderr.on("data", (d: Buffer) => {
       this.stderrTail = Buffer.concat([this.stderrTail, d]).subarray(-300);
+      if (this.stderrFull.length < PcmWindow.STDERR_KEEP) {
+        this.stderrFull = Buffer.concat([this.stderrFull, d]).subarray(-PcmWindow.STDERR_KEEP);
+      }
     });
     proc.stdout.on("data", (d: Buffer) => this.onData(d));
     proc.on("error", (e: Error) => {

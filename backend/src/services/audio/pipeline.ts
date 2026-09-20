@@ -23,6 +23,19 @@ export interface DecodeRequest {
   input: string;
   /** seek 起播偏移(秒):-ss 放 -i 之前(输入定位快,见 plan §4 接口约定)。 */
   timeOffsetSec?: number;
+  /** http 输入的鉴权头(ffmpeg `-headers`,放 -i 之前;回环 token 通常不需要)。 */
+  headers?: Record<string, string>;
+  /** 强制输入格式(测试用 lavfi 等;生产靠扩展名/协议自动识别)。 */
+  inputFormat?: string;
+  /** 出流 ffmpeg 的 `-af` 链(响度→DSP→限制器,调用方按 loudnessFilter 等拼好)。 */
+  af?: string[];
+  /**
+   * 过渡期强制输出采样率/声道(以 `-ar/-ac` 输出选项追加,行为与旧硬编码一致)。
+   * sendspin 在 P1-4 确认编码层/pump 数学支持变采样率前,传 48000/2 保持
+   * 下游所有 48k 立体声不变式;确认后去掉,真正跟随源。
+   */
+  forceRate?: number;
+  forceChannels?: number;
 }
 
 /**
@@ -31,11 +44,30 @@ export interface DecodeRequest {
  * `-vn -sn -dn -map 0:a:0` 只取首音频流(封面/字幕不进管道)。
  */
 export function decodeArgs(req: DecodeRequest): string[] {
-  const args = ["-hide_banner", "-loglevel", "error"];
+  // loudnorm 的 JSON 报告走 info 级打印(print_format=json 在流结束时输出):
+  // 链里有它就必须把 loglevel 提到 info,否则 P0-4 拿不到测量值;
+  // 无则保持 error(静默,沿用旧行为)。
+  const needsInfo = (req.af ?? []).some(f => f.includes("loudnorm"));
+  const args = ["-hide_banner", "-loglevel", needsInfo ? "info" : "error"];
   if (req.timeOffsetSec !== undefined && Number.isFinite(req.timeOffsetSec) && req.timeOffsetSec > 0) {
     args.push("-ss", String(req.timeOffsetSec));
   }
-  args.push("-i", req.input, "-vn", "-sn", "-dn", "-map", "0:a:0", "-f", "f32le", "pipe:1");
+  if (req.headers && Object.keys(req.headers).length > 0) {
+    const lines = Object.entries(req.headers).map(([k, v]) => `${k}: ${v}`);
+    args.push("-headers", lines.join("\r\n"));
+  }
+  if (req.inputFormat) args.push("-f", req.inputFormat);
+  args.push("-i", req.input, "-vn", "-sn", "-dn", "-map", "0:a:0");
+  if (req.af && req.af.length > 0) {
+    args.push("-af", req.af.join(","));
+  }
+  if (req.forceRate !== undefined && Number.isFinite(req.forceRate) && req.forceRate > 0) {
+    args.push("-ar", String(Math.round(req.forceRate)));
+  }
+  if (req.forceChannels !== undefined && Number.isFinite(req.forceChannels) && req.forceChannels > 0) {
+    args.push("-ac", String(Math.round(req.forceChannels)));
+  }
+  args.push("-f", "f32le", "pipe:1");
   return args;
 }
 

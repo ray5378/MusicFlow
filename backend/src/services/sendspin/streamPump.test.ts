@@ -4,6 +4,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { GroupPump, overridePumpSource, type GroupAudio } from "./streamEngine.js";
 import { PcmWindow } from "./streamSource.js";
+import { db } from "../../db/index.js";
+import { songs } from "../../db/schema.js";
+import { eq } from "drizzle-orm";
+import { loadAnalysis, deleteAnalysis } from "../audio/analysisStore.js";
 
 const SPEED = "20";
 let oldSpeed: string | undefined;
@@ -24,10 +28,11 @@ function stubGroup() {
   return { group, frames };
 }
 
-function injectSine(seconds: number): GroupAudio {
+function injectSine(seconds: number, rowId?: string): GroupAudio {
   const w = new PcmWindow({
     input: `sine=frequency=440:duration=${seconds}:sample_rate=48000`,
     inputFormat: "lavfi",
+    ...(rowId ? { rowId } : {}),
   });
   opened.push(w);
   return { pcm: new Float32Array(0), durationMs: seconds * 1000, stream: w };
@@ -142,4 +147,34 @@ describe("GroupPump 流式窗口", () => {
     expect(group.current).toBeNull();
     expect(frames.length).toBeGreaterThan(10);
   }, 30_000);
+});
+
+describe("GroupPump 流式 P0-4 边播边测", () => {
+  it("自然播完上报 loudness,本地行入库", async () => {
+    speedOn();
+    db.insert(songs).values({
+      id: "ana-song", title: "ana", artist: "a", duration: 6,
+      path: "/music/ana.mp3", contentType: "audio/mpeg", type: "local",
+    } as any).run();
+    deleteAnalysis("ana-song");
+    // 注意:window 的 rowId 取 songs.id,pump 的 songId 同源(生产链同构)。
+    overridePumpSource(async () => injectSine(6, "ana-song"));
+    const { group } = stubGroup();
+    const pump = new GroupPump({ log() {} } as any, group);
+    await pump.play("ana-song");
+    await waitInactive(pump, 20_000, "分析曲自然结束");
+    // 上报是 fire-and-forget,轮询等入库(ffmpeg EOF 打 JSON 后)
+    const t0 = Date.now();
+    for (;;) {
+      const rec = loadAnalysis("ana-song");
+      if (rec && Number.isFinite(rec.loudnessIntegrated as number)) break;
+      if (Date.now() - t0 > 10_000) throw new Error("回写未落库");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const rec = loadAnalysis("ana-song")!;
+    expect(rec.loudnessIntegrated).toBeGreaterThan(-30);
+    expect(rec.loudnessIntegrated).toBeLessThan(0);
+    deleteAnalysis("ana-song");
+    db.delete(songs).where(eq(songs.id, "ana-song")).run();
+  }, 40_000);
 });
