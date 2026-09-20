@@ -8,6 +8,8 @@
 //
 // 单位约定:滤镜链全部用 dB(MA 同构),限制器 `level=false` 纯天花板语义。
 import type { VolumeNormalizationMode } from "./loudness.js";
+import { chooseMode, computeGainDb } from "./loudness.js";
+import { loadAnalysis } from "./analysisStore.js";
 
 /** D1 推荐值:目标响度(MA constants.py:464 默认 -14,采纳推荐值前保持可配)。 */
 export const DEFAULT_TARGET_LUFS = -14;
@@ -29,6 +31,11 @@ export interface DecodeRequest {
   inputFormat?: string;
   /** 出流 ffmpeg 的 `-af` 链(响度→DSP→限制器,调用方按 loudnessFilter 等拼好)。 */
   af?: string[];
+  /**
+   * 输出封装(默认 f32le 交给下游编码层;AirPlay RAOP 要 s16le 直出)。
+   * 注意:dither 仍走 af 里的 osf(见 outputFilters),这里只定容器格式。
+   */
+  outputFormat?: "f32le" | "s16le";
   /**
    * 过渡期强制输出采样率/声道(以 `-ar/-ac` 输出选项追加,行为与旧硬编码一致)。
    * sendspin 在 P1-4 确认编码层/pump 数学支持变采样率前,传 48000/2 保持
@@ -67,7 +74,7 @@ export function decodeArgs(req: DecodeRequest): string[] {
   if (req.forceChannels !== undefined && Number.isFinite(req.forceChannels) && req.forceChannels > 0) {
     args.push("-ac", String(Math.round(req.forceChannels)));
   }
-  args.push("-f", "f32le", "pipe:1");
+  args.push("-f", req.outputFormat ?? "f32le", "pipe:1");
   return args;
 }
 
@@ -129,21 +136,32 @@ export interface FfmpegInput {
  * 本地文件路径原样放行。空输入直接抛错(早失败,别等 ffmpeg 报).
  * 注意动态导入 dlna/control:audio 层不允许静态依赖上层路由模块(禁环)。
  */
-export async function resolvePipelineInput(direct: FfmpegInput): Promise<FfmpegInput> {
-  if (/^https?:\/\//i.test(direct.input)) {
-    const { loopbackRawStreamUrl } = await import("../dlna/control.js");
-    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
+/** 是否回环地址(本机回环直连不经过代理/DNS,天然合规,不再包)。
+ *  导出供各通道解码器做失败 fast 的前置断言(SPEC §1.8)。 */
+export function isLoopbackUrl(input: string): boolean {
+  try {
+    const host = new URL(input).hostname.toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
   }
+}
+
+export async function resolvePipelineInput(direct: FfmpegInput): Promise<FfmpegInput> {
   if (!direct.input) {
     throw new Error("ffmpeg 输入为空(本地文件路径或回环 token URL 二选一)");
+  }
+  if (/^https?:\/\//i.test(direct.input) && !isLoopbackUrl(direct.input)) {
+    const { loopbackRawStreamUrl } = await import("../dlna/control.js");
+    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
   }
   return direct;
 }
 
 // ==================== ⑥ 输出(重采样 + dither + 编码) ====================
-
 export interface OutputRequest {
-  /** 源采样率/位深(解码段跟随源的实际值;未知传 null → 保守处理)。 */  sourceRate: number | null;
+  /** 源采样率/位深(解码段跟随源的实际值;未知传 null → 保守处理)。 */
+  sourceRate: number | null;
   sourceBits: number | null;
   targetRate: number;
   targetBits: number;
@@ -151,6 +169,9 @@ export interface OutputRequest {
   hasLoudnorm: boolean;
   /**  libsoxr 可用时走 soxr 高精度(MA 默认);不可用/未知 → swr。 */
   soxrAvailable?: boolean;
+  /** 协议硬性采样率(如 RAOP 恒 44100):设置即无视 sourceRate 恒发 aresample。
+   *  与"跟随源"冲突时以它为准,调用方必须在注释写明协议依据。 */
+  forceRate?: number;
 }
 
 /**
@@ -162,14 +183,17 @@ export interface OutputRequest {
  */
 export function outputFilters(req: OutputRequest): string[] {
   const out: string[] = [];
+  const forced = req.forceRate !== undefined && Number.isFinite(req.forceRate) && req.forceRate > 0;
   const rateDiffers =
-    typeof req.sourceRate === "number" &&
-    Number.isFinite(req.sourceRate) &&
-    req.sourceRate > 0 &&
-    req.sourceRate !== req.targetRate;
+    forced ||
+    (typeof req.sourceRate === "number" &&
+      Number.isFinite(req.sourceRate) &&
+      req.sourceRate > 0 &&
+      req.sourceRate !== req.targetRate);
   if (rateDiffers) {
+    const rate = forced ? Math.round(req.forceRate as number) : req.targetRate;
     const resampler = !req.hasLoudnorm && req.soxrAvailable !== false ? "soxr:precision=30" : "swr";
-    out.push(`aresample=${req.targetRate}:resampler=${resampler}`);
+    out.push(`aresample=${rate}:resampler=${resampler}`);
   }
   const needDither =
     typeof req.sourceBits === "number" &&
@@ -196,4 +220,51 @@ export function codecArgs(codec: "flac" | "mp3" | "aac" | "opus" | "pcm", bitrat
     case "pcm":
       return ["-c:a", "pcm_s16le"];
   }
+}
+
+export interface LoudnessAfOpts {
+  /** 分析行 id(= songs.id):命中已测量走静态 volume,否则实时 loudnorm。 */
+  rowId?: string;
+  /** 缺省启用(D2);false = 整条 -af 不加(与旧命令逐字节一致,单测/逃生用)。 */
+  enabled?: boolean;
+  /** 目标 LUFS(缺省 D1 推荐 -14)。 */
+  targetLoudness?: number;
+  /** 逃生舱 env 名(如 "SENDSPIN_LOUDNESS"):设为 "0" 即整条 -af 不加。 */
+  escapeEnvVar?: string;
+}
+
+/**
+ * 响度段 af:[响度?,限制器](sendspin/airplay 共用同一语义,见 P1-2/P1-3):
+ * - 逃生舱/单源关闭 → []（与旧命令逐字节一致）;
+ * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume;
+ * - 末尾恒跟限制器(-1dB,MA 同构)。
+ * 注意需要 DB(loadAnalysis),在测试/嵌入式场景 DB 未就绪时回落无测量。
+ */
+export function resolveLoudnessAf(opts: LoudnessAfOpts): string[] {
+  if (opts.escapeEnvVar && process.env[opts.escapeEnvVar] === "0") return [];
+  if (opts.enabled === false) return [];
+  const target = opts.targetLoudness ?? DEFAULT_TARGET_LUFS;
+  let measured: number | null = null;
+  if (opts.rowId) {
+    try {
+      measured = loadAnalysis(opts.rowId)?.loudnessIntegrated ?? null;
+    } catch {
+      measured = null;
+    }
+  }
+  const mode = chooseMode({
+    enabled: true,
+    preference: "fallback_dynamic",
+    targetLoudness: target,
+    measuredLoudness: measured,
+  });
+  const out: string[] = [];
+  const gainDb =
+    mode === "measurement_only" || mode === "fixed_gain"
+      ? computeGainDb(target, measured)
+      : undefined;
+  const lf = loudnessFilter({ mode, gainDb, targetLoudness: target });
+  if (lf) out.push(lf);
+  out.push(limiterFilter());
+  return out;
 }

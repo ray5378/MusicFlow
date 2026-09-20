@@ -14,6 +14,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { createRequire } from "module";
 import { PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
 import { createLogger } from "../../utils/logger.js";
+import {
+  decodeArgs,
+  outputFilters,
+  resolveLoudnessAf,
+  isLoopbackUrl,
+} from "../audio/pipeline.js";
 
 const log = createLogger("AIRPLAY");
 
@@ -44,17 +50,85 @@ export function ffmpegBin(): string {
   return process.env.FFMPEG_PATH || "ffmpeg";
 }
 
-/** Spawn ffmpeg decoding `url` to raw stereo s16le 44100 PCM on stdout. */
-export function spawnDecoder(url: string, seekSec?: number): ChildProcessWithoutNullStreams {
-  const args = ["-loglevel", "error", "-hide_banner"];
-  if (seekSec && seekSec > 0) args.push("-ss", String(seekSec));
-  args.push("-i", url, "-f", "s16le", "-ac", "2", "-ar", String(SAMPLE_RATE), "pipe:1");
+export interface AirplayDecodeOpts {
+  /** 分析行 id(= songs.id):命中已测量走静态 volume,否则实时 loudnorm。 */
+  rowId?: string;
+  /** 响度段开关(缺省启用);false = 整条 -af 不加(与旧命令逐字节一致)。 */
+  loudness?: {
+    enabled?: boolean;
+    targetLoudness?: number;
+  };
+  /** 强制输入格式(测试用 lavfi);生产靠扩展名/协议自动识别。 */
+  inputFormat?: string;
+}
+
+/**
+ * 组装 AirPlay 解码 af:[响度?,限制器,aresample=44100,dither](P1-3,导出供单测):
+ * - 44.1k/16-bit/stereo 是 RAOP 协议硬性要求,恒定 pin(非过渡,与 sendspin 的
+ *   forceRate 不同);
+ * - 重采样规则与输出段一致:链中有 loudnorm → swr,否则 soxr(见 outputFilters)。
+ */
+export function buildAirplayAf(opts: Pick<AirplayDecodeOpts, "rowId" | "loudness"> = {}): {
+  af: string[];
+  hasLoudnorm: boolean;
+} {
+  const loud = resolveLoudnessAf({
+    rowId: opts.rowId,
+    enabled: opts.loudness?.enabled,
+    targetLoudness: opts.loudness?.targetLoudness,
+    escapeEnvVar: "AIRPLAY_LOUDNESS",
+  });
+  const hasLoudnorm = loud.some(f => f.startsWith("loudnorm"));
+  // 输出段:源位深按 F32 解码口径(恒 dither 到 16bit);采样率恒 pin 44100
+  // (RAOP 协议硬性要求,非过渡——与 sendspin 的 forceRate 不同)。
+  const out = outputFilters({
+    sourceRate: null,
+    sourceBits: 32,
+    targetRate: SAMPLE_RATE,
+    targetBits: 16,
+    hasLoudnorm,
+    forceRate: SAMPLE_RATE,
+  });
+  return { af: [...loud, ...out], hasLoudnorm };
+}
+
+/** Spawn ffmpeg decoding `input` to raw stereo s16le 44100 PCM on stdout.
+ *
+ * P1-3:参数经统一管道装配(响度＋限制器＋协议输出段);输入必须是合规的
+ * (SPEC §1.8:本地路径或回环 token URL),否则直接抛错 —— 调用方先过
+ * resolvePipelineInput,禁止静默直连远端(Alpine DNS 全坏＋鉴权头泄漏)。
+ * 返回的 proc 挂 `stderrText()`(全量 stderr 截断 64KB,供 P0-4 解析 loudnorm)。
+ */
+export function spawnDecoder(
+  input: string,
+  seekSec?: number,
+  opts: AirplayDecodeOpts = {},
+): ChildProcessWithoutNullStreams {
+  if (/^https?:\/\//i.test(input) && !isLoopbackUrl(input)) {
+    throw new Error("AirPlay 解码输入必须合规(SPEC §1.8):本地文件路径或回环 token URL,调用方先过 resolvePipelineInput");
+  }
+  const { af } = buildAirplayAf(opts);
+  const args = decodeArgs({
+    input,
+    inputFormat: opts.inputFormat,
+    timeOffsetSec: seekSec,
+    ...(af.length > 0 ? { af } : {}),
+    outputFormat: "s16le",
+    forceChannels: 2,
+  });
   const ff = spawn(ffmpegBin(), args);
   let errBuf = "";
+  let errFull = "";
   ff.stderr.on("data", (d: Buffer) => {
-    errBuf += d.toString();
+    const s = d.toString();
+    errBuf += s;
     if (errBuf.length > 4096) errBuf = errBuf.slice(-4096);
+    if (errFull.length < 64 * 1024) {
+      errFull += s;
+      if (errFull.length > 64 * 1024) errFull = errFull.slice(-64 * 1024);
+    }
   });
+  (ff as any).stderrText = () => errFull;
   ff.on("exit", (code, signal) => {
     if (code !== 0 && code !== null) {
       log.info(`ffmpeg exit code=${code} signal=${signal} stderr=${errBuf.slice(0, 800)}`);

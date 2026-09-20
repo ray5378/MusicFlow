@@ -23,8 +23,9 @@ export interface AirplayReadyInfo {
   pid: number;
 }
 
-/** 子进程 → 主进程的业务事件。 */
-export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string };
+/** 子进程 → 主进程的业务事件。
+ *  sessionEnded 可附解码器全量 stderr(P0-4 解析 loudnorm 用,截断传,无则省略)。 */
+export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string; loudnessStderr?: string };
 
 /** 主进程 → 子进程:除通用 req/stop 外无附加消息。 */
 export type AirplayHostExtra = never;

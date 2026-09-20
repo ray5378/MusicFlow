@@ -13,6 +13,7 @@ import { type ChildProcessWithoutNullStreams } from "child_process";
 import { PlaybackState } from "../player/types.js";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
 import { makeProducer, spawnDecoder, degreesToDb } from "./decoder.js";
+import { resolvePipelineInput } from "../audio/pipeline.js";
 import { isAirPlayForkMode } from "./mode.js";
 import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
@@ -170,7 +171,9 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     throw e;
   }
 
-  const ff = spawnDecoder(streamUrl, seekSec);
+  const ff = spawnDecoder((await resolvePipelineInput({ input: streamUrl })).input, seekSec, {
+    rowId: opts.songId,
+  });
   // ⚠️ 这里**不要**再 makeProducer(ff):runStream 内部会建唯一一份 producer。
   // 旧实现先建一份又丢弃(变量未使用),但那个 producer 的 stdout data 监听器仍在,
   // 会把整首歌的 PCM 再缓存一份且无人消费(内存翻倍),还会与真 producer 争抢
@@ -251,6 +254,12 @@ function runStream(active: ActiveSession, session: RaopSession): void {
       }).catch((e) => {
         log.error("reportState IDLE 上报失败", { deviceId: active.deviceId, err: (e as Error)?.message || e });
       });
+      // P0-4 AirPlay 落点:自然结束/失败/被 stop 统一走这里(seek 原地换解码器不走,
+      // 上面 seekReplace 分支已提前 return)。stderr 无 JSON(被杀/失败)即 false。
+      void handleAirplaySessionEnded(
+        active.deviceId,
+        (active.ffmpeg as any)?.stderrText?.() ?? "",
+      );
     });
   active.streamPromise = p;
 }
@@ -432,8 +441,7 @@ let hostStarting: Promise<void> | null = null;
 /** 会话结束后向 PlayerController 上报 IDLE(等价 DLNA 的 GENA 事件):
  *  让 QueueController 不必等下一次 5s fallback poll 就能感知"这首已结束"并自动续播。
  *  fork 模式下由子进程的 sessionEnded 事件触发。 */
-function reportAirPlayIdle(deviceId: string): void {
-  // ===== 注意用动态 import 避免静态循环依赖 =====
+function reportAirPlayIdle(deviceId: string): void {  // ===== 注意用动态 import 避免静态循环依赖 =====
   import("../player/index.js").then(({ getPlayerController }) => {
     getPlayerController().reportState({
       playerId: `airplay:${deviceId}`,
@@ -447,13 +455,35 @@ function reportAirPlayIdle(deviceId: string): void {
   });
 }
 
+/**
+ * AirPlay 会话结束统一出口(P0-4 落点,导出供单测):
+ * 1) 上报 IDLE(原 reportAirPlayIdle 语义,队列自动续播);
+ * 2) 按 lastCast 取 songId,用解码器 stderr 交 reportPlaybackLoudness
+ *    (本地/WebDAV 行入库,网络行丢弃;无 JSON/无曲均为 false)。
+ * in-proc 由 runStream finally 调;fork 由子进程 sessionEnded 事件调。
+ */
+export async function handleAirplaySessionEnded(
+  deviceId: string,
+  loudnessStderr = "",
+  songIdHint?: string,
+): Promise<void> {
+  reportAirPlayIdle(deviceId);
+  try {
+    const songId = songIdHint ?? lastCast.get(deviceId)?.songId;
+    if (!songId || !loudnessStderr) return;
+    const { reportPlaybackLoudness } = await import("../audio/analysisStore.js");
+    reportPlaybackLoudness(songId, loudnessStderr);
+  } catch { /* 入库失败不影响续播 */ }
+}
+
 /** 确保 airplay 子进程在跑(fork 模式)。懒启动兜底:服务启动时的 start 是 fire-and-forget;
  *  in-flight 去重,避免并发投屏各 fork 一个。 */
 async function ensureAirplayHost(): Promise<void> {
   if (airplaySupervisor.isRunning()) return;
   hostStarting ??= (async () => {
     airplaySupervisor.setHooks({
-      onSessionEnded: (deviceId) => reportAirPlayIdle(deviceId),
+      onSessionEnded: (deviceId, loudnessStderr) =>
+        void handleAirplaySessionEnded(deviceId, loudnessStderr ?? ""),
     });
     await airplaySupervisor.start();
   })().finally(() => { hostStarting = null; });
@@ -479,13 +509,17 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
   const streamUrl = opts.streamUrl || createCastSession(opts.songId, opts.deviceId, baseUrl).streamUrl;
 
   await ensureAirplayHost();
+  // fork 路径输入合规(SPEC §1.8):子进程不碰 DB,回环包装必须在主进程完成;
+  // 回环地址幂等直通,重复包装无害。
+  const compliantUrl = (await resolvePipelineInput({ input: streamUrl })).input;
   await airplaySupervisor.rpc("cast", {
     deviceId: opts.deviceId,
     host: dev.host,
     port: dev.port,
     pk: dev.pk,
     et: dev.et,
-    streamUrl,
+    streamUrl: compliantUrl,
+    songId: opts.songId,
     seekSec: opts.seekSec,
     title: opts.title,
     artist: opts.artist,
@@ -595,7 +629,10 @@ export async function seekAirPlay(deviceId: string, seconds: number): Promise<vo
     return;
   }
 
-  s.ffmpeg = spawnDecoder(s.streamUrl, t);
+  // 重播输入同样先过合规门(原 token 可能过期,重解出新 token;回环地址幂等直通)。
+  s.ffmpeg = spawnDecoder((await resolvePipelineInput({ input: s.streamUrl })).input, t, {
+    rowId: lastCast.get(deviceId)?.songId,
+  });
   runStream(s, s.session);
   if (wasPaused) s.player.pause();
 }

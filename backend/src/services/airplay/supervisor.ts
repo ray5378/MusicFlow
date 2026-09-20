@@ -27,8 +27,9 @@ export interface AirplayMirror {
 }
 
 export interface AirplayHostHooks {
-  /** 会话结束(整首播完 / 失败 / 被停):主进程上报 IDLE,让队列自动续播。 */
-  onSessionEnded?: (deviceId: string) => void;
+  /** 会话结束(整首播完 / 失败 / 被停):主进程上报 IDLE,让队列自动续播。
+   *  loudnessStderr 为解码器全量 stderr(P0-4 解析 loudnorm 用),可空。 */
+  onSessionEnded?: (deviceId: string, loudnessStderr?: string) => void;
 }
 
 class AirplaySupervisor extends RendererHostSupervisor<
@@ -52,7 +53,7 @@ class AirplaySupervisor extends RendererHostSupervisor<
       },
       onEvent: (ev, hooks) => {
         if (ev.t === "sessionEnded") {
-          try { hooks.onSessionEnded?.(ev.deviceId); } catch { /* 上报失败不拖垮桥 */ }
+          try { hooks.onSessionEnded?.(ev.deviceId, ev.loudnessStderr); } catch { /* 上报失败不拖垮桥 */ }
         }
       },
     });

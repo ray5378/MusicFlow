@@ -44,8 +44,9 @@ export interface AirplayCastArgs {
   /** 主进程用 DLNA createCastSession 取好的 token 化地址(子进程不碰 DB)。 */
   streamUrl: string;
   seekSec?: number;
-  title?: string;
-  artist?: string;
+  /** 分析行 id(= songs.id):供解码 af 选静态增益;缺省走实时 loudnorm。 */
+  songId?: string;
+  title?: string;  artist?: string;
   album?: string;
   durationSec?: number;
 }
@@ -64,6 +65,8 @@ interface ActiveSession {
   album?: string;
   duration: number;
   streamUrl: string;
+  /** 分析行 id(随 cast 透传,供 seek 重建解码器时保持响度决策一致)。 */
+  songId?: string;
   startedAt: number;
   ended: boolean;
   /** 节拍健康度周期打点(仅流存续期间存在)。 */
@@ -71,8 +74,9 @@ interface ActiveSession {
 }
 
 export interface AirplayRuntimeHooks {
-  /** 会话结束(整首播完 / 失败 / 被 stop):主进程据此上报 IDLE 让队列自动续播。 */
-  onSessionEnded?: (deviceId: string) => void;
+  /** 会话结束(整首播完 / 失败 / 被 stop):主进程据此上报 IDLE 让队列自动续播。
+   *  info.loudnessStderr 为解码器全量 stderr(P0-4 用,无则省略)。 */
+  onSessionEnded?: (deviceId: string, info?: { loudnessStderr?: string }) => void;
   /** 任何影响快照的变更(起播 / 暂停 / 恢复 / seek / 结束),用于触发快照推送。 */
   onChanged?: () => void;
 }
@@ -104,7 +108,7 @@ export class AirplaySessionRuntime {
       player.stop().catch(() => {});
       throw e;
     }
-    const ff = spawnDecoder(a.streamUrl, a.seekSec);
+    const ff = spawnDecoder(a.streamUrl, a.seekSec, { rowId: a.songId });
     const active: ActiveSession = {
       deviceId: a.deviceId,
       player,
@@ -115,6 +119,7 @@ export class AirplaySessionRuntime {
       album: a.album,
       duration: a.durationSec || 0,
       streamUrl: a.streamUrl,
+      songId: a.songId,
       startedAt: Date.now(),
       ended: false,
     };
@@ -165,7 +170,10 @@ export class AirplaySessionRuntime {
         // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
         // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
         active.player.stop().catch(() => {});
-        this.hooks.onSessionEnded?.(active.deviceId);
+        // P0-4:把解码器 stderr 带给主进程解析 loudnorm(子进程不碰 DB)。
+        // 被 stop/失败时无 JSON,主进程侧解析失败即 false,不影响续播。
+        const loudnessStderr = (ff as any)?.stderrText?.() ?? "";
+        this.hooks.onSessionEnded?.(active.deviceId, loudnessStderr ? { loudnessStderr } : undefined);
         this.hooks.onChanged?.();
       });
     active.streamPromise = p;
@@ -267,7 +275,7 @@ export class AirplaySessionRuntime {
     // The finalizer raced and tore the session down anyway → 交给调用方重播。
     if (this.sessions.get(deviceId) !== s) return false;
 
-    s.ffmpeg = spawnDecoder(s.streamUrl, t);
+    s.ffmpeg = spawnDecoder(s.streamUrl, t, { rowId: s.songId });
     this.runStream(s, s.session);
     if (wasPaused) s.player.pause();
     this.hooks.onChanged?.();

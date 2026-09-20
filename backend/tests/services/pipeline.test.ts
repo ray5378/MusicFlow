@@ -31,6 +31,12 @@ describe("decodeArgs ①解码(跟随源)", () => {
     expect(decodeArgs({ input: "/m/a.flac", timeOffsetSec: -3 })).not.toContain("-ss");
   });
 
+  it("outputFormat 切 s16le(AirPlay RAOP),forceRate/Channels 以输出选项追加", () => {
+    const a = decodeArgs({ input: "/m/a.flac", outputFormat: "s16le", forceRate: 44100, forceChannels: 2 });
+    expect(a.slice(-7)).toEqual(["-ar", "44100", "-ac", "2", "-f", "s16le", "pipe:1"]);
+    expect(decodeArgs({ input: "/m/a.flac" }).slice(-3)).toEqual(["-f", "f32le", "pipe:1"]);
+  });
+
   it("链里有 loudnorm 才提 loglevel 到 info(否则 JSON 被过滤,P0-4 拿不到测量)", () => {
     const plain = decodeArgs({ input: "/m/a.flac" });
     expect(plain.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "error", "-i"]);
@@ -118,6 +124,21 @@ describe("outputFilters ⑥重采样 + dither(按需)", () => {
   it("变采样率 + 降位深同时成立时两条都出且有序", () => {
     expect(outputFilters({ ...base, sourceRate: 96000, sourceBits: 24 })).toEqual([
       "aresample=48000:resampler=soxr:precision=30",
+      "aresample=osf=s16:dither_method=triangular_hp",
+    ]);
+  });
+
+  it("forceRate 无视源采样率恒发 aresample(RAOP 44100 这类协议硬性要求)", () => {
+    expect(
+      outputFilters({ ...base, sourceRate: null, sourceBits: 32, targetRate: 44100, targetBits: 16, forceRate: 44100 }),
+    ).toEqual([
+      "aresample=44100:resampler=soxr:precision=30",
+      "aresample=osf=s16:dither_method=triangular_hp",
+    ]);
+    expect(
+      outputFilters({ ...base, sourceRate: 48000, sourceBits: 32, targetRate: 44100, targetBits: 16, forceRate: 44100, hasLoudnorm: true }),
+    ).toEqual([
+      "aresample=44100:resampler=swr",
       "aresample=osf=s16:dither_method=triangular_hp",
     ]);
   });
