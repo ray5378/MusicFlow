@@ -3,6 +3,13 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > **⏳ 历史快照（2026-09-19 标注）**：本文是当时的一次性计划 / 设计稿，对应任务**已完成**，**不是现行规范**。落地后的真实形态以代码为准：架构总览见 `docs/DEVELOPER.md`，进程 / 隔离模型见 `docs/PROCESS_MODEL_AND_ISOLATION_PLAN.md`。请勿按本文直接施工。
+>
+> **⚠️ 事实订正（2026-09-21 对照 MA `76c2fcb` 复核「调研依据」8 条）**：
+> - ⑥「**60s 卡死兜底**：`elapsed_time_last_updated > 60s` 视为异常」——**现版 MA 已无此机制**。全仓 `grep stall` 只剩 `constants.py:944 STREAM_STALL_TIMEOUT = 20`，那是**流**级别「多久没新 chunk 就当源卡住」，与播放卡死无关。本仓的 60s 兜底（`PlaybackTracker.ts` `STALL_TIMEOUT_MS = 60_000`）是**我方设计**，只是当年借了这个数字。
+> - ②「`call_later(0.5s)` 转发到 queue」——现版 `player_queues/controller.py` 里找不到对应落点（那里的 `call_later` 都用于按钮去抖 / 缓存写 / autoplay，不是状态转发）。**0.25s 那半条属实**：`players/controller.py:1747-1765` `debounce_delay: float = 0.25`。
+> - 可核且属实的：③ `_handle_playback_progress_report`（`playback_tracker.py:589`，调用点 :278）；⑦ `PLAYBACK_START_TIMEOUT = 5.0`（`player_queues/constants.py:114`）；⑧ DLNA provider 仍查 `CurrentTransportActions`（`providers/dlna/player.py:225` / `:295`，等待入口 `async_wait_for_can_play` `:256`）。
+>
+> 即：这 8 条是 **2026-08 的 MA 快照**，不是「MA 一直如此」；引用前请按 commit sha 重新核对。
 
 **Goal:** 把 DLNA 的"播放结束自动下一首"决策从 player 层上移到独立的 Queue Controller,移植 Music Assistant 的可靠性机制(双层去抖、状态迁移判断、瞬态屏蔽、乐观设态、卡死兜底、play 超时),解决"播 1 秒停/进度不动/级联误切"问题。
 

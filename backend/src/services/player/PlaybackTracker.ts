@@ -23,7 +23,11 @@
 // 两侧同因:缺少"以已知时长为准"的判据。故这里引入 expectedDuration(见下)。
 import { CompareState, PlaybackState } from "./types.js";
 
-const STALL_TIMEOUT_MS = 60_000; // 对照 MA: elapsed_time_last_updated > 60s
+// 卡死兜底阈值(我方设计,不是现版 MA 的机制 —— 见下)。
+// 2026-09-21 复核 MA `76c2fcb`:全仓 `stall` 只剩 `constants.py:944 STREAM_STALL_TIMEOUT = 20`,
+// 那是**流**级别"多久没新 chunk 就当源卡住",与"播放卡死"无关;原先注里写的
+// `elapsed_time_last_updated > 60s` 只存在于 2026-08 那版 MA(当时据此实现),上游已移除。本仓有意保留。
+const STALL_TIMEOUT_MS = 60_000;
 
 /** 播到已知时长后,再宽限多久才认定"设备不会报结束了"。
  *  取 8s:外推起点是 cast 时刻,设备实际出声常晚 1~3s,外推读数会略超前于真实
