@@ -1,6 +1,7 @@
-# MusicFlow 音频流水线对齐 Music Assistant · 实施方案
+# MusicFlow 音频流水线对齐 Music Assistant · 规格
 
-> 状态：**D2 / D5 / D7 已定，D1 / D3 / D4 / D6 采纳推荐值（见 §5）**，可进入开发交接
+> 状态：**D1–D10 已定；P0–P5 已落地**（唯一例外：P5-4 Smart Fades L1/L2 按 §6 标为远期不做）。
+> 落地进度 / 验收实测 / 每小项的 commit 以 **`docs/audio-pipeline-progress.md`** 为唯一真相源；本文件只负责「规格」（怎么设计、为什么这么设计、MA 源码实证、决策点）。
 > 取证对象一：`ray5378/MusicFlow`（服务端 / Web 前端，main 快照 2026-09-20）+ `MusicFlow-client`（Flutter，当前工作区）—— 我们的现状
 > 取证对象二：`music-assistant/server` **dev 分支 commit `76c2fcb`（2026-09-19）** —— MA 的真实实现。
 > **核对方式：按 commit 拉取**，不依赖本地快照 ——
@@ -398,7 +399,7 @@ outArgs(req, bufferFmt): string[] {
 
 ---
 
-## 6. 任务清单（交接用）
+## 6. 任务清单（已落地 —— 逐项状态 / commit / 验收见 `docs/audio-pipeline-progress.md`）
 
 ### P0 · 数据层与响度核心（无播放行为改动，可独立上线）
 
