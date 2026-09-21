@@ -22,6 +22,13 @@ import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
+import {
+  type SeekGuard,
+  SEEK_GUARD_MS,
+  seekGuardExpired,
+  seekExpectedPosition,
+  isSeekReadingStale,
+} from "./seekGuard.js";
 
 // ==================== base URL resolution (DLNA 拉流地址) ====================
 // DLNA 设备需要回连本服务的 /rest/dlna/stream/:token 拉取音频流,因此 streamUrl
@@ -438,6 +445,22 @@ export function getDevice(deviceId: string): DlnaDevice | undefined {
   return cachedDevices.find(d => d.id === deviceId);
 }
 
+/**
+ * 该设备此刻是否在**发现缓存**里(有可用的 AVTransport 控制地址)。
+ *
+ * 与 `isDeviceAvailable` 不是一回事,别互相替代:`isDeviceAvailable` 读的是 `runtimes`
+ * 里的 `available` 位,而且**对未知设备乐观返回 true**(它服务的是"要不要重投/续播"),
+ * 而这里服务的是"我到底有没有这台设备的真实读数"。`getDeviceStatus` 的早退分支正是用
+ * `!device?.avTransportUrl` 冒充 `STOPPED`,所以出流侧要区分「设备真停了」与「我还没发现它」,
+ * 判据只能是这一个。
+ *
+ * `devices` 可注入(缺省用模块的发现缓存)—— 让这条判定能被单测直接钉住,不必去 mock
+ * 整条 SOAP/发现链路。
+ */
+export function isDeviceKnown(deviceId: string, devices: DlnaDevice[] = cachedDevices): boolean {
+  return !!devices.find(d => d.id === deviceId)?.avTransportUrl;
+}
+
 // Create a token-auth-free stream URL for DLNA renderer to pull.
 // The URL points at this server; the caller passes the server's LAN base URL.
 // Returns expiresAt so callers (e.g. the /v1/dlna/stream-url API) can surface a TTL.
@@ -705,6 +728,10 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   // 实测后果:不报 TrackDuration 的设备(HiVi)基线里 dur 恒为 0 → 外推永不封顶
   // → 进度无限涨、设备又不报结束 → 卡死在结尾永不切歌。
   positionEstimateSong.set(opts.deviceId, opts.songId);
+  // 换歌时清掉上一首残留的 seek 保护窗/代际:窗是"针对某个播放位置"的,
+  // 跨到新曲后目标秒数已无意义,留着会误挡新曲的合法读数(表现为新曲进度卡住)。
+  seekGuards.delete(opts.deviceId);
+  seekGeneration.delete(opts.deviceId);
 
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
@@ -842,23 +869,35 @@ export function shouldPollDevice(deviceId: string): boolean {
 export async function playDevice(deviceId: string): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到");
+  log.debug(`[DLNA][Play] ${deviceId} 发起`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Play", { InstanceID: "0", Speed: "1" });
     markOk(deviceId);
     // 立刻把新传输状态写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
     getEventManager().setTransportState(deviceId, "PLAYING");
-  } catch (e: any) { markFailed(deviceId, "Play", e); throw e; }
+    log.debug(`[DLNA][Play] ${deviceId} 成功`);
+  } catch (e: any) {
+    log.debug(`[DLNA][Play] ${deviceId} 失败 err=${e?.message || e}`);
+    markFailed(deviceId, "Play", e);
+    throw e;
+  }
 }
 
 export async function pauseDevice(deviceId: string): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到");
+  log.debug(`[DLNA][Pause] ${deviceId} 发起`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Pause", { InstanceID: "0" });
     markOk(deviceId);
     // 立刻把新传输状态写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
     getEventManager().setTransportState(deviceId, "PAUSED_PLAYBACK");
-  } catch (e: any) { markFailed(deviceId, "Pause", e); throw e; }
+    log.debug(`[DLNA][Pause] ${deviceId} 成功`);
+  } catch (e: any) {
+    log.debug(`[DLNA][Pause] ${deviceId} 失败 err=${e?.message || e}`);
+    markFailed(deviceId, "Pause", e);
+    throw e;
+  }
 }
 
 export async function stopDevice(deviceId: string): Promise<void> {
@@ -866,28 +905,115 @@ export async function stopDevice(deviceId: string): Promise<void> {
   if (!device?.avTransportUrl) throw new Error("设备未找到");
   const rt = runtimeOf(deviceId);
   rt.nextEnqueued = false;
+  log.debug(`[DLNA][Stop] ${deviceId} 发起`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });
     markOk(deviceId);
     // 立刻把新传输状态写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
     getEventManager().setTransportState(deviceId, "STOPPED");
-  } catch (e: any) { markFailed(deviceId, "Stop", e); throw e; }
+    log.debug(`[DLNA][Stop] ${deviceId} 成功`);
+  } catch (e: any) {
+    log.debug(`[DLNA][Stop] ${deviceId} 失败 err=${e?.message || e}`);
+    markFailed(deviceId, "Stop", e);
+    throw e;
+  }
 }
 
 // Seek to a position (seconds). Uses REL_TIME format HH:MM:SS.
-export async function seekDevice(deviceId: string, seconds: number): Promise<void> {
+// `opts.verify === false` 只给「落位校验失败后的重发」用:重发不得再派生新校验。
+export async function seekDevice(deviceId: string, seconds: number, opts?: { verify?: boolean }): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到");
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
   const target = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  // debug:SOAP Seek 的实际下发与往返耗时。连续拖动时的并发重投在这里看得最清楚
+  // (同一设备短时间内多条 seek 起点、耗时参差,就是重投风暴的现场)。
+  const t0 = Date.now();
+  log.debug(`[DLNA][seek] ${deviceId} 发起 REL_TIME=${target}(入参 ${seconds}s)`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Seek", { InstanceID: "0", Unit: "REL_TIME", Target: target });
     markOk(deviceId);
-    // 立刻把新进度写进事件缓存并推 WS,HA 侧无需等轮询即可同步(双向同步)。
+    // ---- seek 后必须同时做三件事,缺任何一件都会出现"进度跳回" ----
+    // ① 事件缓存(推 WS/HA 用);② 外推基线(轮询用);③ 落位保护窗(挡陈旧采样)。
+    // 早先只做了 ①,于是 ②③ 缺失 → 下一次采样把 seek 前的位置写回基线 → 进度跳回。
     getEventManager().setPosition(deviceId, seconds);
-  } catch (e: any) { markFailed(deviceId, "Seek", e); throw e; }
+    // ② 基线改锚到目标。trackUri/dur 沿用既有基线的 —— 只改"位置锚点"这一件事,
+    //    不能让 trackUri 变化触发上面的换歌检测(那会把刚设的锚点又删掉)。
+    const prevBase = positionEstimates.get(deviceId);
+    const dur = prevBase && prevBase.dur > 0 ? prevBase.dur : (mediaDuration.get(deviceId) || 0);
+    positionEstimates.set(deviceId, { pos: seconds, at: Date.now(), dur, trackUri: prevBase?.trackUri });
+    // ③ 开保护窗 + 递增代际(让上一次 seek 派出的校验协程作废)。
+    seekGuards.set(deviceId, { target: seconds, at: Date.now() });
+    const gen = (seekGeneration.get(deviceId) ?? 0) + 1;
+    seekGeneration.set(deviceId, gen);
+    log.debug(`[DLNA][seek] ${deviceId} 成功 REL_TIME=${target} ${Date.now() - t0}ms(基线/护栏已改锚到 ${seconds}s, gen=${gen})`);
+    // 落位校验:不阻塞调用方(HTTP 要尽快返回,否则手感变卡)。
+    // 设备不报位置时校验无从进行,函数内部会自行放弃(见 readRawPosition)。
+    // ⚠️ `verify:false` 用于「校验失败后的重发」:若重发也派生新校验,gen 会每次自增,
+    // 老 gen 的 `seekGeneration !== gen` 检查永远挡不住 → 递归成千次 seek 风暴(实测)。
+    if (opts?.verify !== false) void verifySeekLanding(deviceId, seconds, gen);
+  } catch (e: any) {
+    log.debug(`[DLNA][seek] ${deviceId} 失败 REL_TIME=${target} ${Date.now() - t0}ms err=${e?.message || e}`);
+    markFailed(deviceId, "Seek", e);
+    throw e;
+  }
+}
+
+/** 读**未经保护窗/外推改写**的 SOAP 原始位置。校验落位必须用原始值 ——
+ *  用 getDeviceStatus 会读到被保护窗外推出来的"目标位置",得到"已落位"的假阳性。 */
+async function readRawPosition(deviceId: string): Promise<number | null> {
+  const device = getDevice(deviceId);
+  if (!device?.avTransportUrl) return null;
+  try {
+    const xml = await soapCall(device.avTransportUrl, AV_TRANSPORT, "GetPositionInfo", { InstanceID: "0" });
+    const rel = xml.match(/<RelTime>([^<]*)<\/RelTime>/i)?.[1].trim();
+    if (!rel || rel === "NOT_IMPLEMENTED") return null; // 不报位置的设备:无从校验
+    return parseHms(rel);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * seek 落位校验(异步、不阻塞用户):等待生效后读一次原始位置,明显不符则**重发一次**。
+ *
+ * 解决的场景是「有时不落位」:部分渲染器在 STOPPED / TRANSITIONING / 刚 SetAVTransportURI
+ * 后收到 Seek 会**静默丢弃**(不报错、不生效),HA 集成侧靠"先起播再 seek"规避,
+ * 后端此前是发完就完。这里补一次单发重试 —— 等 1.2s 让设备进入可 seek 态后再补一枪。
+ *
+ * 三重自我保护:①代际号变了就作废(用户又拖了);②设备不报位置直接放弃(无法判定);
+ * ③只重试一次,不做循环(避免和设备的真实播放进度打架)。
+ */
+async function verifySeekLanding(deviceId: string, target: number, gen: number): Promise<void> {
+  try {
+    await sleep(1200);
+    if (seekGeneration.get(deviceId) !== gen) return; // 已被更新的 seek 取代
+    const raw = await readRawPosition(deviceId);
+    if (raw === null) return;
+    // ---- 设备不报位置 → 落位校验**无从进行**,必须在此放弃 ----
+    // HiVi/MUZO 播转码 chunked 流时 RelTime 恒为 0。若把 0 当"未落位"处理,重发会派生
+    // 新的 gen 校验,新校验又失败再重发 …… 形成每秒一次的无限 seek 风暴;更糟的是
+    // 每次重发都重设 `seekGuards`,护栏永不失效 → 位置恒被 `seekExpectedPosition`
+    // 顶成"目标+已过时间(≈0)" → 用户观感「拖动后进度卡住不再前进」(240 真机实测)。
+    // 判据只用 `<= 0`:设备真在 0s 时 seek 到 60s 本来就该判未落位,但那种情况
+    // 下面几行的正常分支会处理;恒 0 才是"不支持上报"。
+    if (raw <= 0) {
+      log.debug(`[DLNA][seek-verify] ${deviceId} 设备恒报 0(不报位置)→ 放弃落位校验(目标 ${Math.round(target)}s)`);
+      return;
+    }
+    if (raw >= target - 3 && raw <= target + 6) {
+      log.debug(`[DLNA][seek-verify] ${deviceId} 已落位:目标 ${Math.round(target)}s,设备报 ${Math.round(raw)}s`);
+      return;
+    }
+    log.warn(`[DLNA][seek-verify] ${deviceId} 未落位:目标 ${Math.round(target)}s,设备报 ${Math.round(raw)}s → 重发一次`);
+    if (seekGeneration.get(deviceId) !== gen) return;
+    // 重发**恰好一次**:关闭 seekDevice 自身的校验派生,链条到此终止。
+    await seekDevice(deviceId, target, { verify: false });
+  } catch (e: any) {
+    log.debug(`[DLNA][seek-verify] ${deviceId} 校验异常(忽略): ${e?.message || e}`);
+  }
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -929,13 +1055,18 @@ export async function alignDeviceToPosition(
   for (let i = 0; i < tries; i++) {
     const target = opts?.getTargetSec ? await opts.getTargetSec() : targetSec;
     try {
+      // debug:校准 seek 每一轮的目标与设备回报位置。多次尝试仍不收敛即为
+      // "设备不支持 seek"或"seek 被后续 Play/SetURI 重置"(拖动后回退的典型现场)。
+      log.debug(`[DLNA][align] ${deviceId} 第 ${i + 1}/${tries} 轮 seek→${Math.round(target)}s`);
       await seekDevice(deviceId, target);
       await sleep(intervalMs);
       const s = await getDeviceStatus(deviceId);
       lastPos = s.position ?? 0;
+      log.debug(`[DLNA][align] ${deviceId} 第 ${i + 1} 轮后设备位置=${Math.round(lastPos)}s(容差 ${toleranceSec}s)`);
       if (Math.abs(lastPos - target) <= toleranceSec) break;
-    } catch {
+    } catch (e: any) {
       // 设备偶发抖动(如 seek 期间 transport 被重置),继续重试。
+      log.debug(`[DLNA][align] ${deviceId} 第 ${i + 1} 轮异常(继续重试): ${e?.message || e}`);
     }
   }
   const finalTarget = opts?.getTargetSec ? await opts.getTargetSec() : targetSec;
@@ -1015,6 +1146,33 @@ export interface DeviceStatus {
 // elapsed so the reported position keeps increasing smoothly between polls.
 const positionEstimates = new Map<string, { pos: number; at: number; dur: number; trackUri?: string; pausedAt?: number }>();
 const POSITION_ESTIMATE_MAX_AGE_MS = 30_000; // 超过此时长不再外推,避免暂停久后跳变
+
+/**
+ * 用户 seek 的「落位保护窗」(每设备)。**这是「拖完进度又跳回原位」的服务端根治点。**
+ *
+ * 病根:DLNA Seek 是"尽力而为"的异步命令 —— 设备接受后不会立刻改 GetPositionInfo 的
+ * 读数(实测 MUZO/HiVi 类固件要 1s 以上),而 `getDeviceStatus` 的 PLAYING 分支见
+ * `position > 0` 就把读数当作"可信新基线"(见下方 `positionEstimates.set`)。于是:
+ *
+ *   拖到 300s → SOAP Seek 成功 → 下一次采样(2~5s 后)设备仍报旧值 120s
+ *             → 基线被写成 120 → 若设备随后报 0(MUZO 播转码 chunked 流时恒如此)
+ *             → 从 120 继续外推 → 前端进度条被拽回拖动前的位置。
+ *
+ * 后端四个客户端(Web / HA 集成 / HA 卡片 / 客户端)各自有一段 6~8s 的乐观护栏,
+ * 但它们都只挡"上报 vs 手指值",挡不住**服务端自己**把错基线喂回来 —— 护栏一过期
+ * 就被服务端读数覆盖,表现就是"拖完过两秒又跳回去"。
+ *
+ * 所以权威护栏必须建在这里:窗口内只接受「与预期位置相符」的读数
+ * (预期 = 目标 + 已过时间),其余一律视为 seek 前的陈旧采样并丢弃,外推基线
+ * 保持为 seek 目标。判定逻辑本身在 `seekGuard.ts`(纯函数,CI 单测锁定)。
+ */
+const seekGuards = new Map<string, SeekGuard>();
+/**
+ * 每设备 seek 代际号。用于让**异步落位校验**知道"我发的那次 seek 是否还是最后一次":
+ * 用户连拖时后一次 seek 会顶掉前一次,前一次派出的校验协程必须自行作废,
+ * 否则它会拿旧目标重发,和用户新拖的位置打架(表现为"松手后又自己跳回去")。
+ */
+const seekGeneration = new Map<string, number>();
 
 // 记录每台设备"当前已加载曲目"的 songId,用于在不依赖 TrackURI 的情况下检测换歌,
 // 从而重置上面的单调位置基线(某些 DLNA 设备 GetPositionInfo 不回传 TrackURI,
@@ -1117,6 +1275,9 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   positionEstimateSong.set(deviceId, curSong);
 
   // ---- 单调位置估计(修 DLNA 进度不前进/反复回滚) ----
+  // debug 用:记住 SOAP 原始读数(下面的外推/封顶会改写 state.position)。
+  const rawPos = state.position;
+  const rawDur = state.duration;
   // 切歌(TrackURI 变化)则重置基线,避免用上一首的进度外推。
   const cachedBaseline = positionEstimates.get(deviceId);
   if (cachedBaseline && state.trackUri && cachedBaseline.trackUri && cachedBaseline.trackUri !== state.trackUri) {
@@ -1126,6 +1287,28 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   // 封顶用时长:优先基线里的(设备可信采样记下的),基线被换歌检测清掉时退到
   // castToDevice 写入的曲库时长(见 mediaDuration 注释)。
   const durCap = base && base.dur > 0 ? base.dur : (mediaDuration.get(deviceId) || 0);
+
+  // ---- seek 落位保护窗:丢弃"seek 之前采样"的读数 ----
+  // 这一步必须放在状态分支**之前**:播放态、暂停态都会踩同一个坑 ——
+  // 拖动后设备回的还是旧位置,PLAYING 分支会把它当可信基线,暂停分支会把它当冻结值。
+  // 判据:预期位置 = 目标 + 已过时间(仅播放态推进);偏离超过容差即视为陈旧采样,
+  // 直接用预期值回填 state.position,让后续逻辑看到的就是"应当处于的位置"。
+  const guard = seekGuards.get(deviceId);
+  if (guard) {
+    const ageMs = sampledAt - guard.at;
+    if (seekGuardExpired(guard, sampledAt)) {
+      seekGuards.delete(deviceId);
+      log.debug(`[DLNA][seek-guard] ${deviceId} 保护窗到期(目标 ${Math.round(guard.target)}s),恢复采纳设备读数`);
+    } else if (isSeekReadingStale(guard, sampledAt, state.position, state.state === "PLAYING")) {
+      const expected = seekExpectedPosition(guard, sampledAt, state.state === "PLAYING");
+      log.debug(
+        `[DLNA][seek-guard] ${deviceId} 丢弃陈旧读数 reported=${Math.round(state.position)}s`
+        + ` vs 预期=${Math.round(expected)}s(目标 ${Math.round(guard.target)}s,窗内剩 ${Math.round(SEEK_GUARD_MS - ageMs)}ms)`,
+      );
+      state.position = expected;
+    }
+  }
+
   if (state.state === "PLAYING") {
     if (state.position > 0) {
       // 本次 SOAP 采样可信 -> 作为新基线(顺带记下 duration 用于封顶/兜底)。
@@ -1173,6 +1356,9 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     positionEstimates.delete(deviceId);
   }
 
+  // debug:设备侧真相的完整落地结果。raw=SOAP 原始读数,pos/dur=经外推·封顶·兜底后的
+  // 最终值(两者不同即"设备不报位置,走了本地估计");前端进度再与之对不上就是上层的事了。
+  log.debug(`[DLNA][status] ${deviceId} state=${state.state} rawPos=${rawPos} pos=${Math.round(state.position)} rawDur=${rawDur} dur=${Math.round(state.duration)} uri=${state.trackUri ? "y" : "n"}`);
   return state;
 }
 
@@ -1210,15 +1396,27 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
     async resume() { await playDevice(deviceId); },
     async seek(s: number) { await seekDevice(deviceId, s); },
     async setVolume(v: number) { await setDeviceVolume(deviceId, v); },
+    /** 设备是否还在发现缓存里且可用(见 ProtocolPlayer.isAvailable 注释)。 */
+    isAvailable() { return isDeviceAvailable(deviceId); },
     async pollState(): Promise<PlayerState> {
-      const s = await getDeviceStatus(deviceId);
+      const st = await getDeviceStatus(deviceId);
+      // ⚠️ 设备不在发现缓存时 `getDeviceStatus` 会**冒充 STOPPED**(见其 `!device?.avTransportUrl`
+      // 早退分支):容器重启 / 重新发现窗口期里这台设备还没进 `cachedDevices`,读数就恒为
+      // 「STOPPED pos=0」→ tracker 读成"设备真的停了" → 连续 2 次判卡死后**放行切歌**
+      // (真机复现:重启后 35s,DLNA 队列凭空少一首、位置归零,极易被误判成 seek bug)。
+      // 与 sendspin 侧 `unavailable` 同一条纪律:**读不到真实状态就不许冒充** —— 标上标记后
+      // QueueController 不喂 tracker、不计数,等设备重新发现再走恢复续播(见 noteLinkLost)。
+      // 注意判据必须是「是否在发现缓存里」(isDeviceKnown)而不是 `isDeviceAvailable`
+      // (runtimes 的 available 位,对未知设备乐观返回 true),后者在这里会漏判。
+      const unknownDevice = !isDeviceKnown(deviceId);
       return {
         playerId,
-        playbackState: mapTransportState(s.state),
-        position: s.position,
-        duration: s.duration,
-        mediaUri: s.trackUri, // 来自 GetPositionInfo 的 TrackURI,供 track_changed 检测
+        playbackState: mapTransportState(st.state),
+        position: st.position,
+        duration: st.duration,
+        mediaUri: st.trackUri, // 来自 GetPositionInfo 的 TrackURI,供 track_changed 检测
         updatedAt: Date.now(),
+        ...(unknownDevice ? { unavailable: true } : {}),
       };
     },
   };

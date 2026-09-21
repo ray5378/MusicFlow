@@ -85,18 +85,30 @@ export class RendererHostSupervisor<
   private heartbeatCheck: ReturnType<typeof setInterval> | null = null;
   private hooks: THooks | null = null;
   private pendingBootCleanup: (() => void) | null = null;
+  /** 最近一次发出的 RPC 名(诊断:心跳超时那一刻在跟子进程要什么)。 */
+  private lastRpcOp = "";
 
   /** 主进程同步读的状态镜像(子进程 state 快照)。 */
   readonly mirror: TMirror;
 
-  /** 看门狗:超过 3 个心跳周期没任何消息视为卡死,强杀并重启。 */
+  /**
+   * 看门狗:超过 N 个心跳周期没收到**任何**子进程消息即视为卡死,强杀重启。
+   *
+   * 2026-09-21 收紧(95s → 65s),真机依据:sendspin 子进程**事件循环停摆 95s**
+   * (设备换了 IP、旧拨号目标 EHOSTUNREACH,期间主进程侧一切 RPC 25s 超时),
+   * 停摆窗口里 QueueController 把这批超时误读成"设备卡死"→ 放行切歌 → 位置归零/曲目乱跳。
+   * 恢复得越早,暴露窗口越短。取 2×+5s 而不是 3×:心跳周期 30s(IPC 上还有 150ms 节流的
+   * 状态快照,正常情况下几乎每秒都有消息),容忍"整整一个心跳丢失"已足够安全 ——
+   * 真正健康的事件循环不可能 65s 一个消息都发不出。
+   * 检查间隔同步 30s → 10s:否则最坏情况要多等一个检查周期才动手(125s)。
+   */
   private readonly heartbeatTimeoutMs: number;
 
   constructor(opts: RendererHostOptions<TMirror, TReady, TSnapshot, TEvent, THooks>) {
     this.opts = opts;
     this.log = createLogger(opts.logName);
     this.mirror = opts.initialMirror;
-    this.heartbeatTimeoutMs = (opts.heartbeatMs ?? RENDERER_HEARTBEAT_MS) * 3 + 5_000;
+    this.heartbeatTimeoutMs = (opts.heartbeatMs ?? RENDERER_HEARTBEAT_MS) * 2 + 5_000;
   }
 
   setHooks(hooks: THooks): void {
@@ -149,6 +161,7 @@ export class RendererHostSupervisor<
     if (!child || !this.running) return Promise.reject(new Error(`${this.opts.name} 子进程未运行(${op})`));
     const id = ++this.rpcSeq;
     const name = this.opts.name;
+    this.lastRpcOp = op;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -289,13 +302,20 @@ export class RendererHostSupervisor<
   private startHeartbeatCheck(): void {
     this.lastHeartbeat = Date.now();
     if (this.heartbeatCheck) return;
+    // 10s 粒度:配合上面的 65s 阈值,最坏情况 75s 内一定动手(旧配置最坏 125s)。
     this.heartbeatCheck = setInterval(() => {
       if (!this.running) return;
       if (Date.now() - this.lastHeartbeat > this.heartbeatTimeoutMs) {
-        this.log.error(`${this.opts.name} 子进程心跳超时(${this.heartbeatTimeoutMs}ms),强杀重启`);
+        // 诊断信息一起打:排障"为什么停摆"时,「当时在跟它要什么 + 有多少请求悬着」
+        // 是唯一能区分"子进程自己卡死"与"IPC/父进程侧堵住"的线索。
+        this.log.error(
+          `${this.opts.name} 子进程心跳超时(${this.heartbeatTimeoutMs}ms),强杀重启`
+          + ` [最后消息 ${Math.round((Date.now() - this.lastHeartbeat) / 1000)}s 前`
+          + ` | 最后 RPC op=${this.lastRpcOp || "-"} | 悬挂 RPC ${this.pending.size} 个]`,
+        );
         this.killChild("SIGKILL"); // onExit 走退避重启
       }
-    }, 30_000);
+    }, 10_000);
   }
 
   private stopHeartbeatCheck(): void {

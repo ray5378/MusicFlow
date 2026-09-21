@@ -8,6 +8,9 @@
 //   "track_changed"— 同为 PLAYING 但 uri 变了(设备 native gapless 切歌)
 //   "idle_early"   — 收到 IDLE 但进度远未到已知时长:判为 IDLE 误报,**不切歌**
 //                    (由 QueueController 复查设备真实状态后决定放行还是撤销)
+//   "frozen"       — **PLAYING 但位置在墙钟上长时间一动不动**:设备/推流侧僵死,
+//                    链路还在、状态还报 PLAYING,音频却不再前进。由 QueueController
+//                    就地重投 + 拉回位置(不是切歌!)。见 FREEZE_TIMEOUT_MS。
 //   "none"         — 无需动作
 //
 // 关键:不在此处判断"有无下一首",由 QueueController 在调用前注入 hasNext。
@@ -35,6 +38,9 @@
 //        而 DLNA 位置外推**只在采样点推进**(dlna/control.ts:1141),于是
 //        「位置到时长 + END_GRACE_MS」被采样粒度拖成 ~10s 才生效。
 import { CompareState, PlaybackState } from "./types.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("tracker");
 
 // 卡死兜底阈值(我方设计,不是现版 MA 的机制 —— 见下)。
 // 2026-09-21 复核 MA `76c2fcb`:全仓 `stall` 只剩 `constants.py:944 STREAM_STALL_TIMEOUT = 20`,
@@ -60,12 +66,29 @@ const STALL_TIMEOUT_MS = 15_000;
  *  播放位置;8s 足够吃掉这段偏差,又不至于让用户在结尾干等。 */
 const END_GRACE_MS = 8_000;
 
+/**
+ * 「PLAYING 但位置冻结」的判定阈值(2026-09-21 新增,真机实测驱动)。
+ *
+ * 与 STALL_TIMEOUT_MS(IDLE 卡死)是**两条独立**的僵死路径,必须都有:
+ *   · IDLE 卡死 = 设备停了但不说,队列不推进 → 上面那套。
+ *   · PLAYING 冻结 = 设备(或推流侧)明明在"播",位置却一动不动。
+ *     实测:sendspin peer 报 `PLAYING pos=173.6 dur=280` 整整 3 分钟不变、推流
+ *     pump 零日志、后端毫无异常 —— 现有看门狗**全部不触发**,永不自愈。
+ *     用户观感就是"进度条卡住不动"(与"归零"不同,不会切歌,只是永远停在那)。
+ *
+ * 取 30s 的依据:设备采样是 5s(QueueController.startPollLoop),30s = 连续 6 次采样
+ * 位置一模一样。正常播放时 6 次采样一定跨过 ≥25s 音频,不可能读数不变;而 seek 后
+ * ffmpeg 重起的真空期通常 1~3s,远小于 30s,不会误报(另有 seek 冷静期兜底)。
+ */
+const FREEZE_TIMEOUT_MS = 30_000;
+
 export type TrackDecision =
   | "advance"
   | "ended"
   | "stalled"
   | "track_changed"
   | "idle_early"
+  | "frozen"
   | "none";
 
 /** IDLE 提前量容差:距已知时长还差超过此值 → 判 IDLE 误报。
@@ -97,6 +120,16 @@ export class PlaybackTracker {
   /** 本次 IDLE 期间是否已派发过 stalled。同一次卡死只报一次 —— 否则 500ms 的 tick
    *  会每拍重复派发;「再来一次」由 QueueController 重投后的 resetTracker 释放。 */
   private idleStallSignaled = false;
+  /** 设备上报的 position **最后一次真正变化**的墙上时刻(ms)与当时的读数。
+   *
+   *  与 `prev.updatedAt` 的区别是这整套判据的关键:`updatedAt` 在每次采样都被刷成
+   *  当前时刻(DLNA poll=采样时刻 / sendspin/AirPlay=Date.now()),拿它算"多久没动"
+   *  恒得 5s(轮询间隔),永远触发不了 —— 与 STALL_TIMEOUT_MS 那次订正踩的是同一个坑。
+   *  所以冻结判据必须自带一个"只在读数变了才刷新"的独立时钟。 */
+  private progressAt: number | null = null;
+  private progressPos = 0;
+  /** 本段冻结是否已派发过 frozen。同段只报一次,位置重新推进 / reset() 时释放。 */
+  private frozenSignaled = false;
 
   /** 起播时注入本曲已知时长(秒)。0/无效值 = 未知。 */
   setExpectedDuration(seconds: number): void {
@@ -115,6 +148,17 @@ export class PlaybackTracker {
     const prev = this.prev;
     const cur = neww.playbackState;
     const dur = this.expectedDuration;
+    // 下面各分支会把 lastPlaying 清掉,故先快照一份用于日志(它决定 IDLE 能否被认作"真播过")。
+    const hadLastPlaying = !!this.lastPlaying;
+
+    // 冻结时钟:只在**设备报的位置真的变了**时才刷新(见 progressAt 字段注释)。
+    // 放在状态分支之前 —— 与状态无关,纯粹记录"读数在动"这件事。
+    if (Number.isFinite(neww.position) && neww.position !== this.progressPos) {
+      this.progressPos = neww.position;
+      this.progressAt = Date.now();
+      // 位置重新推进 = 不再冻结 → 释放信号,让下一次冻结还能被报出来。
+      this.frozenSignaled = false;
+    }
 
     if (cur === PlaybackState.PLAYING) {
       // native gapless:同为 PLAYING 但 uri 变了
@@ -166,6 +210,10 @@ export class PlaybackTracker {
       this.idleStallSignaled = false;
     }
     this.prev = neww;
+    // debug:状态迁移判定的最终裁决点 —— 决策 + 全部判据输入一起打。拖动后被切歌 /
+    // 判成结束 / 卡死这类问题的根因(时长已知与否、lastPlaying 有没有置上、
+    // uri 是否变了)在这一行就齐了,不必再去翻上游各层。
+    log.debug(`[tracker][update] ${prev?.playbackState ?? "-"}→${cur} pos=${Math.round(neww.position)} dur=${Math.round(dur)} hasNext=${hasNext} lastPlaying=${hadLastPlaying} uri=${neww.mediaUri ? "y" : "n"} → ${decision}`);
     return decision;
   }
 
@@ -185,7 +233,7 @@ export class PlaybackTracker {
    * 快照。判结束后必须清掉时长 —— 设备多半仍报 PLAYING,不清就会同一首反复 advance。
    *
    * 这里同时承担**卡死兜底**(与结束判定共用同一节拍,不再依赖设备上报时刻):
-   * 见下方 IDLE 分支与 STALL_TIMEOUT_MS。
+   * 见下方 IDLE 分支(STALL_TIMEOUT_MS)与 PLAYING 冻结分支(FREEZE_TIMEOUT_MS)。
    */
   tick(nowMs: number): TrackDecision {
     const cur = this.prev;
@@ -199,6 +247,9 @@ export class PlaybackTracker {
       if (this.idleSinceAt === null || this.idleStallSignaled) return "none";
       if (nowMs - this.idleSinceAt < STALL_TIMEOUT_MS) return "none";
       this.idleStallSignaled = true; // 同一次卡死只报一次,等 reset()/离开 IDLE 释放
+      // debug:卡死兜底触发点。拖动后无声/设备已停但队列不前进时,这一行是判定依据;
+      // 配合上面的 [tracker][update] 看「最后一次 IDLE 是怎么来的」(误报 or 真停)。
+      log.debug(`[tracker][tick] IDLE 持续 ${nowMs - this.idleSinceAt}ms ≥ ${STALL_TIMEOUT_MS}ms → stalled`);
       return "stalled";
     }
 
@@ -210,6 +261,22 @@ export class PlaybackTracker {
     const pos = cur.position + (nowMs - cur.updatedAt) / 1000;
     if (pos < dur) {
       this.overrunAt = null;
+      // ③ 冻结兜底:PLAYING、时长已知、且位置**在墙钟上**一动不动 ≥ FREEZE_TIMEOUT_MS
+      //    → 判 frozen(设备/推流侧僵死,链路还在但音频不再前进)。
+      //
+      //    ⚠️ 判据不能用上面那个 `pos`:它按 `updatedAt` 外推,而 updatedAt 每次采样
+      //    都被刷成当前时刻 → 冻结时 pos 照样"在涨"(恒为 frozen+5s),永远看不见卡住。
+      //    必须用 progressAt —— 它只在设备报的位置真的变了才刷新(见 update())。
+      //
+      //    progressPos > 0 是必要的护栏:设备报告"position 恒 0"是**未知**而非冻结
+      //    (部分渲染器不实现 GetPositionInfo),它可能正在正常出声 —— 那种情况
+      //    交给 IDLE 卡死 / 结束兜底,绝不在这里动手。
+      if (!this.frozenSignaled && this.progressPos > 0 && this.progressAt !== null
+          && nowMs - this.progressAt >= FREEZE_TIMEOUT_MS) {
+        this.frozenSignaled = true; // 同一段冻结只报一次,等位置重新推进 / reset() 释放
+        log.debug(`[tracker][tick] PLAYING 但位置冻结在 ${Math.round(this.progressPos)}s(已 ${nowMs - this.progressAt}ms ≥ ${FREEZE_TIMEOUT_MS}ms)→ frozen`);
+        return "frozen";
+      }
       return "none";
     }
     if (this.overrunAt === null) this.overrunAt = nowMs;
@@ -217,6 +284,7 @@ export class PlaybackTracker {
     this.lastPlaying = null;
     this.overrunAt = null;
     this.expectedDuration = 0;
+    log.debug(`[tracker][tick] 位置外推 ${Math.round(pos)}s ≥ 时长 ${Math.round(dur)}s 且过宽限 → advance`);
     return "advance";
   }
 
@@ -228,6 +296,11 @@ export class PlaybackTracker {
     // 墙钟会立刻让新队列被判卡死。同时释放 idleStallSignaled,让新的一轮还能再报。
     this.idleSinceAt = null;
     this.idleStallSignaled = false;
+    // 冻结时钟同理:重投/切歌后位置会从新起点重新变化,progressAt 不清也不会误报,
+    // 但 progressPos 会带着上一首的读数 —— 清掉,让新的一轮从"未知"重新学起。
+    this.progressAt = null;
+    this.progressPos = 0;
+    this.frozenSignaled = false;
   }
 
   getPrev(): CompareState | null {

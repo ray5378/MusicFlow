@@ -20,6 +20,7 @@ import { getGroupManager } from "../group/index.js";
 import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
 import { createLogger } from "../../utils/logger.js";
+import { markSeekIssued, withinSeekSettle, logSeekSettleSuppressed, clearSeekSettle } from "./seekSettle.js";
 
 const log = createLogger("QueueController");
 
@@ -77,6 +78,19 @@ export class QueueController extends EventEmitter {
    *  这个计数跨曲累积,上限 = 一整圈(stallCounters 允许每首 2 次,故取 2×曲数),
    *  达到即判「整队都投不出去」,停止推进等负缓存过期(与 playCurrent 的 skipLimit 同口径)。 */
   private castFailStreak = new Map<string, number>();
+  /** 各 player 最近一次**成功**读到的播放位置(秒)。两处用途:
+   *  ① 链路丢失(frozen / 子进程僵死)后回归时,把播放位置拉回用户离开的地方,
+   *     而不是从头播(= 用户眼里的"归零");
+   *  ② frozen 判定后重投的落点。 */
+  private lastPos = new Map<string, number>();
+  /** 探测到「链路/子进程不可用」的 player(key=裸 id):记下当时的播放位置。
+   *  期间**不接受任何决策**(不切歌、不计数、不重投),等恢复后一次性续播。
+   *
+   *  为什么必须这样:fork 模式 sendspin 子进程僵死的那 95s 里,主进程对它的每个 RPC
+   *  都 25s 超时,而旧实现把"读不到"当成"设备报 IDLE"处理 → 凭空造出 PLAYING→IDLE
+   *  迁移 → advance 切歌;stalled 通道还会把它计进"连续卡死",第 2 次直接放行切歌。
+   *  用户观感 = 进度条归零 + 曲目乱跳(2026-09-21 真机实测 3 次)。 */
+  private linkLost = new Map<string, { pos: number; at: number; reason: string }>();
   /** 正由 flow 会话(连续流,P3-1)驱动的设备:设备拉的是**一条多曲流**,
    *  它报的 position/duration 不再对应单曲 → 切歌决策由出流侧在曲目边界静默推进
    *  (见 flowAdvance / handleDecision 入口的拦截)。 */
@@ -146,6 +160,8 @@ export class QueueController extends EventEmitter {
       this.queues.delete(k);
       this.stallCounters.delete(k);
       this.castFailStreak.delete(k);
+      this.linkLost.delete(k);
+      this.lastPos.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -204,11 +220,28 @@ export class QueueController extends EventEmitter {
     playerId = stripPlayerPrefix(playerId);
     const player = this.players.get(playerId);
     if (!player) throw new Error(`未注册的播放器: ${playerId}`);
-    if (op === "play") await player.resume();
-    else if (op === "pause") await player.pause();
-    else if (op === "stop") await player.stop();
-    else if (op === "seek") await player.seek(arg!);
-    else if (op === "volume") await player.setVolume(arg!);
+    // debug:传输命令入口留痕。拖动进度条时这里是"一次拖动实际发了几个 seek"的第一手证据
+    // (前端有 250ms 防抖,但连拖/多点仍可能并发下发;tid 相同即为同一个请求链)。
+    const t0 = Date.now();
+    log.debug(`[QueueController][transport] ${playerId} op=${op} arg=${arg}`);
+    // seek 冷静期打标必须在**下发之前**:请求在途/重定位进行中就可能有一拍状态上报
+    // 落进"设备非 PLAYING"的真空里(见 services/player/seekSettle.ts 顶部注释)。
+    if (op === "seek") markSeekIssued(playerId);
+    // stop / play 会丢弃当前播放上下文(位置归零或重投),旧的 seek 时刻不再有意义 ——
+    // 清掉,避免新上下文里的合法 idle_early 被一条陈旧记录压住。
+    if (op === "stop" || op === "play") clearSeekSettle(playerId);
+    try {
+      if (op === "play") await player.resume();
+      else if (op === "pause") await player.pause();
+      else if (op === "stop") await player.stop();
+      else if (op === "seek") await player.seek(arg!);
+      else if (op === "volume") await player.setVolume(arg!);
+    } catch (e: any) {
+      // 失败按 warn 出(不吞):"拖动后没法播"的第一现场就在这里。
+      log.warn(`[QueueController][transport] ${playerId} op=${op} arg=${arg} 失败 ${Date.now() - t0}ms`, { err: e?.message || e });
+      throw e;
+    }
+    log.debug(`[QueueController][transport] ${playerId} op=${op} arg=${arg} 完成 ${Date.now() - t0}ms`);
   }
 
   /** 读取已注册播放器的实时状态(供 /status 路由;sendspin 等无 SOAP 的设备)。
@@ -234,13 +267,77 @@ export class QueueController extends EventEmitter {
       if (this.advancing.has(deviceId)) continue;
       try {
         const state = await player.pollState();
+        // 链路不可用(子进程僵死/重启窗口、RPC 超时)→ **绝不能**把这读数喂给 tracker:
+        // 它带着 playbackState=IDLE 的占位值,会凭空造出 PLAYING→IDLE 迁移 → 误判自然
+        // 结束 → 切歌 → 位置归零。这里只登记"链路丢了 + 当时的播放位置",等恢复后续播。
+        if ((state as any).unavailable) {
+          this.noteLinkLost(deviceId, "poll 不可用");
+          log.debug(`[QueueController][poll] t=${Date.now()} ${deviceId}: 链路不可用,跳过上报`);
+          continue;
+        }
+        // 链路从"丢"回到"通":先把这一轮的真实状态上报掉,再触发续播。
+        // 注意这里只**查**不删 —— 位置快照留在 linkLost 里,由 resumeAfterLinkRecovery
+        // 取用(它自己负责清)。先删就会把"离开时的播放位置"丢掉,续播只能从头播。
+        const wasLost = this.linkLost.has(deviceId);
+        if (typeof state.position === "number" && state.position > 0) this.lastPos.set(deviceId, state.position);
         // state.playerId 已是 "dlna:<deviceId>",直接上报 PlayerController。
         this.ctrls.get(deviceId)?.reportState(state);
-        log.info(`[QueueController][pollDBG] t=${Date.now()} ${deviceId}: state=${state.playbackState} pos=${state.position} dur=${state.duration}`);
+        // 轮询快照:debug 级(5s × N 设备,info 下太吵)。排障"进度条回退/不动"时
+        // 这条是设备侧的真相来源(与前端 UI 显示的位置对不上即为上报/外推问题)。
+        log.debug(`[QueueController][poll] t=${Date.now()} ${deviceId}: state=${state.playbackState} pos=${state.position} dur=${state.duration}`);
+        if (wasLost) void this.resumeAfterLinkRecovery(deviceId);
       } catch (e: any) {
         log.warn(`[QueueController][poll] ${deviceId}: ${e?.message || e}`);
       }
     }
+  }
+
+  /** 登记「链路不可用」并记住当时的播放位置(幂等:已有记录只刷新位置)。 */
+  private noteLinkLost(deviceId: string, reason: string): void {
+    const prev = this.linkLost.get(deviceId);
+    const pos = this.lastPos.get(deviceId) ?? prev?.pos ?? 0;
+    this.linkLost.set(deviceId, { pos, at: prev?.at ?? Date.now(), reason });
+  }
+
+  /** 链路恢复(子进程重启完成 / 设备重新可读)后就地续播当前首。
+   *
+   *  为什么需要它:上面那条"链路不可用期间不接受任何决策"的护栏把误切歌挡住了,
+   *  代价是这段时间里没人推进队列 —— 必须有人负责把播放接回去,否则用户看到的是
+   *  "卡住后彻底不动了"(比误切歌好,但仍然不对)。
+   *  姿势复用组离线看门狗(group/watchdog.ts):先在播则不重复 cast,cast 后把位置
+   *  拉回离开时的秒数。 */
+  private async resumeAfterLinkRecovery(deviceId: string): Promise<void> {
+    const lost = this.linkLost.get(deviceId);
+    const q = this.queues.get(deviceId);
+    const player = this.players.get(deviceId);
+    if (!q || !player || !q.isActive || q.ended || q.currentIndex < 0) {
+      this.linkLost.delete(deviceId);
+      return;
+    }
+    if (this.advancing.has(deviceId)) return; // 保留 linkLost,下一拍再试
+    // 链路恢复 ≠ 设备回来了:fork 模式 sendspin 子进程重启后要重新拨号、设备要重新入组,
+    // 这中间 `poll` 会合法地回 IDLE。此刻盲目 cast 会投进一个不存在的连接(没声音,
+    // 状态却显示在播)→ 30s 后又被冻结看门狗判死 → 第 2 次直接放行切歌(曲目乱跳)。
+    // 所以先问一句设备在不在;不在就**保留** linkLost,等下一拍(5s 后)再试。
+    try {
+      const proto = (player as any).getProtocol?.();
+      if (proto?.isAvailable && !(await proto.isAvailable())) {
+        log.info(`[QueueController] ${deviceId}: 链路恢复但设备尚未回来,等待…`);
+        return;
+      }
+    } catch { return; }
+    this.linkLost.delete(deviceId);
+    // 已在播(用户手动恢复 / 设备自己接上了)→ 不打断。
+    try {
+      const st = await player.pollState();
+      if (!(st as any).unavailable && st.playbackState === PlaybackState.PLAYING) {
+        log.info(`[QueueController] ${deviceId}: 链路恢复但已在播,跳过自动续播`);
+        return;
+      }
+    } catch { return; }
+    const pos = lost?.pos ?? this.lastPos.get(deviceId) ?? 0;
+    log.warn(`[QueueController] ${deviceId}: 链路恢复(丢失原因:${lost?.reason ?? "-"}),续播当前首@${Math.round(pos)}s`);
+    await this.recoverInPlace(deviceId, pos);
   }
 
   /** 重启后恢复:对照原 QueueManager.resumeActive。设备有活跃队列时续播当前首。 */
@@ -282,6 +379,15 @@ export class QueueController extends EventEmitter {
         && (decision === "advance" || decision === "track_changed" || decision === "idle_early")) return;
 
     if (decision === "idle_early") {
+      // seek 冷静期:刚下发过 seek → 后端正在按新的 `-ss` 重起 ffmpeg,这段时间设备
+      // **必然**有一小段非 PLAYING。若照常走下面的复查,几乎必然探到非 PLAYING →
+      // 误判"设备确实停了" → 放行切歌 → 位置归零(用户观感:「拖动后进度条跳回去了」)。
+      // 真机实证见 services/player/seekSettle.ts 顶部。冷静期内一律按真空撤销。
+      if (withinSeekSettle(id)) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        logSeekSettleSuppressed(playerId, "idle_early");
+        return;
+      }
       // IDLE 但进度远未到已知时长 → 高度怀疑是误报(SOAP 抖动 / 链路瞬断)。
       // 不直接切歌:立刻复查一次设备真实状态 ——
       //   · 复查到 PLAYING → 确认误报,重置 tracker 后静默返回(这首歌继续播);
@@ -289,6 +395,14 @@ export class QueueController extends EventEmitter {
       // 没有这道复查的话,真停了的场景要等 60s 的 stalled 兜底才推进。
       try {
         const st = await this.players.get(id)?.pollState();
+        // 读不到真实状态(子进程僵死/重启窗口、链路 RPC 超时)→ **绝不能**按"设备确实
+        // 停了"放行切歌 —— 那正是"进度条归零 / 曲目乱跳"的来源。登记链路丢失,等恢复续播。
+        if ((st as any)?.unavailable) {
+          this.noteLinkLost(id, "idle_early 复查不可用");
+          this.ctrls.get(id)?.resetTracker(playerId);
+          log.warn(`[QueueController][idle_early] ${playerId}: 链路不可用,复查不到真实状态 → 暂不放行`);
+          return;
+        }
         if (st?.playbackState === PlaybackState.PLAYING) {
           this.ctrls.get(id)?.resetTracker(playerId);
           log.warn(`[QueueController][idle_early] ${playerId}: IDLE 误报已撤销(pos=${Math.round(st.position)}/${Math.round(st.duration)}),继续播放`);
@@ -324,6 +438,67 @@ export class QueueController extends EventEmitter {
       if (!this.shouldSuppressGroupEnd(id)) this.markEnded(id);
       return;
     }
+    if (decision === "frozen") {
+      // 设备报 PLAYING 但位置冻结(链路活着、音频不前进)。**就地重投当前首 + 拉回位置**,
+      // 而不是切歌 —— 切歌正是用户抱怨的"进度条归零 / 曲目乱跳"。
+      // 判据与真机依据见 PlaybackTracker.FREEZE_TIMEOUT_MS。
+      if (!q.isActive || q.ended) return;
+      if (this.advancing.has(id)) return;
+      // 链路本身就丢了(子进程僵死)→ 交给恢复路径,别在这里叠一次重投。
+      if (this.linkLost.has(id)) return;
+      // seek 冷静期:刚下发过 seek 时位置本就不该动(ffmpeg 正按新的 -ss 重起),
+      // 此刻判 frozen 是误报 → 撤销,并清掉已派发的信号让检测重新武装。
+      if (withinSeekSettle(id)) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        logSeekSettleSuppressed(playerId, "frozen");
+        return;
+      }
+      // 与 idle_early 对称的反证:复查一次,位置确实在推进 → 是误报(采样粒度),
+      // 撤销并重新武装,不打扰正在播的这首。
+      try {
+        const st = await this.players.get(id)?.pollState();
+        const base = this.lastPos.get(id) ?? 0;
+        if (st && !(st as any).unavailable
+            && st.playbackState === PlaybackState.PLAYING
+            && st.position > base + 0.5) {
+          this.lastPos.set(id, st.position);
+          this.ctrls.get(id)?.resetTracker(playerId);
+          log.info(`[QueueController][frozen] ${playerId}: 位置已恢复推进(pos=${Math.round(st.position)}),撤销`);
+          return;
+        }
+      } catch (e: any) {
+        log.warn(`[QueueController][frozen] ${playerId}: 复查失败`, { err: e?.message || e });
+      }
+      // 同一首连续计数(与 stalled 共用):重投 1 次兜瞬时僵死,第 2 次说明这首就是推不动
+      // → 放行切歌。没有这个上限的话,一首死源会每 30s 重投一次,永远原地打转。
+      const frozenSongId: string | undefined =
+        q.currentIndex >= 0 ? q.items[q.currentIndex]?.songId : undefined;
+      const prevFz = this.stallCounters.get(id);
+      const frozenCount = prevFz && prevFz.songId === frozenSongId ? prevFz.count + 1 : 1;
+      this.stallCounters.set(id, { songId: frozenSongId, count: frozenCount });
+      if (frozenCount >= 2 && frozenSongId !== undefined) {
+        const nextIdx = this.pickNext(q, false);
+        if (nextIdx !== -1 && nextIdx !== q.currentIndex) {
+          log.warn(`[QueueController] ${id}: ${frozenSongId} 冻结重投 ${frozenCount} 次仍不动,放行切歌`);
+          this.stallCounters.delete(id);
+          this.advancing.add(id);
+          try {
+            q.currentIndex = nextIdx;
+            q.ended = false;
+            await this.playCurrent(id, baseUrl);
+            this.persist(id);
+            this.emit("queue_changed", id, this.snapshot(id));
+            this.schedulePreProbe(id);
+          } finally {
+            this.advancing.delete(id);
+          }
+          return;
+        }
+      }
+      log.warn(`[QueueController][frozen] ${playerId}: PLAYING 但位置冻结@${Math.round(this.lastPos.get(id) ?? 0)}s,就地重投并拉回位置`);
+      await this.recoverInPlace(id, this.lastPos.get(id) ?? 0);
+      return;
+    }
     if (decision === "stalled") {
       // 已结束 / 未激活的队列不重投(2026-09-21 新增护栏)。
       // 卡死阈值从(生产里不可达的)60s 降到 15s 后这条路径才**真正可达**,而它原先
@@ -337,6 +512,17 @@ export class QueueController extends EventEmitter {
       // 先轮询设备真实状态:确在播放 → 静默关闭乐观窗口并重置 tracker,绝不重投。
       try {
         const state = await this.players.get(id)?.pollState();
+        // 链路不可用(子进程僵死/重启窗口、RPC 25s 超时)→ 既不能重投也不能切歌:
+        //  · 重投会把命令抛进一个已经堵死的 IPC,只会再造一次 25s 超时;
+        //  · 切歌(下面的连续卡死计数)正是"曲目乱跳 + 位置归零"的来源。
+        // 正确动作是**什么都不做**,登记链路丢失,等子进程回归后 resumeAfterLinkRecovery
+        // 续播当前首。真机依据:心跳停摆的 95s 里正是这条路径放行了切歌(2026-09-21)。
+        if ((state as any)?.unavailable) {
+          this.noteLinkLost(id, "stalled 复查不可用");
+          this.ctrls.get(id)?.resetTracker(playerId);
+          log.warn(`[QueueController][stalled] ${playerId}: 链路不可用(子进程/链路丢失),不重投也不切歌,等恢复续播`);
+          return;
+        }
         if (state?.playbackState === PlaybackState.PLAYING) {
           this.ctrls.get(id)?.endOptimistic(playerId);
           this.ctrls.get(id)?.resetTracker(playerId);
@@ -557,6 +743,49 @@ export class QueueController extends EventEmitter {
     return getCachedPlayability(item.songId) === "unplayable" ? "skip" : "play";
   }
 
+  /** 就地恢复当前首:重投(cast)+ 把播放位置拉回 `pos` 秒。
+   *
+   *  两条自愈路径共用:
+   *    ① tracker 判 `frozen` —— 设备报 PLAYING 但位置冻结(链路活着、音频不前进);
+   *    ② 链路/子进程丢失后回归(linkLost 已登记)。
+   *  共同点:**不该切歌,只该把当前这首重新推起来**。切歌正是用户抱怨的"进度条归零 /
+   *  曲目乱跳",所以恢复一律围绕当前曲做。
+   *
+   *  位置校准复用组离线看门狗(group/watchdog.ts)的同款姿势:cast 会让设备从头播,
+   *  所以 cast 之后再 seek 到目标位置。seek 失败不阻断 —— 至少已经重新出声了,
+   *  比永远卡住强。seek 前必须 markSeekIssued:否则随后的重定位真空会被
+   *  `idle_early` 判成"真结束"→ 又切歌(见 seekSettle.ts)。 */
+  private async recoverInPlace(deviceId: string, pos: number): Promise<void> {
+    const player = this.players.get(deviceId);
+    const ctrl = this.ctrls.get(deviceId);
+    if (!player || !ctrl) return;
+    if (this.advancing.has(deviceId)) return;
+    const playerId = player.playerId;
+    this.advancing.add(deviceId);
+    try {
+      await this.playCurrent(deviceId, getEffectiveBaseUrl());
+      // 减 1s 抵消 cast 的启动开销(设备真正出声常晚于 Play 命令),避免定位略超前。
+      const target = Math.max(0, pos - 1);
+      if (target > 1) {
+        markSeekIssued(deviceId);
+        try {
+          await player.seek(target);
+          // ⚠️ 不要在这里写 lastPos:那是「**设备告诉我们**的最后位置」,不是我们的意图。
+          // 写了会把补偿 seek 的目标当成新的基线,下一次 frozen 复查就会把设备仍在报的
+          // 旧读数(高于 seek 目标)误判成"位置恢复了"→ 撤销 → 冻结永远修不掉。
+          // 真机依据:重投到 172.6s、设备仍报 173.6s → 复查判"已推进"→ 取消恢复。
+          log.info(`[QueueController][recover] ${playerId}: 已重投并拉回位置@${Math.round(target)}s`);
+        } catch (e: any) {
+          log.warn(`[QueueController][recover] ${playerId}: 重投成功但位置拉回失败(从头播):${e?.message || e}`);
+        }
+      } else {
+        log.info(`[QueueController][recover] ${playerId}: 已重投(位置 0,无需校准)`);
+      }
+    } finally {
+      this.advancing.delete(deviceId);
+    }
+  }
+
   private async playCurrent(deviceId: string, baseUrl: string): Promise<void> {
     const q = this.queues.get(deviceId);
     const player = this.players.get(deviceId);
@@ -628,7 +857,12 @@ export class QueueController extends EventEmitter {
       // → 5s 超时 → stalled → 重播当前首 → 死循环。
       // 对照 MA:命令发出前先把 _attr_playback_state = PLAYING(乐观设态)。
       ctrl.beginOptimistic(playerId, "pending");
+      // debug:cast 三连(Stop→SetAVTransportURI→Play)的起点 + 目标流地址。
+      // 拖动"投不出去"时,配合下面完成行的耗时能看出是设备慢还是链路断了。
+      const castT0 = Date.now();
+      log.debug(`[QueueController][cast] ${playerId} 起点 idx=${q.currentIndex} song=${fullItem.songId} baseUrl=${baseUrl} dur=${this.knownDuration(fullItem)}`);
       const { mediaUri } = await player.playMedia(fullItem, baseUrl);
+      log.debug(`[QueueController][cast] ${playerId} 完成 ${Date.now() - castT0}ms mediaUri=${mediaUri}`);
       // cast 命令已送达 → 断开连续失败链(下面的 catch 才计失败)。
       this.castFailStreak.delete(deviceId);
       // 乐观窗口阶段 2:命令已送达,现在才起 5s「等设备确认 PLAYING」计时。

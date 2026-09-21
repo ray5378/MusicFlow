@@ -20,6 +20,23 @@ export interface PlayerState {
   duration: number;          // 秒
   mediaUri?: string;         // 当前流 URL,用于检测曲目切换
   updatedAt: number;         // ms epoch,状态最后一次刷新
+  /**
+   * 该读数**不是**设备真实状态,而是「链路/子进程不可用」时的占位(2026-09-21)。
+   *
+   * 为什么必须显式标记(fork 模式 sendspin 实测的「位置归零 / 曲目乱跳」根因):
+   * `createSendspinProxyPlayer.pollState()` 在 RPC 失败时 `.catch()` 成
+   * `{playing:false, positionMs:0}` → 上报给 PlayerController 后**凭空造出**
+   * 一条 `PLAYING → IDLE` 迁移。而 cast 时 `schedulePlayingReport` 刚置过
+   * lastPlaying=PLAYING,于是 tracker 把它判成"自然结束" → `advance` → 切歌;
+   * 若走 `stalled` 通道则被计入"连续卡死"→ 第 2 次放行切歌。
+   * 两者都表现为用户看到的**进度条归零 / 曲目乱跳**。
+   *
+   * 消费方约定(违反即重新引入该 bug):
+   *   · `QueueController.pollAllDevices` —— **不得**把它 reportState 给 tracker;
+   *   · `handleDecision` 的复查分支 —— 不得据它判定"设备确实停了";
+   *   · 它只表示"这次读不到",不表示"设备在 IDLE"。
+   */
+  unavailable?: boolean;
 }
 
 /** 状态迁移比较快照。对照 MA CompareState。PlaybackTracker 据此判断。 */
@@ -75,6 +92,18 @@ export interface ProtocolPlayer {
   setVolume(vol: number): Promise<void>;
   /** 主动查询设备状态(SOAP poll)。GENA 事件路径不依赖此方法。 */
   pollState(): Promise<PlayerState>;
+  /**
+   * 设备此刻是否**真的在线**(可以接收 cast)。可选 —— 未实现即「未知」,调用方按可用处理
+   * (保持与引入该方法之前完全一致的行为)。
+   *
+   * 为什么需要它(2026-09-21):链路(子进程/连接)恢复后要自动续播当前首,但
+   * 「链路恢复」≠「设备回来了」—— fork 模式 sendspin 子进程重启后,它要重新拨号、
+   * 设备要重新入组,这中间 `poll` 会合法地返回"IDLE"(对未知 client 不抛错,
+   * 走 ephemeral 组)。此时盲目 cast 会投进一个不存在的连接:没声音 → 30s 后又被
+   * 冻结看门狗判死 → 第 2 次直接放行切歌(曲目乱跳)。所以续播前必须先问一句
+   * "设备真的在吗"。
+   */
+  isAvailable?(): boolean | Promise<boolean>;
 }
 
 /** 队列快照(对照原 QueueSnapshot,新增 ended 字段)。 */

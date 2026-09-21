@@ -30,6 +30,26 @@ import {
 import { sendspinSupervisor } from "./supervisor.js";
 import { getPlayerController, getQueueController } from "../player/index.js";
 import { getGroupManager, splitMemberId } from "../group/index.js";
+import { createLogger } from "../../utils/logger.js";
+
+// debug:协议层边界日志。sendspin 的 seek 有 in-proc / fork 两条实现、以及
+// 用户组单发第三种入口,统一在这里打「目标秒数 + 模式 + 耗时」—— 拖动后无声时
+// 先用这一行确认「指令有没有到达协议层」,再看下游 playerCore/streamEngine 的 [seek] 行。
+const log = createLogger("Sendspin");
+
+/** 该 sendspin client 此刻是否真的在线且就绪(见 ProtocolPlayer.isAvailable 注释)。
+ *  双模式统一走 getSendspinFront():fork 是镜像代理,in-proc 是真 server。
+ *  用「连接派生」判定(与 onlineSendspinMembers 同口径):client 不在列表 / ready=false
+ *  即视为不在线 —— 此时 cast 会投进 ephemeral 组,没声音但状态显示"在播",最坏。 */
+async function sendspinClientAvailable(clientId: string): Promise<boolean> {
+  try {
+    const { getSendspinFront } = await import("./index.js");
+    const c = (getSendspinFront() as any)?.clients?.get(clientId) as any;
+    return !!c && c.ready !== false;
+  } catch {
+    return false;
+  }
+}
 
 /** 单个 sendspin 客户端抽象成一个 ProtocolPlayer。 */
 export function createSendspinProtocolPlayer(clientId: string): ProtocolPlayer {
@@ -103,21 +123,35 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
     },
     async seek(seconds: number) {
       const { sendspinGroupTransport } = await import("./index.js");
+      const t0 = Date.now();
+      log.debug(`[seek] group=${groupName} 目标=${seconds.toFixed(2)}s 模式=用户组单发 → 下发`);
       await sendspinGroupTransport(groupName, "seek", seconds);
+      log.debug(`[seek] group=${groupName} 目标=${seconds.toFixed(2)}s 下发完成 ${Date.now() - t0}ms`);
     },
     async setVolume(vol: number) {
       const { sendspinGroupTransport } = await import("./index.js");
       await sendspinGroupTransport(groupName, "volume", vol);
     },
+    /** 组内至少有一个 sendspin 成员在线才可 cast(与 onlineSendspinMembers 同口径)。 */
+    async isAvailable() {
+      return (await onlineSendspinMembers(userGroupId).catch(() => [])).length > 0;
+    },
     async pollState(): Promise<PlayerState> {
       const { sendspinGroupPoll } = await import("./index.js");
-      const st = await sendspinGroupPoll(groupName).catch(() => ({ playing: false, positionMs: 0, durationMs: 0 }));
+      // 与单设备 proxy 同款:探不到(pump 组缺席 / 子进程不可用)必须标记 unavailable,
+      // 不能冒充 IDLE(理由见 createSendspinProxyPlayer.pollState 注释)。
+      let unavailable = false;
+      const st = await sendspinGroupPoll(groupName).catch(() => {
+        unavailable = true;
+        return { playing: false, positionMs: 0, durationMs: 0 };
+      });
       return {
         playerId,
         playbackState: st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
+        unavailable,
       };
     },
   };
@@ -232,12 +266,14 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
       );
     },
     async seek(seconds: number) {
+      log.debug(`[seek] client=${clientId} 目标=${seconds.toFixed(2)}s 模式=in-proc → seekCore`);
       seekCore(getServer(), clientId, seconds);
     },
     async setVolume(vol: number) {
       // 只写**组音量**(Sendspin 单设备组的权威音量标度;详见 setVolumeCore 注释)。
       setVolumeCore(getServer(), clientId, vol);
     },
+    isAvailable() { return sendspinClientAvailable(clientId); },
     async pollState(): Promise<PlayerState> {
       const st = pollCore(getServer(), clientId);
       return {
@@ -289,22 +325,42 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
       );
     },
     async seek(seconds: number) {
-      await transport("seek", seconds);
+      const t0 = Date.now();
+      log.debug(`[seek] client=${clientId} 目标=${seconds.toFixed(2)}s 模式=fork → RPC transport`);
+      try {
+        await transport("seek", seconds);
+      } catch (e: any) {
+        // 子进程不在/重启窗口 → RPC 抛错。原实现直接冒泡给路由,日志里看不出根因。
+        log.warn(`[seek] client=${clientId} 目标=${seconds.toFixed(2)}s RPC 失败 ${Date.now() - t0}ms: ${e?.message || e}`);
+        throw e;
+      }
+      log.debug(`[seek] client=${clientId} 目标=${seconds.toFixed(2)}s RPC 返回 ${Date.now() - t0}ms`);
     },
     async setVolume(vol: number) {
       await transport("volume", vol);
     },
+    isAvailable() { return sendspinClientAvailable(clientId); },
     async pollState(): Promise<PlayerState> {
-      // 子进程不在(崩溃重启窗口)→ 报 IDLE,让上层走恢复,不 throw 打断轮询循环。
+      // ⚠️ 子进程不在(崩溃重启窗口 / RPC 25s 超时)时**必须**带 unavailable 标记,
+      // 不能像旧实现那样 `.catch()` 成 {playing:false,positionMs:0} —— 那等于向
+      // PlayerController 撒谎"设备报 IDLE",会凭空造出 PLAYING→IDLE 迁移 →
+      // tracker 判自然结束 → 切歌;stalled 通道还会把它计成"连续卡死"→ 第 2 次放行切歌。
+      // 真机后果:子进程心跳停摆的那 95s 里位置归零、曲目乱跳(2026-09-21 实测 3 次)。
+      // 标记后由 QueueController 决定:不喂 tracker、不计数、等子进程回归后续播。
+      let unavailable = false;
       const st = await sendspinSupervisor
         .rpc<{ playing: boolean; positionMs: number; durationMs: number }>("poll", { clientId })
-        .catch(() => ({ playing: false, positionMs: 0, durationMs: 0 }));
+        .catch(() => {
+          unavailable = true;
+          return { playing: false, positionMs: 0, durationMs: 0 };
+        });
       return {
         playerId,
         playbackState: st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
+        unavailable,
       };
     },
   };

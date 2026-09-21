@@ -673,6 +673,14 @@ let dialTargets: DialTarget[] = [];
 let dialTargetsLoadedFor: string | null = null;
 let redialTimer: ReturnType<typeof setInterval> | null = null;
 const REDIAL_INTERVAL_MS = 60_000;
+/** 补拨时的 connect 超时。局域网握手 <1s,失效地址等满 10s 只会拖住整轮补拨。 */
+const REDIAL_CONNECT_TIMEOUT_MS = 5_000;
+/** 连续多少次「地址不可达」后淘汰记忆目标(见 dialRemembered 里的淘汰分支)。 */
+const STALE_DIAL_FAILS = 3;
+/** "host:port" → 连续失败次数。成功后清零。 */
+const dialFailures = new Map<string, number>();
+/** 补拨单飞闸(同一次只允许一轮在跑)。 */
+let redialInFlight = false;
 let cleanerRegistered = false;
 
 function dialTargetsFile(): string {
@@ -772,24 +780,73 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
 }
 
 async function dialRemembered(srv: SendspinServer): Promise<void> {
-  for (const t of dialTargets.map((x) => ({ ...x }))) {
-    const online = [...srv.clients.values()].some(
-      (c) => c.dialed && c.dialHost === t.host && c.dialPort === t.port,
-    );
-    if (online) continue;
-    // spec:设备明确拒绝重连的 reason(another_server 等)不再自动骚扰,手动 dial 恢复。
-    const suppressed = srv.noAutoRedial.get(`${t.host}:${t.port}`);
-    if (suppressed) {
-      log.info(`sendspin 跳过重拨(设备已拒绝:${suppressed}): ${t.host}:${t.port}`);
-      continue;
+  // 单飞:上一次补拨还没跑完(有失效目标时单次最久要等一个 connect 超时)就跳过这一轮,
+  // 否则 60s 周期会和上一轮叠加,同一批目标被并发重拨。
+  if (redialInFlight) return;
+  redialInFlight = true;
+  try {
+    for (const t of dialTargets.map((x) => ({ ...x }))) {
+      const key = `${t.host}:${t.port}`;
+      const online = [...srv.clients.values()].some(
+        (c) => c.dialed && c.dialHost === t.host && c.dialPort === t.port,
+      );
+      if (online) {
+        dialFailures.delete(key);
+        continue;
+      }
+      // spec:设备明确拒绝重连的 reason(another_server 等)不再自动骚扰,手动 dial 恢复。
+      const suppressed = srv.noAutoRedial.get(key);
+      if (suppressed) {
+        log.info(`sendspin 跳过重拨(设备已拒绝:${suppressed}): ${key}`);
+        continue;
+      }
+      try {
+        // 补拨用**更短**的 connect 超时:局域网设备握手 <1s,5s 足够;10s 只会让
+        // 一个失效目标把整轮补拨拖住(而拿到错误地址恰恰是最常见的失效形态)。
+        await srv.dialPlayer(`ws://${t.host}:${t.port}/sendspin`, REDIAL_CONNECT_TIMEOUT_MS);
+        dialFailures.delete(key);
+        log.info(`sendspin 重拨成功: ${key}`);
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        const count = (dialFailures.get(key) ?? 0) + 1;
+        dialFailures.set(key, count);
+        log.info(`sendspin 重拨失败(60s 后重试): ${key} ${msg}`);
+        // ── 地址已失效的目标:淘汰,交给 mDNS 重新发现 ──
+        //
+        // 病灶(2026-09-21 真机):设备 DHCP 从 192.168.10.245 换到 .246,而记忆里还是
+        // .245 —— 每 60s 重拨一次、线上无限 `EHOSTUNREACH`(实测 44 次)。更糟的是
+        // 每次失败都要等一整个 connect 超时,期间那台**真正在线**的设备也跟着被拖慢;
+        // 而它本来靠 mDNS(_sendspin._tcp)已在 .246 上正常连着了。
+        //
+        // 判据只认**地址层面**的错误(unreachable / down / not found):它们说明"这个
+        // 地址上不是它了",而不是"它在但暂时忙"(ECONNREFUSED / ETIMEDOUT 属于后者,
+        // 设备重启时常见,不清)。连续 STALE_DIAL_FAILS 次才动手,避免抖动误删。
+        // 淘汰是**非破坏性**的:只从 dial_targets 移除(不 purge 设备档案/音量),
+        // 设备一旦在局域网里被 mDNS 看到,discover.ts 会以新地址重新记住它。
+        if (count >= STALE_DIAL_FAILS && isStaleAddressError(msg)) {
+          const before = dialTargets.length;
+          dialTargets = dialTargets.filter((x) => !(x.host === t.host && x.port === t.port));
+          if (dialTargets.length !== before) {
+            await saveDialTargets();
+            dialFailures.delete(key);
+            log.warn(
+              `sendspin 拨号目标已失效(连续 ${count} 次地址不可达:${msg}),移除记忆目标 ${key}`
+              + ` —— 设备换 IP 后会经 mDNS 自动重新发现并记住`,
+            );
+          }
+        }
+      }
     }
-    try {
-      await srv.dialPlayer(`ws://${t.host}:${t.port}/sendspin`, 10_000);
-      log.info(`sendspin 重拨成功: ${t.host}:${t.port}`);
-    } catch (e: any) {
-      log.info(`sendspin 重拨失败(60s 后重试): ${t.host}:${t.port} ${e?.message || e}`);
-    }
+  } finally {
+    redialInFlight = false;
   }
+}
+
+/** 错误文案是否属于「地址层面已失效」(该地址上不再是这台设备)。
+ *  仅这些才允许淘汰记忆目标 —— ECONNREFUSED / ETIMEDOUT 是"在但暂时不应答"
+ *  (设备重启/忙),淘汰会让正常设备失去重连档案,不在此列。 */
+function isStaleAddressError(msg: string): boolean {
+  return /EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|ENOTFOUND|EAI_AGAIN|ENETDOWN/.test(msg);
 }
 
 /** 空闲回收兜底:清掉无成员的组(pump 已停+编码器已关,双重保险)并上报。
