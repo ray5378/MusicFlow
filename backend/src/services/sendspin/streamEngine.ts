@@ -22,6 +22,9 @@ import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, type WindowSource } from "./streamSource.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("Sendspin");
 
 export interface GroupAudio {
   pcm: Float32Array;
@@ -182,6 +185,43 @@ export class GroupPump {
   private dbgPrevTs = 0;
   private paused = false;
   private epoch = 0;
+  /** 推流 pacing 的**锚点对**:「某个播放位置」⇄「它对应的墙钟时刻」。
+   *
+   *  排程公式 `dueMs = paceAnchorWall + (i*FRAME_MS - paceAnchorMs)/speed`。
+   *
+   *  ⚠️ 为什么必须是"锚点对"而不是单一基准时刻:seek 会改写 positionMs 使 `i` 跳变,
+   *  基准必须能表达"位置 i 应在何时播"。早先用「起播时刻 + i*FRAME_MS」的单一基准,
+   *  seek 后 dueMs 会随 i 一起跳:
+   *    · 向前拖 → dueMs 落到很远未来 → 主循环 sleep 掉**整个拖动距离**的时长
+   *      (实测:拖 40s → 静默 40s) —— 即「sendspin 拖动后无法播放」;
+   *    · 向后拖 → dueMs 全部落在过去 → delayMs≤0 → 帧无节制倒灌,瞬间灌爆设备缓冲。
+   *  改用锚点对后,**每次循环都从同一对 (position, wall) 现算** dueMs:seek 只需把锚点
+   *  对改写成 (目标位置, 现在),无需一次性标志 —— 也就不存在"标志被上一轮循环吃掉、
+   *  seek 这一拍丢了基准"的竞态(第一版用布尔标志时实测仍会倒灌 192 帧/300ms)。
+   */
+  private paceAnchorMs = 0;
+  private paceAnchorWall = 0;
+  /** seek 后需重建时间线锚点(timelineBaseUs / cursorUs)。
+   *
+   *  时间戳必须与墙钟同源(见 pushLoop 头部"第三次无声事故"注释)。seek 时:
+   *  `window.seekTo` 要重起 ffmpeg,期间主循环在 WindowEvictedError 上空转 ——
+   *  这段时间 cursorUs 不推进而墙钟在走,窗口就绪后时间戳已落后于真实时间,
+   *  设备端 `(ts - send_ahead) - now` 恒为负 → 立即吐字节 → underrun → 无声。
+   *  故 seek 后必须按当时墙钟重新确立锚点。
+   *
+   *  用**自增序号**而非布尔:主循环可能已经越过了本轮的重锚判断点(seek 恰好插在
+   *  取帧与排程之间),布尔会被这一轮吃掉、seek 的重锚就丢了。序号则让下一轮仍能
+   *  看出"这是一次尚未消费的 seek"。 */
+  private timelineReseed = 0;
+  /** 起播窗口内到达的 seek 目标(ms),由 `play()` 取用后清空。
+   *
+   *  `play()` 会 `await source(...)`,内部要 spawn ffmpeg 并预缓冲(实测数秒,长曲更久)。
+   *  这段时间 pump 已存在但 `running === false` —— 用户"刚点播就拖进度条"完全合理,
+   *  而此刻 seek 只能写 `positionMs`,紧接着就被 `play()` 归零(新曲从 0 开始的语义),
+   *  于是那次拖动被**整条吞掉**:接口返回 success、`[pump][seek]` 日志也打了,
+   *  但音频从 0 开始播 → 用户观感「拖动无效 / 拖了没反应」(240 真机实测复现)。
+   *  故窗口内的目标必须单独留一份,由 `play()` 作为起播位置消费。 */
+  private pendingSeekMs: number | null = null;
   private pcm: Float32Array | null = null;
   private window: PcmWindow | null = null;
   private durationMs = 0;
@@ -215,7 +255,21 @@ export class GroupPump {
     this.songId = songId;
     this.endedNaturally = false;
     this.group.current = { songId, durationMs, title: this.group.current?.title, artist: this.group.current?.artist, album: this.group.current?.album, coverArt: this.group.current?.coverArt };
-    this.group.positionMs = 0;
+    // 起播位置:消费起播窗口内到达的 seek(见 pendingSeekMs 注释)。
+    // 绝不能无条件写 0 —— 那正是「刚点播就拖、拖动被吞」的根因。
+    const startMs = this.pendingSeekMs ?? 0;
+    this.pendingSeekMs = null;
+    this.group.positionMs = startMs;
+    if (startMs > 0 && this.window) {
+      // 起播即跳转:目标大概率不在窗口内,按 -ss 重起 ffmpeg(与运行中 seek 同路径)。
+      void this.window.seekTo(startMs).catch((e: any) => {
+        log.warn(`[pump][play] group=${this.group.name} 起播跳转 ${startMs}ms 失败: ${e?.message || e}`);
+      });
+    }
+    /** pacing 锚点对:起播位置 ⇄ 现在。带 seek 起播时锚点必须是 startMs,
+     *  否则 dueMs 会按 positionMs(=startMs)算出一个远在未来的时刻(见 paceAnchorMs)。 */
+    this.paceAnchorMs = startMs;
+    this.paceAnchorWall = Date.now();
     this.resumeWaiter = null;
     // 主循环不阻塞调用方(playMedia 需尽快返回,由 pollState 反映进度)。
     void this.pushLoop(myEpoch);
@@ -265,18 +319,19 @@ export class GroupPump {
     /** 连续零产出的累计时长(微秒),用于区分「编码器正常攒样」与「编码器失效」。 */
     let starvationUs = 0;
     this.group.timelineBaseUs = 0n; // 起播重置:锚点在首块时按当时墙钟确立
-    /** 起播的墙钟基准(ms):pacing 按它的**绝对时刻**排程,见循环内注释。 */
-    let paceWallMs0 = Date.now();
+    /** 本循环已消费到的 seek 重锚序号(与字段比较,见 timelineReseed 注释)。 */
+    let consumedReseed = this.timelineReseed;
 
     try {
       while (this.running && this.epoch === myEpoch) {
         // 暂停时挂起,等待 resume。
         if (this.paused) {
           await new Promise<void>((r) => { this.resumeWaiter = r; });
-          // ⚠️ resume 后必须把 pacing 基准挪到当前墙钟:暂停期间墙钟照走,
+          // ⚠️ resume 后必须把 pacing 锚点挪到当前墙钟:暂停期间墙钟照走,
           // 若不重置,dueMs 会全部落在过去 → delayMs≤0 → 积压帧被一次性倒给设备
-          // (瞬间灌爆环形缓冲,设备再次失步)。以「当前已播位置」为基准重新对齐。
-          paceWallMs0 = Date.now() - this.group.positionMs / this.speed;
+          // (瞬间灌爆环形缓冲,设备再次失步)。以「当前已播位置」为锚点重新对齐。
+          this.paceAnchorMs = this.group.positionMs;
+          this.paceAnchorWall = Date.now();
           continue;
         }
         const i = Math.floor(this.group.positionMs / FRAME_MS);
@@ -299,22 +354,36 @@ export class GroupPump {
           seg = pcm!.subarray(lo, Math.min(lo + frameSamples, pcm!.length));
         }
 
-        if (firstFrame) {
+        // 时间线锚点:首帧确立;seek 后重建(见 timelineReseed 注释)。
+        // 两条路径共用同一段 —— 时间戳锚点与 pacing 锚点必须一次性同源重设,
+        // 分开写迟早漂移(此前 pacing 在 seek 时完全没被重设,是"拖动后无声"的真凶)。
+        if (firstFrame || this.timelineReseed !== consumedReseed) {
+          const reseed = !firstFrame;
+          consumedReseed = this.timelineReseed;
           firstFrame = false;
-          // pacing 基准锚在时间戳确立的同一刻(首帧 i 必为 0),保证
-          // 「墙钟推进」与「时间戳推进」从同一个零点开始、速率严格一致。
-          paceWallMs0 = Date.now();
           // 锚点 = 墙钟 + 组公共 send_ahead(MA 公式;与帧头同源,故 delta≈0)。
           const aheadUs = this.group.commonSendAheadUs();
           const lead = BigInt(Math.max(aheadUs, FIRST_FRAME_LEAD_US));
-          this.group.timelineBaseUs = nowUs() + lead;
-          cursorUs = this.group.timelineBaseUs;
+          // ⚠️ 锚点必须**严格大于已发出的最后一个时间戳**(= 此刻的 cursorUs)。
+          // 时间线游标按 `round(produced/采样率)` 步进,与墙钟速率几乎相等但不完全相等:
+          // 220 帧后两者会积累出 ±几十~几百 µs 的交叉(高压负载下实测 -21µs / -185µs),
+          // 此时若无条件写成 `nowUs()+lead`,新时间戳会**比上一帧更小** → 时间轴倒退。
+          // 设备端按时间戳排程,倒退是失序信号(虽远低于 hard-sync 阈值,但没理由让它发生)。
+          // 取二者较大值即可:回跳只换内容,时间轴永不倒退;与真值的偏差仅数百 µs,
+          // 相对 800ms 的 send_ahead 是噪声级,不影响 delta≈0 的锚点语义。
+          const anchor = nowUs() + lead;
+          const clamped = anchor > cursorUs ? anchor : cursorUs;
+          this.group.timelineBaseUs = clamped;
+          cursorUs = clamped;
           tsUs = cursorUs;
           logSafe(
             this.server,
             "info",
-            `sendspin timeline anchored: base=${cursorUs} lead=${lead}us (sendAhead=${aheadUs}us) ` +
-            `frameMs=${FRAME_MS} frameSamples=${frameSamples}`,
+            reseed
+              ? `sendspin timeline RE-anchored after seek: pos=${this.group.positionMs}ms base=${cursorUs} lead=${lead}us (sendAhead=${aheadUs}us)` +
+                (clamped > anchor ? ` [clamped: wall=${anchor} ≤ cursor,已保单调]` : "")
+              : `sendspin timeline anchored: base=${cursorUs} lead=${lead}us (sendAhead=${aheadUs}us) ` +
+                `frameMs=${FRAME_MS} frameSamples=${frameSamples}`,
           );
         } else {
           tsUs = cursorUs;
@@ -392,7 +461,7 @@ export class GroupPump {
         // 绝对时刻调度:记录起播墙钟,每帧的到期时刻 = startWall + i*帧长/speed,
         // sleep 到**那个绝对时刻**。某轮处理慢了就自动少睡,把落后补回来;
         // 长期平均严格 = 实时,漂移不累积(这是 MA push_stream 的做法)。
-        const dueMs = paceWallMs0 + (i * FRAME_MS) / this.speed;
+        const dueMs = this.paceAnchorWall + (i * FRAME_MS - this.paceAnchorMs) / this.speed;
         const delayMs = dueMs - Date.now();
         if (delayMs > 0) await sleep(delayMs);
         // 元数据时长与实际解码长度常差几十 ms:解码偏长时 i 永远到不了 total,
@@ -445,6 +514,9 @@ export class GroupPump {
     this.running = false;
     this.resumeWaiter?.();
     this.resumeWaiter = null;
+    // 起播窗口内的 seek 归属**上一首**:stop 意味着这段播放上下文已被丢弃,
+    // 若不清,playCore 的 "stop → 起播新曲" 序列会把上一次拖动带到新曲上。
+    this.pendingSeekMs = null;
     // 旧曲音频立即释放(切歌瞬间,不等新解码覆盖):整包清引用,流式杀进程。
     this.releaseAudio();
   }
@@ -466,16 +538,40 @@ export class GroupPump {
   seek(seconds: number): void {
     const wantMs = Math.max(0, Math.round(seconds * 1000));
     const targetMs = this.durationMs > 0 ? Math.min(this.durationMs, wantMs) : wantMs;
+    // debug:seek 入口(含窗口模式与运行态)。sendspin "拖动后没法播" 的排查起点。
+    log.debug(`[pump][seek] group=${this.group.name} want=${wantMs}ms target=${targetMs}ms dur=${this.durationMs} running=${this.running} paused=${this.paused} window=${!!this.window}`);
     if (this.window) {
       // 同步状态重置(无 await 点),随后 positionMs 赋值即一致;失败(如已停)忽略。
-      void this.window.seekTo(targetMs).catch(() => {});
+      void this.window.seekTo(targetMs).catch((e: any) => {
+        // 窗口重定位失败会被静默吞掉 → 表现为"位置改了但没有声音"。必须留痕。
+        log.warn(`[pump][seek] group=${this.group.name} 窗口重定位失败: ${e?.message || e}`);
+      });
     }
     this.group.positionMs = targetMs;
+    // ---- 时间轴重锚(「拖动后无法播放」的服务端根治点)----
+    // positionMs 一改,主循环下一轮的 `i` 就跟着跳。若不重设 pacing 锚点与时间戳
+    // 锚点,两个后果(都已在真机/单测复现):
+    //   · 向前拖:dueMs 落到很远未来 → 主循环 sleep 掉整个拖动距离 → **无声**;
+    //   · 向后拖:dueMs 全部落在过去 → 无 sleep 连发 → 瞬间灌爆设备环形缓冲
+    //     (实测 192 帧/300ms,正常应 ~12 帧)。
+    // pacing:把锚点对改写为「目标位置 ⇄ 现在」,主循环每次现算即正确(无标志可丢)。
+    this.paceAnchorMs = targetMs;
+    this.paceAnchorWall = Date.now();
+    // 时间戳:自增序号请主循环在下一轮重建(ffmpeg 重起期间的墙钟空洞也必须补偿,
+    // 否则设备端判定"目标时刻已过"直接 underrun)。
+    this.timelineReseed++;
+    // pump 未运行时(起播窗口 / 已停),positionMs 会被随后的 play() 归零 ——
+    // 这里额外留一份,让那次拖动成为 play() 的起播位置(见 pendingSeekMs 注释)。
+    if (!this.running) this.pendingSeekMs = targetMs;
     // 暂停态拖动保持暂停(与 DLNA Seek-in-PAUSED / Web autoplay 快照同语义):
     // running 只表示 pump 存活,paused 才表示用户意图,seek 不得擅自 resume。
+    // ⚠️ 但 running=false 时只置 positionMs 是**不会出声的**(没有循环在取帧) ——
+    // 这条路径由上层负责起播(QueueController/playerCore 的冷起播),日志必须显式区分,
+    // 否则"拖动后无声"会被误判成本函数的问题。
     if (this.running && !this.paused) {
       this.resume();
     }
+    log.debug(`[pump][seek] group=${this.group.name} 已置 positionMs=${targetMs} pacing 重锚${this.running && !this.paused ? " 并 resume" : "(未 resume)"}${this.running ? "" : ` ⚠️pump 未运行,已记起播位置 ${targetMs}ms 交由 play() 消费`}`);
   }
 }
 

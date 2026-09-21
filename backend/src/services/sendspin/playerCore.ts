@@ -224,8 +224,11 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
       // 真组(非 ephemeral 假组):pumpFor 要求完整 SendspinGroup。
       pumpFor(srv, srv.group(clientId)).seek(seconds);
       return;
-    } catch {
+    } catch (e: any) {
       // pump 未起(如 idle 态拖动):落标记,起播/恢复时按它对齐。
+      // ⚠️ 这条静默回退的后果是"位置标记改了但没有音频在动" —— 用户观感即
+      // "拖动后没法播"。必须留痕,否则根因被吞在这一个 catch 里(实测踩过)。
+      log.debug(`[seek] client=${clientId} pump 不可用(落标记 ${seconds}s): ${e?.message || e}`);
     }
   }
   ephemeralOrReal(srv, clientId).positionMs = Math.max(0, seconds * 1000);

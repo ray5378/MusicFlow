@@ -21,6 +21,9 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { SAMPLE_RATE, CHANNELS, ffmpegBin } from "./encoding.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("Sendspin");
 import {
   decodeArgs,
   outputFilters,
@@ -127,6 +130,19 @@ export class PcmWindow {
   private closed = false;
   private paused = false;
   private waiters: Array<() => void> = [];
+  /**
+   * 窗口重定位代数。`seekTo()` 每次真正重定位 +1。
+   *
+   * 为什么必须有:seekTo 会把 `decodedSamples` **重置到目标值**(通常比原值更小)。
+   * 此时若有一个 `slice()` 正在等 `decodedSamples >= hi`(hi 是按**旧位置**算出来的),
+   * 它会一直等一个已不可能按时到达的水位,直到 15s 超时,把 `pushLoop` 整个打死 ——
+   * 真机实测(连续拖动 86 次 seek 后):
+   *   `[sendspin] sendspin pushLoop 异常终止: PcmWindow 等数超时(15000ms)`
+   * 之后 `running=false`,进度条**永久停住不动**。
+   * 有代数后,在飞的等待立刻失效并抛 `WindowEvictedError`,主循环按既有路径
+   * `continue` → 用新的 `positionMs` 重算 lo/hi,一次 seek 的代价就是一次重取。
+   */
+  private gen = 0;
 
   constructor(source: WindowSource, startMs = 0) {
     this.source = source;
@@ -151,8 +167,14 @@ export class PcmWindow {
 
   /** 等到预缓冲(2 秒)或 EOF/失败。首帧 latency 的唯一阻塞点,替代整曲解码等待。 */
   async ready(timeoutMs = SLICE_WAIT_MS): Promise<void> {
+    const gen0 = this.gen;
     const target = this.baseSample + samplesOfSec(PREBUFFER_SEC);
-    await this.waitFor(() => this.decodedSamples >= target || this.eofSample !== null, timeoutMs);
+    // gen 变化 = 窗口已被 seekTo 重定位,预缓冲目标值已失效:立刻返回,
+    // 交给 pushLoop 的首个 slice 按新 position 等真实数据(pendingSeekMs 路径同理)。
+    await this.waitFor(
+      () => this.decodedSamples >= target || this.eofSample !== null || this.gen !== gen0,
+      timeoutMs,
+    );
     if (this.closed) throw new WindowClosedError();
     if (this.failed) throw new WindowFailedError(this.failed);
   }
@@ -167,12 +189,16 @@ export class PcmWindow {
    */
   async slice(lo: number, hi: number, timeoutMs = SLICE_WAIT_MS): Promise<Float32Array> {
     if (hi <= lo) return new Float32Array(0);
+    const gen0 = this.gen;
     await this.waitFor(
-      () => this.decodedSamples >= hi || this.eofSample !== null,
+      () => this.decodedSamples >= hi || this.eofSample !== null || this.gen !== gen0,
       timeoutMs,
     );
     if (this.closed) throw new WindowClosedError();
     if (this.failed) throw new WindowFailedError(this.failed);
+    // 等待期间窗口被 seekTo 重定位 → lo/hi 已属旧坐标系,按"淘汰"处理:
+    // 主循环 continue 后用新 positionMs 重算(见 gen 字段注释)。
+    if (this.gen !== gen0) throw new WindowEvictedError();
     if (lo < this.baseSample) throw new WindowEvictedError();
     const end = this.eofSample !== null ? Math.min(hi, this.eofSample) : hi;
     if (end <= lo) return new Float32Array(0);
@@ -191,10 +217,18 @@ export class PcmWindow {
     if (this.closed) throw new WindowClosedError();
     const target = Math.max(0, Math.floor((ms / 1000) * SAMPLE_RATE * CHANNELS));
     if (!this.failed && target >= this.baseSample && target <= this.decodedSamples) {
+      // debug:命中窗口 → 只挪消费水位,不重起 ffmpeg(零成本路径)。
+      log.debug(`[window][seek] 命中窗口 target=${target} base=${this.baseSample} decoded=${this.decodedSamples} → 仅改下标`);
       this.consumedSamples = target;
       this.maybeResume();
       return false;
     }
+    // debug:未命中(回跳超窗 / 前跳超已解前沿 / 上一次解码失败)→ 杀进程按 -ss 重起,
+    // 会有约 1s 空窗。连续拖动时的成本就在这里,也是 sendspin 拖动体验的关键观测点。
+    log.debug(`[window][seek] 重定位 target=${target} base=${this.baseSample} decoded=${this.decodedSamples} failed=${this.failed ?? "-"} → 重起 ffmpeg(-ss ${(ms / 1000).toFixed(3)})`);
+    // 代数 +1:**先**递增再重置状态 —— 在飞的 slice()/ready() 会在下一次唤醒时
+    // 立刻发现代数变了并放弃旧下标,不会撑到 15s 超时(见 gen 字段注释)。
+    this.gen++;
     this.killProc();
     this.chunks = [];
     this.chunksBytes = 0;
@@ -263,7 +297,14 @@ export class PcmWindow {
       // 每次都留末尾（旧写法有 "length < KEEP 才追加" 的守卫 → 到上限后冻结在流开头）。
       this.stderrFull.push(d);
     });
-    proc.stdout.on("data", (d: Buffer) => this.onData(d));
+    proc.stdout.on("data", (d: Buffer) => {
+      // ⚠️ 世代守卫:被 killProc 掉的旧 ffmpeg,管道里已缓冲的 stdout 仍可能再吐一批。
+      // 若不挡,旧 `-ss` 偏移的音频会被灌进**刚重定位**的窗口 —— `decodedSamples` 被抬到
+      // 错误位置,且块内容与新 baseSample 错位(PcmWindow 的绝对下标语义直接被破坏)。
+      // 同一个 spawn 里 `error` / `close` 两个 handler 一直有这道守卫,`data` 这条此前漏了。
+      if (this.proc !== proc) return;
+      this.onData(d);
+    });
     proc.on("error", (e: Error) => {
       if (this.proc !== proc) return;
       this.failed = `ffmpeg 进程错误: ${e?.message || e}`;

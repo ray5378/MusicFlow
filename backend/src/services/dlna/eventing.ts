@@ -22,6 +22,9 @@ import { EventEmitter } from "events";
 import { DlnaDevice } from "./discovery.js";
 import { notifyTrackChanged } from "./control.js";
 import { PlaybackState, type PlayerState } from "../player/types.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("GENA");
 
 const AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1";
@@ -179,6 +182,10 @@ class EventManager extends EventEmitter {
       }
       this.states.set(deviceId, st);
       const prevState = prev.state;
+      // debug:GENA 事件的落地结果。**进度"回退"的一个可能源头就在这里** ——
+      // 设备把过期/乱序的 RelTime 用事件推回来,盖掉刚 seek 的位置。配合上层
+      // [PlayerController][report] 的原始上报值,能直接看出是设备报错还是我们算错。
+      log.debug(`[GENA] ${deviceId} svc=${svcIdx} state=${st.state ?? "-"}(prev ${prevState ?? "-"}) pos=${st.position ?? "-"} dur=${st.duration ?? "-"} vol=${st.volume ?? "-"}`);
       this.emit("state_changed", deviceId, st);
       // 不再 emit track_ended 直接触发 queue。改为上报 PlayerController,
       // 由上层去抖 + 状态迁移判断决策切歌(对照 MA:player 上报状态 → controller 决策)。
@@ -339,6 +346,9 @@ class EventManager extends EventEmitter {
     const prev = this.states.get(deviceId) || { updatedAt: 0 };
     const st: DeviceEventState = { ...prev, position, updatedAt: Date.now() };
     this.states.set(deviceId, st);
+    // debug:seek 后我们主动把新位置写进事件缓存并推 WS。若 UI 随后又"退回"旧值,
+    // 说明这条推送之后还有一条更陈旧的样本(轮询/GENA)把它盖了 —— 顺序在这两行日志里。
+    log.debug(`[GENA][setPosition] ${deviceId} ${prev.position ?? "-"} → ${position}s(主动推送)`);
     this.emit("state_changed", deviceId, st);
   }
 

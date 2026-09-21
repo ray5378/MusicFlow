@@ -1171,8 +1171,16 @@ export const usePlayerStore = defineStore("player", () => {
     st.currentTime = time; updateCastLyric(st);
     const timer = seekTimers.get(st.peerId);
     if (timer) clearTimeout(timer);
+    // console.debug (Verbose level in devtools): el-slider @input fires on every drag
+    // tick, so this shows how many ticks one drag produced and how many POSTs actually
+    // went out after the 250ms debounce -- i.e. whether the front end itself is
+    // fanning out a re-cast storm. Backend logs carry the matching "seek" lines.
+    console.debug(`[castSeek] ${st.peerId} ui=${time.toFixed(2)}s (trailing debounce 250ms)`);
     seekTimers.set(st.peerId, setTimeout(() => {
       seekTimers.delete(st.peerId);
+      console.debug(`[castSeek] ${st.peerId} POST /seek seconds=${time.toFixed(2)}`);
+      // 置护栏必须在 POST **之前**:请求在途期间就可能有一次轮询返回旧位置。
+      seekIssued.set(st.peerId, { at: Date.now(), target: time });
       api.post(peerApi(st.peerId, "/seek"), { seconds: time }).catch(() => {});
     }, 250));
   }
@@ -1224,6 +1232,19 @@ export const usePlayerStore = defineStore("player", () => {
   }
   const volumeIssuedAt = new Map<string, number>(); // 每设备最近一次下发音量的时刻(ms)
   let transportIssuedAt = 0; // 最近一次下发播放/暂停命令的时刻(ms)
+  /**
+   * 每设备最近一次下发 seek 的「时刻 + 目标秒」。**Web 端此前唯独缺这一段护栏**
+   * (卡片有 `_seekIssuedAt`、客户端有 `_seekIssuedAtMs`、HA 集成有 `seek_guard_until`,
+   * 只有 Web 的 castPoll 无条件采纳上报),于是轮询读到的"设备尚未生效的旧位置"
+   * 会直接把进度条拽回拖动前 —— 这就是 Web 上「拖完又跳回原位」的直接原因。
+   *
+   * 判据与服务端 `dlna/control.ts` 的 seekGuards 完全同构:预期位置 = 目标 + 已过时间,
+   * 偏离超过容差即视为陈旧采样、不采纳。服务端已做权威过滤,这里保留一层是为了
+   * 覆盖「请求在途 / 服务端尚未处理」的往返窗口,两侧共用同一组容差语义。
+   */
+  const seekIssued = new Map<string, { at: number; target: number }>();
+  const SEEK_UI_GUARD_MS = 6000;
+  const SEEK_UI_TOLERANCE_SEC = 2.5;
 
   // Per-peer poll: mirrors backend transport state + queue into the peer's
   // RemoteState. Each peer has its own timer, so multiple targets are tracked
@@ -1250,7 +1271,28 @@ export const usePlayerStore = defineStore("player", () => {
           const res = await api.get(peerApi(st.peerId, "/status"), { timeout: 10000 });
           const s = res.data || {};
           st.lastCastState = s.state || "STOPPED";
-          if (typeof s.position === "number") st.currentTime = s.position;
+          // console.debug: the single most useful line when the progress bar "jumps
+          // back" after a drag. Compare the position the device reports (s.position)
+          // with what the UI currently shows (st.currentTime): if the poll value is
+          // older than a seek we just issued, the revert is an echo of a stale sample.
+          console.debug(`[castPoll] ${st.peerId} state=${st.lastCastState} dev=${s.position} ui=${st.currentTime.toFixed(2)} dur=${s.duration}`);
+          if (typeof s.position === "number") {
+            // seek 后不采纳「与预期位置不符」的读数(详见 seekIssued 注释)。
+            const g = seekIssued.get(st.peerId);
+            let adopt = true;
+            if (g && Date.now() - g.at <= SEEK_UI_GUARD_MS) {
+              const elapsed = (Date.now() - g.at) / 1000;
+              const playing = s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
+              const expected = g.target + (playing ? elapsed : 0);
+              adopt = Math.abs(s.position - expected) <= SEEK_UI_TOLERANCE_SEC;
+              if (!adopt) {
+                console.debug(`[castPoll] ${st.peerId} 丢弃 seek 后偏离读数 dev=${s.position} 预期=${expected.toFixed(1)} 目标=${g.target}(距 seek ${Date.now() - g.at}ms)`);
+              }
+            } else if (g) {
+              seekIssued.delete(st.peerId); // 窗到期,恢复正常采纳
+            }
+            if (adopt) st.currentTime = s.position;
+          }
           if (typeof s.duration === "number" && s.duration > 0) st.duration = s.duration;
           // 播放状态判定(自愈):
           // 1) 后端 state 明确为 PLAYING/playing/STARTED → 在播;

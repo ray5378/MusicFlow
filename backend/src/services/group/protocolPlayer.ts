@@ -90,16 +90,25 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
   const playerId = `group:${groupId}`;
 
   async function fanOut(
+    opName: string,
     op: (p: ProtocolPlayer) => Promise<unknown>,
   ): Promise<{ fulfilled: number; rejected: number }> {
     const members = getOnlineMemberIds(groupId);
-    if (members.length === 0) return { fulfilled: 0, rejected: 0 };
-    const results = await Promise.allSettled(members.map(d => op(createDlnaProtocolPlayer(d))));
-    const rejected = results.filter(r => r.status === "rejected");
-    if (rejected.length > 0) {
-      log.warn(`[group] ${groupId}: ${rejected.length}/${members.length} 成员命令失败`);
+    if (members.length === 0) {
+      log.debug(`[group][${opName}] ${groupId}: 无在线 DLNA 成员,跳过扇出`);
+      return { fulfilled: 0, rejected: 0 };
     }
-    return { fulfilled: results.length - rejected.length, rejected: rejected.length };
+    const t0 = Date.now();
+    const results = await Promise.allSettled(members.map(d => op(createDlnaProtocolPlayer(d))));
+    // debug:逐成员记录失败者 —— 原实现只打「N/M 失败」总数,查「到底是谁没跟上」
+    // (组内 seek 后某台音箱停在旧位置)时无从下手。
+    const failed = results
+      .map((r, i) => (r.status === "rejected" ? `${members[i]}(${r.reason?.message || r.reason})` : null))
+      .filter((x): x is string => x !== null);
+    if (failed.length > 0) {
+      log.warn(`[group][${opName}] ${groupId}: ${failed.length}/${members.length} 成员失败 ${Date.now() - t0}ms → ${failed.join(", ")}`);
+    }
+    return { fulfilled: results.length - failed.length, rejected: failed.length };
   }
 
   /** sendspin 子集单发组指令(共享 pump,非逐成员扇出)。无 sendspin 成员直接跳过。 */
@@ -138,11 +147,23 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       // 上报用的 mediaUri 取首个成功的(状态派生仍走 leader,见 pollState)。
       return (ok as PromiseFulfilledResult<{ mediaUri: string }>).value;
     },
-    async stop() { await fanOut(p => p.stop()); await spinOp(p => p.stop()); },
-    async pause() { await fanOut(p => p.pause()); await spinOp(p => p.pause()); },
-    async resume() { await fanOut(p => p.resume()); await spinOp(p => p.resume()); },
-    async seek(seconds: number) { await fanOut(p => p.seek(seconds)); await spinOp(p => p.seek(seconds)); },
-    async setVolume(vol: number) { await fanOut(p => p.setVolume(vol)); await spinOp(p => p.setVolume(vol)); },
+    async stop() { await fanOut("stop", p => p.stop()); await spinOp(p => p.stop()); },
+    async pause() { await fanOut("pause", p => p.pause()); await spinOp(p => p.pause()); },
+    async resume() { await fanOut("resume", p => p.resume()); await spinOp(p => p.resume()); },
+    async seek(seconds: number) {
+      // debug:组 seek 是「DLNA 扇出 + sendspin 组单发」两条独立路径 ——
+      // 一条成功一条失败时,组内成员会停在两个不同时间轴(组内不同步的根因),
+      // 所以这里必须把两路的结果分别打出来。
+      const t0 = Date.now();
+      const dlna = await fanOut("seek", p => p.seek(seconds));
+      const spinCount = splitGroupMembers(groupId).spin.length;
+      await spinOp(p => p.seek(seconds));
+      log.debug(
+        `[group][seek] ${groupId} 目标=${seconds.toFixed(2)}s DLNA ${dlna.fulfilled}/${dlna.fulfilled + dlna.rejected}`
+        + ` sendspin=${spinCount} 耗时 ${Date.now() - t0}ms`,
+      );
+    },
+    async setVolume(vol: number) { await fanOut("setVolume", p => p.setVolume(vol)); await spinOp(p => p.setVolume(vol)); },
     async pollState(): Promise<PlayerState> {
       const leader = getGroupLeader(groupId);
       if (!leader) {

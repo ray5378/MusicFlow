@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { PcmWindow, WindowClosedError, WINDOW_HIGH_SEC, resolveSendspinAf } from "./streamSource.js";
+import { PcmWindow, WindowClosedError, WindowEvictedError, WINDOW_HIGH_SEC, resolveSendspinAf } from "./streamSource.js";
 import { decodeToF32, ffmpegBin, SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { saveAnalysis, deleteAnalysis } from "../audio/analysisStore.js";
 import { parseLoudnorm } from "../audio/loudness.js";
@@ -19,6 +19,7 @@ const SPOOK = (sec: number) => Math.floor(sec * SR * CH); // 秒 → 绝对交�
 
 let tmpDir = "";
 let wav30 = "";
+let wav120 = "";
 let ref30: Float32Array | null = null;
 
 function maxAbsDiff(a: Float32Array, b: Float32Array): number {
@@ -64,6 +65,16 @@ beforeAll(async () => {
     "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-y", wav30,
   ]);
   ref30 = await decodeToF32(new Uint8Array(fs.readFileSync(wav30)));
+  // 重定位代数用例需要一条**远长于背压高水位(30s)**的素材:
+  // 窗口只在消费前沿之后攒 WINDOW_HIGH_SEC=30s 就 pause stdout,所以 30s 素材会被
+  // 一次解完(decoded 直接到 EOF),根本拦不住 slice,断言就变成"看 ffmpeg 手速"。
+  // 120s 素材下 decoded 恒定被压在 ~30s,seek 到 50s 必然是"窗口外重定位",确定可复现。
+  wav120 = path.join(tmpDir, "tone-120s.wav");
+  execFileSync(ffmpegBin(), [
+    "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=120:sample_rate=48000",
+    "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-y", wav120,
+  ]);
 }, 60_000);
 
 afterAll(() => {
@@ -302,5 +313,46 @@ describe("stderr 尾部保留(P1-2 修复):长曲边播边测不再静默失效"
       if (prev === undefined) delete process.env.FFMPEG_PATH;
       else process.env.FFMPEG_PATH = prev;
     }
+  }, 30_000);
+});
+
+// ==================== 重定位代数(拖动风暴回归) ====================
+//
+// 真机实测:连续拖动 86 次 seek 后
+//   `[sendspin] sendspin pushLoop 异常终止: PcmWindow 等数超时(15000ms)`
+// → running=false,进度条**永久停住**。根因:seekTo 把 decodedSamples 重置到更小值,
+// 而先前发出的 slice() 还在等一个按**旧位置**算出的 hi,永远等不到 → 15s 超时外抛。
+// 修法:窗口带重定位代数,在飞等待立刻失效并抛 WindowEvictedError(主循环 continue 重取)。
+describe("PcmWindow 重定位代数", () => {
+  it("slice 等待期间 seekTo 重定位 → 立刻抛 WindowEvictedError,不等满 15s", async () => {
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false } });
+    await w.ready(10_000);
+    // decoded 被背压高水位压在 ~30s,所以 @60s 一定拦得住(必然进入等待)
+    expect(w.decoded).toBeLessThan(SPOOK(60));
+    const far = SPOOK(60);
+    const pending = w.slice(far, far + 2400, 15_000);
+    // 让它真正挂进等待队列,再重定位到窗口外(@50s 远超已解前沿 → 走重起 ffmpeg 那条路)
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = Date.now();
+    expect(await w.seekTo(50_000)).toBe(true);
+    await expect(pending).rejects.toBeInstanceOf(WindowEvictedError);
+    // 关键断言:是"立刻失效"而不是撑到 15s 超时(那样 pushLoop 就被打死了)
+    expect(Date.now() - t0).toBeLessThan(3000);
+    w.close();
+  }, 30_000);
+
+  it("seekTo 重定位后窗口水位恰好等于目标(旧进程残留 stdout 不得灌进来)", async () => {
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false } });
+    await w.ready(10_000);
+    expect(w.decoded).toBeGreaterThan(SPOOK(1));
+    // @50s 在已解前沿(~30s)之外 → 必然走重定位
+    expect(await w.seekTo(50_000)).toBe(true);
+    // 重定位瞬间水位必须精确落在目标(SPOOK(50));若旧 ffmpeg 的缓冲 stdout 漏进来,
+    // 这里会立刻偏大 —— 那正是 decodedSamples 被抬到错位置的老 bug。
+    expect(w.decoded).toBe(SPOOK(50));
+    // 且新进程随后能正常续上
+    const seg = await w.slice(SPOOK(50), SPOOK(50) + 2400, 15_000);
+    expect(seg.length).toBe(2400);
+    w.close();
   }, 30_000);
 });
