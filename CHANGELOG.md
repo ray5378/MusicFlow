@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.3] - 2026-09-21
+
+### 修复
+
+- **插件沙箱交互型调用超时 30s→20s**：15s 配额过窄，20s 兼顾等待与卡死可杀；重建预算 30s 不变。
+- **沙箱 OOM 清理排空 pending jobs**：被 interrupt 打断的 async continuation 残留会钉住 `gc_obj_list`，`dispose` 即触发 QuickJS teardown 断言 abort（WASM 层 SIGABRT，宿主 try/catch 抓不住，直接杀死整个 vitest worker、全量陪葬）。`oomCleanup` 前后各排空一次；`sandbox.test.ts` 连续 3 次 27/27 通过。
+- **sendspin `seekCore` 类型修正**：v4.0.2 带入的 TS2345（ephemeral 假组传给 `pumpFor`），改用 `srv.group` 取真组，`tsc` 干净。
+
+### 构建信息
+
+- Docker 镜像：`ray5378/musicflow:4.0.3` + `:latest`
+
 ## [4.0.2] - 2026-09-21
 
 ### 修复 —— 拖动进度条问题（分播放器逐一修复）
