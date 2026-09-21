@@ -1,0 +1,23 @@
+# gitleaks 误报指纹豁免(--gitleaksignore 语法:一行一个 fingerprint)
+#
+# 为什么需要:定时任务(schedule)的 gitleaks 走**全量历史**扫描,而 push 触发的
+# 扫描只查本次 push 的提交范围 —— 所以这条历史误报只有定时任务会红
+# (2026-09-21 的 schedule 运行因此失败,run 35574334882)。
+#
+# 命中的是历史上 vendor 进来的第三方只读参考实现,不是本仓代码,也不是凭据:
+#
+#   refs/music-assistant-server/music_assistant/providers/filesystem_cloud/base.py:103
+#     raise SetupFlowError("A client secret is required", translation_key="required")
+#
+#   —— Home Assistant setup flow 的错误文案。gitleaks 的 generic-api-key 规则按
+#   「client secret + 上下文关键字」命中,熵值 3.625(偏低)。该目录已在后续提交里
+#   从工作区移除,但 git 历史仍在。
+#
+# 为什么用指纹豁免而不是 .gitleaks.toml:
+#   实测加 .gitleaks.toml(即便写了 [extend] useDefault = true)会改变扫描语义 ——
+#   同一份历史里凭空多报一条(3rd-party/libflac.js 的 base64 常量表,熵 6.02),
+#   即「豁免一条、冒出一条」。指纹豁免是**纯减法**:不动规则、不动默认豁免,
+#   只精确屏蔽这一条,新出现的真实凭据 fingerprint 不同,照样会被拦。
+#
+# 粒度说明:fingerprint = 提交:路径:规则:行号。只对这一个历史位置生效。
+e93716473d708ade584975930d84c56d04094151:refs/music-assistant-server/music_assistant/providers/filesystem_cloud/base.py:generic-api-key:103
