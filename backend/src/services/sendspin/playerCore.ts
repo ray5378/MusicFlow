@@ -219,16 +219,16 @@ export function resumePumpCore(srv: SendspinServer | null, clientId: string): vo
  *  触发播完→跳歌/停播)——「sendspin 拖动后无法播放/进度不对」的根因。
  *  GroupPump.seek 内含 clamp + 流式窗口 -ss 重起 + resume,与 play/stop 同口径。 */
 export function seekCore(srv: SendspinServer | null, clientId: string, seconds: number): void {
-  const g = ephemeralOrReal(srv, clientId);
   if (srv) {
     try {
-      pumpFor(srv, g).seek(seconds);
+      // 真组(非 ephemeral 假组):pumpFor 要求完整 SendspinGroup。
+      pumpFor(srv, srv.group(clientId)).seek(seconds);
       return;
     } catch {
       // pump 未起(如 idle 态拖动):落标记,起播/恢复时按它对齐。
     }
   }
-  g.positionMs = Math.max(0, seconds * 1000);
+  ephemeralOrReal(srv, clientId).positionMs = Math.max(0, seconds * 1000);
 }
 
 /** 音量核心:**只写组音量**(Sendspin 单设备组的权威音量标度)。
