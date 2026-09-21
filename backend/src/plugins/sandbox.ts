@@ -27,8 +27,8 @@ import { dirname, join } from "path";
 
 const MEMORY_LIMIT = 256 * 1024 * 1024; // 单插件内存上限 256MB
 const STACK_LIMIT = 1024 * 1024;        // 单插件栈上限 1MB
-const INVOKE_TIMEOUT_MS = 30000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
-const REBUILD_TIMEOUT_MS = 30000;       // OOM 自愈重建的 init 全程预算:触顶可能已耗尽旧 deadline(30s),
+const INVOKE_TIMEOUT_MS = 20000;        // 交互型调用超时(卡死可杀);长耗时方法见 manifest.longRunning
+const REBUILD_TIMEOUT_MS = 30000;       // OOM 自愈重建的 init 全程预算:触顶可能已耗尽旧 deadline(20s),
                                         // 重建时若沿用旧 deadline,interrupt handler 会立即中断重建代码
                                         // (CI 实测 rebuild 失败 "interrupted" → 沙箱半死)。重建应给足
                                         // 独立预算(init 加载 stdlib + 插件代码正常 <1s,30s 宽裕且不失控)。
@@ -57,7 +57,7 @@ const MEMORY_LIMIT_MB = MEMORY_LIMIT / 1024 / 1024;
 const OOM_HINT = `插件疑似内存泄漏(guest 全局数据跨调用累积,如把搜索结果缓存在模块级变量)。已自动重建沙箱,本次调用失败;若频繁出现请检查插件的全局缓存/累积逻辑`;
 
 /** 沙箱限制类错误:全链路可辨识(稳定错误码 + 中文说明 + 修复提示)。
- *  路由 / jobRunner 透传 sandboxCode/hint 给前端,避免「timeout of 30000ms exceeded」
+ *  路由 / jobRunner 透传 sandboxCode/hint 给前端,避免「timeout of 20000ms exceeded」
  *  「HTTP undefined」这类无从排查的裸报错。 */
 export class SandboxLimitError extends Error {
   readonly sandboxCode: string;
@@ -320,8 +320,8 @@ export class SandboxedPlugin {
   private commListeners = new Map<QuickJSHandle, (message: any) => void>();
   /** 墙钟基准:仅用于 init/重建代码执行(此期间无在途调用,activeCalls 为空)。
    *  注意:不要在 invoke/invokeSync 里写这个字段——它曾是唯一的看门狗状态,
-  *  并发调用互相覆盖(8 worker 下 A 的 30s 配额被 B 重置、重建的 30s 预算被
-  *  在途调用踩回 30s → interrupt 误杀重建代码,沙箱半死,pass3 事故根因)。 */
+  *  并发调用互相覆盖(8 worker 下 A 的 20s 配额被 B 重置、重建的 30s 预算被
+  *  在途调用踩回 20s → interrupt 误杀重建代码,沙箱半死,pass3 事故根因)。 */
   private deadline = Date.now() + INVOKE_TIMEOUT_MS;
   /** 按调用登记的看门狗上下文:invoke 可并发(guest JS 在 await 边界交错执行,
    *  各调用的 pump 循环共享同一 runtime),中断裁决必须按「活跃调用各自的状态」
@@ -368,7 +368,7 @@ export class SandboxedPlugin {
       for (const call of this.activeCalls.values()) {
         if (call.killed) return true;
         if (!call.isLong) {
-          // 交互型:墙钟 30s 配额(用户等一个搜索/歌词不该无限等待)。
+          // 交互型:墙钟 20s 配额(用户等一个搜索/歌词不该无限等待)。
           if (now > call.deadline) return true;
         } else if (now - call.lastProgressAt > cpuIdleLimitMs()) {
           // 长耗时批量任务:软看门狗——连续 cpuIdleLimitMs 无任何 host 调用完成
@@ -541,7 +541,7 @@ export class SandboxedPlugin {
     try {
       // 内存超限后 runtime.dispose() 会抛 QuickJS gc 断言异常(实测 abort 可捕获),
       // dispose 内部已 try/catch 吞掉;全新 init 不受旧 runtime 状态影响。
-      // 关键:OOM 触顶可能已耗尽旧 deadline(默认 30s),init() 会重新设置 interrupt
+      // 关键:OOM 触顶可能已耗尽旧 deadline(默认 20s),init() 会重新设置 interrupt
       // handler(Date.now() > this.deadline),若沿用旧 deadline,重建代码一执行就被
       // 中断 → rebuild 失败 "interrupted" → 沙箱半死(CI 实测)。重置 deadline 给
       // 重建独立预算(REBUILD_TIMEOUT_MS),init 全程不被看门狗打断。
@@ -1090,7 +1090,7 @@ export class SandboxedPlugin {
     }
   }
 
-  /** 方法级超时:manifest.longRunning[method] 声明的长耗时预算(cap 5 分钟),否则默认 30s。 */
+  /** 方法级超时:manifest.longRunning[method] 声明的长耗时预算(cap 5 分钟),否则默认 20s。 */
   private timeoutForMethod(method: string): number {
     try {
       const lr = this.manifest?.longRunning;
@@ -1145,7 +1145,7 @@ export class SandboxedPlugin {
     settledPromise.then(() => { done = true; }, () => { done = true; });
     // 长耗时批量任务:无墙钟硬超时——循环一直推进,退出靠 done(任务完成)或
     // interrupt 软看门狗(CPU 空转 60s 杀)。等网络/DB(await 挂起)无限合法,
-    // 支持任意规模歌单/封面/歌词;交互型调用维持 30s 墙钟。
+    // 支持任意规模歌单/封面/歌词;交互型调用维持 20s 墙钟。
     // 看门狗状态读自己的在途条目(callId);条目缺失(重建清场/上层未登记)时
     // 该调用视为已失效,不再参与空转判定,循环仅靠 done/墙钟退出。
     const isLong = timeoutMs !== INVOKE_TIMEOUT_MS;
