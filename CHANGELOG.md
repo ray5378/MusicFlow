@@ -2,6 +2,61 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.4] - 2026-09-21
+
+### 新增
+
+- **日志等级运行时可调**：新增设置键 `log.level` + admin API（`GET/PUT /rest/api/v1/admin/log-settings`），
+  设置页新增「日志等级」卡片。此前只能靠启动时的 `LOG_LEVEL` 环境变量定死，排查线上问题要么重启、
+  要么零日志。fork 出去的子进程有独立 logger 实例，故新增 `setLogLevel` IPC 显式下发
+  （否则推流/解码侧的 debug 明细不出现）。
+- **请求级 trace id**：`runWithTrace()` 给 `/rest`、`/api`、`/webhooks` 请求生成短 id 放进
+  `AsyncLocalStorage`，debug 日志自动附加 `tid=`。一次「拖动进度条」会级联 HTTP → QueueController
+  → DLNA SOAP → sendspin 多层，靠 tid 才能把跨层日志串成一条链。静态资源不生成（纯噪音）。
+
+### 修复 —— 播放链路
+
+- **PLAYING 但位置冻结无看门狗**（用户观感＝「进度条卡住不动」，永不自愈）：实测 sendspin 报
+  `PLAYING pos=173.6 dur=280` 三分钟不推进、pump 零日志，而现有的 IDLE 卡死（15s）与结束兜底（8s）
+  都够不着。新增 `frozen` 判据（位置**真变化**的墙钟超 30s）→ 就地重投当前首并拉回位置
+  （**不切歌**），与 stalled 共用连续计数；seek 冷静期内与复查后撤销。
+- **链路不可用却冒充设备状态**：子进程僵死期间 RPC 25s 超时，旧代码 catch 成
+  `{playing:false,pos:0}` ＝ 向 tracker 谎报「设备停了」→ 凭空造出 PLAYING→IDLE 迁移 →
+  判「自然结束」切歌。新增 `PlayerState.unavailable`：sendspin 三种 player 与 DLNA 的 `pollState`
+  在拿不到真实读数时标它，QueueController 读到即不喂 tracker、不计数、登记 linkLost，等真恢复再续播。
+- **DLNA 在设备未发现时冒充 STOPPED**：`getDeviceStatus` 的早退分支在设备不在发现缓存时返回
+  `STOPPED pos=0`，容器重启 / 重新发现窗口期会被读成「设备真停了」，连续 2 次判卡死后**放行切歌**
+  （真机复现：重启后 35s 队列凭空少一首、位置归零，极易被误判成 seek bug）。修法同款：标
+  `unavailable` 不冒充。判据用**发现缓存**而非 `runtimes` 的 available 位——后者对未知设备乐观返回 true。
+- **「链路恢复」≠「设备回来了」**：fork 模式 sendspin 子进程重启后要重新拨号、设备要重新入组，
+  这中间 `poll` 会合法地回 IDLE。盲目 cast 会投进一个不存在的连接（没声音但状态显示在播）→
+  30s 后被冻结看门狗判死 → 第 2 次直接放行切歌。新增 `ProtocolPlayer.isAvailable?()` 作为续播前门，
+  不在线就**保留** linkLost 等下一拍（5s 后）再试。
+- **子进程僵死窗口过长**：心跳看门狗 3×+5s(95s) → 2×+5s(65s)，检查间隔 30s→10s（最坏 125s→75s）；
+  超时日志补「最后消息 Xs 前 | 最后 RPC op | 悬挂 RPC 数」，下次能直接看出卡在哪一步。
+- **拨号目标过期不重发现**：`dialRemembered()` 只重拨记忆中的 host:port、不做 mDNS 重解析，
+  设备 DHCP 换 IP（实测 .245→.246）后旧目标无限 `EHOSTUNREACH`，把子进程拖住并连带所有 RPC 25s 超时。
+  现在连续 3 次**地址类**错误（EHOSTUNREACH/ENETUNREACH/EHOSTDOWN/ENOTFOUND/EAI_AGAIN/ENETDOWN）
+  即淘汰记忆目标并落盘（非破坏性，mDNS 会重新发现新 IP），并加单飞与 5s 连接超时。
+
+### 修复 —— 拖动进度条（四端）
+
+- **Web 端缺 seek 护栏**：`castPoll` 此前**无条件采纳**设备上报位置，设备实际生效有延迟时轮询读到的
+  仍是拖动前的旧位置 → 进度条被拽回。新增每设备 `seekIssued`（时刻+目标）护栏，与卡片
+  `_seekIssuedAt`、客户端 `_seekIssuedAtMs`、HA 集成 `seek_guard_until` 同语义，且必须在 POST
+  **之前**置位（请求在途期间就可能有一次轮询返回旧位置）。
+- **服务端 DLNA `seekGuard`**：拖动后设备把陈旧读数报回来的窗口内，丢弃陈旧值、采纳落位值、到期解除。
+  判定抽成纯函数以便 CI 用固定时间轴钉死（失效形态是偶发跳回，手测极难复现）。
+- **sendspin 重定位代数化**：「校验失败→重发」此前会让 `seekDevice` 末尾派生新 gen 的新校验 →
+  每秒一次的无限风暴；更隐蔽的后果是每次重发都重设护栏 → 位置恒被 `seekExpectedPosition` 顶住 →
+  **进度卡住不前进**。现在重发恰好一次（`{verify:false}`），设备恒报 0（HiVi/MUZO 播转码 chunked 流）
+  时直接放弃落位校验。
+- **起播窗口内拖动**：拖动落在 pump 尚未运行的空档时记下起播位置交由 `play()` 消费，不再丢弃。
+
+### 构建信息
+
+- Docker 镜像：`ray5378/musicflow:4.0.4` + `:latest`
+
 ## [4.0.3] - 2026-09-21
 
 ### 修复
