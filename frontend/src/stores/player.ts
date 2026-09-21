@@ -1286,7 +1286,7 @@ export const usePlayerStore = defineStore("player", () => {
               const expected = g.target + (playing ? elapsed : 0);
               adopt = Math.abs(s.position - expected) <= SEEK_UI_TOLERANCE_SEC;
               if (!adopt) {
-                console.debug(`[castPoll] ${st.peerId} 丢弃 seek 后偏离读数 dev=${s.position} 预期=${expected.toFixed(1)} 目标=${g.target}(距 seek ${Date.now() - g.at}ms)`);
+                console.debug(`[castPoll] ${st.peerId} dropping post-seek off-target reading dev=${s.position} expected=${expected.toFixed(1)} target=${g.target} (${Date.now() - g.at}ms since seek)`);
               }
             } else if (g) {
               seekIssued.delete(st.peerId); // 窗到期,恢复正常采纳
