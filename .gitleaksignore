@@ -1,24 +1,33 @@
 # gitleaks 误报指纹豁免(语法:一行一个 fingerprint,`#` 开头为注释)
 #
-# 历史误报位置:
+# ── 豁免 1:第三方只读参考实现里的错误文案(真正的误报) ───────────────────
 #   refs/music-assistant-server/music_assistant/providers/filesystem_cloud/base.py:103
 #
 # 该行是 Home Assistant setup flow 里的一句错误文案(提示需要填写客户端密钥),
-# 属于第三方只读参考实现 —— 不是本仓代码,更不是凭据。gitleaks 的 generic-api-key
+# 属第三方只读参考实现 —— 不是本仓代码,更不是凭据。gitleaks 的 generic-api-key
 # 规则按「客户端密钥关键词 + 相邻引号字符串」命中,熵值仅 3.625(偏低)。
 # 该目录已在后续提交里从工作区移出,但 git 历史仍在,故按指纹精确豁免。
 #
-# 为什么 push 时是绿、只有定时任务红:push 触发的扫描只覆盖本次 push 的提交范围
-# (gitleaks-action 会算 --log-opts),schedule / workflow_dispatch 才是全量历史。
+# ── 豁免 2:本文件自己的历史版本(自伤,修不掉的过去) ─────────────────────
+#   0748dd9:.gitleaksignore:generic-api-key:10
 #
-# 为什么用指纹豁免而不是 .gitleaks.toml:实测加 .gitleaks.toml(即使写了
-# [extend] useDefault = true)会改变扫描语义,同一份历史凭空多报一条
-# (3rd-party/libflac.js 里的 base64 常量表,熵 6.02)—— 豁免一条冒出另一条。
-# 指纹豁免是纯减法:不动规则、不动默认豁免,只屏蔽这一个历史位置;
-# 将来新出现的真实凭据 fingerprint 不同,照样会被拦住。
+# 本文件第一版把「豁免 1」那句英文原文照抄进了注释里,于是注释本身被同一条规则
+# 命中。后续提交已删掉那段原文,但 0748dd9 这个提交仍在历史里(detect 扫历史,
+# 不会因为后来改好就不报),所以这一条只能同样按指纹豁免。
 #
-# ⚠ 本文件自身也在扫描范围内。切勿在此复写被命中的那句英文原文 ——
-#   否则这条注释会被同一条 generic-api-key 规则命中(2026-09-21 已实测踩过一次,
-#   当时 fingerprint 为 0748dd9:.gitleaksignore:generic-api-key:10)。
-#   下面最后一行是唯一有效内容。
+# ⚠ 教训:本文件自身也在扫描范围内。注释里绝不要复写任何「关键词 + 引号字符串」
+#   形态的英文原文(哪怕是解释误报用),否则就是自己给自己制造新误报。
+#
+# ── 为什么 push 时是绿、只有定时任务红 ───────────────────────────────────
+# push 触发的扫描只覆盖本次 push 的提交范围(gitleaks-action 会算 --log-opts),
+# 而 schedule / workflow_dispatch 是全量历史 —— 这两条历史误报只有后者会命中。
+#
+# ── 为什么用指纹豁免而不是 .gitleaks.toml ────────────────────────────────
+# 实测加 .gitleaks.toml(即使写了 [extend] useDefault = true)会改变扫描语义:
+# 同一份历史凭空多报一条(3rd-party/libflac.js 里的 base64 常量表,熵 6.02)
+# —— 豁免一条、冒出另一条。指纹豁免是纯减法:不动规则、不动默认豁免,只屏蔽
+# 这两个历史位置;将来新出现的真实凭据 fingerprint 不同,照样会被拦住。
+#
+# 以下两行为唯一有效内容:
 e93716473d708ade584975930d84c56d04094151:refs/music-assistant-server/music_assistant/providers/filesystem_cloud/base.py:generic-api-key:103
+0748dd9b87d02c756812b708bcd47dfa8cf7147d:.gitleaksignore:generic-api-key:10
