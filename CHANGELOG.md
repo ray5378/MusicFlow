@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.2] - 2026-09-21
+
+### 修复 —— 拖动进度条问题（分播放器逐一修复）
+
+- **sendspin 拖动后无法播放/进度不对**：`seekCore` 只写 `positionMs` 标记，pump 主循环下一帧即按下标覆盖（进度回跳、音频原地），且不钳制 duration（拖到尾直接触发播完→跳歌/停播）。改为走组 pump 跳转（含 clamp＋流式窗口 `-ss` 重起）；暂停态拖动保持暂停（与 DLNA/Web 同语义）。
+- **timeOffset 接受 0.1s 粒度小数**：新增 `parseTimeOffset`（4 处替换 `parseInt`，非法/负值归零），ffmpeg `-ss` 前置定位直接支持小数。整秒 floor 时代的系统性 `<1s` 偏小是 Web/客户端「进度定位不对」的来源之一。
+- DLNA/AirPlay/group/local 本体核实无害（REL_TIME 整秒是设备规范；AirPlay 有 FLUSH＋换 decoder；group fan-out；local 转发），坏的都在调用侧，已由三端（Web/客户端/HA）配套修复。
+
+### 配套
+
+- Web 前端：seek 越界钳位 `duration-0.5s`、拖动开始快照 autoplay、`localSeekActive` 跟手保护、时长按 `song.duration` 播种、0.1s 粒度 timeOffset。
+- 客户端 **v5.0.19**、HA 卡片 **v2.4.3**、HA 集成 **v2.0.2** 同步发版（四端同批）。
+
+### 构建信息
+
+- Docker 镜像：`ray5378/musicflow:4.0.2` + `:latest`
+
 ## [4.0.1] - 2026-09-21
 
 ### 修复 —— 播放结束判定与卡死兜底
