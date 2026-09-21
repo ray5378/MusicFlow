@@ -189,6 +189,8 @@ frontend/src/
 | 新接一个渲染器 | 照 `services/rendererHost/index.ts` 顶部六步清单；CI `check-renderer-host.mjs` 会校验 |
 | 改批量任务 | `src/batch/{runner,jobs,child}.ts`（一次性子进程，勿改回主进程内联） |
 | 改前端播放体验 | `stores/` + `components/` + `views/Groups|Playlists` |
+| 开 debug 日志排障 | 前端「设置 → 日志等级」切 `debug`（即时生效，无需重启）；接口 `GET/PUT /rest/api/v1/admin/log-settings` |
+| 查 opencode 会话讨论 | `python3 scripts/opencode-session-dump.py --list` / `--latest`；原理与坑见 `docs/OPENCODE_SESSION_HOWTO.md` |
 
 ## 8. 环境变量
 
@@ -201,7 +203,7 @@ frontend/src/
 | `STATIC_DIR` | 前端构建产物目录（生产由后端 `serveStatic` 托管） |
 | `JWT_SECRET` | 留空则首次启动自动生成并落盘 `.jwt-secret`（重启后稳定） |
 | `CORS_ORIGINS` | 允许的跨域来源 |
-| `LOG_LEVEL` | 日志级别 |
+| `LOG_LEVEL` | 日志级别初值（`debug`/`info`/`warn`/`error`，默认 `info`）。优先级低于「设置 → 日志等级」里保存的运行期值（存 `settings.log.level`）：容器带了它、而设置项为空时以 env 为准；在设置页保存过则以设置为准。排障请优先用设置页（即时生效、无需重启）。 |
 | `PLAY_HISTORY_RETENTION_DAYS` | 播放历史保留天数 |
 | `MUSICFLOW_OFFICIAL_REGISTRY` | 插件市场注册表地址覆写 |
 
@@ -214,3 +216,46 @@ Sendspin 推流（`SENDSPIN_JITTER` / `SENDSPIN_PUSH_SPEED` / `SENDSPIN_STREAM_S
 版本注入（`APP_VERSION` / `APP_COMMIT`，由 CI 构建时写入）。
 
 > 容器部署见 `docker-compose.yml`（已给出常用项）；完整清单以 `utils/env.ts` 与各子系统源码为准。
+
+## 9. 排障：跨仓 debug 日志开关一览
+
+播放链路横跨四个仓（后端 / Web 前端 / HA 集成 / 客户端），**任一层断链都会表现为
+「拖了没反应」或「进度跳回」**。排障时按下面的表逐层打开 debug，再按 §9.2 的顺序
+看日志，就能把断链点定位到具体一层 —— 不必再去猜。
+
+### 9.1 各仓如何打开 debug
+
+| 仓 | 开关 | 生效方式 | 说明 |
+|---|---|---|---|
+| **MusicFlow 后端** | 前端「设置 → 日志等级」切 `debug`；或 `GET/PUT /rest/api/v1/admin/log-settings` | 即时生效，无需重启 | 落库 `settings["log.level"]`，并同步推给在跑的 sendspin 子进程。`LOG_LEVEL` env 只在设置项为空时兜底（见 §8） |
+| **Web 前端** | 无开关：调试行走 `console.debug` | DevTools 控制台级别勾选 **Verbose**（默认 `Default` 看不到） | 仅进度条拖动链路（`stores/player.ts` 的 `[castSeek]` / `[castPoll]`）。真正的服务端行为看后端那条（#4 起） |
+| **HA 集成（hass-musicflow）** | `configuration.yaml`: `logger: { logs: { custom_components.musicflow: debug } }` | 需重载 HA 或重启 | 走 HA 标准 logging，无额外开关 |
+| **HA 卡片（hass-musicflow-card）** | 浏览器控制台 `localStorage.mfLog = "debug"` 后刷新；或 URL 加 `?mfLog=debug` | 刷新后生效 | 前缀 `[MF card][dbg]`；`?mfLog=debug` 优先级更高，适合临时抓一次 |
+| **客户端（MusicFlow-client）** | App 内「设置 → 日志抓取」打开（`Logger.setLoggingEnabled(true)`） | 即时生效 | 默认**全局关闭**；打开后可在 App 内日志查看页导出现场 |
+
+### 9.2 seek / 进度回退：按链路的日志阅读顺序
+
+一次拖动从手指到设备依次经过下列各层，**从上往下读，第一处不出现的日志就是断链点**：
+
+| # | 层 | 关键日志 | 看什么 |
+|---|---|---|---|
+| 1 | HA 卡片 / Web / 客户端 UI | `[MF card][dbg] 拖动` → `下发 seek` | 手指落点 vs 钳位后目标（差异大 = 尾部余量在起作用，不是 bug） |
+| 2 | 卡片 REST 层 | `[MF card][dbg] REST →` / `REST ←` | 命令有没有真的发出去、走 direct 还是 proxy、后端返回什么状态码 |
+| 3 | HA 集成 | `[seek] <peer> 收到 position=… 钳制后=…` | 集成是否收到、是否被判非法丢弃、当时 peer 是什么状态 |
+| 4 | 后端路由 | `[Peer][seek] 收到 peerId=… kind=… target=…s` | 同一 tid 的多条 = 一个请求链；不同 tid 短时间扎堆且 target 各异 = 前端没收敛住的**重投风暴** |
+| 5 | 队列/播放控制器 | `[QueueController][transport]` / `[PlayerController][report]` | 命令有没有进到队列层、设备原始上报值（`uri=` / `opt=` 字段） |
+| 6 | 协议层 | `[DLNA][seek]` / `[Sendspin][seek] … 模式=in-proc|fork` | 目标秒数有没有到协议层、sendspin 走哪条实现 |
+| 7 | 设备/推流 | `[DLNA][align]` / `[GENA]` / `[Sendspin][stream] seekTo` | 设备是否真落位（`align` 会重试并报最终偏差）；`[GENA]` 会显示设备**用事件把旧位置推回来**——这是「跳回」最常见的真凶 |
+| 8 | 回程（进度条被拽回） | `[ws][state]` / `[seek-guard] 丢弃陈旧上报` | 服务端推给前端的权威 position；若卡片/客户端打了 `丢弃陈旧上报`，说明护栏在正常工作，不是 bug |
+
+### 9.3 三个典型现象 → 直接看哪一行
+
+- **拖了完全没反应**：从 #1 往下找第一个缺失的日志。常见断点是 #2（请求没发出，
+  网络/CORS）或 #4（`kind` 与你以为的设备类型不符 —— 例如拖的是组但打到了单机）。
+- **拖完进度跳回原位**：看 #8。有 `[seek-guard] 丢弃陈旧上报` = 护栏生效、跳回是
+  「上报滞后」的正常表现；**没有**该行却仍跳回 = 护栏没拦住（窗口过期 / `reportedAt`
+  缺失 / 标记未置上），属真缺陷。
+- **拖完无声（DLNA）/ sendspin 拖动后不播**：看 #6 → #7。`[DLNA][align]` 报
+  「校准后仍在 Ns」= 设备不支持该位置的 seek；sendspin 侧看到
+  `[Sendspin][stream] seekTo … 重起 ffmpeg` 之后没有后续 = 子进程推流没起来。
+
