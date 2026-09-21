@@ -2,6 +2,34 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.7] - 2026-09-22
+
+### 重做 —— sendspin seek 按 Music Assistant 权威语义推倒重来（真机验证通过）
+
+**v4.0.6 的「后台预建 + 帧边界原子切换」方案在真机上失败，本版整体废弃，
+改为与 MA `player_queues/controller.py::seek`(@862) 逐条对齐的实现：**
+
+- **seek = 发布位置对 + 整条流重建**（MA `play_index(seek_position)`）：
+  - ① 先发布 `group.positionMs = targetMs`（MA `elapsed_time + last_updated`），
+    推送循环取帧改用**自有游标**（`playCursorMs`），共享位置只写不读 ——
+    v4.0.6 的 swap 前置问题：pushLoop 用共享 positionMs 反推帧下标，
+    seek 一发布目标位置旧循环即误判 EOF（真机 FP-TRACE 堆栈钉死）。
+  - ② `seekCore` 走与正常起播**完全相同**的 `playCore/playGroupCore` 路径重建流：
+    停旧流 → stream/end 成对 → 全新音源带 `-ss` 起点起流 → 新时间线锚点
+    （now + send_ahead，MA `_resolve_channel_play_start` auto 模式）。
+    MA 没有帧边界换流；设备缓冲自然耗尽后接新流，即 MA 真机行为。
+- 删除 v4.0.6 引入的全部自创机制：`beginRebuild` / `applySwap` / `swap*` /
+  `rebuildGen` / `rebuildInFlight`。
+- `playCore`/`playGroupCore` 新增 `seekPositionMs` 通道（MA seek_position 等价）；
+  组状态 `current` 补存 `mime`。
+- **真机验证**（240 容器 + 真实音源）：
+  - sendspin(esp32-player2)：seek 30s→31.2s 续播、seek 45s→47.0s 续播，
+    真实节奏推进不断线；音量 30/45/80 即时回读一致。
+  - DLNA(主卧 HiVi H5MKII)：seek 40s→43.0s、seek 70s→73.0s 续播正常；
+    设备恒报 RelTime=0 时自动降级「重投流重建」标记生效；音量 20→40→70 即时生效。
+- 排查附记：测试曲「Ditch」实际音频仅 30s（试听片段）而元数据 131s，
+  seek 超出实际音频末尾的 EOF→切歌行为与 MA 一致，非本版缺陷。
+
 ## [4.0.6] - 2026-09-22
 
 ### 修复 —— 进度条跳转(sendspin / DLNA)按 Music Assistant 语义重做

@@ -331,7 +331,7 @@ export class SendspinGroup {
   positionMs = 0;
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
-  current: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; durationMs: number } | null = null;
+  current: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; mime?: string; durationMs: number } | null = null;
   /** 延迟的 stream/start 目标集(见 protocolPlayer.playMedia 注释:解码可达 10s,
    *  立即宣告会让设备在空等中丢弃该流)。由 pushFrame 在**首个音频帧之前**兑现。
    *  数组(多房间组每个成员各兑现一次);单设备组退化为单元素,与旧单字段语义一致。 */

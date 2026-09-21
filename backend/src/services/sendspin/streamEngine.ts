@@ -243,31 +243,13 @@ export class GroupPump {
    *  但音频从 0 开始播 → 用户观感「拖动无效 / 拖了没反应」(240 真机实测复现)。
    *  故窗口内的目标必须单独留一份,由 `play()` 作为起播位置消费。 */
   private pendingSeekMs: number | null = null;
-  /** MA 语义:seek = 用新起点**重建整条流**(见上方 `PumpSource` 注释与
-   *  文件头「MA seek 契约」)。这里保存**后台预建完成、等待切换**的新流。
-   *
-   *  为什么不在 `seek()` 里直接换:换的瞬间必须同时完成「换 window + 重锚
-   *  时间线/pacing + 释放旧流」三步,在帧边界做才能让设备端连续;
-   *  而 `seek()` 是同步的(HTTP 需尽快返回),真正的重建要等 ffmpeg 预缓冲
-   *  (数秒)。故:seek 只发布位置并**发起**重建,切换交给 pushLoop。 */
-  private swapWindow: PcmWindow | null = null;
-  private swapPcm: Float32Array | null = null;
-  private swapDurationMs = 0;
-  private swapTargetMs = 0;
-  /** 切换瞬间的时间线游标(微秒,绝对墙钟)。
-   *
-   * 切换必须**新起一次 pushLoop**(window/pcm/total 全部失效,要重新捕获),
-   * 而新循环的游标从 0 开始 —— 于是切换后首帧的锚点会按「墙钟 + lead」重算,
-   * 与切换前已发出的时间戳相比**可能更小**(真机/单测都测到过:220 帧后墙钟与
-   * 游标会积累数百 µs 的交叉),时间轴倒退 —— 设备按时间戳排程,倒退是失序信号。
-   * 时间线(什么时候播)与内容(播什么)是两件事:seek 换的是内容起点,
-   * 时间线必须**连续**。故把游标带过去,新循环以它为下界。 */
-  private swapCursorUs: bigint | null = null;
-  /** 重建代数:每次 seek +1。用途有二 ——
-   *   ① 连续拖动时,只有**最后一次**的重建会被采纳(过期重建直接丢弃);
-   *   ② 切歌(epoch 变化)同样作废在飞的重建。
-   *  作废时必须 `close()` 掉已 spawn 的 ffmpeg,否则就是新的泄漏源。 */
-  private rebuildGen = 0;
+  /** ★ pushLoop 的**自有取帧游标**(MA 位置模型:值+时间戳对,推送循环独占写)。
+   *  此前 pushLoop 用共享的 group.positionMs 反推帧下标(`Math.floor(positionMs/FRAME_MS)`),
+   *  而 seek() 的「先发布目标位置」恰好写的就是这个共享字段 → 旧循环下一帧直接
+   *  跳到目标处取帧 → 旧滑窗给不出数据 → seg.length===0 误判 EOF →
+   *  contentEnded → finishPlayback → 设备 IDLE、预建流作废(2026-09-22 真机实锤,
+   *  FP-TRACE 堆栈钉死 pushLoop EOF 路径)。原则:**共享位置只写不读**,取帧一律用本游标。 */
+  private playCursorMs = 0;
   private pcm: Float32Array | null = null;
   private window: PcmWindow | null = null;
   private durationMs = 0;
@@ -316,6 +298,7 @@ export class GroupPump {
     // 绝不能无条件写 0 —— 那正是「刚点播就拖、拖动被吞」的根因。
     const startMs = this.pendingSeekMs ?? 0;
     this.pendingSeekMs = null;
+    this.playCursorMs = startMs;
     this.group.positionMs = startMs;
     // 起播跳转已由音源工厂的 `-ss` 完成(见 startMsForSource),无需再 seekTo ——
     // 此处若再调一次会 kill 刚 spawn 的 ffmpeg 并重起,白白多一次冷起空窗。
@@ -331,15 +314,6 @@ export class GroupPump {
   /** 释放音频持有(整包缓冲 / 流式窗口＋ffmpeg 二选一,调用方无需区分)。 */
   private releaseAudio(): void {
     this.pcm = null;
-    // 待切换的新流同样持有 ffmpeg:stop/切歌时必须一并释放,否则又是孤儿。
-    // rebuildGen++ 让在飞的重建作废(它自己会 close 已 spawn 的进程)。
-    this.rebuildGen++;
-    this.swapCursorUs = null;
-    if (this.swapWindow) {
-      try { this.swapWindow.close(); } catch { /* ignore */ }
-      this.swapWindow = null;
-    }
-    this.swapPcm = null;
     if (this.window) {
       try { this.window.close(); } catch { /* ignore */ }
       this.window = null;
@@ -376,10 +350,10 @@ export class GroupPump {
     // 设备收到首块即判「目标时刻已过 550ms」→ 立即吐字节 → underrun → 无声。
     // 两者必须同源:send_ahead 变,锚点跟着变。
     let tsUs = this.group.timelineBaseUs;
-    /** 本组当前时间线游标(微秒,绝对墙钟)。
-     *  切换进来的那一轮**继承**上一轮的游标(见 swapCursorUs),保证时间轴连续。 */
-    let cursorUs = this.swapCursorUs ?? 0n;
-    this.swapCursorUs = null;
+    /** 本组当前时间线游标(微秒,绝对墙钟)。每次新流(含 seek 重建)从 0 起立,
+     *  首帧锚点 = 墙钟 + send_ahead(MA `_resolve_channel_play_start` 的
+     *  auto 模式:channel_timing 初始化为 now + min_send_ahead)。 */
+    let cursorUs = 0n;
     /** 连续零产出的累计时长(微秒),用于区分「编码器正常攒样」与「编码器失效」。 */
     let starvationUs = 0;
     this.group.timelineBaseUs = 0n; // 起播重置:锚点在首块时按当时墙钟确立
@@ -388,21 +362,17 @@ export class GroupPump {
 
     try {
       while (this.running && this.epoch === myEpoch) {
-        // MA seek 契约的最后一环:新流预建就绪 → 在**帧边界**原子切换。
-        // 切换后 win/pcm/total 全部失效,故重新进入循环重新捕获
-        // (此处用 void 尾调用而非递归,避免连续拖动时栈增长)。
-        if (this.applySwap(cursorUs)) { void this.pushLoop(myEpoch); return; }
         // 暂停时挂起,等待 resume。
         if (this.paused) {
           await new Promise<void>((r) => { this.resumeWaiter = r; });
           // ⚠️ resume 后必须把 pacing 锚点挪到当前墙钟:暂停期间墙钟照走,
           // 若不重置,dueMs 会全部落在过去 → delayMs≤0 → 积压帧被一次性倒给设备
           // (瞬间灌爆环形缓冲,设备再次失步)。以「当前已播位置」为锚点重新对齐。
-          this.paceAnchorMs = this.group.positionMs;
+          this.paceAnchorMs = this.playCursorMs;
           this.paceAnchorWall = Date.now();
           continue;
         }
-        const i = Math.floor(this.group.positionMs / FRAME_MS);
+        const i = Math.floor(this.playCursorMs / FRAME_MS);
         const lo = i * frameSamples;
         let seg: Float32Array;
         if (win) {
@@ -416,7 +386,10 @@ export class GroupPump {
             throw e;
           }
           // EOF 耗尽(短片/空):与整包 `i >= total` 同义。
-          if (seg.length === 0) { contentEnded = true; break; }
+          if (seg.length === 0) {
+            logSafe(this.server, "warn", `sendspin 流式窗口提前 EOF: lo=${lo} frame=${i} pid=${win.pid} eof=${win.eof} failed=${win.failedReason ?? "-"} decoded=${win.decoded} song=${this.songId}`);
+            contentEnded = true; break;
+          }
         } else {
           if (i >= total) { contentEnded = true; break; } // 解码耗尽
           seg = pcm!.subarray(lo, Math.min(lo + frameSamples, pcm!.length));
@@ -532,10 +505,12 @@ export class GroupPump {
         }
         this.group.timelineBaseUs = cursorUs;
 
-        this.group.positionMs = this.durationMs > 0
+        const framePosMs = this.durationMs > 0
           ? Math.min(this.durationMs, i * FRAME_MS + FRAME_MS)
           : i * FRAME_MS + FRAME_MS; // 时长未知(流式元数据缺失):不钳制,
         // 否则 position 恒 0 → 同一片无限重推 ＋ pacing 永不 sleep,饿死事件循环
+        this.playCursorMs = framePosMs;
+        this.group.positionMs = framePosMs;
         // ⚠️⚠️ 必须用**绝对时刻调度**,不能用「每轮固定 sleep(FRAME_MS)」(2026-09-17 实锤)。
         //
         // 固定 sleep 的致命缺陷:`await sleep(25)` 之外还有 encode/send/pushFrame 本身的开销,
@@ -556,8 +531,9 @@ export class GroupPump {
         // 到达元数据时长即视为播完(退出后 endedNaturally 照常置空 current 触发切歌)。
         // 注意 break 必须在 sleep 之后(保持旧 pacing):提前跳过末帧 sleep 会打乱
         // 乐观窗口/自然结束的时序判定,导致切歌变重播(见 queueModes 回归)。
-        if (this.durationMs > 0 && this.group.positionMs >= this.durationMs) { contentEnded = true; break; }
+        if (this.durationMs > 0 && this.playCursorMs >= this.durationMs) { contentEnded = true; break; }
       }
+      logSafe(this.server, "info", `sendspin pushLoop 退出: contentEnded=${contentEnded} running=${this.running} epochSame=${this.epoch === myEpoch} song=${this.songId}`);
       if (this.epoch === myEpoch) {
         this.running = false;
         this.endedNaturally = contentEnded;
@@ -619,92 +595,38 @@ export class GroupPump {
     this.resumeWaiter = null;
   }
 
-  /** 跳转(秒)。改写 positionMs 即可:主循环按 position 取帧。
-   *  流式时目标若在窗口外,先 `seekTo` 按 `-ss` 重起 ffmpeg(绝对偏移连续,
-   *  主循环下标算法不变);窗口内则纯改下标,与整包零成本同构。 */
-  /** 跳转进度。
-   *
-   *  MA 权威契约(queue controller:862)—— seek **不是**在流里挪指针,而是:
-   *    ① 先发布目标位置(防 UI 拿旧值回跳 snapback);
-   *    ② 用新起点**重建整条流**(`play_index(seek_position=N)`)。
-   *
-   *  旧实现在**跑着的流**上调 `window.seekTo()`:它会 kill 旧 ffmpeg 再冷起新的,
-   *  这中间设备**完全断流**(实测 5~7.4s 空窗)→ 缓冲耗尽 → 持续欠载卡顿;
-   *  且空窗期间 pacing 锚点不补偿 → 帧无节制连发 → 进度条比真实时间快。
-   *
-   *  新实现:**后台预建**新流(旧流继续播 → 设备零空窗),预缓冲就绪后由
-   *  pushLoop 在帧边界原子切换。 */
+  /** 跳转进度 —— **MA 权威语义**(music_assistant/controllers/player_queues/controller.py
+   *  `seek` @862,逐条对齐,不自创机制):
+   *    ① `queue.elapsed_time = position; elapsed_time_last_updated = now; signal_update()`
+   *       → 这里对应 `group.positionMs = targetMs`(推送循环每帧重写它,取帧用自有
+   *       游标 playCursorMs,互不干扰 —— MA 的推流引擎同样从不读 elapsed_time 取帧)。
+   *    ② `await self.play_index(queue_id, current_index, seek_position=position)`
+   *       → **整条流重建,走与正常起播完全相同的路径**(停旧流 → stream/end 成对 →
+   *       全新音源带 seek 起点起流 → 新时间线锚点)。这一步由 playerCore.seekCore
+   *       调 playCore/playGroupCore 完成;pump 只负责 ① 与空闲态的位置记忆。
+   *  MA 没有「帧边界无缝换流」;设备端缓冲自然耗尽后接新流,听感即 MA 真机行为。 */
   seek(seconds: number): void {
     const wantMs = Math.max(0, Math.round(seconds * 1000));
     const targetMs = this.durationMs > 0 ? Math.min(this.durationMs, wantMs) : wantMs;
     log.debug(`[pump][seek] group=${this.group.name} want=${wantMs}ms target=${targetMs}ms dur=${this.durationMs} running=${this.running} paused=${this.paused} window=${!!this.window}`);
-    // ① MA:先发布目标位置再动流。UI/状态接口立刻读到新位置,不会回跳到旧值。
+    // ① 发布位置对(防 UI 拿旧值回跳)。
     this.group.positionMs = targetMs;
     if (!this.running || !this.songId) {
-      // 泵未运行(起播窗口 / 已停):没有循环在取帧,写 positionMs 不会出声。
-      // 留给 play() 作为起播位置消费(见 pendingSeekMs 注释)。
+      // 泵未运行(空闲/起播窗口):MA 对应 resume_with_position —— 记起播位置,
+      // 下一次 play() 起流即带 -ss 消费,无需现在重建。
       this.pendingSeekMs = targetMs;
-      log.debug(`[pump][seek] ⚠️pump 未运行 → 记起播位置 ${targetMs}ms 交由 play() 消费`);
-      return;
+      log.debug(`[pump][seek] pump 未运行 → 记起播位置 ${targetMs}ms 交由 play() 消费`);
     }
-    // ② 后台重建整条流。旧流在此期间继续播,设备端零空窗。
-    void this.beginRebuild(targetMs);
-    log.debug(`[pump][seek] 已发布 positionMs=${targetMs} 并启动新流预建(旧流继续播,设备不间断)`);
+    // ② 重建由 seekCore → playCore/playGroupCore 走完整起播路径(见 seekCore)。
   }
 
-  /** 后台预建一条从 `targetMs` 起的新流;就绪后挂到 swap* 等 pushLoop 切换。 */
-  private async beginRebuild(targetMs: number): Promise<void> {
-    const gen = ++this.rebuildGen;
-    const myEpoch = this.epoch;
-    const source = injectedSource ?? defaultSource;
-    try {
-      // 与 play() 同口径:起点直接给音源工厂,ffmpeg 带 -ss 起,不再二次冷起。
-      const { pcm, durationMs, stream } = await source(this.songId, targetMs);
-      // 期间又有新 seek(gen 变)或切歌(epoch 变)→ 本次作废,立刻释放
-      // 已 spawn 的 ffmpeg,否则每次拖动都泄漏一个进程。
-      if (gen !== this.rebuildGen || myEpoch !== this.epoch) {
-        try { stream?.close(); } catch { /* ignore */ }
-        log.debug(`[pump][rebuild] 作废过期重建 target=${targetMs}ms(gen/epoch 已变),已释放`);
-        return;
-      }
-      this.swapWindow = stream ?? null;
-      this.swapPcm = pcm ?? null;
-      this.swapDurationMs = durationMs;
-      this.swapTargetMs = targetMs;
-      log.debug(`[pump][rebuild] 新流就绪 target=${targetMs}ms,等待 pushLoop 帧边界原子切换`);
-    } catch (e: any) {
-      // 预建失败**不能**影响当前播放:旧流仍在播,只是这次跳转没生效。
-      log.warn(`[pump][rebuild] 新流预建失败 target=${targetMs}ms: ${e?.message || e}`);
-    }
+  /** 起播位置装填(playCore 重建路径用):在 pump.stop() **之后**调用
+   *  (stop 会清 pendingSeekMs —— 那是"旧上下文丢弃"语义,MA 的 seek_position
+   *  属于新流,必须在其后装填)。 */
+  armSeek(ms: number): void {
+    this.pendingSeekMs = Math.max(0, Math.round(ms));
   }
 
-  /** 消费已就绪的新流:换 window/pcm + 重锚时间线与 pacing + 释放旧流。
-   *  返回是否发生了切换(调用方据此重新进入取帧循环)。 */
-  private applySwap(cursorUs: bigint): boolean {
-    if (!this.swapWindow && !this.swapPcm) return false;
-    const oldWin = this.window;
-    const targetMs = this.swapTargetMs;
-    this.window = this.swapWindow;
-    this.pcm = this.swapPcm;
-    if (this.swapDurationMs > 0) this.durationMs = this.swapDurationMs;
-    this.swapWindow = null;
-    this.swapPcm = null;
-    // 位置/pacing/时间线三者必须一次性同源重设(分开写迟早漂移):
-    // 时间戳锚点靠 timelineReseed 让 pushLoop 下一帧重建,pacing 锚点对直接改写。
-    this.group.positionMs = targetMs;
-    this.paceAnchorMs = targetMs;
-    this.paceAnchorWall = Date.now();
-    // ★ 时间线**不重锚**:墙钟时间轴与"播到第几秒"是两件事,seek 换的是后者。
-    // 旧流在预建期间一直在播,设备手上有连续的排程;此刻若按「墙钟 + lead」
-    // 重新起一个锚点(尤其 seek 后 3s 的加深 lead),时间轴会凭空前跳数秒 ——
-    // 设备播完手上 800ms 缓冲后撞上一段真空 → 听感就是"跳转后断一下"。
-    // 故只把游标带过去,由下一帧以「锚点 vs 游标取大」保证单调且连续。
-    this.swapCursorUs = cursorUs;
-    logSafe(this.server, "info", `sendspin seek 切换完成: pos=${targetMs}ms(时间线延续,旧流此刻释放,设备零空窗)`);
-    // 旧流**最后**释放:确保切换瞬间设备手上仍有数据可播。
-    try { oldWin?.close(); } catch { /* ignore */ }
-    return true;
-  }
 }
 
 // ---- 单组 pump 池(server:group 生命周期内复用) ----

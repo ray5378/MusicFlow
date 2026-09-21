@@ -321,3 +321,44 @@ sendspin seek 切换完成: pos=…ms(旧流此刻释放,设备零空窗)   原�
   → `curl /rest/ping` 必须等到 200（实测 22s 时可能还是 000，**要循环到 40s**）。
 - 240 监控 `/root/seek_live.sh`、抓包 `/root/http_sniff.sh` —— **容器重启后必须重新拉起**。
 - ⚠️ 经 paramiko→bash→grep 的**中文正则不会匹配**：日志一律 `rc.py get` 拉回本地再用 Python 分析。
+
+---
+
+## 修订记录
+
+### 修订 R2（2026-09-22，v4.0.7）：废弃「后台预建 + 帧边界原子切换」，回归 MA play_index 全流重建
+
+v4.0.6 的 patch6（swap 机制）**在真机上被推翻**，本版按 MA 权威语义重写：
+
+**真机失败证据（FP-TRACE 堆栈钉死）**
+- pushLoop 用共享的 `group.positionMs` 反推取帧下标（`Math.floor(positionMs/FRAME_MS)`）；
+- seek() 第①步「发布目标位置」写的正是这个共享字段 → 旧循环下一帧直接跳到目标处取帧
+  → 旧滑窗给不出数据 → `seg.length===0` 误判 EOF → `contentEnded → finishPlayback`
+  → 设备 IDLE、在飞预建被作废。这正是 MA 铁律②「位置绝不能被外部改写而不换流」的教科书式反例。
+
+**v4.0.7 实现（与 MA `controller.seek`@862 逐条对齐）**
+1. seek = ①发布位置对（`group.positionMs = targetMs`）+ ②整条流重建（MA
+   `play_index(seek_position)` 等价）：`seekCore` 走与正常起播**完全相同**的
+   `playCore/playGroupCore` 路径 —— 停旧流 → stream/end 成对 → 全新音源带 `-ss`
+   起点起流 → 新时间线锚点（now + send_ahead，MA `_resolve_channel_play_start` auto 模式）。
+2. pushLoop 取帧改用**自有游标** `playCursorMs`，共享位置只写不读（MA 推流引擎同样
+   从不读 elapsed_time 取帧）。
+3. 删除全部自创机制：`beginRebuild` / `applySwap` / `swap*` / `rebuildGen` / `rebuildInFlight`。
+4. `playCore`/`playGroupCore` 新增 `seekPositionMs` 通道（armSeek 在 pump.stop() 之后装填）。
+
+**MA 没有帧边界无缝换流**：设备缓冲自然耗尽后接新流，seek 空窗 ≈ 2-3s（resolve(缓存命中)
++ ffmpeg 预缓冲 2s），即 MA 真机行为，可接受。
+
+**真机验证（v4.0.7，240 容器）**
+- sendspin(esp32-player2)：seek 30s→31.2s 续播、seek 45s→47.0s 续播，真实节奏推进不断线；
+  音量 30/45/80 即时回读一致。
+- DLNA(主卧 HiVi H5MKII)：seek 40s→43.0s、seek 70s→73.0s 续播；设备恒报 RelTime=0 时
+  自动降级「重投流重建」标记生效；音量 20→40→70 即时生效。
+
+**排查附记（重要环境事实）**
+- 测试曲「Ditch」实际音频仅 **30 秒**（476KB AAC 128kbps 试听片段），而库内元数据 131s；
+  且插件源（go-music-dl:netease / 天翼云盘）**每次 resolve 可能返回不同版本文件**
+  （同一首歌先后解析出 30s AAC 与 320kbps 两种）。seek 超出实际音频末尾 → EOF → 切歌
+  的行为与 MA 一致，**不是缺陷**。真机测试前必须先用 ffprobe 确认实际时长。
+- ffmpeg `-ss`（input 侧）按 mp3 头声称码率估算 seek 字节偏移，元数据失配的小文件
+  会命中上游 416 Range Not Satisfiable → 空流 EOF。

@@ -54,13 +54,18 @@ export function playCore(
   clientId: string,
   item: QueueItem,
   onPlayFailed: PlayFailedSink = () => {},
+  /** MA `play_index(seek_position=N)` 等价通道:新流从该位置起(音源 -ss)。
+   *  必须在 pump.stop() 之后装填(stop 清 pendingSeekMs 属"旧上下文丢弃"语义)。 */
+  seekPositionMs?: number,
 ): void {
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
   const conn = srv.clients.get(clientId);
   // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
   const g = srv.group(clientId);
   const pump = pumpFor(srv, g);
-  pump.stop(); // 打断上一首,避免重叠推流
+  pump.stop(); // 打断上一首,避免重叠推流(MA:track change 丢弃旧 PushStream)
+  // MA seek_position 属于**新**流:stop 之后装填,play() 起流即带 -ss 起点。
+  if (seekPositionMs != null) pump.armSeek(seekPositionMs);
   // ⚠️ 切歌必须先 stream/end 收尾旧流,再 stream/start 起新流(成对)。
   // 只发 stream/start 会让设备把新流塞进「旧解码上下文」——它认为扬声器已在跑,
   // 不重建 ring buffer/speaker task,新流音频无从解码 → 链路上一切正常但**无声**
@@ -71,10 +76,10 @@ export function playCore(
   g.current = null;
   g.close();
   g.finishPlayback();
-  g.positionMs = 0;
+  g.positionMs = seekPositionMs ?? 0;
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
   // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
-  g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, durationMs: (item.duration ?? 0) * 1000 };
+  g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
   if (conn) {
     conn.group = g;
     g.add(conn); // 成员入组,推流才真正下发
@@ -124,17 +129,20 @@ export function playGroupCore(
   memberIds: string[],
   item: QueueItem,
   onPlayFailed: PlayFailedSink = () => {},
+  /** MA `play_index(seek_position=N)` 等价通道(用户组重建流起点)。 */
+  seekPositionMs?: number,
 ): void {
   if (!srv) return;
   const g = srv.group(groupName);
   const pump = pumpFor(srv, g);
   pump.stop(); // 打断上一首,避免重叠推流
+  if (seekPositionMs != null) pump.armSeek(seekPositionMs);
   // stream/end 收尾旧流(成对)＋关旧编码器清残留分段:与 playCore 同因(无声事故)。
   g.current = null;
   g.close();
   g.finishPlayback();
-  g.positionMs = 0;
-  g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, durationMs: (item.duration ?? 0) * 1000 };
+  g.positionMs = seekPositionMs ?? 0;
+  g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
   for (const id of memberIds) {
     const conn = srv.clients.get(id);
     if (!conn) continue;
@@ -213,23 +221,50 @@ export function resumePumpCore(srv: SendspinServer | null, clientId: string): vo
   pumpFor(srv, srv.group(clientId)).resume();
 }
 
-/** seek 核心:走组 pump 的跳转(推流引擎按它对齐);无 server 时落 ephemeral 假组。
+/** seek 核心 —— **MA 权威语义**(controllers/player_queues/controller.py `seek` @862,
+ *  逐条对齐,不自创机制):
+ *    ① 先发布 (elapsed_time, last_updated) 位置对 —— `pump.seek()` 里的
+ *       `group.positionMs = targetMs`(防 UI 回跳);泵空闲时同时记忆起播位置。
+ *    ② `play_index(current_index, seek_position)` —— **整条流重建,且走与正常起播
+ *       完全相同的路径**(playCore/playGroupCore:停旧流 → stream/end 成对 → 全新
+ *       音源带 -ss 起点起流 → 新时间线锚点 now + send_ahead)。MA 没有"在跑着的
+ *       流里挪指针",也没有帧边界换流;设备缓冲自然耗尽后接新流即 MA 真机行为。
  *  ⚠️ 不能只写 positionMs(旧实现):pump 主循环每帧按下标重写 positionMs,
  *  光写标记会被下一帧覆盖(进度回跳、音频原地),且不钳制 duration(拖到尾直接
- *  触发播完→跳歌/停播)——「sendspin 拖动后无法播放/进度不对」的根因。
- *  GroupPump.seek 内含 clamp + 流式窗口 -ss 重起 + resume,与 play/stop 同口径。 */
+ *  触发播完→跳歌/停播)。 */
 export function seekCore(srv: SendspinServer | null, clientId: string, seconds: number): void {
   if (srv) {
-    try {
-      // 真组(非 ephemeral 假组):pumpFor 要求完整 SendspinGroup。
-      pumpFor(srv, srv.group(clientId)).seek(seconds);
+    const g = srv.group(clientId);
+    const pump = pumpFor(srv, g);
+    const cur = g.current;
+    // 钳制到曲目时长(MA:`max(0, min(position, duration))`)。
+    const durMs = cur?.durationMs && cur.durationMs > 0 ? cur.durationMs : null;
+    const targetMs = Math.max(0, Math.round(seconds * 1000));
+    const clampedMs = durMs != null ? Math.min(targetMs, durMs) : targetMs;
+    // ① 发布位置对 + 空闲态记忆起播位置。
+    pump.seek(seconds);
+    if (!cur) {
+      // 无在播曲(空闲):位置已记忆,下一次起播消费 —— MA resume_with_position 语义。
       return;
-    } catch (e: any) {
-      // pump 未起(如 idle 态拖动):落标记,起播/恢复时按它对齐。
-      // ⚠️ 这条静默回退的后果是"位置标记改了但没有音频在动" —— 用户观感即
-      // "拖动后没法播"。必须留痕,否则根因被吞在这一个 catch 里(实测踩过)。
-      log.debug(`[seek] client=${clientId} pump 不可用(落标记 ${seconds}s): ${e?.message || e}`);
     }
+    // ② play_index 等价:走完整起播路径重建流(同一首歌、新起点)。
+    const item: QueueItem = {
+      songId: cur.songId,
+      title: cur.title ?? "",
+      artist: cur.artist ?? "",
+      album: cur.album ?? "",
+      coverArt: cur.coverArt ?? "",
+      mime: cur.mime ?? "",
+      duration: (cur.durationMs || 0) / 1000,
+    };
+    const onFailed: PlayFailedSink = () => {};
+    if (clientId.startsWith("ug:")) {
+      const memberIds = Array.from(g.members, (m) => m.clientId).filter((id): id is string => !!id);
+      playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs);
+    } else {
+      playCore(srv, clientId, item, onFailed, clampedMs);
+    }
+    return;
   }
   ephemeralOrReal(srv, clientId).positionMs = Math.max(0, seconds * 1000);
 }
