@@ -21,6 +21,7 @@ import { discoverDlnaDevices, fetchDeviceAtLocation, onSsdpEvent, DlnaDevice } f
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
+import { getSetting, setSetting } from "../settings.js";
 import { createLogger } from "../../utils/logger.js";
 import {
   type SeekGuard,
@@ -229,6 +230,14 @@ interface DeviceRuntime {
   lastSeen: number;            // ms epoch of last successful contact
   currentMedia?: CurrentMedia; // track currently loaded on the device
   suppressAutoNext?: boolean;  // set by stop()/queue.clear to avoid auto-advance
+  /** SOAP `Seek`(REL_TIME)对该设备**无效**:落位校验连续无法进行(设备恒报
+   *  RelTime=0)或连续未落位。置位后 seek 改走「重投流重建」(MA play_index 语义)。 */
+  unreliableSeek?: boolean;
+  /** 连续「设备不报位置,落位校验无从进行」的次数(见 verifySeekLanding)。 */
+  seekNoReportCount?: number;
+  /** 上次投屏参数。seek 需要**重建流**时复用它(songId/标题/mime/封面),避免
+   *  重投时丢元数据 —— 重投必须是完整的一次 SetAVTransportURI。 */
+  lastCastOptions?: CastOptions;
 }
 const runtimes = new Map<string, DeviceRuntime>();
 
@@ -236,6 +245,29 @@ function runtimeOf(deviceId: string): DeviceRuntime {
   let r = runtimes.get(deviceId);
   if (!r) { r = { available: true, forcePoll: false, lastSeen: Date.now() }; runtimes.set(deviceId, r); }
   return r;
+}
+
+/** 「该设备 SOAP Seek 无效」的持久化键。
+ *
+ * 运行时标记 `unreliableSeek` 只在进程内存里,容器/服务重启后会重新走一遍
+ * 「试 SOAP → 校验失败 2 次 → 降级」的学习过程 —— 每次重启的头两三次拖动都是坏的。
+ * 判定结论一旦得出就是设备的固件属性(MUZO/HiVi 播实时转码流恒回 RelTime=0),
+ * 不会随时间变化,所以落库一次即可:重启后首次 seek 就直接走重投流。 */
+function unreliableSeekKey(deviceId: string): string {
+  return `dlna.seek.unreliable.${deviceId}`;
+}
+
+/** 该设备的 SOAP Seek 是否已被判定为无效(内存标记 + 持久化,二者取或)。 */
+function isSeekUnreliable(deviceId: string): boolean {
+  const rt = runtimeOf(deviceId);
+  if (rt.unreliableSeek) return true;
+  try {
+    if (getSetting(unreliableSeekKey(deviceId), "0") === "1") {
+      rt.unreliableSeek = true;   // 回填内存,后续不再查库
+      return true;
+    }
+  } catch { /* 设置不可读时退化为纯内存判定 */ }
+  return false;
 }
 
 // ==================== Public API ====================
@@ -561,6 +593,10 @@ export interface CastOptions {
   deviceId: string;
   baseUrl: string;
   coverArt?: string;   // song.coverArt — turned into an absolute albumArtUri
+  /** 起播位置(秒)。>0 时编进流 URL(`timeOffset=N`),让设备**从该秒开始拉一条
+   *  新流** —— 这是 MA `play_index(seek_position=N)` 在 DLNA 侧的等价实现。
+   *  用于 SOAP Seek 无效的设备(实时管道上 REL_TIME Seek 不会生效)。 */
+  timeOffset?: number;
 }
 
 // Probe whether a device supports SetNextAVTransportURI by fetching its
@@ -654,13 +690,21 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   } catch (e: any) {
     log.warn("[cast] 双协议互斥:停止同 host AirPlay 会话失败(忽略)", { deviceId: opts.deviceId, err: e?.message || e });
   }
-  const { token, streamUrl } = createCastSession(opts.songId, opts.deviceId, opts.baseUrl);
+  const { token, streamUrl: castUrl } = createCastSession(opts.songId, opts.deviceId, opts.baseUrl);
+  // MA 语义:起播位置直接编码进流 URL,让设备**从新起点拉一条新流**,而不是
+  // 「先播到一半再 Seek」—— 后者在实时转码管道上永远不会生效(见 CastOptions.timeOffset)。
+  const streamUrl =
+    opts.timeOffset && opts.timeOffset > 0
+      ? `${castUrl}${castUrl.includes("?") ? "&" : "?"}timeOffset=${Math.round(opts.timeOffset)}`
+      : castUrl;
   const albumArtUri = opts.coverArt ? `${opts.baseUrl}/rest/getCoverArt?id=${encodeURIComponent(opts.coverArt)}&size=500` : undefined;
   const metadata = buildDidlLite({ title: opts.title, artist: opts.artist, album: opts.album, uri: streamUrl, mime: opts.mime, albumArtUri });
 
   log.info(`[cast] ${opts.deviceId}: BEGIN songId=${opts.songId} title="${opts.title}"`);
   // Reset the "next enqueued" flag — a fresh SetAVTransportURI clears the device's next slot.
   runtimeOf(opts.deviceId).nextEnqueued = false;
+  // 记住本次投屏参数(剥离 timeOffset,它只对这一次起播有效),供后续 seek 重建流复用。
+  runtimeOf(opts.deviceId).lastCastOptions = { ...opts, timeOffset: undefined };
 
   // Step 1: Stop (tolerate errors). 对照 MA play_media: always clear queue (by sending stop) first.
   try {
@@ -921,9 +965,53 @@ export async function stopDevice(deviceId: string): Promise<void> {
 
 // Seek to a position (seconds). Uses REL_TIME format HH:MM:SS.
 // `opts.verify === false` 只给「落位校验失败后的重发」用:重发不得再派生新校验。
+/**
+ * MA 语义的 DLNA 跳转:**用新起点重建整条流**(等价 `play_index(seek_position=N)`)。
+ *
+ * 为什么需要它:MUZO/HiVi 固件播放实时转码流时 `GetPositionInfo` 恒回 `RelTime=0`,
+ * SOAP `Seek(REL_TIME)` 在这类管道上**静默失效**(管道忽略 Range、伪造 12h
+ * Content-Length,设备无处可跳)。后果是位置基线被锚到 target 而设备实际没跳 →
+ * 纯墙钟外推 → ① 进度条比真实时间快;② 外推越过时长后被判「播完」→ 提前切歌。
+ *
+ * 反复重试 SOAP 永远不会落位,所以改为重投一个 `timeOffset=N` 的新流:
+ * 设备从新位置起播,位置基线才真正与设备对齐。
+ */
+async function reseekByRecast(deviceId: string, seconds: number): Promise<void> {
+  const rt = runtimeOf(deviceId);
+  const prev = rt.lastCastOptions;
+  if (!prev) throw new Error("无投屏上下文,无法重投流");
+  const target = Math.max(0, Math.round(seconds));
+  const t0 = Date.now();
+  log.info(`[DLNA][seek] ${deviceId} SOAP Seek 不可靠 → 重投流重建(timeOffset=${target}s)`);
+  await castToDevice({ ...prev, timeOffset: target });
+  // 位置基线改锚到目标:此刻设备是真的从 target 起播,而不是"声称跳了但没跳"。
+  const prevBase = positionEstimates.get(deviceId);
+  positionEstimates.set(deviceId, {
+    pos: target,
+    at: Date.now(),
+    dur: (prevBase && prevBase.dur > 0) ? prevBase.dur : (mediaDuration.get(deviceId) || 0),
+    trackUri: prevBase?.trackUri,
+  });
+  getEventManager().setPosition(deviceId, target);
+  getEventManager().emit("player_refresh", deviceId, { reason: "seek_recast" });
+  log.info(`[DLNA][seek] ${deviceId} 重投流完成 timeOffset=${target}s ${Date.now() - t0}ms`);
+}
+
 export async function seekDevice(deviceId: string, seconds: number, opts?: { verify?: boolean }): Promise<void> {
   const device = getDevice(deviceId);
   if (!device?.avTransportUrl) throw new Error("设备未找到");
+  // MA 语义:设备已被证实「SOAP Seek 无效」(见 verifySeekLanding)→ 不再反复重试
+  // SOAP(对实时管道永远不会落位),直接**用新起点重建流**。
+  // `verify:false` 是校验失败后的单次重发,必须仍走 SOAP,否则会与校验链递归。
+  const rtSeek = runtimeOf(deviceId);
+  if (isSeekUnreliable(deviceId) && rtSeek.lastCastOptions && opts?.verify !== false) {
+    try {
+      await reseekByRecast(deviceId, seconds);
+      return;
+    } catch (e: any) {
+      log.warn(`[DLNA][seek] ${deviceId} 重投流失败,回退 SOAP Seek: ${e?.message || e}`);
+    }
+  }
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
@@ -1000,10 +1088,24 @@ async function verifySeekLanding(deviceId: string, target: number, gen: number):
     // 判据只用 `<= 0`:设备真在 0s 时 seek 到 60s 本来就该判未落位,但那种情况
     // 下面几行的正常分支会处理;恒 0 才是"不支持上报"。
     if (raw <= 0) {
+      // 设备不报位置 → 本次**无从校验**。连续多次如此即说明 SOAP Seek 对该设备无效
+      // (MUZO/HiVi 播实时转码流恒回 RelTime=0),此后 seek 改走「重投流重建」。
+      const rtv = runtimeOf(deviceId);
+      rtv.seekNoReportCount = (rtv.seekNoReportCount ?? 0) + 1;
+      if (rtv.seekNoReportCount >= 2 && !rtv.unreliableSeek) {
+        rtv.unreliableSeek = true;
+        try { setSetting(unreliableSeekKey(deviceId), "1"); } catch { /* 落库失败不影响本次判定 */ }
+        log.info(
+          `[DLNA][seek-verify] ${deviceId} 连续 ${rtv.seekNoReportCount} 次不报位置 → 判定 SOAP Seek 无效,` +
+          "后续 seek 改走「重投流重建」(MA play_index(seek_position) 语义)",
+        );
+      }
       log.debug(`[DLNA][seek-verify] ${deviceId} 设备恒报 0(不报位置)→ 放弃落位校验(目标 ${Math.round(target)}s)`);
       return;
     }
     if (raw >= target - 3 && raw <= target + 6) {
+      // 设备确实报了位置且落在目标附近 → Seek 是可靠的,清掉"不报位置"计数。
+      runtimeOf(deviceId).seekNoReportCount = 0;
       log.debug(`[DLNA][seek-verify] ${deviceId} 已落位:目标 ${Math.round(target)}s,设备报 ${Math.round(raw)}s`);
       return;
     }

@@ -18,8 +18,9 @@ import { isAirPlayForkMode } from "./mode.js";
 import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
-import { createCastSession, getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
+import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
+import { createAirPlaySession } from "./session.js";
 import { createLogger } from "../../utils/logger.js";
 
 // 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
@@ -160,7 +161,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
 
   const baseUrl = opts.baseUrl || getEffectiveBaseUrl();
   if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");
-  const streamUrl = opts.streamUrl || createCastSession(opts.songId, opts.deviceId, baseUrl).streamUrl;
+  const streamUrl = opts.streamUrl || createAirPlaySession(opts.songId, opts.deviceId, baseUrl).streamUrl;
 
   const player = new RaopPlayer({ host: dev.host, port: dev.port, pk: dev.pk, et: dev.et });
   let session: RaopSession;
@@ -506,7 +507,7 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
 
   const baseUrl = opts.baseUrl || getEffectiveBaseUrl();
   if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");
-  const streamUrl = opts.streamUrl || createCastSession(opts.songId, opts.deviceId, baseUrl).streamUrl;
+  const streamUrl = opts.streamUrl || createAirPlaySession(opts.songId, opts.deviceId, baseUrl).streamUrl;
 
   await ensureAirplayHost();
   // fork 路径输入合规(SPEC §1.8):子进程不碰 DB,回环包装必须在主进程完成;

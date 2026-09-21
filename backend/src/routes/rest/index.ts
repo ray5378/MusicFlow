@@ -1863,10 +1863,133 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
 // DLNA renderers pull bytes via a plain HTTP GET and cannot send auth headers.
 // This endpoint resolves a cast token (created by castToDevice) to a songId,
 // then streams the file exactly like /rest/stream. Registered without auth.
+// ==================== 投屏出流核心(DLNA / AirPlay 共用) ====================
+// 两条链此前共用 `/rest/dlna/stream/:token` **一条**路由 —— AirPlay 因此被迫带上
+// DLNA 音箱兼容头、滤镜通道键恒为 `dlna`、连 timeOffset 语义都要跟着 DLNA 走
+// (「播放通道不能复用」要根治的点)。现在路由 / token / 通道各自独立,出流逻辑仍是
+// 这一份,只按 `kind` 取不同的参数 —— 不复制这 100 行,避免两条链各自漂移。
+async function serveCastStream(
+  c: any,
+  ctx: { kind: "dlna" | "airplay"; songId: string; deviceId: string },
+): Promise<any> {
+  const song = db.select().from(songs).where(eq(songs.id, ctx.songId)).get();
+  if (!song) return c.text("Song not found", 404);
+
+  // 拉流同样走播放优选 + 回退(与 /rest/stream 一致):cast token 绑定的是
+  // 用户点的 web 行,实际出流切组内 local/webdav 无损源;local 不可用回 web。
+  // 队列/状态仍按原行上报,只影响音箱实际拉到的流。
+  const resolvedSong = await resolvePreferredSong(song);
+
+  const timeOffset = parseTimeOffset(c);
+  const requestedFormat = getParam(c, "format");
+  const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
+  // P4-2:per-player DSP 用 `<通道>:<deviceId>` 作查键 —— 播放端自己不会自报,
+  // 但 cast token 里带着 deviceId(= 它由哪台设备投屏而来),所以天然知道"是谁在播"。
+  const dspPeerId = ctx.deviceId ? `${ctx.kind}:${ctx.deviceId}` : "";
+  // P5-1/P5-2 + 通道独立(L4):DLNA 是「通道开关 **且** 该设备未被单独回退」;
+  // AirPlay 只看自己的通道开关(它没有单设备回退键)。`null` = 本次不带滤镜链
+  // (仍是完整管道,只是空 af:D9)。
+  const { isDlnaEffectsEnabled, isChannelEnabled } = await import("../../services/audio/pipelineSwitches.js");
+  const channel: PipelineChannel | null =
+    ctx.kind === "dlna"
+      ? (isDlnaEffectsEnabled(ctx.deviceId) ? "dlna" : null)
+      : (isChannelEnabled("airplay") ? "airplay" : null);
+
+  // 与 /rest/stream 一致支持 format/maxBitRate/timeOffset 服务端实时转码;
+  // 音箱默认不带这些参数 → 走下面的实时管道(不是原样拉流)。
+  const transcode = decideTranscode({
+    requestedFormat,
+    maxBitRate,
+    sourceFormat: resolvedSong.suffix,
+    sourceBitRate: resolvedSong.bitRate,
+  });
+  if (transcode.should && transcode.format) {
+    const input = await resolveTranscodeInput(c, resolvedSong);
+    if (input) {
+      return serveTranscodedSong(c, input, {
+        format: transcode.format,
+        bitrateKbps: transcode.bitrateKbps,
+        timeOffset,
+        af: await resolveRequestAf(resolvedSong, dspPeerId, channel),
+        songId: resolvedSong.id,
+      });
+    }
+  }
+
+  // P2-2:投屏不再有直传旁路(D9)。web/webdav/本地统一走服务端实时管道:
+  // cast 时 DIDL mime 与出流 Content-Type 共用它(天然同步);Range 在实时流上
+  // 无意义一律忽略走全流 200(客户端改走 timeOffset)。
+  try {
+    const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
+    const castCodec = resolveDlnaOutput(resolvedSong.suffix);
+    const input = await resolveTranscodeInput(c, resolvedSong);
+    if (!input) return c.text("No playable stream", 404);
+    if ((resolvedSong.type || "local") !== "web") {
+      const parsedLocal = parseSongPath(resolvedSong.path);
+      if (!parsedLocal) return c.text("Invalid song path", 400);
+      if (parsedLocal.type !== "w") {
+        const fs = await import("fs");
+        if (!fs.existsSync(parsedLocal.filePath)) return c.text("File not found", 404);
+      }
+    }
+    // 音箱兼容头 **仅 DLNA 语义**(http_profile 等价):contentFeatures 宣告
+    // OP/CI/FLAGS,forced_content_length 给 12h 假总量(部分老固件无 Content-Length
+    // 拒播),ICY 仅当设备请求 Icy-MetaData:1 时给。AirPlay 是本机 ffmpeg 拉流,
+    // 这些头对它无意义且会误导(尤其那个假的 12h Content-Length)。
+    const extraHeaders: Record<string, string> = {};
+    let icyRequested = false;
+    if (ctx.kind === "dlna") {
+      const flacEstimateKbps = 1411;
+      const rateKbps = castCodec.codec === "flac" ? flacEstimateKbps : (castCodec.bitrateKbps ?? 320);
+      extraHeaders["contentFeatures.dlna.org"] =
+        "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+      extraHeaders["Content-Length"] = String(Math.ceil(rateKbps * 1000 / 8 * 12 * 3600));
+      icyRequested = (c.req.header("icy-metadata") || "") === "1";
+    }
+
+    // P3-5:D7 的 L0 落地 —— 开关打开时(缺省**关**,见 flowSource.resolveFlowSettings)
+    // 出「队列连续流」:cast token 里带着 deviceId,能直接取到该设备的**权威队列**,
+    // 从当前首往后接着拼,曲目边界靠 ICY StreamTitle 告诉设备(连续流里设备分不出换歌)。
+    // timeOffset>0(在流内 seek 重拉)一律不走 flow:连续流没有"第 N 秒"这个稳定语义,
+    // 交回单曲管道(P2-4 的 timeOffset 路径)。flow 是 DLNA 队列语义,AirPlay 不走。
+    if (ctx.kind === "dlna" && timeOffset === 0 && ctx.deviceId) {
+      const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
+      const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d), { effectsOn: channel !== null });
+      if (flowCfg.enabled && flowCfg.crossfade) {
+        const flowResp = await serveFlowQueue(c, {
+          deviceId: ctx.deviceId,
+          songId: resolvedSong.id,
+          codec: castCodec,
+          fade: flowCfg.fade,
+          extraHeaders,
+          dspPeerId,
+          flowChannel: channel,
+          ...(icyRequested ? { icyMetaint: 16384 } : {}),
+        });
+        if (flowResp) return flowResp;
+      }
+    }
+
+    return servePipelinedSong(c, resolvedSong, input, {
+      timeOffset,
+      af: await resolveRequestAf(resolvedSong, dspPeerId, channel),
+      codecOverride: castCodec,
+      extraHeaders,
+      ...(icyRequested ? { icyMetaint: 16384 } : {}),
+    });
+  } catch (e: any) {
+    return c.text(e.message || "Stream failed", 500);
+  }
+}
+
+// ==================== DLNA stream (token-auth-free) ====================
+// DLNA renderers pull bytes via a plain HTTP GET and cannot send auth headers.
+// This endpoint resolves a cast token (created by castToDevice) to a songId,
+// then streams the file exactly like /rest/stream. Registered without auth.
 restRoutes.get("/dlna/stream/:token", async (c) => {
   const token = c.req.param("token");
-  // raw=1 回环取流走上面的 raw-stream 注册表分支(plugins/ffmpeg 内部用);
-  // cast token 绑定的歌曲一律走下面管道出流,不再有直传旁路(P2-2/D9)。
+  // raw=1 回环取流走下面的 raw-stream 注册表分支(plugins/ffmpeg 内部用);
+  // cast token 绑定的歌曲一律走管道出流,不再有直传旁路(P2-2/D9)。
   const rawEntry = resolveRawStreamToken(token);
   if (rawEntry) {
     const headers: Record<string, string> = { ...(rawEntry.headers || {}) };
@@ -1885,108 +2008,18 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   }
   const castSession = resolveCastSession(token);
   if (!castSession) return c.text("Invalid or expired cast token", 403);
-  const songId = castSession.songId;
+  return serveCastStream(c, { kind: "dlna", songId: castSession.songId, deviceId: castSession.deviceId });
+});
 
-  const song = db.select().from(songs).where(eq(songs.id, songId)).get();
-  if (!song) return c.text("Song not found", 404);
-
-  // DLNA 拉流同样走播放优选 + 回退(与 /rest/stream 一致):cast token 绑定的是
-  // 用户点的 web 行,实际出流切组内 local/webdav 无损源;local 不可用回 web。
-  // 队列/状态仍按原行上报,只影响音箱实际拉到的流。
-  const resolvedSong = await resolvePreferredSong(song);
-
-  const timeOffset = parseTimeOffset(c);
-  const requestedFormat = getParam(c, "format");
-  const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
-  // P4-2:DLNA 侧 per-player DSP 用 `dlna:<deviceId>` 作查键 —— 音箱自己不会自报,
-  // 但 cast token 里带着 deviceId(= 它由哪台设备投屏而来),所以这里天然知道"是谁在播"。
-  const dspPeerId = castSession.deviceId ? `dlna:${castSession.deviceId}` : "";
-  // P5-1/P5-2:本设备的滤镜链是否生效 —— 通道开关(`pipeline.dlna`)开 **且** 该设备
-  // 未被单独回退。`null` 表示本次不带滤镜链(仍是完整管道，只是空 af：D9)。
-  const { isDlnaEffectsEnabled } = await import("../../services/audio/pipelineSwitches.js");
-  const dlnaChannel: PipelineChannel | null = isDlnaEffectsEnabled(castSession.deviceId) ? "dlna" : null;
-
-  // 与 /rest/stream 一致支持 format/maxBitRate/timeOffset 服务端实时转码；
-  // 音箱默认不带这些参数 → 走下面的实时管道(不是原样拉流)。
-  const transcode = decideTranscode({
-    requestedFormat,
-    maxBitRate,
-    sourceFormat: resolvedSong.suffix,
-    sourceBitRate: resolvedSong.bitRate,
-  });
-  if (transcode.should && transcode.format) {
-    const input = await resolveTranscodeInput(c, resolvedSong);
-    if (input) {
-      return serveTranscodedSong(c, input, {
-        format: transcode.format,
-        bitrateKbps: transcode.bitrateKbps,
-        timeOffset,
-        af: await resolveRequestAf(resolvedSong, dspPeerId, dlnaChannel),
-        songId: resolvedSong.id,
-      });
-    }
-  }
-
-  // P2-2:DLNA 不再有直传旁路(D9)。web/webdav/本地统一走服务端实时管道:
-  // cast 时 DIDL mime 与出流 Content-Type 共用它(天然同步);Range 在实时流上
-  // 无意义一律忽略走全流 200(客户端改走 timeOffset)。
-  try {
-    const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
-    const dlnaCodec = resolveDlnaOutput(resolvedSong.suffix);
-    const input = await resolveTranscodeInput(c, resolvedSong);
-    if (!input) return c.text("No playable stream", 404);
-    if ((resolvedSong.type || "local") !== "web") {
-      const parsedLocal = parseSongPath(resolvedSong.path);
-      if (!parsedLocal) return c.text("Invalid song path", 400);
-      if (parsedLocal.type !== "w") {
-        const fs = await import("fs");
-        if (!fs.existsSync(parsedLocal.filePath)) return c.text("File not found", 404);
-      }
-    }
-    // 音箱兼容头:http_profile 等价语义 —— contentFeatures 宣告 OP/CI/FLAGS,
-    // forced_content_length 给 12h 假总量(部分老固件无 Content-Length 拒播),
-    // ICY 仅当设备请求 Icy-MetaData:1 时给(icy-metaint + 空元数据装帧)。
-    const flacEstimateKbps = 1411;
-    const rateKbps = dlnaCodec.codec === "flac" ? flacEstimateKbps : (dlnaCodec.bitrateKbps ?? 320);
-    const extraHeaders: Record<string, string> = {
-      "contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000",
-      "Content-Length": String(Math.ceil(rateKbps * 1000 / 8 * 12 * 3600)),
-    };
-    const icyRequested = (c.req.header("icy-metadata") || "") === "1";
-
-    // P3-5:D7 的 L0 落地 —— 开关打开时(缺省**关**,见 flowSource.resolveFlowSettings)
-    // 出「队列连续流」:cast token 里带着 deviceId,能直接取到该设备的**权威队列**,
-    // 从当前首往后接着拼,曲目边界靠 ICY StreamTitle 告诉设备(连续流里设备分不出换歌)。
-    // timeOffset>0(设备在流内 seek 重拉)一律不走 flow:连续流没有"第 N 秒"这个稳定语义,
-    // 交回单曲管道(P2-4 的 timeOffset 路径)。
-    if (timeOffset === 0 && castSession.deviceId) {
-      const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
-      const flowCfg = resolveFlowSettings((k, d) => getSetting(k, d), { effectsOn: dlnaChannel !== null });
-      if (flowCfg.enabled && flowCfg.crossfade) {
-        const flowResp = await serveFlowQueue(c, {
-          deviceId: castSession.deviceId,
-          songId: resolvedSong.id,
-          codec: dlnaCodec,
-          fade: flowCfg.fade,
-          extraHeaders,
-          dspPeerId,
-          flowChannel: dlnaChannel,
-          ...(icyRequested ? { icyMetaint: 16384 } : {}),
-        });
-        if (flowResp) return flowResp;
-      }
-    }
-
-    return servePipelinedSong(c, resolvedSong, input, {
-      timeOffset,
-      af: await resolveRequestAf(resolvedSong, dspPeerId, dlnaChannel),
-      codecOverride: dlnaCodec,
-      extraHeaders,
-      ...(icyRequested ? { icyMetaint: 16384 } : {}),
-    });
-  } catch (e: any) {
-    return c.text(e.message || "Stream failed", 500);
-  }
+// ==================== AirPlay stream(独立 token 命名空间) ====================
+// AirPlay 的 ffmpeg 在本机拉这条流(经 resolvePipelineInput 回环包装),不再复用
+// `/rest/dlna/stream/:token`。token 由 services/airplay/session.ts 发放(SQLite 登记,
+// 跨 fork 子进程可见)。支持 timeOffset:seek 时用它重拉一条从新起点开始的流。
+restRoutes.get("/airplay/stream/:token", async (c) => {
+  const { resolveAirPlaySession } = await import("../../services/airplay/session.js");
+  const s = resolveAirPlaySession(c.req.param("token"));
+  if (!s) return c.text("Invalid or expired airplay token", 403);
+  return serveCastStream(c, { kind: "airplay", songId: s.songId, deviceId: s.deviceId });
 });
 
 restRoutes.get("/download", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {

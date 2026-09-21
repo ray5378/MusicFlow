@@ -566,6 +566,15 @@ export function initDatabase() {
       headers_json TEXT NOT NULL DEFAULT '',
       exp INTEGER NOT NULL
     );
+    -- AirPlay 独立取流凭证(见 services/airplay/session.ts)。与 raw_stream_tokens
+    -- 同理由必须落库:AirPlay fork 模式下主进程 mint、子进程经回环 URL 消费,
+    -- 内存 Map 跨进程不可见。短 TTL 凭证,非用户数据。
+    CREATE TABLE IF NOT EXISTS airplay_stream_tokens (
+      token TEXT PRIMARY KEY,
+      song_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      exp INTEGER NOT NULL
+    );
     -- 每源一行的响度/节奏/频谱测量值(MA AudioAnalysisData 对齐),供②段静态增益取值。
     -- row_id 指向 songs.id:同曲多源各有自己的一行,不按 group 合并。
     -- 写侧纪律见 D8:仅 local/webdav 行回写,网络源永不入库(永远走实时 loudnorm)。

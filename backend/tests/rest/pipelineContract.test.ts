@@ -72,7 +72,9 @@ describe("P2-6 结构锁:两个路由都不再有原样直出路径（D9 回归�
 
   it("/rest/dlna/stream handler 段的 cast 分支后无原样直出手段", () => {
     const seg = sliceBetween(restSrc, 'restRoutes.get("/dlna/stream/:token"', 'restRoutes.get("/download"');
-    expect(seg).toContain("servePipelinedSong(");
+    // 出流核心已抽成 serveCastStream()（DLNA / AirPlay 共用，见 4.0.6「通道独立」）：
+    // 路由只做 token 解析 + 委派，管道出口的干净性改由下面的共享函数段断言。
+    expect(seg).toContain('serveCastStream(c, { kind: "dlna"');
     // 回环取源分支必须挂在本进程注册表上（发给 ffmpeg 用），不能被换成别的签发来源
     expect(seg).toContain("resolveRawStreamToken(token)");
     // cast token（用户可见路径）之后一律走管道
@@ -80,13 +82,38 @@ describe("P2-6 结构锁:两个路由都不再有原样直出路径（D9 回归�
     expect(afterCast.length).toBeGreaterThan(0);
     expect(afterCast).not.toContain("createReadStream");
     expect(afterCast).not.toContain("Accept-Ranges");
-    expect(afterCast).toContain("servePipelinedSong(");
+    expect(afterCast).toContain('serveCastStream(c, { kind: "dlna"');
+    expect(afterCast).not.toMatch(/getParam\(c,\s*"raw"\)/);
+    expect(afterCast).not.toContain("c.body(");
+
+    // 真正的管道出口断言落到共享函数上（结构不变，只是搬了位置）。
+    const core = sliceBetween(restSrc, "async function serveCastStream(", 'restRoutes.get("/dlna/stream/:token"');
+    expect(core).toContain("servePipelinedSong(");
+    expect(core).not.toContain("createReadStream");
+    expect(core).not.toContain("Accept-Ranges");
     // P3-5:DLNA 侧默认由服务端接管队列 → flow 出口必须**开关把关**（缺省关）
     // 且会话内部仍是六段管道（serveFlowQueue 就是管道出口，不是旁路）。
-    expect(afterCast).toContain("resolveFlowSettings(");
-    expect(afterCast).toContain("serveFlowQueue(");
+    expect(core).toContain("resolveFlowSettings(");
+    expect(core).toContain("serveFlowQueue(");
     // 设备在流内 seek（timeOffset>0）时连续流没有稳定语义 → 必须落回单曲管道
-    expect(afterCast).toMatch(/timeOffset === 0/);
+    expect(core).toMatch(/timeOffset === 0/);
+  });
+
+  // 「播放通道不能复用」的可执行版本：AirPlay 曾与 DLNA 共用 /rest/dlna/stream
+  // 一条路由（DLNA 音箱兼容头被强加给 AirPlay 解码器、滤镜通道键恒为 dlna）。
+  // 现在它必须有自己的 token 命名空间与路由，且两者都走同一个管道出口。
+  it("AirPlay 取流通道独立于 DLNA（不再复用 /rest/dlna/stream）", () => {
+    const seg = sliceBetween(restSrc, 'restRoutes.get("/airplay/stream/:token"', 'restRoutes.get("/download"');
+    expect(seg).toContain("resolveAirPlaySession(");
+    expect(seg).toContain('serveCastStream(c, { kind: "airplay"');
+    expect(seg).not.toContain("/rest/dlna/stream");
+    expect(seg).not.toContain("contentFeatures.dlna.org");
+    // 通道键必须随 kind 走：AirPlay 用 pipeline.airplay，不再恒为 dlna
+    const core = sliceBetween(restSrc, "async function serveCastStream(", 'restRoutes.get("/dlna/stream/:token"');
+    expect(core).toMatch(/ctx\.kind === "dlna"/);
+    expect(core).toContain('isChannelEnabled("airplay")');
+    // AirPlay 侧不得出现 DLNA 音箱兼容头（假 12h Content-Length 会误导本机 ffmpeg）
+    expect(core).toMatch(/if \(ctx\.kind === "dlna"\)/);
   });
 
   it("X-MusicFlow-Transcoded 头只在两个管道出口定义（单曲管道 / flow 连续流，没有第三条）", () => {

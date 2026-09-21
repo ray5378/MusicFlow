@@ -2,6 +2,55 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.6] - 2026-09-22
+
+### 修复 —— 进度条跳转(sendspin / DLNA)按 Music Assistant 语义重做
+
+根因一句话:此前 seek 的语义是「在跑着的流里挪指针」,而 MA 的语义是
+「用新起点重建一条流」(`controllers/player_queues/controller.py:862`)。
+前者在实时转码管道上物理落不了位 —— sendspin 卡顿、进度条比真实快、DLNA 进度虚高,
+是同一个根因的三种表现。完整方案见 `docs/PLAYBACK_SEEK_MA_REWORK.md`。
+
+- **sendspin 跳转后持续卡顿 + 进度条比真实时间快**:`window.seekTo()` 是 kill 旧 ffmpeg
+  再冷起新的,设备端实测 **5~7.4s 完全断流**,缓冲耗尽后按实时速率补不回来;且 seek
+  瞬间就写了 pacing 锚点、首帧却晚到数秒,`dueMs` 全部落在过去 → 帧无节制连发
+  (实测 3.94s 内 `pos` 涨 8.875s)。现在改为 MA 式**后台预建新流 + 帧边界原子切换**:
+  `seek()` 立即发布目标位置(防 UI snapback)→ `beginRebuild()` 后台预建 → 就绪后由
+  pushLoop 在帧边界换流 —— **旧流在预建期间继续播,设备端零空窗**;`rebuildGen`
+  保证连续拖动只认最后一次,过期的重建立即释放(防泄漏);seek 后重锚提前量抬到 3s
+  (设备上报的缓冲参数常常全 0,`send_ahead` 退化成 800ms,太浅)。
+- **ffmpeg 孤儿泄漏(P0)**:`GroupPump.play()` 用 `this.window = stream` 直接覆盖,
+  旧 `WindowStream` 从未 `close()` → 每次切歌泄漏一个 ffmpeg。240 现场堆积 10 个、
+  存活 18~29 分钟、各占 ~65MB RSS,最终触发 `PcmWindow 等数超时(15000ms)` →
+  `idle_early` 误判 → 切歌 → 再泄漏,恶性循环。改为 play 前先 `releaseAudio()`。
+  部署后实测:ffmpeg 10→1、僵尸 5→0、容器内存 1.35G→674MB。
+- **DLNA 进度虚高 + 外推越过时长误判切歌**:HiVi/MUZO 播实时转码流时 `GetPositionInfo`
+  **恒回 `RelTime=0`**,SOAP `Seek(REL_TIME)` 静默失效,而位置基线仍被锚到请求目标 →
+  纯墙钟外推。现在连续 2 次「设备不报位置」即判定该设备 SOAP Seek 无效(**并落库持久化**,
+  重启后首次 seek 就直接走,不必再试错两回),此后 seek 改为**带 `timeOffset=N` 重投一条
+  新流**(MA `play_index(seek_position=N)` 在 DLNA 侧的等价实现)。
+- **起播跳转不再二次冷起**:`PumpSource` 增加 `startMs`,起播即带 ffmpeg `-ss`,
+  省掉「建流 → `seekTo()` → 再冷起」的整段空窗。
+
+### 新增 —— AirPlay 通道独立(播放通道不再复用)
+
+AirPlay 此前与 DLNA、sendspin 共用 `/rest/dlna/stream/:token` **一条**路由,带来三个
+结构性问题:① DLNA 音箱兼容头(`contentFeatures` / 12h 假 `Content-Length` / ICY)被
+强加给 AirPlay 解码器;② 滤镜通道键恒为 `dlna`,`pipeline.airplay` 开关形同虚设;
+③ 任一链改 URL 参数会串到别的链。现在 AirPlay 有自己的 token 命名空间
+(`services/airplay/session.ts`,**SQLite 登记** —— AirPlay fork 模式下主进程 mint、
+子进程经回环 URL 消费,内存 Map 跨进程不可见)与 `/rest/airplay/stream/:token` 路由;
+出流核心抽成 `serveCastStream()` 由两条链共用,按通道取各自的 DSP 查键与管线开关,
+不复制 100+ 行出流逻辑。
+
+### 文档
+- 新增 `docs/PLAYBACK_SEEK_MA_REWORK.md`:真机取证(F1~F4 + 两个放大器)、MA 权威契约、
+  通道复用现状图、四层改造总纲、patch 全表、验收矩阵、发布与回滚方案。
+
+### 构建信息
+
+- Docker 镜像:`ray5378/musicflow:4.0.6` + `:latest`
+
 ## [4.0.5] - 2026-09-21
 
 ### 修复 —— CI 合规

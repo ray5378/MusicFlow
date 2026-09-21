@@ -3,11 +3,13 @@
 // like DLNA devices do. Audio is driven by services/airplay/control.ts; this
 // file only maps the ProtocolPlayer contract onto it.
 //
-// The DLNA chain stays untouched: like control.ts, we only reuse DLNA's exported
-// createCastSession() to mint a token stream URL (the same /rest/dlna/stream/:token
-// endpoint DLNA renderers pull) that ffmpeg decodes into RAW-ALAC.
+// Channel independence (L4): AirPlay used to *reuse* DLNA's createCastSession() and
+// pull /rest/dlna/stream/:token — one route serving three protocols, which forced
+// DLNA-only headers onto the AirPlay decoder and pinned the filter channel to `dlna`.
+// It now mints its own token (services/airplay/session.ts) and pulls
+// /rest/airplay/stream/:token; the streaming core stays shared (serveCastStream).
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
-import { createCastSession } from "../dlna/control.js";
+import { createAirPlaySession } from "./session.js";
 import {
   castToAirPlayDevice,
   getAirPlayStatus,
@@ -23,7 +25,7 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
   return {
     playerId,
     async playMedia(item: QueueItem, baseUrl: string) {
-      const streamUrl = createCastSession(item.songId, deviceId, baseUrl).streamUrl;
+      const streamUrl = createAirPlaySession(item.songId, deviceId, baseUrl).streamUrl;
       await castToAirPlayDevice({
         deviceId,
         songId: item.songId,
