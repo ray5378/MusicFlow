@@ -13,6 +13,9 @@
 import { PlaybackTracker, type TrackDecision } from "./PlaybackTracker.js";
 import { PlaybackState, PlayerState, toCompareState } from "./types.js";
 import { touch } from "../memory/reclaim.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("PlayerController");
 
 const DEBOUNCE_LAYER1_MS = 250;  // player 层去抖
 const DEBOUNCE_LAYER2_MS = 500;  // → queue 层去抖
@@ -57,7 +60,9 @@ export class PlayerController {
   reportState(state: PlayerState): void {
     touch(); // 标记活动:播放状态上报(有设备在播/切歌/seek 都算活跃)
     this.latest.set(state.playerId, state);
-    console.log(`[PlayerController][reportDBG] ${state.playerId}: ${state.playbackState} pos=${state.position} dur=${state.duration} opt=${!!this.optimistic.get(state.playerId)}`);
+    // debug:设备→服务端的状态上报原始值(设备侧真相)。拖动后被"回退"的观感,
+    // 多半能在这一行看到 UI 之外的真实位置序列。
+    log.debug(`[PlayerController][report] ${state.playerId}: ${state.playbackState} pos=${state.position} dur=${state.duration} uri=${state.mediaUri || "-"} opt=${!!this.optimistic.get(state.playerId)}`);
     // 乐观窗口:若该 player 正在切歌,忽略 IDLE/异常上报,只接受 PLAYING(确认成功)
     const opt = this.optimistic.get(state.playerId);
     if (opt) {
@@ -71,6 +76,7 @@ export class PlayerController {
         // 落入下方正常去抖逻辑(不 return)
       } else {
         // 乐观窗口内忽略非 PLAYING 上报(屏蔽瞬态 STOPPED/TRANSITIONING)
+        log.debug(`[PlayerController][optimistic] ${state.playerId}: 窗口内忽略 ${state.playbackState}(等待 PLAYING 确认)`);
         return;
       }
     }
@@ -122,8 +128,12 @@ export class PlayerController {
     if (!opt || opt.timeoutTimer) return;
     opt.timeoutTimer = setTimeout(() => {
       this.optimistic.delete(playerId);
+      // debug:窗口超时 = 5s 内没等到设备报 PLAYING。这是"投出去但没播起来"的关键信号,
+      // 上面还会有一条 [stalled] 决策日志;两者成对出现说明重投链路在跑。
+      log.debug(`[PlayerController][optimistic] ${playerId}: 阶段2 超时(${PLAY_TIMEOUT_MS}ms 未收到 PLAYING)→ stalled`);
       this.onDecision("stalled", playerId);
     }, PLAY_TIMEOUT_MS);
+    log.debug(`[PlayerController][optimistic] ${playerId}: 阶段2 起 5s 等 PLAYING 计时`);
   }
 
   private clearOptimistic(playerId: string): void {
@@ -131,6 +141,7 @@ export class PlayerController {
     if (!opt) return;
     if (opt.timeoutTimer) clearTimeout(opt.timeoutTimer);
     this.optimistic.delete(playerId);
+    log.debug(`[PlayerController][optimistic] ${playerId}: 窗口关闭(耗时 ${Date.now() - opt.startedAt}ms)`);
   }
 
   /** 显式结束乐观窗口(cast 失败 / 显式撤销时调)。cast **成功**不调这个 ——
@@ -192,7 +203,7 @@ export class PlayerController {
       // 本地节拍不经过设备事件去抖(它天生无风暴:每 tick 每 player 至多一条),
       // 而走 pendingDecision 会被窗口内后到的 reportState 用 "none" 覆盖掉。
       this.clearPending(playerId);
-      console.log(`[PlayerController][overrunDBG] t=${now} ${playerId}: decision=${decision}`);
+      log.debug(`[PlayerController][overrun] ${playerId}: decision=${decision}`);
       this.onDecision(decision, playerId);
     }
   }

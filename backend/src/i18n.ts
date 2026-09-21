@@ -121,6 +121,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
 
     "errors.common.proxyFormat": "代理地址格式应为 http://ip:port、https://ip:port 或 socks5://ip:port",
     "errors.common.paceFormat": "档位必须为 slow | standard | full",
+    "errors.common.logLevelFormat": "日志等级必须为 debug | info | warn | error",
     "errors.common.builtinPluginProtected": "内置核心插件不可删除",
     "errors.common.registryUrlRequired": "需要 registry URL",
     "errors.common.downloadUrlRequired": "需要 downloadUrl",
@@ -289,6 +290,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     // ======== i18n keys migrated via apiError in routes/api/index.ts ========
     "errors.common.proxyFormat": "Proxy address must be http://ip:port, https://ip:port, or socks5://ip:port",
     "errors.common.paceFormat": "Pace must be slow | standard | full",
+    "errors.common.logLevelFormat": "Log level must be debug | info | warn | error",
     "errors.common.builtinPluginProtected": "Built-in core plugins cannot be deleted",
     "errors.common.registryUrlRequired": "Registry URL is required",
     "errors.common.downloadUrlRequired": "downloadUrl is required",

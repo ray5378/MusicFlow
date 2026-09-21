@@ -56,12 +56,15 @@ import {
   RANDOM_SONGS_CHANGED_EVENT,
 } from "../plugin/randomSongs.js";
 
+// 模块级 logger:WS 事件的转发回调(subscribeAndForward)在顶层函数里,
+// 拿不到 initWebSocketServer 内部的局部 logger,故统一提到模块级。
+const log = createLogger("ws");
+
 let wss: WebSocketServer | null = null;
 
 export function initWebSocketServer(server: import("http").Server): void {
   if (wss) return;
   wss = new WebSocketServer({ noServer: true });
-  const log = createLogger("ws");
 
   // 「随机歌曲」歌单变动广播:插件(后台定时 / 惰性刷新)重建歌单后 emit,
   // 此处转发给所有已连接客户端,客户端收到后按需重拉歌单,不再轮询。
@@ -191,6 +194,11 @@ function subscribeAndForward(ws: WebSocket): () => void {
   const onState = (deviceId: string, st: any) => {
     if (!canSeeDevice(deviceId)) return;
     const media = getCurrentMedia(deviceId);
+    // debug:推给前端的最终状态 —— 进度条「拖动后跳回」是前端渲染 vs 服务端权威值
+    // 的分歧,而服务端权威值就是以这一行为准(前端进度条按 pos/dur 渲染)。
+    // 拖动瞬间若看到 pos 从目标值掉回旧值,说明回退发生在服务端外推/上报侧,
+    // 而不是前端 UI 层;反之则前端没接受这个值。
+    log.debug(`[ws][state] ${deviceId} state=${st?.state ?? "-"} pos=${Math.round(st?.position ?? 0)} dur=${Math.round(st?.duration ?? 0)} track=${media?.title ?? "-"}`);
     send(ws, { type: "player_state_changed", device_id: deviceId, state: { ...st, media } });
   };
   const onMedia = (deviceId: string, media: any) => {

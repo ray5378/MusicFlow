@@ -136,6 +136,21 @@
       "reclaimFailed": "Reclamation failed",
       "saved": "Memory settings saved"
     },
+    "logLevel": {
+      "title": "Log level",
+      "levelTitle": "Backend log level",
+      "levelDesc": "Switch to debug when troubleshooting: the backend then writes the whole playback chain (drag / seek / cast / decode / stream) straight into the container log (docker logs musicflow) with no restart needed. Switch back to info afterwards. Higher levels log less; error logs errors only.",
+      "sourceSetting": "Saved on the server, survives restarts",
+      "sourceEnv": "Currently set by the LOG_LEVEL environment variable; saving here overrides it",
+      "sourceDefault": "Currently the default level (info)",
+      "saved": "Log level switched, effective immediately",
+      "levels": {
+        "debug": "debug (most verbose, for troubleshooting)",
+        "info": "info (default)",
+        "warn": "warn (warnings only)",
+        "error": "error (errors only)"
+      }
+    },
     "dsp": {
       "title": "Tone (per device)",
       "desc": "EQ and gain saved per device, applied from the next playback. Leave everything at 0 for no processing at all (zero overhead). While devices are grouped, a member's own tone settings are disabled.",

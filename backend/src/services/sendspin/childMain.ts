@@ -39,6 +39,7 @@ import {
   leaveGroupCore,
 } from "./playerCore.js";
 import type { QueueItem } from "../player/types.js";
+import { isLogLevel, setLogLevel } from "../../utils/logger.js";
 
 /** 子进程对主进程的发送通道(child.ts 注入 process.send 的安全包装;测试注入数组)。 */
 export type ChildSend = (msg: SendspinChildToParent) => void;
@@ -102,6 +103,14 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
   private async dispatch(op: string, p: any): Promise<unknown> {
     const srv = this.deps.getServer();
     switch (op) {
+      case "setLogLevel": {
+        // 运行期日志等级下发(2026-09-21)。子进程 stdio inherit,日志与主进程同汇
+        // docker logs,但它有**独立的 logger 实例**:LOG_LEVEL 只在 fork 时读一次 env,
+        // 所以设置页切换 debug 后必须显式推给它,否则推流/解码侧的 debug 明细不出现。
+        const lv = String(p?.level || "").toLowerCase();
+        if (isLogLevel(lv)) setLogLevel(lv);
+        return null;
+      }
       case "playMedia": {
         if (!srv) throw new Error("sendspin server 未运行");
         const clientId = String(p.clientId);

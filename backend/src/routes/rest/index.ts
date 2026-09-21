@@ -1297,6 +1297,12 @@ async function serveTranscodedSong(
     timeOffsetSec: opts.timeOffset,
     ...(opts.af && opts.af.length > 0 ? { af: opts.af } : {}),
   });
+  // debug:转码 seek 的最终落点 —— ffmpeg 参数里的 -ss 才是「真正从第几秒开始解码」。
+  // 进度条「定位恒偏小 / 拖动后跳回」时,用它和 [stream] 那行的 timeOffset 对照,
+  // 就能区分「参数没传下来」和「传下来了但 ffmpeg 没照做」。
+  if (opts.timeOffset && opts.timeOffset > 0) {
+    log.debug(`[transcode] ${opts.songId ?? "-"} ${opts.format} ${opts.bitrateKbps}kbps timeOffset=${opts.timeOffset}s args=${args.join(" ").slice(0, 200)}`);
+  }
   // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream。
   // 直接把 child.stdout(Node Readable) 丢进 new Response() 时,undici 在流结束处
   // 会对 ReadableByteStreamController 调用两次 close()(child_process 的 stdout
@@ -1687,6 +1693,13 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   // P4-2:per-player DSP 的查键。HTTP 客户端必须自报(Web 用 `local:<uuid>`),
   // 不自报就没有 per-device 音色 —— 服务端无从知道"这是哪台设备在播"。
   const dspPeerId = getParam(c, "peerId") || "";
+
+  // debug:seek 重拉流的服务端入口。客户端(Web / 安卓 / Windows)拖动进度条后
+  // 不是改播放位置,而是带 timeOffset 重新拉一次流 —— 想确认「拖动到底有没有
+  // 传到服务端」「传的是多少秒」,只有这一行能看到。timeOffset=0 是常规起播,不打。
+  if (timeOffset > 0) {
+    log.debug(`[stream] ${song.id} timeOffset=${timeOffset}s(拖动重拉)peerId=${dspPeerId || "-"} format=${requestedFormat || "-"} maxBitRate=${maxBitRate ?? "-"}`);
+  }
 
   // OpenSubsonic 转码语义：客户端要求 format=mp3/aac，或 maxBitRate 低于源码率 → 服务端实时转码。
   // 转码流不可按字节 seek，客户端会用 timeOffset 重新拉流（对应已宣告的 transcodeOffset 扩展）。

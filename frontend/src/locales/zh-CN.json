@@ -136,6 +136,21 @@
       "reclaimFailed": "回收失败",
       "saved": "内存回收设置已保存"
     },
+    "logLevel": {
+      "title": "日志等级",
+      "levelTitle": "后端日志等级",
+      "levelDesc": "排障时切到 debug，后端会把整条播放链路（拖动/seek/投递/解码/推流）的明细即时写进容器日志（docker logs musicflow），无需重启容器；用完切回 info 即可。级别越高输出越少，error 只记错误。",
+      "sourceSetting": "已保存到服务端，重启后仍生效",
+      "sourceEnv": "当前由环境变量 LOG_LEVEL 指定，在此保存可覆盖它",
+      "sourceDefault": "当前为默认级别（info）",
+      "saved": "日志等级已切换，立即生效",
+      "levels": {
+        "debug": "debug（最详细，排障用）",
+        "info": "info（默认）",
+        "warn": "warn（只看警告）",
+        "error": "error（只看错误）"
+      }
+    },
     "dsp": {
       "title": "音色（每台设备）",
       "desc": "按设备保存的均衡与增益，下一次起播生效。全部留 0 即不做任何处理（零开销）。设备成组播放时，成员自身的音色自动停用。",

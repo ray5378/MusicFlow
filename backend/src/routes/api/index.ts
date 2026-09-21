@@ -50,6 +50,8 @@ import { songSourceInfo, serializeSongRow, attachGroupSources, resolveSongCover 
 import { getArtistList, setArtistList, invalidateArtistList } from "../../utils/artistListCache.js";
 import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
+import { logLevelSnapshot, saveLogLevel } from "../../services/logSettings.js";
+import { isLogLevel } from "../../utils/logger.js";
 import { getProxyConfig, normalizeProxyUrl, testProxyConnection } from "../../services/proxy.js";
 import { startBackfill, backfillStatus } from "../../services/backfill.js";
 import { sendToLocalPeer, countLiveConnections } from "../../services/ws/index.js";
@@ -94,6 +96,7 @@ import {
 } from "../../services/audio/offlineMeasure.js";
 import { getGroupStatus, getGroupLeaderDeviceId } from "../../services/group/protocolPlayer.js";
 import { getQueueController } from "../../services/player/index.js";
+import { markSeekIssued } from "../../services/player/seekSettle.js";
 import { PlaybackState } from "../../services/player/types.js";
 import { onlineRoutes } from "./online.js";
 import { playlistSearchRoutes } from "./playlistSearch.js";
@@ -122,6 +125,9 @@ const comboApi = () => comboPlaylistApi();
 const syncApi = () => playlistSyncApi();
 
 const log = createLogger("RECOMMEND");
+// 传输控制(play/pause/stop/seek/volume)入口日志,单独前缀便于
+// `docker logs musicflow | grep '\[Peer\]'` 只捞拖动/控制链路,不受推荐等噪音干扰。
+const seekLog = createLogger("Peer");
 export const apiRoutes = new Hono();
 
 // ==================== 细粒度功能权限门禁(前缀 → 权限 key) ====================
@@ -1445,6 +1451,27 @@ apiRoutes.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
 // 请求指标:总请求数 / 慢请求数 / 端点调用计数(内存态,重启清零)。
 apiRoutes.get("/v1/admin/metrics", adminMiddleware, (c) => {
   return c.json({ success: true, ...getRequestMetrics() });
+});
+
+// ==================== 日志等级(运行时可调) ====================
+// 排障时在前端「设置 → 日志等级」切到 debug,**无需重启容器**即可让整条播放链路
+// (拖动/seek/投递/解码/推流)的明细落到 stdout(docker logs 可见);用完切回 info。
+// 真源 = settings 表 `log.level`;优先级:本设置 > 环境变量 LOG_LEVEL > 默认 info。
+// 只影响本进程日志输出,不改任何播放行为。
+apiRoutes.get("/v1/admin/log-settings", adminMiddleware, (c) => {
+  return c.json({ success: true, ...logLevelSnapshot() });
+});
+
+apiRoutes.put("/v1/admin/log-settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const level = typeof body?.level === "string" ? body.level.trim().toLowerCase() : "";
+  if (!isLogLevel(level)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.logLevelFormat"), 400);
+  }
+  const snap = saveLogLevel(level);
+  // 切换本身用 info 记录:这是一次"人主动做的运维动作",任何时候都该看得见。
+  createLogger("ADMIN").info(`[log] 日志等级切换为 ${snap.level}`);
+  return c.json({ success: true, ...snap });
 });
 
 // ==================== Playback settings ====================
@@ -4022,40 +4049,37 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  // 五种 kind 的入参契约完全一致(seconds 优先,兼容 position),先统一解析再分派 ——
+  // 这样日志能一次带齐 target,不必在各分支重复打。
+  const body = await c.req.json().catch(() => ({} as any));
+  const seconds = typeof body?.seconds === "number" ? body.seconds : body?.position;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+    seekLog.debug(`[seek] 拒绝 peerId=${peerId} kind=${parsed.kind} 缺 seconds/position body=${JSON.stringify(body)?.slice(0, 120)}`);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
+  }
+  // debug:seek 请求入口。前端有 250ms 防抖,但"连拖/多点"仍可能并发打到后端 ——
+  // 同一 tid 的多条 = 同一个请求链;不同 tid 短时间扎堆(且 target 各异)= 前端没收敛住的重投风暴。
+  seekLog.debug(`[seek] 收到 peerId=${peerId} kind=${parsed.kind} target=${seconds.toFixed(2)}s`);
+  // seek 冷静期打标:本路由是所有客户端(网页/卡片/客户端/HA 集成)seek 的唯一入口,
+  // 在这里打标才能覆盖 DLNA 那条**不经 transport()**的直连路径。
+  // 用途:seek 重定位期间设备必然短暂非 PLAYING,此窗口内的 IDLE 不得被判成"真结束"
+  // 而放行切歌 —— 否则表现就是「拖动后进度条归零」(见 services/player/seekSettle.ts)。
+  markSeekIssued(parsed.id);
+  const t0 = Date.now();
   if (parsed.kind === "dlna") {
-    const body = await c.req.json().catch(() => ({} as any));
-    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
-    try { await seekDevice(parsed.id, seconds); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    try { await seekDevice(parsed.id, seconds); }
+    catch (e: any) { seekLog.warn(`[seek] dlna ${parsed.id} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`); return c.json({ error: e.message }, 500); }
+  } else if (parsed.kind === "group" || parsed.kind === "airplay" || parsed.kind === "sendspin") {
+    try { await getQueueController().transport(parsed.id, "seek", seconds); }
+    catch (e: any) { seekLog.warn(`[seek] ${parsed.kind} ${parsed.id} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`); return c.json({ error: e.message }, 500); }
+  } else if (parsed.kind === "local") {
+    const res = dispatchPeerCommand(peerId, "seek", { seconds }) as { success: boolean; delivered?: boolean };
+    // delivered=false = 目标实例没有 WS 连接(离线)或是不再被控的 web 端 ——
+    // 「拖了没反应」在服务端侧最常见的根因就是这一条,必须显式打出来。
+    seekLog.debug(`[seek] local ${peerId} → ${seconds.toFixed(2)}s delivered=${res?.delivered} ${Date.now() - t0}ms`);
+    return c.json(res);
   }
-  if (parsed.kind === "group") {
-    const body = await c.req.json().catch(() => ({} as any));
-    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
-    try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
-  }
-  if (parsed.kind === "airplay") {
-    const body = await c.req.json().catch(() => ({} as any));
-    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
-    try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
-  }
-  if (parsed.kind === "sendspin") {
-    const body = await c.req.json().catch(() => ({} as any));
-    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
-    try { await getQueueController().transport(parsed.id, "seek", seconds); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
-  }
-  if (parsed.kind === "local") {
-    const body = await c.req.json().catch(() => ({} as any));
-    const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
-    if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
-    return c.json(dispatchPeerCommand(peerId, "seek", { seconds }));
-  }
+  seekLog.debug(`[seek] 完成 peerId=${peerId} target=${seconds.toFixed(2)}s ${Date.now() - t0}ms`);
   return c.json({ success: true });
 });
 

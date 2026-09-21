@@ -4,7 +4,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { metricsMiddleware } from "./middleware/metrics.js";
-import { createLogger } from "./utils/logger.js";
+import { createLogger, runWithTrace } from "./utils/logger.js";
+import { randomBytes } from "node:crypto";
 
 const log = createLogger("INDEX");
 
@@ -21,6 +22,7 @@ import {
   resolvePlayerDevicePeers, handlePlayerWebhook,
 } from "./services/player/playerWebhook.js";
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
+import { applyLogLevelFromSettings } from "./services/logSettings.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { discoverExternalPlugins } from "./plugins/discovery.js";
@@ -42,6 +44,18 @@ const app = new Hono();
 app.use("*", async (c, next) => {
   const locale = parseLocale(c.req.header("x-mf-lang") ?? c.req.header("accept-language"));
   return runWithLocale(locale, () => next());
+});
+
+// 请求级追踪 id:API/webhook 请求生成一个短 id 放进 AsyncLocalStorage,
+// debug 日志自动附加 `tid=`(见 utils/logger.ts)。排查「一次拖动进度条」这类
+// 多层级联问题时,HTTP 入口 / QueueController / DLNA SOAP / sendspin 各层的
+// 日志能被同一个 tid 串起来。静态资源不生成(无排障价值,纯噪音)。
+app.use("*", async (c, next) => {
+  const p = c.req.path;
+  const traced = p.startsWith("/rest") || p.startsWith("/api")
+    || p.startsWith("/webhooks/") || p === "/webhook/player";
+  if (!traced) return next();
+  return runWithTrace(randomBytes(4).toString("hex"), () => next());
 });
 
 // Log only what's useful: auth failures get a readable Chinese hint, real
@@ -247,6 +261,9 @@ app.get("*", async (c, next) => {
 // order here is what makes built-ins show up in the admin Plugins page.
 registerBuiltinPlugins();
 initDatabase();
+// 日志等级:设置表里的 log.level 覆盖 env/默认(库就绪后立刻应用,后续保存即时生效)。
+// 排障时前端「设置 → 日志等级」切 debug,无需重启容器。
+applyLogLevelFromSettings();
 backfillGenres();
 
 // Seed the official plugin registry once, so a fresh install has a working

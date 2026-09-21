@@ -124,6 +124,27 @@
           </div>
         </div>
       </el-card>
+
+      <el-card class="mt-card">
+        <h3>{{ t('settings.logLevel.title') }}</h3>
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.logLevel.levelTitle') }}</div>
+            <div class="desc">{{ t('settings.logLevel.levelDesc') }}</div>
+          </div>
+          <div class="setting-value log-level-actions">
+            <el-select :model-value="logLevel" style="width: 190px" @change="saveLogLevel">
+              <el-option
+                v-for="lv in logLevels"
+                :key="lv"
+                :label="t(`settings.logLevel.levels.${lv}`)"
+                :value="lv"
+              />
+            </el-select>
+            <span class="pace-hint">{{ logLevelHint }}</span>
+          </div>
+        </div>
+      </el-card>
     </template>
 
     <!-- ===== 通用 ===== -->
@@ -324,6 +345,45 @@ async function reclaimNow() {
   }
 }
 
+// ---------- 日志等级(运行时可调,排障用) ----------
+// 后端默认只出 info;排障时在这里切到 debug,整条播放链路(拖动/seek/投递/解码/推流)
+// 的明细会立即写进容器日志(docker logs musicflow),**无需重启容器**;用完切回 info。
+// 注意:若容器带了 LOG_LEVEL 环境变量且设置项为空,生效值来自 env(下方提示会说明)。
+type LogLevelValue = "debug" | "info" | "warn" | "error";
+const logLevel = ref<LogLevelValue>("info");
+const logLevels = ref<LogLevelValue[]>(["debug", "info", "warn", "error"]);
+const logLevelSource = ref<"setting" | "env" | "default">("default");
+const logLevelHint = computed(() => {
+  switch (logLevelSource.value) {
+    case "env": return t("settings.logLevel.sourceEnv");
+    case "setting": return t("settings.logLevel.sourceSetting");
+    default: return t("settings.logLevel.sourceDefault");
+  }
+});
+
+async function loadLogLevel() {
+  try {
+    const res = await api.get("/rest/api/v1/admin/log-settings");
+    const lv = res.data?.level;
+    if (typeof lv === "string") logLevel.value = lv as LogLevelValue;
+    const levels = res.data?.levels;
+    if (Array.isArray(levels) && levels.length > 0) logLevels.value = levels as LogLevelValue[];
+    if (typeof res.data?.source === "string") logLevelSource.value = res.data.source;
+  } catch { /* 静默 */ }
+}
+
+async function saveLogLevel(lv: LogLevelValue) {
+  try {
+    const res = await api.put("/rest/api/v1/admin/log-settings", { level: lv });
+    const s = res.data || {};
+    if (typeof s.level === "string") logLevel.value = s.level as LogLevelValue;
+    if (typeof s.source === "string") logLevelSource.value = s.source;
+    ElMessage.success(t("settings.logLevel.saved"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("settings.saveFailed")));
+  }
+}
+
 // ---------- 外观 / 通用 ----------
 const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
@@ -343,6 +403,8 @@ function clearCache() {
 
 onMounted(() => {
   loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig();
+  // 日志等级卡只在管理员可见(模板里 v-if="authStore.isAdmin"),非管理员请求会 403 → 静默忽略。
+  if (authStore.isAdmin) loadLogLevel();
 });
 </script>
 
@@ -365,6 +427,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: var(--fnos-text-
 .proxy-input { width: 300px; }
 .batch-pace-actions { display: flex; gap: 10px; align-items: center; }
 .memory-actions { display: flex; gap: 10px; align-items: center; }
+.log-level-actions { display: flex; gap: 10px; align-items: center; }
 .pace-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
 
 @media (max-width: 768px) {
