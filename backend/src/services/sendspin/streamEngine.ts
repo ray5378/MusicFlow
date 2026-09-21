@@ -471,7 +471,9 @@ export class GroupPump {
       void this.window.seekTo(targetMs).catch(() => {});
     }
     this.group.positionMs = targetMs;
-    if (this.running) {
+    // 暂停态拖动保持暂停(与 DLNA Seek-in-PAUSED / Web autoplay 快照同语义):
+    // running 只表示 pump 存活,paused 才表示用户意图,seek 不得擅自 resume。
+    if (this.running && !this.paused) {
       this.resume();
     }
   }

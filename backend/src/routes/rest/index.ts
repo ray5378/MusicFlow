@@ -85,6 +85,17 @@ function getParam(c: any, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * 解析 `timeOffset` 查询参数(秒,拖动 seek 用):
+ * 接受小数(ffmpeg `-ss` 前置定位支持小数,0.1s 粒度;整秒时代的 floor 误差 <1s
+ * 是「进度定位恒偏小」的来源之一)。非法/负值归 0,上限由调用方按时长钳制。
+ */
+function parseTimeOffset(c: any): number {
+  const raw = parseFloat(getParam(c, "timeOffset") || "0");
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.round(raw * 10) / 10;
+}
+
 function getParams(c: any, name: string): string[] {
   const merged = c.get(paramKey) || {};
   const v = merged[name];
@@ -1670,7 +1681,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
 
   // P2-1:Range 在实时管道流上无意义(无字节总量可供续传),一律忽略走全流 200;
   // 客户端改走 timeOffset 重拉(P2-3),Web 端见 P2-4。
-  const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
+  const timeOffset = parseTimeOffset(c);
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
   // P4-2:per-player DSP 的查键。HTTP 客户端必须自报(Web 用 `local:<uuid>`),
@@ -1801,7 +1812,7 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
       return serveTranscodedSong(c, { source: loopbackRawStreamUrl(streamUrl, streamHeaders) }, {
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
-        timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0,
+        timeOffset: parseTimeOffset(c),
         af: await resolveRequestAf(null, dspPeerId),
       });
     }
@@ -1828,7 +1839,7 @@ restRoutes.get("/stream-remote", permMiddleware(PERM.LIBRARY_STREAM), async (c) 
       c,
       { suffix: "mp3" },
       { source: loopbackRawStreamUrl(playUrl, streamHeaders) },
-      { timeOffset: parseInt(getParam(c, "timeOffset") || "0") || 0, af: await resolveRequestAf(null, dspPeerId) },
+      { timeOffset: parseTimeOffset(c), af: await resolveRequestAf(null, dspPeerId) },
     );
   } catch (e: any) {
     return c.json(fail(0, e.message || "Remote stream failed"));
@@ -1871,7 +1882,7 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   // 队列/状态仍按原行上报,只影响音箱实际拉到的流。
   const resolvedSong = await resolvePreferredSong(song);
 
-  const timeOffset = parseInt(getParam(c, "timeOffset") || "0") || 0;
+  const timeOffset = parseTimeOffset(c);
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
   // P4-2:DLNA 侧 per-player DSP 用 `dlna:<deviceId>` 作查键 —— 音箱自己不会自报,

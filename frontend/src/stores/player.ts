@@ -418,7 +418,7 @@ export const usePlayerStore = defineStore("player", () => {
   const progress = computed(() => duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0);
 
   // 播放源 URL:远程歌(带 streamUrl)直接用它(需补 token),否则走后端 /rest/stream?id=。
-  // timeOffsetSec > 0 时追加 `timeOffset`(整秒)让服务端 ffmpeg 从该位置起出流(P2-4)。
+  // timeOffsetSec > 0 时追加 `timeOffset`(0.1s 粒度)让服务端 ffmpeg 从该位置起出流(P2-4)。
   function getStreamUrl(song: Song, timeOffsetSec = 0): string {
     const authStore = useAuthStore();
     const token = authStore.token || "";
@@ -494,24 +494,32 @@ export const usePlayerStore = defineStore("player", () => {
   async function startLocalPlayback(opts?: { timeOffsetSec?: number; autoplay?: boolean }) {
     // P2-4：拖动 seek 带 timeOffset 重拉；换歌 / 正常起播为 0。offset>0 表示这是
     // 「同一首的 seek 重建」，据此避免重复 scrobble（详见 onplay 内注释）。
-    const offset = Math.max(0, Math.floor(opts?.timeOffsetSec ?? 0));
+    const offset = Math.max(0, Math.round((opts?.timeOffsetSec ?? 0) * 10) / 10);
     const autoplay = opts?.autoplay !== false;
     if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
+    localSeekActive = false; // 重建开始：手指值已落地，后续由 timer 按新流位置推进
     localStreamOffset.value = offset;
     if (howl) { howl.unload(); howl = null; }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song);
+    // 时长播种（S5）：管道流无 Content-Length，howl.duration() 在首包前是
+    // NaN/0/Infinity —— 先用库内时长（秒）播种，进度条分母/拖动映射从第一帧就是对的；
+    // 库内无时长（<=0）才允许 howl 回写（见 syncDuration）。
+    if (song.duration > 0) localDuration.value = song.duration;
     // 远程歌(/rest/stream-remote)格式恒为 mp3:该路由固定按 mp3 320 出流(P2-7)。
     // 曾经这里发一次 `Range: bytes=0-0` 探测上游 Content-Type —— 出流改管道后那条
     // GET 会拉起一个 ffmpeg 转码槽而 body 被丢着不读(常驻烧槽),且输出格式已由
     // 服务端定死,探测不再有任何信息量,故整段删除(frontend 侧契约见后端路由注释)。
     const fmt = isRemoteSong(song) ? "mp3" : (song.suffix || "").toLowerCase();
     // seek 重拉后 howl.duration() 返回「剩余时长」，加回 offset 才是全曲时长（P2-4）。
-    // 未 load 完时 howl.duration() 可能为 0 → 不覆盖，避免进度条时长跳变。
+    // 管道流首包前 duration 可能是 NaN/0/Infinity（S5）：非有限正数一律不覆盖；
+    // 库内已有时长（播种）时也不覆盖 —— howl 的值在实时流上不可靠，只做无时长兜底。
     const syncDuration = () => {
       const raw = howl?.duration() || 0;
-      if (raw > 0) localDuration.value = toLogicalPosition(raw, offset);
+      if (!Number.isFinite(raw) || raw <= 0) return;
+      if (song.duration > 0) return;
+      localDuration.value = toLogicalPosition(raw, offset);
     };
     howl = new Howl({
       src: [getStreamUrl(song, offset)],
@@ -912,22 +920,39 @@ export const usePlayerStore = defineStore("player", () => {
   // 改为带 `timeOffset` 重拉（服务端 ffmpeg `-ss` 前置定位）。el-slider @input 每帧
   // 触发 → 250ms trailing debounce，只在拖拽停止后重建一次（与 setVolume/castSeek 同款，
   // 否则一次拖拽会起几十个 ffmpeg 转码）。
+  // 播放/暂停状态在**拖动开始时**取（第一次 localSeek 且无 pending 重建时快照）：
+  // 起播慢（转码槽排队/回环拉源）时 onplay 未到，触发时刻 h.playing() 恒 false，
+  // 按触发时刻采样会把「播着拖」误判成暂停拖 → 重建后不播（S7「拖动后无法播放」）。
+  // 拖动中途用户切暂停是小概率事件，以开始意图为准（暂停态起拖快照即 false，不受影响）。
+  let pendingSeekAutoplay = true;
+  // 拖动进行中标志：@input 每帧乐观写 localCurrentTime，250ms 进度 timer 若同时
+  // 用 howl 位置覆盖会把手指的值顶回去（S1 滑块跟手抖）。置位期间 timer 只自愈
+  // 播放按钮，不碰 currentTime；防抖触发（重建开始）即清零。
+  let localSeekActive = false;
   function localSeek(time: number) {
     if (!howl) return;
-    const target = seekTargetFromLogical(time);
+    // 越界钳位：timeOffset ≥ 时长会让 ffmpeg 瞬退/空流 → onplayerror → 跳下一首
+    //（S9「拖到尾就跳歌」）。留 0.5s 余量；时长未知（<=0）时不截。
+    const dur = localDuration.value;
+    const clamped = Number.isFinite(time) ? time : 0;
+    const safeTime = dur > 1 ? Math.min(Math.max(0, clamped), dur - 0.5) : Math.max(0, clamped);
+    const target = seekTargetFromLogical(safeTime);
     localCurrentTime.value = target.logicalPosition; // UI 立即跟手；重拉在防抖后发生
     if (localSeekTimer) clearTimeout(localSeekTimer);
+    else pendingSeekAutoplay = howl.playing(); // 本次拖动手势的第一帧：快照播放意图
+    localSeekActive = true;
+    const wantAutoplay = pendingSeekAutoplay;
     localSeekTimer = setTimeout(() => {
       localSeekTimer = null;
+      localSeekActive = false;
       const h = howl; // 收窄到局部常量：闭包内 howl 可能已被换歌清空
       if (!h) return;
-      // 与当前流起点同一整秒（< 1s 的微调）：不重建，省一次转码；把显示拉回实际位置。
+      // 与当前流起点同一位置（小数相等）：不重建，省一次转码；把显示拉回实际位置。
       if (target.serverOffset === localStreamOffset.value) {
         localCurrentTime.value = toLogicalPosition(h.seek() as number || 0, localStreamOffset.value, localDuration.value);
         return;
       }
-      // 播放/暂停状态在执行时取（拖动期间用户可能已切换），避免拖完暂停却被重新拉起。
-      startLocalPlayback({ timeOffsetSec: target.serverOffset, autoplay: h.playing() });
+      startLocalPlayback({ timeOffsetSec: target.serverOffset, autoplay: wantAutoplay });
     }, 250);
   }
 
@@ -940,6 +965,7 @@ export const usePlayerStore = defineStore("player", () => {
 
   function localClearQueue() {
     if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
+    localSeekActive = false;
     localStreamOffset.value = 0;
     if (howl) { howl.unload(); howl = null; }
     stopLocalProgressTimer();
@@ -976,6 +1002,8 @@ export const usePlayerStore = defineStore("player", () => {
       // 为真值源修正按钮状态,避免"在播却显示播放"或"已暂停却仍显示暂停"的偶发不同步。
       const playing = howl.playing();
       if (playing !== localIsPlaying.value) localIsPlaying.value = playing;
+      // 拖动手势进行中（S1）：显示以手指为准，timer 不覆盖 currentTime，只做按钮自愈。
+      if (localSeekActive) return;
       if (playing) {
         localCurrentTime.value = toLogicalPosition(howl.seek() as number || 0, localStreamOffset.value, localDuration.value);
         updateLocalLyric();
@@ -1486,7 +1514,10 @@ export const usePlayerStore = defineStore("player", () => {
     if (isRemotePeer.value && activeRemote.value) castSeek(activeRemote.value, time);
     else localSeek(time);
   }
-  function seekPercent(percent: number) { if (duration.value > 0) seek((percent / 100) * duration.value); }
+  function seekPercent(percent: number) {
+    if (!Number.isFinite(percent) || duration.value <= 0) return;
+    seek((percent / 100) * duration.value);
+  }
   // 音量拖拽防抖:el-slider @input 每拖拽一帧触发一次 setVolume,若每帧都发远程
   // /volume,配合后端 setDeviceVolume 的「10s 确认窗口 + 持续重发」,会并发堆积成
   // SOAP 请求轰炸(实测一次拖拽 30 帧 → 设备被发 450+ 次 SOAP),导致设备音量异常。

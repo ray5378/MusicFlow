@@ -213,9 +213,21 @@ export function resumePumpCore(srv: SendspinServer | null, clientId: string): vo
   pumpFor(srv, srv.group(clientId)).resume();
 }
 
-/** seek 核心:只改组时间线位置(推流引擎按它对齐);无 server 时落 ephemeral 假组。 */
+/** seek 核心:走组 pump 的跳转(推流引擎按它对齐);无 server 时落 ephemeral 假组。
+ *  ⚠️ 不能只写 positionMs(旧实现):pump 主循环每帧按下标重写 positionMs,
+ *  光写标记会被下一帧覆盖(进度回跳、音频原地),且不钳制 duration(拖到尾直接
+ *  触发播完→跳歌/停播)——「sendspin 拖动后无法播放/进度不对」的根因。
+ *  GroupPump.seek 内含 clamp + 流式窗口 -ss 重起 + resume,与 play/stop 同口径。 */
 export function seekCore(srv: SendspinServer | null, clientId: string, seconds: number): void {
   const g = ephemeralOrReal(srv, clientId);
+  if (srv) {
+    try {
+      pumpFor(srv, g).seek(seconds);
+      return;
+    } catch {
+      // pump 未起(如 idle 态拖动):落标记,起播/恢复时按它对齐。
+    }
+  }
   g.positionMs = Math.max(0, seconds * 1000);
 }
 

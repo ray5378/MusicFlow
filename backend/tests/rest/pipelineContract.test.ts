@@ -122,8 +122,9 @@ describe("P2-6 结构锁:两个路由都不再有原样直出路径（D9 回归�
     expect(seg).not.toContain("Accept-Ranges");
     expect(seg).not.toContain("upstream");
     expect(seg).not.toMatch(/c\.body\(/);
-    // seek：管道流无字节 Range，必须按 timeOffset 重拉
-    expect(seg).toMatch(/getParam\(c,\s*"timeOffset"\)/);
+    // seek：管道流无字节 Range，必须按 timeOffset 重拉（小数精度：parseTimeOffset
+    // 接受 0.1s 粒度，旧整秒 floor 是 Web/客户端「定位恒偏小 <1s」的来源之一）。
+    expect(seg).toContain("parseTimeOffset(c)");
   });
 
   // 前端联动锁（P2-7）：输出格式固定 mp3 ⇒ 前端必须固定按 mp3 建 Howl，
@@ -270,6 +271,21 @@ describe("P2-6 开关:pipeline.http 关掉也只等于「滤镜链为空」（D9
     } finally {
       setSetting("pipeline.http", "1");
     }
+  }, 30000);
+
+  it("timeOffset 接受小数(0.1s 粒度)与非法值归零", async () => {
+    // 小数 -ss:ffmpeg 前置定位支持小数,2s 源从 0.5s 起仍有 ~1.5s 可播。
+    const frac = await authedApp.request(`/rest/stream?id=pw&timeOffset=0.5&${authQS()}`);
+    expect(frac.status).toBe(200);
+    expect(frac.headers.get("x-musicflow-transcoded")).toBe("1");
+    const fbuf = Buffer.from(await frac.arrayBuffer());
+    expect(fbuf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+    expect(fbuf.length).toBeGreaterThan(1024);
+    // 非法值归 0:不断流(旧 parseInt||0 同语义,小数版延续)。
+    const bad = await authedApp.request(`/rest/stream?id=pw&timeOffset=abc&${authQS()}`);
+    expect(bad.status).toBe(200);
+    const bbuf = Buffer.from(await bad.arrayBuffer());
+    expect(bbuf.subarray(0, 4).toString("ascii")).toBe("fLaC");
   }, 30000);
 });
 

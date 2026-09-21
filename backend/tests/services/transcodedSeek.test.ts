@@ -20,10 +20,10 @@ describe("seekTargetFromLogical（逻辑位置 → 服务端 timeOffset）", () 
     expect(t.sourcePosition).toBe(0);
   });
 
-  it("含零头：零头留在流内（sourcePosition），不丢精度", () => {
+  it("含零头：0.1s 粒度直接发给服务端（不再 floor 丢精度）", () => {
     const t = seekTargetFromLogical(30.7);
-    expect(t.serverOffset).toBe(30);
-    expect(t.sourcePosition).toBeCloseTo(0.7, 6);
+    expect(t.serverOffset).toBe(30.7);
+    expect(t.sourcePosition).toBeCloseTo(0, 6);
   });
 
   it("0 / 负数 / 非法值一律归零（不能给服务端传负 timeOffset）", () => {
@@ -76,7 +76,8 @@ describe("withTimeOffset（给流 URL 追加 timeOffset）", () => {
     }
   });
 
-  it("只发整秒（服务端 timeOffset 语义为秒）", () => {
-    expect(withTimeOffset("/rest/stream-remote?a=1", 12.9)).toBe("/rest/stream-remote?a=1&timeOffset=12");
+  it("小数按 0.1s 粒度发送（服务端 parseTimeOffset 接受小数）", () => {
+    expect(withTimeOffset("/rest/stream-remote?a=1", 12.9)).toBe("/rest/stream-remote?a=1&timeOffset=12.9");
+    expect(withTimeOffset("/rest/stream?id=x", 12.95)).toBe("/rest/stream?id=x&timeOffset=13");
   });
 });
