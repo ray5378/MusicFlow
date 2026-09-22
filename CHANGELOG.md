@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.10] - 2026-09-22
+
+### 修复 —— 拖动后切歌／从头重播（240 联调实锤三连）
+
+- **同歌重投误判换歌**：`track_changed` 用全 URI 字符串比较，重投只改 `?timeOffset` 也算"换歌"→自动 advance。比较前剥 query（真换歌 token 必变，不受影响）；回归单测锁定。
+- **重投间隙 STOPPED 清基线**：Stop 生效期的瞬态 STOPPED 走 else 分支删掉 seek 锚点，随后 PLAYING rawPos=0 只能就地播种 0 → 进度/歌词从头重爬。保护窗内保留基线并回填预期位置；重投路径补开保护窗。
+- **手动 next/prev 归因日志**：`[Peer] 手动切歌`，区分误触与自发切歌（此前 playCurrent 无决策无请求，无法定案）。
+- 三链路核查：sendspin（pump 设目标值）／AirPlay（原地 FLUSH 保 position）／group（透传成员）无同类瞬态清锚逻辑，不用动。
+
+### 构建信息
+
+- Docker 镜像：`ray5378/musicflow:4.0.10` + `:latest`
+
 ## [4.0.9] - 2026-09-22
 
 ### 修复 —— DLNA 重投风暴串行化 + Web 投屏跟手保护
