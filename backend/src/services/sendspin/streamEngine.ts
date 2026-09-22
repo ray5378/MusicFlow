@@ -290,7 +290,34 @@ export class GroupPump {
     // 起播位置已知(pendingSeekMs)时直接交给音源工厂,让 ffmpeg 从一开始
     // 就带 `-ss` 起 —— 省掉「建流 → 再 seekTo → 再冷起」的整段空窗。
     const startMsForSource = Math.max(0, this.pendingSeekMs ?? 0);
-    const { pcm, durationMs, stream } = await source(songId, startMsForSource);
+    // ★ 音源获取熔断(**仅 seek 重建**,首播不动):source() 内部任何一步没超时
+    // 保护(resolve/取字节/预缓冲),永挂会导致整组静默(无帧、无报错、无 pushLoop),
+    // 随后看门狗误判、子进程被杀。240 实锤:seek 重建后新 pushLoop 永远没起来,
+    // 旧循环已按世代退出,组静默至死。首播不加(大文件全量解码可能合法地慢)。
+    // 30s 熔断 → 抛错 → onPlayFailed 走跳过/换源愈合,绝不停在"半截 rebuild"。
+    const NEED_FUSE = startMsForSource > 0;
+    const SOURCE_TIMEOUT_MS = 30_000;
+    let srcResult: Awaited<ReturnType<typeof source>>;
+    log.debug(`[pump][play] song=${songId} startMs=${startMsForSource} 开始获取音源${NEED_FUSE ? "(seek 重建,30s 熔断)" : ""}`);
+    let srcTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const srcPromise = source(songId, startMsForSource);
+      srcResult = NEED_FUSE
+        ? await Promise.race([
+            srcPromise,
+            new Promise<never>((_, reject) => {
+              srcTimer = setTimeout(() => reject(new Error(`音源获取超时(${SOURCE_TIMEOUT_MS}ms)`)), SOURCE_TIMEOUT_MS);
+            }),
+          ])
+        : await srcPromise;
+    } catch (e: any) {
+      logSafe(this.server, "error", `sendspin play 音源失败 song=${songId}: ${e?.message || e}`);
+      throw e;
+    } finally {
+      if (srcTimer) clearTimeout(srcTimer);
+    }
+    log.debug(`[pump][play] song=${songId} 音源就绪 dur=${srcResult.durationMs}ms window=${!!srcResult.stream}`);
+    const { pcm, durationMs, stream } = srcResult;
     if (this.epoch !== myEpoch) {
       // 等待期间已有更新的 play() 接管:刚建出来的窗口是孤儿苗子,就地掐掉。
       try { stream?.close(); } catch { /* ignore */ }
