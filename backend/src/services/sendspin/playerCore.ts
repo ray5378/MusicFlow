@@ -261,7 +261,11 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
       mime: cur.mime ?? "",
       duration: (cur.durationMs || 0) / 1000,
     };
-    const onFailed: PlayFailedSink = () => {};
+    const onFailed: PlayFailedSink = (cid, songId, message) => {
+      // seek 重建失败绝不能静默:此前 noop 导致"拖动后无声"且无任何日志,
+      // 只能靠 frozen 看门狗兜底(它会用无偏移重投,见 recoverInPlace)。
+      log.error(`[Sendspin][seekCore] ${cid} 重建流失败 song=${songId}: ${message}`);
+    };
     if (clientId.startsWith("ug:")) {
       const memberIds = Array.from(g.members, (m) => m.clientId).filter((id): id is string => !!id);
       playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs);

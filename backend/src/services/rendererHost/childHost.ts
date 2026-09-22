@@ -48,7 +48,24 @@ export class ChildRpcHost<TSend, TSnapshot extends object> {
     }, opts.snapshotSweepMs ?? RENDERER_SNAPSHOT_SWEEP_MS);
     this.sweep.unref?.();
     // 心跳:主进程看门狗据此判断卡死。
+    // 事件循环卡死自检:若本回调迟到(同步阻塞/GC 死亡螺旋),在恢复的第一时间
+    // 打一条 ERROR(带上次正常时刻),否则"65s 无消息被强杀"将永远查无实据 ——
+    // 240 实锤:sendspin 子进程 65s 零消息后被 SIGKILL, loop 内阻塞点未知。
+    // 注意:完全卡死时本回调根本跑不到,这行日志只能抓到"间歇性卡顿",
+    // 真死锁仍靠主进程侧超时强杀(已有)。两者互补。
+    let lastBeat = Date.now();
     this.heartbeat = setInterval(() => {
+      const now = Date.now();
+      const lag = now - lastBeat - (opts.heartbeatMs ?? RENDERER_HEARTBEAT_MS);
+      lastBeat = now;
+      if (lag > 15_000) {
+        try {
+          console.error(
+            `[childHost][loop-lag] 事件循环卡了 ${Math.round(lag)}ms 才恢复` +
+            `(mem=${Math.round(process.memoryUsage().heapUsed / 1048576)}MB rss=${Math.round(process.memoryUsage().rss / 1048576)}MB)`,
+          );
+        } catch { /* ignore */ }
+      }
       this.emit({ t: "heartbeat", pid: process.pid });
     }, opts.heartbeatMs ?? RENDERER_HEARTBEAT_MS);
     this.heartbeat.unref?.();

@@ -281,11 +281,22 @@ export class GroupPump {
     // 必须在 await source() **之前**释放:source() 会立刻 spawn 新 ffmpeg,
     // 先杀旧的可以把瞬时双进程压到最短。
     this.releaseAudio();
+    // ★ 世代守卫:连续 seek/切歌会并发进入多个 play(),它们在 await source() 处
+    // 交错 —— 后到的 releaseAudio 杀不掉先到者**还没建出来**的 ffmpeg,先到者
+    // 建出来后又覆盖 this.window,旧 ffmpeg 永久孤儿(240 实锤:同一组 -ss 与全量
+    // 两个解码器并存)。epoch 必须在 await **之前**抢,回来后验世代,若已不是
+    // 最新则亲手杀掉刚建的窗口(不能指望别人的 releaseAudio)并直接返回。
+    const myEpoch = ++this.epoch;
     // 起播位置已知(pendingSeekMs)时直接交给音源工厂,让 ffmpeg 从一开始
     // 就带 `-ss` 起 —— 省掉「建流 → 再 seekTo → 再冷起」的整段空窗。
     const startMsForSource = Math.max(0, this.pendingSeekMs ?? 0);
     const { pcm, durationMs, stream } = await source(songId, startMsForSource);
-    const myEpoch = ++this.epoch;
+    if (this.epoch !== myEpoch) {
+      // 等待期间已有更新的 play() 接管:刚建出来的窗口是孤儿苗子,就地掐掉。
+      try { stream?.close(); } catch { /* ignore */ }
+      logSafe(this.server, "info", `sendspin play superseded song=${songId} (epoch ${myEpoch}→${this.epoch}),窗口已就地释放`);
+      return;
+    }
     this.running = true;
     this.paused = false;
     this.pcm = pcm;
