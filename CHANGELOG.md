@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.11] - 2026-09-22
+
+### 调试日志补全（seek 全链路）
+
+- AirPlay protocol seek：入口＋结果＋耗时（原裸调，成败靠猜）
+- sendspin `seekCore`：请求值／钳制结果／有无在播／重建耗时／ephemeral 回落
+- DLNA（cast/seek/guard/status）、group 扇出、transport 入口：既有覆盖不变
+- 零行为变更；配套客户端 **v5.0.26**
+
+### 构建信息
+
+- Docker 镜像：`ray5378/musicflow:4.0.11` + `:latest`
+
 ## [4.0.10] - 2026-09-22
 
 ### 修复 —— 拖动后切歌／从头重播（240 联调实锤三连）
