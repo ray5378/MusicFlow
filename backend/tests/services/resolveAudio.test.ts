@@ -1,6 +1,7 @@
 // 统一音源裁决:各链路同口径(快缓存 → 本行探测 → 优选换行 → 本行复核)。
 // 回归:周深小美满案——歌单引用无 url 本地行,旧 judge 探失败即判死,
 // 不看组内 web 兄弟;现应换行播出。
+// 另含「源行复用」契约(preferRowId):同曲 seek 重建跳过播放优选,见文末四例。
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
@@ -50,7 +51,10 @@ describe("resolvePlayableRow", () => {
     sqlite.prepare("INSERT INTO songs (id, title, artist, type, url, plugin_entry, group_id, path, suffix) VALUES " +
       "('ra-web','T1','A','web','http://127.0.0.1:9/dead.mp3','go-music-dl','" + G + "','', 'mp3')," +
       "('ra-local','T1','A','local','','','" + G + "','l:src:" + wavPath.replace(/'/g, "''") + "', 'wav')," +
-      "('ra-dead','T9','Z','web','http://127.0.0.1:9/dead.mp3','go-music-dl','g-resolve-dead','','mp3')").run();
+      "('ra-dead','T9','Z','web','http://127.0.0.1:9/dead.mp3','go-music-dl','g-resolve-dead','','mp3')," +
+      // 源行复用用例专用组:独立 group_id 保证与上面三条互不影响,断言可依赖「冷缓存」。
+      "('ra-web2','T2','B','web','http://127.0.0.1:9/dead.mp3','go-music-dl','g-resolve-2','','mp3')," +
+      "('ra-local2','T2','B','local','','','g-resolve-2','l:src:" + wavPath.replace(/'/g, "''") + "', 'wav')").run();
   });
 
   afterAll(() => {
@@ -81,5 +85,40 @@ describe("resolvePlayableRow", () => {
     const r = await resolvePlayableRow("no-such-song");
     expect(r.row).toBeNull();
     expect(r.reason).toBe("no-row");
+  });
+
+  // ---- 源行复用(preferRowId) ----
+  // 动机(2026-09-22 240 实测):seek 重建走 `PumpSource(songId, startMs)` —— 只带 songId,
+  // 同一首歌内反复拖进度条也要每次重跑播放优选(`resolvePreferredSong` → 逐候选
+  // `probeLocalSourceOk` → `verifyRow`),实测 1.85~2.53s/次且结果恒定(web 行每次都
+  // swap 到组内核心曲库行)。用户口径:「跳转进度时应该自动复用正在播放的地址,
+  // 不应该回退到查找播放源这一步」。下面四条把该契约钉死。
+  it("preferRowId 命中:直返该行且跳过整段优选(reason=reuse-active)", async () => {
+    // 故意指一行「优选绝不会选中」的死链 web 行:若仍走了优选就会换到 ra-local2,
+    // 故返回 ra-web2 本身即证明优选被跳过 —— 这正是复用要省掉的那 1.85~2.5s。
+    const r = await resolvePlayableRow("ra-web2", { preferRowId: "ra-web2" });
+    expect(r.row?.id).toBe("ra-web2");
+    expect(r.reason).toBe("reuse-active");
+    // 宽容语义:复用是「已知可用」而非「确定无源」,调用方不得据此判死。
+    expect(r.definitive).toBe(false);
+  });
+
+  it("preferRowId 命中组内兄弟行:原样返回该行(复用的是实际出流那行)", async () => {
+    // 真实序列:web 行首轮优选换到 ra-local2;第二轮把它当 preferRowId 传回必须原样命中。
+    const r = await resolvePlayableRow("ra-web2", { preferRowId: "ra-local2" });
+    expect(r.row?.id).toBe("ra-local2");
+    expect(r.reason).toBe("reuse-active");
+  });
+
+  it("preferRowId 指向已不存在的行:回退完整裁决,不得把歌判死", async () => {
+    const r = await resolvePlayableRow("ra-web2", { preferRowId: "row-gone" });
+    expect(r.reason).not.toBe("reuse-active");
+    expect(r.row?.id).toBe("ra-local2"); // 落回优选路径
+  });
+
+  it("不传 preferRowId:行为与从前一致(完整裁决)", async () => {
+    const r = await resolvePlayableRow("ra-web2");
+    expect(r.reason).not.toBe("reuse-active");
+    expect(r.row?.id).toBe("ra-local2");
   });
 });

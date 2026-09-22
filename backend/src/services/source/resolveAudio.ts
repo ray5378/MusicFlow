@@ -34,6 +34,25 @@ export interface PlayableRowResult {
   definitive: boolean;
 }
 
+/** `resolvePlayableRow` 的可选入参(不传 = 行为与从前完全一致)。 */
+export interface ResolvePlayableRowOpts {
+  /** 复用的「生效源行」:上一轮同曲**实际用来出流的那一行**。
+   *
+   *  为什么需要(2026-09-22 实测):web 行每次裁决都先跑「播放优选」
+   *  (`resolvePreferredSong` → 逐候选 `probeLocalSourceOk` → `verifyRow`),
+   *  本实例里结果恒定(总是换到组内核心曲库行)却每次都花 1.85~2.53s;
+   *  而 seek 重建走的是 `PumpSource(songId, startMs)` —— **只带 songId、不带
+   *  「刚才用的是哪一行」**,于是同一首歌内反复拖进度条也要每次重跑一遍优选。
+   *  传入本值即走零成本快捷返回(一次主键查找),整段优选被跳过。
+   *
+   *  失效兜底由**调用方**负责:命中却取不到流时清缓存并重解析一次(不可在此自行
+   *  重试 —— 那等于把 1.85s 又加回来,且本函数不知道调用方的重试语义)。
+   *
+   *  ⚠️ 只有主动维护这份记账的调用方(sendspin pump)才许传;judge、DLNA 拉流等
+   *  一次性裁决路径不传,行为不变。 */
+  preferRowId?: string;
+}
+
 /** 快速验证一行确实可播:本地行走 probeLocalSourceOk;web 行探 url(5s)。 */
 async function verifyRow(row: SongRow): Promise<boolean> {
   try {
@@ -128,7 +147,10 @@ export function resolveRowInput(row: SongRow): { input: string; headers?: Record
  *  - judge 要 verdict:row ? "play" : (cached-unplayable ? "skip" : "play")(宽容不变);
  *  - pump 要字节:row ? fetchRowBytes(row) : throw。
  *  失败只返回 null + reason,不抛(调用方按自己语义处理)。 */
-export async function resolvePlayableRow(songId: string): Promise<PlayableRowResult> {
+export async function resolvePlayableRow(
+  songId: string,
+  opts?: ResolvePlayableRowOpts,
+): Promise<PlayableRowResult> {
   const t0 = Date.now();
   let row: SongRow | null = null;
   try {
@@ -141,6 +163,15 @@ export async function resolvePlayableRow(songId: string): Promise<PlayableRowRes
     log.info(`[resolve] ${songId} -> ${r ? r.id : "null"} (${reason}) ms=${Date.now() - t0}`);
     return { row: r, reason, definitive };
   };
+  // 0) 复用生效源行(零成本:一次主键查找,跳过下面整段优选)。
+  //    放在快缓存**之前**:快缓存记的是「这首歌可播」、且回的永远是**原始 songId 那行**,
+  //    而实际在播的可能是优选换过的兄弟行 —— 复用生效行才是「接着放原来那条流」的正确语义。
+  if (opts?.preferRowId) {
+    try {
+      const reuse = db.select().from(songs).where(eq(songs.id, opts.preferRowId)).get() as SongRow | null;
+      if (reuse) return done(reuse, "reuse-active");
+    } catch { /* 查不到/查询失败 → 继续走完整裁决 */ }
+  }
   // 1) 快缓存(零成本)
   try {
     if (getCachedPlayability(songId) === "playable") return done(row, "fresh-cache");

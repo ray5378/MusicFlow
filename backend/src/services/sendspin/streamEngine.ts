@@ -31,6 +31,10 @@ export interface GroupAudio {
   durationMs: number;
   /** 流式窗口(阶段二):有则走窗口取数,无则走整包 pcm。announce/测试保持整包。 */
   stream?: PcmWindow | null;
+  /** 本轮**实际用来出流**的源行 id(裁决结果,可能已被「播放优选」换成组内兄弟行)。
+   *  由 `GroupPump` 记账,同曲 seek 重建时作为 `preferRowId` 传回解析器以跳过优选
+   *  (见 ResolvePlayableRowOpts)。注入音源(测试)不返回时视为「无记录」。 */
+  sourceRowId?: string;
 }
 
 /** 流式音源开关:插件配置 `stream_source` 为单一可信源(配置页开关,下一首生效);
@@ -65,8 +69,14 @@ async function readSendspinStreamSource(): Promise<boolean> {
 /** 解析某首歌的可播字节(默认真实);测试可注入。 */
 /** 音源工厂契约。`startMs > 0` = 起播即定位(ffmpeg `-ss`),由 seek 重建与
  *  起播跳转共用 —— MA 语义里「从 X 秒开始播」和「跳到 X 秒」是同一件事:
- *  都是用新起点建一条流,而不是在旧流里挪指针。 */
-export type PumpSource = (songId: string, startMs?: number) => Promise<GroupAudio>;
+ *  都是用新起点建一条流,而不是在旧流里挪指针。
+ *  `opts.preferRowId` = 复用上一轮生效源行(pump 在**同曲**重建时回填),
+ *  透传给 `resolvePlayableRow` 以跳过整段播放优选(实测省 1.85~2.53s/次)。 */
+export type PumpSource = (
+  songId: string,
+  startMs?: number,
+  opts?: { preferRowId?: string },
+) => Promise<GroupAudio>;
 
 let injectedSource: PumpSource | null = null;
 /** 测试注入音源;传 null 恢复默认真实解析。 */
@@ -136,17 +146,24 @@ export const SEEK_RESEED_LEAD_US = 3_000_000;
 export const STALL_GRACE_US = 500_000;
 
 /** 默认音源:统一裁决(resolvePlayableRow,与 /rest/stream 同口径) → 取字节 → 解码。
- *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。 */
-async function defaultSource(songId: string, startMs = 0): Promise<GroupAudio> {
+ *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。
+ *  `opts.preferRowId` = 复用上一轮生效源行(见 ResolvePlayableRowOpts):
+ *  同曲 seek 重建时跳过整段播放优选;返回值回带实际用的行 id 供调用方记账。 */
+async function defaultSource(
+  songId: string,
+  startMs = 0,
+  opts?: { preferRowId?: string },
+): Promise<GroupAudio> {
   const { resolvePlayableRow, fetchRowBytes } = await import("../source/resolveAudio.js");
-  const r = await resolvePlayableRow(songId);
+  const r = await resolvePlayableRow(songId, { preferRowId: opts?.preferRowId });
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
-  if (await isStreamSource()) return streamingSource(r.row as any, startMs);
+  const sourceRowId = r.row.id;
+  if (await isStreamSource()) return { ...(await streamingSource(r.row as any, startMs)), sourceRowId };
   const bytes = await fetchRowBytes(r.row);
   if (!bytes) throw new Error(`fetch bytes failed for ${songId} (${r.reason})`);
   const pcm = await decodeToF32(bytes);
   const durationMs = bufferDurationMs(pcm);
-  return { pcm, durationMs };
+  return { pcm, durationMs, sourceRowId };
 }
 
 /** 流式音源:行 → ffmpeg 直读输入 → 滑动窗口。首帧只等 2 秒预缓冲,
@@ -279,6 +296,18 @@ export class GroupPump {
   private window: PcmWindow | null = null;
   private durationMs = 0;
   private songId = "";
+  /** 上一轮实际用来出流的**源行 id** 及其所属歌 id(源行复用记账)。
+   *
+   *  为什么记:seek 重建走 `source(songId, startMs)` —— 只带 songId,同一首歌内
+   *  反复拖进度条会每次重跑「播放优选」(实测 1.85~2.53s/次,且结果恒定:web 行
+   *  每次都 swap 到组内核心曲库行)。记住生效行,同曲重建把它当 `preferRowId`
+   *  交给解析器直接命中,整段优选跳过。
+   *
+   *  生命周期:切歌(songId 变化)不复用;复用命中却出不了流时**清空并回退完整
+   *  解析一次**(见 play 内 srcPromise),回退成功后按新结果重新记账。
+   *  `stop()` 有意**不清** —— stop → 重播同一首等价于 seek 到 0,复用同样成立。 */
+  private srcRowId: string | null = null;
+  private srcRowSongId = "";
   // 暂停时被唤醒的等待器。
   private resumeWaiter: (() => void) | null = null;
   // 上一首是否已"自然播完"(用于结束时置空 current 触发 auto-advance)。
@@ -320,13 +349,34 @@ export class GroupPump {
     // 随后看门狗误判、子进程被杀。240 实锤:seek 重建后新 pushLoop 永远没起来,
     // 旧循环已按世代退出,组静默至死。首播不加(大文件全量解码可能合法地慢)。
     // 30s 熔断 → 抛错 → onPlayFailed 走跳过/换源愈合,绝不停在"半截 rebuild"。
+    // ★ 源行复用(仅**同曲**):把上一轮生效的源行交给解析器,跳过整段播放优选。
+    //   用户口径 ——「网络源/webdav 源跳转进度时应该自动复用正在播放的地址,
+    //   不应该回退到查找播放源这一步」。切歌 / 无记账 → undefined,走完整裁决。
+    const reuseRowId = songId === this.srcRowSongId ? this.srcRowId ?? undefined : undefined;
     const NEED_FUSE = startMsForSource > 0;
     const SOURCE_TIMEOUT_MS = 30_000;
     let srcResult: Awaited<ReturnType<typeof source>>;
-    log.debug(`[pump][play] song=${songId} startMs=${startMsForSource} 开始获取音源${NEED_FUSE ? "(seek 重建,30s 熔断)" : ""}`);
+    log.debug(`[pump][play] song=${songId} startMs=${startMsForSource} 开始获取音源${NEED_FUSE ? "(seek 重建,30s 熔断)" : ""}${reuseRowId ? ` 复用源行=${reuseRowId}` : ""}`);
     let srcTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const srcPromise = source(songId, startMsForSource);
+      const srcPromise = (async () => {
+        try {
+          return await source(songId, startMsForSource, { preferRowId: reuseRowId });
+        } catch (e) {
+          // 复用命中却出不了流(源行已失效/被删/上游不可达):清掉记账,回退**完整解析**
+          // 重试一次。只重试一次 —— 再失败就交给既有 onPlayFailed 愈合(跳过/换源),
+          // 不在此处循环(那会把「复用」变成「先白等一次 + 再慢一次」)。
+          if (!reuseRowId) throw e;
+          logSafe(
+            this.server,
+            "warn",
+            `sendspin 复用源行取流失败,回退完整解析 song=${songId} row=${reuseRowId}: ${(e as Error)?.message || e}`,
+          );
+          this.srcRowId = null;
+          this.srcRowSongId = "";
+          return await source(songId, startMsForSource, {});
+        }
+      })();
       srcResult = NEED_FUSE
         ? await Promise.race([
             srcPromise,
@@ -342,7 +392,7 @@ export class GroupPump {
       if (srcTimer) clearTimeout(srcTimer);
     }
     log.debug(`[pump][play] song=${songId} 音源就绪 dur=${srcResult.durationMs}ms window=${!!srcResult.stream}`);
-    const { pcm, durationMs, stream } = srcResult;
+    const { pcm, durationMs, stream, sourceRowId } = srcResult;
     if (this.epoch !== myEpoch) {
       // 等待期间已有更新的 play() 接管:刚建出来的窗口是孤儿苗子,就地掐掉。
       try { stream?.close(); } catch { /* ignore */ }
@@ -355,6 +405,10 @@ export class GroupPump {
     this.window = stream ?? null;
     this.durationMs = durationMs;
     this.songId = songId;
+    // 记下本轮生效源行,供同曲 seek 重建复用(见 srcRowId 字段说明)。
+    // 注入音源(测试)可不回带 → 记为 null,下次重建照旧走完整裁决。
+    this.srcRowId = sourceRowId ?? null;
+    this.srcRowSongId = songId;
     this.endedNaturally = false;
     this.group.current = { songId, durationMs, title: this.group.current?.title, artist: this.group.current?.artist, album: this.group.current?.album, coverArt: this.group.current?.coverArt };
     // 起播位置:消费起播窗口内到达的 seek(见 pendingSeekMs 注释)。
