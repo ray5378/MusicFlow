@@ -19,7 +19,13 @@ import { sqlite } from "../../db/index.js";
 
 const AIRPLAY_SESSION_TTL_MS = 30 * 60 * 1000;
 
-/** 为一次 AirPlay 投屏登记取流凭证,返回 token 化的 URL。 */
+/** 为一次 AirPlay 投屏登记取流凭证,返回 token 化的 URL。
+ *
+ * ⚠️ 同 (songId, deviceId) 的未过期会话**复用 token、仅续期** —— 对齐 MA 的
+ * 「同一队列项流 URL 恒定」:若每次投流都 mint 新 token,同歌 seek 重建流后
+ * 设备侧 mediaUri 变化会触发 PlaybackTracker 的「PLAYING 且 uri 变 = 换歌」
+ * 误判 → 自动 advance 切下一首(与 DLNA createCastSession 同根因,见其注释)。
+ */
 export function createAirPlaySession(
   songId: string,
   deviceId: string,
@@ -30,11 +36,26 @@ export function createAirPlaySession(
   const expiresAt = now + AIRPLAY_SESSION_TTL_MS;
   try {
     sqlite.prepare("DELETE FROM airplay_stream_tokens WHERE exp < ?").run(now);
+    const existing = sqlite
+      .prepare(
+        "SELECT token FROM airplay_stream_tokens WHERE song_id = ? AND device_id = ? AND exp > ? ORDER BY exp DESC LIMIT 1",
+      )
+      .get(songId, deviceId, now) as { token: string } | undefined;
+    if (existing) {
+      sqlite.prepare("UPDATE airplay_stream_tokens SET exp = ? WHERE token = ?").run(expiresAt, existing.token);
+      return { token: existing.token, streamUrl: `${baseUrl}/rest/airplay/stream/${existing.token}`, expiresAt };
+    }
     sqlite
       .prepare("INSERT INTO airplay_stream_tokens (token, song_id, device_id, exp) VALUES (?, ?, ?, ?)")
       .run(token, songId, deviceId, expiresAt);
   } catch (e) {
     // 建表失败(极旧库)不应让投屏整体失败:回退到一次性内存 token,本次播放仍可用。
+    for (const [k, v] of memoryTokens) {
+      if (v.songId === songId && v.deviceId === deviceId && v.expiresAt > now) {
+        v.expiresAt = expiresAt;
+        return { token: k, streamUrl: `${baseUrl}/rest/airplay/stream/${k}`, expiresAt };
+      }
+    }
     memoryTokens.set(token, { songId, deviceId, expiresAt });
   }
   return { token, streamUrl: `${baseUrl}/rest/airplay/stream/${token}`, expiresAt };

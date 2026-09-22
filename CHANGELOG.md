@@ -2,6 +2,26 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.8] - 2026-09-22
+
+### 修复 —— 同歌 seek 重投被 tracker 误判为换歌，自动 advance 切下一首（HA 卡片/客户端同病）
+
+**根因（240 真机日志实锤）**：拖动进度触发「重投流重建」时，`createCastSession`/
+`createAirPlaySession` 每次 mint **新 token** → 设备 TrackURI/mediaUri 随之变化。
+`PlaybackTracker` 的 native gapless 判据「PLAYING 且 uri 变 = 换歌」
+（PlaybackTracker.ts:165）把同歌重投误判成换歌 → `track_changed` → 自动 advance。
+4 次拖拽 2 次中招；轮询恰好采到 BUFFERING 瞬态时幸免，故体感「拖到靠近结尾必切下一首」。
+HA 卡片与客户端共用后端队列，两边同时中招 —— 与前端无关。
+
+**修复（对齐 MA「同一队列项流 URL 恒定」语义）**：
+- `createCastSession`（DLNA + sendspin mediaUri 共用）：同 (songId, deviceId)
+  未过期会话**复用 token、仅续期**（6h TTL 内同歌重投 TrackURI 不变）。
+- `createAirPlaySession`（AirPlay 独立会话）：同样复用（SQLite 主路径 +
+  内存回退路径）。换歌（songId 变化）仍 mint 新 token，真换歌的
+  track_changed 判据不受影响。
+- 新增回归测试：`tests/dlna/castSessionReuse.test.ts`、
+  `tests/airplay/sessionReuse.test.ts`（复用/换歌/跨设备/解析一致性共 8 例）。
+
 ## [4.0.7] - 2026-09-22
 
 ### 重做 —— sendspin seek 按 Music Assistant 权威语义推倒重来（真机验证通过）

@@ -496,9 +496,23 @@ export function isDeviceKnown(deviceId: string, devices: DlnaDevice[] = cachedDe
 // Create a token-auth-free stream URL for DLNA renderer to pull.
 // The URL points at this server; the caller passes the server's LAN base URL.
 // Returns expiresAt so callers (e.g. the /v1/dlna/stream-url API) can surface a TTL.
+// ⚠️ 同 (songId, deviceId) 的未过期会话**复用 token、仅续期** —— 对齐 MA 的
+// 「同一队列项流 URL 恒定」:MA 的 resolve_stream_url 对同一 queue item 永远给
+// 同一个 URL,seek 重建流只改 timeOffset 查询参数,不换标识。若每次投流都 mint
+// 新 token,同歌 seek 重投(Stop→SetAVTransportURI)后设备 TrackURI 必变,
+// PlaybackTracker 的「PLAYING 且 uri 变 = native gapless 换歌」判据会把同歌重投
+// 误判成换歌 → 自动 advance 切下一首(240 真机实锤:4 次拖拽 2 次中招,HA 卡片与
+// 客户端同病)。sendspin 的 mediaUri 复用本函数(见 protocolPlayer.ts),此处修复
+// 同时覆盖 DLNA 与 sendspin 两条链。
 export function createCastSession(songId: string, deviceId: string, baseUrl: string): { token: string; streamUrl: string; expiresAt: number } {
-  const token = randomBytes(16).toString("hex");
   const now = Date.now();
+  for (const s of sessions.values()) {
+    if (s.songId === songId && s.deviceId === deviceId && s.expiresAt > now) {
+      s.expiresAt = now + SESSION_TTL_MS;
+      return { token: s.token, streamUrl: `${baseUrl}/rest/dlna/stream/${s.token}`, expiresAt: s.expiresAt };
+    }
+  }
+  const token = randomBytes(16).toString("hex");
   const expiresAt = now + SESSION_TTL_MS;
   sessions.set(token, { token, songId, deviceId, createdAt: now, expiresAt });
   // Clean expired sessions opportunistically.
