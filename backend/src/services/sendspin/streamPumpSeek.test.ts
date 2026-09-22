@@ -10,7 +10,7 @@
 // 本用例把这条钉死:向前 seek 后必须在很短时间内继续出新帧。
 // 用整包 PCM(不带 stream)注入 —— 避开 ffmpeg 重起的耗时抖动,只测 pacing 本身。
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { GroupPump, overridePumpSource, type GroupAudio } from "./streamEngine.js";
+import { GroupPump, overridePumpSource, alignFrameMs, type GroupAudio } from "./streamEngine.js";
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 
 const SONG_SEC = 60;
@@ -125,6 +125,70 @@ describe("GroupPump seek 后时间轴重锚", () => {
 // 此时 play() 正卡在 `await source(...)`(spawn ffmpeg + 预缓冲,实测数秒),
 // pump 已存在但 running=false —— 旧实现把 positionMs 归零,那次拖动被整条吞掉:
 // 接口返回 success、[pump][seek] 日志也打了,但音频从 0 开始播(观感「拖动无效」)。
+// ---- 帧栅格对齐(2026-09-22 240 事故:HA 卡片拖进度打死子进程) ----
+//
+// 现象:HA 卡片拖动 → 无声 + 进度冻死;客户端拖同一位置却完全正常。
+// 差别只在**目标值精度**:HA 卡片下发当前播放位置(31.178s 毫秒精度),
+// 客户端下发整秒(62.00/108.00/…)。
+// 机理:pushLoop 取帧用 `lo = floor(pos/25)*2400`(帧栅格),窗口基准
+// `base = floor(pos/1000*96000)`(毫秒→样本)—— 只有 25ms 整数倍时相等;
+// 否则 lo < base → slice 抛 WindowEvictedError → continue 用同一游标重算 →
+// 纯微任务自旋 → 心跳/poll RPC 全排不上队 → 65s 看门狗 SIGKILL(真机:悬挂 RPC 12~15 个)。
+// 本用例钉死**接口契约**:一路传到音源的 startMs 必须已被 alignFrameMs 对齐。
+// (窗口侧的"亚帧错位钳制返回短帧"容错另有单测,见 streamSource.test.ts。)
+describe("seek 目标帧栅格对齐", () => {
+  it("alignFrameMs:非 25ms 整数倍向下取整,已对齐者原样", () => {
+    expect(alignFrameMs(31178)).toBe(31175);
+    expect(alignFrameMs(30178)).toBe(30175);
+    expect(alignFrameMs(87033)).toBe(87025);
+    expect(alignFrameMs(62000)).toBe(62000); // 客户端整秒本就对齐
+    expect(alignFrameMs(0)).toBe(0);
+    expect(alignFrameMs(-5)).toBe(0);
+  });
+
+  it("重建路径(armSeek):毫秒精度目标对齐后才交给音源", async () => {
+    const seen: number[] = [];
+    overridePumpSource(async (_song, startMs = 0) => {
+      seen.push(startMs);
+      return injectSilencePcm(SONG_SEC);
+    });
+    const { group, frames } = stubGroup();
+    const pump = new GroupPump({ log() {} } as any, group);
+    await pump.play("align-rebuild");
+    await waitFrames(frames, 2, 5_000, "起播");
+
+    // 复刻 seekCore→playCore 的序列:stop 打断旧流 → armSeek 装填新起点。
+    pump.stop();
+    pump.armSeek(31_178);
+    await pump.play("align-rebuild2");
+    // 起播位置必须已对齐(否则 31.178 会带着 288 样本的错位进窗口)。
+    expect(seen[seen.length - 1]).toBe(31_175);
+    await waitFrames(frames, 2, 5_000, "重建后出帧");
+    pump.stop();
+  }, 20_000);
+
+  it("空闲/起播窗口路径(seek 记忆位置):发布与消费都用对齐值,且推流继续前进", async () => {
+    const seen: number[] = [];
+    overridePumpSource(async (_song, startMs = 0) => {
+      seen.push(startMs);
+      return injectSilencePcm(SONG_SEC);
+    });
+    const { group, frames } = stubGroup();
+    const pump = new GroupPump({ log() {} } as any, group);
+
+    // 未起播时拖动 → 只发布位置 + 记忆(MA resume_with_position 语义)。
+    pump.seek(31.178);
+    expect(group.positionMs).toBe(31_175); // 发布值即对齐值(UI 只差 3ms,不可见)
+
+    await pump.play("align-idle");
+    expect(seen[seen.length - 1]).toBe(31_175); // 起播消费的也是对齐值
+    const atStart = group.positionMs;
+    await waitFrames(frames, 3, 5_000, "带 seek 起播后出帧");
+    expect(group.positionMs).toBeGreaterThan(atStart); // 确实在推进,不是停在跳转点
+    pump.stop();
+  }, 20_000);
+});
+
 describe("GroupPump 起播窗口内的 seek", () => {
   it("play() 解码/预缓冲期间的 seek 必须成为起播位置,而不是被归零", async () => {
     let sourceResolved = false;

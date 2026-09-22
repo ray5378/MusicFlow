@@ -6,6 +6,7 @@ import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, n
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
 import { apiError, BusinessErrorCode } from "../../utils/errors.js";
+import { alignSeekSeconds } from "../../utils/seekGranularity.js";
 import {
   sanitizeClientId,
   resolveLocalPeerId,
@@ -4052,14 +4053,26 @@ apiRoutes.post("/v1/peers/:peerId/seek", async (c) => {
   // 五种 kind 的入参契约完全一致(seconds 优先,兼容 position),先统一解析再分派 ——
   // 这样日志能一次带齐 target,不必在各分支重复打。
   const body = await c.req.json().catch(() => ({} as any));
-  const seconds = typeof body?.seconds === "number" ? body.seconds : body?.position;
-  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+  const rawSeconds = typeof body?.seconds === "number" ? body.seconds : body?.position;
+  if (typeof rawSeconds !== "number" || !Number.isFinite(rawSeconds)) {
     seekLog.debug(`[seek] 拒绝 peerId=${peerId} kind=${parsed.kind} 缺 seconds/position body=${JSON.stringify(body)?.slice(0, 120)}`);
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
   }
+  // ★ 精度守卫(最小粒度 1 秒):本路由是所有客户端(网页/卡片/客户端/HA 集成)seek 的
+  //   唯一入口,只有在这里兜底才能保证「任何来源都不可能把非整秒目标送进流式引擎」。
+  //   非整秒目标会让子进程按 25ms 帧栅格取帧时与窗口的毫秒基准错位 → 纯微任务自旋 →
+  //   事件循环饿死 → 心跳超时被 65s 看门狗 SIGKILL(见 utils/seekGranularity.ts 的硬约束)。
+  //   客户端本就下发 Duration.inSeconds(整秒),故此处对它是恒等变换。
+  //   注:不走 HTTP 的内部路径(QueueController → player.seek)不受本层约束,
+  //   由 streamEngine 的帧栅格对齐(alignFrameMs)+ 亚帧容错兜底。
+  const seconds = alignSeekSeconds(rawSeconds);
   // debug:seek 请求入口。前端有 250ms 防抖,但"连拖/多点"仍可能并发打到后端 ——
   // 同一 tid 的多条 = 同一个请求链;不同 tid 短时间扎堆(且 target 各异)= 前端没收敛住的重投风暴。
-  seekLog.debug(`[seek] 收到 peerId=${peerId} kind=${parsed.kind} target=${seconds.toFixed(2)}s`);
+  // 同时打印对齐前后:事后可区分「前端根本没对齐」与「后端按粒度抹掉了零头」。
+  seekLog.debug(
+    `[seek] 收到 peerId=${peerId} kind=${parsed.kind} target=${rawSeconds.toFixed(2)}s→${seconds}s`
+      + (rawSeconds === seconds ? "" : "(已按最小粒度 1s 对齐)"),
+  );
   // seek 冷静期打标:本路由是所有客户端(网页/卡片/客户端/HA 集成)seek 的唯一入口,
   // 在这里打标才能覆盖 DLNA 那条**不经 transport()**的直连路径。
   // 用途:seek 重定位期间设备必然短暂非 PLAYING,此窗口内的 IDLE 不得被判成"真结束"

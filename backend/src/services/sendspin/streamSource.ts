@@ -154,6 +154,10 @@ export class PcmWindow {
   }
 
   get decoded(): number { return this.decodedSamples; }
+  /** 窗口基准时刻(ms,曲首起算)= chunks[0][0] 对应的时刻。
+   *  调用方(pushLoop)用它把落后于基准的游标**贴齐** —— 保证淘汰之后必然前进,
+   *  不会退化成"游标不变 → 再淘汰"的自旋(见 slice 的亚帧容错注释)。 */
+  get baseMs(): number { return (this.baseSample / (SAMPLE_RATE * CHANNELS)) * 1000; }
   /** stderr 尾部文本(上限 128KB):供 P0-4 解析 loudnorm JSON。 */
   stderrText(): string {
     return this.stderrFull.text();
@@ -199,7 +203,21 @@ export class PcmWindow {
     // 等待期间窗口被 seekTo 重定位 → lo/hi 已属旧坐标系,按"淘汰"处理:
     // 主循环 continue 后用新 positionMs 重算(见 gen 字段注释)。
     if (this.gen !== gen0) throw new WindowEvictedError();
-    if (lo < this.baseSample) throw new WindowEvictedError();
+    // ⚠️ `lo < baseSample` 有**两种**成因,必须分开处理(2026-09-22 240 真机实锤):
+    //   ① 整段都已被淘汰(回跳超窗 / 重定位竞态)→ 照旧抛错,由调用方重定位;
+    //   ② **只差不到一帧**(lo 落在 base 之前,而 hi 仍在 base 之后)→ 这是调用方
+    //      帧栅格(FRAME_MS 的整数倍)与窗口毫秒基准之间的**量化差**,必然出现在
+    //      「seek 目标不是 25ms 整数倍」时(如 HA 卡片下发 31.178s):数据只缺开头
+    //      几十个样本。此时**绝不能抛** —— 抛了就变成
+    //      「主循环 continue → 游标不变 → 再抛」的纯微任务自旋:事件循环彻底饿死,
+    //      日志停在调用方等待点之前,心跳与 poll RPC 全部堆积
+    //      (supervisor: `悬挂 RPC 12~15 个`、`最后消息 71s 前`)→ 65s 看门狗 SIGKILL。
+    //      正确做法:钳到 base 返回短帧(仍是这一帧的后半段),调用方照常推进。
+    //   判据取 hi:请求段与窗口**全无交集**才算真淘汰。
+    if (lo < this.baseSample) {
+      if (hi <= this.baseSample) throw new WindowEvictedError();
+      lo = this.baseSample;
+    }
     const end = this.eofSample !== null ? Math.min(hi, this.eofSample) : hi;
     if (end <= lo) return new Float32Array(0);
     const out = this.copyRange(lo, end);

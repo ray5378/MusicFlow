@@ -83,6 +83,31 @@ export function overridePumpSource(fn: PumpSource | null): void {
  *  实测样本数推进(见 pushLoop)。 */
 export const FRAME_MS = 25;
 
+/** 把时刻对齐到**帧栅格**(FRAME_MS 的整数倍,向下取整)。
+ *
+ *  ★ 这是硬约束,不是可选优化(2026-09-22 240 真机实锤):
+ *  `pushLoop` 取帧用 `lo = floor(pos / FRAME_MS) * frameSamples`(帧栅格),
+ *  而 `PcmWindow.baseSample = floor(pos / 1000 * SR * CH)`(毫秒→样本)。
+ *  两者**只在 pos 为 FRAME_MS 整数倍时严格相等**;否则 `lo` 会落在 `base`
+ *  **之前**(最多 24ms 的量化差),`slice()` 判 `lo < baseSample` →
+ *  `WindowEvictedError` → 主循环 `continue` → 用**同一个游标**重算 → 再抛……
+ *  整条循环退化成纯微任务自旋,事件循环彻底饿死:日志永远停在调用方的等待点之前
+ *  (真机:「音源就绪」之后再无锚点/公告),心跳与 `poll` RPC 全部堆积
+ *  (supervisor 记 `悬挂 RPC 12~15 个` / `最后消息 71s 前`)→ 65s 看门狗 SIGKILL →
+ *  子进程重启 → frozen 兜底重投(位置仍是毫秒精度)→ 再挂,无限循环,听感全哑。
+ *
+ *  触发面(解释了「同一个 seek 接口,HA 卡片与 Web 前端必挂、客户端正常」):
+ *  HA 卡片与 Web 前端把**当前播放位置原样下发**(31.178s / 30.178s 这类毫秒精度),
+ *  客户端下发整秒(62.00 / 108.00 / …)恰好都是 25ms 整数倍,故从未触发。
+ *  流式关闭时走整包 `pcm.subarray` 路径(越界只钳制、没有"淘汰"概念),
+ *  所以旧开关关掉时也"看起来正常"—— 这也是当初误判成"流式开关的问题"的原因。
+ *
+ *  代价:向下取整最多让起点早 FRAME_MS-1(24ms),远低于可闻阈值;
+ *  换来的是 base 与游标同源,首帧即精确位置。 */
+export function alignFrameMs(ms: number): number {
+  return Math.max(0, Math.floor(ms / FRAME_MS) * FRAME_MS);
+}
+
 /** 首块音频的下发提前量(微秒):锚点 = 当前墙钟 + 本值。
  *  对齐 MA `push_stream.DEFAULT_INITIAL_DELAY_US = 250_000`(250ms)——
  *  给设备留出「收到首块 → 建解码环 → 排入 I2S」的启动时间。
@@ -289,7 +314,7 @@ export class GroupPump {
     const myEpoch = ++this.epoch;
     // 起播位置已知(pendingSeekMs)时直接交给音源工厂,让 ffmpeg 从一开始
     // 就带 `-ss` 起 —— 省掉「建流 → 再 seekTo → 再冷起」的整段空窗。
-    const startMsForSource = Math.max(0, this.pendingSeekMs ?? 0);
+    const startMsForSource = alignFrameMs(this.pendingSeekMs ?? 0);
     // ★ 音源获取熔断(**仅 seek 重建**,首播不动):source() 内部任何一步没超时
     // 保护(resolve/取字节/预缓冲),永挂会导致整组静默(无帧、无报错、无 pushLoop),
     // 随后看门狗误判、子进程被杀。240 实锤:seek 重建后新 pushLoop 永远没起来,
@@ -334,7 +359,9 @@ export class GroupPump {
     this.group.current = { songId, durationMs, title: this.group.current?.title, artist: this.group.current?.artist, album: this.group.current?.album, coverArt: this.group.current?.coverArt };
     // 起播位置:消费起播窗口内到达的 seek(见 pendingSeekMs 注释)。
     // 绝不能无条件写 0 —— 那正是「刚点播就拖、拖动被吞」的根因。
-    const startMs = this.pendingSeekMs ?? 0;
+    // 起播位置必须与 startMsForSource **同源**(同一对齐函数),否则窗口 base 与
+    // 帧栅格游标又会错位(见 alignFrameMs 的硬约束说明)。
+    const startMs = alignFrameMs(this.pendingSeekMs ?? 0);
     this.pendingSeekMs = null;
     this.playCursorMs = startMs;
     this.group.positionMs = startMs;
@@ -419,7 +446,24 @@ export class GroupPump {
           } catch (e) {
             // 淘汰 == 回放点已不在窗口:只发生在 seekTo 重定位竞态里,
             // 重定位已完成,按新 position 重取即可。
-            if (e instanceof WindowEvictedError) continue;
+            if (e instanceof WindowEvictedError) {
+              // ★ 护栏(第三层防御):淘汰**必须伴随游标前进**,否则就是自旋。
+              // 真机事故(2026-09-22):游标永远算在窗口 base 之前,slice 每次抛错 →
+              // `continue` 用同一个游标重算 → 纯微任务死循环,事件循环饿死
+              // (心跳/poll RPC 全停 → 看门狗 SIGKILL),日志连锚点都到不了。
+              // 这里把落后于窗口基准的游标**贴齐**到基准(向上取到帧栅格):
+              // 贴齐后 lo >= base,下一次 slice 必然成功 —— 保证每轮淘汰都朝前走。
+              const baseMs = win.baseMs;
+              const snapMs = Math.ceil(baseMs / FRAME_MS) * FRAME_MS;
+              if (snapMs > this.playCursorMs) {
+                logSafe(this.server, "warn", `sendspin 游标落后窗口基准,贴齐继续: ${this.playCursorMs}ms → ${snapMs}ms song=${this.songId}`);
+                this.playCursorMs = snapMs;
+                this.group.positionMs = snapMs;
+                this.paceAnchorMs = snapMs;
+                this.paceAnchorWall = Date.now();
+              }
+              continue;
+            }
             // 超时/失败 → 外层 catch 停 pump(同整包解码失败语义,不静默)。
             throw e;
           }
@@ -646,14 +690,17 @@ export class GroupPump {
   seek(seconds: number): void {
     const wantMs = Math.max(0, Math.round(seconds * 1000));
     const targetMs = this.durationMs > 0 ? Math.min(this.durationMs, wantMs) : wantMs;
-    log.debug(`[pump][seek] group=${this.group.name} want=${wantMs}ms target=${targetMs}ms dur=${this.durationMs} running=${this.running} paused=${this.paused} window=${!!this.window}`);
+    // ★ 帧栅格对齐:发布/记忆的位置必须与 PcmWindow 的 baseSample 同源
+    //   (见 alignFrameMs —— 目标不是 25ms 整数倍时子进程会微任务自旋被看门狗强杀)。
+    const alignedMs = alignFrameMs(targetMs);
+    log.debug(`[pump][seek] group=${this.group.name} want=${wantMs}ms target=${targetMs}ms 对齐=${alignedMs}ms dur=${this.durationMs} running=${this.running} paused=${this.paused} window=${!!this.window}`);
     // ① 发布位置对(防 UI 拿旧值回跳)。
-    this.group.positionMs = targetMs;
+    this.group.positionMs = alignedMs;
     if (!this.running || !this.songId) {
       // 泵未运行(空闲/起播窗口):MA 对应 resume_with_position —— 记起播位置,
       // 下一次 play() 起流即带 -ss 消费,无需现在重建。
-      this.pendingSeekMs = targetMs;
-      log.debug(`[pump][seek] pump 未运行 → 记起播位置 ${targetMs}ms 交由 play() 消费`);
+      this.pendingSeekMs = alignedMs;
+      log.debug(`[pump][seek] pump 未运行 → 记起播位置 ${alignedMs}ms 交由 play() 消费`);
     }
     // ② 重建由 seekCore → playCore/playGroupCore 走完整起播路径(见 seekCore)。
   }
@@ -662,7 +709,8 @@ export class GroupPump {
    *  (stop 会清 pendingSeekMs —— 那是"旧上下文丢弃"语义,MA 的 seek_position
    *  属于新流,必须在其后装填)。 */
   armSeek(ms: number): void {
-    this.pendingSeekMs = Math.max(0, Math.round(ms));
+    // 同样按帧栅格对齐(seekCore 传进来的是毫秒精度的目标,见 alignFrameMs)。
+    this.pendingSeekMs = alignFrameMs(Math.max(0, Math.round(ms)));
   }
 
 }

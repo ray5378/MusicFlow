@@ -323,6 +323,54 @@ describe("stderr 尾部保留(P1-2 修复):长曲边播边测不再静默失效"
 // → running=false,进度条**永久停住**。根因:seekTo 把 decodedSamples 重置到更小值,
 // 而先前发出的 slice() 还在等一个按**旧位置**算出的 hi,永远等不到 → 15s 超时外抛。
 // 修法:窗口带重定位代数,在飞等待立刻失效并抛 WindowEvictedError(主循环 continue 重取)。
+// ---- 亚帧错位(2026-09-22 240 事故):调用方帧栅格 vs 窗口毫秒基准的量化差 ----
+//
+// 现象:HA 卡片拖到 31.178s(毫秒精度)→ 子进程事件循环饿死 → 看门狗 SIGKILL →
+// 无声、进度冻死;客户端拖整秒(62.00/108.00/…)却完全正常。
+// 机理:pushLoop 的 `lo = floor(pos/25)*2400` 与窗口 `base = floor(pos/1000*96000)`
+// 只在 pos 为 25ms 整数倍时相等,否则 lo 比 base 小最多 2399 个样本。
+// 旧实现无条件 `throw WindowEvictedError` → 主循环 continue 后游标不变 → 微任务自旋。
+// 修法:**只差不到一帧**时钳到 base 返回短帧(数据确实只缺开头几十个样本);
+// 请求段与窗口全无交集才仍算真淘汰。
+describe("PcmWindow 亚帧错位(毫秒精度 seek)", () => {
+  // 31.178s:base = floor(31178*96) = 2_993_088,而帧栅格 lo = 1247*2400 = 2_992_800
+  const POS_MS = 31178;
+  const BASE = Math.floor((POS_MS / 1000) * SR * CH);
+  const FRAME = 2400;
+
+  it("lo 落在 base 之前不足一帧 → 钳到 base 返回短帧,绝不抛 WindowEvictedError", async () => {
+    // ⚠️ 素材必须够长(wav120):起点 31.178s 已越过 wav30 的 EOF,
+    //    那样窗口立刻 EOF,断言会退化成"看素材长度"而不是"看钳制行为"。
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false } }, POS_MS);
+    try {
+      await w.ready(10_000);
+      const lo = Math.floor(POS_MS / 25) * FRAME; // 2_992_800
+      expect(lo).toBeLessThan(BASE); // 前提:确实错位(否则用例失去意义)
+      expect(BASE - lo).toBeLessThan(FRAME);
+      // 旧实现:这里 rejects WindowEvictedError → pushLoop 自旋 → 事件循环饿死。
+      const seg = await w.slice(lo, lo + FRAME, 10_000);
+      // 返回**剩余部分**(从 base 起),内容取自窗口自己的数据,长度=FRAME-(base-lo)。
+      expect(seg.length).toBe(FRAME - (BASE - lo));
+      expect(seg.length).toBeGreaterThan(0);
+    } finally {
+      w.close();
+    }
+  }, 30_000);
+
+  it("请求段整体落在 base 之前(真淘汰)→ 仍抛 WindowEvictedError(不得静默跳位)", async () => {
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false } }, POS_MS);
+    try {
+      await w.ready(10_000);
+      // 回跳到 1s:整段远在 base(=31.178s 起)之前 → 必须抛错,由调用方重定位,
+      // 而不是"贴到 base 悄悄播 31.178s 的内容"(那会把回跳变成静默跳位)。
+      const far = SPOOK(1);
+      await expect(w.slice(far, far + FRAME, 10_000)).rejects.toBeInstanceOf(WindowEvictedError);
+    } finally {
+      w.close();
+    }
+  }, 30_000);
+});
+
 describe("PcmWindow 重定位代数", () => {
   it("slice 等待期间 seekTo 重定位 → 立刻抛 WindowEvictedError,不等满 15s", async () => {
     const w = new PcmWindow({ input: wav120, loudness: { enabled: false } });

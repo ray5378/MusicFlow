@@ -11,6 +11,7 @@ import { waitAsyncTask } from "@/utils/asyncTask";
 import { getClientId } from "@/utils/clientId";
 import { getDeviceCard } from "@/utils/deviceCard";
 import { seekTargetFromLogical, toLogicalPosition, withTimeOffset } from "@/utils/transcodedSeek";
+import { alignSeekSeconds } from "@/utils/seekGranularity";
 import { gt } from "@/locales";
 
 /**
@@ -1174,7 +1175,13 @@ export const usePlayerStore = defineStore("player", () => {
     // 分母未知时不发 seek(否则点哪都是 seek 0 回开头)。
     if (!(st.duration > 0) || !Number.isFinite(time)) return;
     // 尾部钳位:拖到 100% 越界会被渲染器拒收/跳开头(留 0.5s 余量)。
-    const t = Math.min(Math.max(0, time), st.duration - 0.5 > 0 ? st.duration - 0.5 : st.duration);
+    const clamped = Math.min(Math.max(0, time), st.duration - 0.5 > 0 ? st.duration - 0.5 : st.duration);
+    // ★ 精度守卫(最小粒度 1 秒):服务端 sendspin 流式引擎按 25ms 帧栅格取帧,而窗口
+    //   基准是毫秒换算 —— 非 25ms 整数倍的目标会错位,导致子进程纯微任务自旋、事件
+    //   循环饿死、心跳超时被 65s 看门狗 SIGKILL(现场=「拖完进度条后播放静默死掉」)。
+    //   整秒必然是 25ms 的整数倍(1000 / 25 = 40),且与客户端 Duration.inSeconds 同语义。
+    //   乐观值 st.currentTime 必须与下发值同源:tick/轮询只按秒级比较,不同源会被拽回。
+    const t = alignSeekSeconds(clamped);
     st.currentTime = t; updateCastLyric(st);
     seekDragging.add(st.peerId);
     const timer = seekTimers.get(st.peerId);
@@ -1183,7 +1190,7 @@ export const usePlayerStore = defineStore("player", () => {
     // tick, so this shows how many ticks one drag produced and how many POSTs actually
     // went out after the 250ms debounce -- i.e. whether the front end itself is
     // fanning out a re-cast storm. Backend logs carry the matching "seek" lines.
-    console.debug(`[castSeek] ${st.peerId} ui=${t.toFixed(2)}s (trailing debounce 250ms)`);
+    console.debug(`[castSeek] ${st.peerId} ui=${clamped.toFixed(2)}s→${t}s (trailing debounce 250ms)`);
     seekTimers.set(st.peerId, setTimeout(() => {
       seekTimers.delete(st.peerId);
       seekDragging.delete(st.peerId);
