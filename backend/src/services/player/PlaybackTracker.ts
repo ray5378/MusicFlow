@@ -161,9 +161,14 @@ export class PlaybackTracker {
     }
 
     if (cur === PlaybackState.PLAYING) {
-      // native gapless:同为 PLAYING 但 uri 变了
+      // native gapless:同为 PLAYING 但 uri 变了。
+      // 比较时必须剥掉 query(`?timeOffset=N`):同歌 seek 重投只改 query(token 复用
+      // 保同一性,见 dlna/control.ts createCastSession 注释),query 交替出现不是换歌。
+      // 240 实锤:194s→235s 连续重投,采样在两个 URI 间交替即误判 track_changed →
+      // 自动 advance 切下一首(用户观感"拖动后切歌")。真换歌 token 必变,base 仍不同。
+      const uriOf = (u: string | undefined): string => (u ?? "").split("?")[0];
       if (prev && prev.playbackState === PlaybackState.PLAYING
-               && prev.mediaUri && neww.mediaUri && prev.mediaUri !== neww.mediaUri) {
+               && prev.mediaUri && neww.mediaUri && uriOf(prev.mediaUri) !== uriOf(neww.mediaUri)) {
         decision = "track_changed";
       }
       this.lastPlaying = neww;

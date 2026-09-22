@@ -55,6 +55,20 @@ describe("PlaybackTracker", () => {
     expect(r).toBe("track_changed");
   });
 
+  it("同歌 seek 重投只改 ?timeOffset:uri 交替出现不判换歌(240 实锤)", () => {
+    const t = new PlaybackTracker();
+    const base = "http://srv/rest/dlna/stream/abc123";
+    t.update(toCompareState(st(PlaybackState.PLAYING, `${base}?timeOffset=194`, 194, 273)));
+    // 连续重投:采样在 ?timeOffset=194 与 ?timeOffset=235 间交替 → 必须 none。
+    const r1 = t.update(toCompareState(st(PlaybackState.PLAYING, `${base}?timeOffset=235`, 235, 273)));
+    expect(r1).toBe("none");
+    const r2 = t.update(toCompareState(st(PlaybackState.PLAYING, `${base}?timeOffset=194`, 196, 273)));
+    expect(r2).toBe("none");
+    // 真换歌(token 变,base 不同)仍判 track_changed。
+    const r3 = t.update(toCompareState(st(PlaybackState.PLAYING, "http://srv/rest/dlna/stream/def456", 1, 267)));
+    expect(r3).toBe("track_changed");
+  });
+
   // ── 卡死兜底(2026-09-21 二次订正:60s「上报间隔」死判据 → 15s 墙钟累积) ──
   // 旧判据 `neww.updatedAt - prev.updatedAt > 60_000` 要求「连续两次 IDLE 上报间隔超 60s」,
   // 而生产采样固定 5s、每帧都把 updatedAt 刷成当前时刻 → 差值恒为 5s,**永远触发不了**。
