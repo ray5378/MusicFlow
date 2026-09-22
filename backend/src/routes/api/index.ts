@@ -4026,7 +4026,7 @@ apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
-    try { await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
+    try { seekLog.info(`[Peer] 手动切歌 next peerId=${peerId}`); await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "next"));
@@ -4038,7 +4038,7 @@ apiRoutes.post("/v1/peers/:peerId/prev", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
-    try { await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
+    try { seekLog.info(`[Peer] 手动切歌 prev peerId=${peerId}`); await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "prev"));
