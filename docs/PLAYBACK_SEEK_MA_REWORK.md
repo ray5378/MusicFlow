@@ -304,13 +304,36 @@ ffmpeg 报 `No trailing CRLF found` 且**根本没读输入**，量到的是假�
 存活的那个 pump 拿到 `eof=true / decoded == baseSample` 的**零输出窗口** → 判成播完退出。
 `流式窗口提前 EOF` 在 v4.0.12 原生（A/E 均未部署）时期已出现多次，属**存量缺陷**。
 
-**修法（待做）**
-1. `seekCore`：`pump` 处于起播中（`running=false` 且已有 play 在飞）时**只记 `pendingSeekMs`**，
-   不再起第二个 play（单飞）。
-2. `play()`：`await source()` 回来后若发现 `pendingSeekMs` 已变（起播期间来了新 seek），
-   关掉刚建好的窗口并**带新起点重来一次** —— 窗口 `baseSample` 必须等于起播位置。
-3. 回归锁：起播中 seek → 最终窗口 base == 目标位置；无 seek 时不重来。
+**修法（2026-09-22 已落地 · patch10 · 240 实测通过）**
 
+1. `seekCore`：pump 处于起播中（`busy`）时**只记起播位置**，不再起第二个 play（单飞）。
+   此前 ② 无条件重建 —— 两个 play 各自 `++epoch`，在 `await source()` 处交错、回来互相掐窗口。
+2. `play()`：`await source()` 回来后若 `pendingSeekMs` 与本次起点不符 → 关掉刚建的窗口、
+   **带新起点重来一次**（窗口 `baseSample` 必须等于起播位置）。
+3. 回归锁：`src/services/sendspin/streamPumpStartupSeek.test.ts`（7 例）；负向矩阵 N1~N5
+   每个变体精确变红（含「过度保留」方向）。
+
+**第二批收口（同日 240 复测时暴露，一并修掉）**
+
+| 缺陷 | 现象（240 实测） | 修法 |
+|---|---|---|
+| 钳制用错时长 | 切歌后拖到 140s：`[pump][seek] want=140000 target=114000 dur=114000` —— `durationMs` 还是**上一首**的（新歌 play 尚未提交），目标被裁短 | `pump.seek(seconds, {clamp})`：`seekCore` 在 `busy` 或 `group.current` 为空时**不钳制**；收口改由本轮 play 用 `srcResult.durationMs`（新歌真实时长）完成，并把钳制结果**回写** `pendingSeekMs` 后再重来 |
+| 重来丢失源行 | 自纠重来又跑一遍完整播放优选（`preferred-swap ms=2059`），白等 2s | 自纠分支把**刚拿到的** `sourceRowId` 记账（它就是同一首歌的生效行）→ 重来那轮直接 `reuse-active ms=1` |
+| 无限重来风险 | 负向变体 N1（去掉回写）→ 每轮重来都重新取一次音源，**死循环** | `playRetry` 收敛保险：自纠最多 2 次，超限 `warn` + 按当前窗口提交（绝不无限 spawn ffmpeg） |
+
+**240 实测（2026-09-22 13:22，A + patch10 热补丁）**
+
+```
+13:22:21.063 [pump][seek] want=60000 target=60000 dur=329000 running=false   ← 不再沿用旧歌时长钳制
+13:22:21.063 [seekCore] 起播窗口内 → 只记起播位置,不再起第二个 play
+13:22:22.160 起播期间收到新 seek(0→60000ms) → 带新起点重来
+13:22:22.160 ...(seek 重建...) 复用源行=5ed2ba54-...                         ← 复用刚拿到的源行
+13:22:22.161 [resolve] ... (reuse-active) ms=1                               ← 1ms（改前 preferred-swap 2059ms）
+```
+
+- 三轮「切歌 + 250ms 内拖动」全部通过：位置落在目标值（60 / 100 / **140**，此前 140 被裁成 114），
+  随后 1:1 推进；`提前 EOF / stalled / 冻结 / 放行切歌` = **0**。
+- 抓包（240 → 设备 :8928）：189 KiB/s = 48kHz×2ch×16bit；载荷零字节 **0.4%** → 音频在流且非静音。
 ## 7. 验收矩阵（改完必跑）
 
 前置：`mf_ctl.sh loglevel debug`；`docker exec musicflow ps -eo pid,ppid,stat,etime,rss,args | grep '[f]fmpeg'`
@@ -448,3 +471,18 @@ v4.0.6 的 patch6（swap 机制）**在真机上被推翻**，本版按 MA 权�
 - **落地范围**：`backend/src/services/source/resolveAudio.ts` + `backend/src/services/sendspin/streamEngine.ts`
   + 2 个测试文件。验证：全量回归 **179 文件 / 1510 用例** + `tsc --noEmit` + 8 个门禁脚本全绿。
 - **未 tag**：按「每次发版只修一处」节奏，与下一版一起走。
+### 修订 R4（2026-09-22，**未发版**）：patch10 —— 起播窗口内 seek 的世代竞态（§6.6）
+
+用户报「切歌后拖进度条不正常」。定位到**存量缺陷**（v4.0.12 原生即有）：seek 落在起播窗口内时，
+`seekCore` 与 in-flight `play()` **双路径重复起 play**，两个 play 互掐对方刚建好的窗口 → 存活的 pump
+拿到 `eof=true / decoded == baseSample` 的零输出窗口 → `流式窗口提前 EOF` → IDLE → 15s `stalled`
+→ 从 0 重投 → `frozen` → **放行切歌**。E（`-noaccurate_seek`）回滚后故障照旧复现，证明与之无关。
+
+- **修复**：seekCore 起播中只记位置（单飞）；`play()` 带新起点自纠重来；钳制改由本轮**新歌时长**
+  收口（不再沿用上一首时长裁短目标）；自纠复用**刚拿到的**源行（省 2s 优选）；`playRetry` 收敛保险。
+- **落地范围**：`backend/src/services/sendspin/streamEngine.ts` + `playerCore.ts` +
+  `streamPumpStartupSeek.test.ts`（7 例）。
+- **验证**：负向矩阵 N1~N5 每个变体精确变红（含「过度」方向）；`tsc --noEmit` + 9 个门禁脚本全绿；
+  **240 热补丁实测**：三轮「切歌 + 250ms 内拖动」位置落在目标值并 1:1 推进，异常计数 0，
+  抓包 189 KiB/s（48kHz/16bit）+ 零字节 0.4%（非静音）。
+- **未 tag**：与下一版一起走。

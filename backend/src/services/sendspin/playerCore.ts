@@ -246,9 +246,22 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     const clampedMs = durMs != null ? Math.min(targetMs, durMs) : targetMs;
     log.debug(`[Sendspin][seekCore] ${clientId} 请求=${seconds.toFixed(2)}s 钳制=${(clampedMs / 1000).toFixed(2)}s 有在播=${!!cur}`);
     // ① 发布位置对 + 空闲态记忆起播位置。
-    pump.seek(seconds);
+    // 起播窗口内 `durationMs` 可能属于**上一首** → 此时不钳制(见 GroupPump.seek 的
+    // opts.clamp),否则「切歌后立刻拖到靠后位置」会被上一首时长裁短(240:140s→114s)。
+    // 收口改由本轮 play() 拿到新歌时长后完成(见 GroupPump.play 的起播期间 seek 分支)。
+    const busy = pump.busy;
+    pump.seek(seconds, { clamp: !busy && !!cur });
     if (!cur) {
       // 无在播曲(空闲):位置已记忆,下一次起播消费 —— MA resume_with_position 语义。
+      return;
+    }
+    // ★ 起播窗口内(音源还没就绪,但**已有一次 play 在飞**):只记起播位置,由那次 play
+    //   在音源就绪后自纠(带新起点重建一次,见 GroupPump.play 的起播期间 seek 分支)。
+    //   此处**绝不能**再走 ②:两个 play 会各自 ++epoch 后互掐对方刚建好的窗口,存活者
+    //   拿到零输出窗口(eof=true / decoded==baseSample)→ 被当成播完 → IDLE → 15s stalled
+    //   → 从 0 重投 → frozen → 放行切歌(240 日志 12:31 实锤)。
+    if (busy) {
+      log.debug(`[Sendspin][seekCore] ${clientId} 起播窗口内 → 只记起播位置,不再起第二个 play`);
       return;
     }
     // ② play_index 等价:走完整起播路径重建流(同一首歌、新起点)。

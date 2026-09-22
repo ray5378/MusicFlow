@@ -306,6 +306,16 @@ export class GroupPump {
    *  生命周期:切歌(songId 变化)不复用;复用命中却出不了流时**清空并回退完整
    *  解析一次**(见 play 内 srcPromise),回退成功后按新结果重新记账。
    *  `stop()` 有意**不清** —— stop → 重播同一首等价于 seek 到 0,复用同样成立。 */
+  /** 起播进行中(play() 已进入、音源尚未就绪):此刻 `running` 仍是 false,但**已有一次
+   *  play 在飞** —— 起播窗口内的 seek 必须交给它自纠,调用方(seekCore)不得再起第二个
+   *  play:两个 play 会各自 ++epoch,回来后验世代**互掐对方刚建好的窗口**,存活的那个
+   *  pump 拿到的是零输出窗口(`eof=true` / `decoded == baseSample`)→ 被判成播完退出
+   *  → IDLE → 15s stalled → 从 0 重投 → frozen → 放行切歌(240 日志 12:31 实锤)。 */
+  private playInFlight = false;
+  /** 起播自纠重来计数:仅作**收敛保险**(见 play 的起播期间 seek 分支),正常一次即归零。 */
+  private playRetry = 0;
+  /** 起播窗口判定:是否已有一次 play 在飞(见 playInFlight)。 */
+  get busy(): boolean { return this.playInFlight; }
   private srcRowId: string | null = null;
   private srcRowSongId = "";
   // 暂停时被唤醒的等待器。
@@ -341,6 +351,7 @@ export class GroupPump {
     // 两个解码器并存)。epoch 必须在 await **之前**抢,回来后验世代,若已不是
     // 最新则亲手杀掉刚建的窗口(不能指望别人的 releaseAudio)并直接返回。
     const myEpoch = ++this.epoch;
+    this.playInFlight = true;
     // 起播位置已知(pendingSeekMs)时直接交给音源工厂,让 ffmpeg 从一开始
     // 就带 `-ss` 起 —— 省掉「建流 → 再 seekTo → 再冷起」的整段空窗。
     const startMsForSource = alignFrameMs(this.pendingSeekMs ?? 0);
@@ -387,6 +398,7 @@ export class GroupPump {
         : await srcPromise;
     } catch (e: any) {
       logSafe(this.server, "error", `sendspin play 音源失败 song=${songId}: ${e?.message || e}`);
+      if (this.epoch === myEpoch) this.playInFlight = false;
       throw e;
     } finally {
       if (srcTimer) clearTimeout(srcTimer);
@@ -399,6 +411,35 @@ export class GroupPump {
       logSafe(this.server, "info", `sendspin play superseded song=${songId} (epoch ${myEpoch}→${this.epoch}),窗口已就地释放`);
       return;
     }
+    // ★ 起播期间又到了新的 seek(seekCore 在起播窗口内只记 pendingSeekMs、不再起第二个
+    //   play,见 6.6):刚建好的窗口基准是**旧起点**,与新的起播位置不符 —— 若照旧提交,
+    //   窗口会拿「新位置之前」的音频当本位置的数据(或直接越界淘汰),实测表现为
+    //   `流式窗口提前 EOF: eof=true decoded==baseSample` → contentEnded → 拖完不播。
+    //   正确做法:关掉刚建的窗口,**带新起点重来一次**。递归是自限的 —— 重来那一轮
+    //   的 startMsForSource 就是当前 pendingSeekMs,除非期间又来一次 seek(即新的一次拖动)。
+    if (this.pendingSeekMs !== null) {
+      // 用**本轮刚拿到的**新歌时长再钳一次:此刻 this.durationMs 可能还是上一首的。
+      const durNew = durationMs > 0 ? durationMs : null;
+      const rawWant = this.pendingSeekMs;
+      const wantMs = alignFrameMs(durNew != null ? Math.min(rawWant, durNew) : rawWant);
+      if (wantMs !== startMsForSource) {
+        try { stream?.close(); } catch { /* ignore */ }
+        log.debug(`[pump][play] song=${songId} 起播期间收到新 seek(${startMsForSource}→${wantMs}ms) → 带新起点重来`);
+        // 重来那轮必须按**钳制后**的位置起,否则又读到未钳制的原始值(超尾 → 空流)。
+        this.pendingSeekMs = wantMs;
+        // 刚拿到的源行虽对应旧起点,但行本身有效(同一首歌) → 记账,让重来那轮直接
+        // 命中 reuse-active,省掉一次完整播放优选(240 实测 2.0~2.4s)。
+        if (sourceRowId) {
+          this.srcRowId = sourceRowId;
+          this.srcRowSongId = songId;
+        }
+        // 收敛保险:回写后下一轮 startMsForSource 必等于 wantMs(正常一次即收敛)。若异常
+        // 情况下不收敛,到此为止 —— 每轮重来都会重新取一次音源(spawn ffmpeg),无限重来
+        // 就是 CPU 与上游灾难;宁可提交当前窗口,也不打转。
+        if (++this.playRetry <= 2) return this.play(songId);
+        logSafe(this.server, "warn", `sendspin 起播自纠超限(2 次),按当前窗口提交 song=${songId}`);
+      }
+    }
     this.running = true;
     this.paused = false;
     this.pcm = pcm;
@@ -409,6 +450,7 @@ export class GroupPump {
     // 注入音源(测试)可不回带 → 记为 null,下次重建照旧走完整裁决。
     this.srcRowId = sourceRowId ?? null;
     this.srcRowSongId = songId;
+    this.playRetry = 0; // 起播成功:自纠计数归零。
     this.endedNaturally = false;
     this.group.current = { songId, durationMs, title: this.group.current?.title, artist: this.group.current?.artist, album: this.group.current?.album, coverArt: this.group.current?.coverArt };
     // 起播位置:消费起播窗口内到达的 seek(见 pendingSeekMs 注释)。
@@ -428,6 +470,8 @@ export class GroupPump {
     this.resumeWaiter = null;
     // 主循环不阻塞调用方(playMedia 需尽快返回,由 pollState 反映进度)。
     void this.pushLoop(myEpoch);
+    // 已提交(running=true、窗口已挂上):起播窗口结束,此后 seek 走窗口内快路径。
+    if (this.epoch === myEpoch) this.playInFlight = false;
   }
 
   /** 释放音频持有(整包缓冲 / 流式窗口＋ffmpeg 二选一,调用方无需区分)。 */
@@ -711,6 +755,8 @@ export class GroupPump {
   stop(): void {
     this.epoch++;
     this.running = false;
+    this.playInFlight = false; // 起播在飞也算被打断:不清会让标志永久为真,后续 seek 全被跳过。
+    this.playRetry = 0; // 上一段播放上下文已丢弃,重来计数跟着归零。
     this.resumeWaiter?.();
     this.resumeWaiter = null;
     // 起播窗口内的 seek 归属**上一首**:stop 意味着这段播放上下文已被丢弃,
@@ -741,9 +787,13 @@ export class GroupPump {
    *       全新音源带 seek 起点起流 → 新时间线锚点)。这一步由 playerCore.seekCore
    *       调 playCore/playGroupCore 完成;pump 只负责 ① 与空闲态的位置记忆。
    *  MA 没有「帧边界无缝换流」;设备端缓冲自然耗尽后接新流,听感即 MA 真机行为。 */
-  seek(seconds: number): void {
+  seek(seconds: number, opts?: { clamp?: boolean }): void {
     const wantMs = Math.max(0, Math.round(seconds * 1000));
-    const targetMs = this.durationMs > 0 ? Math.min(this.durationMs, wantMs) : wantMs;
+    // opts.clamp=false 时**不做时长钳制**:起播窗口内 `durationMs` 可能还是上一首的
+    // (新歌的 play 尚未提交),据此钳制会把目标裁短 —— 240 实测:切歌后拖到 140s,
+    // 被上一首的 114s 裁成了 114s。此时先记原始位置,由本轮 play() 拿到新歌时长后收口
+    // (见 GroupPump.play 的起播期间 seek 分支)。
+    const targetMs = opts?.clamp !== false && this.durationMs > 0 ? Math.min(this.durationMs, wantMs) : wantMs;
     // ★ 帧栅格对齐:发布/记忆的位置必须与 PcmWindow 的 baseSample 同源
     //   (见 alignFrameMs —— 目标不是 25ms 整数倍时子进程会微任务自旋被看门狗强杀)。
     const alignedMs = alignFrameMs(targetMs);
