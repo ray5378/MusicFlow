@@ -1992,19 +1992,16 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   // cast token 绑定的歌曲一律走管道出流,不再有直传旁路(P2-2/D9)。
   const rawEntry = resolveRawStreamToken(token);
   if (rawEntry) {
-    const headers: Record<string, string> = { ...(rawEntry.headers || {}) };
-    const rangeHeader = c.req.header("range");
-    if (rangeHeader) headers["Range"] = rangeHeader;
-    const upstream = await fetch(rawEntry.url, { headers });
-    const respHeaders: Record<string, string> = { "Cache-Control": "no-cache" };
-    const ct = upstream.headers.get("content-type");
-    if (ct) respHeaders["Content-Type"] = ct;
-    const cl = upstream.headers.get("content-length");
-    if (cl) respHeaders["Content-Length"] = cl;
-    const cr = upstream.headers.get("content-range");
-    if (cr) respHeaders["Content-Range"] = cr;
-    if (upstream.headers.get("accept-ranges")) respHeaders["Accept-Ranges"] = "bytes";
-    return c.body(upstream.body as any, upstream.status as any, respHeaders);
+    // PERF-B(2026-09-23):回环 raw 流不再纯透传 —— 改走「有界回源 + 256KB 稀疏块缓存」
+    // 代理,让 ffmpeg 对无 SEEKTABLE 的网盘 FLAC 做输入定位(-ss)时的多次回溯 Range
+    // 命中本地缓存。`docs/PLAYBACK_SEEK_OPTIMIZATION.md` §6;开关 RAW_STREAM_CACHE=0 回旧行为。
+    const { proxyRawRange } = await import("../../services/dlna/rawStreamCache.js");
+    return proxyRawRange({
+      url: rawEntry.url,
+      headers: rawEntry.headers || {},
+      rangeHeader: c.req.header("range"),
+      signal: c.req.raw.signal,
+    });
   }
   const castSession = resolveCastSession(token);
   if (!castSession) return c.text("Invalid or expired cast token", 403);
