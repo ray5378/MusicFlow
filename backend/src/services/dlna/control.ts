@@ -611,6 +611,28 @@ export interface CastOptions {
    *  新流** —— 这是 MA `play_index(seek_position=N)` 在 DLNA 侧的等价实现。
    *  用于 SOAP Seek 无效的设备(实时管道上 REL_TIME Seek 不会生效)。 */
   timeOffset?: number;
+  /**
+   * 风暴合并检查点:返回 true 表示已有更新的重投,本次应立即中止(不再发 SOAP)。
+   * 连续拖动会产生背靠背重投(Stop/SetURI/wait/Play),小设备 HTTP 栈扛不住
+   * 直接失联(240 真机:5 连拖后全 500)。调用方 reseekByRecast 负责世代号。
+   */
+  shouldAbort?: () => boolean;
+}
+
+/** 本次重投已被更新的重投取代(哨兵错误,不记为失败;新重投会给出最终结果)。 */
+export class SeekSupersededError extends Error {
+  constructor() { super("superseded by newer recast"); this.name = "SeekSupersededError"; }
+}
+
+// ==================== 重投风暴串行化 ====================
+// 同设备重投排队串行 + settle 收敛:新重投到达时若有在途,不立即开新流程,
+// 等 400ms 让连续拖动收敛到最新目标再跑一次。旧重投在每步检查点退出。
+const recastChains = new Map<string, Promise<void>>();
+const recastGens = new Map<string, number>();
+const RECAST_SETTLE_MS = 400;
+
+function recastAborted(deviceId: string, gen: number): boolean {
+  return recastGens.get(deviceId) !== gen;
 }
 
 // Probe whether a device supports SetNextAVTransportURI by fetching its
@@ -726,6 +748,7 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   } catch (e: any) {
     log.info(`[cast] ${opts.deviceId}: Step 1 Stop failed (ignored): ${e?.message || e}`);
   }
+  if (opts.shouldAbort?.()) throw new SeekSupersededError();
 
   // 注:MA 在 stop 与 SetAVTransportURI 之间无固定 sleep,依赖 wait_for_can_play 等设备就绪。
 
@@ -737,11 +760,13 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
     CurrentURIMetaData: metadata,
   });
   log.info(`[cast] ${opts.deviceId}: Step 2 SetAVTransportURI OK`);
+  if (opts.shouldAbort?.()) throw new SeekSupersededError();
 
   // Step 3: wait_for_can_play — 检查 CurrentTransportActions 含 play。对照 MA 10s budget。
   log.info(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay`);
   await waitForCanPlay(device);
   log.info(`[cast] ${opts.deviceId}: Step 3 waitForCanPlay OK`);
+  if (opts.shouldAbort?.()) throw new SeekSupersededError();
 
   // Step 4: Play.
   log.info(`[cast] ${opts.deviceId}: Step 4 Play`);
@@ -995,9 +1020,34 @@ async function reseekByRecast(deviceId: string, seconds: number): Promise<void> 
   const prev = rt.lastCastOptions;
   if (!prev) throw new Error("无投屏上下文,无法重投流");
   const target = Math.max(0, Math.round(seconds));
+  // 风暴串行化:同设备同时只跑一个重投;新到达者先等 settle 窗收敛连续拖动,
+  // 若等到期间又有更新者,自己直接退出(新者会给出最终结果)。
+  const gen = (recastGens.get(deviceId) ?? 0) + 1;
+  recastGens.set(deviceId, gen);
+  const prevChain = recastChains.get(deviceId) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => { release = r; });
+  recastChains.set(deviceId, prevChain.catch(() => {}).then(() => mine));
+  await prevChain.catch(() => {});
+  await new Promise((r) => setTimeout(r, RECAST_SETTLE_MS));
+  if (recastAborted(deviceId, gen)) {
+    log.info(`[DLNA][seek] ${deviceId} settle 窗内被更新的 seek 取代(target=${target}s),跳过本次重投`);
+    release();
+    return;
+  }
   const t0 = Date.now();
   log.info(`[DLNA][seek] ${deviceId} SOAP Seek 不可靠 → 重投流重建(timeOffset=${target}s)`);
-  await castToDevice({ ...prev, timeOffset: target });
+  try {
+    await castToDevice({ ...prev, timeOffset: target, shouldAbort: () => recastAborted(deviceId, gen) });
+  } catch (e: any) {
+    if (e instanceof SeekSupersededError || recastAborted(deviceId, gen)) {
+      log.info(`[DLNA][seek] ${deviceId} 重投中途被更新的 seek 取代(target=${target}s),中止`);
+      return;
+    }
+    throw e;
+  } finally {
+    release();
+  }
   // 位置基线改锚到目标:此刻设备是真的从 target 起播,而不是"声称跳了但没跳"。
   const prevBase = positionEstimates.get(deviceId);
   positionEstimates.set(deviceId, {

@@ -1167,21 +1167,30 @@ export const usePlayerStore = defineStore("player", () => {
   // on AirPlay a seek swaps the decoder — issuing one per tick would restart
   // ffmpeg dozens of times per drag. Only the last position within 250ms fires.
   const seekTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // 拖拽进行中的 peer:@input 每帧乐观写 currentTime,tick 若同时 +0.25 会把
+  // 手指的值顶回去(滑块跟手抖)。置位期间 tick 只跳过不推进;防抖触发即清除。
+  const seekDragging = new Set<string>();
   function castSeek(st: RemoteState, time: number) {
-    st.currentTime = time; updateCastLyric(st);
+    // 分母未知时不发 seek(否则点哪都是 seek 0 回开头)。
+    if (!(st.duration > 0) || !Number.isFinite(time)) return;
+    // 尾部钳位:拖到 100% 越界会被渲染器拒收/跳开头(留 0.5s 余量)。
+    const t = Math.min(Math.max(0, time), st.duration - 0.5 > 0 ? st.duration - 0.5 : st.duration);
+    st.currentTime = t; updateCastLyric(st);
+    seekDragging.add(st.peerId);
     const timer = seekTimers.get(st.peerId);
     if (timer) clearTimeout(timer);
     // console.debug (Verbose level in devtools): el-slider @input fires on every drag
     // tick, so this shows how many ticks one drag produced and how many POSTs actually
     // went out after the 250ms debounce -- i.e. whether the front end itself is
     // fanning out a re-cast storm. Backend logs carry the matching "seek" lines.
-    console.debug(`[castSeek] ${st.peerId} ui=${time.toFixed(2)}s (trailing debounce 250ms)`);
+    console.debug(`[castSeek] ${st.peerId} ui=${t.toFixed(2)}s (trailing debounce 250ms)`);
     seekTimers.set(st.peerId, setTimeout(() => {
       seekTimers.delete(st.peerId);
-      console.debug(`[castSeek] ${st.peerId} POST /seek seconds=${time.toFixed(2)}`);
+      seekDragging.delete(st.peerId);
+      console.debug(`[castSeek] ${st.peerId} POST /seek seconds=${t.toFixed(2)}`);
       // 置护栏必须在 POST **之前**:请求在途期间就可能有一次轮询返回旧位置。
-      seekIssued.set(st.peerId, { at: Date.now(), target: time });
-      api.post(peerApi(st.peerId, "/seek"), { seconds: time }).catch(() => {});
+      seekIssued.set(st.peerId, { at: Date.now(), target: t });
+      api.post(peerApi(st.peerId, "/seek"), { seconds: t }).catch(() => {});
     }, 250));
   }
 
@@ -1319,6 +1328,9 @@ export const usePlayerStore = defineStore("player", () => {
           const media = s.media;
           if (media && media.songId && media.songId !== st.lastScrobbledSongId) {
             st.lastScrobbledSongId = media.songId;
+            // 换歌:旧 seek 目标作废,否则新歌 0s 会被误判"未落位"冻结 6s。
+            seekIssued.delete(st.peerId);
+            seekDragging.delete(st.peerId);
             api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
             loadCastLyrics(st, media.songId);
           }
@@ -1338,6 +1350,8 @@ export const usePlayerStore = defineStore("player", () => {
     // playing so the progress bar moves smoothly between the 2s polls. The
     // next poll overwrites with the backend ground truth, correcting drift.
     st.tickTimer = setInterval(() => {
+      // 拖拽中手指值优先(见 castSeek seekDragging),tick 不推进。
+      if (seekDragging.has(st.peerId)) return;
       if (st.isPlaying && st.duration > 0 && st.currentTime < st.duration) {
         st.currentTime += 0.25;
         if (st.currentTime > st.duration) st.currentTime = st.duration;
@@ -1349,6 +1363,9 @@ export const usePlayerStore = defineStore("player", () => {
     st.polling = false;
     if (st.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
     if (st.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
+    const timer = seekTimers.get(st.peerId);
+    if (timer) { clearTimeout(timer); seekTimers.delete(st.peerId); }
+    seekDragging.delete(st.peerId);
   }
 
   // Pull the backend's authoritative queue snapshot into a peer's state.
