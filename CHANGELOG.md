@@ -2,6 +2,41 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.12] - 2026-09-22
+
+### 修复 —— 拖拽 seek 打死 sendspin 子进程（整秒契约）+ 取流重建加固
+
+- **根因**：sendspin 流式引擎按 **25ms 帧栅格**取帧（`lo = floor(pos/25) * 2400` 样点），而滑动窗口
+  基准是「毫秒 → 样本」换算（`base = floor(pos/1000 * 48000 * 2)`）—— **只有目标为 25ms 整数倍时两者相等**。
+  HA 卡片 / 网页把当前播放位置原样下发（31.178s / 30.178s 这类毫秒精度）→ `lo < base` →
+  `PcmWindow.slice()` 抛 `WindowEvictedError` → 主循环 `continue` 用**同一个游标**重算 → 再抛 →
+  纯微任务自旋（不 await I/O）→ 事件循环彻底饿死 → 心跳与 `poll` RPC 全排不上队（管辖进程记
+  `悬挂 RPC 12~15 个` / `最后消息 71s 前`）→ **65s 看门狗 SIGKILL** → 重启 → frozen 兜底重投
+  （位置仍是毫秒精度）→ 再挂。现象：拖完进度条播放静默死掉、进度冻住。
+  客户端下发 `Duration.inSeconds` 恒为整秒（1000/25 = 40），所以**从来只有 HA 卡片与网页会挂**。
+- **三层防御（引擎）**：①新增 `alignFrameMs()` 帧栅格对齐，在 `play()`（源起点 + 游标）、`seek()`
+  （发布位置 + 记忆）、`armSeek()`（装填）**四处统一**向下取整到 25ms（代价 ≤24ms，不可闻）；
+  ②`PcmWindow.slice()` 亚帧容错 —— 只在请求段与窗口**全无交集**（`hi <= baseSample`）时才抛错，
+  `lo < base < hi` 时钳到 base 返回短帧；新增 `get baseMs()`；③pushLoop 淘汰护栏 —— 淘汰分支把
+  落后于窗口基准的游标**贴齐**到 `ceil(baseMs / FRAME_MS) * FRAME_MS` 并重锚 pacing（+ warn 取证），
+  保证「每轮淘汰必然前进」，机制上杜绝自旋。
+- **唯一入口兜底**：`POST /v1/peers/:peerId/seek` 经 `alignSeekSeconds()` 统一向下取整 —— 任何来源
+  （HA 卡片 / 网页 / 第三方客户端）都不可能把非整秒目标送进引擎。
+- **取流重建加固**：并发 `play` 世代守卫、重建失败告警 + 子进程 loop 自检、音源获取 30s 熔断。
+
+### 门禁
+
+- 新增 `backend/scripts/check-seek-granularity.mjs`（6 条规则：两侧 util 导出、后端路由必须兜底、
+  前端每个 `/seek` 下发站点必须对齐、不得有未识别的 `/seek` 字面量、引擎 `alignFrameMs` 应用点 ≥5
+  且 `WindowEvictedError` 仍在），挂 `ci.yml` 新 job。
+- 新增 `backend/tests/utils/seekGranularity.test.ts`（截断语义 / 整秒恒等 / 25ms 帧栅格不变式 / 非法归 0）。
+- 新增 `streamSource.test.ts` 2 例（亚帧钳制返回短帧 / 真淘汰仍抛错）、`streamPumpSeek.test.ts` 3 例。
+
+### 构建信息
+
+- Docker 镜像：`ray5378/musicflow:4.0.12` + `:latest`
+- 配套：客户端 **v5.0.28**／HA 卡片 **v2.4.8**／HA 集成 **v2.0.5**（同一批次）
+
 ## [4.0.11] - 2026-09-22
 
 ### 调试日志补全（seek 全链路）
