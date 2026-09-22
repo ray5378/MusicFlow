@@ -10,6 +10,9 @@
 // /rest/airplay/stream/:token; the streaming core stays shared (serveCastStream).
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createAirPlaySession } from "./session.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("AirPlay");
 import {
   castToAirPlayDevice,
   getAirPlayStatus,
@@ -44,7 +47,19 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
     async stop() { await stopAirPlay(deviceId); },
     async pause() { await pauseAirPlay(deviceId); },
     async resume() { await resumeAirPlay(deviceId); },
-    async seek(seconds: number) { await seekAirPlay(deviceId, seconds); },
+    async seek(seconds: number) {
+      // 入口+结果留痕:AirPlay seek 是"原地 FLUSH 换 decoder"还是"带 seekSec 重投",
+      // 成败只看这一行(内部分支见 control.ts seekAirPlay)。
+      const t0 = Date.now();
+      log.debug(`[AirPlay][seek] ${deviceId} 目标=${seconds.toFixed(2)}s → 下发`);
+      try {
+        await seekAirPlay(deviceId, seconds);
+        log.debug(`[AirPlay][seek] ${deviceId} 完成 ${Date.now() - t0}ms`);
+      } catch (e: any) {
+        log.debug(`[AirPlay][seek] ${deviceId} 失败 ${Date.now() - t0}ms err=${e?.message || e}`);
+        throw e;
+      }
+    },
     async setVolume(vol: number) { await setAirPlayVolume(deviceId, vol); },
     async pollState(): Promise<PlayerState> {
       const s = getAirPlayStatus(deviceId);

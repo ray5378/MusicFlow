@@ -233,6 +233,9 @@ export function resumePumpCore(srv: SendspinServer | null, clientId: string): vo
  *  光写标记会被下一帧覆盖(进度回跳、音频原地),且不钳制 duration(拖到尾直接
  *  触发播完→跳歌/停播)。 */
 export function seekCore(srv: SendspinServer | null, clientId: string, seconds: number): void {
+  // 入口留痕:三条下发路径(index/childMain/protocolPlayer)最终都汇到这里,
+  // 钳制结果与空闲记忆必须可见 —— 否则"拖了没反应"时分不清是没下发还是被钳制。
+  const t0 = Date.now();
   if (srv) {
     const g = srv.group(clientId);
     const pump = pumpFor(srv, g);
@@ -241,6 +244,7 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     const durMs = cur?.durationMs && cur.durationMs > 0 ? cur.durationMs : null;
     const targetMs = Math.max(0, Math.round(seconds * 1000));
     const clampedMs = durMs != null ? Math.min(targetMs, durMs) : targetMs;
+    log.debug(`[Sendspin][seekCore] ${clientId} 请求=${seconds.toFixed(2)}s 钳制=${(clampedMs / 1000).toFixed(2)}s 有在播=${!!cur}`);
     // ① 发布位置对 + 空闲态记忆起播位置。
     pump.seek(seconds);
     if (!cur) {
@@ -264,9 +268,11 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     } else {
       playCore(srv, clientId, item, onFailed, clampedMs);
     }
+    log.debug(`[Sendspin][seekCore] ${clientId} 已走完整起播路径重建流 ${Date.now() - t0}ms`);
     return;
   }
   ephemeralOrReal(srv, clientId).positionMs = Math.max(0, seconds * 1000);
+  log.debug(`[Sendspin][seekCore] ${clientId} 无 server,落 ephemeral 标记 ${Date.now() - t0}ms`);
 }
 
 /** 音量核心:**只写组音量**(Sendspin 单设备组的权威音量标度)。
