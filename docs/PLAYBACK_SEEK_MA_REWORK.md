@@ -2,7 +2,7 @@
 
 > 专题：**进度条跳转 / 播放位置 / 播放通道 / 歌词进度** 四条链路按 Music Assistant（MA）语义重做
 > 版本基线：后端 `v4.0.5-3-g6789e54`（230 `/workspace/MusicFlow`）· 客户端 `v5.0.21`（230 `/workspace/MusicFlow-client`）
-> 编写日期：2026-09-22　状态：**patch 1~7 已落地并热部署到 240；剩余项见第 6 节**
+> 编写日期：2026-09-22　状态：**patch 1~8 已落地并热部署到 240；patch9（seek 源行复用）已落地并热补丁部署 240 验证；剩余项见第 6 节**
 
 ---
 
@@ -200,6 +200,47 @@ pushLoop 帧边界
 日志串：`[DLNA][seek] … 连续 N 次不报位置 → 判定 SOAP Seek 无效` →
 `[DLNA][seek] … SOAP Seek 不可靠 → 重投流重建(timeOffset=N)` → `重投流完成 …`。
 
+### patch9 · seek 后出声延迟（用户报「跳转进度后要十几秒才出声」）
+
+**症状**：seek 后 4~14s 才出声。生产日志 `开始获取音源`→`音源就绪`：67s=6.84 / 129s=**15.34** / 178s=7.03。
+
+**根因两段，互相独立，且与带宽无关**（240 逐层排除：WebDAV 带宽 5.44MB/s、上游 Range 支持 206、
+回环响应头正确转发、loudnorm 各变体 200~300ms、HTTP 层 2~4ms、CPU Xeon E-2244G/8 核 load 1.8、
+回环 vs 直连单请求耗时 ~340ms vs ~370ms）:
+
+| # | 段 | 实测 | 状态 |
+|---|---|---|---|
+| ① | `resolvePlayableRow` **每次重跑「播放优选」** | 1.85~2.53s/次，**结果恒定**（web 行恒 `preferred-swap` 到组内核心曲库行） | ✅ 本版已修（源行复用） |
+| ② | ffmpeg 对**无 SEEKTABLE 的网盘 FLAC** 的输入 `-ss` 反复发**开放式** Range | 单次 **9 个** `Range: bytes=N-`，4~13s，越往后越慢 | ⬜ 未修，见第 6 节 |
+
+**改动 · 源行复用（本版落地）**
+- `source/resolveAudio.ts`：`resolvePlayableRow(songId, { preferRowId })` —— 命中直接返回
+  （`reason=reuse-active`，零成本一次主键查找），跳过 `resolvePreferredSong` → 逐候选
+  `probeLocalSourceOk` → `verifyRow` 整段。判定放在**快缓存之前**：快缓存回的永远是原始 `songId`
+  那行，而实际在播的可能是优选换过的组内兄弟行。
+- `sendspin/streamEngine.ts`：`GroupAudio.sourceRowId` 回带**实际出流**的行；pump 记
+  `{songId, rowId}`，**仅同曲** seek 重建时作 `preferRowId` 传回；切歌不复用；复用命中却出不了流
+  → 清记账 + 回退完整裁决**一次**（回退成功则按新结果重建记账，不会永久退化）。
+- 依据用户口径：「如果是网络源/WebDAV 源，在跳转进度时应该**自动复用正在播放的地址**才对，
+  不应该回退到查找播放源这一步」。
+- **240 实测**：同曲 seek 重建日志 `复用源行=<rowId>` + `[resolve] <A> -> <A> (reuse-active) ms=2`
+  （原为 1.85~2.53s 的 `preferred-swap`）。
+
+**未采纳的一版（记录以免重走）：输入粗定位 `-noaccurate_seek`**
+该参数曾在 240 容器内**独立** ffmpeg 上量到 10086ms → 7193ms（**-29%**），一度随本 patch 一起落地；
+但在**真实 seek 重建路径**上无法确认收益，且热补丁实测期间出现 `PcmWindow 等数超时(15000ms)`。
+后续取证（240 日志 12:31 故障链，**E 已回滚仍完整复现**）表明该故障另有根因 ——
+`play()` 世代记账与「seek 落在起播窗口」的双路径重复（见 6.6），**故 E 已从本方案撤出**，不在本版内。
+
+**实验否证过的一版（记下来别再走）**：先用容器内独立脚本量到「直连 WebDAV 仅 258ms」，
+据此差点绕向 CDN / 回环优化 —— 实为 `-headers` 的值含 `\r\n` 经 shell 被截断成换行、
+ffmpeg 报 `No trailing CRLF found` 且**根本没读输入**，量到的是假的快。
+**量 ffmpeg 必须用 `execFileSync(bin, [args...])` 数组传参**。
+
+**契约锁**：`tests/services/resolveAudio.test.ts`（4 例）、
+`src/services/sendspin/streamPumpRowReuse.test.ts`（4 例，新增）。两组均做过**负向验证**
+（变体分别精确变红，失败信息恰好点中所修语义）。
+
 ---
 
 ## 6. 剩余改造（设计 + 落地步骤）
@@ -238,6 +279,37 @@ pushLoop 帧边界
 - 待复核：卡片/网页读位置时是否遵守「非 PLAYING 不外推」。
 
 ---
+
+### 6.6 起播窗口内的 seek 世代竞态（240 实锤，**优先级最高**）
+
+**症状**：切歌后 1s 内拖进度条 → 拖动「生效了但不出声」：位置发布到目标值、随后转 IDLE、
+15s 后从 0 重投，再 30s 判 frozen → **放行切歌**（整首歌被跳过）。
+
+**240 日志（12:31，E 已回滚，与输入粗定位无关）**：
+
+```
+12:31:48.336 [pump][play] song=47ac4fb2 startMs=0 开始获取音源          ← play#1（切歌后 1s 内）
+12:31:49.518 seek 130s → [pump][seek] running=false window=false        ← pump 还没起来
+12:31:49.521 [pump][play] song=47ac4fb2 startMs=130000 开始获取音源(seek 重建)  ← play#2
+12:31:50.154 play superseded (epoch 8→10),窗口已就地释放
+12:31:51.542 流式窗口提前 EOF: lo=12480000 frame=5200 eof=true decoded=12480000
+12:31:51.542 pushLoop 退出: contentEnded=true
+12:32:13.593 IDLE 持续 15122ms ≥ 15000ms → stalled
+12:32:14.433 playCurrent 重投 startMs=0 → 12:33:18 位置冻结 → 放行切歌
+```
+
+**机理**：`seekCore` ① `pump.seek()` 在 `running=false`（起播窗口）时**只记 `pendingSeekMs`**，
+② 却**无条件**继续走「完整起播路径重建」→ `playCore` → `stop() + armSeek() + play()`，起了**第二个 play**。
+两个 play 在 `await source()` 处交错，各自 `++epoch`、回来验世代 → 互相把对方刚建好的窗口掐掉；
+存活的那个 pump 拿到 `eof=true / decoded == baseSample` 的**零输出窗口** → 判成播完退出。
+`流式窗口提前 EOF` 在 v4.0.12 原生（A/E 均未部署）时期已出现多次，属**存量缺陷**。
+
+**修法（待做）**
+1. `seekCore`：`pump` 处于起播中（`running=false` 且已有 play 在飞）时**只记 `pendingSeekMs`**，
+   不再起第二个 play（单飞）。
+2. `play()`：`await source()` 回来后若发现 `pendingSeekMs` 已变（起播期间来了新 seek），
+   关掉刚建好的窗口并**带新起点重来一次** —— 窗口 `baseSample` 必须等于起播位置。
+3. 回归锁：起播中 seek → 最终窗口 base == 目标位置；无 seek 时不重来。
 
 ## 7. 验收矩阵（改完必跑）
 
@@ -362,3 +434,17 @@ v4.0.6 的 patch6（swap 机制）**在真机上被推翻**，本版按 MA 权�
   的行为与 MA 一致，**不是缺陷**。真机测试前必须先用 ffprobe 确认实际时长。
 - ffmpeg `-ss`（input 侧）按 mp3 头声称码率估算 seek 字节偏移，元数据失配的小文件
   会命中上游 416 Range Not Satisfiable → 空流 EOF。
+
+### 修订 R3（2026-09-22，**未发版**）：新增 patch9 —— seek 后出声延迟（源行复用）
+
+用户在 R2 之后报「很多歌曲跳转进度后要十几秒才出声」，本轮把两段独立开销中的 ① 落地：
+
+- **patch9（见 §5）**：源行复用 —— 同曲 seek 重建跳过整段播放优选（1.85~2.53s/次），
+  240 实测命中 `reuse-active` 耗时 1~2ms。**已热补丁部署 240 验证可用**。
+- **SPEC 同步**：§1.7 `resolvePlayableRow(songId, opts?)` 补 `preferRowId` / `reuse-active`，
+  写明「失效兜底归调用方、本函数不自行重试」。
+- **E（输入粗定位 `-noaccurate_seek`）已撤出**：孤立 ffmpeg 上量到 -29%，但在真实 seek 重建路径
+  无法确认收益，且同期 240 出现取流超时；取证表明故障另有根因（见 6.6），故不在本版引入。
+- **落地范围**：`backend/src/services/source/resolveAudio.ts` + `backend/src/services/sendspin/streamEngine.ts`
+  + 2 个测试文件。验证：全量回归 **179 文件 / 1510 用例** + `tsc --noEmit` + 8 个门禁脚本全绿。
+- **未 tag**：按「每次发版只修一处」节奏，与下一版一起走。

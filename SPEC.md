@@ -275,7 +275,8 @@
 > **快缓存 → 本行探测 → 优选换行（含验证）→ 本行复核**，每一步都带 `reason` 便于定位判死位置；只返回可播行，字节统一走 `fetchRowBytes`。
 
 - **抽离后的公共接口（已抽成所有链路共用，禁止各自内联复刻）**：
-  - `resolvePlayableRow(songId) -> PlayableRowResult`：裁决某首歌的可播行（本地行失败会换组内 web 兄弟行）；`row` 为可播行；`reason` 标记判定路径（`fresh-cache/ensure-ok/local-probe-ok/preferred-swap/reverify-ok/...-failed`）；`definitive:true` = 确定无源（本地文件确死）可判 skip，`false` = 未知（网络抖动/缓存过期）调用方须**宽容放行**、不可判死。
+  - `resolvePlayableRow(songId, opts?) -> PlayableRowResult`：裁决某首歌的可播行（本地行失败会换组内 web 兄弟行）；`row` 为可播行；`reason` 标记判定路径（`reuse-active/fresh-cache/ensure-ok/local-probe-ok/preferred-swap/reverify-ok/...-failed`）；`definitive:true` = 确定无源（本地文件确死）可判 skip，`false` = 未知（网络抖动/缓存过期）调用方须**宽容放行**、不可判死。
+    - `opts.preferRowId`（可选，**只有主动维护该记账的调用方式才许传** —— 现为 sendspin pump）：复用「上一轮实际出流的源行」。命中即零成本直返该行（`reason=reuse-active`），**整段播放优选被跳过**。动机：seek 重建只带 `songId`，同一首歌内反复拖进度条会每次重跑 `resolvePreferredSong` → 逐候选 `probeLocalSourceOk` → `verifyRow`（240 实测 1.85~2.53s/次，且 web 行结果恒定地 swap 到组内核心曲库行）。**失效兜底由调用方负责**（清记账 + 回退完整裁决一次），本函数不自行重试；judge、DLNA 拉流等一次性裁决路径不传，行为不变。
   - `fetchRowBytes(row) -> Buffer|null`：与 `/rest/stream` **同口径**取行字节（web 行走 `url`+`cachePath`、webdav 按 `path` 解析并带源鉴权、local 读文件）。
 - **强制接入点（现有链路）**：
   - 切歌前裁决：`QueueController.judgePlayable` → `resolvePlayableRow`；
