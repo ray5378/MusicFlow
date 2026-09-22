@@ -1037,6 +1037,10 @@ async function reseekByRecast(deviceId: string, seconds: number): Promise<void> 
   }
   const t0 = Date.now();
   log.info(`[DLNA][seek] ${deviceId} SOAP Seek 不可靠 → 重投流重建(timeOffset=${target}s)`);
+  // 开保护窗:重投间隙的 STOPPED/TRANSITIONING-0 样本不得删基线/回填 0,
+  // 否则 PLAYING rawPos=0 时只能就地播种 0 → 进度从头重爬(240 实锤)。
+  // 与 SOAP 路径同窗同语义(见 seekGuard.ts),只少代际校验(重投是同步等完成的)。
+  seekGuards.set(deviceId, { target, at: Date.now() });
   try {
     await castToDevice({ ...prev, timeOffset: target, shouldAbort: () => recastAborted(deviceId, gen) });
   } catch (e: any) {
@@ -1519,7 +1523,18 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     if (state.duration <= 0 && durCap > 0) state.duration = durCap;
   } else {
     // 真正停止:清掉基线,下次播放从 0 重新起算。
-    positionEstimates.delete(deviceId);
+    // 例外:seek 重投间隙的瞬态 STOPPED(Stop 已发、Play 未生效)绝不能清 ——
+    // 240 实锤:170s 重投后 STOPPED 样本把 170 锚点删掉,随后 PLAYING rawPos=0
+    // 只能就地播种 0 → 进度/歌词从头重爬(用户观感"回到同一首歌重新开始",
+    // 声音其实从 170s 播)。保护窗内保留基线并回填预期位置。
+    const recastGuard = seekGuards.get(deviceId);
+    if (recastGuard && !seekGuardExpired(recastGuard, sampledAt)) {
+      const expected = seekExpectedPosition(recastGuard, sampledAt, false);
+      log.debug(`[DLNA][seek-guard] ${deviceId} 重投间隙 STOPPED,保留基线并回填预期 ${Math.round(expected)}s`);
+      state.position = expected;
+    } else {
+      positionEstimates.delete(deviceId);
+    }
   }
 
   // debug:设备侧真相的完整落地结果。raw=SOAP 原始读数,pos/dur=经外推·封顶·兜底后的
