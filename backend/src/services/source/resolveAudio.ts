@@ -17,7 +17,7 @@ import {
   probeStream,
 } from "./online/streamFallback.js";
 import { resolvePreferredSong } from "./preferredSource.js";
-import { probeLocalSourceOk, parseSongPath } from "../../utils/localSourceProbe.js";
+import { probeLocalSourceOk, parseSongPath, evictProbeOk } from "../../utils/localSourceProbe.js";
 import { existsSync } from "node:fs";
 import { createLogger } from "../../utils/logger.js";
 
@@ -89,7 +89,8 @@ async function verifyRow(row: SongRow): Promise<boolean> {
     if (!parsed) return null;
     if (parsed.type === "w") {
       const source: any = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-      if (!source) return null;
+      // 出流失败 → 逐出该曲的 WebDAV 成功记忆(成功记忆只代表「探测当时可播」)。
+      if (!source) { evictProbeOk(row.id); return null; }
       const config = JSON.parse(source.config || "{}");
       const origin = new URL(config.url).origin;
       const headers: Record<string, string> = {};
@@ -97,13 +98,14 @@ async function verifyRow(row: SongRow): Promise<boolean> {
         headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
       }
       const res = await fetch(origin + parsed.filePath, { headers, signal: AbortSignal.timeout(60_000) });
-      if (!res.ok) return null;
+      if (!res.ok) { evictProbeOk(row.id); return null; }
       return Buffer.from(await res.arrayBuffer());
     }
     const fs = await import("fs");
     if (!fs.existsSync(parsed.filePath)) return null;
     return fs.readFileSync(parsed.filePath);
   } catch {
+    try { evictProbeOk(row.id); } catch { /* 逐出失败不影响返回语义 */ }
     return null;
   }
 }

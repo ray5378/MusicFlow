@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.14] - 2026-09-23
+
+### 优化 —— 播放优选：WebDAV 可播「成功记忆」（跳转性能 F 项）
+
+- **问题**：`utils/localSourceProbe.ts` 只记**失败**（`localFailCache` 5 分钟），成功不记。
+  而「这首歌的 WebDAV 源可播」这个结论在**每次起播 / 每次 seek** 都被重新探测一遍 ——
+  240 实测单次 `probeLocalSourceOk` = 597~1410ms，`resolvePlayableRow` 的 `preferred-swap`
+  因此要 1.7~2.0s（judge 一次 + 出流一次，成对出现）。
+- **做法**：新增与失败记忆**对称**的成功记忆 `webdavOkCache`（TTL 同为 5 分钟）：
+  - **只缓存 WebDAV 分支** —— 本地 `l:` 走 `existsSync` 零成本，缓存它零收益，
+    反而会引入「文件已删却仍返回死行」的风险；
+  - 对外暴露 `evictProbeOk(songId)`，**出流失败**（源行缺失 / 非 2xx / 取流异常）时逐出，
+    接线在 `resolveAudio.ts` 的 `fetchRowBytes`;
+  - 缓存条目上限 512，超出先清过期再丢最旧，防无界增长。
+- **收益（240 真机）**：同一首 WebDAV 行连测 3 次 `probeLocalSourceOk`：
+  831ms → **0ms → 0ms**；`preferred-swap` 裁决 2007/1731/1758ms → **957/810/727ms**（约 -55%）。
+  `resolvePreferredSong` 的 6 个调用点自动受益，无需改动任何链路。
+- **测试**：新增 `tests/utils/webdavOkCache.test.ts` 5 例（命中 / 过期 / 逐出 / 失败不记 / 本地分支不参与），
+  并做负向变体验证守卫会红（破坏命中判定 → 2 红；`evictProbeOk` 置空 → 1 红；还原后 5 绿）。
+  全量回归 185 文件 / 1568 用例全绿，`tsc --noEmit` 与 9 个 CI 门禁全 0。
+
 ## [4.0.13] - 2026-09-23
 
 ### 优化 —— seek 取流：回环 raw 流加 256KB 稀疏块缓存（跳转性能 B 项）

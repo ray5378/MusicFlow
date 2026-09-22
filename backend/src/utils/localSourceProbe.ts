@@ -3,6 +3,11 @@
 // 先经 preferLocal 优选 local 主源,再探测主源可用性,不可用则切组内 web 源。
 // 本地文件用零成本 existsSync;WebDAV 每次流播一次 HEAD(失败记忆 5 分钟,
 // 避免文件缺失期间每次流播都重复探测)。
+//
+// 成功记忆(F 项):WebDAV 探测成功同样记 5 分钟 —— 「这个文件刚探测过、可播」
+// 的结论在 seek/起播之间反复被用到,却每次都重探(240 实测单次 1.0~2.9s)。
+// 只缓存 webdav 分支:本地 l: 走 existsSync 零成本,缓存它零收益,反而会引入
+// 「文件已删却仍返回死行」的风险。
 import { db } from "../db/index.js";
 import { mediaSources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
@@ -24,6 +29,33 @@ function getWebDAVUrl(sourceConfig: any, filePath: string): string {
 
 const localFailCache = new Map<string, number>(); // songId -> 失败时间戳
 const LOCAL_FAIL_TTL = 5 * 60 * 1000;
+/** 成功记忆与失败记忆取同量级:两者对称,不会出现「5 分钟内判死」与「每次重探」的错位。 */
+const WEBDAV_OK_TTL = LOCAL_FAIL_TTL;
+/** 缓存条目上限(防无界增长):超出先清过期,再丢最旧的(插入序)。 */
+const CACHE_MAX = 512;
+
+function pruneCache(m: Map<string, number>): void {
+  if (m.size <= CACHE_MAX) return;
+  const now = Date.now();
+  for (const [k, t] of m) if (now - t >= LOCAL_FAIL_TTL) m.delete(k);
+  while (m.size > CACHE_MAX) {
+    const oldest = m.keys().next();
+    if (oldest.done) break;
+    m.delete(oldest.value);
+  }
+}
+
+// songId -> 探测成功时间戳(仅 webdav 分支写入;本地分支零成本,不参与)
+const webdavOkCache = new Map<string, number>();
+
+/**
+ * 主动逐出某首歌的 WebDAV 可播成功记忆。
+ * 出流失败(404 / 上游 5xx)时调用 —— 成功记忆只是「曾经探测通过」,
+ * 真出流失败说明这个结论已失效,继续缓存会让后续请求一直走这条死路。
+ */
+export function evictProbeOk(songId: string): void {
+  webdavOkCache.delete(songId);
+}
 
 /**
  * WebDAV 文件可播性判定(纯函数,可注入 fetch 单测):
@@ -55,17 +87,24 @@ export async function probeWebDAV(
   }
 }
 
-/** 探测 local/WebDAV 歌曲源是否可播(带失败记忆缓存)。 */
+/** 探测 local/WebDAV 歌曲源是否可播(带失败记忆 + WebDAV 成功记忆)。 */
 export function probeLocalSourceOk(song: { id: string; path?: string | null }): Promise<boolean> {
   const cached = localFailCache.get(song.id);
   if (cached && Date.now() - cached < LOCAL_FAIL_TTL) return Promise.resolve(false);
+  // 成功记忆命中:零往返返回。只有 webdav 分支写过它,本地分支永远不会命中。
+  const okAt = webdavOkCache.get(song.id);
+  if (okAt && Date.now() - okAt < WEBDAV_OK_TTL) return Promise.resolve(true);
   try {
     const parsed = parseSongPath(song.path || "");
     if (!parsed) return Promise.resolve(true); // 路径解析不出按可用处理,避免误回退
     if (parsed.type === "w") {
       return (async () => {
         const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-        if (!source) { localFailCache.set(song.id, Date.now()); return false; }
+        if (!source) {
+          webdavOkCache.delete(song.id);
+          localFailCache.set(song.id, Date.now());
+          return false;
+        }
         const config = JSON.parse(source.config || "{}");
         const url = getWebDAVUrl(config, parsed.filePath);
         const headers: Record<string, string> = {};
@@ -73,8 +112,15 @@ export function probeLocalSourceOk(song: { id: string; path?: string | null }): 
           headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
         }
         const ok = await probeWebDAV(fetch, url, headers);
-        if (!ok) localFailCache.set(song.id, Date.now());
-        return ok;
+        if (!ok) {
+          webdavOkCache.delete(song.id);
+          localFailCache.set(song.id, Date.now());
+          pruneCache(localFailCache);
+          return false;
+        }
+        webdavOkCache.set(song.id, Date.now());
+        pruneCache(webdavOkCache);
+        return true;
       })();
     }
     return import("fs").then((fs) => {
