@@ -245,6 +245,10 @@ ffmpeg 报 `No trailing CRLF found` 且**根本没读输入**，量到的是假�
 
 ## 6. 剩余改造（设计 + 落地步骤）
 
+> **sendspin 跳转进度的性能优化（A~E 五项）已拆到 `docs/SENDSPIN_SEEK_OPTIMIZATION.md`** ——
+> 本文只管 seek 的**语义与正确性**（世代竞态 / 钳制 / 源行复用契约）；
+> 那边管「拖一次进度条要多久才出声」（真机实测、候选取舍、各项优化方法）。
+
 ### 6.1 AirPlay 通道独立（L4，未开工）
 **目标**：AirPlay 不再复用 `dlna/control.ts` 的 `createCastSession()`。
 **方案**（代码级）：
