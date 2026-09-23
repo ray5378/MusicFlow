@@ -9,9 +9,12 @@
 #      - "stream/end" / "stream/start"   → 流起停抖动(正常切歌也有,看频率)
 #      - "client/hello" / "goodbye"      → 设备重连(ESPHome 断线重连常伴随卡顿)
 #      - "playFailed" / "announceStream" → 起播失败 / 播报打断
-#   3) 进度停滞:pollDBG 里某客户端 PLAYING 但 position 连续 3 个采样(15s)不动
-#      → STALL 事件(真卡顿最直接的服务端证据)
-#   4) 位置跳变:后退>5s(非切歌回零)疑似重播/重缓冲;前进>15s 疑似跳歌
+#   3) 进度停滞:[QueueController][poll](debug 级)里某客户端 PLAYING 但 position
+#      连续 3 个采样(15s)不动 → STALL 事件(真卡顿最直接的服务端证据);
+#      位置后退>5s → REWIND(疑似重缓冲/卡顿);链路不可用连续3轮 → LINKDOWN
+#   4) 卡顿指纹(告警类,PUSHBREAK/ENCSTALL/WINEOF/CURSORLAG/LOOPLAG/LOOPDEATH
+#      出现即写 [ALERT] 行):音源/编码/时间线/事件循环/子进程各段的卡顿证据
+#   5) 全量容器日志另有 docker logs -f 落盘(与本脚本 CSV/events 对时间戳)
 #
 # 注意:设备侧 Lost sync/underrun 只在 ESPHome 端,不进容器日志,此处抓不到;
 #      若服务端全绿但体感仍卡,下一步去设备串口日志对时间戳。
@@ -69,19 +72,34 @@ fetch_new_logs() {
   LAST_TS=$now
 }
 
-declare -A LAST_POS LAST_SEEN STALL_FLAG
+declare -A LAST_POS LAST_SEEN STALL_FLAG LINKDOWN_N
 
-# pollDBG 行: ...[pollDBG] t=... <client>: state=PLAYING pos=165.05 dur=227
-handle_positions() { # $1=日志文本 $2=当前epoch
-  local logtext="$1" now="$2"
+# 告警:卡顿类事件统一再写一条高亮 ALERT 行(带时间戳),自动告警的唯一入口。
+alert() { # $1=类型 $2=详情
+  echo "$(date '+%F %T') [ALERT][$1] $2" | tee -a "$EVENTS"
+}
+
+# 新格式: ...[QueueController][poll] t=123 CID: state=PLAYING pos=165.05 dur=227
+#         ...[QueueController][poll] t=123 CID: 链路不可用,跳过上报
+handle_positions() { # $1=日志文本
+  local logtext="$1"
   local line cid st pos
   while IFS= read -r line; do
-    [[ "$line" == *"pollDBG"* ]] || continue
+    [[ "$line" == *"[QueueController][poll]"* ]] || continue
     # shellcheck disable=SC2001
-    cid=$(echo "$line" | sed -n 's/.*pollDBG] t=[0-9]* \([^:]*\):.*/\1/p')
+    cid=$(echo "$line" | sed -n 's/.*\[QueueController\]\[poll\] t=[0-9]* \([^:]*\):.*/\1/p')
+    [ -n "$cid" ] || continue
+    if [[ "$line" == *"链路不可用"* ]]; then
+      local n=${LINKDOWN_N[$cid]:-0}; n=$((n+1)); LINKDOWN_N[$cid]=$n
+      if [ "$n" -eq 3 ]; then
+        log_event "LINKDOWN" "$cid 链路不可用已连续 ${n} 个采样(>${n}*${INTERVAL}s),上报停摆"
+        alert "LINKDOWN" "$cid 链路不可用连续 ${n} 轮,服务端拿不到设备状态"
+      fi
+      continue
+    fi
+    LINKDOWN_N[$cid]=0
     st=$(echo "$line" | sed -n 's/.*state=\([A-Z_]*\).*/\1/p')
     pos=$(echo "$line" | sed -n 's/.*pos=\([0-9.]*\).*/\1/p')
-    [ -n "$cid" ] || continue
     [ -n "$pos" ] || continue
     if [ "$st" = "PLAYING" ]; then
       if [ "${LAST_POS[$cid]:-}" = "$pos" ]; then
@@ -89,6 +107,7 @@ handle_positions() { # $1=日志文本 $2=当前epoch
         if [ "$n" -ge "$STALL_SAMPLES" ] && [ "${STALL_FLAG[$cid]:-0}" != "1" ]; then
           STALL_FLAG[$cid]=1
           log_event "STALL" "$cid PLAYING 但 position=${pos}s 已连续 ${n} 个采样不动(>${STALL_SAMPLES}*${INTERVAL}s)"
+          alert "STALL" "$cid 位置冻结 ${pos}s(连续${n}轮):服务端推流停滞,体感=卡死"
         fi
       else
         # 位置动了:判跳变(排除切歌回零:新 pos<2s 视为切歌)
@@ -100,12 +119,14 @@ handle_positions() { # $1=日志文本 $2=当前epoch
           fwd=$(awk -v d="$jumped" 'BEGIN{print (d > '"$JUMP_FWD_S"')}')
           if [ "$back" = "1" ]; then
             local isnew
-            isnew=$(awk -v a="$pos" 'BEGIN{print (a < 2.0)}')
+            isnew=$(awk -v a="$pos" 'BEGIN{print (a < 6.0)}')
+            # 切歌回零:新 pos<6s 视为切歌(5s 轮询粒度下新歌首个采样可达 5s+)
             if [ "$isnew" = "1" ]; then
               log_event "TRACK" "$cid 切歌 pos ${LAST_POS[$cid]}s → ${pos}s"
               STALL_FLAG[$cid]=0
             else
               log_event "REWIND" "$cid 位置后退 ${LAST_POS[$cid]}s → ${pos}s(疑似重播/重缓冲)"
+              alert "REWIND" "$cid 播放中位置后退${LAST_POS[$cid]}s→${pos}s:疑似重缓冲/卡顿"
             fi
           elif [ "$fwd" = "1" ]; then
             log_event "SKIPFWD" "$cid 位置前跳 ${LAST_POS[$cid]}s → ${pos}s(疑似跳歌/seek)"
@@ -129,7 +150,21 @@ PATTERNS=(
   "JUDGE_DEAD|judge.*确定无源|judge.*无可播行"
   "JUDGE_SKIP|judge.*跳过|整队无源"
   "PUMP_DEADFAIL|no playable stream"
+  # 卡顿指纹(偶发卡顿分析用;需 debug 级已开)
+  "WINEOF|流式窗口提前 EOF"
+  "REANCHOR|timeline RE-anchored"
+  "CURSORLAG|游标落后窗口基准"
+  "LOOPLAG|loop-lag"
+  "LOOPDEATH|心跳超时|强杀重启|意外退出"
+  "PUSHEXIT|pushLoop 退出"
+  # 组分裂(成员被显式操控脱组/队列被转移/组播中成员被停):体感=一台或全组突然断/停
+  "GROUPSPLIT|自动脱离组|transfer-from|脱离组"
 )
+
+# 告警类指纹:出现即 ALERT(自动告警),其余只记事件
+# (WINEOF 不进告警:歌尾正常 EOF 也打这行,逐首触发会狼来了;真正缺数据的歌
+# 会表现为 ENCSTALL 长风暴+用户切歌,靠 ENCSTALL/STALL/REWIND 捕获)
+ALERT_PATTERNS="PUSHBREAK ENCSTALL CURSORLAG LOOPLAG LOOPDEATH LINKDOWN GROUPSPLIT"
 
 ONESAMPLE=0
 [ "${1:-}" = "--once" ] && ONESAMPLE=1
@@ -145,13 +180,19 @@ sample_once() {
   playing=$(echo "$newlog" | grep -c "state=PLAYING" || true)
   local stall=0
   handle_positions "$newlog" "$(date +%s)"
-  # 指纹计数
+  # 指纹计数(告警类指纹同步写 ALERT 行)
   local desc pat name
   for desc in "${PATTERNS[@]}"; do
     name="${desc%%|*}"; pat="${desc#*|}"
     local c
     c=$(echo "$newlog" | grep -cE "$pat" || true)
-    [ "$c" -gt 0 ] && log_event "$name" "最近${INTERVAL}s出现 ${c} 次" && stall=1
+    if [ "$c" -gt 0 ]; then
+      log_event "$name" "最近${INTERVAL}s出现 ${c} 次"
+      stall=1
+      if [[ " $ALERT_PATTERNS " == *" $name "* ]]; then
+        alert "$name" "最近${INTERVAL}s出现 ${c} 次: $(echo "$newlog" | grep -E "$pat" | tail -1 | cut -c1-150)"
+      fi
+    fi
   done
   # resolve 慢探测(>10s):源半死不活的征兆,单列
   local slow
@@ -159,6 +200,9 @@ sample_once() {
   [ -n "$slow" ] && log_event "SLOWRESOLVE" "$(echo "$slow" | tr '\n' ';')" && stall=1
   for cid in "${!STALL_FLAG[@]}"; do
     [ "${STALL_FLAG[$cid]}" = "1" ] && stall=1
+  done
+  for cid in "${!LINKDOWN_N[@]}"; do
+    [ "${LINKDOWN_N[$cid]:-0}" -ge 3 ] && stall=1
   done
   echo "$ts,$cpu,$mem,$main,$child,$ff,$playing,$stall" >> "$CSV"
 }
