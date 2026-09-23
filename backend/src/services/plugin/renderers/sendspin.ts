@@ -71,6 +71,24 @@ export const sendspinRendererManifest: PluginManifest = {
       default: true,
       help: "推流解码走滑动窗口:边解边播,子进程只驻留约 300 秒音频(~115MB,与 MA AudioBuffer BALANCED 对齐),与曲长无关。关闭后整曲一次解完进内存(320 秒约 122MB,切歌瞬间翻倍,超长单曲可能顶爆内存)。开启后下一首生效(正在播的不中断);seek 回跳超出窗口时会重建解码(约 1 秒空窗)。**默认开启**(3.0.36 灰度验证稳定后转正);如需排障可临时关闭。",
     },
+    {
+      key: "prefill_buffer_ms",
+      label: "设备缓冲深度(抗卡顿)",
+      type: "select",
+      default: "3000",
+      options: [
+        { label: "0.8 秒(关闭预填充,等同旧行为)", value: "800" },
+        { label: "1.5 秒", value: "1500" },
+        { label: "3 秒(推荐)", value: "3000" },
+        { label: "5 秒", value: "5000" },
+        { label: "10 秒(最抗卡顿,需设备缓冲 ≥2.5MB)", value: "10000" },
+      ],
+      help:
+        "起播/卡顿恢复后,先把设备缓冲灌到这个水位再按实时速率推 —— 这就是设备能吸收的抖动与停顿窗口,越大越抗卡顿。\n" +
+        "**起播延迟不随本值变化**(恒 ≈0.8 秒,由首帧锚点决定);卡顿把缓冲抽干后会自动回补到本水位。\n" +
+        "代价:① 切歌时要等设备把缓冲播完,间隙 ≈ 本值 − 0.8 秒;② 进度条会比实际听到的声音快一个缓冲量;③ 设备缓冲要装得下,PCM 需 ≥ 本值×192000 字节(3 秒≈576KB,10 秒≈1.9MB,ESPHome 的 buffer_size 要同步调大)。\n" +
+        "**Web 改完立即生效**(无需重启、不中断当前播放);只在当前这首歌上最多延迟 5 秒生效。",
+    },
     // ⚠️ 这里**没有** ESPHome(6053)的开关/密钥输入框,是刻意的 ——
     // ESPHome 每台设备的 api.encryption.key 是各自生成的,一把全局密钥只能连上
     // 一台;而且早期版本「测试连接」取的是「任意一台已连设备的 IP」,填 A 的密钥
@@ -108,6 +126,22 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
         stream_source: {
           label: "Streaming decode (save memory)",
           help: "Decode while streaming through a sliding window: the child process only holds ~300s of audio (~115MB, matching MA's AudioBuffer BALANCED) regardless of track length. When off, each track is fully decoded into memory at once (~122MB for a 320s track, doubled briefly at track changes, and extra-long tracks may exhaust memory). Takes effect on the next track (the one currently playing is untouched); seeking back beyond the window rebuilds the decoder (~1s gap). On by default; turn it off only for troubleshooting.",
+        },
+        // 按 ray 要求:该配置项**统一显示中文**(英文界面下同样用中文文案)。
+        prefill_buffer_ms: {
+          label: "设备缓冲深度(抗卡顿)",
+          help:
+            "起播/卡顿恢复后,先把设备缓冲灌到这个水位再按实时速率推 —— 这就是设备能吸收的抖动与停顿窗口,越大越抗卡顿。\n" +
+            "**起播延迟不随本值变化**(恒 ≈0.8 秒,由首帧锚点决定);卡顿把缓冲抽干后会自动回补到本水位。\n" +
+            "代价:① 切歌时要等设备把缓冲播完,间隙 ≈ 本值 − 0.8 秒;② 进度条会比实际听到的声音快一个缓冲量;③ 设备缓冲要装得下,PCM 需 ≥ 本值×192000 字节(3 秒≈576KB,10 秒≈1.9MB,ESPHome 的 buffer_size 要同步调大)。\n" +
+            "**Web 改完立即生效**(无需重启、不中断当前播放);只在当前这首歌上最多延迟 5 秒生效。",
+          options: {
+            "800": "0.8 秒(关闭预填充,等同旧行为)",
+            "1500": "1.5 秒",
+            "3000": "3 秒(推荐)",
+            "5000": "5 秒",
+            "10000": "10 秒(最抗卡顿,需设备缓冲 ≥2.5MB)",
+          },
         },
       },
     },

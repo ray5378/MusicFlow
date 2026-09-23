@@ -336,7 +336,38 @@ export class SendspinGroup {
    *  立即宣告会让设备在空等中丢弃该流)。由 pushFrame 在**首个音频帧之前**兑现。
    *  数组(多房间组每个成员各兑现一次);单设备组退化为单元素,与旧单字段语义一致。 */
   pendingAnnounces: SendspinConnection[] = [];
-  /** 兑现延迟宣告:先发 stream/start,随即首块音频跟上(MA `_pending_stream_start` 同构)。 */
+  /** 兑现某个成员的延迟 stream/start —— **只在该成员首块音频已产出时**调用。
+   *
+   *  ⚠️ 不能「先宣告、再等编码器吐货」(2026-09-24 真机:播放中把 Sendspin 播放器
+   *  加入群组,走 FLAC 链路的新成员不出声,PCM 正常)。原因:
+   *   FLAC 是块编码器(libFLAC 自选块大小,约 4096 样本 ≈ 85ms),新成员的编码器
+   *   要攒满一块才吐首帧;而 PCM 每批即刻产出。于是只有 FLAC 会在
+   *   `stream/start` 与首块音频之间留出 ~85ms 空窗 —— 这正是本文件已记录过的
+   *   事故形态:「收到 Stream Started 却在等待中丢弃该流 → 不做 codec header
+   *   处理、扬声器不启动 = 无声」。
+   *   MA 的 `_pending_stream_start` 同样是**首块就绪才发**,故这里改为逐成员兑现。
+   *
+   *  附带收益:codec_header 此刻必定是该成员编码器的**真实 STREAMINFO**
+   *  (`realFlacHeaderB64` 已有值),不再回落到合成头(合成头曾因 block size /
+   *  位深与实流不符导致严格解码器逐帧校验失败 → 日志全绿但无声)。 */
+  flushAnnounceFor(c: SendspinConnection): void {
+    // 去重:多首连续起播可能把同一 conn 压入多次(上一首没产帧就没兑现过),
+    // 只删第一个会留下陈旧条目,后续被误兑现成第二份 stream/start。
+    let i = this.pendingAnnounces.indexOf(c);
+    if (i < 0) return;
+    while (i >= 0) {
+      this.pendingAnnounces.splice(i, 1);
+      i = this.pendingAnnounces.indexOf(c);
+    }
+    try {
+      c.announceStream();
+    } catch {
+      /* 单成员宣告失败不连累其余 */
+    }
+  }
+
+  /** 兜底兑现所有仍未发出的延迟宣告:全程一帧都没产出的成员也要拿到 stream/start,
+   *  否则客户端会空等一个永不开始的流(与旧行为一致)。 */
   announcePending(): void {
     const list = this.pendingAnnounces.splice(0);
     for (const c of list) {
@@ -396,9 +427,6 @@ export class SendspinGroup {
    *  多成员时取**最大值** —— 各成员编码器(opus/flac)产出的样本总应相同,
    *  取 max 以防某个成员编码器恰好缓冲未吐时把时间线拖慢。 */
   async pushFrame(tsUs: bigint, pcm: Float32Array): Promise<number> {
-    // 首帧前兑现延迟的 stream/start:此时编码器已产出首段 → codec_header 是真实值,
-    // 且 stream/start 与首块音频之间无延迟(设备不会因空等而丢弃该流)。
-    this.announcePending();
     let maxSamples = 0;
     for (const c of this.members) {
       const gain = c.appliedGain();
@@ -419,6 +447,10 @@ export class SendspinGroup {
       // 因此逐帧按 `ck.frameSamples` 累加微秒推进。
       let sum = 0;
       let ts = tsUs;
+      // ★ 该成员**首块音频已产出**时才发 stream/start(见 flushAnnounceFor 注释):
+      //   先宣告再等编码器吐货会在 FLAC 链路留出 ~85ms 空窗,设备据此刻丢弃该流
+      //   → 播放中加入的新成员无声(2026-09-24 真机)。PCM 因首批即有产出不受影响。
+      if (chunks.length > 0) this.flushAnnounceFor(c);
       for (const ck of chunks) {
         const n = ck.frameSamples ?? 0;
         sum += n;

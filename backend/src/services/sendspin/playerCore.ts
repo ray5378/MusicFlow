@@ -189,7 +189,12 @@ export function joinGroupCore(srv: SendspinServer | null, groupName: string, cli
   g.add(conn);
   if (!g.current) return { joined: true, live: false };
   conn.sendGroupUpdate();
-  conn.announceStream();
+  // ★ 不能在加入瞬间就发 stream/start:FLAC 是块编码器(约 4096 样本 ≈ 85ms),
+  //   新成员的编码器要攒满一块才吐首帧,「先宣告、后等货」会留出空窗,设备据此
+  //   丢弃该流 → **播放中加入的新成员无声**(2026-09-24 真机;PCM 首批即产出,
+  //   所以只有 FLAC 链路暴露)。改为挂入 pendingAnnounces,由 pushFrame 在该成员
+  //   首块音频就绪时兑现 —— 与起播路径(playCore/playGroupCore)语义完全一致。
+  g.pendingAnnounces.push(conn);
   return { joined: true, live: true };
 }
 

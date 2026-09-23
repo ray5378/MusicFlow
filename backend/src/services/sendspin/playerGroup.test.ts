@@ -65,15 +65,15 @@ describe("sendspin 用户组多房间", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sendspin-group-"));
     setSendspinIdentityDir(tmpDir);
     await startSendspinService(PORT);
-    // 1s 正弦单声道 16bit/48k(FLAC 首块 4096 样本 ≈ 85ms,必出帧)
+    // 30s 正弦(预填充灌满后仍按实时推,播中加入才能收到直播帧)(FLAC 首块 4096 样本 ≈ 85ms,必出帧)
     const rate = 48000;
-    const n = rate * 1;
+    const n = rate * 30;
     const pcm = new Float32Array(n * 2);
     for (let i = 0; i < n; i++) {
       const v = Math.sin((2 * Math.PI * 440 * i) / rate) * 0.5;
       pcm[i * 2] = v; pcm[i * 2 + 1] = v;
     }
-    overridePumpSource(async () => ({ pcm, durationMs: 1000 }));
+    overridePumpSource(async () => ({ pcm, durationMs: 30000 }));
   }, 60_000);
 
   afterAll(async () => {
@@ -103,7 +103,7 @@ describe("sendspin 用户组多房间", () => {
     try {
       await waitFor(() => !!srv.clients.get("GRP-G1") && !!srv.clients.get("GRP-G2"), 5000, "双 conn");
       playGroupCore(srv, GNAME, ["GRP-G1", "GRP-G2", "OFFLINE-NOBODY"], {
-        songId: "g-song-1", title: "t", duration: 1,
+        songId: "g-song-1", title: "t", duration: 30,
       } as any);
       await waitFor(() => firstAudioTs(c1.binaries) !== null, 15000, "G1 首帧");
       await waitFor(() => firstAudioTs(c2.binaries) !== null, 15000, "G2 首帧");
@@ -133,7 +133,7 @@ describe("sendspin 用户组多房间", () => {
       // 离线 conn 拒绝
       expect(joinGroupCore(srv, GNAME, "NOBODY").joined).toBe(false);
       // 起播(G3 在组内 + G4 新起)
-      playGroupCore(srv, GNAME, ["GRP-G3", "GRP-G4"], { songId: "g-song-2", title: "t", duration: 1 } as any);
+      playGroupCore(srv, GNAME, ["GRP-G3", "GRP-G4"], { songId: "g-song-2", title: "t", duration: 30 } as any);
       await waitFor(() => firstAudioTs(c4.binaries) !== null, 15000, "G4 首帧");
       // 播中摘除 G4:收到 stream/end,组内只剩 G3
       expect(leaveGroupCore(srv, GNAME, "GRP-G4")).toBe(true);
@@ -154,13 +154,21 @@ describe("sendspin 用户组多房间", () => {
     const c6 = collect(ws6);
     try {
       await waitFor(() => !!srv.clients.get("GRP-G5") && !!srv.clients.get("GRP-G6"), 5000, "双 conn");
-      playGroupCore(srv, GNAME, ["GRP-G5"], { songId: "g-song-3", title: "t", duration: 1 } as any);
+      playGroupCore(srv, GNAME, ["GRP-G5"], { songId: "g-song-3", title: "t", duration: 30 } as any);
       await waitFor(() => firstAudioTs(c5.binaries) !== null, 15000, "G5 首帧");
       // G6 播中加入:live,立即拿 stream/start,随后收到直播帧
       const r = joinGroupCore(srv, GNAME, "GRP-G6");
       expect(r).toEqual({ joined: true, live: true });
+      // ★ stream/start 必须**延后到该成员首块音频就绪**,不能在加入瞬间就发
+      //   (2026-09-24 真机:FLAC 块编码器要攒满一块才吐首帧,先宣告会留下空窗,
+      //    设备据此丢弃该流 → 播放中加入的新成员无声;PCM 首批即有产出故不受影响)。
+      //   下面两句同步执行,推流循环没机会插入,判定是确定的。
+      expect(c6.texts.some((m) => m?.type === "stream/start")).toBe(false);
+      expect(srv.group(GNAME).pendingAnnounces.some((c: any) => c.clientId === "GRP-G6")).toBe(true);
       await waitFor(() => c6.texts.some((m) => m?.type === "stream/start"), 5000, "G6 stream/start");
       await waitFor(() => firstAudioTs(c6.binaries) !== null, 15000, "G6 直播帧");
+      // 首帧(含空包被跳过的情形)之后:宣告必然已兑现且不再挂起,不会重复发第二份。
+      expect(srv.group(GNAME).pendingAnnounces.some((c: any) => c.clientId === "GRP-G6")).toBe(false);
     } finally {
       ws5.terminate(); ws6.terminate();
     }

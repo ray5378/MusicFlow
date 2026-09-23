@@ -181,7 +181,11 @@ describe("SendspinChildController(IPC 桥)", () => {
     const r: any = await rpc("groupJoin", { group: "ug:t2", clientId: "PC-1" });
     expect(r.result).toEqual({ joined: true, live: true });
     const conn = srv.clients.get("PC-1") as any;
-    expect(conn.sent).toContain("stream/start");
+    // ★ stream/start **不再即时发送**:播中加入改为挂到 pendingAnnounces,由
+    //   pushFrame 在该成员首块音频就绪时才兑现(FLAC 块编码器要攒满一块 ≈85ms,
+    //   「先宣告后等货」留出空窗 → 设备丢弃该流 → 新成员无声,2026-09-24 真机)。
+    //   与起播路径(playCore/playGroupCore)语义一致。
+    expect((g as any).pendingAnnounces).toContain(conn);
     expect(conn.group).toBe(g);
   });
 

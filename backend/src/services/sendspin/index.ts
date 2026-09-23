@@ -24,7 +24,11 @@ import { SendspinServer, type SendspinConnection, type SendspinCodecPreference, 
 import { WS_PORT } from "./constants.js";
 import { PairingStore } from "./pairingStore.js";
 import { PairingCoordinator } from "./pairServer.js";
-import { stopGroupPump } from "./streamEngine.js";
+import {
+  stopGroupPump,
+  normalizePrefillBufferMs,
+  PREFILL_BUFFER_DEFAULT_MS,
+} from "./streamEngine.js";
 import { advertiseSendspinServer, unadvertiseSendspinServer } from "./advertise.js";
 import { startPlayerDiscovery, stopPlayerDiscovery } from "./discover.js";
 import {
@@ -158,6 +162,7 @@ export function readSendspinPluginConfig(): {
   autoDiscover: boolean;
   preferredCodec: SendspinCodecPreference;
   streamSource: boolean;
+  prefillBufferMs: number;
 } {
   const fallback = {
     allowLegacyClients: true,
@@ -165,6 +170,7 @@ export function readSendspinPluginConfig(): {
     autoDiscover: true,
     preferredCodec: "pcm" as SendspinCodecPreference,
     streamSource: true,
+    prefillBufferMs: PREFILL_BUFFER_DEFAULT_MS,
   };
   try {
     const row = sqlite
@@ -183,6 +189,9 @@ export function readSendspinPluginConfig(): {
       // 流式解码:默认开(3.0.36 灰度验证稳定后转正);只有**显式 false** 才关
       // (老用户此前手关闭仍保持关)。缺省/非布尔一律按默认开。
       streamSource: cfg?.stream_source !== false,
+      // 预填充缓冲(设备侧抗抖动窗口,毫秒)。插件配置页**随时可改**,推流循环
+      // 以 PREFILL_CACHE_MS 的粒度重读(见 streamEngine),无需重启、不中断当前播放。
+      prefillBufferMs: normalizePrefillBufferMs(cfg?.prefill_buffer_ms),
     };
   } catch {
     return fallback;

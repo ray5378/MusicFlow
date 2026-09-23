@@ -15,6 +15,8 @@ describe("readSendspinPluginConfig", () => {
       // 见下面「6053 开关/密钥不再属于插件配置」用例)。
       // 流式解码默认开(3.0.36 灰度验证稳定后转正)。
       streamSource: true,
+      // 预填充缓冲(设备侧抗抖动窗口):缺省 3000ms,Web 配置页可随时改档位。
+      prefillBufferMs: 3000,
     });
   });
 
@@ -28,6 +30,7 @@ describe("readSendspinPluginConfig", () => {
       autoDiscover: true,
       preferredCodec: "pcm",
       streamSource: true,
+      prefillBufferMs: 3000,
     });
   });
 
@@ -111,6 +114,38 @@ describe("readSendspinPluginConfig", () => {
     // 显式 false(老用户手关过)→ 保持关
     write({ stream_source: false });
     expect(readSendspinPluginConfig().streamSource).toBe(false);
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
+  });
+
+  // 2026-09-24 卡顿治理(B1):预填充缓冲改成 Web 配置页的**档位下拉**(存字符串),
+  // 推流循环每 5s 重读。这里钉死归一化:档位字符串能被读成数字、越界/非法回落缺省。
+  it("prefill_buffer_ms:档位字符串生效,越界/非法回落缺省 3000", () => {
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
+    const write = (cfg: any) =>
+      sqlite
+        .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
+        .run(JSON.stringify(cfg));
+    // 无行 / 空 → 缺省 3000
+    expect(readSendspinPluginConfig().prefillBufferMs).toBe(3000);
+    write({});
+    expect(readSendspinPluginConfig().prefillBufferMs).toBe(3000);
+    // 下拉档位(字符串)→ 读成数字
+    for (const [raw, want] of [["800", 800], ["1500", 1500], ["3000", 3000], ["5000", 5000], ["10000", 10000]] as const) {
+      write({ prefill_buffer_ms: raw });
+      expect(readSendspinPluginConfig().prefillBufferMs).toBe(want);
+    }
+    // 数字同样认
+    write({ prefill_buffer_ms: 2000 });
+    expect(readSendspinPluginConfig().prefillBufferMs).toBe(2000);
+    // 越界夹紧 / 非法回落
+    write({ prefill_buffer_ms: 999999 });
+    expect(readSendspinPluginConfig().prefillBufferMs).toBe(30000);
+    write({ prefill_buffer_ms: 1 });
+    expect(readSendspinPluginConfig().prefillBufferMs).toBe(100);
+    for (const bad of ["abc", null, undefined, Number.NaN, -5, 0]) {
+      write({ prefill_buffer_ms: bad });
+      expect(readSendspinPluginConfig().prefillBufferMs).toBe(3000);
+    }
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 });

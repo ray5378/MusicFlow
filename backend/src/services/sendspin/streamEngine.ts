@@ -66,6 +66,77 @@ async function readSendspinStreamSource(): Promise<boolean> {
   return value;
 }
 
+// ==================== 预填充缓冲(B1)====================
+//
+// 设备侧缓冲深度 = 时间线游标已推进到哪儿 − 当前墙钟。
+// 稳态下它恒等于「首帧锚点提前量」(800ms):服务端按实时速率推,设备按实时速率播,
+// 差值永远填不满 —— 所以**光把锚点抬到 10s 只会换来 10s 静默**,填不出缓冲。
+// 正确做法是把两件事解耦:
+//   - 锚点提前量  → 决定**起播延迟**,固定留 800ms(真机验证过的最低可用水位);
+//   - 预填充水位  → 决定**缓冲深度**,由推流循环在首帧后尽快灌满(卡顿后还会自动回补)。
+// 这正对齐 MA:producer 一路领先消费端填充,直到客户端 buffer_capacity 上限。
+
+/** 预填充缓冲的合法区间与缺省值(毫秒)。
+ *  - 下限 100ms:再低就没有抗抖动意义;
+ *  - 上限 30000ms:再高设备缓冲装不下(PCM 30s ≈ 5.76MB),且切歌间隙难接受。 */
+export const PREFILL_BUFFER_MIN_MS = 100;
+export const PREFILL_BUFFER_MAX_MS = 30_000;
+export const PREFILL_BUFFER_DEFAULT_MS = 3_000;
+
+/** 归一化插件配置里的 `prefill_buffer_ms`(下拉档位存的是字符串):非法/越界回落缺省。 */
+export function normalizePrefillBufferMs(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return PREFILL_BUFFER_DEFAULT_MS;
+  return Math.min(PREFILL_BUFFER_MAX_MS, Math.max(PREFILL_BUFFER_MIN_MS, Math.round(n)));
+}
+
+let prefillCache: { valueMs: number; at: number } | null = null;
+let prefillRefreshing = false;
+/** 插件配置重读间隔:Web 改完最多 5s 内生效,且不中断当前播放。 */
+const PREFILL_CACHE_MS = 5000;
+
+/** 取当前预填充目标(毫秒)。**同步** —— 推流热路径不能被 DB 查询卡住;
+ *  缓存过期时后台异步刷新,本轮先用上次的值。 */
+export function prefillTargetMs(): number {
+  // 环境变量显式覆盖(排障/二分用),优先于插件配置:`SENDSPIN_PREFILL_MS=800`。
+  const env = process.env.SENDSPIN_PREFILL_MS;
+  if (env) {
+    const n = Number(env);
+    if (Number.isFinite(n) && n > 0) return normalizePrefillBufferMs(n);
+  }
+  const now = Date.now();
+  if (!prefillCache || now - prefillCache.at >= PREFILL_CACHE_MS) void refreshPrefillTarget(now);
+  return prefillCache?.valueMs ?? PREFILL_BUFFER_DEFAULT_MS;
+}
+
+async function refreshPrefillTarget(now: number): Promise<void> {
+  if (prefillRefreshing) return;
+  prefillRefreshing = true;
+  try {
+    const { readSendspinPluginConfig } = await import("./index.js");
+    prefillCache = { valueMs: readSendspinPluginConfig().prefillBufferMs, at: now };
+  } catch {
+    // 读不到(子进程/单测):保留旧值;首次则回落缺省。
+    if (!prefillCache) prefillCache = { valueMs: PREFILL_BUFFER_DEFAULT_MS, at: now };
+  } finally {
+    prefillRefreshing = false;
+  }
+}
+
+/** 预填充总开关(排障/回滚用):`SENDSPIN_PREFILL=0` 一键退回旧行为 ——
+ *  锚点回到 send_ahead、不填充、曲末不排空。 */
+export function prefillEnabled(): boolean {
+  const raw = process.env.SENDSPIN_PREFILL;
+  return !(raw === "0" || raw === "false" || raw === "off");
+}
+
+/** 首帧锚点仍保留的浅水位(微秒)。
+ *  ⚠️ 不能高于它:锚点 = 起播静默时长,抬到 10s 就要静默 10s。
+ *  ⚠️ 也不能低于它:2026-09-17 真机事故 —— 锚点只提前 250ms,而设备按 800ms
+ *  的余量判据调度 → delta = 250 − 800 = −550ms 恒为负 → 收首块即判「目标时刻
+ *  已过」→ 立即吐字节 → underrun 无声。800ms 是实测可用的最低水位。 */
+export const ANCHOR_SAFE_LEAD_US = 800_000;
+
 /** 解析某首歌的可播字节(默认真实);测试可注入。 */
 /** 音源工厂契约。`startMs > 0` = 起播即定位(ffmpeg `-ss`),由 seek 重建与
  *  起播跳转共用 —— MA 语义里「从 X 秒开始播」和「跳到 X 秒」是同一件事:
@@ -135,6 +206,13 @@ export const FIRST_FRAME_LEAD_US = 250_000;
  * 让设备先攒够缓冲再播。
  */
 export const SEEK_RESEED_LEAD_US = 3_000_000;
+
+/** 推流循环每推送多少帧强制让出一次宏任务(B2)。对齐 MA
+ *  `connection.py`:每 50 次迭代强制 `await asyncio.sleep(0)`。
+ *  ⚠️ 不能写成「每帧都让出」:追赶/填充时必须尽快补帧,每帧 await setImmediate
+ *  会把循环绑死在「每宏任务一帧」的节奏上 —— 慢设备或假时钟下永远追不上实时
+ *  (实测会把队列自动切歌用例全部拖垮:每 tick 只推一帧,进度永远到不了曲末)。 */
+export const YIELD_EVERY_FRAMES = 50;
 
 /** 「编码器零产出」多久后判定为**异常**(而非正常攒样),降级为按喂入量推进时间线。
  *
@@ -214,6 +292,17 @@ function bufferDurationMs(pcm: Float32Array): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 让出一个**宏任务**周期。
+ *
+ *  ⚠️ 与 `await Promise.resolve()`(纯微任务)有本质区别:Node 在每个宏任务
+ *  边界会把微任务队列**完全排空**,所以纯微任务 yield 不会给 I/O 回调任何机会;
+ *  `setImmediate` 明确排在本轮 I/O 回调之后,能保证 WebSocket 的 message 回调
+ *  (设备发来的 `client/time` 等)得以执行。
+ *  对齐 MA:aiosendspin `connection.py` 每 50 次迭代强制 `asyncio.sleep(0)`。 */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((r) => setImmediate(r));
 }
 
 /** 安全日志:GroupPump 可能被以最小 stub server 构造(测试/嵌入式场景),
@@ -522,6 +611,13 @@ export class GroupPump {
     this.group.timelineBaseUs = 0n; // 起播重置:锚点在首块时按当时墙钟确立
     /** 本循环已消费到的 seek 重锚序号(与字段比较,见 timelineReseed 注释)。 */
     let consumedReseed = this.timelineReseed;
+    /** 连续未让出宏任务的帧数(B2,见 YIELD_EVERY_FRAMES 注释)。 */
+    let sinceYield = 0;
+    const yieldEveryN = async (): Promise<void> => {
+      if (++sinceYield < YIELD_EVERY_FRAMES) return;
+      sinceYield = 0;
+      await yieldToEventLoop();
+    };
 
     try {
       while (this.running && this.epoch === myEpoch) {
@@ -601,9 +697,15 @@ export class GroupPump {
           // 浅缓冲继续推只会持续欠载。抬到 3s 让设备先攒够再播(见
           // SEEK_RESEED_LEAD_US 注释)。正常起播路径保持原语义不变。
           const reseedLead = Math.max(aheadUs, SEEK_RESEED_LEAD_US);
-          const lead = BigInt(
-            Math.max(reseed ? reseedLead : aheadUs, FIRST_FRAME_LEAD_US),
-          );
+          // ★ 预填充(B1):锚点只留「真机验证可用的浅水位」,目标缓冲深度交给
+          //   下方 fill 分支尽快灌满 —— 把「起播延迟」与「缓冲深度」彻底解耦。
+          //   - 旧行为:lead = send_ahead ⇒ 想缓冲 10s 就必须静默 10s;
+          //   - 新行为:lead = min(send_ahead, 800ms) ⇒ 起播延迟恒 ≈0.8s,
+          //     缓冲深度由 pushLoop 顶到插件配置的 prefill_buffer_ms(默认 3s)。
+          const anchorLead = prefillEnabled()
+            ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
+            : (reseed ? reseedLead : aheadUs);
+          const lead = BigInt(Math.max(anchorLead, FIRST_FRAME_LEAD_US));
           // ⚠️ 锚点必须**严格大于已发出的最后一个时间戳**(= 此刻的 cursorUs)。
           // 时间线游标按 `round(produced/采样率)` 步进,与墙钟速率几乎相等但不完全相等:
           // 220 帧后两者会积累出 ±几十~几百 µs 的交叉(高压负载下实测 -21µs / -185µs),
@@ -705,7 +807,40 @@ export class GroupPump {
         // 长期平均严格 = 实时,漂移不累积(这是 MA push_stream 的做法)。
         const dueMs = this.paceAnchorWall + (i * FRAME_MS - this.paceAnchorMs) / this.speed;
         const delayMs = dueMs - Date.now();
-        if (delayMs > 0) await sleep(delayMs);
+        // 设备侧当前缓冲深度 = 时间线游标已推进到哪儿 − 现在(墙钟)。
+        // 卡顿/停滞期间墙钟照走而游标不动 → 深度被抽干,且旧行为**补不回来**
+        // (按实时速率推,差值永远填不满) → 缓冲长期浅 → 持续卡顿。
+        const depthUs = Number(cursorUs) - Number(nowUs());
+        const targetUs = prefillTargetMs() * 1000;
+        // ⚠️ 两个必须的条件:
+        //  ① 目标水位必须**严格大于**锚点(800ms)。选「0.8 秒(关闭预填充)」档时
+        //     target == anchor,此时若用 `<` 比较,深度恒比目标少几微秒(取时刻差
+        //     必然有耗时)→ 每帧都误判「未达标」→ 退化成全程爆推,实时配速失效。
+        //  ② 留一帧的容差,避免在目标水位附近反复横跳。
+        const wantFill =
+          prefillEnabled() &&
+          targetUs > ANCHOR_SAFE_LEAD_US &&
+          depthUs < targetUs - FRAME_MS * 1000;
+        if (wantFill) {
+          // ★ 预填充 / 回补:缓冲未达目标水位 → **不 sleep**,尽快灌。
+          //   - 起播:一次灌到目标水位,而起播延迟仍只有锚点的 0.8s;
+          //   - 卡顿后:编码器/音源恢复时自动把被抽干的缓冲补回来。
+          await yieldEveryN();
+          // 灌满后把 pacing 锚点挪到当下,之后严格按实时速率推进(水位维持)。
+          this.paceAnchorMs = i * FRAME_MS;
+          this.paceAnchorWall = Date.now();
+        } else if (delayMs > 0) {
+          await sleep(delayMs);
+          sinceYield = 0; // 睡过一轮等于已经让出,计数归零
+        } else {
+          // ★ B2:落后时也必须让出**宏任务**。
+          // 原本这里什么都不做 → 整条 pushLoop 在 await 链上退化成微任务自旋:
+          // Node 在每个宏任务边界会把微任务队列**完全排空**,而 ws 的 I/O 回调
+          // (含设备发来的 client/time)属于宏任务 —— 于是落后期间 client/time
+          // 永远排不上队 → 设备侧 `Time message N/8 timed out` → 重同步 → 卡顿。
+          // 对齐 MA:connection.py 每 50 次迭代强制 `asyncio.sleep(0)`。
+          await yieldEveryN();
+        }
         // 元数据时长与实际解码长度常差几十 ms:解码偏长时 i 永远到不了 total,
         // positionMs 又被 clamp 在 durationMs → 同一尾帧无限重推、永不结束。
         // 到达元数据时长即视为播完(退出后 endedNaturally 照常置空 current 触发切歌)。
@@ -715,6 +850,31 @@ export class GroupPump {
       }
       logSafe(this.server, "info", `sendspin pushLoop 退出: contentEnded=${contentEnded} running=${this.running} epochSame=${this.epoch === myEpoch} song=${this.songId}`);
       if (this.epoch === myEpoch) {
+        // ★ 曲末排空(深缓冲):必须等设备把缓冲里的音频播完,再收流。
+        // 协议规定 stream/end 会让客户端**清空缓冲** —— 不等就发,设备里还排着
+        // 若干毫秒没播的音频会被直接砍掉。旧行为(800ms)砍掉 800ms 无人察觉,
+        // 缓冲抬到秒级后必须补这一步。
+        // 只等「超出旧水位的那部分」:尾部截断量保持与旧行为一致(800ms),
+        // 新增的切歌间隙恰好 = 预填充水位 − 800ms。
+        // ⚠️ 必须在 running=false **之前**完成:外部(单测 waitInactive / 看门狗)
+        // 一看到 inactive 就会去读 group.current,而排空期间它还没置空,
+        // 会被误判成「已停却仍在播」。
+        if (contentEnded) {
+          // ⚠️ 除以 speed:设备侧的播出同样按倍率走(SENDSPIN_PUSH_SPEED 快进时,
+          // 缓冲里的音频会以 speed 倍速播完),不折算会在快进用例里白等几十秒。
+          const rawDrainMs =
+            (Number(cursorUs) - Number(nowUs()) - ANCHOR_SAFE_LEAD_US) / 1000;
+          const extraDrainMs =
+            Math.min(rawDrainMs, PREFILL_BUFFER_MAX_MS) / (this.speed > 0 ? this.speed : 1);
+          if (prefillEnabled() && extraDrainMs > 0) {
+            logSafe(
+              this.server,
+              "info",
+              `sendspin 曲末排空:等设备播完缓冲 ${Math.round(extraDrainMs)}ms 后再收流 song=${this.songId}`,
+            );
+            await sleep(Math.min(extraDrainMs, PREFILL_BUFFER_MAX_MS));
+          }
+        }
         this.running = false;
         this.endedNaturally = contentEnded;
         try {

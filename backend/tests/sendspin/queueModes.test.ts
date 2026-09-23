@@ -26,7 +26,9 @@ import { overridePumpSource } from "../../src/services/sendspin/streamEngine.js"
 
 const RATE = 48000;
 const CH = 2;
-const AUDIO_MS = 300; // 每首歌的合成时长(track 播完即自然结束,触发自动切歌)
+const AUDIO_MS = 5000; // 每首歌的合成时长(track 播完即自然结束,触发自动切歌)
+// ⚠️ 必须**大于**预填充缓冲(默认 3s,见 prefill_buffer_ms):曲长短于缓冲时整首会被
+//   瞬间灌完,「按实时播完 → 自然结束 → 自动切歌」的仿真前提不成立(2026-09-24)。
 const BASE = "http://lan-base";
 
 let tmpDir: string;

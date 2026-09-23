@@ -2,6 +2,45 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.18] - 2026-09-24
+
+### Sendspin —— 抗卡顿：设备缓冲深度可配（预填充／回补）＋ 推流循环不再饿死事件循环
+
+针对「ESP32 Sendspin 播放时不时卡顿」的服务端两条硬修复，并把它做成 Web 可随时调整的配置项。
+
+- **新增插件配置项「设备缓冲深度（抗卡顿）」**（Sendspin 插件页下拉档位）：
+  `0.8 秒（关闭预填充，等同旧行为）` / `1.5 秒` / `3 秒（推荐）` / `5 秒` / `10 秒`。
+  改完**立即生效**（推流循环每 5s 重读配置，无需重启、不中断当前播放）。
+- **预填充 / 卡顿后自动回补**（`services/sendspin/streamEngine.ts`）：
+  此前设备侧缓冲深度**恒等于首帧锚点（800ms）** —— 服务端按实时速率推、设备按实时速率播，
+  差值永远填不满，所以「想缓冲 10s」只能靠把锚点抬到 10s，代价是**起播静默 10 秒**。
+  现在两者解耦：**锚点固定 800ms（起播延迟不变），缓冲深度由推流循环在首帧后尽快灌满**；
+  编码器/音源停顿时缓冲被抽干，恢复后还会**自动补回**目标水位（旧行为补不回来 → 持续卡顿）。
+  对齐 MA：producer 领先消费端填充，直到客户端 `buffer_capacity` 上限。
+- **推流循环落后时让出宏任务**（B2）：原 `if (delayMs > 0) await sleep(delayMs)` 在落后时
+  **没有任何让出点** → 整条 `pushLoop` 退化成微任务自旋，WebSocket 的 I/O 回调（含设备发来的
+  `client/time`）排不上队 → 设备侧 `Time message N/8 timed out` → 重同步 → 卡顿。
+  现在落后时 `await setImmediate`（对齐 MA `connection.py` 每 50 次迭代 `asyncio.sleep(0)`）。
+- **曲末排空**：缓冲变深后，曲末若立刻发 `stream/end`，协议要求客户端**清空缓冲**，
+  设备里还没播的音频会被砍掉。现在先等设备播完缓冲再收流（只等超出旧水位 800ms 的那部分，
+  尾部截断量与旧行为一致），且排空放在 `running=false` **之前**，避免外部误判「已停却仍在播」。
+- **配置读取**：`readSendspinPluginConfig()` 新增 `prefillBufferMs`
+  （`normalizePrefillBufferMs` 归一化，区间 100–30000ms，非法回落 3000）。
+- **修复：播放中加入群组的新播放器（FLAC 链路）不出声**（`services/sendspin/playerCore.ts`
+  + `server.ts`）：播中加入原本**在加入瞬间就发 `stream/start`**，但 FLAC 是块编码器
+  （libFLAC 自选块大小 ≈4096 样本 ≈85ms），新成员的编码器要攒满一块才吐首帧 ——
+  「先宣告、后等货」留出空窗，设备据此丢弃该流（本文件已记录过的同型事故：收到
+  `Stream Started` 却不做 codec header 处理、扬声器不启动 = 无声）。PCM 每批即刻产出，
+  所以只有 FLAC 暴露。
+  改为与起播路径一致：`stream/start` 挂入 `pendingAnnounces`，由 `pushFrame` 在
+  **该成员首块音频就绪时**才兑现（对齐 MA `_pending_stream_start`）。
+  附带收益：`codec_header` 此刻必为该成员编码器的**真实 STREAMINFO**，不再回落合成头。
+- **测试**：`pluginConfig.test.ts` 新增档位/越界/非法归一化用例；`playerGroup.test.ts` 桩音源
+  由 1s 加长到 30s（预填充灌满后仍按实时推，播中加入才收得到直播帧）并新增
+  「stream/start 必须延后到首块就绪」断言；`childMain.test.ts` 同步更新该语义；
+  `queueModes.test.ts` 桩曲长 300ms → 5s（曲长短于缓冲时整首会被瞬间灌完，
+  「按实时播完 → 自动切歌」的仿真前提不成立）。sendspin 36 文件 203 例全绿。
+
 ## [4.0.17] - 2026-09-24
 
 ### 群组 —— 容器语义恒在线 + 点群组即切 MINI 遥控栏
