@@ -85,6 +85,8 @@
                 </div>
                 <div class="controls-peer-meta">
                   <span v-if="isGroupPeer(p) && groupManageId === p.peerId">{{ t('layout.groupManaging', { name: playerStore.peerDisplayName(p) }) }}</span>
+                  <span v-else-if="isGroupPeer(p) && (p.memberCount ?? 0) === 0">{{ t('layout.groupEmpty') }}</span>
+                  <span v-else-if="isGroupPeer(p)">{{ t('layout.groupMembersOnline', { online: p.onlineCount ?? 0, total: p.memberCount ?? 0 }) }}</span>
                   <span v-else-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
                     {{ p.queue.total ?? p.queue.items?.length }} {{ t('layout.tracksUnit') }}
                     <span v-if="p.queue.isActive">
@@ -102,13 +104,6 @@
                 :title="inSelectedGroup(p) ? t('layout.groupLeave') : t('layout.groupJoin')"
                 @click.stop="toggleGroupMember(p)"
               >✓</span>
-              <MfIcon
-                v-else-if="isGroupPeer(p)"
-                name="Play"
-                class="controls-peer-goplay"
-                :title="t('layout.transferPlaybackBtn')"
-                @click.stop="onControlsSwitchPeer(p.peerId)"
-              />
               <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId && !(groupManageId && groupCheckable(p))" class="controls-peer-check" />
             </div>
             <div v-if="playerStore.peers.length === 0" class="controls-peer-empty">{{ t('layout.noPeerAvailable') }}</div>
@@ -300,6 +295,8 @@
                   </div>
                   <div class="psi-meta">
                     <span v-if="isGroupPeer(p) && groupManageId === p.peerId">{{ t('layout.groupManaging', { name: playerStore.peerDisplayName(p) }) }}</span>
+                    <span v-else-if="isGroupPeer(p) && (p.memberCount ?? 0) === 0">{{ t('layout.groupEmpty') }}</span>
+                    <span v-else-if="isGroupPeer(p)">{{ t('layout.groupMembersOnline', { online: p.onlineCount ?? 0, total: p.memberCount ?? 0 }) }}</span>
                     <span v-else-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
                       {{ p.queue.total ?? p.queue.items?.length }} {{ t('layout.tracksUnit') }}
                       <span v-if="p.queue.isActive">
@@ -317,13 +314,6 @@
                   :title="inSelectedGroup(p) ? t('layout.groupLeave') : t('layout.groupJoin')"
                   @click.stop="toggleGroupMember(p)"
                 >✓</span>
-                <MfIcon
-                  v-else-if="isGroupPeer(p)"
-                  name="Play"
-                  class="psi-goplay"
-                  :title="t('layout.transferPlaybackBtn')"
-                  @click.stop="onSwitchPeer(p.peerId)"
-                />
                 <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId && !(groupManageId && groupCheckable(p))" class="psi-check"  />
               </div>
               <div v-if="playerStore.peers.length === 0" class="peer-switcher-empty">{{ t('layout.noPeerAvailable') }}</div>
@@ -763,11 +753,14 @@ async function toggleGroupManage(p: any) {
   if (!isGroupPeer(p)) return;
   const gid = p.peerId;
   if (groupManageId.value === gid) {
-    // 再点一次 = 退出管理模式。
+    // 再点一次 = 退出管理模式(控制目标保持在该群组)。
     groupManageId.value = "";
     groupMembers.value = new Set();
     return;
   }
+  // 点群组 = 把 MINI 播放器栏切换为该群组 + 进入管理模式(勾选框出现)。
+  // 注意:不关弹窗/抽屉 —— 用户还要在列表里勾选成员(与 onSwitchPeer 的差异)。
+  await playerStore.switchPeer(gid);
   if (groupBusy.value) return;
   groupBusy.value = true;
   try {
@@ -1937,10 +1930,6 @@ watch(controlsDrawerOpen, (open) => {
     &:hover { border-color: var(--fnos-red); }
     &.on { background: var(--fnos-red); border-color: var(--fnos-red); color: #fff; }
   }
-  .psi-goplay {
-    flex-shrink: 0; font-size: 15px; color: var(--fnos-text-tertiary); cursor: pointer;
-    &:hover { color: var(--fnos-red); }
-  }
 }
 .peer-switcher-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
 .peer-switcher-scan {
@@ -1996,10 +1985,6 @@ watch(controlsDrawerOpen, (open) => {
     transition: all .18s ease;
     &:hover { border-color: var(--fnos-red); }
     &.on { background: var(--fnos-red); border-color: var(--fnos-red); color: #fff; }
-  }
-  .controls-peer-goplay {
-    flex-shrink: 0; font-size: 15px; color: var(--fnos-text-tertiary); cursor: pointer;
-    &:hover { color: var(--fnos-red); }
   }
   &.managing { background: var(--fnos-hover, rgba(0,0,0,.04)); }
 }

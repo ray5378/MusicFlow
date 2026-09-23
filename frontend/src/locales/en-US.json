@@ -318,6 +318,8 @@
     "groupLeave": "Leave group",
     "groupJoined": "Joined group: {name}",
     "groupLeft": "Left group: {name}",
+    "groupEmpty": "No players joined yet",
+    "groupMembersOnline": "{online}/{total} players online",
     "collapseQueue": "Collapse queue",
     "playbackQueue": "Queue",
     "collapse": "Collapse",

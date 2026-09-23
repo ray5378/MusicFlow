@@ -318,6 +318,8 @@
     "groupLeave": "退出群组",
     "groupJoined": "已加入群组:{name}",
     "groupLeft": "已退出群组:{name}",
+    "groupEmpty": "还没有加入播放器",
+    "groupMembersOnline": "{online}/{total} 台播放器在线",
     "collapseQueue": "收起播放队列",
     "playbackQueue": "播放队列",
     "collapse": "收起",

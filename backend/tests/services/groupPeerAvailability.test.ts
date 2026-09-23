@@ -1,15 +1,16 @@
 // 群组 peer 的「可用性」契约测试。
 //
-// 背景(2026-09-23 真机事故):
-//   `PeerManager.reconcileGroupPeers()` 曾经自己拿成员 id 去 DLNA 设备缓存里查:
-//     const available = g.memberIds.some(d => getCachedDevices().find(x => x.id === d)?.available);
-//   但成员 id 是**带命名空间**的(`sendspin:<clientId>` / `dlna:<deviceId>` / 裸 id≡DLNA),
-//   sendspin 成员**不在** DLNA 设备缓存里 ⇒ 永远 miss ⇒ 该群组恒被判为离线。
-//   后果:群组本身已落库(管理页正常显示「2 台设备 · 2 台在线」),但在「流转播放」
-//   选择器里被前端按 available 剪掉整行 —— 群组根本没法接入播放。
+// 语义演进(2026-09-23 定稿,用户拍板):
+//   **组是「容器」不是设备 —— 组行恒 available=true**,不随成员上下线波动。
+//   空组、成员全离线的组也显示在线;成员各自的在线状态由
+//   `GroupManager.resolveMemberStates()`(命名空间分派的唯一真相源)推导,
+//   汇总为 `onlineCount` 供前端展示「x/y 在线」,但不影响组行可用性。
 //
-// 本文件锁定唯一真相源:群组可用性必须由 `GroupManager.resolveMemberStates()` 推导
-// (它按成员 id 的命名空间分派到各自的设备源)。
+// 历史(两次都把「容器在线」误当成「内容物在线」):
+//   ① `reconcileGroupPeers()` 只查 DLNA 设备缓存 ⇒ sendspin 成员永远 miss
+//      ⇒ 非 DLNA 群组恒离线,被前端「流转播放」按 available 剪掉整行。
+//   ② 改为「至少一个成员在线」⇒ 空组/成员全离线时组又显示「离线」,
+//      用户指出:群组里有播放器不在线就显示离线不合理,组空了也要在线。
 import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { sqlite } from "../../src/db/index.js";
@@ -59,7 +60,7 @@ beforeAll(() => {
   `);
 });
 
-describe("群组 peer 可用性(命名空间成员)", () => {
+describe("群组 peer 可用性(组是容器,恒在线)", () => {
   let gm: GroupManager;
 
   beforeEach(() => {
@@ -81,51 +82,64 @@ describe("群组 peer 可用性(命名空间成员)", () => {
     expect(states[0].name).toBe("esp32-player2");
   });
 
-  it("纯 sendspin 成员的组:成员在线 ⇒ 组 peer 必须是 available(曾经的 bug 点)", () => {
+  it("组行恒 available:纯 sendspin 成员的组(曾经的 bug 点)", () => {
     const g = gm.createGroup("sendspin群组", ["sendspin:sp1"]);
     getPeerManager().reconcileGroupPeers();
 
     const peer = getPeerManager().get(`group:${g.id}`);
     expect(peer).toBeDefined();
     expect(peer!.kind).toBe("group");
-    // 关键断言:旧实现只查 DLNA 缓存 ⇒ sendspin 成员永远 miss ⇒ 这里会是 false,
-    // 群组随即被前端「流转播放」选择器剪掉。
     expect(peer!.available).toBe(true);
+    expect(peer!.onlineCount).toBe(1);
   });
 
-  it("组内成员全离线 ⇒ 组 peer 标离线(不得因解析不到而恒真)", () => {
-    const g = gm.createGroup("全离线组", ["sendspin:sp2"]);
+  it("组行恒 available:成员全离线也不得显示离线(本次定稿)", () => {
+    const g = gm.createGroup("全离线组", ["sendspin:sp2", "dlna:d2"]);
     getPeerManager().reconcileGroupPeers();
-    expect(getPeerManager().get(`group:${g.id}`)!.available).toBe(false);
+    const peer = getPeerManager().get(`group:${g.id}`)!;
+    expect(peer.available).toBe(true);
+    expect(peer.onlineCount).toBe(0);
   });
 
-  it("DLNA 成员的组:可用性照旧由 DLNA 源决定(不得回归)", () => {
+  it("组行恒 available:空组(没有成员)也在线", () => {
+    const g = gm.createGroup("空组", []);
+    getPeerManager().reconcileGroupPeers();
+    const peer = getPeerManager().get(`group:${g.id}`)!;
+    expect(peer.available).toBe(true);
+    expect(peer.memberCount).toBe(0);
+    expect(peer.onlineCount).toBe(0);
+  });
+
+  it("组行恒 available:DLNA 组不得回归", () => {
     const on = gm.createGroup("在线DLNA组", ["dlna:d1"]);
     const off = gm.createGroup("离线DLNA组", ["dlna:d2"]);
     getPeerManager().reconcileGroupPeers();
     expect(getPeerManager().get(`group:${on.id}`)!.available).toBe(true);
-    expect(getPeerManager().get(`group:${off.id}`)!.available).toBe(false);
+    expect(getPeerManager().get(`group:${off.id}`)!.available).toBe(true);
+    expect(getPeerManager().get(`group:${off.id}`)!.onlineCount).toBe(0);
   });
 
-  it("混合成员的组:任一成员在线即可用", () => {
+  it("组行恒 available:混合成员组", () => {
     const g = gm.createGroup("混合组", ["sendspin:sp2", "sendspin:sp1"]);
     getPeerManager().reconcileGroupPeers();
     expect(getPeerManager().get(`group:${g.id}`)!.available).toBe(true);
   });
 
-  it("成员在线状态翻转后 reconcile 必须跟着翻(不缓存旧判定)", () => {
+  it("成员在线状态翻转不影响组行 available,但 onlineCount 必须实时汇总", () => {
     const g = gm.createGroup("翻转组", ["sendspin:sp1"]);
     getPeerManager().reconcileGroupPeers();
     expect(getPeerManager().get(`group:${g.id}`)!.available).toBe(true);
+    expect(getPeerManager().get(`group:${g.id}`)!.onlineCount).toBe(1);
 
-    // sp1 掉线 → 再 reconcile ⇒ 组跟着离线。
+    // sp1 掉线 → 组仍在线(容器语义),但在线数归零。
     sendspinClients.set("sp1", { name: "esp32-player2", ready: false });
     getPeerManager().reconcileGroupPeers();
-    expect(getPeerManager().get(`group:${g.id}`)!.available).toBe(false);
+    expect(getPeerManager().get(`group:${g.id}`)!.available).toBe(true);
+    expect(getPeerManager().get(`group:${g.id}`)!.onlineCount).toBe(0);
 
-    // 恢复在线 ⇒ 组也恢复。
+    // 恢复在线 ⇒ 在线数跟着恢复。
     sendspinClients.set("sp1", { name: "esp32-player2", ready: true });
     getPeerManager().reconcileGroupPeers();
-    expect(getPeerManager().get(`group:${g.id}`)!.available).toBe(true);
+    expect(getPeerManager().get(`group:${g.id}`)!.onlineCount).toBe(1);
   });
 });

@@ -517,17 +517,16 @@ class PeerManager extends EventEmitter {
     const seen = new Set<string>();
     for (const g of groups) {
       seen.add(g.id);
-      // 可用性 = 至少一个成员在线。**必须复用 GroupManager 的成员解析**
-      // (按成员 id 的命名空间分派 —— sendspin 成员不在 DLNA 设备缓存里)。
-      // 曾在此处直接 `getCachedDevices().find(id)` ⇒ 只认 DLNA 成员,
-      // 非 DLNA 群组恒判离线 ⇒ 前端「流转播放」选择器按 available 剪掉整行,
-      // 群组虽已落库、管理页也正常,却无法接入播放。
-      // ⚠️ 注意「可用性」与「是否显示」是两件事：空组恒 available=false，
-      // 但**必须仍然出现在列表里**(见 Peer.memberCount 注释)。
+      // 组是「容器」不是设备:**可用性恒为在线**,不随成员上下线波动 ——
+      // 空组、成员全离线的组也显示在线(用户定稿 2026-09-23:组恒在线)。
+      // 成员各自的在线状态由 resolveMemberStates(命名空间分派的唯一真相源)
+      // 汇总为 onlineCount,供前端展示「x/y 在线」,但不影响组行可用性。
+      // 历史:①曾只查 DLNA 缓存 ⇒ 非 DLNA 组恒离线、无法接入播放;
+      // ②后改「至少一个成员在线」⇒ 空组/成员离线时组显示离线 ——
+      // 两版都把「容器在线」误当成「内容物在线」。
       const states = gm.resolveMemberStates(g.memberIds);
-      const available = states.some(m => m.available);
       const onlineCount = states.filter(m => m.available).length;
-      this.registerGroup(g.id, g.name, available, g.memberIds, onlineCount);
+      this.registerGroup(g.id, g.name, true, g.memberIds, onlineCount);
     }
     // Groups that vanished → remove their peer entry entirely (permanent peers,
     // no offline grace needed).
