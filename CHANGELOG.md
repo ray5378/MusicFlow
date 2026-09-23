@@ -2,6 +2,39 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.17] - 2026-09-24
+
+### 群组 —— 容器语义恒在线 + 点群组即切 MINI 遥控栏
+
+- **组是「容器」不是设备，可用性恒为在线**（`services/peer.ts::reconcileGroupPeers`）：
+  注册组时 `available` 恒 `true`，空组、成员全部离线也显示在线。成员各自的在线状态仍由
+  `GroupManager.resolveMemberStates()`（按成员 id 命名空间分派的唯一真相源）推导，
+  汇总成 `onlineCount` **只供前端展示「x/y 在线」**，不再反向决定组行可用性。
+  历史两版都把「容器在线」误当成「内容物在线」：① 只查 DLNA 设备缓存 ⇒ sendspin 组恒离线、
+  被流转选择器按 `available` 剪掉整行；② 改 `some(m => m.available)` ⇒ 空组/成员离线时组又变离线。
+- **点群组 = 切换 MINI 遥控栏 + 进入管理模式**（`frontend/src/layouts/MainLayout.vue`）：
+  `toggleGroupManage` 内先 `await playerStore.switchPeer(gid)`，把 MINI 播放器栏切到该群组，
+  再展开成员勾选（保留弹窗/抽屉，这是与 `onSwitchPeer` 的差异）；移除群组行的 ▶ 按钮
+  （与勾选圈职责冲突）；组行状态标注：空组 → `layout.groupEmpty`，有成员 → `layout.groupMembersOnline`。
+- **测试**：`tests/services/groupPeerAvailability.test.ts` 重写为 7 例（组恒在线 + `onlineCount`
+  汇总，保留旧语义的负向验证，回退即红）。
+- **i18n**：新增 `layout.groupEmpty` / `layout.groupMembersOnline`（zh + en）。
+
+### 工程
+
+- `scripts/sendspin-monitor-240.sh`：匹配串 `pollDBG` → `[QueueController][poll]`（poll 日志改
+  debug 级后旧串不再出现，脚本此前**静默漏采**）；新增位置回退 >5s 的 `REWIND`、链路不可用连续
+  3 轮的 `LINKDOWN`，卡顿指纹（PUSHBREAK / ENCSTALL / WINEOF / CURSORLAG / LOOPLAG / LOOPDEATH）
+  统一写带时间戳的 `[ALERT]` 行；新增高采样率变体 `scripts/sendspin-hires-240.sh`。
+- **版本号守卫**：新增 `backend/scripts/check-release-version.mjs` + `.github/workflows/version-guard.yml`
+  —— 版本号必须是数字（vX.Y.Z），`main` / `master` / `latest` 等分支名一律判红；静态禁止 workflow
+  把 `github.ref_name` 当版本号（推分支时它等于 `main`）；监听 `tags: ["*"]` 以便非法 tag 进来就被判红。
+
+### 验证
+
+- `backend tsc --noEmit` 0 错；`frontend vue-tsc --noEmit` 0 错；
+  全量 vitest **186 文件 / 1579 例全绿**；7 个 `check-*.mjs` + `check-i18n` 全通过。
+
 ## [4.0.16] - 2026-09-23
 
 ### 功能 —— 群组音量持久化（空组也落库）+ 默认 20 + 卡顿监控文档
