@@ -23,6 +23,7 @@ import { PlaybackState, type PlayerState } from "../../src/services/player/types
 import { setSendspinIdentityDir, startSendspinService, stopSendspinService } from "../../src/services/sendspin/index.js";
 import { createSendspinProtocolPlayer } from "../../src/services/sendspin/protocolPlayer.js";
 import { overridePumpSource } from "../../src/services/sendspin/streamEngine.js";
+import { setNowUsOverride } from "../../src/services/sendspin/clock.js";
 
 const RATE = 48000;
 const CH = 2;
@@ -30,6 +31,15 @@ const AUDIO_MS = 5000; // 每首歌的合成时长(track 播完即自然结束,�
 // ⚠️ 必须**大于**预填充缓冲(默认 3s,见 prefill_buffer_ms):曲长短于缓冲时整首会被
 //   瞬间灌完,「按实时播完 → 自然结束 → 自动切歌」的仿真前提不成立(2026-09-24)。
 const BASE = "http://lan-base";
+
+// ⚠️ 本文件**显式关掉预填充**(SENDSPIN_PREFILL_MS=800 = 插件页「关闭预填充」档),
+//   理由:预填充会把「已推送」与「可听」拉开整整一个缓冲深度的**静默期** ——
+//   实测(2026-09-24 起)对外上报的 position 已改为**可听位置**(= 已推送 − 设备缓冲深度),
+//   于是 3s 预填充下起播后前 ~3.8s 位置恒为 0(声音还没出来)。本文件测的是
+//   QueueController 的**模式语义**(顺序/循环/随机/pause/seek/stop),
+//   深缓冲的静默期只会让「位置是否推进」的断言失真,不是被测对象。
+//   关掉后缓冲深度 = 首帧锚点 800ms,与 4.0.18 之前的行为一致。
+const PREV_PREFILL_MS = process.env.SENDSPIN_PREFILL_MS;
 
 let tmpDir: string;
 let srcTmpDir: string;
@@ -52,6 +62,7 @@ beforeAll(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sendspin-modes-"));
   srcTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sendspin-src-"));
+  process.env.SENDSPIN_PREFILL_MS = "800"; // 见文件头注释:本文件按浅缓冲(旧行为)仿真
   setSendspinIdentityDir(tmpDir);
   await startSendspinService();
 });
@@ -59,6 +70,8 @@ beforeAll(async () => {
 afterAll(async () => {
   overridePumpSource(null);
   await stopSendspinService();
+  if (PREV_PREFILL_MS === undefined) delete process.env.SENDSPIN_PREFILL_MS;
+  else process.env.SENDSPIN_PREFILL_MS = PREV_PREFILL_MS;
   fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.rmSync(srcTmpDir, { recursive: true, force: true });
 });
@@ -66,9 +79,14 @@ afterAll(async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  // ⚠️ 假定时器**不接管 process.hrtime**(见 clock.ts setNowUsOverride 注释),
+  //   而上报的「可听位置」= 已推送 −(cursorUs − nowUs())。不接管的话 nowUs() 静止、
+  //   cursorUs 随实产样本飞涨 → 位置恒被钳到 0,「位置有没有推进」全部失真。
+  setNowUsOverride(() => BigInt(Date.now()) * 1000n);
 });
 
 afterEach(() => {
+  setNowUsOverride(null);
   vi.useRealTimers();
 });
 
@@ -290,8 +308,8 @@ describe("Sendspin 队列全模式", () => {
     expect((await p.pollState()).playbackState).not.toBe(PlaybackState.IDLE);
 
     // 恢复 → 继续推进:pump.resume 唤醒,position 越过暂停点、回到 PLAYING。
-    // 注:轨道仅 300ms,暂停点在 ~100ms,恢复后用 100ms 步长确认"推了一帧且在播",
-    // 步长过大会直接推完(剩 200ms)→ IDLE。
+    // 注:本文件已关预填充(缓冲深度 = 首帧锚点 800ms),故起播 ~0.8s 后即可听位置 > 0,
+    //     暂停点稳定落在轨内(合成轨 5000ms);步长过大会直接推完 → IDLE。
     await qc.transport(id, "play"); // transport 用 "play" 映射 player.resume → pump.resume
     await crank(pc, p, 100); // 恢复后推一帧
     const resumed = await p.pollState();

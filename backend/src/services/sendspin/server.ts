@@ -24,6 +24,8 @@ import {
   MAX_TRANSPORT_PLAINTEXT,
   MAX_REASSEMBLED_BYTES,
   SENTINEL_PSK_HEX,
+  PREFILL_BUFFER_MIN_MS,
+  PREFILL_BUFFER_MAX_MS,
 } from "./constants.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
@@ -322,6 +324,47 @@ export class SendspinServer {
   }
 }
 
+/** 从 `client/hello` payload 取设备宣告的缓冲容量(字节);取不到返回 0。
+ *
+ *  真机实发(ESPHome 2026.9.0 / esp32-player-meet):
+ *    `"player@v1_support": { supported_formats: [...], buffer_capacity: 1600000,
+ *                            supported_commands: ["volume","mute"] }`
+ *  单位是 **byte** —— ESPHome 源码实锤:`components/sendspin/__init__.py`
+ *  把 `CONF_BUFFER_SIZE`(media_source 里 `cv.int_range(min=25000)`,明显是字节)
+ *  直接塞进 `audio_buffer_capacity`;aiosendspin 同名字段作
+ *  `BufferTracker(capacity_bytes=...)` 消费。另兼容 `player_support`(非 v1
+ *  键名)与顶层 `buffer_capacity`。 */
+export function parseHelloBufferCapacity(payload: any): number {
+  const support = payload?.["player@v1_support"] ?? payload?.player_support ?? payload;
+  const raw = support?.buffer_capacity ?? payload?.buffer_capacity;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round(n);
+}
+
+/** 设备缓冲容量的**可用比例**——留安全余量,不把设备灌满。
+ *
+ *  2026-09-24 真机 A/B 实测(ESPHome 2026.9.0 / esp32-player-meet,
+ *  `buffer_capacity=1600000B`,FLAC 实测 105052 B/s):
+ *    - 档位 10s(= 1.05MB,**66%** 占用)→ 设备侧 `Failed to send audio chunk`
+ *      = 0、`Lost sync` = 0,100s 全程干净;
+ *    - 档位 30s(按 100% 容量钳到 15.23s)→ 设备在 **PLAYING 后 15.30s**
+ *      开始连续 `Failed to send audio chunk`(设备拒收 = 缓冲满),并伴随
+ *      `Lost sync (85352us off)` 风暴 —— 15.30s 与 1600000/105052=15.23s 吻合,
+ *      即「灌满到 100% 后每一帧都被拒」。
+ *
+ *  为什么要余量(而不是像 aiosendspin 那样直接用 100%):
+ *    aiosendspin 的 `BufferTracker` 累计的是**每个 chunk 的真实压缩字节数**
+ *    (字段就叫 `capacity_bytes`),而本仓是**按时长**记账
+ *    (`depth = cursor − now`,再乘平均码率换算),两者不等价:
+ *    FLAC 瞬时码率随内容起伏,加上每 chunk 的协议头开销与最多一帧(25ms)
+ *    的目标水位过冲,按 100% 算必然踩线。取 **0.6** 实测安全
+ *    (10s 档那次实测占用 66% 已干净,0.6 再加一档余量)。
+ *
+ *  想用更深的档位 → 在 ESPHome 里调大 `buffer_size`(容量越大,
+ *  同一比例对应的秒数越多),而不是把这个比例调高。 */
+export const DEVICE_BUFFER_HEADROOM_RATIO = 0.6;
+
 export class SendspinGroup {
   name: string;
   server: SendspinServer;
@@ -351,6 +394,11 @@ export class SendspinGroup {
    *  (`realFlacHeaderB64` 已有值),不再回落到合成头(合成头曾因 block size /
    *  位深与实流不符导致严格解码器逐帧校验失败 → 日志全绿但无声)。 */
   flushAnnounceFor(c: SendspinConnection): void {
+    // spec:「server MUST NOT send stream/start unless the latest client/state
+    // reports available:true」。设备**明确**报 available:false 时本轮不宣告,
+    // 条目留在队列里,下一帧(pushFrame 每帧都会调本函数)自然重试;
+    // 未上报过 available 的设备(真机固件即如此)不受影响(见 clientWantsStream)。
+    if (!c.clientWantsStream()) return;
     // 去重:多首连续起播可能把同一 conn 压入多次(上一首没产帧就没兑现过),
     // 只删第一个会留下陈旧条目,后续被误兑现成第二份 stream/start。
     let i = this.pendingAnnounces.indexOf(c);
@@ -413,6 +461,69 @@ export class SendspinGroup {
   commonSendAheadUs(): number {
     return computeCommonSendAhead([...this.members].map((m) => sendAheadInputOf(m)));
   }
+
+  // ---- 缓冲档位 × 设备容量匹配(见 PREFILL_BUFFER_MAX_MS 注释与
+  //      SendspinConnection.bufferCapacityBytes) ----
+
+  /** 本首歌累计已推送的**压缩字节数 / 样本数**(单成员口径,用于实测码率)。
+   *  只在 pushFrame 里累加;起播时由 resetPushMeter 清零。 */
+  private pushedBytes = 0;
+  private pushedSamples = 0;
+
+  /** 起播时清零码率计量窗口(上一首的码率对新歌无参考价值)。 */
+  resetPushMeter(): void {
+    this.pushedBytes = 0;
+    this.pushedSamples = 0;
+  }
+
+  /** 是否已有**实测**码率(否则 encodedBytesPerSec 走名义回落)。
+   *  供日志判据用:首帧时必然还没样本,此时打出来的秒数偏保守,会误导排障。 */
+  hasMeasuredRate(): boolean {
+    return this.pushedSamples > 0 && this.pushedBytes > 0;
+  }
+
+  /** 实测「压缩字节/秒」。样本数 → 秒;无样本时按 codec 名义值回落。 */
+  encodedBytesPerSec(): number {
+    if (this.pushedSamples > 0 && this.pushedBytes > 0) {
+      const secs = this.pushedSamples / SAMPLE_RATE;
+      if (secs > 0) return this.pushedBytes / secs;
+    }
+    // 名义值(实测出来前只用一两帧,影响可忽略):
+    //   PCM 48k/16/2 = 192000 B/s;FLAC 取 0.7 × PCM(偏保守 → 钳制更紧,更安全)。
+    const codec = [...this.members][0]?.codec ?? "pcm";
+    return codec === "pcm" ? SAMPLE_RATE * 2 * 2 : SAMPLE_RATE * 2 * 2 * 0.7;
+  }
+
+  /** 全员宣告的缓冲容量取**最小值**(0 视为未宣告,忽略);全都没宣告 → 0。 */
+  deviceCapacityBytes(): number {
+    let min = 0;
+    for (const m of this.members) {
+      const b = m.bufferCapacityBytes;
+      if (b > 0 && (min === 0 || b < min)) min = b;
+    }
+    return min;
+  }
+
+  /** 预填充水位的**设备容量上界**(毫秒)。
+   *
+   *  两个独立约束取小(对照 aiosendspin `BufferTracker`:`capacity_bytes` +
+   *  `max_duration_us`,二者是「独立的」两把尺):
+   *    ① 时长:`PREFILL_BUFFER_MAX_MS`(30s,= aiosendspin
+   *       `PlayerPersistentState.max_duration_us` 默认 30_000_000);
+   *    ② 字节:`deviceCapacityBytes × DEVICE_BUFFER_HEADROOM_RATIO ÷ 实测码率`。
+   *
+   *  设备未宣告容量时返回 ①(行为与加入本逻辑前**完全一致**)。
+   *  真机 1.6MB + FLAC 实测下 ② ≈ 9.1 秒 —— 选 15/20/25/30s 档会被钳到 ②,
+   *  这不是「档位失效」:超过设备环形缓冲的部分根本放不下,推过去只会
+   *  被设备逐帧拒收(`Failed to send audio chunk`)并抽干缓冲 → 插静音卡顿。
+   *  要更深的水位请调大设备侧 `buffer_size`。 */
+  capacityLimitedPrefillMs(): number {
+    const cap = this.deviceCapacityBytes();
+    if (cap <= 0) return PREFILL_BUFFER_MAX_MS;
+    const usable = cap * DEVICE_BUFFER_HEADROOM_RATIO;
+    const byBytes = (usable / Math.max(1, this.encodedBytesPerSec())) * 1000;
+    return Math.max(PREFILL_BUFFER_MIN_MS, Math.min(PREFILL_BUFFER_MAX_MS, Math.floor(byBytes)));
+  }
   private scalePcm(pcm: Float32Array, gain: number): Float32Array {
     const g = gain / 100;
     if (g >= 1) return pcm;
@@ -446,6 +557,7 @@ export class SendspinGroup {
       // → 设备立即吐字节 → 缓冲空 → underrun。
       // 因此逐帧按 `ck.frameSamples` 累加微秒推进。
       let sum = 0;
+      let bytes = 0;
       let ts = tsUs;
       // ★ 该成员**首块音频已产出**时才发 stream/start(见 flushAnnounceFor 注释):
       //   先宣告再等编码器吐货会在 FLAC 链路留出 ~85ms 空窗,设备据此刻丢弃该流
@@ -456,10 +568,19 @@ export class SendspinGroup {
         sum += n;
         const data = ck.data;
         // 空包必跳过:严格客户端收空包会判 Invalid data(2026-09-17 ESPHome 真机)。
-        if (data && data.length > 0) c.sendAudio(ts, data);
+        if (data && data.length > 0) {
+          bytes += data.length;
+          c.sendAudio(ts, data);
+        }
         if (n > 0) ts += BigInt(Math.round((n * 1_000_000) / SAMPLE_RATE));
       }
-      if (sum > maxSamples) maxSamples = sum;
+      if (sum > maxSamples) {
+        maxSamples = sum;
+        // 码率计量跟**产出最多**的那个成员走:各成员样本数本应相同,取 max
+        // 是为了避开「某成员编码器恰好缓冲未吐」时把样本数记小、码率算大。
+        this.pushedSamples += sum;
+        this.pushedBytes += bytes;
+      }
     }
     return maxSamples;
   }
@@ -586,6 +707,30 @@ export class SendspinConnection {
   minBufferMs = 0;
   /** 是否已收到过 client/state(未见过的设备回落到保守缺省)。 */
   stateReported = false;
+  /** 设备侧缓冲区容量(ms)。`client/state` / `client/hello` 均可携带;
+   *  0 = **未上报**(旧固件 / legacy 明文路径),此时不做任何钳制。 */
+  bufferCapacityMs = 0;
+  /** 设备是否愿收流(spec `client/state.available`)。
+   *  `null` = 从未上报 → 不做门控(向后兼容);`false` = 明确拒绝收流。 */
+  clientAvailable: boolean | null = null;
+  /** 设备播放状态(spec `state`):`synchronized` / `error` / …。 */
+  clientSyncState: string | null = null;
+  /** 收到 `available:false` / `state:error` 的时刻(用于门控超时兜底)。 */
+  clientUnavailableSinceMs = 0;
+  /** 上次已记录日志的同步状态,用于只记**变化**(见 noteSyncState)。 */
+  private lastLoggedSyncState: string | null = null;
+  /** 设备在 `client/hello` 里宣告的**压缩字节**缓冲上限(`player@v1_support.
+   *  buffer_capacity`,单位 = byte)。0 = 未宣告(旧固件)→ 不做容量钳制。
+   *
+   *  为什么必须用它:aiosendspin `BufferTracker` 明确把它当 `capacity_bytes`
+   *  用 —— 「server sends audio chunks as far ahead as the client's buffer
+   *  capacity allows」是 spec 硬约束。推送量超过设备环形缓冲后,设备读不动
+   *  socket,TCP 背压把帧堆在**服务端内存**里,设备端缓冲被抽干 → 反复 hard
+   *  sync(阈值仅 5ms)→ 往音乐里插静音 → 听感「一卡一卡」。
+   *  真机(ESPHome 2026.9.0 esp32-player-meet)实报 `buffer_capacity: 1600000`
+   *  = 1.6MB —— 按 FLAC 实测量换算仅十来秒,正是「缓冲档位必须匹配设备」
+   *  的那个数。 */
+  bufferCapacityBytes = 0;
 
   private phase: "init" | "handshake" | "ready" = "init";
   private clientInitText = "";
@@ -766,6 +911,15 @@ export class SendspinConnection {
     // 协商结果必打:codec 选错(如回落到 opus)时设备会静默不出声或整条 stream/start 作废,
     // 这条日志是排查「连上了但没声音」的第一站(2026-09-17 真机)。
     this.server.log("info", `legacy client/hello: codec=${this.codec} roles=${JSON.stringify(this.roles)} formats=${JSON.stringify(payload?.["player@v1_support"]?.supported_formats ?? payload?.player_support?.supported_formats ?? null)}`);
+    // 原始 hello(截断 1500B):`client_id`/`device_info`/`supported_roles` 之后
+    // 还可能有 spec 字段(如 `buffer_capacity`、`static_delay_ms`),只打解析后
+    // 字段会看不到「设备到底宣告了什么」。1500B 足以覆盖 ESP32 单行 hello。
+    try {
+      this.server.log("info", `legacy client/hello RAW from ${clientId}: ${JSON.stringify(payload).slice(0, 1500)}`);
+    } catch {
+      /* 循环引用等极端情况忽略 */
+    }
+    this.parseHelloCapacity(payload);
     this.legacy = true;
     this.handshakeDone = true;
     this.phase = "ready";
@@ -839,10 +993,24 @@ export class SendspinConnection {
    *
    *  ⚠️ 这条消息此前**根本没有解析分支** —— 设备报什么都不看,send_ahead 硬编码
    *  800ms。设备(ESP32 sendspin-cpp)重启后 1-2s 内即上报,解析后 send_ahead
-   *  才真正贴合本设备能力;未上报前保持缺省(向后兼容旧固件)。 */
+   *  才真正贴合本设备能力;未上报前保持缺省(向后兼容旧固件)。
+   *
+   *  2026-09-24 补齐 spec 三字段(`available` / `state` / `buffer_capacity`),
+   *  并用真机 RAW 实测校正了**取值层级**:
+   *
+   *  真机(ESPHome 2026.9.0 / esp32-player-meet)实发 payload 为
+   *    `{"state":"synchronized","player":{"volume":53,"muted":false,"static_delay_ms":0}}`
+   *  —— `state` 在**根层**,而 `output_delay_ms` / `required_lead_time_ms` /
+   *  `min_buffer_ms` / `available` / `buffer_capacity` **都不发**。
+   *  也就是说:该固件下三个延迟量永远是缺省值(此前日志里的 `=0ms` 是缺省,
+   *  不是设备真的上报了 0),`send_ahead` 一直走保守缺省。故 state/available
+   *  一律**根层优先、player 层回落**,两个位置都读。
+   *
+   *  仍保持「未上报即不门控」的兼容语义,避免砸掉不发这些字段的旧固件。 */
   private applyClientState(payload: any): void {
-    const p = payload?.player ?? payload;
-    if (!p || typeof p !== "object") return;
+    const root = payload && typeof payload === "object" ? payload : null;
+    if (!root) return;
+    const p = root.player && typeof root.player === "object" ? root.player : root;
     const num = (v: any): number | null => {
       const n = Number(v);
       return Number.isFinite(n) && n >= 0 ? n : null;
@@ -853,14 +1021,91 @@ export class SendspinConnection {
     if (od !== null) this.outputDelayMs = od;
     if (rl !== null) this.requiredLeadTimeMs = rl;
     if (mb !== null) this.minBufferMs = mb;
+    // 设备输出链路固有延迟:真机报在 player 层 `static_delay_ms`(缺省 0)。
+    const sd = num(p.static_delay_ms);
+    if (sd !== null && od === null) this.outputDelayMs = sd;
+    // ---- spec 三字段:根层优先,player 层回落(设备可能只发其中一部分) ----
+    const cap = num(root.buffer_capacity_ms ?? root.buffer_capacity ?? p.buffer_capacity_ms ?? p.buffer_capacity);
+    if (cap !== null) this.bufferCapacityMs = cap;
+    const availVal = root.available ?? p.available;
+    if (typeof availVal === "boolean") {
+      if (availVal) this.clientUnavailableSinceMs = 0;
+      else if (this.clientAvailable !== false) this.clientUnavailableSinceMs = Date.now();
+      this.clientAvailable = availVal;
+    }
+    const stateVal = root.state ?? p.state;
+    if (typeof stateVal === "string" && stateVal) {
+      this.clientSyncState = stateVal;
+      this.noteSyncState(stateVal);
+    }
     const first = !this.stateReported;
     this.stateReported = true;
+    // 首次上报打**完整原始 payload**(截断 600B):排查「设备到底报了什么」
+    // 时不必再改代码重编。设备只在状态变化时才发,量可控。
+    if (first) {
+      let raw = "";
+      try {
+        raw = JSON.stringify(payload).slice(0, 600);
+      } catch {
+        raw = "<unserializable>";
+      }
+      this.server.log("info", `client/state RAW (first) from ${this.clientId ?? "?"}: ${raw}`);
+    }
     this.server.log(
       "info",
       `client/state from ${this.clientId ?? "?"}${first ? " (first)" : ""}: ` +
       `output_delay=${this.outputDelayMs}ms required_lead=${this.requiredLeadTimeMs}ms ` +
-      `min_buffer=${this.minBufferMs}ms`,
+      `min_buffer=${this.minBufferMs}ms buffer_capacity=${this.bufferCapacityMs}ms ` +
+      `available=${this.clientAvailable} state=${this.clientSyncState}`,
     );
+  }
+
+  /** 解析 `client/hello` 里的设备缓冲容量(`player@v1_support.buffer_capacity`)。
+   *
+   *  真机实发(ESPHome 2026.9.0 / esp32-player-meet):
+   *    `"player@v1_support": { supported_formats: [...], buffer_capacity: 1600000,
+   *                            supported_commands: ["volume","mute"] }`
+   *  另兼容 `player_support`(非 v1 legacy 键名)与顶层 `buffer_capacity`。
+   *  单位是 **byte**(对照 aiosendspin `BufferTracker(capacity_bytes=...)`)。
+   *  解析到就记一条日志 —— 档位是否需要被钳制,全看这个数。 */
+  private parseHelloCapacity(payload: any): void {
+    const n = parseHelloBufferCapacity(payload);
+    if (n <= 0) return;
+    this.bufferCapacityBytes = n;
+    this.server.log(
+      "info",
+      `client/hello: device buffer_capacity=${n} bytes ${this.clientId ?? "?"}`,
+    );
+  }
+
+  /** 设备**同步状态变化**时的显式日志(spec `client/state.state`)。
+   *
+   *  真机只在状态**翻转**时才发 `client/state`,故这里的变化日志等价于一份
+   *  「失步/恢复」时间线 —— 排查「播放中偶发卡顿」时,以往只能靠设备侧
+   *  ESPHome 日志(WorkBuddy/opencode 侧拿不到),现在服务端即可自证。
+   *  spec 语义:`error` = 失步(客户端应静音)、`synchronized` = 已恢复。 */
+  private noteSyncState(next: string | null): void {
+    if (next === this.lastLoggedSyncState) return;
+    this.lastLoggedSyncState = next;
+    if (next === "error") {
+      this.server.log("warn", `client/state: device reported SYNC LOST (state=error) ${this.clientId ?? "?"}`);
+    } else if (next === "synchronized") {
+      this.server.log("info", `client/state: device reports synchronized ${this.clientId ?? "?"}`);
+    }
+  }
+
+  /** 设备此刻是否愿收流(spec `available`)。
+   *
+   *  ⚠️ 只在设备**明确上报过** `available` 时才启用门控 —— `null`(从未上报,
+   *  如 legacy 明文固件)一律返回 true,保持既有行为,绝不因新增门控砸掉旧设备。
+   *  另设 3s 超时兜底:设备报 `available:false` 后若迟迟不转 true(固件卡死 /
+   *  漏发状态翻转),超时后照常推流 —— 宁可冒设备丢帧的风险,也不要永久无声。 */
+  clientWantsStream(): boolean {
+    if (this.clientAvailable !== false) return true;
+    if (this.clientUnavailableSinceMs > 0 && Date.now() - this.clientUnavailableSinceMs > 3000) {
+      return true;
+    }
+    return false;
   }
 
   private beginHandshake(clientInitText: string, payload: any): void {
@@ -1049,6 +1294,7 @@ export class SendspinConnection {
     this.name = typeof hello.name === "string" ? hello.name : (this.clientId ?? "");
     this.codec = negotiateCodec(payload, this.server.preferredCodec);
     this.server.log("info", `activated ${this.clientId} name=${this.name} roles=${this.roles.join(",")} codec=${this.codec}`);
+    this.parseHelloCapacity(hello);
     this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
     // spec MUST:首次 activate 后立即下发 group/update(真实客户端如 sendspin-cpp
     // 在收到它之前不认 server;此前从没发过,ESPHome 真机 ~30s 后 goodbye 离开)。

@@ -47,7 +47,7 @@ describe("flacCodecHeaderFromStream", () => {
     "hex",
   );
 
-  it("从真实段头提取 42B 并 base64(与手写合成同值)", () => {
+  it("从真实段头提取 42B 并 base64(字段取自实流)", () => {
     const b64 = flacCodecHeaderFromStream(new Uint8Array(realSegHead));
     expect(b64).not.toBeNull();
     const h = Buffer.from(b64!, "base64");
@@ -57,6 +57,21 @@ describe("flacCodecHeaderFromStream", () => {
     for (let i = 0; i < 8; i++) pack = (pack << 8n) | BigInt(h[18 + i]);
     expect(Number((pack >> 44n) & 0xfffffn)).toBe(SAMPLE_RATE);
     expect(Number((pack >> 36n) & 0x1fn)).toBe(15); // 16bit
+  });
+
+  it("★ last-metadata-block 位必须置 1(2026-09-24 FLAC 无声事故回归)", () => {
+    // 真实流里 STREAMINFO 之后还跟着 VORBIS_COMMENT / PADDING,libFLAC 因此把块头
+    // 写成 0x00(last=0)—— 对**完整流**而言这是正确的。
+    expect(realSegHead[4]).toBe(0x00);
+    const h = Buffer.from(flacCodecHeaderFromStream(new Uint8Array(realSegHead))!, "base64");
+    // 但 codec_header 是**单独**发给设备初始化解码器的,之后直接跟裸音频帧:
+    // 若照抄 last=0,解码器读完 STREAMINFO 会继续按「元数据块」格式解析下一段,
+    // 撞上 FLAC 帧同步码 0xFF → 块类型 = 0x7F(127)非法 → 解码失败
+    // → 日志全绿、进度照走、完全无声(240 真机:v4.0.17 发 0x80 有声,v4.0.18
+    //   发 0x00 无声,两者仅此一字节不同)。
+    expect(h[4]).toBe(0x80);
+    // 除这一位外,其余 41B 必须与实流逐字节一致 —— 只规范化标志位,不改写任何字段。
+    expect(h.subarray(5).toString("hex")).toBe(realSegHead.subarray(5, 42).toString("hex"));
   });
 
   it("非 fLaC 或长度不足返回 null(调用方回落合成值)", () => {

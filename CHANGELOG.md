@@ -2,6 +2,109 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.19] - 2026-09-24
+
+### 修复：FLAC 链路完全无声（codec_header 的 last-metadata-block 位）
+
+4.0.18 把 `stream/start` 延后到「首块音频就绪」才发，这才**第一次**真正把编码器的
+**真实 STREAMINFO** 当作 `codec_header` 送出去，于是暴露了一个字节位的错误。
+
+- **根因**：真实流里 STREAMINFO 之后还跟着 VORBIS_COMMENT / PADDING，libFLAC 因此把
+  块头写成 `0x00`（last-metadata-block = 0）—— 对**完整流**这是对的。但 `codec_header`
+  是**单独**发给设备初始化解码器的，之后设备直接收裸音频帧：照抄 `last=0` 会让解码器
+  读完 STREAMINFO 后继续按「元数据块」格式解析下一段，撞上 FLAC 帧同步码 `0xFF`
+  → 块类型字段 = `0x7F`(127) 属**非法类型** → 解码状态机失败。
+  表现极具迷惑性：**服务端日志全绿、进度照走、设备零报错，但完全无声。**
+- **实证对照**（240 真机，同一台 esp32-player-meet，两组值**仅第 5 字节不同**，
+  其余 41 字节完全一致：48k/2ch/16bit/block 4096）：
+  - v4.0.17 发 `ZkxhQ4AAACIQ…`（第 5 字节 `0x80`，last=1）→ **有声**；
+  - v4.0.18 发 `ZkxhQwAAACIQ…`（第 5 字节 `0x00`，last=0）→ **无声**。
+  之所以上一版恒为合成头：v4.0.17 的 `pushFrame` 在 `encode()` **之前**就兑现宣告，
+  编码器尚未产出任何东西 → `realFlacHeaderB64` 恒为 `undefined` → 回落合成头（自带 last=1）。
+- **修复**：`flacCodecHeaderFromStream()` 把块头的 last 位**强制置 1**（只改这一位，
+  其余 41 字节仍逐字节取自实流 —— 保留真实头不会与实流漂移的优点）。
+- **测试**：`encoding.test.ts` 新增回归用例，钉住「输入 last=0 → 输出 last=1」且
+  「其余 41B 与实流逐字节一致」。
+
+### 修复：进度条／歌词从缓冲深度起跳（预填充的副作用）
+
+- **现象**：预填充设成 10 秒后，所有歌曲一开播进度条和歌词就直接显示 `00:10`，
+  而声音明明是从头开始的（其它档位同理，偏移量 = 档位值）。
+- **根因**：对外上报的 `group.positionMs` 此前是**已推送位置**。预填充把「已推送」和
+  「已听到」拉开了整整一个缓冲深度 —— 服务端抢先灌满缓冲时，设备才刚要出声。
+- **修复**：上报改为**可听位置** = 已推送位置 − 当前设备缓冲深度
+  （`cursorUs` 与 `nowUs()` 同为 host monotonic 时钟，可直接相减）。取帧仍用
+  `playCursorMs`，只有对外上报换口径。曲末排空期间改为分段等待并持续刷新上报位置，
+  让进度平滑走到曲末（一次睡到底会让进度停在 `durationMs` 之前，拖后自动切歌判定）。
+- **保住 seek 语义**：可听位置带**下界** `reportedFloorMs`（本轮起播位置 / seek 目标）。
+  正常起播下界为 0 → 开播即 `00:00`；拖到 40s 时下界为 40s → UI 立刻显示目标值，
+  不会被「缓冲还没建立」拉低成 39.2s（MA `controller.py:862` 的 `elapsed_time` 防回跳语义）。
+- **测试**：`streamPumpSeek.test.ts` 两处「出帧即断言位置必增」改为轮询等待推进 ——
+  起播后有一段锚点提前量（≈0.8s）的静默期，此刻声音未出、进度**理应**停在起点。
+
+### 缓冲深度档位扩充 + **按设备容量自动钳制**（「匹配好」）
+
+Sendspin 插件页「设备缓冲深度（抗卡顿）」下拉新增 **15 / 20 / 25 / 30 秒**四档
+（原有 0.8 / 1.5 / 3 / 5 / 10 秒保留）。
+
+**关键：档位从「想填多少就填多少」改为「期望水位」，实际水位还要匹配设备自己宣告的缓冲容量。**
+
+- **容量从哪来**：设备在 `client/hello` 的 `player@v1_support.buffer_capacity` 里宣告
+  （真机实测 `1600000`）。单位是**字节** —— ESPHome 源码实锤：
+  `components/sendspin/__init__.py` 把 `CONF_BUFFER_SIZE`（`media_source` 里
+  `cv.int_range(min=25000)`，明显是字节）塞进 `audio_buffer_capacity`；
+  aiosendspin 同名字段作 `BufferTracker(capacity_bytes=...)` 消费。
+  协议硬约束：`server sends audio chunks as far ahead as the client's buffer capacity allows`。
+  本仓此前**完全没读这个字段**。
+- **换算**：`可用字节 = buffer_capacity × 0.6`，除以**实测压缩码率**（推流中累计
+  「压缩字节 ÷ 音频秒数」，按首清零）得到设备装得下的最长秒数；
+  再与 30 秒时长上限（= aiosendspin `PlayerPersistentState.max_duration_us` 默认
+  `30_000_000`）取小。两道尺独立生效，与 aiosendspin 一致。
+- **真机 A/B 实证**（esp32-player-meet，`buffer_capacity=1600000B`，FLAC 实测 105052 B/s）：
+  - 灌到 **100%**（档位 30s 按容量满额钳到 15230ms）→ 设备在 **PLAYING 后 15.30 秒**
+    开始连续 `sendspin.player: Failed to send audio chunk`（= 缓冲满、逐帧拒收），
+    并伴随 `Lost sync (85352us off)` 风暴。15.30s 与 `1600000/105052 = 15.23s` 吻合。
+  - 留 **0.6 余量**（钳到 9138ms）→ 100 秒全程 `Failed to send audio chunk` = 0、
+    `Lost sync` = 0。
+  - 三首不同曲目的钳制结果在**字节口径上恒为 60%**（0.96MB / 1.6MB），换算链路自洽。
+- **为什么留余量而不是像 aiosendspin 直接用 100%**：aiosendspin 累计的是每个 chunk 的
+  **真实压缩字节数**；本仓按时长记账（`depth = cursor − now`，再乘平均码率换算），
+  加上每 chunk 协议头开销与最多一帧（25ms）水位过冲，按 100% 算必然踩线。
+- **设备未宣告容量时不受影响**：退回 30 秒上限，行为与本版之前**完全一致**（向后兼容旧固件）。
+- **想用更深的档位**：请调大 ESPHome 的 `buffer_size`（容量越大，同一比例对应秒数越多），
+  而不是期望把比例调高。插件帮助文案已写明此关系与实测数据。
+
+### 修复：`client/state` 取值层级错误（真机 RAW 实测校正）
+
+补协议缺口的同一条日志意外暴露了取值位置错误 —— 真机实发 payload 为：
+
+```json
+{"state":"synchronized","player":{"volume":53,"muted":false,"static_delay_ms":0}}
+```
+
+- `state` 在**根层**，不在 `player` 里；而 `output_delay_ms` / `required_lead_time_ms` /
+  `min_buffer_ms` / `available` / `buffer_capacity` 该固件**一个都不发**。
+  也就是说：此前日志里的 `output_delay=0ms required_lead=0ms min_buffer=0ms`
+  是**缺省值**，设备从未真正上报过 —— `send_ahead` 一直走保守缺省 800ms。
+  本版改为 `state` / `available` / `buffer_capacity` **根层优先、`player` 层回落**，
+  两处都读；并额外解析 `player.static_delay_ms`（设备输出链路固有延迟）。
+- **失步时间线自有证据**：设备只在状态**翻转**时才发 `client/state`，故新增
+  `SYNC LOST (state=error)` / `synchronized` 变化日志 —— 排查「偶发卡顿」以前只能靠
+  设备侧 ESPHome 日志，现在服务端可自证。
+- **`stream/start` 门控**：spec 要求 `server MUST NOT send stream/start unless the latest
+  client/state reports available:true`，此前完全未做。现按「设备**明确上报过**
+  `available:false` 才拦，且 3 秒超时兜底」实现：未上报 `available` 的固件（真机即如此）
+  行为零变化，绝不因新增门控砸掉旧设备。
+
+### 本版验证
+
+- **单元/集成回归**：`186` 个测试文件、`1581` 个用例全绿；其中新增
+  `backend/tests/sendspin/prefillCapacity.test.ts`（17 例）钉死容量解析、
+  百分比换算、名义码率回落、下限钳制与「未宣告容量 → 退回 30s」的兼容语义。
+- **240 真机**：FLAC 链路出声（设备 `Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit`
+  → `State changed to PLAYING`）；进度从 `00:00` 起 1:1 递增；30 秒档按容量钳制后
+  100 秒零拒收、零失步。
+
 ## [4.0.18] - 2026-09-24
 
 ### Sendspin —— 抗卡顿：设备缓冲深度可配（预填充／回补）＋ 推流循环不再饿死事件循环

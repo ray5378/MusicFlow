@@ -59,6 +59,23 @@ async function waitFrames(frames: bigint[], target: number, ms: number, what: st
   }
 }
 
+/** 等**上报位置**真正超过 `from`(带超时)。
+ *
+ *  ⚠️ 为什么不能「出帧就立刻断言 positionMs 必增」:上报的是**可听位置**
+ *  (已推送 − 设备缓冲深度),起播后还有一段锚点提前量(≈0.8s)的静默期 ——
+ *  此刻声音尚未出来,进度**理应**停在跳转点。旧断言之所以成立,是因为当时上报的是
+ *  「已推送位置」,它比实际听到的声音超前整整一个缓冲(2026-09-24 真机:10s 预填充档
+ *  开播瞬间进度条显示 00:10)。改语义后这里必须改成轮询等待。 */
+async function waitAdvance(group: any, from: number, ms: number, what: string): Promise<void> {
+  const t0 = Date.now();
+  while (group.positionMs <= from) {
+    if (Date.now() - t0 > ms) {
+      throw new Error(`等位置推进超时(${what}):停在 ${group.positionMs},起点 ${from}`);
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 describe("GroupPump seek 后时间轴重锚", () => {
   it("向前跳转后立刻继续按节奏出帧(旧实现会睡掉整个跳转距离)", async () => {
     overridePumpSource(async () => injectSilencePcm(SONG_SEC));
@@ -184,7 +201,8 @@ describe("seek 目标帧栅格对齐", () => {
     expect(seen[seen.length - 1]).toBe(31_175); // 起播消费的也是对齐值
     const atStart = group.positionMs;
     await waitFrames(frames, 3, 5_000, "带 seek 起播后出帧");
-    expect(group.positionMs).toBeGreaterThan(atStart); // 确实在推进,不是停在跳转点
+    // 确实在推进,不是停在跳转点(起播静默期内停在起点属正常,故轮询等待,见 waitAdvance)。
+    await waitAdvance(group, atStart, 5_000, "带 seek 起播后位置继续推进");
     pump.stop();
   }, 20_000);
 });
@@ -216,8 +234,8 @@ describe("GroupPump 起播窗口内的 seek", () => {
     expect(group.positionMs).toBeLessThan(20_100);
     const atStart = group.positionMs;
     await waitFrames(frames, 3, 5_000, "起播后出帧");
-    // 且推流确实从 20s 之后继续推进(不是从头开始)。
-    expect(group.positionMs).toBeGreaterThan(atStart);
+    // 且推流确实从 20s 之后继续推进(不是从头开始、也不是卡死在跳转点)。
+    await waitAdvance(group, atStart, 5_000, "起播后位置继续推进");
     pump.stop();
   }, 20_000);
 });

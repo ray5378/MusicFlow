@@ -18,6 +18,7 @@
 // 通过 overridePumpSource 可注入测试音源(真实本地 WAV),默认走
 // ensurePlayableStream 解析真实网络曲源。
 
+import { PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, type WindowSource } from "./streamSource.js";
@@ -76,11 +77,12 @@ async function readSendspinStreamSource(): Promise<boolean> {
 //   - 预填充水位  → 决定**缓冲深度**,由推流循环在首帧后尽快灌满(卡顿后还会自动回补)。
 // 这正对齐 MA:producer 一路领先消费端填充,直到客户端 buffer_capacity 上限。
 
-/** 预填充缓冲的合法区间与缺省值(毫秒)。
- *  - 下限 100ms:再低就没有抗抖动意义;
- *  - 上限 30000ms:再高设备缓冲装不下(PCM 30s ≈ 5.76MB),且切歌间隙难接受。 */
-export const PREFILL_BUFFER_MIN_MS = 100;
-export const PREFILL_BUFFER_MAX_MS = 30_000;
+// 预填充缓冲的合法区间:定义搬到 constants.ts(server.ts 的
+// capacityLimitedPrefillMs 也要用,若留在本文件会与 `import ... from
+// "./server.js"` 形成循环 import)。此处 re-export 保持对外 API 与
+// 既有引用/测试不变。
+export { PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
+/** 缺省水位(毫秒):3 秒 —— 抗抖动与切歌间隙的折中。 */
 export const PREFILL_BUFFER_DEFAULT_MS = 3_000;
 
 /** 归一化插件配置里的 `prefill_buffer_ms`(下拉档位存的是字符串):非法/越界回落缺省。 */
@@ -381,6 +383,19 @@ export class GroupPump {
    *  contentEnded → finishPlayback → 设备 IDLE、预建流作废(2026-09-22 真机实锤,
    *  FP-TRACE 堆栈钉死 pushLoop EOF 路径)。原则:**共享位置只写不读**,取帧一律用本游标。 */
   private playCursorMs = 0;
+  /** ★ 对外上报进度的**下界**(本轮起播位置 / seek 目标)。
+   *
+   *  为什么需要:上报的是「可听位置」(已推送 − 缓冲深度),它天然落后于已推送量:
+   *   - 正常起播(startMs=0)时落后约一个锚点提前量 → 下界 0,开播即显示 00:00 ✅
+   *     (这正是「预填充 10s 档开播就显示 00:10」的修复点);
+   *   - 但 **seek 到 40s** 时若也这么算,首帧会显示 39.2s —— 而 MA 的权威语义是
+   *     ① 先发布 `elapsed_time = position` 防 UI 回跳(controller.py @862),拖动后
+   *     UI 必须立刻看到目标值。把刚发布的目标又拉低 = 用户观感「拖了没到位」。
+   *
+   *  故可听位置的下界取「本轮已发布的目标」,由 play()(起播位置)与 seek()(目标)
+   *  两处写入 —— 与 `pendingSeekMs` 的区别:那个是**给音源 -ss 用的起播偏移**,
+   *  这个是**给 UI 用的上报地板**,两者数值相同但用途不同、都不该互相替代。 */
+  private reportedFloorMs = 0;
   private pcm: Float32Array | null = null;
   private window: PcmWindow | null = null;
   private durationMs = 0;
@@ -550,6 +565,9 @@ export class GroupPump {
     this.pendingSeekMs = null;
     this.playCursorMs = startMs;
     this.group.positionMs = startMs;
+    // 本轮上报下界 = 起播位置(见 reportedFloorMs 注释:正常起播为 0,
+    // 带 seek 起播时为目标位置,防止刚发布的目标被可听位置拉低)。
+    this.reportedFloorMs = startMs;
     // 起播跳转已由音源工厂的 `-ss` 完成(见 startMsForSource),无需再 seekTo ——
     // 此处若再调一次会 kill 刚 spawn 的 ffmpeg 并重起,白白多一次冷起空窗。
     /** pacing 锚点对:起播位置 ⇄ 现在。带 seek 起播时锚点必须是 startMs,
@@ -570,6 +588,28 @@ export class GroupPump {
       try { this.window.close(); } catch { /* ignore */ }
       this.window = null;
     }
+  }
+
+  /** 设备此刻**正在播出**的媒体位置 = 已推送位置 − 仍排在设备缓冲里的量。
+   *
+   *  ⚠️ 为什么必须减:预填充(B1)把「已推送」和「已听到」拉开了整整一个缓冲深度。
+   *  服务端按快于实时的速度把缓冲灌满,设备仍按实时播 —— 于是 `framePosMs` 一开局
+   *  就已经是 10s,而扬声器才刚要出第一个字节。直接把已推送量当进度报,表现就是
+   *  「10s 档开播瞬间进度条和歌词都显示 00:10」(2026-09-24 真机),声音却从头开始。
+   *
+   *  `cursorUs`(时间线游标)与 `nowUs()`(host monotonic)同源,相减即设备侧
+   *  当前缓冲深度(微秒 → 毫秒)。
+   *
+   *  下界 `floorMs`:本轮已发布的目标(起播位置 / seek 目标)。可听位置低于它时取它
+   *  —— 既有「开播显示 00:00」的修复效果(正常起播 floor=0),又保住 MA 的
+   *  「拖动后立刻显示目标值」语义(见 reportedFloorMs 注释)。
+   *
+   *  边界:缓冲被抽干(卡顿/停滞)时深度变负 → 位置不得超过已推送量。 */
+  private audiblePositionMs(pushedMs: number, cursorUs: bigint, floorMs: number): number {
+    const depthMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+    const audible = pushedMs - depthMs;
+    if (audible > pushedMs) return pushedMs;
+    return audible < floorMs ? floorMs : audible;
   }
 
   /** 推流主循环:按真实墙钟节奏取 PCM 段 → 编码 → 下发,时间戳按**实测样本数**推进。 */
@@ -613,11 +653,24 @@ export class GroupPump {
     let consumedReseed = this.timelineReseed;
     /** 连续未让出宏任务的帧数(B2,见 YIELD_EVERY_FRAMES 注释)。 */
     let sinceYield = 0;
+    /** 本轮最后一次「已推送」的媒体位置(曲末排空期间刷新上报进度用)。
+     *  循环外可见:`framePosMs` 是循环内 const,排空代码在循环之后。 */
+    let lastPushedMs = this.playCursorMs;
+    /** 本轮上报下界:一开始就固定,避免中途被 seek 改写后前后帧判据不一致。 */
+    const floorMs = this.reportedFloorMs;
     const yieldEveryN = async (): Promise<void> => {
       if (++sinceYield < YIELD_EVERY_FRAMES) return;
       sinceYield = 0;
       await yieldToEventLoop();
     };
+
+    // 码率计量按首清零:压缩字节/秒只与 codec 有关,跨歌复用会让「上一首的
+    // 码率」冒充「本首的码率」把容量换算算歪(见 SendspinGroup.encodedBytesPerSec)。
+    // ⚠️ 全部用可选调用:单测里的最小 stub group 没有这些方法,直接调会抛。
+    this.group.resetPushMeter?.();
+    // 档位被设备容量钳制只提示**一次**(每首歌一次):日志里能看到「你选了
+    // 30s,设备只能装 Ns」,而不是静默削弱 —— 排障时这是第一手证据。
+    let cappedLogged = false;
 
     try {
       while (this.running && this.epoch === myEpoch) {
@@ -792,7 +845,12 @@ export class GroupPump {
           : i * FRAME_MS + FRAME_MS; // 时长未知(流式元数据缺失):不钳制,
         // 否则 position 恒 0 → 同一片无限重推 ＋ pacing 永不 sleep,饿死事件循环
         this.playCursorMs = framePosMs;
-        this.group.positionMs = framePosMs;
+        lastPushedMs = framePosMs;
+        // ★ 上报进度必须是「设备此刻正在播」的位置,不能是「已推送」的位置
+        //   (2026-09-24 真机:预填充 10s 档下,开播瞬间进度条与歌词直接显示 00:10,
+        //    而声音明明从头开始 —— 已推送量比实际听到的多出整整一个缓冲深度)。
+        //  取帧仍用 playCursorMs(已推送),只有对外上报走可听位置。
+        this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
         // ⚠️⚠️ 必须用**绝对时刻调度**,不能用「每轮固定 sleep(FRAME_MS)」(2026-09-17 实锤)。
         //
         // 固定 sleep 的致命缺陷:`await sleep(25)` 之外还有 encode/send/pushFrame 本身的开销,
@@ -811,7 +869,29 @@ export class GroupPump {
         // 卡顿/停滞期间墙钟照走而游标不动 → 深度被抽干,且旧行为**补不回来**
         // (按实时速率推,差值永远填不满) → 缓冲长期浅 → 持续卡顿。
         const depthUs = Number(cursorUs) - Number(nowUs());
-        const targetUs = prefillTargetMs() * 1000;
+        // ★ 档位 × 设备容量匹配:下拉里选的 `prefill_buffer_ms` 只是**期望值**,
+        //   真正的目标水位还要受设备宣告的缓冲容量(压缩字节数)与 30s 时长上限
+        //   钳制(见 SendspinGroup.capacityLimitedPrefillMs)。设备未宣告容量时
+        //   上界就是 30s,行为与不引入本逻辑前完全一致。
+        const capacityCapMs = this.group.capacityLimitedPrefillMs?.() ?? PREFILL_BUFFER_MAX_MS;
+        const wantedMs = prefillTargetMs();
+        const targetUs = Math.min(wantedMs, capacityCapMs) * 1000;
+        // ⚠️ 等到**已有实测码率**再打:首帧时 pushedSamples 还是 0,码率走名义回落
+        //   (FLAC 名义 134400B/s),打出来的实际秒数偏保守,会让人误以为「设备只能装这么点」。
+        //   真机实测 105052B/s → 1.6MB 装 15.2s;名义值算出来只有 11.9s。
+        if (!cappedLogged && wantedMs > capacityCapMs && this.group.hasMeasuredRate?.()) {
+          cappedLogged = true;
+          const capB = this.group.deviceCapacityBytes?.() ?? 0;
+          const rateB = this.group.encodedBytesPerSec?.() ?? 0;
+          const wantB = Math.round((capacityCapMs / 1000) * rateB);
+          logSafe(
+            this.server,
+            "info",
+            `sendspin 预填充水位按设备容量钳制:档位=${wantedMs}ms → 实际=${capacityCapMs}ms ` +
+              `(设备 buffer_capacity=${capB}B, 实测码率=${Math.round(rateB)}B/s, ` +
+              `目标占用≈${wantB}B=${Math.round((wantB * 100) / Math.max(1, capB))}%) song=${this.songId}`,
+          );
+        }
         // ⚠️ 两个必须的条件:
         //  ① 目标水位必须**严格大于**锚点(800ms)。选「0.8 秒(关闭预填充)」档时
         //     target == anchor,此时若用 `<` 比较,深度恒比目标少几微秒(取时刻差
@@ -872,7 +952,17 @@ export class GroupPump {
               "info",
               `sendspin 曲末排空:等设备播完缓冲 ${Math.round(extraDrainMs)}ms 后再收流 song=${this.songId}`,
             );
-            await sleep(Math.min(extraDrainMs, PREFILL_BUFFER_MAX_MS));
+            // 分段等待而不是一次睡到底:每步按墙钟刷新上报进度,让进度条/歌词
+            // 平滑走到曲末。一次睡到底会让进度停在 durationMs 之前,拖后自动切歌判定。
+            const drainStepMs = 200;
+            for (
+              let left = Math.min(extraDrainMs, PREFILL_BUFFER_MAX_MS);
+              left > 0;
+              left -= drainStepMs
+            ) {
+              await sleep(Math.min(drainStepMs, left));
+              this.group.positionMs = this.audiblePositionMs(lastPushedMs, cursorUs, floorMs);
+            }
           }
         }
         this.running = false;
@@ -960,6 +1050,9 @@ export class GroupPump {
     log.debug(`[pump][seek] group=${this.group.name} want=${wantMs}ms target=${targetMs}ms 对齐=${alignedMs}ms dur=${this.durationMs} running=${this.running} paused=${this.paused} window=${!!this.window}`);
     // ① 发布位置对(防 UI 拿旧值回跳)。
     this.group.positionMs = alignedMs;
+    // ① 之后还要记住这个下界:新 pushLoop 的首帧会按「可听位置」上报,而刚拖动完
+    // 缓冲还没建立,可听位置会低于目标 —— 不设下界 UI 会看到「拖到 40s 却显示 39.2s」。
+    this.reportedFloorMs = alignedMs;
     if (!this.running || !this.songId) {
       // 泵未运行(空闲/起播窗口):MA 对应 resume_with_position —— 记起播位置,
       // 下一次 play() 起流即带 -ss 消费,无需现在重建。

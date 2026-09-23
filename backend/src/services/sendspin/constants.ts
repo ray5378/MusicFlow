@@ -25,4 +25,19 @@ export const BIN_ARTWORK_BASE = 8; // 8..11
 export const BIN_SOURCE_AUDIO = 12;
 export const BIN_VISUALIZER_BASE = 16; // 16..21
 
+// ---- 预填充缓冲水位的合法区间(毫秒)。放在 constants 里而不是 streamEngine:
+//      server.ts(SendspinGroup.capacityLimitedPrefillMs)也要用,而 streamEngine
+//      是 import server.js 的下游 —— 常量放那边会形成循环 import。
+//      streamEngine 仍 re-export 这三个,维持既有引用路径与测试不变。
+
+/** 下限 100ms:再低就没有抗抖动意义。 */
+export const PREFILL_BUFFER_MIN_MS = 100;
+/** 上限 30000ms —— **两道独立的尺**同时生效(对照 aiosendspin `BufferTracker`):
+ *   ① 时长:等于 aiosendspin `PlayerPersistentState.max_duration_us` 默认
+ *      30_000_000,协议侧的时长天花板;
+ *   ② 字节:设备 `client/hello` 宣告的 `buffer_capacity`(byte,= ESPHome 的
+ *      `buffer_size`)÷ 实测压缩码率(见 SendspinGroup.capacityLimitedPrefillMs)。
+ *  设备未宣告容量时只有 ① 生效,行为与引入容量匹配前完全一致。 */
+export const PREFILL_BUFFER_MAX_MS = 30_000;
+
 export type PskCategory = "lt" | "pr" | "sn";

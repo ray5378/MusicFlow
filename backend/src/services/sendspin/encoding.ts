@@ -152,11 +152,33 @@ export function flacCodecHeaderB64(
 
 /** 从一段真实 FLAC 字节里提取前 42B(`fLaC` + STREAMINFO 块头 + 34B STREAMINFO)并 base64。
  *  这是**唯一保证声明与流一致**的做法:不再手工合成字段。
- *  入参非法(非 fLaC 或长度不足)时返回 null,调用方回落到 `flacCodecHeaderB64()`。 */
+ *  入参非法(非 fLaC 或长度不足)时返回 null,调用方回落到 `flacCodecHeaderB64()`。
+ *
+ *  ⚠️⚠️ 必须把 STREAMINFO 的 **last-metadata-block 位置 1**(2026-09-24 真机事故)。
+ *  真实流里 STREAMINFO 后面还跟着 VORBIS_COMMENT / PADDING,libFLAC 因此把它的
+ *  块头写成 `0x00`(last=0)。但 `codec_header` 是**单独**发给设备初始化解码器用的,
+ *  设备之后直接收裸音频帧 —— 若照抄 last=0,解码器读完 STREAMINFO 会继续按
+ *  「元数据块」格式解析下一段,而下一个字节是 FLAC 帧的同步码 `0xFF`
+ *  ⇒ 块类型字段 = `0x7F`(127)是**非法类型** ⇒ 解码状态机失败 ⇒
+ *  **日志全绿、进度照走、完全无声**。
+ *
+ *  实测对照(240 真机,同一台 esp32-player-meet):
+ *   - v4.0.17 发出的值 `ZkxhQ4AAACIQ...`(第 5 字节 0x80,last=1)→ 有声;
+ *   - v4.0.18 发出的值 `ZkxhQwAAACIQ...`(第 5 字节 0x00,last=0)→ 无声。
+ *     两者**仅第 5 字节不同**,其余 41B 完全一致(48k/2ch/16bit/block 4096)。
+ *  之所以上一版恒为合成头:v4.0.17 的 `pushFrame` 在 `encode()` **之前**就兑现宣告,
+ *  编码器尚未产出 ⇒ `realFlacHeaderB64` 恒为 undefined ⇒ 回落合成头(自带 last=1)。
+ *  v4.0.18 把宣告延后到首块就绪后才**第一次真正送出真实头**,于是暴露了这一位。
+ *
+ *  置 1 后与合成头的语义一致(声明"元数据到此为止,后面全是帧"),同时保留真实头的
+ *  block size / 位深 / 采样率等字段不会与实流漂移的优点。 */
 export function flacCodecHeaderFromStream(seg: Uint8Array): string | null {
   if (seg.length < 42) return null;
   if (seg[0] !== 0x66 || seg[1] !== 0x4c || seg[2] !== 0x61 || seg[3] !== 0x43) return null;
-  return Buffer.from(seg.subarray(0, 42)).toString("base64");
+  const head = Buffer.from(seg.subarray(0, 42));
+  // 第 5 字节 = 元数据块头:bit7 = last-metadata-block,bit0..6 = 块类型(STREAMINFO=0)。
+  head[4] = (head[4] & 0x7f) | 0x80;
+  return head.toString("base64");
 }
 
 /**
