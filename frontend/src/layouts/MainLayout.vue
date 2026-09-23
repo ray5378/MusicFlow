@@ -73,8 +73,8 @@
               v-for="p in playerStore.peersForSwitcher"
               :key="p.peerId"
               class="controls-peer-item"
-              :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
-              @click="onControlsSwitchPeer(p.peerId)"
+              :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available, managing: groupManageId === p.peerId }"
+              @click="isGroupPeer(p) ? toggleGroupManage(p) : onControlsSwitchPeer(p.peerId)"
             >
               <MfIcon name="Speaker" class="controls-peer-icon" />
               <div class="controls-peer-info">
@@ -84,7 +84,8 @@
                   <span v-if="!p.available" class="controls-peer-offline">{{ t('layout.offline') }}</span>
                 </div>
                 <div class="controls-peer-meta">
-                  <span v-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
+                  <span v-if="isGroupPeer(p) && groupManageId === p.peerId">{{ t('layout.groupManaging', { name: playerStore.peerDisplayName(p) }) }}</span>
+                  <span v-else-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
                     {{ p.queue.total ?? p.queue.items?.length }} {{ t('layout.tracksUnit') }}
                     <span v-if="p.queue.isActive">
                       · {{ t('layout.playing') }}
@@ -94,7 +95,21 @@
                   <span v-else>{{ t('layout.idle') }}</span>
                 </div>
               </div>
-              <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId" class="controls-peer-check" />
+              <span
+                v-if="groupManageId && groupCheckable(p)"
+                class="controls-peer-gcheck"
+                :class="{ on: inSelectedGroup(p) }"
+                :title="inSelectedGroup(p) ? t('layout.groupLeave') : t('layout.groupJoin')"
+                @click.stop="toggleGroupMember(p)"
+              >✓</span>
+              <MfIcon
+                v-else-if="isGroupPeer(p)"
+                name="Play"
+                class="controls-peer-goplay"
+                :title="t('layout.transferPlaybackBtn')"
+                @click.stop="onControlsSwitchPeer(p.peerId)"
+              />
+              <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId && !(groupManageId && groupCheckable(p))" class="controls-peer-check" />
             </div>
             <div v-if="playerStore.peers.length === 0" class="controls-peer-empty">{{ t('layout.noPeerAvailable') }}</div>
           </div>
@@ -273,8 +288,8 @@
                 v-for="p in playerStore.peersForSwitcher"
                 :key="p.peerId"
                 class="peer-switcher-item"
-                :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available }"
-                @click="onSwitchPeer(p.peerId)"
+                :class="{ active: p.peerId === playerStore.currentPeerId, unavailable: !p.available, managing: groupManageId === p.peerId }"
+                @click="isGroupPeer(p) ? toggleGroupManage(p) : onSwitchPeer(p.peerId)"
               >
                 <MfIcon name="Speaker" class="psi-icon" />
                 <div class="psi-info">
@@ -284,7 +299,8 @@
                     <span v-if="!p.available" class="psi-offline">{{ t('layout.offline') }}</span>
                   </div>
                   <div class="psi-meta">
-                    <span v-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
+                    <span v-if="isGroupPeer(p) && groupManageId === p.peerId">{{ t('layout.groupManaging', { name: playerStore.peerDisplayName(p) }) }}</span>
+                    <span v-else-if="p.queue && (p.queue.total ?? (p.queue.items?.length ?? 0)) > 0">
                       {{ p.queue.total ?? p.queue.items?.length }} {{ t('layout.tracksUnit') }}
                       <span v-if="p.queue.isActive">
                         · {{ t('layout.playing') }}
@@ -294,7 +310,21 @@
                     <span v-else>{{ t('layout.idle') }}</span>
                   </div>
                 </div>
-                <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId" class="psi-check"  />
+                <span
+                  v-if="groupManageId && groupCheckable(p)"
+                  class="psi-gcheck"
+                  :class="{ on: inSelectedGroup(p) }"
+                  :title="inSelectedGroup(p) ? t('layout.groupLeave') : t('layout.groupJoin')"
+                  @click.stop="toggleGroupMember(p)"
+                >✓</span>
+                <MfIcon
+                  v-else-if="isGroupPeer(p)"
+                  name="Play"
+                  class="psi-goplay"
+                  :title="t('layout.transferPlaybackBtn')"
+                  @click.stop="onSwitchPeer(p.peerId)"
+                />
+                <MfIcon name="Check" v-if="p.peerId === playerStore.currentPeerId && !(groupManageId && groupCheckable(p))" class="psi-check"  />
               </div>
               <div v-if="playerStore.peers.length === 0" class="peer-switcher-empty">{{ t('layout.noPeerAvailable') }}</div>
             </div>
@@ -494,6 +524,7 @@ import { useFavoritesStore } from "@/stores/favorites";
 import GlobalItemUI from "@/components/GlobalItemUI.vue";
 import PreProbeNotice from "@/components/PreProbeNotice.vue";
 import { ElMessage } from "element-plus";
+import { formatApiError } from "@/api";
 import api from "@/api";
 import { PERM } from "@/utils/perms";
 import { coverUrl as coverArtUrl } from "@/utils/cover";
@@ -701,6 +732,79 @@ const dlnaScanning = ref(false);
 
 const peerSwitcherVisible = ref(false);
 const volumePopoverVisible = ref(false);
+
+/* ===== 群组管理模式(动态组成员勾选) =====
+   点群组行 = 进入/退出该组的管理模式(不切遥控);管理模式下每个设备型播放器
+   (dlna / sendspin)行尾出现勾选框:勾选 = 加入群组,取消 = 退出群组,与客户端
+   「点群组选中 → 设备圆下 +/−」和 HA 卡片「群组管理模式 → 设备徽标 +/−」同一套
+   后端语义(POST /v1/groups/:id/members {add,remove})。
+   memberIds 命名空间与 peerId 一致(sendspin:<clientId> / dlna:<deviceId>;
+   历史数据里的裸 id ≡ DLNA,匹配前归一化)。 */
+const groupManageId = ref("");
+const groupMembers = ref<Set<string>>(new Set());
+const groupBusy = ref(false);
+
+function isGroupPeer(p: any): boolean {
+  return typeof p?.peerId === "string" && p.peerId.startsWith("group:");
+}
+
+// 管理模式下能被勾选的行:设备型(dlna / sendspin)。组不能嵌组,本机不进组。
+function groupCheckable(p: any): boolean {
+  if (!groupManageId.value) return false;
+  const id = String(p?.peerId || "");
+  return id.startsWith("dlna:") || id.startsWith("sendspin:");
+}
+
+function inSelectedGroup(p: any): boolean {
+  return groupMembers.value.has(String(p?.peerId || ""));
+}
+
+async function toggleGroupManage(p: any) {
+  if (!isGroupPeer(p)) return;
+  const gid = p.peerId;
+  if (groupManageId.value === gid) {
+    // 再点一次 = 退出管理模式。
+    groupManageId.value = "";
+    groupMembers.value = new Set();
+    return;
+  }
+  if (groupBusy.value) return;
+  groupBusy.value = true;
+  try {
+    const res = await api.get("/rest/api/v1/groups");
+    const hit = (res.data?.groups || []).find((g: any) => g.id === gid.slice(6) || `group:${g.id}` === gid);
+    // 裸 id(历史数据) ≡ DLNA,统一补 dlna: 前缀再与 peerId 匹配。
+    const ids = (hit?.memberIds || []).map((m: string) =>
+      m.includes(":") ? m : `dlna:${m}`
+    );
+    groupManageId.value = gid;
+    groupMembers.value = new Set(ids);
+  } catch (e: any) {
+    ElMessage.error(formatApiError(e));
+  } finally {
+    groupBusy.value = false;
+  }
+}
+
+async function toggleGroupMember(p: any) {
+  const gid = groupManageId.value;
+  if (!gid || groupBusy.value) return;
+  const peerId = String(p.peerId);
+  const joining = !groupMembers.value.has(peerId);
+  groupBusy.value = true;
+  try {
+    await api.post(`/rest/api/v1/groups/${gid.slice(6)}/members`, joining ? { add: [peerId] } : { remove: [peerId] });
+    const next = new Set(groupMembers.value);
+    if (joining) next.add(peerId); else next.delete(peerId);
+    groupMembers.value = next;
+    ElMessage.success(joining ? t("layout.groupJoined", { name: playerStore.peerDisplayName(p) }) : t("layout.groupLeft", { name: playerStore.peerDisplayName(p) }));
+    playerStore.refreshPeers();
+  } catch (e: any) {
+    ElMessage.error(formatApiError(e));
+  } finally {
+    groupBusy.value = false;
+  }
+}
 
 /* ===== 手机端滑动/系统返回关闭所有弹窗 =====
    思路：任一弹窗（播放模式/播放列表/更多/音量/侧边栏）打开时 history.pushState
@@ -1792,6 +1896,7 @@ watch(controlsDrawerOpen, (open) => {
   cursor: pointer; transition: background 0.15s;
   color: var(--fnos-text-primary-dim);
   &:hover { background: rgba(255, 255, 255, 0.06); }
+  &.managing { background: rgba(255, 255, 255, 0.08); }
   &.active {
     background: linear-gradient(90deg, rgba(246, 44, 85, 0.18) 0%, rgba(246, 44, 85, 0.04) 100%);
     .psi-name { color: var(--fnos-red); }
@@ -1823,6 +1928,19 @@ watch(controlsDrawerOpen, (open) => {
     }
   }
   .psi-check { color: var(--fnos-red); font-size: 16px; flex-shrink: 0; }
+  .psi-gcheck {
+    flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; cursor: pointer; user-select: none;
+    border: 1.5px solid var(--fnos-border, #dcdfe6); color: transparent;
+    transition: all .18s ease;
+    &:hover { border-color: var(--fnos-red); }
+    &.on { background: var(--fnos-red); border-color: var(--fnos-red); color: #fff; }
+  }
+  .psi-goplay {
+    flex-shrink: 0; font-size: 15px; color: var(--fnos-text-tertiary); cursor: pointer;
+    &:hover { color: var(--fnos-red); }
+  }
 }
 .peer-switcher-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 20px 0; }
 .peer-switcher-scan {
@@ -1870,6 +1988,20 @@ watch(controlsDrawerOpen, (open) => {
     .controls-playing-title { color: var(--fnos-yellow); }
   }
   .controls-peer-check { color: var(--fnos-red); font-size: 16px; flex-shrink: 0; }
+  .controls-peer-gcheck {
+    flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; cursor: pointer; user-select: none;
+    border: 1.5px solid var(--fnos-border, #dcdfe6); color: transparent;
+    transition: all .18s ease;
+    &:hover { border-color: var(--fnos-red); }
+    &.on { background: var(--fnos-red); border-color: var(--fnos-red); color: #fff; }
+  }
+  .controls-peer-goplay {
+    flex-shrink: 0; font-size: 15px; color: var(--fnos-text-tertiary); cursor: pointer;
+    &:hover { color: var(--fnos-red); }
+  }
+  &.managing { background: var(--fnos-hover, rgba(0,0,0,.04)); }
 }
 .controls-peer-empty { text-align: center; color: var(--fnos-text-muted); font-size: 13px; padding: 16px 0; }
 .controls-scan { padding-top: 8px;
