@@ -285,9 +285,12 @@ describe("transcodeArgs(P1-5):音质档位与af同一次进程", () => {
         timeOffsetSec: 30,
       }),
     ).toEqual([
-      "-hide_banner", "-loglevel", "error",
+      "-hide_banner", "-loglevel", "error", "-nostats", "-ignore_unknown",
       "-ss", "30",
       "-headers", "Authorization: Basic eDp5",
+      "-protocol_whitelist", "file,hls,http,https,tcp,tls,crypto,pipe,data,fd,rtp,udp,concat",
+      "-probesize", "8096",
+      "-analyzeduration", "500000",
       "-i", "/m/a.flac",
       "-vn", "-sn", "-dn", "-map", "0:a:0",
       "-c:a", "libmp3lame", "-b:a", "192k",
@@ -302,7 +305,7 @@ describe("transcodeArgs(P1-5):音质档位与af同一次进程", () => {
       bitrateKbps: 256,
       af: ["loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json", "alimiter=limit=-1dB:level=false:asc=true:latency=true"],
     });
-    expect(a.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "info", "-i"]);
+    expect(a.slice(0, 5)).toEqual(["-hide_banner", "-loglevel", "info", "-nostats", "-ignore_unknown"]);
     expect(a).toContain("-af");
     expect(a.slice(-7)).toEqual(["-c:a", "aac", "-b:a", "256k", "-f", "adts", "-"]);
     expect(a).not.toContain("pipe:1");

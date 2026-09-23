@@ -40,12 +40,26 @@ describe("decodeArgs ①解码(跟随源)", () => {
 
   it("链里有 loudnorm 才提 loglevel 到 info(否则 JSON 被过滤,P0-4 拿不到测量)", () => {
     const plain = decodeArgs({ input: "/m/a.flac" });
-    expect(plain.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "error", "-i"]);
+    expect(plain.slice(0, 5)).toEqual(["-hide_banner", "-loglevel", "error", "-nostats", "-ignore_unknown"]);
     const withNorm = decodeArgs({
       input: "/m/a.flac",
       af: ["loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json", "alimiter=limit=-1dB:level=false:asc=true:latency=true"],
     });
-    expect(withNorm.slice(0, 4)).toEqual(["-hide_banner", "-loglevel", "info", "-i"]);
+    expect(withNorm.slice(0, 5)).toEqual(["-hide_banner", "-loglevel", "info", "-nostats", "-ignore_unknown"]);
+  });
+
+  it("P0:每个 -i 前带 MA _INPUT_READ_ARGS;http 无 -f 时带重连,本地/lavfi 不带", () => {
+    const local = decodeArgs({ input: "/m/a.flac" });
+    expect(local.indexOf("-probesize")).toBeLessThan(local.indexOf("-i"));
+    expect(local.indexOf("-protocol_whitelist")).toBeLessThan(local.indexOf("-i"));
+    expect(local.indexOf("-reconnect")).toBe(-1);
+    const lavfi = decodeArgs({ input: "sine=frequency=440", inputFormat: "lavfi" });
+    expect(lavfi.indexOf("-reconnect")).toBe(-1);
+    expect(lavfi.indexOf("-f")).toBeLessThan(lavfi.indexOf("-i"));
+    const http = decodeArgs({ input: "http://127.0.0.1:1/rest/dlna/stream/x?raw=1" });
+    expect(http.indexOf("-reconnect")).toBeGreaterThan(-1);
+    expect(http.indexOf("-reconnect")).toBeLessThan(http.indexOf("-i"));
+    expect(http.indexOf("-probesize")).toBeLessThan(http.indexOf("-reconnect"));
   });
 
   it("headers/inputFormat 透传;af 在 -i 之后;forceRate/Channels 以输出选项追加", () => {

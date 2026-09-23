@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.15] - 2026-09-23
+
+### 对齐 MA —— ffmpeg 解码参数（P0）+ 滑动窗口 300s（BALANCED）
+
+- **ffmpeg 参数对齐 MA（P0）**（`audio/pipeline.ts`）：
+  - 新增 `INPUT_READ_ARGS`：每输入自带 `protocol_whitelist` + `probesize 8096` + `analyzeduration 500000`（对齐 MA `_INPUT_READ_ARGS`，起播/切歌不再等满 5MB 默认探测）；
+  - 新增 `HTTP_RECONNECT_ARGS`：http(s) 输入补 `-reconnect 1 -reconnect_delay_max 10 -reconnect_streamed 1 -reconnect_on_network_error 0 -reconnect_on_http_error 5xx,429`（对齐 MA `get_ffmpeg_args` 重连窗）；
+  - 全局补 `-nostats -ignore_unknown`。
+- **滑动窗口 30→300 秒**（`sendspin/streamSource.ts`）：`WINDOW_HIGH_SEC=300` / `WINDOW_LOW_SEC=290`（滞回 10s 同宽），对齐 MA `BUFFER_SIZE_MAP[BALANCED]`（240 ≥4GB 落 BALANCED）。未消费前沿 PCM 上限 ~115MB（Buffer 外部内存，不占 V8 老生代）；5 分钟曲内 seek 回跳几乎总能命中窗口。
+- **概念分层写清**：300s = 服务端 PCM 解码环；MA `_PRODUCER_BUFFER_LIMIT_US`（30→60s，发送侧推流背压，MA 源码侧已改）是另一层，注释与设计文档 §2.5 已区分。
+- **插件 help（中英）与设计文档同步**：30s/11.5MB → 300s/115MB；`SENDSPIN_MULTIROOM_STREAMING_PLAN.md` §2.1/2.2/2.5/§A 重写（60→30→300 演进、水位 290/300、MA 侧 60s ≈26MB）。
+- **测试**：pipeline / transcode / streamSource 相关用例同步；`tsc --noEmit` 0；`check-i18n` 0。
+- **240 热补丁核验 + CPU 峰值压测**：容器内 grep 全部参数在位、`/ping` ok；12–16×`yes` 忙等使 loadavg 峰值 23.11，期间 `state=PLAYING` 位置线性推进、无 STALL；20:11:44–51 卡顿反馈经 events/docker 日志对齐为**自然切歌**（`contentEnded` → `advance` → dur 170→126），非卡死。
+
 ## [4.0.14] - 2026-09-23
 
 ### 优化 —— 播放优选：WebDAV 可播「成功记忆」（跳转性能 F 项）

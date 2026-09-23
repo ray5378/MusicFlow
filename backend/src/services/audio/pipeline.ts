@@ -59,22 +59,60 @@ export interface DecodeRequest {
 }
 
 /**
+ * MA `_INPUT_READ_ARGS`(helpers/ffmpeg.py:43-50):ffmpeg 把这些套在**单个** -i 前,
+ * 不是全局命令行 —— 每个输入都得自带一份。小 probesize/analyzeduration 让格式探测
+ * 不再等满 5MB 默认值(起播/切歌更快);protocol_whitelist 按 MA 白名单收口。
+ */
+export const INPUT_READ_ARGS = [
+  "-protocol_whitelist",
+  "file,hls,http,https,tcp,tls,crypto,pipe,data,fd,rtp,udp,concat",
+  "-probesize",
+  "8096",
+  "-analyzeduration",
+  "500000",
+] as const;
+
+/**
+ * MA `get_ffmpeg_args` 里对 `input_path.startswith("http")` 且 extra 无 `-f` 的输入
+ * 追加的 HTTP 重连参数(ffmpeg.py:550-569)。我们回环 token / 远程源同构。
+ */
+export const HTTP_RECONNECT_ARGS = [
+  "-reconnect",
+  "1",
+  "-reconnect_delay_max",
+  "10",
+  "-reconnect_streamed",
+  "1",
+  "-reconnect_on_network_error",
+  "0",
+  "-reconnect_on_http_error",
+  "5xx,429",
+] as const;
+
+/**
  * 解码段参数:输出 F32 交错 PCM 到 stdout。
  * 刻意**不加 -ar/-ac**(采样率/声道跟随源,重采样下沉到⑥);
  * `-vn -sn -dn -map 0:a:0` 只取首音频流(封面/字幕不进管道)。
+ * 全局 `-nostats -ignore_unknown` + 每输入 `INPUT_READ_ARGS` 对齐 MA(P0)。
  */
 export function decodeArgs(req: DecodeRequest): string[] {
   // loudnorm 的 JSON 报告走 info 级打印(print_format=json 在流结束时输出):
   // 链里有它就必须把 loglevel 提到 info,否则 P0-4 拿不到测量值;
   // 无则保持 error(静默,沿用旧行为)。
   const needsInfo = (req.af ?? []).some(f => f.includes("loudnorm"));
-  const args = ["-hide_banner", "-loglevel", needsInfo ? "info" : "error"];
+  // MA 全局参数序:ffmpeg -hide_banner -loglevel <lv> -nostats -ignore_unknown
+  const args = ["-hide_banner", "-loglevel", needsInfo ? "info" : "error", "-nostats", "-ignore_unknown"];
   if (req.timeOffsetSec !== undefined && Number.isFinite(req.timeOffsetSec) && req.timeOffsetSec > 0) {
     args.push("-ss", String(req.timeOffsetSec));
   }
   if (req.headers && Object.keys(req.headers).length > 0) {
     const lines = Object.entries(req.headers).map(([k, v]) => `${k}: ${v}`);
     args.push("-headers", lines.join("\r\n"));
+  }
+  args.push(...INPUT_READ_ARGS);
+  // MA:仅 http(s) 输入且未显式 -f 时补重连(本地路径 / lavfi 测试不带)。
+  if (!req.inputFormat && /^https?:\/\//i.test(req.input)) {
+    args.push(...HTTP_RECONNECT_ARGS);
   }
   if (req.inputFormat) args.push("-f", req.inputFormat);
   args.push("-i", req.input, "-vn", "-sn", "-dn", "-map", "0:a:0");

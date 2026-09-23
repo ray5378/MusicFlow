@@ -65,10 +65,8 @@ beforeAll(async () => {
     "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-y", wav30,
   ]);
   ref30 = await decodeToF32(new Uint8Array(fs.readFileSync(wav30)));
-  // 重定位代数用例需要一条**远长于背压高水位(30s)**的素材:
-  // 窗口只在消费前沿之后攒 WINDOW_HIGH_SEC=30s 就 pause stdout,所以 30s 素材会被
-  // 一次解完(decoded 直接到 EOF),根本拦不住 slice,断言就变成"看 ffmpeg 手速"。
-  // 120s 素材下 decoded 恒定被压在 ~30s,seek 到 50s 必然是"窗口外重定位",确定可复现。
+  // 重定位代数用例素材:WINDOW_HIGH_SEC=300 后 120s 曲在预缓冲后很快全进窗口,
+  // seek 仍可能命中;真正考验"窗口外"的是 ready() 后立刻 seek 到 50s(已解 ≈2s)。
   wav120 = path.join(tmpDir, "tone-120s.wav");
   execFileSync(ffmpegBin(), [
     "-hide_banner", "-loglevel", "error",
@@ -111,7 +109,8 @@ describe("PcmWindow 流式对拍整包解码", () => {
   it("seek 窗口外返回 true,按 -ss 重起后绝对偏移连续", async () => {
     const w = new PcmWindow({ input: wav30, loudness: { enabled: false } });
     try {
-      // 解码刚起步即跳 25s:远超已解范围,必走重起路径
+      // ready() 只预缓冲 PREBUFFER_SEC≈2s;跳 25s 超已解前沿,必走重起
+      // (WINDOW_HIGH_SEC=300 后窗口够大,但"超过 decoded"仍触发重定位)。
       expect(await w.seekTo(25000)).toBe(true);
       await w.ready();
       const lo = SPOOK(25);
@@ -180,18 +179,28 @@ describe("PcmWindow 进程与背压", () => {  it("close 杀掉 ffmpeg、无残�
   }, 30_000);
 
   it("不消费时解码停在高水位附近,不无限缓冲", async () => {
+    // 素材必须长于 WINDOW_HIGH_SEC(300s),否则先到 EOF 就测不到背压。
     const w = new PcmWindow({
-      input: "sine=frequency=440:duration=300:sample_rate=48000",
+      input: "sine=frequency=440:duration=400:sample_rate=48000",
       inputFormat: "lavfi",
     });
     try {
-      // lavfi 合成远快于实时:无背压 3 秒能解完整首;有背压应停在 ~60s
-      await new Promise((r) => setTimeout(r, 3000));
+      // 高水位 300s 后 lavfi 约 10s 才爬到平台;且 pause 只在数据到达时判定,
+      // 接近高水位后单秒仍可能再冲几秒音频 —— 先等到**增长停滞**再取样。
+      const deadline = Date.now() + 25_000;
+      let prev = -1;
+      for (;;) {
+        const cur = w.decoded;
+        if (cur >= SPOOK(WINDOW_HIGH_SEC - 15) && (cur === prev || cur - prev <= SPOOK(1))) break;
+        if (Date.now() >= deadline) break;
+        prev = cur;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      expect(w.decoded).toBeGreaterThanOrEqual(SPOOK(WINDOW_HIGH_SEC - 15));
       const d1 = w.decoded;
       await new Promise((r) => setTimeout(r, 1000));
       const d2 = w.decoded;
-      const cap = SPOOK(WINDOW_HIGH_SEC + 10);
-      expect(d2).toBeLessThanOrEqual(cap);
+      expect(d2).toBeLessThanOrEqual(SPOOK(WINDOW_HIGH_SEC + 10));
       // 停滞证明(1 秒内零增长,允许管道余量):已在水位憋住而非仍在狂解
       expect(d2 - d1).toBeLessThanOrEqual(SPOOK(5));
       expect(w.bufferedBytes).toBeLessThanOrEqual((WINDOW_HIGH_SEC + 10) * SR * CH * 4);
@@ -373,15 +382,20 @@ describe("PcmWindow 亚帧错位(毫秒精度 seek)", () => {
 
 describe("PcmWindow 重定位代数", () => {
   it("slice 等待期间 seekTo 重定位 → 立刻抛 WindowEvictedError,不等满 15s", async () => {
+    // 高水位 300s 后 wav120(~120s)会整首进窗:若 sleep 够长,decode 在
+    // slice(60s) 等待期间直接解完 → pending 先 resolved,再 seekTo 命中窗口。
+    // waiter 在 waitFor 里**同步**注册,起 slice 后立刻 seekTo 即可挂住等待。
     const w = new PcmWindow({ input: wav120, loudness: { enabled: false } });
     await w.ready(10_000);
-    // decoded 被背压高水位压在 ~30s,所以 @60s 一定拦得住(必然进入等待)
+    // ready 刚返回时 decoded≈PREBUFFER(2s),远未到 60s
     expect(w.decoded).toBeLessThan(SPOOK(60));
     const far = SPOOK(60);
     const pending = w.slice(far, far + 2400, 15_000);
-    // 让它真正挂进等待队列,再重定位到窗口外(@50s 远超已解前沿 → 走重起 ffmpeg 那条路)
-    await new Promise((r) => setTimeout(r, 200));
+    // 只让出一个宏任务,确保 slice 已进入 waitFor;不做长 sleep(否则背压前
+    // 局域解码会把 60s 段直接灌满,pending 先成功返回)。
+    await new Promise((r) => setImmediate(r));
     const t0 = Date.now();
+    // decoded 仍 < 50s → target 落在已解前沿之外 → 必走重起(返回 true)
     expect(await w.seekTo(50_000)).toBe(true);
     await expect(pending).rejects.toBeInstanceOf(WindowEvictedError);
     // 关键断言:是"立刻失效"而不是撑到 15s 超时(那样 pushLoop 就被打死了)
@@ -393,7 +407,8 @@ describe("PcmWindow 重定位代数", () => {
     const w = new PcmWindow({ input: wav120, loudness: { enabled: false } });
     await w.ready(10_000);
     expect(w.decoded).toBeGreaterThan(SPOOK(1));
-    // @50s 在已解前沿(~30s)之外 → 必然走重定位
+    // ready 后 decoded≈2s;@50s 在已解前沿之外 → 必然走重定位
+    // (300s 高水位下整首会进窗,故必须在爬满前立刻 seek,不能先 sleep)。
     expect(await w.seekTo(50_000)).toBe(true);
     // 重定位瞬间水位必须精确落在目标(SPOOK(50));若旧 ffmpeg 的缓冲 stdout 漏进来,
     // 这里会立刻偏大 —— 那正是 decodedSamples 被抬到错位置的老 bug。
