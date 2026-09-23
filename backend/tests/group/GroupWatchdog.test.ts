@@ -65,6 +65,8 @@ vi.mock("../../src/services/group/index.js", async (importOriginal) => {
       groupOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId),
       groupsOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId) || [],
       list: () => Array.from(h.groupStore.values()),
+      getVolume: () => 20,
+      setVolume: (_id: string, v: number) => v,
     }),
     splitMemberId: actual.splitMemberId,
   };
@@ -133,8 +135,10 @@ beforeAll(() => {
     );
     CREATE TABLE IF NOT EXISTS player_groups (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       member_ids TEXT NOT NULL DEFAULT '[]',
+      volume INTEGER NOT NULL DEFAULT 20,
       created_at TEXT,
       updated_at TEXT
     );

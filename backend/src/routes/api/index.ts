@@ -4129,7 +4129,13 @@ apiRoutes.post("/v1/peers/:peerId/volume", async (c) => {
   if (parsed.kind === "group") {
     const { volume } = await c.req.json().catch(() => ({} as any));
     if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
-    try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
+    try {
+      // 组音量**先落库**(无成员也持久,重启恢复);再扇出到在线成员。
+      // 扇出失败不回滚库值 —— 成员全离线时仍要保住用户的调节结果。
+      gm.setVolume(parsed.id, volume);
+      await getQueueController().transport(parsed.id, "volume", volume);
+      return c.json({ success: true });
+    }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "airplay") {
@@ -4397,6 +4403,9 @@ async function alignGroupMembers(groupId: string, added: string[], removed: stri
   const sg = sendspinGroupName(groupId);
   for (const cid of spinAdded) {
     try {
+      // ug 懒创建缺省 100:入组前灌 GroupManager 持久值(与起播 playMedia 同源)。
+      const { sendspinGroupTransport } = await import("../../services/sendspin/index.js");
+      await sendspinGroupTransport(sg, "volume", gm.getVolume(groupId));
       await sendspinGroupJoin(sg, cid);
     } catch (e: any) {
       log.warn(`[group] ${groupId}: sendspin 成员 ${cid} 加入失败: ${e?.message || e}`);

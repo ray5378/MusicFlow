@@ -320,6 +320,8 @@ export const playerGroups = sqliteTable("player_groups", {
   ownerUserId: text("owner_user_id").notNull().default(""), // 创建者;空=历史数据(按迁移归属首个管理员)
   name: text("name").notNull(),
   memberIds: text("member_ids").notNull().default("[]"), // dlna deviceId[] serialized
+  // 组级音量:独立于成员设备音量,空组/全离线也持久。新建未改过=20(用户定稿)。
+  volume: integer("volume").notNull().default(20),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

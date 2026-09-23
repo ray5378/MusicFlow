@@ -2,6 +2,24 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.16] - 2026-09-23
+
+### 功能 —— 群组音量持久化（空组也落库）+ 默认 20 + 卡顿监控文档
+
+- **组音量落库**（`player_groups.volume`，0–100 整数）：
+  - `schema.ts` 与 `db/index.ts` 的 `CREATE TABLE player_groups` 同步加 `volume INTEGER NOT NULL DEFAULT 20`（无 `ALTER TABLE`，老库按约定重建）；
+  - `GroupManager`：新建组默认 **20**（用户定稿，替代原 100）；`getVolume` / `setVolume`（钳位 + `persist` + `group_updated`）；`loadFromDb` / `persist` 读写 volume；
+  - **无成员也持久**：空组 / 全离线调音量重启后恢复；改成员、改名不覆盖已存音量。
+- **写路径**：
+  - 路由 `POST /v1/peers/:peerId/volume` group 分支：**先** `gm.setVolume` 落库，再 `transport` 扇出（扇出失败不回滚库值）；
+  - `GroupProtocolPlayer.setVolume`、`createSendspinGroupPlayer.setVolume`：先落库再下发。
+- **回显**：`getGroupStatus` 音量权威 = GroupManager 持久值（空组/全离线也回显）；sendspin leader 有实时组值则用实时，DLNA leader 覆盖为持久组音量。
+- **ug 懒创建回填**（子进程 `SendspinGroup.volume` 缺省 100 的对称修复）：
+  - 起播 `playMedia`、成员加入对齐 `alignGroupMembers`、看门狗成员回归：入组/起播前 `sendspinGroupTransport(ug, "volume", gm.getVolume(id))` 灌入持久值。
+- **测试**：3 个测试文件内嵌 `CREATE TABLE player_groups` 补 `volume` 列；`GroupManager` 新增 3 例（默认 20 / 空组持久重启恢复 / 钳位与事件 / 改成员改名不丢音量）；GroupPlayback·GroupWatchdog 的 `getGroupManager` stub 补 `getVolume`/`setVolume`。
+- **文档**：新增 `docs/STALL_MONITORING.md` —— 多线程容器卡顿监控方法（`sendspin-monitor-240.sh` / `sendspin-hires-240.sh` / `pull-240-monitor.sh` 部署、事件判读、排查顺序、盲区、DLNA 对照）。
+- **验证**：`tsc --noEmit` 0；组相关 5 个测试文件 44 用例绿；`check-i18n` 0。
+
 ## [4.0.15] - 2026-09-23
 
 ### 对齐 MA —— ffmpeg 解码参数（P0）+ 滑动窗口 300s（BALANCED）

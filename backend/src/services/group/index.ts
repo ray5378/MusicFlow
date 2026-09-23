@@ -37,11 +37,17 @@ export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } 
 }
 
 const log = createLogger("group");
+
+/** 新建组默认音量(用户定稿 2026-09-23):未手动改过前保持 20。 */
+export const DEFAULT_GROUP_VOLUME = 20;
+
 export interface PlayerGroup {
   id: string;
   ownerUserId: string; // 创建者;管理员可为空串(历史数据)或管理员 id
   name: string;
   memberIds: string[]; // dlna deviceIds
+  /** 组级音量 0-100:与成员设备音量独立,空组/全离线也持久(重启恢复)。 */
+  volume: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -85,6 +91,7 @@ export class GroupManager extends EventEmitter {
         ownerUserId: r.ownerUserId || "",
         name: r.name,
         memberIds,
+        volume: clampVolume(r.volume),
         createdAt: r.createdAt || "",
         updatedAt: r.updatedAt || "",
       });
@@ -132,11 +139,34 @@ export class GroupManager extends EventEmitter {
     const id = uuidv4();
     this.assertMembersAvailable(memberIds);
     const now = new Date().toISOString();
-    const g: PlayerGroup = { id, ownerUserId, name: this.normalizeName(name), memberIds: [...memberIds], createdAt: now, updatedAt: now };
+    const g: PlayerGroup = {
+      id, ownerUserId, name: this.normalizeName(name), memberIds: [...memberIds],
+      volume: DEFAULT_GROUP_VOLUME,
+      createdAt: now, updatedAt: now,
+    };
     this.persist(g);
     this.groups.set(id, g);
     this.emit("group_created", g);
     return g;
+  }
+
+  /** 读组音量(缺省 DEFAULT_GROUP_VOLUME;组不存在也返回缺省,供 status 回显)。 */
+  getVolume(id: string): number {
+    return this.groups.get(id)?.volume ?? DEFAULT_GROUP_VOLUME;
+  }
+
+  /** 写组音量并落库。**无成员也持久** —— 空组调完重启仍恢复。
+   *  返回实际生效值(非法入参回退当前/缺省)。 */
+  setVolume(id: string, vol: number): number {
+    const g = this.groups.get(id);
+    const next = clampVolume(vol);
+    if (!g) return next; // 组不存在:无处可写,返回钳后值(路由层仍会先落 try)
+    if (g.volume === next) return next;
+    g.volume = next;
+    g.updatedAt = new Date().toISOString();
+    this.persist(g);
+    this.emit("group_updated", g);
+    return next;
   }
 
   renameGroup(id: string, name: string): PlayerGroup | undefined {
@@ -305,15 +335,28 @@ export class GroupManager extends EventEmitter {
         ownerUserId: g.ownerUserId || "",
         name: g.name,
         memberIds: JSON.stringify(g.memberIds),
+        volume: g.volume,
         createdAt: g.createdAt,
         updatedAt: g.updatedAt,
       })
       .onConflictDoUpdate({
         target: playerGroups.id,
-        set: { ownerUserId: g.ownerUserId || "", name: g.name, memberIds: JSON.stringify(g.memberIds), updatedAt: g.updatedAt },
+        set: {
+          ownerUserId: g.ownerUserId || "",
+          name: g.name,
+          memberIds: JSON.stringify(g.memberIds),
+          volume: g.volume,
+          updatedAt: g.updatedAt,
+        },
       })
       .run();
   }
+}
+
+/** 钳到 0-100 整数;非法/缺失回缺省。 */
+function clampVolume(v: unknown): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return DEFAULT_GROUP_VOLUME;
+  return Math.min(100, Math.max(0, Math.round(v)));
 }
 
 let instance: GroupManager | null = null;

@@ -8,8 +8,10 @@ beforeAll(() => {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS player_groups (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       member_ids TEXT NOT NULL DEFAULT '[]',
+      volume INTEGER NOT NULL DEFAULT 20,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
@@ -139,5 +141,44 @@ describe("GroupManager", () => {
     gm.setMembers(a.id, ["d1", "d2"]);
     gm.deleteGroup(a.id);
     expect(events).toEqual(["created", "updated", "deleted"]);
+  });
+
+  it("组音量:新建默认 20,空组也持久,重启恢复", () => {
+    const g = gm.createGroup("空组音量", []);
+    expect(g.volume).toBe(20);
+    expect(gm.getVolume(g.id)).toBe(20);
+    // 空组调音量也必须落库(用户定稿:无成员也持久)
+    gm.setVolume(g.id, 55);
+    expect(gm.getVolume(g.id)).toBe(55);
+    const gm2 = new GroupManager();
+    gm2.loadFromDb();
+    expect(gm2.getVolume(g.id)).toBe(55);
+  });
+
+  it("组音量:setVolume 钳到 0-100 并触发 group_updated;非法入参回缺省", () => {
+    const g = gm.createGroup("钳位组", ["d1"]);
+    const events: string[] = [];
+    gm.on("group_updated", () => events.push("updated"));
+    expect(gm.setVolume(g.id, 150)).toBe(100);
+    expect(gm.getVolume(g.id)).toBe(100);
+    expect(gm.setVolume(g.id, -5)).toBe(0);
+    expect(gm.getVolume(g.id)).toBe(0);
+    expect(gm.setVolume(g.id, 42.4)).toBe(42);
+    expect(events.length).toBeGreaterThanOrEqual(3);
+    // 组不存在:无处可写,返回钳后缺省语义
+    expect(gm.setVolume("missing", 70)).toBe(70);
+    expect(gm.getVolume("missing")).toBe(20);
+  });
+
+  it("组音量:改成员/改名不覆盖已持久的音量", () => {
+    const g = gm.createGroup("保住音量", ["d1"]);
+    gm.setVolume(g.id, 33);
+    gm.setMembers(g.id, ["d1", "d2"]);
+    gm.renameGroup(g.id, "新名");
+    expect(gm.getVolume(g.id)).toBe(33);
+    const gm2 = new GroupManager();
+    gm2.loadFromDb();
+    expect(gm2.get(g.id)?.volume).toBe(33);
+    expect(gm2.get(g.id)?.name).toBe("新名");
   });
 });

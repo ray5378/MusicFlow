@@ -69,6 +69,8 @@ vi.mock("../../src/services/group/index.js", async (importOriginal) => {
       groupOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId),
       groupsOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId) || [],
       list: () => Array.from(h.groupStore.values()),
+      getVolume: () => 20,
+      setVolume: (_id: string, v: number) => v,
     }),
     splitMemberId: actual.splitMemberId,
   };

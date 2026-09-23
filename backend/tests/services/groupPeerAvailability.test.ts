@@ -51,6 +51,7 @@ beforeAll(() => {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       member_ids TEXT NOT NULL DEFAULT '[]',
+      volume INTEGER NOT NULL DEFAULT 20,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       owner_user_id TEXT NOT NULL DEFAULT ''

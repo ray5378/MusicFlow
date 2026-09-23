@@ -101,7 +101,12 @@ export async function runGroupWatchdogTick(): Promise<void> {
       // 回归的 sendspin 成员重新入组(断开时已从组成员摘除):播中走直播沿,
       // 空闲仅登记。resumeActive 已恢复组 pump(如组在播)。
       for (const cid of getOnlineSendspinIds(g.id)) {
-        try { await sendspinGroupJoin(sendspinGroupName(g.id), cid); } catch {}
+        try {
+          // ug 懒创建缺省 100:回归入组前灌持久音量(与 playMedia/align 同源)。
+          const { sendspinGroupTransport } = await import("../sendspin/index.js");
+          await sendspinGroupTransport(sendspinGroupName(g.id), "volume", getGroupManager().getVolume(g.id));
+          await sendspinGroupJoin(sendspinGroupName(g.id), cid);
+        } catch {}
       }
       continue;
     }

@@ -163,7 +163,12 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         + ` sendspin=${spinCount} 耗时 ${Date.now() - t0}ms`,
       );
     },
-    async setVolume(vol: number) { await fanOut("setVolume", p => p.setVolume(vol)); await spinOp(p => p.setVolume(vol)); },
+    async setVolume(vol: number) {
+      // 组音量先落库(无成员也持久);再扇出。路由层可能已写过,这里幂等覆盖。
+      try { getGroupManager().setVolume(groupId, vol); } catch { /* 库失败不挡扇出 */ }
+      await fanOut("setVolume", p => p.setVolume(vol));
+      await spinOp(p => p.setVolume(vol));
+    },
     async pollState(): Promise<PlayerState> {
       const leader = getGroupLeader(groupId);
       if (!leader) {
@@ -197,8 +202,12 @@ export async function getGroupStatus(groupId: string): Promise<{
   state: string; position: number; duration: number; volume: number; muted: boolean; media?: unknown;
   updatedAt: number;
 }> {
+  // 音量权威 = GroupManager 持久库值(空组/全离线也回显用户上次调节)。
+  const persistedVolume = getGroupManager().getVolume(groupId);
   const leader = getGroupLeader(groupId);
-  if (!leader) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, updatedAt: Date.now() };
+  if (!leader) {
+    return { state: "STOPPED", position: 0, duration: 0, volume: persistedVolume, muted: false, updatedAt: Date.now() };
+  }
   if (leader.kind === "sendspin") {
     const { sendspinGroupPoll } = await import("../sendspin/index.js");
     const gname = sendspinGroupName(groupId);
@@ -209,11 +218,14 @@ export async function getGroupStatus(groupId: string): Promise<{
       state: st.playing ? "PLAYING" : "STOPPED",
       position: Math.floor(st.positionMs / 1000),
       duration: Math.floor(st.durationMs / 1000),
-      volume: typeof gv?.volume === "number" ? gv.volume : 100,
+      // 实时组在则回实时(刚调过),否则回持久库值(重启后 / ug 组尚未创建)。
+      volume: typeof gv?.volume === "number" ? gv.volume : persistedVolume,
       muted: !!gv?.muted,
       media: gv?.current ?? undefined,
       updatedAt: Date.now(),
     };
   }
-  return getDeviceStatus(leader.id);
+  const st = await getDeviceStatus(leader.id);
+  // DLNA leader 的设备音量是单机标度;组音量以 GroupManager 为准(用户调的是「组」)。
+  return { ...st, volume: persistedVolume };
 }

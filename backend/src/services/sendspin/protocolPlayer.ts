@@ -96,7 +96,10 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       }
       // castSession/token 是主进程状态(track_changed 检测用),必须本侧生成。
       const streamUrl = createCastSession(item.songId, playerId, baseUrl).streamUrl;
-      const { sendspinGroupPlay } = await import("./index.js");
+      const { sendspinGroupPlay, sendspinGroupTransport } = await import("./index.js");
+      // ug 组懒创建缺省 volume=100:起播前先灌 GroupManager 持久值(空组/重启后一致)。
+      try { await sendspinGroupTransport(groupName, "volume", getGroupManager().getVolume(userGroupId)); }
+      catch { /* 回填失败不挡起播,status 仍回持久值 */ }
       await sendspinGroupPlay(groupName, members, item);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
@@ -130,6 +133,9 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
     },
     async setVolume(vol: number) {
       const { sendspinGroupTransport } = await import("./index.js");
+      // ug: 组音量先落 player_groups(无成员也持久);子进程侧 setVolumeCore 仍不写
+      // sendspin_device_state(ug 不是设备行),两层各管各的。
+      try { getGroupManager().setVolume(userGroupId, vol); } catch { /* 库失败不挡下发 */ }
       await sendspinGroupTransport(groupName, "volume", vol);
     },
     /** 组内至少有一个 sendspin 成员在线才可 cast(与 onlineSendspinMembers 同口径)。 */
