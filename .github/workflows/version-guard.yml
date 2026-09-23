@@ -1,0 +1,30 @@
+name: Version Guard
+
+# 拒绝「main 版本」发布:版本号必须是数字(vX.Y.Z),分支名(main/master/latest…)一律判红。
+#
+# ⚠️ 这里刻意监听 tags: ["*"] 而不是 ["v*"] —— 只监听 v* 的话,误打一个名为 "main"
+# 的 tag 根本不会触发任何检查,等于没拦;监听全部 tag 才能让非法 tag **进来就被判红**。
+#
+# 与 build.yml 的分工:build.yml 的 push main 只出 :latest / :main **镜像 tag**(回溯用,
+# 不是版本号);正式版本号只认 v* tag(写入 backend/package.json + CHANGELOG)。
+# 本守卫盯的是「版本号」这一层:tag 名、各 package.json 版本字段、以及 workflow 里
+# 有没有把 github.ref_name 当版本号赋值(推 main 时它 = "main")。
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  version-guard:
+    name: 版本号必须是数字(拒绝 main/分支名版本)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # 零依赖脚本,无需 npm install。
+      - name: 运行版本守卫
+        run: node backend/scripts/check-release-version.mjs
