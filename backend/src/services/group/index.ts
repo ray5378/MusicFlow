@@ -213,6 +213,19 @@ export class GroupManager extends EventEmitter {
 
   // ==================== 内部 ====================
 
+  /** 解析全部成员的展示信息(名称/可用性/sendspin 音量)。
+   *
+   *  **对外公开:这是「成员在线判定」的单一真相源。**
+   *  成员 id 带命名空间(`sendspin:<clientId>` / `dlna:<deviceId>` / 裸 id≡DLNA),
+   *  必须按 kind 分派到各自的设备源 —— sendspin 成员**不在** DLNA 设备缓存里,
+   *  拿成员 id 去 `getCachedDevices()` 查永远 miss ⇒ 会被误判成离线。
+   *  peer 层的「群组是否可用」(`PeerManager.reconcileGroupPeers`)必须复用本方法,
+   *  不得另写一套(曾经就是那样:只查 DLNA 缓存 ⇒ 非 DLNA 群组恒被标离线,
+   *  「流转播放」选择器直接把整行剪掉,群组用不了)。 */
+  resolveMemberStates(memberIds: string[]): GroupMemberInfo[] {
+    return this.resolveMembers(memberIds);
+  }
+
   private resolveMembers(memberIds: string[]): GroupMemberInfo[] {
     const cache = new Map(getCachedDevices().map(d => [d.id, d]));
     return memberIds.map(memberId => {

@@ -23,7 +23,7 @@ import { userPermissions, userRendererGrants } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { apiError, BusinessErrorCode } from "../utils/errors.js";
 import { buildLocalPeerId, isOwnLocalPeer, maskLocalPeerId, userIdOfLocalPeer } from "../utils/peerId.js";
-import { getGroupManager } from "./group/index.js";
+import { getGroupManager, splitMemberId } from "./group/index.js";
 import { getHiddenPeerIds, getNameOverrides } from "./playerPrefs.js";
 // sendspin 音量回显取值(实时优先/离线回退持久值)。此处只做「补齐字段」,
 // 不引入 sendspin 运行时依赖(peerVolume 内部才碰 sendspin/index);
@@ -228,9 +228,25 @@ export function decoratePeersForClient<T extends { peerId: string; kind?: string
   isAdmin: boolean,
   clientId?: string | null,
   includeHidden = false,
-): (T & { self: boolean; hidden?: boolean; instancePeerId?: string; volume?: number; muted?: boolean })[] {
+): (T & { self: boolean; hidden?: boolean; instancePeerId?: string; volume?: number; muted?: boolean; managedByGroup?: string })[] {
   const myLocalPeerId = buildLocalPeerId(userId, clientId);
   const seen = new Set<string>();
+  // 「成员托管」映射：设备 peerId → 正在播放的组 groupId。
+  // 组在播时它的成员设备**自身播放状态一律作废**（不是清库，只改出口口径）：
+  // 成员行的 `queue.isActive` 强制为 false（items 原样保留 —— 脱离后仍能接着自己播），
+  // 并带上 `managedByGroup`，三端据此把成员渲染成「跟随某组」而不是「自己在放某首」。
+  // 放在这个**唯一出口**做，`/v1/peers` 与 WS `peer_snapshot` 同时生效；
+  // WS 的局部事件（peer_queue_changed 等）不带该字段，但成员被托管期间其队列不会变更，
+  // 那类事件本就不会发，不存在「被局部事件改回去」的窗口。
+  const managedBy = new Map<string, string>();
+  for (const p of peers as (T & { groupId?: string; memberIds?: string[]; queue?: { isActive?: boolean } })[]) {
+    if (p.kind !== "group" || !p.groupId || !p.queue?.isActive) continue;
+    for (const m of p.memberIds ?? []) {
+      const split = splitMemberId(m);
+      const pid = split ? `${split.kind}:${split.id}` : m;
+      if (!managedBy.has(pid)) managedBy.set(pid, p.groupId);
+    }
+  }
   // sendspin 音量/静音回显：在这个**唯一出口**补齐（实时优先、离线回退持久库值），
   // 后面的可见性/打码/隐藏剪枝/改名都不改变取值口径；其它 kind 不带这两个字段。
   const out: (T & { self: boolean; instancePeerId?: string; volume?: number; muted?: boolean })[] = [];
@@ -265,7 +281,13 @@ export function decoratePeersForClient<T extends { peerId: string; kind?: string
   return rows.map((p) => {
     const override = overrides.get(prefKey(p));
     const named = override ? { ...p, name: override } : p;
-    return includeHidden ? { ...named, hidden: hidden.has(prefKey(p)) } : named;
+    // 被活跃组托管的成员行：挂起自身播放状态 + 标出托管组。
+    // `peerId` 到这里已完成打码/归一化，但设备类（dlna / sendspin）的 id 段不变，
+    // 可直接命中映射；local 的 peerId 会被改写成 `local:<uid>` 故不参与托管判定。
+    const gid = named.kind === "local" ? undefined : managedBy.get(named.peerId);
+    const base: any = gid ? { ...named, managedByGroup: gid } : named;
+    if (gid && base.queue) base.queue = { ...base.queue, isActive: false };
+    return includeHidden ? { ...base, hidden: hidden.has(prefKey(p)) } : base;
   });
 }
 

@@ -3582,6 +3582,8 @@ apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
+    // 成员被显式指派播放 → 先脱离活跃组再独立播(MA ensure_player_ungrouped)。
+    await detachFromActiveGroups(parsed);
     try {
       await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
       return c.json({ success: true });
@@ -3639,6 +3641,8 @@ apiRoutes.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   const parsedTo = parsePeerId(toPeerId);
   if (!parsedTo) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsedTo)) {
+    // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
+    await detachFromActiveGroups(parsedTo);
     try {
       await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
     } catch (e: any) { return c.json({ error: e.message }, 500); }
@@ -3670,6 +3674,8 @@ apiRoutes.post("/v1/peers/:peerId/queue/jump", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
+    // 成员被显式跳播 → 先脱离活跃组(MA ensure_player_ungrouped)。
+    await detachFromActiveGroups(parsed);
     try {
       await getQueueManager().jumpTo(parsed.id, index, getDlnaBaseUrl(c));
       return c.json({ success: true });
@@ -3884,6 +3890,7 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     try {
+      await detachFromActiveGroups(parsed);
       getQueueController().resumePlayback(parsed.id);
       await playDevice(parsed.id);
       return c.json({ success: true });
@@ -3908,6 +3915,7 @@ apiRoutes.post("/v1/peers/:peerId/play", async (c) => {
   }
   if (parsed.kind === "sendspin") {
     try {
+      await detachFromActiveGroups(parsed);
       getQueueController().resumePlayback(parsed.id);
       await getQueueController().transport(parsed.id, "play");
       return c.json({ success: true });
@@ -4027,7 +4035,7 @@ apiRoutes.post("/v1/peers/:peerId/next", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
-    try { seekLog.info(`[Peer] 手动切歌 next peerId=${peerId}`); await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
+    try { await detachFromActiveGroups(parsed); seekLog.info(`[Peer] 手动切歌 next peerId=${peerId}`); await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "next"));
@@ -4039,7 +4047,7 @@ apiRoutes.post("/v1/peers/:peerId/prev", async (c) => {
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
-    try { seekLog.info(`[Peer] 手动切歌 prev peerId=${peerId}`); await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
+    try { await detachFromActiveGroups(parsed); seekLog.info(`[Peer] 手动切歌 prev peerId=${peerId}`); await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
     catch (e: any) { return c.json({ error: e.message }, 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "prev"));
@@ -4352,6 +4360,27 @@ const gm = getGroupManager();
  *  - sendspin 摘除:stream/end 后移出(不断其余成员);
  *  - dlna 摘除:沿用旧行为(不主动停成员设备)。
  *  全部 best-effort:单个成员失败记日志,不影响其余成员与接口成功。 */
+// 显式操控成员 → 自动脱离活跃组(MA ensure_player_ungrouped 语义):
+// 成员在组播期间不独立受理播放指令;用户把播放/切歌/流转明确指向成员本身时,
+// 先把它从所属活跃组摘出(写库 + 断流对齐),再走各 kind 的独立播放分支。
+// 仅设备型成员(dlna / sendspin)适用;group/local 目标本就不从属于任何组。
+async function detachFromActiveGroups(parsed: { kind: string; id: string }): Promise<void> {
+  if (parsed.kind !== "dlna" && parsed.kind !== "sendspin") return;
+  const bare = splitMemberId(parsed.kind === "sendspin" ? `sendspin:${parsed.id}` : parsed.id)?.id ?? parsed.id;
+  const gid = getQueueController().activeGroupOfDevice(bare);
+  if (!gid) return;
+  // memberIds 存的是组内原样写法(sendspin:<id> / 裸 id ≡ dlna),按裸 id 找回原样再删。
+  const memberKey = (gm.get(gid)?.memberIds ?? []).find(m => (splitMemberId(m)?.id ?? m) === bare);
+  if (!memberKey) return;
+  try {
+    gm.applyMemberDelta(gid, { remove: [memberKey] });
+    await alignGroupMembers(gid, [], [memberKey]);
+    log.info(`[group] ${gid}: 成员 ${memberKey} 因被显式操控自动脱离组`);
+  } catch (e: any) {
+    log.warn(`[group] ${gid}: 成员 ${memberKey} 自动脱离失败: ${e?.message || e}`);
+  }
+}
+
 async function alignGroupMembers(groupId: string, added: string[], removed: string[]): Promise<void> {
   const kindOf = (m: string) => splitMemberId(m)?.kind ?? "dlna";
   const bareOf = (m: string) => splitMemberId(m)?.id ?? m;

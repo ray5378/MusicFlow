@@ -575,10 +575,16 @@ export class QueueController extends EventEmitter {
 
   /** 设备是否属于某个"正在播放"的组。组播放期间其个人队列决策一律忽略。
    *  设备可同时属于多个组,只要任一所属组的队列激活即视为受组控制。 */
-  private isMemberOfActiveGroup(deviceId: string): boolean {
+  /** 设备所属的、**正在播放**的组（无则 undefined）。设备可同时属于多个组，取第一个
+   *  队列处于激活态的。**对外公开**：HTTP 层的「显式操控成员 ⇒ 自动脱离」靠它定位
+   *  该把设备从哪个组摘出来；`isMemberOfActiveGroup` 亦复用本方法，判定单源。 */
+  activeGroupOfDevice(deviceId: string): string | undefined {
     const gids = getGroupManager().groupsOfDevice(deviceId);
-    if (gids.length === 0) return false;
-    return gids.some(gid => !!this.queues.get(gid)?.isActive);
+    return gids.find(gid => !!this.queues.get(gid)?.isActive);
+  }
+
+  private isMemberOfActiveGroup(deviceId: string): boolean {
+    return this.activeGroupOfDevice(deviceId) !== undefined;
   }
 
   /** 悬挂时清空组的 tracker 状态(lastPlaying):成员回归后 leader 报 NO_MEDIA_PRESENT→

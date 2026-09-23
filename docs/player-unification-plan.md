@@ -302,3 +302,149 @@ Web 不经此模型——它不是播放端。Web 作为遥控面，复用与 DL
   - **播放器管理页**：客户端 / 设备离线行**保留并打「离线」标签**，不删行（peer 行从不自动移除；被回收的只是队列 —— **6h 未变动 且 该端离线 6h**）。
   - **流转播放选择列表**：**别的**离线本机客户端被剪掉、不可选中（「自己那条」恒在）；DLNA / AirPlay / Sendspin / 群组设备离线后由 WS 删行，同样不在列表。
   服务端内部记录按队列回收策略（6h 双条件）清理，与上面的**行可见性**无关。
+
+---
+
+## 10. 群组接入修复（2026-09-23）
+
+### 10.1 症状与影响
+
+「流转播放」选择器里**只有 DLNA 群组**能出现，sendspin 群组等其它类型的群组完全不显示
+（管理页「播放器群组」区块却一切正常，显示「2 台设备 · 2 台在线」）⇒
+用户无法把非 DLNA 群组当作一个播放器接入。
+
+### 10.2 根因（单一缺陷，两套算法）
+
+「群组是否可用」存在**两份实现**，对「成员 id 带命名空间」这件事只有一份处理正确：
+
+| 位置 | 算法 | 结果 |
+|---|---|---|
+| `GroupManager.resolveMembers()`（`services/group/index.ts`）**管理页用** | 先 `splitMemberId()` 按 kind 分派：sendspin 走 sendspin 源、dlna 走 DLNA 缓存 | ✅ 正确 |
+| `PeerManager.reconcileGroupPeers()`（`services/peer.ts`）**流转播放列表用** | `g.memberIds.some(d => getCachedDevices().find(x => x.id === d)?.available)` | ❌ **只查 DLNA 缓存** |
+
+群组成员 id 是**带命名空间**的（`sendspin:<clientId>` / `dlna:<deviceId>` / 裸 id ≡ DLNA，
+见 `services/group/index.ts` 的 `splitMemberId`）。sendspin 成员**不在** DLNA 设备缓存里，
+拿成员 id 直接去 `getCachedDevices()` 查**永远 miss** ⇒ 该群组恒被标 `available=false`。
+
+链路闭合：服务端 peer 判离线 → 前端 `stores/player.ts::filterVisiblePeers`
+按 `p.available || (kind 不是 dlna/group/airplay/sendspin)` 过滤 ⇒ **整行被剪掉**，
+用户在选择器里根本看不到这个群组。
+
+> 注：sendspin **单设备**（非群组）不受影响 —— 它走 `PeerManager.registerSendspin()`，
+> 由 sendspin 服务自身驱动注册，不经 DLNA 缓存。所以截图中 `esp32-player2` 单设备能正常显示，
+> 只有「群组」这一路被误判。
+
+### 10.3 240 真机取证（修复前后对比）
+
+同一时刻同一次 `/rest/api/v1/peers` 请求：
+
+| group peer | 修复前 `available` | 修复后 `available` |
+|---|---|---|
+| `group:<sendspin群组>` | **false** ❌ | **true** ✅ |
+| `group:<DLNA群组>` | true | **false**（当时两台 DLNA 设备确实都离线 —— 正确反转，不再是恒真） |
+
+而同一个 `sendspin群组` 在 `/rest/api/v1/groups` 里明确回报
+`esp32-player2 available=true` —— **两套算法结论相反**，是本次判定根因的直接证据。
+
+DLNA 群组从 true 翻成 false 这一步很关键：它证明新算法是**真判据**（跟随成员在线状态），
+而不是把值恒置为 true 来掩盖问题。
+
+### 10.4 修复
+
+让「成员在线判定」**单一真相源**：
+
+1. `GroupManager` 新增公开方法 `resolveMemberStates(memberIds)` ——
+   直接转发私有 `resolveMembers()`，即「按命名空间分派」的那份正确实现。
+2. `PeerManager.reconcileGroupPeers()` 改用它：
+   `const available = gm.resolveMemberStates(g.memberIds).some(m => m.available);`
+   （`getGroupManager()` 的 import 本就存在，无需新增依赖。）
+
+前端**无需改动** —— `filterVisiblePeers` 以服务端 `available` 为准。
+
+### 10.5 群组「当一个播放器用」的闭环验证（240 真机）
+
+修复 `available` 只是让它**出现在选择器里**；本项同时验证了群组当播放器**真的可用**：
+
+| 验证点 | 真机结果 |
+|---|---|
+| 群组持有独立队列 | ✅ `group_queues` 落库 3137 首、`is_active=1` |
+| 群组 peer 可读队列 | ✅ `GET /v1/peers/group:<id>/queue` 返回同一份队列 |
+| 对群组起播 | ✅ `POST /v1/peers/group:<id>/queue/play` → 200，走 `QueueManager.playFrom(groupId, items, startIndex)` |
+| 播放位置**独立推进并落库** | ✅ `currentIndex` 由 241 → **1224**（「喜欢你」），`group_queues.current_index` 同步 = 1224 |
+| 群组播放通路支持 sendspin 成员 | ✅ `createSendspinGroupPlayer` 的 `isAvailable()` 与 `resolveSendspinMember` **同口径**（`front.clients.get(id)?.ready !== false`） |
+
+⇒ 群组确实是**一台独立播放器**：独立队列、独立播放位置、独立落库；
+`/v1/peers/:peerId/{play,pause,stop,queue/*}` 对 `kind==="group"` 的分支与其它播放端同款
+（`isCastPeer(parsed)` 为真 → 走 queue/device 通路，与 kind 无关）。
+
+### 10.6 回归与验证
+
+- 新增 `backend/tests/services/groupPeerAvailability.test.ts` —— **6 例**，覆盖：
+  `resolveMemberStates` 的命名空间分派（sendspin 走 sendspin 源 / dlna 走 DLNA 源 /
+  裸 id ≡ DLNA / 未知 id 离线）、**纯 sendspin 群组必须 available**（原 bug 点）、
+  成员全离线须标离线（不得恒真）、DLNA 群组不回归、混合成员任一在线即可用、
+  **成员在线状态翻转后 reconcile 必须跟着翻**（不缓存旧判定）。
+- **负向验证**（守卫必须真会红）：
+  | 变体 | 破坏点 | 结果 |
+  |---|---|---|
+  | V1 | `reconcileGroupPeers` 退回旧算法（只查 DLNA 缓存） | 🔴 **4 例精确变红** |
+  | V2 | `resolveMembers` 破坏命名空间分派（sendspin 也去 DLNA 缓存查） | 🔴 **4 例精确变红** |
+  还原正版后 6/6 全绿（NEG 标记残留数 = 0）。
+- 230：`tsc --noEmit` 通过；**全量 vitest 186 文件 / 1574 用例全绿**；9 个 CI 门禁脚本全 0。
+- 240：热补丁注入后容器正常起来，`resolveMemberStates` 在 dist 中命中；
+  本轮启动后 `[ERROR]` = 0、group 相关告警 = 0。
+
+### 10.7 教训
+
+- **同一语义两套实现 = 定时炸弹**：`resolveMembers` 写对了，`reconcileGroupPeers` 写错了，
+  两处都在「群组」这件事上，却因为**消费方不同**（管理页 vs 流转播放列表）而长期没被发现 ——
+  管理页一直是对的，所以没人怀疑。
+- **命名空间 id 的匹配必须走 `splitMemberId`**：任何「拿成员 id 直接查某个设备源」的写法，
+  只要那个源不是「全类型」，就该用命名空间分派，而不是裸比较。
+- **「显示不出来」要在链路两头都查**：前端确实有剪枝（`filterVisiblePeers`），
+  但它**忠实执行**服务端的 `available`；根因必须在服务端。只改前端会把 bug 藏得更深。
+
+## 11. 动态组:成员托管 / 自动脱离 / 组恒可见（2026-09-23）
+
+### 11.1 语义定调(对齐 MA `create_group_player(dynamic=True)`)
+
+组是**持久实体**(有 ID / 独立队列),「动态」修饰的是**成员关系**:成员随时加入、随时退出。
+对照 MA(music-assistant/server@dev `9a4261b`):
+
+| MA 概念 | MusicFlow 对应落地 |
+|---|---|
+| permanent group + `dynamic=True` | `player_groups` + `group_queues`(本就持久) |
+| `cmd_set_members` / `sync_members` | `POST /v1/groups/:id/members {add,remove}`(已有) |
+| `_get_player_with_redirect`(成员指令重定向 leader) | **托管**:组播期间成员自身状态出口作废(`managedByGroup`) |
+| `ensure_player_ungrouped`(显式操控先摘出) | **自动脱离**:播放指令指向成员 → 先 `applyMemberDelta(remove)` + `alignGroupMembers` 再独立播 |
+
+三端交互(用户定稿):**拖拽 = 流转队列**(客户端原有语义,保持不变);**点群组 = 进管理模式**,
+每个设备型播放器底下出现 +/− 徽标(组内 − / 组外 +),点徽标即加入/退出。
+
+### 11.2 服务端改动
+
+| 文件 | 改动 |
+|---|---|
+| `services/access.ts` | `decoratePeersForClient`(REST `/v1/peers` 与 WS `peer_snapshot` **唯一出口**)新增:活跃组(组行 `queue.isActive`)的成员打 `managedByGroup:<groupId>`,成员行 `queue.isActive` 出口强制 false(items 原样保留,脱离后能接着自己播) |
+| `services/player/QueueController.ts` | 私有 `isMemberOfActiveGroup` 拆出公开 `activeGroupOfDevice(deviceId)`(判定单源,路由层复用) |
+| `routes/api/index.ts` | 新增 `detachFromActiveGroups()`:目标为 dlna/sendspin 成员且属于活跃组 → 按裸 id 找回组内原样 memberKey → `gm.applyMemberDelta(remove)` + `alignGroupMembers(sendspinGroupLeave)`。挂到 7 个显式播放指令入口:`queue/play` / `queue/transfer-from`(目标端) / `queue/jump` / `next` / `prev` / `play`(dlna+sendspin 分支) |
+| `services/peer.ts` | (§10 已改)组可用性 = 任一成员在线 |
+| `frontend/src/stores/player.ts` | `filterVisiblePeers`:组是「容器」恒可见(`p.kind === "group"` 豁免离线剪枝),设备离线照旧剪 |
+
+### 11.3 三端交互
+
+- **Web**:流转列表组行恒可见;`managedByGroup` 字段已下发(行内「跟随某组」渲染待后续迭代)。
+- **客户端** `player_transfer_page.dart`:点群组圆 = 选中/取消(拉 `GET /v1/groups` 取 memberIds),
+  设备型(dlna/sendspin)圆信息列下方出现 +/−(`_MemberToggleButton`),点徽标走
+  `POST /v1/groups/:id/members`;toast 反馈;拖拽语义不变(=流转队列)。新增 API:`fetchGroups` / `setGroupMembership`。
+- **HA 卡片**:outputs 纳入 group 行(恒可见);点群组 output = 进/退管理模式,设备 output 底下
+  挂 +/− 徽标(`.out-badge`,组内 − accent 高亮);新增 API:`getGroups` / `updateGroupMembers`。
+
+### 11.4 验收(240 实测 2026-09-23)
+
+1. 230:tsc 0 错、9 门禁全过、全量 vitest **186 文件 / 1574 用例全绿**。
+2. 240 热补丁(`hotfix-dynagroup.tgz`:peer/access/QueueController/routes 四文件;回滚点 `/tmp/rollback-dg/`)。
+3. 端到端:组起播 → 成员 `managedByGroup=ab7fca6f…` 且自身队列 `isActive=false` →
+   显式 `queue/jump` 成员 → 日志「成员 sendspin:3C:0F… 因被显式操控自动脱离组」、组员列表收缩、
+   成员恢复自身状态 → 加回成员 + 组续播 → 重新托管。全程 0 ERROR。
+4. 注意:组行 `queue.isActive` 是运行态,**容器重启后归零直到下次起播** —— 托管标记随之消失属预期。

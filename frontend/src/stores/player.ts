@@ -1777,10 +1777,10 @@ export const usePlayerStore = defineStore("player", () => {
   function filterVisiblePeers(list: any[]): any[] {
     const hidden = hiddenPeers.value;
     const overrides = nameOverrides.value;
+    // 组是「容器」不是「内容物」:成员全离线 / 空组也必须显示(否则空组没法拖设备进去),
+    // 只在行上标注状态;设备离线仍照旧剪掉。hidden 改名照旧应用。
     return markStaleLocalPeersOffline(list || [])
-      .filter((p) =>
-        (p.available || (p.kind !== "dlna" && p.kind !== "group" && p.kind !== "airplay" && p.kind !== "sendspin"))
-        && !hidden.has(p.peerId))
+      .filter((p) => (p.available || p.kind === "group") && !hidden.has(p.peerId))
       .map((p) => (overrides[p.peerId] ? { ...p, name: overrides[p.peerId] } : p));
   }
 

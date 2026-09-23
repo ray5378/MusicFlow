@@ -65,6 +65,14 @@ export interface Peer {
   userId?: string;      // local peers only
   deviceId?: string;    // dlna / airplay / sendspin peers only
   groupId?: string;     // group peers only
+  /** 组成员 id 快照（group peers only）。三端据此判断「哪些设备正被组托管」；
+   *  出口层的 `managedByGroup` 由它反推。裸 id ≡ DLNA（历史数据）。 */
+  memberIds?: string[];
+  /** 成员总数 / 在线数（group peers only）。空组（memberCount=0）与成员全离线组
+   *  **仍然保留在列表里** —— 组是容器，剪掉就再也找不到、没法把设备拖进去；
+   *  两者靠这两个数字在行上渲染状态，而不是靠 available 决定存亡。 */
+  memberCount?: number;
+  onlineCount?: number;
   unencrypted?: boolean; // sendspin legacy 明文客户端(无 Noise,配对不可用)
   /** sendspin 音量/静音快照(列表与 peer_snapshot 回显用;离线时为持久值)。
    *  其它 kind 暂不填,前端按存在性渲染。由 attachSendspinPeerVolumes 填充。 */
@@ -476,19 +484,25 @@ class PeerManager extends EventEmitter {
     this.peers.delete(peerId);
   }
 
-  /** Register or refresh a group peer. availability = 任一成员在线。 */
-  registerGroup(groupId: string, name: string, available: boolean): Peer {
+  /** Register or refresh a group peer. availability = 任一成员在线。
+   *  `memberIds` / `onlineCount` 一并落进行里：出口层靠它反推「哪些设备被组托管」，
+   *  三端靠 `memberCount`/`onlineCount` 渲染「空组 / 成员全离线」——
+   *  组恒可见的前提是「状态能从行本身读出来」，而不是靠 available 定生死。 */
+  registerGroup(groupId: string, name: string, available: boolean, memberIds: string[] = [], onlineCount = 0): Peer {
     const peerId = `group:${groupId}`;
     const now = Date.now();
     let p = this.peers.get(peerId);
     if (!p) {
-      p = { peerId, kind: "group", name, available, lastActiveAt: now, groupId };
+      p = { peerId, kind: "group", name, available, lastActiveAt: now, groupId, memberIds: [...memberIds], memberCount: memberIds.length, onlineCount };
       this.peers.set(peerId, p);
       this.emit("peer_registered", p);
     } else {
       const wasAvailable = p.available;
       p.name = name;
       p.available = available;
+      p.memberIds = [...memberIds];
+      p.memberCount = memberIds.length;
+      p.onlineCount = onlineCount;
       if (available) p.lastActiveAt = now;
       if (available && !wasAvailable) this.emit("peer_available", p);
       else if (!available && wasAvailable) this.emit("peer_unavailable", p);
@@ -496,16 +510,24 @@ class PeerManager extends EventEmitter {
     return p;
   }
 
-  /** Sync the group peer set from GroupManager (names + availability). */
+  /** Sync the group peer set from GroupManager (names + availability + member stats). */
   reconcileGroupPeers(): void {
-    const groups = getGroupManager().list();
+    const gm = getGroupManager();
+    const groups = gm.list();
     const seen = new Set<string>();
     for (const g of groups) {
       seen.add(g.id);
-      const available = g.memberIds.some(
-        d => getCachedDevices().find(x => x.id === d)?.available,
-      );
-      this.registerGroup(g.id, g.name, available);
+      // 可用性 = 至少一个成员在线。**必须复用 GroupManager 的成员解析**
+      // (按成员 id 的命名空间分派 —— sendspin 成员不在 DLNA 设备缓存里)。
+      // 曾在此处直接 `getCachedDevices().find(id)` ⇒ 只认 DLNA 成员,
+      // 非 DLNA 群组恒判离线 ⇒ 前端「流转播放」选择器按 available 剪掉整行,
+      // 群组虽已落库、管理页也正常,却无法接入播放。
+      // ⚠️ 注意「可用性」与「是否显示」是两件事：空组恒 available=false，
+      // 但**必须仍然出现在列表里**(见 Peer.memberCount 注释)。
+      const states = gm.resolveMemberStates(g.memberIds);
+      const available = states.some(m => m.available);
+      const onlineCount = states.filter(m => m.available).length;
+      this.registerGroup(g.id, g.name, available, g.memberIds, onlineCount);
     }
     // Groups that vanished → remove their peer entry entirely (permanent peers,
     // no offline grace needed).
