@@ -161,6 +161,14 @@ export function initDatabase() {
       plugin_entry TEXT,
       cache_path TEXT,
       lyrics TEXT,
+      -- 文件头标签扩展:扫描时只读音频文件头就能拿到的常用标签单独成列(year 是歌曲
+      -- 自己的年份,与 albums.year 的"建专辑那年"不同);tags 存全部原始标签的 JSON
+      -- (二进制类如内嵌封面只留 format/size),冷门标签也不再丢。
+      year INTEGER DEFAULT 0,
+      album_artist TEXT DEFAULT '',
+      composer TEXT DEFAULT '',
+      comment TEXT DEFAULT '',
+      tags TEXT,
       -- 同曲多源归组:规范化标题+歌手相同且时长差 ≤3s 的行共享同一 group_id;
       -- 组内优先级 local > webdav > web,播放优选/展示合并基于它。分组只附加列,不删行。
       group_id TEXT,

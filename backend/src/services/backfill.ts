@@ -85,8 +85,11 @@ export function collectCandidates(kind: BackfillKind): any[] {
          FROM songs WHERE ${whereClause(kind)}`,
     ).all() as any[];
   }
+  // cover_art 之外必须带上 type / album_id:fetchCoverForSong 依据它们执行
+  // 「本地歌曲已有专辑封面则跳过」守卫(否则批量补全会给数万首本地歌写入
+  // 在线搜来的封面,覆盖原有专辑封面兜底)。
   return sqlite.prepare(
-    `SELECT id, title, artist, album, duration, cover_art
+    `SELECT id, title, artist, album, duration, cover_art, type, album_id
        FROM songs WHERE ${whereClause(kind)}`,
   ).all() as any[];
 }

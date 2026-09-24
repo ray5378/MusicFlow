@@ -15,6 +15,15 @@ import { newGroupId, normalizeGroupText } from "../../utils/songGroup.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
 const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover art
+/** WebDAV 分级取头:FLAC 的元数据块(STREAMINFO/VORBIS_COMMENT/PICTURE)紧跟文件头,
+ *  实测 25/25 首 256KB 就解析完整;只有超大内嵌封面或异常 PADDING 才需升档。
+ *  逐级重试把全库取头流量从固定 4MB/首 降到约 1/16。 */
+const HEADER_LADDER = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
+/** 歌词标签字段名白名单(大小写不敏感):Vorbis Comment 与 ID3 的常见写法。
+ *  实测本库只用 LYRICS,但别的抓轨/转码工具可能写 UNSYNCEDLYRICS/SYNCEDLYRICS/LYRIC。 */
+const LYRIC_TAG_RE = /^(LYRICS|UNSYNCEDLYRICS|UNSYNCED_?LYRICS|LYRIC|SYNCEDLYRICS|SYNCED_?LYRICS|USLT|SYLT)$/i;
+/** 二进制型标签:进 tags JSON 时只留格式/长度,不把 base64 图或整篇歌词塞两遍。 */
+const BINARY_TAG_RE = /^(METADATA_BLOCK_PICTURE|COVERART|APIC)$/i;
 const TRAVERSE_CONCURRENCY = 10; // 目录遍历并发
 const DOWNLOAD_CONCURRENCY = 8; // 音频头部下载并发
 const MAX_RETRIES = 3; // 网络请求重试次数
@@ -50,7 +59,16 @@ interface MusicMetadata {
   title: string; artist: string; album: string; duration: number; bitRate: number;
   genre: string; year: number; track: number; discNumber: number;
   contentType: string; suffix: string; size: number;
+  /** 多值标签折叠成单列的形态(以 "; " 连接),供 songs.album_artist / composer / comment 使用。 */
+  albumArtist: string; composer: string; comment: string;
   picture?: { format: string; data: Buffer };
+  /** 内嵌歌词标签(ID3 USLT / Vorbis LYRICS 等)的纯文本。
+   *  扫描时 metadata 已在内存里被完整解析,取用零额外 IO/网络成本。 */
+  lyrics?: string;
+  /** 全部原始标签的 JSON(二进制字段只留 format/size);文件头能拿到的标签一个不丢。 */
+  tags?: string;
+  /** 仅解析失败(回落到文件名推断)时为 true —— WebDAV 据此升档重取更多字节。 */
+  incomplete?: boolean;
 }
 
 const log = createLogger("SCANNER");
@@ -214,16 +232,24 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
     progress.currentTrack = path.basename(href);
     emitProgress();
     try {
-      const res = await fetchWithRetry(downloadUrl, {
-        headers: {
-          ...(auth ? { Authorization: auth } : {}),
-          Range: `bytes=0-${HEADER_SIZE - 1}`,
-        },
-      });
-      if (!res.ok && res.status !== 206) { skipped++; return; }
-      const arrayBuf = await res.arrayBuffer();
-      const headerBuf = Buffer.from(arrayBuf);
-      const meta = await extractMetadataHeader(headerBuf, path.basename(href), entry.size);
+      // 分级取头:先 256KB,解析不完整(回落到文件名推断)再升 1MB / 4MB。实测 FLAC 的
+      // 元数据块全在最前面,256KB 已覆盖 25/25,全库取头流量因此降到固定 4MB 方案的 ~1/16。
+      let meta: MusicMetadata | null = null;
+      for (let i = 0; i < HEADER_LADDER.length && !meta; i++) {
+        const res = await fetchWithRetry(downloadUrl, {
+          headers: {
+            ...(auth ? { Authorization: auth } : {}),
+            Range: `bytes=0-${HEADER_LADDER[i] - 1}`,
+          },
+        });
+        if (!res.ok && res.status !== 206) { skipped++; return; }
+        const arrayBuf = await res.arrayBuffer();
+        const headerBuf = Buffer.from(arrayBuf);
+        const parsed = await extractMetadataHeader(headerBuf, path.basename(href), entry.size);
+        // 只有真正解析失败才升档;WAV 这类天生无标签的格式解析本身是成功的,不会白升。
+        if (!parsed.incomplete || i === HEADER_LADDER.length - 1) meta = parsed;
+      }
+      if (!meta) { skipped++; return; }
       const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? buildFingerprint(entry) : undefined);
       if (result === "added") added++;
       else if (result === "updated") updated++;
@@ -338,7 +364,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
 }
 
 // Extract metadata from header chunk using music-metadata
-async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSize: number): Promise<MusicMetadata> {
+export async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSize: number): Promise<MusicMetadata> {
   const ext = path.extname(fileName).toLowerCase();
   const nameWithoutExt = path.basename(fileName, ext);
   const fallback = (): MusicMetadata => {
@@ -348,6 +374,9 @@ async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSi
       artist: parts.length > 1 ? parts[0].trim() : "Unknown Artist",
       album: "Unknown Album", duration: 0, bitRate: 0, genre: "", year: 0,
       track: 0, discNumber: 1, contentType: mimeFromExt(ext), suffix: ext.replace(".", ""), size: fileSize,
+      albumArtist: "", composer: "", comment: "",
+      // 解析失败(头部字节不够 / 结构异常):标记不完整,WebDAV 侧据此升档重取
+      incomplete: true,
     };
   };
 
@@ -372,10 +401,91 @@ async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSi
       duration = Math.round(((fileSize) * 8) / (bitRate * 1000));
     }
 
-    return { title, artist, album, duration, bitRate, genre, year, track, discNumber, contentType: mime, suffix: ext.replace(".", ""), size: fileSize, picture: extractPicture(common) };
+    return {
+      title, artist, album, duration, bitRate, genre, year, track, discNumber,
+      contentType: mime, suffix: ext.replace(".", ""), size: fileSize,
+      albumArtist: joinTags((common as any).albumartist ?? (common as any).albumArtist),
+      composer: joinTags(common.composer),
+      comment: joinTags(common.comment),
+      picture: extractPicture(common),
+      lyrics: extractLyricsText(common, metadata.native),
+      tags: buildTagsJson(common, metadata.native),
+    };
   } catch {
     return fallback();
   }
+}
+
+/** 多值标签折叠成单串(以 "; " 连接),供 songs.album_artist / composer / comment 这类单列存储。 */
+function joinTags(v: unknown): string {
+  if (v == null) return "";
+  const arr = Array.isArray(v) ? v : [v];
+  return arr
+    .map((x) => (typeof x === "string" ? x : String((x as any)?.text ?? "")))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .join("; ");
+}
+
+/** 内嵌歌词提取(纯文本 / 带时间轴文本)。两条来源并用:
+ *  ① music-metadata 规范化后的 common.lyrics(ILyricsTag[]{text} 或旧版 string[]);
+ *  ② native 原始标签兜底 —— Vorbis Comment 的 LYRICS / UNSYNCEDLYRICS / SYNCEDLYRICS / LYRIC、
+ *     ID3 的 USLT / SYLT,凡是规范化没映射到的字段名都能捞回来。
+ *  去重后**带 [mm:ss] 时间轴的优先**,否则用纯文本;全空返回 undefined(保持 NULL 语义)。 */
+function extractLyricsText(common: any, native?: any): string | undefined {
+  const parts: string[] = [];
+  const raw = common?.lyrics;
+  for (const item of Array.isArray(raw) ? raw : raw ? [raw] : []) {
+    const t = typeof item === "string" ? item : item?.text;
+    if (typeof t === "string" && t.trim().length > 0) parts.push(t);
+  }
+  for (const list of Object.values((native || {}) as Record<string, any[]>)) {
+    for (const t of list || []) {
+      if (!LYRIC_TAG_RE.test(String(t?.id ?? ""))) continue;
+      const v = t?.value;
+      const text = typeof v === "string" ? v : (v?.text ?? "");
+      if (typeof text === "string" && text.trim().length > 0) parts.push(text);
+    }
+  }
+  if (parts.length === 0) return undefined;
+  const uniq = [...new Set(parts.map((p) => p.trim()))];
+  const timed = uniq.filter((p) => /\[\d{1,2}:\d{2}/.test(p));
+  return (timed.length > 0 ? timed : uniq).join("\n\n");
+}
+
+/** 全部原始标签 -> JSON:common 的规范化结果与 native 的原始字段名都保留,冷门标签不再丢。
+ *  二进制类(内嵌封面 base64、歌词正文)与超长值只留长度,避免与 songs.cover_art / lyrics 双份存储。 */
+function buildTagsJson(common: any, native?: any): string | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries((common || {}) as Record<string, any>)) {
+    if (v == null || v === "" || (Array.isArray(v) && v.length === 0)) continue;
+    if (k === "picture") {
+      out.picture = (v as any[]).map((p) => ({ format: p?.format, size: p?.data?.length ?? 0 }));
+    } else if (k === "lyrics") {
+      out.lyrics = (v as any[]).map((l) =>
+        typeof l === "string"
+          ? { textLength: l.length }
+          : { contentType: l?.contentType, language: l?.language, descriptor: l?.descriptor, textLength: String(l?.text ?? "").length });
+    } else {
+      out[k] = v;
+    }
+  }
+  const nat: Record<string, unknown> = {};
+  for (const [tagType, list] of Object.entries((native || {}) as Record<string, any[]>)) {
+    for (const t of list || []) {
+      const id = String(t?.id ?? "");
+      if (!id) continue;
+      const rawValue = t?.value;
+      const asText = typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue ?? null);
+      // Vorbis 的字段名本身已大写且唯一,直接用作 key;其它格式加前缀避免同名覆盖。
+      const key = tagType === "vorbis" ? id : `${tagType}:${id}`;
+      if (BINARY_TAG_RE.test(id)) nat[key] = `[binary ${asText.length}]`;
+      else if (LYRIC_TAG_RE.test(id)) nat[key] = `[lyrics ${asText.length}]`;
+      else nat[key] = asText.length > 1000 ? `[${asText.length} chars]` : rawValue;
+    }
+  }
+  if (Object.keys(nat).length > 0) out.native = nat;
+  return Object.keys(out).length > 0 ? JSON.stringify(out) : undefined;
 }
 
 function extractPicture(common: any): { format: string; data: Buffer } | undefined {
@@ -440,7 +550,12 @@ async function extractMetadataLocal(filePath: string): Promise<MusicMetadata> {
       genre: common.genre?.[0] || "", year: common.year || 0,
       track: common.track?.no || 0, discNumber: common.disk?.no || 1,
       contentType: mimeFromExt(ext), suffix: ext.replace(".", ""), size: stat.size,
+      albumArtist: joinTags((common as any).albumartist ?? (common as any).albumArtist),
+      composer: joinTags(common.composer),
+      comment: joinTags(common.comment),
       picture: extractPicture(common),
+      lyrics: extractLyricsText(common, metadata.native),
+      tags: buildTagsJson(common, metadata.native),
     };
   } catch {
     const parts = nameWithoutExt.split(" - ");
@@ -449,6 +564,7 @@ async function extractMetadataLocal(filePath: string): Promise<MusicMetadata> {
       artist: parts.length > 1 ? parts[0].trim() : "Unknown Artist",
       album: "Unknown Album", duration: 0, bitRate: 0, genre: "", year: 0,
       track: 0, discNumber: 1, contentType: mimeFromExt(ext), suffix: ext.replace(".", ""), size: stat.size,
+      albumArtist: "", composer: "", comment: "", incomplete: true,
     };
   }
 }
@@ -474,22 +590,25 @@ function findOrCreateArtist(name: string): string {
   return id;
 }
 
-function findOrCreateAlbum(name: string, artistId: string, artistName: string, year: number, picture?: { format: string; data: Buffer }): string {
+function findOrCreateAlbum(name: string, artistId: string, artistName: string, year: number, picture?: { format: string; data: Buffer }, genre?: string): string {
   if (!name || name === "Unknown Album") return "";
   const existing = db.select().from(albums).where(eq(albums.name, name)).get();
   if (existing) {
-    // Backfill cover art for albums created before cover extraction existed
+    // 存量专辑补写:封面(老库里没有封面抽取的年代建的)与流派(albums.genre 此前从未被写过)。
+    const patch: Partial<{ coverArt: string; genre: string; updatedAt: string }> = {};
     if (!existing.coverArt && picture) {
       const coverRef = saveCoverArt(existing.id, picture);
-      if (coverRef) {
-        db.update(albums).set({ coverArt: coverRef, updatedAt: new Date().toISOString() }).where(eq(albums.id, existing.id)).run();
-      }
+      if (coverRef) patch.coverArt = coverRef;
+    }
+    if (!existing.genre && genre) patch.genre = genre;
+    if (Object.keys(patch).length > 0) {
+      db.update(albums).set({ ...patch, updatedAt: new Date().toISOString() }).where(eq(albums.id, existing.id)).run();
     }
     return existing.id;
   }
   const id = uuidv4();
   const coverRef = saveCoverArt(id, picture);
-  db.insert(albums).values({ id, name, artistId, artist: artistName, year, coverArt: coverRef, songCount: 0, duration: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
+  db.insert(albums).values({ id, name, artistId, artist: artistName, year, genre: genre || "", coverArt: coverRef, songCount: 0, duration: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
   return id;
 }
 
@@ -518,7 +637,7 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
 export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" | "skip" {
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
   const artistId = findOrCreateArtist(meta.artist) || null;
-  const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture) || null;
+  const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture, meta.genre) || null;
   if (existing) {
     // 同曲多源归组:已分组行保持组不变;历史 NULL 组行(归组启用前/插件关闭期
     // 扫入的存量)在元数据更新时顺带补组,与 web 导入同规则。
@@ -527,7 +646,15 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
       title: meta.title, artist: meta.artist, artistId, album: meta.album, albumId,
       duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
       suffix: meta.suffix, size: meta.size, genre: meta.genre,
-      discNumber: meta.discNumber, track: meta.track, updatedAt: new Date().toISOString(),
+      discNumber: meta.discNumber, track: meta.track,
+      // 文件头标签以文件为权威源,扫描即刷新。
+      year: meta.year || 0, albumArtist: meta.albumArtist || "", composer: meta.composer || "",
+      comment: meta.comment || "",
+      ...(meta.tags ? { tags: meta.tags } : {}),
+      // 内嵌歌词是唯一例外:只在库内尚无歌词时补写 —— 已有歌词(在线回填的时间轴 LRC /
+      // 之前扫描写入)不被覆盖,避免用纯文本标签顶掉带时间轴的 LRC。
+      ...(meta.lyrics && !existing.lyrics ? { lyrics: meta.lyrics } : {}),
+      updatedAt: new Date().toISOString(),
       ...(backfill ? { groupId: backfill.groupId, groupKey: backfill.groupKey } : {}),
       ...(fingerprint ? { fingerprint } : {}),
     }).where(eq(songs.id, existing.id)).run();
@@ -542,6 +669,11 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
     duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
     suffix: meta.suffix, path: songPath, size: meta.size, genre: meta.genre,
     discNumber: meta.discNumber, track: meta.track, playCount: 0,
+    // 文件头能拿到的标签全部入库:歌词直接落列(纯文本或带时间轴),
+    // 冷门标签进 tags JSON;入库后这首歌的批量回填(lyrics IS NULL)会自动跳过。
+    lyrics: meta.lyrics ?? null,
+    year: meta.year || 0, albumArtist: meta.albumArtist || "", composer: meta.composer || "",
+    comment: meta.comment || "", tags: meta.tags ?? null,
     ...(group ? { groupId: group.groupId, groupKey: group.groupKey } : {}),
     ...(fingerprint ? { fingerprint } : {}),
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),

@@ -6,10 +6,10 @@
 // 防风暴(getCoverArt 是高频端点):每首歌在一次失败后,短 TTL 内不再重复触发;
 //   批量补全(C)用 force 绕过该门控,但自身节流。
 import { db, sqlite } from "../db/index.js";
-import { songs } from "../db/schema.js";
-import { inArray } from "drizzle-orm";
+import { songs, albums } from "../db/schema.js";
+import { inArray, eq } from "drizzle-orm";
 import { hasCoverProvider, searchCover } from "../plugins/providers.js";
-import { cacheRemoteCover } from "./playlistCover.js";
+import { cacheRemoteCover, resolveCoverFile } from "./playlistCover.js";
 import { getSettingBool } from "./settings.js";
 
 export interface CoverSongInput {
@@ -19,6 +19,10 @@ export interface CoverSongInput {
   album?: string | null;
   duration?: number | null;
   coverArt?: string | null;
+  /** 歌曲来源类型(local / web …)。本地歌曲的"已有封面不覆盖"守卫据此判定。 */
+  type?: string | null;
+  /** 所属专辑 id。本地歌曲经专辑封面兜底时,据此判断它其实已有封面。 */
+  albumId?: string | null;
 }
 
 const ATTEMPT_TTL = 10 * 60 * 1000; // 10 分钟内同一首歌失败后不再自动重试
@@ -73,6 +77,21 @@ export async function fetchCoverForSong(song: CoverSongInput, force = false): Pr
 
   // 已有封面(本地内嵌/之前落库)→ 直接用
   if (song.coverArt) return song.coverArt;
+
+  // 本地歌曲守卫:本地歌的封面走「专辑封面兜底」(songs.cover_art 恒为空,显示时
+  // 由 getCoverArt 的 al-/so- 分支回落到专辑封面)。若专辑已有可用封面文件,则
+  // 这首歌其实"已经有封面",**不得**再用在线搜来的图覆盖 —— 只补齐真正没有任何
+  // 封面的本地歌。
+  // 必要性:批量补全(C)按 `cover_art IS NULL` 扫全库,本地歌全部命中;若无此守卫,
+  // 数万首本地歌会被写入在线搜来的 song 级封面,既覆盖原有专辑封面兜底(在线匹配
+  // 常命中翻唱/同名异版),又白白消耗大量外部搜索请求。
+  // 注意:命中时只返回引用、不写库,保持本地歌数据原样。
+  if (song.type === "local" && song.albumId) {
+    const album = db.select({ coverArt: albums.coverArt }).from(albums)
+      .where(eq(albums.id, song.albumId)).get();
+    const albumRef = album?.coverArt || null;
+    if (albumRef && resolveCoverFile(albumRef)) return albumRef;
+  }
 
   // 防风暴:失败后 TTL 内不再自动重试
   const last = attempts.get(song.id);

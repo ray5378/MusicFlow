@@ -71,6 +71,14 @@ export const songs = sqliteTable("songs", {
   sourceData: text("source_data"),
   pluginEntry: text("plugin_entry"),
   cachePath: text("cache_path"),
+  // 文件内嵌歌词标签(ID3 USLT / Vorbis LYRICS 等)的纯文本/时间轴文本,扫描入库时写入。
+  lyrics: text("lyrics"),
+  // 扫描时从文件头解析出的常用标签;tags 为全部原始标签的 JSON(冷门标签不丢)。
+  year: integer("year").default(0),
+  albumArtist: text("album_artist").default(""),
+  composer: text("composer").default(""),
+  comment: text("comment").default(""),
+  tags: text("tags"),
   // 同曲多源归组:规范化标题+歌手+专辑相同且时长差 ≤1s(秒级)的行共享同一
   // group_id;组内优先级 local > webdav > web,播放优选/展示合并基于它。
   // 分组只附加列,不删行。
