@@ -2,6 +2,61 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.22] - 2026-09-25
+
+### 新增：扫描落库文件头全部标签（年份 / 专辑艺术家 / 作曲家 / 备注 / 原始标签）
+
+- **动机**：本地源（WebDAV / 网盘）此前只落 `title` / `artist` / `album` 等少数字段，
+  **扫描时读到的信息全丢**。FLAC 元数据块位于文件最前面（STREAMINFO → VORBIS_COMMENT /
+  PICTURE → 音频帧），**只取文件头即可拿到与全量解析逐键一致的标签**。
+- **新增列**：`songs.year` / `album_artist` / `composer` / `comment` / `tags`（原始标签 JSON，
+  二进制值与 >1000 字符的值只留长度），另加 `has_lyrics`（三态，见下）；
+  `albums.genre` 顺带由 `findOrCreateAlbum` 补写。线上库已手工 ALTER，drizzle schema 同步。
+- **分级取头**：`HEADER_LADDER = [256KB, 1MB, 4MB]`，由 `MusicMetadata.incomplete` 驱动升档。
+  实测曲库 FLAC 元数据块全部落在前 256KB 内，取头流量从固定 4MB 降至约 1/16。
+- **歌词提取**：双来源 —— `common.lyrics` + native 原始标签白名单
+  （`LYRICS` / `UNSYNCEDLYRICS` / `SYNCEDLYRICS` / `LYRIC` / `USLT` / `SYLT`）兜底，
+  带 `[mm:ss]` 时间轴的优先（实测 FLAC 内嵌 LYRICS 多数本身就是 LRC）。
+- 新增 `buildTagsJson()`（全量原始标签落库）、`joinTags()`（多值标签折叠）。
+
+### 变更：歌词只标注存在性，不落正文
+
+- `songs.lyrics` 不再承载歌词正文，改为只表示**在线歌词文件引用**（`online-lyrics/<id>.lrc`）；
+  新增 `has_lyrics` 三态：**NULL = 未检测 / 0 = 检测过无 / 1 = 有**
+  （刻意不设 DEFAULT —— 只有 NULL 才代表"没查过"）。
+- `upsertSong` 写入 `hasLyrics`，文件无歌词时**不降级**已有的 1。
+- 理由是批量回填只需区分「有和没有」，存正文既撑库又没有出口。
+
+### 修复：批量回填重复劳动 + 网盘请求无限速
+
+- `backfill.ts` 歌词候选加 `COALESCE(has_lyrics,0)=0`（内嵌已带歌词的歌不再被在线重复搜索），
+  命中落盘时同步 `has_lyrics=1`；sidecar 命中分支同样标注。
+- 封面回填候选过滤掉**已有专辑封面**的行；本地歌已有封面则不再搜索覆盖。
+- 回填请求限速重写：全局最小请求间隔 + 429/5xx 退避重试（与 `scanner.fetchWithRetry`
+  同语义），并复用系统「限速档位」`batch_pace` 的批间睡眠与并发 —— **网盘必须有间隔**。
+
+### 新增：新落库标签的 API / 前端出口
+
+- `utils/songSource.ts`：`ClientSongRow` / `serializeSongRow` 增
+  `year` / `albumArtist` / `composer` / `comment` / `hasLyrics`。
+- `routes/rest/index.ts`：`songToChild` 修掉 `year` 硬编码 0（列已落库却永远输出 0），
+  增 OpenSubsonic 扩展字段 `displayAlbumArtist` / `displayComposer`；search3 空查询分支的
+  手工投影列同步补齐（否则搜索结果这些字段恒空）。
+- `routes/api/index.ts`：新增 `GET /v1/songs/:id` 单曲详情（返回 `tags` 原始标签 JSON +
+  `lyrics` 概况）。列表接口刻意**不返回** `tags`（0.5~2KB/行，整页投影会撑爆）。
+- 前端歌曲信息弹窗：补 年份 / 专辑艺术家 / 作曲家 / 流派 / 音轨 / 备注 行、歌词状态行、
+  「原始标签(N)」折叠区；`locales` 的 `globalItem` 新增对应 key（zh / en 同步）。
+
+### 验证
+
+- `npx tsc --noEmit` 通过；前端 `npm run build` 通过。
+- CI 守卫全绿：`check-builtins` 18/18、`check-core`、`check-i18n`、`check-seek-granularity`、
+  `check-frontend-plugins` / `check-frontend-overlays` / `check-element-overrides` /
+  `check-fixed-playlist-ids` / `check-renderer-host`。
+- 实测（4 首样本）：仅 256KB 一档即拿到完整标签；`album_artist` / `year` / `comment` /
+  歌词（777~1351 字符，3/4 带时间轴）/ `tags` 均落库，两轮 upsert 幂等。
+- 本期**不回填历史曲库**（用户决定）：代码路径已就绪，库内已有数据的标签补齐按需再跑。
+
 ## [4.0.21] - 2026-09-24
 
 ### 修复：成员换组残留双成员 / 双流（对齐 MA `add_client` 的 `ungroup`）
