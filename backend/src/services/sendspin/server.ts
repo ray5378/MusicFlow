@@ -264,6 +264,13 @@ export class SendspinServer {
   /** 连接完成 server/activate 后注册为可播播放器(由 index.ts 注入)。 */
   onConnectionActivated(conn: SendspinConnection): void {
     this.clients.set(conn.clientId!, conn);
+    // 上线即对齐:此刻 hello 已解析完(含 `supported_commands`),若这个 clientId 名下
+    // 已有组(持久音量恢复 / 同名用户组 / 掉线重连),把权威音量立刻补发给设备。
+    // 只 `get` 不 `group()` —— 不要为一个从没播过的设备凭空建空组(空组不会被回收)。
+    // 没有持久行时下面的 onActivated → applyPersistedDeviceVolume 会补上;两条都空
+    // 则设备保持自身默认(100 = unity),正是我们要的「没设过就不干预」。
+    const g = this.groups.get(conn.clientId!);
+    if (g) { try { this.syncVolume(g); } catch { /* best-effort */ } }
     this.onActivated?.(conn);
   }
 
@@ -317,6 +324,30 @@ export class SendspinServer {
     }
   }
 
+  /** 把「此刻生效的组音量/静音」下发给该组的**听众**(MA `group` 音量分配的下行等价物)。
+   *
+   *  听众 = 组内成员 **＋ 该组命名对应的裸设备连接**:
+   *  设备**还没起播**时 `conn.group` 仍为空(入组发生在 playCore),但它的单设备组
+   *  就是 `groups.get(它的 clientId)`(「组名 = 裸 clientId」的既有约定)——
+   *  「上线即对齐」「恢复持久音量」两条路径全靠这一条把命令送到设备,否则要等到
+   *  起播才生效(用户看到"改了音量没反应")。
+   *
+   *  返回真正下发了命令的听众数(0 = 全员不支持 ⇒ 走既有编码增益路径,调用方无需分支)。
+   *  幂等、可重复调用;全体发送都是 best-effort(单台失败不连累其余)。 */
+  syncVolume(g: SendspinGroup): number {
+    let n = 0;
+    const done = new Set<SendspinConnection>();
+    for (const c of g.members) {
+      done.add(c);
+      try { if (g.syncVolumeTo(c)) n++; } catch { /* 单台失败不连累其余 */ }
+    }
+    const bare = g.name ? this.clients.get(g.name) : undefined;
+    if (bare && !done.has(bare)) {
+      try { if (g.syncVolumeTo(bare)) n++; } catch { /* ignore */ }
+    }
+    return n;
+  }
+
   stop(): void {
     for (const c of this.clients.values()) c.close();
     this.clients.clear();
@@ -344,6 +375,31 @@ export function parseHelloBufferCapacity(payload: any): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return 0;
   return Math.round(n);
+}
+
+/** 从 `client/hello` payload 取设备宣告的 **player 命令能力**(`supported_commands`)。
+ *
+ *  真机实发(ESPHome 2026.9.0 / esp32-player-meet):
+ *    `"player@v1_support": { supported_formats: [...], buffer_capacity: 1600000,
+ *                            supported_commands: ["volume","mute"] }`
+ *  键名兼容 `player_support`(非 v1 legacy 键名)与顶层 `supported_commands`。
+ *  spec(aiosendspin `models/player.py::ClientHelloPlayerSupport`)只允许
+ *  `volume` / `mute` 两个值,故这里只做「取出来 + 过滤成合法值 + 去重」,不猜语义。
+ *  取不到 → `[]`(= 未宣告能力 ⇒ 任何设备命令都不发,音量回退编码增益路径)。
+ *
+ *  这是**发送侧的唯一门禁**:spec 要求 `server/command` 的 command 必须落在设备宣告的
+ *  列表内(MA `player/v1.py:600-616` 就是先查 `supported_commands` 再发)。 */
+export function parseHelloSupportedCommands(payload: any): string[] {
+  const support = payload?.["player@v1_support"] ?? payload?.player_support ?? payload;
+  const raw = support?.supported_commands ?? payload?.supported_commands;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== "string") continue;
+    const s = v.trim().toLowerCase();
+    if ((s === "volume" || s === "mute") && !out.includes(s)) out.push(s);
+  }
+  return out;
 }
 
 /** 设备缓冲容量的**可用比例**——留安全余量,不把设备灌满。
@@ -434,6 +490,13 @@ export class SendspinGroup {
   }
   add(c: SendspinConnection): void {
     this.members.add(c);
+    // 入组即对齐(MA `PlayerGroupRole` 的组音量分配语义):**组音量是权威标度**,成员
+    // 一进组就得跟上,否则同一份 PCM 下「老成员停在旧值、新成员停在设备默认 100」——
+    // 听感上表现为新加入的那台明显更响。设备宣告了 volume/mute ⇒ 立刻下发命令;
+    // 未宣告 ⇒ `syncVolumeTo` 内部 no-op,音量仍走共享编码增益(全组天然一致)。
+    // 放在 `add()` 而非各调用点:入组入口有 playCore/playGroupCore/announce/重绑四处,
+    // 漏掉任何一处都会重现上面的不一致。
+    try { this.syncVolumeTo(c); } catch { /* 下发失败不该让入组失败 */ }
   }
   remove(c: SendspinConnection): void {
     this.members.delete(c);
@@ -441,9 +504,53 @@ export class SendspinGroup {
   get empty(): boolean {
     return this.members.size === 0;
   }
+  /** 该成员是否把音量/静音**交给设备输出级**(MA 语义,见 `SendspinConnection.sendPlayerCommand`)。
+   *
+   *  要求设备在 `client/hello` 里**同时**宣告 `volume` 与 `mute`:
+   *  只宣告 volume 时静音无法可靠表达(要么恒发 `volume=0`、把设备自己的音量旋钮拧到 0,
+   *  要么静音无效),而那正是我们要避开的一类"看起来生效、实际打架"的实现。
+   *  不满足 ⇒ 回退**编码增益**路径(改动前行为,绝不回归)。
+   *  `supportsCommand` 走可选调用:最小桩(单测)只有 `{clientId, codec}`。 */
+  offloadsVolume(c: SendspinConnection): boolean {
+    return !!c.supportsCommand?.("volume") && !!c.supportsCommand?.("mute");
+  }
+
+  /** 该成员的**编码增益**(烘进 PCM 的那份,0-100)。
+   *
+   *  - 设备能收音量命令 → 恒 **100 = unity**:音量由设备输出级实时施加(MA 从不把
+   *    音量写进采样)。这也是「改了音量要等 30s 缓冲播完才生效」的根治点;
+   *  - 否则 → 旧的组音量乘积 `conn.trim × 组音量 / 100`(老设备/最小桩行为完全不变)。
+   *
+   *  ⚠️ 与 `c.volume` 的关系:那是**每连接 trim**(恒 100,只有 TTS 播报临时改),
+   *  与 `setVolumeCore` 只写组音量的权威标度相反 —— 两者相乘才是有效增益(双写即平方)。 */
   appliedGain(c: SendspinConnection): number {
+    if (this.offloadsVolume(c)) return 100;
     if (this.muted || c.muted) return 0;
     return Math.min(100, Math.max(0, Math.round((c.volume * this.volume) / 100)));
+  }
+
+  /** 该成员的**设备音量**(0-100,**不含静音**):conn trim × 组音量。
+   *  静音走独立的 `server/command` mute(MA 的 `set_group_volume` / `set_mute` 就是
+   *  两把旋钮 —— 静音不改音量值,取消静音后音量原样回来)。 */
+  deviceVolume(c: SendspinConnection): number {
+    return Math.min(100, Math.max(0, Math.round((c.volume * this.volume) / 100)));
+  }
+
+  /** 把当前组音量/静音**下发给该成员**(幂等:可重复调用)。
+   *
+   *  返回是否真的发了命令(false = 成员不支持设备命令,音量仍走编码增益)。
+   *  调用时机见 `SendspinServer.syncVolume` —— 凡"设备需要知道当前音量"的时刻。
+   *
+   *  顺序:先 volume 再 mute。"静音期间改音量"两序皆安全;而"取消静音"这一拍,
+   *  先给音量再解静音 ⇒ 设备解静音时音量已是新值,不会闪一下旧音量。 */
+  syncVolumeTo(c: SendspinConnection): boolean {
+    if (!this.offloadsVolume(c)) return false;
+    const vol = this.deviceVolume(c);
+    const muted = !!(this.muted || c.muted);
+    // 顺序即语义:见上。两条命令都不带任何音频,和 30s 缓冲无关。
+    const a = c.sendPlayerCommand({ command: "volume", volume: vol });
+    const b = c.sendPlayerCommand({ command: "mute", mute: muted });
+    return a && b;
   }
   /** 编码组键:同一份 PCM 经同一 codec、同一增益编出的字节**逐字节相同**,
    *  与是哪个客户端无关 —— 故同键成员共享一个编码器(见 pushFrame)。 */
@@ -927,6 +1034,13 @@ export class SendspinConnection {
    *  的那个数。 */
   bufferCapacityBytes = 0;
 
+  /** 设备在 `client/hello` 里宣告的 **player 命令能力**(`supported_commands`,
+   *  见 `parseHelloSupportedCommands`)。决定音量/静音的**施加位置**:
+   *    - 含 `volume`+`mute` → 下发 `server/command`,设备输出级**实时**生效(MA 语义);
+   *    - 否则 → 回退编码增益(烘进 PCM,旧行为)。
+   *  未宣告 = `[]`(旧固件/legacy 明文客户端)→ 一律走旧路径,绝不因新增能力判定砸掉老设备。 */
+  supportedCommands: string[] = [];
+
   private phase: "init" | "handshake" | "ready" = "init";
   private clientInitText = "";
   private serverInitText = "";
@@ -1115,6 +1229,10 @@ export class SendspinConnection {
       /* 循环引用等极端情况忽略 */
     }
     this.parseHelloCapacity(payload);
+    // 设备是否宣告 `player` 的 volume/mute 命令 —— 决定音量/静音的**施加位置**
+    // (设备输出级实时 vs 烘进 PCM 的编码增益)。必须在 onConnectionActivated 之前,
+    // 否则「上线即对齐」那一拍会按「不支持」错误地退回编码路径。
+    this.parseHelloCommands(payload);
     this.legacy = true;
     this.handshakeDone = true;
     this.phase = "ready";
@@ -1271,6 +1389,25 @@ export class SendspinConnection {
       "info",
       `client/hello: device buffer_capacity=${n} bytes ${this.clientId ?? "?"}`,
     );
+  }
+
+  /** 解析 `client/hello` 里的设备**命令能力**(`player@v1_support.supported_commands`)。
+   *
+   *  与缓冲容量同一个 hello 段落、同一套键名兼容规则(见 `parseHelloBufferCapacity`)。
+   *  解析到就记日志:它会决定这台设备的音量/静音走**设备命令**还是**编码增益**,
+   *  「改了音量要等 30s 才生效」的现场排查第一眼就要看这行。 */
+  private parseHelloCommands(payload: any): void {
+    const cmds = parseHelloSupportedCommands(payload);
+    this.supportedCommands = cmds;
+    if (cmds.length > 0) {
+      this.server.log(
+        "info",
+        `client/hello: device supported_commands=${JSON.stringify(cmds)} ${this.clientId ?? "?"}` +
+          (this.supportsCommand("volume") && this.supportsCommand("mute")
+            ? "(音量/静音走 server/command,设备输出级实时生效)"
+            : "(缺少 volume/mute,音量回退编码增益)"),
+      );
+    }
   }
 
   /** 设备**同步状态变化**时的显式日志(spec `client/state.state`)。
@@ -1490,6 +1627,7 @@ export class SendspinConnection {
     this.codec = negotiateCodec(payload, this.server.preferredCodec);
     this.server.log("info", `activated ${this.clientId} name=${this.name} roles=${this.roles.join(",")} codec=${this.codec}`);
     this.parseHelloCapacity(hello);
+    this.parseHelloCommands(hello);
     this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
     // spec MUST:首次 activate 后立即下发 group/update(真实客户端如 sendspin-cpp
     // 在收到它之前不认 server;此前从没发过,ESPHome 真机 ~30s 后 goodbye 离开)。
@@ -1597,6 +1735,40 @@ export class SendspinConnection {
       group_id: g?.name ?? this.clientId ?? "",
       group_name: g?.name ?? this.name,
     });
+  }
+
+  /** 设备是否宣告支持某条 player 命令(`volume` / `mute`,见 `supportedCommands`)。 */
+  supportsCommand(cmd: "volume" | "mute"): boolean {
+    return this.supportedCommands.includes(cmd);
+  }
+
+  /** 下发一条 MA `server/command` 的 **player 命令**(与 `stream/start` 并列的下行控制面)。
+   *
+   *  协议帧(aiosendspin `models/core.py:599` `ServerCommandMessage` +
+   *  `models/player.py:134` `PlayerCommandPayload`):
+   *    `{ "type": "server/command",
+   *       "payload": { "player": { "command": "volume", "volume": 50 } } }`
+   *    `{ "type": "server/command",
+   *       "payload": { "player": { "command": "mute", "mute": true } } }`
+   *
+   *  设备在**自己的输出级**实时应用 —— 与音频流无关,故与设备缓冲深度无关。
+   *  这正是「改音量要等 30s 缓冲里那段旧增益的音频播完才生效」的根治点:
+   *  MA **从不**把音量烘进 PCM(其 player 的 audio transformer 只再导出编码器)。
+   *
+   *  ⚠️ 门禁:spec 要求命令必须落在设备 `client/hello` 宣告的 `supported_commands`
+   *  内(MA `player/v1.py:600-616` 就是 `if PlayerCommand.VOLUME not in
+   *  support.supported_commands: return`)。未宣告一律不发。
+   *  返回是否真的发出(调用方据此决定要不要回退编码增益)。 */
+  sendPlayerCommand(
+    cmd: { command: "volume"; volume: number } | { command: "mute"; mute: boolean },
+  ): boolean {
+    if (!this.supportsCommand(cmd.command)) return false;
+    try {
+      this.sendJson("server/command", { player: cmd });
+      return true;
+    } catch {
+      return false;
+    }
   }
   private _sendPlain(body: Uint8Array): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;

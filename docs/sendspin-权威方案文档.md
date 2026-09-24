@@ -227,6 +227,11 @@ capacityLimitedPrefillMs(): number {
 **③ 结构上消除相位**：按 `(codec, gain)` **分组编码** —— 同组只编一次、字节与时间戳分发给全组。
 → 同一 `(codec, gain)` 的设备**共用同一个编码器实例**，相位由构造决定一致 ⇒ ②的口径不再有可被相位干扰的余地。`(codec, gain)` 不同（如 FLAC 与 PCM 混编、各设备音量不同）才分属不同组，成本随**组数**而非成员数增长。
 
+> ⚠️ **`gain` 这一维在收窄**（本次修复，§2.15）：设备一旦在 `client/hello` 宣告 `volume`+`mute`
+> 命令，它的编码增益**恒为 100（unity）** —— 音量改由 `server/command` 下发到设备输出级。
+> 于是这类设备只剩 `codec` 一维，「各设备音量不同 ⇒ 分属不同编码组」不再成立
+> （全组共用一份 unity 音频，编码组数 = codec 数）。未宣告能力的老设备维持原样。
+
 - 锚点 = `nowUs() + SendspinGroup.commonSendAheadUs()`。
 - `produced > 0 ? 按产出推进 : 不推进`；零产出超过 `STALL_GRACE_US`（500ms）才降级为按喂入量推进，避免编码器真坏时时间线冻结。
 - **`commonSendAheadUs()` 是唯一出口**：锚点必须用它（帧头 9B 里**没有** send_ahead，设备用自己那个，未协商默认 800ms）。
@@ -320,6 +325,85 @@ if (delayMs > 0) await sleep(delayMs);   // ❌ 落后时完全没有让出点
 - 2D Kalman（offset + drift）在**客户端**计算；服务端只提供时间戳并测到达/发送时刻。
 - 收敛前客户端不报 `available:true`。稳态 ±0.5~±1ms；漂移修正节制（dead band ~100µs，整帧删/插）。
 - **服务端可 rate-limit / debounce / coalesce** 客户端的 timing 更新（spec 允许）。
+
+## 2.15 音量/静音走 `server/command`，**绝不烘进 PCM**
+
+**症状**：用户拖群组音量后要等设备缓冲（档位 30s 时最明显）里那段**旧增益的音频播完**才生效。
+
+**根因**：我们把音量乘进了编码增益 —— `SendspinGroup.appliedGain(c) = conn.volume × 组音量 / 100`，
+再经 `scalePcm` **烘进编码后的采样**。音频是一次性推给设备的长流，改增益只对**之后编出来的块**有效，
+设备已经把前面几十秒的字节吞进自己的缓冲了 ⇒ 延迟 = 设备缓冲深度。
+
+**MA 的标准答案**（`music_assistant/providers/sendspin`）把两件事分得很开：
+
+| 量 | MA 的施加位置 | 说明 |
+|---|---|---|
+| **响度归一化增益**（-14 LUFS / EBU-R128，默认开） | **烘进 PCM** | `controllers/player_queues/config.py:462` "(re)baked gain filter"，**只在新建流时算一次** |
+| **用户音量 / 组音量 / 静音** | **`server/command` 下发** | `player/v1.py:600-616` 发 `player.command="volume"`，设备在**自己的输出级**实时施加，与缓冲深度无关 |
+
+MA 的 player audio transformer **只再导出编码器**（`FlacEncoder` / `OpusEncoder` / `PcmPassthrough`），
+里面**没有任何 gain** —— 这是「MA 改音量立即生效」的全部原因。
+
+**本仓实现**（`sendspin/server.ts` + `sendspin/playerCore.ts`）：
+
+1. **能力门禁**：`parseHelloSupportedCommands(payload)` 读 `client/hello` 的
+   `player@v1_support.supported_commands`（兼容 `player_support` / 顶层键名），只认 spec 允许的
+   `volume` / `mute` 两值。**必须两者都宣告**才启用 —— 只宣告 `volume` 时静音无法可靠表达
+   （要么恒发 `volume=0` 把设备自己那把旋钮拧掉，要么静音无效），那正是要避开的一类「看着生效、实际打架」。
+   → `SendspinGroup.offloadsVolume(c)` / `SendspinConnection.supportsCommand()`。
+2. **增益分派**：`appliedGain(c)` → 能做设备命令的成员**恒返回 100（unity）**；否则回退旧的乘积。
+   未宣告能力的老固件/legacy 客户端**行为逐字节不变**（这也是回归安全网）。
+3. **下发**：`syncVolumeTo(c)` 先 `{command:"volume",volume}` 再 `{command:"mute",mute}`
+   （顺序即语义：取消静音那一拍，设备解静音时音量已是新值，不会闪一下旧音量）；
+   静音**独立于音量**，不改音量值 —— 与 MA 的 `set_group_volume` / `set_mute` 两把旋钮一致。
+4. **对齐时机**（凡「设备需要知道当前音量」的时刻，全部收敛到一处 `SendspinServer.syncVolume(g)`）：
+
+   | 时机 | 落点 |
+   |---|---|
+   | 用户改音量 / 静音 | `playerCore.setVolumeCore` / `setMutedCore`（播控唯一咽喉，in-proc 与 fork 子进程都走这里） |
+   | 成员**入组** | `SendspinGroup.add()` —— 否则「老成员停在旧值、新成员停在设备默认 100」，同一份 PCM 下听感明显不一致 |
+   | 设备**上线/重连** | `SendspinServer.onConnectionActivated()`（此时 hello 已解析完，能力已知） |
+   | 重启后**持久恢复** | `applyPersistedDeviceVolume` → `setVolumeCore`（同一咽喉） |
+   | **TTS 播报结束**还原音量 | `announceCore` 的还原分支（那是直接赋值、绕过 setVolumeCore，必须显式补发） |
+
+   `syncVolume` 的听众 = 组内成员 **＋ 该组命名对应的裸设备连接**（设备还没起播时 `conn.group` 仍为空，
+   靠「组名 = 裸 clientId」的既有约定把命令送到）。
+
+**前端配套**：`frontend/src/views/Groups/index.vue` 里群组成员行原有的「成员迷你音量条」**已移除**。
+理由：群组推流按 `ug:<gid>` 组对象的 volume 走（全组同一份 PCM、同一编码增益），
+而那个滑条打的是 `/v1/peers/sendspin:<id>/volume`，写的是该设备**自己那个单设备组**的 volume
+⇒ 群组播放时压根不参与，是「看着能动、实际没作用」的死控件。成员静音同理交回群组级入口，
+避免「组里两台设备各有一把旋钮」的错误心智模型。三个配套 i18n key 一并删除（zh/en 保持 1362 键对齐）。
+
+**测试锁**：`backend/tests/services/sendspinVolumeCommand.test.ts`（9 例：hello 解析键名兼容/非法值过滤、
+unity 增益分派、未宣告命令**一条都不发**、只宣告 volume 也回退、入组即对齐、静音的独立旋钮语义、
+以及**真机链路** —— 真实 legacy WS 连接上确实收到 `server/command`）。
+
+> ⚠️ 写该测试的两个坑：① `vitest.config.ts` 开了 `sequence.shuffle`，**用例必须自建基线**，
+> 不能依赖上一个用例留下的组音量/静音；② 观测窗口的顺序必须是「先清空帧 → 再造基线 → 等基线到齐 →
+> 再清空」，先清再等会漏掉**在途帧**（它们在清空之后才落地，污染下一次观测）。两条都是实测翻车过的。
+> ⚠️ 还要 `auto_discover:false`（往 `plugins` 表写一行 config）：否则单测会经 mDNS 真的去
+> **拨局域网里的音箱**。
+
+## 2.16 ③ 段音色 DSP 已接入 sendspin 流
+
+六段流水线（真相源 `docs/audio-pipeline-progress.md`）的 ③ 段之前只接在 HTTP/DLNA
+（`routes/rest/index.ts::resolveRequestAf` / `resolveFlowAf` 调 `playerDspFilters`），
+sendspin 的 `-af` 链只算了 ②响度 + ⑤限制器 —— **是漏接，不是被成组规则挡住**。
+
+接线方式：
+
+- `WindowSource` 增 `dspFilters?: string[]`（**纯音源层不碰 peerId→配置映射**：那要读 DB + 组管理器）；
+- `resolveSendspinAf` 把片段交给 `resolveLoudnessAf({ extraFilters })` —— 顺序 **②→③→⑤** 由那**一个函数**单点保证（DSP 必须作用在「已经一样响」的信号上，反过来响度归一化会把调好的音色重新抹平），本函数只负责传，不自行拼接；
+- `GroupPump.groupDspFilters()` 在 `play()` 起播时算一次（改配置**下一首生效**，与产品语义一致），peerId 由 `dspPeerIdForGroup(groupName)` 翻译：用户组 `ug:<gid>` → `group:<gid>`（与前端「音色」下拉的群组条目同形），单设备组（组名 = 裸 clientId）→ `sendspin:<clientId>`；
+- **成组时成员自身的音色自动停用**仍由 `playerDspFilters` 内部的 `isPeerGrouped` 判据负责（整体返回空链）—— 判定只留那一个入口，这里不重复实现；
+- 三处刻意取舍：① 动态 `import("../playerDsp.js")`（它静态依赖组管理器，会把模块加载期绑死）；② 注入音源（测试）直接返回 `[]`，既有测试零影响；③ 读失败一律回退 `[]` ——「音色是可选装饰，绝不能因为它让整组放不出声」。
+
+> ⚠️ **逃生舱语义**：`enabled:false` 与 `SENDSPIN_LOUDNESS=0` 会让 `resolveLoudnessAf` **整条返回空**，
+> 此时 ③ 段 DSP 一并丢弃（见该函数 `extraFilters` 字段注释，与 D9/D5「关闭开关 = 滤镜链为空」一致）。
+> 用户可见的「音量归一化」开关走的是 `normalization` 字段，**只摘 ② 段、保留 ③⑤** —— 两者别混用。
+> 另注：`WindowSource.loudness` 在**生产代码里没有任何赋值点**（只有单测用它做逃生舱），
+> 所以生产路径恒读全局设置，不会误伤音色。
 
 ---
 
@@ -1147,6 +1231,11 @@ docker restart musicflow
 - ✅ **late-join 回填** `seedLateJoin`（v4.0.20，§5.3，修「加入新设备要很久才出声」）— **真机实测 ≈29s → ≈0.1s**（§8.3）
 - ✅ ESPHome 6053 只读监控 + `GET /v1/sendspin/esphome`
 - ✅ 长音源 ref 长度溢出修复（v4.0.19）
+- ✅ **音量/静音改走 `server/command`**（本次修复，§2.15）—— 编码增益对能力设备恒 unity，
+  音量下发设备输出级，根治「改群组音量要等设备缓冲（30s 档）播完才生效」；配套移除前端
+  群组成员行的「成员迷你音量条」死控件
+- ✅ **③ 段音色 DSP 接入 sendspin 流**（本次修复，§2.16）—— 与 HTTP/DLNA 同序（②→③→⑤），
+  用户组染 `group:<gid>` / 单设备染 `sendspin:<id>`，成组时成员音色仍由 `isPeerGrouped` 自动停用
 
 ## 10.2 未做（留待决定）
 

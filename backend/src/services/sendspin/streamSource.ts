@@ -63,25 +63,41 @@ export interface WindowSource {
     enabled?: boolean;
     targetLoudness?: number;
   };
+  /** ③ 段 per-播放器音色 DSP(`services/playerDsp.ts::playerDspFilters` 的产物,P4)。
+   *
+   *  为什么由调用方算好再传进来:本模块是**纯音源层**,不该知道 peerId → 配置的
+   *  映射(那要读 DB + 组管理器)。调用方(streamEngine)按「组 → peerId」算一次,
+   *  整条流共用 —— 与 HTTP/DLNA 侧 `resolveRequestAf(song, peerId)` 同构。
+   *
+   *  ⚠️ sendspin 的流是**按组共享的一条**(一个 ffmpeg 喂全组),所以音色只能染一份:
+   *  用户组染「组自己」的配置(`group:<gid>`),单设备组染该设备的(`sendspin:<id>`)。
+   *  与 MA/plan §3.3 一致:成员各自的音色在成组时自动停用(由 `playerDspFilters`
+   *  内部的 `isPeerGrouped` 判据负责整体返回空链)。 */
+  dspFilters?: string[];
 }
 
 /**
- * sendspin 推流 -af 链:[响度?,限制器](P1-2)。
+ * sendspin 推流 -af 链:[响度?,DSP?,限制器](P1-2 + P4)。
  * - 通道开关 `pipeline.sendspin` 关(P5-1) → []，**仍走管道**（不是绕过，D9）;
  * - 逃生舱 `SENDSPIN_LOUDNESS=0` 或单源 `loudness.enabled=false` → []，
  *   ffmpeg 命令与 P1-2 之前逐字节一致;
  * - 默认 D2:无测量走实时 loudnorm(-14),有测量(rowId 命中)走静态 volume,
- *   末尾恒跟限制器(-1dB,MA 同构)。
+ *   末尾恒跟限制器(-1dB,MA 同构);
+ * - ③ 段 DSP(`source.dspFilters`,P4):插在**响度之后、限制器之前**(②→③→⑤,
+ *   与 MA 及 HTTP/DLNA 同序 —— 顺序由 `resolveLoudnessAf({extraFilters})` 单点保证,
+ *   本函数只负责把片段传进去,不自行拼接)。
  * 输出 48k 立体声恒定(P1-4 确认结论,见 spawn):编码层/时间线全是 48k 硬编码。
  */
-export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness">): string[] {
+export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness" | "dspFilters">): string[] {
   // P5-1:通道开关。判定放在本函数里而不是调用点，是为了让"哪条通道被关"只有一处真相。
   if (!isChannelEnabled("sendspin")) return [];
+  const extraFilters = source.dspFilters ?? [];
   return resolveLoudnessAf({
-    rowId: source.rowId,
-    enabled: source.loudness?.enabled,
-    targetLoudness: source.loudness?.targetLoudness,
+    ...(source.rowId ? { rowId: source.rowId } : {}),
+    ...(source.loudness?.enabled !== undefined ? { enabled: source.loudness.enabled } : {}),
+    ...(source.loudness?.targetLoudness !== undefined ? { targetLoudness: source.loudness.targetLoudness } : {}),
     escapeEnvVar: "SENDSPIN_LOUDNESS",
+    ...(extraFilters.length > 0 ? { extraFilters } : {}),
   });
 }
 

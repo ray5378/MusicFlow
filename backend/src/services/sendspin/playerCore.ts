@@ -333,8 +333,23 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
   log.debug(`[Sendspin][seekCore] ${clientId} 无 server,落 ephemeral 标记 ${Date.now() - t0}ms`);
 }
 
+/** 把当前组音量/静音**立刻**下发给设备(MA 语义:音量由设备输出级实时施加)。
+ *
+ *  这是「改了群组音量要等 30s 缓冲里的旧增益播完才生效」的根治点:命令是控制面
+ *  (`server/command`),不携带音频,与设备缓冲深度无关。
+ *  设备未宣告 volume/mute ⇒ `syncVolume` 内部判定后不发任何命令,音量继续走编码增益
+ *  (改动前行为),故调用方**不需要任何分支**。
+ *  srv 为空(服务未启动/子进程不在)时无事可做 —— 等真正起播时 `SendspinGroup.add`
+ *  会再对齐一次。 */
+function syncVolumeNow(srv: SendspinServer | null, clientId: string): void {
+  if (!srv) return;
+  try {
+    srv.syncVolume(srv.group(clientId));
+  } catch { /* 单条命令失败不影响音量落库/推送 */ }
+}
+
 /** 音量核心:**只写组音量**(Sendspin 单设备组的权威音量标度)。
- *  ⚠️ 不可同时写 conn.volume 与 group.volume —— appliedGain = 两者乘积/100,
+ *  ⚠️ 不可同时写 conn.volume 与 group.volume —— 旧编码增益 = 两者乘积/100,
  *  双写即平方增益(拖 50 实得 25,v3.0.32 已修)。
  *  persist=true 时同步落库(按设备持久,重连恢复);`ug:` 用户组 volume 不落库
  *  (组成员关系临时,落库只认裸设备 id);announce 播报不走本函数(临时双写不持久)。 */
@@ -344,6 +359,7 @@ export function setVolumeCore(srv: SendspinServer | null, clientId: string, vol:
   if (persist && !clientId.startsWith("ug:")) {
     saveDeviceVolumeState(clientId, { volume: g.volume });
   }
+  syncVolumeNow(srv, clientId);
 }
 
 /** 静音核心:组与连接两侧同置(离线重连后组标记仍有效)。落库语义同 setVolumeCore。 */
@@ -355,6 +371,7 @@ export function setMutedCore(srv: SendspinServer | null, clientId: string, muted
   if (persist && !clientId.startsWith("ug:")) {
     saveDeviceVolumeState(clientId, { muted });
   }
+  syncVolumeNow(srv, clientId);
 }
 
 /** 轮询核心:逻辑播放状态以「组当前曲」为准(已注册播放器在投/续播即视为播放中);
@@ -493,11 +510,15 @@ export async function announceCore(
     }
     if (conn) conn.volume = savedVol;
     g.volume = savedGroupVol;
+    // 播报期间音量被临时改过(见上 `g.volume = v`),这里是**直接还原赋值**、绕过
+    // setVolumeCore ⇒ 必须显式补发一次命令,否则设备停在播报音量上再也回不来。
+    syncVolumeNow(srv, clientId);
     return { targets: 1 };
   } catch (e) {
     // 失败也要把现场还原(音量/成员),否则播报一次失败永久改音量。
     if (conn) conn.volume = savedVol;
     g.volume = savedGroupVol;
+    syncVolumeNow(srv, clientId);
     throw e;
   }
 }

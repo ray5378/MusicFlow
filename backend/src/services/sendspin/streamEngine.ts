@@ -144,11 +144,13 @@ export const ANCHOR_SAFE_LEAD_US = 800_000;
  *  起播跳转共用 —— MA 语义里「从 X 秒开始播」和「跳到 X 秒」是同一件事:
  *  都是用新起点建一条流,而不是在旧流里挪指针。
  *  `opts.preferRowId` = 复用上一轮生效源行(pump 在**同曲**重建时回填),
- *  透传给 `resolvePlayableRow` 以跳过整段播放优选(实测省 1.85~2.53s/次)。 */
+ *  透传给 `resolvePlayableRow` 以跳过整段播放优选(实测省 1.85~2.53s/次)。
+ *  `opts.dspFilters` = ③ 段 per-播放器音色(见 `WindowSource.dspFilters`;
+ *  仅流式窗口路径用得上 —— 整包 `decodeToF32` 路径没有 ffmpeg 链可挂)。 */
 export type PumpSource = (
   songId: string,
   startMs?: number,
-  opts?: { preferRowId?: string },
+  opts?: { preferRowId?: string; dspFilters?: string[] },
 ) => Promise<GroupAudio>;
 
 let injectedSource: PumpSource | null = null;
@@ -232,13 +234,15 @@ export const STALL_GRACE_US = 500_000;
 async function defaultSource(
   songId: string,
   startMs = 0,
-  opts?: { preferRowId?: string },
+  opts?: { preferRowId?: string; dspFilters?: string[] },
 ): Promise<GroupAudio> {
   const { resolvePlayableRow, fetchRowBytes } = await import("../source/resolveAudio.js");
   const r = await resolvePlayableRow(songId, { preferRowId: opts?.preferRowId });
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
   const sourceRowId = r.row.id;
-  if (await isStreamSource()) return { ...(await streamingSource(r.row as any, startMs)), sourceRowId };
+  if (await isStreamSource()) {
+    return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters)), sourceRowId };
+  }
   const bytes = await fetchRowBytes(r.row);
   if (!bytes) throw new Error(`fetch bytes failed for ${songId} (${r.reason})`);
   const pcm = await decodeToF32(bytes);
@@ -264,6 +268,7 @@ export async function resolveFfmpegInput(
 async function streamingSource(
   row: { id?: string; duration?: number | null },
   startMs = 0,
+  dspFilters?: string[],
 ): Promise<GroupAudio> {
   const { resolveRowInput } = await import("../source/resolveAudio.js");
   const direct = resolveRowInput(row as any);
@@ -272,7 +277,11 @@ async function streamingSource(
   // startMs 直达 ffmpeg `-ss`(PcmWindow 构造本就支持,此前未透传):
   // 起播即定位,省掉「先建流再 seekTo 冷起一次」的整段空窗。
   const window = new PcmWindow(
-    { ...source, rowId: typeof row.id === "string" ? row.id : undefined },
+    {
+      ...source,
+      ...(typeof row.id === "string" ? { rowId: row.id } : {}),
+      ...(dspFilters && dspFilters.length > 0 ? { dspFilters } : {}),
+    },
     startMs,
   );
   try {
@@ -314,6 +323,22 @@ function logSafe(server: SendspinServer | undefined, level: "info" | "warn" | "e
   try {
     server?.log?.(level, msg);
   } catch { /* 日志失败绝不影响推流 */ }
+}
+
+/** 组的音色目标 peerId(③ 段 DSP 的配置键)。
+ *
+ *  sendspin 的音频是**按组一条共享流**(一个 ffmpeg 喂全组),所以一份音色只能染
+ *  整条流 —— 分不了成员。于是取「这个播放目标自己」的配置:
+ *    - 用户组(`ug:<gid>`,组名由 `playerCore.sendspinGroupName` 生成)→ `group:<gid>`
+ *      —— 与前端「音色」下拉里群组条目的 peerId 同形,也让 plan §3.3「成组的音色
+ *      由组的输出统一决定」真正落地;
+ *    - 单设备组(组名 = 裸 clientId = `playCore`/`seekCore` 建的组)→ `sendspin:<id>`。
+ *
+ *  ⚠️ 两条都由 `playerDspFilters` 内部再判一层:设备已被拉进用户组时
+ *  (`isPeerGrouped` 为真)整体返回空链 —— 成员自身的音色自动停用,与 MA 一致。
+ *  该判断**必须**留在 playerDsp 侧(唯一判定入口),此处只做「组名 → peerId」的翻译。 */
+export function dspPeerIdForGroup(groupName: string): string {
+  return groupName.startsWith("ug:") ? `group:${groupName.slice("ug:".length)}` : `sendspin:${groupName}`;
 }
 
 /**
@@ -438,9 +463,31 @@ export class GroupPump {
     return this.running;
   }
 
+  /** 本组共享流的 ③ 段音色片段(见 `dspPeerIdForGroup` / `WindowSource.dspFilters`)。
+   *
+   *  三处刻意取舍:
+   *   ① **动态 import** `playerDsp.js` —— 它静态依赖 `group/index.js`(组管理器),
+   *      而组管理器反向要读 sendspin 的实时音量镜像;静态引入会把这条链在模块加载
+   *      期就绑死(与 `readSendspinStreamSource` 的"不许静态 import index.js"同因);
+   *   ② 注入音源(测试)直接返回 `[]` —— 测试不该因为加了 / 没加音色配置而变形;
+   *   ③ 读失败一律回退 `[]` —— `getPlayerDspConfig` 本身已"永不抛",这里再兜一层:
+   *      音色是可选装饰,**绝不能因为它让整组放不出声**(与「读路径永不抛」同一纪律)。 */
+  private async groupDspFilters(): Promise<string[]> {
+    if (injectedSource) return [];
+    try {
+      const { playerDspFilters } = await import("../playerDsp.js");
+      return playerDspFilters(dspPeerIdForGroup(this.group.name));
+    } catch {
+      return [];
+    }
+  }
+
   /** 播放一个音频缓冲:按组时间线切帧推送,推进 positionMs。 */
   async play(songId: string): Promise<void> {
     const source = injectedSource ?? defaultSource;
+    // ③ 段 per-播放器音色(P4):本组共享流的音色片段,起播算一次(改配置下一首生效)。
+    // 注入音源(测试)不读该 opts ⇒ 既有测试零影响。
+    const dspFilters = await this.groupDspFilters();
     // ★ 切歌/重播必须先释放上一首持有的解码窗口(内含 ffmpeg 子进程)。
     // 此前 `this.window = stream ?? null` 直接覆盖,旧 WindowStream 从未 close(),
     // 其 ffmpeg 变成孤儿永久存活 —— 实测每次切歌泄漏一个,240 现场堆积 10 个、
@@ -476,7 +523,7 @@ export class GroupPump {
     try {
       const srcPromise = (async () => {
         try {
-          return await source(songId, startMsForSource, { preferRowId: reuseRowId });
+          return await source(songId, startMsForSource, { preferRowId: reuseRowId, dspFilters });
         } catch (e) {
           // 复用命中却出不了流(源行已失效/被删/上游不可达):清掉记账,回退**完整解析**
           // 重试一次。只重试一次 —— 再失败就交给既有 onPlayFailed 愈合(跳过/换源),
@@ -489,7 +536,7 @@ export class GroupPump {
           );
           this.srcRowId = null;
           this.srcRowSongId = "";
-          return await source(songId, startMsForSource, {});
+          return await source(songId, startMsForSource, { dspFilters });
         }
       })();
       srcResult = NEED_FUSE

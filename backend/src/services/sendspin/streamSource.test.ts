@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { PcmWindow, WindowClosedError, WindowEvictedError, WINDOW_HIGH_SEC, resolveSendspinAf } from "./streamSource.js";
+import { dspPeerIdForGroup } from "./streamEngine.js";
 import { decodeToF32, ffmpegBin, SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { saveAnalysis, deleteAnalysis } from "../audio/analysisStore.js";
 import { parseLoudnorm } from "../audio/loudness.js";
@@ -418,4 +419,43 @@ describe("PcmWindow 重定位代数", () => {
     expect(seg.length).toBe(2400);
     w.close();
   }, 30_000);
+});
+
+describe("resolveSendspinAf ③ 段音色 DSP 接线(P4)", () => {
+  it("DSP 插在响度之后、限制器之前(②→③→⑤,与 HTTP/DLNA 同序)", () => {
+    const dsp = "equalizer=f=200:t=q:w=1:g=3";
+    const af = resolveSendspinAf({ dspFilters: [dsp] });
+    expect(af.length).toBe(3);
+    expect(af[0]).toContain("loudnorm"); // ②
+    expect(af[1]).toBe(dsp); // ③
+    expect(af[2]).toContain("alimiter"); // ⑤
+  });
+
+  it("多段 DSP 原序保留", () => {
+    const af = resolveSendspinAf({ dspFilters: ["dsp-a", "dsp-b"] });
+    expect(af.filter((f) => f === "dsp-a" || f === "dsp-b")).toEqual(["dsp-a", "dsp-b"]);
+  });
+
+  it("无音色配置 → 与接线前逐字节一致(不改变既有命令)", () => {
+    expect(resolveSendspinAf({ dspFilters: [] })).toEqual(resolveSendspinAf({}));
+  });
+
+  it("逃生舱 / 通道开关优先级高于 DSP(整链为空时不残留音色片段)", () => {
+    // 单源逃生舱:整条链为空,DSP 一并丢弃(见 resolveLoudnessAf 的 extraFilters 注释)
+    expect(resolveSendspinAf({ loudness: { enabled: false }, dspFilters: ["dsp-a"] })).toEqual([]);
+  });
+});
+
+describe("dspPeerIdForGroup 组名 → 音色配置键(P4)", () => {
+  it("用户组 ug:<gid> → group:<gid>(与前端「音色」下拉的群组条目同形)", () => {
+    expect(dspPeerIdForGroup("ug:abc123")).toBe("group:abc123");
+  });
+
+  it("单设备组(组名 = 裸 clientId)→ sendspin:<clientId>", () => {
+    expect(dspPeerIdForGroup("ABCDEF0123")).toBe("sendspin:ABCDEF0123");
+  });
+
+  it("只认完整 `ug:` 前缀,`ug` 二字不算用户组", () => {
+    expect(dspPeerIdForGroup("ug")).toBe("sendspin:ug");
+  });
 });
