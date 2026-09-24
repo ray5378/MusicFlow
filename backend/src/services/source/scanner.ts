@@ -651,9 +651,9 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
       year: meta.year || 0, albumArtist: meta.albumArtist || "", composer: meta.composer || "",
       comment: meta.comment || "",
       ...(meta.tags ? { tags: meta.tags } : {}),
-      // 内嵌歌词是唯一例外:只在库内尚无歌词时补写 —— 已有歌词(在线回填的时间轴 LRC /
-      // 之前扫描写入)不被覆盖,避免用纯文本标签顶掉带时间轴的 LRC。
-      ...(meta.lyrics && !existing.lyrics ? { lyrics: meta.lyrics } : {}),
+      // 歌词只标注「有没有」,不存正文(DB 不承载歌词文本):1=有 / 0=检测过无。
+      // 文件里没有歌词时不把已有的 1 降级(在线歌词文件可能已落盘),NULL 视为未检测。
+      hasLyrics: meta.lyrics ? 1 : (existing.hasLyrics ?? 0),
       updatedAt: new Date().toISOString(),
       ...(backfill ? { groupId: backfill.groupId, groupKey: backfill.groupKey } : {}),
       ...(fingerprint ? { fingerprint } : {}),
@@ -669,9 +669,9 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
     duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
     suffix: meta.suffix, path: songPath, size: meta.size, genre: meta.genre,
     discNumber: meta.discNumber, track: meta.track, playCount: 0,
-    // 文件头能拿到的标签全部入库:歌词直接落列(纯文本或带时间轴),
-    // 冷门标签进 tags JSON;入库后这首歌的批量回填(lyrics IS NULL)会自动跳过。
-    lyrics: meta.lyrics ?? null,
+    // 文件头能拿到的标签全部入库;歌词只标注存在性(正文不落库),
+    // 冷门标签进 tags JSON;入库后这首歌的批量回填(has_lyrics 已有值)会自动跳过。
+    hasLyrics: meta.lyrics ? 1 : 0,
     year: meta.year || 0, albumArtist: meta.albumArtist || "", composer: meta.composer || "",
     comment: meta.comment || "", tags: meta.tags ?? null,
     ...(group ? { groupId: group.groupId, groupKey: group.groupKey } : {}),

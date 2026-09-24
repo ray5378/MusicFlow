@@ -1399,7 +1399,19 @@
   "globalItem": {
     "addSongsCountPrompt": "Add {count} songs to:",
     "infoTitle": "Song info",
-    "bitrate": "Bitrate"
+    "bitrate": "Bitrate",
+    "year": "Year",
+    "albumArtist": "Album artist",
+    "composer": "Composer",
+    "genre": "Genre",
+    "track": "Track",
+    "comment": "Comment",
+    "lyrics": "Lyrics",
+    "lyricsTimed": "Yes (timed)",
+    "lyricsPlain": "Yes",
+    "lyricsEmbedded": "Yes (embedded)",
+    "lyricsNone": "None",
+    "rawTags": "Raw tags ({n})"
   },
   "songTable": {
     "title": "Title",

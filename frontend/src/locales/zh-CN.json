@@ -1399,7 +1399,19 @@
   "globalItem": {
     "addSongsCountPrompt": "将 {count} 首歌曲添加到：",
     "infoTitle": "歌曲信息",
-    "bitrate": "码率"
+    "bitrate": "码率",
+    "year": "年份",
+    "albumArtist": "专辑艺术家",
+    "composer": "作曲家",
+    "genre": "流派",
+    "track": "音轨",
+    "comment": "备注",
+    "lyrics": "歌词",
+    "lyricsTimed": "有（带时间轴）",
+    "lyricsPlain": "有",
+    "lyricsEmbedded": "有（文件内嵌）",
+    "lyricsNone": "无",
+    "rawTags": "原始标签（{n}）"
   },
   "songTable": {
     "title": "标题",

@@ -197,7 +197,8 @@ function songToChild(s: any, starredSet?: Set<string>, rating?: number): any {
     album: s.album || "",
     artist: s.artist || "",
     track: s.track || 0,
-    year: 0,
+    // 扫描/回填落库的发行年份(此前硬编码 0 → 客户端永远看不到年份)
+    year: s.year || 0,
     genre: s.genre || "",
     // Web/online songs cache their cover on the song row (songs.cover_art);
     // local songs rely on the album cover. Prefer the song's own cover so
@@ -223,6 +224,10 @@ function songToChild(s: any, starredSet?: Set<string>, rating?: number): any {
     sourcePlatform: src.sourcePlatform,
     sourcePluginId: src.sourcePluginId,
     isWeb: src.isWeb,
+    // OpenSubsonic 扩展字段:专辑艺术家 / 作曲家(扫描/回填从文件标签落库)。
+    // 空值不输出(undefined 会被 JSON.stringify 丢弃),避免客户端拿到大量空串。
+    displayAlbumArtist: s.albumArtist || undefined,
+    displayComposer: s.composer || undefined,
     // 同曲多源归组:行类型 + 组号(前端合并展示/播放优选;sources 仅在收藏页附加)
     rowType: s.type || "local",
     groupId: s.groupId || undefined,
@@ -633,6 +638,11 @@ const searchHandler = (c: any) => {
       path: songs.path,
       playCount: songs.playCount,
       discNumber: songs.discNumber,
+      // 新落库的标签列必须同步进投影,否则 songToChild 拿不到 → search 结果里
+      // year/displayAlbumArtist/displayComposer 恒为空(与实际数据不一致)。
+      year: songs.year,
+      albumArtist: songs.albumArtist,
+      composer: songs.composer,
       createdAt: songs.createdAt,
     }).from(songs).all().sort((a, b) => (a.title || "").localeCompare(b.title || ""));
     foundAlbums = db.select().from(albums).all();

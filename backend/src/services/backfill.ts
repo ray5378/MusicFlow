@@ -67,7 +67,10 @@ function isLocalWithSidecar(path: string): boolean {
 // ---- 子进程侧 worker(纯函数,child 可 import;不做任何父进程状态) ----
 
 function whereClause(kind: BackfillKind): string {
-  if (kind === "lyrics") return "lyrics IS NULL OR lyrics = ''";
+  // 歌词只补「库里确实没有歌词」的歌:lyrics 存在线歌词文件引用,has_lyrics 是扫描/
+  // 回填写入的存在性标注(1 = 文件里自带内嵌歌词)。任一为真都视为已有歌词,
+  // 不再重复在线搜索 —— 这就是「区分有和没有」的用途。
+  if (kind === "lyrics") return "(lyrics IS NULL OR lyrics = '') AND COALESCE(has_lyrics, 0) = 0";
   return "cover_art IS NULL OR cover_art = ''";
 }
 
@@ -123,8 +126,12 @@ export async function runBackfillLoop(
     try {
       let found = false;
       if (kind === "lyrics") {
-        // 本地歌曲已有 sidecar .lrc → 读时 sidecar 优先,无需拉取覆盖 DB
-        if (isLocalWithSidecar(song.path)) { skipped++; done++; onProgress?.({ done, ok, fail, skipped, currentId: song.id }); continue; }
+        // 本地歌曲已有 sidecar .lrc → 读时 sidecar 优先,无需拉取覆盖 DB。
+        // 顺带把 has_lyrics 标为 1,后续批量回填不再把这首算进候选。
+        if (isLocalWithSidecar(song.path)) {
+          try { sqlite.prepare("UPDATE songs SET has_lyrics = 1 WHERE id = ?").run(song.id); } catch { /* ignore */ }
+          skipped++; done++; onProgress?.({ done, ok, fail, skipped, currentId: song.id }); continue;
+        }
         let sourceData: any = null;
         try { sourceData = JSON.parse(song.source_data || "{}"); } catch {}
         const lrc = await searchLyrics({
@@ -140,7 +147,9 @@ export async function runBackfillLoop(
           // C 批量补全总是落库:写 online-lyrics/<id>.lrc 文件 + songs.lyrics 存引用
           // (与封面同构;其目的就是建离线歌词库)。
           const ref = saveLyricFile(song.id, lrc);
-          if (ref) sqlite.prepare("UPDATE songs SET lyrics = ? WHERE id = ?").run(ref, song.id);
+          // has_lyrics=1 与 lyrics 引用同步写入:此后再跑批量回填,该曲会被
+          // whereClause 直接排除,不会重复在线搜索。
+          if (ref) sqlite.prepare("UPDATE songs SET lyrics = ?, has_lyrics = 1 WHERE id = ?").run(ref, song.id);
           found = true;
         }
       } else {

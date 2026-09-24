@@ -64,6 +64,16 @@ export interface ClientSongRow {
   genre: string;
   track: number;
   discNumber: number;
+  /** 发行年份(来自文件标签;无标签为 0) */
+  year: number;
+  /** 专辑艺术家(TPE2 / ALBUMARTIST;缺失为空串) */
+  albumArtist: string;
+  /** 作曲家(TCOM / COMPOSER;缺失为空串) */
+  composer: string;
+  /** 备注(COMM / COMMENT;缺失为空串) */
+  comment: string;
+  /** 是否有歌词(库内只标注存在性,不存正文;true 表示内嵌标签有词或已落歌词文件) */
+  hasLyrics: boolean;
   coverArt?: string;
   /** 行类型:local | webdav | web(前端据此区分本地源与平台源) */
   type: string;
@@ -97,6 +107,11 @@ export function serializeSongRow(s: any, coverRef?: string): ClientSongRow {
     genre: s.genre || "",
     track: s.track || 0,
     discNumber: s.discNumber || 1,
+    year: s.year || 0,
+    albumArtist: s.albumArtist || "",
+    composer: s.composer || "",
+    comment: s.comment || "",
+    hasLyrics: s.hasLyrics === 1 || !!s.lyrics,
     coverArt: coverRef !== undefined ? coverRef : (s.coverArt ? `so-${s.id}` : undefined),
     type: s.type || "local",
     sourcePlatform: src.sourcePlatform,

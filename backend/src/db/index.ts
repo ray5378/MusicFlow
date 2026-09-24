@@ -160,7 +160,12 @@ export function initDatabase() {
       source_data TEXT,
       plugin_entry TEXT,
       cache_path TEXT,
+      -- lyrics 仅保留「在线歌词文件引用」(online-lyrics/<id>.lrc);歌词正文不落库。
       lyrics TEXT,
+      -- 歌词存在性标注(NULL=未检测 / 0=检测过但无 / 1=有歌词)。
+      -- 内嵌歌词(FLAC LYRICS / ID3 USLT)只标注不存正文 —— 批量回填据此跳过,
+      -- 正文需要时按需从源文件头读取。
+      has_lyrics INTEGER,
       -- 文件头标签扩展:扫描时只读音频文件头就能拿到的常用标签单独成列(year 是歌曲
       -- 自己的年份,与 albums.year 的"建专辑那年"不同);tags 存全部原始标签的 JSON
       -- (二进制类如内嵌封面只留 format/size),冷门标签也不再丢。

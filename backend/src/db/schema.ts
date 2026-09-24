@@ -71,8 +71,11 @@ export const songs = sqliteTable("songs", {
   sourceData: text("source_data"),
   pluginEntry: text("plugin_entry"),
   cachePath: text("cache_path"),
-  // 文件内嵌歌词标签(ID3 USLT / Vorbis LYRICS 等)的纯文本/时间轴文本,扫描入库时写入。
+  // 在线歌词文件引用(online-lyrics/<id>.lrc);歌词正文一律不落库。
   lyrics: text("lyrics"),
+  // 歌词存在性标注:null=未检测 / 0=检测过无 / 1=有(内嵌标签或已落盘的歌词文件)。
+  // 批量回填靠它跳过已有歌词的歌;正文需要时按需从源文件头取。
+  hasLyrics: integer("has_lyrics"),
   // 扫描时从文件头解析出的常用标签;tags 为全部原始标签的 JSON(冷门标签不丢)。
   year: integer("year").default(0),
   albumArtist: text("album_artist").default(""),

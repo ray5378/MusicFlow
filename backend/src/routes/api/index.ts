@@ -33,6 +33,7 @@ import { touch, registerCacheCleaner, reclaimNow, isIdle, getMemorySnapshot, get
 import { getCoverCacheBytes } from "../../services/coverCache.js";
 import { getRenderedCoverBytes } from "../../services/coverImage.js";
 import { getLyricsCacheEntries } from "../../services/lyrics.js";
+import { resolveLyricContent } from "../../services/lyricsStore.js";
 import { runPluginJob, getPluginJobState } from "../../services/plugin/jobRunner.js";
 import { currentPace, setPace, BatchPace, isBatchBusy } from "../../services/plugin/batchPacer.js";
 import { startAsyncTask, getAsyncTask, anyTaskRunning } from "../../services/plugin/asyncTasks.js";
@@ -1158,6 +1159,48 @@ apiRoutes.get("/v1/songs", (c) => {
     }
   }
   return c.json({ total, page, pageSize, items });
+});
+
+// 单曲详情:在列表行字段之上补两类「体积大、不适合逐行返回」的东西 ——
+// ① tags:扫描时从文件头落库的全部原始标签 JSON(平均 0.5~2KB,含封面/歌词长度摘录);
+// ② lyrics 概况:是否已有歌词、是否为带时间轴的 LRC、字符数(歌词正文仍走原有
+//   歌词接口/文件,不在详情里回传)。
+// 前端「歌曲信息」弹窗据此展示原始标签;列表接口刻意不返回这两个字段。
+apiRoutes.get("/v1/songs/:id", (c) => {
+  const id = c.req.param("id")!;
+  const song = db.select().from(songs).where(eq(songs.id, id)).get();
+  if (!song) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.song.notFound"), 404);
+  const row = serializeSongRow(song, resolveSongCover(song));
+  let tags: Record<string, unknown> | null = null;
+  const rawTags = (song as any).tags;
+  if (typeof rawTags === "string" && rawTags.trim()) {
+    try {
+      const parsed = JSON.parse(rawTags);
+      if (parsed && typeof parsed === "object") tags = parsed as Record<string, unknown>;
+    } catch {
+      // tags 损坏(手工改库/半截写入)时降级为 null,不影响详情主体
+      tags = null;
+    }
+  }
+  // 歌词:库里只有「文件引用」或「存在性标注」,正文在 online-lyrics/<id>.lrc 或源文件里。
+  // 内嵌歌词只标注(has_lyrics=1)不存正文 → 这类歌 present=true 但 length/timed 取不到,
+  // 时间轴判断仅在歌词文件实际存在时有效。
+  const lyricsRef = (song as any).lyrics || "";
+  const hasLyrics = (song as any).hasLyrics === 1 || !!lyricsRef;
+  const lyricsBody = lyricsRef ? resolveLyricContent(lyricsRef) || "" : "";
+  return c.json({
+    ...row,
+    /** 文件在源上的路径(歌曲信息里用来看来源文件) */
+    path: song.path || "",
+    tags,
+    lyrics: {
+      present: hasLyrics,
+      /** 是否有可读的歌词正文(内嵌歌词只标注存在性时为 false) */
+      inLibrary: lyricsBody.length > 0,
+      timed: /\[\d{1,2}:\d{2}/.test(lyricsBody),
+      length: lyricsBody.length,
+    },
+  });
 });
 
 // 删除库内单曲(含插件匹配的 web 歌曲):级联清理歌单条目/收藏/播放历史后删除,

@@ -96,20 +96,75 @@
         <div class="info-row"><span class="info-k">{{ t('songTable.album') }}</span><span class="info-v">{{ infoDlg.song.album || '—' }}</span></div>
         <div class="info-row"><span class="info-k">{{ t('songTable.duration') }}</span><span class="info-v">{{ fmt(infoDlg.song.duration) }}</span></div>
         <div class="info-row" v-if="infoDlg.song.bitRate"><span class="info-k">{{ t('globalItem.bitrate') }}</span><span class="info-v">{{ infoDlg.song.bitRate }}kbps · {{ (infoDlg.song.suffix || '').toUpperCase() }}</span></div>
+        <!-- 文件标签落库后的补充信息:空值整行不显示(web 歌曲多数没有这些标签) -->
+        <div class="info-row" v-if="infoDlg.song.year"><span class="info-k">{{ t('globalItem.year') }}</span><span class="info-v">{{ infoDlg.song.year }}</span></div>
+        <div class="info-row" v-if="infoDlg.song.albumArtist"><span class="info-k">{{ t('globalItem.albumArtist') }}</span><span class="info-v">{{ infoDlg.song.albumArtist }}</span></div>
+        <div class="info-row" v-if="infoDlg.song.composer"><span class="info-k">{{ t('globalItem.composer') }}</span><span class="info-v">{{ infoDlg.song.composer }}</span></div>
+        <div class="info-row" v-if="infoDlg.song.genre"><span class="info-k">{{ t('globalItem.genre') }}</span><span class="info-v">{{ infoDlg.song.genre }}</span></div>
+        <div class="info-row" v-if="infoDlg.song.track"><span class="info-k">{{ t('globalItem.track') }}</span><span class="info-v">{{ infoDlg.song.track }}</span></div>
+        <div class="info-row" v-if="infoDlg.song.comment"><span class="info-k">{{ t('globalItem.comment') }}</span><span class="info-v">{{ infoDlg.song.comment }}</span></div>
+        <div class="info-row"><span class="info-k">{{ t('globalItem.lyrics') }}</span><span class="info-v">{{ lyricsText }}</span></div>
+        <!-- 原始标签(文件头全量解析入库):键值可能很多,默认折叠;列表接口不返回它 -->
+        <details class="info-tags" v-if="tagEntries.length">
+          <summary>{{ t('globalItem.rawTags', { n: tagEntries.length }) }}</summary>
+          <div class="info-tag-row" v-for="kv in tagEntries" :key="kv.k">
+            <span class="info-tag-k">{{ kv.k }}</span><span class="info-tag-v">{{ kv.v }}</span>
+          </div>
+        </details>
       </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
+import api from "@/api";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
 
 const { t } = useI18n();
 
 const { menu, addDlg, infoDlg, closeMenu, addToPlaylist, createAndAdd, closeAddDlg } = useItemActions();
+
+// 单曲详情(仅弹窗打开时按需拉取):tags 原始标签 + 歌词概况体积较大,
+// 列表接口刻意不返回,这里单独取一次。失败不影响基础信息展示。
+const detailSong = ref<any>(null);
+watch(
+  () => infoDlg.open,
+  async (open) => {
+    detailSong.value = null;
+    const id = infoDlg.song?.id;
+    if (!open || !id) return;
+    try {
+      const res = await api.get(`/v1/songs/${id}`);
+      detailSong.value = res.data;
+    } catch {
+      detailSong.value = null;
+    }
+  },
+);
+
+/** 原始标签 → 展示用键值对(数组折叠为逗号串,对象序列化)。 */
+const tagEntries = computed<{ k: string; v: string }[]>(() => {
+  const tags = detailSong.value?.tags;
+  if (!tags || typeof tags !== "object") return [];
+  return Object.entries(tags).map(([k, v]) => ({
+    k,
+    v: typeof v === "string" ? v : Array.isArray(v) ? v.join(", ") : JSON.stringify(v),
+  }));
+});
+
+// 歌词状态:库内只标注「有没有」(has_lyrics,列表行即带),正文不落库。
+// 只有在线歌词文件真正存在时才能进一步区分时间轴/纯文本。
+const lyricsText = computed(() => {
+  const det = detailSong.value?.lyrics;
+  const present = det ? det.present : !!infoDlg.song?.hasLyrics;
+  if (!present) return t("globalItem.lyricsNone");
+  if (det?.timed) return t("globalItem.lyricsTimed");
+  if (det?.inLibrary) return t("globalItem.lyricsPlain");
+  return t("globalItem.lyricsEmbedded");
+});
 
 const MENU_W = 224;
 const menuPos = computed(() => {
@@ -223,6 +278,25 @@ function fmt(sec: number) {
 
 .info-grid { display: flex; flex-direction: column; gap: 12px; }
 .info-row { display: flex; gap: 12px; font-size: 14px; .info-k { width: 64px; color: var(--fnos-text-tertiary); flex-shrink: 0; } .info-v { flex: 1; color: var(--fnos-text-primary); word-break: break-all; } .info-v.mono { font-family: monospace; font-size: 12px; } }
+
+/* 原始标签折叠区:弹窗窄(420px),键值用两列网格,长值换行 */
+.info-tags {
+  font-size: 13px;
+  summary {
+    cursor: pointer;
+    color: var(--fnos-text-tertiary);
+    user-select: none;
+    &:hover { color: var(--fnos-text-secondary); }
+  }
+  .info-tag-row {
+    display: flex;
+    gap: 10px;
+    padding: 4px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    .info-tag-k { width: 120px; flex-shrink: 0; color: var(--fnos-text-tertiary); word-break: break-all; }
+    .info-tag-v { flex: 1; color: var(--fnos-text-primary); word-break: break-all; }
+  }
+}
 
 .sheet-enter-active, .sheet-leave-active { transition: opacity 0.2s ease; }
 .sheet-enter-from, .sheet-leave-to { opacity: 0; }
