@@ -212,18 +212,29 @@ capacityLimitedPrefillMs(): number {
 
 > **⚠️ 档位名存实亡的陷阱**：如果你的 `buffer_size` 装不下想用的档位，档位会被**永远钳到更低值**。要真用上 20/25/30s，必须按 §3.2 调大设备 `buffer_size`。
 
-## 2.6 时间线模型：按**实际产出**推进
+## 2.6 时间线模型：按**实际产出**推进，且聚合口径必须免疫编码器相位
 
-- `ts = 锚点 + 累计实际样本数 / SR`（**样本精确**，绝不按调度粒度）。
+三层，缺一层就会出坑（B15 就是第三层没做对）：
+
+**① 单编码组内**：`ts = 锚点 + 累计实际产出样本 / SR`（**样本精确**，绝不按调度粒度）。
+→ 为什么不能按喂入量：编码器攒样期（libFLAC 要攒满 4096 样本 ≈85ms 才吐帧）若把「喂进去但没吐出来」的量算成已播出，时间线会超前约 75ms → 设备报 `Lost sync (75006us off)` → 往音乐里**插静音**补空 → 听感卡顿。
+
+**② 跨编码组聚合**：推进量 = `max(各组**累计**交付样本)` 的**增量**（不是「每批取 max」）。
+→ 「每批取 max」在块编码器下会把**并集**当成本批推进（B15）：相位错开时两批共记 8192 而真正上网只有 4096。
+
+**③ 结构上消除相位**：按 `(codec, gain)` **分组编码** —— 同组只编一次、字节与时间戳分发给全组。
+→ 同一 `(codec, gain)` 的设备**共用同一个编码器实例**，相位由构造决定一致 ⇒ ②的口径不再有可被相位干扰的余地。`(codec, gain)` 不同（如 FLAC 与 PCM 混编、各设备音量不同）才分属不同组，成本随**组数**而非成员数增长。
+
 - 锚点 = `nowUs() + SendspinGroup.commonSendAheadUs()`。
 - `produced > 0 ? 按产出推进 : 不推进`；零产出超过 `STALL_GRACE_US`（500ms）才降级为按喂入量推进，避免编码器真坏时时间线冻结。
-- **`commonSendAheadUs()` 是唯一出口**：`sendAudio` 与锚点都必须用它。
-
-**为什么不能按喂入量推进**：编码器攒样期（libFLAC 要攒满一块才吐帧）若把「喂进去但没吐出来」的量算成已播出，时间线会超前约 75ms → 设备报 `Lost sync (75006us off)` → 往音乐里**插静音**补空 → 听感卡顿。
+- **`commonSendAheadUs()` 是唯一出口**：锚点必须用它（帧头 9B 里**没有** send_ahead，设备用自己那个，未协商默认 800ms）。
+- 新编码组以**当前峰值**为基线登记 ⇒ 播中加入的成员（新 codec/gain 组合）不会让 `max` 被拉低（时间线不倒退、不停滞）。
 
 **设备上报三个时序参数为 0 时**（`output_delay` / `required_lead` / `min_buffer`）必须视为「未提供」，回落缺省 **800ms**（ESPHome 实测恒报 0，是表达能力缺失，不是真的不需要 buffer）。
 
 > 曾有版本误把 MA 的 `DEFAULT_INITIAL_DELAY_US=250ms` 当独立常量 → 锚点 250ms vs `send_ahead` 800ms → `delta` 恒 −550ms → 设备收首块即判「已过期」→ 立即吐字节 → underrun → **日志全绿但无声**。
+
+**测试锁**：`pushFrameGroupEncode.test.ts`（10 例，含「两组相位错开 4 批共吐 2 帧 ⇒ 推进 8192」）。
 
 ## 2.7 pacing 必须**绝对时刻调度**（固定 sleep 会累积漂移）
 
@@ -469,17 +480,40 @@ Body: { add?: string[], remove?: string[] }
 
 **Flutter 流程**：`GET /v1/peers` 选设备 → `POST members {add:[...]}` → 收 WS `group_updated` 刷新。播放/音量/静音走 `group:<id>` peer 口。
 
-## 5.3 直播沿加入（**不抄 MA 式回填**）
+## 5.3 直播沿加入 + **late-join 回填**（对齐 aiosendspin `on_role_join`）
 
-sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members.add` → 从直播 cursor 收帧；摘除：`members.delete` + `stream/end`。编码器按 `(clientId:codec)` 本就隔离，**PCM + FLAC 混编可并存**。
+sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members.add` → 收帧；摘除：`members.delete` + `stream/end`。编码器按 `(codec, gain)` 分组共享（§2.6），**PCM + FLAC 混编可并存**。
 
-**为什么不需要 MA 的历史重放**：MA 的回填解决的是它独有问题 —— **每成员独立 DSP 链预热**（新设备进来要把历史音频重跑一遍它的 EQ/filter 链才能追上直播沿）。我们没有这笔债：
+> ⚠️ 本节曾被写成「**不抄 MA 式回填**」，那是错的 —— 见坑 B14。当时理由是「时间戳绝对 + 按 ts 排播天然对齐 ⇒ 新成员无需历史」。这只证明了**对齐**不需要历史，**没有**回答**出声延迟**。
 
-- **时间戳绝对**：`pushFrame` 给所有成员广播同一 `tsUs`，新成员首块 ts 即「现在 + send_ahead」，按 ts 排播天然对齐，无「追赶」概念；
-- **FLAC 帧独立可解**：新成员拿 fresh STREAMINFO（现有 `announceStream`）从直播沿收帧；
-- 正确性不需要历史重放。回填只在「按房间独立 DSP」出现时才需要，届时用 5 秒历史环做预热。
+### 为什么必须回填
 
-**测试锁**：`playerGroup.test.ts` 断言「同一批帧所有成员收到相同 ts」，把隐式对齐变显式契约。
+| 事实 | 后果 |
+|---|---|
+| 预填充把组游标推到**领先墙钟一整个水位**（30s 档 ≈29s —— 这正是 §2.5 的抗抖动余量本身） | 「未来帧」都在游标之后 |
+| 新成员旧行为下只从**游标之后**收帧 | 它的首帧时间戳在 29s 之后 → **静默等 29 秒才出声**（2026-09-24 真机「加入新设备要很久才发出声音」） |
+
+**MA（aiosendspin `server/push_stream.py`）的解法**：组内保留**尚未播到**的音频缓存，新角色 `on_role_join` 时把「起点 ≥ late-join 目标时刻」的 chunk **立即回放**，之后无缝接实时流。
+
+| MA 机制 | MA 常量 | 本仓等价物 |
+|---|---|---|
+| `_pcm_chunk_cache` / `_role_chunk_cache`（按 `ts + duration <= now` 逐出） | `_HISTORY_KEEP_PAST_US = 1_000_000` | `SendspinGroup.recentByGroup`（键 = 编码组，逐出规则同款） |
+| `_send_cached_chunks_to_role`（只发起点 ≥ 目标时刻的 chunk） | `LATE_JOINER_MIN_LEAD_US = 100_000` | `SendspinGroup.seedLateJoin` |
+| `_pending_join_roles`（commit 在飞时**延迟 join**，不打断） | — | 同步回填，天然无竞态 |
+| `_start_catchup_encoding`（无编码缓存则按 PCM 缓存补编） | `ENCODER_CATCHUP_WARMUP_US = 120_000` | **不需要**：同组字节逐字节相同，直接复用缓存 |
+
+### 本仓实现要点（`SendspinGroup.seedLateJoin`）
+
+1. **目标时刻 = `now + send_ahead + 100ms`**。设备**按 `ts − send_ahead` 决定何时播**这一块（帧头只有 9B：type + 8B 微秒 ts，**不含** send_ahead；设备用自己那个，未协商时默认 800ms），所以「没落在过去」的充要条件是 `ts ≥ now + send_ahead`。
+   ⚠️ 这点与**起播锚点不同**：起播时没有别人在对齐，锚点可以自选提前量（`min(send_ahead, 800ms)`）；late-join 必须**贴住既有时间轴**，否则新成员一进来就 underrun。
+2. **跳过起点早于目标时刻的 chunk**（MA：「straddling 的整块跳过」）。
+3. **回填量受设备容量钳制**（`capacityLimitedPrefillMs`，§2.5）—— 否则一进来就把设备灌满 → 逐帧拒收。
+4. **先 `stream/start`、后音频**（复用 `pendingAnnounces` + `flushAnnounceFor`，§2.4 同款约束）；设备报 `available:false` 时不回填。
+5. 缓存**按曲清零**（`resetPushMeter`）—— 上一首的字节对新流毫无用处，留着只会把新成员灌进已播完的音频。
+
+**效果**：新成员约 **0.1s 出声**，且与老成员播的是**同一份时间戳**（天然对齐），不再等一个水位。
+
+**测试锁**：`lateJoinBackfill.test.ts`（8 例）—— 首帧不在过去、≈100ms 出声、截止于组游标、只剩过期缓存时不回填、`available:false` 不回填、容量钳制、按编码组取字节、成员数不影响推进量。
 
 ## 5.4 内存对照
 
@@ -569,7 +603,7 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 - **真相**：这个库叫 **`psk`**（client 标识也是 `clientId` 而非 `clientInfo`）。写错后**静默走明文握手**，设备回一个 `0x01` noise 指示字节 → `EncryptionRequiredError`。另外它也**没有 `error` 事件**，失败原因是挂在 `lifecycle` 的 `disconnect.cause` 上。
 - **教训**：跨库 API 不要靠包名迁移经验。**让类型系统先拦一遍**——这两个错误都是 `tsc` 报出来的。
 
-## 6.2 B 组：v4.0.17 → v4.0.18 → v4.0.19 三轮迭代（13 条）
+## 6.2 B 组：v4.0.17 → v4.0.18 → v4.0.19 → v4.0.20 四轮迭代（15 条）
 
 ### 坑 B1 —— 把「服务端只推 800ms」当成根因
 
@@ -654,6 +688,29 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
   **源码实证**（tag `2026.9.0`）：`esphome/components/audio_http/media_source.py` **存在**；而 `esphome/components/http_request/` 目录下**没有任何 media-source 平台文件**。所以 `platform: http_request` 必然「平台未找到」。
 - **正解**：`media_source: - platform: audio_http`（§3.4）。
 
+### 坑 B14 —— 用「对齐不需要历史」否掉了「出声需要回填」（**曾经写进本文档的错结论**）
+
+- **现象**：播放中把 Sendspin 播放器加入群组，**新设备要等 ≈29 秒才出声**（30s 档）。
+- **当时的错误判断**：本文档 §5.3 曾写「**不抄 MA 式回填**」，理由是「时间戳绝对，新成员首帧 ts 即『现在 + send_ahead』，按 ts 排播天然对齐，无追赶概念」。
+- **真相**：那个推理证明了**对齐**不需要历史，却把「出声延迟」偷换掉了 ——
+  预填充把组游标推到**领先墙钟一整个水位**（§2.5 的抗抖动余量本身），而新成员只从**游标之后**收帧 ⇒ 首帧时间戳在 29s 之后 ⇒ 设备老实等到那一刻才播。
+  MA 的回填也**不是为了对齐**（MA 同样用绝对时间戳），而是为了让新成员**拿到它本该已经收到的音频**，从而立刻出声。
+- **正解**：`seedLateJoin` 回填「起点 ≥ `now + send_ahead + 100ms`」的缓存 chunk（§5.3）。
+
+### 坑 B15 —— 「每成员一个编码器 + 每批产出取 max」把**并集**当成时间线推进量
+
+- **现象**：FLAC 链路下播中加成员 → **整组一卡一卡**；且**只有当前这首坏，切下一首就恢复**。
+- **当时的错误判断**：`pushFrame` 的注释写着「各成员产出的样本总应相同，取 max 以防某成员缓冲未吐拖慢时间线」—— 这个前提在**块编码器**下不成立。
+- **真相**：libFLAC 攒满 4096 样本（≈85ms）才吐一帧，而喂料粒度 25ms ⇒ 每 3.4 批只有 1 批有产出。两个编码器的**块相位由创建时刻决定**：起播时全员同时创建 ⇒ 相位恒同 ⇒ 时间线正确；**播中加入者**的编码器在流中途创建 ⇒ 相位任意错开 ⇒ 逐批取 max 变成**并集计数**：
+
+  ```
+  批 k  : A 吐 4096 / B 吐 0     → 记 4096
+  批 k+1: A 吐 0    / B 吐 4096  → 再记 4096   ← 两批共记 8192,真正上网只有 4096
+  ```
+
+  游标按 ~2× 推进（真机实测净 1.44×），帧时间戳跑到墙钟前面 → 设备排程跟不上 → 反复 `SYNC LOST(state=error)` ↔ `synchronized`（240 实测峰值 556 次/分钟，两台一起）。游标全组共享 ⇒ **全员一起卡**。「切歌即恢复」的指纹也由此解释：新曲全员重新创建编码器，相位重新对齐。
+- **正解**：① **按 `(codec, gain)` 分组编码**（同组只编一次、字节分发给全组 ⇒ 结构上不存在相位错开）；② 时间线推进取 `max(各组**累计**交付样本)` 的增量，而非「每批取 max」（§2.6）。
+
 ## 6.3 这些坑的共同模式（提取成规则）
 
 | 模式 | 犯在哪 | 防呆规则 |
@@ -671,6 +728,8 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 | **偶然正确掩盖真 bug** | B4 | 「能响」不等于「对」；要问「这条路是设计走通的还是碰巧走通的」 |
 | **把缺省回显当成设备诉求** | B1、B3、B6 | 日志里的 0 先问「是谁写的 0」；未上报 = 无约束，不是零诉求 |
 | **拍脑袋定常量** | B1、B5 | 一切阈值都要有来源（设备宣告 / 实测 / 规范条款），并留安全余量 |
+| **用一个正确结论否掉另一个问题** | B14 | 「X 不需要 A」≠「Y 不需要 A」：先锁定症状，再证明该机制与**这个**症状无关 |
+| **拿「各成员应当相同」当不变量** | B15 | 有状态编解码器（块编码器）下成员间**相位可以任意错开**；聚合口径必须在结构上不可能被相位影响 |
 
 ---
 
@@ -901,7 +960,32 @@ npx vitest run src/services/sendspin/playerGroup.test.ts
 
 # 第八部分：MusicFlow vs Music Assistant 对齐表
 
-> MA 的节奏/背压逻辑在 `aiosendspin==9.1.1`，不在 provider 里。以下为**仍在参考**的对齐清单，标注当前状态。
+> MA 的节奏/背压逻辑在 `aiosendspin`（MA 的同步内核库），**不在 provider 里**。provider（`music_assistant/providers/sendspin/*.py`）只做 DSP、元数据、发现与桥接，同步/推流全部委托给 `aiosendspin.server`。以下为**仍在参考**的对齐清单，标注当前状态。
+
+## 8.0 参考实现的权威出处（查证用）
+
+**架构**：`┌ SendspinProvider ─▶ SendspinServer(port 8927) ─▶ Audio Streams ┐`，客户端直连 WebSocket（`ws://<ma>:8927/sendspin`）或 WebRTC DataChannel（局域网外）。
+
+| 关注点 | 文件 | 关键符号 |
+|---|---|---|
+| 推流时间线 / 缓存 / late-join | `aiosendspin/server/push_stream.py` | `PushStream`、`commit_audio()`、`now_us()`、`_channel_timing`（+`_channel_timing_residue` 无漂移累加）、`prepare_historical_audio()`、`prepare_audio()`、`_pcm_chunk_cache`、`_role_chunk_cache`、`_prune_role_chunk_cache()`、`on_role_join()`、`_do_role_join()`、`_pending_join_roles`、`_start_catchup_encoding()`、`sleep_to_limit_buffer()`、`set_live_source()`、`_min_send_ahead_us()` |
+| 组与成员增删 | `aiosendspin/server/group.py` | `SendspinGroup`、`_group_roles`、`on_client_added/removed`、`add_client()`（先 `client.ungroup()`）、`remove_client()`、`start_stream()`（换流 `keep_stream=True`）、`_play_start_time_us` |
+| 角色模型 | `aiosendspin/server/roles/`、`client.py` | `Role`、`get_audio_requirements()`、`AudioRequirements`、`AudioChunk`、`supports_preconnect_audio()` |
+| MA 侧播放管线 | `music_assistant/providers/sendspin/playback.py` | `SendspinPlaybackSession`、`commit_audio()`、`_history`、`_start_join_catchup()`、`_feed_join_history()`、`_promote_join_catchup_processor()`、`_pad_history_to_live_tail()`、`_wait_for_buffer_drain()` |
+| MA 侧组员管理 | `music_assistant/providers/sendspin/player.py`、`provider.py` | `SendspinPlayer`、`SendspinGroup` 模型、`create_virtual_player()`（服务端常驻 anchor ⇒ **成员来去不会触发 leader 迁移**） |
+
+**可直接引用的常量**（本仓取值都已对齐）：
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `DEFAULT_INITIAL_DELAY_US` | 250 000 | 无角色/无锚点时的兜底提前量 |
+| `LATE_JOINER_MIN_LEAD_US` | 100 000 | late-join 目标时刻的最小提前量 |
+| `_HISTORY_KEEP_PAST_US` | 1 000 000 | 回填缓存保留的「已播过」尾巴 |
+| `ENCODER_CATCHUP_WARMUP_US` | 120 000 | 追赶编码预热 |
+| `_JOIN_PROMOTE_ARM_WINDOW_US` / `_JOIN_PROMOTE_TOLERANCE_US` | 2 000 000 / 50 000 | 追赶处理器「提升为实时管线」的进入窗口与容差 |
+| `_JOIN_PROMOTION_TIMEOUT_S` | 15.0 | 追赶超时放弃 |
+| `_PRODUCER_BUFFER_LIMIT_US` | 30 000 000 | 背压上限（= 我们的预填充 30s 天花板） |
+| `max_duration_us`（`PlayerPersistentState`） | 30 000 000 | 时长天花板 |
 
 ## 8.1 早期结构性错位（均已修复，存档备查）
 
@@ -930,10 +1014,48 @@ npx vitest run src/services/sendspin/playerGroup.test.ts
 | 5 | 预推深度 | producer 推到领先 60s，受客户端 buffer 约束 | 可配档位 + 容量钳制（§2.5） | ✅ |
 | 6 | 追赶策略 | 上游饥饿时整条时间线向前跳（rebase） | 落后多少补多少 | 未做 |
 | 7 | 时钟源 | `RawMonotonicClock`（避免 NTP slew 毒化） | 配速用墙钟、时间戳用单调钟混用 | 未做 |
-| 8 | 编码成本 | 每组编码一次，同 chunk 分发给所有 role | 每客户端独立编码（FLAC 下才痛） | 未做 |
+| 8 | 编码成本 | `TransformerPool`：按 transform key 共享编码器，同 chunk 分发给所有 role | **已实现**：按 `(codec, gain)` 分组编码，同组只编一次、字节分发给全组（§2.6 ③） | ✅ |
 | 9 | 音源窗口 CPU | — | `PcmWindow` 每次 `slice` 从头线性扫描、`evict()` 做 O(n) `shift()` | 未做 |
 | 10 | 慢设备处置 | 队列溢出 → 断连重连，不拖累全组 | 无检测 | 未做 |
 | 11 | time 请求频率 | 客户端自适应（未同步 0.2s，稳定 3s） | 服务端被动应答 | 未做 |
+| 12 | **late-join 回填** | `on_role_join` 回放**尚未播到**的缓存（`_role_chunk_cache`，`LATE_JOINER_MIN_LEAD_US=100ms`） | **已实现**：`seedLateJoin`（§5.3），新成员约 0.1s 出声 | ✅ |
+| 13 | 成员换组 | `add_client` 第一步 `await client.ungroup()`（一个客户端只属于一个组） | `joinGroupCore` 直接改 `conn.group`，**未**从旧组 `remove` ⇒ 可能双成员（旧组仍在 `members` 里） | ⚠️ 待修（见下） |
+| 14 | 显式操控成员 | `ensure_player_ungrouped` 语义 | 已实现（`detachFromActiveGroups`） | ✅ |
+
+## 8.3 真机验证记录（v4.0.20，2026-09-24）
+
+受控复现脚本 `/root/lj_test.sh`（240 容器内）：① 移出 `esp32-player-meet` → ② `playnow group:ab7fca6f-…` 组起播（仅 `esp32-player2`，FLAC）→ ③ 等 45s 灌深水位 → ④ **播中加入** `esp32-player-meet` → ⑤ 观察 75s → `python3 /root/an_latejoin.py 200 <gid>`。
+
+| 观测项 | 修复前 | 修复后（v4.0.20 实测） |
+|---|---|---|
+| 新成员出声延迟 | 空等**一个完整水位** ≈ 29s | **≈ 0.1s**（首帧 `delta = ts − send_ahead − now = 100ms`） |
+| 群组播放速率 | **1.44×**（超速、一卡一卡） | **1.00×**（`pos` 40s/40s） |
+| `SYNC LOST` / `Lost sync` | 持续风暴 | **0 / 0** |
+| 编码器零产出 / `pushLoop` 退出 | 频发 | **0 / 0** |
+| `timeline RE-anchored` | — | **0**（流全程未重启、时间轴未重锚） |
+
+关键日志（原文）：
+
+```text
+05:01:38 [sendspin] 预填充水位按设备容量钳制:档位=30000ms → 实际=29995ms
+                    (设备 buffer_capacity=4800000B, 实测码率=96014B/s, 目标占用≈2879926B=60%)
+05:02:41 announceStream -> {"player":{"codec":"flac",…}}
+05:02:41 [sendspin] sendspin late-join 回填: client=3C:0F:02:F9:69:E4 codec=flac
+                    chunks=341 span=29099ms target=882706us(ahead of now)
+                    group=ug:ab7fca6f-82fe-49f5-9652-32440f83a4f1
+```
+
+**读数要点**（下次照此判读）：
+
+- `target=882706us` = `send_ahead 800000 + LATE_JOIN_MARGIN_US 100000` —— 证明回填**贴住既有时间轴**，没有自选提前量。
+- `chunks=341` × 85.33ms ≈ **29099ms**，与钳制水位 `29995ms` 严丝合缝（差的就是那 900ms 的 `send_ahead+margin`）。
+  341 这个数字同时反证编码器粒度：libFLAC 攒满 4096 样本（≈85.33ms）才吐一帧，**不是**每 25ms 一帧。
+- 回填前 17ms 先出现 `announceStream`（两行），顺序正确 —— `seedLateJoin` 内部先兑现
+  `pendingAnnounces`、再推缓存字节；反过来设备会因缺 `codec_header` 丢弃缓存帧。
+- 加入后 `synchronized` 计数为 **0**（起播阶段那 2 次是设备握手，与本次无关）。
+
+**为何不会撑爆设备缓冲**：回填 29.1s ≈ 2.79MB < `buffer_capacity` 4.8MB；此后设备「收到速率 = 播出速率」，
+差值恒定为 `29995 − 900 = 29095ms`，稳态不增长。（水位钳制按目标占用 60% 算，40% 余量即为此留。）
 
 ---
 
@@ -1000,6 +1122,8 @@ docker restart musicflow
 - ✅ 曲末分段排空
 - ✅ 流式解码 `PcmWindow`（`SENDSPIN_STREAM_SOURCE`）
 - ✅ 多房组管理（命名空间 + 增量成员口 + 直播沿加入）
+- ✅ **按 `(codec, gain)` 分组编码** + 时间线 `max-of-累计`（v4.0.20，§2.6，修「播中加入成员 → 整组卡顿」）— **真机实测 1.44× → 1.00×**（§8.3）
+- ✅ **late-join 回填** `seedLateJoin`（v4.0.20，§5.3，修「加入新设备要很久才出声」）— **真机实测 ≈29s → ≈0.1s**（§8.3）
 - ✅ ESPHome 6053 只读监控 + `GET /v1/sendspin/esphome`
 - ✅ 长音源 ref 长度溢出修复（v4.0.19）
 
@@ -1007,11 +1131,12 @@ docker restart musicflow
 
 | 项 | 说明 |
 |---|---|
+| **成员换组未从旧组摘出** | `joinGroupCore` 直接改 `conn.group`/`g.add(conn)`，**没有** `prev.remove(conn)`；MA `add_client` 第一步就是 `await client.ungroup()`（一个客户端只属于一个组）。现状：旧组 `members` 仍持有该 conn，若旧组也在推流则设备收**双流**。修法：抽 `SendspinServer.detachFromGroup(conn)`（组空 → `stopGroupPump` + `close`，与 `onConnectionClosed` 同款收尾），`joinGroupCore` 先调它。⚠️ 需同时确保「为换组而停的 pump」不被 tracker 误判为自然结束（`GroupPump.stop()` 已走 epoch 路径、不置 `endedNaturally`，但仍要核对 `pollState` 的上报语义） |
+| **加入群组时中止该设备原有独立会话** | 已确认方向（选项 A）：设备加进组即停掉它自己的 pump + 清队列标记，绝不让 tracker 判 `advance`。与上一项同批做（同一处语义） |
 | `stream/end` 音频丢弃守卫 | 对齐 MA `_stream_started` |
 | 迟到帧丢弃 | 对齐 MA `drop_late=True` + 2s 宽限期 |
 | 时间线 rebase | 上游饥饿时整条时间线向前跳 |
 | 统一时钟源 | 避免墙钟/单调钟混用（NTP slew 毒化） |
-| FLAC 按组编码 | 同 chunk 分发给多成员，省每客户端独立编码 |
 | `PcmWindow` 环形缓冲 | 消除每次 `slice` 的线性扫描与 `evict()` 的 O(n) `shift()` |
 | 慢设备断连 | 队列溢出 → 断连重连，不拖累全组 |
 | `state:error` 自适应回缩水位 | 现仅记日志，未据此自动降水位 |
@@ -1019,7 +1144,6 @@ docker restart musicflow
 | `broadcastGroupState` 死代码 | `PlayerStatePayload` 实为 client → server 方向 |
 | `SendspinGroup` 重复定义 | `group.ts` 与 `server.ts` 各有一份，待合并 |
 | 插件页 `preferred_codec` 帮助文案量化码率 | 任务 4 遗留，不阻塞 |
-| `state:error` / 自适应回路 | 见上 |
 
 ## 10.3 已知边界（不是 bug）
 

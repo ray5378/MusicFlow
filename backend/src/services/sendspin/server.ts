@@ -7,7 +7,8 @@
 //   - 之后进入加密 transport 期(JSON 帧 = [0x00]+json;二进制帧由调用方带类型字节);
 //   - post-handshake:server/hello → client/hello → server/activate → 业务数据。
 //
-// 分组同步推流保留:解码 → 逐客户端独立编码 → 按组公共时间戳下发(group.pushFrame)。
+// 分组同步推流保留:解码 → **按 (codec, gain) 分组编码(同组只编一次)** →
+// 按组公共时间戳下发(group.pushFrame)。
 
 import WebSocket, { WebSocketServer } from "ws";
 import { randomBytes } from "node:crypto";
@@ -26,12 +27,15 @@ import {
   SENTINEL_PSK_HEX,
   PREFILL_BUFFER_MIN_MS,
   PREFILL_BUFFER_MAX_MS,
+  LATE_JOIN_MARGIN_US,
+  LATE_JOIN_KEEP_PAST_US,
+  LATE_JOIN_RING_MAX_US,
 } from "./constants.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
-import { createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncoder, OPUS_FRAME_MS, SAMPLE_RATE, type SendspinCodec, waitFlacEncoderReady } from "./encoding.js";
+import { createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncoder, type EncodedChunk, OPUS_FRAME_MS, SAMPLE_RATE, type SendspinCodec, waitFlacEncoderReady } from "./encoding.js";
 import { stopGroupPump } from "./streamEngine.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
@@ -441,19 +445,33 @@ export class SendspinGroup {
     if (this.muted || c.muted) return 0;
     return Math.min(100, Math.max(0, Math.round((c.volume * this.volume) / 100)));
   }
-  encoderFor(c: SendspinConnection): ChunkEncoder {
-    const key = `${c.clientId}:${c.codec}`;
+  /** 编码组键:同一份 PCM 经同一 codec、同一增益编出的字节**逐字节相同**,
+   *  与是哪个客户端无关 —— 故同键成员共享一个编码器(见 pushFrame)。 */
+  private encoderKey(codec: SendspinCodec, gain: number): string {
+    return `${codec}:${gain}`;
+  }
+  /** 取(必要时创建)某个编码组的编码器。 */
+  encoderForGroup(codec: SendspinCodec, gain: number): ChunkEncoder {
+    const key = this.encoderKey(codec, gain);
     let e = this.encoders.get(key);
     if (!e) {
-      e = createChunkEncoder(c.codec);
+      e = createChunkEncoder(codec);
       this.encoders.set(key, e);
     }
     return e;
   }
-  /** 该连接当前 FLAC 编码器已产出的真实首段 STREAMINFO(未产出则 undefined)。
-   *  供 stream/start 用真实值,避免手工合成 header 与实流漂移。 */
+  /** 该连接所属编码组的编码器(播报尾帧 flush 等旧调用点用)。
+   *  ⚠️ `appliedGain` 走**可选调用**:单测里的最小桩只给 `{clientId, codec}`
+   *  (见 reclaim.test.ts),直接调会抛 —— 与 streamEngine 对最小 stub group 的
+   *  可选调用是同一约定。缺省增益 100 = 不改音量。 */
+  encoderFor(c: SendspinConnection): ChunkEncoder {
+    return this.encoderForGroup(c.codec, c.appliedGain?.() ?? 100);
+  }
+  /** 该连接所属编码组已产出的真实首段 STREAMINFO(未产出则 undefined)。
+   *  供 stream/start 用真实值,避免手工合成 header 与实流漂移。
+   *  ⚠️ 只读不建:此处若创建编码器会白白多起一个实例(且未喂料时 header 必为 undefined)。 */
   realFlacHeaderB64(c: SendspinConnection): string | undefined {
-    return this.encoders.get(`${c.clientId}:${c.codec}`)?.getCodecHeaderB64?.() ?? undefined;
+    return this.encoders.get(this.encoderKey(c.codec, c.appliedGain()))?.getCodecHeaderB64?.() ?? undefined;
   }
   /** 本组当前公共 send_ahead(微秒)。与帧头里填的值**同源** —— 时间线锚点
    *  必须用同一个量(MA `push_stream.py:1313`),否则 `delta=(ts-send_ahead)-now`
@@ -470,10 +488,33 @@ export class SendspinGroup {
   private pushedBytes = 0;
   private pushedSamples = 0;
 
-  /** 起播时清零码率计量窗口(上一首的码率对新歌无参考价值)。 */
+  /** 每个**编码组**(键 = `codec:gain`)累计已交付的样本数(单声道口径)。
+   *  时间线推进取它的**上包络增量**,而不是「每批各成员产出取 max」——详见 pushFrame。 */
+  private deliveredByGroup = new Map<string, number>();
+  /** 上包络(单调不减):成员/编码组增删(含播中加入)时时间线永不倒退、不停滞。 */
+  private deliveredPeak = 0;
+
+  /** **尚未播到**的音频缓存(late-join 回填用),键 = 编码组(`codec:gain`)。
+   *
+   *  为什么按编码组而不是按成员:同组字节**逐字节相同**(见 pushFrame ①),
+   *  所以一份缓存就能给该组任意新成员复用 —— 与 aiosendspin 的
+   *  `_role_chunk_cache`(按 TransformKey 缓存已编码 chunk)同构。
+   *
+   *  逐出规则对齐 aiosendspin `_prune_role_chunk_cache`:丢掉
+   *  `ts + duration <= now - KEEP_PAST` 的条目,即只留「未来还没播的」加 1s 尾巴。 */
+  private recentByGroup = new Map<
+    string,
+    Array<{ tsUs: bigint; durUs: number; data: Uint8Array }>
+  >();
+
+  /** 起播/重建流时清零计量窗口(上一首的码率、上一段流的交付累积对新流都无参考价值)。 */
   resetPushMeter(): void {
     this.pushedBytes = 0;
     this.pushedSamples = 0;
+    this.deliveredByGroup.clear();
+    this.deliveredPeak = 0;
+    // 上一首的字节对新流毫无用处:留着只会让新成员被回填进**已经播完**的音频。
+    this.recentByGroup.clear();
   }
 
   /** 是否已有**实测**码率(否则 encodedBytesPerSec 走名义回落)。
@@ -531,38 +572,86 @@ export class SendspinGroup {
     for (let i = 0; i < pcm.length; i++) out[i] = pcm[i] * g;
     return out;
   }
-  /** 推一批 PCM 给全部成员,返回本批产出包覆盖的**总样本数**(单声道口径)。
+  /** 推一批 PCM 给全部成员,返回**本批时间线推进量**(样本,单声道口径)。
    *
-   *  返回值是时间线推进的依据:调用方按 `samples / SAMPLE_RATE` 前进游标,
-   *  而非按调度粒度近似(见 EncodedChunk / streamEngine.pushLoop 注释)。
-   *  多成员时取**最大值** —— 各成员编码器(opus/flac)产出的样本总应相同,
-   *  取 max 以防某个成员编码器恰好缓冲未吐时把时间线拖慢。 */
+   *  ## 返回值 = 真正上网的音频量(时间线推进依据)
+   *
+   *  调用方按 `samples / SAMPLE_RATE` 前进游标(见 streamEngine.pushLoop 与
+   *  playerCore 播报循环),所以这里必须是实测值,不能是估算。
+   *
+   *  ## ① 按 (codec, gain) 分组编码:同组只编一次
+   *
+   *  同一份 PCM + 同一 codec + 同一增益 ⇒ 编出的字节**逐字节相同**,与是哪个客户端
+   *  无关。旧实现给每个成员各建编码器、各编一遍,代价有三:
+   *    1. CPU × 成员数 —— libFLAC 是进程内同步(asm.js)编码,直接占用事件循环;
+   *    2. 各编码器的**块相位**由创建时刻决定 ⇒ 彼此错开;
+   *    3. 「时间线推进」按每批各成员产出取 max ⇒ 相位错开时把**并集**当本批推进。
+   *  第 3 条正是 2026-09-24 真机「播放中把 Sendspin 播放器加入群组后整组一卡一卡」
+   *  的根因(见下)。按组编码后,同组设备拿到完全相同的字节与时间戳序列。
+   *
+   *  ## ② 时间线用 max-of-**累计** 的上包络增量,而不是「每批取 max」
+   *
+   *  块编码器(libFLAC)攒满一块才吐一帧(4096 样本 ≈ 85ms),**某批零产出是正常的**。
+   *  旧口径每批取 `max(各成员本批产出)`,两组相位错开时:
+   *      批 k  : A 吐一帧(4096) / B 吐 0     → 记 4096
+   *      批 k+1: A 吐 0        / B 吐一帧(4096) → 又记 4096
+   *  两批共记 8192,而真正上网的音频只有 4096 ⇒ 时间线按 ~2× 推进(真机实测净
+   *  1.44×,因帧长可变)。时间戳跑到墙钟前面 → 设备排程跟不上 → 反复
+   *  `Lost sync` / 插静音,听感一卡一卡;且**只有当前这首坏、切歌即恢复**
+   *  (新曲全员同时创建编码器 ⇒ 相位重新对齐,这正是该 bug 的指纹)。
+   *
+   *  改为每编码组维护**累计交付样本**,推进量 = `max(累计)` 的增量:相位错开相互
+   *  抵消,长期严格等于真实上网的音频量。`deliveredPeak` 单调不减、且新编码组以
+   *  当前峰值为基线登记,所以成员增删(含播中加入)都不会让时间线倒退或停滞。
+   */
   async pushFrame(tsUs: bigint, pcm: Float32Array): Promise<number> {
-    let maxSamples = 0;
+    // ---- 分组:同 (codec, gain) 的成员共享一次编码 ----
+    const groups = new Map<
+      string,
+      { codec: SendspinCodec; gain: number; members: SendspinConnection[] }
+    >();
     for (const c of this.members) {
       const gain = c.appliedGain();
-      const enc = this.encoderFor(c);
-      let chunks: any[];
+      const key = this.encoderKey(c.codec, gain);
+      let g = groups.get(key);
+      if (!g) {
+        g = { codec: c.codec, gain, members: [] };
+        groups.set(key, g);
+      }
+      g.members.push(c);
+    }
+
+    const before = this.deliveredPeak;
+    let peak = before;
+    // 码率计量跟**本批推进最多**的组走(单成员口径,与旧实现同义):各组成交量本应
+    // 相同,取 max 是为了避开「某组恰好缓冲未吐」时把样本数记小、码率算大。
+    let meterSamples = 0;
+    let meterBytes = 0;
+
+    for (const [key, g] of groups) {
+      const enc = this.encoderForGroup(g.codec, g.gain);
+      let chunks: EncodedChunk[];
       try {
-        chunks = await enc.encode(this.scalePcm(pcm, gain));
+        chunks = await enc.encode(this.scalePcm(pcm, g.gain));
       } catch (e) {
         // 编码阶段异常带上下文再抛,便于上游区分「编码器坏了」与「连接断了」。
-        throw new Error(`encode failed (client=${c.clientId} codec=${c.codec}): ${(e as Error)?.message || e}`);
+        throw new Error(
+          `encode failed (codec=${g.codec} gain=${g.gain} members=${g.members.length}): ${(e as Error)?.message || e}`,
+        );
       }
-      // 时间戳一律以**实测样本数**推进,见 EncodedChunk.frameSamples。
-      //
-      // ⚠️ 同一批里若有**多帧**(libFLAC 在某次喂料后恰好凑满 2 帧、或抖动后补吐),
-      // 绝不能全用同一个 `tsUs` —— 第 2 帧的真实起点比第 1 帧晚
-      // `frameSamples / SAMPLE_RATE` 秒。共用一个 ts 会让第 2 帧被判「已过期」
-      // → 设备立即吐字节 → 缓冲空 → underrun。
-      // 因此逐帧按 `ck.frameSamples` 累加微秒推进。
+      // ★ 该组**首块音频已产出**时才给组内成员发 stream/start(见 flushAnnounceFor 注释):
+      //   先宣告再等编码器吐货会在 FLAC 链路留出 ~85ms 空窗,设备据此刻丢弃该流
+      //   → 播放中加入的新成员无声(2026-09-24 真机)。PCM 因首批即有产出不受影响。
+      if (chunks.length > 0) {
+        for (const c of g.members) this.flushAnnounceFor(c);
+      }
+
       let sum = 0;
       let bytes = 0;
       let ts = tsUs;
-      // ★ 该成员**首块音频已产出**时才发 stream/start(见 flushAnnounceFor 注释):
-      //   先宣告再等编码器吐货会在 FLAC 链路留出 ~85ms 空窗,设备据此刻丢弃该流
-      //   → 播放中加入的新成员无声(2026-09-24 真机)。PCM 因首批即有产出不受影响。
-      if (chunks.length > 0) this.flushAnnounceFor(c);
+      // late-join 回填缓存:逐帧记下**本组真正发出去的 chunk** 及其真实起点时间戳。
+      // 只有这里(唯一的下发点)能拿到「未来还没播的音频」,新成员加入时靠它补齐。
+      const ring = this.ringFor(key);
       for (const ck of chunks) {
         const n = ck.frameSamples ?? 0;
         sum += n;
@@ -570,19 +659,124 @@ export class SendspinGroup {
         // 空包必跳过:严格客户端收空包会判 Invalid data(2026-09-17 ESPHome 真机)。
         if (data && data.length > 0) {
           bytes += data.length;
-          c.sendAudio(ts, data);
+          // 同一份字节分发给组内全部成员 —— 字节与时间戳序列完全一致。
+          for (const c of g.members) c.sendAudio(ts, data);
+          if (n > 0) ring.push({ tsUs: ts, durUs: Math.round((n * 1_000_000) / SAMPLE_RATE), data });
         }
+        // 时间戳一律以**实测样本数**推进,见 EncodedChunk.frameSamples。
+        //
+        // ⚠️ 同一批里若有**多帧**(libFLAC 在某次喂料后恰好凑满 2 帧、或抖动后补吐),
+        // 绝不能全用同一个 `tsUs` —— 第 2 帧的真实起点比第 1 帧晚
+        // `frameSamples / SAMPLE_RATE` 秒。共用一个 ts 会让第 2 帧被判「已过期」
+        // → 设备立即吐字节 → 缓冲空 → underrun。因此逐帧按 `ck.frameSamples` 推进。
         if (n > 0) ts += BigInt(Math.round((n * 1_000_000) / SAMPLE_RATE));
       }
-      if (sum > maxSamples) {
-        maxSamples = sum;
-        // 码率计量跟**产出最多**的那个成员走:各成员样本数本应相同,取 max
-        // 是为了避开「某成员编码器恰好缓冲未吐」时把样本数记小、码率算大。
-        this.pushedSamples += sum;
-        this.pushedBytes += bytes;
+
+      // 该组累计交付。新组以**当前峰值**为基线登记 —— 否则播中加入的新成员
+      // (或新出现的 codec/gain 组合)会把 max 拉低,时间线倒着走。
+      const cum = (this.deliveredByGroup.get(key) ?? before) + sum;
+      this.deliveredByGroup.set(key, cum);
+      if (cum > peak) peak = cum;
+
+      if (sum > meterSamples) {
+        meterSamples = sum;
+        meterBytes = bytes;
       }
     }
-    return maxSamples;
+
+    this.deliveredPeak = peak;
+    if (meterSamples > 0) {
+      this.pushedSamples += meterSamples;
+      this.pushedBytes += meterBytes;
+    }
+    this.pruneRecent();
+    return peak - before;
+  }
+
+  /** 取(必要时创建)某编码组的 late-join 缓存。 */
+  private ringFor(key: string): Array<{ tsUs: bigint; durUs: number; data: Uint8Array }> {
+    let r = this.recentByGroup.get(key);
+    if (!r) {
+      r = [];
+      this.recentByGroup.set(key, r);
+    }
+    return r;
+  }
+
+  /** 逐出 late-join 缓存:① 已经播完(ts+dur ≤ now−KEEP_PAST)的;② 超出总时长上限的。
+   *  对齐 aiosendspin `_prune_role_chunk_cache` —— 缓存只保留「尚未播到」的音频。 */
+  private pruneRecent(): void {
+    const cut = nowUs() - BigInt(LATE_JOIN_KEEP_PAST_US);
+    for (const [key, ring] of this.recentByGroup) {
+      while (ring.length > 0 && ring[0].tsUs + BigInt(ring[0].durUs) <= cut) ring.shift();
+      let total = 0;
+      for (let i = ring.length - 1; i >= 0; i--) {
+        total += ring[i].durUs;
+        if (total > LATE_JOIN_RING_MAX_US) {
+          ring.splice(0, i + 1);
+          break;
+        }
+      }
+      if (ring.length === 0) this.recentByGroup.delete(key);
+    }
+  }
+
+  /** late-join 回填:**播中加入**的成员立即补齐「它本该已经收到的音频」。
+   *
+   *  背景(2026-09-24 真机):组时间线游标领先墙钟一整个预填充水位(30s 档 ≈ 29s),
+   *  新成员若只等未来帧,就要空等一个水位才出声 —— 这就是「加入新设备要很久才
+   *  发出声音」。MA/aiosendspin 的解法是 `on_role_join` 回放缓存
+   *  (`_send_cached_chunks_to_role` / `_start_catchup_encoding`):把**起点 ≥
+   *  late-join 目标时刻**的缓存 chunk 立刻发给新角色,之后无缝接实时流。
+   *
+   *  这里做同一件事,只是字节已经在缓存里(同组字节逐字节相同,无需重新编码):
+   *    ① 目标时刻 = `now + send_ahead + LATE_JOIN_MARGIN_US`
+   *       —— 设备**按 `ts − send_ahead` 决定何时播**这一块,所以「不在过去」的
+   *       充要条件是 `ts ≥ now + send_ahead`;加上余量后新成员约 0.1s 出声,且与
+   *       老成员播的是**同一份时间戳**,天然对齐(不像起播锚点可以随便定提前量:
+   *       起播时没有别人在对齐,late-join 必须贴住既有时间轴);
+   *    ② 跳过起点早于目标时刻的 chunk(对齐 MA:「straddling 的整块跳过」);
+   *    ③ 只回填设备装得下的量(容量钳制),避免一进来就把设备灌满被逐帧拒收;
+   *    ④ 宣告必须在音频之前(`stream/start` 先到,否则设备在空等中丢弃该流)。
+   *
+   *  返回回填的 chunk 数(0 = 无可回填,调用方按原路径等未来帧即可)。 */
+  seedLateJoin(c: SendspinConnection): number {
+    // 设备明确报 available:false 时不回填 —— 音频要跟在 stream/start 之后。
+    if (!c.clientWantsStream()) return 0;
+    const ring = this.recentByGroup.get(this.encoderKey(c.codec, c.appliedGain()));
+    if (!ring || ring.length === 0) return 0;
+
+    // 帧头不带 send_ahead(见 sendAudio 注释),设备用的是它自己的(未协商时默认
+    // 800ms)。组公共值就是我们对它的最佳估计,与锚点用的是同一个量。
+    const sendAheadUs = Math.max(this.commonSendAheadUs(), LATE_JOIN_MARGIN_US);
+    const target = nowUs() + BigInt(sendAheadUs + LATE_JOIN_MARGIN_US);
+    let startIdx = -1;
+    for (let i = 0; i < ring.length; i++) {
+      if (ring[i].tsUs >= target) { startIdx = i; break; }
+    }
+    // 缓存里全是「已经播到/播过」的音频(例如刚起播、水位还没立起来)→ 无可回填。
+    if (startIdx < 0) return 0;
+
+    const capUs = Math.max(0, this.capacityLimitedPrefillMs()) * 1000;
+    const items: Array<{ tsUs: bigint; data: Uint8Array }> = [];
+    let accUs = 0;
+    for (let i = startIdx; i < ring.length; i++) {
+      if (accUs >= capUs) break;
+      accUs += ring[i].durUs;
+      items.push({ tsUs: ring[i].tsUs, data: ring[i].data });
+    }
+    if (items.length === 0) return 0;
+
+    // ★ 先宣告、后音频(见 flushAnnounceFor:先给货后宣告会留空窗,设备丢弃该流)。
+    if (!this.pendingAnnounces.includes(c)) this.pendingAnnounces.push(c);
+    this.flushAnnounceFor(c);
+    for (const it of items) c.sendAudio(it.tsUs, it.data);
+    this.server.log(
+      "info",
+      `sendspin late-join 回填: client=${c.clientId} codec=${c.codec} chunks=${items.length} ` +
+        `span=${Math.round(accUs / 1000)}ms target=${target - nowUs()}us(ahead of now) group=${this.name}`,
+    );
+    return items.length;
   }
   /** 曲终/停止:对全员发 stream/end(结束全部角色流) + group/update(stopped)。
    *  缺了客户端永远卡 PLAYING(2026-09-17 ESPHome 真机:播完 30s 还 PLAYING)。
@@ -603,6 +797,7 @@ export class SendspinGroup {
       n++;
     }
     this.encoders.clear();
+    this.recentByGroup.clear();
     return n;
   }
 }

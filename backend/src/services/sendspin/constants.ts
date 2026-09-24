@@ -40,4 +40,30 @@ export const PREFILL_BUFFER_MIN_MS = 100;
  *  设备未宣告容量时只有 ① 生效,行为与引入容量匹配前完全一致。 */
 export const PREFILL_BUFFER_MAX_MS = 30_000;
 
+// ---- late-join 回填(对齐 aiosendspin `PushStream.on_role_join` 的缓存回放)----
+//
+// 2026-09-24 真机:播放中把 Sendspin 播放器加入群组,新成员要等**一个完整预填充
+// 水位**(30s 档 ≈ 29s)才出声。原因不是代码写错,而是**只给新成员发未来帧**:
+// 组时间线游标领先墙钟一个水位深度,新成员收到的首帧时间戳在 30s 之后,只能干等。
+//
+// MA / aiosendspin 的做法(`push_stream.py`):组内保留**尚未播到**的音频缓存
+// (`_pcm_chunk_cache` / `_role_chunk_cache`,按 `ts + duration <= now` 逐出),
+// 新角色 `on_role_join` 时把缓存里起点 ≥「late-join 目标时刻」的 chunk **立即回放**
+// 给它,之后无缝接上实时流。于是新成员与老成员**同一时刻出声**。
+//
+// 目标时刻 = `now + send_ahead + LATE_JOIN_MARGIN_US`(见 SendspinGroup.seedLateJoin):
+//   late-join **不能自选提前量**——起播时无人在对齐,锚点可以随便提前;但回填必须
+//   **贴住既有时间轴**,否则新成员与老成员的 `ts` 就会错开一个提前量。
+//   设备侧判据 `delta = (ts - send_ahead) - now`,所以取「设备协商的 send_ahead」
+//   再加一点传输余量,首帧 delta ≈ +100ms:既不在过去被丢,也不至于等太久。
+//   (早期版本误用起播锚点的 lead 作提前量,已删;真机实测 target=882706us
+//    = send_ahead 800000 + margin 100000, 新成员约 0.1s 出声。)
+
+/** 回填首帧的额外余量(µs)。对齐 aiosendspin `LATE_JOINER_MIN_LEAD_US = 100_000`。 */
+export const LATE_JOIN_MARGIN_US = 100_000;
+/** 缓存保留的「已播过」尾巴(µs)。对齐 aiosendspin `_HISTORY_KEEP_PAST_US = 1_000_000`。 */
+export const LATE_JOIN_KEEP_PAST_US = 1_000_000;
+/** 缓存总时长上限(µs):= 预填充上限 30s + 余量,足够覆盖任何档位。 */
+export const LATE_JOIN_RING_MAX_US = 35_000_000;
+
 export type PskCategory = "lt" | "pr" | "sn";

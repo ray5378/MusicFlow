@@ -174,6 +174,8 @@ export interface GroupJoinResult {
   joined: boolean;
   /** true=组正在播,新成员从直播沿入流;false=组空闲,仅登记,下次起播生效。 */
   live: boolean;
+  /** 播中加入时**已回填**的 chunk 数(>0 表示新成员立刻就有音频可播,无需等水位)。 */
+  backfilled?: number;
 }
 
 /** 用户组成员直播沿加入:组在播 → 新成员立即拿 stream/start＋组状态,从当前
@@ -195,7 +197,16 @@ export function joinGroupCore(srv: SendspinServer | null, groupName: string, cli
   //   所以只有 FLAC 链路暴露)。改为挂入 pendingAnnounces,由 pushFrame 在该成员
   //   首块音频就绪时兑现 —— 与起播路径(playCore/playGroupCore)语义完全一致。
   g.pendingAnnounces.push(conn);
-  return { joined: true, live: true };
+  // ★ late-join 回填(MA/aiosendspin `on_role_join` 的等价物,见
+  //   SendspinGroup.seedLateJoin):组时间线游标领先墙钟**一整个预填充水位**
+  //   (30s 档 ≈ 29s),只发未来帧会让新成员空等一个水位才出声 —— 这正是
+  //   2026-09-24 真机「加入新设备要很久才发出声音」。有缓存就立刻补齐(内部按
+  //   「先 stream/start、后音频」的顺序兑现宣告),没缓存就退回等首帧。
+  // ⚠️ 两个可选调用都为了最小桩:`seedLateJoin` 缺席(childMain 单测的假组)当 0;
+  //   `backfilled` 仅在**真的回填了**才出现在返回值里,保持既有
+  //   `{joined, live}` 契约不变(两个既有测试用 toEqual 比对)。
+  const backfilled = g.seedLateJoin?.(conn) ?? 0;
+  return backfilled > 0 ? { joined: true, live: true, backfilled } : { joined: true, live: true };
 }
 
 /** 用户组成员摘除:给该成员发 stream/end＋组状态后移出(播中摘除不断其他成员)。

@@ -146,7 +146,7 @@ describe("sendspin 用户组多房间", () => {
     }
   }, 60_000);
 
-  it("播中加入从直播沿收帧(无需历史)", async () => {
+  it("播中加入:有缓存则回填、无缓存则挂 pending —— stream/start 绝不早于音频", async () => {
     const srv = getSendspinServer()!;
     const ws5 = await connectHello("GRP-G5");
     const c5 = collect(ws5);
@@ -156,19 +156,28 @@ describe("sendspin 用户组多房间", () => {
       await waitFor(() => !!srv.clients.get("GRP-G5") && !!srv.clients.get("GRP-G6"), 5000, "双 conn");
       playGroupCore(srv, GNAME, ["GRP-G5"], { songId: "g-song-3", title: "t", duration: 30 } as any);
       await waitFor(() => firstAudioTs(c5.binaries) !== null, 15000, "G5 首帧");
-      // G6 播中加入:live,立即拿 stream/start,随后收到直播帧
+      // G6 播中加入:live。两条**都合法**的路径(取决于加入时缓存里是否已有
+      // 「还没播到」的音频):
+      //   A) 回填 —— 组游标领先墙钟一个预填充水位,缓存里有未来音频 ⇒ 立刻补齐,
+      //      新成员无需空等(2026-09-24 真机「加入新设备很久才出声」的修复);
+      //   B) 无缓存(刚起播/水位未立起)⇒ 退回 pendingAnnounces,等首帧就绪再宣告。
+      // 两条路的**共同不变量**:`stream/start` 绝不早于该成员的首块音频
+      // (FLAC 块编码器攒满一块才吐首帧,先宣告会留空窗 → 设备丢弃该流 → 无声)。
       const r = joinGroupCore(srv, GNAME, "GRP-G6");
-      expect(r).toEqual({ joined: true, live: true });
-      // ★ stream/start 必须**延后到该成员首块音频就绪**,不能在加入瞬间就发
-      //   (2026-09-24 真机:FLAC 块编码器要攒满一块才吐首帧,先宣告会留下空窗,
-      //    设备据此丢弃该流 → 播放中加入的新成员无声;PCM 首批即有产出故不受影响)。
-      //   下面两句同步执行,推流循环没机会插入,判定是确定的。
-      expect(c6.texts.some((m) => m?.type === "stream/start")).toBe(false);
-      expect(srv.group(GNAME).pendingAnnounces.some((c: any) => c.clientId === "GRP-G6")).toBe(true);
+      expect(r.joined).toBe(true);
+      expect(r.live).toBe(true);
+      // pendingAnnounces 是否被兑现是**同步**可判定的(不依赖 WS 投递时序):
+      // 回填路径在发音频前已 flush 掉宣告,故必然不在队列里;无缓存路径才留在队列里。
+      const stillPending = () => srv.group(GNAME).pendingAnnounces.some((c: any) => c.clientId === "GRP-G6");
+      if ((r.backfilled ?? 0) > 0) {
+        expect(stillPending()).toBe(false);
+      } else {
+        expect(stillPending()).toBe(true);
+      }
       await waitFor(() => c6.texts.some((m) => m?.type === "stream/start"), 5000, "G6 stream/start");
-      await waitFor(() => firstAudioTs(c6.binaries) !== null, 15000, "G6 直播帧");
+      await waitFor(() => firstAudioTs(c6.binaries) !== null, 15000, "G6 首帧");
       // 首帧(含空包被跳过的情形)之后:宣告必然已兑现且不再挂起,不会重复发第二份。
-      expect(srv.group(GNAME).pendingAnnounces.some((c: any) => c.clientId === "GRP-G6")).toBe(false);
+      expect(stillPending()).toBe(false);
     } finally {
       ws5.terminate(); ws6.terminate();
     }
