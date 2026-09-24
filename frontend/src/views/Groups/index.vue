@@ -1126,8 +1126,9 @@ async function toggleSendspinDisabled(dev: any, disabled: boolean): Promise<void
 }
 
 // ---- Sendspin **设备自身**音量(ESPHome 6053;每台设备各自一把密钥) ----
-// 与组音量/成员音量条的区别必须清楚:那条是**音乐采样增益**(Sendspin group
-// volume),这条是**设备硬件输出**(6053 的 media_player volume)。实际响度 =
+// 与**组音量**的区别必须清楚:那条是**音乐采样增益**(Sendspin group volume,
+// 全组一份 —— 成员行那把旋钮已移除,见上方 Groups 脚本区的 ⚠️ 注释),
+// 这条是**设备硬件输出**(6053 的 media_player volume)。实际响度 =
 // 两者相乘,所以 UI 不合并、端点也不共用(/v1/peers/:id/volume vs
 // /v1/sendspin/devices/:id/esphome/volume)。
 const showDeviceVolume = ref(false);
@@ -1153,7 +1154,7 @@ const esphomeConnected = ref(false);
 const esphomeTesting = ref(false);
 const esphomeSaving = ref(false);
 const esphomeResult = ref<{ success: boolean; message: string } | null>(null);
-/** 拖拽防抖:本地即时反馈 + 250ms 一 POST(与成员音量条同款节流)。 */
+/** 拖拽防抖:本地即时反馈 + 250ms 一 POST(拖动期间别把网络刷爆)。 */
 let deviceVolumeTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 写失败结果码 → 文案。后端刻意只回机器可读 code(不在后端写死语言)。 */
@@ -1724,7 +1725,7 @@ onBeforeUnmount(() => { stopSendspinPolling(); });
 }
 
 // ---- 设备自身音量弹窗(ESPHome 6053)----
-// 配色沿用成员音量条那套:几何在本地覆写,滑块颜色交给 global.scss 的 el-slider 全局覆写。
+// 几何在本地覆写,滑块颜色交给 global.scss 的 el-slider 全局覆写。
 .device-vol-btn.is-ready { color: var(--fnos-red); }
 /* 设备 API(6053)连接状态:与「明文直连」标签并排的独立指示。做成独立的 pill + 圆点
    而不是复用 el-tag —— 它跟「配对/明文直连」是**两个维度**(连接方式 vs 当前通断),
