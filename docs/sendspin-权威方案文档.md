@@ -1152,8 +1152,8 @@ docker restart musicflow
 
 | 项 | 说明 |
 |---|---|
-| **成员换组未从旧组摘出** | `joinGroupCore` 直接改 `conn.group`/`g.add(conn)`，**没有** `prev.remove(conn)`；MA `add_client` 第一步就是 `await client.ungroup()`（一个客户端只属于一个组）。现状：旧组 `members` 仍持有该 conn，若旧组也在推流则设备收**双流**。修法：抽 `SendspinServer.detachFromGroup(conn)`（组空 → `stopGroupPump` + `close`，与 `onConnectionClosed` 同款收尾），`joinGroupCore` 先调它。⚠️ 需同时确保「为换组而停的 pump」不被 tracker 误判为自然结束（`GroupPump.stop()` 已走 epoch 路径、不置 `endedNaturally`，但仍要核对 `pollState` 的上报语义） |
-| **加入群组时中止该设备原有独立会话** | 已确认方向（选项 A）：设备加进组即停掉它自己的 pump + 清队列标记，绝不让 tracker 判 `advance`。与上一项同批做（同一处语义） |
+| ✅ **成员换组（已从旧组摘出，v4.0.21 修）** | 原问题：`joinGroupCore` 直接改 `conn.group`/`g.add(conn)`、**没有** `prev.remove(conn)` → 旧组 `members` 仍持有 conn，旧组推流则设备收**双流**。修复（playerCore.ts:191-213）：入组前 `old = conn.group`，若 `old && old !== g` 则先 `old.remove(conn)` + 清 `pendingAnnounces` + 空组停 pump/删组，与 MA `add_client` 第一步 `ungroup()` 对齐。⚠️ 残留待回归：`pollState` 上报语义是否仍按 epoch 路径核对。详见 §8.2 #13 / §11.3。 |
+| ✅ **加入群组时中止原独立会话（v4.0.21 修）** | 设备的独立会话即其单成员组（`conn.group`），换组时从旧组摘出后 `old.empty` 为真 → 停 pump + 关编码器 + 删组，独立会话自然中止（选项 A，与上一行同一处代码）。详见 §8.2 #13。 |
 | `stream/end` 音频丢弃守卫 | 对齐 MA `_stream_started` |
 | 迟到帧丢弃 | 对齐 MA `drop_late=True` + 2s 宽限期 |
 | 时间线 rebase | 上游饥饿时整条时间线向前跳 |
