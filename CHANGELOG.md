@@ -2,6 +2,31 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.21] - 2026-09-24
+
+### 修复：成员换组残留双成员 / 双流（对齐 MA `add_client` 的 `ungroup`）
+
+- **现象**：一个 Sendspin 播放器**已属于某组**（用户组 或 它自己的独立播放组）时，
+  再被加入另一个组，会同时留在**旧组和新组**的 `members` 里 → 旧组继续往它推音频
+  = **双成员 / 双流**（同一首歌卡顿 + 双声叠加）。正是 §8.2 row 13 挂账的 MA 不对齐。
+- **根因**：`joinGroupCore` 直接 `conn.group = g; g.add(conn)`，**没有把 conn 从旧组摘掉**。
+- **修复**（对齐 MA/aiosendspin `add_client` 首步 `client.ungroup()`）：
+  - 入组前先 `old.remove(conn)`，并清掉旧组残留的 `pendingAnnounces`（避免旧组
+    `pushFrame` 给已离组 conn 重发 `stream/start` 造成双流）。
+  - 旧组若仅此一员（独立播放组的典型形态）→ 停空转 pump + 关编码器 + 从 registry 移除。
+  - 顺带让「加入群组中止原独立会话」（选项 A）**自然成立**：独立播放组的 `conn.group`
+    就是该客户端专属组，换组时它正是被 `ungroup` 的旧组。
+- **验证**：`tsc --noEmit` 通过；新增 2 例回归（独立播放转组不双成员、他组再入新组从旧组
+  摘除且旧组其余成员不受影响）→ `playerGroup` 5/5 + `childMain` 13/13 全绿。
+- **文档**：`docs/sendspin-权威方案文档.md` §8.2 row 13 `⚠️待修 → ✅已实现`；§11.3 挂账项清零。
+
+### 附：发版前 CI 一处 flaky（非本版本问题）
+
+- `tests/services/flow.test.ts` 的 `abort 幂等且让 done 收敛` 在负载高的 runner 上偶发
+  15s 超时（该用例用 30s 输入、依赖 abort 收敛 `done`，属转码流水线测试，与本期
+  sendspin 改动**零代码路径关联**——`flow.ts` 不 import `playerCore`/`services/sendspin`）。
+  首次触发时该 job 报红，重跑即通过，CI 整体转绿。**未改动 flow 测试代码**。
+
 ## [4.0.20] - 2026-09-24
 
 ### 修复：播放中加入成员 → 整组一卡一卡（时间线把「并集」当成推进量）
