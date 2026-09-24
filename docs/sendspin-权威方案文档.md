@@ -1040,7 +1040,7 @@ npx vitest run src/services/sendspin/playerGroup.test.ts
 | 10 | 慢设备处置 | 队列溢出 → 断连重连，不拖累全组 | 无检测 | 未做 |
 | 11 | time 请求频率 | 客户端自适应（未同步 0.2s，稳定 3s） | 服务端被动应答 | 未做 |
 | 12 | **late-join 回填** | `on_role_join` 回放**尚未播到**的缓存（`_role_chunk_cache`，`LATE_JOINER_MIN_LEAD_US=100ms`） | **已实现**：`seedLateJoin`（§5.3），新成员约 0.1s 出声 | ✅ |
-| 13 | 成员换组 | `add_client` 第一步 `await client.ungroup()`（一个客户端只属于一个组） | `joinGroupCore` 直接改 `conn.group`，**未**从旧组 `remove` ⇒ 可能双成员（旧组仍在 `members` 里） | ⚠️ 待修（见下） |
+| 13 | 成员换组 | `add_client` 第一步 `await client.ungroup()`（一个客户端只属于一个组） | **已实现（v4.0.21）**：`joinGroupCore` 入组前先 `old.remove(conn)` 把 conn 从旧组（另一用户组 / 自己的独立播放组）摘出，`old.empty` 时停 pump + 关编码器 + 从 registry 移除 ⇒ 绝无双成员 / 双流 | ✅ |
 | 14 | 显式操控成员 | `ensure_player_ungrouped` 语义 | 已实现（`detachFromActiveGroups`） | ✅ |
 
 ## 8.3 真机验证记录（v4.0.20，2026-09-24）
@@ -1231,11 +1231,13 @@ docker restart musicflow
 
 | 项 | MA 做法 | 我们的现状 | 备注 |
 |---|---|---|---|
-| 成员换组 | `add_client` 第一步 `await client.ungroup()` | `joinGroupCore` 直接改 `conn.group`，未从旧组 `remove` → 可能双流 | §10.2 第一条；与上一项同批做 |
-| 加入群组中止原独立会话 | `ensure_player_ungrouped` 语义 | 未做 | 同上，需保证停 pump 不被 tracker 误判自然结束 |
+| 成员换组 | `add_client` 第一步 `await client.ungroup()` | **✅ 已修（v4.0.21）**：`joinGroupCore` 入组前先 `old.remove(conn)`，旧组空则停 pump + 关编码器 + 删 registry；见 §8.2 #13、`playerCore.ts` `joinGroupCore` | 修复 PR 见 4.0.21 |
+| 加入群组中止原独立会话 | `ensure_player_ungrouped` 语义 | **✅ 随换组修复自然成立**：独立播放组的 `conn.group` 即该客户端专属组，换组时它正是被 `ungroup` 的旧组 ⇒ 独立会话被中止（停 pump + 删组），无需单独机制 | 与「成员换组」同一处代码 |
 | 迟到帧 / 时间线 rebase / 统一时钟源 | aiosendspin 均有 | 未做 | §8.2 #3 / #6 / #7 |
 
-> 下轮处理以上任一项，**先回到 §11.0 大前提**：读 aiosendspin 对应函数，对照我们代码，量化现网症状，再动手。
+> 下轮处理「迟到帧 / rebase / 统一时钟源」任一项，**先回到 §11.0 大前提**：读 aiosendspin 对应函数，对照我们代码，量化现网症状，再动手。
+>
+> **挂账项清零记录（2026-09-24）**：本轮把最后一处「MA 不对齐」——成员换组（`joinGroupCore` 未从旧组 `remove` → 双成员/双流，§8.2 #13）——补齐，并顺带让「加入群组中止原独立会话」自然成立。剩余未做项仅剩 §8.2 #1/#3/#6/#7/#9/#10/#11（迟发帧、rebase、统一时钟源等），均为性能/鲁棒性增强，非同步正确性阻塞。
 
 ---
 
