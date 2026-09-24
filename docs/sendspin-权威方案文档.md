@@ -19,13 +19,15 @@
 - **想要更深的水位，唯一的正道是调大设备端 `buffer_size`**（容量变大，同一比例对应秒数更多），而不是指望把比例调高。
 - 设备**不宣告** `buffer_capacity` 时退回 30 秒上限，行为与旧版本完全一致（向后兼容旧固件）。
 
-四条最容易翻车的铁律（详见第二部分）：
+六条最容易翻车的铁律（详见第二部分）：
 
 | 铁律 | 一句话 |
 |---|---|
 | 音频帧头 **9 字节** | `[0x04][i64 大端 μs][data]`，**没有 `send_ahead`**。多一个字节就整条链路无声 |
 | FLAC `codec_header` 的 **last 位必须为 1** | 头是单独发的；last=0 会让解码器撞帧同步码，**服务端全绿、设备零报错、就是没声** |
 | 时间线**按实际产出**推进 + **绝对时刻调度** | 固定 sleep 会累积漂移；设备 hard-sync 阈值只有 **5ms** |
+| 编码**按 `(codec, gain)` 分组**、时间线取 **max-of-累计** | 每成员各建编码器时块相位会错开，「每批取 max」把**并集**当推进量 → 整组卡顿（§2.6） |
+| 播中加入成员**必须回填**「还没播到」的音频 | 组游标领先墙钟一整个水位，只发未来帧 → 新成员空等一个水位才出声（§5.3） |
 | 编解码**默认 FLAC** | ESPHome 默认偏好就是 `[flac, opus, pcm]`；PCM 是 2× 空口占用 |
 
 ---
@@ -512,6 +514,25 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 5. 缓存**按曲清零**（`resetPushMeter`）—— 上一首的字节对新流毫无用处，留着只会把新成员灌进已播完的音频。
 
 **效果**：新成员约 **0.1s 出声**，且与老成员播的是**同一份时间戳**（天然对齐），不再等一个水位。
+
+**240 真机实测**（2026-09-24，es主卧 `3C:0F:02:F9:69:E4`，FLAC，容量 4.8MB → 钳到 29995ms/60%）：
+
+```
+服务端: sendspin late-join 回填: client=3C:0F:02:F9:69:E4 codec=flac
+              chunks=341 span=29099ms target=879930us(ahead of now)
+        SYNC LOST=0  Lost sync=0  零产出=0  Failed to send=0  frozen=0
+        tracker pos: 2→7→12→…→42   (每 5s 涨 5s，1:1)
+
+设备侧(ESPHome 2026.9.0，join 后 ~1.6s 内):
+        sendspin.client: Stream Started                        ← 33.919
+        sendspin.sync_task: Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
+        speaker_source_media_player: State changed to PLAYING  ← 33.961
+        i2s_audio.speaker: Starting                            ← 34.046 = 真正出声
+        计数: Stream Started=2  State changed to PLAYING=3
+              Failed to send audio chunk=0  Lost sync=0  Regained sync=0  underrun=0
+```
+
+=> 新成员在**加入的同一毫秒**拿到 29.1 秒音频（覆盖它本该收到的那一整段），约 **0.13 秒后 i2s 起播**，整组全程零失步、零拒收。
 
 **测试锁**：`lateJoinBackfill.test.ts`（8 例）—— 首帧不在过去、≈100ms 出声、截止于组游标、只剩过期缓存时不回填、`available:false` 不回填、容量钳制、按编码组取字节、成员数不影响推进量。
 
