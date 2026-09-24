@@ -187,6 +187,31 @@ export function joinGroupCore(srv: SendspinServer | null, groupName: string, cli
   if (!conn) return { joined: false, live: false };
   const g = srv.group(groupName);
   if (g.members.has(conn)) return { joined: false, live: !!g.current };
+
+  // MA 对齐:add_client 第一步 `await client.ungroup()` —— **一个客户端只属于一个组**。
+  // 否则 conn 仍留在旧组(另一个用户组 / 它自己的独立播放组)的 `members` 里 → 旧组
+  // 继续往它推音频 = 双成员 / 双流(同一首歌卡顿 + 双声叠加;2026-09-24 复盘 §8.2 row 13)。
+  // 等价于 MA 的「先退旧组再入新组」,顺带让「加入群组中止原独立会话」(选项 A)自然成立。
+  const old = conn.group;
+  if (old && old !== g) {
+    // 旧流先收尾(stream/end 成对 + 组状态 stopped),再摘出 conn —— 与 leaveGroupCore 同序。
+    try { conn.sendJson("stream/end", {}); } catch { /* ignore */ }
+    try { conn.sendGroupUpdate(); } catch { /* ignore */ }
+    old.remove(conn);
+    // 清掉旧组残留的延迟宣告,避免旧组 pushFrame 给已离组 conn 重发 stream/start(双流)。
+    const pa = old.pendingAnnounces;
+    let pi = pa.indexOf(conn);
+    while (pi >= 0) { pa.splice(pi, 1); pi = pa.indexOf(conn); }
+    conn.group = null;
+    // 旧组若仅此一员(独立播放组)→ 停空转 pump + 关编码器 + 从 registry 移除
+    // (与 onConnectionClosed 空组清理同因;多成员用户组不动,其余成员照常播)。
+    if (old.empty) {
+      pumpFor(srv, old).stop();
+      old.close();
+      srv.groups.delete(old.name);
+    }
+  }
+
   conn.group = g;
   g.add(conn);
   if (!g.current) return { joined: true, live: false };

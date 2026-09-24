@@ -7,7 +7,7 @@ import path from "node:path";
 import fs from "node:fs";
 import WebSocket from "ws";
 import { setSendspinIdentityDir, startSendspinService, stopSendspinService, getSendspinServer } from "./index.js";
-import { playGroupCore, joinGroupCore, leaveGroupCore, sendspinGroupName } from "./playerCore.js";
+import { playCore, playGroupCore, joinGroupCore, leaveGroupCore, sendspinGroupName } from "./playerCore.js";
 import { overridePumpSource } from "./streamEngine.js";
 
 const PORT = 18941;
@@ -180,6 +180,57 @@ describe("sendspin 用户组多房间", () => {
       expect(stillPending()).toBe(false);
     } finally {
       ws5.terminate(); ws6.terminate();
+    }
+  }, 60_000);
+
+  it("独立播放转组:先退旧独立组 → 不双成员/不双流(选项 A 自然成立)", async () => {
+    const srv = getSendspinServer()!;
+    const ws7 = await connectHello("GRP-G7");
+    try {
+      await waitFor(() => !!srv.clients.get("GRP-G7"), 5000, "conn");
+      const conn = srv.clients.get("GRP-G7")!;
+      // 先独立起播:conn.group = 独立组(srv.group("GRP-G7")),members 含 conn
+      playCore(srv, "GRP-G7", { songId: "indep-1", title: "t", duration: 30 } as any);
+      const indepGroup = srv.group("GRP-G7");
+      expect(indepGroup.members.has(conn)).toBe(true);
+      expect(conn.group).toBe(indepGroup);
+      // 再把它加入用户组(修复前:conn 同时留在 indepGroup + GNAME = 双成员双流)
+      const r = joinGroupCore(srv, GNAME, "GRP-G7");
+      expect(r.joined).toBe(true);
+      // 关键不变量:conn 只属于新组,旧独立组已被清空并从 registry 移除
+      expect(srv.groups.has("GRP-G7")).toBe(false);
+      expect(srv.group(GNAME).members.has(conn)).toBe(true);
+      expect(conn.group).toBe(srv.group(GNAME));
+      // 旧独立组的 pump 已停、编码器已关:不再有「双流」推送
+      expect(indepGroup.members.has(conn)).toBe(false);
+    } finally {
+      ws7.terminate();
+    }
+  }, 60_000);
+
+  it("已在他组再入新组:从旧组摘除,旧组其余成员不受影响(无双成员)", async () => {
+    const srv = getSendspinServer()!;
+    const wsA1 = await connectHello("GRP-A1");
+    const wsA2 = await connectHello("GRP-A2");
+    const wsB1 = await connectHello("GRP-B1");
+    try {
+      await waitFor(() => ["GRP-A1", "GRP-A2", "GRP-B1"].every((id) => !!srv.clients.get(id)), 5000, "conns");
+      const GA = sendspinGroupName("UT-GROUP-A");
+      const GB = sendspinGroupName("UT-GROUP-B");
+      // A 起播,两名成员
+      playGroupCore(srv, GA, ["GRP-A1", "GRP-A2"], { songId: "ga", title: "t", duration: 30 } as any);
+      expect(srv.group(GA).members.size).toBe(2);
+      // GRP-A1 再入 B(修复前:仍留 A 的 members → 双成员双流)
+      const r = joinGroupCore(srv, GB, "GRP-A1");
+      expect(r.joined).toBe(true);
+      // 已从 A 摘除,且只在新组 B
+      expect(srv.group(GA).members.has(srv.clients.get("GRP-A1")!)).toBe(false);
+      expect(srv.group(GB).members.has(srv.clients.get("GRP-A1")!)).toBe(true);
+      // A 其余成员(A2)完全不受影响,A 仍在播
+      expect(srv.group(GA).members.size).toBe(1);
+      expect([...srv.group(GA).members].map((c: any) => c.clientId)).toEqual(["GRP-A2"]);
+    } finally {
+      wsA1.terminate(); wsA2.terminate(); wsB1.terminate();
     }
   }, 60_000);
 });
