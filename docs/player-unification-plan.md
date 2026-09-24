@@ -11,7 +11,7 @@
 > 前端已删除 Web 播放器模块与被控代码。最终只保留两种遥控关系：**客户端→客户端**、**Web→客户端**。
 >
 > 关联文档：`DEVELOPER.md`（整体架构）、`API.md`（接口面）、`PRE_PROBE.md`（预探测）、
-> `sendspin-renderer-handoff-2026-09-13.md`（Sendspin 渲染端）。
+> `sendspin-权威方案文档.md`（Sendspin 协议链路 / 设备配置 / 踩坑全集）。
 
 ---
 
