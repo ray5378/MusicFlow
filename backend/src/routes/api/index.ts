@@ -77,6 +77,7 @@ import { sendspinGroupName } from "../../services/sendspin/playerCore.js";
 import { getSendspinDeviceVolume } from "../../services/sendspin/peerVolume.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import { runPlaylistAutoMatch } from "../../services/playlist/autoMatch.js";
+import { matchPlaylistInBackground } from "../../services/plugin/shared.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
@@ -4661,6 +4662,27 @@ apiRoutes.post("/v1/play", async (c) => {
     shuffleOrder: enqueue ? undefined : snap?.shuffleOrder,
     shufflePos: enqueue ? undefined : snap?.shufflePos,
   });
+});
+
+// ==================== 歌单自动匹配(播放器/客户端显式触发入口) ====================
+// /v1/play 内建的自动匹配只对投屏(服务端内容点播)生效:客户端**本机播放**并不走
+// /v1/play,而客户端无法预知 online providerId(本地歌单没有该字段),调不了
+// /v1/online/:providerId/match-playlist。故开一个 providerId 无关的入口:复用
+// matchPlaylistInBackground 的「能力驱动挑选」(插件启了谁就用谁),调用方无需知道
+// 源是谁。响应即时返回(只登记任务),进度由调用方重新拉歌单自行观察,不占连接。
+apiRoutes.post("/v1/playlist/:id/auto-match", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+  const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
+  }
+  // fire-and-forget:拿全局批量闸可能要排队,绝不能把触发方挂住。
+  void matchPlaylistInBackground(id).then((s) => {
+    console.info(`[auto-match] ${id} 完成: total=${s.total} matched=${s.matched} noMatch=${s.noMatch} error=${s.error}`);
+  });
+  return c.json({ success: true, started: true, playlistId: id });
 });
 
 // ==================== 音流(MusicFlow) ====================
