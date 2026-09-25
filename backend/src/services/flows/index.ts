@@ -13,6 +13,10 @@ import { getQueueController } from "../player/index.js";
 import { setDeviceVolume, refreshDevices } from "../dlna/control.js";
 import { resolveContentSongs, songsToQueueItems } from "../content.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../plugin/fixedRecommend.js";
+import { getGroupManager, splitMemberId } from "../group/index.js";
+import { checkPlayTarget } from "../playTarget.js";
+import { wakeSendspinDiscovery, isSendspinEnabled, readSendspinPluginConfig } from "../sendspin/index.js";
+import { rescanAirPlayDevices } from "../airplay/discovery.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("INDEX");
@@ -178,6 +182,121 @@ export function isFlowRunning(id: string): boolean {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// ── 目标唤醒(2026-09-25)──────────────────────────────────────────────────
+// 等待阶段原本只做两件事:`refreshDevices()`(只扫 DLNA)+ 读 `peer.available`。
+// 而 sendspin 的 peer **只在设备已连上时才注册**(peer.ts registerSendspin),
+// airplay 靠自己的常驻 mDNS browser —— 两者都不在 refreshDevices 的覆盖范围内:
+//   - sendspin 的 browser 每 60s 才重建一次(discover.ts BROWSER_REFRESH_MS),
+//     音流的等待窗口(waitTimeoutSec,常见 30~60s)往往更短 ⇒ 不主动催,必然
+//     等到 timeout 也看不见设备;
+//   - airplay 的常驻句柄收不到刚上电设备的首轮应答(见 discovery.ts spinQuery 注释),
+//     得开个短命句柄重扫一次。
+// 这里在每轮扫描时**主动催一次发现**,全程复用既有链路(不新增拨号路径):
+//   sendspin(独立设备 **与** 群组里的 sendspin 成员一视同仁)
+//            → wakeSendspinDiscovery():重建 browser(在线设备重新 emit up →
+//              discover 自动入册 + 开重试窗口)+ 对拨号名单里「当前未在线」的目标补一枪
+//   airplay  → rescanAirPlayDevices()(短命 `_raop._tcp` 查询,upsert 后 peer 实时桥接)
+// DLNA 无需唤醒:refreshDevices() 本来就是同步扫描。
+//
+// 🔴 sendspin 那一路**必须**走 wakeSendspinDiscovery() 这个入口,不能在本文件里直调
+// refreshPlayerDiscoveryNow / armDialTarget:发现循环(browser + 重试状态机)活在
+// **sendspin 子进程**里,而音流引擎跑在主进程 —— fork 模式下直调是**静默空转**
+// (2026-09-25 实测:音流唤醒 100% 无效,日志只有 `armDialTarget: sendspin 服务未运行`)。
+// 入口内部按 isForkMode() 分派到 RPC / 直跑,并统一做「插件启用 + autoDiscover」守卫。
+const WAKE_MIN_GAP_MS = 5_000; // 与 discover.refreshPlayerDiscoveryNow 的默认节流对齐
+let lastWakeAt = 0;            // 进程级节流(多条音流共享,避免叠加轰炸 mDNS)
+let dialSweepBusy = false;     // sendspin 唤醒的 in-flight 门(等 RPC 回来)
+let airplayRescanBusy = false; // airplay 重扫的 in-flight 门(其内部要等 2.5s 收应答)
+let wakeLogged = false;        // 每次执行首轮打 info,之后降 debug(免得每 3s 刷屏)
+
+/** 目标需要哪条唤醒通道。group 只看**组内是否真有 sendspin 成员** ——
+ *  组自己的 `available` 恒 true(不因成员掉线而不可用,故也不在等待里挂成员),
+ *  但成员设备得先连上才可能出声,所以要按独立设备同一条通道去催。 */
+function wakeChannels(targets: Set<string>): { sendspin: boolean; airplay: boolean } {
+  let sendspin = false;
+  let airplay = false;
+  const gm = getGroupManager();
+  for (const pid of targets) {
+    const p = parsePeerId(pid);
+    if (!p) continue;
+    if (p.kind === "sendspin") sendspin = true;
+    else if (p.kind === "airplay") airplay = true;
+    else if (p.kind === "group") {
+      const g = gm.get(p.id);
+      if ((g?.memberIds || []).some((m) => splitMemberId(m)?.kind === "sendspin")) sendspin = true;
+    }
+  }
+  return { sendspin, airplay };
+}
+
+/** 主动唤醒目标设备(节流 + 非阻塞)。失败静默:下一轮还会来。 */
+async function wakeTargets(targets: Set<string>, flowName: string): Promise<void> {
+  const need = wakeChannels(targets);
+  if (!need.sendspin && !need.airplay) return;
+  const now = Date.now();
+  if (now - lastWakeAt < WAKE_MIN_GAP_MS) return;
+  lastWakeAt = now;
+  const did: string[] = [];
+  if (need.sendspin) {
+    // 守卫(2026-09-25):尊重插件启用与 `autoDiscover` 开关 —— **配置即意志**。
+    // 插件没启用 / 用户关掉了「自动发现」时,音流也不主动拨号(否则就成了绕过配置的
+    // 后门);此时设备只能靠自己连入或手工 dial,等不到就按 waitTimeoutSec 走 timeout。
+    // (wakeSendspinDiscovery() 内部也做同样的守卫,这里是头一道,顺带给出可读的日志。)
+    let why = "";
+    try {
+      if (!isSendspinEnabled()) why = "sendspin 插件未启用";
+      else if (!readSendspinPluginConfig().autoDiscover) why = "autoDiscover 已关闭";
+    } catch { why = "读取 sendspin 插件配置失败"; }
+    if (why) {
+      log.debug(`[flow ${flowName}] 跳过 sendspin 唤醒:${why}`);
+    } else if (!dialSweepBusy) {
+      dialSweepBusy = true;
+      try {
+        // 一次调用完成两件事(①重建 browser 重发 PTR 查询 ②对名单里未在线的目标补
+        // 开重试窗口)。**必须串行 await**:wakeLogged 只让首轮打 info,而 RPC 是异步的
+        // —— 早先 fire-and-forget 时 did 还是空的,连「重扫」这条记录都攒不出来。
+        const r = await wakeSendspinDiscovery();
+        if (r.rescanned) did.push("sendspin 重扫");
+        if (r.rearmed.length) did.push(`sendspin 名单补枪 ×${r.rearmed.length}`);
+      } catch { /* 下一轮重来 */ } finally { dialSweepBusy = false; }
+    }
+  }
+  if (need.airplay && !airplayRescanBusy) {
+    airplayRescanBusy = true;
+    void rescanAirPlayDevices()
+      .catch(() => { /* ignore */ })
+      .finally(() => { airplayRescanBusy = false; });
+    did.push("airplay 重扫");
+  }
+  if (did.length === 0) return;
+  if (!wakeLogged) {
+    wakeLogged = true;
+    log.info(`[flow ${flowName}] 等待阶段主动发现目标:${did.join(" + ")}`);
+  } else {
+    log.debug(`[flow ${flowName}] 等待阶段主动发现目标:${did.join(" + ")}`);
+  }
+}
+
+/** 目标此刻是否「可播」。与「peer 是否 available」的区别在**群组与 AirPlay**:
+ *
+ *  两者的「peer 行可用」都不代表「真能出声」 —— 组行 `available` **恒 true**
+ *  (peer.ts「组恒可见」的展示约定:不因成员掉线而整行不可用/消失);
+ *  AirPlay 设备档案持久化,离线也仍留在列表里。
+ *
+ *  判据不在这里算,统一问 `playTarget.checkPlayTarget()`(单一真相源,播放层的
+ *  QueueController 起播前查的是**同一个**函数):组 = 有没有在线成员;
+ *  AirPlay = discovery 的 available;dlna/sendspin 乐观放行。
+ *
+ *  🔴 判为「未就绪」时音流**继续等待**(并持续催发现),而不是把内容投进不可播的目标 ——
+ *  投进去的后果不是「静默不播」,而是 QueueController 反复 cast 失败 →
+ *  `castFailStreak++` + `handleDecision("stalled")` 自我续 loop → **边失败边切歌**:
+ *  2026-09-25 真机实测,组零成员 + 大歌单,6 分钟空转 787 次 `无在线成员,无法播放`,
+ *  idx 从 293 被一路推到 49(视感 = 疯狂切歌)。这违背「没播放器在线就不开始播放」的
+ *  长久行为,故在此拦死(等待到有 ≥1 个在线才继续)。 */
+function isTargetReady(pid: string): boolean {
+  return checkPlayTarget(pid).playable;
+}
+
 /**
  * 异步执行一条音流。同一时间同一流程只允许一个运行实例(重复触发直接跳过)。
  * 执行过程:
@@ -235,16 +354,17 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
   const intervalMs = Math.max(2, Math.min(60, def.scanIntervalSec || 5)) * 1000;
   const deadline = def.waitTimeoutSec > 0 ? Date.now() + def.waitTimeoutSec * 1000 : 0;
   let online: string[] = [];
+  wakeLogged = false; // 本次执行的首轮唤醒打 info,之后降 debug
   while (true) {
     try { await refreshDevices(); } catch { /* 扫描失败下一轮重试 */ }
+    // 主动催一次 sendspin / airplay 的发现(见上方 wakeTargets 注释):
+    // 这两类设备的 peer 不靠 refreshDevices 更新,不催的话等待窗口内根本看不见它们。
+    await wakeTargets(declaredTargets, flow.name);
     // 目标解析:本机播放器对外只有 local:<userId>(临时端 ID 不外露),这里按该用户
     // 已注册的客户端实例解析成真实 peerId;客户端还没连上时保留原样下一轮再试。
     online = [...declaredTargets]
       .map((pid) => pm.resolveVisiblePeerId(pid))
-      .filter((pid) => {
-        const p = pm.get(pid);
-        return p && p.available;
-      });
+      .filter((pid) => isTargetReady(pid));
     if (online.length > 0) break;
     if (deadline > 0 && Date.now() >= deadline) break;
     await sleep(intervalMs);
@@ -273,7 +393,7 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
         }
         case "target": {
           for (const pid of node.targets || []) {
-            if (!activeTargets.has(pid) && pm.get(pid)?.available) activeTargets.add(pid);
+            if (!activeTargets.has(pid) && isTargetReady(pid)) activeTargets.add(pid);
           }
           break;
         }

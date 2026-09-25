@@ -16,6 +16,7 @@ import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
 import { createGroupProtocolPlayer, getGroupStatus, hasOnlineMember } from "../group/protocolPlayer.js";
+import { checkPlayTarget } from "../playTarget.js";
 import { getGroupManager } from "../group/index.js";
 import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
@@ -809,6 +810,25 @@ export class QueueController extends EventEmitter {
     const ctrl = this.ctrls.get(deviceId);
     if (!q || !player || !ctrl) return;
 
+    // ── 硬限制:**目标没有在线播放器,就不开始播放** ───────────────────────
+    // 定稿 2026-09-25(用户):这是长久以来的既有行为,判据由 playTarget.checkPlayTarget
+    // 单点给出(群组=组内无在线成员;AirPlay=设备不在线;dlna/sendspin 乐观放行)。
+    //   • **不起播**:连 cast 都不发(playMedia 里那条「无在线成员」throw 是第二道保险);
+    //   • **不推进队列**:绝不能落到下面的 cast 失败分支 —— 那条路会 castFailStreak++
+    //     并把每一拍交给 handleDecision("stalled")(放行切歌)⇒ 整队被反复失败推着走完。
+    //     2026-09-25 真机:组零成员 + 大歌单,6 分钟空转 787 次 `无在线成员,无法播放`,
+    //     idx 从 293 一路被推到 49(视感 = 疯狂切歌);
+    //   • **不计失败**:队列保持 isActive「悬挂」,成员/设备回归后由 group watchdog 的
+    //     resumeActive 重新投递(见 group/watchdog.ts 的悬挂→恢复)。
+    // deviceId 是裸 id(QueueController 全程用裸 id 作 key,见 stripPlayerPrefix 注释)。
+    {
+      const chk = checkPlayTarget(deviceId);
+      if (!chk.playable) {
+        log.info(`[QueueController][playCurrent] ${deviceId}: ${chk.reason},不开始播放(等设备回归)`);
+        return;
+      }
+    }
+
     // ==================== 不可播裁决 + 跳过循环 ====================
     //
     // **2026-09-11 拍板:留队列跳过,不再摘除。**
@@ -894,6 +914,19 @@ export class QueueController extends EventEmitter {
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);
+      // 竞态兜底(2026-09-25):起播前的硬限制判据过关、但 cast 期间成员掉光/设备掉线 ⇒
+      // 这**不是**「投不出去」,而是「现在没人可投」。必须在这里再问一次同一个判据并挂起:
+      // 若落到下面的失败分支,castFailStreak 会一路累加到 2×曲数、每拍还放行一次切歌,
+      // 整队空转消耗掉(真机实测 6 分钟 787 次)。同时清掉已累积的失败链,
+      // 免得设备刚回归就被「整队投不出去」挡住。
+      {
+        const chk = checkPlayTarget(deviceId);
+        if (!chk.playable) {
+          this.castFailStreak.delete(deviceId);
+          log.info(`[QueueController][playCurrent] ${playerId}: ${chk.reason}(cast 期间掉线),不推进`);
+          return;
+        }
+      }
       // cast 失败**不能静默**:endOptimistic 关掉了乐观窗口的兜底,若这里什么都不做,
       // 这首既不会重投也不会切歌 —— 队列就此停死(设备瞬时离线时表现为"再也不播了")。
       // 先按「一整圈」封顶:stallCounters 允许每首 2 次重投,故连续失败上限取 2×曲数,

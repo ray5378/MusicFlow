@@ -461,6 +461,10 @@ export const sendspinDeviceState = sqliteTable("sendspin_device_state", {
   esphomePsk: text("esphome_psk").notNull().default(""),
   /** 6053 端口,0 = 用缺省 6053。 */
   esphomePort: integer("esphome_port").notNull().default(0),
+  /** 设备最后一次出现时的 host(IP)。设备会换 DHCP 而 clientId 不变,故这只是
+   *  「这台 host 现在是谁」的近似 —— 供拨号守卫判断该 host 是否属于**被禁用**的
+   *  设备(误判的代价 = 少拨一次,绝不会连错设备)。 */
+  lastHost: text("last_host").notNull().default(""),
   updatedAt: text("updated_at").default(""),
 });
 

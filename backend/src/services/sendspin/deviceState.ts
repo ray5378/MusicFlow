@@ -213,6 +213,52 @@ export function listEsphomeCreds(): { clientId: string; psk: string; port: numbe
 
 /** 写某设备禁用态(按字段合并,不动 volume/muted)。
  *  与 `saveDeviceVolumeState` 同款 UPSERT:无行则补一行(volume/muted 取缺省)。 */
+/** 记下设备最后一次出现的 host。设备会换 DHCP、clientId 不会 —— 这个映射只作
+ *  拨号守卫的近似依据(见 isHostOfDisabledDevice),不参与任何播放决策。
+ *  子进程(设备连上时)写、主进程(discover / 音流)读,同一个 DB 文件(WAL 多进程安全)。
+ *  只更新 last_host,**不动 disabled**(否则会把用户设的禁用态抹掉)。 */
+export function saveDeviceHost(clientId: string, host: string): void {
+  try {
+    if (!clientId || !host) return;
+    const cur = getDeviceVolumeState(clientId);
+    sqlite
+      .prepare(
+        `INSERT INTO sendspin_device_state (client_id, volume, muted, disabled, last_host, updated_at)
+         VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(client_id) DO UPDATE SET
+         last_host = excluded.last_host, updated_at = excluded.updated_at`,
+      )
+      .run(
+        clientId,
+        cur?.volume ?? 100,
+        (cur?.muted ?? false) ? 1 : 0,
+        host,
+        new Date().toISOString(),
+      );
+  } catch (e: any) {
+    log.warn(`[device-state] 写 host ${clientId} 失败: ${e?.message || e}`);
+  }
+}
+
+/** 该 host 是否属于**被用户禁用**的设备 —— 自动发现/拨号的守卫。
+ *
+ *  为什么要:用户禁用一台设备后它仍在广播 mDNS,自动发现(或音流的名单补枪)
+ *  会按 host:port 又把它拨回来 —— 那条路只有地址,拿不到 clientId。
+ *  这里用「最近一次已知 host」做近似:换过 IP 的设备查不到 ⇒ 放行(宁可多拨一次;
+ *  连上后 registerServerPlayer 会因 disabled 不注册 peer,功能仍然正确,并且会
+ *  顺带刷新 last_host,下一轮就不再拨它了)。 */
+export function isHostOfDisabledDevice(host: string): boolean {
+  try {
+    if (!host) return false;
+    const row = sqlite
+      .prepare("SELECT 1 AS hit FROM sendspin_device_state WHERE disabled = 1 AND last_host = ? LIMIT 1")
+      .get(host) as any;
+    return !!row;
+  } catch (e: any) {
+    log.warn(`[device-state] 查禁用 host ${host} 失败: ${e?.message || e}`);
+    return false;
+  }
+}
+
 export function saveDeviceDisabled(clientId: string, disabled: boolean): void {
   try {
     if (!clientId) return;

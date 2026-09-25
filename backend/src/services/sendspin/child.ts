@@ -39,7 +39,7 @@ let controller: SendspinChildController | null = null;
 async function main(): Promise<void> {
   const { startSendspinInProcess, stopSendspinInProcess } = await import("./index.js");
   const { esphomeBridge } = await import("./esphomeBridge.js");
-  const { getDeviceEsphome } = await import("./deviceState.js");
+  const { getDeviceEsphome, saveDeviceHost } = await import("./deviceState.js");
   const { SendspinChildController } = await import("./childMain.js");
 
   controller = new SendspinChildController(
@@ -59,6 +59,11 @@ async function main(): Promise<void> {
         return getDeviceEsphome(conn.clientId);
       })();
       esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
+      // 记下这台设备这次的 host。fork 模式下主进程只从 IPC 拿到 clientId(见
+      // SendspinChildEvent),host 只有这里能拿到 —— 而拨号守卫(自动发现 / 音流名单补枪)
+      // 恰恰只有 host:port,得靠这层映射才能拦住「被禁用的设备又被拨回来」。
+      // 子进程直写 DB 与主进程读同一文件(WAL 多进程安全,与上面的 6053 凭据同模式)。
+      if (conn.clientId) saveDeviceHost(conn.clientId, conn.remoteHost);
       if (conn.clientId) {
         send({
           t: "activated",

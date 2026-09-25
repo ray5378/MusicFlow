@@ -569,6 +569,10 @@ export function initDatabase() {
       disabled INTEGER NOT NULL DEFAULT 0,
       esphome_psk TEXT NOT NULL DEFAULT '',
       esphome_port INTEGER NOT NULL DEFAULT 0,
+      -- 设备最后一次出现时的 host(IP)。拨号守卫靠它拦「被禁用的设备被自动发现
+      -- 又拨回来」——发现那条路只有 host:port、拿不到 clientId,只能靠这层映射;
+      -- 换过 DHCP 的设备查不到即放行(连上后 disabled 判定仍会挡住 peer 注册)。
+      last_host TEXT NOT NULL DEFAULT '',
       updated_at TEXT DEFAULT ''
     );
     -- 内部 ffmpeg 回环取流凭证(见 services/dlna/control.ts)。

@@ -30,7 +30,7 @@ import {
   PREFILL_BUFFER_DEFAULT_MS,
 } from "./streamEngine.js";
 import { advertiseSendspinServer, unadvertiseSendspinServer } from "./advertise.js";
-import { startPlayerDiscovery, stopPlayerDiscovery } from "./discover.js";
+import { startPlayerDiscovery, stopPlayerDiscovery, refreshPlayerDiscoveryNow } from "./discover.js";
 import {
   esphomeBridge,
   type EsphomeWriteResult,
@@ -118,7 +118,10 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   // 禁用设备不出现在任何流转播放入口;解除禁用后重连即自动回来。
   let disabled = false;
   try {
-    const { getDeviceDisabled } = await import("./deviceState.js");
+    const { getDeviceDisabled, saveDeviceHost } = await import("./deviceState.js");
+    // 记下这台设备这次的 host:拨号守卫靠它拦「被禁用的设备又被自动发现拨回来」
+    // (发现那条路只有 host:port,拿不到 clientId —— 见 isHostOfDisabledDevice)。
+    saveDeviceHost(conn.clientId, conn.remoteHost);
     disabled = getDeviceDisabled(conn.clientId);
   } catch { /* 读禁用态失败按启用处理,不阻断设备上线 */ }
   if (disabled) {
@@ -887,6 +890,15 @@ export async function armDialTarget(host: string, port: number, src = "signal"):
     return false;
   }
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return false;
+  // 守卫:该 host 属于**被用户禁用**的设备 → 不拨(禁用 = 别再自动连它)。
+  // 拦在这里是因为**所有拨号来源都过这个函数**:自动发现 / 音流名单补枪 / 手工 dial。
+  try {
+    const { isHostOfDisabledDevice } = await import("./deviceState.js");
+    if (isHostOfDisabledDevice(host)) {
+      log.debug(`armDialTarget: ${host}:${port} 属于已禁用设备,跳过 (${src})`);
+      return false;
+    }
+  } catch { /* 读不到禁用态 → 按未禁用处理,不阻断拨号 */ }
   const key = `${host}:${port}`;
   if (srv.isRedialSuppressed(host, port)) return false;
   if (srv.isConnectedTo(host, port)) {
@@ -901,6 +913,66 @@ export async function armDialTarget(host: string, port: number, src = "signal"):
   log.info(`sendspin 重试窗口开启(${src}): ${key} —— 2s×30 → 10s×24,共 ${Math.round(RETRY_WINDOW_MS / 1000)}s`);
   redialTick(); // 立即首拨,不等下一个 tick
   return true;
+}
+
+/** wakeSendspinDiscovery() 的结果。 */
+export interface WakeResult {
+  /** 本次真的重发了 `_sendspin._tcp` PTR 查询(false = 被节流 / 发现未启动)。 */
+  rescanned: boolean;
+  /** 本次新开重试窗口的目标(key 形如 `host:port`)。 */
+  rearmed: string[];
+}
+
+/** 唤醒自动发现的**实际执行体**。
+ *
+ *  ⚠️ **必须在持有 sendspin 运行时的进程内调用**(fork 下的 sendspin 子进程 / in-proc
+ *  装配 / 单测)。本包内 `refreshPlayerDiscoveryNow` 读的是 discover 模块内的 `serving`,
+ *  `armDialTarget` 读的是 `runtime.getServer()` —— 两者都是**进程内单例**,只在
+ *  startPlayerDiscovery() 执行过的那个进程里有值。主进程在 fork 模式下两者皆空 ⇒
+ *  直调只会**静默空转**(前者返回 false 且不打日志,后者打一行 warn)。
+ *  外部调用方一律走 wakeSendspinDiscovery(),不要直接调本函数。 */
+export async function wakeDiscoveryCore(): Promise<WakeResult> {
+  const srv = getServer();
+  if (!srv) return { rescanned: false, rearmed: [] };
+  // ① 立刻重建 browser(= 马上重发一次 `_sendspin._tcp` PTR 查询,默认 5s 节流)。
+  //    覆盖「设备开机只广播一次、而我们恰好错过了那一次」:新 browser 的 _services
+  //    为空 ⇒ 在线设备会重新 emit up ⇒ discover.onPlayerSeen 重新入册 + 开窗。
+  let rescanned = false;
+  try { rescanned = refreshPlayerDiscoveryNow(); } catch { /* 发现未启动 → 视为没重扫 */ }
+  // ② 名单补枪:对 dial_targets.json 里「已知但当前不在线」的目标补开一个重试窗口。
+  //    覆盖「设备在线、但 mDNS 长期静默」的边缘 —— 名单里存着 host,不必等发现。
+  const rearmed: string[] = [];
+  for (const t of await listDialTargets()) {
+    try {
+      if (srv.isConnectedTo(t.host, t.port)) continue;
+      if (await armDialTarget(t.host, t.port, "flow")) rearmed.push(`${t.host}:${t.port}`);
+    } catch { /* 单台失败不拖累其余 */ }
+  }
+  return { rescanned, rearmed };
+}
+
+/** 唤醒自动发现的**唯一对外入口**(音流等待阶段调用)。
+ *
+ *  分派:fork 模式 → RPC 到 sendspin 子进程执行(发现循环与重试状态机都活在那里);
+ *  in-proc 模式(单测 / MUSICFLOW_SENDSPIN_INPROC=1)→ 当前进程直跑。
+ *
+ *  🔴 2026-09-25 实测教训:音流引擎跑在**主进程**,最初直调 refreshPlayerDiscoveryNow
+ *  + armDialTarget,在生产(fork)下 **100% 空转** —— 日志里只有
+ *  `armDialTarget: sendspin 服务未运行`(且返回 false,导致音流侧连「重扫」记录都攒不出),
+ *  而 refreshPlayerDiscoveryNow 连日志都不打,更难发现。凡是操作 sendspin 运行时状态的
+ *  命令,都必须像本函数这样按 isForkMode() 分派(与 esphomeSync / disconnect 同惯例)。
+ *
+ *  守卫(插件启用 / autoDiscover)收在这里:poll 式调用方再多也不会绕过配置。 */
+export async function wakeSendspinDiscovery(): Promise<WakeResult> {
+  try {
+    if (!isSendspinEnabled()) return { rescanned: false, rearmed: [] };
+    if (!readSendspinPluginConfig().autoDiscover) return { rescanned: false, rearmed: [] };
+  } catch { return { rescanned: false, rearmed: [] }; }
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return { rescanned: false, rearmed: [] };
+    return await sendspinSupervisor.rpc<WakeResult>("wakeDiscovery", {}, 20_000);
+  }
+  return wakeDiscoveryCore();
 }
 
 /** 取消某目标的重试窗口(手动 forget / 已连上时用)。 */

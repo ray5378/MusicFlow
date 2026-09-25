@@ -26,6 +26,7 @@
 //    ⚠️ 单纯调 `browser.update()` **无效**(响应照样落进 existingService 分支)。
 import type { SendspinServer } from "./server.js";
 import { getSharedBonjour } from "../discovery/mdns.js";
+import { isHostOfDisabledDevice } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("sendspin-discover");
@@ -38,6 +39,8 @@ const BROWSER_REFRESH_MS = 60_000;
 let browser: any = null;
 let serving: SendspinServer | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+/** 上次重建 browser 的时间戳(供 refreshPlayerDiscoveryNow 节流)。 */
+let lastOpenAt = 0;
 
 /** 启动播放器发现(幂等)。服务停止时必须调 stopPlayerDiscovery()。 */
 export function startPlayerDiscovery(srv: SendspinServer): void {
@@ -65,6 +68,22 @@ export function stopPlayerDiscovery(): void {
   browser = null;
 }
 
+/** 立即重建 browser(= 马上重发一次 `_sendspin._tcp` PTR 查询),不等 60s 周期。
+ *
+ *  用途:音流的等待阶段需要**主动催**一次发现 —— sendspin 的 peer 只在设备
+ *  **已连上**时才注册(见 peer.ts `registerSendspin`),而音流的等待窗口
+ *  (`waitTimeoutSec`,常见 30~60s)往往短于这里 60s 的重建周期 ⇒ 不主动催的话,
+ *  音流会一直等到 timeout 也看不见这台设备。
+ *  节流 `minGapMs`(默认 5s):太密的重复查询没意义,还白占 mDNS 带宽。
+ *  返回 true = 本次真的重建了;false = 发现未启动 或 距上次不足 minGapMs。 */
+export function refreshPlayerDiscoveryNow(minGapMs = 5_000): boolean {
+  if (!serving) return false;
+  const now = Date.now();
+  if (now - lastOpenAt < minGapMs) return false;
+  openBrowser();
+  return true;
+}
+
 /** 开一个全新的 Browser 实例(= 重发一次 PTR 查询)。旧实例直接丢弃:
  *  `stop()` 只摘监听、不清 `_services`,而**新实例的 `_services` 是空的** —— 这正是
  *  让在线设备重新触发 `up` 的关键。 */
@@ -80,6 +99,7 @@ function openBrowser(): void {
       if (serving !== s) return; // 重建/停止期间的迟到回调:丢弃
       void onPlayerSeen(s, svc).catch((e) => log.warn("auto-dial failed", { err: (e as Error)?.message || e }));
     });
+    lastOpenAt = Date.now();
     // 每 60s 一行的 debug(LOG_LEVEL=debug 才可见)。不再每轮 info,免得刷屏;
     // 需要肉眼确认「周期重查在跑」时抓 240→224.0.0.251 的 PTR 查询即可。
     log.debug("rebuilt _sendspin._tcp browser(周期重查)");
@@ -108,6 +128,9 @@ async function onPlayerSeen(srv: SendspinServer, svc: any): Promise<void> {
   const port = Number((svc as any)?.port);
   const host = pickIPv4(svc);
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return;
+  // 已禁用设备不再拨回(禁用 = 别再自动连它)。放最前,省掉后面一整串动作;
+  // 判定按「最近一次已知 host」做,详见 deviceState.isHostOfDisabledDevice。
+  if (isHostOfDisabledDevice(host)) return;
   // 设备明确拒绝过(another_server 等)且仍在抑制期内:不再骚扰(与手工 dial 同口径)。
   if (srv.isRedialSuppressed(host, port)) return;
   // 已在线不重复拨:拨出的按 host:port、拨入的按 host(端口未知),两路都算在线。

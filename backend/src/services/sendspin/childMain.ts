@@ -209,6 +209,13 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         srv?.clearNoRedial(String(p.host), Number(p.port));
         return null;
       }
+      case "wakeDiscovery": {
+        // 音流等待阶段主动催一次自动发现(重建 browser + 名单补枪)。实现与 in-proc
+        // 路径共用 index.ts 的同一个核心 —— 主进程直调那两个函数在 fork 下是空转的
+        // (见 index.ts wakeSendspinDiscovery 的注释),必须走这条 RPC。
+        const { wakeDiscoveryCore } = await import("./index.js");
+        return wakeDiscoveryCore();
+      }
       case "dialList":
         return this.dialTargets();
       case "dialRemember":
