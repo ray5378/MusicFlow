@@ -76,6 +76,7 @@ import { startSendspinService, stopSendspinService, getSendspinFront, sendspinGr
 import { sendspinGroupName } from "../../services/sendspin/playerCore.js";
 import { getSendspinDeviceVolume } from "../../services/sendspin/peerVolume.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
+import { runPlaylistAutoMatch } from "../../services/playlist/autoMatch.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
@@ -4637,6 +4638,17 @@ apiRoutes.post("/v1/play", async (c) => {
     else pm.localSetPlayMode(peerId, mode);
   }
   const snap = isCastPeer(parsed) ? getQueueManager().snapshot(parsed.id) : null;
+  // 起播成功后再 fire-and-forget 做一次「歌单自动匹配 + 补齐」:
+  // 播歌单时,此前匹配不上(门禁拦下/在线源下架)的条目会被重新搜一次,命中的追加到队尾。
+  // 刻意 **不等** —— 它会去抢全局批量闸(可能被全库扫描占住),而播放已经开始,
+  // 补不补都影响不到正在听的那一首(2026-09-25 收敛)。
+  if (type === "playlist") {
+    void runPlaylistAutoMatch(id, {
+      playerId: isCastPeer(parsed) ? parsed.id : peerId,
+      contentContext: `playlist:${id}`,
+      baseUrl,
+    }).catch((e: any) => console.warn(`[auto-match] ${id} 触发失败: ${e?.message || e}`));
+  }
   return c.json({
     // 回执里的 peerId 必须是**对外形式**:local 的真实行带着 clientId,直接回显会把它
     // 泄给调用方(设计约束:clientId 永不出服务端)。cast peer 的 id 无此问题,原样返回。

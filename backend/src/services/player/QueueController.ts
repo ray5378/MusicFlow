@@ -41,6 +41,17 @@ interface QueueData {
   playMode: PlayMode;
   isActive: boolean;
   ended: boolean;  // 对照 MA mark_ended
+  /** **内容来源标记**(纯内存,不持久化),形如 `playlist:<playlistId>`。
+   *
+   *  由起播入口在播「歌单/专辑/艺人」等内容时写入,播单曲 / 清空时置空。
+   *  用途:播放触发的后台自动匹配(runPlaylistAutoMatch)跑完后,据此**精确**判断
+   *  「这条队列还是刚才那个歌单吗」,再决定能否把新匹配到的曲目追加到队尾。
+   *
+   *  为什么必须在内存里记而不是查库:三张队列表(device_queues / group_queues /
+   *  local_queues)**都没有来源字段**,服务端无法从数据侧确证队列归属;而靠
+   *  「队列长度 + 首曲 id」快照去猜会误判(用户中途加一首就对不上;两个同长度的
+   *  歌单还会撞车)。内存标记则天然精确,且**进程重启即失效 = 绝不补错队列**。 */
+  contentContext?: string;
   /** 洗牌序(一轮内不重复的队列 index 序列)与位置;随队列重建,不持久化。
    *  与 web 端播放器(v1.7.43 洗牌序)语义对齐:随机播放 = 固定序列一轮不重复。 */
   shuffleOrder?: number[];
@@ -945,8 +956,10 @@ export class QueueController extends EventEmitter {
   }
 
   // ==================== 公共 API(供路由调用,保持原 QueueManager 形状)====================
-  /** 仅设数据,不触发播放(供测试 + playFrom 复用)。 */
-  setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string): void {
+  /** 仅设数据,不触发播放(供测试 + playFrom 复用)。
+   *  `contentContext` 可选:不传表示**清空**来源(点播单曲等无来源队列),
+   *  播放触发的后台自动匹配据此跳过补齐。 */
+  setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string, contentContext?: string): void {
     playerId = stripPlayerPrefix(playerId);
     // 整队替换 → 旧队列上的 flow 会话作废（它的曲目列表已经不是这条队列了）。
     this.flowOwned.delete(playerId);
@@ -954,6 +967,7 @@ export class QueueController extends EventEmitter {
     this.castFailStreak.delete(playerId);
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
+    q.contentContext = contentContext ?? undefined;
     q.items = items;
     q.currentIndex = Math.max(-1, Math.min(items.length - 1, startIndex));
     if (q.playMode === "shuffle" && items.length > 1) this.rebuildShuffle(q, { keepCurrent: true });
@@ -964,6 +978,13 @@ export class QueueController extends EventEmitter {
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     this.schedulePreProbe(playerId);
+  }
+
+  /** 读队列的**内容来源标记**(无则 undefined)。
+   *  播放触发的后台自动匹配(runPlaylistAutoMatch)据此判断「这条队列还是刚才那个
+   *  歌单吗」——只有标记一致才允许把新匹配到的曲目补进队尾,避免补错队列。 */
+  getContentContext(playerId: string): string | undefined {
+    return this.queues.get(stripPlayerPrefix(playerId))?.contentContext;
   }
 
   /**
@@ -995,6 +1016,7 @@ export class QueueController extends EventEmitter {
     items: QueueItem[],
     startIndex: number | null | undefined,
     baseUrl: string,
+    contentContext?: string,
   ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
@@ -1006,7 +1028,7 @@ export class QueueController extends EventEmitter {
       : mode === "shuffle" && items.length > 1
         ? Math.floor(Math.random() * items.length)
         : 0;
-    this.setQueue(playerId, items, idx, baseUrl);
+    this.setQueue(playerId, items, idx, baseUrl, contentContext);
     if (!this.advancing.has(playerId)) {
       this.advancing.add(playerId);
       try { await this.playCurrent(playerId, baseUrl); }

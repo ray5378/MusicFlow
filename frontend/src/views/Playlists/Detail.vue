@@ -91,7 +91,7 @@ import { waitAsyncTask } from "@/utils/asyncTask";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
 import { useInfiniteList } from "@/composables/useInfiniteList";
-import { usePlayContent } from "@/composables/usePlayContent";
+import { usePlayContent, isAutoMatchThrottled, markAutoMatch } from "@/composables/usePlayContent";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 import { Trash2 } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
@@ -185,30 +185,44 @@ async function playSong(song: any) {
 //
 // 注意：匹配回来的歌排在队尾而非原位（与旧实现 [...playable, ...matched] 一致）。
 // 投屏起播用 songId 身份定位，两侧顺序不一致也不会播错歌，故无需插回原位。
+/**
+ * 「播放全部」= **先起播，再静默补齐**。
+ *
+ * 1. 立刻用当前可播曲目建队（零等待 —— 匹配要跑几十秒，绝不能挡在这前面）；
+ * 2. 后台静默跑一次歌单批量匹配（silent：不弹进度对话框，只 toast 结果）；
+ * 3. 新匹配的曲目追加到队尾，然后刷新列表。
+ *
+ * 注意**不要把新曲目插回它在歌单里的原位置**：它的 position 在歌单中间，而本机队列
+ * 一旦追加过就与歌单序不一致；投屏时服务端按 songId 定位，插位置反而没有追加稳。
+ */
 async function playAll() {
   const id = String(route.params.id);
-  const { playable, unmatched } = await fetchPlaylistTracks(id);
+  const { playable } = await fetchPlaylistTracks(id);
+  // 起播前先留一份「已在播的曲目」名单，补齐时据此剔除重复。
+  const before = new Set(playable.map((s: any) => s.id));
 
   // ② 先起播能播的（队列空则不调，避免用空队列覆盖当前播放）
   if (playable.length > 0) playWholeContent("playlist", id, playable);
 
-  if (unmatched.length === 0) {
-    if (playable.length === 0) ElMessage.warning(t("playlists.noPlayableTrack"));
-    return;
-  }
-
-  // ③ 现场匹配：需要在线源。首块响应可能还没把 onlineSourceId 填上，这里显式等待。
+  // ③ 自动匹配：**所有歌单都试一次**，不再只看「当前有没有未匹配行」——
+  //    历史被门禁拦下的曲目，可能后来在线源又有了，这里就是自愈入口。
+  //    首块响应可能还没把 onlineSourceId 填上，故显式等一次。
   await loadOnlineSource();
   if (!onlineSourceId.value) {
     if (playable.length === 0) ElMessage.warning(t("playlists.noOnlineSourceTrack"));
     return;
   }
-  const before = new Set(playable.map((s: any) => s.id));
-  await runMatchJob();
+  // 24h 节流：同一歌单半天内只自动匹配一轮（防连点把在线源打成 429）。
+  if (isAutoMatchThrottled(id)) {
+    if (playable.length === 0) ElMessage.warning(t("playlists.noPlayableTrack"));
+    return;
+  }
+  markAutoMatch(id);
+  await runMatchJob({ silent: true });
   // 页面已卸载（轮询被 onUnmounted 中止）→ 不再补队，避免污染队列
   if (matchPollCancelled) return;
 
-  // ④ 补齐：只追加本次新匹配到的曲目（避免重复入队已在播的那些）
+  // ④ 补齐：只追加本次新出现的曲目（避免重复入队已在播的那些）
   const after = await fetchPlaylistTracks(id);
   const added = after.playable.filter((s: any) => !before.has(s.id));
   if (added.length > 0) {
@@ -275,10 +289,18 @@ async function matchBeforePlay(unmatched: any[]) {
 
 // 跑一次「整单在线匹配」后台 job，期间用进度对话框展示，返回终态结果。
 // 两个调用方共用：① 手动点「在线匹配未匹配」；② playAll 起播后补齐。
-async function runMatchJob(): Promise<any> {
+/**
+ * 跑一次歌单批量匹配 job。
+ *
+ * `silent = true` 用于**播放触发的自动匹配**：用户只想听歌，不想被进度对话框挡住，
+ * 结果只在真补齐了曲目时用 toast 说一声。手动「批量匹配」按钮走 `silent = false`,
+ * 保留完整进度对话框。
+ */
+async function runMatchJob(opts: { silent?: boolean } = {}): Promise<any> {
   const pid = onlineSourceId.value;
   if (!pid) return null;
-  showMatchDialog.value = true;
+  const silent = !!opts.silent;
+  if (!silent) showMatchDialog.value = true;
   matchRunning.value = true;
   matchResult.value = null;
   matchDone.value = 0;
@@ -297,11 +319,11 @@ async function runMatchJob(): Promise<any> {
             try {
               const s = await api.get(`/rest/api/v1/online/${pid}/match-playlist/status`, { params: { jobId: res.data.jobId } });
               if (matchPollCancelled) { resolve(null); return; }
-              if (s.data?.progress) matchDone.value = s.data.progress.done || 0;
+              if (!silent && s.data?.progress) matchDone.value = s.data.progress.done || 0;
               if (s.data?.status === "completed" || s.data?.status === "failed") {
                 matchRunning.value = false;
-                matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
-                if (s.data.error) ElMessage.warning(s.data.error);
+                if (!silent) matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
+                if (!silent && s.data.error) ElMessage.warning(s.data.error);
                 resolve(matchResult.value);
                 return;
               }
@@ -313,19 +335,21 @@ async function runMatchJob(): Promise<any> {
         });
       } else {
         // 兼容同步返回（无 jobId）的旧响应
-        matchTotal.value = res.data.total || 0;
-        matchDone.value = matchTotal.value;
-        matchResult.value = res.data;
+        if (!silent) {
+          matchTotal.value = res.data.total || 0;
+          matchDone.value = matchTotal.value;
+          matchResult.value = res.data;
+        }
         matchRunning.value = false;
         result = res.data;
       }
     } else {
       matchRunning.value = false;
-      ElMessage.warning(res.data?.error || t("playlists.onlineSourceUnavailable"));
+      if (!silent) ElMessage.warning(res.data?.error || t("playlists.onlineSourceUnavailable"));
     }
   } catch (e: any) {
     matchRunning.value = false;
-    ElMessage.error(e.response?.data?.error || t("playlists.matchStartFailed"));
+    if (!silent) ElMessage.error(e.response?.data?.error || t("playlists.matchStartFailed"));
   } finally { matchingAll.value = false; }
   return result;
 }

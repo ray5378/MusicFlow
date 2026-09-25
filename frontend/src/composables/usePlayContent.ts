@@ -5,6 +5,29 @@ function sub(albumRes: any): any[] {
   return albumRes?.data?.["subsonic-response"]?.album?.song || [];
 }
 
+// ---- 歌单自动匹配节流（与后端 services/playlist/autoMatch.ts 的 TTL 对齐）----
+// 「播放全部」会顺带对歌单做一次在线自动匹配（让历史上被门禁拦下的曲目自愈）。
+// 同一歌单 24h 内只允许自动跑一次：反复点「播放全部」会连续打在线源（实测 71 条约
+// 91s，连点即 429）。手动「批量匹配」按钮不受此限制。
+const AUTO_MATCH_TTL_MS = 24 * 60 * 60 * 1000;
+const lastAutoMatchAt = new Map<string, number>();
+
+/** 该歌单是否处在自动匹配的节流窗口内。 */
+export function isAutoMatchThrottled(playlistId: string): boolean {
+  const at = lastAutoMatchAt.get(playlistId);
+  return !!at && Date.now() - at < AUTO_MATCH_TTL_MS;
+}
+
+/** 记下「刚自动匹配过」，开启下一轮 24h 节流窗口。 */
+export function markAutoMatch(playlistId: string): void {
+  lastAutoMatchAt.set(playlistId, Date.now());
+  if (lastAutoMatchAt.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of lastAutoMatchAt) if (now - v >= AUTO_MATCH_TTL_MS) lastAutoMatchAt.delete(k);
+    if (lastAutoMatchAt.size > 500) lastAutoMatchAt.clear();
+  }
+}
+
 /** `/v1/play` 的 type 取值（与后端 services/content.ts 一一对应）。 */
 type ContentType = "playlist" | "album" | "artist";
 

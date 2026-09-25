@@ -88,14 +88,32 @@ function hasStrippedLetters(s: string): boolean {
 // Per-playlist auto-match guard: only one background match at a time per playlist.
 const autoMatchLocks = new Set<string>();
 
+/** 一次后台自动匹配的战果统计(全部为 0 表示「无事可做」)。 */
+export interface AutoMatchStats {
+  total: number;
+  matched: number;
+  noMatch: number;
+  error: number;
+}
+
+const EMPTY_MATCH_STATS: AutoMatchStats = { total: 0, matched: 0, noMatch: 0, error: 0 };
+
 /** 后台自动匹配一张歌单的未匹配条目(playable=0 且 external_title 非空)。
  *
  *  共享宿主服务:导入歌单(rebuildPlaylistEntries 后)与外置插件歌单
  *  (discovery.upsertPluginPlaylist 写入后)都经此触发,避免两份近似逻辑漂移。
+ *  另有一路调用方:**播放触发的自动补齐**(services/playlist/autoMatch.ts,用户点
+ *  「播放全部」/ 投屏起播后 fire-and-forget),二者共用这里的能力挑选 / 锁 / 批量闸。
  *  能力驱动:autoMatch 能力优先,否则任意 search 能力插件兜底;每歌单内存锁防并发;
- *  失败不抛(调用方 fire-and-forget)。 */
-export async function matchPlaylistInBackground(playlistId: string): Promise<void> {
-  if (autoMatchLocks.has(playlistId)) return;
+ *  失败不抛(调用方 fire-and-forget)。
+ *
+ *  @returns 本轮战果;调用方(播放补齐链路)据此决定追加多少首到队尾。
+ *  @param onFinished 战果回调(在锁与批量闸释放**之后**触发),用于需要"跑完再说"的调用方。 */
+export async function matchPlaylistInBackground(
+  playlistId: string,
+  onFinished?: (stats: AutoMatchStats) => void,
+): Promise<AutoMatchStats> {
+  if (autoMatchLocks.has(playlistId)) return EMPTY_MATCH_STATS;
   autoMatchLocks.add(playlistId);
   // 全局批量闸:与插件任务(jobRunner)共用,全进程同时只跑 1 个批量任务,防叠加。
   // 动态 import 避免顶层环(shared → batchPacer → settings,settings 无回环,静态亦可;
@@ -105,12 +123,13 @@ export async function matchPlaylistInBackground(playlistId: string): Promise<voi
   // P2:排队时间不计入匹配耗时——started 在拿到全局批量闸之后才记录,
   // 日志里的 in Xs 只反映真实匹配开销,不含等待队列的时长。
   const started = Date.now();
+  let stats: AutoMatchStats = EMPTY_MATCH_STATS;
   try {
     const matcher = firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search");
-    if (!matcher) return; // no capable plugin enabled -> nothing to do
+    if (!matcher) return stats; // no capable plugin enabled -> nothing to do
     const config = getPluginConfig(matcher.manifest.id);
-    if (!config) return; // plugin disabled between lookup and read
-    if (typeof matcher.impl?.search !== "function") return; // can't actually match
+    if (!config) return stats; // plugin disabled between lookup and read
+    if (typeof matcher.impl?.search !== "function") return stats; // can't actually match
 
     // P1:匹配进度经 WS 广播(限频 1s),前端可显示「后台匹配中 x/y」而非"卡死"。
     // 动态 import 解环:shared → ws → dlna → online → builtins → shared 会成环。
@@ -130,14 +149,22 @@ export async function matchPlaylistInBackground(playlistId: string): Promise<voi
         ws.broadcastToClients({ type: "match_progress", playlistId, done, total });
       },
     );
+    stats = {
+      total: result.total,
+      matched: result.matched,
+      noMatch: result.noMatch,
+      error: result.error,
+    };
     if (result.total > 0) {
       console.log(
         `[auto-match] ${playlistId}: ${result.matched} matched, ${result.noMatch} no-match, ${result.error} errors in ${((Date.now() - started) / 1000).toFixed(1)}s`,
       );
     }
+    return stats;
   } finally {
     autoMatchLocks.delete(playlistId);
     release(); // 释放全局批量闸
+    onFinished?.(stats);
   }
 }
 
