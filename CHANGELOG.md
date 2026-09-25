@@ -2,6 +2,42 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.27] - 2026-09-25
+
+### 修复：Sendspin 设备断电重上电后不自动连回，连回后也要切歌才出声
+
+- **现象**：Sendspin 播放器（ESPHome / ESP32）断电再上电后服务端不会自动连回来（设备同网段可 ping 通、
+  本身也起好了 WS server）；人工连上后同样不出声 —— 要等到下一次切歌才正常播放。
+- **根因**：四层叠加。
+  - **发现是一次性的**：设备开机只广播一次 mDNS，而 `bonjour-service` 的 PTR 查询只发起一次、
+    对已知 fqdn **永久去重**、`expire()` 从不调用 —— 首次拨号失败（设备网卡刚起、IP 栈未通，
+    实测 `EHOSTUNREACH`）之后，这台设备就再也没有第二次机会。
+  - **重试不记忆**：旧逻辑是 60s 盲轮询，容器重启后不再尝试，断电设备永不被重新 `arm`。
+  - **死链不摘牌**：断连留下的 WS 连接无心跳、未启 `SO_KEEPALIVE`，内核默认 15 分钟才判死，
+    期间服务端仍认为「已在线」—— 新广播被在线判据直接跳过，任何重试方案都不会被触发。
+  - **新连接不入组**：组推流的成员是 `SendspinGroup.members` 里的 **conn 对象**，断连时
+    `onConnectionClosed` 会 `g.remove(conn)`；重连是**新 conn**，不在任何组里，只有下一次切歌的
+    `playGroupCore` 才会 `g.add(conn)` —— 夹在中间的窗口拿不到 `stream/start`，
+    设备收得到 TCP 数据却无声。
+- **修复**（`backend/src/services/sendspin/`）：
+  - `discover.ts`：发现即入册（先记后拨）+ **每 60s 重建 mDNS browser**，重新捕获设备广播；
+  - `index.ts`：per-target 重试状态机取代 60s 盲轮询 —— `2s × 30 → 10s × 24`（300s 窗口后停手，
+    兜底职责交给 mDNS 信号源），拨号显式 5s 超时，窗口内不因新信号重置计时起点；
+    **上线自动回组**：连接就绪后对「本组正在播」的组走 `sendspinGroupJoin` ——
+    与「加入群组」同一条 `joinGroupCore` 路径（live 沿加入 + `pendingAnnounces` 兑现
+    `stream/start` + `seedLateJoin` 回填）；
+  - `server.ts`：10s WS 心跳（未回 pong 即 terminate）+ `noAutoRedial` 加 5min TTL +
+    在线判据兼顾 inbound 方向。
+
+### 真机验收（240 + ESPHome ESP32-S3，三轮受控复现）
+
+- 断电量 >300s（重试窗口**已过期**、状态机零动作）后上电：mDNS 发现重新触发窗口
+  （日志前缀 `(discover)`，区别于容器 boot 的 `(boot)`）→ 首次拨号 `EHOSTUNREACH` →
+  **55s 后拨通** → `设备上线自动回组 … joined=true live=true pump=true` →
+  `late-join 回填 chunks=288 span=24576ms` → 切歌时与在播成员**成对**收到
+  `finishPlayback` + `announceStream ×2`。
+- 结论：断电上电后自动连回并**直接出声**，全程零人工干预、无需切歌（用户实听确认）。
+
 ## [4.0.26] - 2026-09-25
 
 ### 功能：新增歌单自动匹配触发端点（供客户端 / 播放器调用）
