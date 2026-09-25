@@ -94,6 +94,9 @@ export interface AutoMatchStats {
   matched: number;
   noMatch: number;
   error: number;
+  /** true = 本歌单上一轮还在跑,本轮被每歌单并发锁直接挡下(什么都没做)。
+   *  调用方据此判断这是「空跑」,不应消耗任何节流额度/记录。 */
+  concurrencySkipped?: boolean;
 }
 
 const EMPTY_MATCH_STATS: AutoMatchStats = { total: 0, matched: 0, noMatch: 0, error: 0 };
@@ -113,7 +116,9 @@ export async function matchPlaylistInBackground(
   playlistId: string,
   onFinished?: (stats: AutoMatchStats) => void,
 ): Promise<AutoMatchStats> {
-  if (autoMatchLocks.has(playlistId)) return EMPTY_MATCH_STATS;
+  // 上一轮还在跑 —— 直接返回空战果,但标记为「并发空跑」,让调用方能区别于
+  // 「真的跑完但一首都没匹配上」这两种 totally 不同的语义。
+  if (autoMatchLocks.has(playlistId)) return { ...EMPTY_MATCH_STATS, concurrencySkipped: true };
   autoMatchLocks.add(playlistId);
   // 全局批量闸:与插件任务(jobRunner)共用,全进程同时只跑 1 个批量任务,防叠加。
   // 动态 import 避免顶层环(shared → batchPacer → settings,settings 无回环,静态亦可;

@@ -217,8 +217,17 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
         expect(reg).toBeTruthy();
         const r = await reg.impl.runDailyJob({ force: true });
         expect(String(r)).toContain("ok:3"); // comp 成功 → entries 里多一条可播 songId
-        // 等待本用例触发的后台 auto-match 完成(清场,避免 fire-and-forget 泄漏到下一用例)
-        for (let i = 0; i < 20 && searchCalls.length < 2; i++) await sleep(250);
+        // 等待本用例触发的后台补齐把外部条目(e1)补成可播(清场,避免 fire-and-forget
+        // 泄漏到下一用例)。4.0.29 起有「本地曲库优先」短路:曲库里已有同名行时直接
+        // 绑定旧行、不再消耗在线搜索 ⇒ 等待条件以「条目是否可播」为准,而不是在线
+        // 搜索被调用了几次。
+        for (let i = 0; i < 20; i++) {
+          const e = db.select().from(playlistSongs)
+            .where(and(eq(playlistSongs.playlistId, "pl-test"), eq(playlistSongs.externalSongId, "e1")))
+            .get() as any;
+          if (e && e.playable === 1 && e.songId) break;
+          await sleep(250);
+        }
       },
     );
     // search 收到的是「配置对象」而非字符串:baseUrl 可读,补全才可能成功
@@ -227,8 +236,12 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
     expect(compCall.config).toBeTruthy();
     expect(compCall.config.baseUrl).toBe("http://gm:18080");
     expect(typeof compCall.params.query).toBe("string");
-    // auto-match 也被正确调用(生成时未补全的外部条目,后台再补一轮)
-    expect(searchCalls.some((c) => c.params?.query && c.params.query.includes("外部曲"))).toBe(true);
+    // 生成时未补全的外部条目最终被补齐了(走在线导入,或库内短路直接绑定旧行)
+    const done = db.select().from(playlistSongs)
+      .where(and(eq(playlistSongs.playlistId, "pl-test"), eq(playlistSongs.externalSongId, "e1")))
+      .get() as any;
+    expect(done?.playable).toBe(1);
+    expect(done?.songId).toBeTruthy();
   });
 
   it("upsert 后剩余外部条目自动后台匹配(生成时未补全的,后台再经在线源补一轮)", async () => {
@@ -255,8 +268,16 @@ describe("外置插件 host.playlists / host.sources 宿主实现(真实 DB)", (
         expect(updated).toBe(true); // 外部条目已被后台自动匹配为可播 web 歌曲
       },
     );
-    // 至少一次「生成时 complete」+ 一次「auto-match」的 search 调用(都带 baseUrl 配置)
-    expect(searchCalls.length).toBeGreaterThanOrEqual(2);
+    // 在线源补齐默认先走「本地曲库优先」短路(4.0.29 起):同一条目第二轮补齐时,
+    // 上一轮导入的同名行已在曲库里 ⇒ 直接绑定旧行、**不再消耗在线搜索**。故这里
+    // 不再断言「auto-match 必然再打一次在线源」,只断言在线调用发生过且都带配置。
+    expect(searchCalls.length).toBeGreaterThanOrEqual(1);
     expect(searchCalls.every((c) => c.config?.baseUrl === "http://gm:18080")).toBe(true);
+    // 无论走短路还是在线导入,条目最终都必须是可播的,且绑到曲库里真实存在的一首歌。
+    const eRow = db.select().from(playlistSongs)
+      .where(and(eq(playlistSongs.playlistId, "pl-test"), eq(playlistSongs.externalSongId, "e1")))
+      .get() as any;
+    expect(eRow?.playable).toBe(1);
+    expect(sqlite.prepare("select 1 from songs where id = ?").get(eRow?.songId)).toBeTruthy();
   });
 });

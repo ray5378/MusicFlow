@@ -352,6 +352,11 @@ export const usePlayerStore = defineStore("player", () => {
     const id = activeRemotePeerId.value;
     return id ? remoteStates.get(id) : undefined;
   });
+  // 歌单自动补齐回执(服务端 /v1/play 后台匹配并把新曲目追加到设备队列后广播)。
+  // WEB 端过去是自己 补队列才有 perceptible feedback;投屏路径改由服务端补齐后,
+  // 靠这条事件把「补了几首」交还给 UI(见 Playlists/Detail.vue 里的 watch)。
+  const playlistAppended = ref<{ playlistId: string; count: number; matched: number; peerId: string; at: number } | null>(null);
+
   // castActive means "at least one DLNA device is being tracked" (group peers
   // don't count — the 投屏 button/dialog is DLNA-only).
   const castActive = computed(() => {
@@ -2071,6 +2076,15 @@ export const usePlayerStore = defineStore("player", () => {
             void restoreCast().catch(() => {});
           }
           break;
+        case "playlist_appended":
+          playlistAppended.value = {
+            playlistId: String(msg.playlistId || ""),
+            count: Number(msg.count || 0),
+            matched: Number(msg.matched || 0),
+            peerId: String(msg.peerId || ""),
+            at: Date.now(), // 同一歌单连补两次也要能触发第二次 watch
+          };
+          break;
         case "peer_registered":
         case "peer_available": {
           const p = msg.peer ? normSelfPeer(msg.peer) : null;
@@ -2209,6 +2223,8 @@ export const usePlayerStore = defineStore("player", () => {
     volume, showLyrics, showPlaylist, playModeVisible,
     // cast indicators
     castActive, castDeviceName,
+    // 歌单自动补齐回执
+    playlistAppended,
     // 预探测状态位(右上角轻提示)
     activePreProbe, activePreProbePeerName,
     // peer system

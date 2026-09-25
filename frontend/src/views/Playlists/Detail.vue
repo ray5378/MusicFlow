@@ -81,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
@@ -195,6 +195,15 @@ async function playSong(song: any) {
  * 注意**不要把新曲目插回它在歌单里的原位置**：它的 position 在歌单中间，而本机队列
  * 一旦追加过就与歌单序不一致；投屏时服务端按 songId 定位，插位置反而没有追加稳。
  */
+// 「服务端 cast 目标」判定：/v1/play 对这类 peerId 走 QueueController —— 会写入
+// contentContext、并在后台把新匹配的曲目补到队尾。
+// 注意「另一台本机实例」local:<other> **不算**：服务端对它走 localPlayFrom，既不写
+// contentContext 也不补齐，那种场景仍必须由前端自己补齐。
+function isServerCastTarget(pid: string): boolean {
+  return pid.startsWith("dlna:") || pid.startsWith("group:")
+    || pid.startsWith("sendspin:") || pid.startsWith("airplay:");
+}
+
 async function playAll() {
   const id = String(route.params.id);
   const { playable } = await fetchPlaylistTracks(id);
@@ -203,6 +212,14 @@ async function playAll() {
 
   // ② 先起播能播的（队列空则不调，避免用空队列覆盖当前播放）
   if (playable.length > 0) playWholeContent("playlist", id, playable);
+
+  // ③ 投屏目标且确实起播了 ⇒ /v1/play 已在服务端 fire-and-forget 跑同一套
+  //    「歌单自动匹配 + 队列补齐」，前端**不再**自己发一轮 match-playlist。
+  //    必须掐掉的原因：两套 24h 节流 Map 一个在浏览器一个在 Node 进程，互不知晓，
+  //    同时放行 = 同一歌单被在线搜两遍（连点极易 429），且两边都往同一个投屏队列
+  //    队尾追加 ⇒ 重复入队。补齐结果改由 WS `playlist_appended` 回传（见下方 watch）。
+  //    例外：整单一首都播不了时 /v1/play 根本没发出去，服务端无从触发，前端照旧自己跑。
+  if (playable.length > 0 && isServerCastTarget(playerStore.currentPeerId)) return;
 
   // ③ 自动匹配：**所有歌单都试一次**，不再只看「当前有没有未匹配行」——
   //    历史被门禁拦下的曲目，可能后来在线源又有了，这里就是自愈入口。
@@ -585,6 +602,18 @@ onMounted(() => {
 // Cancel any in-flight match-progress poll when the page is left. Without this,
 // the recursive setTimeout keeps issuing /match-playlist/status requests after
 // the component has been unmounted.
+// 服务端补齐回执：投屏路径下由后台完成「匹配 + 追加到设备队列」后广播此事件。
+// 这里把它还原成原本前端自建队补齐的可见反馈 —— 刷新列表 + 「已补齐 N 首」提示，
+// 保证换路径不换观感（count=0 表示绑到了但队列里本就有，只刷新不提示）。
+watch(
+  () => playerStore.playlistAppended,
+  (evt) => {
+    if (!evt || evt.playlistId !== String(route.params.id)) return;
+    if (evt.count > 0) ElMessage.success(t("playlists.matchedAppended", { count: evt.count }));
+    void reloadTracks();
+  },
+);
+
 let matchPollCancelled = false;
 onUnmounted(() => {
   matchPollCancelled = true;

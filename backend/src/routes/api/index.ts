@@ -77,7 +77,6 @@ import { sendspinGroupName } from "../../services/sendspin/playerCore.js";
 import { getSendspinDeviceVolume } from "../../services/sendspin/peerVolume.js";
 import { resolveContentSongs, songsToQueueItems } from "../../services/content.js";import { listFlows, createFlow, updateFlow, deleteFlow, getFlow, executeFlow, isFlowRunning } from "../../services/flows/index.js";
 import { runPlaylistAutoMatch } from "../../services/playlist/autoMatch.js";
-import { matchPlaylistInBackground } from "../../services/plugin/shared.js";
 import {
   listPlayerWebhookTokens, createPlayerWebhookToken, deletePlayerWebhookToken,
   setPlayerWebhookTokenEnabled, resolvePlayerWebhookOwnerName, getPlayerWebhookTokenById,
@@ -4627,7 +4626,11 @@ apiRoutes.post("/v1/play", async (c) => {
   if (isCastPeer(parsed)) {
     try {
       if (enqueue) { await getQueueManager().enqueue(parsed.id, items, baseUrl); effectiveStart = 0; }
-      else effectiveStart = await getQueueManager().playFrom(parsed.id, items, start, baseUrl);
+      // 第 5 参 contentContext 必须传:它是 QueueData 上唯一的「这条队列来自哪个内容」
+      // 标记,runPlaylistAutoMatch 靠它与 opts.contentContext 严格比对来确认队列没被换掉。
+      // 漏传 => 队列上 contentContext 恒 undefined => 比对恒失败 => 补齐永远不执行。
+      else effectiveStart = await getQueueManager()
+        .playFrom(parsed.id, items, start, baseUrl, type === "playlist" ? `playlist:${id}` : undefined);
     } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), 500); }
   } else {
     if (enqueue) { pm.localEnqueue(peerId, c.get("user")?.id, items); effectiveStart = 0; }
@@ -4679,8 +4682,16 @@ apiRoutes.post("/v1/playlist/:id/auto-match", permMiddleware(PERM.PLAYLIST_IMPOR
     return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
   }
   // fire-and-forget:拿全局批量闸可能要排队,绝不能把触发方挂住。
-  void matchPlaylistInBackground(id).then((s) => {
-    console.info(`[auto-match] ${id} 完成: total=${s.total} matched=${s.matched} noMatch=${s.noMatch} error=${s.error}`);
+  //
+  // 走 runPlaylistAutoMatch 而非直接 matchPlaylistInBackground,目的只有一个:
+  // 与 /v1/play 那条快路径**共用同一份 24h 节流**,避免客户端每次本机起播歌单都真打
+  // 一轮在线源(连点即 429,正是节流要防的场景)。不传 playerId/contentContext =>
+  // 只做匹配、不做服务端补齐,队列由调用方本机自行 diff 追加队尾,语义不变。
+  void runPlaylistAutoMatch(id).then((r) => {
+    console.info(
+      `[auto-match] ${id} 完成: total=${r.total} matched=${r.matched}` +
+      ` appended=${r.appended} skipped=${r.skipped || "-"}${r.lockTimeout ? " lockTimeout" : ""}`,
+    );
   });
   return c.json({ success: true, started: true, playlistId: id });
 });

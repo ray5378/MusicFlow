@@ -17,7 +17,7 @@
 
 import { getQueueController } from "../player/index.js";
 import { resolveContentSongs, songsToQueueItems } from "../content.js";
-import { matchPlaylistInBackground } from "../plugin/shared.js";
+import { matchPlaylistInBackground, type AutoMatchStats } from "../plugin/shared.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("PlaylistAutoMatch");
@@ -95,21 +95,32 @@ export async function runPlaylistAutoMatch(
   //    这里只做「超时就走人」的兜底,防止本 Promise 被永久挂住。
   //    注意超时后那个匹配仍会在后台跑完(并释放锁),只是我们不再等它。
   const waitMs = opts.lockWaitMs ?? LOCK_WAIT_MS;
-  let finished = false;
-  void matchPlaylistInBackground(playlistId).then((s) => {
-    finished = true;
-    result.total = s.total;
-    result.matched = s.matched;
+  // 「匹配跑完」与「等太久」两条 Promise 竞速,谁先到走谁 —— 不再像旧实现那样
+  // 无论 2 秒跑完还是卡满闸门都一律死等 waitMs(默认 5 分钟)才去做补齐。
+  // onFinished 由 matchPlaylistInBackground 在释放每歌单锁与全局批量闸**之后**触发。
+  // 战果必须用对象成员承载:TS 的控制流分析不追踪回调内的赋值,裸 let 会被窄化到
+  // null/never,取 .total/.matched 会直接编译报错。
+  const box: { value: AutoMatchStats | null } = { value: null };
+  const finished = new Promise<void>((resolve) => {
+    void matchPlaylistInBackground(playlistId, (r) => { box.value = r; resolve(); }).catch(() => resolve());
   });
-  await new Promise<void>((resolve) => { const h = setTimeout(resolve, waitMs); h.unref?.(); });
-  if (!finished) {
-    // 闸门被全库扫描之类占着 —— 放弃本轮(不影响已经在播的歌),下次起播再试。
+  const timeout = new Promise<void>((resolve) => { const h = setTimeout(resolve, waitMs); h.unref?.(); });
+  await Promise.race([finished, timeout]);
+  const stats = box.value;
+  if (stats === null) {
+    // 闸门被全库扫描之类占着 —— 放弃本轮等待(后台那轮跑完会自行释放闸)。
     result.lockTimeout = true;
     log.info(`[auto-match] ${playlistId}: 等批量闸超时(${waitMs}ms)放弃本轮,不影响播放`);
+    // 后台那轮的拒绝不要变成 unhandled rejection。
+    void finished.catch(() => {});
     return result;
   }
-  // 只有「真的跑完了」才记节流,避免超时白吃 24h 额度。
-  markAutoMatch(playlistId);
+  result.total = stats.total;
+  result.matched = stats.matched;
+  // 只有**真的拿到锁跑完**才记节流:
+  //  ·超时分支——已在上面提前返回,不吃额度;
+  //  ·被并发锁挡下的空跑(concurrencySkipped)——一次什么都没做的调用,也不该占额度。
+  if (!stats.concurrencySkipped) markAutoMatch(playlistId);
 
   // ② 补齐:只有明确给了 playerId + contentContext 才做,且必须**标记一致**。
   if (!opts.playerId || !opts.contentContext) return result;
@@ -132,14 +143,31 @@ export async function runPlaylistAutoMatch(
     log.warn(`[auto-match] ${playlistId}: 解析歌单失败,跳过补齐: ${e.message}`);
     return result;
   }
-  if (extra.length === 0) return result;
 
-  try {
-    await qc.enqueue(opts.playerId, extra, opts.baseUrl ?? "");
-    result.appended = extra.length;
-    log.info(`[auto-match] ${playlistId}: 已把 ${extra.length} 首新匹配曲目补齐到队尾`);
-  } catch (e: any) {
-    log.warn(`[auto-match] ${playlistId}: 补齐队列失败: ${e.message}`);
+  if (extra.length > 0) {
+    try {
+      await qc.enqueue(opts.playerId, extra, opts.baseUrl ?? "");
+      result.appended = extra.length;
+      log.info(`[auto-match] ${playlistId}: 已把 ${extra.length} 首新匹配曲目补齐到队尾`);
+    } catch (e: any) {
+      log.warn(`[auto-match] ${playlistId}: 补齐队列失败: ${e.message}`);
+    }
+  }
+
+  // ③ 回执:只要本轮有新绑定的曲目就广播。WEB 歌单页据此刷新列表并对用户给出
+  //    「已补齐 N 首」提示 —— 投屏路径下补齐改由服务端做,这里保持与原前端自建队
+  //    补齐**同等的可见反馈**(appended=0 时只刷新不弹提示)。动态 import 解环。
+  if (result.matched > 0) {
+    try {
+      const { broadcastToClients } = await import("../ws/index.js");
+      broadcastToClients({
+        type: "playlist_appended",
+        playlistId,
+        peerId: opts.playerId,
+        count: result.appended,
+        matched: result.matched,
+      });
+    } catch { /* WS 不可用不影响补齐结果 */ }
   }
   return result;
 }

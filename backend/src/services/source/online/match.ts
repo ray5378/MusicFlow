@@ -9,6 +9,7 @@ import { db, sqlite } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { refreshPlaylistCounts, strictNormEquals } from "../../plugin/shared.js";
+import { matchSongsToLibrary } from "../../plugin/libraryMatch.js";
 import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill } from "../../covers.js";
 import { OnlineSongResult } from "./types.js";
@@ -235,9 +236,45 @@ export async function matchUnmatchedPlaylistEntries(
 
   const results: MatchOutcome[] = new Array(entries.length);
   const matchedByEntry = new Map<number, { best: OnlineSongResult; fp: string; title: string }>();
+  // 阶段0 库内短路命中(entryId -> songId);matched 由阶段0/阶段2 分别累加。
+  const localById = new Map<number, string>();
+  let matched = 0;
   let next = 0;
   let done = 0;
   let noMatch = 0, error = 0;
+
+  // ---- 阶段0:库内优先短路(与插件榜单同步的 matchLocal 同阈值) ----
+  // 曲库中已有「归一化标题精确相等 + 歌手互相包含」的行时直接绑定旧行:不消耗
+  // 在线搜索、不过 importGate。在线门禁要求条目与在线候选的标题全串严格相等,
+  // 带译名/版本后缀的条目(「... (炽日将烬)(feat. ...)」)永远差一个字符,导致
+  // matched 恒为 0、补齐链路不可达;库内短路正是这条链路的兜底(与插件导入歌单
+  // 时的 matchLocal 行为对齐)。
+  // 代价:libraryMatch 只索引 group_key 非空的 songs 行,分组关闭的存量行短路
+  // 不命中,自然回退到在线搜索;索引按 count+max(rowid) 探针失效,全量扫描只在
+  // 首次调用发生(进程级缓存),可忽略。
+  {
+    const localHits = matchSongsToLibrary(
+      entries.map((e) => ({
+        title: e.externalTitle || "",
+        artist: e.externalArtist || "",
+        album: e.externalAlbum || undefined,
+        // externalDuration 是毫秒,libraryMatch 的时长容差按秒。
+        duration: e.externalDuration ? Math.round(e.externalDuration / 1000) : null,
+      })),
+    );
+    for (let i = 0; i < entries.length; i++) {
+      const sid = localHits[i];
+      if (!sid) continue;
+      localById.set(entries[i].id, sid);
+      results[i] = {
+        entryId: entries[i].id,
+        title: entries[i].externalTitle || "",
+        status: "matched",
+        songId: sid,
+        message: "库内已有,直接绑定(不进在线搜索)",
+      };
+    }
+  }
 
   // ---- 阶段1:并发搜索 + 打分(不落库),每 10 首让行 ----
   // 批内结果缓存:同一歌单里重复 (title,artist)(同专辑多曲、多 source id 的同一首)
@@ -256,6 +293,16 @@ export async function matchUnmatchedPlaylistEntries(
         album: e.externalAlbum || undefined,
         duration: e.externalDuration || undefined,
       };
+      // 库内已有同名同歌手的行 -> 直接绑旧行,不再消耗在线搜索、不受 importGate 约束。
+      const localSongId = localById.get(e.id);
+      if (localSongId) {
+        results[i] = { entryId: target.entryId, title: target.title, status: "matched", songId: localSongId, message: "库内已有,直接绑定" };
+        matched++;
+        done++;
+        onProgress?.(done, entries.length, results[i]);
+        continue;
+      }
+
       const m = await searchBestMatch(providerId, config, provider, target, searchCache);
       // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
       // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。
@@ -278,7 +325,26 @@ export async function matchUnmatchedPlaylistEntries(
   await Promise.all(workers);
 
   // ---- 阶段2:批量导入所有命中(批量 dedup + 计数去重刷新一次)+ 分块事务链接 ----
-  let matched = 0;
+  const TX_CHUNK = 200;
+  // 阶段2a:库内短路命中落库(不经 importOnlineSongs——旧行早已可用)。
+  if (localById.size > 0) {
+    const pairs = Array.from(localById.entries());
+    for (let off = 0; off < pairs.length; off += TX_CHUNK) {
+      const chunk = pairs.slice(off, off + TX_CHUNK);
+      sqlite.transaction(() => {
+        const ids = chunk.map((c) => c[0]);
+        const idPh = ids.map(() => "?").join(",");
+        const songCases = chunk.map(() => "WHEN ? THEN ?").join(" ");
+        const songArgs: any[] = [];
+        for (const c of chunk) songArgs.push(c[0], c[1]);
+        sqlite
+          .prepare(`UPDATE playlist_songs SET song_id = CASE id ${songCases} END, playable = 1, unavailable_reason = NULL WHERE id IN (${idPh})`)
+          .run(...songArgs, ...ids);
+      })();
+      if (off + TX_CHUNK < pairs.length) await sleepBetweenBatch();
+    }
+  }
+
   if (matchedByEntry.size > 0) {
     const imp = await importOnlineSongs(providerId, Array.from(matchedByEntry.values()).map((v) => v.best), { gate: "verified" });
     const byFp = new Map<string, string>();
@@ -288,7 +354,7 @@ export async function matchUnmatchedPlaylistEntries(
     const linkPairs = Array.from(matchedByEntry.entries())
       .map(([entryId, v]) => ({ entryId, songId: byFp.get(v.fp) }))
       .filter((x): x is { entryId: number; songId: string } => !!x.songId);
-    matched = linkPairs.length;
+    matched += linkPairs.length;
 
     // 分块事务链接:每块用【单条 CASE UPDATE】替掉逐 entry 的 N 次 UPDATE(prepare+run
     // 每次),块提交避免超大歌单单事务持锁时间过长。块间主动睡眠节流。
@@ -327,6 +393,10 @@ export async function matchUnmatchedPlaylistEntries(
 
     // 封面回填由 importOnlineSongs 内部统一触发(见 service.ts);此处不再重复。
   }
+
+  // 全库内短路(无在线导入)时 matchedByEntry 为空,上面的计数刷新会被整块跳过,
+  // 歌单的「可播放数」就停在旧值——无条件兜底一次。
+  refreshPlaylistCounts(playlistId);
 
   return { total: results.length, matched, noMatch, error, results };
 }
