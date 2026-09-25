@@ -130,6 +130,49 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   }
   // 恢复持久音量(无行则沿用缺省,不发声不断流,见 applyPersistedDeviceVolume)。
   await applyPersistedDeviceVolume(conn.clientId);
+  // 上线回组:组在播时把本设备接回组 pump 的直播沿(见 rejoinActiveGroups)。
+  await rejoinActiveGroups(conn.clientId);
+}
+
+/** 设备上线后自动「回组」:若它属于某个**正在播**的用户组,按「加入群组」的同一流程
+ *  把它接回组 pump 的直播沿(灌组音量 → joinGroupCore),不必等用户再切一次歌。
+ *
+ *  为什么必须做:组 pump 的成员是 `SendspinGroup.members` 里的 **conn 对象**,而断开时
+ *  `onConnectionClosed` 会 `g.remove(conn)`;重连产生的是**新 conn**,不在任何组里 ——
+ *  只有下一次 `playGroupCore`(切歌/重新 cast)才会 `g.add(conn)`。夹在中间这段
+ *  「已连接但未入组」的窗口里,设备拿不到 `pendingAnnounces` 兑现的 `stream/start`,
+ *  表现为**「TCP 上数据正常、设备却无声」,直到切歌才响**(2026-09-25 真机:硬断电
+ *  重连后必须切下一首才开始播放)。
+ *
+ *  与 `alignGroupMembers` 的 sendspin 新增分支同源(volume → join);幂等 ——
+ *  joinGroupCore 对已在组内的 conn 直接返回。 */
+async function rejoinActiveGroups(clientId: string): Promise<void> {
+  if (!clientId || clientId.startsWith("ug:")) return; // ug: 是组名,不是设备 id
+  const qc = qcSingleton;
+  if (!qc) return; // 控制器未就绪:不影响设备注册本身
+  try {
+    const { getGroupManager } = await import("../group/index.js");
+    const { sendspinGroupName } = await import("./playerCore.js");
+    const gm = getGroupManager();
+    for (const groupId of gm.groupsOfDevice(clientId)) {
+      // 只回**正在播**的组:组空闲时 joinGroupCore 仅登记成员、没有可接的流,
+      // 反而是替「没在播的组」凭空建立成员关系。
+      let active = false;
+      try { active = !!qc.snapshot(groupId).isActive; } catch { /* 无该组队列 = 未播 */ }
+      if (!active) continue;
+      const groupName = sendspinGroupName(groupId);
+      // 回组前灌组音量(ug 组懒创建缺省 100):与 playMedia/alignGroupMembers 同源。
+      try { await sendspinGroupTransport(groupName, "volume", gm.getVolume(groupId)); }
+      catch { /* 音量回填失败不挡入组 */ }
+      const r = await sendspinGroupJoin(groupName, clientId);
+      // pump 活性一并留痕:live=true 但 pump=false 说明「组在播却无推流」,
+      // 属看门狗(resumeActive)的职责范围,真机排障时一眼可见。
+      const pumpActive = await sendspinGroupPumpActive(groupName).catch(() => false);
+      log.info(`sendspin 设备上线自动回组 ${groupId}: ${clientId} joined=${r.joined} live=${r.live} pump=${pumpActive}`);
+    }
+  } catch (e: any) {
+    log.warn("sendspin 设备上线回组失败", { client: clientId, err: e?.message || e });
+  }
 }
 
 /** 应用某设备持久音量/静音(重连/重启后无感恢复)。
@@ -245,16 +288,24 @@ export async function startSendspinInProcess(port?: number, hooks?: SendspinBoot
   // spec Client Initiated:广播 _sendspin-server._tcp,客户端经 mDNS 发现本服务端。
   // (此前只广播 _musicflow._tcp,ESPHome 真机永远发现不了 server。)
   advertiseSendspinServer(port ?? pluginCfg.port, "MusicFlow Sendspin");
-  // 记住的拨号目标:启动即拨 + 每 60s 补拨掉线的。
+  // 记住的拨号目标:启动即为每个目标**开一个重试窗口**(首拨立即发出),之后由 1s
+  // 节拍的状态机推进(2s×30 → 10s×24,5 分钟停手)。
   if (dialTargetsLoadedFor !== identityDir) await loadDialTargets();
-  void dialRemembered(srv);
+  for (const t of dialTargets.map((x) => ({ ...x }))) {
+    await armDialTarget(t.host, t.port, "boot");
+  }
   if (redialTimer) clearInterval(redialTimer);
   redialTimer = setInterval(() => {
-    const s = getServer();
-    if (s) void dialRemembered(s);
-  }, REDIAL_INTERVAL_MS);
-  // 播放器自动发现:浏览 _sendspin._tcp,新设备出现即拨号(只发现不自动播)。
-  // 与记忆重拨互补:没拨过的设备靠这个首次出现。
+    try {
+      redialTick();
+    } catch (e: any) {
+      log.warn("redial tick failed", { err: e?.message || e });
+    }
+  }, RETRY_TICK_MS);
+  redialTimer.unref?.();
+  // 播放器自动发现:浏览 _sendspin._tcp,新设备出现即入册开窗(只发现不自动播)。
+  // 与记忆重拨互补:没拨过的设备靠这个首次出现;它也是「不设兜底」方案**唯一**的
+  // 重新开窗信号源(每 60s 重建 browser),两者必须同时成立。
   if (pluginCfg.autoDiscover) startPlayerDiscovery(srv);
   // 空闲回收兜底:主进程挂到内存回收总线;child 进程自挂周期清扫(无人驱动 reclaim)。
   if (hooks) {
@@ -275,6 +326,8 @@ export async function stopSendspinInProcess(hooks?: SendspinBootHooks): Promise<
     clearInterval(redialTimer);
     redialTimer = null;
   }
+  retryStates.clear();
+  retryInFlight.clear();
   stopPlayerDiscovery();
   // 插件停用 → 断开全部 6053 只读连接,零常驻资源(与 socket/mDNS 一致)。
   esphomeBridge.stop();
@@ -310,6 +363,8 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
       try { pmSingleton?.registerSendspin(clientId, name, true, legacy); } catch { /* peer 未就绪忽略 */ }
       // 恢复持久音量(与 in-proc registerServerPlayer 尾部同构,见上)。
       void applyPersistedDeviceVolume(clientId);
+      // 上线回组(与 in-proc registerServerPlayer 尾部同构,见 rejoinActiveGroups)。
+      void rejoinActiveGroups(clientId);
     },
     onClosed: (clientId) => {
       try { pmSingleton?.removeSendspinPeer(clientId); } catch { /* ignore */ }
@@ -681,15 +736,44 @@ export interface DialTarget {
 let dialTargets: DialTarget[] = [];
 let dialTargetsLoadedFor: string | null = null;
 let redialTimer: ReturnType<typeof setInterval> | null = null;
-const REDIAL_INTERVAL_MS = 60_000;
-/** 补拨时的 connect 超时。局域网握手 <1s,失效地址等满 10s 只会拖住整轮补拨。 */
-const REDIAL_CONNECT_TIMEOUT_MS = 5_000;
-/** 连续多少次「地址不可达」后淘汰记忆目标(见 dialRemembered 里的淘汰分支)。 */
-const STALE_DIAL_FAILS = 3;
-/** "host:port" → 连续失败次数。成功后清零。 */
-const dialFailures = new Map<string, number>();
-/** 补拨单飞闸(同一次只允许一轮在跑)。 */
-let redialInFlight = false;
+
+// ── 重试状态机(2026-09-25 重写,节奏由用户指定)──────────────────────────────
+//
+// 目标:设备**硬断电**再上电后自动连回来。旧实现是「60s 一轮、整轮只拨一次」,
+// 且 `dial_targets` 只在**拨号成功后**才写 —— 首次就失败(开机瞬间 :8928 还没 listen)
+// 的设备永远进不了名单,轮询遍历不到它 ⇒ **一次失败 = 永久失联**。
+//
+// 节奏:阶段 1 每 2s 一次、共 30 次(前 60s);阶段 2 每 10s 一次、共 24 次(后 240s)。
+// 合计 54 发 / 300s 后**停手**。
+//
+// ⚠️ **不设兜底轮询**:5 分钟走完后不再慢速重试,而是等**新的发现信号**
+// (discover.ts 每 60s 重建 browser → 在线设备重新 emit `up`)重新开窗。
+// 因此本机制**必须**与 discover 的周期信号同时成立 —— 单独用会退化成「5 分钟即永久放弃」。
+const RETRY_TICK_MS = 1_000;
+const RETRY_FAST_INTERVAL_MS = 2_000;
+const RETRY_FAST_WINDOW_MS = 60_000;
+const RETRY_SLOW_INTERVAL_MS = 10_000;
+const RETRY_WINDOW_MS = 300_000;
+/** 单次拨号的 connect+activate 超时。局域网握手 <1s;真失效的地址毫秒级就
+ *  `EHOSTUNREACH`,故此值只对「在但慢」的目标生效,不会拖慢 2s 节奏。 */
+const RETRY_CONNECT_TIMEOUT_MS = 5_000;
+
+interface RetryState {
+  /** 窗口起点(ms)。**窗口内不因新信号重置** —— 否则每 60s 一次的发现信号会让窗口
+   *  一直停在「前 60s 的 2s 阶段」,10s 阶段永远到不了(等效无限 2s 拨号)。 */
+  t0: number;
+  attempts: number;
+  nextAt: number;
+  /** 迄今是否**每次**失败都是地址级不可达。窗口走完据此决定是否淘汰记忆目标。 */
+  addressLevelOnly: boolean;
+  /** 是否已把「进入慢速阶段」打过 info(避免每发都刷屏)。 */
+  loggedSlow: boolean;
+}
+
+/** "host:port" → 重试窗口状态。窗口结束(成功 / 淘汰 / 停手)即删除。 */
+const retryStates = new Map<string, RetryState>();
+/** 已有一发拨号在飞的 "host:port"(避免 1s tick 叠发)。 */
+const retryInFlight = new Set<string>();
 let cleanerRegistered = false;
 
 function dialTargetsFile(): string {
@@ -762,6 +846,8 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
     if (!sendspinSupervisor.isRunning()) return false;
     return sendspinSupervisor.rpc<boolean>("dialForget", { host, port });
   }
+  // 明确遗忘 = 停止对它的重试(否则状态机还会继续拨满一个 5 分钟窗口)。
+  cancelRetry(host, port);
   const before = dialTargets.length;
   dialTargets = dialTargets.filter((t) => !(t.host === host && t.port === port));
   if (dialTargets.length === before) return false;
@@ -788,67 +874,119 @@ export async function forgetDialTarget(host: string, port: number): Promise<bool
   return true;
 }
 
-async function dialRemembered(srv: SendspinServer): Promise<void> {
-  // 单飞:上一次补拨还没跑完(有失效目标时单次最久要等一个 connect 超时)就跳过这一轮,
-  // 否则 60s 周期会和上一轮叠加,同一批目标被并发重拨。
-  if (redialInFlight) return;
-  redialInFlight = true;
-  try {
-    for (const t of dialTargets.map((x) => ({ ...x }))) {
-      const key = `${t.host}:${t.port}`;
-      const online = [...srv.clients.values()].some(
-        (c) => c.dialed && c.dialHost === t.host && c.dialPort === t.port,
-      );
-      if (online) {
-        dialFailures.delete(key);
-        continue;
-      }
-      // spec:设备明确拒绝重连的 reason(another_server 等)不再自动骚扰,手动 dial 恢复。
-      const suppressed = srv.noAutoRedial.get(key);
-      if (suppressed) {
-        log.info(`sendspin 跳过重拨(设备已拒绝:${suppressed}): ${key}`);
-        continue;
-      }
-      try {
-        // 补拨用**更短**的 connect 超时:局域网设备握手 <1s,5s 足够;10s 只会让
-        // 一个失效目标把整轮补拨拖住(而拿到错误地址恰恰是最常见的失效形态)。
-        await srv.dialPlayer(`ws://${t.host}:${t.port}/sendspin`, REDIAL_CONNECT_TIMEOUT_MS);
-        dialFailures.delete(key);
-        log.info(`sendspin 重拨成功: ${key}`);
-      } catch (e: any) {
-        const msg = String(e?.message || e);
-        const count = (dialFailures.get(key) ?? 0) + 1;
-        dialFailures.set(key, count);
-        log.info(`sendspin 重拨失败(60s 后重试): ${key} ${msg}`);
-        // ── 地址已失效的目标:淘汰,交给 mDNS 重新发现 ──
-        //
-        // 病灶(2026-09-21 真机):设备 DHCP 从 192.168.10.245 换到 .246,而记忆里还是
-        // .245 —— 每 60s 重拨一次、线上无限 `EHOSTUNREACH`(实测 44 次)。更糟的是
-        // 每次失败都要等一整个 connect 超时,期间那台**真正在线**的设备也跟着被拖慢;
-        // 而它本来靠 mDNS(_sendspin._tcp)已在 .246 上正常连着了。
-        //
-        // 判据只认**地址层面**的错误(unreachable / down / not found):它们说明"这个
-        // 地址上不是它了",而不是"它在但暂时忙"(ECONNREFUSED / ETIMEDOUT 属于后者,
-        // 设备重启时常见,不清)。连续 STALE_DIAL_FAILS 次才动手,避免抖动误删。
-        // 淘汰是**非破坏性**的:只从 dial_targets 移除(不 purge 设备档案/音量),
-        // 设备一旦在局域网里被 mDNS 看到,discover.ts 会以新地址重新记住它。
-        if (count >= STALE_DIAL_FAILS && isStaleAddressError(msg)) {
-          const before = dialTargets.length;
-          dialTargets = dialTargets.filter((x) => !(x.host === t.host && x.port === t.port));
-          if (dialTargets.length !== before) {
-            await saveDialTargets();
-            dialFailures.delete(key);
-            log.warn(
-              `sendspin 拨号目标已失效(连续 ${count} 次地址不可达:${msg}),移除记忆目标 ${key}`
-              + ` —— 设备换 IP 后会经 mDNS 自动重新发现并记住`,
-            );
-          }
-        }
-      }
-    }
-  } finally {
-    redialInFlight = false;
+/** 为一个目标开重试窗口(「发现即写」的唯一入口)。
+ *
+ *  返回 true = 新开窗(调用方不必再自己拨:状态机会立刻首发并持续重试);
+ *  false = 无需动作(已在线 / 抑制期内 / 已有窗口在跑(窗口内不重置) / 服务未运行)。
+ *
+ *  只在 sendspin 子进程内被调用(discover 循环跑在 in-proc 装配里),故不走 RPC。 */
+export async function armDialTarget(host: string, port: number, src = "signal"): Promise<boolean> {
+  const srv = getServer();
+  if (!srv) {
+    log.warn(`armDialTarget: sendspin 服务未运行,忽略 ${host}:${port} (${src})`);
+    return false;
   }
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return false;
+  const key = `${host}:${port}`;
+  if (srv.isRedialSuppressed(host, port)) return false;
+  if (srv.isConnectedTo(host, port)) {
+    cancelRetry(host, port);
+    return false;
+  }
+  // ① 先记住、再拨:即便这一发失败,设备也已进 dial_targets。旧实现写在**成功之后**
+  //    (discover.ts),失败即中断 ⇒ 名单里永远没有它 ⇒ 一次失败 = 永久失联。
+  await rememberDialTarget(host, port);
+  if (retryStates.has(key)) return false; // 窗口内不重置进度
+  retryStates.set(key, { t0: Date.now(), attempts: 0, nextAt: Date.now(), addressLevelOnly: true, loggedSlow: false });
+  log.info(`sendspin 重试窗口开启(${src}): ${key} —— 2s×30 → 10s×24,共 ${Math.round(RETRY_WINDOW_MS / 1000)}s`);
+  redialTick(); // 立即首拨,不等下一个 tick
+  return true;
+}
+
+/** 取消某目标的重试窗口(手动 forget / 已连上时用)。 */
+function cancelRetry(host: string, port: number): void {
+  const key = `${host}:${port}`;
+  retryStates.delete(key);
+  retryInFlight.delete(key);
+}
+
+/** 重试状态机的一拍。**同步**执行:拨号 fire-and-forget,单飞靠 retryInFlight
+ *  + `dialPlayer` 自身的 pendingDials 双保险 —— 故不存在「上一拍没跑完」的重叠问题。 */
+function redialTick(): void {
+  const srv = getServer();
+  if (!srv) return;
+  const now = Date.now();
+  for (const [key, st] of [...retryStates]) {
+    const sep = key.lastIndexOf(":");
+    const host = key.slice(0, sep);
+    const port = Number(key.slice(sep + 1));
+    // 唯一成功出口:连上了。
+    if (srv.isConnectedTo(host, port)) {
+      cancelRetry(host, port);
+      continue;
+    }
+    // 手动 dial 清除了抑制 / 设备 goodbye 拉黑:立刻收工,不再骚扰。
+    if (srv.isRedialSuppressed(host, port)) {
+      cancelRetry(host, port);
+      continue;
+    }
+    // 窗口走完:停手(不设兜底轮询,等下一轮发现信号重新开窗,见 RETRY_WINDOW_MS 注释)。
+    // 若还有一发在飞,先等它落地再判 —— 否则会把「其实刚连上」的设备误判成失败。
+    if (now - st.t0 >= RETRY_WINDOW_MS) {
+      if (retryInFlight.has(key)) continue;
+      retryStates.delete(key);
+      if (st.addressLevelOnly) {
+        void evictStaleTarget(key, host, port, st.attempts);
+      } else {
+        log.info(`sendspin 重试窗口结束(未连上,保留记忆目标): ${key} 共尝试 ${st.attempts} 次`);
+      }
+      continue;
+    }
+    if (now < st.nextAt) continue;
+    if (retryInFlight.has(key)) continue;
+    const fast = now - st.t0 < RETRY_FAST_WINDOW_MS;
+    if (!fast && !st.loggedSlow) {
+      st.loggedSlow = true;
+      log.info(`sendspin 重试进入慢速阶段(每 10s 一次,至第 ${Math.round(RETRY_WINDOW_MS / 1000)}s): ${key} 已尝试 ${st.attempts} 次`);
+    }
+    st.attempts += 1;
+    st.nextAt = now + (fast ? RETRY_FAST_INTERVAL_MS : RETRY_SLOW_INTERVAL_MS);
+    retryInFlight.add(key);
+    srv
+      .dialPlayer(`ws://${host}:${port}/sendspin`, RETRY_CONNECT_TIMEOUT_MS)
+      .then(() => {
+        retryInFlight.delete(key);
+        retryStates.delete(key);
+        log.info(`sendspin 重拨成功: ${key}`);
+      })
+      .catch((e: any) => {
+        retryInFlight.delete(key);
+        const msg = String(e?.message || e);
+        if (!isStaleAddressError(msg)) st.addressLevelOnly = false;
+        // 首发失败打 info(这是「设备刚开机还没就绪」的关键证据),之后降为 debug
+        // 免得一台离线设备在 5 分钟里刷 54 行。阶段切换 / 收尾另有 info。
+        const line = `sendspin 重拨失败(第 ${st.attempts} 次): ${key} ${msg}`;
+        if (st.attempts === 1) log.info(line);
+        else log.debug(line);
+      });
+  }
+}
+
+/** 淘汰记忆目标 —— **非破坏性**:只从 dial_targets 移除,不 purge 设备档案(音量 / 6053 密钥)。
+ *
+ *  判据从「连续 N 次失败」改为「**整个重试窗口内每次失败都是地址级不可达**」:
+ *  旧判据(连续 3 次)在 2s 节奏下第 6 秒就会把设备踢出名单,与「重试到成功」正面矛盾
+ *  (2026-09-25 定位)。语义上这仍然安全:设备一旦重新被 mDNS 看到(discover 每 60s
+ *  重查一遍),会以新地址重新入册。 */
+async function evictStaleTarget(key: string, host: string, port: number, attempts: number): Promise<void> {
+  const before = dialTargets.length;
+  dialTargets = dialTargets.filter((t) => !(t.host === host && t.port === port));
+  if (dialTargets.length === before) return;
+  await saveDialTargets();
+  log.warn(
+    `sendspin 拨号目标已失效(${attempts} 次尝试全程地址不可达),移除记忆目标 ${key}`
+    + ` —— 设备换 IP 后会经 mDNS 自动重新发现并记住`,
+  );
 }
 
 /** 错误文案是否属于「地址层面已失效」(该地址上不再是这台设备)。

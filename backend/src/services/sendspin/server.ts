@@ -83,16 +83,64 @@ export function normalizeRemoteHost(host?: string | null): string {
   return h;
 }
 
+export interface NoRedialEntry {
+  reason: string;
+  /** 抑制到期时刻(ms epoch)。`Infinity` = 不过期(仅测试用)。 */
+  until: number;
+}
+
+/** goodbye 重拨抑制的存活时长。
+ *  ⚠️ **必须有限**(2026-09-25 真机定位):设备**硬断电**不发 goodbye,那条 socket 会
+ *  永久沉积在服务端(见 SendspinConnection 的心跳注释)。抑制若永久有效,设备重新上线
+ *  后只要撞上一次 `another_server` 仲裁就被永久拉黑、再也连不回来 —— 与「自动重连」
+ *  的目标正面冲突。5 分钟足够避开「设备切换 server」的瞬时抖动,又不会锁死。 */
+const NO_REDIAL_TTL_MS = 5 * 60 * 1000;
+
 export class SendspinServer {
   identity: Identity;
   log: SendspinLog;
   readonly clients = new Map<string, SendspinConnection>();
   readonly groups = new Map<string, SendspinGroup>();
-  /** 不再自动重拨的目标 host:port → goodbye reason(手动 dial 清除,见 goodbye 分支)。 */
-  readonly noAutoRedial = new Map<string, string>();
+  /** 不再自动重拨的目标 host:port → 抑制原因 + 到期时刻(手动 dial 立即清除)。 */
+  readonly noAutoRedial = new Map<string, NoRedialEntry>();
   /** 手动拨号清除指定目标的重拨抑制(运营商明确意图,供路由层调用)。 */
   clearNoRedial(host: string, port: number): void {
     this.noAutoRedial.delete(`${host}:${port}`);
+  }
+  /** 记入重拨抑制。`ttlMs <= 0` 表示不过期(仅测试/特殊场景用,生产一律给有限 TTL)。 */
+  suppressRedial(host: string, port: number, reason: string, ttlMs = NO_REDIAL_TTL_MS): void {
+    this.noAutoRedial.set(`${host}:${port}`, {
+      reason,
+      until: ttlMs > 0 ? Date.now() + ttlMs : Number.POSITIVE_INFINITY,
+    });
+  }
+  /** 抑制原因;不在抑制期返回 null。过期条目**惰性**清掉(无需定时器)。 */
+  noRedialReason(host: string, port: number): string | null {
+    const key = `${host}:${port}`;
+    const e = this.noAutoRedial.get(key);
+    if (!e) return null;
+    if (Date.now() >= e.until) { this.noAutoRedial.delete(key); return null; }
+    return e.reason;
+  }
+  /** 该目标当前是否处于重拨抑制期。 */
+  isRedialSuppressed(host: string, port: number): boolean {
+    return this.noRedialReason(host, port) !== null;
+  }
+  /** 是否已有通往该目标(或该主机)的**在线**连接。
+   *  - 服务端拨出的连接:按 `dialHost:dialPort` 精确匹配;
+   *  - 客户端拨入的连接:只有 `remoteHost`(端口未知),按主机匹配。
+   *  两路都算「在线」—— 设备已经拨进来时我们再拨出去,设备会按 spec 踢掉一个
+   *  (`another_server`),白白抖一次连接。 */
+  isConnectedTo(host: string, port: number): boolean {
+    if (!host) return false;
+    for (const c of this.clients.values()) {
+      if (c.dialed) {
+        if (c.dialHost === host && c.dialPort === port) return true;
+      } else if (c.remoteHost === host) {
+        return true;
+      }
+    }
+    return false;
   }
   /** 进行中的拨号 url → 任务(同目标单飞,见 dialPlayer)。 */
   private readonly pendingDials = new Map<string, Promise<SendspinConnection>>();
@@ -960,12 +1008,26 @@ function sendAheadInputOf(c: SendspinConnection): SendAheadInput {
   };
 }
 
+/** WS 心跳间隔(ms)。见 SendspinConnection 的心跳注释。 */
+const HEARTBEAT_INTERVAL_MS = 10_000;
+
 export class SendspinConnection {
   id: string;
   clientId: string | null = null;
   name = "";
   server: SendspinServer;
   private ws: WebSocket;
+  /** ---- WS 心跳(僵尸连接摘牌)----
+   *  病灶(2026-09-25 真机):设备**硬断电**不发 FIN/RST/goodbye,那条 socket 会永久
+   *  沉积在服务端 —— `clients` 仍认为它在线,于是新广播到达时「已在线」判据命中、
+   *  直接跳过拨号,任何重试机制都不会被 arm,界面还假报在线(实测:空闲连接既无 WS
+   *  心跳、也未启用 SO_KEEPALIVE、服务端也无周期性下发 ⇒ 永不摘牌)。
+   *  修法:每 10s 发 PING;设备侧 ESP-IDF `httpd_ws` 在 `handle_ws_control_frames=false`
+   *  时会自动回 PONG(已核 sendspin-cpp `src/esp/ws_server.cpp:103`)。上一轮 PING 未回
+   *  即判死链,直接 terminate → 触发 close → onConnectionClosed 摘牌。
+   *  实测口径:最迟约 20s 摘牌,短于 discover 的 60s 重查节拍。 */
+  private heartbeatAlive = true;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   noise: NoiseSession | null = null;
   handshakeDone = false;
   /** 本次握手混入的 PSK 类别(sn/lt/pr),决定会话权限与配对走向。 */
@@ -1064,7 +1126,21 @@ export class SendspinConnection {
     this.id = "";
     ws.on("message", (data, isBinary) => void this.onFrame(Buffer.from(data as Buffer), isBinary));
     ws.on("error", () => ws.terminate());
+    // 心跳(见 heartbeatAlive 注释)。`readyState !== OPEN` 时(拨号握手中/已关闭)跳过,
+    // 避免 ws.ping() 在 CONNECTING 上抛异常。
+    ws.on("pong", () => { this.heartbeatAlive = true; });
+    this.heartbeatTimer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (!this.heartbeatAlive) {
+        try { ws.terminate(); } catch { /* 已死 */ }
+        return;
+      }
+      this.heartbeatAlive = false;
+      try { ws.ping(); } catch { /* 已死 */ }
+    }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref?.();
     ws.on("close", () => {
+      if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
       this.server.onConnectionClosed(this);
     });
   }
@@ -1288,9 +1364,12 @@ export class SendspinConnection {
       // pairing_required → SHOULD NOT auto-reconnect(之前无脑 60s 重拨,
       // 与设备"切换 server"打架,形成 dial→踢→重拨死循环)。记入抑制表,
       // 手动 dial 清除(运营商明确意图)。restart/concurrent_attempt 不抑制。
+      //
+      // ⚠️ 抑制带 TTL(NO_REDIAL_TTL_MS):硬断电留下的僵尸连接让「重新上线即被
+      //    another_server 踢」变得常见,永久拉黑等于设备再也回不来(2026-09-25)。
       if (this.dialed && this.dialHost && ["another_server", "shutdown", "user_request", "unpaired", "unauthorized", "pairing_required"].includes(reason)) {
-        this.server.noAutoRedial.set(`${this.dialHost}:${this.dialPort}`, reason);
-        this.server.log("warn", `auto-redial suppressed for ${this.dialHost}:${this.dialPort} (goodbye: ${reason});手动 dial 可恢复`);
+        this.server.suppressRedial(this.dialHost, this.dialPort, reason);
+        this.server.log("warn", `auto-redial suppressed ${Math.round(NO_REDIAL_TTL_MS / 60000)}min for ${this.dialHost}:${this.dialPort} (goodbye: ${reason});手动 dial 可立即恢复`);
       }
       try { this.ws.close(); } catch { /* ignore */ }
       return;
