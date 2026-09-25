@@ -71,7 +71,23 @@ function whereClause(kind: BackfillKind): string {
   // 回填写入的存在性标注(1 = 文件里自带内嵌歌词)。任一为真都视为已有歌词,
   // 不再重复在线搜索 —— 这就是「区分有和没有」的用途。
   if (kind === "lyrics") return "(lyrics IS NULL OR lyrics = '') AND COALESCE(has_lyrics, 0) = 0";
-  return "cover_art IS NULL OR cover_art = ''";
+  // 封面候选必须与执行期的守卫同口径,否则「可匹配」数量会被整座本地库撑大:
+  // 本地(WebDAV)歌的封面按设计存在**专辑行**(songs.cover_art 恒为空),而
+  // covers.ts 的专辑守卫命中后「只返回引用、不写库,保持本地歌数据原样」——
+  // 这批歌因此永远不会离开候选集,界面数字点了不降,还会让整表 select 白跑一遍
+  // (实测 49174 个候选里 48968 首属此类,真正要搜在线的只有 ~206 首)。
+  // 故把同一守卫条件下沉到这里:本地歌 + 有专辑 + 专辑已有封面 → 不算候选。
+  // 局限:SQL 判不了封面文件是否真的存在(那是 resolveCoverFile 的活);JS 侧守卫
+  // 保留作第二道网,万一专辑封面断链也不会误写在线图。
+  return `(cover_art IS NULL OR cover_art = '')
+    AND NOT (
+      type = 'local' AND album_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM albums a
+        WHERE a.id = songs.album_id
+          AND a.cover_art IS NOT NULL AND a.cover_art <> ''
+      )
+    )`;
 }
 
 /** 候选总数(轻量 COUNT,主进程同步返回给 startBackfill 契约)。 */
