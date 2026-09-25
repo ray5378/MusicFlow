@@ -91,6 +91,7 @@ import { waitAsyncTask } from "@/utils/asyncTask";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
 import { useInfiniteList } from "@/composables/useInfiniteList";
+import { usePlayContent } from "@/composables/usePlayContent";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 import { Trash2 } from "lucide-vue-next";
 import { coverUrl } from "@/utils/cover";
@@ -98,6 +99,7 @@ import { coverUrl } from "@/utils/cover";
 const route = useRoute();
 const router = useRouter();
 const playerStore = usePlayerStore();
+const { fetchPlaylistTracks, playWholeContent } = usePlayContent();
 const { t } = useI18n();
 const playlist = ref<any>(null);
 // Whether this playlist is in the daily-recommend pool.
@@ -170,17 +172,55 @@ async function playSong(song: any) {
   if (song.isMatched !== false) { playerStore.playSong(song); return; }
   await matchAndPlay(song);
 }
+// 「播放全部」。数据源必须是**分页拉全量 tracks**，不能再用 `list.value`
+// （useInfiniteList 的窗口化稀疏数组：初始只装首屏 ~1000 行，滚过的旧块还会被
+//  nullSlots() 置空，filter 静默跳过 → 大歌单尾部漏播）。
+//
+// 流程：
+//   ① 全量拉取（position 序）→ 拆可播 / 未匹配；
+//   ② 可播部分**立即起播**（零等待，投屏时经 contentOrigin 走主通道）；
+//   ③ 有未匹配 → 后台跑整单匹配 job（复用进度对话框），不阻塞已在播的队列；
+//   ④ 匹配完成后重拉一次，把**新增的可播行** enqueue 到队尾；core-pre-probe
+//      会自动预探测这些新入队曲目 → 切到它们时零等待。
+//
+// 注意：匹配回来的歌排在队尾而非原位（与旧实现 [...playable, ...matched] 一致）。
+// 投屏起播用 songId 身份定位，两侧顺序不一致也不会播错歌，故无需插回原位。
 async function playAll() {
-  const loaded = list.value;
-  const playable = loaded.filter(s => !!s && s.isMatched !== false);
-  const unmatched = loaded.filter(s => !!s && s.isMatched === false);
-  if (unmatched.length > 0) {
-    const matched = await matchBeforePlay(unmatched);
-    if (matched.length > 0) playerStore.playQueue([...playable, ...matched]);
-    else if (playable.length > 0) playerStore.playQueue(playable);
+  const id = String(route.params.id);
+  const { playable, unmatched } = await fetchPlaylistTracks(id);
+
+  // ② 先起播能播的（队列空则不调，避免用空队列覆盖当前播放）
+  if (playable.length > 0) playWholeContent("playlist", id, playable);
+
+  if (unmatched.length === 0) {
+    if (playable.length === 0) ElMessage.warning(t("playlists.noPlayableTrack"));
     return;
   }
-  if (playable.length > 0) playerStore.playQueue(playable);
+
+  // ③ 现场匹配：需要在线源。首块响应可能还没把 onlineSourceId 填上，这里显式等待。
+  await loadOnlineSource();
+  if (!onlineSourceId.value) {
+    if (playable.length === 0) ElMessage.warning(t("playlists.noOnlineSourceTrack"));
+    return;
+  }
+  const before = new Set(playable.map((s: any) => s.id));
+  await runMatchJob();
+  // 页面已卸载（轮询被 onUnmounted 中止）→ 不再补队，避免污染队列
+  if (matchPollCancelled) return;
+
+  // ④ 补齐：只追加本次新匹配到的曲目（避免重复入队已在播的那些）
+  const after = await fetchPlaylistTracks(id);
+  const added = after.playable.filter((s: any) => !before.has(s.id));
+  if (added.length > 0) {
+    if (playable.length === 0) {
+      // 整单一首都没预先可播：匹配结果就是全部队列，直接起播
+      playWholeContent("playlist", id, added);
+    } else {
+      for (const s of added) playerStore.addToQueue(s);
+    }
+    ElMessage.success(t("playlists.matchedAppended", { count: added.length }));
+  }
+  await reloadTracks();
 }
 async function playSelected() {
   const playable = selectedSongs.value.filter(s => s.isMatched !== false);
@@ -233,44 +273,51 @@ async function matchBeforePlay(unmatched: any[]) {
   return ok;
 }
 
-// Batch-match all unmatched tracks of this playlist as a background job, with progress.
-async function matchAllPlaylist() {
+// 跑一次「整单在线匹配」后台 job，期间用进度对话框展示，返回终态结果。
+// 两个调用方共用：① 手动点「在线匹配未匹配」；② playAll 起播后补齐。
+async function runMatchJob(): Promise<any> {
   const pid = onlineSourceId.value;
-  if (!pid) return;
+  if (!pid) return null;
   showMatchDialog.value = true;
   matchRunning.value = true;
   matchResult.value = null;
   matchDone.value = 0;
   matchingAll.value = true;
+  matchPollCancelled = false;
+  let result: any = null;
   try {
     const res = await api.post(`/rest/api/v1/online/${pid}/match-playlist`, { playlistId: route.params.id });
     if (res.data?.success) {
       if (res.data.jobId) {
         matchTotal.value = res.data.progress?.total || 0;
-        let pollTimer: ReturnType<typeof setTimeout> | null = null;
-        const poll = async () => {
-          if (matchPollCancelled) return;
-          try {
-            const s = await api.get(`/rest/api/v1/online/${pid}/match-playlist/status`, { params: { jobId: res.data.jobId } });
-            if (matchPollCancelled) return;
-            if (s.data?.progress) matchDone.value = s.data.progress.done || 0;
-            if (s.data?.status === "completed" || s.data?.status === "failed") {
-              matchRunning.value = false;
-              matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
-              if (s.data.error) ElMessage.warning(s.data.error);
-              return;
-            }
-          } catch { /* keep polling */ }
-          if (matchPollCancelled) return;
-          pollTimer = setTimeout(poll, 2000);
-        };
-        matchPollCancelled = false;
-        poll();
+        // 轮询到终态（completed / failed）后 resolve 结果。
+        result = await new Promise<any>((resolve) => {
+          const poll = async () => {
+            if (matchPollCancelled) { resolve(null); return; }
+            try {
+              const s = await api.get(`/rest/api/v1/online/${pid}/match-playlist/status`, { params: { jobId: res.data.jobId } });
+              if (matchPollCancelled) { resolve(null); return; }
+              if (s.data?.progress) matchDone.value = s.data.progress.done || 0;
+              if (s.data?.status === "completed" || s.data?.status === "failed") {
+                matchRunning.value = false;
+                matchResult.value = s.data.result || { matched: 0, noMatch: 0, error: 0 };
+                if (s.data.error) ElMessage.warning(s.data.error);
+                resolve(matchResult.value);
+                return;
+              }
+            } catch { /* keep polling */ }
+            if (matchPollCancelled) { resolve(null); return; }
+            setTimeout(poll, 2000);
+          };
+          poll();
+        });
       } else {
+        // 兼容同步返回（无 jobId）的旧响应
         matchTotal.value = res.data.total || 0;
         matchDone.value = matchTotal.value;
         matchResult.value = res.data;
         matchRunning.value = false;
+        result = res.data;
       }
     } else {
       matchRunning.value = false;
@@ -280,6 +327,14 @@ async function matchAllPlaylist() {
     matchRunning.value = false;
     ElMessage.error(e.response?.data?.error || t("playlists.matchStartFailed"));
   } finally { matchingAll.value = false; }
+  return result;
+}
+
+// Batch-match all unmatched tracks of this playlist as a background job, with progress.
+async function matchAllPlaylist() {
+  if (!onlineSourceId.value) await loadOnlineSource();
+  if (!onlineSourceId.value) return;
+  await runMatchJob();
 }
 const matchPercent = computed(() => (matchTotal.value > 0 ? Math.min(100, Math.round((matchDone.value / matchTotal.value) * 100)) : 0));
 async function closeMatchAndReload() {

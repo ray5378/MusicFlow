@@ -795,6 +795,8 @@
     "onlineSourceUnavailable": "在线源未配置或未启用",
     "matchStartFailed": "匹配启动失败",
     "matchDoneReload": "匹配完成,未匹配歌曲已刷新",
+    "noPlayableTrack": "该歌单暂无可播放的歌曲",
+    "matchedAppended": "已把新匹配的 {count} 首补齐到播放队列",
     "autoSyncOn": "已启用自动同步",
     "autoSyncOff": "已关闭自动同步",
     "publicSet": "歌单已设为公开",

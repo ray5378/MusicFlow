@@ -25,9 +25,24 @@ export function usePlayContent() {
     player.playQueue(songs, 0);
   }
 
-  async function fetchPlaylistSongs(id: string): Promise<any[]> {
-    const songs: any[] = [];
-    const pageSize = 100;
+  /// 歌单全量分解结果。`playable` 是权威可播队列（顺序 = 后端 position 序），
+  /// `unmatched` 是「曲库中未找到」的占位行（带 entryId，可送去在线源现场匹配）。
+  interface PlaylistTracks {
+    all: any[];
+    playable: any[];
+    unmatched: any[];
+  }
+
+  // 分页拉全量 tracks（而非只吃首屏窗口）。这是歌单「播放全部」的唯一正确数据源：
+  //
+  //  - 顺序 = 后端 `orderBy(position, id)`，与投屏 resolveContentSongs 同源；
+  //  - 包含未匹配占位行（`isMatched:false` 且带 `entryId`），现场匹配的输入就靠它；
+  //  - 不受 useInfiniteList 窗口化影响 —— 旧写法只播首屏 ~1000 行，尾部静默丢弃。
+  //
+  // pageSize 取后端上限 200（此前 100，请求数减半）。
+  async function fetchPlaylistTracks(id: string): Promise<PlaylistTracks> {
+    const all: any[] = [];
+    const pageSize = 200;
     let total = Infinity;
     for (let page = 1; (page - 1) * pageSize < total; page++) {
       const res = await api.get(`/rest/api/v1/playlists/${id}/tracks`, {
@@ -35,11 +50,17 @@ export function usePlayContent() {
       });
       const data = res.data || {};
       total = data.total || 0;
-      const items = (data.items || []).filter((s: any) => s.playable);
-      if (songs.length + items.length >= total) { songs.push(...items); break; }
-      songs.push(...items);
+      const items: any[] = data.items || [];
+      all.push(...items);
+      if (!items.length) break; // 防御：空页立即收尾，避免 total 漂移导致死循环
     }
-    return songs;
+    const playable = all.filter((s: any) => !!s && s.playable !== false && s.isMatched !== false);
+    const unmatched = all.filter((s: any) => !!s && s.isMatched === false);
+    return { all, playable, unmatched };
+  }
+
+  async function fetchPlaylistSongs(id: string): Promise<any[]> {
+    return (await fetchPlaylistTracks(id)).playable;
   }
 
   async function fetchAlbumSongs(id: string): Promise<any[]> {
@@ -75,5 +96,5 @@ export function usePlayContent() {
     return songs.length;
   }
 
-  return { fetchPlaylistSongs, fetchAlbumSongs, fetchArtistSongs, playPlaylist, playAlbum, playArtist };
+  return { fetchPlaylistTracks, fetchPlaylistSongs, fetchAlbumSongs, fetchArtistSongs, playWholeContent, playPlaylist, playAlbum, playArtist };
 }

@@ -795,6 +795,8 @@
     "onlineSourceUnavailable": "Online source not configured or not enabled",
     "matchStartFailed": "Failed to start matching",
     "matchDoneReload": "Matching done; unmatched tracks refreshed",
+    "noPlayableTrack": "This playlist has no playable tracks",
+    "matchedAppended": "Appended {count} newly matched track(s) to the playback queue",
     "autoSyncOn": "Auto sync enabled",
     "autoSyncOff": "Auto sync disabled",
     "publicSet": "Playlist set to public",
