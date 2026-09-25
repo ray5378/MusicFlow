@@ -22,6 +22,24 @@
   另清掉 5985 行指向已不在库的 UUID 形态 id；真实平台 id（`netease:` / `qq:` / `kugou:` / `apple:` /
   `huawei:` 等 2.3 万行）与 lastfm / listenbrainz 的 MBID 全部保留。
 
+### 修复：歌单「播放全部」大歌单静默漏播尾部（>1000 行只播前 ~1000 首）
+
+- **现象**：歌单详情页点「播放全部」，超过约 1000 行的歌单只会播前 ~1000 首，后面的曲目
+  无声无息被丢弃（不报错、不提示）。生产库实测「今日漫游」3137 行、只播前 ~1000 行。
+- **根因**：`playAll` 的数据源是 `useInfiniteList` 的**窗口化稀疏数组**（可视区 120 行 + 预取余量 700 行），
+  滚出窗口的旧块还会被 `nullSlots()` 置空 —— 数组里根本没有第 1001 行之后的内容。
+- **修复**：
+  - `composables/usePlayContent.ts` 新增 `fetchPlaylistTracks()`：分页拉取 `/v1/playlists/:id/tracks`
+    **全量**（`pageSize` 取上限 200，`position, id` 序），单次返回 `{ playable, unmatched }` 两段；
+    先回退一页补齐服务端 `total` 与分页上限不一致的边界。
+  - `views/Playlists/Detail.vue` 的 `playAll` 不再读 `list.value`：
+    ① 命中可播行 → `setContentOrigin("playlist", id)` + `playQueue(可播队列)` **零等待起播**（顺序正确）；
+    ② 存在未匹配行 → 复用后端 `match-playlist` job（并发搜索 + 门禁 + 批量导入，带进度对话框）
+    → 跑完 `addToQueue` 把新匹配到的曲目**补齐到队尾**。
+  - 同时补上 `playAll` 缺失的 `contentOrigin` 声明 —— 此前切投屏会退化成"整队推送"，
+    受公网 WAF 体积闸门限制（约 300 首即 403）；现在投屏走服务端权威队列 + `songId` 身份定位。
+- **慢路径边界**：整单一首都不可播时不再"先起播"，直接提示无可播歌曲（保持原行为）。
+
 ## [4.0.23] - 2026-09-25
 
 ### 修复：封面批量补全的候选口径与执行守卫不一致（界面「可匹配」数量虚高）
