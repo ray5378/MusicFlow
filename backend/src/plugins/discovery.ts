@@ -721,10 +721,15 @@ async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?
   const entries = Array.isArray(opts?.entries) ? opts.entries : [];
   entries.forEach((e: any, i: number) => {
     if (e && e.songId) {
-      const sid = String(e.songId);
-      sqlite.prepare(`INSERT INTO playlist_songs (playlist_id, song_id, position, playable, external_song_id, external_title)
-        VALUES (?, ?, ?, 1, ?, ?)`)
-        .run(playlistId, sid, i, sid, sid);
+      // 命中分支只写 song_id,external_* 三列保持空。
+      // 这里曾经把 sid 顶进 external_song_id/external_title 当「占位」,导致某行日后失去
+      // song_id 时(导入门禁重验不命中、歌曲被删),matchUnmatchedPlaylistEntries 会拿这串
+      // UUID 当歌名去在线搜索(externalSongId 直通路径已废除,只按 external_title/artist 搜),
+      // 永远搜不到 → 永久卡死,且歌曲列表对未匹配行直接渲染 external_title → 界面显示 UUID。
+      // 插件侧本来就在未命中分支才提供平台来源(如 "netease:<id>" + 歌名/歌手),命中分支无需占位。
+      sqlite.prepare(`INSERT INTO playlist_songs (playlist_id, song_id, position, playable)
+        VALUES (?, ?, ?, 1)`)
+        .run(playlistId, String(e.songId), i);
     } else if (e && (e.externalTitle || e.externalSongId)) {
       sqlite.prepare(`INSERT INTO playlist_songs (playlist_id, position, playable, external_song_id, external_title, external_artist, external_album, external_duration)
         VALUES (?, ?, 0, ?, ?, ?, ?, ?)`)

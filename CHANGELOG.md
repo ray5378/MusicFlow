@@ -2,6 +2,26 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.24] - 2026-09-25
+
+### 修复：歌单条目的 external_* 被写入「歌曲自身 UUID」占位，失效后永久卡死
+
+- **现象**：歌单里出现一串 UUID 当歌名（如 `35cd8956-…`），该条目再也匹配不上任何源。
+- **根因**：宿主写歌单条目的「已匹配」分支，把 `song_id` 顶进了 `external_song_id` / `external_title`，
+  且 `external_artist` 从未写入 —— `plugins/discovery.ts` 的 `upsertPluginPlaylist()`（外置插件
+  `host.playlists.upsert`）与 `services/source/online/recommendImport.ts` 的 `replacePlaylistSongs()`。
+  这两列本应只在「未匹配占位」时承载平台信息（`netease:<id>` + 歌名 + 歌手）。
+  平台 id 直通路径早已废除，未匹配条目一律拿 `external_title` / `external_artist` 去在线搜索并过导入门禁；
+  一旦某行因门禁重验不命中而失去 `song_id`，它就会用这串 UUID 当歌名去搜 → 永远搜不到，
+  永久卡死，并被歌曲列表原样渲染成 UUID。
+- **修复**：
+  - `discovery.ts` 命中分支只写 `song_id`，external_* 三列留空；
+  - `recommendImport.ts` 不再把歌曲 id 写入 `external_song_id`（保留真实歌名 `external_title`，
+    便于该行日后失去链接时仍能按名搜回，自愈）。
+- **存量数据**：清理 88361 行占位（其中 57059 行按 `songs` 表回填真歌名/歌手/时长，31302 行只清 id），
+  另清掉 5985 行指向已不在库的 UUID 形态 id；真实平台 id（`netease:` / `qq:` / `kugou:` / `apple:` /
+  `huawei:` 等 2.3 万行）与 lastfm / listenbrainz 的 MBID 全部保留。
+
 ## [4.0.23] - 2026-09-25
 
 ### 修复：封面批量补全的候选口径与执行守卫不一致（界面「可匹配」数量虚高）

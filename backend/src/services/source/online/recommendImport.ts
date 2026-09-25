@@ -107,8 +107,10 @@ export async function replacePlaylistSongs(playlistId: string, songIds: { id: st
         songId: s.id,
         position: gi,
         playable: 1,
+        // external_title 保留真实歌名(该行若日后失去 song_id,未匹配匹配路径还能按名字搜回);
+        // external_song_id 不再写 s.id —— 那是库内歌曲自己的 UUID,不是平台 id,
+        // 写进去既无消费者,又会在导出时被当作 externalId 带出去(见 exportPlaylistEntries)。
         externalTitle: s.title,
-        externalSongId: s.id,
       });
     }
   });
