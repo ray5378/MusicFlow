@@ -24,8 +24,12 @@ const WHITELIST = [
   "backend/src/services/plugin/dailyRecommend.ts",
   "backend/src/services/plugin/localRecommend.ts",
   "backend/src/services/plugin/dailyRoam.ts",
+  // 注意:walk() 只扫 backend/src 与 frontend/src,下面两条测试目录白名单当前**不会命中**;
+  // 保留是为了 walk 范围一旦扩到测试目录时白名单仍然成立。
+  // 2026-09-27 修:前端测试目录早已是 frontend/e2e/(原 frontend/tests/ 已不存在),
+  // 过期路径本身就是 D13 类「路径搬家未同步」,元守卫 check-workflow-paths.mjs 会拦。
   "backend/tests/",
-  "frontend/tests/",
+  "frontend/e2e/",
 ];
 const WHITELIST_RELS = WHITELIST.map((w) => w.replace(/\\/g, "/"));
 

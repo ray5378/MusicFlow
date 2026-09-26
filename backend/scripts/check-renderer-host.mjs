@@ -22,6 +22,7 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join, extname, resolve, dirname, relative } from "path";
 import { fileURLToPath } from "url";
+import { stripComments } from "./lib/strip-comments.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const SERVICES = join(root, "backend/src/services");
@@ -56,10 +57,6 @@ function walk(dir, out = []) {
   return out;
 }
 
-/** 剥掉注释,只审「代码里真的这么写」——注释/文档说明不拦。
- *  只删块注释与**整行**行注释:行尾 `//` 不删,免得把 `"http://…"` 这类字符串截断。 */
-const stripComments = (src) =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/[^\n]*$/gm, "");
 
 /** 文件归属的业务目录名(backend/src/services/<biz>/…),不在 services/<biz>/ 下返回 null。 */
 const bizOf = (fileRel) => /^backend\/src\/services\/([^/]+)\//.exec(fileRel)?.[1] ?? null;

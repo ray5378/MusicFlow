@@ -24,22 +24,34 @@
 //
 // 零依赖 node 脚本(与 check-seek-granularity.mjs / check-renderer-host.mjs 同款),
 // 挂 ci.yml 的守卫 job。
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./lib/strip-comments.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const SCAN_POLICY = "backend/src/services/dlna/scanPolicy.ts";
 const ENTRY = "backend/src/index.ts";
-const PEERS_ROUTE = "backend/src/routes/api/index.ts";
+// 拆分后 index.ts 只剩装配层,路由在 routes/api/*.ts -> 指向**目录**,read() 会拼接全目录。
+const PEERS_ROUTE_DIR = "backend/src/routes/api";
 const DISCOVERY = "backend/src/services/dlna/discovery.ts";
 const CONTROL = "backend/src/services/dlna/control.ts";
 
-const read = (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : "");
-/** 剥掉注释:只审「代码里真的这么写」,注释里的说明/示例不拦。 */
-const stripComments = (s) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+/** 读文件;若传的是**目录**(拆分后路由按业务域分文件),按文件名排序拼接目录内全部 .ts。
+ *  路径耦合的静态守卫必须跟着拆分一起走,否则 routes 一搬家这里就静默假绿(2026-09-27)。 */
+const read = (p) => {
+  const abs = join(root, p);
+  if (!existsSync(abs)) return "";
+  if (statSync(abs).isDirectory()) {
+    return readdirSync(abs)
+      .filter((f) => f.endsWith(".ts"))
+      .sort()
+      .map((f) => readFileSync(join(abs, f), "utf8"))
+      .join("\n");
+  }
+  return readFileSync(abs, "utf8");
+};
 
 /** 从源码里取出某个 `if (...)` 分支的**整段内容**(按花括号配对)。返回 `{ body, end }`,找不到返回 null。 */
 function branchBody(src, header, from = 0) {
@@ -107,15 +119,15 @@ if (!/from\s+"\.\/services\/dlna\/scanPolicy\.js"/.test(entry)) {
 }
 
 // ---------------- R3 拉列表即补扫 ----------------
-const routes = stripComments(read(PEERS_ROUTE));
+const routes = stripComments(read(PEERS_ROUTE_DIR));
 const peersIdx = routes.indexOf('"/v1/peers"');
 if (peersIdx === -1) {
-  fail("R3", `${PEERS_ROUTE} 未找到 \`/v1/peers\` 路由`);
+  fail("R3", `${PEERS_ROUTE_DIR} 未找到 \`/v1/peers\` 路由`);
 } else {
   // 取该路由处理函数的开头一小段（应紧跟路由声明）
   const body = routes.slice(peersIdx, peersIdx + 700);
   if (!/shouldRefreshDevices\(\)/.test(body)) {
-    fail("R3", `${PEERS_ROUTE} 的 \`/v1/peers\` 未调用 shouldRefreshDevices() 后台补扫 —— 拉列表本身带不出刚上线的设备`);
+    fail("R3", `${PEERS_ROUTE_DIR} 的 \`/v1/peers\` 未调用 shouldRefreshDevices() 后台补扫 —— 拉列表本身带不出刚上线的设备`);
   }
 }
 

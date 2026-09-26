@@ -97,8 +97,16 @@ jobs:
         shell: bash
         run: |
           miss=0
-          if ! grep -n "409" backend/src/routes/api/index.ts | grep -q "noPlayableSource"; then
+          # 2026-09-27 修:原写法是 grep index.ts 里的字面量 "409",同时踩了两个坑 ——
+          #   ① index.ts 已按业务域拆分(5048 行 → 71 行装配层),该逻辑搬到了 dlna.ts;
+          #   ② 状态码自 D10 起走 apiErrorStatus()/ERROR_STATUS 单一真源,不再写字面量 409。
+          # 改为「按目录递归找 i18n key + 断言 CONFLICT 确实映射 409」,对路径与写法都不再耦合。
+          if ! grep -rn "errors.song.noPlayableSource" backend/src/routes/api/ | grep -q "CONFLICT"; then
             echo "::error::跨仓契约回归:/v1/dlna/stream-url 必须在返回 409 的同时给出 errors.song.noPlayableSource"
+            miss=1
+          fi
+          if ! grep -q "CONFLICT]: 409" backend/src/utils/errors.ts; then
+            echo "::error::跨仓契约回归:BusinessErrorCode.CONFLICT 必须映射 HTTP 409(apiErrorStatus 单一真源)"
             miss=1
           fi
           if ! grep -q '"errors.song.noPlayableSource"' backend/src/i18n.ts; then
@@ -116,15 +124,16 @@ jobs:
         shell: bash
         run: |
           miss=0
-          if ! grep -q 'queue/transfer-from' backend/src/routes/api/index.ts; then
+          # 拆分后必须递归扫目录:路由已按业务域分文件,盯单文件会静默假绿(2026-09-27 修)。
+          if ! grep -rq 'queue/transfer-from' backend/src/routes/api/; then
             echo "::error::队列流转回归:缺少 /peers/:peerId/queue/transfer-from 端点"
             miss=1
           fi
-          if ! grep -q 'resolveBodyPeerId(c, from' backend/src/routes/api/index.ts; then
+          if ! grep -rq 'resolveBodyPeerId(c, from' backend/src/routes/api/; then
             echo "::error::队列流转回归:from 是 body 里的 peerId,必须经 resolveBodyPeerId 解析(否则把对外掩码当真实键,查不到队列)"
             miss=1
           fi
-          if grep -q "req.json().*items.*from" backend/src/routes/api/index.ts; then
+          if grep -rq "req.json().*items.*from" backend/src/routes/api/; then
             echo "::error::队列流转回归:流转端点不得接收 items(零上传设计红线)"
             miss=1
           fi

@@ -39,13 +39,15 @@
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, extname, resolve, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./lib/strip-comments.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const rel = (p) => relative(root, p).replace(/\\/g, "/");
 
 const BACKEND_UTIL = "backend/src/utils/seekGranularity.ts";
 const FRONTEND_UTIL = "frontend/src/utils/seekGranularity.ts";
-const BACKEND_ROUTE = "backend/src/routes/api/index.ts";
+// 拆分后 index.ts 只剩装配层,路由在 routes/api/*.ts -> 指向**目录**,read() 会拼接全目录。
+const BACKEND_ROUTES_DIR = "backend/src/routes/api";
 const FRONTEND_STORE = "frontend/src/stores/player.ts";
 const STREAM_ENGINE = "backend/src/services/sendspin/streamEngine.ts";
 
@@ -56,10 +58,20 @@ const ALIGN_CALL_RE = /alignSeekSeconds\s*\(/;
 const SEEK_POST_RE =
   /api\.post\(\s*peerApi\([^)]*,\s*"\/seek"\s*\)\s*,\s*\{([\s\S]{0,240}?\})/g;
 
-const read = (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : "");
-/** 剥掉注释:只审「代码里真的这么写」，注释里的示例/说明不拦。 */
-const stripComments = (s) =>
-  s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+/** 读文件;若传的是**目录**(拆分后路由按业务域分文件),按文件名排序拼接目录内全部 .ts。
+ *  路径耦合的静态守卫必须跟着拆分一起走,否则 routes 一搬家这里就静默假绿(2026-09-27)。 */
+const read = (p) => {
+  const abs = join(root, p);
+  if (!existsSync(abs)) return "";
+  if (statSync(abs).isDirectory()) {
+    return readdirSync(abs)
+      .filter((f) => f.endsWith(".ts"))
+      .sort()
+      .map((f) => readFileSync(join(abs, f), "utf8"))
+      .join("\n");
+  }
+  return readFileSync(abs, "utf8");
+};
 
 const violations = [];
 const fail = (rule, msg) => violations.push(`${rule} ${msg}`);
@@ -98,17 +110,17 @@ for (const [rule, p] of [["R1", BACKEND_UTIL], ["R2", FRONTEND_UTIL]]) {
 
 // —— R3:后端 seek 唯一入口必须兜底对齐 ——
 {
-  const code = stripComments(read(BACKEND_ROUTE));
+  const code = stripComments(read(BACKEND_ROUTES_DIR));
   const routeAt = code.indexOf('"/v1/peers/:peerId/seek"');
   if (routeAt < 0) {
-    fail("R3", `${BACKEND_ROUTE} 找不到 /v1/peers/:peerId/seek 路由（被改名或搬走？）`);
+    fail("R3", `${BACKEND_ROUTES_DIR} 找不到 /v1/peers/:peerId/seek 路由（被改名或搬走？）`);
   } else {
     // 取路由体（到下一个 apiRoutes.<verb>( 之前），确认下发值经对齐。
     const rest = code.slice(routeAt);
     const next = rest.slice(1).search(/apiRoutes\.(post|get|put|delete|patch)\(/);
     const body = next < 0 ? rest : rest.slice(0, next + 1);
     if (!ALIGN_CALL_RE.test(body)) {
-      fail("R3", `${BACKEND_ROUTE} 的 /v1/peers/:peerId/seek 未用 alignSeekSeconds 兜底（唯一入口必须拦截非整秒目标）`);
+      fail("R3", `${BACKEND_ROUTES_DIR} 的 /v1/peers/:peerId/seek 未用 alignSeekSeconds 兜底（唯一入口必须拦截非整秒目标）`);
     }
   }
 }
