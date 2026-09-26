@@ -45,6 +45,27 @@ export function apiError(code: BusinessErrorCode, message: string, params?: Reco
 }
 
 /** 构造统一成功响应体(可选附加 data)。 */
+/** 业务错误码 -> HTTP 状态码。apiError() 只造响应体,c.json() 的第二参数由本函数统一给出,
+ *  避免各调用点各写各的(历史上 25 处漏传,导致错误响应返回 200)。 */
+/** 业务错误码能映射到的 HTTP 状态码集合(窄字面量联合:Hono 的 c.json() 第二参数
+ *  只接受 ContentfulStatusCode,plain number 不可赋值)。 */
+export type ApiErrorStatus = 400 | 403 | 404 | 409 | 500 | 502;
+
+export const ERROR_STATUS: Record<BusinessErrorCode, ApiErrorStatus> = {
+  [BusinessErrorCode.INVALID_PARAM]: 400,
+  [BusinessErrorCode.NOT_FOUND]: 404,
+  [BusinessErrorCode.CONFLICT]: 409,
+  [BusinessErrorCode.BUSY]: 409,
+  [BusinessErrorCode.FORBIDDEN]: 403,
+  [BusinessErrorCode.UPSTREAM_ERROR]: 502,
+  [BusinessErrorCode.INTERNAL]: 500,
+};
+
+/** 取业务错误码对应的 HTTP 状态码(未知码回落 500 —— 不能静默降级成 200)。 */
+export function apiErrorStatus(code: BusinessErrorCode): ApiErrorStatus {
+  return ERROR_STATUS[code] ?? 500;
+}
+
 export function apiOk(data?: Record<string, unknown>): { success: true } & Record<string, unknown> {
   return { success: true, ...(data || {}) };
 }

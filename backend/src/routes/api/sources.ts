@@ -6,6 +6,7 @@ import {
   ScanProgress,
   adminMiddleware,
   apiError,
+  apiErrorStatus,
   cleanupOrphans,
   db,
   deleteAnalysisMany,
@@ -77,7 +78,7 @@ app.delete("/v1/sources/:id", adminMiddleware, (c) => {
 app.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"));
+  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
 
   const config = JSON.parse(source.config || "{}");
 
@@ -89,17 +90,17 @@ app.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
       return c.json(result);
     } catch (e: any) {
       console.log("[TEST] Error:", e.message);
-      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.source.connectFailed"));
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.source.connectFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
   } else if (source.type === "local") {
     const fs = await import("fs");
     if (fs.existsSync(config.path)) {
       return c.json({ success: true, message: `路径 ${config.path} 存在` });
     } else {
-      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.source.pathMissing", { path: config.path }));
+      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.source.pathMissing", { path: config.path }), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
     }
   }
-  return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.source.unsupportedType"));
+  return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.source.unsupportedType"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
 });
 
 // Scan source
@@ -108,10 +109,10 @@ app.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   touch(); // 标记活动:媒体源扫描
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"));
-  if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.source.disabled"));
+  if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
+  if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.source.disabled"), apiErrorStatus(BusinessErrorCode.CONFLICT));
   if (scanJobs.has(id) && scanJobs.get(id)!.status === "running") {
-    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.busy"));
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.busy"), apiErrorStatus(BusinessErrorCode.CONFLICT));
   }
 
   const body = await c.req.json().catch(() => ({}));
@@ -173,7 +174,7 @@ app.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
 app.post("/v1/sources/:id/scan-stop", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   const job = scanJobs.get(id);
-  if (!job || job.status !== "running") return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.notRunning"));
+  if (!job || job.status !== "running") return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.notRunning"), apiErrorStatus(BusinessErrorCode.CONFLICT));
   job.controller?.abort();
   return c.json({ success: true, message: "正在停止扫描..." });
 });

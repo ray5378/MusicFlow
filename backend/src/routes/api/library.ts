@@ -8,6 +8,7 @@ import {
   albums,
   and,
   apiError,
+  apiErrorStatus,
   artists,
   artistsMissingCovers,
   artistsMissingInfo,
@@ -308,12 +309,12 @@ app.post("/v1/artists/scrape", async (c) => {
   try {
     if (name) {
       const result = await scrapeArtist(name, body.artistId || undefined);
-      if (!result) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.artist.notFound"));
+      if (!result) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.artist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
       return c.json({ success: true, name: result.name, platform: result.platform, coverArt: result.coverArt, bio: result.bio || undefined });
     }
     // Full scrape: all artists missing covers, run in background with progress
     if (scrapeJobs.get(SCRAPE_JOB_ID)?.status === "running") {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scraper.busy"));
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scraper.busy"), apiErrorStatus(BusinessErrorCode.CONFLICT));
     }
     const missing = artistsMissingCovers();
     const job = { status: "running", startedAt: new Date().toISOString(), progress: undefined as any };
@@ -329,7 +330,7 @@ app.post("/v1/artists/scrape", async (c) => {
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削" });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.scraper.failed"));
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.scraper.failed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -346,7 +347,7 @@ app.get("/v1/artists/scrape-status", (c) => {
 app.post("/v1/artists/scrape-missing", async (c) => {
   try {
     if (scrapeJobs.get(SCRAPE_JOB_ID)?.status === "running") {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scraper.busy"));
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scraper.busy"), apiErrorStatus(BusinessErrorCode.CONFLICT));
     }
     const missing = artistsMissingInfo();
     if (missing.length === 0) {
@@ -365,7 +366,7 @@ app.post("/v1/artists/scrape-missing", async (c) => {
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削缺失歌手信息" });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.scraper.failed"));
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.scraper.failed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 

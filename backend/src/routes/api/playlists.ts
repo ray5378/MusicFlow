@@ -8,6 +8,7 @@ import {
   albums,
   and,
   apiError,
+  apiErrorStatus,
   asc,
   attachGroupSources,
   clearLibraryIndex,
@@ -52,7 +53,7 @@ app.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c)
   const body = await c.req.json().catch(() => ({}));
   const url = (body.url || "").trim();
   const native = body.native; // MusicFlow-exported JSON (object) for native files
-  if (!url && !native) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.linkOrFileRequired"));
+  if (!url && !native) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.linkOrFileRequired"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   if (native) {
       // Uploaded playlist file — routed to whichever enabled importer plugin
       // recognizes the payload (built-in: MusicFlow export, one or many playlists).
@@ -94,7 +95,7 @@ app.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c)
       });
     }
     if (syncApi()?.checkImportCooldown(user?.id || "", url) ?? false) {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.importDup"));
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.importDup"), apiErrorStatus(BusinessErrorCode.CONFLICT));
     }
     if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
     const ownerKey = `${url}:${user?.id || ""}`;
@@ -151,9 +152,9 @@ app.post("/v1/playlists/:id/sync", permMiddleware(PERM.PLAYLIST_IMPORT), async (
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   // Only owner (or admin) can sync
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.syncForbidden"));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.syncForbidden"), apiErrorStatus(BusinessErrorCode.FORBIDDEN));
   if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
   const started = startAsyncTask("playlist-sync", `pl:${id}`, {
     kind: "playlist-sync",
@@ -170,8 +171,8 @@ app.put("/v1/playlists/:id", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => 
   const id = c.req.param("id")!;
   const body = await c.req.json().catch(() => ({}));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"), apiErrorStatus(BusinessErrorCode.FORBIDDEN));
   const update: any = { updatedAt: new Date().toISOString() };
   if (body.name !== undefined) update.name = String(body.name).trim() || playlist.name;
   if (body.isPublic !== undefined) update.isPublic = body.isPublic ? 1 : 0;
@@ -188,9 +189,9 @@ app.post("/v1/playlists/:id/convert-to-local", permMiddleware(PERM.PLAYLIST_MANA
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
-  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
-  if (!playlist.sourceUrl) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.alreadyLocal"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
+  if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"), apiErrorStatus(BusinessErrorCode.FORBIDDEN));
+  if (!playlist.sourceUrl) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.alreadyLocal"), apiErrorStatus(BusinessErrorCode.CONFLICT));
   const update: any = {
     sourceUrl: null,
     externalId: null,
@@ -434,9 +435,9 @@ app.post("/v1/playlist/:id/auto-match", permMiddleware(PERM.PLAYLIST_IMPORT), as
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"));
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   if (playlist.ownerId !== user?.id && !user?.isAdmin) {
-    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"));
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.modifyForbidden"), apiErrorStatus(BusinessErrorCode.FORBIDDEN));
   }
   // fire-and-forget:拿全局批量闸可能要排队,绝不能把触发方挂住。
   //

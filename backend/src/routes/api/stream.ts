@@ -5,6 +5,7 @@ import {
   MAX_PROBE_BATCH,
   PERM,
   apiError,
+  apiErrorStatus,
   db,
   ensurePlayableStream,
   eq,
@@ -21,7 +22,7 @@ app.post("/v1/stream/probe", async (c) => {
   const songIds = Array.isArray(body.songIds)
     ? body.songIds.filter((s: any) => typeof s === "string").slice(0, MAX_PROBE_BATCH)
     : [];
-  if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.songIdsRequired"));
+  if (!songIds.length) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.songIdsRequired"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const results = await Promise.all(songIds.map(async (id: string) => {
     const song = db.select().from(songs).where(eq(songs.id, id)).get();
     if (!song) return { songId: id, ok: false, local: false, verdict: "unplayable" as const, reason: "歌曲不存在" };
