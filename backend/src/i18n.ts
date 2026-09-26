@@ -108,6 +108,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.album.refRequired": "缺少专辑 source/id",
 
     "errors.import.noSongs": "没有可导入的歌曲",
+    "errors.import.allRejected": "没有歌曲通过导入门禁(标题/歌手/专辑/时长校验),拒导 {count} 首",
     "errors.import.failed": "导入失败",
     "errors.common.paramsRequired": "缺少参数",
 
@@ -278,6 +279,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.album.refRequired": "Missing album source/id",
 
     "errors.import.noSongs": "No songs available to import",
+    "errors.import.allRejected": "No songs passed the import gate (title/artist/album/duration); {count} rejected",
     "errors.import.failed": "Import failed",
     "errors.common.paramsRequired": "Missing parameters",
     "errors.cast.screenFailed": "Cast failed",

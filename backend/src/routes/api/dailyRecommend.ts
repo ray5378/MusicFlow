@@ -5,6 +5,7 @@ import {
   adminMiddleware,
   and,
   apiError,
+  apiErrorStatus,
   count,
   dailyApi,
   dailyRecommendTag,
@@ -133,7 +134,7 @@ app.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
   } catch (e: any) {
     const error = e.message || translate("errors.recommend.genFailed");
     log.error("[DAILY-RECOMMEND] trigger error", { err: error });
-    return c.json({ success: false, error }, 500);
+    return c.json(apiError(BusinessErrorCode.INTERNAL, error), apiErrorStatus(BusinessErrorCode.INTERNAL));
   }
 });
 

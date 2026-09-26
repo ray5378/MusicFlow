@@ -40,7 +40,7 @@ beforeAll(() => {
 });
 
 async function call(method: string, path: string, body?: any) {
-  const res = await app.request("/rest/api" + path + "?" + authQS(), {
+  const res = await app.request("/rest/api" + path + (path.includes("?") ? "&" : "?") + authQS(), {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -104,9 +104,16 @@ describe("online 路由契约 - 返回体形态", () => {
     }
   });
 
-  it("unmatched 列表返回数组形态", async () => {
+  it("[D8] unmatched 缺 playlistId:400 + INVALID_PARAM(此前静默 200)", async () => {
     const r = await call("GET", "/v1/online/no-such-provider/unmatched");
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ success: false, code: "INVALID_PARAM" });
+  });
+
+  it("unmatched 列表返回数组形态", async () => {
+    const r = await call("GET", "/v1/online/no-such-provider/unmatched?playlistId=nope");
     expect(r.status).toBe(200);
-    expect(r.body && typeof r.body === "object").toBe(true);
+    expect(r.body).toMatchObject({ success: true, count: 0 });
+    expect(Array.isArray(r.body.entries)).toBe(true);
   });
 });

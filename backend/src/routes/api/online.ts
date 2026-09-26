@@ -24,6 +24,7 @@ import { getPluginManifest, getEnabledByCapability } from "../../plugins/registr
 import { runPluginJob } from "../../services/plugin/jobRunner.js";
 import { runBatchJob } from "../../batch/runner.js";
 import { translate } from "../../i18n.js";
+import { apiError, apiErrorStatus, BusinessErrorCode } from "./shared.js";
 
 export const onlineRoutes = new Hono();
 
@@ -62,11 +63,11 @@ const matchJobsSweep = setInterval(() => {
 // Connectivity test for an admin-configured provider instance.
 onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const provider = getOnlineProvider(providerId);
-  if (!provider) return c.json({ success: false, error: translate("errors.online.unknownProvider", { providerId }) });
+  if (!provider) return c.json({ ...apiError(BusinessErrorCode.NOT_FOUND, "errors.online.unknownProvider", { providerId }) }, apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   const config = getSourcePluginConfig(providerId);
-  if (!config) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!config) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
   const result = await provider.test(config);
   return c.json({ success: result.success, message: result.message });
 });
@@ -75,12 +76,12 @@ onlineRoutes.post("/v1/online/:providerId/test", adminMiddleware, async (c) => {
 // Body: { q: string, sources?: string[] } -> { songs: OnlineSongResult[] }
 onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_SEARCH), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!configured) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
   const body = await c.req.json().catch(() => ({}));
   const q = String(body.q || "").trim();
-  if (!q) return c.json({ success: false, error: translate("errors.search.queryRequired") });
+  if (!q) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.search.queryRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
   try {
     const result = await configured.provider.search(configured.config, { query: q, sources });
@@ -93,7 +94,7 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
     }));
     return c.json({ success: true, total: songs.length, songs });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || translate("errors.search.failed") });
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.search.failed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -107,16 +108,16 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
 //   GET   .../match-playlist/status?jobId=  -> { status, progress, result?, error? }
 onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!configured) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
 
   const body = await c.req.json().catch(() => ({}));
   const playlistId = typeof body.playlistId === "string" ? body.playlistId : null;
-  if (!playlistId) return c.json({ success: false, error: translate("errors.playlist.idRequired") });
+  if (!playlistId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.idRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
 
   const pl = db.select().from(playlists).where(eq(playlists.id, playlistId)).get();
-  if (!pl) return c.json({ success: false, error: translate("errors.playlist.notFound") }, 404);
+  if (!pl) return c.json({ ...apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound") }, apiErrorStatus(BusinessErrorCode.NOT_FOUND));
 
   const entryCount = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all()
     .filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim()).length;
@@ -128,7 +129,7 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
       const result = await matchUnmatchedPlaylistEntries(providerId, configured.config, configured.provider, playlistId);
       return c.json({ success: true, jobId: null, ...result });
     } catch (e: any) {
-      return c.json({ success: false, error: e.message || translate("errors.online.matchFailed") });
+      return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.online.matchFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
   }
 
@@ -152,9 +153,9 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
 // Poll status of a background match job.
 onlineRoutes.get("/v1/online/:providerId/match-playlist/status", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const jobId = c.req.query("jobId");
-  if (!jobId) return c.json({ success: false, error: translate("errors.task.jobIdRequired") });
+  if (!jobId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.task.jobIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const job = matchJobs.get(jobId);
-  if (!job) return c.json({ success: false, error: translate("errors.task.notFound") }, 404);
+  if (!job) return c.json({ ...apiError(BusinessErrorCode.NOT_FOUND, "errors.task.notFound") }, apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, progress: job.progress, result: job.result, error: job.error });
 });
 
@@ -164,9 +165,9 @@ onlineRoutes.get("/v1/online/:providerId/match-playlist/status", permMiddleware(
 //   GET  /v1/online/:providerId/match-playlists/status?batchId= -> { status, total, done, current, results, error }
 onlineRoutes.post("/v1/online/:providerId/match-playlists", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!configured) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
 
   // 收集所有含未匹配条目的歌单(entryCount > 0)。
   // 单条 GROUP BY 聚合替代「每歌单全量扫描」的 N+1 查询。
@@ -209,9 +210,9 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", permMiddleware(PERM.
 
 onlineRoutes.get("/v1/online/:providerId/match-playlists/status", permMiddleware(PERM.PLAYLIST_IMPORT), (c) => {
   const batchId = c.req.query("batchId");
-  if (!batchId) return c.json({ success: false, error: translate("errors.task.batchIdRequired") });
+  if (!batchId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.task.batchIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const job = batchMatchJobs.get(batchId);
-  if (!job) return c.json({ success: false, error: translate("errors.task.notFound") }, 404);
+  if (!job) return c.json({ ...apiError(BusinessErrorCode.NOT_FOUND, "errors.task.notFound") }, apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   return c.json({ success: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, total: job.total, done: job.done, current: job.current, results: job.results, error: job.error });
 });
 
@@ -219,16 +220,16 @@ onlineRoutes.get("/v1/online/:providerId/match-playlists/status", permMiddleware
 // Body: { entryId }
 onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!configured) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
 
   const body = await c.req.json().catch(() => ({}));
   const entryId = Number(body.entryId);
-  if (!Number.isInteger(entryId) || entryId <= 0) return c.json({ success: false, error: translate("errors.online.entryIdRequired") });
+  if (!Number.isInteger(entryId) || entryId <= 0) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.entryIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
 
   const entry = db.select().from(playlistSongs).where(eq(playlistSongs.id, entryId)).get();
-  if (!entry) return c.json({ success: false, error: translate("errors.online.entryNotFound") }, 404);
+  if (!entry) return c.json({ ...apiError(BusinessErrorCode.NOT_FOUND, "errors.online.entryNotFound") }, apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   if (entry.playable && entry.songId) return c.json({ success: true, alreadyPlayable: true });
 
   try {
@@ -241,7 +242,7 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
     });
     return c.json({ success: result.status === "matched", ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || translate("errors.online.matchFailed") });
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.online.matchFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -250,7 +251,7 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
 onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
   const playlistId = c.req.query("playlistId");
-  if (!providerId || !playlistId) return c.json({ success: false, error: translate("errors.common.paramsRequired") });
+  if (!providerId || !playlistId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.paramsRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   try {
     const entries = db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).all();
     const unmatched = entries.filter((e) => !e.playable && !e.songId && (e.externalTitle || "").trim());
@@ -258,7 +259,7 @@ onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIS
       id: e.id, title: e.externalTitle, artist: e.externalArtist, album: e.externalAlbum, duration: e.externalDuration,
     })) });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || translate("errors.search.queryFailed") });
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.search.queryFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 // Body: { songs: OnlineSongResult[], playlistId?: string, verified?: boolean }
@@ -267,24 +268,24 @@ onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIS
 // 否则(上游歌单条目等)逐首搜索交叉比对,全命中才导,拒导的不落库。
 onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
-  if (!getSourcePluginConfig(providerId)) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
+  if (!getSourcePluginConfig(providerId)) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
   const songList: OnlineSongResult[] = Array.isArray(body.songs) ? body.songs : null;
-  if (!songList || songList.length === 0) return c.json({ success: false, error: translate("errors.import.noSongs") });
+  if (!songList || songList.length === 0) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.import.noSongs") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const playlistId = typeof body.playlistId === "string" ? body.playlistId : undefined;
   try {
     let toImport = songList;
     let rejected = 0;
     if (body.verified !== true) {
       const configured = getConfiguredProvider(providerId);
-      if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+      if (!configured) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
       const r = await crossVerifySongs(providerId, configured.config, configured.provider, songList);
       toImport = r.verified;
       rejected = r.rejected;
       if (!toImport.length) {
-        return c.json({ success: false, error: `没有歌曲通过导入门禁(标题/歌手/专辑/时长校验),拒导 ${rejected} 首`, rejected });
+        return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.import.allRejected", { count: rejected }), rejected }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
       }
     }
     // verified=true 是用户亲选的搜索结果(SPEC 明文契约豁免)→ 显式 skip;
@@ -292,7 +293,7 @@ onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_
     const result = await importOnlineSongs(providerId, toImport, { playlistId, userId: user?.id, gate: body.verified === true ? "skip" : "verified" });
     return c.json({ success: true, rejected, ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || translate("errors.import.failed") });
+    return c.json({ ...apiError(BusinessErrorCode.INTERNAL, e.message || "errors.import.failed") }, apiErrorStatus(BusinessErrorCode.INTERNAL));
   }
 });
 
@@ -302,9 +303,9 @@ onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_
 // GET /v1/online/:providerId/recommend
 onlineRoutes.get("/v1/online/:providerId/recommend", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured || !configured.provider.recommend) return c.json({ success: false, error: translate("errors.online.noRecommend") });
+  if (!configured || !configured.provider.recommend) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.noRecommend") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   try {
     const result = await configured.provider.recommend(configured.config);
     // Annotate each playlist with whether it's already imported locally.
@@ -315,7 +316,7 @@ onlineRoutes.get("/v1/online/:providerId/recommend", permMiddleware(PERM.RECOMME
     }
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || translate("errors.online.fetchRecommendFailed") });
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.online.fetchRecommendFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -334,12 +335,12 @@ onlineRoutes.get("/v1/online/:providerId/recommend/local", permMiddleware(PERM.R
 // POST /v1/online/:providerId/recommend/import { source, id, name, cover, creator, trackCount }
 onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured?.provider.playlistSongs) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!configured?.provider.playlistSongs) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
   const user = c.get("user");
   const body = await c.req.json().catch(() => ({}));
-  if (!body.source || !body.id) return c.json({ success: false, error: translate("errors.online.recommendRefRequired") });
+  if (!body.source || !body.id) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.recommendRefRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const info = { id: String(body.id), source: String(body.source), name: String(body.name || ""), creator: String(body.creator || ""), cover: String(body.cover || ""), trackCount: String(body.trackCount || ""), link: String(body.link || "") };
   try {
     const result = await importRecommendPlaylist(providerId, info, { userId: user?.id });
@@ -367,13 +368,13 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM
 onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", permMiddleware(PERM.RECOMMEND_VIEW), async (c) => {
   touch(); // 标记活动:聚合同步所有平台
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const configured = getConfiguredProvider(providerId);
-  if (!configured) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!configured) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
 
   // ① 路径 A 推荐歌单重导(后台,状态存 syncAllState)。
   const existing = syncAllState.get(providerId);
-  if (existing?.running) return c.json({ success: false, error: translate("errors.online.syncBusy") }, 409);
+  if (existing?.running) return c.json({ ...apiError(BusinessErrorCode.BUSY, "errors.online.syncBusy") }, apiErrorStatus(BusinessErrorCode.BUSY));
   const state = { running: true, startedAt: new Date().toISOString(), finishedAt: undefined as string | undefined, result: null as any, error: null as string | null };
   syncAllState.set(providerId, state);
   (async () => {
@@ -403,7 +404,7 @@ onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", permMiddleware(PE
 onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", permMiddleware(PERM.RECOMMEND_VIEW), (c) => {
   const providerId = c.req.param("providerId");
   const st = syncAllState.get(providerId || "");
-  if (!st) return c.json({ success: false, error: translate("errors.online.noSyncRecord") }, 404);
+  if (!st) return c.json({ ...apiError(BusinessErrorCode.NOT_FOUND, "errors.online.noSyncRecord") }, apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   return c.json({ success: true, running: st.running, startedAt: st.startedAt, finishedAt: st.finishedAt, result: st.result, error: st.error });
 });
 
@@ -412,13 +413,13 @@ onlineRoutes.get("/v1/online/:providerId/recommend/sync-all/status", permMiddlew
 // POST /v1/online/:providerId/purge-web-songs
 onlineRoutes.post("/v1/online/:providerId/purge-web-songs", adminMiddleware, async (c) => {
   const providerId = c.req.param("providerId");
-  if (!providerId) return c.json({ success: false, error: translate("errors.online.providerIdRequired") });
-  if (!getConfiguredProvider(providerId)) return c.json({ success: false, error: translate("errors.online.notConfigured") });
+  if (!providerId) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.online.providerIdRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
+  if (!getConfiguredProvider(providerId)) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.online.notConfigured") }, apiErrorStatus(BusinessErrorCode.CONFLICT));
   try {
     // 清理在一次性批量子进程里执行(方案3);结果经 IPC 回传。
     const { result } = await runBatchJob("purge-web-songs", { providerId });
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message || translate("errors.online.purgeFailed") });
+    return c.json({ ...apiError(BusinessErrorCode.INTERNAL, e.message || "errors.online.purgeFailed") }, apiErrorStatus(BusinessErrorCode.INTERNAL));
   }
 });
