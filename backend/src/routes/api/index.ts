@@ -3494,17 +3494,30 @@ apiRoutes.post("/v1/pipeline/measure/run", adminMiddleware, async (c) => {
 // 非 admin 只能控制/查询「自己的本机播放器 + 被授权的设备/群组」。
 // 与 /v1/peers 列表过滤一致(canControlPeer 含 local:<userId> 永远放行),
 // 防止普通用户看到或遥控别人的播放器/群组。
+//
+// ⚠️ 路径隔离(2026-09-26 实测定位):Hono 的 `:peerId/*` 通配会**吞掉字面量子路径** ——
+// 最小复现(backend 内跑 Hono 4.13.5):
+//   POST /v1/peers/register → MW 命中且 `peerId === "register"`
+// 于是 `canControlPeer(userId, false, "register")` 恒 false,普通账号注册自己被 403
+// 拦下(管理员因 isAdmin 短路才通过)。这是「非管理员在客户端看不到自己本机播放器」
+// 的**根因** —— 注册失败 ⇒ peer 从未建立 ⇒ 列表里既没有自己那行、self 也无从谈起。
+// 故此处显式放行下面的**字面量保留段**(它们不是 peerId):
+//   register —— 注册本端(自身校验在路由内)
+// 注意用**精确等值**而非前缀匹配,避免把真实 peerId(如 dlna:register-xxx)误放。
+const PEER_PATH_RESERVED = new Set(["register"]);
 apiRoutes.use("/v1/peers/:peerId/*", async (c, next) => {
-  const user = c.get("user");
   const peerId = c.req.param("peerId") || "";
+  if (PEER_PATH_RESERVED.has(peerId)) return next();
+  const user = c.get("user");
   if (canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)) return next();
   return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
 });
 
 apiRoutes.use("/v1/peers/:peerId", async (c, next) => {
   if (c.req.method !== "GET") return next(); // 只拦 GET 详情/状态查询;register/heartbeat 等走各自校验
-  const user = c.get("user");
   const peerId = c.req.param("peerId") || "";
+  if (PEER_PATH_RESERVED.has(peerId)) return next();
+  const user = c.get("user");
   return canControlPeer(user?.id ?? "", !!user?.isAdmin, peerId)
     ? next()
     : c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);

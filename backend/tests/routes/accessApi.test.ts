@@ -208,3 +208,66 @@ describe("功能权限门禁(端点级)", () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// /v1/peers/:peerId/* 路径隔离(2026-09-26 实测定位的回归锁)
+//
+// Hono 的 `:peerId/*` 通配会吞掉字面量子路径:最小复现证明
+//   POST /v1/peers/register → 中间件命中且 `peerId === "register"`
+// ⇒ `canControlPeer(uid, false, "register")` 恒 false ⇒ 普通账号注册自己 403。
+// 这是「非管理员在客户端看不到自己本机播放器」的根因(注册失败 ⇒ peer 未建立)。
+// 修复 = 中间件显式放行 PEER_PATH_RESERVED 里的字面量段。
+// ---------------------------------------------------------------------------
+describe("/v1/peers 路径隔离", () => {
+  it("普通用户 POST /v1/peers/register → 200(不再被 :peerId 通配当成 peerId 拦下)", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    const uAuth = await authed(u, false);
+    const res = await app.request("/rest/api/v1/peers/register", {
+      method: "POST",
+      headers: { ...uAuth.headers, "x-mf-client-id": "app-testregister" },
+      body: JSON.stringify({ name: "", platform: "windows" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    // 注册成功必须回自己那条(self 恒 true),字段与客户端消费口径一致。
+    expect(body?.peer?.peerId).toContain(`local:${u}`);
+    expect(body?.peer?.self).toBe(true);
+  });
+
+  it("register resp 的 peerId 能反查(带实例键),列表里认得出 self", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    const uAuth = await authed(u, false);
+    const headers = { ...uAuth.headers, "x-mf-client-id": "app-testregister2" };
+    const reg = await app.request("/rest/api/v1/peers/register", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "", platform: "windows" }),
+    });
+    const regBody = (await reg.json()) as any;
+    const masked = regBody?.peer?.peerId;
+    expect(masked).toBeTruthy();
+
+    const list = await app.request("/rest/api/v1/peers", { headers });
+    const peers = ((await list.json()) as any)?.peers ?? [];
+    // ⚠️ 出口口径(access.ts decoratePeersForClient):self 行的 `peerId` 会被归一化成
+    // 账号级 `local:<uid>`(前端靠它判「自己那条」),而**带实例键**的稳定标识放在
+    // `instancePeerId`。故不能用 register 回的 masked id 去比 `peerId`。
+    const mine = peers.filter(
+      (p: any) => p.self === true && p.instancePeerId === masked,
+    );
+    expect(mine.length).toBe(1);
+    // 同一 clientId 视角下,自己那条必是 self —— 「在客户端看到自己」的判定依据。
+    expect(mine[0].peerId).toBe(`local:${u}`);
+  });
+
+  it("保留段放行不误伤真实 peerId(带 register 前缀的 dlna 设备仍走鉴权)", async () => {
+    const outsider = seedUser({ isAdmin: 0 });
+    const oAuth = await authed(outsider, false);
+    // dlna:register-xxx 不是保留段(精确等值匹配),普通用户无授权 → 仍 403。
+    const res = await app.request("/rest/api/v1/peers/dlna:register-abc/heartbeat", {
+      method: "POST",
+      headers: oAuth.headers,
+    });
+    expect(res.status).toBe(403);
+  });
+});
