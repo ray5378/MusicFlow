@@ -6,7 +6,7 @@
  * Vorbis Comment 的多值标签 + 带/不带时间轴歌词、ID3v2.3 的 APIC 内嵌封面。
  * WAV 则在本文件里按 RIFF 手搓(只有 PCM 头,零标签),覆盖「解析成功但无标签」。
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -407,7 +407,7 @@ describe("scanLocalSource", () => {
     const phases: string[] = [];
     const res = await scanLocalSource("sL1", { path: dir }, "full", (p) => phases.push(p.phase));
 
-    expect(res).toMatchObject({ added: 2, updated: 0, removed: 0, skipped: 0 });
+    expect(res).toMatchObject({ added: 2, updated: 0, removed: 0, skipped: 0, failed: 0 });
     expect(phases[0]).toBe("scanning");
     expect(phases[phases.length - 1]).toBe("done");
 
@@ -428,7 +428,7 @@ describe("scanLocalSource", () => {
     const dir = writeFiles();
     await scanLocalSource("sL3", { path: dir }, "full");
     const res = await scanLocalSource("sL3", { path: dir }, "incremental");
-    expect(res).toMatchObject({ added: 0, updated: 0, removed: 0, skipped: 2 });
+    expect(res).toMatchObject({ added: 0, updated: 0, removed: 0, skipped: 2, failed: 0 });
   });
 
   it("incremental 扫描:文件内容变化后重新入库(updated)", async () => {
@@ -440,6 +440,34 @@ describe("scanLocalSource", () => {
     expect(res.added).toBe(0);
     expect(res.updated).toBe(1);
     expect(res.skipped).toBe(1);
+    expect(res.failed).toBe(0);
+  });
+
+  it("[D5] 单个文件抛异常 -> 计入 failed 并带路径告警,其余文件照常入库", async () => {
+    const dir = writeFiles();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // 只让 one.wav 的 statSync 失败(等价于「列目录后文件被换掉 / 权限突变」)。
+    const realStatSync = fs.statSync.bind(fs);
+    let thrown = false;
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((p: any, opts?: any) => {
+      if (!thrown && String(p).endsWith("one.wav")) {
+        thrown = true;
+        throw new Error("EACCES: boom");
+      }
+      return (realStatSync as any)(p, opts);
+    }) as any);
+
+    try {
+      const res = await scanLocalSource("sL7", { path: dir }, "full");
+      // 失败不再混进 skipped —— 之前这里会报 skipped:1,用户以为只是「无需变更」。
+      expect(res).toMatchObject({ added: 1, skipped: 0, failed: 1 });
+      const warned = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warned).toContain("本地入库失败");
+      expect(warned).toContain("one.wav");
+    } finally {
+      statSpy.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it("文件消失后 full 扫描回收歌曲行并清理孤儿", async () => {

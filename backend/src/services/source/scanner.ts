@@ -80,7 +80,10 @@ export interface ScanProgress {
   processedFiles: number;
   added: number;
   updated: number;
+  /** 仅「无需变更」——增量指纹未变 / upsert 判定无需改动。 */
   skipped: number;
+  /** 真正失败:下载非 2xx、解析或入库抛异常。与 skipped 分开,避免「跳过」掩盖故障。 */
+  failed: number;
   currentTrack: string;
   mode: "full" | "incremental";
 }
@@ -162,7 +165,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
 
   const progress: ScanProgress = {
     phase: "traverse", totalDirs: 0, processedDirs: 0,
-    totalFiles: 0, processedFiles: 0, added: 0, updated: 0, skipped: 0, currentTrack: "", mode,
+    totalFiles: 0, processedFiles: 0, added: 0, updated: 0, skipped: 0, failed: 0, currentTrack: "", mode,
   };
   if (onProgress) onProgress(progress);
 
@@ -172,7 +175,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   const seenPaths = new Set<string>();
   const MAX_DIR_ATTEMPTS = 4;
 
-  let added = 0, updated = 0, skipped = 0;
+  let added = 0, updated = 0, skipped = 0, failed = 0;
   let activeDirs = 0, activeFiles = 0;
   let discoveredFiles = 0;
   let doneResolve: () => void;
@@ -189,7 +192,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
       progress.currentTrack = "";
       progress.totalFiles = discoveredFiles;
       emitProgress();
-      log.info(`[SCANNER] Scan complete: +${added} ~${updated} -${skipped} (mode=${mode})`);
+      log.info(`[SCANNER] Scan complete: +${added} ~${updated} -${skipped} fail=${failed} (mode=${mode})`);
       doneResolve();
     }
   };
@@ -202,11 +205,11 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
     progress.currentTrack = "";
     progress.totalFiles = discoveredFiles;
     emitProgress();
-    log.info(`[SCANNER] Scan aborted: +${added} ~${updated} -${skipped} (mode=${mode})`);
+    log.info(`[SCANNER] Scan aborted: +${added} ~${updated} -${skipped} fail=${failed} (mode=${mode})`);
     doneResolve();
   };
   if (signal) {
-    if (signal.aborted) { abortScan(); return { added: 0, updated: 0, removed: 0, skipped: 0, aborted: true }; }
+    if (signal.aborted) { abortScan(); return { added: 0, updated: 0, removed: 0, skipped: 0, failed: 0, aborted: true }; }
     signal.addEventListener("abort", abortScan, { once: true });
   }
 
@@ -242,7 +245,12 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
             Range: `bytes=0-${HEADER_LADDER[i] - 1}`,
           },
         });
-        if (!res.ok && res.status !== 206) { skipped++; return; }
+        if (!res.ok && res.status !== 206) {
+          // 下载失败是「异常」不是「无需变更」——分开计数并留一条可检索的 debug。
+          failed++;
+          log.debug(`[SCANNER] 取头失败 HTTP ${res.status}: ${href}`);
+          return;
+        }
         const arrayBuf = await res.arrayBuffer();
         const headerBuf = Buffer.from(arrayBuf);
         const parsed = await extractMetadataHeader(headerBuf, path.basename(href), entry.size);
@@ -258,7 +266,11 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
       if (result === "added") added++;
       else if (result === "updated") updated++;
       else skipped++;
-    } catch { skipped++; }
+    } catch (e: any) {
+      // 解析 / 入库抛异常属缺陷面:计入 failed 并带路径与原因告警,不再静默吞掉。
+      failed++;
+      log.warn(`[SCANNER] 入库失败 ${href}`, { err: e?.message || String(e) });
+    }
   };
 
   // Directory worker: PROPFIND a dir, enqueue files + child dirs.
@@ -320,6 +332,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
         progress.added = added;
         progress.updated = updated;
         progress.skipped = skipped;
+        progress.failed = failed;
         if (progress.phase === "traverse") progress.phase = "scanning";
         emitProgress();
         pumpFiles();
@@ -334,7 +347,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
 
   // Cleanup: remove songs that no longer exist in the source (both modes).
   // Skipped when aborted to avoid deleting songs from an incomplete traversal.
-  if (signal?.aborted) return { added, updated, removed: 0, skipped, aborted: true };
+  if (signal?.aborted) return { added, updated, removed: 0, skipped, failed, aborted: true };
   const existingSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`w:${sourceId}:`));
   let removed = 0;
   const removedIds: string[] = [];
@@ -363,8 +376,8 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   }
   if (removed > 0) cleanupOrphans();
 
-  log.info(`[SCANNER] WebDAV ${mode} scan: +${added} ~${updated} -${removed} skip=${skipped}`);
-  return { added, updated, removed, skipped };
+  log.info(`[SCANNER] WebDAV ${mode} scan: +${added} ~${updated} -${removed} skip=${skipped} fail=${failed}`);
+  return { added, updated, removed, skipped, failed };
 }
 
 // Extract metadata from header chunk using music-metadata
@@ -770,11 +783,11 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
   const allFiles = scanLocalDir(dirPath);
   const progress: ScanProgress = {
     phase: "scanning", totalDirs: 0, processedDirs: 0,
-    totalFiles: allFiles.length, processedFiles: 0, added: 0, updated: 0, skipped: 0, currentTrack: "", mode,
+    totalFiles: allFiles.length, processedFiles: 0, added: 0, updated: 0, skipped: 0, failed: 0, currentTrack: "", mode,
   };
   if (onProgress) onProgress(progress);
 
-  let added = 0, updated = 0, skipped = 0;
+  let added = 0, updated = 0, skipped = 0, failed = 0;
   const seenPaths = new Set<string>();
   // Incremental mode: load existing l:<sourceId>:* paths once, then check in memory
   // instead of running one SELECT per file.
@@ -803,11 +816,16 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
       if (result === "added") added++;
       else if (result === "updated") updated++;
       else skipped++;
-    } catch { skipped++; }
+    } catch (e: any) {
+      // 与 WebDAV 同口径:解析 / 入库失败属异常,计入 failed 并带路径告警。
+      failed++;
+      log.warn(`[SCANNER] 本地入库失败 ${filePath}`, { err: e?.message || String(e) });
+    }
     progress.processedFiles = i + 1;
     progress.added = added;
     progress.updated = updated;
     progress.skipped = skipped;
+    progress.failed = failed;
     if (onProgress) onProgress({ ...progress });
   }
 
@@ -816,7 +834,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
     progress.phase = "done";
     progress.currentTrack = "";
     if (onProgress) onProgress({ ...progress });
-    return { added, updated, removed: 0, skipped, aborted: true };
+    return { added, updated, removed: 0, skipped, failed, aborted: true };
   }
   // Fetch only this source's songs via LIKE (instead of loading the whole library)
   const existingSongs = sqlite.prepare("SELECT id, path FROM songs WHERE path LIKE ?").all(`l:${sourceId}:%`) as { id: string; path: string }[];
@@ -844,6 +862,6 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
   progress.phase = "done";
   progress.currentTrack = "";
   if (onProgress) onProgress(progress);
-  log.info(`[Local] ${mode} scan complete: +${added} ~${updated} -${removed} skip=${skipped}`);
-  return { added, updated, removed, skipped };
+  log.info(`[Local] ${mode} scan complete: +${added} ~${updated} -${removed} skip=${skipped} fail=${failed}`);
+  return { added, updated, removed, skipped, failed };
 }

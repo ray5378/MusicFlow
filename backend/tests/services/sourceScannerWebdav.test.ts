@@ -34,6 +34,18 @@ function binResp(buf: Buffer, status = 206): FakeResp {
   };
 }
 
+/** 状态码正常但读 body 时抛错 —— 用来覆盖「下载/解析阶段异常」这条 catch 分支。 */
+function throwingResp(status = 206): FakeResp {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => "",
+    arrayBuffer: async () => {
+      throw new Error("boom: connection reset while reading body");
+    },
+  };
+}
+
 function propfindXml(
   items: { href: string; collection?: boolean; size?: number; mtime?: string; etag?: string }[],
 ): string {
@@ -190,7 +202,7 @@ describe("scanWebDAVSource / 正常扫描", () => {
     const seen: string[] = [];
     const res = await scanWebDAVSource("w1", { url: BASE }, "full", (p) => seen.push(p.phase));
 
-    expect(res).toMatchObject({ added: 1, updated: 0, removed: 0, skipped: 0 });
+    expect(res).toMatchObject({ added: 1, updated: 0, removed: 0, skipped: 0, failed: 0 });
     expect(seen[0]).toBe("traverse");
     expect(seen[seen.length - 1]).toBe("done");
 
@@ -244,7 +256,7 @@ describe("scanWebDAVSource / 正常扫描", () => {
     ac.abort();
     const res = await scanWebDAVSource("w6", { url: BASE }, "full", undefined, ac.signal);
 
-    expect(res).toEqual({ added: 0, updated: 0, removed: 0, skipped: 0, aborted: true });
+    expect(res).toEqual({ added: 0, updated: 0, removed: 0, skipped: 0, failed: 0, aborted: true });
     expect(fetchCalls).toHaveLength(0);
   });
 });
@@ -298,7 +310,7 @@ describe("scanWebDAVSource / 降级与容错", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("音频文件下载失败(404)计入 skipped,不入库", async () => {
+  it("[D5] 音频文件下载失败(404)计入 failed 而非 skipped,不入库", async () => {
     handler = (url, init) => {
       if (init.method === "PROPFIND") {
         return textResp(propfindXml([{ href: "/music/", collection: true }, { href: "/music/x.wav", size: 9 }]), 207);
@@ -306,8 +318,25 @@ describe("scanWebDAVSource / 降级与容错", () => {
       return textResp("nope", 404);
     };
     const res = await scanWebDAVSource("w8", { url: BASE }, "full");
-    expect(res).toMatchObject({ added: 0, skipped: 1 });
+    // 「下载不到」是异常,不该混进「无需变更」的 skipped —— 否则用户看到「跳过 1」以为正常。
+    expect(res).toMatchObject({ added: 0, skipped: 0, failed: 1 });
     expect(sqlite.prepare("SELECT id FROM songs WHERE path LIKE 'w:w8:%'").all()).toHaveLength(0);
+  });
+
+  it("[D5] 下载成功但读 body 抛异常 -> 计入 failed 并带路径告警", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    handler = (url, init) => {
+      if (init.method === "PROPFIND") {
+        return textResp(propfindXml([{ href: "/music/", collection: true }, { href: "/music/boom.mp3", size: 9 }]), 207);
+      }
+      return throwingResp(206);
+    };
+    const res = await scanWebDAVSource("w8b", { url: BASE }, "full");
+
+    expect(res).toMatchObject({ added: 0, skipped: 0, failed: 1 });
+    const warned = warn.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(warned).toContain("入库失败");
+    expect(warned).toContain("boom.mp3");
   });
 
   it("目录列举持续失败:重试到上限后放弃;零目录可达时保留测量回写、只删歌曲行", async () => {

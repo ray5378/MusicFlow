@@ -1040,6 +1040,7 @@
       "editDialogTitle": "编辑音源",
       "emptyTitle": "暂无在线音源",
       "emptyDesc": "添加 WebDAV 或本地目录用于刮削",
+      "failed": "失败 {count}",
       "full": "全量",
       "fullScan": "全量扫描",
       "fullScanStarted": "全量扫描已开始",

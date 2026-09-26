@@ -71,6 +71,8 @@
             <span>{{ t('admin.sources.added', { count: source._scanProgress.added || 0 }) }}</span>
             <span>{{ t('admin.sources.updated', { count: source._scanProgress.updated || 0 }) }}</span>
             <span>{{ t('admin.sources.skipped', { count: source._scanProgress.skipped || 0 }) }}</span>
+            <!-- 失败与跳过分开显示:失败>0 才出现,红色,避免被「跳过」掩盖 -->
+            <span v-if="source._scanProgress.failed" class="stat-fail">{{ t('admin.sources.failed', { count: source._scanProgress.failed }) }}</span>
           </div>
         </div>
 
@@ -233,6 +235,8 @@ function startProgressPolling(source: any) {
         source._scanProgress = null;
         const r = data.result;
         ElMessage.success(t("admin.sources.scanDoneSummary", { added: r?.added || 0, updated: r?.updated || 0, removed: r?.removed || 0 }));
+        // 成功 toast 只报新增/更新/移除 —— 有失败必须单独提示,否则用户以为「跳过」而已。
+        if (r?.failed) ElMessage.warning(t("admin.sources.failed", { count: r.failed }));
         loadSources();
       } else if (data.status === "stopped") {
         clearInterval(progressTimers[source.id]);
@@ -326,6 +330,7 @@ onUnmounted(() => { Object.values(progressTimers).forEach(clearInterval); });
       .current-name { font-size: 12px; color: var(--fnos-text-primary-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     }
     .progress-stats { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--fnos-text-tertiary); span { &:first-child { color: var(--fnos-green); } &:nth-child(2) { color: var(--fnos-green); } &:nth-child(3) { color: var(--fnos-orange); } } }
+    .progress-stats .stat-fail { color: var(--fnos-red); font-weight: 600; }
   }
   .source-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06);
     .el-button { margin-left: 0; flex: 1 1 auto; min-width: 84px; }

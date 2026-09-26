@@ -1040,6 +1040,7 @@
       "editDialogTitle": "Edit Source",
       "emptyTitle": "No sources yet",
       "emptyDesc": "Add a WebDAV or local directory source to scan",
+      "failed": "{count} failed",
       "full": "Full",
       "fullScan": "Full Scan",
       "fullScanStarted": "Full scan started",
