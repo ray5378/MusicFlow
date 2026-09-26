@@ -132,7 +132,7 @@ export function peerIdleTimeoutMs(): number {
   return mins * 60 * 1000;
 }
 
-class PeerManager extends EventEmitter {
+export class PeerManager extends EventEmitter {
   private peers = new Map<string, Peer>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   /**
