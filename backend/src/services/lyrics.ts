@@ -14,10 +14,36 @@ export interface LrcLine {
 // Parse standard LRC content into timed lines
 // Handles metadata tags ([ti:...], [ar:...], [al:...], [by:...], [offset:...]) and
 // multiple timestamps per line, e.g. [00:10.00][00:20.00]text
+//
+// 两种"一行里多个时间戳"必须区分对待 —— 这是 2026-09-26 修复歌词整体重复的核心:
+//   ① 分组式(标准写法,真·多行): `[00:10.00][00:20.00]副歌`
+//      时间戳挤在一起、彼此之间没有文字 ⇒ 这句歌词确实要在 10s、20s 各出现一次,展开成多条。
+//   ② 交错式(逐字 / 卡拉OK 歌词): `[00:00.63]天[00:00.89]地[00:01.35]龙`
+//      时间戳把文字切成一个个字 ⇒ 整行只是**一句歌词**,那些时间戳是字级进度信息。
+//      旧实现无差别地对每个时间戳都推入"整行文本",一行 20 个字就吐出 20 条完全相同的
+//      歌词 ⇒ 所有消费端(Web / HA 卡片 / 客户端)都看到成片重复。逐字行必须**折叠成一条**,
+//      起点取该行首个时间戳。
 export function parseLrc(content: string): LrcLine[] {
   const lines: LrcLine[] = [];
+  // 同 (time, text) 只保留一条:逐字折叠后、以及源里 `[ts][ts]同词` 这类写法都不会再吐重复行。
+  const seen = new Set<string>();
   const timeRegex = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
   const metaRegex = /^\[(ti|ar|al|by|offset|length|re|ve|au|la):/i;
+  // enhanced LRC 的行内逐字标签 `<mm:ss.xx>`:不是行级时间戳,只作进度信息,渲染前剥掉,
+  // 否则端上会直接显示 "<00:10.50>" 这种原始标签。
+  const wordTagRegex = /<\d{1,2}:\d{1,2}(?:[.:]\d{1,3})?>/g;
+  const toSeconds = (m: RegExpMatchArray): number => {
+    const min = parseInt(m[1]);
+    const sec = parseInt(m[2]);
+    const frac = m[3] ? parseInt(m[3].padEnd(3, "0")) / 1000 : 0;
+    return min * 60 + sec + frac;
+  };
+  const push = (time: number, text: string) => {
+    const key = `${time}\u0000${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    lines.push({ time, text });
+  };
   for (const rawLine of content.split(/\r?\n/)) {
     const trimmed = rawLine.trim();
     if (!trimmed) continue;
@@ -27,14 +53,23 @@ export function parseLrc(content: string): LrcLine[] {
       if (metaRegex.test(trimmed)) continue;
       continue;
     }
-    // Text = line with all [mm:ss.xx] timestamps removed
-    const text = trimmed.replace(timeRegex, "").trim();
+    // Text = line with all [mm:ss.xx] / <mm:ss.xx> timestamps removed
+    const text = trimmed.replace(timeRegex, "").replace(wordTagRegex, "").trim();
     if (!text) continue;
-    for (const m of matches) {
-      const min = parseInt(m[1]);
-      const sec = parseInt(m[2]);
-      const frac = m[3] ? parseInt(m[3].padEnd(3, "0")) / 1000 : 0;
-      lines.push({ time: min * 60 + sec + frac, text });
+    if (matches.length === 1) {
+      push(toSeconds(matches[0]), text);
+      continue;
+    }
+    // 判定分组式 vs 交错式:首个时间戳结束到最后一个时间戳开始之间有没有文字。
+    const first = matches[0];
+    const last = matches[matches.length - 1];
+    const between = trimmed.slice((first.index ?? 0) + first[0].length, last.index ?? 0);
+    if (between.trim() === "") {
+      // 分组式:标准多时间戳写法,该文本在多处出现,逐条展开。
+      for (const m of matches) push(toSeconds(m), text);
+    } else {
+      // 交错式(逐字歌词):整行折叠成一条,起点取该行首个时间戳。
+      push(toSeconds(first), text);
     }
   }
   return lines.sort((a, b) => a.time - b.time);
