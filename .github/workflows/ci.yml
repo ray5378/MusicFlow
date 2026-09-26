@@ -11,7 +11,11 @@ name: ci
 #   6. 拖动 seek 精度守卫(scripts/check-seek-granularity.mjs)——所有拖拽 seek 目标
 #      一律整秒(最小粒度 1 秒):非整秒目标会让 sendspin 子进程按 25ms 帧栅格取帧时
 #      与窗口毫秒基准错位 → 微任务自旋 → 事件循环饿死 → 看门狗 SIGKILL
-#   7. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
+#   7. DLNA 实时发现守卫(scripts/check-dlna-realtime.mjs)——设备「实际已在线且在播」
+#      必须尽快出现在 /v1/peers:alive 通告抓 description 失败必须放开去抖窗口、
+#      `/v1/peers` 拉取要补扫、扫描间隔只能来自 scanPolicy 单一真源、
+#      byebye 必须真标离线、扫描并发去重
+#   8. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -95,6 +99,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验拖拽 seek 目标均按整秒对齐
         run: node backend/scripts/check-seek-granularity.mjs
+
+  # DLNA 实时发现守卫:设备「实际已在线且在播」必须尽快出现在 `/v1/peers`。
+  # 2026-09-26 事故:主卧已播放很久,播放器列表里却没有它。根因是 alive 通告抓取
+  # description 失败一次就静默丢弃,还白白耗掉 60s 去抖窗口 —— 设备刚上电时 SSDP 栈
+  # 往往先于内嵌 HTTP 就绪,此刻必失败,于是这一次「上线」被彻底错过(230 模拟器实测:
+  # HTTP 恢复后设备还要 85s 才可见)。不报错、手测易当网络问题的**静默退化**,钉死:
+  #   周期扫描间隔单一真源 + 拉列表即补扫 + alive 失败放开去抖 + 按需广播 + 并发去重
+  # 零依赖 node 脚本,秒级完成。
+  dlna-realtime-guard:
+    name: DLNA 实时发现守卫(上线即刻入列)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验上线即刻入列的接线(去抖放开/补扫/节奏真源/反向语义)
+        run: node backend/scripts/check-dlna-realtime.mjs
 
   test:
     name: 类型检查 + 全量测试
