@@ -250,6 +250,10 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
         if (!parsed.incomplete || i === HEADER_LADDER.length - 1) meta = parsed;
       }
       if (!meta) { skipped++; return; }
+      if (meta.incomplete) {
+        // 升到顶(4MB)仍解析不出标签 —— 此前完全静默,现在留一条可检索的 warn。
+        log.warn(`[SCANNER] ${path.basename(href)} 取头升到 ${HEADER_LADDER[HEADER_LADDER.length - 1] / 1024 / 1024}MB 仍解析不出标签,元数据回落文件名推断`);
+      }
       const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? buildFingerprint(entry) : undefined);
       if (result === "added") added++;
       else if (result === "updated") updated++;
@@ -367,6 +371,10 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
 export async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSize: number): Promise<MusicMetadata> {
   const ext = path.extname(fileName).toLowerCase();
   const nameWithoutExt = path.basename(fileName, ext);
+  // .wav 天生只有 PCM 头、没有标签块 —— 任何「升档重取更大区间」都不可能拿到标签,
+  // 所以它既不该被判不完整,也不该触发升档(否则每个 WAV 白取 3 次头)。
+  // 判据只在这里定义一次,宽容解析路径与 fallback 路径共用。
+  const inherentlyTagless = ext === ".wav";
   const fallback = (): MusicMetadata => {
     const parts = nameWithoutExt.split(" - ");
     return {
@@ -375,8 +383,9 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
       album: "Unknown Album", duration: 0, bitRate: 0, genre: "", year: 0,
       track: 0, discNumber: 1, contentType: mimeFromExt(ext), suffix: ext.replace(".", ""), size: fileSize,
       albumArtist: "", composer: "", comment: "",
-      // 解析失败(头部字节不够 / 结构异常):标记不完整,WebDAV 侧据此升档重取
-      incomplete: true,
+      // 解析失败(头部字节不够 / 结构异常):标记不完整,WebDAV 侧据此升档重取。
+      // 天生无标签的格式除外 —— 升档也拿不到标签,白费流量。
+      ...(inherentlyTagless ? {} : { incomplete: true as const }),
     };
   };
 
@@ -401,6 +410,24 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
       duration = Math.round(((fileSize) * 8) / (bitRate * 1000));
     }
 
+    const tags = buildTagsJson(common, metadata.native);
+    const lyrics = extractLyricsText(common, metadata.native);
+    // 第二重完整性判据:解析「没抛错」不等于「拿到了东西」。music-metadata 对
+    // 截断 / 垃圾字节是宽容的 —— 不抛错,而是 resolve 一个**占位**结果
+    // (实测 v11.14.0:common 里连 track/disk/movementIndex 这种全 null 的壳都会给,
+    //  format 只有 {"tagTypes":[],"trackInfo":[],"hasAudio":false})。
+    // 所以既不能只看「有没有抛错」,也不能只看 common 是否为空 —— 后者会让
+    // buildTagsJson 吐出一串全 null 的壳,判据恒假,256KB→1MB→4MB 分级取头永不升档,
+    // 带大标签块 / 大封面的文件的元数据会静默退化成文件名推断。
+    // 看「到底拿到了什么」:
+    //   · 有标签(或 title/artist/album)⇒ 完整;
+    //   · 读出了音频结构(duration / bitRate)⇒ 也完整 —— 只是天生没打标签,
+    //     再取多大区间都不会有标签,升档纯属浪费流量;
+    //   · 两者皆无 ⇒ 头部区间不够,判为不完整,交调用方升档重取。
+    // (tags 已由 buildTagsJson 滤掉全 null 的占位壳,故 !!tags 是可信的「有标签」信号)
+    const hasTags = !!tags || !!common.title || !!common.artist || !!common.album;
+    const hasAudioInfo = duration > 0 || bitRate > 0;
+    const incomplete = !inherentlyTagless && !hasTags && !hasAudioInfo;
     return {
       title, artist, album, duration, bitRate, genre, year, track, discNumber,
       contentType: mime, suffix: ext.replace(".", ""), size: fileSize,
@@ -408,8 +435,9 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
       composer: joinTags(common.composer),
       comment: joinTags(common.comment),
       picture: extractPicture(common),
-      lyrics: extractLyricsText(common, metadata.native),
-      tags: buildTagsJson(common, metadata.native),
+      lyrics,
+      tags,
+      ...(incomplete ? { incomplete: true as const } : {}),
     };
   } catch {
     return fallback();
@@ -455,10 +483,26 @@ function extractLyricsText(common: any, native?: any): string | undefined {
 
 /** 全部原始标签 -> JSON:common 的规范化结果与 native 的原始字段名都保留,冷门标签不再丢。
  *  二进制类(内嵌封面 base64、歌词正文)与超长值只留长度,避免与 songs.cover_art / lyrics 双份存储。 */
+/**
+ * 该标签值是否「什么都没承载」。
+ * music-metadata 即便一个标签都没解析出来,也会给 track / disk / movementIndex
+ * 这类字段全为 null 的结构占位对象 —— 它们不是标签,不该进 songs.tags,更不该被
+ * 当作「拿到了标签」而使扫描器的升档判据失效。
+ */
+function isValuelessTag(v: unknown): boolean {
+  if (v == null || v === "") return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === "object") {
+    const vals = Object.values(v as Record<string, unknown>);
+    return vals.length === 0 || vals.every(isValuelessTag);
+  }
+  return false;
+}
+
 function buildTagsJson(common: any, native?: any): string | undefined {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries((common || {}) as Record<string, any>)) {
-    if (v == null || v === "" || (Array.isArray(v) && v.length === 0)) continue;
+    if (isValuelessTag(v)) continue;
     if (k === "picture") {
       out.picture = (v as any[]).map((p) => ({ format: p?.format, size: p?.data?.length ?? 0 }));
     } else if (k === "lyrics") {

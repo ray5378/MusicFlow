@@ -253,26 +253,49 @@ describe("scanWebDAVSource / 降级与容错", () => {
   const BASE = "http://dav.local/music";
 
   /**
-   * ⚠️ 缺陷固化:本意是「256KB 解析不完整 → 升档 1MB → 4MB」,但实际上
-   * music-metadata 对截断/垃圾字节是宽容的(不抛错、只给空 common),而
-   * extractMetadataHeader 只在 catch 里标 incomplete —— 于是升档判据永不成立,
-   * 只取一次头就把标题退化成文件名。见缺陷登记文档。
+   * [D3 回归] 本意就是「256KB 解析不完整 → 升档 1MB → 4MB」。修复前 music-metadata
+   * 对截断/垃圾字节是宽容的(不抛错、只给空 common),而 extractMetadataHeader 只在
+   * catch 里标 incomplete —— 升档判据永不成立,只取一次头就把标题退化成文件名。
+   * 现在宽容解析路径也会标 incomplete,升档链路真正生效。
    */
-  it("[缺陷固化] 头部解析不出标签时**不会**升档:只发 1 次取头请求,标题退化成文件名", async () => {
+  it("[D3] 头部解析不出标签 -> 升档到顶:发 3 次取头请求,再退化成文件名", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const junk = Buffer.from("this is not audio at all");
     handler = (url, init) => {
       if (init.method === "PROPFIND") {
-        return textResp(propfindXml([{ href: "/music/", collection: true }, { href: "/music/bad.wav", size: 9 }]), 207);
+        return textResp(propfindXml([{ href: "/music/", collection: true }, { href: "/music/bad.mp3", size: 9 }]), 207);
       }
       return binResp(junk, 206);
     };
     const res = await scanWebDAVSource("w7", { url: BASE }, "full");
 
     const ranges = fetchCalls.filter((c) => c.method !== "PROPFIND").map((c) => c.headers.Range);
-    // 期望(未实现):["bytes=0-262143","bytes=0-1048575","bytes=0-4194303"]
+    expect(ranges).toEqual(["bytes=0-262143", "bytes=0-1048575", "bytes=0-4194303"]);
+    expect(res.added).toBe(1);
+    expect((sqlite.prepare("SELECT title FROM songs WHERE path = ?").get(`w:w7:/music/bad.mp3`) as any).title).toBe("bad");
+    // 升到顶仍解析不出标签 -> 必须留一条可检索的 warn(修复前此处完全静默)
+    expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toContain("仍解析不出标签");
+  });
+
+  /**
+   * [D3 回归] .wav 天生只有 PCM 头、没有标签块,升档重取更大区间也拿不到东西,
+   * 必须豁免 —— 否则每个 WAV 都要白取 3 次头,全库取头流量翻 3 倍。
+   */
+  it("[D3] WAV 解析不出标签**不**升档:仍只发 1 次取头请求、且不告警", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const junk = Buffer.from("not really a wav at all");
+    handler = (url, init) => {
+      if (init.method === "PROPFIND") {
+        return textResp(propfindXml([{ href: "/music/", collection: true }, { href: "/music/plain.wav", size: 9 }]), 207);
+      }
+      return binResp(junk, 206);
+    };
+    const res = await scanWebDAVSource("w7b", { url: BASE }, "full");
+
+    const ranges = fetchCalls.filter((c) => c.method !== "PROPFIND").map((c) => c.headers.Range);
     expect(ranges).toEqual(["bytes=0-262143"]);
     expect(res.added).toBe(1);
-    expect((sqlite.prepare("SELECT title FROM songs WHERE path = ?").get(`w:w7:/music/bad.wav`) as any).title).toBe("bad");
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("音频文件下载失败(404)计入 skipped,不入库", async () => {

@@ -208,28 +208,45 @@ describe("extractMetadataHeader / WAV 与兜底", () => {
   });
 
   /**
-   * ⚠️ 以下两条是**现状固化**(characterization),不是期望行为 —— 已登记为缺陷:
-   * music-metadata 对「头部被截断 / 根本不是音频」的字节是**宽容**的:它 resolve 一个
-   * 空的 common/format,而不是抛错。于是 extractMetadataHeader 里唯一的 incomplete
-   * 判据(catch 分支)永不触发,WebDAV 的 256KB→1MB→4MB 分级取头也就永不升档。
+   * [D3 回归] 「解析没抛错」不等于「拿到了东西」—— music-metadata 对截断 / 垃圾
+   * 字节是宽容的:它 resolve 一个空的 common/format 而不抛错(实测 v11.14.0)。
+   * 修复前 incomplete 只在 catch 分支置位,这类文件因此永不升档、元数据静默退化
+   * 成文件名。现约定:非「天生无标签」格式且一个标签都没拿到 ⇒ incomplete=true,
+   * 交调用方(i.e. WebDAV 分级取头)升档重取。
    */
-  it("[缺陷固化] 3 字节垃圾 + .mp3:不抛错 → 无 incomplete,标题退化成整个文件名", async () => {
+  it("[D3] 3 字节垃圾 + .mp3:未抛错但零标签 -> incomplete=true(触发升档)", async () => {
     const junk = Buffer.from([0x00, 0x01, 0x02]);
     const meta = await extractMetadataHeader(junk, "Cool Band - Nice Song.mp3", 12345);
 
-    // 期望(未实现):incomplete=true,artist="Cool Band",title="Nice Song"
-    expect(meta.incomplete).toBeUndefined();
+    expect(meta.incomplete).toBe(true);
+    // 同根因的另一半:music-metadata 会给 track/disk/movementIndex 这类全 null 的
+    // 结构占位壳,它们不是标签 —— 不该写进 songs.tags(否则「歌曲信息」弹窗多出垃圾行),
+    // 更不该让上面的「有标签吗」判据失真。
+    expect(meta.tags).toBeUndefined();
+    // 升档是调用方的职责;本函数自己仍给文件名兜底,故标题仍是整个基名。
     expect(meta.title).toBe("Cool Band - Nice Song");
     expect(meta.artist).toBe("Unknown Artist");
     expect(meta.duration).toBe(0);
   });
 
-  it("[缺陷固化] 未知扩展名回落 audio/mpeg,扩展名原样进 suffix", async () => {
+  it("[D3] 零标签的 .flac 同样标记 incomplete(宽容解析路径)", async () => {
+    // 30 字节不足以构成任何有效 FLAC 元数据块,而 music-metadata 不抛错。
+    const meta = await extractMetadataHeader(Buffer.alloc(30), "untagged.flac", 999);
+    expect(meta.incomplete).toBe(true);
+    expect(meta.tags).toBeUndefined();
+  });
+
+  it("[D3] .wav 零标签**不**标记 incomplete(天生无标签,升档无意义)", async () => {
+    const meta = await extractMetadataHeader(Buffer.alloc(30), "untagged.wav", 999);
+    expect(meta.incomplete).toBeUndefined();
+  });
+
+  it("未知扩展名回落 audio/mpeg,扩展名原样进 suffix(仍按非 WAV 处理)", async () => {
     const junk = Buffer.from([0x00]);
     const meta = await extractMetadataHeader(junk, "weird.xyz", 1);
     expect(meta.contentType).toBe("audio/mpeg");
     expect(meta.suffix).toBe("xyz");
-    expect(meta.incomplete).toBeUndefined();
+    expect(meta.incomplete).toBe(true);
     expect(meta.title).toBe("weird");
   });
 
