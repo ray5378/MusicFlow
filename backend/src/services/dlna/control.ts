@@ -17,7 +17,7 @@
 // `/rest/dlna/stream/:token` endpoint so the renderer can pull bytes directly.
 import { randomBytes } from "crypto";
 import os from "os";
-import { discoverDlnaDevices, fetchDeviceAtLocation, onSsdpEvent, DlnaDevice } from "./discovery.js";
+import { discoverDlnaDevices, fetchDeviceAtLocation, lastScanWasErrored, onSsdpEvent, DlnaDevice } from "./discovery.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
@@ -241,6 +241,32 @@ interface DeviceRuntime {
 }
 const runtimes = new Map<string, DeviceRuntime>();
 
+// ==================== 活跃出流登记（存活判定的硬证据）====================
+// 「设备正在拉我们的流」比 SSDP / SOAP 都硬：字节真的在往外走。出流侧每写一块就
+// 登记一次（见 routes/rest/index.ts::noteActivityStream），发现侧据此**豁免离线判定**
+// —— 否则一台正在放歌的音箱会因为某轮没回 M-SEARCH（固件忙）或 description 拉取超时
+// 就从 Web / HA 卡片 / App 三端列表里消失（用户报的现象）。
+//
+// 键是 peerId（`dlna:<deviceId>`），与出流侧已知的 deviceId 对齐；条目数受设备数约束，
+// 且 refreshDevices 每次顺带清掉已不在缓存里的键，不会无限增长。
+const peerActivityAt = new Map<string, number>();
+
+/** 登记一次「该 peer 正在出流」。空串忽略（HTTP 侧可能没有 peerId）。 */
+export function notePeerActivity(peerId: string, at: number = Date.now()): void {
+  if (peerId) peerActivityAt.set(peerId, at);
+}
+
+/** 该 peer 是否在 `windowMs` 内有过出流活动。 */
+export function peerActiveWithin(peerId: string, windowMs: number): boolean {
+  const t = peerActivityAt.get(peerId);
+  return !!t && Date.now() - t <= windowMs;
+}
+
+/** 出流活跃豁免窗口：设备在此窗口内拉过流 ⇒ 视为在线（覆盖一次正常的曲间停顿）。 */
+const ACTIVE_STREAM_GRACE_MS = 90_000;
+/** 抖动宽限：距上次成功发现不足此值 ⇒ 本轮不做离线判定（单轮漏报不算离线）。 */
+const OFFLINE_GRACE_MS = 90_000;
+
 function runtimeOf(deviceId: string): DeviceRuntime {
   let r = runtimes.get(deviceId);
   if (!r) { r = { available: true, forcePoll: false, lastSeen: Date.now() }; runtimes.set(deviceId, r); }
@@ -289,8 +315,41 @@ export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
   }
   // Devices that vanished → keep them listed but mark unavailable (offline).
   // Offline devices stay visible so the user can manage (rename/delete) them.
-  for (const d of cachedDevices) {
-    if (!live.has(d.id) && d.available) {
+  //
+  // ⚠️ 判离线前必须过三道闸 —— 每一道都对应一种「设备其实活着」的证据。缺了它们
+  // 就会出现「歌在放、播放器却从列表消失」（用户报的现象：三端都 .filter(available)
+  // 一剪，设备直接不见了）。三道都不过才真的判离线。
+  const nowMs = Date.now();
+  if (lastScanWasErrored()) {
+    // ④ 消毒：本轮扫描 socket 出错、提前返回空集 —— 结果不可信，整轮不做离线判定，
+    // 否则一次瞬时错误就把全网设备打成离线。
+    log.warn("[discovery] 本轮扫描 socket 出错（结果不可信）→ 跳过离线判定");
+  } else {
+    for (const d of cachedDevices) {
+      if (live.has(d.id) || !d.available) continue;
+      // ① 正在拉我们的流 ⇒ 活着（最强的存活证据），仅续 lastSeen。
+      if (peerActiveWithin(`dlna:${d.id}`, ACTIVE_STREAM_GRACE_MS)) {
+        d.lastSeen = nowMs;
+        log.debug(`[discovery] ${d.id} 本轮未回应 M-SEARCH，但正在出流 → 保持在线`);
+        continue;
+      }
+      // ② 抖动宽限：最近刚看到过它，单轮漏报不判离线。
+      if (nowMs - d.lastSeen < OFFLINE_GRACE_MS) continue;
+      // ③ 定向补探：location 已知就直接拉 description.xml，**不依赖 SSDP**
+      //    （部分 MUZO/Linkplay 固件在播放/上电窗口内根本不回 M-SEARCH）。
+      if (d.location) {
+        const probed = await fetchDeviceAtLocation(d.location);
+        if (probed?.avTransportUrl) {
+          const idx = cachedDevices.indexOf(d);
+          if (idx >= 0) {
+            cachedDevices[idx] = { ...d, ...probed, available: true };
+            upsertDeviceRow(cachedDevices[idx]);
+          }
+          log.info(`[discovery] ${d.id} 未回应 M-SEARCH，但 HTTP 补探成功 → 保持在线`);
+          continue;
+        }
+      }
+      log.info(`[discovery] ${d.id} 判离线（SSDP 无回应 + HTTP 补探失败，距上次成功 ${Math.round((nowMs - d.lastSeen) / 1000)}s）`);
       d.available = false;
       markDeviceOfflineInDb(d.id);
     }
@@ -302,6 +361,11 @@ export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
   // the count equal but must still be evicted.
   for (const [deviceId] of runtimes) {
     if (!live.has(deviceId)) runtimes.delete(deviceId);
+  }
+  // 同样清掉已经不在缓存里的出流活跃登记（设备被删除/禁用后不再需要）。
+  for (const key of peerActivityAt.keys()) {
+    const id = key.startsWith("dlna:") ? key.slice(5) : "";
+    if (id && !cachedDevices.some((x) => x.id === id)) peerActivityAt.delete(key);
   }
   // Notify subscribers (WS layer) that the device list may have changed.
   getEventManager().emitDeviceListChanged(cachedDevices.length);

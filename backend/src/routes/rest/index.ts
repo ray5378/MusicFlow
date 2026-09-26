@@ -36,8 +36,41 @@ import type { FlowItem } from "../../services/audio/flow.js";
 import type { PipelineChannel } from "../../services/audio/pipelineSwitches.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendToUser } from "../../services/ws/index.js";
+import { notePeerActivity } from "../../services/dlna/control.js";
 
 const log = createLogger("REST-STREAM");
+
+/**
+ * 出流「活着」登记：设备正在拉我们的 DLNA 流 ⇒ 它明确活着。
+ *
+ * DLNA 的可用性此前只看 SSDP —— 某轮没回 M-SEARCH（固件播放中变忙）或 description
+ * 拉取超时，设备就被判离线，三端 `.filter(p => p.available)` 随即把它从列表里剪掉，
+ * 于是「歌还在放，播放器却不见了」。出流是**比 SSDP 更硬**的存活证据（字节真的在走），
+ * 这里把它登记给发现侧做豁免。节流 5s：块大小几十 KB，不节流就是高频 Map 写。
+ */
+let lastActivityNoteAt = 0;
+function noteStreamActivity(peerId?: string): void {
+  if (!peerId) return;
+  const now = Date.now();
+  if (now - lastActivityNoteAt < 5000) return;
+  lastActivityNoteAt = now;
+  notePeerActivity(peerId, now);
+}
+
+/** 把响应体包一层：每写一块登记一次出流活动（透传 status/headers 与背压）。
+ *  只对成功响应计数（2xx/3xx）—— 4xx/5xx 的短正文不是「在放歌」。 */
+function noteActivityStream(resp: any, peerId?: string): any {
+  if (!peerId || !resp || !resp.body || resp.status >= 400) return resp;
+  const body = resp.body.pipeThrough(
+    new TransformStream({
+      transform(chunk: any, controller: any) {
+        noteStreamActivity(peerId);
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Response(body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+}
 
 export const restRoutes = new Hono();
 
@@ -2015,7 +2048,11 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   }
   const castSession = resolveCastSession(token);
   if (!castSession) return c.text("Invalid or expired cast token", 403);
-  return serveCastStream(c, { kind: "dlna", songId: castSession.songId, deviceId: castSession.deviceId });
+  // 出流在走 = 这台设备活着 → 登记给发现侧，避免它因 SSDP 漏报被从三端列表剪掉。
+  return noteActivityStream(
+    await serveCastStream(c, { kind: "dlna", songId: castSession.songId, deviceId: castSession.deviceId }),
+    `dlna:${castSession.deviceId}`,
+  );
 });
 
 // ==================== AirPlay stream(独立 token 命名空间) ====================

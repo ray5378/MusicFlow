@@ -87,6 +87,17 @@ async function fetchDescription(location: string): Promise<DlnaDevice | null> {
   }
 }
 
+/** 上一轮 M-SEARCH 扫描是否因 socket 错误**提前结束**（结果不可信）。
+ *
+ * `discoverDlnaDevices` 的 socket `error` 分支会立刻 `finish()`，此时 `locations`
+ * 还是空集 —— 若把这个空集当成「权威答案」，一次瞬时 socket 错误就能把**全网设备**
+ * 一次性判成离线（静默退化：错误被吞、现象是全端设备消失）。所以这里留一个标记，
+ * 由 `refreshDevices` 跳过该轮的离线判定。
+ */
+let lastScanErrored = false;
+/** 上一轮扫描结果是否不可信（见 `lastScanErrored`）。 */
+export function lastScanWasErrored(): boolean { return lastScanErrored; }
+
 // ==================== Continuous SSDP listener ====================
 // A long-lived UDP socket that joins the SSDP multicast group and listens for
 // NOTIFY messages from devices. MA's SsdpListener does the same. We keep a
@@ -190,6 +201,7 @@ export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
     const locations = new Set<string>();
     const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
     let settled = false;
+    lastScanErrored = false;   // 新一轮开始，先认为结果可信
 
     const finish = async () => {
       if (settled) return;
@@ -202,6 +214,8 @@ export function discoverDlnaDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
     };
 
     socket.on("error", () => {
+      // 早退：此轮结果不可信（空集 ≠「全网都没设备」），标记后由 refreshDevices 跳过离线判定。
+      lastScanErrored = true;
       if (!settled) finish();
     });
 
