@@ -259,8 +259,11 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     session.abort(); // 幂等：第二次不该抛
     const settled = await Promise.race([
       session.done.then(() => "done"),
-      new Promise((r) => setTimeout(() => r("timeout"), 15000)),
+      // 全量串行跑(每文件独立 fork + ffmpeg 子进程)时机器负载高,15s 兜底太紧 ——
+      // 历史上两次偶发红都卡在这里,而隔离跑 10/10 通过。兜底放宽到 60s,断言不变:
+      // 最终必须是 done(而不是 timeout),abort 收敛这条契约本身没有被削弱。
+      new Promise((r) => setTimeout(() => r("timeout"), 60000)),
     ]);
     expect(settled).toBe("done");
-  }, 30000);
+  }, 90000);
 });
