@@ -3620,22 +3620,26 @@ apiRoutes.get("/v1/peers/:peerId/queue", (c) => {
 // Body: { items: QueueItem[], startIndex?: number }
 apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
   const peerId = decodePeerId(c);
-  const { items, startIndex } = await c.req.json().catch(() => ({} as any));
+  const { items, startIndex, position } = await c.req.json().catch(() => ({} as any));
   if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   const start = typeof startIndex === "number" ? startIndex : 0;
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  // 起始位置(流转场景:整队推送时把源端进度一起带过来)。
+  const askPosition = typeof position === "number" && Number.isFinite(position) ? Math.max(0, position) : null;
   if (isCastPeer(parsed)) {
     // 成员被显式指派播放 → 先脱离活跃组再独立播(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsed);
     try {
       await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
-      return c.json({ success: true });
     } catch (e: any) { return c.json({ error: e.message }, 500); }
+    let landed: number | null = null;
+    if (askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landed = askPosition;
+    return c.json({ success: true, position: landed });
   }
-  // local
-  pm.localPlayFrom(peerId, c.get("user")!.id, items, start);
-  return c.json({ success: true });
+  // local:起点随起播交出去(见 seekPeerToSeconds 上方注释)。
+  pm.localPlayFrom(peerId, c.get("user")!.id, items, start, askPosition ?? undefined);
+  return c.json({ success: true, position: askPosition });
 });
 
 // 队列流转:把**另一个播放端**的队列整体搬到目标端,并从同一位置起播。
@@ -3654,7 +3658,12 @@ apiRoutes.post("/v1/peers/:peerId/queue/play", async (c) => {
 // Body: { from: string }  from = 源端完整对外 peerId
 apiRoutes.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   const toPeerId = decodePeerId(c);
-  const { from } = await c.req.json().catch(() => ({} as any));
+  const { from, position: requestedPosition } = await c.req.json().catch(() => ({} as any));
+  // 调用方显式给的起始位置(秒)。本机做源端时客户端的读数是**本地精确值**,且本机
+  // 此刻已暂停、不再前进,比服务端镜像更新鲜,故优先用它;没传才回落到服务端读数。
+  const askPosition = typeof requestedPosition === "number" && Number.isFinite(requestedPosition)
+    ? Math.max(0, requestedPosition)
+    : null;
   if (typeof from !== "string" || !from.trim()) {
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   }
@@ -3684,14 +3693,24 @@ apiRoutes.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
 
   const parsedTo = parsePeerId(toPeerId);
   if (!parsedTo) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  // ── 进度对齐:目标端出声的位置与流转前对齐(秒级) ────────────────────────
+  // 读数**放在起播之后**:起播(尤其 DLNA 投递)要花 1~3s,这期间源端仍在播,
+  // 读得越晚越贴近目标端真正出声的那一刻。
+  let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
     // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsedTo);
     try {
       await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
     } catch (e: any) { return c.json({ error: e.message }, 500); }
+    const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+    if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
   } else {
-    pm.localPlayFrom(toPeerId, c.get("user")!.id, items, start);
+    // local 目标:起点必须**随起播**交出去(见 seekPeerToSeconds 上方注释)。
+    const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+    const at = pos !== null && pos > 0 ? pos : undefined;
+    if (at !== undefined) landedPosition = at;
+    pm.localPlayFrom(toPeerId, c.get("user")!.id, items, start, at);
   }
 
   // 播放模式随队列流转(队列换了模式却留在原端会显得"没搬全")。
@@ -3704,7 +3723,7 @@ apiRoutes.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     } catch { /* best-effort */ }
   }
 
-  return c.json({ success: true, transferred: items.length, startIndex: start });
+  return c.json({ success: true, transferred: items.length, startIndex: start, position: landedPosition });
 });
 
 // 跳播到指定索引并立即播放。即使随机模式也尊重 index(随机仅作用于后续自动续播)。
@@ -3917,6 +3936,74 @@ apiRoutes.post("/v1/peers/:peerId/queue/index", async (c) => {
 // 返回 delivered:目标离线(无 WS 连接)时为 false —— 前端据此给「设备离线」反馈,
 // 而不是假装成功。队列类操作(点歌/加歌/清空/切歌)不走这里:它们直接写服务端权威
 // 队列,由 peer_queue_changed 广播 + updatedAt 仲裁让目标实例跟随。
+// ==================== 播放进度对齐(流转 / 带进度起播) ====================
+//
+// 起播接口(playFrom / localPlayFrom)**没有「起始位置」参数**,队列快照里也没有
+// position 字段 —— 所以进度只能**两段式**带过去:先按既有链路起播,再把目标端
+// 落到源端的进度上。
+//
+// 两种目标的收尾方式不同,不能混:
+//   - cast(dlna / group / airplay / sendspin):起播已 await 完成,设备或推流引擎
+//     已接管 ⇒ 服务端**自己 seek**,一定落在正在播的那一首上;
+//   - local:音频会话活在客户端进程里,服务端只能下令;而客户端此刻**还没起播**
+//     (它是收到 peer_queue_changed 之后才起播的),此时下令必然落空 ⇒ 改为在
+//     localPlayFrom 时把起点塞进当次快照(startPosition),客户端起播后自行落位。
+//
+// seek 的分派与 POST /v1/peers/:peerId/seek **完全一致**(同一套 kind 分支),
+// 保证五种 kind 的手感与既有 seek 没有任何差别。
+
+/** 读某个播放端此刻的实时进度(秒)。读不到(未知 kind / 离线 / 无上报)→ null。 */
+async function readPeerPositionSeconds(peerId: string): Promise<number | null> {
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return null;
+  try {
+    if (parsed.kind === "dlna") {
+      const st = await getDeviceStatus(parsed.id);
+      return typeof st?.position === "number" && Number.isFinite(st.position) ? st.position : null;
+    }
+    if (parsed.kind === "group") {
+      const st = await getGroupStatus(parsed.id);
+      return typeof st?.position === "number" && Number.isFinite(st.position) ? st.position : null;
+    }
+    if (parsed.kind === "airplay") {
+      const st = getAirPlayPeerStatus(parsed.id);
+      return typeof st?.position === "number" && Number.isFinite(st.position) ? st.position : null;
+    }
+    if (parsed.kind === "sendspin") {
+      const st = await getQueueController().getPlayerState(parsed.id);
+      return typeof st?.position === "number" && Number.isFinite(st.position) ? st.position : null;
+    }
+    // local:对端客户端上报的状态(服务端只做暂存,见 LocalPlaybackReport)。
+    const rep = pm.getLocalStatusReport(peerId);
+    return typeof rep?.position === "number" && Number.isFinite(rep.position) ? rep.position : null;
+  } catch (e: any) {
+    seekLog.debug(`[position] 读取 ${peerId} 进度失败: ${e?.message || e}`);
+    return null;
+  }
+}
+
+/** 把某个播放端 seek 到 [seconds] 秒(在起播完成后调用)。返回是否下发成功。
+ *  <=0 视为「从头播」,不下发(既无意义,也可能被设备当成异常 target)。 */
+async function seekPeerToSeconds(peerId: string, seconds: number): Promise<boolean> {
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return false;
+  if (!Number.isFinite(seconds) || seconds <= 0) return false;
+  const t0 = Date.now();
+  try {
+    // seek 冷静期:与 HTTP seek 入口同款 —— 重定位窗口内设备必然短暂非 PLAYING,
+    // 此窗口的 IDLE 不得被判成「真结束」而放行切歌(见 services/player/seekSettle.ts)。
+    markSeekIssued(parsed.id);
+    if (parsed.kind === "dlna") await seekDevice(parsed.id, seconds);
+    else if (parsed.kind === "local") dispatchPeerCommand(peerId, "seek", { seconds });
+    else await getQueueController().transport(parsed.id, "seek", seconds);
+    seekLog.info(`[transfer] 进度对齐 ${peerId} → ${seconds.toFixed(2)}s ${Date.now() - t0}ms`);
+    return true;
+  } catch (e: any) {
+    seekLog.warn(`[transfer] 进度对齐 ${peerId} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`);
+    return false;
+  }
+}
+
 function dispatchPeerCommand(peerId: string, action: string, payload?: Record<string, unknown>) {
   // 方案收敛:Web 播放器不再是被控端 —— 即便调用方持有历史 peerId,指令也不下发。
   // (列表已隐藏 web 实例,这里是防御性兜底,防缓存直呼。)
@@ -4572,7 +4659,7 @@ apiRoutes.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
 
 apiRoutes.post("/v1/play", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
-  const { peerId: rawPeerId, type, id, songId, startIndex, playMode, enqueue } = body || {};
+  const { peerId: rawPeerId, type, id, songId, startIndex, playMode, enqueue, position } = body || {};
   if (typeof rawPeerId !== "string" || typeof type !== "string" || typeof id !== "string") {
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.needPeerTypeId"), 400);
   }
@@ -4623,6 +4710,11 @@ apiRoutes.post("/v1/play", async (c) => {
   // 回执要给出**实际起播**位置：`start` 为 null 时由 playFrom 在 shuffle 下随机决定，
   // 故用其返回值（playFrom 内部随机后把真实下标回传），避免客户端拿到 null 无从对齐。
   let effectiveStart = start ?? 0;
+  // 起始位置(流转场景:客户端把本机此刻的进度一并带过来)。
+  // 调用方是本机会话的持有者,它的读数即权威 —— 这里**不**再回读服务端镜像
+  // (本机上报有 TTL 与轮询间隔,反而更旧)。
+  const askPosition = typeof position === "number" && Number.isFinite(position) ? Math.max(0, position) : null;
+  let landedPosition: number | null = null;
   if (isCastPeer(parsed)) {
     try {
       if (enqueue) { await getQueueManager().enqueue(parsed.id, items, baseUrl); effectiveStart = 0; }
@@ -4632,9 +4724,15 @@ apiRoutes.post("/v1/play", async (c) => {
       else effectiveStart = await getQueueManager()
         .playFrom(parsed.id, items, start, baseUrl, type === "playlist" ? `playlist:${id}` : undefined);
     } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), 500); }
+    if (!enqueue && askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landedPosition = askPosition;
   } else {
     if (enqueue) { pm.localEnqueue(peerId, c.get("user")?.id, items); effectiveStart = 0; }
-    else pm.localPlayFrom(peerId, c.get("user")?.id, items, effectiveStart);
+    else {
+      // local 目标:起点随起播交出去(见 seekPeerToSeconds 上方注释)。
+      const at = askPosition !== null && askPosition > 0 ? askPosition : undefined;
+      if (at !== undefined) landedPosition = at;
+      pm.localPlayFrom(peerId, c.get("user")?.id, items, effectiveStart, at);
+    }
   }
   if (typeof playMode === "string" && ["order", "one", "all", "shuffle"].includes(playMode)) {
     const mode = playMode as "order" | "one" | "all" | "shuffle";
@@ -4661,6 +4759,8 @@ apiRoutes.post("/v1/play", async (c) => {
     queued: items.length,
     startIndex: enqueue ? undefined : effectiveStart,
     songId: enqueue ? undefined : items[effectiveStart]?.songId,
+    // 实际落到的起始位置(秒):null = 未要求/未落上。客户端据此判断是否要对旧服务端兜底。
+    position: landedPosition,
     // 权威洗牌序列(客户端镜像用,免一次额外请求)。非 cast peer(local)不适用。
     shuffleOrder: enqueue ? undefined : snap?.shuffleOrder,
     shufflePos: enqueue ? undefined : snap?.shufflePos,

@@ -135,6 +135,16 @@ export function peerIdleTimeoutMs(): number {
 class PeerManager extends EventEmitter {
   private peers = new Map<string, Peer>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * 本机队列的「起播起始位置」(秒)—— **一次性**、只跟随**当次**广播带出。
+   *
+   * 为什么不是持久化列:它是「这一刻刚流转过来的起点」,不是队列属性;
+   * 落库会让之后每次轮询/重启恢复都带着它,表现为每次回到同一位置。
+   * 为什么不是服务端直接 seek:本机端的播放器(just_audio / Howl)活在客户端
+   * 进程里,服务端只能下令,而「下令」在客户端还没起播时会落空 —— 起点随
+   * 快照交出去,客户端起播后自行落位,因果才闭合(见 localPlayFrom)。
+   */
+  private pendingStartPosition = new Map<string, number>();
 
   constructor() {
     super();
@@ -680,15 +690,19 @@ class PeerManager extends EventEmitter {
       // shuffle 模式下发服务端权威洗牌序列(对齐 SPEC;单曲/更少无需序列)。
       if (playMode === "shuffle" && items.length > 1) {
         const sh = this.ensureLocalShuffle(peerId, row.currentIndex, items.length);
+        const sp1 = this.pendingStartPosition.get(peerId);
         return {
           items, currentIndex: row.currentIndex, playMode,
           isActive: !!row.isActive, ended: false, updatedAt, preProbe: pp,
           shuffleOrder: sh.order, shufflePos: sh.pos, shuffleEpoch: sh.epoch,
+          ...(sp1 !== undefined ? { startPosition: sp1 } : {}),
         };
       }
+      const sp2 = this.pendingStartPosition.get(peerId);
       return {
         items, currentIndex: row.currentIndex, playMode,
         isActive: !!row.isActive, ended: false, updatedAt, preProbe: pp,
+        ...(sp2 !== undefined ? { startPosition: sp2 } : {}),
       };
     } catch {
       return { items: [], currentIndex: -1, playMode: "order", isActive: false, ended: false, updatedAt: 0, preProbe: pp };
@@ -805,7 +819,7 @@ class PeerManager extends EventEmitter {
   // ----- Local queue CRUD (dlna queues are owned by queue.ts) -----
 
   /** Replace the local queue and mark it active. */
-  localPlayFrom(peerId: string, userId: string, items: QueueItem[], startIndex: number): void {
+  localPlayFrom(peerId: string, userId: string, items: QueueItem[], startIndex: number, startPosition?: number): void {
     const now = new Date().toISOString();
     // 整队替换 → 旧洗牌序列失效(惰性重建,按新 currentIndex keepCurrent)。
     this.localShuffle.delete(peerId);
@@ -832,7 +846,17 @@ class PeerManager extends EventEmitter {
       })
       .run();
     this.scheduleLocalPreProbe(peerId);
-    this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
+    // 起始位置只随**这一次**广播带出:先落 pending → 取快照(快照里带上它)
+    // → 广播 → 立刻清掉。顺序不能颠倒,否则后续轮询会反复把它交给客户端,
+    // 表现为「每次轮询都被拉回同一个位置」。
+    if (typeof startPosition === "number" && Number.isFinite(startPosition) && startPosition > 0) {
+      this.pendingStartPosition.set(peerId, startPosition);
+    } else {
+      this.pendingStartPosition.delete(peerId);
+    }
+    const snap = this.getQueueSnapshot(peerId);
+    this.emit("peer_queue_changed", peerId, snap);
+    this.pendingStartPosition.delete(peerId);
   }
 
   /** Append items to a local queue. */
