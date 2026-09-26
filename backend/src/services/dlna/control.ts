@@ -18,7 +18,6 @@
 import { randomBytes } from "crypto";
 import os from "os";
 import { discoverDlnaDevices, fetchDeviceAtLocation, lastScanWasErrored, onSsdpEvent, clearAliveEmit, DlnaDevice } from "./discovery.js";
-import { DISCOVERY_CACHE_TTL_MS } from "./scanPolicy.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
@@ -568,7 +567,7 @@ export function wireSsdpRealtime(): void {
 }
 
 export function shouldRefreshDevices(): boolean {
-  return Date.now() - lastDiscovery > DISCOVERY_CACHE_TTL_MS;
+  return Date.now() - lastDiscovery > 60_000; // cache for 1 min
 }
 
 export function getDevice(deviceId: string): DlnaDevice | undefined {
