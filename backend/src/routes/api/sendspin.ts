@@ -5,6 +5,7 @@ import {
   PERM,
   adminMiddleware,
   apiError,
+  apiErrorStatus,
   getCachedDevices,
   getEventManager,
   hasPerm,
@@ -253,7 +254,7 @@ app.post("/v1/sendspin/pairing/start", adminMiddleware, async (c) => {
     await srv.pairing.start(clientId, method, format ?? "digits");
     return c.json({ success: true });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.pairStartFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.pairStartFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -269,7 +270,7 @@ app.post("/v1/sendspin/pairing/code", adminMiddleware, async (c) => {
     await srv.pairing.enterCode(clientId, code);
     return c.json({ success: true });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.codeFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.codeFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -285,7 +286,7 @@ app.post("/v1/sendspin/pairing/token", adminMiddleware, async (c) => {
     await srv.pairing.pairWithToken(clientId, token);
     return c.json({ success: true });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.tokenFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.tokenFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -334,7 +335,7 @@ app.post("/v1/sendspin/dial", adminMiddleware, async (c) => {
     } catch { /* 记住失败不影响已建连接 */ }
     return c.json({ success: true, clientId: conn.clientId, name: conn.name });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.dialFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.sendspin.dialFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
