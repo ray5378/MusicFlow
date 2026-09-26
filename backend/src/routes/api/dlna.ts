@@ -5,6 +5,7 @@ import {
   PERM,
   and,
   apiError,
+  apiInternalError,
   canUseRenderer,
   castToDevice,
   createCastSession,
@@ -261,17 +262,17 @@ app.post("/v1/dlna/devices/:deviceId/play", async (c) => {
   const deviceId = c.req.param("deviceId")!;
   if (isDeviceDisabled(deviceId)) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.deviceDisabled"), 403);
   try { await playDevice(deviceId); return c.json({ success: true }); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/pause", async (c) => {
   try { await pauseDevice(c.req.param("deviceId")); return c.json({ success: true }); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/stop", async (c) => {
   try { await stopDevice(c.req.param("deviceId")); return c.json({ success: true }); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/seek", async (c) => {
@@ -281,21 +282,21 @@ app.post("/v1/dlna/devices/:deviceId/seek", async (c) => {
   const seconds = typeof body.seconds === "number" ? body.seconds : body.position;
   if (typeof seconds !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSecondsOrPosition"), 400);
   try { await seekDevice(c.req.param("deviceId"), seconds); return c.json({ success: true }); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/volume", async (c) => {
   const { volume } = await c.req.json().catch(() => ({}));
   if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
   try { await setDeviceVolume(c.req.param("deviceId"), volume); return c.json({ success: true }); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/mute", async (c) => {
   const { muted } = await c.req.json().catch(() => ({}));
   if (typeof muted !== "boolean") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
   try { await setDeviceMute(c.req.param("deviceId"), muted); return c.json({ success: true }); }
-  catch (e: any) { return c.json({ error: e.message }, 500); }
+  catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 // Query device status (state / position / duration / volume).
@@ -318,7 +319,7 @@ app.get("/v1/dlna/devices/:deviceId/status", async (c) => {
       if (typeof evt.muted === "boolean") status.muted = evt.muted;
     }
     return c.json(status);
-  } catch (e: any) { return c.json({ error: e.message }, 500); }
+  } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 // ==================== Queue management ====================
@@ -342,7 +343,7 @@ app.post("/v1/dlna/devices/:deviceId/queue/play", async (c) => {
   try {
     await getQueueManager().playFrom(deviceId, items, startIndex || 0, getDlnaBaseUrl(c));
     return c.json({ success: true });
-  } catch (e: any) { return c.json({ error: e.message }, 500); }
+  } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 // Append items to the queue without switching playback.
@@ -355,21 +356,21 @@ app.post("/v1/dlna/devices/:deviceId/queue/enqueue", async (c) => {
   try {
     await getQueueManager().enqueue(deviceId, items, getDlnaBaseUrl(c));
     return c.json({ success: true });
-  } catch (e: any) { return c.json({ error: e.message }, 500); }
+  } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/next", async (c) => {
   try {
     await getQueueManager().next(c.req.param("deviceId")!, getDlnaBaseUrl(c));
     return c.json({ success: true });
-  } catch (e: any) { return c.json({ error: e.message }, 500); }
+  } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.post("/v1/dlna/devices/:deviceId/prev", async (c) => {
   try {
     await getQueueManager().prev(c.req.param("deviceId")!, getDlnaBaseUrl(c));
     return c.json({ success: true });
-  } catch (e: any) { return c.json({ error: e.message }, 500); }
+  } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
 
 app.delete("/v1/dlna/devices/:deviceId/queue", (c) => {

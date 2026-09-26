@@ -9,6 +9,7 @@ import {
   and,
   announceOnPeer,
   apiError,
+  apiInternalError,
   borrowLandingConfirmed,
   broadcastSendspinVolume,
   canControlPeer,
@@ -224,7 +225,7 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
     await detachFromActiveGroups(parsed);
     try {
       await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
     let landed: number | null = null;
     if (askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landed = askPosition;
     return c.json({ success: true, position: landed });
@@ -300,7 +301,7 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     let startedIdx: number | null = null;
     try {
       startedIdx = await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
     // 移交只在「目标端真的起播了源端那一首」且**确实落位**时才成立。任一不成立都走
     // 常规对齐 —— 且必须走:移交没发生就意味着目标端还在 0 秒。
     const playedSongId = items[startedIdx ?? start]?.songId;
@@ -353,7 +354,7 @@ app.post("/v1/peers/:peerId/queue/jump", async (c) => {
     try {
       await getQueueManager().jumpTo(parsed.id, index, getDlnaBaseUrl(c));
       return c.json({ success: true });
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   // local: 直接设当前索引,Web 客户端 Howl 跟进播放
   pm.localSetIndex(peerId, index);
@@ -373,7 +374,7 @@ app.post("/v1/peers/:peerId/queue/enqueue", async (c) => {
     try {
       await getQueueManager().enqueue(parsed.id, items, getDlnaBaseUrl(c));
       return c.json({ success: true });
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   pm.localEnqueue(peerId, c.get("user")!.id, items);
   return c.json({ success: true });
@@ -576,7 +577,7 @@ app.post("/v1/peers/:peerId/play", async (c) => {
       await playDevice(parsed.id);
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
     try {
@@ -584,7 +585,7 @@ app.post("/v1/peers/:peerId/play", async (c) => {
       await getQueueController().transport(parsed.id, "play");
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
     try {
@@ -592,7 +593,7 @@ app.post("/v1/peers/:peerId/play", async (c) => {
       await getQueueController().transport(parsed.id, "play");
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "sendspin") {
     try {
@@ -601,7 +602,7 @@ app.post("/v1/peers/:peerId/play", async (c) => {
       await getQueueController().transport(parsed.id, "play");
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "play"));
   return c.json({ success: true });
@@ -613,19 +614,19 @@ app.post("/v1/peers/:peerId/pause", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (parsed.kind === "dlna") {
     try { await pauseDevice(parsed.id); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
     try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
     try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "sendspin") {
     try { await getQueueController().transport(parsed.id, "pause"); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "pause"));
   return c.json({ success: true });
@@ -641,7 +642,7 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
       await stopDevice(parsed.id);
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
     try {
@@ -649,7 +650,7 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
       await getQueueController().transport(parsed.id, "stop");
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
     try {
@@ -657,7 +658,7 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
       await getQueueController().transport(parsed.id, "stop");
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "sendspin") {
     try {
@@ -665,7 +666,7 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
       await getQueueController().transport(parsed.id, "stop");
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "stop"));
   return c.json({ success: true });
@@ -701,7 +702,7 @@ app.post("/v1/peers/:peerId/reset", async (c) => {
       }
       getQueueController().clear(parsed.id);
     } catch (e: any) {
-      return c.json({ error: e.message }, 500);
+      return c.json(apiInternalError(e), 500);
     }
     return c.json({ success: true });
   }
@@ -718,7 +719,7 @@ app.post("/v1/peers/:peerId/next", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try { await detachFromActiveGroups(parsed); seekLog.info(`[Peer] 手动切歌 next peerId=${peerId}`); await getQueueManager().next(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "next"));
   return c.json({ success: true });
@@ -730,7 +731,7 @@ app.post("/v1/peers/:peerId/prev", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try { await detachFromActiveGroups(parsed); seekLog.info(`[Peer] 手动切歌 prev peerId=${peerId}`); await getQueueManager().prev(parsed.id, getDlnaBaseUrl(c)); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "prev"));
   return c.json({ success: true });
@@ -771,10 +772,10 @@ app.post("/v1/peers/:peerId/seek", async (c) => {
   const t0 = Date.now();
   if (parsed.kind === "dlna") {
     try { await seekDevice(parsed.id, seconds); }
-    catch (e: any) { seekLog.warn(`[seek] dlna ${parsed.id} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`); return c.json({ error: e.message }, 500); }
+    catch (e: any) { seekLog.warn(`[seek] dlna ${parsed.id} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`); return c.json(apiInternalError(e), 500); }
   } else if (parsed.kind === "group" || parsed.kind === "airplay" || parsed.kind === "sendspin") {
     try { await getQueueController().transport(parsed.id, "seek", seconds); }
-    catch (e: any) { seekLog.warn(`[seek] ${parsed.kind} ${parsed.id} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`); return c.json({ error: e.message }, 500); }
+    catch (e: any) { seekLog.warn(`[seek] ${parsed.kind} ${parsed.id} → ${seconds.toFixed(2)}s 失败 ${Date.now() - t0}ms: ${e?.message || e}`); return c.json(apiInternalError(e), 500); }
   } else if (parsed.kind === "local") {
     const res = dispatchPeerCommand(peerId, "seek", { seconds }) as { success: boolean; delivered?: boolean };
     // delivered=false = 目标实例没有 WS 连接(离线)或是不再被控的 web 端 ——
@@ -798,7 +799,7 @@ app.post("/v1/peers/:peerId/volume", async (c) => {
     const { volume } = await c.req.json().catch(() => ({} as any));
     if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await setDeviceVolume(parsed.id, volume); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
     const { volume } = await c.req.json().catch(() => ({} as any));
@@ -810,13 +811,13 @@ app.post("/v1/peers/:peerId/volume", async (c) => {
       await getQueueController().transport(parsed.id, "volume", volume);
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
     const { volume } = await c.req.json().catch(() => ({} as any));
     if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "sendspin") {
     const { volume } = await c.req.json().catch(() => ({} as any));
@@ -827,7 +828,7 @@ app.post("/v1/peers/:peerId/volume", async (c) => {
       broadcastSendspinVolume(peerId, { volume });
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") {
     const { volume } = await c.req.json().catch(() => ({} as any));
@@ -855,7 +856,7 @@ app.post("/v1/peers/:peerId/announce", async (c) => {
     try {
       const r = await announceOnPeer({ peerId, url, volume });
       return c.json({ success: true, ...r });
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (isAnnouncing(peerId)) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.renderer.announcing"), 409);
   announceOnPeer({ peerId, url, volume }).catch((e: any) => {
@@ -877,7 +878,7 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
   if (typeof muted !== "boolean") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
   if (parsed.kind === "dlna") {
     try { await setDeviceMute(parsed.id, muted); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
     // 组没有自己的渲染器,静音要逐台成员下发。个别成员不支持静音时不应连累
@@ -899,7 +900,7 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
   }
   if (parsed.kind === "airplay") {
     try { await setAirPlayMuted(parsed.id, muted); return c.json({ success: true }); }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "sendspin") {
     // 与 DLNA RenderingControl SetMute 同语义:独立于音量的开关,取消恢复原音量。
@@ -908,7 +909,7 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
       await setSendspinMemberMuted(parsed.id, muted);
       return c.json({ success: true });
     }
-    catch (e: any) { return c.json({ error: e.message }, 500); }
+    catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   return c.json({ success: true });
 });
@@ -944,7 +945,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
       }
       return c.json(status);
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
     try {
@@ -960,7 +961,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
       }
       return c.json(status);
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
     return c.json(getAirPlayPeerStatus(parsed.id));
@@ -988,7 +989,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
         media: srv?.currentMedia(parsed.id),
       });
-    } catch (e: any) { return c.json({ error: e.message }, 500); }
+    } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   // local:队列快照(权威队列)+ 本机实例上报的传输状态(state / position / duration /
   // volume)。上报是**附加**字段:对端轮询时据此镜像进度条与播放按钮;无上报(该端

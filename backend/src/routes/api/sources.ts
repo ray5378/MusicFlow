@@ -68,7 +68,7 @@ app.put("/v1/sources/:id", adminMiddleware, async (c) => {
   const id = c.req.param("id")!;
   const body = await c.req.json();
   const existing = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
-  if (!existing) return c.json({ error: "Source not found" }, 404);
+  if (!existing) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   db.update(mediaSources).set({
     name: body.name || existing.name,
     enabled: normalizeEnabled(body.enabled, existing.enabled),   // 不传 → 保持原值

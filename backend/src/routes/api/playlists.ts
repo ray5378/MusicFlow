@@ -116,10 +116,10 @@ app.get("/v1/playlists/:id/export", permMiddleware(PERM.PLAYLIST_IMPORT), (c) =>
   const user = c.get("user");
   const id = c.req.param("id")!;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ error: "errors.playlist.notFound" }, 404);
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.exportForbidden"), 403);
   const exported = syncApi()?.exportPlaylistEntries(id);
-  if (!exported) return c.json({ error: "errors.playlist.syncNotEnabled" }, 503);
+  if (!exported) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
   const { name, tracks } = exported;
   const payload = { app: NATIVE_APP, version: 1, exportedAt: new Date().toISOString(), name, tracks };
   const filename = `${(name || "歌单").replace(/[\\/:*?"<>|]/g, "_")}.json`;
@@ -221,7 +221,7 @@ app.post("/v1/playlists/:id/favorite", permMiddleware(PERM.FAVORITES_MANAGE), as
   const body = await c.req.json().catch(() => ({}));
   const favorite = body.favorite === true;
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ error: "errors.playlist.notFound" }, 404);
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
 
   const now = new Date().toISOString();
   if (favorite) {
@@ -351,7 +351,7 @@ app.get("/playlist", (c) => {
 
 app.get("/playlist/:id/tracks", (c) => c.json(db.select().from(playlistSongs).where(eq(playlistSongs.playlistId, c.req.param("id"))).all().filter(e => e.playable && e.songId)));
 
-app.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; if (isFixedRecommendPlaylist(id)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.fixedNotDeleteable"), 400); const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json({ error: "Playlist not found" }, 404); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.deleteForbidden"), 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
+app.delete("/playlist/:id", (c) => { const user = c.get("user"); const id = c.req.param("id")!; if (isFixedRecommendPlaylist(id)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.playlist.fixedNotDeleteable"), 400); const pl = db.select().from(playlists).where(eq(playlists.id, id)).get(); if (!pl) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND)); if (pl.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.deleteForbidden"), 403); db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run(); db.delete(playlists).where(eq(playlists.id, id)).run(); clearPlaylistCoverCache(id); return c.json({ success: true }); });
 
 // ==================== Playlist tracks (paginated) ====================
 
@@ -360,7 +360,7 @@ app.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json({ error: "Playlist not found" }, 404);
+  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   // 「随机歌曲」固定歌单惰性刷新:客户端(音流随心听)读取曲目列表时若超过
   // 刷新间隔则立即重建,播完一轮再来取时歌单必然已刷新好 → 无空白等待。
   if (playlist.id === RANDOM_PLAYLIST_ID) maybeRefreshRandomSongs();

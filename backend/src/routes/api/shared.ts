@@ -8,7 +8,7 @@ import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, 
 import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, ne } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
-import { apiError, apiErrorStatus, BusinessErrorCode } from "../../utils/errors.js";
+import { apiError, apiInternalError, apiErrorStatus, BusinessErrorCode } from "../../utils/errors.js";
 import { alignSeekSeconds } from "../../utils/seekGranularity.js";
 import {
   sanitizeClientId,
@@ -726,6 +726,7 @@ export {
   anyJobRunning,
   anyTaskRunning,
   apiError,
+  apiInternalError,
   apiErrorStatus,
   artists,
   artistsMissingCovers,

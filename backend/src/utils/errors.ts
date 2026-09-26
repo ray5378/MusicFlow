@@ -66,6 +66,17 @@ export function apiErrorStatus(code: BusinessErrorCode): ApiErrorStatus {
   return ERROR_STATUS[code] ?? 500;
 }
 
+/**
+ * 兜底错误:把未预期异常收编成统一契约(INTERNAL / 500)。
+ * 之前大量 `catch (e) { return c.json({ error: e.message }, 500) }` 既没有
+ * `success:false` 也没有 `code` —— 客户端无法分类,契约形同不存在。
+ * message 原样透传(常为上游/驱动异常的原始文案),前端可继续直接展示。
+ */
+export function apiInternalError(e: unknown): ApiErrorBody {
+  const raw = e instanceof Error ? e.message : String(e ?? "");
+  return apiError(BusinessErrorCode.INTERNAL, raw || "errors.internal");
+}
+
 export function apiOk(data?: Record<string, unknown>): { success: true } & Record<string, unknown> {
   return { success: true, ...(data || {}) };
 }

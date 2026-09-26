@@ -6,6 +6,7 @@ import {
   addRegistry,
   adminMiddleware,
   apiError,
+  apiErrorStatus,
   collectRegistryGroups,
   db,
   discoverRenderers,
@@ -71,7 +72,7 @@ app.put("/v1/plugins/:id", adminMiddleware, async (c) => {
   // 的插件位次重复则拒绝保存(自己占自己位次不算冲突)。
   if (body.config !== undefined) {
     const conflict = homePositionConflictForSave(p.id, body.config);
-    if (conflict) return c.json({ error: conflict }, 400);
+    if (conflict) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, conflict), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   }
   db.update(plugins).set({
     config: body.config !== undefined ? JSON.stringify(body.config) : p.config,
@@ -134,7 +135,7 @@ app.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
       let cfg: any = {};
       try { cfg = p.config ? JSON.parse(p.config) : {}; } catch {}
       const conflict = homePositionConflictForSave(p.id, cfg);
-      if (conflict) return c.json({ error: conflict }, 400);
+      if (conflict) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, conflict), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
     }
   }
   const nextEnabled = p.enabled ? 0 : 1;

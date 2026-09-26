@@ -20,6 +20,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
   "zh-CN": {
     "errors.forbidden.operation": "无权执行该操作",
     "errors.forbidden.renderer": "无权控制该播放器",
+    "errors.internal": "服务器内部错误",
     "errors.flow.notFound": "音流不存在",
     "errors.flow.disabled": "该音流已停用",
     "errors.flow.tokenMismatch": "该渠道 token 与音流不匹配",
@@ -190,6 +191,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
   "en-US": {
     "errors.forbidden.operation": "Operation not permitted",
     "errors.forbidden.renderer": "Not authorized to control this player",
+    "errors.internal": "Internal server error",
     "errors.flow.notFound": "Flow not found",
     "errors.flow.disabled": "This flow is disabled",
     "errors.flow.tokenMismatch": "The channel token does not match this flow",
