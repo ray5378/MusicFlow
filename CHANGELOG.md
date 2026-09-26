@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.33] - 2026-09-26
+
+### Fixed
+- **普通用户（非管理员）在 Windows / 安卓客户端看不到自己的本机播放器**：
+  `POST /v1/peers/register` 对非管理员恒被 403 拦下，导致该账号的本机播放器
+  从未在服务端建立——列表里自然既没有自己那行、`self` 标记也无从谈起。
+
+  根因是 Hono 的 `:peerId/*` 通配会吞掉字面量子路径：`/v1/peers/:peerId/*`
+  中间件实际命中了 `POST /v1/peers/register` 且把 `peerId` 解析成 `"register"`，
+  于是权限判定 `canControlPeer(userId, false, "register")` 恒为 false。管理员因为
+  `isAdmin` 短路放行才一直正常，这正是「只有普通账号出问题」的原因。
+
+  修复：中间件显式放行字面量保留段 `register`（精确等值匹配，故
+  `dlna:register-xxx` 这类真实 peerId 不受影响，仍走鉴权）。
+
+  验证：240 上普通账号 `POST /v1/peers/register` 由 403 转为 200 并返回
+  `self: true`；带该客户端实例标识拉 `/v1/peers`，自己那条以 `self: true` 出现。
+  回归测试覆盖 register 放行、self 可认、真实 peerId 不误放三种情形。
+
 ## [4.0.32] - 2026-09-26
 
 ### Fixed
