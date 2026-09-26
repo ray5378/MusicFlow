@@ -108,7 +108,7 @@ export class PlayerController {
     const decision = this.pendingDecision.get(playerId);
     this.pendingDecision.delete(playerId);
     if (decision && decision !== "none") {
-      console.log(`[PlayerController][evaluateDBG] t=${Date.now()} ${playerId}: decision=${decision}`);
+      log.debug(`[PlayerController][evaluate] t=${Date.now()} ${playerId}: decision=${decision}`);
       this.onDecision(decision, playerId);
     }
   }

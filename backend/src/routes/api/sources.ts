@@ -109,12 +109,12 @@ app.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
 
   if (source.type === "webdav") {
     try {
-      console.log("[TEST] URL:", config.url, "root_path:", config.root_path, "user:", config.username);
+      log.debug("[source-test] WebDAV 探测", { url: config.url, rootPath: config.root_path });
       const result = await testWebDAVConnection(config.url, config.username, config.password, config.root_path);
-      console.log("[TEST] Result:", JSON.stringify(result));
+      log.debug("[source-test] WebDAV 探测结果", { result });
       return c.json(result);
     } catch (e: any) {
-      console.log("[TEST] Error:", e.message);
+      log.warn("[source-test] WebDAV 探测失败", { sourceId: id, err: e.message });
       return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.source.connectFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
   } else if (source.type === "local") {
