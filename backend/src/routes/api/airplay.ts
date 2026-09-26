@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   PERM,
   adminMiddleware,
   apiError,
@@ -147,7 +148,7 @@ app.post("/v1/airplay/cast", async (c) => {
     });
     return c.json({ success: true, message: "已投放到 AirPlay 设备" });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.airplayFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.airplayFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 

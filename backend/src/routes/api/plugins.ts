@@ -185,7 +185,7 @@ app.get("/v1/plugins/renderers", adminMiddleware, (c) => c.json({ renderers: get
 
 app.get("/v1/plugins/renderers/devices", adminMiddleware, async (c) => {
   try { return c.json({ devices: await discoverRenderers() }); }
-  catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.discovery.deviceFailed"), 500); }
+  catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.discovery.deviceFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR)); }
 });
 
 // Scrobbler plugins (playback reporting).
@@ -214,7 +214,7 @@ app.get("/v1/plugins/registry", adminMiddleware, async (c) => {
     });
     return c.json({ registries, plugins: merged });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.registryFetchFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.registryFetchFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -222,7 +222,7 @@ app.post("/v1/plugins/registry", adminMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   if (!body?.url) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.common.registryUrlRequired"), 400);
   try { return c.json({ id: addRegistry(body.url) }); }
-  catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.addFailed"), 400); }
+  catch (e: any) { return c.json(apiError(BusinessErrorCode.INVALID_PARAM, e.message || "errors.plugin.addFailed"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM)); }
 });
 
 app.delete("/v1/plugins/registry/:id", adminMiddleware, (c) => {
@@ -237,7 +237,7 @@ app.post("/v1/plugins/registry/install", adminMiddleware, async (c) => {
     const r = await installPlugin(body.downloadUrl);
     return c.json({ success: true, ...r });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.installFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.installFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 

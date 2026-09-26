@@ -125,7 +125,7 @@ app.put("/v1/daily-recommend/candidates", adminMiddleware, async (c) => {
 // skipped=true. With { force: true } it bypasses idempotency and re-randomizes.
 
 app.post("/v1/daily-recommend/trigger", adminMiddleware, async (c) => {
-  if (!dailyApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.dailyRecommendDisabled"), 503);
+  if (!dailyApi()) return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.common.dailyRecommendDisabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
   try {
     const body = await c.req.json().catch(() => ({}));
     const opts = { force: body?.force === true, seedSalt: body?.seedSalt };

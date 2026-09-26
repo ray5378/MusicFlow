@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   PERM,
   RECOMMEND_CACHE_TTL_MS,
   adminMiddleware,
@@ -281,7 +282,7 @@ app.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
     }
     // 未启用(或尚无 DB 行)视为不可用。
     if (getPluginConfig(pluginId) === null) {
-      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.plugin.notEnabled"), 503);
+      return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.plugin.notEnabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
     }
     const impl = reg.impl;
     if (typeof impl?.runDailyJob !== "function") {
@@ -292,7 +293,7 @@ app.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
       return c.json({ success: true, pluginId, alreadyRunning: true, message: "该插件刷新任务已在后台运行中" }, 200);
     }
     if (!started) {
-      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.task.startFailed"), 500);
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.task.startFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
     return c.json({ success: true, pluginId, started: true, message: "已开始后台刷新,可通过 GET /v1/plugins/:id/job 查询进度" }, 202);
   }
@@ -301,12 +302,12 @@ app.post("/v1/recommend/refresh", adminMiddleware, async (c) => {
   // 同步前置校验:能力不存在直接 503(契约保留)。实际生成在一次性批量子进程内跑
   // (recommend-refresh,方案3),峰值内存随子进程退出归还;前端 202 后轮询
   // GET /v1/tasks/:taskId 取结果(task.result = { success, seedSalt, results })。
-  if (targets.includes("daily") && !dailyApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.dailyRecommendDisabled"), 503);
+  if (targets.includes("daily") && !dailyApi()) return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.common.dailyRecommendDisabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
   if (targets.includes("local") && (!localApi() || typeof localApi().generateLocalDailyPlaylist !== "function")) {
-    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.localRecommendDisabled"), 503);
+    return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.common.localRecommendDisabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
   }
   if (targets.includes("roam") && (!comboApi() || typeof comboApi().generateComboPlaylist !== "function")) {
-    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.common.roamRecommendDisabled"), 503);
+    return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.common.roamRecommendDisabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
   }
   const seedSalt = Math.floor(Math.random() * 1_000_000);
   const started = startAsyncTask("recommend-refresh", `targets:${targets.join(",")}`, {

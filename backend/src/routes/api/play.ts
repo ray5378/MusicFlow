@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   and,
   apiError,
   canControlPeer,
@@ -48,7 +49,7 @@ app.post("/v1/play", async (c) => {
   const resolved = await resolveContentSongs(type, id);
   if (!resolved) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.invalidTypeId", { type }), 404);
   const items = songsToQueueItems(resolved.rows);
-  if (items.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.noPlayableSongs", { name: resolved.name }), 422);
+  if (items.length === 0) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.renderer.noPlayableSongs", { name: resolved.name }), apiErrorStatus(BusinessErrorCode.CONFLICT));
   // 起点定位：优先按 songId 身份查找（与两侧排序无关）；找不到或未传时才回落
   // startIndex 行号。songId 传了但队列里没有 → 视为调用方所指的歌不在该内容中，
   // 明确返 404 而不是静默从头播（历史上 startIndex 越界静默归 0 掩盖了大量错位）。
@@ -86,7 +87,7 @@ app.post("/v1/play", async (c) => {
       // 漏传 => 队列上 contentContext 恒 undefined => 比对恒失败 => 补齐永远不执行。
       else effectiveStart = await getQueueManager()
         .playFrom(parsed.id, items, start, baseUrl, type === "playlist" ? `playlist:${id}` : undefined);
-    } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), 500); }
+    } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR)); }
     if (!enqueue && askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landedPosition = askPosition;
   } else {
     if (enqueue) { pm.localEnqueue(peerId, c.get("user")?.id, items); effectiveStart = 0; }

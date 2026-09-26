@@ -26,6 +26,10 @@ export enum BusinessErrorCode {
   BUSY = "BUSY",
   /** 权限不足(非 admin 访问 admin 端点、跨用户访问) */
   FORBIDDEN = "FORBIDDEN",
+  /** 未认证:未登录 / 凭据缺失或失效(区别于 FORBIDDEN = 已认证但无权限) */
+  UNAUTHORIZED = "UNAUTHORIZED",
+  /** 服务不可用:功能被关闭 / 依赖未启用 / 暂不可用(区别于 CONFLICT = 状态冲突) */
+  UNAVAILABLE = "UNAVAILABLE",
   /** 外部依赖失败(插件调用 / 上游服务 / 网络) */
   UPSTREAM_ERROR = "UPSTREAM_ERROR",
   /** 未预期异常(兜底,通常伴随 Error 日志) */
@@ -49,7 +53,7 @@ export function apiError(code: BusinessErrorCode, message: string, params?: Reco
  *  避免各调用点各写各的(历史上 25 处漏传,导致错误响应返回 200)。 */
 /** 业务错误码能映射到的 HTTP 状态码集合(窄字面量联合:Hono 的 c.json() 第二参数
  *  只接受 ContentfulStatusCode,plain number 不可赋值)。 */
-export type ApiErrorStatus = 400 | 403 | 404 | 409 | 500 | 502;
+export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 500 | 502 | 503;
 
 export const ERROR_STATUS: Record<BusinessErrorCode, ApiErrorStatus> = {
   [BusinessErrorCode.INVALID_PARAM]: 400,
@@ -57,7 +61,9 @@ export const ERROR_STATUS: Record<BusinessErrorCode, ApiErrorStatus> = {
   [BusinessErrorCode.CONFLICT]: 409,
   [BusinessErrorCode.BUSY]: 409,
   [BusinessErrorCode.FORBIDDEN]: 403,
+  [BusinessErrorCode.UNAUTHORIZED]: 401,
   [BusinessErrorCode.UPSTREAM_ERROR]: 502,
+  [BusinessErrorCode.UNAVAILABLE]: 503,
   [BusinessErrorCode.INTERNAL]: 500,
 };
 

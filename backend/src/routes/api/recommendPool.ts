@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   PERM,
   apiError,
   dailyApi,
@@ -50,7 +51,7 @@ app.get("/v1/recommend-pool/playlist/:playlistId/status", (c) => {
 
 app.post("/v1/recommend-pool/favorites", async (c) => {
   const user = c.get("user");
-  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.auth.notLoggedIn"), 401);
+  if (!user?.id) return c.json(apiError(BusinessErrorCode.UNAUTHORIZED, "errors.auth.notLoggedIn"), apiErrorStatus(BusinessErrorCode.UNAUTHORIZED));
   const added = dailyApi()?.addToRecommendPool("favorites", user.id, "我喜欢的音乐", user.id) ?? false;
   return c.json({ success: true, added, message: added ? "已加入每日推荐池" : "我喜欢的音乐已在推荐池中" });
 });
@@ -59,7 +60,7 @@ app.post("/v1/recommend-pool/favorites", async (c) => {
 
 app.delete("/v1/recommend-pool/favorites", (c) => {
   const user = c.get("user");
-  if (!user?.id) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.auth.notLoggedIn"), 401);
+  if (!user?.id) return c.json(apiError(BusinessErrorCode.UNAUTHORIZED, "errors.auth.notLoggedIn"), apiErrorStatus(BusinessErrorCode.UNAUTHORIZED));
   const removed = dailyApi()?.removeFromRecommendPool("favorites", user.id) ?? false;
   return c.json({ success: true, removed });
 });

@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   PERM,
   and,
   apiError,
@@ -196,7 +197,7 @@ app.post("/v1/dlna/stream-url", async (c) => {
         .get();
     }
     if (!playable) {
-      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.song.noPlayableSource"), 409);
+      return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.song.noPlayableSource"), apiErrorStatus(BusinessErrorCode.CONFLICT));
     }
   }
   const deviceId = typeof body.deviceId === "string" && body.deviceId ? body.deviceId : "client-cast";
@@ -224,7 +225,7 @@ app.post("/v1/dlna/cast", async (c) => {
     });
     return c.json({ success: true, message: `已投屏到设备` });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.screenFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.screenFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -252,7 +253,7 @@ app.post("/v1/dlna/enqueue", async (c) => {
     });
     return c.json({ success: true, enqueueSupported: supported });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.preloadFailed"), 500);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.cast.preloadFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 

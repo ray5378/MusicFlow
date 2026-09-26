@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   LocalPlaybackReport,
   PEER_PATH_RESERVED,
   PlaybackState,
@@ -894,7 +895,7 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
     const ok = results.filter(r => r.status === "fulfilled").length;
     if (ok === 0) {
       const reason = results[0].status === "rejected" ? (results[0] as PromiseRejectedResult).reason : null;
-      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, reason?.message || "errors.group.muteUnsupported"), 500);
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, reason?.message || "errors.group.muteUnsupported"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
     return c.json({ success: true, applied: ok, total: members.length });
   }
@@ -970,7 +971,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
   if (parsed.kind === "sendspin") {
     try {
       const st = await getQueueController().getPlayerState(parsed.id);
-      if (!st) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 404);
+      if (!st) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.invalidPeerId"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
       const srv = getSendspinFront();
       // 音量权威 = 组音量(setVolume 只写组;conn.volume 是每连接 trim,恒 100)。
       // 离线(组缺席 / 服务未跑)回退持久库值 —— 已离线端也看得到上次音量,

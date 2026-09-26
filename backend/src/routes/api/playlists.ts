@@ -69,7 +69,7 @@ app.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c)
           sourceUrl: null, sourcePlatform: imp.platform, externalId: null,
           syncEnabled: 0,
         }).run();
-        if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
+        if (!syncApi()) return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.playlist.syncNotEnabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
         const result = await syncApi().rebuildPlaylistEntries(id, imp, {
           userId: user?.id,
           notes: `从本地歌单文件导入「${name}」`,
@@ -97,7 +97,7 @@ app.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c)
     if (syncApi()?.checkImportCooldown(user?.id || "", url) ?? false) {
       return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.importDup"), apiErrorStatus(BusinessErrorCode.CONFLICT));
     }
-    if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
+    if (!syncApi()) return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.playlist.syncNotEnabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
     const ownerKey = `${url}:${user?.id || ""}`;
     // URL 导入跑在一次性批量子进程里(方案3):子进程内 importPlaylistFromUrl +
     // 增量重建,进度/结果经 IPC 回传;clearLibraryIndex/touch 由 runBatchJob 收尾。
@@ -119,7 +119,7 @@ app.get("/v1/playlists/:id/export", permMiddleware(PERM.PLAYLIST_IMPORT), (c) =>
   if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.user.exportForbidden"), 403);
   const exported = syncApi()?.exportPlaylistEntries(id);
-  if (!exported) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
+  if (!exported) return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.playlist.syncNotEnabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
   const { name, tracks } = exported;
   const payload = { app: NATIVE_APP, version: 1, exportedAt: new Date().toISOString(), name, tracks };
   const filename = `${(name || "歌单").replace(/[\\/:*?"<>|]/g, "_")}.json`;
@@ -155,7 +155,7 @@ app.post("/v1/playlists/:id/sync", permMiddleware(PERM.PLAYLIST_IMPORT), async (
   if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   // Only owner (or admin) can sync
   if (playlist.ownerId !== user?.id && !user?.isAdmin) return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.playlist.syncForbidden"), apiErrorStatus(BusinessErrorCode.FORBIDDEN));
-  if (!syncApi()) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.playlist.syncNotEnabled"), 503);
+  if (!syncApi()) return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.playlist.syncNotEnabled"), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
   const started = startAsyncTask("playlist-sync", `pl:${id}`, {
     kind: "playlist-sync",
     args: { playlistId: id, userId: user?.id },

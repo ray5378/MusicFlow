@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  apiErrorStatus,
   PERM,
   alignGroupMembers,
   apiError,
@@ -28,7 +29,7 @@ app.post("/v1/groups", permMiddleware(PERM.RENDERER_USE), async (c) => {
     const g = gm.createGroup(name, memberIds, user?.id ?? "");
     return c.json({ group: gm.getWithMembers(g.id) }, 201);
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.createFailed"), 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, e.message || "errors.group.createFailed"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   }
 });
 
@@ -62,7 +63,7 @@ app.put("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), async (c) => {
     if (!g) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
     return c.json({ group: g });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.updateFailed"), 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, e.message || "errors.group.updateFailed"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   }
 });
 
@@ -86,7 +87,7 @@ app.post("/v1/groups/:id/members", permMiddleware(PERM.RENDERER_USE), async (c) 
     }
     return c.json({ group: gm.getWithMembers(id), added: r.added, removed: r.removed });
   } catch (e: any) {
-    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.group.updateFailed"), 400);
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, e.message || "errors.group.updateFailed"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   }
 });
 

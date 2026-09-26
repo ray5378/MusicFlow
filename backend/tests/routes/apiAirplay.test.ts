@@ -165,13 +165,14 @@ describe("airplay 域:投放", () => {
     expect(r.status).toBe(403);
   });
 
-  it("POST /v1/airplay/cast 管理员成功;上游失败 500", async () => {
+  it("[D10] POST /v1/airplay/cast 管理员成功;上游失败 -> 502(原写 500,与 UPSTREAM_ERROR 映射打架)", async () => {
     const ok = await call("alice", "POST", "/v1/airplay/cast", { songId: "s1", deviceId: "ap1" });
     expect(ok.body).toMatchObject({ success: true });
     expect(controlMock.castToAirPlayDevice).toHaveBeenCalled();
     controlMock.castToAirPlayDevice.mockRejectedValueOnce(new Error("raop refused"));
     const bad = await call("alice", "POST", "/v1/airplay/cast", { songId: "s2", deviceId: "ap1" });
-    expect(bad.status).toBe(500);
+    expect(bad.status).toBe(502);
+    expect(bad.body).toMatchObject({ success: false, code: "UPSTREAM_ERROR" });
     expect(bad.body.error).toContain("raop refused");
   });
 });
