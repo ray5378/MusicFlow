@@ -352,26 +352,23 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   let removed = 0;
   const removedIds: string[] = [];
   for (const s of existingSongs) {
-    if (!seenPaths.has(s.path)) {
-      removedIds.push(s.id);
-      removed++;
-    }
+    if (!seenPaths.has(s.path)) removedIds.push(s.id);
   }
   if (removedIds.length > 0) {
-    // P0-6:行删了回写跟删。但仅在源可达时执行 —— 至少一个目录列举成功才说明
-    // 这次看到的是"源的真实全貌"而非"源挂了所以啥也没列出来";否则一次源抖动
-    // 就会把整库测量值抹掉。探测失败时跳过并记 warning,回写原样保留。
-    // 顺序:先回写后歌曲行(audio_analysis.row_id 有 FK 无 CASCADE)。
+    // P0-6:只有「至少一个目录列举成功」才说明这次看到的是源的真实全貌。
+    // 零目录可达 = 源整体不可达(网络抖动 / 远端重启)的最强信号,此时既不能抹
+    // 测量回写,更不能删歌曲行 —— 否则一次瞬断就把整个 WebDAV 源从曲库抹掉,
+    // 用户立刻看到歌单变空、封面 404、群组队列失效。整体跳过删除,等下一次
+    // 成功扫描自然校正;removed 如实报 0,不谎报"已回收"。
+    // 顺序(可达分支):先回写后歌曲行(audio_analysis.row_id 有 FK 无 CASCADE)。
     if (visited.size > 0) {
       deleteAnalysisMany(removedIds);
       for (const id of removedIds) {
         db.delete(songs).where(eq(songs.id, id)).run();
       }
+      removed = removedIds.length;
     } else {
-      log.warn(`[SCANNER] WebDAV ${mode} scan: 源 ${sourceId} 本次零目录可达,回写保留(仅删歌曲行)`);
-      for (const id of removedIds) {
-        db.delete(songs).where(eq(songs.id, id)).run();
-      }
+      log.warn(`[SCANNER] WebDAV ${mode} scan: 源 ${sourceId} 本次零目录可达 -> 判定源整体不可达,不删除任何行(保留 ${removedIds.length} 首待下次成功扫描核对)`);
     }
   }
   if (removed > 0) cleanupOrphans();

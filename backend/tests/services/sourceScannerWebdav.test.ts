@@ -339,8 +339,8 @@ describe("scanWebDAVSource / 降级与容错", () => {
     expect(warned).toContain("boom.mp3");
   });
 
-  it("目录列举持续失败:重试到上限后放弃;零目录可达时保留测量回写、只删歌曲行", async () => {
-    // 预置一首该源下的旧歌,验证「源不可达不抹回写」的 P0-6 分支
+  it("[D6] 目录列举持续失败(零目录可达)-> 判定源整体不可达,歌曲行与测量回写都保留", async () => {
+    // 预置一首该源下的旧歌 + 它的测量回写,验证「源瞬断不删任何行」
     upsertSong(
       "w:w9:/music/gone.mp3",
       {
@@ -350,12 +350,19 @@ describe("scanWebDAVSource / 降级与容错", () => {
       } as any,
       "w9",
     );
+    const goneId = (sqlite.prepare("SELECT id FROM songs WHERE path = ?").get("w:w9:/music/gone.mp3") as any).id;
+    sqlite.prepare("INSERT INTO audio_analysis (row_id, loudness_integrated) VALUES (?, ?)").run(goneId, -14.5);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     handler = () => textResp("boom", 404);
 
     const res = await scanWebDAVSource("w9", { url: BASE }, "full");
 
-    expect(res).toMatchObject({ added: 0, removed: 1 });
-    expect(sqlite.prepare("SELECT id FROM songs WHERE path LIKE 'w:w9:%'").all()).toHaveLength(0);
+    // 关键:removed 必须如实为 0,不谎报「已回收」——否则用户看到歌单变空。
+    expect(res).toMatchObject({ added: 0, removed: 0 });
+    expect(sqlite.prepare("SELECT id FROM songs WHERE path LIKE 'w:w9:%'").all()).toHaveLength(1);
+    expect(sqlite.prepare("SELECT loudness_integrated FROM audio_analysis WHERE row_id = ?").get(goneId)).toMatchObject({ loudness_integrated: -14.5 });
+    expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toContain("不删除任何行");
     // 目录重试上限 4 次(初次 + 3 次重排)
     expect(fetchCalls.length).toBeGreaterThanOrEqual(4);
   }, 20000);
