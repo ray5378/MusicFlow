@@ -9,9 +9,8 @@
 //  - playCore  : group 收尾 → 置新曲元数据 → 入组宣告 → 后台起 pump(失败清理+回调)
 //  - announceCore: TTS 拉取解码 → 按组时间线逐帧推 → flush 尾帧 → 音量/成员还原
 import type { QueueItem } from "../player/types.js";
-import type { SendspinServer } from "./server.js";
-import type { SendspinGroup } from "./group.js";
-import { pumpFor } from "./streamEngine.js";
+import type { SendspinServer, SendspinConnection, SendspinGroup } from "./server.js";
+import { pumpFor, peekPump, transferPumpTo, stopGroupPump } from "./streamEngine.js";
 import { FIRST_FRAME_LEAD_US, FRAME_MS } from "./streamEngine.js";
 import { nowUs } from "./clock.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
@@ -46,6 +45,188 @@ export function sendspinGroupName(userGroupId: string): string {
   return `ug:${userGroupId}`;
 }
 
+/** peerId → sendspin 组名(sendspin 设备 = 裸 clientId;用户组 = `ug:<groupId>`)。
+ *  非 sendspin 系(本机 / DLNA / AirPlay)返回 null。
+ *
+ *  ⚠️ 返回 null **不等于**「那个端不能复用服务端的解码结果」—— 它能,而且一直都在复用:
+ *  解码 + 响度归一(+ per-peer DSP)这一段是**端无关**的,服务端本来就握在手里。
+ *  null 只说明那端在服务端侧**没有可移交的推送泵**(GroupPump)——DLNA / 客户端走 HTTP
+ *  **拉**流,出流会话绑死在各自 socket 上;要让它们复用同一段 PCM,需要的是
+ *  「多消费者共享 PCM 窗口」(见 `services/audio/buffer.ts` 已备好的骨架 + AudioBuffer
+ *  的两段式管道),那是**另一套机制**,不是本文件的泵移交。别把这两件事混为一谈。 */
+export function sendspinGroupNameForPeer(peerId: string): string | null {
+  if (peerId.startsWith("sendspin:")) return peerId.slice("sendspin:".length);
+  if (peerId.startsWith("group:")) return sendspinGroupName(peerId.slice("group:".length));
+  return null;
+}
+
+// ==================== 借流(泵移交):流转时复用源端已解码的流 ====================
+//
+// 用户在流转播放里要的是"目标端出声的位置与流转前秒级对齐,而且是**立刻**出声"。
+// sendspin 天然满足这个前提:音频是服务端**推**出去的,泵持有已解码窗口 + 时间线,
+// 全部归服务端所有 —— 于是"把这条流交给另一个组"只是换个下发目标(见 GroupPump.rehost)。
+//
+// 与「共享解码窗口」方案的区别(重要):那条路要给窗口加多消费者读指针、引用计数、
+// 按最慢者淘汰;而同一时刻只有一个组在播,移交根本不需要这些 —— 零额外 PCM 内存、
+// 不多起进程。下一首由目标组自己的泵起播(`play()` 里 `groupDspFilters()` 按**新组**
+// 重算),自然回到该设备独立的 DSP 链路,这正是用户要的语义。
+
+/** 借流**规格**:移交所需的最小信息。key = **目标组名**(与 srv.groups 同一命名空间)。
+ *  ⚠️ 刻意**不含**登记时刻 —— 时间戳是 TTL 的记账,不是移交语义的一部分,不该出现在
+ *  `handoverCore` 这类"拿着规格干活"的签名里(曾因此让类型上说不过去)。 */
+export interface BorrowSpec {
+  fromGroup: string;
+  /** 移交时的落点(ms):源端此刻的**可听位置**(不是已推送位置)。 */
+  positionMs: number;
+  /** 武装时源端正在播的歌。起播时歌不同即自动放弃(见 handoverCore)。 */
+  songId: string;
+}
+
+/** 武装结果(对外形状)。字段平铺是**故意的**:它同时是 fork RPC 的载荷
+ *  (`sendspinSupervisor.rpc("armBorrow", …)`),嵌一层对象只是白增序列化面。 */
+export interface BorrowArmed {
+  armed: boolean;
+  positionMs?: number;
+  songId?: string;
+  reason?: string;
+}
+
+/** 登记项 = 规格 ＋ 登记时刻。`at` 只活在本模块内。 */
+interface BorrowEntry {
+  spec: BorrowSpec;
+  at: number;
+}
+
+const armedBorrows = new Map<string, BorrowEntry>();
+
+/** 登记有效期。武装 → 起播是同步推进的(路由里紧挨着的两步),超时即视为陈旧 ——
+ *  否则一次失败的武装会污染很久以后的一次同目标起播。 */
+const BORROW_TTL_MS = 15_000;
+
+/** 武装一次「借流」:目标组下一次起播若正好要放源端**正在播的同一首**,就把源端
+ *  那条流整体移交过去(见 handoverCore)。
+ *
+ *  返回 `armed=false` 时调用方走既有链路(起播 → 读进度 → seek),行为与改动前一致。
+ *  位置读数取**可听位置**而非已推送位置:目标端要从"用户正听到的地方"接上。
+ *
+ *  纯判定,不动任何状态(除登记本身)—— 故可以放心在路由里先探后起播。 */
+export function armBorrowCore(
+  srv: SendspinServer | null,
+  targetGroup: string,
+  sourceGroup: string,
+  overrideMs?: number | null,
+): BorrowArmed {
+  if (!srv) return { armed: false, reason: "no-server" };
+  // ⚠️ 一律 groups.get 而**不**用 srv.group():后者会凭空建一个空组。
+  const gTo = srv.groups.get(targetGroup);
+  const gFrom = srv.groups.get(sourceGroup);
+  if (!gTo) return { armed: false, reason: "target-group-absent" };
+  if (!gFrom || gFrom === gTo) return { armed: false, reason: "source-group-absent" };
+  const p = peekPump(gFrom);
+  if (!p || !p.active) return { armed: false, reason: "source-not-playing" };
+  if (p.busy) return { armed: false, reason: "source-starting" };
+  const songId = p.playingSongId;
+  if (!songId) return { armed: false, reason: "source-no-song" };
+  const pos = typeof overrideMs === "number" && Number.isFinite(overrideMs) && overrideMs >= 0
+    ? overrideMs
+    : gFrom.positionMs;
+  armedBorrows.set(targetGroup, {
+    spec: { fromGroup: sourceGroup, positionMs: pos, songId },
+    at: Date.now(),
+  });
+  return { armed: true, positionMs: pos, songId };
+}
+
+/** 消费登记(一次性;陈旧即作废)。返回**规格**(不含时刻)。 */
+function takeBorrow(groupName: string): BorrowSpec | null {
+  const e = armedBorrows.get(groupName);
+  if (!e) return null;
+  armedBorrows.delete(groupName);
+  if (Date.now() - e.at > BORROW_TTL_MS) return null;
+  return e.spec;
+}
+
+/** 起播时是否该走借流(供 playCore/playGroupCore 共用;不成立返回 null 即静默回退)。 */
+function borrowFor(group: SendspinGroup, item: QueueItem): BorrowSpec | null {
+  const spec = takeBorrow(group.name);
+  if (!spec) return null;
+  if (spec.songId !== item.songId) {
+    log.info(
+      `[Sendspin][handover] ${group.name} ← ${spec.fromGroup} 借流放弃 song-mismatch` +
+        `(源端=${spec.songId} 本次=${item.songId}),走完整起播`,
+    );
+    return null;
+  }
+  return spec;
+}
+
+export interface HandoverResult {
+  ok: boolean;
+  positionMs?: number;
+  reason?: string;
+}
+
+/** ★ 借流核心:把源端正在播的那条流整体交给目标组。成功即返回(调用方不得再起播)。
+ *
+ *  顺序上有一处不能调换:必须**先**把目标成员挂进新组并排好延迟宣告,**再**搬泵 ——
+ *  pushFrame 一旦指向新组就要能立刻兑现 stream/start(协议要求宣告先于音频,见
+ *  SendspinGroup.flushAnnounceFor),否则新组第一帧音频会被设备当"无流数据"丢弃,
+ *  表现为目标端开口就少一小段。
+ *
+ *  失败一律返回 ok=false 且不改变现场(调用方回退完整起播,行为与改动前一致)。 */
+export function handoverCore(
+  srv: SendspinServer | null,
+  spec: BorrowSpec,
+  targetGroup: string,
+  item: QueueItem,
+  conns: SendspinConnection[],
+): HandoverResult {
+  if (!srv) return { ok: false, reason: "no-server" };
+  const gTo = srv.groups.get(targetGroup);
+  const gFrom = srv.groups.get(spec.fromGroup);
+  if (!gTo) return { ok: false, reason: "target-group-absent" };
+  if (!gFrom || gFrom === gTo) return { ok: false, reason: "source-group-absent" };
+  const p = peekPump(gFrom);
+  if (!p || !p.active) return { ok: false, reason: "source-not-playing" };
+  if (p.playingSongId !== item.songId) return { ok: false, reason: "song-mismatch" };
+  if (p.busy) return { ok: false, reason: "source-starting" };
+
+  // ① 目标组旧现场清干净:它可能正放着别的(新旧两泵并存 = 双流),旧编码器(含 flac
+  //    的 ffmpeg 子进程)也必须杀,否则孤儿进程。与 playCore 的收尾段逐条对齐。
+  stopGroupPump(gTo);
+  gTo.current = null;
+  gTo.finishPlayback();
+  gTo.close();
+  // ② 目标组就位(先成员 + 宣告,后搬泵 —— 见上文顺序说明)。
+  for (const c of conns) {
+    try { c.group = gTo; gTo.add(c); } catch { /* 单成员挂载失败不挡其余 */ }
+  }
+  gTo.current = {
+    songId: item.songId,
+    title: item.title,
+    artist: item.artist,
+    album: item.album,
+    coverArt: item.coverArt,
+    mime: item.mime,
+    durationMs: (item.duration ?? 0) * 1000,
+  };
+  for (const c of gTo.members) {
+    try { c.sendGroupUpdate(); gTo.pendingAnnounces.push(c); } catch { /* ignore */ }
+  }
+  // ③ 搬泵(落点由 rehost 决定并回传;移交自带落点,**调用方不得再 seek**)。
+  const at = transferPumpTo(gFrom, gTo, spec.positionMs);
+  if (at === null) return { ok: false, reason: "transfer-failed" };
+  // ④ 源端到此为止:流的归属已经交出去了,不留半截状态(与 stopCore 同语义)。
+  gFrom.current = null;
+  gFrom.finishPlayback();
+  gFrom.close();
+  log.info(
+    `[Sendspin][handover] 借流成功 ${gFrom.name} → ${gTo.name} song=${item.songId} ` +
+      `pos=${at}ms(源端零重建:不启 ffmpeg、不 seek、不预缓冲)`,
+  );
+  return { ok: true, positionMs: at };
+}
+
 /** 起播核心:对应原 ProtocolPlayer.playMedia 的「推流侧」段落。同步段执行完即返回,
  *  解码/推流在 pump 内异步进行;失败经 onPlayFailed 上抛(不 throw —— 与原行为一致,
  *  playMedia 不因解码失败阻塞 QC,清理由核心内完成)。 */
@@ -62,6 +243,14 @@ export function playCore(
   const conn = srv.clients.get(clientId);
   // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
   const g = srv.group(clientId);
+  // ★ 借流:这一首若正好是源端**正在播**的那首,就把源端那条已解码的流整体接过来
+  //   —— 目标端不启 ffmpeg、不 seek、不预缓冲,首帧现成即出声。不成立即静默回退。
+  const arm = borrowFor(g, item);
+  if (arm) {
+    const r = handoverCore(srv, arm, g.name, item, conn ? [conn] : []);
+    if (r.ok) return;
+    log.info(`[Sendspin][handover] ${clientId} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
+  }
   const pump = pumpFor(srv, g);
   pump.stop(); // 打断上一首,避免重叠推流(MA:track change 丢弃旧 PushStream)
   // MA seek_position 属于**新**流:stop 之后装填,play() 起流即带 -ss 起点。
@@ -134,6 +323,16 @@ export function playGroupCore(
 ): void {
   if (!srv) return;
   const g = srv.group(groupName);
+  // ★ 借流(见 playCore 同名段落):用户组作目标时同样适用 —— 泵照搬,成员原样。
+  const arm = borrowFor(g, item);
+  if (arm) {
+    const conns = memberIds
+      .map((id) => srv.clients.get(id))
+      .filter((c): c is SendspinConnection => !!c);
+    const r = handoverCore(srv, arm, g.name, item, conns);
+    if (r.ok) return;
+    log.info(`[Sendspin][handover] ${groupName} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
+  }
   const pump = pumpFor(srv, g);
   pump.stop(); // 打断上一首,避免重叠推流
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);

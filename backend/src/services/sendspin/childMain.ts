@@ -121,6 +121,17 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         this.requestSnapshot(true); // current 元数据变化立即可见(前端歌词/封面跟随)
         return null; // pump 异步起播,不等待解码
       }
+      case "armBorrow": {
+        // 借流武装(见 playerCore.armBorrowCore):登记在**子进程**——泵在这里。
+        if (!srv) throw new Error("sendspin server 未运行");
+        const { armBorrowCore } = await import("./playerCore.js");
+        return armBorrowCore(
+          srv,
+          String(p.targetGroup),
+          String(p.sourceGroup),
+          typeof p.overrideMs === "number" ? p.overrideMs : null,
+        );
+      }
       case "transport": {
         const clientId = String(p.clientId);
         switch (p.op) {

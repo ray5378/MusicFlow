@@ -3700,11 +3700,28 @@ apiRoutes.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   if (isCastPeer(parsedTo)) {
     // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsedTo);
+    // ★ sendspin → sendspin:源端那条流在服务端是**现成解码好**的(泵 + PCM 窗口),
+    //   把泵整体交给目标端即可立刻出声 —— 不重启 ffmpeg、不 seek、不预缓冲。
+    //   武装必须在起播**之前**:起播那一步的 playCore 会消费它。
+    const borrow = await tryArmSendspinBorrow(fromPeerId, toPeerId, askPosition);
+    let startedIdx: number | null = null;
     try {
-      await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
+      startedIdx = await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
     } catch (e: any) { return c.json({ error: e.message }, 500); }
-    const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
-    if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
+    // 移交只在「目标端真的起播了源端那一首」且**确实落位**时才成立。任一不成立都走
+    // 常规对齐 —— 且必须走:移交没发生就意味着目标端还在 0 秒。
+    const playedSongId = items[startedIdx ?? start]?.songId;
+    const handedOver =
+      borrow.armed &&
+      !!borrow.songId &&
+      playedSongId === borrow.songId &&
+      await borrowLandingConfirmed(toPeerId, borrow.positionSeconds);
+    if (handedOver) {
+      landedPosition = borrow.positionSeconds ?? null;
+    } else {
+      const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+      if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
+    }
   } else {
     // local 目标:起点必须**随起播**交出去(见 seekPeerToSeconds 上方注释)。
     const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
@@ -4501,6 +4518,51 @@ const gm = getGroupManager();
 // 成员在组播期间不独立受理播放指令;用户把播放/切歌/流转明确指向成员本身时,
 // 先把它从所属活跃组摘出(写库 + 断流对齐),再走各 kind 的独立播放分支。
 // 仅设备型成员(dlna / sendspin)适用;group/local 目标本就不从属于任何组。
+/** sendspin → sendspin 的「借流」武装(泵移交,见 services/sendspin/playerCore.ts)。
+ *
+ *  两端都是 sendspin 系 peer 时才尝试。armed=true 表示紧随其后的那次起播会把源端
+ *  **已经解码好**的那条流整体接过去(目标端零解码、零 seek、零预缓冲即出声),落点
+ *  由移交方给出 —— 调用方必须跳过事后的 seek(seek 会走完整重建,把泵打死)。 */
+async function tryArmSendspinBorrow(
+  fromPeerId: string,
+  toPeerId: string,
+  askPosition: number | null,
+): Promise<{ armed: boolean; positionSeconds: number | null; songId: string | null }> {
+  const miss = { armed: false, positionSeconds: null, songId: null };
+  try {
+    const { sendspinArmBorrow, sendspinGroupNameForPeer } = await import("../../services/sendspin/index.js");
+    const fromGroup = sendspinGroupNameForPeer(fromPeerId);
+    const toGroup = sendspinGroupNameForPeer(toPeerId);
+    if (!fromGroup || !toGroup) return miss; // 有一端不是 sendspin:没有可移交的流对象
+    const r = await sendspinArmBorrow(toGroup, fromGroup, askPosition != null ? askPosition * 1000 : null);
+    if (!r?.armed) {
+      if (r?.reason) seekLog.debug(`[transfer] 借流未武装(${r.reason}),走常规对齐`);
+      return miss;
+    }
+    return {
+      armed: true,
+      positionSeconds: typeof r.positionMs === "number" ? r.positionMs / 1000 : null,
+      songId: r.songId ?? null,
+    };
+  } catch (e: any) {
+    seekLog.debug(`[transfer] 借流武装异常: ${e?.message || e}`);
+    return miss;
+  }
+}
+
+/** 泵移交是否真的落位:读目标端实时进度与移交落点比对。
+ *
+ *  为什么必须读回来:移交成没成,在返回值上区分不了(playCore 是 fire-and-forget,
+ *  武装之后源端可能在毫秒级窗口里被停/被换歌),而两种情形的后续处置**完全相反**
+ *  —— 成了就必须跳过 seek,没成又必须 seek。一次读回把这个不确定性消掉。
+ *  容差 1.5s:移交后 pushLoop 的「可听位置」会短暂落后落点(最多一个 ≤800ms 的锚点
+ *  提前量);而"从 0 播"在落点 >1.5s 时必然落在容差外。 */
+async function borrowLandingConfirmed(toPeerId: string, expectSeconds: number | null): Promise<boolean> {
+  if (expectSeconds === null || expectSeconds <= 0) return false;
+  const back = await readPeerPositionSeconds(toPeerId);
+  return back !== null && Math.abs(back - expectSeconds) <= 1.5;
+}
+
 async function detachFromActiveGroups(parsed: { kind: string; id: string }): Promise<void> {
   if (parsed.kind !== "dlna" && parsed.kind !== "sendspin") return;
   const bare = splitMemberId(parsed.kind === "sendspin" ? `sendspin:${parsed.id}` : parsed.id)?.id ?? parsed.id;

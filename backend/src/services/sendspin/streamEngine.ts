@@ -445,6 +445,11 @@ export class GroupPump {
   private playRetry = 0;
   /** 起播窗口判定:是否已有一次 play 在飞(见 playInFlight)。 */
   get busy(): boolean { return this.playInFlight; }
+
+  /** 当前**正在播**的歌 id(未在播为空串)。
+   *  ⚠️ 移交判定必须看它而不能只看 `active`:`active` 在 `running=true` 而首帧
+   *  还没产出时就已经为真,拿它当"有流可借"会借到一条半成品。 */
+  get playingSongId(): string { return this.running ? this.songId : ""; }
   private srcRowId: string | null = null;
   private srcRowSongId = "";
   // 暂停时被唤醒的等待器。
@@ -703,8 +708,9 @@ export class GroupPump {
     /** 本轮最后一次「已推送」的媒体位置(曲末排空期间刷新上报进度用)。
      *  循环外可见:`framePosMs` 是循环内 const,排空代码在循环之后。 */
     let lastPushedMs = this.playCursorMs;
-    /** 本轮上报下界:一开始就固定,避免中途被 seek 改写后前后帧判据不一致。 */
-    const floorMs = this.reportedFloorMs;
+    /** 本轮上报下界。正常起播=0、带 seek 起播=目标位置;泵移交(rehost)与 seek 同理,
+     *  **只可能在时间线重锚那一拍被改写**,故取值放在下面的重锚分支里同步刷新一次。 */
+    let floorMs = this.reportedFloorMs;
     const yieldEveryN = async (): Promise<void> => {
       if (++sinceYield < YIELD_EVERY_FRAMES) return;
       sinceYield = 0;
@@ -778,6 +784,10 @@ export class GroupPump {
           const reseed = !firstFrame;
           consumedReseed = this.timelineReseed;
           firstFrame = false;
+          // ★ 重锚这一拍同步刷新上报下界:泵移交(rehost)把下界改成目标落点,seek 把
+          //   下界写成目标位置 —— 这里不取,移交后目标端的进度会从
+          //   (落点 − 缓冲深度) 一路爬上来,看起来像"没对齐"。
+          floorMs = this.reportedFloorMs;
           // ★ seek 后的墙钟空洞必须在这里补偿 pacing 锚点。
           // seek() 在拖动那一刻就写了 paceAnchorWall=Date.now(),但重起 ffmpeg
           // 到首帧产出实测要 5~7.4s;若不在此重设,dueMs 会全部落在过去 →
@@ -1117,6 +1127,60 @@ export class GroupPump {
     this.pendingSeekMs = alignFrameMs(Math.max(0, Math.round(ms)));
   }
 
+  /** ★ 泵移交:把本泵(连同**已解码窗口**、时间线、推流节奏)整体改挂到另一个组。
+   *
+   *  ============ 为什么只需改一个字段 ============
+   *  本泵的下发目标就是 `this.group`:pushFrame / positionMs / timelineBaseUs /
+   *  current / commonSendAheadUs() 全部在**每一帧读取时**取自 `this.group`,没有
+   *  任何一处把它缓存成局部量(`win`/`pcm` 缓存的是音频数据本身,与组无关)。
+   *  所以"把这条流交给另一个组"= 换掉 `this.group` + 让时间线按**新组**的时钟
+   *  (commonSendAheadUs)重锚一帧即可 —— 不需要第二份解码、不需要第二个 ffmpeg、
+   *  不需要多消费者窗口(同一时刻只有一个组在播)。
+   *
+   *  ============ 起点为什么必须回退 ============
+   *  对外可见的 `group.positionMs` 是**可听位置**(已推送 − 缓冲深度),而取帧游标
+   *  `playCursorMs` 是**已推送位置**,两者相差整整一个预填充水位(默认 3s,可配到
+   *  30s)。若照搬游标,目标端会从"源端还排在设备缓冲里、用户还没听到"的那一段开始
+   *  —— 听感就是"一下子往前跳了 N 秒"。故移交必须把游标回退到源端此刻的可听位置。
+   *
+   *  ⚠️ 回退有物理下限:窗口只保留 5s 已消费历史(`HISTORY_KEEP_SEC`),水位比它深时
+   *  回退不到可听位置。此时以窗口基准为下限 —— 宁可少退几秒(听感上少跳几秒),也
+   *  不能让 `slice()` 直接命中淘汰路径。另一个方向的上限是已推送位置(超过即重发同一段)。
+   *
+   *  @param next    新组(移交后本泵唯一的下发目标)
+   *  @param wantMs  期望起点(通常 = 源端可听位置)
+   *  @returns       实际落点(ms)
+   */
+  rehost(next: SendspinGroup, wantMs: number): number {
+    const prev = this.group;
+    let start = alignFrameMs(Math.max(0, Math.round(wantMs)));
+    // 下限:窗口还能读到的最早点(向上取到帧栅格,与 slice 的绝对下标同源)。
+    if (this.window) {
+      const winBase = Math.ceil(this.window.baseMs / FRAME_MS) * FRAME_MS;
+      if (start < winBase) start = winBase;
+    }
+    // 上限:已推送位置(超过它就是把同一段音频重发一遍)。
+    const pushed = alignFrameMs(this.playCursorMs);
+    if (start > pushed) start = pushed;
+    // 旧组的时间线上游作废:新组由本轮 reseed 按**新组**的 send_ahead 重立。
+    prev.timelineBaseUs = 0n;
+    this.group = next;
+    this.playCursorMs = start;
+    next.positionMs = start;
+    // 上报下界 = 落点:目标端 UI/歌词立刻显示正确位置(与带 seek 起播同款语义),
+    // 由 pushLoop 的重锚分支取用(见 floorMs)。
+    this.reportedFloorMs = start;
+    // ★ 重锚序号自增 —— 这一帧起,时间戳锚点按 next.commonSendAheadUs() 重立。
+    // 序号(而非布尔)保证"移交这一拍"不会被已经越过重锚判断点的循环吃掉。
+    this.timelineReseed++;
+    // 暂停态也照常交付:流转的语义是"接着播",不是"把暂停一起搬过去"。
+    if (this.paused) this.resume();
+    log.debug(
+      `[pump][rehost] ${prev.name} → ${next.name} 起点=${start}ms(需求 ${Math.round(wantMs)}ms,已推送 ${pushed}ms)`,
+    );
+    return start;
+  }
+
 }
 
 // ---- 单组 pump 池(server:group 生命周期内复用) ----
@@ -1140,4 +1204,25 @@ export function stopGroupPump(group: SendspinGroup): void {
     try { p.stop(); } catch { /* ignore */ }
     pumpByGroup.delete(group);
   }
+}
+
+/** 读该组现有的泵(**不创建**)。移交前的可行性判定必须用它 —— `pumpFor()` 会凭空
+ *  建一个空泵,把"源端根本没在播"误判成"有个泵在"。 */
+export function peekPump(group: SendspinGroup): GroupPump | undefined {
+  return pumpByGroup.get(group);
+}
+
+/** 把 `from` 名下的泵整体移交到 `to`(含 WeakMap 键),返回落点(ms)。
+ *
+ *  ⚠️ 只做**泵这一侧**的搬运:两端的组状态(current / 成员 / stream 宣告 / 编码器)
+ *  由调用方负责 —— 那是会话语义,属于 playerCore.handoverCore。
+ *  返回 null 表示没有可移交的泵(或源目标同组)。 */
+export function transferPumpTo(from: SendspinGroup, to: SendspinGroup, wantMs: number): number | null {
+  if (from === to) return null;
+  const p = pumpByGroup.get(from);
+  if (!p) return null;
+  const at = p.rehost(to, wantMs);
+  pumpByGroup.delete(from);
+  pumpByGroup.set(to, p);
+  return at;
 }

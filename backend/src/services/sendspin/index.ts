@@ -615,9 +615,36 @@ export async function sendspinUnpair(clientId: string): Promise<boolean> {
   return ok;
 }
 
+/** sendspin 借流(泵移交)的武装入口(见 playerCore.armBorrowCore)。
+ *
+ *  必须在**目标端起播之前**调用:紧随其后的 playCore/playGroupCore 会消费它。
+ *  返回 armed=true 表示"这次起播会走泵移交",且 positionMs 给出落点 —— 调用方
+ *  **不得**再对目标端 seek(seek 走完整重建,会把刚接手的泵打死)。
+ *  fork 模式经 RPC 在子进程登记(pump 在子进程);in-proc 直调。 */
+export async function sendspinArmBorrow(
+  targetGroup: string,
+  sourceGroup: string,
+  overrideMs?: number | null,
+): Promise<{ armed: boolean; positionMs?: number; songId?: string; reason?: string }> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return { armed: false, reason: "service-down" };
+    return await sendspinSupervisor
+      .rpc<{ armed: boolean; positionMs?: number; songId?: string; reason?: string }>("armBorrow", {
+        targetGroup,
+        sourceGroup,
+        overrideMs: overrideMs ?? null,
+      })
+      .catch(() => ({ armed: false, reason: "rpc-failed" }));
+  }
+  const { armBorrowCore } = await import("./playerCore.js");
+  return armBorrowCore(getServer(), targetGroup, sourceGroup, overrideMs ?? null);
+}
+
 /** 用户组播放入口(多房间同步):fork 经 RPC 在子进程执行, in-proc 直调 core。
  *  供路由层(成员变更)/组 player(起播)调用;调用方零分叉。
  *  groupName 统一用 playerCore.sendspinGroupName(userGroupId) 映射。 */
+export { sendspinGroupNameForPeer } from "./playerCore.js";
+
 export async function sendspinGroupPlay(
   groupName: string,
   memberIds: string[],
