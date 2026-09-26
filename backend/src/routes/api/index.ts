@@ -3304,6 +3304,10 @@ function isCastPeer(parsed: { kind: string }): boolean {
 // 其余 peer 一律不可见(见 services/access.ts 的 filterPeersByAccess)。
 apiRoutes.get("/v1/peers", (c) => {
   const user = c.get("user");
+  // 客户端来拉列表 = 「用户正盯着设备列表」：距上次发现超过 60s 就后台补扫一轮
+  // （fire-and-forget，不阻塞本次响应）。设备不发通告时，这一步让「打开 / 刷新列表」
+  // 本身就能把刚上线的设备带出来，而不必干等周期扫描。并发由 refreshDevices 自身去重。
+  if (shouldRefreshDevices()) void refreshDevices().catch(() => {});
   // 单一出口(与 WS peer_snapshot 共用):可见性 → 打码/self → 按用户级隐藏 → 改名。
   // 本机播放器的临时端 ID 由客户端以 X-MF-Client-Id 头 / ?clientId= 上报,缺省退回旧格式。
   //

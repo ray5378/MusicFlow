@@ -342,10 +342,15 @@ async function runMaintenanceOnce() {
 // ==================== DLNA background discovery ====================
 // Keep the device cache warm so the cast dialog can show devices instantly
 // without making the user wait for a fresh SSDP sweep every time. Runs once
-// shortly after boot (give the network stack a moment) then every 5 min.
+// shortly after boot (give the network stack a moment) then every 90s.
 // After each refresh, register newly discovered devices with QueueController
 // so they have a UniversalPlayer + DLNA ProtocolPlayer bound for playback.
-const DLNA_SCAN_INTERVAL = 5 * 60 * 1000;
+//
+// 90s（原 5 分钟）：主动扫描是「设备不发 SSDP 通告」时的唯一兜底 —— 典型场景是第三方
+// App（音流等）把**已开机**的 DLNA 设备直接拉起来播放，设备自身不会再广播 ssdp:alive，
+// 只能靠扫描发现。旧的 5 分钟间隔让用户「歌都放半天了，列表里还没有这台设备」。
+// 家宽 LAN 上一轮 M-SEARCH + 每设备一次 description 抓取的代价可以忽略。
+const DLNA_SCAN_INTERVAL = 90 * 1000;
 async function refreshAndRegisterDevices(): Promise<void> {
   try {
     await refreshDevices();

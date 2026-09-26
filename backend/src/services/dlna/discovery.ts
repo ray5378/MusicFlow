@@ -124,40 +124,60 @@ function emitSsdpEvent(e: SsdpEvent): void {
 const lastAliveEmitAt = new Map<string, number>();
 const ALIVE_EMIT_DEBOUNCE_MS = 60 * 1000;
 
+/** 实时 alive 处理（含重试）最终失败 → 放开去抖，让后续通告 / 扫描立刻接管。
+ *
+ * 去抖窗口在 emit 时「先占位」——真实设备一次上电会连发多条 NT（同一 LOCATION，
+ * 毫秒级），只需处理其中一条。但**处理失败必须把它放开**：设备刚上电 / 刚被第三方
+ * App（音流等）拉起时，它的 SSDP 栈往往先于内嵌 HTTP 服务就绪，此刻抓 description
+ * 必然失败；旧实现提前消耗去抖 + 失败静默丢弃（`if (!d) return`）⇒ 这次上线窗口被
+ * 彻底浪费，用户要等下一轮主动扫描（旧 5 分钟）才在列表里看到设备
+ * （真机实测：HTTP 恢复后还要 85s 才可见）。 */
+export function clearAliveEmit(location: string): void {
+  lastAliveEmitAt.delete(location);
+}
+
 /** Fetch a single device's description by its SSDP location URL. */
 export function fetchDeviceAtLocation(location: string): Promise<DlnaDevice | null> {
   return fetchDescription(location);
+}
+
+/** 处理一条 NOTIFY 报文的副作用（登记通告 / 触发 alive / byebye）。
+ *
+ * 从 socket 回调里抽出来是为了**可单测**：alive 去抖窗口何时被消耗、失败后又如何
+ * 被放开，正是「设备上电后迟迟不出现」的根因所在（见 `clearAliveEmit` 注释）。 */
+export function handleNotifyText(text: string): void {
+  const isNotify = /^NOTIFY \* HTTP\/1\.1/i.test(text);
+  if (!isNotify) return;
+  const loc = text.match(/^LOCATION:\s*(.+)$/im)?.[1].trim();
+  const nts = text.match(/^NTS:\s*(.+)$/im)?.[1].trim();
+  const usn = text.match(/^USN:\s*(.+)$/im)?.[1].trim() || "";
+  if (!loc) return;
+  // ssdp:byebye → device is going offline
+  if (nts === "ssdp:byebye") {
+    announced.delete(usn);
+    const m = usn.match(/uuid:([^:]+)/i);
+    if (m) emitSsdpEvent({ type: "byebye", udn: m[1] });
+    return;
+  }
+  // ssdp:alive / ssdp:update → device is (re)announcing itself
+  if (nts === "ssdp:alive" || nts === "ssdp:update") {
+    announced.set(usn, { location: loc, lastSeen: Date.now(), usn });
+    const last = lastAliveEmitAt.get(loc) || 0;
+    if (Date.now() - last > ALIVE_EMIT_DEBOUNCE_MS) {
+      // 先占位：真实设备一次上电会连发多条 NT（同一 LOCATION，毫秒级），
+      // 这样只触发**一条**处理链；该链重试全失败时由 clearAliveEmit 放开，
+      // 让设备后续的通告立刻能再触发一次。
+      lastAliveEmitAt.set(loc, Date.now());
+      emitSsdpEvent({ type: "alive", location: loc });
+    }
+  }
 }
 
 function startListener() {
   if (listenerSocket) return;
   const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
   sock.on("error", () => {}); // never crash on socket errors
-  sock.on("message", (msg) => {
-    const text = msg.toString();
-    const isNotify = /^NOTIFY \* HTTP\/1\.1/i.test(text);
-    if (!isNotify) return;
-    const loc = text.match(/^LOCATION:\s*(.+)$/im)?.[1].trim();
-    const nts = text.match(/^NTS:\s*(.+)$/im)?.[1].trim();
-    const usn = text.match(/^USN:\s*(.+)$/im)?.[1].trim() || "";
-    if (!loc) return;
-    // ssdp:byebye → device is going offline
-    if (nts === "ssdp:byebye") {
-      announced.delete(usn);
-      const m = usn.match(/uuid:([^:]+)/i);
-      if (m) emitSsdpEvent({ type: "byebye", udn: m[1] });
-      return;
-    }
-    // ssdp:alive / ssdp:update → device is (re)announcing itself
-    if (nts === "ssdp:alive" || nts === "ssdp:update") {
-      announced.set(usn, { location: loc, lastSeen: Date.now(), usn });
-      const last = lastAliveEmitAt.get(loc) || 0;
-      if (Date.now() - last > ALIVE_EMIT_DEBOUNCE_MS) {
-        lastAliveEmitAt.set(loc, Date.now());
-        emitSsdpEvent({ type: "alive", location: loc });
-      }
-    }
-  });
+  sock.on("message", (msg) => handleNotifyText(msg.toString()));
   sock.bind(SSDP_PORT, () => {
     try { sock.addMembership(SSDP_ADDR); } catch {}
   });

@@ -17,7 +17,7 @@
 // `/rest/dlna/stream/:token` endpoint so the renderer can pull bytes directly.
 import { randomBytes } from "crypto";
 import os from "os";
-import { discoverDlnaDevices, fetchDeviceAtLocation, lastScanWasErrored, onSsdpEvent, DlnaDevice } from "./discovery.js";
+import { discoverDlnaDevices, fetchDeviceAtLocation, lastScanWasErrored, onSsdpEvent, clearAliveEmit, DlnaDevice } from "./discovery.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
@@ -298,7 +298,16 @@ function isSeekUnreliable(deviceId: string): boolean {
 
 // ==================== Public API ====================
 
+/** 正在进行的扫描：并发触发（定时器 / REST / WS 补扫）共享同一次结果，避免重复扫。 */
+let refreshInFlight: Promise<DlnaDevice[]> | null = null;
+
 export async function refreshDevices(timeoutMs = 4000): Promise<DlnaDevice[]> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = doRefreshDevices(timeoutMs).finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
+}
+
+async function doRefreshDevices(timeoutMs: number): Promise<DlnaDevice[]> {
   const discovered = await discoverDlnaDevices(timeoutMs);
   lastDiscovery = Date.now();
   const live = new Set(discovered.map(d => d.id));
@@ -499,6 +508,24 @@ export function getCachedDevices(): DlnaDevice[] {
 // Here we: fetch its description immediately, upsert the cache, and emit
 // device_list_changed → peer reconcile → WS peer_registered/peer_available →
 // the HA card / Web switcher show (or dim) the device in real time.
+/** 实时 alive 的 description 抓取退避（首次立即，其后 0.8s / 2s / 5s，总跨度 ≈7.8s）。
+ *
+ * 设备刚上电 / 刚被第三方 App 拉起时，SSDP 通告常常早于它内嵌 HTTP 服务就绪，
+ * 首次抓 description 极易失败（240 真机实测 HiVi 在播放窗口内持续 `fetch failed`）。
+ * 单次失败就放弃 ⇒ 这次上线事件被白扔，用户要等下一轮扫描才看到设备（实测 85s）。
+ * 用一小段退避重试把「设备已宣告、服务还没起来」的窗口覆盖掉。 */
+const ALIVE_FETCH_BACKOFF_MS = [0, 800, 2000, 5000];
+const aliveRetryWait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+async function fetchAliveDevice(location: string): Promise<DlnaDevice | null> {
+  for (let i = 0; i < ALIVE_FETCH_BACKOFF_MS.length; i++) {
+    if (ALIVE_FETCH_BACKOFF_MS[i] > 0) await aliveRetryWait(ALIVE_FETCH_BACKOFF_MS[i]);
+    const d = await fetchDeviceAtLocation(location);
+    if (d) return d;
+  }
+  return null;
+}
+
 let ssdpRealtimeWired = false;
 export function wireSsdpRealtime(): void {
   if (ssdpRealtimeWired) return;
@@ -506,8 +533,14 @@ export function wireSsdpRealtime(): void {
   onSsdpEvent(async (e) => {
     try {
       if (e.type === "alive") {
-        const d = await fetchDeviceAtLocation(e.location);
-        if (!d) return;
+        const d = await fetchAliveDevice(e.location);
+        if (!d) {
+          // 重试全部失败 → 放开去抖，让设备后续通告 / 下一轮扫描立刻接管，
+          // 而不是白等一个 60s 去抖周期（旧行为：这一次上线窗口直接作废）。
+          clearAliveEmit(e.location);
+          log.debug(`[SSDP] alive 拉取 description 失败（已重试 ${ALIVE_FETCH_BACKOFF_MS.length - 1} 次）：${e.location}`);
+          return;
+        }
         const idx = cachedDevices.findIndex((x) => x.id === d.id);
         const wasAvailable = idx >= 0 ? cachedDevices[idx].available : false;
         if (idx >= 0) {
