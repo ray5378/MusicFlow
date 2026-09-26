@@ -1,6 +1,18 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（users 域，15 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import {
+  flows,
+  localQueues,
+  playerNameOverrides,
+  playerPrefs,
+  playerWebhookTokens,
+  recommendPool,
+  userPermissions,
+  userPlayQueues,
+  userRatings,
+  userRendererGrants,
+} from "../../db/schema.js";
+import {
   BusinessErrorCode,
   adminMiddleware,
   apiError,
@@ -94,6 +106,19 @@ app.delete("/v1/users/:id", adminMiddleware, (c) => {
   db.delete(playlistFavorites).where(eq(playlistFavorites.userId, id)).run();
   db.delete(playHistory).where(eq(playHistory.userId, id)).run();
   db.delete(wishes).where(eq(wishes.userId, id)).run();
+  // 用户私有状态与凭据必须显式清理 —— invalidateAccessCaches() 只清内存缓存,
+  // 不删行;残留的 player_webhook_tokens 更是「已删用户仍可用的免鉴权凭据」。
+  // 注意:player_groups 属共享播放资源,不随创建者删除(其它用户仍在收听)。
+  db.delete(userPermissions).where(eq(userPermissions.userId, id)).run();
+  db.delete(userRendererGrants).where(eq(userRendererGrants.userId, id)).run();
+  db.delete(playerPrefs).where(eq(playerPrefs.ownerUserId, id)).run();
+  db.delete(playerNameOverrides).where(eq(playerNameOverrides.ownerUserId, id)).run();
+  db.delete(playerWebhookTokens).where(eq(playerWebhookTokens.ownerUserId, id)).run();
+  db.delete(userRatings).where(eq(userRatings.userId, id)).run();
+  db.delete(userPlayQueues).where(eq(userPlayQueues.userId, id)).run();
+  db.delete(localQueues).where(eq(localQueues.userId, id)).run();
+  db.delete(recommendPool).where(eq(recommendPool.userId, id)).run();
+  db.delete(flows).where(eq(flows.ownerUserId, id)).run();
   db.delete(users).where(eq(users.id, id)).run();
   // 清理该用户的权限与播放器授权(避免孤儿行)。
   invalidateAccessCaches(id);
