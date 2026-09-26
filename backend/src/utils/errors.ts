@@ -1,4 +1,8 @@
 import { translate } from "../i18n.js";
+import { createLogger } from "./logger.js";
+
+// 统一错误响应的日志标签:脱敏模式下,异常原文只在这条日志里出现。
+const log = createLogger("API");
 
 // ==================== 统一业务错误码 ====================
 //
@@ -78,9 +82,33 @@ export function apiErrorStatus(code: BusinessErrorCode): ApiErrorStatus {
  * `success:false` 也没有 `code` —— 客户端无法分类,契约形同不存在。
  * message 原样透传(常为上游/驱动异常的原始文案),前端可继续直接展示。
  */
+/**
+ * 未预期异常的 message 原文是否可以直接返回给客户端。
+ *
+ * Dockerfile 已设 `ENV NODE_ENV=production`,故**生产部署默认脱敏**:原文只进日志,
+ * 响应回落通用文案 —— 否则任意登录用户(含非 admin)在报错弹窗里就能看到
+ * SQL / 文件路径 / 插件 id 等内部细节。开发与测试默认保留原文(排障更方便)。
+ * 需要显式指定时用环境变量 `MF_EXPOSE_ERROR_DETAIL=1` / `=0` 覆盖。
+ *
+ * 为什么不放进 utils/env.ts:该模块在 import 期就执行 getJwtSecret()(生成/读取
+ * data/.jwt-secret),而 errors.ts 被几乎所有模块引用 —— 放过去会把这个副作用扩散到
+ * 纯逻辑单测里。此处只读一个环境变量,保持 errors.ts 无副作用。
+ */
+function errorDetailExposed(): boolean {
+  const raw = (process.env.MF_EXPOSE_ERROR_DETAIL || "").trim().toLowerCase();
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  return process.env.NODE_ENV !== "production";
+}
+
+/** 未预期异常 → 统一 INTERNAL 错误体(原文按环境分级)。 */
 export function apiInternalError(e: unknown): ApiErrorBody {
   const raw = e instanceof Error ? e.message : String(e ?? "");
-  return apiError(BusinessErrorCode.INTERNAL, raw || "errors.internal");
+  const exposed = errorDetailExposed();
+  // 原文无论如何都要进服务端日志:脱敏之后,它是唯一的排障线索。
+  if (raw) log.error(`内部异常(响应${exposed ? "含原文" : "已脱敏"}): ${raw}`);
+  if (!exposed || !raw) return apiError(BusinessErrorCode.INTERNAL, "errors.internal");
+  return apiError(BusinessErrorCode.INTERNAL, raw);
 }
 
 export function apiOk(data?: Record<string, unknown>): { success: true } & Record<string, unknown> {

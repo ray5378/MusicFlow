@@ -2,7 +2,7 @@
 // the backend opens its SQLite DB at module-load time.
 import "../plugins/_env.js";
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 
 import { Hono } from "hono";
 import md5 from "md5";
@@ -70,6 +70,67 @@ describe("D7 统一错误契约", () => {
     // 关键:errors.internal 必须在 catalog 里,否则前端会看到 "errors.internal" 这串 key
     expect(body.error).not.toContain("errors.");
     expect(body.error).toBe("服务器内部错误");
+  });
+
+  it("D11 生产环境:内部异常原文不返回客户端,回落通用文案、原文只进日志", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      const body = apiInternalError(new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed: songs.id"));
+      expect(body).toEqual({ success: false, code: "INTERNAL", error: "服务器内部错误" });
+      // 关键:SQL / 表名这类内部细节不得出现在响应体里
+      expect(body.error).not.toContain("SQLITE");
+      expect(body.error).not.toContain("songs.id");
+      // 但原文必须仍能在服务端日志里找到,否则脱敏等于把排障线索一起丢了
+      const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("UNIQUE constraint failed: songs.id");
+      expect(logged).toContain("已脱敏");
+    } finally {
+      vi.unstubAllEnvs();
+      spy.mockRestore();
+    }
+  });
+
+  it("D11 默认(非 production)保留原文;MF_EXPOSE_ERROR_DETAIL 可双向显式覆盖", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // 未设 NODE_ENV=production ⇒ 原文直出(开发/测试排障习惯不被破坏)
+      expect(apiInternalError(new Error("boom")).error).toBe("boom");
+
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("MF_EXPOSE_ERROR_DETAIL", "1");
+      expect(apiInternalError(new Error("boom")).error).toBe("boom"); // 显式打开
+
+      vi.stubEnv("MF_EXPOSE_ERROR_DETAIL", "0");
+      expect(apiInternalError(new Error("boom")).error).toBe("服务器内部错误"); // 显式关闭
+
+      // 无法识别的取值不参与判定,交回 NODE_ENV —— production 下仍脱敏
+      vi.unstubAllEnvs();
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("MF_EXPOSE_ERROR_DETAIL", "yes");
+      expect(apiInternalError(new Error("boom")).error).toBe("服务器内部错误");
+
+      // …而 NODE_ENV 未设时,同一个取值下就是暴露(证明回落链确实是 env → NODE_ENV → 默认暴露)
+      vi.unstubAllEnvs();
+      vi.stubEnv("MF_EXPOSE_ERROR_DETAIL", "yes");
+      expect(apiInternalError(new Error("boom")).error).toBe("boom");
+    } finally {
+      vi.unstubAllEnvs();
+      spy.mockRestore();
+    }
+  });
+
+  it("D11 端到端:生产模式下 catch 兜底也不再吐异常原文", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      const r = await call("POST", "/v1/peers/dlna:no-such-device/play");
+      expect(r.status).toBe(500);
+      expect(r.body).toMatchObject({ success: false, code: "INTERNAL", error: "服务器内部错误" });
+    } finally {
+      vi.unstubAllEnvs();
+      spy.mockRestore();
+    }
   });
 
   it("catch 兜底(dlna/peers):500 + INTERNAL + 原文,且带 success:false", async () => {
