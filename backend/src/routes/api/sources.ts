@@ -29,13 +29,38 @@ import {
   uuidv4,
 } from "./shared.js";
 
+/**
+ * 归一化媒体源开关。
+ * `media_sources.enabled` 是 INTEGER 列，而 better-sqlite3 只接受
+ * number / string / bigint / Buffer / null —— JS `boolean` 直接绑定会抛
+ * "SQLite3 can only bind numbers, ..." → 未捕获 → 500。
+ * 前端开关组件可能回传 布尔 / "false" / "0" / 数字，也可能不带该字段，统一收口到这里。
+ */
+function normalizeEnabled(v: unknown, fallback: number | null): number | null {
+  // 不传即原样保持(历史行可能是 NULL,不臆造成 0/1)
+  if (v === undefined) return fallback;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    if (t === "false" || t === "0" || t === "") return 0;
+    return 1;
+  }
+  return v ? 1 : 0;
+}
+
 export function registerSources(app: Hono): void {
 app.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, config: JSON.parse(s.config || "{}") }))));
 
 app.post("/v1/sources", adminMiddleware, async (c) => {
   const body = await c.req.json();
   const id = uuidv4();
-  db.insert(mediaSources).values({ id, name: body.name, type: body.type || "webdav", enabled: body.enabled !== false ? 1 : 0, config: JSON.stringify(body.config || {}) }).run();
+  db.insert(mediaSources).values({
+    id,
+    name: body.name,
+    type: body.type || "webdav",
+    // 不传 enabled → 默认开启(与历史行为一致)
+    enabled: normalizeEnabled(body.enabled, 1),
+    config: JSON.stringify(body.config || {}),
+  }).run();
   return c.json({ id });
 });
 
@@ -46,7 +71,7 @@ app.put("/v1/sources/:id", adminMiddleware, async (c) => {
   if (!existing) return c.json({ error: "Source not found" }, 404);
   db.update(mediaSources).set({
     name: body.name || existing.name,
-    enabled: body.enabled !== undefined ? body.enabled : existing.enabled,
+    enabled: normalizeEnabled(body.enabled, existing.enabled),   // 不传 → 保持原值
     config: body.config ? JSON.stringify(body.config) : existing.config,
     updatedAt: new Date().toISOString(),
   }).where(eq(mediaSources.id, id)).run();

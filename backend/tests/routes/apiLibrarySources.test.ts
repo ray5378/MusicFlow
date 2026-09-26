@@ -282,6 +282,16 @@ describe("sources 域", () => {
     expect(created.body.id).toBeTruthy();
     const row = db.select().from(mediaSources).where(eq(mediaSources.id, created.body.id)).get()!;
     expect(row.enabled).toBe(1);
+    // D4:不传 → 默认开启;数字 0 / 布尔 false 都必须落成 0。
+    // 旧写法 `body.enabled !== false ? 1 : 0` 会把数字 0 判成 1,布尔则直接绑 SQLite 报错。
+    const enabledOf = (id: string) =>
+      db.select().from(mediaSources).where(eq(mediaSources.id, id)).get()!.enabled;
+    const zero = await call("POST", "/v1/sources", { name: "Zero", type: "local", enabled: 0, config: {} });
+    expect(enabledOf(zero.body.id)).toBe(0);
+    const no = await call("POST", "/v1/sources", { name: "No", type: "local", enabled: false, config: {} });
+    expect(enabledOf(no.body.id)).toBe(0);
+    const off = await call("POST", "/v1/sources", { name: "Off", type: "local", enabled: "false", config: {} });
+    expect(enabledOf(off.body.id)).toBe(0);
   });
 
   it("PUT /v1/sources/:id 不存在 404 / 更新成功", async () => {
@@ -292,9 +302,25 @@ describe("sources 域", () => {
     const row = db.select().from(mediaSources).where(eq(mediaSources.id, "src-here")).get()!;
     expect(row.name).toBe("Renamed");
     expect(row.enabled).toBe(0);
-    // characterization:enabled 传布尔值时 SQLite 绑定失败 → 非 2xx(未做类型归一)。
-    const boolEnabled = await call("PUT", "/v1/sources/src-here", { enabled: true });
-    expect(boolEnabled.status).toBeGreaterThanOrEqual(400);
+    // D4:布尔 / 字符串开关归一化成 0/1 —— 此前布尔直接绑 SQLite 抛错返回 500。
+    const enabledOf = () =>
+      db.select().from(mediaSources).where(eq(mediaSources.id, "src-here")).get()!.enabled;
+    const boolOn = await call("PUT", "/v1/sources/src-here", { enabled: true });
+    expect(boolOn.status).toBe(200);
+    expect(enabledOf()).toBe(1);
+    const boolOff = await call("PUT", "/v1/sources/src-here", { enabled: false });
+    expect(boolOff.status).toBe(200);
+    expect(enabledOf()).toBe(0);
+    const strOff = await call("PUT", "/v1/sources/src-here", { enabled: "false" });
+    expect(strOff.status).toBe(200);
+    expect(enabledOf()).toBe(0);
+    const strOn = await call("PUT", "/v1/sources/src-here", { enabled: "1" });
+    expect(strOn.status).toBe(200);
+    expect(enabledOf()).toBe(1);
+    // 不传 enabled → 保持原值(此刻为 1)
+    const keep = await call("PUT", "/v1/sources/src-here", { name: "Kept" });
+    expect(keep.status).toBe(200);
+    expect(enabledOf()).toBe(1);
     await call("PUT", "/v1/sources/src-here", { name: "Here", enabled: 1, config: { path: "/" } });
   });
 
