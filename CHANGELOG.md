@@ -49,6 +49,43 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.43] - 2026-09-27
+
+### 测试
+
+- **补测第十轮（B22：扩写 2 个已有测试文件 / +40 用例，合计 43 例）**，双向证伪 23 处定向变异（10 处 control.ts +
+  13 处 deviceState.ts）全部咬住，摘掉被测分支后对应用例立刻变红，恢复后转绿。本轮两个目标都是 Sendspin 的
+  「控制面 / 持久化面」—— 播控指令与实际设备状态都经这两处落地：
+
+- `src/services/sendspin/control.ts`（缺口 39 → **0**，行/语句/函数 100%，分支 96.96%）：原文件只有 53 行 3 例，
+  只测了 `listSendspinPlayers`，真正掷出声音的 `castSendspin` / `controlSendspin` **一行没覆盖**。补齐后钉住：
+  服务未启动时先拉起、曲库查不到直接拦、空标题兜成「未知」、空合作者/封面/时长一律不喂给播放器（脏 duration 不转数字）、
+  `mime` 固定 `audio/mpeg`、取不到 player 时不硬闯、`play` 落到 `resume` 而非 `stop`、`seek` 缺省按 0 计、
+  未支持的 action 显式抛错（而不是静默返回 null）。
+
+- `src/services/sendspin/deviceState.ts`（缺口 30 → **0**，行/语句/函数 100%）：新增一整组 12 例，钉住模块顶部那句约定
+  「读失败一律回退（无行 / null），绝不阻断播控热路径」。把 `sqlite.prepare` 整个打成抛错，逼所有 catch 走一遍，
+  确认：读音量失败回 null 且留 warn、列禁用设备失败回空数组、删除设备行的失败不影响后续清理、清改名/隐藏偏好的那一步
+  炸了也不能回滚已经删掉的设备行、写失败留下的 warn 带 `[device-state]` 标识（区分「写」与「读」两类失败）、
+  读禁用态失败按「未禁用」回落、读凭据失败回空凭据、查禁用 host 失败按放行回落。
+
+### 覆盖率提升（未覆盖行数）
+
+| 文件 | 补测前 → 补测后 | 备注 |
+| --- | --- | --- |
+| `sendspin/control.ts` | 39 → **0** | 行/语句/函数 100%；分支 96.96% |
+| `sendspin/deviceState.ts` | 30 → **0** | 行/语句/函数 100% |
+
+- 证伪的 10 项 control.ts 分支：服务未启动是否拉起、曲库查不到是否拦截、空标题兜底、mime 是否固定、duration 是否做类型
+  判定、两处 player 取用是否拦住、`play` 的分派目标、seek 缺省值、未支持 action 是否抛错。
+- 证伪的 13 项 deviceState.ts 分支：读音量失败回退、读失败留 warn、列禁用失败回退、列禁用失败留 warn、删行失败留 warn、
+  清偏好失败的 warn 标识、读禁用态回退、写音量失败留 warn、读凭据失败回退、查禁用 host 失败回退、写 host 失败留 warn、
+  写 ESPHome 失败留 warn、写禁用态失败留 warn。
+
+- `deviceState.ts` 剩余未覆盖分支集中在持久化失败的 catch 侧（65.34% 分支），均已被上面 12 例按「回落 + 留 warn」逐个钉死，
+  属 catch 内部的分支差分，非真实缺口。
+- 本轮无产品行为改动，未新增缺陷备案。
+
 ## [4.0.42] - 2026-09-27
 
 ### 测试
