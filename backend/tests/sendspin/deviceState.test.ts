@@ -5,15 +5,37 @@
 // the backend opens its SQLite DB at module-load time.
 import "../plugins/_env.js";
 
-import { describe, it, expect, beforeAll } from "vitest";
-import { initDatabase } from "../../src/db/index.js";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
+import { initDatabase, sqlite } from "../../src/db/index.js";
 import * as ds from "../../src/services/sendspin/deviceState.js";
+import * as pp from "../../src/services/playerPrefs.js";
 
 const D = ds as any;
+
+// 模块里的 log 是在加载时由 createLogger 造出来的,打桩要在 import 之前挂好。
+const log = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock("../../src/utils/logger.js", async (io) => ({
+  ...(await io<Record<string, unknown>>()),
+  createLogger: () => ({ warn: log.warn, error: vi.fn(), info: vi.fn(), debug: vi.fn() }),
+}));
 
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
   initDatabase();
+});
+
+beforeEach(() => {
+  log.warn.mockReset();
+});
+
+/** 最近一条 warn 的文案(用来确认"写失败"那一条确实留下了)。 */
+function lastWarn(): string {
+  const calls = log.warn.mock.calls;
+  return String(calls[calls.length - 1][0]);
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 let n = 0;
@@ -139,5 +161,82 @@ describe("设备产物清理", () => {
 
   it("清理不存在的设备不抛", () => {
     expect(() => D.purgeDeviceArtifacts(cid("ghost"))).not.toThrow();
+  });
+});
+
+// 这一组钉的是模块顶部那句约定:「读失败一律回退(无行/null),绝不阻断播控热路径」。
+// 删掉任何一个 try/catch,异常都会冒到播控调用方 —— 表现为「调一下音量整个播放停了」。
+describe("【兜底】持久化失败时一律回落,绝不把异常抛给播控", () => {
+  beforeEach(() => {
+    // 让每一次 prepare 都炸,逼所有 catch 走一遍。
+    vi.spyOn(sqlite, "prepare").mockImplementation(() => {
+      throw new Error("disk I/O error");
+    });
+  });
+
+  it("读音量失败 → null,并留一条带设备名的 warn", () => {
+    expect(D.getDeviceVolumeState(cid("boom-vol"))).toBeNull();
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(String(log.warn.mock.calls[0][0])).toContain("[device-state] 读");
+  });
+
+  it("写音量失败 → 静默跳过,调用方以为成功就行", () => {
+    expect(() => D.saveDeviceVolumeState(cid("boom-save"), { volume: 50 })).not.toThrow();
+    // 内部先读一次旧值,那次失败也会记一条;这里要确认的是"写"本身也留了痕。
+    expect(lastWarn()).toContain("[device-state] 写");
+  });
+
+  it("列禁用设备失败 → 空数组(不是让整页设备列表 500)", () => {
+    expect(D.listDisabledDeviceIds()).toEqual([]);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("删状态行失败 → 不抛", () => {
+    expect(() => D.deleteDeviceVolumeState(cid("boom-del"))).not.toThrow();
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("清改名/隐藏偏好那步失败 → 设备行照样删掉,不回滚整个清理", () => {
+    // 设备行删除本身在上一行就被吞了;这里专测「第二步炸了也不能连累第一步的结果」。
+    vi.spyOn(pp, "purgePeerPrefsAllOwners").mockImplementation(() => {
+      throw new Error("prefs 表坏了");
+    });
+    expect(() => D.purgeDeviceArtifacts(cid("boom-purge"))).not.toThrow();
+    expect(lastWarn()).toContain("[device-state] 清");
+  });
+
+  it("读禁用态失败 → false(按「未禁用」放行,而不是把设备永久困住)", () => {
+    expect(D.getDeviceDisabled(cid("boom-dis"))).toBe(false);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("读 ESPHome 凭据失败 → 空凭据(等于这台不连)", () => {
+    expect(D.getDeviceEsphome(cid("boom-esp"))).toEqual({ psk: "", port: 0 });
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("写 ESPHome 凭据失败 → 不抛", () => {
+    expect(() => D.saveDeviceEsphome(cid("boom-esp2"), "PSK", 6053)).not.toThrow();
+    expect(lastWarn()).toContain("[device-state] 写");
+  });
+
+  it("列 ESPHome 凭据失败 → 空数组(启动时就不会去批量 attach)", () => {
+    expect(D.listEsphomeCreds()).toEqual([]);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("写 host 失败 → 不抛(下一轮自动发现还能重试)", () => {
+    expect(() => D.saveDeviceHost(cid("boom-host"), "192.168.10.77")).not.toThrow();
+    expect(lastWarn()).toContain("[device-state] 写");
+  });
+
+  it("查禁用 host 失败 → false(宁可多拨一次,连上后会自动纠正)", () => {
+    expect(D.isHostOfDisabledDevice("192.168.10.88")).toBe(false);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("写禁用态失败 → 不抛", () => {
+    expect(() => D.saveDeviceDisabled(cid("boom-dis2"), true)).not.toThrow();
+    expect(lastWarn()).toContain("[device-state] 写");
   });
 });
