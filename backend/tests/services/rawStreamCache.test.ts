@@ -15,6 +15,8 @@ type Upstream = {
   payload: Buffer;
   /** 收到的每个请求的 Range 头。 */
   ranges: Array<string | undefined>;
+  /** 当前在上游侧未收尾的请求数(含**后台补块**那条)。 */
+  readonly inflightSnapshot: number;
   /** 放开被 `hold` 卡住的 body。 */
   release: () => void;
   close: () => Promise<void>;
@@ -52,7 +54,15 @@ async function startUpstream(opts: {
   let releaseFn: () => void = () => {};
   const gate = new Promise<void>((r) => { releaseFn = r; });
   let failCount = 0;
+  let inflight = 0;
   const server = http.createServer(async (req, res) => {
+    inflight += 1;
+    // 「上游侧收尾」的唯一可靠信号:响应关闭(覆盖 finish / error / 客户端提前断开)
+    const done = () => {
+      inflight -= 1;
+    };
+    res.on("close", done);
+    res.on("error", done);
     ranges.push(req.headers["range"] as string | undefined);
     if (opts.failFrom !== undefined) {
       const rm = /^bytes=(\d*)-/.exec((req.headers["range"] as string | undefined || "").trim());
@@ -131,6 +141,9 @@ async function startUpstream(opts: {
     url: `http://127.0.0.1:${port}/a.flac`,
     payload: opts.payload,
     ranges,
+    get inflightSnapshot() {
+      return inflight;
+    },
     release: () => releaseFn(),
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
@@ -164,6 +177,33 @@ async function readPartial(res: Response, n: number): Promise<Buffer> {
   }
   await new Promise((r) => setTimeout(r, 20)); // 给后台补前缀/镜像一点回旋
   return Buffer.concat(chunks).subarray(0, Math.min(n, got));
+}
+
+/**
+ * 等「后台补块」真正落进缓存。
+ *
+ * ### 为什么不能靠 sleep
+ * `proxyRawRange` 的未命中分支是**先回 `miss`,再 fire-and-forget 调 `warmBlock` 补整块**
+ * (见 rawStreamCache.ts 里 warmBlock 的注释:绝不带客户端 signal、必须 catch)。
+ * 于是「后台那条块请求何时写完」与「下一个 Range 何时到达」是**并行竞态**:
+ * 下一轮 seek 回溯要能判命中,前提是整块已经 `store()` 进缓存;块没落地时
+ * `cachedRunLength()` 算出来是 0,那个请求会退化成一次额外的回源透传。
+ * 原先靠 `readPartial()` 末尾那点 `setTimeout(…, 20)` 猜「差不多好了」,
+ * 机器忙(多文件并行)时会赌输,报 `expected 'miss;…' to contain 'hit'`
+ * (实测全量合并跑时复现过)。
+ *
+ * ### 这里等的是什么
+ * 1. 上游侧 inflight 归零 —— 后台那条块请求已经收尾;
+ * 2. 再放几个微任务 —— 上游收尾 ≠ 客户端 `response.arrayBuffer()` 已 resolve,
+ *    `warmBlock` 里 `await` 之后的 `src.store(head.realStart, buf)` 还没跑完。
+ */
+async function settleBackgroundWarm(up: Upstream): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (up.inflightSnapshot > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 1));
 }
 
 const restoreFns: Array<() => void> = [];
@@ -394,6 +434,8 @@ describe("命中:后续 Range 零上游往返", () => {
         const head = await readPartial(res, 2048);
         expect(Buffer.compare(head, payload.subarray(s, s + 2048))).toBe(0);
         if (i > 0) expect(res.headers.get("x-musicflow-rawcache")).toContain("hit");
+        // 等后台补块落地再发下一个 Range(否则第 2~5 次是在赌「块已经写进缓存」)
+        await settleBackgroundWarm(up);
       }
       // 关键:5 次回溯只付出 2 次上游往返(旧版是 5 次)
       expect(up.ranges.length).toBe(2);

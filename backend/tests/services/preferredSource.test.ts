@@ -35,7 +35,19 @@ vi.mock("../../src/utils/logger.js", () => ({
 
 import { resolvePreferredSong } from "../../src/services/source/preferredSource.js";
 
-const iso = (n = 0) => new Date(Date.now() + n).toISOString();
+/**
+ * ⚠️ 单位**秒**(不是毫秒)。
+ *
+ * 早先写成 `Date.now() + n`(毫秒):相邻两条 seed 之间实际相隔常常不足 1ms,一旦
+ * 第二次 `Date.now()` 正跨过整毫秒边界,它拿到的基准就 **等于或大于** 第一次的,
+ * 于是两条 `created_at` **打平(tie)** —— 而 `resolvePreferredSong` 用的是
+ * `orderBy(songs.createdAt)` + `limit 1`,SQL 在排序键平局时的返回顺序**未定义**。
+ * 结果就是「按 createdAt 取最早那条」的用例会偶发拿到 createdAt 更晚的那条
+ * (实测 5 轮里 flaky 1 次,期望 w2 却拿到 w9)。
+ *
+ * 改成秒后两条 seed 至少相差 1000ms,远大于时钟漂移,彻底消除平局。
+ */
+const iso = (sec = 0) => new Date(Date.now() + sec * 1000).toISOString();
 
 function seedSong(id: string, type: string | null, groupId: string | null, over: Record<string, any> = {}) {
   sqlite

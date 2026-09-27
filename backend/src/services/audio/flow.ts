@@ -252,6 +252,12 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
   const live = new Set<Decoder>();
   let aborted = false;
   let currentIndex = 0;
+  /**
+   * 整会话的取消信号(D24)。`abort()` 会把它 mark 掉:
+   * 正在**排队等转码槽**的 `spawnDecoder` 因此会被 reject,而不是永远吊在队列里 ——
+   * 否则 `run()` 不收敛 ⇒ `done` 永不 resolve ⇒ 路由函数不返回、槽也还不回来。
+   */
+  const cancel = new AbortController();
 
   // 编码进程先起：混合结果随到随写，不设中间缓冲。
   const enc = spawn(resolveFfmpeg(), flowEncodeArgs({ sampleRate, channels, codec }), { stdio: ["pipe", "pipe", "pipe"] });
@@ -268,8 +274,27 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
     enc.on("error", () => resolve());
   });
 
+  /**
+   * SIGKILL + **拆掉我们自己这一侧 pipe**。
+   * ### 只 kill 是不够的（D25）
+   * 「abort 之后 `done` 一定收敛」这条契约，在只调 `kill("SIGKILL")` 时**不成立**：
+   * `ChildProcess` 的 `close` 事件要等**全部 stdio 流关闭**才发，而死掉的 ffmpeg 若
+   * 正卡在写满的 stdout pipe 上（不可中断睡眠），SIGKILL 未必立刻送达；
+   * 更常见的是进程**已经退出**（实测 abort 后 `/proc/<pid>` 已消失），
+   * 但 `stdout` 这侧迟迟不 close —— `stdoutEnded=false / destroyed=false` 一直是这样。
+   * `done = Promise.all([runPromise, encClosed])` 整条链就挂在 `encClosed` 上 ⇒ 永不 resolve，
+   * 实测 24 次里挂 2 次（约 8%），放到全量跑就是那条偶发红。
+   * 自己 destroy 把「等对端关管」变成「自己关」，与对端状态解耦。
+   */
+  const reap = (proc: any) => {
+    try { proc.kill("SIGKILL"); } catch { /* 已退出 */ }
+    for (const s of [proc.stdout, proc.stderr, proc.stdin]) {
+      try { if (s && typeof s.destroy === "function") s.destroy(); } catch { /* 已关 */ }
+    }
+  };
+
   const killDecoder = (d: Decoder) => {
-    try { d.proc.kill("SIGKILL"); } catch { /* 已退出 */ }
+    reap(d.proc);
     if (!d.settled) { d.settled = true; d.release(); }
     live.delete(d);
   };
@@ -277,7 +302,8 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
   const abort = () => {
     if (aborted) return;
     aborted = true;
-    try { enc.kill("SIGKILL"); } catch { /* 已退出 */ }
+    cancel.abort();
+    reap(enc);
     for (const d of [...live]) killDecoder(d);
   };
 
@@ -297,7 +323,7 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
 
   /** 起一路解码器（占一个 flow 槽；等槽是异步的，排队时也不能静默丢曲）。 */
   const spawnDecoder = async (item: FlowItem): Promise<Decoder> => {
-    const release = await acquireTranscodeSlot("flow");
+    const release = await acquireTranscodeSlot("flow", cancel.signal);
     if (aborted) { release(); throw new FlowAbort(); }
     const proc = spawn(resolveFfmpeg(), flowDecodeArgs({
       input: item.input,

@@ -220,13 +220,32 @@ const slotPools: Record<TranscodeSlotKind, SlotPool> = {
   flow: { limit: SLOT_LIMITS.flow, active: 0, waiters: [] },
 };
 
+/** 排队等待被取消(`acquireTranscodeSlot(kind, signal)` 的 signal 触发)。 */
+export class TranscodeSlotAborted extends Error {
+  constructor(kind: TranscodeSlotKind) {
+    super(`转码槽排队被取消(${kind})`);
+    this.name = "TranscodeSlotAborted";
+  }
+}
+
 /**
  * 占用一个并发槽，返回**该槽的释放函数**（幂等，重复调用无副作用）。
  * 用租约而不是 acquire/release 两个函数成对调用，是为了让释放必然落到
  * 申请时那个池 —— 分池之后「释放到错误池」会静默把另一个池的额度吃掉。
  * 与 `plugin/batchPacer.ts::acquireBatchLock()` 同一形态。
+ *
+ * ### 第二参数 `signal` 为什么必须有(D24)
+ * 排队中的等待**必须能被取消**。否则「申请还没轮到 → 调用方已经放弃」这一瞬间
+ * 会把调用方永久挂住：`flow` 会话的 `run()` 停在 `await acquireTranscodeSlot(...)`,
+ * `done` 永不收敛 ⇒ 路由处理函数永不返回、槽也永不归还 ⇒ 该池额度被慢慢吃光。
+ * 客户端断开 / 停投走的正是 abort 这条路，所以这等于「断连救不回来」。
+ * 用法：`acquireTranscodeSlot("flow", controller.signal)`，abort 时排队者被 **reject**
+ * 并从 waiters 里摘掉（既不占槽、也不会被后面的唤醒塞进来一个已经没人要的租约）。
  */
-export function acquireTranscodeSlot(kind: TranscodeSlotKind = "quality"): Promise<() => void> {
+export function acquireTranscodeSlot(
+  kind: TranscodeSlotKind = "quality",
+  signal?: AbortSignal,
+): Promise<() => void> {
   const pool = slotPools[kind];
   // released 闭包标志:租约必须幂等 —— 出流路径上 abort/exit/close 三种终态都会
   // 调 release,不挡住的话一次出流会还掉三个额度(池子被悄悄放大)。
@@ -237,15 +256,35 @@ export function acquireTranscodeSlot(kind: TranscodeSlotKind = "quality"): Promi
     releaseTranscodeSlot(pool);
   };
   if (pool.active < pool.limit) {
+    if (signal?.aborted) return Promise.reject(new TranscodeSlotAborted(kind));
     pool.active++;
     return Promise.resolve(lease);
   }
   // 排队是可观测事件（首字节延迟的直接来源），只在实际排队时记一次。
   log.info("转码槽排队等待", { kind, limit: pool.limit, queue: pool.waiters.length + 1 });
-  return new Promise((resolve) => pool.waiters.push(() => {
-    pool.active++;
-    resolve(lease);
-  }));
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new TranscodeSlotAborted(kind));
+      return;
+    }
+    let claimed = false;
+    const onAbort = () => {
+      if (claimed) return; // 已经轮到我了,该信号就没意义了
+      const i = pool.waiters.indexOf(waiter);
+      if (i >= 0) pool.waiters.splice(i, 1); // 仍在排队 ⇒ 直接摘掉,不占额度
+      signal?.removeEventListener("abort", onAbort);
+      reject(new TranscodeSlotAborted(kind));
+    };
+    const waiter = () => {
+      if (claimed) return; // 极端竞态:已经被 onAbort reject 了
+      claimed = true;
+      signal?.removeEventListener("abort", onAbort);
+      pool.active++;
+      resolve(lease);
+    };
+    pool.waiters.push(waiter);
+    signal?.addEventListener("abort", onAbort);
+  });
 }
 
 /** 释放一个槽并唤醒下一个排队者（内部使用；外部请用 acquire 返回的租约）。 */

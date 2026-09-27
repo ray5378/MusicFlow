@@ -32,6 +32,21 @@ const { fetchLrcForSong, getLyricsCacheEntries, clearLyricsCache } = await impor
 const TTL = 10 * 60 * 1000; // CACHE_TTL
 const SWEEP = 5 * 60 * 1000; // sweep 周期
 
+/**
+ * ⚠️ 为什么判过期要推进「TTL + 一个完整 sweep 周期」而不是「TTL」?
+ *
+ * sweep 是 lyrics.ts 在**模块加载时**注册的 `setInterval(…, 5min)`,它的 tick 落在
+ * **固定网格**上(锚点 = 模块加载那一刻),而缓存条目是在用例执行到一半时才写入的,
+ * 必然晚于锚点 ε 毫秒。于是第 k 轮 tick 那一刻条目的真实 age 是 `5k 分钟 - ε`,
+ * 而不是 `5k 分钟`。只推进 TTL 的话,最后一次 tick 的 age 是 `TTL - ε`
+ * —— 判定用的是 `age >= TTL`,差那几毫秒就直接不删。
+ *
+ * 机器忙的时候 ε 更大、跑得顺的时候 ε = 0,于是同一个用例时绿时红(实测 6 轮挂 4 轮)。
+ * 推进 TTL + SWEEP 后,最后那轮 tick 的 age 是 `TTL + SWEEP - ε`,**必然** >= TTL,
+ * 与锚点相位、与机器负载都无关。
+ */
+const ADVANCE_TO_EVICT = TTL + SWEEP;
+
 beforeEach(() => {
   clearLyricsCache();
   vi.clearAllMocks();
@@ -65,25 +80,25 @@ describe("lrcCacheSweep 定期清理", () => {
 
   it("累计越过后 sweep 删除过期条目,且是惰性读取之外的主动清理", async () => {
     await putStaleEntry("sw2");
-    // 一次性推进到 age == TTL:sweep 在这一刻判定 now - at >= TTL → 删除。
-    // (实测分两次各推 SWEEP 反而删不掉,是 fake-timers 推进 interval 的时序问题,不是产品行为)
-    await vi.advanceTimersByTimeAsync(TTL);
+    // 推进到「最后一个 tick 时条目必然已过 TTL」(见 ADVANCE_TO_EVICT 的说明)
+    await vi.advanceTimersByTimeAsync(ADVANCE_TO_EVICT);
     expect(getLyricsCacheEntries()).toBe(0);
   });
 
   it("TTL 外的条目被清掉之后,下次请求会重新走一遍管线重建缓存", async () => {
     await putStaleEntry("sw3");
-    await vi.advanceTimersByTimeAsync(TTL);
+    await vi.advanceTimersByTimeAsync(ADVANCE_TO_EVICT);
     expect(getLyricsCacheEntries()).toBe(0);
 
-    // 时间已推进 10min 以上,缓存读判定也会失效 → 重新命中 ①,缓存回来
+    // 时间已推进一个 TTL 以上,缓存读判定也会失效 → 重新命中 ①,缓存回来
     await fetchLrcForSong({ id: "sw3", path: `l:src1/sw3.mp3`, title: "T-sw3" } as any);
     expect(getLyricsCacheEntries()).toBe(1);
   });
 
   it("过期判定是 >= TTL(不是 >):刚好一个 TTL 时就要被清掉", async () => {
     await putStaleEntry("sw4");
-    // 推进到「条目 age == TTL」(系统时间被一起推进),再让 sweep 跑一轮
+    // 分两段推(先到 age == TTL 的那一刻,再让下一轮 sweep 跑过那个点),
+    // 等价于 ADVANCE_TO_EVICT,同样不受锚点相位影响。
     await vi.advanceTimersByTimeAsync(TTL);
     await vi.advanceTimersByTimeAsync(SWEEP);
     expect(getLyricsCacheEntries()).toBe(0);
