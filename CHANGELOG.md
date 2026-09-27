@@ -2,6 +2,47 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.35] - 2026-09-27
+
+### Changed
+- **后端路由层拆分**（`backend/src/routes/api/index.ts`：5048 行 → 71 行装配层）：按业务域拆出
+  `peers.ts` / `playlists.ts` / `dlna.ts` / `sendspin.ts` 等模块，`index.ts` 只保留路由挂载装配。
+- **CI 静态守卫改为扫目录**：`check-dlna-realtime.mjs`、`check-seek-granularity.mjs`
+  与 `playback-chain-guard.yml` 原先直接读 `routes/api/index.ts`；拆分后该文件已成装配层，
+  产生 3 处假红、3 处假绿（假绿的三条是负向断言，恒真 —— 永远在保护不存在的东西）。
+  现统一改为扫 `routes/api/` 目录。
+- **注释剥离器改为字符串感知**（`backend/scripts/lib/strip-comments.mjs`）：原实现用朴素正则
+  剥注释，会把路由字符串 `"/v1/airplay/devices/:deviceId/*"` 里的 `/*` 当成块注释起点向右吞；
+  改为逐字符扫描并跳过字符串字面量。
+
+### Added
+- **路径引用元守卫**（`backend/scripts/check-workflow-paths.mjs`，挂 ci.yml）：静态校验
+  `.github/workflows/*.yml` 与 `check-*.mjs` 中引用的仓库内路径必须真实存在，并禁止再把
+  装配层文件当作内容来源 —— "文件还在、内容搬走" 是纯存在性检查抓不到的失效形态。
+- **`isolatedModules`（`backend/tsconfig.json`）**：禁止类型名从值导出块再导出，从编译期杜绝
+  「`tsc` 全绿、运行时却报 does not provide an export named ...」。
+
+### Bug 修复
+- **后端起不来（P0）**：`routes/api/shared.ts` 把 5 个纯类型名放进了值导出块，`tsc` 会整条擦除
+  而 esbuild / tsx 予以保留 → 启动即 `SyntaxError: ... does not provide an export named 'BatchPace'`。
+  已改为 TS 5.5 内联 `type` 导出。同类问题会同时打红 pentest「启动后端实例」与
+  frontend-responsive，而跑 `tsc` + 全量测试的 `build-and-push` 一直是绿的 ——
+  **类型检查加测试通过，不能证明后端起得来。**
+- **内部异常原文外泄**：`apiInternalError` 改为按环境分级脱敏 —— 生产默认只回 `errors.internal`，
+  原文写日志；`MF_EXPOSE_ERROR_DETAIL=1|true` 可显式放开。
+- **遗留调试代码**：`[TEST]`、`evaluateDBG` 等无条件打印（其中 3 处会带出媒体源 URL 与用户名）
+  收编到分级日志，受 `LOG_LEVEL` 控制。
+- **错误契约收编**：业务错误码与 HTTP 状态码打架 27 处、裸 `{error}` 响应 51 处、在线源/搜索域
+  70 处错误响应，全部走 `apiError` + `apiErrorStatus` 单一真源。
+- **WebDAV 源整体不可达时不再清空歌曲行**；「跳过」与「失败」改为分离计数；`enabled` 传布尔值
+  不再 500；删除用户时清理 10 张用户私有表（含可用凭据）。
+
+### 测试
+- 路由层契约测试三段齐到行覆盖 100%：`routes/api/dlna.ts`（64 用例）、
+  `routes/api/sendspin.ts`（58）、`routes/api/playlists.ts`（57）。
+- 零覆盖模块补齐：`services/sendspin/ipcProtocol.ts`、`routes/navidrome/index.ts`、
+  `services/sendspin/proxy.ts`（行 48% → 100%、分支 14% → 100%）。
+
 ## [4.0.34] - 2026-09-26
 
 ### Changed
