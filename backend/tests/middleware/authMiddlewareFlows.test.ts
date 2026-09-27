@@ -9,7 +9,7 @@
 // 一条实现层面的观察(可读性/死代码,非缺陷):getParam 的 `|| q[name]?.[0]` 第三级在
 // Hono 下不可达 —— c.req.query(name) 与 c.req.queries()[name][0] 同源,前者有值时后者
 // 也有值,前者无值时后者同样无值。保留无害,仅为兼容写法。
-import { describe, it, expect, beforeEach, beforeAll } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, vi } from "vitest";
 import { Hono } from "hono";
 import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
@@ -17,7 +17,7 @@ import jwt from "jsonwebtoken";
 import { db, encryptPassword } from "../../src/db/index.js";
 import { users } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
-import { authMiddleware, adminMiddleware, invalidateAuthCaches } from "../../src/middleware/auth.js";
+import { authMiddleware, adminMiddleware, invalidateAuthCaches, credentialsProfile } from "../../src/middleware/auth.js";
 import { generateToken, hashApiKey } from "../../src/utils/auth.js";
 import { JWT_SECRET } from "../../src/utils/env.js";
 
@@ -363,5 +363,103 @@ describe("adminMiddleware", () => {
   it("未认证 → 先被 authMiddleware 拦成 401", async () => {
     const res = await makeApp().request("/admin/dash");
     expect(res.status).toBe(401);
+  });
+});
+
+// ==================== HTTP Basic 认证 + D26 401 现场 ====================
+// 为什么合在一起:这两件事是**同一次排障**会一起用到的 ——
+// 「客户端走 Basic 而后端不认」既是功能缺口(D:Basic),也是 401 查不出原因的一半原因(D26)。
+
+/** 给指定用户配一个有效 apiKey,返回明文。 */
+function apiKeyFor(id: string): string {
+  const apiKey = `mf_${uuidv4().replace(/-/g, "")}`;
+  db.update(users)
+    .set({ apiKey, apiKeyHash: hashApiKey(apiKey), apiKeyExpiresAt: null })
+    .where(eq(users.id, id))
+    .run();
+  invalidateAuthCaches();
+  return apiKey;
+}
+
+describe("HTTP Basic 认证(Authorization: Basic)", () => {
+  it("明文口令 → 通过", async () => {
+    const id = insertUser({ username: "basicuser", passEnc: encryptPassword("pw") });
+    const res = await makeApp().request("/ping", {
+      headers: { Authorization: `Basic ${Buffer.from("basicuser:pw").toString("base64")}` },
+    });
+    expect(res.status).toBe(200);
+    expect((await body(res)).user.id).toBe(id);
+  });
+
+  it("口令里自带 ':' 也能通过(只按第一个冒号切分)", async () => {
+    // 防回归要点:用 split(":") 会把 `col:on:side` 截成 `col`,这种口令会**恒定失败**
+    // 且失败提示看不出原因 —— 正是 HA 侧 401 最难查的那类形态。
+    const id = insertUser({ username: "colonuser", passEnc: encryptPassword("col:on:side") });
+    const res = await makeApp().request("/ping", {
+      headers: { Authorization: `Basic ${Buffer.from("colonuser:col:on:side").toString("base64")}` },
+    });
+    expect(res.status).toBe(200);
+    expect((await body(res)).user.id).toBe(id);
+  });
+
+  it("口令错误 → 401", async () => {
+    insertUser({ username: "basicuser2", passEnc: encryptPassword("pw") });
+    const res = await makeApp().request("/ping", {
+      headers: { Authorization: `Basic ${Buffer.from("basicuser2:wrong").toString("base64")}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("Basic 解码后没有冒号时,不挡住后面的凭据分支", async () => {
+    const id = insertUser({ passEnc: encryptPassword("pw") });
+    const apiKey = apiKeyFor(id);
+    const res = await makeApp().request("/ping", {
+      headers: {
+        Authorization: `Basic ${Buffer.from("no-colon-here").toString("base64")}`,
+        "X-API-Key": apiKey,
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("D26: 401 现场可诊断(脱敏)", () => {
+  // 直接验「画像」本身 —— 它决定 401 日志里会出现什么。
+  // 不去 spy logger:logger 是 createLogger() 现造的实例,与本文件 import 的未必是同一份,
+  // 那种断言一改 logger 实现就红,而这里要保证的真正内容是「画像正确 + 不含密钥原文」。
+  async function profileOf(url: string, headers: Record<string, string> = {}) {
+    const app = new Hono();
+    app.get("*", (c) => c.json(credentialsProfile(c, (n) => c.req.query(n) ?? undefined)));
+    const res = await app.request(url, { headers });
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  it("客户端走 Basic → 记 scheme=basic(一眼看出不是 Bearer)", async () => {
+    expect(await profileOf("/ping", { Authorization: "Basic dXNlcjpwYXNz" })).toMatchObject({
+      scheme: "basic",
+      path: "/ping",
+    });
+  });
+
+  it("什么都没带 → scheme=none,且没有 subsonicUser", async () => {
+    expect(await profileOf("/ping")).toMatchObject({ scheme: "none", subsonicUser: null });
+  });
+
+  it("u/p 失败时记下用户名(便于核对「谁的凭据过期了」)", async () => {
+    expect(await profileOf("/ping?u=ghost&p=whatever")).toMatchObject({
+      scheme: "none",
+      subsonicUser: "ghost",
+      hasSubsonicPassword: true,
+    });
+  });
+
+  it("带 token 时能被识别,便于区分「播放器走 URL token」", async () => {
+    expect(await profileOf("/ping?token=mf_abc")).toMatchObject({ queryToken: true });
+  });
+
+  it("画像里绝不含口令/密钥原文", async () => {
+    const dump = JSON.stringify(await profileOf("/ping?u=xyz&p=SuperSecret123"));
+    expect(dump).not.toContain("SuperSecret123");
   });
 });

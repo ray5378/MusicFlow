@@ -7,6 +7,9 @@ import { eq } from "drizzle-orm";
 import { decryptPassword } from "../db/index.js";
 import { hashApiKey } from "../utils/auth.js";
 import { JWT_SECRET } from "../utils/env.js";
+import { createLogger } from "../utils/logger.js";
+
+export const log = createLogger("auth");
 // 细粒度权限判定中间件与判定函数,集中放在 services/access.ts,这里只做转发
 // (路由层既有的 `import { adminMiddleware } from middleware/auth` 习惯不变)。
 export { permMiddleware, rendererGrantParamMiddleware, hasPerm, canUseRenderer, canControlPeer, peerToDeviceKey, filterPeersByAccess } from "../services/access.js";
@@ -127,6 +130,27 @@ export async function authMiddleware(c: Context, next: Next) {
     if (user) { c.set("user", user); return next(); }
   }
 
+  // HTTP Basic (RFC 7617): `Authorization: Basic base64(user:pass)`。
+  // 此前**完全不解析** Basic —— 老牌 Subsonic 客户端、curl、以及部分 Home Assistant
+  // 集成默认就走这一条,拿到的永远是 401(而且日志只印「认证失败,请检查账号密码」,
+  // 看不出是哪种凭据没被认,排查成本极高)。
+  // 位置放在最后:它只是补上这条缺口,既有六条凭据分支的优先级一字不动。
+  if (authHeader?.startsWith("Basic ")) {
+    let decoded = "";
+    try {
+      decoded = Buffer.from(authHeader.substring(6), "base64").toString("utf8");
+    } catch {
+      // 不是合法 base64 ⇒ 当作没带,继续走后面的分支
+    }
+    // 只按**第一个**冒号切分:密码本身可能带 `:`(如 `enc:...` 或用户自己设的复杂口令),
+    // 用 `split(":")` 会把密码截掉后半截,那种口令永远认证不过。
+    const sep = decoded.indexOf(":");
+    if (sep > 0) {
+      const user = await authenticateLegacy(decoded.slice(0, sep), decoded.slice(sep + 1));
+      if (user) { c.set("user", user); return next(); }
+    }
+  }
+
   // token via query param (for audio streaming). Accepts a JWT first, then falls
   // back to a long-lived API key — same order as the Bearer header branch above,
   // and the same contract the WebSocket upgrade already uses (?token=<apiKey|jwt>).
@@ -142,7 +166,31 @@ export async function authMiddleware(c: Context, next: Next) {
     if (user) { c.set("user", user); return next(); }
   }
 
+  // D26:落一条**可诊断**的现场,密钥/口令一律不落日志。
+  // 此前这里只有一句固定中文提示「认证失败,请检查账号密码」,线上根本分不清是
+  // 「客户端用的是 Basic 而后端不认」「key 在服务端被重置过」「压根没带凭据」
+  // 「用户被停用」中的哪一种 —— 实际排查要靠抓包 + 翻库,成本极高。
+  log.warn("认证失败", credentialsProfile(c, getParam));
   return c.json({ "subsonic-response": { status: "failed", error: { code: 40, message: "Unauthorized" }, version: "1.16.1", type: "MusicFlow" } }, 401);
+}
+
+/**
+ * 401 现场画像(脱敏):只回答「这次请求带了哪种凭据」,不记录任何密钥/口令原文。
+ * `scheme` 能直接区分「客户端走了 Basic」与「客户端走了 Bearer/无」——
+ * 这正是 HA 集成 401 时最需要知道的第一件事。
+ */
+export function credentialsProfile(c: Context, getParam: (name: string) => string | undefined) {
+  const auth = c.req.header("authorization");
+  return {
+    scheme: auth ? (auth.split(" ")[0]?.toLowerCase() ?? "none") : "none",
+    apiKeyHeader: !!c.req.header("x-api-key"),
+    queryToken: !!getParam("token"),
+    subsonicUser: getParam("u") ?? null,
+    hasSubsonicToken: !!getParam("t"),
+    hasSubsonicSalt: !!getParam("s"),
+    hasSubsonicPassword: !!getParam("p"),
+    path: c.req.path,
+  };
 }
 
 async function getUserById(id: string): Promise<AuthUser | null> {
