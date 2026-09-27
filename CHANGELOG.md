@@ -2,7 +2,7 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
-## [4.0.37] - 2026-09-27
+## [4.0.38] - 2026-09-27
 
 ### 测试
 - **补测第六轮（B12~B14：11 个新测试文件 / 265 个新用例，全部断言「现状」而非期望契约）**：
@@ -26,11 +26,26 @@
   `services/localRecommendEngine`、`services/backfill`、`services/flowsCrud`、
   `services/localPlatformRecommend`、`middleware/metrics`。
 
+### 修复
+- **歌单新建 id 撞主键（P2）**：新建歌单的 id 直接取裸毫秒时间戳（`"pl-" + Date.now()`，共 4 处），
+  同一毫秒内建两张歌单就撞 `playlists.id` 主键 → **导入/创建直接抛**
+  `SqliteError: UNIQUE constraint failed: playlists.id`。触发面：批量导入多张歌单（导入循环里
+  每张一次 insert）、并发导入（自动同步 + 手动同步同时跑）、OpenSubsonic 客户端连点「新建歌单」。
+  **本版 CI 的全量测试门禁就是被它打红的**（269 个文件里 `tests/batch/jobsBehavior.test.ts` 的
+  「首次导入」用例偶发失败 —— 快机器上 `Date.now()` 连续两次取到同一毫秒太容易了）。
+  4 处统一加 4 位 base36 随机后缀（与 `recommendImport.ts` 既有写法完全一致）：
+  `batch/jobs.ts`（URL 歌单导入）、`services/plugin/remoteImport.ts`（插件远程导入）、
+  `routes/rest/index.ts`（OpenSubsonic `createPlaylist`）、`routes/api/playlists.ts`（歌单文件
+  导入的多张循环）。id 仍是 `pl-` 前缀的不透明字符串 —— 已确认全仓没有任何代码/测试解析
+  `pl-<数字>`（只按字符串相等或前缀使用），故对外契约零变化。
+  回归防线：`tests/batch/jobsBehavior.test.ts` 新增用例，用 `vi.spyOn(Date, "now")` 把两次
+  导入钉在同一毫秒；**回滚修复后该用例立刻复现同一条报错，恢复修复后转绿**（双向证伪）。
+
 ### 说明
-- 本轮**不改任何产品行为**：补测过程中新发现的 4 条 P3（`D17` 本地推荐口味路径忽略
-  `excludeRecent`、`D18` 全库随机 rowid 过采样在「库容接近 count」时少 1~2 首、`D19`
-  播放后自动匹配把底层失败回报成 `lockTimeout` 且不留错误日志）均**按约定挂起待确认**，
-  只在测试里以 characterization 用例把现状钉住（每条都注明「修复后该断言应翻成什么」）。
+- 补测过程中新发现的 P3 仍**按约定挂起待确认**，只在测试里以 characterization 用例把现状钉住，
+  每条都注明「修复后该断言应翻成什么」：`D17` 本地推荐口味路径忽略 `excludeRecent`、
+  `D18` 全库随机 rowid 过采样在「库容接近 count」时少 1~2 首、
+  `D19` 播放后自动匹配把底层失败回报成 `lockTimeout` 且不留错误日志。
 
 ## [4.0.36] - 2026-09-27
 
