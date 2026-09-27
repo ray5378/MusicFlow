@@ -14,6 +14,7 @@
 
 import { createRequire } from "node:module";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
+import { resolveFfmpeg } from "../transcode.js";
 
 // @discordjs/opus 为 CommonJS,不能用 ESM 具名导入,须经 createRequire 取整。
 const require = createRequire(import.meta.url);
@@ -54,19 +55,9 @@ export const FLAC_COMPRESSION_LEVEL = 5;
 export const OPUS_FRAME_MS = 20;
 export const OPUS_FRAME_SAMPLES = (SAMPLE_RATE * CHANNELS * OPUS_FRAME_MS) / 1000;
 
-/** ffmpeg 二进制定位:FFMPEG_PATH 环境变量 → ffmpeg-static 内置 → PATH。
- *  与 transcode.ts resolveFfmpeg 同约定。之前此处硬编码 spawn("ffmpeg"),
- *  容器内无系统 ffmpeg 时 ENOENT,导致 sendspin 全曲跳过(DLNA 不转码故正常)。 */
-export function ffmpegBin(): string {
-  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
-  try {
-    const p = require("ffmpeg-static") as string | undefined;
-    if (p) return p;
-  } catch {
-    /* 未安装 → 回退 PATH */
-  }
-  return "ffmpeg";
-}
+// ffmpeg 二进制定位统一走 transcode.resolveFfmpeg()(D35):
+// FFMPEG_PATH → ffmpeg-static 内置 → PATH,与 AirPlay / 转码三条链路同一口径。
+// (此处原本自带一份同口径的 ffmpegBin(),属重复实现,已收敛。)
 
 /** 统一 chunk 编码器接口:encode() 返回 0..N 个独立可发送包(裸包/帧)。
  *
@@ -777,7 +768,7 @@ function params(a1: string[], a2?: string[]): string[] {
 
 function pipeThroughFfmpeg(args: string[], input: Uint8Array): Promise<Float32Array> {
   return new Promise((resolve, reject) => {
-    const p = spawn(ffmpegBin(), args, { stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn(resolveFfmpeg(), args, { stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     p.stdout.on("data", (d: Buffer) => out.push(d));

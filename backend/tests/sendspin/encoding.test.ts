@@ -5,7 +5,18 @@
 // the backend opens its SQLite DB at module-load time.
 import "../plugins/_env.js";
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
+import Module from "node:module";
+
+// encoding.ts 用 createRequire 取 ffmpeg-static,是 Node 的 CJS require ——
+// vitest 的 vi.mock 拦不住,只能打在 Module._load 上。
+const origLoad = (Module as any)._load;
+let throwStatic = false;
+(Module as any)._load = function (request: string) {
+  if (throwStatic && request === "ffmpeg-static") throw new Error("ffmpeg-static 不可解析");
+  return origLoad.apply(this, arguments as any);
+};
+
 import {
   SAMPLE_RATE,
   CHANNELS,
@@ -23,8 +34,14 @@ import {
   f32ToS16,
   createChunkEncoder,
   isFlacEncoderReady,
-  ffmpegBin,
+  OpusEncoder,
 } from "../../src/services/sendspin/encoding.js";
+// D35 后 ffmpeg 定位不再由 encoding.ts 自带,统一收敛到 transcode.resolveFfmpeg()。
+import { resolveFfmpeg } from "../../src/services/transcode.js";
+
+afterAll(() => {
+  (Module as any)._load = origLoad;
+});
 
 /** 造一个合法 FLAC 帧头(4096 样本 / 48k / 立体声 / 16bit)。 */
 function frameHeader(opts: { bsize?: number; sr?: number; chan?: number; bps?: number; frameNo?: number[] } = {}) {
@@ -64,9 +81,32 @@ describe("codec 参数与常量", () => {
     expect(FLAC_BLOCK_SIZE).toBe(4096);
   });
 
-  it("ffmpegBin 与 isFlacEncoderReady 可安全调用", () => {
-    expect(typeof ffmpegBin()).toBe("string");
+  it("ffmpeg 定位与 isFlacEncoderReady 可安全调用", () => {
+    expect(typeof resolveFfmpeg()).toBe("string");
     expect(typeof isFlacEncoderReady()).toBe("boolean");
+  });
+});
+
+describe("ffmpeg 定位:口径一致(D35 后与 airplay/transcode 同一实现)", () => {
+  const saved = process.env.FFMPEG_PATH;
+  afterAll(() => {
+    if (saved === undefined) delete process.env.FFMPEG_PATH;
+    else process.env.FFMPEG_PATH = saved;
+  });
+
+  it("FFMPEG_PATH 优先于内置", () => {
+    process.env.FFMPEG_PATH = "/opt/ff/ffmpeg";
+    expect(resolveFfmpeg()).toBe("/opt/ff/ffmpeg");
+  });
+
+  it("内置取不到(未安装/解析抛错)→ 回落 \"ffmpeg\",不炸", () => {
+    throwStatic = true;
+    delete process.env.FFMPEG_PATH;
+    try {
+      expect(resolveFfmpeg()).toBe("ffmpeg");
+    } finally {
+      throwStatic = false;
+    }
   });
 });
 
@@ -212,5 +252,54 @@ describe("PCM 互转与编码器", () => {
     expect(chunks[0].data.length).toBe(4000);
     expect(await enc.flush()).toEqual([]);
     enc.close();
+  });
+});
+
+describe("Opus 编码器:自带 20ms 帧缓冲", () => {
+  const FRAME = 1920; // 20ms @48kHz/2ch(交错样本数)
+
+  it("不足一帧的残余留在缓冲,凑够才出包", async () => {
+    const enc = new OpusEncoder(320);
+    const out = await enc.encode(new Float32Array(FRAME + 400));
+    expect(out.length).toBe(1);
+    expect(out[0].frameSamples).toBe(FRAME / 2); // 单声道口径
+    expect(out[0].offsetMs).toBe(0);
+    enc.close();
+  });
+
+  it("残留缓冲承前帧 → 首包 offsetMs 为负", async () => {
+    const enc = new OpusEncoder(320);
+    await enc.encode(new Float32Array(FRAME + 400));
+    const out = await enc.encode(new Float32Array(FRAME));
+    expect(out.length).toBe(1);
+    expect(out[0].offsetMs).toBeLessThan(0);
+    enc.close();
+  });
+
+  it("空输入不产包(缓冲为空 / 有残留但不足一帧,都不炸)", async () => {
+    const enc = new OpusEncoder(320);
+    expect(await enc.encode(new Float32Array(0))).toEqual([]);
+    await enc.encode(new Float32Array(FRAME + 400));
+    expect(await enc.encode(new Float32Array(0))).toEqual([]);
+    enc.close();
+  });
+
+  it("flush 补零产尾帧;缓冲为空时 flush 返回空", async () => {
+    const enc = new OpusEncoder(320);
+    expect(await enc.flush()).toEqual([]);
+    await enc.encode(new Float32Array(100));
+    const tail = await enc.flush();
+    expect(tail.length).toBe(1);
+    expect(tail[0].frameSamples).toBe(FRAME / 2);
+    expect(await enc.flush()).toEqual([]); // flush 后缓冲已清
+    enc.close();
+  });
+
+  it("fixedFrameSamples 恒为 960(20ms 单声道口径)", () => {
+    expect(new OpusEncoder(320).fixedFrameSamples).toBe(960);
+  });
+
+  it("createChunkEncoder('opus') 拿到的是进程内编码器", () => {
+    expect(createChunkEncoder("opus")).toBeInstanceOf(OpusEncoder);
   });
 });

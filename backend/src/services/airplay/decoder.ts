@@ -11,9 +11,9 @@
 // 背压:缓冲超过 MAX_BUFFER_BYTES 就 pause ffmpeg stdout(它随即阻塞在管道写入),
 // 掉到低水位再 resume —— 不丢数据、不跳音频,内存被钉在 ~10s 而不是整首歌。
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { createRequire } from "module";
 import { PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
 import { createLogger } from "../../utils/logger.js";
+import { resolveFfmpeg } from "../transcode.js";
 import {
   decodeArgs,
   outputFilters,
@@ -40,17 +40,10 @@ export function degreesToDb(volume: number): number {
   return -30 + (v / 100) * 30;
 }
 
-const require_ = createRequire(import.meta.url);
-
-export function ffmpegBin(): string {
-  try {
-    const p = require_("ffmpeg-static") as string | undefined;
-    if (p) return p;
-  } catch {
-    /* not installed — fall back to PATH */
-  }
-  return process.env.FFMPEG_PATH || "ffmpeg";
-}
+// ffmpeg 二进制定位统一走 transcode.resolveFfmpeg()(D35):
+// FFMPEG_PATH → ffmpeg-static 内置 → PATH。此前此处是「内置优先」的重复实现,
+// 导致运维注入 FFMPEG_PATH 想换掉 glibc 静态构建(Alpine/musl 下 NSS/DNS 不可用)
+// 时,唯独 AirPlay 这条链路换不掉。
 
 export interface AirplayDecodeOpts {
   /** 分析行 id(= songs.id):命中已测量走静态 volume,否则实时 loudnorm。 */
@@ -123,7 +116,7 @@ export function spawnDecoder(
     outputFormat: "s16le",
     // 注:声道 pin 在 af 里的 aformat(见 buildAirplayAf),此处不再重复 -ac。
   });
-  const ff = spawn(ffmpegBin(), args);
+  const ff = spawn(resolveFfmpeg(), args);
   let errBuf = "";
   // P0-4:loudnorm JSON 打在 stderr **末尾** → 保留尾部(上限 64KB)。旧写法
   // "length < 64KB 才追加"会冻结在流开头,实时播放 >约 5.7 分钟的曲目永远测不到

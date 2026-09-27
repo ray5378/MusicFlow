@@ -23,7 +23,8 @@
 // 有则走窗口、无则走老路径;announce 的 TTS 短包保持整包解码,不用本模块.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { SAMPLE_RATE, CHANNELS, ffmpegBin } from "./encoding.js";
+import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
+import { resolveFfmpeg } from "../transcode.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -321,7 +322,7 @@ export class PcmWindow {
     let proc: ChildProcessWithoutNullStreams;
     try {
       // stdin 用 pipe 占位(与 encoding.pipeThroughFfmpeg 同口径,实际不写)。
-      proc = spawn(ffmpegBin(), args, { stdio: ["pipe", "pipe", "pipe"] });
+      proc = spawn(resolveFfmpeg(), args, { stdio: ["pipe", "pipe", "pipe"] });
       proc.stdin.end();
     } catch (e: any) {
       this.failed = `ffmpeg 启动失败: ${e?.message || e}`;

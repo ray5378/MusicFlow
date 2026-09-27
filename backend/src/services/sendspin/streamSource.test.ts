@@ -7,7 +7,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { PcmWindow, WindowClosedError, WindowEvictedError, WINDOW_HIGH_SEC, resolveSendspinAf } from "./streamSource.js";
 import { dspPeerIdForGroup } from "./streamEngine.js";
-import { decodeToF32, ffmpegBin, SAMPLE_RATE, CHANNELS } from "./encoding.js";
+import { decodeToF32, SAMPLE_RATE, CHANNELS } from "./encoding.js";
+import { resolveFfmpeg } from "../transcode.js";
 import { saveAnalysis, deleteAnalysis } from "../audio/analysisStore.js";
 import { parseLoudnorm } from "../audio/loudness.js";
 import { db } from "../../db/index.js";
@@ -60,7 +61,7 @@ async function pidDead(pid: number, ms = 5000): Promise<boolean> {
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pcmwindow-"));
   wav30 = path.join(tmpDir, "tone-30s.wav");
-  execFileSync(ffmpegBin(), [
+  execFileSync(resolveFfmpeg(), [
     "-hide_banner", "-loglevel", "error",
     "-f", "lavfi", "-i", "sine=frequency=440:duration=30:sample_rate=48000",
     "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-y", wav30,
@@ -69,7 +70,7 @@ beforeAll(async () => {
   // 重定位代数用例素材:WINDOW_HIGH_SEC=300 后 120s 曲在预缓冲后很快全进窗口,
   // seek 仍可能命中;真正考验"窗口外"的是 ready() 后立刻 seek 到 50s(已解 ≈2s)。
   wav120 = path.join(tmpDir, "tone-120s.wav");
-  execFileSync(ffmpegBin(), [
+  execFileSync(resolveFfmpeg(), [
     "-hide_banner", "-loglevel", "error",
     "-f", "lavfi", "-i", "sine=frequency=440:duration=120:sample_rate=48000",
     "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-y", wav120,
@@ -141,7 +142,7 @@ describe("PcmWindow 流式对拍整包解码", () => {
 describe("PcmWindow 输出恒 48k 立体声(P1-4)", () => {
   it("44.1k 源经链内 aresample 后输出为 48k(长度比≈48000/44100)", async () => {
     const wav44 = path.join(tmpDir, "tone-44k.wav");
-    execFileSync(ffmpegBin(), [
+    execFileSync(resolveFfmpeg(), [
       "-hide_banner", "-loglevel", "error",
       "-f", "lavfi", "-i", "sine=frequency=440:duration=5:sample_rate=44100",
       "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", "-y", wav44,

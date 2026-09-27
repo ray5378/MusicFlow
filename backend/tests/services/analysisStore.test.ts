@@ -18,7 +18,7 @@ import {
 } from "../../src/services/audio/analysisStore.js";
 import { deleteSongDb } from "../../src/routes/api/index.js";
 import { scanLocalSource } from "../../src/services/source/scanner.js";
-import { ffmpegBin } from "../../src/services/sendspin/encoding.js";
+import { resolveFfmpeg } from "../../src/services/transcode.js";
 
 /** 与 loudness.test.ts 同形的 ffmpeg stderr 固件。 */
 function ffmpegStderr(reportJson: string): string {
@@ -106,7 +106,7 @@ describe("删行联动清回写", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "analysis-sweep-"));
     try {
       const mp3 = path.join(dir, "tone.mp3");
-      execFileSync(ffmpegBin(), [
+      execFileSync(resolveFfmpeg(), [
         "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100",
         "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-y", mp3,
@@ -125,7 +125,7 @@ describe("删行联动清回写", () => {
       // 源目录整个没了：扫描直接抛错，回写不受影响
       const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "analysis-sweep-keep-"));
       const mp32 = path.join(dir2, "keep.mp3");
-      execFileSync(ffmpegBin(), [
+      execFileSync(resolveFfmpeg(), [
         "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100",
         "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-y", mp32,
