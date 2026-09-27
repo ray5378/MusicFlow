@@ -4,7 +4,7 @@
 // 未覆盖面(基线 lcov):42-44(元数据无时间戳行)、107-110(缓存定期清理)、
 // 218-240(④ 源插件路径)、247-251(getLyricsForSongId 查无此歌)、259(解析为空)。
 import "../plugins/_env.js";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll, afterEach } from "vitest";
 import { sqlite, db } from "../../src/db/index.js";
 import { songs } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
@@ -73,9 +73,11 @@ function seedSong(id: string, extra: Record<string, any> = {}) {
 }
 
 /** 在 CWD 下造一个「本地文件」(.mp3 + 同目录占位),返回相对 CWD 的 path 形态。 */
+const MADE_DIRS: string[] = [];
 function makeLocalTrack(os: any, osPath: any) {
   const relDir = `tests/.tmp-lrc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   os.mkdirSync(relDir, { recursive: true });
+  MADE_DIRS.push(relDir);
   const rel = `${relDir}/track`;
   os.writeFileSync(`${rel}.mp3`, "x");
   return { base: rel, path: rel };
@@ -108,6 +110,14 @@ beforeEach(() => {
 afterEach(() => {
   clearLyricsCache();
   vi.useRealTimers();
+});
+
+afterAll(() => {
+  // 别把临时目录留在仓库里
+  if (MADE_DIRS.length) {
+    const os = require("node:fs") as any;
+    for (const d of MADE_DIRS) os.rmSync(d, { recursive: true, force: true });
+  }
 });
 
 describe("fetchLrcForSong 缓存面", () => {
