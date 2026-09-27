@@ -2,6 +2,36 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.37] - 2026-09-27
+
+### 测试
+- **补测第六轮（B12~B14：11 个新测试文件 / 265 个新用例，全部断言「现状」而非期望契约）**：
+  按 lcov 未覆盖行清单优先补「逻辑型」模块 —— IO 型链路（`services/dlna/*`、`services/airplay/*`、
+  `services/sendspin/*`）明确降级，不为了数字去 mock 出一堆假 IO。
+- 行覆盖率提升（补测前 → 补测后，未覆盖行数）：
+  - `services/plugin/renderers/airplay.ts` 43.06% → **100%**（41 → 0）
+  - `services/plugin/renderers/dlna.ts` 48.57% → **100%**（36 → 0）
+  - `services/source/preferredSource.ts` 50.63% → **100%**（39 → 0）
+  - `services/playlist/autoMatch.ts` 64.37% → **100%**（31 → 0）
+  - `services/content.ts` 66.67% → **100%**（31 → 0）
+  - `services/plugin/randomSongs.ts` 85.58% → **100%**（45 → 0）
+  - `services/plugin/localPlatformRecommend.ts` → **100%**（分支 89.65%）
+  - `middleware/metrics.ts` → **100%**（分支 83.33%）
+  - `services/playlistCover.ts` 80.29% → **98.08%**（41 → 4）
+  - `services/backfill.ts` 77.09% → **98.32%**（41 → 3）
+  - `services/plugin/localRecommend.ts` 79.85% → **97.79%**（82 → 9）
+  - `services/flows/index.ts` 未覆盖行 60 → 41
+- 新增测试文件：`plugins/renderersPlugin`、`services/contentUnified`、`services/playlistAutoMatch`、
+  `services/preferredSource`、`services/randomSongsEngine`、`services/playlistCoverStore`、
+  `services/localRecommendEngine`、`services/backfill`、`services/flowsCrud`、
+  `services/localPlatformRecommend`、`middleware/metrics`。
+
+### 说明
+- 本轮**不改任何产品行为**：补测过程中新发现的 4 条 P3（`D17` 本地推荐口味路径忽略
+  `excludeRecent`、`D18` 全库随机 rowid 过采样在「库容接近 count」时少 1~2 首、`D19`
+  播放后自动匹配把底层失败回报成 `lockTimeout` 且不留错误日志）均**按约定挂起待确认**，
+  只在测试里以 characterization 用例把现状钉住（每条都注明「修复后该断言应翻成什么」）。
+
 ## [4.0.36] - 2026-09-27
 
 ### 测试
