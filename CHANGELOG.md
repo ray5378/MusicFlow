@@ -49,6 +49,70 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.44] - 2026-09-28
+
+### 修复
+
+- **D35：ffmpeg 二进制定位三处实现、两种口径 —— AirPlay 侧忽略 `FFMPEG_PATH`（P3，已修）**。
+  全仓原本有 3 处 ffmpeg 定位实现：`transcode.ts` `resolveFfmpeg()`、`sendspin/encoding.ts` `ffmpegBin()`、
+  `airplay/decoder.ts` `ffmpegBin()`。前两处口径一致（FFMPEG_PATH → ffmpeg-static → PATH），
+  **唯独 `airplay/decoder.ts` 是反的**：先 `require("ffmpeg-static")`，取到就直接 return，
+  `FFMPEG_PATH` 只在内置取不到时才兜底 —— 且与它自己文件头注释写的顺序相反。
+
+- 后果：运维注入 `FFMPEG_PATH` 后，转码 / Sendspin / 离线测量三条链路都换成注入的 ffmpeg，
+  **唯独 AirPlay 投播仍走内置 ffmpeg-static**。而 `dlna/control.ts:644` 的注释指出 ffmpeg-static 是
+  **glibc 静态构建，在 Alpine（musl）容器里 NSS/DNS 不可用** —— 也就是说「用环境变量换掉静态构建」
+  这个逃生舱，在最需要它的 AirPlay 路径上不生效。
+
+- 修法：删掉 `sendspin/encoding.ts` 与 `airplay/decoder.ts` 里各自重复的 `ffmpegBin()`，连同
+  `sendspin/streamSource.ts` 的调用一并改为 import `transcode.ts` 已导出的 `resolveFfmpeg()`，
+  口径统一为 **FFMPEG_PATH → ffmpeg-static → PATH**。`decoder.ts` 里只服务于该函数的 `createRequire`
+  一并删除（`encoding.ts` 的保留，`@discordjs/opus` 还在用）。**行为变更**：AirPlay 在注入
+  `FFMPEG_PATH` 时会从内置切到注入版本（这正是本缺陷要的效果）；未注入时行为不变。
+
+- 统一后由三处用例共同钉住同一份实现（`tests/airplay/decoderProducer.test.ts` /
+  `tests/sendspin/encoding.test.ts` / `tests/services/transcode.test.ts`）：改一处，三条链路同时转红。
+  双向证伪新增 T1（`FFMPEG_PATH` 不再优先）/ T2（PATH 兜底名被改写）两处变异，均被咬住。
+
+### 测试
+
+- **补测第十一轮（B23：新增 2 个测试文件 + 扩写 1 个，+71 用例）**，双向证伪 20 处定向变异全部咬住，
+  摘掉被测分支后对应用例立刻变红，恢复后转绿。本轮按「逻辑型优先、IO 型降级」挑的两个目标都是
+  **纯编码/缓冲逻辑，无网络** —— 而且正是 2026-09-17 三次无声事故的核心代码：
+
+- `src/services/airplay/decoder.ts`（缺口 39 → **0**，行/语句/函数 100%，分支 93.33%）：新增
+  `decoderProducer.test.ts`，覆盖此前**一行没测**的 `makeProducer` —— 有界 PCM 环形队列这一层。
+  钉住：预填充没攒够时首拉**不返回**（只来一点点数据就立刻吐 chunk 会把发送端饿到，直接表现为卡顿/无声）、
+  缓冲到高水位 pause ffmpeg stdout、掉到低水位 resume（背压不丢数据、不跳音频）、预填充 30s
+  等不到就放弃且不无限挂住、拉空后再来数据要等一轮而不是立刻返回 null、大块缓冲的压实、
+  流结束后把尾部残余吐干净、end 之后 done 闩住。
+
+- `src/services/sendspin/encoding.ts`（缺口 167 → **38**，行 94.20%）：新增 `encodingFrameSplit.test.ts`
+  （34 例），**按 RFC 9639 手工位流造真实 FLAC 帧**（不是拿固件糊弄），把 2026-09-17 的决策性分支
+  逐条钉死：声道码必须按 4bit 取（按 3bit 截会把立体声读成单声道 —— 那次最致命的一条）、残差方法 2
+  （保留值）整帧判废、联合立体声按 2 子帧算、首分区要减掉预测阶数、wasted 吃光位深判废、
+  容器头偏移量回填、`codec_header` 置 last-metadata 位、元数据块遍历在 last 处收尾。
+  另补 `OpusEncoder`（此前一行没测），`encoding.test.ts` 15 → 33 例。
+
+### 覆盖率提升（未覆盖行数）
+
+| 文件 | 补测前 → 补测后 | 备注 |
+| --- | --- | --- |
+| `airplay/decoder.ts` | 39 → **0** | 行/语句/函数 100%；分支 93.33% |
+| `sendspin/encoding.ts` | 167 → **38** | 行 94.20%；剩余为常量与兜底分支 |
+
+- 总体行覆盖率 **86.29% → 86.81%**（未覆盖 4487 → 4314 行，本轮吃掉 173 行）。
+
+- 证伪的 11 项 decoder.ts 分支：音量钳制、0 档静音、通道开关、ffmpeg 非零退出留日志、背压水位、
+  低水位 resume、预填充循环、预填充超时返回 null、尾部残余吐出。
+- 证伪的 11 项 encoding.ts 分支：首分区减预测阶数、残差方法 2 判废、联合立体声子帧数、声道码 0
+  取流缺省、wasted 判废、声道码 4bit、容器头偏移、`codec_header` last 位、元数据块 last 收尾。
+
+- **识别出 4 处不可证伪的变异并说明原因**（不是含糊放过）：A6 是等价变异（`>=` 与 `>` 在该处
+  产出同一个 chunk）；E2 是不可达分支（`n < 0`，`firstPartition` 上一行已判过、`perPartition` 是右移
+  恒非负，属防御性冗余）；E3 / E4 是我误记的锚点（一处漏了行尾注释、一处源码里根本没有该分支），
+  已从证伪集剔除并注明。
+
 ## [4.0.43] - 2026-09-27
 
 ### 测试
