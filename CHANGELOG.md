@@ -49,6 +49,41 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.41] - 2026-09-27
+
+### 测试
+
+- **补测第八轮（B20：2 个新测试文件 / 41 个新用例）**，同样逐条双向证伪——
+  摘掉被测分支后必须立刻变红，恢复后转绿。本轮两个目标都属于「一处写错、波及一片」的共享层：
+
+- `src/services/plugin/importers/http.ts`（**全部导入插件共用**的 HTTP 工具层）：
+  `fetchJson` 的非 2xx 抛错、UA 与自定义头的合并、超时中断真的掐断上游；
+  `resolveRedirect` 展开重定向后取最终 URL、`res.url` 为空时回落输入、以及**任何失败都不抛**。
+  额外钉住一件平时不会暴露的事：`finally` 里的 `clearTimeout` —— 漏掉它用例不会红，
+  但每个导入请求都会漏一个常驻计时器。
+
+- `src/routes/api/stream.ts`（`POST /v1/stream/probe`）：入参校验与 `MAX_PROBE_BATCH` 截断、
+  无需联网的直达分支（本地 / 已缓存行）、web 歌解析出直链时的 `fallback` 标记，
+  以及 `ensurePlayableStream` 返回空时那 **四档 verdict**（unplayable / playable / transient / unknown）。
+  其中「别把网络抖动当死链」是断言的重点：探测未定时必须如实报 `transient`，不能判成不可播。
+
+### 覆盖率提升（未覆盖行数）
+
+| 文件 | 补测前 → 补测后 | 备注 |
+| --- | --- | --- |
+| `routes/api/stream.ts` | 24 → **0** | 行/语句/分支/函数均 100% |
+| `plugin/importers/http.ts` | 30 → **0** | 行/语句/函数 100%；分支 90.9% |
+
+- `http.ts` 分支那 1 处（10 个分支里 9 个已覆盖）经核对是 v8 对 `finally` 块归属的计数噪声，
+  不是真实缺口：真实分支（默认参数两侧、`res.url || url` 的两侧、`catch` 的两条出口）都已覆盖。
+
+- 双向证伪共 10 处变异，全部咬住：type 缺省兜底值、`cachePath` 的本地判定、`fallback` 标记、
+  四档 verdict、`reason` 截到 120 字、`MAX_PROBE_BATCH` 截断、非 2xx 抛错、`res.url` 兜底、
+  `catch` 回落、以及 `finally` 的 `clearTimeout`。
+
+- 顺带固化一条容易被误读的现状：`String(e?.message || e)` 在 `message` 为空串时会退到 `String(e)`，
+  于是探测失败原因显示成 `Error` 而不是空串。不影响可用性，仅备案。
+
 ## [4.0.40] - 2026-09-27
 
 ### 测试
