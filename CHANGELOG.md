@@ -49,6 +49,54 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.45] - 2026-09-28
+
+### 测试
+
+- **补测第十二轮（B24：新增 1 个测试文件 / +44 用例）**，双向证伪 23 处定向变异全部咬住，
+  摘掉被测分支后对应用例立刻变红，恢复后转绿。
+
+- `src/services/sendspin/protocolPlayer.ts`（缺口 176 → **0**，266 行全覆盖，行/语句/函数 100%）：
+  既有 `protocolPlayer.test.ts` 是**集成式**的（真起 sendspin server），只够得到 in-proc 主路径，
+  **fork 模式 / 用户组 player / resume 冷起播三块一行没覆盖**。新增 `protocolPlayerUnits.test.ts`，
+  把 index.js、playerCore、supervisor、GroupManager、QueueController 全部换成受控替身，专攻这三块 ——
+  而它们恰好是注释里记着三次真机事故的地方：
+
+  - **2026-09-17「点播放没声音」**：`resume()` 只调 `pump.resume()`，没走 `playMedia` ⇒ 没有
+    `stream/start`、没有 pump、全链路静默（对照 DLNA：它的 resume 就是 `playDevice()` = 真起播，
+    所以 DLNA 从未暴露这个缺口）。现由「冷起播必须走 playMedia」钉死，**in-proc / 用户组 / fork
+    三种入口各一条**，另加两条兜底：`pumpActive` 探测本身失败时按「不在推流」处理、队列无当前曲
+    时留痕放弃而不是硬闯。
+  - **2026-09-21 子进程心跳停摆 95s**：`pollState` 把「探不到」谎报成 IDLE，凭空造出
+    PLAYING→IDLE 迁移 ⇒ tracker 判自然结束 ⇒ 位置归零、曲目乱跳。现由「必须标 `unavailable`」
+    钉死（**用户组 / proxy 各一条**）—— 标记后由 QueueController 决定不喂 tracker、不计数。
+  - **起播上报必须走 `setTimeout(0)`**：同步上报会被 `resetTracker` 清掉 lastPlaying ⇒ 短于轮询
+    间隔的曲目永远触发不了自然结束、队列卡死。现断言「同步阶段未上报、宏任务之后才上报」。
+
+- 顺带钉住的判定口径：在线与否一律按**连接派生**判定（client 不在列表 / `ready === false` 即不可用，
+  此时 cast 会投进 ephemeral 组——没声音却显示“在播”，是最坏的一种错）；组成员按 `ready` 过滤；
+  命名空间写法与裸写法都认作 sendspin、dlna 成员一律排除；组音量先落 `player_groups`（无成员也持久）
+  再下发，且**落库失败不挡下发**；起播前先灌持久音量（否则起播瞬间跳回缺省 100）。
+
+### 覆盖率提升（未覆盖行数）
+
+| 文件 | 补测前 → 补测后 | 备注 |
+| --- | --- | --- |
+| `sendspin/protocolPlayer.ts` | 176 → **0** | 266 行全覆盖；行/语句/函数 100% |
+
+- 总体行覆盖率 **86.81% → 87.33%**（未覆盖 4314 → 4145 行，本轮吃掉 169 行）。
+- 用例总数 3990 → **4034**（289 个测试文件），全量回归全绿，`tsc --noEmit` 0 错误。
+
+- 证伪的 23 项分支：模式分派、单设备在线判定、组成员 ready 过滤、组不存在 / 无 sendspin 成员 /
+  前端未起三种空返回、无在线成员拦截、起播前灌持久音量、回填失败不挡起播、resume 探测 pump、
+  stop / pause 的 opcode、组音量落库失败不挡下发、isAvailable 探测失败回落、组与 proxy 两处
+  `unavailable` 标记、组 seek 边界日志、proxy seek 失败留 warn 并抛出、in-proc 冷起播、
+  冷起播补全元数据、无当前曲留痕、起播上报 duration。
+
+- **证伪脚本新增多行锚点支持**：`unavailable = true;` 这类短句在组 player 与 proxy 各出现一次，
+  单行 stripped 匹配必然撞车 —— 改为按**连续行块**定位，命中次数仍必须恰好为 1。
+- 本轮无产品行为改动，未新增缺陷备案。
+
 ## [4.0.44] - 2026-09-28
 
 ### 修复
