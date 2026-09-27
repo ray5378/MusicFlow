@@ -63,7 +63,7 @@ app.post("/v1/playlists/import", permMiddleware(PERM.PLAYLIST_IMPORT), async (c)
       for (let i = 0; i < nativeList.length; i++) {
         const imp = nativeList[i];
         const name = imp.name.trim() || "导入歌单";
-        const id = `pl-${Date.now()}-${i}`;
+        const id = `pl-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
         db.insert(playlists).values({
           id, name, ownerId: user?.id || "",
           sourceUrl: null, sourcePlatform: imp.platform, externalId: null,

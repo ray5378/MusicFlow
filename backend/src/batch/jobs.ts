@@ -287,7 +287,7 @@ async function playlistImportHandler(args: Record<string, any>, _ctx: BatchJobCo
       db.update(playlists).set({ name, updatedAt: new Date().toISOString() }).where(eq(playlists.id, id)).run();
     }
   } else {
-    id = `pl-${Date.now()}`;
+    id = `pl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     let coverRef: string | undefined = undefined;
     if (imported.coverUrl) {
       const cached = await cacheRemoteCover(imported.coverUrl, `pl-${id}`);

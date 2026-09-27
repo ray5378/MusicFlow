@@ -711,3 +711,33 @@ describe("推荐手动刷新(recommend-refresh)", () => {
     );
   });
 });
+
+// ---------------- D20 回归:歌单 id 唯一性(不再用裸毫秒时间戳) ----------------
+describe("歌单新建 id 唯一性(缺陷台账 D20)", () => {
+  it("同一毫秒内导入两张不同歌单 → 拿到两个不同 id,两行都建成功(不撞 playlists 主键)", async () => {
+    // 现状(修复前):id = `pl-${Date.now()}`,同一毫秒内两次新建歌单会撞主键，
+    // 第二次直接抛 SqliteError: UNIQUE constraint failed: playlists.id —— 表现为
+    // 「批量导入多张歌单时随机某几张导入失败」。CI 上就是这个形态挂掉了本文件。
+    H.imported = { name: "同毫秒歌单", platform: "qq", coverUrl: "", songs: [] };
+    H.access.playlistSync = {
+      rebuildPlaylistEntries: async () => ({ total: 1, matched: 1, unmatched: 0, wishAdded: 0 }),
+    };
+    const spy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      const a = await batchJobHandlers["playlist-import"](
+        { url: "https://x/pl/same-ms-a", userId: "u1" }, ctx().c,
+      );
+      const b = await batchJobHandlers["playlist-import"](
+        { url: "https://x/pl/same-ms-b", userId: "u1" }, ctx().c,
+      );
+      expect(a.playlistId).not.toBe(b.playlistId);
+      expect(a.playlistId.startsWith("pl-")).toBe(true);
+      const cnt = sqlite
+        .prepare("SELECT COUNT(*) AS c FROM playlists WHERE source_url IN (?,?)")
+        .get("https://x/pl/same-ms-a", "https://x/pl/same-ms-b") as any;
+      expect(cnt.c).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

@@ -96,7 +96,7 @@ export async function importRemotePlaylistLike(input: RemotePlaylistImportInput)
       if (name && name.trim()) upd.name = fallbackName;
       db.update(playlists).set(upd).where(eq(playlists.id, playlistId)).run();
     } else {
-      playlistId = `pl-${Date.now()}`;
+      playlistId = `pl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       db.insert(playlists).values({
         id: playlistId,
         name: fallbackName,

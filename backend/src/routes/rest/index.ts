@@ -917,7 +917,7 @@ function toIdArray(v: any): string[] {
 restRoutes.all("/createPlaylist", permMiddleware(PERM.PLAYLIST_MANAGE), async (c) => {
   const user = c.get("user");
   const body = await parseBody(c);
-  const id = `pl-${Date.now()}`;
+  const id = `pl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const name = (body.name as string) || "New Playlist";
   db.insert(playlists).values({ id, name, ownerId: user?.id || "" }).run();
   const songIds = [...toIdArray(body.songId), ...toIdArray(body.songIds)];
