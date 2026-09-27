@@ -72,6 +72,18 @@ const DEFAULTS = {
   // ---- sendspin / 权限 ----
   sendspinServerOr404: () => null as Any,
   hasPerm: () => true,
+
+  // ---- playlists 域 ----
+  // 插件同步提供方默认不存在 => 各端点走 503「同步未启用」分支;用例按需注入。
+  syncApi: () => null as Any,
+  startAsyncTask: () => ({ started: true, taskId: "task-1" }) as Any,
+  runPlaylistAutoMatch: async () => ({ total: 0, matched: 0, appended: 0, skipped: 0, lockTimeout: false }) as Any,
+  parsePlaylistFile: () => [] as Any[],
+  attachGroupSources: () => undefined,
+  clearLibraryIndex: () => undefined,
+  clearPlaylistCoverCache: () => undefined,
+  maybeRefreshRandomSongs: () => undefined,
+  touch: () => undefined,
 };
 
 type FnName = keyof typeof DEFAULTS;
