@@ -49,6 +49,59 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.40] - 2026-09-27
+
+### 测试
+
+- **补测第七轮（B16~B19：5 个新测试文件 / 100 个新用例）**，每条用例都做了**双向证伪**——
+  摘掉被测分支后必须立刻变红，恢复后转绿，否则不算数。
+  本轮继续按 lcov 缺口榜挑**逻辑型**模块，IO 型协议栈（`services/dlna/*`、`services/airplay/*` 的 socket 层、
+  `services/sendspin/*` 的流式引擎）维持既有原则**明确降级**，不为了覆盖率数字去 mock 出一批假 IO。
+
+- `services/audio/flow.ts` 的唤醒通道选择 + `services/randomSongs.ts` 配置容错：
+  唤醒通道的优先级与「进程级节流」、等待阶段抛错的兜底；配置侧的坏 JSON / 越界数值 / 空白归一 / 年份交换等脏输入
+  （`tests/services/flowWakeTargets.test.ts` 13 条 + `tests/services/randomSongsConfig.test.ts` 12 条，25 例）。
+
+- `services/plugin/renderers/supervisor.ts` 渲染器宿主的分支（12 例）+ `routes/api/shared.ts` 共享查询分支（7 例）。
+
+- `src/services/source/online/recommendImport.ts` 每日推荐导入的分支 + `src/services/ws/auth.ts` 握手鉴权，46 例：
+  `recommendImport.ts` 用「真实插件 + 真实 SQLite」的姿势（只替换远端封面缓存与批量节流两个副作用面），
+  把原本 50 个未覆盖行压到 11；`ws/auth.ts` 打真实 JWT 验签与真实库用户，行/语句/分支/函数**全部 100%**。
+
+- `services/airplay/protocolPlayer.ts` + `services/sendspin/pairServer.ts`（25 例）：
+  `protocolPlayer.ts` 此前**从未被任何测试 import 过**（整块 27–75 行零覆盖），本轮直接补到 100%；
+  `pairServer.ts` 走真实 CPace 双端对跑（服务端起 PAKE、客户端真 derive/verify），把缺口从 71 行压到 24 行。
+
+### 覆盖率提升（未覆盖行数）
+
+| 文件 | 补测前 → 补测后 | 备注 |
+| --- | --- | --- |
+| `services/ws/auth.ts` | 24 → **0** | 行/语句/分支/函数均 100% |
+| `services/airplay/protocolPlayer.ts` | 45 → **0** | 行/语句/分支/函数均 100% |
+| `services/plugin/renderers/supervisor.ts` | 38 → **0** | 行覆盖缺口归零 |
+| `services/sendspin/pairServer.ts` | 71 → 24 | 剩余 24 行经 9 处变异逐条证伪为**死分支** |
+| `services/source/online/recommendImport.ts` | 50 → 11 | 剩余缺口为上游重试的等待段 |
+
+- 剩余 24 行的「死分支」结论不是靠读代码猜的：逐处变异（把恒假的守卫改成恒真、把空转的 `catch` 摘掉、
+  把永不成立的写入条件改成成立）后，用例**全部仍然全绿**——这些行无论怎么改都不可能被照到，
+  属于协议里本就不存在的路径（见下方 D31~D34）。
+
+### 本轮补测暴露、但**未修**的缺陷（仅记录）
+
+全部已固化成「现状」用例双向锁死，修复计划见 `产品缺陷修复任务-2026-09-27.md`，此处仅备案：
+
+- **D27 / D28（P3）**：「每日推荐」导入未带 `userId` 时 `owner_id` 写空串 ⇒ 撞外键整单失败；
+  歌单名为空时**落库兜底成「每日推荐」、返回值却是空串**。
+- **D29（P2）**：轮换删除的闸门永假——`old` 列表在导入**之后**才取全表，本次新单被算进 `oldByChannel` 的分母，
+  `n >= m + n` 恒假 ⇒ 远端已下架的旧歌单只增不减。副作用是它内部的 `try/catch` 与 favorite 跳过分支在修复前不可达。
+- **D30（P2，安全）**：静态配对码「失败 5 次锁定」实质不可达——首次 confirm 不符就 `abort()` 删掉 attempt，
+  `failures` 恒为 1 ⇒ `locked()` 恒假 ⇒ 8 位码可被离线无限枚举。
+- **D34（P2，协议死锁）**：`dynamic_pairing_code` 的日常时序走不通——`onPairInit` 要求 `await_init` 状态，
+  重发的 `client/pair-init` 被直接 return；反过来「先输码再 init」能触发 PAKE，但 `nonce_A` 每次 init 都重新随机，
+  服务端比对的码基线失配。
+- **D31 / D32 / D33（P3，死代码）**：`waitForCode()` 全仓无调用点；`pendingFinalize` 的写入条件与读取前置条件互斥；
+  三处 `b64urlDecode` 的 `catch` 永不触发（`Buffer.from(x, 'base64url')` 不抛错，非法输入由长度检查兜底）。
+
 ## [4.0.38] - 2026-09-27
 
 ### 测试
