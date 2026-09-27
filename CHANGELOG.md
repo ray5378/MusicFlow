@@ -2,8 +2,6 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
-## [4.0.39] - 2026-09-27
-
 ### 新增能力
 - **支持 HTTP Basic 认证**(RFC 7617,`Authorization: Basic base64(user:pass)`)。
   此前 `middleware/auth.ts` 只认 `X-API-Key` / `Bearer` / `X-ND-Authorization` / `?u&t&s` / `?u&p` / `?token=`
@@ -11,20 +9,13 @@
   拿到的永远是 401。Basic 现在排在最后一条分支(不改变既有凭据的优先级),
   且只按**第一个**冒号切分 `user:pass`,所以口令里自带 `:` 也能认证通过。
 
+
 ### 修复
 - **D26(`middleware/auth.ts`)**:401 之前留下一条**可诊断**的凭据画像(脱敏)——
   `scheme`(basic / bearer / none)、是否带 `X-API-Key` 与 `?token=`、`subsonicUser`(只记用户名,不记口令)。
   此前 401 只有一句固定中文提示「认证失败,请检查账号密码」,线上分不清是「客户端用了 Basic 而后端不认」
   「key 在服务端被重置过」还是「压根没带凭据」,实际排查只能靠抓包 + 翻库。密钥/口令一律不落日志。
 
-### 测试
-- `tests/middleware/authMiddlewareFlows.test.ts` 新增 8 条:Basic 明文口令 / 口令自带 `:` 仍通过 /
-  错口令 401 / Basic 解码后无冒号时不挡住后面的凭据分支;以及 401 画像的 `scheme`、`subsonicUser`
-  与「不含口令原文」。全部走**双向证伪**(关掉 Basic 分支后 2 条立即变红,恢复后转绿)。
-- 备注:画像断言**不**去 spy logger —— logger 是 `createLogger()` 现造的实例,与本文件 import 的未必是同一份,
-  那种断言一改 logger 实现就红;这里直接验画像本身,稳定得多。
-
-### 修复
 - **D24（`services/transcode.ts` + `services/audio/flow.ts`）**：转码槽 FIFO 队列里的等待现在**可以被取消**。
   此前「客户端断开 / 停投」走到的 `abort()` 叫不醒还排在队列里的 `await acquireTranscodeSlot("flow")` ——
   `run()` 因此永不返回、`done` 永不 resolve，那个槽也永远还不回来（池额度被一笔笔慢慢吃光）。
@@ -35,7 +26,14 @@
   （实测约 8% 的 abort 会话复现，就是 `flow.test.ts` 里那条偶发红）。现在收敛不等对端关管；
   顺带堵掉解码器侧同类的槽泄漏（只 kill 不拆管 ⇒ `close` 不来 ⇒ `settle()` 不跑 ⇒ 槽还不回来）。
 
+
 ### 测试
+- `tests/middleware/authMiddlewareFlows.test.ts` 新增 8 条:Basic 明文口令 / 口令自带 `:` 仍通过 /
+  错口令 401 / Basic 解码后无冒号时不挡住后面的凭据分支;以及 401 画像的 `scheme`、`subsonicUser`
+  与「不含口令原文」。全部走**双向证伪**(关掉 Basic 分支后 2 条立即变红,恢复后转绿)。
+- 备注:画像断言**不**去 spy logger —— logger 是 `createLogger()` 现造的实例,与本文件 import 的未必是同一份,
+  那种断言一改 logger 实现就红;这里直接验画像本身,稳定得多。
+
 - 三个 flaky 用例的根因全部修掉，不再靠加大超时兜：
   - `services/lyricsCacheSweep.test.ts`：sweep 是模块加载时注册的 `setInterval`，tick 落在**固定网格**上，
     而缓存条目是执行到一半才写入的（晚锚点 ε 毫秒），判 `age >= TTL` 时最后一次 tick 的 age 是 `TTL - ε`，
