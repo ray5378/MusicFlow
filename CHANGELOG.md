@@ -49,6 +49,50 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.48] - 2026-09-28
+
+### 测试
+
+- **补测第十五轮（B28：新增 3 个测试文件 / +59 用例）**，双向证伪 17 处定向变异全部咬住，
+  摘掉被测分支后对应用例立刻变红，恢复后转绿。
+
+- `src/services/source/online/streamFallback.ts`（行 88.36% → **98.74%**，函数 100%）：
+  这个文件决定了「一首 web 歌的直链挂了之后，还能不能换到别的平台」。本轮钉的是
+  **三道结构性短路与缓存收尾**：正/负缓存命中必须零搜索、缺标题/总开关关/解析不出
+  provider 三处判死的口径（总开关关时**不写**负缓存，否则开关一开仍被误判没源）、
+  全候选不可播时 `transient` 与 `unplayable` 的分岔（只有 `sawTransient` 这一个比特
+  在区分「上游挂了」和「这首歌没有源」）、`clearFallbackCache` 定向清与全清的边界
+  （前者只清换源记忆、后者连可播记忆一起清）、两个 FIFO 上限（2000 / 5000）必须真的生效。
+
+- `src/services/sendspin/handshake.ts`（缺口 28 → **6**，行 98.37%）、
+  `src/services/sendspin/supervisor.ts`（缺口 24 → **2**，行 96.08%）：
+  见两文件的提交说明。
+
+### 覆盖率提升（未覆盖行数）
+
+| 文件 | 补测前 → 补测后 | 备注 |
+| --- | --- | --- |
+| `source/online/streamFallback.ts` | 行 88.36% → **98.74%** | 函数 100%，止于 2 处死 catch |
+| `sendspin/handshake.ts` | 缺口 28 → **6** | 行 98.37% |
+| `sendspin/supervisor.ts` | 缺口 24 → **2** | 行 96.08% |
+
+- 本轮自身新增覆盖约 **102 行**；总体 `未覆盖 8030 / 65406 行（87.72%）`。
+- 全量回归 `297 个测试文件 / 4200 用例` 全绿，`tsc --noEmit` 0 错误。
+
+- **两条不可证伪，已写明原因而非含糊放过**：`recheckOnlineDirect`(309-310) 与
+  `resolvePreferredStreamUrl`(514-515) 的 catch 包着的都是全函数（probe /
+  resolvePreferredSong 各自还有一层同款 try），构造上抛不出来。不编假异常刷行覆盖率，
+  改为在测试里把「上游不抛」本身钉成断言并留档。
+
+- **两条等价变异已剔除并留档**：`464` 行写回条件里的「≠ 原 URL」判断（去掉后写的仍是
+  同一个值，库里逐字节不变）、`defaultStreamProviderId` 行无 pluginEntry 时的启用源插件
+  扫描（结果会被 `resolveStreamProvider` 的兜底分支立刻重算，对外 URL 一字不差）。
+
+- **发现（`tests/plugins/sandbox.test.ts`，未改动）**：quickjs 沙箱 OOM 自愈用例偶发
+  `Assertion failed: list_empty(&rt->gc_obj_list)`，会直接 abort worker 让整轮全量拿不到
+  汇总行。单跑三次挂一次、与被测改动无关（本轮两次全量，一次全绿一次被它带崩）。
+  看起来像沙箱在内存压力下 `free` 时的引用计数漏检，属既有问题，留档待议。
+
 ## [4.0.47] - 2026-09-28
 
 ### 测试
