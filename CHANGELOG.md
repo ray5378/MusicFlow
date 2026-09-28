@@ -49,6 +49,50 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.52] - 2026-09-28
+
+### 测试
+
+- `backend/tests/airplay/controlOrchestration.test.ts`(B31 补测):**107 条**。目标 `src/services/airplay/control.ts` —— 按「未覆盖行数 × 可测性」联合排序选中,是最后一块整文件未覆盖的服务层文件。分会话生命周期、起播编排、收尾 finalizer、设备持久化、暂停/恢复/停止、seek、音量与静音、状态读取、服务开关九个分组。
+- `control.ts` 覆盖率(全量口径):**语句 100% / 行 100% / 函数 100% / 分支 96.96%**,唯一未覆盖分支落在第 28 行的 re-export 上。
+- `tsc --noEmit` 通过;全量回归 **300 个文件 / 4480 条全绿**。
+
+### 双向证伪变异(73 条,68 条被抓住)
+
+把 `control.ts` 的 73 条契约逐个改坏后重跑本文件。首轮 53 条立即转红、**20 条存活**;
+逐条归因后补掉 15 条真实测试缺口,复跑 15/15 全部转红;剩下 5 条判为等价变异或死代码。
+首轮存活暴露出的测试缺口(补断言后均已钉住):
+
+- **`stopSession` 没断言「解码器被 kill」** —— 只看了会话表移除与 `player.stop()`。
+- **握手失败分支断言的是「上一次成功那一个」player** —— `startSession` 开头就会 `stopSession` 掉旧会话,
+  旧 player 的 `stop` 因此早已被调用,「失败分支自己收没收干净」整条契约被彻底盖住。
+- **`finalizer` 不 kill 解码器**同样漏了断言(整首播完之后 ffmpeg 会一直烧 CPU)。
+- **seek 的负数夹取只测了结果、没测喂给下游的值** —— 这个值一路喂给 `prepareSeek` 与新 ffmpeg 的 `-ss`。
+- **fork 下「原地 seek 成功」只断言 seek rpc 打没打出去** —— 把 `if (inPlace) return` 去掉之后
+  seek 和 cast 两个 rpc 都会发出去,断言照样绿。
+- **「seek 提前掐断管道」只断言 `kill`** —— 旧 finalizer 的 seekReplace 分支也会 kill 同一把解码器句柄,
+  真正只有 `seekAirPlay` 会做的是 `destroy` 管道(旧 producer 就靠这一步解除 `waitData` 阻塞)。
+- **seek 重建解码器后喂进去的不是合规后的地址** —— 旧 token 可能过期,必须先 `resolvePipelineInput` 重解。
+- **seek 复原暂停态只断言 `toHaveBeenCalled()`** —— 暂停期间 `isPaused` 本就是 true,少调那一次
+  状态查询照样给出 PAUSED;改成「恰好两次」才抓得住。
+- **`hasActiveSession` 的 fork 分支从未被执行过** —— fork 判活必须只读子进程镜像,
+  主进程自己的会话表不算数(本轮新增用例的两条断言就是钉这条的)。
+- **`stopAirPlaySessionsForHost` 的 host 判空只测了 `""`** —— 只有传 `undefined` 才会撞上
+  `host.toLowerCase()` 抛异常,这条变异在 `""` 下是等价的。
+- **大小写不敏感那个用例两边都是小写 IP** —— 大小写敏感与不敏感跑出来完全一样。
+- **音量/静音的 DLNA 转发只断言「转发被调用」** —— 转发成功后漏掉那句 `return` 时,会多走一步
+  `applyVolumeDb` 把音量覆盖成 SET_PARAMETER 的值;只有会话在场时才看得见。
+- **`dlnaPeerOfAirPlay` 的两条判据要特定场景才杀得掉** —— 「不判 host」得配一个解析出空主机名的
+  `file:///dev` 设备才能暴露;「非法 URL 也放行」得让非法 URL 与**别的主机**同时出现:
+  配对错误比不配对更糟 —— 后者是「没调成」,前者是「调到了不该调的地方」。
+
+### 已知问题(本轮只登记,不改产品行为)
+
+- `D31-3`:`control.ts` 里的 `markAirPlayDeviceOfflineInDb()` 是**死代码** —— 整个 `src/` 只有它的定义,
+  既没有调用点也没有导出(grep 已确认)。本轮不为死代码补测试,只在变异阶段记录。
+- 20 条存活变异里另外 4 条(`M14` `M18` `M22` `M63`)经分析是**等价变异**,不是测试缺口:
+  任何测试都无法把它们与正确实现区分开,理由已写在测试文件对应用例的注释里。
+
 ## [4.0.51] - 2026-09-28
 
 ### 测试
