@@ -49,6 +49,24 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.58] - 2026-09-29
+
+### 测试（覆盖率缺口补测，产品代码零改动）
+- 按覆盖率台账并行补测，本轮新增 286 条单元测试；全量套件 4835 条零失败：
+  - B7 dlna 服务层残余：announceResilience / controlBaseUrlProbe / controlTransportGuards / deviceRecordDb / queueCompat / rawStreamCache（65 条）
+  - B9 plugin/player 服务层：queueControllerLifecycle / dailyRecommendFixedRow / localRecommendTaste / peerCastQueue / playlistSyncDegrade（75 条）
+  - B10 路由层与中间件：authCacheSweep / authCredentialFallbacks / dailyRecommendConfigRoundTrip / recommendFallbackContract / sharedScanJobsSweep（37 条）
+  - B16 推荐源：recommendImport.flow（30 条）
+  - airplay/raop.ts：raopPlayer（79 条，本轮早些时候已完成、本次一并纳入发版）
+- 全量覆盖率：Statements 93.14% / Branches 85.71% / Functions 91.72% / Lines 93.14%。
+- 全部新用例均做变异反证或隔离证伪，守住产品契约；用例相互隔离、可重复 shuffle 跑。
+
+### 已知缺陷（本轮未改产品代码，待后续处理）
+- `rebuildPlaylistEntries`（`services/plugin/playlistSync.ts`）对已匹配条目不做二次曲库校验：
+  本地文件被删/移走后，该条目仍 `playable=1` 且 `song_id` 悬空，播放端会投空。
+  已由 `tests/services/playlistSyncDegrade.test.ts` 记入口账（现状断言），
+  修复方案为曲库匹配不到时降级为占位（`playable=0` + `unavailable_reason`）。
+
 ## [4.0.57] - 2026-09-28
 
 ### Fixed
