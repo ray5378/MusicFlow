@@ -645,7 +645,13 @@ describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
       else process.env.SANDBOX_MEMORY_LIMIT = prev;
       try { sb?.dispose(); } catch { /* ignore */ }
     }
-  }, 30000);
+    // 预算 60s(原 30s):这个数字被量出来过,不是拍的。干净进程里本场景 12.7s
+    // (load 36ms + leak 触顶与自愈重建 12695ms + ping 2ms);而本文件前面的 leak
+    // 用例会在同一个 worker 进程里留下内存压力(每个循环最多吃到 256MB,堆越满
+    // 同样的 1MB 字符串分配越慢),同一场景就此涨到 32.4s。产品侧给 rebuild 的
+    // 独立预算是 REBUILD_TIMEOUT_MS = 30000,断言预算理应高于它而不是等于它 ——
+    // 这里守的是"deadline 过期后仍能重建成功",不是"重建要多快"。
+  }, 60000);
 });
 
 describe("并发 OOM 自愈:SIGABRT 防线", () => {

@@ -49,6 +49,81 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.55] - 2026-09-28
+
+### 测试
+
+- `backend/tests/dlna/controlRecast.test.ts`(B7 补测):**24 条**,全绿。目标 `src/services/dlna/control.ts` ——
+  专啃「SOAP Seek 无效」这条最值钱的产品链路:部分固件(HiVi/MUZO)播实时转码流时
+  `GetPositionInfo` 恒回 `RelTime=0`、`Seek(REL_TIME)` **静默失效**(不报错也不跳),
+  后端据此**学**出「该设备 seek 不可靠」并改走 `play_index(seek_position)` 语义的**重投流重建**
+  (`reseekByRecast`:Stop → SetAVTransportURI(timeOffset=N) → 等可播放 → Play)。
+  学习过程必须走满两次观察才落库判定 —— 这条「不许提前降级」的契约此前没有任何用例守着。
+- `control.ts` 语句覆盖率 **99.13%**,9 行(未覆盖行号 [618, 619, 1146, 1147, 1148, 1229, 1230, 1541, 1542])。
+- `tsc --noEmit` 通过;dlna 套件 4 轮 shuffle **258 条 × 4 全绿**。
+
+### 双向证伪变异:6 条补断言后 6/6 被抓
+
+补测写完**不等于**测住了。第二轮变异跑出 6 条"存活",逐条查下来全是**我的断言口径不对**
+(不是变异无效),补强后全部被抓:
+
+- **`waitUntilStopped` 的 1000ms 轮询间隔改成就绪 0ms,照样探 2 次就绿** ——
+  数探测次数杀不掉"忙轮询"。补了**墙钟断言**:两次探测之间必须真的退让。
+- **`verifySeekLanding` 的 catch 改成 `throw e`,用例照样绿** —— 那条 `void` 派出的协程
+  异常无人接收,只有守在 `unhandledRejection` 上才看得见。补了该监听。
+- **「暂停冻结」分支、`POSITION_ESTIMATE_MAX_AGE_MS` 重算分支各关掉一条,照样绿** ——
+  原因是断言写的是 `frozen + 2` 这种容差,几毫秒的外推被吃掉。改成**精确相等**,
+  精确钉住「暂停时长不许算进进度」。
+- **`isSeekUnreliable` 的内存优先分支关掉,照样绿** —— 那条分支与它后面的落库查询结果
+  恒真,只有**「内存为真、库里为假」**才分得出(运维重置持久化判定之后)。补了该用例。
+- **`reseekByRecast` 里 `seekGuards.set` 这一行测了也白测** —— 正常路径上紧接着的
+  `castToDevice` 会无条件 `seekGuards.delete`,窗开等于没开;只有让 `castToDevice`
+  在删窗**之前**就退出(设备已被禁用),这行才显形。
+
+### 修复
+
+全量回归连跑三轮、红了两轮的**不同**用例,根因是同一类:**断言预算低于被测行为的最坏耗时**。
+两处都不是产品缺陷,放宽的都是断言预算,没有动产品侧常量。
+
+- `tests/routes/apiScanRead.test.ts`:`GET /v1/dlna/devices -> 非 5xx` 偶发红
+  (`Test timed out in 5000ms`),单独跑该文件 5/5 全绿。根因:这条端点在发现缓存过期时会
+  走真实 SSDP 冷扫描(`refreshDevices()` 预算 4000ms,`--reporter=verbose` 实测耗时
+  **4003ms**),而 vitest 全局超时 5000ms 只剩 1s 余量,304 个文件一起跑时必然越线。
+  本条契约要守的是「不抛 5xx」而非「快」,预算放宽到 20s。
+- `tests/plugins/sandbox.test.ts`:`OOM 触顶耗尽 deadline 后重建仍成功` **单独跑就红**
+  (32399ms > 自身 30000ms 预算)。用临时诊断脚本分阶段量过:干净进程 **12.7s**
+  (load 36ms + leak 触顶与自愈重建 12695ms + ping 2ms),但同文件前面的 leak 用例会在
+  **同一个 worker 进程**里留下内存压力(每个循环最多吃到 256MB,堆越满同样的 1MB
+  字符串分配越慢),同一场景就此涨到 32.4s。产品侧给 rebuild 的独立预算是
+  `REBUILD_TIMEOUT_MS = 30000`,断言预算理应高于它而不是等于它,故提到 60s。
+  诊断脚本已删除。
+
+### 已观察(建议后续单开一轮处理,本轮不动)
+
+- OOM 类用例的耗时上限取决于**进程里已堆了多少垃圾**而不是被测代码,属测试隔离问题
+  (把 `leak` 系列拆到独立文件即可根治),不是产品缺陷。
+
+### 已知问题(本轮只登记,不改产品行为)
+
+以下三条按「挂起 + 固化」处理:测试里写**现状断言**并标注 `现状记录(缺陷台账 Dxx)`,
+本轮不动产品行为。
+
+- **重投自己开的落位保护窗,会被它自己触发的那次投屏立刻清掉**(`control.ts:1141` 开窗 →
+  `1143` `castToDevice` → `castToDevice` 在 `914` 无条件 `seekGuards.delete`,本意是"换歌时清窗")。
+  重投**不换歌**却同样被清,于是「170s 重投后 STOPPED 样本删锚点 → 进度从头重爬」这条
+  真机防线在重投链上等于没有。修复后该断言应改为回填成 `>= 87`。
+- **`reseekByRecast` 的「中途被取代」分支不可达**(`control.ts:1145-1147` 是死代码):
+  `recastChains` 把同设备的重投排队串行,后到者必须先 `await prevChain`,旧重投还在飞时
+  不可能有新的 seek 去推进代际,`recastAborted` 永远为 false、`SeekSupersededError` 永远抛不出。
+- **`setDeviceAlias` 对仅存于 DB 的设备写库成功但返回 `undefined`** —— 调用方拿到
+  `undefined` 通常按"找不到设备"处置,这条路径上的改名会 404。
+
+### 备注
+
+- 变异脚本新增两项自检:每个变异串**必须恰好命中 1 处**(命中 0 处会假报"存活"),
+  以及先跑一次**未变异基线**自证检测器不会把"全绿"误判成"存活"。
+  上一轮的检测器正则在全绿时匹配不到任何失败数,把 6 条统统记成了 SURVIVED。
+
 ## [4.0.54] - 2026-09-28
 
 

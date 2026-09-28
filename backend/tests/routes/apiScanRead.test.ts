@@ -142,12 +142,27 @@ const GETS_ID: string[] = [
   "/v1/playlists/export-all",
 ];
 
+/**
+ * 「只读端点不得抛 5xx」这条契约的**断言预算**(ms)。
+ *
+ * `GET /v1/dlna/devices` 在发现缓存过期时会顺带走一次真实 SSDP 冷扫描:
+ * `refreshDevices()` 内部预算 4000ms,`--reporter=verbose` 实测这条用例耗时 **4003ms**;
+ * 而 vitest 全局超时是 5000ms —— 余量只剩 1s,全量回归(304 文件)机器一忙就必然超时,
+ * 表现为「偶发红、单独跑全绿」(实测复现)。
+ *
+ * 这里要守的是「不抛 5xx」,不是「快」:4s 的冷扫描是这个端点为保证新鲜度而**允许**付
+ * 出的代价。所以放宽的是断言预算,不去动产品侧的扫描预算(那是产品决策)。
+ * 其余只读端点都在毫秒级,沿用默认 5s,坏了照样快速失败。
+ */
+const budgetMsFor = (path: string): number | undefined =>
+  path === "/v1/dlna/devices" ? 20000 : undefined;
+
 describe("API 契约扫描 - 只读端点不得抛未捕获异常(5xx)", () => {
   for (const p of GETS) {
     it("GET " + p + " -> 非 5xx", async () => {
       const r = await call("GET", p);
       expect(r.status, "GET " + p + " -> " + r.status + " " + r.text.slice(0, 200)).toBeLessThan(500);
-    });
+    }, budgetMsFor(p));
   }
 });
 
