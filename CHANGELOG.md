@@ -49,6 +49,36 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.50] - 2026-09-28
+
+### 测试
+
+- 新增 `backend/tests/plugins/discoveryHost.test.ts`(B29 轮):**100 条用例**,把
+  `src/plugins/discovery.ts` 从「只有纯函数被单测」扩到整个插件 host 环境面 ——
+  http 的 20MB 体积护栏 / songs 脱敏与分词搜索 / playlists 读写与封面兜底 /
+  fs 路径穿越 / command 走 execFile 不经 shell / net 与 ws 本机回环 /
+  jsenv 嵌套 QuickJS / manifest 必填字段与 longRunning 预算 / 权限自动补齐 /
+  reload 覆盖语义 / 重复 discover 不重复注册。
+- **双向证伪**:对 `discovery.ts` 打 **15 个变异点**(放开 20MB 阈值、去掉 content-length
+  护栏、exec 退回走 shell、去掉路径越界判断、拿掉 base64 编码、同名复用塞假 pid……),
+  **15/15 全部被测试杀掉,0 存活**。
+- `discovery.ts` 未覆盖行数 **156 → 47**(76.72% → 约 91%);剩余缺口集中在在线补全(IO 型)。
+- `tsc --noEmit` 干净;全量回归 298 文件 / 4282 用例全绿。
+
+### 已知问题(本轮只登记,不改产品行为)
+
+详见 `docs/KNOWN_ISSUES.md`,每条都在测试里固化了**现状断言**(修复后该断言应转红):
+
+- **MF-002** `host.net` 注释声称「数据以 base64 传输(二进制安全)」,实际发送端
+  `Buffer.from(String(data))` 做一次 utf8 编码、接收端 `msg.toString("base64")` 再编一层。
+  纯 ASCII / UTF-8 文本往返确实无损,但插件按注释「用 base64 传二进制」会拿到双层编码的
+  文本,非 UTF8 字节则被 utf8 重编码成乱码(mojibake),永久损坏。
+- **MF-003** `host.playlists.replaceEntries` 刷新歌单时只从已有行取 `name`,
+  `source_platform` / `source_url` / `external_id` 在 UPDATE 里被无条件写回默认值 ——
+  前端平台徽标掉成默认、`findBySource` 去重键被清空,同一个远端歌单会重复建。
+- **MF-004** `host.command.start` 同名复用分支 `return { name, running: true }` 
+  不带 `pid`,调用方无从区分「新起进程」与「复用旧进程」。
+
 ## [4.0.49] - 2026-09-28
 
 
