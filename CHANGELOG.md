@@ -49,6 +49,81 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.54] - 2026-09-28
+
+
+### 补齐测试(services/dlna)
+
+**`discovery.ts` 27.0% → 100%**(未覆盖行 119 → 0)。这块是用正则手撸的 UPnP
+description 解析器,没有任何外部依赖兜底 —— 改错任何一条都不会报错,只会让部分
+DLNA 音箱**静默地从设备列表里消失**:用户看到的是「设备偶发不见了」,日志里什么
+都没有,属于最难复现的一类缺陷。
+
+新增 `discoveryDescription.test.ts`(19 条)钉 description.xml 解析契约:相对
+controlURL 转绝对地址、多 service 按 serviceType 挑选而不是按位置、缺 AVTransport
+判为不可投屏、HTTP 非 2xx 与抓取抛错都返回 null 而不是把整轮扫描带崩、friendlyName /
+UDN 的各种兜底。
+
+新增 `discoveryScan.test.ts`(13 条)钉扫描与合并契约:socket 出错必须早退并标记
+本轮不可信(否则空集会被当成权威答案,把**全网设备一次性判成离线**)、被动通告与
+主动 M-SEARCH 结果合并去重、超过 10 分钟没再听到通告的设备必须剔除、`addMembership`
+失败(容器/多网卡下 EADDRNOTAVAIL 是常态)必须被静默吞掉而不是让 SSDP 监听死掉。
+
+**`control.ts` 81.73% → 86.47%**(未覆盖行 189 → 140)。新增
+`controlAlignGuard.test.ts`(11 条)钉两条「位置真相」契约:
+
+- `alignDeviceToPosition`(一次性校准 seek):设备没进稳定 PLAYING 前不许 seek、
+  进了立刻开校、落位在容差内只发一次、leader 实时目标优先于固定目标、settle 窗
+  耗尽仍尽力校准、seek 连续失败只重试不抛出。
+- `getDeviceStatus` 里的 seek 保护窗:窗内 STOPPED 不得清基线(240 实锤那条路径)、
+  窗过期即视为真停清基线、窗内读到陈旧读数用预期值回填且不被曲长封顶压回、窗外恢复
+  采用设备读数。
+
+`announce.ts` 维持 99% 覆盖(余下两行是 500ms 等待,纯 IO 型)。
+
+
+### 覆盖率数字的陷阱:假 socket 自己就是盲区
+
+`discovery.ts` 最后 1 行未覆盖(`try { sock.addMembership(...) } catch {}`)差点被
+「覆盖率 99.4%」蒙混过去 —— 查下去发现**那个 catch 从来没有被执行过**,因为测试里的
+假 socket 把 `bind` 写成了单参 `bind(cb)`,而监听端真实调用是 `bind(port, cb)`:
+回调在**最后一个参数**,于是监听器的回调被静默丢弃,`addMembership` 一行都跑不到。
+
+覆盖率能到 99.4%,说明「统计口径」没有问题,有问题的是「这一行到底有没有被验证过」。
+是变异反证(去掉 catch 后测试竟然还是绿的)把这件事翻出来的。
+
+
+### 本轮修掉的测试自身缺陷(共 4 条,都不是产品缺陷)
+
+1. **用例间共享可变状态**:`lastAliveEmitAt`(alive 去抖)与 `announced` 都是模块级
+   Map,前一个用例用同一 LOCATION 占掉 60s 窗口后,排在后面的用例发 alive 会被直接
+   吞掉 —— 表现为「用例顺序一 shuffle 就红」(8 轮里红 4 轮,恰好是 `sequence.shuffle`
+   把它排到 alive 用例之后的那些顺序)。修法:每个用例开跑前用官方清理入口
+   `clearAliveEmit` 放开窗口,并用一条 byebye 清掉通告登记。
+2. **断言依赖绝对时钟(与 v4.0.53 同一根因)**:`markStaleDevices` 边界用例裸写
+   `Date.now() - X`,「构造设备」与「判定」之间过去真实毫秒,差 1 毫秒的两条于是随机
+   翻红。修法:把造设备**和断言**一起放进冻结时钟 —— 断言必须也在块内,初版把断言留在
+   块外,`markStaleDevices` 又跑回真实时钟(12 轮里红 3 次)。
+3. **异步协程跨用例污染**:`seekDevice` 会派生 `verifySeekLanding`(sleep 1200ms),
+   它「落位不符就重发一次 seek」的那一枪会落进**下一个**用例的调用计数里,seek 次数
+   随 shuffle 顺序漂移。修法:让本文件的设备恒不报位置(`NOT_IMPLEMENTED`,即 MUZO
+   播转码 chunked 流的真实表现),校验协程随即自行放弃。
+4. **测试桩自递归**:覆盖 `soap` 时写了 `soap(a)` 回指刚赋值的那个 lambda,非目标动作
+   于是无限自递归。修法:先把基础桩捕获到本地常量。
+
+
+### 变异反证
+
+10 条变异全部被新断言杀掉:
+
+- discovery:`discovery.ts` 去掉 AVTransport 的 null 兜底 / 相对 controlURL 不转绝对
+  / UDN 兜底退化成用 location 当 id / 陈旧通告不剔除 / 过期判定 `>` 改 `>=` / socket
+  报错不标记不可信 / 去掉 `addMembership` 的 catch。
+- control:align 跳过稳定态等待 / align 单轮异常不再继续重试 / 重投间隙 STOPPED 不清
+  基线 / 陈旧读数不再回填。
+
+`discovery.ts` 与 `control.ts` 的新用例改完连跑 12 轮(每轮重新洗牌用例顺序)全绿。
+
 ## [4.0.53] - 2026-09-28
 
 
