@@ -49,6 +49,47 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.53] - 2026-09-28
+
+
+### 修复(测试基建:断言不得依赖绝对时钟)
+
+v4.0.52 的 CI 在「类型检查 + 全量测试」上红了两条用例,根因都不是产品缺陷,而是
+**断言依赖真实时钟往前走一格** —— 慢机器 / VM 时钟被调整(kvmclock 跳变、NTP 校正)时,
+两次读取会落进同一毫秒,`not.toBe` 于是随机翻红。本轮把三条同类断言从根上改写。
+
+- `memoryReclaim.test.ts`(阈值边界用例):原来在真实时钟上拨 `Date.now() - 5*MIN + 1`
+  再隔真实毫秒判定 —— 中间过去 ≥1 毫秒就翻成「空闲」。现在把 `Date` 换成假时钟:
+  `isIdle()` 只读 `Date.now()`,判定时钟完全静止,「>= 才空闲 / 差 1 毫秒就不算」
+  这条边界语义反而被钉得更死,与机器快慢无关。
+- `discoveryHost.test.ts`(replaceEntries 刷 updated_at):原来断言「≠ 刷新前的值」,
+  等于要求时钟真的走了一格(CI 上两侧同值:2026-09-28T09:29:09.188Z)。现在**钉哨兵 +
+  冻时钟** —— 先把 updated_at 写成一个 2000 年的哨兵旧值,再把 Date 冻住:产品照常写
+  就写成冻住的 now,漏写则保持哨兵。「有没有写」与「时钟有没有走」彻底脱钩。
+- `recommendImportBranches.test.ts`(二次导入刷 updatedAt):同一根因(原来靠
+  `await setTimeout(5)` 空等 5 毫秒)。同样改为「钉哨兵 + 冻时钟」,那 5 毫秒空等一并省掉。
+
+范式由此统一:判断「某列有没有被改写」要用**与绝对时钟无关的哨兵比对**,而不是「前后两个
+时间戳不相等」。`playlistsRoutesContract` 那条本来就是这么写的,现已作为参照。
+
+
+### 变异反证(断言没有被绕过)
+
+改完必须自证,否则只是把断言绕开:
+
+- `isIdle()` 的 `>=` 改成 `>` → 2 条立刻翻红。
+- `discovery.ts` 里三处 updated_at 写入(main UPDATE / `refreshPluginPlaylistCounts` /
+  cover 兜底)全删 → 1 条翻红。
+- `recommendImport.ts` 与 `shared.ts` 里的 updated_at 写入全删 → 1 条翻红。
+
+期间还识别出两条**等价变异**并记账:只删掉 `recommendImport` 中 existing 分支那一条
+updatedAt 写入时用例不红 —— `replacePlaylistSongs` 末尾的 `refreshPlaylistCounts()`
+已经把 updated_at 刷回去了;discovery 侧同理(去掉前两处仍有第三处兜底)。
+两者都不是测试缺口,不计为漏测。
+
+回归:类型检查通过;全量 300 文件 / 4480 条全绿;满载(6 路并发占满核)连跑 3 轮共 18 次,
+每次都是 170 条全绿、退出码全 0。
+
 ## [4.0.52] - 2026-09-28
 
 ### 测试
