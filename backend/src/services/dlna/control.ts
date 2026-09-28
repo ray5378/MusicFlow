@@ -417,15 +417,38 @@ function markDeviceOfflineInDb(deviceId: string): void {
 // 设置用户自定义显示名(alias)。空串 = 恢复使用原始名。同步 DB + 内存缓存,
 // 并通过 device_list_changed 广播触发 peer reconcile(播放控件/HA 卡片显示名更新)。
 // 返回更新后的设备(找不到返回 undefined)。
+// 从 DB 读回一条设备并构造成 DlnaDevice(供仅存于 DB、尚未进缓存的写操作返回最新状态)。
+// 与 loadPersistedDevices 同构图,保证缓存缺失场景下"写后读回"的对象与发现流程加载的一致。
+function readDlnaDeviceRow(id: string): DlnaDevice | undefined {
+  const row = sqlite.prepare(
+    "SELECT id, name, alias, manufacturer, model, last_seen, disabled FROM dlna_devices WHERE id = ?"
+  ).get(id) as any;
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    name: row.name || "未知设备",
+    alias: row.alias || undefined,
+    location: "",
+    manufacturer: row.manufacturer || undefined,
+    model: row.model || undefined,
+    lastSeen: row.last_seen ? Date.parse(row.last_seen) || 0 : 0,
+    available: false,
+    disabled: !!row.disabled,
+  };
+}
+
 export function setDeviceAlias(deviceId: string, alias: string): DlnaDevice | undefined {
   if (!cachedDevices.some(d => d.id === deviceId) &&
       !sqlite.prepare("SELECT 1 FROM dlna_devices WHERE id = ?").get(deviceId)) return undefined;
   sqlite.prepare("UPDATE dlna_devices SET alias = ?, updated_at = ? WHERE id = ?")
     .run(alias, isoNow(), deviceId);
   const dev = cachedDevices.find(d => d.id === deviceId);
-  if (dev) dev.alias = alias || undefined;
+  if (dev) dev.alias = alias || undefined;  // 缓存命中:就地更新显示名
   getEventManager().emitDeviceListChanged(cachedDevices.length);
-  return dev;
+  // 缓存命中直接返回;仅存于 DB(尚未被 loadPersistedDevices 加载进缓存)的设备写库已成功,
+  // 但缓存里没有 → 从 DB 读回最新状态返回,否则调用方拿到 undefined 会按"找不到设备"返回 404
+  // (改个名却 404 是反直觉的;DB-only 常见于离线/禁用后仅留记录的设备)。
+  return dev ?? readDlnaDeviceRow(deviceId);
 }
 
 // 禁用/启用 DLNA 设备:写 DB + 内存缓存,并通过 device_list_changed 广播触发
@@ -445,7 +468,8 @@ export function setDeviceDisabled(deviceId: string, disabled: boolean): DlnaDevi
   const dev = cachedDevices.find(d => d.id === deviceId);
   if (dev) dev.disabled = disabled;
   getEventManager().emitDeviceListChanged(cachedDevices.length);
-  return dev;
+  // 同 setDeviceAlias:DB-only 设备写库成功后从 DB 读回返回,避免返回 undefined 被调用方误判 404。
+  return dev ?? readDlnaDeviceRow(deviceId);
 }
 
 // 设备是否被禁用(内存缓存优先,DB 兜底——用于 cast/控制链路的防绕过校验)。
@@ -911,8 +935,14 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   positionEstimateSong.set(opts.deviceId, opts.songId);
   // 换歌时清掉上一首残留的 seek 保护窗/代际:窗是"针对某个播放位置"的,
   // 跨到新曲后目标秒数已无意义,留着会误挡新曲的合法读数(表现为新曲进度卡住)。
-  seekGuards.delete(opts.deviceId);
-  seekGeneration.delete(opts.deviceId);
+  // 但重投流重建(opts.timeOffset 有值)不换歌——窗是 reseekByRecast 刚开的、专门
+  // 覆盖这场重投间隙 STOPPED 样本的,必须保留;否则 castToDevice 返回瞬间窗消失,
+  // getDeviceStatus 读不到窗会误删 reseekByRecast 刚改锚的基线(240 实锤:170s 重投后进度从头重爬)。
+  // 判定:timeOffset === undefined 才是真换歌;重投永远带 timeOffset(含 0)。
+  if (opts.timeOffset === undefined) {
+    seekGuards.delete(opts.deviceId);
+    seekGeneration.delete(opts.deviceId);
+  }
 
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).

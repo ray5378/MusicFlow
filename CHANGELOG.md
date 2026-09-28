@@ -49,6 +49,49 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.56] - 2026-09-28
+
+### 修复
+
+- **Dxx-1(`services/dlna/control.ts` `castToDevice`)**:重投流重建(`reseekByRecast`)自己开的 seek
+  落位保护窗,会被它触发的那次 `castToDevice` 在尾段**无条件 `seekGuards.delete`** 立刻清掉
+  (本意是"换歌清掉上一首的窗")。重投**不换歌**(songId 不变、`timeOffset` 有值),却同样被清 →
+  `getDeviceStatus` 的重投间隙 STOPPED 防线读不到窗 → 误删 `reseekByRecast` 刚改锚的基线。
+  240 真机实锤:170s 重投后进度从头重爬。修复:`castToDevice` 只在 `opts.timeOffset === undefined`
+  (真换歌)时才删窗,重投保留窗。
+- **Dxx-3(`services/dlna/control.ts` `setDeviceAlias` / `setDeviceDisabled`)**:仅存于 DB
+  (尚未进缓存)的设备,写库成功后返回 `undefined`,调用方(`api/dlna.ts`)按"找不到设备"处置 →
+  改名/禁用返回 404。新增 `readDlnaDeviceRow` 辅助,写库后从 DB 读回构造 `DlnaDevice` 返回
+  (`dev ?? readDlnaDeviceRow`,缓存命中时短路、无额外 DB 读)。
+
+### 测试
+
+- `backend/tests/dlna/controlRecast.test.ts`:**26 条**(原 24 + 2 覆盖补充 + 1 台账修正),全绿。
+  `control.ts` 语句覆盖率 **99.34%**,7(未覆盖行 [642, 643, 1176, 1177, 1178, 1571, 1572])。
+- `tsc --noEmit` 通过;dlna 套件 4 轮 shuffle **260 条 × 4 全绿**。
+
+### 纠正缺陷台账误判
+
+- **Dxx-2(`reseekByRecast` `control.ts:1145-1147`)** 原被标成"死代码",重读确认**可达**:
+  `castToDevice` 内部在 849/861/867 行有 `shouldAbort()` 检查点,当后续重投推进代际
+  (`recastGens` 变大)时,旧重投会在 `castToDevice` 内抛 `SeekSupersededError`,被 1145 的
+  `catch` 接住优雅退出;删掉它反而在那种时序下把错误抛给调用方(`seekDevice` 报错)。
+  **不动产品代码**,仅把测试台账从"现状断言(死代码)"改为正确契约断言
+  (旧重投串行化让位、1145 作为安全网保留)。
+
+### 双向证伪变异(Dxx-1 / Dxx-3 各 1 条,均 KILLED)
+
+- **Dxx-1**:把 `if (opts.timeOffset === undefined)` 改回"无条件删窗" → 重投保护窗测试立即变红
+  (设备旧读数 5s 不再被回填成 >=87)。恢复后转绿。
+- **Dxx-3**:把 `return dev ?? readDlnaDeviceRow` 改回 `return dev` → DB-only 设备改名测试立即变红
+  (返回 undefined)。恢复后转绿。
+
+### 备注
+
+- 1541-1542(换歌删基线)与 618-619(过期 session 清理)仍属未覆盖:前者实际由 `castToDevice:905`
+  同步更新 `positionEstimateSong` 兜底、属冗余防御分支,强行覆盖需操纵私有 Map,本轮跳过;
+  后者是 `sessions.size>50` 的机会主义清理,低价值,跳过。
+
 ## [4.0.55] - 2026-09-28
 
 ### 测试

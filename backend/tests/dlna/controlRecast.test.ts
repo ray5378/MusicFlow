@@ -320,20 +320,19 @@ describe("reseekByRecast:重投流重建的契约", () => {
     expect(recastSteps()).toEqual(["Stop", "SetAVTransportURI", "GetTransportInfo", "Play"]);
   });
 
-  it("现状记录(缺陷台账 Dxx):重投自己开的落位保护窗,会被它触发的那次投屏立刻清掉", async () => {
-    // control.ts:1141 重投开窗 → 紧接着 1143 调 castToDevice → castToDevice 在 914
-    // 无条件 `seekGuards.delete(opts.deviceId)`(本意是"换歌时清掉上一首的窗")。
-    // 重投**不换歌**(songId 不变),却同样被清窗,于是 240 实锤那条「170s 重投后
-    // STOPPED 样本删掉锚点 → 进度从头重爬」的防线在重投链上等于没有。
-    //
-    // 修复后该断言应改为:expect(s.position).toBeGreaterThanOrEqual(87)
-    // (窗在,设备回的旧读数 5s 会被按预期值回填成 ≥87)。
+  it("重投自己开的落位保护窗,在 castToDevice 返回后依然存活(不再被误删)", async () => {
+    // 修复 Dxx-1 后的契约:control.ts:1141 重投开窗 → 1143 调 castToDevice。
+    // 修复前 castToDevice 尾段无条件 `seekGuards.delete`(本意"换歌清掉上一首的窗"),
+    // 把重投这场不换歌(timeOffset 有值)的窗也一起删了 → getDeviceStatus 读不到窗,
+    // 240 实锤「170s 重投后 STOPPED 样本删掉锚点 → 进度从头重爬」。修复后(timeOffset
+    // 有值不删窗)窗在 castToDevice 返回后仍存活,设备回的旧读数 5s 被按预期值回填成 ≥87。
     const id = await armed();
     await seekDevice(id, 88);
     // 重投刚落地,设备此刻报的还是「跳之前的位置」5s。
     soap = (a) => (a === "GetPositionInfo" ? { xml: withPosOnly("00:00:05", "PLAYING") } : { xml: OK_XML });
     const s = await getDeviceStatus(id);
-    expect(s.position).toBe(5);
+    expect(s.position).toBeGreaterThanOrEqual(87);
+    expect(s.position).toBeLessThan(88 + 6);
   });
 
   it("重投失败回退时,护栏已经开着:设备那次陈旧读数不得顶掉基线", async () => {
@@ -398,15 +397,13 @@ describe("reseekByRecast:重投流重建的契约", () => {
     expect(seekIdx).toBeGreaterThan(playIdx);
   });
 
-  it("现状记录(缺陷台账 Dxx):重投在飞时,新的 seek 只能排队,取代不了", async () => {
-    // `reseekByRecast` 用 recastChains 把同设备的重投排队串行,后到者必须先
-    // `await prevChain`。因此在旧重投的 castToDevice 还在飞的时候,**不可能**
-    // 有新的 reseekByRecast 去推进代际 —— `recastAborted` 永远是 false,
-    // `SeekSupersededError` 也永远抛不出来(它在 castToDevice 的三个检查点里
-    // 只读 recastGens)。于是 control.ts:1145-1147 这四行是死代码。
-    //
-    // 修复后该断言应改为:抓住「中途被取代」并断言不抛出 / 不写基线;
-    // 同时把 1145-1147 删掉(或改成别的可达语义)。
+  it("重投风暴串行化:旧重投跑完后让位(1131),最终只最新目标落锚(1145 安全网保留)", async () => {
+    // 纠正缺陷台账误判:Dxx-2 原把 control.ts:1145-1147 标成死代码,重读确认**可达**。
+    // castToDevice 内部在 849/861/867 行有 `shouldAbort()` 检查点,当后续重投推进代际
+    // (recastGens 变大)时,旧重投会在 castToDevice 内抛 `SeekSupersededError`,
+    // 被 1145 的 catch 接住优雅退出 —— 删掉它反而在那种时序下把错误抛给调用方
+    // (seekDevice 报错)。本用例守串行化正面效果:同设备重投排队,旧重投跑完自己
+    // 让位(1131 处 recastAborted 为 true),两次重投都完整跑、无中途 abort。
     const id = await armed();
     // 把第一次重投的 Play 拖慢 600ms,制造「重投进行到一半」的现场。
     slow.Play = 600;
@@ -584,16 +581,32 @@ describe("waitUntilStopped:等设备自己停下", () => {
 
 // ===========================================================================
 describe("设备记录:库里有、缓存里没有", () => {
-  it("setDeviceAlias 对仅存于 DB 的设备仍然落库,但返回值 undefined", () => {
-    // 现状记录(缺陷台账 Dxx):调用方拿到 undefined 通常按"找不到设备"处置,
-    // 于是这条路径上的别名改名会 404。写库是成功的(缓存补齐后即可见)。
-    // 修复后该断言应改为:返回更新后的设备,且 DB 与缓存一致。
+  it("setDeviceAlias 对仅存于 DB 的设备:写库成功且返回重建后的设备(不再 undefined→404)", () => {
+    // 修复 Dxx-3 后的契约:DB-only 设备写库后从 DB 读回构造 DlnaDevice 返回,
+    // 调用方(api/dlna.ts)不再拿到 undefined 误判 404。缓存命中路径不受影响
+    // (`dev ?? readDlnaDeviceRow` 在缓存命中时短路,无额外 DB 读)。
     const id = nextId();
     sqlite.prepare("INSERT INTO dlna_devices (id, name) VALUES (?, ?)")
       .run(id, "只在库里的设备");
-    expect(setDeviceAlias(id, "新名字")).toBeUndefined();
+    const dev = setDeviceAlias(id, "新名字");
+    expect(dev).toBeDefined();
+    expect(dev!.id).toBe(id);
+    expect(dev!.alias).toBe("新名字");
+    expect(dev!.name).toBe("只在库里的设备");
     const row: any = sqlite.prepare("SELECT alias FROM dlna_devices WHERE id = ?").get(id);
     expect(row.alias).toBe("新名字");
+  });
+
+  it("setDeviceDisabled 对仅存于 DB 的设备同样返回重建后的设备(同形缺陷)", () => {
+    // setDeviceDisabled 与 setDeviceAlias 同形:DB-only 设备原先返回 undefined。
+    // 修复后改成 `dev ?? readDlnaDeviceRow`,离线/禁用后仅留记录的设备也能返回。
+    const id = nextId();
+    sqlite.prepare("INSERT INTO dlna_devices (id, name) VALUES (?, ?)")
+      .run(id, "仅库里的禁用设备");
+    const dev = setDeviceDisabled(id, true);
+    expect(dev).toBeDefined();
+    expect(dev!.id).toBe(id);
+    expect(dev!.disabled).toBe(true);
   });
 
   it("loadPersistedDevices:DB 里有缓存里没有的记录 → 以离线形态补进缓存", () => {
@@ -638,5 +651,30 @@ describe("createDlnaProtocolPlayer:UniversalPlayer 绑定", () => {
     const out = await player.playMedia!(item, "http://192.168.10.230:46400");
     expect(out.mediaUri).toContain("/rest/dlna/stream/");
     expect(last(actions())).toBe("Play");
+  });
+});
+
+// ===========================================================================
+describe("verifySeekLanding:GetPositionInfo 异常路径(覆盖 readRawPosition 1228-1230)", () => {
+  it("落位校验时 GetPositionInfo 抛错 → readRawPosition 吞异常返回 null,不冒泡", async () => {
+    // 1228-1230 是 readRawPosition 的 catch:设备在校验读位置那一刻抽风
+    // (GetPositionInfo 网络错)必须当成"无从校验"返回 null,不能把异常甩给
+    // verifySeekLanding 的 `void` 协程(否则变成 unhandled rejection 污染进程日志)。
+    const id = await seed();
+    await castToDevice(castOpts(id));
+    let threw = false;
+    soap = (a) => {
+      if (a === "Seek") return { xml: OK_XML };
+      if (a === "GetPositionInfo") { threw = true; throw new Error("device dropped"); }
+      return { xml: OK_XML };
+    };
+    // 未判定不可靠 → 走 SOAP Seek → 派发 verifySeekLanding(异步,先 sleep 1200ms)。
+    await expect(seekDevice(id, 30)).resolves.toBeUndefined();
+    // 等校验协程跑到 readRawPosition(1200ms 之后)。
+    await new Promise<void>((r) => setTimeout(r, 1500));
+    expect(threw).toBe(true);
+    // 异常被吞:没有 unhandled rejection,设备仍可被正常查询。
+    soap = (a) => (a === "GetPositionInfo" ? { xml: withPosOnly("00:00:10", "PLAYING") } : { xml: OK_XML });
+    expect((await getDeviceStatus(id)).state).toBeDefined();
   });
 });
