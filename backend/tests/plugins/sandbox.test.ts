@@ -647,3 +647,44 @@ describe("沙箱内存自愈(SANDBOX_MEMORY)", () => {
     }
   }, 30000);
 });
+
+describe("并发 OOM 自愈:SIGABRT 防线", () => {
+  it("两条 leak 并发触顶 OOM,重建不再把 worker 一起带走", async () => {
+    // 根因(2026-09-28 实测,修复前 5/5 必现):dispose() 是**同步**的,而 evalAsync
+    // 的 promiseHandle 在其 finally(**异步**)里释放。两条 leak 并发触顶时,rebuild
+    // 的同步 teardown 会撞上仍在途调用钉住的 GC 对象 → JS_FreeRuntime 断言
+    // `list_empty(&rt->gc_obj_list)` → SIGABRT,宿主 try/catch 抓不住,直接杀死整个
+    // vitest worker(修复前连全量回归的汇总行都拿不到)。
+    // 修复:rebuild 的 dispose 之前 await settleHandlers(),给在途 finally 留出释放时间。
+    const prev = process.env.SANDBOX_MEMORY_LIMIT;
+    process.env.SANDBOX_MEMORY_LIMIT = String(4 * 1024 * 1024);
+    let sb: SandboxedPlugin | null = null;
+    try {
+      const LEAK_CODE = `
+        globalThis.__mfPlugin = {
+          manifest: { id: "demo-leak4", name: "泄漏4", version: "1.0.0", type: "source", capabilities: ["search"], configSchema: [], permissions: [] },
+          create(host) { const acc = []; return { async leak(config) { while (true) { acc.push("x".repeat(1024 * 1024)); } }, async ping(config) { return { ok: true }; } }; }
+        };`;
+      const { sandbox } = await loadSandboxedPlugin("demo-leak4", LEAK_CODE, makeEnv());
+      sb = sandbox;
+      const rtBefore = (sandbox as any).runtime;
+      // 并发发起:两条 leak 同时在途,制造「一枚 OOM、另一枚仍holding promiseHandle」的窗口
+      const errs = await Promise.all(
+        [sandbox.invoke("leak", []), sandbox.invoke("leak", [])].map((p) =>
+          p.then(() => null, (e: any) => e),
+        ),
+      );
+      // 实测两条都以 SANDBOX_MEMORY 结算(另一条若以「沙箱重建中」结算也属正常,
+      // 由上层重试;关键是都不得把 worker 一起带走)。
+      expect(errs.length).toBe(2);
+      expect(errs.every((e: any) => e && e.sandboxCode === "SANDBOX_MEMORY")).toBe(true);
+      // 重建确实发生,且沙箱未半死:新 runtime 可正常响应。
+      expect((sandbox as any).runtime).not.toBe(rtBefore);
+      await expect(sandbox.invoke("ping", [])).resolves.toEqual({ ok: true });
+    } finally {
+      if (prev === undefined) delete process.env.SANDBOX_MEMORY_LIMIT;
+      else process.env.SANDBOX_MEMORY_LIMIT = prev;
+      try { sb?.dispose(); } catch { /* ignore */ }
+    }
+  }, 90000);
+});

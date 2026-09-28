@@ -486,7 +486,12 @@ export class SandboxedPlugin {
     // gc_obj_list 断言(Aborted)把 WASM function table 打坏(实测后续 newContext 全崩
     // "RuntimeError: null function")。先走 oomCleanup(解除限制+禁用 interrupt+触发 GC
     // 清空对象列表),dispose 恢复安全(实测连续多次 OOM 自愈均干净、module 不毒化)。
-    if (this.oomFaulty && this.runtime) this.oomCleanup();
+    // dispose 是**终态销毁**,一律先排空再 teardown,不再用 oomFaulty 守卫。
+    // 历史教训:曾用 `if (this.oomFaulty && this.runtime)` 守卫 —— 并发两条 leak
+    // 触顶时,rebuild 的 dispose 会先消费掉标记,后续 dispose 便跳过排空,残句柄
+    // 钉住 gc_obj_list → JS_FreeRuntime 断言 abort(SIGABRT,try/catch 抓不住)。
+    // oomCleanup 内部已全 try/catch,普通卸载多跑一次也安全。
+    if (this.runtime) this.oomCleanup();
     try { this.ctx?.dispose(); } catch { /* ignore */ }
     // 兜底:QuickJS teardown 断言(gc_obj_list 非空)若仍发生(如某插件/宿主侧句柄泄漏),
     // 该 abort 会永久毒化「共享 WASM module」(后续 newRuntime/newContext 全崩
@@ -501,6 +506,16 @@ export class SandboxedPlugin {
    *   的句柄会钉住 gc_obj_list,随后 dispose 必触发 teardown 断言 abort(该 abort
    *   是 WASM 层 SIGABRT,宿主 try/catch 抓不住,会直接杀死整个 vitest worker);
    *   ④ 触发一次小分配驱动 QuickJS 周期 GC 清空 gc_obj_list,dispose 不再断言失败。 */
+  /** 销毁/重建前给在途调用一个异步让出窗口。
+   *  根因:dispose() 是同步的,而 evalAsync 的 promiseHandle 在其 finally(异步)里
+   *  释放。并发调用仍在途时同步 teardown,GC 对象仍被在途句柄钉住 → JS_FreeRuntime
+   *  断言 list_empty(&rt->gc_obj_list) → SIGABRT(try/catch 抓不住,杀死整个 worker)。
+   *  注意不能用 activeCalls 判断:rebuild 触发时发起方那条调用自己早已结算并注销
+   *  了条目,该等的是「还有多少 evalAsync 的 finally 没跑完」。 */
+  private async settleHandlers(ticks = 8): Promise<void> {
+    for (let i = 0; i < ticks; i++) await new Promise((r) => setImmediate(r));
+  }
+
   private oomCleanup(): void {
     try { this.runtime.setMemoryLimit(-1); } catch { /* ignore */ }
     try { this.runtime.setInterruptHandler(() => false); } catch { /* ignore */ }
@@ -545,6 +560,9 @@ export class SandboxedPlugin {
       // handler(Date.now() > this.deadline),若沿用旧 deadline,重建代码一执行就被
       // 中断 → rebuild 失败 "interrupted" → 沙箱半死(CI 实测)。重置 deadline 给
       // 重建独立预算(REBUILD_TIMEOUT_MS),init 全程不被看门狗打断。
+      // 先给在途调用一个异步让出窗口(见 settleHandlers):同步 dispose 会把仍被
+      // promiseHandle 钉住的 GC 对象一起 teardown → JS_FreeRuntime 断言 abort。
+      await this.settleHandlers();
       this.deadline = Date.now() + REBUILD_TIMEOUT_MS;
       this.dispose();
       this.disposed = false;
@@ -1152,6 +1170,10 @@ export class SandboxedPlugin {
     const call = callId !== undefined ? this.activeCalls.get(callId) : undefined;
     const t0 = Date.now();
     while (!done) {
+      // 沙箱正在销毁/重建:立刻放弃等待这条在途调用 —— 它的 promiseHandle 钉着
+      // 旧 runtime 的 GC 对象,继续持有会让随后的 JS_FreeRuntime 断言 abort
+      //(并发 leak 实测)。交给 finally 释放句柄,错误以沙箱限制抛给上层重试。
+      if (this.rebuilding || this.disposed) break;
       if (call && isLong && !call.killed && Date.now() - call.lastProgressAt > cpuIdleLimitMs()) {
         // 兜底:guest 挂起后 CPU 空转(理论上 interrupt 已杀,此处双保险)
         call.killed = true;
@@ -1164,6 +1186,12 @@ export class SandboxedPlugin {
     try {
       // 超时(在途未结算):明确告知是沙箱限制而非笼统"执行失败",附修复提示。
       if (!done) {
+        if (this.disposed || this.rebuilding) {
+          throw new SandboxLimitError(
+            "SANDBOX_VM",
+            `沙箱限制:插件 ${this.id} 沙箱正在重建,该调用已失效,请重试`,
+          );
+        }
         if (isLong) {
           const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据(网络/DB 调用有进展)则属正常,不应被杀;若为死循环请修复插件";
           console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限(> ${cpuIdleLimitMs()}ms 无网络/DB 进展),已中断`);
