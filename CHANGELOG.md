@@ -49,6 +49,37 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.51] - 2026-09-28
+
+### 测试
+
+- `backend/tests/dlna/controlSoap.test.ts`(B30 补测):**70 条**。目标 `src/services/dlna/control.ts` —— 按「未覆盖行数 × 可测性」联合排序选中(未覆盖行数全场第一,但未覆盖行里 dlna/upnp/fetch 等 IO 关键字只占 6.9%,是「缺口最大但最好啃」的一个)。
+  `control.ts` 里对设备的每一次调用最终都收口到 `soapCall() → 全局 fetch`,所以只要用一个「按 SOAPAction 分发」的 fetch 桩,就能在不碰真网络的前提下跑通整条控制链路 —— 起播四步、就绪闸门、无缝隙预载、TTS 播报、播放三件套、音量与静音、seek、状态采样与位置外推。
+- `control.ts` 未覆盖行数(全量口径)**172**;同一 `tests/dlna` 口径做前后对比,本文件单独贡献 **684 → 189** 行。
+- `tsc --noEmit` 通过;全量回归 **299 个文件 / 4373 条全绿**。
+
+### 双向证伪变异(20 条,19 条被抓住)
+
+把 `control.ts` 的 20 条契约逐个改坏后重跑本文件,19 条立即让测试转红。首轮存活 9 条,
+补强断言后收敛到 1 条。本轮补掉的真实测试缺口:
+
+- **`soapCall` 的 UPnP fault 判据只覆盖了「fetch 直接抛错」那一条路** —— HTTP 200 + 错误体
+  (`<s:Fault>` 包壳 / `<errorCode>` 字段)这一路从未被执行过。现在两条判据分别单独立例。
+- **`shouldAbort` 在 `castToDevice` 里被查三次**,原先只测了第一处:变异把第一处改掉时,
+  第二三处照样抛错,测试照样绿。改用「第 N 次调用才返回 true」的谓词逐一点名。
+- **落位校验是 `void verifySeekLanding(...)` 派出的异步协程(内含 `sleep(1200)`)**,
+  原先三条相关断言都跑在协程之前就执行完了,等于什么都没测。补了显式等待窗口。
+- **探测缓存只测了「支持」那条结论**:`!== undefined` 的缓存语义对「不支持」同样生效,
+  补了反向用例;被拒之后的预载也必须彻底关闭,补了「重复调用不再下发第二次」。
+- **`SetMute` 的 catch 吞掉异常时「音量没被改」依然成立**,补了显式的 rejection 断言。
+
+### 已知问题(本轮只登记,不改产品行为)
+
+- 20 条变异里唯一存活的 `M14`(`relTime !== "NOT_IMPLEMENTED"` 判据)经分析是**等价变异**,
+  不是测试缺口:`parseHms("NOT_IMPLEMENTED")` 返回 0,而 `state.position` 每次调用都从 0 重建,
+  「赋 0」与「跳过赋值」在当前代码结构下不可区分 —— 任何测试都无法区分这两者。
+  真要让它可测,得先把 `getDeviceStatus` 的返回态改成跨调用复用,属行为改动,本轮不做。
+
 ## [4.0.50] - 2026-09-28
 
 ### 测试
