@@ -49,6 +49,108 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.49] - 2026-09-28
+
+
+### 修复
+
+- **MF-001（`src/plugins/sandbox.ts`）：并发调用触发插件沙箱 OOM 自愈时，QuickJS
+  teardown 断言 `list_empty(&rt->gc_obj_list)` 直接 SIGABRT 带走整个进程。
+  这是 v4.0.48 记录的「偶发」的真身 —— 它从来不是偶发，**必现（5/5）**，
+  只是触发条件苛刻：必须**并发**两个调用同时/相继触顶内存上限。
+
+  根因是四层的：`dispose()` 是**同步**的，而 `evalAsync` 的 `promiseHandle` 在其
+  `finally`（**异步**）里释放。单发 OOM 时触发方已经 return、句柄已放，teardown 干净；
+  并发时另一条仍在途，同步 teardown 会撞上它钉住的 GC 对象。关键证据是插桩时
+  `hasPendingJob()` 已经是 `false` —— 残留的**不是 pending job**，
+  所以 v4.0.3 那套「排空 pending jobs」救不了它。
+
+  三处加固：`rebuild()` 的 `dispose()` 之前 `await settleHandlers()`（8 个
+  `setImmediate`，给所有在途 `finally` 留出释放时间，**真正消除 abort 的那一条**）；
+  `dispose()` 里 `oomCleanup` 去掉 `oomFaulty` 守卫改为无条件先排空；
+  `evalAsync` 泵循环在沙箱进入 `rebuilding`/`disposed` 时立刻放手。
+  中间试过「`oomFaulty` 消费式清零」与「按 `activeCalls` 计数等待」两版，**实测都无效**
+  —— rebuild 触发时发起方那条调用自己早已结算并注销了 `activeCalls`，该等的是
+  「还有多少 `evalAsync` 的 `finally` 没跑完」，不是「`activeCalls` 是否为空」。
+
+- **影响面**：并发调用一个泄漏插件时，沙箱自愈路径会把宿主进程一起带走，属**进程级**
+  故障而非单次调用失败。插件沙箱本身跑在 worker thread
+  （见 `docs/PLUGIN_ARCHITECTURE.md`），生产上的实际降级表现为 worker 崩溃，
+  是否波及主进程待线上观察确认。
+
+
+### 测试
+
+- `tests/plugins/sandbox.test.ts` 新增 1 条：`并发 OOM 自愈：SIGABRT 防线`，
+  并发发起两个 `leak()`。修复前该用例转红并 abort（**双向证伪通过**），修复后转绿。
+- 探针统计：修复前 5 轮 5 次 abort，修复后 5 轮 0 abort；
+  基线模式（单发 OOM / 反复 OOM / 重复 dispose）均无退化。
+- 全量回归 **297 文件 / 4201 用例**全绿，`tsc --noEmit` 干净。
+
+- **遗留（不追）**：全量里另有 3 次**确定性** abort，但不在 OOM 路径
+  （`加载失败后仍可继续加载其他插件(模块不毒化)`、`SANDBOX_WORKER_DISABLE=1 时回退主线程` ×2），
+  且 WASM 层 SIGABRT 之后 **worker 存活、用例通过、退出码 0**。
+  试过「dispose 时释放 `this.shared` 里的 `ctx.null`/`hTrue`/`hFalse`」，
+  专项连跑 3 轮 abort 数纹丝不动，故该改动已回滚、不留代码。
+  已记入 `docs/KNOWN_ISSUES.md` MF-001 遗留观察②。
+
+
+### 新增文档
+
+- `docs/KNOWN_ISSUES.md`：项目级**已知问题台账**，登记工程/运行时类缺陷
+  （UI/UX 类见仓库根 `AUDIT.md`）。首批登记 MF-001 的完整根因链、修复与验证。
+
+## [4.0.49] - 2026-09-28
+
+
+### 修复
+
+- **MF-001（`src/plugins/sandbox.ts`）：并发调用触发插件沙箱 OOM 自愈时，QuickJS
+  teardown 断言 `list_empty(&rt->gc_obj_list)` 直接 SIGABRT 带走整个进程。
+  这是 v4.0.48 记录的「偶发」的真身 —— 它从来不是偶发，**必现（5/5）**，
+  只是触发条件苛刻：必须**并发**两个调用同时/相继触顶内存上限。
+
+  根因是四层的：`dispose()` 是**同步**的，而 `evalAsync` 的 `promiseHandle` 在其
+  `finally`（**异步**）里释放。单发 OOM 时触发方已经 return、句柄已放，teardown 干净；
+  并发时另一条仍在途，同步 teardown 会撞上它钉住的 GC 对象。关键证据是插桩时
+  `hasPendingJob()` 已经是 `false` —— 残留的**不是 pending job**，
+  所以 v4.0.3 那套「排空 pending jobs」救不了它。
+
+  三处加固：`rebuild()` 的 `dispose()` 之前 `await settleHandlers()`（8 个
+  `setImmediate`，给所有在途 `finally` 留出释放时间，**真正消除 abort 的那一条**）；
+  `dispose()` 里 `oomCleanup` 去掉 `oomFaulty` 守卫改为无条件先排空；
+  `evalAsync` 泵循环在沙箱进入 `rebuilding`/`disposed` 时立刻放手。
+  中间试过「`oomFaulty` 消费式清零」与「按 `activeCalls` 计数等待」两版，**实测都无效**
+  —— rebuild 触发时发起方那条调用自己早已结算并注销了 `activeCalls`，该等的是
+  「还有多少 `evalAsync` 的 `finally` 没跑完」，不是「`activeCalls` 是否为空」。
+
+- **影响面**：并发调用一个泄漏插件时，沙箱自愈路径会把宿主进程一起带走，属**进程级**
+  故障而非单次调用失败。插件沙箱本身跑在 worker thread
+  （见 `docs/PLUGIN_ARCHITECTURE.md`），生产上的实际降级表现为 worker 崩溃，
+  是否波及主进程待线上观察确认。
+
+
+### 测试
+
+- `tests/plugins/sandbox.test.ts` 新增 1 条：`并发 OOM 自愈：SIGABRT 防线`，
+  并发发起两个 `leak()`。修复前该用例转红并 abort（**双向证伪通过**），修复后转绿。
+- 探针统计：修复前 5 轮 5 次 abort，修复后 5 轮 0 abort；
+  基线模式（单发 OOM / 反复 OOM / 重复 dispose）均无退化。
+- 全量回归 **297 文件 / 4201 用例**全绿，`tsc --noEmit` 干净。
+
+- **遗留（不追）**：全量里另有 3 次**确定性** abort，但不在 OOM 路径
+  （`加载失败后仍可继续加载其他插件(模块不毒化)`、`SANDBOX_WORKER_DISABLE=1 时回退主线程` ×2），
+  且 WASM 层 SIGABRT 之后 **worker 存活、用例通过、退出码 0**。
+  试过「dispose 时释放 `this.shared` 里的 `ctx.null`/`hTrue`/`hFalse`」，
+  专项连跑 3 轮 abort 数纹丝不动，故该改动已回滚、不留代码。
+  已记入 `docs/KNOWN_ISSUES.md` MF-001 遗留观察②。
+
+
+### 新增文档
+
+- `docs/KNOWN_ISSUES.md`：项目级**已知问题台账**，登记工程/运行时类缺陷
+  （UI/UX 类见仓库根 `AUDIT.md`）。首批登记 MF-001 的完整根因链、修复与验证。
+
 ## [4.0.48] - 2026-09-28
 
 ### 测试
