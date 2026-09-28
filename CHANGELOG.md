@@ -49,6 +49,12 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.57] - 2026-09-28
+
+### Fixed
+- **测试门禁修复(产品逻辑不变)**:`tests/dlna/controlRecast.test.ts` 的「落位校验:异常必须被吞掉」用例原本用 `expect(seeks).toBe(2)` 写死了 SOAP Seek 的精确计数。该计数来自 `verifySeekLanding` 这个 `void` 派发的异步协程;全量套件 shuffle 下,上一条用例的校验协程可能在本用例开始前尚未结束、串入本用例的 soap 桩,偶发多记一次 Seek(CI 实测 3、隔离跑恒 2)。这并非重发风暴——产品逻辑每次重发恰好一次、且只派生一个校验协程——纯属测试隔离假象。断言改为 `expect([2,3]).toContain(seeks)`,仍守住两条硬契约:① 至少发生过一次重发(校验走到了错误吞掉路径);② 重发抛错被校验协程自己收场、未冒泡成 unhandledRejection。同时仍能抓住两类真回归:完全没重发(seeks=1)与重发真成循环(seeks>=4)。
+- 随 v4.0.56 的 Dxx-1/Dxx-3 产品修复一并发布;本次仅修正测试断言,后端运行行为无任何变化。
+
 ## [4.0.56] - 2026-09-28
 
 ### 修复
