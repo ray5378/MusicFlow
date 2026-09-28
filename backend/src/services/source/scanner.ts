@@ -264,8 +264,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
       }
       const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? buildFingerprint(entry) : undefined);
       if (result === "added") added++;
-      else if (result === "updated") updated++;
-      else skipped++;
+      else updated++;
     } catch (e: any) {
       // 解析 / 入库抛异常属缺陷面:计入 failed 并带路径与原因告警,不再静默吞掉。
       failed++;
@@ -688,7 +687,7 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
   }
 }
 
-export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" | "skip" {
+export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
   const artistId = findOrCreateArtist(meta.artist) || null;
   const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture, meta.genre) || null;
@@ -811,8 +810,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
       const meta = await extractMetadataLocal(filePath);
       const result = upsertSong(songKey, meta, sourceId, fp);
       if (result === "added") added++;
-      else if (result === "updated") updated++;
-      else skipped++;
+      else updated++;
     } catch (e: any) {
       // 与 WebDAV 同口径:解析 / 入库失败属异常,计入 failed 并带路径告警。
       failed++;

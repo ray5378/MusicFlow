@@ -12,6 +12,7 @@
 import "../plugins/_env.js";
 
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { translate } from "../../src/i18n.js";
 import { Hono } from "hono";
 import md5 from "md5";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
@@ -152,7 +153,9 @@ describe("online:大歌单后台任务失败要落到 status=failed(前端可轮
     await settle();
     const st = await call("GET", `/v1/online/${P}/match-playlist/status?jobId=${r.body.jobId}`);
     expect(st.body.status).toBe("failed");
-    expect(String(st.body.error)).toContain("子进程崩了");
+    // 后台任务失败:状态体暴露通用文案,内部异常原文不再外泄(只进服务端日志)
+    expect(st.body.error).toBe(translate("errors.online.matchFailed"));
+    expect(String(st.body.error)).not.toContain("子进程崩了");
     // 失败也必须带 finishedAt(前端靠它停止轮询 / 展示时长)
     expect(st.body.finishedAt).toBeTruthy();
   });
@@ -202,18 +205,23 @@ describe("online:单曲匹配失败映射", () => {
   });
 });
 
-describe("online:recommend/import 沙箱错误透传(前端要能展示错误码+修复提示)", () => {
-  it("importRecommendPlaylist 抛带 sandboxCode/hint 的错误 → 原样回传", async () => {
+describe("online:recommend/import 沙箱错误 → 稳定错误码 + 正确状态码 + sandboxCode/hint 透传(不得泄露内部异常原文)", () => {
+  it("importRecommendPlaylist 抛带 sandboxCode/hint 的错误 → 502/UPSTREAM_ERROR + 通用文案 + 结构化字段", async () => {
     const mod: any = await import("../../src/services/source/online/recommendImport.js");
     const err: any = new Error("沙箱拒绝网络访问");
     err.sandboxCode = "SANDBOX_HTTP_DENIED";
     err.hint = "请在插件配置中放行该域名";
     (mod.importRecommendPlaylist as any).mockRejectedValueOnce(err);
     const r = await call("POST", `/v1/online/${P}/recommend/import`, { source: "netease", id: "r1", name: "热门" });
+    // 合同:失败必须带业务错误码 + 正确 HTTP 状态码(此前是 200 + 无 code)
+    expect(r.status).toBe(502);
     expect(r.body.success).toBe(false);
-    expect(r.body.error).toContain("沙箱拒绝网络访问");
+    expect(r.body.code).toBe("UPSTREAM_ERROR");
+    expect(r.body.error).toBe(translate("errors.online.importRecommendFailed"));
     // 关键契约:sandboxCode / hint 必须出现在响应体里,否则前端只剩一句无解的错误文案
     expect(r.body.sandboxCode).toBe("SANDBOX_HTTP_DENIED");
     expect(r.body.hint).toBe("请在插件配置中放行该域名");
+    // 内部异常原文不得外泄(只进服务端日志)
+    expect(r.body.error).not.toContain("沙箱拒绝网络访问");
   });
 });

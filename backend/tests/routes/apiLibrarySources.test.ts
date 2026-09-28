@@ -9,6 +9,7 @@ import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, songs, albums, artists, mediaSources, userFavoriteAlbums, userFavoriteArtists } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
+import { translate } from "../../src/i18n.js";
 
 const { scrapeMock, scanMock, runBatchJobMock } = vi.hoisted(() => ({
   scrapeMock: {
@@ -243,14 +244,16 @@ describe("library 域:歌手刮削", () => {
     expect(status.body.progress).toEqual({ done: 1, total: 2 });
   });
 
-  it("刮削任务失败时写 failed 状态并保留原因", async () => {
+  it("刮削任务失败时写 failed 状态并保留原因(通用文案,不泄露内部异常原文)", async () => {
     runBatchJobMock.mockImplementationOnce(async () => { throw new Error("scrape boom"); });
     scrapeMock.artistsMissingCovers.mockReturnValue([{ id: "ar1" }]);
     await call("POST", "/v1/artists/scrape", {});
     await settle();
     const st = await call("GET", "/v1/artists/scrape-status");
     expect(st.body.status).toBe("failed");
-    expect(st.body.error).toContain("scrape boom");
+    // 状态体暴露通用文案,内部异常原文不再外泄(只进服务端日志)
+    expect(st.body.error).toBe(translate("errors.scraper.failed"));
+    expect(String(st.body.error)).not.toContain("scrape boom");
   });
 
   it("POST /v1/artists/scrape-missing:无缺失短路,有缺失起任务,运行中冲突语义", async () => {

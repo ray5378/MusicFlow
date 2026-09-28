@@ -196,7 +196,7 @@ for (const spec of SPECS) {
           kind: "song-search-import",
           args: { providerId, songs: list, userId: user?.id },
         });
-        if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
+        if (!started.started) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.search.alreadyRunning"), alreadyRunning: true, taskId: started.taskId }, apiErrorStatus(BusinessErrorCode.CONFLICT));
         return c.json({ success: true, taskId: started.taskId });
       }
 
@@ -222,7 +222,7 @@ for (const spec of SPECS) {
           userId: user?.id,
         },
       });
-      if (!started.started) return c.json({ success: false, alreadyRunning: true, taskId: started.taskId });
+      if (!started.started) return c.json({ ...apiError(BusinessErrorCode.CONFLICT, "errors.search.alreadyRunning"), alreadyRunning: true, taskId: started.taskId }, apiErrorStatus(BusinessErrorCode.CONFLICT));
       return c.json({ success: true, taskId: started.taskId });
     });
   }

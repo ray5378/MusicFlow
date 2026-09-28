@@ -41,6 +41,7 @@ import {
   userFavoriteArtists,
   users,
 } from "./shared.js";
+import { translate } from "../../i18n.js";
 
 export function registerLibrary(app: Hono): void {
 app.use("/v1/songs", permMiddleware(PERM.LIBRARY_BROWSE));
@@ -324,9 +325,10 @@ app.post("/v1/artists/scrape", async (c) => {
       try {
         const { result } = await runBatchJob("scrape-artists", { artistIds: missing.map(a => a.id) }, { onProgress });
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job.startedAt, finishedAt: new Date().toISOString(), progress: result });
-      } catch (e: any) {
-        scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "errors.scraper.failed", progress: job.progress });
-      }
+    } catch (e: any) {
+      log.error(`[LIBRARY] 歌手封面/缺失信息刮削失败: ${e?.message || e}`);
+      scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: translate("errors.scraper.failed"), progress: job.progress });
+    }
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削" });
   } catch (e: any) {
@@ -360,9 +362,10 @@ app.post("/v1/artists/scrape-missing", async (c) => {
       try {
         const { result } = await runBatchJob("scrape-artists", { artistIds: missing.map(a => a.id) }, { onProgress });
         scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: job.startedAt, finishedAt: new Date().toISOString(), progress: result });
-      } catch (e: any) {
-        scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: e.message || "errors.scraper.failed", progress: job.progress });
-      }
+    } catch (e: any) {
+      log.error(`[LIBRARY] 歌手封面/缺失信息刮削失败: ${e?.message || e}`);
+      scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: job.startedAt, error: translate("errors.scraper.failed"), progress: job.progress });
+    }
     })();
     return c.json({ success: true, total: missing.length, message: "开始刮削缺失歌手信息" });
   } catch (e: any) {

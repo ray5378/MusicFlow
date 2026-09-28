@@ -25,6 +25,9 @@ import { runPluginJob } from "../../services/plugin/jobRunner.js";
 import { runBatchJob } from "../../batch/runner.js";
 import { translate } from "../../i18n.js";
 import { apiError, apiErrorStatus, BusinessErrorCode } from "./shared.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("ONLINE");
 
 export const onlineRoutes = new Hono();
 
@@ -144,7 +147,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
       });
       matchJobs.set(jobId, { status: "completed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: { done: entryCount, total: entryCount }, result, error: null });
     } catch (e: any) {
-      matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: e.message || translate("errors.online.matchFailed") });
+      log.error(`[ONLINE] match-playlist 后台任务失败 ${jobId}: ${e?.message || e}`);
+      matchJobs.set(jobId, { status: "failed", playlistId, startedAt: matchJobs.get(jobId)!.startedAt, finishedAt: new Date().toISOString(), progress: matchJobs.get(jobId)!.progress, result: null, error: translate("errors.online.matchFailed") });
     }
   })();
   return c.json({ success: true, jobId, running: true, progress: { done: 0, total: entryCount } });
@@ -346,13 +350,14 @@ onlineRoutes.post("/v1/online/:providerId/recommend/import", permMiddleware(PERM
     const result = await importRecommendPlaylist(providerId, info, { userId: user?.id });
     return c.json(result);
   } catch (e: any) {
-    // 沙箱限制错误透传 sandboxCode/hint,前端可展示「错误码 + 说明 + 修复提示」。
+    // 沙箱限制错误透传 sandboxCode/hint,前端可展示「错误码 + 说明 + 修复提示」;
+    // 内部异常原文只进日志(脱敏),响应回落稳定文案 + 业务错误码 + 正确 HTTP 状态码。
+    log.error(`[ONLINE] recommend/import 失败: ${e?.message || e}`);
     return c.json({
-      success: false,
-      error: e.message || translate("errors.online.importRecommendFailed"),
+      ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.online.importRecommendFailed"),
       sandboxCode: e?.sandboxCode,
       hint: e?.hint,
-    });
+    }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 

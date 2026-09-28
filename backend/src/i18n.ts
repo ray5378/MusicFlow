@@ -105,6 +105,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.search.noPlugin": "未找到已启用的搜索插件",
     "errors.search.noPlaylistPlugin": "未找到已启用的歌单搜索插件",
     "errors.search.songsRequired": "缺少 songs 列表",
+    "errors.search.alreadyRunning": "该任务已在运行",
     "errors.album.refRequired": "缺少专辑 source/id",
 
     "errors.import.noSongs": "没有可导入的歌曲",
@@ -287,6 +288,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.search.noPlugin": "No enabled search plugin found",
     "errors.search.noPlaylistPlugin": "No enabled playlist search plugin found",
     "errors.search.songsRequired": "Missing songs list",
+    "errors.search.alreadyRunning": "That task is already running",
     "errors.album.refRequired": "Missing album source/id",
 
     "errors.import.noSongs": "No songs available to import",

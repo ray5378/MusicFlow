@@ -49,6 +49,36 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.61] - 2026-09-29
+
+### 修复（真实产品缺陷，来自 4.0.60 汇总台账）
+- [HIGH] `routes/api/online.ts:348-356`：POST recommend/import 的 catch 原先返回
+  `{success:false, error:e.message, sandboxCode, hint}`，**HTTP 200、无 `code`、且 `e.message` 原文外泄**。
+  改为统一错误契约 `apiError(UPSTREAM_ERROR, "errors.online.importRecommendFailed")` + `apiErrorStatus(UPSTREAM_ERROR)`（**HTTP 502**），
+  并 `log.error` 记录原始异常；`sandboxCode` / `hint` 仍为可控上下文透传（非异常原文）。
+- [MED] `routes/api/entitySearch.ts:199,225`：song / album import 的 `startAsyncTask` 未启动时
+  原先返回 `{success:false, alreadyRunning:true, taskId}`，**HTTP 200 且缺 `code`**。
+  改为 `apiError(CONFLICT, "errors.search.alreadyRunning")` + `apiErrorStatus(CONFLICT)`（**HTTP 409**），
+  并新增 i18n key `errors.search.alreadyRunning`（「该任务已在运行」）。
+- [MED] 原始异常外泄：`routes/api/library.ts:328,365`（scrape 后台失败写入 job.error，经 scrape-status 暴露）、
+  `routes/api/online.ts:147`（match-playlist 后台失败写入 matchJobs.error）——
+  改为 `log.error` 记录后只回传稳定 i18n key（`errors.scraper.failed` / `errors.online.matchFailed`），不再外泄 `e.message` 原文。
+- [LOW] 死代码/死分支：`services/source/scanner.ts` 的 `upsertSong` 声明返回 `"added" | "updated" | "skip"`，
+  但 `skip` 永不返回（仅 `added` / `updated`）；两处调用点的 `else if (result === "updated") updated++; else skipped++`
+  中 `skipped++` 恒不可达。收敛返回类型为 `"added" | "updated"`，调用点改为 `else updated++`。
+  复核：`services/audio/flow.ts:447-449` 经核实为交叉淡入禁用时的可达回退分支，**非**死代码，已从台账移除。
+
+### 测试
+- `tests/routes/apiOnlineErrorPaths.test.ts`：match-playlist 失败断言改为验稳定 key；
+  recommend/import 沙箱错误用例改为断言 `502 + UPSTREAM_ERROR + errors.online.importRecommendFailed`，并证伪原文不泄露。
+- `tests/routes/apiLibrarySources.test.ts`：刮削失败用例改为断言稳定 key、证伪原文不泄露。
+- `tests/routes/lt2_entitySearchErrorBranches.test.ts`：新增「导入任务已在跑（alreadyRunning）→ 必须 409 CONFLICT + code」用例（song + album 两个），mock `startAsyncTask` 控制返回。
+
+### 覆盖率（全量实测）
+- 本次仅修复产品缺陷 + 同步断言现状行为，未新增覆盖缺口；`scanner.ts` 移除死分支后未覆盖行微降。
+- 全量回归：391 文件 / 5446 条用例全绿，`tsc --noEmit` 干净。
+- Lines **99.14%**；Branches **88.21%**；Functions **97.14%**。
+
 ## [4.0.60] - 2026-09-29
 
 ### 测试

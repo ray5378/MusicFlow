@@ -31,7 +31,12 @@ vi.mock("../../src/plugins/registry.js", async (io) => ({
   getPluginConfig: () => ({}),
 }));
 
+vi.mock("../../src/services/plugin/asyncTasks.js", () => ({
+  startAsyncTask: vi.fn(() => ({ started: true, taskId: "t-ok" })),
+}));
+
 import { entitySearchRoutes } from "../../src/routes/api/entitySearch.js";
+import { startAsyncTask } from "../../src/services/plugin/asyncTasks.js";
 
 // entitySearch 的路由自带 `/v1/...` 全路径,故挂在根上即可(生产里它挂在 /rest/api 下继承鉴权)。
 const app = new Hono();
@@ -59,6 +64,7 @@ const throwing = async () => { throw new Error("上游炸了"); };
 beforeEach(() => {
   state.plugins = [];
   state.throwOnSongCapability = false;
+  (startAsyncTask as any).mockReturnValue({ started: true, taskId: "t-ok" });
 });
 
 describe("聚合搜索的兜底", () => {
@@ -134,5 +140,23 @@ describe("导入/详情:能力缺失与上游失败", () => {
     const r = await call("GET", "/v1/artist-search/art-boom/items?name=X");
     expect(r.status).toBe(502);
     expect(r.body).toMatchObject({ success: false, code: "UPSTREAM_ERROR", error: "上游炸了" });
+  });
+});
+
+describe("导入:任务已在跑(alreadyRunning)—— 必须 409 CONFLICT + code,不得裸 200", () => {
+  it("song 导入:startAsyncTask 返回 started:false → 409 + CONFLICT + alreadyRunning + taskId", async () => {
+    (startAsyncTask as any).mockReturnValue({ started: false, taskId: "t-running", alreadyRunning: true });
+    state.plugins = [plugin("sg1", ["songSearch"], {})];
+    const r = await call("POST", "/v1/song-search/sg1/import", { songs: [{ id: "s1", source: "netease", name: "歌", duration: 200 }] });
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ success: false, code: "CONFLICT", alreadyRunning: true, taskId: "t-running" });
+  });
+
+  it("album 导入:startAsyncTask 返回 started:false → 409 + CONFLICT + alreadyRunning + taskId", async () => {
+    (startAsyncTask as any).mockReturnValue({ started: false, taskId: "t-running", alreadyRunning: true });
+    state.plugins = [plugin("alb1", ["albumSearch"], { playlistSongs: async () => ({ songs: [] }) })];
+    const r = await call("POST", "/v1/album-search/alb1/import", { source: "netease", id: "al1" });
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ success: false, code: "CONFLICT", alreadyRunning: true, taskId: "t-running" });
   });
 });
