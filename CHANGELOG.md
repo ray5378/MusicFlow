@@ -49,6 +49,27 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.60] - 2026-09-29
+
+### 测试
+- 长尾覆盖补测：sendspin 残余（server/index/pairServer/encoding/framing/handshake/
+  streamEngine/supervisor/crypto 等）、routes/api 与 middleware、services 长尾
+  （scanner/scraper/airplay/utils/player/covers/access/transcode 等）、plugins/audio/ws/batch 残余。
+- 新增 53 个测试文件；全量 391 文件 / 5444 条用例全绿，`tsc --noEmit` 干净。
+
+### 覆盖率（全量实测）
+- Lines **99.15%**；Branches **88.18%**；Functions **97.19%**。
+
+### 发现的真实缺陷（本轮仅汇总，未改产品代码）
+- [HIGH] `routes/api/online.ts:348-356`：POST recommend/import 的 catch 返回
+  `{success:false, error:e.message, sandboxCode, hint}`，HTTP 200、无 `code`、且 `e.message` 原文外泄。
+- [MED] `routes/api/entitySearch.ts:199,225`：`startAsyncTask` 未启动时返回
+  `{success:false, alreadyRunning:true, taskId}`，HTTP 200 且缺 `code`。
+- [MED] 原始异常外泄：`routes/api/library.ts:328,365`（写入 job.error，经 scrape-status 暴露）、
+  `routes/api/online.ts:147`（写入 matchJobs.error）。
+- [LOW] 死代码：`services/audio/flow.ts:447-449` 不可达 else-if；
+  `services/source/scanner.ts:691` `upsertSong` 声明返回 "skip" 但从不返回 → 268/815 的 `skipped++` 恒不可达。
+
 ## [4.0.59] - 2026-09-29
 
 ### 测试
