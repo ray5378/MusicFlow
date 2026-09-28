@@ -317,11 +317,26 @@ describe("recommendImport: 首次导入 vs 二次复用", () => {
   it("二次导入会刷新 comment 与 updatedAt", async () => {
     registerProvider();
     const first = await importRecommendPlaylist(PROVIDER, info("100", "名字"), { userId: "u1" });
-    const before = plRow(first.playlistId!)!;
-    await new Promise((r) => setTimeout(r, 5));
-    await importRecommendPlaylist(PROVIDER, info("100", "名字"), { userId: "u1" });
-    const after = plRow(first.playlistId!)!;
-    expect(after.updatedAt).not.toBe(before.updatedAt);
+    const plId = first.playlistId!;
+    // ⚠️ 与 discoveryHost 那条例同一根因:原先靠 `await setTimeout(5)` 让真实时钟
+    // 走一格,再去比对 before/after 的 updatedAt —— 时钟被冻结或倒退时两边同值,
+    // 用例就会随机红。彻底修法同样是两层:① 把 updatedAt 钉成 2000 年的哨兵旧值;
+    // ② 把 Date 冻住 —— 漏写 updatedAt 的实现下行里留的是 INSERT 时间戳,它不是
+    // 哨兵,光钉哨兵会误绿,冻住时钟后漏写就只剩哨兵 → 必红。契约不变(二次导入
+    // 必须刷 updatedAt),断言与绝对时钟彻底脱钩,5 毫秒空等也一并省掉。
+    const SENTINEL = "2000-01-01T00:00:00.000Z";
+    const clockNow = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(clockNow);
+      sqlite.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(SENTINEL, plId);
+      expect(String(plRow(plId)!.updatedAt)).toBe(SENTINEL); // 钉桩成功
+      await importRecommendPlaylist(PROVIDER, info("100", "名字"), { userId: "u1" });
+    } finally {
+      vi.useRealTimers();
+    }
+    const after = plRow(plId)!;
+    expect(String(after.updatedAt)).not.toBe(SENTINEL);
     expect(after.comment).toBe("每日推荐歌单·" + NETEASE);
   });
 

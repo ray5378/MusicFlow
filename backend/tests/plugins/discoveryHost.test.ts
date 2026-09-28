@@ -5,7 +5,7 @@ import "./_env.js";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "fs";
 import path from "path";
-import { db, initDatabase } from "../../src/db/index.js";
+import { db, initDatabase, sqlite } from "../../src/db/index.js";
 import { songs, users, playlists, playlistSongs } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import {
@@ -578,17 +578,37 @@ describe("host.playlists replaceEntries(已存在走 UPDATE,不存在走 INSERT)
   });
 
   it("对已存在的歌单:走 UPDATE,不动 id/owner_id/created_at,只换条目与 updated_at", async () => {
-    const before: any = await kitEnv().playlists.get("pl-b29-rep");
-    const beforeUpdated = String(before.updated_at);
+    // ⚠️ 这条断言原先写的是「刷新后的 updated_at ≠ 刷新前的值」—— 那等于要求时钟
+    // 真的往前走了一格。v4.0.52 的 CI 上偶发红过一次(两侧都是
+    // 2026-09-28T09:29:09.188Z:VM 时钟被调整/冻结,两次写入落进同一毫秒)。
+    // 彻底修法是两层:
+    //   ① 先把 updated_at 钉成一个 2000 年的哨兵旧值 —— 「有没有被改写」于是与
+    //      时钟是否推进无关;
+    //   ② 再把 Date 冻住 —— 只钉哨兵还不够:漏写 updated_at 的实现下,行里留的
+    //      是 INSERT 时写进来的时间戳,它不是哨兵,断言照样会过(变异实测存活过)。
+    //      冻住时钟后,漏写就只剩哨兵 → 必红。
+    const SENTINEL_UPDATED = "2000-01-01T00:00:00.000Z";
+    sqlite.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(
+      SENTINEL_UPDATED, "pl-b29-rep");
 
-    await kitEnv().playlists.replaceEntries("pl-b29-rep", [{ songId: "r-2" }]);
+    const before: any = await kitEnv().playlists.get("pl-b29-rep");
+    expect(String(before.updated_at)).toBe(SENTINEL_UPDATED); // 钉桩成功,后面才有意义
+
+    const clockNow = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(clockNow);
+      await kitEnv().playlists.replaceEntries("pl-b29-rep", [{ songId: "r-2" }]);
+    } finally {
+      vi.useRealTimers();
+    }
     const after: any = await kitEnv().playlists.get("pl-b29-rep");
 
     // 注意:playlists.get 走裸 SQL,列名是 snake_case(不带 drizzle 驼峰别名)
     expect(after.id).toBe("pl-b29-rep");
     expect(after.owner_id).toBe(owner); // UPDATE 分支不碰 owner
     expect(after.created_at).toBe(before.created_at);
-    expect(String(after.updated_at)).not.toBe(beforeUpdated);
+    expect(String(after.updated_at)).not.toBe(SENTINEL_UPDATED);
     expect(after.entries).toEqual([
       expect.objectContaining({ song_id: "r-2", position: 0, playable: 1 }),
     ]);

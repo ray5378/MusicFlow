@@ -124,11 +124,23 @@ describe("reclaim: 活动判定", () => {
   });
 
   it("恰好卡在阈值边界上按「未到」处理(>= 才空闲)", () => {
-    idleFor(5);
-    expect(isIdle()).toBe(true);
-    // 差 1 毫秒就不到。
-    _setLastActivityForTest(Date.now() - 5 * MIN + 1);
-    expect(isIdle()).toBe(false);
+    // ⚠️ 这条用例原先直接跑在真实时钟上:拨完 lastActivity 之后要等真实代码执行
+    // 到 isIdle(),中间只要过去 >=1 毫秒,真实间隔就顶到阈值,断言随即翻成空闲
+    // —— 慢机器上必炸(CI 实测复现过一次)。
+    // 彻底修法:isIdle 只读 Date.now(),把 Date 换成假时钟,让它对真实耗时完全
+    // 免疫;而「>= 才空闲 / 差 1 毫秒就不算空闲」这条边界语义被钉得更死,不再看
+    // 机器快慢。
+    const now = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(now);
+      idleFor(5);                                 // 正好卡在阈值上 → >= 判空闲
+      expect(isIdle()).toBe(true);
+      _setLastActivityForTest(now - 5 * MIN + 1); // 差 1 毫秒就不到
+      expect(isIdle()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("自动回收开关关着 → 永远不空闲(不执行分层回收)", () => {
