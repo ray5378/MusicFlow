@@ -49,6 +49,21 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.59] - 2026-09-29
+
+### 测试
+- 补全 sendspin 服务层覆盖：`server.ts`(383→66 未覆盖行)、`index.ts`(324→28)、`pairServer`/`encoding`/`streamEngine`/`streamSource`/`esphomeBridge`/`childMain`/`roles/*` 等。
+- 补全非 sendspin 域：`services/proxy`、`routes/api/online`、`airplay/raop(transport)`、`batch/jobs` 管线、`group/GroupManager`。
+- 新增 16 个测试文件（含 1 个 socket 桩辅助 `_connStubs.ts`），共 295 条用例。
+- 修正 `tests/batch/jobsPipelineExtras.test.ts` 中 `purgeExpiredWebSongs` 的 mock 误写为 async 的缺陷：
+  真实实现是同步函数（`purge.ts: export function purgeExpiredWebSongs(): PurgeResult`），
+  同步调用点拿到未 await 的 Promise 会变成 unhandled rejection，且掩盖「清理日志」这条真实契约。
+
+### 覆盖率（全量实测）
+- Test Files 338 passed / Tests 5130 passed（零失败）；`tsc --noEmit` 干净。
+- Lines 93.15% → **97.11%**（+1299 行覆盖）；Branches 85.72% → **86.86%**；Functions 91.72% → **95.52%**。
+- 未覆盖行 2243 → 944。
+
 ## [4.0.58] - 2026-09-29
 
 ### 测试（覆盖率缺口补测，产品代码零改动）
