@@ -1027,6 +1027,9 @@ export class SendspinConnection {
    *  即判死链,直接 terminate → 触发 close → onConnectionClosed 摘牌。
    *  实测口径:最迟约 20s 摘牌,短于 discover 的 60s 重查节拍。 */
   private heartbeatAlive = true;
+  /** 连续未回 PONG 计数(见心跳逻辑)。容忍单次抖动。 */
+  private heartbeatMisses = 0;
+  private static readonly HEARTBEAT_MAX_MISSES = 3; // ~30s 宽限(原:1 次即杀)
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   noise: NoiseSession | null = null;
   handshakeDone = false;
@@ -1071,9 +1074,6 @@ export class SendspinConnection {
   minBufferMs = 0;
   /** 是否已收到过 client/state(未见过的设备回落到保守缺省)。 */
   stateReported = false;
-  /** 设备侧缓冲区容量(ms)。`client/state` / `client/hello` 均可携带;
-   *  0 = **未上报**(旧固件 / legacy 明文路径),此时不做任何钳制。 */
-  bufferCapacityMs = 0;
   /** 设备是否愿收流(spec `client/state.available`)。
    *  `null` = 从未上报 → 不做门控(向后兼容);`false` = 明确拒绝收流。 */
   clientAvailable: boolean | null = null;
@@ -1128,14 +1128,22 @@ export class SendspinConnection {
     ws.on("error", () => ws.terminate());
     // 心跳(见 heartbeatAlive 注释)。`readyState !== OPEN` 时(拨号握手中/已关闭)跳过,
     // 避免 ws.ping() 在 CONNECTING 上抛异常。
-    ws.on("pong", () => { this.heartbeatAlive = true; });
+    ws.on("pong", () => { this.heartbeatAlive = true; this.heartbeatMisses = 0; });
     this.heartbeatTimer = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return;
       if (!this.heartbeatAlive) {
-        try { ws.terminate(); } catch { /* 已死 */ }
+        // 上一轮 PING 未回 PONG:计入连续未回次数,达到阈值才摘牌。
+        // 容忍单次抖动(设备解码/I2S 抖动期间可能漏回一帧 PONG),
+        // 避免把「抖动」升级成「永久断连」(与文档 §2.9 容忍精神一致)。
+        this.heartbeatMisses += 1;
+        if (this.heartbeatMisses >= SendspinConnection.HEARTBEAT_MAX_MISSES) {
+          console.warn(`[sendspin] heartbeat: peer ${this.id}/${this.remoteHost} 连续 ${this.heartbeatMisses} 次未回 PONG, terminate 摘牌`);
+          try { ws.terminate(); } catch { /* 已死 */ }
+        }
         return;
       }
       this.heartbeatAlive = false;
+      this.heartbeatMisses = 0;
       try { ws.ping(); } catch { /* 已死 */ }
     }, HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
@@ -1417,8 +1425,6 @@ export class SendspinConnection {
     const sd = num(p.static_delay_ms);
     if (sd !== null && od === null) this.outputDelayMs = sd;
     // ---- spec 三字段:根层优先,player 层回落(设备可能只发其中一部分) ----
-    const cap = num(root.buffer_capacity_ms ?? root.buffer_capacity ?? p.buffer_capacity_ms ?? p.buffer_capacity);
-    if (cap !== null) this.bufferCapacityMs = cap;
     const availVal = root.available ?? p.available;
     if (typeof availVal === "boolean") {
       if (availVal) this.clientUnavailableSinceMs = 0;
@@ -1447,7 +1453,7 @@ export class SendspinConnection {
       "info",
       `client/state from ${this.clientId ?? "?"}${first ? " (first)" : ""}: ` +
       `output_delay=${this.outputDelayMs}ms required_lead=${this.requiredLeadTimeMs}ms ` +
-      `min_buffer=${this.minBufferMs}ms buffer_capacity=${this.bufferCapacityMs}ms ` +
+      `min_buffer=${this.minBufferMs}ms buffer_capacity=${this.bufferCapacityBytes}B ` +
       `available=${this.clientAvailable} state=${this.clientSyncState}`,
     );
   }

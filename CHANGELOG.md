@@ -2,6 +2,8 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.67] - 2026-09-29
+
 ### 新增能力
 - **支持 HTTP Basic 认证**(RFC 7617,`Authorization: Basic base64(user:pass)`)。
   此前 `middleware/auth.ts` 只认 `X-API-Key` / `Bearer` / `X-ND-Authorization` / `?u&t&s` / `?u&p` / `?token=`
@@ -11,6 +13,7 @@
 
 
 ### 修复
+- **SENDSPIN 心跳零容忍导致设备循环断连（`services/sendspin/server.ts`）**：设备起播后偶发解码/I2S 抖动会使 ESP-IDF `httpd_ws` 线程被占用、10s 内心跳漏回一帧 PONG；原「一轮未回即 `ws.terminate()` 摘牌」会把短暂抖动升级为永久断连（每 ~70s 一次 terminate→重拨死循环，播 ~7s 即无声）。改为**连续 3 次（≈30s 宽限）未回 PONG 才摘牌**，对齐权威文档 §2.9「容忍抖动」精神；另清理 `client/state` 中把字节 `buffer_capacity` 误当毫秒存的误导性死字段 `bufferCapacityMs`，日志改回打印正确字节值。240 真机验证：设备稳定连续播完多首歌并自动切歌，`terminate 摘牌` 触发 0 次。
 - **D26(`middleware/auth.ts`)**:401 之前留下一条**可诊断**的凭据画像(脱敏)——
   `scheme`(basic / bearer / none)、是否带 `X-API-Key` 与 `?token=`、`subsonicUser`(只记用户名,不记口令)。
   此前 401 只有一句固定中文提示「认证失败,请检查账号密码」,线上分不清是「客户端用了 Basic 而后端不认」
