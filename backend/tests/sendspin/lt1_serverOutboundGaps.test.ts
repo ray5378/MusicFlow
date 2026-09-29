@@ -71,8 +71,9 @@ describe("server:心跳看门狗", () => {
     const { ws } = makeConn(srv);
     vi.advanceTimersByTime(10_000);
     expect(ws.pingCount).toBe(1); // 首拍:alive 初始 true → ping 并置 false
-    vi.advanceTimersByTime(10_000);
-    // 契约:一整拍都没等到 pong ⇒ 判定对端已死,terminate 释放 clientId。
+    // 修复后容错单次抖动:需连续 HEARTBEAT_MAX_MISSES=3 拍未回 pong 才摔牌(≈30s 宽限)。
+    vi.advanceTimersByTime(30_000); // 第二/三/四拍仍无 pong ⇒ misses 累到 3 ⇒ 第 4 拍 terminate
+    // 契约:连续 3 拍未回 pong ⇒ 判定对端已死,terminate 释放 clientId。
     expect(ws.terminateCount).toBe(1);
   });
 

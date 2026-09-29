@@ -639,15 +639,21 @@ describe("client/state 解析:available / state 门控与变化日志", () => {
     expect(logs.some(([, m]) => m.includes("reports synchronized"))).toBe(true);
   });
 
-  it("buffer_capacity 与 static_delay_ms 回落解析", async () => {
+  it("buffer_capacity(client/hello,字节) 与 static_delay_ms(client/state) 回落解析", async () => {
     const { srv } = makeServer();
-    const h = await noise(srv);
+    const h = await noise(srv, {
+      helloPayload: {
+        name: "客厅",
+        supported_roles: ["player@v1"],
+        "player@v1_support": { supported_formats: [{ codec: "flac" }], buffer_capacity: 4_800_000 },
+      },
+    });
+    expect(h.conn.bufferCapacityBytes).toBe(4_800_000);
     await h.deliverJson({
       type: "client/state",
-      payload: { player: { static_delay_ms: 25, buffer_capacity_ms: 3000 } },
+      payload: { player: { static_delay_ms: 25 } },
     });
     expect(h.conn.outputDelayMs).toBe(25);
-    expect(h.conn.bufferCapacityMs).toBe(3000);
   });
 
   it("负数/非有限值一律不采纳(按未提供处理)", async () => {

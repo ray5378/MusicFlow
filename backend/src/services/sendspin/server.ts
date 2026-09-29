@@ -417,6 +417,29 @@ export class SendspinServer {
  *  直接塞进 `audio_buffer_capacity`;aiosendspin 同名字段作
  *  `BufferTracker(capacity_bytes=...)` 消费。另兼容 `player_support`(非 v1
  *  键名)与顶层 `buffer_capacity`。 */
+
+/**
+ * 心跳状态机纯函数(回归守卫,便于单测;见 2026-09-29 修复)。
+ *
+ * 给定本论开始前的 alive(上一轮是否收到 PONG)/misses(连续未回计数),
+ * 返回本轮后的状态与是否摘牌:
+ *   - alive=true :本论发 PING,清零 misses,不摘牌(下一轮 alive 翻为 false)。
+ *   - alive=false:本论计入一次未回,misses+1,达到 HEARTBEAT_MAX_MISSES 才摘牌。
+ *
+ * 语义要点:修复前为「1 次未回即 terminate」(MAX_MISSES=1),修复后容忍单次
+ * 抖动(解码/I2S 抖动期漏回一帧 PONG)→ MAX_MISSES=3(≈30s 宽限),与文档 §2.9 一致。
+ */
+export function nextHeartbeatState(
+  alive: boolean,
+  misses: number,
+): { alive: boolean; misses: number; terminate: boolean } {
+  if (alive) {
+    return { alive: false, misses: 0, terminate: false };
+  }
+  const next = misses + 1;
+  return { alive: false, misses: next, terminate: next >= SendspinConnection.HEARTBEAT_MAX_MISSES };
+}
+
 export function parseHelloBufferCapacity(payload: any): number {
   const support = payload?.["player@v1_support"] ?? payload?.player_support ?? payload;
   const raw = support?.buffer_capacity ?? payload?.buffer_capacity;
@@ -1029,7 +1052,7 @@ export class SendspinConnection {
   private heartbeatAlive = true;
   /** 连续未回 PONG 计数(见心跳逻辑)。容忍单次抖动。 */
   private heartbeatMisses = 0;
-  private static readonly HEARTBEAT_MAX_MISSES = 3; // ~30s 宽限(原:1 次即杀)
+  public static readonly HEARTBEAT_MAX_MISSES = 3; // ~30s 宽限(原:1 次即杀)
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   noise: NoiseSession | null = null;
   handshakeDone = false;
@@ -1131,20 +1154,19 @@ export class SendspinConnection {
     ws.on("pong", () => { this.heartbeatAlive = true; this.heartbeatMisses = 0; });
     this.heartbeatTimer = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      if (!this.heartbeatAlive) {
-        // 上一轮 PING 未回 PONG:计入连续未回次数,达到阈值才摘牌。
-        // 容忍单次抖动(设备解码/I2S 抖动期间可能漏回一帧 PONG),
-        // 避免把「抖动」升级成「永久断连」(与文档 §2.9 容忍精神一致)。
-        this.heartbeatMisses += 1;
-        if (this.heartbeatMisses >= SendspinConnection.HEARTBEAT_MAX_MISSES) {
-          console.warn(`[sendspin] heartbeat: peer ${this.id}/${this.remoteHost} 连续 ${this.heartbeatMisses} 次未回 PONG, terminate 摘牌`);
-          try { ws.terminate(); } catch { /* 已死 */ }
-        }
+      const st = nextHeartbeatState(this.heartbeatAlive, this.heartbeatMisses);
+      if (st.terminate) {
+        // 连续 MAX_MISSES 次未回 PONG(≈30s):才摘牌。容忍单次抖动。与文档 §2.9 一致。
+        console.warn(`[sendspin] heartbeat: peer ${this.id}/${this.remoteHost} 连续 ${st.misses} 次未回 PONG, terminate 摘牌`);
+        try { ws.terminate(); } catch { /* 已死 */ }
         return;
       }
-      this.heartbeatAlive = false;
-      this.heartbeatMisses = 0;
-      try { ws.ping(); } catch { /* 已死 */ }
+      this.heartbeatAlive = st.alive;
+      this.heartbeatMisses = st.misses;
+      if (this.heartbeatAlive === false && st.misses === 0) {
+        // 本轮从 alive 翻 false:需发 PING(并等待下轮 PONG)。
+        try { ws.ping(); } catch { /* 已死 */ }
+      }
     }, HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
     ws.on("close", () => {
