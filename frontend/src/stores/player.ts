@@ -1775,7 +1775,8 @@ export const usePlayerStore = defineStore("player", () => {
     finally { localPeersRefreshing = false; }
   }
 
-  // 离线 DLNA 设备 / 成员全离线的群组 / 断开的 sendspin 客户端不显示;local(本机)恒显示。
+  // 离线 DLNA 设备 / 成员全离线的群组 / 断开的 sendspin 客户端**同样保留**(带「离线」
+  // 标记),不再剪掉;local(本机)恒显示。
   // 设备重新上线时后端发 peer_available/peer_registered 会把它加回列表。
   // 额外剔除该用户「按用户级隐藏」的设备/群组(不影响 disabled 与授权),并应用
   // 该用户的「按用户级改名」(REST 与 WS 推送统一在此应用,保证改名不被 WS 覆盖)。
@@ -1783,9 +1784,10 @@ export const usePlayerStore = defineStore("player", () => {
     const hidden = hiddenPeers.value;
     const overrides = nameOverrides.value;
     // 组是「容器」不是「内容物」:成员全离线 / 空组也必须显示(否则空组没法拖设备进去),
-    // 只在行上标注状态;设备离线仍照旧剪掉。hidden 改名照旧应用。
+    // 只在行上标注状态;**离线设备同样全量保留**(不再按 available 剪裁),
+    // 由 UI 自己决定是否打「离线」标记 —— 数据层不再替 UI 决定「看不见」。
     return markStaleLocalPeersOffline(list || [])
-      .filter((p) => (p.available || p.kind === "group") && !hidden.has(p.peerId))
+      .filter((p) => !hidden.has(p.peerId))
       .map((p) => (overrides[p.peerId] ? { ...p, name: overrides[p.peerId] } : p));
   }
 
@@ -1793,13 +1795,11 @@ export const usePlayerStore = defineStore("player", () => {
   // 服务端现在会返回同账号的多个本机实例(客户端 / Web),「自己那条」必须排在最顶端
   // (与「本机」角标一起构成视角标识),其余保持后端顺序。
   //
-  // 客户端实例**离线即从选择列表消失**(与 DLNA 设备同语义):服务端对 local 只标
-  // available=false、不删行(「自己那条」必须恒在,它是播放器 UI 的落点,见 WS 的
-  // peer_unavailable 分支),故在这里按 available 剪掉**别的**离线客户端。
+  // 离线设备(含别的本机实例)**一律保留**在切换器里并打「离线」标记,不再剪掉:
+  // 服务端对 local 只标 available=false、不删行(「自己那条」必须恒在,它是播放器
+  // UI 的落点,见 WS 的 peer_unavailable 分支),这里也就没有理由再筛掉别的离线实例。
   const peersForSwitcher = computed(() => {
-    const list = (peers.value || []).filter(
-      (p: any) => !(p.kind === "local" && !isSelfPeer(p) && p.available === false),
-    );
+    const list = peers.value || [];
     const own = localPeerId.value;
     const i = list.findIndex((p: any) => p.peerId === own);
     if (i <= 0) return list;
@@ -2091,7 +2091,7 @@ export const usePlayerStore = defineStore("player", () => {
           if (!p) break;
           const idx = peers.value.findIndex(x => x.peerId === p.peerId);
           if (idx >= 0) peers.value[idx] = { ...peers.value[idx], ...p, ...(nameOverrides.value[p.peerId] ? { name: nameOverrides.value[p.peerId] } : {}) };
-          else if (p.available !== false && !hiddenPeers.value.has(p.peerId)) peers.value.push({ ...p, ...(nameOverrides.value[p.peerId] ? { name: nameOverrides.value[p.peerId] } : {}) });
+          else if (!hiddenPeers.value.has(p.peerId)) peers.value.push({ ...p, ...(nameOverrides.value[p.peerId] ? { name: nameOverrides.value[p.peerId] } : {}) });
           break;
         }
         case "peer_unavailable": {
@@ -2108,9 +2108,14 @@ export const usePlayerStore = defineStore("player", () => {
             if (i >= 0) peers.value[i] = { ...peers.value[i], available: false };
             break;
           }
-          // 离线设备从列表移除(不再置灰显示)。
-          peers.value = peers.value.filter(x => x.peerId !== p.peerId);
-          // 当前播放设备离线 → 自动切换到下一个可用设备;无可用则回本机。
+          // 离线设备**不再删行**:与上面的 local 分支一致,只把该 peer 标成
+          // available=false 留在列表里(常驻可见,由 UI 打「离线」标记);
+          // 重新上线由 peer_available / peer_registered 把状态置回。
+          {
+            const i = peers.value.findIndex(x => x.peerId === p.peerId);
+            if (i >= 0) peers.value[i] = { ...peers.value[i], available: false };
+          }
+          // 当前播放设备离线 → 自动切换到下一个**在线**设备;无在线则回本机。
           if (currentPeerId.value === p.peerId) {
             const next = peers.value.find(x => x.available && x.peerId !== localPeerId.value);
             if (next) void switchPeer(next.peerId).catch(() => {});
