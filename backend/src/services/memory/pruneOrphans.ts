@@ -13,6 +13,7 @@ import { getGroupManager } from "../group/index.js";
 import { getAirPlayDevices } from "../airplay/discovery.js";
 import { getPlayerController, getQueueController } from "../player/index.js";
 import { getPeerManager } from "../peer.js";
+import { listKnownDeviceIds } from "../sendspin/deviceState.js";
 import { sweepScrobbleDedupe } from "../../plugins/scrobblers.js";
 import { db } from "../../db/index.js";
 import { users } from "../../db/schema.js";
@@ -39,14 +40,23 @@ export function pruneOrphansOnce(): void {
   const userIds = new Set(db.select().from(users).all().map((u) => u.id));
   // Sendspin 客户端同理:裸 clientId 作 QueueController key 且有独立队列,
   // 不并入合法集合会被当孤儿删掉(播放中直接掐断,表现为"播完一首就停")。
-  // 以 peer 注册表为准(deviceId 即裸 clientId,见 peer.registerSendspin)。
-  const sendspinIds: string[] = [];
+  // 合法集合 = peer 注册表(deviceId 即裸 clientId,见 peer.registerSendspin)
+  //          ∪ 持久设备档案(sendspin_device_state,排除 disabled)。
+  // 只认 peer 注册表是不够的:设备断连后 peer 行虽不再被删(只置 available=false),
+  // 但重启后到设备重连前这段时间里 registry 里没有它 —— 那时它的队列/播放器条目仍会
+  // 被当孤儿清掉。持久档案是「这台设备存在过」的底表(只在解绑时删除),必须并入。
+  const sendspinIds = new Set<string>();
   const sendspinPeerIds: string[] = [];
   for (const p of getPeerManager().list()) {
     if (p.kind === "sendspin" && p.deviceId) {
-      sendspinIds.push(p.deviceId);
+      sendspinIds.add(p.deviceId);
       sendspinPeerIds.push(p.peerId);
     }
+  }
+  for (const clientId of listKnownDeviceIds()) {
+    if (sendspinIds.has(clientId)) continue;
+    sendspinIds.add(clientId);
+    sendspinPeerIds.push(`sendspin:${clientId}`);
   }
   for (const id of sendspinIds) deviceIds.add(id);
 

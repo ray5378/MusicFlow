@@ -239,6 +239,7 @@ export function playCore(
    *  必须在 pump.stop() 之后装填(stop 清 pendingSeekMs 属"旧上下文丢弃"语义)。 */
   seekPositionMs?: number,
 ): void {
+  clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
   const conn = srv.clients.get(clientId);
   // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
@@ -297,7 +298,10 @@ export function playCore(
 }
 
 /** 停止核心(原 stop():打断 pump + 清组状态 + stream/end 成对收尾)。 */
-export function stopCore(srv: SendspinServer | null, clientId: string): void {  const g = ephemeralOrReal(srv, clientId);
+export function stopCore(srv: SendspinServer | null, clientId: string): void {
+  clearPauseWatchdog(clientId);
+  const _pg = srv?.group(clientId);
+  if (_pg) _pg.paused = false;  const g = ephemeralOrReal(srv, clientId);
   if (srv) pumpFor(srv, srv.group(clientId)).stop();
   g.positionMs = 0;
   g.current = null;
@@ -321,6 +325,7 @@ export function playGroupCore(
   /** MA `play_index(seek_position=N)` 等价通道(用户组重建流起点)。 */
   seekPositionMs?: number,
 ): void {
+  clearPauseState(srv, groupName);
   if (!srv) return;
   const g = srv.group(groupName);
   // ★ 借流(见 playCore 同名段落):用户组作目标时同样适用 —— 泵照搬,成员原样。
@@ -449,16 +454,128 @@ export function leaveGroupCore(srv: SendspinServer | null, groupName: string, cl
   return false;
 }
 
+// ==================== 暂停:三态广播 + 自动 stop 看门狗 ====================
+//
+// 对齐 MA `controllers/player_queues/controller.py:733-756` 的 `_watch_pause`:
+// 暂停后先最多等 5s 让暂停落地,再等 30s;仍处于 PAUSED 才 `stop()` 回收推流资源。
+// MusicFlow 的 pause 是**同步置位**(不像 MA 需等设备状态回传),故 5s 落地等待
+// 可以省去 —— 直接 30s 后复查 `group.paused`,期间恢复则看门狗已被取消。
+//
+// ⚠️ 暂停本身**不下发任何设备命令**:协议层没有给 player 的 pause 命令,
+// 清缓冲的 `stream/clear` 只归 seek/切歌(见 P2),不归暂停。
+
+/** 暂停后自动转 stop 的时限(ms)。对齐 MA 硬编码的 30s。 */
+export const PAUSE_AUTO_STOP_MS = 30_000;
+/** 静态输出延迟上限(ms)。对齐 MA `CONF_SENDSPIN_STATIC_DELAY` range=(0,5000)。 */
+export const STATIC_DELAY_MAX_MS = 5_000;
+
+const pauseWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** 取设备**实际所属**的组。
+ *  ⚠️ 不能直接用 `srv.group(clientId)`:设备一旦加入用户组,`conn.group` 指向
+ *  `ug:xxx`,而 `srv.group(clientId)` 返回的是**单设备组**(name=clientId) ——
+ *  两者不是同一个对象。真机实测:置位到单设备组 ⇒ sendGroupUpdate 读
+ *  conn.group.paused 恒为 false ⇒ 暂停后仍报 playing(2026-09-30 修复)。
+ *  未入组/离线时回退单设备组,行为与改动前一致。 */
+function resolveLiveGroup(srv: SendspinServer, clientId: string): SendspinGroup {
+  const conn = srv.clients.get(clientId) as (SendspinConnection & { group?: SendspinGroup }) | undefined;
+  const live = conn?.group;
+  if (live && typeof live === "object") return live;
+  return srv.group(clientId);
+}
+
+/** 向组内全体成员(含未入组的同名裸连接)广播一次组状态。
+ *  暂停/恢复必须**主动**推一帧:否则设备只能等到下一次字段变化才看得到 paused。 */
+function broadcastGroupState(srv: SendspinServer | null, clientId: string, g: SendspinGroup): void {
+  const done = new Set<SendspinConnection>();
+  for (const c of [...g.members]) {
+    done.add(c);
+    try { c.sendGroupUpdate(); } catch { /* 单台失败不连累其余 */ }
+  }
+  const bare = g.name ? srv?.clients.get(g.name) : undefined;
+  if (bare && !done.has(bare)) {
+    try { bare.sendGroupUpdate(); } catch { /* ignore */ }
+  }
+}
+
+function clearPauseWatchdog(clientId: string): void {
+  const t = pauseWatchdogs.get(clientId);
+  if (t) {
+    clearTimeout(t);
+    pauseWatchdogs.delete(clientId);
+  }
+}
+
+/** 起播路径统一清理:disarm 看门狗 + 复位 paused。
+ *  ⚠️ 恢复可能走**冷起播**(coldStartResume → playMedia → playCore),那条路
+ *  不经过 resumePumpCore;若不在起播入口清理,paused 与看门狗都会残留,
+ *  导致「已经恢复播放了,30s 后仍被自动 stop」(2026-09-30 真机修复)。 */
+function clearPauseState(srv: SendspinServer | null, id: string): void {
+  clearPauseWatchdog(id);
+  const g = srv?.group(id);
+  if (g) g.paused = false;
+  const conn = srv?.clients.get(id) as (SendspinConnection & { group?: SendspinGroup }) | undefined;
+  if (conn?.group) conn.group.paused = false;
+}
+
+function armPauseWatchdog(srv: SendspinServer | null, clientId: string): void {
+  clearPauseWatchdog(clientId);
+  const t = setTimeout(() => {
+    pauseWatchdogs.delete(clientId);
+    const g = srv ? resolveLiveGroup(srv, clientId) : null;
+    if (!g || !g.paused) return; // 期间已恢复 / 已停 ⇒ 不触发
+    log.info(
+      `[sendspin] 暂停满 ${PAUSE_AUTO_STOP_MS / 1000}s 未恢复,自动转 stop(对齐 MA _watch_pause) client=${clientId}`,
+    );
+    g.paused = false;
+    stopCore(srv, clientId);
+  }, PAUSE_AUTO_STOP_MS);
+  // 兜底回收不该吊住 event loop(尤其子进程退出路径)。
+  (t as any).unref?.();
+  pauseWatchdogs.set(clientId, t);
+}
+
+/** 静态输出延迟核心:钳制到 [0, STATIC_DELAY_MAX_MS] 后下发(带宣告门禁)。
+ *  未宣告 `set_static_delay` 的设备一律不发现状,返回 false(无副作用)。 */
+export function setStaticDelayCore(
+  srv: SendspinServer | null,
+  clientId: string,
+  delayMs: number,
+): boolean {
+  const v = Math.min(STATIC_DELAY_MAX_MS, Math.max(0, Math.round(delayMs)));
+  const g = srv ? resolveLiveGroup(srv, clientId) : null;
+  if (g) g.staticDelayMs = v;
+  if (!srv) return false;
+  let sent = false;
+  for (const c of [...(g?.members ?? [])]) {
+    try { if (c.sendStaticDelay(v)) sent = true; } catch { /* 单台失败不连累其余 */ }
+  }
+  return sent;
+}
+
 /** 暂停核心(打断节奏循环,不断连接;恢复走 resumePumpCore)。 */
 export function pauseCore(srv: SendspinServer | null, clientId: string): void {
   if (!srv) return;
-  pumpFor(srv, srv.group(clientId)).pause();
+  const g = resolveLiveGroup(srv, clientId);
+  g.paused = true;
+  pumpFor(srv, g).pause();
+  broadcastGroupState(srv, clientId, g);
+  // ⚠️ 只有「真的有曲目在播」才埋看门狗。设备未起播(队列空 / 只是挂了个暂停
+  // 标记)时 pause 也会走到这里,若无条件 arm,30s 后会把一台并未在播的设备
+  // 误 stop —— 240 真机实测:组内设备因此被判离线(2026-09-30 修复)。
+  if (g.current) armPauseWatchdog(srv, clientId);
 }
 
 /** 恢复核心:仅在「已有推流(暂停中)」时原地恢复;冷起播由主进程侧走 playMedia。 */
 export function resumePumpCore(srv: SendspinServer | null, clientId: string): void {
   if (!srv) return;
-  pumpFor(srv, srv.group(clientId)).resume();
+  const g = resolveLiveGroup(srv, clientId);
+  clearPauseWatchdog(clientId);
+  if (g.paused) {
+    g.paused = false;
+    broadcastGroupState(srv, clientId, g);
+  }
+  pumpFor(srv, g).resume();
 }
 
 /** seek 核心 —— **MA 权威语义**(controllers/player_queues/controller.py `seek` @862,

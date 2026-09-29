@@ -814,15 +814,25 @@ function openRenameLocalPeer(p: any) {
 }
 
 // 群组编辑对话框可选成员:排除禁用 DLNA 设备(禁用设备不可加入/保留在群组中)。
-// sendspin 在线客户端以 `sendspin:<id>` 形式并入(与后端命名空间一致,裸 id 仍视为 DLNA)。
+// sendspin 客户端(含离线)以 `sendspin:<id>` 形式并入(与后端命名空间一致,裸 id 仍视为
+// DLNA);离线的一并显示并带「离线」徽标 —— 后端对 sendspin 成员只校验格式,离线也能建组。
 const selectableDevices = computed(() => {
   const dlna = (dlnaDevices.value || []).filter((d: any) => !d.disabled);
+  // available 取**真实态**而不是硬编码 true:后端对离线补回的项(已禁用且当前离线)
+  // 带 offline:true,照它渲染才会出现「离线」徽标;两个字段都没有时回退 true。
   const spin = (sendspinClients.value || []).map((c: any) => ({
     id: `sendspin:${c.clientId}`,
     name: c.name || c.clientId,
-    available: true,
+    available: typeof c.available === "boolean" ? c.available : !c.offline,
     kind: "sendspin",
   }));
+  // 已记住但当前离线的拨号目标(与 sendspinRows 的 offlineTargets 同源同判据):
+  // 服务端 /dial 才 remember,与拨入设备不相交;它们当前未连上、没有 clientId,
+  // 故以 host:port 作为成员 id(后端按 sendspin:<id> 解析)。
+  // 拨号目标(dialTargets)不并入候选:它只有 host/port、没有 clientId,据此造出的
+  // `sendspin:host:port` 与设备重连后的真实 `sendspin:<clientId>` 是两条不同成员,
+  // 不会自动合并 -> 重复成员且永远离线。离线设备改由 /v1/sendspin/clients 以持久
+  // 设备档案为底表补回(带真实 clientId),此处不再需要 dialTargets 兜底。
   return [...dlna, ...spin];
 });
 

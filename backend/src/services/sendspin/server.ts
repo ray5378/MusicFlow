@@ -502,6 +502,12 @@ export class SendspinGroup {
   members = new Set<SendspinConnection>();
   volume = 100;
   muted = false;
+  /** 暂停标记(对齐 MA `PlaybackStateType.PAUSED`):曲目仍在组上但推流挂起。
+   *  仅用于 `group/update` 状态广播 —— 协议层没有 pause 命令,暂停不下发任何设备命令。 */
+  paused = false;
+  /** 静态输出延迟(ms)。对齐 MA `CONF_SENDSPIN_STATIC_DELAY`,range=(0,5000)。
+   *  只写给宣告了 `set_static_delay` 的设备,未宣告一律不发。 */
+  staticDelayMs = 0;
   positionMs = 0;
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
@@ -568,6 +574,8 @@ export class SendspinGroup {
     // 放在 `add()` 而非各调用点:入组入口有 playCore/playGroupCore/announce/重绑四处,
     // 漏掉任何一处都会重现上面的不一致。
     try { this.syncVolumeTo(c); } catch { /* 下发失败不该让入组失败 */ }
+    // 静态延迟同机对齐:设备宣告了才发,未宣告 no-op(见 syncStaticDelayTo)。
+    try { this.syncStaticDelayTo(c); } catch { /* 下发失败不该让入组失败 */ }
   }
   remove(c: SendspinConnection): void {
     this.members.delete(c);
@@ -622,6 +630,13 @@ export class SendspinGroup {
     const a = c.sendPlayerCommand({ command: "volume", volume: vol });
     const b = c.sendPlayerCommand({ command: "mute", mute: muted });
     return a && b;
+  }
+
+  /** 把当前静态输出延迟下发给该成员(幂等,可重复调用)。
+   *  未宣告 `set_static_delay` 的设备在 `sendStaticDelay` 内 no-op,
+   *  行为与引入该能力前完全一致 —— 不会凭空多出下行帧。 */
+  syncStaticDelayTo(c: SendspinConnection): boolean {
+    return c.sendStaticDelay(this.staticDelayMs);
   }
   /** 编码组键:同一份 PCM 经同一 codec、同一增益编出的字节**逐字节相同**,
    *  与是哪个客户端无关 —— 故同键成员共享一个编码器(见 pushFrame)。 */
@@ -1837,16 +1852,38 @@ export class SendspinConnection {
    *  未入组(idle)时按其默认组(clientId)报 stopped,给客户端稳定的组身份。 */
   sendGroupUpdate(): void {
     const g = this.group;
+    // 三态对齐 MA `PlaybackStateType`:有曲目但推流挂起 = paused,
+    // 让设备能区分「服务端暂停」与「断网/播完」(后两者此前都表现为 stopped)。
+    const state = !g?.current ? "stopped" : g.paused ? "paused" : "playing";
+    // 组状态是设备区分「暂停 / 断网 / 播完」的唯一依据,变化必须留痕(排障第一手证据)。
+    this.server.log("info", `group/update -> ${state} group=${g?.name ?? this.clientId ?? ""} client=${this.clientId ?? ""}`);
     this.sendJson("group/update", {
-      playback_state: g?.current ? "playing" : "stopped",
+      playback_state: state,
       group_id: g?.name ?? this.clientId ?? "",
       group_name: g?.name ?? this.name,
     });
   }
 
   /** 设备是否宣告支持某条 player 命令(`volume` / `mute`,见 `supportedCommands`)。 */
-  supportsCommand(cmd: "volume" | "mute"): boolean {
+  supportsCommand(cmd: "volume" | "mute" | "set_static_delay"): boolean {
     return this.supportedCommands.includes(cmd);
+  }
+
+  /** 下发静态输出延迟(MA `CONF_SENDSPIN_STATIC_DELAY`,range 0-5000,immediate_apply)。
+   *  与 volume/mute 同走 `server/command` 的 player 命令面,设备输出级实时生效。
+   *  ⚠️ 同一道门禁:设备 `client/hello` 未宣告 `set_static_delay` 一律不发
+   *  (MA `player.py:1707-1711` 门禁 + `_apply_static_delay` @1938)。
+   *  返回是否真的发出(调用方据此决定是否降级)。 */
+  sendStaticDelay(delayMs: number): boolean {
+    if (!this.supportsCommand("set_static_delay")) return false;
+    try {
+      this.sendJson("server/command", {
+        player: { command: "set_static_delay", delay: Math.round(delayMs) },
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** 下发一条 MA `server/command` 的 **player 命令**(与 `stream/start` 并列的下行控制面)。

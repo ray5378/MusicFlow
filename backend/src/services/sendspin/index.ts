@@ -277,10 +277,12 @@ export async function startSendspinInProcess(port?: number, hooks?: SendspinBoot
         hooks.onClosed(conn);
         return;
       }
-      // 客户端断开:撤下其 sendspin peer(留播放器与队列,便于重连恢复)。
+      // 客户端断开:只把 peer 置为**离线**(行保留、可见;播放器与队列不动,便于重连恢复)。
+      // 与 DLNA / AirPlay 同口径 —— 断连不是「设备被删除」,真删只发生在显式意图路径
+      // (用户禁用 / 删除、插件停用,见 sendspinSetDisabled / removeSendspinPeers)。
       if (!conn.clientId) return;
       try {
-        pmSingleton?.removeSendspinPeer(conn.clientId);
+        pmSingleton?.markSendspinUnavailable(conn.clientId, conn.name || conn.clientId);
       } catch { /* peer 层未就绪时忽略 */ }
     },
   });
@@ -369,8 +371,9 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
       // 上线回组(与 in-proc registerServerPlayer 尾部同构,见 rejoinActiveGroups)。
       void rejoinActiveGroups(clientId);
     },
+    // 与 in-proc 同口径:断连只置离线(行保留可见),不摘除 peer。
     onClosed: (clientId) => {
-      try { pmSingleton?.removeSendspinPeer(clientId); } catch { /* ignore */ }
+      try { pmSingleton?.markSendspinUnavailable(clientId); } catch { /* ignore */ }
     },
     onPlayFailed: (clientId, songId, message) => {
       log.warn(`sendspin play ${songId} failed(client=${clientId}): ${message}`);

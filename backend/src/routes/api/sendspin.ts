@@ -18,7 +18,7 @@ app.get("/v1/sendspin/clients", async (c) => {
   const srv = sendspinServerOr404(c);
   if (!srv) return c.json({ clients: [], enabled: false });
   const store = srv.pairingStore;
-  const { getDeviceDisabled, listDisabledDeviceIds, listEsphomeCreds } = await import("../../services/sendspin/deviceState.js");
+  const { getDeviceDisabled, listDisabledDeviceIds, listKnownDeviceIds, listEsphomeCreds } = await import("../../services/sendspin/deviceState.js");
   // 6053 是每台设备各连各的:按 clientId 建「已填密钥 → 端口」索引,按 host 建桥接
   // 快照索引(remoteHost 是连接派生的,前端拿不到,所以由后端在这里替前端对齐)。
   const esphomePortByClient = new Map<string, number>(
@@ -69,27 +69,47 @@ app.get("/v1/sendspin/clients", async (c) => {
             muted: !!p0?.muted,
           };
         })(),
+        // 在线连接:显式给出与离线行同构的两个标记(前端按 offline 分派行样式)。
+        offline: false,
+        available: true,
       };
     });
-  // 已禁用但当前离线的设备补回列表:否则禁用(会断连接)后该设备从列表消失,
-  // 用户再无入口把它启用回来。与 DLNA loadPersistedDevices 恢复禁用设备同效。
-  for (const clientId of listDisabledDeviceIds()) {
+  // 离线设备同样要在列表里(与 DLNA / AirPlay 同口径:断连只置位、不摘除):
+  // ① 已知但当前离线 —— 底表是持久设备档案 sendspin_device_state(排除 disabled),
+  //    设备断连后必须有行,否则用户在群组页 / 播放器页再也找不到它、也没法回组;
+  // ② 已禁用且离线 —— 保留在列表里才有入口把它启用回来(与 DLNA loadPersistedDevices
+  //    把禁用设备恢复进缓存同效)。
+  // 在线连接态已先入 clients,这里只补「有档案但当前无连接」的行。
+  const offlineIds = new Map<string, boolean>(); // clientId → disabled
+  for (const clientId of listKnownDeviceIds()) offlineIds.set(clientId, false);
+  for (const clientId of listDisabledDeviceIds()) offlineIds.set(clientId, true);
+  for (const [clientId, disabled] of offlineIds) {
     if (live.has(clientId)) continue;
+    const rec = store?.getRecord(clientId);
     clients.push({
       clientId,
+      // 持久档案里没有名字列:离线行用 clientId 兜底(前端会套用改名覆盖)。
       name: clientId,
       roles: [],
       legacy: false,
-      paired: !!store?.getRecord(clientId),
-      pairedAt: store?.getRecord(clientId)?.createdAt ?? null,
-      lastUsedAt: store?.getRecord(clientId)?.lastUsedAt ?? null,
+      paired: !!rec,
+      pairedAt: rec?.createdAt ?? null,
+      lastUsedAt: rec?.lastUsedAt ?? null,
       approved: store?.isApproved(clientId) ?? false,
-      disabled: true,
+      disabled,
       dialed: false,
       host: "",
       port: 0,
       pairing: null,
       offline: true, // 前端据此渲染为离线行(变暗 + 不显示在线专属按钮)
+      available: false, // 与 peer 层同口径:离线 = available:false(不是「不存在」)
+      esphome: {
+        pskConfigured: esphomePortByClient.has(clientId),
+        port: esphomePortByClient.get(clientId) ?? 6053,
+        connected: false,
+        volume: null,
+        muted: false,
+      },
     } as any);
   }
   return c.json({ clients, enabled: true, port: srv.port });
