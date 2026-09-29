@@ -829,20 +829,11 @@ const selectableDevices = computed(() => {
   // 已记住但当前离线的拨号目标(与 sendspinRows 的 offlineTargets 同源同判据):
   // 服务端 /dial 才 remember,与拨入设备不相交;它们当前未连上、没有 clientId,
   // 故以 host:port 作为成员 id(后端按 sendspin:<id> 解析)。
-  const onlineDialKeys = new Set(
-    (sendspinClients.value || [])
-      .filter((c: any) => c.dialed && c.host)
-      .map((c: any) => `${c.host}:${c.port}`),
-  );
-  const spinTargets = (dialTargets.value || [])
-    .filter((tg: any) => !tg.online && !onlineDialKeys.has(`${tg.host}:${tg.port}`))
-    .map((tg: any) => ({
-      id: `sendspin:${tg.host}:${tg.port}`,
-      name: `${tg.host}:${tg.port}`,
-      available: false,
-      kind: "sendspin",
-    }));
-  return [...dlna, ...spin, ...spinTargets];
+  // 拨号目标(dialTargets)不并入候选:它只有 host/port、没有 clientId,据此造出的
+  // `sendspin:host:port` 与设备重连后的真实 `sendspin:<clientId>` 是两条不同成员,
+  // 不会自动合并 -> 重复成员且永远离线。离线设备改由 /v1/sendspin/clients 以持久
+  // 设备档案为底表补回(带真实 clientId),此处不再需要 dialTargets 兜底。
+  return [...dlna, ...spin];
 });
 
 // deviceId → 除当前编辑组外,还属于哪些组(仅展示提示,不阻止多组加入)。

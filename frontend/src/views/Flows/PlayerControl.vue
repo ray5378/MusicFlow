@@ -198,7 +198,9 @@ async function loadCtlTargets() {
   try {
     const s = await api.get("/rest/api/v1/sendspin/clients");
     for (const it of s.data?.clients || []) {
-      out.push({ peerId: `sendspin:${it.clientId}`, name: it.name || it.clientId, kind: "sendspin", available: true });
+      // available 取后端真实态(/v1/sendspin/clients 对离线补回的行带 available:false /
+      // offline:true),不再硬编码 true —— 否则离线 ESP32 在这被错标为在线。
+      out.push({ peerId: `sendspin:${it.clientId}`, name: it.name || it.clientId, kind: "sendspin", available: typeof it.available === "boolean" ? it.available : !it.offline });
     }
   } catch {}
   ctlTargets.value = out;
