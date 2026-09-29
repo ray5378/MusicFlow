@@ -277,7 +277,7 @@ describe("online: 导入", () => {
   it("import → 入库抛错映射为 500/INTERNAL(原文不泄露)", async () => {
     const pkg: any = await import("../../src/services/source/online/service.js");
     (pkg.importOnlineSongs as any).mockRejectedValueOnce(new Error("db down"));
-    const r = await call("POST", `/v1/online/${P}/import", { songs: [{ id: "o3" }], verified: true });
+    const r = await call("POST", `/v1/online/${P}/import`, { songs: [{ id: "o3" }], verified: true });
     expect(r.status).toBe(500);
     expect(r.body).toMatchObject({ success: false, code: "INTERNAL" });
     expect(r.body.error).toBe(translate("errors.import.failed"));

@@ -1,38 +1,29 @@
-// pairServer.ts 覆盖率补口:配对状态机的**错误收口**与"背靠背"缓存路径。
+// pairServer.ts 覆盖率补口:配对状态机的**错误收口**。
 //
 // 缺口背景(PairingCoordinator 每条都是"一次错就配对失败且无提示"的路径):
 //   - enterCode 在设备**已锁码窗口**内再输码 → 必须拒绝(防爆破);
 //   - dynamic 的 commit_B / pair-auth 的 pake_msg_2 / pair-confirm 的 client_kc
-//     解码失败 → 必须 abort 或静默断连,**不能把异常抛进 WS 事件回调**;
-//   - finalize 与 confirm/auth **背靠背**到达时的缓存与消费(协议允许对端一次发两帧);
+//     非法 → 由长度 / derive / 验签守卫收口,**不能把异常抛进 WS 事件回调**;
 //   - 静态码 confirm 验签失败累计到上限 → 必须锁定并 abort(不是无限重试)。
 //
-// ⚠️ 其中三处 base64 解码 catch 在**真实实现**下是防御性死分支(旧用例已固化:
-// `b64urlDecode` 对非法字符静默丢弃、从不抛错)。这里用哨兵字符串让解码抛错,专门
-// 验证「万一真抛了,连接是否被正确判废」—— 这比让这三行永远黑着更有意义。
+// 2026-09-29(v4.0.63,D31/D32/D33 死代码清理)后本文件同步收敛:
+//   - waitForCode() / codeWaiters 无调用点,已删除 → 不再构造"挂起等码"场景;
+//   - pendingFinalize 缓存路径条件自相矛盾(finalize 只在 state !== await_confirm 时才写、
+//     而缓存又要求 state === await_confirm),不可达,已删除 → finalize 抢在 auth/confirm
+//     之前到达时按「直接忽略」处理,不再缓存;
+//   - b64urlDecode 用 Buffer.from(..., "base64url"),非法字符静默丢弃、**永不抛**,
+//     故三处防御性 try/catch 已删除;非法载荷改由长度 / derive / 验签守卫收口。
 //
 // 隔离:全内存假 conn / 假 store,不碰真 WS / 真 DB。
 import "../plugins/_env.js";
 
 import { describe, it, expect, vi } from "vitest";
 
-vi.mock("../../src/services/sendspin/util.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/services/sendspin/util.js")>();
-  return {
-    ...actual,
-    b64urlDecode: (s: string) => {
-      if (s === "__BAD__") throw new Error("malformed base64");
-      return actual.b64urlDecode(s);
-    },
-  };
-});
-
 import { PairingCoordinator } from "../../src/services/sendspin/pairServer.js";
-import { CPace, wrapKey, aeadSeal } from "../../src/services/sendspin/cpace.js";
+import { CPace } from "../../src/services/sendspin/cpace.js";
 import { b64urlEncode, b64urlDecode } from "../../src/services/sendspin/util.js";
 
 const PAKE_SID_LABEL = "sendspin-pair-pake-v1";
-const WRAP_PSK_LABEL = "sendspin-pair-psk-wrap-v1";
 const SUITE = "CHACHA20POLY1305";
 const H = new Uint8Array(32).fill(7);
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -110,9 +101,6 @@ function clientFor(conn: any, code: string) {
   return client;
 }
 
-const wrappedPsk = (client: CPace, psk: Uint8Array) =>
-  b64urlEncode(aeadSeal("chacha", wrapKey(WRAP_PSK_LABEL, sidFor(H, 1), client.getISK()), psk));
-
 describe("enterCode:锁码窗口守卫", () => {
   it("静码失败次数达上限(窗口未过)→ 拒绝输码(防爆破)", async () => {
     const conn = makeConn();
@@ -127,29 +115,34 @@ describe("enterCode:锁码窗口守卫", () => {
   });
 });
 
-describe("配对消息的解码失败收口", () => {
-  it("dynamic pair-init 的 commit_B 解码抛错 → abort protocol_error", async () => {
+describe("配对消息的非法载荷收口(靠长度 / derive / 验签守卫,不靠 catch)", () => {
+  it("dynamic pair-init 的 commit_B 非法 → 解码后长度 != 32 → abort protocol_error", async () => {
     const conn = makeConn();
     const logs: string[] = [];
     const coord = new PairingCoordinator(makeServer(conn, logs), makeStore());
     await coord.start("CLIENTID", "dynamic_pin");
-    await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: "__BAD__" });
+    // b64urlDecode("@@@") 把非法字符丢弃 → 空串,长度守卫直接收口。
+    await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: "@@@" });
     expect(coord.getAttempt("CLIENTID")).toBeUndefined();
     expect(logs.some((l) => l.includes("protocol_error"))).toBe(true);
   });
 
-  it("pair-auth 的 pake_msg_2 解码抛错 → abort protocol_error", async () => {
-    const { conn, coord } = await staticToAwaitPeerAuth();
-    await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: "__BAD__" });
+  it("pair-auth 的 pake_msg_2 非法 → derive 抛错,静默断连且不落盘", async () => {
+    const { conn, store, coord } = await staticToAwaitPeerAuth();
+    await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: "@@@" });
+    // 契约:解码异常不能冒进 WS 回调 —— 走 derive 失败分支静默断连、attempt 清掉。
+    expect(conn.closed).toBe(true);
     expect(coord.getAttempt("CLIENTID")).toBeUndefined();
+    expect(store.putRecord).not.toHaveBeenCalled();
   });
 
-  it("pair-confirm 的 client_kc 解码抛错 → abort protocol_error", async () => {
-    const { conn, coord } = await staticToAwaitPeerAuth();
+  it("pair-confirm 的 client_kc 非法 → 验签失败,绝不落盘", async () => {
+    const { conn, store, coord } = await staticToAwaitPeerAuth();
     const client = clientFor(conn, "12345678");
     await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(client.publicShare) });
-    await coord.onPairMessage(conn, "client/pair-confirm", { pairing_index: 1, client_kc: "__BAD__" });
-    expect(coord.getAttempt("CLIENTID")).toBeUndefined();
+    await coord.onPairMessage(conn, "client/pair-confirm", { pairing_index: 1, client_kc: "@@@" });
+    // 无论失败是否触发锁定,未通过验签就绝不能写下 pair 记录。
+    expect(store.putRecord).not.toHaveBeenCalled();
   });
 });
 
@@ -171,63 +164,26 @@ describe("静态码 confirm 验签失败累计到上限 → 锁定并 abort", ()
   });
 });
 
-describe("finalize 与 auth/confirm 背靠背到达的缓存与消费", () => {
-  it("auth 处理完立刻消费已缓存的 finalize(无需等对端重发)", async () => {
+describe("finalize 抢在 auth/confirm 之前到达 → 直接忽略(不再缓存)", () => {
+  it("状态未到 await_confirm 的 finalize → 不落盘、无 pendingFinalize 缓存、状态机不回退", async () => {
     const { conn, store, coord } = await staticToAwaitPeerAuth();
-    const client = clientFor(conn, "12345678");
-    const psk = new Uint8Array(32).fill(5);
-    (coord as any).attempts.get("CLIENTID").pendingFinalize = {
-      pairing_index: 1,
-      wrapped_psk: wrappedPsk(client, psk),
-    };
-    await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(client.publicShare) });
-    // 契约:对端常把 auth+finalize 一起发;不消费缓存就会永远停在 await_confirm。
-    expect(store.putRecord).toHaveBeenCalledWith("CLIENTID", Buffer.from(psk).toString("hex"));
-    expect(coord.getAttempt("CLIENTID")).toBeUndefined();
-  });
-
-  it("confirm 处理完立刻消费已缓存的 finalize", async () => {
-    const { conn, store, coord } = await staticToAwaitPeerAuth();
-    const client = clientFor(conn, "12345678");
-    const psk = new Uint8Array(32).fill(6);
-    await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(client.publicShare) });
-    (coord as any).attempts.get("CLIENTID").pendingFinalize = {
-      pairing_index: 1,
-      wrapped_psk: wrappedPsk(client, psk),
-    };
-    await coord.onPairMessage(conn, "client/pair-confirm", { pairing_index: 1, client_kc: b64urlEncode(client.tag()) });
-    expect(store.putRecord).toHaveBeenCalledWith("CLIENTID", Buffer.from(psk).toString("hex"));
-    expect(coord.getAttempt("CLIENTID")).toBeUndefined();
-  });
-
-  it("finalize 先到(状态未到 await_confirm)→ 只缓存,不落盘", async () => {
-    const { conn, store, coord } = await staticToAwaitPeerAuth();
-    const a = (coord as any).attempts.get("CLIENTID");
-    a.state = "await_confirm";
-    a.cpace = undefined; // 尚无 PAKE 会话
+    // 此刻 state = await_peer_auth(尚未收 pair-auth),finalize 提前到达。
     await coord.onPairMessage(conn, "client/pair-finalize", { pairing_index: 1, wrapped_psk: "AAAA" });
-    // 契约:必须缓存等 confirm;此刻落盘会写进一个未经 PAKE 认证的 PSK。
+    // 旧实现的 pendingFinalize 缓存已随 D32 清理删除:过早到达的 finalize 一律忽略。
     expect(store.putRecord).not.toHaveBeenCalled();
-    expect(a.pendingFinalize).toEqual({ pairing_index: 1, wrapped_psk: "AAAA" });
+    const a = (coord as any).attempts.get("CLIENTID");
+    expect(a.pendingFinalize).toBeUndefined();
+    expect(a.state).toBe("await_peer_auth"); // 状态机不因过早的 finalize 而回退
   });
 });
 
-describe("waitForCode(当前无调用点)", () => {
-  it("码已就绪 → 直接 resolve;码未就绪 → 挂起并在 enterCode 时被唤醒", async () => {
+describe("waitForCode 已删除(无调用点)", () => {
+  it("PairingCoordinator 不再暴露 waitForCode / codeWaiters", async () => {
     const conn = makeConn();
     const coord = new PairingCoordinator(makeServer(conn), makeStore());
     await coord.start("CLIENTID", "static_pin");
     const a = (coord as any).attempts.get("CLIENTID");
-    a.codeRaw = new Uint8Array([1, 2, 3]);
-    // 契约:码就绪时必须**立即**返回,不允许把已有码的轮次挂起。
-    await expect((coord as any).waitForCode(a)).resolves.toBeUndefined();
-
-    a.codeRaw = undefined;
-    const pending = (coord as any).waitForCode(a);
-    expect(a.codeWaiters.length).toBe(1);
-    // enterCode 会唤醒所有 waiter(码到了就放行 PAKE)。
-    await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1 });
-    await coord.enterCode("CLIENTID", "12345678");
-    await expect(pending).resolves.toBeUndefined();
+    expect((coord as any).waitForCode).toBeUndefined();
+    expect(a.codeWaiters).toBeUndefined();
   });
 });

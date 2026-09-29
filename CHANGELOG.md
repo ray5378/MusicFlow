@@ -49,6 +49,19 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.64] - 2026-09-29
+
+### 修复（发版 CI 回归：测试文件与 v4.0.62/v4.0.63 实现不同步）
+- [P1] `tests/routes/apiOnline.test.ts`：R5 精确替换时第 280 行模板字面量引号损坏（反引号开启、却用双引号闭合），导致 esbuild 转译失败、整份文件无法加载（`Test Files 1 failed / Tests no tests`），并连带 `ci` 与 `build-and-push` 的全量测试门禁失败。改为正确的反引号闭合（diff 仅 1 行）。
+- [P1] `tests/sendspin/lt1_pairServerGaps.test.ts`：与 v4.0.63（D31/D32/D33 死代码清理）不同步，9 条中 7 条失败：
+  - 3 条「解码失败收口」用例依赖已删除的三处 `b64urlDecode` try/catch（用哨兵 `__BAD__` 强制解码抛错）→ 改为基于保留守卫（解码后长度 / derive / 验签）的真实载荷用例。
+  - 3 条「finalize 背靠背缓存」用例依赖已删除的 `pendingFinalize`→ 改为锁定新契约：抢在 auth/confirm 之前到达的 finalize 一律忽略（不落盘、不缓存）。
+  - 1 条 `waitForCode` 用例依赖已删除的方法 → 改为断言该入口已不存在。
+- 与更早同步完成的 `pairServer.test.ts` / `pairServerBranches.test.ts` 口径一致。
+
+### 测试
+- 仅改上述两个测试文件（`apiOnline.test.ts` +1/-1；`lt1_pairServerGaps.test.ts` 净删 44 行），无产品代码改动。
+
 ## [4.0.63] - 2026-09-29
 
 ### 修复（真实产品缺陷：sendspin 配对模块死代码/死 catch 清理 D31/D32/D33）
