@@ -134,12 +134,14 @@ beforeEach(() => {
 });
 
 describe("online:内联匹配失败必须映射为上游错误(而非 200 success:false)", () => {
-  it("小歌单匹配抛错 → 5xx/UPSTREAM 语义 + 错误体带 error,绝不当成成功", async () => {
+  it("小歌单匹配抛错 → 502/UPSTREAM_ERROR + 稳定文案,内部异常原文不泄露", async () => {
     matchMocks.matchUnmatchedPlaylistEntries.mockRejectedValueOnce(new Error("上游搜索超时"));
     const r = await call("POST", `/v1/online/${P}/match-playlist`, { playlistId: "pl-small" });
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(502);
     expect(r.body.success).toBe(false);
-    expect(String(r.body.error)).toContain("上游搜索超时");
+    expect(r.body.code).toBe("UPSTREAM_ERROR");
+    expect(r.body.error).toBe(translate("errors.online.matchFailed"));
+    expect(String(r.body.error)).not.toContain("上游搜索超时");
   });
 });
 
@@ -169,7 +171,9 @@ describe("online:大歌单后台任务失败要落到 status=failed(前端可轮
     await settle();
     const st = await call("GET", `/v1/online/${P}/match-playlists/status?batchId=${r.body.batchId}`);
     expect(st.body.status).toBe("failed");
-    expect(String(st.body.error)).toContain("批量匹配失败");
+    // 后台任务失败:状态体暴露通用文案,内部异常原文不再外泄(只进服务端日志)
+    expect(st.body.error).toBe(translate("errors.online.matchFailed"));
+    expect(String(st.body.error)).not.toContain("批量匹配失败");
   });
 
   it("recommend/sync-all 路径 A 抛错 → running 归 false 且 error 可读(不假装还在跑)", async () => {
@@ -181,27 +185,33 @@ describe("online:大歌单后台任务失败要落到 status=failed(前端可轮
     const st = await call("GET", `/v1/online/${P}/recommend/sync-all/status`);
     expect(st.status).toBe(200);
     expect(st.body.running).toBe(false);
-    expect(String(st.body.error)).toContain("推荐重导失败");
+    // 后台任务失败:状态体暴露通用文案,内部异常原文不再外泄(只进服务端日志)
+    expect(st.body.error).toBe(translate("errors.online.syncAllFailed"));
+    expect(String(st.body.error)).not.toContain("推荐重导失败");
   });
 
-  it("purge-web-songs 批量任务抛错 → 5xx/INTERNAL 语义 + error 透传", async () => {
+  it("purge-web-songs 批量任务抛错 → 500/INTERNAL + 稳定文案,内部异常原文不泄露", async () => {
     ctrl.failKind = "purge-web-songs";
     ctrl.failMessage = "清理子进程异常";
     const r = await call("POST", `/v1/online/${P}/purge-web-songs`);
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(500);
     expect(r.body.success).toBe(false);
-    expect(String(r.body.error)).toContain("清理子进程异常");
+    expect(r.body.code).toBe("INTERNAL");
+    expect(r.body.error).toBe(translate("errors.online.purgeFailed"));
+    expect(String(r.body.error)).not.toContain("清理子进程异常");
   });
 });
 
 describe("online:单曲匹配失败映射", () => {
-  it("match-track 上游抛错 → 非 2xx + error(不得吞成 success:false 的 200)", async () => {
+  it("match-track 上游抛错 → 502/UPSTREAM_ERROR + 稳定文案,内部异常原文不泄露", async () => {
     const rows = db.select().from(playlistSongs).all().filter((e) => e.playlistId === "pl-small" && !e.playable);
     matchMocks.matchToOnlineSong.mockRejectedValueOnce(new Error("匹配服务不可用"));
     const r = await call("POST", `/v1/online/${P}/match-track`, { entryId: rows[0].id });
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(502);
     expect(r.body.success).toBe(false);
-    expect(String(r.body.error)).toContain("匹配服务不可用");
+    expect(r.body.code).toBe("UPSTREAM_ERROR");
+    expect(r.body.error).toBe(translate("errors.online.matchFailed"));
+    expect(String(r.body.error)).not.toContain("匹配服务不可用");
   });
 });
 
@@ -223,5 +233,40 @@ describe("online:recommend/import 沙箱错误 → 稳定错误码 + 正确状�
     expect(r.body.hint).toBe("请在插件配置中放行该域名");
     // 内部异常原文不得外泄(只进服务端日志)
     expect(r.body.error).not.toContain("沙箱拒绝网络访问");
+  });
+});
+
+describe("online:聚合搜索 / 获取推荐 / 导入 失败 → 稳定错误码 + 正确状态码(绝不泄露内部异常原文)", () => {
+  it("/search 上游抛错 → 502/UPSTREAM_ERROR + errors.search.failed,原文不泄露", async () => {
+    FAKE_PROVIDER.search.mockRejectedValueOnce(new Error("搜索后端挂了"));
+    const r = await call("POST", `/v1/online/${P}/search`, { q: "周杰伦" });
+    expect(r.status).toBe(502);
+    expect(r.body.success).toBe(false);
+    expect(r.body.code).toBe("UPSTREAM_ERROR");
+    expect(r.body.error).toBe(translate("errors.search.failed"));
+    expect(String(r.body.error)).not.toContain("搜索后端挂了");
+  });
+
+  it("/recommend GET 上游抛错 → 502/UPSTREAM_ERROR + errors.online.fetchRecommendFailed,原文不泄露", async () => {
+    FAKE_PROVIDER.recommend.mockRejectedValueOnce(new Error("推荐接口 500"));
+    const r = await call("GET", `/v1/online/${P}/recommend`);
+    expect(r.status).toBe(502);
+    expect(r.body.success).toBe(false);
+    expect(r.body.code).toBe("UPSTREAM_ERROR");
+    expect(r.body.error).toBe(translate("errors.online.fetchRecommendFailed"));
+    expect(String(r.body.error)).not.toContain("推荐接口 500");
+  });
+
+  it("/import 入库抛错 → 500/INTERNAL + errors.import.failed,原文不泄露", async () => {
+    const mod: any = await import("../../src/services/source/online/service.js");
+    (mod.importOnlineSongs as any).mockRejectedValueOnce(new Error("数据库写入失败"));
+    const r = await call("POST", `/v1/online/${P}/import`, {
+      songs: [{ title: "歌", artist: "人", source: "netease", id: "i1" }],
+    });
+    expect(r.status).toBe(500);
+    expect(r.body.success).toBe(false);
+    expect(r.body.code).toBe("INTERNAL");
+    expect(r.body.error).toBe(translate("errors.import.failed"));
+    expect(String(r.body.error)).not.toContain("数据库写入失败");
   });
 });

@@ -49,6 +49,29 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.62] - 2026-09-29
+
+### 修复（真实产品缺陷：online.ts 上游异常原文外泄）
+- [MED] `routes/api/online.ts` 多处错误响应把上游异常原文 `e.message` 透传给客户端：
+  - 响应泄漏（随 `error` 字段外泄）：`/search`、内联 `/match-playlist`、单曲 `/match-track`、
+    `/unmatched`、单曲 `/import`、GET `/recommend`、`/purge-web-songs` 共 7 处 `apiError(CODE, e.message || key)`。
+  - 后台任务状态泄漏：`/match-playlists` 与 `/recommend/sync-all` 的 `job.error` / `state.error`
+    写入原始 `e.message`，经 status 轮询接口暴露。
+- 修复：所有泄漏点改为返回**稳定 i18n key**（不随异常内容变化），原始异常只进 `log.error`（服务端日志，脱敏）；
+  状态码与业务码不变（UPSTREAM_ERROR→502 / INTERNAL→500）。
+- 新增 i18n key `errors.online.syncAllFailed`（「同步所有平台失败」），其余复用既有 key
+  （`errors.search.failed` / `errors.search.queryFailed` / `errors.online.matchFailed` /
+  `errors.online.fetchRecommendFailed` / `errors.import.failed` / `errors.online.purgeFailed`）。
+
+### 测试
+- `tests/routes/apiOnlineErrorPaths.test.ts`：既有 5 个仍断言原文泄漏的用例改为断言稳定 key + 证伪原文；
+  新增 `/search`、GET `/recommend`、`/import` 失败路径用例（断言 502/500 + 业务码 + 稳定 key + 原文不泄露）。
+- `tests/routes/apiOnline.test.ts`：3 个断言 `error:"boom"/"db down"/"upstream down"` 的用例改为断言稳定 key + 证伪原文。
+
+### 覆盖率（全量实测）
+- 全量回归：391 文件 / 5449 条用例全绿，0 失败；`tsc --noEmit` 干净。
+- Lines **99.15%**；Branches **88.21%**；Functions **97.19%**（对比 v4.0.61 基本持平，+3 用例，无新增缺口）。
+
 ## [4.0.61] - 2026-09-29
 
 ### 修复（真实产品缺陷，来自 4.0.60 汇总台账）

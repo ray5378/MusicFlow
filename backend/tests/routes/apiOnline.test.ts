@@ -9,6 +9,7 @@ import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, playlists, playlistSongs, songs } from "../../src/db/schema.js";
 import { eq, asc } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
+import { translate } from "../../src/i18n.js";
 
 // ==================== mocks ====================
 // 这些 mock 让路由走「已配置 provider」的正常分支,不被真实网络/子进程拖住。
@@ -154,13 +155,16 @@ describe("online: provider test / search", () => {
     expect(r.body.songs[0]).toMatchObject({ platformLabel: "netease", streamUrl: "http://stream/1.mp3" });
   });
 
-  it("POST search → 缺 q 报错,provider 抛错被吞成 success=false", async () => {
+  it("POST search → 缺 q 报错,provider 抛错映射为 502/UPSTREAM_ERROR(原文不泄露)", async () => {
     const missing = await call("POST", `/v1/online/${P}/search`, {});
-    expect(missing.body.success).toBe(false);
+    expect(missing.status).toBe(400);
     FAKE_PROVIDER.search.mockRejectedValueOnce(new Error("boom"));
     const bad = await call("POST", `/v1/online/${P}/search`, { q: "x" });
+    expect(bad.status).toBe(502);
     expect(bad.body.success).toBe(false);
-    expect(bad.body.error).toBe("boom");
+    expect(bad.body.code).toBe("UPSTREAM_ERROR");
+    expect(bad.body.error).toBe(translate("errors.search.failed"));
+    expect(String(bad.body.error)).not.toContain("boom");
   });
 });
 
@@ -270,11 +274,14 @@ describe("online: 导入", () => {
     expect(ok.body).toMatchObject({ success: true, rejected: 1, imported: 1 });
   });
 
-  it("import → 入库抛错被吞成 success=false", async () => {
+  it("import → 入库抛错映射为 500/INTERNAL(原文不泄露)", async () => {
     const pkg: any = await import("../../src/services/source/online/service.js");
     (pkg.importOnlineSongs as any).mockRejectedValueOnce(new Error("db down"));
-    const r = await call("POST", `/v1/online/${P}/import`, { songs: [{ id: "o3" }], verified: true });
-    expect(r.body).toMatchObject({ success: false, error: "db down" });
+    const r = await call("POST", `/v1/online/${P}/import", { songs: [{ id: "o3" }], verified: true });
+    expect(r.status).toBe(500);
+    expect(r.body).toMatchObject({ success: false, code: "INTERNAL" });
+    expect(r.body.error).toBe(translate("errors.import.failed"));
+    expect(String(r.body.error)).not.toContain("db down");
   });
 });
 
@@ -287,12 +294,16 @@ describe("online: 推荐歌单", () => {
     expect(FAKE_PROVIDER.recommend).toHaveBeenCalled();
   });
 
-  it("recommend → provider 无 recommend 能力时明确报错", async () => {
+  it("recommend → provider 抛错映射为 502/UPSTREAM_ERROR(原文不泄露)", async () => {
     const r = await call("GET", `/v1/online/${P}/recommend`);
     expect(r.body.success).toBe(true);
     FAKE_PROVIDER.recommend.mockRejectedValueOnce(new Error("upstream down"));
     const bad = await call("GET", `/v1/online/${P}/recommend`);
-    expect(bad.body).toMatchObject({ success: false, error: "upstream down" });
+    expect(bad.status).toBe(502);
+    expect(bad.body.success).toBe(false);
+    expect(bad.body.code).toBe("UPSTREAM_ERROR");
+    expect(bad.body.error).toBe(translate("errors.online.fetchRecommendFailed"));
+    expect(String(bad.body.error)).not.toContain("upstream down");
   });
 
   it("recommend/local → 只列出本地已导入的推荐歌单", async () => {

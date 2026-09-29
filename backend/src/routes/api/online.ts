@@ -97,7 +97,8 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
     }));
     return c.json({ success: true, total: songs.length, songs });
   } catch (e: any) {
-    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.search.failed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+    log.error(`[ONLINE] search 失败: ${e?.message || e}`);
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.search.failed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -132,7 +133,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlist", permMiddleware(PERM.P
       const result = await matchUnmatchedPlaylistEntries(providerId, configured.config, configured.provider, playlistId);
       return c.json({ success: true, jobId: null, ...result });
     } catch (e: any) {
-      return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.online.matchFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+      log.error(`[ONLINE] match-playlist 内联匹配失败: ${e?.message || e}`);
+      return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.online.matchFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
   }
 
@@ -205,7 +207,8 @@ onlineRoutes.post("/v1/online/:providerId/match-playlists", permMiddleware(PERM.
       job.results = Array.isArray(result?.results) ? result.results : [];
       Object.assign(job, { status: "completed", done: result?.done ?? job.total, finishedAt: new Date().toISOString() });
     } catch (e: any) {
-      job.error = String(e?.message || e);
+      log.error(`[ONLINE] match-playlists 批量任务失败: ${e?.message || e}`);
+      job.error = translate("errors.online.matchFailed");
       Object.assign(job, { status: "failed", finishedAt: new Date().toISOString() });
     }
   })();
@@ -246,7 +249,8 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
     });
     return c.json({ success: result.status === "matched", ...result });
   } catch (e: any) {
-    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.online.matchFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+    log.error(`[ONLINE] match-track 失败: ${e?.message || e}`);
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.online.matchFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -263,7 +267,8 @@ onlineRoutes.get("/v1/online/:providerId/unmatched", permMiddleware(PERM.PLAYLIS
       id: e.id, title: e.externalTitle, artist: e.externalArtist, album: e.externalAlbum, duration: e.externalDuration,
     })) });
   } catch (e: any) {
-    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.search.queryFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+    log.error(`[ONLINE] unmatched 查询失败: ${e?.message || e}`);
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.search.queryFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 // Body: { songs: OnlineSongResult[], playlistId?: string, verified?: boolean }
@@ -297,7 +302,8 @@ onlineRoutes.post("/v1/online/:providerId/import", permMiddleware(PERM.PLAYLIST_
     const result = await importOnlineSongs(providerId, toImport, { playlistId, userId: user?.id, gate: body.verified === true ? "skip" : "verified" });
     return c.json({ success: true, rejected, ...result });
   } catch (e: any) {
-    return c.json({ ...apiError(BusinessErrorCode.INTERNAL, e.message || "errors.import.failed") }, apiErrorStatus(BusinessErrorCode.INTERNAL));
+    log.error(`[ONLINE] import 失败: ${e?.message || e}`);
+    return c.json({ ...apiError(BusinessErrorCode.INTERNAL, "errors.import.failed") }, apiErrorStatus(BusinessErrorCode.INTERNAL));
   }
 });
 
@@ -320,7 +326,8 @@ onlineRoutes.get("/v1/online/:providerId/recommend", permMiddleware(PERM.RECOMME
     }
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.online.fetchRecommendFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+    log.error(`[ONLINE] recommend 获取失败: ${e?.message || e}`);
+    return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.online.fetchRecommendFailed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }
 });
 
@@ -388,7 +395,8 @@ onlineRoutes.post("/v1/online/:providerId/recommend/sync-all", permMiddleware(PE
       const { result } = await runBatchJob("recommend-sync-all", { providerId, userId: c.get("user")?.id });
       Object.assign(state, { running: false, result, finishedAt: new Date().toISOString() });
     } catch (e: any) {
-      Object.assign(state, { running: false, error: String(e?.message || e), finishedAt: new Date().toISOString() });
+      log.error(`[ONLINE] recommend/sync-all 失败: ${e?.message || e}`);
+      Object.assign(state, { running: false, error: translate("errors.online.syncAllFailed"), finishedAt: new Date().toISOString() });
     }
   })();
 
@@ -425,6 +433,7 @@ onlineRoutes.post("/v1/online/:providerId/purge-web-songs", adminMiddleware, asy
     const { result } = await runBatchJob("purge-web-songs", { providerId });
     return c.json({ success: true, ...result });
   } catch (e: any) {
-    return c.json({ ...apiError(BusinessErrorCode.INTERNAL, e.message || "errors.online.purgeFailed") }, apiErrorStatus(BusinessErrorCode.INTERNAL));
+    log.error(`[ONLINE] purge-web-songs 失败: ${e?.message || e}`);
+    return c.json({ ...apiError(BusinessErrorCode.INTERNAL, "errors.online.purgeFailed") }, apiErrorStatus(BusinessErrorCode.INTERNAL));
   }
 });

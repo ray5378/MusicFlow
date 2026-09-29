@@ -98,6 +98,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.online.syncBusy": "同步任务进行中,请稍候",
     "errors.online.noSyncRecord": "尚无同步记录",
     "errors.online.purgeFailed": "清理失败",
+    "errors.online.syncAllFailed": "同步所有平台失败",
 
     "errors.search.queryRequired": "请输入搜索关键词",
     "errors.search.failed": "搜索失败",
@@ -281,6 +282,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.online.syncBusy": "A sync task is already running; please wait",
     "errors.online.noSyncRecord": "No sync record yet",
     "errors.online.purgeFailed": "Cleanup failed",
+    "errors.online.syncAllFailed": "Failed to sync all platforms",
 
     "errors.search.queryRequired": "Please enter a search keyword",
     "errors.search.failed": "Search failed",
