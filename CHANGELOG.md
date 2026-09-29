@@ -49,6 +49,18 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.63] - 2026-09-29
+
+### 修复（真实产品缺陷：sendspin 配对模块死代码/死 catch 清理 D31/D32/D33）
+- [P3] 清理 `services/sendspin/pairServer.ts` 中三处不可达代码，纯清理、不改产品行为：
+  - **D31**：删除无调用点的 `waitForCode()` 私有方法，及其专用 `codeWaiters` 字段与 `enterCode` 中唯一的使用点（`a.codeWaiters.splice(0)` 唤醒循环）。
+  - **D32**：删除 `pendingFinalize` 字段（始终为 `undefined`）及其在 `onPairAuth` / `onPairConfirm` / `onPairFinalize` 中三处不可达的「背靠背 finalize 缓存」分支；`onPairFinalize` 早退改为直接 `return`（忽略过早到达的 finalize）。
+  - **D33**：删除三处 `b64urlDecode(...)` 的 `try/catch` 死分支——`Buffer.from(s, "base64url")` 对非法字符静默丢弃、永不抛异常，catch 不可达；下游长度/验签检查已覆盖拒绝逻辑。
+- 台账「双向证伪」证据：上述代码废掉后 sendspin 配对套件（含 49 条配对用例）仍全绿；本次实测 sendspin 全量 36 文件 / 213 条用例零失败，`tsc --noEmit` 干净。
+
+### 测试
+- 无新增用例（死代码清理，既有 `pairServer.test.ts` / `pairing.test.ts` / `pairE2E.test.ts` 及 sendspin 全量套件覆盖）。
+
 ## [4.0.62] - 2026-09-29
 
 ### 修复（真实产品缺陷：online.ts 上游异常原文外泄）

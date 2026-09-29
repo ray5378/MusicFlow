@@ -77,11 +77,9 @@ interface Attempt {
   nonceA?: Uint8Array;
   commitB?: Uint8Array;
   cpace?: CPace;
-  pendingFinalize?: any; // 与 pair-confirm 背靠背到达的 finalize 缓存
   pendingMessage?: string; // client/pair-pending 原文(展示给运营商)
   gate: StaticCodeGate;
   timer: ReturnType<typeof setTimeout>;
-  codeWaiters: Array<() => void>;
   msgWaiters: Array<{ type: string; resolve: (p: any) => void }>;
 }
 
@@ -190,7 +188,6 @@ export class PairingCoordinator {
       state: "await_init",
       gate: new StaticCodeGate(),
       timer: setTimeout(() => this.abort(clientId, "attempt_timeout", true), ATTEMPT_TIMEOUT_MS),
-      codeWaiters: [],
       msgWaiters: [],
     };
     this.attempts.set(clientId, attempt);
@@ -218,7 +215,6 @@ export class PairingCoordinator {
     }
     a.code = digits;
     a.codeRaw = new TextEncoder().encode(digits);
-    for (const w of a.codeWaiters.splice(0)) w();
     // static:输码即开跑(若 pair-init 已到);dynamic:码就绪后等 round 推进。
     if (a.method === "static_pairing_code" && a.state === "await_code") {
       void this.runStaticRound(a).catch((e) => this.abort(clientId, "pairing_code_mismatch", false, String(e?.message || e)));
@@ -239,7 +235,7 @@ export class PairingCoordinator {
       clientId, method: "pairing_psk", format: "digits", pairingIndex, round: 1,
       state: "await_init", gate: new StaticCodeGate(),
       timer: setTimeout(() => this.abort(clientId, "attempt_timeout", true), ATTEMPT_TIMEOUT_MS),
-      codeWaiters: [], msgWaiters: [],
+      msgWaiters: [],
     };
     this.attempts.set(clientId, attempt);
     // 先 re-handshake 到配对 PSK,再发 pairing activate。
@@ -323,11 +319,7 @@ export class PairingCoordinator {
     if (a.method === "dynamic_pairing_code") {
       const commit = typeof payload?.commit_B === "string" ? payload.commit_B : "";
       if (!commit) return this.abort(a.clientId, "protocol_error", false);
-      try {
-        a.commitB = b64urlDecode(commit);
-      } catch {
-        return this.abort(a.clientId, "protocol_error", false);
-      }
+      a.commitB = b64urlDecode(commit);
       if (a.commitB.length !== 32) return this.abort(a.clientId, "protocol_error", false);
       // 首轮发 nonce_A;码由运营商从设备外放读出后输入。
       a.nonceA = randomBytes(32);
@@ -342,11 +334,6 @@ export class PairingCoordinator {
       if (a.codeRaw) void this.runStaticRound(a).catch((e) => this.abort(a.clientId, "pairing_code_mismatch", false, String(e?.message || e)));
       return;
     }
-  }
-
-  private waitForCode(a: Attempt): Promise<void> {
-    if (a.codeRaw) return Promise.resolve();
-    return new Promise((resolve) => a.codeWaiters.push(resolve));
   }
 
   private pakeSid(conn: SendspinConnection, a: Attempt): Uint8Array {
@@ -375,12 +362,7 @@ export class PairingCoordinator {
 
   private async onPairAuth(a: Attempt, conn: SendspinConnection, payload: any): Promise<void> {
     if (a.state !== "await_peer_auth" || !a.cpace) return;
-    let yb: Uint8Array;
-    try {
-      yb = b64urlDecode(String(payload?.pake_msg_2 || ""));
-    } catch {
-      return this.abort(a.clientId, "protocol_error", false);
-    }
+    const yb = b64urlDecode(String(payload?.pake_msg_2 || ""));
     try {
       a.cpace.derive(yb, new TextEncoder().encode("client"));
     } catch {
@@ -391,19 +373,12 @@ export class PairingCoordinator {
     }
     conn.sendJson("server/pair-confirm", { server_kc: b64urlEncode(a.cpace.tag()) });
     a.state = "await_confirm";
-    // finalize 常与 confirm 背靠背到达:若已缓存直接处理。
-    if (a.pendingFinalize) {
-      const f = a.pendingFinalize;
-      a.pendingFinalize = undefined;
-      await this.onPairFinalize(a, conn, f);
-    }
   }
 
   private async onPairRetry(a: Attempt, conn: SendspinConnection): Promise<void> {
     if (a.method !== "dynamic_pairing_code" || (a.state !== "await_confirm" && a.state !== "await_peer_auth")) return;
     a.round += 1;
     a.cpace = undefined;
-    a.pendingFinalize = undefined;
     // 新 round:新 server/pair-init(不带 nonce_A,复用首轮),新 CPace run。
     conn.sendJson("server/pair-init", {});
     a.state = "await_code";
@@ -412,12 +387,7 @@ export class PairingCoordinator {
 
   private async onPairConfirm(a: Attempt, conn: SendspinConnection, payload: any): Promise<void> {
     if (a.state !== "await_confirm" || !a.cpace) return;
-    let ckc: Uint8Array;
-    try {
-      ckc = b64urlDecode(String(payload?.client_kc || ""));
-    } catch {
-      return this.abort(a.clientId, "protocol_error", false);
-    }
+    const ckc = b64urlDecode(String(payload?.client_kc || ""));
     if (!a.cpace.verify(ckc)) {
       if (a.method === "static_pairing_code") {
         const g = a.gate;
@@ -458,12 +428,6 @@ export class PairingCoordinator {
     } else if (a.method === "static_pairing_code") {
       a.gate.failures = 0; // 成功清零
     }
-    // 等 finalize(可能已缓存)。
-    if (a.pendingFinalize) {
-      const f = a.pendingFinalize;
-      a.pendingFinalize = undefined;
-      await this.onPairFinalize(a, conn, f);
-    }
   }
 
   private async onPairFinalize(a: Attempt, conn: SendspinConnection, payload: any): Promise<void> {
@@ -489,9 +453,8 @@ export class PairingCoordinator {
       }
       return;
     }
-    // confirm 还没处理完(finalize 先到):缓存。
+    // 未处于待确认态(或无 cpace):忽略过早/无效到达的 finalize。
     if (a.state !== "await_confirm" || !a.cpace) {
-      if (a.state === "await_confirm") a.pendingFinalize = payload;
       return;
     }
     let pskHex: string | null = null;
