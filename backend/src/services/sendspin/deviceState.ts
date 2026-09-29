@@ -81,6 +81,26 @@ export function listDisabledDeviceIds(): string[] {
   }
 }
 
+/** 列出「已知设备」的 clientId(持久档案,**排除用户禁用的**)。
+ *
+ *  为什么需要这张底表:sendspin 设备档案只在**解绑**时删除(见 purgeDeviceArtifacts),
+ *  断开 / 重启 / 停服务都不碰 —— 所以它是「这台设备存在过、应当一直可见」的权威来源:
+ *    - peer.ts:断连时据此补一条 `available:false` 的占位 peer(离线设备留在列表里);
+ *    - memory/pruneOrphans:据此保留离线设备的队列/播放器条目(不当孤儿清掉);
+ *    - /v1/sendspin/clients:据此列出离线设备(在线连接态叠加其上)。
+ *  排除 disabled:禁用设备不出现在任何流转播放入口(与 DLNA/AirPlay 同语义)。 */
+export function listKnownDeviceIds(): string[] {
+  try {
+    const rows = sqlite
+      .prepare("SELECT client_id FROM sendspin_device_state WHERE disabled = 0")
+      .all() as any[];
+    return rows.map((r) => String(r.client_id)).filter(Boolean);
+  } catch (e: any) {
+    log.warn(`[device-state] 列已知设备失败: ${e?.message || e}`);
+    return [];
+  }
+}
+
 /** 删某设备音量行(解绑/忘记设备时调)。 */
 export function deleteDeviceVolumeState(clientId: string): void {
   try {

@@ -86,8 +86,12 @@ describe("sendspin legacy 明文直通", () => {
     } finally {
       ws.terminate();
     }
-    // 断开后 peer 移除(与加密路径一致)。
-    await waitFor(() => getPeerManager().get(`sendspin:${LEGACY_ID}`) === undefined);
+    // 断开后 peer **保留**并置 available=false(与 DLNA / AirPlay 同口径:
+    // 断连 ≠ 设备被删除 —— 离线设备必须留在 peer 列表与组成员里可见,重连时同一行复活)。
+    await waitFor(() => {
+      const p = getPeerManager().get(`sendspin:${LEGACY_ID}`);
+      return !!p && p.available === false && p.name === LEGACY_NAME && p.unencrypted === true;
+    });
   });
 
   it("stream/start 明文下发 + 音频 RAW BINARY 直通(0x04 头)", async () => {

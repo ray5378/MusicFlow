@@ -52,6 +52,8 @@ import { createLogger } from "../utils/logger.js";
 import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
 import { getPreProbeScheduler, type QueuePeekSource } from "./player/preProbeScheduler.js";
 import { getSetting } from "./settings.js";
+// Sendspin 持久设备档案:断连补占位 peer / 判定「这台设备存在过」(见 markSendspinUnavailable)。
+import { getDeviceDisabled, listKnownDeviceIds } from "./sendspin/deviceState.js";
 
 const log = createLogger("peer");
 export type PeerKind = "local" | "dlna" | "group" | "airplay" | "sendspin";
@@ -453,7 +455,34 @@ export class PeerManager extends EventEmitter {
     return p;
   }
 
-  /** Remove a Sendspin peer entirely (client disconnected / plugin stopped). */
+  /** 标记某 Sendspin 设备「离线」(连接断开):**只置 available=false,绝不删行**。
+   *  与 markDlnaUnavailable / markAirPlayUnavailable 同口径 —— 离线设备必须留在 peer
+   *  列表与组成员里可见:「断连即摘除」会让用户在切换器 / 群组页再也找不到该设备,
+   *  且重连前它的队列与播放器状态会被孤儿清理扫掉(见 memory/pruneOrphans)。
+   *  设备重连时 registerServerPlayer 会再调 registerSendspin(available=true)复活同一行。
+   *
+   *  peer 行不存在时(重启后设备尚未重连、或曾被显式移除):按持久档案
+   *  (sendspin_device_state)补一条 `available:false` 的**占位 peer**,名字取已知名、
+   *  否则 clientId 兜底。**被用户禁用的设备不补**(与 DLNA / AirPlay 同语义:禁用
+   *  设备不出现在任何流转播放入口)。 */
+  markSendspinUnavailable(clientId: string, name?: string): void {
+    if (!clientId) return;
+    const peerId = `sendspin:${clientId}`;
+    const p = this.peers.get(peerId);
+    if (p) {
+      if (p.available) {
+        p.available = false;
+        this.emit("peer_unavailable", p);
+      }
+      return;
+    }
+    if (getDeviceDisabled(clientId)) return;
+    if (!listKnownDeviceIds().includes(clientId)) return;
+    this.registerSendspin(clientId, name || clientId, false);
+  }
+
+  /** Remove a Sendspin peer entirely —— **只在显式意图路径调用**(用户禁用 / 删除、
+   *  插件停用)。设备断连走 markSendspinUnavailable:只置 available=false,行保留可见。 */
   removeSendspinPeer(clientId: string): void {
     const peerId = `sendspin:${clientId}`;
     const p = this.peers.get(peerId);
