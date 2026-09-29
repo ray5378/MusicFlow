@@ -254,17 +254,24 @@ describe("generateRandomSongsPlaylist:抽取路径与歌单行", () => {
     );
   });
 
-  // 现状记录(缺陷台账 D18):rowid 过采样在「库容接近 count」时会饱和 ——
-  // 每轮最多命中「不同 rowid 数」个,4 轮上限也用不满,于是歌单会**比 count 少 1~2 首**
-  // (实测 60 首库容 + 默认 count 48 时出现过 47)。大库不受影响,仅小曲库可见。
-  // 这里只钉住不变量:不超过 count、也不至于差很多。
-  it("库容接近 count 时结果可能少于 count(采样饱和)", () => {
+  // D18 已修复:库容接近 count 时,rowid 区间过采样会饱和(去重后拿不满 count)。
+  // 现在区间相对 limit 不够大(span <= limit*4)时改走 SQLite 原生 `ORDER BY RANDOM()`,
+  // 库容足够时恰好取满 count;库容远超 count 仍走 rowid 快路径,同样取满。
+  it("库容接近 count(60)与远超 count(200)都恰好取满 count", () => {
     seedLibrary(60);
-    const r = generateRandomSongsPlaylist(); // count 默认 48
-    expect(r!.skipped).toBe(false);
-    expect(r!.total).toBeLessThanOrEqual(DEFAULT_SONG_COUNT);
-    expect(r!.total).toBeGreaterThan(DEFAULT_SONG_COUNT - 5);
-    expect(playlistSongIds()).toHaveLength(r!.total);
+    const near = generateRandomSongsPlaylist(); // 默认 48
+    expect(near!.skipped).toBe(false);
+    expect(near!.total).toBe(DEFAULT_SONG_COUNT);
+    expect(new Set(playlistSongIds()).size).toBe(DEFAULT_SONG_COUNT);
+
+    // 清掉重来:库容 200 + limit 48 → 走 rowid 快路径,仍恰好 48
+    sqlite.prepare("DELETE FROM playlist_songs").run();
+    sqlite.prepare("DELETE FROM songs").run();
+    seedLibrary(200);
+    const far = generateRandomSongsPlaylist();
+    expect(far!.skipped).toBe(false);
+    expect(far!.total).toBe(DEFAULT_SONG_COUNT);
+    expect(new Set(playlistSongIds()).size).toBe(DEFAULT_SONG_COUNT);
   });
 
   it("歌单行缺失时创建(带标签 comment);名字被改过则自动改回", () => {

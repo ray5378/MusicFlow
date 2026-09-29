@@ -315,21 +315,30 @@ export class PairingCoordinator {
   }
 
   private async onPairInit(a: Attempt, conn: SendspinConnection, payload: any): Promise<void> {
-    if (a.state !== "await_init") return;
+    // D34 修复:允许在「等输码」(await_code)状态下再收一次 client/pair-init ——
+    // 日常时序里设备先发 init(服务端出 nonce_A、state=await_code),运营商读码后设备
+    // 会**再发一次** init 来推进 PAKE;旧实现要求状态仍是 await_init,把这一发直接丢弃,
+    // 导致 runDynamicRound 永不触发。(static 仍只认首次 init,见下方守卫。)
+    if (a.state !== "await_init" && a.state !== "await_code") return;
     if (a.method === "dynamic_pairing_code") {
       const commit = typeof payload?.commit_B === "string" ? payload.commit_B : "";
       if (!commit) return this.abort(a.clientId, "protocol_error", false);
       a.commitB = b64urlDecode(commit);
       if (a.commitB.length !== 32) return this.abort(a.clientId, "protocol_error", false);
-      // 首轮发 nonce_A;码由运营商从设备外放读出后输入。
-      a.nonceA = randomBytes(32);
-      conn.sendJson("server/pair-init", { nonce_A: b64urlEncode(a.nonceA) });
-      a.state = "await_code";
-      // 若码已提前输入(如 qr token),直接开跑。
+      // D34 修复:一条配对会话里 nonce_A 只随机一次。首次 init 生成并经 server/pair-init
+      // 下发;重发 init(await_code)复用同一个 nonce_A —— 否则每次重随机,运营商读到的
+      // 码与设备实际使用的不一致,判码必错。
+      if (!a.nonceA) {
+        a.nonceA = randomBytes(32);
+        conn.sendJson("server/pair-init", { nonce_A: b64urlEncode(a.nonceA) });
+        a.state = "await_code";
+      }
+      // 码已就绪(运营商已输码 / qr token)→ 直接开跑。
       if (a.codeRaw) void this.runDynamicRound(a).catch((e) => this.abort(a.clientId, "pairing_code_mismatch", false, String(e?.message || e)));
       return;
     }
     if (a.method === "static_pairing_code") {
+      if (a.state !== "await_init") return; // static 不做 init 重入
       a.state = "await_code";
       if (a.codeRaw) void this.runStaticRound(a).catch((e) => this.abort(a.clientId, "pairing_code_mismatch", false, String(e?.message || e)));
       return;
@@ -396,6 +405,13 @@ export class PairingCoordinator {
           conn.sendJson("pair/abort", { reason: "pairing_code_mismatch" });
           return this.abort(a.clientId, "pairing_code_mismatch", false, "码错误次数超限,窗口锁定");
         }
+        // D30 修复:未达上限时**保留 attempt**(不 abort),只丢弃本轮 CPace、回到
+        // await_code,让运营商可重新输码重试 —— 旧实现首次不符即 abort(),attempt 被删、
+        // failures 恒为 1,`locked()`(>=5)永远不可达。只有真锁了才断。
+        a.cpace = undefined;
+        a.state = "await_code";
+        conn.sendJson("pair/abort", { reason: "pairing_code_mismatch" });
+        return;
       }
       conn.sendJson("pair/abort", { reason: "pairing_code_mismatch" });
       return this.abort(a.clientId, "pairing_code_mismatch", false);

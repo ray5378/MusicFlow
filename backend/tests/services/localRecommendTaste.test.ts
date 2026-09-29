@@ -212,11 +212,9 @@ describe("pickLocalRecommendSongs —— 口味抽取与「排除近期播放」
     expect(r.sourceUsers).toBe(1);
   });
 
-  it("现状记录(缺陷台账):excludeRecent=false 在口味路径上不生效,近 30 天听过的歌仍被排除", () => {
-    // 契约:关掉「排除近期播放」后,近期听过的歌应当**回到**候选里(用户就是想再听)。
-    // 现状:pickLocalRecommendSongs 只把 excludeRecent 传给了 pickFromPlaylistPool,
-    // 而 pickCandidateSongs 一律拿 profile.recentSongIds 当排除集 —— 于是未配置参考
-    // 歌单(默认路径)时这个开关是死的。这里把现状钉住,便于修好后改成反向断言。
+  it("excludeRecent=false → 口味路径近期歌重新入候选(已修复 D17)", () => {
+    // D17 修复:pickCandidateSongs 现在按 excludeRecent 决定是否用 profile.recentSongIds
+    // 当排除集;关掉「排除近期播放」后,近期听过的歌会**回到**候选里(用户就是想再听)。
     seedSongs(20, { artistId: "ar-1", albumId: "al-1", genre: "Pop" });
     const recent = Array.from({ length: 10 }, (_, i) => `s${i}`);
     seedHistory(recent);
@@ -224,9 +222,9 @@ describe("pickLocalRecommendSongs —— 口味抽取与「排除近期播放」
 
     const r = pickLocalRecommendSongs(new Date("2026-09-22T10:00:00"));
     expect(r.fallback).toBe(false);
-    // 关掉开关后理应是 20 首;现状只剩「没听过的」10 首。
-    expect(r.songIds).toHaveLength(10);
-    for (const id of r.songIds) expect(recent).not.toContain(id);
+    // 关掉开关后 20 首全部可入候选(不再被近期历史挡掉)。
+    expect(r.songIds).toHaveLength(20);
+    expect(r.songIds.some((id) => recent.includes(id))).toBe(true);
   });
 
   it("参考歌单池优先:只从池内歌曲抽,且数量受 count 控制", () => {

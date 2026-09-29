@@ -246,16 +246,20 @@ export async function rebuildPlaylistEntries(
       });
       if (off + UPD_CHUNK < updates.length) await sleepBetweenBatch();
     }
-    // 仅 unavailable_reason 非空的行:单独 CASE 写回(与 drizzle 语义一致——matched 行
-    // 不携带该列即不改动)。
-    const withReason = updates.filter((u) => (u as any).unavailableReason != null);
+    // D15 修复:匹配成功(挂了 song_id)的行也要一并把 unavailable_reason 擦成 NULL,
+    // 否则「stub 修成可播后」会残留旧的「曲库中未找到」。过滤条件由「仅非空」扩为
+    // `u.songId ? <写 NULL> : u.unavailableReason` —— 与 match.ts 挂 song_id 即
+    // unavailable_reason = NULL 的既有约定保持一致(未匹配行仍写回原因)。
+    const withReason = updates.filter(
+      (u) => (u as any).songId != null || (u as any).unavailableReason != null,
+    );
     for (let off = 0; off < withReason.length; off += UPD_CHUNK) {
       const chunk = withReason.slice(off, off + UPD_CHUNK);
       const ids = chunk.map((u) => u.id);
-      const args: (number | string)[] = [];
+      const args: (number | string | null)[] = [];
       sets.length = 0;
       sets.push(`unavailable_reason = CASE id ${chunk.map(() => "WHEN ? THEN ?").join(" ")} END`);
-      for (const u of chunk) args.push(u.id, (u as any).unavailableReason);
+      for (const u of chunk) args.push(u.id, (u as any).songId != null ? null : (u as any).unavailableReason);
       const idPh = ids.map(() => "?").join(",");
       chunkTx(() => {
         sqlite.prepare(`UPDATE playlist_songs SET ${sets.join(", ")} WHERE id IN (${idPh})`).run(...args, ...ids);

@@ -5,6 +5,9 @@ import { getPluginImpl, getPluginConfig } from "../plugins/registry.js";
 import { hasLyricProvider, searchLyrics } from "../plugins/providers.js";
 import { getSettingBool } from "./settings.js";
 import { saveLyricFile, resolveLyricContent } from "./lyricsStore.js";
+import { createLogger } from "../utils/logger.js";
+
+const log = createLogger("lyrics");
 
 export interface LrcLine {
   time: number; // seconds
@@ -138,13 +141,23 @@ async function readSidecarLrc(song: SongRow): Promise<string | null> {
     const lrcPath = filePath.replace(/\.[^.]+$/, "") + ".lrc";
 
     const source = db.select().from(mediaSources).where(eq(mediaSources.id, sourceId)).get();
-    if (!source) return null;
+    if (!source) {
+      // D21 修复:源不存在也补一条日志,避免「取不到 sidecar」时现场一片空白。
+      log.warn(`readSidecarLrc: 媒体源不存在(id=${sourceId}),跳过 sidecar`);
+      return null;
+    }
     const config = JSON.parse(source.config || "{}");
 
     if (prefix === "w") {
       const base = config.url?.replace(/\/+$/, "");
-      if (!base) return null;
-      const url = new URL(base).origin + lrcPath;
+      if (!base) {
+        // D21 修复:WebDAV 源没配 url ⇒ 无法拼地址,补日志便于排障(此前静默返回 null)。
+        log.warn(`readSidecarLrc: WebDAV 源缺少 url 配置(source=${sourceId}),跳过 sidecar`);
+        return null;
+      }
+      // D21 修复:保留源配置里的子目录(如 /music/),不要只取 origin 把路径丢掉;
+      // 同时 base 与 lrcPath 之间补一个 "/",避免拼成 "host名专辑" 这种非法地址。
+      const url = base + (lrcPath.startsWith("/") ? "" : "/") + lrcPath;
       const headers: Record<string, string> = { Range: "bytes=0-65535" };
       if (config.username && config.password) {
         headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
@@ -154,12 +167,16 @@ async function readSidecarLrc(song: SongRow): Promise<string | null> {
       try {
         const res = await fetch(url, { headers, signal: controller.signal });
         if (res.ok || res.status === 206) return await res.text();
+        // D21 修复:非 2xx/206(如 404)→ 记一条 debug,方便区分「没配到源」与「源上没有文件」。
+        log.debug(`readSidecarLrc: sidecar 抓取未命中(status=${res.status} url=${url})`);
       } finally { clearTimeout(timeout); }
     } else if (prefix === "l") {
       const fs = await import("fs");
       if (fs.existsSync(lrcPath)) return fs.readFileSync(lrcPath, "utf8");
+      // D21 修复:本地 l: 分支同目录没有 .lrc 也补一条 debug。
+      log.debug(`readSidecarLrc: 本地 sidecar 文件不存在(${lrcPath})`);
     }
-  } catch { /* 任何失败都当作无 sidecar */ }
+  } catch (e) { log.warn("readSidecarLrc: 读取 sidecar 歌词异常,按无 sidecar 处理", { err: e }); }
   return null;
 }
 
@@ -214,28 +231,38 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
 
   // ④ web 歌曲 legacy 源插件 lyricUrl(仅当上面都没有):provider 特定 URL 逻辑
   //    (如 go-music-dl 的 /music/download_lrc)留在插件侧,核心不重复实现。
+  //    D22 修复:整段插件交互(取实现 / 构造 URL / 抓取)包进 try/catch,插件抛错或抓取
+  //    失败都当「无歌词」处理并记 warn,与 ①②③ 的兜底一致,异常不再冒给调用方(避免 500)。
   if (!content && song.type === "web" && song.pluginEntry) {
-    const impl = getPluginImpl(song.pluginEntry);
-    if (impl?.lyricUrl) {
-      const cfg = getPluginConfig(song.pluginEntry) || {};
-      const lrcUrl = impl.lyricUrl(cfg, {
-        url: song.url,
-        duration: song.duration,
-        title: song.title,
-        artist: song.artist,
-      });
-      if (lrcUrl) {
-        try {
+    try {
+      const impl = getPluginImpl(song.pluginEntry);
+      if (impl?.lyricUrl) {
+        const cfg = getPluginConfig(song.pluginEntry) || {};
+        const lrcUrl = impl.lyricUrl(cfg, {
+          url: song.url,
+          duration: song.duration,
+          title: song.title,
+          artist: song.artist,
+        });
+        if (lrcUrl) {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 8000);
-          const res = await fetch(lrcUrl, { signal: controller.signal });
-          clearTimeout(timeout);
-          if (res.ok) {
-            const text = await res.text();
-            if (text && !text.startsWith("Lyric not found")) content = text;
+          try {
+            const res = await fetch(lrcUrl, { signal: controller.signal });
+            if (res.ok) {
+              const text = await res.text();
+              if (text && !text.startsWith("Lyric not found")) content = text;
+            }
+          } catch (e: any) {
+            log.debug(`fetchLrcForSong: ④ 抓取 legacy 歌词失败,按无歌词处理: ${e?.message || e}`);
+            content = null;
+          } finally {
+            clearTimeout(timeout);
           }
-        } catch { content = null; }
+        }
       }
+    } catch (e) {
+      log.warn("fetchLrcForSong: ④ 源插件 lyricUrl 失败,按无歌词处理", { err: e });
     }
   }
 

@@ -260,10 +260,9 @@ describe("fetchLrcForSong ② sidecar .lrc", () => {
     const r = await fetchLrcForSong({ id: "s7", path: "w:wsrc:album/track.mp3", title: "T" } as any);
     expect(r).toBe("[00:11.00]WebDAV sidecar");
     const [url, init] = fetchMock.mock.calls[0] as any;
-    // ⚠️ 现状(缺陷 D21):代码只取 new URL(base).origin,源配置里的子目录 (/music/) 被丢掉,
-    //    于是拼成「主机名 + 绝对路径」这种非法 URL(origin 不带路径,直接跟 lrcPath 拼接)。
-    //    这里固化现状,修好后这条应变成 http://webdav.local/music/album/track.lrc。
-    expect(url).toBe("http://webdav.localalbum/track.lrc");
+    // D21 修复:拼地址时保留源配置里的子目录 (/music/),并在 base 与 lrcPath 之间补 "/",
+    // 不再拼成 "host名专辑" 这种非法 URL。期望拼成 http://webdav.local/music/album/track.lrc。
+    expect(url).toBe("http://webdav.local/music/album/track.lrc");
     expect(init.headers.Range).toBe("bytes=0-65535");
     expect(init.headers.Authorization).toBeUndefined();
     fetchMock.mockRestore();
@@ -546,7 +545,7 @@ describe("fetchLrcForSong ④ web 源插件 lyricUrl", () => {
     await expect(fetchLrcForSong(row("w10") as any)).resolves.toBeNull();
   });
 
-  it("lyricUrl 抛出异常 → 冒给调用方(getLyricsForSong 会连带失败,不是静默 null)", async () => {
+  it("lyricUrl 抛出异常 → 静默当无歌词(与 fetch 失败兜底一致,不冒给调用方)", async () => {
     seedSong("w11", { type: "web", pluginEntry: "go-music-dl" });
     H.registry.getPluginImpl.mockReturnValue({
       lyricUrl: () => {
@@ -554,9 +553,9 @@ describe("fetchLrcForSong ④ web 源插件 lyricUrl", () => {
       },
     });
 
-    // ⚠️ 现状(缺陷 D22):impl.lyricUrl(...) 的调用在 try 之外,异常直接冒穿 fetchLrcForSong。
-    //    同级的 fetch 失败是静默吞掉的,唯独「构造 URL」这一步不是 —— 上层会拿到 500。
-    await expect(fetchLrcForSong(row("w11") as any)).rejects.toThrow(/plugin blew up/);
+    // D22 修复:impl.lyricUrl(...) 的调用已包进 try/catch,异常被吞掉并记 warn 日志,
+    // fetchLrcForSong 返回 null(无歌词),不再把异常冒给上层导致 500。
+    await expect(fetchLrcForSong(row("w11") as any)).resolves.toBeNull();
   });
 
   it("lyricUrl 拿到的上下文带 url/duration/title/artist", async () => {

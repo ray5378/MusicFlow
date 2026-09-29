@@ -30,6 +30,19 @@ const H = vi.hoisted(() => ({
   queueClears: [] as string[],
 }));
 
+// 捕获 peer.ts 的 log.error(供 D16 用例断言「钩子出错被记日志而不是未捕获异常」)。
+const LOG = vi.hoisted(() => ({ error: [] as any[], warn: [] as any[], info: [] as any[] }));
+
+vi.mock("../../src/utils/logger.js", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  createLogger: () => ({
+    debug: () => {},
+    info: (...a: any[]) => LOG.info.push(a),
+    warn: (...a: any[]) => LOG.warn.push(a),
+    error: (...a: any[]) => LOG.error.push(a),
+  }),
+}));
+
 vi.mock("../../src/services/dlna/control.js", () => ({
   getCachedDevices: () => H.cachedDevices,
 }));
@@ -126,6 +139,9 @@ beforeEach(() => {
   sqlite.prepare("DELETE FROM local_queues").run();
   sqlite.prepare("DELETE FROM device_queues").run();
   sqlite.prepare("DELETE FROM group_queues").run();
+  LOG.error.length = 0;
+  LOG.warn.length = 0;
+  LOG.info.length = 0;
 });
 
 afterEach(() => {
@@ -184,30 +200,32 @@ describe("startCleanup:周期扫描与发现桥", () => {
   it("重启清扫里任一步抛错 → 记 error 而不是让定时器回调炸掉", async () => {
     vi.useFakeTimers();
     const pm = new PeerManager();
-    // 5s 引导钩子先跑一次(那一条**没有** try/catch);20s 这一条有,必须吞住。
+    // 5s 引导钩子先跑一次(现在也有 safeTick 保护);20s 这一条同样必须吞住。
     let calls = 0;
     vi.spyOn(pm, "reconcileDlnaPeers").mockImplementation(() => {
       calls++;
       if (calls > 1) throw new Error("发现未就绪");
     });
     pm.startCleanup();
-    // 抛错被那条 try/catch 吞住 → 这里不会 reject(否则 await 会直接把用例打挂)
+    // 抛错被 safeTick 吞住 → 这里不会 reject(否则 await 会直接把用例打挂)
     await vi.advanceTimersByTimeAsync(20_000);
     expect(calls).toBe(2);
     clearInterval((pm as Any).cleanupTimer);
     (pm as Any).cleanupTimer = null;
   });
 
-  it("现状记录(缺陷台账 D16):5s 引导钩子与 60s 周期钩子都没有 try/catch,发现源抛错会成为未捕获异常", async () => {
-    // 只有 20s「重启清扫」那一条包了 try/catch;5s 填充与 60s 周期两条直接裸调。
-    // 发现源(mDNS / SSDP 缓存)一旦抛错,这里就是**未捕获异常** —— Node 默认行为是
-    // 终止进程,而它每 60s 就会再来一次。修法(给三条钩子统一包一层)会改变产品行为,
-    // 故按台账挂起;修复后本断言应改为 resolves。
+  it("D16 已修复:5s 引导钩子与 60s 周期钩子里的发现源抛错 → 记 error 而非未捕获异常", async () => {
+    // 修复:三条钩子(5s 首填充 / 60s 周期 / 20s 重启清扫)统一走 safeTick;发现源抛错
+    // 只记日志、不再让定时器回调抛未捕获异常(Node 默认会终止进程,且 60s 每拍复现)。
     vi.useFakeTimers();
     const pm = new PeerManager();
     vi.spyOn(pm, "reconcileDlnaPeers").mockImplementation(() => { throw new Error("发现源不可用"); });
     pm.startCleanup();
-    await expect(vi.advanceTimersByTimeAsync(5_000)).rejects.toThrow("发现源不可用");
+    // 旧断言 `rejects.toThrow("发现源不可用")` 已按新行为翻转:safeTick 吞住异常、回调不 reject。
+    // 注意:vi.advanceTimersByTimeAsync() 的 resolve 值是 vitest 定时器对象本身(非 undefined),
+    // 故不能用 `.resolves.toBeUndefined()`(必失败);改为直接 await,再用 LOG.error 断言。
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(LOG.error.some((a) => String(a[0]).includes("发现源不可用"))).toBe(true);
     clearInterval((pm as Any).cleanupTimer);
     (pm as Any).cleanupTimer = null;
   });

@@ -181,7 +181,7 @@ describe("importRecommendPlaylist", () => {
 
   it("provider 无 playlistSongs 能力 → 早返回 success:false(187-190)", async () => {
     H.configured = null;
-    const r = await importRecommendPlaylist("lt3-unknown-prov", info("d0"));
+    const r = await importRecommendPlaylist("lt3-unknown-prov", info("d0"), { userId: OWNER() });
     expect(r.success).toBe(false);
     expect(r.created).toBe(false);
     expect(r.trackCount).toBe(0);
@@ -193,7 +193,7 @@ describe("importRecommendPlaylist", () => {
     H.importResult = { added: 0, deduped: 0, failed: 0, songs: [] };
     seedPlaylist(PL, `${PREFIX}d5`); // 已导入过同一个远端歌单
 
-    const r = await importRecommendPlaylist(PROVIDER, info("d5"));
+    const r = await importRecommendPlaylist(PROVIDER, info("d5"), { userId: OWNER() });
 
     expect(r.success).toBe(false);
     expect(r.trackCount).toBe(0);
@@ -227,7 +227,7 @@ describe("importRecommendPlaylist", () => {
     seedPlaylist(PL, `${PREFIX}d7`);
     seedEntry(PL, S.OLD, 0);
 
-    const r = await importRecommendPlaylist(PROVIDER, info("d7"));
+    const r = await importRecommendPlaylist(PROVIDER, info("d7"), { userId: OWNER() });
 
     expect(r.success).toBe(true);
     expect(r.created).toBe(false);

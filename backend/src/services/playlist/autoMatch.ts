@@ -69,6 +69,9 @@ export interface AutoMatchOnPlaybackResult {
   appended: number;
   /** 因排队超时放弃(不影响播放)。 */
   lockTimeout?: boolean;
+  /** D19:后台匹配器本身失败(抛错)时的失败原因。与 lockTimeout 互斥 ——
+   *  只有真的等超时才置 lockTimeout,底层 reject 一律走这里并留 warn 日志。 */
+  failed?: string;
 }
 
 /**
@@ -100,14 +103,23 @@ export async function runPlaylistAutoMatch(
   // onFinished 由 matchPlaylistInBackground 在释放每歌单锁与全局批量闸**之后**触发。
   // 战果必须用对象成员承载:TS 的控制流分析不追踪回调内的赋值,裸 let 会被窄化到
   // null/never,取 .total/.matched 会直接编译报错。
-  const box: { value: AutoMatchStats | null } = { value: null };
+  const box: { value: AutoMatchStats | null; error?: unknown } = { value: null };
   const finished = new Promise<void>((resolve) => {
-    void matchPlaylistInBackground(playlistId, (r) => { box.value = r; resolve(); }).catch(() => resolve());
+    void matchPlaylistInBackground(playlistId, (r) => { box.value = r; resolve(); })
+      // D19 修复:底层 reject 也把原因收进 box,让「匹配失败」与「等闸超时」分成两条路。
+      .catch((e) => { box.error = e; resolve(); });
   });
   const timeout = new Promise<void>((resolve) => { const h = setTimeout(resolve, waitMs); h.unref?.(); });
   await Promise.race([finished, timeout]);
   const stats = box.value;
   if (stats === null) {
+    if (box.error !== undefined) {
+      // 后台匹配器 reject(不是排队超时):据实回报失败原因并留一条 warn,不再谎报
+      // 「等批量闸超时」,也不再只打 info。
+      result.failed = (box.error as any)?.message || String(box.error);
+      log.warn(`[auto-match] ${playlistId}: 后台匹配失败: ${result.failed}`);
+      return result;
+    }
     // 闸门被全库扫描之类占着 —— 放弃本轮等待(后台那轮跑完会自行释放闸)。
     result.lockTimeout = true;
     log.info(`[auto-match] ${playlistId}: 等批量闸超时(${waitMs}ms)放弃本轮,不影响播放`);

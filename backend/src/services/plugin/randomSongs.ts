@@ -155,10 +155,12 @@ function pickRandomPlayableSongs(
     `WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL${f.where}`;
 
   const meta = sqlite
-    .prepare(`SELECT COUNT(*) AS n, MAX(songs.rowid) AS maxR ${baseFrom}`)
-    .get(...filterParams) as { n: number; maxR: number | null };
-  if (!meta.n || !meta.maxR) return [];
+    .prepare(`SELECT COUNT(*) AS n, MIN(songs.rowid) AS minR, MAX(songs.rowid) AS maxR ${baseFrom}`)
+    .get(...filterParams) as { n: number; minR: number | null; maxR: number | null };
+  if (!meta.n || meta.maxR == null) return [];
   const maxRowid = meta.maxR;
+  const minRowid = meta.minR ?? 1;
+  const span = maxRowid - minRowid + 1;
 
   // 命中数量不超过 limit:直接全量洗牌返回。
   if (meta.n <= limit) {
@@ -169,6 +171,17 @@ function pickRandomPlayableSongs(
       const j = Math.floor(Math.random() * (i + 1));
       [rows[i], rows[j]] = [rows[j], rows[i]];
     }
+    return rows.map((r) => r.id);
+  }
+
+  // D18 修复:库容接近 limit 时,[minRowid, maxRowid] 区间的 rowid 过采样会饱和
+  // (去重后实得 < limit,如 60 首库容 + count 48 只取到 47)。此时区间相对 limit
+  // 不够大(span <= limit * 4),改走 SQLite 原生 `ORDER BY RANDOM()` 随机排序,
+  // 保证库容足够时恰好取到 limit;区间远大于 limit 时仍走下面的 O(limit) 快路径。
+  if (span <= limit * 4) {
+    const rows = sqlite
+      .prepare(`SELECT songs.id ${baseFrom} ORDER BY RANDOM() LIMIT ?`)
+      .all(...filterParams, limit) as { id: string }[];
     return rows.map((r) => r.id);
   }
 

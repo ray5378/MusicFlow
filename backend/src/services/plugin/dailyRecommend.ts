@@ -562,6 +562,25 @@ async function doGenerate(date: Date, dateStr: string, todayRow: any): Promise<D
       .run((plRow?.song_count || 0) + poolSongsAdded, (plRow?.duration || 0) + addedDuration, now2, playlistId);
   }
 
+  // D14 修复:只有**真正产生了本次生成结果**才盖当天日期。零远程轨道且本次池歌新增为 0
+  // (即什么新内容都没写进去)时,不盖日期、返回「未生成」标记(skipped:true),使当天稍后
+  // 仍可重试。旧实现无条件盖当天日期,于是次日 isGeneratedToday() 为真、不再重试,却仍
+  // 返回 skipped:false,谎报「今天已更新」;且旧条目既不被清、又被 existingSongIds 挡掉当天候选。
+  if (totalRemoteTracks === 0 && poolSongsAdded === 0) {
+    log.info(`[DAILY-RECOMMEND] ${dateStr}: 无新增内容(远程全失败且池歌无新增),保留既有内容,不盖当天日期`);
+    return {
+      date: dateStr,
+      playlistId,
+      name: NAME_TODAY,
+      picked: candidates,
+      platform: "mixed",
+      total: 0, matched: 0, unmatched: 0, wishAdded: 0,
+      poolSongsAdded: 0, poolMembers,
+      randomSongsAdded: 0,
+      skipped: true,
+    };
+  }
+
   // 封面:取歌单自身可播条目中某首有封面歌曲的封面 ref(同一首封面每天固定,
   // 跨天自动轮换成另一首的封面;被其它固定推荐歌单占用的 ref 自动跳过,保证各
   // 固定歌单封面两两不同)。无封面时清掉旧缓存文件。

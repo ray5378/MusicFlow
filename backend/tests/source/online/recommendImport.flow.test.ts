@@ -138,9 +138,9 @@ function setSongs(id: string, songs: string[]) {
 }
 
 // playlists.owner_id 有外键指向 users,插歌单前必须有对应的用户行。
-// `importRecommendPlaylist` 在没传 userId 时落 ownerId=""(见「不传 userId」用例),
-// 所以空 id 也要有行,否则那条路径在真实库里会直接 FK 失败。
-const OWNER_IDS = ["", "u1", "u-42", "u-1"];
+// D27 修复后 importRecommendPlaylist 要求显式 userId(不再落空串撞 FK),用例统一传
+// "u1" / "u-42" / "u-1";空 id 已无引用,故不再播种。
+const OWNER_IDS = ["u1", "u-42", "u-1"];
 function seedUsers() {
   const stmt = sqlite.prepare(
     `INSERT OR IGNORE INTO users (id, username, password, salt, subsonic_salt) VALUES (?,?,?,?,?)`,
@@ -305,7 +305,7 @@ describe("推荐源标记:这条本地歌单是不是「每日推荐」导进来
 describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => {
   it("在线源未配置 → success:false 且一个库行都不落(没源就不造空歌单)", async () => {
     H.configured = null;
-    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     expect(r).toMatchObject({ success: false, created: false, trackCount: 0, added: 0, deduped: 0, failed: 0 });
     expect(allPlaylists()).toHaveLength(0);
     expect(H.importCalls).toHaveLength(0);
@@ -313,7 +313,7 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
 
   it("provider 缺 playlistSongs → 同样拒导,不落库", async () => {
     H.configured = { config: {}, provider: { recommend: async () => ({ channels: [] }) } };
-    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     expect(r.success).toBe(false);
     expect(allPlaylists()).toHaveLength(0);
   });
@@ -340,8 +340,8 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
 
   it("同一条推荐再导一次 → 复用同一歌单(幂等 upsert,不重复建)", async () => {
     setSongs("r1", ["w1", "w2"]);
-    const a = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
-    const b = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const a = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
+    const b = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     expect(b.created).toBe(false);
     expect(b.playlistId).toBe(a.playlistId);
     expect(allPlaylists()).toHaveLength(1);
@@ -349,12 +349,12 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
 
   it("再导入 = 整单替换:不在新集合里的旧条目被删,新增的补上", async () => {
     setSongs("r1", ["w1", "w2"]);
-    const a = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const a = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     H.impSongs = [
       { id: "w2", title: "W2" },
       { id: "w3", title: "W3" },
     ];
-    await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     // 「今天的推荐」语义 = 全量替换,不是往里追加,否则歌单会无限膨胀。
     expect(entrySongIds(a.playlistId!)).toEqual(["w2", "w3"]);
     expect(playlistRow(a.playlistId!)!.songCount).toBe(2);
@@ -366,7 +366,7 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
     H.impSongs = [];
     H.impFailed = 3;
     seedPlaylist("pl-old", { sourceUrl: `${PREFIX}r1`, externalId: "r1" });
-    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     expect(r).toMatchObject({ success: false, created: false, trackCount: 0 });
     expect(r.failed).toBe(3); // 导入层的 failed 要透传,不能吞掉
     expect(playlistRow("pl-old")).toBeUndefined();
@@ -375,7 +375,7 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
 
   it("上游 0 首且本地没有对应歌单 → 什么都不建(不会生成一个空壳)", async () => {
     H.impSongs = [];
-    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     expect(r.success).toBe(false);
     expect(allPlaylists()).toHaveLength(0);
   });
@@ -384,15 +384,15 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
     // WebUI 卡片 nowrap 渲染,长名会把平台标签挤掉 —— 截断是显示契约,不是随意为之。
     for (const id of ["r1", "r2", "r3"]) setSongs(id, ["w1"]);
     const long = "一二三四五六七八九十一二三四五六七八九十"; // 20
-    const r = await importRecommendPlaylist(PID, plInfo("r1", long));
+    const r = await importRecommendPlaylist(PID, plInfo("r1", long), { userId: "u1" });
     expect(r.name).toBe("一二三四五六七八九十一二三四五六七八" + "…");
     expect([...r.name].length).toBe(19);
 
     const exact = "A".repeat(18);
-    const r2 = await importRecommendPlaylist(PID, plInfo("r2", exact));
+    const r2 = await importRecommendPlaylist(PID, plInfo("r2", exact), { userId: "u1" });
     expect(r2.name).toBe(exact);
 
-    const r3 = await importRecommendPlaylist(PID, plInfo("r3", ""));
+    const r3 = await importRecommendPlaylist(PID, plInfo("r3", ""), { userId: "u1" });
     expect(playlistRow(r3.playlistId!)!.name).toBe("每日推荐");
   });
 
@@ -401,21 +401,21 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
     H.impAdded = 1;
     H.impDeduped = 1;
     H.impFailed = 2;
-    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
+    const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"), { userId: "u1" });
     expect(r).toMatchObject({ added: 1, deduped: 1, failed: 2, trackCount: 2 });
   });
 
   it("新建路径:封面缓存成功才写 coverArt,缓存失败(null)时保持空", async () => {
     setSongs("r1", ["w1"]);
     H.cover = "/cover/a.jpg";
-    const withCover = await importRecommendPlaylist(PID, plInfo("r1", "推荐一", "qq", "http://c/1.jpg"));
+    const withCover = await importRecommendPlaylist(PID, plInfo("r1", "推荐一", "qq", "http://c/1.jpg"), { userId: "u1" });
     expect(H.coverCalls).toEqual([{ url: "http://c/1.jpg", key: `pl-${withCover.playlistId}`, force: undefined }]);
     expect(playlistRow(withCover.playlistId!)!.coverArt).toBe("/cover/a.jpg");
 
     H.cover = null;
     H.coverCalls.length = 0;
     setSongs("r2", ["w1"]);
-    const noCover = await importRecommendPlaylist(PID, plInfo("r2", "推荐二", "qq", "http://c/2.jpg"));
+    const noCover = await importRecommendPlaylist(PID, plInfo("r2", "推荐二", "qq", "http://c/2.jpg"), { userId: "u1" });
     expect(H.coverCalls).toHaveLength(1);
     expect(playlistRow(noCover.playlistId!)!.coverArt).toBeNull();
   });
@@ -424,12 +424,12 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
     setSongs("r1", ["w1"]);
     H.cover = "/cover/a.jpg";
     H.coverCalls.length = 0;
-    const first = await importRecommendPlaylist(PID, plInfo("r1", "推荐一", "qq", "http://c/1.jpg"));
+    const first = await importRecommendPlaylist(PID, plInfo("r1", "推荐一", "qq", "http://c/1.jpg"), { userId: "u1" });
     expect(playlistRow(first.playlistId!)!.coverArt).toBe("/cover/a.jpg");
 
     H.cover = "/cover/b.jpg";
     H.coverCalls.length = 0;
-    const second = await importRecommendPlaylist(PID, plInfo("r1", "推荐一", "qq", "http://c/1.jpg"));
+    const second = await importRecommendPlaylist(PID, plInfo("r1", "推荐一", "qq", "http://c/1.jpg"), { userId: "u1" });
     expect(second.created).toBe(false);
     // 更新路径必须 force:上一轮可能卡在「拉歌曲」之前,歌单建了但封面没落地。
     expect(H.coverCalls).toEqual([
@@ -438,10 +438,13 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
     expect(playlistRow(first.playlistId!)!.coverArt).toBe("/cover/b.jpg");
   });
 
-  it("不传 userId → ownerId 落空串(系统任务的归属由上层负责)", async () => {
+  it("不传 userId → 显式拒绝导入(不再落空串撞外键)(已修复 D27)", async () => {
     setSongs("r1", ["w1"]);
     const r = await importRecommendPlaylist(PID, plInfo("r1", "推荐一"));
-    expect(playlistRow(r.playlistId!)!.ownerId).toBe("");
+    expect(r.success).toBe(false);
+    expect(r.playlistId).toBeUndefined();
+    // 没有归属用户 ⇒ 一个歌单行都不落(旧实现落 owner_id="" 在真实库里直接 FK 失败)。
+    expect(allPlaylists()).toHaveLength(0);
   });
 });
 
@@ -449,7 +452,7 @@ describe("importRecommendPlaylist:单歌单的 upsert / 自删 / 收口", () => 
 describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
   it("在线源没启用(或缺 recommend 能力)→ failed:1 + 明确错误,不导入任何东西", async () => {
     H.configured = null;
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(r).toMatchObject({ synced: 0, created: 0, failed: 1, playlists: [] });
     expect(r.errors[0]).toContain("在线源未启用或缺少 recommend/playlistSongs");
     // 批量闸必须成对:拿了锁就得还,否则后续所有批量任务永久卡死。
@@ -479,7 +482,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
   it("上游一个渠道都没有(channels 空数组)→ 立即收敛,不白重试 5 轮", async () => {
     // 每轮重试要睡 2.5s。「没有渠道」不是「渠道还没预热好」,不该为此空转 10 秒。
     H.recommendSeq = [{ channels: [] }];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(H.recommendCalls).toBe(1);
     expect(r).toMatchObject({ synced: 0, created: 0, failed: 0, playlists: [] });
     expect(r.errors).toEqual([]);
@@ -491,7 +494,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
       { channels: [{ source: "kugou", playlists: [] }] },
       { channels: [{ source: "kugou", playlists: [plInfo("a1", "推荐A")] }] },
     ];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(H.recommendCalls).toBe(2); // 确实重试了
     expect(r.synced).toBe(1);
     expect(r.errors).toEqual([]); // 拿到数据后不再报「该渠道无推荐歌单」
@@ -501,34 +504,24 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
     setSongs("a1", ["w1"]);
     seedPlaylist("pl-old", { sourceUrl: `${PREFIX}old1`, externalId: "old1", sourcePlatform: "kugou" });
     H.recommendSeq = [{ channels: [{ source: "kugou", playlists: [] }] }];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(r.synced).toBe(0);
     // 抓不到今天的推荐时,删掉昨天的 = 用户凭空少一批歌单;宁可留旧的。
     expect(r.errors.some((e) => e.includes("该渠道无推荐歌单,保留原有歌单"))).toBe(true);
     expect(playlistRow("pl-old")).toBeDefined();
   }, 60000);
 
-  // 🔴 这条用例钉的是**现状**,不是期望;缺陷已上报(见交付报告)。
-  //
-  // 期望行为:今日推荐换了 id,昨天的歌单应当被清理,否则每日推荐歌单会只增不减。
-  // 实际行为:清理闸门恒不成立 ⇒ 永远不删。
-  // 根因:`old`(第 371 行)是在**导入之后**才查的,于是它把今天刚建/刚更新的
-  //       歌单也数进了 oldByChannel;而 `current`(importedKeys)同样只含今天的。
-  //       设「昨天留下 prev 条、今天导入 n 条、其中 k 条是原地更新」,则
-  //         oldByChannel = prev + (n - k),current.size = n
-  //       闸门要求 n >= prev + n - k,即 k >= prev;而 k <= prev,故只有 k == prev
-  //       (昨天的全部都在今天里)才成立 —— 但那时「不在今日集合里的旧歌单」是空集,
-  //       循环体一轮都不删。**清理步骤等价于死代码**。
-  // 修法建议:把 `old` 的取样提到导入之前(或按 sourceUrl 排除今日导入的那些行)。
-  // 修好后本用例的期望应改为 `toBeUndefined()`,请一并更新。
-  it("轮换后的旧推荐歌单**当前**不会被清理(闸门恒不成立,已上报缺陷)", async () => {
+  // D29 修复后:清理统计用的 `old` 在**导入之前**快照,分母回到「昨天的量」,于是远端
+  // 下架、今天不再出现的旧歌单会被真正删掉(旧实现放在导入之后取全表,把今天新建的也计进
+  // oldByChannel,闸门 `current.size >= oldByChannel` 恒不成立 ⇒ 清理是死代码)。
+  it("轮换后的旧推荐歌单会被清理(远端下架 + 今日同渠道导入数不少于旧数)(已修复 D29)", async () => {
     setSongs("new1", ["w1"]);
     seedPlaylist("pl-old", { sourceUrl: `${PREFIX}old1`, externalId: "old1", sourcePlatform: "qq" });
     H.recommendSeq = [{ channels: [{ source: "qq", playlists: [plInfo("new1", "新推荐")] }] }];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(r.synced).toBe(1);
-    expect(playlistRow("pl-old")).toBeDefined(); // 现状:旧歌单留下(期望是删掉)
-    expect(allPlaylists()).toHaveLength(2);
+    expect(playlistRow("pl-old")).toBeUndefined(); // 已修复:旧歌单被轮换清理
+    expect(allPlaylists()).toHaveLength(1);
   });
 
   it("渠道里混着一个 0 首的歌单 → 不算失败,也不计入 synced(只在日志里记一笔)", async () => {
@@ -539,7 +532,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
     H.recommendSeq = [
       { channels: [{ source: "qq", playlists: [plInfo("empty", "空歌单"), plInfo("good", "好歌单")] }] },
     ];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(r.synced).toBe(1);
     expect(r.playlists).toHaveLength(1);
     expect(r.errors).toEqual([]);
@@ -550,10 +543,9 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
     setSongs("old1", ["w1", "w2"]);
     seedPlaylist("pl-fav", { sourceUrl: `${PREFIX}old1`, externalId: "old1", sourcePlatform: "qq", favorite: 1 });
     H.recommendSeq = [{ channels: [{ source: "qq", playlists: [plInfo("old1", "收藏的推荐")] }] }];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     // 收藏 = 用户表态要留着;轮换清理必须绕开它,但歌单内容照样每天刷新。
-    // 注:受上面那条缺陷影响,「不删」目前是双重保险(收藏分支 + 恒不成立的闸门);
-    // 缺陷修好后这两条断言仍然成立,所以不会变成假绿。
+    // D29 修复后清理闸门已生效,「不删」由收藏分支单独保证(不再依赖恒不成立的闸门兜底)。
     expect(r.synced).toBe(1);
     expect(playlistRow("pl-fav")).toBeDefined();
     expect(entrySongIds("pl-fav")).toEqual(["w1", "w2"]);
@@ -561,7 +553,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
     // 换一天:今天推的是别的 id,收藏的旧歌单仍不能被删。
     setSongs("new1", ["w3"]);
     H.recommendSeq = [{ channels: [{ source: "qq", playlists: [plInfo("new1", "新推荐")] }] }];
-    await syncAllRecommendPlaylists(PID);
+    await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(playlistRow("pl-fav")).toBeDefined();
   });
 
@@ -571,7 +563,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
     seedPlaylist("pl-2", { sourceUrl: `${PREFIX}old2`, externalId: "old2", sourcePlatform: "qq" });
     // 今天只抓回 1 条(昨天有 2 条)→ 判定为部分抓取,old2 必须留着。
     H.recommendSeq = [{ channels: [{ source: "qq", playlists: [plInfo("old1", "推荐一")] }] }];
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(r.synced).toBe(1);
     expect(playlistRow("pl-1")).toBeDefined();
     expect(playlistRow("pl-2")).toBeDefined();
@@ -593,7 +585,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
         },
       },
     };
-    const r = await syncAllRecommendPlaylists(PID);
+    const r = await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(r.synced).toBe(1); // 好歌单照常进来
     expect(r.errors.some((e) => e.includes("上游炸了"))).toBe(true);
     expect(allPlaylists()).toHaveLength(1);
@@ -617,7 +609,7 @@ describe("syncAllRecommendPlaylists:抓取 → 导入 → 安全清理", () => {
   it("整轮同步走全局批量闸,且批间让行(不与别的批量任务叠加抢带宽)", async () => {
     setSongs("a1", ["w1"]);
     H.recommendSeq = [{ channels: [{ source: "qq", playlists: [plInfo("a1", "推荐A")] }] }];
-    await syncAllRecommendPlaylists(PID);
+    await syncAllRecommendPlaylists(PID, { userId: "u1" });
     expect(H.lockAcquired).toBe(1);
     expect(H.lockReleased).toBe(1);
     expect(H.sleepCalls).toBeGreaterThanOrEqual(1);

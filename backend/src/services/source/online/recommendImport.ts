@@ -184,6 +184,13 @@ export async function importRecommendPlaylist(
   info: OnlinePlaylistInfo,
   opts?: { userId?: string },
 ): Promise<ImportRecommendResult> {
+  // D27 修复:playlists.owner_id 有外键指向 users.id。未带 userId 时旧实现把
+  // owner_id 写成空串 ⇒ `FOREIGN KEY constraint failed`,整单导入失败(异常还会被
+  // doSync 吞成一条「导入失败」)。这里显式拒绝并留 warn,不再落空串、不再触发 FK 异常。
+  if (!opts?.userId) {
+    log.warn(`[recommend-sync] 导入「${info.name}」被拒:缺少 userId(无法确定歌单归属)`);
+    return { success: false, created: false, name: truncateName(info.name), platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: 0 };
+  }
   const configured = getConfiguredProvider(providerId);
   if (!configured?.provider.playlistSongs) {
     return { success: false, created: false, name: info.name, platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: 0 };
@@ -194,7 +201,9 @@ export async function importRecommendPlaylist(
   // (标题+歌手+专辑+时长全命中才导),拒导的计入 rejected,绝不落库。
   const { verified, rejected } = await crossVerifySongs(providerId, configured.config, configured.provider, list);
   const imp = await importOnlineSongs(providerId, verified, { userId: opts?.userId, gate: "verified" });
+  // D28 修复:落库与返回值统一用兜底名「每日推荐」,避免「库里叫每日推荐、返回空串」不一致。
   const displayName = truncateName(info.name);
+  const finalName = displayName || "每日推荐";
 
   // 平台歌单音乐为 0(空歌单)→ 自动删除本地对应歌单,不保留空占位。
   if (imp.songs.length === 0) {
@@ -203,14 +212,14 @@ export async function importRecommendPlaylist(
       removePlaylistRows(existing.id);
       log.info(`[recommend-sync] 歌单「${displayName}」音乐为 0,已自动删除`);
     }
-    return { success: false, created: false, name: displayName, platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: imp.failed };
+    return { success: false, created: false, name: finalName, platform: info.source, trackCount: 0, added: 0, deduped: 0, failed: imp.failed };
   }
 
   const existing = findRecommendPlaylist(info.id, providerId);
   if (existing) {
     await replacePlaylistSongs(existing.id, imp.songs);
     db.update(playlists).set({
-      name: displayName,
+      name: finalName,
       comment: COMMENT_PREFIX + info.source,
       updatedAt: new Date().toISOString(),
     }).where(eq(playlists.id, existing.id)).run();
@@ -220,7 +229,7 @@ export async function importRecommendPlaylist(
     const playlistCover = await cacheRemoteCover(info.cover, `pl-${existing.id}`, true);
     if (playlistCover) db.update(playlists).set({ coverArt: playlistCover, updatedAt: new Date().toISOString() }).where(eq(playlists.id, existing.id)).run();
     return {
-      success: true, playlistId: existing.id, created: false, name: displayName,
+      success: true, playlistId: existing.id, created: false, name: finalName,
       platform: info.source, trackCount: imp.songs.length, added: imp.added, deduped: imp.deduped, failed: imp.failed,
     };
   }
@@ -229,7 +238,7 @@ export async function importRecommendPlaylist(
   const now = new Date().toISOString();
   db.insert(playlists).values({
     id,
-    name: displayName || "每日推荐",
+    name: finalName,
     ownerId: opts?.userId || "",
     isPublic: 0,
     comment: COMMENT_PREFIX + info.source,
@@ -252,7 +261,7 @@ export async function importRecommendPlaylist(
 
   await replacePlaylistSongs(id, imp.songs);
   return {
-    success: true, playlistId: id, created: true, name: displayName,
+    success: true, playlistId: id, created: true, name: finalName,
     platform: info.source, trackCount: imp.songs.length, added: imp.added, deduped: imp.deduped, failed: imp.failed,
   };
 }
@@ -320,6 +329,20 @@ async function doSyncAllRecommendPlaylists(
   // touched (avoid deleting old ones we failed to refresh).
   const emptyChannels = new Set<string>(channels.filter((ch) => ch.playlists.length === 0).map((ch) => ch.source));
 
+  // D29 修复:做清理统计的 `old` 必须在**导入之前**快照 —— 旧实现放在导入之后取全表,
+  // 把本次新建的歌单也计进 oldByChannel ⇒ 闸门 `current.size >= oldByChannel` 等价于
+  // `n >= m + n`,只要 m>=1 就永不成立,轮换删除实际从不生效(旧歌单只增不减)。
+  // 前置快照后分母回到「昨天的量」,远端下架的旧单才删得掉。
+  const old = db.select().from(playlists).all().filter((p) => isDailyRecommendPlaylist(p));
+  const oldByChannel = new Map<string, number>();
+  for (const p of old) {
+    const src = p.sourcePlatform || "";
+    oldByChannel.set(src, (oldByChannel.get(src) || 0) + 1);
+  }
+  // 本轮导入出现失败/部分失败的渠道:不得清理其旧歌单(否则可能把还没补回的歌单清空)。
+  // 与 emptyChannels 同属「导入失败不清理」主旨,双保险。
+  const failedChannels = new Set<string>();
+
   // 2. Import every playlist of every channel (upsert: new ones created,
   //    existing ones updated in place).
   // 并发窗口:逐个歌单「拉取歌曲→导入」串行是纯网络密集(每单 1 次上游往返),
@@ -350,9 +373,11 @@ async function doSyncAllRecommendPlaylists(
           log.info(`[recommend-sync] [${ch.source}] ${pl.name}: 空歌单,已自动删除`);
         } else {
           errors.push(`[${ch.source}] ${pl.name}: 导入失败`);
+          failedChannels.add(ch.source);
         }
       } catch (e: any) {
         errors.push(`[${ch.source}] ${pl.name}: ${e.message || "导入失败"}`);
+        failedChannels.add(ch.source);
       }
       // 批间让行:批量循环每批主动睡眠(batchPacer:档位 + ELD + 交互窗口内 ×4 退让),
       // 与 match.ts / importOnlineSongs 的节流保持同一套节奏。
@@ -367,13 +392,7 @@ async function doSyncAllRecommendPlaylists(
   //    Additionally, only prune a channel when today's import count >= the old
   //    count — if we imported fewer than we had before (e.g. a flaky fetch
   //    returned a partial list), we keep the old playlists rather than deleting
-  //    good playlists we then can't replace.
-  const old = db.select().from(playlists).all().filter((p) => isDailyRecommendPlaylist(p));
-  const oldByChannel = new Map<string, number>();
-  for (const p of old) {
-    const src = p.sourcePlatform || "";
-    oldByChannel.set(src, (oldByChannel.get(src) || 0) + 1);
-  }
+  //    good playlists we then can't replace. (old/oldByChannel 已改为导入前快照,见上。)
   const importedForChannel = (source: string) => new Set(
     [...importedKeys].filter((k) => k.source === source).map((k) => k.id),
   );
@@ -382,6 +401,7 @@ async function doSyncAllRecommendPlaylists(
     if (pl.favorite) continue;
     const src = pl.sourcePlatform || "";
     if (emptyChannels.has(src)) continue; // couldn't refresh this channel → keep old
+    if (failedChannels.has(src)) continue; // D29:该渠道本轮有导入失败 → 不清理其旧单
     const current = importedForChannel(src);
     const remoteId = String(pl.externalId || pl.sourceUrl!.replace(recommendPrefix(providerId), ""));
     // Safety: only delete stale playlists when today's import is at least as

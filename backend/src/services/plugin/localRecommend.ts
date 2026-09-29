@@ -169,9 +169,10 @@ function buildTasteProfile(): TasteProfile {
 }
 
 // Pull ALL candidate songs from the local library based on the taste profile,
-// excluding recently played ones. No size cap — returns everything that matches.
-function pickCandidateSongs(profile: TasteProfile, date: Date): string[] {
-  const excludeIds = profile.recentSongIds;
+// excluding recently played ones when `excludeRecent` is on (D17:口味路径与
+// 「参考歌单池」路径读同一个开关,关掉时近期歌可重新入候选)。
+function pickCandidateSongs(profile: TasteProfile, date: Date, excludeRecent: boolean): string[] {
+  const excludeIds = excludeRecent ? profile.recentSongIds : new Set<string>();
   const seen = new Set<string>();
   const candidates: { id: string; rank: number }[] = [];
 
@@ -367,7 +368,7 @@ export function pickLocalRecommendSongs(date: Date): { songIds: string[]; source
   }
 
   const profile = buildTasteProfile();
-  let songIds = pickCandidateSongs(profile, date);
+  let songIds = pickCandidateSongs(profile, date, excludeRecent);
   let fallback = false;
   if (songIds.length < 5) {
     songIds = pickRandomSample(date);

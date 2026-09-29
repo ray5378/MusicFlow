@@ -21,6 +21,7 @@ import { importOnlineSongs } from "../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, crossVerifySongs } from "../services/source/online/match.js";
 import { syncAllRecommendPlaylists } from "../services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "../services/source/online/purge.js";
+import { systemOwnerId } from "../services/plugin/shared.js";
 import { scanLocalSource, scanWebDAVSource } from "../services/source/scanner.js";
 import { scrapeArtistList } from "../services/scraper/artist.js";
 import { collectCandidates, runBackfillLoop, runBackfillChunked } from "../services/backfill.js";
@@ -144,7 +145,9 @@ async function runSyncPipeline(gate: (id: string) => boolean, tag: string): Prom
     if (caps.includes("recommend")) {
       if (!gate(manifest.id)) { skipped++; continue; }
       try {
-        const r = await syncAllRecommendPlaylists(manifest.id, {});
+        // D27 修复:导入歌单 owner_id 有外键,必须显式传归属用户;与 dailyRecommend/
+        // localRecommend 写系统歌单的口径一致,取首个 admin(无 admin 时返回 "",D27 会优雅拒绝)。
+        const r = await syncAllRecommendPlaylists(manifest.id, { userId: systemOwnerId() });
         if (r.synced > 0 || r.failed > 0) {
           log.info(`[${tag}] refreshed ${r.synced} ${manifest.id} daily-recommend playlists, errors: ${r.failed}`);
         }

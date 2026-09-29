@@ -76,10 +76,10 @@ function makeConn(over: any = {}) {
   return conn;
 }
 
-function makeServer(conn?: any) {
+function makeServer(conn?: any, logs: string[] = []) {
   const clients = new Map<string, any>();
   if (conn) clients.set(conn.clientId, conn);
-  return { clients, log: () => undefined } as any;
+  return { clients, log: (_lv: string, msg: string) => { logs.push(msg); } } as any;
 }
 
 function makeStore() {
@@ -397,6 +397,39 @@ async function beginStaticRound() {
   return { conn, store, coord, client, sid, h };
 }
 
+/** 让当前 static attempt 走完一轮「运营商输错码」:以错码起 PAKE,再由持正确码的客户端
+ *  完成 pair-auth + pair-confirm,使服务端在 confirm 处验签失败(用于 D30 连错计数)。 */
+async function staticWrongConfirm(conn: any, coord: any, correctCode: string, wrongCode: string) {
+  const h = conn.noise.handshakeHash as Uint8Array;
+  await coord.enterCode("CLIENTID", wrongCode);
+  const client = CPace.start({ role: "responder", prs: enc(correctCode), sid: sidFor(h, 1), ad: enc("client") });
+  client.derive(b64urlDecode(lastSent(conn, "server/pair-auth").pake_msg_1), enc("server"));
+  await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(client.publicShare) });
+  await coord.onPairMessage(conn, "client/pair-confirm", { pairing_index: 1, client_kc: b64urlEncode(client.tag()) });
+}
+
+/** 起一轮 dynamic 配对:init#1 出 nonce_A → 运营商输码 → 设备重发 init#2(被接受)→
+ *  服务端已发 server/pair-auth,现场推进到 await_peer_auth。 */
+async function beginDynamicRound() {
+  const conn = makeConn();
+  const store = makeStore();
+  const coord = new PairingCoordinator(makeServer(conn), store);
+  const h = conn.noise.handshakeHash as Uint8Array;
+  const nonceB = new Uint8Array(32).fill(42);
+  const commitB = sha256(new Uint8Array([...enc(COMMIT_LABEL), ...nonceB]));
+  await coord.start("CLIENTID", "dynamic_pin");
+  await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
+  const nonceA = b64urlDecode(lastSent(conn, "server/pair-init").nonce_A);
+  const code = deriveDynamicCode(h, nonceA, nonceB);
+  await coord.enterCode("CLIENTID", code);
+  // 设备重发 init(D34 已修复:await_code 状态下被接受并推进 PAKE)
+  await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
+  const sid = sidFor(h, 1);
+  const client = CPace.start({ role: "responder", prs: enc(code), sid, ad: enc("client") });
+  client.derive(b64urlDecode(lastSent(conn, "server/pair-auth").pake_msg_1), enc("server"));
+  return { conn, store, coord, client, sid, nonceB, nonceA, h };
+}
+
 describe("PairingCoordinator 完整 static 配对流程", () => {
   it("init → code → auth → confirm → finalize 落盘 + re-handshake 到长 PSK", async () => {
     const { conn, store, coord, client, sid } = await beginStaticRound();
@@ -424,18 +457,26 @@ describe("PairingCoordinator 完整 static 配对流程", () => {
     expect(coord.getAttempt("CLIENTID")).toBeUndefined();
   });
 
-  it("码错: confirm 校验失败 → pair/abort + 结束配对", async () => {
-    const { conn, coord, client } = await beginStaticRound();
-    await coord.onPairMessage(conn, "client/pair-auth", {
-      pairing_index: 1,
-      pake_msg_2: b64urlEncode(client.publicShare),
-    });
-    await coord.onPairMessage(conn, "client/pair-confirm", {
-      pairing_index: 1,
-      client_kc: b64urlEncode(new Uint8Array(32).fill(1)),
-    });
-    expect(lastSent(conn, "pair/abort").reason).toBe("pairing_code_mismatch");
+  it("D30 已修复:静态码连错可继续重试,累计 5 次才锁定并结束会话", async () => {
+    const conn = makeConn();
+    const logs: string[] = [];
+    const coord = new PairingCoordinator(makeServer(conn, logs), makeStore());
+    await coord.start("CLIENTID", "static_pin");
+    await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1 });
+
+    // 前 4 次输错:未达上限 → 不结束会话(failures 逐次累积),回到 await_code 可再试。
+    for (let i = 1; i <= 4; i++) {
+      await staticWrongConfirm(conn, coord, "12345678", "00000000");
+      expect(lastSent(conn, "pair/abort").reason).toBe("pairing_code_mismatch");
+      expect((coord as any).attempts.get("CLIENTID"), `第 ${i} 次错误后仍可重试`).toBeDefined();
+      expect((coord as any).attempts.get("CLIENTID").gate.failures).toBe(i);
+    }
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
+
+    // 第 5 次:达上限 → 锁定并终止会话(旧实现首次错误即 abort、锁恒不可达,已翻转)。
+    await staticWrongConfirm(conn, coord, "12345678", "00000000");
     expect(coord.getAttempt("CLIENTID")).toBeUndefined();
+    expect(logs.some((l) => l.includes("窗口锁定"))).toBe(true);
   });
 
   it("pair-auth 载荷非法 base64 → protocol_error", async () => {
@@ -464,8 +505,8 @@ describe("PairingCoordinator 完整 static 配对流程", () => {
       pairing_index: 1,
       pake_msg_2: b64urlEncode(client.publicShare),
     });
-    // onPairFinalize 只在 state !== await_confirm 时才写 pendingFinalize,而缓存又要求
-    // state === await_confirm —— 条件自相矛盾,pendingFinalize 缓存路径实际不可达。现状固化。
+    // pendingFinalize 缓存路径已随死代码清理删除(D32);finalize 在 state===await_confirm
+    // 且 cpace 就绪时直接落盘。
     await coord.onPairMessage(conn, "client/pair-finalize", { pairing_index: 1, wrapped_psk: wrapped });
     expect(store.putRecord).toHaveBeenCalledWith("CLIENTID", Buffer.from(psk).toString("hex"));
     expect(coord.getAttempt("CLIENTID")).toBeUndefined();
@@ -491,7 +532,7 @@ describe("PairingCoordinator 完整 static 配对流程", () => {
   });
 });
 
-describe("PairingCoordinator dynamic digits 流程(现状固化)", () => {
+describe("PairingCoordinator dynamic digits 流程", () => {
   it("pair-init 后回 nonce_A 并进入 await_code", async () => {
     const conn = makeConn();
     const coord = new PairingCoordinator(makeServer(conn), makeStore());
@@ -503,19 +544,33 @@ describe("PairingCoordinator dynamic digits 流程(现状固化)", () => {
     expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
   });
 
-  it("[已确知缺口] dynamic digits:运营商后输码不推进 PAKE(仅 static 有推进路径)", async () => {
-    const conn = makeConn();
-    const coord = new PairingCoordinator(makeServer(conn), makeStore());
-    const h = conn.noise.handshakeHash as Uint8Array;
-    await coord.start("CLIENTID", "dynamic_pin");
-    const nonceB = new Uint8Array(32).fill(42);
-    const commitB = sha256(new Uint8Array([...enc(COMMIT_LABEL), ...nonceB]));
-    await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
-    const nonceA = b64urlDecode(lastSent(conn, "server/pair-init").nonce_A);
-    await coord.enterCode("CLIENTID", deriveDynamicCode(h, nonceA, nonceB));
-    // 现状:enterCode 仅对 static 触发 runStaticRound,dynamic 停在 await_code 且未发 pair-auth
-    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
-    expect(lastSent(conn, "server/pair-auth")).toBeUndefined();
+  it("D34 已修复:nonce_A 一条会话只随机一次,重发 pair-init 被接受并推进 PAKE → 进入 confirm", async () => {
+    const { conn, coord, client, sid, nonceB } = await beginDynamicRound();
+
+    // 第 2 次 client/pair-init 已被接受 → 已发 server/pair-auth,状态推进到 await_peer_auth
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_peer_auth");
+    expect(lastSent(conn, "server/pair-auth")).toBeDefined();
+    // nonce_A 不在重发 init 时重随机:带 nonce_A 的 server/pair-init 全程只发过一次
+    expect(conn.sent.filter(([t]) => t === "server/pair-init").length).toBe(1);
+
+    // 完成 PAKE:client → pair-auth → server/pair-confirm(码校验通过)
+    await coord.onPairMessage(conn, "client/pair-auth", {
+      pairing_index: 1,
+      pake_msg_2: b64urlEncode(client.publicShare),
+    });
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_confirm");
+    const serverKc = b64urlDecode(lastSent(conn, "server/pair-confirm").server_kc);
+    expect(client.verify(serverKc)).toBe(true);
+
+    // confirm:nonce 开示 + commitment 校验 + 码比对全部通过 → 不回 abort
+    const k = wrapKey(WRAP_NONCE_LABEL, sid, client.getISK());
+    await coord.onPairMessage(conn, "client/pair-confirm", {
+      pairing_index: 1,
+      client_kc: b64urlEncode(client.tag()),
+      wrapped_nonce_B: b64urlEncode(aeadSeal("chacha", k, nonceB)),
+    });
+    expect(lastSent(conn, "pair/abort")).toBeUndefined();
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_confirm");
   });
 });
 

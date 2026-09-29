@@ -494,24 +494,34 @@ describe("generateDailyPlaylist — 幂等跳过与封面", () => {
     expect((await generateDailyPlaylist(DATE)).skipped).toBe(true);
   });
 
-  it("仅推荐池(远程全失败)时按现状只做追加、不清旧条目 —— 见缺陷台账 D14", async () => {
+  it("零远程 + 零池歌新增 → 不盖当天日期、可重试;有池歌新增则追加并盖日期(已修复 D14)", async () => {
     allRemoteFail();
     for (const id of ["s1", "s2", "s3"]) seedSong(id);
     for (const id of ["s1", "s2", "s3"]) addFavorite("u-pool", id);
     addPool("favorites", "u-pool");
 
     const day1 = await generateDailyPlaylist(DATE);
+    expect(day1.skipped).toBe(false);
     expect(day1.poolSongsAdded).toBe(3);
+    expect(todayRow().comment).toContain(DATE_STR);
 
-    // 次日远程依旧全失败:零远程轨道 → rebuildPlaylistEntries 不被调用 → 旧条目
-    // 不会被清;候选又被 existingSongIds 去重 → 一首也加不进去。
-    // 结果是「日期戳成新的一天、内容仍是昨天的、且当天不会再重试」(total=0)。
-    // 这是现状记录,不是期望行为;修复后本用例应改为断言旧条目被替换。
+    // 次日远程依旧全失败:零远程轨道 + 池歌全被 existingSongIds 去重 → 什么新内容都没写进去。
+    // 已修复:不盖当天日期(不谎报「今天已更新」),返回「未生成」标记,当天稍后仍可重试。
     const day2 = await generateDailyPlaylist(new Date("2026-09-28T04:00:00"));
-    expect(day2.skipped).toBe(false);
+    expect(day2.skipped).toBe(true);
     expect(day2.total).toBe(0);
     expect(day2.poolSongsAdded).toBe(0);
-    expect(todayEntries().length).toBe(3);
+    expect(todayEntries().length).toBe(3);                 // 旧内容原样保留
+    expect(todayRow().comment).not.toContain("2026-09-28"); // 未盖当天日期
+    expect(todayRow().comment).toContain(DATE_STR);         // 仍是昨天那次的日期戳
+
+    // 当天晚些时候池里出现一首新歌 → 本次真正写入新内容 → 追加且盖当天日期(正向对照,行为不变)
+    seedSong("s4");
+    addFavorite("u-pool", "s4");
+    const day2b = await generateDailyPlaylist(new Date("2026-09-28T05:00:00"));
+    expect(day2b.skipped).toBe(false);
+    expect(day2b.poolSongsAdded).toBe(1);
+    expect(todayEntries().length).toBe(4);
     expect(todayRow().comment).toContain("2026-09-28");
   });
 
@@ -535,6 +545,11 @@ describe("generateDailyPlaylist — 幂等跳过与封面", () => {
     await generateDailyPlaylist(DATE);
     expect(todayRow().cover_art).toBe("cover-A");
     expect(f.clearPlaylistCoverCache).not.toHaveBeenCalled();
+
+    // 第二次 force 必须真正产出新内容,否则命中 D14 提前返回(空跑不盖日期、也不动封面),
+    // 就走不到封面分支。喂入一首新池歌使其 poolSongsAdded===1,进入正常生成的封面逻辑。
+    seedSong("s2");
+    addFavorite("u-pool", "s2");
 
     f.pickDailyRotatedCover.mockReturnValue(null);
     await generateDailyPlaylist(DATE, { force: true, seedSalt: 1 });

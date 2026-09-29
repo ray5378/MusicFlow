@@ -158,6 +158,19 @@ export class PeerManager extends EventEmitter {
     });
   }
 
+  /**
+   * 把一条定时/启动钩子包成「出错只记日志、不让异常冒穿定时器回调」的安全壳。
+   * 定时器回调里抛出的未捕获异常在 Node 默认策略下会终止进程;这几条钩子
+   * (5s 首填充 / 60s 周期 / 20s 重启清扫)任一发现源抛错都不该把整个后端带走。
+   */
+  private async safeTick(label: string, fn: () => void | Promise<void>): Promise<void> {
+    try {
+      await fn();
+    } catch (e: any) {
+      log.error(`[peer] ${label} failed: ${e?.message || e}`);
+    }
+  }
+
   /** Start the periodic inactivity cleanup. Call once at boot. */
   startCleanup(): void {
     if (this.cleanupTimer) return;
@@ -165,26 +178,36 @@ export class PeerManager extends EventEmitter {
     // discovered devices show up without waiting for a refreshDevices call.
     // Group peers are reconciled from GroupManager (availability = any member
     // online; names follow group renames).
+    //
+    // D16 修复:三条钩子(60s 周期 / 5s 首填充 / 20s 重启清扫)统一走 safeTick ——
+    // 发现源(mDNS / SSDP 缓存 / 组管理)任一抛错都只记日志、绝不成为未捕获异常
+    // (Node 默认会终止进程,而 60s 这条每拍都会复现)。此前只有 20s 那条包了 try/catch。
     this.cleanupTimer = setInterval(() => {
-      this.reconcileDlnaPeers();
-      this.reconcileGroupPeers();
-      this.reconcileAirPlayPeers();
-      this.runCleanup();
-    }, CLEANUP_INTERVAL_MS);
-    // Run once shortly after boot so the peer list is populated immediately.
-    setTimeout(() => { this.reconcileDlnaPeers(); this.reconcileGroupPeers(); this.reconcileAirPlayPeers(); }, 5000);
-    // 重启清扫:容器重启后 DLNA/群组 peer 要等发现落位、本机 peer 要等客户端重连,
-    // 故推迟到 20s 再跑第一轮 —— 队列「6h 未变动 + 播放端离线 6h」才回收,刚播过
-    // 或刚好重连上来的队列不会被动。
-    setTimeout(() => {
-      try {
+      void this.safeTick("cleanup-tick", () => {
         this.reconcileDlnaPeers();
         this.reconcileGroupPeers();
         this.reconcileAirPlayPeers();
         this.runCleanup();
-      } catch (e: any) {
-        log.error(`[peer] boot queue sweep failed: ${e?.message || e}`);
-      }
+      });
+    }, CLEANUP_INTERVAL_MS);
+    // Run once shortly after boot so the peer list is populated immediately.
+    setTimeout(() => {
+      void this.safeTick("boot-fill", () => {
+        this.reconcileDlnaPeers();
+        this.reconcileGroupPeers();
+        this.reconcileAirPlayPeers();
+      });
+    }, 5000);
+    // 重启清扫:容器重启后 DLNA/群组 peer 要等发现落位、本机 peer 要等客户端重连,
+    // 故推迟到 20s 再跑第一轮 —— 队列「6h 未变动 + 播放端离线 6h」才回收,刚播过
+    // 或刚好重连上来的队列不会被动。
+    setTimeout(() => {
+      void this.safeTick("boot-sweep", () => {
+        this.reconcileDlnaPeers();
+        this.reconcileGroupPeers();
+        this.reconcileAirPlayPeers();
+        this.runCleanup();
+      });
     }, BOOT_SWEEP_DELAY_MS);
     // Bridge DLNA discovery → peer availability. Whenever the device list
     // changes (refreshDevices / SSDP sweep), re-sync the dlna peer set so the

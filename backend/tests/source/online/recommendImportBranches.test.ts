@@ -75,6 +75,8 @@ interface ImplOpts {
   searchMiss?: boolean;
   playlistSongsThrows?: Error;
   recommendThrows?: Error;
+  /** 指定远端歌单 id 的 playlistSongs 抛错(用于「某渠道部分导入失败」用例)。 */
+  failPlaylistIds?: string[];
 }
 
 function makeImpl(o: ImplOpts = {}) {
@@ -98,8 +100,9 @@ function makeImpl(o: ImplOpts = {}) {
     streamUrl: (_c: any, s: any) => `http://rib/stream?id=${s.id}`,
   };
   if (!o.noPlaylistSongs) {
-    impl.playlistSongs = async () => {
+    impl.playlistSongs = async (_config: any, _source: string, id: string) => {
       if (o.playlistSongsThrows) throw o.playlistSongsThrows;
+      if (o.failPlaylistIds?.includes(String(id))) throw new Error(`上游 ${id} 失败`);
       return { songs: o.songs === null ? [] : (o.songs ?? [remoteSong()]) };
     };
   }
@@ -195,13 +198,12 @@ describe("recommendImport: 命名与标记", () => {
     expect(r.name).toBe(name);
   });
 
-  // ⚠️ 真实缺陷(D24 现状固化):名字为空时,落库那步有  兜底,
-  // 但返回给调用方的 name 直接就是 displayName(空串)——调用方拿到空名字。
-  it("空歌单名:落库兜底成「每日推荐」,返回值仍是空串(D24 现状)", async () => {
+  // D28 已修复:落库与返回值统一用兜底名「每日推荐」,不再「库里是每日推荐、返回空串」。
+  it("空歌单名:D28 已修复 —— 落库与返回值一致,都是「每日推荐」", async () => {
     registerProvider();
     const r = await importRecommendPlaylist(PROVIDER, info("1", ""), { userId: "u1" });
     expect(plRow(r.playlistId!)!.name).toBe("每日推荐");
-    expect(r.name).toBe("");
+    expect(r.name).toBe("每日推荐");
   });
 
   it("recommendSourceUrl 用插件声明的前缀,不是硬编码", () => {
@@ -276,15 +278,14 @@ describe("recommendImport: 首次导入 vs 二次复用", () => {
     expect(plRow(r.playlistId!)!.ownerId).toBe("u1");
   });
 
-  // ⚠️ 真实缺陷(已固化进用例,记入缺陷台账 D23):opts 里没有 userId 时,
-  // importRecommendPlaylist 会把 owner_id 写成空串,而 playlists.owner_id 有
-  // FK 指向 users.id ⇒ 整条导入直接抛 FOREIGN KEY constraint failed,歌单没建
-  // 起来,异常还会顺着 doSync 的 try/catch 变成一条「导入失败」。
-  it("没传 userId 时 owner_id 写空串 ⇒ 外键约束报错,导入整单失败(D23 现状)", async () => {
+  // D27 已修复:playlists.owner_id 有 FK 指向 users.id,未带 userId 时显式拒绝 ——
+  // 不再写空串、不再触发 `FOREIGN KEY constraint failed` 把整单拖失败。
+  it("没传 userId → 显式拒绝(success:false),不触发外键异常", async () => {
     registerProvider();
-    await expect(importRecommendPlaylist(PROVIDER, info("100", "推荐单"))).rejects.toThrow(
-      /FOREIGN KEY constraint failed/,
-    );
+    const r = await importRecommendPlaylist(PROVIDER, info("100", "推荐单"));
+    expect(r.success).toBe(false);
+    expect(r.created).toBe(false);
+    expect(r.trackCount).toBe(0);
     expect(plRow("100")).toBeUndefined();
   });
 
@@ -431,20 +432,18 @@ describe("recommendImport: syncAll 渠道级保险", () => {
     expect(r.errors.every((e) => e.startsWith("[netease]"))).toBe(true);
   });
 
-  // ⚠️ 真实缺陷(D25 现状固化):做清理统计的 `old` 列表是在导入**之后**取的
-  // 全表,本次新建的歌单也被计入 oldByChannel ⇒ `current.size >= oldByChannel`
-  // 这个「导入没导全就别删」的安全闸永远不成立(每导一个,旧数的分母也跟着涨),
-  // 结果「每日推荐」的轮换删除实际从不生效,旧歌单只增不减。
-  it("远端已下架的旧歌单不会被清理:旧数统计把本次新单也算进去了(D25 现状)", async () => {
+  // D29 已修复:做清理统计的 `old` 改为在**导入之前**快照,分母回到「昨天的量」,
+  // 远端下架的旧歌单才能被正确清理(旧实现把本次新建的单也算进分母 ⇒ 闸门 `n>=m+n` 永假)。
+  it("远端已下架的旧歌单会被清理(旧数统计改为导入前快照)", async () => {
     registerProvider();
     seedOldPlaylist("99");
     const r = await syncAllRecommendPlaylists(PROVIDER, { userId: "u1" });
     expect(r.synced).toBe(1);
-    expect(plRow("99")).toBeDefined();
+    expect(plRow("99")).toBeUndefined(); // 已下架旧单被轮换删除
   });
 
-  // 负向对照:昨天有 2 个旧单、今天只导回 1 个,同样删不掉(闸门本就先挡住了)。
-  it("今天只导回一部分(导入数 < 旧数)时同样不会删旧单", async () => {
+  // 负向对照:昨天有 2 个旧单、今天只导回 1 个(导入数 < 旧数)→ 安全闸仍挡住不删。
+  it("今天只导回一部分(导入数 < 旧数)时不会删旧单", async () => {
     registerProvider();
     seedOldPlaylist("99");
     seedOldPlaylist("98");
@@ -454,13 +453,49 @@ describe("recommendImport: syncAll 渠道级保险", () => {
     expect(plRow("98")).toBeDefined();
   });
 
-  // 上式修复后这条 continue 才真正可到达;目前它与 D25 是同一道闸门,先固化现状。
-  it("收藏的歌单不参与轮换删除(内容照常更新,但不会被清理)", async () => {
+  // D29 新增①:某渠道本轮有导入失败 → 不清理该渠道旧单(否则会清空还没补回的歌单)。
+  // 这里旧数=1、成功导入 1 单 → 单看闸门本会删掉 99;因「失败渠道不清理」保险而保留。
+  it("某渠道部分导入失败 → 不清理该渠道旧歌单", async () => {
+    registerProvider({
+      channels: [
+        {
+          source: NETEASE,
+          playlists: [
+            { id: "100", source: NETEASE, name: "今天好", cover: "" },
+            { id: "101", source: NETEASE, name: "今天坏", cover: "" },
+          ],
+        },
+      ],
+      failPlaylistIds: ["101"],
+    });
+    seedOldPlaylist("99");
+    const r = await syncAllRecommendPlaylists(PROVIDER, { userId: "u1" });
+    expect(r.synced).toBe(1); // 100 导入成功
+    expect(r.failed).toBeGreaterThan(0); // 101 失败
+    expect(plRow("99")).toBeDefined(); // 该渠道有失败 → 旧单不被清
+  });
+
+  // D29 新增②:收藏的歌单不参与轮换删除(修复后清理段首次可达,favorite 分支被照到)。
+  it("收藏的旧歌单不参与轮换删除(内容照常更新,但不会被清理)", async () => {
     registerProvider();
     seedOldPlaylist("99", { favorite: 1 });
     const r = await syncAllRecommendPlaylists(PROVIDER, { userId: "u1" });
     expect(r.synced).toBe(1);
     expect(plRow("99")).toBeDefined();
+  });
+
+  // D29 新增③:清理段 try/catch —— removePlaylistRows 抛错被吞进 errors,不影响整轮。
+  it("清理旧歌单抛错被吞进 errors(不影响整轮)", async () => {
+    registerProvider();
+    seedOldPlaylist("99");
+    // 只让「99」的封面缓存清理抛错 → removePlaylistRows("99") 中途抛出、被清理段捕获;
+    // 导入「100」用的是别的歌单 id,不受影响。
+    f.clearPlaylistCoverCache.mockImplementation((id: string) => {
+      if (id === "99") throw new Error("封面缓存清理炸了");
+    });
+    const r = await syncAllRecommendPlaylists(PROVIDER, { userId: "u1" });
+    expect(r.synced).toBe(1);
+    expect(r.errors.some((e) => e.includes("删除旧歌单") && e.includes("封面缓存清理炸了"))).toBe(true);
   });
 
   it("导入结果里带 playlistId/name/trackCount", async () => {

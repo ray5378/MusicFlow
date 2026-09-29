@@ -192,6 +192,10 @@ describe("「每日推荐」固定行 —— 换内容不换行", () => {
     await generateDailyPlaylist(new Date("2026-12-02T04:00:00"));
     const first = todayRow();
 
+    // 12-03 那次必须真正产出新内容,否则命中 D14 空跑提前返回(不盖当天日期戳),走不到重建路径。
+    seedSong("s2");
+    addFavorite("u-pool", "s2");
+
     await generateDailyPlaylist(new Date("2026-12-03T04:00:00"), { force: true });
     const second = todayRow();
 

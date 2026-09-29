@@ -358,12 +358,10 @@ describe("rebuildPlaylistEntries — 增量(再同步同一歌单)", () => {
     expect(after[0].id).toBe(before);
     expect(after[0].song_id).toBe("s1");
     expect(after[0].playable).toBe(1);
-    // 现状记录(缺陷台账 D15):rebuild 只对「非空 unavailable_reason」的行单独 CASE 写回,
-    // 已匹配行不带该列 → 保留原来的 "曲库中未找到"。而同族的自动匹配路径
-    // (services/source/online/match.ts:100)在挂上 song_id 时会把该列显式置 NULL。
-    // 该残留值目前不会漏给客户端(路由只在 !(playable && songId) 的分支里读它,
-    // routes/api/playlists.ts:416),所以是潜伏的不一致;修复后本断言应改为 null。
-    expect(after[0].unavailable_reason).toBe("曲库中未找到");
+    // D15 已修复:matched(挂了 song_id)的行一并把 unavailable_reason 擦成 NULL,
+    // 与同族自动匹配路径(services/source/online/match.ts)「挂 song_id 即置 NULL」的
+    // 约定一致 —— 占位行修成可播后不再残留旧的「曲库中未找到」。
+    expect(after[0].unavailable_reason).toBe(null);
     expect(plRow("pl-1").song_count).toBe(1);
     expect(plRow("pl-1").duration).toBe(150);
   });

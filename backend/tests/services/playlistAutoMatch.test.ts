@@ -158,17 +158,15 @@ describe("runPlaylistAutoMatch:等批量闸的竞速与放弃", () => {
     expect(r.matched).toBe(3);
   });
 
-  it("现状记录(缺陷台账 D19):后台匹配器 reject 也被报成 lockTimeout,且不留错误日志", async () => {
-    // 现状:box 只在 onFinished 回调里赋值;底层 reject → catch(()=>resolve()) 只推进
-    // 「等闸」这条 Promise,box 仍为 null → 与「等太久」走上同一条分支。
-    // 于是「匹配失败」被回报成「等批量闸超时」,并只打一条 info(没有 error/warn)。
-    // 影响:调用方/排障者会把失败误读为排队超时;修复后本用例应改为断言
-    //       存在独立的失败回报(或至少 logger.error 被调用)。
+  it("D19 已修复:后台匹配器 reject → 报失败(非超时)并留 warn,不再谎报 lockTimeout", async () => {
+    // 修复:底层 reject 的原因收进 box.error → 走独立的失败分支并记 warn；
+    // 「等批量闸超时」只留给真正的超时(timer 先到)。
     h.match.mockImplementation(() => Promise.reject(new Error("在线源全线 429")));
     const r = await runPlaylistAutoMatch("pl-lock-c", { lockWaitMs: 50 });
-    expect(r.lockTimeout).toBe(true);
-    expect(h.logs.info.some(([m]) => String(m).includes("等批量闸超时"))).toBe(true);
-    expect(h.logs.warn).toEqual([]);
+    expect(r.lockTimeout).toBeFalsy();
+    expect(r.failed).toBe("在线源全线 429");
+    expect(h.logs.warn.some(([m]) => String(m).includes("后台匹配失败"))).toBe(true);
+    expect(h.logs.info.some(([m]) => String(m).includes("等批量闸超时"))).toBe(false);
   });
 });
 

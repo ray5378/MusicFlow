@@ -136,7 +136,7 @@ describe("PairingCoordinator dynamic 活路径(runDynamicRound)", () => {
     expect(lastSent(conn, "server/pair-auth")).toBeDefined();
   });
 
-  it("[现状固化] dynamic 活路径走到 confirm:nonce_A 每次 init 都重生成,码基线换了人 ⇒ 码错误收场", async () => {
+  it("跨 attempt nonce 必须重新随机(真实守卫):旧轮 nonce_A 派生的码在新一轮必然不符 ⇒ 码错误收场", async () => {
     const nonceB = new Uint8Array(32).fill(42);
     const conn = makeConn();
     const store = makeStore();
@@ -173,7 +173,7 @@ describe("PairingCoordinator dynamic 活路径(runDynamicRound)", () => {
     expect(lastSent(conn, "pair/abort")?.reason).toBe("pairing_code_mismatch");
   });
 
-  it("[现状固化] dynamic 卡在第 1 轮后:状态机要求 await_init,重发 pair-init 被直接 return", async () => {
+  it("[已修复 D34] dynamic 卡在第 1 轮后:await_code 状态下重发 pair-init 会被接受并推进 PAKE", async () => {
     const nonceB = new Uint8Array(32).fill(42);
     const conn = makeConn();
     const coord = new PairingCoordinator(makeServer(conn), makeStore());
@@ -187,13 +187,16 @@ describe("PairingCoordinator dynamic 活路径(runDynamicRound)", () => {
     expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
     expect(lastSent(conn, "server/pair-auth")).toBeUndefined();
 
-    // 设备的 pair-init 是"一次性的":第 2 次被 await_code 挡下,既不重生成 nonce_A,
-    // 也不会触发 runDynamicRound —— 这就是 dynamic 走不通日常时序的原因。
+    // 修复前:第 2 次 pair-init 被 await_code 挡下,既不重生成 nonce_A 也不触发
+    // runDynamicRound —— dynamic 走不通日常时序。修复后:await_code 下重发 init 会被接受、
+    // 复用同一个 nonce_A,并立即推进 PAKE。
     const before = conn.sent.length;
     await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
-    expect(conn.sent.length).toBe(before);
-    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
-    expect(lastSent(conn, "server/pair-auth")).toBeUndefined();
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_peer_auth");
+    expect(lastSent(conn, "server/pair-auth")).toBeDefined();
+    expect(conn.sent.length).toBeGreaterThan(before);
+    // nonce_A 已下发过 ⇒ 重发 init 不再重复下发 server/pair-init。
+    expect(conn.sent.slice(before).some(([t]) => t === "server/pair-init")).toBe(false);
   });
 
   it("dynamic confirm:解不开 wrapped_nonce_B ⇒ 静默断连且不落盘", async () => {
@@ -314,23 +317,37 @@ describe("不可达分支固化(死代码 / 死 catch)", () => {
     expect(b64urlDecode("!!!not-b64!!!").length).toBeLessThan(16);
   });
 
-  it("静态码:首次 confirm 不符即 abort,后续再错也无从累计 ⇒ 锁定分支不可达", async () => {
+  it("静态码:错码累计 5 次才锁定(前 4 次保留 attempt 可重试)(已修复 D30)", async () => {
     const conn = makeConn();
     const store = makeStore();
     const coord = new PairingCoordinator(makeServer(conn), store);
     await coord.start("CLIENTID", "static_pin");
-    // 第 1 次:attempt 在,输码能推进 PAKE。
     await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1 });
-    await coord.enterCode("CLIENTID", "12345678");
-    await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(new Uint8Array(32).fill(9)) });
-    await coord.onPairMessage(conn, "client/pair-confirm", { pairing_index: 1, client_kc: b64urlEncode(new Uint8Array(32).fill(1)) });
-    expect(coord.getAttempt("CLIENTID")).toBeUndefined();
+
+    // 一轮错码:输码开跑 PAKE → 用**正确码**派生一个自洽的 pake_msg_2(保证服务端 derive
+    // 成功、能走到 confirm)→ 再提交一个**错误** client_kc,让 verify 失败、记一次失败。
+    const wrongRound = async () => {
+      await coord.enterCode("CLIENTID", "12345678");
+      const client = CPace.start({ role: "responder", prs: enc("12345678"), sid: sidFor(H, 1), ad: enc("client") });
+      client.derive(b64urlDecode(lastSent(conn, "server/pair-auth").pake_msg_1), enc("server"));
+      await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(client.publicShare) });
+      await coord.onPairMessage(conn, "client/pair-confirm", { pairing_index: 1, client_kc: b64urlEncode(new Uint8Array(32).fill(1)) });
+    };
+
+    // 第 1 次错码:只记数,**保留 attempt**(state 回 await_code),不再首次不符即 abort。
+    await wrongRound();
+    expect(coord.getAttempt("CLIENTID")).toBeDefined();
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
     expect(store.putRecord).not.toHaveBeenCalled();
 
-    // 第 2 次:attempt 已被 abort 删掉,报的是"没有等待输码的配对"而非"已锁定"。
-    await expect(coord.enterCode("CLIENTID", "12345678")).rejects.toThrow("没有等待输码的配对");
-    await expect(coord.enterCode("CLIENTID", "1234-5678")).rejects.toThrow("没有等待输码的配对");
-    // StaticCodeGate 的 5 次锁定在这里永远排不上号。
+    // 再错 4 次,累计到第 5 次才锁定并 abort(attempt 被删)。
+    await wrongRound();
+    await wrongRound();
+    await wrongRound();
+    await wrongRound();
+    expect(coord.getAttempt("CLIENTID")).toBeUndefined();
+    expect(store.putRecord).not.toHaveBeenCalled();
+    // 顺带:SP:1(24B 动态码)token 的纯解码守卫,与本锁定流程无关。
     expect(decodePairingToken("SP:1" + b32Encode(new Uint8Array(24)))).not.toBeNull();
   });
 

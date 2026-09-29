@@ -9,8 +9,8 @@
 //   ③ 兜底链:候选不足 5 首 → 全库确定性随机(pickRandomSample);
 //      池内无可播 → 回落口味;口味也无 → 空结果不报错。
 //
-// 顺带固化一个**口径不一致**(缺陷台账 D17):`excludeRecent` 只在「参考歌单池」
-// 路径生效,「口味路径」的近期剔除是无条件的 —— 关掉该开关在口味推荐下看不出效果。
+// D17 已修复:口味路径与「参考歌单池」路径共用同一个 `excludeRecent` —— 关掉该开关后
+// 两条路径都不再剔除近期播放过的歌(此前口味路径的剔除去耦于该开关、静默失效)。
 //
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
@@ -230,19 +230,17 @@ describe("口味路径:play_history / 收藏聚合 + 近期剔除", () => {
     expect(r.songIds).toContain("s0");
   });
 
-  it("现状记录(缺陷台账 D17):excludeRecent=false 在口味路径下被忽略,近期歌仍被剔除", () => {
-    // 「口味路径」的剔除用的是 buildTasteProfile().recentSongIds,与 excludeRecent 无关;
-    // 该开关只在「参考歌单池」路径生效。用户把「排除近期播放」关掉时,口味推荐仍会
-    // 把近 30 天听过的歌剔掉 —— 开关在这个模式下看起来失效。
-    // 修复后该断言应改为 toContain("s0")。
+  it("D17 已修复:excludeRecent=false 时口味路径也认这个开关,近期歌可重新入候选", () => {
+    // 「口味路径」与「参考歌单池」路径共用同一个 excludeRecent;关掉后口味推荐不再剔除
+    // 近 30 天听过的歌(s0/s5 都是近期播放),两条路径口径一致。
     seedLibrary();
     seedHistory(owner, "s0", 1);
-    seedHistory(owner, "s5", 1); // 两个艺人各有一条近期历史 → 剩余候选 8 首
+    seedHistory(owner, "s5", 1); // 两个艺人各有一条近期历史
     setCfg({ excludeRecent: false });
     const r = pickLocalRecommendSongs(NOW);
     expect(r.fallback).toBe(false);
-    expect(r.songIds).not.toContain("s0");
-    expect(r.songIds).not.toContain("s5");
+    expect(r.songIds).toContain("s0");
+    expect(r.songIds).toContain("s5");
   });
 
   it("候选结果被 count 截断(不是把整库吐出来)", () => {

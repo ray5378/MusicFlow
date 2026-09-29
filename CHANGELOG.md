@@ -49,6 +49,27 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.65] - 2026-09-29
+
+### 修复（行为变更类缺陷 13 条：D14–D19 / D21 / D22 / D27–D30 / D34）
+- [P3] D14 `plugin/dailyRecommend.ts`：远程全失败且本次无池歌新增时，不再无条件盖当天日期（此前谎报「今天已更新」且当天不再重试）。改为不盖日期、返回 `skipped:true`，保留既有内容并允许当天重试。
+- [P3] D15 `plugin/playlistSync.ts`：歌单重建时「匹配成功（已挂 song_id）」的行一并将 `unavailable_reason` 擦成 NULL，消除「可播后仍残留『曲库中未找到』」。
+- [P3] D16 `peer.ts`：60s 周期 / 5s 首填充 / 20s 重启清扫三条钩子统一收敛到 `safeTick`，发现源抛错只记 log.error，不再成为未捕获异常（此前 60s 那条会让进程周期性终止）。
+- [P3] D17 `plugin/localRecommend.ts`：口味路径与「参考歌单池」路径读同一个 `excludeRecent` 开关，修复「关掉排除最近播放」在口味路径下静默失效。
+- [P3] D18 `plugin/randomSongs.ts`：rowid 过采样区间相对 limit 过小（`span <= limit*4`）时退化为 `ORDER BY RANDOM() LIMIT n`，修复「库容≈count」时静默少数（如 60 首库抽 48 只得 47）。
+- [P3] D19 `playlist/autoMatch.ts`：区分「后台匹配器失败」与「等批量闸超时」——底层 reject 现回报 `failed`（失败原因，新增可选字段）并记 log.warn，仅真超时才置 `lockTimeout`。
+- [P2] D21 `lyrics.ts`：WebDAV sidecar 歌词拼接保留源配置子目录（此前只取 `origin`、子目录被丢，拼出非法 URL 永远取不到）；并为源不存在 / url 缺失 / 抓取未命中 / 本地文件缺失补 warn/debug 日志。
+- [P3] D22 `lyrics.ts`：歌词第 ④ 级（源插件 `lyricUrl`）整段包进 try/catch，插件抛错不再冒穿成上层 500，按「无歌词」处理并记 warn；顺带修掉 fetch 失败时定时器未清（移入 finally）。
+- [P3] D27 `source/online/recommendImport.ts`：未带 `userId` 时显式拒绝导入（返回 `success:false` + warn），不再把 `owner_id` 写成空串触发外键约束失败、导致整单导入失败。同时修正生产调用方 `batch/jobs.ts`：每日推荐同步现显式传入 `systemOwnerId()`（首个 admin），该路径此前因落空串一直无法建单。
+- [P3] D28 `source/online/recommendImport.ts`：落库与返回值统一用兜底名「每日推荐」，消除「库里叫每日推荐、返回空串」的不一致。
+- [P2] D29 `source/online/recommendImport.ts`：「每日推荐」轮换删除修复——旧歌单统计前置到导入之前（分母回到「昨天的量」），使远端已下架的旧单真正可被清理；并新增「本轮导入失败的渠道不清理」保护，避免失败时把歌单清空。
+- [P2] D30 `sendspin/pairServer.ts`：静态配对码失败节流修复——码错误先记数，未达上限（<5）时保留配对会话回到「等输码」以便重试，达上限才真正断；此前首次错误即 abort 导致 `failures` 恒为 1、锁定窗口不可达。
+- [P2] D34 `sendspin/pairServer.ts`：动态码日常时序修复——一条配对会话内 `nonce_A` 只随机一次，并允许在「等输码」状态再收一次 `client/pair-init` 推进 PAKE；此前重发 init 被状态机丢弃、且 nonce 每次重随机导致判码必错。
+
+### 测试
+- 14 个测试文件按新行为翻转（D14/D15/D16/D17/D18/D19/D21/D22/D27/D28/D29/D30/D34 全部去除「现状固化」断言），并补足 D29 清理段新可达分支（favorite / try-catch）与 D30/D34 新契约。
+- 仅改上述源码 + 对应测试，无对外 HTTP 契约破坏（D19 为新增可选字段 `failed`）。
+
 ## [4.0.64] - 2026-09-29
 
 ### 修复（发版 CI 回归：测试文件与 v4.0.62/v4.0.63 实现不同步）
