@@ -239,6 +239,7 @@ export function playCore(
    *  必须在 pump.stop() 之后装填(stop 清 pendingSeekMs 属"旧上下文丢弃"语义)。 */
   seekPositionMs?: number,
 ): void {
+  clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
   const conn = srv.clients.get(clientId);
   // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
@@ -324,6 +325,7 @@ export function playGroupCore(
   /** MA `play_index(seek_position=N)` 等价通道(用户组重建流起点)。 */
   seekPositionMs?: number,
 ): void {
+  clearPauseState(srv, groupName);
   if (!srv) return;
   const g = srv.group(groupName);
   // ★ 借流(见 playCore 同名段落):用户组作目标时同样适用 —— 泵照搬,成员原样。
@@ -504,6 +506,18 @@ function clearPauseWatchdog(clientId: string): void {
   }
 }
 
+/** 起播路径统一清理:disarm 看门狗 + 复位 paused。
+ *  ⚠️ 恢复可能走**冷起播**(coldStartResume → playMedia → playCore),那条路
+ *  不经过 resumePumpCore;若不在起播入口清理,paused 与看门狗都会残留,
+ *  导致「已经恢复播放了,30s 后仍被自动 stop」(2026-09-30 真机修复)。 */
+function clearPauseState(srv: SendspinServer | null, id: string): void {
+  clearPauseWatchdog(id);
+  const g = srv?.group(id);
+  if (g) g.paused = false;
+  const conn = srv?.clients.get(id) as (SendspinConnection & { group?: SendspinGroup }) | undefined;
+  if (conn?.group) conn.group.paused = false;
+}
+
 function armPauseWatchdog(srv: SendspinServer | null, clientId: string): void {
   clearPauseWatchdog(clientId);
   const t = setTimeout(() => {
@@ -546,7 +560,10 @@ export function pauseCore(srv: SendspinServer | null, clientId: string): void {
   g.paused = true;
   pumpFor(srv, g).pause();
   broadcastGroupState(srv, clientId, g);
-  armPauseWatchdog(srv, clientId);
+  // ⚠️ 只有「真的有曲目在播」才埋看门狗。设备未起播(队列空 / 只是挂了个暂停
+  // 标记)时 pause 也会走到这里,若无条件 arm,30s 后会把一台并未在播的设备
+  // 误 stop —— 240 真机实测:组内设备因此被判离线(2026-09-30 修复)。
+  if (g.current) armPauseWatchdog(srv, clientId);
 }
 
 /** 恢复核心:仅在「已有推流(暂停中)」时原地恢复;冷起播由主进程侧走 playMedia。 */
