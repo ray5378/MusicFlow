@@ -2,6 +2,36 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.69] - 2026-09-30
+
+### 新增能力
+- **SENDSPIN 实时控制对齐 Music Assistant**（`services/sendspin/`）：
+  - 组状态由「playing / stopped」两态升级为**三态**（`playing / paused / stopped`），
+    设备据此区分「暂停」与「断网」——此前暂停**零下行通知**，设备只看到推流停了。
+  - 暂停满 30s 自动转 stop（`PAUSE_AUTO_STOP_MS = 30_000`，对齐 MA `_watch_pause`），
+    回收推流资源；resume / stop 均会 disarm，杜绝僵死的 paused。
+  - `set_static_delay` 下行（钳制 0–5000ms），复用既有 `supported_commands` 门禁，
+    设备未宣告一律静默不发（真机 esp32-player2 只宣告 volume / mute，故当前不下发，符合预期）。
+- **离线设备常驻可见**：SENDSPIN 设备断连只置 `available=false`，**不再摘除 peer** ——
+  此前它是唯一「断连即真删」的协议（DLNA / AirPlay 本来只置位）。组成员、播放器切换器、
+  群组页候选项现在都保留离线设备并带「离线」标记，不再自动清理或隐藏。
+
+### 修复
+- **暂停看门狗误触发**（240 真机定位，表现为设备被误 stop 并在组内显示离线）：
+  `pauseCore` 无条件 arm（没在播也埋雷）+ 冷起播路径不清 `paused`。改为仅在真有曲目在播时
+  arm，并在 `playCore` / `playGroupCore` 起播入口统一 `clearPauseState()`。热部署后观察 3 分钟，
+  误触发 0 次。
+- **`resolveLiveGroup()`**：设备加入用户组后 `conn.group` 指向 `ug:<id>`，而
+  `srv.group(clientId)` 返回的是**单设备组** —— `paused` 此前被置到错误的组上。新增该 helper
+  优先取 `conn.group`，已接入 pause / resume / 看门狗 / set_static_delay。
+- **`GET /v1/sendspin/clients` 只列在线连接**：改为以持久设备档案 `sendspin_device_state`
+  为底表叠加连接态，离线设备也能被找到、能加回组。
+- **`pruneOrphans` 误清离线设备**：合法 sendspin 集合不再只看 peer 注册表，并入持久化档案，
+  离线设备的队列 / 播放器条目不再被 10 分钟一轮当孤儿清掉。
+- 前端：store 与 WS `peer_unavailable` 不再过滤 / 删除离线 peer；组编辑候选不再用
+  `sendspin:host:port` 造 id（与真实的 `sendspin:<clientId>` 不合并 → 重复且永远离线的成员）；
+  Flows 控制页不再把离线 ESP32 硬编码标为在线。
+
 ## [4.0.67] - 2026-09-29
 
 ### 新增能力
