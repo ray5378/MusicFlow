@@ -46,6 +46,7 @@ const H = vi.hoisted(() => {
     },
     pm: {
       registerSendspin: vi.fn(),
+      markSendspinUnavailable: vi.fn(),
       removeSendspinPeer: vi.fn(),
       removeSendspinPeers: vi.fn(),
     },
@@ -886,10 +887,14 @@ describe("startSendspinInProcess / startSendspinService / stop", () => {
     expect(H.core.setVolumeCore).toHaveBeenCalledWith(srv, "ss:ug:1", 50);
     expect(H.core.joinGroupCore).toHaveBeenCalledWith(srv, "ss:ug:1", "DEV1");
 
-    // onClosed → 撤 peer 但保留播放器
+    // onClosed → 只把 peer 置为离线(行保留、可见),不摘除
+    // 与 DLNA / AirPlay 同口径:断连 ≠ 设备被删除,真删只发生在显式意图路径
+    // (用户禁用 / 删除、插件停用)。
     H.pm.removeSendspinPeer.mockClear();
+    H.pm.markSendspinUnavailable.mockClear();
     H.createOpts.onClosed(conn);
-    expect(H.pm.removeSendspinPeer).toHaveBeenCalledWith("DEV1");
+    expect(H.pm.markSendspinUnavailable).toHaveBeenCalledWith("DEV1", "客厅");
+    expect(H.pm.removeSendspinPeer).not.toHaveBeenCalled();
 
     await idx.stopSendspinService();
     expect(srv.stop).toHaveBeenCalled();
@@ -954,7 +959,9 @@ describe("startSendspinInProcess / startSendspinService / stop", () => {
     hooks.onPlayFailed("FK", "s1", "boom");
     expect(H.qc.registerSendspinDevice).toHaveBeenCalledWith("FK", "名");
     expect(H.pm.registerSendspin).toHaveBeenCalledWith("FK", "名", true, true);
-    expect(H.pm.removeSendspinPeer).toHaveBeenCalledWith("FK");
+    // fork 同口径:断连只置离线,不摘除 peer。
+    expect(H.pm.markSendspinUnavailable).toHaveBeenCalledWith("FK");
+    expect(H.pm.removeSendspinPeer).not.toHaveBeenCalled();
 
     // 已在运行 → 幂等返回 null，不再 start
     H.supervisor.start.mockClear();
