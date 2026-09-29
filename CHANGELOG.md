@@ -49,6 +49,22 @@
   `tests/services/flowSlotAbort.test.ts`（D24 排队中 abort）、`tests/services/flowAbortSettle.test.ts`（D25 拆管收敛）。
 - `tests/services` 目录级 8 轮压测全绿。
 
+## [4.0.66] - 2026-09-29
+
+### 测试（覆盖率 C 类真实逻辑缺口补测，产品代码零改动）
+- 新增 10 个测试文件，覆盖此前从未触达的真实逻辑分支：
+  - `sendspin/encoding.ts`：FLAC 帧解析守卫与 strict 边界行为证据用例（chanCode 11..15 保留值被上游守卫拒绝、strict 恰落缓冲末尾的精确切帧）；经源码核对 `readSigned` / `alignByte` / `looksLikeFrameHeaderAt` 为零调用点死代码、`frameChannelLayout` 保留值分支被守卫挡死（本版不改产品代码，已标注待后续清理轮）。
+  - `sendspin/server.ts`：dial 超时（`ws.terminate()` + `dial timeout`）与 dial 失败两条 reject 路径。
+  - `routes/api/peers.ts`：6 个路由此前从未断言的成功返回 `{success:true}` + renderer 操作 403 FORBIDDEN。
+  - `routes/auth/index.ts`：`POST /login` 路由 handler 成功/失败两条路（此前仅 handleLogin 单测，路由层零覆盖）。
+  - `pluginAccess.ts`：`getPlaylistSyncImpl` 三条选择路径（命中带 `rebuildPlaylistEntries` 的 / 跳过选后续 / 全无返回 undefined）。
+  - `audio/dsp.ts`：pan 立体声右声道衰减公式 + `perChannelPreampDb` FL/FR 非零组装。
+  - `plugin/localRecommend.ts`：口味/参考池两路候选的 `seen.add` 去重分支。
+  - `plugin/importers/netease.ts`：非法歌单链接抛错 + 合法链接透传正确 id。
+  - `plugins/discovery.ts`：外置插件 `create()` 未返回 impl → `sandbox.dispose()` + 跳过 + 继续加载后续插件。
+  - `player/PlayerController.ts`：`resetPlayerState` 四步清理（tracker/latest/pending/optimistic）。
+- 覆盖率：Lines 99.15% → 99.29%；Branches 88.22% → 88.32%；Functions 97.19% → 97.27%（全量 401 文件 / 5486 条零失败）。
+
 ## [4.0.65] - 2026-09-29
 
 ### 修复（行为变更类缺陷 13 条：D14–D19 / D21 / D22 / D27–D30 / D34）
