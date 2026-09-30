@@ -22,7 +22,7 @@ import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
 import { createLogger } from "../../utils/logger.js";
 import { markSeekIssued, withinSeekSettle, logSeekSettleSuppressed, clearSeekSettle } from "./seekSettle.js";
-import { withinPauseStopSettle } from "./pauseStopSettle.js";
+import { withinPauseStopSettle, clearPauseStop } from "./pauseStopSettle.js";
 
 const log = createLogger("QueueController");
 
@@ -242,7 +242,9 @@ export class QueueController extends EventEmitter {
     if (op === "seek") markSeekIssued(playerId);
     // stop / play 会丢弃当前播放上下文(位置归零或重投),旧的 seek 时刻不再有意义 ——
     // 清掉,避免新上下文里的合法 idle_early 被一条陈旧记录压住。
-    if (op === "stop" || op === "play") clearSeekSettle(playerId);
+    // 「暂停看门狗转 stop」的持久标记同理(见 pauseStopSettle.ts 顶部):恢复播放/
+    // 显式停止都是新播放会话,不清会把新会话里合法的 idle_early 复查一直压住。
+    if (op === "stop" || op === "play") { clearSeekSettle(playerId); clearPauseStop(playerId); }
     try {
       if (op === "play") await player.resume();
       else if (op === "pause") await player.pause();
@@ -839,6 +841,12 @@ export class QueueController extends EventEmitter {
         return;
       }
     }
+
+    // 起播漏斗:任何「开始播一首曲」(手动上下曲/跳转/自动推进/恢复重投)都汇于此。
+    // 旧的「暂停看门狗转 stop」标记到此为止 —— 新会话里 idle_early 恢复原有裁决
+    // (见 pauseStopSettle.ts 顶部注释)。放在 checkPlayTarget 之后:目标不可播、
+    // 尚未真正起播时,标记保留(播放器仍处于看门狗 stop 态)。
+    clearPauseStop(deviceId);
 
     // ==================== 不可播裁决 + 跳过循环 ====================
     //
