@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.73] - 2026-10-01
+
+### 测试
+- **SENDSPIN 协议链路回归守卫(Sendspin Guard)**:
+  - 新增工作流 `.github/workflows/sendspin-guard.yml`(blocking,push main + PR),
+    把 v4.0.6x~v4.0.72 三轮真机验证拍板的协议契约钉死,防止后续改动静默回归。
+  - 新增门禁用例:
+    - `groupStateTriad.test.ts`(P0):`group/update` 的 playback_state 必须是
+      stopped / paused / playing 三态;退回两态会让设备分不清「暂停」与「断网」,
+      P1 续播随之失效 —— 已做变异验证(吃掉 paused 分支即转红);
+    - `forkSeekContract.test.ts`(P1):fork(子进程)路径必须把续播位置
+      `seekPositionMs` 透传到 `playCore` / `playGroupCore`。该路径漏参数是
+      **静默失效** —— 主进程测试跑 in-proc 全绿,只有真机 fork 模式才暴露
+      (暂停后恢复播放回 0);
+  - 源码级静态守卫 11 条,覆盖 vitest 覆盖不到的 plumbing:三态表达式、
+    `PAUSE_AUTO_STOP_MS` + `keepCurrent` 分支、续播位置的**生产侧两点**
+    (`protocolPlayer` / `index` 的 RPC 入参)与消费侧(`childMain` 解参)、
+    `canKeepStream` / `clearPlayback` 及两处切歌分支、legacy 回退阀门。
+  - 全部守卫已做**变异验证**:逐个回退 P0 / P1 / P2 的修复,动态用例与静态
+    守卫均确认转红(守卫不是恒绿的摆设)。
+
 ## [4.0.72] - 2026-10-01
 
 ### 修复

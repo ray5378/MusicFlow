@@ -1,0 +1,161 @@
+name: Sendspin Guard
+
+# SENDSPIN 协议链路专用门禁（blocking），与 ci.yml 全量测试互补、与 build.yml（v* tag）解耦。
+#
+# 钉死 2026-09-30 ~ 10-01 三轮真机验证拍板的协议契约，防止被改坏：
+#
+#   P0 组状态三态（v4.0.6x）：group/update 的 playback_state 必须是
+#       stopped / paused / playing 三态，对齐 MA PlaybackStateType。
+#       此前「暂停 / 断网 / 播完」一律报 stopped，设备无法区分，
+#       真机表现是「暂停后恢复播放从头开始」。三态是 P1 续播能生效的前提。
+#       —— src/services/sendspin/groupStateTriad.test.ts
+#
+#   P1 暂停看门狗 + 续播（v4.0.70）：暂停 30s 转 stop 时 keepCurrent=true
+#       保留 current/positionMs/paused；恢复播放必须把暂停位置透传到底层，
+#       **fork（子进程）路径同样必须透传** —— 该路径漏参数是静默失效：
+#       主进程测试跑 in-proc，全绿，只有真机 fork 模式才暴露（续播回 0）。
+#       —— forkSeekContract.test.ts（协议层）+ 下方源码守卫（生产侧三点）
+#
+#   P2 切歌 keep_stream（v4.0.72）：track change 只发 stream/clear 清缓冲，
+#       绝不发 stream/end；stream/end 只留给队列空 / 用户 stop / 成员摘除。
+#       依据 MA player.py:1454 "The spec reserves stream/end for queue-empty,
+#       not track changes." 真机（esp32-player2 / ESPHome 2026.9.0）实测
+#       设备侧打印 "Stream clear" 且全程无 "Stream ended"。
+#       —— trackChangeKeepStream.test.ts
+#
+# 为什么除了 vitest 还要源码扫描：上面三类里最危险的是**静默失效** ——
+# 参数漏传 / 分支被短路时既有单测仍全绿，只有真机才暴露。源码守卫把
+# 「符号必须在位」钉死，不依赖测试用例是否覆盖到那条路径。
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: sendspin-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sendspin-guard:
+    name: sendspin protocol guard (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: cd backend && npm ci
+
+      - name: Run sendspin guard tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cd backend
+          npx vitest run \
+            src/services/sendspin/groupStateTriad.test.ts \
+            src/services/sendspin/forkSeekContract.test.ts \
+            src/services/sendspin/coldStartResume.test.ts \
+            src/services/sendspin/pauseStopIpc.test.ts \
+            src/services/sendspin/trackChangeKeepStream.test.ts \
+            tests/sendspin/playerCoreUnits.test.ts \
+            tests/sendspin/indexWrappers.test.ts 2>&1 | tee /tmp/sendspin-guard.log
+
+      # —— P0：组状态三态表达式 ——
+      # 退回两态（删掉 g.paused 分支）后设备无法区分暂停与断流，P1 续播随之失效。
+      - name: "Guard P0 - group state triad (stopped/paused/playing)"
+        shell: bash
+        run: |
+          if ! grep -qF 'const state = !g?.current ? "stopped" : g.paused ? "paused" : "playing";' backend/src/services/sendspin/server.ts; then
+            echo "::error::P0 回归:group/update 必须是三态 !current→stopped / paused→paused / else→playing(删掉 paused 分支会让设备分不清暂停与断网,续播失效)"
+            exit 1
+          fi
+          echo "OK: 组状态三态在位"
+
+      # —— P1：暂停看门狗 + 续播（三条，含 fork 路径的生产侧）——
+      # 测试只能钉死「消费侧参数到达 playerCore」；生产侧（谁把 seekPositionMs
+      # 放进 RPC）漏传时消费侧测试仍绿 —— 故这里扫三个生产点。
+      - name: "Guard P1 - pause watchdog keepCurrent"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -qF 'export const PAUSE_AUTO_STOP_MS = 30_000;' backend/src/services/sendspin/playerCore.ts; then
+            echo "::error::P1 回归:缺少 PAUSE_AUTO_STOP_MS = 30_000(暂停转 stop 看门狗阈值)"
+            miss=1
+          fi
+          if ! grep -qF 'export function stopCore(srv: SendspinServer | null, clientId: string, keepCurrent = false)' backend/src/services/sendspin/playerCore.ts; then
+            echo "::error::P1 回归:stopCore 必须保留 keepCurrent 形参(看门狗转 stop 要留 current/positionMs,显式 stop 才全清)"
+            miss=1
+          fi
+          if ! grep -qF 'if (!keepCurrent) {' backend/src/services/sendspin/playerCore.ts; then
+            echo "::error::P1 回归:stopCore 缺少 if (!keepCurrent) 保护分支(会把看门狗的续播现场一起清掉)"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 暂停看门狗 keepCurrent 在位"; fi
+          exit "$miss"
+
+      - name: "Guard P1 - resume position reaches fork RPC (producer side)"
+        shell: bash
+        run: |
+          miss=0
+          # 生产点1:单设备 fork 起播
+          if ! grep -qF 'rpc("playMedia", { clientId, item, streamUrl, seekPositionMs: startMs })' backend/src/services/sendspin/protocolPlayer.ts; then
+            echo "::error::P1 回归:protocolPlayer 的 playMedia RPC 必须带 seekPositionMs: startMs(漏传则 fork 模式续播回 0,主进程测试全绿看不出来)"
+            miss=1
+          fi
+          # 生产点2:用户组 fork 起播
+          if ! grep -qF 'rpc("groupPlay", { group: groupName, members: memberIds, item, seekPositionMs: startMs })' backend/src/services/sendspin/index.ts; then
+            echo "::error::P1 回归:groupPlay RPC 必须带 seekPositionMs: startMs(用户组 fork 续播回 0)"
+            miss=1
+          fi
+          # 消费点:子进程必须把参数解出来传给 playCore / playGroupCore
+          if [ "$(grep -cF 'p.seekPositionMs as number | undefined' backend/src/services/sendspin/childMain.ts)" -lt 2 ]; then
+            echo "::error::P1 回归:childMain 必须在 playMedia 与 groupPlay 两处都解出 seekPositionMs"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 续播位置透传链路(生产侧+消费侧)在位"; fi
+          exit "$miss"
+
+      # —— P2：切歌 keep_stream ——
+      # 退回 stream/end 会让设备拆掉解码/扬声器上下文再重建：切歌出现gap，
+      # 且组状态会闪一下 stopped（真机已实测过这条旧路径的问题）。
+      - name: "Guard P2 - track change keeps the stream (clear, never end)"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -qF 'canKeepStream()' backend/src/services/sendspin/server.ts; then
+            echo "::error::P2 回归:SendspinGroup 缺少 canKeepStream()(切歌门禁)"
+            miss=1
+          fi
+          if ! grep -qF 'clearPlayback()' backend/src/services/sendspin/server.ts; then
+            echo "::error::P2 回归:SendspinGroup 缺少 clearPlayback()(切歌只清缓冲,不发 stream/end)"
+            miss=1
+          fi
+          n=$(grep -cF 'if (g.current && g.canKeepStream()) {' backend/src/services/sendspin/playerCore.ts)
+          if [ "$n" -lt 2 ]; then
+            echo "::error::P2 回归:playCore 与 playGroupCore 都必须走 canKeepStream() 分支(当前命中 $n 处,期望 2)"
+            miss=1
+          fi
+          # 回退阀门:碰到真不认 stream/clear 的固件可一键回到 MA 严格档
+          if ! grep -qF 'MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY' backend/src/services/sendspin/server.ts; then
+            echo "::error::P2 回归:缺少 MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY 回退阀门"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 切歌 keep_stream 契约在位"; fi
+          exit "$miss"
+
+      - name: Upload guard log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sendspin-guard-log
+          path: /tmp/sendspin-guard.log
+          if-no-files-found: ignore
+          retention-days: 3
