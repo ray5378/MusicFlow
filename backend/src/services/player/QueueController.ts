@@ -22,6 +22,7 @@ import { suffixToMime } from "../dlna/queue.js";
 import type { TrackDecision } from "./PlaybackTracker.js";
 import { createLogger } from "../../utils/logger.js";
 import { markSeekIssued, withinSeekSettle, logSeekSettleSuppressed, clearSeekSettle } from "./seekSettle.js";
+import { withinPauseStopSettle } from "./pauseStopSettle.js";
 
 const log = createLogger("QueueController");
 
@@ -422,6 +423,16 @@ export class QueueController extends EventEmitter {
         }
       } catch (e: any) {
         log.warn(`[QueueController][idle_early] ${playerId}: 复查失败,按真结束处理`, { err: e?.message || e });
+      }
+      // 暂停看门狗转停(对齐 MA `_watch_pause`,见 services/player/pauseStopSettle.ts):
+      // 这条 IDLE 是看门狗「暂停满 30s 未恢复 → 自动 stop」拆流产生的,**不是曲目播完**;
+      // 复查确认已停是必然结果。MA 语义:转 stop 只停传输,队列留在当前曲(stopped=可续播),
+      // 队列推进只由曲目真结束驱动。放行切歌的话,用户观感就是
+      // 「暂停 → 缓冲播完停几秒 → 自己切下一首」。
+      if (withinPauseStopSettle(id)) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        log.warn(`[QueueController][idle_early] ${playerId}: 暂停看门狗转停(非曲目结束) → 保留队列位置,不切歌`);
+        return;
       }
       log.warn(`[QueueController][idle_early] ${playerId}: 复查确认已停,放行切歌`);
     }

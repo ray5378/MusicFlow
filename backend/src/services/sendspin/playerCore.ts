@@ -16,6 +16,7 @@ import { nowUs } from "./clock.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
 import { saveDeviceVolumeState } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
+import { markPauseStopIssued } from "../player/pauseStopSettle.js";
 
 const log = createLogger("Sendspin");
 
@@ -528,6 +529,10 @@ function armPauseWatchdog(srv: SendspinServer | null, clientId: string): void {
       `[sendspin] 暂停满 ${PAUSE_AUTO_STOP_MS / 1000}s 未恢复,自动转 stop(对齐 MA _watch_pause) client=${clientId}`,
     );
     g.paused = false;
+    // 看门狗转 stop 打标(见 services/player/pauseStopSettle.ts):这条 stop 是我们自己
+    // 拆流产生的,**不是曲目播完**。不打标的话 QueueController 的 idle_early 复查会
+    // 探到「设备确实停了」→ 放行切歌(真机观感:暂停 → 缓冲播完停几秒 → 自己切下一首)。
+    markPauseStopIssued(clientId);
     stopCore(srv, clientId);
   }, PAUSE_AUTO_STOP_MS);
   // 兜底回收不该吊住 event loop(尤其子进程退出路径)。
