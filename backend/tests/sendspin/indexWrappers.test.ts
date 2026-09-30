@@ -73,7 +73,7 @@ const H = vi.hoisted(() => {
       pauseCore: vi.fn(),
       resumePumpCore: vi.fn(),
       seekCore: vi.fn(),
-      pollCore: vi.fn(() => ({ playing: true, positionMs: 11, durationMs: 22 })),
+      pollCore: vi.fn(() => ({ playing: true, paused: false, positionMs: 11, durationMs: 22 })),
       pumpActiveCore: vi.fn(() => true),
       armBorrowCore: vi.fn(() => ({ armed: true, positionMs: 5 })),
     },
@@ -271,7 +271,7 @@ beforeEach(() => {
   H.esphome.mirroredVolume.mockReturnValue({ volume: 0.37, muted: true });
   H.core.joinGroupCore.mockReturnValue({ joined: true, live: false });
   H.core.leaveGroupCore.mockReturnValue(true);
-  H.core.pollCore.mockReturnValue({ playing: true, positionMs: 11, durationMs: 22 });
+  H.core.pollCore.mockReturnValue({ playing: true, paused: false, positionMs: 11, durationMs: 22 });
   H.core.pumpActiveCore.mockReturnValue(true);
   H.core.armBorrowCore.mockReturnValue({ armed: true, positionMs: 5 });
   H.core.setVolumeCore.mockImplementation(() => {});
@@ -788,13 +788,13 @@ describe("armBorrow + group 包装(fork/in-proc 双支)", () => {
   it("sendspinGroupPoll / Muted / PumpActive 双支", async () => {
     H.fork = true;
     H.supervisor.isRunning.mockReturnValue(false);
-    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: false, positionMs: 0, durationMs: 0 });
+    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: false, paused: false, positionMs: 0, durationMs: 0 });
     await expect(idx.sendspinGroupMuted("g", true)).rejects.toThrow("未运行");
     expect(await idx.sendspinGroupPumpActive("g")).toBe(false);
 
     H.supervisor.isRunning.mockReturnValue(true);
-    H.rpcResult = { playing: true, positionMs: 1, durationMs: 2 };
-    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: true, positionMs: 1, durationMs: 2 });
+    H.rpcResult = { playing: true, paused: false, positionMs: 1, durationMs: 2 };
+    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: true, paused: false, positionMs: 1, durationMs: 2 });
     H.rpcResult = undefined;
     await idx.sendspinGroupMuted("g", true);
     expect(H.rpcCalls.at(-1)).toMatchObject({ op: "setMuted", payload: { clientId: "g", muted: true } });
@@ -805,7 +805,7 @@ describe("armBorrow + group 包装(fork/in-proc 双支)", () => {
     H.server = null;
     expect(await idx.sendspinGroupPumpActive("g")).toBe(false);
     H.server = makeFakeSrv();
-    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: true, positionMs: 11, durationMs: 22 });
+    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: true, paused: false, positionMs: 11, durationMs: 22 });
     await idx.sendspinGroupMuted("g", true);
     expect(H.core.setMutedCore).toHaveBeenCalledWith(H.server, "g", true);
     expect(await idx.sendspinGroupPumpActive("g")).toBe(true);
