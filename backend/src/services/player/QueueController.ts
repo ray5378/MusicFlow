@@ -471,6 +471,13 @@ export class QueueController extends EventEmitter {
       if (this.advancing.has(id)) return;
       // 链路本身就丢了(子进程僵死)→ 交给恢复路径,别在这里叠一次重投。
       if (this.linkLost.has(id)) return;
+      // 暂停看门狗转停(见 pauseStopSettle.ts):设备被我们自己 stop 后位置冻结,
+      // tracker 必然报 frozen —— 预期状态,不复查不重投更不切歌。
+      if (withinPauseStopSettle(id)) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        log.warn(`[QueueController][frozen] ${playerId}: 暂停看门狗转停(非冻结死机) → 不重投不切歌`);
+        return;
+      }
       // seek 冷静期:刚下发过 seek 时位置本就不该动(ffmpeg 正按新的 -ss 重起),
       // 此刻判 frozen 是误报 → 撤销,并清掉已派发的信号让检测重新武装。
       if (withinSeekSettle(id)) {
@@ -531,6 +538,14 @@ export class QueueController extends EventEmitter {
       // 放在最前:先于任何 pollState / 计数 / 重投,零副作用。
       if (!q.isActive || q.ended) return;
       if (this.advancing.has(id)) return;
+      // 暂停看门狗转停(见 pauseStopSettle.ts):设备被我们自己 stop 后位置冻结,
+      // tracker 必然报 stalled —— 预期状态,不重投不切歌(2026-09-30 真机:idle_early
+      // 已拦住,但「连续卡死 2 次放行切歌」正是从这条通道绕过去的)。
+      if (withinPauseStopSettle(id)) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        log.warn(`[QueueController][stalled] ${playerId}: 暂停看门狗转停(非卡死) → 不重投不切歌`);
+        return;
+      }
       // 回归修复:乐观窗口 5s 未确认 PLAYING 会触发 stalled,但 HiVi 等真实设备的
       // PLAYING 确认(GENA 或 5s 轮询,cast 期间 advancing 还会跳过轮询)常晚于 5s。
       // 此时盲目重投会把"已在播放"的设备打断 → 歌曲前几秒无限重复。

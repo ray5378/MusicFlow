@@ -308,14 +308,20 @@ export function playCore(
   });
 }
 
-/** 停止核心(原 stop():打断 pump + 清组状态 + stream/end 成对收尾)。 */
-export function stopCore(srv: SendspinServer | null, clientId: string): void {
+/** 停止核心(原 stop():打断 pump + 清组状态 + stream/end 成对收尾)。
+ *  keepCurrent=true(看门狗转 stop 专用):MA 语义「stopped/paused = 可续播」——
+ *  停传输、**保留曲目元数据/位置/paused 标记**,组状态继续带着 current(设备与
+ *  HA 卡片的播放帧锁定不清空);stream/end 照发(设备立即静音)。
+ *  用户显式 stop 仍走默认(全清,keepCurrent=false)。 */
+export function stopCore(srv: SendspinServer | null, clientId: string, keepCurrent = false): void {
   clearPauseWatchdog(clientId);
   const _pg = srv?.group(clientId);
-  if (_pg) _pg.paused = false;  const g = ephemeralOrReal(srv, clientId);
+  if (_pg && !keepCurrent) _pg.paused = false;  const g = ephemeralOrReal(srv, clientId);
   if (srv) pumpFor(srv, srv.group(clientId)).stop();
-  g.positionMs = 0;
-  g.current = null;
+  if (!keepCurrent) {
+    g.positionMs = 0;
+    g.current = null;
+  }
   // 流结束 + playback_state → stopped,组状态同步给客户端(自然结束走 pump)。
   const live = srv?.group(clientId);
   if (live) live.finishPlayback();
@@ -540,7 +546,9 @@ export function armPauseWatchdog(srv: SendspinServer | null, clientId: string): 
     log.info(
       `[sendspin] 暂停满 ${PAUSE_AUTO_STOP_MS / 1000}s 未恢复,自动转 stop(对齐 MA _watch_pause) client=${clientId}`,
     );
-    g.paused = false;
+    // ⚠️ 这里**不复位 g.paused**:看门狗 stop 是「暂停超时 → 停传输」,语义仍是
+    // 暂停态(stopped = 可续播,MA _watch_pause 同款)—— 保留 paused + current,
+    // 设备/HA 卡片的播放帧才不会被打空(2026-09-30 真机:「播放帧直接清空了」)。
     // 看门狗转 stop 打标(见 services/player/pauseStopSettle.ts):这条 stop 是我们自己
     // 拆流产生的,**不是曲目播完**。不打标的话 QueueController 的 idle_early 复查会
     // 探到「设备确实停了」→ 放行切歌(真机观感:暂停 → 缓冲播完停几秒 → 自己切下一首)。
@@ -548,7 +556,7 @@ export function armPauseWatchdog(srv: SendspinServer | null, clientId: string): 
     // in-proc 由 index.ts 接线为直标;sink 未接线时原地打标兜底(直连场景)。
     if (pauseStopSink) pauseStopSink(clientId);
     else markPauseStopIssued(clientId);
-    stopCore(srv, clientId);
+    stopCore(srv, clientId, true);
   }, PAUSE_AUTO_STOP_MS);
   // 兜底回收不该吊住 event loop(尤其子进程退出路径)。
   (t as any).unref?.();

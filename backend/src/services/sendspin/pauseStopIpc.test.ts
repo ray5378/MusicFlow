@@ -12,7 +12,7 @@ vi.mock("./streamEngine.js", () => ({
 }));
 vi.mock("./deviceState.js", () => ({ saveDeviceVolumeState: () => {} }));
 
-import { armPauseWatchdog, setPauseStopSink } from "./playerCore.js";
+import { armPauseWatchdog, setPauseStopSink, stopCore } from "./playerCore.js";
 import { withinPauseStopSettle, clearPauseStop } from "../player/pauseStopSettle.js";
 
 // 背景(2026-09-30 真机两次复现):看门狗「暂停转 stop」跑在 sendspin 子进程,
@@ -53,10 +53,33 @@ describe("pauseStopIssued 跨进程打标链", () => {
       armPauseWatchdog(srv as any, "ug:g1");
       vi.advanceTimersByTime(30_000);
       expect(seen).toEqual(["ug:g1"]);
+      // keepCurrent:看门狗 stop 保留曲目与 paused(播放帧锁定,可续播)
+      expect(g.current).toEqual({ songId: "s1", durationMs: 100 });
+      expect(g.paused).toBe(true);
     } finally {
       setPauseStopSink(null);
       vi.useRealTimers();
     }
+  });
+
+  it("stopCore 默认(显式 stop)仍全清;keepCurrent=true 保留曲目", () => {
+    const mkG = () => ({
+      name: "dev1", paused: false,
+      current: { songId: "s1", durationMs: 100 } as any,
+      members: [] as unknown[], positionMs: 42, volume: 100, muted: false,
+      finishPlayback() {},
+    });
+    const g1 = mkG();
+    const srv1 = { clients: { get: () => ({ sendGroupUpdate() {} }) }, group: () => g1 };
+    stopCore(srv1 as any, "dev1");
+    expect(g1.current).toBeNull();
+    expect(g1.positionMs).toBe(0);
+    expect(g1.paused).toBe(false);
+    const g2 = mkG();
+    const srv2 = { clients: { get: () => ({ sendGroupUpdate() {} }) }, group: () => g2 };
+    stopCore(srv2 as any, "dev1", true);
+    expect(g2.current).toEqual({ songId: "s1", durationMs: 100 });
+    expect(g2.positionMs).toBe(42);
   });
 
   it("sink 未接线 → 兜底原地打标(in-proc 直标路径)", () => {
