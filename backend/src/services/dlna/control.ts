@@ -1693,7 +1693,7 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `dlna:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string) {
+    async playMedia(item: QueueItem, baseUrl: string, _startMs = 0) {
       const { mediaUri } = await castToDevice({
         songId: item.songId, title: item.title, artist: item.artist, album: item.album,
         mime: item.mime, deviceId, baseUrl, coverArt: item.coverArt,

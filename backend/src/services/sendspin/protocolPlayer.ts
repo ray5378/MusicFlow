@@ -89,7 +89,7 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
       const members = await onlineSendspinMembers(userGroupId);
       if (members.length === 0) {
         throw new Error(`组 ${userGroupId} 无在线 sendspin 成员,无法播放`);
@@ -100,7 +100,7 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       // ug 组懒创建缺省 volume=100:起播前先灌 GroupManager 持久值(空组/重启后一致)。
       try { await sendspinGroupTransport(groupName, "volume", getGroupManager().getVolume(userGroupId)); }
       catch { /* 回填失败不挡起播,status 仍回持久值 */ }
-      await sendspinGroupPlay(groupName, members, item);
+      await sendspinGroupPlay(groupName, members, item, startMs);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -149,11 +149,13 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       let unavailable = false;
       const st = await sendspinGroupPoll(groupName).catch(() => {
         unavailable = true;
-        return { playing: false, positionMs: 0, durationMs: 0 };
+        return { playing: false, paused: false, positionMs: 0, durationMs: 0 };
       });
       return {
         playerId,
-        playbackState: st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE,
+        playbackState: st.paused ? PlaybackState.PAUSED
+          : st.playing ? PlaybackState.PLAYING
+          : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
@@ -210,7 +212,7 @@ function schedulePlayingReport(playerId: string, durationSec: number): void {
 
 /** resume 的冷起播段(两种模式共用):无推流在跑 = 真正起播,从 QC 队列取当前曲
  *  → playMedia。原地恢复(暂停中)的判定与动作由各模式自己先做。 */
-async function coldStartResume(self: ProtocolPlayer, clientId: string, warn: (msg: string) => void): Promise<void> {
+export async function coldStartResume(self: ProtocolPlayer, clientId: string, warn: (msg: string) => void): Promise<void> {
   const qc = getQueueController();
   const snap = qc.snapshot(clientId);
   const item = snap.currentIndex >= 0 ? snap.items[snap.currentIndex] : undefined;
@@ -220,7 +222,18 @@ async function coldStartResume(self: ProtocolPlayer, clientId: string, warn: (ms
   }
   // 只带 songId 的 item 需补全元数据(coverArt/mime 等),否则组状态缺字段。
   const fullItem = await qc.resolveItem(item);
-  await self.playMedia(fullItem, getEffectiveBaseUrl());
+  // 续播落点:暂停/看门狗转 stop 后 group.positionMs 仍保留(keepCurrent),
+  // 必须从此位置续播,否则"暂停后点播放从头开始"(2026-09-30 真机)。
+  // 位置由各模式 player 自己的 pollState 读回(组/单设备/in-proc 口径一致)。
+  let startMs = 0;
+  try {
+    const st = await self.pollState();
+    startMs = Math.max(0, Math.round((st.position ?? 0) * 1000));
+  } catch { /* 读不到位置就用 0(从头),不挡起播 */ }
+  if (startMs > 0) {
+    log.debug(`[Sendspin] coldStartResume ${clientId} 从 ${startMs}ms 续播(暂停位置)`);
+  }
+  await self.playMedia(fullItem, getEffectiveBaseUrl(), startMs);
 }
 
 // ==================== in-proc 模式(单测/子进程自身) ====================
@@ -229,7 +242,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
   const playerId = `sendspin:${clientId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
       const srv = getServer();
       if (!srv) throw new Error(`sendspin server not running: ${clientId}`);
       // mediaUri:token 流地址,仅供 track_changed 检测;音频走内部推流。
@@ -238,7 +251,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
       emitMediaChanged(clientId, item);
       playCore(srv, clientId, item, (cid, songId, message) => {
         srv.log("warn", `sendspin play ${songId} failed(client=${cid}): ${message}`);
-      });
+      }, startMs);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -284,7 +297,12 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
       const st = pollCore(getServer(), clientId);
       return {
         playerId,
-        playbackState: st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE,
+        // 暂停态必须如实上报 PAUSED:否则 HA 卡片误以为在播 → 进度条按墙钟插值
+        // (每轮 poll 前进一步又下一轮回弹),且暂停键常显"播放"。PlaybackTracker 已
+        // 把 PAUSED 当瞬态(不计切歌),故不会触发 v1~v4 已修的自动切歌。
+        playbackState: st.paused ? PlaybackState.PAUSED
+          : st.playing ? PlaybackState.PLAYING
+          : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
@@ -301,13 +319,13 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
     sendspinSupervisor.rpc("transport", { clientId, op, arg });
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
       // castSession/token 是主进程状态(track_changed 检测用),必须留在本侧生成。
       const streamUrl = createCastSession(item.songId, clientId, baseUrl).streamUrl;
       emitMediaChanged(clientId, item);
       // 子进程做推流侧全部动作(收尾旧流 → 元数据 → 入组宣告 → 后台 pump);
       // RPC 只等同步段返回,解码/推流异步进行(与 in-proc 时序一致)。
-      await sendspinSupervisor.rpc("playMedia", { clientId, item, streamUrl });
+      await sendspinSupervisor.rpc("playMedia", { clientId, item, streamUrl, seekPositionMs: startMs });
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -355,14 +373,16 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
       // 标记后由 QueueController 决定:不喂 tracker、不计数、等子进程回归后续播。
       let unavailable = false;
       const st = await sendspinSupervisor
-        .rpc<{ playing: boolean; positionMs: number; durationMs: number }>("poll", { clientId })
+        .rpc<{ playing: boolean; paused: boolean; positionMs: number; durationMs: number }>("poll", { clientId })
         .catch(() => {
           unavailable = true;
-          return { playing: false, positionMs: 0, durationMs: 0 };
+          return { playing: false, paused: false, positionMs: 0, durationMs: 0 };
         });
       return {
         playerId,
-        playbackState: st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE,
+        playbackState: st.paused ? PlaybackState.PAUSED
+          : st.playing ? PlaybackState.PLAYING
+          : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),

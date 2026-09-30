@@ -2,6 +2,11 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.70] - 2026-09-30
+
+### 修复
+- **SENDSPIN 暂停后恢复播放从头开始（无声）**（240 ESP32 真机定位）：`coldStartResume` 调 `playMedia` 时未带续播位置，导致 `playCore(startMs=0)` —— 暂停 → 30s 看门狗转 stop（`keepCurrent` 保留 `group.positionMs`）→ 点播放，进度从 0 开始且不出声。修复：先 `self.pollState()` 读回暂停位置，再透传 `startMs`（`seekPositionMs`）到 `playCore` / `playGroupCore` / fork RPC，设备侧 `Stream ended → Stream Started` 成对重建即正常出声。新增回归门禁 `coldStartResume.test.ts`：`pollState` 回报 40.064s → `playMedia` 必须收到 `startMs=40064`（而非 0）。
+
 ## [4.0.69] - 2026-09-30
 
 ### 新增能力

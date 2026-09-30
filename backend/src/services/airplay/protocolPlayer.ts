@@ -27,7 +27,7 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `airplay:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string) {
+    async playMedia(item: QueueItem, baseUrl: string, _startMs = 0) {
       const streamUrl = createAirPlaySession(item.songId, deviceId, baseUrl).streamUrl;
       await castToAirPlayDevice({
         deviceId,

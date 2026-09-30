@@ -674,10 +674,11 @@ export async function sendspinGroupPlay(
   groupName: string,
   memberIds: string[],
   item: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; duration?: number },
+  startMs?: number,
 ): Promise<void> {
   if (isForkMode()) {
     if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
-    await sendspinSupervisor.rpc("groupPlay", { group: groupName, members: memberIds, item });
+    await sendspinSupervisor.rpc("groupPlay", { group: groupName, members: memberIds, item, seekPositionMs: startMs });
     return;
   }
   const { playGroupCore } = await import("./playerCore.js");
@@ -685,7 +686,7 @@ export async function sendspinGroupPlay(
   if (!srv) throw new Error("sendspin 服务未运行");
   playGroupCore(srv, groupName, memberIds, item as any, (cid, songId, message) => {
     log.warn(`sendspin group play ${songId} failed(group=${cid}): ${message}`);
-  });
+  }, startMs);
 }
 
 /** 用户组停止(成员保留,下次起播复用)。 */
@@ -748,9 +749,9 @@ export async function sendspinGroupTransport(
 /** 用户组轮询(播放在播/位置/时长):供组 player pollState 与组状态派生。 */
 export async function sendspinGroupPoll(
   groupName: string,
-): Promise<{ playing: boolean; positionMs: number; durationMs: number }> {
+): Promise<{ playing: boolean; paused: boolean; positionMs: number; durationMs: number }> {
   if (isForkMode()) {
-    if (!sendspinSupervisor.isRunning()) return { playing: false, positionMs: 0, durationMs: 0 };
+    if (!sendspinSupervisor.isRunning()) return { playing: false, paused: false, positionMs: 0, durationMs: 0 };
     return sendspinSupervisor.rpc("poll", { clientId: groupName });
   }
   const { pollCore } = await import("./playerCore.js");

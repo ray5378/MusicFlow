@@ -84,7 +84,7 @@ export interface QueueItem {
 export interface ProtocolPlayer {
   playerId: string;
   /** 执行播放一首(Stop→Set→wait→Play)。返回上报用的 mediaUri。 */
-  playMedia(item: QueueItem, baseUrl: string): Promise<{ mediaUri: string }>;
+  playMedia(item: QueueItem, baseUrl: string, startMs?: number): Promise<{ mediaUri: string }>;
   stop(): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;

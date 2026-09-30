@@ -117,7 +117,7 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         const item = p.item as QueueItem;
         playCore(srv, clientId, item, (cid, songId, message) => {
           this.emit({ t: "playFailed", clientId: cid, songId, message });
-        });
+        }, p.seekPositionMs as number | undefined);
         this.requestSnapshot(true); // current 元数据变化立即可见(前端歌词/封面跟随)
         return null; // pump 异步起播,不等待解码
       }
@@ -167,7 +167,7 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         const members = Array.isArray(p.members) ? p.members.map(String) : [];
         playGroupCore(srv, String(p.group), members, p.item as QueueItem, (cid, songId, message) => {
           this.emit({ t: "playFailed", clientId: cid, songId, message });
-        });
+        }, p.seekPositionMs as number | undefined);
         this.requestSnapshot(true);
         return null;
       }

@@ -720,10 +720,14 @@ export function setMutedCore(srv: SendspinServer | null, clientId: string, muted
 
 /** 轮询核心:逻辑播放状态以「组当前曲」为准(已注册播放器在投/续播即视为播放中);
  *  连接就绪与否只影响推流可达性,不改变 QueueController 的切歌/恢复判定。 */
-export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; positionMs: number; durationMs: number } {
-  const g = ephemeralOrReal(srv, clientId);
+export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; durationMs: number } {
+  // ⚠️ 必须读**实际所属**的组(resolveLiveGroup):设备若在用户组内,
+  // srv.group(clientId) 是单设备组,其 paused/current 不反映真实播放态 ——
+  // 只读它会导致暂停后仍报 playing(HA 卡片进度条不锁帧、暂停键常显"播放")。
+  const g = srv ? resolveLiveGroup(srv, clientId) : (ephemeralGroup(clientId) as any);
   return {
     playing: !!g.current,
+    paused: !!g.paused,
     positionMs: g.positionMs,
     durationMs: (g as any).current?.durationMs ?? 0,
   };
@@ -732,7 +736,10 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
 /** pump 是否在推流(供主进程侧 resume 判定冷起播/原地恢复)。 */
 export function pumpActiveCore(srv: SendspinServer | null, clientId: string): boolean {
   if (!srv) return false;
-  return pumpFor(srv, srv.group(clientId)).active;
+  // ⚠️ 同 pollCore:必须读 live group。设备入用户组后,单设备组的 pump 从未起播
+  // (起播走的是 live group 的 pump),若只看单设备泵会误判"未起播"→ resume 走冷起播
+  // → 从 0 重头播放(2026-09-30 真机:暂停后点播放从头开始)。
+  return pumpFor(srv, resolveLiveGroup(srv, clientId)).active;
 }
 
 function ephemeralOrReal(srv: SendspinServer | null, clientId: string): { positionMs: number; volume: number; muted: boolean; current: any } {
