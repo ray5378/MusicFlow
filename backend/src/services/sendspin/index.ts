@@ -62,6 +62,7 @@ import { setServer, getServer } from "./runtime.js";
 import { getSendspinFront as getSendspinFrontImpl } from "./proxy.js";
 import { sendspinSupervisor } from "./supervisor.js";
 import { isForkMode } from "./mode.js";
+import { markPauseStopIssued } from "../player/pauseStopSettle.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -79,6 +80,8 @@ export interface SendspinRuntime {
 export interface SendspinBootHooks {
   onActivated?: (conn: SendspinConnection) => void;
   onClosed?: (conn: SendspinConnection) => void;
+  /** 看门狗「暂停转 stop」已下发(child 模式经 IPC 回主进程打标;缺省由接线方直标)。 */
+  onPauseStopIssued?: (clientId: string) => void;
 }
 
 /** 数据目录(可被测试覆盖)。 */
@@ -287,6 +290,15 @@ export async function startSendspinInProcess(port?: number, hooks?: SendspinBoot
     },
   });
   setServer(srv);
+  // 看门狗「暂停转 stop」打标接线:打标必须落在**主进程**(idle_early 复查所在,
+  // 见 services/player/pauseStopSettle.ts)。child 模式 → hooks(IPC 回主进程);
+  // in-proc → 本进程直标(QueueController 同进程)。fork 主进程不走此函数(无 server)。
+  try {
+    const { setPauseStopSink } = await import("./playerCore.js");
+    setPauseStopSink(
+      hooks?.onPauseStopIssued ?? ((clientId: string) => markPauseStopIssued(clientId)),
+    );
+  } catch { /* playerCore 不可用时由看门狗兜底原地打标 */ }
   srv.pairingStore = pairingStore;
   srv.pairing = new PairingCoordinator(srv, pairingStore);
   await srv.listen(port ?? pluginCfg.port); // 监听 ws://0.0.0.0:38927/sendspin(客户端拨入)
@@ -331,6 +343,11 @@ export async function stopSendspinInProcess(hooks?: SendspinBootHooks): Promise<
     clearInterval(redialTimer);
     redialTimer = null;
   }
+  // 卸载看门狗打标接线(重启后由 startSendspinInProcess 重新接)。
+  try {
+    const { setPauseStopSink } = await import("./playerCore.js");
+    setPauseStopSink(null);
+  } catch { /* ignore */ }
   retryStates.clear();
   retryInFlight.clear();
   stopPlayerDiscovery();
@@ -377,6 +394,11 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     },
     onPlayFailed: (clientId, songId, message) => {
       log.warn(`sendspin play ${songId} failed(client=${clientId}): ${message}`);
+    },
+    // 看门狗「暂停转 stop」经 IPC 到主进程 —— 打标必须落在主进程
+    // (idle_early 复查在本进程 QueueController,见 services/player/pauseStopSettle.ts)。
+    onPauseStopIssued: (clientId) => {
+      markPauseStopIssued(clientId);
     },
   });
   await sendspinSupervisor.start(port ?? pluginCfg.port);

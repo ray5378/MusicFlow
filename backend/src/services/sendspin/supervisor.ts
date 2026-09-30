@@ -40,6 +40,30 @@ export interface SupervisorHooks {
   onActivated?: (clientId: string, name: string, legacy: boolean) => void;
   onClosed?: (clientId: string) => void;
   onPlayFailed?: (clientId: string, songId: string, message: string) => void;
+  /** 看门狗「暂停转 stop」已下发(主进程据此 markPauseStopIssued —— idle_early
+   *  复查在主进程 QueueController,见 services/player/pauseStopSettle.ts)。 */
+  onPauseStopIssued?: (clientId: string) => void;
+}
+
+/** 子进程业务事件 → hooks 分发(纯函数抽出,便于单测)。
+ *  单个 hook 抛错只吞自身,不拖垮事件桥。 */
+export function dispatchSendspinChildEvent(ev: SendspinChildEvent, hooks: SupervisorHooks): void {
+  switch (ev.t) {
+    case "activated":
+      try { hooks.onActivated?.(ev.clientId, ev.name, ev.legacy); } catch { /* 注册失败不拖垮桥 */ }
+      return;
+    case "closed":
+      try { hooks.onClosed?.(ev.clientId); } catch { /* ignore */ }
+      return;
+    case "playFailed":
+      try { hooks.onPlayFailed?.(ev.clientId, ev.songId, ev.message); } catch { /* ignore */ }
+      return;
+    case "pauseStopIssued":
+      try { hooks.onPauseStopIssued?.(ev.clientId); } catch { /* ignore */ }
+      return;
+    default:
+      return;
+  }
 }
 
 class SendspinSupervisor extends RendererHostSupervisor<
@@ -76,19 +100,7 @@ class SendspinSupervisor extends RendererHostSupervisor<
         m.attempts = s.attempts;
       },
       onEvent: (ev, hooks) => {
-        switch (ev.t) {
-          case "activated":
-            try { hooks.onActivated?.(ev.clientId, ev.name, ev.legacy); } catch { /* 注册失败不拖垮桥 */ }
-            return;
-          case "closed":
-            try { hooks.onClosed?.(ev.clientId); } catch { /* ignore */ }
-            return;
-          case "playFailed":
-            try { hooks.onPlayFailed?.(ev.clientId, ev.songId, ev.message); } catch { /* ignore */ }
-            return;
-          default:
-            return;
-        }
+        dispatchSendspinChildEvent(ev, hooks);
       },
     });
   }

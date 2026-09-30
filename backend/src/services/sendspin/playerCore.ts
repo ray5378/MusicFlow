@@ -40,6 +40,16 @@ export function ephemeralGroup(clientId: string): SendspinGroupLike {
 /** pump.play 失败回调(in-proc=打日志;child=IPC 通知主进程)。 */
 export type PlayFailedSink = (clientId: string, songId: string, message: string) => void;
 
+/** 看门狗「暂停转 stop」通知 sink(in-proc=主进程直标;child=IPC 通知主进程打标)。
+ *  ⚠️ markPauseStopIssued 的 Map 在**进程内存**里,而 idle_early 复查在主进程
+ *  QueueController —— fork 模式下子进程原地打标永远打不进主进程的 Map
+ *  (2026-09-30 真机两次复现的根因),必须经此 sink 跨进程上报。 */
+export type PauseStopIssuedSink = (clientId: string) => void;
+let pauseStopSink: PauseStopIssuedSink | null = null;
+export function setPauseStopSink(fn: PauseStopIssuedSink | null): void {
+  pauseStopSink = fn;
+}
+
 /** 用户组 → sendspin 组名映射:与单设备组(clientId 裸名)互不碰撞。
  *  路由层/组 player/测试统一走这里,不要手拼前缀。 */
 export function sendspinGroupName(userGroupId: string): string {
@@ -519,7 +529,9 @@ function clearPauseState(srv: SendspinServer | null, id: string): void {
   if (conn?.group) conn.group.paused = false;
 }
 
-function armPauseWatchdog(srv: SendspinServer | null, clientId: string): void {
+/** 埋暂停看门狗(30s 未恢复自动转 stop,对齐 MA `_watch_pause`)。
+ *  export 仅为单测(pauseStopIpc.test.ts 直测触发路径);生产入口只有 pauseCore。 */
+export function armPauseWatchdog(srv: SendspinServer | null, clientId: string): void {
   clearPauseWatchdog(clientId);
   const t = setTimeout(() => {
     pauseWatchdogs.delete(clientId);
@@ -532,7 +544,10 @@ function armPauseWatchdog(srv: SendspinServer | null, clientId: string): void {
     // 看门狗转 stop 打标(见 services/player/pauseStopSettle.ts):这条 stop 是我们自己
     // 拆流产生的,**不是曲目播完**。不打标的话 QueueController 的 idle_early 复查会
     // 探到「设备确实停了」→ 放行切歌(真机观感:暂停 → 缓冲播完停几秒 → 自己切下一首)。
-    markPauseStopIssued(clientId);
+    // ⚠️ 打标必须落在**主进程**(复查所在):fork 模式经 sink → IPC 上报,
+    // in-proc 由 index.ts 接线为直标;sink 未接线时原地打标兜底(直连场景)。
+    if (pauseStopSink) pauseStopSink(clientId);
+    else markPauseStopIssued(clientId);
     stopCore(srv, clientId);
   }, PAUSE_AUTO_STOP_MS);
   // 兜底回收不该吊住 event loop(尤其子进程退出路径)。

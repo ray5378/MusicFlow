@@ -79,6 +79,12 @@ async function main(): Promise<void> {
       send({ t: "closed", clientId: conn.clientId });
       controller?.requestSnapshot(true);
     },
+    onPauseStopIssued: (clientId: string) => {
+      // 看门狗「暂停转 stop」→ IPC 回主进程打标(idle_early 复查在主进程
+      // QueueController,见 services/player/pauseStopSettle.ts 顶部)。
+      if (!clientId) return;
+      send({ t: "pauseStopIssued", clientId });
+    },
   };
 
   // 起 in-proc 运行时(端口/codec/6053 配置自读 DB —— WAL 多进程安全)。

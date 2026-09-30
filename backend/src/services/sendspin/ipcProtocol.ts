@@ -82,7 +82,8 @@ export type SendspinHostExtra =
 export type SendspinChildEvent =
   | { t: "activated"; clientId: string; name: string; legacy: boolean }
   | { t: "closed"; clientId: string }
-  | { t: "playFailed"; clientId: string; songId: string; message: string };
+  | { t: "playFailed"; clientId: string; songId: string; message: string }
+  | { t: "pauseStopIssued"; clientId: string };
 
 /** 主进程 → child。 */
 export type ParentToSendspinChild = HostToChild<SendspinHostExtra>;

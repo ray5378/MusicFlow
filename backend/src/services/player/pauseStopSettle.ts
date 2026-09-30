@@ -39,7 +39,10 @@ export function pauseStopSettleKey(playerId: string): string {
   return playerId;
 }
 
-/** 记一次「暂停看门狗转 stop」。**在 stopCore 拆流之前**调用。 */
+/** 记一次「暂停看门狗转 stop」。**在 stopCore 拆流之前**调用。
+ *  ⚠️ 必须落在**主进程**(idle_early 复查在主进程 QueueController):fork 模式下
+ *  子进程经 IPC(sendspin/child.ts → supervisor.ts)上报,由主进程侧调用本函数;
+ *  子进程原地调用打不进主进程的 Map(2026-09-30 真机两次复现的根因)。 */
 export function markPauseStopIssued(playerId: string, at: number = Date.now()): void {
   const k = pauseStopSettleKey(playerId);
   lastPauseStopAt.set(k, at);
