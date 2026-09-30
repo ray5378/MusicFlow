@@ -110,6 +110,11 @@ function makeGroup(name: string) {
     },
     close: vi.fn(),
     finishPlayback: vi.fn(),
+    // P2 keep_stream 门禁(见 playCore/playGroupCore 切歌分支):stub 默认 false =
+    // 保守退回 stream/end 旧路径,与 legacy 安全阀同语义;需要验证新路径的用例
+    // 再显式 canKeepStream.mockReturnValue(true)。
+    canKeepStream: vi.fn(() => false),
+    clearPlayback: vi.fn(),
   };
 }
 

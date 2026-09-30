@@ -974,6 +974,55 @@ export class SendspinGroup {
   /** 曲终/停止:对全员发 stream/end(结束全部角色流) + group/update(stopped)。
    *  缺了客户端永远卡 PLAYING(2026-09-17 ESPHome 真机:播完 30s 还 PLAYING)。
    *  调用前先把 current 置空,sendGroupUpdate 才能报出 stopped。 */
+  /** 切歌/seek 能否走 keep_stream(**只清缓冲,不结束流**)。
+   *
+   *  MA `providers/sendspin/playback.py:405-423` 出于保守,在 legacy/非合规客户端
+   *  在场时强制 `keep_stream=False`(注释原文:"since they might mishandle
+   *  stream/clear")。MusicFlow 的默认与之**相反**,依据是 240 真机实测:
+   *  esp32-player2(ESPHome 2026.9.0,legacy 明文客户端)设备日志逐条打印
+   *  `sendspin.client: Stream clear - player:1 artwork:1 visualizer:1`,
+   *  随后 `Stream Started` + `Processed new codec header`,**全程无 `Stream ended`**,
+   *  `group/update` 也保持 playing(不再闪一下 stopped);连切两首序列稳定成对。
+   *  ⇒ "legacy 会错误处理 stream/clear" 是 MA 的**假设**,不是本设备的事实;
+   *    默认放行才能拿到 spec 想要的 gapless 切歌。
+   *
+   *  回退阀门:置 `MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY=0` 即回到 MA 同款严格档
+   *  (legacy 成员在场时整组退回 `stream/end`),用于碰到确实不认 `stream/clear`
+   *  的固件时一键回退。 */
+  canKeepStream(): boolean {
+    if (this.members.size === 0) return false;
+    if (process.env.MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY === "0") {
+      for (const c of this.members) if (c.legacy) return false;
+    }
+    return true;
+  }
+
+  /** 切歌/seek:对全员发 `stream/clear`(**只清缓冲,流不结束**)—— 对齐 MA
+   *  `PushStream.clear()`。
+   *
+   *  为什么切歌不能发 `stream/end`:spec 把它保留给「队列空/真正结束」
+   *  (MA `providers/sendspin/player.py:1454` 注释原文:
+   *   "The spec reserves stream/end for queue-empty, not track changes.")。
+   *  切歌发 end 会让设备拆掉解码/扬声器上下文,并在 `group/update` 里看到
+   *  stopped 一闪,下一首要**完整重建**流(非 gapless)。
+   *  改用 clear:设备丢掉缓冲里旧曲的残余音频(不用等水位播完),流上下文保留,
+   *  随后新 `stream/start` 只更新 codec header → 切歌即时 + gapless。
+   *
+   *  ⚠️ 调用前必须先过 `canKeepStream()` 门禁;组状态(playing)由起播侧的
+   *  `sendGroupUpdate()` 负责,这里**不报 stopped**。 */
+  clearPlayback(): void {
+    for (const c of this.members) {
+      const reg = c.clientId ? this.server.clients.get(c.clientId) : undefined;
+      this.server.log(
+        "info",
+        `clearPlayback(track change) member=${c.clientId} legacy=${c.legacy} ws=${(c as any).ws?.readyState} registered=${reg === c}`,
+      );
+      try {
+        c.sendJson("stream/clear", {});
+      } catch { /* 单成员发送失败不连累其余 */ }
+    }
+  }
+
   finishPlayback(): void {
     for (const c of this.members) {
       const reg = c.clientId ? this.server.clients.get(c.clientId) : undefined;

@@ -267,16 +267,30 @@ export function playCore(
   pump.stop(); // 打断上一首,避免重叠推流(MA:track change 丢弃旧 PushStream)
   // MA seek_position 属于**新**流:stop 之后装填,play() 起流即带 -ss 起点。
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
-  // ⚠️ 切歌必须先 stream/end 收尾旧流,再 stream/start 起新流(成对)。
-  // 只发 stream/start 会让设备把新流塞进「旧解码上下文」——它认为扬声器已在跑,
-  // 不重建 ring buffer/speaker task,新流音频无从解码 → 链路上一切正常但**无声**
-  // (2026-09-17 ESPHome 真机:重发 stream/start 后只剩 codec header 一行日志)。
-  // MA 金标准同样是 `Stream ended` → `Stream Started` 成对出现。
-  // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end;
-  // 关掉旧编码器同时清掉残留分段(否则旧段字节会混进新歌首帧)。
-  g.current = null;
+  // ⚠️ 换流必须**先复位旧流**再 stream/start,两种复位方式二选一:
+  //   ① `stream/end`  → 流真正结束(队列空 / stop / legacy 回退路径);
+  //   ② `stream/clear` → 只清缓冲、流上下文保留(切歌 keep_stream,见下方分支)。
+  // 裸发 stream/start(两者都不发)会让设备把新流塞进「旧解码上下文」——它认为
+  // 扬声器已在跑,不重建 ring buffer/speaker task,新流音频无从解码 → 链路上一切
+  // 正常但**无声**(2026-09-17 ESPHome 真机:重发 stream/start 后只剩 codec
+  // header 一行日志)。MA 真机日志同样是复位 → `Stream Started` 成对出现。
+  // 关掉旧编码器同时清掉残留分段(否则旧段字节会混进新歌首帧)—— 两种路径都要。
   g.close();
-  g.finishPlayback();
+  // ★ 切歌/seek 的流生命周期(MA 权威语义:`playback.py` cancel(keep_stream=True)
+  //   → `PushStream.clear()`;`player.py:1454`
+  //   "The spec reserves stream/end for queue-empty, not track changes"):
+  //   只发 stream/clear 清设备缓冲,**绝不 stream/end**,随后新流 stream/start
+  //   只更新 codec header → gapless。旧行为(切歌也发 end)会让设备拆掉解码/
+  //   扬声器上下文并看到 stopped 一闪,下一首还要完整重建流。
+  //   仅「有旧曲在播 + 组过 keep_stream 门禁」走新路径;首播 / 无 current /
+  //   legacy 成员在场时退回原来的 end+start 完整重建(canKeepStream 内判门禁)。
+  if (g.current && g.canKeepStream()) {
+    g.clearPlayback();
+  } else {
+    // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end。
+    g.current = null;
+    g.finishPlayback();
+  }
   g.positionMs = seekPositionMs ?? 0;
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
   // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
@@ -358,10 +372,17 @@ export function playGroupCore(
   const pump = pumpFor(srv, g);
   pump.stop(); // 打断上一首,避免重叠推流
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
-  // stream/end 收尾旧流(成对)＋关旧编码器清残留分段:与 playCore 同因(无声事故)。
-  g.current = null;
+  // 关旧编码器清残留分段(与 playCore 同因:无声事故)—— 两种路径都要。
   g.close();
-  g.finishPlayback();
+  // ★ 切歌/seek 只 stream/clear 绝不 stream/end(MA keep_stream 语义,详见
+  //   playCore 同名段落注释)。用户组各成员逐一清缓冲,流上下文保留 → gapless。
+  if (g.current && g.canKeepStream()) {
+    g.clearPlayback();
+  } else {
+    // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end。
+    g.current = null;
+    g.finishPlayback();
+  }
   g.positionMs = seekPositionMs ?? 0;
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
   for (const id of memberIds) {

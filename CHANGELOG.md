@@ -2,6 +2,29 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.72] - 2026-10-01
+
+### 修复
+- **切歌不再发 `stream/end`(spec 语义归位 + gapless)**:
+  - 依据:MA `providers/sendspin/player.py:1454` ——
+    "The spec reserves stream/end for queue-empty, not track changes."
+    MA 的切歌走 `cancel(keep_stream=True)`(`playback.py:405-431`),即
+    `PushStream.clear()` + `ps.stop(keep_stream=True)`:只清缓冲、流不结束。
+  - 改动:切歌 / seek 由 `finishPlayback()`(`stream/end` + `group/update(stopped)`)
+    改为 `clearPlayback()`(`stream/clear`),随后照常起新的 `stream/start`。
+    自然播完(队列空)与用户 stop 仍走 `stream/end`,语义不变。
+  - 收益:设备不再因 `stream/end` 拆掉解码/扬声器上下文,`group/update` 也不再
+    闪一下 stopped —— 切歌变 gapless,下一首无需完整重建流。
+  - 回退阀门:`MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY=0` 可退回旧路径(legacy
+    成员在场时整组走 `stream/end`)。默认取舍见代码注释里的真机实测结论。
+  - **240 真机实测**(esp32-player2 / ESPHome 2026.9.0,legacy 明文客户端):
+    设备日志 `Stream clear - player:1 artwork:1 visualizer:1` →
+    `Group update - state: playing` → `Stream Started` →
+    `Processed new codec header`,**全程无 `Stream ended`**;连切两首序列稳定成对,
+    服务端零 `Failed to send audio chunk` / `Lost sync`,进度 1:1 推进。
+  - 新增回归门禁 `backend/src/services/sendspin/trackChangeKeepStream.test.ts`:
+    切歌只发 clear 不发 end、严格档下 legacy 退回 end、`clearPlayback` 不报 stopped。
+
 ## [4.0.71] - 2026-09-30
 
 ### 修复
