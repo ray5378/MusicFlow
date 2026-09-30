@@ -12,6 +12,11 @@
     dev-only；vitest 5 的 peer 要求顺带把 `@types/node` 20 → 24）。全量 407 文件 /
     5513 例 **0 失败**，tsc 0 错，且跑得更稳（718s vs 此前 1052s，此前偶发的 sandbox
     60s 超时未复现）。
+  - 后端 `vite` 钉到 ^7.0.0（**关键**）：vitest 5 默认会拉 vite 8 → rolldown，
+    而 CI 用的是 npm 10（node 22），其 arborist 处理 rolldown 的平台可选包会崩
+    `npm error Invalid Version`，导致 `npm ci` 直接失败（多工作流飘红）。
+    vitest 5 的 peer 是 `^6.4.0 || ^7.0.0 || ^8.0.0`，允许 vite 7，故显式钉版即可
+    去掉 rolldown，npm 10 的 `npm ci` 恢复正常——**无需改动任何 CI 配置**。
   - 前端 `axios` 1.19.0 → 1.20.0（OSV 报 5 条 high，CVSS 7.0–8.3；**npm audit 未覆盖**，
     只有 OSV 扫得出）；`brace-expansion` 2.1.4 → 2.1.7。
   - 复验：backend / frontend `npm audit --audit-level=high` 均 0；`osv-scanner`
