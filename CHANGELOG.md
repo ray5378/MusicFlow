@@ -2,6 +2,21 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.71] - 2026-09-30
+
+### 修复
+- **依赖漏洞一轮清零**（`security` 工作流此前 failure，属预存在问题）：
+  - 后端 `undici` ^8.10.0 → ^8.11.2（high，漏洞区间 8.0.0–8.10.1）；传递依赖
+    `brace-expansion` 三处 1.1.18→1.1.21 / 2.1.4→2.1.7 / 5.0.9→5.0.12（均补丁级、非破坏）。
+  - 后端 `vitest` / `@vitest/coverage-v8` 3.2.7 → 5.0.3（OSV GHSA-82fw-gwwq-j7x9，
+    dev-only；vitest 5 的 peer 要求顺带把 `@types/node` 20 → 24）。全量 407 文件 /
+    5513 例 **0 失败**，tsc 0 错，且跑得更稳（718s vs 此前 1052s，此前偶发的 sandbox
+    60s 超时未复现）。
+  - 前端 `axios` 1.19.0 → 1.20.0（OSV 报 5 条 high，CVSS 7.0–8.3；**npm audit 未覆盖**，
+    只有 OSV 扫得出）；`brace-expansion` 2.1.4 → 2.1.7。
+  - 复验：backend / frontend `npm audit --audit-level=high` 均 0；`osv-scanner`
+    `--fail-on-vuln` 全仓 **No issues found**（此前 7 条）。
+
 ## [4.0.70] - 2026-09-30
 
 ### 修复
