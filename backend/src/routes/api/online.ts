@@ -90,12 +90,16 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
     const result = await configured.provider.search(configured.config, { query: q, sources });
     // 平台 → 展示名 映射由插件 manifest 声明(platformLabels),核心不写死平台词典。
     const platformLabels = getPluginManifest(providerId)?.platformLabels || {};
-    const songs = result.songs.map((s) => ({
+    // 插件可能软失败(如 lx-source 全部音源回退后返回 {empty:true,message,trace} 而无 songs),
+    // 这里防御: songs 非数组按 0 结果返回, 插件的 message(失败原因/回退轨迹)透传给前端。
+    const rawSongs = result && Array.isArray((result as any).songs) ? (result as any).songs : [];
+    const songs = rawSongs.map((s: any) => ({
       ...s,
       platformLabel: platformLabels[s.source] || s.source,
       streamUrl: configured.provider.streamUrl(configured.config, s),
     }));
-    return c.json({ success: true, total: songs.length, songs });
+    const msg = result && typeof (result as any).message === "string" ? (result as any).message : undefined;
+    return c.json({ success: true, total: songs.length, songs, message: msg });
   } catch (e: any) {
     log.error(`[ONLINE] search 失败: ${e?.message || e}`);
     return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.search.failed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));

@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.77] - 2026-10-03
+
+### 修复
+- **在线搜索接口 502:插件软失败返回缺 songs 字段时核心直接崩**
+  - 现象:`POST /rest/api/v1/online/:providerId/search` 在 lx-source 全部音源
+    回退后返回 502,日志 `Cannot read properties of undefined (reading 'map')`。
+  - 根因:`online.ts` 的 search 响应构造直接 `result.songs.map(...)`,而插件
+    (lx-source withFallback)全部音源无结果时返回 `{empty:true,message,trace}`
+    的软失败形状,没有 songs 字段。
+  - 修法:songs 非数组按 0 结果返回,插件的 message(失败原因/回退轨迹)透传给前端;
+    配套插件 lx-source v1.0.10 侧补齐 `songs: []`(双保险)。
 ## [4.0.76] - 2026-10-03
 
 ### 修复
