@@ -1238,6 +1238,8 @@
       "chartUrl": "榜单链接",
       "chartNamePlaceholder": "显示名",
       "addChart": "添加榜单",
+      "addRow": "添加一行",
+      "removeRowTitle": "删除此行",
       "removeChartTitle": "移除该榜单",
       "operations": "操作",
       "purgeNow": "立即清理",

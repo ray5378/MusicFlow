@@ -491,6 +491,14 @@
                   </div>
                   <el-button text type="primary" @click="addCandidate(f.key)">+ {{ t('admin.plugins.addChart') }}</el-button>
                 </div>
+                <!-- text-list:一行一个字符串的可增删编辑行(如 lx-source 音源列表),由 manifest configSchema 声明 -->
+                <div v-else-if="f.type === 'text-list'" class="candidate-list">
+                  <div v-for="(row, idx) in (editConfig[f.key] || [])" :key="idx" class="candidate-row">
+                    <el-input v-model="editConfig[f.key][idx]" style="flex: 1; min-width: 0" />
+                    <el-button circle text type="danger" :title="t('admin.plugins.removeRowTitle')" @click="removeTextRow(f.key, idx)">✕</el-button>
+                  </div>
+                  <el-button text type="primary" @click="addTextRow(f.key)">+ {{ t('admin.plugins.addRow') }}</el-button>
+                </div>
                 <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
                 <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
                 <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
@@ -1215,7 +1223,7 @@ function editPlugin(plugin: any) {
     let v = cfg[f.key];
     if (v === undefined) v = f.default;
     if (v === undefined) {
-      if (f.type === "multiselect" || f.type === "select" || f.type === "playlist-multi") v = [];
+      if (f.type === "multiselect" || f.type === "select" || f.type === "playlist-multi" || f.type === "text-list") v = [];
       else if (f.type === "switch") v = false;
       else if (f.type === "number") v = 0;
       else v = "";
@@ -1240,6 +1248,18 @@ function addCandidate(key: string) {
 function removeCandidate(key: string, idx: number) {
   const arr = editConfig[key];
   if (Array.isArray(arr) && arr.length > 1) arr.splice(idx, 1);
+}
+
+// text-list:新增一行空字符串(如 lx-source 音源列表,一行一个音源)
+function addTextRow(key: string) {
+  if (!Array.isArray(editConfig[key])) editConfig[key] = [];
+  editConfig[key].push("");
+}
+
+// text-list:删除指定行(允许删到空,插件侧判空并显式报错)
+function removeTextRow(key: string, idx: number) {
+  const arr = editConfig[key];
+  if (Array.isArray(arr)) arr.splice(idx, 1);
 }
 
 async function testSource() {
@@ -1280,6 +1300,10 @@ async function saveConfig(opts?: { silent?: boolean }) {
           return;
         }
         v = cleaned;
+      }
+      // text-list:清洗空行后提交(全空允许,插件侧判空并显式报「未配置音源」)。
+      if (f.type === "text-list") {
+        v = (Array.isArray(v) ? v : []).map((r: any) => String(r ?? "").trim()).filter(Boolean);
       }
       cfg[f.key] = v;
     }

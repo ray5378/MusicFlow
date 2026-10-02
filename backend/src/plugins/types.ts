@@ -72,7 +72,7 @@ export interface ConfigField {
   label: string;
   // playlist-multi:参考歌单多选(本地 + 平台导入歌单,前端渲染为可搜索下拉多选)。
   // candidate-list:推荐榜单列表(每项 {platform,url,name}),前端渲染为可增删替换的编辑行。
-  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list";
+  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list" | "text-list";
   required?: boolean;
   default?: unknown;
   options?: { label: string; value: string }[];

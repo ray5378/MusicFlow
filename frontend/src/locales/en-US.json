@@ -1238,6 +1238,8 @@
       "chartUrl": "Chart URL",
       "chartNamePlaceholder": "Display name",
       "addChart": "Add Chart",
+      "addRow": "Add row",
+      "removeRowTitle": "Remove this row",
       "removeChartTitle": "Remove this chart",
       "operations": "Operations",
       "purgeNow": "Purge Now",
