@@ -1108,6 +1108,20 @@ export class SandboxedPlugin {
     }
   }
 
+  /**
+   * 该方法是否「放宽预算但留在主线程」:manifest.longRunningInMain 里列出,
+   * 且在 longRunning 里确实声明了预算(否则没有长预算可言,仍走默认 20s)。
+   */
+  private isLongRunningInMain(method: string): boolean {
+    try {
+      const arr = this.manifest?.longRunningInMain;
+      if (!Array.isArray(arr) || !arr.length) return false;
+      const lr = this.manifest?.longRunning;
+      const hasBudget = !!lr && typeof lr[method] === "number" && Number.isFinite(lr[method]) && lr[method] > 0;
+      return hasBudget && arr.indexOf(method) >= 0;
+    } catch { return false; }
+  }
+
   /** 方法级超时:manifest.longRunning[method] 声明的长耗时预算(cap 5 分钟),否则默认 20s。 */
   private timeoutForMethod(method: string): number {
     try {
@@ -1253,7 +1267,8 @@ export class SandboxedPlugin {
       if (!present.has(m)) continue;
       impl[m] = (...args: any[]) => {
         const clean = STRIP_HOST_FIRST.has(m) ? args.slice(1) : args;
-        if (worker && this.manifest.longRunning?.[m]) return worker.invoke(m, clean, this.env.getConfig());
+        // longRunningInMain:预算照拿(longRunning),但强制主线程 —— worker 下 jsenv 不可用
+        if (worker && this.manifest.longRunning?.[m] && !this.isLongRunningInMain(m)) return worker.invoke(m, clean, this.env.getConfig());
         if (SYNC_METHODS.has(m)) return this.invokeSync(m, clean);
         return this.invoke(m, clean);
       };
@@ -1262,10 +1277,26 @@ export class SandboxedPlugin {
     if (present.has("health")) {
       impl.health = (...args: any[]) => this.invoke("health", args);
     }
+    // longRunningInMain 里列出的方法:即便上面走了 worker 分支,这里再兜一次,
+    // 确保它们永远在主线程(this.invoke 会读 timeoutForMethod 拿到 longRunning 预算)。
+    const lrm = sandbox_manifestLongRunningInMain(this.manifest);
+    for (const m of lrm) {
+      if (!present.has(m)) continue;
+      impl[m] = (...args: any[]) => {
+        const clean = STRIP_HOST_FIRST.has(m) ? args.slice(1) : args;
+        if (SYNC_METHODS.has(m)) return this.invokeSync(m, clean);
+        return this.invoke(m, clean);
+      };
+    }
     return impl;
   }
 }
 
+/** 取 manifest.longRunningInMain(容错:非数组一律当空)。 */
+function sandbox_manifestLongRunningInMain(m: any): string[] {
+  const a = m && m.longRunningInMain;
+  return Array.isArray(a) ? a.filter((x: any) => typeof x === "string") : [];
+}
 /** 沙箱批量 worker 的宿主侧代理:持有 worker 线程,把 longRunning 批量方法调用发到
  *  worker 执行(插件计算不占主线程事件循环),host.* 调用由 worker 发回本代理用真实
  *  env 执行后回传。与 sandboxWorker.ts 配对(消息协议一致)。 */
@@ -1433,7 +1464,12 @@ export async function loadSandboxedPlugin(
   await sandbox.init(code, expectedManifest);
   let worker: SandboxedPluginRemote | null = null;
   const lr = sandbox.manifest?.longRunning;
-  if (lr && Object.keys(lr).length > 0 && process.env.SANDBOX_WORKER_DISABLE !== "1") {
+  // longRunningInMain 覆盖掉全部 longRunning 键时,没有任何方法真正需要 worker ——
+  // 不建 worker(省一条线程 + 避免 worker 下 jsenv 不可用的隐患)。
+  const lrKeys = lr ? Object.keys(lr) : [];
+  const lrmArr = sandbox_manifestLongRunningInMain(sandbox.manifest);
+  const needWorker = lrKeys.some((k) => lrmArr.indexOf(k) < 0);
+  if (needWorker && lrKeys.length > 0 && process.env.SANDBOX_WORKER_DISABLE !== "1") {
     try {
       worker = new SandboxedPluginRemote(id, env);
       // 延迟拿批量闸(避免 sandbox.ts 顶层拉入 batchPacer→settings→db 的模块链,worker 里会重复开 DB)。

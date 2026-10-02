@@ -350,7 +350,15 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
   }
 
   /** 用宿主真实网络处理子环境里挂起的 __mfJsenvHttp 调用。 */
-  async function drainNet(e: any, budgetMs = 20000): Promise<void> {
+  /**
+   * 预算上限必须小于宿主主线程 INVOKE_TIMEOUT_MS(20s, 见 sandbox.ts),
+   * 否则单次 jsenv 调用就能把整个插件方法拖到超时(表现为 HTTP 500)。
+   */
+  const JSENV_NET_BUDGET_MS = 8000;
+  const JSENV_PUMP_BUDGET_MS = 8000;
+  const JSENV_DEADLINE_MS = 10000;
+
+  async function drainNet(e: any, budgetMs = JSENV_NET_BUDGET_MS): Promise<void> {
     const t0 = Date.now();
     while (e.netQueue.length && Date.now() - t0 < budgetMs) {
       const item = e.netQueue.shift();
@@ -369,14 +377,23 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
     }
   }
 
-  /** 推进子环境微任务队列(jsenv.execute 默认不泵,异步注册的脚本会永远卡住)。 */
-  async function pumpJobs(e: any, budgetMs = 25000): Promise<void> {
+  /**
+   * 推进子环境微任务队列(jsenv.execute 默认不泵,异步注册的脚本会永远卡住)。
+   *
+   * until:结算判定回调 —— 目标 promise 一 settle 就立刻返回,不再跑满预算。
+   * ⚠️ 历史缺陷:调用方(execute)算出了 done 却从未传给本函数,导致哪怕一个
+   * 1ms 就能结算的微任务也要空转满 25s,直接把插件方法拖过宿主 20s 预算。
+   */
+  async function pumpJobs(e: any, budgetMs = JSENV_PUMP_BUDGET_MS, until?: () => boolean): Promise<void> {
     const t0 = Date.now();
     while (Date.now() - t0 < budgetMs) {
       if (!e.runtime || !e.runtime.alive) return;
+      // 开头先判一次:上一轮泵完就已结算时立刻返回,省掉一轮无谓的 drainNet + setImmediate
+      if (until && until()) return;
       try { await drainNet(e); } catch { /* ignore */ }
       if (e.runtime.hasPendingJob()) { try { e.runtime.executePendingJobs(50); } catch { /* ignore */ } }
       await new Promise((r) => setImmediate(r));
+      if (until && until()) return;
     }
   }
 
@@ -388,7 +405,7 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
       const runtime = module.newRuntime();
       runtime.setMemoryLimit(64 * 1024 * 1024);
       runtime.setMaxStackSize(512 * 1024);
-      let deadline = Date.now() + 30000;
+      let deadline = Date.now() + JSENV_DEADLINE_MS;
       runtime.setInterruptHandler(() => Date.now() > deadline);
       const ctx = runtime.newContext();
       const entry = { runtime, ctx, netQueue: [] as any[] };
@@ -422,7 +439,7 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
     execute: async (name: string, code: string) => {
       const e = envs.get(String(name));
       if (!e) throw new Error(`jsenv 不存在: ${name}`);
-      deadlineRefresh(e, 30000);
+      deadlineRefresh(e, JSENV_DEADLINE_MS);
       // 子环境挂起的 http 请求先由宿主真实发出,否则 await 永远挂住
       if (hostHttp && e.netQueue.length) { try { await drainNet(e); } catch { /* ignore */ } }
       const r = e.ctx.evalCode(String(code));
@@ -436,11 +453,14 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
         let done = false;
         try { e.ctx.resolvePromise(vh).then(() => { done = true; }, () => { done = true; }); }
         catch { done = true; }
-        await pumpJobs(e);
+        // 结算即退出:done 曾是「算了不用」的死变量,pump 会空转满预算 -> 宿主超时 500
+        await pumpJobs(e, JSENV_PUMP_BUDGET_MS, () => done);
       }
       let v: any = null;
       try { v = e.ctx.dump(vh); } catch { v = undefined; }
-      vh.dispose();
+      // dump 会消费 handle(实测再 dispose 抛 QuickJSUseAfterFree);
+      // dump 抛错时 handle 仍活着,仍需要 dispose —— 两种情况都容错。
+      try { vh.dispose(); } catch { /* dump 已消费 handle,无害 */ }
       return { ok: true, result: v };
     },
     destroy: async (name: string) => {

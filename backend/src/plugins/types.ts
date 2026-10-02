@@ -138,6 +138,17 @@ export interface PluginManifest {
    *  用于拉取平台/外网歌单等慢网络操作(如 go-music-dl 的 runDailyJob/playlistSongs)。
    *  上限 600000(10 分钟),未声明的方法一律维持 INVOKE_TIMEOUT_MS 看门狗。 */
   longRunning?: Record<string, number>;
+  /**
+   * 已在 longRunning 里声明预算、但**必须留在主线程**执行的方法名列表。
+   *
+   * longRunning 一个字段同时承担「放宽预算 + 换软看门狗」和「路由到 worker 线程」
+   * 两个语义,而 worker 下 host.jsenv 子环境不可用(sandboxWorker.ts 一律 UNSUPPORTED)。
+   * 依赖 jsenv 的插件因此陷入死结:声明 longRunning 就跑不了 jsenv,不声明就只有
+   * 20s 墙钟预算(sandbox.ts INVOKE_TIMEOUT_MS)。本字段把两个语义解开 ——
+   * 列出的方法照常拿到 longRunning 的预算与软看门狗,但强制留在主线程。
+   * 未列入 longRunning 的方法名填在这里无效(仍走默认 20s 预算)。
+   */
+  longRunningInMain?: string[];
   /** Declared permissions (see host.KNOWN_PERMISSIONS). Unknown perms are
    *  rejected at manifest-validation time. */
   permissions?: string[];

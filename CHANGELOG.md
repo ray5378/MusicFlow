@@ -2,6 +2,39 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.76] - 2026-10-03
+
+### 修复
+- **P0 插件 jsenv 子环境:单次 execute 空转满 25 秒,必然拖到宿主超时(HTTP 500)**
+  - 根因:`plugins/discovery.ts` 的 `pumpJobs` 只有子环境 runtime 死亡才提前退出,
+    而 `execute` 里算出的 `done`(目标 promise 是否结算)是**设了没人读**的死变量,
+    于是哪怕一个 1ms 就能结算的微任务也要空转到预算耗尽(默认 25000ms)。
+    宿主主线程调用预算是 20s(`sandbox.ts` `INVOKE_TIMEOUT_MS`),25s > 20s,
+    结果就是「子环境里只要有任何异步任务,插件方法一调用就被掐断」。
+    真机表现:lx-source 音源里依赖异步注册的长青SVIP / fish / ikun / 念心 / 星海
+    单独测试一律整整 20.0s 后返回 500;同步注册的源(全豆要/幻音/Huibq/溯音/统一/汽水VIP)正常。
+  - 修法:
+    - `pumpJobs` 增加 `until` 结算判定回调,目标 promise 一 settle 立刻返回;
+    - 预算收敛为 `JSENV_PUMP_BUDGET_MS = 8000` / `JSENV_NET_BUDGET_MS = 8000`,
+      均远小于宿主 20s,单次 jsenv 调用不再可能单独把方法拖超时;
+    - 子环境 interrupt deadline 30000 -> `JSENV_DEADLINE_MS = 10000`。
+    - `jsenv.execute` 返回值句柄 `vh.dispose()` 由裸调用改为 `try/catch` 容错
+      —— `dump()` 会消费 handle(实测再 dispose 抛 `QuickJSUseAfterFree`),
+      此前任何异步注册的音源 probe execute 都可能被这个异常打断。
+### 新增
+- **manifest.longRunningInMain:只放宽时间预算,不切 worker 线程**
+  - 解决的问题:`longRunning` 一个字段同时承担两个语义 —— ①放宽预算
+    (20s -> 最多 300s)并把看门狗换成软看门狗(`await` 网络期间不计时);
+    ②把方法路由到 worker 线程(`sandbox.ts` 的 `worker.invoke` 分支)。
+    而 worker 下 `host.jsenv` 子环境一律不可用(`sandboxWorker.ts` 返回 UNSUPPORTED),
+    于是依赖 jsenv 的插件陷入死结:声明 `longRunning` 就跑不了子环境,
+    不声明就只有 20s 墙钟预算且 `await` 网络也计时。
+  - 用法:在 `longRunning` 里照常声明预算,再把方法名列进 `longRunningInMain`。
+    这些方法会拿到长预算 + 软看门狗,但强制留在主线程(`this.invoke`)。
+    当 `longRunningInMain` 覆盖了全部 `longRunning` 键时,不再创建 worker 线程。
+  - 未列入 `longRunning` 的方法名填在这里无效(仍走默认 20s 预算),
+    避免「凭空拿到长预算」;字段可选,老插件行为完全不变。
+
 ## [4.0.73] - 2026-10-01
 
 ### 测试
