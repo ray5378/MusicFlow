@@ -311,10 +311,75 @@ export function makeWsApi(): any {
   };
 }
 
-/** host.jsenv:嵌套 QuickJS 子环境(独立 context,与主沙箱共享 WASM 模块)。 */
-export function makeJsenvApi(): any {
-  const envs = new Map<string, { runtime: any; ctx: any }>();
+/** host.jsenv:嵌套 QuickJS 子环境(独立 context,与主沙箱共享 WASM 模块)。
+ *
+ * opts.http:宿主真实网络实现。传入后会往子环境注入 `__mfJsenvHttp` —— 子环境里
+ * 挂起的请求由宿主代发(deferred 手动 settle),并由 execute() 负责推进微任务队列。
+ * 不传时行为与改造前完全一致(不注入、不泵),保证既有插件不受影响。 */
+export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promise<any> }): any {
+  const envs = new Map<string, { runtime: any; ctx: any; netQueue: any[] }>();
   const modulePromise = getSandboxModule();
+  const hostHttp = opts && opts.http;
+
+  /** JS 值 -> VM handle(deferred.resolve 只收 handle;递归构造纯 JSON 结构)。 */
+  function toVmHandle(ctx: any, v: any): any {
+    if (v === undefined) return ctx.undefined;
+    if (v === null) return ctx.null;
+    if (typeof v === "string") return ctx.newString(v);
+    if (typeof v === "number") return ctx.newNumber(v);
+    if (typeof v === "boolean") return v ? ctx.true : ctx.false;
+    if (Array.isArray(v)) {
+      const a = ctx.newArray();
+      for (let i = 0; i < v.length; i++) {
+        const h = toVmHandle(ctx, v[i]);
+        ctx.setProp(a, i, h);
+        try { h.dispose(); } catch { /* ignore */ }
+      }
+      return a;
+    }
+    if (typeof v === "object") {
+      const o = ctx.newObject();
+      for (const k of Object.keys(v)) {
+        const h = toVmHandle(ctx, v[k]);
+        ctx.setProp(o, k, h);
+        try { h.dispose(); } catch { /* ignore */ }
+      }
+      return o;
+    }
+    return ctx.newString(String(v));
+  }
+
+  /** 用宿主真实网络处理子环境里挂起的 __mfJsenvHttp 调用。 */
+  async function drainNet(e: any, budgetMs = 20000): Promise<void> {
+    const t0 = Date.now();
+    while (e.netQueue.length && Date.now() - t0 < budgetMs) {
+      const item = e.netQueue.shift();
+      try {
+        const resp = await hostHttp!(item.url, item.opt || {});
+        const h = toVmHandle(e.ctx, resp);
+        item.d.resolve(h);
+        try { h.dispose(); } catch { /* ignore */ }
+      } catch (err) {
+        const msg = err instanceof Error ? String(err.message) : String(err);
+        const h = e.ctx.newString(msg);
+        try { item.d.reject(h); } catch { /* ignore */ }
+        try { h.dispose(); } catch { /* ignore */ }
+      }
+      try { item.d.dispose(); } catch { /* ignore */ }
+    }
+  }
+
+  /** 推进子环境微任务队列(jsenv.execute 默认不泵,异步注册的脚本会永远卡住)。 */
+  async function pumpJobs(e: any, budgetMs = 25000): Promise<void> {
+    const t0 = Date.now();
+    while (Date.now() - t0 < budgetMs) {
+      if (!e.runtime || !e.runtime.alive) return;
+      try { await drainNet(e); } catch { /* ignore */ }
+      if (e.runtime.hasPendingJob()) { try { e.runtime.executePendingJobs(50); } catch { /* ignore */ } }
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
   return {
     create: async (name: string, initCode?: string) => {
       const n = String(name);
@@ -326,6 +391,23 @@ export function makeJsenvApi(): any {
       let deadline = Date.now() + 30000;
       runtime.setInterruptHandler(() => Date.now() > deadline);
       const ctx = runtime.newContext();
+      const entry = { runtime, ctx, netQueue: [] as any[] };
+      envs.set(n, entry);
+      // 宿主网络桥:sync 版 quickjs 不允许宿主回调直接返回 Promise,
+      // 故这里用 deferred 手动 settle —— 子环境拿到的是可 await 的 promise handle。
+      if (hostHttp) {
+        const bridge = ctx.newFunction("__mfJsenvHttp", (url: any, opt: any) => {
+          let u = "", o: any = {};
+          // url/opt 都是 VM handle:必须 ctx.dump 成宿主 JS 值,否则 String(url) 得到 "[object Object]"
+          try { u = String(ctx.dump(url)); } catch { u = ""; }
+          try { o = ctx.dump(opt) || {}; } catch { o = {}; }
+          const d = ctx.newPromise();
+          entry.netQueue.push({ d, url: u, opt: o });
+          return d.handle;
+        });
+        ctx.setProp(ctx.global, "__mfJsenvHttp", bridge);
+        bridge.dispose();
+      }
       if (initCode) {
         const r = ctx.evalCode(String(initCode));
         if (r.error !== undefined) {
@@ -335,20 +417,29 @@ export function makeJsenvApi(): any {
         }
         ctx.unwrapResult(r).dispose();
       }
-      envs.set(n, { runtime, ctx });
       return n;
     },
     execute: async (name: string, code: string) => {
       const e = envs.get(String(name));
       if (!e) throw new Error(`jsenv 不存在: ${name}`);
       deadlineRefresh(e, 30000);
+      // 子环境挂起的 http 请求先由宿主真实发出,否则 await 永远挂住
+      if (hostHttp && e.netQueue.length) { try { await drainNet(e); } catch { /* ignore */ } }
       const r = e.ctx.evalCode(String(code));
       if (r.error !== undefined) {
         const msg = e.ctx.dump(r.error); r.error.dispose();
         return { ok: false, error: String(msg) };
       }
       const vh = e.ctx.unwrapResult(r);
-      const v = e.ctx.dump(vh);
+      // 返回的是 promise(异步脚本在跑):泵到结算,否则调用方永远拿不到结果
+      if (e.runtime.alive && e.runtime.hasPendingJob()) {
+        let done = false;
+        try { e.ctx.resolvePromise(vh).then(() => { done = true; }, () => { done = true; }); }
+        catch { done = true; }
+        await pumpJobs(e);
+      }
+      let v: any = null;
+      try { v = e.ctx.dump(vh); } catch { v = undefined; }
       vh.dispose();
       return { ok: true, result: v };
     },
@@ -488,14 +579,8 @@ export async function discoverExternalPlugins(
       const derivedFromJson = derivePermissions(expectedManifest?.capabilities);
       const initialPerms = [...new Set([...declaredPerms, ...derivedFromJson])];
       const comm = createComm(id, initialPerms);
-      const env = {
-        version: process.env.APP_VERSION || "dev",
-        getConfig: () => getPluginConfig(id) ?? {},
-        permissions: initialPerms,
-        crypto: {
-          md5: (s: string) => createHash("md5").update(String(s)).digest("hex"),
-        },
-        http: async (input: string, init?: any) => {
+      // 宿主 HTTP 实现(具名提升:env.http 与 jsenv 网络桥共用,避免 env 自引用)
+      const pluginHttp = async (input: string, init?: any) => {
           try {
             const timeout = Number(init?.timeout) > 0 ? Number(init.timeout) : 20000;
             const { timeout: _t, ...rest } = init || {};
@@ -513,7 +598,17 @@ export async function discoverExternalPlugins(
           } catch (e: any) {
             return { ok: false, status: 0, headers: {}, body: "", error: String(e?.message || e) };
           }
+        };
+
+      const env = {
+        version: process.env.APP_VERSION || "dev",
+        getConfig: () => getPluginConfig(id) ?? {},
+        permissions: initialPerms,
+        crypto: {
+          md5: (s: string) => createHash("md5").update(String(s)).digest("hex"),
         },
+        http: pluginHttp,
+
         storage: makeScopedStorage(id),
         log: (...args: any[]) => console.log(`[PLUGIN:${id}]`, ...args),
         comm: {
@@ -600,7 +695,7 @@ export async function discoverExternalPlugins(
         command: makeCommandApi(),
         net: makeNetApi(),
         ws: makeWsApi(),
-        jsenv: makeJsenvApi(),
+        jsenv: makeJsenvApi({ http: pluginHttp }),
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       const manifest: PluginManifest = sandbox.manifest;
