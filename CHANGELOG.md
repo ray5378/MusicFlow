@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.78] - 2026-10-03
+
+### 功能
+- **搜索层跨插件兜底（core-search-fallback）**
+  - 现象:`POST /rest/api/v1/online/:providerId/search` 中任一源插件搜索返回空或抛错时，结果就只有这一个插件，没有第二道防线（既有换源兜底只在取链/播放层，搜索层没有跨插件遍历）。
+  - 根因:`online.ts` 直接调用 `configured.provider.search` 一次即返回，`services/source/online/service.ts` 只负责把结果入库，不具备兜底能力。
+  - 修法:新增内置行为插件 `core-search-fallback`(config-only) 与`runSearchWithFallback()` —— 主插件先试，空/错按配置自动改用其它「已启用 + search&stream 齐备」的源插件(上限 maxCandidates=2、总预算 6000ms)，命中结果回传 `fallbackFrom`，全部耗尽回传 `{empty,message,trace}`。
+  - 契约:新增 `upstreamError` 三态 —— 主命中/兜底命中为空串;主插件抛错且兜底没捞回时非空(路由回 502，走业务码、不透传上游原文);主插件真无结果且兜底耗尽仍 200 + message(不是错误)。
+  - 配置:`core-search-fallback` 提供 enabled / maxCandidates / budgetMs /fallbackOnEmpty / fallbackOnError 五项，默认全部开启，可在插件页关掉。
+
+### 重构
+- **通用兜底 runner 抽成核心可复用能力**
+  - `services/plugin/shared.ts` 新增与业务无关的 `runSourceFallback<T>()`：逐候选尝试、首个 usable 即返回、双闸门(总预算 + 最多试几个)、候选抛错只记 trace 不向上抛、回传完整轨迹，供后续任何插件/核心链路复用。
+  - 插件侧契约收敛:`plugins/types.ts` 新增 `PluginSoftEmptyResult`(`{empty,message,trace,songs,source}`) 显式类型；`plugins/sandbox.ts` 新增`sandbox_makeEmptyResult()` 并经 `host.fallback.makeEmptyResult` 注入沙箱，任何插件都能产出同构的软失败+轨迹，不必各写一份。
+  - 配套:`streamFallback.ts` 保持零改动 —— 其带负缓存/TTL/三态 probe 的既有语义不并入通用 runner(正确性优先，重复可接受)。
+
 ## [4.0.77] - 2026-10-03
 
 ### 修复
