@@ -122,7 +122,7 @@ export interface PluginMatchCandidate {
  *  fallbackOnEmpty / fallbackOnError 分别决定「空结果」和「抛错」是否换下一个候选;
  *  maxCandidates 既算首选也算兜底(默认 2 = 首选 1 + 兜底 1)。
  *  开关全关时候选链退化为「只有首选」,等价于改动前的行为。 */
-async function buildMatchCandidates(
+export async function buildMatchCandidates(
   primaryId: string,
   primaryConfig: any,
   primaryImpl: any,
