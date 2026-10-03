@@ -82,6 +82,15 @@ export interface OnlineProvider {
   playlistSongs?(config: Record<string, any>, source: string, id: string): Promise<{ songs: OnlineSongResult[]; name: string }>;
   /** Build the audio proxy URL for a song (go-music-dl /download?stream=1). */
   streamUrl(config: Record<string, any>, song: OnlineSongResult, range?: string): string;
+  /** 纯 stream 插件的跨插件取链入口(2026-10-04):按歌自带元数据/平台 ID
+   *  (song.sourceData,如 gmd 渠道的 {source, remoteId})直查直链,不依赖
+   *  search。成功返回可 probe 的 URL;失败/无链返回 ""(约定不抛错)。
+   *  只被核心取链兜底(findFallbackStream)在本尊平台轮换全败后、对
+   *  「capabilities 含 stream 且不含 search」的插件调用。 */
+  resolveStream?(
+    config: Record<string, any>,
+    song: { id: string; title: string; artist: string; album: string; duration: number; pluginEntry?: string | null; sourceData?: string | null },
+  ): Promise<string>;
   /** Build the lyrics (LRC) URL for a stored web song. Returns null if the
    *  provider cannot supply lyrics for this song. Replaces the old core-side
    *  deriveGmdlLrcUrl() so that gmdl-specific URL logic lives with the plugin. */

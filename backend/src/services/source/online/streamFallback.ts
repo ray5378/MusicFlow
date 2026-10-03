@@ -228,6 +228,37 @@ export async function findFallbackStream(
     if (outcome === "transient") sawTransient = true;
   }
 
+  // 纯 stream 插件跨插件兜底(2026-10-04):本尊重搜+平台轮换全败后,逐个尝试
+  // 只声明 stream、**不含** search 的启用源插件(如 lx-source:按歌 sourceData 里的
+  // 平台原生 ID 直查洛雪源脚本 musicUrl 并多源轮切,不依赖重搜)。契约与核心调用
+  // 插件的既有惯例一致:resolveStream(config, songLike) → Promise<string>,
+  // 成功=直链 URL,失败/无链=""(异常同败)。probe 通过才换链;任何结果都计入
+  // sawTransient 语义,最终负缓存/退避判定与原先完全一致。
+  let sdRaw: string | null = null;
+  try {
+    sdRaw = db.select({ sourceData: songs.sourceData }).from(songs).where(eq(songs.id, songId)).get()?.sourceData ?? null;
+  } catch { sdRaw = null; }
+  const songLike = { id: songId, title, artist, album, duration, pluginEntry: providerId, sourceData: sdRaw };
+  for (const { manifest } of getEnabledSourcePlugins()) {
+    if (!manifest.capabilities.includes("stream") || manifest.capabilities.includes("search")) continue;
+    if (manifest.id === providerId) continue; // 本尊已在上面走过,不重复
+    const alt = getConfiguredProvider(manifest.id);
+    if (!alt?.provider || typeof alt.provider.resolveStream !== "function") continue;
+    let url = "";
+    try {
+      url = String((await alt.provider.resolveStream(alt.config, songLike)) || "");
+    } catch {
+      url = ""; // 插件内部错误=该跳失败,与返回 "" 同语义,不阻塞后续候选
+    }
+    if (!url) continue;
+    const outcome = await probe(url, timeoutMs);
+    if (outcome === "ok") {
+      setFallback(songId, url);
+      return { url, source: manifest.id };
+    }
+    if (outcome === "transient") sawTransient = true;
+  }
+
   // 全候选都不可播:只要其中有「网络异常/超时」就不判定不可播(网络抖动 ≠ 没有源),
   // 只按短期退避记;只有全是明确的 403/404/410 才写负结果。
   setFallback(songId, null, { transient: sawTransient });
