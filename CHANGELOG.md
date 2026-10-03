@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.83] - 2026-10-04
+
+### 修复
+- **本尊「搜索请求抛错」时提前 return,纯 stream 插件兜底被整段跳过(gmd 一挂就彻底没链)**
+  - 现象:240 生产容器真机复验(`docker stop music-dl` 逼本尊全平台失败)——库里的 gmd 歌曲一首都换不出链,洛雪(lx-source v1.1.1)压根没被调用到。
+  - 根因:`findFallbackStream` 里本尊重搜的 `provider.search()` 抛异常(上游 down / 网络异常)时,catch 分支按「网络异常不判死,只短期退避」的语义直接 `setFallback(..., {transient:true}); return null` —— 这条 return 排在**纯 stream 插件轮询之前**,于是本尊一崩,洛雪按歌曲 `sourceData` 里的平台原生 ID 直查直链的机会就没了。
+  - 为何单测没抓到:既有用例构造的是「搜索成功但空结果 / 候选被导入门禁过滤」,从不构造「本尊 search 本身抛错」;而真机 gmd 停服走的恰恰是抛错分支。
+  - 修法:catch 改为只置 `searchFailed` 标记并走 `results = []`,继续走原有候选循环与纯 stream 插件轮询;全无果时末尾统一 `setFallback(songId, null, { transient: sawTransient || searchFailed })`,与原「短期退避不判死」语义完全一致。
+  - 真机复核:240 v4.0.83 + lx-source v1.1.1,停掉 gmd 后按库内网易云 ID 直查,直链 host 由 `192.168.10.240:18180` 切到 `m701.music.126.net`,`HTTP 206 audio/mpeg` 可播。
+
+### 测试
+- 新增 `tests/services/streamFallbackSearchThrow.test.ts` 2 例:①本尊 search 抛错 → 纯 stream 插件仍按 sourceData 直查并换链成功;②无链时返回 null 但按 transient 退避(不判死)。双向变异(还原旧 `return`)→ 1 failed,还原 → 2 passed。
+
 ## [4.0.82] - 2026-10-04
 
 ### 新增

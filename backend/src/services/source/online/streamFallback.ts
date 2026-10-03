@@ -181,13 +181,19 @@ export async function findFallbackStream(
 
   const query = [title, artist].filter(Boolean).join(" ");
   let results: OnlineSongResult[];
+  let searchFailed = false;
   try {
     const r = await configured.provider.search(configured.config, { query });
     results = r.songs || [];
   } catch {
-    // 搜索请求本身失败(网络异常/上游 5xx):**不判定"没有源"**,只短期退避。
-    setFallback(songId, null, { transient: true });
-    return null;
+    // 搜索请求本身失败(网络异常/上游 5xx)→**不判定"没有源"**,只短期退避
+    // (2026-10-04 240 真机实锤):旧实现在此直接 return,把下游「纯 stream 插件
+    // 跨插件兜底」整段跳过——本尊(gmd)一抛错,洛雪按歌曲 sourceData 里的平台
+    // 原生 ID 直查直链的机会就没了(gmd 挂掉时正是这个场景)。改为打标记后
+    // 走空结果路径,纯 stream 插件照常轮询;全无果时再由末尾统一按 searchFailed
+    // 写 transient 负缓存,语义与原「短期退避」完全一致。
+    searchFailed = true;
+    results = [];
   }
 
   // 换源兜底与导入门禁同套断言(v2.3.4):候选必须通过 passesImportGate——
@@ -261,7 +267,7 @@ export async function findFallbackStream(
 
   // 全候选都不可播:只要其中有「网络异常/超时」就不判定不可播(网络抖动 ≠ 没有源),
   // 只按短期退避记;只有全是明确的 403/404/410 才写负结果。
-  setFallback(songId, null, { transient: sawTransient });
+  setFallback(songId, null, { transient: sawTransient || searchFailed });
   return null;
 }
 
