@@ -18,6 +18,7 @@ import { eq } from "drizzle-orm";
 import { getConfiguredProvider, getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "../../services/source/online/index.js";
 import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong, crossVerifySongs } from "../../services/source/online/match.js";
+import { buildMatchCandidates } from "../../services/plugin/shared.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { touch } from "../../services/memory/reclaim.js";
 import { runSearchWithFallback } from "../../services/source/online/searchFallback.js";
@@ -269,13 +270,15 @@ onlineRoutes.post("/v1/online/:providerId/match-track", permMiddleware(PERM.PLAY
   if (entry.playable && entry.songId) return c.json({ success: true, alreadyPlayable: true });
 
   try {
+    const candidates = await buildMatchCandidates(providerId, configured.config, configured.provider);
+    if (candidates.length > 1) log.info(`[ONLINE] match-track: ${entryId} 匹配候选链 ${candidates.map((c) => c.providerId).join(" -> ")}`);
     const result = await matchToOnlineSong(providerId, configured.config, configured.provider, entry.playlistId, {
       entryId,
       title: entry.externalTitle || "",
       artist: entry.externalArtist || "",
       album: entry.externalAlbum || undefined,
       duration: entry.externalDuration || undefined,
-    });
+    }, candidates);
     return c.json({ success: result.status === "matched", ...result });
   } catch (e: any) {
     log.error(`[ONLINE] match-track 失败: ${e?.message || e}`);

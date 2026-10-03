@@ -22,6 +22,12 @@
 
 ## [4.0.80] - 2026-10-03
 
+### 功能
+- **「手动补链」(match-track) 也接上跨插件兜底候选链**
+  - 现象:`POST /v1/online/:providerId/match-track` 调 `matchToOnlineSong()` 只传了原有 5 个参数,漏掉第 6 个 `candidates` —— 候选链机制本身已存在,但手动补链永远只跑 URL 里那个 provider,空/错即失败,没有任何第二道防线。
+  - 修法:路由里先调 `buildMatchCandidates(providerId, config, provider)` 拼出「首选 + 其它已启用搜索插件」的候选链作第 6 参传入;候选数 > 1 时打一条 `[ONLINE] match-track: <entryId> 匹配候选链 a -> b -> c` 日志,排障时能看清它到底试了谁。
+  - 边界:`buildMatchCandidates` 自身排除本尊(不把自己列进兜底)、受 `core-search-fallback` 的 `enabled` 与 `maxCandidates` 约束(默认 2 → 只补 1 个兜底),因此默认行为是「用户显式选的 provider 失败 → 再试一个已启用插件」,与自动匹配链路同一套开关、同一份配置。
+
 ### 修复
 - **首选源慢/超时时跨插件兜底静默失效,直接回 502**
   - 现象:`POST /rest/api/v1/online/:providerId/search` 走 `searchBestMatchWithFallback()`。真机 240 实测:`providerId=lx-source` + `q=稻香` 正常(兜底轨迹 `["lx-source(空结果)"]`,由 go-music-dl 捞回);而 `providerId=apple-music` + `q=稻香` 直接 HTTP 502 `{code: UPSTREAM_ERROR}`,响应里的 `fallbackFrom` 与 `trace` 都是空的——兜底一次都没跑。日志同窗口出现 `[PLUGIN:apple-music] 调用 search() 执行超时(> 20000ms),已中断`。
