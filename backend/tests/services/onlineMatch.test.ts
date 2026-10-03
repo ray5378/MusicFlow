@@ -245,7 +245,7 @@ describe("searchBestMatch:查询构造 / 打分排序 / 门禁 / 批内缓存", 
 
   it("批内缓存命中 → 直接复用首次结果,不再发起任何搜索", async () => {
     const best = cand();
-    const cache = new Map<string, any>([["歌|歌手", { status: "matched", best, score: 44 }]]);
+    const cache = new Map<string, any>([["prov|歌|歌手", { status: "matched", best, score: 44 }]]);
     const p = prov([cand({ name: "别的" })]);
     const r = await searchBestMatch("prov", {}, p, { entryId: 3, title: " 歌 ", artist: " 歌手 " }, cache);
     expect(r.status).toBe("matched");
@@ -254,23 +254,23 @@ describe("searchBestMatch:查询构造 / 打分排序 / 门禁 / 批内缓存", 
     expect(p.search).not.toHaveBeenCalled();
   });
 
-  it("缓存键用原文 trim+lowercase(不归一化)→ 假名标题不会与别的歌共用键", async () => {
+  it("缓存键 = providerId + 原文 trim+lowercase(不归一化)→ 假名标题不会与别的歌共用键", async () => {
     const cache = new Map<string, any>();
     await searchBestMatch("prov", {}, prov([cand({ name: "ソラ" })]), { entryId: 1, title: "ソラ", artist: "" }, cache);
-    expect([...cache.keys()]).toEqual(["ソラ|"]);
+    expect([...cache.keys()]).toEqual(["prov|ソラ|"]);
   });
 
   it("命中时写入缓存 matched(带 best 与 score)", async () => {
     const cache = new Map<string, any>();
     const best = cand();
     await searchBestMatch("prov", {}, prov([best]), { entryId: 1, title: "歌", artist: "歌手" }, cache);
-    expect(cache.get("歌|歌手")).toMatchObject({ status: "matched", score: 28, best });
+    expect(cache.get("prov|歌|歌手")).toMatchObject({ status: "matched", score: 28, best });
   });
 
   it("门禁失败时写入缓存 no-match(带 message)", async () => {
     const cache = new Map<string, any>();
     await searchBestMatch("prov", {}, prov([cand({ name: "别的" })]), { entryId: 1, title: "歌", artist: "歌手" }, cache);
-    const hit = cache.get("歌|歌手");
+    const hit = cache.get("prov|歌|歌手");
     expect(hit.status).toBe("no-match");
     expect(hit.message).toContain("未通过导入门禁[title]");
     expect(hit.best).toBeUndefined();

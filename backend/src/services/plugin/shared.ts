@@ -10,7 +10,7 @@
 import { db, sqlite } from "../../db/index.js";
 import { playlists } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { firstEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
+import { firstEnabledByCapability, getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
 
 /** 当天日期字符串(YYYY-MM-DD),用于歌单当天幂等标记。 */
 export function todayStr(d = new Date()): string {
@@ -101,6 +101,53 @@ export interface AutoMatchStats {
 
 const EMPTY_MATCH_STATS: AutoMatchStats = { total: 0, matched: 0, noMatch: 0, error: 0 };
 
+/** 自动匹配(歌单导入 / 播放补齐)的在线搜索候选链。
+ *  与 match.ts 的 MatchProviderCandidate 结构类型兼容,这里不 import 那个类型:
+ *  match.ts 反向 import 本模块的 refreshPlaylistCounts,静态互引会成环(ESM 下
+ *  可能出现求值期 undefined),故用结构类型 + 动态 import 取配置。 */
+export interface PluginMatchCandidate {
+  providerId: string;
+  config: any;
+  provider: any;
+}
+
+/** 拼出「首选插件 + 其它已启用 search 插件」的候选链(排除本尊)。
+ *
+ *  修的是什么:matchPlaylistInBackground 原先只挑一个 matcher
+ *  (firstEnabledByCapability("autoMatch") ?? firstEnabledByCapability("search")),
+ *  而 firstEnabledByCapability 只取 [0]——首选插件搜索空/报错时,后面那些明明
+ *  装好的插件根本不会被碰到(实测内置插件没人声明 autoMatch,所以永远走 search 分支)。
+ *
+ *  开关语义:兜底整体由 core-search-fallback 的 enabled 控制;
+ *  fallbackOnEmpty / fallbackOnError 分别决定「空结果」和「抛错」是否换下一个候选;
+ *  maxCandidates 既算首选也算兜底(默认 2 = 首选 1 + 兜底 1)。
+ *  开关全关时候选链退化为「只有首选」,等价于改动前的行为。 */
+async function buildMatchCandidates(
+  primaryId: string,
+  primaryConfig: any,
+  primaryImpl: any,
+): Promise<PluginMatchCandidate[]> {
+  const head: PluginMatchCandidate[] = [
+    { providerId: primaryId, config: primaryConfig, provider: primaryImpl },
+  ];
+  // 动态 import:searchFallback.ts 反向 import 本模块的 runSourceFallback,静态引会成环。
+  const { getSearchFallbackConfig } = await import("../source/online/searchFallback.js");
+  const cfg = await getSearchFallbackConfig();
+  const fallbackWanted = cfg.enabled && (cfg.fallbackOnEmpty || cfg.fallbackOnError);
+  const maxRaw = Math.floor(Number(cfg.maxCandidates));
+  if (!fallbackWanted || !Number.isFinite(maxRaw) || maxRaw <= 1) return head;
+  const others: PluginMatchCandidate[] = [];
+  for (const p of getEnabledByCapability("search")) {
+    if (others.length >= maxRaw - 1) break;
+    if (p.manifest.id === primaryId) continue; // 排除本尊
+    const cfgOther = getPluginConfig(p.manifest.id);
+    if (!cfgOther || typeof p.impl?.search !== "function") continue; // 中途被禁用 / 不支持搜索
+    others.push({ providerId: p.manifest.id, config: cfgOther, provider: p.impl });
+  }
+  return [...head, ...others];
+}
+
+
 /** 后台自动匹配一张歌单的未匹配条目(playable=0 且 external_title 非空)。
  *
  *  共享宿主服务:导入歌单(rebuildPlaylistEntries 后)与外置插件歌单
@@ -135,6 +182,13 @@ export async function matchPlaylistInBackground(
     const config = getPluginConfig(matcher.manifest.id);
     if (!config) return stats; // plugin disabled between lookup and read
     if (typeof matcher.impl?.search !== "function") return stats; // can't actually match
+    // 候选链:首选插件 + 其它已启用且声明 search 的插件(排除本尊,受 maxCandidates 约束)。
+    const candidates = await buildMatchCandidates(matcher.manifest.id, config, matcher.impl);
+    if (candidates.length > 1) {
+      console.log(
+        `[auto-match] ${playlistId}: 匹配候选链 ${candidates.map((c) => c.providerId).join(" -> ")}`,
+      );
+    }
 
     // P1:匹配进度经 WS 广播(限频 1s),前端可显示「后台匹配中 x/y」而非"卡死"。
     // 动态 import 解环:shared → ws → dlna → online → builtins → shared 会成环。
@@ -153,6 +207,7 @@ export async function matchPlaylistInBackground(
         lastBcast = now;
         ws.broadcastToClients({ type: "match_progress", playlistId, done, total });
       },
+      candidates,
     );
     stats = {
       total: result.total,
@@ -237,13 +292,13 @@ export const FALLBACK_BUDGET_MS_DEFAULT = 6000;
 export const FALLBACK_MAX_TRIES_DEFAULT = 2;
 
 /** 错误摘要:超长截断到前 80 字(根因通常在开头:状态码/异常类型/URL 前缀)。 */
-function summarizeError(err: unknown): string {
+export function summarizeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   return msg.length > 80 ? msg.slice(0, 79) + "…" : msg;
 }
 
 /** 把一段尝试限制在给定毫秒内;超时抛错(由 runner 记 trace 后换下一个候选)。 */
-function withinBudget<T>(p: Promise<T>, ms: number): Promise<T> {
+export function withinBudget<T>(p: Promise<T>, ms: number): Promise<T> {
   if (!Number.isFinite(ms) || ms <= 0) return Promise.reject(new Error(`超过兜底预算 ${ms}ms`));
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`超过兜底预算 ${Math.round(ms)}ms`)), ms);

@@ -8,13 +8,14 @@
 import { db, sqlite } from "../../../db/index.js";
 import { playlistSongs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
-import { refreshPlaylistCounts, strictNormEquals } from "../../plugin/shared.js";
+import { refreshPlaylistCounts, strictNormEquals, withinBudget, summarizeError } from "../../plugin/shared.js";
 import { matchSongsToLibrary } from "../../plugin/libraryMatch.js";
 import { batchConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill } from "../../covers.js";
 import { OnlineSongResult } from "./types.js";
 import { importOnlineSong, importOnlineSongs } from "./service.js";
 import { passesImportGate } from "./importGate.js";
+import { getSearchFallbackConfig, type SearchFallbackConfig } from "./searchFallback.js";
 
 export interface MatchTarget {
   entryId: number;
@@ -109,6 +110,15 @@ function linkPlaylistEntry(playlistId: string, entryId: number, songId: string) 
  * 同一歌单内的重复标题/歌手(同专辑多曲、不同 source id 的同一首歌)不必重复
  * 在线搜索——命中直接沿用 first 结果,省下网络往返与搜索打分 CPU。
  */
+export interface MatchProviderCandidate {
+  providerId: string; // 进 trace 与日志用(如 go-music-dl / lx-source)
+  config: any;
+  provider: any;
+}
+
+/** searchBestMatch 的返回形状(候选链复用时避免重复写字面量)。 */
+type SearchBestResult = Awaited<ReturnType<typeof searchBestMatch>>;
+
 export interface SearchMatchCache {
   status: "matched" | "no-match" | "error";
   best?: OnlineSongResult;
@@ -125,6 +135,112 @@ export interface SearchMatchCache {
  *              同一歌单内重复的标题重复搜索直接复用首次结果;未传则每次真实搜索
  *              (单首实况匹配路径,保持原行为)。缓存只记忆资源结果,不记忆 DB 产物。
  */
+/**
+ * 上一跳失败之后,开关是否允许继续换下一个插件。
+ *
+ *  空结果由 fallbackOnEmpty 管、抛错由 fallbackOnError 管(两个独立开关);
+ *  关掉就必须**在发下一个请求之前**停手,而不是等请求发出去才判定。
+ *  last 为 null(还没试过任何候选)时恒允许。
+ */
+function canContinueAfter(cfg: SearchFallbackConfig, last: SearchBestResult | null): boolean {
+  if (!last) return true;
+  return last.status === "no-match" ? !!cfg.fallbackOnEmpty : !!cfg.fallbackOnError;
+}
+
+/** 失败原因摘要(只留插件自己的 message,不吐上游原文)。 */
+function failSegment(label: string, r: SearchBestResult | null, fallbackMsg: string): string {
+  return `${label}(${r?.message || fallbackMsg})`;
+}
+
+/**
+ * 「可用」判定:通过导入门禁并拿到最佳候选(与 searchBestMatch 的返回契约一致)。
+ *
+ *  刻意用普通 boolean 而不是类型谓词:声明类型就等于谓词类型时,谓词的 else 分支
+ *  会被收窄成 never(TS 会认为「不可能是 SearchBestResult」),下游读 .message 直接
+ *  编译不过 —— 这里取不到可用结果后还要拼兜底轨迹,必须能读到那一支的字段。
+ */
+function isUsableMatch(r: SearchBestResult | null | undefined): boolean {
+  return !!r && r.status === "matched" && !!r.best;
+}
+
+/**
+ * 带跨插件兜底的在线搜索:候选链按序试,首个「通过导入门禁的可用结果」即返回;
+ * 全部耗尽回传最后一个候选的结果,并把兜底轨迹拼进 message。
+ *
+ *  为什么不用 shared.ts 的 runSourceFallback:那套 runner 的 onEmpty / onError 只能
+ *  「记一笔轨迹」,表达不了「开关关掉就不要换候选」的两种粒度 —— fallbackOnEmpty 和
+ *  fallbackOnError 是 core-search-fallback 里两个独立开关(分别管空结果与抛错),
+ *  关掉其中一个必须就地停止,而不是照常往下试。这里沿用 runner 的同一套闸门语义
+ *  (总预算 budgetMs + 最多试 maxCandidates 个),并直接复用它的 withinBudget /
+ *  summarizeError,不重新实现超时与摘要。
+ *
+ *  两个刻意的行为边界:
+ *  - **单候选零包装**:候选只有 1 个(绝大多数部署只装了一个搜索插件)时直接走
+ *    searchBestMatch,不套预算、不换实现 —— 全量回归据此比对改动前后逐字段等价。
+ *  - **首候选不吃预算**:只有兜底候选受剩余预算约束,首选沿用原路径(其自身超时由
+ *    插件自己管),避免「主插件慢但合法」被 6s 闸门误杀。
+ *
+ *  与 /api 搜索路由那层(core-search-fallback)是同一套开关、同一份配置,两条链路
+ *  行为一致;差别只在调用层(这里是逐条匹配,另一处是一次搜索)。
+ */
+export async function searchBestMatchWithFallback(
+  candidates: MatchProviderCandidate[],
+  want: MatchTarget,
+  cache?: Map<string, SearchMatchCache>,
+  cfgOverride?: Partial<SearchFallbackConfig>,
+): Promise<SearchBestResult> {
+  const list = Array.isArray(candidates)
+    ? candidates.filter((c): c is MatchProviderCandidate => !!c && typeof c === "object")
+    : [];
+  if (list.length === 0) {
+    return { entryId: want.entryId, title: want.title, status: "error", message: "无可用的在线匹配插件(候选为空)" };
+  }
+  const head = list[0]!;
+  if (list.length === 1) return searchBestMatch(head.providerId, head.config, head.provider, want, cache);
+
+  // 配置可注入:调用方(含单测)能覆盖 core-search-fallback 的三个开关,不必改库。
+  const cfg = { ...(await getSearchFallbackConfig()), ...(cfgOverride ?? {}) };
+  const startedAt = Date.now();
+  const remain = () => Math.max(0, cfg.budgetMs - (Date.now() - startedAt));
+  const rawLimit = Math.floor(Number(cfg.maxCandidates));
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 1 ? Math.min(rawLimit, list.length) : list.length;
+  const trace: string[] = [];
+
+  /** 跑一个候选:抛错原地转成 error 结果(不往调用方冒),好让整条链统一处理。 */
+  const attempt = async (c: MatchProviderCandidate): Promise<SearchBestResult> => {
+    try {
+      return await searchBestMatch(c.providerId, c.config, c.provider, want, cache);
+    } catch (e) {
+      return { entryId: want.entryId, title: want.title, status: "error", message: summarizeError(e) };
+    }
+  };
+
+  // 首候选也走同一条循环:开关把关只此一处(早先在首候选后另加了一份,
+  // 结果循环里那条守卫永远轮不到 —— 死代码,变异测试也抓不到)。
+  let last: SearchBestResult | null = null;
+  for (let i = 0; i < limit; i++) {
+    const c = list[i]!;
+    if (i > 0) {
+      // 兜底阶段才有闸门:总开关 / 预算耗尽 / 上一跳的失败被开关否掉 —— 都在此拦下,
+      // 且必须在发请求之前判定,否则多余请求已经打出去了。
+      if (!cfg.enabled || remain() <= 0) break;
+      if (!canContinueAfter(cfg, last)) break;
+      last = await withinBudget(attempt(c), remain());
+    } else {
+      // 首候选不吃兜底预算(其超时由插件自己管),避免慢但合法的源被预算闸门误杀
+      last = await attempt(c);
+    }
+    if (isUsableMatch(last)) return last;
+    // 记轨迹:全耗尽时调用方要能看出首选是谁、为什么没成(不是一句笼统「搜索失败」)
+    trace.push(failSegment(c.providerId, last, "空结果"));
+  }
+  if (last && trace.length > 0) {
+    const suffix = ` + (兜底轨迹: ${trace.join(" → ")})`;
+    return last.status === "matched" ? last : { ...last, message: `${last.message || ""}${suffix}` };
+  }
+  return last ?? { entryId: want.entryId, title: want.title, status: "error", message: "首选匹配插件失败且无兜底轨迹" };
+}
+
 export async function searchBestMatch(
   providerId: string,
   config: any,
@@ -135,7 +251,11 @@ export async function searchBestMatch(
   // P0 直通已在上层(onlineSongFromExternalId)拦截;到这里的都是需要服务端搜索的。
   // 缓存键用原文 trim+lowercase(不用 normalizeTitleStrict):假名/纯符号标题
   // 归一后全是空串,不同歌会共享同一缓存键导致跨歌错配;原文键永不碰撞。
-  const cacheKey = cache ? `${String(want.title || "").trim().toLowerCase()}|${String(want.artist || "").trim().toLowerCase()}` : "";
+  // key 带 providerId:批内缓存原本只按 (title,artist) 记,跨插件兜底时主候选把
+  // no-match 写进同一个 key,兜底候选会被直接短路成 no-match —— 兜底就永远不生效。
+  const cacheKey = cache
+    ? `${String(providerId || "").trim()}|${String(want.title || "").trim().toLowerCase()}|${String(want.artist || "").trim().toLowerCase()}`
+    : "";
   if (cache && cache.has(cacheKey)) {
     const hit = cache.get(cacheKey)!;
     return { entryId: want.entryId, title: want.title, status: hit.status, best: hit.best, score: hit.score, message: hit.message };
@@ -184,10 +304,14 @@ export async function matchToOnlineSong(
   provider: any,
   playlistId: string,
   want: MatchTarget,
+  candidates?: MatchProviderCandidate[],
 ): Promise<MatchOutcome> {
   try {
     // 平台 id 直通已废除:一律走搜索 + 门禁交叉比对(假源正是从直通混入的)。
-    const m = await searchBestMatch(providerId, config, provider, want);
+    const m = await searchBestMatchWithFallback(
+      candidates ?? [{ providerId, config, provider }],
+      want,
+    );
     if (m.status !== "matched" || !m.best) {
       return { entryId: want.entryId, title: want.title, status: m.status, message: m.message };
     }
@@ -228,6 +352,7 @@ export async function matchUnmatchedPlaylistEntries(
   provider: any,
   playlistId: string,
   onProgress?: (done: number, total: number, outcome: MatchOutcome) => void,
+  candidates?: MatchProviderCandidate[],
 ): Promise<{ total: number; matched: number; noMatch: number; error: number; results: MatchOutcome[] }> {
   const entries = db.select().from(playlistSongs)
     .where(eq(playlistSongs.playlistId, playlistId))
@@ -303,7 +428,11 @@ export async function matchUnmatchedPlaylistEntries(
         continue;
       }
 
-      const m = await searchBestMatch(providerId, config, provider, target, searchCache);
+      const m = await searchBestMatchWithFallback(
+        candidates ?? [{ providerId, config, provider }],
+        target,
+        searchCache,
+      );
       // 节流:每 10 首主动睡眠(batchPacer:档位 + ELD 自适应),让 CPU 真正空闲,
       // 前台轮询/stream 有喘息;全速档 sleepMs=0 即退回旧行为。
       searchedSinceSleep++;
@@ -419,6 +548,7 @@ export async function crossVerifySongs(
   provider: any,
   songs: OnlineSongResult[],
   opts?: { interactive?: boolean },
+  candidates?: MatchProviderCandidate[],
 ): Promise<{ verified: OnlineSongResult[]; rejected: number }> {
   const verified: OnlineSongResult[] = [];
   let rejected = 0;
@@ -430,10 +560,8 @@ export async function crossVerifySongs(
     while (next < songs.length) {
       const i = next++;
       const s = songs[i]!;
-      const m = await searchBestMatch(
-        providerId,
-        config,
-        provider,
+      const m = await searchBestMatchWithFallback(
+        candidates ?? [{ providerId, config, provider }],
         {
           entryId: i,
           title: s.name || "",
