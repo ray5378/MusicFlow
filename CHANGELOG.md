@@ -2,6 +2,31 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.84] - 2026-10-04
+
+### 修复
+
+- **纯 stream 插件跨插件兜底在架构上不可用(240 生产容器真机实锤)**:宿主沙箱
+  `backend/src/plugins/sandbox.ts` 的 `CAP_METHODS` 把 `stream` 能力只映射到
+  `["streamUrl"]`,于是插件即便实现了 `resolveStream`,核心拿到的 impl 门面里也永远
+  没有它 —— `streamFallback.ts` 的 `typeof provider.resolveStream !== "function"`
+  恒真,「本尊重搜+全平台全败后,逐个问纯 stream 插件按平台原生 ID 要直链」这条链**从来
+  没有真正跑起来过**(4.0.82 引入、4.0.83 修掉前半段的提前 return,但都被这一层挡住)。
+  240 实测证据:停掉 `music-dl` 容器后本尊(gmd)搜索全败、`lx-source` v1.1.1 已加载且
+  `enabled=1`、容器内 dist 已含 `searchFailed` 补丁,`findFallbackStream` 仍返回 `null`
+  且 playability 落 `unplayable`;容器内直查插件实现确认 `impl` 只有
+  `streamUrl/test/health`,`resolveStream` 被白名单挡在门面之外。
+- 修法:`stream: ["streamUrl", "resolveStream"]`。`makeImpl` 只在插件**实际实现**该方法
+  时才暴露,故未实现 `resolveStream` 的 stream 插件行为完全不变(不误加门面)。
+
+### 测试
+
+- `backend/tests/plugins/discoveryHost.test.ts` 新增 K 段 2 例:① 声明 `stream` 且实现了
+  `resolveStream` 的插件,`impl` 必须暴露该方法且能返回直链;② 未实现的插件,`impl` 不得
+  凭空多出该方法(反向守卫)。
+- 双向变异已验证:把白名单改回 `["streamUrl"]` → ① 立刻变红(`1 failed | 103 passed`),
+  还原 → `104 passed` 全绿。
+
 ## [4.0.83] - 2026-10-04
 
 ### 修复

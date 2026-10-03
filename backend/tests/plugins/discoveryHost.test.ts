@@ -1232,3 +1232,44 @@ describe("makeJsenvApi(嵌套 QuickJS 子环境)", () => {
     await api.destroy("p2");
   });
 });
+
+
+// ==================== K. 纯 stream 插件必须被暴露 resolveStream(240 真机实锤) ====================
+// 根因:makeImpl 按 CAP_METHODS 白名单暴露方法。stream 能力原本只映射 ["streamUrl"],
+// 于是插件**实现了** resolveStream、宿主也**不暴露**它,核心 findFallbackStream 里
+// `typeof provider.resolveStream !== "function"` 恒真 →「纯 stream 插件跨插件兜底」
+// 在架构上是死的(2026-10-04 240 生产容器实锤:停掉 music-dl 后 gmd 本尊全败,
+// lx-source v1.1.1 已加载且 enabled=1,核心仍返回 null、playability=unplayable)。
+// 这两条是防回归守卫:白名单一旦被改回 ["streamUrl"],第一条必须立刻变红。
+describe("CAP_METHODS: stream 能力必须暴露 resolveStream", () => {
+  it("声明 stream 且实现了 resolveStream 的插件:impl 暴露该方法,返回直链", async () => {
+    const id = "lx-expose";
+    const root = path.join(TMP_DATA_DIR, `b29-${id}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    const kit = `globalThis.__mfPlugin = { manifest: { id: "${id}", name: "LX Pure", version: "1.1.1", type: "source", capabilities: ["stream"], permissions: ["net"], configSchema: [] }, create() { return { streamUrl() { return ""; }, async resolveStream(config, song) { return "http://lx.expose/" + String(song && song.id) + ".mp3"; } }; } };`;
+    fs.mkdirSync(path.join(root, id), { recursive: true });
+    fs.writeFileSync(path.join(root, id, "index.js"), kit, "utf8");
+    fs.writeFileSync(path.join(root, id, "plugin.json"), JSON.stringify({ id, name: "LX Pure", version: "1.1.1", type: "source", capabilities: ["stream"], permissions: ["net"], minAppVersion: "1.0.0" }), "utf8");
+
+    expect(await discoverExternalPlugins(APP, root)).toBe(1);
+    const p = getPlugin(id);
+    expect(p).toBeTruthy();
+    expect(typeof p.impl.resolveStream).toBe("function");
+    const url = await p.impl.resolveStream({}, { id: "s1", title: "t", artist: "a" });
+    expect(url).toBe("http://lx.expose/s1.mp3");
+  });
+
+  it("声明 stream 但未实现 resolveStream 的插件:impl 不暴露该方法(不误加门面)", async () => {
+    const id = "lx-no-rs";
+    const root = path.join(TMP_DATA_DIR, `b29-${id}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    const kit = `globalThis.__mfPlugin = { manifest: { id: "${id}", name: "LX NoRS", version: "1.1.1", type: "source", capabilities: ["stream"], permissions: ["net"], configSchema: [] }, create() { return { streamUrl() { return ""; } }; } };`;
+    fs.mkdirSync(path.join(root, id), { recursive: true });
+    fs.writeFileSync(path.join(root, id, "index.js"), kit, "utf8");
+    fs.writeFileSync(path.join(root, id, "plugin.json"), JSON.stringify({ id, name: "LX NoRS", version: "1.1.1", type: "source", capabilities: ["stream"], permissions: ["net"], minAppVersion: "1.0.0" }), "utf8");
+
+    expect(await discoverExternalPlugins(APP, root)).toBe(1);
+    const p = getPlugin(id);
+    expect(p).toBeTruthy();
+    expect(p.impl.resolveStream).toBeUndefined();
+    expect(typeof p.impl.streamUrl).toBe("function");
+  });
+});

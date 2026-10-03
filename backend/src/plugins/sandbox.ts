@@ -158,7 +158,11 @@ const CAP_METHODS: Record<string, string[]> = {
   albumSearch: ["searchAlbums"],
   recommend: ["recommend"],
   playlistSongs: ["playlistSongs"],
-  stream: ["streamUrl"],
+  // resolveStream:纯 stream 插件(如 lx-source 洛雪取链)的异步按 ID 直查入口。
+  // 核心取链兜底(findFallbackStream)在本尊重搜+全平台失败后会调它换链,
+  // 2026-10-04 240 真机实锤:白名单里若不含它,makeImpl 永不暴露该方法,
+  // 「纯 stream 插件跨插件兜底」在架构上就是死的(插件实现了也调不到)。
+  stream: ["streamUrl", "resolveStream"],
   autoMatch: ["search"],
   lyricProvider: ["searchLyrics"],
   coverProvider: ["searchCover"],
