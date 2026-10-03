@@ -20,6 +20,14 @@
 - **单插件部署行为完全等价**:候选数只有 1 时 `searchBestMatchWithFallback()` 直接走原 `searchBestMatch()`,不引入任何开关判断、不吃兜底预算。
 - 配套测试 `tests/matchFallback.test.ts` 14 例(单候选等价 / 首候选命中不发第二请求 / 空→换源 / 错→换源 / 全耗尽轨迹 / 开关与预算闸门 / maxCandidates 上限 / 缓存与兜底交互);兜底逻辑经 5 项双向变异(改一行→断言必红→还原→绿)验证。
 
+## [4.0.81] - 2026-10-03
+
+### 修复
+- **检索型插件(无 streamUrl)走 /search 路由必 502,兜底捞回的结果也被映射行炸掉**
+  - 现象:240 真机 `POST /rest/api/v1/online/apple-music/search` 稳定 502 `{code:UPSTREAM_ERROR}`,日志 `[ONLINE] search 失败: configured.provider.streamUrl is not a function`。v4.0.80 曾把根因归为「兜底预算被首选吃掉」——那修的是 match.ts 自动匹配链路里真实存在的预算缺陷,但不是这条 502 的因;真因这次靠 240 日志钉死。
+  - 根因:search 路由对每首歌调 `configured.provider.streamUrl(...)` 做直链预取,有两个错:① 用的是 **URL 里的主插件**而不是 `fallbackFrom` 指向的**实际产出结果的插件**(兜底捞回时两者不同家,取错源);② 假设所有 search 插件都声明了 streamUrl —— 检索型插件(如 apple-music,manifest 描述明说「Apple 无全曲直链」)没有该方法,映射行 TypeError 被路由 catch 整体 502,连兜底成功的结果也一起炸掉。
+  - 修法:改用 `fromConfigured`(= fallbackFrom 插件;主插件自答时即 configured)取 streamUrl,并按 `service.ts` 导入落库处的同一防御口径加 `typeof === "function"` 守卫 —— 未声明就留空串,播放层走核心换源兜底;搜索结果绝不该因映射行崩掉。
+
 ## [4.0.80] - 2026-10-03
 
 ### 功能

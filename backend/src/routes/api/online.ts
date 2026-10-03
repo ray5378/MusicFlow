@@ -105,6 +105,11 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
     // 平台 → 展示名 映射由插件 manifest 声明(platformLabels),核心不写死平台词典。
     // 兜底命中时改用平台映射取自**结果来自的**那个插件(与 songs 同插件才对得上)。
     const fromPlugin = outcome.fallbackFrom || providerId;
+    // streamUrl 直链预取必须用「实际产出结果的」那个插件:主插件没答上、由兜底插件
+    // 捞回时(fallbackFrom 非空),结果与 configured(URL 里的主插件)根本不是同一家,
+    // 拿主插件的 streamUrl 既取错源,也会在检索型插件(如 apple-music,只声明 search
+    // 没声明 streamUrl)上直接 TypeError → 整个搜索 502(240 真机实测的根因)。
+    const fromConfigured = fromPlugin === providerId ? configured : getConfiguredProvider(fromPlugin) || configured;
     const platformLabels = getPluginManifest(fromPlugin)?.platformLabels || {};
     // 插件可能软失败(如 lx-source 全部音源回退后返回 {empty:true,message,trace} 而无 songs),
     // 这里防御: songs 非数组按 0 结果返回, 插件的 message(失败原因/回退轨迹)透传给前端。
@@ -112,7 +117,12 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
     const songs = rawSongs.map((s: any) => ({
       ...s,
       platformLabel: platformLabels[s.source] || s.source,
-      streamUrl: configured.provider.streamUrl(configured.config, s),
+      // 检索型插件可以不声明 streamUrl(留空 → 播放层走核心换源兜底),与
+      // service.ts 导入落库处的防御写法同一口径,绝不能让映射行炸掉整个搜索。
+      streamUrl:
+        typeof fromConfigured.provider.streamUrl === "function"
+          ? fromConfigured.provider.streamUrl(fromConfigured.config, s)
+          : "",
     }));
     const msg = outcome.message || (outcome.raw && typeof outcome.raw.message === "string" ? outcome.raw.message : undefined);
     return c.json({
