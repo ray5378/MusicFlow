@@ -193,8 +193,12 @@ describe("searchBestMatchWithFallback 跨插件兜底", () => {
 
   it("兜底候选自身超预算:该跳按失败记轨迹,且不再碰第三候选", async () => {
     // 第二候选光搜索就 300ms(> budgetMs 120ms)→ 该跳被预算掐断(收敛成失败,
-    // 不把异常冒给调用方),且此时兜底预算已归零,第三候选连请求都不该发出
-    // (maxCandidates 放成 3,让「不碰第三」只可能由预算闸门导致)。
+    // 不把异常冒给调用方)。「不碰第三」用 fallbackOnError:false 这个确定性闸门
+    // 兜住,而不是依赖 remain() 归零 —— withinBudget 的超时走单调钟定时器,
+    // remain() 走 Date.now() 墙钟,两钟在 CI 机器上有毫秒级偏差,120ms 定时器
+    // 触发时墙钟差可能还差 1-2ms 没归零,第三跳就会被放进来(CI 实测翻红、
+    // 本地偶绿,典型时钟竞态)。maxCandidates 仍放成 3,保证第三候选唯一能被
+    // 拦下的途径就是「上一跳失败被开关否掉」这道闸门。
     const first = provider([]);
     const slow = {
       search: vi.fn(async () => {
@@ -207,7 +211,7 @@ describe("searchBestMatchWithFallback 跨插件兜底", () => {
       [cand("go-music-dl", first), cand("lx-source", slow), cand("netease", third)],
       WANT,
       undefined,
-      { budgetMs: 120, maxCandidates: 3 },
+      { budgetMs: 120, maxCandidates: 3, fallbackOnError: false },
     );
     expect(first.search).toHaveBeenCalledTimes(1);
     expect(slow.search).toHaveBeenCalledTimes(1);
