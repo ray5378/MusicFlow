@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.79] - 2026-10-03
+
+### 功能
+- **自动匹配链路接入跨插件兜底（歌单导入 / 播放补齐）**
+  - 现象:上次 [4.0.78] 只把兜底做在了 `/api` 搜索路由上,歌单导入与补齐播放这类「自动匹配」链路还是「一个 matcher 一把梭」——`shared.ts` 只用 `firstEnabledByCapability("search")` 取第一个启用的搜索插件,首选空结果或抛错时其它插件不再补位,所以实际观感是「还是只有 go-music-dl 在匹配」。
+  - 根因:导入链路上没有候选概念,`matchUnmatchedPlaylistEntries()` 是单 provider 搜索+打分,内部不存在换源;加上插件侧没人声明 `autoMatch` 能力,能力驱动的挑选永远落到 search 分支,只能选出一个。
+  - 修法:`services/plugin/shared.ts` 新增 `buildMatchCandidates()`,按 `core-search-fallback` 的配置把首选插件之外其它「已启用 + 有 search 方法」的插件拼成候选链(排除本尊,受 maxCandidates 约束),`matchPlaylistInBackground` 把它作为可选参数传给 `matchUnmatchedPlaylistEntries()`;三处调用点(`matchToOnlineSong` / `matchUnmatchedPlaylistEntries` / `crossVerifySongs`)签名向后兼容。
+  - 匹配层:`match.ts` 新增 `searchBestMatchWithFallback()`——首候选即主挑选器,未命中再按 `fallbackOnEmpty` / `fallbackOnError` 决定是否换下一个候选;`enabled` 总开关 + `budgetMs` 双闸门,候选抛错原地收敛为 error 不外冒,全耗尽时 message 带回完整「插件A(空结果) → 插件B(超时)」轨迹,便于在插件页直接看出走了哪条路。
+
+### 修复
+- **批内缓存 key 未区分插件,兜底候选会被首选的 no-match 短路**
+  - 现象:首选插件返回 no-match 后换到第二个插件,第二个插件的查询会命中间批缓存里同一 (标题, 歌手) 的 no-match,直接复用旧结论、根本不发起搜索——兜底等于白配。
+  - 修法:缓存 key 由 `title|artist` 改为 `providerId|title|artist`,各插件缓存彼此隔离;同步更新 `onlineMatch.test.ts` 中 4 条缓存键断言。
+
+### 不变量
+- **单插件部署行为完全等价**:候选数只有 1 时 `searchBestMatchWithFallback()` 直接走原 `searchBestMatch()`,不引入任何开关判断、不吃兜底预算。
+- 配套测试 `tests/matchFallback.test.ts` 14 例(单候选等价 / 首候选命中不发第二请求 / 空→换源 / 错→换源 / 全耗尽轨迹 / 开关与预算闸门 / maxCandidates 上限 / 缓存与兜底交互);兜底逻辑经 5 项双向变异(改一行→断言必红→还原→绿)验证。
 ## [4.0.78] - 2026-10-03
 
 ### 功能
