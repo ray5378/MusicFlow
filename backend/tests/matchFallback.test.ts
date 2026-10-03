@@ -169,7 +169,9 @@ describe("searchBestMatchWithFallback 跨插件兜底", () => {
     expect(second.search).not.toHaveBeenCalled();
   });
 
-  it("总预算闸门:首选把预算吃光后,兜底候选不再发起搜索", async () => {
+  it("首选慢/超时不吃兜底预算:第二候选仍会被触达并命中", async () => {
+    // 首选光搜索就 300ms(> budgetMs 120ms)。修复前预算从「进函数」就开始计时,
+    // 兜底闸门在发请求之前就被 remain() <= 0 拦掉 → 第二候选一个请求都发不出去。
     const slow = {
       search: vi.fn(async () => {
         await new Promise((r) => setTimeout(r, 300));
@@ -183,9 +185,36 @@ describe("searchBestMatchWithFallback 跨插件兜底", () => {
       undefined,
       { budgetMs: 120, maxCandidates: 2 },
     );
-    expect(out.status).toBe("no-match");
     expect(slow.search).toHaveBeenCalledTimes(1);
-    expect(second.search).not.toHaveBeenCalled();
+    expect(second.search).toHaveBeenCalledTimes(1);
+    expect(out.status).toBe("matched");
+    expect(out.best).toBe(HIT);
+  });
+
+  it("兜底候选自身超预算:该跳按失败记轨迹,且不再碰第三候选", async () => {
+    // 第二候选光搜索就 300ms(> budgetMs 120ms)→ 该跳被预算掐断(收敛成失败,
+    // 不把异常冒给调用方),且此时兜底预算已归零,第三候选连请求都不该发出
+    // (maxCandidates 放成 3,让「不碰第三」只可能由预算闸门导致)。
+    const first = provider([]);
+    const slow = {
+      search: vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 300));
+        return { songs: [] };
+      }),
+    };
+    const third = provider([HIT]);
+    const out = await searchBestMatchWithFallback(
+      [cand("go-music-dl", first), cand("lx-source", slow), cand("netease", third)],
+      WANT,
+      undefined,
+      { budgetMs: 120, maxCandidates: 3 },
+    );
+    expect(first.search).toHaveBeenCalledTimes(1);
+    expect(slow.search).toHaveBeenCalledTimes(1);
+    expect(third.search).not.toHaveBeenCalled();
+    expect(out.status).toBe("error");
+    // 超预算那一跳必须留在轨迹里(能看出是「超预算」而不是笼统的空结果)
+    expect(out.message).toContain("超过兜底预算");
   });
 
   it("双闸门:maxCandidates=2 时第三个候选不许被碰(总开关 / 最多试几个)", async () => {

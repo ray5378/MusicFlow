@@ -27,7 +27,7 @@ export const searchFallbackManifest: PluginManifest = {
   configSchema: [
     { key: "enabled", label: "搜索兜底", type: "switch", default: true, help: "开启后,搜索某插件返回空结果或报错时,自动改用其它已启用源插件再试(排除本尊)。关闭即退回「只调一次主插件」的原有行为" },
     { key: "maxCandidates", label: "最多改用几个插件", type: "number", default: 2, help: "主插件失败后最多再试几个其它源插件。范围 0-5,0 = 不兜底(等同关闭)。默认 2" },
-    { key: "budgetMs", label: "兜底总预算(毫秒)", type: "number", default: 6000, help: "兜底尝试的总时间上限,超时即停手(已发出的尝试不中断),防慢源把搜索请求拖死。范围 500-60000,默认 6000" },
+    { key: "budgetMs", label: "兜底预算(毫秒)", type: "number", default: 6000, help: "每个兜底候选的时间上限(逐个候选单独计量,不构成整条链的总时长上限),超时即停手(已发出的尝试不中断),防慢源把搜索请求拖死。首选插件的耗时不计入此预算。范围 500-60000,默认 6000" },
     { key: "fallbackOnEmpty", label: "空结果时兜底", type: "switch", default: true, help: "开启后,主插件搜索返回空结果(无歌曲)即改用其它插件再试;关闭后只有报错才兜底" },
     { key: "fallbackOnError", label: "报错时兜底", type: "switch", default: true, help: "开启后,主插件搜索抛错(网络异常/上游 5xx)即改用其它插件再试;关闭后报错直接返回错误" },
   ],
@@ -47,7 +47,7 @@ export const searchFallbackManifest: PluginManifest = {
         },
         budgetMs: {
           label: "Fallback budget (ms)",
-          help: "Total time allowed for fallback attempts; it stops as soon as the budget is used up (in-flight attempts are not cancelled), so a slow source cannot hang a search. Range 500-60000, default 6000.",
+          help: "Per-candidate time limit for each fallback attempt (counted per candidate, not as a total for the whole chain); the attempt stops as soon as the budget is used up (in-flight attempts are not cancelled), so a slow source cannot hang a search. The primary plugin's own time is not charged to this budget. Range 500-60000, default 6000.",
         },
         fallbackOnEmpty: {
           label: "Fallback on empty result",
@@ -64,7 +64,7 @@ export const searchFallbackManifest: PluginManifest = {
 某次搜索的主插件返回**空结果**或**抛错**时,核心自动改用另一个「已启用 + 声明了 search 与 stream 能力」的源插件再试(排除本尊,不自我重试),首个有结果的插件直接返回,并把「结果来自哪个插件」(fallbackFrom)与逐插件回退轨迹(trace)一起回传给前端。
 
 - 开关「搜索兜底」可整体停用(退回只调一次主插件),另可按场景只关「空结果兜底」或只关「报错兜底」;
-- 「最多改用几个插件」(默认 2)与「兜底总预算」(默认 6000ms)是双闸门:候选再多也最多试 N 个,预算耗尽即停手,避免慢源把搜索请求拖死;
+- 「最多改用几个插件」(默认 2)与「兜底预算」(默认 6000ms)是双闸门:候选再多也最多试 N 个,每个兜底候选各有自己的时间上限、耗尽即停手,避免慢源把搜索请求拖死;
 - **报错不等于没源**:上游 5xx / 超时只做短期退避语义 —— 候选失败原因是网络/超时时不把它写成永久结论,仍会正常返回(搜索本身不做负缓存,下一次请求会重新尝试);
 - 与换源兜底(core-stream-fallback)**并列**:一个是「搜索层换插件找结果」,一个是「播放层换替代源出链」,互不干扰,可各自开关。`,
 };

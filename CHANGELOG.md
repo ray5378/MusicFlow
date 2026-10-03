@@ -19,6 +19,22 @@
 ### 不变量
 - **单插件部署行为完全等价**:候选数只有 1 时 `searchBestMatchWithFallback()` 直接走原 `searchBestMatch()`,不引入任何开关判断、不吃兜底预算。
 - 配套测试 `tests/matchFallback.test.ts` 14 例(单候选等价 / 首候选命中不发第二请求 / 空→换源 / 错→换源 / 全耗尽轨迹 / 开关与预算闸门 / maxCandidates 上限 / 缓存与兜底交互);兜底逻辑经 5 项双向变异(改一行→断言必红→还原→绿)验证。
+
+## [4.0.80] - 2026-10-03
+
+### 修复
+- **首选源慢/超时时跨插件兜底静默失效,直接回 502**
+  - 现象:`POST /rest/api/v1/online/:providerId/search` 走 `searchBestMatchWithFallback()`。真机 240 实测:`providerId=lx-source` + `q=稻香` 正常(兜底轨迹 `["lx-source(空结果)"]`,由 go-music-dl 捞回);而 `providerId=apple-music` + `q=稻香` 直接 HTTP 502 `{code: UPSTREAM_ERROR}`,响应里的 `fallbackFrom` 与 `trace` 都是空的——兜底一次都没跑。日志同窗口出现 `[PLUGIN:apple-music] 调用 search() 执行超时(> 20000ms),已中断`。
+  - 根因:`match.ts` 里 `startedAt` 在函数入口取表、预算 `remain() = budgetMs - (now - startedAt)` 从进函数那一刻就开始计;而首候选走的是「不吃预算」的原路径(慢源超时本该由插件自己管)。apple-music 这一跳光搜索就吃了 20s+,兜底总预算 `budgetMs=6000` 在兜底请求发出**之前**就被扣成 0 → 循环里的 `remain() <= 0` 先于任何兜底请求生效 → 兜底整段被跳过,trace 为空、路由直接 502。代码注释写着「首候选不吃兜底预算」,实现却是「从进函数开始计时」,自相矛盾。
+  - 修法:预算改为**只在兜底阶段计量**——`fallbackAt` 在首候选跑完之后(i>0 首次进入循环体)才起算,首选耗时完全不计入兜底预算;每个兜底候选各自拿满一个 `budgetMs`(从该候选自己的起点计时),即 `withinBudget(attempt(c), cfg.budgetMs)`。整体仍有界:≤ `maxCandidates × budgetMs`。顺带把预算超时收敛成本跳失败(原先 withinBudget 的这个外层拒绝会直接冒给调用方,兜底一超时就变成 502,而不是「这一跳失败、换下一跳」)。
+  - 配置口径同步:`core-search-fallback` 的 `budgetMs` 文案由「兜底总预算(毫秒)」改为「兜底预算(毫秒)」——逐个候选计量的时间上限,不再是整条链的总时长上限(范围 500-60000、默认 6000、超时即停手、已发出的尝试不中断),中英文 help 与插件文档同步改。
+
+### 不变量
+- **单候选部署零行为变化**:候选只有 1 条时仍直接走 `searchBestMatch()`,不取表、不吃预算、不套任何闸门。
+- **开关关闭零行为变化**:`enabled` / `fallbackOnEmpty` / `fallbackOnError` 仍在发请求**之前**判定,关掉即就地停手,与改动前一致。
+- **闸门顺序与轨迹格式不变**:总开关 → 预算耗尽 → `canContinueAfter` 三道闸门都先于请求发出;trace 仍是 `插件A(空结果)` 形式,全耗尽时 message 追加 ` + (兜底轨迹: …)`;`withinBudget` / `summarizeError` / `canContinueAfter` / `isUsableMatch` / `failSegment` 本身零改动。
+- **配套测试**:`tests/matchFallback.test.ts` 原「首选吃光预算→不碰第二」那条改为「首选慢不吃兜底预算→第二候选仍被触达并命中」,并新增「兜底候选自身超预算→该跳记轨迹、不碰第三」;15 例全绿(另 `matchCandidates` 10 例、`onlineMatch` 46 例),`tsc --noEmit` 0 错。改一行→对应断言必红→还原→绿,3 项双向变异(`fallbackAt` 起点 / 每候选预算 / 超时收敛)专项验证。
+
 ## [4.0.78] - 2026-10-03
 
 ### 功能

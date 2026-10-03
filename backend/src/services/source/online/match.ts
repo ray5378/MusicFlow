@@ -171,14 +171,19 @@ function isUsableMatch(r: SearchBestResult | null | undefined): boolean {
  *  「记一笔轨迹」,表达不了「开关关掉就不要换候选」的两种粒度 —— fallbackOnEmpty 和
  *  fallbackOnError 是 core-search-fallback 里两个独立开关(分别管空结果与抛错),
  *  关掉其中一个必须就地停止,而不是照常往下试。这里沿用 runner 的同一套闸门语义
- *  (总预算 budgetMs + 最多试 maxCandidates 个),并直接复用它的 withinBudget /
+ *  (每候选预算 budgetMs + 最多试 maxCandidates 个),并直接复用它的 withinBudget /
  *  summarizeError,不重新实现超时与摘要。
  *
- *  两个刻意的行为边界:
+ *  三个刻意的行为边界:
  *  - **单候选零包装**:候选只有 1 个(绝大多数部署只装了一个搜索插件)时直接走
  *    searchBestMatch,不套预算、不换实现 —— 全量回归据此比对改动前后逐字段等价。
- *  - **首候选不吃预算**:只有兜底候选受剩余预算约束,首选沿用原路径(其自身超时由
- *    插件自己管),避免「主插件慢但合法」被 6s 闸门误杀。
+ *  - **首候选不吃预算**:预算的计时起点是「首候选跑完之后」(不是进函数那一刻),
+ *    首选沿用原路径(其自身超时由插件自己管),避免「主插件慢但合法」被闸门误杀。
+ *    线上 apple-music 单搜一次就 20s+,预算若从进函数开始计时,兜底请求还没发出
+ *    预算就已经归零 → 跨插件兜底静默失效、直接 502 —— 这正是要修的缺陷。
+ *  - **每个兜底候选各自拿满一个 budgetMs**:预算不再是一个「整条链的总时长上限」,
+ *    而是单个兜底候选的超时上限(从该候选自己的起点计时);整体仍然有界
+ *    (≤ maxCandidates × budgetMs),闸门顺序也保持在发请求之前。
  *
  *  与 /api 搜索路由那层(core-search-fallback)是同一套开关、同一份配置,两条链路
  *  行为一致;差别只在调用层(这里是逐条匹配,另一处是一次搜索)。
@@ -200,8 +205,11 @@ export async function searchBestMatchWithFallback(
 
   // 配置可注入:调用方(含单测)能覆盖 core-search-fallback 的三个开关,不必改库。
   const cfg = { ...(await getSearchFallbackConfig()), ...(cfgOverride ?? {}) };
-  const startedAt = Date.now();
-  const remain = () => Math.max(0, cfg.budgetMs - (Date.now() - startedAt));
+  // 兜底预算的计时起点:首候选(主插件)跑完之后才起算(循环里 i>0 首次进入时赋值)。
+  // 刻意不拿进函数那一刻计时 —— 首选慢/超时正是兜底要解决的问题,拿它扣兜底预算
+  // 等于在兜底发请求之前把它掐死(见上方行为边界说明)。
+  let fallbackAt: number | null = null;
+  const remain = (): number => Math.max(0, cfg.budgetMs - (Date.now() - (fallbackAt ?? Date.now())));
   const rawLimit = Math.floor(Number(cfg.maxCandidates));
   const limit = Number.isFinite(rawLimit) && rawLimit >= 1 ? Math.min(rawLimit, list.length) : list.length;
   const trace: string[] = [];
@@ -215,17 +223,34 @@ export async function searchBestMatchWithFallback(
     }
   };
 
+  /**
+   * 跑一个**兜底**候选:受 cfg.budgetMs 约束(从该候选自己的起点计时,超时即放弃
+   * 这一跳),超时/抛错都原地收敛成 error 结果 —— 预算超时是 withinBudget 投出的
+   * 外层拒绝,attempt 的 try/catch 兜不到它,不在此收敛的话整条链会把异常冒给调用方,
+   * 兜底就变成「超时即 502」而不是「这一跳失败、换下一跳」。
+   */
+  const attemptWithinBudget = async (c: MatchProviderCandidate): Promise<SearchBestResult> => {
+    try {
+      return await withinBudget(attempt(c), Number(cfg.budgetMs));
+    } catch (e) {
+      return { entryId: want.entryId, title: want.title, status: "error", message: summarizeError(e) };
+    }
+  };
+
   // 首候选也走同一条循环:开关把关只此一处(早先在首候选后另加了一份,
   // 结果循环里那条守卫永远轮不到 —— 死代码,变异测试也抓不到)。
   let last: SearchBestResult | null = null;
   for (let i = 0; i < limit; i++) {
     const c = list[i]!;
     if (i > 0) {
+      // 兜底阶段才起表:预算从首候选之后开始计量,首选的耗时不占兜底预算
+      if (fallbackAt === null) fallbackAt = Date.now();
       // 兜底阶段才有闸门:总开关 / 预算耗尽 / 上一跳的失败被开关否掉 —— 都在此拦下,
       // 且必须在发请求之前判定,否则多余请求已经打出去了。
       if (!cfg.enabled || remain() <= 0) break;
       if (!canContinueAfter(cfg, last)) break;
-      last = await withinBudget(attempt(c), remain());
+      // 该候选自己的预算(不是「整条链的剩余」):慢源拖不垮后面的兜底候选
+      last = await attemptWithinBudget(c);
     } else {
       // 首候选不吃兜底预算(其超时由插件自己管),避免慢但合法的源被预算闸门误杀
       last = await attempt(c);
