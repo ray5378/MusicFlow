@@ -20,6 +20,7 @@ import { importOnlineSongs } from "../../services/source/online/service.js";
 import { matchUnmatchedPlaylistEntries, matchToOnlineSong, crossVerifySongs } from "../../services/source/online/match.js";
 import { importRecommendPlaylist, isDailyRecommendPlaylist, findRecommendPlaylist } from "../../services/source/online/recommendImport.js";
 import { touch } from "../../services/memory/reclaim.js";
+import { runSearchWithFallback } from "../../services/source/online/searchFallback.js";
 import { getPluginManifest, getEnabledByCapability } from "../../plugins/registry.js";
 import { runPluginJob } from "../../services/plugin/jobRunner.js";
 import { runBatchJob } from "../../batch/runner.js";
@@ -87,19 +88,43 @@ onlineRoutes.post("/v1/online/:providerId/search", permMiddleware(PERM.LIBRARY_S
   if (!q) return c.json({ ...apiError(BusinessErrorCode.INVALID_PARAM, "errors.search.queryRequired") }, apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : undefined;
   try {
-    const result = await configured.provider.search(configured.config, { query: q, sources });
+    // 搜索兜底(core-search-fallback):主插件空/报错时自动改用其它已启用源插件再试,
+    // 命中时带 fallbackFrom(结果来自哪个插件)与 trace(逐插件回退轨迹)一并返回。
+    const outcome = await runSearchWithFallback(providerId, { query: q, sources });
+    // 契约(坑 3 裁决):只有**兜底真捞回结果**才返 200。主插件抛错、兜底也没捞回来时,
+    // 上游错误不许被吞成「无结果」—— 仍回 502/UPSTREAM_ERROR(与 catch 分支同形,只走业务码,
+    // 不透传上游原文)。主插件空结果(非抛错)且兜底耗尽是「真的没有」,走下面 200 + message。
+    if (outcome.upstreamError) {
+      log.error(`[ONLINE] search 兜底未捞回,上游错误: ${outcome.upstreamError}`);
+      return c.json(
+        { ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.search.failed") },
+        apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR),
+      );
+    }
     // 平台 → 展示名 映射由插件 manifest 声明(platformLabels),核心不写死平台词典。
-    const platformLabels = getPluginManifest(providerId)?.platformLabels || {};
+    // 兜底命中时改用平台映射取自**结果来自的**那个插件(与 songs 同插件才对得上)。
+    const fromPlugin = outcome.fallbackFrom || providerId;
+    const platformLabels = getPluginManifest(fromPlugin)?.platformLabels || {};
     // 插件可能软失败(如 lx-source 全部音源回退后返回 {empty:true,message,trace} 而无 songs),
     // 这里防御: songs 非数组按 0 结果返回, 插件的 message(失败原因/回退轨迹)透传给前端。
-    const rawSongs = result && Array.isArray((result as any).songs) ? (result as any).songs : [];
+    const rawSongs = Array.isArray(outcome.songs) ? outcome.songs : [];
     const songs = rawSongs.map((s: any) => ({
       ...s,
       platformLabel: platformLabels[s.source] || s.source,
       streamUrl: configured.provider.streamUrl(configured.config, s),
     }));
-    const msg = result && typeof (result as any).message === "string" ? (result as any).message : undefined;
-    return c.json({ success: true, total: songs.length, songs, message: msg });
+    const msg = outcome.message || (outcome.raw && typeof outcome.raw.message === "string" ? outcome.raw.message : undefined);
+    return c.json({
+      success: true,
+      total: songs.length,
+      songs,
+      message: msg,
+      // 兜底可观测:fallbackFrom = 结果实际来自的插件(空串 = 主插件自己答的),
+      // trace = 逐插件回退轨迹(形如 ["netease(空结果)", "lx-source(403)"])。
+      fallbackFrom: outcome.fallbackFrom,
+      trace: outcome.trace,
+      transient: outcome.transient,
+    });
   } catch (e: any) {
     log.error(`[ONLINE] search 失败: ${e?.message || e}`);
     return c.json({ ...apiError(BusinessErrorCode.UPSTREAM_ERROR, "errors.search.failed") }, apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));

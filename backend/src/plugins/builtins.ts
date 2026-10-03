@@ -50,6 +50,7 @@ import { songGroupManifest, songGroupPlugin } from "../services/plugin/core/song
 import { playPreferenceManifest, playPreferencePlugin } from "../services/plugin/core/playPreference.js";
 import { importGateManifest, importGatePlugin } from "../services/plugin/core/importGate.js";
 import { streamFallbackManifest, streamFallbackPlugin } from "../services/plugin/core/streamFallbackPlugin.js";
+import { searchFallbackManifest, searchFallbackPlugin } from "../services/plugin/core/searchFallbackPlugin.js";
 import { preProbeManifest, preProbePlugin } from "../services/plugin/core/preProbe.js";
 
 export interface BuiltinPlugin {
@@ -105,6 +106,8 @@ export const BUILTIN_CORE_PLUGINS: BuiltinPlugin[] = [
   { manifest: streamFallbackManifest, impl: streamFallbackPlugin },
   // 预探测:提前扫出「接下来 N 首已确认可播」填进滑动缓冲(config-only,逻辑在核心)。
   { manifest: preProbeManifest, impl: preProbePlugin },
+  // 搜索兜底:某源插件搜索空/报错时自动改用其它已启用源插件再试(config-only,逻辑在核心)。
+  { manifest: searchFallbackManifest, impl: searchFallbackPlugin },
 ];
 
 /** All built-in plugins (any type). */

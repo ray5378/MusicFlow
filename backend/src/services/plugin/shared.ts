@@ -173,6 +173,135 @@ export async function matchPlaylistInBackground(
   }
 }
 
+// ==================== 通用跨源兜底 runner ====================
+//
+// 「逐个候选试、第一个可用的就返回、全耗尽回传轨迹」这件事在换源/搜索两处都要用,
+// 且各自都带「总预算 + 最多试几个」双闸门(防某个慢源把播放/搜索请求拖死)。
+// 与其复制两份,不如把闸门与轨迹语义收敛成一个与业务无关的纯 runner:
+//
+//   runSourceFallback({ candidates, isUsable, budgetMs, maxTries, ... })
+//     → { ok, value, trace, exhausted }
+//
+// 设计要点:
+//   - **候选与业务解耦**:调用方决定候选从哪来(其它插件 / 其它音源 / 其它候选行),
+//     runner 只管「试 → 判可用 → 记轨迹 → 换下一个」;
+//   - **不吞错**:候选抛错记进 trace 后继续下一个,最终把整条 trace 交还调用方,
+//     所以「全耗尽」时调用方能拼出人类可读的原因(不是一句笼统的「搜索失败」);
+//   - **预算是硬闸门**:单次候选也受总预算余量约束(超时即放弃该候选并停手),
+//     避免一个卡住的源吃掉整个预算导致后续候选根本没机会试;
+//   - **可注入时间源**(opts.now)便于测试确定性推进时钟。
+//
+// 与 streamFallback.ts 的关系:那是既有实现(带负缓存/TTL/三态探测语义),代码里
+// findFallbackStream 已有一套既有测试与「网络异常不写负缓存」的约定,本 runner 不
+// 复用它、也不改它(正确性优先,见交付说明);本 runner 服务于搜索层的跨插件兜底。
+
+/** 一个待尝试的兜底候选(与业务无关,由调用方填充)。 */
+export interface FallbackCandidate<T> {
+  /** 轨迹段标识(插件 id / 音源名 / 候选行标识),进 trace 形如 `netease(403)`。 */
+  label: string;
+  /** 执行一次尝试;抛错由 runner 捕获并记入 trace(不向上抛)。 */
+  run: () => Promise<T>;
+}
+
+export interface RunSourceFallbackOptions<T> {
+  /** 候选列表(按优先级从前往后)。 */
+  candidates: FallbackCandidate<T>[];
+  /** 判定该次结果是否可用(可用即直接返回,不再尝试后续候选)。 */
+  isUsable: (value: T) => boolean;
+  /** 总预算(毫秒),默认 6000。余量耗尽即停手(已发出的尝试不中断)。 */
+  budgetMs?: number;
+  /** 最多尝试几个候选(不含调用方自己已试过的主候选),默认 2。 */
+  maxTries?: number;
+  /** 候选抛错时额外记一笔(返回 null 表示不记)。默认 `${label}(${错误前 80 字})`。 */
+  onError?: (label: string, err: unknown) => string | null;
+  /** 结果不可用时额外记一笔(返回 null 表示不记)。默认 `${label}(空结果)`。 */
+  onEmpty?: (label: string) => string | null;
+  /** 时间源(默认 Date.now),便于测试。 */
+  now?: () => number;
+}
+
+export interface SourceFallbackOutcome<T> {
+  /** 是否命中可用结果。 */
+  ok: boolean;
+  /** 命中结果(未命中为 null)。 */
+  value: T | null;
+  /** 逐个候选的轨迹段(形如 ["netease(空结果)", "lx-source(403)"])。 */
+  trace: string[];
+  /** true = 候选全部用尽/被闸门掐掉且无可用结果(调用方据此决定兜底提示文案)。 */
+  exhausted: boolean;
+}
+
+/** 默认总预算(毫秒)。与 core-search-fallback.budgetMs 默认值保持一致。 */
+export const FALLBACK_BUDGET_MS_DEFAULT = 6000;
+/** 默认最多尝试的候选数(不含主候选)。与 core-search-fallback.maxCandidates 一致。 */
+export const FALLBACK_MAX_TRIES_DEFAULT = 2;
+
+/** 错误摘要:超长截断到前 80 字(根因通常在开头:状态码/异常类型/URL 前缀)。 */
+function summarizeError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return msg.length > 80 ? msg.slice(0, 79) + "…" : msg;
+}
+
+/** 把一段尝试限制在给定毫秒内;超时抛错(由 runner 记 trace 后换下一个候选)。 */
+function withinBudget<T>(p: Promise<T>, ms: number): Promise<T> {
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.reject(new Error(`超过兜底预算 ${ms}ms`));
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`超过兜底预算 ${Math.round(ms)}ms`)), ms);
+    Promise.resolve(p).then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e instanceof Error ? e : new Error(String(e ?? ""))); },
+    );
+  });
+}
+
+/**
+ * 通用跨源兜底:逐候选尝试,第一个「isUsable」的结果直接返回;全耗尽回传整条 trace。
+ *
+ * 双闸门:
+ *   - `budgetMs` 总预算(默认 6000ms):每试一个候选前先算剩余预算,<=0 立即停手并
+ *     记 `${label}(超预算)`;单个候选也被同一预算约束(超时即放弃该候选);
+ *   - `maxTries` 最多尝试数(默认 2):防止在插件数量多时把一次搜索拖成遍历。
+ *
+ * 抛错**不**向上抛:每个候选的失败都记进 trace 后继续下一个 —— 兜底的价值就在于
+ * 「一个源挂了还有下一个」,而「全部挂了」的原因要靠 trace 回传给调用方/前端。
+ *
+ * @returns { ok, value, trace, exhausted } —— ok=false 时 value 恒 null。
+ */
+export async function runSourceFallback<T>(opts: RunSourceFallbackOptions<T>): Promise<SourceFallbackOutcome<T>> {
+  const budgetMs =
+    Number.isFinite(opts.budgetMs) && (opts.budgetMs as number) > 0
+      ? (opts.budgetMs as number)
+      : FALLBACK_BUDGET_MS_DEFAULT;
+  const maxTriesRaw = Number(opts.maxTries);
+  const maxTries = Number.isFinite(maxTriesRaw) && maxTriesRaw >= 0 ? Math.floor(maxTriesRaw) : FALLBACK_MAX_TRIES_DEFAULT;
+  const isUsable = typeof opts.isUsable === "function" ? opts.isUsable : ((v: T) => !!v);
+  const now = typeof opts.now === "function" ? opts.now : () => Date.now();
+  const startedAt = now();
+  const trace: string[] = [];
+  const list: FallbackCandidate<T>[] = Array.isArray(opts.candidates) ? opts.candidates : [];
+  const limit = Math.min(maxTries, list.length);
+
+  for (let i = 0; i < limit; i++) {
+    const cand = list[i];
+    if (!cand || typeof cand.run !== "function") continue;
+    const remain = budgetMs - (now() - startedAt);
+    if (remain <= 0) {
+      trace.push(`${cand.label}(超预算)`);
+      break;
+    }
+    try {
+      const value = await withinBudget(cand.run(), remain);
+      if (isUsable(value)) return { ok: true, value, trace, exhausted: false };
+      const seg = opts.onEmpty ? opts.onEmpty(cand.label) : `${cand.label}(空结果)`;
+      if (seg) trace.push(seg);
+    } catch (e) {
+      const seg = opts.onError ? opts.onError(cand.label, e) : `${cand.label}(${summarizeError(e)})`;
+      if (seg) trace.push(seg);
+    }
+  }
+  return { ok: false, value: null, trace, exhausted: true };
+}
+
 // Recompute a playlist's songCount and duration
 export function refreshPlaylistCounts(playlistId: string) {
   // Single aggregate query (LEFT JOIN song durations) instead of one SELECT per

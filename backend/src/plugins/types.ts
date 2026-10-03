@@ -64,6 +64,7 @@ export type PluginCapability =
   | "songGroup" // 同曲多源组:匹配/写入 group_id + 序列化输出 groupId/sources
   | "importGate" // 导入命中门禁:在线导入/匹配须同时命中标题+歌手+专辑+时长才落库
   | "streamFallback" // 换源兜底:播放原链失效时搜索替代源换链(config-only 插件,逻辑在核心)
+  | "searchFallback" // 搜索兜底:插件搜索空/报错时核心改用其它已启用源插件再试(config-only,逻辑在核心)
   | "preProbe"       // 预探测:提前扫出"接下来 N 首已确认可播"的歌(config-only 插件,逻辑在核心)
   | "playPreference"; // 播放优选:首选 Local + local 失败回退平台
 
@@ -200,6 +201,37 @@ export interface PluginManifest {
 }
 
 // ==================== Capability-specific impl contracts ====================
+
+/**
+ * 插件「软失败空结果」契约(软失败 = 插件拿不出结果,但**不抛错**)。
+ *
+ * 形状来源:lx-source 插件内多音源轮切(withFallback) exhausted 时返回的就是这个形状
+ * (`{empty:true, message, trace}`),而核心侧此前**没有任何显式类型**约定它 —— 契约只
+ * 活在插件实现里,核心只能靠 `result.songs` 不存在隐式推断。这里把它写成显式类型:
+ *
+ *   - `empty:true` 表示「这是一次显式空结果,插件没抛错」;
+ *   - `message` 是给前端直接展示的原因/回退轨迹(如「全部洛雪音源均无结果(3 次回退):…」);
+ *   - `trace` 是逐尝试的轨迹段(形如 `["netease(空结果)", "lx-source(403)"]`),调用方按 `>`
+ *     拼接成单行展示;**任何插件都可按同构格式产出**,不必各自手写。
+ *
+ * 核心(services/source/online/searchFallback.ts)只读 `songs` / `empty` / `message` /
+ * `trace`,用于「主插件软失败 → 自动改用其它启用源插件再试」(core-search-fallback);
+ * 兼容面:老插件不返回 `empty` 字段、只返回 `{songs: []}`,核心同样按空结果处理。
+ */
+export interface PluginSoftEmptyResult<T = unknown> {
+  /** 显式空结果标记(核心据此判定「要不要换下一个插件」)。 */
+  empty: boolean;
+  /** 可读原因(前端直接展示;软失败时由插件写清失败/回退轨迹)。 */
+  message?: string;
+  /** 回退轨迹段(形如 `["netease(空结果)", "lx-source(403)"]`)。 */
+  trace?: string[];
+  /** 结果集(成功时非空;软失败时缺失或空数组,与核心兜底产出的 songs 同形)。 */
+  songs?: T[];
+  /** 结果来自的具体音源/平台(插件自报,核心不解释语义)。 */
+  source?: string;
+  /** 扩展字段:核心按原样透传给路由,不逐个字段解释。 */
+  [k: string]: unknown;
+}
 
 /** A track parsed from a remote playlist (mirrors services/plugin/playlistImport). */
 export interface ImportedTrackShape {

@@ -19,7 +19,7 @@
 
 import { newQuickJSWASMModule, type QuickJSWASMModule } from "quickjs-emscripten";
 import type { QuickJSRuntime, QuickJSContext, QuickJSHandle, QuickJSDeferredPromise } from "quickjs-emscripten";
-import type { PluginManifest } from "./types.js";
+import type { PluginManifest, PluginSoftEmptyResult } from "./types.js";
 import { Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 import { existsSync } from "fs";
@@ -855,6 +855,16 @@ export class SandboxedPlugin {
     c.setProp(playlistsObj, "delete", plDelete);
     plUpsert.dispose(); plGet.dispose(); plList.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose(); plDelete.dispose();
 
+    // host.fallback(软失败空结果契约 helper:无需权限,纯形状构造)
+    const fallbackObj = c.newObject();
+    const fbMakeEmpty = this.hostSync(
+      "makeEmptyResult",
+      (message: any, trace: any) => sandbox_makeEmptyResult(String(message ?? ""), trace ?? []),
+      null,
+    );
+    c.setProp(fallbackObj, "makeEmptyResult", fbMakeEmpty);
+    fbMakeEmpty.dispose();
+
     // host.sources(在线源补全,需 songs:write)
     const sourcesObj = c.newObject();
     const srcComplete = this.hostAsync("complete", (opts: any) => this.env.sources.complete(opts || {}), "songs:write");
@@ -874,6 +884,7 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "comm", commObj);
     c.setProp(hostObj, "songs", songsObj);
     c.setProp(hostObj, "playlists", playlistsObj);
+    c.setProp(hostObj, "fallback", fallbackObj);
     c.setProp(hostObj, "sources", sourcesObj);
     c.setProp(hostObj, "plugin", pluginObj);
     c.setProp(hostObj, "crypto", cryptoObj);
@@ -898,7 +909,7 @@ export class SandboxedPlugin {
     const versionStr = c.newString(this.env.version || "");
     c.setProp(hostObj, "version", versionStr);
     versionStr.dispose();
-    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); cryptoObj.dispose(); logFn.dispose();
+    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); fallbackObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); cryptoObj.dispose(); logFn.dispose();
     c.setProp(c.global, "__mfHost", hostObj);
     hostObj.dispose();
   }
@@ -1296,6 +1307,30 @@ export class SandboxedPlugin {
 function sandbox_manifestLongRunningInMain(m: any): string[] {
   const a = m && m.longRunningInMain;
   return Array.isArray(a) ? a.filter((x: any) => typeof x === "string") : [];
+}
+
+/**
+ * 沙箱 helper:产出「软失败空结果」同构对象(PluginSoftEmptyResult)。
+ *
+ * 背景:插件内部轮切(exhausted)时本该回一个带原因与轨迹的空结果,但硬编码在插件里的
+ * 对象形状会在多个插件之间漂移,核心也就无从按统一契约兜底。这里把形状收敛成一个纯
+ * 函数,经 `host.fallback.makeEmptyResult()` 注入给任何沙箱插件复用:
+ *
+ *   const r = await host.fallback.makeEmptyResult("全部音源均无结果(2 次回退)", trace);
+ *   // → { empty: true, message: "...", trace: [...], songs: [] }
+ *
+ * `songs: []` 一并补上:让「软失败」与「搜到了 0 首」在形状上一致,核心的
+ * 「空结果 → 换下一个插件」判定只需要看 songs,不必再分辨消息文案。
+ * 纯函数、无宿主依赖(除 types 的类型导入),便于单测。
+ */
+export function sandbox_makeEmptyResult(message: string, trace?: string[] | string): PluginSoftEmptyResult {
+  const segs = Array.isArray(trace) ? trace : [String(trace ?? "")].filter(Boolean);
+  return {
+    empty: true,
+    message: String(message ?? ""),
+    trace: segs,
+    songs: [],
+  };
 }
 /** 沙箱批量 worker 的宿主侧代理:持有 worker 线程,把 longRunning 批量方法调用发到
  *  worker 执行(插件计算不占主线程事件循环),host.* 调用由 worker 发回本代理用真实
