@@ -8,6 +8,7 @@ import os from "node:os";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { getLyricsForSongId, getLyricsForSong, lrcToStructured } from "../../services/lyrics.js";
 import { notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../plugins/scrobblers.js";
 import { getPlaylistCover, cacheRemoteCover, clearPlaylistCoverCache, resolveCoverFile } from "../../services/playlistCover.js";
@@ -71,6 +72,110 @@ function noteActivityStream(resp: any, peerId?: string): any {
   );
   return new Response(body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
 }
+
+// ==================== ffmpeg 出流看门狗(B 项:兜底回收僵死进程) ====================
+//
+// serveFfmpegPipe 起的 ffmpeg 在「正常结束 / 客户端 abort / stdout close」三条路径上
+// 都有 kill 联动;但当上游 HTTP 源卡住(既不产字节、也不退出、也不 abort)时,进程会
+// 一直活着:stdout 无字节 → 无 close → 无 abort → 无人 kill。它占着并发槽(再播别的
+// 就报「并发已满」)且常驻内存(每进程 +2.6MB 级)。这里用「模块级注册表 + 周期对账器」
+// 兜底(同 peer.reconcile / pruneOrphans 模式,不依赖空闲):
+//   ① spawn 时登记,exit/error 时注销;
+//   ② stdout 每有字节即刷新 lastDataAt(卡死只看「字节有没有在走」);
+//   ③ 对账器周期扫描,命中「连续 FFMPEG_IDLE_KILL_MS 无 stdout 字节」或
+//      「存活超过 FFMPEG_HARD_MAX_MS」即 SIGKILL 并注销;
+//   ④ 响应流被取消(客户端停读)时也 kill(见 killOnCancel)。
+// serveFfmpegPipe 只服务「单曲出流」,进程寿命上界 = 单曲时长,故硬性总时长取 6h(纯兜底)。
+// 不做启动对账:重启后旧进程已随容器消失,无残留可清。
+/** 连续无 stdout 字节多久判定为卡死(毫秒)。90s:远长于正常首字节间隔(拉流 + 首帧解码
+ *  通常 <10s),又远短于一首歌,能在占住并发槽后尽快回收。 */
+export const FFMPEG_IDLE_KILL_MS = 90_000;
+/** 单条出流硬性总时长上限(毫秒)。serveFfmpegPipe 只服务单曲,6h 纯兜底;
+ *  健康流不触发(只要持续有字节,lastDataAt 一直刷新)。 */
+export const FFMPEG_HARD_MAX_MS = 6 * 60 * 60 * 1000;
+/** 对账周期(毫秒)。30s 一轮,兼顾及时性与常驻开销(每轮只遍历在途进程)。 */
+const FFMPEG_RECONCILE_INTERVAL_MS = 30_000;
+
+interface FfmpegPipeEntry {
+  child: ChildProcess;
+  songId?: string;
+  source: string;
+  startedAt: number;
+  lastDataAt: number;
+}
+
+const ffmpegPipes = new Map<number, FfmpegPipeEntry>();
+let ffmpegPipeSeq = 0;
+
+/** 登记一条在途 ffmpeg 出流(①②);exit/error 自动注销。返回注册表 key。 */
+export function registerFfmpegPipe(child: ChildProcess, info: { songId?: string; source: string }): number {
+  const key = ++ffmpegPipeSeq;
+  const entry: FfmpegPipeEntry = { child, songId: info.songId, source: info.source, startedAt: Date.now(), lastDataAt: Date.now() };
+  ffmpegPipes.set(key, entry);
+  try { child.stdout?.on("data", () => { entry.lastDataAt = Date.now(); }); } catch { /* stdout 不可用则退化为只看硬性总时长 */ }
+  child.once("exit", () => { ffmpegPipes.delete(key); });
+  child.once("error", () => { ffmpegPipes.delete(key); });
+  return key;
+}
+
+/** 执行一轮对账(③):命中卡死/超时即 SIGKILL + 注销。返回本轮强杀数。
+ *  now 可注入(测试用假时刻驱动,避免真实等待)。 */
+export function reconcileFfmpegPipes(now: number = Date.now()): number {
+  let killed = 0;
+  for (const [key, e] of ffmpegPipes) {
+    const idleMs = now - e.lastDataAt;
+    const aliveMs = now - e.startedAt;
+    const idleDead = idleMs >= FFMPEG_IDLE_KILL_MS;
+    const hardDead = aliveMs >= FFMPEG_HARD_MAX_MS;
+    if (!idleDead && !hardDead) continue;
+    log.warn("ffmpeg 出流看门狗强杀", { songId: e.songId, source: e.source, idleMs, aliveMs, reason: hardDead ? "hard-max" : "idle" });
+    try { e.child.kill("SIGKILL"); } catch { /* 可能已退出 */ }
+    ffmpegPipes.delete(key);
+    killed++;
+  }
+  return killed;
+}
+
+let ffmpegReconcilerTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 启动周期对账器(幂等,③)。不做启动对账。 */
+export function startFfmpegReconciler(): void {
+  if (ffmpegReconcilerTimer) return;
+  ffmpegReconcilerTimer = setInterval(() => {
+    try { reconcileFfmpegPipes(); } catch (e: any) { log.error("ffmpeg 看门狗对账出错", { err: e?.message || e }); }
+  }, FFMPEG_RECONCILE_INTERVAL_MS);
+  ffmpegReconcilerTimer.unref();
+}
+
+/** ④ 响应流被取消(客户端停止读取 / 连接半关)时回调 onCancel。
+ *  toWeb 的 cancel 只 destroy(child.stdout),ffmpeg 未必因 EPIPE 立即退出;残留进程
+ *  仍占并发槽,故这里显式 kill。字节透传,不改内容。 */
+function killOnCancel(stream: any, onCancel: () => void): any {
+  let reader: any;
+  try { reader = stream.getReader(); } catch { return stream; }
+  return new ReadableStream({
+    async pull(controller: any) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { try { controller.close(); } catch { /* ignore */ } return; }
+        controller.enqueue(value);
+      } catch (e) { try { controller.error(e); } catch { /* ignore */ } }
+    },
+    cancel(reason: any) {
+      try { onCancel(); } catch { /* ignore */ }
+      return reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
+// ---------- 测试钩子 ----------
+/** 清空注册表(并强杀其子进程),供测试隔离。 */
+export function _resetFfmpegPipesForTest(): void {
+  for (const e of ffmpegPipes.values()) { try { e.child.kill("SIGKILL"); } catch { /* ignore */ } }
+  ffmpegPipes.clear();
+}
+/** 当前在途出流条数,供测试断言「已注销」。 */
+export function _ffmpegPipeCountForTest(): number { return ffmpegPipes.size; }
 
 export const restRoutes = new Hono();
 
@@ -1431,6 +1536,9 @@ async function serveFfmpegPipe(
   child.once("error", release);
   child.stdout.on("close", () => { killChild(); release(); });
 
+  // B 项:登记进模块级出流注册表(②stdout 每有字节即刷新 lastDataAt,供看门狗兜底)。
+  registerFfmpegPipe(child, { songId: opts.songId, source: opts.sourceLabel });
+
   // 排空 stderr 防止管道写满阻塞 ffmpeg,保留末尾(供 P0-4 解析 loudnorm JSON)。
   let errBuf = "";
   child.stderr.on("data", (d: Buffer) => { errBuf = (errBuf + d.toString()).slice(-8192); });
@@ -1455,7 +1563,9 @@ async function serveFfmpegPipe(
   let webStream = NodeReadable.toWeb(child.stdout as any) as any;
   const metaint = opts.icyMetaint ?? 0;
   if (metaint > 0) webStream = icyFrameStream(webStream, metaint);
-  return new Response(webStream, {
+  // ④ 响应流被取消(客户端停止读取)时也 kill —— abort 信号未必覆盖所有停读场景。
+  const guardedStream = killOnCancel(webStream, killChild);
+  return new Response(guardedStream, {
     status: 200,
     headers: {
       "Content-Type": opts.mime,

@@ -13,7 +13,7 @@ import fs from "fs";
 import path from "path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { authRoutes } from "./routes/auth/index.js";
-import { restRoutes } from "./routes/rest/index.js";
+import { restRoutes, startFfmpegReconciler } from "./routes/rest/index.js";
 import { apiRoutes, getDlnaBaseUrl } from "./routes/api/index.js";
 import { navidromeRoutes } from "./routes/navidrome/index.js";
 import { getFlow, executeFlow, isFlowRunning } from "./services/flows/index.js";
@@ -492,6 +492,10 @@ startIdleReclaimer();
 // 残留 key(asyncTasks/eventing/QueueController/PlayerController/proxy/scrobblers)。
 // 10 分钟一轮,启动 1 分钟后先跑首轮。与空闲回收互补(不依赖空闲)。
 startOrphanPruner();
+
+// ffmpeg 出流看门狗:周期对账在途转码进程,回收「既不产字节也不退出」的僵死 ffmpeg
+// (先于 kill 联动失效的场景,如上游源卡住)。30s 一轮,幂等启动,不做启动对账。
+startFfmpegReconciler();
 
 server.listen(port, "0.0.0.0", () => {
   log.info(`MusicFlow backend listening on http://0.0.0.0:${port}`);

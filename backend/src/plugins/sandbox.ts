@@ -650,6 +650,12 @@ export class SandboxedPlugin {
     if (h && !this.shared.has(h)) { try { h.dispose(); } catch { /* ignore */ } }
   }
 
+  /** 仅测试用:置 SANDBOX_LEAK_HOST_RESULT=1 时故意跳过异步结果句柄释放,
+   *  复现「resolve 后不 dispose」的泄漏以验证内存防护测试的灵敏度;生产恒为 false。 */
+  private skipHostResultDispose(): boolean {
+    return process.env.SANDBOX_LEAK_HOST_RESULT === "1";
+  }
+
   /** 从在途清单移除已结算的 deferred(避免 defers 数组只增不减导致误限流)。 */
   private removeDefer(d: QuickJSDeferredPromise): void {
     const i = this.defers.indexOf(d);
@@ -686,7 +692,11 @@ export class SandboxedPlugin {
       if (this.defers.length > MAX_DEFERS) {
         this.removeDefer(deferred);
         const msg = `[SANDBOX_CONCURRENCY] 沙箱限制:并发宿主调用过多(在途 ${this.defers.length} > 上限 ${MAX_DEFERS})。插件应降低并行度或分批串行`;
-        deferred.resolve(this.jsToHandle({ ok: false, error: { message: msg } }));
+        // [A] resolve 不消费句柄:必须显式释放,否则每次拒绝泄漏一个宿主句柄
+        // (QuickJS 引用计数钉住对象 → GC 永不回收 → 堆单调增长 + teardown 断言)。
+        const rejectHandle = this.jsToHandle({ ok: false, error: { message: msg } });
+        deferred.resolve(rejectHandle);
+        if (!this.skipHostResultDispose()) this.safeDispose(rejectHandle);
         // 极少触发的分支:先泵送结算,再延后一拍释放 handle,避免 VM 尚未读取就被 dispose
         try { this.pumpJobs(); } catch { /* ignore */ }
         Promise.resolve().then(() => { try { deferred.dispose(); } catch { /* ignore */ } });
@@ -708,7 +718,7 @@ export class SandboxedPlugin {
             // (用于 tcpConnect / ws.connect 这类需要返回「含函数对象」的场景)。
             const raw = value && (value as any).__mfRawHandle;
             if (raw) { deferred.resolve(raw); try { raw.dispose(); } catch { /* ignore */ } }
-            else deferred.resolve(this.jsToHandle(value));
+            else { const h = this.jsToHandle(value); deferred.resolve(h); if (!this.skipHostResultDispose()) this.safeDispose(h); }
           }
         })
         .catch((err) => {
@@ -716,7 +726,7 @@ export class SandboxedPlugin {
           // 任何宿主侧实现抛出都到此兜底:服务端记真实错误便于排查(plugin id + 方法 + 所需权限),
           // 同时给插件一个带 status:0 的透明信封,使其能读出真实原因而非 undefined。
           console.error(`[PLUGIN:${this.id}] host.${name} 执行异常: ${msg}${perm ? ` (需权限 ${perm})` : ""}`);
-          if (deferred.alive) deferred.resolve(this.jsToHandle(this.hostErrorEnvelope(msg)));
+          if (deferred.alive) { const h = this.jsToHandle(this.hostErrorEnvelope(msg)); deferred.resolve(h); if (!this.skipHostResultDispose()) this.safeDispose(h); }
         })
         .finally(() => {
           this.removeDefer(deferred);
