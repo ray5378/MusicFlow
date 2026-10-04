@@ -724,6 +724,9 @@ export class GroupPump {
     // 档位被设备容量钳制只提示**一次**(每首歌一次):日志里能看到「你选了
     // 30s,设备只能装 Ns」,而不是静默削弱 —— 排障时这是第一手证据。
     let cappedLogged = false;
+    // 真实字节闸生效(占用达预算)也只提示**一次**(每首歌一次):证明「时长口径
+    // 估计偏浅、已按真实排队字节闭环」——现场核对水位是否被字节闸压短就看这条。
+    let byteGateLogged = false;
 
     try {
       while (this.running && this.epoch === myEpoch) {
@@ -954,10 +957,36 @@ export class GroupPump {
         //     target == anchor,此时若用 `<` 比较,深度恒比目标少几微秒(取时刻差
         //     必然有耗时)→ 每帧都误判「未达标」→ 退化成全程爆推,实时配速失效。
         //  ② 留一帧的容差,避免在目标水位附近反复横跳。
+        //
+        // ★★ 真实字节闸(核心修复):上面的 `capacityCapMs` 是**时长口径**
+        //   (`0.6·cap ÷ 实测平均码率`),只有在「窗口瞬时码率 == 整首平均码率」
+        //   时才等于设备的真实占用。FLAC 瞬时码率随内容起伏(坑 B12),深档位
+        //   (30s)撞上比平均码率更密的段落时,真实占用会超过估算并吃穿 0.6 余量
+        //   → 设备逐帧拒收 + `SYNC LOST`(2026-10 生产:4.8MB/30s/60% 仍溢出,
+        //   起播后约一个水位即开始 `Failed to send audio chunk`)。
+        //   故再加一道以**真实累计压缩字节**为准的闸:由 SendspinGroup 从
+        //   late-join 缓存里数「尚未播到的字节」(= 设备 `BufferTracker` 口径),
+        //   达到 `cap × 0.6` 即停灌。设备未宣告容量时该闸关闭(行为与旧版一致)。
+        const byteBudget = this.group.prefillByteBudget?.() ?? 0;
+        const bufferedBytes = byteBudget > 0 ? (this.group.bufferedCompressedBytes?.() ?? 0) : 0;
+        const byteOk = byteBudget <= 0 || bufferedBytes < byteBudget;
+        if (!byteGateLogged && byteBudget > 0 && !byteOk) {
+          byteGateLogged = true;
+          const capB = this.group.deviceCapacityBytes?.() ?? 0;
+          const rateB = this.group.encodedBytesPerSec?.() ?? 0;
+          logSafe(
+            this.server,
+            "info",
+            `sendspin 预填充按**真实排队字节**封顶:占用=${bufferedBytes}B ≥ 预算=${byteBudget}B ` +
+              `(设备 buffer_capacity=${capB}B, 实测平均码率=${Math.round(rateB)}B/s) ` +
+              `→ 停在较短水位(时长口径估计偏浅,已按字节闭环) song=${this.songId}`,
+          );
+        }
         const wantFill =
           prefillEnabled() &&
           targetUs > ANCHOR_SAFE_LEAD_US &&
-          depthUs < targetUs - FRAME_MS * 1000;
+          depthUs < targetUs - FRAME_MS * 1000 &&
+          byteOk;
         if (wantFill) {
           // ★ 预填充 / 回补:缓冲未达目标水位 → **不 sleep**,尽快灌。
           //   - 起播:一次灌到目标水位,而起播延迟仍只有锚点的 0.8s;

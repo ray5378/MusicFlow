@@ -758,6 +758,52 @@ export class SendspinGroup {
     const byBytes = (usable / Math.max(1, this.encodedBytesPerSec())) * 1000;
     return Math.max(PREFILL_BUFFER_MIN_MS, Math.min(PREFILL_BUFFER_MAX_MS, Math.floor(byBytes)));
   }
+
+  /** 设备环形缓冲的**压缩字节预算**(扣除余量)。0 = 设备未宣告容量(不做字节闸)。
+   *
+   *  这是设备那条**硬上限**(spec:`buffer_capacity` is a hard per-player byte
+   *  limit)的权威换算:`cap × DEVICE_BUFFER_HEADROOM_RATIO`。与
+   *  `capacityLimitedPrefillMs`(时长口径)互补 —— 后者只能按「时长 × 平均码率」
+   *  估算字节,遇到 FLAC 瞬时码率起伏(坑 B12)就会算歪;本函数给出**真实字节**
+   *  口径的上限,由调用方与 `bufferedCompressedBytes()` 比较后闭环。 */
+  prefillByteBudget(): number {
+    const cap = this.deviceCapacityBytes();
+    if (cap <= 0) return 0;
+    return Math.floor(cap * DEVICE_BUFFER_HEADROOM_RATIO);
+  }
+
+  /** 设备环形缓冲里**真实占用的压缩字节数**(尚未播到的部分)。
+   *
+   *  ## 为什么不能用「时长 × 平均码率」估计
+   *  `capacityLimitedPrefillMs` 走的正是那条估计式,而设备侧(aiosendspin
+   *  `BufferTracker(capacity_bytes=...)` / ESPHome ring buffer)累计的是
+   *  **每个 chunk 的真实压缩字节数**。二者只在「窗口瞬时码率 == 整首平均码率」
+   *  时才相等;FLAC 瞬时码率随内容起伏(坑 B12),窗口越深越容易撞上比平均码率
+   *  更密的段落 ⇒ 真实占用 > 估计值,深档位(30s)下把 0.6 余量吃穿 → 设备拒收
+   *  (`Failed to send audio chunk`) + 失步(`SYNC LOST`)。协议头/一帧过冲是固定
+   *  量,长窗口反而更安全 —— 真正的放大器就是这条**码率估计偏差**(见修复说明)。
+   *
+   *  ## 数据来源:late-join 缓存
+   *  `recentByGroup` 逐帧记录了本组**真正发出去**的每个 chunk 的
+   *  `tsUs / durUs / data`(见 pushFrame)。其中「尚未播完」(`ts + dur > now`)的
+   *  条目字节数之和,就是设备此刻还排着的压缩音频字节数 —— 与设备 `BufferTracker`
+   *  同口径,且**与码率估计无关**。取各编码组的**最大值**(同组字节逐字节相同,
+   *  多组并存时以最满的一组为准,保守)。
+   *
+   *  转成 `bigint` 比较避免 ts 溢出;返回 number(字节量远小于 2^53)。 */
+  bufferedCompressedBytes(): number {
+    const now = nowUs();
+    let max = 0;
+    for (const ring of this.recentByGroup.values()) {
+      let sum = 0;
+      for (const e of ring) {
+        // 尚未播完:起点 + 时长 > now。含「正在播的这一块」(略偏保守,安全)。
+        if (e.tsUs + BigInt(e.durUs) > now) sum += e.data.length;
+      }
+      if (sum > max) max = sum;
+    }
+    return max;
+  }
   private scalePcm(pcm: Float32Array, gain: number): Float32Array {
     const g = gain / 100;
     if (g >= 1) return pcm;
@@ -951,11 +997,19 @@ export class SendspinGroup {
     if (startIdx < 0) return 0;
 
     const capUs = Math.max(0, this.capacityLimitedPrefillMs()) * 1000;
+    // ★ 字节闸:回填同样按**真实压缩字节**封顶(与 pushLoop 的预填充闸同源)。
+    //   只按 `capUs`(时长 × 平均码率估的秒数)封顶,遇到比平均码率更密的段落
+    //   会把新成员一次性灌爆 → 逐帧拒收(与起播水位溢出同一根因,见
+    //   `bufferedCompressedBytes` 注释)。0 = 设备未宣告容量 → 不做字节闸。
+    const byteBudget = this.prefillByteBudget();
     const items: Array<{ tsUs: bigint; data: Uint8Array }> = [];
     let accUs = 0;
+    let accBytes = 0;
     for (let i = startIdx; i < ring.length; i++) {
       if (accUs >= capUs) break;
+      if (byteBudget > 0 && accBytes + ring[i].data.length > byteBudget) break;
       accUs += ring[i].durUs;
+      accBytes += ring[i].data.length;
       items.push({ tsUs: ring[i].tsUs, data: ring[i].data });
     }
     if (items.length === 0) return 0;
@@ -967,7 +1021,9 @@ export class SendspinGroup {
     this.server.log(
       "info",
       `sendspin late-join 回填: client=${c.clientId} codec=${c.codec} chunks=${items.length} ` +
-        `span=${Math.round(accUs / 1000)}ms target=${target - nowUs()}us(ahead of now) group=${this.name}`,
+        `span=${Math.round(accUs / 1000)}ms bytes=${accBytes}` +
+        (byteBudget > 0 ? `/${byteBudget}(预算)` : "") +
+        ` target=${target - nowUs()}us(ahead of now) group=${this.name}`,
     );
     return items.length;
   }
