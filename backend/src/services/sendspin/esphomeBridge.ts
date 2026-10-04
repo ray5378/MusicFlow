@@ -370,8 +370,45 @@ class EsphomeBridge {
     return ids;
   }
 
-  /** 设**设备自身**音量(0..1,speaker 硬件输出),与音乐采样增益无关。
-   *  fire-and-forget:是否生效看后续 media_player 状态回显(桥本身就在镜像)。 */
+  /** 挑出该设备上**重启用**的 button 实体(只挑,不发)。
+   *  匹配:name 或 objectId 含 restart —— ESPHome 侧即 `button: - platform: restart
+   *  name: "esp32-player2 Restart"`(object_id 会被 to_snake_case 收成 xxx_restart)。 */
+  private restartButtonId(e: Entry): ReturnType<typeof entityId<"button">> | null {
+    for (const meta of e.entities.values()) {
+      if (!meta.objectId) continue;
+      if (meta.type && meta.type !== "button") continue;
+      if (!/restart/i.test(`${meta.name} ${meta.objectId}`)) continue;
+      return entityId("button", meta.objectId);
+    }
+    return null;
+  }
+
+  /** 经 6053 按**重启按钮**(ESPHome `button: - platform: restart`)。
+   *
+   *  ⚠️ 设备此刻**可能还没编进这个按钮** —— 拿不到实体时**返回 false 不抛**,
+   *  由调用方(自愈链路 / 前端)降级,绝不因为「按不了重启」炸掉推流循环。 */
+  restartDevice(hostRaw: string): EsphomeWriteResult {
+    const host = String(hostRaw || "").trim();
+    const e = host ? this.entries.get(host) : undefined;
+    if (!e) return { ok: false, code: "no-bridge", sent: 0 };
+    if (!e.connected || !e.cli) return { ok: false, code: "not-connected", sent: 0 };
+    const id = this.restartButtonId(e);
+    if (!id) {
+      log.warn(`6053 无重启实体(设备未暴露 restart 按钮): ${host}`);
+      return { ok: false, code: "no-entity", sent: 0 };
+    }
+    try {
+      // button 在 api.proto 里 command 的 fields 是空的(瞬时触发),无需任何选项。
+      e.cli.command(id, {});
+      log.info(`6053 按重启按钮: ${host}`);
+      return { ok: true, code: "ok", sent: 1 };
+    } catch (err: any) {
+      log.warn(`6053 按重启按钮失败 ${host}: ${err?.message || err}`);
+      return { ok: false, code: "send-failed", sent: 0 };
+    }
+  }
+
+  /** 设**设备自身**音量(0..1,speaker 硬件输出),与音乐采样增益无关。 */
   setVolume(hostRaw: string, volume: number): EsphomeWriteResult {
     const host = String(hostRaw || "").trim();
     const e = host ? this.entries.get(host) : undefined;

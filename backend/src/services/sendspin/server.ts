@@ -36,7 +36,8 @@ import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
 import { createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncoder, type EncodedChunk, OPUS_FRAME_MS, SAMPLE_RATE, type SendspinCodec, waitFlacEncoderReady } from "./encoding.js";
-import { stopGroupPump } from "./streamEngine.js";
+import { peekPump, stopGroupPump } from "./streamEngine.js";
+import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
@@ -100,6 +101,15 @@ export class SendspinServer {
   identity: Identity;
   log: SendspinLog;
   readonly clients = new Map<string, SendspinConnection>();
+
+  /** 查某位成员的开环健康(ok / degraded / stalled)。
+   *  ⚠️ 对外视图 `ConnView`(proxy.ts)不带 group,路由不能直接读 conn.group;
+   *  这里统一从真实连接表里查,保证对外出口读到的就是服务端真值。 */
+  sinkHealthOf(clientId: string): "ok" | "degraded" | "stalled" {
+    const c = clientId ? this.clients.get(clientId) : undefined;
+    if (!c) return "ok";
+    return c.group?.health() ?? "ok";
+  }
   readonly groups = new Map<string, SendspinGroup>();
   /** 不再自动重拨的目标 host:port → 抑制原因 + 到期时刻(手动 dial 立即清除)。 */
   readonly noAutoRedial = new Map<string, NoRedialEntry>();
@@ -728,6 +738,95 @@ export class SendspinGroup {
     return codec === "pcm" ? SAMPLE_RATE * 2 * 2 : SAMPLE_RATE * 2 * 2 * 0.7;
   }
 
+  /** 组级开环健康聚合(供 /v1/sendspin/clients 与日志消费)。
+   *  任一位成员 stalled ⇒ stalled;否则有成员堆积偏高 ⇒ degraded;其余 ok。 */
+  health(): "ok" | "degraded" | "stalled" {
+    let degraded = false;
+    for (const m of this.members) {
+      if (m.sinkHealth === "stalled") return "stalled";
+      if (m.sinkHealth === "ok" && m.lastBufferedAmount > SINK_STALL_RECOVER_BYTES) degraded = true;
+    }
+    return degraded ? "degraded" : "ok";
+  }
+
+  /** 对一位卡死的成员做**分级自愈** L0 → L1 → L2,全程**不改播放状态**
+   *  (不 pause、不报 stopped、不踢出群组)。
+   *
+   *  设备侧根因见 SINK_* 常量注释:`pending_start_` 一旦锁死,重发 `stream/start`
+   *  会被去重吞掉、`stream/clear` 又不触发 STREAM_END ⇒ 协议内软手段均无效,
+   *  只剩 `stream/end`(唯一能让设备回 IDLE 的消息)与硬重启两条。 */
+  escalateSinkRecovery(c: SendspinConnection): void {
+    const now = Date.now();
+    if (now - c.sinkLastRecoveryAt < SINK_RECOVERY_COOLDOWN_MS) return;
+    // L0 的告警不受「组内是否只有一位卡住」约束;再往上必须过这道闸。
+    if (c.sinkRecoveryLevel > 0 && !this.sinkEscalationAllowed()) return;
+    c.sinkLastRecoveryAt = now;
+    const level = c.sinkRecoveryLevel;
+    c.sinkRecoveryLevel += 1;
+    const who = c.clientId ?? "?";
+    const g = this.name;
+
+    if (level === 0) {
+      // L0:只告警,不动流。
+      this.server.log(
+        "warn",
+        `sendspin sink 疑似停摆(设备未取数): client=${who} group=${g} ` +
+          `buffered=${c.lastBufferedAmount}B stalled=${c.sinkStalledSinceMs} ` +
+          `ws=${this.wsStateOf(c)}(开环检测:3 窗 ${SINK_STALL_WINDOWS}×${HEARTBEAT_INTERVAL_MS}ms 峰值 > ${SINK_STALL_THRESHOLD_BYTES}B)`,
+      );
+      return;
+    }
+    if (level === 1) {
+      // L1 探针:stream/end 是设备侧唯一能回 IDLE 的消息。
+      // ⚠️ 只发流级收尾,**不发 group/update(stopped)** —— 真机会把 stopped 镜像成
+      //    组播放器 IDLE,把「无声」伪装成「正常停止」,反而毁掉诊断窗口
+      //    (见 finishPlayback / clearPlayback 注释)。
+      c.sendJson("stream/end", {});
+      this.server.log("warn", `sendspin sink 自愈 L1: 发 stream/end 探针 client=${who} group=${g}`);
+      return;
+    }
+    // L2:协议内手段在 latch 锁死下均无判别力 ⇒ 远程重启这台设备。
+    void this.restartStalledMember(c);
+  }
+
+  /** 「组内仍在 playing、且只有这一位卡住」才允许升到 L1 以上。
+   *  全组一起卡(可能是服务端整体问题)时只允许 L0 告警,不折腾设备。 */
+  private sinkEscalationAllowed(): boolean {
+    if (this.paused || this.current === null) return false;
+    let stalled = 0;
+    for (const m of this.members) if (m.sinkHealth === "stalled") stalled += 1;
+    return stalled === 1;
+  }
+
+  /** 经 ESPHome 原生 API(6053)远程重启一台卡死的设备。
+   *  拿不到 button 实体 / 桥连不上都只记日志,**不抛、不连累推流循环**。 */
+  private async restartStalledMember(c: SendspinConnection): Promise<void> {
+    const host = c.remoteHost || "";
+    const who = c.clientId ?? "?";
+    const g = this.name;
+    if (!host) {
+      this.server.log(
+        "warn",
+        `sendspin sink 自愈 L2 跳过: 取不到设备 6053 host(未配 esphome psk?),无法远程重启 client=${who} group=${g}`,
+      );
+      return;
+    }
+    try {
+      const r = esphomeBridge.restartDevice(host);
+      this.server.log(
+        r.ok ? "warn" : "error",
+        `sendspin sink 自愈 L2: ${r.ok ? "已按重启按钮" : `重启失败(${r.code})`} ` +
+          `client=${who} host=${host} group=${g}`,
+      );
+    } catch (e: any) {
+      this.server.log("error", `sendspin sink 自愈 L2 异常: client=${who} group=${g}: ${e?.message || e}`);
+    }
+  }
+
+  private wsStateOf(c: SendspinConnection): string {
+    return String((c as any)?.ws?.readyState ?? "?");
+  }
+
   /** 全员宣告的缓冲容量取**最小值**(0 视为未宣告,忽略);全都没宣告 → 0。 */
   deviceCapacityBytes(): number {
     let min = 0;
@@ -1079,12 +1178,17 @@ export class SendspinGroup {
     }
   }
 
-  finishPlayback(): void {
+  /** `silentState=true`: 只发 `stream/end` 收尾流,**不发 `group/update(stopped)`**。
+   *  用于「切歌/借流」这类**紧邻就会发 `playing`** 的过渡:此刻报 stopped 属空转,
+   *  且真机固件会把 `group/update -> stopped` 镜像成组播放器 IDLE,随后 `playing`
+   *  不足以把它拉回 → 卡成「实体 PLAYING + 流已 ended」= 无声(2026-10 真机)。
+   *  终态停止(曲终/stop)仍走默认(发 stopped),语义不变。 */
+  finishPlayback(opts?: { silentState?: boolean }): void {
     for (const c of this.members) {
       const reg = c.clientId ? this.server.clients.get(c.clientId) : undefined;
       this.server.log("info", `finishPlayback member=${c.clientId} legacy=${c.legacy} ws=${(c as any).ws?.readyState} registered=${reg === c}`);
       c.sendJson("stream/end", {});
-      c.sendGroupUpdate();
+      if (!opts?.silentState) c.sendGroupUpdate();
     }
   }
   /** 关闭全部编码器(含 flac 的 ffmpeg 持续进程),返回关掉的数量(供回收上报)。 */
@@ -1153,6 +1257,28 @@ function sendAheadInputOf(c: SendspinConnection): SendAheadInput {
 
 /** WS 心跳间隔(ms)。见 SendspinConnection 的心跳注释。 */
 const HEARTBEAT_INTERVAL_MS = 10_000;
+
+/** ----「设备已不再消费」开环检测(2026-10 生产实锤)----
+ *  病灶:设备 **socket 活着、还在收包解码**(设备日志照打 `Stream Started`),
+ *  但下游管线(speaker_mixer → i2s)根本没起来 ⇒ 设备不取数,而服务端照 1× 实时
+ *  猛推 ⇒ `Failed to send audio chunk` 以 ≈11~12 条/秒刷屏且**永不恢复**。
+ *  服务端此前完全**开环**:只查 `ws.readyState`(见 sendJson / sendBinary /
+ *  sendAudio),对「设备到底有没有在消费」零记账 —— 表现为进度条照走、音量
+ *  可调、界面一切正常,用户只会以为「在播但没声音」。
+ *
+ *  设备侧根因(240 定位):sendspin-cpp `pending_start_` 只在 play_uri 内清零,
+ *  首轮被拒后**永久锁死**,之后每首 `stream/start` 都被 `if(!pending_start_)`
+ *  吞掉 ⇒ 设备再也回不到 IDLE。软手段救不回来,只剩两条路:`stream/end`
+ *  (协议里唯一能让设备回 IDLE 的消息)或硬重启。
+ *
+ *  唯一能观测「设备是否还在消费」的信号是 **ws 发送侧堆积** `ws.bufferedAmount`:
+ *  健康态实测 0~13KB 突发,故障态稳定停在 58585B 平台。 */
+const SINK_STALL_THRESHOLD_BYTES = 32_000; // 健康峰值 13KB ×2.5,故障平台 58585 ×0.55
+const SINK_STALL_RECOVER_BYTES = 16_000;   // 回落到它以下 = 这一窗只是正常过冲后排空
+const SINK_STALL_WINDOWS = 3;              // 连续 3 窗(≈30s)峰值超阈值 ⇒ stalled
+const SINK_WATCH_CONNECT_GRACE_MS = 10_000;// 建连后不判
+const SINK_WATCH_PREFILL_MAX_MS = 60_000;  // 预填充迟迟不 settle 的硬回退(见 sampleSinkHealth)
+const SINK_RECOVERY_COOLDOWN_MS = 5_000;   // 每级恢复动作之间的冷却
 
 export class SendspinConnection {
   id: string;
@@ -1226,6 +1352,24 @@ export class SendspinConnection {
   clientUnavailableSinceMs = 0;
   /** 上次已记录日志的同步状态,用于只记**变化**(见 noteSyncState)。 */
   private lastLoggedSyncState: string | null = null;
+  /** ----「设备已不再消费」开环检测(见 SINK_* 常量注释)---- */
+  sinkHealth: "ok" | "stalled" = "ok";
+  /** 判定为 stalled 的时刻(0 = 未判定)。 */
+  sinkStalledSinceMs = 0;
+  /** 最近一次采样到的 ws 发送侧堆积字节数。 */
+  lastBufferedAmount = 0;
+  /** 最近一次采样时刻。 */
+  lastSampleAt = 0;
+  /** 连接建立时刻(建连宽限与预填充硬回退的基准)。 */
+  connectedAt: number = 0;
+  /** 已执行到的恢复等级(0 = 仅 WARN,1 = stream/end 探针,2 = 远程重启)。 */
+  sinkRecoveryLevel = 0;
+  /** 上次任何一级恢复动作的时刻(SINK_RECOVERY_COOLDOWN_MS 冷却)。 */
+  sinkLastRecoveryAt = 0;
+  /** 连续超阈值的窗数。 */
+  private sinkStallWindows = 0;
+  /** 是否已越过起播预填充窗口(由 pump 的 wantFill 退出 + 60s 硬回退决定)。 */
+  private sinkWatchArmed = false;
   /** 设备在 `client/hello` 里宣告的**压缩字节**缓冲上限(`player@v1_support.
    *  buffer_capacity`,单位 = byte)。0 = 未宣告(旧固件)→ 不做容量钳制。
    *
@@ -1264,6 +1408,7 @@ export class SendspinConnection {
 
   constructor(server: SendspinServer, ws: WebSocket, remoteHost = "") {
     this.server = server;
+    this.connectedAt = Date.now();
     this.ws = ws;
     this.remoteHost = normalizeRemoteHost(remoteHost);
     this.id = "";
@@ -1287,6 +1432,8 @@ export class SendspinConnection {
         // 本轮从 alive 翻 false:需发 PING(并等待下轮 PONG)。
         try { ws.ping(); } catch { /* 已死 */ }
       }
+      // 顺带做一次「设备是否还在消费」采样 —— 复用本心跳轮,不新增定时器。
+      this.sampleSinkHealth();
     }, HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
     ws.on("close", () => {
@@ -1665,6 +1812,45 @@ export class SendspinConnection {
       return true;
     }
     return false;
+  }
+
+  /** 采样 ws 发送侧堆积,判定「设备已不再消费」(开环检测)。
+   *
+   *  由 HEARTBEAT_INTERVAL_MS 心跳轮每 10s 调一次(见 constructor),**不新增定时器**。
+   *  独立调用也安全(纯读取 + 计数,不做任何流操作)。 */
+  sampleSinkHealth(): void {
+    const now = Date.now();
+    const wsAny = this.ws as any;
+    this.lastBufferedAmount = typeof wsAny?.bufferedAmount === "number" ? Number(wsAny.bufferedAmount) : 0;
+    this.lastSampleAt = now;
+    // ① 建连宽限:握手 / 首帧期间本就不该判。
+    if (now - this.connectedAt < SINK_WATCH_CONNECT_GRACE_MS) return;
+    // ② 起播预填充窗口豁免:灌水位期间一律不判。注意设备不消费时 pump 会**一直**
+    //    停在 fill 模式(`depthUs` 是服务端自己的游标,照实时推进),若不设硬回退
+    //    就永远 arm 不上 —— 那恰恰就是本故障形态。故 60s 后无条件 arm。
+    if (!this.sinkWatchArmed) {
+      const grp = this.group;
+      const settled = grp ? peekPump(grp)?.prefillSettled === true : false;
+      if (!settled && now - this.connectedAt < SINK_WATCH_PREFILL_MAX_MS) return;
+      this.sinkWatchArmed = true;
+    }
+    // ③ 排空过 ⇒ 设备还在消费,这一窗不能算数(清窗重计)。
+    if (this.lastBufferedAmount < SINK_STALL_RECOVER_BYTES) {
+      this.sinkStallWindows = 0;
+      if (this.sinkHealth !== "ok") {
+        this.sinkHealth = "ok";
+        this.sinkStalledSinceMs = 0;
+      }
+      return;
+    }
+    // ④ 中间带(16KB~32KB)既不累加也不清窗,避免阈值附近反复横跳误报。
+    if (this.lastBufferedAmount <= SINK_STALL_THRESHOLD_BYTES) return;
+    this.sinkStallWindows += 1;
+    if (this.sinkStallWindows < SINK_STALL_WINDOWS) return;
+    if (this.sinkHealth === "stalled") return; // 已判过,交给组去自愈
+    this.sinkHealth = "stalled";
+    this.sinkStalledSinceMs = now;
+    this.group?.escalateSinkRecovery(this);
   }
 
   private beginHandshake(clientInitText: string, payload: any): void {

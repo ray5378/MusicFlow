@@ -72,6 +72,8 @@ app.get("/v1/sendspin/clients", async (c) => {
         // 在线连接:显式给出与离线行同构的两个标记(前端按 offline 分派行样式)。
         offline: false,
         available: true,
+        // 开环检测(设备是否还在消费音频):ok / degraded / stalled。
+        streamHealth: srv.sinkHealthOf(clientId),
       };
     });
   // 离线设备同样要在列表里(与 DLNA / AirPlay 同口径:断连只置位、不摘除):
@@ -103,6 +105,7 @@ app.get("/v1/sendspin/clients", async (c) => {
       pairing: null,
       offline: true, // 前端据此渲染为离线行(变暗 + 不显示在线专属按钮)
       available: false, // 与 peer 层同口径:离线 = available:false(不是「不存在」)
+      streamHealth: "ok", // 离线行无从观测,按 ok 兜底(与 offline/available 同口径)
       esphome: {
         pskConfigured: esphomePortByClient.has(clientId),
         port: esphomePortByClient.get(clientId) ?? 6053,
@@ -244,6 +247,18 @@ app.put("/v1/sendspin/devices/:clientId/esphome/muted", async (c) => {
   const { sendspinSetEsphomeMuted } = await import("../../services/sendspin/index.js");
   const r = await sendspinSetEsphomeMuted(clientId, muted);
   return c.json({ success: r.ok, code: r.code, sent: r.sent, muted });
+});
+
+/** 远程重启一台设备(排障按钮;开环自愈链路也会调它)。
+ *  拿不到重启按钮 / 桥没连上 ⇒ 返回 ok:false + code,**不 5xx**。 */
+
+app.post("/v1/sendspin/devices/:clientId/esphome/restart", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const { resolveEsphomeHost } = await import("../../services/sendspin/index.js");
+  const { esphomeBridge } = await import("../../services/sendspin/esphomeBridge.js");
+  const r = esphomeBridge.restartDevice(resolveEsphomeHost(clientId));
+  return c.json({ success: r.ok, code: r.code, sent: r.sent });
 });
 
 /** 聚合快照(排障用):每台**填了密钥**的设备各自的桥接状态。

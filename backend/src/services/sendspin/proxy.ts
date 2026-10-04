@@ -73,6 +73,8 @@ export interface SendspinServerLike {
   currentMedia(clientId: string): { songId: string; title?: string; artist?: string; album?: string; coverArt?: string } | undefined;
   // 注意:**不含 esphomeStatus** —— 真实 server 无此方法,放进 Like 会破坏 AssertServerLike
   // 哨兵;ESPHome 状态走独立 proxyEsphomeStatus()(fork)/sendspinEsphomeStatus()(装配层)。
+  // 开环检测(sink 是否还在消费音频):真实 server / fork 代理两边都要给,路由才零分叉。
+  sinkHealthOf(clientId: string): "ok" | "degraded" | "stalled";
 }
 
 // ==================== fork 模式实现 ====================
@@ -189,6 +191,22 @@ class SendspinServerProxy implements SendspinServerLike {
     const cur = this.sup.mirror.groups.get(clientId)?.current;
     if (!cur) return undefined;
     return { songId: cur.songId, title: cur.title, artist: cur.artist, album: cur.album, coverArt: cur.coverArt };
+  }
+  /** 开环检测健康度缓存:RPC 结果异步回填后,路由下一拍就能读到真值。 */
+  private readonly sinkHealth = new Map<string, "ok" | "degraded" | "stalled">();
+  /** 开环检测:健康度真值只在子进程,fork 模式走 RPC。
+   *  接口给的是同步签名(与真 server 一致,路由零分叉),这里**异步回读**:
+   *  发一次 rpc 回填缓存,本拍返回的是缓存里的上一个值(首次即 "ok")。
+   *  ⚠️ 子进程挂了 / rpc 失败一律按 "ok" 兜底 —— 这个字段只是**暴露**,
+   *  绝不参与任何播放决策,读失败不该让路由报错。 */
+  sinkHealthOf(clientId: string): "ok" | "degraded" | "stalled" {
+    if (this.sup.isRunning() && !this.sinkHealth.has(clientId)) {
+      void this.sup
+        .rpc<"ok" | "degraded" | "stalled">("sinkHealth", { clientId })
+        .then((v) => this.sinkHealth.set(clientId, v))
+        .catch(() => this.sinkHealth.set(clientId, "ok"));
+    }
+    return this.sinkHealth.get(clientId) ?? "ok";
   }
 }
 

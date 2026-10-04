@@ -364,6 +364,12 @@ export class GroupPump {
   private dbgPrevTs = 0;
   private paused = false;
   private epoch = 0;
+  /** 起播预填充窗口是否已退出(pushLoop 里 wantFill 由 true 翻 false)。
+   *  服务端开环检测靠它豁免「起播灌水位」阶段;设备不消费时 wantFill 会恒 true,
+   *  故 server.ts 另有 SINK_WATCH_PREFILL_MAX_MS 硬回退兜底。 */
+  prefillSettled = false;
+  /** 当前是否处在起播灌水位(fill)阶段。 */
+  prefillFilling = false;
   /** 推流 pacing 的**锚点对**:「某个播放位置」⇄「它对应的墙钟时刻」。
    *
    *  排程公式 `dueMs = paceAnchorWall + (i*FRAME_MS - paceAnchorMs)/speed`。
@@ -489,6 +495,9 @@ export class GroupPump {
 
   /** 播放一个音频缓冲:按组时间线切帧推送,推进 positionMs。 */
   async play(songId: string): Promise<void> {
+    // 新曲起播:预填充窗口重新打开(旧曲的 settle 状态不能带过来)。
+    this.prefillSettled = false;
+    this.prefillFilling = false;
     const source = injectedSource ?? defaultSource;
     // ③ 段 per-播放器音色(P4):本组共享流的音色片段,起播算一次(改配置下一首生效)。
     // 注入音源(测试)不读该 opts ⇒ 既有测试零影响。
@@ -987,6 +996,15 @@ export class GroupPump {
           targetUs > ANCHOR_SAFE_LEAD_US &&
           depthUs < targetUs - FRAME_MS * 1000 &&
           byteOk;
+        // ★ 起播预填充窗口的退出点,供服务端开环检测豁免灌水阶段。
+        //   注意:设备不消费时 `depthUs` 是**服务端自己**的游标(照实时推进),
+        //   wantFill 会恒 true ⇒ 光靠这条信号永远判不出本故障,server.ts 侧
+        //   另设 60s 硬回退(见 SINK_WATCH_PREFILL_MAX_MS)。
+        if (wantFill) this.prefillFilling = true;
+        else if (this.prefillFilling) {
+          this.prefillFilling = false;
+          this.prefillSettled = true;
+        }
         if (wantFill) {
           // ★ 预填充 / 回补:缓冲未达目标水位 → **不 sleep**,尽快灌。
           //   - 起播:一次灌到目标水位,而起播延迟仍只有锚点的 0.8s;

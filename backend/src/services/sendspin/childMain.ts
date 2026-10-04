@@ -322,6 +322,11 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         const v = esphomeBridge.mirroredVolume(String(p.host ?? ""));
         return v ? { volume: Math.round(v.volume * 100), muted: v.muted } : null;
       }
+      case "sinkHealth": {
+        // 开环检测只读:设备是否还在消费音频(ok/degraded/stalled)。
+        // 只读、不改任何状态 —— 判定与自愈都发生在子进程内部的采样轮上。
+        return srv?.sinkHealthOf(String(p?.clientId ?? "")) ?? "ok";
+      }
       case "applyCfg": {
         // 配置热更新(主进程 DB 为单一可信源):只管 server 字段。
         const cfg = p as SendspinIpcConfig;

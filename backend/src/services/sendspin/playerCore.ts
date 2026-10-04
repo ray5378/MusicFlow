@@ -206,7 +206,7 @@ export function handoverCore(
   //    的 ffmpeg 子进程)也必须杀,否则孤儿进程。与 playCore 的收尾段逐条对齐。
   stopGroupPump(gTo);
   gTo.current = null;
-  gTo.finishPlayback();
+  gTo.finishPlayback({ silentState: true });
   gTo.close();
   // ② 目标组就位(先成员 + 宣告,后搬泵 —— 见上文顺序说明)。
   for (const c of conns) {
@@ -289,7 +289,7 @@ export function playCore(
   } else {
     // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end。
     g.current = null;
-    g.finishPlayback();
+    g.finishPlayback({ silentState: true });
   }
   g.positionMs = seekPositionMs ?? 0;
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
@@ -381,7 +381,7 @@ export function playGroupCore(
   } else {
     // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end。
     g.current = null;
-    g.finishPlayback();
+    g.finishPlayback({ silentState: true });
   }
   g.positionMs = seekPositionMs ?? 0;
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
