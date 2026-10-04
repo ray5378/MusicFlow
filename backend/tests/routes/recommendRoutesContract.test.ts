@@ -30,7 +30,7 @@ vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
   return { ...actual, ...overrides, ...f };
 });
 
-import { recommendCache } from "../../src/routes/api/shared.js";
+import { recommendCache, clearProviderRecommendCache } from "../../src/routes/api/shared.js";
 import { registerRecommend } from "../../src/routes/api/recommend.js";
 
 type Any = any;
@@ -58,6 +58,7 @@ const cap = (id: string, impl?: Any, capabilities: string[] = []) => ({
 
 beforeEach(() => {
   recommendCache.clear();
+  clearProviderRecommendCache();
   f.firstEnabledByCapability.mockReset().mockReturnValue(undefined);
   f.getEnabledByCapability.mockReset().mockReturnValue([]);
   f.getPlugin.mockReset().mockReturnValue(undefined);
@@ -258,6 +259,19 @@ describe("GET /v1/local-recommend", () => {
     ]);
     const b = await json(await get("/v1/local-recommend"));
     expect(b.channels.map((c: Any) => c.source)).toEqual(["first", "second"]);
+  });
+
+  it("P1-1:manifest 声明 recommendCacheTtlSeconds 的 provider 结果 TTL 内复用;未声明者每次重算", async () => {
+    const cached = vi.fn(async () => ({ channels: [{ source: "chart", sortOrder: 1, playlists: [] }] }));
+    const plain = vi.fn(async () => ({ channels: [{ source: "local", sortOrder: 2, playlists: [] }] }));
+    f.getEnabledByCapability.mockReturnValue([
+      { manifest: { id: "chart-x", capabilities: ["localPlatformRecommend"], recommendCacheTtlSeconds: 120 }, impl: { recommendLocal: cached } },
+      { manifest: { id: "local-x", capabilities: ["localPlatformRecommend"] }, impl: { recommendLocal: plain } },
+    ]);
+    await get("/v1/local-recommend");
+    await get("/v1/local-recommend");
+    expect(cached).toHaveBeenCalledTimes(1); // 命中结果缓存
+    expect(plain).toHaveBeenCalledTimes(2);  // 未声明 → 每次重算
   });
 });
 

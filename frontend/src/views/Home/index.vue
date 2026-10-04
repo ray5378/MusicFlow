@@ -375,9 +375,16 @@ async function loadRecommend() {
 }
 
 onMounted(async () => {
+  // P1-3 渐进渲染:各分区基于各自响应式 ref 独立渲染(模板未整页骨架门控 loading)。
+  // 快加载器(歌单/本地随机/配置/固定卡)决定首屏 loading 复位;loadRecommend 聚合
+  // 含 go-music-dl + 全部榜单频道,冷缓存下可能很慢(前端超时已放宽到 150s),故让它
+  // 独立进行、不阻塞其它分区与 loading 复位。
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadRecommend(), loadLocalRandom(), loadHomeConfig(), loadHomeCards()]);
+  const fast = Promise.all([loadPlaylists(), loadLocalRandom(), loadHomeConfig(), loadHomeCards()]);
+  const slow = loadRecommend();
+  await fast;
   loading.value = false;
+  await slow;
 });
 </script>
 

@@ -681,6 +681,13 @@ export async function discoverExternalPlugins(
             const entries = sqlite.prepare("SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY position").all(String(playlistId)) as any[];
             return { ...p, entries };
           },
+          // P1-2:轻量只读入口 —— 只回 playlists 行,不查 playlist_songs(避免把整张
+          // 歌单条目跨 VM 编组回插件)。榜单类插件只读 id/name/cover_art/song_count 4 个
+          // 标量,用 getMeta 即可,每条省掉一次大查询;get 保留不动(仍需 entries 的照用)。
+          getMeta: async (playlistId: string) => {
+            const p = sqlite.prepare("SELECT * FROM playlists WHERE id = ?").get(String(playlistId)) as any;
+            return p || null;
+          },
           list: async () => {
             const rows = sqlite.prepare("SELECT id, name, song_count, duration, source_platform, source_plugin, created_at, updated_at FROM playlists ORDER BY created_at DESC").all() as any[];
             return rows;

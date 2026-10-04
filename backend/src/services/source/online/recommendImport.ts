@@ -19,6 +19,7 @@ import { importOnlineSongs } from "./service.js";
 import { crossVerifySongs } from "./match.js";
 import { OnlinePlaylistInfo } from "./types.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../../playlistCover.js";
+import { invalidatePlatformPool } from "../../plugin/localPlatformRecommend.js";
 import { refreshPlaylistCounts } from "../../plugin/shared.js";
 import { getPluginManifest, listRegistered } from "../../../plugins/registry.js";
 import { acquireBatchLock, sleepBetweenBatch } from "../../plugin/batchPacer.js";
@@ -60,6 +61,8 @@ export function isDailyRecommendPlaylist(pl: any): boolean {
 export function removePlaylistRows(playlistId: string): void {
   db.delete(playlistSongs).where(eq(playlistSongs.playlistId, playlistId)).run();
   clearPlaylistCoverCache(playlistId);
+  // P0-3:歌单行增删 → 首页「本地随机」候选池立即失效(其余写入点靠 120s TTL 兜底)。
+  invalidatePlatformPool();
   db.delete(playlists).where(eq(playlists.id, playlistId)).run();
 }
 
@@ -160,6 +163,8 @@ export async function replacePlaylistSongs(playlistId: string, songIds: { id: st
 
   refreshPlaylistCounts(playlistId);
   clearPlaylistCoverCache(playlistId);
+  // P0-3:歌单行增删 → 首页「本地随机」候选池立即失效(其余写入点靠 120s TTL 兜底)。
+  invalidatePlatformPool();
 }
 
 export interface ImportRecommendResult {

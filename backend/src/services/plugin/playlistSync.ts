@@ -5,6 +5,7 @@ import { eq, and, inArray } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { importPlaylistFromUrl, findUrlImporter, ImportedPlaylist, ImportedTrack } from "./playlistImport.js";
 import { cacheRemoteCover, clearPlaylistCoverCache } from "../playlistCover.js";
+import { invalidatePlatformPool } from "./localPlatformRecommend.js";
 import type { PluginManifest, SyncPlugin } from "../../plugins/types.js";
 import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 // 共享匹配/计数工具已收敛到 services/plugin/shared.ts(宿主中性模块),本插件只消费,
@@ -315,6 +316,8 @@ export async function syncPlaylist(playlistId: string, opts: RebuildOptions = {}
     }
     // Playlist entries changed -> clear the collage cache so it regenerates with new covers
     clearPlaylistCoverCache(playlistId);
+    // P0-3:平台歌单内容/封面变更 → 首页「本地随机」候选池立即失效(其余写入点靠 120s TTL 兜底)。
+    invalidatePlatformPool();
     // Keep playlist name in sync with the platform if user hasn't renamed it
     db.update(playlists).set({
       updatedAt: new Date().toISOString(),

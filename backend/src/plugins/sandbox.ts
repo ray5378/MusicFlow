@@ -274,6 +274,8 @@ export interface SandboxHostEnv {
   playlists: {
     upsert(playlistId: string, opts: { name?: string; description?: string; entries?: any[]; coverSongId?: string; coverUrl?: string; sourcePlatform?: string; sourceUrl?: string; externalId?: string }): Promise<any>;
     get(playlistId: string): Promise<any | null>;
+    /** 轻量只读:只回 playlists 行,不查 playlist_songs(榜单类插件只读标量字段)。 */
+    getMeta(playlistId: string): Promise<any | null>;
     /** 列出所有歌单(脱敏视图,不含 entries)。 */
     list(): Promise<any[]>;
     replaceEntries(playlistId: string, entries: any[]): Promise<any>;
@@ -845,6 +847,9 @@ export class SandboxedPlugin {
     const playlistsObj = c.newObject();
     const plUpsert = this.hostAsync("upsert", (playlistId: any, opts: any) => this.env.playlists.upsert(String(playlistId), opts || {}), "playlists:write");
     const plGet = this.hostAsync("get", (playlistId: any) => this.env.playlists.get(String(playlistId)), "playlists:write");
+    // P1-2:轻量只读入口(只回 playlists 行,不查 playlist_songs)。权限与 get 一致
+    // (playlists:write),榜单插件无需新增授权即可改用。
+    const plGetMeta = this.hostAsync("getMeta", (playlistId: any) => this.env.playlists.getMeta(String(playlistId)), "playlists:write");
     const plList = this.hostAsync("list", () => this.env.playlists.list(), "playlists:read");
     const plReplace = this.hostAsync("replaceEntries", (playlistId: any, entries: any) => this.env.playlists.replaceEntries(String(playlistId), entries || []), "playlists:write");
     const plCover = this.hostAsync("updateCover", (playlistId: any, coverSongId: any) => this.env.playlists.updateCover(String(playlistId), String(coverSongId)), "playlists:write");
@@ -852,12 +857,13 @@ export class SandboxedPlugin {
     const plDelete = this.hostAsync("delete", (playlistId: any) => this.env.playlists.delete(String(playlistId)), "playlists:write");
     c.setProp(playlistsObj, "upsert", plUpsert);
     c.setProp(playlistsObj, "get", plGet);
+    c.setProp(playlistsObj, "getMeta", plGetMeta);
     c.setProp(playlistsObj, "list", plList);
     c.setProp(playlistsObj, "replaceEntries", plReplace);
     c.setProp(playlistsObj, "updateCover", plCover);
     c.setProp(playlistsObj, "findBySource", plFindBySource);
     c.setProp(playlistsObj, "delete", plDelete);
-    plUpsert.dispose(); plGet.dispose(); plList.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose(); plDelete.dispose();
+    plUpsert.dispose(); plGet.dispose(); plGetMeta.dispose(); plList.dispose(); plReplace.dispose(); plCover.dispose(); plFindBySource.dispose(); plDelete.dispose();
 
     // host.fallback(软失败空结果契约 helper:无需权限,纯形状构造)
     const fallbackObj = c.newObject();

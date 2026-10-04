@@ -24,6 +24,7 @@ import {
   permMiddleware,
   playlists,
   plugins,
+  providerRecommendCache,
   recommendCache,
   runPluginJob,
   songs,
@@ -164,38 +165,56 @@ app.get("/v1/recommend", async (c) => {
 
 app.get("/v1/local-recommend", async (c) => {
   // 遍历所有具备该能力的插件,合并多插件的 channels(支持多提供方共存)。
+  // 并发调用各 provider(P0-1):把若干「榜单类」插件(P1-1 命中缓存后近乎零成本)与
+  // 内置「本地随机」(P0-3 池缓存后仅洗牌)的墙钟重叠,不再串行累加。各 provider 独立
+  // try/catch,单个失败只记 warn、不影响其它;合并结果最后统一按 sortOrder 排序。
   const providers = getEnabledByCapability("localPlatformRecommend");
   const allChannels: any[] = [];
-  for (const p of providers) {
-    if (typeof p.impl?.recommendLocal !== "function") continue;
-    try {
-      const result = await p.impl.recommendLocal(getPluginConfig(p.manifest.id) || {});
-      const channels = Array.isArray(result?.channels) ? result.channels : [];
-      for (const ch of channels) {
-        allChannels.push({
-          source: ch.source || "",
-          name: ch.name || ch.source || "",
-          count: ch.count || 0,
-          sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
-          // 可选展示文案(由提供方决定;缺省时前端回落为「本地随机」默认表述):
-          //   subtag  → 分区标题后缀(如「每日更新」),缺省用「本地随机」
-          //   tagline → 分区副标题说明,缺省用「从你的 X 歌单里随机(每次刷新不同)」
-          subtag: typeof ch.subtag === "string" ? ch.subtag : undefined,
-          tagline: typeof ch.tagline === "string" ? ch.tagline : undefined,
-          // 本地歌单:直接透传 DB 字段(coverArt 为本地封面 ref,三端用各自 cover 工具拼 URL)。
-          playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
-            id: pl.id ?? "",
-            name: pl.name ?? "",
-            coverArt: pl.coverArt ?? null,
-            songCount: pl.songCount ?? 0,
-            imported: true,
-          })),
-        });
+  await Promise.all(
+    providers.map(async (p) => {
+      if (typeof p.impl?.recommendLocal !== "function") return;
+      const pluginId = p.manifest.id;
+      // P1-1:仅当插件 manifest 显式声明 recommendCacheTtlSeconds(>0 秒)才缓存其结果。
+      // 完全由 manifest 字段驱动,核心不写死插件名;内置「本地随机」不声明该字段
+      // (需每次重洗),故永不进入该缓存分支。
+      const ttlSec = Number(p.manifest?.recommendCacheTtlSeconds);
+      const cacheable = Number.isFinite(ttlSec) && ttlSec > 0;
+      try {
+        let result: any;
+        const cached = cacheable ? providerRecommendCache.get(pluginId) : undefined;
+        if (cached && Date.now() - cached.ts < ttlSec * 1000) {
+          result = cached.result;
+        } else {
+          result = await p.impl.recommendLocal(getPluginConfig(pluginId) || {});
+          if (cacheable) providerRecommendCache.set(pluginId, { ts: Date.now(), result });
+        }
+        const channels = Array.isArray(result?.channels) ? result.channels : [];
+        for (const ch of channels) {
+          allChannels.push({
+            source: ch.source || "",
+            name: ch.name || ch.source || "",
+            count: ch.count || 0,
+            sortOrder: typeof ch.sortOrder === "number" ? ch.sortOrder : 99,
+            // 可选展示文案(由提供方决定;缺省时前端回落为「本地随机」默认表述):
+            //   subtag  → 分区标题后缀(如「每日更新」),缺省用「本地随机」
+            //   tagline → 分区副标题说明,缺省用「从你的 X 歌单里随机(每次刷新不同)」
+            subtag: typeof ch.subtag === "string" ? ch.subtag : undefined,
+            tagline: typeof ch.tagline === "string" ? ch.tagline : undefined,
+            // 本地歌单:直接透传 DB 字段(coverArt 为本地封面 ref,三端用各自 cover 工具拼 URL)。
+            playlists: (Array.isArray(ch.playlists) ? ch.playlists : []).map((pl: any) => ({
+              id: pl.id ?? "",
+              name: pl.name ?? "",
+              coverArt: pl.coverArt ?? null,
+              songCount: pl.songCount ?? 0,
+              imported: true,
+            })),
+          });
+        }
+      } catch (e: any) {
+        console.warn(`[LOCAL-RECOMMEND] ${p.manifest.id} recommendLocal() failed:`, e?.message || e);
       }
-    } catch (e: any) {
-      console.warn(`[LOCAL-RECOMMEND] ${p.manifest.id} recommendLocal() failed:`, e?.message || e);
-    }
-  }
+    }),
+  );
   // 按 sortOrder 升序排列(数值越小越靠前)
   allChannels.sort((a, b) => {
     const sa = typeof a.sortOrder === "number" ? a.sortOrder : 99;

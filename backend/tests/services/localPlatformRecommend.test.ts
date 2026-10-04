@@ -22,8 +22,10 @@ import {
   recommendLocalPlatforms,
   localPlatformRecommendPlugin,
   localPlatformRecommendManifest,
+  invalidatePlatformPool,
   LOCAL_PLATFORM_REC_PLUGIN_ID,
 } from "../../src/services/plugin/localPlatformRecommend.js";
+import { getPlaylistCover } from "../../src/services/playlistCover.js";
 
 const NOW = "2026-09-27T00:00:00.000Z";
 let owner = "";
@@ -113,6 +115,8 @@ beforeEach(() => {
   sqlite.prepare("DELETE FROM playlists").run();
   sqlite.prepare("DELETE FROM songs").run();
   clearCoverResolveCache();
+  // P0-3:候选池是进程内缓存,跨用例必须清空,否则前一用例的候选集合会串味。
+  invalidatePlatformPool();
   setPluginConfig({}, 1);
 });
 
@@ -282,5 +286,71 @@ describe("插件清单与入口", () => {
     const r = await localPlatformRecommendPlugin.recommendLocal();
     expect(r.channels).toHaveLength(1);
     expect(r.channels[0].source).toBe("qq");
+  });
+});
+
+
+describe("P0-2/P0-3:封面语义等价 + 候选池缓存 + 显式失效", () => {
+  it("coverArt 语义与 getPlaylistCover 逐字等价(同列 / 同扩展名门 / 同 resolveCoverFile)", () => {
+    // 自身封面(小写扩展名)存在 → pl-<id>
+    writeCover("pl-p-a.jpg");
+    seedPlaylist("p-a", "netease", { coverArt: "pl-p-a.jpg" });
+    // 大写扩展名同样命中(正则 /i)→ pl-<id>
+    writeCover("pl-p-b.PNG");
+    seedPlaylist("p-b", "netease", { coverArt: "pl-p-b.PNG" });
+    // 无扩展名的 cover_art → 不算自身封面(getPlaylistCover 亦返回 null)→ 无歌 → null
+    seedPlaylist("p-c", "netease", { coverArt: "pl-p-c" });
+
+    const byId: Record<string, any> = {};
+    for (const p of recommendLocalPlatforms().channels[0].playlists) byId[p.id] = p;
+
+    expect(byId["p-a"].coverArt).toBe("pl-p-a");
+    expect(byId["p-b"].coverArt).toBe("pl-p-b");
+    expect(byId["p-c"].coverArt).toBeNull();
+
+    // 直接对照详情页解析路径:非空/空与被测函数一致(证明未改变语义)。
+    expect(getPlaylistCover("p-a")).not.toBeNull();
+    expect(getPlaylistCover("p-b")).not.toBeNull();
+    expect(getPlaylistCover("p-c")).toBeNull();
+  });
+
+  it("TTL 内候选集合不变、但每次仍重新洗牌(随机性 100% 保留)", () => {
+    for (let i = 0; i < 6; i++) seedPlaylist(`p-r${i}`, "netease");
+    setPluginConfig({ homeCount: 6 }); // 池大小 == homeCount → 集合恒定,只有顺序可能变
+    const first = recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
+    expect(new Set(first).size).toBe(6);
+
+    const seenOrders = new Set<string>([first.join(",")]);
+    for (let i = 0; i < 25; i++) {
+      const ids = recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
+      // 候选集合始终相同(TTL 内不再重查库)
+      expect(new Set(ids)).toEqual(new Set(first));
+      seenOrders.add(ids.join(","));
+    }
+    // 25 次里至少出现 2 种不同顺序(6! 排列,几乎不可能全同 → 证明洗牌未被缓存吞掉)
+    expect(seenOrders.size).toBeGreaterThan(1);
+  });
+
+  it("TTL 内候选池只查库一次(稳态不再叠加 DB 往返)", () => {
+    seedPlaylist("p-n1", "netease");
+    seedPlaylist("p-n2", "qq");
+    const spy = vi.spyOn(sqlite, "prepare");
+    recommendLocalPlatforms();
+    recommendLocalPlatforms();
+    const poolQueries = spy.mock.calls.filter((a: any) => /FROM playlists/i.test(String(a[0]))).length;
+    expect(poolQueries).toBe(1);
+  });
+
+  it("invalidatePlatformPool() 后立即重建(新导入歌单立即可见)", () => {
+    seedPlaylist("p-old", "netease");
+    setPluginConfig({ homeCount: 50 });
+    expect(recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id)).toEqual(["p-old"]);
+    // 新增歌单但在 TTL 内 → 缓存未失效,仍只看到旧的
+    seedPlaylist("p-new", "netease");
+    expect(recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id)).toEqual(["p-old"]);
+    // 显式失效 → 立即重建,新歌单可见
+    invalidatePlatformPool();
+    const ids = recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
+    expect(new Set(ids)).toEqual(new Set(["p-old", "p-new"]));
   });
 });

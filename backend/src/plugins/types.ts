@@ -139,6 +139,12 @@ export interface PluginManifest {
    *  用于拉取平台/外网歌单等慢网络操作(如 go-music-dl 的 runDailyJob/playlistSongs)。
    *  上限 600000(10 分钟),未声明的方法一律维持 INVOKE_TIMEOUT_MS 看门狗。 */
   longRunning?: Record<string, number>;
+  /** recommender 插件专用(可选):本插件 recommendLocal() 结果在核心侧的缓存 TTL
+   *  (秒)。>0 时,核心按插件 id 缓存 recommendLocal 返回值,TTL 内直接复用、不再
+   *  每次请求都跨沙箱调用(输出只随本地歌单变化的确定性插件应声明此值)。
+   *  缺省 / 0 表示不缓存(如内置「本地随机」需每次重洗,不声明)。
+   *  核心完全由该字段驱动判定,不写死任何插件名。 */
+  recommendCacheTtlSeconds?: number;
   /**
    * 已在 longRunning 里声明预算、但**必须留在主线程**执行的方法名列表。
    *

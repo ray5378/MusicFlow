@@ -54,6 +54,7 @@ import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.j
 import { songSourceInfo, serializeSongRow, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
 import { getArtistList, setArtistList, invalidateArtistList } from "../../utils/artistListCache.js";
 import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
+import { invalidatePlatformPool } from "../../services/plugin/localPlatformRecommend.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { logLevelSnapshot, saveLogLevel } from "../../services/logSettings.js";
 import { isLogLevel } from "../../utils/logger.js";
@@ -160,6 +161,21 @@ export function clearRecommendCache(): void {
 // 空闲内存回收时一并清空(经注册回调,避免 reclaim 与路由层循环依赖)。
 
 registerCacheCleaner(() => { recommendCache.clear(); });
+
+// P1-1:外置 chart 类 provider 的 recommendLocal 结果缓存(由插件 manifest 的
+// recommendCacheTtlSeconds 字段驱动,核心不写死插件名)。key = 插件 id;
+// TTL 内直接复用结果 —— 仅「输出只随本地歌单变化的确定性 provider」才声明该字段。
+export const providerRecommendCache = new Map<string, { ts: number; result: any }>();
+/** 清空 provider 结果缓存(供测试 / 管理端「立即刷新」使用)。 */
+export function clearProviderRecommendCache(): void {
+  providerRecommendCache.clear();
+}
+// 空闲内存回收时一并清空。
+registerCacheCleaner(() => { providerRecommendCache.clear(); });
+
+// P0-3:内置「本地随机」候选池缓存的回收(在该插件模块内自注册会因 load 期模块环
+// 触发 TDZ,故在本中枢统一注册;invalidatePlatformPool 只是置空一个模块级变量)。
+registerCacheCleaner(() => { invalidatePlatformPool(); });
 
 /** 归一化歌名供兜底比对:去空白、去尾部省略号、小写。 */
 
