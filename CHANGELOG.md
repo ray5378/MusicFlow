@@ -2,6 +2,82 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.85] - 2026-10-04
+
+### 性能（Web 首页打开慢：240 真机冷态 14.3s → 1.0s、热态 2.0s → 0.47s）
+
+- **根因定位（240 容器内耗时分解实测）**：`/v1/local-recommend` 是首页 5 个数据源里唯一
+  「零缓存」且逐歌单做封面 N+1 查询的链路。真瓶颈不是日志里那 5 个榜单外置插件（合计仅
+  60~200ms），而是**内置 `local-random-recommend`**（695/857/190ms，占 62~77%）；且封面解析
+  对 240 个歌单额外发起 240 次 drizzle 全行查询（主 SQL 已 `SELECT cover_art`，却又逐条调
+  `getPlaylistCover()`）。
+- **P0-1 provider 遍历并发化**：`backend/src/routes/api/recommend.ts` 的 `local-recommend`
+  由串行 `for` 改 `Promise.all`，每个 provider 独立 try/catch，单个失败不影响其余。
+- **P0-2 封面解析去 N+1**：`backend/src/services/plugin/localPlatformRecommend.ts` 直接用主
+  SQL 已取回的 `r.cover_art` 做「扩展名合法 + `resolveCoverFile` 存在」判定，与
+  `getPlaylistCover()` 的判定逐字等价，省掉 240 次多余查询。
+- **P0-3 候选池缓存（保留随机语义）**：新增 `platformPoolCache` + `PLATFORM_POOL_TTL_MS=120s`
+  + `invalidatePlatformPool()`。TTL 内只固定候选集合与封面解析结果，**每次请求仍然 shuffle**，
+  「每次刷新都不一样」的体验不变。
+- **P1-1 provider 结果缓存（插件自治，核心不写死插件名）**：核心读插件 manifest 的
+  `recommendCacheTtlSeconds`（>0 才缓存，key=pluginId）；`backend/src/plugins/types.ts` 新增
+  该可选字段。5 个榜单插件声明 120s（配套插件同步发版，见下）。
+- **P1-2 新增轻量宿主 API `host.playlists.getMeta(id)`**：只返回 `playlists` 行，不再跨
+  QuickJS/WASM VM 编组整张歌单 entries；权限沿用 `playlists:write`。同步注册 `sandbox.ts`
+  进程内表面与 `sandboxWorker.ts` worker 桥。
+- **P1-3 前端首页请求解耦**：`frontend/src/views/Home/index.vue` 的 `onMounted` 拆成
+  「快路径先就绪、慢路径后到」。注：`loading` ref 当前未被模板消费，故此项为纯结构性解耦，
+  视觉收益为 0（如实记录）。
+
+### 修复（沙箱宿主句柄泄漏 + ffmpeg 出流永不回收，均 240 定量证实）
+
+- **沙箱宿主异步句柄泄漏**：`backend/src/plugins/sandbox.ts` 的
+  `deferred.resolve(jsToHandle(value))` 中 **`resolve` 不消费传入 handle**，调用方必须自行
+  dispose；旧代码三处（并发拒绝分支 / 成功分支 / 错误路径）均未 dispose → QuickJS 引用计数
+  不归零 → 堆单调增长（+1454 B/call），teardown 命中
+  `Assertion failed: list_empty(&rt->gc_obj_list), at quickjs.c:2036, JS_FreeRuntime`。
+  修法：先取句柄 → `resolve` → 在 `!skipHostResultDispose()` 时 `safeDispose`。
+  240 实测：60 轮真实 provider 调用后 `external` 21.5→21.5MB（+0）、QuickJS `obj_count`
+  4282→4282（+0），两条曲线完全拉平。新增**仅测试用**只读开关
+  `SANDBOX_LEAK_HOST_RESULT=1`（默认关，生产恒释放），供回归用例复现泄漏面。
+- **ffmpeg DLNA 出流看门狗**：`backend/src/routes/rest/index.ts` 的 `serveFfmpegPipe` 原回收
+  仅依赖 `c.req.raw.signal` abort / child exit+error / `stdout.on("close")`；渲染端 socket
+  半开时三者都不触发 → 转码进程永久驻留（240 实测 7 个进程存活 3.5–15.2h，回环 TCP 仍
+  ESTABLISHED、服务端 tx_queue 堆到 2.5–4MB 而 rx_queue=0）。修法：① `registerFfmpegPipe`
+  登记 / exit+error 注销；② `stdout.on("data")` 刷新 `lastDataAt`；③ 周期对账器（`setInterval`
+  30s、`.unref()`、幂等）：连续 **90s** 无 stdout 字节 或 存活超硬性 **6h** → SIGKILL + 注销；
+  ④ `killOnCancel()` 包响应流，cancel 时立即 `child.kill()`。`backend/src/index.ts` 在
+  `startOrphanPruner()` 后启动对账器（不做启动期对账，避免重启瞬间误杀）。
+- **显式失效点补齐**：`services/plugin/playlistSync.ts` 与
+  `services/source/online/recommendImport.ts` 在 `clearPlaylistCoverCache` 后补调
+  `invalidatePlatformPool()`；其余写点靠 120s TTL 自然收敛。注册点放在
+  `routes/api/shared.ts`（在模块顶层自注册会触发模块环 TDZ：
+  `Cannot access 'cleaners' before initialization`）。
+
+### 测试
+
+- 新增 `backend/tests/plugins/sandboxHostDispose.test.ts`(139)、
+  `backend/tests/rest/ffmpegWatchdog.test.ts`(84)、
+  `backend/tests/services/localPlatformRecommend.test.ts`(70)，并扩充
+  `backend/tests/routes/recommendRoutesContract.test.ts`。
+- QA 独立回归守卫 `backend/tests/qa_perf/`（4 文件 580 行）：封面等价性（逐字比对新判定 vs 旧
+  `getPlaylistCover`）、随机性守卫（TTL 内仍重洗）、provider 缓存语义、ffmpeg 看门狗边界。
+  3 处变异均让守卫变红（有判别力）。
+- 240 真机实测（热替换 dist）：串行冷态 **14297.7 → 1044.7ms（−93%）**、
+  串行热态 1996.9 → 471.4ms（−76%）、并行热态 797.2 → 250.4ms（−69%）；
+  真实 HTTP 热态下限约 133ms。
+
+### 配套插件（MusicFlow-plugins 同步发版）
+
+- 5 个榜单插件（apple-music / huawei-chart / kugou-chart / netease-chart / qq-chart）声明
+  `recommendCacheTtlSeconds: 120`。
+- 6 处 `host.playlists.get(` 改 `host.playlists.getMeta(`，并做**兼容降级**
+  （`host.playlists.getMeta || host.playlists.get`）——不抬高 `minAppVersion`，
+  保证旧核心上不因 `getMeta` 缺失而静默丢失该平台榜单分区。
+- 版本：apple-music 1.0.4→**1.0.5**、huawei-chart 1.2.0→**1.2.1**、
+  kugou-chart 1.7.0→**1.7.1**、netease-chart 1.7.0→**1.7.1**、qq-chart 1.7.0→**1.7.1**
+  （由插件仓 CI push master 自动打 tag + Release）。
+
 ## [4.0.84] - 2026-10-04
 
 ### 修复
