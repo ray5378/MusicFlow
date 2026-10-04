@@ -22,6 +22,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { SendspinGroup, DEVICE_BUFFER_HEADROOM_RATIO } from "./server.js";
 import { setNowUsOverride } from "./clock.js";
+import { GroupPump, overridePumpSource, type GroupAudio } from "./streamEngine.js";
 
 /** 造一个只用于「纯方法」测试的组:server 只被日志路径用到,给个 no-op 桩即可。 */
 function makeGroup(capBytes?: number): SendspinGroup {
@@ -173,4 +174,74 @@ describe("seedLateJoin:回填也按**真实压缩字节**封顶(而非只按时�
     const n2 = fixture2.g.seedLateJoin(fixture2.c);
     expect(n2).toBeGreaterThan(n);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 运行时集成(★ 本体修复的判别力所在)
+//
+// 上面的纯方法测试**钉不住**真正的运行时改动 —— `streamEngine` 里的
+// `wantFill && byteOk`。若把 `&& byteOk` 整段删掉,纯方法测试仍全绿。
+// 故这里用最小桩 group 驱动 `GroupPump.play`(pushLoop),实测:
+//   · 无闸(budget=0,= 未宣告容量的向后兼容路径)→ 预填充一次性猛灌到水位;
+//   · 有闸(budget 被派生占用在第 1 帧顶满)→ 立即停灌,之后按 1x 配速。
+// 撤掉 `&& byteOk` ⇒ 有闸与无闸帧数相同 ⇒ 本用例变红。
+// ---------------------------------------------------------------------------
+describe("运行时集成:streamEngine 的字节闸真会「停灌」(撤掉 `&& byteOk` 即变红)", () => {
+  /** 桩 group:pushFrame 逐帧递增 frames;bufferedCompressedBytes 由 frames 派生。 */
+  function gateStub(budget: number, bytesPerFrame: number) {
+    let frames = 0;
+    const logs: string[] = [];
+    const group: any = {
+      name: "g",
+      positionMs: 0,
+      timelineBaseUs: 0n,
+      current: { songId: "s", durationMs: 0 },
+      commonSendAheadUs: () => 800_000,
+      resetPushMeter: () => {},
+      hasMeasuredRate: () => true,
+      encodedBytesPerSec: () => 96_011,
+      deviceCapacityBytes: () => 4_800_000,
+      capacityLimitedPrefillMs: () => 30_000,
+      prefillByteBudget: () => budget,
+      bufferedCompressedBytes: () => frames * bytesPerFrame,
+      async pushFrame(_ts: bigint, pcm: Float32Array) {
+        frames++;
+        return Math.floor(pcm.length / 2);
+      },
+    };
+    const server: any = { log: (_lvl: string, msg: string) => logs.push(String(msg)) };
+    return { group, server, logs, frames: () => frames };
+  }
+
+  async function burst(budget: number, bytesPerFrame = 100_000) {
+    const { group, server, logs, frames } = gateStub(budget, bytesPerFrame);
+    overridePumpSource(async (): Promise<GroupAudio> => ({
+      pcm: new Float32Array(20 * 48_000 * 2),
+      durationMs: 20_000,
+    }));
+    const pump = new GroupPump(server, group);
+    await pump.play(`gate-${budget}-${bytesPerFrame}`);
+    await new Promise((r) => setTimeout(r, 300)); // 观察预填充突进阶段
+    pump.stop();
+    return { frames: frames(), logs };
+  }
+
+  afterEach(() => overridePumpSource(null));
+
+  it("预算 100000、每帧派生 100000B:第 1 帧即达预算 → 突进被压住(远少于无闸)", async () => {
+    process.env.SENDSPIN_PREFILL_MS = "5000"; // 目标 5s:无闸会一次灌到水位(≈200 帧)
+    try {
+      const off = await burst(0); // 无闸(向后兼容路径)
+      const on = await burst(100_000); // 有闸
+      // 无闸:一次性灌到 5s 水位 → 大量突进帧
+      expect(off.frames).toBeGreaterThan(60);
+      // 有闸:第 1 帧即达预算 → 停灌,之后实时配速 → 窗口内帧数远小
+      expect(on.frames).toBeLessThan(40);
+      expect(on.frames).toBeLessThan(off.frames);
+      // 一次性日志:证明确实走了「按真实排队字节封顶」分支
+      expect(on.logs.some((m) => m.includes("真实排队字节"))).toBe(true);
+    } finally {
+      delete process.env.SENDSPIN_PREFILL_MS;
+    }
+  }, 20_000);
 });
