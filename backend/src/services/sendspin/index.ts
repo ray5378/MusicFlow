@@ -495,7 +495,8 @@ export async function sendspinSaveEsphomeCreds(
 }
 
 /** 设**设备自身**音量(0..100 → 0..1),走 6053 的 speaker 硬件输出,
- *  与音乐采样增益(Sendspin group volume)是两个旋钮,实际响度 = 两者相乘。 */
+ *  4.0.87 起两者是**同一个旋钮**:Sendspin 音量一律经 server/command 直控设备
+ *  输出级、采样恒满幅,不存在「采样增益 × 硬件音量」的乘算(见 offloadsVolume)。 */
 export async function sendspinSetEsphomeVolume(
   clientId: string,
   volume: number,

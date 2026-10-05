@@ -146,8 +146,8 @@ app.put("/v1/sendspin/devices/:clientId/disabled", permMiddleware(PERM.RENDERER_
 //
 // 作用有两个:①读设备侧 media_player 真值(「推的流有没有真的在播」的独立判据
 // + 音量回显);②写**设备自身**音量(speaker 硬件输出)。注意这与音乐采样增益
-// (Sendspin group volume,见 POST /v1/peers/:peerId/volume)是**两个旋钮**,
-// 实际响度 = 两者相乘,所以 UI 上分开,不要合并。
+// 4.0.87 起这两个入口**不再相乘**:Sendspin 音量一律经 server/command 直控设备
+// 输出级、采样恒满幅,二者其实是同一个物理旋钮 —— UI 分开只是作用面/场景不同。
 
 /** 某一台设备的 6053 状态 + 已保存的密钥(供弹窗回显、便于核对与复制)。
  *

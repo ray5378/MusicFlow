@@ -257,8 +257,9 @@
             </div>
             <!-- 在线:禁用/恢复 → 配对/解绑 → 重命名(与 DLNA 同序)。 -->
             <template v-if="dev.online">
-              <!-- 设备音量(6053):调的是**设备自身**的硬件输出,与音乐采样增益
-                   (组音量)是两个旋钮,实际响度 = 两者相乘,所以入口独立、不并进组音量。
+              <!-- 设备音量(6053):调的是**设备自身**的硬件输出。4.0.87 起它与组音量
+                   **不是两个相乘的旋钮** —— 组音量同样直控设备输出级,二者是同一个
+                   物理旋钮的两个入口,只是作用面/权限不同。入口仍独立、不并进组音量。
                    未配密钥时**照常显示**并置灰徽标 —— 藏起来用户就找不到填密钥的地方。 -->
               <el-button
                 v-if="canUse && dev.clientId"
@@ -552,8 +553,8 @@
       <SendspinPairing :client-id="pairTarget" />
     </el-dialog>
 
-    <!-- 设备音量(ESPHome 6053,每台设备各自一把密钥)。
-         两个旋钮的关系必须写清楚:这条滑杆 = 播放器自己的硬件音量,音乐音量另算。 -->
+    <!-- 设备音量(ESPHome 6053,每台设备各自一把密钥)。4.0.87 起它与组音量是同一
+         个物理旋钮的两个入口(组音量同样直控设备输出级),不是「相乘」的两份音量。 -->
     <el-dialog
       v-model="showDeviceVolume"
       :title="t('groups.sendspinDeviceVolumeTitle', { name: deviceVolumeName })"
@@ -1136,11 +1137,10 @@ async function toggleSendspinDisabled(dev: any, disabled: boolean): Promise<void
 }
 
 // ---- Sendspin **设备自身**音量(ESPHome 6053;每台设备各自一把密钥) ----
-// 与**组音量**的区别必须清楚:那条是**音乐采样增益**(Sendspin group volume,
-// 全组一份 —— 成员行那把旋钮已移除,见上方 Groups 脚本区的 ⚠️ 注释),
-// 这条是**设备硬件输出**(6053 的 media_player volume)。实际响度 =
-// 两者相乘,所以 UI 不合并、端点也不共用(/v1/peers/:id/volume vs
-// /v1/sendspin/devices/:id/esphome/volume)。
+// 与**组音量**的区别必须清楚:4.0.87 起两条都是**直控设备输出级**(采样恒满幅),
+// 不再是「相乘」的两份音量 —— 那条全组一份(成员行那把旋钮已移除,见上方 ⚠️ 注释),
+// 这条是设备自身 6053 的 media_player volume。所以 UI 不合并、端点也不共用
+// (/v1/peers/:id/volume vs /v1/sendspin/devices/:id/esphome/volume)。
 const showDeviceVolume = ref(false);
 const deviceVolumeClientId = ref("");
 const deviceVolumeName = ref("");
