@@ -22,6 +22,11 @@ const DEFAULTS = {
 
   // ---- services/sendspin/index.ts ----
   sendspinEsphomeStatus: async () => ({ devices: [] as Any[] }),
+  // 开环健康(ok / degraded / stalled)。4.0.86 起路由要给在线连接行回
+  // `streamHealth: srv.sinkHealthOf(clientId)`(见 routes/api/sendspin.ts),
+  // 服务层真实行为由 src/services/sendspin/sinkHealth.test.ts 覆盖;
+  // 路由层默认给 ok,需要制造 stalled 的用例用 mockImplementation 覆盖。
+  sinkHealthOf: () => "ok" as Any,
   sendspinSetDisabled: async () => true,
   sendspinGetEsphomeVolume: async () => null as Any,
   sendspinSaveEsphomeCreds: async () => ({ host: "" }) as Any,

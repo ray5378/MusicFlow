@@ -57,6 +57,18 @@ export interface SendspinServerOptions {
    *  缺省 `pcm`(见 negotiateCodec 注释里 2026-09-17 ESP32 真机实测)。这只决定
    *  **优先顺序**,不是强制:设备不支持所选时仍自动退到另一种。 */
   preferredCodec?: SendspinCodecPreference;
+  /** sink 自愈**自动远程重启**(L2)开关 —— 缺省 **false**。
+   *
+   *  为什么默认关:`bufferedAmount` 是「服务端看着自己发不出去」的推断,不是设备侧
+   *  事实;服务端此刻还订阅不到设备日志流(排在 4.0.87),拿不到设备到底卡在哪一步
+   *  (是 latch 锁死、还是真在解码只是没声)。假阳 —— 把一台正在正常播放的机器
+   *  按重启;漏判 —— 继续无声。两者代价不对称(重启代价大、且可人工兜底),
+   *  所以阶梯先给到 L1 探针(只发 `stream/end`,不改播放状态),重启必须显式开。
+   *
+   *  开了之后的节奏:3 窗 stalled → L0 告警 → 满 60s → L1 `stream/end` 探针
+   *  → 再满 5min → L2 远程重启(下发后长冷却 10min)。
+   *  设备日志流接上以后可以在配置页翻 true。 */
+  sinkAutoRestart?: boolean;
   /** 连接完成 server/activate（播放器可用）后的回调——用于注册 QueueController 播放器。 */
   onActivated?: (conn: SendspinConnection) => void;
   /** 连接关闭（含握手失败/断流）后的清理回调。 */
@@ -161,6 +173,8 @@ export class SendspinServer {
   /** 运行时可热更新(插件配置页切换,见 PUT /v1/plugins/:id)。
    *  只影响**之后**建立的新连接/新起播流的 codec 协商,不断当前流。 */
   preferredCodec: SendspinCodecPreference;
+  /** 运行时可读(自愈阶梯 L2 分支用;插件配置页可翻,见 SendspinServerOptions)。 */
+  sinkAutoRestart: boolean;
   /** 配对记录(长配对 PSK / 未配对批准)。无则握手恒走 sentinel(配对功能关闭)。 */
   pairingStore: PairingStore | null = null;
   /** 配对编排(由 index.ts 在 store 就绪后注入;无则 pair/* 直接忽略)。 */
@@ -183,6 +197,7 @@ export class SendspinServer {
     this.serverName = opts.serverName ?? "MusicFlow Sendspin";
     this.allowLegacyClients = opts.allowLegacyClients !== false;
     this.preferredCodec = normalizeCodecPreference(opts.preferredCodec);
+    this.sinkAutoRestart = opts.sinkAutoRestart === true; // 默认关,理由见选项注释
     this.port = WS_PORT;
     this.onActivated = opts.onActivated;
     this.onClosed = opts.onClosed;
@@ -785,8 +800,27 @@ export class SendspinGroup {
       this.server.log("warn", `sendspin sink 自愈 L1: 发 stream/end 探针 client=${who} group=${g}`);
       return;
     }
-    // L2:协议内手段在 latch 锁死下均无判别力 ⇒ 远程重启这台设备。
+    // level >= 2 ⇒ 该动 L2(远程重启)了。
+    // ⚠️ 默认**不自动**重启:sinkAutoRestart=false 时钉死在「已到顶」,只复述告警 ——
+    //    `bufferedAmount` 只是推断,服务端此刻还拿不到设备侧事实(设备日志流排 4.0.87),
+    //    假阳(把一台正在正常播放的机器按重启)的代价远大于漏判。手动路由
+    //    POST /v1/sendspin/devices/:clientId/esphome/restart 仍可真实按下。
+    if (!this.server.sinkAutoRestart) {
+      c.sinkRecoveryLevel = 3; // 钉在「已到顶」,别每 60s 刷同一条
+      this.server.log(
+        "warn",
+        `sendspin sink 自愈停在 L1: 自动重启默认关闭(sinkAutoRestart=false) client=${who} ` +
+          `group=${g} stalled=${c.sinkStalledSinceMs} — 设备侧可手动按重启按钮,或把 ` +
+          `sendspin-renderer 的 sink_auto_restart 打开`,
+      );
+      return;
+    }
+    // 协议内手段在 latch 锁死下均无判别力 ⇒ 只剩远程重启这一条路。
     void this.restartStalledMember(c);
+    // 重启命令已下发:阶梯归零,并把动作冷却**往前推** SINK_RESUME_COOLDOWN_MS ——
+    // 设备起回来之前绝不再按第二遍(否则每 5s 一轮重启,等于把机器按死)。
+    c.sinkRecoveryLevel = 0;
+    c.sinkLastRecoveryAt = now + SINK_RESUME_COOLDOWN_MS;
   }
 
   /** 「组内仍在 playing、且只有这一位卡住」才允许升到 L1 以上。
@@ -815,7 +849,9 @@ export class SendspinGroup {
       const r = esphomeBridge.restartDevice(host);
       this.server.log(
         r.ok ? "warn" : "error",
-        `sendspin sink 自愈 L2: ${r.ok ? "已按重启按钮" : `重启失败(${r.code})`} ` +
+        `sendspin sink 自愈 L2: ${r.ok
+          ? "重启命令已下发,设备约 3~5s 后重启"
+          : `重启失败(${r.code})`} ` +
           `client=${who} host=${host} group=${g}`,
       );
     } catch (e: any) {
@@ -1273,12 +1309,21 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
  *
  *  唯一能观测「设备是否还在消费」的信号是 **ws 发送侧堆积** `ws.bufferedAmount`:
  *  健康态实测 0~13KB 突发,故障态稳定停在 58585B 平台。 */
-const SINK_STALL_THRESHOLD_BYTES = 32_000; // 健康峰值 13KB ×2.5,故障平台 58585 ×0.55
-const SINK_STALL_RECOVER_BYTES = 16_000;   // 回落到它以下 = 这一窗只是正常过冲后排空
-const SINK_STALL_WINDOWS = 3;              // 连续 3 窗(≈30s)峰值超阈值 ⇒ stalled
-const SINK_WATCH_CONNECT_GRACE_MS = 10_000;// 建连后不判
-const SINK_WATCH_PREFILL_MAX_MS = 60_000;  // 预填充迟迟不 settle 的硬回退(见 sampleSinkHealth)
-const SINK_RECOVERY_COOLDOWN_MS = 5_000;   // 每级恢复动作之间的冷却
+/** 三档阈值(导出给回归守卫:阈值被人改坏时,对应用例必须红)。 */
+export const SINK_STALL_THRESHOLD_BYTES = 32_000; // 健康峰值 13KB ×2.5,故障平台 58585 ×0.55
+export const SINK_STALL_RECOVER_BYTES = 16_000;   // 回落到它以下 = 这一窗只是正常过冲后排空
+export const SINK_STALL_WINDOWS = 3;              // 连续 3 窗(≈30s)峰值超阈值 ⇒ stalled
+export const SINK_RECOVERY_COOLDOWN_MS = 5_000;   // 每级恢复动作之间的冷却
+/** 判 stalled 之后,每再满这么久才把自愈阶梯往上推一格(L0 复述 → L1 探针 → L2 重启)。
+ *  60s 的依据:故障态是**永久不恢复**,早 1s 晚 1s 用户感知不到;但一次网络抖动
+ *  往往 10~20s 内就排空了,给足这段时间才动手,宁可晚一点也别误伤。 */
+export const SINK_RECOVERY_STEP_MS = 60_000;
+/** L1 探针之后还要再等这么久才允许 L2 远程重启(累计 ≈ 7min 仍无回落)。 */
+export const SINK_RECOVERY_L2_MS = 300_000;
+/** L2 下发重启后的长冷却:设备重连回来之前绝不重复按同一台机器。 */
+export const SINK_RESUME_COOLDOWN_MS = 10 * 60_000;
+export const SINK_WATCH_CONNECT_GRACE_MS = 10_000;// 建连后不判
+export const SINK_WATCH_PREFILL_MAX_MS = 60_000;  // 预填充迟迟不 settle 的硬回退(见 sampleSinkHealth)
 
 export class SendspinConnection {
   id: string;
@@ -1840,6 +1885,12 @@ export class SendspinConnection {
       if (this.sinkHealth !== "ok") {
         this.sinkHealth = "ok";
         this.sinkStalledSinceMs = 0;
+        // 设备已经排空 ⇒ 这一场开环结束、阶梯归零(下次再卡从 L0 重新走)。
+        // 不归零的话,下一场故障会带着上一次留下的 level 起跳,直接跳到 L2 重启。
+        if (this.sinkRecoveryLevel !== 0) {
+          this.sinkRecoveryLevel = 0;
+          this.sinkLastRecoveryAt = 0;
+        }
       }
       return;
     }
@@ -1847,7 +1898,24 @@ export class SendspinConnection {
     if (this.lastBufferedAmount <= SINK_STALL_THRESHOLD_BYTES) return;
     this.sinkStallWindows += 1;
     if (this.sinkStallWindows < SINK_STALL_WINDOWS) return;
-    if (this.sinkHealth === "stalled") return; // 已判过,交给组去自愈
+    // ④ 已经判过 stalled 之后,每窗都要走到这里 —— 故障态的队列**永不回落**,
+    //    永远走不回 ③ 的清窗分支,所以不能「判过就 return」。自愈阶梯改由
+    //    「已 stall 了多久」驱动:满 SINK_RECOVERY_STEP_MS 才把组再往上推一格。
+    //    (旧实现在这里直接 return,导致 escalateSinkRecovery 全程只被调过一次,
+    //     L1 探针与 L2 重启全是死代码 —— 4.0.86 修复。)
+    if (this.sinkHealth === "stalled") {
+      // 阶梯节奏(锚点是 sinkStalledSinceMs)—— 注意**按「当前处于哪一级」取等待量**,
+      // 不是一律等满:判出来那次(L0)立刻走,之后每级各自等满自己的档期。
+      //   当前 level 0 → L0 告警   : 判出来的那一窗就发
+      //   当前 level 1 → L1 探针   : 再等满 STEP_MS
+      //   当前 level ≥2 → L2 重启  : 再等满 STEP_MS + L2_MS(中间每窗都会走到这里,
+      //                              到点才 escalate,所以「已到顶」那条告警不会每 5s 刷一遍)
+      const lv = this.sinkRecoveryLevel;
+      const need = lv === 0 ? 0 : lv === 1 ? SINK_RECOVERY_STEP_MS : SINK_RECOVERY_STEP_MS + SINK_RECOVERY_L2_MS;
+      if (now - this.sinkStalledSinceMs < need) return;
+      this.group?.escalateSinkRecovery(this);
+      return;
+    }
     this.sinkHealth = "stalled";
     this.sinkStalledSinceMs = now;
     this.group?.escalateSinkRecovery(this);

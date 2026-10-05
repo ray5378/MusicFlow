@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.86] - 2026-10-05
+
+### Sendspin 群组「播放中途突然无声」整改(设备侧固件不可改,服务端开环兜底)
+
+- **根因(240 取证坐实)**:sendspin-cpp `pending_start_` 一锤子锁 —— 只在 `sendspin_media_source.cpp:77`(紧邻 `:78 set_state_(PLAYING)`)清零,`:87` / `:175-180` / `:184-187` 都不复位。锁上之后重发 `stream/start` 会被 `if(!pending_start_)` 去重吞掉,设备再也回不到 IDLE;协议内软手段(重发 start / clear / server+activate / 切歌)全部无效,只剩掉电。判活只看 `State changed to PLAYING` —— `Stream Started` 出自网络线程,健康与故障都打,无判别力。
+- **新增 sink 开环检测**:唯一可观测信号是 `ws.bufferedAmount`(健康 0~13KB 突发,故障稳定 58585B 平台)。连续 3 窗(≈30s)峰值 > 32KB 判 `stalled`;回落到 < 16KB 清窗重计;建连 10s 宽限、起播预填充窗口豁免、60s 硬回退(设备不取数时 pump 恒停在 fill,不设硬回退就永远 arm 不上检测)。
+- **分级自愈(全程不改播放状态:不 pause / 不报 stopped / 不踢出群组)**:判出来 → L0 仅 WARN;满 60s → L1 发 `stream/end` 探针(协议里唯一能让设备回 IDLE 的消息,且不发 `group/update(stopped)`,免得把「无声」伪造成「正常停止」);再满 5min → L2 远程重启。
+- **L2 自动重启默认关**:`bufferedAmount` 只是推断,服务端尚订阅不到设备日志流,拿不到设备侧事实;假阳(把正在正常播放的机器按重启)与漏判(继续无声)代价不对称。开关位 `sendspin-renderer.sink_auto_restart`(缺省 false,改插件配置后重启服务生效),关着时降级为 WARN + 设备列表暴露 `streamHealth`,手动路由 `POST /v1/sendspin/devices/:clientId/esphome/restart` 仍可真实按下。
+- **修掉自愈阶梯的死代码**:`sampleSinkHealth` 原先在「已 stalled」时直接 return,导致 `escalateSinkRecovery` 全程只被调过一次,L1 / L2 永远发不出去。改为按「已 stall 多久」驱动(按当前所处级别取等待量),设备排空恢复时阶梯归零、下次故障从 L0 重新走;L2 下发后阶梯归零并前推 10min 冷却,设备回来前绝不再按第二遍。
+- **设备列表暴露健康态**:`GET /v1/sendspin/clients` 在线行新增 `streamHealth`(`ok` / `degraded` / `stalled`)。
+- **esphomeBridge 重启实体挑选**:只认 `object_id` 以 `restart` 结尾且排除 safe-mode 变体,命名不规范时按名字兜底并记 warn;拿不到实体 / 桥未连 / 发送失败一律返回 `ok:false` 不抛。
+- **切歌收尾不再误报停止**:`finishPlayback` 增加 `silentState` 选项,置位时只做流级收尾、不广播 `group/update(stopped)`(自愈探针专用)。
+- **回归守卫**:`sinkHealth.test.ts` 22 例(三窗计数 / 清窗 / 三档豁免 / 反例:阶梯靠时间推进 / L2 默认关与开启两条路径 / 闸门 / 实体挑选 / 健康聚合 / 阈值常量守卫 / 重启真实成功路径);阈值与节奏常量改为从实现 import,改坏即对应用例转红。
+
 ## [4.0.85] - 2026-10-04
 
 ### 性能（Web 首页打开慢：240 真机冷态 14.3s → 1.0s、热态 2.0s → 0.47s）

@@ -297,6 +297,8 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       preferredCodec: "pcm",
       streamSource: true,
       prefillBufferMs: 3000,
+      // sink 自动重启(sink_auto_restart)默认关,见 SendspinServerOptions 注释。
+      sinkAutoRestart: false,
     });
     expect(idx.isSendspinEnabled()).toBe(false);
   });
@@ -317,6 +319,8 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       preferredCodec: "flac",
       streamSource: false,
       prefillBufferMs: 500,
+      // sink 自动重启(sink_auto_restart)默认关,见 SendspinServerOptions 注释。
+      sinkAutoRestart: false,
     });
     expect(idx.isSendspinEnabled()).toBe(true);
   });

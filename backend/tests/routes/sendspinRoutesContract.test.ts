@@ -79,6 +79,8 @@ function makeSrv(over: Any = {}) {
     pairing,
     dialPlayer: vi.fn(async () => ({ clientId: "c9", name: "音箱" })),
     clearNoRedial: vi.fn(),
+    // 开环健康(ok / degraded / stalled):路由给在线连接行回 streamHealth。
+    sinkHealthOf: vi.fn(() => "ok"),
     ...over,
   };
   fns.sendspinServerOr404.mockReturnValue(srv);

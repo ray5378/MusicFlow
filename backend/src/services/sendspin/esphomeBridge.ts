@@ -132,6 +132,14 @@ interface Entry {
   entities: Map<string, EntityMeta>;
 }
 
+/** 规范重启按钮:object_id **以 restart 结尾**(如 )。
+ *  判死在尾部 ——  /  之类不该被当成重启本体。 */
+const RESTART_ENTITY_RE = /(^|[_.-])restart$/i;
+/** safe-mode 变体:object_id 也含 restart,但语义是「重启进安全模式」,必须排除。 */
+const SAFE_MODE_ENTITY_RE = /safe[_-]?mode/i;
+/** 兜底启发式:名字或 object_id 里带 restart(规范名挑不出来时才用,会告警)。 */
+const RESTART_HINT_RE = /restart/i;
+
 /** 保活目标上限:防止动态 IP 设备换地址后无限堆积。超出后丢弃最久未 attach 的。 */
 const MAX_DEVICES = 16;
 
@@ -373,11 +381,19 @@ class EsphomeBridge {
   /** 挑出该设备上**重启用**的 button 实体(只挑,不发)。
    *  匹配:name 或 objectId 含 restart —— ESPHome 侧即 `button: - platform: restart
    *  name: "esp32-player2 Restart"`(object_id 会被 to_snake_case 收成 xxx_restart)。 */
-  private restartButtonId(e: Entry): ReturnType<typeof entityId<"button">> | null {
+  private restartButtonId(e: Entry, host: string): ReturnType<typeof entityId<"button">> | null {
+    // ① 规范名优先:object_id 以 restart 结尾,且不是 safe-mode 变体。
+    //    必须跑在 ② 之前 —— safe-mode 按钮在实体表里常排在真重启之前。
     for (const meta of e.entities.values()) {
-      if (!meta.objectId) continue;
-      if (meta.type && meta.type !== "button") continue;
-      if (!/restart/i.test(`${meta.name} ${meta.objectId}`)) continue;
+      if (!meta.objectId || (meta.type && meta.type !== "button")) continue;
+      if (RESTART_ENTITY_RE.test(meta.objectId) && !SAFE_MODE_ENTITY_RE.test(meta.objectId))
+        return entityId("button", meta.objectId);
+    }
+    // ② 兜底:名字/object_id 里带 restart。按下的是猜的,显式告警让人能发现。
+    for (const meta of e.entities.values()) {
+      if (!meta.objectId || (meta.type && meta.type !== "button")) continue;
+      if (!RESTART_HINT_RE.test(`${meta.name} ${meta.objectId}`)) continue;
+      log.warn(`6053 重启实体命名不规范(${meta.objectId}),按下的是猜测结果: ${host}`);
       return entityId("button", meta.objectId);
     }
     return null;
@@ -392,7 +408,7 @@ class EsphomeBridge {
     const e = host ? this.entries.get(host) : undefined;
     if (!e) return { ok: false, code: "no-bridge", sent: 0 };
     if (!e.connected || !e.cli) return { ok: false, code: "not-connected", sent: 0 };
-    const id = this.restartButtonId(e);
+    const id = this.restartButtonId(e, host);
     if (!id) {
       log.warn(`6053 无重启实体(设备未暴露 restart 按钮): ${host}`);
       return { ok: false, code: "no-entity", sent: 0 };

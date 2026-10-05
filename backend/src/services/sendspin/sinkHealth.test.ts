@@ -22,16 +22,21 @@
 //   ⑦ 组级 health 聚合;
 //   ⑧ 全程不改播放状态(不 pause / 不报 stopped / 不踢出群组)。
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { SendspinConnection, SendspinGroup } from "./server.js";
+import {
+  SendspinConnection,
+  SendspinGroup,
+  // 阈值/节奏一律从**实现** import:谁把它们改坏了,下面的守卫用例必须红。
+  SINK_STALL_THRESHOLD_BYTES as THRESHOLD,
+  SINK_STALL_RECOVER_BYTES as RECOVER,
+  SINK_STALL_WINDOWS as WINDOWS,
+  SINK_WATCH_CONNECT_GRACE_MS as CONNECT_GRACE_MS,
+  SINK_WATCH_PREFILL_MAX_MS as PREFILL_MAX_MS,
+  SINK_RECOVERY_STEP_MS as STEP_MS,
+  SINK_RECOVERY_L2_MS as SINK_L2_MS,
+  SINK_RESUME_COOLDOWN_MS as RESUME_COOLDOWN_MS,
+} from "./server.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { peekPump, pumpFor } from "./streamEngine.js";
-
-/** 采样与判定的阈值(与 server.ts 常量一致,故意不 import 私有常量)。 */
-const THRESHOLD = 32_000;
-const RECOVER = 16_000;
-const WINDOWS = 3;
-const CONNECT_GRACE_MS = 10_000;
-const PREFILL_MAX_MS = 60_000;
 
 type Conn = SendspinConnection & { sampleSinkHealth(): void };
 
@@ -152,12 +157,86 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
     expect(c.sinkHealth).toBe("stalled");
     expect(c.sinkRecoveryLevel).toBe(1); // L0 已执行
     expect(sent).toEqual([]); // L0 不动流
-    // 已判过就不再重复触发(每 10s 一窗,不会每窗都 escalation)
+    // 判出来后的第一档内(STEP_MS)什么都不该再做 —— 网络抖动常常自己排空,别瞎动。
+    // 注意这里**不是**「判过就永久不再触发」:那条早退会把 L1/L2 变成死代码,
+    // 真正的 repeat 靠「已 stall 多久」驱动(见 ④-反例)。
     pumpWindows(c, 5, THRESHOLD + 1000);
     expect(c.sinkRecoveryLevel).toBe(1);
     expect(sent).toEqual([]);
     expect(group.paused).toBe(false);
     expect(group.current).not.toBeNull();
+  });
+
+  it("④-反例(关键回归):判 stalled 后阶梯靠时间继续往上走,L1 探针必须发得出去", () => {
+    vi.useFakeTimers();
+    try {
+      const c = makeConn(group);
+      group.members.add(c);
+      const sent: string[] = [];
+      c.sendJson = ((t: string) => {
+        sent.push(t);
+        return;
+      }) as any;
+      pumpWindows(c, WINDOWS, THRESHOLD + 1000);
+      expect(c.sinkHealth).toBe("stalled");
+      expect(c.sinkRecoveryLevel).toBe(1); // L0
+
+      vi.advanceTimersByTime(STEP_MS - 1);
+      pumpWindows(c, 3, THRESHOLD + 1000);
+      expect(c.sinkRecoveryLevel).toBe(1); // 还没到点,不动
+      expect(sent).toEqual([]);
+
+      vi.advanceTimersByTime(STEP_MS);
+      pumpWindows(c, 1, THRESHOLD + 1000);
+      expect(c.sinkRecoveryLevel).toBe(2); // L1 已执行
+      expect(sent).toContain("stream/end");
+      expect(sent.filter((t) => t === "group/update")).toEqual([]); // L1 不改播放状态
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("④ L2 默认关(sinkAutoRestart=false):到点只复述告警,绝不按重启", () => {
+    const c = makeConn(group);
+    group.members.add(c);
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2; // 已经历 L0/L1
+    c.sinkLastRecoveryAt = 0;
+    group.escalateSinkRecovery(c);
+    expect(spy).not.toHaveBeenCalled();
+    expect(c.sinkRecoveryLevel).toBe(3); // 钉在「已到顶」,别每窗刷同一条
+    spy.mockRestore();
+  });
+
+  it("④ L2 开了:重启下发后阶梯归零 + 冷却前推(设备回来前绝不重复按)", () => {
+    const c = makeConn(group);
+    group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2;
+    c.sinkLastRecoveryAt = 0;
+    const before = Date.now();
+    group.escalateSinkRecovery(c);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(c.sinkRecoveryLevel).toBe(0);
+    expect(c.sinkLastRecoveryAt).toBeGreaterThanOrEqual(before + RESUME_COOLDOWN_MS);
+    spy.mockRestore();
+  });
+
+  it("⑨ 常量守卫:阈值/节奏被人改坏了,这里必须红", () => {
+    expect(RECOVER * 2).toBeLessThanOrEqual(THRESHOLD); // 16KB~32KB 中间带得真实存在
+    expect(WINDOWS).toBe(3);
+    expect(CONNECT_GRACE_MS).toBe(10_000);
+    expect(PREFILL_MAX_MS).toBeGreaterThanOrEqual(STEP_MS); // 预填充兜底不短于自愈一档
+    expect(STEP_MS).toBeGreaterThanOrEqual(30_000); // 不许把自动动作压到秒级
+    expect(SINK_L2_MS).toBeGreaterThanOrEqual(3 * 60_000);
+    expect(RESUME_COOLDOWN_MS).toBeGreaterThanOrEqual(5 * 60_000);
+    expect(Math.round((THRESHOLD + RECOVER) / 2)).toBeGreaterThan(RECOVER);
+    expect(Math.round((THRESHOLD + RECOVER) / 2)).toBeLessThan(THRESHOLD);
   });
 
   it("④ 冷却期内不升级;过冷却才发 L1 stream/end 探针", () => {
@@ -183,15 +262,15 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
     expect(sent.filter((t) => t === "group/update")).toEqual([]);
   });
 
-  it("④ 升级到 L2:有 6053 host 且桥上能按下按钮 ⇒ ok", () => {
+  it("④ 升级到 L2:开了 autoRestart ⇒ 走重启分支", () => {
     const c = makeConn(group);
     group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
     const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
     c.sinkHealth = "stalled";
     c.sinkRecoveryLevel = 2; // 已经历过 L0/L1,下一级就是 L2 远程重启
     c.sinkLastRecoveryAt = 0;
     group.escalateSinkRecovery(c);
-    expect(c.sinkRecoveryLevel).toBe(3);
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
@@ -215,17 +294,20 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
     expect(sent).toEqual([]);
   });
 
-  it("⑤ 组内只有一位卡住 + 仍在 playing ⇒ 允许升到 L2", () => {
+  it("⑤ 组内只有一位卡住 + 仍在 playing ⇒ 闸门开着,L2 走得通", () => {
     const c1 = makeConn(group);
     const c2 = makeConn(group);
     group.members.add(c1);
     group.members.add(c2);
+    (group.server as any).sinkAutoRestart = true;
     c1.sinkHealth = "stalled";
     c2.sinkHealth = "ok";
-    c1.sinkRecoveryLevel = 2; // 闸门开 ⇒ 从 L2 继续往 L3 走
+    c1.sinkRecoveryLevel = 2; // 闸门开 ⇒ 走到 L2
     c1.sinkLastRecoveryAt = 0;
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
     group.escalateSinkRecovery(c1);
-    expect(c1.sinkRecoveryLevel).toBe(3);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 
   it("⑤ 组已 pause / 无 current ⇒ 只 L0,不动设备", () => {
@@ -251,6 +333,102 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
     const r2 = esphomeBridge.restartDevice(""); // 空 host 不允许走到查表
     expect(r2.ok).toBe(false);
     expect(r2.code).toBe("no-bridge");
+  });
+
+  it("⑥b 实体挑选:safe-mode 按钮排在前头也不能被当成重启键", () => {
+    // software-engineer 240 取证:真重启实体是 `esp32_player2_restart`;
+    // ESPHome 的 safe-mode 按钮 object_id 常为 `restart_safe_mode`,同样命中 /restart/i,
+    // 一旦排在实体表前面,旧实现会把它当重启键按下 ⇒ 设备进安全模式启动。
+    const cmds: string[] = [];
+    // entityId() 返回的是字符串形式的 branded id(`button-<object_id>`),不是对象。
+    const cli: any = { command: (id: any) => void cmds.push(String(id)) };
+    (esphomeBridge as any).entries.set("192.0.2.78", {
+      host: "192.0.2.78",
+      psk: "",
+      port: 6053,
+      cli,
+      deviceName: "",
+      esphomeVersion: "",
+      connected: true,
+      connectedAt: Date.now(),
+      lastStateAt: Date.now(),
+      lastError: "",
+      states: new Map(),
+      entities: new Map<string, any>([
+        [
+          "restart_safe_mode",
+          { name: "esp32-player2 Safe Mode", objectId: "restart_safe_mode", type: "button" },
+        ],
+        [
+          "esp32_player2_restart",
+          { name: "esp32-player2 Restart", objectId: "esp32_player2_restart", type: "button" },
+        ],
+      ]),
+    });
+    const r = esphomeBridge.restartDevice("192.0.2.78");
+    expect(r.ok).toBe(true);
+    expect(cmds).toEqual(["button-esp32_player2_restart"]); // 必须挑中真重启,不是 safe mode
+  });
+
+  it("⑥c 命名不规范时按名字兜底,但仍记 warn 并照发", () => {
+    const cmds: string[] = [];
+    // entityId() 返回的是字符串形式的 branded id(`button-<object_id>`),不是对象。
+    const cli: any = { command: (id: any) => void cmds.push(String(id)) };
+    (esphomeBridge as any).entries.set("192.0.2.79", {
+      host: "192.0.2.79",
+      psk: "",
+      port: 6053,
+      cli,
+      deviceName: "",
+      esphomeVersion: "",
+      connected: true,
+      connectedAt: Date.now(),
+      lastStateAt: Date.now(),
+      lastError: "",
+      states: new Map(),
+      entities: new Map<string, any>([
+        ["esp32_player2_restart_now", { name: "esp32-player2 Restart Now", objectId: "esp32_player2_restart_now", type: "button" }],
+      ]),
+    });
+    const r = esphomeBridge.restartDevice("192.0.2.79");
+    expect(r.ok).toBe(true);
+    expect(cmds).toEqual(["button-esp32_player2_restart_now"]);
+  });
+
+  it("⑥d L2 真实成功路径:重启命令真的进设备(不 mock 掉被测方法本身)", async () => {
+    // 旧用例把 group.restartStalledMember 整个 mock 掉,只验了「level+1」,
+    // 真正按下按钮这一段等于没测 —— 这里注入一台桥里已知的机器,真走完
+    // restartDevice → esphomeBridge 的 cli.command(...) 全链路。
+    const cmds: string[] = [];
+    const cli: any = { command: (id: any) => void cmds.push(String(id)) };
+    (esphomeBridge as any).entries.set("192.0.2.80", {
+      host: "192.0.2.80",
+      psk: "",
+      port: 6053,
+      cli,
+      deviceName: "",
+      esphomeVersion: "",
+      connected: true,
+      connectedAt: Date.now(),
+      lastStateAt: Date.now(),
+      lastError: "",
+      states: new Map(),
+      entities: new Map<string, any>([
+        ["esp32_player2_restart", { name: "esp32-player2 Restart", objectId: "esp32_player2_restart", type: "button" }],
+      ]),
+    });
+    const c = makeConn(group);
+    group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
+    (c as any).remoteHost = "192.0.2.80";
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2;
+    c.sinkLastRecoveryAt = 0;
+    group.escalateSinkRecovery(c);
+    // escalateSinkRecovery 里是 `void this.restartStalledMember(c)`,异步尾巴要自己冲一冲。
+    await vi.waitFor(() => expect(cmds).toEqual(["button-esp32_player2_restart"]));
+    (esphomeBridge as any).entries.delete("192.0.2.80");
   });
 
   it("⑦ 组 health 聚合:任一 stalled ⇒ stalled;有堆积但未 stalled ⇒ degraded", () => {
