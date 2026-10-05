@@ -81,7 +81,7 @@ describe("sendspin mute", () => {
     return { status: res.status, body: await res.json().catch(() => null) };
   }
 
-  it("静音/取消静音置位 conn + 组标记,增益归零/恢复", async () => {
+  it("静音/取消静音置位 conn + 组标记,采样增益恒 unity(响度归设备输出级)", async () => {
     const srv = getSendspinServer()!;
     const conn = srv.clients.get(CID)!;
     expect(conn.muted).toBe(false);
@@ -90,7 +90,7 @@ describe("sendspin mute", () => {
     expect(r1.status).toBe(200);
     expect(conn.muted).toBe(true);
     expect(srv.group(CID).muted).toBe(true);
-    expect(srv.group(CID).appliedGain(conn)).toBe(0);
+    expect(srv.group(CID).appliedGain(conn)).toBe(100); // 静音靠独立 mute 命令,不烘进 PCM
 
     const r2 = await mute(`sendspin:${CID}`, false);
     expect(r2.status).toBe(200);

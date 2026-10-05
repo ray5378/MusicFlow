@@ -13,6 +13,7 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
+import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
 import {
@@ -59,15 +60,16 @@ export interface SendspinServerOptions {
   preferredCodec?: SendspinCodecPreference;
   /** sink 自愈**自动远程重启**(L2)开关 —— 缺省 **false**。
    *
-   *  为什么默认关:`bufferedAmount` 是「服务端看着自己发不出去」的推断,不是设备侧
-   *  事实;服务端此刻还订阅不到设备日志流(排在 4.0.87),拿不到设备到底卡在哪一步
-   *  (是 latch 锁死、还是真在解码只是没声)。假阳 —— 把一台正在正常播放的机器
-   *  按重启;漏判 —— 继续无声。两者代价不对称(重启代价大、且可人工兜底),
-   *  所以阶梯先给到 L1 探针(只发 `stream/end`,不改播放状态),重启必须显式开。
+   *  为什么默认开:2026-10-05 起设备侧(`sendspin-cpp`)自带自愈 ——
+   *  `sendspin.player: Failed to send audio chunk` 1 分钟内累计到阈值就本地
+   *  `App.restart()`(esp32-player2 已实装并实测生效)。本地重启是**唯一能清
+   *  `pending_start_` 锁**的手段,设备自己就会按 ⇒ 服务端再按一次就是叠加
+   *  (刚起回来又被按死)。所以默认开的同时,escalateSinkRecovery 里必须挂两道
+   *  前置闸(1 conn 已断 / 2 同 host 冷却窗内已下发),见下面 L2 分支。
    *
-   *  开了之后的节奏:3 窗 stalled → L0 告警 → 满 60s → L1 `stream/end` 探针
-   *  → 再满 5min → L2 远程重启(下发后长冷却 10min)。
-   *  设备日志流接上以后可以在配置页翻 true。 */
+   *  想退回保守模式:把 `sendspin-renderer` 的 `sink_auto_restart` 设 false。
+   *  阶梯节奏:3 窗 stalled → L0 告警 → 满 60s → L1 `stream/end` 探针
+   *  → 再满 5min → L2 远程重启(下发后长冷却 10min)。 */
   sinkAutoRestart?: boolean;
   /** 连接完成 server/activate（播放器可用）后的回调——用于注册 QueueController 播放器。 */
   onActivated?: (conn: SendspinConnection) => void;
@@ -123,6 +125,11 @@ export class SendspinServer {
     return c.group?.health() ?? "ok";
   }
   readonly groups = new Map<string, SendspinGroup>();
+  /** host → 最近一次远程重启下发的时间戳(见 escalateSinkRecovery 的 L2 闸2)。
+   *  设备重连会换 **新 conn**,而新 conn 上的 sinkRecoveryLevel / sinkLastRecoveryAt
+   *  全是初值 ⇒ 冷却若只记在 conn 上会丢,新 conn 会从头再爬一遍 7 分钟阶梯。
+   *  所以按 host 落到 server 层,跨 conn 生效。 */
+  readonly lastRestartSentAt = new Map<string, number>();
   /** 不再自动重拨的目标 host:port → 抑制原因 + 到期时刻(手动 dial 立即清除)。 */
   readonly noAutoRedial = new Map<string, NoRedialEntry>();
   /** 手动拨号清除指定目标的重拨抑制(运营商明确意图,供路由层调用)。 */
@@ -197,7 +204,7 @@ export class SendspinServer {
     this.serverName = opts.serverName ?? "MusicFlow Sendspin";
     this.allowLegacyClients = opts.allowLegacyClients !== false;
     this.preferredCodec = normalizeCodecPreference(opts.preferredCodec);
-    this.sinkAutoRestart = opts.sinkAutoRestart === true; // 默认关,理由见选项注释
+    this.sinkAutoRestart = opts.sinkAutoRestart !== false; // 默认开,两道闸见 escalateSinkRecovery
     this.port = WS_PORT;
     this.onActivated = opts.onActivated;
     this.onClosed = opts.onClosed;
@@ -525,7 +532,12 @@ export class SendspinGroup {
   name: string;
   server: SendspinServer;
   members = new Set<SendspinConnection>();
-  volume = 100;
+  /** 组音量(0-100)。出厂 `DEFAULT_SENDSPIN_VOLUME`(=20,不取满 100)——
+   *  设备重连上线时 `add()` 会把它当输出级音量刷给设备,默认值必须落在安全侧;
+   *  用户真正设过的音量由 `sendspin_device_state` 播种(见 add() 内注释)。 */
+  volume = DEFAULT_SENDSPIN_VOLUME;
+  /** 组音量是否已被播种/显式设置过 —— 只播种**一次**,之后用户显式调的值不再被覆盖。 */
+  volumeSeeded = false;
   muted = false;
   /** 暂停标记(对齐 MA `PlaybackStateType.PAUSED`):曲目仍在组上但推流挂起。
    *  仅用于 `group/update` 状态广播 —— 协议层没有 pause 命令,暂停不下发任何设备命令。 */
@@ -590,6 +602,21 @@ export class SendspinGroup {
     this.name = name;
     this.server = server;
   }
+  /** 把设备的**持久音量**播种进本组(只做一次)。
+   *
+   *  语义:组音量 = 用户最后一次在 UI 上设的值(slider 落 `sendspin_device_state`),
+   *  而不是组内对象的出厂缺省。播种后就标记 `volumeSeeded`,重连不再覆盖 ——
+   *  否则「用户把音量调到 38 → 设备重启 → 重连把 38 冲成出厂缺省」会变成常态。
+   *  读不到(从未设过)则什么都不做,本组停在出厂缺省(安全侧的小音量)。 */
+  private seedVolumeFromDevice(c: SendspinConnection): void {
+    if (this.volumeSeeded) return;
+    const st = getDeviceVolumeState(c.clientId ?? "");
+    if (!st) return;
+    const v = Math.min(100, Math.max(0, Math.round(st.volume)));
+    if (v === this.volume) { this.volumeSeeded = true; return; }
+    this.volume = v;
+    this.volumeSeeded = true;
+  }
   add(c: SendspinConnection): void {
     this.members.add(c);
     // 入组即对齐(MA `PlayerGroupRole` 的组音量分配语义):**组音量是权威标度**,成员
@@ -598,6 +625,15 @@ export class SendspinGroup {
     // 未宣告 ⇒ `syncVolumeTo` 内部 no-op,音量仍走共享编码增益(全组天然一致)。
     // 放在 `add()` 而非各调用点:入组入口有 playCore/playGroupCore/announce/重绑四处,
     // 漏掉任何一处都会重现上面的不一致。
+    //
+    // ⚠️ 进来之后**先播种再对齐**,顺序不能反:
+    //    sendspin 有两套组对象 —— `srv.group(<设备名>)`(用户 slider 写它的 volume 并
+    //    落 `sendspin_device_state`)与 `srv.group('ug:<用户组>')`(设备上线自动回组的那
+    //    个,出厂音量缺省)。重连走的是后者,若它停在缺省值就会把满音量刷给刚起回来的
+    //    设备(= 2026-10-05「重启后突然非常大声」)。所以本组还没被播种过时,先把
+    //    设备持久音量(`sendspin_device_state`,即用户上次真正设的值)灌进来再对齐;
+    //    `volumeSeeded` 保证只播种一次,用户之后显式调的值不会被重连冲掉。
+    this.seedVolumeFromDevice(c);
     try { this.syncVolumeTo(c); } catch { /* 下发失败不该让入组失败 */ }
     // 静态延迟同机对齐:设备宣告了才发,未宣告 no-op(见 syncStaticDelayTo)。
     try { this.syncStaticDelayTo(c); } catch { /* 下发失败不该让入组失败 */ }
@@ -615,8 +651,19 @@ export class SendspinGroup {
    *  要么静音无效),而那正是我们要避开的一类"看起来生效、实际打架"的实现。
    *  不满足 ⇒ 回退**编码增益**路径(改动前行为,绝不回归)。
    *  `supportsCommand` 走可选调用:最小桩(单测)只有 `{clientId, codec}`。 */
-  offloadsVolume(c: SendspinConnection): boolean {
-    return !!c.supportsCommand?.("volume") && !!c.supportsCommand?.("mute");
+  /** 音量/静音是否**直通设备输出级**(MA 语义,见 SendspinConnection.sendPlayerCommand)。
+   *
+   *  ⚠️ 4.0.87 起**恒 true**:不管什么设备(宣告不宣告 `volume`/`mute` 都一样),
+   *  音量一律以 `server/command` 直接作用到设备输出级;服务端**不再自己持有一份
+   *  音量** —— 既不烘进 PCM 的「编码增益」(那才是「服务端音量」),也不与设备自身
+   *  硬件音量相乘(两边其实是同一个物理旋钮的两次表达,相乘只会互相打架)。
+   *
+   *  4.0.86 及以前按设备宣告判定,未宣告 volume/mute 的设备回退走编码增益;
+   *  那条分支已删 ——「服务端音量」正是 2026-10-05「设备重启后突然非常大声」
+   *  (重连把组音量刷成 100)同一家族的根子。接管成本:若某 sendspin 固件
+   *  完全不吃 `server/command volume/mute`,该设备音量将失去作用面(原来靠烘 PCM 兜底)。 */
+  offloadsVolume(_c: SendspinConnection): boolean {
+    return true;
   }
 
   /** 该成员的**编码增益**(烘进 PCM 的那份,0-100)。
@@ -627,17 +674,23 @@ export class SendspinGroup {
    *
    *  ⚠️ 与 `c.volume` 的关系:那是**每连接 trim**(恒 100,只有 TTS 播报临时改),
    *  与 `setVolumeCore` 只写组音量的权威标度相反 —— 两者相乘才是有效增益(双写即平方)。 */
-  appliedGain(c: SendspinConnection): number {
-    if (this.offloadsVolume(c)) return 100;
-    if (this.muted || c.muted) return 0;
-    return Math.min(100, Math.max(0, Math.round((c.volume * this.volume) / 100)));
+  appliedGain(_c: SendspinConnection): number {
+    // 恒 unity:采样永远是满幅,**响度 100% 由设备输出级负责**(见 offloadsVolume)。
+    // 没有任何「按设备能力回退烘 PCM」的分支 —— 4.0.87 起**一律直控设备音量**,
+    // 服务端不再持有独立音量,群组和独立播放器同口径。
+    return 100;
   }
 
   /** 该成员的**设备音量**(0-100,**不含静音**):conn trim × 组音量。
    *  静音走独立的 `server/command` mute(MA 的 `set_group_volume` / `set_mute` 就是
    *  两把旋钮 —— 静音不改音量值,取消静音后音量原样回来)。 */
-  deviceVolume(c: SendspinConnection): number {
-    return Math.min(100, Math.max(0, Math.round((c.volume * this.volume) / 100)));
+  /** 该成员的**设备音量**(0-100):组音量**原样直通**,绝不乘算。
+   *  与 `appliedGain` 同源(采样满幅)—— 响度全由这条命令作用到设备输出级。
+   *  旧实现是 `conn.trim × 组音量 / 100`:`trim` 恒 100、只在 TTS 播报期间临时改,
+   *  与组音量相乘正是「两个音量相乘」的来源,4.0.87 去掉;播报音量改走
+   *  `setVolumeCore`(仍把组音量写回权威值)。 */
+  deviceVolume(_c: SendspinConnection): number {
+    return Math.min(100, Math.max(0, Math.round(this.volume)));
   }
 
   /** 把当前组音量/静音**下发给该成员**(幂等:可重复调用)。
@@ -801,10 +854,10 @@ export class SendspinGroup {
       return;
     }
     // level >= 2 ⇒ 该动 L2(远程重启)了。
-    // ⚠️ 默认**不自动**重启:sinkAutoRestart=false 时钉死在「已到顶」,只复述告警 ——
-    //    `bufferedAmount` 只是推断,服务端此刻还拿不到设备侧事实(设备日志流排 4.0.87),
-    //    假阳(把一台正在正常播放的机器按重启)的代价远大于漏判。手动路由
-    //    POST /v1/sendspin/devices/:clientId/esphome/restart 仍可真实按下。
+    // L2 默认开(sinkAutoRestart 缺省即 true),但下发**前**必须先过下面两道闸 ——
+    // 设备侧已自带「Fail 计数 → 本地 App.restart()」自愈,且本地重启是唯一能清
+    // `pending_start_` 的手段;设备自己按过之后服务端再按一次就是叠加(按死)。
+    // 想退回保守模式:把 sendspin-renderer 的 sink_auto_restart 设 false。
     if (!this.server.sinkAutoRestart) {
       c.sinkRecoveryLevel = 3; // 钉在「已到顶」,别每 60s 刷同一条
       this.server.log(
@@ -815,7 +868,36 @@ export class SendspinGroup {
       );
       return;
     }
+    // ---- L2 闸1:本 conn 已断 = 设备多半已经自己重启过了 ----
+    // WS close → 心跳约 20s 摘牌;对着旧对象再按一次重启就是**叠加重启**
+    // (刚起回来又被按死)。用 `=== false` 而非真值判定:握手前 / 测试替身不定义
+    // ready 时按「还活着」放行,不影响正常路径(真断链时 readyState 必为 CLOSED)。
+    if (c.ready === false) {
+      c.sinkRecoveryLevel = 3;
+      this.server.log(
+        "warn",
+        `sendspin sink 自愈 L2 跳过: client=${who} 连接已断(设备多半已自重启), ` +
+          `等重连后重新评估 group=${g}`,
+      );
+      return;
+    }
+    // ---- L2 闸2:同 host 在 SINK_RESUME_COOLDOWN_MS 冷却窗内已下发过重启 ----
+    // 设备重连产生的是**新 conn**,新对象上的 sinkRecoveryLevel / sinkLastRecoveryAt
+    // 全是初值 ⇒ 冷却记在 conn 上会丢。必须落在 server 层(按 host 记)才跨 conn 生效。
+    const restartHost = c.remoteHost || "";
+    const lastSent = this.server.lastRestartSentAt.get(restartHost);
+    if (lastSent !== undefined && now - lastSent < SINK_RESUME_COOLDOWN_MS) {
+      c.sinkRecoveryLevel = 3;
+      const left = Math.ceil((SINK_RESUME_COOLDOWN_MS - (now - lastSent)) / 1000);
+      this.server.log(
+        "warn",
+        `sendspin sink 自愈 L2 跳过: 同 host=${restartHost} 还有 ${left}s 冷却窗(已下发过重启) ` +
+          `client=${who} group=${g}`,
+      );
+      return;
+    }
     // 协议内手段在 latch 锁死下均无判别力 ⇒ 只剩远程重启这一条路。
+    this.server.lastRestartSentAt.set(restartHost, now); // 供闸2 跨 conn 判定
     void this.restartStalledMember(c);
     // 重启命令已下发:阶梯归零,并把动作冷却**往前推** SINK_RESUME_COOLDOWN_MS ——
     // 设备起回来之前绝不再按第二遍(否则每 5s 一轮重启,等于把机器按死)。

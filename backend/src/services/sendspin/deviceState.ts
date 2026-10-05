@@ -24,11 +24,23 @@ export interface DeviceVolumeState {
 }
 
 function clampVol(v: unknown): number {
-  const n = typeof v === "number" ? Math.round(v) : 100;
+  const n = typeof v === "number" ? Math.round(v) : DEFAULT_SENDSPIN_VOLUME;
   return Math.min(100, Math.max(0, Number.isFinite(n) ? n : 100));
 }
 
-/** 读某设备持久音量:无行/读失败返回 null(调用方用缺省 100/false)。 */
+/** Sendspin 组音量的**出厂缺省值**(0-100)。
+ *
+ *  为什么不是 100:设备一重连,`SendspinGroup.add()` 就会把「组音量」当成输出级
+ *  音量刷下去(设备宣告了 volume/mute ⇒ 音量大权交给设备输出级,见
+ *  `SendspinGroup.offloadsVolume`)。组音量若停在出厂 100,用户「设备硬件音量 × 组
+ *  音量」里的第二把旋钮就被顶到满 —— 2026-10-05 实测:esp32-player2 设备自重启后
+ *  一上线服务端就推 volume=100,听感上「音量突然非常大声」(约 3 倍)。
+ *  默认压到 20 后,「从没调过音量」的设备只会安静地小声起步,用户再往上推;
+ *  真正设过音量的走 `getDeviceVolumeState` 播种,不会被默认值盖掉。 */
+export const DEFAULT_SENDSPIN_VOLUME = 20;
+/**
+ *  读某设备持久音量:无行/读失败返回 null(调用方用缺省 DEFAULT_SENDSPIN_VOLUME/false)。
+ */
 export function getDeviceVolumeState(clientId: string): DeviceVolumeState | null {
   try {
     if (!clientId) return null;
@@ -51,7 +63,7 @@ export function saveDeviceVolumeState(
   try {
     if (!clientId) return;
     const cur = getDeviceVolumeState(clientId);
-    const volume = patch.volume === undefined ? (cur?.volume ?? 100) : clampVol(patch.volume);
+    const volume = patch.volume === undefined ? (cur?.volume ?? DEFAULT_SENDSPIN_VOLUME) : clampVol(patch.volume);
     const muted = patch.muted === undefined ? (cur?.muted ?? false) : !!patch.muted;
     sqlite
       .prepare(
@@ -198,7 +210,7 @@ export function saveDeviceEsphome(clientId: string, psk: string, port = 0): void
       )
       .run(
         clientId,
-        cur?.volume ?? 100,
+        cur?.volume ?? DEFAULT_SENDSPIN_VOLUME,
         (cur?.muted ?? false) ? 1 : 0,
         curDisabled ? 1 : 0,
         String(psk ?? "").trim(),
@@ -249,7 +261,7 @@ export function saveDeviceHost(clientId: string, host: string): void {
       )
       .run(
         clientId,
-        cur?.volume ?? 100,
+        cur?.volume ?? DEFAULT_SENDSPIN_VOLUME,
         (cur?.muted ?? false) ? 1 : 0,
         host,
         new Date().toISOString(),
@@ -291,7 +303,7 @@ export function saveDeviceDisabled(clientId: string, disabled: boolean): void {
       )
       .run(
         clientId,
-        cur?.volume ?? 100,
+        cur?.volume ?? DEFAULT_SENDSPIN_VOLUME,
         (cur?.muted ?? false) ? 1 : 0,
         disabled ? 1 : 0,
         new Date().toISOString(),

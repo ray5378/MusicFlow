@@ -15,6 +15,7 @@ import { FIRST_FRAME_LEAD_US, FRAME_MS } from "./streamEngine.js";
 import { nowUs } from "./clock.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
 import { saveDeviceVolumeState } from "./deviceState.js";
+import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
 import { markPauseStopIssued } from "../player/pauseStopSettle.js";
 
@@ -31,7 +32,7 @@ const ephemeralMap = new Map<string, SendspinGroupLike>();
 export function ephemeralGroup(clientId: string): SendspinGroupLike {
   let g = ephemeralMap.get(clientId);
   if (!g) {
-    g = { positionMs: 0, volume: 100, muted: false, current: null };
+    g = { positionMs: 0, volume: DEFAULT_SENDSPIN_VOLUME, muted: false, current: null };
     ephemeralMap.set(clientId, g);
   }
   return g;

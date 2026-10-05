@@ -15,6 +15,7 @@ vi.mock("../../src/services/airplay/control.js", async (orig) => {
 import { announceOnPeer, isAnnouncing } from "../../src/services/dlna/announce.js";
 import * as airplayControl from "../../src/services/airplay/control.js";
 import { setSendspinIdentityDir, startSendspinService, stopSendspinService, getSendspinServer } from "../../src/services/sendspin/index.js";
+import { DEFAULT_SENDSPIN_VOLUME } from "../../src/services/sendspin/deviceState.js";
 import { getQueueController } from "../../src/services/player/index.js";
 
 const PORT = 18935;
@@ -137,7 +138,7 @@ describe("announce sendspin e2e", () => {
     expect(binaries[binaries.length - 1][0]).toBe(0x04);
     // 音量恢复
     expect(conn.volume).toBe(77);
-    expect(srv.group(CID).volume).toBe(100);
+    expect(srv.group(CID).volume).toBe(DEFAULT_SENDSPIN_VOLUME);
     // 闲置队列 current 保持空
     expect(srv.group(CID).current).toBeNull();
   }, 60000);

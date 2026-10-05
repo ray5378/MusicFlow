@@ -2,6 +2,38 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.0.87] - 2026-10-05
+
+### Sendspin sink 自愈:远程重启默认开 + 两道防叠加闸
+
+- **L2 远程重启默认开启(`sinkAutoRestart` 缺省即 true)**:设备侧(`sendspin-cpp`) 2026-10-05 起自带自愈 —— `sendspin.player: Failed to send audio chunk` 1 分钟内 累计到阈值就本地 `App.restart()`(esp32-player2 已实装并实测生效)。本地重启是**唯一能清 `pending_start_` 一锤子锁**的手段,设备自己已经会按 ⇒ 服务端再按一次就是**叠加重启**(刚起回来又被按死)。故本版把默认从「保守关」翻成「默认开」,同时在下发前挂两道前置闸。想退回保守模式:把 `sendspin-renderer` 的`sink_auto_restart` 显式设 false。
+
+- **L2 闸1:本 conn 已断 ⇒ 绝不重复按**:`ws close` → 心跳约 20s 摘牌,此时设备多半已经自己重启过了;对着已断的旧连接再发一次重启就是叠加(刚起回来又被按死)。命中则把 `sinkRecoveryLevel` 钉到 3(不再每 60s 刷同一条告警),等重连后重新评估。判定用 `c.ready === false`:握手前 / 无定义的替身按「还活着」放行,不影响正常路径(真断链时 `readyState` 必为 CLOSED)。
+
+- **L2 闸2:同 host 在 10min 冷却窗内已下发过 ⇒ 换新 conn 也不再按**:设备重连产生的是**新 conn**(`sinkRecoveryLevel` / `sinkLastRecoveryAt` 全是初值),冷却若只记在conn 上会丢 ⇒ 新增 server 层 `lastRestartSentAt: Map<host, ts>` 按 host 记,跨 conn生效。命中时日志会打出剩余冷却秒数。
+
+- **远程重启是「通用」的,不依赖具体按钮名**(承接 4.0.86 的 `esphomeBridge.restartButtonId` 两级匹配):① `object_id` 以 `restart` 结尾且非 safe-mode 变体 → 规范命中,**必须排在兜底之前**(safe-mode 按钮在实体表里常排在真重启前面);② 兜底:`name`/`object_id` 含 `restart` 就按下,并显式 warn「实体命名不规范,按下的是猜测结果」;③ 都没有 → 返回 `{ ok:false, code:"no-entity" }`,只记 warn**不抛**。**换设备不会因命名不一致而失效**,只要设备暴露了 `button: - platform: restart` 且 6053 已连上。
+
+- **回归守卫**:`sinkHealth.test.ts` ④ 段 1 例 → 5 例(显式关 / 默认开真按 / 闸1 断链不按 / 闸2 冷却窗内不按 / 冷却窗过完允许再按)共 26 passed,并钉住 `lastRestartSentAt`常量。`tsc --noEmit` 0 错误,sendspin 子集 97 文件 1061 passed + 1 expected fail。
+
+### Sendspin 音量:统一「直控设备音量」,组音量缺省收到 20
+
+- **事故修复 —— 设备重连后音量突然非常大(2026-10-05 实测复现)**:根因是**两套互不相干的组对象 + 组音量缺省 100**。用户在滑块里写的是按 host 取到的组(`group("C4:9E:…")`,落到 `sendspin_device_state`),而设备上线自动回组的是按 `ug:` 前缀建的**另一个**内存组;新组 `volume` 缺省 100,重连 `add()` 时 `syncVolumeTo` 把满音量刷进**设备输出级**,再叠上设备自身的硬件音量 ⇒ 听感暴涨数倍。(240 取证:`sendspin_device_state` 里 `C4:9E:7E:08:75:64` volume 38 / `3C:0F:02:F9:69:E4` volume 100。)
+
+- **组音量出厂缺省 100 → `DEFAULT_SENDSPIN_VOLUME = 20`**(新增常量,位于 `deviceState.ts`):缺省值本身就是「刚起回来的设备被灌满」的元凶,直接压到安全侧;用户真正设过的值由下面第 4 条从持久库播种回真值。回归守卫:`peerVolume.test.ts` 钉住 `DEFAULT_SENDSPIN_VOLUME < 50`。
+
+- **统一直控设备输出级,服务端不再持有独立音量(不乘算)**:`offloadsVolume()` 恒 `true`、`appliedGain()` 恒 100(unity) —— **不管什么设备(宣告音量与否)、不管是群组还是独立播放器,一律把音量以 `server/command` 直接作用到设备输出级**,采样恒满幅、不烘任何服务端音量。不再保留「按设备能力回退烘 PCM」的分支:两个音量(服务端 × 设备)相乘以及两者各自生效,都是同一个物理旋钮的两次表达,相乘只会互相打架。代价(用户已确认接受):极老固件若完全不吃 `server/command`,其音量将失去作用面 —— 这是「一律直控」的必要代价,不是遗漏。
+
+- **`deviceVolume()` 原样直通、零乘算**(去掉 `× c.volume` 的乘法):组音量多少就下发给设备多少。**群组和独立播放器同口径** —— 都是直接控制设备音量,不再存在「服务端音量 × 设备音量」或「播放器音量 × 设备音量」这类相乘。
+
+- **`seedVolumeFromDevice()`:组对象 `add()` 时按设备持久音量(`sendspin_device_state`)播种一次(`volumeSeeded` 标记)**:修掉上面那两套组对象的歧义 —— 用户滑块设过的值在设备重连后会被播种回来,而不是每次掉回缺省值 20。
+
+- **同一常量收口所有缺省出口**:`sendspin/playerCore.ts` 服务未跑时的内存假组、`sendspin/proxy.ts` 组缺席时的占位视图、`sendspin/peerVolume.ts` 离线回退(顺手清掉残留的 `?? 100` 字面量) 全部换用 `DEFAULT_SENDSPIN_VOLUME`。
+- **「缺省」出口全量收口,不留后门**:除上面几处,还清掉了 `deviceState.ts` 里 4 处 upsert 缺省 (`cur?.volume ?? 100` —— 设备从没存过音量时会被写成 100)、以及 `group.ts` 的 `SendspinGroup.volume = 100`。**凡是「不知道就先给」的出口一律 20,不允许再出现满音量缺省**,否则从另一扇门又会回到本次事故。同步更新 `deviceState.test.ts` / `group.test.ts` 的缺省断言与 import。
+
+
+- **回归守卫**:`serverCore.test.ts` 该用例改为「组音量 42 原样直通(不乘算、不烘 PCM)」;`proxyFront.test.ts` 拆成两条 —— 镜像里**已存在**的组原样透传、`ghost` 缺席时才返回缺省常量;`peerVolume.test.ts` / `playerCoreUnits.test.ts` 的缺省断言全部改常量(后者补上 import)。`tsc --noEmit` 0 错误。
+
 ## [4.0.86] - 2026-10-05
 
 ### Sendspin 群组「播放中途突然无声」整改(设备侧固件不可改,服务端开环兜底)

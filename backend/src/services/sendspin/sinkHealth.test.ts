@@ -59,6 +59,9 @@ function makeConn(group: SendspinGroup): Conn {
   // connectedAt 是构造时打的;这里显式回拨到「建连已过宽限、也过了 60s 预填充硬回退」
   // ⇒ 每次采样都直接 arm,后面的用例只测计数与自愈本身(豁免单独测)。
   c.connectedAt = Date.now() - PREFILL_MAX_MS - 5_000;
+  // 握手已完成:否则 `SendspinConnection.ready`(= ws OPEN && handshakeDone)恒
+  // 为 false,L2 的闸① 会把所有「该按重启」的用例挡掉(见 ④ L2 闸1 用例)。
+  c.handshakeDone = true;
   return c as Conn;
 }
 
@@ -75,7 +78,10 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
 
   beforeEach(() => {
     esphomeBridge.stop();
+    // server 假体要带上 lastRestartSentAt:真实 SendspinServer 上有这个字段,
+    // escalateSinkRecovery 的 L2 闸2 会跨 conn 读它。
     group = new SendspinGroup("g", { log() {} } as any);
+    (group.server as any).lastRestartSentAt = new Map<string, number>();
     group.current = { songId: "s1", durationMs: 100_000 }; // 组内「仍在 playing」
   });
 
@@ -196,9 +202,10 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
     }
   });
 
-  it("④ L2 默认关(sinkAutoRestart=false):到点只复述告警,绝不按重启", () => {
+  it("④ L2 显式关(sinkAutoRestart=false):到点只复述告警,绝不按重启", () => {
     const c = makeConn(group);
     group.members.add(c);
+    (group.server as any).sinkAutoRestart = false; // 默认是开的,这里显式关掉
     const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
     c.sinkHealth = "stalled";
     c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
@@ -207,6 +214,72 @@ describe("sendspin sink 开环检测(设备不再消费)", () => {
     group.escalateSinkRecovery(c);
     expect(spy).not.toHaveBeenCalled();
     expect(c.sinkRecoveryLevel).toBe(3); // 钉在「已到顶」,别每窗刷同一条
+    spy.mockRestore();
+  });
+
+  it("④ L2 默认开(sinkAutoRestart 不设即开):到点真按重启", () => {
+    const c = makeConn(group);
+    group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2;
+    c.sinkLastRecoveryAt = 0;
+    group.escalateSinkRecovery(c);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("④ L2 闸1:conn 已断(设备多半已自重启)→ 绝不再按一次", () => {
+    const c = makeConn(group);
+    group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2;
+    c.sinkLastRecoveryAt = 0;
+    // WS 置 CLOSED:设备自己重启了。走 ws 而不是 `ready` 属性 —— ready 是
+    // SendspinConnection 的只读 getter,直接赋值在 strict 下会炸。
+    (c as any).ws.readyState = 3; // WebSocket.CLOSED
+    group.escalateSinkRecovery(c);
+    expect(spy).not.toHaveBeenCalled(); // 关键:不对着已断的旧 conn 再按一次
+    expect(c.sinkRecoveryLevel).toBe(3);
+    spy.mockRestore();
+  });
+
+  it("④ L2 闸2:同 host 冷却窗内已下发过 → 换新 conn 也不重复按", () => {
+    const c = makeConn(group);
+    group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
+    const host = c.remoteHost || "";
+    expect(host).not.toBe(""); // 前置条件:host 要有值,否则这道闸测了个寂寞
+    (group.server as any).lastRestartSentAt.set(host, Date.now() - 1000); // 1s 前下发过
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2; // 模拟「设备重连后的新 conn」:level 从头起
+    c.sinkLastRecoveryAt = 0;
+    group.escalateSinkRecovery(c);
+    expect(spy).not.toHaveBeenCalled(); // 关键:跨 conn 的冷却必须还认
+    expect(c.sinkRecoveryLevel).toBe(3);
+    spy.mockRestore();
+  });
+
+  it("④ L2 闸2 放行:冷却窗过完后允许再按一次", () => {
+    const c = makeConn(group);
+    group.members.add(c);
+    (group.server as any).sinkAutoRestart = true;
+    const spy = vi.spyOn(group as any, "restartStalledMember").mockResolvedValue(undefined);
+    const host = c.remoteHost || "no-host-fallback";
+    (group.server as any).lastRestartSentAt.set(host, Date.now() - RESUME_COOLDOWN_MS - 1000);
+    c.sinkHealth = "stalled";
+    c.sinkStalledSinceMs = Date.now() - STEP_MS - SINK_L2_MS - 1;
+    c.sinkRecoveryLevel = 2;
+    c.sinkLastRecoveryAt = 0;
+    group.escalateSinkRecovery(c);
+    expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
 

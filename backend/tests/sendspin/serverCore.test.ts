@@ -183,9 +183,11 @@ describe("broadcastGroupState:逐成员下发 server/state", () => {
 });
 
 describe("syncVolume:把组音量/静音下发给听众(成员 + 裸设备连接)", () => {
-  it("★ 支持 volume+mute 的成员各收两条 server/command,计数正确", () => {
+  it("★ 组音量**原样直通**设备(4.0.87:不乘算、不烘 PCM)", () => {
     const { srv } = makeServer();
     const g = srv.group("gv");
+    // 取一个**非缺省**的组音量:只有不等于出厂缺省,才证明它原样下发、没被乘算冲掉。
+    g.volume = 42;
     const h = mklegacy(srv); // 宣告 volume/mute,且 legacy ⇒ 出站是明文 JSON,便于断言
     g.add(h.conn);
     h.ws.sent.length = 0;
@@ -193,7 +195,7 @@ describe("syncVolume:把组音量/静音下发给听众(成员 + 裸设备连接
     const cmds = h.ws.jsonOf("server/command");
     expect(cmds.length).toBe(2);
     // 顺序即语义:先 volume 后 mute("取消静音"那一拍不会闪旧音量)。
-    expect(cmds[0]!.payload.player).toEqual({ command: "volume", volume: 100 });
+    expect(cmds[0]!.payload.player).toEqual({ command: "volume", volume: 42 });
     expect(cmds[1]!.payload.player).toEqual({ command: "mute", mute: false });
   });
 

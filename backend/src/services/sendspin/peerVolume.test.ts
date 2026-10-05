@@ -5,7 +5,11 @@
 // 正好覆盖「服务/组缺席 → 回退库值」这条关键路径(在线分支由实时组音量覆盖,另由集成路径验证)。
 import { describe, it, expect, beforeEach } from "vitest";
 import { sqlite } from "../../db/index.js";
-import { saveDeviceVolumeState, deleteDeviceVolumeState } from "./deviceState.js";
+import {
+  saveDeviceVolumeState,
+  deleteDeviceVolumeState,
+  DEFAULT_SENDSPIN_VOLUME,
+} from "./deviceState.js";
 import { getSendspinDeviceVolume, attachSendspinPeerVolumes } from "./peerVolume.js";
 import { decoratePeersForClient } from "../access.js";
 
@@ -16,8 +20,14 @@ describe("sendspin 音量回显(离线回退库值 + 唯一出口补齐)", () =>
     deleteDeviceVolumeState(CID);
   });
 
-  it("无库行 → 缺省 100/false,online=false", () => {
-    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: 100, muted: false, online: false });
+  it("无库行 → 缺省 20/false,online=false(缺省值必须落在安全侧)", () => {
+    expect(getSendspinDeviceVolume(CID)).toEqual({
+      volume: DEFAULT_SENDSPIN_VOLUME,
+      muted: false,
+      online: false,
+    });
+    // 回归守卫:缺省若被改回 100,设备重连就会被刷成满音量(2026-10-05 事故)。
+    expect(DEFAULT_SENDSPIN_VOLUME).toBeLessThan(50);
   });
 
   it("有库行 → 回显持久值(服务不在跑时的离线回退)", () => {
@@ -25,8 +35,12 @@ describe("sendspin 音量回显(离线回退库值 + 唯一出口补齐)", () =>
     expect(getSendspinDeviceVolume(CID)).toEqual({ volume: 33, muted: true, online: false });
   });
 
-  it("空 clientId → 缺省 100/false", () => {
-    expect(getSendspinDeviceVolume("")).toEqual({ volume: 100, muted: false, online: false });
+  it("空 clientId → 缺省 20/false", () => {
+    expect(getSendspinDeviceVolume("")).toEqual({
+      volume: DEFAULT_SENDSPIN_VOLUME,
+      muted: false,
+      online: false,
+    });
   });
 
   it("attachSendspinPeerVolumes:只补 sendspin 行,其它 kind 原样不动", () => {

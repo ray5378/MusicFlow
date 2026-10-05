@@ -13,6 +13,7 @@ import type { SendspinServer } from "./server.js";
 import { getServer } from "./runtime.js";
 import { sendspinSupervisor } from "./supervisor.js";
 import { AssertImplements, rpcFireAndForget } from "../rendererHost/front.js";
+import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 
 /** 连接视图:真实 SendspinConnection 与镜像行的公共字段(主进程侧只许用这些)。 */
 export interface ConnView {
@@ -185,7 +186,11 @@ class SendspinServerProxy implements SendspinServerLike {
   group(name: string): GroupView {
     const g = this.sup.mirror.groups.get(name);
     // 镜像没有的组返回占位(与真实 server 的 group() 懒创建语义一致)。
-    return new MirrorGroupView(this.sup, name, g ?? { volume: 100, muted: false, current: null });
+    return new MirrorGroupView(this.sup, name, g ?? {
+      volume: DEFAULT_SENDSPIN_VOLUME,
+      muted: false,
+      current: null,
+    });
   }
   currentMedia(clientId: string) {
     const cur = this.sup.mirror.groups.get(clientId)?.current;

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   computeCommonSendAhead, distributeGroupVolume, SendspinGroup, DEFAULT_MIN_BUFFER_MS,
 } from "./group.js";
+// 4.0.87:缺省音量从 100 收到 DEFAULT_SENDSPIN_VOLUME(=20)。
+import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 
 // send_ahead 单位回归锁:协议单位是**微秒**(aiosendspin models/player.py
 // "Microseconds from server transmit to timestamp_us";DEFAULT_INITIAL_DELAY_US = 250_000)。
@@ -100,7 +102,7 @@ describe("SendspinGroup", () => {
     g = new SendspinGroup("g1");
   });
   it("默认组音量/位置", () => {
-    expect(g.props.volume).toBe(100);
+    expect(g.props.volume).toBe(DEFAULT_SENDSPIN_VOLUME);
     expect(g.props.muted).toBe(false);
   });
 });

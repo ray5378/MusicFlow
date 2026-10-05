@@ -20,6 +20,7 @@
 import { getServer } from "./runtime.js";
 import { sendspinSupervisor } from "./supervisor.js";
 import { getDeviceVolumeState } from "./deviceState.js";
+import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -57,13 +58,13 @@ function liveGroup(clientId: string): { volume?: number; muted?: boolean } | nul
 /** 取某 sendspin 设备（裸 clientId）的音量/静音快照：实时优先，离线回退持久值。
  *  全程 best-effort：任何异常都回退到库值/缺省，绝不抛给播控或回显热路径。 */
 export function getSendspinDeviceVolume(clientId: string): SendspinVolumeSnapshot {
-  if (!clientId) return { volume: 100, muted: false, online: false };
+  if (!clientId) return { volume: DEFAULT_SENDSPIN_VOLUME, muted: false, online: false };
   const g = liveGroup(clientId);
   if (g && typeof g.volume === "number") {
     return { volume: clampVol(g.volume), muted: !!g.muted, online: true };
   }
   const st = getDeviceVolumeState(clientId);
-  return { volume: st?.volume ?? 100, muted: st?.muted ?? false, online: false };
+  return { volume: st?.volume ?? DEFAULT_SENDSPIN_VOLUME, muted: st?.muted ?? false, online: false };
 }
 
 /** 给 peer 列表里的 sendspin 行补 volume/muted；其它 kind 原样返回（前端按存在性渲染）。

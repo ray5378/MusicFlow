@@ -177,7 +177,7 @@ describe("sendspin 音量走设备命令(server/command)", () => {
     ]);
   });
 
-  it("未宣告命令 → 完全回退编码增益,一条命令都不发", () => {
+  it("未宣告命令 → 照样直控设备,采样恒 unity(无烘 PCM 兜底)", () => {
     const g = new SendspinGroup("g-legacy", {} as any);
     g.volume = 40;
     const sent: any[] = [];
@@ -186,12 +186,12 @@ describe("sendspin 音量走设备命令(server/command)", () => {
       supportsCommand: () => false,
       sendPlayerCommand: (cmd: any) => { sent.push(cmd); return true; },
     };
-    expect(g.appliedGain(c)).toBe(40); // 旧行为:乘积
-    expect(g.syncVolumeTo(c)).toBe(false);
-    expect(sent).toEqual([]);
+    expect(g.appliedGain(c)).toBe(100); // 4.0.87:采样恒 unity,不烘服务端音量
+    expect(g.syncVolumeTo(c)).toBe(true);
+    expect(sent).toEqual([{ command: "volume", volume: 40 }, { command: "mute", mute: false }]);
   });
 
-  it("只宣告 volume 不宣告 mute → 回退编码增益", () => {
+  it("只宣告 volume 不宣告 mute → 采样仍恒 unity(无烘 PCM 兜底)", () => {
     // 只宣告 volume 时静音无法可靠表达,而那正是要避开的一类"看起来生效、实际打架"。
     const g = new SendspinGroup("g-half", {} as any);
     g.volume = 30;
@@ -200,8 +200,8 @@ describe("sendspin 音量走设备命令(server/command)", () => {
       supportsCommand: (cmd: string) => cmd === "volume",
       sendPlayerCommand: () => true,
     };
-    expect(g.offloadsVolume(c)).toBe(false);
-    expect(g.appliedGain(c)).toBe(30);
+    expect(g.offloadsVolume(c)).toBe(true);
+    expect(g.appliedGain(c)).toBe(100);
   });
 
   it("入组即对齐:成员一进组就拿到组音量", () => {
@@ -298,7 +298,7 @@ describe("sendspin 音量走设备命令(server/command)", () => {
     ]);
   });
 
-  it("真机链路:未宣告能力的设备一条命令都收不到(老固件行为不变)", async () => {
+  it("真机链路:未宣告能力的设备命令被能力门禁拦下 + 采样恒 unity(4.0.87:不再烘 PCM)", async () => {
     const srv = getSendspinServer()!;
     plainWire.frames.length = 0;
 
@@ -309,8 +309,9 @@ describe("sendspin 音量走设备命令(server/command)", () => {
     expect(plainWire.frames.filter((f) => f?.type === "server/command")).toEqual([]);
     // 老路径照旧:静音 → 增益 0;未静音 → 乘积
     const conn = srv.clients.get(PLAIN_CID)!;
-    expect(srv.group(PLAIN_CID).appliedGain(conn)).toBe(0);
+    // 4.0.87:采样恒 unity —— 不再有「静音烘 0 / 组音量烘 PCM」这两条老固件兜底。
+    expect(srv.group(PLAIN_CID).appliedGain(conn)).toBe(100);
     setMutedCore(srv, PLAIN_CID, false);
-    expect(srv.group(PLAIN_CID).appliedGain(conn)).toBe(21);
+    expect(srv.group(PLAIN_CID).appliedGain(conn)).toBe(100);
   });
 });

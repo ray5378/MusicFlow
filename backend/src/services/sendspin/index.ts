@@ -212,7 +212,7 @@ export function readSendspinPluginConfig(): {
   preferredCodec: SendspinCodecPreference;
   streamSource: boolean;
   prefillBufferMs: number;
-  /** sink 自愈自动远程重启(L2)—— 默认 false,理由见 SendspinServerOptions.sinkAutoRestart。 */
+  /** sink 自愈自动远程重启(L2)—— 默认 true(显式 false 才关),理由见 SendspinServerOptions.sinkAutoRestart。 */
   sinkAutoRestart: boolean;
 } {
   const fallback = {
@@ -222,7 +222,7 @@ export function readSendspinPluginConfig(): {
     preferredCodec: "pcm" as SendspinCodecPreference,
     streamSource: true,
     prefillBufferMs: PREFILL_BUFFER_DEFAULT_MS,
-    sinkAutoRestart: false,
+    sinkAutoRestart: true,
   };
   try {
     const row = sqlite
@@ -244,8 +244,8 @@ export function readSendspinPluginConfig(): {
       // 预填充缓冲(设备侧抗抖动窗口,毫秒)。插件配置页**随时可改**,推流循环
       // 以 PREFILL_CACHE_MS 的粒度重读(见 streamEngine),无需重启、不中断当前播放。
       prefillBufferMs: normalizePrefillBufferMs(cfg?.prefill_buffer_ms),
-      // 只有**显式 true** 才开:默认关(见 SendspinServerOptions.sinkAutoRestart)。
-      sinkAutoRestart: cfg?.sink_auto_restart === true,
+      // 默认开:**显式 false 才关**(见 SendspinServerOptions.sinkAutoRestart)。
+      sinkAutoRestart: cfg?.sink_auto_restart !== false,
     };
   } catch {
     return fallback;

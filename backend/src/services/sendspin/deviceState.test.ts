@@ -14,6 +14,8 @@ import {
   saveDeviceEsphome,
   listEsphomeCreds,
   purgeDeviceArtifacts,
+  // 4.0.87:无行时的缺省音量从 100 收到 DEFAULT_SENDSPIN_VOLUME(=20)。
+  DEFAULT_SENDSPIN_VOLUME,
 } from "./deviceState.js";
 
 describe("sendspin deviceState (按设备持久音量)", () => {
@@ -95,7 +97,7 @@ describe("sendspin deviceState (按设备持久音量)", () => {
 
   it("无行时直接写禁用态也能建行(volume/muted 取缺省)", () => {
     saveDeviceDisabled(CID, true);
-    expect(getDeviceVolumeState(CID)).toEqual({ volume: 100, muted: false });
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: DEFAULT_SENDSPIN_VOLUME, muted: false });
     expect(getDeviceDisabled(CID)).toBe(true);
   });
 
@@ -151,7 +153,7 @@ describe("sendspin deviceState (按设备持久音量)", () => {
 
   it("无行时直接写密钥也能建行(volume/muted 取缺省)", () => {
     saveDeviceEsphome(CID, "k", 6053);
-    expect(getDeviceVolumeState(CID)).toEqual({ volume: 100, muted: false });
+    expect(getDeviceVolumeState(CID)).toEqual({ volume: DEFAULT_SENDSPIN_VOLUME, muted: false });
     expect(rowCount()).toBe(1);
   });
 

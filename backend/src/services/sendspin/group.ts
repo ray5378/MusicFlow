@@ -96,9 +96,12 @@ export type GroupProps = {
   sendAhead: number;
 };
 
+import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
+
 export class SendspinGroup {
   id: string;
-  volume = 100;
+  // 4.0.87:缺省收到 DEFAULT_SENDSPIN_VOLUME(=20)—— 缺省 100 即「设备重连被灌满音量」。
+  volume = DEFAULT_SENDSPIN_VOLUME;
   muted = false;
   positionMs = 0;
   members = new Set<string>();

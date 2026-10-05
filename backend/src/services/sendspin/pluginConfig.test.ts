@@ -17,8 +17,8 @@ describe("readSendspinPluginConfig", () => {
       streamSource: true,
       // 预填充缓冲(设备侧抗抖动窗口):缺省 3000ms,Web 配置页可随时改档位。
       prefillBufferMs: 3000,
-      // sink 自动重启(sink_auto_restart)默认关,见 SendspinServerOptions 注释。
-      sinkAutoRestart: false,
+      // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
+      sinkAutoRestart: true,
     });
   });
 
@@ -33,8 +33,8 @@ describe("readSendspinPluginConfig", () => {
       preferredCodec: "pcm",
       streamSource: true,
       prefillBufferMs: 3000,
-      // sink 自动重启(sink_auto_restart)默认关,见 SendspinServerOptions 注释。
-      sinkAutoRestart: false,
+      // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
+      sinkAutoRestart: true,
     });
   });
 

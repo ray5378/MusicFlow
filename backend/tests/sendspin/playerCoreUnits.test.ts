@@ -64,8 +64,12 @@ vi.mock("../../src/services/sendspin/streamEngine.js", () => eng);
 
 vi.mock("../../src/services/sendspin/deviceState.js", () => ({
   saveDeviceVolumeState: vi.fn(),
+  // 4.0.87:组音量出厂缺省从 100 收到 20(设备重连会把组音量刷成输出级音量,
+  // 缺省 100 就是「重启后突然非常大声」),测试必须真实暴露这个常量。
+  DEFAULT_SENDSPIN_VOLUME: 20,
 }));
 
+import { DEFAULT_SENDSPIN_VOLUME } from "../../src/services/sendspin/deviceState.js";
 import {
   ephemeralGroup,
   armBorrowCore,
@@ -174,7 +178,12 @@ afterEach(() => {
 describe("ephemeralGroup:服务未运行时的内存假组", () => {
   it("首次调用按缺省值建组", () => {
     const g = ephemeralGroup("eph-a");
-    expect(g).toMatchObject({ positionMs: 0, volume: 100, muted: false, current: null });
+    expect(g).toMatchObject({
+      positionMs: 0,
+      volume: DEFAULT_SENDSPIN_VOLUME,
+      muted: false,
+      current: null,
+    });
   });
 
   it("同一 clientId 二次调用拿到同一个对象(改过的值留着)", () => {
@@ -191,7 +200,7 @@ describe("ephemeralGroup:服务未运行时的内存假组", () => {
     const a = ephemeralGroup("eph-c1");
     const b = ephemeralGroup("eph-c2");
     a.volume = 11;
-    expect(b.volume).toBe(100);
+    expect(b.volume).toBe(DEFAULT_SENDSPIN_VOLUME);
     expect(ephemeralGroup("eph-c2")).toBe(b);
   });
 });

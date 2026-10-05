@@ -41,6 +41,7 @@ vi.mock("../../src/services/sendspin/runtime.js", () => ({
 }));
 
 import { getSendspinFront, proxyEsphomeStatus } from "../../src/services/sendspin/proxy.js";
+import { DEFAULT_SENDSPIN_VOLUME } from "../../src/services/sendspin/deviceState.js";
 
 /** 等一轮微任务,让 fire-and-forget 的 RPC 落地。 */
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -149,6 +150,8 @@ describe("SendspinServerProxy 读侧(镜像)", () => {
     const p = getSendspinFront(false)!;
     const g = p.groups.get("g1")!;
     expect(g.name).toBe("g1");
+    // 4.0.87:缺省收窄到 DEFAULT_SENDSPIN_VOLUME,但**镜像里已存在的组**(真机在跑)仍原样透传,
+    // 缺省只作用于「组缺席」这条分支(见下面 ghost 用例)。
     expect(g.volume).toBe(100);
     expect(g.muted).toBe(false);
     expect(g.current?.songId).toBe("s1");
@@ -164,7 +167,7 @@ describe("SendspinServerProxy 读侧(镜像)", () => {
     expect(p.groups.get("ghost")).toBeUndefined();
     const g = p.group("ghost");
     expect(g.name).toBe("ghost");
-    expect(g.volume).toBe(100);
+    expect(g.volume).toBe(DEFAULT_SENDSPIN_VOLUME);
     expect(g.muted).toBe(false);
     expect(g.current).toBeNull();
   });

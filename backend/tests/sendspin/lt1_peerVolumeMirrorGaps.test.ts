@@ -38,6 +38,9 @@ vi.mock("../../src/services/sendspin/supervisor.js", () => ({
 }));
 
 import { getSendspinDeviceVolume, attachSendspinPeerVolumes } from "../../src/services/sendspin/peerVolume.js";
+// 4.0.87:回退缺省从 100 收到 DEFAULT_SENDSPIN_VOLUME(=20)——
+// 缺省 100 会在设备重连时把满音量刷进设备输出级,「重启后突然非常大声」。
+import { DEFAULT_SENDSPIN_VOLUME } from "../../src/services/sendspin/deviceState.js";
 import { initDatabase, sqlite } from "../../src/db/index.js";
 
 const CID = "lt1-peer-vol-mirror";
@@ -68,20 +71,20 @@ describe("peerVolume:fork 镜像实时取值", () => {
   it("supervisor 运行中但镜像没有该组 → 视为离线,回退缺省(不编造在线)", () => {
     H.running = true;
     // 镜像为空:设备还没起播 → 不是「在线 100」,而是「离线,按缺省回显」。
-    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: 100, muted: false, online: false });
+    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: DEFAULT_SENDSPIN_VOLUME, muted: false, online: false });
   });
 
   it("镜像组存在但 volume 不是数字 → 不当作实时值,回退库/缺省", () => {
     H.running = true;
     H.mirrorGroups.set(CID, { muted: true }); // 只有 muted,没有权威 volume
-    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: 100, muted: false, online: false });
+    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: DEFAULT_SENDSPIN_VOLUME, muted: false, online: false });
   });
 
   it("读实时值抛异常(运行时故障)→ 吞掉并回退,绝不冒泡到回显热路径", () => {
     H.running = true;
     H.serverThrows = true;
     // 契约:best-effort —— 异常时必须仍返回一个可用快照,而不是让 /v1/peers 整表 500。
-    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: 100, muted: false, online: false });
+    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: DEFAULT_SENDSPIN_VOLUME, muted: false, online: false });
   });
 
   it("in-proc 有真实 server 且组存在 → 取组音量(主进程默认路径)", () => {
@@ -94,7 +97,7 @@ describe("peerVolume:fork 镜像实时取值", () => {
     H.running = false;
     H.mirrorGroups.set(CID, { volume: 77, muted: false });
     // 契约:isRunning() 是镜像可信度的门禁;子进程没跑时镜像必是陈旧残留,必须忽略。
-    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: 100, muted: false, online: false });
+    expect(getSendspinDeviceVolume(CID)).toEqual({ volume: DEFAULT_SENDSPIN_VOLUME, muted: false, online: false });
   });
 });
 
