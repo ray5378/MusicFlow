@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.1.0] - 2026-10-07
+
+### 性能优化:发现页与库页查询提速 + 推荐缓存永热
+
+- **数据库索引 + 查询下推(rest/index.ts + db/index.ts)**:新增 4 个幂等索引(albums.year / albums.genre / albums.play_count / album_artists.artist);getAlbumList2 全类型排序/过滤/分页下推 SQL——random 改「id 列取样回表」(整行大列不再进排序堆),newest/recent/frequent/highest/byGenre/byYear/starred 逐项语义核对后下推,alphabeticalByName/ByArtist 保留 JS 路径(localeCompare 区域序不可下推);getRandomSongs 同步改 id 取样且无过滤时免 join;getArtists/getIndexes 投影瘦身(bio 等大文本列不再捞回)。合成库(6 万专辑/13 万歌)实测:random 232ms→10.8ms、newest 288ms→3.3ms、byYear/frequent/byGenre/starred 208-221ms→3.0-3.6ms、getRandomSongs 64ms→16.4ms、getArtists 113ms→72ms、getIndexes 101ms→58ms,EXPLAIN QUERY PLAN 全部命中索引。
+
+- **推荐缓存 stale-while-revalidate(api/recommend.ts)**:/v1/recommend 与可缓存 provider 的 /v1/local-recommend 改为「有缓存立即返回(不论新旧),过期触发后台刷新(single-flight 去重),插件聚合失败保留 last-good 不覆盖旧缓存,无缓存才阻塞拉取」;新增周期预热(递归 setTimeout,TTL/2,unref,冷启动不外呼)。用户侧效果:首页插件推荐从「5 分钟过期后下一次 900ms+ 阻塞」变为永远秒回。
+
+- **回归守卫**:新增 recommendSwr(4 例)/ddlIdempotent(2 例)/restPagingRegression(7 例);recommendRoutesContract 1 例按 SWR 新契约订正。全量 432 文件 / 5685 例全绿,tsc --noEmit 干净。
 ## [4.0.88] - 2026-10-07
 
 ### Sendspin 修复:FLAC 编码器死亡自愈,杜绝「中途无声、进度照走、切歌恢复」
