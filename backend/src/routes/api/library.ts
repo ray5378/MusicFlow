@@ -72,7 +72,7 @@ app.get("/v1/stats", (c) => {
 
 app.get("/v1/songs", (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
+  const pageSize = Math.min(2000, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const query = (c.req.query("query") || "").trim();
   const genre = (c.req.query("genre") || "").trim();
   // sort=recentAdded: 最新添加入库的歌曲（按入库时间倒序，封顶 500 首，新入库自动进入列表）

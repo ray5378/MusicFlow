@@ -790,9 +790,15 @@ const searchHandler = (c: any) => {
 
   if (query === "" || query === '""') {
     // Empty query: return everything (used by clients to page through the whole library).
+    // 消费者排查(b43srv,2026-10):hass-musicflow-card 的 backend-client.js getSongs()
+    // 显式发 '/search3?query=&songCount=60&songOffset=N' 借本分支翻全库(其注释明确
+    // 「复用 search3 空查询」);hass-musicflow 集成 async_search_media → search3 的
+    // query 来自 HA 搜索栏,空词不能静态排除。故本分支不可删除。
     // 只投影 songToChild 实际用到的列,避开 source_data/stream_headers/cache_path
     // 等大文本列 —— 整库翻页不会再把整张 songs 表的文本载荷都拉进内存(排序/分页
     // 语义不变:标题按 localeCompare 排)。
+    // 不下推 SQL LIMIT/OFFSET 的原因:localeCompare 是 locale 感知排序(与 /v1/artists
+    // 同理,SQLite ORDER BY 会破坏中文顺序),只对当页排序会改变全局排序语义。
     foundSongs = db.select({
       id: songs.id,
       albumId: songs.albumId,
