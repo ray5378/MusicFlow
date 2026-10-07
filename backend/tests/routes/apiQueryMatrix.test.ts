@@ -103,12 +103,14 @@ describe("GET /v1/songs 分页与钳制", () => {
     for (const id of ids2) expect(ids1).not.toContain(id);
   });
 
-  // characterization: pageSize=0 走 `Number(x) || 50` 回落默认50（不是钳到 1）；上界 200 生效。
-  it("pageSize 越界:0 回落默认 50，999 钳制到 200", async () => {
+  // characterization: pageSize=0 走 `Number(x) || 50` 回落默认50（不是钳到 1）；上界 2000 生效(b43:所有歌曲页整库翻页 200→2000,999 已在界内不再被钳)。
+  it("pageSize 越界:0 回落默认 50，界内 999 原样保留，99999 钳制到 2000", async () => {
     const a = await call("GET", "/v1/songs?pageSize=0");
     expect(a.body.pageSize).toBe(50);
     const b = await call("GET", "/v1/songs?pageSize=999");
-    expect(b.body.pageSize).toBe(200);
+    expect(b.body.pageSize).toBe(999);
+    const c = await call("GET", "/v1/songs?pageSize=99999");
+    expect(c.body.pageSize).toBe(2000);
   });
 
   it("page 非法(负数/非数字)→ 回落第 1 页", async () => {

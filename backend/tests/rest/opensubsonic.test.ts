@@ -146,6 +146,17 @@ describe("浏览与搜索", () => {
     expect((sr(all)?.searchResult3?.song ?? []).length).toBe(8);
   });
 
+  it("search3 空查询:按标题 localeCompare 排序,songCount/songOffset 真分页", async () => {
+    // hass-musicflow-card 的 getSongs() 依赖此契约:query= 翻全库 + offset/count 分页。
+    // 锁两件事:① 排序是 localeCompare(标题字典序,非 DB 行序);② offset 真实生效。
+    const page1 = await get("/rest/search3?query=&songCount=3&songOffset=0");
+    const s1 = sr(page1)?.searchResult3?.song?.map((x: any) => x.title);
+    expect(s1).toEqual(["Song Aac", "Song Flac", "Song M4a"]);
+    const page2 = await get("/rest/search3?query=&songCount=3&songOffset=3");
+    const s2 = sr(page2)?.searchResult3?.song?.map((x: any) => x.title);
+    expect(s2).toEqual(["Song Ogg", "Song One", "Song Opus"]);
+  });
+
   it("getSong 返回单曲", async () => {
     const r = await get("/rest/getSong?id=s1");
     expect(sr(r)?.song?.title).toBe("Song One");

@@ -150,6 +150,30 @@ describe("GET /v1/songs", () => {
     expect(r.status).toBe(200);
     expect(r.body.items.some((x: any) => x.id === "s-g1")).toBe(true);
   });
+
+  it("pageSize 上限为 2000:>2000 被夹到 2000,2000 整页可用,默认值仍为 50", async () => {
+    clearLibraryTables();
+    const N = 2001;
+    // 分批插入:better-sqlite3 默认变量上限 999,2001 行一次插入会触发 too many SQL variables
+    const rows = Array.from({ length: N }, (_, i) => ({ id: `s-p${i}`, title: `分页${String(i).padStart(5, "0")}`, artist: "P", path: `l:src:/p${i}.mp3` }));
+    for (let i = 0; i < rows.length; i += 100) db.insert(songs).values(rows.slice(i, i + 100)).run();
+    // 越界(99999)被夹到 2000,单页恰好返回 2000 条
+    const clamped = await call("GET", "/v1/songs?page=1&pageSize=99999");
+    expect(clamped.status).toBe(200);
+    expect(clamped.body.pageSize).toBe(2000);
+    expect(clamped.body.total).toBe(N);
+    expect(clamped.body.items.length).toBe(2000);
+    // 显式 2000 恰好整页
+    const full = await call("GET", "/v1/songs?page=1&pageSize=2000");
+    expect(full.status).toBe(200);
+    expect(full.body.pageSize).toBe(2000);
+    expect(full.body.items.length).toBe(2000);
+    // 不传 pageSize 保持原默认 50(客户端不传参行为不变)
+    const def = await call("GET", "/v1/songs");
+    expect(def.status).toBe(200);
+    expect(def.body.pageSize).toBe(50);
+    expect(def.body.items.length).toBe(50);
+  });
 });
 
 describe("艺术家刮削口", () => {

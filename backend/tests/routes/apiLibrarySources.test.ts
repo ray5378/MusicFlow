@@ -120,8 +120,8 @@ describe("library 域:列表与检索", () => {
     expect(byQuery.body.items.every((i: any) => /two/i.test(i.title) || /two/i.test(i.artist || "") || /two/i.test(i.album || ""))).toBe(true);
     const byGenre = await call("GET", "/v1/songs?genre=Jazz");
     expect(byGenre.body.items.every((i: any) => i.genre === "Jazz")).toBe(true);
-    const clamped = await call("GET", "/v1/songs?pageSize=9999&page=1");
-    expect(clamped.body.pageSize).toBe(200);
+    const clamped = await call("GET", "/v1/songs?pageSize=99999&page=1");
+    expect(clamped.body.pageSize).toBe(2000);
     const paged = await call("GET", "/v1/songs?page=2&pageSize=1");
     expect(paged.body.items.length).toBeLessThanOrEqual(1);
   });
