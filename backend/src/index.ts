@@ -114,7 +114,9 @@ app.use("/rest/*", async (c, next) => {
   // 其鉴权,前端已在封面 URL 上附加 ?token= 查询参数,故改走 authMiddleware。
   const p = c.req.path;
   // c.req.path 是完整路径(含 /rest 前缀),所以用 includes/endsWith 匹配
-  if (p.includes("/dlna/stream/")) return next();
+  // membuf/:token(batch44):整曲内存缓冲的回环取流端,16 字节随机 token,
+  //   信任模型与 dlna/stream/:token 相同(仅本机回环消费,token 即凭证)。
+  if (p.includes("/dlna/stream/") || p.includes("/membuf/")) return next();
   return authMiddleware(c, next);
 });
 app.route("/rest", restRoutes);

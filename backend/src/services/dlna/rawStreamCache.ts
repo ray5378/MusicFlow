@@ -312,6 +312,67 @@ function warnThrottled(key: string, msg: string): void {
   } catch { /* 日志不可用绝不能影响取流 */ }
 }
 
+// ==================== 停摆看门狗(batch44 · 僵尸流修复) ====================
+//
+// 上游「不产字节也不报错」是僵尸流的根因形态:produce 里的 reader.read() 永不 resolve
+// ⇒ 回环响应挂死 ⇒ ffmpeg 无字节可吐 ⇒ 下游(已发出 200)基于时间虚假推进进度。
+// 这里给**每一次上游字节读取**加停摆看门狗:连续 RAW_STALL_TIMEOUT_MS 无字节即
+// cancel 上游读端并向下游 throw(下游看到的是**错误**而不是干净 EOF —— 与
+// 「续接失败必须报错」红线同语义);同时给上游建连+响应头(openUpstream/passthrough)
+// 加超时。ffmpeg 拿到回环错误后带错退出,serveFfmpegPipe 侧显式终止下游响应。
+// (读值在调用时发生:测试可用环境变量按用例覆写。)
+
+/** 连续无上游字节多久判定停摆(毫秒)。env `RAW_STALL_TIMEOUT_MS`,缺省 10s。 */
+function stallTimeoutMs(): number {
+  return envInt("RAW_STALL_TIMEOUT_MS", 10_000);
+}
+
+/** 上游建连+响应头超时(毫秒)。env `RAW_UPSTREAM_OPEN_TIMEOUT_MS`,缺省 15s。 */
+function openTimeoutMs(): number {
+  return envInt("RAW_UPSTREAM_OPEN_TIMEOUT_MS", 15_000);
+}
+
+class UpstreamStallError extends Error {
+  constructor() { super(`rawStreamCache: 上游停摆(>${stallTimeoutMs()}ms 无字节)`); this.name = "UpstreamStallError"; }
+}
+
+/** 把外部 signal 与超时 signal 合成 fetch 用 signal(不依赖 AbortSignal.any 的类型可用性)。 */
+function fetchSignalWithTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!signal) return timeout;
+  const ctrl = new AbortController();
+  const abort = () => ctrl.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  timeout.addEventListener("abort", abort, { once: true });
+  return ctrl.signal;
+}
+
+/** 带停摆看门狗的一次 reader.read():超时先 cancel 上游再 throw(Promise.race 对落败
+ *  分支保持监听,不会有 unhandledRejection)。 */
+async function readWithStallGuard(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  key: string,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, rej) => {
+        timer = setTimeout(() => {
+          warnThrottled(`stall:${key}`, `上游停摆(>${stallTimeoutMs()}ms 无字节)⇒ 终止读,下游将看到错误`);
+          // ⚠️ 先 rej 再 cancel:cancel 会把挂起的 read resolve 成 {done:true},
+          //    若先 cancel,Promise.race 会被这个「假 EOF」抢先,停摆错误就丢了
+          //    (实测:后 cancel 在同一 tick 内同步 settle 挂起读,竞态必输)。
+          rej(new UpstreamStallError());
+          void reader.cancel().catch(() => {});
+        }, stallTimeoutMs());
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // ==================== 回源 ====================
 
 /**
@@ -325,10 +386,12 @@ async function openUpstream(
 ): Promise<{ head: UpstreamHead; response?: Response }> {
   const headers: Record<string, string> = { ...src.headers, Range: rangeHeader };
   src.upstreamRequests += 1;
+  // batch44(僵尸流修复):建连+响应头硬顶 —— 原 fetch 无超时,上游 TTFB 挂死会让
+  // 回环响应无限等待(ffmpeg 无字节,只能等 90s 看门狗兜底)。
   const res = await fetch(src.url, {
     headers,
     redirect: "follow",
-    ...(signal ? { signal } : {}),
+    signal: fetchSignalWithTimeout(signal, openTimeoutMs()),
   });
   const contentRange = res.headers.get("content-range");
   const total = parseTotalFromRange(contentRange);
@@ -420,7 +483,21 @@ function copyPassthrough(res: Response, tag = "passthrough"): Response {
     headers[k] = v;
   });
   headers["X-MusicFlow-RawCache"] = tag;
-  return new Response(res.body, { status: res.status, headers });
+  // batch44(僵尸流修复):纯透传体同样上停摆看门狗(原样 res.body 无任何超时保护 ——
+  // 这是 RAW_STREAM_CACHE=0 时的唯一形态,「上游停摆 ⇒ 下游显式终止」必须全路径覆盖)。
+  if (!res.body) return new Response(null, { status: res.status, headers });
+  const reader = res.body.getReader();
+  return new Response(
+    toWebStream(
+      async () => {
+        const r = await readWithStallGuard(reader, tag);
+        if (r.done) return null;
+        return new Uint8Array(r.value);
+      },
+      () => { void reader.cancel().catch(() => {}); },
+    ),
+    { status: res.status, headers },
+  );
 }
 
 export interface ProxyRawOptions {
@@ -437,7 +514,7 @@ async function passthrough(opts: ProxyRawOptions): Promise<Response> {
   const upstream = await fetch(opts.url, {
     headers,
     redirect: "follow",
-    ...(opts.signal ? { signal: opts.signal } : {}),
+    signal: fetchSignalWithTimeout(opts.signal, openTimeoutMs()),
   });
   return copyPassthrough(upstream);
 }
@@ -496,7 +573,7 @@ export async function proxyRawRange(opts: ProxyRawOptions): Promise<Response> {
         // pos > lastByte 截掉抵消」,总长度还一样,极难发现。
         // 240 实测:整曲 md5 与直连不符、且两次回环互不相同,首个差异正好落在块边界。
         if (tailReader) {
-          const { done, value } = await tailReader.read();
+          const { done, value } = await readWithStallGuard(tailReader, src.key);
           if (done) return null;
           const buf = new Uint8Array(value);
           mirrorInto(src, pos, buf, tailBudget);
@@ -541,7 +618,7 @@ export async function proxyRawRange(opts: ProxyRawOptions): Promise<Response> {
         }
         // 上面要么赋值成功、要么 throw ⇒ 此处必非空(TS 无法证明循环体至少执行一次,故显式收敛)
         const tail = tailReader!;
-        const { done, value } = await tail.read();
+        const { done, value } = await readWithStallGuard(tail, src.key);
         if (done) return null;
         const buf = new Uint8Array(value);
         mirrorInto(src, pos, buf, tailBudget);
@@ -604,7 +681,7 @@ export async function proxyRawRange(opts: ProxyRawOptions): Promise<Response> {
     const budget = { mirrored: 0 };
     const produce = async (): Promise<Uint8Array | null> => {
       if (pos > lastByte) return null;
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithStallGuard(reader, src.key);
       if (done) return null;
       const buf = new Uint8Array(value);
       mirrorInto(src, pos, buf, budget);

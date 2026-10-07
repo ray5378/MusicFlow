@@ -1604,8 +1604,80 @@ async function serveFfmpegPipe(
 
   // 用 Readable.toWeb 把 Node 可读流显式转成 Web ReadableStream(规避 undici
   // 重复 close 竞态,见 serveTranscodedSong 处注释)。
-  const { Readable: NodeReadable } = await import("node:stream");
-  let webStream = NodeReadable.toWeb(child.stdout as any) as any;
+  // batch44(僵尸流修复):stdout 先经 PassThrough 中转。stdout「提前 close」
+  // (ffmpeg 被看门狗强杀 / 上游断或错导致带错退出)且客户端未断开时,带错 destroy
+  // ⇒ toWeb 流 error ⇒ killOnCancel 透传 error ⇒ @hono/node-server 拆掉底层 socket
+  // ⇒ 客户端收到**连接错误**,走既有跳歌/重试。旧行为:toWeb 对 stdout close 一律
+  // 干净收尾 ⇒ 客户端把「中途夭折」当「整曲播完」;而「上游挂死不 close」则是响应
+  // 永不结束 = 僵尸流(进度条照常走,内容已死)。两类形态都在这里收口。
+  const { Readable: NodeReadable, PassThrough } = await import("node:stream");
+  const sink = new PassThrough();
+  // batch44 v2:end:false —— stdout 的 EOF('end' 恒先于 child 'close')不得提前把
+  // sink 收成干净 EOF,否则「启动裁决通过后中段死亡」(直通中上游断/错/看门狗强杀)
+  // 会被客户端误读为「整曲播完」(C3 契约:未完成缓冲模式下上游死亡 ⇒ 下游显式终止)。
+  // 收尾去向统一由下方 child 'close' 按退出码决定。
+  child.stdout.pipe(sink, { end: false });
+  // 拆下游:中途中断(看门狗强杀/客户端 abort/上游断导致 stdout close 未 end)时
+  // 带错 destroy;outgoing.destroy(err) 同步拆 socket(fetch 原生运行时 ⇒ 连接错误)。
+  const abortDownstream = (err: Error) => {
+    // ⚠️ outgoing.destroy() 无参是优雅 FIN;带 err 才是 RST。
+    sink.destroy(err);
+    try { (c as any)?.env?.outgoing?.destroy?.(err); } catch { /* 非 node runtime */ }
+  };
+  // ---- 启动裁决(b44 僵尸流修复):回话前先等「首字节 / 带错退出 / 超时」----
+  // node-server 对「首字节前出错的流体」会把错误吞成干净空 200(eager read done ⇒
+  // writeHead+end;实测 ffmpeg 零输出带错退出 ⇒ 客户端拿 0 字节 200,destroy(err)
+  // 也抢不过 stdout 'end' 竞态)。回话前裁决:首字节 ⇒ 正常出流;启动失败 ⇒ throw
+  // ⇒ 调用方回显式 fail;首字节超时(上游挂死)⇒ kill + throw。绝不发不产字节的 200。
+  const FIRST_BYTE_TIMEOUT_MS = Number(process.env.FFMPEG_FIRST_BYTE_TIMEOUT_MS) || 15_000;
+  const startFail = await new Promise<Error | null>((resolveFail) => {
+    let settled = false;
+    const done = (e: Error | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.off("data", onData);
+      child.off("exit", onExit);
+      resolveFail(e);
+    };
+    const onData = () => done(null);
+    const onExit = (code: number | null) => {
+      if (signal.aborted) return;
+      // code!=0 ⇒ 启动失败(含零输出);code===0 且零输出 ⇒ 交给正常路径(首个 pull 即
+      // done,干净空结束,与旧行为一致 —— 我们的输入不存在这种常态)。
+      done(code !== 0 ? new Error(`ffmpeg 启动失败 code=${code} songId=${opts.songId ?? "-"}`) : null);
+    };
+    const timer = setTimeout(() => done(new Error(`ffmpeg 首字节超时(${FIRST_BYTE_TIMEOUT_MS}ms,上游挂死?) songId=${opts.songId ?? "-"}`)), FIRST_BYTE_TIMEOUT_MS);
+    child.stdout.once("data", onData);
+    child.once("exit", onExit);
+  });
+  if (startFail) {
+    killChild();
+    release();
+    // 显式失败:直接回 Subsonic failed envelope(与 404 死链路径同形态)。
+    // (实测 `throw` 会被 Hono onError 兜成 500 "Internal Server Error" 空 text,
+  //   客户端拿不到结构化失败;直接 return 响应则确定可达。)
+    return c.json(fail(0, startFail.message));
+  }
+  // batch44 v2:收尾决策挂在 child 'close'(带退出码)而非 stdout 'close' ——
+  //   code===0            → sink.end() 干净收尾(自然播完,P0-4 语义不变);
+  //   客户端 abort        → 静默 destroy;
+  //   其余(带错退出/强杀) → abortDownstream:toWeb 流 error + outgoing RST
+  //                         ⇒ 客户端一定看到连接错误,走既有跳歌/重试(C3)。
+  child.once("close", (code: number | null, sig: string | null) => {
+    if (sink.destroyed) return;
+    if (signal.aborted) {
+      sink.destroy();
+      try { (c as any)?.env?.outgoing?.destroy?.(); } catch { /* ignore */ }
+      return;
+    }
+    if (code === 0 && sig === null) {
+      if (!sink.writableEnded) sink.end();
+      return;
+    }
+    abortDownstream(new Error(`ffmpeg 异常终止(code=${code} sig=${sig ?? "-"},上游断/错或看门狗强杀) songId=${opts.songId ?? "-"}`));
+  });
+  let webStream = NodeReadable.toWeb(sink as any) as any;
   const metaint = opts.icyMetaint ?? 0;
   if (metaint > 0) webStream = icyFrameStream(webStream, metaint);
   // ④ 响应流被取消(客户端停止读取)时也 kill —— abort 信号未必覆盖所有停读场景。
@@ -1762,7 +1834,7 @@ async function serveFlowQueue(
     const row = db.select().from(songs).where(eq(songs.id, cand.songId)).get();
     if (!row) continue;
     const resolved = await resolvePreferredSong(row);
-    const input = await resolveTranscodeInput(c, resolved);
+    const input = await resolveTranscodeInput(c, resolved, { buffering: false });
     if (!input) continue;
     items.push({
       key: resolved.id,
@@ -1836,8 +1908,20 @@ async function serveFlowQueue(
   });
 }
 
-// 解析转码输入：本地文件路径 / WebDAV URL(+Basic) / 在线 URL(+headers，优先本地缓存)。
-async function resolveTranscodeInput(c: any, song: any): Promise<{ source: string; headers?: Record<string, string> } | null> {
+// 解析转码输入：本地文件路径 / 内存缓冲回环 URL / WebDAV URL(+Basic) / 在线 URL(+headers，优先本地缓存)。
+// batch44(整曲内存缓冲):网络源(web 插件行 / WebDAV 行)默认先**整曲取进内存**
+// (fetchWholeSongBuffered:瞬时错误有限重试 + 停摆/总时长硬顶 + 大小/并发预算保护),
+// 成功经 /rest/membuf/:token 回环喂 ffmpeg —— 起播后上游再断网也不影响本首
+// (240 僵尸流的根治层;插件临时外链整曲一次取完也最稳)。失败分两类:
+//   - too-big / budget / timeout ⇒ 回退 loopbackRawStreamUrl 直通(旧行为,rawStreamCache 照常);
+//   - dead / stalled / error ⇒ 返回 null ⇒ 调用方显式失败(客户端走既有跳歌/重试,不发僵尸 200)。
+// opts.buffering === false 跳过缓冲:seek 重拉(timeOffset>0)走 rawStreamCache 缓存路径更省;
+// flow 连续流逐曲解析,串行整曲下载会拖垮过渡延迟 —— 均由调用方显式传入。
+async function resolveTranscodeInput(
+  c: any,
+  song: any,
+  opts?: { buffering?: boolean },
+): Promise<{ source: string; headers?: Record<string, string> } | null> {
   if ((song.type || "local") === "web") {
     const fs = await import("fs");
     if (song.cachePath && fs.existsSync(song.cachePath)) return { source: song.cachePath };
@@ -1848,6 +1932,12 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
     if (!url) {
       url = await resolveEmptyUrlStream(song);
       if (!url) return null;
+    }
+    if (opts?.buffering !== false) {
+      const buffered = await bufferNetworkSource(song.id, url, headers, c);
+      if (buffered === null) return null; // 显式失败 ⇒ 调用方 fail,客户端走既有跳歌/重试
+      if (buffered) return buffered;      // membuf 回环 URL
+      // undefined ⇒ 回退直通(旧行为)
     }
     return { source: loopbackRawStreamUrl(url, headers) };
   }
@@ -1862,9 +1952,53 @@ async function resolveTranscodeInput(c: any, song: any): Promise<{ source: strin
     if (config.username && config.password) {
       headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
     }
+    if (opts?.buffering !== false) {
+      const buffered = await bufferNetworkSource(song.id, downloadUrl, headers, c);
+      if (buffered === null) return null; // 显式失败(同上)
+      if (buffered) return buffered;
+    }
     return { source: loopbackRawStreamUrl(downloadUrl, headers) };
   }
   return { source: parsed.filePath };
+}
+
+/**
+ * 整曲内存缓冲(网络源共用入口,WEBDAV 与插件/在线源同享)。
+ * batch44(D):取流失败不走「快速失败」,而是**挂起本请求**进入长窗口自动重试
+ * (前 1 分钟每 10s → 之后每 60s → 总窗口 30min,常量化可配;同曲并发请求
+ * single-flight 共享同一循环;窗口内恢复 ⇒ 立即整曲缓冲正常供流,耗尽 ⇒ 显式失败)。
+ *   - 成功  → { source: membuf 回环 URL };
+ *   - 明确失败(dead/stalled/error)→ null ⇒ 调用方显式失败;
+ *   - 回退类(too-big/budget/timeout)→ undefined ⇒ 调用方落回 loopbackRawStreamUrl 直通。
+ */
+async function bufferNetworkSource(
+  songId: string,
+  url: string,
+  headers: Record<string, string>,
+  c: any,
+): Promise<{ source: string } | null | undefined> {
+  // batch44(D · 用户最终拍板):新流取流失败 ⇒ **挂起本请求**进入长窗口自动重试
+  // (前 1 分钟每 10s → 之后每 60s → 总窗口 30min;参数常量化 env 可配;同曲并发
+  // 请求 single-flight 共享同一循环;挂起等待不占缓冲预算 —— 预算只在
+  // fetchWholeSongBuffered 真正开始取流那一刻按在途字节记账)。窗口内任一次成功
+  // ⇒ 立即整曲缓冲正常供流(用户只感觉起播晚几秒);耗尽 ⇒ 显式失败。
+  // 「15~20s 硬顶」是**单次取流尝试**的上限(即上方 18s deadline),与长窗口不冲突。
+  const { fetchSongWithRetryWindow, registerMemStream, isBufferedDeadKind } =
+    await import("../../services/source/bufferedFetch.js");
+  const r = await fetchSongWithRetryWindow(`song:${songId}`, url, headers, { signal: c?.req?.raw?.signal });
+  if (r.ok) {
+    const token = registerMemStream(r.buf);
+    log.info(`[membuf] ${songId} 整曲缓冲 ${r.bytes}B/${Math.round(r.ms)}ms attempts=${r.attempts} → 内存回环供流`);
+    return { source: `${loopbackBase()}/rest/membuf/${token}` };
+  }
+  log.warn(`[membuf] ${songId} 整曲缓冲未成 kind=${r.kind}${isBufferedDeadKind(r.kind) ? " ⇒ 显式失败" : " ⇒ 回退直通"}`, {
+    status: (r as any).status,
+    err: (r as any).err,
+    attempts: r.attempts,
+    ms: r.ms,
+  });
+  if (isBufferedDeadKind(r.kind)) return null;
+  return undefined;
 }
 
 // 播放优选 + 回退(web 行切组内 local/webdav;local/webdav 不可用回 web)已抽到
@@ -1908,7 +2042,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
     sourceBitRate: song.bitRate,
   });
   if (transcode.should && transcode.format) {
-    const input = await resolveTranscodeInput(c, song);
+    const input = await resolveTranscodeInput(c, song, { buffering: timeOffset === 0 });
     if (input) {
       return serveTranscodedSong(c, input, {
         format: transcode.format,
@@ -1924,7 +2058,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   // Range 在实时流上无意义:一律全流 200(客户端改走 timeOffset,P2-3)。
   // 本地缺文件仍 404(与旧行为一致,避免 ffmpeg 空跑后才断流)。
   try {
-    const input = await resolveTranscodeInput(c, song);
+    const input = await resolveTranscodeInput(c, song, { buffering: timeOffset === 0 });
     if (!input) return c.json(fail(0, "No playable stream"));
     if ((song.type || "local") !== "web") {
       const parsedLocal = parseSongPath(song.path);
@@ -2102,7 +2236,7 @@ async function serveCastStream(
     sourceBitRate: resolvedSong.bitRate,
   });
   if (transcode.should && transcode.format) {
-    const input = await resolveTranscodeInput(c, resolvedSong);
+    const input = await resolveTranscodeInput(c, resolvedSong, { buffering: timeOffset === 0 });
     if (input) {
       return serveTranscodedSong(c, input, {
         format: transcode.format,
@@ -2120,7 +2254,7 @@ async function serveCastStream(
   try {
     const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
     const castCodec = resolveDlnaOutput(resolvedSong.suffix);
-    const input = await resolveTranscodeInput(c, resolvedSong);
+    const input = await resolveTranscodeInput(c, resolvedSong, { buffering: timeOffset === 0 });
     if (!input) return c.text("No playable stream", 404);
     if ((resolvedSong.type || "local") !== "web") {
       const parsedLocal = parseSongPath(resolvedSong.path);
@@ -2248,6 +2382,41 @@ restRoutes.get("/download", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   } catch (e: any) {
     return c.json(fail(0, e.message || "Download failed"));
   }
+});
+
+// ==================== 整曲内存缓冲回环出流(batch44) ====================
+// ffmpeg 的「内存缓冲输入端」:resolveTranscodeInput 把网络源整曲取进内存后在此注册,
+// (位置注意:本路由必须留在 P2-6 结构锁各文本切片覆盖范围之外 —— Accept-Ranges 是锁内的禁用字样。)
+// ffmpeg 经回环 token URL 取字节(支持 Range —— 输入侧定位零上游往返)。无鉴权:
+// token 16 字节随机,信任模型与 dlna 回环流 token 的 raw 分支一致(仅本机回环消费)。
+restRoutes.get("/membuf/:token", async (c) => {
+  const { resolveMemStream } = await import("../../services/source/bufferedFetch.js");
+  const { parseRangeHeader } = await import("../../services/dlna/rawStreamCache.js");
+  const entry = resolveMemStream(c.req.param("token"));
+  if (!entry) return c.text("Invalid or expired membuf token", 403);
+  const total = entry.buf.length;
+  const base: Record<string, string> = {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "no-cache",
+    "X-MusicFlow-MemBuf": "1",
+    ...(entry.mime ? { "Content-Type": entry.mime } : {}),
+  };
+  const range = parseRangeHeader(c.req.header("range"));
+  if (range && range.start >= 0) {
+    const end = range.end === null || range.end === undefined ? total - 1 : Math.min(range.end, total - 1);
+    if (range.start >= total || range.start > end) {
+      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${total}` } });
+    }
+    return new Response(new Uint8Array(entry.buf.subarray(range.start, end + 1)), {
+      status: 206,
+      headers: {
+        ...base,
+        "Content-Length": String(end - range.start + 1),
+        "Content-Range": `bytes ${range.start}-${end}/${total}`,
+      },
+    });
+  }
+  return new Response(new Uint8Array(entry.buf), { status: 200, headers: { ...base, "Content-Length": String(total) } });
 });
 
 restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
