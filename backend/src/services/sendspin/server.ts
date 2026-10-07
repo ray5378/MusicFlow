@@ -726,6 +726,11 @@ export class SendspinGroup {
   encoderForGroup(codec: SendspinCodec, gain: number): ChunkEncoder {
     const key = this.encoderKey(codec, gain);
     let e = this.encoders.get(key);
+    if (e && e.isHealthy?.() === false) {
+      // 自愈失败进退避的死实例(如 asm 堆楔死):换新,否则该组后续每首都被退避放空。
+      try { e.close(); } catch { /* ignore */ }
+      e = undefined;
+    }
     if (!e) {
       e = createChunkEncoder(codec);
       this.encoders.set(key, e);
