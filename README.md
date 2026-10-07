@@ -43,6 +43,9 @@ services:
       - ./local/online-covers:/app/backend/data/online-covers
       # 可选:平台歌词缓存,独立挂到大磁盘
       - ./local/online-lyrics:/app/backend/data/online-lyrics
+      # 容器时区:镜像无 tzdata,需挂载宿主机时区文件(TZ 环境变量仅对应用层生效)
+      - /etc/localtime:/etc/localtime:ro
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
 
 networks: {}
 ```
