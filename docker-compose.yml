@@ -1,41 +1,33 @@
 services:
   musicflow:
-    image: ghcr.io/ray5378/musicflow:latest
+    image: ray5378/musicflow:latest
     container_name: musicflow
-    restart: unless-stopped
+    restart: always
     # 注意:DLNA 发现依赖 SSDP 多播,必须使用 host 网络模式。
-    # 否则容器无法向局域网发送/接收 UDP 多播。
-    # host 网络仅 Linux 支持;Docker Desktop(macOS/Windows)上多播不可用,
-    # DLNA 需改为在 Linux 宿主机原生运行。
+    # host 网络仅 Linux 支持;Docker Desktop(macOS/Windows)上多播不可用,DLNA 需原生运行。
     network_mode: host
     environment:
-      # 数据目录:SQLite 主库 + 歌词/封面落库 + 外置插件 + 密钥都在这。
-      # 必须与下方 ./data:/data 卷映射对应,否则数据不会持久化。
-      - DATA_DIR=/data
-      # 可选:JWT 签名密钥。留空时首次启动自动生成并保存到 <DATA_DIR>/.jwt-secret
-      # (重启后保持稳定)。复用已有数据目录时建议显式设置,保证密钥一致。
+      # 可选:JWT 签名密钥。留空则首次启动自动生成并保存到数据目录 .jwt-secret(重启稳定)。
       - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
-      # V8 堆上限:server 的 JS 堆日常仅 ~30MB,256MB 上限让 V8 及时压堆、
-      # 少保留已提交的低位页(RSS 里的"无主内存"),与空闲回收(服务端内置 gc)
-      # 配合把常驻内存压到百 MB 级。可按需调大(如 512)但收益递减。
-      - NODE_OPTIONS=--max-old-space-size=256
+      # 可选:V8 堆上限(MB)。默认不设;内存紧张的机器可设 256 及时压堆。
+      # - NODE_OPTIONS=--max-old-space-size=256
       # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;
       # 反代/多网卡导致探测错误时设置此项。
       # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
-      # 数据与缓存目录(宿主 ./data 挂到容器 /data):
+      # 数据与缓存目录(宿主 ./data 挂到容器 /app/backend/data,与镜像 entrypoint 一致):
       #   musicflow.db      —— SQLite 主库(歌曲/歌单/设置)
       #   covers/           —— 本地刮削封面(扫描内嵌封面、艺术家头像)
       #   online-covers/    —— 平台/在线封面缓存(web 歌曲、歌单导入、按需获取 A/B)
       #   online-lyrics/    —— 插件获取并落库的歌词文件(按需获取 A/B、批量补全 C)
       #   plugins/          —— 外置插件
       #   .jwt-secret       —— 自动生成的 JWT 密钥
-      - ./data:/data
-      # 容器时区:镜像无 tzdata,musl 只认 /etc/localtime(TZ 环境变量仅 Node 层生效)
+      - ./data:/app/backend/data
+      # 容器时区:镜像无 tzdata,需挂载宿主机时区文件(TZ 环境变量仅对应用层生效)
       - /etc/localtime:/etc/localtime:ro
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
       # 本地音乐目录(默认开启):宿主 ./local/music 挂到容器 /local/music。
@@ -43,9 +35,11 @@ services:
       # 在「媒体源管理 → 添加媒体源 → 类型选本地目录」时,
       # 本地路径填 /local/music(容器内路径),必须与本挂载保持一致,否则读取不到。
       - ./local/music:/local/music
-      # 可选:把平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
+      # 可选:平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
       # 默认它在上面的 ./data 卷内,无需配置;想单独存放/单独清缓存时,
       # 取消注释并把宿主机路径换成你的目录(优先级高于 ./data 内的同名子目录):
-      # - ./online-covers:/data/online-covers
+      # - ./online-covers:/app/backend/data/online-covers
       # 可选:歌词文件(online-lyrics)同理可独立挂载/单独清空:
-      # - ./online-lyrics:/data/online-lyrics
+      # - ./online-lyrics:/app/backend/data/online-lyrics
+
+networks: {}

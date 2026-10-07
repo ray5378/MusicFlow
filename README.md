@@ -34,18 +34,34 @@ services:
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
+      # 可选:V8 堆上限(MB)。默认不设;内存紧张的机器可设 256 及时压堆。
+      # - NODE_OPTIONS=--max-old-space-size=256
+      # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;
+      # 反代/多网卡导致探测错误时设置此项。
+      # - DLNA_BASE_URL=http://192.168.1.100:46400
     volumes:
-      # 数据目录(SQLite 主库 + 歌词/封面/插件/密钥)
-      - ./local/data:/app/backend/data
-      # 本地音乐目录:把音乐文件放进宿主机路径,容器内即 /local/music
-      - ./local/music:/local/music
-      # 可选:平台歌曲/歌单封面缓存,独立挂到大磁盘
-      - ./local/online-covers:/app/backend/data/online-covers
-      # 可选:平台歌词缓存,独立挂到大磁盘
-      - ./local/online-lyrics:/app/backend/data/online-lyrics
+      # 数据与缓存目录(宿主 ./data 挂到容器 /app/backend/data,与镜像 entrypoint 一致):
+      #   musicflow.db      —— SQLite 主库(歌曲/歌单/设置)
+      #   covers/           —— 本地刮削封面(扫描内嵌封面、艺术家头像)
+      #   online-covers/    —— 平台/在线封面缓存(web 歌曲、歌单导入、按需获取 A/B)
+      #   online-lyrics/    —— 插件获取并落库的歌词文件(按需获取 A/B、批量补全 C)
+      #   plugins/          —— 外置插件
+      #   .jwt-secret       —— 自动生成的 JWT 密钥
+      - ./data:/app/backend/data
       # 容器时区:镜像无 tzdata,需挂载宿主机时区文件(TZ 环境变量仅对应用层生效)
       - /etc/localtime:/etc/localtime:ro
       - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
+      # 本地音乐目录(默认开启):宿主 ./local/music 挂到容器 /local/music。
+      # 把你的音乐文件放到宿主机的 ./local/music 目录,容器内即 /local/music。
+      # 在「媒体源管理 → 添加媒体源 → 类型选本地目录」时,
+      # 本地路径填 /local/music(容器内路径),必须与本挂载保持一致,否则读取不到。
+      - ./local/music:/local/music
+      # 可选:平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
+      # 默认它在上面的 ./data 卷内,无需配置;想单独存放/单独清缓存时,
+      # 取消注释并把宿主机路径换成你的目录(优先级高于 ./data 内的同名子目录):
+      # - ./online-covers:/app/backend/data/online-covers
+      # 可选:歌词文件(online-lyrics)同理可独立挂载/单独清空:
+      # - ./online-lyrics:/app/backend/data/online-lyrics
 
 networks: {}
 ```
