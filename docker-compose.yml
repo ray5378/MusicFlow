@@ -35,6 +35,9 @@ services:
       #   plugins/          —— 外置插件
       #   .jwt-secret       —— 自动生成的 JWT 密钥
       - ./data:/data
+      # 容器时区:镜像无 tzdata,musl 只认 /etc/localtime(TZ 环境变量仅 Node 层生效)
+      - /etc/localtime:/etc/localtime:ro
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
       # 本地音乐目录(默认开启):宿主 ./local/music 挂到容器 /local/music。
       # 把你的音乐文件放到宿主机的 ./local/music 目录,容器内即 /local/music。
       # 在「媒体源管理 → 添加媒体源 → 类型选本地目录」时,
