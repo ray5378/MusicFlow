@@ -94,6 +94,8 @@ export interface ChunkEncoder {
   /** 本编码器**恒定**的输出帧样本数(单声道口径);用于校验/兜底。
    *  flac: FLAC_BLOCK_SIZE(末帧可能更短);opus: OPUS_FRAME_SAMPLES;pcm: 无固定值。 */
   readonly fixedFrameSamples?: number;
+  /** 编码器是否健康(flac 实现提供;缺省视为健康)。用于诊断/兜底。 */
+  isHealthy?(): boolean;
 }
 
 export function encodeCodecParams(codec: SendspinCodec): { format: string; codecName: string } {
@@ -926,7 +928,13 @@ export function createChunkEncoder(codec: SendspinCodec, bitrateKbps = 320): Chu
  * 给一次 STREAMINFO,之后每个 chunk 恰好一帧。
  */
 export class LibFlacEncoder implements ChunkEncoder {
-  private readonly Flac: LibFlacModule;
+  private Flac: LibFlacModule;
+  /** 模块级自愈:返回全新 libflacjs 模块(bust require 缓存 → 新 asm.js 堆),失败 null。测试可注入。 */
+  private reloadModule: () => LibFlacModule | null;
+  /** 自愈失败后的退避标记:HEAL_BACKOFF_MS 内 encode 直接放空,避免每 25ms 一次无谓重建。 */
+  private unhealthy = false;
+  private lastHealAt = 0;
+  private static readonly HEAL_BACKOFF_MS = 5_000;
   private encId = 0;
   private closed = false;
   /** 每帧回调暂存:process_interleaved 是同步的,回调在调用栈内触发。 */
@@ -940,13 +948,25 @@ export class LibFlacEncoder implements ChunkEncoder {
   /** 首个音频帧的样本数(诊断用;libFLAC 自选块大小,通常 4096)。 */
   private firstFrameSamples = 0;
 
-  constructor() {
+  constructor(mod?: LibFlacModule, reloadModule?: () => LibFlacModule | null) {
     const req = createRequire(import.meta.url);
-    const factory = req("libflacjs") as (variant?: string) => LibFlacModule;
     // ⚠️ 必须用 asm.js 变体(`release`,不带 `.wasm`):
     // WASM 变体在 Node 下会走浏览器的 `fetch(wasmPath)` 分支 → "unknown scheme" 直接崩;
     // asm.js 是纯 JS,零加载配置、零镜像改动。
-    this.Flac = factory("release");
+    this.Flac = mod ?? (req("libflacjs") as (variant?: string) => LibFlacModule)("release");
+    this.reloadModule =
+      reloadModule ??
+      (() => {
+        try {
+          const resolved = req.resolve("libflacjs");
+          for (const k of Object.keys(req.cache)) {
+            if (k === resolved || k.includes("libflacjs")) delete req.cache[k];
+          }
+          return (req("libflacjs") as (variant?: string) => LibFlacModule)("release");
+        } catch {
+          return null;
+        }
+      });
     // libFLAC 是**异步**初始化的:首次 require 后要过一轮 tick 才 isReady()。
     // 服务端启动时会 `await waitFlacEncoderReady()` 预热;这里再兜一层 ——
     // 若仍不 ready 则同步抛错(调用方 encoderFor 会向上冒泡,不会静默产出空流)。
@@ -1036,9 +1056,64 @@ export class LibFlacEncoder implements ChunkEncoder {
     return this.firstFrameSamples || undefined;
   }
 
-  /** 喂一批 F32/48k 立体声,同步返回本次产出的**帧**(每个包恰好一帧)。 */
-  encode(pcmF32: Float32Array): Promise<EncodedChunk[]> {
-    if (this.closed || !this.encId) return Promise.resolve([]);
+  /** 自愈后是否可用(ChunkEncoder.isHealthy)。 */
+  isHealthy(): boolean {
+    return !this.closed && !this.unhealthy;
+  }
+
+  /** 等 libFLAC 就绪(新加载的模块要过一轮 tick;轮询兜底,超时 false)。 */
+  private async ensureReady(timeoutMs = 5000): Promise<boolean> {
+    if (this.Flac.isReady()) return true;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (this.Flac.isReady()) return true;
+    }
+    return false;
+  }
+
+  /** ★ 自愈核心:原地重建编码流。删旧实例 → 重置元数据状态 → openStream;
+   *  openStream 失败(典型:asm.js 堆楔死 —— create 返回 0 / process 恒 false,
+   *  240 生产实锤 @frame=0 连续上万次)→ **模块级重载**(bust require 缓存,
+   *  新模块 = 新 asm.js 堆)后再试一次。
+   *  重建后新流的元数据回调照常走 metaChunks 分支(不会当音频帧下发);
+   *  STREAMINFO 参数与已宣告的 codec_header 一致,设备无需重宣告。 */
+  private async rebuildStream(): Promise<boolean> {
+    try {
+      if (this.encId) this.Flac.FLAC__stream_encoder_delete(this.encId);
+    } catch { /* ignore */ }
+    this.encId = 0;
+    this.metaChunks = [];
+    this.metaLen = 0;
+    this.metaDone = false;
+    this.realHeaderB64 = null;
+    try {
+      this.openStream();
+      return true;
+    } catch {
+      const fresh = this.reloadModule();
+      if (!fresh) return false;
+      this.Flac = fresh;
+      if (!(await this.ensureReady())) return false;
+      try {
+        this.openStream();
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  /** 喂一批 F32/48k 立体声,同步返回本次产出的**帧**(每个包恰好一帧)。
+   *  ★ 失败自愈(2026-10-07 240 生产实锤):libFLAC process_interleaved 中途返回
+   *  false 后,旧实现只 warn + 静默放空,pushLoop 降级推进把剩余整首推成静音
+   *  (进度照走、切歌才恢复)。现在:原地重建(必要时模块级重载)→ **重编同一批**
+   *  —— 成功则调用方无感(无缝续流);仍失败置 unhealthy 退避放空,
+   *  交给 pushLoop 降级上限(MAX_SILENT_DEGRADE)提前切歌兜底。 */
+  async encode(pcmF32: Float32Array): Promise<EncodedChunk[]> {
+    if (this.closed || !this.encId) return [];
+    // 退避:自愈刚失败过的 HEAL_BACKOFF_MS 内直接放空,避免每 25ms 一次无谓的重建尝试。
+    if (this.unhealthy && Date.now() - this.lastHealAt < LibFlacEncoder.HEAL_BACKOFF_MS) return [];
     const samples = Math.floor(pcmF32.length / CHANNELS);
     if (samples <= 0) return Promise.resolve([]);
     // F32 [-1,1] → Int32(16bit 有效位,libFLAC 接受未左移的原始样本)
@@ -1049,15 +1124,29 @@ export class LibFlacEncoder implements ChunkEncoder {
       pcm[i] = s;
     }
     this.out = [];
-    const ok = this.Flac.FLAC__stream_encoder_process_interleaved(this.encId, pcm, samples);
+    let ok = this.Flac.FLAC__stream_encoder_process_interleaved(this.encId, pcm, samples);
     if (!ok) {
-      console.warn(`[sendspin][flac] libFLAC process_interleaved 失败 @frame=${this.frameCount}`);
+      console.warn(`[sendspin][flac] libFLAC process_interleaved 失败 @frame=${this.frameCount},原地重建自愈`);
+      if (await this.rebuildStream()) {
+        this.out = [];
+        ok = this.Flac.FLAC__stream_encoder_process_interleaved(this.encId, pcm, samples);
+      }
+      if (ok) {
+        this.unhealthy = false;
+        const out = this.out;
+        this.out = [];
+        return out;
+      }
+      console.warn(`[sendspin][flac] 重建后重编仍失败 @frame=${this.frameCount},编码器退避停用`);
+      this.unhealthy = true;
+      this.lastHealAt = Date.now();
       this.out = [];
-      return Promise.resolve([]);
+      return [];
     }
+    this.unhealthy = false;
     const out = this.out;
     this.out = [];
-    return Promise.resolve(out);
+    return out;
   }
 
   /** 收尾:告知 libFLAC 不再有新样本,冲掉不足一块的尾帧(libFLAC 会以合法帧头写出)。
@@ -1066,28 +1155,19 @@ export class LibFlacEncoder implements ChunkEncoder {
    *  而组编码器缓存在多次播报/切歌间复用(`SendspinGroup.encoderFor`),播报每次必
    *  flush → 不重建则第二次播报起全链卡死。因此 flush 在取走尾帧后**原地重建**
    *  一条新流,对象保持可用;新流的元数据回调照常重建 `codec_header`。 */
-  flush(): Promise<EncodedChunk[]> {
-    if (this.closed || !this.encId) return Promise.resolve([]);
+  async flush(): Promise<EncodedChunk[]> {
+    if (this.closed || !this.encId) return [];
     this.out = [];
     const ok = this.Flac.FLAC__stream_encoder_finish(this.encId);
     if (!ok) console.warn("[sendspin][flac] libFLAC finish 返回失败");
     const out = this.out;
     this.out = [];
-    // 旧流已终结:先删后建,之后的新流与构造期行为一致。
-    try {
-      this.Flac.FLAC__stream_encoder_delete(this.encId);
-    } catch { /* ignore */ }
-    this.encId = 0;
-    this.metaChunks = [];
-    this.metaLen = 0;
-    this.metaDone = false;
-    this.realHeaderB64 = null;
-    try {
-      this.openStream();
-    } catch (e) {
-      console.warn(`[sendspin][flac] flush 后重建编码流失败,本编码器停用: ${(e as Error)?.message || e}`);
+    // 旧流已终结:统一走 rebuildStream 自愈(原地重建;openStream 失败 = asm.js
+    // 堆楔死 → 模块级重载后重试,见 rebuildStream 注释)。
+    if (!(await this.rebuildStream())) {
+      console.warn(`[sendspin][flac] flush 后重建编码流失败(含模块重载),本编码器退避停用`);
     }
-    return Promise.resolve(out);
+    return out;
   }
 
   close(): void {
@@ -1103,7 +1183,7 @@ export class LibFlacEncoder implements ChunkEncoder {
 }
 
 /** libflacjs(asm.js 变体)导出的最小接口面,仅声明本项目用到的部分。 */
-interface LibFlacModule {
+export interface LibFlacModule {
   variant?: string;
   isReady(): boolean;
   onready?: (event: unknown) => void;

@@ -226,6 +226,17 @@ export const YIELD_EVERY_FRAMES = 50;
  *  给足 10 倍余量:连续 500ms 零产出才认为是编码器坏了,此时宁可时间线略偏,
  *  也不能让它彻底停摆(timestamp 冻结 → pump 永不结束 → 切歌卡死)。 */
 export const STALL_GRACE_US = 500_000;
+/** 「编码器疑似失效」降级推进的**上限**:降级只是「攒样(≤85ms)」与「真死」之间的
+ *  过渡兜底,绝不能让死编码器把整首歌唱成默剧 —— 240 生产实锤(2026-10-07):
+ *  libFLAC 中途崩死后 encode 静默放空,降级推进把剩余 191s/453s 全部推成静音、
+ *  进度照走、切歌才恢复。超过上限仍零产出 ⇒ 本曲不可修复,提前按自然播完收场
+ *  (endedNaturally → 自动切下一首;新曲新建编码器即恢复;配合 encoding.ts 的
+ *  编码器重建/模块重载自愈)。env `SENDSPIN_MAX_SILENT_DEGRADE_MS` 可覆盖(测试)。 */
+export function maxSilentDegradeUs(): number {
+  const ms = Number(process.env.SENDSPIN_MAX_SILENT_DEGRADE_MS);
+  const cap = Number.isFinite(ms) && ms > 0 ? ms : 5_000;
+  return Math.max(STALL_GRACE_US, cap * 1000);
+}
 
 /** 默认音源:统一裁决(resolvePlayableRow,与 /rest/stream 同口径) → 取字节 → 解码。
  *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。
@@ -905,6 +916,14 @@ export class GroupPump {
           if (starvationUs >= STALL_GRACE_US) {
             cursorUs += frameStepUs; // 降级:编码器疑失效,保流逝不断
             logSafe(this.server, "warn", `sendspin 编码器疑似失效:连续 ${starvationUs}us 零产出,时间线降级推进`);
+            // ★ 降级不是无限期的:持续零产出超过上限 ⇒ 编码器已死(240 生产实锤:
+            //   降级曾把剩余整首推成静音)。提前按自然播完收场 → 自动切下一首,
+            //   新曲新建编码器即恢复(encoding.ts 侧另有重建/模块重载自愈)。
+            if (starvationUs >= maxSilentDegradeUs()) {
+              logSafe(this.server, "error", `sendspin 编码器持续零产出超过 ${Math.round(maxSilentDegradeUs() / 1000)}ms,放弃本曲提前切歌 song=${this.songId}`);
+              contentEnded = true;
+              break;
+            }
           }
         }
         this.group.timelineBaseUs = cursorUs;
