@@ -194,13 +194,19 @@ describe("GET /v1/recommend", () => {
     expect(recommend).toHaveBeenCalledTimes(2);
   });
 
-  it("缓存已过期(TTL 之外)则重新聚合", async () => {
+  it("缓存已过期:立即返回 stale,后台重新聚合后更新缓存(SWR)", async () => {
     const recommend = vi.fn(async () => ({ channels: [{ source: "x", playlists: [] }] }));
     f.firstEnabledByCapability.mockReturnValue(cap("gmdl", { recommend }));
     recommendCache.set("gmdl|", { ts: 0, channels: [{ stale: true }] });
     const b = await json(await get("/v1/recommend"));
-    expect(b.channels[0].source).toBe("x");
+    // 过期缓存立即返回(不等外网插件),后台刷新已在途(single-flight)
+    expect(b.channels[0].stale).toBe(true);
     expect(recommend).toHaveBeenCalledTimes(1);
+    // 后台刷新完成后缓存被更新为聚合结果
+    await vi.waitFor(() => {
+      expect(recommendCache.get("gmdl|")!.ts).toBeGreaterThan(0);
+    }, { timeout: 2000, interval: 20 });
+    expect(recommendCache.get("gmdl|")!.channels[0].source).toBe("x");
   });
 
   it("channels / playlists 非数组时兜底为空数组", async () => {
