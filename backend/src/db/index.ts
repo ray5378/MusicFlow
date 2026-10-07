@@ -405,6 +405,13 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_albums_name ON albums(name);
     -- 专辑列表按 created_at 倒序分页,同样需索引避免整表排序(36k 行实测 ~24ms/块)。
     CREATE INDEX IF NOT EXISTS idx_albums_created_at ON albums(created_at);
+    -- getAlbumList2 byYear/byGenre/frequent(及 highest)排序过滤下推 SQL 后的命中列
+    -- (见 routes/rest getAlbumListData:6 万专辑整表捞回 JS 排序实测 230-290ms/次)。
+    CREATE INDEX IF NOT EXISTS idx_albums_year ON albums(year);
+    CREATE INDEX IF NOT EXISTS idx_albums_genre ON albums(genre);
+    CREATE INDEX IF NOT EXISTS idx_albums_play_count ON albums(play_count);
+    -- 扫描器按艺人删关联行用(PK (album_id, artist_id) 只覆盖 album_id 前导)。
+    CREATE INDEX IF NOT EXISTS idx_album_artists_artist ON album_artists(artist_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_user ON play_history(user_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
     CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist ON playlist_songs(playlist_id);

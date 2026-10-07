@@ -576,7 +576,8 @@ restRoutes.get("/getMusicFolders", (c) => {
 });
 
 restRoutes.get("/getIndexes", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
-  const allArtists = db.select().from(artists).all();
+  // 只投影下面真正用到的列:artists.bio 可能是大文本,整列捞回会白占带宽与 GC。
+  const allArtists = db.select({ id: artists.id, name: artists.name, coverArt: artists.coverArt, albumCount: artists.albumCount }).from(artists).all();
   const indexMap = new Map<string, any[]>();
   for (const a of allArtists) {
     const ch = (a.name || "#")[0]?.toUpperCase() || "#";
@@ -590,7 +591,8 @@ restRoutes.get("/getIndexes", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
 restRoutes.get("/getArtists", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const user = c.get("user");
   const starredSet = getArtistStarredSet(user?.id);
-  const allArtists = db.select().from(artists).all();
+  // 只投影 artistToID3 用到的列(同 getIndexes:bio 等大文本列不捞回)。
+  const allArtists = db.select({ id: artists.id, name: artists.name, coverArt: artists.coverArt, albumCount: artists.albumCount }).from(artists).all();
   const indexMap = new Map<string, any[]>();
   for (const a of allArtists) {
     const ch = (a.name || "#")[0]?.toUpperCase() || "#";
@@ -698,26 +700,58 @@ function getAlbumListData(c: any) {
   const toYear = parseInt(getParam(c, "toYear") || "0") || 0;
   const user = c.get("user");
 
+  // ==================== SQL 下推(排序/过滤/分页全在库内) ====================
+  // 原实现把整张 albums 捞回 JS 再排序/过滤/切片:6 万专辑一次调用 230-290ms,
+  // size=10 也要付全表加载+整表排序的代价。下推 SQL 后配合 idx_albums_created_at /
+  // idx_albums_year / idx_albums_genre / idx_albums_play_count,单次调用从整表 O(N log N)
+  // 降为索引序读取 LIMIT 行。排序语义逐一核对:
+  //   newest/recent      — created_at 是 ISO-8601 文本,SQLite 字典序 == 原 JS 对它的比较序;
+  //   frequent/highest   — playCount 数值列降序,等价;
+  //   random             — 原 JS 洗牌,现改为「id 列随机取样再回表取整行」:sorter 只携带
+  //                        短 id,不把整行(含大文本列)拖进排序堆;offset 分页语义保持;
+  //   byGenre/byYear/starred — 精确过滤下推,结果集语义不变;
+  //   alphabeticalByName/ByArtist — localeCompare(拼音/区域规则)与 SQLite BINARY
+  //                        排序规则不同,为不改变返回顺序,这两类保持原 JS 路径。
+  switch (type) {
+    case "random": {
+      const ids = db.select({ id: albums.id }).from(albums)
+        .orderBy(sql`random()`).limit(size).offset(offset).all().map(r => r.id);
+      if (ids.length === 0) return { paged: [], user };
+      const rows = db.select().from(albums).where(inArray(albums.id, ids)).all();
+      const byId = new Map(rows.map(r => [r.id, r]));
+      // IN 不保序,按取样顺序还原返回顺序
+      return { paged: ids.map(id => byId.get(id)).filter(Boolean), user };
+    }
+    case "newest":
+    case "recent":
+      return { paged: db.select().from(albums).orderBy(desc(albums.createdAt)).limit(size).offset(offset).all(), user };
+    case "frequent":
+    case "highest":
+      return { paged: db.select().from(albums).orderBy(desc(albums.playCount)).limit(size).offset(offset).all(), user };
+    case "byGenre":
+      if (genre) return { paged: db.select().from(albums).where(eq(albums.genre, genre)).limit(size).offset(offset).all(), user };
+      break;
+    case "byYear":
+      return {
+        paged: db.select().from(albums)
+          .where(sql`${albums.year} >= ${fromYear} and ${albums.year} <= ${toYear}`)
+          .limit(size).offset(offset).all(),
+        user,
+      };
+    case "starred": {
+      // 专辑收藏独立读表(不再从歌曲收藏推导)。与原实现一致:未登录 = 全部用户收藏并集。
+      const sub = user?.id
+        ? sql`select album_id from user_favorite_albums where user_id = ${user.id}`
+        : sql`select album_id from user_favorite_albums`;
+      return { paged: db.select().from(albums).where(sql`${albums.id} in (${sub})`).limit(size).offset(offset).all(), user };
+    }
+  }
+
+  // alphabetical* 与未知 type:保持原 JS 全量路径(排序规则需与原 localeCompare 语义一致)。
   let allAlbums = db.select().from(albums).all();
   switch (type) {
-    case "random": allAlbums = [...allAlbums].sort(() => Math.random() - 0.5); break;
-    case "newest": allAlbums.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")); break;
-    case "recent": allAlbums.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")); break;
-    case "frequent": allAlbums.sort((a, b) => (b.playCount || 0) - (a.playCount || 0)); break;
-    case "highest": allAlbums.sort((a, b) => (b.playCount || 0) - (a.playCount || 0)); break;
     case "alphabeticalByName": allAlbums.sort((a, b) => (a.name || "").localeCompare(b.name || "")); break;
     case "alphabeticalByArtist": allAlbums.sort((a, b) => (a.artist || "").localeCompare(b.artist || "")); break;
-    case "byGenre": if (genre) allAlbums = allAlbums.filter(a => (a.genre || "") === genre); break;
-    case "byYear": allAlbums = allAlbums.filter(a => (a.year || 0) >= fromYear && (a.year || 0) <= toYear); break;
-    case "starred": {
-      // 专辑收藏独立读表(不再从歌曲收藏推导)。
-      const starredAlbumIds = new Set(
-        db.select({ albumId: userFavoriteAlbums.albumId }).from(userFavoriteAlbums)
-          .where(user?.id ? eq(userFavoriteAlbums.userId, user.id) : undefined).all().map(r => r.albumId)
-      );
-      allAlbums = allAlbums.filter(a => starredAlbumIds.has(a.id));
-      break;
-    }
   }
   return { paged: paginate(allAlbums, offset, size), user };
 }
@@ -838,18 +872,23 @@ restRoutes.get("/getRandomSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   if (effFrom != null) conds.push(sql`${albums.year} >= ${effFrom}`);
   if (effTo != null) conds.push(sql`${albums.year} <= ${effTo}`);
 
-  // SQL 随机取样,避免把整张 songs 表(含大文本列)加载进来在 JS 里洗牌。
-  // 单条链式表达式避免对查询变量重赋值引发的 drizzle 类型推断问题;
-  // 无过滤时 where(undefined) 等于不设置筛选。
-  const allSongs = db
-    .select()
-    .from(songs)
-    .leftJoin(albums, eq(songs.albumId, albums.id))
-    .where(conds.length ? and(...(conds as any[])) : undefined)
-    .orderBy(sql`random()`)
-    .limit(size)
-    .all();
-  return c.json(ok({ randomSongs: { song: allSongs.map((r) => songToChild(r.songs, getStarredSet(user?.id))) } }));
+  // SQL 随机取样:先只对 id 列 ORDER BY random() 取样(sorter 只携带 13 万个短 id,
+  // 不把含大文本列的整行拖进排序堆),再按取样 id 回表取整行、按取样顺序返回。
+  // year 过滤只作用于取样阶段:有过滤才需要 join albums,无过滤走单表免 join。
+  const idRows = conds.length
+    ? db.select({ id: songs.id }).from(songs)
+        .leftJoin(albums, eq(songs.albumId, albums.id))
+        .where(and(...(conds as any[])))
+        .orderBy(sql`random()`).limit(size).all()
+    : db.select({ id: songs.id }).from(songs).orderBy(sql`random()`).limit(size).all();
+  const ids = idRows.map(r => r.id);
+  const sampled = ids.length ? (() => {
+    const fetched = db.select().from(songs).where(inArray(songs.id, ids)).all();
+    const byId = new Map(fetched.map(s => [s.id, s]));
+    // IN 不保序,按取样顺序还原
+    return ids.map(id => byId.get(id)).filter(Boolean);
+  })() : [];
+  return c.json(ok({ randomSongs: { song: sampled.map((s) => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
 restRoutes.get("/getGenres", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {

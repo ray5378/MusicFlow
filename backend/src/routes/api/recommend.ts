@@ -33,32 +33,20 @@ import {
   touch,
 } from "./shared.js";
 
-export function registerRecommend(app: Hono): void {
-app.use("/v1/recommend", permMiddleware(PERM.RECOMMEND_VIEW));
+// ==================== stale-while-revalidate(SWR) ====================
+// 原状:TTL(5min)过期后下一个请求阻塞式重调所有外网插件(冷 900ms+,插件慢时更久)。
+// 现策略:
+//   有缓存(无论新旧) → 立即返回缓存;
+//   缓存已过期       → 触发后台刷新(single-flight 去重,成功后原子更新缓存);
+//   无任何缓存       → 保持现状阻塞拉取(冷启动仍走全量聚合)。
+// 后台刷新与请求路径共用同一聚合函数 fetchRecommendChannels,保证两条路径产物一致。
 
-app.use("/v1/local-recommend", permMiddleware(PERM.RECOMMEND_VIEW));
-
-app.use("/v1/home/playlist-count", permMiddleware(PERM.RECOMMEND_VIEW));
-
-app.get("/v1/recommend", async (c) => {
-  // ==================== 统一推荐聚合 ====================
-  // 1) 调用主推荐插件(具备 recommend 能力,如 go-music-dl)获取频道
-  // 2) 调用所有推荐歌单插件(具备 recommendPlaylist 能力,如 QQ/酷狗/网易云榜单)
-  // 3) 合并所有频道,按 sortOrder 升序排列
-  // 这样每个插件都是独立平等的,不依赖 go-music-dl 内部合并。
-  // ====================================================
-  const rp = firstEnabledByCapability("recommend");
-  const providerId = rp?.manifest.id || "";
-
-  // 缓存 key 包含所有 recommendPlaylist 插件 ID,避免缓存错乱
-  const rpList = getEnabledByCapability("recommendPlaylist");
-  const rpSigs = rpList.map((p: any) => p.manifest.id).sort().join(",");
-  const cacheKey = providerId + "|" + rpSigs;
-  const cached = recommendCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < RECOMMEND_CACHE_TTL_MS) {
-    return c.json({ success: true, channels: cached.channels, providerId });
-  }
-
+/** 聚合所有推荐插件频道(请求路径与后台刷新共用)。 */
+async function fetchRecommendChannels(
+  providerId: string,
+  rp: ReturnType<typeof firstEnabledByCapability>,
+  rpList: any[],
+): Promise<{ channels: any[]; primaryError?: string }> {
   const allChannels: any[] = [];
   let primaryError: string | undefined;
 
@@ -152,16 +140,120 @@ app.get("/v1/recommend", async (c) => {
     return sa - sb;
   });
 
-  recommendCache.set(cacheKey, { ts: Date.now(), channels: allChannels });
-  const resp: any = { success: true, channels: allChannels, providerId };
+  return { channels: allChannels, primaryError };
+}
+
+/** 后台刷新 single-flight 表:key = 缓存 key。同一缓存在途刷新至多一个。 */
+const recommendRefreshInflight = new Map<string, Promise<void>>();
+
+/** 过期缓存的后台刷新(不 await):single-flight 去重;成功后原子更新缓存。
+ *  聚合层面插件失败会被吞进 primaryError 并返回空 channels —— 此时**不覆盖**旧缓存
+ *  (保留 last-good,下次请求继续 stale 返回并再试);阻塞冷路径保持原有
+ *  「失败也写空缓存」的语义不变,避免扩大改动面。 */
+function refreshRecommendCacheInBackground(
+  cacheKey: string,
+  providerId: string,
+  rp: ReturnType<typeof firstEnabledByCapability>,
+  rpList: any[],
+): void {
+  if (recommendRefreshInflight.has(cacheKey)) return;
+  const task = (async () => {
+    const { channels, primaryError } = await fetchRecommendChannels(providerId, rp, rpList);
+    if (primaryError && channels.length === 0) {
+      console.warn(`[RECOMMEND] SWR 后台刷新失败(保留旧缓存): ${primaryError}`);
+      return;
+    }
+    recommendCache.set(cacheKey, { ts: Date.now(), channels });
+    log.info(`[RECOMMEND] SWR 后台刷新完成: ${cacheKey}`);
+  })().catch((e: any) => {
+    // 聚合函数自身抛错:保留旧缓存(下次请求继续 stale 返回并再次尝试刷新)。
+    console.warn("[RECOMMEND] SWR 后台刷新失败:", e?.message || e);
+  }).finally(() => {
+    recommendRefreshInflight.delete(cacheKey);
+  });
+  recommendRefreshInflight.set(cacheKey, task);
+}
+
+// ==================== 周期性预热刷新 ====================
+// 模式与 services/dailyScheduler.ts 一致:递归 setTimeout、finally 里 re-arm、
+// 异常不断链。间隔 = TTL/2:用户请求几乎总能命中未过期缓存。只预热「已有缓存」
+// 的 key(说明首页被用过);冷启动不做无谓外呼。定时器 unref,不阻进程退出。
+let recommendWarmerTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function startRecommendCacheWarmer(): void {
+  if (recommendWarmerTimer) return;
+  const tick = () => {
+    recommendWarmerTimer = setTimeout(() => {
+      try {
+        // 用当前插件集重算 cacheKey(插件增删后旧 key 自然不再预热,由内存清理兜底)。
+        const rp = firstEnabledByCapability("recommend");
+        const providerId = rp?.manifest.id || "";
+        const rpSigs = getEnabledByCapability("recommendPlaylist").map((p: any) => p.manifest.id).sort().join(",");
+        const cacheKey = providerId + "|" + rpSigs;
+        const entry = recommendCache.get(cacheKey);
+        if (entry && Date.now() - entry.ts >= RECOMMEND_CACHE_TTL_MS) {
+          refreshRecommendCacheInBackground(cacheKey, providerId, rp, getEnabledByCapability("recommendPlaylist"));
+        }
+      } catch (e: any) {
+        console.warn("[RECOMMEND] SWR 预热失败:", e?.message || e);
+      } finally {
+        tick(); // re-arm(在 finally,异常也不能断链)
+      }
+    }, RECOMMEND_CACHE_TTL_MS / 2);
+    recommendWarmerTimer?.unref?.();
+  };
+  tick();
+}
+
+export function registerRecommend(app: Hono): void {
+app.use("/v1/recommend", permMiddleware(PERM.RECOMMEND_VIEW));
+
+app.use("/v1/local-recommend", permMiddleware(PERM.RECOMMEND_VIEW));
+
+app.use("/v1/home/playlist-count", permMiddleware(PERM.RECOMMEND_VIEW));
+
+app.get("/v1/recommend", async (c) => {
+  // ==================== 统一推荐聚合 ====================
+  // 1) 调用主推荐插件(具备 recommend 能力,如 go-music-dl)获取频道
+  // 2) 调用所有推荐歌单插件(具备 recommendPlaylist 能力,如 QQ/酷狗/网易云榜单)
+  // 3) 合并所有频道,按 sortOrder 升序排列
+  // 这样每个插件都是独立平等的,不依赖 go-music-dl 内部合并。
+  // ====================================================
+  const rp = firstEnabledByCapability("recommend");
+  const providerId = rp?.manifest.id || "";
+
+  // 缓存 key 包含所有 recommendPlaylist 插件 ID,避免缓存错乱
+  const rpList = getEnabledByCapability("recommendPlaylist");
+  const rpSigs = rpList.map((p: any) => p.manifest.id).sort().join(",");
+  const cacheKey = providerId + "|" + rpSigs;
+  const cached = recommendCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < RECOMMEND_CACHE_TTL_MS) {
+    return c.json({ success: true, channels: cached.channels, providerId });
+  }
+  // SWR:有过期缓存 → 立即返回 stale + 后台单飞刷新(响应体形状与热路径一致)。
+  if (cached) {
+    refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList);
+    return c.json({ success: true, channels: cached.channels, providerId });
+  }
+
+  // 无任何缓存(冷启动):保持阻塞拉取。
+  const { channels, primaryError } = await fetchRecommendChannels(providerId, rp, rpList);
+  recommendCache.set(cacheKey, { ts: Date.now(), channels });
+  const resp: any = { success: true, channels, providerId };
   if (primaryError) resp.error = primaryError;
   return c.json(resp);
 });
+
+// 启动周期预热(SWR 的一部分;幂等,重复注册不会叠加定时器)。
+startRecommendCacheWarmer();
 
 // ==================== 首页「本地随机(按平台)」(能力驱动,不写死插件名) ====================
 // 由启用的 `localPlatformRecommend` 插件(如内置 local-random-recommend)提供:
 // 从本地库按平台分组随机取已入库歌单,供三端(Web/客户端/HA)统一展示动态刷新的
 // 平台歌单——不依赖上游固定精选。核心只按能力遍历调用并透传数据。
+
+/** /v1/local-recommend 各 provider 的后台刷新 single-flight 表:key = 插件 id。 */
+const providerRefreshInflight = new Map<string, Promise<void>>();
 
 app.get("/v1/local-recommend", async (c) => {
   // 遍历所有具备该能力的插件,合并多插件的 channels(支持多提供方共存)。
@@ -183,6 +275,21 @@ app.get("/v1/local-recommend", async (c) => {
         let result: any;
         const cached = cacheable ? providerRecommendCache.get(pluginId) : undefined;
         if (cached && Date.now() - cached.ts < ttlSec * 1000) {
+          result = cached.result;
+        } else if (cached) {
+          // SWR:过期缓存立即返回 stale,后台单飞刷新(与 /v1/recommend 同策略)。
+          // 冷=慢插件不再阻塞首页;无缓存的冷启动仍阻塞拉取(保持现状)。
+          if (!providerRefreshInflight.has(pluginId)) {
+            const task = (async () => {
+              const fresh = await p.impl.recommendLocal(getPluginConfig(pluginId) || {});
+              providerRecommendCache.set(pluginId, { ts: Date.now(), result: fresh });
+            })().catch((e: any) => {
+              console.warn(`[LOCAL-RECOMMEND] ${pluginId} SWR 后台刷新失败:`, e?.message || e);
+            }).finally(() => {
+              providerRefreshInflight.delete(pluginId);
+            });
+            providerRefreshInflight.set(pluginId, task);
+          }
           result = cached.result;
         } else {
           result = await p.impl.recommendLocal(getPluginConfig(pluginId) || {});
