@@ -532,18 +532,18 @@ FLAC 块：  4096 样本 ≈ 85.3ms ≈ 3.41 次喂料
 
 ## 5.1 流式解码（`PcmWindow`）
 
-**动因**：原 `defaultSource` 把整曲一次解成内存 F32 —— 320 秒歌曲 ≈ **122MB PCM**，切歌时新旧缓冲重叠 → ~570MB 尖峰；子进程继承 `--max-old-space-size=256`，超长单曲会顶爆堆。
+**动因**：原 `defaultSource` 把整曲一次解成内存 F32 —— 320 秒歌曲 ≈ **122MB PCM**，切歌时新旧缓冲重叠 → ~570MB 尖峰；超长单曲会把子进程内存顶到很高（fork 未设显式堆上限，由 Node 默认 old-space 上限兜底）。
 
-**做法**（`streamSource.ts`，`SENDSPIN_STREAM_SOURCE` 开关，默认关）：
+**做法**（`streamSource.ts`；流式解码**恒开**——旧 `SENDSPIN_STREAM_SOURCE` 开关已于 2026-10-08 移除，保留多少未消费 PCM 改由插件页「解码窗口上限」配置，30s~10min 可配、缺省 5 分钟）：
 
-- **生产者**：每首歌一个长命 ffmpeg（`ffmpeg -ss <offset> -i <url> -ar 48000 -ac 2 -f f32le pipe:1`），后台 reader 持续排入窗口。水位：低 20 秒 / 高 30 秒；满则停读（ffmpeg 被管道憋住，**天然背压**，无需额外协议）。
+- **生产者**：每首歌一个长命 ffmpeg（`ffmpeg -ss <offset> -i <url> -ar 48000 -ac 2 -f f32le pipe:1`），后台 reader 持续排入窗口。水位由插件页「解码窗口上限」定（缺省 300s=5 分钟，低水位 = 高水位 − 10s 滞回）；满则停读（ffmpeg 被管道憋住，**天然背压**，无需额外协议）。
 - **`pushLoop` 取数**从 `pcm.subarray(lo,hi)` 改成 `window.slice(absLo,absHi)`：命中窗口 → 直接喂编码器（热路径逐字节一致）；未命中但未 EOF → 等（带超时，走现有 `STALL_GRACE` 降级）；EOF 且窗口耗尽 → 结束。
 - **seek**：目标在窗口内（±10 秒占绝大多数）→ 只改 `positionMs`，零成本；窗口外 → 杀 ffmpeg 按 `-ss` 重起，空窗 ~1 秒。
 - **stop**：杀 ffmpeg + 清窗口（`reclaim.test.ts` 的「停后释放」语义保留）。
 - **接口兼容**：保留 `PumpSource` / `GroupAudio` 整包接口，`GroupAudio` 加可选 `stream?: PcmWindow`；有 `stream` 走窗口路径，否则走老路径。现有注入测试（`overridePumpSource`、`pumpEnd`、`reclaim`、`pumpFallback`）**零改动**。
 - announce 的 TTS 短包（0.5 秒级）保持整包 `decodeToF32`，不动。
 
-**窗口上限 30 秒**（`WINDOW_HIGH_SEC` 60→30，2026-09-19 定），与 MA 的 `sleep_to_limit_buffer(30秒)` 对齐。
+**窗口上限可配**（插件页「解码窗口上限」，30s~10min，缺省 300s=5 分钟，对齐 MA `AudioBuffer` BALANCED；2026-10-08 起由「固定 30 秒」改为可配，且**歌长 ≤ 上限时整曲保留**：不淘汰、不背压，前后 seek 全程命中窗口）。
 
 ## 5.2 组管理 API：壳复用、核分流
 
@@ -914,7 +914,7 @@ Created ring buffer with size 19200
 **设备侧关键错误字样**（`logger: level: DEBUG` 时可见）：`Failed to send audio chunk`（缓冲满逐帧拒收）、`Lost sync (Xus off)`、`Time message N/8 timed out`、`underrun`。
 > 注意：稳定播放时设备**零日志**，看计数不看有无。
 
-**调试开关**：`SENDSPIN_JITTER=1`（打印 diff 序列）、`SENDSPIN_PUSH_SPEED`、`SENDSPIN_STREAM_SOURCE=1`（流式解码）。
+**调试开关**：`SENDSPIN_JITTER=1`（打印 diff 序列）、`SENDSPIN_PUSH_SPEED`。
 
 ## 7.3 设备日志抓取（三法）
 
@@ -1225,7 +1225,7 @@ docker restart musicflow
 - ✅ `client/state` 根层解析 + `SYNC LOST` / `synchronized` 日志（v4.0.19）
 - ✅ 落后时让出宏任务（`setImmediate`）
 - ✅ 曲末分段排空
-- ✅ 流式解码 `PcmWindow`（`SENDSPIN_STREAM_SOURCE`）
+- ✅ 流式解码 `PcmWindow`（**恒开**；旧 `SENDSPIN_STREAM_SOURCE` 开关已移除，窗口上限改为插件页可配）
 - ✅ 多房组管理（命名空间 + 增量成员口 + 直播沿加入）
 - ✅ **按 `(codec, gain)` 分组编码** + 时间线 `max-of-累计`（v4.0.20，§2.6，修「播中加入成员 → 整组卡顿」）— **真机实测 1.44× → 1.00×**（§8.3）
 - ✅ **late-join 回填** `seedLateJoin`（v4.0.20，§5.3，修「加入新设备要很久才出声」）— **真机实测 ≈29s → ≈0.1s**（§8.3）

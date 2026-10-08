@@ -1,7 +1,7 @@
 // resolveRowInput:sendspin 流式窗口的输入解析(与 fetchRowBytes 同构,只给 ffmpeg
 // 直读的「文件/URL＋头」,不读字节)。
 //
-// 为何单独测:流式解码(stream_source)默认开启后,网络曲源不再经 fetch 取字节,
+// 为何单独测:流式解码恒开(旧 stream_source 开关已于 2026-10-08 移除)后,网络曲源不再经 fetch 取字节,
 // 而是把 URL 直接交给 ffmpeg 子进程 —— 源鉴权(WebDAV Basic)必须靠这里的
 // `headers` 转成 ffmpeg `-headers` 才不丢。取字节路径由 pumpFallback 覆盖,
 // 本文件补流式输入解析,两者分支必须一一对应(改一处须对另一处)。
