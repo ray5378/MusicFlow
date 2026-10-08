@@ -19,9 +19,9 @@
 // ensurePlayableStream 解析真实网络曲源。
 
 import { PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
-import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
+import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
-import { PcmWindow, WindowEvictedError, type WindowSource } from "./streamSource.js";
+import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -38,32 +38,26 @@ export interface GroupAudio {
   sourceRowId?: string;
 }
 
-/** 流式音源开关:插件配置 `stream_source` 为单一可信源(配置页开关,下一首生效);
- *  环境变量仅做显式覆盖(1=强制开,0=强制关,供测试/排障)。
- *  注意 ./index.js 只许动态导入(禁环:index → 本文件静态导入 stopGroupPump)。 */
-export async function isStreamSource(): Promise<boolean> {
-  if (process.env.SENDSPIN_STREAM_SOURCE === "1") return true;
-  if (process.env.SENDSPIN_STREAM_SOURCE === "0") return false;
-  return readSendspinStreamSource();
-}
-
-let streamSourceCache: { value: boolean; at: number } | null = null;
+/** 插件配置重读缓存间隔(5s):「解码窗口上限」等配置的最大生效延迟。 */
 const STREAM_SOURCE_CACHE_MS = 5000;
 
-/** 读插件配置的流式开关(5s 缓存:每首歌只查一次 DB,开关翻转最多延迟 5s 生效)。 */
-async function readSendspinStreamSource(): Promise<boolean> {
+let windowSecCache: { value: number; at: number } | null = null;
+
+/** 读插件配置的「解码窗口上限」(秒;5s 缓存,与流式开关同节奏)。
+ *  读不到(子进程/单测)时回落缺省 300s。 */
+async function readStreamWindowSeconds(): Promise<number> {
   const now = Date.now();
-  if (streamSourceCache && now - streamSourceCache.at < STREAM_SOURCE_CACHE_MS) {
-    return streamSourceCache.value;
+  if (windowSecCache && now - windowSecCache.at < STREAM_SOURCE_CACHE_MS) {
+    return windowSecCache.value;
   }
-  let value = false;
+  let value = WINDOW_HIGH_SEC;
   try {
     const { readSendspinPluginConfig } = await import("./index.js");
-    value = readSendspinPluginConfig().streamSource === true;
+    value = readSendspinPluginConfig().streamWindowSeconds;
   } catch {
-    value = false;
+    value = WINDOW_HIGH_SEC;
   }
-  streamSourceCache = { value, at: now };
+  windowSecCache = { value, at: now };
   return value;
 }
 
@@ -238,8 +232,11 @@ export function maxSilentDegradeUs(): number {
   return Math.max(STALL_GRACE_US, cap * 1000);
 }
 
-/** 默认音源:统一裁决(resolvePlayableRow,与 /rest/stream 同口径) → 取字节 → 解码。
- *  整个文件解码为内存 F32(功能性实现;长曲适度占用,见引擎头部说明)。
+/** 歌曲音源(唯一路径):统一裁决(resolvePlayableRow,与 /rest/stream 同口径)
+ *  → 流式滑动窗口(ffmpeg 直读输入;窗口上限与整曲保留见 streamSource)。
+ *  2026-10-08:「整曲一次解完进内存」旧路径已删除 —— 被「解码窗口上限」的整曲保留
+ *  模式涵盖(歌长 ≤ 上限时不淘汰/不背压/前后 seek 零成本,起播更快、切歌不翻倍),
+ *  且长曲走滑动窗口更安全。整包 `GroupAudio.pcm` 仅留给 announce(TTS)与测试注入。
  *  `opts.preferRowId` = 复用上一轮生效源行(见 ResolvePlayableRowOpts):
  *  同曲 seek 重建时跳过整段播放优选;返回值回带实际用的行 id 供调用方记账。 */
 async function defaultSource(
@@ -247,18 +244,11 @@ async function defaultSource(
   startMs = 0,
   opts?: { preferRowId?: string; dspFilters?: string[] },
 ): Promise<GroupAudio> {
-  const { resolvePlayableRow, fetchRowBytes } = await import("../source/resolveAudio.js");
+  const { resolvePlayableRow } = await import("../source/resolveAudio.js");
   const r = await resolvePlayableRow(songId, { preferRowId: opts?.preferRowId });
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
   const sourceRowId = r.row.id;
-  if (await isStreamSource()) {
-    return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters)), sourceRowId };
-  }
-  const bytes = await fetchRowBytes(r.row);
-  if (!bytes) throw new Error(`fetch bytes failed for ${songId} (${r.reason})`);
-  const pcm = await decodeToF32(bytes);
-  const durationMs = bufferDurationMs(pcm);
-  return { pcm, durationMs, sourceRowId };
+  return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters)), sourceRowId };
 }
 
 /** 流式音源:行 → ffmpeg 直读输入 → 滑动窗口。首帧只等 2 秒预缓冲,
@@ -287,6 +277,11 @@ async function streamingSource(
   const source = await resolveFfmpegInput(direct);
   // startMs 直达 ffmpeg `-ss`(PcmWindow 构造本就支持,此前未透传):
   // 起播即定位,省掉「先建流再 seekTo 冷起一次」的整段空窗。
+  // 解码窗口上限(插件配置「解码窗口上限」):歌长 ≤ 上限 → 整曲保留(前后 seek 零成本);
+  // 歌长 > 上限 → 滑动窗口(背压+淘汰),照样播完。duration 未知(0/null)时保守走滑动。
+  const windowSec = await readStreamWindowSeconds();
+  const durSec = typeof row.duration === "number" && row.duration > 0 ? row.duration : 0;
+  const retainWholeSong = durSec > 0 && durSec <= windowSec;
   const window = new PcmWindow(
     {
       ...source,
@@ -294,6 +289,7 @@ async function streamingSource(
       ...(dspFilters && dspFilters.length > 0 ? { dspFilters } : {}),
     },
     startMs,
+    { highSec: windowSec, retainWholeSong },
   );
   try {
     await window.ready();
@@ -305,11 +301,6 @@ async function streamingSource(
     ? Math.round(row.duration * 1000)
     : 0;
   return { pcm: new Float32Array(0), durationMs, stream: window };
-}
-
-function bufferDurationMs(pcm: Float32Array): number {
-  const perSec = SAMPLE_RATE * CHANNELS; // interleaved frames per second
-  return Math.round((pcm.length / perSec) * 1000);
 }
 
 function sleep(ms: number): Promise<void> {

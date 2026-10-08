@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
 import { sqlite } from "../../src/db/index.js";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
 import { GroupPump, overridePumpSource } from "../../src/services/sendspin/streamEngine.js";
@@ -15,6 +16,7 @@ const G = "g-pumpfallback-1";
 let wavPath = "";
 let wavBytes: Buffer;
 const realFetch = globalThis.fetch;
+let httpSrv: http.Server | null = null;
 
 /** 0.5s 440Hz 正弦 16bit 单声道 WAV(48k)。 */
 function makeWav(): Buffer {
@@ -60,21 +62,29 @@ async function waitInactive(pump: GroupPump, ms: number, what: string): Promise<
 describe("pump 取源兜底(/rest/stream 同口径)", () => {
   let tmpDir: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
-    // 固化取源为「整包」路径:本 fixture 只 stub 了 `globalThis.fetch`,
-    // 而流式窗口(streamSource)把输入**直接交给 ffmpeg 子进程** —— 子进程看不到
-    // stub,真连 127.0.0.1:18777 必然 ECONNREFUSED。用例只验证「取源裁决 + 兜底换行」
-    // 语义(与 /rest/stream 同口径),与解码路径无关,故显式走整包取字节。
-    // 流式输入解析(resolveRowInput,含 WebDAV 源鉴权头)另见
-    // tests/source/resolveRowInput.test.ts 的纯函数单测。
-    process.env.SENDSPIN_STREAM_SOURCE = "0";
+    // 取源唯一路径 = 流式窗口(ffmpeg 直读输入)。除 stub `globalThis.fetch`
+    // (供主进程 resolvePlayableRow 探活)外,再起一个真 HTTP server 监听 18777,
+    // 让 WebDAV 行产出的直链能被 ffmpeg 子进程真读到(子进程看不到 fetch stub)。
+    // 本地行(l:/w:)仍走本地文件;取源裁决 + 兜底换行语义与 /rest/stream 同口径。
     registerBuiltinPlugins();
     sqlite.prepare("INSERT INTO plugins (id, name, enabled, config) VALUES ('core-play-preference', 'core-play-preference', 1, '{\"preferLocal\":true,\"fallbackToWeb\":true}') ON CONFLICT(id) DO UPDATE SET enabled=1, config=excluded.config").run();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pumpfallback-"));
     wavPath = path.join(tmpDir, "t.wav");
     wavBytes = makeWav();
     fs.writeFileSync(wavPath, wavBytes);
+    // 真 HTTP server(模拟 WebDAV 上游):所有请求回 wav,供 ffmpeg 直读 18777 直链。
+    httpSrv = http.createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "audio/wav" });
+      res.end(wavBytes);
+    });
+    try {
+      await new Promise<void>((r, j) => {
+        httpSrv!.once("error", j);
+        httpSrv!.listen(18777, "127.0.0.1", () => r());
+      });
+    } catch { /* 端口被占(并行跑):pf-dav 会走兜底换行,不阻断其余用例 */ }
     // stub fetch: sidecar 死链一律 404;webdav 文件给 wav;其余走真实 fetch。
     vi.stubGlobal("fetch", (async (url: any, init: any) => {
       const u = String(url);
@@ -90,10 +100,10 @@ describe("pump 取源兜底(/rest/stream 同口径)", () => {
     sqlite.prepare("INSERT INTO media_sources (id, name, type, config) VALUES ('davsrc','dav','webdav','{\"url\":\"http://127.0.0.1:18777/dav\",\"username\":\"u\",\"password\":\"p\"}') ON CONFLICT(id) DO NOTHING").run();
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     vi.unstubAllGlobals();
     overridePumpSource(null);
-    delete process.env.SENDSPIN_STREAM_SOURCE;
+    if (httpSrv) await new Promise<void>((r) => httpSrv!.close(() => r()));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 

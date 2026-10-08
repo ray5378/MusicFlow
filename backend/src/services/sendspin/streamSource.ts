@@ -6,8 +6,8 @@
 //
 //   - 每首歌一个长命 ffmpeg(`-i <源> -ar 48k -ac 2 -f f32le pipe:1`),
 //     后台持续排入窗口;消费(`GroupPump.pushLoop`)按 25ms 切片取数;
-//   - 背压:未消费前沿超 `WINDOW_HIGH_SEC`(= MA AudioBuffer BALANCED 300s)
-//     即 `stdout.pause()`,ffmpeg 被管道憋住;低于 `WINDOW_LOW_SEC` 恢复。
+//   - 背压:未消费前沿超**窗口上限**(插件配置「解码窗口上限」,缺省 300s =
+//     MA AudioBuffer BALANCED)即 `stdout.pause()`,ffmpeg 被管道憋住;低 10s 恢复。
 //     注意:300s 是**服务端 PCM 环容量上限**(对齐 MA `BUFFER_SIZE_MAP[BALANCED]`),
 //     与 MA sendspin 推流背压 `_PRODUCER_BUFFER_LIMIT_US`(60s,发送侧)是两回事;
 //   - 偏移全是**曲首起算的绝对交错样本**(与整包 `Float32Array` 下标同口径),
@@ -16,8 +16,10 @@
 //     ffmpeg,绝对偏移保持连续,调用方同样只改 `positionMs`。
 //
 // 内存上限:窗口 300 秒 ≈ 115MB(Buffer 属外部内存,不占 V8 老生代)＋ ffmpeg 常驻 ~15MB;
-// 短于 300s 的曲目会在 EOF 前解完并停在高水位附近,等价于整曲驻留。
-// 历史保留:已消费数据保留最近 5 秒(`HISTORY_KEEP_SEC`,后续按房间 DSP 预热用)。
+// 上限由插件配置「解码窗口上限」定(30s~10min,内存 ~0.375MB/秒线性)。
+// 整曲保留(2026-10-08):歌长 ≤ 窗口上限时引擎开 `retainWholeSong` —— 不淘汰、不背压,
+// 前后 seek 全程命中窗口(零成本);歌长 > 上限则走滑动窗口,**照样播完**(超窗 seek 重建)。
+// 历史保留:已消费数据保留最近 5 秒(`HISTORY_KEEP_SEC`;仅滑动窗口模式)。
 //
 // 与整包路径的关系:`GroupAudio` 加可选 `stream` 字段(见 streamEngine),
 // 有则走窗口、无则走老路径;announce 的 TTS 短包保持整包解码,不用本模块.
@@ -25,6 +27,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { resolveFfmpeg } from "../transcode.js";
+import { WINDOW_DEFAULT_SEC, normalizeWindowSeconds } from "./windowConfig.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -41,9 +44,11 @@ export const BYTES_PER_SAMPLE = 4;
  *  (`controllers/streams/constants.py:52-56`,240 ≥4GB 落 BALANCED):
  *  解码侧不再按 30s 硬切,seek 回跳在 5 分钟曲内几乎总能命中窗口。
  *  代价是未消费前沿最多 ~115MB PCM(Buffer 外部内存),需在 240 soak 看 RSS。 */
-export const WINDOW_HIGH_SEC = 300;
-/** 背压低水位(秒):低于即恢复读取。滞回 10s(300−290),与 30/20 时代同宽度。 */
-export const WINDOW_LOW_SEC = 290;
+export const WINDOW_HIGH_SEC = WINDOW_DEFAULT_SEC;
+/** 背压低水位(秒):低于即恢复读取。滞回 10s(WINDOW_HYSTERESIS_SEC)。 */
+export const WINDOW_LOW_SEC = WINDOW_HIGH_SEC - 10;
+/** 背压滞回宽度(秒):高水位 − 本值 = 低水位(实例级窗口用)。 */
+const WINDOW_HYSTERESIS_SEC = 10;
 /** 已消费历史保留(秒):后续 DSP 预热的地基,现在只记不播。 */
 export const HISTORY_KEEP_SEC = 5;
 /** 起播预缓冲(秒):`ready()` 等到这么多或 EOF。 */
@@ -165,8 +170,24 @@ export class PcmWindow {
    */
   private gen = 0;
 
-  constructor(source: WindowSource, startMs = 0) {
+  /** 背压高水位(秒):未消费前沿超过即暂停解码(插件配置「解码窗口上限」经 opts 下发)。 */
+  private readonly highSec: number;
+  /** 背压低水位(秒):低于即恢复,与高水位留固定滞回(WINDOW_HYSTERESIS_SEC)。 */
+  private readonly lowSec: number;
+  /** 整曲保留(歌长 ≤ 窗口上限时由引擎开启):不淘汰已消费数据、不背压 ——
+   *  前后 seek 全程命中窗口(零成本),代价是驻留 min(歌长,上限)×0.375MB/秒。
+   *  歌长 > 上限时为 false,走既有滑动窗口(背压+淘汰+超窗 seek 重建),歌照常播完。 */
+  private readonly retainAll: boolean;
+
+  constructor(
+    source: WindowSource,
+    startMs = 0,
+    opts?: { highSec?: number; retainWholeSong?: boolean },
+  ) {
     this.source = source;
+    this.retainAll = opts?.retainWholeSong === true;
+    this.highSec = normalizeWindowSeconds(opts?.highSec ?? WINDOW_HIGH_SEC);
+    this.lowSec = Math.max(1, this.highSec - WINDOW_HYSTERESIS_SEC);
     const startSample = Math.max(0, Math.floor((startMs / 1000) * SAMPLE_RATE * CHANNELS));
     this.baseSample = startSample;
     this.decodedSamples = startSample;
@@ -376,8 +397,8 @@ export class PcmWindow {
     }
     this.evict();
     // 真背压:未消费前沿超高水位即暂停 stdout,ffmpeg 被管道憋住;
-    // 只在数据到达时判定,避免定时轮询。
-    if (!this.paused && this.bufferedAheadBytes() > samplesOfSec(WINDOW_HIGH_SEC) * BYTES_PER_SAMPLE) {
+    // 只在数据到达时判定,避免定时轮询。整曲保留模式不背压(允许一直解到 EOF)。
+    if (!this.retainAll && !this.paused && this.bufferedAheadBytes() > samplesOfSec(this.highSec) * BYTES_PER_SAMPLE) {
       this.paused = true;
       try { this.proc?.stdout.pause(); } catch { /* ignore */ }
     }
@@ -391,14 +412,16 @@ export class PcmWindow {
   }
 
   private maybeResume(): void {
-    if (this.paused && this.bufferedAheadBytes() < samplesOfSec(WINDOW_LOW_SEC) * BYTES_PER_SAMPLE) {
+    if (this.retainAll) return;
+    if (this.paused && this.bufferedAheadBytes() < samplesOfSec(this.lowSec) * BYTES_PER_SAMPLE) {
       this.paused = false;
       try { this.proc?.stdout.resume(); } catch { /* ignore */ }
     }
   }
 
-  /** 淘汰:只保留 [consumed - 5s历史, …),从头删。 */
+  /** 淘汰:只保留 [consumed - 5s历史, …),从头删。整曲保留模式不淘汰(全曲驻留)。 */
   private evict(): void {
+    if (this.retainAll) return;
     const keepFrom = Math.max(
       this.baseSample,
       this.consumedSamples - samplesOfSec(HISTORY_KEEP_SEC),

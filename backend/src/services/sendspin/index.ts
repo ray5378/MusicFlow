@@ -22,6 +22,7 @@ import { promises as fs } from "node:fs";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { SendspinServer, type SendspinConnection, type SendspinCodecPreference, normalizeCodecPreference } from "./server.js";
 import { WS_PORT } from "./constants.js";
+import { WINDOW_DEFAULT_SEC, normalizeWindowSeconds } from "./windowConfig.js";
 import { PairingStore } from "./pairingStore.js";
 import { PairingCoordinator } from "./pairServer.js";
 import {
@@ -210,7 +211,8 @@ export function readSendspinPluginConfig(): {
   port: number;
   autoDiscover: boolean;
   preferredCodec: SendspinCodecPreference;
-  streamSource: boolean;
+  /** 解码窗口上限(秒,插件配置「解码窗口上限」,档位 30~600)。 */
+  streamWindowSeconds: number;
   prefillBufferMs: number;
   /** sink 自愈自动远程重启(L2)—— 默认 true(显式 false 才关),理由见 SendspinServerOptions.sinkAutoRestart。 */
   sinkAutoRestart: boolean;
@@ -220,7 +222,7 @@ export function readSendspinPluginConfig(): {
     port: WS_PORT,
     autoDiscover: true,
     preferredCodec: "pcm" as SendspinCodecPreference,
-    streamSource: true,
+    streamWindowSeconds: WINDOW_DEFAULT_SEC,
     prefillBufferMs: PREFILL_BUFFER_DEFAULT_MS,
     sinkAutoRestart: true,
   };
@@ -238,9 +240,9 @@ export function readSendspinPluginConfig(): {
       preferredCodec: normalizeCodecPreference(cfg?.preferred_codec),
       // 注:ESPHome 6053 的开关/密钥/端口**已从这里移除** —— 它们是每台设备各自的,
       // 存在 sendspin_device_state(clientId → psk/port),见 deviceState.ts。
-      // 流式解码:默认开(3.0.36 灰度验证稳定后转正);只有**显式 false** 才关
-      // (老用户此前手关闭仍保持关)。缺省/非布尔一律按默认开。
-      streamSource: cfg?.stream_source !== false,
+      // 解码窗口上限(秒):下拉档位存字符串,归一化吸附到最近合法档;缺省 300(= 旧行为)。
+      // 歌长 ≤ 本值 → 整曲保留(前后 seek 零成本);> 本值 → 滑动窗口(照样播完)。
+      streamWindowSeconds: normalizeWindowSeconds(cfg?.stream_window_seconds),
       // 预填充缓冲(设备侧抗抖动窗口,毫秒)。插件配置页**随时可改**,推流循环
       // 以 PREFILL_CACHE_MS 的粒度重读(见 streamEngine),无需重启、不中断当前播放。
       prefillBufferMs: normalizePrefillBufferMs(cfg?.prefill_buffer_ms),

@@ -295,7 +295,7 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       port: 38927,
       autoDiscover: true,
       preferredCodec: "pcm",
-      streamSource: true,
+      streamWindowSeconds: 300,
       prefillBufferMs: 3000,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
@@ -307,8 +307,8 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
     setPluginRow({
       allow_legacy_clients: false,
       auto_discover: false,
-      stream_source: false,
       preferred_codec: "flac",
+      stream_window_seconds: 60,
       port: 12345,
       prefill_buffer_ms: 500,
     });
@@ -317,7 +317,7 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       port: 12345,
       autoDiscover: false,
       preferredCodec: "flac",
-      streamSource: false,
+      streamWindowSeconds: 60,
       prefillBufferMs: 500,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
@@ -329,14 +329,13 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
     setPluginRow({
       allow_legacy_clients: "no",
       auto_discover: 0,
-      stream_source: 1,
       preferred_codec: "opus",
       port: 0,
     });
     const cfg = idx.readSendspinPluginConfig();
     expect(cfg.allowLegacyClients).toBe(true); // 仅显式 false 才关
     expect(cfg.autoDiscover).toBe(true);
-    expect(cfg.streamSource).toBe(true);
+    expect(cfg.streamWindowSeconds).toBe(300);
     expect(cfg.preferredCodec).toBe("pcm"); // opus 非法
     expect(cfg.port).toBe(38927);
     // 越界端口逐个回默认

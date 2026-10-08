@@ -21,7 +21,6 @@ vi.mock("../../src/services/sendspin/index.js", () => ({
 import {
   GroupPump,
   overridePumpSource,
-  isStreamSource,
   prefillTargetMs,
   PREFILL_BUFFER_DEFAULT_MS,
 } from "../../src/services/sendspin/streamEngine.js";
@@ -214,17 +213,6 @@ describe("streamEngine 预填充:设备容量钳制必须明说", () => {
 });
 
 describe("streamEngine 读插件配置失败的兜底", () => {
-  it("isStreamSource:读不到配置 → false(绝不阻断播放)", async () => {
-    const saved = process.env.SENDSPIN_STREAM_SOURCE;
-    delete process.env.SENDSPIN_STREAM_SOURCE;
-    try {
-      expect(await isStreamSource()).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env.SENDSPIN_STREAM_SOURCE;
-      else process.env.SENDSPIN_STREAM_SOURCE = saved;
-    }
-  });
-
   it("prefillTargetMs:读不到配置 → 回落缺省水位(不抛)", async () => {
     const saved = process.env.SENDSPIN_PREFILL_MS;
     delete process.env.SENDSPIN_PREFILL_MS;

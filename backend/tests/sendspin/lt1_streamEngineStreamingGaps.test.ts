@@ -65,7 +65,7 @@ vi.mock("../../src/services/sendspin/streamSource.js", () => {
       return "";
     }
   }
-  return { PcmWindow, WindowEvictedError };
+  return { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC: 300 };
 });
 
 import { GroupPump, overridePumpSource } from "../../src/services/sendspin/streamEngine.js";
@@ -88,7 +88,6 @@ function makeGroup() {
 const server = { log: () => {} } as any;
 
 const ENV = {
-  SENDSPIN_STREAM_SOURCE: process.env.SENDSPIN_STREAM_SOURCE,
   SENDSPIN_PREFILL: process.env.SENDSPIN_PREFILL,
   SENDSPIN_PUSH_SPEED: process.env.SENDSPIN_PUSH_SPEED,
 };
@@ -99,7 +98,6 @@ const releaseSlices = (): void => {
 };
 
 beforeEach(() => {
-  process.env.SENDSPIN_STREAM_SOURCE = "1";
   process.env.SENDSPIN_PREFILL = "0";
   process.env.SENDSPIN_PUSH_SPEED = "100";
   H.rows = [];
