@@ -1,5 +1,5 @@
 // 解码窗口可配(30s~10min) + 整曲保留模式 的回归守卫(batch45)。
-// - normalizeWindowSeconds:纯函数吸附(非法/缺省 → 300,超范围钳两端);
+// - normalizeWindowSeconds:纯函数吸附(非法/缺省 → 缺省档 30s,超范围钳两端);
 // - retainWholeSong:歌长 ≤ 上限时不淘汰(base 恒 0),回退/前跳 seek 全部命中(零重建);
 // - 超窗滑动:歌长 > 上限时背压生效 + 超窗回退触发重定位(保证超窗歌照样播完)。
 import "../plugins/_env.js";
@@ -22,7 +22,7 @@ describe("normalizeWindowSeconds(档位吸附)", () => {
     expect(normalizeWindowSeconds(String(WINDOW_DEFAULT_SEC))).toBe(WINDOW_DEFAULT_SEC);
   });
 
-  it("非法/缺省 → 缺省 300", () => {
+  it("非法/缺省 → 缺省档(30s)", () => {
     expect(normalizeWindowSeconds(undefined)).toBe(WINDOW_DEFAULT_SEC);
     expect(normalizeWindowSeconds(null)).toBe(WINDOW_DEFAULT_SEC);
     expect(normalizeWindowSeconds("abc")).toBe(WINDOW_DEFAULT_SEC);

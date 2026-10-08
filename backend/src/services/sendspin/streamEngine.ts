@@ -44,7 +44,7 @@ const STREAM_SOURCE_CACHE_MS = 5000;
 let windowSecCache: { value: number; at: number } | null = null;
 
 /** 读插件配置的「解码窗口上限」(秒;5s 缓存)。
- *  读不到(子进程/单测)时回落缺省 300s。 */
+ *  读不到(子进程/单测)时回落缺省 30s(用户拍板 2026-10-08)。 */
 async function readStreamWindowSeconds(): Promise<number> {
   const now = Date.now();
   if (windowSecCache && now - windowSecCache.at < STREAM_SOURCE_CACHE_MS) {

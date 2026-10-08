@@ -6,17 +6,17 @@
 //
 //   - 每首歌一个长命 ffmpeg(`-i <源> -ar 48k -ac 2 -f f32le pipe:1`),
 //     后台持续排入窗口;消费(`GroupPump.pushLoop`)按 25ms 切片取数;
-//   - 背压:未消费前沿超**窗口上限**(插件配置「解码窗口上限」,缺省 300s =
-//     MA AudioBuffer BALANCED)即 `stdout.pause()`,ffmpeg 被管道憋住;低 10s 恢复。
-//     注意:300s 是**服务端 PCM 环容量上限**(对齐 MA `BUFFER_SIZE_MAP[BALANCED]`),
+//   - 背压:未消费前沿超**窗口上限**(插件配置「解码窗口上限」,缺省 30s =
+//     最省内存档,档位可调至 10 分钟)即 `stdout.pause()`,ffmpeg 被管道憋住;低 10s 恢复。
+//     注意:窗口上限是**服务端 PCM 环容量上限**(原 300s 对齐 MA `BUFFER_SIZE_MAP[BALANCED]`),
 //     与 MA sendspin 推流背压 `_PRODUCER_BUFFER_LIMIT_US`(60s,发送侧)是两回事;
 //   - 偏移全是**曲首起算的绝对交错样本**(与整包 `Float32Array` 下标同口径),
 //     `pushLoop` 的 `lo = i*frameSamples` 无需换算;
 //   - seek 回放点在窗口内只动下标(调用方行为);窗口外由 `seekTo()` 按 `-ss` 重起
 //     ffmpeg,绝对偏移保持连续,调用方同样只改 `positionMs`。
 //
-// 内存上限:窗口 300 秒 ≈ 115MB(Buffer 属外部内存,不占 V8 老生代)＋ ffmpeg 常驻 ~15MB;
-// 上限由插件配置「解码窗口上限」定(30s~10min,内存 ~0.375MB/秒线性)。
+// 内存上限:窗口 30 秒 ≈ 11MB(缺省档)~ 600 秒 ≈ 225MB(Buffer 属外部内存,不占 V8 老生代)＋ ffmpeg 常驻 ~15MB;
+// 上限由插件配置「解码窗口上限」定(30s~10min,缺省 30s,内存 ~0.375MB/秒线性)。
 // 整曲保留(2026-10-08):歌长 ≤ 窗口上限时引擎开 `retainWholeSong` —— 不淘汰、不背压,
 // 前后 seek 全程命中窗口(零成本);歌长 > 上限则走滑动窗口,**照样播完**(超窗 seek 重建)。
 // 历史保留:已消费数据保留最近 5 秒(`HISTORY_KEEP_SEC`;仅滑动窗口模式)。
@@ -40,10 +40,8 @@ import { isChannelEnabled } from "../audio/pipelineSwitches.js";
 import { StderrTail } from "../audio/stderrTail.js";
 export const BYTES_PER_SAMPLE = 4;
 /** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
- *  2026-09-23 对齐 MA `AudioBuffer.max_size_seconds` BALANCED=300
- *  (`controllers/streams/constants.py:52-56`,240 ≥4GB 落 BALANCED):
- *  解码侧不再按 30s 硬切,seek 回跳在 5 分钟曲内几乎总能命中窗口。
- *  代价是未消费前沿最多 ~115MB PCM(Buffer 外部内存),需在 240 soak 看 RSS。 */
+ *  = 插件配置「解码窗口上限」的缺省档(用户拍板 2026-10-08:缺省 30s 最省内存,
+ *  历史上曾固定 300s 对齐 MA `AudioBuffer.max_size_seconds` BALANCED)。 */
 export const WINDOW_HIGH_SEC = WINDOW_DEFAULT_SEC;
 /** 背压低水位(秒):低于即恢复读取。滞回 10s(WINDOW_HYSTERESIS_SEC)。 */
 export const WINDOW_LOW_SEC = WINDOW_HIGH_SEC - 10;

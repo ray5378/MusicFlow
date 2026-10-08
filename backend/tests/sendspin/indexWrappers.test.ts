@@ -295,7 +295,7 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       port: 38927,
       autoDiscover: true,
       preferredCodec: "pcm",
-      streamWindowSeconds: 300,
+      streamWindowSeconds: 30,
       prefillBufferMs: 3000,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
@@ -335,7 +335,7 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
     const cfg = idx.readSendspinPluginConfig();
     expect(cfg.allowLegacyClients).toBe(true); // 仅显式 false 才关
     expect(cfg.autoDiscover).toBe(true);
-    expect(cfg.streamWindowSeconds).toBe(300);
+    expect(cfg.streamWindowSeconds).toBe(30);
     expect(cfg.preferredCodec).toBe("pcm"); // opus 非法
     expect(cfg.port).toBe(38927);
     // 越界端口逐个回默认
