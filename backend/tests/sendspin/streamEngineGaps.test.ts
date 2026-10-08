@@ -119,9 +119,12 @@ describe("streamEngine pushLoop:整包路径的时长/锚点/诊断分支", () =
     await waitInactive(pump, 15000, "pushFrame 抛错");
     expect(frames).toHaveLength(0);
     expect(logs.some((m) => m.includes("pushFrame 中断"))).toBe(true);
-    // 异常结束(非自然)不得置空 current —— 否则会被误判成"自然播完"而自动切歌
-    expect(g.current).not.toBeNull();
-    expect(g.finished).toBe(0);
+    // 异常终止与自然结束同口径(2026-10-08「月满西楼」假在播根源修复后的新契约):
+    // 清 current + finishPlayback ⇒ pollCore playing=false ⇒ poll 报 IDLE
+    // ⇒ auto-advance 走既有跳歌自愈。旧契约「异常不得清 current 防误切歌」已废弃
+    // —— current 残留才是真事故(poll 恒报 PLAYING pos=0,队列层被骗住,永不自愈)。
+    expect(g.current).toBeNull();
+    expect(g.finished).toBe(1);
   }, 30_000);
 });
 
@@ -174,9 +177,10 @@ describe("streamEngine pushLoop:流式窗口取数错误的分流", () => {
     await pump.play("song-window-err");
     await waitInactive(pump, 15000, "窗口错误终止");
     expect(logs.some((m) => m.includes("pushLoop 异常终止"))).toBe(true);
-    // 非自然结束:不得置空 current
-    expect(g.current).not.toBeNull();
-    expect(g.finished).toBe(0);
+    // 异常终止与自然结束同口径(新契约,见 pumpErrorState.test.ts 守卫):
+    // 清 current + finishPlayback ⇒ poll 报 IDLE ⇒ auto-advance 跳歌自愈。
+    expect(g.current).toBeNull();
+    expect(g.finished).toBe(1);
   }, 30_000);
 });
 

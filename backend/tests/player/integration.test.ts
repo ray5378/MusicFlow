@@ -273,14 +273,16 @@ describe("MA 式链路集成测试", () => {
   // ============ 场景 3d:5s 超时但设备实际已在播放 → 不重投,不打断 ============
   //   回归测试:修复"乐观窗口 5s 未确认 PLAYING → stalled → 盲目重投 → 打断
   //   已在播放的设备 → 歌曲前几秒无限重复"(真实 HiVi GENA/轮询确认晚于 5s)。
-  it("场景3d:stalled 时设备已在播放(pollState=PLAYING)→ 静默关闭窗口,不重投", async () => {
+  it("场景3d:stalled 时设备已在播放(pollState=PLAYING 且有 mediaUri)→ 静默关闭窗口,不重投", async () => {
     const { pc, qc, device } = setup();
     // 模拟真实设备:cast 后设备实际已开始播放(PLAYING),但 GENA/轮询确认
     // 晚于 5s 乐观窗口(轮询被 advancing 跳过) → stalled 触发时设备已在播。
+    // 真在播证据 = poll 复查能报出 mediaUri(SetAVTransportURI 设备都记得自己的 URI)。
     const origPlayMedia = device.playMedia.bind(device);
     device.playMedia = async (item, _baseUrl) => {
       device.playMediaCalls.push(item);
       device.state = PlaybackState.PLAYING; // 设备在播,但不发 GENA 事件
+      device.mediaUri = `http://base/stream/${item.songId}`; // poll 复查可见 → 真在播
       return { mediaUri: `http://base/stream/${item.songId}` };
     };
     await qc.playFrom("d1", makeItems(2), 0, "http://base");
@@ -289,6 +291,28 @@ describe("MA 式链路集成测试", () => {
     // 超过 5s play 超时 → stalled → 验证 pollState 发现设备已在播放 → 不重投
     await vi.advanceTimersByTimeAsync(6000);
     expect(device.playMediaCalls.length).toBe(1); // 未被再次 cast,不打断
+    device.playMedia = origPlayMedia;
+  });
+
+  // ============ 场景 3e:假在播签名(PLAYING 无 mediaUri pos=0)→ 重投自愈 ============
+  //   回归测试:2026-10-08 240「月满西楼」群组永久卡死根源修复的队列侧防线。
+  //   群组流死亡后设备可保持 PLAYING pos=0 mediaUri=空 —— 旧逻辑误判「确在播放」
+  //   清掉卡死计数 → 每 15s 循环,永不重投永不切歌。新契约:此签名 = 流已死,
+  //   不清计数 → 第 1 次 stalled 重投兜 transient(自愈)。
+  it("场景3e:stalled 复查见 PLAYING 但无 mediaUri 且 pos=0(假在播)→ 第 1 次重投自愈", async () => {
+    const { pc, qc, device } = setup();
+    const origPlayMedia = device.playMedia.bind(device);
+    device.playMedia = async (item, _baseUrl) => {
+      device.playMediaCalls.push(item);
+      device.state = PlaybackState.PLAYING; // 假在播:不发 GENA、不记 mediaUri、pos 冻结 0
+      return { mediaUri: `http://base/stream/${item.songId}` };
+    };
+    await qc.playFrom("d1", makeItems(2), 0, "http://base");
+    expect(device.playMediaCalls.length).toBe(1);
+
+    // 超过 5s play 超时 → stalled → 复查命中假在播签名 → 不清计数 → 重投自愈
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(device.playMediaCalls.length).toBe(2); // 第 1 次重投(自愈),不再被骗住
     device.playMedia = origPlayMedia;
   });
 
