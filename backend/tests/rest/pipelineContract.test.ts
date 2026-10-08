@@ -234,6 +234,12 @@ describe("P2-6 开关:pipeline.http 关掉也只等于「滤镜链为空」（D9
       const af = await resolveRequestAf(null);
       expect(af[0]).toContain("loudnorm=I=-14");
       expect(af[af.length - 1]).toContain("alimiter=limit=-1dB");
+      // loudnorm 恒上采样 192kHz → 链内必须有降采样回落(240 GGMM 变速案),
+      // 且必须落在 loudnorm 之后、限制器之前(限制器保持在浮点域/链尾)。
+      const lnIdx = af.findIndex((f) => f.includes("loudnorm"));
+      expect(lnIdx).toBeGreaterThanOrEqual(0);
+      expect(af.slice(lnIdx + 1).join(",")).toContain("aresample=resampler=swr:osr=48000");
+      expect(af.filter((f) => f.includes("aresample")).length).toBe(1);
     } finally {
       setSetting("pipeline.http", "1");
     }

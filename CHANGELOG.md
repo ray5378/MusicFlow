@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.2.3] - 2026-10-08
+
+### Fix
+
+- **fix(pipeline): HTTP/DLNA 转码链 loudnorm 缺降采样回落,高采样率流直喂设备**
+  - 根因:loudnorm 滤波器内部恒上采样到 192kHz;本通道无 `-ar` 输出选项,flac/mp3/aac 编码器
+    又接受 192k → 图协商不降采样 → 未测量歌曲首播(实时 loudnorm)输出 192kHz 流,部分
+    renderer(gmediarender 实锤)变速变调播放、媒体钟错乱(240 GGMM MUSIC 案:位置 0.5x 前进、
+    overrun advance、声音异常;重播命中测量走静态 volume 即恢复正常)。
+  - 修复:`resolveRequestAf` 链含 loudnorm 时紧随其后插入 `aresample=resampler=swr:osr=48000`
+    (锚定 48k 与 DSP_FILTER_RATE 同源;swr 显式声明对齐 ffmpeg ticket 11323 与 ⑥ 段口径),
+    限制器保持在链尾浮点域。有 DSP 配置的链路本就自带 aresample=48000 不受影响。
+  - 覆盖 /rest/stream、/stream-remote、/rest/dlna/stream/:token 全部管道出口(同一 af 入口)。
+  - 实证:复刻事故命令输出 flac 192000Hz → 修复后 48000Hz;airplay/sendspin/flow 三链原本
+    就有各自回落,不受影响。
+
 ## [4.2.2] - 2026-10-08
 
 ### Added

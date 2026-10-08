@@ -1546,10 +1546,21 @@ export async function resolveRequestAf(
   const { resolveLoudnessAf } = await import("../../services/audio/pipeline.js");
   const { playerDspFilters } = await import("../../services/playerDsp.js");
   const extraFilters = playerDspFilters(peerId, {});
-  return resolveLoudnessAf({
+  const af = resolveLoudnessAf({
     ...(song?.id ? { rowId: song.id } : {}),
     ...(extraFilters.length > 0 ? { extraFilters } : {}),
   });
+  // loudnorm 滤波器内部恒上采样到 192kHz(ffmpeg 实现),而本通道输出无 -ar 输出选项、
+  // flac/mp3/aac 编码器又都接受 192k → 图协商不会自动降采样 → 高采样率流直喂设备,
+  // 部分 renderer(gmediarender 实锤)变速变调播放 + 媒体钟错乱(240 GGMM 案:位置
+  // 0.5x 前进/overrun advance/声音异常,重播有测量走静态 volume 即正常)。
+  // 有 DSP 配置时 playerDsp 链首自带 aresample=48000 不踩坑;这里补齐无 DSP 的情形,
+  // 锚定 48k(与 DSP_FILTER_RATE 同源),swr 必须显式声明(链中有 loudnorm,
+  // ffmpeg ticket 11323,与 ⑥ 段 outputFilters 同口径)。
+  // 位置:紧随 loudnorm 之后(与 DSP 链首 aresample 同位),限制器仍在链尾(契约锁 af[last])。
+  const lnIdx = af.findIndex((f) => f.includes("loudnorm"));
+  if (lnIdx >= 0) af.splice(lnIdx + 1, 0, "aresample=resampler=swr:osr=48000");
+  return af;
 }
 
 /**
