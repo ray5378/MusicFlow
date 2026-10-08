@@ -109,7 +109,10 @@ describe("ffmpeg 生命周期事件真实取证", () => {
     const dbg = await import("../../src/services/sendspin/debugLog.js");
     const { PcmWindow } = await import("../../src/services/sendspin/streamSource.js");
     dbg.setSendspinDebugEnabled(true);
-    const w = new PcmWindow({ input: "http://127.0.0.1:9/refused" }, 0, { highSec: 30 });
+    const w = new PcmWindow({ input: "http://127.0.0.1:9/refused" }, 0, {
+      highSec: 30,
+      meta: { songId: "song-under-test", durationSec: 60 },
+    });
     const deadline = Date.now() + 20_000;
     while (!w.failedReason && Date.now() < deadline) await sleep(100);
     expect(w.failedReason).toBeTruthy();
@@ -117,6 +120,10 @@ describe("ffmpeg 生命周期事件真实取证", () => {
     expect(ev).toBeTruthy();
     expect(ev!.fields!.code).not.toBe(0);
     expect(typeof ev!.fields!.stderrTail).toBe("string");
+    // 歌曲定位字段(batch46b):songId/歌长/当时播放位置 —— 复现排查用
+    expect(ev!.fields!.songId).toBe("song-under-test");
+    expect(ev!.fields!.durationMs).toBe(60000);
+    expect(typeof ev!.fields!.positionMs).toBe("number");
     // spawn 事件也应在册(生命周期起点)
     expect(dbg.getSendspinDebugSnapshot().entries.some((e) => e.kind === "ffmpeg.spawn")).toBe(true);
   });

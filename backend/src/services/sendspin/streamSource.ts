@@ -183,13 +183,17 @@ export class PcmWindow {
    *  前后 seek 全程命中窗口(零成本),代价是驻留 min(歌长,上限)×0.375MB/秒。
    *  歌长 > 上限时为 false,走既有滑动窗口(背压+淘汰+超窗 seek 重建),歌照常播完。 */
   private readonly retainAll: boolean;
+  /** 曲目上下文(songId/歌长):debug 日志取证用 —— 定位「哪首歌、播到哪、怎么挂的」,
+   *  不参与解码逻辑;测试直构窗口可不传。 */
+  private readonly meta: { songId?: string; durationSec?: number } | null;
 
   constructor(
     source: WindowSource,
     startMs = 0,
-    opts?: { highSec?: number; retainWholeSong?: boolean },
+    opts?: { highSec?: number; retainWholeSong?: boolean; meta?: { songId?: string; durationSec?: number } },
   ) {
     this.source = source;
+    this.meta = opts?.meta ?? null;
     this.retainAll = opts?.retainWholeSong === true;
     this.highSec = normalizeWindowSeconds(opts?.highSec ?? WINDOW_HIGH_SEC);
     this.lowSec = Math.max(1, this.highSec - WINDOW_HYSTERESIS_SEC);
@@ -205,6 +209,17 @@ export class PcmWindow {
    *  调用方(pushLoop)用它把落后于基准的游标**贴齐** —— 保证淘汰之后必然前进,
    *  不会退化成"游标不变 → 再淘汰"的自旋(见 slice 的亚帧容错注释)。 */
   get baseMs(): number { return (this.baseSample / (SAMPLE_RATE * CHANNELS)) * 1000; }
+  /** debug 取证公共字段:歌曲定位(songId/歌长)+ 当前已消费到的播放位置。
+   *  positionMs 口径:consumedSamples 是**曲首起算的绝对交错样本**,除 (48k×2) 即播放位置 ——
+   *  异常事件带上它,就能回答「这首歌播到第几秒挂的」。 */
+  private dbgSongFields(): Record<string, unknown> {
+    return {
+      songId: this.meta?.songId ?? null,
+      durationMs: this.meta?.durationSec && this.meta.durationSec > 0 ? Math.round(this.meta.durationSec * 1000) : null,
+      positionMs: Math.round((this.consumedSamples / (SAMPLE_RATE * CHANNELS)) * 1000),
+    };
+  }
+
   /** stderr 尾部文本(上限 128KB):供 P0-4 解析 loudnorm JSON。 */
   stderrText(): string {
     return this.stderrFull.text();
@@ -352,7 +367,7 @@ export class PcmWindow {
       proc.stdin.end();
     } catch (e: any) {
       this.failed = `ffmpeg 启动失败: ${e?.message || e}`;
-      recordSendspinDebug("ffmpeg.start_failed", this.failed, { startSec: Math.max(0, startSec) });
+      recordSendspinDebug("ffmpeg.start_failed", this.failed, { ...this.dbgSongFields(), startSec: Math.max(0, startSec) });
       this.wakeAll();
       return;
     }
@@ -361,6 +376,7 @@ export class PcmWindow {
     this.spawnWallMs = Date.now();
     this.spawnStartSec = Math.max(0, startSec);
     recordSendspinDebug("ffmpeg.spawn", `ffmpeg 解码进程已启动(-ss=${this.spawnStartSec}s)`, {
+      ...this.dbgSongFields(),
       startSec: this.spawnStartSec,
       source: String(this.source.input || "").slice(0, 160),
       inputFormat: this.source.inputFormat ?? null,
@@ -384,6 +400,7 @@ export class PcmWindow {
       if (this.proc !== proc) return;
       this.failed = `ffmpeg 进程错误: ${e?.message || e}`;
       recordSendspinDebug("ffmpeg.process_error", this.failed, {
+        ...this.dbgSongFields(),
         startSec: this.spawnStartSec,
         liveMs: Date.now() - this.spawnWallMs,
       });
@@ -393,17 +410,20 @@ export class PcmWindow {
       if (this.proc !== proc) return; // 已被 seekTo/close 替换,忽略旧进程退出
       this.proc = null;
       const liveMs = Date.now() - this.spawnWallMs;
-      const decodedSec = Math.round((this.decodedSamples / SAMPLE_RATE) * 10) / 10;
+      // 口径:样本是**交错声道样本**(samplesOfSec = sec×SAMPLE_RATE×CHANNELS),换算秒必须除 CHANNELS。
+      const decodedSec = Math.round((this.decodedSamples / (SAMPLE_RATE * CHANNELS)) * 10) / 10;
       if (code === 0) {
         recordSendspinDebug("ffmpeg.eof", "ffmpeg 解码到源结尾(code=0,自然 EOF)", {
+          ...this.dbgSongFields(),
           startSec: this.spawnStartSec, decodedSec, liveMs,
         });
         this.eofSample = this.decodedSamples;
       } else if (!this.closed) {
         const tail = this.stderrTail.toString().slice(0, 200);
         this.failed = `ffmpeg 异常退出(${code}): ${tail}`;
-        // ★ 核心取证:退出码 + stderr 尾巴(错误原因)+ 已解码时长(判断"播到一半断")
+        // ★ 核心取证:退出码 + stderr 尾巴(错误原因)+ 歌曲定位(songId/播到哪/歌长)
         recordSendspinDebug("ffmpeg.abnormal_exit", `ffmpeg 异常退出(code=${code})`, {
+          ...this.dbgSongFields(),
           code,
           startSec: this.spawnStartSec,
           decodedSec,
@@ -412,6 +432,7 @@ export class PcmWindow {
         });
       } else {
         recordSendspinDebug("ffmpeg.killed", "ffmpeg 被主动终止(seek 重建/close)", {
+          ...this.dbgSongFields(),
           code, startSec: this.spawnStartSec, decodedSec, liveMs,
         });
       }
@@ -438,7 +459,7 @@ export class PcmWindow {
       this.paused = true;
       recordSendspinDebug("window.backpressure_pause",
         `解码快于消费,暂停读取(前沿=${(this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE).toFixed(1)}s ≥ 上限${this.highSec}s)`,
-        { bufferedAheadSec: Math.round((this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10, highSec: this.highSec });
+        { ...this.dbgSongFields(), bufferedAheadSec: Math.round((this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10, highSec: this.highSec });
       try { this.proc?.stdout.pause(); } catch { /* ignore */ }
     }
     this.wakeAll();
@@ -456,7 +477,7 @@ export class PcmWindow {
       this.paused = false;
       recordSendspinDebug("window.backpressure_resume",
         `消费追上,恢复读取(前沿=${(this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE).toFixed(1)}s < 低水位${this.lowSec}s)`,
-        { bufferedAheadSec: Math.round((this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10, lowSec: this.lowSec });
+        { ...this.dbgSongFields(), bufferedAheadSec: Math.round((this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10, lowSec: this.lowSec });
       try { this.proc?.stdout.resume(); } catch { /* ignore */ }
     }
   }
@@ -480,6 +501,7 @@ export class PcmWindow {
     if (this.evictedBytes > 0 && !this.evictLogged) {
       this.evictLogged = true;
       recordSendspinDebug("window.evict_first", "滑动窗口开始淘汰已解码数据(歌长超出窗口上限,属预期;超窗回退将重建解码)", {
+        ...this.dbgSongFields(),
         evictedSec: Math.round((this.evictedBytes / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10,
       });
     }

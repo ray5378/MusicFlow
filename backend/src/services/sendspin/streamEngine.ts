@@ -251,7 +251,7 @@ async function defaultSource(
   const r = await resolvePlayableRow(songId, { preferRowId: opts?.preferRowId });
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
   const sourceRowId = r.row.id;
-  return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters)), sourceRowId };
+  return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters, songId)), sourceRowId };
 }
 
 /** 流式音源:行 → ffmpeg 直读输入 → 滑动窗口。首帧只等 2 秒预缓冲,
@@ -273,6 +273,8 @@ async function streamingSource(
   row: { id?: string; duration?: number | null },
   startMs = 0,
   dspFilters?: string[],
+  /** 曲目 id:透传给 PcmWindow.meta,debug 日志取证「哪首歌播到哪挂了」用。 */
+  songId?: string,
 ): Promise<GroupAudio> {
   const { resolveRowInput } = await import("../source/resolveAudio.js");
   const direct = resolveRowInput(row as any);
@@ -293,7 +295,7 @@ async function streamingSource(
       ...(dspFilters && dspFilters.length > 0 ? { dspFilters } : {}),
     },
     startMs,
-    { highSec: windowSec, retainWholeSong },
+    { highSec: windowSec, retainWholeSong, meta: { songId, durationSec: durSec } },
   );
   try {
     await window.ready();
