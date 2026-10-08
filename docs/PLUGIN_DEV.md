@@ -410,7 +410,7 @@ globalThis.__mfPlugin = {
 | `host.jsenv`             | 嵌套 QuickJS 子环境跑隔离脚本：`create(name, initCode)` / `execute(name, code)` / `destroy(name)`——子环境只有标准 JS，**没有 host.**\*，无法触达宿主                                                                                                                            | `jsenv`           |
 | `host.playlists`         | 受控写推荐歌单（需 `playlists:write`）：`upsert/get/replaceEntries/updateCover`。`opts.sourcePlatform` / `opts.sourceUrl` 写入歌单的平台标签/来源，前端据此显示平台徽标                                                                                                               | `playlists:write` |
 | `host.sources`           | 在线源补全（需 `songs:write`）：`complete({artist,title})` 把匹配不到本地的曲目交给已启用的 source 插件搜索并导入为可播本地 song，返回 `{ songId }`                                                                                                                                         | `songs:write`     |
-| `host.crypto`            | 纯同步工具（需 `crypto` 权限）：`md5(input)`（Last.fm api\_sig 等签名用）                                                                                                                                                                                            | `crypto`          |
+| `host.crypto`            | 纯同步密码学原语（需 `crypto` 权限），**全部同步、失败返回 `{ error }` 不抛**：`md5/sha1/sha256(input)`、`randomBytes(len)`、`aesEncrypt/aesDecrypt(opts)`（AES-128 CBC/ECB/GCM）、`rsaEncrypt(opts)`。详见 §6.2                                                                                                                                                                                            | `crypto`          |
 
 ### 6.1 权限白名单 `KNOWN_PERMISSIONS`
 
@@ -424,6 +424,43 @@ songs:read  songs:write  playlists:read  playlists:write  inter-plugin
 
 > **已桥接的权限**：`log` / `storage` / `net`（`host.http` + `host.net` socket）/ `inter-plugin`（`host.comm`）/ `songs:read`（`host.songs`）/ `songs:write`（`host.sources`）/ `playlists:write`（`host.playlists`）/ `fs`（`host.fs` 插件目录内）/ `command`（`host.command`）/ `websocket`（`host.ws`）/ `jsenv`（`host.jsenv`）/ `crypto`（`host.crypto`）。
 > **挂名未桥接**（白名单校验放行，但沙箱里没有对应宿主函数——刻意保留为未来扩展位）：`fs:music`、`fs:external`、`playlists:read`。外置插件无法改宿主曲库、无法读写宿主音乐库文件；`host.fs` 被限定在插件自己的 `files/` 目录。
+
+### 6.2 `host.crypto` 密码学原语（插件侧平台加密）
+
+`host.crypto` 提供插件在沙箱内**自行完成平台加密**所需的纯同步原语（QQ / 网易云的
+`weapi` / `eapi` / `ag-1` 签名都可在插件里复刻）。实现源唯一为后端
+`src/plugins/pluginCrypto.ts` 的 `createPluginCrypto()`，三处通道（主线程沙箱 `sandbox.ts`
+转发 / 直连宿主 `discovery.ts` / worker `sandboxWorker.ts`）共用同一实现，逐字节一致。
+
+> **契约**：全部为**同步**函数；成功返回字符串，**失败一律返回 `{ error: string }`，
+> 绝不抛异常**（插件侧读返回值判断，不要 try/catch）。hex 输出恒为**小写**；部分上游协议
+> 要求大写 HEX（网易云 `eapi`、QQ `zzcSign` 的 sha1），由插件自行 `.toUpperCase()`。
+
+| 方法 | 说明 |
+| --- | --- |
+| `md5(input)` / `sha1(input)` / `sha256(input)` | 摘要，返回小写 hex（`input` 会 `String()` 化） |
+| `randomBytes(len)` | `len` 字节随机数据的 hex（`1 ≤ len ≤ 1024`） |
+| `aesEncrypt({ mode, data, key, iv?, dataEncoding?, keyEncoding?, ivEncoding?, outputEncoding? })` | AES-128 加密；`mode` ∈ `cbc` / `ecb` / `gcm` |
+| `aesDecrypt({ mode, data, key, iv?, dataEncoding?, keyEncoding?, ivEncoding? })` | AES-128 解密，返回 utf8 明文 |
+| `rsaEncrypt({ data, publicKey, padding?, dataEncoding?, outputEncoding? })` | RSA 加密；`padding` ∈ `pkcs1`（默认）/ `none` |
+
+**编码约定**：`data` / `key` / `iv` 的输入编码默认 `"utf8"`（可选 `"base64"` / `"hex"`）；
+AES 输出默认 `"base64"`（可选 `"hex"`）；`rsaEncrypt` 输出默认 `"hex"`（网易云 `encSecKey` 为 HEX）。
+`key` 必须是 16 字节（aes-128）；`mode:"cbc"` 的 `iv` 必须 16 字节；`mode:"ecb"` 忽略 `iv`。
+
+**GCM 输出布局**：与上游 `multiPlatformMusicApi` 一致 —— 密文串 = `[12B IV] ‖ [密文] ‖ [16B authTag]`。
+`iv` 省略或空串时由宿主生成 12 字节随机 IV 并前置；解密从密文头部切 IV、尾部切 16 字节 tag。
+
+**RSA `padding:"none"`**：复刻上游 `RSA_NO_PADDING` —— 宿主先把 `data` **左补 `0x00` 到 128 字节**
+再加密（网易云 `encSecKey` 的固定 1024-bit 块）；`data` 超过 128 字节返回 `{ error }`。
+补零由宿主完成，**插件不碰二进制**。
+
+```js
+// 示例：QQ ag-1 = AES-128-GCM(IV‖ct‖tag)，再 SHA1 签名
+const enc = host.crypto.aesEncrypt({ mode: "gcm", data: JSON.stringify(payload), key: keyUtf8 });
+if (enc && enc.error) throw new Error(enc.error); // 失败信封，不抛异常
+const sign = host.crypto.sha1("zzc" + enc).toUpperCase();
+```
 
 ***
 

@@ -18,7 +18,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { execFile, spawn } from "child_process";
-import { createHash } from "node:crypto";
 import dgram from "dgram";
 import net from "net";
 import WebSocket from "ws";
@@ -29,6 +28,7 @@ import { songs } from "../db/schema.js";
 import { registerPlugin, getPlugin, getPluginConfig, getEnabledByCapability } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
+import { createPluginCrypto } from "./pluginCrypto.js";
 import { matchPlaylistInBackground } from "../services/plugin/shared.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
 import { cacheRemoteCover, firstPlayableCoverFile } from "../services/playlistCover.js";
@@ -624,9 +624,10 @@ export async function discoverExternalPlugins(
         version: process.env.APP_VERSION || "dev",
         getConfig: () => getPluginConfig(id) ?? {},
         permissions: initialPerms,
-        crypto: {
-          md5: (s: string) => createHash("md5").update(String(s)).digest("hex"),
-        },
+        // host.crypto 原语唯一实现源 = pluginCrypto.ts(md5/sha1/sha256/randomBytes/
+        // aesEncrypt/aesDecrypt/rsaEncrypt)。与主线程沙箱( sandbox.ts 转发)、worker
+        // (sandboxWorker.ts)三处共用同一实现,杜绝「后台任务签名能过、前台不能过」类漂移。
+        crypto: createPluginCrypto(),
         http: pluginHttp,
 
         storage: makeScopedStorage(id),

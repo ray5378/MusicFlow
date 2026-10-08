@@ -15,7 +15,6 @@
 //   worker → 主线程: ready / init-done / invoke-result / host-call
 
 import { parentPort } from "worker_threads";
-import { createHash } from "crypto";
 import { fileURLToPath, pathToFileURL } from "url";
 import { existsSync } from "fs";
 import { dirname, join } from "path";
@@ -29,6 +28,13 @@ const sandboxEntry = existsSync(join(HERE, "sandbox.js"))
   ? join(HERE, "sandbox.js")
   : join(HERE, "sandbox.ts");
 const { SandboxedPlugin } = await import(pathToFileURL(sandboxEntry).href) as typeof import("./sandbox.js");
+
+// pluginCrypto 与 sandbox 同理:worker 以原生 ESM(dev 下 Node 类型剥离)加载本文件,
+// 静态 "./pluginCrypto.js" 不会被重映射到 .ts → 必须运行时解析入口。纯 node:crypto 包装,值导入安全。
+const cryptoEntry = existsSync(join(HERE, "pluginCrypto.js"))
+  ? join(HERE, "pluginCrypto.js")
+  : join(HERE, "pluginCrypto.ts");
+const { createPluginCrypto } = await import(pathToFileURL(cryptoEntry).href) as typeof import("./pluginCrypto.js");
 
 const port = parentPort!;
 let sandbox: InstanceType<typeof SandboxedPlugin> | null = null;
@@ -55,8 +61,9 @@ function makeWorkerEnv(permissions: string[]): SandboxHostEnv {
     getConfig: () => cachedConfig,
     permissions,
     http: (input, init) => hostCall("http", [input, init]),
-    // hostSync 唯一能力(crypto.md5):纯计算,worker 本地同步实现,无需回主线程。
-    crypto: { md5: (s) => createHash("md5").update(String(s)).digest("hex") },
+    // host.crypto:纯同步密码学原语(唯一实现源 = pluginCrypto.ts)。纯计算,
+    // worker 本地同步实现,无需回主线程;与主线程/直连宿主三处共用同一实现。
+    crypto: createPluginCrypto(),
     storage: {
       get: (k) => hostCall("storage.get", [k]),
       set: (k, v) => hostCall("storage.set", [k, v]),

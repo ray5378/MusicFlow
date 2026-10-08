@@ -180,6 +180,31 @@ const CAP_METHODS: Record<string, string[]> = {
 // source 插件额外暴露 test(连线探测)
 const EXTRA_METHODS = new Set(["test"]);
 
+// ---- host.crypto 契约类型(结构必须与 pluginCrypto.ts 的 PluginCrypto 对齐)----
+// sandbox.ts 刻意**不 import** pluginCrypto.ts:本文件会被 worker 以原生 ESM 动态加载,
+// 保持零新依赖;此处只声明转发契约,实现源唯一 = pluginCrypto.ts(discovery / sandboxWorker 注入)。
+/** 原语结果:成功为字符串;失败为 { error }(绝不抛异常,插件侧读返回值判断)。 */
+type CryptoPrimResult = string | { error: string };
+/** AES-128 加/解密入参。gcm 输出布局 [12B IV]‖[ct]‖[16B tag];mode:"ecb" 忽略 iv。 */
+interface CryptoAesOpts {
+  mode: "cbc" | "ecb" | "gcm";
+  data: string;
+  key: string;
+  iv?: string;
+  dataEncoding?: "utf8" | "base64" | "hex";
+  keyEncoding?: "utf8" | "base64" | "hex";
+  ivEncoding?: "utf8" | "base64" | "hex";
+  outputEncoding?: "base64" | "hex";
+}
+/** RSA 加密入参。padding:"none" = 宿主左补 0x00 到 128 字节后 RSA_NO_PADDING。 */
+interface CryptoRsaOpts {
+  data: string;
+  publicKey: string;
+  padding?: "pkcs1" | "none";
+  dataEncoding?: "utf8" | "base64" | "hex";
+  outputEncoding?: "hex" | "base64";
+}
+
 /** 宿主提供给沙箱的环境:副作用全部由宿主实现,沙箱只转发参数/结果。 */
 export interface SandboxHostEnv {
   version: string;
@@ -189,9 +214,22 @@ export interface SandboxHostEnv {
   permissions: string[];
   /** host.http:发起 HTTP 请求,返回 { ok, status, headers, body } 信封。 */
   http(input: string, init?: any): Promise<any>;
-  /** host.crypto:纯同步工具(需 crypto 权限)。MD5 hex(Last.fm api_sig 等签名需要)。 */
+  /**
+   * host.crypto:纯同步密码学原语(需 crypto 权限)。全部为同步函数,成功返回字符串,
+   * 失败返回 { error: string }(绝不抛异常)。实现源唯一 = pluginCrypto.ts:
+   *   - md5/sha1/sha256:摘要,返回小写 hex(Last.fm api_sig、网易云/QQ 签名用)。
+   *   - randomBytes(len):len 字节随机数据的 hex(1..1024)。
+   *   - aesEncrypt / aesDecrypt:AES-128 CBC/ECB/GCM;gcm 布局 [12B IV]‖[ct]‖[16B tag]。
+   *   - rsaEncrypt:padding "none" 时左补 0x00 到 128 字节(RSA_NO_PADDING,网易云 encSecKey)。
+   */
   crypto: {
-    md5(input: string): string;
+    md5(input: string): CryptoPrimResult;
+    sha1(input: string): CryptoPrimResult;
+    sha256(input: string): CryptoPrimResult;
+    randomBytes(len: number): CryptoPrimResult;
+    aesEncrypt(opts: CryptoAesOpts): CryptoPrimResult;
+    aesDecrypt(opts: CryptoAesOpts): CryptoPrimResult;
+    rsaEncrypt(opts: CryptoRsaOpts): CryptoPrimResult;
   };
   /** host.storage:按插件隔离的 KV(与 host.ts PluginStorage 同契约,异步)。 */
   storage: {
@@ -892,11 +930,26 @@ export class SandboxedPlugin {
     srcComplete.dispose();
 
     // host.config(每次调用前刷新)/ host.version
-    // host.crypto(纯同步工具,需 crypto 权限;Last.fm api_sig = MD5(排序拼接 + secret))
+    // host.crypto(纯同步密码学原语,需 crypto 权限;实现源唯一 = pluginCrypto.ts:
+    // 摘要族 + randomBytes + AES(cbc/ecb/gcm) + RSA。hostSync 把失败信封 { error } 原样透传。)
     const cryptoObj = c.newObject();
     const cryptoMd5 = this.hostSync("md5", (s: any) => this.env.crypto.md5(String(s ?? "")), "crypto");
+    const cryptoSha1 = this.hostSync("sha1", (s: any) => this.env.crypto.sha1(String(s ?? "")), "crypto");
+    const cryptoSha256 = this.hostSync("sha256", (s: any) => this.env.crypto.sha256(String(s ?? "")), "crypto");
+    const cryptoRandomBytes = this.hostSync("randomBytes", (n: any) => this.env.crypto.randomBytes(Number(n)), "crypto");
+    // 对象入参由 QuickJS dump 成纯 JS 对象后原样透传;枚举/长度/编码校验与错误信封由实现源负责。
+    const cryptoAesEncrypt = this.hostSync("aesEncrypt", (o: any) => this.env.crypto.aesEncrypt(o), "crypto");
+    const cryptoAesDecrypt = this.hostSync("aesDecrypt", (o: any) => this.env.crypto.aesDecrypt(o), "crypto");
+    const cryptoRsaEncrypt = this.hostSync("rsaEncrypt", (o: any) => this.env.crypto.rsaEncrypt(o), "crypto");
     c.setProp(cryptoObj, "md5", cryptoMd5);
-    cryptoMd5.dispose();
+    c.setProp(cryptoObj, "sha1", cryptoSha1);
+    c.setProp(cryptoObj, "sha256", cryptoSha256);
+    c.setProp(cryptoObj, "randomBytes", cryptoRandomBytes);
+    c.setProp(cryptoObj, "aesEncrypt", cryptoAesEncrypt);
+    c.setProp(cryptoObj, "aesDecrypt", cryptoAesDecrypt);
+    c.setProp(cryptoObj, "rsaEncrypt", cryptoRsaEncrypt);
+    cryptoMd5.dispose(); cryptoSha1.dispose(); cryptoSha256.dispose(); cryptoRandomBytes.dispose();
+    cryptoAesEncrypt.dispose(); cryptoAesDecrypt.dispose(); cryptoRsaEncrypt.dispose();
 
     const hostObj = c.newObject();
     c.setProp(hostObj, "http", httpFn);
