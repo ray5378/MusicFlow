@@ -2,7 +2,7 @@
 //
 // 动机:默认音源(`streamEngine.defaultSource`)把整曲一次解成内存 F32 ——
 // 320 秒 ≈ 122MB,切歌新旧重叠 ×2 ≈ 250MB,超长单曲直接顶爆子进程堆
-// (fork 继承 --max-old-space-size=256)。本模块把解码换成滑动窗口:
+// (fork 未设显式堆上限,由 Node 默认 old-space 上限兜底)。本模块把解码换成滑动窗口:
 //
 //   - 每首歌一个长命 ffmpeg(`-i <源> -ar 48k -ac 2 -f f32le pipe:1`),
 //     后台持续排入窗口;消费(`GroupPump.pushLoop`)按 25ms 切片取数;
