@@ -693,6 +693,7 @@ export class GroupPump {
     // 流式无全长:total 仅整包路径用,窗口路径靠 EOF＋耗尽结束。
     const total = win ? Infinity : Math.ceil(pcm!.length / frameSamples);
     let contentEnded = false;
+    let linkDied = false; // 推帧中断(编码器/连接死亡):与自然结束同口径清组状态
     let firstFrame = true;
     // ---- 时间线锚点(第三次无声事故的修复核心)----
     // `timelineBaseUs` 此前是**死字段**(全仓无赋值点,恒 0),时间戳退化成
@@ -873,7 +874,13 @@ export class GroupPump {
           // ⚠️ 别静默吞:pushFrame 抛错(编码器/连接)时此前完全无日志,表现为
           // 「decode 完成后推流戛然而止、服务端看起来一切正常但设备无声」(2026-09-17 真机)。
           logSafe(this.server, "warn", `sendspin pushFrame 中断 @frame=${i}/${total} song=${this.songId}: ${(e as Error)?.message || e}`);
-          break; // 连接断开等:停止推流(状态由 QueueController 处理)。
+          // 根因修复(2026-10-08「月满西楼」群组永久卡死):旧注释说「状态由
+          // QueueController 处理」,但 QueueController 只能经 poll 看状态 ——
+          // current 残留时 pollCore 恒报 playing,队列层全被假在播骗住,无人处理。
+          // 置 linkDied ⇒ 收尾段与自然结束同口径清 current + finishPlayback
+          // ⇒ poll 报 IDLE ⇒ auto-advance 正常跳歌自愈。
+          linkDied = true;
+          break; // 连接断开等:停止推流,收尾段清组状态。
         }
         // ⚠️⚠️ 本批无产出时**绝大多数情况下必须推进 0**(2026-09-17 实锤)。
         //
@@ -1093,7 +1100,9 @@ export class GroupPump {
         try {
           // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
           // 同时宣告流结束:缺 stream/end + group/update(stopped),客户端永远卡 PLAYING。
-          if (this.endedNaturally) {
+          // linkDied(推帧中断/链路死亡)同样清 current —— 否则 pollCore 恒报
+          // playing(pos 冻结在死亡点),队列层永久假在播(「月满西楼」卡死根因)。
+          if (this.endedNaturally || linkDied) {
             this.group.current = null;
             this.group.finishPlayback();
           }
@@ -1121,6 +1130,18 @@ export class GroupPump {
       // 外抛异常(解码失败/源不可播等)同样不能静默,否则推流停摆无迹可循。
       logSafe(this.server, "warn", `sendspin pushLoop 异常终止 song=${this.songId}: ${(e as Error)?.message || e}`);
       this.running = false;
+      // 根因修复(2026-10-08 240「月满西楼」群组永久卡死):异常死亡旧代码只置
+      // running —— group.current 残留 ⇒ pollCore `playing: !!g.current` 永远 true
+      // ⇒ 主进程 pollState 永远 PLAYING pos=0 uri=- ⇒ tracker/QueueController 被
+      // 假在播状态骗住,既不重投也不切歌。与自然结束分支同口径:清 current +
+      // finishPlayback 宣告结束 ⇒ poll 上报 IDLE ⇒ auto-advance 走既有跳歌自愈
+      // (失败矩阵:显式失败 ⇒ 跳下一首取新流)。releaseAudio 同样必须做,否则
+      // 整包 PCM/流式 ffmpeg 残留(与自然路径 finally 同理)。
+      try {
+        this.group.current = null;
+        this.group.finishPlayback();
+      } catch { /* 最小 stub 组无 finishPlayback 时忽略 */ }
+      this.releaseAudio();
     }
   }
 

@@ -564,11 +564,20 @@ export class QueueController extends EventEmitter {
           return;
         }
         if (state?.playbackState === PlaybackState.PLAYING) {
-          this.ctrls.get(id)?.endOptimistic(playerId);
-          this.ctrls.get(id)?.resetTracker(playerId);
-          // 确认在播:清掉卡死计数(之前若有抖动攒的数作废)。
-          this.stallCounters.delete(id);
-          return;
+          // 假在播防线(2026-10-08 240 真机「月满西楼」群组卡死根因):群组流死亡后
+          // 设备可保持 PLAYING pos=0 mediaUri=空 —— tracker 判 stalled 后复查到这里,
+          // 旧逻辑误判「确在播放」清掉卡死计数 → 每 15s 循环,永不重投永不切歌。
+          // PLAYING 但无 mediaUri 且 pos=0 ⇒ 不是真在播,不清计数,落到下方连续
+          // 卡死计数(第 1 次重投兜 transient,第 2 次放行切歌)。
+          if (!state.mediaUri && (state.position ?? 0) === 0) {
+            log.warn(`[QueueController][stalled] ${playerId}: PLAYING 但无 mediaUri 且 pos=0(假在播,流已死) → 不清计数,走重投/切歌自愈`);
+          } else {
+            this.ctrls.get(id)?.endOptimistic(playerId);
+            this.ctrls.get(id)?.resetTracker(playerId);
+            // 确认在播:清掉卡死计数(之前若有抖动攒的数作废)。
+            this.stallCounters.delete(id);
+            return;
+          }
         }
       } catch (e: any) {
         log.warn("切歌前状态检查失败,继续播放", { playerId, err: e?.message || e });
