@@ -216,6 +216,8 @@ export function readSendspinPluginConfig(): {
   prefillBufferMs: number;
   /** sink 自愈自动远程重启(L2)—— 默认 true(显式 false 才关),理由见 SendspinServerOptions.sinkAutoRestart。 */
   sinkAutoRestart: boolean;
+  /** 解码链路 debug 日志开关(插件配置 debug_log,默认关;开时事件保留 1 天,见 debugLog.ts)。 */
+  debugLog: boolean;
 } {
   const fallback = {
     allowLegacyClients: true,
@@ -225,6 +227,7 @@ export function readSendspinPluginConfig(): {
     streamWindowSeconds: WINDOW_DEFAULT_SEC,
     prefillBufferMs: PREFILL_BUFFER_DEFAULT_MS,
     sinkAutoRestart: true,
+    debugLog: false,
   };
   try {
     const row = sqlite
@@ -240,7 +243,7 @@ export function readSendspinPluginConfig(): {
       preferredCodec: normalizeCodecPreference(cfg?.preferred_codec),
       // 注:ESPHome 6053 的开关/密钥/端口**已从这里移除** —— 它们是每台设备各自的,
       // 存在 sendspin_device_state(clientId → psk/port),见 deviceState.ts。
-      // 解码窗口上限(秒):下拉档位存字符串,归一化吸附到最近合法档;缺省 300(= 旧行为)。
+      // 解码窗口上限(秒):下拉档位存字符串,归一化吸附到最近合法档;缺省 30(用户拍板 2026-10-08)。
       // 歌长 ≤ 本值 → 整曲保留(前后 seek 零成本);> 本值 → 滑动窗口(照样播完)。
       streamWindowSeconds: normalizeWindowSeconds(cfg?.stream_window_seconds),
       // 预填充缓冲(设备侧抗抖动窗口,毫秒)。插件配置页**随时可改**,推流循环
@@ -248,6 +251,8 @@ export function readSendspinPluginConfig(): {
       prefillBufferMs: normalizePrefillBufferMs(cfg?.prefill_buffer_ms),
       // 默认开:**显式 false 才关**(见 SendspinServerOptions.sinkAutoRestart)。
       sinkAutoRestart: cfg?.sink_auto_restart !== false,
+      // 解码调试日志:默认**关**,显式 true 才开(排障用,事件保留 1 天)。
+      debugLog: cfg?.debug_log === true,
     };
   } catch {
     return fallback;

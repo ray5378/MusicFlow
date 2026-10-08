@@ -297,6 +297,8 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       preferredCodec: "pcm",
       streamWindowSeconds: 30,
       prefillBufferMs: 3000,
+      // 解码调试日志(batch46):默认关。
+      debugLog: false,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
     });
@@ -319,6 +321,7 @@ describe("readSendspinPluginConfig / isSendspinEnabled", () => {
       preferredCodec: "flac",
       streamWindowSeconds: 60,
       prefillBufferMs: 500,
+      debugLog: false,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
     });

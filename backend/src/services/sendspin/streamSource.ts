@@ -38,6 +38,7 @@ import {
 } from "../audio/pipeline.js";
 import { isChannelEnabled } from "../audio/pipelineSwitches.js";
 import { StderrTail } from "../audio/stderrTail.js";
+import { recordSendspinDebug } from "./debugLog.js";
 export const BYTES_PER_SAMPLE = 4;
 /** 背压高水位(秒):未消费前沿超此即暂停 stdout,ffmpeg 被管道憋住。
  *  = 插件配置「解码窗口上限」的缺省档(用户拍板 2026-10-08:缺省 30s 最省内存,
@@ -138,6 +139,12 @@ export class PcmWindow {
    *  **最末尾**,超限丢开头保末尾(audio/stderrTail.ts;旧写法"到上限就不再追加"会冻结在流开头)。
    *  close() 不清它(对象 GC 时释放),调用方在 releaseAudio 前取。 */
   private readonly stderrFull = new StderrTail(STDERR_KEEP_BYTES);
+  /** spawn 时刻墙钟 + 起始偏移:debug 日志算 ffmpeg 生命周期用(纯观测,不参与逻辑)。 */
+  private spawnWallMs = 0;
+  private spawnStartSec = 0;
+  /** 已淘汰字节数(滑动窗口模式):debug 日志「开始淘汰」事件用。 */
+  private evictedBytes = 0;
+  private evictLogged = false;
   /** 上次 stdout 读剩的不足一个 float 的尾巴(0-3B),下次拼接,防跨包拆分错位。 */
   private carry: Uint8Array = new Uint8Array(0);
   /** chunks[0][0] 对应的绝对交错样本下标。 */
@@ -345,11 +352,21 @@ export class PcmWindow {
       proc.stdin.end();
     } catch (e: any) {
       this.failed = `ffmpeg 启动失败: ${e?.message || e}`;
+      recordSendspinDebug("ffmpeg.start_failed", this.failed, { startSec: Math.max(0, startSec) });
       this.wakeAll();
       return;
     }
     this.proc = proc;
     this.paused = false;
+    this.spawnWallMs = Date.now();
+    this.spawnStartSec = Math.max(0, startSec);
+    recordSendspinDebug("ffmpeg.spawn", `ffmpeg 解码进程已启动(-ss=${this.spawnStartSec}s)`, {
+      startSec: this.spawnStartSec,
+      source: String(this.source.input || "").slice(0, 160),
+      inputFormat: this.source.inputFormat ?? null,
+      retainAll: this.retainAll,
+      highSec: this.highSec,
+    });
     proc.stderr.on("data", (d: Buffer) => {
       this.stderrTail = Buffer.concat([this.stderrTail, d]).subarray(-300);
       // 每次都留末尾（旧写法有 "length < KEEP 才追加" 的守卫 → 到上限后冻结在流开头）。
@@ -366,16 +383,37 @@ export class PcmWindow {
     proc.on("error", (e: Error) => {
       if (this.proc !== proc) return;
       this.failed = `ffmpeg 进程错误: ${e?.message || e}`;
+      recordSendspinDebug("ffmpeg.process_error", this.failed, {
+        startSec: this.spawnStartSec,
+        liveMs: Date.now() - this.spawnWallMs,
+      });
       this.wakeAll();
     });
     proc.on("close", (code) => {
       if (this.proc !== proc) return; // 已被 seekTo/close 替换,忽略旧进程退出
       this.proc = null;
+      const liveMs = Date.now() - this.spawnWallMs;
+      const decodedSec = Math.round((this.decodedSamples / SAMPLE_RATE) * 10) / 10;
       if (code === 0) {
+        recordSendspinDebug("ffmpeg.eof", "ffmpeg 解码到源结尾(code=0,自然 EOF)", {
+          startSec: this.spawnStartSec, decodedSec, liveMs,
+        });
         this.eofSample = this.decodedSamples;
       } else if (!this.closed) {
         const tail = this.stderrTail.toString().slice(0, 200);
         this.failed = `ffmpeg 异常退出(${code}): ${tail}`;
+        // ★ 核心取证:退出码 + stderr 尾巴(错误原因)+ 已解码时长(判断"播到一半断")
+        recordSendspinDebug("ffmpeg.abnormal_exit", `ffmpeg 异常退出(code=${code})`, {
+          code,
+          startSec: this.spawnStartSec,
+          decodedSec,
+          liveMs,
+          stderrTail: this.stderrTail.toString().slice(0, 600),
+        });
+      } else {
+        recordSendspinDebug("ffmpeg.killed", "ffmpeg 被主动终止(seek 重建/close)", {
+          code, startSec: this.spawnStartSec, decodedSec, liveMs,
+        });
       }
       this.wakeAll();
     });
@@ -398,6 +436,9 @@ export class PcmWindow {
     // 只在数据到达时判定,避免定时轮询。整曲保留模式不背压(允许一直解到 EOF)。
     if (!this.retainAll && !this.paused && this.bufferedAheadBytes() > samplesOfSec(this.highSec) * BYTES_PER_SAMPLE) {
       this.paused = true;
+      recordSendspinDebug("window.backpressure_pause",
+        `解码快于消费,暂停读取(前沿=${(this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE).toFixed(1)}s ≥ 上限${this.highSec}s)`,
+        { bufferedAheadSec: Math.round((this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10, highSec: this.highSec });
       try { this.proc?.stdout.pause(); } catch { /* ignore */ }
     }
     this.wakeAll();
@@ -413,6 +454,9 @@ export class PcmWindow {
     if (this.retainAll) return;
     if (this.paused && this.bufferedAheadBytes() < samplesOfSec(this.lowSec) * BYTES_PER_SAMPLE) {
       this.paused = false;
+      recordSendspinDebug("window.backpressure_resume",
+        `消费追上,恢复读取(前沿=${(this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE).toFixed(1)}s < 低水位${this.lowSec}s)`,
+        { bufferedAheadSec: Math.round((this.bufferedAheadBytes() / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10, lowSec: this.lowSec });
       try { this.proc?.stdout.resume(); } catch { /* ignore */ }
     }
   }
@@ -430,7 +474,14 @@ export class PcmWindow {
       if (this.baseSample + firstSamples > keepFrom) break;
       this.chunks.shift();
       this.chunksBytes -= first.length;
+      this.evictedBytes += first.length;
       this.baseSample += firstSamples;
+    }
+    if (this.evictedBytes > 0 && !this.evictLogged) {
+      this.evictLogged = true;
+      recordSendspinDebug("window.evict_first", "滑动窗口开始淘汰已解码数据(歌长超出窗口上限,属预期;超窗回退将重建解码)", {
+        evictedSec: Math.round((this.evictedBytes / BYTES_PER_SAMPLE / SAMPLE_RATE) * 10) / 10,
+      });
     }
   }
 

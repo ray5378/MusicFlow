@@ -85,6 +85,17 @@ export const sendspinRendererManifest: PluginManifest = {
       help: "流式解码恒开(无开关,旧 stream_source 开关已移除)。本项控制滑动窗口保留多少未消费音频(每个正在播放的组一份,约 0.375MB/秒)。歌长 ≤ 本值的曲目自动进入**整曲保留**:不淘汰、不背压,前后拖动 seek 全程命中窗口(零成本、不重起 ffmpeg);歌长 > 本值的曲目走滑动窗口(边解边播+背压+淘汰),**照样正常播完**,只是回退/前跳超出窗口时会重建解码(约 1 秒空窗)。默认 30 秒(最省内存档)。下一首生效。",
     },
     {
+      key: "debug_log",
+      label: "解码调试日志",
+      type: "switch",
+      default: false,
+      help:
+        "排查播放不稳时打开:记录解码链路全部异常与波动事件 —— ffmpeg 非正常退出(退出码+stderr 错误尾巴+已解码时长+存活时长)、启动失败/进程错误、一次性解码失败、推帧中断、滑动窗口背压暂停/恢复、开始淘汰、seek 重建、自然 EOF、起播/结束,以及全部 sendspin 警告/错误日志。每条含精确时间与原因。\n" +
+        "日志保留 **1 天**:文件 DATA_DIR/logs/sendspin-debug.log(JSONL,一行一条),单文件超 16MB 自动轮转留一份,超 24h 自动清理;内存另存最近 2000 条。\n" +
+        "查看:GET /rest/sendspin-debug-log(需管理员,返回 JSON),或直接读上述文件(docker exec musicflow cat /app/backend/data/logs/sendspin-debug.log)。\n" +
+        "开关改动 ≤5 秒生效,无需重启、不中断当前播放;关闭时零开销。",
+    },
+    {
       key: "prefill_buffer_ms",
       label: "设备缓冲深度(抗卡顿)",
       type: "select",
@@ -161,6 +172,12 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
           },
         },
         // 按 ray 要求:该配置项**统一显示中文**(英文界面下同样用中文文案)。
+        debug_log: {
+          label: "解码调试日志",
+          help:
+            "排查播放不稳时打开:记录解码链路全部异常与波动事件(ffmpeg 非正常退出/启动失败/推帧中断/背压暂停与恢复/淘汰/seek 重建/起播与结束),每条含精确时间与原因。\n" +
+            "日志保留 1 天:文件 DATA_DIR/logs/sendspin-debug.log,超 16MB 轮转、超 24h 自动清理;查看用 GET /rest/sendspin-debug-log(管理员)或直接读文件。开关 ≤5 秒生效,无需重启;关闭时零开销。",
+        },
         prefill_buffer_ms: {
           label: "设备缓冲深度(抗卡顿)",
           help:

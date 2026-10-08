@@ -449,6 +449,14 @@ function paginate<T>(list: T[], offset: number, size: number): T[] {
 // ==================== System ====================
 
 restRoutes.get("/ping", (c) => c.json(ok()));
+
+// Sendspin 解码链路 debug 日志(batch46):排障「播放不稳」的取证出口。
+// 开关在插件页「解码调试日志」;事件保留 1 天(文件 + 内存环形缓冲)。
+restRoutes.get("/sendspin-debug-log", permMiddleware(PERM.SETTINGS_MANAGE), async (c) => {
+  const { getSendspinDebugSnapshot } = await import("../../services/sendspin/debugLog.js");
+  const limit = Number(c.req.query("limit")) || 1000;
+  return c.json(ok(getSendspinDebugSnapshot(Math.min(Math.max(limit, 1), 2000))));
+});
 restRoutes.get("/ping.view", (c) => c.json(ok()));
 restRoutes.get("/getLicense", (c) => c.json(ok({ license: { valid: true } })));
 restRoutes.get("/getOpenSubsonicExtensions", (c) => c.json(ok({

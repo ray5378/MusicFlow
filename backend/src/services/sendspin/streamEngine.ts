@@ -22,6 +22,7 @@ import { PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
+import { recordSendspinDebug, refreshSendspinDebugEnabled } from "./debugLog.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -111,6 +112,7 @@ async function refreshPrefillTarget(now: number): Promise<void> {
   try {
     const { readSendspinPluginConfig } = await import("./index.js");
     prefillCache = { valueMs: readSendspinPluginConfig().prefillBufferMs, at: now };
+    void refreshSendspinDebugEnabled(); // debug 开关跟随插件配置(5s 缓存),推流期间自动生效
   } catch {
     // 读不到(子进程/单测):保留旧值;首次则回落缺省。
     if (!prefillCache) prefillCache = { valueMs: PREFILL_BUFFER_DEFAULT_MS, at: now };
@@ -326,6 +328,8 @@ function yieldToEventLoop(): Promise<void> {
 function logSafe(server: SendspinServer | undefined, level: "info" | "warn" | "error", msg: string): void {
   try {
     server?.log?.(level, msg);
+    // debug 日志开时,全部 sendspin 日志自动入册(文件 + 内存环形缓冲),排障一条时间线。
+    recordSendspinDebug("log", msg, { level });
   } catch { /* 日志失败绝不影响推流 */ }
 }
 
@@ -502,6 +506,10 @@ export class GroupPump {
     // 新曲起播:预填充窗口重新打开(旧曲的 settle 状态不能带过来)。
     this.prefillSettled = false;
     this.prefillFilling = false;
+    // debug 日志开关起播这一拍刷新(fire-and-forget,**不 await** —— play 的起播时序
+    // 有用例钉死(busy/取源次数),多一个宏任务都会破坏;刷新在取音源的数秒窗口内
+    // 必然完成,首个事件(play.start 除外)记录时开关已就绪)。
+    void refreshSendspinDebugEnabled();
     const source = injectedSource ?? defaultSource;
     // ③ 段 per-播放器音色(P4):本组共享流的音色片段,起播算一次(改配置下一首生效)。
     // 注入音源(测试)不读该 opts ⇒ 既有测试零影响。
@@ -537,6 +545,9 @@ export class GroupPump {
     const SOURCE_TIMEOUT_MS = 30_000;
     let srcResult: Awaited<ReturnType<typeof source>>;
     log.debug(`[pump][play] song=${songId} startMs=${startMsForSource} 开始获取音源${NEED_FUSE ? "(seek 重建,30s 熔断)" : ""}${reuseRowId ? ` 复用源行=${reuseRowId}` : ""}`);
+    recordSendspinDebug("play.start", NEED_FUSE ? "起播(seek 重建)" : "起播", {
+      songId, startMs: startMsForSource, reuseRowId: reuseRowId ?? null, seekRebuild: NEED_FUSE,
+    });
     let srcTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const srcPromise = (async () => {
@@ -1090,6 +1101,15 @@ export class GroupPump {
         }
         this.running = false;
         this.endedNaturally = contentEnded;
+        recordSendspinDebug(
+          linkDied ? "play.link_died" : contentEnded ? "play.finished" : "play.stopped",
+          linkDied
+            ? "推帧中断(编码器/连接死亡),组状态已清"
+            : contentEnded
+              ? "播放自然结束(解码 EOF/耗尽)"
+              : "播放被打断(stop/切歌/世代更替)",
+          { songId: this.songId, cursorMs: this.playCursorMs, durationMs: this.durationMs, linkDied },
+        );
         try {
           // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
           // 同时宣告流结束:缺 stream/end + group/update(stopped),客户端永远卡 PLAYING。
@@ -1122,6 +1142,7 @@ export class GroupPump {
     } catch (e) {
       // 外抛异常(解码失败/源不可播等)同样不能静默,否则推流停摆无迹可循。
       logSafe(this.server, "warn", `sendspin pushLoop 异常终止 song=${this.songId}: ${(e as Error)?.message || e}`);
+      recordSendspinDebug("play.aborted", `pushLoop 异常终止: ${(e as Error)?.message || e}`, { songId: this.songId });
       this.running = false;
       // 根因修复(2026-10-08 240「月满西楼」群组永久卡死):异常死亡旧代码只置
       // running —— group.current 残留 ⇒ pollCore `playing: !!g.current` 永远 true

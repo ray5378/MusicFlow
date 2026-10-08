@@ -14,6 +14,7 @@
 
 import { createRequire } from "node:module";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
+import { recordSendspinDebug } from "./debugLog.js";
 import { resolveFfmpeg } from "../transcode.js";
 
 // @discordjs/opus 为 CommonJS,不能用 ESM 具名导入,须经 createRequire 取整。
@@ -775,10 +776,17 @@ function pipeThroughFfmpeg(args: string[], input: Uint8Array): Promise<Float32Ar
     const err: Buffer[] = [];
     p.stdout.on("data", (d: Buffer) => out.push(d));
     p.stderr.on("data", (d: Buffer) => err.push(d));
-    p.on("error", reject);
+    p.on("error", (e) => {
+      recordSendspinDebug("ffmpeg.oneshot_error", `ffmpeg 一次性解码进程错误: ${e?.message || e}`, {
+        args: args.slice(0, 8).join(" ").slice(0, 300),
+      });
+      reject(e);
+    });
     p.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`ffmpeg decode failed (${code}): ${Buffer.concat(err).toString().slice(0, 300)}`));
+        const msg = `ffmpeg decode failed (${code}): ${Buffer.concat(err).toString().slice(0, 300)}`;
+        recordSendspinDebug("ffmpeg.oneshot_failed", msg, { code });
+        reject(new Error(msg));
         return;
       }
       resolve(bytesToF32(Buffer.concat(out)));

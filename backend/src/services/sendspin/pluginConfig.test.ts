@@ -17,6 +17,8 @@ describe("readSendspinPluginConfig", () => {
       streamWindowSeconds: 30,
       // 预填充缓冲(设备侧抗抖动窗口):缺省 3000ms,Web 配置页可随时改档位。
       prefillBufferMs: 3000,
+      // 解码调试日志(batch46):默认**关**,显式 true 才开;开时事件保留 1 天(见 debugLog.ts)。
+      debugLog: false,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
     });
@@ -33,6 +35,7 @@ describe("readSendspinPluginConfig", () => {
       preferredCodec: "pcm",
       streamWindowSeconds: 30,
       prefillBufferMs: 3000,
+      debugLog: false,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
     });
@@ -154,6 +157,24 @@ describe("readSendspinPluginConfig", () => {
     for (const bad of ["abc", null, undefined, Number.NaN, -5, 0]) {
       write({ prefill_buffer_ms: bad });
       expect(readSendspinPluginConfig().prefillBufferMs).toBe(3000);
+    }
+    sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
+  });
+});
+
+describe("readSendspinPluginConfig.debug_log(batch46 解码调试日志)", () => {
+  it("显式 true → debugLog=true;非 true 值一律 false", () => {
+    for (const [raw, want] of [
+      [{ debug_log: true }, true],
+      [{ debug_log: false }, false],
+      [{ debug_log: "1" }, false],
+      [{ debug_log: 1 }, false],
+      [{}, false],
+    ] as const) {
+      sqlite
+        .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
+        .run(JSON.stringify(raw));
+      expect(readSendspinPluginConfig().debugLog).toBe(want);
     }
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
