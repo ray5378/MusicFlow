@@ -278,6 +278,10 @@ interface MemStreamEntry {
   buf: Buffer;
   mime?: string;
   at: number;
+  /** 最近一次被消费(membuf 路由 GET)的时间。undefined = 注册后从未被消费。
+   *  每次新 stream 请求都重新整曲缓冲(条目不复用),消费完的条目是死重,
+   *  由 sweepMemStreams 按空闲阈值主动回收,不必等 TTL。 */
+  lastReadAt?: number;
 }
 
 const memStreams = new Map<string, MemStreamEntry>();
@@ -313,15 +317,20 @@ export function registerMemStream(buf: Buffer, mime?: string): string {
   return token;
 }
 
-/** 取一条内存流(命中即续期)。过期/不存在返回 null。 */
-export function resolveMemStream(token: string): { buf: Buffer; mime?: string } | null {
+/** 取一条内存流(命中即续期)。过期/不存在返回 null。
+ *  `now` 仅供测试注入时间轴(生产不传 = Date.now(),行为不变)。 */
+export function resolveMemStream(
+  token: string,
+  now: number = Date.now(),
+): { buf: Buffer; mime?: string } | null {
   const e = memStreams.get(token);
   if (!e) return null;
-  if (Date.now() - e.at > memCfg().ttlMs) {
+  if (now - e.at > memCfg().ttlMs) {
     memStreams.delete(token);
     return null;
   }
-  e.at = Date.now();
+  e.at = now;
+  e.lastReadAt = now;
   return { buf: e.buf, mime: e.mime };
 }
 
@@ -329,6 +338,48 @@ export function resolveMemStream(token: string): { buf: Buffer; mime?: string } 
 export function resetMemStreamsForTest(): void {
   memStreams.clear();
 }
+
+// ==================== 主动回收(周期清扫) ====================
+// 旧机制只有注册时惰性驱逐(条数/总量/TTL),低流量时段消费完的整曲会驻留到
+// TTL(10min)甚至更久 —— 而 membuf 条目按设计**不复用**(每次新 stream 请求都
+// 重新整曲缓冲),滞留即死重。这里补两层:
+//   1. 消费过的条目(lastReadAt 存在)空闲超过 MEM_STREAM_IDLE_RECYCLE_MS 即回收;
+//   2. 从未消费的条目仍按 TTL 回收(给 ffmpeg 留足起播窗口)。
+// sweepMemStreams 是纯函数(测试直调);模块级定时器每 60s 扫一轮,unref 不阻退出。
+/** 消费后空闲回收阈值。ffmpeg 同 token 的 Range 重连间隔为秒级,120s 绰绰有余。 */
+export const MEM_STREAM_IDLE_RECYCLE_MS = 120_000;
+/** 清扫周期。 */
+export const MEM_STREAM_SWEEP_INTERVAL_MS = 60_000;
+
+export function sweepMemStreams(now: number = Date.now()): {
+  removed: number;
+  remaining: number;
+  totalBytes: number;
+} {
+  const c = memCfg();
+  let removed = 0;
+  for (const [k, e] of memStreams) {
+    const idleAt = Math.max(e.at, e.lastReadAt ?? 0);
+    const limit = e.lastReadAt !== undefined ? Math.min(c.ttlMs, MEM_STREAM_IDLE_RECYCLE_MS) : c.ttlMs;
+    if (now - idleAt > limit) {
+      memStreams.delete(k);
+      removed++;
+    }
+  }
+  let totalBytes = 0;
+  for (const e of memStreams.values()) totalBytes += e.buf.length;
+  if (removed > 0) {
+    log.info(`[membuf] 清扫回收 ${removed} 条,余 ${memStreams.size} 条/${Math.round(totalBytes / MB)}MB`);
+  }
+  return { removed, remaining: memStreams.size, totalBytes };
+}
+
+const memSweepTimer = setInterval(() => {
+  try {
+    sweepMemStreams();
+  } catch { /* 清扫失败不影响主流程,下一轮重试 */ }
+}, MEM_STREAM_SWEEP_INTERVAL_MS);
+memSweepTimer.unref?.();
 
 // ==================== D:取流失败长窗口自动重试(batch44) ====================
 //
