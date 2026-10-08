@@ -10,7 +10,7 @@
 //   HACS 的 validate 动作只认 main 分支(它按默认分支取版本),与本仓库「拒绝 main
 //   版本」直接冲突 ⇒ **永久禁用 HACS 校验**,改由本守卫 + 仓库自带校验覆盖。
 //
-// 三条规则:
+// 四条规则(2026-10-08 增补 R4):
 //   R1 tag 守卫:tag 触发时,tag 名必须是 vX.Y.Z(可带 -rc.N / +build 后缀);
 //      出现 main/master/latest/… 等分支名或非 semver 一律失败。
 //   R2 版本声明:仓库内各版本字段(package.json / pubspec.yaml / CARD_VERSION …)
@@ -27,6 +27,16 @@ import { fileURLToPath } from "url";
 const ROOT = process.cwd();
 // semver:v 前缀可选,三段数字必填,允许 -rc.1 / +build.5 之类后缀。
 const SEMVER = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+// R4(2026-10-08 用户定调):版本号**每段 0-99**,不允许出现 ≥100 的段(如 v5.1.100)。
+// 到 99 仍需在该维度升级时按语义进位:patch 99 → minor+1.0;minor 99 → major+1.0.0。
+const MAX_SEGMENT = 99;
+function segFails(v) {
+  const core = String(v).replace(/^v/i, "").split(/[-+]/)[0];
+  const bad = core.split(".").map(Number)
+    .filter((n) => !(Number.isInteger(n) && n >= 0 && n <= MAX_SEGMENT));
+  return bad.length ? bad : null;
+}
 // 「分支名黑名单」:这些字符串无论带不带 v 前缀都不是版本号。
 const BRANCH_NAMES = new Set([
   "main", "master", "latest", "stable", "dev", "develop", "release",
@@ -53,8 +63,10 @@ if (ref.startsWith("refs/tags/")) {
     fail(`R1 tag 名 "${tag}" 是分支名 —— 拒绝发布。发版必须打数字 tag(vX.Y.Z)。`);
   } else if (!SEMVER.test(tag)) {
     fail(`R1 tag 名 "${tag}" 不是数字版本号 —— 拒绝发布。只认 vX.Y.Z(可带 -rc.N / +build 后缀)。`);
+  } else if (segFails(tag)) {
+    fail(`R1 tag "${tag}" 版本段超出 0-99 上限(${segFails(tag).join(",")}) —— 每段最大 99,到 99 后按语义进位(patch 99→minor+1.0;minor 99→major+1.0.0)。`);
   } else {
-    notes.push(`R1 tag "${tag}" 为合法数字版本号`);
+    notes.push(`R1 tag "${tag}" 为合法数字版本号(段上限 0-99 通过)`);
   }
 } else {
   notes.push(`R1 跳过:当前 ref 不是 tag(${ref || "本地运行"})`);
@@ -82,6 +94,8 @@ for (const src of VERSION_SOURCES) {
     fail(`R2 ${src.file} 版本字段 = "${raw}"(分支名) —— 拒绝发布,必须是数字版本号。`);
   } else if (!/^\d+\.\d+\.\d+/.test(core)) {
     fail(`R2 ${src.file} 版本字段 = "${raw}" 不是数字版本号(应形如 X.Y.Z)。`);
+  } else if (segFails(core)) {
+    fail(`R2 ${src.file} 版本字段 = "${raw}" 版本段超出 0-99 上限(${segFails(core).join(",")}) —— 每段最大 99,到 99 后按语义进位。`);
   } else {
     notes.push(`R2 ${src.file} = ${raw}`);
   }
