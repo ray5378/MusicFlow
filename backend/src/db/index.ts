@@ -83,6 +83,34 @@ export function decryptPassword(enc: string | null | undefined): string | null {
   } catch { return null; }
 }
 
+/**
+ * 一次性数据搬迁(batch49):v4.2.4 的 `player_rate_configs`(只有采样率两列)
+ * 并入 `player_output_configs`(多了位深列)。
+ *
+ * 为什么手写:本仓没有迁移框架 —— 全仓只有 `CREATE TABLE IF NOT EXISTS`,
+ * 加列不会自动落到已有库上。所以改名 + 加列都靠这一步,**幂等**:
+ * 老表在(老库)就搬完删掉;不在(全新库 / 已经搬过)就整个跳过。
+ * `INSERT OR IGNORE`:新表 peer_id 是主键,已存在的行不会被覆盖。
+ * 搬迁失败不能拦住启动 —— 老表里最多是「自动探测到的采样率」,设备重连时
+ * 会重新 hello 写回,丢了也只是晚一轮生效。
+ */
+function migrateLegacyRateConfigs(): void {
+  try {
+    const legacy = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='player_rate_configs'")
+      .get();
+    if (!legacy) return;
+    sqlite.exec(`
+      INSERT OR IGNORE INTO player_output_configs (peer_id, manual_rate, probed_rate, updated_at)
+        SELECT peer_id, manual_rate, probed_rate, updated_at FROM player_rate_configs;
+      DROP TABLE player_rate_configs;
+    `);
+    log.info("[DB] player_rate_configs 已并入 player_output_configs(位深列上线)");
+  } catch (e: any) {
+    log.warn("[DB] player_rate_configs 搬迁跳过: " + (e?.message || e));
+  }
+}
+
 export function initDatabase() {
   // Create tables if they don't exist
   sqlite.exec(`
@@ -570,10 +598,11 @@ export function initDatabase() {
     -- 选的档位(白名单);probed_rate = sendspin 设备 client/hello 自动宣告的采样率
     -- (DLNA 协议不报采样率,恒 0)。0 = 未设置。三来源优先级 手动 > 探测 > 缺省 48000;
     -- 成组时取成员最低值(见 services/playerRate.ts)。子进程与主进程直写(WAL 安全)。
-    CREATE TABLE IF NOT EXISTS player_rate_configs (
+    CREATE TABLE IF NOT EXISTS player_output_configs (
       peer_id TEXT PRIMARY KEY,
       manual_rate INTEGER NOT NULL DEFAULT 0,
       probed_rate INTEGER NOT NULL DEFAULT 0,
+      manual_bits INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT DEFAULT ''
     );
 
@@ -677,6 +706,9 @@ export function initDatabase() {
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_enabled", "true");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
+
+  // batch49:老表(player_rate_configs)→ 新表(player_output_configs)一次性搬迁。
+  migrateLegacyRateConfigs();
 
   // Seed DB rows for every registered plugin (manifest-driven, idempotent).
   // Deferred require-style import: the registry imports `db` from this module,

@@ -1553,7 +1553,7 @@ export class SendspinConnection {
 
   /** 设备在 `client/hello` 里宣告的**最高采样率**(Hz,见 `parseHelloSupportedFormats`)。
    *  0 = 未宣告(旧固件)→ 出流按缺省 48000。用于「设置面板回显」+「出流目标采样率
-   *  裁决」,落 `player_rate_configs.probed_rate`(见 services/playerRate.ts)。 */
+   *  裁决」,落 `player_output_configs.probed_rate`(见 services/playerRate.ts)。 */
   announcedSampleRate = 0;
 
   /** 设备在 `client/hello` 里宣告的 **player 命令能力**(`supported_commands`,
@@ -1961,7 +1961,7 @@ export class SendspinConnection {
   /** 解析 `client/hello` 里的设备**格式能力**(`player@v1_support.supported_formats`)。
    *
    *  与缓冲容量/命令能力同一个 hello 段落、同一套键名兼容规则。取到的
-   *  `max(sample_rate)` 落 `player_rate_configs.probed_rate`(键 `sendspin:<clientId>`),
+   *  `max(sample_rate)` 落 `player_output_configs.probed_rate`(键 `sendspin:<clientId>`),
    *  供设置面板「设备自动上报」回显 + 出流侧目标采样率裁决(batch48 第一步)。
    *  记账失败**只记日志**:探测是增值功能,绝不能因为记不下来就把设备拒之门外。 */
   private parseHelloFormats(payload: any): void {

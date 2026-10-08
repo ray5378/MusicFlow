@@ -181,6 +181,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
 
     "errors.dsp.saveFailed": "音色配置保存失败",
     "errors.rate.invalidRate": "采样率档位不合法(可选 48000/88200/96000/176400/192000)",
+    "errors.rate.invalidBits": "位深档位不合法(可选 16/24)",
 
     "errors.group.notFound": "组不存在",
     "errors.group.notFoundOrNoPerm": "组不存在或无权限",
@@ -366,6 +367,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
 
     "errors.dsp.saveFailed": "Failed to save the tone settings",
     "errors.rate.invalidRate": "Invalid sample rate (allowed: 48000/88200/96000/176400/192000)",
+    "errors.rate.invalidBits": "Invalid bit depth (allowed: 16/24)",
 
     "errors.group.notFound": "Group not found",
     "errors.group.notFoundOrNoPerm": "Group not found or no permission",

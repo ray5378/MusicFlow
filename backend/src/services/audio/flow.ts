@@ -78,6 +78,8 @@ export interface FlowStats {
 export interface FlowOptions {
   /** 输出采样率（会话锚定，缺省 48000）。 */
   sampleRate?: number;
+  /** 输出位深（16/24，缺省 16）。flow 无「源」可跟随，故缺省是具体值不是自动。 */
+  targetBits?: number | null;
   /** 输出声道数（会话锚定，缺省 2）。 */
   channels?: number;
   /** 输出编码（缺省 mp3 320）。 */
@@ -133,6 +135,8 @@ export function flowDecodeArgs(req: FlowDecodeRequest): string[] {
 
 export interface FlowEncodeRequest {
   sampleRate: number;
+  /** 目标位深(16/24)。flow 是连续混合流,没有「源」可跟随 ⇒ 调用方必须给具体值。 */
+  targetBits: number;
   channels: number;
   codec: ChannelCodec;
 }
@@ -151,7 +155,7 @@ export function flowEncodeArgs(req: FlowEncodeRequest): string[] {
       sourceRate: req.sampleRate,
       sourceBits: 32,
       targetRate: req.sampleRate,
-      targetBits: 16,
+      targetBits: req.targetBits,
       hasLoudnorm: false,
     }),
   ];
@@ -236,6 +240,7 @@ function asBuffer(a: Float32Array): Buffer {
  */
 export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}): Promise<FlowSession> {
   const sampleRate = Math.max(8000, Math.round(opts.sampleRate ?? FLOW_DEFAULT_SAMPLE_RATE));
+  const targetBits = opts.targetBits === 24 ? 24 : 16;
   const channels = Math.max(1, Math.round(opts.channels ?? FLOW_DEFAULT_CHANNELS));
   const codec = opts.codec ?? FLOW_DEFAULT_CODEC;
   const crossfade = opts.crossfade === true;
@@ -260,7 +265,7 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
   const cancel = new AbortController();
 
   // 编码进程先起：混合结果随到随写，不设中间缓冲。
-  const enc = spawn(resolveFfmpeg(), flowEncodeArgs({ sampleRate, channels, codec }), { stdio: ["pipe", "pipe", "pipe"] });
+  const enc = spawn(resolveFfmpeg(), flowEncodeArgs({ sampleRate, channels, codec, targetBits }), { stdio: ["pipe", "pipe", "pipe"] });
   let encErr = "";
   enc.stderr.on("data", (d: Buffer) => { encErr += d.toString(); });
   enc.stderr.resume();

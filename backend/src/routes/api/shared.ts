@@ -128,11 +128,14 @@ import { createLogger } from "../../utils/logger.js";
 // batch48 第一步：per-player 目标采样率（见 services/playerRate.ts）。
 // 单独一条 re-export，不动上面那份按字母排序的导出块（加进去只会让 diff 变噪）。
 export {
+  BITS_OPTIONS,
   DEFAULT_TARGET_RATE,
   RATE_OPTIONS,
   getPlayerRateConfig,
   listPlayerRateConfigs,
+  normalizeTargetBits,
   normalizeTargetRate,
+  resolveTargetBits,
   resolveTargetSampleRate,
   setPlayerRate,
 } from "../../services/playerRate.js";

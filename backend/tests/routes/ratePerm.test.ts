@@ -19,7 +19,7 @@ import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { v4 as uuidv4 } from "uuid";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
-import { users, userPermissions, userRendererGrants, playerRateConfigs } from "../../src/db/schema.js";
+import { users, userPermissions, userRendererGrants, playerOutputConfigs } from "../../src/db/schema.js";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes } from "../../src/routes/api/index.js";
 import { generateToken } from "../../src/utils/auth.js";
@@ -75,7 +75,7 @@ beforeEach(() => {
   invalidateAccessCaches();
   db.delete(userPermissions).run();
   db.delete(userRendererGrants).run();
-  db.delete(playerRateConfigs).run();
+  db.delete(playerOutputConfigs).run();
   db.delete(users).run();
 });
 
@@ -97,7 +97,7 @@ describe("采样率端点：非授权设备一律 403", () => {
       body: JSON.stringify({ rate: 96000 }),
     });
     expect(res.status).toBe(403);
-    expect(db.select().from(playerRateConfigs).all()).toEqual([]);
+    expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
   });
 
   it("授权是**按设备**的：授权 dlna:rate-dev-1 不代表能动 dlna:rate-dev-2", async () => {
@@ -122,14 +122,14 @@ describe("采样率端点：读写闭环与归一化", () => {
       body: JSON.stringify({ rate: 96000 }),
     });
     expect(put.status).toBe(200);
-    expect((await put.json()).config).toEqual({ manualRate: 96000, probedRate: null });
+    expect((await put.json()).config).toEqual({ manualRate: 96000, probedRate: null, manualBits: null });
 
     const get = await app.request(ratePath("dlna:rate-dev-1"), { headers });
     expect(get.status).toBe(200);
     const body = await get.json();
     expect(body.options).toEqual([48000, 88200, 96000, 176400, 192000]);
     expect(body.defaultRate).toBe(48000);
-    expect(body.config).toEqual({ manualRate: 96000, probedRate: null });
+    expect(body.config).toEqual({ manualRate: 96000, probedRate: null, manualBits: null });
     expect(body.effectiveRate).toBe(96000);
     // 允许字符串形式（下拉/表单可能给字符串）
     const put2 = await app.request(ratePath("dlna:rate-dev-1"), {
@@ -153,7 +153,7 @@ describe("采样率端点：读写闭环与归一化", () => {
       });
       expect(res.status, `rate=${bad}`).toBe(400);
     }
-    expect(db.select().from(playerRateConfigs).all()).toEqual([]);
+    expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
   });
 
   it("显式 null → 清除手动值但**保留**设备自动宣告值", async () => {
@@ -176,7 +176,7 @@ describe("采样率端点：读写闭环与归一化", () => {
       body: JSON.stringify({ rate: null }),
     });
     const body = await cleared.json();
-    expect(body.config).toEqual({ manualRate: null, probedRate: 96000 });
+    expect(body.config).toEqual({ manualRate: null, probedRate: 96000, manualBits: null });
     expect(body.effectiveRate).toBe(96000);
   });
 
@@ -234,5 +234,95 @@ describe("采样率全量端点：按可见性过滤", () => {
     const asAdmin = await (await app.request(rateAll, { headers: adminAuth.headers })).json();
     expect(Object.keys(asAdmin.configs).sort()).toEqual(["dlna:mine", "dlna:not-mine"]);
     expect(asAdmin.defaultRate).toBe(48000);
+  });
+});
+
+describe("位深端点（与采样率同路由）：读写闭环 + 键独立", () => {
+  it("PUT bits=16 落库并回显 effectiveBits；GET 读回同一份 + bitsOptions", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    grantRendererUse(u);
+    grantDevice(u, "dlna:rate-dev-1");
+    const { headers } = await authed(u, false);
+
+    const put = await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ bits: 16 }),
+    });
+    expect(put.status).toBe(200);
+    const pj = await put.json();
+    expect(pj.config.manualBits).toBe(16);
+    expect(pj.effectiveBits).toBe(16);
+
+    const get = await app.request(ratePath("dlna:rate-dev-1"), { headers });
+    expect(get.status).toBe(200);
+    const body = await get.json();
+    expect(body.bitsOptions).toEqual([16, 24]);
+    expect(body.config.manualBits).toBe(16);
+    expect(body.effectiveBits).toBe(16);
+  });
+
+  it("非法位深 → 400 且**不落库**（不静默当成「清除」）", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    grantRendererUse(u);
+    grantDevice(u, "dlna:rate-dev-1");
+    const { headers } = await authed(u, false);
+    for (const bad of [8, 20, 32, 0, -1, "abc"]) {
+      const res = await app.request(ratePath("dlna:rate-dev-1"), {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ bits: bad }),
+      });
+      expect(res.status, `bits=${bad}`).toBe(400);
+    }
+    expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
+  });
+
+  it("两个键各自独立：先设采样率、再设位深，两次都不互相冲掉", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    grantRendererUse(u);
+    grantDevice(u, "dlna:rate-dev-1");
+    const { headers } = await authed(u, false);
+
+    await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ rate: 96000 }),
+    });
+    const put2 = await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ bits: 24 }),
+    });
+    const cfg = (await put2.json()).config;
+    expect(cfg).toEqual({ manualRate: 96000, probedRate: null, manualBits: 24 });
+  });
+
+  it("清位深（显式 null）不影响采样率；清采样率不影响位深", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    grantRendererUse(u);
+    grantDevice(u, "dlna:rate-dev-1");
+    const { headers } = await authed(u, false);
+
+    await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ rate: 88200, bits: 16 }),
+    });
+    const r1 = await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ bits: null }),
+    });
+    expect((await r1.json()).config).toEqual({ manualRate: 88200, probedRate: null, manualBits: null });
+
+    const r2 = await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ rate: null }),
+    });
+    // 两个都空 → 行删掉，回全缺省
+    expect((await r2.json()).config).toEqual({ manualRate: null, probedRate: null, manualBits: null });
+    expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
   });
 });

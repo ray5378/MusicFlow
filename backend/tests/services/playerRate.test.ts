@@ -15,7 +15,7 @@
 // 每个 `it` 自带前置状态（清表 + 清组）——本仓开了 `sequence.shuffle`，不依赖执行顺序。
 import { describe, it, expect, beforeEach } from "vitest";
 import { db } from "../../src/db/index.js";
-import { playerGroups, playerRateConfigs } from "../../src/db/schema.js";
+import { playerGroups, playerOutputConfigs } from "../../src/db/schema.js";
 import { getGroupManager } from "../../src/services/group/index.js";
 import {
   DEFAULT_TARGET_RATE,
@@ -45,7 +45,7 @@ function seedGroup(id: string, members: string[]): void {
 }
 
 beforeEach(() => {
-  db.delete(playerRateConfigs).run();
+  db.delete(playerOutputConfigs).run();
   db.delete(playerGroups).run();
   getGroupManager().loadFromDb();
 });
@@ -80,23 +80,23 @@ describe("裁决优先级：手动 > 探测 > 缺省 48000", () => {
     expect(DEFAULT_TARGET_RATE).toBe(48000);
 
     expect(recordProbedRate(A, 96000)).toBe(true);
-    expect(getPlayerRateConfig(A)).toEqual({ manualRate: null, probedRate: 96000 });
+    expect(getPlayerRateConfig(A)).toEqual({ manualRate: null, probedRate: 96000, manualBits: null });
     expect(resolveDeviceRate(A)).toBe(96000);
 
     setPlayerRate(A, 192000);
-    expect(getPlayerRateConfig(A)).toEqual({ manualRate: 192000, probedRate: 96000 });
+    expect(getPlayerRateConfig(A)).toEqual({ manualRate: 192000, probedRate: 96000, manualBits: null });
     expect(resolveDeviceRate(A)).toBe(192000); // 手动压过探测
 
     setPlayerRate(A, { rate: null }); // 清除手动 → 回落到探测值（**不清探测**）
-    expect(getPlayerRateConfig(A)).toEqual({ manualRate: null, probedRate: 96000 });
+    expect(getPlayerRateConfig(A)).toEqual({ manualRate: null, probedRate: 96000, manualBits: null });
     expect(resolveDeviceRate(A)).toBe(96000);
   });
 
   it("只有手动值时清空即删行（库里不留「等于没配置」的空行）", () => {
     setPlayerRate(A, 192000);
-    expect(db.select().from(playerRateConfigs).all()).toHaveLength(1);
-    expect(setPlayerRate(A, null)).toEqual({ manualRate: null, probedRate: null });
-    expect(db.select().from(playerRateConfigs).all()).toEqual([]);
+    expect(db.select().from(playerOutputConfigs).all()).toHaveLength(1);
+    expect(setPlayerRate(A, null)).toEqual({ manualRate: null, probedRate: null, manualBits: null });
+    expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
     expect(resolveDeviceRate(A)).toBe(DEFAULT_TARGET_RATE);
   });
 
@@ -104,7 +104,7 @@ describe("裁决优先级：手动 > 探测 > 缺省 48000", () => {
     expect(recordProbedRate(B, 96000)).toBe(true);
     expect(recordProbedRate(B, 96000)).toBe(false);
     expect(recordProbedRate(B, 48000)).toBe(true);
-    expect(db.select().from(playerRateConfigs).all()).toHaveLength(1);
+    expect(db.select().from(playerOutputConfigs).all()).toHaveLength(1);
     expect(getPlayerRateConfig(B).probedRate).toBe(48000);
   });
 
@@ -121,16 +121,16 @@ describe("裁决优先级：手动 > 探测 > 缺省 48000", () => {
     expect(resolveDeviceRate("dlna:never-written")).toBe(DEFAULT_TARGET_RATE);
     expect(resolveTargetSampleRate("")).toBe(DEFAULT_TARGET_RATE);
     expect(resolveTargetSampleRate(undefined)).toBe(DEFAULT_TARGET_RATE);
-    expect(getPlayerRateConfig("")).toEqual({ manualRate: null, probedRate: null });
-    expect(setPlayerRate("", 96000)).toEqual({ manualRate: null, probedRate: null });
+    expect(getPlayerRateConfig("")).toEqual({ manualRate: null, probedRate: null, manualBits: null });
+    expect(setPlayerRate("", 96000)).toEqual({ manualRate: null, probedRate: null, manualBits: null });
   });
 
   it("全量列表只回非空配置", () => {
     setPlayerRate(A, 96000);
     recordProbedRate(B, 48000);
     expect(listPlayerRateConfigs()).toEqual({
-      [A]: { manualRate: 96000, probedRate: null },
-      [B]: { manualRate: null, probedRate: 48000 },
+      [A]: { manualRate: 96000, probedRate: null, manualBits: null },
+      [B]: { manualRate: null, probedRate: 48000, manualBits: null },
     });
     expect(listPlayerRateConfigs()[C]).toBeUndefined();
   });

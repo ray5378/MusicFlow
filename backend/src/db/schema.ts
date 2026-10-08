@@ -448,17 +448,23 @@ export const playerDspConfigs = sqliteTable("player_dsp_configs", {
   updatedAt: text("updated_at").default(""),
 });
 
-// player_rate_configs:每台播放器(peerId)一条「目标采样率」配置(batch48 第一步)。
-// **按设备全局**——采样率是设备硬件能力,不跟账号走(与 player_dsp_configs /
-// sendspin_device_state 同理)。三来源优先级 手动 > 探测 > 缺省 48000:
+// player_output_configs:每台播放器(peerId)一条「输出格式」配置(batch48 采样率 +
+// batch49 位深)。**按设备全局**——采样率/位深是设备硬件能力,不跟账号走(与
+// player_dsp_configs / sendspin_device_state 同理)。
+// 采样率三来源优先级 手动 > 探测 > 缺省 48000:
 //   manual_rate:设置面板选的档位(白名单,见 services/playerRate.ts 的 RATE_OPTIONS);
 //   probed_rate:sendspin 设备 client/hello 里 player@v1_support.supported_formats
 //               逐条上报的 sample_rate 取最大值(DLNA 协议不报,恒为 0);
 //   0 = 未设置。设备每次重连都会 hello,值不变时**不写**(避免写放大)。
-export const playerRateConfigs = sqliteTable("player_rate_configs", {
+// 位深只有手动一档(0 = 自动 = **跟随源位深**,没有设备上报来源:DLNA 协议不报,
+// sendspin 那个 bit_depth 说的是它编码给上位机的位深,与出流位深无关);
+//   manual_bits:16 / 24。
+// 表名 batch49 由 player_rate_configs 改名而来(见 db/index.ts 的 migrateLegacyRateConfigs)。
+export const playerOutputConfigs = sqliteTable("player_output_configs", {
   peerId: text("peer_id").primaryKey(),
   manualRate: integer("manual_rate").notNull().default(0),
   probedRate: integer("probed_rate").notNull().default(0),
+  manualBits: integer("manual_bits").notNull().default(0),
   updatedAt: text("updated_at").default(""),
 });
 

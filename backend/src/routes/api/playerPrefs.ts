@@ -1,6 +1,7 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（playerPrefs 域，7 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import {
+  BITS_OPTIONS,
   BusinessErrorCode,
   DEFAULT_TARGET_RATE,
   PERM,
@@ -16,8 +17,10 @@ import {
   isPeerHidden,
   listPlayerDspConfigs,
   listPlayerRateConfigs,
+  normalizeTargetBits,
   normalizeTargetRate,
   permMiddleware,
+  resolveTargetBits,
   resolveTargetSampleRate,
   setPeerHidden,
   setPeerNameOverride,
@@ -122,7 +125,7 @@ app.put("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), async
   }
 });
 
-// ===== per-player 目标采样率（batch48 第一步，与 per-player 音色同层）=====
+// ===== per-player 输出格式：目标采样率 + 位深（batch48 采样率 / batch49 位深）=====
 // 采样率与音色同为**设备属性**（设备硬件能力，不跟账号走），故同样按 `peerId` 全设备级
 // 存储、同一套 `canControlPeer` 权限口径（非 admin：自己的本机播放器 + 被授权的设备/组）。
 // 三来源优先级：**手动 > 设备 hello 自动宣告 > 缺省 48000**（见 services/playerRate.ts）。
@@ -131,6 +134,10 @@ app.put("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), async
 // 生效时机：**下一次起播**（出流侧起流时一次算定 af 链，与 DSP 同一 pin 语义）。
 // 成组的成员设备取**组内最低值**（组内必须同率，否则同步/连续流会变速），
 // 故回显里同时给"最终生效值"，前端不必自己算组。
+//
+// batch49 位深：与采样率**同一条路由、同一张表**（都是「输出格式」= 设备属性）。
+// 位深只有手动一档，`null` = 自动 = **跟随源位深**（16 源出 16 / 24 源出 24）；
+// 没有设备上报来源，理由见 services/playerRate.ts 文件头。
 // GET:一次返回全部配置 + 可选档位 + 缺省值（面板一次渲染完，省 N 次请求）。
 
 app.get("/v1/player-prefs/rate", permMiddleware(PERM.RENDERER_USE), (c) => {
@@ -142,7 +149,12 @@ app.get("/v1/player-prefs/rate", permMiddleware(PERM.RENDERER_USE), (c) => {
     : Object.fromEntries(
         Object.entries(all).filter(([peerId]) => canControlPeer(user?.id ?? "", false, peerId)),
       );
-  return c.json({ options: RATE_OPTIONS, defaultRate: DEFAULT_TARGET_RATE, configs });
+  return c.json({
+    options: RATE_OPTIONS,
+    defaultRate: DEFAULT_TARGET_RATE,
+    bitsOptions: BITS_OPTIONS,
+    configs,
+  });
 });
 // GET:单台设备（含 effectiveRate —— 成组时是组内最低值，前端直接回显它）。
 // ⚠️ 与 DSP 同一纪律：**DB 键用原始参数、权限判定用解析后的 id**。
@@ -158,11 +170,15 @@ app.get("/v1/player-prefs/rate/:peerId", permMiddleware(PERM.RENDERER_USE), (c) 
     peerId: raw,
     options: RATE_OPTIONS,
     defaultRate: DEFAULT_TARGET_RATE,
+    bitsOptions: BITS_OPTIONS,
     config: getPlayerRateConfig(raw),
     effectiveRate: resolveTargetSampleRate(raw),
+    /** null = 自动（跟随源位深）。 */
+    effectiveBits: resolveTargetBits(raw),
   });
 });
-// PUT:设置/清除手动档位。Body: { rate: number|null }。
+// PUT:设置/清除手动档位。Body: { rate?: number|null, bits?: 16|24|null }。
+// 两个键**各自独立**：缺席 = 不动（只改采样率不会把位深冲掉），显式 null = 清除。
 // 归一化后为 null（清除）时**只清手动值、保留设备自动宣告值**；
 // 返回归一化后的实际生效值，前端表单据此纠正显示（与 DSP 的返回值语义一致）。
 
@@ -181,9 +197,19 @@ app.put("/v1/player-prefs/rate/:peerId", permMiddleware(PERM.RENDERER_USE), asyn
   if (rawRate !== null && rawRate !== undefined && rawRate !== "" && normalizeTargetRate(rawRate) === null) {
     return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.rate.invalidRate"), 400);
   }
+  const rawBits = body?.bits;
+  if (rawBits !== null && rawBits !== undefined && rawBits !== "" && normalizeTargetBits(rawBits) === null) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.rate.invalidBits"), 400);
+  }
   try {
     const config = setPlayerRate(raw, body);
-    return c.json({ ok: true, peerId: raw, config, effectiveRate: resolveTargetSampleRate(raw) });
+    return c.json({
+      ok: true,
+      peerId: raw,
+      config,
+      effectiveRate: resolveTargetSampleRate(raw),
+      effectiveBits: resolveTargetBits(raw),
+    });
   } catch {
     return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.dsp.saveFailed"), 500);
   }

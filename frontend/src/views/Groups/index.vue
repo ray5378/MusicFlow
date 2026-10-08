@@ -66,6 +66,12 @@
             <div class="device-row-meta">{{ dev.manufacturer || dev.model || t('groups.dlnaDeviceMeta') }}</div>
           </div>
           <div class="device-row-actions">
+            <!-- 音频输出（采样率 + 位深）。DLNA 协议不报这两项能力 ⇒ 只能手动 + 缺省。 -->
+            <el-button
+              v-if="canUse"
+              size="small"
+              @click="openOutputConfig([`dlna:${dev.id}`], deviceDisplayName(dev, `dlna:${dev.id}`))"
+            ><MfIcon name="SlidersHorizontal" />{{ t('groups.outputConfig') }}</el-button>
             <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
               <el-switch
                 :model-value="isHidden(`dlna:${dev.id}`)"
@@ -248,6 +254,12 @@
             </div>
           </div>
           <div class="device-row-actions">
+            <!-- 音频输出（采样率 + 位深）。Sendspin 会自报采样率（自动档通常已准），位深仍手动。 -->
+            <el-button
+              v-if="canUse && dev.clientId"
+              size="small"
+              @click="openOutputConfig([`sendspin:${dev.clientId}`], deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`))"
+            ><MfIcon name="SlidersHorizontal" />{{ t('groups.outputConfig') }}</el-button>
             <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
               <el-switch
                 :model-value="isHidden(`sendspin:${dev.clientId}`)"
@@ -432,6 +444,13 @@
           <span v-else class="member-empty">{{ t('groups.noMembers') }}</span>
         </div>
         <div class="group-actions">
+          <!-- 音频输出（整组一键设置：写给组内每一台设备，保证组内同格式）。 -->
+          <el-button
+            v-if="canUse"
+            size="small"
+            :disabled="groupMemberPeerIds(g).length === 0"
+            @click="openOutputConfig(groupMemberPeerIds(g), g.name)"
+          ><MfIcon name="SlidersHorizontal" />{{ t('groups.outputConfig') }}</el-button>
           <div class="device-hide-toggle" :title="t('groups.hideToggleGroupTitle')">
             <el-switch
               :model-value="isHidden(`group:${g.id}`)"
@@ -460,6 +479,9 @@
         <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
       </el-empty>
     </div>
+
+    <!-- 音频输出（采样率 + 位深）：整页共用一个弹窗；群组走「整组一键设置」。 -->
+    <OutputConfigDialog v-model="showOutput" :peer-ids="outputPeerIds" :title="outputTitle" />
 
     <!-- Create / edit group dialog (name + full member set) -->
     <el-dialog
@@ -665,6 +687,7 @@ import { PERM } from "@/utils/perms";
 import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
 import SendspinPairing from "@/views/Settings/SendspinPairing.vue";
+import OutputConfigDialog from "@/components/OutputConfigDialog.vue";
 import { useCopy } from "@/composables/useCopy";
 import { apiErrorText } from "@/utils/apiError";
 
@@ -854,6 +877,28 @@ async function loadGroups(): Promise<void> {
     groups.value = res.data?.groups || [];
   } catch { groups.value = []; }
   finally { loading.value = false; }
+}
+
+// ---- 音频输出（采样率 + 位深，batch49）----
+// 整页**共用一个弹窗**：点哪一行就把那一行的 peerId 列表塞进去（群组卡片塞全组成员）。
+// 采样率 + 位深同在一个弹窗里手动配，与「音频」页「音色」卡片里的采样率下拉同源
+// （同一后端表 / 同一套 /v1/player-prefs/rate 路由）。语义见 services/playerRate.ts。
+const showOutput = ref(false);
+const outputPeerIds = ref<string[]>([]);
+const outputTitle = ref("");
+
+/** 打开「音频输出」弹窗。设备行传 1 个 peerId；群组卡片传全组成员（整组一键设置）。 */
+function openOutputConfig(peerIds: string[], name: string): void {
+  const ids = (peerIds || []).filter((x) => !!x);
+  if (ids.length === 0) return; // 空组无处可写，直接不打开（按钮侧也已置灰）
+  outputPeerIds.value = ids;
+  outputTitle.value = name ? `${name} · ${t("groups.outputConfig")}` : t("groups.outputConfig");
+  showOutput.value = true;
+}
+
+/** 群组成员 → peerId 列表（`sendspin:<id>` / `dlna:<id>` / 历史裸 id 视为 DLNA）。 */
+function groupMemberPeerIds(g: any): string[] {
+  return (g?.members || []).map((m: any) => memberPeerId(m)).filter((x: string) => !!x);
 }
 
 async function loadDlnaDevices(): Promise<void> {
@@ -1669,7 +1714,7 @@ onBeforeUnmount(() => { stopSendspinPolling(); });
     }
     .device-row-meta { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 2px; }
   }
-  .device-row-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .device-row-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 }
 .device-hide-toggle { display: inline-flex; align-items: center; }
 .group-actions .device-hide-toggle { margin-right: 2px; }
@@ -1708,7 +1753,7 @@ onBeforeUnmount(() => { stopSendspinPolling(); });
       .member-offline { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
     }
   }
-  .group-actions { display: flex; gap: 8px; }
+  .group-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 }
 @media (max-width: 768px) {
   .groups-page { padding: 20px 16px; }

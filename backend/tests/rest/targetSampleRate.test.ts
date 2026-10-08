@@ -15,7 +15,7 @@
 //   ⑤ 非法档位不生效（回落缺省，命令里绝不出现非法值）。
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { db } from "../../src/db/index.js";
-import { playerDspConfigs, playerGroups, playerRateConfigs } from "../../src/db/schema.js";
+import { playerDspConfigs, playerGroups, playerOutputConfigs } from "../../src/db/schema.js";
 import { resolveRequestAf } from "../../src/routes/rest/index.js";
 import { playerDspFilters, setPlayerDspConfig } from "../../src/services/playerDsp.js";
 import { setPlayerRate } from "../../src/services/playerRate.js";
@@ -42,7 +42,7 @@ function seedGroup(id: string, members: string[]): void {
 }
 
 beforeEach(() => {
-  db.delete(playerRateConfigs).run();
+  db.delete(playerOutputConfigs).run();
   db.delete(playerDspConfigs).run();
   db.delete(playerGroups).run();
   getGroupManager().loadFromDb();
@@ -80,7 +80,7 @@ describe("目标采样率 → resolveRequestAf（HTTP/DLNA 转码链）", () => 
 
   it("非法档位被拒（不落库）→ 仍是缺省 48000，命令里绝不出现非法值", async () => {
     setPlayerRate(PEER, 12345);
-    expect(db.select().from(playerRateConfigs).all()).toEqual([]);
+    expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
     expect(osrOf(await resolveRequestAf(UNMEASURED, PEER))).toBe(48000);
   });
 

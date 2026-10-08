@@ -65,6 +65,14 @@
     }
   },
   "settings": {
+    "bits": {
+      "title": "Output bit depth",
+      "desc": "Auto = follow the source depth (a 16-bit source stays 16-bit, 24-bit stays 24-bit). Only meaningful for lossless output (FLAC / LPCM); lossy codecs (mp3 / aac / opus) have no bit depth. When reducing the depth, triangular-highpass dither is applied instead of plain truncation.",
+      "auto": "Auto (follow source)",
+      "autoState": "follows source",
+      "state": "Effective now",
+      "groupTip": "Applies to the whole group: saving writes to every member device so all of them use the same format."
+    },
     "title": "System Settings",
     "appearance": "Appearance",
     "theme": {
@@ -909,6 +917,8 @@
     "noEnc": "no encryption",
     "noAirplayDevices": "No AirPlay devices found. Make sure a device has AirPlay enabled and is on the same LAN; use Scan in the top right to re-query mDNS right away.",
     "groupsTitle": "Player Groups",
+    "outputConfig": "Audio output",
+    "outputSave": "Save",
     "tip1": "Add several DLNA devices to a group; the group holds its own queue. When playing, the backend concurrently delivers the same track to all online members (like a Music Assistant Sync Group, without drift correction).",
     "tip2": "A device can join multiple groups (e.g. \"Living Room Group\" + \"All Devices Group\"); a device can render only one stream at a time, and the last command wins when several groups play at once.",
     "tip3": "Once created, a group can be selected and controlled like a single device in the player switcher above.",

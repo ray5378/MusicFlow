@@ -1536,7 +1536,7 @@ async function serveTranscodedSong(
  * 导出仅为 P2-6 契约测试能直接验证「开关关闭 = 空链」这条 D9 语义。
  */
 export async function resolveRequestAf(
-  song: { id?: string } | null,
+  song: { id?: string; path?: string | null; type?: string | null } | null,
   peerId?: string,
   channel: PipelineChannel | null = "http",
 ): Promise<string[]> {
@@ -1565,9 +1565,25 @@ export async function resolveRequestAf(
   // 才是一次协商、全程稳定。源率低于目标率时的那点升采样代价远小于变速的风险。
   const lnIdx = af.findIndex((f) => f.includes("loudnorm"));
   if (lnIdx >= 0) {
-    const { resolveTargetSampleRate } = await import("../../services/playerRate.js");
+    const { resolveTargetSampleRate, resolveTargetBits } = await import("../../services/playerRate.js");
     const targetRate = resolveTargetSampleRate(peerId);
-    af.splice(lnIdx + 1, 0, `aresample=resampler=swr:osr=${targetRate}`);
+    // 位深(batch49):目标档 null = 自动 = **跟随源位深**。为什么必须显式给 osf:
+    // loudnorm 走浮点 ⇒ 不给 osf 时编码器恒吃 f32、FLAC 恒落 24bit(230 实测,
+    // 16bit 源也出 s32(24 bit))。给了 osf 才能「16 源出 16、24 源出 24」,
+    // 230 同链实测 osf=s16:dither_method=triangular_hp → 出参 s16 且体积减半。
+    // 降位深必须带 dither(triangular_hp)—— f32→s16 直接截断会引入相关失真。
+    // 探不到源位深(远端源 / 解析失败 / 有损格式)一律不干预 ⇒ 回落缺省行为。
+    const manualBits = resolveTargetBits(peerId);
+    let autoBits: number | null = null;
+    if (manualBits === null) {
+      const { probeSourceBits } = await import("../../services/source/audioInfo.js");
+      autoBits = await probeSourceBits(song);
+    }
+    const bits = manualBits ?? autoBits;
+    let opts = `resampler=swr:osr=${targetRate}`;
+    if (bits === 16) opts += ":osf=s16:dither_method=triangular_hp";
+    else if (bits === 24) opts += ":osf=s32";
+    af.splice(lnIdx + 1, 0, `aresample=${opts}`);
   }
   return af;
 }
@@ -1886,13 +1902,18 @@ async function serveFlowQueue(
   // = 爆音/失步），所以解码段 `-ar`（这里的 sampleRate）与每曲 af 链的 DSP 锚定率
   // （`resolveFlowAf` → `playerDspFilters(..., {flow:true})` → `resolveTargetSampleRate`）
   // 必须取**同一个键**算出的同一个值。
-  const { resolveTargetSampleRate } = await import("../../services/playerRate.js");
+  const { resolveTargetSampleRate, resolveTargetBits } = await import("../../services/playerRate.js");
   const flowRateKey = opts.dspPeerId || (opts.deviceId ? `dlna:${opts.deviceId}` : "");
   const flowSampleRate = resolveTargetSampleRate(flowRateKey);
+  // batch49 位深:flow 是**多曲混合**的连续流,没有单一「源」可跟随 ⇒ 自动档
+  // 落 16bit(与 batch49 之前的 flow 行为一致,`flowEncodeArgs` 原先就写死 16);
+  // 只有显式设了 24 才升到 24。
+  const flowTargetBits = resolveTargetBits(flowRateKey) === 24 ? 24 : 16;
   const { startFlowSession } = await import("../../services/audio/flow.js");
   const session = await startFlowSession(items, {
     codec: opts.codec,
     sampleRate: flowSampleRate,
+    targetBits: flowTargetBits,
     crossfade: true,
     fade: opts.fade,
     onItemStart: (i, item) => {
