@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.3.0] - 2026-10-09
+
+### Feat
+
+- **沙箱插件**：新增 `host.crypto` 密码学原语共 10 个（md5 / sha1 / sha256 / randomBytes / aesEncrypt / aesDecrypt / rsaEncrypt / base64Encode / base64Decode / utf8Decode），全字符串出入参、失败返 `{error}` 绝不抛，双通道（直连宿主 / 后台 worker）行为一致
+- **沙箱插件**：新增零依赖二维码编码器（byte / UTF-8、ECC L/M/Q/H、v1-10 自适应、RS+块交织、BCH 格式信息、8 掩码+惩罚评分、SVG 输出），58 用例分层对拍 segno
+- **沙箱插件**：新增通用「扫码动作」能力：`configSchema` 字段 `type: "action"` + 后端 `POST /v1/plugins/:id/action` 端点（method 白名单 + capability 门禁）+ 前端扫码弹窗，url/text 自动归一化为 SVG data URL（ecc M、border 4）
+- **沙箱插件**：新增能力 `qrLogin`（`startBind` / `pollBind` / `cancelBind`），经 `CAP_METHODS` 白名单登记
+- 新增前端静态守卫 `check-frontend-no-qr.mjs`（禁止前端出现二维码编码逻辑，只认非注释行）
+
+### Fix
+
+- **沙箱插件**：修复 atob 对非 3 倍数字节长度输入末 1~2 字节恒为 0xFF 的缺陷（重写为按位累加器实现，41 例对拍 Buffer 零误差）
+
 ## [4.2.5] - 2026-10-08
 
 ### Feat
