@@ -1554,12 +1554,21 @@ export async function resolveRequestAf(
   // flac/mp3/aac 编码器又都接受 192k → 图协商不会自动降采样 → 高采样率流直喂设备,
   // 部分 renderer(gmediarender 实锤)变速变调播放 + 媒体钟错乱(240 GGMM 案:位置
   // 0.5x 前进/overrun advance/声音异常,重播有测量走静态 volume 即正常)。
-  // 有 DSP 配置时 playerDsp 链首自带 aresample=48000 不踩坑;这里补齐无 DSP 的情形,
-  // 锚定 48k(与 DSP_FILTER_RATE 同源),swr 必须显式声明(链中有 loudnorm,
-  // ffmpeg ticket 11323,与 ⑥ 段 outputFilters 同口径)。
+  // v4.2.3 补了这条回落但**写死 48k**,等于把真支持 96K/192K 的设备一并降级。
+  // batch48 起改读**该播放器的目标采样率**(手动设置 > 设备 hello 自动宣告 > 缺省 48000;
+  // 成组取成员最低值,见 services/playerRate.ts)—— 缺省值与 v4.2.3 逐字节一致,
+  // 存量设备行为不变。
+  // swr 必须显式声明(链中有 loudnorm,ffmpeg ticket 11323,与 ⑥ 段 outputFilters 同口径);
   // 位置:紧随 loudnorm 之后(与 DSP 链首 aresample 同位),限制器仍在链尾(契约锁 af[last])。
+  // ⚠️ 目标率恒为设备的**原生率**(而不是 min(源率, 设备率)):DLNA/flow 是长连接流,
+  // 同一个流里逐曲变速会让设备重新锁相(听感是曲间爆音/顿挫),统一锚到设备原生率
+  // 才是一次协商、全程稳定。源率低于目标率时的那点升采样代价远小于变速的风险。
   const lnIdx = af.findIndex((f) => f.includes("loudnorm"));
-  if (lnIdx >= 0) af.splice(lnIdx + 1, 0, "aresample=resampler=swr:osr=48000");
+  if (lnIdx >= 0) {
+    const { resolveTargetSampleRate } = await import("../../services/playerRate.js");
+    const targetRate = resolveTargetSampleRate(peerId);
+    af.splice(lnIdx + 1, 0, `aresample=resampler=swr:osr=${targetRate}`);
+  }
   return af;
 }
 
@@ -1872,9 +1881,18 @@ async function serveFlowQueue(
   const startIndex = snapshot.items.findIndex((it) => it.songId === opts.songId);
   // ICY 当前标题：由 onItemStart 改写，装帧器每个间隔现读一次（见 icyFrameStream）。
   let metadata: Buffer | null = null;
+  // batch48：会话采样率 = 该播放器的目标采样率（成组取成员最低，见 services/playerRate.ts）。
+  // flow 是**连续流**：一个会话内绝不允许变速（设备端时钟按流内真实率锁定，中途改率
+  // = 爆音/失步），所以解码段 `-ar`（这里的 sampleRate）与每曲 af 链的 DSP 锚定率
+  // （`resolveFlowAf` → `playerDspFilters(..., {flow:true})` → `resolveTargetSampleRate`）
+  // 必须取**同一个键**算出的同一个值。
+  const { resolveTargetSampleRate } = await import("../../services/playerRate.js");
+  const flowRateKey = opts.dspPeerId || (opts.deviceId ? `dlna:${opts.deviceId}` : "");
+  const flowSampleRate = resolveTargetSampleRate(flowRateKey);
   const { startFlowSession } = await import("../../services/audio/flow.js");
   const session = await startFlowSession(items, {
     codec: opts.codec,
+    sampleRate: flowSampleRate,
     crossfade: true,
     fade: opts.fade,
     onItemStart: (i, item) => {

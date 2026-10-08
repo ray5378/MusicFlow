@@ -235,6 +235,16 @@
       "measureBusy": "已有测量任务在进行",
       "measureDisabled": "请先打开开关"
     },
+    "rate": {
+      "title": "输出采样率",
+      "desc": "服务端出流的目标采样率（下一首生效）。留空 = 自动：优先用设备上报值，设备没上报则用默认 48000 Hz。Sendspin 设备会把自己的采样率上报给服务端（自动填入）；DLNA/UPnP 协议不提供采样率信息，只能手动选。设备成组播放时取组内最低值。",
+      "auto": "自动（{rate} Hz）",
+      "probed": "设备自动上报：{rate} Hz（来自 client/hello）",
+      "notProbed": "设备未上报采样率（DLNA 协议不提供，请手动选择）",
+      "state": "当前生效",
+      "saved": "采样率已保存",
+      "saveFailed": "保存采样率失败"
+    },
     "general": "通用",
     "clearCache": {
       "title": "清除缓存",

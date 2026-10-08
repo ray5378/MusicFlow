@@ -448,6 +448,20 @@ export const playerDspConfigs = sqliteTable("player_dsp_configs", {
   updatedAt: text("updated_at").default(""),
 });
 
+// player_rate_configs:每台播放器(peerId)一条「目标采样率」配置(batch48 第一步)。
+// **按设备全局**——采样率是设备硬件能力,不跟账号走(与 player_dsp_configs /
+// sendspin_device_state 同理)。三来源优先级 手动 > 探测 > 缺省 48000:
+//   manual_rate:设置面板选的档位(白名单,见 services/playerRate.ts 的 RATE_OPTIONS);
+//   probed_rate:sendspin 设备 client/hello 里 player@v1_support.supported_formats
+//               逐条上报的 sample_rate 取最大值(DLNA 协议不报,恒为 0);
+//   0 = 未设置。设备每次重连都会 hello,值不变时**不写**(避免写放大)。
+export const playerRateConfigs = sqliteTable("player_rate_configs", {
+  peerId: text("peer_id").primaryKey(),
+  manualRate: integer("manual_rate").notNull().default(0),
+  probedRate: integer("probed_rate").notNull().default(0),
+  updatedAt: text("updated_at").default(""),
+});
+
 // sendspin_device_state:Sendspin 播放器「按设备全局」音量/静音持久化(clientId 裸 id)。
 // 与 player_prefs(按用户)不同,音量是设备属性,跟人不跟账号:任何用户调完都落同一行,
 // 重连/重启后自动恢复。只在"删除播放器"(解绑 unpair / 忘记拨号目标)时清行;

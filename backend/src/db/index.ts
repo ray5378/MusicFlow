@@ -566,6 +566,17 @@ export function initDatabase() {
       updated_at TEXT DEFAULT ''
     );
 
+    -- 每台播放器(peerId)一条目标采样率配置(batch48 第一步):manual_rate = 设置面板
+    -- 选的档位(白名单);probed_rate = sendspin 设备 client/hello 自动宣告的采样率
+    -- (DLNA 协议不报采样率,恒 0)。0 = 未设置。三来源优先级 手动 > 探测 > 缺省 48000;
+    -- 成组时取成员最低值(见 services/playerRate.ts)。子进程与主进程直写(WAL 安全)。
+    CREATE TABLE IF NOT EXISTS player_rate_configs (
+      peer_id TEXT PRIMARY KEY,
+      manual_rate INTEGER NOT NULL DEFAULT 0,
+      probed_rate INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT ''
+    );
+
     -- Sendspin 播放器按设备全局音量/静音(client_id 裸 id 主键):重连/重启自动恢复,
     -- 只在解绑/忘记设备时清行。子进程与主进程直写(WAL 多进程安全)。
     -- disabled 与 DLNA 同语义:用户手动禁用(持久化),不出现在任何流转播放入口。

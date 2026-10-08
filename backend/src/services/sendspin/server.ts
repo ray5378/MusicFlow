@@ -40,6 +40,7 @@ import { createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncod
 import { peekPump, stopGroupPump } from "./streamEngine.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
+import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
 import type { PairingCoordinator } from "./pairServer.js";
@@ -503,6 +504,40 @@ export function parseHelloSupportedCommands(payload: any): string[] {
     if ((s === "volume" || s === "mute") && !out.includes(s)) out.push(s);
   }
   return out;
+}
+
+/** 从 `client/hello` payload 取设备宣告的**格式能力**(`player@v1_support.supported_formats`)。
+ *
+ *  真机实发(ESPHome 2026.9.1 / esp32-player2 C4:9E:7E:08:75:64,240 服务端日志实录):
+ *    `"player@v1_support": { supported_formats: [
+ *        {codec:"flac", channels:2, sample_rate:48000, bit_depth:16},
+ *        {codec:"flac", channels:1, sample_rate:48000, bit_depth:16},
+ *        {codec:"opus", channels:2, sample_rate:48000, bit_depth:16},
+ *        {codec:"pcm",  channels:2, sample_rate:48000, bit_depth:16} ], ... }`
+ *  即**按「编码 × 声道」逐条**上报采样率/位深 —— 取 `max(sample_rate)` 就是这台设备
+ *  能吃的最高采样率(batch48 第一步「按设备能力的目标采样率」的自动探测源)。
+ *  键名兼容 `player_support`(非 v1 legacy 键名)与顶层 `supported_formats`。
+ *
+ *  ESPHome 侧语义(components/sendspin 官方文档):`sample_rate` 取值 16000~96000、
+ *  默认 48000,**会宣告给服务端**;配成 ≠48K 时 Opus 自动从 codecs 列表消失
+ *  (Opus 格式恒 48K,硬天花板)。故这里把 codecs 一起回传,日志/面板可回显。
+ *  取不到 → `{ maxSampleRate: 0, codecs: [] }`(旧固件不宣告 ⇒ 回落缺省 48000)。 */
+export function parseHelloSupportedFormats(payload: any): { maxSampleRate: number; codecs: string[] } {
+  const support = payload?.["player@v1_support"] ?? payload?.player_support ?? payload;
+  const raw = support?.supported_formats ?? payload?.supported_formats;
+  // 兼容「payload 本身就是格式数组」（legacy/裸报文本，与解析缓冲容量那套键名兼容同一思路）
+  const list = Array.isArray(raw) ? raw : Array.isArray(payload) ? payload : null;
+  if (!list) return { maxSampleRate: 0, codecs: [] };
+  let maxSampleRate = 0;
+  const codecs: string[] = [];
+  for (const f of list) {
+    if (!f || typeof f !== "object") continue;
+    const r = Number((f as any).sample_rate);
+    if (Number.isFinite(r) && r > 0 && r > maxSampleRate) maxSampleRate = Math.round(r);
+    const c = typeof (f as any).codec === "string" ? (f as any).codec.trim().toLowerCase() : "";
+    if (c && !codecs.includes(c)) codecs.push(c);
+  }
+  return { maxSampleRate, codecs };
 }
 
 /** 设备缓冲容量的**可用比例**——留安全余量,不把设备灌满。
@@ -1516,6 +1551,11 @@ export class SendspinConnection {
    *  的那个数。 */
   bufferCapacityBytes = 0;
 
+  /** 设备在 `client/hello` 里宣告的**最高采样率**(Hz,见 `parseHelloSupportedFormats`)。
+   *  0 = 未宣告(旧固件)→ 出流按缺省 48000。用于「设置面板回显」+「出流目标采样率
+   *  裁决」,落 `player_rate_configs.probed_rate`(见 services/playerRate.ts)。 */
+  announcedSampleRate = 0;
+
   /** 设备在 `client/hello` 里宣告的 **player 命令能力**(`supported_commands`,
    *  见 `parseHelloSupportedCommands`)。决定音量/静音的**施加位置**:
    *    - 含 `volume`+`mute` → 下发 `server/command`,设备输出级**实时**生效(MA 语义);
@@ -1739,6 +1779,7 @@ export class SendspinConnection {
     // (设备输出级实时 vs 烘进 PCM 的编码增益)。必须在 onConnectionActivated 之前,
     // 否则「上线即对齐」那一拍会按「不支持」错误地退回编码路径。
     this.parseHelloCommands(payload);
+    this.parseHelloFormats(payload);
     this.legacy = true;
     this.handshakeDone = true;
     this.phase = "ready";
@@ -1914,6 +1955,36 @@ export class SendspinConnection {
             ? "(音量/静音走 server/command,设备输出级实时生效)"
             : "(缺少 volume/mute,音量回退编码增益)"),
       );
+    }
+  }
+
+  /** 解析 `client/hello` 里的设备**格式能力**(`player@v1_support.supported_formats`)。
+   *
+   *  与缓冲容量/命令能力同一个 hello 段落、同一套键名兼容规则。取到的
+   *  `max(sample_rate)` 落 `player_rate_configs.probed_rate`(键 `sendspin:<clientId>`),
+   *  供设置面板「设备自动上报」回显 + 出流侧目标采样率裁决(batch48 第一步)。
+   *  记账失败**只记日志**:探测是增值功能,绝不能因为记不下来就把设备拒之门外。 */
+  private parseHelloFormats(payload: any): void {
+    const fmt = parseHelloSupportedFormats(payload);
+    if (fmt.maxSampleRate <= 0) return;
+    this.announcedSampleRate = fmt.maxSampleRate;
+    const clientId = this.clientId;
+    if (!clientId) {
+      this.server.log(
+        "info",
+        `client/hello: device sample_rate=${fmt.maxSampleRate}Hz codecs=${JSON.stringify(fmt.codecs)}`,
+      );
+      return;
+    }
+    try {
+      const changed = recordProbedRate(`sendspin:${clientId}`, fmt.maxSampleRate);
+      this.server.log(
+        "info",
+        `client/hello: device sample_rate=${fmt.maxSampleRate}Hz codecs=${JSON.stringify(fmt.codecs)} ${clientId}` +
+          (changed ? "(已记入播放器采样率配置)" : ""),
+      );
+    } catch (e: any) {
+      this.server.log("warn", `client/hello: 采样率记账失败 ${clientId}: ${e?.message || e}`);
     }
   }
 
@@ -2197,6 +2268,7 @@ export class SendspinConnection {
     this.server.log("info", `activated ${this.clientId} name=${this.name} roles=${this.roles.join(",")} codec=${this.codec}`);
     this.parseHelloCapacity(hello);
     this.parseHelloCommands(hello);
+    this.parseHelloFormats(hello);
     this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
     // spec MUST:首次 activate 后立即下发 group/update(真实客户端如 sendspin-cpp
     // 在收到它之前不认 server;此前从没发过,ESPHome 真机 ~30s 后 goodbye 离开)。

@@ -2,7 +2,9 @@
 import type { Hono } from "hono";
 import {
   BusinessErrorCode,
+  DEFAULT_TARGET_RATE,
   PERM,
+  RATE_OPTIONS,
   apiError,
   canControlPeer,
   decodePeerId,
@@ -10,12 +12,17 @@ import {
   getNameOverrides,
   getPeerNameOverride,
   getPlayerDspConfig,
+  getPlayerRateConfig,
   isPeerHidden,
   listPlayerDspConfigs,
+  listPlayerRateConfigs,
+  normalizeTargetRate,
   permMiddleware,
+  resolveTargetSampleRate,
   setPeerHidden,
   setPeerNameOverride,
   setPlayerDspConfig,
+  setPlayerRate,
 } from "./shared.js";
 
 export function registerPlayerPrefs(app: Hono): void {
@@ -110,6 +117,73 @@ app.put("/v1/player-prefs/dsp/:peerId", permMiddleware(PERM.RENDERER_USE), async
   try {
     const config = setPlayerDspConfig(raw, body);
     return c.json({ ok: true, peerId: raw, config });
+  } catch {
+    return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.dsp.saveFailed"), 500);
+  }
+});
+
+// ===== per-player 目标采样率（batch48 第一步，与 per-player 音色同层）=====
+// 采样率与音色同为**设备属性**（设备硬件能力，不跟账号走），故同样按 `peerId` 全设备级
+// 存储、同一套 `canControlPeer` 权限口径（非 admin：自己的本机播放器 + 被授权的设备/组）。
+// 三来源优先级：**手动 > 设备 hello 自动宣告 > 缺省 48000**（见 services/playerRate.ts）。
+//   - 自动宣告：Sendspin 设备在 `client/hello` 里逐条上报 sample_rate（真机实测），
+//     服务端取最大值落 probedRate —— DLNA **协议不报采样率**，只有手动 + 缺省。
+// 生效时机：**下一次起播**（出流侧起流时一次算定 af 链，与 DSP 同一 pin 语义）。
+// 成组的成员设备取**组内最低值**（组内必须同率，否则同步/连续流会变速），
+// 故回显里同时给"最终生效值"，前端不必自己算组。
+// GET:一次返回全部配置 + 可选档位 + 缺省值（面板一次渲染完，省 N 次请求）。
+
+app.get("/v1/player-prefs/rate", permMiddleware(PERM.RENDERER_USE), (c) => {
+  const user = c.get("user");
+  const all = listPlayerRateConfigs();
+  // 非 admin：按"能控制谁"过滤（不是拒绝 —— 全量视图对普通用户只是"我这些设备"）。
+  const configs = user?.isAdmin
+    ? all
+    : Object.fromEntries(
+        Object.entries(all).filter(([peerId]) => canControlPeer(user?.id ?? "", false, peerId)),
+      );
+  return c.json({ options: RATE_OPTIONS, defaultRate: DEFAULT_TARGET_RATE, configs });
+});
+// GET:单台设备（含 effectiveRate —— 成组时是组内最低值，前端直接回显它）。
+// ⚠️ 与 DSP 同一纪律：**DB 键用原始参数、权限判定用解析后的 id**。
+
+app.get("/v1/player-prefs/rate/:peerId", permMiddleware(PERM.RENDERER_USE), (c) => {
+  const raw = c.req.param("peerId") || "";
+  if (!raw) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  const user = c.get("user");
+  if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, decodePeerId(c))) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
+  }
+  return c.json({
+    peerId: raw,
+    options: RATE_OPTIONS,
+    defaultRate: DEFAULT_TARGET_RATE,
+    config: getPlayerRateConfig(raw),
+    effectiveRate: resolveTargetSampleRate(raw),
+  });
+});
+// PUT:设置/清除手动档位。Body: { rate: number|null }。
+// 归一化后为 null（清除）时**只清手动值、保留设备自动宣告值**；
+// 返回归一化后的实际生效值，前端表单据此纠正显示（与 DSP 的返回值语义一致）。
+
+app.put("/v1/player-prefs/rate/:peerId", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const raw = c.req.param("peerId") || "";
+  if (!raw) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.peerIdRequired"), 400);
+  const user = c.get("user");
+  if (!canControlPeer(user?.id ?? "", !!user?.isAdmin, decodePeerId(c))) {
+    return c.json(apiError(BusinessErrorCode.FORBIDDEN, "errors.renderer.operationForbidden"), 403);
+  }
+  const body = await c.req.json().catch(() => ({} as any));
+  // 显式给了**非法档位** → 400。下拉只可能给出白名单值，非法值只可能来自手改 API；
+  // 静默当成"清除手动设置"会把"传错了"伪装成"设置成功"。
+  // 显式 null / 缺省 / 空串 → 清除手动值（**保留**设备自动宣告值）。
+  const rawRate = body?.rate;
+  if (rawRate !== null && rawRate !== undefined && rawRate !== "" && normalizeTargetRate(rawRate) === null) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.rate.invalidRate"), 400);
+  }
+  try {
+    const config = setPlayerRate(raw, body);
+    return c.json({ ok: true, peerId: raw, config, effectiveRate: resolveTargetSampleRate(raw) });
   } catch {
     return c.json(apiError(BusinessErrorCode.INTERNAL, "errors.dsp.saveFailed"), 500);
   }

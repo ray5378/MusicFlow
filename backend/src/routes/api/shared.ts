@@ -125,6 +125,18 @@ import path from "node:path";
 import { getDataDir } from "../../utils/env.js";
 import { createLogger } from "../../utils/logger.js";
 
+// batch48 第一步：per-player 目标采样率（见 services/playerRate.ts）。
+// 单独一条 re-export，不动上面那份按字母排序的导出块（加进去只会让 diff 变噪）。
+export {
+  DEFAULT_TARGET_RATE,
+  RATE_OPTIONS,
+  getPlayerRateConfig,
+  listPlayerRateConfigs,
+  normalizeTargetRate,
+  resolveTargetSampleRate,
+  setPlayerRate,
+} from "../../services/playerRate.js";
+
 // 每日推荐 / 本地推荐 / 今日漫游 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
 
 // ==================== 共享声明（原 index.ts 顶层） ====================

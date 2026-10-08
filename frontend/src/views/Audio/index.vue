@@ -138,6 +138,29 @@
       </div>
 
       <template v-if="dspPeerId">
+        <!-- batch48 第一步：输出采样率（与音色同层，同为「按设备」属性）。
+             三来源优先级 手动 > 设备 hello 自动宣告 > 缺省 48000；成组取组内最低值。
+             「自动」在 UI 里用哨兵 'auto'（el-select 把 null 当「没选」，会显示 placeholder）。 -->
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.rate.title') }}</div>
+            <div class="desc">{{ t('settings.rate.desc') }}</div>
+          </div>
+          <div class="setting-value">
+            <el-select v-model="rateManual" style="width: 260px" :disabled="rateSaving" @change="saveRate">
+              <el-option :label="t('settings.rate.auto', { rate: rateProbed ?? rateDefault })" value="auto" />
+              <el-option v-for="r in rateOptions" :key="r" :label="`${r} Hz`" :value="r" />
+            </el-select>
+          </div>
+        </div>
+        <div class="setting-item">
+          <div class="setting-label">
+            <div class="title">{{ t('settings.rate.state') }}</div>
+            <div class="desc">{{ rateProbeText }}</div>
+          </div>
+          <div class="setting-value"><span class="dsp-mini">{{ rateEffective }} Hz</span></div>
+        </div>
+
         <div class="setting-item">
           <div class="setting-label">
             <div class="title">{{ t('settings.dsp.preamp') }}</div>
@@ -495,12 +518,80 @@ function applyDspConfig(cfg: any): void {
 /** 切换设备：先把表单清回"无处理"，再拉该设备的配置（避免把上一台的残留带过去）。 */
 async function loadDsp(): Promise<void> {
   applyDspConfig(null);
-  if (!dspPeerId.value) return;
+  if (!dspPeerId.value) {
+    void loadRate();
+    return;
+  }
+  // 采样率面板与音色面板同一个设备选择器：切设备时一起刷新（各自一个 GET，互不阻塞）。
+  void loadRate();
   try {
     const res = await api.get(dspUrl());
     applyDspConfig(res.data?.config);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("settings.dsp.loadFailed")));
+  }
+}
+
+// ---------- 输出采样率：per-player 目标采样率（batch48 第一步）----------
+// 与音色同层：服务端按 peerId 存（采样率是设备硬件能力，不跟账号走），出流侧起流时算定。
+// 三来源优先级 手动 > 设备 hello 自动宣告 > 缺省 48000；成组取**组内最低值**，
+// 所以「当前生效」一律用服务端回的 effectiveRate 回显，前端不自己算组。
+// 「自动」在 v-model 里用哨兵 'auto'：el-select 把 null 视作「未选择」，
+// 值用 null 会退化成显示 placeholder，看不到「自动（48000 Hz）」。
+const rateManual = ref<string | number>("auto");
+const rateOptions = ref<number[]>([48000, 88200, 96000, 176400, 192000]);
+const rateDefault = ref(48000);
+const rateProbed = ref<number | null>(null);
+const rateEffective = ref(48000);
+const rateSaving = ref(false);
+
+const rateProbeText = computed(() =>
+  rateProbed.value
+    ? t("settings.rate.probed", { rate: rateProbed.value })
+    : t("settings.rate.notProbed"),
+);
+
+function rateUrl(): string {
+  return `/rest/api/v1/player-prefs/rate/${encodeURIComponent(dspPeerId.value)}`;
+}
+
+/** 用服务端返回值回写面板（归一化 + effectiveRate 的真相都在服务端）。 */
+function applyRateConfig(data: any): void {
+  rateManual.value = data?.config?.manualRate ?? "auto";
+  rateProbed.value = data?.config?.probedRate ?? null;
+  rateEffective.value = Number(data?.effectiveRate) || rateDefault.value;
+  if (Array.isArray(data?.options) && data.options.length > 0) rateOptions.value = data.options;
+  if (Number(data?.defaultRate) > 0) rateDefault.value = Number(data.defaultRate);
+}
+
+async function loadRate(): Promise<void> {
+  if (!dspPeerId.value) {
+    rateManual.value = "auto";
+    rateProbed.value = null;
+    rateEffective.value = rateDefault.value;
+    return;
+  }
+  try {
+    applyRateConfig((await api.get(rateUrl())).data);
+  } catch {
+    // 读失败不打扰用户：面板保持上次显示。出流侧仍按服务端配置裁决，
+    // 不因为面板没读到而改变 —— 读失败只是看不到值，不是配置失效。
+  }
+}
+
+async function saveRate(): Promise<void> {
+  if (!dspPeerId.value) return;
+  rateSaving.value = true;
+  try {
+    const res = await api.put(rateUrl(), {
+      rate: rateManual.value === "auto" ? null : rateManual.value,
+    });
+    applyRateConfig(res.data);
+    ElMessage.success(t("settings.rate.saved"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("settings.rate.saveFailed")));
+  } finally {
+    rateSaving.value = false;
   }
 }
 

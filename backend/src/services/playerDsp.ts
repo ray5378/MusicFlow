@@ -19,6 +19,7 @@ import { db } from "../db/index.js";
 import { playerDspConfigs } from "../db/schema.js";
 import { DSP_FILTER_RATE, buildFilterChain, normalizeDspConfig, type DspConfig, type DspFormat } from "./audio/dsp.js";
 import { getGroupManager } from "./group/index.js";
+import { resolveTargetSampleRate } from "./playerRate.js";
 
 /**
  * 单曲管道（非 flow）的**锚定格式**：48000 Hz / 立体声，与 `DSP_FILTER_RATE` 同源。
@@ -116,8 +117,13 @@ export function playerDspFilters(
   if (!peerId) return [];
   const cfg = getPlayerDspConfig(peerId);
   if (!cfg) return [];
-  const chain = buildFilterChain(cfg, DSP_ANCHOR_FORMAT, { grouped: isPeerGrouped(peerId) });
+  // 锚定率 = 该播放器的**目标采样率**（batch48：手动 > hello 自动宣告 > 缺省 48000；
+  // 成组取成员最低值）。必须与出流侧 `resolveRequestAf` 那条 `aresample=osr=` 同源 ——
+  // biquad 系数与采样率绑定，两处不同源就会出现「EQ 生效了但整条曲线偏了」。
+  // 缺省值仍是 DSP_FILTER_RATE(48000)，存量行为不变。
+  const anchorRate = resolveTargetSampleRate(peerId);
+  const chain = buildFilterChain(cfg, { ...DSP_ANCHOR_FORMAT, sampleRate: anchorRate }, { grouped: isPeerGrouped(peerId) });
   if (chain.length === 0) return [];
   if (opts.flow === true) return chain;
-  return [`aresample=${DSP_FILTER_RATE}`, `aformat=channel_layouts=stereo`, ...chain];
+  return [`aresample=${anchorRate}`, `aformat=channel_layouts=stereo`, ...chain];
 }
