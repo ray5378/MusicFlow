@@ -282,6 +282,7 @@ async function streamingSource(
   const windowSec = await readStreamWindowSeconds();
   const durSec = typeof row.duration === "number" && row.duration > 0 ? row.duration : 0;
   const retainWholeSong = durSec > 0 && durSec <= windowSec;
+  log.debug(`[window] 上限=${windowSec}s 整曲保留=${retainWholeSong} 歌长=${durSec}s`);
   const window = new PcmWindow(
     {
       ...source,
