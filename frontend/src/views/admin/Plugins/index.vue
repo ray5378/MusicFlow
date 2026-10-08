@@ -500,6 +500,11 @@
                   <el-button text type="primary" @click="addTextRow(f.key)">+ {{ t('admin.plugins.addRow') }}</el-button>
                 </div>
                 <el-switch v-else-if="f.type === 'switch'" v-model="editConfig[f.key]" />
+                <!-- action:点击按钮 → POST /v1/plugins/:id/action 调用 f.action 指定的插件方法
+                     (如扫码登录 startBind)。按钮文案 = manifest/i18n 的 label,核心不写死任何插件。 -->
+                <el-button v-else-if="f.type === 'action'" type="primary" plain @click="openQrAction(f)">
+                  {{ f.label || f.action || f.key }}
+                </el-button>
                 <span v-if="f.help && f.key !== 'keywords'" class="field-hint">{{ f.help }}</span>
                 <!-- 配置项下方的「获取链接」:点击快速进入对应申请 / 授权 / 说明页。
                      支持 ${fieldKey} 插值当前配置值(如把已填的 apiKey 拼进授权页 URL)。
@@ -562,6 +567,16 @@
         <el-button v-if="canSaveConfig && configFields.length > 0" type="primary" :loading="saving" @click="() => saveConfig()">{{ t('admin.plugins.saveConfig') }}</el-button>
       </template>
     </el-dialog>
+
+    <!-- 扫码登录弹窗:由 configSchema type:"action" 字段触发,零 QR 编码逻辑
+         (后端归一化出 imageDataUrl 后 <img> 直显,守卫 check-frontend-no-qr.mjs)。 -->
+    <QrLoginDialog
+      v-model="qrDialogVisible"
+      :plugin-id="qrPluginId"
+      :method="qrMethod"
+      :title="qrTitle"
+      @success="loadPlugins"
+    />
   </div>
 </template>
 
@@ -570,6 +585,7 @@ import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
+import QrLoginDialog from "@/components/QrLoginDialog.vue";
 import api, { formatApiError } from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { parseManifest, parseConfig } from "@/utils/plugin";
@@ -1260,6 +1276,19 @@ function addTextRow(key: string) {
 function removeTextRow(key: string, idx: number) {
   const arr = editConfig[key];
   if (Array.isArray(arr)) arr.splice(idx, 1);
+}
+
+// ---- 扫码登录弹窗(configSchema type:"action" 字段触发;零 QR 编码逻辑) ----
+const qrDialogVisible = ref(false);
+const qrPluginId = ref("");
+const qrMethod = ref("");
+const qrTitle = ref("");
+function openQrAction(f: any) {
+  if (!editing.value) return;
+  qrPluginId.value = String(editing.value.id ?? "");
+  qrMethod.value = String(f.action || f.key || "");
+  qrTitle.value = String(f.label || f.action || f.key || "");
+  qrDialogVisible.value = true;
 }
 
 async function testSource() {
