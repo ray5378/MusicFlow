@@ -423,6 +423,8 @@ describe("(C) 边界用例", () => {
     expect(() => encodeQrMatrix("hi", { version: 0 })).toThrow(/版本/);
     expect(() => encodeQrMatrix("hi", { version: 11 })).toThrow(/版本/);
     expect(() => encodeQrMatrix("hi", { ecc: "X" as never })).toThrow(/ECC/);
+    expect(() => encodeQrMatrix("hi", { border: -1 })).toThrow(/border/);
+    expect(() => encodeQrMatrix("hi", { border: 1.5 })).toThrow(/border/);
   });
 });
 
@@ -447,5 +449,12 @@ describe("qrToSvg", () => {
     const esc = qrToSvg("hi", { light: 'a&b<c>"d' });
     expect(esc).toContain("&amp;");
     expect(esc).not.toContain('fill="a&b');
+  });
+
+  it("非法 moduleSize 抛错(0 / 负数 / 非有限)", () => {
+    expect(() => qrToSvg("hi", { moduleSize: 0 })).toThrow(/moduleSize/);
+    expect(() => qrToSvg("hi", { moduleSize: -2 })).toThrow(/moduleSize/);
+    expect(() => qrToSvg("hi", { moduleSize: Number.NaN })).toThrow(/moduleSize/);
+    expect(() => qrToSvg("hi", { moduleSize: Number.POSITIVE_INFINITY })).toThrow(/moduleSize/);
   });
 });
