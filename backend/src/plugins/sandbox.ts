@@ -132,14 +132,27 @@ if (typeof btoa === "undefined") {
     }
     return out;
   };
+  // atob:按位累加器实现(修复带 padding 的 base64 解码错乱)。
+  // 旧实现按 4 字符组一次取 24 bit,末组缺位时 s[i+n] 为 undefined → indexOf = -1,
+  // 其全 1 位经 << / | 污染整个 n → 解出 0xFF 垃圾字节;即任何明文长度 %3 != 0
+  // (也就是 btoa 产出带 padding)的输入都满足 atob(btoa(x)) !== x。
+  // 现逐字符累加 6 bit,凑满 8 bit 立即输出一字节;Latin-1 字节串语义(每字符一字节)
+  // 与 Node Buffer.from(b64,"base64").toString("latin1") 一致;非字母表字符(含 = 与
+  // 空白/换行)一律剥除。acc 不掩码是安全的:JS 位运算是 32 位,只丢高位,而每次
+  // 仅读取低 (bits+8) < 14 位,全部为有效数据。
   globalThis.atob = function (str) {
-    const s = String(str).replace(/=+$/, "");
+    const s = String(str).replace(/[^A-Za-z0-9+/]/g, "");
     let out = "";
-    for (let i = 0; i < s.length; i += 4) {
-      const n = (_B64.indexOf(s[i]) << 18) | (_B64.indexOf(s[i + 1]) << 12) | (_B64.indexOf(s[i + 2]) << 6) | _B64.indexOf(s[i + 3]);
-      out += String.fromCharCode((n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff);
+    let acc = 0, bits = 0;
+    for (let i = 0; i < s.length; i++) {
+      acc = (acc << 6) | _B64.indexOf(s[i]); // 正则剥除后只剩字母表字符,idx 必为 0..63
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out += String.fromCharCode((acc >> bits) & 0xff);
+      }
     }
-    return out.slice(0, Math.floor(s.length * 3 / 4));
+    return out;
   };
 }
 `;
