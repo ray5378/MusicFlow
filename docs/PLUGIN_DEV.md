@@ -84,12 +84,14 @@ globalThis.__mfPlugin = {
 { key: "token", label: "访问令牌", type: "text", required: false, default: "", help: "可选" }
 ```
 
-`type` 可选：`"text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list"`。
+`type` 可选：`"text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list" | "text-list" | "action"`。
 `select/multiselect/radio` 需提供 `options: [{ label, value }]`。
 
 - `playlist-multi`：本地 + 平台导入歌单多选（可搜索），常用于「参考歌单」类配置（如本地推荐的 sourcePlaylists）。值 = 歌单 id 数组。
 
 - `candidate-list`：可增删替换的编辑行列表（每项 `{ platform, url, name? }`），用于「推荐榜单」类配置（如每日推荐的 candidates）。值 = 对象数组。
+
+- `action`：按钮字段，点击后由前端调 `POST /v1/plugins/:id/action`（body `{ method, params? }`）触发本字段 `action` 指定的插件方法（如扫码登录的 `startBind`）。按钮文案 = 字段 `label`（manifest/i18n 驱动，核心不写死任何插件）。门禁：插件 `capabilities` 须含 `qrLogin`、method 须在白名单（`startBind/pollBind/cancelBind`）内、且插件真实实现了该方法。`startBind` 返回 `QrPayload { kind: "image"|"url"|"text", value, ttlSec, pollIntervalMs, sessionKey }`，后端归一化出 `imageDataUrl`（image 透传；url/text 用内置零依赖 QR 编码器生成 SVG data URL，ecc "M" + border 4；编码失败 → `null` 且保留 `value`，前端降级为可点击链接/文本）。
 
 ### 3.2 定时能力声明（`schedules`）—— 涉及歌单能力的插件**必读**
 
@@ -222,6 +224,7 @@ globalThis.__mfPlugin = {
 | `stream`         | `streamUrl(config, song, range?)` → **string（纯同步）**                                   | 构造可播流地址；**不发起网络**。                                                                     |
 | `lyrics`         | —（**当前沙箱** **`CAP_METHODS`** **未映射此能力**，`lyricUrl` 不会被暴露到 impl）                       | ⚠️ 已废弃路径；请改用 `lyricProvider` → `searchLyrics`（见 §4.5）。声明 `lyrics` 但实际不会暴露任何方法，歌词会静默失效。 |
 | `webRotation`    | （由核心 purge 逻辑触发，无需方法）                                                                 | 回收不再被引用的 web 歌曲/封面。                                                                    |
+| `qrLogin`        | `startBind(params?) → QrPayload`；`pollBind(params, {sessionKey}) → {code: 801\|802\|800, ...}`；`cancelBind(params, {sessionKey})` | 扫码登录：后端 `POST /v1/plugins/:id/action` 门面调用（三道门禁：capability 声明 + 方法白名单 + makeImpl 实存）。`startBind` 返回 `{kind:"image"\|"url"\|"text", value, ttlSec, pollIntervalMs, sessionKey}`，后端归一化出 `imageDataUrl`，前端通用扫码弹窗直显（零编码逻辑）。 |
 
 `OnlineSongResult` / `RemoteSongShape` = `{ id, source, name/title?, artist, album, duration, cover, extra? }`。
 `RemoteAlbumShape` = `{ id, source, name, artist?, cover?, trackCount?, year?, link? }`。

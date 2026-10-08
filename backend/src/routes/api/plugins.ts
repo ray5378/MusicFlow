@@ -15,6 +15,7 @@ import {
   fs,
   getCachedPlayability,
   getDataDir,
+  getEnabledByCapability,
   getPluginJobState,
   getPluginManifest,
   getRendererPlugins,
@@ -42,6 +43,8 @@ import {
   unregisterPlugin,
   uuidv4,
 } from "./shared.js";
+import { isQrActionMethod, withImageDataUrl } from "../../plugins/qrAction.js";
+import { createLogger } from "../../utils/logger.js";
 
 export function registerPlugins(app: Hono): void {
 app.get("/v1/plugins", adminMiddleware, (c) => {
@@ -250,6 +253,47 @@ app.get("/v1/plugins/:id/job", adminMiddleware, (c) => {
   const state = getPluginJobState(id);
   if (!state) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.noTask"), 404);
   return c.json({ success: true, pluginId: id, running: state.running, job: state });
+});
+
+// ==================== 插件 action(扫码登录等交互) ====================
+const actionLog = createLogger("PLUGIN-ACTION");
+
+// POST /v1/plugins/:id/action  body: { method: "startBind"|"pollBind"|"cancelBind", params?: object }
+// 配置页 type:"action" 按钮的统一后端入口:调插件方法 → 归一化 QrPayload → 前端通用
+// 扫码弹窗直显(弹窗零编码逻辑,守卫 check-frontend-no-qr.mjs)。
+// 门禁三道(缺一即拒,白名单唯一真源 = plugins/qrAction.ts,不另立第二套):
+//   ① method 在白名单内(与 sandbox.ts CAP_METHODS.qrLogin 对齐);
+//   ② 插件已启用且 manifest.capabilities 声明 "qrLogin"(getEnabledByCapability 枚举);
+//   ③ makeImpl 门面上真实存在该方法(插件未实现 → 不暴露)。
+// 合规:此端点只触发插件自定义交互,不修改 apiKey/密码,非「鉴权写操作」,
+// 无需 invalidateAuthCaches(与 /v1/recommend/refresh 同判)。
+app.post("/v1/plugins/:id/action", adminMiddleware, async (c) => {
+  const id = c.req.param("id");
+  if (!id) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.idRequired"), 400);
+  const body = await c.req.json().catch(() => ({}));
+  const method = body?.method;
+  if (!isQrActionMethod(method)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.badActionMethod", { method: String(method ?? "") }), 400);
+  }
+  const reg = getEnabledByCapability("qrLogin").find((p) => p.manifest.id === id);
+  if (!reg) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.plugin.noQrLogin"), 400);
+  }
+  const fn = reg.impl?.[method];
+  if (typeof fn !== "function") {
+    return c.json(apiError(BusinessErrorCode.UNAVAILABLE, "errors.plugin.noQrMethod", { method }), apiErrorStatus(BusinessErrorCode.UNAVAILABLE));
+  }
+  const params = typeof body?.params === "object" && body?.params !== null ? body.params : {};
+  try {
+    const result = await fn(params);
+    if (method !== "startBind") return c.json({ success: true, result });
+    // startBind:归一化 QrPayload(image 直显 / url|text 生成二维码 data URL / 失败保留 value)
+    return c.json({ success: true, ...withImageDataUrl(result) });
+  } catch (e: any) {
+    // 插件方法抛错 → apiError 透出,不吞
+    actionLog.error(`插件 ${id} action ${method} 失败: ${e?.message || e}`);
+    return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e?.message || "errors.plugin.fetchFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+  }
 });
 
 // 外部音源预探测(播放前):批量检查歌曲是否有可用音源,供播放器在切歌前

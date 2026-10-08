@@ -79,6 +79,9 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.plugin.registryFetchFailed": "拉取插件市场失败",
     "errors.plugin.addFailed": "添加失败",
     "errors.plugin.installFailed": "安装失败",
+    "errors.plugin.noQrLogin": "该插件未声明 qrLogin 能力(不支持扫码登录)",
+    "errors.plugin.badActionMethod": "非法的 action method: {method}",
+    "errors.plugin.noQrMethod": "插件未实现 {method}",
 
     "errors.task.notFound": "任务不存在",
     "errors.task.startFailed": "任务启动失败",
@@ -265,6 +268,9 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.plugin.registryFetchFailed": "Failed to fetch plugin marketplace",
     "errors.plugin.addFailed": "Add failed",
     "errors.plugin.installFailed": "Install failed",
+    "errors.plugin.noQrLogin": "Plugin does not declare the qrLogin capability (QR login not supported)",
+    "errors.plugin.badActionMethod": "Invalid action method: {method}",
+    "errors.plugin.noQrMethod": "Plugin does not implement {method}",
 
     "errors.task.notFound": "Task not found",
     "errors.task.startFailed": "Failed to start task",

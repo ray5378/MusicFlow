@@ -60,6 +60,8 @@ export type PluginCapability =
   | "scrobbler" // reports playback events via onPlay/onScrobble
   // ---- artist plugins ----
   | "artistInfo" // fetches artist bio/avatar via fetchArtistInfo()
+  // ---- 交互插件(扫码登录等) ----
+  | "qrLogin" // 扫码登录:startBind/pollBind/cancelBind 经 POST /v1/plugins/:id/action 门面调用
   // ---- core plugins(服务端内置行为开关,端侧零改动) ----
   | "songGroup" // 同曲多源组:匹配/写入 group_id + 序列化输出 groupId/sources
   | "importGate" // 导入命中门禁:在线导入/匹配须同时命中标题+歌手+专辑+时长才落库
@@ -73,11 +75,14 @@ export interface ConfigField {
   label: string;
   // playlist-multi:参考歌单多选(本地 + 平台导入歌单,前端渲染为可搜索下拉多选)。
   // candidate-list:推荐榜单列表(每项 {platform,url,name}),前端渲染为可增删替换的编辑行。
-  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list" | "text-list";
+  type: "text" | "url" | "number" | "select" | "multiselect" | "radio" | "switch" | "playlist-multi" | "candidate-list" | "text-list" | "action";
   required?: boolean;
   default?: unknown;
   options?: { label: string; value: string }[];
   help?: string;
+  /** action 字段专用:点击按钮 → POST /v1/plugins/:id/action 调用本方法名(如 startBind),
+   *  结果(QrPayload)经后端归一化(imageDataUrl)后由前端通用扫码弹窗展示。 */
+  action?: string;
   /** 配置分组标识,前端按此字段将配置项圈入带标题的功能模块框。如 "backend","recommend","keyword","frontend"。 */
   group?: string;
 }
