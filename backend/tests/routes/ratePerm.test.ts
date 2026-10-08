@@ -15,7 +15,7 @@
 //   ⑤ admin 全通；自己的本机播放器放行、别人的 403；
 //   ⑥ 全量端点：普通用户只看到自己能控制的 peer。
 import "../plugins/_env.js";
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { v4 as uuidv4 } from "uuid";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
@@ -77,6 +77,9 @@ beforeEach(() => {
   db.delete(userRendererGrants).run();
   db.delete(playerOutputConfigs).run();
   db.delete(users).run();
+});
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("采样率端点：非授权设备一律 403", () => {
@@ -324,5 +327,26 @@ describe("位深端点（与采样率同路由）：读写闭环 + 键独立", (
     // 两个都空 → 行删掉，回全缺省
     expect((await r2.json()).config).toEqual({ manualRate: null, probedRate: null, manualBits: null });
     expect(db.select().from(playerOutputConfigs).all()).toEqual([]);
+  });
+
+  it("写库失败 → 500（保存失败必须让用户知道；静默 200 = 用户以为设好了）", async () => {
+    const u = seedUser({ isAdmin: 0 });
+    grantRendererUse(u);
+    grantDevice(u, "dlna:rate-dev-1");
+    const { headers } = await authed(u, false);
+
+    // 与 services/playerRate.ts 的两条相反纪律配对：
+    // **读**在出流热路径上必须吞掉异常（见 tests/services/playerRateDegrade.test.ts），
+    // **写**在设置面板路径上必须抛出来 → 这里正好验证路由把它翻成 500。
+    vi.spyOn(db, "insert").mockImplementation(() => {
+      throw new Error("db down");
+    });
+    const res = await app.request(ratePath("dlna:rate-dev-1"), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ bits: 16 }),
+    });
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("INTERNAL");
   });
 });

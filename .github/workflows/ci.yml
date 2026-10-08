@@ -18,6 +18,11 @@ name: ci
 #   8. 后端类型检查 + 全量测试(含 OpenSubsonic 路由级、插件沙箱专项)
 #   9. 路径引用元守卫(scripts/check-workflow-paths.mjs)——workflow 与守卫脚本里出现的
 #      仓库内路径必须真实存在(路径搬家/文件拆分后最易静默失同步:D13 一次踩了 7 处)
+#  10. 音频输出格式链路守卫(scripts/check-audio-output-format.mjs)——采样率/位深的
+#      「配置 → ffmpeg 命令」接线:osf 插入位置(splice(lnIdx+1,…) 不能被改成 push)、
+#      源位深探测(自动档=跟随源)、player_rate_configs→player_output_configs 改名与
+#      老库搬迁(删了调用线 CI 全绿但线上老库永远缺 manual_bits 列)、flow 位深贯通、
+#      以及「播放器」页的输出配置入口(用户实际报过的缺陷:控件做在「音频」页)
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -127,6 +132,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验 workflow 与守卫脚本引用的仓库内路径均存在
         run: node backend/scripts/check-workflow-paths.mjs
+
+  # batch48/batch49 的输出格式链路(采样率 + 位深)。这批契约的共同点是**静默失效**:
+  # 断了不报错、不会让任何既有测试变红,只让听感/体积悄悄变差,或让老库升级后
+  # 功能永不生效(2026-10-08 用户报「播放器页根本没有采样率手动设置选项」即此类)。
+  # 动态契约(真跑 ffmpeg 命令 / 真读文件头 / 真跑搬迁)见
+  # backend/tests/services/playerOutputBits.test.ts、flowEncodeBits.test.ts、
+  # playerRateDegrade.test.ts、backend/tests/db/legacyRateMigration.test.ts;
+  # 本 job 补的是「这些动态用例的**前提**还在不在」(函数签名/插入位置/调用点/表名/入口符号)。
+  # 零依赖 node 脚本,秒级完成;每条断言都做过双向变异验证(改坏必红)。
+  audio-output-format-guard:
+    name: 音频输出格式链路守卫(采样率/位深的接线与位置)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 osf 接线与插入位置 / 源位深探测 / 表改名与老库搬迁 / flow 贯通 / 播放器页入口
+        run: node backend/scripts/check-audio-output-format.mjs
 
   test:
     name: 类型检查 + 全量测试

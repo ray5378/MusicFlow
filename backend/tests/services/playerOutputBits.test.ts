@@ -211,6 +211,14 @@ describe("源位深探测：真的读文件头", () => {
     expect(await probeSourceBits({ path: `l:src:${path.join(tmpDir, "nope.wav")}`, type: "local" })).toBeNull();
     expect(await probeSourceBits({ path: "garbage", type: "local" })).toBeNull();
   });
+
+  it("type 缺省 / 显式 null 一律按 local 认（老数据没有 type 列）；WebDAV 源不做网络探测", async () => {
+    // type 缺省 ⇒ `(song?.type || "local")` 的兜底分支 = 老行（本批之前入库的歌）
+    expect(await probeSourceBits({ path: `l:src:${wav16}` })).toBe(16);
+    expect(await probeSourceBits({ path: `l:src:${wav16}`, type: null })).toBe(16);
+    // WebDAV 路径（parseSongPath 回 type:'w'）⇒ 哪怕调用方说是 local 也不去拉网络
+    expect(await probeSourceBits({ path: "w:mysrc:/music/a.flac", type: "local" })).toBeNull();
+  });
 });
 
 describe("位深接线：osf 真的落到出流链上", () => {
@@ -254,5 +262,53 @@ describe("位深接线：osf 真的落到出流链上", () => {
     setPlayerRate(B, { bits: 16 });
     expect(afFilter(await resolveRequestAf(UNMEASURED, A))).toContain("osf=s16");
     expect(afFilter(await resolveRequestAf(UNMEASURED, B))).toContain("osf=s16");
+  });
+});
+
+// ==================== 位置契约（防 plumbing 静默失效） ====================
+//
+// 上面那些用例断言的是「osf 出现/消失」——**出现**了但**位置错了**同样能让它们全绿。
+// 这条回落的位置是硬要求：`splice(lnIdx + 1, …)`（紧随 loudnorm），一旦有人图省事
+// 改成 `af.push(...)`，滤镜仍在链里、断言仍绿，而形状已经变了：
+// 限制器被顶出链尾 ⇒ 降位深产生的抖动噪声落在限制器**之后**（限幅失效，可能削顶）。
+describe("位置契约：osf 只能长在 loudnorm 后面那一条 aresample 上", () => {
+  it("紧邻 loudnorm、限制器仍在链尾、全链恰好一条 aresample 带 osf", async () => {
+    setPlayerRate(A, { bits: 16 });
+    const af = await resolveRequestAf(UNMEASURED, A);
+    const lnIdx = af.findIndex((f) => f.includes("loudnorm"));
+    expect(lnIdx).toBeGreaterThanOrEqual(0);
+    expect(af[lnIdx + 1], "回落必须紧随 loudnorm（splice(lnIdx + 1, …)），改成 push 即回归").toContain("osf=");
+    expect(af[af.length - 1], "位置改错会把限制器顶出链尾").toContain("alimiter=limit=-1dB");
+    expect(af.filter((f) => f.includes("aresample=")).length).toBe(1);
+    expect(af.filter((f) => f.includes("osf=")).length, "osf 只允许挂在那一条上").toBe(1);
+  });
+
+  it("位深片段只允许 s16(+三角高频抖动) / s32 —— s24 不是 ffmpeg 的 sample_fmt 名", async () => {
+    for (const b of [16, 24]) {
+      setPlayerRate(A, { bits: b });
+      const seg = afFilter(await resolveRequestAf(UNMEASURED, A))!;
+      const osf = seg.match(/osf=([a-z0-9_]+)/)?.[1];
+      expect(["s16", "s32"], `bits=${b} 出的是 osf=${String(osf)}`).toContain(osf);
+      if (b === 16) expect(seg).toContain("dither_method=triangular_hp");
+      else expect(seg, "24bit 没有降位 → 不该带抖动").not.toContain("dither_method");
+    }
+  });
+
+  it("链里没有 loudnorm（响度归一化关掉）→ 不插 osf：这条回落本就是为 loudnorm 的浮点而存在的", async () => {
+    setSetting("loudness.normalization", "0");
+    setPlayerRate(A, { bits: 16 });
+    const af = await resolveRequestAf(UNMEASURED, A);
+    expect(af.some((f) => f.includes("loudnorm")), "关掉 ② 段后链里不该还有 loudnorm").toBe(false);
+    expect(af.some((f) => f.includes("osf=")), "没有 loudnorm 就没有浮点强制转换，不该凭空插位深回落").toBe(false);
+    setSetting("loudness.normalization", "1");
+  });
+
+  it("位深与目标采样率**共处同一条 aresample**、互不干扰", async () => {
+    setPlayerRate(A, { rate: 96000, bits: 16 });
+    expect(afFilter(await resolveRequestAf(UNMEASURED, A))).toBe(
+      "aresample=resampler=swr:osr=96000:osf=s16:dither_method=triangular_hp",
+    );
+    setPlayerRate(A, { rate: 192000, bits: 24 });
+    expect(afFilter(await resolveRequestAf(UNMEASURED, A))).toBe("aresample=resampler=swr:osr=192000:osf=s32");
   });
 });
