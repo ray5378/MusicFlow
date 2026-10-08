@@ -13,8 +13,8 @@ describe("readSendspinPluginConfig", () => {
       preferredCodec: "pcm",
       // 注:ESPHome 6053 的开关/密钥/端口**已不在插件配置里**(每台设备各自一把,
       // 见下面「6053 开关/密钥不再属于插件配置」用例)。
-      // 解码窗口上限(秒):缺省 300(对齐 MA AudioBuffer BALANCED);档位 30~600。
-      streamWindowSeconds: 300,
+      // 解码窗口上限(秒):缺省 30(用户拍板 2026-10-08,最省内存档);档位 30~600。
+      streamWindowSeconds: 30,
       // 预填充缓冲(设备侧抗抖动窗口):缺省 3000ms,Web 配置页可随时改档位。
       prefillBufferMs: 3000,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
@@ -31,7 +31,7 @@ describe("readSendspinPluginConfig", () => {
       port: 8931,
       autoDiscover: true,
       preferredCodec: "pcm",
-      streamWindowSeconds: 300,
+      streamWindowSeconds: 30,
       prefillBufferMs: 3000,
       // sink 自动重启(sink_auto_restart)默认**开**(显式 false 才关),见 SendspinServerOptions 注释。
       sinkAutoRestart: true,
@@ -98,17 +98,17 @@ describe("readSendspinPluginConfig", () => {
   });
 
   // 2026-10-08:窗口上限由固定 300s 改为插件配置「解码窗口上限」(档位字符串)。
-  // 这里钉死归一化:缺省 300、档位字符串可读、非档位吸附最近、超范围钳两端、非法回落缺省。
-  it("stream_window_seconds:档位字符串生效,非档位吸附最近、越界/非法回落缺省 300", () => {
+  // 这里钉死归一化:缺省 30、档位字符串可读、非档位吸附最近、超范围钳两端、非法回落缺省。
+  it("stream_window_seconds:档位字符串生效,非档位吸附最近、越界/非法回落缺省档(30s)", () => {
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
     const write = (cfg: any) =>
       sqlite
         .prepare("INSERT INTO plugins (id, name, config) VALUES ('sendspin-renderer', 'sendspin-renderer', ?) ON CONFLICT(id) DO UPDATE SET config = excluded.config")
         .run(JSON.stringify(cfg));
-    // 无行 / 空配置 → 缺省 300
-    expect(readSendspinPluginConfig().streamWindowSeconds).toBe(300);
+    // 无行 / 空配置 → 缺省 30
+    expect(readSendspinPluginConfig().streamWindowSeconds).toBe(30);
     write({});
-    expect(readSendspinPluginConfig().streamWindowSeconds).toBe(300);
+    expect(readSendspinPluginConfig().streamWindowSeconds).toBe(30);
     // 档位字符串 → 数字
     write({ stream_window_seconds: "60" });
     expect(readSendspinPluginConfig().streamWindowSeconds).toBe(60);
@@ -120,15 +120,15 @@ describe("readSendspinPluginConfig", () => {
     expect(readSendspinPluginConfig().streamWindowSeconds).toBe(600);
     write({ stream_window_seconds: 0 });
     expect(readSendspinPluginConfig().streamWindowSeconds).toBe(30);
-    // 非法 → 回落缺省 300
+    // 非法 → 回落缺省 30
     write({ stream_window_seconds: "abc" });
-    expect(readSendspinPluginConfig().streamWindowSeconds).toBe(300);
+    expect(readSendspinPluginConfig().streamWindowSeconds).toBe(30);
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer'").run();
   });
 
   // 2026-09-24 卡顿治理(B1):预填充缓冲改成 Web 配置页的**档位下拉**(存字符串),
   // 推流循环每 5s 重读。这里钉死归一化:档位字符串能被读成数字、越界/非法回落缺省。
-  it("prefill_buffer_ms:档位字符串生效,越界/非法回落缺省 3000", () => {
+  it("prefill_buffer_ms:档位字符串生效,越界/非法回落缺省档(30s)0", () => {
     sqlite.prepare("DELETE FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'").run();
     const write = (cfg: any) =>
       sqlite
