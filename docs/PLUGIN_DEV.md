@@ -443,6 +443,13 @@ songs:read  songs:write  playlists:read  playlists:write  inter-plugin
 | `aesEncrypt({ mode, data, key, iv?, dataEncoding?, keyEncoding?, ivEncoding?, outputEncoding? })` | AES-128 加密；`mode` ∈ `cbc` / `ecb` / `gcm` |
 | `aesDecrypt({ mode, data, key, iv?, dataEncoding?, keyEncoding?, ivEncoding? })` | AES-128 解密，返回 utf8 明文 |
 | `rsaEncrypt({ data, publicKey, padding?, dataEncoding?, outputEncoding? })` | RSA 加密；`padding` ∈ `pkcs1`（默认）/ `none` |
+| `base64Encode(input, { inputEncoding? })` | base64 编码；`inputEncoding` ∈ `utf8`（默认）/ `latin1` / `hex`；`latin1` 时逐字符校验码点 ≤ 0xFF（超出报错，不静默截断） |
+| `base64Decode(input, { outputEncoding? })` | base64 解码；`outputEncoding` ∈ `latin1`（默认，**每字符一字节的二进制串**，同 `atob` 语义）/ `hex`；容忍空白、接受 unpadded，长度 %4==1 或含字母表外字符报错 |
+| `utf8Decode(input, { inputEncoding? })` | 严格 UTF-8 解码为 JS 字符串；`inputEncoding` ∈ `latin1`（默认）/ `hex`；**非法序列返回 `{ error }`，绝不静默替换为 U+FFFD**；BOM 保留为 U+FEFF（与 `Buffer.toString("utf8")` 一致） |
+
+> **二进制表达约定（重要）**：以上三个原语与 `atob`/`btoa` 一致，用 **latin1 字节串**（每字符一字节）表达二进制，**绝无 TypedArray**——主线程 `jsToHandle` 不认 TypedArray、worker 结构化克隆却认，双通道返回形态会不对称；`hex` 为备选（小写）。三者同样纳入 hostApiParity 双向门禁与双通道一致性 KAT。
+>
+> **⚠️ 含 U+0000 的字符串跨桥会被截断**：QuickJS 桥（`jsToHandle` / `dump`）对含 NUL 的字符串按首个 NUL 截断（实测 `"\u0000\u00ff"` 跨桥变 `""`）。因此含 `0x00` 字节的 latin1 串**只能在 VM 内使用**（拼请求体、算签名等），**需要跨桥（作为 `host.*` 入参或返回给宿主）时请改用 `hex`**。原语本身对 `0x00` 的正确性由 `pluginCrypto.test.ts`（纯 Node、不过桥）覆盖；双通道一致性由 `cryptoDualChannel.test.ts` 覆盖。
 
 **编码约定**：`data` / `key` / `iv` 的输入编码默认 `"utf8"`（可选 `"base64"` / `"hex"`）；
 AES 输出默认 `"base64"`（可选 `"hex"`）；`rsaEncrypt` 输出默认 `"hex"`（网易云 `encSecKey` 为 HEX）。

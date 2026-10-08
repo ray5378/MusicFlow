@@ -74,6 +74,24 @@ export type RsaEncryptOpts = {
   outputEncoding?: "hex" | "base64";
 };
 
+/** base64Encode 入参(输入编码,默认 utf8)。 */
+export type Base64EncodeOpts = {
+  inputEncoding?: "utf8" | "latin1" | "hex";
+};
+
+/**
+ * base64Decode 入参(输出编码,默认 latin1)。
+ * latin1 = 「每字符一字节」的二进制串,与沙箱 atob 语义一致;hex = 小写 hex。
+ */
+export type Base64DecodeOpts = {
+  outputEncoding?: "latin1" | "hex";
+};
+
+/** utf8Decode 入参(输入编码,默认 latin1 = 每字符一字节的二进制串)。 */
+export type Utf8DecodeOpts = {
+  inputEncoding?: "latin1" | "hex";
+};
+
 /** host.crypto 暴露的原语集合。 */
 export interface PluginCrypto {
   md5(input: string): CryptoResult;
@@ -83,6 +101,9 @@ export interface PluginCrypto {
   aesEncrypt(opts: AesEncryptOpts): CryptoResult;
   aesDecrypt(opts: AesDecryptOpts): CryptoResult;
   rsaEncrypt(opts: RsaEncryptOpts): CryptoResult;
+  base64Encode(input: string, opts?: Base64EncodeOpts): CryptoResult;
+  base64Decode(input: string, opts?: Base64DecodeOpts): CryptoResult;
+  utf8Decode(input: string, opts?: Utf8DecodeOpts): CryptoResult;
 }
 
 const AES_KEY_BYTES = 16; // aes-128
@@ -320,6 +341,128 @@ function rsaEncrypt(opts: RsaEncryptOpts): CryptoResult {
   }
 }
 
+// ---- base64 / UTF-8 原语(纯字符串出入参,绝无 TypedArray)----
+// 为什么必须是字符串出入参:主线程通道 jsToHandle() 只认 null/boolean/string/number/
+// Array/普通对象,TypedArray 会被摊成 {0:…} 普通对象;而 worker 通道走结构化克隆,
+// 能回传真 TypedArray → 双通道返回形态必然不对称。故这三个原语一律字符串进出,
+// 二进制统一用 latin1 字节串(每字符一字节,与沙箱 atob/btoa 语义一致)或 hex 表达。
+
+const LATIN1_MAX_CODE = 0xff;
+/** base64 解码容忍的字符:仅空白(atob 同语义);其余字母表外字符一律判错。 */
+const B64_WS_RE = /[ \t\r\n\f\v]/g;
+/** 剥除空白后的严格 base64 语法(允许末尾 0-2 个 =)。 */
+const B64_STRICT_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+let utf8FatalDecoder: TextDecoder | null = null;
+
+/** 取(并缓存)fatal 模式 UTF-8 解码器:非法序列抛错,而非静默替换为 U+FFFD。 */
+function getUtf8FatalDecoder(): TextDecoder {
+  if (!utf8FatalDecoder) {
+    // ignoreBOM:true = 不剥离 BOM(保留为 U+FEFF),与 Buffer.toString("utf8") 逐字节一致。
+    utf8FatalDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  }
+  return utf8FatalDecoder;
+}
+
+/** latin1 语义校验:每个字符码点必须 ≤ 0xFF(超出会被静默截断,宁可报错)。 */
+function toLatin1Buffer(value: string, field: string): Buffer | { error: string } {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > LATIN1_MAX_CODE) {
+      return err(`${field} 含码点 > 0xFF 的字符(位置 ${i}),latin1 语义下会被静默截断,已拒绝`);
+    }
+  }
+  return Buffer.from(value, "latin1");
+}
+
+/** 校验 opts 为普通对象或省略;其余一律报错(fail-loud,不静默忽略)。 */
+function checkOpts(opts: unknown, fnName: string): true | { error: string } {
+  if (opts === undefined) return true;
+  if (!isPlainObject(opts)) return err(`${fnName}: opts 必须是对象`);
+  return true;
+}
+
+/**
+ * base64 编码:input 按 inputEncoding(默认 utf8)取字节 → base64(带 padding)。
+ * inputEncoding:"latin1" 时逐字符校验码点 ≤ 0xFF,避免静默截断。
+ */
+function base64Encode(input: unknown, opts?: Base64EncodeOpts): CryptoResult {
+  try {
+    if (typeof input !== "string") return err("base64Encode: input 必须是字符串");
+    const okOpts = checkOpts(opts, "base64Encode");
+    if (okOpts !== true) return okOpts;
+    const inputEncoding = opts?.inputEncoding ?? "utf8";
+    if (inputEncoding !== "utf8" && inputEncoding !== "latin1" && inputEncoding !== "hex") {
+      return err(`base64Encode: 未知 inputEncoding(${String(inputEncoding)}),仅支持 utf8 / latin1 / hex`);
+    }
+    let buf: Buffer;
+    if (inputEncoding === "latin1") {
+      const r = toLatin1Buffer(input, "input");
+      if (isErr(r)) return r;
+      buf = r;
+    } else {
+      const d = decodeField(input, inputEncoding, "input");
+      if (isErr(d)) return d;
+      buf = d;
+    }
+    return buf.toString("base64");
+  } catch (e) {
+    return err("base64Encode 失败: " + describe(e));
+  }
+}
+
+/**
+ * base64 解码:input(base64,容忍空白,接受 padded / unpadded)→
+ * 按 outputEncoding(默认 latin1)输出字符串;latin1 = 每字符一字节(同 atob 语义)。
+ * 长度 %4 == 1(非法残组)或含字母表外字符(除空白)一律返回 { error }。
+ */
+function base64Decode(input: unknown, opts?: Base64DecodeOpts): CryptoResult {
+  try {
+    if (typeof input !== "string") return err("base64Decode: input 必须是字符串");
+    const okOpts = checkOpts(opts, "base64Decode");
+    if (okOpts !== true) return okOpts;
+    const outputEncoding = opts?.outputEncoding ?? "latin1";
+    if (outputEncoding !== "latin1" && outputEncoding !== "hex") {
+      return err(`base64Decode: 未知 outputEncoding(${String(outputEncoding)}),仅支持 latin1 / hex`);
+    }
+    const compact = input.replace(B64_WS_RE, "");
+    if (!B64_STRICT_RE.test(compact) || compact.length % 4 === 1) {
+      return err("base64Decode: input 不是合法的 base64 字符串");
+    }
+    const buf = Buffer.from(compact, "base64");
+    return outputEncoding === "hex" ? buf.toString("hex") : buf.toString("latin1");
+  } catch (e) {
+    return err("base64Decode 失败: " + describe(e));
+  }
+}
+
+/**
+ * utf8 解码:input 按 inputEncoding(默认 latin1)取字节 → 严格 UTF-8 解码为 JS 字符串。
+ * 非法 UTF-8 序列返回 { error },**绝不静默替换为 U+FFFD**(fatal TextDecoder)。
+ */
+function utf8Decode(input: unknown, opts?: Utf8DecodeOpts): CryptoResult {
+  try {
+    if (typeof input !== "string") return err("utf8Decode: input 必须是字符串");
+    const okOpts = checkOpts(opts, "utf8Decode");
+    if (okOpts !== true) return okOpts;
+    const inputEncoding = opts?.inputEncoding ?? "latin1";
+    if (inputEncoding !== "latin1" && inputEncoding !== "hex") {
+      return err(`utf8Decode: 未知 inputEncoding(${String(inputEncoding)}),仅支持 latin1 / hex`);
+    }
+    let buf: Buffer;
+    if (inputEncoding === "latin1") {
+      const r = toLatin1Buffer(input, "input");
+      if (isErr(r)) return r;
+      buf = r;
+    } else {
+      const d = decodeField(input, "hex", "input");
+      if (isErr(d)) return d;
+      buf = d;
+    }
+    return getUtf8FatalDecoder().decode(buf);
+  } catch (e) {
+    return err("utf8Decode: 输入不是合法的 UTF-8 序列(" + describe(e) + ")");
+  }
+}
+
 /** 构造沙箱脚本可用的密码学原语集合(三个消费方共用同一实现)。 */
 export function createPluginCrypto(): PluginCrypto {
   return {
@@ -340,5 +483,8 @@ export function createPluginCrypto(): PluginCrypto {
     aesEncrypt,
     aesDecrypt,
     rsaEncrypt,
+    base64Encode,
+    base64Decode,
+    utf8Decode,
   };
 }

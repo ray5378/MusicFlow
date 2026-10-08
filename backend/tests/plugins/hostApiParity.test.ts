@@ -85,10 +85,12 @@ describe("host API 三处接线一致性 · 两级键分发", () => {
   describe("组 crypto(唯一实现源 pluginCrypto.ts)", () => {
     const keys = pluginCryptoContractKeys();
 
-    it("pluginCrypto 契约恰好包含 7 个原语", () => {
-      expect(new Set(keys)).toEqual(
-        new Set(["md5", "sha1", "sha256", "randomBytes", "aesEncrypt", "aesDecrypt", "rsaEncrypt"])
-      );
+    it("pluginCrypto 契约恰好包含 10 个原语", () => {
+      expect(new Set(keys)).toEqual(new Set([
+        "md5", "sha1", "sha256", "randomBytes",
+        "aesEncrypt", "aesDecrypt", "rsaEncrypt",
+        "base64Encode", "base64Decode", "utf8Decode",
+      ]));
     });
 
     it("直连宿主(discovery.ts)与 worker(sandboxWorker.ts)均注入 createPluginCrypto()", () => {

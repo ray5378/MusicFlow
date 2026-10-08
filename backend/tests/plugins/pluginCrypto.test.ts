@@ -78,9 +78,12 @@ const RSA_NONE_HEX =
   "89b0ca4dea51698ee84adaadb339ab57f7e08ad8262cac36389cae6eb670a339";
 
 describe("pluginCrypto · 契约形状", () => {
-  it("恰好导出 7 个原语", () => {
+  it("恰好导出 10 个原语", () => {
     expect(Object.keys(crypto).sort()).toEqual(
-      ["aesDecrypt", "aesEncrypt", "md5", "randomBytes", "rsaEncrypt", "sha1", "sha256"].sort()
+      [
+        "aesDecrypt", "aesEncrypt", "base64Decode", "base64Encode", "md5",
+        "randomBytes", "rsaEncrypt", "sha1", "sha256", "utf8Decode",
+      ].sort()
     );
   });
 });
@@ -203,6 +206,18 @@ describe("pluginCrypto · 错误信封(绝不抛异常)", () => {
     ["rsaEncrypt 空 publicKey", () => crypto.rsaEncrypt({ data: "a", publicKey: "" })],
     ["rsaEncrypt 非 PEM publicKey", () => crypto.rsaEncrypt({ data: "a", publicKey: "not-a-pem" })],
     ["rsaEncrypt 非对象入参", () => crypto.rsaEncrypt("nope" as never)],
+    ["base64Encode 非法 hex 输入", () => crypto.base64Encode("zz", { inputEncoding: "hex" })],
+    ["base64Encode 未知 inputEncoding", () => crypto.base64Encode("a", { inputEncoding: "utf16" as never })],
+    ["base64Encode latin1 含 >0xFF 码点", () => crypto.base64Encode("汉字", { inputEncoding: "latin1" })],
+    ["base64Encode 非对象 opts", () => crypto.base64Encode("a", "x" as never)],
+    ["base64Decode 非法 base64", () => crypto.base64Decode("!!!")],
+    ["base64Decode 长度 %4==1", () => crypto.base64Decode("Q")],
+    ["base64Decode 未知 outputEncoding", () => crypto.base64Decode("QQ==", { outputEncoding: "utf8" as never })],
+    ["base64Decode 非字符串 input", () => crypto.base64Decode(5 as never)],
+    ["utf8Decode 非法 UTF-8 序列", () => crypto.utf8Decode("\u00ff\u00fe")],
+    ["utf8Decode 非法 hex", () => crypto.utf8Decode("zz", { inputEncoding: "hex" })],
+    ["utf8Decode 未知 inputEncoding", () => crypto.utf8Decode("a", { inputEncoding: "base64" as never })],
+    ["utf8Decode 非字符串 input", () => crypto.utf8Decode(null as never)],
   ];
   for (const [name, fn] of badCases) {
     it(`${name} → { error }(不抛)`, () => {
@@ -210,4 +225,58 @@ describe("pluginCrypto · 错误信封(绝不抛异常)", () => {
       err(v);
     });
   }
+});
+
+describe("pluginCrypto · base64 / UTF-8 原语 KAT(纯字符串出入参)", () => {
+  it("base64Encode 默认 utf8 → base64(带 padding)", () => {
+    expect(ok(crypto.base64Encode("hello"))).toBe("aGVsbG8=");
+    expect(ok(crypto.base64Encode("AB"))).toBe("QUI=");
+  });
+  it("base64Encode latin1 / hex 输入编码", () => {
+    expect(ok(crypto.base64Encode("\u0000\u00ff", { inputEncoding: "latin1" }))).toBe("AP8=");
+    expect(ok(crypto.base64Encode("00ff", { inputEncoding: "hex" }))).toBe("AP8=");
+  });
+  it("base64Decode 默认 latin1(每字符一字节,同 atob 语义)/ hex", () => {
+    const s = ok(crypto.base64Decode("AP8="));
+    expect(s.length).toBe(2);
+    expect(s.charCodeAt(0)).toBe(0x00);
+    expect(s.charCodeAt(1)).toBe(0xff);
+    expect(ok(crypto.base64Decode("AP8=", { outputEncoding: "hex" }))).toBe("00ff");
+  });
+  it("base64Decode 容忍空白、接受 unpadded", () => {
+    expect(ok(crypto.base64Decode(" QQ == "))).toBe("A");
+    expect(ok(crypto.base64Decode("QQ"))).toBe("A");
+    expect(ok(crypto.base64Decode("QUI"))).toBe("AB");
+  });
+  it("base64Encode/Decode padded 环回:len%3==1 与 %3==2 至少各一条", () => {
+    for (const n of [1, 2, 4, 5, 7, 8]) {
+      let s = "";
+      for (let i = 0; i < n; i++) s += String.fromCharCode((i * 61 + n) & 0xff);
+      const b64 = ok(crypto.base64Encode(s, { inputEncoding: "latin1" }));
+      expect(b64.endsWith("="), `len=${n} 应为 padded base64`).toBe(true);
+      expect(b64, `len=${n} 与 Node 参考`).toBe(Buffer.from(s, "latin1").toString("base64"));
+      expect(ok(crypto.base64Decode(b64)), `len=${n} 环回`).toBe(s);
+    }
+    // 显式各留一条锚点用例(%3==1 → 2 个 =;%3==2 → 1 个 =)
+    expect(ok(crypto.base64Encode("ABCD", { inputEncoding: "latin1" }))).toBe("QUJDRA==");
+    expect(ok(crypto.base64Encode("ABCDE", { inputEncoding: "latin1" }))).toBe("QUJDREU=");
+  });
+  it("utf8Decode latin1(默认)/ hex → 正确解码多字节字符", () => {
+    const latin1 = "\u00e4\u00bd\u00a0\u00e5\u00a5\u00bd"; // "你好" 的 UTF-8 字节按 latin1 表达
+    expect(ok(crypto.utf8Decode(latin1))).toBe("你好");
+    expect(ok(crypto.utf8Decode("e4bda0e5a5bd", { inputEncoding: "hex" }))).toBe("你好");
+    expect(ok(crypto.utf8Decode("plain"))).toBe("plain");
+  });
+  it("utf8Decode 保留 BOM(与 Buffer.toString('utf8') 一致,不做静默剥离)", () => {
+    expect(ok(crypto.utf8Decode("\u00ef\u00bb\u00bf"))).toBe("\ufeff");
+  });
+  it("与 Node Buffer 参考逐字节一致(latin1 语义,长度 0..9)", () => {
+    for (let n = 0; n <= 9; n++) {
+      let s = "";
+      for (let i = 0; i < n; i++) s += String.fromCharCode((i * 29 + 7) & 0xff);
+      const b64 = ok(crypto.base64Encode(s, { inputEncoding: "latin1" }));
+      expect(b64).toBe(Buffer.from(s, "latin1").toString("base64"));
+      expect(ok(crypto.base64Decode(b64))).toBe(Buffer.from(b64, "base64").toString("latin1"));
+    }
+  });
 });

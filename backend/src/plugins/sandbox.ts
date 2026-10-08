@@ -217,6 +217,18 @@ interface CryptoRsaOpts {
   dataEncoding?: "utf8" | "base64" | "hex";
   outputEncoding?: "hex" | "base64";
 }
+/** base64Encode 入参(输入编码,默认 utf8)。 */
+interface CryptoBase64EncodeOpts {
+  inputEncoding?: "utf8" | "latin1" | "hex";
+}
+/** base64Decode 入参(输出编码,默认 latin1 = 每字符一字节的二进制串,同 atob 语义)。 */
+interface CryptoBase64DecodeOpts {
+  outputEncoding?: "latin1" | "hex";
+}
+/** utf8Decode 入参(输入编码,默认 latin1 = 每字符一字节的二进制串)。 */
+interface CryptoUtf8DecodeOpts {
+  inputEncoding?: "latin1" | "hex";
+}
 
 /** 宿主提供给沙箱的环境:副作用全部由宿主实现,沙箱只转发参数/结果。 */
 export interface SandboxHostEnv {
@@ -234,6 +246,9 @@ export interface SandboxHostEnv {
    *   - randomBytes(len):len 字节随机数据的 hex(1..1024)。
    *   - aesEncrypt / aesDecrypt:AES-128 CBC/ECB/GCM;gcm 布局 [12B IV]‖[ct]‖[16B tag]。
    *   - rsaEncrypt:padding "none" 时左补 0x00 到 128 字节(RSA_NO_PADDING,网易云 encSecKey)。
+   *   - base64Encode / base64Decode / utf8Decode:纯字符串出入参,二进制用 latin1 字节串
+   *     (每字符一字节,同 atob/btoa 语义)或 hex 表达;**绝无 TypedArray**——主线程
+   *     jsToHandle 不认 TypedArray,worker 结构化克隆却认,双通道形态会不对称。
    */
   crypto: {
     md5(input: string): CryptoPrimResult;
@@ -243,6 +258,9 @@ export interface SandboxHostEnv {
     aesEncrypt(opts: CryptoAesOpts): CryptoPrimResult;
     aesDecrypt(opts: CryptoAesOpts): CryptoPrimResult;
     rsaEncrypt(opts: CryptoRsaOpts): CryptoPrimResult;
+    base64Encode(input: string, opts?: CryptoBase64EncodeOpts): CryptoPrimResult;
+    base64Decode(input: string, opts?: CryptoBase64DecodeOpts): CryptoPrimResult;
+    utf8Decode(input: string, opts?: CryptoUtf8DecodeOpts): CryptoPrimResult;
   };
   /** host.storage:按插件隔离的 KV(与 host.ts PluginStorage 同契约,异步)。 */
   storage: {
@@ -954,6 +972,10 @@ export class SandboxedPlugin {
     const cryptoAesEncrypt = this.hostSync("aesEncrypt", (o: any) => this.env.crypto.aesEncrypt(o), "crypto");
     const cryptoAesDecrypt = this.hostSync("aesDecrypt", (o: any) => this.env.crypto.aesDecrypt(o), "crypto");
     const cryptoRsaEncrypt = this.hostSync("rsaEncrypt", (o: any) => this.env.crypto.rsaEncrypt(o), "crypto");
+    // base64 / UTF-8 原语:纯字符串出入参(二进制用 latin1 字节串 / hex 表达,绝无 TypedArray)。
+    const cryptoBase64Encode = this.hostSync("base64Encode", (s: any, o: any) => this.env.crypto.base64Encode(String(s ?? ""), o), "crypto");
+    const cryptoBase64Decode = this.hostSync("base64Decode", (s: any, o: any) => this.env.crypto.base64Decode(String(s ?? ""), o), "crypto");
+    const cryptoUtf8Decode = this.hostSync("utf8Decode", (s: any, o: any) => this.env.crypto.utf8Decode(String(s ?? ""), o), "crypto");
     c.setProp(cryptoObj, "md5", cryptoMd5);
     c.setProp(cryptoObj, "sha1", cryptoSha1);
     c.setProp(cryptoObj, "sha256", cryptoSha256);
@@ -961,8 +983,12 @@ export class SandboxedPlugin {
     c.setProp(cryptoObj, "aesEncrypt", cryptoAesEncrypt);
     c.setProp(cryptoObj, "aesDecrypt", cryptoAesDecrypt);
     c.setProp(cryptoObj, "rsaEncrypt", cryptoRsaEncrypt);
+    c.setProp(cryptoObj, "base64Encode", cryptoBase64Encode);
+    c.setProp(cryptoObj, "base64Decode", cryptoBase64Decode);
+    c.setProp(cryptoObj, "utf8Decode", cryptoUtf8Decode);
     cryptoMd5.dispose(); cryptoSha1.dispose(); cryptoSha256.dispose(); cryptoRandomBytes.dispose();
     cryptoAesEncrypt.dispose(); cryptoAesDecrypt.dispose(); cryptoRsaEncrypt.dispose();
+    cryptoBase64Encode.dispose(); cryptoBase64Decode.dispose(); cryptoUtf8Decode.dispose();
 
     const hostObj = c.newObject();
     c.setProp(hostObj, "http", httpFn);
