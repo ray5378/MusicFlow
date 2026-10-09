@@ -33,6 +33,34 @@ export function comboPlaylistApi(): any {
  *  (如 ListenBrainz),与内置 daily/local/combo 一样支持 showOnHome/homePosition 首页卡位。 */
 export const HOME_RECOMMENDER_CAPS = ["dailyPlaylist", "localPlaylist", "comboPlaylist", "recommendPlaylist"] as const;
 
+/** 插件声明的首页卡列表(多卡 homePlaylistIds 优先;仅单数 homePlaylistId 时回落
+ *  为单元素卡:键固定 showOnHome/homePosition,名称用插件名——行为完全不变)。 */
+function homeCardsOf(
+  manifest: any,
+): Array<{ id: string; name: string; showOnHomeKey: string; positionKey: string }> {
+  if (Array.isArray(manifest?.homePlaylistIds) && manifest.homePlaylistIds.length) {
+    return manifest.homePlaylistIds
+      .map((c: any) => ({
+        id: String(c?.id || ""),
+        name: String(c?.name || ""),
+        showOnHomeKey: String(c?.showOnHomeKey || "showOnHome"),
+        positionKey: String(c?.positionKey || "homePosition"),
+      }))
+      .filter((c: { id: string }) => !!c.id);
+  }
+  if (manifest?.homePlaylistId) {
+    return [
+      {
+        id: String(manifest.homePlaylistId),
+        name: manifest.name || manifest.id,
+        showOnHomeKey: "showOnHome",
+        positionKey: "homePosition",
+      },
+    ];
+  }
+  return [];
+}
+
 /** 读插件配置中某字段,缺失时回落 manifest configSchema 的 default。 */
 function readConfigField(manifest: any, key: string, cfg: Record<string, any> | null): any {
   if (cfg && cfg[key] !== undefined && cfg[key] !== null) return cfg[key];
@@ -44,7 +72,7 @@ function readConfigField(manifest: any, key: string, cfg: Record<string, any> | 
 export interface HomeCardConfig {
   pluginId: string;
   name: string;
-  playlistId: string; // manifest.homePlaylistId
+  playlistId: string; // 多卡 manifest.homePlaylistIds[].id 或单数 manifest.homePlaylistId
   capabilities: string[];
   showOnHome: boolean;
   position: number; // 0 = 未固定
@@ -55,19 +83,20 @@ export function listHomeCardPlugins(): HomeCardConfig[] {
   const out: HomeCardConfig[] = [];
   for (const cap of HOME_RECOMMENDER_CAPS) {
     for (const { manifest } of getEnabledByCapability(cap)) {
-      if (!manifest?.homePlaylistId) continue; // 未声明首页歌单,不参与
       const cfg = getPluginConfig(manifest.id);
-      const showOnHome = !!readConfigField(manifest, "showOnHome", cfg);
-      const rawPos = parseInt(String(readConfigField(manifest, "homePosition", cfg) ?? 0), 10);
-      const position = Number.isFinite(rawPos) && rawPos >= 1 ? rawPos : 0;
-      out.push({
-        pluginId: manifest.id,
-        name: manifest.name || manifest.id,
-        playlistId: manifest.homePlaylistId,
-        capabilities: manifest.capabilities || [],
-        showOnHome,
-        position,
-      });
+      for (const card of homeCardsOf(manifest)) {
+        const showOnHome = !!readConfigField(manifest, card.showOnHomeKey, cfg);
+        const rawPos = parseInt(String(readConfigField(manifest, card.positionKey, cfg) ?? 0), 10);
+        const position = Number.isFinite(rawPos) && rawPos >= 1 ? rawPos : 0;
+        out.push({
+          pluginId: manifest.id,
+          name: card.name || manifest.name || manifest.id,
+          playlistId: card.id,
+          capabilities: manifest.capabilities || [],
+          showOnHome,
+          position,
+        });
+      }
     }
   }
   return out;
@@ -82,18 +111,30 @@ export function homePositionConflictForSave(
   newConfig: Record<string, any>,
 ): string | null {
   const manifest = getPluginManifest(pluginId);
-  if (!manifest?.homePlaylistId) return null; // 非首页卡插件
-  const others = listHomeCardPlugins(); // 当前已启用的首页卡插件(读 DB)
-  // 计算目标插件的新 showOnHome / homePosition。
+  if (!manifest) return null;
+  const cards = homeCardsOf(manifest);
+  if (!cards.length) return null; // 非首页卡插件
+  // 计算目标插件各卡的新 showOnHome / homePosition(替换其 DB 值)。
   const cfg = { ...newConfig };
-  const showOnHome = !!readConfigField(manifest, "showOnHome", cfg);
-  const rawPos = parseInt(String(readConfigField(manifest, "homePosition", cfg) ?? 0), 10);
-  const position = Number.isFinite(rawPos) && rawPos >= 1 ? rawPos : 0;
-  if (!showOnHome || position <= 0) return null;
-  const other = others.find(
-    (p) => p.pluginId !== pluginId && p.showOnHome && p.position === position,
-  );
-  return other ? `首页位次 ${position} 已被「${other.name}」占用,请改用其它位次` : null;
+  const mine: Array<{ name: string; position: number }> = [];
+  for (const card of cards) {
+    const showOnHome = !!readConfigField(manifest, card.showOnHomeKey, cfg);
+    const rawPos = parseInt(String(readConfigField(manifest, card.positionKey, cfg) ?? 0), 10);
+    const position = Number.isFinite(rawPos) && rawPos >= 1 ? rawPos : 0;
+    if (showOnHome && position > 0) {
+      mine.push({ name: card.name || manifest.name || manifest.id, position });
+    }
+  }
+  if (!mine.length) return null;
+  const others = listHomeCardPlugins().filter((p) => p.pluginId !== pluginId); // 已启用的其它首页卡
+  for (const m of mine) {
+    // 自身多卡之间撞位次。
+    const selfDup = mine.find((x) => x !== m && x.position === m.position);
+    if (selfDup) return `首页位次 ${m.position} 已被「${selfDup.name}」占用,请改用其它位次`;
+    const other = others.find((p) => p.showOnHome && p.position === m.position);
+    if (other) return `首页位次 ${m.position} 已被「${other.name}」占用,请改用其它位次`;
+  }
+  return null;
 }
 
 /** 首页顶部「今日推荐 + 随机歌单」展示张数(含今日推荐),由每日推荐插件配置 homeCount 控制。 */

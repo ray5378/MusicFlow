@@ -30,23 +30,32 @@ const BUILTIN_FIXED_SET = new Set<string>(BUILTIN_FIXED);
 
 const HOME_RECOMMENDER_CAPS: PluginCapability[] = ["dailyPlaylist", "localPlaylist", "recommendPlaylist"];
 
-/** 某 id 是否固定推荐歌单(内置兜底 + 任意启用插件 manifest.homePlaylistId)。 */
+/** 插件声明的首页固定卡 id 列表(多卡 homePlaylistIds 优先;仅单数 homePlaylistId
+ *  时回落为单元素列表,行为不变)。 */
+function homeCardIdsOf(manifest: any): string[] {
+  if (Array.isArray(manifest?.homePlaylistIds) && manifest.homePlaylistIds.length) {
+    return manifest.homePlaylistIds.map((c: any) => String(c?.id || "")).filter(Boolean);
+  }
+  return manifest?.homePlaylistId ? [String(manifest.homePlaylistId)] : [];
+}
+
+/** 某 id 是否固定推荐歌单(内置兜底 + 任意启用插件声明的任一首页卡 id)。 */
 export function isFixedRecommendPlaylist(id: string): boolean {
   if (!id) return false;
   if (BUILTIN_FIXED_SET.has(id)) return true;
   for (const cap of HOME_RECOMMENDER_CAPS) {
     for (const { manifest } of getEnabledByCapability(cap)) {
-      if (manifest?.homePlaylistId === id) return true;
+      if (homeCardIdsOf(manifest).includes(id)) return true;
     }
   }
   return false;
 }
 
-/** 找声明该 homePlaylistId 的推荐插件(启用);无则 null。 */
+/** 找声明该首页卡 id 的推荐插件(启用,任一卡命中即可);无则 null。 */
 function findHomePlugin(playlistId: string): any {
   for (const cap of HOME_RECOMMENDER_CAPS) {
     for (const reg of getEnabledByCapability(cap)) {
-      if (reg.manifest?.homePlaylistId === playlistId) return reg;
+      if (homeCardIdsOf(reg.manifest).includes(playlistId)) return reg;
     }
   }
   return null;

@@ -141,6 +141,13 @@ export interface PluginManifest {
    *  (如「今日漫游」= pl-daily-roam)。核心按 homePlaylistId 聚合首页固定卡,
    *  不写死任何歌单 id。 */
   homePlaylistId?: string;
+  /** recommender 插件专用(可选):多首页卡声明。每项对应首页一张固定卡:id 为
+   *  该卡对应的固定歌单 id,name 为卡显示名(位次冲突文案用),showOnHomeKey/
+   *  positionKey 为该卡在 configSchema 中对应的开关/位次字段名(各卡独立键,
+   *  支持一插件多张卡分别控制显隐与位次)。声明本字段后核心按数组聚合多张首页卡;
+   *  仅声明单数 homePlaylistId 时等价于单元素卡(键固定 showOnHome/homePosition,
+   *  名称回落插件名),行为完全不变。 */
+  homePlaylistIds?: Array<{ id: string; name: string; showOnHomeKey: string; positionKey: string }>;
   /** Source plugins only: prefix used to tag daily-recommend imported playlists. */
   recommendPrefix?: string;
   minAppVersion?: string;

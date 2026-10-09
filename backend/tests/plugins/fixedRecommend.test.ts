@@ -12,6 +12,7 @@ import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes } from "../../src/routes/api/index.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../src/services/plugin/fixedRecommend.js";
+import { listHomeCardPlugins, homePositionConflictForSave } from "../../src/services/pluginAccess.js";
 import { FIXED_TODAY_ID } from "../../src/services/plugin/dailyRecommend.js";
 import { LOCAL_FIXED_PLAYLIST_ID } from "../../src/services/plugin/localRecommend.js";
 import { ROAM_PLAYLIST_ID } from "../../src/services/plugin/dailyRoam.js";
@@ -39,7 +40,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
-  for (const id of ["f-fixed", "f-today", "f-local", "f-roam"]) {
+  for (const id of ["f-fixed", "f-today", "f-local", "f-roam", "f-multi", "f-other"]) {
     db.delete(plugins).where(eq(plugins.name, id)).run();
     unregisterPlugin(id);
   }
@@ -149,5 +150,83 @@ describe("fixedRecommend 固定推荐歌单契约", () => {
     const res = await app.request(`/rest/api/playlist/pl-normal-del?${authQS()}`, { method: "DELETE" });
     expect(res.status).toBe(200);
     expect(sqlite.prepare("SELECT id FROM playlists WHERE id = 'pl-normal-del'").get()).toBeFalsy();
+  });
+});
+
+
+describe("fixedRecommend 多首页卡(homePlaylistIds)", () => {
+  const MC_CARDS = [
+    { id: "pl-mc-netease", name: "网易云历史日推", showOnHomeKey: "neteaseShowOnHome", positionKey: "neteaseHomePosition" },
+    { id: "pl-mc-qq", name: "QQ历史日推", showOnHomeKey: "qqShowOnHome", positionKey: "qqHomePosition" },
+    { id: "pl-mc-kugou", name: "酷狗历史日推", showOnHomeKey: "kugouShowOnHome", positionKey: "kugouHomePosition" },
+  ];
+  const MC_SCHEMA = [
+    { key: "neteaseShowOnHome", type: "switch", default: true },
+    { key: "neteaseHomePosition", type: "number", default: 1 },
+    { key: "qqShowOnHome", type: "switch", default: true },
+    { key: "qqHomePosition", type: "number", default: 2 },
+    { key: "kugouShowOnHome", type: "switch", default: true },
+    { key: "kugouHomePosition", type: "number", default: 3 },
+  ];
+
+  function registerMulti(impl?: any) {
+    const manifest = {
+      id: "f-multi", name: "多卡插件", version: "1.0.0", type: "recommender",
+      capabilities: ["recommendPlaylist"],
+      homePlaylistIds: MC_CARDS,
+      configSchema: MC_SCHEMA,
+    };
+    registerPlugin(manifest as any, impl || { runDailyJob: async () => "ok", manifest: null });
+    db.insert(plugins).values({ id: "f-multi", name: "f-multi", enabled: 1, config: "{}" }).run();
+  }
+
+  it("三张卡均按固定推荐歌单识别,未声明 id 不算", () => {
+    registerMulti();
+    expect(isFixedRecommendPlaylist("pl-mc-netease")).toBe(true);
+    expect(isFixedRecommendPlaylist("pl-mc-qq")).toBe(true);
+    expect(isFixedRecommendPlaylist("pl-mc-kugou")).toBe(true);
+    expect(isFixedRecommendPlaylist("pl-mc-none")).toBe(false);
+  });
+
+  it("listHomeCardPlugins 按卡展开,各卡独立读取自己的 showOnHome/position 键", () => {
+    registerMulti();
+    const cards = listHomeCardPlugins().filter((c) => c.pluginId === "f-multi");
+    expect(cards.length).toBe(3);
+    expect(cards.find((c) => c.playlistId === "pl-mc-netease")).toMatchObject({ name: "网易云历史日推", showOnHome: true, position: 1 });
+    expect(cards.find((c) => c.playlistId === "pl-mc-qq")).toMatchObject({ name: "QQ历史日推", showOnHome: true, position: 2 });
+    expect(cards.find((c) => c.playlistId === "pl-mc-kugou")).toMatchObject({ name: "酷狗历史日推", showOnHome: true, position: 3 });
+  });
+
+  it("单数 homePlaylistId 回落:单卡、键 showOnHome/homePosition、名称用插件名(行为不变)", () => {
+    const p = fakeRecommender("f-other", "recommendPlaylist", "pl-single-home");
+    registerPlugin(p.manifest as any, p.impl as any);
+    db.insert(plugins).values({ id: "f-other", name: "f-other", enabled: 1, config: "{}" }).run();
+    const cards = listHomeCardPlugins().filter((c) => c.pluginId === "f-other");
+    expect(cards.length).toBe(1);
+    expect(cards[0]).toMatchObject({ playlistId: "pl-single-home", name: "插件 f-other", showOnHome: false, position: 0 });
+    expect(isFixedRecommendPlaylist("pl-single-home")).toBe(true);
+  });
+
+  it("位次冲突:同插件两张卡占同一位次 → 拒绝(自身卡间)", () => {
+    registerMulti();
+    const r = homePositionConflictForSave("f-multi", { neteaseHomePosition: 21, qqHomePosition: 21, kugouHomePosition: 23 });
+    expect(r).toContain("首页位次 21");
+    expect(r).toContain("占用");
+  });
+
+  it("位次冲突:与其它启用插件的卡同位次 → 拒绝,文案带对方卡名", () => {
+    registerMulti();
+    const p = fakeRecommender("f-other", "recommendPlaylist", "pl-single-home");
+    registerPlugin(p.manifest as any, p.impl as any);
+    db.insert(plugins).values({ id: "f-other", name: "f-other", enabled: 1, config: JSON.stringify({ showOnHome: true, homePosition: 21 }) }).run();
+    const r = homePositionConflictForSave("f-multi", { neteaseHomePosition: 21, qqHomePosition: 22, kugouHomePosition: 23 });
+    expect(r).toContain("首页位次 21");
+    expect(r).toContain("插件 f-other");
+  });
+
+  it("位次不冲突 → null;未显示的卡不参与冲突", () => {
+    registerMulti();
+    expect(homePositionConflictForSave("f-multi", { neteaseHomePosition: 31, qqHomePosition: 32, kugouHomePosition: 33 })).toBeNull();
+    expect(homePositionConflictForSave("f-multi", { qqShowOnHome: false, neteaseHomePosition: 34, kugouHomePosition: 35 })).toBeNull();
   });
 });
