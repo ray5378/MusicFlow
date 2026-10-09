@@ -2,6 +2,12 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.3.1] - 2026-10-09
+
+### Fix
+
+- **插件系统**：修复能力白名单漏登记 `qrLogin` 的集成缺口（v4.3.0 遗漏）：`discovery.ts` 的 `VALID_CAPS` 补 `qrLogin`、`CAP_PERMISSIONS` 补 `qrLogin: ["net", "storage"]` 权限推导——此前 manifest 声明 `qrLogin` 的插件会被 `validateManifest` 以「含非法能力」拒载，扫码动作端点永远不可达；补 manifest 接受性与权限推导回归测试
+
 ## [4.3.0] - 2026-10-09
 
 ### Feat
