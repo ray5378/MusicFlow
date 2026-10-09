@@ -189,9 +189,10 @@ const CAP_METHODS: Record<string, string[]> = {
   localPlatformRecommend: ["runDailyJob", "recommendLocal"],
   playlistCleanup: ["runDailyJob"],
   playlistSync: ["runSyncJob"],
-  // qrLogin:扫码登录三步(startBind 发码 / pollBind 轮询 / cancelBind 清理)。
+  // qrLogin:扫码登录四方法(startBind 发码 / pollBind 轮询 / cancelBind 清理 /
+  // status 配置页常驻绑定状态块)。
   // POST /v1/plugins/:id/action 经 makeImpl 门面调用——白名单不含的方法永远暴露不出来。
-  qrLogin: ["startBind", "pollBind", "cancelBind"],
+  qrLogin: ["startBind", "pollBind", "cancelBind", "status"],
 };
 // source 插件额外暴露 test(连线探测)
 const EXTRA_METHODS = new Set(["test"]);

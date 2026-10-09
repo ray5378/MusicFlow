@@ -27,7 +27,7 @@ export interface QrPayloadLike {
 
 /** action 端点允许调用的方法白名单(与 sandbox.ts CAP_METHODS.qrLogin 对齐;
  *  门禁唯一真源在此,端点与测试共用,不另立第二套白名单)。 */
-export const QR_ACTION_METHODS = ["startBind", "pollBind", "cancelBind"] as const;
+export const QR_ACTION_METHODS = ["startBind", "pollBind", "cancelBind", "status"] as const;
 export type QrActionMethod = (typeof QR_ACTION_METHODS)[number];
 
 /** method 是否在 action 白名单内。 */

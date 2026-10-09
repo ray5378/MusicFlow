@@ -1,6 +1,6 @@
 // withImageDataUrl 归一化 + action 方法白名单(T05 §14.3)单测。
 // 覆盖:image 透传 / url·text 生成二维码 data URL / 非法·超长 value → null 且 value 保留 /
-// 未知 kind·非字符串 → null / 白名单枚举恰好三个方法。
+// 未知 kind·非字符串 → null / 白名单枚举恰好四个方法(status 为第四方法,配置页状态块)。
 import { describe, it, expect } from "vitest";
 import { withImageDataUrl, isQrActionMethod, QR_ACTION_METHODS } from "../../src/plugins/qrAction.js";
 
@@ -62,13 +62,14 @@ describe("qrAction · withImageDataUrl 归一化", () => {
 });
 
 describe("qrAction · 方法白名单", () => {
-  it("恰好三个:startBind / pollBind / cancelBind", () => {
-    expect([...QR_ACTION_METHODS]).toEqual(["startBind", "pollBind", "cancelBind"]);
+  it("恰好四个:startBind / pollBind / cancelBind / status", () => {
+    expect([...QR_ACTION_METHODS]).toEqual(["startBind", "pollBind", "cancelBind", "status"]);
   });
-  it("isQrActionMethod:三个合法 method 为 true,其余(含插件自有方法)为 false", () => {
+  it("isQrActionMethod:四个合法 method 为 true,其余(含插件自有方法)为 false", () => {
     expect(isQrActionMethod("startBind")).toBe(true);
     expect(isQrActionMethod("pollBind")).toBe(true);
     expect(isQrActionMethod("cancelBind")).toBe(true);
+    expect(isQrActionMethod("status")).toBe(true);
     expect(isQrActionMethod("runDailyJob")).toBe(false);
     expect(isQrActionMethod("search")).toBe(false);
     expect(isQrActionMethod(undefined)).toBe(false);

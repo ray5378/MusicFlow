@@ -385,6 +385,18 @@
       </div>
 
       <div v-if="canSaveConfig && configFields.length > 0">
+        <!-- 绑定状态常驻块(qrLogin 能力插件):打开配置/刷新时调 status 方法直显
+             每平台「已绑定:昵称(凭据有效/已失效,请重新绑定)/未绑定」,失败显示状态未知 -->
+        <div v-if="qrStatusBlockVisible" class="pd-section qr-status-block">
+          <h4>{{ t('admin.plugins.qrStatusTitle') }}</h4>
+          <div v-if="qrStatusFailed" class="qr-status-row">{{ t('admin.plugins.qrStatusUnknown') }}</div>
+          <template v-else>
+            <div v-for="row in qrStatusRows" :key="row.platform" class="qr-status-row">
+              <img v-if="row.avatarUrl" :src="row.avatarUrl" class="qr-status-avatar" alt="" />
+              <span :class="{ 'qr-status-invalid-text': row.invalid }">{{ row.text }}</span>
+            </div>
+          </template>
+        </div>
         <template v-for="g in groupedConfigFields" :key="g.key">
           <div class="pd-section">
             <h4>{{ g.label }}</h4>
@@ -576,13 +588,13 @@
       :method="qrMethod"
       :title="qrTitle"
       :params="qrParams"
-      @success="loadPlugins"
+      @success="() => { loadPlugins(); loadQrStatus(); }"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
@@ -1296,6 +1308,51 @@ function openQrAction(f: any) {
   qrDialogVisible.value = true;
 }
 
+// ---- 绑定状态常驻块(v4.3.2):qrLogin 能力插件打开配置时调 status 方法直显 ----
+const qrStatus = ref<any>(null);
+const qrStatusFailed = ref(false);
+const qrStatusBlockVisible = computed(() => {
+  if (!editing.value) return false;
+  const m = parseManifest(editing.value);
+  return (m.capabilities || []).includes("qrLogin") && configFields.value.some((f: any) => f.type === "action");
+});
+const qrStatusRows = computed(() => {
+  const st = qrStatus.value;
+  const plats = st && st.platforms && typeof st.platforms === "object" ? st.platforms : {};
+  const rows: Array<{ platform: string; text: string; avatarUrl: string; invalid: boolean }> = [];
+  for (const key of Object.keys(plats)) {
+    const p = plats[key] || {};
+    const name = String(p.label || key);
+    if (!p.bound) {
+      rows.push({ platform: key, text: `${name}：${t('admin.plugins.qrStatusUnbound')}`, avatarUrl: "", invalid: false });
+      continue;
+    }
+    const suffix = p.valid === true ? t('admin.plugins.qrStatusValid') : p.valid === false ? t('admin.plugins.qrStatusInvalid') : t('admin.plugins.qrStatusUnknown');
+    rows.push({
+      platform: key,
+      text: `${t('admin.plugins.qrStatusBound', { name: p.nickname || '-' })}（${suffix}）`,
+      avatarUrl: String(p.avatarUrl || ""),
+      invalid: p.valid === false,
+    });
+  }
+  return rows;
+});
+async function loadQrStatus(): Promise<void> {
+  if (!qrStatusBlockVisible.value || !editing.value) return;
+  qrStatusFailed.value = false;
+  qrStatus.value = null;
+  try {
+    const res = await api.post(`/rest/api/v1/plugins/${editing.value.id}/action`, { method: "status", params: {} });
+    const data = res?.data ?? {};
+    const st = data?.result ?? data;
+    if (st && st.platforms && typeof st.platforms === "object") qrStatus.value = st;
+    else qrStatusFailed.value = true;
+  } catch {
+    qrStatusFailed.value = true; // status 失败静默显示「状态未知」
+  }
+}
+watch(showConfigDialog, (v) => { if (v) void loadQrStatus(); });
+
 async function testSource() {
   if (!editing.value) return;
   testing.value = true;
@@ -1550,6 +1607,11 @@ onMounted(() => {
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
+.qr-status-block { margin-bottom: 8px; }
+.qr-status-block h4 { margin: 0 0 8px; }
+.qr-status-row { display: flex; align-items: center; gap: 8px; font-size: 13px; line-height: 1.8; color: var(--el-text-color-primary); }
+.qr-status-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; flex: none; }
+.qr-status-invalid-text { color: var(--el-color-danger); }
 .tag-input-wrap { width: 100%; }
 .tag-input-wrap .tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .tag-input-wrap .tag-actions { margin-top: 10px; }
