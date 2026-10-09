@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.3.2] - 2026-10-09
+
+### Feat
+
+- plugins: 扫码登录弹窗平台下拉(切换即取消旧会话按新平台重新出码, 选项由插件 status 下发); qrLogin status 方法直达插件配置页常驻绑定状态块
+- plugins: 首页固定推荐卡多卡扩展 —— manifest.homePlaylistIds 数组声明多张卡, 每卡独立 showOnHome/homePosition, 位次冲突校验含插件自身多卡; 固定推荐歌单自愈(ensureHomePlaylist)支持多卡
+- frontend: 扫码弹窗绑定状态行补平台名前缀
+
+### Fix
+
+- plugins: 多条 Set-Cookie 合并防 undici forEach 覆盖丢 p_skey; pluginHttp 新增 setCookieList(getSetCookie) 逐条数组; 二进制响应 base64 过桥防 NUL 截断
+- frontend: 首页固定推荐卡展示门槛 >30 改 >15, 恰 30 首的历史日推卡不再被误杀
+- plugins: 插件歌单缺省名中性化(遗留「ListenBrainz 推荐」会误标其它插件新建歌单)
+
 ## [4.3.1] - 2026-10-09
 
 ### Fix
