@@ -54,6 +54,9 @@ const VALID_CAPS: PluginCapability[] = [
   "playlistCleanup",
   "lyricProvider", "coverProvider", "renderer", "scrobbler",
   "artistInfo",
+  // 交互能力(T05 §14):扫码登录三方法 startBind/pollBind/cancelBind,
+  // 经 POST /v1/plugins/:id/action 门面调用(sandbox.ts CAP_METHODS.qrLogin)。
+  "qrLogin",
 ];
 
 // 能力 → 该能力实现「必然需要」的宿主权限。
@@ -71,6 +74,8 @@ const VALID_CAPS: PluginCapability[] = [
 //   host.comm → inter-plugin。具体能力的 impl 内部会调用哪些 host.* 由插件决定,
 // 这里取「该能力可能用到」的最小权限集(网络型能力一律 net)。
 const CAP_PERMISSIONS: Record<string, string[]> = {
+  // qrLogin:扫码登录走 host.http 取/轮询平台二维码 + host.storage 存会话与绑定态。
+  qrLogin: ["net", "storage"],
   // 源 / 在线能力:实现几乎都走 host.http 取数据 → net
   search: ["net"],
   playlistSearch: ["net"],  // searchPlaylists 走 host.http
