@@ -625,7 +625,16 @@ export async function discoverExternalPlugins(
               : await res.text();
             if (body.length > MAX_BODY) return { ok: false, status: 0, headers: {}, body: "", error: "响应过大(> 20MB),已拒绝" };
             const headers: Record<string, string> = {};
-            res.headers.forEach((v, k) => { headers[k] = v; });
+            res.headers.forEach((v, k) => {
+              // 多条 Set-Cookie 不可覆盖:undici forEach 逐条回调,直接赋值只留
+              // 最后一条(ptlogin2 check_sig 一跳 8 枚 cookie,p_skey 被丢即 QQ
+              // 登录置链必败)。合并为逗号连接串,与插件侧 cookie 解析器兼容。
+              if (k === "set-cookie") {
+                headers[k] = headers[k] ? headers[k] + ", " + v : v;
+                return;
+              }
+              headers[k] = v;
+            });
             return { ok: res.ok, status: res.status, headers, body };
           } catch (e: any) {
             return { ok: false, status: 0, headers: {}, body: "", error: String(e?.message || e) };

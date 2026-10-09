@@ -46,6 +46,8 @@
           </el-button>
         </div>
         <div v-else class="qr-waiting">{{ t('admin.plugins.qrWaiting') }}</div>
+        <!-- pollBind 上报的错误(如上游风控文案):直显插件本地化消息,不打断轮询 -->
+        <div v-if="pollErrorMsg && !success && !expired" class="qr-poll-error">{{ pollErrorMsg }}</div>
       </template>
     </div>
     <template #footer>
@@ -63,7 +65,9 @@
 //     插件下发;缺省兜底 2s);801 待扫继续 / 802 过期 → 停轮询显示刷新 / 800 成功
 //     → Toast(含昵称) + emit success + 停留 ~2s 展示登录账号后自动关弹窗;
 //   - 关闭弹窗(R24-AC④)→ 立即停轮询 + 发 cancelBind 清理会话(成功关闭同样清理);
-//   - 轮询单次失败容忍(网络抖动),不中断循环;
+//   - 轮询单次失败容忍(网络抖动),不中断循环;插件上报 state:"error" 时直显其
+//     message(风控文案等)但继续轮询;并发 poll 迟到响应(成功后清理会话的 802)
+//     不覆盖成功态(v4.3.2 真机修复);
 //   - 绑定状态行:payload.boundAccount(昵称/头像)+ payload.authValid(true 有效 /
 //     false 失效)由插件探测下发,前端只直显,不做任何判断逻辑。
 import { ref, computed, watch, onUnmounted } from "vue";
@@ -96,6 +100,8 @@ const payload = ref<any>(null);
 const expired = ref(false);
 const success = ref(false);
 const successText = ref("");
+/** 最近一次 pollBind 上报的 error message(轮询持续,不中断;成功/过期即清)。 */
+const pollErrorMsg = ref("");
 
 /** 绑定状态回显(插件 startBind 下发;未下发/未绑定为 null → 不渲染状态行)。 */
 const boundAccount = computed<any>(() => {
@@ -146,6 +152,7 @@ async function start(): Promise<void> {
   expired.value = false;
   success.value = false;
   successText.value = "";
+  pollErrorMsg.value = "";
   payload.value = null;
   sessionKey = null;
   try {
@@ -171,6 +178,11 @@ async function poll(): Promise<void> {
   } catch {
     return; // 单次轮询失败容忍,下个周期再试
   }
+  // 竞态守卫:轮询间隔短于上游响应时多个 poll 并发在途;成功路径会删除会话,
+  // 迟到的并发 poll 拿到 802「会话不存在」,若不拦会把已显示的成功态覆盖成
+  // 过期态(真机实测:酷狗凭据已落库但弹窗无成功反应)。
+  if (success.value || expired.value || sessionKey === null) return;
+  if (result?.state === "error") pollErrorMsg.value = String(result?.message || "");
   const code = result?.code;
   if (code === 800) {
     success.value = true;
@@ -237,6 +249,7 @@ onUnmounted(() => {
 
 <style scoped>
 .qr-body { display: flex; flex-direction: column; align-items: center; gap: 12px; min-height: 200px; justify-content: center; }
+.qr-poll-error { color: var(--el-color-danger); font-size: 12px; line-height: 1.5; text-align: center; white-space: pre-wrap; word-break: break-all; margin-top: -4px; }
 .qr-img { width: 240px; height: 240px; object-fit: contain; }
 .qr-waiting { color: var(--el-text-color-secondary, #909399); font-size: 13px; }
 .qr-expired { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--el-color-warning, #e6a23c); font-size: 13px; }
