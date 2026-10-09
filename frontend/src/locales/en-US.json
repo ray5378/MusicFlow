@@ -1277,7 +1277,7 @@
       "qrAuthInvalid": "credentials expired, please re-bind",
       "qrSuccessAs": "Logged in as {name}",
       "qrStatusTitle": "Binding Status",
-      "qrStatusBound": "Bound: {name}",
+      "qrStatusBound": "Bound to {name}",
       "qrStatusValid": "credentials valid",
       "qrStatusInvalid": "credentials expired, please re-bind",
       "qrStatusUnknown": "status unknown",

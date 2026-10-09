@@ -13,6 +13,13 @@
     :append-to-body="true"
     @update:model-value="(v: any) => onVisibleChange(!!v)"
   >
+    <!-- 平台下拉(多平台插件):切换即取消当前会话并按新平台重新出码;选项由
+         status 结果 platforms 下发(插件中文名 label),核心不写死任何平台。 -->
+    <div v-if="platformOptions.length > 1" class="qr-platform-row">
+      <el-select v-model="selectedPlatform" size="small" style="width: 220px" @change="onPlatformChange">
+        <el-option v-for="o in platformOptions" :key="o.value" :label="o.label" :value="o.value" />
+      </el-select>
+    </div>
     <div v-loading="loading" class="qr-body">
       <!-- 绑定状态回显:打开弹窗时插件对存量凭据做了轻量探测(不阻塞出码)。
            authValid=false 明确提示重新绑定;true 提示当前凭据仍有效。 -->
@@ -86,6 +93,9 @@ const props = defineProps<{
   /** 附加参数(manifest action 字段 args,如 {platform:"netease"}):
    *  与 sessionKey 合并后随 start/poll/cancel 全程透传给插件方法。 */
   params?: Record<string, unknown> | null;
+  /** 平台选项(多平台插件):由配置页 status 结果 platforms 下发({value,label});
+   *  >1 项时弹窗顶部渲染下拉,切换即按新平台重新出码。 */
+  platforms?: Array<{ value: string; label: string }> | null;
 }>();
 
 const emit = defineEmits<{
@@ -113,6 +123,10 @@ const authValid = computed<boolean | null>(() => {
   return typeof v === "boolean" ? v : null;
 });
 
+/** 平台下拉:选项由父层传(status 结果下发);当前值缺省取 params.platform。 */
+const platformOptions = computed(() => (props.platforms || []).filter((o) => o && o.value && o.label));
+const selectedPlatform = ref<string>("");
+
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let successTimer: ReturnType<typeof setTimeout> | null = null;
 let pollIntervalMs = 2000; // 插件未下发时的兜底;正常路径以响应 pollIntervalMs 为准
@@ -121,7 +135,9 @@ let cancelled = false;
 
 /** 合并附加参数(args)与本调用键:args 在前、调用键在后(后者不可被覆盖)。 */
 function actionParams(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { ...(props.params || {}), ...extra };
+  const merged: Record<string, unknown> = { ...(props.params || {}), ...extra };
+  if (selectedPlatform.value) merged.platform = selectedPlatform.value;
+  return merged;
 }
 
 function stopPolling(): void {
@@ -217,6 +233,15 @@ async function cancel(): Promise<void> {
   }
 }
 
+/** 下拉切平台:取消旧会话 → 按新平台重新出码(cancel 后重置 cancelled,
+ *  保证弹窗关闭时新会话仍能被正确清理)。 */
+async function onPlatformChange(): Promise<void> {
+  if (!props.modelValue) return;
+  await cancel();
+  cancelled = false;
+  await start();
+}
+
 function onVisibleChange(v: boolean): void {
   if (!v) {
     stopPolling();
@@ -231,6 +256,7 @@ watch(
   (v) => {
     if (v) {
       cancelled = false;
+      selectedPlatform.value = String(props.params?.platform || platformOptions.value[0]?.value || "");
       void start();
     } else {
       stopPolling();
@@ -255,6 +281,7 @@ onUnmounted(() => {
 .qr-expired { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--el-color-warning, #e6a23c); font-size: 13px; }
 .qr-fallback { display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 100%; }
 .qr-link-text { word-break: break-all; color: var(--el-text-color-secondary, #909399); font-size: 12px; max-width: 300px; }
+.qr-platform-row { display: flex; justify-content: center; }
 .qr-status { font-size: 13px; color: var(--el-color-success, #67c23a); text-align: center; max-width: 320px; }
 .qr-status-invalid { color: var(--el-color-error, #f56c6c); }
 .qr-success-view { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--el-color-success, #67c23a); font-size: 14px; }

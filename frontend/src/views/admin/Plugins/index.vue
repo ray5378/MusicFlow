@@ -588,6 +588,7 @@
       :method="qrMethod"
       :title="qrTitle"
       :params="qrParams"
+      :platforms="qrPlatformOptions"
       @success="() => { loadPlugins(); loadQrStatus(); }"
     />
   </div>
@@ -1330,12 +1331,19 @@ const qrStatusRows = computed(() => {
     const suffix = p.valid === true ? t('admin.plugins.qrStatusValid') : p.valid === false ? t('admin.plugins.qrStatusInvalid') : t('admin.plugins.qrStatusUnknown');
     rows.push({
       platform: key,
-      text: `${t('admin.plugins.qrStatusBound', { name: p.nickname || '-' })}（${suffix}）`,
+      text: `${name}：${t('admin.plugins.qrStatusBound', { name: p.nickname || '-' })}（${suffix}）`,
       avatarUrl: String(p.avatarUrl || ""),
       invalid: p.valid === false,
     });
   }
   return rows;
+});
+/** 弹窗平台下拉选项:status 结果 platforms 下发({value,label});status 未就绪时
+ *  为空数组 → 弹窗不渲染下拉(退化为基础单平台出码)。 */
+const qrPlatformOptions = computed(() => {
+  const st = qrStatus.value;
+  const plats = st && st.platforms && typeof st.platforms === "object" ? st.platforms : {};
+  return Object.keys(plats).map((k) => ({ value: k, label: String(plats[k]?.label || k) }));
 });
 async function loadQrStatus(): Promise<void> {
   if (!qrStatusBlockVisible.value || !editing.value) return;

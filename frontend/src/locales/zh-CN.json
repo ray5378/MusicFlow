@@ -1277,7 +1277,7 @@
       "qrAuthInvalid": "凭据已失效，请重新绑定",
       "qrSuccessAs": "登录成功：{name}",
       "qrStatusTitle": "绑定状态",
-      "qrStatusBound": "已绑定：{name}",
+      "qrStatusBound": "已绑定 {name}",
       "qrStatusValid": "凭据有效",
       "qrStatusInvalid": "凭据已失效，请重新绑定",
       "qrStatusUnknown": "状态未知",
