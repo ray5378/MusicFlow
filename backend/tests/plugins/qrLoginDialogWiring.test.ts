@@ -103,7 +103,9 @@ describe("status 第四方法(配置页常驻绑定状态块)", () => {
   });
 
   it("插件仓 check.mjs 方法白名单同步(含 status)", () => {
-    expect(readSibling("scripts/check.mjs")).toContain(
+    const chk = readSibling("scripts/check.mjs");
+    if (!chk) return; // 插件仓未检出(主仓 CI)时跳过 —— 与上面用例同守卫,漏加曾炸 CI 全量门禁
+    expect(chk).toContain(
       'qrLogin: ["startBind", "pollBind", "cancelBind", "status"],'
     );
   });
