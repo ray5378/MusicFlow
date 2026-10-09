@@ -615,7 +615,14 @@ export async function discoverExternalPlugins(
             const MAX_BODY = 20 * 1024 * 1024;
             const cl = Number(res.headers.get("content-length") || 0);
             if (cl > MAX_BODY) return { ok: false, status: 0, headers: {}, body: "", error: `响应过大(${cl} 字节 > 20MB),已拒绝` };
-            const body = await res.text();
+            // opt-in 二进制通道(4.3.2):init.encoding="base64" 时响应体以 base64 回传
+            // (PNG 等)。⚠️ 不做 latin1 字节串:沙箱桥 newString 走 NUL 结尾 C 串,
+            // 含 0x00 的 latin1 串会被截断(PNG 头部即含 NUL,实测截到 8 字节);
+            // base64 纯 ASCII 免截断,插件侧直接拼 data:image/png;base64, 前缀。
+            // 默认仍 utf8 文本。
+            const body = (init as any)?.encoding === "base64"
+              ? Buffer.from(await res.arrayBuffer()).toString("base64")
+              : await res.text();
             if (body.length > MAX_BODY) return { ok: false, status: 0, headers: {}, body: "", error: "响应过大(> 20MB),已拒绝" };
             const headers: Record<string, string> = {};
             res.headers.forEach((v, k) => { headers[k] = v; });

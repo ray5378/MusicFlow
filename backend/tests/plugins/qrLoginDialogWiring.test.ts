@@ -1,0 +1,56 @@
+// QQ 扫码改版(ptlogin2 通道,go-music-dl 蓝本)+ 前端弹窗接线的源码级守卫测试。
+// 前端无单测运行器(SPEC §九1 禁新增 devDependency),组件行为用「源码接线断言 +
+// check-frontend-no-qr 守卫 + npm run build」组合覆盖(T05 qrAction 同款模式)。
+import { readFileSync } from "node:fs";
+import { describe, it, expect } from "vitest";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+
+describe("QrLoginDialog v4.3.2 接线(params 透传 + 状态回显 + 成功昵称)", () => {
+  const dialog = read("frontend/src/components/QrLoginDialog.vue");
+  const index = read("frontend/src/views/admin/Plugins/index.vue");
+
+  it("弹窗声明 params prop 并在 start/poll/cancel 全程合并透传", () => {
+    expect(dialog).toContain("params?: Record<string, unknown> | null");
+    // actionParams 统一合并(args 在前、sessionKey 不可被覆盖),三个调用点都要走它
+    expect(dialog).toContain("function actionParams(");
+    expect(dialog).toContain("callAction(props.method, actionParams())");
+    expect(dialog).toContain('callAction("pollBind", actionParams({ sessionKey }))');
+    expect(dialog).toContain('callAction("cancelBind", actionParams({ sessionKey }))');
+  });
+
+  it("绑定状态行:boundAccount/authValid 直显,null 不给判定(探测失败≠失效)", () => {
+    expect(dialog).toContain("payload.boundAccount");
+    expect(dialog).toContain("authValid !== null");
+    expect(dialog).toContain("qrBoundAccount");
+    expect(dialog).toContain("qrAuthInvalid");
+  });
+
+  it("800 成功显示登录昵称(qrSuccessAs)后自动关弹窗", () => {
+    expect(dialog).toContain("qrSuccessAs");
+    expect(dialog).toContain("successTimer = setTimeout(");
+  });
+
+  it("配置页把 manifest action 字段的 args 传给弹窗", () => {
+    expect(index).toContain('qrParams.value = f.args && typeof f.args === "object" ? { ...f.args } : null');
+    expect(index).toContain(':params="qrParams"');
+  });
+
+  it("零 QR 编码逻辑仍成立(不出现编码器导入/dataURL 自拼)", () => {
+    expect(dialog).not.toMatch(/qrToSvg|qrcode\.js|data:image\/svg\+xml/);
+  });
+});
+
+describe("ptlogin2 通道配套机制", () => {
+  it("types.ts ConfigField 增加可选 args 注记", () => {
+    expect(read("backend/src/plugins/types.ts")).toContain("args?: Record<string, string>");
+  });
+
+  it("discovery.ts pluginHttp 支持 base64 二进制 opt-in(PNG 通道,latin1 会被沙箱桥 U+0000 截断)", () => {
+    expect(read("backend/src/plugins/discovery.ts")).toContain('encoding === "base64"');
+    expect(read("backend/src/plugins/discovery.ts")).not.toContain('encoding === "latin1"');
+  });
+});

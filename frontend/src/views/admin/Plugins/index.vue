@@ -575,6 +575,7 @@
       :plugin-id="qrPluginId"
       :method="qrMethod"
       :title="qrTitle"
+      :params="qrParams"
       @success="loadPlugins"
     />
   </div>
@@ -1283,11 +1284,15 @@ const qrDialogVisible = ref(false);
 const qrPluginId = ref("");
 const qrMethod = ref("");
 const qrTitle = ref("");
+// v4.3.2:action 字段的静态附加参数(manifest args,如 {platform:"qq"})——
+// 与 sessionKey 合并后随 start/poll/cancel 全程透传,两平台独立绑定入口靠它区分。
+const qrParams = ref<Record<string, unknown> | null>(null);
 function openQrAction(f: any) {
   if (!editing.value) return;
   qrPluginId.value = String(editing.value.id ?? "");
   qrMethod.value = String(f.action || f.key || "");
   qrTitle.value = String(f.label || f.action || f.key || "");
+  qrParams.value = f.args && typeof f.args === "object" ? { ...f.args } : null;
   qrDialogVisible.value = true;
 }
 

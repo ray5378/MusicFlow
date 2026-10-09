@@ -83,6 +83,10 @@ export interface ConfigField {
   /** action 字段专用:点击按钮 → POST /v1/plugins/:id/action 调用本方法名(如 startBind),
    *  结果(QrPayload)经后端归一化(imageDataUrl)后由前端通用扫码弹窗展示。 */
   action?: string;
+  /** action 字段可选静态参数(如 {platform:"qq"}):前端点击按钮时合并进 action 请求的
+   *  body.params,与 method 一并透传给插件方法;后端原样转发不解释。用于同一 method
+   *  服务多入口(如两平台各自的 startBind 绑定按钮)。 */
+  args?: Record<string, string>;
   /** 配置分组标识,前端按此字段将配置项圈入带标题的功能模块框。如 "backend","recommend","keyword","frontend"。 */
   group?: string;
 }
