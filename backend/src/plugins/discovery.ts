@@ -635,7 +635,13 @@ export async function discoverExternalPlugins(
               }
               headers[k] = v;
             });
-            return { ok: res.ok, status: res.status, headers, body };
+            // getSetCookie()(Node 24 undici):逐条数组直出,免「合串再拆」的逗号歧义
+            // (expires 日期自带逗号,朴素 split 把日期炸成假 cookie —— 240 真机
+            // MUSIC_U 丢失根因链一环)。数组经桥序列化安全;插件侧 setCookieList 优先。
+            const setCookieList: string[] = typeof (res.headers as any).getSetCookie === "function"
+              ? (res.headers as any).getSetCookie()
+              : (headers["set-cookie"] ? [headers["set-cookie"]] : []);
+            return { ok: res.ok, status: res.status, headers, setCookieList, body };
           } catch (e: any) {
             return { ok: false, status: 0, headers: {}, body: "", error: String(e?.message || e) };
           }

@@ -119,6 +119,10 @@ describe("status 第四方法(配置页常驻绑定状态块)", () => {
   it("QQ 修复:删除型 Set-Cookie 不覆盖有效值(p_skey)", () => {
     const plugin = readSibling("plugins/daily-rec-platform/index.js");
     if (!plugin) return; // 插件仓未检出(主仓 CI)时跳过
-    expect(plugin).toContain("val !== \"\"");
+    // T05b 重写为 utils_mergeCookieEntry:空值跳过语义由 COOKIE_ATTRS/val==="" 守卫
+    expect(plugin).toContain('if (!name || COOKIE_ATTRS[name.toLowerCase()] || val === "") return jar;');
+    // 逗号日期安全:RFC 感知拆分(仅「token=」后随才是分隔符),不再朴素按逗号切
+    expect(plugin).toContain("function utils_splitSetCookie");
+    expect(plugin).toContain("function utils_mergeCookieEntry");
   });
 });
