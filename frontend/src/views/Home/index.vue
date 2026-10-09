@@ -181,7 +181,8 @@ async function playPl(pl: any) {
 }
 
 // 首页固定推荐卡：由各推荐插件配置 showOnHome + homePosition 决定。
-// 核心经 /v1/recommend/home-cards 按位次排序返回,前端只做 >30 首门槛过滤。
+// 核心经 /v1/recommend/home-cards 按位次排序返回,前端只做 >=30 首门槛过滤。
+// (曾为 >30:历史日推等恰 30 首的固定卡被误杀不显示,240 真机实锤 → 改 >=。)
 const homeCards = ref<any[]>([]);
 async function loadHomeCards() {
   try {
@@ -194,7 +195,7 @@ async function loadHomeCards() {
 // 归一化为歌单形状(playPl/playlistActions 都按 id/name 工作),带 isCombo 标记。
 const fixedCards = computed<any[]>(() =>
   homeCards.value
-    .filter((c) => c.songCount > 30) // 保持 >30 首展示门槛(用户确认)
+    .filter((c) => c.songCount >= 30) // >=30 首展示门槛(恰 30 首的固定卡如历史日推也要显示)
     .map((c) => ({
       id: c.playlistId,
       playlistId: c.playlistId, // 模板点击跳转用(此前缺失 → /playlists/undefined)
