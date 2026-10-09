@@ -721,7 +721,7 @@ export async function discoverExternalPlugins(
             return rows;
           },
           replaceEntries: async (playlistId: string, entries: any[]) =>
-            upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "ListenBrainz 推荐", entries: entries || [] }, id),
+            upsertPluginPlaylist(String(playlistId), { name: (sqlite.prepare("SELECT name FROM playlists WHERE id = ?").get(String(playlistId)) as any)?.name || "插件歌单", entries: entries || [] }, id),
           updateCover: async (playlistId: string, coverSongId: string) => {
             const cover = firstPlayableCoverFile(String(playlistId), { preferSongId: String(coverSongId) });
             if (cover) sqlite.prepare("UPDATE playlists SET cover_art = ?, updated_at = ? WHERE id = ?").run(cover, new Date().toISOString(), String(playlistId));
@@ -848,8 +848,10 @@ function refreshPluginPlaylistCounts(playlistId: string): void {
  *  { songId } 本地歌曲;或 { externalSongId, externalTitle, externalArtist, externalAlbum?, externalDuration? } 外部条目。 */
 async function upsertPluginPlaylist(playlistId: string, opts: any, sourcePlugin?: string): Promise<any> {
   const now = new Date().toISOString();
-  const name = String(opts?.name || "ListenBrainz 推荐");
-  const desc = opts?.description || "ListenBrainz 推荐歌单";
+  // 缺省名中性化(遗留 "ListenBrainz 推荐" 会把其他插件 replaceEntries 新建的歌单误标成 LB);
+  // listenbrainz 插件自身 upsert 恒传 name,不受影响。
+  const name = String(opts?.name || "插件歌单");
+  const desc = opts?.description || "由插件生成的歌单";
   // 平台标签(前端显示徽标):插件可传 sourcePlatform(如 "netease"/"qq"/"kugou"/"soda")
   // 与 sourceUrl;缺省保持历史默认('listenbrainz' / lb://),向后兼容。
   const sourcePlatform = typeof opts?.sourcePlatform === "string" && opts.sourcePlatform ? String(opts.sourcePlatform) : "listenbrainz";

@@ -656,7 +656,7 @@ describe("host.playlists replaceEntries(已存在走 UPDATE,不存在走 INSERT)
     const row: any = await kitEnv().playlists.replaceEntries("pl-b29-fresh-rep", [{ songId: "r-1" }]);
     expect(row).toBeTruthy();
     const got: any = await kitEnv().playlists.get("pl-b29-fresh-rep");
-    expect(got.name).toBe("ListenBrainz 推荐"); // 无 name 时的兜底
+    expect(got.name).toBe("插件歌单"); // 无 name 时的兜底(中性名,不再误标 ListenBrainz)
     expect(got.source_plugin).toBe(PLUG_ID);
     expect(got.source_platform).toBe("listenbrainz");
     expect(got.entries).toHaveLength(1);
