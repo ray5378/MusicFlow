@@ -577,8 +577,10 @@ describe("fetch 路由：洗版端点", () => {
     expect(cfg.__upgrade.originalDisposal.action).toBe("delete"); // 产品定调 2026-10-10：洗版默认删除原版;
     expect(Array.isArray(cfg.__upgrade.originalDisposal.allowedRoots)).toBe(true);
 
-    // 有可洗目标 → 起了批量子进程
-    expect(runBatchJobMock).toHaveBeenCalled();
+    // 有可洗目标 → 起了批量子进程（runBatchJob 是任务创建后的异步触发，
+    // CI 全量高并发下事件循环延迟会让同步断言先于触发执行 → 必现假失败，
+    // 本地快机不可复现；waitFor 轮询到触发为止，2026-10-11 v4.4.0 两次 CI 红修复）
+    await vi.waitFor(() => expect(runBatchJobMock).toHaveBeenCalled(), { timeout: 5000 });
   });
 
   it("POST /v1/fetch/upgrade/tasks：无目标 → 立即终态 done，不启动批量", async () => {
