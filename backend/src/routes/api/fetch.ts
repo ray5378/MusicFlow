@@ -263,13 +263,23 @@ export function registerFetch(app: Hono): void {
     }
     const body = await c.req.json().catch(() => ({}));
     const onlyFailed = !!body?.onlyFailed;
+    // 显式 targetIds（前端逐曲重试）优先；未给则按 onlyFailed 挑选未完成项。
+    const rawIds = Array.isArray(body?.targetIds) ? (body.targetIds as unknown[]) : null;
 
     // 从旧 items 里挑出待重试项的 targetId。
     const retryIds = new Set<string>();
-    for (const it of job.items) {
-      const failedLike = it.status === "failed" || it.status === "cancelled";
-      const notDone = it.status !== "done";
-      if (onlyFailed ? failedLike : notDone) retryIds.add(it.targetId);
+    if (rawIds && rawIds.length > 0) {
+      // 白名单与 job.items 求交：只保留真实存在且未完成的 targetId（此时忽略 onlyFailed）。
+      const wanted = new Set(rawIds.map((v) => String(v)));
+      for (const it of job.items) {
+        if (wanted.has(it.targetId) && it.status !== "done") retryIds.add(it.targetId);
+      }
+    } else {
+      for (const it of job.items) {
+        const failedLike = it.status === "failed" || it.status === "cancelled";
+        const notDone = it.status !== "done";
+        if (onlyFailed ? failedLike : notDone) retryIds.add(it.targetId);
+      }
     }
     const origTargets: any[] = Array.isArray(job.targets?.targets) ? job.targets.targets : [];
     const targets = origTargets.filter((t) => retryIds.has(String(t?.id)));

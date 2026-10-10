@@ -13,6 +13,12 @@ import { users, settings } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { _resetSettingsCacheForTest } from "../../src/services/settings.js";
+import {
+  _resetFetchJobsForTest,
+  createFetchJob,
+  getFetchJob,
+  saveFetchJobItems,
+} from "../../src/services/fetch/jobStore.js";
 
 const { runBatchJobMock } = vi.hoisted(() => ({
   runBatchJobMock: vi.fn(async () => ({ result: { hasMore: false }, aborted: false, childRss: 0 })),
@@ -68,11 +74,39 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  // 用例顺序不保证，清掉已存配置覆盖项 + 失效 settings 内存缓存。
+  // 用例顺序不保证，清掉已存配置覆盖项 + 失效 settings 内存缓存 + 清空 fetch_jobs。
   db.delete(settings).where(eq(settings.key, "fetch.config")).run();
   _resetSettingsCacheForTest();
+  _resetFetchJobsForTest();
   runBatchJobMock.mockClear();
 });
+
+/**
+ * 造一个含 3 个 items 的任务：done / failed / queued（三者都带对应 target）。
+ * 返回 jobId 与三条 targetId，供 retry 选择语义的用例断言。
+ */
+function seedJob(): { jobId: string; done: string; failed: string; queued: string } {
+  const done = "t-done";
+  const failed = "t-failed";
+  const queued = "t-queued";
+  const job = createFetchJob({
+    kind: "manual",
+    targets: {
+      targets: [
+        { id: done, title: "A" },
+        { id: failed, title: "B" },
+        { id: queued, title: "C" },
+      ],
+    },
+    config: {},
+  });
+  saveFetchJobItems(job.id, [
+    { id: done, targetId: done, status: "done", attempts: 1 },
+    { id: failed, targetId: failed, status: "failed", attempts: 1, errorCode: "TIMEOUT" },
+    { id: queued, targetId: queued, status: "queued", attempts: 0 },
+  ]);
+  return { jobId: job.id, done, failed, queued };
+}
 
 describe("fetch 域：配置 / 音源 / 任务", () => {
   it("GET /v1/fetch/config 返回默认合并结果", async () => {
@@ -117,5 +151,29 @@ describe("fetch 域：配置 / 音源 / 任务", () => {
     const r = await call("GET", "/v1/fetch/jobs/does-not-exist");
     expect(r.status).toBe(404);
     expect(r.body.success).toBe(false);
+  });
+
+  it("POST /jobs/:id/retry with targetIds：只重试显式指定且未完成的条目", async () => {
+    const { jobId, queued } = seedJob();
+    const r = await call("POST", `/v1/fetch/jobs/${jobId}/retry`, { targetIds: [queued] });
+    expect(r.status).toBe(200);
+    expect(r.body.success).toBe(true);
+    expect(r.body.jobId).toBeTruthy();
+
+    const newJob = getFetchJob(r.body.jobId)!;
+    expect(newJob.targets.targets.length).toBe(1);
+    expect(newJob.targets.targets[0].id).toBe(queued);
+  });
+
+  it("POST /jobs/:id/retry with onlyFailed：回归保护，只重试 failed 条目", async () => {
+    const { jobId, failed } = seedJob();
+    const r = await call("POST", `/v1/fetch/jobs/${jobId}/retry`, { onlyFailed: true });
+    expect(r.status).toBe(200);
+    expect(r.body.success).toBe(true);
+    expect(r.body.jobId).toBeTruthy();
+
+    const newJob = getFetchJob(r.body.jobId)!;
+    expect(newJob.targets.targets.length).toBe(1);
+    expect(newJob.targets.targets[0].id).toBe(failed);
   });
 });
