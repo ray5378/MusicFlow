@@ -42,6 +42,7 @@ import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
 import { findExistingPlayable } from "./existing.js";
 import { ensureDownloadSource } from "./source.js";
+import { disposeOriginalFile, migrateUpgradedSong } from "./upgrade.js";
 import { scanLocalFiles } from "../source/scanner.js";
 import { resolveFetchConfig, validateFetchPaths, type FetchConfig } from "./config.js";
 import { HostLimiter, Semaphore } from "./limiter.js";
@@ -79,6 +80,8 @@ export interface FetchItemOutcome {
   cachePath?: string;
   errorCode?: FetchErrorCode;
   errorMsg?: string;
+  /** 洗版审计：命中更好音质后对原低码率文件的处置结果。 */
+  replaced?: { originalPath: string; newPath: string; action: string; deleted?: boolean; movedTo?: string };
 }
 
 export interface FetchPipelineProgress {
@@ -142,6 +145,10 @@ export interface RunFetchPipelineOptions {
   signal?: AbortSignal;
   dryRun?: boolean;
   deps?: Partial<FetchDeps>;
+  /** 覆盖成品落盘根（洗版用 /MUSIC/LOSSLESS）；同时决定 ensureDownloadSource 建哪个源。 */
+  downloadRootOverride?: string;
+  /** 落盘并入库成功后对原文件的处置（洗版用）；省略 = 不处置。 */
+  originalDisposal?: { action: "keep" | "move" | "delete"; backupDir?: string; allowedRoots: string[] };
 }
 
 // ==================== 小工具 ====================
@@ -236,6 +243,23 @@ function describeQuality(q: CandidateQuality | undefined): string {
   return parts.length > 0 ? parts.join("/") : "未知";
 }
 
+/** 从洗版 target.sourceData 的 `upgrade` 块里取原路径与原 songId（非洗版 target 返回空）。 */
+function upgradeMetaOf(t: FetchTarget | undefined): { originalPath?: string; oldSongId?: string } {
+  const raw = t?.sourceData;
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(raw) as { upgrade?: { path?: unknown; songId?: unknown } };
+    const up = obj?.upgrade;
+    if (!up) return {};
+    return {
+      originalPath: typeof up.path === "string" && up.path ? up.path : undefined,
+      oldSongId: typeof up.songId === "string" && up.songId ? up.songId : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 /** 归一化标题|歌手，用于任务内去重。 */
 function dedupeKey(t: FetchTarget): string {
   const norm = (s: string | undefined): string =>
@@ -276,7 +300,12 @@ function emitProgress(
 // ==================== 主入口 ====================
 
 export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<FetchPipelineResult> {
-  const cfg = resolveFetchConfig(opts.config);
+  // 洗版：先把成品根覆盖成 /MUSIC/LOSSLESS，**再**做路径校验（校验必须作用在覆盖后的根上）。
+  // ensureDownloadSource / scanLocalFiles 都读同一个 sourceId，覆盖后自动指向新媒体源。
+  const cfgResolved = resolveFetchConfig(opts.config);
+  const cfg: FetchConfig = opts.downloadRootOverride
+    ? { ...cfgResolved, downloadRoot: opts.downloadRootOverride }
+    : cfgResolved;
   const warnings: string[] = [];
   const targets = Array.isArray(opts.targets) ? opts.targets : [];
   const counts: FetchPipelineCounts = {
@@ -322,7 +351,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
   const items: FetchItemOutcome[] = [];
   const seen = new Set<string>();
-  const pending: Array<{ item: FetchItemOutcome; finalPath: string }> = [];
+  const pending: Array<{ item: FetchItemOutcome; finalPath: string; originalPath?: string; oldSongId?: string }> = [];
 
   // 限流器：整批共用一个实例（按任务实例创建，跑完随对象 GC）。
   const global = new Semaphore(cfg.maxConcurrentDownloads);
@@ -350,6 +379,38 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       } catch {
         /* 反查失败不影响主流程 */
       }
+    }
+
+    // 洗版：迁移库行（保住旧行 id，别让歌单/收藏变死引用）→ **成功后才**处置原件。
+    // 🔴 顺序硬约束：迁移没成功就绝不允许删原件（disposeOriginalFile 另有多重安全闸）。
+    if (!opts.originalDisposal) return;
+    for (const p of batch) {
+      if (!p.originalPath || !p.oldSongId) continue;
+      const mig = await migrateUpgradedSong({
+        oldSongId: p.oldSongId,
+        newPath: p.finalPath,
+        newSourceId: sourceId,
+      });
+      if (mig.warnings.length > 0) warnings.push(...mig.warnings);
+      if (!mig.migrated) continue; // 迁移失败 → 保留原件，换不了就不删
+      // 新行已被删除，存活的是旧行 id。
+      p.item.songId = p.oldSongId;
+      const disp = disposeOriginalFile({
+        originalPath: p.originalPath,
+        newPath: p.finalPath,
+        action: opts.originalDisposal.action,
+        backupDir: opts.originalDisposal.backupDir,
+        allowedRoots: opts.originalDisposal.allowedRoots,
+        dryRun: false,
+      });
+      if (disp.warnings.length > 0) warnings.push(...disp.warnings);
+      p.item.replaced = {
+        originalPath: p.originalPath,
+        newPath: p.finalPath,
+        action: disp.action,
+        ...(disp.deleted ? { deleted: true } : {}),
+        ...(disp.movedTo ? { movedTo: disp.movedTo } : {}),
+      };
     }
   };
 
@@ -379,7 +440,14 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (item.bytes) counts.bytes += item.bytes;
 
       if (item.status === "done" && item.finalPath) {
-        pending.push({ item, finalPath: item.finalPath });
+        // 洗版目标：sourceData 里的 `upgrade` 块带原路径与原 songId（见 upgrade.ts:buildUpgradeTargets）。
+        const um = upgradeMetaOf(targets[i]);
+        pending.push({
+          item,
+          finalPath: item.finalPath,
+          ...(um.originalPath ? { originalPath: um.originalPath } : {}),
+          ...(um.oldSongId ? { oldSongId: um.oldSongId } : {}),
+        });
         if (pending.length >= cfg.scanBatchSize) await flush();
       }
 
@@ -534,6 +602,9 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           sourcePriority: cfg.sourcePriority,
           candidateTimeoutMs: cfg.candidateTimeoutMs,
           maxCandidatesPerSong: cfg.maxCandidatesPerSong,
+          inspectCandidates: cfg.inspectCandidates,
+          inspectTimeoutMs: cfg.inspectTimeoutMs,
+          inspectTopN: cfg.inspectTopN,
         });
       } catch (e) {
         item.status = "failed";

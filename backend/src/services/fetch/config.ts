@@ -20,6 +20,8 @@ import type { IntegrityLevel } from "./integrity.js";
 export const DEFAULT_DOWNLOAD_ROOT = "/MUSIC/DOWNLOAD";
 /** 默认缓存根目录（半成品 / 死信）。 */
 export const DEFAULT_CACHE_ROOT = "/MUSIC/DOWNLOADCACHE";
+/** 洗版成品根目录（容器内英文目录；宿主机挂载自 …/无损音乐）。 */
+export const DEFAULT_LOSSLESS_ROOT = "/MUSIC/LOSSLESS";
 
 /** 一次下载任务生效的完整配置。 */
 export interface FetchConfig {
@@ -75,6 +77,16 @@ export interface FetchConfig {
   scanBatchSize: number;
   /** batch 子进程分片大小，见 M2 §2 */
   chunkSize: number;
+  /** 洗版（无损替换低码率）成品根目录；容器内英文目录，宿主机挂载自 …/无损音乐。 */
+  losslessRoot: string;
+  /** 洗版范围：媒体源 id 列表；空数组 = 运行时回落到「/MUSIC/DOWNLOAD 对应的源」。 */
+  upgradeSourceIds: string[];
+  /** 单次洗版最多处理多少首（手动触发的默认批量上限）。 */
+  upgradeBatchLimit: number;
+  /** 洗版命中更好音质后，原低码率文件的处置。默认 keep；delete 不可逆。 */
+  upgradeOriginalAction: "keep" | "move" | "delete";
+  /** upgradeOriginalAction === "move" 时的备份子目录（相对 downloadRoot）。 */
+  upgradeBackupDir: string;
 }
 
 /** 默认配置（所有旋钮的缺省取值见各字段注释）。 */
@@ -112,6 +124,11 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   syncToPlaylistIds: [],
   scanBatchSize: 10,
   chunkSize: 20,
+  losslessRoot: DEFAULT_LOSSLESS_ROOT,
+  upgradeSourceIds: [],
+  upgradeBatchLimit: 20,
+  upgradeOriginalAction: "keep",
+  upgradeBackupDir: ".upgraded-backup",
 };
 
 /**

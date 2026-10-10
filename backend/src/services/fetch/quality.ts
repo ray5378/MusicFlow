@@ -127,7 +127,11 @@ function tierOf(c: Candidate): QualityTier {
  *
  * - off：恒 false（用户明确关闭检测）；
  * - meta：encoder 字符串命中 fakeLosslessEncoderHints 即判假（最省，但依赖信源给 encoder）；
- * - bitrate：有效比特率 < fakeLosslessMinEffBitrate 即判假（命中「有损转 flac」最有效）；
+ * - bitrate：有效比特率 < 阈值即判假（命中「有损转 flac」最有效）。阈值**按容器分档**：
+ *   未压缩无损（wav/aiff，见 cfg.uncompressedContainers）用更高的 uncompressedMinKbps，
+ *   其余（含压缩无损 flac/alac/ape）用 fakeLosslessMinEffBitrate。默认 DEFAULT_QUALITY_CONFIG
+ *   的 uncompressedContainers 为空数组 → need 恒 = fakeLosslessMinEffBitrate，既有行为不变；
+ *   只有洗版档（upgrade.ts:buildUpgradeQuality）才给未压缩容器抬高下限。
  * - spectrum：频谱分析，本轮不实现，恒返回 { fake: false, reason: 'not-implemented' }。
  *
  * reason 写清判定依据（例如 'effective 612kbps < 700'），直接进用户可见的失败原因。
@@ -150,14 +154,19 @@ export function isFakeLossless(c: Candidate, cfg: QualityConfig): { fake: boolea
     return { fake: false, reason: encoder ? "encoder 未命中假无损特征" : "信源未提供 encoder，无法判定" };
   }
 
-  // bitrate 模式
+  // bitrate 模式。阈值按容器分档（见上方注释）。
   const kbps = pickBitrateKbps(q);
   if (kbps <= 0) return { fake: false, reason: "无有效比特率，无法判定" };
   const shown = Math.round(kbps);
-  if (kbps < cfg.fakeLosslessMinEffBitrate) {
-    return { fake: true, reason: `effective ${shown}kbps < ${cfg.fakeLosslessMinEffBitrate}` };
+  const isUncompressed = cfg.uncompressedContainers.some((x) => x.toLowerCase() === container);
+  const need = isUncompressed ? cfg.uncompressedMinKbps : cfg.fakeLosslessMinEffBitrate;
+  if (kbps < need) {
+    return {
+      fake: true,
+      reason: `effective ${shown}kbps < ${need}${isUncompressed ? `（${container} 未压缩无损下限）` : ""}`,
+    };
   }
-  return { fake: false, reason: `effective ${shown}kbps >= ${cfg.fakeLosslessMinEffBitrate}` };
+  return { fake: false, reason: `effective ${shown}kbps >= ${need}` };
 }
 
 /** 标题是否命中排除关键词（大小写不敏感）。 */

@@ -144,6 +144,14 @@ export interface QualityConfig {
   preferStudioVersion: boolean;
   /** meta 模式命中即判假的编码器特征串 */
   fakeLosslessEncoderHints: string[];
+  /**
+   * 未压缩无损容器（这些容器要求更高的有效码率，见 `uncompressedMinKbps`）。
+   * **默认 [] = 不启用该规则**（既有行为逐字节不变）；只有洗版档（buildUpgradeQuality）才填
+   * `["wav","aiff"]`。
+   */
+  uncompressedContainers: string[];
+  /** 未压缩无损容器的最低有效码率（kbps）；仅当容器命中 `uncompressedContainers` 时生效。 */
+  uncompressedMinKbps: number;
 }
 
 /** 默认质量配置：默认门槛 320kbps（产品已确认）。 */
@@ -165,4 +173,7 @@ export const DEFAULT_QUALITY_CONFIG: QualityConfig = {
   excludeTitleKeywords: ["试听", "铃声", "片段", "DJ版", "串烧", "伴奏", "清唱", "广场舞"],
   preferStudioVersion: true,
   fakeLosslessEncoderHints: ["Lavc", "LAME", "Fraunhofer"],
+  // 默认关闭「未压缩无损更高码率门槛」：空数组 → 不启用，所有既有判定逐字节不变。
+  uncompressedContainers: [],
+  uncompressedMinKbps: 1400,
 };

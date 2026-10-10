@@ -10,6 +10,7 @@
 // 分片循环的关键：每一片都是一次**独立**的 runBatchJob（不在一片里循环所有片），
 // 这样每片结束即释放全局批量闸，不会把 scan/backfill/每日推荐堵住几十分钟。
 import type { Hono } from "hono";
+import * as path from "node:path";
 import {
   BusinessErrorCode,
   adminMiddleware,
@@ -21,15 +22,20 @@ import {
 import { runBatchJob } from "../../batch/runner.js";
 import { sleepBetweenBatch } from "../../services/plugin/batchPacer.js";
 import { getSetting, setSetting } from "../../services/settings.js";
+import { db } from "../../db/index.js";
+import { mediaSources } from "../../db/schema.js";
 import {
+  DEFAULT_DOWNLOAD_ROOT,
   DEFAULT_FETCH_CONFIG,
+  DEFAULT_LOSSLESS_ROOT,
   resolveFetchConfig,
   validateFetchPaths,
   type FetchConfig,
 } from "../../services/fetch/config.js";
 import { listCandidateSources, type FetchTarget } from "../../services/fetch/candidates.js";
-import { findDownloadSource } from "../../services/fetch/source.js";
+import { ensureDownloadSource, findDownloadSource } from "../../services/fetch/source.js";
 import { runFetchPipeline } from "../../services/fetch/orchestrator.js";
+import { buildUpgradePlan, buildUpgradeQuality, buildUpgradeTargets } from "../../services/fetch/upgrade.js";
 import {
   createFetchJob,
   getFetchJob,
@@ -312,6 +318,131 @@ export function registerFetch(app: Hono): void {
     });
     startFetchJob(newJob.id);
     return c.json({ success: true, jobId: newJob.id });
+  });
+
+  // ---------------- 洗版（无损替换低码率） ----------------
+
+  /** 洗版范围解析：显式 sourceId > cfg.upgradeSourceIds > 回落「/MUSIC/DOWNLOAD 对应的源」。 */
+  function resolveUpgradeSourceIds(explicit?: string | null): string[] {
+    if (explicit && String(explicit).trim()) return [String(explicit).trim()];
+    const cfg = currentConfig();
+    if (Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0) {
+      return [...cfg.upgradeSourceIds];
+    }
+    return [ensureDownloadSource(DEFAULT_DOWNLOAD_ROOT).sourceId];
+  }
+
+  /** sourceId → 源名（仅供 UI 展示；查询失败返回空表，不抛）。 */
+  function sourceNamesOf(ids: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    try {
+      for (const r of db.select().from(mediaSources).all()) {
+        if (ids.includes(r.id)) out[r.id] = r.name ?? "";
+      }
+    } catch {
+      /* 忽略 */
+    }
+    return out;
+  }
+
+  /** GET/PUT /upgrade/config 的对外视图（压缩/未压缩下限直接取自洗版档，避免重复硬编码）。 */
+  function upgradeConfigView(cfg: FetchConfig): Record<string, unknown> {
+    const upQ = buildUpgradeQuality(cfg.quality);
+    return {
+      sourceIds: cfg.upgradeSourceIds,
+      batchLimit: cfg.upgradeBatchLimit,
+      originalAction: cfg.upgradeOriginalAction,
+      losslessRoot: cfg.losslessRoot,
+      compressedMinKbps: upQ.fakeLosslessMinEffBitrate,
+      uncompressedMinKbps: upQ.uncompressedMinKbps,
+      inspectCandidates: cfg.inspectCandidates,
+    };
+  }
+
+  /** 洗版任务的 config_json 快照（含 __upgrade 供批量子进程还原）。 */
+  function buildUpgradeJobConfig(cfg: FetchConfig, dryRun: boolean): Record<string, any> {
+    return {
+      ...cfg,
+      skipIfInLibrary: false, // 洗版必须能命中「库内已有的低码率行」，绕开「已有则跳过」
+      quality: buildUpgradeQuality(cfg.quality),
+      dryRun,
+      __upgrade: {
+        downloadRootOverride: cfg.losslessRoot || DEFAULT_LOSSLESS_ROOT,
+        originalDisposal: {
+          action: cfg.upgradeOriginalAction,
+          backupDir: path.join(cfg.downloadRoot, cfg.upgradeBackupDir),
+          allowedRoots: [cfg.downloadRoot],
+        },
+      },
+    };
+  }
+
+  app.get("/v1/fetch/upgrade/plan", adminMiddleware, (c) => {
+    const cfg = currentConfig();
+    const sourceIds = resolveUpgradeSourceIds(c.req.query("sourceId"));
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const plan = buildUpgradePlan(sourceIds, cfg, {
+      ...(Number.isFinite(limitRaw) && limitRaw > 0 ? { limit: Math.floor(limitRaw) } : {}),
+      ...(Number.isFinite(offsetRaw) && offsetRaw > 0 ? { offset: Math.floor(offsetRaw) } : {}),
+    });
+    return c.json({
+      success: true,
+      plan: { ...plan, sourceNames: sourceNamesOf(plan.sourceIds) },
+    });
+  });
+
+  app.post("/v1/fetch/upgrade/tasks", adminMiddleware, async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = currentConfig();
+    const sourceIds = resolveUpgradeSourceIds(typeof body?.sourceId === "string" ? body.sourceId : null);
+    const songIds = Array.isArray(body?.songIds) ? (body.songIds as unknown[]).map((v) => String(v)) : undefined;
+    const limitRaw = Number(body?.limit);
+    const dryRun = !!body?.dryRun;
+
+    const plan = buildUpgradePlan(sourceIds, cfg, {
+      ...(songIds && songIds.length > 0 ? { songIds } : {}),
+      ...(Number.isFinite(limitRaw) && limitRaw > 0 ? { limit: Math.floor(limitRaw) } : {}),
+    });
+    const targets = normalizeTargets(buildUpgradeTargets(plan.items));
+
+    const job = createFetchJob({
+      kind: "manual",
+      targets: { targets },
+      // sourceId 留空：批量子进程会按 downloadRootOverride(=/MUSIC/LOSSLESS) 自建洗版源。
+      config: buildUpgradeJobConfig(cfg, dryRun),
+    });
+    if (targets.length === 0) {
+      // 没有可洗的 → 立刻终态，避免 0 目标任务卡在 pending。
+      updateFetchJobStatus(job.id, "done");
+      return c.json({ success: true, job: summarize(getFetchJob(job.id)!) });
+    }
+    startFetchJob(job.id);
+    return c.json({ success: true, job: summarize(getFetchJob(job.id)!) });
+  });
+
+  app.get("/v1/fetch/upgrade/config", adminMiddleware, (c) =>
+    c.json({ success: true, config: upgradeConfigView(currentConfig()) }),
+  );
+
+  app.put("/v1/fetch/upgrade/config", adminMiddleware, async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const patch: Partial<FetchConfig> = {};
+    if (Array.isArray(body?.sourceIds)) patch.upgradeSourceIds = (body.sourceIds as unknown[]).map((v) => String(v));
+    if (typeof body?.batchLimit === "number" && Number.isFinite(body.batchLimit) && body.batchLimit > 0) {
+      patch.upgradeBatchLimit = Math.floor(body.batchLimit);
+    }
+    if (body?.originalAction === "keep" || body?.originalAction === "move" || body?.originalAction === "delete") {
+      patch.upgradeOriginalAction = body.originalAction;
+    }
+    if (typeof body?.losslessRoot === "string" && body.losslessRoot.trim()) {
+      patch.losslessRoot = body.losslessRoot.trim();
+    }
+    if (typeof body?.inspectCandidates === "boolean") patch.inspectCandidates = body.inspectCandidates;
+
+    // 只增量写覆盖项（与 PUT /config 同一套「逐项提交」纪律）。
+    setSetting(CONFIG_KEY, JSON.stringify({ ...readStoredOverride(), ...patch }));
+    return c.json({ success: true, config: upgradeConfigView(currentConfig()) });
   });
 }
 

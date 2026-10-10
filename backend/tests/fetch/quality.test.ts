@@ -506,3 +506,60 @@ describe("declared 比特率优先级：精确 bitrateKbps 胜过被量化的 by
   });
 });
 
+// ==================== isFakeLossless 分档阈值（洗版档：压缩 700 / 未压缩 1400） ====================
+//
+// 洗版档把「假无损阈值」按容器分档：wav/aiff 这类**未压缩无损**要求 ≥1400kbps（≈CD 1411），
+// flac/alac/ape 等压缩无损仍 ≥700kbps。默认配置 `uncompressedContainers: []` 时两档合一，
+// 既有行为逐字节不变（见下第一个回归用例）。
+describe("isFakeLossless — 未压缩无损分档（洗版档）", () => {
+  function probedCand(container: string, bytes: number, durationSec = 100): Candidate {
+    return mk({ probed: { container, bytes, durationSec } });
+  }
+  /** 洗版档的质量配置（与 buildUpgradeQuality 同口径，此处手写、避免与 upgrade.ts 互相依赖）。 */
+  const upgradeCfg = () =>
+    cfgOf({
+      fakeLosslessDetect: "bitrate",
+      fakeLosslessMinEffBitrate: 700,
+      uncompressedContainers: ["wav", "aiff"],
+      uncompressedMinKbps: 1400,
+    });
+
+  it("回归：默认配置（uncompressedContainers 为空）下 wav 800kbps 不判假（既有行为不变）", () => {
+    const r = isFakeLossless(probedCand("wav", bytesFor(800, 100)), cfgOf({ fakeLosslessDetect: "bitrate" }));
+    expect(r.fake).toBe(false);
+    expect(r.reason).toBe("effective 800kbps >= 700");
+  });
+
+  it("洗版档：wav 800kbps < 1400 → 判假（理由点明未压缩下限）", () => {
+    const r = isFakeLossless(probedCand("wav", bytesFor(800, 100)), upgradeCfg());
+    expect(r.fake).toBe(true);
+    expect(r.reason).toContain("1400");
+    expect(r.reason).toContain("未压缩无损下限");
+  });
+
+  it("洗版档：wav 1411kbps ≥ 1400 → 不判假", () => {
+    expect(isFakeLossless(probedCand("wav", bytesFor(1411, 100)), upgradeCfg()).fake).toBe(false);
+  });
+
+  it("洗版档：aiff 900kbps < 1400 → 判假", () => {
+    expect(isFakeLossless(probedCand("aiff", bytesFor(900, 100)), upgradeCfg()).fake).toBe(true);
+  });
+
+  it("洗版档：flac 800kbps ≥ 700 → 不判假（压缩无损仍用 700 档）", () => {
+    const r = isFakeLossless(probedCand("flac", bytesFor(800, 100)), upgradeCfg());
+    expect(r.fake).toBe(false);
+    expect(r.reason).toBe("effective 800kbps >= 700");
+  });
+
+  it("洗版档：flac 600kbps < 700 → 判假（压缩无损下限）", () => {
+    const r = isFakeLossless(probedCand("flac", bytesFor(600, 100)), upgradeCfg());
+    expect(r.fake).toBe(true);
+    expect(r.reason).toBe("effective 600kbps < 700");
+    expect(r.reason).not.toContain("未压缩"); // 非未压缩容器不带括号说明
+  });
+
+  it("洗版档：单声道 wav 705kbps 虽过 700 档，仍因 < 1400 判假", () => {
+    expect(isFakeLossless(probedCand("wav", bytesFor(705, 100)), upgradeCfg()).fake).toBe(true);
+  });
+});
+

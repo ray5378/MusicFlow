@@ -579,6 +579,25 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
   if (!job) throw new Error(`fetch job 不存在: ${jobId}`);
 
   const cfg = resolveFetchConfig(job.config);
+  // 洗版模式（config_json.__upgrade）：覆盖成品根（/MUSIC/LOSSLESS）+ 原件处置。
+  // 缺失时（普通下载任务）行为与现在**完全一致**。
+  const upg = (job.config as any)?.__upgrade as
+    | { downloadRootOverride?: unknown; originalDisposal?: unknown }
+    | undefined;
+  const downloadRootOverride =
+    typeof upg?.downloadRootOverride === "string" && upg.downloadRootOverride
+      ? upg.downloadRootOverride
+      : undefined;
+  const originalDisposal =
+    upg?.originalDisposal && typeof upg.originalDisposal === "object"
+      ? (upg.originalDisposal as {
+          action: "keep" | "move" | "delete";
+          backupDir?: string;
+          allowedRoots: string[];
+        })
+      : undefined;
+  // ensureDownloadSource 必须建「覆盖后」那个根对应的源（洗版 → LOSSLESS 源）。
+  const effRoot = downloadRootOverride || cfg.downloadRoot;
   const allTargets: any[] = Array.isArray(job.targets?.targets) ? job.targets.targets : [];
   const total = allTargets.length;
   const chunkSize = Number.isFinite(cfg.chunkSize) && cfg.chunkSize > 0 ? Math.floor(cfg.chunkSize) : 20;
@@ -597,7 +616,7 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
   let sourceId = job.sourceId ?? "";
   if (!sourceId) {
     try {
-      const r = ensureDownloadSource(cfg.downloadRoot);
+      const r = ensureDownloadSource(effRoot);
       sourceId = r.sourceId;
       updateFetchJobStatus(jobId, "running", { sourceId });
     } catch (e) {
@@ -613,6 +632,8 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     sourceId: sourceId || undefined,
     signal: ctx.signal,
     dryRun,
+    downloadRootOverride,
+    originalDisposal,
     // 🔴 progress 即心跳:每完成一首回报一次,防 15min 看门狗 SIGKILL。
     onProgress: (p) => ctx.onProgress({ stage: "fetch", ...p }),
   });

@@ -34,6 +34,8 @@ export interface FetchJobItem {
   finalPath?: string;
   errorCode?: FetchErrorCode;
   errorMsg?: string;
+  /** 洗版审计：命中更好音质后对原低码率文件的处置结果（items_json 整体 JSON 落库，加字段零成本）。 */
+  replaced?: { originalPath: string; newPath: string; action: string; deleted?: boolean; movedTo?: string };
   startedAt?: string;
   finishedAt?: string;
 }
