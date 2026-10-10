@@ -70,6 +70,10 @@
                 <el-input v-model="ssrfHostsText" :placeholder="t('admin.fetch.config.ssrfTrustedHostsPlaceholder')" />
                 <div class="hint">{{ t('admin.fetch.config.ssrfTrustedHostsHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.jobRetentionDays')">
+                <el-input-number v-model="config.jobRetentionDays" :min="0" :max="3650" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.jobRetentionDaysHint') }}</div>
+              </el-form-item>
             </div>
 
             <el-divider content-position="left">{{ t('admin.fetch.config.transcode') }}</el-divider>
@@ -251,6 +255,7 @@
             </el-select>
           </div>
           <el-button size="small" :loading="jobsLoading" @click="refreshJobs"><MfIcon name="RefreshCw" />{{ t('admin.fetch.jobs.refresh') }}</el-button>
+          <el-button size="small" type="danger" plain @click="doClearJobs">{{ t('admin.fetch.jobs.clearAll') }}</el-button>
         </div>
 
         <el-alert v-if="jobsError" type="error" :closable="false" :title="jobsError" class="jobs-error" />
@@ -286,6 +291,7 @@
             <template #default="{ row }">
               <el-button size="small" @click="openDetail(row)">{{ t('admin.fetch.jobs.view') }}</el-button>
               <el-button v-if="isActiveStatus(row.status)" size="small" type="danger" plain @click="doCancel(row)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
+              <el-button v-if="!isActiveStatus(row.status)" size="small" type="danger" plain @click="doDeleteJob(row)">{{ t('admin.fetch.jobs.delete') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -521,6 +527,8 @@ import {
   listFetchJobs,
   getFetchJob,
   cancelFetchJob,
+  clearFetchJobs,
+  deleteFetchJob,
   retryFetchJob,
   getUpgradePlan,
   getUpgradeConfig,
@@ -583,6 +591,7 @@ function defaultConfig(): ConfigForm {
     fileConflictPolicy: "keepBetter",
     sourcePriority: [],
     ssrfTrustedHosts: [],
+    jobRetentionDays: 30,
   };
 }
 
@@ -625,6 +634,7 @@ async function loadConfig() {
     if (remote.transcodeBitDepth == null || (remote.transcodeBitDepth as unknown) === "auto") merged.transcodeBitDepth = "follow";
     if (!Array.isArray(merged.sourcePriority)) merged.sourcePriority = [];
     if (!Array.isArray(merged.ssrfTrustedHosts)) merged.ssrfTrustedHosts = [];
+    if (merged.jobRetentionDays == null) merged.jobRetentionDays = 30;
     Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
@@ -820,6 +830,45 @@ async function openDetail(job: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.detailFailed")));
   } finally {
     detailLoading.value = false;
+  }
+}
+
+// 删除单条任务记录（仅终态；运行中先取消）。
+async function doDeleteJob(job: any) {
+  try {
+    await ElMessageBox.confirm(
+      t("admin.fetch.jobs.deleteConfirm", { id: shortId(job.id) }),
+      t("admin.fetch.jobs.delete"),
+      { type: "warning" },
+    );
+  } catch {
+    return;
+  }
+  try {
+    await deleteFetchJob(job.id);
+    ElMessage.success(t("admin.fetch.jobs.deleted"));
+    if (detailVisible.value && detailId.value === job.id) detailVisible.value = false;
+    await refreshJobs();
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.deleteFailed")));
+  }
+}
+
+// 一键清空任务记录（只清终态）。
+async function doClearJobs() {
+  try {
+    await ElMessageBox.confirm(t("admin.fetch.jobs.clearConfirm"), t("admin.fetch.jobs.clearAll"), {
+      type: "warning",
+    });
+  } catch {
+    return;
+  }
+  try {
+    const r = await clearFetchJobs();
+    ElMessage.success(t("admin.fetch.jobs.cleared", { n: r.cleared ?? 0 }));
+    await refreshJobs();
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.clearFailed")));
   }
 }
 

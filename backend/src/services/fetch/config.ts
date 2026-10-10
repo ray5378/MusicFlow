@@ -32,6 +32,8 @@ export interface FetchConfig {
   cacheRoot: string;
   /** 可信内网主机（自建信源如 go-music-dl）：命中即放行下载，不受内网段拦截。默认 [] */
   ssrfTrustedHosts: string[];
+  /** 任务记录保留天数（终态任务超期自动清理；0 = 关闭自动清理）。默认 30 */
+  jobRetentionDays: number;
   /** 落盘命名模板（复用 naming.ts） */
   naming: NamingConfig;
   /** 质量门槛（复用 types.ts） */
@@ -113,6 +115,7 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   downloadRoot: DEFAULT_DOWNLOAD_ROOT,
   cacheRoot: DEFAULT_CACHE_ROOT,
   ssrfTrustedHosts: [],
+  jobRetentionDays: 30,
   naming: DEFAULT_NAMING_CONFIG,
   quality: DEFAULT_QUALITY_CONFIG,
   skipIfInLibrary: true,
@@ -173,6 +176,10 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
     ssrfTrustedHosts: p.ssrfTrustedHosts
       ? [...p.ssrfTrustedHosts]
       : [...DEFAULT_FETCH_CONFIG.ssrfTrustedHosts],
+    jobRetentionDays:
+      typeof p.jobRetentionDays === "number" && Number.isFinite(p.jobRetentionDays)
+        ? Math.min(3650, Math.max(0, Math.floor(p.jobRetentionDays)))
+        : DEFAULT_FETCH_CONFIG.jobRetentionDays,
     syncToPlaylistIds: p.syncToPlaylistIds
       ? [...p.syncToPlaylistIds]
       : [...DEFAULT_FETCH_CONFIG.syncToPlaylistIds],

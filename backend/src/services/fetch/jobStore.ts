@@ -8,7 +8,7 @@
 // 本模块只依赖 db（db/index.ts）+ fetchJobs（db/schema.ts）+ drizzle，可在主进程与
 // 批量子进程里同源使用（子进程持有独立的 better-sqlite3 连接）。
 
-import { eq, desc, inArray } from "drizzle-orm";
+import { eq, desc, inArray, lt, and } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { db } from "../../db/index.js";
 import { fetchJobs } from "../../db/schema.js";
@@ -226,6 +226,67 @@ export function updateFetchJobStatus(
   if (status === "running") set.startedAt = now;
   if (isTerminal(status)) set.finishedAt = now;
   db.update(fetchJobs).set(set).where(eq(fetchJobs.id, id)).run();
+}
+
+/** 删除单条任务记录（存在与否由调用方判定）；仅终态任务可删由路由层把关。 */
+export function deleteFetchJobRow(id: string): boolean {
+  const job = getFetchJob(id);
+  if (!job) return false;
+  db.delete(fetchJobs).where(eq(fetchJobs.id, id)).run();
+  return true;
+}
+
+/** 清空任务记录（只清终态；running/pending 不动）。返回删除行数。 */
+export function clearFetchJobRows(): number {
+  const stale = db
+    .select({ id: fetchJobs.id })
+    .from(fetchJobs)
+    .where(inArray(fetchJobs.status, [...TERMINAL_STATUSES]))
+    .all();
+  if (stale.length === 0) return 0;
+  db.delete(fetchJobs)
+    .where(inArray(fetchJobs.status, [...TERMINAL_STATUSES]))
+    .run();
+  return stale.length;
+}
+
+/**
+ * 按保留天数清理过期任务记录（只清终态）。retentionDays <= 0 = 关闭。
+ * 以 updatedAt 为基准（进行中会不断刷新，终态后停止）。
+ */
+export function cleanExpiredFetchJobs(retentionDays: number): number {
+  if (!(Number(retentionDays) > 0)) return 0;
+  const cutoff = new Date(Date.now() - Number(retentionDays) * 86_400_000).toISOString();
+  const cond = and(
+    inArray(fetchJobs.status, [...TERMINAL_STATUSES]),
+    lt(fetchJobs.updatedAt, cutoff),
+  );
+  const stale = db.select({ id: fetchJobs.id }).from(fetchJobs).where(cond).all();
+  if (stale.length === 0) return 0;
+  db.delete(fetchJobs).where(cond).run();
+  return stale.length;
+}
+
+/**
+ * 启动恢复：把上一进程遗留的 pending/running 任务落 failed 终态。
+ *
+ * 跑批循环是**进程内**的（jobRunner 持有 AbortController），服务重启即消亡；
+ * 不恢复的话这些行永远卡在 running，UI 取消也无效（无 controller 可 abort）。
+ * 返回恢复行数。
+ */
+export function recoverInterruptedFetchJobs(): number {
+  const now = new Date().toISOString();
+  const stale = db
+    .select({ id: fetchJobs.id })
+    .from(fetchJobs)
+    .where(inArray(fetchJobs.status, ["pending", "running"]))
+    .all();
+  if (stale.length === 0) return 0;
+  db.update(fetchJobs)
+    .set({ status: "failed", error: "服务重启，任务中断（boot 恢复）", updatedAt: now, finishedAt: now })
+    .where(inArray(fetchJobs.status, ["pending", "running"]))
+    .run();
+  return stale.length;
 }
 
 /**

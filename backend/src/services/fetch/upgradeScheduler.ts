@@ -18,6 +18,7 @@ import { ensureDownloadSource } from "./source.js";
 import { buildUpgradeJobConfig, buildUpgradePlan, buildUpgradeTargets, recordUpgradeAttempts } from "./upgrade.js";
 import { createFetchJob, updateFetchJobStatus } from "./jobStore.js";
 import { startFetchJob } from "./jobRunner.js";
+import { cleanExpiredFetchJobs } from "./jobStore.js";
 
 const log = createLogger("upgrade-scheduler");
 
@@ -27,6 +28,7 @@ const BOOT_DELAY_MS = 15_000;
 
 let started = false;
 let ticking = false;
+let lastJobCleanAt = 0;
 
 /** "HH:mm" → 今天该时刻的本地时间戳；非法格式返回 0（视为永不触发）。 */
 export function todayTriggerMs(timeOfDay: string, now = new Date()): number {
@@ -88,6 +90,17 @@ export function startUpgradeScheduler(): void {
     ticking = true;
     try {
       const cfg = currentFetchConfig();
+      // 任务记录自动清理：每小时最多一次（retentionDays<=0 = 关闭）；挂在调度
+      // tick 上而非独立定时器，避免多一个常驻 interval。
+      if (Date.now() - lastJobCleanAt > 3_600_000) {
+        lastJobCleanAt = Date.now();
+        try {
+          const cleaned = cleanExpiredFetchJobs(cfg.jobRetentionDays);
+          if (cleaned > 0) log.info(`[JOB-CLEAN] 已清理 ${cleaned} 条过期任务记录（保留 ${cfg.jobRetentionDays} 天）`);
+        } catch {
+          /* 清理失败不影响调度 */
+        }
+      }
       if (!cfg.upgradeAutoEnabled) return;
       runAutoUpgradeOnce(cfg);
     } catch (e) {

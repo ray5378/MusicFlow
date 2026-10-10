@@ -343,6 +343,7 @@ async function runMaintenanceOnce() {
 
 import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
 import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
+import { recoverInterruptedFetchJobs } from "./services/fetch/jobStore.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
 import { ensureWritableDir } from "./services/fetch/writable.js";
 
@@ -379,6 +380,14 @@ wireSsdpRealtime();
 
 // 定时自动洗版（默认关闭；开启后按 upgradeAutoIntervalDays / upgradeAutoTimeOfDay 触发）。
 startUpgradeScheduler();
+
+// 启动恢复：上一进程遗留的 pending/running fetch 任务落 failed 终态（跑批随重启消亡）。
+try {
+  const recovered = recoverInterruptedFetchJobs();
+  if (recovered > 0) log.info(`[FETCH] boot 恢复：${recovered} 个中断任务已落终态`);
+} catch (e: any) {
+  log.error(`[FETCH] boot 恢复失败: ${e?.message || e}`);
+}
 
 // 写目录启动探针：downloadRoot/cacheRoot 挂载权限配错时第一时间在日志给出
 // 修复指引（不阻塞启动，流媒体等主链路不受影响）。

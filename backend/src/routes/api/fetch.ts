@@ -53,7 +53,9 @@ import {
   resetLibraryAttempts,
 } from "../../services/fetch/library.js";
 import {
+  clearFetchJobRows,
   createFetchJob,
+  deleteFetchJobRow,
   getFetchJob,
   listFetchJobs,
   updateFetchJobStatus,
@@ -117,6 +119,13 @@ export function registerFetch(app: Hono): void {
       (override as Record<string, unknown>).ssrfTrustedHosts = Array.isArray(raw)
         ? Array.from(new Set(raw.map((x) => String(x).trim()).filter(Boolean)))
         : [];
+    }
+    // jobRetentionDays：整数 0-3650（0 = 关闭自动清理）。
+    if ("jobRetentionDays" in override) {
+      const n = Number((override as Record<string, unknown>).jobRetentionDays);
+      (override as Record<string, unknown>).jobRetentionDays = Number.isFinite(n)
+        ? Math.min(3650, Math.max(0, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.jobRetentionDays;
     }
     const merged = resolveFetchConfig(override as Partial<FetchConfig>);
     const v = validateFetchPaths(merged);
@@ -242,8 +251,35 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.NOT_FOUND;
       return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    if (!abortFetchJob(id)) return c.json({ success: true, message: "任务未在运行" });
+    if (!abortFetchJob(id)) {
+      // 无在跑 controller：可能是重启遗留的僵尸 running 行（或已终态）。
+      // 僵尸行直接落取消终态，否则 UI 的取消永远无效。
+      if (job.status === "pending" || job.status === "running") {
+        updateFetchJobStatus(id, "cancelled", { error: "手动取消（无运行中的进程内任务）" });
+        return c.json({ success: true, cancelled: "zombie" });
+      }
+      return c.json({ success: true, message: "任务未在运行" });
+    }
     return c.json({ success: true });
+  });
+
+  // ---------------- 删除 / 清空任务记录（只动终态任务） ----------------
+  app.delete("/v1/fetch/jobs/:id", adminMiddleware, (c) => {
+    const id = c.req.param("id")!;
+    const job = getFetchJob(id);
+    if (!job) {
+      const code = BusinessErrorCode.NOT_FOUND;
+      return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
+    }
+    if (job.status === "pending" || job.status === "running") {
+      const code = BusinessErrorCode.INVALID_PARAM;
+      return c.json(apiError(code, "先取消运行中的任务再删除记录"), apiErrorStatus(code));
+    }
+    return c.json({ success: true, deleted: deleteFetchJobRow(id) });
+  });
+
+  app.post("/v1/fetch/jobs/clear", adminMiddleware, (c) => {
+    return c.json({ success: true, cleared: clearFetchJobRows() });
   });
 
   // ---------------- 重试（从原任务挑出未完成项，新建一个 retry 任务） ----------------

@@ -106,6 +106,7 @@ export interface FetchConfig {
   fileConflictPolicy?: string;
   sourcePriority?: string[];
   ssrfTrustedHosts?: string[];
+  jobRetentionDays?: number;
 }
 
 const BASE = "/rest/api/v1/fetch";
@@ -154,6 +155,17 @@ export async function getFetchJob(id: string): Promise<FetchJobDetail | null> {
 
 export async function cancelFetchJob(id: string): Promise<void> {
   await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/cancel`);
+}
+
+/** 删除单条任务记录（仅终态任务，运行中会被后端拒绝）。 */
+export async function deleteFetchJob(id: string): Promise<void> {
+  await api.delete(`${BASE}/jobs/${encodeURIComponent(id)}`);
+}
+
+/** 一键清空任务记录（只清终态）。返回删除条数。 */
+export async function clearFetchJobs(): Promise<{ cleared: number }> {
+  const r = await api.post(`${BASE}/jobs/clear`);
+  return (r as any)?.data ?? r;
 }
 
 export interface FetchRetryOptions {

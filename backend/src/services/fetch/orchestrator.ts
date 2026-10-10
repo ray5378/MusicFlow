@@ -16,7 +16,7 @@
 // `onProgress` 是防 15 分钟看门狗的唯一心跳（SPEC §1.3）。
 //
 // 全部外部依赖通过 `deps` 注入（默认用真实实现），单测整体替换即可零网络零 ffmpeg。
-import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
@@ -894,8 +894,21 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           loudnessTwoPass: cfg.transcodeLoudnessTwoPass,
         });
         if (tr.dstPath && tr.dstPath !== cachePath) cachePath = tr.dstPath;
+        // 转码改变了容器/位深/采样率/码率：重探针刷新 probed。否则 finalize 用
+        // 转码前旧探针命名（flac 成品落 .mp3 名 → 扫描器走 mp3 路径，duration/
+        // bit_rate 入库垃圾值），shouldUpgrade 也用旧码率（2026-10-10 240 实测教训）。
+        try {
+          const p2 = await deps.probeFile(cachePath);
+          probed = toCandidateQuality(p2, statSync(cachePath).size);
+          enriched.probed = probed;
+        } catch {
+          /* 重探失败：沿用旧探针（不致命，仅命名/升级判定可能用旧值） */
+        }
       } catch (e) {
-        warnings.push(`转码失败(TRANSCODE_FAILED，保留已写标签源文件继续落盘): ${msgOf(e)}`);
+        // 产品定调 2026-10-10：转码+打标是落盘的**硬前置** —— 失败不再「保留源文件
+        // 继续落盘」，而是本候选判失败（换下一候选），绝不把未转码成品放进最终目录。
+        cleanup();
+        return { kind: "fail", code: "TRANSCODE_FAILED", detail: msgOf(e) };
       }
     }
 

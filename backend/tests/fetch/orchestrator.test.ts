@@ -349,14 +349,14 @@ describe("runFetchPipeline", () => {
     expect(tr2).not.toHaveBeenCalled();
   });
 
-  it("11. 转码失败不致命：仍 done，warnings 有说明", async () => {
+  it("11. 转码失败 = 硬前置失败：候选判失败换下一候选，绝不落未转码成品（产品定调 2026-10-10）", async () => {
     const tr = vi.fn(async () => {
       throw new Error("ffmpeg boom");
     });
     const deps = makeDeps({ collectCandidates: oneMp3, transcodeFile: tr });
     const r = await run({ targets: [tgt({ id: "t1", title: "A", durationSec: 200 })], sourceId: "src-1", deps });
-    expect(r.items[0].status).toBe("done");
-    expect(r.warnings.some((w) => w.includes("转码失败"))).toBe(true);
+    expect(r.items[0].status).toBe("failed");
+    expect(r.items[0].errorCode).toBe("TRANSCODE_FAILED");
   });
 
   it("12. 落盘时已存在更优文件（finalize=keep）→ skipped，且不再试其他候选", async () => {
