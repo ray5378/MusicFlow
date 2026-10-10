@@ -27,7 +27,7 @@ export interface FetchJobItem {
     declared?: CandidateQuality;
     probed?: CandidateQuality;
   };
-  rejected?: Array<{ candidateId: string; reason: FetchErrorCode }>;
+  rejected?: Array<{ candidateId: string; reason: FetchErrorCode; detail?: string }>;
   host?: string;
   bytes?: number;
   cachePath?: string;

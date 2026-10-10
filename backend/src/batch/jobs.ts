@@ -532,7 +532,8 @@ function toJobItem(o: FetchItemOutcome): FetchJobItem {
     status: o.status,
     attempts: o.attempts,
     chosen: o.chosen,
-    rejected: (o.rejected ?? []).map((r) => ({ candidateId: r.candidateId, reason: r.reason })),
+    // detail（拒绝原因，如「预探估算 596kbps 不达假无损下限」）一并落库，任务详情可见
+    rejected: (o.rejected ?? []).map((r) => ({ candidateId: r.candidateId, reason: r.reason, detail: r.detail })),
     bytes: o.bytes,
     cachePath: o.cachePath,
     finalPath: o.finalPath,
