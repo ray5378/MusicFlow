@@ -51,6 +51,14 @@ vi.mock("../../src/batch/runner.js", async (importOriginal) => {
   return { ...actual, runBatchJob: runBatchJobMock };
 });
 
+// startFetchJob 同步预检 ensureWritableDir 要 mkdir 配置里的写根(/MUSIC/DOWNLOAD 特权路径)
+// —— CI runner 非 root 必抛 EACCES → 预检失败提前 return,runBatchJob 永不触发(本地 root 跑
+// 永远复现不了,三连 CI 红根因,2026-10-11)。单测不依赖真实文件系统特权,桩掉。
+vi.mock("../../src/services/fetch/writable.js", async (importOriginal) => {
+  const actual = await importOriginal<any>();
+  return { ...actual, ensureWritableDir: vi.fn() };
+});
+
 import { registerFetch } from "../../src/routes/api/fetch.js";
 
 const app = new Hono();
