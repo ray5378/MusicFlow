@@ -19,7 +19,12 @@ import {
   log,
 } from "./shared.js";
 import { startFetchJob, abortFetchJob } from "../../services/fetch/jobRunner.js";
-import { getSetting, setSetting } from "../../services/settings.js";
+import { setSetting } from "../../services/settings.js";
+import {
+  FETCH_CONFIG_KEY,
+  currentFetchConfig,
+  readFetchConfigOverride,
+} from "../../services/fetch/configStore.js";
 import { db } from "../../db/index.js";
 import { mediaSources } from "../../db/schema.js";
 import {
@@ -55,25 +60,6 @@ import {
   type FetchJobRecord,
 } from "../../services/fetch/jobStore.js";
 import type { TaskStatus } from "../../services/fetch/types.js";
-
-const CONFIG_KEY = "fetch.config";
-
-/** 读取已存配置覆盖项（坏 JSON / 非对象一律视作无覆盖，不抛）。 */
-function readStoredOverride(): Partial<FetchConfig> {
-  const raw = getSetting(CONFIG_KEY, "");
-  if (!raw) return {};
-  try {
-    const obj = JSON.parse(raw);
-    return obj && typeof obj === "object" && !Array.isArray(obj) ? (obj as Partial<FetchConfig>) : {};
-  } catch {
-    return {};
-  }
-}
-
-/** 当前生效配置 = 默认值与已存覆盖项合并。 */
-function currentConfig(): FetchConfig {
-  return resolveFetchConfig(readStoredOverride());
-}
 
 /** 客户端入参 → FetchTarget[]（宽容归一化：缺 id 补位、缺 title 置空）。 */
 function normalizeTargets(input: unknown): FetchTarget[] {
@@ -119,7 +105,7 @@ function summarize(job: FetchJobRecord): Record<string, unknown> {
 export function registerFetch(app: Hono): void {
   // ---------------- 配置 ----------------
   app.get("/v1/fetch/config", adminMiddleware, (c) =>
-    c.json({ success: true, config: currentConfig() }),
+    c.json({ success: true, config: currentFetchConfig() }),
   );
 
   app.put("/v1/fetch/config", adminMiddleware, async (c) => {
@@ -135,7 +121,7 @@ export function registerFetch(app: Hono): void {
         apiErrorStatus(code),
       );
     }
-    setSetting(CONFIG_KEY, JSON.stringify(override));
+    setSetting(FETCH_CONFIG_KEY, JSON.stringify(override));
     return c.json({ success: true, config: merged, warnings: v.warnings });
   });
 
@@ -154,7 +140,7 @@ export function registerFetch(app: Hono): void {
   app.post("/v1/fetch/preview", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const targets = normalizeTargets(body?.targets);
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     try {
       const result = await runFetchPipeline({
         targets,
@@ -194,7 +180,7 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.INVALID_PARAM;
       return c.json(apiError(code, "targets 为空"), apiErrorStatus(code));
     }
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     const dryRun = !!body?.dryRun;
     const job = createFetchJob({
       kind: "manual",
@@ -287,7 +273,7 @@ export function registerFetch(app: Hono): void {
       return c.json({ success: true, jobId: null, message: "没有需要重试的条目" });
     }
 
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     const newJob = createFetchJob({
       kind: "retry",
       targets: { targets },
@@ -303,7 +289,7 @@ export function registerFetch(app: Hono): void {
   /** 洗版范围解析：显式 sourceId > cfg.upgradeSourceIds > 回落「/MUSIC/DOWNLOAD 对应的源」。 */
   function resolveUpgradeSourceIds(explicit?: string | null): string[] {
     if (explicit && String(explicit).trim()) return [String(explicit).trim()];
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     if (Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0) {
       return [...cfg.upgradeSourceIds];
     }
@@ -342,7 +328,7 @@ export function registerFetch(app: Hono): void {
   }
 
   app.get("/v1/fetch/upgrade/plan", adminMiddleware, (c) => {
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     const sourceIds = resolveUpgradeSourceIds(c.req.query("sourceId"));
     const limitRaw = Number(c.req.query("limit"));
     const offsetRaw = Number(c.req.query("offset"));
@@ -358,7 +344,7 @@ export function registerFetch(app: Hono): void {
 
   app.post("/v1/fetch/upgrade/tasks", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     const sourceIds = resolveUpgradeSourceIds(typeof body?.sourceId === "string" ? body.sourceId : null);
     const songIds = Array.isArray(body?.songIds) ? (body.songIds as unknown[]).map((v) => String(v)) : undefined;
     const limitRaw = Number(body?.limit);
@@ -388,7 +374,7 @@ export function registerFetch(app: Hono): void {
   });
 
   app.get("/v1/fetch/upgrade/config", adminMiddleware, (c) =>
-    c.json({ success: true, config: upgradeConfigView(currentConfig()) }),
+    c.json({ success: true, config: upgradeConfigView(currentFetchConfig()) }),
   );
 
   app.put("/v1/fetch/upgrade/config", adminMiddleware, async (c) => {
@@ -419,8 +405,8 @@ export function registerFetch(app: Hono): void {
     }
 
     // 只增量写覆盖项（与 PUT /config 同一套「逐项提交」纪律）。
-    setSetting(CONFIG_KEY, JSON.stringify({ ...readStoredOverride(), ...patch }));
-    return c.json({ success: true, config: upgradeConfigView(currentConfig()) });
+    setSetting(FETCH_CONFIG_KEY, JSON.stringify({ ...readFetchConfigOverride(), ...patch }));
+    return c.json({ success: true, config: upgradeConfigView(currentFetchConfig()) });
   });
 
   // 清空洗版冷却记录（下一次所有歌都可重新触发洗版）。
@@ -431,7 +417,7 @@ export function registerFetch(app: Hono): void {
 
   // ---------------- 全库下载（手动按钮：库里本地没有实体文件的歌） ----------------
   app.get("/v1/fetch/library/plan", adminMiddleware, (c) => {
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     const limitRaw = Number(c.req.query("limit"));
     const songIdsRaw = c.req.query("songIds");
     const plan = buildLibraryPlan(cfg, {
@@ -445,7 +431,7 @@ export function registerFetch(app: Hono): void {
 
   app.post("/v1/fetch/library/tasks", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const cfg = currentConfig();
+    const cfg = currentFetchConfig();
     const dryRun = !!body?.dryRun;
     const songIds = Array.isArray(body?.songIds)
       ? (body.songIds as unknown[]).map((v) => String(v))

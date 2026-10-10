@@ -12,7 +12,8 @@
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import { getSetting, setSetting } from "../settings.js";
-import { DEFAULT_DOWNLOAD_ROOT, resolveFetchConfig, type FetchConfig } from "./config.js";
+import { DEFAULT_DOWNLOAD_ROOT, type FetchConfig } from "./config.js";
+import { currentFetchConfig } from "./configStore.js";
 import { ensureDownloadSource } from "./source.js";
 import { buildUpgradeJobConfig, buildUpgradePlan, buildUpgradeTargets, recordUpgradeAttempts } from "./upgrade.js";
 import { createFetchJob, updateFetchJobStatus } from "./jobStore.js";
@@ -26,18 +27,6 @@ const BOOT_DELAY_MS = 15_000;
 
 let started = false;
 let ticking = false;
-
-/** 读取 fetch 配置覆盖项（与 routes/api/fetch.ts 的 readStoredOverride 同口径）。 */
-function currentConfig(): FetchConfig {
-  const raw = getSetting("fetch.config", "");
-  if (!raw) return resolveFetchConfig({});
-  try {
-    const obj = JSON.parse(raw);
-    return resolveFetchConfig(obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {});
-  } catch {
-    return resolveFetchConfig({});
-  }
-}
 
 /** "HH:mm" → 今天该时刻的本地时间戳；非法格式返回 0（视为永不触发）。 */
 export function todayTriggerMs(timeOfDay: string, now = new Date()): number {
@@ -98,7 +87,7 @@ export function startUpgradeScheduler(): void {
     if (ticking) return;
     ticking = true;
     try {
-      const cfg = currentConfig();
+      const cfg = currentFetchConfig();
       if (!cfg.upgradeAutoEnabled) return;
       runAutoUpgradeOnce(cfg);
     } catch (e) {

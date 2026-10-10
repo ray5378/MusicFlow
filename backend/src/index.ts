@@ -343,6 +343,8 @@ async function runMaintenanceOnce() {
 
 import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
 import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
+import { currentFetchConfig } from "./services/fetch/configStore.js";
+import { ensureWritableDir } from "./services/fetch/writable.js";
 
 // ==================== DLNA background discovery ====================
 // Keep the device cache warm so the cast dialog can show devices instantly
@@ -377,6 +379,15 @@ wireSsdpRealtime();
 
 // 定时自动洗版（默认关闭；开启后按 upgradeAutoIntervalDays / upgradeAutoTimeOfDay 触发）。
 startUpgradeScheduler();
+
+// 写目录启动探针：downloadRoot/cacheRoot 挂载权限配错时第一时间在日志给出
+// 修复指引（不阻塞启动，流媒体等主链路不受影响）。
+try {
+  const fetchCfg = currentFetchConfig();
+  for (const dir of [fetchCfg.downloadRoot, fetchCfg.cacheRoot]) ensureWritableDir(dir, { fresh: true });
+} catch (e: any) {
+  log.error(`[FETCH-WRITABLE] ${e?.message || e}`);
+}
 // 新发现的设备即时注册 QueueController(幂等),上线即可播,不必等下一轮扫描。
 getEventManager().on("device_list_changed", () => {
   for (const d of getCachedDevices()) {
