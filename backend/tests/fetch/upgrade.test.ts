@@ -38,6 +38,7 @@ import {
   buildUpgradeTargets,
   disposeOriginalFile,
   migrateUpgradedSong,
+  upgradeBaselineKbps,
 } from "../../src/services/fetch/upgrade.js";
 
 // 批量子进程运行器整体替换成桩，避免真 fork（仅路由组用到）。
@@ -271,14 +272,16 @@ describe("buildUpgradePlan — 只列低于门槛的行", () => {
   const cfg = () => resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
 
   function seedThree() {
+    // size/duration 必须与 bitRate 自洽（基准码率用 size/duration 现场换算，见 upgradeBaselineKbps）：
+    // size = kbps*1000*duration/8，duration 统一 200s。
     // 达标：flac 900（不该出现在计划里）
-    seedSong({ id: "s-hi", path: "l:s-up:/dl/hi.flac", suffix: "flac", bitRate: 900 });
+    seedSong({ id: "s-hi", path: "l:s-up:/dl/hi.flac", suffix: "flac", bitRate: 900, size: 22_500_000, duration: 200 });
     // 待洗：flac 600 / wav 900 / mp3 320
-    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600 });
-    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.wav", suffix: "wav", bitRate: 900 });
-    seedSong({ id: "s-lo3", path: "l:s-up:/dl/lo3.mp3", suffix: "mp3", bitRate: 320 });
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.wav", suffix: "wav", bitRate: 900, size: 22_500_000, duration: 200 });
+    seedSong({ id: "s-lo3", path: "l:s-up:/dl/lo3.mp3", suffix: "mp3", bitRate: 320, size: 8_000_000, duration: 200 });
     // 另一个源的行，不该被 s-up 范围命中
-    seedSong({ id: "s-other", path: "l:s-other:/dl/x.mp3", suffix: "mp3", bitRate: 128 });
+    seedSong({ id: "s-other", path: "l:s-other:/dl/x.mp3", suffix: "mp3", bitRate: 128, size: 3_200_000, duration: 200 });
   }
 
   it("只列低于门槛的行，且限定在给定源内", () => {
@@ -605,5 +608,62 @@ describe("fetch 路由：洗版端点", () => {
     expect(r.body.success).toBe(true);
     expect(r.body.config.originalAction).toBe("delete");
     expect(r.body.config.batchLimit).toBe(5);
+  });
+});
+
+// ==================== 7) upgradeBaselineKbps —— 洗版基准码率 ====================
+
+describe("upgradeBaselineKbps — size/duration 换算优先（240 生产实测守卫）", () => {
+  it("size/duration 可信时优先现场换算（库存 bit_rate 对 flac 是垃圾：900kbps 存成 8）", () => {
+    // 22,500,000 B / 200s = 900kbps；库存 bit_rate 只有 8
+    expect(upgradeBaselineKbps({ size: 22_500_000, durationSec: 200, bitRate: 8 })).toBe(900);
+  });
+
+  it("size/duration 缺失时回落 bit_rate 列", () => {
+    expect(upgradeBaselineKbps({ size: 0, durationSec: 0, bitRate: 320 })).toBe(320);
+    expect(upgradeBaselineKbps({ bitRate: 320 })).toBe(320);
+  });
+
+  it("两者都拿不到 → 0（isBelowUpgradeBar 判「码率未知」）", () => {
+    expect(upgradeBaselineKbps({})).toBe(0);
+    expect(upgradeBaselineKbps({ size: 0, durationSec: 0, bitRate: 0 })).toBe(0);
+  });
+
+  it("isBelowUpgradeBar 用基准码率判定：bit_rate=8 但 size/duration 显示 900kbps 的 flac 达标", () => {
+    const r = isBelowUpgradeBar(
+      {
+        id: "x",
+        path: "l:s:/a.flac",
+        title: "t",
+        artist: "a",
+        album: "al",
+        suffix: "flac",
+        bitRate: 8,
+        durationSec: 200,
+        size: 22_500_000,
+      },
+      buildUpgradeQuality(DEFAULT_QUALITY_CONFIG),
+    );
+    expect(r.below).toBe(false);
+    expect(r.reason).toContain("900kbps >= 700kbps");
+  });
+
+  it("反之：真实只有 600kbps 的 flac 仍判低于门槛", () => {
+    const r = isBelowUpgradeBar(
+      {
+        id: "y",
+        path: "l:s:/b.flac",
+        title: "t",
+        artist: "a",
+        album: "al",
+        suffix: "flac",
+        bitRate: 6,
+        durationSec: 200,
+        size: 15_000_000,
+      },
+      buildUpgradeQuality(DEFAULT_QUALITY_CONFIG),
+    );
+    expect(r.below).toBe(true);
+    expect(r.reason).toContain("600kbps < 700kbps");
   });
 });

@@ -26,6 +26,7 @@ import { extractMetadataLocal, upsertSong } from "../source/scanner.js";
 import type { FetchTarget } from "./candidates.js";
 import type { FetchConfig } from "./config.js";
 import type { QualityConfig } from "./types.js";
+import { effectiveBitrateKbps } from "./quality.js";
 
 /** 压缩无损容器（码率下限 = fakeLosslessMinEffBitrate = 700）。 */
 export const LOSSLESS_COMPRESSED_CONTAINERS: string[] = ["flac", "alac", "ape"];
@@ -105,7 +106,7 @@ export function isBelowUpgradeBar(
   if (!allLossless.includes(suffix)) {
     return { below: true, reason: `有损格式 ${suffix || "(未知)"}` };
   }
-  const br = Number(row.bitRate);
+  const br = upgradeBaselineKbps(row);
   if (!(br > 0)) {
     return { below: true, reason: "码率未知，视为低码率" };
   }
@@ -114,9 +115,29 @@ export function isBelowUpgradeBar(
     ? (upQ.uncompressedMinKbps ?? UPGRADE_UNCOMPRESSED_MIN_KBPS)
     : (upQ.fakeLosslessMinEffBitrate ?? UPGRADE_COMPRESSED_MIN_KBPS);
   if (br < need) {
-    return { below: true, reason: `${br}kbps < ${need}kbps（${suffix}）` };
+    return { below: true, reason: `${Math.round(br)}kbps < ${need}kbps（${suffix}）` };
   }
-  return { below: false, reason: `${br}kbps >= ${need}kbps（${suffix}）` };
+  return { below: false, reason: `${Math.round(br)}kbps >= ${need}kbps（${suffix}）` };
+}
+
+/**
+ * 取洗版基准码率（kbps）。
+ *
+ * 🔴 **size/duration 现场换算优先，`bit_rate` 列只作回落** —— 与 `quality.ts:pickBitrateKbps`
+ * 同一条不变量（字节数才是真实体量）。原因：240 生产实测，扫描入库的 `bit_rate` 对
+ * flac 基本是垃圾（49,358 首 flac 的库存值平均只有真实值的 1/202，随机样本
+ * 853kbps→8、1726kbps→2；mp3 则是准的），直接信它会把曲库 94% 误判成「低于洗版门槛」。
+ * `size` 与 `duration` 则 100% 可信（w: 行 size 全量有值）。
+ */
+export function upgradeBaselineKbps(row: {
+  size?: number;
+  durationSec?: number;
+  bitRate?: number;
+}): number {
+  const eff = effectiveBitrateKbps(Number(row.size ?? 0), Number(row.durationSec ?? 0));
+  if (eff > 0) return eff;
+  const br = Number(row.bitRate ?? 0);
+  return br > 0 ? br : 0;
 }
 
 // ==================== 查库与计划 ====================
@@ -204,7 +225,7 @@ export function buildUpgradePlan(
     artist: r.artist,
     album: r.album,
     suffix: r.suffix,
-    bitrateKbps: r.bitRate,
+    bitrateKbps: Math.round(upgradeBaselineKbps(r)),
     durationSec: r.durationSec,
     path: r.path,
     reason: isBelowUpgradeBar(r, upQ).reason,
