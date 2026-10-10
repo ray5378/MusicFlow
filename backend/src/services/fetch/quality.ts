@@ -151,11 +151,18 @@ const NON_STUDIO_PATTERN: RegExp = /(^|[^a-z])(live|remix|acoustic|cover)([^a-z]
  *
  * 顺序：容器白名单 → 时长区间 → 时长偏差 → 采样率上下限 → 档位下限
  *      → 有损比特率下限（与档位下限取严者）→ 标题关键词 → 假无损。
+ *
+ * `opts.tolerateUnknown`：**预筛阶段**开关。信源（尤其聚合源 go-music-dl / lx-source）
+ * 常常只给一个 URL，不声明容器/比特率/档位；此时若按「未知即一票否决」处理，会在
+ * 还没比音质之前就把全部候选杀掉（真实线上事故）。开启后，「容器未声明」「档位 unknown」
+ * 两类**未知**放行到下载后的探针复筛；而**已声明**的可信信号（坏容器 / 低档位 / 低比特率）
+ * 一律照旧拒绝 —— 宽容只针对「未知」，绝不放过「已知的差」。
  */
 export function meetsFloor(
   c: Candidate,
   cfg: QualityConfig,
   target?: { durationSec?: number },
+  opts?: { tolerateUnknown?: boolean },
 ): { ok: boolean; reason?: string } {
   const q = pickQuality(c);
 
@@ -163,10 +170,13 @@ export function meetsFloor(
   if (cfg.allowedContainers.length > 0) {
     const container = (q?.container ?? "").toLowerCase();
     if (!container) {
-      return { ok: false, reason: "信源未声明容器，无法确认格式" };
-    }
-    const allowed = cfg.allowedContainers.some((a) => a.toLowerCase() === container);
-    if (!allowed) {
+      // 信源未声明容器：预筛阶段放行（下载后由探针拿到真实容器再复核）；
+      // 探针阶段（tolerateUnknown 未开）仍严格拒绝。
+      if (!opts?.tolerateUnknown) {
+        return { ok: false, reason: "信源未声明容器，无法确认格式" };
+      }
+    } else if (!cfg.allowedContainers.some((a) => a.toLowerCase() === container)) {
+      // 已声明的容器不在白名单 → 无论哪个阶段都拒绝（这是可信信号）。
       return { ok: false, reason: `容器 ${container} 不在允许列表（${cfg.allowedContainers.join("/")}）` };
     }
   }
@@ -207,8 +217,8 @@ export function meetsFloor(
 
   const tier = tierOf(c);
 
-  // 5) 档位下限
-  if (cfg.qualityFloor !== "any") {
+  // 5) 档位下限（tolerateUnknown 时，档位 unknown 放行到探针阶段复核）
+  if (cfg.qualityFloor !== "any" && !(opts?.tolerateUnknown && tier === "unknown")) {
     const floorRank = TIER_RANK[cfg.qualityFloor];
     if (TIER_RANK[tier] < floorRank) {
       return { ok: false, reason: `质量档位 ${tier} 低于门槛 ${cfg.qualityFloor}` };
@@ -265,6 +275,10 @@ export function scoreCandidate(c: Candidate, cfg: QualityConfig): number {
  *
  * preferLossless：只要池中**存在**无损档（lossless/hires）候选，就剔除全部有损候选，
  * 避免「有损排在无损前面」被先下载。
+ *
+ * ⚠️ 预筛用**宽容模式**（`tolerateUnknown:true`）：此刻只有信源声明值，聚合源普遍不声明
+ * 容器/比特率，若按严格口径会把整池候选误杀（真实线上事故）。真实音质由 orchestrator
+ * 下载后的 probed 复筛（严格口径）把关；已声明的坏容器/低档位在此仍会被剔除。
  */
 export function rankCandidates(
   cands: Candidate[],
@@ -279,7 +293,10 @@ export function rankCandidates(
     unique.push(c);
   }
 
-  const passed = unique.filter((c) => meetsFloor(c, cfg, target).ok);
+  // 预筛阶段只能用信源的**声明值**（此时还没下载、没有 probed）。
+  // 聚合源普遍不报容器/比特率 → 必须容忍 unknown，否则全部候选会在此被误杀；
+  // 真实音质由 orchestrator 下载后的 probed 复筛（strict）把关。
+  const passed = unique.filter((c) => meetsFloor(c, cfg, target, { tolerateUnknown: true }).ok);
 
   let pool = passed;
   if (cfg.preferLossless) {

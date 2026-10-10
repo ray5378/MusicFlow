@@ -296,3 +296,88 @@ describe("shouldUpgrade", () => {
     expect(shouldUpgrade({ tier: "320" }, { tier: "lossless" }, cross)).toBe(true);
   });
 });
+
+// ==================== tolerateUnknown（预筛宽容，修复「无质量声明候选被全量误杀」） ====================
+describe("meetsFloor — tolerateUnknown", () => {
+  it("默认（不给 opts）+ 无 declared/probed → 拒绝，reason 含「未声明容器」", () => {
+    const c = mk(); // 无任何质量信息
+    const r = meetsFloor(c, cfgOf());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("未声明容器");
+  });
+
+  it("tolerateUnknown + 无任何质量信息 → 放行（交给探针复核）", () => {
+    const c = mk();
+    expect(meetsFloor(c, cfgOf(), undefined, { tolerateUnknown: true }).ok).toBe(true);
+  });
+
+  it("tolerateUnknown + 已声明坏容器（wma 不在白名单）→ 仍拒绝（可信信号不许漏过）", () => {
+    const c = mk({ declared: { container: "wma", bitrateKbps: 320 } });
+    const r = meetsFloor(c, cfgOf({ allowedContainers: ["mp3", "flac"] }), undefined, { tolerateUnknown: true });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("wma");
+  });
+
+  it("tolerateUnknown + 已声明 128kbps + qualityFloor 320 → 仍拒绝（低音质不许漏过）", () => {
+    const c = mk({ declared: { container: "mp3", bitrateKbps: 128 } });
+    const r = meetsFloor(c, cfgOf({ qualityFloor: "320" }), undefined, { tolerateUnknown: true });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("低于门槛");
+  });
+
+  it("tolerateUnknown + qualityFloor any + minBitrateKbps 320 + 声明 256kbps → 拒绝（走比特率闸）", () => {
+    const c = mk({ declared: { container: "mp3", bitrateKbps: 256 } });
+    const r = meetsFloor(
+      c,
+      cfgOf({ qualityFloor: "any", minBitrateKbps: 320 }),
+      undefined,
+      { tolerateUnknown: true },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("低于下限 320kbps");
+  });
+});
+
+describe("rankCandidates — 无质量声明（生产现场回归守卫）", () => {
+  // 贴近真实：go-music-dl 只给 URL + 平台歌曲 id，不声明容器/比特率/采样率。
+  function goMusicDl(id: string, rank: number): Candidate {
+    return {
+      id: `go-music-dl:kg:${id}`,
+      pluginId: "go-music-dl",
+      platform: "kg",
+      url: `https://cdn.example.com/${id}.mp3`,
+      sourceRank: rank,
+      title: "Shape of You",
+      artist: "Ed Sheeran",
+    };
+  }
+
+  it("3 个完全无质量声明的候选 → 返回长度 3（不得为空）", () => {
+    const out = rankCandidates(
+      [
+        goMusicDl("B6A303C9CDA8E6C4C0B2FB0B23A570C6", 0),
+        goMusicDl("D1B2E5F7A8C9D0E1F2A3B4C5D6E7F8A9", 1),
+        goMusicDl("0F1E2D3C4B5A69788796A5B4C3D2E1F0", 2),
+      ],
+      cfgOf(),
+    );
+    expect(out).toHaveLength(3);
+    expect(out.map((c) => c.id)).toContain("go-music-dl:kg:B6A303C9CDA8E6C4C0B2FB0B23A570C6");
+  });
+
+  it("2 个无声明 + 1 个已声明 128kbps → 返回 2（低音质仍被剔）", () => {
+    const low = mk({
+      id: "go-music-dl:kg:LOW128",
+      pluginId: "go-music-dl",
+      platform: "kg",
+      declared: { container: "mp3", bitrateKbps: 128 },
+    });
+    const out = rankCandidates(
+      [goMusicDl("AAAAAAAA000000000000000000000001", 0), goMusicDl("BBBBBBBB000000000000000000000002", 1), low],
+      cfgOf(),
+    );
+    expect(out).toHaveLength(2);
+    expect(out.map((c) => c.id)).not.toContain("go-music-dl:kg:LOW128");
+  });
+});
+

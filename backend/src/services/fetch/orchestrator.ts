@@ -440,7 +440,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       const ranked = deps.rankCandidates(cands, cfg.quality, { durationSec: t.durationSec });
       if (!ranked || ranked.length === 0) {
         for (const c of cands) {
-          const r = meetsFloor(c, cfg.quality, { durationSec: t.durationSec });
+          // 与 rankCandidates 的预筛口径保持一致（tolerateUnknown）：否则「原因」会对不上。
+          const r = meetsFloor(c, cfg.quality, { durationSec: t.durationSec }, { tolerateUnknown: true });
           if (!r.ok) item.rejected.push({ candidateId: c.id, reason: "BELOW_BAR", detail: r.reason });
         }
         item.status = "failed";

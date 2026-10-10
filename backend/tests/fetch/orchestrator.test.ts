@@ -414,4 +414,26 @@ describe("runFetchPipeline", () => {
     expect(r.items.length).toBe(0);
     expect(r.warnings.some((w) => w.includes("cacheRoot 位于 downloadRoot 之内"))).toBe(true);
   });
+
+  it("16. 无质量声明的候选（聚合源）在 dryRun 下判为 queued，不再 BELOW_BAR（生产回归）", async () => {
+    // 贴近真实：go-music-dl 只给 URL + 平台歌曲 id，不声明容器/比特率。
+    const bare: Candidate = {
+      id: "go-music-dl:kg:B6A303C9CDA8E6C4C0B2FB0B23A570C6",
+      pluginId: "go-music-dl",
+      platform: "kg",
+      url: "https://cdn.example.com/x.mp3",
+      sourceRank: 0,
+      title: "Shape of You",
+      artist: "Ed Sheeran",
+    };
+    const deps = makeDeps({ collectCandidates: async () => [bare], rankCandidates: realRankCandidates as any });
+    const r = await run({
+      targets: [tgt({ id: "t1", title: "Shape of You", artist: "Ed Sheeran", durationSec: 200 })],
+      sourceId: "src-1",
+      dryRun: true,
+      deps,
+    });
+    expect(r.items[0].status).toBe("queued");
+    expect(r.items[0].errorCode).toBeUndefined();
+  });
 });
