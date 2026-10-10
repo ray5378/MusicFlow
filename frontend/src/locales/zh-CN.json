@@ -1466,8 +1466,8 @@
         "skipIfInLibraryHint": "本地 / WebDAV 已有则跳过,不重复下载",
         "strictBestTier": "只下最高音质档",
         "strictBestTierHint": "只下载最高音质档;最优源失败时只在同档或更高档里换源,不会降级下低音质",
-        "integrityLevel": "完整性校验强度",
-        "integrityLevelHint": "完整性校验强度,decodable 会整曲解码,最严但最慢",
+        "downloadCooldownDays": "下载冷却天数",
+        "downloadCooldownDaysHint": "最近 N 天内试过的歌在下载任务里直接跳过(断点重跑/反复触发不再重试);0 = 关闭。",
         "transcode": "转码",
         "transcodeEnabled": "启用转码",
         "transcodeWarn": "转 flac 只是容器重新封装,不提升音质;源本来是有损格式时,转出来文件更大但保真度不变。采样率与位深默认跟随源,不会把 48kHz 降成 44.1kHz。",
@@ -1482,6 +1482,14 @@
         "jobRetentionDaysHint": "终态任务记录超期自动清理;0 = 关闭自动清理。不影响已下载的音乐文件。",
         "libraryAutoContinue": "全库下载自动续批",
         "libraryAutoContinueHint": "全库任务跑完自动开下一批,直到库里没有可下歌曲;手动取消的任务不会续批。",
+        "libraryCooldownDays": "全库下载冷却天数",
+        "libraryCooldownDaysHint": "失败尝试 N 天内不再被自动选中;成功歌已迁移本地行,天然不会重选。",
+        "libraryAutoEnabled": "定时自动全库下载",
+        "libraryAutoEnabledHint": "按间隔与时刻自动触发全库下载(跳过冷却期内的失败项)。",
+        "libraryAutoIntervalDays": "自动全库下载间隔(天)",
+        "libraryAutoIntervalDaysHint": "距离上次自动触发多少天后才允许再次触发。",
+        "libraryAutoTimeOfDay": "自动全库下载时刻",
+        "libraryAutoTimeOfDayHint": "每日触发时刻,24 小时制 HH:mm(服务器本地时区)。",
         "transcodeBitDepth24Hint": "源本身是有损格式时 24bit 无意义,只会让文件更大",
         "transcodeTarget": "转码目标格式",
         "transcodeSampleRateHz": "转码采样率 (Hz)",
@@ -1514,12 +1522,6 @@
         "lossless": "无损",
         "hires": "高解析",
         "any": "不限"
-      },
-      "integrityOption": {
-        "length": "长度",
-        "magic": "文件头",
-        "probe": "探测",
-        "decodable": "可解码"
       },
       "conflictOption": {
         "skip": "跳过",

@@ -64,11 +64,9 @@
                 <el-switch v-model="config.strictBestTier" />
                 <div class="hint">{{ t('admin.fetch.config.strictBestTierHint') }}</div>
               </el-form-item>
-              <el-form-item :label="t('admin.fetch.config.integrityLevel')">
-                <el-select v-model="config.integrityLevel">
-                  <el-option v-for="o in integrityOptions" :key="o" :label="integrityLabel(o)" :value="o" />
-                </el-select>
-                <div class="hint">{{ t('admin.fetch.config.integrityLevelHint') }}</div>
+              <el-form-item :label="t('admin.fetch.config.downloadCooldownDays')">
+                <el-input-number v-model="config.downloadCooldownDays" :min="0" :max="365" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.downloadCooldownDaysHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.ssrfTrustedHosts')">
                 <el-input v-model="ssrfHostsText" :placeholder="t('admin.fetch.config.ssrfTrustedHostsPlaceholder')" />
@@ -81,6 +79,22 @@
               <el-form-item :label="t('admin.fetch.config.libraryAutoContinue')">
                 <el-switch v-model="config.libraryAutoContinue" />
                 <div class="hint">{{ t('admin.fetch.config.libraryAutoContinueHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.libraryCooldownDays')">
+                <el-input-number v-model="config.libraryCooldownDays" :min="1" :max="365" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.libraryCooldownDaysHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.libraryAutoEnabled')">
+                <el-switch v-model="config.libraryAutoEnabled" />
+                <div class="hint">{{ t('admin.fetch.config.libraryAutoEnabledHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.libraryAutoIntervalDays')">
+                <el-input-number v-model="config.libraryAutoIntervalDays" :min="1" :max="365" controls-position="right" :disabled="!config.libraryAutoEnabled" />
+                <div class="hint">{{ t('admin.fetch.config.libraryAutoIntervalDaysHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.libraryAutoTimeOfDay')">
+                <el-input v-model="config.libraryAutoTimeOfDay" placeholder="03:00" class="time-input" :disabled="!config.libraryAutoEnabled" />
+                <div class="hint">{{ t('admin.fetch.config.libraryAutoTimeOfDayHint') }}</div>
               </el-form-item>
             </div>
 
@@ -585,7 +599,7 @@ function defaultConfig(): ConfigForm {
     rejectFakeLossless: true,
     skipIfInLibrary: true,
     strictBestTier: true,
-    integrityLevel: "probe",
+    downloadCooldownDays: 7,
     transcodeEnabled: true,
     transcodeTarget: "flac",
     transcodeSampleRateHz: "follow",
@@ -600,6 +614,10 @@ function defaultConfig(): ConfigForm {
     ssrfTrustedHosts: [],
     jobRetentionDays: 30,
     libraryAutoContinue: true,
+    libraryCooldownDays: 30,
+    libraryAutoEnabled: false,
+    libraryAutoIntervalDays: 1,
+    libraryAutoTimeOfDay: "03:00",
   };
 }
 
@@ -617,15 +635,11 @@ const ssrfHostsText = computed({
 const availableSources = ref<FetchSourceInfo[]>([]);
 
 const floorOptions = ["lossless", "hires", "320", "256", "192", "128", "any"];
-const integrityOptions = ["length", "magic", "probe", "decodable"];
 const conflictOptions = ["skip", "overwrite", "rename", "keepBetter"];
 
 function floorLabel(v: string): string {
   if (v === "lossless" || v === "hires" || v === "any") return t(`admin.fetch.floor.${v}`);
   return `${v} kbps`;
-}
-function integrityLabel(v: string): string {
-  return t(`admin.fetch.integrityOption.${v}`);
 }
 function conflictLabel(v: string): string {
   return t(`admin.fetch.conflictOption.${v}`);
@@ -644,6 +658,11 @@ async function loadConfig() {
     if (!Array.isArray(merged.ssrfTrustedHosts)) merged.ssrfTrustedHosts = [];
     if (merged.jobRetentionDays == null) merged.jobRetentionDays = 30;
     if (merged.libraryAutoContinue == null) merged.libraryAutoContinue = true;
+    if (merged.downloadCooldownDays == null) merged.downloadCooldownDays = 7;
+    if (merged.libraryCooldownDays == null) merged.libraryCooldownDays = 30;
+    if (merged.libraryAutoEnabled == null) merged.libraryAutoEnabled = false;
+    if (merged.libraryAutoIntervalDays == null) merged.libraryAutoIntervalDays = 1;
+    if (!merged.libraryAutoTimeOfDay) merged.libraryAutoTimeOfDay = "03:00";
     Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));

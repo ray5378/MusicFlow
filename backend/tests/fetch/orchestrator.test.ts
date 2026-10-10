@@ -94,6 +94,10 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
     // 增值项（歌词/封面 provider）：默认关闭，避免单测触达真实插件沙箱。
     searchLyrics: (async () => null) as any,
     searchCover: (async () => null) as any,
+    // PATCH17 下载尝试台账：默认桩掉（真实实现是 DB 单例，跨用例污染 —— 用例 A 记过的
+    // 键会让用例 B 的同键 target 被冷却秒跳）。台账行为由 attempts.test.ts 专测。
+    isRecentlyAttempted: (() => false) as any,
+    recordDownloadAttempt: (() => undefined) as any,
   };
   return { ...base, ...over } as FetchDeps;
 }
@@ -757,5 +761,28 @@ describe("runFetchPipeline", () => {
     expect(seen[0].loudnessNormalize).toBe(true);
     expect(seen[0].loudnessTargetLufs).toBe(-14);
     expect(seen[0].loudnessTwoPass).toBe(true);
+  });
+
+  it("26. 台账冷却（PATCH17）：最近试过 → 秒跳，不取链不下载；终态回调落 onItem", async () => {
+    const collect = vi.fn(oneMp3);
+    const dl = vi.fn(defaultDownload);
+    const seenItems: any[] = [];
+    const deps = makeDeps({
+      collectCandidates: collect,
+      downloadToFile: dl,
+      isRecentlyAttempted: ((k: string) => k === "t1") as any,
+    });
+    const r = await run({
+      targets: [tgt({ id: "t1", title: "A", durationSec: 200 })],
+      sourceId: "src-1",
+      deps,
+      onItem: (o) => seenItems.push(o),
+    });
+    expect(r.items[0].status).toBe("skipped");
+    expect(r.items[0].errorCode).toBe("COOLDOWN_SKIPPED");
+    expect(collect).not.toHaveBeenCalled(); // 不取链
+    expect(dl).not.toHaveBeenCalled(); // 不下载
+    expect(seenItems).toHaveLength(1); // skipped 即时回调
+    expect(seenItems[0].errorCode).toBe("COOLDOWN_SKIPPED");
   });
 });

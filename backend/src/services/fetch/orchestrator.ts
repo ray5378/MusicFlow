@@ -19,7 +19,7 @@
 import { mkdtempSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
@@ -42,6 +42,13 @@ import { writeTags, type SongTags } from "./tagWriter.js";
 import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
 import { findExistingPlayable } from "./existing.js";
+import {
+  DOWNLOAD_COOLDOWN_CODE,
+  downloadAttemptKeyOf,
+  effectiveCooldownDays,
+  isRecentlyAttempted,
+  recordDownloadAttempt,
+} from "./attempts.js";
 import { ensureDownloadSource } from "./source.js";
 import { disposeOriginalFile, migrateUpgradedSong } from "./upgrade.js";
 import { canWriteDir, ensureWritableDir } from "./writable.js";
@@ -126,6 +133,9 @@ export interface FetchDeps {
   searchLyrics: typeof searchLyrics;
   /** 封面 provider（同上；优先用 Candidate.coverUrl，缺了才调它）。 */
   searchCover: typeof searchCover;
+  /** 下载尝试台账（PATCH17）：冷却期内直接跳过；终态时记录（可轮转）。 */
+  isRecentlyAttempted: typeof isRecentlyAttempted;
+  recordDownloadAttempt: typeof recordDownloadAttempt;
 }
 
 const DEFAULT_DEPS: FetchDeps = {
@@ -143,6 +153,8 @@ const DEFAULT_DEPS: FetchDeps = {
   rankCandidates,
   searchLyrics,
   searchCover,
+  isRecentlyAttempted,
+  recordDownloadAttempt,
 };
 
 export interface RunFetchPipelineOptions {
@@ -151,6 +163,12 @@ export interface RunFetchPipelineOptions {
   /** 省略时内部调 ensureDownloadSource */
   sourceId?: string;
   onProgress?: (p: FetchPipelineProgress) => void;
+  /**
+   * PATCH17 增量落库回调：单曲终态时触发。done 项在 flush（scan/迁移/处置）完成、
+   * songId 已反查后回调；failed/skipped 即时回调；cancelled 不回调（重跑要继续处理）。
+   * jobs 层借此把完整 outcome 立刻写进 fetch_jobs.items_json，中断重跑按终态秒跳。
+   */
+  onItem?: (o: FetchItemOutcome) => void;
   signal?: AbortSignal;
   dryRun?: boolean;
   deps?: Partial<FetchDeps>;
@@ -548,8 +566,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     // 洗版：迁移库行（保住旧行 id，别让歌单/收藏变死引用）→ **成功后才**处置原件。
     // 🔴 顺序硬约束：迁移没成功就绝不允许删原件（disposeOriginalFile 另有多重安全闸）。
     // 全库下载（migrateRowOnly）：只迁移库行（web 行 → 指向新本地文件），**一个文件都不删**。
-    if (!opts.originalDisposal && !opts.migrateRowOnly) return;
-    for (const p of batch) {
+    if (opts.originalDisposal || opts.migrateRowOnly) {
+      for (const p of batch) {
       if (!p.originalPath || !p.oldSongId) continue;
       const mig = await migrateUpgradedSong({
         oldSongId: p.oldSongId,
@@ -587,52 +605,108 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         ...(disp.deleted ? { deleted: true } : {}),
         ...(disp.movedTo ? { movedTo: disp.movedTo } : {}),
       };
+      }
+    }
+
+    // PATCH17 增量落库回调：本批 scan/迁移/处置全部完成（songId 已反查、replaced 已定）
+    // 才触发 —— jobs 层借此把完整 outcome 立刻写进 fetch_jobs.items_json。
+    if (opts.onItem) {
+      for (const p of batch) {
+        try {
+          opts.onItem(p.item);
+        } catch {
+          /* 增量落库失败不影响主流程（片尾还有全量落库兜底） */
+        }
+      }
     }
   };
 
+  // PATCH16 目标级并行：maxConcurrentTargets 路 worker 同时推进不同歌曲的流水线。
+  // 网络总闸仍是 global（maxConcurrentDownloads）+ HostLimiter（单站并发 + 最小间隔），
+  // 并行只提高「等待重叠度」（插件取链 / 预探 / 转码 / 完整性校验期间别的歌继续跑），
+  // 不放大对音源的网络压力。pending/flush 与 counts 变更经调度链串行化，避免并发写竞态。
+  const par = Math.max(1, Math.min(8, Math.floor(Number(cfg.maxConcurrentTargets) || 1)));
+  const targetSem = new Semaphore(par);
+  const batchId = randomUUID();
+  let flushChain: Promise<void> = Promise.resolve();
+  const scheduleFlush = (): void => {
+    flushChain = flushChain.then(() => flush()).catch(() => undefined);
+  };
+  const cancelledOutcome = (t: FetchTarget | undefined, i: number): FetchItemOutcome => ({
+    targetId: t?.id ?? `target-${i}`,
+    status: "cancelled",
+    attempts: 0,
+    rejected: [],
+    errorMsg: "任务已取消",
+  });
+
   try {
-    for (let i = 0; i < targets.length; i++) {
-      if (signal?.aborted) {
-        // 剩余未开始的 target 全部 cancelled。
-        for (let j = i; j < targets.length; j++) {
-          const cancelled: FetchItemOutcome = {
-            targetId: targets[j]?.id ?? `target-${j}`,
-            status: "cancelled",
-            attempts: 0,
-            rejected: [],
-            errorMsg: "任务已取消",
-          };
-          items.push(cancelled);
-          emitProgress(opts.onProgress, cancelled, j, targets.length);
+    const runOne = async (t: FetchTarget, i: number): Promise<void> => {
+      // 排队期间被取消（acquire 抛 AbortError）→ 按 cancelled 收尾，与串行版语义一致。
+      const release = await targetSem.acquire(signal).catch(() => null);
+      if (!release) {
+        items[i] = cancelledOutcome(t, i);
+        emitProgress(opts.onProgress, items[i]!, i, targets.length);
+        return;
+      }
+      try {
+        if (signal?.aborted) {
+          items[i] = cancelledOutcome(t, i);
+          emitProgress(opts.onProgress, items[i]!, i, targets.length);
+          return;
         }
-        break;
+        const item = await processTarget(t, i);
+        items[i] = item;
+        if (item.status === "done") counts.done++;
+        else if (item.status === "failed") counts.failed++;
+        else if (item.status === "skipped") counts.skipped++;
+        if (item.bytes) counts.bytes += item.bytes;
+
+        // 台账记录（PATCH17）：只记跑完的终态（done/failed）。中断（cancelled）与快速
+        // 路径（skipped）不记 —— 前者重跑要继续处理，后者记了只会把冷却起点后推。
+        // 洗版走自己的冷却（fetch_upgrade_attempts），dryRun 不落任何记录。
+        if (!dryRun && !opts.originalDisposal && (item.status === "done" || item.status === "failed")) {
+          try {
+            deps.recordDownloadAttempt(downloadAttemptKeyOf(t), batchId, item.status, effectiveCooldownDays(cfg));
+          } catch (e) {
+            warnings.push(`尝试台账记录失败(忽略): ${msgOf(e)}`);
+          }
+        }
+
+        // PATCH17 增量落库：failed/skipped 即时回调（无 scan 依赖）；done 项等 flush
+        // 反查 songId 后再回调（见 flush 内 onItem），保证重跑时可直接按终态跳过。
+        if (opts.onItem && (item.status === "failed" || item.status === "skipped")) {
+          try {
+            opts.onItem(item);
+          } catch {
+            /* 兜底在片尾全量落库 */
+          }
+        }
+
+        if (item.status === "done" && item.finalPath) {
+          // 洗版目标：sourceData 里的 `upgrade` 块带原路径与原 songId（见 upgrade.ts:buildUpgradeTargets）。
+          const um = upgradeMetaOf(t);
+          pending.push({
+            item,
+            finalPath: item.finalPath,
+            ...(um.originalPath ? { originalPath: um.originalPath } : {}),
+            ...(um.oldSongId ? { oldSongId: um.oldSongId } : {}),
+            ...(item.inPlace ? { inPlace: item.inPlace } : {}),
+          });
+          if (pending.length >= cfg.scanBatchSize) scheduleFlush();
+        }
+
+        emitProgress(opts.onProgress, item, i, targets.length);
+      } finally {
+        release();
       }
+    };
 
-      const item = await processTarget(targets[i], i);
-      items.push(item);
-      if (item.status === "done") counts.done++;
-      else if (item.status === "failed") counts.failed++;
-      else if (item.status === "skipped") counts.skipped++;
-      if (item.bytes) counts.bytes += item.bytes;
-
-      if (item.status === "done" && item.finalPath) {
-        // 洗版目标：sourceData 里的 `upgrade` 块带原路径与原 songId（见 upgrade.ts:buildUpgradeTargets）。
-        const um = upgradeMetaOf(targets[i]);
-        pending.push({
-          item,
-          finalPath: item.finalPath,
-          ...(um.originalPath ? { originalPath: um.originalPath } : {}),
-          ...(um.oldSongId ? { oldSongId: um.oldSongId } : {}),
-          ...(item.inPlace ? { inPlace: item.inPlace } : {}),
-        });
-        if (pending.length >= cfg.scanBatchSize) await flush();
-      }
-
-      emitProgress(opts.onProgress, item, i, targets.length);
-    }
+    await Promise.all(targets.map(runOne));
   } finally {
-    // 收尾必 flush 一次（否则最后不足一批的不入库）。
-    await flush();
+    // 收尾必 flush 一次（否则最后不足一批的不入库）；末次 flush 的错误照常上抛。
+    flushChain = flushChain.then(() => flush());
+    await flushChain;
   }
 
   return { sourceId, items, counts, warnings };
@@ -765,6 +839,20 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         item.errorCode = "ALREADY_IN_LIBRARY";
         item.errorMsg = `库内已有：${existing.kind} ${existing.path}`;
         return item;
+      }
+
+      // 2.5) 台账冷却（PATCH17）：最近 N 天试过（无论成败）→ 秒跳，不取链不预探不下载。
+      //      断点重跑 / 反复触发不再从头重试同一批失败项。洗版有自己的冷却
+      //      （upgradeCooldownDays / fetch_upgrade_attempts），这里不重复管。
+      if (!opts.originalDisposal) {
+        const cooldownDays = effectiveCooldownDays(cfg);
+        const akey = downloadAttemptKeyOf(t);
+        if (cooldownDays > 0 && deps.isRecentlyAttempted(akey, cooldownDays)) {
+          item.status = "skipped";
+          item.errorCode = DOWNLOAD_COOLDOWN_CODE;
+          item.errorMsg = `冷却期内已尝试过（${cooldownDays} 天窗口），跳过`;
+          return item;
+        }
       }
 
       // 3) 取链。
@@ -977,12 +1065,17 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
     // c) 完整性校验。
     try {
+      // 转码常开时「全解码」档自动降级 probe：转码本身就是一次完整解码（文件烂了转码
+      // 自己会失败），再做全解码纯属重复花销；probe 档的时长对比零额外成本（探针本来
+      // 就要做）。产品定调 2026-10-10：完整性只对时长，不花多余钱。
+      const effIntegrityLevel: typeof cfg.integrityLevel =
+        cfg.transcodeEnabled && cfg.integrityLevel === "decodable" ? "probe" : cfg.integrityLevel;
       const ir = await deps.verifyIntegrity(
         {
           file: cachePath,
           expect: { bytes: dl.bytes, sha256: dl.sha256, durationSec: t.durationSec },
         },
-        cfg.integrityLevel,
+        effIntegrityLevel,
       );
       if (!ir.ok) {
         cleanup();

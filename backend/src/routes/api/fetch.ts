@@ -157,6 +157,13 @@ export function registerFetch(app: Hono): void {
     ) {
       delete (override as Record<string, unknown>).libraryAutoTimeOfDay;
     }
+    // 下载尝试冷却天数（PATCH17，产品定调 2026-10-10）：整数 0-365（0 = 关闭）。
+    if ("downloadCooldownDays" in override) {
+      const n = Number((override as Record<string, unknown>).downloadCooldownDays);
+      (override as Record<string, unknown>).downloadCooldownDays = Number.isFinite(n)
+        ? Math.min(365, Math.max(0, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.downloadCooldownDays;
+    }
     // jobRetentionDays：整数 0-3650（0 = 关闭自动清理）。
     if ("jobRetentionDays" in override) {
       const n = Number((override as Record<string, unknown>).jobRetentionDays);

@@ -95,7 +95,8 @@ export interface FetchConfig {
   rejectFakeLossless?: boolean;
   skipIfInLibrary?: boolean;
   strictBestTier?: boolean;
-  integrityLevel?: string;
+  /** 下载尝试冷却天数：最近 N 天试过的歌直接跳过（0 = 关闭）。默认 7 */
+  downloadCooldownDays?: number;
   transcodeEnabled?: boolean;
   transcodeTarget?: string;
   transcodeSampleRateHz?: number;
@@ -110,6 +111,14 @@ export interface FetchConfig {
   ssrfTrustedHosts?: string[];
   jobRetentionDays?: number;
   libraryAutoContinue?: boolean;
+  /** 全库下载冷却天数（失败尝试 N 天内不再自动选中）。默认 30 */
+  libraryCooldownDays?: number;
+  /** 定时自动全库下载总开关。默认 false */
+  libraryAutoEnabled?: boolean;
+  /** 定时自动全库下载间隔天数。默认 1 */
+  libraryAutoIntervalDays?: number;
+  /** 定时自动全库下载时刻（HH:mm）。默认 "03:00" */
+  libraryAutoTimeOfDay?: string;
 }
 
 const BASE = "/rest/api/v1/fetch";

@@ -1466,8 +1466,8 @@
         "skipIfInLibraryHint": "Skip when already present in the local / WebDAV library, no re-download",
         "strictBestTier": "Best tier only",
         "strictBestTierHint": "Download only the highest quality tier; if the best source fails, switch within the same or higher tier, never fall back to lower quality",
-        "integrityLevel": "Integrity check level",
-        "integrityLevelHint": "Integrity verification strength; decodable decodes the whole track, strictest but slowest",
+        "downloadCooldownDays": "Download cooldown days",
+        "downloadCooldownDaysHint": "Songs attempted within the last N days are skipped in download jobs (resume/retrigger won't retry them); 0 = off.",
         "transcode": "Transcode",
         "transcodeEnabled": "Enable transcoding",
         "transcodeWarn": "Transcoding to flac only re-wraps the container and does NOT improve quality; if the source is lossy, the output file is larger with the same fidelity. Sample rate and bit depth follow the source by default and will NOT downsample 48kHz to 44.1kHz.",
@@ -1482,6 +1482,14 @@
         "jobRetentionDaysHint": "Finished task records older than this are cleaned automatically; 0 disables auto-cleanup. Downloaded music files are not affected.",
         "libraryAutoContinue": "Auto-continue full-library download",
         "libraryAutoContinueHint": "When a full-library job finishes, the next batch starts automatically until nothing is left; cancelled jobs do not continue.",
+        "libraryCooldownDays": "Full-library cooldown days",
+        "libraryCooldownDaysHint": "Failed attempts are not re-selected for N days; successful songs migrate to local rows and are naturally excluded.",
+        "libraryAutoEnabled": "Scheduled full-library download",
+        "libraryAutoEnabledHint": "Trigger a full-library download automatically by interval and time of day (skipping items in cooldown).",
+        "libraryAutoIntervalDays": "Auto download interval (days)",
+        "libraryAutoIntervalDaysHint": "Minimum days between automatic triggers.",
+        "libraryAutoTimeOfDay": "Auto download time of day",
+        "libraryAutoTimeOfDayHint": "Daily trigger time, 24h HH:mm (server local timezone).",
         "transcodeBitDepth24Hint": "24bit is meaningless when the source is lossy; it only makes the file larger",
         "transcodeTarget": "Target format",
         "transcodeSampleRateHz": "Target sample rate (Hz)",
@@ -1514,12 +1522,6 @@
         "lossless": "Lossless",
         "hires": "Hi-Res",
         "any": "Any"
-      },
-      "integrityOption": {
-        "length": "Length",
-        "magic": "Magic bytes",
-        "probe": "Probe",
-        "decodable": "Decodable"
       },
       "conflictOption": {
         "skip": "Skip",

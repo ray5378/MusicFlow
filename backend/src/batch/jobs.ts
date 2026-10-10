@@ -632,8 +632,35 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
   }
 
   const dryRun = !!(job.config as any)?.dryRun;
+
+  // PATCH17 断点续跑：本片里已有终态（done/skipped/failed）的项直接跳过，只跑
+  // 未处理/被中断（cancelled 或尚无结果）的项 —— 中断重跑不再从头重试整片。
+  // done 项的 items 里带 songId（flush 反查后才增量落库），可安全跳过；cancelled
+  // 项刻意不落库，重跑时照常处理。
+  const TERMINAL_STATUSES = new Set(["done", "skipped", "failed"]);
+  const terminalIds = new Set(
+    job.items.filter((x) => TERMINAL_STATUSES.has(String(x.status))).map((x) => x.targetId),
+  );
+  const todo = slice.filter((t: any) => !terminalIds.has(String(t?.id)));
+
+  if (todo.length === 0) {
+    // 本片已全部有终态（中断重跑场景）：不碰流水线，直接推进下一片/落终态。
+    if (!hasMore) {
+      const c = job.counts;
+      const anyFailed = c.failed > 0;
+      const anyOk = c.done > 0 || c.skipped > 0;
+      let status: TaskStatus;
+      if (ctx.signal.aborted) status = "cancelled";
+      else if (anyFailed && anyOk) status = "partial";
+      else if (anyFailed) status = "failed";
+      else status = "done";
+      updateFetchJobStatus(jobId, status);
+    }
+    return { jobId, chunk, hasMore, counts: job.counts, warnings: [] };
+  }
+
   const result = await runFetchPipeline({
-    targets: slice,
+    targets: todo,
     config: cfg,
     sourceId: sourceId || undefined,
     signal: ctx.signal,
@@ -643,6 +670,33 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     migrateRowOnly,
     // 🔴 progress 即心跳:每完成一首回报一次,防 15min 看门狗 SIGKILL。
     onProgress: (p) => ctx.onProgress({ stage: "fetch", ...p }),
+    // PATCH17 增量落库：每首歌终态立刻进 fetch_jobs.items_json（done 项在 flush 反查
+    // songId 后回调），中断重跑按终态秒跳。计数从 items 重推导（幂等，可安全覆盖）。
+    onItem: (o) => {
+      try {
+        const fresh = getFetchJob(jobId);
+        if (!fresh) return;
+        const merged = mergeItems(fresh.items, [o]);
+        const by = { done: 0, failed: 0, skipped: 0 };
+        let bytes = 0;
+        for (const it of merged) {
+          if (it.status === "done") by.done++;
+          else if (it.status === "failed") by.failed++;
+          else if (it.status === "skipped") by.skipped++;
+          if (it.bytes) bytes += it.bytes;
+        }
+        saveFetchJobItems(jobId, merged, {
+          ...fresh.counts,
+          total: allTargets.length,
+          done: by.done,
+          failed: by.failed,
+          skipped: by.skipped,
+          bytes,
+        });
+      } catch {
+        /* 增量落库失败不影响主流程（片尾还有全量落库兜底） */
+      }
+    },
   });
 
   // 本片结果合并进 fetch_jobs(按 targetId/itemId 对齐,不丢其它片)。

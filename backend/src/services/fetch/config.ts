@@ -44,6 +44,9 @@ export interface FetchConfig {
   libraryAutoIntervalDays: number;
   /** 定时自动全库下载时刻（HH:mm，服务器本地时区）。默认 "03:00" */
   libraryAutoTimeOfDay: string;
+  /** 下载尝试冷却天数：最近 N 天内试过（无论成败）的歌在下载任务里直接跳过（0 = 关闭）。
+   *  断点续跑/反复触发不再从头重试（PATCH17，产品定调 2026-10-10）。默认 7 */
+  downloadCooldownDays: number;
   /** 落盘命名模板（复用 naming.ts） */
   naming: NamingConfig;
   /** 质量门槛（复用 types.ts） */
@@ -87,6 +90,8 @@ export interface FetchConfig {
   writeSourceComment: boolean;
   embedCover: boolean;
   maxConcurrentDownloads: number;
+  /** 同时推进多少首歌的流水线（目标级并行，PATCH16）。1 = 串行（旧行为） */
+  maxConcurrentTargets: number;
   maxConcurrentPerHost: number;
   perHostMinIntervalMs: number;
   /** 0 = 不限速（单位 KB/s） */
@@ -131,6 +136,7 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   libraryAutoEnabled: false,
   libraryAutoIntervalDays: 1,
   libraryAutoTimeOfDay: "03:00",
+  downloadCooldownDays: 7,
   naming: DEFAULT_NAMING_CONFIG,
   quality: DEFAULT_QUALITY_CONFIG,
   skipIfInLibrary: true,
@@ -155,6 +161,8 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   writeSourceComment: true,
   embedCover: true,
   maxConcurrentDownloads: 2,
+  /** PATCH16 目标级并行：同时推进多少首歌的流水线（下载仍受 maxConcurrentDownloads / 单站闸约束）。默认 3 */
+  maxConcurrentTargets: 3,
   maxConcurrentPerHost: 1,
   perHostMinIntervalMs: 500,
   rateLimitKBps: 0,

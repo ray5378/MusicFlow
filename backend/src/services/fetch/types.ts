@@ -92,6 +92,7 @@ export type FetchErrorCode =
   | "SCAN_FAILED"
   // MusicFetch 编排层（orchestrator）专用：
   | "ALREADY_IN_LIBRARY" // 本地/WebDAV 已有，按用户要求跳过
+  | "COOLDOWN_SKIPPED" // PATCH17 台账冷却：最近试过（无论成败），秒跳
   | "DUPLICATE_TARGET" // 同一任务内重复的曲目
   | "TRANSCODE_FAILED" // 转码失败（此前借用 TAG_FAILED，UI 上会误显示成"写标签失败"）
   | "UNKNOWN";
