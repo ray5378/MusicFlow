@@ -43,12 +43,7 @@ import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
 import { findExistingPlayable } from "./existing.js";
 import { ensureDownloadSource } from "./source.js";
-import {
-  disposeOriginalFile,
-  LOSSLESS_COMPRESSED_CONTAINERS,
-  LOSSLESS_UNCOMPRESSED_CONTAINERS,
-  migrateUpgradedSong,
-} from "./upgrade.js";
+import { disposeOriginalFile, migrateUpgradedSong } from "./upgrade.js";
 import { canWriteDir, ensureWritableDir } from "./writable.js";
 import { scanLocalFiles } from "../source/scanner.js";
 import { resolveFetchConfig, validateFetchPaths, type FetchConfig } from "./config.js";
@@ -307,8 +302,6 @@ function upgradeMetaOf(t: FetchTarget | undefined): {
   }
 }
 
-const ALL_LOSSLESS_CONTAINERS: string[] = [...LOSSLESS_COMPRESSED_CONTAINERS, ...LOSSLESS_UNCOMPRESSED_CONTAINERS];
-
 /**
  * 洗版「抢救候选」（PATCH14B）：全部候选被 rank 预筛拒绝时，挑出仍值得下载验证的：
  * 无损容器 +（声明码率已知时）高于原件基准。声明缺失视为未知（值得试），最终以探针裁决。
@@ -318,12 +311,17 @@ function rescueCandidatesForInPlace(cands: Candidate[], t: FetchTarget): Candida
   if (!um?.originalFsPath || !um.originalSourceId) return [];
   const baseline = um.baselineKbps ?? 0;
   if (!(baseline > 0)) return [];
+  // 240 实测教训：桥接候选的 declared 容器来自 URL 扩展名，lx 直链常无扩展名 → 容器未知。
+  // 所以只排除「确定不值得」的：已知有损容器、已知无损且声明码率不超过原件；其余（含
+  // 容器/码率全未知）都值得下载验证 —— 最终裁决一律以探针为准。
+  const LOSSY = new Set(["mp3", "aac", "ogg", "wma", "opus", "m4a"]);
   return cands.filter((c) => {
     const q = qualityOf(c);
     const cont = String(q?.container ?? "").toLowerCase();
-    if (!ALL_LOSSLESS_CONTAINERS.includes(cont)) return false;
+    if (LOSSY.has(cont)) return false;
     const k = Number(q?.bitrateKbps ?? 0);
-    return !(k > 0 && k <= baseline);
+    if (k > 0 && k <= baseline) return false;
+    return true;
   });
 }
 
