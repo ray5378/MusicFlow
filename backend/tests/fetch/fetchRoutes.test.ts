@@ -176,4 +176,34 @@ describe("fetch 域：配置 / 音源 / 任务", () => {
     expect(newJob.targets.targets.length).toBe(1);
     expect(newJob.targets.targets[0].id).toBe(failed);
   });
+
+  it("GET /jobs/:id：items 从 targets 快照 join title/artist（无匹配 target 则留空）", async () => {
+    const job = createFetchJob({
+      kind: "manual",
+      targets: { targets: [{ id: "t1", title: "晴天", artist: "周杰伦" }] },
+      config: {},
+    });
+    saveFetchJobItems(job.id, [
+      { id: "t1", targetId: "t1", status: "done", attempts: 1 },
+      { id: "t-unknown", targetId: "t-unknown", status: "failed", attempts: 1 },
+    ]);
+
+    const r = await call("GET", `/v1/fetch/jobs/${job.id}`);
+    expect(r.status).toBe(200);
+    expect(r.body.success).toBe(true);
+
+    const items = r.body.job.items;
+    expect(items).toHaveLength(2);
+
+    const hit = items.find((i: any) => i.targetId === "t1");
+    expect(hit.title).toBe("晴天");
+    expect(hit.artist).toBe("周杰伦");
+    expect(hit.status).toBe("done");
+    expect(hit.targetId).toBe("t1");
+
+    // 无匹配 target 的 item：不崩、不误填。
+    const miss = items.find((i: any) => i.targetId === "t-unknown");
+    expect(miss.title).toBe("");
+    expect(miss.artist).toBe("");
+  });
 });

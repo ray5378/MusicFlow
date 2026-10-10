@@ -236,7 +236,23 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.NOT_FOUND;
       return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    return c.json({ success: true, job });
+    // 详情弹窗要显示歌名/歌手：items 自身不冗余这两个字段，
+    // 故在读取时从 targets 快照 join（key = targetId）。
+    const tgts: any[] = Array.isArray((job as any)?.targets?.targets)
+      ? (job as any).targets.targets
+      : [];
+    const meta = new Map(
+      tgts.map((t) => [
+        String(t?.id),
+        { title: String(t?.title ?? ""), artist: String(t?.artist ?? "") },
+      ]),
+    );
+    const items = job.items.map((it) => ({
+      ...it,
+      title: meta.get(it.targetId)?.title ?? "",
+      artist: meta.get(it.targetId)?.artist ?? "",
+    }));
+    return c.json({ success: true, job: { ...job, items } });
   });
 
   // ---------------- 取消 ----------------
