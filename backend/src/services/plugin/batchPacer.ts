@@ -209,18 +209,21 @@ function pumpLock(): void {
   }
 }
 
-/** 设置批量并发上限(≥1)。沙箱 worker 注册/注销时由批量闸联动更新。 */
+/** 批量并发上限(≥1)。沙箱 worker 注册/注销时由批量闸联动更新。 */
 export function setBatchConcurrencyLimit(n: number): void {
-  batchLimit = Math.max(batchFloor, 1, n);
+  batchLimit = Math.min(MAX_BATCH_LIMIT, Math.max(batchFloor, 1, n));
   pumpLock();
 }
+
+// 批量闸并发硬上限：再多就是无意义的子进程/内存叠加（每个批量任务 = 一个子进程）。
+const MAX_BATCH_LIMIT = 16;
 
 // 基础并发下限(PATCH19):fetch 多任务并行等场景保底;插件并行资格在此基础上只增不减。
 let batchFloor = 1;
 
-/** 设置批量并发下限(≥1):调用方(如 fetch 任务并行数配置)保底,运行时可调,即时生效。 */
+/** 设置批量并发下限(≥1，硬上限 16):调用方(如 fetch 任务并行数配置)保底,运行时可调,即时生效。 */
 export function ensureBaseBatchLimit(n: number): void {
-  batchFloor = Math.max(1, Math.floor(n) || 1);
+  batchFloor = Math.min(MAX_BATCH_LIMIT, Math.max(1, Math.floor(n) || 1));
   setBatchConcurrencyLimit(Math.max(batchFloor, batchParallelIds.size, 1));
 }
 

@@ -165,7 +165,8 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   maxConcurrentDownloads: 2,
   /** PATCH16 目标级并行：同时推进多少首歌的流水线（下载仍受 maxConcurrentDownloads / 单站闸约束）。默认 3 */
   maxConcurrentTargets: 3,
-  /** PATCH19 任务级并行：全局批量闸的 fetch 保底下限（1=串行排队旧行为）。默认 2 */
+  /** PATCH19 任务级并行：全局批量闸的 fetch 保底下限（1=串行排队旧行为，上限 16）。
+   *  下载 / 洗版 / 全库下载 / 重试**共用**这一个闸（都走 startFetchJob）。默认 2 */
   maxConcurrentJobs: 2,
   maxConcurrentPerHost: 1,
   perHostMinIntervalMs: 500,
@@ -207,10 +208,10 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
       typeof p.jobRetentionDays === "number" && Number.isFinite(p.jobRetentionDays)
         ? Math.min(3650, Math.max(0, Math.floor(p.jobRetentionDays)))
         : DEFAULT_FETCH_CONFIG.jobRetentionDays,
-    // PATCH19 任务级并行：1..4（>4 个批量子进程叠加会挤压交互，不给配）。
+    // PATCH19 任务级并行：1..16（与批量闸硬上限一致）。
     maxConcurrentJobs:
       typeof p.maxConcurrentJobs === "number" && Number.isFinite(p.maxConcurrentJobs)
-        ? Math.min(4, Math.max(1, Math.floor(p.maxConcurrentJobs)))
+        ? Math.min(16, Math.max(1, Math.floor(p.maxConcurrentJobs)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentJobs,
     syncToPlaylistIds: p.syncToPlaylistIds
       ? [...p.syncToPlaylistIds]

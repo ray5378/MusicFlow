@@ -60,6 +60,7 @@ import {
   updateFetchJobStatus,
   type FetchJobRecord,
 } from "../../services/fetch/jobStore.js";
+import { ensureBaseBatchLimit } from "../../services/plugin/batchPacer.js";
 import type { TaskStatus } from "../../services/fetch/types.js";
 
 /** 客户端入参 → FetchTarget[]（宽容归一化：缺 id 补位、缺 title 置空）。 */
@@ -137,11 +138,11 @@ export function registerFetch(app: Hono): void {
         ? Math.min(365, Math.max(1, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.libraryCooldownDays;
     }
-    // PATCH19 任务级并行数：1..4（resolveFetchConfig 还会再夹一层）。
+    // PATCH19 任务级并行数：1..16（与批量闸硬上限一致；resolveFetchConfig 再夹一层）。
     if ("maxConcurrentJobs" in override) {
       const n = Number((override as Record<string, unknown>).maxConcurrentJobs);
       (override as Record<string, unknown>).maxConcurrentJobs = Number.isFinite(n)
-        ? Math.min(4, Math.max(1, Math.floor(n)))
+        ? Math.min(16, Math.max(1, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentJobs;
     }
     if (
@@ -188,6 +189,8 @@ export function registerFetch(app: Hono): void {
       );
     }
     setSetting(FETCH_CONFIG_KEY, JSON.stringify(override));
+    // PATCH19：任务并行数改动**即时生效**（不等下一个任务启动）——立刻刷新全局批量闸保底。
+    ensureBaseBatchLimit(merged.maxConcurrentJobs);
     return c.json({ success: true, config: merged, warnings: v.warnings });
   });
 

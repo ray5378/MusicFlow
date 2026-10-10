@@ -138,7 +138,7 @@
             <el-divider content-position="left">{{ t('admin.fetch.config.concurrency') }}</el-divider>
             <div class="config-grid">
               <el-form-item :label="t('admin.fetch.config.maxConcurrentJobs')">
-                <el-input-number v-model="config.maxConcurrentJobs" :min="1" :max="4" controls-position="right" />
+                <el-input-number v-model="config.maxConcurrentJobs" :min="1" :max="16" controls-position="right" />
                 <div class="hint">{{ t('admin.fetch.config.maxConcurrentJobsHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.maxConcurrentDownloads')">

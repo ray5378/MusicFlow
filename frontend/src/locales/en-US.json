@@ -1499,7 +1499,7 @@
         "concurrency": "Concurrency",
         "maxConcurrentDownloads": "Max concurrent downloads",
         "maxConcurrentJobs": "Parallel jobs",
-        "maxConcurrentJobsHint": "How many download/upgrade jobs advance at the same time (each job still processes chunks sequentially, with parallel targets within a chunk); changes take effect immediately.",
+        "maxConcurrentJobsHint": "How many download/upgrade jobs advance at the same time (up to 16; each job still processes chunks sequentially, with parallel targets within a chunk). Downloads, upgrades and full-library runs share this gate; changes take effect immediately.",
         "maxConcurrentPerHost": "Max concurrent per host",
         "perHostMinIntervalMs": "Min interval per host (ms)",
         "rateLimitKBps": "Rate limit (KB/s)",

@@ -23,6 +23,7 @@ import {
   updateFetchJobStatus,
 } from "../../src/services/fetch/jobStore.js";
 import { sqlite } from "../../src/db/index.js";
+import { resolveFetchConfig } from "../../src/services/fetch/config.js";
 
 describe("batchPacer — ensureBaseBatchLimit 保底下限", () => {
   beforeEach(() => _resetPacerForTest());
@@ -31,6 +32,13 @@ describe("batchPacer — ensureBaseBatchLimit 保底下限", () => {
   it("保底下限生效：limit 至少为 floor", () => {
     ensureBaseBatchLimit(3);
     expect(_batchLimitForTest()).toBe(3);
+  });
+
+  it("批量闸硬上限 16：floor 开再大也封顶 16", () => {
+    ensureBaseBatchLimit(99);
+    expect(_batchLimitForTest()).toBe(16);
+    ensureBaseBatchLimit(16);
+    expect(_batchLimitForTest()).toBe(16);
   });
 
   it("插件并行资格与 floor 取大者；注销后回落到 floor 而不是 1", () => {
@@ -52,6 +60,14 @@ describe("batchPacer — ensureBaseBatchLimit 保底下限", () => {
     expect(_batchLimitForTest()).toBe(2);
     ensureBaseBatchLimit(1);
     expect(_batchLimitForTest()).toBe(1);
+  });
+
+  it("maxConcurrentJobs 配置夹紧到 1..16（下载/洗版/全库共用同一字段）", () => {
+    expect(resolveFetchConfig({ maxConcurrentJobs: 99 }).maxConcurrentJobs).toBe(16);
+    expect(resolveFetchConfig({ maxConcurrentJobs: 16 }).maxConcurrentJobs).toBe(16);
+    expect(resolveFetchConfig({ maxConcurrentJobs: 0 }).maxConcurrentJobs).toBe(1);
+    expect(resolveFetchConfig({ maxConcurrentJobs: -3 }).maxConcurrentJobs).toBe(1);
+    expect(resolveFetchConfig({}).maxConcurrentJobs).toBe(2);
   });
 });
 
