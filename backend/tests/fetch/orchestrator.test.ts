@@ -508,6 +508,121 @@ describe("runFetchPipeline", () => {
     expect(r.warnings.some((w) => w.includes("封面下载失败") || w.includes("封面获取失败"))).toBe(true);
   });
 
+  it("21. 洗版原地替换：假无损但有效码率高于原件 → done，落回原目录，按原 sourceId 入库", async () => {
+    const origDir = join(DL, "Artist");
+    mkdirSync(origDir, { recursive: true });
+    const origFile = join(origDir, "old.mp3");
+    writeFileSync(origFile, "OLD");
+    const upgTarget: FetchTarget = {
+      id: "upgrade:old-1",
+      title: "Song",
+      artist: "Artist",
+      sourceData: JSON.stringify({
+        upgrade: { songId: "old-1", path: `l:dl-x:${origFile}`, suffix: "mp3", bitRate: 500 },
+      }),
+    };
+    // 候选 flac：13,750,000 字节 / 200s = 550kbps —— 假无损（<700）但 > 原件基准 500 → 接受。
+    const finalize = vi.fn(() => ({
+      action: "write" as const,
+      finalPath: join(origDir, "Song - Artist.flac"),
+      warnings: [],
+    }));
+    const scans: string[] = [];
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "fl", url: "http://h/x.flac", container: "flac", bitrateKbps: 999, bitDepth: 16 }),
+      ],
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        mkdirSync(dirname(o.destPath), { recursive: true });
+        writeFileSync(o.destPath, Buffer.alloc(13_750_000, 1));
+        return {
+          bytes: 13_750_000,
+          httpStatus: 200,
+          sha256: "s",
+          rangeSupported: true,
+          finalUrl: o.url,
+          partial: false,
+        };
+      }) as any,
+      probeFile: (async (file: string) => ({
+        path: file,
+        bytes: 13_750_000,
+        container: "flac",
+        bitDepth: 16,
+        bitrateKbps: 550,
+        sampleRateHz: 44100,
+        durationSec: 200,
+        hasCover: false,
+      })) as any,
+      finalizeFile: finalize,
+      scanLocalFiles: (async (sid: string) => {
+        scans.push(sid);
+        return { added: 1, updated: 0, failed: 0, skipped: 0 };
+      }) as any,
+    });
+    const r = await run({
+      targets: [upgTarget],
+      sourceId: "src-1",
+      deps,
+      originalDisposal: { action: "keep", allowedRoots: [DL] },
+    });
+    expect(r.items[0].status).toBe("done");
+    expect(r.items[0].inPlace).toEqual({ fsPath: origFile, sourceId: "dl-x" });
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(finalize.mock.calls[0][0].destDirOverride).toBe(origDir);
+    expect(scans).toContain("dl-x");
+  });
+
+  it("22. 原地替换基线：假无损且有效码率不高于原件 → 仍 FAKE_LOSSLESS，不落盘", async () => {
+    const origFile = join(DL, "Artist", "old.mp3");
+    const upgTarget: FetchTarget = {
+      id: "upgrade:old-2",
+      title: "Song",
+      artist: "Artist",
+      sourceData: JSON.stringify({
+        upgrade: { songId: "old-2", path: `l:dl-x:${origFile}`, suffix: "mp3", bitRate: 600 },
+      }),
+    };
+    const finalize = vi.fn(() => ({ action: "write" as const, finalPath: join(DL, "x.flac"), warnings: [] }));
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "fl", url: "http://h/x.flac", container: "flac", bitrateKbps: 999, bitDepth: 16 }),
+      ],
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        mkdirSync(dirname(o.destPath), { recursive: true });
+        writeFileSync(o.destPath, Buffer.alloc(13_750_000, 1));
+        return {
+          bytes: 13_750_000,
+          httpStatus: 200,
+          sha256: "s",
+          rangeSupported: true,
+          finalUrl: o.url,
+          partial: false,
+        };
+      }) as any,
+      probeFile: (async (file: string) => ({
+        path: file,
+        bytes: 13_750_000,
+        container: "flac",
+        bitDepth: 16,
+        bitrateKbps: 550,
+        sampleRateHz: 44100,
+        durationSec: 200,
+        hasCover: false,
+      })) as any,
+      finalizeFile: finalize,
+    });
+    const r = await run({
+      targets: [upgTarget],
+      sourceId: "src-1",
+      deps,
+      originalDisposal: { action: "keep", allowedRoots: [DL] },
+    });
+    expect(r.items[0].status).toBe("failed");
+    expect(r.items[0].errorCode).toBe("FAKE_LOSSLESS");
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
   it("20. 转码透传响度归一化参数（cfg 默认开，目标 -14 LUFS）", async () => {
     const seen: any[] = [];
     const tr = vi.fn(async (src: string, o: any) => {

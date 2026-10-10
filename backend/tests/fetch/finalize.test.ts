@@ -234,6 +234,23 @@ describe("finalizeFile", () => {
     ).toThrow(/原地覆盖/);
   });
 
+  it("destDirOverride：原地替换 —— 成品落到指定目录（文件名取模板）", () => {
+    const dest = join(DL, "orig/Artist/Album");
+    mkdirSync(dest, { recursive: true });
+    const cache = makeCache("x.flac", "LOSSLESS");
+    const r = finalizeFile({
+      cachePath: cache,
+      target: TARGET,
+      probed: { container: "flac" },
+      config: cfg(),
+      destDirOverride: dest,
+    });
+    expect(r.action).toBe("write");
+    expect(dirname(r.finalPath!)).toBe(dest);
+    expect(r.finalPath).toMatch(/\.flac$/);
+    expect(existsSync(r.finalPath!)).toBe(true);
+  });
+
   it("无法确定扩展名时抛错", () => {
     expect(() =>
       finalizeFile({

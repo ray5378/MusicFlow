@@ -29,6 +29,7 @@ import type { LyricSongInput } from "../../plugins/types.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
 import {
   classifyTier,
+  effectiveBitrateKbps,
   isFakeLossless,
   meetsFloor,
   rankCandidates,
@@ -82,6 +83,8 @@ export interface FetchItemOutcome {
   errorMsg?: string;
   /** 洗版审计：命中更好音质后对原低码率文件的处置结果。 */
   replaced?: { originalPath: string; newPath: string; action: string; deleted?: boolean; movedTo?: string };
+  /** 原地替换（洗版：假无损但高于原件）：新文件落在原媒体源目录，按原 sourceId 入库。 */
+  inPlace?: { fsPath: string; sourceId: string };
 }
 
 export interface FetchPipelineProgress {
@@ -254,23 +257,54 @@ function describeQuality(q: CandidateQuality | undefined): string {
  *   - `library`（全库下载）：原 `web` 行 id（path 仅作审计，migrateRowOnly 下不删文件）。
  * 都没有 → 返回空。
  */
-function upgradeMetaOf(t: FetchTarget | undefined): { originalPath?: string; oldSongId?: string } {
+function upgradeMetaOf(t: FetchTarget | undefined): {
+  originalPath?: string;
+  oldSongId?: string;
+  /** 原件基准有效码率（buildUpgradeTargets 里用 upgradeBaselineKbps 按 size/duration 预算好）。 */
+  baselineKbps?: number;
+  /** 库行 path 剥出的原媒体源 id（`l:<sid>:<fs>` 前缀段）。 */
+  originalSourceId?: string;
+  /** 库行 path 剥出的真实 fs 路径。 */
+  originalFsPath?: string;
+} {
   const raw = t?.sourceData;
   if (!raw) return {};
   try {
     const obj = JSON.parse(raw) as {
-      upgrade?: { path?: unknown; songId?: unknown };
+      upgrade?: { path?: unknown; songId?: unknown; bitRate?: unknown };
       library?: { path?: unknown; songId?: unknown };
     };
     const hit = obj?.upgrade ?? obj?.library;
     if (!hit) return {};
+    const originalPath = typeof hit.path === "string" && hit.path ? hit.path : undefined;
+    let originalSourceId: string | undefined;
+    let originalFsPath: string | undefined;
+    if (originalPath) {
+      const m = /^l:([^:]+):(.+)$/.exec(originalPath);
+      if (m) {
+        originalSourceId = m[1];
+        originalFsPath = m[2];
+      } else {
+        originalFsPath = originalPath;
+      }
+    }
+    const br = (hit as { bitRate?: unknown }).bitRate;
     return {
-      originalPath: typeof hit.path === "string" && hit.path ? hit.path : undefined,
+      originalPath,
       oldSongId: typeof hit.songId === "string" && hit.songId ? hit.songId : undefined,
+      baselineKbps: typeof br === "number" && br > 0 ? br : undefined,
+      originalSourceId,
+      originalFsPath,
     };
   } catch {
     return {};
   }
+}
+
+/** 库行 path（`l:<sid>:<fs路径>`）→ 真实 fs 路径；无前缀原样返回。 */
+function stripLibraryPathPrefix(p: string): string {
+  const m = /^l:([^:]+):(.+)$/.exec(p);
+  return m ? m[2] : p;
 }
 
 /** 归一化标题|歌手，用于任务内去重。 */
@@ -284,7 +318,14 @@ function dedupeKey(t: FetchTarget): string {
 
 /** 候选处理结果。 */
 type AttemptOutcome =
-  | { kind: "success"; cachePath: string; bytes: number; finalPath: string }
+  | {
+      kind: "success";
+      cachePath: string;
+      bytes: number;
+      finalPath: string;
+      /** 原地替换：见 tryCandidate 步骤 e。 */
+      inPlace?: { fsPath: string; sourceId: string };
+    }
   | { kind: "keep" }
   | { kind: "fail"; code: FetchErrorCode; detail?: string };
 
@@ -342,6 +383,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   const deps: FetchDeps = { ...DEFAULT_DEPS, ...(opts.deps ?? {}) };
   const signal = opts.signal;
   const dryRun = !!opts.dryRun;
+  // 洗版模式（config_json.__upgrade 必带 originalDisposal）：启用「假无损原地替换」分支。
+  const upgradeMode = !!opts.originalDisposal;
 
   // sourceId：未给时确保下载源存在。
   let sourceId = opts.sourceId ?? "";
@@ -367,7 +410,14 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
   const items: FetchItemOutcome[] = [];
   const seen = new Set<string>();
-  const pending: Array<{ item: FetchItemOutcome; finalPath: string; originalPath?: string; oldSongId?: string }> = [];
+  const pending: Array<{
+    item: FetchItemOutcome;
+    finalPath: string;
+    originalPath?: string;
+    oldSongId?: string;
+    /** 原地替换项：新文件落原媒体源目录，点名入库/迁移/处置都按原 sourceId 走。 */
+    inPlace?: { fsPath: string; sourceId: string };
+  }> = [];
 
   // 限流器：整批共用一个实例（按任务实例创建，跑完随对象 GC）。
   const global = new Semaphore(cfg.maxConcurrentDownloads);
@@ -376,24 +426,34 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   const flush = async (): Promise<void> => {
     if (dryRun || pending.length === 0) return;
     const batch = pending.splice(0, pending.length);
-    try {
-      const res = await deps.scanLocalFiles(sourceId, batch.map((p) => p.finalPath), undefined, signal);
-      counts.added += res.added;
-      counts.updated += res.updated;
-    } catch (e) {
-      warnings.push(`点名入库失败: ${msgOf(e)}`);
-    }
-    // songId 反查（scanLocalFiles 只返回计数）：path = l:<sourceId>:<绝对路径>
+    // 分组点名入库：原地替换项落回原媒体源（文件在其目录下），其余落流水线 sourceId。
+    const groups = new Map<string, typeof batch>();
     for (const p of batch) {
+      const sid = p.inPlace?.sourceId || sourceId;
+      const arr = groups.get(sid);
+      if (arr) arr.push(p);
+      else groups.set(sid, [p]);
+    }
+    for (const [sid, arr] of groups) {
       try {
-        const row = db
-          .select({ id: songs.id })
-          .from(songs)
-          .where(eq(songs.path, `l:${sourceId}:${p.finalPath}`))
-          .get();
-        if (row?.id) p.item.songId = row.id;
-      } catch {
-        /* 反查失败不影响主流程 */
+        const res = await deps.scanLocalFiles(sid, arr.map((p) => p.finalPath), undefined, signal);
+        counts.added += res.added;
+        counts.updated += res.updated;
+      } catch (e) {
+        warnings.push(`点名入库失败: ${msgOf(e)}`);
+      }
+      // songId 反查（scanLocalFiles 只返回计数）：path = l:<sourceId>:<绝对路径>
+      for (const p of arr) {
+        try {
+          const row = db
+            .select({ id: songs.id })
+            .from(songs)
+            .where(eq(songs.path, `l:${sid}:${p.finalPath}`))
+            .get();
+          if (row?.id) p.item.songId = row.id;
+        } catch {
+          /* 反查失败不影响主流程 */
+        }
       }
     }
 
@@ -406,7 +466,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       const mig = await migrateUpgradedSong({
         oldSongId: p.oldSongId,
         newPath: p.finalPath,
-        newSourceId: sourceId,
+        newSourceId: p.inPlace?.sourceId || sourceId,
       });
       if (mig.warnings.length > 0) warnings.push(...mig.warnings);
       if (!mig.migrated) continue; // 迁移失败 → 保留原件，换不了就不删
@@ -417,17 +477,23 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         p.item.replaced = { originalPath: p.originalPath, newPath: p.finalPath, action: "migrate" };
         continue;
       }
+      // 库行 path 带 `l:<sid>:` 前缀，处置闸（allowedRoots/扩展名）要真实 fs 路径才判得准。
+      const origFs = stripLibraryPathPrefix(p.originalPath);
       const disp = disposeOriginalFile({
-        originalPath: p.originalPath,
+        originalPath: origFs,
         newPath: p.finalPath,
-        action: opts.originalDisposal.action,
+        // 原地替换语义 = 原文件被更优版本顶替：keep 一律升级为 delete（move/keep 备份语义
+        // 只适用于「迁去 LOSSLESS」；原地留下的旧文件会成为孤儿并被重扫出重复行）。
+        action: p.inPlace && opts.originalDisposal.action === "keep" ? "delete" : opts.originalDisposal.action,
         backupDir: opts.originalDisposal.backupDir,
-        allowedRoots: opts.originalDisposal.allowedRoots,
+        allowedRoots: p.inPlace
+          ? [...opts.originalDisposal.allowedRoots, path.dirname(origFs)]
+          : opts.originalDisposal.allowedRoots,
         dryRun: false,
       });
       if (disp.warnings.length > 0) warnings.push(...disp.warnings);
       p.item.replaced = {
-        originalPath: p.originalPath,
+        originalPath: origFs,
         newPath: p.finalPath,
         action: disp.action,
         ...(disp.deleted ? { deleted: true } : {}),
@@ -469,6 +535,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           finalPath: item.finalPath,
           ...(um.originalPath ? { originalPath: um.originalPath } : {}),
           ...(um.oldSongId ? { oldSongId: um.oldSongId } : {}),
+          ...(item.inPlace ? { inPlace: item.inPlace } : {}),
         });
         if (pending.length >= cfg.scanBatchSize) await flush();
       }
@@ -685,6 +752,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           item.bytes = outcome.bytes;
           item.finalPath = outcome.finalPath;
           item.cachePath = outcome.cachePath;
+          if (outcome.inPlace) item.inPlace = outcome.inPlace;
           item.chosen = {
             candidateId: cand.id,
             pluginId: cand.pluginId,
@@ -818,17 +886,40 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
     // e) 假无损：**先于复筛**判定。原因：`meetsFloor` 内部也含假无损检查（会把它归成
     //    BELOW_BAR）；这里显式先判，才能给出更精确的 FAKE_LOSSLESS 错误码（UI 上不误导）。
+    // 原地替换（洗版专属，产品定调 2026-10-10）：假无损（无损容器但有效码率不足 700/1400）
+    // 若有效码率仍**高于原件现有水平**，则接受 —— 落回原文件所在目录顶替原件，而不是拒之门外。
+    // 只豁免假无损这一条门槛；其余复筛失败照旧拒绝。
+    let inPlace: { fsPath: string; sourceId: string } | undefined;
     if (cfg.quality.rejectFakeLossless) {
       const fake = isFakeLossless(enriched, cfg.quality);
       if (fake.fake) {
-        cleanup();
-        return { kind: "fail", code: "FAKE_LOSSLESS", detail: fake.reason };
+        let eff = 0;
+        try {
+          eff = effectiveBitrateKbps(
+            statSync(cachePath).size,
+            typeof probed.durationSec === "number" ? probed.durationSec : 0,
+          );
+        } catch {
+          /* stat 失败按 0 处理 → 走拒绝分支 */
+        }
+        const um = upgradeMode ? upgradeMetaOf(t) : undefined;
+        if (
+          um?.originalFsPath &&
+          um.originalSourceId &&
+          (um.baselineKbps ?? 0) > 0 &&
+          eff > (um.baselineKbps ?? 0)
+        ) {
+          inPlace = { fsPath: um.originalFsPath, sourceId: um.originalSourceId };
+        } else {
+          cleanup();
+          return { kind: "fail", code: "FAKE_LOSSLESS", detail: fake.reason };
+        }
       }
     }
 
-    // f) 用探针值复筛。
+    // f) 用探针值复筛（原地替换已豁免假无损门槛；其余失败照旧）。
     const floor = meetsFloor(enriched, cfg.quality, { durationSec: t.durationSec });
-    if (!floor.ok) {
+    if (!floor.ok && !inPlace) {
       cleanup();
       return { kind: "fail", code: "BELOW_BAR", detail: floor.reason };
     }
@@ -931,6 +1022,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     try {
       fr = deps.finalizeFile({
         cachePath,
+        // 原地替换：成品直接落回原文件所在目录（文件名仍按命名模板生成）。
+        ...(inPlace ? { destDirOverride: path.dirname(inPlace.fsPath) } : {}),
         target: {
           title,
           artist,
@@ -952,6 +1045,6 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     if (!fr.finalPath) {
       return { kind: "fail", code: "MOVE_FAILED", detail: "finalize 未返回 finalPath" };
     }
-    return { kind: "success", cachePath, bytes: dl.bytes, finalPath: fr.finalPath };
+    return { kind: "success", cachePath, bytes: dl.bytes, finalPath: fr.finalPath, ...(inPlace ? { inPlace } : {}) };
   }
 }

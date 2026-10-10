@@ -54,6 +54,11 @@ export interface FinalizeOptions {
   source?: string;
   /** true 时只计算路径，不做任何文件操作 */
   dryRun?: boolean;
+  /**
+   * 覆盖落盘目录（洗版「原地替换」用）：给出时成品落到该目录下、文件名仍取命名模板的
+   * 文件名部分，忽略 config.downloadRoot。缺省行为完全不变。
+   */
+  destDirOverride?: string;
 }
 
 export interface FinalizeResult {
@@ -116,7 +121,10 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
     bitrateKbps: opts.probed?.bitrateKbps,
   };
   const relativePath = buildRelativePath(ctx, cfg.naming, ext);
-  let finalPath = path.join(cfg.downloadRoot, relativePath);
+  // destDirOverride：原地替换 —— 成品落回原文件所在目录（只取命名模板的文件名段）。
+  let finalPath = opts.destDirOverride
+    ? path.join(opts.destDirOverride, path.basename(relativePath))
+    : path.join(cfg.downloadRoot, relativePath);
 
   // 禁止原地覆盖：缓存路径不能就在成品目录里（否则会把半成品搬回自己头上）。
   if (path.resolve(finalPath) === path.resolve(opts.cachePath)) {
