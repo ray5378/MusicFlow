@@ -120,6 +120,10 @@ export function registerFetch(app: Hono): void {
         ? Array.from(new Set(raw.map((x) => String(x).trim()).filter(Boolean)))
         : [];
     }
+    // 转码目标只留 FLAC（产品定调 2026-10-10）：历史遗留 alac/wav 覆盖项一律归一。
+    if ("transcodeTarget" in override) {
+      (override as Record<string, unknown>).transcodeTarget = "flac";
+    }
     // jobRetentionDays：整数 0-3650（0 = 关闭自动清理）。
     if ("jobRetentionDays" in override) {
       const n = Number((override as Record<string, unknown>).jobRetentionDays);

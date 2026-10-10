@@ -88,8 +88,6 @@
               <el-form-item :label="t('admin.fetch.config.transcodeTarget')">
                 <el-select v-model="config.transcodeTarget">
                   <el-option label="FLAC" value="flac" />
-                  <el-option label="ALAC" value="alac" />
-                  <el-option label="WAV" value="wav" />
                 </el-select>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.transcodeSampleRateHz')">
