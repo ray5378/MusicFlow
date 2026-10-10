@@ -169,3 +169,70 @@ export async function retryFetchJob(
   const res = await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/retry`, opts);
   return res.data?.jobId as string;
 }
+
+// ---------- 洗版(无损替换低码率) ----------
+export interface UpgradePlanItem {
+  songId: string;
+  title: string;
+  artist?: string;
+  album?: string;
+  suffix?: string;
+  bitrateKbps?: number;
+  durationSec?: number;
+  path?: string;
+  reason?: string;
+}
+
+export interface UpgradePlan {
+  sourceIds: string[];
+  sourceNames: string[];
+  total: number;
+  belowBar: number;
+  truncated: boolean;
+  items: UpgradePlanItem[];
+}
+
+export interface UpgradeConfig {
+  sourceIds?: string[];
+  batchLimit?: number;
+  originalAction?: "keep" | "move" | "delete";
+  losslessRoot?: string;
+  compressedMinKbps?: number;
+  uncompressedMinKbps?: number;
+  inspectCandidates?: boolean;
+}
+
+export async function getUpgradePlan(params?: {
+  sourceId?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<UpgradePlan> {
+  const res = await api.get(`${BASE}/upgrade/plan`, { params });
+  return (res.data?.plan ?? {
+    sourceIds: [],
+    sourceNames: [],
+    total: 0,
+    belowBar: 0,
+    truncated: false,
+    items: [],
+  }) as UpgradePlan;
+}
+
+export async function getUpgradeConfig(): Promise<Partial<UpgradeConfig>> {
+  const res = await api.get(`${BASE}/upgrade/config`);
+  return (res.data?.config ?? {}) as Partial<UpgradeConfig>;
+}
+
+export async function updateUpgradeConfig(patch: Partial<UpgradeConfig>): Promise<void> {
+  await api.put(`${BASE}/upgrade/config`, patch);
+}
+
+export async function startUpgradeTask(body: {
+  sourceId?: string;
+  songIds?: string[];
+  limit?: number;
+  dryRun?: boolean;
+}): Promise<FetchJobSummary | null> {
+  const res = await api.post(`${BASE}/upgrade/tasks`, body);
+  return (res.data?.job ?? null) as FetchJobSummary | null;
+}

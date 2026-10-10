@@ -272,6 +272,116 @@
           compact
         />
       </el-tab-pane>
+
+      <!-- ===== 4. 洗版(无损替换低码率) ===== -->
+      <el-tab-pane :label="t('admin.fetch.tabUpgrade')" name="upgrade">
+        <div v-loading="upgradeConfigLoading" class="upgrade-wrap">
+          <el-form label-position="top" class="upgrade-form">
+            <el-divider content-position="left">{{ t('admin.fetch.upgrade.settings') }}</el-divider>
+            <div class="config-grid">
+              <el-form-item :label="t('admin.fetch.upgrade.batchLimit')">
+                <el-input-number v-model="upgradeConfig.batchLimit" :min="1" :max="500" controls-position="right" />
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.originalAction')">
+                <el-select v-model="upgradeConfig.originalAction">
+                  <el-option :label="t('admin.fetch.upgrade.actionKeep')" value="keep" />
+                  <el-option :label="t('admin.fetch.upgrade.actionMove')" value="move" />
+                  <el-option :label="t('admin.fetch.upgrade.actionDelete')" value="delete" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.losslessRoot')">
+                <el-input v-model="upgradeConfig.losslessRoot" :placeholder="t('admin.fetch.upgrade.losslessRootPlaceholder')" />
+                <div class="hint">{{ t('admin.fetch.upgrade.losslessRootHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.compressedMinKbps')">
+                <el-input-number v-model="upgradeConfig.compressedMinKbps" :min="0" :step="50" controls-position="right" />
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.uncompressedMinKbps')">
+                <el-input-number v-model="upgradeConfig.uncompressedMinKbps" :min="0" :step="100" controls-position="right" />
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.inspectCandidates')">
+                <el-switch v-model="upgradeConfig.inspectCandidates" />
+                <div class="hint">{{ t('admin.fetch.upgrade.inspectCandidatesHint') }}</div>
+              </el-form-item>
+            </div>
+            <el-alert
+              v-if="upgradeConfig.originalAction === 'delete'"
+              type="error"
+              :closable="false"
+              show-icon
+              class="upgrade-warn"
+            >{{ t('admin.fetch.upgrade.deleteWarn') }}</el-alert>
+            <div class="config-actions">
+              <el-button :loading="upgradeSaving" @click="saveUpgradeConfig">{{ t('admin.fetch.upgrade.save') }}</el-button>
+            </div>
+          </el-form>
+
+          <el-divider content-position="left">{{ t('admin.fetch.upgrade.preview') }}</el-divider>
+          <div class="upgrade-toolbar">
+            <div class="upgrade-summary">
+              <el-tag>{{ t('admin.fetch.upgrade.summaryTotal', { count: upgradePlan?.total ?? 0 }) }}</el-tag>
+              <el-tag type="warning">{{ t('admin.fetch.upgrade.summaryBelowBar', { count: upgradePlan?.belowBar ?? 0 }) }}</el-tag>
+              <el-tag v-if="upgradePlan?.truncated" type="info">{{ t('admin.fetch.upgrade.summaryTruncated') }}</el-tag>
+              <span v-if="upgradePlan && upgradePlan.sourceNames && upgradePlan.sourceNames.length" class="hint">
+                {{ t('admin.fetch.upgrade.sources') }}: {{ upgradePlan.sourceNames.join(', ') }}
+              </span>
+            </div>
+            <el-button :loading="planLoading" @click="loadUpgradePlan"><MfIcon name="Search" />{{ t('admin.fetch.upgrade.loadPlan') }}</el-button>
+          </div>
+
+          <el-alert v-if="planError" type="error" :closable="false" :title="planError" class="jobs-error" />
+
+          <el-table
+            v-if="planItems.length"
+            ref="planTableRef"
+            :data="planItems"
+            row-key="songId"
+            stripe
+            v-loading="planLoading"
+            @selection-change="onPlanSelectionChange"
+          >
+            <el-table-column type="selection" width="48" />
+            <el-table-column :label="t('admin.fetch.upgrade.colTitle')" min-width="180">
+              <template #default="{ row }">
+                <div class="song-cell">
+                  <span class="song-title">{{ row.title }}</span>
+                  <span v-if="row.artist" class="song-artist">{{ row.artist }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('admin.fetch.upgrade.colAlbum')" width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.album || '-' }}</template>
+            </el-table-column>
+            <el-table-column :label="t('admin.fetch.upgrade.colSuffix')" width="90">
+              <template #default="{ row }">{{ row.suffix || '-' }}</template>
+            </el-table-column>
+            <el-table-column :label="t('admin.fetch.upgrade.colBitrate')" width="130" align="right">
+              <template #default="{ row }">{{ formatKbps(row.bitrateKbps) }}</template>
+            </el-table-column>
+            <el-table-column :label="t('admin.fetch.upgrade.colDuration')" width="100" align="right">
+              <template #default="{ row }">{{ formatDuration(row.durationSec) }}</template>
+            </el-table-column>
+            <el-table-column :label="t('admin.fetch.upgrade.colReason')" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.reason ? errorText(row.reason) : '' }}</template>
+            </el-table-column>
+          </el-table>
+          <EmptyState
+            v-else-if="planLoaded && !planLoading"
+            icon="box"
+            :title="t('admin.fetch.upgrade.emptyTitle')"
+            :description="t('admin.fetch.upgrade.emptyDesc')"
+            compact
+          />
+          <div v-else-if="!planLoading" class="hint upgrade-hint">{{ t('admin.fetch.upgrade.notLoaded') }}</div>
+
+          <div class="upgrade-actions">
+            <span class="hint">{{ t('admin.fetch.upgrade.selectedCount', { count: selectedSongIds.length }) }}</span>
+            <el-button :disabled="!planItems.length" @click="selectAllPlan">{{ t('admin.fetch.upgrade.selectAll') }}</el-button>
+            <el-button :disabled="!selectedSongIds.length" @click="clearPlanSelection">{{ t('admin.fetch.upgrade.clearSelect') }}</el-button>
+            <el-button type="danger" :loading="upgradeStarting" @click="doStartUpgrade"><MfIcon name="Download" />{{ t('admin.fetch.upgrade.start') }}</el-button>
+          </div>
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <!-- ===== 任务详情 ===== -->
@@ -332,6 +442,14 @@
           <el-table-column :label="t('admin.fetch.jobs.detailColPath')" min-width="180" show-overflow-tooltip>
             <template #default="{ row }"><span class="mono">{{ row.finalPath || '-' }}</span></template>
           </el-table-column>
+          <el-table-column :label="t('admin.fetch.jobs.detailColReplaced')" min-width="200" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.replaced">
+                {{ t('admin.fetch.jobs.replaced') }}
+                <span class="mono">{{ replacedText(row.replaced) }}</span>
+              </span>
+            </template>
+          </el-table-column>
           <el-table-column :label="t('admin.fetch.jobs.detailColActions')" width="90" fixed="right">
             <template #default="{ row }">
               <el-button size="small" :disabled="!canRetryItem(row.status)" @click="retryItem(row)">{{ t('admin.fetch.jobs.retry') }}</el-button>
@@ -361,6 +479,10 @@ import {
   getFetchJob,
   cancelFetchJob,
   retryFetchJob,
+  getUpgradePlan,
+  getUpgradeConfig,
+  updateUpgradeConfig,
+  startUpgradeTask,
 } from "@/api/fetch";
 import type {
   FetchConfig,
@@ -371,6 +493,9 @@ import type {
   FetchJobSummary,
   FetchJobDetail,
   FetchTargetInput,
+  UpgradePlan,
+  UpgradePlanItem,
+  UpgradeConfig,
 } from "@/api/fetch";
 
 const { t } = useI18n();
@@ -697,6 +822,152 @@ async function retryItem(item: any) {
   }
 }
 
+// ---------- 洗版(无损替换低码率) ----------
+function defaultUpgradeConfig(): Required<UpgradeConfig> {
+  return {
+    sourceIds: [],
+    batchLimit: 20,
+    originalAction: "delete",
+    losslessRoot: "",
+    compressedMinKbps: 700,
+    uncompressedMinKbps: 1400,
+    inspectCandidates: true,
+  };
+}
+
+const upgradeConfig = reactive<Required<UpgradeConfig>>(defaultUpgradeConfig());
+const upgradeConfigLoading = ref(false);
+const upgradeSaving = ref(false);
+const upgradeStarting = ref(false);
+const planLoading = ref(false);
+const planLoaded = ref(false);
+const planError = ref("");
+const upgradePlan = ref<UpgradePlan | null>(null);
+const planItems = ref<UpgradePlanItem[]>([]);
+const selectedSongIds = ref<string[]>([]);
+const planTableRef = ref<any>(null);
+
+async function loadUpgradeConfig() {
+  upgradeConfigLoading.value = true;
+  try {
+    const remote = await getUpgradeConfig();
+    const merged = defaultUpgradeConfig();
+    Object.assign(merged, remote);
+    const a = merged.originalAction;
+    if (a !== "keep" && a !== "move" && a !== "delete") merged.originalAction = "delete";
+    if (!Array.isArray(merged.sourceIds)) merged.sourceIds = [];
+    Object.assign(upgradeConfig, merged);
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.saveFailed")));
+  } finally {
+    upgradeConfigLoading.value = false;
+  }
+}
+
+async function saveUpgradeConfig() {
+  upgradeSaving.value = true;
+  try {
+    await updateUpgradeConfig({ ...upgradeConfig });
+    ElMessage.success(t("admin.fetch.upgrade.saved"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.saveFailed")));
+  } finally {
+    upgradeSaving.value = false;
+  }
+}
+
+async function loadUpgradePlan() {
+  planLoading.value = true;
+  planError.value = "";
+  try {
+    const plan = await getUpgradePlan({ limit: upgradeConfig.batchLimit });
+    upgradePlan.value = plan;
+    planItems.value = plan.items || [];
+    planLoaded.value = true;
+    selectedSongIds.value = [];
+  } catch (e: any) {
+    planError.value = apiErrorText(e, t("admin.fetch.upgrade.loadFailed"));
+  } finally {
+    planLoading.value = false;
+  }
+}
+
+function onPlanSelectionChange(rows: any[]) {
+  selectedSongIds.value = (rows || []).map((r) => r.songId).filter(Boolean);
+}
+function selectAllPlan() {
+  const tbl = planTableRef.value;
+  if (!tbl || !planItems.value.length) return;
+  if (selectedSongIds.value.length === planItems.value.length) return;
+  tbl.clearSelection();
+  tbl.toggleAllSelection();
+}
+function clearPlanSelection() {
+  planTableRef.value?.clearSelection();
+}
+
+// 二次确认里列出将被删除的原文件(勾选项,或未勾选时按批量上限取的预览清单)。
+function currentTriggerPaths(): string[] {
+  const items = planItems.value;
+  const picked = selectedSongIds.value.length
+    ? items.filter((i) => selectedSongIds.value.includes(i.songId))
+    : items.slice(0, upgradeConfig.batchLimit);
+  return picked.map((i) => i.path).filter(Boolean) as string[];
+}
+
+async function confirmDelete(paths: string[]): Promise<boolean> {
+  const list = (paths || []).filter(Boolean);
+  const lines = list.slice(0, 10).map(escapeHtml);
+  const more = list.length > 10
+    ? `<br>${escapeHtml(t("admin.fetch.upgrade.deleteMore", { count: list.length - 10 }))}`
+    : "";
+  const listHtml = lines.length ? `<br><br>${lines.join("<br>")}${more}` : "";
+  try {
+    await ElMessageBox.confirm(
+      escapeHtml(t("admin.fetch.upgrade.deleteWarn")) + listHtml,
+      t("admin.fetch.upgrade.deleteTitle"),
+      { type: "warning", dangerouslyUseHTMLString: true },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function doStartUpgrade() {
+  const action = upgradeConfig.originalAction;
+  if (action === "delete") {
+    if (!(await confirmDelete(currentTriggerPaths()))) return;
+  } else if (action === "move") {
+    try {
+      await ElMessageBox.confirm(t("admin.fetch.upgrade.moveConfirm"), t("admin.fetch.upgrade.start"), { type: "warning" });
+    } catch {
+      return;
+    }
+  } else {
+    try {
+      await ElMessageBox.confirm(t("admin.fetch.upgrade.keepConfirm"), t("admin.fetch.upgrade.start"), { type: "info" });
+    } catch {
+      return;
+    }
+  }
+
+  upgradeStarting.value = true;
+  try {
+    const body: any = { dryRun: false };
+    if (selectedSongIds.value.length) body.songIds = [...selectedSongIds.value];
+    else body.limit = upgradeConfig.batchLimit;
+    const job = await startUpgradeTask(body);
+    ElMessage.success(t("admin.fetch.upgrade.started", { id: shortId(job?.id) }));
+    activeTab.value = "jobs";
+    await refreshJobs();
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.startFailed")));
+  } finally {
+    upgradeStarting.value = false;
+  }
+}
+
 // ---------- 展示辅助 ----------
 const STATUS_KEY: Record<string, string> = {
   pending: "pending",
@@ -778,6 +1049,32 @@ function formatBytes(n?: number): string {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+function formatKbps(n?: number): string {
+  return n == null ? "-" : `${n} kbps`;
+}
+
+function formatDuration(sec?: number): string {
+  if (!sec || sec <= 0) return "-";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// 仅在「删除原件」二次确认里拼 HTML(路径来自服务端,必须转义)。
+function escapeHtml(s: string): string {
+  const map: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  return String(s).replace(/[&<>"']/g, (c) => map[c]);
+}
+
+// 洗版结果里的 replaced 字段容错展示(形状可能缺字段)。
+function replacedText(r: any): string {
+  if (!r || typeof r !== "object") return "";
+  const from = r.originalPath || "";
+  const to = r.newPath || r.movedTo || "";
+  if (from && to) return `${from} -> ${to}`;
+  return to || from || "";
+}
+
 function formatDateTime(v?: string | number): string {
   if (!v) return "-";
   const d = new Date(v);
@@ -821,6 +1118,7 @@ onMounted(() => {
   loadConfig();
   loadSources();
   refreshJobs();
+  loadUpgradeConfig();
 });
 onUnmounted(stopPolling);
 </script>
@@ -886,6 +1184,15 @@ onUnmounted(stopPolling);
 .song-title { color: var(--fnos-text-primary); }
 .song-artist { font-size: 12px; color: var(--fnos-text-tertiary); }
 .empty-items { padding: 24px 0; text-align: center; }
+
+/* 洗版 */
+.upgrade-wrap { max-width: 1100px; }
+.upgrade-form :deep(.el-form-item) { margin-bottom: 16px; }
+.upgrade-warn { margin: 4px 0 16px; }
+.upgrade-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.upgrade-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.upgrade-hint { padding: 20px 0; }
+.upgrade-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 
 @media (max-width: 768px) {
   .admin-fetch { padding: 20px 16px; }
