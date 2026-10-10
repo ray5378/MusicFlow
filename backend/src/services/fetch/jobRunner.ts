@@ -94,7 +94,9 @@ function maybeContinueLibraryJob(jobId: string): void {
       }
     }
     if (!cfgj || typeof cfgj !== "object" || !cfgj.__library) return;
-    if (cfgj.dryRun) return;
+    // 导入触发批次（__library.noAutoContinue）**不参与全库自动续批**：它的语义是
+    // 「把这批刚入库的歌下完」，不是「开始全库下载」，续批会把范围放大到全库。
+    if (cfgj.__library.noAutoContinue === true) return;
     const cfg = currentFetchConfig();
     if (!cfg.libraryAutoContinue) return;
     if (hasAnyActiveJob()) return;
@@ -127,7 +129,6 @@ function autoScanAfterJob(jobId: string): void {
         cfgj = {};
       }
     }
-    if (cfgj?.dryRun) return;
     const counts = (job as any)?.counts ?? {};
     if (!Number(counts.added)) return;
     void runBatchJob("scan", { sourceId: job.sourceId, mode: "incremental" })

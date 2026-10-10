@@ -70,7 +70,7 @@ export function runAutoUpgradeOnce(
       : [ensureDownloadSource(DEFAULT_DOWNLOAD_ROOT).sourceId];
   const plan = buildUpgradePlan(sourceIds, cfg, {});
   const targets = buildUpgradeTargets(plan.items); // 结构即 FetchTarget，无需 normalize
-  const job = createFetchJob({ kind: "upgrade", targets: { targets }, config: buildUpgradeJobConfig(cfg, false) });
+  const job = createFetchJob({ kind: "upgrade", targets: { targets }, config: buildUpgradeJobConfig(cfg) });
   if (plan.items.length > 0) recordUpgradeAttempts(job.id, plan.items.map((i) => i.songId));
   if (targets.length === 0) {
     updateFetchJobStatus(job.id, "done");

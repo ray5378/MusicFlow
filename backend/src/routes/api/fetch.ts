@@ -3,7 +3,6 @@
 // 门禁：全部 adminMiddleware（与 sources 域一致）。前端只经这些端点驱动下载任务：
 //   - 配置读写（GET/PUT /v1/fetch/config）：覆盖项落 settings 表 `fetch.config`（JSON 串）
 //   - 可用音源列表（GET /v1/fetch/sources）
-//   - 预览（POST /v1/fetch/preview）：dryRun 同步跑流水线，只报告「将会下载什么」
 //   - 建任务（POST /v1/fetch/tasks）：登记 fetch_jobs 行 + 后台分片跑批量子进程
 //   - 任务查询/取消/重试（GET jobs / GET jobs/:id / POST cancel / POST retry）
 //
@@ -15,7 +14,6 @@ import {
   adminMiddleware,
   apiError,
   apiErrorStatus,
-  apiInternalError,
   log,
 } from "./shared.js";
 import { startFetchJob, abortFetchJob } from "../../services/fetch/jobRunner.js";
@@ -35,8 +33,7 @@ import {
   type FetchConfig,
 } from "../../services/fetch/config.js";
 import { listCandidateSources, type FetchTarget } from "../../services/fetch/candidates.js";
-import { ensureDownloadSource, findDownloadSource } from "../../services/fetch/source.js";
-import { runFetchPipeline } from "../../services/fetch/orchestrator.js";
+import { ensureDownloadSource } from "../../services/fetch/source.js";
 import {
   buildUpgradeJobConfig,
   buildUpgradePlan,
@@ -145,6 +142,14 @@ export function registerFetch(app: Hono): void {
         ? Math.min(16, Math.max(1, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentJobs;
     }
+    // PATCH20 单任务并发歌曲数：1..64（目标级并行）。全库下载 / 洗版都是单任务，这个值
+    // 才是它们真正的并发上限；小于「最大并发下载数」时后者永远吃不满 —— 故必须可配。
+    if ("maxConcurrentTargets" in override) {
+      const n = Number((override as Record<string, unknown>).maxConcurrentTargets);
+      (override as Record<string, unknown>).maxConcurrentTargets = Number.isFinite(n)
+        ? Math.min(64, Math.max(1, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.maxConcurrentTargets;
+    }
     if (
       "libraryAutoEnabled" in override &&
       typeof (override as Record<string, unknown>).libraryAutoEnabled !== "boolean"
@@ -205,42 +210,6 @@ export function registerFetch(app: Hono): void {
     return c.json({ success: true, sources });
   });
 
-  // ---------------- 预览（同步 dryRun） ----------------
-  app.post("/v1/fetch/preview", adminMiddleware, async (c) => {
-    const body = await c.req.json().catch(() => ({}));
-    const targets = normalizeTargets(body?.targets);
-    const cfg = currentFetchConfig();
-    try {
-      const result = await runFetchPipeline({
-        targets,
-        config: cfg,
-        dryRun: true,
-        sourceId: findDownloadSource(cfg.downloadRoot) ?? undefined,
-      });
-      const byId = new Map(targets.map((t) => [t.id, t]));
-      const items = result.items.map((o) => {
-        const t = byId.get(o.targetId);
-        return {
-          targetId: o.targetId,
-          title: t?.title ?? "",
-          artist: t?.artist ?? "",
-          status: o.status,
-          tier: o.targetTier,
-          reason: o.errorMsg ?? o.errorCode,
-        };
-      });
-      const summary = {
-        total: targets.length,
-        downloadable: result.items.filter((o) => o.status === "queued").length,
-        belowBar: result.items.filter((o) => o.errorCode === "BELOW_BAR").length,
-        noCandidate: result.items.filter((o) => o.errorCode === "NO_CANDIDATE").length,
-      };
-      return c.json({ success: true, summary, items });
-    } catch (e) {
-      return c.json(apiInternalError(e), 500);
-    }
-  });
-
   // ---------------- 建任务 + 后台分片 ----------------
   app.post("/v1/fetch/tasks", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
@@ -250,12 +219,10 @@ export function registerFetch(app: Hono): void {
       return c.json(apiError(code, "targets 为空"), apiErrorStatus(code));
     }
     const cfg = currentFetchConfig();
-    const dryRun = !!body?.dryRun;
     const job = createFetchJob({
       kind: "search",
       targets: { targets },
-      // dryRun 一并快照进 config_json，供子进程 handler 还原（FetchConfig 无该键）。
-      config: { ...cfg, dryRun } as Record<string, any>,
+      config: { ...cfg } as Record<string, any>,
     });
     startFetchJob(job.id);
     return c.json({ success: true, jobId: job.id });
@@ -465,7 +432,6 @@ export function registerFetch(app: Hono): void {
     const sourceIds = resolveUpgradeSourceIds(typeof body?.sourceId === "string" ? body.sourceId : null);
     const songIds = Array.isArray(body?.songIds) ? (body.songIds as unknown[]).map((v) => String(v)) : undefined;
     const limitRaw = Number(body?.limit);
-    const dryRun = !!body?.dryRun;
 
     const plan = buildUpgradePlan(sourceIds, cfg, {
       ...(songIds && songIds.length > 0 ? { songIds } : {}),
@@ -477,7 +443,7 @@ export function registerFetch(app: Hono): void {
       kind: "upgrade",
       targets: { targets },
       // sourceId 留空：批量子进程会按 downloadRootOverride(=/MUSIC/LOSSLESS) 自建洗版源。
-      config: buildUpgradeJobConfig(cfg, dryRun),
+      config: buildUpgradeJobConfig(cfg),
     });
     if (targets.length === 0) {
       // 没有可洗的 → 立刻终态，避免 0 目标任务卡在 pending。
@@ -548,7 +514,6 @@ export function registerFetch(app: Hono): void {
   app.post("/v1/fetch/library/tasks", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const cfg = currentFetchConfig();
-    const dryRun = !!body?.dryRun;
     const songIds = Array.isArray(body?.songIds)
       ? (body.songIds as unknown[]).map((v) => String(v))
       : undefined;
@@ -566,7 +531,7 @@ export function registerFetch(app: Hono): void {
     const job = createFetchJob({
       kind: "library",
       targets: { targets },
-      config: buildLibraryJobConfig(cfg, dryRun),
+      config: buildLibraryJobConfig(cfg),
     });
     if (targets.length === 0) {
       // 没有可下的 → 立刻终态，避免 0 目标任务卡 pending。

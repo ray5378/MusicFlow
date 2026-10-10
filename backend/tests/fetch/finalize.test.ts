@@ -70,16 +70,16 @@ describe("finalizeFile", () => {
       probed: { container: "flac" },
       containerHint: "mp3",
       config: cfg(),
-      dryRun: true,
     });
     expect(r.finalPath?.endsWith(".flac")).toBe(true);
 
+    // 无 probed.container，只有 containerHint → 取 hint；缓存文件须真实存在（真做 rename）。
+    const cache2 = makeCache("onlyhint.part", "X");
     const r2 = finalizeFile({
-      cachePath: join(CA, "onlyhint.part"),
+      cachePath: cache2,
       target: TARGET,
       containerHint: "wav",
       config: cfg(),
-      dryRun: true,
     });
     expect(r2.finalPath?.endsWith(".wav")).toBe(true);
   });
@@ -179,32 +179,16 @@ describe("finalizeFile", () => {
     expect(existsSync(cache)).toBe(true);
   });
 
-  it("dryRun：返回路径但磁盘无任何变化", () => {
-    const cache = makeCache("tmp.mp3", "NEW");
-    const r = finalizeFile({
-      cachePath: cache,
-      target: TARGET,
-      probed: { container: "mp3" },
-      config: cfg(),
-      dryRun: true,
-    });
-    expect(r.action).toBe("write");
-    expect(r.finalPath).toBe(join(DL, REL));
-    expect(readdirSync(DL).length).toBe(0); // 未建任何目录/文件
-    expect(existsSync(cache)).toBe(true);
-  });
-
   it("目录模板缺 year 时不产生空目录/空括号", () => {
     // {year} 缺失 → '(...)' 整组消去；'({year})' 不能留下 '()'。
     const config = cfg({
       naming: { ...DEFAULT_NAMING_CONFIG, dirTemplate: "{albumArtist}/{album} ({year})" },
     });
     const r = finalizeFile({
-      cachePath: join(CA, "x.mp3"),
+      cachePath: makeCache("x.mp3", "X"),
       target: TARGET,
       probed: { container: "mp3" },
       config,
-      dryRun: true,
     });
     expect(r.finalPath).toBe(join(DL, REL));
     expect(r.finalPath).not.toContain("()");
@@ -214,11 +198,10 @@ describe("finalizeFile", () => {
       naming: { ...DEFAULT_NAMING_CONFIG, dirTemplate: "{albumArtist}/{year}" },
     });
     const r2 = finalizeFile({
-      cachePath: join(CA, "x.mp3"),
+      cachePath: makeCache("x.mp3", "X"),
       target: TARGET,
       probed: { container: "mp3" },
       config: config2,
-      dryRun: true,
     });
     expect(r2.finalPath).toBe(join(DL, "A/T - A.mp3"));
   });

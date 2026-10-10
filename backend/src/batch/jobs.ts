@@ -632,8 +632,6 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     }
   }
 
-  const dryRun = !!(job.config as any)?.dryRun;
-
   // PATCH19 终态记账映射：targetId → songId（仅全库下载目标 `library:<songId>` 有库记账语义）。
   const librarySongIds = new Map<string, string>();
   for (const t of allTargets) {
@@ -644,7 +642,7 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
   }
   /** 全库记账：条目终态即写 fetch_library_attempts（UPSERT 最新终态）。 */
   const recordLibraryTerminal = (o: FetchItemOutcome): void => {
-    if (dryRun || librarySongIds.size === 0) return;
+    if (librarySongIds.size === 0) return;
     const st = String(o.status);
     // COOLDOWN_SKIPPED 不记账——记了会把冷却起点不断后推，反复触发的任务永远跑不动。
     const rec =
@@ -692,7 +690,6 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     config: cfg,
     sourceId: sourceId || undefined,
     signal: ctx.signal,
-    dryRun,
     downloadRootOverride,
     originalDisposal,
     migrateRowOnly,

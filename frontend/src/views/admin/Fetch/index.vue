@@ -138,6 +138,10 @@
                 <el-input-number v-model="config.maxConcurrentJobs" :min="1" :max="16" controls-position="right" />
                 <div class="hint">{{ t('admin.fetch.config.maxConcurrentJobsHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.maxConcurrentTargets')">
+                <el-input-number v-model="config.maxConcurrentTargets" :min="1" :max="64" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.maxConcurrentTargetsHint') }}</div>
+              </el-form-item>
               <el-form-item :label="t('admin.fetch.config.maxConcurrentDownloads')">
                 <el-input-number v-model="config.maxConcurrentDownloads" :min="1" :max="32" controls-position="right" />
               </el-form-item>
@@ -211,8 +215,6 @@
           </el-form-item>
           <div class="create-actions">
             <span class="hint">{{ t('admin.fetch.create.parsedCount', { count: parsedCount }) }}</span>
-            <span class="hint">{{ t('admin.fetch.create.dryRunHint') }}</span>
-            <el-button :loading="previewLoading" @click="doPreview"><MfIcon name="Search" />{{ t('admin.fetch.create.preview') }}</el-button>
             <el-button type="primary" :loading="startLoading" @click="doStart"><MfIcon name="Download" />{{ t('admin.fetch.create.start') }}</el-button>
           </div>
         </el-form>
@@ -232,31 +234,6 @@
             <el-button :loading="libraryPlanLoading" @click="loadLibraryPlan"><MfIcon name="RefreshCw" />{{ t('admin.fetch.library.reload') }}</el-button>
           </div>
           <div class="hint library-hint">{{ t('admin.fetch.library.hint') }}</div>
-        </div>
-
-        <div v-if="previewSummary" class="preview-block">
-          <el-divider content-position="left">{{ t('admin.fetch.create.previewResult') }}</el-divider>
-          <div class="summary-bar">
-            <el-tag type="success">{{ t('admin.fetch.create.summaryDownloadable', { count: previewSummary.downloadable }) }}</el-tag>
-            <el-tag type="warning">{{ t('admin.fetch.create.summaryBelowBar', { count: previewSummary.belowBar }) }}</el-tag>
-            <el-tag type="info">{{ t('admin.fetch.create.summaryNoCandidate', { count: previewSummary.noCandidate }) }}</el-tag>
-            <el-tag>{{ t('admin.fetch.create.summaryTotal', { count: previewSummary.total }) }}</el-tag>
-          </div>
-          <el-table :data="previewItems" stripe>
-            <el-table-column prop="title" :label="t('admin.fetch.create.colTitle')" min-width="180" />
-            <el-table-column prop="artist" :label="t('admin.fetch.create.colArtist')" width="140" />
-            <el-table-column :label="t('admin.fetch.create.colStatus')" width="110">
-              <template #default="{ row }">
-                <el-tag :type="statusTagType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.create.colTier')" width="120">
-              <template #default="{ row }">{{ row.tier || '-' }}</template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.create.colReason')" min-width="200" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.reason ? errorText(row.reason) : '' }}</template>
-            </el-table-column>
-          </el-table>
         </div>
       </el-tab-pane>
 
@@ -406,8 +383,6 @@ import EmptyState from "@/components/EmptyState.vue";
 import JobListPanel from "./JobListPanel.vue";
 import { apiErrorText } from "@/utils/apiError";
 import {
-  statusText as fmtStatusText,
-  statusTagType as fmtStatusTagType,
   errorText as fmtErrorText,
   shortId as fmtShortId,
   type TFn,
@@ -416,7 +391,6 @@ import {
   getFetchConfig,
   updateFetchConfig,
   getFetchSources,
-  previewFetch,
   createFetchTask,
   getUpgradePlan,
   getUpgradeConfig,
@@ -430,8 +404,6 @@ import {
 import type {
   FetchConfig,
   FetchSourceInfo,
-  FetchPreviewItem,
-  FetchPreviewSummary,
   FetchTargetInput,
   UpgradePlan,
   UpgradePlanItem,
@@ -473,6 +445,7 @@ function defaultConfig(): ConfigForm {
     transcodeKeepOriginal: false,
     maxConcurrentDownloads: 2,
     maxConcurrentJobs: 2,
+    maxConcurrentTargets: 3,
     maxConcurrentPerHost: 1,
     perHostMinIntervalMs: 500,
     rateLimitKBps: 0,
@@ -525,6 +498,7 @@ async function loadConfig() {
     if (!Array.isArray(merged.ssrfTrustedHosts)) merged.ssrfTrustedHosts = [];
     if (merged.jobRetentionDays == null) merged.jobRetentionDays = 30;
     if (merged.maxConcurrentJobs == null) merged.maxConcurrentJobs = 2;
+    if (merged.maxConcurrentTargets == null) merged.maxConcurrentTargets = 3;
     if (merged.libraryAutoContinue == null) merged.libraryAutoContinue = true;
     if (merged.downloadCooldownDays == null) merged.downloadCooldownDays = 7;
     if (merged.libraryCooldownDays == null) merged.libraryCooldownDays = 30;
@@ -585,10 +559,7 @@ function movePriority(i: number, delta: number) {
 
 // ---------- 新建任务 ----------
 const targetsText = ref("");
-const previewLoading = ref(false);
 const startLoading = ref(false);
-const previewSummary = ref<FetchPreviewSummary | null>(null);
-const previewItems = ref<FetchPreviewItem[]>([]);
 
 function parseTargets(text: string): FetchTargetInput[] {
   const out: FetchTargetInput[] = [];
@@ -609,24 +580,6 @@ function parseTargets(text: string): FetchTargetInput[] {
 
 const parsedCount = computed(() => parseTargets(targetsText.value).length);
 
-async function doPreview() {
-  const targets = parseTargets(targetsText.value);
-  if (!targets.length) {
-    ElMessage.warning(t("admin.fetch.create.emptyInput"));
-    return;
-  }
-  previewLoading.value = true;
-  try {
-    const res = await previewFetch(targets);
-    previewSummary.value = res.summary;
-    previewItems.value = res.items;
-  } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.create.previewFailed")));
-  } finally {
-    previewLoading.value = false;
-  }
-}
-
 async function doStart() {
   const targets = parseTargets(targetsText.value);
   if (!targets.length) {
@@ -635,7 +588,7 @@ async function doStart() {
   }
   startLoading.value = true;
   try {
-    const jobId = await createFetchTask(targets, false);
+    const jobId = await createFetchTask(targets);
     ElMessage.success(t("admin.fetch.create.started", { id: shortId(jobId) }));
     activeTab.value = "jobs";
     await downloadJobsRef.value?.refresh();
@@ -651,7 +604,8 @@ async function doStart() {
 // 这里只保留「新建任务后把对应面板刷一下」这一条父级职责。
 // 下载任务 = 全部非洗版（搜索导入 search / 全库 library / 重试 retry / 历史 manual）；
 // 洗版任务 = upgrade。两类任务因此永远不会混在同一个列表里。
-const DOWNLOAD_JOB_KINDS = ["search", "library", "retry", "manual"];
+// 「下载任务列表」= 全部非洗版 kind（洗版单独一栏）。新增 kind 必须显式决定归哪一栏。
+const DOWNLOAD_JOB_KINDS = ["search", "import", "library", "retry", "manual"];
 const UPGRADE_JOB_KINDS = ["upgrade"];
 
 const downloadJobsRef = ref<InstanceType<typeof JobListPanel> | null>(null);
@@ -807,7 +761,7 @@ async function doStartUpgrade() {
 
   upgradeStarting.value = true;
   try {
-    const body: any = { dryRun: false };
+    const body: any = {};
     if (selectedSongIds.value.length) body.songIds = [...selectedSongIds.value];
     else body.limit = upgradeConfig.batchLimit;
     const job = await startUpgradeTask(body);
@@ -897,8 +851,6 @@ async function doResetLibrary() {
 }
 
 // ---------- 展示辅助（任务列表相关的已下沉到 jobFormat.ts，这里只留父级自己用的） ----------
-const statusText = (s?: string) => fmtStatusText(tt, s);
-const statusTagType = (s?: string) => fmtStatusTagType(s);
 const errorText = (c?: string) => fmtErrorText(tt, c);
 const shortId = fmtShortId;
 
@@ -976,8 +928,6 @@ watch(activeTab, (v) => {
 .library-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .library-hint { margin-top: 10px; }
 .create-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.preview-block { margin-top: 8px; }
-.summary-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 
 /* 任务列表 */
 .jobs-toolbar {

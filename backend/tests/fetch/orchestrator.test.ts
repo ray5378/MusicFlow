@@ -324,24 +324,6 @@ describe("runFetchPipeline", () => {
     expect(r.items[1].errorCode).toBe("DUPLICATE_TARGET");
   });
 
-  it("9. dryRun → 全 queued，且不下载/不落盘/不入库", async () => {
-    const dl = vi.fn();
-    const fin = vi.fn();
-    const scan = vi.fn(async () => ({ added: 0, updated: 0, failed: 0, skipped: 0 }));
-    const deps = makeDeps({ collectCandidates: oneMp3, downloadToFile: dl, finalizeFile: fin, scanLocalFiles: scan });
-    const r = await run({
-      targets: [tgt({ id: "t1", title: "A", durationSec: 200 }), tgt({ id: "t2", title: "B", durationSec: 200 })],
-      sourceId: "src-1",
-      dryRun: true,
-      deps,
-    });
-    expect(r.items.length).toBe(2);
-    expect(r.items.every((i) => i.status === "queued")).toBe(true);
-    expect(dl).not.toHaveBeenCalled();
-    expect(fin).not.toHaveBeenCalled();
-    expect(scan).not.toHaveBeenCalled();
-  });
-
   it("10. 转码开关：开→调用且 finalPath 来自转码后路径；关→不调用", async () => {
     const captured: string[] = [];
     const fin = vi.fn((o: any) => {
@@ -442,7 +424,7 @@ describe("runFetchPipeline", () => {
     expect(r.warnings.some((w) => w.includes("cacheRoot 位于 downloadRoot 之内"))).toBe(true);
   });
 
-  it("16. 无质量声明的候选（聚合源）在 dryRun 下判为 queued，不再 BELOW_BAR（生产回归）", async () => {
+  it("16. 无质量声明的候选（聚合源）不再被判 BELOW_BAR 误杀，可正常下完（生产回归）", async () => {
     // 贴近真实：go-music-dl 只给 URL + 平台歌曲 id，不声明容器/比特率。
     const bare: Candidate = {
       id: "go-music-dl:kg:B6A303C9CDA8E6C4C0B2FB0B23A570C6",
@@ -457,11 +439,12 @@ describe("runFetchPipeline", () => {
     const r = await run({
       targets: [tgt({ id: "t1", title: "Shape of You", artist: "Ed Sheeran", durationSec: 200 })],
       sourceId: "src-1",
-      dryRun: true,
       deps,
     });
-    expect(r.items[0].status).toBe("queued");
-    expect(r.items[0].errorCode).toBeUndefined();
+    // 关键：不能被质量预筛一票否决（历史上「全部候选未达质量门槛」的主因之一），
+    // 必须真的进入下载并下完（真实码率由下载后探针给出，不靠信源声明）。
+    expect(r.items[0].errorCode).not.toBe("BELOW_BAR");
+    expect(r.items[0].status).toBe("done");
   });
 
   it("17. 增值标签：genre / lyric / cover 都写入，封面优先用候选自带 coverUrl", async () => {
@@ -803,5 +786,49 @@ describe("runFetchPipeline", () => {
     expect(dl).not.toHaveBeenCalled(); // 不下载
     expect(seenItems).toHaveLength(1); // skipped 即时回调
     expect(seenItems[0].errorCode).toBe("COOLDOWN_SKIPPED");
+  });
+
+  it("27. 单任务并发歌曲数（PATCH20）：上限从 8 放开，12 首可同时推进", async () => {
+    // 回归守卫：旧实现在此硬夹 `Math.min(8, maxConcurrentTargets)`，且该键从未出现在配置界面，
+    // 于是「最大并发下载数=16」永远吃不满（240 实测 8 核 load 仅 2.0，纯属并发被饿死）。
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const collect = vi.fn(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 15));
+      inFlight--;
+      return [cand({ id: "c", url: "http://h/a.mp3", container: "mp3", bitrateKbps: 320 })];
+    });
+    const targets = Array.from({ length: 12 }, (_, i) => tgt({ id: `t${i}`, title: `T${i}` }));
+    const r = await run({
+      targets,
+      sourceId: "src-1",
+      deps: makeDeps({ collectCandidates: collect, downloadToFile: vi.fn(defaultDownload) }),
+      config: { maxConcurrentTargets: 12, maxConcurrentDownloads: 64, maxConcurrentPerHost: 64 },
+    });
+    expect(r.items).toHaveLength(12);
+    expect(maxInFlight).toBeGreaterThan(8); // 旧行为（硬夹 8）在此必红
+    expect(maxInFlight).toBe(12);
+  });
+
+  it("28. 单任务并发歌曲数：显式设 1 时退化回严格串行（旧行为可复现）", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const collect = vi.fn(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      return [cand({ id: "c", url: "http://h/a.mp3", container: "mp3", bitrateKbps: 320 })];
+    });
+    const targets = Array.from({ length: 5 }, (_, i) => tgt({ id: `t${i}`, title: `T${i}` }));
+    await run({
+      targets,
+      sourceId: "src-1",
+      deps: makeDeps({ collectCandidates: collect, downloadToFile: vi.fn(defaultDownload) }),
+      config: { maxConcurrentTargets: 1 },
+    });
+    expect(maxInFlight).toBe(1);
   });
 });

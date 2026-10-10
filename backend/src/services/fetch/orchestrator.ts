@@ -187,7 +187,6 @@ export interface RunFetchPipelineOptions {
    */
   onItem?: (o: FetchItemOutcome) => void;
   signal?: AbortSignal;
-  dryRun?: boolean;
   deps?: Partial<FetchDeps>;
   /** 覆盖成品落盘根（洗版用 /MUSIC/LOSSLESS）；同时决定 ensureDownloadSource 建哪个源。 */
   downloadRootOverride?: string;
@@ -529,7 +528,6 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
   const deps: FetchDeps = { ...DEFAULT_DEPS, ...(opts.deps ?? {}) };
   const signal = opts.signal;
-  const dryRun = !!opts.dryRun;
   // 洗版模式（config_json.__upgrade 必带 originalDisposal）：启用「假无损原地替换」分支。
   const upgradeMode = !!opts.originalDisposal;
 
@@ -554,7 +552,6 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   const losslessRootAbs = cfg.losslessRoot ? path.resolve(cfg.losslessRoot) : "";
   const losslessRoutable =
     !upgradeMode &&
-    !dryRun &&
     !!losslessRootAbs &&
     losslessRootAbs !== downloadRootAbs &&
     canWriteDir(cfg.losslessRoot);
@@ -603,7 +600,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   const hostLimiter = new HostLimiter(cfg.maxConcurrentPerHost, cfg.perHostMinIntervalMs, global);
 
   const flush = async (): Promise<void> => {
-    if (dryRun || pending.length === 0) return;
+    if (pending.length === 0) return;
     const batch = pending.splice(0, pending.length);
     // 分组点名入库：原地替换项落回原媒体源（文件在其目录下），其余按成品**实际落盘根**
     // 选源（downloadRoot / losslessRoot 各对应一个源）。
@@ -670,7 +667,6 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         allowedRoots: p.inPlace
           ? [...opts.originalDisposal.allowedRoots, path.dirname(origFs)]
           : opts.originalDisposal.allowedRoots,
-        dryRun: false,
       });
       if (disp.warnings.length > 0) warnings.push(...disp.warnings);
       p.item.replaced = {
@@ -700,7 +696,13 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   // 网络总闸仍是 global（maxConcurrentDownloads）+ HostLimiter（单站并发 + 最小间隔），
   // 并行只提高「等待重叠度」（插件取链 / 预探 / 转码 / 完整性校验期间别的歌继续跑），
   // 不放大对音源的网络压力。pending/flush 与 counts 变更经调度链串行化，避免并发写竞态。
-  const par = Math.max(1, Math.min(8, Math.floor(Number(cfg.maxConcurrentTargets) || 1)));
+  //
+  // ⚠️ PATCH20（2026-10-11 提速）：上限从 8 提到 64 并**在前端暴露**。原先这里硬夹 8、
+  // 且该键从未出现在配置界面，于是「最大并发下载数 / 单站点最大并发」设成 16 也永远吃不满
+  // ——全库下载与洗版都是**单个**任务，任务内并发就是这两档的真正天花板（240 实测：8 核
+  // load 仅 2.0，ffmpeg 只有 1 个进程，纯属并发被饿死，不是 CPU 瓶颈）。
+  // 语义定调：目标级并发 ≥ 下载总闸，否则总闸形同虚设。
+  const par = Math.max(1, Math.min(64, Math.floor(Number(cfg.maxConcurrentTargets) || 1)));
   const targetSem = new Semaphore(par);
   const batchId = randomUUID();
   let flushChain: Promise<void> = Promise.resolve();
@@ -739,8 +741,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
         // 台账记录（PATCH17）：只记跑完的终态（done/failed）。中断（cancelled）与快速
         // 路径（skipped）不记 —— 前者重跑要继续处理，后者记了只会把冷却起点后推。
-        // 洗版走自己的冷却（fetch_upgrade_attempts），dryRun 不落任何记录。
-        if (!dryRun && !opts.originalDisposal && (item.status === "done" || item.status === "failed")) {
+        // 洗版走自己的冷却（fetch_upgrade_attempts），这里不记。
+        if (!opts.originalDisposal && (item.status === "done" || item.status === "failed")) {
           try {
             deps.recordDownloadAttempt(downloadAttemptKeyOf(t), batchId, item.status, effectiveCooldownDays(cfg));
           } catch (e) {
@@ -1004,13 +1006,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           : ranked;
       }
 
-      // 6) dryRun：到此为止，只报告「将会下载」。
-      if (dryRun) {
-        item.status = "queued";
-        return item;
-      }
-
-      // 7) 逐候选尝试（eligible 串行）。
+      // 6) 逐候选尝试（eligible 串行）。
       let lastFail: { code: FetchErrorCode; detail?: string } | undefined;
       for (const cand of eligible) {
         if (signal?.aborted) {

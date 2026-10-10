@@ -422,8 +422,7 @@ function isUnderRoot(originalPath: string, root: string): boolean {
  *   1. 原路径与新路径（解析后）不同；
  *   2. 新文件确实存在（existsSync(newPath)）；
  *   3. 原路径落在 allowedRoots 中任意一个之下；
- *   4. 扩展名在音频扩展名集合内；
- *   5. dryRun 为真时只返回计划、不碰磁盘。
+ *   4. 扩展名在音频扩展名集合内。
  * delete → unlinkSync；move → 备份到 backupDir（EXDEV 降级 copy+unlink）。
  */
 export function disposeOriginalFile(args: {
@@ -432,7 +431,6 @@ export function disposeOriginalFile(args: {
   action: "keep" | "move" | "delete";
   backupDir?: string;
   allowedRoots: string[];
-  dryRun?: boolean;
 }): DisposeResult {
   const warnings: string[] = [];
   try {
@@ -457,10 +455,7 @@ export function disposeOriginalFile(args: {
     if (!AUDIO_EXTENSIONS.has(ext)) {
       return { action: "skip", warnings: [`非音频扩展名（${ext || "无"}），拒绝处置`] };
     }
-    // 闸 5：dryRun 只算不做。
-    if (args.dryRun) {
-      return { action: args.action, warnings };
-    }
+    // 闸 5：动作合法性（未知动作一律不碰文件）。
     if (args.action === "keep") {
       return { action: "keep", warnings };
     }
@@ -506,7 +501,7 @@ export function disposeOriginalFile(args: {
 // ==================== 洗版任务 config_json 快照（自 routes 迁入，供调度器复用） ====================
 
 /** 洗版任务的 config_json 快照（含 __upgrade 供批量子进程还原）。 */
-export function buildUpgradeJobConfig(cfg: FetchConfig, dryRun: boolean): Record<string, any> {
+export function buildUpgradeJobConfig(cfg: FetchConfig): Record<string, any> {
   return {
     ...cfg,
     skipIfInLibrary: false, // 洗版必须能命中「库内已有的低码率行」，绕开「已有则跳过」
@@ -515,7 +510,6 @@ export function buildUpgradeJobConfig(cfg: FetchConfig, dryRun: boolean): Record
     // 这里硬钉 true，避免历史遗留的 `inspectCandidates:false` 覆盖项把它静默关掉。
     inspectCandidates: true,
     quality: buildUpgradeQuality(cfg.quality),
-    dryRun,
     __upgrade: {
       downloadRootOverride: cfg.losslessRoot || DEFAULT_LOSSLESS_ROOT,
       originalDisposal: {

@@ -238,16 +238,27 @@ export function buildLibraryContinuation(
   const job = createFetchJob({
     kind: "library",
     targets: { targets: buildLibraryTargets(plan.items) },
-    config: buildLibraryJobConfig(cfg, false),
+    config: buildLibraryJobConfig(cfg),
   });
   // PATCH19：记账移到条目终态时（fetchHandler onItem），创建时不再整批预记。
   return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.pending - plan.items.length) };
 }
 
-export function buildLibraryJobConfig(cfg: FetchConfig, dryRun?: boolean): Record<string, unknown> {
+/**
+ * 全库下载任务的 config_json：只加 `__library` 开关，其余沿用普通下载配置。
+ *
+ * `noAutoContinue`：**导入触发**的批次必须带上——否则任务终态后 jobRunner 会顺手开
+ * 「全库自动续批」，把「下完这批导入的歌」放大成「把全库 8 万首全下完」。
+ */
+export function buildLibraryJobConfig(
+  cfg: FetchConfig,
+  opts?: { noAutoContinue?: boolean },
+): Record<string, unknown> {
   return {
     ...cfg,
-    ...(dryRun ? { dryRun: true } : {}),
-    __library: { migrateRowOnly: true },
+    __library: {
+      migrateRowOnly: true,
+      ...(opts?.noAutoContinue ? { noAutoContinue: true } : {}),
+    },
   };
 }

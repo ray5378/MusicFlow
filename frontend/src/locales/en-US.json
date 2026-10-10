@@ -1500,6 +1500,8 @@
         "maxConcurrentDownloads": "Max concurrent downloads",
         "maxConcurrentJobs": "Parallel jobs",
         "maxConcurrentJobsHint": "How many download/upgrade jobs advance at the same time (up to 16; each job still processes chunks sequentially, with parallel targets within a chunk). Downloads, upgrades and full-library runs share this gate; changes take effect immediately.",
+        "maxConcurrentTargets": "Songs per job",
+        "maxConcurrentTargetsHint": "How many songs advance in parallel inside one job (up to 64). Full-library downloads and upgrades are single jobs, so this is their real concurrency ceiling — if it is lower than \"Max concurrent downloads\", that gate can never be saturated. The default of 3 is conservative; raise it to roughly match \"Max concurrent downloads\" to use your full bandwidth.",
         "maxConcurrentPerHost": "Max concurrent per host",
         "perHostMinIntervalMs": "Min interval per host (ms)",
         "rateLimitKBps": "Rate limit (KB/s)",
@@ -1535,24 +1537,11 @@
         "inputLabel": "Track list",
         "inputHint": "One track per line, either \"Title - Artist\" or \"Title\"",
         "placeholder": "For example:\nSunny - Jay Chou\nRice Field - Jay Chou\nPeninsula Iron Box",
-        "preview": "Preview",
         "start": "Start download",
         "emptyInput": "Please enter at least one track",
         "parsedCount": "{count} tracks parsed",
-        "previewResult": "Preview result",
-        "summaryTotal": "{count} total",
-        "summaryDownloadable": "{count} downloadable",
-        "summaryBelowBar": "{count} below bar",
-        "summaryNoCandidate": "{count} no candidate",
-        "colTitle": "Title",
-        "colArtist": "Artist",
-        "colStatus": "Status",
-        "colTier": "Quality",
-        "colReason": "Reason",
-        "previewFailed": "Preview failed",
         "started": "Task {id} created",
-        "startFailed": "Failed to create task",
-        "dryRunHint": "Preview only computes matches; nothing is downloaded or written"
+        "startFailed": "Failed to create task"
       },
       "status": {
         "pending": "Pending",
@@ -1596,6 +1585,7 @@
       "jobs": {
         "kind": {
           "search": "Search import",
+          "import": "Import-triggered",
           "library": "Library download",
           "upgrade": "Upgrade",
           "retry": "Retry",

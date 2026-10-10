@@ -45,7 +45,7 @@ export function runAutoLibraryOnce(
   const batchLimit = Math.max(1, Math.floor(cfg.libraryBatchLimit || 500));
   const plan = buildLibraryPlan(cfg, { limit: batchLimit });
   const targets = buildLibraryTargets(plan.items);
-  const job = createFetchJob({ kind: "library", targets: { targets }, config: buildLibraryJobConfig(cfg, false) });
+  const job = createFetchJob({ kind: "library", targets: { targets }, config: buildLibraryJobConfig(cfg) });
   // PATCH19：记账移到条目终态时（fetchHandler onItem），创建时不再整批预记。
   if (targets.length === 0) {
     updateFetchJobStatus(job.id, "done");

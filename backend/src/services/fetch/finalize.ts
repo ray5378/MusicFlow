@@ -52,8 +52,6 @@ export interface FinalizeOptions {
   newIsBetter?: boolean;
   /** 来源平台 slug，供命名模板 {source} */
   source?: string;
-  /** true 时只计算路径，不做任何文件操作 */
-  dryRun?: boolean;
   /**
    * 覆盖落盘目录（洗版「原地替换」用）：给出时成品落到该目录下、文件名仍取命名模板的
    * 文件名部分，忽略 config.downloadRoot。缺省行为完全不变。
@@ -96,7 +94,7 @@ function withBasename(fullPath: string, finalName: string): string {
 
 /**
  * 计算命名 → 处理冲突 → 原子落盘。
- * 流程见文件头与设计稿 §3.6。`dryRun` 时只算路径。
+ * 流程见文件头与设计稿 §3.6。
  */
 export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
   const warnings: string[] = [];
@@ -175,17 +173,7 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
     finalPath = withBasename(finalPath, rc.finalName);
   }
 
-  // 4) dryRun：只算路径，不碰磁盘。
-  if (opts.dryRun) {
-    return {
-      action: "write",
-      finalPath,
-      relativePath: path.relative(destRoot, finalPath),
-      warnings,
-    };
-  }
-
-  // 5) 建目录 + 原子落盘。
+  // 4) 建目录 + 原子落盘。
   mkdirSync(path.dirname(finalPath), { recursive: true });
   try {
     renameSync(opts.cachePath, finalPath);
@@ -204,7 +192,7 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
     }
   }
 
-  // 6) 放开权限位：容器内 root 建出的文件默认 other::---，其它应用读不到。
+  // 5) 放开权限位：容器内 root 建出的文件默认 other::---，其它应用读不到。
   try {
     chmodSync(finalPath, 0o644);
   } catch (e) {

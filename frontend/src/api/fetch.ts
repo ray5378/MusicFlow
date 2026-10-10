@@ -66,22 +66,6 @@ export interface FetchSourceInfo {
   capabilities: string[];
 }
 
-export interface FetchPreviewItem {
-  targetId?: string;
-  title: string;
-  artist?: string;
-  status: string;
-  tier?: string;
-  reason?: string;
-}
-
-export interface FetchPreviewSummary {
-  total: number;
-  downloadable: number;
-  belowBar: number;
-  noCandidate: number;
-}
-
 export interface FetchConfig {
   enabled?: boolean;
   downloadRoot?: string;
@@ -103,6 +87,8 @@ export interface FetchConfig {
   transcodeKeepOriginal?: boolean;
   maxConcurrentDownloads?: number;
   maxConcurrentJobs?: number;
+  /** 单任务内同时推进的歌曲数（目标级并行）。全库下载/洗版都是单任务，此值就是它们真正的并发上限。 */
+  maxConcurrentTargets?: number;
   maxConcurrentPerHost?: number;
   perHostMinIntervalMs?: number;
   rateLimitKBps?: number;
@@ -137,18 +123,8 @@ export async function getFetchSources(): Promise<FetchSourceInfo[]> {
   return (res.data?.sources ?? []) as FetchSourceInfo[];
 }
 
-export async function previewFetch(
-  targets: FetchTargetInput[],
-): Promise<{ summary: FetchPreviewSummary; items: FetchPreviewItem[] }> {
-  const res = await api.post(`${BASE}/preview`, { targets });
-  return {
-    summary: res.data?.summary as FetchPreviewSummary,
-    items: (res.data?.items ?? []) as FetchPreviewItem[],
-  };
-}
-
-export async function createFetchTask(targets: FetchTargetInput[], dryRun = false): Promise<string> {
-  const res = await api.post(`${BASE}/tasks`, { targets, dryRun });
+export async function createFetchTask(targets: FetchTargetInput[]): Promise<string> {
+  const res = await api.post(`${BASE}/tasks`, { targets });
   return res.data?.jobId as string;
 }
 
@@ -274,7 +250,6 @@ export async function startUpgradeTask(body: {
   sourceId?: string;
   songIds?: string[];
   limit?: number;
-  dryRun?: boolean;
 }): Promise<FetchJobSummary | null> {
   const res = await api.post(`${BASE}/upgrade/tasks`, body);
   return (res.data?.job ?? null) as FetchJobSummary | null;

@@ -206,16 +206,19 @@ describe("buildLibraryTargets / buildLibraryJobConfig", () => {
     expect(targets[0]!.artist).toBeUndefined();
   });
 
-  it("job config 带 __library.migrateRowOnly=true，dryRun 透传", () => {
+  it("job config 带 __library.migrateRowOnly=true；导入触发批次另带 noAutoContinue", () => {
     const cfg = resolveFetchConfig();
-    const withDry = buildLibraryJobConfig(cfg, true) as Record<string, any>;
-    expect(withDry.__library).toEqual({ migrateRowOnly: true });
-    expect(withDry.dryRun).toBe(true);
-    expect(withDry.libraryBatchLimit).toBe(cfg.libraryBatchLimit);
 
-    const withoutDry = buildLibraryJobConfig(cfg) as Record<string, any>;
-    expect(withoutDry.__library).toEqual({ migrateRowOnly: true });
-    expect("dryRun" in withoutDry).toBe(false);
+    // 全库下载（手动 / 自动续批）：只迁移库行，且**允许**终态后自动续批。
+    const plain = buildLibraryJobConfig(cfg) as Record<string, any>;
+    expect(plain.__library).toEqual({ migrateRowOnly: true });
+    expect(plain.libraryBatchLimit).toBe(cfg.libraryBatchLimit);
+    expect("dryRun" in plain).toBe(false);
+
+    // 导入触发批次：语义是「把这批刚入库的歌下完」，必须关掉全库自动续批，
+    // 否则会被放大成「开始全库下载」。
+    const imported = buildLibraryJobConfig(cfg, { noAutoContinue: true }) as Record<string, any>;
+    expect(imported.__library).toEqual({ migrateRowOnly: true, noAutoContinue: true });
   });
 
   it("libraryBatchLimit 缺省 500", () => {

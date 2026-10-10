@@ -1500,6 +1500,8 @@
         "maxConcurrentDownloads": "最大并发下载数",
         "maxConcurrentJobs": "任务并行数",
         "maxConcurrentJobsHint": "同时推进多少个下载/洗版任务（上限 16；每个任务内部仍按片推进、片内多首并行）；下载、洗版、全库下载共用此闸，改动即时生效。",
+        "maxConcurrentTargets": "单任务并发歌曲数",
+        "maxConcurrentTargetsHint": "一个任务内同时推进多少首歌（上限 64）。全库下载 / 洗版都是单个任务，所以这个值才是它们真正的并发上限——若它比「最大并发下载数」小，后者永远吃不满。默认 3 偏保守，想跑满带宽请调到与「最大并发下载数」相当。",
         "maxConcurrentPerHost": "单站点最大并发",
         "perHostMinIntervalMs": "同站点最小间隔 (ms)",
         "rateLimitKBps": "限速 (KB/s)",
@@ -1535,24 +1537,11 @@
         "inputLabel": "歌曲列表",
         "inputHint": "每行一首,支持「歌名 - 歌手」或「歌名」格式",
         "placeholder": "例如:\n晴天 - 周杰伦\n稻香 - 周杰伦\n半岛铁盒",
-        "preview": "预览",
         "start": "开始下载",
         "emptyInput": "请输入至少一首歌曲",
         "parsedCount": "已解析 {count} 首",
-        "previewResult": "预览结果",
-        "summaryTotal": "总计 {count} 首",
-        "summaryDownloadable": "可下载 {count} 首",
-        "summaryBelowBar": "不达标 {count} 首",
-        "summaryNoCandidate": "无候选 {count} 首",
-        "colTitle": "歌名",
-        "colArtist": "歌手",
-        "colStatus": "状态",
-        "colTier": "音质",
-        "colReason": "说明",
-        "previewFailed": "预览失败",
         "started": "已创建任务 {id}",
-        "startFailed": "创建任务失败",
-        "dryRunHint": "预览仅做匹配演算,不会下载或写盘"
+        "startFailed": "创建任务失败"
       },
       "status": {
         "pending": "等待中",
@@ -1596,6 +1585,7 @@
       "jobs": {
         "kind": {
           "search": "搜索导入",
+          "import": "导入触发",
           "library": "全库下载",
           "upgrade": "洗版",
           "retry": "重试",

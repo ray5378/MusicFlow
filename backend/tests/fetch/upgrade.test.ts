@@ -381,17 +381,6 @@ describe("disposeOriginalFile — 安全闸", () => {
     expect(r.warnings.join()).toContain("非音频扩展名");
   });
 
-  it("闸：dryRun → 只返回计划，不删文件", () => {
-    const orig = join(ROOT, "low.mp3");
-    writeFileSync(orig, "x");
-    const neu = join(ROOT, "n.flac");
-    writeFileSync(neu, "y");
-    const r = disposeOriginalFile({ originalPath: orig, newPath: neu, action: "delete", allowedRoots: [ROOT], dryRun: true });
-    expect(r.action).toBe("delete");
-    expect(r.deleted).toBeUndefined();
-    expect(existsSync(orig)).toBe(true);
-  });
-
   it("delete：真删除原件，新文件保留", () => {
     const orig = join(ROOT, "low.mp3");
     writeFileSync(orig, "x");
