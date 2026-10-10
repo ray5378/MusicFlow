@@ -11,6 +11,10 @@
 //    songLike)` 返回直链字符串；manifest 过滤**反向**（:249 `!includes("stream") ||
 //    includes("search")` → skip），方法判空 :252。该分支强依赖 target 的 `sourceData`
 //    （:243-247），**sourceData 为空时不走分支 B**。
+//  - 分支 C（跨源桥接，2026-10-10）：纯 stream 源（如 lx-source）在 target 顶层**无**
+//    sourceData 时，由「有 search 能力」的桥接源（如 go-music-dl）先按歌名+歌手定位
+//    平台歌曲，再把 songId 交接给本源 resolveStream 按歌取直链（洛雪协议无搜索，
+//    按 ID 取链音质上限更高）；桥接失败/无命中时其它源照常兜底。
 //
 // 韧性语义（本模块的核心要求）：**单个音源失败/超时不得让整首歌失败**。每个源独立跑在
 // 自己的超时预算里，抛错/超时只记为「该源缺失」，其它源照常返回；一个候选都拿不到时
@@ -42,6 +46,9 @@ import { TIER_RANK, classifyTier } from "./quality.js";
 import type { Candidate, CandidateQuality } from "./types.js";
 
 const log = createLogger("FETCH-CAND");
+
+/** 分支 C：桥接取链最多对几个搜索命中做 resolveStream（防请求放大/风控）。 */
+export const DEFAULT_BRIDGE_TOP_N = 3;
 
 /** 单个音源的取链预算：超时即视为该源本轮换空，不阻塞其它源。 */
 export const DEFAULT_CANDIDATE_TIMEOUT_MS = 15 * 1000;
@@ -401,6 +408,44 @@ interface CandRecord {
   song?: Record<string, any>;
 }
 
+/**
+ * 分支 C 采纳条件：纯 stream 源（有 resolveStream、无 search 路由、target 顶层无
+ * 平台歌曲 ID —— 分支 B 不适用）。典型：lx-source（洛雪协议无搜索，按 ID 取链）。
+ * 取链由 viaBridgeResolve 用桥接搜索源定位 songId 后喂给它。
+ */
+function supportsBridgeResolve(src: CandidateSource, target: FetchTarget): boolean {
+  const sd = readSourceData(target);
+  return (
+    src.capabilities.includes("stream") &&
+    typeof src.provider?.resolveStream === "function" &&
+    !supportsSearchRoute(src, target) &&
+    !supportsResolveRoute(src, target) &&
+    !sd.songId &&
+    !sd.platform &&
+    Boolean(target.title)
+  );
+}
+
+/**
+ * 桥接命中过滤：标题归一化（小写+去空白/标点）后相等或互含；歌手归一化后互含或
+ * 多艺术家任一分词命中即放行（一方无歌手信息则标题对上即可）。宁缺毋滥：过滤不过
+ * 的命中不做 resolveStream，避免把同名别人的歌唱进下载目录。
+ */
+function bridgeHitMatches(h: OnlineSongResult, target: FetchTarget): boolean {
+  const norm = (v: unknown) => String(v ?? "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  const t = norm(target.title);
+  const hn = norm(h.name);
+  if (!t || !hn) return false;
+  if (hn !== t && !hn.includes(t) && !t.includes(hn)) return false;
+  const ta = norm(target.artist);
+  const ha = norm(h.artist);
+  if (!ta || !ha) return true;
+  if (ha.includes(ta) || ta.includes(ha)) return true;
+  const tParts = String(target.artist ?? "").split(/[、/&,,，]+/).map(norm).filter(Boolean);
+  const hParts = String(h.artist ?? "").split(/[、/&,,，]+/).map(norm).filter(Boolean);
+  return tParts.some((tp) => hParts.some((hp) => hp && (hp.includes(tp) || tp.includes(hp))));
+}
+
 /** 分支 A 采纳条件（双条件齐备，照抄 streamFallback.ts:134-135 / manifest 过滤 :140）。 */
 function supportsSearchRoute(src: CandidateSource, target: FetchTarget): boolean {
   return (
@@ -518,6 +563,103 @@ async function viaResolveStream(src: CandidateSource, target: FetchTarget): Prom
       song: { ...songLike, source: sd.platform, name: target.title, extra: undefined, duration: cand.declared?.durationSec ?? 0 },
     },
   ];
+}
+
+/**
+ * 分支 C：桥接取链 —— `桥接源.search()` 定位平台歌曲 → 逐命中（串行，防风控）调
+ * 本源 `resolveStream` 按歌 ID 拿直链。整体预算 = 搜索 1 份 + 取链 N 份（各 timeoutMs，
+ * 到点停止继续取，已拿到的照常返回）；单命中失败只影响它自己。
+ * sourceData 契约（对齐 lx-source resolveStream）：`{source: 平台名, remoteId: 平台原生 ID}`
+ * —— 绝不能把 MusicFlow UUID 当平台 ID 传（lx-source 会按 id 回退，实测回 301 代理链）。
+ */
+async function viaBridgeResolve(
+  src: CandidateSource,
+  target: FetchTarget,
+  bridgeSrc: CandidateSource,
+  timeoutMs: number,
+  inspectOpts: InspectOpts,
+): Promise<Candidate[]> {
+  const t0 = Date.now();
+  const query = [target.title, target.artist].filter(Boolean).join(" ").trim();
+  let hits: OnlineSongResult[] = [];
+  try {
+    const res = await withTimeout(
+      Promise.resolve(bridgeSrc.provider.search(bridgeSrc.config, { query })),
+      timeoutMs,
+    );
+    hits = Array.isArray(res?.songs) ? (res.songs as OnlineSongResult[]) : [];
+  } catch (e) {
+    log.warn("桥接搜索失败（分支 C 本源跳过）", {
+      pluginId: src.pluginId,
+      bridge: bridgeSrc.pluginId,
+      err: String(e),
+    });
+    return [];
+  }
+  const matched = hits.filter((h) => bridgeHitMatches(h, target)).slice(0, Math.max(1, DEFAULT_BRIDGE_TOP_N));
+  if (matched.length === 0) {
+    log.debug("桥接搜索无标题/歌手匹配命中，分支 C 跳过", {
+      pluginId: src.pluginId,
+      bridge: bridgeSrc.pluginId,
+      hits: hits.length,
+    });
+    return [];
+  }
+  const acc: CandRecord[] = [];
+  for (const h of matched) {
+    if (Date.now() - t0 > timeoutMs * (1 + matched.length)) break; // 整体预算到点即停
+    const platform = normalizePlatform(h.source);
+    const songId = String(h.id ?? "");
+    if (!songId) continue;
+    const durationSec =
+      typeof h.duration === "number" && h.duration > 0 ? h.duration : (target.durationSec ?? 0);
+    const songLike = {
+      id: target.id,
+      title: h.name || target.title,
+      artist: h.artist || target.artist || "",
+      album: h.album || target.album || "",
+      duration: durationSec,
+      pluginEntry: null,
+      sourceData: JSON.stringify({ source: platform, remoteId: songId }),
+    };
+    let url = "";
+    try {
+      url = String(
+        (await withTimeout(
+          Promise.resolve(src.provider.resolveStream(src.config, songLike)),
+          timeoutMs,
+        )) || "",
+      );
+    } catch (e) {
+      log.debug("桥接 resolveStream 单命中失败", { pluginId: src.pluginId, err: String(e) });
+      continue;
+    }
+    if (!isHttpUrl(url)) continue;
+    const cand = buildCandidate({
+      src,
+      url,
+      platformSongId: songId,
+      declared: { container: containerFromUrl(url), durationSec },
+      meta: {
+        title: target.title,
+        artist: target.artist,
+        album: target.album,
+        durationSec,
+        platform,
+      },
+    });
+    acc.push({
+      cand,
+      song: { ...songLike, source: platform, name: songLike.title, extra: undefined },
+    });
+  }
+  try {
+    await inspectRecords(src, acc, inspectOpts);
+  } catch (e) {
+    // inspect 全程增强项（内部已全包），再兜一层。
+    log.debug("桥接 inspect 阶段异常（忽略，保留取链结果）", { pluginId: src.pluginId, err: String(e) });
+  }
+  return acc.map((r) => r.cand);
 }
 
 /** inspect 阶段的开关与预算。 */
@@ -701,10 +843,32 @@ export async function collectCandidates(params: CollectParams): Promise<Candidat
     topN: positiveOr(params.inspectTopN, DEFAULT_INSPECT_TOP_N),
   };
 
+  // 分支 C（跨源桥接）：见 supportsBridgeResolve / viaBridgeResolve。桥接源取
+  // sourcePriority 最靠前的 search 源；没有 search 源则本分支整体跳过（与旧行为一致）。
+  const bridgeJobs: Array<Promise<Candidate[]>> = [];
+  const bridgeSources = sources.filter((s) => supportsBridgeResolve(s, target));
+  if (bridgeSources.length > 0) {
+    const searchSrc = [...sources]
+      .filter((s) => supportsSearchRoute(s, target))
+      .sort((a, b) => rankOf(a.pluginId, "", priority) - rankOf(b.pluginId, "", priority))[0];
+    if (searchSrc) {
+      for (const s of bridgeSources) {
+        bridgeJobs.push(
+          viaBridgeResolve(s, target, searchSrc, timeoutMs, inspectOpts).catch((e) => {
+            log.warn("桥接取链失败，本轮换视为缺失", { pluginId: s.pluginId, err: String(e) });
+            return [] as Candidate[];
+          }),
+        );
+      }
+    }
+  }
+
   // 跨插件并发；任一 reject（含超时）由 allSettled 兜住，只影响对应的那一个源。
-  const settled = await Promise.allSettled(
-    sources.map((s) => collectFromSource(s, target, timeoutMs, inspectOpts)),
-  );
+  // （分支 C 的桥接任务自带 catch，理论上不会 reject；这里兜一层防 log 里 pluginId 越界。）
+  const settled = await Promise.allSettled([
+    ...sources.map((s) => collectFromSource(s, target, timeoutMs, inspectOpts)),
+    ...bridgeJobs,
+  ]);
   const pooled: Candidate[] = [];
   settled.forEach((r, i) => {
     if (r.status === "fulfilled") {
@@ -712,7 +876,7 @@ export async function collectCandidates(params: CollectParams): Promise<Candidat
       return;
     }
     log.warn("音源取链失败，本轮换视为缺失", {
-      pluginId: sources[i].pluginId,
+      pluginId: sources[i]?.pluginId ?? "bridge",
       targetId: target.id,
       err: String(r.reason),
     });

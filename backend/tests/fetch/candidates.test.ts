@@ -541,3 +541,104 @@ describe("Candidate.extra 透传", () => {
     expect(out[0].declared?.durationSec).toBe(269);
   });
 });
+
+// ==================== 分支 C：跨源桥接（songId 交接） ====================
+
+const bridgeTarget: FetchTarget = {
+  id: "song-2",
+  title: "爱在西元前",
+  artist: "周杰伦",
+  album: "范特西",
+  durationSec: 240,
+  // 注意：无 sourceData —— 分支 B 不适用，走分支 C。
+};
+
+function bridgeSearchStub(
+  hits: Array<{ id: string; source: string; name: string; artist: string }>,
+): any {
+  return {
+    async search(_cfg: any, _p: any) {
+      return {
+        songs: hits.map((h) => ({ ...h, album: "专辑", duration: 240, cover: "" })),
+      };
+    },
+    streamUrl(_cfg: any, song: any) {
+      return "https://cdn.example.com/" + song.source + "/" + song.id + ".mp3";
+    },
+  };
+}
+
+describe("collectCandidates 分支 C：跨源桥接", () => {
+  it("纯 stream 源无 sourceData → 桥接搜索定位 songId 后按 ID 取链", async () => {
+    const seen: any[] = [];
+    const lx = src("lx-source", ["stream"], {
+      async resolveStream(_cfg: any, song: any) {
+        seen.push(song);
+        return "https://cdn.example.com/lx/flac/1323099451.flac";
+      },
+    });
+    const gmdl = src("go-music-dl", ["stream", "search"], bridgeSearchStub([
+      { id: "1323099451", source: "netease", name: "爱在西元前", artist: "周杰伦" },
+    ]));
+    const out = await collectCandidates({
+      target: bridgeTarget,
+      sourcePriority: ["lx-source", "go-music-dl"],
+      sources: [gmdl, lx],
+    });
+    // gmdl 分支 A 1 条 + lx 桥接 1 条
+    expect(out.map((c) => c.pluginId).sort()).toEqual(["go-music-dl", "lx-source"]);
+    const lxC = out.find((c) => c.pluginId === "lx-source")!;
+    expect(lxC.platform).toBe("wy");
+    expect(lxC.id).toBe("lx-source:wy:1323099451");
+    // songId 交接契约：sourceData 带 source+remoteId，绝不传 MusicFlow UUID
+    expect(seen).toHaveLength(1);
+    const sd = JSON.parse(seen[0].sourceData);
+    expect(sd).toEqual({ source: "wy", remoteId: "1323099451" });
+  });
+
+  it("标题/歌手不匹配的搜索命中不桥接（宁缺毋滥）", async () => {
+    const lx = src("lx-source", ["stream"], {
+      async resolveStream() {
+        return "https://x/y.flac";
+      },
+    });
+    const gmdl = src("go-music-dl", ["stream", "search"], bridgeSearchStub([
+      { id: "1", source: "netease", name: "爱在西元前 (DJ版)", artist: "别人" },
+    ]));
+    const out = await collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] });
+    expect(out.every((c) => c.pluginId !== "lx-source")).toBe(true);
+  });
+
+  it("桥接 resolveStream 失败 → 回落桥接源自身直链候选", async () => {
+    const lx = src("lx-source", ["stream"], {
+      async resolveStream() {
+        return "";
+      },
+    });
+    const gmdl = src("go-music-dl", ["stream", "search"], bridgeSearchStub([
+      { id: "1", source: "netease", name: "爱在西元前", artist: "周杰伦" },
+    ]));
+    const out = await collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] });
+    expect(out).toHaveLength(1);
+    expect(out[0].pluginId).toBe("go-music-dl");
+  });
+
+  it("有 sourceData 的 target 仍走分支 B，不触发桥接", async () => {
+    let resolveCalls = 0;
+    const lx = src("lx-source", ["stream"], {
+      async resolveStream(_cfg: any, song: any) {
+        resolveCalls++;
+        // 分支 B 收到的是 target.sourceData（kw:5566），不是桥接命中的 netease:999
+        expect(String(song.sourceData)).toContain('"remoteId":"5566"');
+        return "https://cdn.example.com/kw/5566.flac";
+      },
+    });
+    const gmdl = src("go-music-dl", ["stream", "search"], bridgeSearchStub([
+      { id: "999", source: "netease", name: "爱在西元前", artist: "周杰伦" },
+    ]));
+    const out = await collectCandidates({ target, sources: [gmdl, lx] }); // target 有 sourceData kw:5566
+    const lxC = out.find((c) => c.pluginId === "lx-source")!;
+    expect(lxC.url).toBe("https://cdn.example.com/kw/5566.flac");
+    expect(resolveCalls).toBe(1); // 只有分支 B 那一次，桥接未发生
+  });
+});
