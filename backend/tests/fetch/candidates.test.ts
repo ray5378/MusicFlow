@@ -523,6 +523,40 @@ describe("inspect 预探（真实码率驱动排序）", () => {
     expect(DEFAULT_INSPECT_TIMEOUT_MS).toBe(8000);
     expect(DEFAULT_INSPECT_TOP_N).toBe(6);
   });
+
+  it("PATCH20：inspect 有界并行（3 路）—— 6 个候选各耗 60ms，总耗时远低于串行 360ms，且结果不变", async () => {
+    // 回归守卫：旧实现逐候选串行，6×8s 上限 = 48s 全挂在每首歌的关键路径上（240 实测每首 ~100s）。
+    const ids = ["a", "b", "c", "d", "e", "f"];
+    const source = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return {
+          songs: ids.map((id) => ({
+            id,
+            source: "migu",
+            name: "歌",
+            artist: "人",
+            album: "专",
+            duration: 269,
+            cover: "",
+          })),
+        };
+      },
+      streamUrl(_cfg: any, s: any) {
+        return `https://cdn.example.com/${s.id}.mp3`;
+      },
+      inspectSong(_cfg: any, song: any) {
+        return new Promise((r) => setTimeout(() => r({ valid: true, bitrateKbps: 700 }), 60));
+      },
+    });
+    const t0 = Date.now();
+    const out = await collectCandidates({ target, sources: [source], inspectTopN: 6 });
+    const elapsed = Date.now() - t0;
+    expect(out).toHaveLength(6);
+    // 每个候选都拿到了 inspect 结果 → 并行不改变语义
+    expect(out.every((c) => c.declared?.bitrateKbps === 700)).toBe(true);
+    // 串行需 ≥360ms；3 路并行 ≈120ms。给足裕量（CI 负载抖动）仍必须显著低于串行。
+    expect(elapsed).toBeLessThan(300);
+  });
 });
 
 // ==================== extra 透传 ====================

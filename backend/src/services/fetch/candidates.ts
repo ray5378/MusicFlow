@@ -659,14 +659,22 @@ function markInspectUnavailable(c: Candidate): void {
  * inspect 预探阶段（增强项，**任何失败都静默降级**）。
  *
  * 预算纪律：**与取链预算是两个独立预算**（`inspectTimeoutMs` vs `candidateTimeoutMs`），
- * 不得合并 —— 单个源取链预算默认 15s，而逐候选串行探 6 个 × 8s 上限 48s；若共用，
+ * 不得合并 —— 单个源取链预算默认 15s，而探 6 个候选 × 8s 上限 48s；若共用，
  * inspect 一慢就会把**已经拿到的取链结果**一起判超时丢掉，本末倒置（inspect 只是用来排序）。
  * 故这里另设 `deadline = now + inspectTimeoutMs × 待探个数`，到点只是**停止继续探**，
  * 已探到的结果照常生效，取链结果永远保住。
  *
- * 逐候选**串行**（与取链同口径，防风控）；单请求带 `inspectTimeoutMs` 超时；
- * 单个候选失败/超时/返回 null 只影响它自己。
+ * ⚠️ PATCH20（2026-10-11 提速）：并发上限 `INSPECT_CONCURRENCY`（默认 3）路并行。
+ * 原实现是**严格串行**，最坏 6×8s = **48 秒**全挂在每首歌的关键路径上（在下载之前）——
+ * 叠加取链的 15s 预算后，240 实测每首歌要 ~100s 才开始下载，而 8 核机器 load 只有 2.5
+ * （纯等待、非算力）。各候选的 inspect 结果**互相独立**（只写自己的 `rec.cand`），
+ * 故并行不改变任何结果，只把最坏 48s 压到 ~16s。取链阶段仍保持逐候选串行（防风控），
+ * 这里只对「增强项」放开一个很小的常数并发。
+ *
+ * 单请求带 `inspectTimeoutMs` 超时；单个候选失败/超时/返回 null 只影响它自己。
  */
+const INSPECT_CONCURRENCY = 3;
+
 async function inspectRecords(src: CandidateSource, records: CandRecord[], o: InspectOpts): Promise<void> {
   if (!o.enabled || records.length === 0) return;
   if (typeof src.provider?.inspectSong !== "function") {
@@ -680,8 +688,10 @@ async function inspectRecords(src: CandidateSource, records: CandRecord[], o: In
   const deadline = Date.now() + o.timeoutMs * batch.length;
   let anyValid = false;
   let anyInvalid = false;
-  for (const rec of batch) {
-    if (Date.now() > deadline) break; // 预算用尽：停止继续探，保留已探结果
+
+  // 单游标 + worker 池：`cursor++` 在同一次事件循环 tick 内完成（await 之前），无竞态。
+  let cursor = 0;
+  const probeOne = async (rec: CandRecord): Promise<void> => {
     let res: any = null;
     try {
       res = await withTimeout(Promise.resolve(src.provider.inspectSong(src.config, rec.song)), o.timeoutMs);
@@ -695,15 +705,28 @@ async function inspectRecords(src: CandidateSource, records: CandRecord[], o: In
       res = null;
     }
     // null / 畸形返回 = 网络失败或解析失败 → 静默跳过（插件保证不抛，这里再兜一层）。
-    if (!res || typeof res !== "object" || typeof res.valid !== "boolean") continue;
+    if (!res || typeof res !== "object" || typeof res.valid !== "boolean") return;
     if (res.valid === true) {
       anyValid = true;
       applyInspectResult(rec.cand, res);
-      continue;
+      return;
     }
     anyInvalid = true;
     markInspectUnavailable(rec.cand);
-  }
+  };
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= batch.length) return;
+      if (Date.now() > deadline) return; // 预算用尽：停止继续探，保留已探结果
+      await probeOne(batch[i]!);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(INSPECT_CONCURRENCY, batch.length) }, () => worker()),
+  );
+
   // 「全部失败静默降级」的判据是**没有任何候选返回 valid:true**，
   // 而不是「有任何非 true 的返回」—— 后者会把整批歌都误判成降级。
   if (!anyValid) {
