@@ -377,6 +377,14 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
 }
 
 // Extract metadata from header chunk using music-metadata
+/**
+ * 无损容器的码率不信任 format.bitrate：music-metadata 对「截断头部 buffer」解析出的
+ * bitrate 是按**到手字节/时长**估算的（WebDAV 分级取头 256KB 头 ÷ 4 分钟 flac ≈ 8kbps 级
+ * 垃圾值；240 实测 49,358 首 flac 库值平均只有真实值 1/202）。这些容器的真实码率应由
+ * size*8/duration 现场换算（与 fetch/upgrade.ts 的 upgradeBaselineKbps 同口径）。
+ */
+const LOSSLESS_SIZE_BITRATE_EXTS = new Set([".flac", ".wav", ".ape", ".aiff", ".aif", ".wv"]);
+
 export async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSize: number): Promise<MusicMetadata> {
   const ext = path.extname(fileName).toLowerCase();
   const nameWithoutExt = path.basename(fileName, ext);
@@ -417,6 +425,11 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
     // For MP3: estimate duration from file size and bitrate if not parsed
     if (ext === ".mp3" && duration === 0 && bitRate > 0) {
       duration = Math.round(((fileSize) * 8) / (bitRate * 1000));
+    }
+    // 无损容器：截断头解析出的 format.bitrate 是「到手字节/时长」的估算垃圾值，
+    // duration 来自 STREAMINFO 等结构头、fileSize 是真实大小，两者可信 → 现场换算。
+    if (LOSSLESS_SIZE_BITRATE_EXTS.has(ext) && duration > 0) {
+      bitRate = Math.round((fileSize * 8) / duration / 1000);
     }
 
     const tags = buildTagsJson(common, metadata.native);
@@ -598,6 +611,10 @@ export async function extractMetadataLocal(filePath: string): Promise<MusicMetad
     let bitRate = Math.round((format.bitrate || 0) / 1000);
     if (ext === ".mp3" && duration === 0 && bitRate > 0) {
       duration = Math.round((stat.size * 8) / (bitRate * 1000));
+    }
+    // 无损容器：码率不信任截断头解析出的 format.bitrate，按 size*8/duration 现场换算。
+    if (LOSSLESS_SIZE_BITRATE_EXTS.has(ext) && duration > 0) {
+      bitRate = Math.round((stat.size * 8) / duration / 1000);
     }
     return {
       title: common.title || nameWithoutExt, artist: common.artist || "Unknown Artist",
