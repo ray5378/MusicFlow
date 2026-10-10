@@ -345,7 +345,7 @@ import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
 import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
 import { recoverInterruptedFetchJobs } from "./services/fetch/jobStore.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
-import { ensureWritableDir } from "./services/fetch/writable.js";
+import { cleanCacheRootContents, ensureWritableDir } from "./services/fetch/writable.js";
 
 // ==================== DLNA background discovery ====================
 // Keep the device cache warm so the cast dialog can show devices instantly
@@ -389,10 +389,12 @@ try {
   log.error(`[FETCH] boot 恢复失败: ${e?.message || e}`);
 }
 
-// 写目录启动探针：downloadRoot/cacheRoot 挂载权限配错时第一时间在日志给出
-// 修复指引（不阻塞启动，流媒体等主链路不受影响）。
+// 写目录启动探针 + 缓存清空：挂载权限配错第一时间在日志给出修复指引；
+// 缓存目录内容（上次进程遗留的下载子目录 / .part 半成品）整目录清空（不碰成品目录）。
 try {
   const fetchCfg = currentFetchConfig();
+  const cleanedCache = cleanCacheRootContents(fetchCfg.cacheRoot, fetchCfg.downloadRoot);
+  if (cleanedCache > 0) log.info(`[FETCH] boot：已清空缓存目录 ${fetchCfg.cacheRoot} 内容（${cleanedCache} 项）`);
   for (const dir of [fetchCfg.downloadRoot, fetchCfg.cacheRoot]) ensureWritableDir(dir, { fresh: true });
 } catch (e: any) {
   log.error(`[FETCH-WRITABLE] ${e?.message || e}`);

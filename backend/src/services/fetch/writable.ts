@@ -11,7 +11,8 @@
 //     快速失败，而不是跑到一半逐项报难懂的 EACCES。
 // 后端进程通常非 root，无法自行 chown 自愈 → 修复动作在部署侧执行；错误信息里
 // 直接给出可复制的 chown 命令。
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import * as path from "node:path";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("fetch-writable");
@@ -22,6 +23,39 @@ const verified = new Set<string>();
 /** 测试辅助：清空「已验证」记忆，下次预检强制重新探针。 */
 export function resetWritableVerify(): void {
   verified.clear();
+}
+
+/**
+ * 清空缓存根目录**内容**（保留目录本身），返回删除条数。
+ *
+ * 为什么在启动时清：跑批循环是进程内的，重启后缓存目录里遗留的下载子目录 /
+ * .part 半成品永远不会再被任何任务引用，留着只占空间（产品定调 2026-10-10）。
+ *
+ * 防御：cacheRoot 为空 / 是根路径 / 深度不足两段 / 与 downloadRoot 相同或互为
+ * 祖先时，一律拒绝清理 —— 绝不碰成品目录与挂载点。
+ */
+export function cleanCacheRootContents(cacheRoot: string, downloadRoot: string): number {
+  if (!cacheRoot || !String(cacheRoot).trim()) return 0;
+  const cr = path.resolve(String(cacheRoot));
+  const root = path.parse(cr).root;
+  if (cr === root) return 0;
+  const rel = cr.slice(root.length);
+  if (rel.split(path.sep).filter(Boolean).length < 2) return 0; // 只清至少两段深的目录
+  const dr = String(downloadRoot || "").trim() ? path.resolve(String(downloadRoot)) : "";
+  if (dr && (cr === dr || cr.startsWith(dr + path.sep) || dr.startsWith(cr + path.sep))) {
+    log.warn("cacheRoot 与 downloadRoot 相同/互为祖先，跳过启动清空", { cr, dr });
+    return 0;
+  }
+  let n = 0;
+  try {
+    for (const e of readdirSync(cr)) {
+      rmSync(path.join(cr, e), { recursive: true, force: true });
+      n++;
+    }
+  } catch {
+    /* 目录不存在等：视为无可清理 */
+  }
+  return n;
 }
 
 /**

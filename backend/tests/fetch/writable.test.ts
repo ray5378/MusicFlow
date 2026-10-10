@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,5 +44,33 @@ describe("ensureWritableDir 写目录预检", () => {
 
   it("空路径直接抛出明确错误", () => {
     expect(() => ensureWritableDir("")).toThrow(/写目录为空/);
+  });
+
+  it("cleanCacheRootContents：清空子目录与文件、保留根目录", async () => {
+    const { cleanCacheRootContents } = await import("../../src/services/fetch/writable.js");
+    const cache = path.join(base, "cache");
+    const dl = path.join(base, "dl");
+    fs.mkdirSync(path.join(cache, "lib_a"), { recursive: true });
+    fs.writeFileSync(path.join(cache, "lib_a", "t.part"), "x");
+    fs.writeFileSync(path.join(cache, "stray.bin"), "y");
+    fs.mkdirSync(path.join(dl, "album"), { recursive: true });
+    fs.writeFileSync(path.join(dl, "album", "song.flac"), "z");
+    const n = cleanCacheRootContents(cache, dl);
+    expect(n).toBe(2);
+    expect(existsSync(cache)).toBe(true);
+    expect(fs.readdirSync(cache).length).toBe(0);
+    // 成品目录不受影响
+    expect(existsSync(path.join(dl, "album", "song.flac"))).toBe(true);
+  });
+
+  it("cleanCacheRootContents：防御路径（根/浅层/与成品同目录）一律不清", async () => {
+    const { cleanCacheRootContents } = await import("../../src/services/fetch/writable.js");
+    const dl = path.join(base, "dl2");
+    fs.mkdirSync(dl, { recursive: true });
+    fs.writeFileSync(path.join(dl, "keep.flac"), "z");
+    expect(cleanCacheRootContents("", dl)).toBe(0);
+    expect(cleanCacheRootContents("/", dl)).toBe(0);
+    expect(cleanCacheRootContents(dl, dl)).toBe(0); // 同目录
+    expect(existsSync(path.join(dl, "keep.flac"))).toBe(true);
   });
 });
