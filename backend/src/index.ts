@@ -343,6 +343,9 @@ async function runMaintenanceOnce() {
 
 import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
 import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
+import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
+import { startScanScheduler } from "./services/source/scanScheduler.js";
+import { ensureDownloadSource } from "./services/fetch/source.js";
 import { recoverInterruptedFetchJobs } from "./services/fetch/jobStore.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
 import { cleanCacheRootContents, ensureWritableDir } from "./services/fetch/writable.js";
@@ -380,6 +383,15 @@ wireSsdpRealtime();
 
 // 定时自动洗版（默认关闭；开启后按 upgradeAutoIntervalDays / upgradeAutoTimeOfDay 触发）。
 startUpgradeScheduler();
+startLibraryScheduler();
+startScanScheduler();
+// 两个下载源显示名归一（产品定调 2026-10-10）+ 目录自动生成：
+//   downloadRoot → 已下载流媒体音质；losslessRoot（洗版成品根）→ 已下载无损音质。
+try {
+  const bootCfg = currentFetchConfig();
+  ensureDownloadSource(bootCfg.downloadRoot, "已下载流媒体音质");
+  ensureDownloadSource(bootCfg.losslessRoot, "已下载无损音质");
+} catch { /* 目录不可达时忽略——首次扫描/下载会再 ensure */ }
 
 // 启动恢复：上一进程遗留的 pending/running fetch 任务落 failed 终态（跑批随重启消亡）。
 try {

@@ -17,6 +17,7 @@
 import { sqlite } from "../../db/index.js";
 import type { FetchTarget } from "./candidates.js";
 import type { FetchConfig } from "./config.js";
+import { createFetchJob, type FetchJobRecord } from "./jobStore.js";
 
 /** 全库下载 target id 前缀（orchestrator 据此 + `sourceData.library` 定位旧行）。 */
 export const LIBRARY_TARGET_PREFIX = "library:";
@@ -40,6 +41,8 @@ export interface LibraryPlan {
   attempted: number;
   /** 待尝试行数（应用 songIds 白名单过滤后）。 */
   pending: number;
+  /** 冷却期内被跳过的数量（对齐洗版 summary）。 */
+  cooled: number;
   /** 本次将排入的数量。 */
   willEnqueue: number;
   /** 是否因 limit 截断（还有更多待尝试）。 */
@@ -102,6 +105,18 @@ export function collectAttemptedSongIds(): Set<string> {
 }
 
 /** 记录「这一批已尝试」（`INSERT OR IGNORE` 幂等，重复点不会膨胀）。 */
+/**
+ * 收集「已尝试」时间戳（冷却判定用）：song_id → attempted_at(ISO)。
+ * 表不存在时先建（首个用例/冷启动前可能还没跑过任何全库任务）。
+ */
+export function collectLibraryAttemptedAt(): Map<string, string> {
+  ensureLibraryAttemptsTable();
+  const rows = sqlite
+    .prepare("SELECT song_id, attempted_at FROM fetch_library_attempts")
+    .all() as { song_id: string; attempted_at: string }[];
+  return new Map(rows.map((r) => [r.song_id, r.attempted_at]));
+}
+
 export function recordLibraryAttempts(batchId: string, songIds: string[]): void {
   ensureLibraryAttemptsTable();
   const now = new Date().toISOString();
@@ -126,26 +141,44 @@ export function resetLibraryAttempts(): number {
  * `limit` 缺省 / 0 → 只回统计、`items` 为空。
  */
 export function buildLibraryPlan(
-  _cfg: FetchConfig,
+  cfg: FetchConfig,
   opts?: { limit?: number; songIds?: string[] },
 ): LibraryPlan {
   const all = collectLibrarySongs();
-  const done = collectAttemptedSongIds();
   const total = all.length;
 
   const wanted =
     Array.isArray(opts?.songIds) && opts!.songIds!.length > 0
       ? new Set(opts!.songIds!.map((v) => String(v)))
       : null;
-  const pool = all.filter((r) => !done.has(r.songId) && (!wanted || wanted.has(r.songId)));
+  // 冷却过滤（产品定调 2026-10-10，对齐洗版）：失败尝试 N 天内不再自动选中；
+  // 成功的歌已迁移成本地行（path l:）天然不进 pool；显式 songIds 点名绕过冷却（用户重试语义）。
+  const cooldownDays = Math.min(365, Math.max(1, Math.floor(cfg.libraryCooldownDays > 0 ? cfg.libraryCooldownDays : 30)));
+  const attemptedAt = collectLibraryAttemptedAt();
+  const nowMs = Date.now();
+  let cooled = 0;
+  const pool = all.filter((r) => {
+    if (wanted && !wanted.has(r.songId)) return false;
+    const at = attemptedAt.get(r.songId);
+    if (!at) return true;
+    if (wanted) return true; // 点名重试绕过冷却
+    const t = Date.parse(at);
+    if (Number.isFinite(t) && nowMs - t < cooldownDays * 86_400_000) {
+      cooled += 1;
+      return false;
+    }
+    return true;
+  });
+  const attemptedCount = all.reduce((n, r) => n + (attemptedAt.has(r.songId) ? 1 : 0), 0);
 
   const capRaw =
     typeof opts?.limit === "number" && Number.isFinite(opts.limit) ? Math.floor(opts.limit) : 0;
   const items = capRaw > 0 ? pool.slice(0, capRaw) : [];
   return {
     total,
-    attempted: total - all.filter((r) => !done.has(r.songId)).length,
+    attempted: attemptedCount,
     pending: pool.length,
+    cooled,
     willEnqueue: items.length,
     truncated: capRaw > 0 && pool.length > items.length,
     items,
@@ -175,6 +208,29 @@ export function buildLibraryTargets(items: LibraryPlanItem[]): FetchTarget[] {
 }
 
 /** 全库下载任务的 config_json：只加 `__library` 开关，其余沿用普通下载配置。 */
+/**
+ * 组装「自动续批」的下一批任务（**只创建不启动**，启动由 jobRunner 负责）。
+ *
+ * 产品定调 2026-10-10：全库下载任务跑完终态后，若仍有待下歌曲则自动开下一批，
+ * 直到全库完成。开关 `libraryAutoContinue`（默认开）；用户取消的任务不续。
+ * 返回 job=null 表示无需续批（开关关 / 无待下项）。
+ */
+export function buildLibraryContinuation(
+  cfg: FetchConfig,
+): { job: FetchJobRecord | null; enqueued: number; remaining: number } {
+  if (!cfg.libraryAutoContinue) return { job: null, enqueued: 0, remaining: 0 };
+  const limit = Math.max(1, Math.floor(cfg.libraryBatchLimit || 500));
+  const plan = buildLibraryPlan(cfg, { limit });
+  if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: plan.pending };
+  const job = createFetchJob({
+    kind: "manual",
+    targets: { targets: buildLibraryTargets(plan.items) },
+    config: buildLibraryJobConfig(cfg, false),
+  });
+  recordLibraryAttempts(job.id, plan.items.map((i) => i.songId));
+  return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.pending - plan.items.length) };
+}
+
 export function buildLibraryJobConfig(cfg: FetchConfig, dryRun?: boolean): Record<string, unknown> {
   return {
     ...cfg,

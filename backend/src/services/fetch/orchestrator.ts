@@ -346,7 +346,10 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   // sourceId：未给时确保下载源存在。
   let sourceId = opts.sourceId ?? "";
   if (!sourceId) {
-    const r = deps.ensureDownloadSource(cfg.downloadRoot);
+    const r = deps.ensureDownloadSource(
+      cfg.downloadRoot,
+      cfg.downloadRoot === cfg.losslessRoot ? "已下载无损音质" : "已下载流媒体音质",
+    );
     sourceId = r.sourceId;
     if (r.ancestorSourceId) {
       warnings.push(

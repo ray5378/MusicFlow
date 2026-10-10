@@ -364,6 +364,10 @@ export async function migrateUpgradedSong(args: {
 
     const now = new Date().toISOString();
     const patch: Record<string, unknown> = { path: newFullPath, updatedAt: now };
+    // 迁移即「今天入库」（产品定调 2026-10-10）：created_at 一并刷新为迁移时刻。
+    // 否则 webdav 老行迁移后「最近添加」（按 created_at 倒序）仍按老时间排序，
+    // 用户看不到刚下载的歌（240 实测：45 行迁移后挂在 2026-08-12 上）。
+    patch.createdAt = now;
     for (const k of COPY_COLUMNS) patch[k] = (newRow as any)[k];
     // type 一并跟随新行：web 行被「全库下载」替换成实体文件后必须是 local，否则
     // `type='local' AND path LIKE 'l:%'` 这类查询会永远漏掉它（洗版场景新行本就是 local，无变化）。

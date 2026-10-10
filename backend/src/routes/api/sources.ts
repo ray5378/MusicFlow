@@ -1,5 +1,6 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（sources 域，8 条路由）。零逻辑改动。
 import type { Hono } from "hono";
+import { sqlite } from "../../db/index.js";
 import {
   BusinessErrorCode,
   SCRAPE_JOB_ID,
@@ -47,8 +48,34 @@ function normalizeEnabled(v: unknown, fallback: number | null): number | null {
   return v ? 1 : 0;
 }
 
+/**
+ * 每源「每日定时增量扫描」配置消毒（存 config JSON，不动 DDL）：
+ *   scanAutoEnabled  布尔归一；非布尔直接删除（回退默认关）。
+ *   scanAutoTimeOfDay HH:mm 正则校验；非法删除（调度器回落 "03:00"）。
+ * 其余键原样保留（path/url 等照旧整包覆盖语义）。
+ */
+function sanitizeScanAuto(config: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...config };
+  if ("scanAutoEnabled" in out && typeof out.scanAutoEnabled !== "boolean") delete out.scanAutoEnabled;
+  if (
+    "scanAutoTimeOfDay" in out &&
+    (typeof out.scanAutoTimeOfDay !== "string" || !/^([01]?\d|2[0-3]):([0-5]\d)$/.test(out.scanAutoTimeOfDay.trim()))
+  ) {
+    delete out.scanAutoTimeOfDay;
+  }
+  return out;
+}
+
+/** 每源歌曲数（songs.path 前缀 l:<id>: / w:<id>: 两段并集）。 */
+export function countSourceSongs(id: string): number {
+  const r = sqlite
+    .prepare("SELECT COUNT(*) AS n FROM songs WHERE path LIKE ? OR path LIKE ?")
+    .get(`l:${id}:%`, `w:${id}:%`) as { n?: number } | undefined;
+  return Number(r?.n ?? 0);
+}
+
 export function registerSources(app: Hono): void {
-app.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, config: JSON.parse(s.config || "{}") }))));
+app.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, songCount: countSourceSongs(s.id), config: JSON.parse(s.config || "{}") }))));
 
 app.post("/v1/sources", adminMiddleware, async (c) => {
   const body = await c.req.json();
@@ -72,7 +99,7 @@ app.put("/v1/sources/:id", adminMiddleware, async (c) => {
   db.update(mediaSources).set({
     name: body.name || existing.name,
     enabled: normalizeEnabled(body.enabled, existing.enabled),   // 不传 → 保持原值
-    config: body.config ? JSON.stringify(body.config) : existing.config,
+    config: body.config ? JSON.stringify(sanitizeScanAuto(body.config)) : existing.config,
     updatedAt: new Date().toISOString(),
   }).where(eq(mediaSources.id, id)).run();
   return c.json({ success: true });

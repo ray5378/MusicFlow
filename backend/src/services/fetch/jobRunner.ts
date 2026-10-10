@@ -6,9 +6,11 @@
 import { runBatchJob } from "../../batch/runner.js";
 import { sleepBetweenBatch } from "../plugin/batchPacer.js";
 import { createLogger } from "../../utils/logger.js";
-import { updateFetchJobStatus } from "./jobStore.js";
+import { sqlite } from "../../db/index.js";
+import { getFetchJob, updateFetchJobStatus } from "./jobStore.js";
 import { currentFetchConfig } from "./configStore.js";
 import { ensureWritableDir } from "./writable.js";
+import { buildLibraryContinuation } from "./library.js";
 
 const log = createLogger("fetch-runner");
 
@@ -51,8 +53,89 @@ export function startFetchJob(jobId: string): void {
       log.error("fetch 任务失败", { jobId, err: String(e?.message || e) });
     } finally {
       controllers.delete(jobId);
+      maybeContinueLibraryJob(jobId);
+      autoScanAfterJob(jobId);
     }
   })();
+}
+
+/**
+ * 全库下载自动续批（产品定调 2026-10-10）：`__library` 标记的任务终态后，
+ * 若仍有待下歌曲则自动创建并启动下一批，直到全库完成 / 关闭 / 用户取消。
+ *
+ * 只认「全库下载」入口建的任务（config 快照带 `__library` 标记）；手动单任务不续。
+ * 防御：有其他活动任务时不续（避免多批叠加打爆平台接口）；本次机会让渡，
+ * 由后续任务终态或用户手动触发。
+ */
+function hasAnyActiveJob(): boolean {
+  try {
+    const row = sqlite
+      .prepare("SELECT COUNT(*) AS n FROM fetch_jobs WHERE status IN ('pending','running')")
+      .get() as { n?: number };
+    return Number(row?.n ?? 0) > 0;
+  } catch {
+    return true; // 查不动就当有任务在跑，宁可少续
+  }
+}
+
+function maybeContinueLibraryJob(jobId: string): void {
+  try {
+    const job = getFetchJob(jobId);
+    if (!job || job.status === "cancelled") return;
+    let cfgj: any = (job as any)?.config;
+    if (typeof cfgj === "string") {
+      try {
+        cfgj = JSON.parse(cfgj);
+      } catch {
+        return;
+      }
+    }
+    if (!cfgj || typeof cfgj !== "object" || !cfgj.__library) return;
+    if (cfgj.dryRun) return;
+    const cfg = currentFetchConfig();
+    if (!cfg.libraryAutoContinue) return;
+    if (hasAnyActiveJob()) return;
+    const next = buildLibraryContinuation(cfg);
+    if (!next.job) {
+      log.info(`[LIBRARY-AUTO] 全库续批完成：无待下项（剩余 pending ${next.remaining}）`);
+      return;
+    }
+    startFetchJob(next.job.id);
+    log.info(`[LIBRARY-AUTO] 自动续批 ${next.enqueued} 首（剩余 pending ${next.remaining}），job=${next.job.id}`);
+  } catch (e: any) {
+    log.error("library 自动续批失败", { jobId, err: String(e?.message || e) });
+  }
+}
+
+/**
+ * 任务成功终态后自动增量扫描对应源（产品定调 2026-10-10「立刻添加进媒体库」）：
+ * fetch 流程只落盘 + 迁移行，songs 行靠扫描器 upsertSong 建立——不扫就不进媒体库。
+ * 防抖：只扫 done 且 added>0；__library 续批链中批（hasAnyActiveJob=true）跳过，链尾扫一次。
+ */
+function autoScanAfterJob(jobId: string): void {
+  try {
+    const job = getFetchJob(jobId);
+    if (!job || job.status !== "done" || !job.sourceId) return;
+    let cfgj: any = (job as any)?.config;
+    if (typeof cfgj === "string") {
+      try {
+        cfgj = JSON.parse(cfgj);
+      } catch {
+        cfgj = {};
+      }
+    }
+    if (cfgj?.dryRun) return;
+    const counts = (job as any)?.counts ?? {};
+    if (!Number(counts.added)) return;
+    void runBatchJob("scan", { sourceId: job.sourceId, mode: "incremental" })
+      .then((r) => {
+        const st = (r as { result?: { added?: number; updated?: number; removed?: number } })?.result ?? {};
+        log.info(`[FETCH-AUTO-SCAN] job=${jobId} 源 ${job.sourceId}: +${st.added ?? 0} ~${st.updated ?? 0} -${st.removed ?? 0}`);
+      })
+      .catch((e) => log.warn("fetch 终态自动扫描失败", { jobId, err: String((e as Error)?.message || e) }));
+  } catch (e) {
+    log.warn("autoScanAfterJob 内部错误", { jobId, err: String((e as Error)?.message || e) });
+  }
 }
 
 /** 取消运行中任务；任务不在跑返回 false。 */

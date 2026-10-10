@@ -618,7 +618,10 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
   let sourceId = job.sourceId ?? "";
   if (!sourceId) {
     try {
-      const r = ensureDownloadSource(effRoot);
+      const r = ensureDownloadSource(
+        effRoot,
+        effRoot === cfg.losslessRoot ? "已下载无损音质" : "已下载流媒体音质",
+      );
       sourceId = r.sourceId;
       updateFetchJobStatus(jobId, "running", { sourceId });
     } catch (e) {

@@ -183,7 +183,8 @@ export const DEFAULT_QUALITY_CONFIG: QualityConfig = {
   fakeLosslessMinEffBitrate: 700,
   minDurationSec: 30,
   maxDurationSec: 900,
-  durationToleranceSec: 3.0,
+  // 默认 3.0s 过严（2026-10-10 240 实测：Live/重制版与候选动辄差 3s+ → 79/140 全拒 BELOW_BAR）。
+  durationToleranceSec: 10.0,
   excludeTitleKeywords: ["试听", "铃声", "片段", "DJ版", "串烧", "伴奏", "清唱", "广场舞"],
   preferStudioVersion: true,
   fakeLosslessEncoderHints: ["Lavc", "LAME", "Fraunhofer"],

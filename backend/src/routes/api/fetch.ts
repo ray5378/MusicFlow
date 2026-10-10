@@ -124,6 +124,39 @@ export function registerFetch(app: Hono): void {
     if ("transcodeTarget" in override) {
       (override as Record<string, unknown>).transcodeTarget = "flac";
     }
+    // libraryAutoContinue：布尔归一（非布尔回默认 true，删键即可）。
+    if (
+      "libraryAutoContinue" in override &&
+      typeof (override as Record<string, unknown>).libraryAutoContinue !== "boolean"
+    ) {
+      delete (override as Record<string, unknown>).libraryAutoContinue;
+    }
+    // 全库下载冷却/定时四件套（产品定调 2026-10-10，对齐洗版）。
+    if ("libraryCooldownDays" in override) {
+      const n = Number((override as Record<string, unknown>).libraryCooldownDays);
+      (override as Record<string, unknown>).libraryCooldownDays = Number.isFinite(n)
+        ? Math.min(365, Math.max(1, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.libraryCooldownDays;
+    }
+    if (
+      "libraryAutoEnabled" in override &&
+      typeof (override as Record<string, unknown>).libraryAutoEnabled !== "boolean"
+    ) {
+      delete (override as Record<string, unknown>).libraryAutoEnabled;
+    }
+    if ("libraryAutoIntervalDays" in override) {
+      const n = Number((override as Record<string, unknown>).libraryAutoIntervalDays);
+      (override as Record<string, unknown>).libraryAutoIntervalDays = Number.isFinite(n)
+        ? Math.min(365, Math.max(1, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.libraryAutoIntervalDays;
+    }
+    if (
+      "libraryAutoTimeOfDay" in override &&
+      (typeof (override as Record<string, unknown>).libraryAutoTimeOfDay !== "string" ||
+        !/^([01]?\d|2[0-3]):([0-5]\d)$/.test(String((override as Record<string, unknown>).libraryAutoTimeOfDay).trim()))
+    ) {
+      delete (override as Record<string, unknown>).libraryAutoTimeOfDay;
+    }
     // jobRetentionDays：整数 0-3650（0 = 关闭自动清理）。
     if ("jobRetentionDays" in override) {
       const n = Number((override as Record<string, unknown>).jobRetentionDays);

@@ -34,6 +34,16 @@ export interface FetchConfig {
   ssrfTrustedHosts: string[];
   /** 任务记录保留天数（终态任务超期自动清理；0 = 关闭自动清理）。默认 30 */
   jobRetentionDays: number;
+  /** 全库下载自动续批：任务终态后若仍有待下歌曲，自动开下一批直到全库完成（取消不续）。默认 true */
+  libraryAutoContinue: boolean;
+  /** 全库下载冷却天数：失败尝试 N 天内不再自动选中（成功歌已迁移本地行天然不会重选）。默认 30 */
+  libraryCooldownDays: number;
+  /** 定时自动全库下载总开关。默认 false */
+  libraryAutoEnabled: boolean;
+  /** 定时自动全库下载间隔天数。默认 1 */
+  libraryAutoIntervalDays: number;
+  /** 定时自动全库下载时刻（HH:mm，服务器本地时区）。默认 "03:00" */
+  libraryAutoTimeOfDay: string;
   /** 落盘命名模板（复用 naming.ts） */
   naming: NamingConfig;
   /** 质量门槛（复用 types.ts） */
@@ -116,6 +126,11 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   cacheRoot: DEFAULT_CACHE_ROOT,
   ssrfTrustedHosts: [],
   jobRetentionDays: 30,
+  libraryAutoContinue: true,
+  libraryCooldownDays: 30,
+  libraryAutoEnabled: false,
+  libraryAutoIntervalDays: 1,
+  libraryAutoTimeOfDay: "03:00",
   naming: DEFAULT_NAMING_CONFIG,
   quality: DEFAULT_QUALITY_CONFIG,
   skipIfInLibrary: true,

@@ -544,8 +544,8 @@ describe("orchestrator — downloadRootOverride（洗版成品根覆盖）", () 
       });
 
       expect(r.items[0].status).toBe("done");
-      // ensureDownloadSource 收到的是覆盖后的根（洗版源），不是原 downloadRoot
-      expect(ensure).toHaveBeenCalledWith(LS);
+      // ensureDownloadSource 收到的是覆盖后的根（洗版源）+ 按根定调的显示名
+      expect(ensure).toHaveBeenCalledWith(LS, "已下载流媒体音质");
       expect(finalize).toHaveBeenCalled();
       expect((finalize.mock.calls[0][0] as any).config.downloadRoot).toBe(LS);
     } finally {

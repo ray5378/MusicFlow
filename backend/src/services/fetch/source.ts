@@ -114,6 +114,14 @@ export function ensureDownloadSource(rootPath: string, name?: string): EnsureSou
     if (s.type !== "local") continue;
     const p = readConfigPath(s.config);
     if (p && path.resolve(p) === abs) {
+      // 名字对齐：确定性 dl- 源由系统管理，传入 name 与现有名不一致时归一
+      //（2026-10-10 产品定调改名「已下载流媒体音质 / 已下载无损音质」）。
+      if (name && s.name !== name && s.id.startsWith("dl-")) {
+        db.update(mediaSources)
+          .set({ name, updatedAt: new Date().toISOString() })
+          .where(eq(mediaSources.id, s.id))
+          .run();
+      }
       return {
         sourceId: s.id,
         created: false,
@@ -130,7 +138,7 @@ export function ensureDownloadSource(rootPath: string, name?: string): EnsureSou
   db.insert(mediaSources)
     .values({
       id,
-      name: name ?? "已下载",
+      name: name ?? "已下载流媒体音质",
       type: "local",
       enabled: 1, // 🔴 数字，不能是 boolean
       config: JSON.stringify({ path: abs }),

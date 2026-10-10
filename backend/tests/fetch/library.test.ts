@@ -21,6 +21,7 @@ import { songs } from "../../src/db/schema.js";
 import { resolveFetchConfig } from "../../src/services/fetch/config.js";
 import {
   LIBRARY_TARGET_PREFIX,
+  buildLibraryContinuation,
   buildLibraryJobConfig,
   buildLibraryPlan,
   buildLibraryTargets,
@@ -31,6 +32,7 @@ import {
   resetLibraryAttempts,
 } from "../../src/services/fetch/library.js";
 import { migrateUpgradedSong } from "../../src/services/fetch/upgrade.js";
+import { updateFetchJobStatus } from "../../src/services/fetch/jobStore.js";
 
 function seedSong(o: {
   id: string;
@@ -283,5 +285,43 @@ describe("migrateUpgradedSong — type 跟随新行（全库下载场景）", ()
     const row = db.select().from(songs).where(eq(songs.id, "old-loc")).get()!;
     expect(row.type).toBe("local");
     expect(row.path).toBe("l:s-old:/lossless/high.flac");
+  });
+});
+
+describe("buildLibraryContinuation 自动续批", () => {
+  it("有待下项且开启 → 组装下一批任务并落 attempts（不启动）", () => {
+    ensureLibraryAttemptsTable();
+    resetLibraryAttempts();
+    seedSong({ id: "ac1", path: "web:cont:1", type: "web", title: "续批一" });
+    seedSong({ id: "ac2", path: "web:cont:2", type: "web", title: "续批二" });
+    const cfg = resolveFetchConfig({ libraryAutoContinue: true, libraryBatchLimit: 500 });
+    const r = buildLibraryContinuation(cfg);
+    expect(r.job).not.toBeNull();
+    expect(r.enqueued).toBe(2);
+    expect(r.remaining).toBe(0);
+    expect(collectAttemptedSongIds().has("ac1")).toBe(true);
+    expect(collectAttemptedSongIds().has("ac2")).toBe(true);
+    const cfgj = (r.job as any)?.config as Record<string, unknown>;
+    expect(cfgj.__library).toBeTruthy();
+    updateFetchJobStatus((r.job as any).id, "cancelled");
+  });
+
+  it("关闭开关 → 不组装", () => {
+    ensureLibraryAttemptsTable();
+    resetLibraryAttempts();
+    seedSong({ id: "ac3", path: "web:cont:3", type: "web", title: "续批三" });
+    const cfg = resolveFetchConfig({ libraryAutoContinue: false });
+    const r = buildLibraryContinuation(cfg);
+    expect(r.job).toBeNull();
+    expect(collectAttemptedSongIds().has("ac3")).toBe(false);
+  });
+
+  it("无待下项 → job null 且 remaining 0", () => {
+    ensureLibraryAttemptsTable();
+    resetLibraryAttempts();
+    const cfg = resolveFetchConfig({ libraryAutoContinue: true });
+    const r = buildLibraryContinuation(cfg);
+    expect(r.job).toBeNull();
+    expect(r.remaining).toBe(0);
   });
 });
