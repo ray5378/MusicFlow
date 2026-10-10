@@ -36,6 +36,7 @@ const routes = [
         children: [
           { path: "plugins", name: "AdminPlugins", component: () => import("@/views/admin/Plugins/index.vue"), meta: { requiresAdmin: true } },
           { path: "sources", name: "AdminSources", component: () => import("@/views/admin/Sources/index.vue"), meta: { requiresAdmin: true } },
+          { path: "fetch", name: "AdminFetch", component: () => import("@/views/admin/Fetch/index.vue"), meta: { requiresAdmin: true } },
           { path: "users", name: "AdminUsers", component: () => import("@/views/admin/Users/index.vue"), meta: { requiresAdmin: true } },
           { path: "wish", name: "AdminWish", component: () => import("@/views/admin/Wish/index.vue"), meta: { requiresAdmin: true } },
         ],

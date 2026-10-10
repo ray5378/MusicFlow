@@ -39,6 +39,7 @@
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>{{ t('layout.mediaSources') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/fetch"><MfIcon name="Download" /><template #title>{{ t('layout.fetchManage') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><MfIcon name="User" /><template #title>{{ t('layout.userManage') }}</template></el-menu-item>
         <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>{{ t('layout.systemSettings') }}</template></el-menu-item>
       </el-menu>
