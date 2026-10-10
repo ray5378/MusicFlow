@@ -125,6 +125,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.sendspin.badDialTarget": "拨号目标非法(host 或 port 不合法)",
     "errors.sendspin.dialFailed": "拨号连接 Sendspin 播放端失败",
     "errors.sendspin.noSuchTarget": "未找到该拨号目标",
+    "errors.fetch.jobNotFound": "下载任务不存在",
     "errors.import.failed": "导入失败",
     "errors.common.paramsRequired": "缺少参数",
 
@@ -314,6 +315,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.sendspin.badDialTarget": "Invalid dial target (bad host or port)",
     "errors.sendspin.dialFailed": "Failed to dial the Sendspin player",
     "errors.sendspin.noSuchTarget": "Dial target not found",
+    "errors.fetch.jobNotFound": "Fetch job not found",
     "errors.import.failed": "Import failed",
     "errors.common.paramsRequired": "Missing parameters",
     "errors.cast.screenFailed": "Cast failed",

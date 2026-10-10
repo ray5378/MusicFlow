@@ -120,6 +120,8 @@ vi.mock("../../src/services/source/online/purge.js", () => ({
 vi.mock("../../src/services/source/scanner.js", () => ({
   scanLocalSource: async () => ({ added: 0, updated: 0, removed: 0 }),
   scanWebDAVSource: async () => ({ added: 0, updated: 0, removed: 0 }),
+  // orchestrator 的 DEFAULT_DEPS 在模块加载期就取它（点名单曲入库用），mock 里必须补齐。
+  scanLocalFiles: async () => ({ added: 0, updated: 0 }),
 }));
 
 vi.mock("../../src/services/scraper/artist.js", () => ({

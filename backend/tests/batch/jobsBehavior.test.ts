@@ -130,6 +130,9 @@ vi.mock("../../src/services/source/scanner.js", () => ({
     if (H.onScan) H.onScan();
     return H.scanResult;
   },
+  // orchestrator 的 DEFAULT_DEPS 在模块加载期就取它（点名单曲入库用），mock 里必须补齐，
+  // 否则整文件在收集阶段就报 “No scanLocalFiles export is defined on the mock”。
+  scanLocalFiles: async () => ({ added: 0, updated: 0 }),
 }));
 
 vi.mock("../../src/services/scraper/artist.js", () => ({
