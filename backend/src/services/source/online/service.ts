@@ -23,6 +23,7 @@ import { getOnlineProvider, getSourcePluginConfig, OnlineSongResult } from "./in
 import { batchConcurrency, interactiveConcurrency, sleepBetweenBatch } from "../../plugin/batchPacer.js";
 import { runCoverBackfill, withCoverLimit } from "../../covers.js";
 import { createLogger } from "../../../utils/logger.js";
+import { emitImportedSongs } from "./importTriggerHook.js";
 import { newGroupId, normalizeGroupText } from "../../../utils/songGroup.js";
 import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../../plugin/core/songGroup.js";
 
@@ -442,6 +443,8 @@ export async function importOnlineSongs(
 
   let added = 0, deduped = 0, failed = 0;
   const songsOut: { id: string; title: string; fingerprint: string }[] = [];
+  // 本轮**新入库**（非去重命中）的网络歌曲行 id：这批必须过一轮下载流程（见函数末尾）。
+  const addedSongIds: string[] = [];
 
   // 交互操作(用户前端导入)用档位基础并发全速跑,不受 interactive 退让影响;
   // 后台批量(每日推荐同步/自动匹配)用 batchConcurrency()——交互窗口内自动压到 1。
@@ -461,7 +464,12 @@ export async function importOnlineSongs(
       try {
         const plan = await planSongInsert(providerId, s, configured, provider, dedupPreloaded, existingFingerprints, artistsPending, albumsPending, artistIds, albumIds, coverUrls, waveNow);
         if (plan.success && plan.songId) {
-          if (plan.deduped) deduped++; else added++;
+          if (plan.deduped) deduped++;
+          else {
+            added++;
+            // 只做收集：要不要下、下哪些、哪些该被挡，全部由 fetch 层的下载闸判定。
+            addedSongIds.push(plan.songId);
+          }
           if (plan.planned) {
             planned.push(plan.planned);
             if (plan.planned.albumId) insertedAlbums.add(plan.planned.albumId);
@@ -496,6 +504,19 @@ export async function importOnlineSongs(
 
   // 计数聚合更新(每个触达的专辑/歌手一次,聚合 SQL 取最新值)。
   await refreshCounts(insertedAlbums, insertedArtists);
+
+  // ==================== 入库即入队：网络歌曲必须过一轮下载流程 ====================
+  //
+  // 产品定调 2026-10-11（最根本的一条）：**任何**入库的网络歌曲都必须自动走一轮下载。
+  // 这里是最上游、唯一的「平台歌曲落库」收口点 —— 插件歌单导入 / 单曲导入 / 每日推荐
+  // 同步 / 跨源匹配 / 发现页全部经本函数，故在这里广播一次即可覆盖全部导入路径，
+  // 不需要（也不应该）在各调用点重复接线。
+  //
+  // 判定与执行全部下沉到 fetch 层（services/fetch/importTrigger.ts，经启动时挂载的钩子）：
+  //   - 下载总开关 `fetch.enabled` 关闭 → 导入照常，完全不下载；
+  //   - 「本地 / WebDAV 已有实体文件」「时长不匹配」→ 由既有下载闸自动挡住；
+  //   - 失败只记日志，**绝不影响导入本身的成功返回**。
+  emitImportedSongs(addedSongIds, { providerId });
 
   return { added, deduped, failed, songs: songsOut };
 }

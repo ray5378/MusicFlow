@@ -344,6 +344,7 @@ async function runMaintenanceOnce() {
 import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
 import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
 import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
+import { registerFetchImportTrigger } from "./services/fetch/importTrigger.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
 import { resumeInterruptedFetchJobs } from "./services/fetch/jobRunner.js";
@@ -385,6 +386,11 @@ wireSsdpRealtime();
 startUpgradeScheduler();
 startLibraryScheduler();
 startScanScheduler();
+// 入库即入队（产品定调 2026-10-11，最根本的一条）：**任何**入库的网络歌曲都必须过一轮
+// 下载流程。钩子挂在唯一的平台歌曲落库收口点 importOnlineSongs 上（注册制，见
+// services/source/online/importTriggerHook.ts）。本挂载点必须保留 ——
+// CI 守卫 scripts/check-import-trigger.mjs 会钉死它，防重构时静默拆掉。
+registerFetchImportTrigger();
 // 两个下载源显示名归一（产品定调 2026-10-10）+ 目录自动生成：
 //   downloadRoot → 已下载流媒体音质；losslessRoot（洗版成品根）→ 已下载无损音质。
 try {
