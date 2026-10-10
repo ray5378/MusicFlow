@@ -596,6 +596,8 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
           allowedRoots: string[];
         })
       : undefined;
+  // 全库下载模式（config_json.__library）：只迁移库行（web 行 → 新本地文件），不删任何文件。
+  const migrateRowOnly = (job.config as any)?.__library?.migrateRowOnly === true;
   // ensureDownloadSource 必须建「覆盖后」那个根对应的源（洗版 → LOSSLESS 源）。
   const effRoot = downloadRootOverride || cfg.downloadRoot;
   const allTargets: any[] = Array.isArray(job.targets?.targets) ? job.targets.targets : [];
@@ -634,6 +636,7 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     dryRun,
     downloadRootOverride,
     originalDisposal,
+    migrateRowOnly,
     // 🔴 progress 即心跳:每完成一首回报一次,防 15min 看门狗 SIGKILL。
     onProgress: (p) => ctx.onProgress({ stage: "fetch", ...p }),
   });

@@ -87,6 +87,8 @@ export interface FetchConfig {
   upgradeOriginalAction: "keep" | "move" | "delete";
   /** upgradeOriginalAction === "move" 时的备份子目录（相对 downloadRoot）。 */
   upgradeBackupDir: string;
+  /** 「全库下载」单批上限（产品定 500/次，防止一次把平台接口打爆）。 */
+  libraryBatchLimit: number;
 }
 
 /** 默认配置（所有旋钮的缺省取值见各字段注释）。 */
@@ -129,6 +131,7 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   upgradeBatchLimit: 20,
   upgradeOriginalAction: "keep",
   upgradeBackupDir: ".upgraded-backup",
+  libraryBatchLimit: 500,
 };
 
 /**

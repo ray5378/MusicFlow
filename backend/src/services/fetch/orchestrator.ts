@@ -149,6 +149,11 @@ export interface RunFetchPipelineOptions {
   downloadRootOverride?: string;
   /** 落盘并入库成功后对原文件的处置（洗版用）；省略 = 不处置。 */
   originalDisposal?: { action: "keep" | "move" | "delete"; backupDir?: string; allowedRoots: string[] };
+  /**
+   * 全库下载模式：只把旧行（web 行）改指新本地文件（保住 id/歌单引用），**不删任何文件**。
+   * 与 `originalDisposal` 互斥使用；两者都缺省 → 不做迁移。
+   */
+  migrateRowOnly?: boolean;
 }
 
 // ==================== 小工具 ====================
@@ -243,17 +248,25 @@ function describeQuality(q: CandidateQuality | undefined): string {
   return parts.length > 0 ? parts.join("/") : "未知";
 }
 
-/** 从洗版 target.sourceData 的 `upgrade` 块里取原路径与原 songId（非洗版 target 返回空）。 */
+/**
+ * 从 target.sourceData 里取原路径与原 songId（两处来源，语义不同）：
+ *   - `upgrade`（洗版）：原低码率文件路径 + 旧行 id；
+ *   - `library`（全库下载）：原 `web` 行 id（path 仅作审计，migrateRowOnly 下不删文件）。
+ * 都没有 → 返回空。
+ */
 function upgradeMetaOf(t: FetchTarget | undefined): { originalPath?: string; oldSongId?: string } {
   const raw = t?.sourceData;
   if (!raw) return {};
   try {
-    const obj = JSON.parse(raw) as { upgrade?: { path?: unknown; songId?: unknown } };
-    const up = obj?.upgrade;
-    if (!up) return {};
+    const obj = JSON.parse(raw) as {
+      upgrade?: { path?: unknown; songId?: unknown };
+      library?: { path?: unknown; songId?: unknown };
+    };
+    const hit = obj?.upgrade ?? obj?.library;
+    if (!hit) return {};
     return {
-      originalPath: typeof up.path === "string" && up.path ? up.path : undefined,
-      oldSongId: typeof up.songId === "string" && up.songId ? up.songId : undefined,
+      originalPath: typeof hit.path === "string" && hit.path ? hit.path : undefined,
+      oldSongId: typeof hit.songId === "string" && hit.songId ? hit.songId : undefined,
     };
   } catch {
     return {};
@@ -383,7 +396,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
     // 洗版：迁移库行（保住旧行 id，别让歌单/收藏变死引用）→ **成功后才**处置原件。
     // 🔴 顺序硬约束：迁移没成功就绝不允许删原件（disposeOriginalFile 另有多重安全闸）。
-    if (!opts.originalDisposal) return;
+    // 全库下载（migrateRowOnly）：只迁移库行（web 行 → 指向新本地文件），**一个文件都不删**。
+    if (!opts.originalDisposal && !opts.migrateRowOnly) return;
     for (const p of batch) {
       if (!p.originalPath || !p.oldSongId) continue;
       const mig = await migrateUpgradedSong({
@@ -395,6 +409,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (!mig.migrated) continue; // 迁移失败 → 保留原件，换不了就不删
       // 新行已被删除，存活的是旧行 id。
       p.item.songId = p.oldSongId;
+      if (!opts.originalDisposal) {
+        // 全库下载：没有原件可处置，只记审计（replaced.action = "migrate"）。
+        p.item.replaced = { originalPath: p.originalPath, newPath: p.finalPath, action: "migrate" };
+        continue;
+      }
       const disp = disposeOriginalFile({
         originalPath: p.originalPath,
         newPath: p.finalPath,

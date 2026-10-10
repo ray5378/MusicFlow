@@ -327,6 +327,9 @@ export async function migrateUpgradedSong(args: {
     const now = new Date().toISOString();
     const patch: Record<string, unknown> = { path: newFullPath, updatedAt: now };
     for (const k of COPY_COLUMNS) patch[k] = (newRow as any)[k];
+    // type 一并跟随新行：web 行被「全库下载」替换成实体文件后必须是 local，否则
+    // `type='local' AND path LIKE 'l:%'` 这类查询会永远漏掉它（洗版场景新行本就是 local，无变化）。
+    patch.type = (newRow as any).type ?? "local";
 
     db.update(songs)
       .set(patch as any)

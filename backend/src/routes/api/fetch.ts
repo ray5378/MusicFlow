@@ -37,6 +37,13 @@ import { ensureDownloadSource, findDownloadSource } from "../../services/fetch/s
 import { runFetchPipeline } from "../../services/fetch/orchestrator.js";
 import { buildUpgradePlan, buildUpgradeQuality, buildUpgradeTargets } from "../../services/fetch/upgrade.js";
 import {
+  buildLibraryJobConfig,
+  buildLibraryPlan,
+  buildLibraryTargets,
+  recordLibraryAttempts,
+  resetLibraryAttempts,
+} from "../../services/fetch/library.js";
+import {
   createFetchJob,
   getFetchJob,
   listFetchJobs,
@@ -444,6 +451,68 @@ export function registerFetch(app: Hono): void {
     setSetting(CONFIG_KEY, JSON.stringify({ ...readStoredOverride(), ...patch }));
     return c.json({ success: true, config: upgradeConfigView(currentConfig()) });
   });
+
+  // ---------------- 全库下载（手动按钮：库里本地没有实体文件的歌） ----------------
+  app.get("/v1/fetch/library/plan", adminMiddleware, (c) => {
+    const cfg = currentConfig();
+    const limitRaw = Number(c.req.query("limit"));
+    const songIdsRaw = c.req.query("songIds");
+    const plan = buildLibraryPlan(cfg, {
+      ...(Number.isFinite(limitRaw) && limitRaw > 0 ? { limit: Math.floor(limitRaw) } : {}),
+      ...(songIdsRaw
+        ? { songIds: songIdsRaw.split(",").map((v) => v.trim()).filter(Boolean) }
+        : {}),
+    });
+    return c.json({ success: true, plan });
+  });
+
+  app.post("/v1/fetch/library/tasks", adminMiddleware, async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = currentConfig();
+    const dryRun = !!body?.dryRun;
+    const songIds = Array.isArray(body?.songIds)
+      ? (body.songIds as unknown[]).map((v) => String(v))
+      : undefined;
+    // 硬上限 libraryBatchLimit（产品定 500/次，防误点把平台接口打爆），请求只能往下调。
+    const cap = Math.max(1, Math.floor(cfg.libraryBatchLimit || 500));
+    const reqRaw = Number(body?.limit);
+    const reqLimit = Number.isFinite(reqRaw) && reqRaw > 0 ? Math.floor(reqRaw) : cap;
+    const limit = Math.min(reqLimit, cap);
+
+    const plan = buildLibraryPlan(cfg, {
+      limit,
+      ...(songIds && songIds.length > 0 ? { songIds } : {}),
+    });
+    const targets = normalizeTargets(buildLibraryTargets(plan.items));
+    const job = createFetchJob({
+      kind: "manual",
+      targets: { targets },
+      config: buildLibraryJobConfig(cfg, dryRun),
+    });
+    if (targets.length === 0) {
+      // 没有可下的 → 立刻终态，避免 0 目标任务卡 pending。
+      updateFetchJobStatus(job.id, "done");
+      return c.json({
+        success: true,
+        job: summarize(getFetchJob(job.id)!),
+        enqueued: 0,
+        remaining: plan.pending,
+      });
+    }
+    // 先落「已尝试」，再开跑：这样失败的歌下一批也不会被重复选中（可 reset 重跑）。
+    recordLibraryAttempts(job.id, plan.items.map((i) => i.songId));
+    startFetchJob(job.id);
+    return c.json({
+      success: true,
+      job: summarize(getFetchJob(job.id)!),
+      enqueued: targets.length,
+      remaining: Math.max(0, plan.pending - targets.length),
+    });
+  });
+
+  app.post("/v1/fetch/library/reset", adminMiddleware, (c) =>
+    c.json({ success: true, cleared: resetLibraryAttempts() }),
+  );
 }
 
 // 供测试/自省：默认配置常量再导出（避免测试直接依赖 services/fetch/config）。
