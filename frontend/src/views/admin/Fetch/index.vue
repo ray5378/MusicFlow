@@ -83,13 +83,19 @@
                 </el-select>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.transcodeSampleRateHz')">
-                <el-input-number v-model="config.transcodeSampleRateHz" :min="0" :step="1000" controls-position="right" />
+                <el-select v-model="config.transcodeSampleRateHz">
+                  <el-option :label="t('admin.fetch.config.transcodeFollow')" value="follow" />
+                  <el-option label="44100 Hz" :value="44100" />
+                  <el-option label="48000 Hz" :value="48000" />
+                </el-select>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.transcodeBitDepth')">
                 <el-select v-model="config.transcodeBitDepth">
+                  <el-option :label="t('admin.fetch.config.transcodeFollow')" value="follow" />
                   <el-option label="16 bit" :value="16" />
                   <el-option label="24 bit" :value="24" />
                 </el-select>
+                <div v-if="config.transcodeBitDepth === 24" class="hint">{{ t('admin.fetch.config.transcodeBitDepth24Hint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.transcodeKeepOriginal')">
                 <el-switch v-model="config.transcodeKeepOriginal" />
@@ -372,7 +378,14 @@ const { t } = useI18n();
 const activeTab = ref("config");
 
 // ---------- 配置 ----------
-function defaultConfig(): Required<FetchConfig> {
+// 转码采样率/位深为「可选」字段:UI 用 "follow" 表示「跟随源」,提交时省略该键。
+type TranscodeFollow = "follow";
+type ConfigForm = Omit<Required<FetchConfig>, "transcodeSampleRateHz" | "transcodeBitDepth"> & {
+  transcodeSampleRateHz: number | TranscodeFollow;
+  transcodeBitDepth: 16 | 24 | TranscodeFollow;
+};
+
+function defaultConfig(): ConfigForm {
   return {
     enabled: true,
     downloadRoot: "/MUSIC/DOWNLOAD",
@@ -387,8 +400,8 @@ function defaultConfig(): Required<FetchConfig> {
     integrityLevel: "probe",
     transcodeEnabled: true,
     transcodeTarget: "flac",
-    transcodeSampleRateHz: 44100,
-    transcodeBitDepth: 16,
+    transcodeSampleRateHz: "follow",
+    transcodeBitDepth: "follow",
     transcodeKeepOriginal: false,
     maxConcurrentDownloads: 2,
     maxConcurrentPerHost: 1,
@@ -399,7 +412,7 @@ function defaultConfig(): Required<FetchConfig> {
   };
 }
 
-const config = reactive<Required<FetchConfig>>(defaultConfig());
+const config = reactive<ConfigForm>(defaultConfig());
 const configLoading = ref(false);
 const configSaving = ref(false);
 const priorityInput = ref("");
@@ -424,8 +437,13 @@ async function loadConfig() {
   configLoading.value = true;
   try {
     const remote = await getFetchConfig();
-    Object.assign(config, { ...defaultConfig(), ...remote });
-    if (!Array.isArray(config.sourcePriority)) config.sourcePriority = [];
+    const merged = defaultConfig();
+    Object.assign(merged, remote);
+    // 远端缺省/空值 → 跟随源
+    if (remote.transcodeSampleRateHz == null) merged.transcodeSampleRateHz = "follow";
+    if (remote.transcodeBitDepth == null) merged.transcodeBitDepth = "follow";
+    if (!Array.isArray(merged.sourcePriority)) merged.sourcePriority = [];
+    Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
   } finally {
@@ -444,7 +462,11 @@ async function loadSources() {
 async function saveConfig() {
   configSaving.value = true;
   try {
-    await updateFetchConfig({ ...config });
+    const payload: any = { ...config };
+    // 「跟随源」= 省略该键(不传 null / 空串)
+    if (payload.transcodeSampleRateHz === "follow") delete payload.transcodeSampleRateHz;
+    if (payload.transcodeBitDepth === "follow") delete payload.transcodeBitDepth;
+    await updateFetchConfig(payload);
     ElMessage.success(t("admin.fetch.config.saved"));
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
@@ -642,11 +664,11 @@ async function doCancel(job: any) {
   }
 }
 
-// 顶部按钮:重试当前任务的全部失败项。
+// 顶部按钮:重试当前任务的全部失败项(job 级端点,onlyFailed)。
 async function doRetryAll() {
   if (!detail.value) return;
   try {
-    const newId = await retryFetchJob(detail.value.id, true);
+    const newId = await retryFetchJob(detail.value.id, { onlyFailed: true });
     ElMessage.success(t("admin.fetch.jobs.retryStarted", { id: shortId(newId) }));
     detailVisible.value = false;
     activeTab.value = "jobs";
@@ -656,13 +678,16 @@ async function doRetryAll() {
   }
 }
 
-// 逐曲重试:契约没有单曲重试端点,故为该曲目单独建一个新任务。
+// 逐曲重试:同走 job 级端点,传 targetIds 只重试该曲(targetId 缺失时退回只重试失败项)。
 function canRetryItem(s?: string): boolean {
   return s === "failed" || s === "skipped" || s === "cancelled";
 }
 async function retryItem(item: any) {
   try {
-    const newId = await createFetchTask([{ title: item.title, artist: item.artist || undefined }], false);
+    const opts = detail.value && item.targetId
+      ? { targetIds: [item.targetId as string] }
+      : { onlyFailed: true };
+    const newId = await retryFetchJob(detailId.value, opts);
     ElMessage.success(t("admin.fetch.jobs.retryStarted", { id: shortId(newId) }));
     detailVisible.value = false;
     activeTab.value = "jobs";

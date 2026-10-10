@@ -155,7 +155,17 @@ export async function cancelFetchJob(id: string): Promise<void> {
   await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/cancel`);
 }
 
-export async function retryFetchJob(id: string, onlyFailed = true): Promise<string> {
-  const res = await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/retry`, { onlyFailed });
+export interface FetchRetryOptions {
+  /** 只重试失败项(顶部「重试全部失败项」用)。 */
+  onlyFailed?: boolean;
+  /** 只重试指定曲目(targetId 列表,逐行「重试」用)。 */
+  targetIds?: string[];
+}
+
+export async function retryFetchJob(
+  id: string,
+  opts: FetchRetryOptions = { onlyFailed: true },
+): Promise<string> {
+  const res = await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/retry`, opts);
   return res.data?.jobId as string;
 }
