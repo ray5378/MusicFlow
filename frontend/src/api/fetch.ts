@@ -88,6 +88,8 @@ export interface FetchConfig {
   cacheRoot?: string;
   qualityFloor?: string;
   minBitrateKbps?: number;
+  /** 时长容差（秒）：候选与库内行时长偏差超过此值判不匹配。默认 10 */
+  durationToleranceSec?: number;
   minSampleRateHz?: number;
   preferLossless?: boolean;
   rejectFakeLossless?: boolean;
@@ -107,6 +109,7 @@ export interface FetchConfig {
   sourcePriority?: string[];
   ssrfTrustedHosts?: string[];
   jobRetentionDays?: number;
+  libraryAutoContinue?: boolean;
 }
 
 const BASE = "/rest/api/v1/fetch";

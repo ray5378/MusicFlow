@@ -39,6 +39,10 @@
                 <el-input-number v-model="config.minBitrateKbps" :min="0" :step="10" controls-position="right" />
                 <div class="hint">{{ t('admin.fetch.config.minBitrateKbpsHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.durationToleranceSec')">
+                <el-input-number v-model="config.durationToleranceSec" :min="0" :max="60" :step="1" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.durationToleranceSecHint') }}</div>
+              </el-form-item>
               <el-form-item :label="t('admin.fetch.config.minSampleRateHz')">
                 <el-input-number v-model="config.minSampleRateHz" :min="0" :step="1000" controls-position="right" />
               </el-form-item>
@@ -73,6 +77,10 @@
               <el-form-item :label="t('admin.fetch.config.jobRetentionDays')">
                 <el-input-number v-model="config.jobRetentionDays" :min="0" :max="3650" controls-position="right" />
                 <div class="hint">{{ t('admin.fetch.config.jobRetentionDaysHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.libraryAutoContinue')">
+                <el-switch v-model="config.libraryAutoContinue" />
+                <div class="hint">{{ t('admin.fetch.config.libraryAutoContinueHint') }}</div>
               </el-form-item>
             </div>
 
@@ -432,7 +440,7 @@
     </el-tabs>
 
     <!-- ===== 任务详情 ===== -->
-    <el-dialog v-model="detailVisible" :title="t('admin.fetch.jobs.detailTitle')" width="min(920px, 94vw)" :append-to-body="true">
+    <el-dialog v-model="detailVisible" :title="t('admin.fetch.jobs.detailTitle')" width="min(1160px, 96vw)" :append-to-body="true">
       <div v-if="detail" v-loading="detailLoading" class="detail-body">
         <div class="detail-head">
           <div class="detail-meta">
@@ -477,10 +485,10 @@
           <el-table-column :label="t('admin.fetch.jobs.detailColSource')" width="120">
             <template #default="{ row }">{{ sourceText(row.chosen) }}</template>
           </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColQuality')" width="170">
+          <el-table-column :label="t('admin.fetch.jobs.detailColQuality')" width="150">
             <template #default="{ row }">{{ qualityText(row.chosen) }}</template>
           </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColError')" min-width="170" show-overflow-tooltip>
+          <el-table-column :label="t('admin.fetch.jobs.detailColError')" min-width="150" show-overflow-tooltip>
             <template #default="{ row }">
               <span v-if="row.errorCode" class="cell-fail">{{ errorText(row.errorCode) }}</span>
               <span v-else-if="row.errorMsg">{{ row.errorMsg }}</span>
@@ -497,7 +505,7 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColActions')" width="90" fixed="right">
+          <el-table-column :label="t('admin.fetch.jobs.detailColActions')" width="90">
             <template #default="{ row }">
               <el-button size="small" :disabled="!canRetryItem(row.status)" @click="retryItem(row)">{{ t('admin.fetch.jobs.retry') }}</el-button>
             </template>
@@ -571,6 +579,7 @@ function defaultConfig(): ConfigForm {
     cacheRoot: "/MUSIC/DOWNLOADCACHE",
     qualityFloor: "any",
     minBitrateKbps: 90,
+    durationToleranceSec: 10,
     minSampleRateHz: 44100,
     preferLossless: true,
     rejectFakeLossless: true,
@@ -590,6 +599,7 @@ function defaultConfig(): ConfigForm {
     sourcePriority: [],
     ssrfTrustedHosts: [],
     jobRetentionDays: 30,
+    libraryAutoContinue: true,
   };
 }
 
@@ -633,6 +643,7 @@ async function loadConfig() {
     if (!Array.isArray(merged.sourcePriority)) merged.sourcePriority = [];
     if (!Array.isArray(merged.ssrfTrustedHosts)) merged.ssrfTrustedHosts = [];
     if (merged.jobRetentionDays == null) merged.jobRetentionDays = 30;
+    if (merged.libraryAutoContinue == null) merged.libraryAutoContinue = true;
     Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
