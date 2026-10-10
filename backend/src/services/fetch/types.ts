@@ -18,6 +18,8 @@ export interface CandidateQuality {
   container?: string;
   /** 信源声明的比特率（kbps） */
   bitrateKbps?: number;
+  /** 码率是否为直链体积预探的估算值（体积×8/目标时长；PATCH15）。 */
+  estimated?: boolean;
   /** 采样率（Hz），如 44100 / 96000 */
   sampleRateHz?: number;
   /** 位深，如 16 / 24 */

@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
-import { downloadToFile, type DownloadResult } from "../../utils/httpDownload.js";
+import { downloadToFile, probeRemoteSize, type DownloadResult } from "../../utils/httpDownload.js";
 import { searchCover, searchLyrics } from "../../plugins/providers.js";
 import type { LyricSongInput } from "../../plugins/types.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
@@ -49,6 +49,9 @@ import { scanLocalFiles } from "../source/scanner.js";
 import { resolveFetchConfig, validateFetchPaths, type FetchConfig } from "./config.js";
 import { HostLimiter, Semaphore } from "./limiter.js";
 import type { Candidate, CandidateQuality, FetchErrorCode, ItemStatus, QualityTier } from "./types.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("FETCH-ORCH");
 
 // ==================== 结果契约 ====================
 
@@ -109,6 +112,7 @@ export interface FetchPipelineResult {
 export interface FetchDeps {
   collectCandidates: typeof collectCandidates;
   downloadToFile: typeof downloadToFile;
+  probeRemoteSize: typeof probeRemoteSize;
   verifyIntegrity: typeof verifyIntegrity;
   probeFile: typeof probeFile;
   writeTags: typeof writeTags;
@@ -127,6 +131,7 @@ export interface FetchDeps {
 const DEFAULT_DEPS: FetchDeps = {
   collectCandidates,
   downloadToFile,
+  probeRemoteSize,
   verifyIntegrity,
   probeFile,
   writeTags,
@@ -300,6 +305,55 @@ function upgradeMetaOf(t: FetchTarget | undefined): {
   } catch {
     return {};
   }
+}
+
+/** 预探只看最前面一批声明码率缺失的候选，避免为整批死链付超时代价。 */
+const BITRATE_PROBE_MAX = 8;
+/** 单候选预探超时：体积头应秒回，6s 已非常宽裕。 */
+const BITRATE_PROBE_TIMEOUT_MS = 6000;
+
+/**
+ * 直链体积预探（PATCH15）：声明 bitrateKbps 缺失的 http(s) 候选，用 HEAD/Range 拿
+ * Content-Length，结合目标时长估算有效码率（体积×8/时长，与下载后探针同口径），
+ * 回填 declared（标 estimated）。门槛预筛/排序/抢救通道随之按真实体积决策，
+ * 「下载完才发现不达标」的带宽浪费就此消除。预探拿不到体积（null）保持原行为。
+ */
+async function backfillEstimatedBitrates(
+  cands: Candidate[],
+  t: FetchTarget,
+  probe: typeof probeRemoteSize,
+  trustedHosts: string[] | undefined,
+): Promise<void> {
+  const dur = Number(t.durationSec ?? 0);
+  if (!(dur > 0)) return;
+  const targets = cands
+    .filter((c) => {
+      if (!/^https?:\/\//i.test(c.url)) return false;
+      const k = Number(c.declared?.bitrateKbps ?? 0);
+      return !(k > 0);
+    })
+    .slice(0, BITRATE_PROBE_MAX);
+  if (targets.length === 0) return;
+  await Promise.all(
+    targets.map(async (c) => {
+      try {
+        const bytes = await probe({
+          url: c.url,
+          headers: c.headers,
+          timeoutMs: BITRATE_PROBE_TIMEOUT_MS,
+          ssrfGuard: true,
+          trustedHosts,
+        });
+        if (!bytes || !(bytes > 0)) return;
+        const kbps = Math.round((bytes * 8) / dur / 1000);
+        if (!(kbps > 0)) return;
+        c.declared = { ...(c.declared ?? {}), bitrateKbps: kbps, estimated: true };
+        log.debug("直链体积预探", { candidateId: c.id, bytes, estimatedKbps: kbps });
+      } catch {
+        /* 单候选预探失败不影响主流程 */
+      }
+    }),
+  );
 }
 
 /**
@@ -741,6 +795,48 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         item.errorCode = "NO_CANDIDATE";
         item.errorMsg = "无可用候选";
         return item;
+      }
+
+      // 3.5) 直链体积预探（PATCH15）：lx 等源脚本只回 URL、不带码率/体积元数据；声明缺失时
+      // HEAD/Range 拿 Content-Length 估算有效码率回填 declared（失败保持原行为）。
+      try {
+        await backfillEstimatedBitrates(cands, t, deps.probeRemoteSize, cfg.ssrfTrustedHosts);
+      } catch {
+        /* 预探只是优化，绝不阻断主流程 */
+      }
+
+      // 3.6) 估算假无损预拒（PATCH15）：预探估算码率打 95 折仍构成假无损的「无损」候选
+      // 直接拒 —— 整次下载都省掉；估算贴着阈值的仍交下载后探针裁决（库内时长与真实
+      // 时长的毫厘差不误杀）。洗版不走此闸：假无损高于原件有原地替换通道，裁决基准
+      // 是原件而不是绝对门槛。
+      if (!upgradeMode) {
+        const kept: Candidate[] = [];
+        for (const c of cands) {
+          const q = qualityOf(c);
+          const k = Number(q?.bitrateKbps ?? 0);
+          if (q?.estimated && k > 0) {
+            const est = isFakeLossless(
+              { ...c, declared: { ...q, bitrateKbps: Math.round(k * 0.95) } },
+              cfg.quality,
+            );
+            if (est.fake) {
+              item.rejected.push({
+                candidateId: c.id,
+                reason: "BELOW_BAR",
+                detail: `预探估算 ${k}kbps（体积×8/时长）不达假无损下限：${est.reason}`,
+              });
+              continue;
+            }
+          }
+          kept.push(c);
+        }
+        cands = kept;
+        if (cands.length === 0) {
+          item.status = "failed";
+          item.errorCode = "BELOW_BAR";
+          item.errorMsg = "全部候选预探估算不达标";
+          return item;
+        }
       }
 
       // 4) 门槛过滤与排序。

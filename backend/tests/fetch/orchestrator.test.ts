@@ -57,6 +57,7 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
   const base: FetchDeps = {
     collectCandidates: (async () => []) as any,
     downloadToFile: defaultDownload as any,
+    probeRemoteSize: (async () => null) as any,
     verifyIntegrity: (async () => ({ ok: true, level: "probe", detail: { bytes: 1000 }, warnings: [] })) as any,
     probeFile: (async (file: string) => {
       const flac = file.endsWith(".flac");
@@ -709,6 +710,39 @@ describe("runFetchPipeline", () => {
     expect(r.items[0].status).toBe("failed");
     expect(r.items[0].errorCode).toBe("BELOW_BAR");
     expect(downloads).not.toHaveBeenCalled();
+  });
+
+  it("25. 直链体积预探：声明码率缺失 → 估算回填，低于门槛在下载前拒绝", async () => {
+    const probes: string[] = [];
+    const downloadedUrls: string[] = [];
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "lx1", url: "http://h/a.flac", container: "flac" }), // 无声明码率
+        cand({ id: "g1", url: "http://h/b.flac", container: "flac", bitrateKbps: 999, bitDepth: 16 }),
+      ],
+      probeRemoteSize: (async (o: { url: string }) => {
+        probes.push(o.url);
+        return o.url.endsWith("a.flac") ? 10_000_000 : null; // 10MB / 200s = 400kbps
+      }) as any,
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        downloadedUrls.push(o.url);
+        mkdirSync(dirname(o.destPath), { recursive: true });
+        writeFileSync(o.destPath, Buffer.alloc(22_500_000, 1));
+        return { bytes: 22_500_000, httpStatus: 200, sha256: "s", rangeSupported: true, finalUrl: o.url, partial: false };
+      }) as any,
+    });
+    const r = await run({
+      targets: [tgt({ id: "t25", title: "Song", artist: "Artist", durationSec: 200 })],
+      sourceId: "src-1",
+      deps,
+      // 不传 originalDisposal → 非洗版路径，估算假无损预拒闸（3.6）生效
+    });
+    expect(r.items[0].status).toBe("done");
+    expect(probes).toEqual(["http://h/a.flac"]); // 只有缺声明的 lx1 被预探
+    expect(downloadedUrls).toEqual(["http://h/b.flac"]); // lx1 估算假无损下载前被预拒
+    const rej = r.items[0].rejected.find((x) => x.candidateId === "lx1");
+    expect(rej?.reason).toBe("BELOW_BAR");
+    expect(rej?.detail ?? "").toContain("400"); // detail 带估算依据
   });
 
   it("20. 转码透传响度归一化参数（cfg 默认开，目标 -14 LUFS）", async () => {

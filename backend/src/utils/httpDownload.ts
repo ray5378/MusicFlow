@@ -544,3 +544,89 @@ export async function downloadToFile(opts: DownloadOptions): Promise<DownloadRes
     return result;
   }
 }
+
+/** 直链体积预探入参。 */
+export interface ProbeSizeOptions {
+  url: string;
+  headers?: Record<string, string>;
+  /** 默认 8000 */
+  timeoutMs?: number;
+  /** 默认 3 */
+  maxRedirects?: number;
+  userAgent?: string;
+  ssrfGuard?: boolean;
+  hostAllowlist?: string[];
+  trustedHosts?: string[];
+  signal?: AbortSignal;
+}
+
+/**
+ * 直链体积预探（PATCH15）：不消费 body，只取全量体积。
+ * 先 HEAD（多数静态/CDN 直链支持，content-length 直读）；HEAD 被拒（403/405 等）
+ * 或拿不到体积时回退 GET Range bytes=0-0（206 的 content-range 给全量；服务器忽略
+ * Range 回 200 时用 content-length，读完头立即断开不下载 body）。
+ * 任何失败都返回 null —— 预探只是优化，绝不让主流程失败。
+ */
+export async function probeRemoteSize(opts: ProbeSizeOptions): Promise<number | null> {
+  const timeoutMs = opts.timeoutMs ?? 8000;
+  const deadlineMs = Date.now() + timeoutMs;
+  const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const ssrfGuard = opts.ssrfGuard !== false;
+
+  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+  if (!findHeader(headers, "user-agent")) headers["user-agent"] = opts.userAgent ?? DEFAULT_UA;
+
+  /** 手动跟随重定向发起一次请求；失败抛 DownloadError。 */
+  const requestOnce = async (method: string): Promise<IncomingMessage> => {
+    let currentUrl = parseUrl(opts.url);
+    for (let hop = 0; ; hop++) {
+      await assertUrlAllowed(currentUrl, ssrfGuard, opts.hostAllowlist, opts.trustedHosts);
+      const mod = currentUrl.protocol === "https:" ? https : http;
+      const req = mod.request(currentUrl, { method, headers });
+      const res = await awaitResponse(req, deadlineMs, opts.signal);
+      const status = res.statusCode ?? 0;
+      const location = typeof res.headers.location === "string" ? res.headers.location : undefined;
+      if (status >= 300 && status < 400 && location) {
+        drain(res);
+        if (hop >= maxRedirects) throw new DownloadError("FETCH_FAILED", "重定向次数超过上限");
+        currentUrl = new URL(location, currentUrl);
+        continue;
+      }
+      return res;
+    }
+  };
+
+  const sizeOf = (res: IncomingMessage): number | null => {
+    const cr = String(res.headers["content-range"] ?? "");
+    const m = /\/(\d+)\s*$/.exec(cr);
+    if (m) return Number(m[1]);
+    const cl = Number(res.headers["content-length"] ?? "");
+    return Number.isFinite(cl) && cl > 0 ? cl : null;
+  };
+
+  try {
+    const res = await requestOnce("HEAD");
+    const status = res.statusCode ?? 0;
+    const size = status === 200 || status === 206 ? sizeOf(res) : null;
+    drain(res);
+    if (size) return size;
+  } catch {
+    // HEAD 被拒/网络异常：走 GET Range 兜底
+  }
+  try {
+    const res = await requestOnce("GET");
+    const status = res.statusCode ?? 0;
+    const size = status === 200 || status === 206 ? sizeOf(res) : null;
+    if (status === 206) drain(res); // 1 字节 body，排干即可
+    else {
+      try {
+        res.destroy(); // 200 全量 body：读完头立即断开，绝不下载
+      } catch {
+        /* 断开失败无所谓 */
+      }
+    }
+    return size;
+  } catch {
+    return null;
+  }
+}
