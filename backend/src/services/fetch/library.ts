@@ -117,16 +117,29 @@ export function collectLibraryAttemptedAt(): Map<string, string> {
   return new Map(rows.map((r) => [r.song_id, r.attempted_at]));
 }
 
-export function recordLibraryAttempts(batchId: string, songIds: string[]): void {
+/**
+ * 单歌记账（PATCH19 终态时点）：条目到达终态（done/failed/skipped）才写，
+ * **不再在任务创建时整批预记** —— 否则中断/重启后未处理的歌被冷却锁 30 天。
+ * UPSERT：同一首歌重试后以最新终态/时间覆盖（轮转语义：attempted_at 即冷却起点）。
+ */
+export function recordLibraryAttempt(songId: string, batchId: string, status: string): void {
+  if (!songId) return;
   ensureLibraryAttemptsTable();
-  const now = new Date().toISOString();
-  const stmt = sqlite.prepare(
-    "INSERT OR IGNORE INTO fetch_library_attempts (song_id, attempted_at, batch_id, status) VALUES (?, ?, ?, 'queued')",
-  );
-  const tx = sqlite.transaction((ids: string[]) => {
-    for (const id of ids) if (id) stmt.run(id, now, batchId);
-  });
-  tx(songIds);
+  sqlite
+    .prepare(
+      `INSERT INTO fetch_library_attempts (song_id, attempted_at, batch_id, status)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(song_id) DO UPDATE SET
+         attempted_at = excluded.attempted_at,
+         batch_id = excluded.batch_id,
+         status = excluded.status`,
+    )
+    .run(songId, new Date().toISOString(), batchId, status);
+}
+
+/** 批量记账兼容包装（测试/工具用）：按指定状态逐首记账。 */
+export function recordLibraryAttempts(batchId: string, songIds: string[], status = "failed"): void {
+  for (const id of songIds) recordLibraryAttempt(id, batchId, status);
 }
 
 /** 清空尝试记录（重跑失败项用），返回清除行数。 */
@@ -227,7 +240,7 @@ export function buildLibraryContinuation(
     targets: { targets: buildLibraryTargets(plan.items) },
     config: buildLibraryJobConfig(cfg, false),
   });
-  recordLibraryAttempts(job.id, plan.items.map((i) => i.songId));
+  // PATCH19：记账移到条目终态时（fetchHandler onItem），创建时不再整批预记。
   return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.pending - plan.items.length) };
 }
 

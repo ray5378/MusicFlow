@@ -137,6 +137,10 @@
 
             <el-divider content-position="left">{{ t('admin.fetch.config.concurrency') }}</el-divider>
             <div class="config-grid">
+              <el-form-item :label="t('admin.fetch.config.maxConcurrentJobs')">
+                <el-input-number v-model="config.maxConcurrentJobs" :min="1" :max="4" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.maxConcurrentJobsHint') }}</div>
+              </el-form-item>
               <el-form-item :label="t('admin.fetch.config.maxConcurrentDownloads')">
                 <el-input-number v-model="config.maxConcurrentDownloads" :min="1" :max="32" controls-position="right" />
               </el-form-item>
@@ -606,6 +610,7 @@ function defaultConfig(): ConfigForm {
     transcodeBitDepth: "follow",
     transcodeKeepOriginal: false,
     maxConcurrentDownloads: 2,
+    maxConcurrentJobs: 2,
     maxConcurrentPerHost: 1,
     perHostMinIntervalMs: 500,
     rateLimitKBps: 0,
@@ -657,6 +662,7 @@ async function loadConfig() {
     if (!Array.isArray(merged.sourcePriority)) merged.sourcePriority = [];
     if (!Array.isArray(merged.ssrfTrustedHosts)) merged.ssrfTrustedHosts = [];
     if (merged.jobRetentionDays == null) merged.jobRetentionDays = 30;
+    if (merged.maxConcurrentJobs == null) merged.maxConcurrentJobs = 2;
     if (merged.libraryAutoContinue == null) merged.libraryAutoContinue = true;
     if (merged.downloadCooldownDays == null) merged.downloadCooldownDays = 7;
     if (merged.libraryCooldownDays == null) merged.libraryCooldownDays = 30;

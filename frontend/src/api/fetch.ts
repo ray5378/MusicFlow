@@ -103,6 +103,7 @@ export interface FetchConfig {
   transcodeBitDepth?: 16 | 24 | "auto";
   transcodeKeepOriginal?: boolean;
   maxConcurrentDownloads?: number;
+  maxConcurrentJobs?: number;
   maxConcurrentPerHost?: number;
   perHostMinIntervalMs?: number;
   rateLimitKBps?: number;

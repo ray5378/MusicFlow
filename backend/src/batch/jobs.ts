@@ -33,6 +33,7 @@ import { getPluginManifest } from "../plugins/registry.js";
 import { getFetchJob, saveFetchJobItems, saveFetchJobImports, updateFetchJobStatus } from "../services/fetch/jobStore.js";
 import type { FetchJobItem, FetchJobImport, FetchJobCounts } from "../services/fetch/jobStore.js";
 import { resolveFetchConfig } from "../services/fetch/config.js";
+import { recordLibraryAttempt, LIBRARY_TARGET_PREFIX } from "../services/fetch/library.js";
 import { runFetchPipeline } from "../services/fetch/orchestrator.js";
 import type { FetchItemOutcome } from "../services/fetch/orchestrator.js";
 import { ensureDownloadSource } from "../services/fetch/source.js";
@@ -633,6 +634,33 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
 
   const dryRun = !!(job.config as any)?.dryRun;
 
+  // PATCH19 终态记账映射：targetId → songId（仅全库下载目标 `library:<songId>` 有库记账语义）。
+  const librarySongIds = new Map<string, string>();
+  for (const t of allTargets) {
+    const tid = String(t?.id ?? "");
+    if (tid.startsWith(LIBRARY_TARGET_PREFIX)) {
+      librarySongIds.set(tid, tid.slice(LIBRARY_TARGET_PREFIX.length));
+    }
+  }
+  /** 全库记账：条目终态即写 fetch_library_attempts（UPSERT 最新终态）。 */
+  const recordLibraryTerminal = (o: FetchItemOutcome): void => {
+    if (dryRun || librarySongIds.size === 0) return;
+    const st = String(o.status);
+    // COOLDOWN_SKIPPED 不记账——记了会把冷却起点不断后推，反复触发的任务永远跑不动。
+    const rec =
+      st === "done" ||
+      st === "failed" ||
+      (st === "skipped" && o.errorCode !== "COOLDOWN_SKIPPED");
+    if (!rec) return;
+    const sid = librarySongIds.get(String(o.targetId));
+    if (!sid) return;
+    try {
+      recordLibraryAttempt(sid, jobId, st);
+    } catch {
+      /* 记账失败不影响主流程 */
+    }
+  };
+
   // PATCH17 断点续跑：本片里已有终态（done/skipped/failed）的项直接跳过，只跑
   // 未处理/被中断（cancelled 或尚无结果）的项 —— 中断重跑不再从头重试整片。
   // done 项的 items 里带 songId（flush 反查后才增量落库），可安全跳过；cancelled
@@ -693,6 +721,9 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
           skipped: by.skipped,
           bytes,
         });
+        // PATCH19 全库记账：条目终态即写 fetch_library_attempts（UPSERT 最新终态）。
+        // 创建时整批预记的老做法会在中断/重启后把未处理歌锁进冷却期，废弃。
+        recordLibraryTerminal(o);
       } catch {
         /* 增量落库失败不影响主流程（片尾还有全量落库兜底） */
       }
@@ -704,6 +735,8 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
   const mergedCounts = addCounts(job.counts, result.counts);
   saveFetchJobItems(jobId, mergedItems, mergedCounts);
   saveFetchJobImports(jobId, mergeImports(job.imports, result.items));
+  // PATCH19 片尾兜底记账：onItem 被吞（增量落库异常）的终态项在此补记（UPSERT 幂等）。
+  for (const o of result.items) recordLibraryTerminal(o);
 
   // 只有最后一片才落终态;非末片保持 running 等下一片。
   if (!hasMore) {

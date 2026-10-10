@@ -270,25 +270,21 @@ export function cleanExpiredFetchJobs(retentionDays: number): number {
 }
 
 /**
- * 启动恢复：把上一进程遗留的 pending/running 任务落 failed 终态。
+ * 启动恢复（PATCH19）：收集上一进程遗留的 pending/running 任务 id，**不落终态、
+ * 不改任何行**——由 jobRunner.resumeInterruptedFetchJobs() 重新入队续跑。
  *
  * 跑批循环是**进程内**的（jobRunner 持有 AbortController），服务重启即消亡；
- * 不恢复的话这些行永远卡在 running，UI 取消也无效（无 controller 可 abort）。
- * 返回恢复行数。
+ * 旧行为（落 failed）会让几万首的大任务重启后全部作废重选，浪费且打断自动续批链。
+ * PATCH17 断点续跑（chunk 内终态秒跳）让重跑成本 ≈ 只跑未完成项，故直接续跑。
+ * 全部条目已有终态的任务会在首片「todo.length===0」分支自然落终态。
  */
-export function recoverInterruptedFetchJobs(): number {
-  const now = new Date().toISOString();
+export function collectInterruptedFetchJobIds(): string[] {
   const stale = db
     .select({ id: fetchJobs.id })
     .from(fetchJobs)
     .where(inArray(fetchJobs.status, ["pending", "running"]))
     .all();
-  if (stale.length === 0) return 0;
-  db.update(fetchJobs)
-    .set({ status: "failed", error: "服务重启，任务中断（boot 恢复）", updatedAt: now, finishedAt: now })
-    .where(inArray(fetchJobs.status, ["pending", "running"]))
-    .run();
-  return stale.length;
+  return stale.map((r) => r.id);
 }
 
 /**

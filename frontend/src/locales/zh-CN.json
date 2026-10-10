@@ -1498,6 +1498,8 @@
         "transcodeKeepOriginalHint": "转码后同时保留原文件",
         "concurrency": "并发",
         "maxConcurrentDownloads": "最大并发下载数",
+        "maxConcurrentJobs": "任务并行数",
+        "maxConcurrentJobsHint": "同时推进多少个下载/洗版任务（每个任务内部仍按片推进、片内多首并行）；改动即时生效。",
         "maxConcurrentPerHost": "单站点最大并发",
         "perHostMinIntervalMs": "同站点最小间隔 (ms)",
         "rateLimitKBps": "限速 (KB/s)",

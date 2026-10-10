@@ -121,7 +121,7 @@ describe("runAutoLibraryOnce — 触发闸", () => {
     expect(r2.reason).toBe("interval");
   });
 
-  it("有可下目标 → 建任务、记冷却、启动", () => {
+  it("有可下目标 → 建任务、启动（PATCH19：记账移到条目终态，创建时不再预记）", () => {
     seedWeb("auto-w1");
     seedWeb("auto-w2");
     const r = runAutoLibraryOnce(cfgOf({ libraryAutoTimeOfDay: "00:00" }));
@@ -132,6 +132,6 @@ describe("runAutoLibraryOnce — 触发闸", () => {
     const n = sqlite
       .prepare("SELECT COUNT(*) AS n FROM fetch_library_attempts")
       .get() as { n: number };
-    expect(n.n).toBe(2);
+    expect(n.n).toBe(0);
   });
 });

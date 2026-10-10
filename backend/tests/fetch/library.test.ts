@@ -289,7 +289,7 @@ describe("migrateUpgradedSong — type 跟随新行（全库下载场景）", ()
 });
 
 describe("buildLibraryContinuation 自动续批", () => {
-  it("有待下项且开启 → 组装下一批任务并落 attempts（不启动）", () => {
+  it("有待下项且开启 → 组装下一批任务（PATCH19：记账移到终态，创建时不落 attempts）（不启动）", () => {
     ensureLibraryAttemptsTable();
     resetLibraryAttempts();
     seedSong({ id: "ac1", path: "web:cont:1", type: "web", title: "续批一" });
@@ -299,8 +299,8 @@ describe("buildLibraryContinuation 自动续批", () => {
     expect(r.job).not.toBeNull();
     expect(r.enqueued).toBe(2);
     expect(r.remaining).toBe(0);
-    expect(collectAttemptedSongIds().has("ac1")).toBe(true);
-    expect(collectAttemptedSongIds().has("ac2")).toBe(true);
+    expect(collectAttemptedSongIds().has("ac1")).toBe(false);
+    expect(collectAttemptedSongIds().has("ac2")).toBe(false);
     const cfgj = (r.job as any)?.config as Record<string, unknown>;
     expect(cfgj.__library).toBeTruthy();
     updateFetchJobStatus((r.job as any).id, "cancelled");

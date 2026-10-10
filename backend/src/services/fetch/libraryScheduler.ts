@@ -9,7 +9,7 @@ import { createLogger } from "../../utils/logger.js";
 import { getSetting, setSetting } from "../settings.js";
 import { type FetchConfig } from "./config.js";
 import { currentFetchConfig } from "./configStore.js";
-import { buildLibraryJobConfig, buildLibraryPlan, buildLibraryTargets, recordLibraryAttempts } from "./library.js";
+import { buildLibraryJobConfig, buildLibraryPlan, buildLibraryTargets } from "./library.js";
 import { createFetchJob, updateFetchJobStatus } from "./jobStore.js";
 import { startFetchJob } from "./jobRunner.js";
 import { todayTriggerMs } from "./upgradeScheduler.js";
@@ -46,7 +46,7 @@ export function runAutoLibraryOnce(
   const plan = buildLibraryPlan(cfg, { limit: batchLimit });
   const targets = buildLibraryTargets(plan.items);
   const job = createFetchJob({ kind: "manual", targets: { targets }, config: buildLibraryJobConfig(cfg, false) });
-  if (plan.items.length > 0) recordLibraryAttempts(job.id, plan.items.map((i) => i.songId));
+  // PATCH19：记账移到条目终态时（fetchHandler onItem），创建时不再整批预记。
   if (targets.length === 0) {
     updateFetchJobStatus(job.id, "done");
     return { triggered: true, reason: "empty", enqueued: 0, jobId: job.id };

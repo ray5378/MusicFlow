@@ -49,7 +49,6 @@ import {
   buildLibraryJobConfig,
   buildLibraryPlan,
   buildLibraryTargets,
-  recordLibraryAttempts,
   resetLibraryAttempts,
 } from "../../services/fetch/library.js";
 import {
@@ -137,6 +136,13 @@ export function registerFetch(app: Hono): void {
       (override as Record<string, unknown>).libraryCooldownDays = Number.isFinite(n)
         ? Math.min(365, Math.max(1, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.libraryCooldownDays;
+    }
+    // PATCH19 任务级并行数：1..4（resolveFetchConfig 还会再夹一层）。
+    if ("maxConcurrentJobs" in override) {
+      const n = Number((override as Record<string, unknown>).maxConcurrentJobs);
+      (override as Record<string, unknown>).maxConcurrentJobs = Number.isFinite(n)
+        ? Math.min(4, Math.max(1, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.maxConcurrentJobs;
     }
     if (
       "libraryAutoEnabled" in override &&
@@ -549,8 +555,8 @@ export function registerFetch(app: Hono): void {
         remaining: plan.pending,
       });
     }
-    // 先落「已尝试」，再开跑：这样失败的歌下一批也不会被重复选中（可 reset 重跑）。
-    recordLibraryAttempts(job.id, plan.items.map((i) => i.songId));
+    // PATCH19：记账移到条目终态时（fetchHandler onItem），创建时不再整批预记——
+    // 否则中断后未处理的歌被冷却锁死。
     startFetchJob(job.id);
     return c.json({
       success: true,

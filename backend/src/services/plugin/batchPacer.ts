@@ -211,22 +211,31 @@ function pumpLock(): void {
 
 /** 设置批量并发上限(≥1)。沙箱 worker 注册/注销时由批量闸联动更新。 */
 export function setBatchConcurrencyLimit(n: number): void {
-  batchLimit = Math.max(1, n);
+  batchLimit = Math.max(batchFloor, 1, n);
   pumpLock();
+}
+
+// 基础并发下限(PATCH19):fetch 多任务并行等场景保底;插件并行资格在此基础上只增不减。
+let batchFloor = 1;
+
+/** 设置批量并发下限(≥1):调用方(如 fetch 任务并行数配置)保底,运行时可调,即时生效。 */
+export function ensureBaseBatchLimit(n: number): void {
+  batchFloor = Math.max(1, Math.floor(n) || 1);
+  setBatchConcurrencyLimit(Math.max(batchFloor, batchParallelIds.size, 1));
 }
 
 /** 注册一个并行执行的批量 worker(插件加载成功且用户开启 batchParallel 时调用):
  *  并发上限随之提升。幂等——同一 id 重复注册只算一次。 */
 export function registerBatchWorker(id: string): void {
   batchParallelIds.add(id);
-  setBatchConcurrencyLimit(batchParallelIds.size);
+  setBatchConcurrencyLimit(Math.max(batchFloor, batchParallelIds.size, 1));
 }
 
 /** 注销一个批量 worker 的并行资格(插件销毁 / 用户关闭 batchParallel 时调用)。
  *  幂等——删除不存在的 id 无副作用。 */
 export function unregisterBatchWorker(id: string): void {
   batchParallelIds.delete(id);
-  setBatchConcurrencyLimit(batchParallelIds.size);
+  setBatchConcurrencyLimit(Math.max(batchFloor, batchParallelIds.size, 1));
 }
 
 /** 是否正有批量任务持有或排队等待全局闸(供状态端点/前端提示/空闲判定)。 */
@@ -245,6 +254,7 @@ export function _resetPacerForTest(): void {
   holders = 0;
   pendingLocks = 0;
   batchLimit = 1;
+  batchFloor = 1;
   batchParallelIds.clear();
   interactiveDepth = 0;
   remoteInteractive = false;

@@ -4,10 +4,10 @@
 // 「逐片 runBatchJob + hasMore 续片 + AbortController」语义，抽到 service 层避免
 // routes 被非 HTTP 模块反向 import。
 import { runBatchJob } from "../../batch/runner.js";
-import { sleepBetweenBatch } from "../plugin/batchPacer.js";
+import { sleepBetweenBatch, ensureBaseBatchLimit } from "../plugin/batchPacer.js";
 import { createLogger } from "../../utils/logger.js";
 import { sqlite } from "../../db/index.js";
-import { getFetchJob, updateFetchJobStatus } from "./jobStore.js";
+import { getFetchJob, updateFetchJobStatus, collectInterruptedFetchJobIds } from "./jobStore.js";
 import { currentFetchConfig } from "./configStore.js";
 import { ensureWritableDir } from "./writable.js";
 import { buildLibraryContinuation } from "./library.js";
@@ -26,6 +26,9 @@ export function startFetchJob(jobId: string): void {
   // 而不是跑到一半每个下载项都报 EACCES（2026-10-10 240 生产实测教训）。
   try {
     const cfg = currentFetchConfig();
+    // PATCH19 任务级并行：把「同时推进多少个 fetch 任务」落成全局批量闸的保底下限，
+    // 运行时改配置即时生效（插件并行资格在此基础上只增不减）。
+    ensureBaseBatchLimit(cfg.maxConcurrentJobs);
     ensureWritableDir(cfg.downloadRoot);
     ensureWritableDir(cfg.cacheRoot);
   } catch (e: any) {
@@ -144,4 +147,24 @@ export function abortFetchJob(jobId: string): boolean {
   if (!ctrl) return false;
   ctrl.abort();
   return true;
+}
+
+/**
+ * boot 恢复（PATCH19）：上一进程遗留的 pending/running fetch 任务**重新入队续跑**，
+ * 不再落 failed 终态。PATCH17 断点续跑已让 chunk 重跑对已有终态项秒跳，续跑成本
+ * ≈ 只跑未完成项；全部终态的任务会在首片走「todo.length===0」分支直接落终态。
+ * 返回恢复的任务数；单个恢复失败落 failed 不拖累其它任务。
+ */
+export function resumeInterruptedFetchJobs(): number {
+  let resumed = 0;
+  for (const id of collectInterruptedFetchJobIds()) {
+    try {
+      startFetchJob(id);
+      resumed++;
+    } catch (e: any) {
+      updateFetchJobStatus(id, "failed", { error: `boot 恢复失败: ${e?.message || e}` });
+      log.error("boot 恢复任务失败", { jobId: id, err: String(e?.message || e) });
+    }
+  }
+  return resumed;
 }

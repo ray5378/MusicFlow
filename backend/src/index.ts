@@ -346,7 +346,7 @@ import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
 import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
-import { recoverInterruptedFetchJobs } from "./services/fetch/jobStore.js";
+import { resumeInterruptedFetchJobs } from "./services/fetch/jobRunner.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
 import { cleanCacheRootContents, ensureWritableDir } from "./services/fetch/writable.js";
 
@@ -393,10 +393,11 @@ try {
   ensureDownloadSource(bootCfg.losslessRoot, "已下载无损音质");
 } catch { /* 目录不可达时忽略——首次扫描/下载会再 ensure */ }
 
-// 启动恢复：上一进程遗留的 pending/running fetch 任务落 failed 终态（跑批随重启消亡）。
+// 启动恢复（PATCH19）：上一进程遗留的 pending/running fetch 任务**自动续跑**（不再落
+// failed 作废）。断点续跑让重跑只处理未完成项；全终态任务首片自然落终态。
 try {
-  const recovered = recoverInterruptedFetchJobs();
-  if (recovered > 0) log.info(`[FETCH] boot 恢复：${recovered} 个中断任务已落终态`);
+  const resumed = resumeInterruptedFetchJobs();
+  if (resumed > 0) log.info(`[FETCH] boot 恢复：${resumed} 个中断任务已重新入队续跑`);
 } catch (e: any) {
   log.error(`[FETCH] boot 恢复失败: ${e?.message || e}`);
 }
