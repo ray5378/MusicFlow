@@ -59,6 +59,13 @@ export interface FinalizeOptions {
    * 文件名部分，忽略 config.downloadRoot。缺省行为完全不变。
    */
   destDirOverride?: string;
+  /**
+   * 覆盖落盘**根**（下载品质分流用，2026-10-11）：与 destDirOverride 不同 —— 本项
+   * **保留命名模板的相对目录结构**（`{albumArtist}/{album}/...` 照旧展开），只是把根从
+   * downloadRoot 换成该值。用于「源本身已达标无损 → 直接落 losslessRoot」。
+   * 与 destDirOverride 同时给出时 destDirOverride 优先（原地替换语义更强）。
+   */
+  destRootOverride?: string;
 }
 
 export interface FinalizeResult {
@@ -121,10 +128,13 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
     bitrateKbps: opts.probed?.bitrateKbps,
   };
   const relativePath = buildRelativePath(ctx, cfg.naming, ext);
-  // destDirOverride：原地替换 —— 成品落回原文件所在目录（只取命名模板的文件名段）。
+  // 落盘根三选一：destDirOverride（原地替换：只取命名模板文件名段，落回原目录）
+  //             > destRootOverride（品质分流：保留完整相对目录结构）
+  //             > config.downloadRoot（缺省，行为逐字节不变）。
+  const destRoot = opts.destDirOverride ?? opts.destRootOverride ?? cfg.downloadRoot;
   let finalPath = opts.destDirOverride
     ? path.join(opts.destDirOverride, path.basename(relativePath))
-    : path.join(cfg.downloadRoot, relativePath);
+    : path.join(destRoot, relativePath);
 
   // 禁止原地覆盖：缓存路径不能就在成品目录里（否则会把半成品搬回自己头上）。
   if (path.resolve(finalPath) === path.resolve(opts.cachePath)) {
@@ -156,7 +166,7 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
     return {
       action: rc.action,
       finalPath,
-      relativePath: path.relative(cfg.downloadRoot, finalPath),
+      relativePath: path.relative(destRoot, finalPath),
       reusedExisting: true,
       warnings,
     };
@@ -170,7 +180,7 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
     return {
       action: "write",
       finalPath,
-      relativePath: path.relative(cfg.downloadRoot, finalPath),
+      relativePath: path.relative(destRoot, finalPath),
       warnings,
     };
   }
@@ -204,7 +214,7 @@ export function finalizeFile(opts: FinalizeOptions): FinalizeResult {
   return {
     action: "write",
     finalPath,
-    relativePath: path.relative(cfg.downloadRoot, finalPath),
+    relativePath: path.relative(destRoot, finalPath),
     warnings,
   };
 }

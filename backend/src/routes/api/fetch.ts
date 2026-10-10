@@ -252,7 +252,7 @@ export function registerFetch(app: Hono): void {
     const cfg = currentFetchConfig();
     const dryRun = !!body?.dryRun;
     const job = createFetchJob({
-      kind: "manual",
+      kind: "search",
       targets: { targets },
       // dryRun 一并快照进 config_json，供子进程 handler 还原（FetchConfig 无该键）。
       config: { ...cfg, dryRun } as Record<string, any>,
@@ -266,7 +266,29 @@ export function registerFetch(app: Hono): void {
     const limitRaw = Number(c.req.query("limit"));
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 20;
     const status = c.req.query("status") as TaskStatus | undefined;
-    const jobs = listFetchJobs(status ? { limit, status } : { limit });
+    // 按任务类型分栏（前端「下载任务 / 洗版任务」是两个独立 tab）：search / library / upgrade / retry。
+    // - kind：精确匹配单个类型；
+    // - kinds（逗号分隔）：类型白名单（IN）。「下载任务」面板一次拉全部非洗版 kind，
+    //   用白名单而不是「排除 upgrade」，是为了以后新增类型时显式决定它归哪一栏。
+    const kind = c.req.query("kind")?.trim() || undefined;
+    // kinds 三种形态全收，避免任何客户端/序列化器差异把过滤条件静默丢掉：
+    //   ?kinds=a,b        （逗号串）
+    //   ?kinds=a&kinds=b  （重复键）
+    //   ?kinds[]=a&kinds[]=b （axios 对数组的默认序列化）
+    const qs = new URL(c.req.url).searchParams;
+    const kinds = Array.from(
+      new Set(
+        [...qs.getAll("kinds"), ...qs.getAll("kinds[]")]
+          .flatMap((v) => String(v).split(","))
+          .map((x) => x.trim())
+          .filter((x) => x.length > 0),
+      ),
+    );
+    const opts: { limit: number; status?: TaskStatus; kind?: string; kinds?: string[] } = { limit };
+    if (status) opts.status = status;
+    if (kinds.length > 0) opts.kinds = kinds;
+    else if (kind) opts.kind = kind;
+    const jobs = listFetchJobs(opts);
     return c.json({ success: true, jobs: jobs.map(summarize) });
   });
 
@@ -415,7 +437,6 @@ export function registerFetch(app: Hono): void {
       losslessRoot: cfg.losslessRoot,
       compressedMinKbps: upQ.fakeLosslessMinEffBitrate,
       uncompressedMinKbps: upQ.uncompressedMinKbps,
-      inspectCandidates: cfg.inspectCandidates,
       upgradeCooldownDays: cfg.upgradeCooldownDays,
       upgradeAutoEnabled: cfg.upgradeAutoEnabled,
       upgradeAutoIntervalDays: cfg.upgradeAutoIntervalDays,
@@ -453,7 +474,7 @@ export function registerFetch(app: Hono): void {
     const targets = normalizeTargets(buildUpgradeTargets(plan.items));
 
     const job = createFetchJob({
-      kind: "manual",
+      kind: "upgrade",
       targets: { targets },
       // sourceId 留空：批量子进程会按 downloadRootOverride(=/MUSIC/LOSSLESS) 自建洗版源。
       config: buildUpgradeJobConfig(cfg, dryRun),
@@ -486,7 +507,6 @@ export function registerFetch(app: Hono): void {
     if (typeof body?.losslessRoot === "string" && body.losslessRoot.trim()) {
       patch.losslessRoot = body.losslessRoot.trim();
     }
-    if (typeof body?.inspectCandidates === "boolean") patch.inspectCandidates = body.inspectCandidates;
     // 冷却/定时四件套：整数 1-365 钳制 + 时刻格式校验（产品定调 2026-10-10）。
     if (typeof body?.upgradeCooldownDays === "number" && Number.isFinite(body.upgradeCooldownDays)) {
       patch.upgradeCooldownDays = Math.min(365, Math.max(1, Math.floor(body.upgradeCooldownDays)));
@@ -544,7 +564,7 @@ export function registerFetch(app: Hono): void {
     });
     const targets = normalizeTargets(buildLibraryTargets(plan.items));
     const job = createFetchJob({
-      kind: "manual",
+      kind: "library",
       targets: { targets },
       config: buildLibraryJobConfig(cfg, dryRun),
     });

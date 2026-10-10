@@ -27,8 +27,9 @@
 // （240 实测：migu ZQ 档 51.9MB/1749kbps vs netease 10.3MB/320kbps）。因此取链后加一个
 // **可开关的 inspect 预探阶段**：
 //   a) `declaredFromExtra(platform, extra)`：零网络，从信源 extra（go-music-dl 的
-//      `data-extra`，内含酷狗的 sq_hash/hq_hash/... 阶梯、migu 的 format_type）
-//      推「声明档位」，用于**预排序 + 防请求放大**（只探最强的前 N 个）；
+//      `data-extra`，内含各平台的 hash 阶梯 / `format_type`）推「声明档位」，
+//      用于**预排序 + 防请求放大**（只探最强的前 N 个）。
+//      实现与平台字典在**插件层** `services/plugin/sourcePlatforms.ts`（见该文件头注释）；
 //   b) `provider.inspectSong()`（go-music-dl `/music/inspect`）：服务端只发
 //      `Range: bytes=0-1`，从 `Content-Range` 拿**真实总字节数**再算码率 →
 //      把真实 `bitrateKbps` 写进 `declared`，下游 `quality.rankCandidates` 于是
@@ -44,6 +45,11 @@ import { getConfiguredProvider } from "../source/online/index.js";
 import type { OnlineSongResult } from "../source/online/types.js";
 import { TIER_RANK, classifyTier } from "./quality.js";
 import type { Candidate, CandidateQuality } from "./types.js";
+// 平台标识归一化 + 信源 extra → 声明档位：**字典归插件层所有**（核心不得出现平台名，
+// 见 check-core.mts 规则 A）。本模块只 import 并原样再导出，保持对外函数面不变。
+import { declaredFromExtra, normalizePlatform } from "../plugin/sourcePlatforms.js";
+
+export { declaredFromExtra };
 
 const log = createLogger("FETCH-CAND");
 
@@ -103,23 +109,6 @@ export interface CollectParams {
   sources?: CandidateSource[];
 }
 
-/** platform slug 归一化：Go-music-dl 给 netease/qq/kugou/..., Candidate.platform 用短码。 */
-const PLATFORM_ALIAS: Record<string, string> = {
-  netease: "wy",
-  qq: "qq",
-  kugou: "kg",
-  kuwo: "kw",
-  migu: "mg",
-  bilibili: "bili",
-  ximalaya: "xmly",
-};
-
-function normalizePlatform(raw: string | undefined | null): string {
-  const s = String(raw ?? "").trim().toLowerCase();
-  if (!s) return "";
-  return PLATFORM_ALIAS[s] ?? s;
-}
-
 function isHttpUrl(raw: unknown): boolean {
   if (typeof raw !== "string" || !raw) return false;
   try {
@@ -139,12 +128,30 @@ function shortHash(s: string): string {
   return crypto.createHash("sha1").update(s, "utf8").digest("hex").slice(0, 12);
 }
 
-/** 容器后缀：从直链路径推导。**不从格式猜**，取不到就 undefined。 */
+/**
+ * 可被「URL 后缀」认定为容器的**已知音频扩展名**白名单。
+ *
+ * 🔴 2026-10-11 240 生产实测教训：早前 `containerFromUrl` 只做 `/^[a-z0-9]{2,5}$/` 形状校验，
+ * 于是 `https://xxx.kugou.com/yy/index.php?cmd=...` 的 `php` 被当成容器名，进而在 `meetsFloor`
+ * 的容器白名单一步被拒（错误码 BELOW_BAR，原因「容器 php 不在允许列表」）。近 25 个任务实测
+ * **379 次误杀**，是「全部候选未达质量门槛」的主因之一。
+ *
+ * URL 后缀不是音频扩展名时的**正确语义是「容器未知」**（undefined），交给预探 / 下载后探针
+ * 复核；而不是当成已知的差信号一票否决。
+ */
+const AUDIO_CONTAINERS: ReadonlySet<string> = new Set([
+  "flac", "alac", "ape", "wav", "aiff",
+  "mp3", "m4a", "aac", "ogg", "opus", "wma",
+  "mp4", "mka", "m4b", "oga", "dsf", "dff", "tak", "wv", "mpc",
+]);
+
+/** 容器后缀：从直链路径推导，**只认已知音频扩展名**，取不到就 undefined。 */
 function containerFromUrl(url: string): string | undefined {
   try {
     const ext = new URL(url).pathname.split(".").pop();
-    if (!ext || !/^[a-z0-9]{2,5}$/i.test(ext)) return undefined;
-    return ext.toLowerCase();
+    if (!ext) return undefined;
+    const c = ext.toLowerCase();
+    return AUDIO_CONTAINERS.has(c) ? c : undefined;
   } catch {
     return undefined;
   }
@@ -221,71 +228,12 @@ function mergeDeclaredHint(
 }
 
 // ==================== 信源 extra → 声明档位（零网络快路径） ====================
-
-/** 取 extra 里第一个「有非空值」的键（键名大小写不敏感，忽略空白值）。 */
-function extraStr(extra: Record<string, string> | undefined, ...keys: string[]): string | undefined {
-  if (!extra || typeof extra !== "object") return undefined;
-  const byLower = new Map<string, string>();
-  for (const k of Object.keys(extra)) byLower.set(k.toLowerCase(), k);
-  for (const want of keys) {
-    const k = byLower.get(want.toLowerCase());
-    if (k === undefined) continue;
-    const v = (extra as Record<string, unknown>)[k];
-    if (typeof v === "string" && v.trim()) return v.trim();
-    if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  }
-  return undefined;
-}
-
-/**
- * 酷狗档位阶梯（240 实测 extra 键）：
- *   sq_hash（无损 flac） > hq_hash / res_hash / ogg_320_hash（320） > hash / file_hash / ogg_128_hash（128）。
- * `privilege === "0"`（版权受限）→ 高档位实际取不到，阶梯封顶到 128。
- * 容器只在「证据全部来自 ogg_*_hash」时才判 ogg，否则按 mp3（**不猜 flac/ape**）。
- */
-function kugouQualityFromExtra(extra: Record<string, string>): CandidateQuality | undefined {
-  const sq = extraStr(extra, "sq_hash");
-  const hi320 = extraStr(extra, "hq_hash", "res_hash");
-  const ogg320 = extraStr(extra, "ogg_320_hash");
-  const mid = extraStr(extra, "hash", "file_hash");
-  const ogg128 = extraStr(extra, "ogg_128_hash");
-  const capped = extraStr(extra, "privilege") === "0";
-  if (sq && !capped) return { container: "flac" };
-  if ((hi320 || ogg320) && !capped) return { container: hi320 ? "mp3" : "ogg", bitrateKbps: 320 };
-  if (mid || ogg128) return { container: mid ? "mp3" : "ogg", bitrateKbps: 128 };
-  if (sq || hi320 || ogg320) return { container: "mp3", bitrateKbps: 128 }; // privilege=0 封顶
-  return undefined;
-}
-
-/**
- * migu 档位：`format_type` 是平台自己的标识 —— ZQ（母带级）/ SQ（无损）/ HQ（高品）/ 其余（标准）。
- * ⚠️ 平台只给档位**标签**、不给位深/采样率，这里按标签语义声明（ZQ 按 24bit、SQ 按 16bit
- * 无损）；**真实值由 inspect / 下载后探针覆盖**，此处仅用于预排序与预筛。
- */
-function miguQualityFromExtra(extra: Record<string, string>): CandidateQuality | undefined {
-  const t = (extraStr(extra, "format_type") ?? "").toUpperCase();
-  if (!t) return undefined;
-  if (t === "ZQ") return { container: "flac", bitDepth: 24 };
-  if (t === "SQ") return { container: "flac", bitDepth: 16 };
-  if (t === "HQ") return { container: "mp3", bitrateKbps: 320 };
-  return { container: "mp3", bitrateKbps: 128 };
-}
-
-/**
- * 从信源 `extra` 推「可得档位」（纯函数，零网络）。
- * 认得的平台：kugou(kw 阶梯) / migu(format_type)；其余平台（netease/qq/kuwo/... 只给 id）
- * 一律返回 `undefined` —— **不给信息就是不猜，交给 inspect 或下载后探针**。
- */
-export function declaredFromExtra(
-  platform: string,
-  extra?: Record<string, string> | null,
-): CandidateQuality | undefined {
-  if (!extra || typeof extra !== "object") return undefined;
-  const p = String(platform ?? "").trim().toLowerCase();
-  if (p === "kugou" || p === "kg") return kugouQualityFromExtra(extra);
-  if (p === "migu" || p === "mg") return miguQualityFromExtra(extra);
-  return undefined;
-}
+//
+// 实现在**插件层** `services/plugin/sourcePlatforms.ts` 的 `declaredFromExtra`
+// （本文件顶部已 import + 原样再导出）。**平台名与 extra 载荷键名只存在于那里**，
+// 本模块不感知任何具体平台：新增平台 / 平台改了 extra 键 → 只改字典文件，
+// 核心与 fetch 子系统零改动。
+//
 
 /**
  * 宽容读取 target.sourceData：只要 JSON 对象里出现常见的平台/ID 键就取出，

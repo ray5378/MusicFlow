@@ -132,8 +132,6 @@ export interface QualityConfig {
   allowedContainers: string[];
   /** 池中存在无损候选时，剔除所有有损候选 */
   preferLossless: boolean;
-  /** 是否拒绝「假无损」（有损转封装成无损容器） */
-  rejectFakeLossless: boolean;
   /** 假无损检测手段 */
   fakeLosslessDetect: "off" | "meta" | "bitrate" | "spectrum";
   /** bitrate 模式判假的阈值：有效比特率低于此值即判假 */
@@ -179,7 +177,9 @@ export const DEFAULT_QUALITY_CONFIG: QualityConfig = {
   maxSampleRateHz: 384000,
   allowedContainers: ["flac", "mp3", "m4a", "ogg", "opus", "ape", "wav", "alac", "aiff"],
   preferLossless: true,
-  rejectFakeLossless: true,
+  // 「拒绝假无损」开关已删除（产品定调 2026-10-11）：flac 只是容器，不等于无损 ——
+  // 档位判定（classifyTier）本就会按有效码率把「有损转 flac」归回真实档位，
+  // 于是洗版档（qualityFloor=lossless）照常挡得住，下载档（qualityFloor=any）正常放行。
   // meta 只认编码器字符串，最省事但漏判多；bitrate 用「字节数/时长」换算有效比特率，
   // 对「有损转 flac」这类最常见的假无损命中率最高，故默认取 bitrate。
   fakeLosslessDetect: "bitrate",

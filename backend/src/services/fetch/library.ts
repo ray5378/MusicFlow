@@ -236,7 +236,7 @@ export function buildLibraryContinuation(
   const plan = buildLibraryPlan(cfg, { limit });
   if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: plan.pending };
   const job = createFetchJob({
-    kind: "manual",
+    kind: "library",
     targets: { targets: buildLibraryTargets(plan.items) },
     config: buildLibraryJobConfig(cfg, false),
   });

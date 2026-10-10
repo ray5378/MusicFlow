@@ -7,6 +7,32 @@ import type { Candidate, CandidateQuality, QualityConfig, QualityTier } from "./
 /** 无损容器集合（用于档位判定与假无损判定的前置过滤）。 */
 const LOSSLESS_CONTAINERS: ReadonlySet<string> = new Set(["flac", "ape", "wav", "alac", "aiff"]);
 
+/** 未压缩无损容器：同样的「无损」，但下限远高于压缩无损（几乎无压缩收益）。 */
+const UNCOMPRESSED_LOSSLESS: ReadonlySet<string> = new Set(["wav", "aiff"]);
+
+/** 压缩无损默认有效码率下限（kbps）——与洗版同口径（upgrade.ts:UPGRADE_COMPRESSED_MIN_KBPS）。 */
+const DEFAULT_COMPRESSED_MIN_KBPS = 700;
+/** 未压缩无损默认有效码率下限（kbps）——与洗版同口径（upgrade.ts:UPGRADE_UNCOMPRESSED_MIN_KBPS）。 */
+const DEFAULT_UNCOMPRESSED_MIN_KBPS = 1400;
+
+/**
+ * 某无损容器的**有效码率下限**（kbps）。压缩无损（flac/alac/ape）取 fakeLosslessMinEffBitrate
+ * （缺省 700）；未压缩（wav/aiff，或 cfg.uncompressedContainers 声明的）取 uncompressedMinKbps
+ * （缺省 1400）。
+ *
+ * 档位判定（classifyTier）与假无损判定（isFakeLossless）**共用本函数**，保证两处口径
+ * 永远一致 —— 历史上这两处各自算阈值，是「档位判无损、却被假无损闸拒掉」这种自相矛盾的温床。
+ */
+export function losslessMinEffBitrate(container: string, cfg?: QualityConfig): number {
+  const c = (container ?? "").toLowerCase();
+  const uncompressed =
+    UNCOMPRESSED_LOSSLESS.has(c) ||
+    (cfg?.uncompressedContainers ?? []).some((x) => x.toLowerCase() === c);
+  return uncompressed
+    ? (cfg?.uncompressedMinKbps ?? DEFAULT_UNCOMPRESSED_MIN_KBPS)
+    : (cfg?.fakeLosslessMinEffBitrate ?? DEFAULT_COMPRESSED_MIN_KBPS);
+}
+
 /** 有损档位阶梯（从高到低），用于把比特率归到最接近且不超过的档。 */
 const LOSSY_TIERS: ReadonlyArray<{ tier: QualityTier; kbps: number }> = [
   { tier: "320", kbps: 320 },
@@ -87,23 +113,35 @@ function pickQuality(c: Candidate): CandidateQuality | undefined {
 }
 
 /**
- * 判定质量档位。
- * - hires：无损容器且（采样率 > 48000 或 位深 > 16）；
- * - lossless：无损容器且（位深未给 或 位深 >= 16）；
+ * 判定质量档位（`cfg` 用于取「无损容器」的有效码率下限；缺省用内置同口径默认值）。
+ * - hires：无损容器 + 有效码率可信 +（采样率 > 48000 或 位深 > 16）；
+ * - lossless：无损容器 + 有效码率可信 +（位深未给 或 位深 >= 16）；
  * - 有损：按可信比特率归到 320/256/192/128（取最接近且不超过的档，> 320 归 320）；
  * - 判不出来（无容器且无比特率 / 比特率低于 128 档）→ unknown。
+ *
+ * 「有效码率可信」= 码率未知（待下载后探针复核）或 ≥ 该容器下限。**flac 只是容器**，
+ * 已知码率却不达标（有损转 flac）的不认无损档。
  */
-export function classifyTier(q: CandidateQuality): QualityTier {
+export function classifyTier(q: CandidateQuality, cfg?: QualityConfig): QualityTier {
   const container = (q.container ?? "").toLowerCase();
-  if (LOSSLESS_CONTAINERS.has(container)) {
-    const sr = q.sampleRateHz ?? 0;
-    const bd = q.bitDepth ?? 0;
-    if ((sr > 0 && sr > 48000) || (bd > 0 && bd > 16)) return "hires";
-    // 位深未给（多数信源不返回位深）→ 按容器认定为无损；位深 < 16 的「无损容器」
-    // （如 8bit wav）不配称无损，继续按比特率归类。
-    if (bd === 0 || bd >= 16) return "lossless";
-  }
   const kbps = pickBitrateKbps(q);
+  if (LOSSLESS_CONTAINERS.has(container)) {
+    // 🔴 **flac 只是容器，不等于无损**（产品定调 2026-10-11）：只有「有效码率未知（待下载后
+    // 探针复核）」或「≥ 该容器下限」才认无损档。码率**已知却不达标** = 「有损转 flac」的
+    // 假无损 → 不享受无损档待遇，按真实码率归档。于是下游全部自然正确：
+    //   - preferLossless 不会为一个 128kbps 的假 flac 剔掉真 320kbps 有损候选；
+    //   - 洗版档 qualityFloor=lossless 会照常把它挡在门外（无须「拒绝假无损」开关）；
+    //   - 下载档 qualityFloor=any 放行，成品按品质分流落流媒体目录。
+    const credibleLossless = kbps <= 0 || kbps >= losslessMinEffBitrate(container, cfg);
+    if (credibleLossless) {
+      const sr = q.sampleRateHz ?? 0;
+      const bd = q.bitDepth ?? 0;
+      if ((sr > 0 && sr > 48000) || (bd > 0 && bd > 16)) return "hires";
+      // 位深未给（多数信源不返回位深）→ 按容器认定为无损；位深 < 16 的「无损容器」
+      // （如 8bit wav）不配称无损，继续按比特率归类。
+      if (bd === 0 || bd >= 16) return "lossless";
+    }
+  }
   if (kbps > 0) {
     // > 320 一律归入 320 档（例如 1411kbps 的 wav 已在上一步判为 lossless）。
     if (kbps > 320) return "320";
@@ -117,9 +155,9 @@ export function classifyTier(q: CandidateQuality): QualityTier {
 }
 
 /** 候选所属档位（probed 优先，缺失回落 declared，都没有 → unknown）。 */
-function tierOf(c: Candidate): QualityTier {
+function tierOf(c: Candidate, cfg?: QualityConfig): QualityTier {
   const q = pickQuality(c);
-  return q ? classifyTier(q) : "unknown";
+  return q ? classifyTier(q, cfg) : "unknown";
 }
 
 /**
@@ -154,12 +192,13 @@ export function isFakeLossless(c: Candidate, cfg: QualityConfig): { fake: boolea
     return { fake: false, reason: encoder ? "encoder 未命中假无损特征" : "信源未提供 encoder，无法判定" };
   }
 
-  // bitrate 模式。阈值按容器分档（见上方注释）。
+  // bitrate 模式。阈值按容器分档 —— **与 classifyTier 共用 `losslessMinEffBitrate`**，
+  // 两处口径永远一致（见该函数注释）。
   const kbps = pickBitrateKbps(q);
   if (kbps <= 0) return { fake: false, reason: "无有效比特率，无法判定" };
   const shown = Math.round(kbps);
-  const isUncompressed = cfg.uncompressedContainers.some((x) => x.toLowerCase() === container);
-  const need = isUncompressed ? cfg.uncompressedMinKbps : cfg.fakeLosslessMinEffBitrate;
+  const need = losslessMinEffBitrate(container, cfg);
+  const isUncompressed = UNCOMPRESSED_LOSSLESS.has(container);
   if (kbps < need) {
     return {
       fake: true,
@@ -183,7 +222,7 @@ const NON_STUDIO_PATTERN: RegExp = /(^|[^a-z])(live|remix|acoustic|cover)([^a-z]
  * 达标判定：按顺序检查，任一不通过即返回 ok=false 并带中文原因（面向用户展示）。
  *
  * 顺序：容器白名单 → 时长区间 → 时长偏差 → 采样率上下限 → 档位下限
- *      → 比特率下限（unknown / 有损档，与档位下限取严者）→ 标题关键词 → 假无损。
+ *      → 比特率下限（unknown / 有损档，与档位下限取严者）→ 标题关键词。
  *
  * `opts.tolerateUnknown`：**预筛阶段**开关。信源（尤其聚合源 go-music-dl / lx-source）
  * 常常只给一个 URL，不声明容器/比特率/档位；此时若按「未知即一票否决」处理，会在
@@ -248,7 +287,7 @@ export function meetsFloor(
     }
   }
 
-  const tier = tierOf(c);
+  const tier = tierOf(c, cfg);
 
   // 5) 档位下限（tolerateUnknown 时，档位 unknown 放行到探针阶段复核）
   if (cfg.qualityFloor !== "any" && !(opts?.tolerateUnknown && tier === "unknown")) {
@@ -278,14 +317,12 @@ export function meetsFloor(
     return { ok: false, reason: `标题命中排除关键词「${hit}」` };
   }
 
-  // 8) 假无损
-  if (cfg.rejectFakeLossless) {
-    const fake = isFakeLossless(c, cfg);
-    if (fake.fake) {
-      return { ok: false, reason: `疑似假无损（${fake.reason}）` };
-    }
-  }
-
+  // 注：**没有**「拒绝假无损」开关（产品定调 2026-10-11）。「flac 只是容器，不代表无损」，
+  // 假无损（无损容器但有效码率不足）已由第 5) 步的 `classifyTier` 按**真实有效码率**归到
+  // 有损档（见其注释），于是：
+  //   - 洗版档 qualityFloor=lossless 自然把它挡在门外（档位不够）；
+  //   - 下载档 qualityFloor=any 自然放行，成品按品质分流落流媒体目录。
+  // 无须再单设一道开关 —— 那道开关会把「我们没下载过的假无损」也一并枪毙，与产品意图相悖。
   return { ok: true };
 }
 
@@ -295,7 +332,7 @@ export function meetsFloor(
  */
 export function scoreCandidate(c: Candidate, cfg: QualityConfig): number {
   const q = pickQuality(c);
-  const tier = q ? classifyTier(q) : "unknown";
+  const tier = q ? classifyTier(q, cfg) : "unknown";
   const kbps = pickBitrateKbps(q);
   const sr = q?.sampleRateHz ?? 0;
   let score = TIER_RANK[tier] * 10000 + kbps + sr / 1000 - (c.sourceRank ?? 0) * 50;

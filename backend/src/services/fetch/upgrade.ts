@@ -9,11 +9,12 @@
 // ⚠️ 原件处置（尤其 delete）**不可逆** —— 所以 `disposeOriginalFile` 里每一条安全闸
 // 都是硬要求，任何一条不满足都必须退化为「不碰文件 + warning」，**绝不放宽**。
 //
-// 为什么门槛要做成「按容器分档」：`quality.ts:meetsFloor` 第 6 步的比特率下限
-// **只对 lossy 档生效**（见 quality.ts 的 `tier === "128" | ... | "320"` 判断），
-// 无损容器根本不走那一步；无损的码率把关实际落在第 8 步 `isFakeLossless` 的 bitrate 分支。
-// 所以「压缩 700 / 未压缩 1400」这个双档只能把假无损阈值改成按容器取值
+// 为什么门槛要做成「按容器分档」：`quality.ts:classifyTier` 按「有效码率 ≥ 该容器下限」
+// 才认无损档（**flac 只是容器，不代表无损**，产品定调 2026-10-11）——所以「压缩 700 /
+// 未压缩 1400」这个双档同时驱动**档位判定**与**假无损判定**（两处共用 `losslessMinEffBitrate`）
 // —— 见 types.ts 的 `uncompressedContainers` / `uncompressedMinKbps` 与 `buildUpgradeQuality`。
+// 洗版档 qualityFloor=lossless 因此天然把「有损转 flac」的假无损挡在门外；
+// 另有「有效码率高于原件则原地替换」的抢救通道（orchestrator 的 inPlace）。
 //
 // 无 IO 的部分（门槛判定 / 计划派生）是纯函数，便于单测；有副作用的部分
 // （迁移库行 / 处置文件）各自 try/catch，失败只返回 warning，**绝不抛**。
@@ -85,7 +86,6 @@ export function buildUpgradeQuality(base: QualityConfig): QualityConfig {
     minBitrateKbps: UPGRADE_COMPRESSED_MIN_KBPS, // 第 6 步 lossy 专用，这里仅兜底
     allowedContainers: [...LOSSLESS_COMPRESSED_CONTAINERS, ...LOSSLESS_UNCOMPRESSED_CONTAINERS],
     preferLossless: true,
-    rejectFakeLossless: true,
     fakeLosslessDetect: "bitrate",
     fakeLosslessMinEffBitrate: UPGRADE_COMPRESSED_MIN_KBPS, // 压缩无损下限
     uncompressedContainers: [...LOSSLESS_UNCOMPRESSED_CONTAINERS],
@@ -94,11 +94,21 @@ export function buildUpgradeQuality(base: QualityConfig): QualityConfig {
 }
 
 /**
- * 某个库内行是否**低于**洗版门槛（纯函数）。
+ * 某个「容器 + 体量」是否**低于**洗版门槛（纯函数）。
  * 有损格式 / 码率未知 / 低于该容器对应下限 → below:true。
+ *
+ * 入参刻意做成**宽形状**：既服务库内行（suffix/bitRate/size/durationSec），也服务
+ * **下载侧源探针**（container/bytes/durationSec）—— 下载按品质分流时直接复用这一套门槛，
+ * 不另造判据（产品定调 2026-10-11）。码率一律走 `upgradeBaselineKbps`：`size/duration`
+ * 现场换算优先，**平台不声明码率也能算出来**，`bit_rate` 列只作回落。
  */
 export function isBelowUpgradeBar(
-  row: Pick<UpgradeSongRow, "suffix" | "bitRate">,
+  row: {
+    suffix?: string;
+    bitRate?: number;
+    size?: number;
+    durationSec?: number;
+  },
   upQ: QualityConfig,
 ): { below: boolean; reason: string } {
   const suffix = String(row.suffix ?? "").toLowerCase();
@@ -500,6 +510,10 @@ export function buildUpgradeJobConfig(cfg: FetchConfig, dryRun: boolean): Record
   return {
     ...cfg,
     skipIfInLibrary: false, // 洗版必须能命中「库内已有的低码率行」，绕开「已有则跳过」
+    // 候选音质预探是**必须功能**（产品定调 2026-10-11：开关已从 UI 摘除）——洗版要判
+    // 「候选有效码率是否高于原件」，不预探就只能信信源虚标的声明值，误判率极高。
+    // 这里硬钉 true，避免历史遗留的 `inspectCandidates:false` 覆盖项把它静默关掉。
+    inspectCandidates: true,
     quality: buildUpgradeQuality(cfg.quality),
     dryRun,
     __upgrade: {

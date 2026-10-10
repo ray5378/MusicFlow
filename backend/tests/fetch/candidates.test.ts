@@ -364,6 +364,11 @@ describe("declaredFromExtra", () => {
     expect(declaredFromExtra("mg", { format_type: "SQ" })).toEqual({ container: "flac", bitDepth: 16 });
   });
 
+  it("按键形状识别：平台名未知/为空也认（载荷契约比平台名稳，聚合源改口不失灵）", () => {
+    expect(declaredFromExtra("", { format_type: "SQ" })).toEqual({ container: "flac", bitDepth: 16 });
+    expect(declaredFromExtra("some-unknown-aggregator", KUGOU_FULL)).toEqual({ container: "flac" });
+  });
+
   it("无音质信息的平台（netease/qq/kuwo）与空 extra → undefined", () => {
     expect(declaredFromExtra("netease", { song_id: "2668397359" })).toBeUndefined();
     expect(declaredFromExtra("qq", { song_id: "1", songmid: "2" })).toBeUndefined();

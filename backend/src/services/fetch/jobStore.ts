@@ -193,22 +193,35 @@ export function getFetchJob(id: string): FetchJobRecord | null {
 }
 
 /** 列出任务，默认按 created_at DESC（最新在前），默认最多 100 条。 */
-export function listFetchJobs(opts?: { limit?: number; status?: TaskStatus }): FetchJobRecord[] {
+export function listFetchJobs(opts?: {
+  limit?: number;
+  status?: TaskStatus;
+  /** 精确匹配单个 kind。 */
+  kind?: string;
+  /** kind 白名单（IN 过滤）；与 `kind` 二选一，`kinds` 优先。前端「下载任务」面板用它一次拉全部非洗版 kind。 */
+  kinds?: string[];
+}): FetchJobRecord[] {
   const limit = opts?.limit ?? 100;
-  const rows = opts?.status
-    ? db
-        .select()
-        .from(fetchJobs)
-        .where(eq(fetchJobs.status, opts.status))
-        .orderBy(desc(fetchJobs.createdAt))
-        .limit(limit)
-        .all()
-    : db
-        .select()
-        .from(fetchJobs)
-        .orderBy(desc(fetchJobs.createdAt))
-        .limit(limit)
-        .all();
+  // 任务类型（kind）与状态可组合过滤：前端「下载任务 / 洗版任务」分栏就是靠 kind。
+  // kind 取值：search（搜索导入）/ library（全库下载）/ upgrade（洗版）/ retry（重试）/ manual（历史行）。
+  const kinds =
+    opts?.kinds?.map((k) => String(k ?? "").trim()).filter((k) => k.length > 0) ?? [];
+  const kindCond =
+    kinds.length > 0
+      ? inArray(fetchJobs.kind, kinds)
+      : opts?.kind
+        ? eq(fetchJobs.kind, opts.kind)
+        : undefined;
+  const where =
+    opts?.status && kindCond
+      ? and(eq(fetchJobs.status, opts.status), kindCond)
+      : opts?.status
+        ? eq(fetchJobs.status, opts.status)
+        : kindCond;
+  const rows = (where ? db.select().from(fetchJobs).where(where) : db.select().from(fetchJobs))
+    .orderBy(desc(fetchJobs.createdAt))
+    .limit(limit)
+    .all();
   return rows.map(rowToRecord);
 }
 

@@ -233,6 +233,30 @@ describe("listFetchJobs", () => {
     const doneOnly = listFetchJobs({ status: "done" });
     expect(doneOnly.map((r) => r.id)).toEqual(["j-2"]);
   });
+
+  // 「下载任务 / 洗版任务」是两个独立面板：下载面板用 kinds 白名单一次拉全部非洗版类型。
+  it("kinds 白名单过滤（IN）：下载任务面板一次拉全部非洗版类型", () => {
+    createFetchJob({ id: "k-search", kind: "search", targets: {} });
+    createFetchJob({ id: "k-lib", kind: "library", targets: {} });
+    createFetchJob({ id: "k-retry", kind: "retry", targets: {} });
+    createFetchJob({ id: "k-manual", targets: {} }); // 缺省 kind = manual
+    createFetchJob({ id: "k-upg", kind: "upgrade", targets: {} });
+
+    const download = listFetchJobs({ kinds: ["search", "library", "retry", "manual"] });
+    expect(download.map((r) => r.id).sort()).toEqual(["k-lib", "k-manual", "k-retry", "k-search"]);
+
+    const upgrade = listFetchJobs({ kinds: ["upgrade"] });
+    expect(upgrade.map((r) => r.id)).toEqual(["k-upg"]);
+
+    // kinds 与 status 可组合
+    updateFetchJobStatus("k-search", "done");
+    const combo = listFetchJobs({ kinds: ["search", "upgrade"], status: "done" });
+    expect(combo.map((r) => r.id)).toEqual(["k-search"]);
+
+    // 空数组 / 全空串 → 视作「不过滤」，不能把列表清空
+    expect(listFetchJobs({ kinds: [] })).toHaveLength(5);
+    expect(listFetchJobs({ kinds: ["", " "] })).toHaveLength(5);
+  });
 });
 
 describe("坏数据容错", () => {

@@ -87,6 +87,32 @@ describe("classifyTier", () => {
     expect(classifyTier({})).toBe("unknown");
   });
 
+  // ---- 「flac 只是容器，不代表无损」（产品定调 2026-10-11）----
+  // 档位判定只看**有效码率**：已知码率却不达该容器下限的「有损转 flac」，不认无损档。
+  it("已知码率 320kbps 的 flac（有损转 flac）→ 320 档，不给无损待遇", () => {
+    expect(classifyTier({ container: "flac", bitrateKbps: 320, sampleRateHz: 44100, bitDepth: 16 })).toBe("320");
+  });
+
+  it("已知码率 699kbps 的 flac（差 1kbps）→ 仍不给无损档", () => {
+    expect(classifyTier({ container: "flac", bitrateKbps: 699, sampleRateHz: 44100, bitDepth: 16 })).toBe("320");
+  });
+
+  it("已知码率 700kbps 的 flac（恰好达线）→ lossless", () => {
+    expect(classifyTier({ container: "flac", bitrateKbps: 700, sampleRateHz: 44100, bitDepth: 16 })).toBe("lossless");
+  });
+
+  it("未压缩 wav 800kbps（< 1400）不给无损档 → 320", () => {
+    expect(classifyTier({ container: "wav", bitrateKbps: 800 })).toBe("320");
+  });
+
+  it("未压缩 wav 1400kbps（达线）→ lossless", () => {
+    expect(classifyTier({ container: "wav", bitrateKbps: 1400 })).toBe("lossless");
+  });
+
+  it("码率未知的 flac 仍按容器认无损（下载后探针再复核）", () => {
+    expect(classifyTier({ container: "flac", sampleRateHz: 44100, bitDepth: 16 })).toBe("lossless");
+  });
+
   it("TIER_RANK 单调:unknown 最低、hires 最高", () => {
     expect(TIER_RANK.unknown).toBeLessThan(TIER_RANK["128"]);
     expect(TIER_RANK["320"]).toBeLessThan(TIER_RANK.lossless);
@@ -193,13 +219,22 @@ describe("meetsFloor", () => {
     expect(r.reason).toContain("试听");
   });
 
-  it("假无损 → 拒绝", () => {
+  it("假无损不再单设闸：320kbps 的「flac」按真实码率归 320 档，any 门槛放行", () => {
     const c = mk({
       probed: { container: "flac", sampleRateHz: 44100, bitDepth: 16, bytes: bytesFor(320, 240), durationSec: 240 },
     });
-    const r = meetsFloor(c, cfgOf({ rejectFakeLossless: true, fakeLosslessDetect: "bitrate" }));
+    // 「flac 只是容器，不代表无损」：实测 320kbps 不达该容器下限 → 不认无损档
+    expect(classifyTier(c.probed!)).toBe("320");
+    expect(meetsFloor(c, cfgOf())).toEqual({ ok: true });
+  });
+
+  it("假无损在「洗版档」被档位门槛自然拦下（无须专门的「拒绝假无损」开关）", () => {
+    const c = mk({
+      probed: { container: "flac", sampleRateHz: 44100, bitDepth: 16, bytes: bytesFor(320, 240), durationSec: 240 },
+    });
+    const r = meetsFloor(c, cfgOf({ qualityFloor: "lossless" }));
     expect(r.ok).toBe(false);
-    expect(r.reason).toContain("疑似假无损");
+    expect(r.reason).toContain("低于门槛");
   });
 
   it("时长偏差超过容差 → 拒绝", () => {
@@ -423,7 +458,7 @@ describe("rankCandidates — 过门槛者取最高音质（需求回归锁定）
   }
   /** 门槛放宽到「全部过闸」，专测排序本身（不改排序逻辑，只锁语义）。 */
   const loose = () =>
-    cfgOf({ qualityFloor: "any", minBitrateKbps: 128, preferLossless: false, rejectFakeLossless: false });
+    cfgOf({ qualityFloor: "any", minBitrateKbps: 128, preferLossless: false });
 
   it("三个都过门槛（有效 1100/320/192kbps）→ 严格按音质降序，不因入参顺序改变", () => {
     const out = rankCandidates(
@@ -474,7 +509,7 @@ describe("rankCandidates — 过门槛者取最高音质（需求回归锁定）
 describe("declared 比特率优先级：精确 bitrateKbps 胜过被量化的 bytes，但 probed 仍压过声明", () => {
   const N = 200;
   const loose = () =>
-    cfgOf({ qualityFloor: "any", minBitrateKbps: 128, preferLossless: false, rejectFakeLossless: false });
+    cfgOf({ qualityFloor: "any", minBitrateKbps: 128, preferLossless: false });
 
   /** declared：精确 128kbps，但 bytes 隐含 320kbps（量化后会虚高）。 */
   function quantized(): Candidate {
@@ -533,12 +568,13 @@ describe("declared 比特率优先级：精确 bitrateKbps 胜过被量化的 by
   });
 });
 
-// ==================== isFakeLossless 分档阈值（洗版档：压缩 700 / 未压缩 1400） ====================
+// ==================== isFakeLossless 分档阈值（压缩 700 / 未压缩 1400） ====================
 //
-// 洗版档把「假无损阈值」按容器分档：wav/aiff 这类**未压缩无损**要求 ≥1400kbps（≈CD 1411），
-// flac/alac/ape 等压缩无损仍 ≥700kbps。默认配置 `uncompressedContainers: []` 时两档合一，
-// 既有行为逐字节不变（见下第一个回归用例）。
-describe("isFakeLossless — 未压缩无损分档（洗版档）", () => {
+// 阈值一律走 `losslessMinEffBitrate`：压缩无损（flac/alac/ape）≥700kbps，
+// **未压缩无损（wav/aiff）恒 ≥1400kbps（≈CD 1411）** —— 与洗版档、与 classifyTier 同一套口径。
+// 产品定调 2026-10-11：「flac 只是容器，不代表无损」，所以判定不再依赖 cfg 里的
+// `uncompressedContainers` 白名单，wav/aiff 在任何配置下都按未压缩下限走。
+describe("isFakeLossless — 未压缩无损分档", () => {
   function probedCand(container: string, bytes: number, durationSec = 100): Candidate {
     return mk({ probed: { container, bytes, durationSec } });
   }
@@ -551,10 +587,11 @@ describe("isFakeLossless — 未压缩无损分档（洗版档）", () => {
       uncompressedMinKbps: 1400,
     });
 
-  it("回归：默认配置（uncompressedContainers 为空）下 wav 800kbps 不判假（既有行为不变）", () => {
+  it("缺省配置下 wav 800kbps 也判假：wav/aiff 恒按 1400 未压缩下限", () => {
     const r = isFakeLossless(probedCand("wav", bytesFor(800, 100)), cfgOf({ fakeLosslessDetect: "bitrate" }));
-    expect(r.fake).toBe(false);
-    expect(r.reason).toBe("effective 800kbps >= 700");
+    expect(r.fake).toBe(true);
+    expect(r.reason).toContain("1400");
+    expect(r.reason).toContain("未压缩无损下限");
   });
 
   it("洗版档：wav 800kbps < 1400 → 判假（理由点明未压缩下限）", () => {
@@ -631,7 +668,7 @@ describe("DEFAULT_QUALITY_CONFIG — 兜底门槛（2026-10-10 默认调整）",
     expect(r.reason).toContain("未声明容器");
   });
 
-  it("缺省不放宽假无损：320kbps 的假 flac 仍被拒", () => {
+  it("缺省无「拒绝假无损」开关：320kbps 的假 flac 按真实码率归 320 档、放行（落流媒体目录）", () => {
     const c = mk({
       probed: {
         container: "flac",
@@ -641,8 +678,7 @@ describe("DEFAULT_QUALITY_CONFIG — 兜底门槛（2026-10-10 默认调整）",
         durationSec: 240,
       },
     });
-    const r = meetsFloor(c, cfgOf());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toContain("疑似假无损");
+    expect(classifyTier(c.probed!)).toBe("320");
+    expect(meetsFloor(c, cfgOf())).toEqual({ ok: true });
   });
 });

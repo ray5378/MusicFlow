@@ -147,6 +147,45 @@ describe("fetch 域：配置 / 音源 / 任务", () => {
     expect(r.body.jobs).toEqual([]);
   });
 
+  it("GET /v1/fetch/jobs?kinds=...：类型白名单过滤（下载任务 / 洗版任务分栏契约）", async () => {
+    createFetchJob({ kind: "search", targets: {} });
+    createFetchJob({ kind: "upgrade", targets: {} });
+
+    const all = await call("GET", "/v1/fetch/jobs");
+    expect(all.body.jobs).toHaveLength(2);
+
+    const download = await call("GET", "/v1/fetch/jobs?kinds=search,library,retry,manual");
+    expect(download.body.jobs.map((j: any) => j.kind)).toEqual(["search"]);
+
+    const upgrade = await call("GET", "/v1/fetch/jobs?kinds=upgrade");
+    expect(upgrade.body.jobs.map((j: any) => j.kind)).toEqual(["upgrade"]);
+
+    // 单值 kind 仍可用（向后兼容）
+    const single = await call("GET", "/v1/fetch/jobs?kind=upgrade");
+    expect(single.body.jobs.map((j: any) => j.kind)).toEqual(["upgrade"]);
+
+    // kinds 里混入空串不改变结果
+    const messy = await call("GET", "/v1/fetch/jobs?kinds=,upgrade,");
+    expect(messy.body.jobs.map((j: any) => j.kind)).toEqual(["upgrade"]);
+
+    // 回归守卫（2026-10-11 线上事故）：axios 对数组的默认序列化是 `kinds[]=a&kinds[]=b`。
+    // 曾经后端只认 `kinds`，于是过滤被静默丢掉 → 两个 tab 显示同一份混合列表。
+    const axiosStyle = await call("GET", "/v1/fetch/jobs?kinds[]=search&kinds[]=upgrade");
+    expect(axiosStyle.body.jobs.map((j: any) => j.kind).sort()).toEqual(["search", "upgrade"]);
+
+    // 重复键形态同样收
+    const repeated = await call("GET", "/v1/fetch/jobs?kinds=search&kinds=upgrade");
+    expect(repeated.body.jobs.map((j: any) => j.kind).sort()).toEqual(["search", "upgrade"]);
+
+    // 只给 kinds[]=upgrade → 只有洗版；这是「洗版任务列表」tab 的真实请求形态
+    const upgOnly = await call("GET", "/v1/fetch/jobs?kinds[]=upgrade");
+    expect(upgOnly.body.jobs.map((j: any) => j.kind)).toEqual(["upgrade"]);
+
+    // 「下载任务列表」tab 的真实请求形态：kinds=search,library,retry,manual
+    const dlOnly = await call("GET", "/v1/fetch/jobs?kinds=search,library,retry,manual");
+    expect(dlOnly.body.jobs.map((j: any) => j.kind)).toEqual(["search"]);
+  });
+
   it("GET /v1/fetch/jobs/<不存在> → 404", async () => {
     const r = await call("GET", "/v1/fetch/jobs/does-not-exist");
     expect(r.status).toBe(404);

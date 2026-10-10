@@ -50,12 +50,24 @@ import {
   recordDownloadAttempt,
 } from "./attempts.js";
 import { ensureDownloadSource } from "./source.js";
-import { disposeOriginalFile, migrateUpgradedSong } from "./upgrade.js";
+import {
+  buildUpgradeQuality,
+  disposeOriginalFile,
+  isBelowUpgradeBar,
+  migrateUpgradedSong,
+} from "./upgrade.js";
 import { canWriteDir, ensureWritableDir } from "./writable.js";
 import { scanLocalFiles } from "../source/scanner.js";
 import { resolveFetchConfig, validateFetchPaths, type FetchConfig } from "./config.js";
 import { HostLimiter, Semaphore } from "./limiter.js";
-import type { Candidate, CandidateQuality, FetchErrorCode, ItemStatus, QualityTier } from "./types.js";
+import type {
+  Candidate,
+  CandidateQuality,
+  FetchErrorCode,
+  ItemStatus,
+  QualityConfig,
+  QualityTier,
+} from "./types.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("FETCH-ORCH");
@@ -96,6 +108,11 @@ export interface FetchItemOutcome {
   replaced?: { originalPath: string; newPath: string; action: string; deleted?: boolean; movedTo?: string };
   /** 原地替换（洗版：假无损但高于原件）：新文件落在原媒体源目录，按原 sourceId 入库。 */
   inPlace?: { fsPath: string; sourceId: string };
+  /**
+   * 本次成品的实际落盘根（下载品质分流，2026-10-11）：**源本身已达标无损** → losslessRoot，
+   * 否则 downloadRoot。flush 据此选对应媒体源入库（缺省 = 流水线 downloadRoot）。
+   */
+  destRoot?: string;
 }
 
 export interface FetchPipelineProgress {
@@ -421,6 +438,8 @@ type AttemptOutcome =
       finalPath: string;
       /** 原地替换：见 tryCandidate 步骤 e。 */
       inPlace?: { fsPath: string; sourceId: string };
+      /** 品质分流：本次成品实际落盘根（达标无损 → losslessRoot）；见步骤 g.5。 */
+      destRoot?: string;
     }
   | { kind: "keep" }
   | { kind: "fail"; code: FetchErrorCode; detail?: string };
@@ -448,6 +467,28 @@ function emitProgress(
 }
 
 // ==================== 主入口 ====================
+
+/**
+ * 下载品质分流判据（产品定调 2026-10-11）：**源音频**是否已达洗版的无损门槛。
+ *
+ * 直接复用洗版同一套判据（`buildUpgradeQuality` + `isBelowUpgradeBar`）：
+ *   - 压缩无损容器（flac / alac / ape）≥ 700kbps；
+ *   - 未压缩无损容器（wav / aiff） ≥ 1400kbps；
+ *   - 有损容器（mp3 / m4a / ogg…）一律不算。
+ * 码率走 `upgradeBaselineKbps`：`size/duration` 现场换算优先，平台不声明码率也能算出来。
+ *
+ * 🔴 判据必须取**转码前**的源探针。因为 `transcodeEnabled` 时成品会被统一转成 flac，
+ * 只看最终容器无法区分「真无损」与「有损转 flac」；源容器 + 源有效码率才是真信号。
+ */
+function isLosslessGradeSource(q: CandidateQuality | undefined, quality: QualityConfig): boolean {
+  if (!q) return false;
+  const container = String(q.container ?? "").toLowerCase();
+  if (!container) return false;
+  return !isBelowUpgradeBar(
+    { suffix: container, size: q.bytes, durationSec: q.durationSec, bitRate: q.bitrateKbps },
+    buildUpgradeQuality(quality),
+  ).below;
+}
 
 export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<FetchPipelineResult> {
   // 洗版：先把成品根覆盖成 /MUSIC/LOSSLESS，**再**做路径校验（校验必须作用在覆盖后的根上）。
@@ -507,6 +548,38 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     }
   }
 
+  // 下载品质分流（产品定调 2026-10-11）：源达标无损的歌**直接落 losslessRoot**，
+  // 不再混进流媒体下载目录。洗版本来就把 downloadRoot 覆盖成 losslessRoot，无需再分流。
+  const downloadRootAbs = path.resolve(cfg.downloadRoot);
+  const losslessRootAbs = cfg.losslessRoot ? path.resolve(cfg.losslessRoot) : "";
+  const losslessRoutable =
+    !upgradeMode &&
+    !dryRun &&
+    !!losslessRootAbs &&
+    losslessRootAbs !== downloadRootAbs &&
+    canWriteDir(cfg.losslessRoot);
+
+  // 目标根 → 媒体源 id（懒建 + 记忆化）：入库/迁移都按成品**实际所在根**选媒体源，
+  // 否则无损成品会被点进「已下载流媒体音质」源，扫描器直接找不到文件。
+  const sourceIdByRoot = new Map<string, string>();
+  sourceIdByRoot.set(downloadRootAbs, sourceId);
+  const sourceIdForRoot = (root?: string): string => {
+    const abs = root ? path.resolve(root) : downloadRootAbs;
+    const hit = sourceIdByRoot.get(abs);
+    if (hit) return hit;
+    const r = deps.ensureDownloadSource(
+      abs,
+      abs === losslessRootAbs ? "已下载无损音质" : "已下载流媒体音质",
+    );
+    if (r.ancestorSourceId) {
+      warnings.push(
+        `下载目录 ${abs} 已被另一个媒体源（${r.ancestorSourceId}）覆盖，可能出现同一文件两行`,
+      );
+    }
+    sourceIdByRoot.set(abs, r.sourceId);
+    return r.sourceId;
+  };
+
   if (cfg.syncToPlaylistIds.length > 0) {
     // 未找到「按 songId 往歌单追加」的既有导出，不为此改其它文件 —— 记警告跳过。
     warnings.push(
@@ -532,10 +605,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   const flush = async (): Promise<void> => {
     if (dryRun || pending.length === 0) return;
     const batch = pending.splice(0, pending.length);
-    // 分组点名入库：原地替换项落回原媒体源（文件在其目录下），其余落流水线 sourceId。
+    // 分组点名入库：原地替换项落回原媒体源（文件在其目录下），其余按成品**实际落盘根**
+    // 选源（downloadRoot / losslessRoot 各对应一个源）。
     const groups = new Map<string, typeof batch>();
     for (const p of batch) {
-      const sid = p.inPlace?.sourceId || sourceId;
+      const sid = p.inPlace?.sourceId || sourceIdForRoot(p.item.destRoot);
       const arr = groups.get(sid);
       if (arr) arr.push(p);
       else groups.set(sid, [p]);
@@ -572,7 +646,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       const mig = await migrateUpgradedSong({
         oldSongId: p.oldSongId,
         newPath: p.finalPath,
-        newSourceId: p.inPlace?.sourceId || sourceId,
+        // 全库下载迁移：新文件可能落在 losslessRoot（无损分流），媒体源要跟着走。
+        newSourceId: p.inPlace?.sourceId || sourceIdForRoot(p.item.destRoot),
       });
       if (mig.warnings.length > 0) warnings.push(...mig.warnings);
       if (!mig.migrated) continue; // 迁移失败 → 保留原件，换不了就不删
@@ -893,39 +968,12 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         /* 预探只是优化，绝不阻断主流程 */
       }
 
-      // 3.6) 估算假无损预拒（PATCH15）：预探估算码率打 95 折仍构成假无损的「无损」候选
-      // 直接拒 —— 整次下载都省掉；估算贴着阈值的仍交下载后探针裁决（库内时长与真实
-      // 时长的毫厘差不误杀）。洗版不走此闸：假无损高于原件有原地替换通道，裁决基准
-      // 是原件而不是绝对门槛。
-      if (!upgradeMode) {
-        const kept: Candidate[] = [];
-        for (const c of cands) {
-          const q = qualityOf(c);
-          const k = Number(q?.bitrateKbps ?? 0);
-          if (q?.estimated && k > 0) {
-            const est = isFakeLossless(
-              { ...c, declared: { ...q, bitrateKbps: Math.round(k * 0.95) } },
-              cfg.quality,
-            );
-            if (est.fake) {
-              item.rejected.push({
-                candidateId: c.id,
-                reason: "BELOW_BAR",
-                detail: `预探估算 ${k}kbps（体积×8/时长）不达假无损下限：${est.reason}`,
-              });
-              continue;
-            }
-          }
-          kept.push(c);
-        }
-        cands = kept;
-        if (cands.length === 0) {
-          item.status = "failed";
-          item.errorCode = "BELOW_BAR";
-          item.errorMsg = "全部候选预探估算不达标";
-          return item;
-        }
-      }
+      // 3.6) 【已移除】预探估算「假无损」预拒（原 PATCH15）。
+      // 产品定调 2026-10-11：「flac 只是容器，不代表无损」「没下载过的歌即便是假无损也该
+      // 落流媒体目录」。假无损的取舍改由**真实探针**在下载后按 `classifyTier` 归到有损档：
+      //   - 下载档 qualityFloor=any 放行 → 按品质分流落 DOWNLOAD（步骤 g.5）；
+      //   - 洗版档 qualityFloor=lossless 自然被门槛挡下（另有高于原件的原地替换通道）。
+      // 故此处不再按估算值预拒，避免把「该落流媒体目录的假无损」整次下载省掉。
 
       // 4) 门槛过滤与排序。
       const ranked = deps.rankCandidates(cands, cfg.quality, { durationSec: t.durationSec });
@@ -979,6 +1027,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           item.finalPath = outcome.finalPath;
           item.cachePath = outcome.cachePath;
           if (outcome.inPlace) item.inPlace = outcome.inPlace;
+          if (outcome.destRoot) item.destRoot = outcome.destRoot;
           item.chosen = {
             candidateId: cand.id,
             pluginId: cand.pluginId,
@@ -1115,13 +1164,16 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     }
     const enriched: Candidate = { ...cand, probed };
 
-    // e) 假无损：**先于复筛**判定。原因：`meetsFloor` 内部也含假无损检查（会把它归成
-    //    BELOW_BAR）；这里显式先判，才能给出更精确的 FAKE_LOSSLESS 错误码（UI 上不误导）。
-    // 原地替换（洗版专属，产品定调 2026-10-10）：假无损（无损容器但有效码率不足 700/1400）
-    // 若有效码率仍**高于原件现有水平**，则接受 —— 落回原文件所在目录顶替原件，而不是拒之门外。
-    // 只豁免假无损这一条门槛；其余复筛失败照旧拒绝。
+    // e) 假无损（**洗版专属**）：**先于复筛**判定，好在 UI 上给出更精确的 FAKE_LOSSLESS 错误码。
+    //    原地替换（产品定调 2026-10-10）：假无损（无损容器但有效码率不足 700/1400）
+    //    若有效码率仍**高于原件现有水平**，则接受 —— 落回原文件所在目录顶替原件，而不是拒之门外。
+    //    只豁免假无损这一条门槛；其余复筛失败照旧拒绝。
+    //
+    //    下载/全库/搜索任务（非洗版）**不走此闸**：它们没有「原件」可比，假无损不再被单独拒，
+    //    而是照「flac 只是容器」原则按真实有效码率归到有损档（classifyTier），最终由步骤 g.5
+    //    按品质分流落流媒体目录。这正是「没下载过的歌即便是假无损也该落流媒体目录」的产品意图。
     let inPlace: { fsPath: string; sourceId: string } | undefined;
-    if (cfg.quality.rejectFakeLossless) {
+    if (upgradeMode) {
       const fake = isFakeLossless(enriched, cfg.quality);
       if (fake.fake) {
         let eff = 0;
@@ -1133,7 +1185,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         } catch {
           /* stat 失败按 0 处理 → 走拒绝分支 */
         }
-        const um = upgradeMode ? upgradeMetaOf(t) : undefined;
+        const um = upgradeMetaOf(t);
         if (
           um?.originalFsPath &&
           um.originalSourceId &&
@@ -1177,6 +1229,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         detail: `时长 ${pd.toFixed(1)}s 与目标 ${t.durationSec}s 偏差超容差 ${cfg.quality.durationToleranceSec}s`,
       };
     }
+
+    // g.5) 下载品质分流（产品定调 2026-10-11）：用**转码前**的源探针判定 —— 源本身
+    //      达标无损（复用洗版同一门槛）则成品直接落 losslessRoot，不再混进流媒体下载目录。
+    //      原地替换（inPlace）语义更强，优先，不受本项影响。
+    const losslessGrade = losslessRoutable && isLosslessGradeSource(probed, cfg.quality);
 
     // h) 写标签（含增值项：风格 / 歌词 / 封面）。
     const title = t.title || cand.title || "Unknown Title";
@@ -1263,6 +1320,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         cachePath,
         // 原地替换：成品直接落回原文件所在目录（文件名仍按命名模板生成）。
         ...(inPlace ? { destDirOverride: path.dirname(inPlace.fsPath) } : {}),
+        // 品质分流：源达标无损 → 落 losslessRoot（保留命名模板的相对目录结构）。
+        ...(!inPlace && losslessGrade && cfg.losslessRoot ? { destRootOverride: cfg.losslessRoot } : {}),
         target: {
           title,
           artist,
@@ -1284,6 +1343,14 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     if (!fr.finalPath) {
       return { kind: "fail", code: "MOVE_FAILED", detail: "finalize 未返回 finalPath" };
     }
-    return { kind: "success", cachePath, bytes: dl.bytes, finalPath: fr.finalPath, ...(inPlace ? { inPlace } : {}) };
+    return {
+      kind: "success",
+      cachePath,
+      bytes: dl.bytes,
+      finalPath: fr.finalPath,
+      ...(inPlace ? { inPlace } : {}),
+      // 品质分流依据（供 flush 按对应媒体源入库）：无损达标 → losslessRoot。
+      ...(!inPlace && losslessGrade && cfg.losslessRoot ? { destRoot: cfg.losslessRoot } : {}),
+    };
   }
 }

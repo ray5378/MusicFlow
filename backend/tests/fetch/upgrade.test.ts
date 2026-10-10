@@ -214,10 +214,11 @@ describe("isBelowUpgradeBar — 洗版门槛分档", () => {
 describe("buildUpgradeQuality — 洗版档派生", () => {
   const upQ = buildUpgradeQuality(DEFAULT_QUALITY_CONFIG);
 
-  it("档位 = lossless + preferLossless + rejectFakeLossless + bitrate 检测", () => {
+  it("档位 = lossless + preferLossless + bitrate 检测（无「拒绝假无损」开关）", () => {
     expect(upQ.qualityFloor).toBe("lossless");
     expect(upQ.preferLossless).toBe(true);
-    expect(upQ.rejectFakeLossless).toBe(true);
+    // 开关已删（产品定调 2026-10-11）：flac 只是容器，假无损由档位门槛自然拦下
+    expect("rejectFakeLossless" in upQ).toBe(false);
     expect(upQ.fakeLosslessDetect).toBe("bitrate");
   });
 
@@ -244,10 +245,11 @@ describe("buildUpgradeQuality — 洗版档派生", () => {
 describe("isFakeLossless — 洗版档按容器分档", () => {
   const upQ = buildUpgradeQuality(DEFAULT_QUALITY_CONFIG);
 
-  it("回归：默认配置（uncompressedContainers 为空）下 wav 800kbps 不判假", () => {
+  it("wav 800kbps 判假：未压缩无损（wav/aiff）恒按 1400 下限，与配置无关", () => {
     const r = isFakeLossless(probedCand("wav", 800), DEFAULT_QUALITY_CONFIG);
-    expect(r.fake).toBe(false);
-    expect(r.reason).toBe("effective 800kbps >= 700");
+    expect(r.fake).toBe(true);
+    expect(r.reason).toContain("1400");
+    expect(r.reason).toContain("未压缩无损下限");
   });
 
   it("洗版档：wav 800kbps < 1400 → 判假", () => {

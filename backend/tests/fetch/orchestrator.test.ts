@@ -246,27 +246,46 @@ describe("runFetchPipeline", () => {
     expect(it0.rejected.length).toBe(it0.attempts);
   });
 
-  it("6. 假无损被拒 → FAKE_LOSSLESS，且不落盘", async () => {
-    const finalize = vi.fn(() => ({ action: "write" as const, finalPath: join(DL, "x.mp3"), warnings: [] }));
+  it("6. 假无损（flac 实测 300kbps）不再单独拒：按真实码率归 320 档，照常落盘", async () => {
+    const finalize = vi.fn(() => ({ action: "write" as const, finalPath: join(DL, "x.flac"), warnings: [] }));
     const deps = makeDeps({
       collectCandidates: async () => [
         cand({ id: "fl", url: "http://h/fake.flac", container: "flac", bitrateKbps: 900, bitDepth: 16 }),
       ],
+      // 声明 900kbps，下载后实测只有 300kbps（有损转 flac）。7.5MB / 200s = 300kbps。
+      // 注意 downloadToFile 报的体积必须与之一致：probed.bytes 取的是**下载回执**的字节数。
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        mkdirSync(dirname(o.destPath), { recursive: true });
+        writeFileSync(o.destPath, "DATA");
+        return {
+          bytes: 7_500_000,
+          httpStatus: 200,
+          sha256: "s",
+          rangeSupported: true,
+          finalUrl: o.url,
+          partial: false,
+        };
+      }) as any,
       probeFile: async (file: string) => ({
         path: file,
-        bytes: 1000,
+        bytes: 7_500_000,
         container: "flac",
         bitDepth: 16,
-        durationSec: undefined,
+        sampleRateHz: 44100,
+        durationSec: 200,
         bitrateKbps: 300,
         hasCover: false,
       }),
       finalizeFile: finalize,
     });
-    const r = await run({ targets: [tgt({ id: "t1", title: "Song" })], sourceId: "src-1", deps });
-    expect(r.items[0].status).toBe("failed");
-    expect(r.items[0].rejected[0].reason).toBe("FAKE_LOSSLESS");
-    expect(finalize).not.toHaveBeenCalled();
+    const r = await run({ targets: [tgt({ id: "t1", title: "Song", durationSec: 200 })], sourceId: "src-1", deps });
+    // 「flac 只是容器」：300kbps 归 320 档 → any 门槛放行 → 不落无损目录、不报假无损
+    expect(r.items[0].status).toBe("done");
+    expect(r.items[0].rejected ?? []).toHaveLength(0);
+    expect(finalize).toHaveBeenCalledTimes(1);
+    const arg = finalize.mock.calls[0][0] as any;
+    expect(arg.destRootOverride).toBeUndefined();
+    expect(arg.destDirOverride).toBeUndefined();
   });
 
   it("7. 试听片段被拒（时长超差），不落盘", async () => {
@@ -716,7 +735,7 @@ describe("runFetchPipeline", () => {
     expect(downloads).not.toHaveBeenCalled();
   });
 
-  it("25. 直链体积预探：声明码率缺失 → 估算回填，低于门槛在下载前拒绝", async () => {
+  it("25. 直链体积预探：声明码率缺失 → 估算回填，但**不再**据估算在下载前预拒", async () => {
     const probes: string[] = [];
     const downloadedUrls: string[] = [];
     const deps = makeDeps({
@@ -739,14 +758,14 @@ describe("runFetchPipeline", () => {
       targets: [tgt({ id: "t25", title: "Song", artist: "Artist", durationSec: 200 })],
       sourceId: "src-1",
       deps,
-      // 不传 originalDisposal → 非洗版路径，估算假无损预拒闸（3.6）生效
+      // 不传 originalDisposal → 非洗版路径
     });
     expect(r.items[0].status).toBe("done");
     expect(probes).toEqual(["http://h/a.flac"]); // 只有缺声明的 lx1 被预探
-    expect(downloadedUrls).toEqual(["http://h/b.flac"]); // lx1 估算假无损下载前被预拒
-    const rej = r.items[0].rejected.find((x) => x.candidateId === "lx1");
-    expect(rej?.reason).toBe("BELOW_BAR");
-    expect(rej?.detail ?? "").toContain("400"); // detail 带估算依据
+    // 产品定调 2026-10-11：估算值只用于**排序**，不再据此在下载前拒收 ——
+    // 「没下载过的歌即便是假无损也该落流媒体目录」，真假一律以下载后探针为准。
+    expect(downloadedUrls).toEqual(["http://h/a.flac"]);
+    expect(r.items[0].rejected ?? []).toHaveLength(0);
   });
 
   it("20. 转码透传响度归一化参数（cfg 默认开，目标 -14 LUFS）", async () => {
