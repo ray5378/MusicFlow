@@ -111,6 +111,13 @@ export function registerFetch(app: Hono): void {
   app.put("/v1/fetch/config", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const override = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    // ssrfTrustedHosts：字符串数组（trim + 去空 + 去重）；坏类型一律置空数组。
+    if ("ssrfTrustedHosts" in override) {
+      const raw = (override as Record<string, unknown>).ssrfTrustedHosts;
+      (override as Record<string, unknown>).ssrfTrustedHosts = Array.isArray(raw)
+        ? Array.from(new Set(raw.map((x) => String(x).trim()).filter(Boolean)))
+        : [];
+    }
     const merged = resolveFetchConfig(override as Partial<FetchConfig>);
     const v = validateFetchPaths(merged);
     if (!v.ok) {

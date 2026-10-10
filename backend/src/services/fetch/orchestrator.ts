@@ -548,6 +548,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         stallTimeoutMs: ENRICH_TIMEOUT_MS,
         maxBytes: COVER_MAX_BYTES,
         ssrfGuard: true,
+        trustedHosts: cfg.ssrfTrustedHosts,
         resume: false,
         signal,
       });
@@ -747,6 +748,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
             stallTimeoutMs: cfg.stallTimeoutSec * 1000,
             rateLimitKBps: cfg.rateLimitKBps,
             ssrfGuard: true,
+            trustedHosts: cfg.ssrfTrustedHosts,
             resume: true,
             signal,
           }),

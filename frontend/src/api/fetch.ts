@@ -105,6 +105,7 @@ export interface FetchConfig {
   rateLimitKBps?: number;
   fileConflictPolicy?: string;
   sourcePriority?: string[];
+  ssrfTrustedHosts?: string[];
 }
 
 const BASE = "/rest/api/v1/fetch";

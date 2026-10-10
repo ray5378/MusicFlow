@@ -66,6 +66,10 @@
                 </el-select>
                 <div class="hint">{{ t('admin.fetch.config.integrityLevelHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.ssrfTrustedHosts')">
+                <el-input v-model="ssrfHostsText" :placeholder="t('admin.fetch.config.ssrfTrustedHostsPlaceholder')" />
+                <div class="hint">{{ t('admin.fetch.config.ssrfTrustedHostsHint') }}</div>
+              </el-form-item>
             </div>
 
             <el-divider content-position="left">{{ t('admin.fetch.config.transcode') }}</el-divider>
@@ -578,6 +582,7 @@ function defaultConfig(): ConfigForm {
     rateLimitKBps: 0,
     fileConflictPolicy: "keepBetter",
     sourcePriority: [],
+    ssrfTrustedHosts: [],
   };
 }
 
@@ -585,6 +590,13 @@ const config = reactive<ConfigForm>(defaultConfig());
 const configLoading = ref(false);
 const configSaving = ref(false);
 const priorityInput = ref("");
+// 可信内网主机（逗号分隔文本 ↔ 字符串数组）
+const ssrfHostsText = computed({
+  get: () => config.ssrfTrustedHosts.join(", "),
+  set: (v: string) => {
+    config.ssrfTrustedHosts = v.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+  },
+});
 const availableSources = ref<FetchSourceInfo[]>([]);
 
 const floorOptions = ["lossless", "hires", "320", "256", "192", "128", "any"];
@@ -612,6 +624,7 @@ async function loadConfig() {
     if (remote.transcodeSampleRateHz == null) merged.transcodeSampleRateHz = "follow";
     if (remote.transcodeBitDepth == null || (remote.transcodeBitDepth as unknown) === "auto") merged.transcodeBitDepth = "follow";
     if (!Array.isArray(merged.sourcePriority)) merged.sourcePriority = [];
+    if (!Array.isArray(merged.ssrfTrustedHosts)) merged.ssrfTrustedHosts = [];
     Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));

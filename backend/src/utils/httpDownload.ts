@@ -67,6 +67,8 @@ export interface DownloadOptions {
   ssrfGuard?: boolean;
   /** 空数组/未给 = 不限 */
   hostAllowlist?: string[];
+  /** 可信内网主机（管理员显式授权，如自建 go-music-dl）：命中即放行，不做内网段拦截。 */
+  trustedHosts?: string[];
   signal?: AbortSignal;
 }
 
@@ -196,13 +198,23 @@ function parseUrl(raw: string): URL {
  * 与 utils/ssrf.ts 的既有策略保持一致：**命中白名单即放行**（白名单是管理员的显式
  * 授权，可能就是内网镜像站），未命中白名单时再做私有网段拦截。
  */
-async function assertUrlAllowed(url: URL, ssrfGuard: boolean, hostAllowlist?: string[]): Promise<void> {
+async function assertUrlAllowed(
+  url: URL,
+  ssrfGuard: boolean,
+  hostAllowlist?: string[],
+  trustedHosts?: string[],
+): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new DownloadError("SSRF_BLOCKED", `不支持的协议 ${url.protocol}`);
   }
   // new URL("http://[::1]/").hostname === "[::1]"
   const hostname = url.hostname.replace(/^\[/, "").replace(/\]$/, "");
   if (!hostname) throw new DownloadError("SSRF_BLOCKED", "URL 缺少主机名");
+
+  // 可信内网主机（管理员显式授权的自建信源，如 go-music-dl）：命中即放行，
+  // 不做白名单/内网段拦截；其余主机照常走既有守卫。
+  const trusted = trustedHosts ?? [];
+  if (trusted.length > 0 && matchHostAllowlist(hostname, trusted)) return;
 
   const allowlist = hostAllowlist ?? [];
   if (allowlist.length > 0) {
@@ -456,7 +468,7 @@ export async function downloadToFile(opts: DownloadOptions): Promise<DownloadRes
   let prevHost = currentUrl.host;
 
   for (let hop = 0; ; hop++) {
-    await assertUrlAllowed(currentUrl, ssrfGuard, opts.hostAllowlist);
+    await assertUrlAllowed(currentUrl, ssrfGuard, opts.hostAllowlist, opts.trustedHosts);
     stripCrossHostAuth(headers, prevHost, currentUrl.host);
 
     // 断点续传只在首跳发起（跳走之后 Range 语义已不属于原资源）

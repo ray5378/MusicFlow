@@ -30,6 +30,8 @@ export interface FetchConfig {
   downloadRoot: string;
   /** 缓存/半成品根目录，默认 "/MUSIC/DOWNLOADCACHE" */
   cacheRoot: string;
+  /** 可信内网主机（自建信源如 go-music-dl）：命中即放行下载，不受内网段拦截。默认 [] */
+  ssrfTrustedHosts: string[];
   /** 落盘命名模板（复用 naming.ts） */
   naming: NamingConfig;
   /** 质量门槛（复用 types.ts） */
@@ -110,6 +112,7 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   enabled: true,
   downloadRoot: DEFAULT_DOWNLOAD_ROOT,
   cacheRoot: DEFAULT_CACHE_ROOT,
+  ssrfTrustedHosts: [],
   naming: DEFAULT_NAMING_CONFIG,
   quality: DEFAULT_QUALITY_CONFIG,
   skipIfInLibrary: true,
@@ -167,6 +170,9 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
     naming: { ...DEFAULT_NAMING_CONFIG, ...(p.naming ?? {}) },
     quality: { ...DEFAULT_QUALITY_CONFIG, ...(p.quality ?? {}) },
     sourcePriority: p.sourcePriority ? [...p.sourcePriority] : [...DEFAULT_FETCH_CONFIG.sourcePriority],
+    ssrfTrustedHosts: p.ssrfTrustedHosts
+      ? [...p.ssrfTrustedHosts]
+      : [...DEFAULT_FETCH_CONFIG.ssrfTrustedHosts],
     syncToPlaylistIds: p.syncToPlaylistIds
       ? [...p.syncToPlaylistIds]
       : [...DEFAULT_FETCH_CONFIG.syncToPlaylistIds],
