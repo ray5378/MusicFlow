@@ -44,6 +44,7 @@ import { finalizeFile, type FinalizeResult } from "./finalize.js";
 import { findExistingPlayable } from "./existing.js";
 import { ensureDownloadSource } from "./source.js";
 import { disposeOriginalFile, migrateUpgradedSong } from "./upgrade.js";
+import { canWriteDir, ensureWritableDir } from "./writable.js";
 import { scanLocalFiles } from "../source/scanner.js";
 import { resolveFetchConfig, validateFetchPaths, type FetchConfig } from "./config.js";
 import { HostLimiter, Semaphore } from "./limiter.js";
@@ -379,6 +380,16 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     return { sourceId: opts.sourceId ?? "", items: [], counts, warnings };
   }
   warnings.push(...validity.warnings);
+
+  // 写权限统一闸（PATCH14）：对本次运行**实际落盘**的根做预检 —— 洗版把 downloadRoot
+  // 覆盖成 LOSSLESS 根后，jobRunner 的基础预检探不到它，EACCES 会漏到逐项 finalize。
+  // 不可写（且自适应修复无效）→ 整任务快速失败，绝不逐项刷 EACCES。
+  try {
+    ensureWritableDir(cfg.downloadRoot);
+    ensureWritableDir(cfg.cacheRoot);
+  } catch (e) {
+    throw new Error(`写目录预检失败（任务整体拒绝启动）: ${msgOf(e)}`);
+  }
 
   const deps: FetchDeps = { ...DEFAULT_DEPS, ...(opts.deps ?? {}) };
   const signal = opts.signal;
@@ -909,8 +920,16 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           (um.baselineKbps ?? 0) > 0 &&
           eff > (um.baselineKbps ?? 0)
         ) {
-          inPlace = { fsPath: um.originalFsPath, sourceId: um.originalSourceId };
-        } else {
+          // 原目录写权限统一闸（PATCH14）：不可写就不接受原地替换（照旧拒绝该候选），
+          // 否则下载/转码全部白做，最后在落盘一步报难懂的 EACCES。
+          const destDir = path.dirname(um.originalFsPath);
+          if (canWriteDir(destDir)) {
+            inPlace = { fsPath: um.originalFsPath, sourceId: um.originalSourceId };
+          } else {
+            warnings.push(`原地替换目标目录不可写，已跳过: ${destDir}`);
+          }
+        }
+        if (!inPlace) {
           cleanup();
           return { kind: "fail", code: "FAKE_LOSSLESS", detail: fake.reason };
         }

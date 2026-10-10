@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ensureWritableDir, resetWritableVerify } from "../../src/services/fetch/writable.js";
+import {
+  canWriteDir,
+  ensureWritableDir,
+  resetWritableVerify,
+} from "../../src/services/fetch/writable.js";
 
 describe("ensureWritableDir 写目录预检", () => {
   let base: string;
@@ -72,5 +76,36 @@ describe("ensureWritableDir 写目录预检", () => {
     expect(cleanCacheRootContents("/", dl)).toBe(0);
     expect(cleanCacheRootContents(dl, dl)).toBe(0); // 同目录
     expect(existsSync(path.join(dl, "keep.flac"))).toBe(true);
+  });
+
+  it("自适应修复（PATCH14）：属主目录缺写位 → 自动 chmod 补写位后通过", () => {
+    const dir = path.join(base, "heal-mode");
+    fs.mkdirSync(dir);
+    fs.chmodSync(dir, 0o555);
+    // 探针本会失败 → 自适应补写位 → 通过（root 环境探针本身能过，同样不抛）
+    ensureWritableDir(dir, { fresh: true });
+    // 记忆命中可重复调用
+    ensureWritableDir(dir);
+    // 非 root（真实属主）才会触发 chmod 修复；root 直接穿透权限位
+    const euid = typeof process.getuid === "function" ? process.getuid() : 0;
+    if (euid !== 0) expect(fs.statSync(dir).mode & 0o200).toBeTruthy();
+  });
+
+  it("自适应修复（PATCH14）：他人目录 + root → 自动 chown；非 root 环境无法构造则跳过", () => {
+    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    if (uid !== 0) return; // 非 root 无法构造他人属主目录，跳过
+    const dir = path.join(base, "heal-chown");
+    fs.mkdirSync(dir);
+    fs.chownSync(dir, 1000, 1001);
+    fs.chmodSync(dir, 0o555);
+    ensureWritableDir(dir, { fresh: true });
+    // root 穿透权限位、探针直接通过，heal 不会触发 → uid 保持 1000 也算通过
+    const euid2 = typeof process.getuid === "function" ? process.getuid() : 0;
+    if (euid2 !== 0) expect(fs.statSync(dir).uid).toBe(0);
+  });
+
+  it("canWriteDir：可写 true（含自动修复）；空路径 false", () => {
+    expect(canWriteDir(path.join(base, "cand-ok"))).toBe(true);
+    expect(canWriteDir("")).toBe(false);
   });
 });

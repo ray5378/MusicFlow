@@ -407,7 +407,11 @@ try {
   const fetchCfg = currentFetchConfig();
   const cleanedCache = cleanCacheRootContents(fetchCfg.cacheRoot, fetchCfg.downloadRoot);
   if (cleanedCache > 0) log.info(`[FETCH] boot：已清空缓存目录 ${fetchCfg.cacheRoot} 内容（${cleanedCache} 项）`);
-  for (const dir of [fetchCfg.downloadRoot, fetchCfg.cacheRoot]) ensureWritableDir(dir, { fresh: true });
+  // boot 预检覆盖全部配置根（PATCH14）：losslessRoot（洗版落盘根）一并探，
+  // 挂载属主配错第一时间在启动日志给出修复指引（自适应修复这里就会顺手修好）。
+  for (const dir of [fetchCfg.downloadRoot, fetchCfg.cacheRoot, fetchCfg.losslessRoot]) {
+    ensureWritableDir(dir, { fresh: true });
+  }
 } catch (e: any) {
   log.error(`[FETCH-WRITABLE] ${e?.message || e}`);
 }
