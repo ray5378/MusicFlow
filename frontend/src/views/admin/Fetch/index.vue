@@ -72,6 +72,7 @@
             <el-alert class="transcode-warn" type="warning" :closable="false" show-icon>
               {{ t('admin.fetch.config.transcodeWarn') }}
             </el-alert>
+            <div class="hint loudness-hint">{{ t('admin.fetch.config.transcodeLoudnessHint') }}</div>
             <div class="config-grid">
               <el-form-item :label="t('admin.fetch.config.transcodeEnabled')">
                 <el-switch v-model="config.transcodeEnabled" />
@@ -89,6 +90,7 @@
                   <el-option label="44100 Hz" :value="44100" />
                   <el-option label="48000 Hz" :value="48000" />
                 </el-select>
+                <div class="hint">{{ t('admin.fetch.config.transcodeSampleRateFollowHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.transcodeBitDepth')">
                 <el-select v-model="config.transcodeBitDepth">
@@ -96,6 +98,7 @@
                   <el-option label="16 bit" :value="16" />
                   <el-option label="24 bit" :value="24" />
                 </el-select>
+                <div v-if="config.transcodeBitDepth === 'follow'" class="hint">{{ t('admin.fetch.config.transcodeBitDepthFollowHint') }}</div>
                 <div v-if="config.transcodeBitDepth === 24" class="hint">{{ t('admin.fetch.config.transcodeBitDepth24Hint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.transcodeKeepOriginal')">
@@ -321,6 +324,22 @@
                 <el-switch v-model="upgradeConfig.inspectCandidates" />
                 <div class="hint">{{ t('admin.fetch.upgrade.inspectCandidatesHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.upgradeCooldownDays')">
+                <el-input-number v-model="upgradeConfig.upgradeCooldownDays" :min="1" :max="365" :step="1" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.upgrade.upgradeCooldownDaysHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.upgradeAutoEnabled')">
+                <el-switch v-model="upgradeConfig.upgradeAutoEnabled" />
+                <div class="hint">{{ t('admin.fetch.upgrade.upgradeAutoEnabledHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.upgradeAutoIntervalDays')">
+                <el-input-number v-model="upgradeConfig.upgradeAutoIntervalDays" :min="1" :max="365" :step="1" controls-position="right" :disabled="!upgradeConfig.upgradeAutoEnabled" />
+                <div class="hint">{{ t('admin.fetch.upgrade.upgradeAutoIntervalDaysHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.upgradeAutoTimeOfDay')">
+                <el-input v-model="upgradeConfig.upgradeAutoTimeOfDay" placeholder="03:00" class="time-input" :disabled="!upgradeConfig.upgradeAutoEnabled" />
+                <div class="hint">{{ t('admin.fetch.upgrade.upgradeAutoTimeOfDayHint') }}</div>
+              </el-form-item>
             </div>
             <el-alert
               v-if="upgradeConfig.originalAction === 'delete'"
@@ -339,12 +358,14 @@
             <div class="upgrade-summary">
               <el-tag>{{ t('admin.fetch.upgrade.summaryTotal', { count: upgradePlan?.total ?? 0 }) }}</el-tag>
               <el-tag type="warning">{{ t('admin.fetch.upgrade.summaryBelowBar', { count: upgradePlan?.belowBar ?? 0 }) }}</el-tag>
+              <el-tag v-if="(upgradePlan?.cooled ?? 0) > 0" type="info">{{ t('admin.fetch.upgrade.summaryCooled', { count: upgradePlan?.cooled ?? 0 }) }}</el-tag>
               <el-tag v-if="upgradePlan?.truncated" type="info">{{ t('admin.fetch.upgrade.summaryTruncated') }}</el-tag>
               <span v-if="upgradePlan && upgradePlan.sourceNames && upgradePlan.sourceNames.length" class="hint">
                 {{ t('admin.fetch.upgrade.sources') }}: {{ upgradePlan.sourceNames.join(', ') }}
               </span>
             </div>
             <el-button :loading="planLoading" @click="loadUpgradePlan"><MfIcon name="Search" />{{ t('admin.fetch.upgrade.loadPlan') }}</el-button>
+            <el-button :loading="upgradeAttemptsResetting" @click="doResetUpgradeAttempts">{{ t('admin.fetch.upgrade.resetAttempts') }}</el-button>
           </div>
 
           <el-alert v-if="planError" type="error" :closable="false" :title="planError" class="jobs-error" />
@@ -403,7 +424,7 @@
     </el-tabs>
 
     <!-- ===== 任务详情 ===== -->
-    <el-dialog v-model="detailVisible" :title="t('admin.fetch.jobs.detailTitle')" width="920px" :append-to-body="true">
+    <el-dialog v-model="detailVisible" :title="t('admin.fetch.jobs.detailTitle')" width="min(920px, 94vw)" :append-to-body="true">
       <div v-if="detail" v-loading="detailLoading" class="detail-body">
         <div class="detail-head">
           <div class="detail-meta">
@@ -504,6 +525,7 @@ import {
   getLibraryPlan,
   startLibraryTask,
   resetLibraryAttempts,
+  resetUpgradeAttempts,
 } from "@/api/fetch";
 import type {
   FetchConfig,
@@ -586,9 +608,9 @@ async function loadConfig() {
     const remote = await getFetchConfig();
     const merged = defaultConfig();
     Object.assign(merged, remote);
-    // 远端缺省/空值 → 跟随源
+    // 远端缺省/空值/显式 "auto" → UI 的「跟随源」语义(提交时省略该键)
     if (remote.transcodeSampleRateHz == null) merged.transcodeSampleRateHz = "follow";
-    if (remote.transcodeBitDepth == null) merged.transcodeBitDepth = "follow";
+    if (remote.transcodeBitDepth == null || (remote.transcodeBitDepth as unknown) === "auto") merged.transcodeBitDepth = "follow";
     if (!Array.isArray(merged.sourcePriority)) merged.sourcePriority = [];
     Object.assign(config, merged);
   } catch (e: any) {
@@ -854,6 +876,10 @@ function defaultUpgradeConfig(): Required<UpgradeConfig> {
     compressedMinKbps: 700,
     uncompressedMinKbps: 1400,
     inspectCandidates: true,
+    upgradeCooldownDays: 30,
+    upgradeAutoEnabled: false,
+    upgradeAutoIntervalDays: 30,
+    upgradeAutoTimeOfDay: "03:00",
   };
 }
 
@@ -878,6 +904,11 @@ async function loadUpgradeConfig() {
     const a = merged.originalAction;
     if (a !== "keep" && a !== "move" && a !== "delete") merged.originalAction = "delete";
     if (!Array.isArray(merged.sourceIds)) merged.sourceIds = [];
+    // 冷却/定时四件套钳制(与后端 PUT 校验同口径):整数 1-365 + HH:mm 格式。
+    merged.upgradeCooldownDays = Math.min(365, Math.max(1, Math.floor(Number(merged.upgradeCooldownDays) || 30)));
+    merged.upgradeAutoEnabled = !!merged.upgradeAutoEnabled;
+    merged.upgradeAutoIntervalDays = Math.min(365, Math.max(1, Math.floor(Number(merged.upgradeAutoIntervalDays) || 30)));
+    if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(String(merged.upgradeAutoTimeOfDay ?? ""))) merged.upgradeAutoTimeOfDay = "03:00";
     Object.assign(upgradeConfig, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.saveFailed")));
@@ -987,6 +1018,30 @@ async function doStartUpgrade() {
     ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.startFailed")));
   } finally {
     upgradeStarting.value = false;
+  }
+}
+
+// 清空洗版冷却记录:下一次所有歌都可重新触发洗版。
+const upgradeAttemptsResetting = ref(false);
+async function doResetUpgradeAttempts() {
+  try {
+    await ElMessageBox.confirm(
+      t("admin.fetch.upgrade.resetAttemptsConfirm"),
+      t("admin.fetch.upgrade.resetAttempts"),
+      { type: "warning" },
+    );
+  } catch {
+    return;
+  }
+  upgradeAttemptsResetting.value = true;
+  try {
+    const cleared = await resetUpgradeAttempts();
+    ElMessage.success(t("admin.fetch.upgrade.resetAttemptsDone", { count: cleared }));
+    await loadUpgradePlan();
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.resetAttemptsFailed")));
+  } finally {
+    upgradeAttemptsResetting.value = false;
   }
 }
 
@@ -1224,6 +1279,8 @@ onUnmounted(stopPolling);
 .config-form :deep(.el-form-item) { margin-bottom: 16px; }
 .field-inline { display: flex; align-items: center; gap: 10px; }
 .transcode-warn { margin: 4px 0 16px; }
+.loudness-hint { margin: -10px 0 16px; max-width: 960px; }
+.time-input { width: 120px; }
 .config-actions { margin-top: 8px; }
 
 .priority-list { width: 100%; }
@@ -1281,5 +1338,9 @@ onUnmounted(stopPolling);
   .page-header h2 { font-size: 24px; }
   .config-grid { grid-template-columns: 1fr; }
   .jobs-filters { width: 100%; }
+  /* 详情弹窗手机端:统计行距收紧、路径等长文本可断行,防压叠 */
+  .detail-head { flex-direction: column; align-items: flex-start; }
+  .detail-counts { gap: 6px 12px; }
+  .mono { word-break: break-all; }
 }
 </style>

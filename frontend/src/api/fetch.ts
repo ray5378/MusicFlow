@@ -97,7 +97,7 @@ export interface FetchConfig {
   transcodeEnabled?: boolean;
   transcodeTarget?: string;
   transcodeSampleRateHz?: number;
-  transcodeBitDepth?: number;
+  transcodeBitDepth?: 16 | 24 | "auto";
   transcodeKeepOriginal?: boolean;
   maxConcurrentDownloads?: number;
   maxConcurrentPerHost?: number;
@@ -188,6 +188,8 @@ export interface UpgradePlan {
   sourceNames: string[];
   total: number;
   belowBar: number;
+  /** 因冷却期跳过的低于门槛数(N 天内已尝试过洗版,无论成败)。 */
+  cooled: number;
   truncated: boolean;
   items: UpgradePlanItem[];
 }
@@ -200,6 +202,14 @@ export interface UpgradeConfig {
   compressedMinKbps?: number;
   uncompressedMinKbps?: number;
   inspectCandidates?: boolean;
+  /** 洗版冷却天数(1-365,默认 30):N 天内尝试过(无论成败)就跳过。 */
+  upgradeCooldownDays?: number;
+  /** 定时自动洗版开关(默认关闭)。 */
+  upgradeAutoEnabled?: boolean;
+  /** 自动洗版间隔天数(1-365,默认 30)。 */
+  upgradeAutoIntervalDays?: number;
+  /** 每日触发时刻("HH:mm" 24 小时制,服务器本地时区,默认 "03:00")。 */
+  upgradeAutoTimeOfDay?: string;
 }
 
 export async function getUpgradePlan(params?: {
@@ -213,6 +223,7 @@ export async function getUpgradePlan(params?: {
     sourceNames: [],
     total: 0,
     belowBar: 0,
+    cooled: 0,
     truncated: false,
     items: [],
   }) as UpgradePlan;
@@ -286,5 +297,11 @@ export async function startLibraryTask(limit: number): Promise<LibraryTaskResult
 
 export async function resetLibraryAttempts(): Promise<number> {
   const res = await api.post(`${BASE}/library/reset`);
+  return Number(res.data?.cleared ?? 0);
+}
+
+/** 清空洗版冷却记录(下一次所有歌都可重新触发洗版)。 */
+export async function resetUpgradeAttempts(): Promise<number> {
+  const res = await api.post(`${BASE}/upgrade/reset`);
   return Number(res.data?.cleared ?? 0);
 }
