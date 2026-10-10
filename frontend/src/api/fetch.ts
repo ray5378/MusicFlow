@@ -236,3 +236,55 @@ export async function startUpgradeTask(body: {
   const res = await api.post(`${BASE}/upgrade/tasks`, body);
   return (res.data?.job ?? null) as FetchJobSummary | null;
 }
+
+// ---------- 全库平台音乐下载 ----------
+export interface LibraryPlanItem {
+  songId: string;
+  title: string;
+  artist?: string;
+  album?: string;
+  durationSec?: number;
+  suffix?: string;
+  bitRate?: number;
+}
+
+export interface LibraryPlan {
+  total: number;
+  attempted: number;
+  pending: number;
+  willEnqueue: number;
+  truncated: boolean;
+  items: LibraryPlanItem[];
+}
+
+export interface LibraryTaskResult {
+  job: FetchJobSummary | null;
+  enqueued: number;
+  remaining: number;
+}
+
+export async function getLibraryPlan(limit = 0): Promise<LibraryPlan> {
+  const res = await api.get(`${BASE}/library/plan`, { params: { limit } });
+  return (res.data?.plan ?? {
+    total: 0,
+    attempted: 0,
+    pending: 0,
+    willEnqueue: 0,
+    truncated: false,
+    items: [],
+  }) as LibraryPlan;
+}
+
+export async function startLibraryTask(limit: number): Promise<LibraryTaskResult> {
+  const res = await api.post(`${BASE}/library/tasks`, { limit });
+  return {
+    job: (res.data?.job ?? null) as FetchJobSummary | null,
+    enqueued: Number(res.data?.enqueued ?? 0),
+    remaining: Number(res.data?.remaining ?? 0),
+  };
+}
+
+export async function resetLibraryAttempts(): Promise<number> {
+  const res = await api.post(`${BASE}/library/reset`);
+  return Number(res.data?.cleared ?? 0);
+}

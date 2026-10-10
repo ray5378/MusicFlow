@@ -185,6 +185,23 @@
           </div>
         </el-form>
 
+        <div class="library-block">
+          <el-divider content-position="left">{{ t('admin.fetch.library.title') }}</el-divider>
+          <div class="library-stats">
+            <el-tag type="warning">{{ t('admin.fetch.library.pending', { count: libraryPlan?.pending ?? 0 }) }}</el-tag>
+            <el-tag type="info">{{ t('admin.fetch.library.attempted', { count: libraryPlan?.attempted ?? 0 }) }}</el-tag>
+            <span v-if="libraryPlan" class="hint">{{ t('admin.fetch.library.total', { count: libraryPlan.total }) }}</span>
+          </div>
+          <div class="library-actions">
+            <span class="hint">{{ t('admin.fetch.library.batchSize') }}</span>
+            <el-input-number v-model="libraryBatchSize" :min="1" :max="500" controls-position="right" />
+            <el-button type="primary" :loading="libraryStarting" @click="doStartLibrary"><MfIcon name="Download" />{{ t('admin.fetch.library.start') }}</el-button>
+            <el-button :loading="libraryResetting" @click="doResetLibrary">{{ t('admin.fetch.library.reset') }}</el-button>
+            <el-button :loading="libraryPlanLoading" @click="loadLibraryPlan"><MfIcon name="RefreshCw" />{{ t('admin.fetch.library.reload') }}</el-button>
+          </div>
+          <div class="hint library-hint">{{ t('admin.fetch.library.hint') }}</div>
+        </div>
+
         <div v-if="previewSummary" class="preview-block">
           <el-divider content-position="left">{{ t('admin.fetch.create.previewResult') }}</el-divider>
           <div class="summary-bar">
@@ -465,7 +482,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
@@ -484,6 +501,9 @@ import {
   getUpgradeConfig,
   updateUpgradeConfig,
   startUpgradeTask,
+  getLibraryPlan,
+  startLibraryTask,
+  resetLibraryAttempts,
 } from "@/api/fetch";
 import type {
   FetchConfig,
@@ -497,6 +517,7 @@ import type {
   UpgradePlan,
   UpgradePlanItem,
   UpgradeConfig,
+  LibraryPlan,
 } from "@/api/fetch";
 
 const { t } = useI18n();
@@ -969,6 +990,57 @@ async function doStartUpgrade() {
   }
 }
 
+// ---------- 全库平台音乐下载 ----------
+const libraryPlan = ref<LibraryPlan | null>(null);
+const libraryPlanLoading = ref(false);
+const libraryStarting = ref(false);
+const libraryResetting = ref(false);
+const libraryBatchSize = ref(500);
+
+async function loadLibraryPlan() {
+  libraryPlanLoading.value = true;
+  try {
+    libraryPlan.value = await getLibraryPlan(0);
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.library.loadFailed")));
+  } finally {
+    libraryPlanLoading.value = false;
+  }
+}
+
+async function doStartLibrary() {
+  libraryStarting.value = true;
+  try {
+    const res = await startLibraryTask(libraryBatchSize.value);
+    ElMessage.success(t("admin.fetch.library.started", { enqueued: res.enqueued, remaining: res.remaining }));
+    await loadLibraryPlan();
+    await refreshJobs();
+    activeTab.value = "jobs";
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.library.startFailed")));
+  } finally {
+    libraryStarting.value = false;
+  }
+}
+
+async function doResetLibrary() {
+  try {
+    await ElMessageBox.confirm(t("admin.fetch.library.resetConfirm"), t("admin.fetch.library.reset"), { type: "warning" });
+  } catch {
+    return;
+  }
+  libraryResetting.value = true;
+  try {
+    const cleared = await resetLibraryAttempts();
+    ElMessage.success(t("admin.fetch.library.resetDone", { count: cleared }));
+    await loadLibraryPlan();
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.library.resetFailed")));
+  } finally {
+    libraryResetting.value = false;
+  }
+}
+
 // ---------- 展示辅助 ----------
 const STATUS_KEY: Record<string, string> = {
   pending: "pending",
@@ -1120,6 +1192,11 @@ onMounted(() => {
   loadSources();
   refreshJobs();
   loadUpgradeConfig();
+  loadLibraryPlan();
+});
+// 切到「创建」页签时刷新一次全库统计。
+watch(activeTab, (v) => {
+  if (v === "create") loadLibraryPlan();
 });
 onUnmounted(stopPolling);
 </script>
@@ -1159,6 +1236,10 @@ onUnmounted(stopPolling);
 
 /* 新建任务 */
 .create-form { max-width: 900px; }
+.library-block { max-width: 900px; }
+.library-stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.library-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.library-hint { margin-top: 10px; }
 .create-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .preview-block { margin-top: 8px; }
 .summary-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }

@@ -1660,6 +1660,23 @@
         "deleteMore": "and {count} more files",
         "moveConfirm": "Originals will be moved to the backup directory and can be rolled back if needed. Start the upgrade?",
         "keepConfirm": "Originals will be kept; after a successful upgrade the same song will exist as both old and new files. Start the upgrade?"
+      },
+      "library": {
+        "title": "Download whole library",
+        "pending": "{count} pending",
+        "attempted": "{count} attempted",
+        "total": "{count} in library",
+        "batchSize": "Batch size",
+        "start": "Download next batch",
+        "reset": "Reset attempt record",
+        "reload": "Refresh stats",
+        "hint": "Only songs without a local file are processed; songs already present locally / on WebDAV are skipped automatically; up to 500 per batch, click repeatedly to continue",
+        "started": "Enqueued {enqueued}, {remaining} remaining",
+        "startFailed": "Failed to start library download",
+        "loadFailed": "Failed to load library stats",
+        "resetConfirm": "Reset the \"attempted\" record? These songs will re-enter the download scope.",
+        "resetDone": "Reset {count} attempt records",
+        "resetFailed": "Failed to reset"
       }
     }
   },

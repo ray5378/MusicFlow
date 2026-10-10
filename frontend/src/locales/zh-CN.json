@@ -1660,6 +1660,23 @@
         "deleteMore": "等 {count} 个文件",
         "moveConfirm": "原件将移到备份目录,可在需要时回滚。确定开始洗版吗?",
         "keepConfirm": "将保留原件,洗版成功后同一首歌会同时存在新旧两份文件。确定开始洗版吗?"
+      },
+      "library": {
+        "title": "全库下载",
+        "pending": "待下载 {count} 首",
+        "attempted": "已尝试 {count} 首",
+        "total": "全库共 {count} 首",
+        "batchSize": "本次首数",
+        "start": "下载全库下一批",
+        "reset": "重置尝试记录",
+        "reload": "刷新统计",
+        "hint": "只处理本地没有实体文件的歌;已在本地/WebDAV 有实体文件的会自动跳过;单次最多 500 首,可反复点",
+        "started": "已排入 {enqueued} 首,剩余 {remaining} 首",
+        "startFailed": "发起全库下载失败",
+        "loadFailed": "加载全库统计失败",
+        "resetConfirm": "确定重置「已尝试」记录吗?重置后这些歌会重新纳入下载范围。",
+        "resetDone": "已重置 {count} 条尝试记录",
+        "resetFailed": "重置失败"
       }
     }
   },
