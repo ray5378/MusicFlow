@@ -90,7 +90,9 @@ export interface FetchConfig {
   writeSourceComment: boolean;
   embedCover: boolean;
   maxConcurrentDownloads: number;
-  /** 同时推进多少首歌的流水线（目标级并行，PATCH16）。1 = 串行（旧行为） */
+  /** 同时推进多少首歌的流水线（目标级并行，PATCH16）。1 = 串行（旧行为）；上限 64（PATCH20）。
+   *  注意：全库下载 / 洗版都是**单个**任务，此值就是它们真正的并发天花板 —— 若小于
+   *  `maxConcurrentDownloads`，后者永远吃不满。 */
   maxConcurrentTargets: number;
   /** 同时推进多少个 fetch 任务（任务级并行，PATCH19）。每个任务内仍按片串行、片内按目标并行 */
   maxConcurrentJobs: number;
@@ -213,6 +215,12 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
       typeof p.maxConcurrentJobs === "number" && Number.isFinite(p.maxConcurrentJobs)
         ? Math.min(16, Math.max(1, Math.floor(p.maxConcurrentJobs)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentJobs,
+    // PATCH20 目标级并行：1..64。**必须与前端可配项同步**，否则「最大并发下载数」会被
+    // 一个看不见的小值卡住（旧行为：硬夹 8 且不可配 → 用户调多少都白搭）。
+    maxConcurrentTargets:
+      typeof p.maxConcurrentTargets === "number" && Number.isFinite(p.maxConcurrentTargets)
+        ? Math.min(64, Math.max(1, Math.floor(p.maxConcurrentTargets)))
+        : DEFAULT_FETCH_CONFIG.maxConcurrentTargets,
     syncToPlaylistIds: p.syncToPlaylistIds
       ? [...p.syncToPlaylistIds]
       : [...DEFAULT_FETCH_CONFIG.syncToPlaylistIds],
