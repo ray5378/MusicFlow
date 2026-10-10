@@ -210,6 +210,26 @@ export const mediaSources = sqliteTable("media_sources", {
   updatedAt: text("updated_at").default(""),
 });
 
+// MusicFetch(网络音源下载入库)任务登记(drizzle 镜像,DDL 原文见 db/index.ts)。
+// items/imports 为 JSON 列(注释里标注内容形态,与 userPlayQueues.entryIdsJson 同风格);
+// 读写封装见 services/fetch/jobStore.ts。
+export const fetchJobs = sqliteTable("fetch_jobs", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull().default("manual"),
+  status: text("status").notNull().default("pending"),
+  sourceId: text("source_id"),
+  targetsJson: text("targets_json").notNull().default("{}"), // FetchTarget[] serialized
+  itemsJson: text("items_json").notNull().default("[]"),     // FetchJobItem[] serialized
+  importsJson: text("imports_json").notNull().default("[]"), // FetchJobImport[] serialized
+  configJson: text("config_json").notNull().default("{}"),   // 生效配置快照（审计）
+  countsJson: text("counts_json").notNull().default("{}"),   // 聚合计数（列表页免解析 items）
+  error: text("error"),
+  createdAt: text("created_at").default(""),
+  startedAt: text("started_at"),
+  finishedAt: text("finished_at"),
+  updatedAt: text("updated_at").default(""),
+});
+
 export const plugins = sqliteTable("plugins", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),

@@ -499,6 +499,14 @@ async function recommendRefreshHandler(args: Record<string, any>, ctx: BatchJobC
   return { success: true, seedSalt, results };
 }
 
+// ---------- 网络音源下载入库(MusicFetch) ----------
+// 占位实现:下一轮替换为真实实现(取链择优 → 下载 → 校验/探针 → 写标签 → 转码 →
+// 原子落盘 → 点名增量入库;按 chunk 分片,跨片进度落 fetch_jobs 表)。
+// 当前仅为满足 batchJobHandlers 对 BatchJobKind 的穷尽映射而登记。
+async function fetchHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
+  throw new Error("fetch handler 待实现");
+}
+
 /** 任务类型 → 处理器映射(子进程 dispatch 用)。 */
 export const batchJobHandlers: Record<BatchJobKind, BatchJobHandler> = {
   "daily-jobs": dailyJobsHandler,
@@ -518,4 +526,5 @@ export const batchJobHandlers: Record<BatchJobKind, BatchJobHandler> = {
   "scrape-artists": scrapeArtistsHandler,
   "backfill": backfillHandler,
   "recommend-refresh": recommendRefreshHandler,
+  "fetch": fetchHandler,
 };

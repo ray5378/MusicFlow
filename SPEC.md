@@ -73,6 +73,25 @@
 | `scrape-artists`                                                        | 批量歌手信息刮削                                          |
 | `backfill`                                                              | 歌词/封面批量补全（C 按钮：候选查询 + 逐首补全，峰值随子进程退出归还）            |
 | `recommend-refresh`                                                     | 推荐手动刷新默认路径（每日/本地/漫游，异步 202+轮询）                    |
+| `fetch`                                                                 | 网络音源下载入库（取链择优 → 下载 → 校验/探针 → 写标签 → 转码 → 原子落盘 → 点名增量入库；按 chunk 分片，跨片进度落 `fetch_jobs`） |
+
+> **迁移说明（MusicFetch · `fetch_jobs`，v4.4.x）**
+>
+> 本次唯一 DDL 变更：**新增一张** `fetch_jobs` 表（及其 1 条索引）。
+>
+> - **唯一入口**：`backend/src/db/index.ts` 建表段
+>   `CREATE TABLE IF NOT EXISTS fetch_jobs (...)` +
+>   `CREATE INDEX IF NOT EXISTS idx_fetch_jobs_status_created ON fetch_jobs(status, created_at DESC)`；
+>   drizzle 侧镜像为 `backend/src/db/schema.ts` 的 `fetchJobs`。
+> - **幂等**：两条语句都是 `IF NOT EXISTS`，每次进程启动都会执行一遍，重复执行零副作用。
+> - **不动老表**：对 `media_sources` / `songs` / `playlists` / `settings` 等既有表
+>   **零 ALTER、零 DROP、零数据搬迁**。老库升级后只是多出一张空表，行为与升级前完全一致。
+> - **前向兼容**：`fetch_jobs` 只被 MusicFetch 链路（下载任务的状态/审计）读写；
+>   表不存在时（老代码读新库）不影响任何既有功能；新代码读老库时该表为空，
+>   表现为「没有历史下载任务」，不报错。
+> - **回滚**：`DROP TABLE fetch_jobs;` 即完整回滚 —— 无其它组件依赖该表，
+>   `songs` / `media_sources` 不受影响，不产生孤儿数据（落盘文件与入库结果独立于本表）。
+> - **保洁**：保留最近 200 条终态任务，超限按 `created_at` 升序删除（不设常驻无界增长）。
 
 新增批量任务类型：先在此表补一行，并在 `batch/types.ts`（jobKinds）/ `batch/jobs.ts`（batchJobHandlers）注册。
 

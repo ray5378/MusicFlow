@@ -673,6 +673,27 @@ export function initDatabase() {
       measured_at TEXT DEFAULT '',
       FOREIGN KEY (row_id) REFERENCES songs(id)
     );
+
+    -- MusicFetch(网络音源下载入库)任务登记:一次任务一行,items/imports 落 JSON 列
+    -- (item 只在任务内读写,不拆表)。DDL/迁移方案见 SPEC.md §1.3 A 白名单表下的
+    -- 「迁移说明(MusicFetch · fetch_jobs)」;drizzle 侧镜像是 db/schema.ts 的 fetchJobs。
+    CREATE TABLE IF NOT EXISTS fetch_jobs (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL DEFAULT 'manual',
+      status TEXT NOT NULL DEFAULT 'pending',
+      source_id TEXT,
+      targets_json TEXT NOT NULL DEFAULT '{}',
+      items_json TEXT NOT NULL DEFAULT '[]',
+      imports_json TEXT NOT NULL DEFAULT '[]',
+      config_json TEXT NOT NULL DEFAULT '{}',
+      counts_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      started_at TEXT,
+      finished_at TEXT,
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_fetch_jobs_status_created ON fetch_jobs(status, created_at DESC);
   `);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

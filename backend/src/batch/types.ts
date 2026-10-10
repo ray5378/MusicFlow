@@ -33,7 +33,8 @@ export type BatchJobKind =
   | "purge-web-songs"      // 过期未引用网页歌曲清理
   | "scrape-artists"       // 批量歌手信息刮削
   | "backfill"             // 歌词/封面批量补全(C 按钮)
-  | "recommend-refresh";   // 推荐手动刷新默认路径(每日/本地/漫游,202+轮询)
+  | "recommend-refresh"    // 推荐手动刷新默认路径(每日/本地/漫游,202+轮询)
+  | "fetch";               // 网络音源下载入库(MusicFetch)
 
 /** 运行时任务类型列表(用于注册校验 / 日志)。 */
 export const jobKinds: readonly BatchJobKind[] = [
@@ -54,6 +55,7 @@ export const jobKinds: readonly BatchJobKind[] = [
   "scrape-artists",
   "backfill",
   "recommend-refresh",
+  "fetch",
 ];
 
 /** 一次批量任务的完整请求(父进程可 JSON 序列化后传给子进程)。 */
