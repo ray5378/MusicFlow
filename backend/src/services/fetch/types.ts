@@ -116,7 +116,10 @@ export type TaskStatus = "pending" | "running" | "done" | "partial" | "cancelled
 export interface QualityConfig {
   /** 档位下限，'any' 表示不按档位卡（但仍按 minBitrateKbps 卡） */
   qualityFloor: QualityTier | "any";
-  /** 有损最低比特率（kbps） */
+  /**
+   * 有损最低比特率（kbps）—— 兜底闸，**unknown 档也按此闸卡**（低于 128kbps 的流会被
+   * classifyTier 归成 unknown）。缺省 90。
+   */
   minBitrateKbps: number;
   /** 最低采样率（Hz） */
   minSampleRateHz: number;
@@ -154,10 +157,21 @@ export interface QualityConfig {
   uncompressedMinKbps: number;
 }
 
-/** 默认质量配置：默认门槛 320kbps（产品已确认）。 */
+/**
+ * 默认质量配置。
+ *
+ * **缺省 = 兜底 90kbps、不卡档位**（2026-10-10 产品调整）。理由：下载链路已经有两道
+ * 「自动变好」的机制 —— ①同一首歌在多源里自动取最高音质；②洗版（把低码率的重新回炉
+ * 搜一遍无损）。有了它们，再把硬门槛定在 320kbps 只会适得其反：只找得到 128kbps 源的歌
+ * 会被**整首拒收**，连「先拿到手、以后再洗」的机会都没有。
+ *
+ * 所以缺省放成 `qualityFloor: "any"` + `minBitrateKbps: 90` —— 只挡「明显不能听」的超低
+ * 码率，其余先按能力拿到，再靠「取最高」与「洗版」逐步升级。
+ * 想要严格门槛的用户仍可在设置页把 qualityFloor 调回 320 / lossless。
+ */
 export const DEFAULT_QUALITY_CONFIG: QualityConfig = {
-  qualityFloor: "320",
-  minBitrateKbps: 320,
+  qualityFloor: "any",
+  minBitrateKbps: 90,
   minSampleRateHz: 44100,
   maxSampleRateHz: 384000,
   allowedContainers: ["flac", "mp3", "m4a", "ogg", "opus", "ape", "wav", "alac", "aiff"],

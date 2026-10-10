@@ -1455,6 +1455,7 @@
         "quality": "Quality floor",
         "qualityFloor": "Minimum quality tier",
         "minBitrateKbps": "Min bitrate (kbps)",
+        "minBitrateKbpsHint": "Fallback floor: sources below this bitrate are rejected. Auto-best-quality and lossless-upgrade already handle quality, so keep this low - otherwise a song whose only sources are low-bitrate is skipped entirely.",
         "minSampleRateHz": "Min sample rate (Hz)",
         "preferLossless": "Prefer lossless",
         "rejectFakeLossless": "Reject fake lossless",

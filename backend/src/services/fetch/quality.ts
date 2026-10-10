@@ -183,7 +183,7 @@ const NON_STUDIO_PATTERN: RegExp = /(^|[^a-z])(live|remix|acoustic|cover)([^a-z]
  * 达标判定：按顺序检查，任一不通过即返回 ok=false 并带中文原因（面向用户展示）。
  *
  * 顺序：容器白名单 → 时长区间 → 时长偏差 → 采样率上下限 → 档位下限
- *      → 有损比特率下限（与档位下限取严者）→ 标题关键词 → 假无损。
+ *      → 比特率下限（unknown / 有损档，与档位下限取严者）→ 标题关键词 → 假无损。
  *
  * `opts.tolerateUnknown`：**预筛阶段**开关。信源（尤其聚合源 go-music-dl / lx-source）
  * 常常只给一个 URL，不声明容器/比特率/档位；此时若按「未知即一票否决」处理，会在
@@ -258,8 +258,11 @@ export function meetsFloor(
     }
   }
 
-  // 6) 有损比特率下限：与「数字档位门槛」取严者
-  if (tier === "128" || tier === "192" || tier === "256" || tier === "320") {
+  // 6) 比特率下限：与「数字档位门槛」取严者。
+  // unknown 档也走这一闸：比特率低于 128 的流没有更低档位可归，会被 classifyTier 判成
+  // unknown；若把它排除在外，`minBitrateKbps` 对 <128kbps 的流就完全失效（兜底形同虚设）。
+  // 真正「无质量信息」的候选 kbps = 0，会被下面的 `kbps > 0` 挡住，不受影响。
+  if (tier === "unknown" || tier === "128" || tier === "192" || tier === "256" || tier === "320") {
     const floorKbps =
       cfg.qualityFloor !== "any" ? (TIER_MIN_KBPS[cfg.qualityFloor] ?? 0) : 0;
     const need = Math.max(cfg.minBitrateKbps, floorKbps);

@@ -1455,6 +1455,7 @@
         "quality": "质量门槛",
         "qualityFloor": "最低音质档",
         "minBitrateKbps": "最低码率 (kbps)",
+        "minBitrateKbpsHint": "兜底下限：低于此码率的源不下载。已有「自动取最高音质」与「洗版」两道机制兜着，建议保持低位，免得「只找得到低码率源」的歌整首下不下来。",
         "minSampleRateHz": "最低采样率 (Hz)",
         "preferLossless": "优先无损",
         "rejectFakeLossless": "拒绝假无损",

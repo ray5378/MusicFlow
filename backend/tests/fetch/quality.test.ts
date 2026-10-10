@@ -241,13 +241,25 @@ describe("rankCandidates", () => {
     expect(out.filter((c) => c.id === "a:wy:1")).toHaveLength(1);
   });
 
-  it("过滤掉不达标的候选", () => {
+  it("过滤掉不达标的候选（显式 320 门槛：128kbps 被剔）", () => {
+    const low = mk({
+      id: "c:kg:1",
+      declared: { container: "mp3", bitrateKbps: 128, durationSec: 240, sampleRateHz: 44100 },
+    });
+    const out = rankCandidates(
+      [low, mp3],
+      cfgOf({ preferLossless: false, qualityFloor: "320", minBitrateKbps: 320 }),
+    );
+    expect(out.map((c) => c.id)).toEqual(["a:wy:1"]);
+  });
+
+  it("缺省兜底门槛（any / 90kbps）：128kbps 不再被剔，但仍排在 320 之后", () => {
     const low = mk({
       id: "c:kg:1",
       declared: { container: "mp3", bitrateKbps: 128, durationSec: 240, sampleRateHz: 44100 },
     });
     const out = rankCandidates([low, mp3], cfgOf({ preferLossless: false }));
-    expect(out.map((c) => c.id)).toEqual(["a:wy:1"]);
+    expect(out.map((c) => c.id)).toEqual(["a:wy:1", "c:kg:1"]);
   });
 
   it("scoreCandidate:档位主导,信源优先级做小额惩罚", () => {
@@ -365,7 +377,22 @@ describe("rankCandidates — 无质量声明（生产现场回归守卫）", () 
     expect(out.map((c) => c.id)).toContain("go-music-dl:kg:B6A303C9CDA8E6C4C0B2FB0B23A570C6");
   });
 
-  it("2 个无声明 + 1 个已声明 128kbps → 返回 2（低音质仍被剔）", () => {
+  it("2 个无声明 + 1 个已声明 128kbps → 显式 320 门槛下返回 2（低音质不许漏过）", () => {
+    const low = mk({
+      id: "go-music-dl:kg:LOW128",
+      pluginId: "go-music-dl",
+      platform: "kg",
+      declared: { container: "mp3", bitrateKbps: 128 },
+    });
+    const out = rankCandidates(
+      [goMusicDl("AAAAAAAA000000000000000000000001", 0), goMusicDl("BBBBBBBB000000000000000000000002", 1), low],
+      cfgOf({ qualityFloor: "320", minBitrateKbps: 320 }),
+    );
+    expect(out).toHaveLength(2);
+    expect(out.map((c) => c.id)).not.toContain("go-music-dl:kg:LOW128");
+  });
+
+  it("2 个无声明 + 1 个已声明 128kbps → 缺省兜底门槛下三个都留（128 > 90 兜底线）", () => {
     const low = mk({
       id: "go-music-dl:kg:LOW128",
       pluginId: "go-music-dl",
@@ -376,8 +403,8 @@ describe("rankCandidates — 无质量声明（生产现场回归守卫）", () 
       [goMusicDl("AAAAAAAA000000000000000000000001", 0), goMusicDl("BBBBBBBB000000000000000000000002", 1), low],
       cfgOf(),
     );
-    expect(out).toHaveLength(2);
-    expect(out.map((c) => c.id)).not.toContain("go-music-dl:kg:LOW128");
+    expect(out).toHaveLength(3);
+    expect(out.map((c) => c.id)).toContain("go-music-dl:kg:LOW128");
   });
 });
 
@@ -563,3 +590,59 @@ describe("isFakeLossless — 未压缩无损分档（洗版档）", () => {
   });
 });
 
+
+describe("DEFAULT_QUALITY_CONFIG — 兜底门槛（2026-10-10 默认调整）", () => {
+  // 背景：链路已有「多源自动取最高音质」+「洗版回炉重搜无损」两道机制，
+  // 320kbps 硬门槛会让「只找得到低码率源」的歌整首下不下来，失去兜底机会。
+  it("缺省 = 不卡档位 + 兜底 90kbps", () => {
+    expect(DEFAULT_QUALITY_CONFIG.qualityFloor).toBe("any");
+    expect(DEFAULT_QUALITY_CONFIG.minBitrateKbps).toBe(90);
+  });
+
+  it("缺省放行 128kbps 有损候选（旧默认 320 会整首拒收）", () => {
+    const c = mk({
+      declared: { container: "mp3", bitrateKbps: 128, durationSec: 240, sampleRateHz: 44100 },
+    });
+    expect(meetsFloor(c, cfgOf())).toEqual({ ok: true });
+  });
+
+  it.each([192, 256, 320])("缺省放行 %dkbps 有损候选", (kbps) => {
+    const c = mk({
+      declared: { container: "mp3", bitrateKbps: kbps, durationSec: 240, sampleRateHz: 44100 },
+    });
+    expect(meetsFloor(c, cfgOf()).ok).toBe(true);
+  });
+
+  it("缺省仍拒绝 64kbps：归 unknown 档，兜底闸照样卡（不让下限形同虚设）", () => {
+    const declared = { container: "mp3", bitrateKbps: 64, durationSec: 240, sampleRateHz: 44100 };
+    expect(classifyTier(declared)).toBe("unknown");
+    const r = meetsFloor(mk({ declared }), cfgOf());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("低于下限 90kbps");
+  });
+
+  it("缺省放行「无质量声明」候选（预筛阶段，kbps=0 不触发兜底闸）", () => {
+    expect(meetsFloor(mk(), cfgOf(), undefined, { tolerateUnknown: true }).ok).toBe(true);
+  });
+
+  it("缺省不改「未声明容器」的严格性：探针复筛阶段照旧拒绝", () => {
+    const r = meetsFloor(mk(), cfgOf());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("未声明容器");
+  });
+
+  it("缺省不放宽假无损：320kbps 的假 flac 仍被拒", () => {
+    const c = mk({
+      probed: {
+        container: "flac",
+        sampleRateHz: 44100,
+        bitDepth: 16,
+        bytes: bytesFor(320, 240),
+        durationSec: 240,
+      },
+    });
+    const r = meetsFloor(c, cfgOf());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("疑似假无损");
+  });
+});

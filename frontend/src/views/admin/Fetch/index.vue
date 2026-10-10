@@ -36,7 +36,8 @@
                 </el-select>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.minBitrateKbps')">
-                <el-input-number v-model="config.minBitrateKbps" :min="0" :step="32" controls-position="right" />
+                <el-input-number v-model="config.minBitrateKbps" :min="0" :step="10" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.minBitrateKbpsHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.minSampleRateHz')">
                 <el-input-number v-model="config.minSampleRateHz" :min="0" :step="1000" controls-position="right" />
@@ -515,8 +516,8 @@ function defaultConfig(): ConfigForm {
     enabled: true,
     downloadRoot: "/MUSIC/DOWNLOAD",
     cacheRoot: "/MUSIC/DOWNLOADCACHE",
-    qualityFloor: "320",
-    minBitrateKbps: 320,
+    qualityFloor: "any",
+    minBitrateKbps: 90,
     minSampleRateHz: 44100,
     preferLossless: true,
     rejectFakeLossless: true,
