@@ -46,9 +46,12 @@ import {
   DOWNLOAD_COOLDOWN_CODE,
   downloadAttemptKeyOf,
   effectiveCooldownDays,
-  isRecentlyAttempted,
+  isPermanentFailureCode,
   recordDownloadAttempt,
+  rollbackPermanentFailure,
+  shouldSkipByCooldown,
 } from "./attempts.js";
+import { purgeDeadSongs, type DeadSongPurgeResult } from "./deadSongPurge.js";
 import { ensureDownloadSource } from "./source.js";
 import {
   buildUpgradeQuality,
@@ -113,6 +116,12 @@ export interface FetchItemOutcome {
    * 否则 downloadRoot。flush 据此选对应媒体源入库（缺省 = 流水线 downloadRoot）。
    */
   destRoot?: string;
+  /**
+   * 下载尝试台账的稳定键（PATCH21）：库内歌 = songId，无库行退回 target.id。
+   * 终态结算（死链判定 / 源故障保护回滚）靠它把 items 与台账行对上，故必须在
+   * processTarget 创建 item 时就填好 —— 失败项拿不到 songId，只能靠这个键。
+   */
+  attemptKey?: string;
 }
 
 export interface FetchPipelineProgress {
@@ -130,7 +139,36 @@ export interface FetchPipelineResult {
   items: FetchItemOutcome[];
   counts: FetchPipelineCounts;
   warnings: string[];
+  /** 死链清理结果（PATCH21）：本轮把哪些网络歌移出曲库、歌单转了几条未匹配。 */
+  purge?: DeadSongPurgeResult;
 }
+
+/**
+ * 源整体故障保护（PATCH21）阈值：**本轮尝试数 ≥ MIN_TRIED（100）**、且「资源不存在类」
+ * 失败占比 ≥ RATIO，**并且本轮一首都没成功**（done === 0），才认定「源集体挂了」而不是
+ * 「这批歌都死了」，此时回滚本轮误加的永久失效计数、跳过清理。
+ *
+ * 判定必须覆盖**所有** A 类错误码，不能只看 NO_CANDIDATE：插件被禁用/凭据过期会刷
+ * NO_CANDIDATE，而签名链路失效（取到的 URL 一用就过期）会刷一片 HTTP_404 —— 两种都是
+ * 「一轮之内大批同向失败」。
+ *
+ * 2026-10-11 用户定调「**0/100 才判定**」：判据 = 尝试数 ≥ 100 且成功数严格为 0，两条同时满足。
+ *   - 样本量门槛：尝试数必须 ≥ 100 —— 小样本（例如单片 20 首）里偶发全灭，不足以断定源挂了；
+ *   - 成功率严格为 0：只要有**任何一首成功**，就证明源在工作、链路是通的，剩下的失败更
+ *     可能是「这批歌本身有问题」。
+ * 收紧前用过「成功率 < 20%」的宽松版：240 生产实测单轮 20 首里失败 13–16 首、A 类占比
+ * 65–75%、成功率 0–16% → 仍被判定为「源故障」并回滚计数 → `fail_count` 长期停在 0/1
+ * → **死链清理一次都跑不起来**（功能形同关闭）。
+ *   - tried 100 / done 0  → 触发（源真的挂了）✓
+ *   - tried  99 / done 0  → 不触发（样本不足，宁可多跑一轮清理）✓
+ *   - tried  20 / done 0  → 不触发 ✓
+ *   - tried 134 / done 83 → 不触发 ✓
+ * ⚠️ `settleDeadSongs` 是**按片**调用的（默认 chunkSize=20），单片尝试数远小于 100，
+ * 所以该保护在默认配置下**实际不会触发** —— 这是刻意选的「最保守」：宁可让死链清理正常
+ * 生效，也不冒险在小样本上误判源故障。把 chunkSize 调到 ≥100 时保护即恢复作用。
+ */
+const SOURCE_OUTAGE_MIN_TRIED = 100;
+const SOURCE_OUTAGE_RATIO = 0.5;
 
 /** 测试注入点：默认用真实实现，单测里整体替换。 */
 export interface FetchDeps {
@@ -150,9 +188,14 @@ export interface FetchDeps {
   searchLyrics: typeof searchLyrics;
   /** 封面 provider（同上；优先用 Candidate.coverUrl，缺了才调它）。 */
   searchCover: typeof searchCover;
-  /** 下载尝试台账（PATCH17）：冷却期内直接跳过；终态时记录（可轮转）。 */
-  isRecentlyAttempted: typeof isRecentlyAttempted;
+  /** 下载尝试台账（PATCH17 / 2026-10-11 定调 B）：窗口内试过即跳过，**永久失效类除外**
+   *  （否则 fail_count 永远停在 1，死链清理永不生效）；终态时记录（可轮转）。 */
+  shouldSkipByCooldown: typeof shouldSkipByCooldown;
   recordDownloadAttempt: typeof recordDownloadAttempt;
+  /** 死链清理（PATCH21）：任务终态把连续永久失败的网络歌移出曲库。 */
+  purgeDeadSongs: typeof purgeDeadSongs;
+  /** 源整体故障保护（PATCH21）：回滚本轮误加的永久失败计数。 */
+  rollbackPermanentFailure: typeof rollbackPermanentFailure;
 }
 
 const DEFAULT_DEPS: FetchDeps = {
@@ -170,8 +213,10 @@ const DEFAULT_DEPS: FetchDeps = {
   rankCandidates,
   searchLyrics,
   searchCover,
-  isRecentlyAttempted,
+  shouldSkipByCooldown,
   recordDownloadAttempt,
+  purgeDeadSongs,
+  rollbackPermanentFailure,
 };
 
 export interface RunFetchPipelineOptions {
@@ -744,7 +789,17 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         // 洗版走自己的冷却（fetch_upgrade_attempts），这里不记。
         if (!opts.originalDisposal && (item.status === "done" || item.status === "failed")) {
           try {
-            deps.recordDownloadAttempt(downloadAttemptKeyOf(t), batchId, item.status, effectiveCooldownDays(cfg));
+            deps.recordDownloadAttempt(
+              downloadAttemptKeyOf(t),
+              batchId,
+              item.status,
+              effectiveCooldownDays(cfg),
+              {
+                errorCode: item.errorCode,
+                // 只有「资源不存在类」才累计永久失效计数（见 attempts.PERMANENT_FAILURE_CODES）。
+                permanent: item.status === "failed" && isPermanentFailureCode(item.errorCode),
+              },
+            );
           } catch (e) {
             warnings.push(`尝试台账记录失败(忽略): ${msgOf(e)}`);
           }
@@ -786,7 +841,75 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     await flushChain;
   }
 
-  return { sourceId, items, counts, warnings };
+  // ==================== 终态结算：源故障保护 + 死链清理（PATCH21） ====================
+  const purge = settleDeadSongs(opts, items, warnings);
+
+  return { sourceId, items, counts, warnings, purge };
+
+  /**
+   * 终态结算（PATCH21）。放在整轮任务跑完、台账已写全之后做，**不进逐条热路径**
+   * （删库是不可逆动作，不该和下载混在一起）。
+   *
+   *   ① 源整体故障保护：本轮失败数够多、且 NO_CANDIDATE 占比过半 → 认定「源集体挂了」
+   *      而不是「这批歌都死了」，回滚本轮误加的永久失效计数，并跳过本轮的清理。
+   *      没有这层，插件被禁用 / 凭据过期一次就能把大批歌判死清出曲库。
+   *   ② 死链清理：把台账里连续永久失败达阈值的**网络歌**移出曲库，引用它的歌单条目
+   *      转成未匹配（保留外部元数据快照，之后可用「一键在线匹配」拉回来）。
+   *
+   * 洗版（originalDisposal）不参与：它不是入库流程，且本地文件还在，删歌是错的。
+   */
+  function settleDeadSongs(
+    ropts: RunFetchPipelineOptions,
+    outs: FetchItemOutcome[],
+    warns: string[],
+  ): DeadSongPurgeResult | undefined {
+    if (ropts.originalDisposal) return undefined;
+
+    const failed = outs.filter((i) => i.status === "failed");
+    const fatal = failed.filter((i) => isPermanentFailureCode(i.errorCode));
+    const done = outs.filter((i) => i.status === "done").length;
+    const tried = done + failed.length;
+    // 🔴 「0/100 才判定」（用户定调 2026-10-11）：必须**尝试 ≥100 首**且**一首都没成功**，
+    // 才认定为源整体故障；两者缺一不可（小样本不判、有成功就不判）。
+    if (
+      tried >= SOURCE_OUTAGE_MIN_TRIED &&
+      done === 0 &&
+      fatal.length / failed.length >= SOURCE_OUTAGE_RATIO
+    ) {
+      for (const it of fatal) {
+        if (!it.attemptKey) continue;
+        try {
+          deps.rollbackPermanentFailure(it.attemptKey);
+        } catch (e) {
+          warns.push(`源故障保护回滚失败(忽略): ${msgOf(e)}`);
+        }
+      }
+      // 必须落日志：warnings 数组不会落库也不会落日志，只 push 等于「静默跳过清理」，
+      // 运维侧完全看不到这次清理为什么没发生（2026-10-11 生产实测发现）。
+      const note =
+        `本次「资源不存在类」失败占 ${fatal.length}/${failed.length}（${Math.round(
+          (fatal.length / failed.length) * 100,
+        )}%），且本轮 ${tried} 首里一首都没成功（0/${tried}）→ 疑为源整体故障（插件停用 / 凭据过期 / 签名链路失效）：已回滚本轮永久失效计数并跳过死链清理`;
+      warns.push(note);
+      log.warn(note);
+      return undefined;
+    }
+
+    try {
+      const res = deps.purgeDeadSongs(cfg);
+      if (res && res.purged > 0) {
+        const note = `死链清理：移除 ${res.purged} 首永久失效的网络歌（歌单转未匹配 ${res.playlistEntries} 条）`;
+        warns.push(note);
+        log.info(note);
+      }
+      return res;
+    } catch (e) {
+      const note = `死链清理失败(忽略): ${msgOf(e)}`;
+      warns.push(note);
+      log.warn(note);
+      return undefined;
+    }
+  }
 
   // ==================== 单曲流水线（闭包） ====================
 
@@ -880,6 +1003,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       status: "queued",
       attempts: 0,
       rejected: [],
+      attemptKey: t ? downloadAttemptKeyOf(t) : undefined,
     };
     try {
       if (!t || !t.title) {
@@ -918,16 +1042,20 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         return item;
       }
 
-      // 2.5) 台账冷却（PATCH17）：最近 N 天试过（无论成败）→ 秒跳，不取链不预探不下载。
-      //      断点重跑 / 反复触发不再从头重试同一批失败项。洗版有自己的冷却
-      //      （upgradeCooldownDays / fetch_upgrade_attempts），这里不重复管。
+      // 2.5) 台账冷却（PATCH17；2026-10-11 定调 B）：窗口内试过 → 秒跳，不取链不预探不下载。
+      //      断点重跑 / 反复触发不再从头重试同一批失败项。
+      //      🔴 B 的例外：**永久失效类不进冷却**（判据封在 shouldSkipByCooldown 里）——
+      //      资源不存在类（404/410/451/NO_CANDIDATE/INTEGRITY_FAILED）不会自愈，必须每轮
+      //      重试才能把 fail_count 累积到 deadSongPurgeThreshold；否则冷却 30 天 > 自动间隔
+      //      15 天 → 永远只失败一次 → 死链清理一次都跑不起来（240 实测 fail_count>=2 恒 0）。
+      //      洗版有自己的冷却（upgradeCooldownDays / fetch_upgrade_attempts），这里不重复管。
       if (!opts.originalDisposal) {
         const cooldownDays = effectiveCooldownDays(cfg);
         const akey = downloadAttemptKeyOf(t);
-        if (cooldownDays > 0 && deps.isRecentlyAttempted(akey, cooldownDays)) {
+        if (cooldownDays > 0 && deps.shouldSkipByCooldown(akey, cooldownDays)) {
           item.status = "skipped";
           item.errorCode = DOWNLOAD_COOLDOWN_CODE;
-          item.errorMsg = `冷却期内已尝试过（${cooldownDays} 天窗口），跳过`;
+          item.errorMsg = `冷却期内已尝试过（${cooldownDays} 天窗口，非永久失效类），跳过`;
           return item;
         }
       }
@@ -1219,9 +1347,13 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     }
     if (t.durationSec && t.durationSec > 0 && Math.abs(pd - t.durationSec) > cfg.quality.durationToleranceSec) {
       cleanup();
+      // 必须用 DURATION_MISMATCH，**不能**沿用 INTEGRITY_FAILED：后者在
+      // PERMANENT_FAILURE_CODES 白名单里（见 attempts.ts），而「时长对不上」只说明
+      // 拿到的是另一个版本，文件本身完整、歌也还能在线播放。误用会把这种歌判成死链
+      // 移出曲库（2026-10-11 生产实测）。
       return {
         kind: "fail",
-        code: "INTEGRITY_FAILED",
+        code: "DURATION_MISMATCH",
         detail: `时长 ${pd.toFixed(1)}s 与目标 ${t.durationSec}s 偏差超容差 ${cfg.quality.durationToleranceSec}s`,
       };
     }

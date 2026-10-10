@@ -86,10 +86,13 @@ describe("verifyIntegrity — magic 档(挡服务端假成功)", () => {
 });
 
 describe("verifyIntegrity — probe 档", () => {
-  it("时长偏差超容差 → 失败", async () => {
+  it("时长偏差超容差 → 失败，且必须是 DURATION_MISMATCH（不得冒充 INTEGRITY_FAILED）", async () => {
     const r = await verifyIntegrity({ file: MP3, expect: { durationSec: 60, durationToleranceSec: 3 } }, "probe");
     expect(r.ok).toBe(false);
     expect(r.level).toBe("probe");
+    // 拿到的是另一个版本 ≠ 文件残缺：用 INTEGRITY_FAILED 会被永久失效白名单收进去，
+    // 于是「歌还在、还能在线播放」的条目会被判死链移出曲库（2026-10-11 生产实测）。
+    expect(r.code).toBe("DURATION_MISMATCH");
     expect(r.warnings.join("|")).toContain("时长");
   }, TMO.timeout);
 

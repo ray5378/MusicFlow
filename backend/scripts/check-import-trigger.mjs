@@ -13,7 +13,7 @@
 //   → 任务分栏白名单(frontend) → i18n(frontend)
 // 任何一处被重构掉，功能都只剩「悄悄没了」，所以逐处钉死。
 //
-// 六条规则：
+// 七条规则：
 //   R1 导入层广播：`importOnlineSongs` 收集「本轮**新入库**」的行 id，并在返回前
 //      `emitImportedSongs(addedSongIds, { providerId })`。这是唯一的平台歌曲落库收口点。
 //   R2 启动挂载：`src/index.ts` 从 fetch/importTrigger 引入并调用
@@ -27,6 +27,12 @@
 //   R5 i18n：`admin.fetch.jobs.kind.import` zh/en 都在（缺了会退化成裸 kind 串）。
 //   R6 钩子契约未被绕过：service.ts 不得再出现「直接 import fetch 层」的静态依赖
 //      （source 是底层，反向静态依赖会成环并让导入单测意外拉起真实下载）。
+//   R7 活跃间隔防抖（产品定调 2026-10-11 第二轮）：导入事件**不得直接建任务** ——
+//      大歌单会分多批广播，直连会把一次导入炸成一串「每批几首」的碎任务。必须
+//      ①并入待处理集合（enqueueImportedSongs）②持久化（settings 键 fetch.import.pending）
+//      ③按固定活跃间隔（IMPORT_TRIGGER_IDLE_MS = 5 分钟）延迟 ④到期才 flush 成**一个**任务
+//      ⑤启动时把上次没 flush 的集合捡回来继续计时。任何一环被拆掉都会静默退回「碎任务」
+//      或「静默不下载」，且都不会报错，故静态钉死。
 //
 // 零依赖 node 脚本（与 check-renderer-host.mjs 同款），挂 ci.yml 的守卫 job。
 import { existsSync, readFileSync } from "node:fs";
@@ -124,10 +130,57 @@ mustNotMatch(
   "source 层不得静态 import fetch 层（会成环并让导入单测意外拉起真实下载；必须走 hook 注册制）",
 );
 
+// ---------- R7 活跃间隔防抖（大歌单分多批广播 → 必须合并成一个任务） ----------
+mustMatch(
+  TRIGGER,
+  /^export const IMPORT_TRIGGER_IDLE_MS = 5 \* 60_000;$/,
+  "活跃间隔必须是固定 5 分钟常量（IMPORT_TRIGGER_IDLE_MS = 5 * 60_000）",
+);
+mustMatch(
+  TRIGGER,
+  /^const PENDING_KEY = "fetch\.import\.pending";$/,
+  "待处理集合必须持久化到 settings（键 fetch.import.pending），重启不丢",
+);
+mustMatch(
+  TRIGGER,
+  /^export function enqueueImportedSongs\(songIds: string\[\]\): number \{$/,
+  "必须提供 enqueueImportedSongs（只累积 + 重计时，不建任务）",
+);
+mustMatch(
+  TRIGGER,
+  /^setSetting\(PENDING_KEY, JSON\.stringify\(\[\.\.\.loadPending\(\)\]\)\);$/,
+  "并入待处理集合后必须落库（否则重启会丢一批）",
+);
+mustMatch(
+  TRIGGER,
+  /^\}, IMPORT_TRIGGER_IDLE_MS\);$/,
+  "延迟必须由 IMPORT_TRIGGER_IDLE_MS 驱动（满活跃间隔才 flush）",
+);
+mustMatch(
+  TRIGGER,
+  /^export function flushImportedSongs\(\): ImportTriggerResult \{$/,
+  "必须提供 flushImportedSongs（到期把累积并集下发成一个任务）",
+);
+mustMatch(
+  TRIGGER,
+  /^enqueueImportedSongs\(songIds\);$/,
+  "入库事件监听器必须走 enqueueImportedSongs（累积），不得直连建任务",
+);
+mustMatch(
+  TRIGGER,
+  /^armIdleTimer\(\);$/,
+  "启动时必须把上次未 flush 的待处理集合捡回来继续计时（重启恢复）",
+);
+mustNotMatch(
+  TRIGGER,
+  /triggerFetchForImportedSongs\(songIds\)/,
+  "监听器不得再直连 triggerFetchForImportedSongs —— 那会退回「一次导入炸一串碎任务」",
+);
+
 // ---------- 结果 ----------
 if (errors.length > 0) {
   console.error("\n入库即入队守卫：发现接线缺失（这条链断了不会报错，只会悄悄不下载）:");
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log("✓ 入库即入队链路完整（导入层广播 → 启动挂载 → fetch 层实现 → 分栏白名单 → i18n）");
+console.log("✓ 入库即入队链路完整（导入层广播 → 启动挂载 → fetch 层实现（含活跃间隔防抖）→ 分栏白名单 → i18n）");

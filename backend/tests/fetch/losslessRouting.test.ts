@@ -145,7 +145,7 @@ function makeDeps(over: Record<string, any> = {}): FetchDeps {
     rankCandidates: ((c: Candidate[]) => c) as any,
     searchLyrics: (async () => null) as any,
     searchCover: (async () => null) as any,
-    isRecentlyAttempted: (() => false) as any,
+    shouldSkipByCooldown: (() => false) as any,
     recordDownloadAttempt: (() => undefined) as any,
   };
   return { ...base, ...over } as unknown as FetchDeps;

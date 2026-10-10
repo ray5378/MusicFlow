@@ -26,6 +26,10 @@ name: ci
 #  11. 入库即入队守卫(scripts/check-import-trigger.mjs)——任何入库的网络歌曲都必须过
 #      一轮下载流程:导入层广播(importOnlineSongs)/启动挂载(注册制,不挂=永远不下载)/
 #      下载总开关/前端分栏白名单/i18n 逐处钉死(断了不报错,只会悄悄不下载)
+#  12. 死链清理守卫(scripts/check-dead-song-purge.mjs)——连续 N 次「资源不存在类」失败
+#      的网络歌移出曲库时:白名单不得混入可恢复码(否则误删还能在线播的歌)、
+#      「转未匹配」必须先于删 songs 行(否则快照丢失再也拉不回来)、只删 web 行、
+#      源整体故障保护不得丢(否则插件停用一次清空曲库)。破坏全是静默且不可逆的。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -165,6 +169,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验导入层广播/启动挂载/下载总开关/分栏白名单/i18n 全部还在
         run: node backend/scripts/check-import-trigger.mjs
+
+  # 死链清理(把连续永久失败的网络歌移出曲库)的静态钉子。这条链的破坏**静默且不可逆**:
+  # 白名单混入可恢复码会误删「还能在线播放」的歌;转未匹配与删行顺序颠倒会让
+  # external_* 快照丢失(歌单只剩「未知歌曲」,一键在线匹配再也拉不回来);去掉 web 行
+  # 保护会连本地实体文件一起清掉;去掉源整体故障保护,插件停用一次就能清空整个曲库。
+  # 零依赖 node 脚本,秒级完成。
+  dead-song-purge-guard:
+    name: 死链清理守卫(永久失效歌曲移出曲库的可逆性与安全性)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验白名单/转未匹配顺序/web 边界/快照回填/源故障保护/单轮上限/配置同步
+        run: node backend/scripts/check-dead-song-purge.mjs
 
   test:
     name: 类型检查 + 全量测试

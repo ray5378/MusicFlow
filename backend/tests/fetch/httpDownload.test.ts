@@ -81,13 +81,43 @@ describe("downloadToFile 正常下载", () => {
 });
 
 describe("downloadToFile 状态码", () => {
-  it("404 → HTTP_4XX", async () => {
+  it("404 → HTTP_404（细分码：资源不存在，参与永久失效判定）", async () => {
     const base = await start((_req, res) => {
       res.writeHead(404);
       res.end("not found");
     });
     await expectCode(
       downloadToFile({ url: `${base}/x.mp3`, destPath: dest("404.part"), ssrfGuard: false }),
+      "HTTP_404",
+    );
+  });
+
+  it("410 / 451 → HTTP_410 / HTTP_451（已下架 / 法律原因不可用）", async () => {
+    const b410 = await start((_req, res) => {
+      res.writeHead(410);
+      res.end("gone");
+    });
+    await expectCode(
+      downloadToFile({ url: `${b410}/x.mp3`, destPath: dest("410.part"), ssrfGuard: false }),
+      "HTTP_410",
+    );
+    const b451 = await start((_req, res) => {
+      res.writeHead(451);
+      res.end("unavailable for legal reasons");
+    });
+    await expectCode(
+      downloadToFile({ url: `${b451}/x.mp3`, destPath: dest("451.part"), ssrfGuard: false }),
+      "HTTP_451",
+    );
+  });
+
+  it("429 → 仍归 HTTP_4XX（限流可恢复，不得参与永久失效判定）", async () => {
+    const base = await start((_req, res) => {
+      res.writeHead(429);
+      res.end("too many requests");
+    });
+    await expectCode(
+      downloadToFile({ url: `${base}/x.mp3`, destPath: dest("429.part"), ssrfGuard: false }),
       "HTTP_4XX",
     );
   });
@@ -164,6 +194,72 @@ describe("downloadToFile 重定向", () => {
       }),
       "SSRF_BLOCKED",
     );
+  });
+});
+
+describe("SSRF 白名单 CIDR（2026-10-11：整段内网一次性授权）", () => {
+  it("trustedHosts 用 CIDR 放行整段内网：127.0.0.0/8 命中 127.0.0.1（不被内网段拦截）", async () => {
+    const body = Buffer.from("cidr-ok");
+    const base = await start((_req, res) => {
+      res.writeHead(200);
+      res.end(body);
+    });
+    const r = await downloadToFile({
+      url: `${base}/a.mp3`,
+      destPath: dest("cidr-ok.part"),
+      ssrfGuard: true,
+      trustedHosts: ["127.0.0.0/8"],
+    });
+    expect(r.httpStatus).toBe(200);
+    expect(r.bytes).toBe(body.length);
+  });
+
+  it("CIDR 覆盖不到的网段仍被拦截：192.168.10.0/24 不放行 127.0.0.1", async () => {
+    const base = await start((_req, res) => {
+      res.writeHead(200);
+      res.end("x");
+    });
+    await expectCode(
+      downloadToFile({
+        url: `${base}/a.mp3`,
+        destPath: dest("cidr-miss.part"),
+        ssrfGuard: true,
+        trustedHosts: ["192.168.10.0/24"],
+      }),
+      "SSRF_BLOCKED",
+    );
+  });
+
+  it("非法 CIDR（前缀越界）→ 不匹配，保守拦截", async () => {
+    const base = await start((_req, res) => {
+      res.writeHead(200);
+      res.end("x");
+    });
+    await expectCode(
+      downloadToFile({
+        url: `${base}/a.mp3`,
+        destPath: dest("cidr-bad.part"),
+        ssrfGuard: true,
+        trustedHosts: ["127.0.0.0/33"],
+      }),
+      "SSRF_BLOCKED",
+    );
+  });
+
+  it("CIDR 与精确主机名 / *.通配 混用互不影响", async () => {
+    const body = Buffer.from("mixed");
+    const base = await start((_req, res) => {
+      res.writeHead(200);
+      res.end(body);
+    });
+    const r = await downloadToFile({
+      url: `${base}/a.mp3`,
+      destPath: dest("cidr-mixed.part"),
+      ssrfGuard: true,
+      trustedHosts: ["music-dl.lan", "*.example.com", "10.0.0.0/8", "127.0.0.0/8"],
+    });
+    expect(r.httpStatus).toBe(200);
+    expect(r.bytes).toBe(body.length);
   });
 });
 

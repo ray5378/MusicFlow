@@ -80,7 +80,13 @@ export type FetchErrorCode =
   | "TIMEOUT"
   | "STALL"
   | "HTTP_403"
+  // HTTP_4XX 细分成三个「资源本身不存在」的码（永久失效判定用，见 attempts.ts
+  // PERMANENT_FAILURE_CODES）：其余 4xx（401 凭据过期 / 408 请求超时 / 429 限流 /
+  // 416 Range 不满足 …）都是可恢复的，仍归 HTTP_4XX 兜底，**绝不参与永久失效计数**。
   | "HTTP_4XX"
+  | "HTTP_404" // 资源不存在
+  | "HTTP_410" // 资源已下架
+  | "HTTP_451" // 因法律原因不可用
   | "HTTP_5XX"
   | "TOO_LARGE"
   | "SSRF_BLOCKED"
@@ -91,6 +97,14 @@ export type FetchErrorCode =
   | "MOVE_FAILED"
   | "SCAN_FAILED"
   // MusicFetch 编排层（orchestrator）专用：
+  // DURATION_MISMATCH：下载到的音频**时长与目标曲目偏差超容差** —— 拿到的是另一个版本
+  //   （现场版 / 混音 / 试听），资源本身**存在且完整**，只是不是我们要的那一版。
+  //   必须与 INTEGRITY_FAILED（字节残缺 / 文件头不对 / 根本解析不了）严格分开：
+  //   前者是「换一版就可能成」，后者才是「源站确实给不出可用文件」。
+  //   历史坑（2026-10-11 生产实测）：此前两者共用 INTEGRITY_FAILED，而它在
+  //   PERMANENT_FAILURE_CODES 白名单里 → 只是版本时长不同、仍能在线播放的歌会被
+  //   当作死链移出曲库（用户侧表现为「歌莫名消失」）。
+  | "DURATION_MISMATCH"
   | "ALREADY_IN_LIBRARY" // 本地/WebDAV 已有，按用户要求跳过
   | "COOLDOWN_SKIPPED" // PATCH17 台账冷却：最近试过（无论成败），秒跳
   | "DUPLICATE_TARGET" // 同一任务内重复的曲目

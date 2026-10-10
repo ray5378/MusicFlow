@@ -47,6 +47,13 @@ export interface FetchConfig {
   /** 下载尝试冷却天数：最近 N 天内试过（无论成败）的歌在下载任务里直接跳过（0 = 关闭）。
    *  断点续跑/反复触发不再从头重试（PATCH17，产品定调 2026-10-10）。默认 7 */
   downloadCooldownDays: number;
+  /**
+   * 死链清理阈值：一首网络歌连续 N 轮都以「资源不存在类」原因失败
+   * （NO_CANDIDATE / HTTP_404 / HTTP_410 / HTTP_451 / INTEGRITY_FAILED），
+   * 即从曲库移除，并把引用它的歌单条目转成未匹配。0 = 关闭清理（只记不删）。
+   * 默认 2（连续两次即判死，产品定调 2026-10-11）—— 移除可逆：歌单条目保留
+   * external_* 快照，之后可用「一键在线匹配」拉回来。调大更保守。 */
+  deadSongPurgeThreshold: number;
   /** 落盘命名模板（复用 naming.ts） */
   naming: NamingConfig;
   /** 质量门槛（复用 types.ts） */
@@ -141,6 +148,7 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   libraryAutoIntervalDays: 1,
   libraryAutoTimeOfDay: "03:00",
   downloadCooldownDays: 7,
+  deadSongPurgeThreshold: 2,
   naming: DEFAULT_NAMING_CONFIG,
   quality: DEFAULT_QUALITY_CONFIG,
   skipIfInLibrary: true,
@@ -221,6 +229,11 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
       typeof p.maxConcurrentTargets === "number" && Number.isFinite(p.maxConcurrentTargets)
         ? Math.min(64, Math.max(1, Math.floor(p.maxConcurrentTargets)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentTargets,
+    // PATCH21 死链清理阈值：0（关闭）..20，非有限数回落默认 3。
+    deadSongPurgeThreshold:
+      typeof p.deadSongPurgeThreshold === "number" && Number.isFinite(p.deadSongPurgeThreshold)
+        ? Math.min(20, Math.max(0, Math.floor(p.deadSongPurgeThreshold)))
+        : DEFAULT_FETCH_CONFIG.deadSongPurgeThreshold,
     syncToPlaylistIds: p.syncToPlaylistIds
       ? [...p.syncToPlaylistIds]
       : [...DEFAULT_FETCH_CONFIG.syncToPlaylistIds],

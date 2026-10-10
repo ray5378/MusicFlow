@@ -67,7 +67,10 @@ export interface DownloadOptions {
   ssrfGuard?: boolean;
   /** 空数组/未给 = 不限 */
   hostAllowlist?: string[];
-  /** 可信内网主机（管理员显式授权，如自建 go-music-dl）：命中即放行，不做内网段拦截。 */
+  /**
+   * 可信内网主机（管理员显式授权，如自建 go-music-dl）：命中即放行，不做内网段拦截。
+   * 支持「主机名 / `*.子域` / IPv4 CIDR（如 `192.168.10.0/24`，整段内网一次性授权）」。
+   */
   trustedHosts?: string[];
   signal?: AbortSignal;
 }
@@ -157,12 +160,58 @@ export function isBlockedIp(ip: string): boolean {
   return true;
 }
 
-/** hostname 是否命中白名单（支持 '*.example.com' 形式）。 */
+/** IPv4 → 32 位无符号整数；非法返回 null。 */
+function ipv4ToInt(ip: string): number | null {
+  if (!net.isIPv4(ip)) return null;
+  const p = ip.split(".").map((x) => Number.parseInt(x, 10));
+  return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
+}
+
+/** 解析 IPv4 CIDR（`192.168.10.0/24`）→ { base, mask }；非法返回 null。 */
+function parseCidr(raw: string): { base: number; mask: number } | null {
+  const m = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(String(raw ?? "").trim());
+  if (!m) return null;
+  const base = ipv4ToInt(m[1]);
+  const bits = Number.parseInt(m[2], 10);
+  if (base === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return { base: (base & mask) >>> 0, mask };
+}
+
+/** ip 是否落在 cidrs 中任意一段之内（IPv4）。 */
+function ipInAnyCidr(ip: string, cidrs: string[]): boolean {
+  const v = ipv4ToInt(ip);
+  if (v === null) return false;
+  for (const raw of cidrs) {
+    const c = parseCidr(raw);
+    if (c && ((v & c.mask) >>> 0) === c.base) return true;
+  }
+  return false;
+}
+
+/** 从白名单里挑出 CIDR 形式的条目（其余是主机名 / 通配域名）。 */
+function cidrEntries(list: string[]): string[] {
+  return list.filter((x) => String(x ?? "").includes("/"));
+}
+
+/**
+ * hostname 是否命中白名单。支持三种写法：
+ *   - 精确主机名：`nas.local`
+ *   - 通配子域：`*.example.com`
+ *   - **IPv4 CIDR**：`192.168.10.0/24`（整段内网一次性授权，2026-10-11）
+ *
+ * CIDR 在**此处**只能命中「主机名本身就是 IP」的情况；主机名要先解析才能比对时，
+ * 由调用方在 DNS 解析后用 `ipInAnyCidr` 再判一次（见 assertUrlAllowed）。
+ */
 function matchHostAllowlist(hostname: string, allowlist: string[]): boolean {
   const h = hostname.toLowerCase();
   for (const raw of allowlist) {
     const p = String(raw ?? "").trim().toLowerCase();
     if (!p) continue;
+    if (p.includes("/")) {
+      if (ipInAnyCidr(h, [p])) return true; // h 必须是字面 IP 才可能命中
+      continue;
+    }
     if (p.startsWith("*.")) {
       const suffix = p.slice(2);
       if (h === suffix || h.endsWith(`.${suffix}`)) return true;
@@ -239,6 +288,12 @@ async function assertUrlAllowed(
   }
   if (addresses.length === 0) {
     throw new DownloadError("SSRF_BLOCKED", `主机 ${hostname} 解析结果为空`);
+  }
+  // 可信 CIDR 的二次判定：主机名（如 `nas.local`）解析到可信网段内 → 一并放行。
+  // （字面 IP 的情形在前面 matchHostAllowlist 已经放行了。）
+  const trustedCidrs = cidrEntries(trusted);
+  if (trustedCidrs.length > 0 && addresses.some((a) => ipInAnyCidr(a.address, trustedCidrs))) {
+    return;
   }
   for (const a of addresses) {
     if (isBlockedIp(a.address)) {
@@ -499,7 +554,19 @@ export async function downloadToFile(opts: DownloadOptions): Promise<DownloadRes
     }
     if (status >= 400 && status < 500) {
       drain(res);
-      throw new DownloadError("HTTP_4XX", `源站返回 ${status}`, { httpStatus: status });
+      // 细分「资源本身不存在」的三个码：它们是永久失效判定（attempts.ts
+      // PERMANENT_FAILURE_CODES）的唯一 HTTP 依据。其余 4xx 可恢复 —— 401 是插件
+      // 凭据过期、408 是请求超时、429 是限流、416 是 Range 不满足，重试/换链就能成，
+      // 一律留在 HTTP_4XX 兜底，**不进永久失效计数**（否则会误删歌）。
+      const code: FetchErrorCode =
+        status === 404
+          ? "HTTP_404"
+          : status === 410
+            ? "HTTP_410"
+            : status === 451
+              ? "HTTP_451"
+              : "HTTP_4XX";
+      throw new DownloadError(code, `源站返回 ${status}`, { httpStatus: status });
     }
     if (status >= 500) {
       drain(res);

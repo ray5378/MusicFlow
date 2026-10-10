@@ -176,6 +176,13 @@ export function registerFetch(app: Hono): void {
         ? Math.min(365, Math.max(0, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.downloadCooldownDays;
     }
+    // 死链清理阈值（PATCH21，产品定调 2026-10-11）：整数 0-20（0 = 关闭清理）。
+    if ("deadSongPurgeThreshold" in override) {
+      const n = Number((override as Record<string, unknown>).deadSongPurgeThreshold);
+      (override as Record<string, unknown>).deadSongPurgeThreshold = Number.isFinite(n)
+        ? Math.min(20, Math.max(0, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.deadSongPurgeThreshold;
+    }
     // jobRetentionDays：整数 0-3650（0 = 关闭自动清理）。
     if ("jobRetentionDays" in override) {
       const n = Number((override as Record<string, unknown>).jobRetentionDays);

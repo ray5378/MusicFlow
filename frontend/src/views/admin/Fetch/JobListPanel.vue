@@ -34,9 +34,6 @@
       <el-table-column :label="t('admin.fetch.jobs.colId')" width="120">
         <template #default="{ row }"><span class="mono">{{ shortId(row.id) }}</span></template>
       </el-table-column>
-      <el-table-column v-if="showKind" :label="t('admin.fetch.jobs.colKind')" width="100">
-        <template #default="{ row }">{{ kindText(row.kind) }}</template>
-      </el-table-column>
       <el-table-column :label="t('admin.fetch.jobs.colStatus')" width="110">
         <template #default="{ row }">
           <el-tag :type="statusTagType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
@@ -83,7 +80,6 @@
           <div class="detail-meta">
             <span class="mono">{{ detail.id }}</span>
             <el-tag :type="statusTagType(detail.status)" size="small">{{ statusText(detail.status) }}</el-tag>
-            <el-tag v-if="showKind" size="small" type="info">{{ kindText(detail.kind) }}</el-tag>
           </div>
           <div class="detail-counts">
             <span>{{ t('admin.fetch.jobs.colTotal') }}: {{ detail.counts?.total ?? 0 }}</span>
@@ -176,7 +172,6 @@ import {
   statusText as fmtStatusText,
   statusTagType,
   errorText as fmtErrorText,
-  kindText as fmtKindText,
   shortId,
   formatBytes,
   formatDateTime,
@@ -191,12 +186,10 @@ const props = withDefaults(
   defineProps<{
     /** 只拉这几类任务（后端 kind IN 过滤）。下载面板传全部非洗版，洗版面板传 ["upgrade"]。 */
     kinds: string[];
-    /** 是否显示「类型」列（单一面板内 kind 唯一时无意义）。 */
-    showKind?: boolean;
     /** 是否在挂载时立即拉一次。 */
     immediate?: boolean;
   }>(),
-  { showKind: false, immediate: true },
+  { immediate: true },
 );
 
 const emit = defineEmits<{ (e: "created", payload: { id: string }): void }>();
@@ -207,7 +200,6 @@ const tt = t as unknown as TFn;
 // 模板里保持与原实现同名的薄封装，避免大面积改模板。
 const statusText = (s?: string) => fmtStatusText(tt, s);
 const errorText = (c?: string) => fmtErrorText(tt, c);
-const kindText = (k?: string) => fmtKindText(tt, k);
 
 const jobs = ref<FetchJobSummary[]>([]);
 const jobsLoading = ref(false);

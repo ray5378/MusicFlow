@@ -252,7 +252,11 @@ export async function verifyIntegrity(
     }
     if (Math.abs(media.durationSec - expect.durationSec) > tol) {
       return {
-        ok: false, level: "probe", code: "INTEGRITY_FAILED", detail,
+        // 时长对不上 = 拿到的是**另一个版本**（现场版/混音），文件本身解析正常、完整。
+        // 必须用 DURATION_MISMATCH，不能用 INTEGRITY_FAILED —— 后者在
+        // PERMANENT_FAILURE_CODES 白名单里，会把这种「歌还在、还能在线播放」的条目
+        // 判成死链移出曲库（2026-10-11 生产实测）。
+        ok: false, level: "probe", code: "DURATION_MISMATCH", detail,
         warnings: [...warnings, `时长偏差超容差: 期望 ${expect.durationSec}s±${tol}s,实际 ${media.durationSec}s`],
       };
     }

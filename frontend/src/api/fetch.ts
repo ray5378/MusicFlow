@@ -80,6 +80,8 @@ export interface FetchConfig {
   strictBestTier?: boolean;
   /** 下载尝试冷却天数：最近 N 天试过的歌直接跳过（0 = 关闭）。默认 7 */
   downloadCooldownDays?: number;
+  /** 死链清理阈值：连续 N 次「资源不存在类」失败即移出曲库（0 = 关闭）。默认 2 */
+  deadSongPurgeThreshold?: number;
   transcodeEnabled?: boolean;
   transcodeTarget?: string;
   transcodeSampleRateHz?: number;

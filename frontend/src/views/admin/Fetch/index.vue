@@ -65,6 +65,10 @@
                 <el-input-number v-model="config.downloadCooldownDays" :min="0" :max="365" controls-position="right" />
                 <div class="hint">{{ t('admin.fetch.config.downloadCooldownDaysHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.deadSongPurgeThreshold')">
+                <el-input-number v-model="config.deadSongPurgeThreshold" :min="0" :max="20" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.deadSongPurgeThresholdHint') }}</div>
+              </el-form-item>
               <el-form-item :label="t('admin.fetch.config.ssrfTrustedHosts')">
                 <el-input v-model="ssrfHostsText" :placeholder="t('admin.fetch.config.ssrfTrustedHostsPlaceholder')" />
                 <div class="hint">{{ t('admin.fetch.config.ssrfTrustedHostsHint') }}</div>
@@ -363,7 +367,7 @@
 
       <!-- ===== 4. 下载任务列表（全部非洗版：搜索导入 / 全库 / 重试） ===== -->
       <el-tab-pane :label="t('admin.fetch.tabJobs')" name="jobs">
-        <JobListPanel ref="downloadJobsRef" :kinds="DOWNLOAD_JOB_KINDS" show-kind />
+        <JobListPanel ref="downloadJobsRef" :kinds="DOWNLOAD_JOB_KINDS" />
       </el-tab-pane>
 
       <!-- ===== 5. 洗版任务列表（独立模块，与下载任务完全分开） ===== -->
@@ -438,6 +442,7 @@ function defaultConfig(): ConfigForm {
     skipIfInLibrary: true,
     strictBestTier: true,
     downloadCooldownDays: 7,
+    deadSongPurgeThreshold: 2,
     transcodeEnabled: true,
     transcodeTarget: "flac",
     transcodeSampleRateHz: "follow",
@@ -501,6 +506,7 @@ async function loadConfig() {
     if (merged.maxConcurrentTargets == null) merged.maxConcurrentTargets = 3;
     if (merged.libraryAutoContinue == null) merged.libraryAutoContinue = true;
     if (merged.downloadCooldownDays == null) merged.downloadCooldownDays = 7;
+    if (merged.deadSongPurgeThreshold == null) merged.deadSongPurgeThreshold = 2;
     if (merged.libraryCooldownDays == null) merged.libraryCooldownDays = 30;
     if (merged.libraryAutoEnabled == null) merged.libraryAutoEnabled = false;
     if (merged.libraryAutoIntervalDays == null) merged.libraryAutoIntervalDays = 1;

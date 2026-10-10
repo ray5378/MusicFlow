@@ -747,6 +747,11 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     updateFetchJobStatus(jobId, status);
   }
 
+  // PATCH21 观测修复：`result.warnings` 此前只被原样返回，而子进程返回值既不落库也不落日志
+  // —— 流水线的关键告警（源整体故障保护、死链清理结果、台账写入失败…）等于**静默丢弃**，
+  // 运维侧看不到「这次清理为什么没发生」。这里统一落到日志，保证任何一条告警都可追溯。
+  for (const w of result.warnings) log.warn(`[fetch ${jobId.slice(0, 8)}] ${w}`);
+
   return { jobId, chunk, hasMore, counts: mergedCounts, warnings: result.warnings };
 }
 

@@ -53,6 +53,21 @@ async function defaultDownload(o: { url: string; destPath: string }) {
 
 type AnyDeps = { [K in keyof FetchDeps]?: any };
 
+/** 空的死链清理结果（PATCH21 桩默认值）。 */
+const emptyPurge = {
+  enabled: true,
+  threshold: 2,
+  candidates: 0,
+  purged: 0,
+  skippedLocal: 0,
+  deferred: 0,
+  playlistEntries: 0,
+  covers: 0,
+  lyrics: 0,
+  errors: 0,
+  details: [] as unknown[],
+};
+
 function makeDeps(over: AnyDeps = {}): FetchDeps {
   const base: FetchDeps = {
     collectCandidates: (async () => []) as any,
@@ -95,9 +110,14 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
     searchLyrics: (async () => null) as any,
     searchCover: (async () => null) as any,
     // PATCH17 下载尝试台账：默认桩掉（真实实现是 DB 单例，跨用例污染 —— 用例 A 记过的
-    // 键会让用例 B 的同键 target 被冷却秒跳）。台账行为由 attempts.test.ts 专测。
-    isRecentlyAttempted: (() => false) as any,
+    // 键会让用例 B 的同键 target 被冷却秒跳）。台账行为由 attempts.test.ts 专测；
+    // 2026-10-11 定调 B 后冷却入口是 shouldSkipByCooldown（永久失效类不冷却）。
+    shouldSkipByCooldown: (() => false) as any,
     recordDownloadAttempt: (() => undefined) as any,
+    // PATCH21 死链清理：同样桩掉。真实实现直连 DB 单例（会跨用例污染），且它删库是
+    // 不可逆动作，单测里绝不该真跑。结算逻辑由 deadSongPurge.test.ts 与本文件 29-31 专测。
+    purgeDeadSongs: (() => ({ ...emptyPurge })) as any,
+    rollbackPermanentFailure: (() => undefined) as any,
   };
   return { ...base, ...over } as FetchDeps;
 }
@@ -306,6 +326,12 @@ describe("runFetchPipeline", () => {
     const r = await run({ targets: [tgt({ id: "t1", title: "Song", durationSec: 200 })], sourceId: "src-1", deps });
     expect(r.items[0].status).toBe("failed");
     expect(r.items[0].rejected[0].detail).toMatch(/时长/);
+    // 时长超差在本流水线里可能由两道守卫拦截：上游 meetsFloor → BELOW_BAR（本例先命中），
+    // 或完整歌曲守卫 → DURATION_MISMATCH。真正要钉死的是**两道都绝不能落成
+    // INTEGRITY_FAILED** —— 它在永久失效白名单里，会把「只是下了别的版本、歌还能在线
+    // 播放」的条目判成死链移出曲库（2026-10-11 生产实测）。
+    expect(["BELOW_BAR", "DURATION_MISMATCH"]).toContain(r.items[0].errorCode);
+    expect(r.items[0].errorCode).not.toBe("INTEGRITY_FAILED");
     expect(finalize).not.toHaveBeenCalled();
   });
 
@@ -772,7 +798,7 @@ describe("runFetchPipeline", () => {
     const deps = makeDeps({
       collectCandidates: collect,
       downloadToFile: dl,
-      isRecentlyAttempted: ((k: string) => k === "t1") as any,
+      shouldSkipByCooldown: ((k: string) => k === "t1") as any,
     });
     const r = await run({
       targets: [tgt({ id: "t1", title: "A", durationSec: 200 })],
@@ -830,5 +856,236 @@ describe("runFetchPipeline", () => {
       config: { maxConcurrentTargets: 1 },
     });
     expect(maxInFlight).toBe(1);
+  });
+
+  it("29. 终态结算（PATCH21）：purgeDeadSongs 被调用一次，结果透出到 result.purge", async () => {
+    const purge = vi.fn(() => ({
+      ...emptyPurge,
+      candidates: 1,
+      purged: 1,
+      playlistEntries: 1,
+      details: [{ songId: "s1", title: "T", errorCode: "HTTP_404", failCount: 2, playlistEntries: 1 }],
+    }));
+    const r = await run({
+      targets: [tgt({ id: "t1", title: "T1" })],
+      sourceId: "src-1",
+      deps: makeDeps({ collectCandidates: vi.fn(oneMp3), purgeDeadSongs: purge }),
+    });
+    expect(purge).toHaveBeenCalledTimes(1);
+    expect(r.purge?.purged).toBe(1);
+    expect(r.purge?.details[0]?.songId).toBe("s1");
+  });
+
+  it("30. 源整体故障保护（PATCH21）：整轮 100+ 首全灭且零成功 → 回滚计数且跳过清理", async () => {
+    // 插件被禁用 / 凭据过期时，一轮任务会整批刷 NO_CANDIDATE。
+    // 没有这道闸，一次源故障就能把大批歌判死并清出曲库。
+    // 用户定调 2026-10-11「0/100 才判定」：样本量必须 ≥ 100 才够格判定源故障。
+    const purge = vi.fn(() => ({ ...emptyPurge, purged: 99 }));
+    const rollback = vi.fn();
+    const deps = makeDeps({
+      collectCandidates: vi.fn(async () => []), // 全部 NO_CANDIDATE
+      purgeDeadSongs: purge,
+      rollbackPermanentFailure: rollback,
+    });
+    const targets = Array.from({ length: 120 }, (_, i) => tgt({ id: `t${i}`, title: `T${i}` }));
+
+    const r = await run({ targets, sourceId: "src-1", deps });
+
+    expect(r.counts.failed).toBe(120);
+    expect(rollback).toHaveBeenCalledTimes(120); // 每首误加的计数都退回
+    expect(purge).not.toHaveBeenCalled(); // 且本轮不清理
+    expect(r.purge).toBeUndefined();
+    expect(r.warnings.some((w) => w.includes("源整体故障"))).toBe(true);
+  });
+
+  it("31. 保护不误伤：失败数不足样本量门槛（<100）时照常清理", async () => {
+    const purge = vi.fn(() => ({ ...emptyPurge, purged: 3 }));
+    const deps = makeDeps({
+      collectCandidates: vi.fn(async () => []),
+      purgeDeadSongs: purge,
+    });
+    const targets = Array.from({ length: 3 }, (_, i) => tgt({ id: `t${i}`, title: `T${i}` }));
+
+    const r = await run({ targets, sourceId: "src-1", deps });
+
+    expect(purge).toHaveBeenCalledTimes(1); // 3 首失败 < 样本量门槛 100 → 视为零散死链
+    expect(r.purge?.purged).toBe(3);
+  });
+
+  it("32. 源故障保护不误判（PATCH21 生产修复）：A 类占比过半但本轮有歌成功 → 照常累计与清理", async () => {
+    // 240 生产实测：一轮 500 首里 done 83 / failed 134，A 类占比 54.5% ≥ 50%，
+    // 但同一轮有 83 首成功 —— 源明明在工作，只是这批歌本身有问题。
+    // 只看 A 类占比的旧条件会把这种轮次也判成「源整体故障」并回滚计数，
+    // 于是 fail_count 永远停在 0/1，死链清理一次都跑不起来。成功率条件正是修这个误判。
+    const purge = vi.fn(() => ({ ...emptyPurge, purged: 4 }));
+    const rollback = vi.fn();
+    const deps = makeDeps({
+      // 6 首取不到候选（A 类失败），4 首正常下完（本轮有成功 → 不该判源故障）
+      collectCandidates: vi.fn(async (p: { target?: { id?: string } }) =>
+        String(p?.target?.id ?? "").startsWith("dead") ? [] : oneMp3(),
+      ) as never,
+      purgeDeadSongs: purge,
+      rollbackPermanentFailure: rollback,
+    });
+    const targets = [
+      ...Array.from({ length: 6 }, (_, i) => tgt({ id: `dead${i}`, title: `D${i}` })),
+      ...Array.from({ length: 4 }, (_, i) => tgt({ id: `ok${i}`, title: `O${i}` })),
+    ];
+
+    const r = await run({ targets, sourceId: "src-1", deps });
+
+    expect(r.counts.failed).toBe(6);
+    expect(r.counts.done).toBe(4);
+    expect(rollback).not.toHaveBeenCalled(); // 源没挂，不许回滚
+    expect(purge).toHaveBeenCalledTimes(1); // 照常清理
+    expect(r.purge?.purged).toBe(4);
+    expect(r.warnings.some((w) => w.includes("源整体故障"))).toBe(false);
+  });
+
+  it("33. 源真的挂了（100 首零成功）仍必须触发保护：0/100 → 回滚且不清理", async () => {
+    const purge = vi.fn(() => ({ ...emptyPurge, purged: 99 }));
+    const rollback = vi.fn();
+    const deps = makeDeps({
+      collectCandidates: vi.fn(async () => []), // 零成功、全 A 类失败
+      purgeDeadSongs: purge,
+      rollbackPermanentFailure: rollback,
+    });
+    const targets = Array.from({ length: 100 }, (_, i) => tgt({ id: `t${i}`, title: `T${i}` }));
+
+    const r = await run({ targets, sourceId: "src-1", deps });
+
+    expect(rollback).toHaveBeenCalledTimes(100);
+    expect(purge).not.toHaveBeenCalled();
+    expect(r.warnings.some((w) => w.includes("源整体故障"))).toBe(true);
+  });
+
+  it("34. 样本量边界：99 首零成功**不**判源故障（0/100 门槛），照常清理", async () => {
+    // 「0/100 才判定」的**下边界**：只有 99 次尝试时，样本量不够，宁可多跑一轮清理也不判源故障。
+    const purge = vi.fn(() => ({ ...emptyPurge, purged: 99 }));
+    const rollback = vi.fn();
+    const deps = makeDeps({
+      collectCandidates: vi.fn(async () => []),
+      purgeDeadSongs: purge,
+      rollbackPermanentFailure: rollback,
+    });
+    const targets = Array.from({ length: 99 }, (_, i) => tgt({ id: `t${i}`, title: `T${i}` }));
+
+    const r = await run({ targets, sourceId: "src-1", deps });
+
+    expect(r.counts.failed).toBe(99);
+    expect(rollback).not.toHaveBeenCalled(); // 样本不足 → 不判源故障
+    expect(purge).toHaveBeenCalledTimes(1); // 照常清理
+    expect(r.warnings.some((w) => w.includes("源整体故障"))).toBe(false);
+  });
+
+  it("35. 成功率必须严格为 0：100 首里只要 1 首成功，A 类占比再高也不判源故障", async () => {
+    // 「0/100」的另一个维度：样本够了但**有成功** → 不判源故障。
+    // 旧的「成功率 < 20%」宽松版会判（1/100 = 1%），把源好使的轮次误判成源挂 → 死链清理永不生效。
+    const purge = vi.fn(() => ({ ...emptyPurge, purged: 99 }));
+    const rollback = vi.fn();
+    const deps = makeDeps({
+      collectCandidates: vi.fn(async (p: { target?: { id?: string } }) =>
+        String(p?.target?.id ?? "").startsWith("dead") ? [] : oneMp3(),
+      ) as never,
+      purgeDeadSongs: purge,
+      rollbackPermanentFailure: rollback,
+    });
+    const targets = [
+      ...Array.from({ length: 99 }, (_, i) => tgt({ id: `dead${i}`, title: `D${i}` })),
+      ...Array.from({ length: 1 }, (_, i) => tgt({ id: `ok${i}`, title: `O${i}` })),
+    ];
+
+    const r = await run({ targets, sourceId: "src-1", deps });
+
+    expect(r.counts.failed).toBe(99);
+    expect(r.counts.done).toBe(1);
+    expect(rollback).not.toHaveBeenCalled(); // 有成功 → 源没挂，绝不回滚
+    expect(purge).toHaveBeenCalledTimes(1); // 照常清理
+    expect(r.warnings.some((w) => w.includes("源整体故障"))).toBe(false);
+  });
+
+  it("36. 冷却不拦永久失效（2026-10-11 定调 B）：上次 404 → 放行重试，照常取链并下载", async () => {
+    // 回归守卫：冷却入口必须是 shouldSkipByCooldown（它内部对永久失效类放行）。
+    // 若退回无差别 isRecentlyAttempted，同一首 404 歌每轮都被秒跳 → fail_count 停在 1
+    // → deadSongPurge 阈值(2) 永远达不到 → 死链清理永不生效（240 生产实测 fail_count>=2 恒 0）。
+    const collect = vi.fn(oneMp3);
+    const dl = vi.fn(defaultDownload);
+    const skip = vi.fn(() => false); // 台账里有行，但最近一次是 HTTP_404 → 不跳过
+    const deps = makeDeps({
+      collectCandidates: collect,
+      downloadToFile: dl,
+      shouldSkipByCooldown: skip as any,
+    });
+
+    const r = await run({
+      targets: [tgt({ id: "t1", title: "A", durationSec: 200 })],
+      sourceId: "src-1",
+      deps,
+    });
+
+    expect(skip).toHaveBeenCalledTimes(1);
+    expect(skip.mock.calls[0][0]).toBe("t1"); // 台账键
+    expect(r.items[0].errorCode).not.toBe("COOLDOWN_SKIPPED");
+    expect(r.items[0].status).toBe("done"); // 真的重新下载（放行），而非静默跳过
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(dl).toHaveBeenCalledTimes(1);
+  });
+
+  it("37. 洗版模式不查下载冷却（洗版有自己的 upgradeCooldownDays 台账）", async () => {
+    const origDir = join(DL, "Artist");
+    mkdirSync(origDir, { recursive: true });
+    const origFile = join(origDir, "old.mp3");
+    writeFileSync(origFile, "OLD");
+    const upgTarget: FetchTarget = {
+      id: "upgrade:old-9",
+      title: "Song",
+      artist: "Artist",
+      sourceData: JSON.stringify({
+        upgrade: { songId: "old-9", path: `l:dl-x:${origFile}`, suffix: "mp3", bitRate: 500 },
+      }),
+    };
+    const skip = vi.fn(() => true); // 即使会命中也不该被调用
+    const deps = makeDeps({
+      collectCandidates: (async () => [
+        cand({ id: "fl", url: "http://h/x.flac", container: "flac", bitrateKbps: 999, bitDepth: 16 }),
+      ]) as any,
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        mkdirSync(dirname(o.destPath), { recursive: true });
+        writeFileSync(o.destPath, Buffer.alloc(13_750_000, 1));
+        return {
+          bytes: 13_750_000,
+          httpStatus: 200,
+          sha256: "s",
+          rangeSupported: true,
+          finalUrl: o.url,
+          partial: false,
+        };
+      }) as any,
+      probeFile: (async (file: string) => ({
+        path: file,
+        bytes: 13_750_000,
+        container: "flac",
+        bitDepth: 16,
+        bitrateKbps: 550,
+        sampleRateHz: 44100,
+        durationSec: 200,
+        hasCover: false,
+      })) as any,
+      finalizeFile: (() => ({
+        action: "write" as const,
+        finalPath: join(origDir, "Song - Artist.flac"),
+        warnings: [],
+      })) as any,
+      shouldSkipByCooldown: skip as any,
+    });
+
+    await run({
+      targets: [upgTarget],
+      sourceId: "src-1",
+      deps,
+      originalDisposal: { action: "keep", allowedRoots: [DL] },
+    });
+
+    expect(skip).not.toHaveBeenCalled(); // 洗版不走下载冷却
   });
 });
