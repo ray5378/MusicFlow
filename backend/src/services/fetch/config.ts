@@ -53,6 +53,13 @@ export interface FetchConfig {
   sourcePriority: string[];
   maxCandidatesPerSong: number;
   candidateTimeoutMs: number;
+  /** 取链后是否对候选做 inspect 预探（拿真实体积/码率来选最高音质）。默认 true。
+   *  插件未实现 `inspectSong` 或服务不可达时静默降级（只记 debug 日志）。 */
+  inspectCandidates?: boolean;
+  /** 单次 inspect 请求超时（毫秒）。默认 8000。与取链/下载预算是**三个独立预算**。 */
+  inspectTimeoutMs?: number;
+  /** 每首歌最多 inspect 前 N 个候选（按 extra 阶梯预排序后），防请求放大。默认 6。 */
+  inspectTopN?: number;
   fileConflictPolicy: ConflictPolicy;
   overwriteExisting: boolean;
   writeSourceComment: boolean;
@@ -89,6 +96,9 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   sourcePriority: [],
   maxCandidatesPerSong: 6,
   candidateTimeoutMs: 15000,
+  inspectCandidates: true,
+  inspectTimeoutMs: 8000,
+  inspectTopN: 6,
   fileConflictPolicy: "keepBetter",
   overwriteExisting: false,
   writeSourceComment: true,

@@ -438,3 +438,71 @@ describe("rankCandidates — 过门槛者取最高音质（需求回归锁定）
   });
 });
 
+// ==================== declared 的比特率优先级（inspect 预探） ====================
+//
+// 背景：inspect 预探（go-music-dl /music/inspect）回传的 `bytes` 是服务端 `%.1f MB`
+// 量化后的**近似值**（小文件误差可达 ±5%），而同一次应答里的 `bitrateKbps` 是服务端用
+// **真实 Content-Range 字节数**算出的精确整型值 → declared 路径必须优先采信 bitrateKbps。
+// 但**下载后 probed 的真实 bytes 仍压过一切声明值**（Requirement 3 复筛严格的基石）。
+describe("declared 比特率优先级：精确 bitrateKbps 胜过被量化的 bytes，但 probed 仍压过声明", () => {
+  const N = 200;
+  const loose = () =>
+    cfgOf({ qualityFloor: "any", minBitrateKbps: 128, preferLossless: false, rejectFakeLossless: false });
+
+  /** declared：精确 128kbps，但 bytes 隐含 320kbps（量化后会虚高）。 */
+  function quantized(): Candidate {
+    return mk({
+      id: "gmd:wy:q",
+      pluginId: "gmd",
+      platform: "wy",
+      url: "https://cdn.example.com/q.mp3",
+      title: "歌",
+      declared: { container: "mp3", bitrateKbps: 128, bytes: bytesFor(320, N), durationSec: N },
+    });
+  }
+
+  it("meetsFloor：按 128 判（低于 320 门槛被拒），不因 bytes 隐含 320 而放行", () => {
+    const r = meetsFloor(quantized(), cfgOf({ qualityFloor: "320", minBitrateKbps: 320 }), { durationSec: N }, {
+      tolerateUnknown: true,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("128");
+  });
+
+  it("排序：128(声明)+bytes 隐含 320 排在真 320 之后", () => {
+    const real = mk({
+      id: "gmd:wy:real",
+      pluginId: "gmd",
+      platform: "wy",
+      url: "https://cdn.example.com/r.mp3",
+      title: "歌",
+      declared: { container: "mp3", bitrateKbps: 320, durationSec: N },
+    });
+    const out = rankCandidates([quantized(), real], loose(), { durationSec: N });
+    expect(out.map((c) => c.id)).toEqual(["gmd:wy:real", "gmd:wy:q"]);
+  });
+
+  it("不变量：probed 的真实 bytes 仍然压过 declared 的高 bitrateKbps", () => {
+    const declaredHi = mk({
+      id: "gmd:wy:decl",
+      pluginId: "gmd",
+      platform: "wy",
+      url: "https://cdn.example.com/d.mp3",
+      title: "歌",
+      declared: { container: "mp3", bitrateKbps: 1749, durationSec: N },
+    });
+    const probedLow = mk({
+      id: "gmd:wy:prob",
+      pluginId: "gmd",
+      platform: "wy",
+      url: "https://cdn.example.com/p.mp3",
+      title: "歌",
+      declared: { container: "mp3", bitrateKbps: 1749, durationSec: N },
+      probed: { container: "mp3", bytes: bytesFor(128, N), durationSec: N }, // 下载后实测只有 128
+    });
+    const out = rankCandidates([probedLow, declaredHi], loose(), { durationSec: N });
+    expect(out[0].id).toBe("gmd:wy:decl"); // probedLow 按真实 128 判 → 排后
+    expect(out[1].id).toBe("gmd:wy:prob");
+  });
+});
+

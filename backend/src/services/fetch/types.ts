@@ -52,6 +52,15 @@ export interface Candidate {
   album?: string;
   /** 风格；仅信源 `extra` 显式声明时才填，取不到留 undefined（不臆造）。 */
   genre?: string;
+  /** 信源原始附加信息（go-music-dl 的 data-extra 原样透传；其它源可能为空）。
+   *  目前承载平台音质阶梯（kugou 的 sq_hash/hq_hash/... 、migu 的 format_type 等），
+   *  供 candidates.declaredFromExtra 推「声明档位」，也是 inspect 判不可用后的诊断依据。 */
+  extra?: Record<string, string>;
+  /** inspect 预探**明确**返回 `{valid:false}` 时为 true（服务端说这一档取不到地址，
+   *  例如酷狗 privilege=10 的官方歌、QQ 当前凭据过期的歌）。
+   *  这是**正常业务响应，不是失败**：候选保留在列表里但排到最后（声明质量已清空，
+   *  避免乐观的 extra 阶梯把它推到最优位）；原始阶梯仍在 `extra` 里可查。 */
+  inspectUnavailable?: boolean;
   year?: number;
   track?: number;
   disc?: number;

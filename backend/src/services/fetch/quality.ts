@@ -57,9 +57,33 @@ function pickBitrateKbps(q: CandidateQuality | undefined): number {
   return q.bitrateKbps ?? 0;
 }
 
-/** 取候选的可信质量描述：probed 优先，缺失回落 declared。 */
+/**
+ * 取候选的可信质量描述：probed 优先，缺失回落 declared。
+ *
+ * ⚠️ 两条不同的比特率来源，优先级**刻意不同**（勿合并）：
+ *
+ * 1) `probed`（下载后真实探针）：`pickBitrateKbps` 以 **bytes/duration** 为准 ——
+ *    probe 模块从容器里读出的是**精确字节数**，比信源声明更可信（信源普遍虚标）。
+ *    这条不变量是 Requirement 3「复筛严格」的基石，**绝不能被下面的改动破坏**。
+ *
+ * 2) `declared`（下载前声明）：inspect 预探走的是 `/music/inspect`，服务端 `size`
+ *    用 `FormatSize` 输出 `%.1f MB`（**只有 1 位小数**），回传的 `bytes` 是
+ *    「按 0.1MB 量化后还原」的近似值（小文件误差可达 ±5%）；而同一次应答里的
+ *    `bitrateKbps` 是服务端用**真实 Content-Range 字节数**算出的整型 kbps，是精确的。
+ *    故 declared 路径**优先采信 `bitrateKbps`**，仅当它缺失时才回落 `bytes/durationSec`。
+ *
+ * 实现方式：declared 同时带 `bitrateKbps` 与 `bytes` 时，把 `bytes` 让位（置 undefined），
+ * 于是两处下游取值（`pickBitrateKbps` / `isFakeLossless`）自然走 bitrate 分支，
+ * 无需改动 probed 那侧的取值顺序。
+ */
 function pickQuality(c: Candidate): CandidateQuality | undefined {
-  return c.probed ?? c.declared;
+  if (c.probed) return c.probed;
+  const d = c.declared;
+  if (!d) return undefined;
+  if (typeof d.bitrateKbps === "number" && d.bitrateKbps > 0 && d.bytes !== undefined) {
+    return { ...d, bytes: undefined };
+  }
+  return d;
 }
 
 /**
