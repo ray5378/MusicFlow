@@ -1,28 +1,44 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseFile } from "music-metadata";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
+import { parseLoudnorm } from "../../src/services/audio/loudness.js";
 import { probeFile } from "../../src/services/fetch/probe.js";
-import { buildTranscodeArgs, transcodeFile } from "../../src/services/fetch/transcode.js";
+import { buildLoudnessFilter, buildTranscodeArgs, transcodeFile } from "../../src/services/fetch/transcode.js";
 import { writeTags } from "../../src/services/fetch/tagWriter.js";
 
 const DIR = mkdtempSync(join(tmpdir(), "mf-transcode-"));
 const TMO = { timeout: 120_000 };
 let MP3 = "";
 let FLAC = "";
+let LOW = "";
 
 function ff(args: string[]): void {
   execFileSync(resolveFfmpeg(), args, { stdio: ["ignore", "ignore", "pipe"] });
 }
 
+/** 空跑 loudnorm 只测响度（复用 loudness.ts 的 parseLoudnorm 读回 input_i）。 */
+function measureLufs(file: string): number | null {
+  const res = spawnSync(
+    resolveFfmpeg(),
+    ["-hide_banner", "-i", file, "-af", "loudnorm=I=-14:TP=-2:LRA=10:print_format=json", "-f", "null", "-"],
+    { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+  );
+  const m = parseLoudnorm(res.stderr || "");
+  return m ? m.inputI : null;
+}
+
 beforeAll(() => {
   MP3 = join(DIR, "src.mp3");
   FLAC = join(DIR, "src.flac");
+  LOW = join(DIR, "low.flac");
   ff(["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:a", "libmp3lame", "-b:a", "320k", MP3]);
   ff(["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:a", "flac", FLAC]);
+  // 明显偏小(-20dB)的源，用来验证归一化确实把电平拉到 -14 LUFS。
+  ff(["-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=6", "-af", "volume=-20dB", "-c:a", "flac", LOW]);
 }, TMO.timeout);
 
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));
@@ -98,6 +114,82 @@ describe("transcodeFile", () => {
     expect(p.container).toBe("wav");
     expect(p.bitDepth).toBe(16);
   }, TMO.timeout);
+
+  it("loudnessNormalize:两遍后成品响度 ≈ -14 LUFS(±1)，采样率跟随源、位深 16", async () => {
+    const out = join(DIR, "loud.flac");
+    const r = await transcodeFile(LOW, { target: "flac", dstPath: out, loudnessNormalize: true });
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toBe(false);
+    // 两遍法成功 → 无「降级为单遍」告警。
+    expect(r.warnings).toEqual([]);
+    // 源是 -20dB 的静音轨：归一化必须真的把电平提上来。
+    const lufs = measureLufs(out);
+    expect(lufs).not.toBeNull();
+    expect(Math.abs((lufs as number) - (-14))).toBeLessThanOrEqual(1.0);
+    // loudnorm 会把流上采样到 192k + 浮点：aresample 必须把二者复位。
+    const srcP = await probeFile(LOW);
+    const outP = await probeFile(out);
+    expect(outP.container).toBe("flac");
+    expect(outP.sampleRateHz).toBe(srcP.sampleRateHz);
+    expect(outP.bitDepth).toBe(16);
+  }, TMO.timeout);
+
+  it("loudnessNormalize:true 且源已是 flac → 绝不 skip(必须真跑一遍归一化)", async () => {
+    const f = join(DIR, "noskip.flac");
+    copyFileSync(FLAC, f);
+    const r = await transcodeFile(f, { target: "flac", loudnessNormalize: true, loudnessTwoPass: false });
+    expect(r.skipped).toBe(false);
+    expect(r.dstPath).toBe(f);
+  }, TMO.timeout);
+});
+
+describe("buildLoudnessFilter", () => {
+  it("loudnorm 必在 aresample 之前，含 osr 与 osf=s16 + 三角抖动", () => {
+    const f = buildLoudnessFilter({ targetLufs: -14, targetSampleRateHz: 44100, osf: "s16" });
+    const li = f.indexOf("loudnorm=");
+    const ai = f.indexOf("aresample=");
+    expect(li).toBeGreaterThanOrEqual(0);
+    expect(ai).toBeGreaterThan(li);
+    expect(f).toContain("I=-14");
+    expect(f).toContain("TP=-2");
+    expect(f).toContain("LRA=10");
+    expect(f).toContain("osr=44100");
+    expect(f).toContain("osf=s16");
+    expect(f).toContain("dither_method=triangular_hp");
+  });
+
+  it("wav 不写 osf；24bit 写 osf=s32；越界目标响度被夹到 [-30,-5]", () => {
+    const wav = buildLoudnessFilter({ targetLufs: -14, targetSampleRateHz: 48000 });
+    expect(wav).toContain("osr=48000");
+    expect(wav).not.toContain("osf=");
+    const s32 = buildLoudnessFilter({ targetLufs: -14, targetSampleRateHz: 44100, osf: "s32" });
+    expect(s32).toContain("osf=s32");
+    expect(s32).not.toContain("dither_method");
+    expect(buildLoudnessFilter({ targetLufs: -99, targetSampleRateHz: 44100 })).toContain("I=-30");
+  });
+
+  it("给了实测值 → linear=true 且带 measured_* 五值", () => {
+    const f = buildLoudnessFilter({
+      targetLufs: -14,
+      targetSampleRateHz: 44100,
+      osf: "s16",
+      measured: { i: -24.3, lra: 5.1, tp: -6.2, thresh: -35.0, offset: 0.4 },
+    });
+    expect(f).toContain("linear=true");
+    expect(f).toContain("measured_I=-24.3");
+    expect(f).toContain("measured_LRA=5.1");
+    expect(f).toContain("measured_TP=-6.2");
+    expect(f).toContain("measured_thresh=-35");
+    expect(f).toContain("offset=0.4");
+  });
+
+  it("-af 透传进转码命令，且排在输出文件之前", () => {
+    const a = buildTranscodeArgs({ src: "i.mp3", out: "o.flac", target: "flac", af: "loudnorm=I=-14" });
+    const idx = a.indexOf("-af");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(a[idx + 1]).toBe("loudnorm=I=-14");
+    expect(a.indexOf("o.flac")).toBeGreaterThan(idx);
+  });
 });
 
 describe("buildTranscodeArgs", () => {

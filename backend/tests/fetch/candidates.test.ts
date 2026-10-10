@@ -203,6 +203,28 @@ describe("collectCandidates 多源聚合", () => {
     expect(DEFAULT_CANDIDATE_TIMEOUT_MS).toBe(15000);
     expect(DEFAULT_MAX_CANDIDATES_PER_SONG).toBe(6);
   });
+
+  it("信源 extra 声明 genre/style → 抽到候选 genre；没有就不臆造", async () => {
+    const source = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return {
+          songs: [
+            { id: "1", source: "netease", name: "歌", artist: "人", album: "专", duration: 200, cover: "", extra: { Genre: "摇滚" } },
+            { id: "2", source: "netease", name: "歌2", artist: "人", album: "专", duration: 200, cover: "", extra: { style: "民谣" } },
+            { id: "3", source: "netease", name: "歌3", artist: "人", album: "专", duration: 200, cover: "", extra: {} },
+          ],
+        };
+      },
+      streamUrl(_c: any, s: any) {
+        return `https://cdn.example.com/${s.id}.mp3`;
+      },
+    });
+    const out = await collectCandidates({ target, sources: [source] });
+    const byId = new Map(out.map((c) => [c.id, c]));
+    expect(byId.get("go-music-dl:wy:1")?.genre).toBe("摇滚"); // 键大小写不敏感
+    expect(byId.get("go-music-dl:wy:2")?.genre).toBe("民谣"); // style 兜底键
+    expect(byId.get("go-music-dl:wy:3")?.genre).toBeUndefined(); // 拿不到不臆造
+  });
 });
 
 describe("dedupeCandidates", () => {

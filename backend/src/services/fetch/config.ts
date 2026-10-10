@@ -44,6 +44,12 @@ export interface FetchConfig {
   transcodeSampleRateHz?: number;
   transcodeBitDepth?: 16 | 24;
   transcodeKeepOriginal: boolean;
+  /** 转码时是否把响度归一化到目标 LUFS（-14）。默认开。 */
+  transcodeLoudnessNormalize: boolean;
+  /** 响度目标 LUFS；缺省 -14（= services/audio/normalization.ts 的 DEFAULT_TARGET_LUFS）。 */
+  transcodeLoudnessTargetLufs: number;
+  /** 两遍（先测后编，linear）响度归一化；默认 true，false = 单遍动态。 */
+  transcodeLoudnessTwoPass: boolean;
   sourcePriority: string[];
   maxCandidatesPerSong: number;
   candidateTimeoutMs: number;
@@ -77,6 +83,9 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   transcodeEnabled: true,
   transcodeTarget: "flac",
   transcodeKeepOriginal: false,
+  transcodeLoudnessNormalize: true,
+  transcodeLoudnessTargetLufs: -14,
+  transcodeLoudnessTwoPass: true,
   sourcePriority: [],
   maxCandidatesPerSong: 6,
   candidateTimeoutMs: 15000,

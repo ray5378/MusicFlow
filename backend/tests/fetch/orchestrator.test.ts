@@ -90,6 +90,9 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
       ancestorSourceId: null,
     })) as any,
     rankCandidates: ((c: Candidate[]) => c) as any,
+    // 增值项（歌词/封面 provider）：默认关闭，避免单测触达真实插件沙箱。
+    searchLyrics: (async () => null) as any,
+    searchCover: (async () => null) as any,
   };
   return { ...base, ...over } as FetchDeps;
 }
@@ -435,5 +438,87 @@ describe("runFetchPipeline", () => {
     });
     expect(r.items[0].status).toBe("queued");
     expect(r.items[0].errorCode).toBeUndefined();
+  });
+
+  it("17. 增值标签：genre / lyric / cover 都写入，封面优先用候选自带 coverUrl", async () => {
+    let got: any;
+    const writeTags = vi.fn(async (src: string, tags: any) => {
+      got = tags;
+      return { ok: true, file: src, bytes: 1000, mtimeMs: Date.now(), warnings: [] };
+    });
+    const coverSearch = vi.fn(async () => "http://h/should-not-be-called.jpg");
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        {
+          ...cand({ id: "c", url: "http://h/a.mp3", container: "mp3", bitrateKbps: 320 }),
+          title: "Song",
+          artist: "A",
+          album: "Alb",
+          genre: "Pop",
+          coverUrl: "http://h/cover.jpg",
+        },
+      ],
+      writeTags,
+      searchLyrics: (async () => "[00:01.00]la la") as any,
+      searchCover: coverSearch as any,
+    });
+    const r = await run({
+      targets: [tgt({ id: "t1", title: "Song", artist: "A", album: "Alb", durationSec: 200 })],
+      sourceId: "src-1",
+      deps,
+    });
+    expect(r.items[0].status).toBe("done");
+    expect(got.genre).toBe("Pop");
+    expect(got.lyric).toBe("[00:01.00]la la");
+    expect(Buffer.isBuffer(got.cover)).toBe(true);
+    expect((got.cover as Buffer).length).toBeGreaterThan(0);
+    expect(coverSearch).not.toHaveBeenCalled(); // 候选自带 coverUrl → 不调 provider
+  });
+
+  it("18. 无候选封面 → 回落 searchCover provider 取图", async () => {
+    const coverSearch = vi.fn(async () => "http://h/from-provider.jpg");
+    const writeTags = vi.fn(async (src: string, tags: any) => {
+      expect(Buffer.isBuffer(tags.cover)).toBe(true);
+      return { ok: true, file: src, bytes: 1000, mtimeMs: Date.now(), warnings: [] };
+    });
+    const deps = makeDeps({ collectCandidates: oneMp3, searchCover: coverSearch as any, writeTags });
+    const r = await run({ targets: [tgt({ id: "t1", title: "A", durationSec: 200 })], sourceId: "src-1", deps });
+    expect(r.items[0].status).toBe("done");
+    expect(coverSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("19. 增值项全失败不致命：仍 done，只多 warnings（歌词/封面各一条）", async () => {
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        {
+          ...cand({ id: "c", url: "http://h/a.mp3", container: "mp3", bitrateKbps: 320 }),
+          coverUrl: "http://h/fail-cover.jpg",
+        },
+      ],
+      searchLyrics: (async () => {
+        throw new Error("lyric provider down");
+      }) as any,
+      searchCover: (async () => {
+        throw new Error("cover provider down");
+      }) as any,
+    });
+    const r = await run({ targets: [tgt({ id: "t1", title: "A", durationSec: 200 })], sourceId: "src-1", deps });
+    expect(r.items[0].status).toBe("done");
+    expect(r.warnings.some((w) => w.includes("歌词获取失败"))).toBe(true);
+    expect(r.warnings.some((w) => w.includes("封面下载失败") || w.includes("封面获取失败"))).toBe(true);
+  });
+
+  it("20. 转码透传响度归一化参数（cfg 默认开，目标 -14 LUFS）", async () => {
+    const seen: any[] = [];
+    const tr = vi.fn(async (src: string, o: any) => {
+      seen.push(o);
+      return { ok: true, srcPath: src, dstPath: src.replace(/\.mp3$/, ".flac"), skipped: false, bytes: 1000, warnings: [] };
+    });
+    const deps = makeDeps({ collectCandidates: oneMp3, transcodeFile: tr });
+    await run({ targets: [tgt({ id: "t1", title: "A", durationSec: 200 })], sourceId: "src-1", deps });
+    expect(tr).toHaveBeenCalledTimes(1);
+    expect(seen[0].loudnessNormalize).toBe(true);
+    expect(seen[0].loudnessTargetLufs).toBe(-14);
+    expect(seen[0].loudnessTwoPass).toBe(true);
   });
 });

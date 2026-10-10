@@ -381,3 +381,60 @@ describe("rankCandidates — 无质量声明（生产现场回归守卫）", () 
   });
 });
 
+describe("rankCandidates — 过门槛者取最高音质（需求回归锁定）", () => {
+  const N = 200;
+  /** 由「有效比特率 + 时长」反推字节数构造一个有损候选（tier 由比特率归类）。 */
+  function byEffBitrate(id: string, kbps: number): Candidate {
+    return mk({
+      id: `gmd:wy:${id}`,
+      pluginId: "gmd",
+      platform: "wy",
+      url: `https://cdn.example.com/${id}.mp3`,
+      title: "歌",
+      declared: { container: "mp3", bytes: bytesFor(kbps, N), durationSec: N },
+    });
+  }
+  /** 门槛放宽到「全部过闸」，专测排序本身（不改排序逻辑，只锁语义）。 */
+  const loose = () =>
+    cfgOf({ qualityFloor: "any", minBitrateKbps: 128, preferLossless: false, rejectFakeLossless: false });
+
+  it("三个都过门槛（有效 1100/320/192kbps）→ 严格按音质降序，不因入参顺序改变", () => {
+    const out = rankCandidates(
+      [byEffBitrate("mid320", 320), byEffBitrate("low192", 192), byEffBitrate("hi1100", 1100)],
+      loose(),
+      { durationSec: N },
+    );
+    expect(out).toHaveLength(3);
+    expect(out.map((c) => c.id)).toEqual(["gmd:wy:hi1100", "gmd:wy:mid320", "gmd:wy:low192"]);
+  });
+
+  it("已声明 flac（无损）胜过已声明 mp3 320", () => {
+    const flac = mk({
+      id: "gmd:wy:flac",
+      pluginId: "gmd",
+      platform: "wy",
+      url: "https://cdn.example.com/f.flac",
+      title: "歌",
+      declared: { container: "flac" },
+    });
+    const out = rankCandidates([byEffBitrate("mp3320", 320), flac], loose(), { durationSec: N });
+    expect(out[0].id).toBe("gmd:wy:flac");
+    expect(out.map((c) => c.id)).toEqual(["gmd:wy:flac", "gmd:wy:mp3320"]);
+  });
+
+  it("preferLossless=true 时：池中有无损 → 有损全被剔除", () => {
+    const flac = mk({
+      id: "gmd:wy:flac",
+      pluginId: "gmd",
+      platform: "wy",
+      url: "https://cdn.example.com/f.flac",
+      title: "歌",
+      declared: { container: "flac" },
+    });
+    const out = rankCandidates([byEffBitrate("mp3320", 320), flac], cfgOf({ preferLossless: true }), {
+      durationSec: N,
+    });
+    expect(out.map((c) => c.id)).toEqual(["gmd:wy:flac"]);
+  });
+});
+

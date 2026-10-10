@@ -181,6 +181,25 @@ function rankOf(pluginId: string, platform: string, priority: string[]): number 
   return byPlugin >= 0 ? byPlugin : priority.length;
 }
 
+/**
+ * 从 `OnlineSongResult.extra` 里挑「风格」。
+ *
+ * 契约（`services/source/online/types.ts:27`）：`extra` 是 `Record<string, string>`，
+ * 键由各插件自行决定。这里只认几个常见键（大小写不敏感），拿到非空字符串才返回；
+ * **拿不到就返回 undefined，绝不臆造**（下游据此决定是否写 genre 标签）。
+ */
+function pickGenre(extra: Record<string, string> | null | undefined): string | undefined {
+  if (!extra || typeof extra !== "object") return undefined;
+  for (const want of ["genre", "style", "tag", "tags"]) {
+    for (const k of Object.keys(extra)) {
+      if (k.toLowerCase() !== want) continue;
+      const v = extra[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+  }
+  return undefined;
+}
+
 /** 枚举可用取链源：已启用 + 声明 stream 能力 + 能拿到 provider 实例（判空是硬要求）。 */
 export function listCandidateSources(): CandidateSource[] {
   const out: CandidateSource[] = [];
@@ -212,6 +231,7 @@ function buildCandidate(params: {
     durationSec?: number;
     coverUrl?: string;
     platform?: string;
+    genre?: string;
   };
 }): Candidate {
   const { src, url, declared, meta } = params;
@@ -233,6 +253,7 @@ function buildCandidate(params: {
   if (meta?.artist) c.artist = meta.artist;
   if (meta?.album) c.album = meta.album;
   if (meta?.coverUrl) c.coverUrl = meta.coverUrl;
+  if (meta?.genre) c.genre = meta.genre;
   return c;
 }
 
@@ -293,6 +314,7 @@ async function viaSearch(src: CandidateSource, target: FetchTarget): Promise<Can
           durationSec: typeof s.duration === "number" && s.duration > 0 ? s.duration : undefined,
           coverUrl: s.cover || undefined,
           platform: normalizePlatform(s.source),
+          genre: pickGenre(s.extra),
         },
       }),
     );
@@ -485,6 +507,7 @@ function fillScore(c: Candidate): number {
   if (c.title) n++;
   if (c.artist) n++;
   if (c.album) n++;
+  if (c.genre) n++;
   if (c.coverUrl) n++;
   if (c.lyricUrl) n++;
   if (c.headers && Object.keys(c.headers).length > 0) n++;
@@ -506,6 +529,7 @@ function mergeCandidates(a: Candidate, b: Candidate): Candidate {
   if (!merged.title && other.title) merged.title = other.title;
   if (!merged.artist && other.artist) merged.artist = other.artist;
   if (!merged.album && other.album) merged.album = other.album;
+  if (!merged.genre && other.genre) merged.genre = other.genre;
   if (!merged.coverUrl && other.coverUrl) merged.coverUrl = other.coverUrl;
   if (!merged.lyricUrl && other.lyricUrl) merged.lyricUrl = other.lyricUrl;
   if ((other.sourceRank ?? 0) < (merged.sourceRank ?? 0)) merged.sourceRank = other.sourceRank;

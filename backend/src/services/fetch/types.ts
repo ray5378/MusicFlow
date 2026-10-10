@@ -50,6 +50,8 @@ export interface Candidate {
   title?: string;
   artist?: string;
   album?: string;
+  /** 风格；仅信源 `extra` 显式声明时才填，取不到留 undefined（不臆造）。 */
+  genre?: string;
   year?: number;
   track?: number;
   disc?: number;

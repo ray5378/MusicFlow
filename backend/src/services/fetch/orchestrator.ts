@@ -16,13 +16,16 @@
 // `onProgress` 是防 15 分钟看门狗的唯一心跳（SPEC §1.3）。
 //
 // 全部外部依赖通过 `deps` 注入（默认用真实实现），单测整体替换即可零网络零 ffmpeg。
-import { renameSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { downloadToFile, type DownloadResult } from "../../utils/httpDownload.js";
+import { searchCover, searchLyrics } from "../../plugins/providers.js";
+import type { LyricSongInput } from "../../plugins/types.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
 import {
   classifyTier,
@@ -108,6 +111,10 @@ export interface FetchDeps {
   scanLocalFiles: typeof scanLocalFiles;
   ensureDownloadSource: typeof ensureDownloadSource;
   rankCandidates: typeof rankCandidates;
+  /** 歌词 provider（价值增值项：拿不到只告警，不让整首歌失败）。 */
+  searchLyrics: typeof searchLyrics;
+  /** 封面 provider（同上；优先用 Candidate.coverUrl，缺了才调它）。 */
+  searchCover: typeof searchCover;
 }
 
 const DEFAULT_DEPS: FetchDeps = {
@@ -122,6 +129,8 @@ const DEFAULT_DEPS: FetchDeps = {
   scanLocalFiles,
   ensureDownloadSource,
   rankCandidates,
+  searchLyrics,
+  searchCover,
 };
 
 export interface RunFetchPipelineOptions {
@@ -136,6 +145,26 @@ export interface RunFetchPipelineOptions {
 }
 
 // ==================== 小工具 ====================
+
+/** 封面下载体积上限（8 MiB）：防误拉到整轨音频或超大图。 */
+const COVER_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 增值项（歌词 / 封面 provider、封面下载）的单次短超时（毫秒）。
+ * 铁律：这些都是「锦上添花」，拿不到只记 warning，**绝不让整首歌失败**，也绝不长等。
+ */
+const ENRICH_TIMEOUT_MS = 10_000;
+
+/** 给一个 promise 套超时护栏（超时即 reject，原 promise 不再占用调用方预算）。 */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`enrich timeout after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, guard]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 function shortHash(s: string): string {
   return createHash("sha1").update(s, "utf8").digest("hex").slice(0, 10);
@@ -364,6 +393,89 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   return { sourceId, items, counts, warnings };
 
   // ==================== 单曲流水线（闭包） ====================
+
+  /**
+   * 采集「增值标签」：风格（信源声明） / 歌词 / 封面。
+   *
+   * 纪律：**三项都是价值增值项，任一失败只 push warning，绝不上抛**（否则一首歌的
+   * 歌词服务抖动就会毁掉整次下载）。风格拿不到不写（不臆造）；封面优先用候选自带的
+   * `coverUrl`，缺了才回落 `searchCover` provider。
+   */
+  async function collectExtraTags(
+    t: FetchTarget,
+    cand: Candidate,
+    base: { title: string; artist?: string; album?: string },
+  ): Promise<Partial<SongTags>> {
+    const extra: Partial<SongTags> = {};
+
+    // 风格：只认信源声明值（candidates.ts 从 OnlineSongResult.extra 抽取）。
+    if (cand.genre) extra.genre = cand.genre;
+
+    const songInput: LyricSongInput = {
+      title: base.title,
+      artist: base.artist ?? null,
+      album: base.album ?? null,
+      duration: t.durationSec ?? cand.declared?.durationSec ?? null,
+      url: cand.url,
+      source: cand.platform || cand.pluginId,
+    };
+
+    // 歌词：provider 可能并发多插件，套短超时护栏。
+    try {
+      const lyric = await withTimeout(deps.searchLyrics(songInput), ENRICH_TIMEOUT_MS);
+      if (lyric && lyric.trim()) extra.lyric = lyric;
+    } catch (e) {
+      warnings.push(`歌词获取失败(忽略，不影响入库): ${msgOf(e)}`);
+    }
+
+    // 封面：优先候选自带；回落 provider；再下载成 Buffer 交给 tagWriter（由它落临时图）。
+    if (cfg.embedCover) {
+      try {
+        let coverUrl = cand.coverUrl;
+        if (!coverUrl) {
+          const u = await withTimeout(deps.searchCover(songInput), ENRICH_TIMEOUT_MS);
+          if (u) coverUrl = u;
+        }
+        if (coverUrl) {
+          const buf = await fetchCoverBuffer(coverUrl);
+          if (buf) extra.cover = buf;
+        }
+      } catch (e) {
+        warnings.push(`封面获取失败(忽略，不影响入库): ${msgOf(e)}`);
+      }
+    }
+
+    return extra;
+  }
+
+  /** 把封面 URL 下载成内存 Buffer（限 8 MiB）；任何失败返回 undefined 且只记 warning。 */
+  async function fetchCoverBuffer(url: string): Promise<Buffer | undefined> {
+    let dir: string | undefined;
+    try {
+      dir = mkdtempSync(path.join(tmpdir(), "mf-cover-"));
+      const file = path.join(dir, "cover.part");
+      const dl = await deps.downloadToFile({
+        url,
+        destPath: file,
+        timeoutMs: ENRICH_TIMEOUT_MS,
+        stallTimeoutMs: ENRICH_TIMEOUT_MS,
+        maxBytes: COVER_MAX_BYTES,
+        ssrfGuard: true,
+        resume: false,
+        signal,
+      });
+      if (!dl.bytes || dl.bytes <= 0) return undefined;
+      const buf = readFileSync(file);
+      return buf.length > 0 ? buf : undefined;
+    } catch (e) {
+      warnings.push(`封面下载失败(忽略，不影响入库): ${msgOf(e)}`);
+      return undefined;
+    } finally {
+      if (dir) {
+        try { rmSync(dir, { recursive: true, force: true }); } catch { /* 清理失败不影响主流程 */ }
+      }
+    }
+  }
 
   async function processTarget(t: FetchTarget, index: number): Promise<FetchItemOutcome> {
     const item: FetchItemOutcome = {
@@ -641,7 +753,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       };
     }
 
-    // h) 写标签。
+    // h) 写标签（含增值项：风格 / 歌词 / 封面）。
     const title = t.title || cand.title || "Unknown Title";
     const artist = t.artist || cand.artist;
     const album = t.album || cand.album;
@@ -657,6 +769,12 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     if (cfg.writeSourceComment) {
       tags.comment = `来源:${cand.platform || cand.pluginId} 声明音质:${describeQuality(cand.declared)} 取链时间:${new Date().toISOString()}`;
     }
+    // 增值项采集：风格 / 歌词 / 封面。整体 try 兜底，异常只告警（绝不让整首歌失败）。
+    try {
+      Object.assign(tags, await collectExtraTags(t, cand, { title, artist, album }));
+    } catch (e) {
+      warnings.push(`增值标签采集异常(忽略): ${msgOf(e)}`);
+    }
     try {
       const tr = await deps.writeTags(cachePath, tags);
       if (tr.warnings && tr.warnings.length > 0) warnings.push(...tr.warnings);
@@ -669,6 +787,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     // i) 转码（增值项：失败不致命，删失败产物、保留已写标签的源文件继续落盘）。
     //    注：TranscodeOptions 无 bitDepth 字段，故把 cfg.transcodeBitDepth 映射为
     //    keepBitDepth16（24bit → false，其余 → true），语义等价。
+    //    响度归一化（-14 LUFS）也在此透传，缺省开（见 FetchConfig）。
     if (cfg.transcodeEnabled) {
       try {
         const tr = await deps.transcodeFile(cachePath, {
@@ -676,6 +795,9 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           sampleRateHz: cfg.transcodeSampleRateHz,
           keepTags: true,
           keepBitDepth16: cfg.transcodeBitDepth !== 24,
+          loudnessNormalize: cfg.transcodeLoudnessNormalize,
+          loudnessTargetLufs: cfg.transcodeLoudnessTargetLufs,
+          loudnessTwoPass: cfg.transcodeLoudnessTwoPass,
         });
         if (tr.dstPath && tr.dstPath !== cachePath) cachePath = tr.dstPath;
       } catch (e) {
