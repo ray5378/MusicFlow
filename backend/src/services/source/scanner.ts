@@ -580,7 +580,9 @@ function scanLocalDir(dirPath: string): string[] {
   return files;
 }
 
-async function extractMetadataLocal(filePath: string): Promise<MusicMetadata> {
+// 导出原因:scanLocalFiles(按指定文件增量入库)复用同一套「文件 -> 库条目」转换,
+// 避免与全量扫描产生字段口径不一致。仅加 export,实现零改动。
+export async function extractMetadataLocal(filePath: string): Promise<MusicMetadata> {
   const ext = path.extname(filePath).toLowerCase();
   const nameWithoutExt = path.basename(filePath, ext);
   const stat = fs.statSync(filePath);
@@ -771,6 +773,106 @@ export function cleanupOrphans() {
     db.delete(artists).where(inArray(artists.id, ids)).run();
     invalidateArtistList();
   }
+}
+
+/** 取本地源的根目录,仅供「指定文件是否越界」校验;查不到(源未登记/配置缺 path/
+ *  配置不是合法 JSON)时返回 null,降级为不校验 —— 不让一次查表失败挡住已下载成功的文件。 */
+function resolveSourceRoot(sourceId: string): string | null {
+  try {
+    const row = db.select().from(mediaSources).where(eq(mediaSources.id, sourceId)).get();
+    const cfg = row?.config ? JSON.parse(row.config) : null;
+    const p = cfg?.path;
+    return typeof p === "string" && p.length > 0 ? path.resolve(p) : null;
+  } catch {
+    return null;
+  }
+}
+
+function isUnderRoot(absPath: string, rootPath: string): boolean {
+  const rel = path.relative(rootPath, absPath);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/**
+ * 只扫**指定文件列表**的增量入库入口(MusicFetch 落盘后要立刻可搜可播,不能等全库重扫)。
+ *
+ * 与 scanLocalSource 的差异只有两处,都是刻意为之:
+ *  1. 输入是调用方点名的具体文件路径,不做目录遍历(scanLocalDir);
+ *  2. 🔴 **不执行收尾对账删除** —— 即 scanLocalSource 里那段
+ *     `SELECT id, path ... WHERE path LIKE 'l:<sourceId>:%'` → `!seenPaths.has()` →
+ *     DELETE + deleteAnalysisMany + deleteSongLyric + cleanupOrphans(本改动前位于
+ *     scanner.ts:835-856,插入本函数后行号下移,请以函数名定位)。
+ *     那段逻辑的语义是「本次没扫到 = 文件已删除」,**成立前提是整个 source 根已被完整
+ *     遍历过**。本函数只看了列表里的几个文件,一旦走对账,库里其余几万首都会被判定为
+ *     消失而被误删。故:全量对账只属于显式 full 扫描,本函数**永不构造 seenPaths、
+ *     永不 DELETE、不调用 cleanupOrphans**,对曲库的影响恒为「新增 / 更新」。
+ *
+ * 其它一律与全量扫描同口径:songKey = `l:<sourceId>:<绝对路径>`、指纹 `size|mtimeMs`、
+ * 元信息走 extractMetadataLocal、入库走 upsertSong(命中即更新,不产生重复行)。
+ *
+ * @returns added/updated/failed/skipped 计数。skipped = 被拒(空项/越界),
+ *          failed = 读取或入库抛异常(含文件不存在)。
+ */
+export async function scanLocalFiles(
+  sourceId: string,
+  filePaths: string[],
+  onProgress?: (p: ScanProgress) => void,
+  signal?: AbortSignal,
+): Promise<{ added: number; updated: number; failed: number; skipped: number }> {
+  const list = Array.isArray(filePaths) ? filePaths : [];
+  const progress: ScanProgress = {
+    phase: "scanning", totalDirs: 0, processedDirs: 0,
+    totalFiles: list.length, processedFiles: 0,
+    added: 0, updated: 0, skipped: 0, failed: 0, currentTrack: "",
+    // 不做删除对账,语义上不是一次完整 sweep,按增量口径上报。
+    mode: "incremental",
+  };
+  const emit = () => { if (onProgress) onProgress({ ...progress }); };
+  emit();
+
+  let added = 0, updated = 0, skipped = 0, failed = 0;
+  const rootPath = resolveSourceRoot(sourceId);
+
+  for (let i = 0; i < list.length; i++) {
+    if (signal?.aborted) break;
+    const raw = list[i];
+    // 空项/非字符串:不计入成功,也不算故障(调用方可能拼出了空槽位)。
+    if (!raw || typeof raw !== "string") { skipped++; continue; }
+    // 统一解析成绝对路径:songKey 必须与全量扫描(path.join(root, ...))的形态一致,
+    // 否则同一首歌会被记成两个条目。
+    const filePath = path.resolve(raw);
+    progress.currentTrack = path.basename(filePath);
+    try {
+      // 越界防护:只认该 source 根之下的文件(拒绝/跳过并记日志,绝不静默入库)。
+      if (rootPath && !isUnderRoot(filePath, rootPath)) {
+        skipped++;
+        log.warn(`[SCANNER] 跳过不在源根下的文件 ${filePath}(源 ${sourceId} 根 ${rootPath})`);
+        continue;
+      }
+      const stat = fs.statSync(filePath);
+      const fp = `${stat.size}|${stat.mtimeMs}`;
+      const meta = await extractMetadataLocal(filePath);
+      const result = upsertSong(`l:${sourceId}:${filePath}`, meta, sourceId, fp);
+      if (result === "added") added++;
+      else updated++;
+    } catch (e: any) {
+      // 与全量扫描同口径:文件不存在 / 无权限 / 解析或入库失败,计入 failed 并带路径告警。
+      failed++;
+      log.warn(`[SCANNER] 指定文件入库失败 ${filePath}`, { err: e?.message || String(e) });
+    }
+    progress.processedFiles = i + 1;
+    progress.added = added;
+    progress.updated = updated;
+    progress.skipped = skipped;
+    progress.failed = failed;
+    emit();
+  }
+
+  progress.phase = "done";
+  progress.currentTrack = "";
+  emit();
+  log.info(`[Local] file scan complete: +${added} ~${updated} skip=${skipped} fail=${failed}`);
+  return { added, updated, failed, skipped };
 }
 
 export async function scanLocalSource(sourceId: string, config: any, mode: ScanMode, onProgress?: (p: ScanProgress) => void, signal?: AbortSignal) {
