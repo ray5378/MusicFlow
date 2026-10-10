@@ -2,7 +2,7 @@
   <div class="admin-fetch">
     <div class="page-header">
       <h2>{{ t('admin.fetch.title') }}</h2>
-      <el-button :loading="jobsLoading" @click="refreshJobs"><MfIcon name="RefreshCw" />{{ t('admin.fetch.jobs.refresh') }}</el-button>
+      <el-button :loading="jobsLoading" @click="refreshAllJobs"><MfIcon name="RefreshCw" />{{ t('admin.fetch.jobs.refresh') }}</el-button>
     </div>
 
     <el-tabs v-model="activeTab" class="fetch-tabs">
@@ -48,9 +48,6 @@
               </el-form-item>
               <el-form-item :label="t('admin.fetch.config.preferLossless')">
                 <el-switch v-model="config.preferLossless" />
-              </el-form-item>
-              <el-form-item :label="t('admin.fetch.config.rejectFakeLossless')">
-                <el-switch v-model="config.rejectFakeLossless" />
               </el-form-item>
             </div>
 
@@ -205,7 +202,7 @@
         </div>
       </el-tab-pane>
 
-      <!-- ===== 2. 新建任务 + 预览 ===== -->
+      <!-- ===== 2. 下载：新建任务 + 全库 ===== -->
       <el-tab-pane :label="t('admin.fetch.tabCreate')" name="create">
         <el-form label-position="top" class="create-form">
           <el-form-item :label="t('admin.fetch.create.inputLabel')">
@@ -263,72 +260,7 @@
         </div>
       </el-tab-pane>
 
-      <!-- ===== 3. 任务列表 + 详情 ===== -->
-      <el-tab-pane :label="t('admin.fetch.tabJobs')" name="jobs">
-        <div class="jobs-toolbar">
-          <div class="jobs-filters">
-            <span class="hint">{{ t('admin.fetch.jobs.autoRefreshHint') }}</span>
-            <el-select v-model="statusFilter" size="small" class="filter-select" @change="refreshJobs">
-              <el-option :label="t('admin.fetch.jobs.filterAll')" value="" />
-              <el-option v-for="s in jobStatusOptions" :key="s" :label="statusText(s)" :value="s" />
-            </el-select>
-            <el-select v-model="limit" size="small" class="limit-select" @change="refreshJobs">
-              <el-option label="20" :value="20" />
-              <el-option label="50" :value="50" />
-              <el-option label="100" :value="100" />
-            </el-select>
-          </div>
-          <el-button size="small" :loading="jobsLoading" @click="refreshJobs"><MfIcon name="RefreshCw" />{{ t('admin.fetch.jobs.refresh') }}</el-button>
-          <el-button size="small" type="danger" plain @click="doClearJobs">{{ t('admin.fetch.jobs.clearAll') }}</el-button>
-        </div>
-
-        <el-alert v-if="jobsError" type="error" :closable="false" :title="jobsError" class="jobs-error" />
-
-        <el-table v-if="jobs.length" :data="jobs" stripe v-loading="jobsLoading" @row-dblclick="openDetail">
-          <el-table-column :label="t('admin.fetch.jobs.colId')" width="120">
-            <template #default="{ row }"><span class="mono">{{ shortId(row.id) }}</span></template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colStatus')" width="110">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colTotal')" width="80" align="center">
-            <template #default="{ row }">{{ row.counts?.total ?? 0 }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colDone')" width="80" align="center">
-            <template #default="{ row }">{{ row.counts?.done ?? 0 }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colFailed')" width="80" align="center">
-            <template #default="{ row }"><span :class="{ 'cell-fail': (row.counts?.failed ?? 0) > 0 }">{{ row.counts?.failed ?? 0 }}</span></template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colSkipped')" width="80" align="center">
-            <template #default="{ row }">{{ row.counts?.skipped ?? 0 }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colBytes')" width="110">
-            <template #default="{ row }">{{ formatBytes(row.counts?.bytes) }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colCreatedAt')" width="150">
-            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.colActions')" width="160" fixed="right">
-            <template #default="{ row }">
-              <el-button size="small" @click="openDetail(row)">{{ t('admin.fetch.jobs.view') }}</el-button>
-              <el-button v-if="isActiveStatus(row.status)" size="small" type="danger" plain @click="doCancel(row)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
-              <el-button v-if="!isActiveStatus(row.status)" size="small" type="danger" plain @click="doDeleteJob(row)">{{ t('admin.fetch.jobs.delete') }}</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-        <EmptyState
-          v-else-if="!jobsLoading"
-          icon="box"
-          :title="t('admin.fetch.jobs.emptyTitle')"
-          :description="t('admin.fetch.jobs.emptyDesc')"
-          compact
-        />
-      </el-tab-pane>
-
-      <!-- ===== 4. 洗版(无损替换低码率) ===== -->
+      <!-- ===== 3. 洗版(无损替换低码率) ===== -->
       <el-tab-pane :label="t('admin.fetch.tabUpgrade')" name="upgrade">
         <div v-loading="upgradeConfigLoading" class="upgrade-wrap">
           <el-form label-position="top" class="upgrade-form">
@@ -353,10 +285,6 @@
               </el-form-item>
               <el-form-item :label="t('admin.fetch.upgrade.uncompressedMinKbps')">
                 <el-input-number v-model="upgradeConfig.uncompressedMinKbps" :min="0" :step="100" controls-position="right" />
-              </el-form-item>
-              <el-form-item :label="t('admin.fetch.upgrade.inspectCandidates')">
-                <el-switch v-model="upgradeConfig.inspectCandidates" />
-                <div class="hint">{{ t('admin.fetch.upgrade.inspectCandidatesHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.upgrade.upgradeCooldownDays')">
                 <el-input-number v-model="upgradeConfig.upgradeCooldownDays" :min="1" :max="365" :step="1" controls-position="right" />
@@ -455,105 +383,41 @@
           </div>
         </div>
       </el-tab-pane>
+
+      <!-- ===== 4. 下载任务列表（全部非洗版：搜索导入 / 全库 / 重试） ===== -->
+      <el-tab-pane :label="t('admin.fetch.tabJobs')" name="jobs">
+        <JobListPanel ref="downloadJobsRef" :kinds="DOWNLOAD_JOB_KINDS" show-kind />
+      </el-tab-pane>
+
+      <!-- ===== 5. 洗版任务列表（独立模块，与下载任务完全分开） ===== -->
+      <el-tab-pane :label="t('admin.fetch.tabUpgradeJobs')" name="upgradeJobs">
+        <JobListPanel ref="upgradeJobsRef" :kinds="UPGRADE_JOB_KINDS" />
+      </el-tab-pane>
     </el-tabs>
 
-    <!-- ===== 任务详情 ===== -->
-    <el-dialog v-model="detailVisible" :title="t('admin.fetch.jobs.detailTitle')" width="min(1160px, 96vw)" :append-to-body="true">
-      <div v-if="detail" v-loading="detailLoading" class="detail-body">
-        <div class="detail-head">
-          <div class="detail-meta">
-            <span class="mono">{{ detail.id }}</span>
-            <el-tag :type="statusTagType(detail.status)" size="small">{{ statusText(detail.status) }}</el-tag>
-          </div>
-          <div class="detail-counts">
-            <span>{{ t('admin.fetch.jobs.colTotal') }}: {{ detail.counts?.total ?? 0 }}</span>
-            <span>{{ t('admin.fetch.jobs.colDone') }}: {{ detail.counts?.done ?? 0 }}</span>
-            <span v-if="(detail.counts?.failed ?? 0) > 0" class="cell-fail">{{ t('admin.fetch.jobs.colFailed') }}: {{ detail.counts.failed }}</span>
-            <span>{{ t('admin.fetch.jobs.colSkipped') }}: {{ detail.counts?.skipped ?? 0 }}</span>
-            <span>{{ t('admin.fetch.jobs.colBytes') }}: {{ formatBytes(detail.counts?.bytes) }}</span>
-            <span>{{ t('admin.fetch.jobs.duration') }}: {{ jobDuration(detail) }}</span>
-          </div>
-        </div>
-        <el-alert
-          v-if="detail.error"
-          type="error"
-          :closable="false"
-          :title="t('admin.fetch.jobs.jobError', { error: detail.error })"
-        />
-        <div class="detail-actions">
-          <el-button size="small" type="warning" :disabled="!(detail.counts?.failed ?? 0)" @click="doRetryAll">
-            <MfIcon name="RotateCcw" />{{ t('admin.fetch.jobs.retryAll') }}
-          </el-button>
-          <el-button v-if="isActiveStatus(detail.status)" size="small" type="danger" plain @click="doCancel(detail)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
-        </div>
-        <el-table v-if="detail.items && detail.items.length" :data="detail.items" stripe size="small" class="detail-table">
-          <el-table-column :label="t('admin.fetch.jobs.detailColSong')" min-width="170">
-            <template #default="{ row }">
-              <div class="song-cell">
-                <span class="song-title">{{ row.title }}</span>
-                <span v-if="row.artist" class="song-artist">{{ row.artist }}</span>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColStatus')" width="110">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColSource')" width="120">
-            <template #default="{ row }">{{ sourceText(row.chosen) }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColQuality')" width="150">
-            <template #default="{ row }">{{ qualityText(row.chosen) }}</template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColError')" min-width="150" show-overflow-tooltip>
-            <template #default="{ row }">
-              <span v-if="row.errorCode" class="cell-fail">{{ errorText(row.errorCode) }}</span>
-              <span v-else-if="row.errorMsg">{{ row.errorMsg }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColPath')" min-width="180" show-overflow-tooltip>
-            <template #default="{ row }"><span class="mono">{{ row.finalPath || '-' }}</span></template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColReplaced')" min-width="200" show-overflow-tooltip>
-            <template #default="{ row }">
-              <span v-if="row.replaced">
-                {{ t('admin.fetch.jobs.replaced') }}
-                <span class="mono">{{ replacedText(row.replaced) }}</span>
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('admin.fetch.jobs.detailColActions')" width="90">
-            <template #default="{ row }">
-              <el-button size="small" :disabled="!canRetryItem(row.status)" @click="retryItem(row)">{{ t('admin.fetch.jobs.retry') }}</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-        <div v-else class="hint empty-items">{{ t('admin.fetch.jobs.noItems') }}</div>
-      </div>
-      <div v-else v-loading="detailLoading" class="detail-empty"></div>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
+import JobListPanel from "./JobListPanel.vue";
 import { apiErrorText } from "@/utils/apiError";
+import {
+  statusText as fmtStatusText,
+  statusTagType as fmtStatusTagType,
+  errorText as fmtErrorText,
+  shortId as fmtShortId,
+  type TFn,
+} from "./jobFormat";
 import {
   getFetchConfig,
   updateFetchConfig,
   getFetchSources,
   previewFetch,
   createFetchTask,
-  listFetchJobs,
-  getFetchJob,
-  cancelFetchJob,
-  clearFetchJobs,
-  deleteFetchJob,
-  retryFetchJob,
   getUpgradePlan,
   getUpgradeConfig,
   updateUpgradeConfig,
@@ -565,12 +429,9 @@ import {
 } from "@/api/fetch";
 import type {
   FetchConfig,
-  FetchChosen,
   FetchSourceInfo,
   FetchPreviewItem,
   FetchPreviewSummary,
-  FetchJobSummary,
-  FetchJobDetail,
   FetchTargetInput,
   UpgradePlan,
   UpgradePlanItem,
@@ -579,6 +440,8 @@ import type {
 } from "@/api/fetch";
 
 const { t } = useI18n();
+// jobFormat 里的纯函数统一吃 (t, ...)，这里把它收窄成字符串键形式。
+const tt = t as unknown as TFn;
 
 const activeTab = ref("config");
 
@@ -600,7 +463,6 @@ function defaultConfig(): ConfigForm {
     durationToleranceSec: 10,
     minSampleRateHz: 44100,
     preferLossless: true,
-    rejectFakeLossless: true,
     skipIfInLibrary: true,
     strictBestTier: true,
     downloadCooldownDays: 7,
@@ -776,7 +638,7 @@ async function doStart() {
     const jobId = await createFetchTask(targets, false);
     ElMessage.success(t("admin.fetch.create.started", { id: shortId(jobId) }));
     activeTab.value = "jobs";
-    await refreshJobs();
+    await downloadJobsRef.value?.refresh();
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.create.startFailed")));
   } finally {
@@ -784,181 +646,24 @@ async function doStart() {
   }
 }
 
-// ---------- 任务列表 ----------
-const jobs = ref<FetchJobSummary[]>([]);
+// ---------- 任务列表（两个独立面板：下载 / 洗版） ----------
+// 列表本身的筛选、轮询、详情弹窗、逐条操作全部下沉到 JobListPanel.vue；
+// 这里只保留「新建任务后把对应面板刷一下」这一条父级职责。
+// 下载任务 = 全部非洗版（搜索导入 search / 全库 library / 重试 retry / 历史 manual）；
+// 洗版任务 = upgrade。两类任务因此永远不会混在同一个列表里。
+const DOWNLOAD_JOB_KINDS = ["search", "library", "retry", "manual"];
+const UPGRADE_JOB_KINDS = ["upgrade"];
+
+const downloadJobsRef = ref<InstanceType<typeof JobListPanel> | null>(null);
+const upgradeJobsRef = ref<InstanceType<typeof JobListPanel> | null>(null);
 const jobsLoading = ref(false);
-const jobsError = ref("");
-const statusFilter = ref("");
-const limit = ref(50);
-const jobStatusOptions = ["pending", "running", "done", "partial", "cancelled", "failed"];
-const ACTIVE_STATUS = ["pending", "running"];
 
-function isActiveStatus(s?: string): boolean {
-  return !!s && ACTIVE_STATUS.includes(s);
-}
-
-async function fetchJobList(): Promise<FetchJobSummary[]> {
-  return listFetchJobs({ limit: limit.value, status: statusFilter.value || undefined });
-}
-
-async function refreshJobs() {
+async function refreshAllJobs() {
   jobsLoading.value = true;
-  jobsError.value = "";
   try {
-    jobs.value = await fetchJobList();
-    ensurePolling();
-  } catch (e: any) {
-    jobsError.value = apiErrorText(e, t("admin.fetch.jobs.loadFailed"));
+    await Promise.all([downloadJobsRef.value?.refresh(), upgradeJobsRef.value?.refresh()]);
   } finally {
     jobsLoading.value = false;
-  }
-}
-
-// 进行中的任务每 2 秒轮询一次;全部结束/取消后自动停止。
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-function hasActiveJobs(): boolean {
-  return jobs.value.some((j) => isActiveStatus(j.status));
-}
-function ensurePolling() {
-  if (hasActiveJobs()) {
-    if (!pollTimer) pollTimer = setInterval(pollTick, 2000);
-  } else {
-    stopPolling();
-  }
-}
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-}
-async function pollTick() {
-  try {
-    jobs.value = await fetchJobList();
-    if (detailVisible.value && detailId.value) {
-      const d = await getFetchJob(detailId.value);
-      if (d) detail.value = d;
-    }
-  } catch {
-    /* 轮询失败静默,下个 tick 再试 */
-  }
-  if (!hasActiveJobs()) stopPolling();
-}
-
-// ---------- 任务详情 ----------
-const detailVisible = ref(false);
-const detailId = ref("");
-const detail = ref<FetchJobDetail | null>(null);
-const detailLoading = ref(false);
-
-async function openDetail(job: any) {
-  detailId.value = job.id;
-  detailVisible.value = true;
-  detailLoading.value = true;
-  try {
-    detail.value = await getFetchJob(job.id);
-    ensurePolling();
-  } catch (e: any) {
-    detail.value = null;
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.detailFailed")));
-  } finally {
-    detailLoading.value = false;
-  }
-}
-
-// 删除单条任务记录（仅终态；运行中先取消）。
-async function doDeleteJob(job: any) {
-  try {
-    await ElMessageBox.confirm(
-      t("admin.fetch.jobs.deleteConfirm", { id: shortId(job.id) }),
-      t("admin.fetch.jobs.delete"),
-      { type: "warning" },
-    );
-  } catch {
-    return;
-  }
-  try {
-    await deleteFetchJob(job.id);
-    ElMessage.success(t("admin.fetch.jobs.deleted"));
-    if (detailVisible.value && detailId.value === job.id) detailVisible.value = false;
-    await refreshJobs();
-  } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.deleteFailed")));
-  }
-}
-
-// 一键清空任务记录（只清终态）。
-async function doClearJobs() {
-  try {
-    await ElMessageBox.confirm(t("admin.fetch.jobs.clearConfirm"), t("admin.fetch.jobs.clearAll"), {
-      type: "warning",
-    });
-  } catch {
-    return;
-  }
-  try {
-    const r = await clearFetchJobs();
-    ElMessage.success(t("admin.fetch.jobs.cleared", { n: r.cleared ?? 0 }));
-    await refreshJobs();
-  } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.clearFailed")));
-  }
-}
-
-async function doCancel(job: any) {
-  try {
-    await ElMessageBox.confirm(
-      t("admin.fetch.jobs.cancelConfirm", { id: shortId(job.id) }),
-      t("admin.fetch.jobs.cancel"),
-      { type: "warning" },
-    );
-  } catch {
-    return;
-  }
-  try {
-    await cancelFetchJob(job.id);
-    ElMessage.success(t("admin.fetch.jobs.cancelled"));
-    await refreshJobs();
-    if (detailVisible.value && detailId.value === job.id && detail.value) {
-      const d = await getFetchJob(job.id);
-      if (d) detail.value = d;
-    }
-  } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.cancelFailed")));
-  }
-}
-
-// 顶部按钮:重试当前任务的全部失败项(job 级端点,onlyFailed)。
-async function doRetryAll() {
-  if (!detail.value) return;
-  try {
-    const newId = await retryFetchJob(detail.value.id, { onlyFailed: true });
-    ElMessage.success(t("admin.fetch.jobs.retryStarted", { id: shortId(newId) }));
-    detailVisible.value = false;
-    activeTab.value = "jobs";
-    await refreshJobs();
-  } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.retryFailed")));
-  }
-}
-
-// 逐曲重试:同走 job 级端点,传 targetIds 只重试该曲(targetId 缺失时退回只重试失败项)。
-function canRetryItem(s?: string): boolean {
-  return s === "failed" || s === "skipped" || s === "cancelled";
-}
-async function retryItem(item: any) {
-  try {
-    const opts = detail.value && item.targetId
-      ? { targetIds: [item.targetId as string] }
-      : { onlyFailed: true };
-    const newId = await retryFetchJob(detailId.value, opts);
-    ElMessage.success(t("admin.fetch.jobs.retryStarted", { id: shortId(newId) }));
-    detailVisible.value = false;
-    activeTab.value = "jobs";
-    await refreshJobs();
-  } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.retryFailed")));
   }
 }
 
@@ -971,7 +676,6 @@ function defaultUpgradeConfig(): Required<UpgradeConfig> {
     losslessRoot: "",
     compressedMinKbps: 700,
     uncompressedMinKbps: 1400,
-    inspectCandidates: true,
     upgradeCooldownDays: 30,
     upgradeAutoEnabled: false,
     upgradeAutoIntervalDays: 30,
@@ -1108,8 +812,8 @@ async function doStartUpgrade() {
     else body.limit = upgradeConfig.batchLimit;
     const job = await startUpgradeTask(body);
     ElMessage.success(t("admin.fetch.upgrade.started", { id: shortId(job?.id) }));
-    activeTab.value = "jobs";
-    await refreshJobs();
+    activeTab.value = "upgradeJobs";
+    await upgradeJobsRef.value?.refresh();
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.startFailed")));
   } finally {
@@ -1165,7 +869,7 @@ async function doStartLibrary() {
     const res = await startLibraryTask(libraryBatchSize.value);
     ElMessage.success(t("admin.fetch.library.started", { enqueued: res.enqueued, remaining: res.remaining }));
     await loadLibraryPlan();
-    await refreshJobs();
+    await downloadJobsRef.value?.refresh();
     activeTab.value = "jobs";
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.library.startFailed")));
@@ -1192,86 +896,11 @@ async function doResetLibrary() {
   }
 }
 
-// ---------- 展示辅助 ----------
-const STATUS_KEY: Record<string, string> = {
-  pending: "pending",
-  running: "running",
-  done: "done",
-  partial: "partial",
-  cancelled: "cancelled",
-  failed: "failed",
-  queued: "queued",
-  probing: "probing",
-  downloading: "downloading",
-  verifying: "verifying",
-  tagging: "tagging",
-  transcoding: "transcoding",
-  moving: "moving",
-  scanned: "scanned",
-  skipped: "skipped",
-  downloadable: "downloadable",
-  belowBar: "belowBar",
-  noCandidate: "noCandidate",
-};
-
-function statusText(s?: string): string {
-  if (!s) return "-";
-  const k = STATUS_KEY[s];
-  return k ? t(`admin.fetch.status.${k}`) : s;
-}
-
-function statusTagType(s?: string): "success" | "info" | "warning" | "danger" {
-  if (!s) return "info";
-  if (["done", "scanned", "downloadable"].includes(s)) return "success";
-  if (["failed", "partial"].includes(s)) return "danger";
-  if (["running", "probing", "downloading", "verifying", "tagging", "transcoding", "moving", "belowBar"].includes(s)) return "warning";
-  return "info";
-}
-
-// 失败原因码 -> 中文/英文文案(按码给文案,不要裸码)。
-const ERROR_CODE_KEY: Record<string, string> = {
-  NO_CANDIDATE: "noCandidate",
-  BELOW_BAR: "belowBar",
-  ALREADY_IN_LIBRARY: "alreadyInLibrary",
-  DUPLICATE_TARGET: "duplicateTarget",
-  FAKE_LOSSLESS: "fakeLossless",
-  INTEGRITY_FAILED: "integrityFailed",
-  HTTP_403: "http403",
-  TIMEOUT: "timeout",
-  STALL: "stall",
-  TAG_FAILED: "tagFailed",
-  TRANSCODE_FAILED: "transcodeFailed",
-  DISK_FULL: "diskFull",
-  MOVE_FAILED: "moveFailed",
-  SCAN_FAILED: "scanFailed",
-  SSRF_BLOCKED: "ssrfBlocked",
-  UNKNOWN: "unknown",
-};
-
-function errorText(code?: string): string {
-  if (!code) return "";
-  const k = ERROR_CODE_KEY[code];
-  if (k) return t(`admin.fetch.errorCode.${k}`);
-  const sk = STATUS_KEY[code];
-  return sk ? t(`admin.fetch.status.${sk}`) : code;
-}
-
-function shortId(id?: string): string {
-  if (!id) return "-";
-  return id.length > 10 ? id.slice(0, 8) + "..." : id;
-}
-
-function formatBytes(n?: number): string {
-  if (!n || n <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
+// ---------- 展示辅助（任务列表相关的已下沉到 jobFormat.ts，这里只留父级自己用的） ----------
+const statusText = (s?: string) => fmtStatusText(tt, s);
+const statusTagType = (s?: string) => fmtStatusTagType(s);
+const errorText = (c?: string) => fmtErrorText(tt, c);
+const shortId = fmtShortId;
 
 function formatKbps(n?: number): string {
   return n == null ? "-" : `${n} kbps`;
@@ -1284,72 +913,25 @@ function formatDuration(sec?: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// 仅在「删除原件」二次确认里拼 HTML(路径来自服务端,必须转义)。
+// 仅在「删除原件」二次确认里拼 HTML（路径来自服务端，必须转义）。
 function escapeHtml(s: string): string {
   const map: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
   return String(s).replace(/[&<>"']/g, (c) => map[c]);
 }
 
-// 洗版结果里的 replaced 字段容错展示(形状可能缺字段)。
-function replacedText(r: any): string {
-  if (!r || typeof r !== "object") return "";
-  const from = r.originalPath || "";
-  const to = r.newPath || r.movedTo || "";
-  if (from && to) return `${from} -> ${to}`;
-  return to || from || "";
-}
-
-function formatDateTime(v?: string | number): string {
-  if (!v) return "-";
-  const d = new Date(v);
-  if (isNaN(d.getTime())) return String(v);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function jobDuration(job: FetchJobSummary): string {
-  const start = job.startedAt || job.createdAt;
-  const end = job.finishedAt;
-  if (!start || !end) return "-";
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  if (!isFinite(ms) || ms < 0) return "-";
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
-function sourceText(chosen?: FetchChosen): string {
-  if (!chosen) return "-";
-  return chosen.platform || chosen.pluginId || "-";
-}
-
-function qualityText(chosen?: FetchChosen): string {
-  if (!chosen) return "-";
-  const p = chosen.probed ?? chosen.declared;
-  const parts: string[] = [];
-  if (p && typeof p === "object") {
-    if (p.codec) parts.push(String(p.codec));
-    if (p.bitrateKbps) parts.push(`${p.bitrateKbps} kbps`);
-    if (p.sampleRateHz) parts.push(`${p.sampleRateHz} Hz`);
-    if (p.bitDepth) parts.push(`${p.bitDepth} bit`);
-  } else if (typeof p === "string" && p) {
-    parts.push(p);
-  }
-  return parts.length ? parts.join(" / ") : "-";
-}
-
 onMounted(() => {
   loadConfig();
   loadSources();
-  refreshJobs();
   loadUpgradeConfig();
   loadLibraryPlan();
+  // 两个任务面板各自 onMounted 自拉；不在这里重复请求。
 });
-// 切到「创建」页签时刷新一次全库统计。
+// 切到「下载/洗版任务」页签时刷新一次对应面板；切到「下载(创建)」时刷新全库统计。
 watch(activeTab, (v) => {
   if (v === "create") loadLibraryPlan();
+  if (v === "jobs") downloadJobsRef.value?.refresh();
+  if (v === "upgradeJobs") upgradeJobsRef.value?.refresh();
 });
-onUnmounted(stopPolling);
 </script>
 
 <style lang="scss" scoped>

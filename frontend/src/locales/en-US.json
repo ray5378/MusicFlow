@@ -1441,8 +1441,9 @@
     "fetch": {
       "title": "Music Fetch",
       "tabConfig": "Config",
-      "tabCreate": "New Task",
-      "tabJobs": "Tasks",
+      "tabCreate": "Download",
+      "tabJobs": "Download job list",
+      "tabUpgradeJobs": "Upgrade job list",
       "tabUpgrade": "Upgrade",
       "config": {
         "basic": "Basic",
@@ -1460,7 +1461,6 @@
         "durationToleranceSecHint": "Reject candidates whose duration deviates more than this from the library row. Default 10: a tight value (e.g. 3s) wrongly rejects live/remaster/alternate-edition sources. 0 = do not match by duration.",
         "minSampleRateHz": "Min sample rate (Hz)",
         "preferLossless": "Prefer lossless",
-        "rejectFakeLossless": "Reject fake lossless",
         "semantics": "Behaviour switches",
         "skipIfInLibrary": "Skip if already in library",
         "skipIfInLibraryHint": "Skip when already present in the local / WebDAV library, no re-download",
@@ -1577,6 +1577,7 @@
       "errorCode": {
         "noCandidate": "No source found any match",
         "belowBar": "Matches found are all below your quality floor",
+        "cooldownSkipped": "Attempted recently, auto-skipped while cooling down",
         "alreadyInLibrary": "Already in local / WebDAV library, skipped",
         "duplicateTarget": "Duplicated within this task",
         "fakeLossless": "Detected as fake lossless, rejected",
@@ -1593,10 +1594,18 @@
         "unknown": "Unknown error"
       },
       "jobs": {
+        "kind": {
+          "search": "Search import",
+          "library": "Library download",
+          "upgrade": "Upgrade",
+          "retry": "Retry",
+          "manual": "Manual"
+        },
         "refresh": "Refresh",
         "autoRefreshHint": "Running tasks refresh every 2 seconds",
         "filterAll": "All",
         "colId": "Task ID",
+        "colKind": "Type",
         "colStatus": "Status",
         "colTotal": "Total",
         "colDone": "Done",
@@ -1652,8 +1661,6 @@
         "losslessRootPlaceholder": "e.g. /MUSIC/LOSSLESS",
         "compressedMinKbps": "Compressed-lossless floor (kbps)",
         "uncompressedMinKbps": "Uncompressed-lossless floor (kbps)",
-        "inspectCandidates": "Inspect candidate quality",
-        "inspectCandidatesHint": "Probe real candidate quality before downloading; more accurate but slower",
         "deleteWarn": "Deleting originals is irreversible: original files will be permanently deleted and cannot be recovered.",
         "upgradeCooldownDays": "Upgrade cooldown (days)",
         "upgradeCooldownDaysHint": "Songs attempted within N days (success or failure) are skipped; 1-365, default 30",
@@ -1704,10 +1711,10 @@
         "attempted": "{count} attempted",
         "total": "{count} in library",
         "batchSize": "Batch size",
-        "start": "Download next batch",
+        "start": "Download library",
         "reset": "Reset attempt record",
         "reload": "Refresh stats",
-        "hint": "Only songs without a local file are processed; songs already present locally / on WebDAV are skipped automatically; up to 500 per batch, click repeatedly to continue",
+        "hint": "Only songs without a local file are processed; songs already present locally / on WebDAV are skipped automatically; up to 500 per batch, click again to download the next batch",
         "started": "Enqueued {enqueued}, {remaining} remaining",
         "startFailed": "Failed to start library download",
         "loadFailed": "Failed to load library stats",

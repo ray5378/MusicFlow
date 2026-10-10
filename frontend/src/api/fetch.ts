@@ -92,7 +92,6 @@ export interface FetchConfig {
   durationToleranceSec?: number;
   minSampleRateHz?: number;
   preferLossless?: boolean;
-  rejectFakeLossless?: boolean;
   skipIfInLibrary?: boolean;
   strictBestTier?: boolean;
   /** 下载尝试冷却天数：最近 N 天试过的歌直接跳过（0 = 关闭）。默认 7 */
@@ -156,8 +155,16 @@ export async function createFetchTask(targets: FetchTargetInput[], dryRun = fals
 export async function listFetchJobs(params?: {
   limit?: number;
   status?: string;
+  /** 任务类型白名单（后端 kind IN 过滤）。「下载任务」面板一次拉全部非洗版 kind。 */
+  kinds?: string[];
 }): Promise<FetchJobSummary[]> {
-  const res = await api.get(`${BASE}/jobs`, { params });
+  // ⚠️ kinds 必须**手动 join 成逗号串**再传：axios 对数组的默认序列化是 `kinds[]=a&kinds[]=b`，
+  // 后端按 `kinds` 取值会读不到 → 过滤条件被静默丢掉 → 「下载任务 / 洗版任务」两个 tab
+  // 都退化成「不过滤」，两边显示同一份混合列表（真实线上事故，2026-10-11 修复）。
+  const { kinds, ...rest } = params ?? {};
+  const res = await api.get(`${BASE}/jobs`, {
+    params: kinds && kinds.length > 0 ? { ...rest, kinds: kinds.join(",") } : rest,
+  });
   return (res.data?.jobs ?? []) as FetchJobSummary[];
 }
 
@@ -227,7 +234,6 @@ export interface UpgradeConfig {
   losslessRoot?: string;
   compressedMinKbps?: number;
   uncompressedMinKbps?: number;
-  inspectCandidates?: boolean;
   /** 洗版冷却天数(1-365,默认 30):N 天内尝试过(无论成败)就跳过。 */
   upgradeCooldownDays?: number;
   /** 定时自动洗版开关(默认关闭)。 */
