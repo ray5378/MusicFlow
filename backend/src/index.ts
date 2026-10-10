@@ -342,6 +342,7 @@ async function runMaintenanceOnce() {
 }
 
 import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
+import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
 
 // ==================== DLNA background discovery ====================
 // Keep the device cache warm so the cast dialog can show devices instantly
@@ -373,6 +374,9 @@ setTimeout(() => {
 // 实时 SSDP:设备一上线/下线立即更新缓存并广播 device_list_changed
 // (-> peer reconcile -> WS peer_registered/available 推送),卡片/Web 即时看到。
 wireSsdpRealtime();
+
+// 定时自动洗版（默认关闭；开启后按 upgradeAutoIntervalDays / upgradeAutoTimeOfDay 触发）。
+startUpgradeScheduler();
 // 新发现的设备即时注册 QueueController(幂等),上线即可播,不必等下一轮扫描。
 getEventManager().on("device_list_changed", () => {
   for (const d of getCachedDevices()) {

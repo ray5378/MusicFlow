@@ -24,7 +24,7 @@ import { db, sqlite } from "../../db/index.js";
 import { songs, albums } from "../../db/schema.js";
 import { extractMetadataLocal, upsertSong } from "../source/scanner.js";
 import type { FetchTarget } from "./candidates.js";
-import type { FetchConfig } from "./config.js";
+import { DEFAULT_LOSSLESS_ROOT, type FetchConfig } from "./config.js";
 import type { QualityConfig } from "./types.js";
 import { effectiveBitrateKbps } from "./quality.js";
 
@@ -191,18 +191,35 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
 /**
  * 出洗版计划（只读，不下载）。
  * - `songIds` 给了 → 只保留这些 id 的行；否则只保留 `isBelowUpgradeBar` 命中的行。
- * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、`belowBar` = 未截断前低于门槛数。
+ * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、`belowBar` = 未截断前低于门槛数、
+ *   `cooled` = 因冷却期跳过的低于门槛数（cooldownDays 天内已尝试过洗版，无论成败）。
  */
 export function buildUpgradePlan(
   sourceIds: string[],
   cfg: FetchConfig,
   opts?: { limit?: number; offset?: number; songIds?: string[] },
-): { sourceIds: string[]; total: number; belowBar: number; truncated: boolean; items: UpgradePlanItem[] } {
+): { sourceIds: string[]; total: number; belowBar: number; cooled: number; truncated: boolean; items: UpgradePlanItem[] } {
   const rows = collectUpgradeSongs(sourceIds);
   const total = rows.length;
   const upQ = buildUpgradeQuality(cfg.quality);
 
-  const belowAll = rows.filter((r) => isBelowUpgradeBar(r, upQ).below);
+  // 冷却过滤：N 天内尝试过（无论成败）的歌自动跳过；显式 songIds 视为用户点名重试，绕过冷却。
+  const cooldownDays = Math.min(365, Math.max(1, Math.floor(cfg.upgradeCooldownDays > 0 ? cfg.upgradeCooldownDays : 30)));
+  const attemptedAt = collectUpgradeAttemptedAt();
+  const nowMs = Date.now();
+  let cooled = 0;
+  const belowAll = rows.filter((r) => {
+    if (!isBelowUpgradeBar(r, upQ).below) return false;
+    const at = attemptedAt.get(r.id);
+    if (at) {
+      const t = Date.parse(at);
+      if (Number.isFinite(t) && nowMs - t < cooldownDays * 86_400_000) {
+        cooled += 1;
+        return false;
+      }
+    }
+    return true;
+  });
   const belowBar = belowAll.length;
 
   const sidList: string[] = opts && Array.isArray(opts.songIds) ? opts.songIds : [];
@@ -231,7 +248,7 @@ export function buildUpgradePlan(
     reason: isBelowUpgradeBar(r, upQ).reason,
   }));
 
-  return { sourceIds, total, belowBar, truncated, items };
+  return { sourceIds, total, belowBar, cooled, truncated, items };
 }
 
 /**
@@ -470,4 +487,82 @@ export function disposeOriginalFile(args: {
   } catch (e) {
     return { action: "skip", warnings: [`原件处置失败（已保留原件）: ${msgOf(e)}`] };
   }
+}
+
+// ==================== 洗版任务 config_json 快照（自 routes 迁入，供调度器复用） ====================
+
+/** 洗版任务的 config_json 快照（含 __upgrade 供批量子进程还原）。 */
+export function buildUpgradeJobConfig(cfg: FetchConfig, dryRun: boolean): Record<string, any> {
+  return {
+    ...cfg,
+    skipIfInLibrary: false, // 洗版必须能命中「库内已有的低码率行」，绕开「已有则跳过」
+    quality: buildUpgradeQuality(cfg.quality),
+    dryRun,
+    __upgrade: {
+      downloadRootOverride: cfg.losslessRoot || DEFAULT_LOSSLESS_ROOT,
+      originalDisposal: {
+        action: cfg.upgradeOriginalAction,
+        backupDir: path.join(cfg.downloadRoot, cfg.upgradeBackupDir),
+        allowedRoots: [cfg.downloadRoot],
+      },
+    },
+  };
+}
+
+// ==================== 洗版冷却（fetch_upgrade_attempts 表） ====================
+//
+// 产品语义（2026-10-10 确认）：同一首歌 N 天内（默认 30）只要**尝试过**洗版
+// ——无论成败——下次触发就自动跳过（「失败的短时间内也可能好不了」，不该天天白扫）。
+// 与 fetch_library_attempts 同构但独立：song_id 主键 + INSERT OR IGNORE 天然幂等；
+// resetUpgradeAttempts() 供「清空洗版记录」按钮用（下一次全量可触发）。
+
+let upgradeAttemptsEnsured = false;
+
+/** 幂等建「洗版已尝试」表（本仓无迁移框架，CREATE TABLE IF NOT EXISTS 即可）。 */
+export function ensureUpgradeAttemptsTable(): void {
+  if (upgradeAttemptsEnsured) return;
+  sqlite
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS fetch_upgrade_attempts (
+         song_id      TEXT PRIMARY KEY,
+         attempted_at TEXT NOT NULL,
+         batch_id     TEXT NOT NULL,
+         status       TEXT NOT NULL DEFAULT 'attempted'
+       )`,
+    )
+    .run();
+  upgradeAttemptsEnsured = true;
+}
+
+/** 记录「这一批已尝试洗版」（失败也记，INSERT OR IGNORE 幂等）。 */
+export function recordUpgradeAttempts(batchId: string, songIds: string[]): void {
+  if (!batchId || songIds.length === 0) return;
+  ensureUpgradeAttemptsTable();
+  const now = new Date().toISOString();
+  const stmt = sqlite.prepare(
+    "INSERT OR IGNORE INTO fetch_upgrade_attempts (song_id, attempted_at, batch_id, status) VALUES (?, ?, ?, 'attempted')",
+  );
+  const tx = sqlite.transaction((ids: string[]) => {
+    for (const id of ids) if (id) stmt.run(id, now, batchId);
+  });
+  tx(songIds);
+}
+
+/** songId → 最近一次尝试时间（ISO 串）。 */
+export function collectUpgradeAttemptedAt(): Map<string, string> {
+  ensureUpgradeAttemptsTable();
+  const rows = sqlite.prepare("SELECT song_id, attempted_at FROM fetch_upgrade_attempts").all() as Array<{
+    song_id: string;
+    attempted_at: string;
+  }>;
+  const out = new Map<string, string>();
+  for (const r of rows) out.set(String(r.song_id ?? ""), String(r.attempted_at ?? ""));
+  return out;
+}
+
+/** 清空全部洗版冷却记录，返回清除行数。 */
+export function resetUpgradeAttempts(): number {
+  ensureUpgradeAttemptsTable();
+  const res = sqlite.prepare("DELETE FROM fetch_upgrade_attempts").run();
+  return Number(res?.changes ?? 0);
 }

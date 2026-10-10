@@ -10,7 +10,6 @@
 // 分片循环的关键：每一片都是一次**独立**的 runBatchJob（不在一片里循环所有片），
 // 这样每片结束即释放全局批量闸，不会把 scan/backfill/每日推荐堵住几十分钟。
 import type { Hono } from "hono";
-import * as path from "node:path";
 import {
   BusinessErrorCode,
   adminMiddleware,
@@ -19,15 +18,13 @@ import {
   apiInternalError,
   log,
 } from "./shared.js";
-import { runBatchJob } from "../../batch/runner.js";
-import { sleepBetweenBatch } from "../../services/plugin/batchPacer.js";
+import { startFetchJob, abortFetchJob } from "../../services/fetch/jobRunner.js";
 import { getSetting, setSetting } from "../../services/settings.js";
 import { db } from "../../db/index.js";
 import { mediaSources } from "../../db/schema.js";
 import {
   DEFAULT_DOWNLOAD_ROOT,
   DEFAULT_FETCH_CONFIG,
-  DEFAULT_LOSSLESS_ROOT,
   resolveFetchConfig,
   validateFetchPaths,
   type FetchConfig,
@@ -35,7 +32,14 @@ import {
 import { listCandidateSources, type FetchTarget } from "../../services/fetch/candidates.js";
 import { ensureDownloadSource, findDownloadSource } from "../../services/fetch/source.js";
 import { runFetchPipeline } from "../../services/fetch/orchestrator.js";
-import { buildUpgradePlan, buildUpgradeQuality, buildUpgradeTargets } from "../../services/fetch/upgrade.js";
+import {
+  buildUpgradeJobConfig,
+  buildUpgradePlan,
+  buildUpgradeQuality,
+  buildUpgradeTargets,
+  recordUpgradeAttempts,
+  resetUpgradeAttempts,
+} from "../../services/fetch/upgrade.js";
 import {
   buildLibraryJobConfig,
   buildLibraryPlan,
@@ -110,37 +114,6 @@ function summarize(job: FetchJobRecord): Record<string, unknown> {
     finishedAt: job.finishedAt,
     updatedAt: job.updatedAt,
   };
-}
-
-/** 运行中任务的 AbortController（jobId → controller），任务结束即移除。 */
-const controllers = new Map<string, AbortController>();
-
-/**
- * 后台分片循环：逐片 runBatchJob("fetch")，片间 sleepBetweenBatch 让位；
- * handler 每片结束返回 hasMore，据此决定是否继续。整批失败/取消在 catch 里落终态。
- */
-function startFetchJob(jobId: string): void {
-  const controller = new AbortController();
-  controllers.set(jobId, controller);
-  void (async () => {
-    try {
-      let chunk = 0;
-      for (;;) {
-        if (controller.signal.aborted) break;
-        const r = await runBatchJob("fetch", { jobId, chunk }, { signal: controller.signal });
-        if (!r?.result?.hasMore) break;
-        chunk++;
-        await sleepBetweenBatch();
-      }
-    } catch (e: any) {
-      updateFetchJobStatus(jobId, controller.signal.aborted ? "cancelled" : "failed", {
-        error: String(e?.message || e),
-      });
-      log.error("fetch 任务失败", { jobId, err: String(e?.message || e) });
-    } finally {
-      controllers.delete(jobId);
-    }
-  })();
 }
 
 export function registerFetch(app: Hono): void {
@@ -276,9 +249,7 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.NOT_FOUND;
       return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    const ctrl = controllers.get(id);
-    if (!ctrl) return c.json({ success: true, message: "任务未在运行" });
-    ctrl.abort();
+    if (!abortFetchJob(id)) return c.json({ success: true, message: "任务未在运行" });
     return c.json({ success: true });
   });
 
@@ -363,24 +334,10 @@ export function registerFetch(app: Hono): void {
       compressedMinKbps: upQ.fakeLosslessMinEffBitrate,
       uncompressedMinKbps: upQ.uncompressedMinKbps,
       inspectCandidates: cfg.inspectCandidates,
-    };
-  }
-
-  /** 洗版任务的 config_json 快照（含 __upgrade 供批量子进程还原）。 */
-  function buildUpgradeJobConfig(cfg: FetchConfig, dryRun: boolean): Record<string, any> {
-    return {
-      ...cfg,
-      skipIfInLibrary: false, // 洗版必须能命中「库内已有的低码率行」，绕开「已有则跳过」
-      quality: buildUpgradeQuality(cfg.quality),
-      dryRun,
-      __upgrade: {
-        downloadRootOverride: cfg.losslessRoot || DEFAULT_LOSSLESS_ROOT,
-        originalDisposal: {
-          action: cfg.upgradeOriginalAction,
-          backupDir: path.join(cfg.downloadRoot, cfg.upgradeBackupDir),
-          allowedRoots: [cfg.downloadRoot],
-        },
-      },
+      upgradeCooldownDays: cfg.upgradeCooldownDays,
+      upgradeAutoEnabled: cfg.upgradeAutoEnabled,
+      upgradeAutoIntervalDays: cfg.upgradeAutoIntervalDays,
+      upgradeAutoTimeOfDay: cfg.upgradeAutoTimeOfDay,
     };
   }
 
@@ -424,6 +381,8 @@ export function registerFetch(app: Hono): void {
       updateFetchJobStatus(job.id, "done");
       return c.json({ success: true, job: summarize(getFetchJob(job.id)!) });
     }
+    // 落冷却记录（失败也记——产品定调 2026-10-10：失败短期内也好不了，不该天天白扫）。
+    recordUpgradeAttempts(job.id, plan.items.map((i) => i.songId));
     startFetchJob(job.id);
     return c.json({ success: true, job: summarize(getFetchJob(job.id)!) });
   });
@@ -446,10 +405,28 @@ export function registerFetch(app: Hono): void {
       patch.losslessRoot = body.losslessRoot.trim();
     }
     if (typeof body?.inspectCandidates === "boolean") patch.inspectCandidates = body.inspectCandidates;
+    // 冷却/定时四件套：整数 1-365 钳制 + 时刻格式校验（产品定调 2026-10-10）。
+    if (typeof body?.upgradeCooldownDays === "number" && Number.isFinite(body.upgradeCooldownDays)) {
+      patch.upgradeCooldownDays = Math.min(365, Math.max(1, Math.floor(body.upgradeCooldownDays)));
+    }
+    if (typeof body?.upgradeAutoEnabled === "boolean") patch.upgradeAutoEnabled = body.upgradeAutoEnabled;
+    if (typeof body?.upgradeAutoIntervalDays === "number" && Number.isFinite(body.upgradeAutoIntervalDays)) {
+      patch.upgradeAutoIntervalDays = Math.min(365, Math.max(1, Math.floor(body.upgradeAutoIntervalDays)));
+    }
+    if (typeof body?.upgradeAutoTimeOfDay === "string" && /^([01]?\d|2[0-3]):([0-5]\d)$/.test(body.upgradeAutoTimeOfDay.trim())) {
+      const parts = body.upgradeAutoTimeOfDay.trim().split(":");
+      patch.upgradeAutoTimeOfDay = String(parts[0]).padStart(2, "0") + ":" + parts[1];
+    }
 
     // 只增量写覆盖项（与 PUT /config 同一套「逐项提交」纪律）。
     setSetting(CONFIG_KEY, JSON.stringify({ ...readStoredOverride(), ...patch }));
     return c.json({ success: true, config: upgradeConfigView(currentConfig()) });
+  });
+
+  // 清空洗版冷却记录（下一次所有歌都可重新触发洗版）。
+  app.post("/v1/fetch/upgrade/reset", adminMiddleware, (c) => {
+    const cleared = resetUpgradeAttempts();
+    return c.json({ success: true, cleared });
   });
 
   // ---------------- 全库下载（手动按钮：库里本地没有实体文件的歌） ----------------

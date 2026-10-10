@@ -19,7 +19,8 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import md5 from "md5";
 
-import { db, encryptPassword } from "../../src/db/index.js";
+import { db, sqlite, encryptPassword } from "../../src/db/index.js";
+import { ensureUpgradeAttemptsTable, recordUpgradeAttempts, resetUpgradeAttempts } from "../../src/services/fetch/upgrade.js";
 import { songs, albums, playlists, playlistSongs, users, settings } from "../../src/db/schema.js";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { _resetSettingsCacheForTest } from "../../src/services/settings.js";
@@ -103,6 +104,10 @@ beforeEach(() => {
   db.delete(playlists).run();
   db.delete(songs).run();
   db.delete(albums).run();
+  // 洗版冷却表是新增表,不在上面的 drizzle 清单里 —— 路由用例(POST /upgrade/tasks)
+  // 会真实写入,而本文件 sequence.shuffle 打乱用例顺序,不清会随机污染 seedThree 用例。
+  ensureUpgradeAttemptsTable(); // 首个用例可能还没人建过表
+  sqlite.prepare("DELETE FROM fetch_upgrade_attempts").run();
   db.delete(settings).where(eq(settings.key, "fetch.config")).run();
   _resetSettingsCacheForTest();
   _resetFetchJobsForTest();
@@ -578,7 +583,7 @@ describe("fetch 路由：洗版端点", () => {
     expect(cfg.quality.fakeLosslessMinEffBitrate).toBe(700);
     expect(cfg.quality.uncompressedMinKbps).toBe(1400);
     expect(cfg.__upgrade.downloadRootOverride).toBe(DEFAULT_LOSSLESS_ROOT);
-    expect(cfg.__upgrade.originalDisposal.action).toBe("keep");
+    expect(cfg.__upgrade.originalDisposal.action).toBe("delete"); // 产品定调 2026-10-10：洗版默认删除原版;
     expect(Array.isArray(cfg.__upgrade.originalDisposal.allowedRoots)).toBe(true);
 
     // 有可洗目标 → 起了批量子进程
@@ -665,5 +670,56 @@ describe("upgradeBaselineKbps — size/duration 换算优先（240 生产实测�
     );
     expect(r.below).toBe(true);
     expect(r.reason).toContain("600kbps < 700kbps");
+  });
+});
+
+// ==================== 5) 洗版冷却（fetch_upgrade_attempts） ====================
+
+describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
+  const cfg = () => resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
+
+  const wipe = () => {
+    sqlite.prepare("DELETE FROM fetch_upgrade_attempts").run();
+    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:s-up:%'").run();
+  };
+  beforeEach(wipe);
+  afterEach(wipe);
+
+  it("冷却期内的歌被跳过并计入 cooled，未尝试的照常入选", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1"]);
+    const plan = buildUpgradePlan(["s-up"], cfg());
+    expect(plan.belowBar).toBe(1);
+    expect(plan.cooled).toBe(1);
+    expect(plan.items.map((i) => i.songId)).toEqual(["s-lo2"]);
+  });
+
+  it("超过冷却期后恢复入选", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1"]);
+    sqlite
+      .prepare("UPDATE fetch_upgrade_attempts SET attempted_at = ? WHERE song_id = 's-lo1'")
+      .run(new Date(Date.now() - 31 * 86_400_000).toISOString());
+    const plan = buildUpgradePlan(["s-up"], cfg());
+    expect(plan.cooled).toBe(0);
+    expect(plan.items.map((i) => i.songId)).toEqual(["s-lo1"]);
+  });
+
+  it("显式 songIds 点名重试绕过冷却", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1"]);
+    const plan = buildUpgradePlan(["s-up"], cfg(), { songIds: ["s-lo1"] });
+    expect(plan.items.map((i) => i.songId)).toEqual(["s-lo1"]);
+  });
+
+  it("resetUpgradeAttempts 清空后全量可触发", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1", "s-lo2"]);
+    expect(resetUpgradeAttempts()).toBe(2);
+    const plan = buildUpgradePlan(["s-up"], cfg());
+    expect(plan.cooled).toBe(0);
+    expect(plan.items).toHaveLength(2);
   });
 });

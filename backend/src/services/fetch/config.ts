@@ -83,12 +83,20 @@ export interface FetchConfig {
   upgradeSourceIds: string[];
   /** 单次洗版最多处理多少首（手动触发的默认批量上限）。 */
   upgradeBatchLimit: number;
-  /** 洗版命中更好音质后，原低码率文件的处置。默认 keep；delete 不可逆。 */
+  /** 洗版命中更好音质后，原低码率文件的处置。产品定调 2026-10-10：默认 delete（不可逆，disposeOriginalFile 有多重安全闸）。 */
   upgradeOriginalAction: "keep" | "move" | "delete";
   /** upgradeOriginalAction === "move" 时的备份子目录（相对 downloadRoot）。 */
   upgradeBackupDir: string;
   /** 「全库下载」单批上限（产品定 500/次，防止一次把平台接口打爆）。 */
   libraryBatchLimit: number;
+  /** 洗版冷却期（天，1-365）：同一首歌 N 天内尝试过洗版（无论成败）就自动跳过。 */
+  upgradeCooldownDays: number;
+  /** 定时自动洗版开关（产品定调 2026-10-10：默认关闭）。 */
+  upgradeAutoEnabled: boolean;
+  /** 定时自动洗版间隔（天，1-365）。 */
+  upgradeAutoIntervalDays: number;
+  /** 定时自动洗版每日触发时刻（"HH:mm" 24 小时制，服务器本地时区）。 */
+  upgradeAutoTimeOfDay: string;
 }
 
 /** 默认配置（所有旋钮的缺省取值见各字段注释）。 */
@@ -129,9 +137,13 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   losslessRoot: DEFAULT_LOSSLESS_ROOT,
   upgradeSourceIds: [],
   upgradeBatchLimit: 20,
-  upgradeOriginalAction: "keep",
+  upgradeOriginalAction: "delete",
   upgradeBackupDir: ".upgraded-backup",
   libraryBatchLimit: 500,
+  upgradeCooldownDays: 30,
+  upgradeAutoEnabled: false,
+  upgradeAutoIntervalDays: 30,
+  upgradeAutoTimeOfDay: "03:00",
 };
 
 /**
