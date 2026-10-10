@@ -43,10 +43,16 @@ export interface FetchConfig {
   /** 转码默认开启（用户已拍板） */
   transcodeEnabled: boolean;
   transcodeTarget: "flac" | "alac" | "wav";
+  /** 目标采样率（Hz）；**缺省 = 跟随源采样率**（产品定调 2026-10-10：自适应、无上限）。 */
   transcodeSampleRateHz?: number;
-  transcodeBitDepth?: 16 | 24;
+  /** 目标位深；**缺省 "auto" = 跟随源位深**（16bit 源→16、24bit 源→24；16/24 = 强制）。 */
+  transcodeBitDepth?: 16 | 24 | "auto";
   transcodeKeepOriginal: boolean;
   /** 转码时是否把响度归一化到目标 LUFS（-14）。默认开。 */
+  /**
+   * 响度归一化（-14 LUFS）：**强制的标准化处理**，不是可选增值 —— 所有入库音频统一电平
+   * （产品定调 2026-10-10）。与位深/采样率的「跟随源」不同：响度是唯一主动改变音频内容的环节。
+   */
   transcodeLoudnessNormalize: boolean;
   /** 响度目标 LUFS；缺省 -14（= services/audio/normalization.ts 的 DEFAULT_TARGET_LUFS）。 */
   transcodeLoudnessTargetLufs: number;
@@ -111,7 +117,9 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   integrityLevel: "probe",
   transcodeEnabled: true,
   transcodeTarget: "flac",
+  transcodeBitDepth: "auto", // 跟随源位深（产品定调 2026-10-10）
   transcodeKeepOriginal: false,
+  // 响度归一化（-14 LUFS）：强制的标准化处理 —— 所有入库音频统一电平，非可选增值（产品定调 2026-10-10）。
   transcodeLoudnessNormalize: true,
   transcodeLoudnessTargetLufs: -14,
   transcodeLoudnessTwoPass: true,

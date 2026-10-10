@@ -875,16 +875,18 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     }
 
     // i) 转码（增值项：失败不致命，删失败产物、保留已写标签的源文件继续落盘）。
-    //    注：TranscodeOptions 无 bitDepth 字段，故把 cfg.transcodeBitDepth 映射为
-    //    keepBitDepth16（24bit → false，其余 → true），语义等价。
+    //    位深/采样率自适应跟随源（产品定调 2026-10-10）：transcodeBitDepth 缺省 "auto"
+    //    （16bit 源→16、24bit 源→24）；transcodeSampleRateHz 缺省不传 = 跟随源、无上限。
+    //    响度归一化（loudnorm -14 LUFS）是**强制的标准化处理**，非可选增值 —— 开启时
+    //    绝不能 skip（内容要变），两遍实测失败降级单遍也绝不让整首歌失败。
     //    响度归一化（-14 LUFS）也在此透传，缺省开（见 FetchConfig）。
     if (cfg.transcodeEnabled) {
       try {
         const tr = await deps.transcodeFile(cachePath, {
           target: cfg.transcodeTarget,
-          sampleRateHz: cfg.transcodeSampleRateHz,
+          sampleRateHz: cfg.transcodeSampleRateHz, // 缺省 = 跟随源采样率（无上限）
           keepTags: true,
-          keepBitDepth16: cfg.transcodeBitDepth !== 24,
+          bitDepth: cfg.transcodeBitDepth ?? "auto", // 缺省 = 跟随源位深
           loudnessNormalize: cfg.transcodeLoudnessNormalize,
           loudnessTargetLufs: cfg.transcodeLoudnessTargetLufs,
           loudnessTwoPass: cfg.transcodeLoudnessTwoPass,

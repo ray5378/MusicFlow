@@ -52,11 +52,16 @@ export interface TranscodeOptions {
   compressionLevel?: number;
   /** 是否保留标签与内嵌封面（默认 true） */
   keepTags?: boolean;
-  /** 是否强制 16bit（默认 true，防 3.5 倍膨胀） */
+  /** （旧参数）是否强制 16bit：true=16 / false=24。新代码请用 bitDepth（缺省 auto=跟随源位深，产品定调 2026-10-10）。 */
   keepBitDepth16?: boolean;
+  /** 输出位深档位："auto"（缺省）= 跟随源（源 ≥24bit→24，16bit 源→16，拿不到→24 保真）；16/24 = 强制。 */
+  bitDepth?: "auto" | 16 | 24;
   /** 单次转码超时（毫秒），缺省 300s */
   timeoutMs?: number;
-  /** 是否做响度归一化到目标 LUFS。缺省 **false**（opt-in；生产由 FetchConfig 打开）。 */
+  /**
+   * 是否做响度归一化到目标 LUFS。模块级缺省 false（纯转码复用）；但 **fetch 入库流水线
+   * 强制开启** —— 响度归一化（-14 LUFS）是标准化处理，不是可选增值（产品定调 2026-10-10）。
+   */
   loudnessNormalize?: boolean;
   /** 目标响度 LUFS，缺省 -14（= normalization.ts 的 DEFAULT_TARGET_LUFS，自动夹到 [-30,-5]）。 */
   loudnessTargetLufs?: number;
@@ -149,6 +154,16 @@ export interface LoudnessFilterInput {
 }
 
 /**
+ * 解析输出位深（纯函数）：16/24 显式生效；"auto" 跟随源 —— 源 ≥24bit → 24，
+ * 16bit 源或**拿不到位深**（有损/探针失败）→ 16（防 3.5 倍虚假升位，回归守卫）。
+ */
+export function resolveOutDepth(mode: "auto" | 16 | 24 | undefined, srcBits?: number): 16 | 24 {
+  if (mode === 16) return 16;
+  if (mode === 24) return 24;
+  return srcBits !== undefined && srcBits >= 24 ? 24 : 16;
+}
+
+/**
  * 拼「loudnorm + aresample」滤镜串（纯函数，便于单测锁定顺序与参数）。
  *
  * 顺序硬约束：`loudnorm` 必须在 `aresample` **之前** —— 前者是唯一的电平处理，
@@ -192,13 +207,16 @@ export function buildTranscodeArgs(opts: {
   sampleRateHz?: number;
   compressionLevel?: number;
   keepTags?: boolean;
+  /** （旧参数）true=16 / false=24；outDepth 给了就忽略。 */
   keepBitDepth16?: boolean;
+  /** 解析后的输出位深（16/24）；缺省回退 keepBitDepth16（!==false 视为 16）。 */
+  outDepth?: 16 | 24;
   hasCover?: boolean;
   /** 音频滤镜链（响度归一化用）；给了就下发 `-af`。 */
   af?: string;
 }): string[] {
   const keepTags = opts.keepTags !== false;
-  const s16 = opts.keepBitDepth16 !== false;
+  const s16 = opts.outDepth ? opts.outDepth === 16 : opts.keepBitDepth16 !== false;
   const hasCover = !!opts.hasCover;
 
   const args: string[] = ["-y", "-hide_banner", "-loglevel", "error", "-i", opts.src];
@@ -217,8 +235,8 @@ export function buildTranscodeArgs(opts: {
     args.push("-c:a", "alac", "-f", "ipod");
     if (s16) args.push("-sample_fmt", "s16");
   } else {
-    // wav：16bit PCM（s32 的 wav 兼容性差且无意义）
-    args.push("-c:a", "pcm_s16le");
+    // wav：位深跟随源（16 → pcm_s16le / 24 → pcm_s24le；s32 的 wav 兼容性差不用）
+    args.push("-c:a", opts.outDepth === 24 ? "pcm_s24le" : "pcm_s16le");
   }
 
   if (keepTags && hasCover) {
@@ -351,11 +369,13 @@ export async function transcodeFile(
   // 源属性：容器决定是否 skip、hasCover 决定要不要带封面流。
   let srcContainer: string | undefined;
   let srcSampleRate: number | undefined;
+  let srcBits: number | undefined;
   let hasCover = false;
   try {
     const m = await probeFile(srcPath);
     srcContainer = m.container;
     srcSampleRate = m.sampleRateHz;
+    srcBits = m.bitDepth;
     hasCover = m.hasCover;
   } catch {
     warnings.push("源探针失败，按未知容器处理（不 skip）");
@@ -382,6 +402,12 @@ export async function transcodeFile(
         ? srcSampleRate
         : DEFAULT_RESAMPLE_RATE;
 
+  // 位深档位解析（产品定调 2026-10-10：跟随源）：显式 bitDepth > 旧 keepBitDepth16（true=16/false=24）> auto。
+  const depthMode: "auto" | 16 | 24 =
+    opts.bitDepth ??
+    (opts.keepBitDepth16 === false ? 24 : opts.keepBitDepth16 === true ? 16 : "auto");
+  const outDepth = resolveOutDepth(depthMode, srcBits);
+
   let af: string | undefined;
   if (loudnessOn) {
     const wantTarget = typeof opts.loudnessTargetLufs === "number" ? opts.loudnessTargetLufs : DEFAULT_TARGET_LUFS;
@@ -403,11 +429,12 @@ export async function transcodeFile(
       truePeakDb: opts.loudnessTruePeakDb,
       rangeLu: opts.loudnessRangeLu,
       targetSampleRateHz: targetRate,
-      // wav 目标（pcm_s16le 定死）不写出流位深。
-      osf: opts.target === "wav" ? undefined : opts.keepBitDepth16 === false ? "s32" : "s16",
+      // wav 目标（pcm_s16le/pcm_s24le 由 -c:a 定死）不写出流位深。
+      osf: opts.target === "wav" ? undefined : outDepth === 16 ? "s16" : "s32",
       measured,
     });
   }
+
 
   const tmp = tmpPathFor(dstPath, "trtmp");
   const args = buildTranscodeArgs({
@@ -417,7 +444,7 @@ export async function transcodeFile(
     sampleRateHz: opts.sampleRateHz,
     compressionLevel: opts.compressionLevel,
     keepTags: opts.keepTags,
-    keepBitDepth16: opts.keepBitDepth16,
+    outDepth,
     hasCover,
     af,
   });
@@ -425,7 +452,8 @@ export async function transcodeFile(
     srcPath,
     dstPath,
     target: opts.target,
-    s16: opts.keepBitDepth16 !== false,
+    outDepth,
+    srcBits,
     loudnorm: loudnessOn,
     osr: loudnessOn ? targetRate : undefined,
   });

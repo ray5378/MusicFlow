@@ -7,7 +7,7 @@ import { parseFile } from "music-metadata";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
 import { parseLoudnorm } from "../../src/services/audio/loudness.js";
 import { probeFile } from "../../src/services/fetch/probe.js";
-import { buildLoudnessFilter, buildTranscodeArgs, transcodeFile } from "../../src/services/fetch/transcode.js";
+import { buildLoudnessFilter, buildTranscodeArgs, resolveOutDepth, transcodeFile } from "../../src/services/fetch/transcode.js";
 import { writeTags } from "../../src/services/fetch/tagWriter.js";
 
 const DIR = mkdtempSync(join(tmpdir(), "mf-transcode-"));
@@ -115,7 +115,7 @@ describe("transcodeFile", () => {
     expect(p.bitDepth).toBe(16);
   }, TMO.timeout);
 
-  it("loudnessNormalize:两遍后成品响度 ≈ -14 LUFS(±1)，采样率跟随源、位深 16", async () => {
+  it("loudnessNormalize:两遍后成品响度 ≈ -14 LUFS(±1)，采样率/位深跟随源(24bit 源→24bit 成品)", async () => {
     const out = join(DIR, "loud.flac");
     const r = await transcodeFile(LOW, { target: "flac", dstPath: out, loudnessNormalize: true });
     expect(r.ok).toBe(true);
@@ -131,7 +131,9 @@ describe("transcodeFile", () => {
     const outP = await probeFile(out);
     expect(outP.container).toBe("flac");
     expect(outP.sampleRateHz).toBe(srcP.sampleRateHz);
-    expect(outP.bitDepth).toBe(16);
+    // 位深跟随源（产品定调 2026-10-10）：夹具 sine→flac 落 24bit 源，成品也必须 24bit。
+    expect(srcP.bitDepth).toBe(24);
+    expect(outP.bitDepth).toBe(24);
   }, TMO.timeout);
 
   it("loudnessNormalize:true 且源已是 flac → 绝不 skip(必须真跑一遍归一化)", async () => {
@@ -214,5 +216,41 @@ describe("buildTranscodeArgs", () => {
     expect(a).toContain("-compression_level");
     const b = buildTranscodeArgs({ src: "i.mp3", out: "o.flac", target: "flac", compressionLevel: 99 });
     expect(b).not.toContain("-compression_level");
+  });
+});
+
+// ==================== 位深/采样率自适应跟随源（产品定调 2026-10-10） ====================
+
+describe("resolveOutDepth — 位深跟随源", () => {
+  it("auto：16bit 源 → 16；24bit 源 → 24；拿不到（有损/探针失败）→ 16 防虚假升位", () => {
+    expect(resolveOutDepth("auto", 16)).toBe(16);
+    expect(resolveOutDepth("auto", 24)).toBe(24);
+    expect(resolveOutDepth("auto", 32)).toBe(24); // 容器上限
+    expect(resolveOutDepth("auto", undefined)).toBe(16); // mp3 等拿不到位深 → 16（回归守卫）
+    expect(resolveOutDepth("auto", 0)).toBe(16);
+  });
+
+  it("显式 16/24 恒生效（源是什么都钳到档位）", () => {
+    expect(resolveOutDepth(16, 24)).toBe(16);
+    expect(resolveOutDepth(24, 16)).toBe(24);
+  });
+
+  it("buildTranscodeArgs：outDepth=24 的 flac 不写 -sample_fmt；outDepth=16 写 s16", () => {
+    const d24 = buildTranscodeArgs({ src: "i", out: "o.flac", target: "flac", outDepth: 24 });
+    expect(d24.join(" ")).not.toContain("-sample_fmt");
+    const d16 = buildTranscodeArgs({ src: "i", out: "o.flac", target: "flac", outDepth: 16 });
+    expect(d16.join(" ")).toContain("-sample_fmt s16");
+  });
+
+  it("buildTranscodeArgs：wav 位深跟随源 —— 24 → pcm_s24le、16 → pcm_s16le", () => {
+    const w24 = buildTranscodeArgs({ src: "i", out: "o.wav", target: "wav", outDepth: 24 });
+    expect(w24.join(" ")).toContain("-c:a pcm_s24le");
+    const w16 = buildTranscodeArgs({ src: "i", out: "o.wav", target: "wav", outDepth: 16 });
+    expect(w16.join(" ")).toContain("-c:a pcm_s16le");
+  });
+
+  it("buildTranscodeArgs：不传 outDepth 回退旧 keepBitDepth16 语义（缺省 16）", () => {
+    const legacy = buildTranscodeArgs({ src: "i", out: "o.flac", target: "flac" });
+    expect(legacy.join(" ")).toContain("-sample_fmt s16");
   });
 });
