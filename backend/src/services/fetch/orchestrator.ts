@@ -43,7 +43,12 @@ import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
 import { findExistingPlayable } from "./existing.js";
 import { ensureDownloadSource } from "./source.js";
-import { disposeOriginalFile, migrateUpgradedSong } from "./upgrade.js";
+import {
+  disposeOriginalFile,
+  LOSSLESS_COMPRESSED_CONTAINERS,
+  LOSSLESS_UNCOMPRESSED_CONTAINERS,
+  migrateUpgradedSong,
+} from "./upgrade.js";
 import { canWriteDir, ensureWritableDir } from "./writable.js";
 import { scanLocalFiles } from "../source/scanner.js";
 import { resolveFetchConfig, validateFetchPaths, type FetchConfig } from "./config.js";
@@ -300,6 +305,26 @@ function upgradeMetaOf(t: FetchTarget | undefined): {
   } catch {
     return {};
   }
+}
+
+const ALL_LOSSLESS_CONTAINERS: string[] = [...LOSSLESS_COMPRESSED_CONTAINERS, ...LOSSLESS_UNCOMPRESSED_CONTAINERS];
+
+/**
+ * 洗版「抢救候选」（PATCH14B）：全部候选被 rank 预筛拒绝时，挑出仍值得下载验证的：
+ * 无损容器 +（声明码率已知时）高于原件基准。声明缺失视为未知（值得试），最终以探针裁决。
+ */
+function rescueCandidatesForInPlace(cands: Candidate[], t: FetchTarget): Candidate[] {
+  const um = upgradeMetaOf(t);
+  if (!um?.originalFsPath || !um.originalSourceId) return [];
+  const baseline = um.baselineKbps ?? 0;
+  if (!(baseline > 0)) return [];
+  return cands.filter((c) => {
+    const q = qualityOf(c);
+    const cont = String(q?.container ?? "").toLowerCase();
+    if (!ALL_LOSSLESS_CONTAINERS.includes(cont)) return false;
+    const k = Number(q?.bitrateKbps ?? 0);
+    return !(k > 0 && k <= baseline);
+  });
 }
 
 /** 库行 path（`l:<sid>:<fs路径>`）→ 真实 fs 路径；无前缀原样返回。 */
@@ -722,24 +747,32 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
       // 4) 门槛过滤与排序。
       const ranked = deps.rankCandidates(cands, cfg.quality, { durationSec: t.durationSec });
+      let eligible: Candidate[];
       if (!ranked || ranked.length === 0) {
         for (const c of cands) {
           // 与 rankCandidates 的预筛口径保持一致（tolerateUnknown）：否则「原因」会对不上。
           const r = meetsFloor(c, cfg.quality, { durationSec: t.durationSec }, { tolerateUnknown: true });
           if (!r.ok) item.rejected.push({ candidateId: c.id, reason: "BELOW_BAR", detail: r.reason });
         }
-        item.status = "failed";
-        item.errorCode = "BELOW_BAR";
-        item.errorMsg = "全部候选未达质量门槛";
-        return item;
+        // 洗版抢救通道（PATCH14B）：声明档全低于门槛时，「无损容器且声明码率高于原件」的
+        // 候选仍值得下载验证 —— 探针实测 > 原件就原地替换（落回原目录），实测不行照旧拒绝。
+        // 声明值不可信，所以只用来决定「值不值得下」，最终裁决一律以探针为准。
+        const rescue = upgradeMode ? rescueCandidatesForInPlace(cands, t) : [];
+        if (rescue.length === 0) {
+          item.status = "failed";
+          item.errorCode = "BELOW_BAR";
+          item.errorMsg = "全部候选未达质量门槛";
+          return item;
+        }
+        eligible = rescue;
+      } else {
+        // 5) 只下最高音质：strictBestTier 为真时只在「同档或更高档」里选。
+        const bestTier = tierOf(ranked[0]);
+        item.targetTier = bestTier;
+        eligible = cfg.strictBestTier
+          ? ranked.filter((c) => TIER_RANK[tierOf(c)] >= TIER_RANK[bestTier])
+          : ranked;
       }
-
-      // 5) 只下最高音质：strictBestTier 为真时只在「同档或更高档」里选。
-      const bestTier = tierOf(ranked[0]);
-      item.targetTier = bestTier;
-      const eligible = cfg.strictBestTier
-        ? ranked.filter((c) => TIER_RANK[tierOf(c)] >= TIER_RANK[bestTier])
-        : ranked;
 
       // 6) dryRun：到此为止，只报告「将会下载」。
       if (dryRun) {

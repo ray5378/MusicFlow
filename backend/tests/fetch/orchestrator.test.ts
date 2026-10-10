@@ -623,6 +623,94 @@ describe("runFetchPipeline", () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
+  it("23. 洗版抢救通道：rank 全拒但声明无损高于原件 → 下载验证后原地替换", async () => {
+    const origDir = join(DL, "Artist");
+    mkdirSync(origDir, { recursive: true });
+    const origFile = join(origDir, "old.mp3");
+    writeFileSync(origFile, "OLD");
+    const upgTarget: FetchTarget = {
+      id: "upgrade:old-3",
+      title: "Song",
+      artist: "Artist",
+      sourceData: JSON.stringify({
+        upgrade: { songId: "old-3", path: `l:dl-x:${origFile}`, suffix: "mp3", bitRate: 500 },
+      }),
+    };
+    const finalize = vi.fn(() => ({
+      action: "write" as const,
+      finalPath: join(origDir, "Song - Artist.flac"),
+      warnings: [],
+    }));
+    const downloads = vi.fn();
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "fl", url: "http://h/x.flac", container: "flac", bitrateKbps: 600, bitDepth: 16 }),
+      ],
+      rankCandidates: (() => []) as any, // 预筛全军覆没 → 触发抢救通道
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        downloads();
+        mkdirSync(dirname(o.destPath), { recursive: true });
+        writeFileSync(o.destPath, Buffer.alloc(13_750_000, 1)); // 实测 550kbps：假无损但 > 500
+        return { bytes: 13_750_000, httpStatus: 200, sha256: "s", rangeSupported: true, finalUrl: o.url, partial: false };
+      }) as any,
+      probeFile: (async (file: string) => ({
+        path: file,
+        bytes: 13_750_000,
+        container: "flac",
+        bitDepth: 16,
+        bitrateKbps: 550,
+        sampleRateHz: 44100,
+        durationSec: 200,
+        hasCover: false,
+      })) as any,
+      finalizeFile: finalize,
+      scanLocalFiles: (async () => ({ added: 1, updated: 0, failed: 0, skipped: 0 })) as any,
+    });
+    const r = await run({
+      targets: [upgTarget],
+      sourceId: "src-1",
+      deps,
+      originalDisposal: { action: "keep", allowedRoots: [DL] },
+    });
+    expect(r.items[0].status).toBe("done");
+    expect(r.items[0].inPlace).toEqual({ fsPath: origFile, sourceId: "dl-x" });
+    expect(downloads).toHaveBeenCalledTimes(1);
+    expect(finalize.mock.calls[0][0].destDirOverride).toBe(origDir);
+  });
+
+  it("24. 洗版抢救通道：声明码率不高于原件 → 不浪费下载，照旧 BELOW_BAR", async () => {
+    const origFile = join(DL, "old2.mp3");
+    const upgTarget: FetchTarget = {
+      id: "upgrade:old-4",
+      title: "Song",
+      artist: "Artist",
+      sourceData: JSON.stringify({
+        upgrade: { songId: "old-4", path: `l:dl-x:${origFile}`, suffix: "mp3", bitRate: 500 },
+      }),
+    };
+    const downloads = vi.fn();
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "fl", url: "http://h/x.flac", container: "flac", bitrateKbps: 400, bitDepth: 16 }),
+        cand({ id: "mp", url: "http://h/a.mp3", container: "mp3", bitrateKbps: 320 }),
+      ],
+      rankCandidates: (() => []) as any,
+      downloadToFile: (async (o: { url: string; destPath: string }) => {
+        downloads();
+        throw new Error("不应下载");
+      }) as any,
+    });
+    const r = await run({
+      targets: [upgTarget],
+      sourceId: "src-1",
+      deps,
+      originalDisposal: { action: "keep", allowedRoots: [DL] },
+    });
+    expect(r.items[0].status).toBe("failed");
+    expect(r.items[0].errorCode).toBe("BELOW_BAR");
+    expect(downloads).not.toHaveBeenCalled();
+  });
+
   it("20. 转码透传响度归一化参数（cfg 默认开，目标 -14 LUFS）", async () => {
     const seen: any[] = [];
     const tr = vi.fn(async (src: string, o: any) => {
