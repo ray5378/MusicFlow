@@ -30,6 +30,13 @@ import type { BackfillKind } from "../services/backfill.js";
 import type { BatchJobKind } from "./types.js";
 import { createLogger } from "../utils/logger.js";
 import { getPluginManifest } from "../plugins/registry.js";
+import { getFetchJob, saveFetchJobItems, saveFetchJobImports, updateFetchJobStatus } from "../services/fetch/jobStore.js";
+import type { FetchJobItem, FetchJobImport, FetchJobCounts } from "../services/fetch/jobStore.js";
+import { resolveFetchConfig } from "../services/fetch/config.js";
+import { runFetchPipeline } from "../services/fetch/orchestrator.js";
+import type { FetchItemOutcome } from "../services/fetch/orchestrator.js";
+import { ensureDownloadSource } from "../services/fetch/source.js";
+import type { TaskStatus } from "../services/fetch/types.js";
 
 const log = createLogger("batch-job");
 
@@ -500,11 +507,135 @@ async function recommendRefreshHandler(args: Record<string, any>, ctx: BatchJobC
 }
 
 // ---------- 网络音源下载入库(MusicFetch) ----------
-// 占位实现:下一轮替换为真实实现(取链择优 → 下载 → 校验/探针 → 写标签 → 转码 →
-// 原子落盘 → 点名增量入库;按 chunk 分片,跨片进度落 fetch_jobs 表)。
-// 当前仅为满足 batchJobHandlers 对 BatchJobKind 的穷尽映射而登记。
-async function fetchHandler(_args: Record<string, any>, _ctx: BatchJobContext): Promise<any> {
-  throw new Error("fetch handler 待实现");
+// 按 chunk 分片执行:一次 batch job 只处理一片(cfg.chunkSize 默认 20),片间由主进程
+// 释放全局批量闸再排队(M2 §2)。targets/config 一律从 fetch_jobs 表读(args 只带
+// jobId/chunk,JSON 安全),跨片进度/重试/死信全落 fetch_jobs。
+
+/** 本片计数累加到任务累计计数(跨片累计,不是覆盖)。 */
+function addCounts(base: FetchJobCounts, delta: Partial<FetchJobCounts>): FetchJobCounts {
+  return {
+    total: base.total + (delta.total ?? 0),
+    done: base.done + (delta.done ?? 0),
+    failed: base.failed + (delta.failed ?? 0),
+    skipped: base.skipped + (delta.skipped ?? 0),
+    added: base.added + (delta.added ?? 0),
+    updated: base.updated + (delta.updated ?? 0),
+    bytes: base.bytes + (delta.bytes ?? 0),
+  };
+}
+
+/** 流水线单曲结果 → fetch_jobs.items_json 元素。 */
+function toJobItem(o: FetchItemOutcome): FetchJobItem {
+  return {
+    id: o.targetId,
+    targetId: o.targetId,
+    status: o.status,
+    attempts: o.attempts,
+    chosen: o.chosen,
+    rejected: (o.rejected ?? []).map((r) => ({ candidateId: r.candidateId, reason: r.reason })),
+    bytes: o.bytes,
+    cachePath: o.cachePath,
+    finalPath: o.finalPath,
+    errorCode: o.errorCode,
+    errorMsg: o.errorMsg,
+  };
+}
+
+/** 按 targetId 对齐合并本片结果到既有 items(保留其它片的条目与顺序)。 */
+function mergeItems(existing: FetchJobItem[], outcomes: FetchItemOutcome[]): FetchJobItem[] {
+  const incoming = outcomes.map(toJobItem);
+  const byTarget = new Map(incoming.map((i) => [i.targetId, i]));
+  const seen = new Set<string>();
+  const out: FetchJobItem[] = [];
+  for (const e of existing) {
+    const hit = byTarget.get(e.targetId);
+    if (hit) {
+      out.push(hit);
+      seen.add(e.targetId);
+    } else out.push(e);
+  }
+  for (const i of incoming) if (!seen.has(i.targetId)) out.push(i);
+  return out;
+}
+
+/** 按 itemId 对齐合并 imports(重试成功只更新不追加)。 */
+function mergeImports(existing: FetchJobImport[], outcomes: FetchItemOutcome[]): FetchJobImport[] {
+  const map = new Map(existing.map((i) => [i.itemId, i]));
+  for (const o of outcomes) {
+    if (o.status === "done") {
+      map.set(o.targetId, { itemId: o.targetId, songId: o.songId, result: "added", filePath: o.finalPath });
+    } else if (o.status === "skipped") {
+      map.set(o.targetId, { itemId: o.targetId, songId: o.songId, result: "skipped", filePath: o.finalPath });
+    } else if (o.status === "failed" || o.status === "cancelled") {
+      map.set(o.targetId, { itemId: o.targetId, result: "failed", err: o.errorMsg });
+    }
+  }
+  return [...map.values()];
+}
+
+async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Promise<any> {
+  const jobId = String(args.jobId ?? "");
+  const job = getFetchJob(jobId);
+  if (!job) throw new Error(`fetch job 不存在: ${jobId}`);
+
+  const cfg = resolveFetchConfig(job.config);
+  const allTargets: any[] = Array.isArray(job.targets?.targets) ? job.targets.targets : [];
+  const total = allTargets.length;
+  const chunkSize = Number.isFinite(cfg.chunkSize) && cfg.chunkSize > 0 ? Math.floor(cfg.chunkSize) : 20;
+  const chunk = Number.isFinite(Number(args.chunk)) ? Math.max(0, Math.floor(Number(args.chunk))) : 0;
+  const start = chunk * chunkSize;
+  const slice = allTargets.slice(start, start + chunkSize);
+  const hasMore = start + slice.length < total;
+
+  // 空片(越界 chunk):直接返回,不改状态。
+  if (slice.length === 0) {
+    return { jobId, chunk, hasMore: false, counts: job.counts, warnings: [] };
+  }
+
+  // 首片置 running;并在落盘前确保下载源存在(sourceId 写回,中途失败 UI 也能看到源)。
+  if (chunk === 0) updateFetchJobStatus(jobId, "running");
+  let sourceId = job.sourceId ?? "";
+  if (!sourceId) {
+    try {
+      const r = ensureDownloadSource(cfg.downloadRoot);
+      sourceId = r.sourceId;
+      updateFetchJobStatus(jobId, "running", { sourceId });
+    } catch (e) {
+      // 源登记失败不致命:流水线内部还会再试一次。
+      log.warn("ensureDownloadSource 失败(继续)", { jobId, err: String((e as any)?.message || e) });
+    }
+  }
+
+  const dryRun = !!(job.config as any)?.dryRun;
+  const result = await runFetchPipeline({
+    targets: slice,
+    config: cfg,
+    sourceId: sourceId || undefined,
+    signal: ctx.signal,
+    dryRun,
+    // 🔴 progress 即心跳:每完成一首回报一次,防 15min 看门狗 SIGKILL。
+    onProgress: (p) => ctx.onProgress({ stage: "fetch", ...p }),
+  });
+
+  // 本片结果合并进 fetch_jobs(按 targetId/itemId 对齐,不丢其它片)。
+  const mergedItems = mergeItems(job.items, result.items);
+  const mergedCounts = addCounts(job.counts, result.counts);
+  saveFetchJobItems(jobId, mergedItems, mergedCounts);
+  saveFetchJobImports(jobId, mergeImports(job.imports, result.items));
+
+  // 只有最后一片才落终态;非末片保持 running 等下一片。
+  if (!hasMore) {
+    let status: TaskStatus;
+    const anyFailed = mergedCounts.failed > 0;
+    const anyOk = mergedCounts.done > 0 || mergedCounts.skipped > 0;
+    if (ctx.signal.aborted) status = "cancelled";
+    else if (anyFailed && anyOk) status = "partial";
+    else if (anyFailed) status = "failed";
+    else status = "done";
+    updateFetchJobStatus(jobId, status);
+  }
+
+  return { jobId, chunk, hasMore, counts: mergedCounts, warnings: result.warnings };
 }
 
 /** 任务类型 → 处理器映射(子进程 dispatch 用)。 */
