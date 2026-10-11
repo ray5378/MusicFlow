@@ -1757,7 +1757,9 @@
     "lyricsPlain": "Yes",
     "lyricsEmbedded": "Yes (embedded)",
     "lyricsNone": "None",
-    "rawTags": "Raw tags ({n})"
+    "rawTags": "Raw tags ({n})",
+    "savedPath": "Saved path",
+    "source": "Source"
   },
   "songTable": {
     "title": "Title",

@@ -1757,7 +1757,9 @@
     "lyricsPlain": "有",
     "lyricsEmbedded": "有（文件内嵌）",
     "lyricsNone": "无",
-    "rawTags": "原始标签（{n}）"
+    "rawTags": "原始标签（{n}）",
+    "savedPath": "保存路径",
+    "source": "来源"
   },
   "songTable": {
     "title": "标题",

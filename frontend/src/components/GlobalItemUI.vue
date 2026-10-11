@@ -104,6 +104,9 @@
         <div class="info-row" v-if="infoDlg.song.track"><span class="info-k">{{ t('globalItem.track') }}</span><span class="info-v">{{ infoDlg.song.track }}</span></div>
         <div class="info-row" v-if="infoDlg.song.comment"><span class="info-k">{{ t('globalItem.comment') }}</span><span class="info-v">{{ infoDlg.song.comment }}</span></div>
         <div class="info-row"><span class="info-k">{{ t('globalItem.lyrics') }}</span><span class="info-v">{{ lyricsText }}</span></div>
+        <!-- 保存路径 / 来源:本地/WebDAV 显示真实保存路径(w:<源id>: 前缀在 UI 层剥掉);
+             平台(web)歌曲显示「平台中文名（插件名）」。标签随类型动态变化。 -->
+        <div class="info-row"><span class="info-k">{{ savedPathLabel }}</span><span class="info-v info-path">{{ savedPathText }}</span></div>
         <!-- 原始标签(文件头全量解析入库):键值可能很多,默认折叠;列表接口不返回它 -->
         <details class="info-tags" v-if="tagEntries.length">
           <summary>{{ t('globalItem.rawTags', { n: tagEntries.length }) }}</summary>
@@ -122,6 +125,7 @@ import { useI18n } from "vue-i18n";
 
 import api from "@/api";
 import { useItemActions, MenuAction } from "@/composables/useItemActions";
+import { platformLabelOf, pluginNameOf, PLATFORM_META } from "@/utils/platformMeta";
 
 const { t } = useI18n();
 
@@ -164,6 +168,37 @@ const lyricsText = computed(() => {
   if (det?.timed) return t("globalItem.lyricsTimed");
   if (det?.inLibrary) return t("globalItem.lyricsPlain");
   return t("globalItem.lyricsEmbedded");
+});
+
+/** WebDAV path 形如 `w:<sourceId>:<href>`;UI 层剥掉前缀只展示真实路径/href。
+ *  注意:`path` 字段本身语义不改,剥前缀**仅在 UI 层**做。 */
+function stripWebdav(p: string) {
+  const m = /^w:([^:]*):(.*)$/.exec(p || "");
+  return m ? m[2] : (p || "");
+}
+
+/** 取数优先详情(detailSong),回退列表行(详情拉取失败时仍能展示来源/路径)。 */
+const srcRow = computed<any>(() => detailSong.value ?? infoDlg.song);
+
+/** 行标签随类型动态变化:平台(web)歌 → 「来源」;本地/WebDAV → 「保存路径」。 */
+const savedPathLabel = computed(() =>
+  (srcRow.value?.isWeb || srcRow.value?.rowType === "web") ? t("globalItem.source") : t("globalItem.savedPath"),
+);
+
+/** 行内容:平台歌 → 「平台中文名（插件名）」;本地/WebDAV → 剥掉 `w:<源id>:` 前缀的真实路径。 */
+const savedPathText = computed(() => {
+  const s = srcRow.value;
+  if (!s) return "—";
+  if (s.isWeb || s.rowType === "web") {
+    const slug = s.sourcePlatform ? String(s.sourcePlatform).toLowerCase() : "";
+    // 静态映射(i18n key,需 t 转译)优先 → 动态 manifest.platformLabels → 平台 id 原文
+    const p = slug
+      ? (t(PLATFORM_META[slug]?.label || "") || platformLabelOf(slug) || s.sourcePlatform)
+      : "";
+    const plug = s.sourcePluginId ? (pluginNameOf(s.sourcePluginId) || s.sourcePluginId) : "";
+    return plug ? (p ? `${p}（${plug}）` : plug) : (p || "—");
+  }
+  return stripWebdav(s.path) || "—";
 });
 
 const MENU_W = 224;
@@ -278,6 +313,8 @@ function fmt(sec: number) {
 
 .info-grid { display: flex; flex-direction: column; gap: 12px; }
 .info-row { display: flex; gap: 12px; font-size: 14px; .info-k { width: 64px; color: var(--fnos-text-tertiary); flex-shrink: 0; } .info-v { flex: 1; color: var(--fnos-text-primary); word-break: break-all; } .info-v.mono { font-family: monospace; font-size: 12px; } }
+/* 保存路径/来源:长路径换行且可选中复制 */
+.info-path { word-break: break-all; user-select: text; }
 
 /* 原始标签折叠区:弹窗窄(420px),键值用两列网格,长值换行 */
 .info-tags {
