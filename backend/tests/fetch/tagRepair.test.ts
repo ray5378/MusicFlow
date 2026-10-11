@@ -52,7 +52,24 @@ vi.mock("../../src/plugins/providers.js", () => ({
 }));
 
 const writeTagsMock = vi.hoisted(() => vi.fn());
-vi.mock("../../src/services/fetch/tagWriter.js", () => ({ writeTags: writeTagsMock }));
+// FetchTagError：源码 instanceof 判定用，测试直接构造实例（Vitest5 工厂必须带出全部被依赖导出）。
+const MockFetchTagError = vi.hoisted(
+  () =>
+    class MockFetchTagError extends Error {
+      constructor(
+        readonly code: string,
+        message: string,
+        readonly file: string,
+      ) {
+        super(message);
+        this.name = "FetchTagError";
+      }
+    },
+);
+vi.mock("../../src/services/fetch/tagWriter.js", () => ({
+  writeTags: writeTagsMock,
+  FetchTagError: MockFetchTagError,
+}));
 
 const cacheRemoteCoverMock = vi.hoisted(() => vi.fn());
 const resolveCoverFileMock = vi.hoisted(() => vi.fn());
@@ -237,6 +254,27 @@ describe("repairSongTags", () => {
     expect(searchLyricsMock).not.toHaveBeenCalled();
     const tags = writeTagsMock.mock.calls[0][1];
     expect(tags.album).toBe("DB 里的专辑名");
+  });
+
+  it("TAG_FAILED → 2s 后重试一次，第二次成功即修复（吸收 NAS 存储层瞬时抖动）", async () => {
+    const p = join(root, "retry.flac");
+    insertSong("s-retry", p);
+    parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+    writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TAG_FAILED", "transient", p));
+
+    const r = await repairSongTags("s-retry", cfg());
+    expect(r.outcome).toBe("fixed");
+    expect(writeTagsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("TIMEOUT 不重试直接上抛（由调用方记异常计数）", async () => {
+    const p = join(root, "timeout.flac");
+    insertSong("s-timeout", p);
+    parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+    writeTagsMock.mockRejectedValue(new MockFetchTagError("TIMEOUT", "slow", p));
+
+    await expect(repairSongTags("s-timeout", cfg())).rejects.toThrow();
+    expect(writeTagsMock).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -30,7 +30,7 @@ import { getSetting, setSetting } from "../settings.js";
 import { searchCover, searchLyrics } from "../../plugins/providers.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
 import { withCoverLimit } from "../covers.js";
-import { writeTags } from "./tagWriter.js";
+import { FetchTagError, writeTags } from "./tagWriter.js";
 import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig } from "./config.js";
 
@@ -49,6 +49,13 @@ const QUEUE_BATCH = 10;
 /** 调度轮询/启动延迟（与 upgradeScheduler 同款）。 */
 const POLL_MS = 60_000;
 const BOOT_DELAY_MS = 15_000;
+/**
+ * TAG_FAILED 单次重试延迟。加固（2026-10-11）：首修全量扫 40 起写失败全部集中在
+ * 一个 11 分钟窗口，实证为 NAS 存储层瞬时抖动（绿联 trimacl 短窗内 EACCES /
+ * 新建条目不可见 / 条目闪没），事后同命令复跑全部成功——2s 后重试 1 次即可吸收。
+ * 仅 TAG_FAILED 重试；TIMEOUT 不重试（可能真慢/真卡），其他错误原样上抛。
+ */
+const TAG_WRITE_RETRY_DELAY_MS = 2_000;
 
 interface QueueEntry {
   count: number;
@@ -263,7 +270,15 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   if (!gotCover && !gotLyric && !gotAlbum) return unobtainable;
 
   // 只在真拿到值时才写 —— tagWriter 原子写（tagtmp+rename），失败抛 FetchTagError。
-  await writeTags(fsPath, tags);
+  // TAG_FAILED 短延迟重试 1 次，吸收 NAS 存储层瞬时抖动；原文件保证未被破坏，重试安全。
+  try {
+    await writeTags(fsPath, tags);
+  } catch (e) {
+    if (!(e instanceof FetchTagError) || e.code !== "TAG_FAILED") throw e;
+    log.warn(`写标签失败，${TAG_WRITE_RETRY_DELAY_MS}ms 后重试一次: song=${songId}`);
+    await new Promise((resolve) => setTimeout(resolve, TAG_WRITE_RETRY_DELAY_MS));
+    await writeTags(fsPath, tags);
+  }
 
   if (gotLyric) {
     sqlite
