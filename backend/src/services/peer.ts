@@ -51,6 +51,7 @@ import { getGroupManager } from "./group/index.js";
 import { createLogger } from "../utils/logger.js";
 import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
 import { getPreProbeScheduler, type QueuePeekSource } from "./player/preProbeScheduler.js";
+import { prefetchUpcoming, PREFETCH_LOOKAHEAD } from "./source/prefetchCache.js";
 import { getSetting } from "./settings.js";
 // Sendspin 持久设备档案:断连补占位 peer / 判定「这台设备存在过」(见 markSendspinUnavailable)。
 import { getDeviceDisabled, listKnownDeviceIds } from "./sendspin/deviceState.js";
@@ -832,9 +833,9 @@ export class PeerManager extends EventEmitter {
   // 队列一变就向前扫描,把「已确认可播 / 明确不可播」的判定写进共享缓存,客户端
   // 切歌时(经 /v1/stream/probe)零成本命中,坏源直接跳过。
   //
-  // 本机队列**没有服务端洗牌序**(随机播放的顺序由客户端持有,见 SPEC:纯离线队列
-  // 由客户端洗牌),故 shuffle 模式下 peekUpcomingPositions 取不到位置流 —— 这是
-  // 有意为之:随机模式由客户端上报候选歌 id 走 /v1/stream/probe 取判定。order/all
+  // 本机队列的洗牌序**由服务端惰性物化**(见下方 localPeekSource:shuffle 模式下经
+  // ensureLocalShuffle 带上 shuffleOrder/shufflePos),故 peekUpcomingPositions 的
+  // shuffle 分支**对本机队列已生效**。order/all
   // 模式下服务端按下标预扫,效果与投屏链路一致。
 
   /** 从 local_queues 行构造只读 peek 源;无行/解析失败 → undefined(不扫)。 */
@@ -898,6 +899,8 @@ export class PeerManager extends EventEmitter {
       })
       .run();
     this.scheduleLocalPreProbe(peerId);
+    // 下一首预缓冲(后台 fire-and-forget,失败全静默)。
+    void prefetchUpcoming(this.localPeekSource(peerId), PREFETCH_LOOKAHEAD);
     // 起始位置只随**这一次**广播带出:先落 pending → 取快照(快照里带上它)
     // → 广播 → 立刻清掉。顺序不能颠倒,否则后续轮询会反复把它交给客户端,
     // 表现为「每次轮询都被拉回同一个位置」。
@@ -1016,6 +1019,8 @@ export class PeerManager extends EventEmitter {
     db.update(localQueues).set({ playMode: mode, updatedAt: now }).where(eq(localQueues.peerId, peerId)).run();
     // 播放模式变化 → 预探测窗口位置整体重算(已探过的曲复用缓存,只补缺口)。
     this.scheduleLocalPreProbe(peerId);
+    // 播放模式变了 ⇒ 「下一首是谁」整体重算,旧预取窗口作废(预取器自己去重,不重复取)。
+    void prefetchUpcoming(this.localPeekSource(peerId), PREFETCH_LOOKAHEAD);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -1032,6 +1037,8 @@ export class PeerManager extends EventEmitter {
       if (pos >= 0) sh.pos = pos;
     }
     this.scheduleLocalPreProbe(peerId);
+    // ★ 切歌事件 = 最准的预取时机:游标刚动,立刻把下一首取进内存。
+    void prefetchUpcoming(this.localPeekSource(peerId), PREFETCH_LOOKAHEAD);
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 

@@ -32,7 +32,7 @@ import { createPluginCrypto } from "./pluginCrypto.js";
 import { matchPlaylistInBackground } from "../services/plugin/shared.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
 import { cacheRemoteCover, firstPlayableCoverFile } from "../services/playlistCover.js";
-import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule } from "./sandbox.js";
+import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule, markSandboxModulePoisoned } from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { matchSongsToLibrary } from "../services/plugin/libraryMatch.js";
 import { createComm } from "./comm.js";
@@ -144,9 +144,13 @@ function toPluginSong(s: any): any {
   };
 }
 
+/** 插件私有数据目录名:`<插件目录>/files`,也是 host.fs 的唯一可写根(见 makeFsApi)。
+ *  抽出为常量是因为热重载必须按它过滤事件 —— 这里是运行期写入区,不是代码/配置。 */
+export const PLUGIN_FILES_DIR = "files";
+
 /** host.fs:插件专属目录文件读写(防路径穿越,只允许 <pluginDir>/files/ 内)。 */
 export function makeFsApi(pluginDir: string): any {
-  const baseDir = path.join(pluginDir, "files");
+  const baseDir = path.join(pluginDir, PLUGIN_FILES_DIR);
   const resolveSafe = (p: string): string => {
     const full = path.resolve(baseDir, String(p));
     if (full !== baseDir && !full.startsWith(baseDir + path.sep)) {
@@ -322,9 +326,95 @@ export function makeWsApi(): any {
  * 挂起的请求由宿主代发(deferred 手动 settle),并由 execute() 负责推进微任务队列。
  * 不传时行为与改造前完全一致(不注入、不泵),保证既有插件不受影响。 */
 export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promise<any> }): any {
-  const envs = new Map<string, { runtime: any; ctx: any; netQueue: any[] }>();
+  const envs = new Map<string, {
+    runtime: any;
+    ctx: any;
+    netQueue: any[];
+    /**
+     * 已出队但**尚未结算**的宿主请求项(drainNet 已 shift 走、正 await 宿主网络)。
+     * ⚠️ 它们同样捏着未结算的 promise/resolve/reject 句柄 —— teardown 时必须一并结算,
+     * 否则和「留在 netQueue 里」一样触发 gc_obj_list 断言(240 现场大量 destroy 正是
+     * 撞在执行中的 drainNet 上,队列反而已被取空)。
+     */
+    inflight?: Set<any>;
+    disposed?: boolean;
+  }>();
   const modulePromise = getSandboxModule();
   const hostHttp = opts && opts.http;
+
+  /**
+   * 安全销毁一个 jsenv 子环境(teardown 前必须先把路上的人清干净)。
+   *
+   * 根因(2026-10-11 240 实测 + 本机复现):直接 `ctx.dispose(); runtime.dispose();` 时,
+   * 只要子环境里还有**未结算的宿主网络 deferred**(`__mfJsenvHttp` 由 `ctx.newPromise()`
+   * 创建,promise + resolve + reject 三枚 JSValue 句柄)或还没跑完的 pending job,这些
+   * 对象就被引用计数钉在 `rt->gc_obj_list` 上 —— `JS_FreeRuntime` 随即命中
+   * `Assertion failed: list_empty(&rt->gc_obj_list)` → emscripten abort(容器日志里那行
+   * `Aborted(...)`),并毒化共享 WASM module。
+   *
+   * lx-source 的 loadOne() 是「先 `host.jsenv.destroy(envName)` 再 create」,而洛雪音源
+   * 脚本注册过程中必然发起网络请求;并发取链时 destroy 撞上在途请求是常态,于是每首歌
+   * 每次兜底取链都刷一条 Aborted —— 这就是生产上的断言风暴。
+   *
+   * 清理步骤与 sandbox.ts 的 oomCleanup 同源经验:先解除内存限制 + 禁用 interrupt
+   * (否则清理代码自己会被旧 deadline / malloc 限制卡住),把在途 deferred 全部结算并
+   * 释放句柄,再排空 pending jobs,最后用小分配驱动一次周期 GC,令 gc_obj_list 归零后
+   * 才 teardown。本机复现:不清理必 abort(T4),清理后再 dispose 全程干净(T5)。
+   */
+  function safeDisposeEntry(e: any): void {
+    if (!e || e.disposed) return;
+    // 仅 regression 测试用:强制走修复前的「裸 dispose」路径,证明下面的守卫确有判别力
+    // (生产恒为 false,见 tests/plugins/jsenvTeardown.test.ts)。
+    if (process.env.MF_JSENV_UNSAFE_TEARDOWN === "1") {
+      try { e.ctx.dispose(); } catch { /* ignore */ }
+      try { e.runtime.dispose(); } catch { markSandboxModulePoisoned(); }
+      return;
+    }
+    e.disposed = true;
+    try { e.runtime.setMemoryLimit(-1); } catch { /* ignore */ }
+    // interrupt 不能「禁用」——那样一个恶意/跑飞的 guest 脚本能在清阶段里无限占用主线程。
+    // 而是换成**清理专用 deadline**:创建时那个 JSENV_DEADLINE_MS(10s)此刻多半已过期,
+    // 沿用它会让清理代码一执行就被中断;给一个短而有限的窗口,既保证 drain 能跑完,
+    // 又把 teardown 的 CPU 占用封顶。
+    const teardownDeadline = Date.now() + JSENV_TEARDOWN_INTERRUPT_MS;
+    try { e.runtime.setInterruptHandler(() => Date.now() > teardownDeadline); } catch { /* ignore */ }
+    try {
+      // 多轮:某一轮结算/deferred 释放会唤醒 guest continuation,它可能又发起新请求,
+      // 直到 netQueue 不再产生新的在途项为止(上限 4 轮,防恶意脚本无限续期)。
+      for (let round = 0; round < 4; round++) {
+        // netQueue(未出队)+ inflight(已出队、正 await 宿主网络)必须**一起**结算
+        const queued: any[] = [
+          ...(e.netQueue || []).splice(0),
+          ...Array.from(e.inflight || new Set<any>()),
+        ];
+        for (const item of queued) {
+          const d = item && item.d;
+          if (!d || !d.alive) continue;
+          try {
+            const eh = e.ctx.newString("沙箱限制:jsenv 子环境正在销毁,该请求已取消");
+            try { d.reject(eh); } catch { /* ignore */ }
+            try { eh.dispose(); } catch { /* ignore */ }
+          } catch { /* ignore */ }
+          try { d.dispose(); } catch { /* ignore */ }
+        }
+        try { (e.inflight as Set<any> | undefined)?.clear(); } catch { /* ignore */ }
+        try { if (e.runtime.hasPendingJob()) e.runtime.executePendingJobs(256); } catch { break; }
+        if (!(e.netQueue || []).length && !(e.inflight || { size: 0 }).size) break;
+      }
+    } catch { /* ignore */ }
+    // 小分配驱动周期 GC:让引用计数已归零的对象真正出队,teardown 才敢断言链表为空。
+    try {
+      e.ctx.evalCode(
+        `let __mfGc__ = []; for (let __mfI__ = 0; __mfI__ < 128; __mfI__++) __mfGc__.push({ __mfS__: "y".repeat(2048) }); __mfGc__ = null; 1;`,
+      );
+    } catch { /* ignore */ }
+    try { e.runtime.executePendingJobs(256); } catch { /* ignore */ }
+    try { e.ctx.dispose(); } catch { /* ignore */ }
+    // 兜底:teardown 断言若仍发生(WASM 层 abort,try/catch 抓不住),共享 module 已不可信
+    // ——标记后下一个沙箱会加载全新 module,避免单个插件把全局沙箱能力拖垮
+    //(与 sandbox.ts dispose() 的兜底同一套机制)。
+    try { e.runtime.dispose(); } catch { markSandboxModulePoisoned(); }
+  }
 
   /** JS 值 -> VM handle(deferred.resolve 只收 handle;递归构造纯 JSON 结构)。 */
   function toVmHandle(ctx: any, v: any): any {
@@ -362,23 +452,42 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
   const JSENV_NET_BUDGET_MS = 8000;
   const JSENV_PUMP_BUDGET_MS = 8000;
   const JSENV_DEADLINE_MS = 10000;
+  /** teardown 清阶段的 CPU 窗口(见 safeDisposeEntry):给 pending jobs 一点时间跑完,
+   *  但不允许无限占用主线程。远小于宿主 INVOKE 预算,不影响调用方体感。 */
+  const JSENV_TEARDOWN_INTERRUPT_MS = 2000;
 
   async function drainNet(e: any, budgetMs = JSENV_NET_BUDGET_MS): Promise<void> {
     const t0 = Date.now();
     while (e.netQueue.length && Date.now() - t0 < budgetMs) {
+      // 子环境正在销毁/已销毁:句柄已被 dispose,继续用会抛 QuickJSUseAfterFree
+      // ("Lifetime not alive"),此处必须提前退出。
+      if (e.disposed || !e.runtime.alive) return;
       const item = e.netQueue.shift();
+      // 出队即登记为「在途」:teardown 要按同一份名单结算(见 envs 的 inflight 注释)。
+      try { (e.inflight as Set<any>).add(item); } catch { /* ignore */ }
+      const releaseInflight = () => { try { (e.inflight as Set<any>).delete(item); } catch { /* ignore */ } };
       try {
         const resp = await hostHttp!(item.url, item.opt || {});
+        // await 期间子环境可能已被并发 destroy:promise/ctx 句柄都已失效,继续 settle
+        // 会抛 QuickJSUseAfterFree("Lifetime not alive")——丢弃该请求即可。
+        if (e.disposed || !e.runtime.alive || !item.d?.alive) {
+          try { item.d.dispose(); } catch { /* ignore */ }
+          releaseInflight();
+          continue;
+        }
         const h = toVmHandle(e.ctx, resp);
         item.d.resolve(h);
         try { h.dispose(); } catch { /* ignore */ }
       } catch (err) {
         const msg = err instanceof Error ? String(err.message) : String(err);
-        const h = e.ctx.newString(msg);
-        try { item.d.reject(h); } catch { /* ignore */ }
-        try { h.dispose(); } catch { /* ignore */ }
+        try {
+          const h = e.ctx.newString(msg);
+          try { item.d.reject(h); } catch { /* ignore */ }
+          try { h.dispose(); } catch { /* ignore */ }
+        } catch { /* 子环境已销毁:连错误句柄都造不出来,放弃该请求 */ }
       }
       try { item.d.dispose(); } catch { /* ignore */ }
+      releaseInflight();
     }
   }
 
@@ -413,7 +522,7 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
       let deadline = Date.now() + JSENV_DEADLINE_MS;
       runtime.setInterruptHandler(() => Date.now() > deadline);
       const ctx = runtime.newContext();
-      const entry = { runtime, ctx, netQueue: [] as any[] };
+      const entry = { runtime, ctx, netQueue: [] as any[], inflight: new Set<any>() };
       envs.set(n, entry);
       // 宿主网络桥:sync 版 quickjs 不允许宿主回调直接返回 Promise,
       // 故这里用 deferred 手动 settle —— 子环境拿到的是可 await 的 promise handle。
@@ -434,7 +543,10 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
         const r = ctx.evalCode(String(initCode));
         if (r.error !== undefined) {
           const e = ctx.dump(r.error); r.error.dispose();
-          try { ctx.dispose(); runtime.dispose(); } catch { /* ignore */ }
+          // initCode 里发起的请求可能仍在 netQueue/newPromise 上:走安全销毁,
+          // 否则 runtime.dispose() 会命中 gc_obj_list 断言(同 destroy 的根因)。
+          safeDisposeEntry(entry);
+          envs.delete(n);
           throw new Error(`jsenv init 失败: ${e}`);
         }
         ctx.unwrapResult(r).dispose();
@@ -444,35 +556,54 @@ export function makeJsenvApi(opts?: { http?: (url: string, init?: any) => Promis
     execute: async (name: string, code: string) => {
       const e = envs.get(String(name));
       if (!e) throw new Error(`jsenv 不存在: ${name}`);
+      // 并发保护:另一次调用正在 destroy 本子环境时,ctx/runtime 句柄已经被 dispose,
+      // 继续 eval 会抛 QuickJSUseAfterFree("Lifetime not alive") 并把栈顶错误交由宿主
+      // 记成 host.execute 执行异常。这里回一个干净信封,让插件自行回退/上报,
+      // 不再制造第二次问题。
+      if (e.disposed || !e.runtime.alive || !e.ctx.alive) {
+        return { ok: false, error: `沙箱限制:jsenv 子环境 ${String(name)} 已销毁,该调用已失效` };
+      }
       deadlineRefresh(e, JSENV_DEADLINE_MS);
-      // 子环境挂起的 http 请求先由宿主真实发出,否则 await 永远挂住
-      if (hostHttp && e.netQueue.length) { try { await drainNet(e); } catch { /* ignore */ } }
-      const r = e.ctx.evalCode(String(code));
-      if (r.error !== undefined) {
-        const msg = e.ctx.dump(r.error); r.error.dispose();
-        return { ok: false, error: String(msg) };
+      try {
+        // 子环境挂起的 http 请求先由宿主真实发出,否则 await 永远挂住
+        if (hostHttp && e.netQueue.length) { try { await drainNet(e); } catch { /* ignore */ } }
+        if (e.disposed || !e.runtime.alive || !e.ctx.alive) {
+          return { ok: false, error: `沙箱限制:jsenv 子环境 ${String(name)} 已销毁,该调用已失效` };
+        }
+        const r = e.ctx.evalCode(String(code));
+        if (r.error !== undefined) {
+          const msg = e.ctx.dump(r.error); r.error.dispose();
+          return { ok: false, error: String(msg) };
+        }
+        const vh = e.ctx.unwrapResult(r);
+        // 返回的是 promise(异步脚本在跑):泵到结算,否则调用方永远拿不到结果
+        if (e.runtime.alive && e.runtime.hasPendingJob()) {
+          let done = false;
+          try {
+            e.ctx.resolvePromise(vh).then(
+              (res: any) => { done = true; try { res?.dispose?.(); } catch { /* ignore */ } },
+              (err: any) => { done = true; try { err?.dispose?.(); } catch { /* ignore */ } },
+            );
+          } catch { done = true; }
+          // 结算即退出:done 曾是「算了不用」的死变量,pump 会空转满预算 -> 宿主超时 500
+          await pumpJobs(e, JSENV_PUMP_BUDGET_MS, () => done);
+        }
+        let v: any = null;
+        try { v = e.ctx.dump(vh); } catch { v = undefined; }
+        // dump 会消费 handle(实测再 dispose 抛 QuickJSUseAfterFree);
+        // dump 抛错时 handle 仍活着,仍需要 dispose —— 两种情况都容错。
+        try { vh.dispose(); } catch { /* dump 已消费 handle,无害 */ }
+        return { ok: true, result: v };
+      } catch (err: any) {
+        // 走到这里基本都是「句柄已失效」(并发 destroy / 模块被污染):给插件一个
+        // 可识别的信封,而不是把 UseAfterFree 顶到宿主日志里刷屏。
+        return { ok: false, error: `jsenv execute 失败: ${String(err && err.message || err)}` };
       }
-      const vh = e.ctx.unwrapResult(r);
-      // 返回的是 promise(异步脚本在跑):泵到结算,否则调用方永远拿不到结果
-      if (e.runtime.alive && e.runtime.hasPendingJob()) {
-        let done = false;
-        try { e.ctx.resolvePromise(vh).then(() => { done = true; }, () => { done = true; }); }
-        catch { done = true; }
-        // 结算即退出:done 曾是「算了不用」的死变量,pump 会空转满预算 -> 宿主超时 500
-        await pumpJobs(e, JSENV_PUMP_BUDGET_MS, () => done);
-      }
-      let v: any = null;
-      try { v = e.ctx.dump(vh); } catch { v = undefined; }
-      // dump 会消费 handle(实测再 dispose 抛 QuickJSUseAfterFree);
-      // dump 抛错时 handle 仍活着,仍需要 dispose —— 两种情况都容错。
-      try { vh.dispose(); } catch { /* dump 已消费 handle,无害 */ }
-      return { ok: true, result: v };
     },
     destroy: async (name: string) => {
       const e = envs.get(String(name));
       if (e) {
-        try { e.ctx.dispose(); } catch { /* ignore */ }
-        try { e.runtime.dispose(); } catch { /* ignore */ }
+        safeDisposeEntry(e);
         envs.delete(String(name));
       }
       return null;

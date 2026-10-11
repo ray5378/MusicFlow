@@ -24,8 +24,12 @@ import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken, resolveCastSession, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
-import { findFallbackStream, resolveEmptyUrlStream, resolveRemoteStreamUrl } from "../../services/source/online/streamFallback.js";
+import { findFallbackStream, resolveRemoteStreamUrl } from "../../services/source/online/streamFallback.js";
 import { resolvePreferredSong } from "../../services/source/preferredSource.js";
+// 出流与后台预取**共用同一份**源解析推导(见 services/source/networkInput.ts 文件头)。
+import { resolveLocalFilePath, resolveNetworkInput, getWebDAVUrl } from "../../services/source/networkInput.js";
+import { parseSongPath } from "../../utils/localSourceProbe.js";
+import { prefetchHit, bindLoopbackBase } from "../../services/source/prefetchCache.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
@@ -40,6 +44,10 @@ import { sendToUser } from "../../services/ws/index.js";
 import { notePeerActivity } from "../../services/dlna/control.js";
 
 const log = createLogger("REST-STREAM");
+
+// 后台预取把整曲放进 membuf 后要拼回环 URL;把它用的 loopbackBase 交给预取模块,
+// 保证预取登记的 URL 与这里出流用的**同源**(端口/协议不会两套)。
+bindLoopbackBase(loopbackBase);
 
 /**
  * 出流「活着」登记：设备正在拉我们的 DLNA 流 ⇒ 它明确活着。
@@ -1460,20 +1468,9 @@ function fmtLrcTime(sec: number): string {
 
 // ==================== Media retrieval ====================
 
-function parseSongPath(p: string): { type: "w" | "l"; sourceId: string; filePath: string } | null {
-  const colon1 = p.indexOf(":");
-  if (colon1 < 0) return null;
-  const prefix = p.slice(0, colon1);
-  const rest = p.slice(colon1 + 1);
-  const colon2 = rest.indexOf(":");
-  if (colon2 < 0) return null;
-  return { type: prefix as "w" | "l", sourceId: rest.slice(0, colon2), filePath: rest.slice(colon2 + 1) };
-}
-
-function getWebDAVUrl(sourceConfig: any, filePath: string): string {
-  const origin = new URL(sourceConfig.url).origin;
-  return origin + filePath;
-}
+// parseSongPath / getWebDAVUrl 已从本文件移除:parseSongPath 复用 utils/localSourceProbe.ts,
+// getWebDAVUrl 随源解析一起抽到 services/source/networkInput.ts —— 出流与后台预取必须共用
+// 同一份推导(两套副本必然漂移,漂移的后果是「预取成功但播不到」,日志上看不出来)。
 
 // ==================== 转码拉流（OpenSubsonic /rest/stream 语义） ====================
 // 需要转码时用系统 ffmpeg 把音源实时转成目标格式输出为分块流：
@@ -1975,49 +1972,49 @@ async function serveFlowQueue(
 //   - dead / stalled / error ⇒ 返回 null ⇒ 调用方显式失败(客户端走既有跳歌/重试,不发僵尸 200)。
 // opts.buffering === false 跳过缓冲:seek 重拉(timeOffset>0)走 rawStreamCache 缓存路径更省;
 // flow 连续流逐曲解析,串行整曲下载会拖垮过渡延迟 —— 均由调用方显式传入。
-async function resolveTranscodeInput(
+export async function resolveTranscodeInput(
   c: any,
   song: any,
   opts?: { buffering?: boolean },
 ): Promise<{ source: string; headers?: Record<string, string> } | null> {
-  if ((song.type || "local") === "web") {
-    const fs = await import("fs");
-    if (song.cachePath && fs.existsSync(song.cachePath)) return { source: song.cachePath };
-    const headers: Record<string, string> = {};
-    try { Object.assign(headers, JSON.parse(song.streamHeaders || "{}")); } catch {}
-    let url = song.url;
-    // 空直链 web 行(纯核实源导入):先兜底解析,命中再交给转码链路。
-    if (!url) {
-      url = await resolveEmptyUrlStream(song);
-      if (!url) return null;
-    }
-    if (opts?.buffering !== false) {
-      const buffered = await bufferNetworkSource(song.id, url, headers, c);
-      if (buffered === null) return null; // 显式失败 ⇒ 调用方 fail,客户端走既有跳歌/重试
-      if (buffered) return buffered;      // membuf 回环 URL
-      // undefined ⇒ 回退直通(旧行为)
-    }
-    return { source: loopbackRawStreamUrl(url, headers) };
+  // ① 后台预取命中 ⇒ 直接内存回环供流(零上游)。
+  //    放在**最前面**:命中时连源解析(DB 读 media_sources / 空直链的兜底解析,后者可能带
+  //    插件网络调用)都不必做 —— 命中路径比旧行为更短。
+  //    这是本次预缓冲改造在**正在播放路径上唯一的改动**:一次同步 Map 查找 + 早返回。
+  //    未命中只多一次 Map miss(纳秒级),不可能拖慢现有流。
+  const hit = prefetchHit(song?.id);
+  if (hit) {
+    log.info(`[membuf] ${song?.id} 预取命中 → 内存回环供流`);
+    return { source: hit };
   }
-  const parsed = parseSongPath(song.path);
-  if (!parsed) return null;
-  if (parsed.type === "w") {
-    const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
-    if (!source) return null;
-    const config = JSON.parse(source.config || "{}");
-    const downloadUrl = getWebDAVUrl(config, parsed.filePath);
-    const headers: Record<string, string> = {};
-    if (config.username && config.password) {
-      headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
-    }
-    if (opts?.buffering !== false) {
-      const buffered = await bufferNetworkSource(song.id, downloadUrl, headers, c);
-      if (buffered === null) return null; // 显式失败(同上)
-      if (buffered) return buffered;
-    }
-    return { source: loopbackRawStreamUrl(downloadUrl, headers) };
+  // ② 本地直读(本地磁盘行 / web 行已缓存到本地的文件)—— 不经内存缓冲层。
+  const localPath = await resolveLocalFilePath(song);
+  if (localPath) return { source: localPath };
+  // ③ 网络源(web 插件直链 / WebDAV)—— 与后台预取共用同一份推导(networkInput.ts)。
+  const net = await resolveNetworkInput(song);
+  if (!net) return null; // 无可用源 ⇒ 调用方显式失败
+  if (opts?.buffering !== false) {
+    const buffered = await bufferNetworkSource(song.id, net.url, net.headers, c);
+    if (buffered === null) return null; // 显式失败 ⇒ 调用方 fail,客户端走既有跳歌/重试
+    if (buffered) return buffered;      // membuf 回环 URL
+    // undefined ⇒ 回退直通(旧行为)
   }
-  return { source: parsed.filePath };
+  return { source: loopbackRawStreamUrl(net.url, net.headers) };
+}
+
+/**
+ * batch44-R(首字节优先):整曲缓冲的**有界等待**上限(ms)。冷启动时客户端要的是
+ * 尽快出声,而不是等整曲缓冲完成(实测 10~26s,撞反代 10s 超时 502,客户端永久卡
+ * loading);等待超过此值即走 bufferNetworkSource 既有的「回退直通」路径,不新造
+ * 回退通道。single-flight 共享循环继续在后台跑,缓冲落地后下一个请求可命中。
+ * env `STREAM_BUFFER_HEAD_WAIT_MS` 可覆盖;非法/非正值回退此默认。
+ */
+const STREAM_BUFFER_HEAD_WAIT_MS = 6000;
+
+/** 读 env `STREAM_BUFFER_HEAD_WAIT_MS`(parseInt;非法/非正值回退默认)。 */
+function streamBufferHeadWaitMs(): number {
+  const n = parseInt(process.env.STREAM_BUFFER_HEAD_WAIT_MS || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : STREAM_BUFFER_HEAD_WAIT_MS;
 }
 
 /**
@@ -2025,6 +2022,9 @@ async function resolveTranscodeInput(
  * batch44(D):取流失败不走「快速失败」,而是**挂起本请求**进入长窗口自动重试
  * (前 1 分钟每 10s → 之后每 60s → 总窗口 30min,常量化可配;同曲并发请求
  * single-flight 共享同一循环;窗口内恢复 ⇒ 立即整曲缓冲正常供流,耗尽 ⇒ 显式失败)。
+ * batch44(R · 首字节优先):本请求对上述循环只做**有界等待**
+ * (`STREAM_BUFFER_HEAD_WAIT_MS`,默认 6s):超时回退 undefined 直通(既有通道,
+ * 不新造回退),循环继续后台跑,缓冲落地后下一个请求 join 在途循环即可命中。
  *   - 成功  → { source: membuf 回环 URL };
  *   - 明确失败(dead/stalled/error)→ null ⇒ 调用方显式失败;
  *   - 回退类(too-big/budget/timeout)→ undefined ⇒ 调用方落回 loopbackRawStreamUrl 直通。
@@ -2041,11 +2041,40 @@ async function bufferNetworkSource(
   // fetchWholeSongBuffered 真正开始取流那一刻按在途字节记账)。窗口内任一次成功
   // ⇒ 立即整曲缓冲正常供流(用户只感觉起播晚几秒);耗尽 ⇒ 显式失败。
   // 「15~20s 硬顶」是**单次取流尝试**的上限(即上方 18s deadline),与长窗口不冲突。
+  // batch44(R):但**本请求不再挂满整个窗口** —— 只做有界等待(见下 race),超时回退
+  // 直通(首字节优先);长窗口重试由共享循环在后台继续,缓冲落地后下一个请求命中。
   const { fetchSongWithRetryWindow, registerMemStream, isBufferedDeadKind } =
     await import("../../services/source/bufferedFetch.js");
-  const r = await fetchSongWithRetryWindow(`song:${songId}`, url, headers, { signal: c?.req?.raw?.signal });
+  // batch44-R(首字节优先):缓冲 promise vs head-wait 计时器 race。计时器赢 ⇒
+  // return undefined 走本函数既有的「回退直通」路径(见上),**不等、不取消**:
+  // fetchSongWithRetryWindow 是同曲 single-flight 共享循环(key `song:${songId}` 跨
+  // 调用共享、与单个调用方生命周期解耦),超时后循环继续后台跑,缓冲落地后下一个
+  // 请求 join 在途循环即可命中(abort 语义见 bufferedFetch.ts single-flight 段落)。
+  const fetchP = fetchSongWithRetryWindow(`song:${songId}`, url, headers, { signal: c?.req?.raw?.signal });
+  const headWaitMs = streamBufferHeadWaitMs();
+  let headTimer: ReturnType<typeof setTimeout> | undefined;
+  const headWait = new Promise<undefined>((resolve) => {
+    headTimer = setTimeout(() => resolve(undefined), headWaitMs);
+  });
+  let r: Awaited<typeof fetchP> | undefined;
+  try {
+    r = await Promise.race([fetchP, headWait]);
+  } finally {
+    // 计时器必清:缓冲先完成则 head-wait 不再触发;超时分支也只触发这一次。
+    if (headTimer !== undefined) clearTimeout(headTimer);
+  }
+  if (r === undefined) {
+    log.warn(`[membuf] ${songId} 整曲缓冲等待超 ${headWaitMs}ms ⇒ 回退直通(首字节优先)`);
+    return undefined;
+  }
   if (r.ok) {
     const token = registerMemStream(r.buf);
+    if (!token) {
+      // 注册表腾不出空位,且**不能**驱逐正在消费的在用条目(踢掉 = 正在播的流断掉)。
+      // 宁可回退直通(旧行为,永远安全),也绝不让 ffmpeg 拿到一个无效的 token。
+      log.warn(`[membuf] ${songId} 整曲缓冲成功但注册表无空位 ⇒ 回退直通`);
+      return undefined;
+    }
     log.info(`[membuf] ${songId} 整曲缓冲 ${r.bytes}B/${Math.round(r.ms)}ms attempts=${r.attempts} → 内存回环供流`);
     return { source: `${loopbackBase()}/rest/membuf/${token}` };
   }

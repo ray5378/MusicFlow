@@ -282,6 +282,10 @@ interface MemStreamEntry {
    *  每次新 stream 请求都重新整曲缓冲(条目不复用),消费完的条目是死重,
    *  由 sweepMemStreams 按空闲阈值主动回收,不必等 TTL。 */
   lastReadAt?: number;
+  /** 登记的 songId(仅观测/预取索引用,不参与查找)。 */
+  songId?: string;
+  /** 由后台预取产生(services/source/prefetchCache.ts):未被消费前可被优先驱逐。 */
+  prefetched?: boolean;
 }
 
 const memStreams = new Map<string, MemStreamEntry>();
@@ -300,21 +304,67 @@ function memTotalBytes(): number {
   return n;
 }
 
-/** 登记一条内存流,返回不可猜 token。LRU + TTL + 总字节上限驱逐。 */
-export function registerMemStream(buf: Buffer, mime?: string): string {
+/**
+ * 登记一条内存流,返回不可猜 token。**腾不出空位时返回空串 `""`** —— 调用方必须按失败处理
+ * (出流侧：回退直通;预取侧：静默放弃)。
+ *
+ * 驱逐顺序(2026-10-12 修订,背景:后台预取进注册表):
+ *   ① 预取产生且**从未被消费**的条目(`prefetched && lastReadAt === undefined`)—— 最廉价;
+ *   ② 其余从未被消费的条目,按插入序最旧;
+ *   ③ **已消费**(`lastReadAt` 有值)的条目一律**不参与驱逐** —— 它正被 ffmpeg 读,
+ *      踢掉会让它的下一次 Range 请求拿到 403 ⇒ **正在播的流当场断掉**。
+ *      修订前 `memStreams.keys().next()` 是「插入序最旧」,而正在播的那条往往正是最旧的,
+ *      预取一多就把它顶掉 —— 这是本修订要根治的事故形态。
+ * 三步都腾不出位置 ⇒ 放弃本次登记(返回 ""),绝不踢在用条目。
+ */
+export function registerMemStream(
+  buf: Buffer,
+  mime?: string,
+  tag?: { songId?: string; prefetched?: boolean },
+): string {
   const c = memCfg();
   const now = Date.now();
   for (const [k, v] of memStreams) {
     if (now - v.at > c.ttlMs) memStreams.delete(k);
   }
-  while (memStreams.size > 0 && (memStreams.size >= c.maxEntries || memTotalBytes() + buf.length > c.maxTotalBytes)) {
-    const oldest = memStreams.keys().next().value;
-    if (oldest === undefined) break;
-    memStreams.delete(oldest);
+  const full = () => memStreams.size >= c.maxEntries || memTotalBytes() + buf.length > c.maxTotalBytes;
+  while (memStreams.size > 0 && full()) {
+    let victim: string | undefined;
+    // ① 预取且从未消费
+    for (const [k, v] of memStreams) {
+      if (v.lastReadAt === undefined && v.prefetched) { victim = k; break; }
+    }
+    // ② 其余从未消费(插入序最旧)
+    if (victim === undefined) {
+      for (const [k, v] of memStreams) {
+        if (v.lastReadAt === undefined) { victim = k; break; }
+      }
+    }
+    if (victim === undefined) break; // 只剩正在消费的在用条目 → 不再驱逐
+    memStreams.delete(victim);
+  }
+  if (full()) {
+    log.warn(
+      `[membuf] 注册表无空位(${memStreams.size} 条/${Math.round(memTotalBytes() / MB)}MB),放弃本次登记`,
+    );
+    return "";
   }
   const token = randomBytes(16).toString("hex");
-  memStreams.set(token, { buf, mime, at: now });
+  const entry: MemStreamEntry = { buf, mime, at: now };
+  if (tag?.songId) entry.songId = tag.songId;
+  if (tag?.prefetched) entry.prefetched = true;
+  memStreams.set(token, entry);
   return token;
+}
+
+/** 条目是否仍存活(**不续期、不写 lastReadAt**)—— 预取索引探测用。
+ *  与 `resolveMemStream` 的区别:后者会把条目标记为「已消费」,进而按 120s 空闲回收;
+ *  预取索引只想确认 token 还在,不能替用户把它提前判死。 */
+export function peekMemStream(token: string): boolean {
+  const e = memStreams.get(token);
+  if (!e) return false;
+  if (Date.now() - e.at > memCfg().ttlMs) return false;
+  return true;
 }
 
 /** 取一条内存流(命中即续期)。过期/不存在返回 null。
@@ -399,10 +449,14 @@ memSweepTimer.unref?.();
 //
 // single-flight:同歌曲(key=songId)的并发挂起请求共享同一个重试循环 —— 后到者直接
 // await 先到者的 promise,不叠加上游压力。挂起等待阶段不占全局缓冲预算(预算只在
-// fetchWholeSongBuffered 真正开始取流那一刻按在途字节记账)。每个调用方的 abort
-// signal 单独登记为引用:**全部**调用方都断开才中止循环 —— 客户端提前超时掐断重发
-// 的新请求要么加入在途循环、要么重启新循环,等效达成全程窗口(E 语义,服务端无需
-// 特殊处理)。
+// fetchWholeSongBuffered 真正开始取流那一刻按在途字节记账)。
+// batch44-R(首字节优先)核实并收紧的 abort 语义:每个调用方的 abort signal 仍单独
+// 登记为引用,但调用方断开**只解除自己的等待**(引用-1),**绝不**中止共享循环 ——
+// 循环持有独立的 AbortController,只由自身的停摆看门狗/单次 deadline/总窗口终止。
+// 动机:播放路径现在对缓冲 promise 做有界等待(head-wait),超时回退直通;直通响应
+// 结束、客户端连接关闭会让该调用方的 signal abort —— 若引用归零就中止循环,冷启动
+// (单客户端)场景下后台缓冲永远落不了地。保留循环继续后台跑(总窗口 30min 硬顶,
+// 不会无限空转),下一个请求 join 在途循环即可命中缓冲结果。
 
 /** 快节奏重试间隔(ms):前 1 分钟每 10 秒一次。env `STREAM_RETRY_FAST_MS`。 */
 export const STREAM_RETRY_FAST_INTERVAL_MS = 10_000;
@@ -476,9 +530,10 @@ async function runRetryWindowLoop(
 // ---------------- single-flight 注册表 ----------------
 
 interface SharedRetryLoop {
-  /** 仍在等待本次循环的调用方数(含创建者);归零 ⇒ 中止无人消费的循环。 */
+  /** 仍在等待本次循环的调用方数(含创建者);归零仅记账,循环照常跑完(batch44-R)。 */
   refs: number;
   promise: Promise<BufferedFetchResult>;
+  /** 循环独立的 abort 通道(传给循环当 outer signal);调用方断开不触发(batch44-R)。 */
   ctrl: AbortController;
 }
 const retryLoops = new Map<string, SharedRetryLoop>();
@@ -513,8 +568,10 @@ export async function fetchSongWithRetryWindow(
   const onAbort = () => {
     if (left) return;
     left = true;
+    // batch44-R:调用方断开只解除自己的等待(引用-1),绝不中止共享循环 —— ctrl 由
+    // 循环内部(停摆看门狗/单次 deadline)专用,外部永不触发;循环自身有总窗口硬顶,
+    // 不会无限后台空转,缓冲落地后下一个请求 join 在途循环即可命中。
     mine.refs -= 1;
-    if (mine.refs <= 0) mine.ctrl.abort();
   };
   opts?.signal?.addEventListener("abort", onAbort, { once: true });
   try {
@@ -527,4 +584,16 @@ export async function fetchSongWithRetryWindow(
 /** 测试用:清空 single-flight 注册表。 */
 export function resetRetryLoopsForTest(): void {
   retryLoops.clear();
+}
+
+/**
+ * 测试用:当前 single-flight 重试循环的 key 列表。
+ *
+ * 存在意义(预缓冲的红线守卫):`fetchSongWithRetryWindow` 的 key 与**播放路径共用**
+ * (`song:${songId}`),后台预取一旦进了这张表,播放请求就会 join 到预取创建的循环上并
+ * **继承预取的 cfg**(30 分钟重试窗被改短 / 后台任务被挂 30 分钟)。预取必须走
+ * `fetchWholeSongBuffered` 且这张表保持为空。
+ */
+export function retryLoopKeysForTest(): string[] {
+  return [...retryLoops.keys()];
 }

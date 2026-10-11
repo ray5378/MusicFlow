@@ -373,6 +373,11 @@ let modulePoisoned = false;
 function markModulePoisoned(): void {
   modulePoisoned = true;
 }
+/** 供宿主端子 RuntimeException(jsenv 子环境)复用:它们的 teardown 与沙箱共享同一个
+ *  WASM module,断言失败时同样必须标记,否则后续所有沙箱都会建在被污染的 module 上。 */
+export function markSandboxModulePoisoned(): void {
+  markModulePoisoned();
+}
 function getQuickJS(): Promise<QuickJSWASMModule> {
   if (!moduleSingleton || modulePoisoned) {
     modulePoisoned = false;

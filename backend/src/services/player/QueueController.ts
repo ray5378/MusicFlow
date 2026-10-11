@@ -15,6 +15,7 @@ import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
+import { prefetchUpcoming, PREFETCH_LOOKAHEAD } from "../source/prefetchCache.js";
 import { createGroupProtocolPlayer, getGroupStatus, hasOnlineMember } from "../group/protocolPlayer.js";
 import { checkPlayTarget } from "../playTarget.js";
 import { getGroupManager } from "../group/index.js";
@@ -133,6 +134,20 @@ export class QueueController extends EventEmitter {
   /** 触发一次预探测(fire-and-forget;调度器内部做防抖/冷却/合并)。 */
   private schedulePreProbe(playerId: string): void {
     getPreProbeScheduler().schedule(playerId, () => this.queues.get(playerId));
+  }
+
+  /**
+   * 触发一次「下一首预缓冲」(fire-and-forget;闸门/去重/并发都在 prefetchCache 内部)。
+   *
+   * 与 schedulePreProbe 并排但**互不干涉**:那个管「有没有源」(写 streamFallback 可播性
+   * 缓存),本方法管「源慢不慢」(写 membuf)。预取**绝不**写可播性缓存 —— 把「慢」误判成
+   * 「无源」会让客户端白跳歌。
+   *
+   * 「下一首是谁」由 prefetchCache 内部统一走 peekUpcomingPositions(四种 playMode 全覆盖、
+   * 只读不改队列状态),这里不自己推算。
+   */
+  private schedulePrefetch(playerId: string): void {
+    prefetchUpcoming(this.queues.get(playerId), PREFETCH_LOOKAHEAD);
   }
 
   registerPlayer(playerId: string, player: UniversalPlayer, ctrl: PlayerControllerLike): void {
@@ -368,7 +383,7 @@ export class QueueController extends EventEmitter {
     } finally {
       this.advancing.delete(deviceId);
     }
-    this.schedulePreProbe(deviceId);
+    this.schedulePreProbe(deviceId); this.schedulePrefetch(deviceId);
   }
 
   /** 由 PlayerController.onDecision 调用。playerId 形如 "dlna:<deviceId>" / "group:<groupId>"。 */
@@ -453,7 +468,7 @@ export class QueueController extends EventEmitter {
         this.persist(id);
         this.emit("queue_changed", id, this.snapshot(id));
         // 切歌后重算预探测窗口(滑动缓冲:头随播放消费,尾持续补探)。
-        this.schedulePreProbe(id);
+        this.schedulePreProbe(id); this.schedulePrefetch(id);
       } finally {
         this.advancing.delete(id);
       }
@@ -520,7 +535,7 @@ export class QueueController extends EventEmitter {
             await this.playCurrent(id, baseUrl);
             this.persist(id);
             this.emit("queue_changed", id, this.snapshot(id));
-            this.schedulePreProbe(id);
+            this.schedulePreProbe(id); this.schedulePrefetch(id);
           } finally {
             this.advancing.delete(id);
           }
@@ -604,7 +619,7 @@ export class QueueController extends EventEmitter {
               await this.playCurrent(id, baseUrl);
               this.persist(id);
               this.emit("queue_changed", id, this.snapshot(id));
-              this.schedulePreProbe(id);
+              this.schedulePreProbe(id); this.schedulePrefetch(id);
             } finally {
               this.advancing.delete(id);
             }
@@ -1053,7 +1068,7 @@ export class QueueController extends EventEmitter {
     getPreProbeScheduler().clear(playerId);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
-    this.schedulePreProbe(playerId);
+    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
   }
 
   /** 读队列的**内容来源标记**(无则 undefined)。
@@ -1109,7 +1124,7 @@ export class QueueController extends EventEmitter {
       this.advancing.add(playerId);
       try { await this.playCurrent(playerId, baseUrl); }
       finally { this.advancing.delete(playerId); }
-      this.schedulePreProbe(playerId);
+      this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     }
     // 返回**实际起播下标**（可能是服务端随机的），供路由如实回执。
     return this.queues.get(playerId)?.currentIndex ?? idx;
@@ -1135,7 +1150,7 @@ export class QueueController extends EventEmitter {
       await this.playCurrent(playerId, baseUrl);
       this.persist(playerId);
       this.emit("queue_changed", playerId, this.snapshot(playerId));
-      this.schedulePreProbe(playerId);
+      this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     } finally {
       this.advancing.delete(playerId);
     }
@@ -1153,7 +1168,7 @@ export class QueueController extends EventEmitter {
     // 改播放模式 → 窗口位置整体重算。**重算 ≠ 重探**:已探过的曲直接复用缓存,
     // 只补缺口。同时清掉枯竭冷却 —— 队列构成/顺序变了,旧的"大面积无源"结论作废。
     getPreProbeScheduler().clearCooldown(playerId);
-    this.schedulePreProbe(playerId);
+    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
   }
 
   async next(playerId: string, baseUrl: string): Promise<void> {
@@ -1163,7 +1178,7 @@ export class QueueController extends EventEmitter {
     if (idx === -1) { this.markEnded(playerId); return; }
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
-    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); }
+    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); this.schedulePrefetch(playerId); }
     finally { this.advancing.delete(playerId); }
   }
 
@@ -1187,7 +1202,7 @@ export class QueueController extends EventEmitter {
       else if (q.currentIndex > 0) { q.currentIndex--; await this.playCurrent(playerId, baseUrl); }
       else if (q.playMode === "all") { q.currentIndex = q.items.length - 1; await this.playCurrent(playerId, baseUrl); }
       this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId));
-      this.schedulePreProbe(playerId);
+      this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     } finally { this.advancing.delete(playerId); }
   }
 
@@ -1270,7 +1285,7 @@ export class QueueController extends EventEmitter {
     q.ended = false;
     this.persist(id);
     this.emit("queue_changed", id, this.snapshot(id));
-    this.schedulePreProbe(id);
+    this.schedulePreProbe(id); this.schedulePrefetch(id);
   }
 
   /** Append items without switching playback. If the queue was empty, start
@@ -1293,7 +1308,7 @@ export class QueueController extends EventEmitter {
     this.ensureShuffleForLookahead(q);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
-    this.schedulePreProbe(playerId);
+    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
   }
 
   /** Remove a single item by index and keep playback coherent. 对照原
@@ -1323,7 +1338,7 @@ export class QueueController extends EventEmitter {
     this.ensureShuffleForLookahead(q);
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
-    this.schedulePreProbe(playerId);
+    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
   }
 
   /** 拖拽排序:搬移一条,当前播放曲目下标跟随到新位置(不打断播放)。 */
@@ -1341,7 +1356,7 @@ export class QueueController extends EventEmitter {
     if (q.playMode === "shuffle") this.rebuildShuffle(q, { keepCurrent: true });
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
-    this.schedulePreProbe(playerId);
+    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
   }
 
   /** Mark a device inactive without clearing the queue. 对照原 QueueManager.deactivate。 */
