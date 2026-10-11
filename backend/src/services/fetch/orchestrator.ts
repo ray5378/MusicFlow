@@ -962,6 +962,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       } catch (e) {
         warnings.push(`封面获取失败(忽略，不影响入库): ${msgOf(e)}`);
       }
+      // 观测补强（2026-10-11）：静默空结果也要可见——enrich 拿不到封面（候选无
+      // coverUrl 且 provider 返 null）时打点，任务终态后由 tagRepair 队列兜底重试。
+      if (!extra.cover) {
+        warnings.push("封面未获取到(不影响入库，已入修复队列待重试)");
+      }
     }
 
     return extra;

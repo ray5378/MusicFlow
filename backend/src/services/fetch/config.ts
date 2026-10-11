@@ -133,6 +133,10 @@ export interface FetchConfig {
   upgradeAutoIntervalDays: number;
   /** 定时自动洗版每日触发时刻（"HH:mm" 24 小时制，服务器本地时区）。 */
   upgradeAutoTimeOfDay: string;
+  /** 标签缺失修复（歌词/封面/专辑回写两个下载目录）：事件队列 + 定时兜底。默认 true（产品定调 2026-10-11）。 */
+  tagRepairEnabled: boolean;
+  /** 全量兜底扫描间隔（小时，1-8760）。默认 168 = 每周一次；事件队列不受它限制。 */
+  tagRepairIntervalHours: number;
 }
 
 /** 默认配置（所有旋钮的缺省取值见各字段注释）。 */
@@ -196,6 +200,8 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   upgradeAutoEnabled: false,
   upgradeAutoIntervalDays: 30,
   upgradeAutoTimeOfDay: "03:00",
+  tagRepairEnabled: true,
+  tagRepairIntervalHours: 168,
 };
 
 /**
@@ -237,6 +243,11 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
     syncToPlaylistIds: p.syncToPlaylistIds
       ? [...p.syncToPlaylistIds]
       : [...DEFAULT_FETCH_CONFIG.syncToPlaylistIds],
+    // 标签修复（2026-10-11）：兜底扫描间隔 1..8760 小时。
+    tagRepairIntervalHours:
+      typeof p.tagRepairIntervalHours === "number" && Number.isFinite(p.tagRepairIntervalHours)
+        ? Math.min(8760, Math.max(1, Math.floor(p.tagRepairIntervalHours)))
+        : DEFAULT_FETCH_CONFIG.tagRepairIntervalHours,
   };
 }
 

@@ -11,6 +11,7 @@ import { getFetchJob, updateFetchJobStatus, collectInterruptedFetchJobIds } from
 import { currentFetchConfig } from "./configStore.js";
 import { ensureWritableDir } from "./writable.js";
 import { buildLibraryContinuation } from "./library.js";
+import { enqueueTagRepairs } from "./tagRepair.js";
 
 const log = createLogger("fetch-runner");
 
@@ -121,6 +122,18 @@ function autoScanAfterJob(jobId: string): void {
   try {
     const job = getFetchJob(jobId);
     if (!job || job.status !== "done" || !job.sourceId) return;
+    // 标签缺失修复入队（方案 B 事件主路径，2026-10-11）：本次任务成功落盘入库的
+    // 歌曲（imports 带 songId）都过一轮「探缺 → 拿得到才写」。enrich 阶段封面/
+    // 歌词失败只告警不上抛（DNS 风暴等瞬时故障），这里兜住。入队自带 10min 初始
+    // 延迟，等增量扫描把 songs 行建好；无关队列开关——tagRepairEnabled 在 tick 判。
+    try {
+      const ids = (job.imports ?? [])
+        .filter((i) => i.songId && (i.result === "added" || i.result === "updated"))
+        .map((i) => i.songId as string);
+      if (ids.length > 0) enqueueTagRepairs([...new Set(ids)]);
+    } catch (e: any) {
+      log.warn("标签修复入队失败(不影响任务)", { jobId, err: String(e?.message || e) });
+    }
     let cfgj: any = (job as any)?.config;
     if (typeof cfgj === "string") {
       try {

@@ -107,6 +107,10 @@ export interface FetchConfig {
   libraryAutoIntervalDays?: number;
   /** 定时自动全库下载时刻（HH:mm）。默认 "03:00" */
   libraryAutoTimeOfDay?: string;
+  /** 标签缺失修复（歌词/封面/专辑）开关。默认 true */
+  tagRepairEnabled?: boolean;
+  /** 标签全量兜底扫描间隔（小时）。默认 168 */
+  tagRepairIntervalHours?: number;
 }
 
 const BASE = "/rest/api/v1/fetch";
@@ -313,4 +317,37 @@ export async function resetLibraryAttempts(): Promise<number> {
 export async function resetUpgradeAttempts(): Promise<number> {
   const res = await api.post(`${BASE}/upgrade/reset`);
   return Number(res.data?.cleared ?? 0);
+}
+
+// ==================== 标签缺失修复（歌词/封面/专辑，2026-10-11） ====================
+
+export interface TagRepairResult {
+  checked: number;
+  coverFixed: number;
+  lyricFixed: number;
+  albumFixed: number;
+  unobtainable: number;
+  skipped: number;
+  fixed: number;
+  at?: number;
+  mode?: string;
+}
+
+export interface TagRepairStatus {
+  enabled: boolean;
+  intervalHours: number;
+  queueSize: number;
+  running: boolean;
+  lastResult: TagRepairResult | null;
+}
+
+export async function getTagRepairStatus(): Promise<TagRepairStatus> {
+  const res = await api.get(`${BASE}/tag-repair`);
+  return (res.data ?? { enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null }) as TagRepairStatus;
+}
+
+/** 触发一轮修复：full=true 全量兜底扫（数分钟），否则只清到期队列。异步执行，结果轮询状态。 */
+export async function runTagRepair(full: boolean): Promise<{ success: boolean; busy?: boolean; mode?: string }> {
+  const res = await api.post(`${BASE}/tag-repair/run`, { full });
+  return res.data ?? { success: false };
 }

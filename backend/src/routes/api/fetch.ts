@@ -59,6 +59,12 @@ import {
 } from "../../services/fetch/jobStore.js";
 import { ensureBaseBatchLimit } from "../../services/plugin/batchPacer.js";
 import type { TaskStatus } from "../../services/fetch/types.js";
+import {
+  getTagRepairLastResult,
+  getTagRepairQueueSize,
+  isTagRepairRunning,
+  runTagRepairOnce,
+} from "../../services/fetch/tagRepair.js";
 
 /** 客户端入参 → FetchTarget[]（宽容归一化：缺 id 补位、缺 title 置空）。 */
 function normalizeTargets(input: unknown): FetchTarget[] {
@@ -564,6 +570,34 @@ export function registerFetch(app: Hono): void {
   app.post("/v1/fetch/library/reset", adminMiddleware, (c) =>
     c.json({ success: true, cleared: resetLibraryAttempts() }),
   );
+
+  // ==================== 标签缺失修复（歌词/封面/专辑，方案 B 2026-10-11） ====================
+  // 状态查询：开关 / 队列规模 / 上次结果（供前端按钮展示）。
+  app.get("/v1/fetch/tag-repair", adminMiddleware, (c) => {
+    const cfg = currentFetchConfig();
+    return c.json({
+      enabled: cfg.tagRepairEnabled,
+      intervalHours: cfg.tagRepairIntervalHours,
+      queueSize: getTagRepairQueueSize(),
+      running: isTagRepairRunning(),
+      lastResult: getTagRepairLastResult(),
+    });
+  });
+  // 手动触发一轮：body { full?: boolean }（默认 queue=只清到期队列；full=全量兜底扫）。
+  // 异步执行（全量可能数分钟），立即返回 busy/started；结果经 GET 轮询 lastResult。
+  app.post("/v1/fetch/tag-repair/run", adminMiddleware, (c) => {
+    let body: { full?: boolean } = {};
+    try {
+      body = (c.req.json() as { full?: boolean }) ?? {};
+    } catch {
+      /* 空 body 合法 */
+    }
+    const mode = body?.full ? "full" : "queue";
+    if (isTagRepairRunning()) return c.json({ success: false, busy: true }, 409);
+    // 不 await：后台跑，前端轮询状态。
+    void runTagRepairOnce(mode);
+    return c.json({ success: true, started: true, mode });
+  });
 }
 
 // 供测试/自省：默认配置常量再导出（避免测试直接依赖 services/fetch/config）。

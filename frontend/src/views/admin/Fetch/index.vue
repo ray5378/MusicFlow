@@ -97,6 +97,22 @@
                 <el-input v-model="config.libraryAutoTimeOfDay" placeholder="03:00" class="time-input" :disabled="!config.libraryAutoEnabled" />
                 <div class="hint">{{ t('admin.fetch.config.libraryAutoTimeOfDayHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.tagRepairEnabled')">
+                <el-switch v-model="config.tagRepairEnabled" />
+                <div class="hint">{{ t('admin.fetch.config.tagRepairEnabledHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.tagRepairIntervalHours')">
+                <el-input-number v-model="config.tagRepairIntervalHours" :min="1" :max="8760" controls-position="right" :disabled="!config.tagRepairEnabled" />
+                <div class="hint">{{ t('admin.fetch.config.tagRepairIntervalHoursHint') }}</div>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.tagRepairRun')">
+                <div class="tag-repair-actions">
+                  <el-button size="small" :loading="tagRepairBusyQueue" :disabled="tagRepairStatus.running" @click="onTagRepairQueue">{{ t('admin.fetch.config.tagRepairQueueBtn') }}</el-button>
+                  <el-button size="small" type="primary" plain :loading="tagRepairBusyFull" :disabled="tagRepairStatus.running" @click="onTagRepairFull">{{ t('admin.fetch.config.tagRepairFullBtn') }}</el-button>
+                </div>
+                <div class="hint" v-if="tagRepairStatusMessage">{{ tagRepairStatusMessage }}</div>
+                <div class="hint">{{ t('admin.fetch.config.tagRepairHint') }}</div>
+              </el-form-item>
             </div>
 
             <el-divider content-position="left">{{ t('admin.fetch.config.transcode') }}</el-divider>
@@ -404,6 +420,8 @@ import {
   startLibraryTask,
   resetLibraryAttempts,
   resetUpgradeAttempts,
+  getTagRepairStatus,
+  runTagRepair,
 } from "@/api/fetch";
 import type {
   FetchConfig,
@@ -413,6 +431,7 @@ import type {
   UpgradePlanItem,
   UpgradeConfig,
   LibraryPlan,
+  TagRepairStatus,
 } from "@/api/fetch";
 
 const { t } = useI18n();
@@ -463,12 +482,87 @@ function defaultConfig(): ConfigForm {
     libraryAutoEnabled: false,
     libraryAutoIntervalDays: 1,
     libraryAutoTimeOfDay: "03:00",
+    tagRepairEnabled: true,
+    tagRepairIntervalHours: 168,
   };
 }
 
 const config = reactive<ConfigForm>(defaultConfig());
 const configLoading = ref(false);
 const configSaving = ref(false);
+
+// ==================== 标签缺失修复（2026-10-11） ====================
+const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null });
+const tagRepairBusyQueue = ref(false);
+const tagRepairBusyFull = ref(false);
+let tagRepairPoll: ReturnType<typeof setInterval> | null = null;
+
+function formatTagRepairResult(r: NonNullable<TagRepairStatus["lastResult"]>): string {
+  const mode = r.mode === "full" ? t("admin.fetch.config.tagRepairModeFull") : t("admin.fetch.config.tagRepairModeQueue");
+  return t("admin.fetch.config.tagRepairResultLine", {
+    mode,
+    fixed: r.fixed ?? 0,
+    cover: r.coverFixed ?? 0,
+    lyric: r.lyricFixed ?? 0,
+    album: r.albumFixed ?? 0,
+    miss: r.unobtainable ?? 0,
+  });
+}
+
+const tagRepairStatusMessage = computed(() => {
+  const s = tagRepairStatus.value;
+  if (s.running) return t("admin.fetch.config.tagRepairRunning");
+  const parts: string[] = [t("admin.fetch.config.tagRepairQueueLine", { n: s.queueSize })];
+  if (s.lastResult) parts.push(formatTagRepairResult(s.lastResult));
+  return parts.join(" · ");
+});
+
+async function loadTagRepairStatus() {
+  try {
+    const wasRunning = tagRepairStatus.value.running;
+    tagRepairStatus.value = await getTagRepairStatus();
+    // 运行中每 5s 轮询一次；到终态停表并提示。
+    if (tagRepairStatus.value.running && !tagRepairPoll) {
+      tagRepairPoll = setInterval(loadTagRepairStatus, 5000);
+    } else if (!tagRepairStatus.value.running && tagRepairPoll) {
+      clearInterval(tagRepairPoll);
+      tagRepairPoll = null;
+      if (wasRunning && tagRepairStatus.value.lastResult) {
+        ElMessage.success(formatTagRepairResult(tagRepairStatus.value.lastResult));
+      }
+    }
+  } catch {
+    /* 状态获取失败不打扰 */
+  }
+}
+
+async function onTagRepairQueue() {
+  tagRepairBusyQueue.value = true;
+  try {
+    const r = await runTagRepair(false);
+    if (r.busy) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
+    else ElMessage.success(t("admin.fetch.config.tagRepairStarted"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
+  } finally {
+    tagRepairBusyQueue.value = false;
+    loadTagRepairStatus();
+  }
+}
+
+async function onTagRepairFull() {
+  tagRepairBusyFull.value = true;
+  try {
+    const r = await runTagRepair(true);
+    if (r.busy) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
+    else ElMessage.success(t("admin.fetch.config.tagRepairStartedFull"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
+  } finally {
+    tagRepairBusyFull.value = false;
+    loadTagRepairStatus();
+  }
+}
 const priorityInput = ref("");
 // 可信内网主机（逗号分隔文本 ↔ 字符串数组）
 const ssrfHostsText = computed({
@@ -511,6 +605,8 @@ async function loadConfig() {
     if (merged.libraryAutoEnabled == null) merged.libraryAutoEnabled = false;
     if (merged.libraryAutoIntervalDays == null) merged.libraryAutoIntervalDays = 1;
     if (!merged.libraryAutoTimeOfDay) merged.libraryAutoTimeOfDay = "03:00";
+    if (merged.tagRepairEnabled == null) merged.tagRepairEnabled = true;
+    if (merged.tagRepairIntervalHours == null) merged.tagRepairIntervalHours = 168;
     Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
@@ -882,6 +978,7 @@ onMounted(() => {
   loadSources();
   loadUpgradeConfig();
   loadLibraryPlan();
+  loadTagRepairStatus();
   // 两个任务面板各自 onMounted 自拉；不在这里重复请求。
 });
 // 切到「下载/洗版任务」页签时刷新一次对应面板；切到「下载(创建)」时刷新全库统计。
