@@ -253,11 +253,9 @@
           <div v-else class="mf-media">
             <div class="mf-media-row">
               <span class="mf-media-label">{{ t('admin.plugins.sourcePlugin') }}</span>
-              <el-select v-model="lyricsSettings.providerId" clearable :placeholder="t('admin.plugins.auto')" style="width: 260px" @change="saveMediaSettings('lyrics')">
-                <el-option v-for="p in lyricProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
-              </el-select>
-              <span class="field-hint">{{ t('admin.plugins.sourcePluginHint') }}</span>
+              <span class="field-hint">{{ t('admin.plugins.lyricsProviderPriorityHint') }}</span>
             </div>
+            <SourcePriorityList :model-value="lyricsSettings.providerPriority" :options="lyricProviderOptions" :available-values="lyricProviderAvailable" @update:model-value="onLyricsPriorityChange" />
             <div class="mf-media-row">
               <span class="mf-media-label">{{ t('admin.plugins.onDemand') }}</span>
               <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
@@ -290,11 +288,9 @@
           <div v-else class="mf-media">
             <div class="mf-media-row">
               <span class="mf-media-label">{{ t('admin.plugins.sourcePlugin') }}</span>
-              <el-select v-model="coversSettings.providerId" clearable :placeholder="t('admin.plugins.auto')" style="width: 260px" @change="saveMediaSettings('covers')">
-                <el-option v-for="p in coverProviderPlugins" :key="p.id" :label="providerLabel(p)" :value="p.id" />
-              </el-select>
-              <span class="field-hint">{{ t('admin.plugins.sourcePluginHint') }}</span>
+              <span class="field-hint">{{ t('admin.plugins.coversProviderPriorityHint') }}</span>
             </div>
+            <SourcePriorityList :model-value="coversSettings.providerPriority" :options="coverProviderOptions" :available-values="coverProviderAvailable" @update:model-value="onCoversPriorityChange" />
             <div class="mf-media-row">
               <span class="mf-media-label">{{ t('admin.plugins.onDemand') }}</span>
               <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
@@ -309,6 +305,20 @@
               <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">{{ t('admin.plugins.batchBackfill') }}</el-button>
               <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
             </div>
+          </div>
+        </el-card>
+
+        <el-card class="mf-card" shadow="never">
+          <template #header>
+            <div class="card-head">
+              <span class="card-title">{{ t('admin.plugins.streamSourcePriority') }}</span>
+            </div>
+          </template>
+          <div class="mf-media">
+            <div class="mf-media-row">
+              <span class="field-hint">{{ t('admin.plugins.streamSourcePriorityHint') }}</span>
+            </div>
+            <SourcePriorityList :model-value="streamSourcePriority" :options="availableStreamSources" @update:model-value="onStreamPriorityChange" />
           </div>
         </el-card>
 
@@ -600,6 +610,7 @@ import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import EmptyState from "@/components/EmptyState.vue";
 import QrLoginDialog from "@/components/QrLoginDialog.vue";
+import SourcePriorityList from "@/components/SourcePriorityList.vue";
 import api, { formatApiError } from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
 import { parseManifest, parseConfig } from "@/utils/plugin";
@@ -661,11 +672,16 @@ const purging = ref(false);
 const testResult = ref<any>(null);
 
 // ---- 歌词/封面按需获取(全局设置 + 批量补全) ----
-const lyricsSettings = reactive({ providerId: "", onDemand: true, persist: false });
-const coversSettings = reactive({ providerId: "", onDemand: true, persist: true });
+const lyricsSettings = reactive({ providerId: "", providerPriority: [] as string[], onDemand: true, persist: false });
+const coversSettings = reactive({ providerId: "", providerPriority: [] as string[], onDemand: true, persist: true });
 const lyricsBackfill = reactive({ running: false, total: 0, done: 0, ok: 0, fail: 0, skipped: 0 });
 const coversBackfill = reactive({ running: false, total: 0, done: 0, ok: 0, fail: 0, skipped: 0 });
 const savingMedia = ref(false);
+
+// ---- 播放来源优先级(播放平台歌曲时的取源顺序;与下载 sourcePriority 独立) ----
+const streamSourcePriority = ref<string[]>([]);
+const availableStreamSources = ref<Array<{ value: string; label: string }>>([]);
+const savingStreamPriority = ref(false);
 
 // ---- health ----
 const healthMap = ref<Record<string, any>>({});
@@ -786,9 +802,17 @@ const lyricProviderPlugins = computed<any[]>(() =>
 const coverProviderPlugins = computed<any[]>(() =>
   plugins.value.filter((p) => (parseManifest(p).capabilities || []).includes("coverProvider")),
 );
-function providerLabel(p: any): string {
-  return `${displayName(p)}${p.enabled ? "" : t('admin.plugins.providerDisabled')}`;
-}
+/** 歌词/封面提供方候选:沿用插件列表按 capability 过滤的结果(不新增后端端点)。
+ *  label 用插件展示名;下拉候选含已禁用项,但「可用」集合只含已启用项 → 禁用项打警示标签。 */
+const lyricProviderOptions = computed(() => lyricProviderPlugins.value.map((p) => ({ value: p.id, label: displayName(p) })));
+const coverProviderOptions = computed(() => coverProviderPlugins.value.map((p) => ({ value: p.id, label: displayName(p) })));
+const lyricProviderAvailable = computed(() => lyricProviderPlugins.value.filter((p) => p.enabled).map((p) => p.id));
+const coverProviderAvailable = computed(() => coverProviderPlugins.value.filter((p) => p.enabled).map((p) => p.id));
+
+/** 三处来源优先级列表:变更即保存(播放来源用独立端点,歌词/封面并入各自媒体设置)。 */
+function onStreamPriorityChange(v: string[]) { streamSourcePriority.value = v; saveStreamSourcePriority(); }
+function onLyricsPriorityChange(v: string[]) { lyricsSettings.providerPriority = v; saveMediaSettings("lyrics"); }
+function onCoversPriorityChange(v: string[]) { coversSettings.providerPriority = v; saveMediaSettings("covers"); }
 
 function isSourcePlugin(plugin: any) {
   return parseManifest(plugin).type === "source";
@@ -1458,16 +1482,37 @@ async function purgeWebSongs() {
 async function loadMediaSettings() {
   try {
     const l = await api.get("/rest/api/v1/lyrics/settings");
-    if (l.data) Object.assign(lyricsSettings, l.data);
+    if (l.data) {
+      Object.assign(lyricsSettings, l.data);
+      // 兼容旧后端(无 providerPriority 字段):旧 providerId 视作列表首项。
+      if (!Array.isArray(lyricsSettings.providerPriority)) {
+        lyricsSettings.providerPriority = l.data.providerId ? [l.data.providerId] : [];
+      }
+    }
     const c = await api.get("/rest/api/v1/covers/settings");
-    if (c.data) Object.assign(coversSettings, c.data);
+    if (c.data) {
+      Object.assign(coversSettings, c.data);
+      if (!Array.isArray(coversSettings.providerPriority)) {
+        coversSettings.providerPriority = c.data.providerId ? [c.data.providerId] : [];
+      }
+    }
+    // 播放来源优先级:与歌词/封面同一批次加载。
+    const p = await api.get("/rest/api/v1/playback-sources/settings");
+    if (Array.isArray(p.data?.priority)) streamSourcePriority.value = p.data.priority;
+    if (Array.isArray(p.data?.available)) availableStreamSources.value = p.data.available;
   } catch { /* 后端旧版本无此端点时保持默认 */ }
 }
 
 async function saveMediaSettings(kind: "lyrics" | "covers"): Promise<boolean> {
   const s = kind === "lyrics" ? lyricsSettings : coversSettings;
   try {
-    await api.put(`/rest/api/v1/${kind}/settings`, { providerId: s.providerId, onDemand: s.onDemand, persist: s.persist });
+    // providerPriority 为真源;providerId 同步为列表首项(后端也会据此覆写),兼容旧消费方。
+    await api.put(`/rest/api/v1/${kind}/settings`, {
+      providerPriority: s.providerPriority,
+      providerId: s.providerPriority[0] ?? "",
+      onDemand: s.onDemand,
+      persist: s.persist,
+    });
     return true;
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || t('admin.plugins.mediaSaveFailed'));
@@ -1475,12 +1520,29 @@ async function saveMediaSettings(kind: "lyrics" | "covers"): Promise<boolean> {
   }
 }
 
-/** 一次性保存「歌词获取」+「封面获取」两组全局设置(保留开关即时保存的同时,给显式确认入口)。 */
+async function saveStreamSourcePriority(): Promise<boolean> {
+  savingStreamPriority.value = true;
+  try {
+    await api.put("/rest/api/v1/playback-sources/settings", { priority: streamSourcePriority.value });
+    return true;
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.streamSourceSaveFailed'));
+    return false;
+  } finally {
+    savingStreamPriority.value = false;
+  }
+}
+
+/** 一次性保存「歌词获取」+「封面获取」+「播放来源优先级」(开关/列表虽即时保存,给显式确认入口)。 */
 async function saveAllMedia() {
   savingMedia.value = true;
-  const [a, b] = await Promise.all([saveMediaSettings("lyrics"), saveMediaSettings("covers")]);
+  const [a, b, c] = await Promise.all([
+    saveMediaSettings("lyrics"),
+    saveMediaSettings("covers"),
+    saveStreamSourcePriority(),
+  ]);
   savingMedia.value = false;
-  if (a && b) ElMessage.success(t('admin.plugins.mediaSaved'));
+  if (a && b && c) ElMessage.success(t('admin.plugins.mediaSaved'));
 }
 
 async function startBackfill(kind: "lyrics" | "covers") {

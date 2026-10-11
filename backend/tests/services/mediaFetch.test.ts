@@ -1,6 +1,7 @@
 // 歌词/封面按需获取(媒体获取)端到端测试:
 //   - 全局设置读写(settings.ts)
-//   - 独立选源 filterProvidersByPreference / searchLyrics 只查选中插件
+//   - 来源优先级 filterProvidersByPreference:列表非空严格按列表序;为空=全部启用;
+//     兼容旧单源 providerId(未命中回退全部)
 //   - fetchLrcForSong:本地/WebDAV 歌曲缺歌词 → lyricProvider 回退 + persist 落库为文件
 //   - 歌词落库新格式:songs.lyrics 存文件引用(online-lyrics/<id>.lrc),旧文本兼容
 //   - sidecar .lrc 优先(本地文件 / WebDAV URL)
@@ -123,24 +124,45 @@ describe("settings 全局键值读写", () => {
   });
 });
 
-describe("filterProvidersByPreference 独立选源", () => {
+describe("filterProvidersByPreference 来源优先级", () => {
   const list = [{ manifest: { id: "a" } }, { manifest: { id: "b" } }] as any;
 
-  it("未设置 → 返回全部(现状 first-match)", () => {
+  it("列表与 providerId 皆空 → 返回全部(现状 first-match)", () => {
+    setSetting("lyrics.providerPriority", "");
     setSetting("lyrics.providerId", "");
-    expect(filterProvidersByPreference(list, "lyrics.providerId").length).toBe(2);
+    expect(filterProvidersByPreference(list, "lyrics").length).toBe(2);
   });
 
-  it("设置且命中 → 只返回选中插件", () => {
+  it("优先级列表非空 → 严格按列表顺序,未列出的不参与", () => {
+    setSetting("lyrics.providerPriority", JSON.stringify(["b", "a"]));
     setSetting("lyrics.providerId", "b");
-    const r = filterProvidersByPreference(list, "lyrics.providerId");
-    expect(r.length).toBe(1);
-    expect(r[0].manifest.id).toBe("b");
+    const r = filterProvidersByPreference(list, "lyrics");
+    expect(r.map((p: any) => p.manifest.id)).toEqual(["b", "a"]);
+    setSetting("lyrics.providerPriority", "");
+    setSetting("lyrics.providerId", "");
   });
 
-  it("选中插件被禁用/卸载 → 回退全部", () => {
+  it("兼容旧 providerId(无 priority)→ 视作单源首项(旧行为不丢)", () => {
+    setSetting("lyrics.providerPriority", "");
+    setSetting("lyrics.providerId", "b");
+    const r = filterProvidersByPreference(list, "lyrics");
+    expect(r.map((p: any) => p.manifest.id)).toEqual(["b"]);
+    setSetting("lyrics.providerId", "");
+  });
+
+  it("旧 providerId 指向已禁用/卸载插件 → 回退全部(旧行为,不因插件消失就没歌词)", () => {
+    setSetting("lyrics.providerPriority", "");
     setSetting("lyrics.providerId", "not-installed");
-    expect(filterProvidersByPreference(list, "lyrics.providerId").length).toBe(2);
+    expect(filterProvidersByPreference(list, "lyrics").length).toBe(2);
+    setSetting("lyrics.providerId", "");
+  });
+
+  it("优先级列表指向不存在/未启用插件 → 安全跳过该条,保留其余", () => {
+    setSetting("lyrics.providerPriority", JSON.stringify(["ghost", "a"]));
+    setSetting("lyrics.providerId", "ghost");
+    const r = filterProvidersByPreference(list, "lyrics");
+    expect(r.map((p: any) => p.manifest.id)).toEqual(["a"]);
+    setSetting("lyrics.providerPriority", "");
     setSetting("lyrics.providerId", "");
   });
 });

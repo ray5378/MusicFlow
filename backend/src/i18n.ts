@@ -128,6 +128,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.fetch.jobNotFound": "下载任务不存在",
     "errors.import.failed": "导入失败",
     "errors.common.paramsRequired": "缺少参数",
+    "errors.streamSourcePriority.invalidList": "播放来源优先级列表格式不正确(应为字符串数组)",
 
     "errors.cast.screenFailed": "投屏失败",
     "errors.cast.preloadFailed": "预加载失败",
@@ -318,6 +319,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.fetch.jobNotFound": "Fetch job not found",
     "errors.import.failed": "Import failed",
     "errors.common.paramsRequired": "Missing parameters",
+    "errors.streamSourcePriority.invalidList": "Invalid playback source priority list (expected an array of strings)",
     "errors.cast.screenFailed": "Cast failed",
     "errors.cast.preloadFailed": "Preload failed",
     "errors.cast.airplayFailed": "AirPlay cast failed",

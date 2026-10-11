@@ -6,6 +6,7 @@ import {
   adminMiddleware,
   apiError,
   backfillStatus,
+  clearStreamFallbackCache,
   createLogger,
   db,
   eq,
@@ -18,9 +19,12 @@ import {
   getRequestMetrics,
   getSetting,
   getSettingBool,
+  getProviderPriority,
+  getStreamSourcePriority,
   isBatchBusy,
   isIdle,
   isLogLevel,
+  listAvailableStreamSources,
   log,
   logLevelSnapshot,
   plugins,
@@ -29,6 +33,7 @@ import {
   saveLogLevel,
   setLyricsCoversSettings,
   setSetting,
+  setStreamSourcePriority,
   songs,
   startBackfill,
 } from "./shared.js";
@@ -146,6 +151,9 @@ app.put("/v1/playback/settings", adminMiddleware, async (c) => {
 
 app.get("/v1/lyrics/settings", adminMiddleware, (c) => c.json({
   providerId: getSetting("lyrics.providerId", ""),
+  // 兼容:providerPriority 为空且旧 providerId 有值时按 [providerId] 返回(旧值视作首项,
+  // 前端自动迁移为列表首项);providerId 字段继续返回,不破坏别的消费方。
+  providerPriority: getProviderPriority("lyrics"),
   onDemand: getSettingBool("lyrics.onDemand", true),
   persist: getSettingBool("lyrics.persist", false),
 }));
@@ -154,6 +162,7 @@ app.put("/v1/lyrics/settings", adminMiddleware, (c) => setLyricsCoversSettings(c
 
 app.get("/v1/covers/settings", adminMiddleware, (c) => c.json({
   providerId: getSetting("cover.providerId", ""),
+  providerPriority: getProviderPriority("cover"),
   onDemand: getSettingBool("cover.onDemand", true),
   persist: getSettingBool("cover.persist", true),
 }));
@@ -161,6 +170,35 @@ app.get("/v1/covers/settings", adminMiddleware, (c) => c.json({
 // 这里必须传 "cover" 而非字面的 "covers",否则写入 covers.* 而无人读取,等同未落库。
 
 app.put("/v1/covers/settings", adminMiddleware, (c) => setLyricsCoversSettings(c, "cover"));
+
+// ==================== 播放来源优先级(playback sources) ====================
+// 「插件管理 → 媒体获取」页可调顺序的来源优先级列表:控制**播放平台歌曲**时按什么顺序
+// 去各音源找可播的流。与「音乐下载」的 fetch.sourcePriority 完全独立(独立存储键
+// stream.sourcePriority)。列表非空 → 换源严格按列表顺序;空 → 保持原行为(本尊优先)。
+//
+// 路径说明:刻意不用 /v1/stream/settings —— `/v1/stream` 前缀上已挂
+// permMiddleware(PERM.LIBRARY_STREAM)(音频流权限门禁,见 routes/api/stream.ts),
+// 把 admin 设置端点放进该命名空间会与流播权限语义耦合,故改用独立的
+// playback-sources 命名空间,避免与音频流路由/守卫相互干扰。
+app.get("/v1/playback-sources/settings", adminMiddleware, (c) => c.json({
+  priority: getStreamSourcePriority(),
+  available: listAvailableStreamSources(),
+}));
+
+app.put("/v1/playback-sources/settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  if (!Array.isArray(body?.priority)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.streamSourcePriority.invalidList"), 400);
+  }
+  const priority = setStreamSourcePriority(body.priority);
+  // P2-1:取源顺序是全局决策,改动后必须让**既有换源/可播缓存**全部失效,
+  // 否则用户调了顺序、已缓存的正/负结果仍按旧顺序命中,表现为「改了没效果」。
+  // 更新前逐出全部缓存即可(下次 findFallbackStream 会按新顺序重新取源)。
+  // 复用 streamFallback 已导出的 clearStreamFallbackCache(QueueController/preProbeScheduler
+  // 用的是同文件的 evictStreamFallbackCache;这里改的是全局顺序,故清全部而非单曲)。
+  clearStreamFallbackCache();
+  return c.json({ success: true, priority });
+});
 
 // 手动批量补全(节流执行,后台运行;同种任务在跑则返回 running=true)
 

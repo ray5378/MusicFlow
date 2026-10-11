@@ -33,30 +33,90 @@ export function hasCoverProvider(): boolean {
 }
 
 /**
- * 独立选源:若全局设置 `<capPrefix>.providerId` 指定了插件且该插件启用,
- * 则只返回它;否则(未设置/被禁用/被卸载)回退全部启用的 provider。
- * 核心始终只按 capability + 用户配置过滤,绝不写死插件名。
+ * 规范化优先级列表:仅保留非空字符串、trim、按值去重(保序)。非数组 → []。
+ */
+export function normalizeProviderPriority(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of list) {
+    if (typeof raw !== "string") continue;
+    const id = raw.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * 读取某个能力的**有效**来源优先级(有序数组):
+ *   - 新键 `<prefix>.providerPriority` 非空 → 直接用它;
+ *   - 否则**兼容旧单源设置** `<prefix>.providerId`:有值则视作单源 [providerId](旧行为不丢);
+ *   - 两者都空 → [](= 自动:全部启用 provider,注册顺序)。
+ * @param prefix "lyrics" | "cover"
+ */
+export function getProviderPriority(prefix: "lyrics" | "cover"): string[] {
+  const raw = getSetting(`${prefix}.providerPriority`, "");
+  if (raw) {
+    try {
+      const list = normalizeProviderPriority(JSON.parse(raw));
+      if (list.length > 0) return list;
+    } catch { /* 非法 JSON → 回退 providerId */ }
+  }
+  const legacy = getSetting(`${prefix}.providerId`, "");
+  return legacy ? [legacy] : [];
+}
+
+/**
+ * 按来源优先级排序/筛选(播放来源优先级同款语义):
+ *   - 新键 `<prefix>.providerPriority` 非空 → **严格按列表顺序**返回其中「存在于 all」
+ *     的插件;未列出的不参与;指向不存在/未启用的插件 → 安全跳过。
+ *   - 该键为空时**兼容旧单源** `<prefix>.providerId`:命中则只返回它(旧行为),
+ *     未命中(插件被禁用/卸载)→ 回退全部启用项(旧行为:不因插件消失就没歌词)。
+ *   - 两者都空 → 全部启用(注册顺序 first-match-wins)。
+ * 核心始终只按 capability + 用户配置排序,绝不写死插件名。
  * @param all 已按 capability 过滤并启用排序的插件列表
- * @param settingKey 全局设置键,如 "lyrics.providerId" / "cover.providerId"
+ * @param prefix "lyrics" | "cover"
  */
 export function filterProvidersByPreference(
   all: RegisteredPlugin[],
-  settingKey: string,
+  prefix: "lyrics" | "cover",
 ): RegisteredPlugin[] {
   if (all.length === 0) return all;
-  const preferred = getSetting(settingKey, "");
-  if (!preferred) return all;
-  const picked = all.filter((p) => p.manifest.id === preferred);
+
+  // 新协议:有序优先级列表(严格)。
+  const raw = getSetting(`${prefix}.providerPriority`, "");
+  if (raw) {
+    let priority: string[] = [];
+    try { priority = normalizeProviderPriority(JSON.parse(raw)); } catch { priority = []; }
+    if (priority.length > 0) {
+      const byId = new Map(all.map((p) => [p.manifest.id, p]));
+      const ordered: RegisteredPlugin[] = [];
+      for (const id of priority) {
+        const picked = byId.get(id);
+        if (!picked) continue; // 不存在/未启用 → 跳过该条,继续下一项
+        ordered.push(picked);
+        byId.delete(id); // 去重(列表已规范化,这里防御性)
+      }
+      return ordered;
+    }
+  }
+
+  // 兼容旧单源 providerId(未迁移的安装):命中只用它;未命中回退全部。
+  const legacy = getSetting(`${prefix}.providerId`, "");
+  if (!legacy) return all;
+  const picked = all.filter((p) => p.manifest.id === legacy);
   return picked.length > 0 ? picked : all;
 }
 
 /**
- * Search lyrics across all enabled lyric providers (first-match-wins).
- * Honors the global `lyrics.providerId` selection when set.
+ * Search lyrics across enabled lyric providers (first-match-wins), honoring the
+ * user's `lyrics.providerPriority` order (falls back to legacy `lyrics.providerId`).
  * @returns LRC/plain lyric text, or null if no provider could supply it.
  */
 export async function searchLyrics(song: LyricSongInput): Promise<string | null> {
-  const providers = filterProvidersByPreference(getEnabledByCapability("lyricProvider"), "lyrics.providerId");
+  const providers = filterProvidersByPreference(getEnabledByCapability("lyricProvider"), "lyrics");
   for (const { manifest, impl } of providers) {
     if (typeof impl?.searchLyrics !== "function") continue;
     const cfg = getPluginConfig(manifest.id) || {};
@@ -77,12 +137,12 @@ export async function searchLyrics(song: LyricSongInput): Promise<string | null>
 }
 
 /**
- * Search cover art across all enabled cover providers (first-match-wins).
- * Honors the global `cover.providerId` selection when set.
+ * Search cover art across enabled cover providers (first-match-wins), honoring the
+ * user's `cover.providerPriority` order (falls back to legacy `cover.providerId`).
  * @returns a cover URL, or null if no provider could supply it.
  */
 export async function searchCover(song: LyricSongInput): Promise<string | null> {
-  const providers = filterProvidersByPreference(getEnabledByCapability("coverProvider"), "cover.providerId");
+  const providers = filterProvidersByPreference(getEnabledByCapability("coverProvider"), "cover");
   for (const { manifest, impl } of providers) {
     if (typeof impl?.searchCover !== "function") continue;
     const cfg = getPluginConfig(manifest.id) || {};

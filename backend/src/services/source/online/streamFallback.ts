@@ -23,10 +23,12 @@ import { db } from "../../../db/index.js";
 import { songs } from "../../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { getEnabledSourcePlugins, getPluginManifest, getPluginConfig } from "../../../plugins/registry.js";
+import type { PluginManifest } from "../../../plugins/types.js";
 import { passesImportGate, getImportGateConfig, type ImportGateConfig } from "./importGate.js";
 import { STREAM_FALLBACK_PLUGIN_ID } from "../../plugin/core/streamFallbackPlugin.js";
 import { resolvePreferredSong } from "../preferredSource.js";
 import { getEffectiveBaseUrl } from "../../dlna/control.js";
+import { getStreamSourcePriority } from "./streamSourcePriority.js";
 
 /** 读取换源兜底配置(core-stream-fallback 内置插件):enabled 总开关 + 时长容差覆写。 */
 function getFallbackConfig(): { enabled: boolean; durationTolerance: number } {
@@ -151,6 +153,160 @@ function resolveStreamProvider(providerId: string): { provider: any; config: Rec
   return null;
 }
 
+// ==================== 播放来源优先级(用户可调取源顺序) ====================
+//
+// 用户在「插件管理 → 媒体获取」页配置取源顺序(见 streamSourcePriority.ts)。
+// 列表**非空**时,findFallbackStream 严格按列表顺序逐项尝试,歌曲「本尊插件」不再
+// 享有特权(本尊不在列表里就不被优先尝试)。列表条目**只有插件级**(就是 plugin id),
+// 插件内部用哪个平台、按什么顺序取源由插件自己决定,宿主不干预:
+//   - 具备 search 能力的插件:走该插件常规 search —— 按插件内置 sourcePreference 排列
+//     各平台候选,候选须过 importGate;并沿用旧语义跳过「本尊失败平台」(同平台多半是
+//     同一条死链);
+//   - 纯 stream 插件(含 stream 不含 search):走 `resolveStream(config, songLike)`。
+// 任一项拿到 probe 通过的 URL 即返回;全部失败 → 用与默认路径同一把尺子写负缓存/退避。
+// 列表为空 → 原有路径(本尊优先 → 启用顺序,含纯 stream 轮询)完全不变。
+
+/** 优先级取源上下文(把 findFallbackStream 的入参与预计算项打包,供各 helper 共用)。 */
+interface PriorityContext {
+  songId: string;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  providerId: string;
+  failingSource: string;
+  timeoutMs: number;
+  query: string;
+  gateCfg: ImportGateConfig | undefined;
+}
+
+/** 优先级取源的副作用标记:用于末尾统一判定「负结果」还是「短期退避」。 */
+interface PriorityFlags {
+  /** 出现过「网络异常/超时」——不得据此判定不可播。 */
+  sawTransient: boolean;
+  /** 任一 search 抛错 —— 属不可判定,最终按 transient 退避而非判死。 */
+  searchFailed: boolean;
+}
+
+/** 组装纯 stream 插件 resolveStream 的入参 songLike(含 songs.sourceData 原文)。 */
+function loadSongLike(ctx: PriorityContext): {
+  id: string; title: string; artist: string; album: string;
+  duration: number; pluginEntry: string; sourceData: string | null;
+} {
+  let sdRaw: string | null = null;
+  try {
+    sdRaw = db.select({ sourceData: songs.sourceData }).from(songs).where(eq(songs.id, ctx.songId)).get()?.sourceData ?? null;
+  } catch { sdRaw = null; }
+  return {
+    id: ctx.songId, title: ctx.title, artist: ctx.artist, album: ctx.album,
+    duration: ctx.duration, pluginEntry: ctx.providerId, sourceData: sdRaw,
+  };
+}
+
+/**
+ * 用某个「具备 search 能力」的插件尝试取源(插件级)。
+ * 走该插件常规 search(插件内部自行决定各平台候选),沿用旧语义跳过本尊失败平台
+ * (同平台多半是同一条死链);不向插件透传 `sources`,平台选择交给插件自己。
+ */
+async function tryPrioritySearchProvider(
+  pluginId: string,
+  configured: { provider: any; config: Record<string, any> },
+  ctx: PriorityContext,
+  flags: PriorityFlags,
+): Promise<{ url: string; source: string } | null> {
+  const { provider, config } = configured;
+  if (typeof provider?.search !== "function" || typeof provider?.streamUrl !== "function") return null;
+
+  const params = { query: ctx.query };
+  let results: OnlineSongResult[];
+  try {
+    const r = await provider.search(config, params);
+    results = r?.songs || [];
+  } catch {
+    // 搜索请求失败(网络异常/上游 5xx)→ 不判定「没有源」,只打标记供末尾退避。
+    flags.searchFailed = true;
+    return null;
+  }
+
+  const preference = getSourcePreference(pluginId);
+  const ranked = results
+    .filter(s => {
+      if (!s?.name) return false;
+      if (s.source === ctx.failingSource) {
+        // 跳过「刚失败的平台」(与默认路径同语义)。
+        return false;
+      }
+      return passesImportGate(
+        { title: ctx.title, artist: ctx.artist, album: ctx.album || null, duration: ctx.duration > 0 ? ctx.duration : null },
+        { name: s.name, artist: s.artist, album: s.album, duration: s.duration },
+        ctx.gateCfg,
+      ).ok;
+    })
+    .sort((a, b) => {
+      const ar = preference.indexOf(a.source);
+      const br = preference.indexOf(b.source);
+      return (ar === -1 ? 99 : ar) - (br === -1 ? 99 : br);
+    });
+
+  for (const cand of ranked) {
+    const url = provider.streamUrl(config, cand);
+    if (!url) continue;
+    const outcome = await probe(url, ctx.timeoutMs);
+    if (outcome === "ok") return { url, source: cand.source };
+    if (outcome === "transient") flags.sawTransient = true;
+  }
+  return null;
+}
+
+/** 用某个「纯 stream 插件」尝试取源:resolveStream(config, songLike) → URL,probe 通过才换。 */
+async function tryPriorityResolveStream(
+  manifest: PluginManifest,
+  configured: { provider: any; config: Record<string, any> },
+  ctx: PriorityContext,
+  flags: PriorityFlags,
+): Promise<{ url: string; source: string } | null> {
+  const { provider, config } = configured;
+  if (typeof provider?.resolveStream !== "function") return null;
+  let url = "";
+  try {
+    url = String((await provider.resolveStream(config, loadSongLike(ctx))) || "");
+  } catch {
+    url = ""; // 插件内部错误 = 该跳失败,与返回 "" 同语义,不阻塞后续候选
+  }
+  if (!url) return null;
+  const outcome = await probe(url, ctx.timeoutMs);
+  if (outcome === "ok") return { url, source: manifest.id };
+  if (outcome === "transient") flags.sawTransient = true;
+  return null;
+}
+
+/**
+ * 严格按用户优先级列表逐项尝试取源。命中 → {url, source};全部失败 → null。
+ * 列表条目即规范化的 plugin id:有 search 能力走 search 路径,否则纯 stream
+ * 插件走 resolveStream。未启用/未配置的插件条目直接跳过(可用性由 UI 保障)。
+ */
+async function tryPrioritySources(
+  priority: string[],
+  ctx: PriorityContext,
+  flags: PriorityFlags,
+): Promise<{ url: string; source: string } | null> {
+  for (const pluginId of priority) {
+    const configured = getConfiguredProvider(pluginId);
+    if (!configured?.provider) continue;
+    if (typeof configured.provider.search === "function") {
+      const hit = await tryPrioritySearchProvider(pluginId, configured, ctx, flags);
+      if (hit) return hit;
+      continue;
+    }
+    const manifest = getPluginManifest(pluginId);
+    if (manifest && typeof configured.provider.resolveStream === "function") {
+      const hit = await tryPriorityResolveStream(manifest, configured, ctx, flags);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
 export async function findFallbackStream(
   songId: string,
   title: string,
@@ -174,12 +330,32 @@ export async function findFallbackStream(
   const fbCfg = getFallbackConfig();
   if (!fbCfg.enabled) return null;
 
+  const query = [title, artist].filter(Boolean).join(" ");
+  const gateCfg: ImportGateConfig | undefined = fbCfg.durationTolerance > 0
+    ? { ...getImportGateConfig(), durationTolerance: fbCfg.durationTolerance }
+    : undefined;
+
+  // ---------- 用户配置的「播放来源优先级」:列表非空 → 严格按列表顺序取源 ----------
+  const priority = getStreamSourcePriority();
+  if (priority.length > 0) {
+    const flags: PriorityFlags = { sawTransient: false, searchFailed: false };
+    const ctx: PriorityContext = { songId, title, artist, album, duration, providerId, failingSource, timeoutMs, query, gateCfg };
+    const hit = await tryPrioritySources(priority, ctx, flags);
+    if (hit) {
+      setFallback(songId, hit.url);
+      return hit;
+    }
+    // 列表内全部候选都不可播:与默认路径同一把尺子 —— 只要出现过网络异常/search 抛错
+    // 就只短期退避(网络抖动 ≠ 没有源),否则写负结果(45s 后重探,源恢复即复活)。
+    setFallback(songId, null, { transient: flags.sawTransient || flags.searchFailed });
+    return null;
+  }
+
   // provider 解析:pluginEntry 缺 stream/search 能力时自动回退首个齐备源插件
   // (resolveStreamProvider),避免对纯核实源(huawei-chart 等)误判无兜底。
   const configured = resolveStreamProvider(providerId);
   if (!configured) { setFallback(songId, null); return null; }
 
-  const query = [title, artist].filter(Boolean).join(" ");
   let results: OnlineSongResult[];
   let searchFailed = false;
   try {
@@ -202,11 +378,8 @@ export async function findFallbackStream(
   // 被换成网易云「李荣浩-、Montagem」的 funk remix:歌名相等、'李荣浩-'.includes
   // ('李荣浩') 恒真)通过后还被 updateSongUrl 持久化污染 songs.url,此后每次播放
   // 都直用错链。期望侧缺字段(无专辑/无时长)时对应维度自动跳过,与导入语义一致。
-  // 时长容差默认沿用导入门禁;core-stream-fallback.durationTolerance > 0 时覆写
-  // (仅放宽时长维度,标题/歌手/专辑不可放宽)。排序偏好(sourcePreference)不变。
-  const gateCfg: ImportGateConfig | undefined = fbCfg.durationTolerance > 0
-    ? { ...getImportGateConfig(), durationTolerance: fbCfg.durationTolerance }
-    : undefined;
+  // 时长容差由 gateCfg(函数入口已按 core-stream-fallback.durationTolerance 计算)承载;
+  // 排序偏好(sourcePreference)不变。
   const preference = getSourcePreference(providerId);
   const ranked = results
     .filter(s => {

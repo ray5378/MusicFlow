@@ -45,7 +45,8 @@ import { formatDailyTime, rearmDailyScheduler } from "../../services/dailySchedu
 import { anyJobRunning } from "../../services/plugin/jobRunner.js";
 import { isFixedRecommendPlaylist, ensureHomePlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID } from "../../services/plugin/randomSongs.js";
-import { ensurePlayableStream, getCachedPlayability } from "../../services/source/online/streamFallback.js";
+import { ensurePlayableStream, getCachedPlayability, clearStreamFallbackCache } from "../../services/source/online/streamFallback.js";
+import { normalizeProviderPriority, getProviderPriority } from "../../plugins/providers.js";
 import { deleteAnalysis, deleteAnalysisMany } from "../../services/audio/analysisStore.js";
 import { probeLocalSourceOk } from "../../utils/localSourceProbe.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi, dailyRecommendTag, dailyRecommendHomeCount, listHomeCardPlugins, homePositionConflictForSave, playlistSyncApi } from "../../services/pluginAccess.js";
@@ -139,6 +140,19 @@ export {
   resolveTargetSampleRate,
   setPlayerRate,
 } from "../../services/playerRate.js";
+
+// 播放来源优先级(播放平台歌曲时按什么顺序去各音源找可播流):媒体获取页读写,
+// 与「音乐下载」的 fetch.sourcePriority 完全独立(不同存储键/不同链路)。
+export {
+  getStreamSourcePriority,
+  setStreamSourcePriority,
+  listAvailableStreamSources,
+} from "../../services/source/online/streamSourcePriority.js";
+
+// 歌词/封面来源优先级(读权限:settings 路由 GET 用 getProviderPriority;写经
+// setLyricsCoversSettings 内的 normalizeProviderPriority)。按优先级列表排序/筛选
+// 的取源逻辑在 providers.ts 的 filterProvidersByPreference。
+export { getProviderPriority, normalizeProviderPriority };
 
 // 每日推荐 / 本地推荐 / 今日漫游 / 歌单同步能力经 registry 门面访问(核心不直连插件实现;插件未启用时返回安全默认)。
 
@@ -326,9 +340,18 @@ export const SCRAPE_JOB_ID = "default";
 
 export const setLyricsCoversSettings = async (c: Context, prefix: "lyrics" | "cover") => {
   const body = await c.req.json().catch(() => ({}));
-  // providerId: 字符串直接存;清空(el-select clearable → undefined/null)→ 存空串(=自动)。
-  if (typeof body.providerId === "string") setSetting(`${prefix}.providerId`, body.providerId);
-  else if (body.providerId === undefined || body.providerId === null) setSetting(`${prefix}.providerId`, "");
+  if (Array.isArray(body.providerPriority)) {
+    // 新协议:写入有序优先级列表,并把 providerId 同步成列表首项(兼容仍在读
+    // providerId 的旧消费方);列表为空 → providerId 写空串(= 自动)。
+    const priority = normalizeProviderPriority(body.providerPriority);
+    setSetting(`${prefix}.providerPriority`, JSON.stringify(priority));
+    setSetting(`${prefix}.providerId`, priority[0] ?? "");
+  } else {
+    // 旧协议(不带 providerPriority):保持原行为 —— 字符串直接存;
+    // 清空(el-select clearable → undefined/null)→ 存空串(=自动)。
+    if (typeof body.providerId === "string") setSetting(`${prefix}.providerId`, body.providerId);
+    else if (body.providerId === undefined || body.providerId === null) setSetting(`${prefix}.providerId`, "");
+  }
   if (typeof body.onDemand === "boolean") setSetting(`${prefix}.onDemand`, body.onDemand ? "true" : "false");
   if (typeof body.persist === "boolean") setSetting(`${prefix}.persist`, body.persist ? "true" : "false");
   return c.json({ success: true });
@@ -773,6 +796,7 @@ export {
   cleanupOrphans,
   clearLibraryIndex,
   clearPlaylistCoverCache,
+  clearStreamFallbackCache,
   clientIdOfLocalPeer,
   collectRegistryGroups,
   comboPlaylistApi,
