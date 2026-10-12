@@ -209,6 +209,30 @@ export function shouldSkipByCooldown(songKey: string, cooldownDays: number): boo
   return true;
 }
 
+/**
+ * 最近一次尝试的终态快照（2026-10-12「孤儿 done」放行判据消费，见 orchestrator 的
+ * `libraryOrphanDone`）。无记录返回 null；**不做窗口过期判断**（那归 shouldSkipByCooldown）。
+ */
+export function lastDownloadAttempt(
+  songKey: string,
+): { status: string; attemptedAt: string; errorCode: string | null } | null {
+  if (!songKey) return null;
+  ensureDownloadAttemptsTable();
+  const row = sqlite
+    .prepare(
+      `SELECT status, attempted_at, error_code FROM fetch_download_attempts WHERE song_key = ?`,
+    )
+    .get(songKey) as
+    | { status?: string; attempted_at?: string; error_code?: string | null }
+    | undefined;
+  if (!row?.status) return null;
+  return {
+    status: String(row.status),
+    attemptedAt: String(row.attempted_at ?? ""),
+    errorCode: row.error_code == null ? null : String(row.error_code),
+  };
+}
+
 /** 台账行数（观测/测试用）。 */
 export function downloadAttemptCount(): number {
   ensureDownloadAttemptsTable();

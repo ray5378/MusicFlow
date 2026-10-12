@@ -191,6 +191,14 @@ function fetchCandidates(queries: ExistingQuery[]): ExistingRow[] {
         or(...titleConds),
       ),
     )
+    .orderBy(
+      // 本地行优先 + 新行优先（2026-10-12，240 实证修复）：粗筛 LIMIT 会截断候选，
+      // 无排序时 rowid 最大的新建本地行首当其冲被切掉——实测标题「是你」271 行候选、
+      // 两条刚入库的 l: 行排在 200 名外 → 查重 miss → 冷却秒跳 → 池子卡死 26 首。
+      // 精筛口径不变，排序只决定「谁有资格进精筛」。
+      sql`CASE WHEN ${songs.path} LIKE 'l:%' THEN 0 ELSE 1 END`,
+      sql`rowid DESC`,
+    )
     .limit(limit)
     .all() as ExistingRow[];
 }

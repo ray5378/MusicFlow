@@ -48,6 +48,7 @@ import {
   effectiveCooldownDays,
   isPermanentFailureCode,
   recordDownloadAttempt,
+  lastDownloadAttempt,
   rollbackPermanentFailure,
   shouldSkipByCooldown,
 } from "./attempts.js";
@@ -191,6 +192,8 @@ export interface FetchDeps {
   /** 下载尝试台账（PATCH17 / 2026-10-11 定调 B）：窗口内试过即跳过，**永久失效类除外**
    *  （否则 fail_count 永远停在 1，死链清理永不生效）；终态时记录（可轮转）。 */
   shouldSkipByCooldown: typeof shouldSkipByCooldown;
+  /** 最近一次尝试终态快照（2026-10-12 孤儿 done 放行判据消费；测试可桩）。 */
+  lastDownloadAttempt: typeof lastDownloadAttempt;
   recordDownloadAttempt: typeof recordDownloadAttempt;
   /** 死链清理（PATCH21）：任务终态把连续永久失败的网络歌移出曲库。 */
   purgeDeadSongs: typeof purgeDeadSongs;
@@ -214,6 +217,7 @@ const DEFAULT_DEPS: FetchDeps = {
   searchLyrics,
   searchCover,
   shouldSkipByCooldown,
+  lastDownloadAttempt,
   recordDownloadAttempt,
   purgeDeadSongs,
   rollbackPermanentFailure,
@@ -334,6 +338,40 @@ function describeQuality(q: CandidateQuality | undefined): string {
   if (q.sampleRateHz) parts.push(`${Math.round(q.sampleRateHz / 1000)}kHz`);
   if (q.bitDepth) parts.push(`${q.bitDepth}bit`);
   return parts.length > 0 ? parts.join("/") : "未知";
+}
+
+/**
+ * 「孤儿 done」放行判据（2026-10-12，240 生产事故修复）：
+ *
+ * 全库/入库目标（sourceData.library）上一次下载尝试是 `done`、但歌曲行**仍在下载池里**
+ * （path 既非 `l:` 本地也非 `w:` 在线）→ 台账记了成功、实体却没落地（flush 的扫描入库/
+ * 行迁移丢失；240 实证：文件在磁盘、DB 无行）。此时 15 天冷却会把这首歌锁死——每批都被
+ * COOLDOWN_SKIPPED，而秒跳按设计不写库冷却表，池子永远收缩不了，「待下载 N 首」常驻。
+ *
+ * 放行需三条同时满足：library 目标 / 上次终态 done / 行仍在池内。
+ * done 已真正入库（行已是 l:）或上次是失败（照常冷却）都不放行。
+ */
+function libraryOrphanDone(t: FetchTarget | undefined, akey: string, deps: FetchDeps): boolean {
+  if (!t?.sourceData) return false;
+  let songId = "";
+  try {
+    const sd = JSON.parse(t.sourceData) as { library?: { songId?: unknown } };
+    const sid = sd.library?.songId;
+    if (typeof sid === "string" && sid) songId = sid;
+  } catch {
+    return false;
+  }
+  if (!songId || songId !== akey) return false;
+  const last =
+    typeof deps.lastDownloadAttempt === "function" ? deps.lastDownloadAttempt(akey) : null;
+  if (!last || last.status !== "done") return false;
+  try {
+    const row = db.select({ path: songs.path }).from(songs).where(eq(songs.id, songId)).get();
+    const p = row?.path ?? "";
+    return !!p && !p.startsWith("l:") && !p.startsWith("w:");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1057,7 +1095,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (!opts.originalDisposal) {
         const cooldownDays = effectiveCooldownDays(cfg);
         const akey = downloadAttemptKeyOf(t);
-        if (cooldownDays > 0 && deps.shouldSkipByCooldown(akey, cooldownDays)) {
+        if (
+          cooldownDays > 0 &&
+          deps.shouldSkipByCooldown(akey, cooldownDays) &&
+          !libraryOrphanDone(t, akey, deps)
+        ) {
           item.status = "skipped";
           item.errorCode = DOWNLOAD_COOLDOWN_CODE;
           item.errorMsg = `冷却期内已尝试过（${cooldownDays} 天窗口，非永久失效类），跳过`;

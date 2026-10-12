@@ -15,6 +15,7 @@ import { rankCandidates as realRankCandidates } from "../../src/services/fetch/q
 import type { Candidate } from "../../src/services/fetch/types.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
 import type { FetchTarget } from "../../src/services/fetch/candidates.js";
+import { sqlite } from "../../src/db/index.js";
 
 // ==================== 现场 ====================
 
@@ -113,6 +114,7 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
     // 键会让用例 B 的同键 target 被冷却秒跳）。台账行为由 attempts.test.ts 专测；
     // 2026-10-11 定调 B 后冷却入口是 shouldSkipByCooldown（永久失效类不冷却）。
     shouldSkipByCooldown: (() => false) as any,
+    lastDownloadAttempt: (() => null) as any,
     recordDownloadAttempt: (() => undefined) as any,
     // PATCH21 死链清理：同样桩掉。真实实现直连 DB 单例（会跨用例污染），且它删库是
     // 不可逆动作，单测里绝不该真跑。结算逻辑由 deadSongPurge.test.ts 与本文件 29-31 专测。
@@ -812,6 +814,82 @@ describe("runFetchPipeline", () => {
     expect(dl).not.toHaveBeenCalled(); // 不下载
     expect(seenItems).toHaveLength(1); // skipped 即时回调
     expect(seenItems[0].errorCode).toBe("COOLDOWN_SKIPPED");
+  });
+
+  it("26b. 孤儿 done 放行（2026-10-12 240 事故修复）：上次 done 但行仍在池 → 不秒跳，照常取链", async () => {
+    // 240 实证：26 首 fetch_download_attempts=done（文件在磁盘）但 DB 无本地行 →
+    // 每批 COOLDOWN_SKIPPED，而秒跳不写库冷却表 → 池子永不收缩，卡死最多 15 天。
+    const songId = "orph-done-1";
+    sqlite
+      .prepare(
+        `INSERT INTO songs (id, type, path, title, artist, album, suffix, bit_rate, duration, size)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(songId, "web", "web:go-music-dl:netease", "A", "AA", "", "flac", 700, 200, 1000);
+    const collect = vi.fn(oneMp3);
+    const dl = vi.fn(defaultDownload);
+    const deps = makeDeps({
+      collectCandidates: collect,
+      downloadToFile: dl,
+      shouldSkipByCooldown: (() => true) as any,
+      lastDownloadAttempt: (() =>
+        ({ status: "done", attemptedAt: new Date().toISOString(), errorCode: null })) as any,
+    });
+    try {
+      const r = await run({
+        targets: [
+          {
+            id: `library:${songId}`,
+            title: "A",
+            artist: "AA",
+            durationSec: 200,
+            sourceData: JSON.stringify({ library: { songId, path: "web:go-music-dl:netease" } }),
+          },
+        ],
+        sourceId: "src-1",
+        deps,
+      });
+      expect(r.items[0].errorCode).not.toBe("COOLDOWN_SKIPPED"); // 放行重试
+      expect(collect).toHaveBeenCalled(); // 真去取链（没被冷却门挡下）
+    } finally {
+      sqlite.prepare("DELETE FROM songs WHERE id = ?").run(songId);
+    }
+  });
+
+  it("26c. 对照：done 且行已是本地(l:) → 仍照常冷却秒跳（不误放行）", async () => {
+    const songId = "orph-done-2";
+    sqlite
+      .prepare(
+        `INSERT INTO songs (id, type, path, title, artist, album, suffix, bit_rate, duration, size)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(songId, "local", "l:src-1:/music/a.flac", "A", "AA", "", "flac", 700, 200, 1000);
+    const collect = vi.fn(oneMp3);
+    const deps = makeDeps({
+      collectCandidates: collect,
+      shouldSkipByCooldown: (() => true) as any,
+      lastDownloadAttempt: (() =>
+        ({ status: "done", attemptedAt: new Date().toISOString(), errorCode: null })) as any,
+    });
+    try {
+      const r = await run({
+        targets: [
+          {
+            id: `library:${songId}`,
+            title: "A",
+            artist: "AA",
+            durationSec: 200,
+            sourceData: JSON.stringify({ library: { songId, path: "l:src-1:/music/a.flac" } }),
+          },
+        ],
+        sourceId: "src-1",
+        deps,
+      });
+      expect(r.items[0].errorCode).toBe("COOLDOWN_SKIPPED"); // 已入库的 done 照样冷却
+      expect(collect).not.toHaveBeenCalled();
+    } finally {
+      sqlite.prepare("DELETE FROM songs WHERE id = ?").run(songId);
+    }
   });
 
   it("27. 单任务并发歌曲数（PATCH20）：上限从 8 放开，12 首可同时推进", async () => {

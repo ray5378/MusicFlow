@@ -31,6 +31,7 @@ import {
   recordDownloadAttempt,
   rollbackPermanentFailure,
   shouldSkipByCooldown,
+  lastDownloadAttempt,
 } from "../../src/services/fetch/attempts.js";
 import { DEFAULT_FETCH_CONFIG } from "../../src/services/fetch/config.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
@@ -209,5 +210,21 @@ describe("fetch 下载冷却（2026-10-11 定调 B：永久失效类不冷却）
     expect(shouldSkipByCooldown("b-old", 30)).toBe(false); // 窗口外
     expect(shouldSkipByCooldown("b-never", 30)).toBe(false); // 无记录
     expect(shouldSkipByCooldown("b-404", 0)).toBe(false); // 关闭冷却
+  });
+});
+
+describe("lastDownloadAttempt（2026-10-12 孤儿 done 放行判据消费）", () => {
+  it("返回最近一次终态快照；无记录返回 null", () => {
+    expect(lastDownloadAttempt("lda-nope")).toBeNull();
+    recordDownloadAttempt("lda-1", "b1", "done", 15);
+    const r = lastDownloadAttempt("lda-1");
+    expect(r?.status).toBe("done");
+    expect(r?.errorCode).toBeNull();
+    expect(typeof r?.attemptedAt).toBe("string");
+    recordDownloadAttempt("lda-1", "b2", "failed", 15, { errorCode: "HTTP_404" });
+    expect(lastDownloadAttempt("lda-1")?.status).toBe("failed");
+    expect(lastDownloadAttempt("lda-1")?.errorCode).toBe("HTTP_404");
+    clearDownloadAttempt("lda-1");
+    expect(lastDownloadAttempt("lda-1")).toBeNull();
   });
 });

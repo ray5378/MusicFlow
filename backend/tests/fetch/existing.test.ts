@@ -257,3 +257,39 @@ describe("ensureDownloadSource / findDownloadSource", () => {
     expect(row?.enabled).toBe(0); // 原样保留
   });
 });
+
+// ==================== 粗筛截断排序（2026-10-12 240「是你」查重 miss 修复） ====================
+
+describe("fetchCandidates 粗筛 LIMIT 截断排序", () => {
+  it("候选超 LIMIT(200) 时，新建本地行仍可被选中（本地优先 + 新行优先）", () => {
+    // 复现 240：标题「是你」271 行候选，两条刚入库的 l: 行 rowid 最大 → 无排序 LIMIT 200
+    // 将其切掉 → 查重 miss → 冷却秒跳 → 池子卡死。修：orderBy 本地优先 + rowid DESC。
+    const title = "exs-排序测试歌";
+    for (let i = 0; i < 200; i++) {
+      insertSong({
+        id: `exs-w-${i}`,
+        title,
+        path: `w:exs-src:/dav/x/${i}.mp3`,
+        artist: "某人",
+        duration: 200,
+        bitRate: 128,
+      });
+    }
+    insertSong({
+      id: "exs-l-new",
+      title,
+      path: "l:exs-src:/music/x/new.flac",
+      artist: "某人",
+      duration: 200,
+      bitRate: 700,
+    });
+    try {
+      const hit = findExistingPlayable({ title, artist: "某人", durationSec: 200 }, 10);
+      expect(hit).not.toBeNull();
+      expect(hit?.kind).toBe("local"); // 修复前：本地行被截断 → 只能命中 webdav
+      expect(hit?.songId).toBe("exs-l-new");
+    } finally {
+      sqlite.prepare("DELETE FROM songs WHERE id LIKE 'exs-w-%' OR id = 'exs-l-new'").run();
+    }
+  });
+});
