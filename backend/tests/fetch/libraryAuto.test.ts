@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sqlite } from "../../src/db/index.js";
 import { _resetSettingsCacheForTest, setSetting } from "../../src/services/settings.js";
 import { resolveFetchConfig } from "../../src/services/fetch/config.js";
-import { runAutoLibraryOnce } from "../../src/services/fetch/libraryScheduler.js";
+import { runAutoLibraryOnce, resumeLibrarySession } from "../../src/services/fetch/libraryScheduler.js";
+import { isAutoSessionActive, setAutoSession } from "../../src/services/fetch/autoSession.js";
 import {
   buildLibraryPlan,
   ensureLibraryAttemptsTable,
@@ -133,5 +134,51 @@ describe("runAutoLibraryOnce — 触发闸", () => {
       .prepare("SELECT COUNT(*) AS n FROM fetch_library_attempts")
       .get() as { n: number };
     expect(n.n).toBe(0);
+  });
+});
+
+describe("resumeLibrarySession — 重启/让渡恢复（2026-10-12）", () => {
+  beforeEach(() => {
+    _resetSettingsCacheForTest();
+    _resetFetchJobsForTest();
+    setSetting(LAST_RUN_KEY, "0");
+    ensureLibraryAttemptsTable();
+    resetLibraryAttempts();
+    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'web:%'").run();
+    sqlite.prepare("DELETE FROM settings WHERE key LIKE 'fetch.%.session'").run();
+    _resetSettingsCacheForTest();
+  });
+  afterEach(() => {
+    _resetSettingsCacheForTest();
+    _resetFetchJobsForTest();
+  });
+
+  it("无会话标记 → 不接管", () => {
+    expect(resumeLibrarySession(cfgOf())).toBe(false);
+  });
+
+  it("有会话 + 无待下项 → 接管并清标记（链收尾）", () => {
+    setAutoSession("library", true);
+    expect(resumeLibrarySession(cfgOf())).toBe(true);
+    expect(isAutoSessionActive("library")).toBe(false);
+  });
+
+  it("有会话 + 有待下项 → 绕过间隔闸立即建批，标记保持", () => {
+    seedWeb("rs-lib-1");
+    setAutoSession("library", true);
+    // lastRunAt 很新（间隔闸必拦）也不影响：恢复路径绕过间隔/时刻闸
+    setSetting(LAST_RUN_KEY, String(Date.now() - 1000));
+    const r = resumeLibrarySession(cfgOf({ libraryAutoIntervalDays: 30 }));
+    expect(r).toBe(true);
+    expect(isAutoSessionActive("library")).toBe(true);
+    const n = sqlite.prepare("SELECT COUNT(*) AS n FROM fetch_jobs WHERE kind = 'library'").get() as { n: number };
+    expect(n.n).toBe(1);
+  });
+
+  it("当前有活动任务 → 不接管（让渡给终态钩子）", () => {
+    setAutoSession("library", true);
+    createFetchJob({ kind: "search", targets: {} });
+    expect(resumeLibrarySession(cfgOf())).toBe(false);
+    expect(isAutoSessionActive("library")).toBe(true);
   });
 });

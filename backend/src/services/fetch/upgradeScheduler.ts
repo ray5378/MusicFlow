@@ -12,12 +12,19 @@
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import { getSetting, setSetting } from "../settings.js";
-import { DEFAULT_DOWNLOAD_ROOT, type FetchConfig } from "./config.js";
+import { type FetchConfig } from "./config.js";
 import { currentFetchConfig } from "./configStore.js";
-import { ensureDownloadSource } from "./source.js";
-import { buildUpgradeJobConfig, buildUpgradePlan, buildUpgradeTargets, recordUpgradeAttempts } from "./upgrade.js";
+import {
+  buildUpgradeContinuation,
+  buildUpgradeJobConfig,
+  buildUpgradePlan,
+  buildUpgradeTargets,
+  recordUpgradeAttempts,
+  resolveUpgradeSourceIds,
+} from "./upgrade.js";
 import { createFetchJob, updateFetchJobStatus } from "./jobStore.js";
 import { startFetchJob } from "./jobRunner.js";
+import { isAutoSessionActive, setAutoSession } from "./autoSession.js";
 import { cleanExpiredFetchJobs } from "./jobStore.js";
 
 const log = createLogger("upgrade-scheduler");
@@ -64,10 +71,7 @@ export function runAutoUpgradeOnce(
   setSetting(LAST_RUN_KEY, String(nowMs));
 
   // 洗版范围：显式 sourceIds > 回落「/MUSIC/DOWNLOAD 对应的源」（与路由同口径）。
-  const sourceIds =
-    Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0
-      ? [...cfg.upgradeSourceIds]
-      : [ensureDownloadSource(DEFAULT_DOWNLOAD_ROOT).sourceId];
+  const sourceIds = resolveUpgradeSourceIds(cfg);
   const plan = buildUpgradePlan(sourceIds, cfg, {});
   const targets = buildUpgradeTargets(plan.items); // 结构即 FetchTarget，无需 normalize
   const job = createFetchJob({ kind: "upgrade", targets: { targets }, config: buildUpgradeJobConfig(cfg) });
@@ -77,8 +81,29 @@ export function runAutoUpgradeOnce(
     return { triggered: true, reason: "empty", enqueued: 0, jobId: job.id };
   }
   startFetchJob(job.id);
+  // 标记续批会话：一批完自动开下一批；中途重启/让渡由调度器凭此标记立即接续。
+  setAutoSession("upgrade", true);
   log.info("[UPGRADE-AUTO] triggered: " + targets.length + " song(s), job=" + job.id);
   return { triggered: true, reason: "started", enqueued: targets.length, jobId: job.id };
+}
+
+/**
+ * 续批链恢复（重启/让渡，产品定调 2026-10-12，对齐全库下载）：会话标记仍在且当前
+ * 无活动任务 → 立即开下一批，绕过 interval/time-of-day 闸。返回 true = 本轮已接管。
+ */
+export function resumeUpgradeSession(cfg: FetchConfig): boolean {
+  if (!isAutoSessionActive("upgrade")) return false;
+  if (hasActiveFetchJobs()) return false; // 有任务在跑 → 终态钩子会续
+  const next = buildUpgradeContinuation(cfg);
+  if (!next.job) {
+    setAutoSession("upgrade", false);
+    log.info("[UPGRADE-AUTO] 续批恢复：无可洗项，会话结束");
+    return true;
+  }
+  setAutoSession("upgrade", true);
+  startFetchJob(next.job.id);
+  log.info(`[UPGRADE-AUTO] 重启/让渡恢复：自动续批 ${next.enqueued} 首（剩余 belowBar ${next.remaining}），job=${next.job.id}`);
+  return true;
 }
 
 /** 挂载调度循环（幂等：重复调用只挂一次）。 */
@@ -102,6 +127,8 @@ export function startUpgradeScheduler(): void {
         }
       }
       if (!cfg.upgradeAutoEnabled) return;
+      // 先接续被重启/让渡打断的链，再评估新周期触发。
+      if (resumeUpgradeSession(cfg)) return;
       runAutoUpgradeOnce(cfg);
     } catch (e) {
       log.warn("[UPGRADE-AUTO] tick failed: " + (e instanceof Error ? e.message : String(e)));

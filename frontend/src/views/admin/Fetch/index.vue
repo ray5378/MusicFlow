@@ -299,6 +299,10 @@
                 <el-input v-model="upgradeConfig.upgradeAutoTimeOfDay" placeholder="03:00" class="time-input" :disabled="!upgradeConfig.upgradeAutoEnabled" />
                 <div class="hint">{{ t('admin.fetch.upgrade.upgradeAutoTimeOfDayHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.upgrade.upgradeAutoContinue')">
+                <el-switch v-model="upgradeConfig.upgradeAutoContinue" />
+                <div class="hint">{{ t('admin.fetch.upgrade.upgradeAutoContinueHint') }}</div>
+              </el-form-item>
             </div>
             <el-alert
               v-if="upgradeConfig.originalAction === 'delete'"
@@ -312,72 +316,18 @@
             </div>
           </el-form>
 
-          <el-divider content-position="left">{{ t('admin.fetch.upgrade.preview') }}</el-divider>
-          <div class="upgrade-toolbar">
-            <div class="upgrade-summary">
-              <el-tag>{{ t('admin.fetch.upgrade.summaryTotal', { count: upgradePlan?.total ?? 0 }) }}</el-tag>
-              <el-tag type="warning">{{ t('admin.fetch.upgrade.summaryBelowBar', { count: upgradePlan?.belowBar ?? 0 }) }}</el-tag>
-              <el-tag v-if="(upgradePlan?.cooled ?? 0) > 0" type="info">{{ t('admin.fetch.upgrade.summaryCooled', { count: upgradePlan?.cooled ?? 0 }) }}</el-tag>
-              <el-tag v-if="upgradePlan?.truncated" type="info">{{ t('admin.fetch.upgrade.summaryTruncated') }}</el-tag>
-              <span v-if="upgradePlan && upgradePlan.sourceNames && upgradePlan.sourceNames.length" class="hint">
-                {{ t('admin.fetch.upgrade.sources') }}: {{ upgradePlan.sourceNames.join(', ') }}
-              </span>
-            </div>
-            <el-button :loading="planLoading" @click="loadUpgradePlan"><MfIcon name="Search" />{{ t('admin.fetch.upgrade.loadPlan') }}</el-button>
-            <el-button :loading="upgradeAttemptsResetting" @click="doResetUpgradeAttempts">{{ t('admin.fetch.upgrade.resetAttempts') }}</el-button>
+          <el-divider content-position="left">{{ t('admin.fetch.upgrade.stats') }}</el-divider>
+          <div class="upgrade-stats">
+            <el-tag type="warning">{{ t('admin.fetch.upgrade.pending', { count: upgradePlan?.belowBar ?? 0 }) }}</el-tag>
+            <el-tag type="info">{{ t('admin.fetch.upgrade.attempted', { count: upgradePlan?.attempted ?? 0 }) }}</el-tag>
+            <span v-if="upgradePlan" class="hint">{{ t('admin.fetch.upgrade.total', { count: upgradePlan.total }) }}</span>
           </div>
-
-          <el-alert v-if="planError" type="error" :closable="false" :title="planError" class="jobs-error" />
-
-          <el-table
-            v-if="planItems.length"
-            ref="planTableRef"
-            :data="planItems"
-            row-key="songId"
-            stripe
-            v-loading="planLoading"
-            @selection-change="onPlanSelectionChange"
-          >
-            <el-table-column type="selection" width="48" />
-            <el-table-column :label="t('admin.fetch.upgrade.colTitle')" min-width="180">
-              <template #default="{ row }">
-                <div class="song-cell">
-                  <span class="song-title">{{ row.title }}</span>
-                  <span v-if="row.artist" class="song-artist">{{ row.artist }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.upgrade.colAlbum')" width="150" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.album || '-' }}</template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.upgrade.colSuffix')" width="90">
-              <template #default="{ row }">{{ row.suffix || '-' }}</template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.upgrade.colBitrate')" width="130" align="right">
-              <template #default="{ row }">{{ formatKbps(row.bitrateKbps) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.upgrade.colDuration')" width="100" align="right">
-              <template #default="{ row }">{{ formatDuration(row.durationSec) }}</template>
-            </el-table-column>
-            <el-table-column :label="t('admin.fetch.upgrade.colReason')" min-width="180" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.reason ? errorText(row.reason) : '' }}</template>
-            </el-table-column>
-          </el-table>
-          <EmptyState
-            v-else-if="planLoaded && !planLoading"
-            icon="box"
-            :title="t('admin.fetch.upgrade.emptyTitle')"
-            :description="t('admin.fetch.upgrade.emptyDesc')"
-            compact
-          />
-          <div v-else-if="!planLoading" class="hint upgrade-hint">{{ t('admin.fetch.upgrade.notLoaded') }}</div>
-
           <div class="upgrade-actions">
-            <span class="hint">{{ t('admin.fetch.upgrade.selectedCount', { count: selectedSongIds.length }) }}</span>
-            <el-button :disabled="!planItems.length" @click="selectAllPlan">{{ t('admin.fetch.upgrade.selectAll') }}</el-button>
-            <el-button :disabled="!selectedSongIds.length" @click="clearPlanSelection">{{ t('admin.fetch.upgrade.clearSelect') }}</el-button>
-            <el-button type="danger" :loading="upgradeStarting" @click="doStartUpgrade"><MfIcon name="Download" />{{ t('admin.fetch.upgrade.start') }}</el-button>
+            <el-button type="primary" :loading="upgradeStarting" @click="doStartUpgrade"><MfIcon name="Download" />{{ t('admin.fetch.upgrade.start') }}</el-button>
+            <el-button :loading="upgradeAttemptsResetting" @click="doResetUpgradeAttempts">{{ t('admin.fetch.upgrade.resetAttempts') }}</el-button>
+            <el-button :loading="planLoading" @click="loadUpgradeStats"><MfIcon name="RefreshCw" />{{ t('admin.fetch.upgrade.reload') }}</el-button>
           </div>
+          <div class="hint upgrade-hint">{{ t('admin.fetch.upgrade.autoContinueHint') }}</div>
         </div>
       </el-tab-pane>
 
@@ -399,7 +349,6 @@
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
-import EmptyState from "@/components/EmptyState.vue";
 import JobListPanel from "./JobListPanel.vue";
 import { apiErrorText } from "@/utils/apiError";
 import {
@@ -428,7 +377,6 @@ import type {
   FetchSourceInfo,
   FetchTargetInput,
   UpgradePlan,
-  UpgradePlanItem,
   UpgradeConfig,
   LibraryPlan,
   TagRepairStatus,
@@ -736,6 +684,7 @@ function defaultUpgradeConfig(): Required<UpgradeConfig> {
     upgradeAutoEnabled: false,
     upgradeAutoIntervalDays: 30,
     upgradeAutoTimeOfDay: "03:00",
+    upgradeAutoContinue: true,
   };
 }
 
@@ -744,12 +693,7 @@ const upgradeConfigLoading = ref(false);
 const upgradeSaving = ref(false);
 const upgradeStarting = ref(false);
 const planLoading = ref(false);
-const planLoaded = ref(false);
-const planError = ref("");
 const upgradePlan = ref<UpgradePlan | null>(null);
-const planItems = ref<UpgradePlanItem[]>([]);
-const selectedSongIds = ref<string[]>([]);
-const planTableRef = ref<any>(null);
 
 async function loadUpgradeConfig() {
   upgradeConfigLoading.value = true;
@@ -765,6 +709,7 @@ async function loadUpgradeConfig() {
     merged.upgradeAutoEnabled = !!merged.upgradeAutoEnabled;
     merged.upgradeAutoIntervalDays = Math.min(365, Math.max(1, Math.floor(Number(merged.upgradeAutoIntervalDays) || 30)));
     if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(String(merged.upgradeAutoTimeOfDay ?? ""))) merged.upgradeAutoTimeOfDay = "03:00";
+    if (merged.upgradeAutoContinue == null) merged.upgradeAutoContinue = true;
     Object.assign(upgradeConfig, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.saveFailed")));
@@ -785,43 +730,16 @@ async function saveUpgradeConfig() {
   }
 }
 
-async function loadUpgradePlan() {
+// 洗版统计（待洗版 / 已尝试 / 全库共）：不带 limit → 只取计数不列清单（预览已下线）。
+async function loadUpgradeStats() {
   planLoading.value = true;
-  planError.value = "";
   try {
-    const plan = await getUpgradePlan({ limit: upgradeConfig.batchLimit });
-    upgradePlan.value = plan;
-    planItems.value = plan.items || [];
-    planLoaded.value = true;
-    selectedSongIds.value = [];
+    upgradePlan.value = await getUpgradePlan();
   } catch (e: any) {
-    planError.value = apiErrorText(e, t("admin.fetch.upgrade.loadFailed"));
+    ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.loadFailed")));
   } finally {
     planLoading.value = false;
   }
-}
-
-function onPlanSelectionChange(rows: any[]) {
-  selectedSongIds.value = (rows || []).map((r) => r.songId).filter(Boolean);
-}
-function selectAllPlan() {
-  const tbl = planTableRef.value;
-  if (!tbl || !planItems.value.length) return;
-  if (selectedSongIds.value.length === planItems.value.length) return;
-  tbl.clearSelection();
-  tbl.toggleAllSelection();
-}
-function clearPlanSelection() {
-  planTableRef.value?.clearSelection();
-}
-
-// 二次确认里列出将被删除的原文件(勾选项,或未勾选时按批量上限取的预览清单)。
-function currentTriggerPaths(): string[] {
-  const items = planItems.value;
-  const picked = selectedSongIds.value.length
-    ? items.filter((i) => selectedSongIds.value.includes(i.songId))
-    : items.slice(0, upgradeConfig.batchLimit);
-  return picked.map((i) => i.path).filter(Boolean) as string[];
 }
 
 async function confirmDelete(paths: string[]): Promise<boolean> {
@@ -846,7 +764,15 @@ async function confirmDelete(paths: string[]): Promise<boolean> {
 async function doStartUpgrade() {
   const action = upgradeConfig.originalAction;
   if (action === "delete") {
-    if (!(await confirmDelete(currentTriggerPaths()))) return;
+    // 预览已下线：确认框列不出勾选清单，改为拉一批计划取前若干个待删路径（拉取失败只出文字警告，不阻断）。
+    let paths: string[] = [];
+    try {
+      const plan = await getUpgradePlan({ limit: upgradeConfig.batchLimit });
+      paths = (plan.items || []).map((i) => i.path).filter(Boolean) as string[];
+    } catch {
+      /* 拉不到清单不阻断确认 */
+    }
+    if (!(await confirmDelete(paths))) return;
   } else if (action === "move") {
     try {
       await ElMessageBox.confirm(t("admin.fetch.upgrade.moveConfirm"), t("admin.fetch.upgrade.start"), { type: "warning" });
@@ -863,10 +789,8 @@ async function doStartUpgrade() {
 
   upgradeStarting.value = true;
   try {
-    const body: any = {};
-    if (selectedSongIds.value.length) body.songIds = [...selectedSongIds.value];
-    else body.limit = upgradeConfig.batchLimit;
-    const job = await startUpgradeTask(body);
+    // 全库范围触发（不带 songIds）：一批终态后自动续下一批，重启容器也会接上。
+    const job = await startUpgradeTask({ limit: upgradeConfig.batchLimit });
     ElMessage.success(t("admin.fetch.upgrade.started", { id: shortId(job?.id) }));
     activeTab.value = "upgradeJobs";
     await upgradeJobsRef.value?.refresh();
@@ -893,7 +817,7 @@ async function doResetUpgradeAttempts() {
   try {
     const cleared = await resetUpgradeAttempts();
     ElMessage.success(t("admin.fetch.upgrade.resetAttemptsDone", { count: cleared }));
-    await loadUpgradePlan();
+    await loadUpgradeStats();
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.resetAttemptsFailed")));
   } finally {
@@ -977,6 +901,7 @@ onMounted(() => {
   loadConfig();
   loadSources();
   loadUpgradeConfig();
+  loadUpgradeStats();
   loadLibraryPlan();
   loadTagRepairStatus();
   // 两个任务面板各自 onMounted 自拉；不在这里重复请求。
@@ -984,6 +909,7 @@ onMounted(() => {
 // 切到「下载/洗版任务」页签时刷新一次对应面板；切到「下载(创建)」时刷新全库统计。
 watch(activeTab, (v) => {
   if (v === "create") loadLibraryPlan();
+  if (v === "upgrade") loadUpgradeStats();
   if (v === "jobs") downloadJobsRef.value?.refresh();
   if (v === "upgradeJobs") upgradeJobsRef.value?.refresh();
 });
@@ -1059,8 +985,7 @@ watch(activeTab, (v) => {
 .upgrade-wrap { max-width: 1100px; }
 .upgrade-form :deep(.el-form-item) { margin-bottom: 16px; }
 .upgrade-warn { margin: 4px 0 16px; }
-.upgrade-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
-.upgrade-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.upgrade-stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .upgrade-hint { padding: 20px 0; }
 .upgrade-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 

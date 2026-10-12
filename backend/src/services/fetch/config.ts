@@ -133,6 +133,9 @@ export interface FetchConfig {
   upgradeAutoIntervalDays: number;
   /** 定时自动洗版每日触发时刻（"HH:mm" 24 小时制，服务器本地时区）。 */
   upgradeAutoTimeOfDay: string;
+  /** 洗版自动续批：一批终态后若仍有可洗歌曲，自动开下一批直到全部洗完（取消不续；
+   *  点名 songIds 的批次不接续）。容器重启/让渡后由调度器凭会话标记立即接上。默认 true */
+  upgradeAutoContinue: boolean;
   /** 标签缺失修复（歌词/封面/专辑回写两个下载目录）：事件队列 + 定时兜底。默认 true（产品定调 2026-10-11）。 */
   tagRepairEnabled: boolean;
   /** 全量兜底扫描间隔（小时，1-8760）。默认 168 = 每周一次；事件队列不受它限制。 */
@@ -200,6 +203,7 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   upgradeAutoEnabled: false,
   upgradeAutoIntervalDays: 30,
   upgradeAutoTimeOfDay: "03:00",
+  upgradeAutoContinue: true,
   tagRepairEnabled: true,
   tagRepairIntervalHours: 168,
 };

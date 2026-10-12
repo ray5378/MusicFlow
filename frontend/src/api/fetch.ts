@@ -202,6 +202,8 @@ export interface UpgradePlan {
   sourceIds: string[];
   sourceNames: string[];
   total: number;
+  /** 范围内任何时间在册的已尝试数（对齐全库下载 attempted 口径）。 */
+  attempted: number;
   belowBar: number;
   /** 因冷却期跳过的低于门槛数(N 天内已尝试过洗版,无论成败)。 */
   cooled: number;
@@ -224,6 +226,8 @@ export interface UpgradeConfig {
   upgradeAutoIntervalDays?: number;
   /** 每日触发时刻("HH:mm" 24 小时制,服务器本地时区,默认 "03:00")。 */
   upgradeAutoTimeOfDay?: string;
+  /** 自动续批:一批完成后自动开下一批直到全部洗完(取消不续;重启容器也会接上)。默认 true */
+  upgradeAutoContinue?: boolean;
 }
 
 export async function getUpgradePlan(params?: {
@@ -236,6 +240,7 @@ export async function getUpgradePlan(params?: {
     sourceIds: [],
     sourceNames: [],
     total: 0,
+    attempted: 0,
     belowBar: 0,
     cooled: 0,
     truncated: false,

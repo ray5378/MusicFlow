@@ -9,9 +9,15 @@ import { createLogger } from "../../utils/logger.js";
 import { getSetting, setSetting } from "../settings.js";
 import { type FetchConfig } from "./config.js";
 import { currentFetchConfig } from "./configStore.js";
-import { buildLibraryJobConfig, buildLibraryPlan, buildLibraryTargets } from "./library.js";
+import {
+  buildLibraryContinuation,
+  buildLibraryJobConfig,
+  buildLibraryPlan,
+  buildLibraryTargets,
+} from "./library.js";
 import { createFetchJob, updateFetchJobStatus } from "./jobStore.js";
 import { startFetchJob } from "./jobRunner.js";
+import { isAutoSessionActive, setAutoSession } from "./autoSession.js";
 import { todayTriggerMs } from "./upgradeScheduler.js";
 
 const log = createLogger("library-scheduler");
@@ -52,8 +58,33 @@ export function runAutoLibraryOnce(
     return { triggered: true, reason: "empty", enqueued: 0, jobId: job.id };
   }
   startFetchJob(job.id);
+  // 标记续批会话：批间链由 jobRunner 终态钩子接；中途重启/让渡由调度器凭此标记立即接续。
+  setAutoSession("library", true);
   log.info(`[LIBRARY-AUTO-SCHED] triggered: ${targets.length} song(s), job=${job.id}`);
   return { triggered: true, reason: "started", enqueued: targets.length, jobId: job.id };
+}
+
+/**
+ * 续批链恢复（重启/让渡，产品定调 2026-10-12）：会话标记仍在且当前无活动任务 →
+ * 立即开下一批，**绕过 interval/time-of-day 闸**——链在开跑时就已获授权，重启不该
+ * 让它干等一个周期。返回 true = 本轮已接管（调用方不必再走 runAutoLibraryOnce）。
+ */
+export function resumeLibrarySession(cfg: FetchConfig): boolean {
+  if (!isAutoSessionActive("library")) return false;
+  const busy = sqlite
+    .prepare("SELECT COUNT(*) AS n FROM fetch_jobs WHERE status IN ('pending','running')")
+    .get() as { n?: number };
+  if (Number(busy?.n ?? 0) > 0) return false; // 有任务在跑 → 终态钩子会续
+  const next = buildLibraryContinuation(cfg);
+  if (!next.job) {
+    setAutoSession("library", false);
+    log.info("[LIBRARY-AUTO] 续批恢复：无待下项，会话结束");
+    return true;
+  }
+  setAutoSession("library", true);
+  startFetchJob(next.job.id);
+  log.info(`[LIBRARY-AUTO] 重启/让渡恢复：自动续批 ${next.enqueued} 首（剩余 pending ${next.remaining}），job=${next.job.id}`);
+  return true;
 }
 
 /** 挂载调度循环（幂等：重复调用只挂一次）。 */
@@ -66,6 +97,8 @@ export function startLibraryScheduler(): void {
     try {
       const cfg = currentFetchConfig();
       if (!cfg.libraryAutoEnabled) return;
+      // 先接续被重启/让渡打断的链，再评估新周期触发。
+      if (resumeLibrarySession(cfg)) return;
       runAutoLibraryOnce(cfg);
     } catch (e) {
       log.warn("[LIBRARY-AUTO-SCHED] tick failed: " + (e instanceof Error ? e.message : String(e)));

@@ -25,9 +25,11 @@ import { db, sqlite } from "../../db/index.js";
 import { songs, albums } from "../../db/schema.js";
 import { extractMetadataLocal, upsertSong } from "../source/scanner.js";
 import type { FetchTarget } from "./candidates.js";
-import { DEFAULT_LOSSLESS_ROOT, type FetchConfig } from "./config.js";
+import { DEFAULT_DOWNLOAD_ROOT, DEFAULT_LOSSLESS_ROOT, type FetchConfig } from "./config.js";
 import type { QualityConfig } from "./types.js";
 import { effectiveBitrateKbps } from "./quality.js";
+import { ensureDownloadSource } from "./source.js";
+import { createFetchJob, type FetchJobRecord } from "./jobStore.js";
 
 /** 压缩无损容器（码率下限 = fakeLosslessMinEffBitrate = 700）。 */
 export const LOSSLESS_COMPRESSED_CONTAINERS: string[] = ["flac", "alac", "ape"];
@@ -202,13 +204,14 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
  * 出洗版计划（只读，不下载）。
  * - `songIds` 给了 → 只保留这些 id 的行；否则只保留 `isBelowUpgradeBar` 命中的行。
  * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、`belowBar` = 未截断前低于门槛数、
- *   `cooled` = 因冷却期跳过的低于门槛数（cooldownDays 天内已尝试过洗版，无论成败）。
+ *   `cooled` = 因冷却期跳过的低于门槛数（cooldownDays 天内已尝试过洗版，无论成败）、
+ *   `attempted` = 范围内任何时间在册的已尝试数（对齐全库下载统计口径，供设置页展示）。
  */
 export function buildUpgradePlan(
   sourceIds: string[],
   cfg: FetchConfig,
   opts?: { limit?: number; offset?: number; songIds?: string[] },
-): { sourceIds: string[]; total: number; belowBar: number; cooled: number; truncated: boolean; items: UpgradePlanItem[] } {
+): { sourceIds: string[]; total: number; attempted: number; belowBar: number; cooled: number; truncated: boolean; items: UpgradePlanItem[] } {
   const rows = collectUpgradeSongs(sourceIds);
   const total = rows.length;
   const upQ = buildUpgradeQuality(cfg.quality);
@@ -231,6 +234,8 @@ export function buildUpgradePlan(
     return true;
   });
   const belowBar = belowAll.length;
+  // 已尝试（任何时间在册，不受冷却窗口限制）——供设置页「已尝试 N 首」统计。
+  const attempted = rows.reduce((n, r) => n + (attemptedAt.has(r.id) ? 1 : 0), 0);
 
   const sidList: string[] = opts && Array.isArray(opts.songIds) ? opts.songIds : [];
   const wanted = sidList.length > 0 ? new Set(sidList.map((v) => String(v))) : null;
@@ -258,7 +263,7 @@ export function buildUpgradePlan(
     reason: isBelowUpgradeBar(r, upQ).reason,
   }));
 
-  return { sourceIds, total, belowBar, cooled, truncated, items };
+  return { sourceIds, total, attempted, belowBar, cooled, truncated, items };
 }
 
 /**
@@ -501,7 +506,10 @@ export function disposeOriginalFile(args: {
 // ==================== 洗版任务 config_json 快照（自 routes 迁入，供调度器复用） ====================
 
 /** 洗版任务的 config_json 快照（含 __upgrade 供批量子进程还原）。 */
-export function buildUpgradeJobConfig(cfg: FetchConfig): Record<string, any> {
+export function buildUpgradeJobConfig(
+  cfg: FetchConfig,
+  opts?: { noAutoContinue?: boolean },
+): Record<string, any> {
   return {
     ...cfg,
     skipIfInLibrary: false, // 洗版必须能命中「库内已有的低码率行」，绕开「已有则跳过」
@@ -512,6 +520,8 @@ export function buildUpgradeJobConfig(cfg: FetchConfig): Record<string, any> {
     quality: buildUpgradeQuality(cfg.quality),
     __upgrade: {
       downloadRootOverride: cfg.losslessRoot || DEFAULT_LOSSLESS_ROOT,
+      // 点名批次（手动指定 songIds）不接续：语义是「洗完点名的这几首」。
+      ...(opts?.noAutoContinue ? { noAutoContinue: true } : {}),
       originalDisposal: {
         action: cfg.upgradeOriginalAction,
         backupDir: path.join(cfg.downloadRoot, cfg.upgradeBackupDir),
@@ -519,6 +529,40 @@ export function buildUpgradeJobConfig(cfg: FetchConfig): Record<string, any> {
       },
     },
   };
+}
+
+/**
+ * 洗版范围解析（与路由 / 调度器同口径）：显式 upgradeSourceIds > 回落「/MUSIC/DOWNLOAD 对应的源」。
+ */
+export function resolveUpgradeSourceIds(cfg: FetchConfig): string[] {
+  if (Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0) return [...cfg.upgradeSourceIds];
+  return [ensureDownloadSource(DEFAULT_DOWNLOAD_ROOT).sourceId];
+}
+
+/**
+ * 组装「自动续批」的下一批洗版任务（**只创建不启动**，启动由 jobRunner 负责）。
+ *
+ * 产品定调 2026-10-12（对齐全库下载 libraryAutoContinue）：一批终态后若仍有可洗歌曲，
+ * 自动开下一批，直到低于门槛的歌唱完。冷却在**建批时**整批预记（与手动触发同语义），
+ * 未尝试集每批必收缩 → 链条天然终止，不会重选同一批歌。点名 songIds 的批次由路由
+ * 打 noAutoContinue，不进此链。
+ */
+export function buildUpgradeContinuation(
+  cfg: FetchConfig,
+): { job: FetchJobRecord | null; enqueued: number; remaining: number } {
+  const sourceIds = resolveUpgradeSourceIds(cfg);
+  const limit = Math.max(1, Math.floor(cfg.upgradeBatchLimit || 500));
+  const plan = buildUpgradePlan(sourceIds, cfg, { limit });
+  if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: plan.belowBar };
+  const job = createFetchJob({
+    kind: "upgrade",
+    targets: { targets: buildUpgradeTargets(plan.items) },
+    // sourceId 留空：批量子进程会按 downloadRootOverride(=/MUSIC/LOSSLESS) 自建洗版源（与手动触发同口径）。
+    config: buildUpgradeJobConfig(cfg),
+  });
+  // 落冷却记录（失败也记——产品定调 2026-10-10：失败短期内也好不了，不该天天白扫）。
+  recordUpgradeAttempts(job.id, plan.items.map((i) => i.songId));
+  return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.belowBar - plan.items.length) };
 }
 
 // ==================== 洗版冷却（fetch_upgrade_attempts 表） ====================

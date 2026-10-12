@@ -35,8 +35,11 @@ import {
   LOSSLESS_UNCOMPRESSED_CONTAINERS,
   buildUpgradeQuality,
   isBelowUpgradeBar,
+  buildUpgradeContinuation,
+  buildUpgradeJobConfig,
   buildUpgradePlan,
   buildUpgradeTargets,
+  resolveUpgradeSourceIds,
   disposeOriginalFile,
   migrateUpgradedSong,
   upgradeBaselineKbps,
@@ -722,5 +725,130 @@ describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
     const plan = buildUpgradePlan(["s-up"], cfg());
     expect(plan.cooled).toBe(0);
     expect(plan.items).toHaveLength(2);
+  });
+});
+
+// ==================== 自动续批（2026-10-12，对齐全库下载 libraryAutoContinue） ====================
+
+describe("buildUpgradePlan — attempted 统计（设置页「已尝试」口径）", () => {
+  beforeEach(() => {
+    ensureUpgradeAttemptsTable();
+    resetUpgradeAttempts();
+    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:%'").run();
+  });
+
+  function seedLo(id: string): void {
+    sqlite
+      .prepare(
+        "INSERT INTO songs (id, type, path, title, artist, album, suffix, bit_rate, duration, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(id, "local", "l:att-src:/" + id + ".flac", "t", "a", "al", "flac", 600, 200, 15_000_000);
+  }
+
+  it("attempted = 范围内任何时间在册的已尝试数（出冷却窗口仍算）", () => {
+    seedLo("att-1");
+    seedLo("att-2");
+    recordUpgradeAttempts("b1", ["att-1"]);
+    // 把记录改到 400 天前 → 出冷却窗口，但仍是「已尝试」
+    sqlite
+      .prepare("UPDATE fetch_upgrade_attempts SET attempted_at = ? WHERE song_id = 'att-1'")
+      .run(new Date(Date.now() - 400 * 86_400_000).toISOString());
+    const plan = buildUpgradePlan(
+      ["att-src"],
+      resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" }),
+      {},
+    );
+    expect(plan.total).toBe(2);
+    expect(plan.attempted).toBe(1);
+    expect(plan.belowBar).toBe(2); // 400 天前 → 双双回池
+    expect(plan.cooled).toBe(0);
+  });
+
+  it("窗口内的 attempted 也计入（与 cooled 并存不互斥）", () => {
+    seedLo("att-3");
+    recordUpgradeAttempts("b2", ["att-3"]);
+    const plan = buildUpgradePlan(
+      ["att-src"],
+      resolveFetchConfig({
+        downloadRoot: "/MUSIC/DOWNLOAD",
+        cacheRoot: "/MUSIC/DOWNLOADCACHE",
+        upgradeCooldownDays: 30,
+      }),
+      {},
+    );
+    expect(plan.attempted).toBe(1);
+    expect(plan.cooled).toBe(1);
+    expect(plan.belowBar).toBe(0);
+  });
+});
+
+describe("buildUpgradeContinuation — 自动续批链", () => {
+  beforeEach(() => {
+    ensureUpgradeAttemptsTable();
+    resetUpgradeAttempts();
+    _resetFetchJobsForTest();
+    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:%'").run();
+  });
+  afterEach(() => {
+    _resetFetchJobsForTest();
+  });
+
+  it("有可洗项 → 建批 + 建批即预记冷却 → 每批未尝试集必收缩，链天然终止", () => {
+    const ins = sqlite.prepare(
+      "INSERT INTO songs (id, type, path, title, artist, album, suffix, bit_rate, duration, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    );
+    ins.run("ct-1", "local", "l:ct-src:/ct-1.flac", "t", "a", "al", "flac", 600, 200, 15_000_000);
+    ins.run("ct-2", "local", "l:ct-src:/ct-2.flac", "t", "a", "al", "flac", 600, 200, 15_000_000);
+    ins.run("ct-3", "local", "l:ct-src:/ct-3.flac", "t", "a", "al", "flac", 600, 200, 15_000_000);
+    const cfg = resolveFetchConfig({
+      downloadRoot: "/MUSIC/DOWNLOAD",
+      cacheRoot: "/MUSIC/DOWNLOADCACHE",
+      upgradeSourceIds: ["ct-src"],
+      upgradeBatchLimit: 2,
+    });
+    const r1 = buildUpgradeContinuation(cfg);
+    expect(r1.job).not.toBeNull();
+    expect(r1.enqueued).toBe(2);
+    expect(r1.remaining).toBe(1);
+    expect(r1.job!.kind).toBe("upgrade");
+    // 预记冷却 → 下一批只剩 1 首
+    const r2 = buildUpgradeContinuation(cfg);
+    expect(r2.enqueued).toBe(1);
+    expect(r2.remaining).toBe(0);
+    // 再下一批 → 无项，返回 job=null（链终止信号）
+    const r3 = buildUpgradeContinuation(cfg);
+    expect(r3.job).toBeNull();
+    expect(r3.enqueued).toBe(0);
+  });
+
+  it("无项 → job=null（链终止信号）", () => {
+    const cfg = resolveFetchConfig({
+      downloadRoot: "/MUSIC/DOWNLOAD",
+      cacheRoot: "/MUSIC/DOWNLOADCACHE",
+      upgradeSourceIds: ["ct-src"],
+    });
+    const r = buildUpgradeContinuation(cfg);
+    expect(r.job).toBeNull();
+    expect(r.enqueued).toBe(0);
+  });
+
+  it("buildUpgradeJobConfig：noAutoContinue 只作用于点名批次", () => {
+    const cfg = resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
+    expect((buildUpgradeJobConfig(cfg) as any).__upgrade.noAutoContinue).toBeUndefined();
+    expect((buildUpgradeJobConfig(cfg, { noAutoContinue: true }) as any).__upgrade.noAutoContinue).toBe(true);
+  });
+
+  it("resolveUpgradeSourceIds：显式 sourceIds 优先，缺省回落下载源", () => {
+    const explicit = resolveFetchConfig({
+      downloadRoot: "/MUSIC/DOWNLOAD",
+      cacheRoot: "/MUSIC/DOWNLOADCACHE",
+      upgradeSourceIds: ["x-1", "x-2"],
+    });
+    expect(resolveUpgradeSourceIds(explicit)).toEqual(["x-1", "x-2"]);
+    const fallback = resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
+    const ids = resolveUpgradeSourceIds(fallback);
+    expect(ids).toHaveLength(1);
+    expect(typeof ids[0]).toBe("string");
+    expect(ids[0].length).toBeGreaterThan(0);
   });
 });

@@ -42,6 +42,7 @@ import {
   recordUpgradeAttempts,
   resetUpgradeAttempts,
 } from "../../services/fetch/upgrade.js";
+import { setAutoSession } from "../../services/fetch/autoSession.js";
 import {
   buildLibraryJobConfig,
   buildLibraryPlan,
@@ -162,6 +163,8 @@ export function registerFetch(app: Hono): void {
     ) {
       delete (override as Record<string, unknown>).libraryAutoEnabled;
     }
+    // 关闭全库下载自动总开关 = 停链：清续批会话标记，防调度器把链复活。
+    if ((override as Record<string, unknown>).libraryAutoEnabled === false) setAutoSession("library", false);
     if ("libraryAutoIntervalDays" in override) {
       const n = Number((override as Record<string, unknown>).libraryAutoIntervalDays);
       (override as Record<string, unknown>).libraryAutoIntervalDays = Number.isFinite(n)
@@ -298,6 +301,12 @@ export function registerFetch(app: Hono): void {
     return c.json({ success: true, job: { ...job, items } });
   });
 
+  /** 取消即停自动续批链：清对应流的会话标记（在跑任务的终态钩子也会清，幂等）。 */
+  function stopAutoSessionForJob(kind: string): void {
+    if (kind === "library") setAutoSession("library", false);
+    else if (kind === "upgrade") setAutoSession("upgrade", false);
+  }
+
   // ---------------- 取消 ----------------
   app.post("/v1/fetch/jobs/:id/cancel", adminMiddleware, (c) => {
     const id = c.req.param("id")!;
@@ -311,10 +320,14 @@ export function registerFetch(app: Hono): void {
       // 僵尸行直接落取消终态，否则 UI 的取消永远无效。
       if (job.status === "pending" || job.status === "running") {
         updateFetchJobStatus(id, "cancelled", { error: "手动取消（无运行中的进程内任务）" });
+        // 僵尸行没有终态钩子 → 这里补清续批会话（取消即停链）。
+        stopAutoSessionForJob(job.kind);
         return c.json({ success: true, cancelled: "zombie" });
       }
       return c.json({ success: true, message: "任务未在运行" });
     }
+    // 在跑任务：终态钩子（maybeContinue*Job）也会清，这里兜底同清（幂等）。
+    stopAutoSessionForJob(job.kind);
     return c.json({ success: true });
   });
 
@@ -421,6 +434,7 @@ export function registerFetch(app: Hono): void {
       upgradeAutoEnabled: cfg.upgradeAutoEnabled,
       upgradeAutoIntervalDays: cfg.upgradeAutoIntervalDays,
       upgradeAutoTimeOfDay: cfg.upgradeAutoTimeOfDay,
+      upgradeAutoContinue: cfg.upgradeAutoContinue,
     };
   }
 
@@ -452,11 +466,13 @@ export function registerFetch(app: Hono): void {
     });
     const targets = normalizeTargets(buildUpgradeTargets(plan.items));
 
+    // 点名 songIds = 一次性批次（不接续）；全库范围触发才进自动续批链。
+    const namedOnly = Array.isArray(songIds) && songIds.length > 0;
     const job = createFetchJob({
       kind: "upgrade",
       targets: { targets },
       // sourceId 留空：批量子进程会按 downloadRootOverride(=/MUSIC/LOSSLESS) 自建洗版源。
-      config: buildUpgradeJobConfig(cfg),
+      config: buildUpgradeJobConfig(cfg, namedOnly ? { noAutoContinue: true } : undefined),
     });
     if (targets.length === 0) {
       // 没有可洗的 → 立刻终态，避免 0 目标任务卡在 pending。
@@ -466,6 +482,8 @@ export function registerFetch(app: Hono): void {
     // 落冷却记录（失败也记——产品定调 2026-10-10：失败短期内也好不了，不该天天白扫）。
     recordUpgradeAttempts(job.id, plan.items.map((i) => i.songId));
     startFetchJob(job.id);
+    // 全库范围触发 → 标记续批会话（一批完自动开下一批，重启/让渡也不断）。
+    if (!namedOnly) setAutoSession("upgrade", true);
     return c.json({ success: true, job: summarize(getFetchJob(job.id)!) });
   });
 
@@ -476,6 +494,7 @@ export function registerFetch(app: Hono): void {
   app.put("/v1/fetch/upgrade/config", adminMiddleware, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const patch: Partial<FetchConfig> = {};
+    const deleteKeys: string[] = []; // 非布尔归一失败 → 删键回默认（对齐 libraryAutoContinue 纪律）
     if (Array.isArray(body?.sourceIds)) patch.upgradeSourceIds = (body.sourceIds as unknown[]).map((v) => String(v));
     if (typeof body?.batchLimit === "number" && Number.isFinite(body.batchLimit) && body.batchLimit > 0) {
       patch.upgradeBatchLimit = Math.floor(body.batchLimit);
@@ -499,8 +518,19 @@ export function registerFetch(app: Hono): void {
       patch.upgradeAutoTimeOfDay = String(parts[0]).padStart(2, "0") + ":" + parts[1];
     }
 
+    // 自动续批总闸（对齐全库下载 libraryAutoContinue）：布尔入库；非布尔 → 删键回默认 true。
+    if (typeof body?.upgradeAutoContinue === "boolean") {
+      patch.upgradeAutoContinue = body.upgradeAutoContinue;
+    } else if ("upgradeAutoContinue" in body) {
+      deleteKeys.push("upgradeAutoContinue");
+    }
+    // 关闭定时自动洗版 = 停链：清续批会话标记，防调度器把链复活。
+    if (patch.upgradeAutoEnabled === false) setAutoSession("upgrade", false);
+
     // 只增量写覆盖项（与 PUT /config 同一套「逐项提交」纪律）。
-    setSetting(FETCH_CONFIG_KEY, JSON.stringify({ ...readFetchConfigOverride(), ...patch }));
+    const mergedOverride = { ...readFetchConfigOverride(), ...patch } as Record<string, unknown>;
+    for (const k of deleteKeys) delete mergedOverride[k];
+    setSetting(FETCH_CONFIG_KEY, JSON.stringify(mergedOverride));
     return c.json({ success: true, config: upgradeConfigView(currentFetchConfig()) });
   });
 
@@ -559,6 +589,8 @@ export function registerFetch(app: Hono): void {
     // PATCH19：记账移到条目终态时（fetchHandler onItem），创建时不再整批预记——
     // 否则中断后未处理的歌被冷却锁死。
     startFetchJob(job.id);
+    // 标记续批会话：一批完自动开下一批，重启容器也会接上（对齐洗版 upgradeAutoContinue）。
+    setAutoSession("library", true);
     return c.json({
       success: true,
       job: summarize(getFetchJob(job.id)!),

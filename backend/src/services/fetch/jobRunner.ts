@@ -11,6 +11,8 @@ import { getFetchJob, updateFetchJobStatus, collectInterruptedFetchJobIds } from
 import { currentFetchConfig } from "./configStore.js";
 import { ensureWritableDir } from "./writable.js";
 import { buildLibraryContinuation, libraryBatchProgressed } from "./library.js";
+import { buildUpgradeContinuation } from "./upgrade.js";
+import { setAutoSession } from "./autoSession.js";
 import { enqueueTagRepairs } from "./tagRepair.js";
 
 const log = createLogger("fetch-runner");
@@ -58,6 +60,7 @@ export function startFetchJob(jobId: string): void {
     } finally {
       controllers.delete(jobId);
       maybeContinueLibraryJob(jobId);
+      maybeContinueUpgradeJob(jobId);
       autoScanAfterJob(jobId);
     }
   })();
@@ -85,7 +88,12 @@ function hasAnyActiveJob(): boolean {
 function maybeContinueLibraryJob(jobId: string): void {
   try {
     const job = getFetchJob(jobId);
-    if (!job || job.status === "cancelled") return;
+    if (!job) return;
+    if (job.status === "cancelled") {
+      // 用户取消 → 续批链终止：清会话标记，否则调度器会把链复活（重启/让渡恢复）。
+      if (job.kind === "library") setAutoSession("library", false);
+      return;
+    }
     let cfgj: any = (job as any)?.config;
     if (typeof cfgj === "string") {
       try {
@@ -113,13 +121,72 @@ function maybeContinueLibraryJob(jobId: string): void {
     if (hasAnyActiveJob()) return;
     const next = buildLibraryContinuation(cfg);
     if (!next.job) {
+      setAutoSession("library", false);
       log.info(`[LIBRARY-AUTO] 全库续批完成：无待下项（剩余 pending ${next.remaining}）`);
       return;
     }
+    setAutoSession("library", true); // 链未完：供重启/让渡后调度器立即接续
     startFetchJob(next.job.id);
     log.info(`[LIBRARY-AUTO] 自动续批 ${next.enqueued} 首（剩余 pending ${next.remaining}），job=${next.job.id}`);
   } catch (e: any) {
     log.error("library 自动续批失败", { jobId, err: String(e?.message || e) });
+  }
+}
+
+/**
+ * 洗版自动续批（产品定调 2026-10-12，对齐全库下载）：`__upgrade` 标记的任务终态后，
+ * 若仍有可洗歌曲则自动创建并启动下一批，直到全部洗完 / 关闭 / 用户取消。
+ *
+ * 与全库下载的差异：冷却在**建批时**整批预记（buildUpgradeContinuation），未尝试集
+ * 每批必收缩，链条天然终止；另加一道「零尝试」闸——本批一条都没跑上（典型=启动
+ * 预检失败）时直接停链，避免系统性故障把整池歌无谓地扫进冷却。
+ */
+function maybeContinueUpgradeJob(jobId: string): void {
+  try {
+    const job = getFetchJob(jobId);
+    if (!job) return;
+    if (job.status === "cancelled") {
+      if (job.kind === "upgrade") setAutoSession("upgrade", false);
+      return;
+    }
+    let cfgj: any = (job as any)?.config;
+    if (typeof cfgj === "string") {
+      try {
+        cfgj = JSON.parse(cfgj);
+      } catch {
+        return;
+      }
+    }
+    if (!cfgj || typeof cfgj !== "object" || !cfgj.__upgrade) return;
+    // 点名批次（__upgrade.noAutoContinue）**不参与自动续批**：语义是「洗完点名的这几首」。
+    if (cfgj.__upgrade.noAutoContinue === true) return;
+    const cc = (job as any)?.counts ?? {};
+    // 零尝试闸：total>0 但 done/failed/skipped 全 0 = 启动预检失败之类的一条没跑上，
+    // 续批只会把整池歌无谓扫进冷却，直接停链交回定时调度/手动。
+    if (Number(cc?.total ?? 0) > 0 && !Number(cc?.done) && !Number(cc?.failed) && !Number(cc?.skipped)) {
+      setAutoSession("upgrade", false);
+      log.info(
+        `[UPGRADE-AUTO] 停止续批:本批零尝试(total=${Number(cc?.total) || 0}),疑似启动预检失败,中止自动续批链`,
+      );
+      return;
+    }
+    const cfg = currentFetchConfig();
+    if (!cfg.upgradeAutoContinue) {
+      setAutoSession("upgrade", false);
+      return;
+    }
+    if (hasAnyActiveJob()) return; // 让渡：会话标记保持，调度器随后接续
+    const next = buildUpgradeContinuation(cfg);
+    if (!next.job) {
+      setAutoSession("upgrade", false);
+      log.info(`[UPGRADE-AUTO] 全库洗版完成：无可洗项（剩余 belowBar ${next.remaining}）`);
+      return;
+    }
+    setAutoSession("upgrade", true);
+    startFetchJob(next.job.id);
+    log.info(`[UPGRADE-AUTO] 自动续批 ${next.enqueued} 首（剩余 belowBar ${next.remaining}），job=${next.job.id}`);
+  } catch (e: any) {
+    log.error("upgrade 自动续批失败", { jobId, err: String(e?.message || e) });
   }
 }
 
