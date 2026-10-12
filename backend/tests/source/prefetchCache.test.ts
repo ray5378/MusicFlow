@@ -738,3 +738,141 @@ describe("⑨ 配置走 settings", () => {
     resetPrefetchSettings();
   });
 });
+
+// ==================== ⑦-M 判官真机场景固化(240 实测样例 + 精确边界) ====================
+// 判官档 3/4 的输入是「parseBuffer 的 format」+「sniffMagic 的结论」。既有用例全用
+// fLaC 假数据,漏掉两件真机上的事:
+//   · 平台试听片段真实容器是 **mp4/M4A**(汽水音乐 240 实测:泪海-许茹芸 0.89MB /
+//     duration=29.0017s / 256kbps,基准 298s)。sniffMagic 必须认 `ftyp` 盒才是音频,
+//     否则整档 3 永远走不到(且正常 mp4/m4a 全曲会被误判 not-audio —— 比原 bug 更糟)。
+//   · 两条判死线都是 `> 严格大于`,边界值(15s / 80s 恰好等于)必须放过,否则会把
+//     「只短一点点」的正常歌判死。既有用例只夹了 14/16 与 79/81,这里钉精确边界。
+describe("⑦-M 判官真机场景固化(240 实测样例 + 精确边界)", () => {
+  // 合法 flac 假数据(与 fetch stub 的 ok 模式同款:合法 flac 头 + 128KB,内容不参与判定)。
+  const FLAC_BUF = Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(128 * 1024, 0)]);
+
+  // 真实 M4A/mp4 容器头:size(4B BE) + "ftyp" + brand。sniffMagic 靠
+  // `buf.subarray(4,8) === "ftyp"` 判音频(L82),与 flac/ogg/mp3 是**并列**的一条。
+  const m4aHead = Buffer.alloc(16, 0);
+  m4aHead.writeUInt32BE(24, 0);
+  m4aHead.write("ftyp", 4, "latin1");
+  m4aHead.write("M4A ", 8, "latin1");
+  const M4A_BUF = Buffer.concat([m4aHead, Buffer.alloc(200 * 1024, 0)]);
+
+  it("(l) 汽水试听样例:mp4/M4A 容器 + duration≈29s vs 基准 298s ⇒ 走时长档判死(不是 not-audio)", async () => {
+    mm.duration = 29.0017; // 240 实测原值
+    mm.bitrate = 0;
+    const v = await judgePrefetchedBuffer(M4A_BUF, 298);
+    expect(v.dead).toBe(true);
+    // 关键:若 sniffMagic 收窄到只认 flac/ogg/mp3,这里会变成 "not-audio" —— 档 3 被旁路,
+    // 且正常 mp4/m4a 全曲会被同一逻辑误杀。reason 必须是 preview。
+    expect(v.reason).toBe("preview");
+    expect(v.via).toBe("metadata");
+    expect(v.actualSec).toBeCloseTo(29.0017, 3);
+    expect(v.expectedSec).toBe(298);
+  });
+
+  it("(m) 同一 mp4/M4A 容器的正常全曲(290s vs 298s)不判死 —— 防 magic 收窄误杀正常 m4a", async () => {
+    mm.duration = 290;
+    mm.bitrate = 0;
+    const v = await judgePrefetchedBuffer(M4A_BUF, 298);
+    expect(v.dead).toBe(false);
+    expect(v.via).toBe("metadata"); // 走过了时长档,只是差值不够
+  });
+
+  it("(n) metadata 判死线精确边界:差恰 15s 放过、差 15.1s 判死(> 是严格大于)", async () => {
+    mm.duration = 185; mm.bitrate = 0; // 200 - 185 = 15 ⇒ 不大于 15
+    expect((await judgePrefetchedBuffer(FLAC_BUF, 200)).dead).toBe(false);
+    mm.duration = 184.9;               // 200 - 184.9 = 15.1 ⇒ 判死
+    const dead = await judgePrefetchedBuffer(FLAC_BUF, 200);
+    expect(dead.dead).toBe(true);
+    expect(dead.reason).toBe("preview");
+    expect(dead.via).toBe("metadata");
+  });
+
+  it("(o) 码率推算判死线精确边界:差恰 80s 放过、差 80.1s 判死(放宽档只到 80)", async () => {
+    const bytes = FLAC_BUF.length;
+    mm.duration = 0;
+    mm.bitrate = (bytes * 8) / 120;   // actual=120s,差 80 ⇒ 不大于 80 ⇒ 放过
+    const ok = await judgePrefetchedBuffer(FLAC_BUF, 200);
+    expect(ok.dead).toBe(false);
+    expect(ok.via).toBe("bitrate");
+    mm.bitrate = (bytes * 8) / 119.9; // actual=119.9s,差 80.1 ⇒ 判死
+    const dead = await judgePrefetchedBuffer(FLAC_BUF, 200);
+    expect(dead.dead).toBe(true);
+    expect(dead.reason).toBe("preview");
+    expect(dead.via).toBe("bitrate");
+  });
+
+  it("(p) 无基准(expectedSec≤0):直接放过,且不回带 expectedSec(dead0 的两个分支)", async () => {
+    mm.duration = 1; mm.bitrate = 0; // 再短也不杀
+    for (const base of [0, -1]) {
+      const v = await judgePrefetchedBuffer(FLAC_BUF, base);
+      expect(v.dead).toBe(false);
+      expect(v.expectedSec).toBeUndefined();
+      expect(v.reason).toBeUndefined();
+    }
+    // 对照:有基准时回带 expectedSec(同一个 dead0 的另一个分支)。
+    expect((await judgePrefetchedBuffer(FLAC_BUF, 200)).expectedSec).toBe(200);
+  });
+
+  it("(q) parseBuffer 解析失败:保守放过(不判死、不带 via)", async () => {
+    mm.fail = true;
+    const v = await judgePrefetchedBuffer(FLAC_BUF, 200);
+    expect(v.dead).toBe(false);
+    expect(v.via).toBeUndefined();
+  });
+
+  it("(r) 能解析出 metadata 但既无时长也无码率:信息不足,保守放过", async () => {
+    mm.duration = 0; mm.bitrate = 0;
+    const v = await judgePrefetchedBuffer(FLAC_BUF, 200);
+    expect(v.dead).toBe(false);
+    expect(v.via).toBeUndefined();
+  });
+});
+
+// ==================== ⑧-F 换源链路边界(候选上限截断 / 双写同一 token) ====================
+describe("⑧-F 换源链路边界", () => {
+  it("(f) 候选上限 3:组内 5 个网络兄弟只评估 4 个(首选+3),超限的从未评估也不标负缓存", async () => {
+    const gid = "pf-grp3";
+    const rows = [
+      { id: "pf-g3-q", path: "w:davsrc:/dav/q3.flac" },
+      { id: "pf-g3-a", path: "w:davsrc:/dav/a3.flac" },
+      { id: "pf-g3-b", path: "w:davsrc:/dav/b3.flac" },
+      { id: "pf-g3-c", path: "w:davsrc:/dav/c3.flac" },
+      { id: "pf-g3-d", path: "w:davsrc:/dav/d3.flac" },
+      { id: "pf-g3-e", path: "w:davsrc:/dav/e3.flac" },
+    ];
+    const ins = sqlite.prepare(
+      "INSERT INTO songs (id, title, path, type, size, duration, suffix, group_id) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+    );
+    for (const r of rows) ins.run(r.id, "t-" + r.id, r.path, "local", 5 * MB, 200, "flac", gid);
+
+    // 每个被评估的候选都判死 ⇒ 只应有 1(首选) + 3(换源上限) = 4 次取流。
+    mm.queue = [30, 30, 30, 30, 30, 30];
+    await prefetchSong("pf-g3-q");
+    await quiesce();
+
+    expect(calls.length).toBe(4); // 截断生效:不是 6
+    expect(new Set(calls.map((c) => c.url)).size).toBe(4); // 4 个不同候选,没有重复抓
+    expect(prefetchHit("pf-g3-q")).toBeNull(); // 全判死 ⇒ 不登记
+
+    // 顺序无关地数:4 个被评估(全判死⇒负缓存),2 个超限从未评估(unknown)。
+    const ids = rows.map((r) => r.id);
+    const marked = ids.filter((id) => getCachedPlayability(id) === "unplayable");
+    const untouched = ids.filter((id) => getCachedPlayability(id) === "unknown");
+    expect(marked.length).toBe(4);
+    expect(untouched.length).toBe(2); // 超上限的两个:知识不完整,不能把未知当死
+  });
+
+  it("(g) 换源成功时双写索引:cand.id 与 resolvedId 是同一条 token(内容只有一份)", async () => {
+    mm.queue = [30, 200]; // 首选(解析后 pf-gdav)判死,次候选 pf-gweb 放过
+    await prefetchSong(ROW_G_WEB.id);
+    await quiesce();
+    const tokCand = prefetchToken(ROW_G_WEB.id);    // 候选 id(实际供源的那行)
+    const tokResolved = prefetchToken(ROW_G_DAV.id); // 解析后 id(出流侧查的那个 key)
+    expect(tokCand).toBeTruthy();
+    expect(tokResolved).toBe(tokCand); // 同一个 token,不是两份拷贝
+    expect(prefetchHit(ROW_G_WEB.id)).toBe(prefetchHit(ROW_G_DAV.id));
+  });
+});

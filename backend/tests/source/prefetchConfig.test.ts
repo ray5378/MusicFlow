@@ -141,4 +141,48 @@ describe("prefetchConfig 读优先级与钳制", () => {
       expect(spec.def, k).toBeLessThanOrEqual(spec.max);
     }
   });
+
+  it("⑩ settings 值为非有限数(字符串/NaN) ⇒ 该字段回落 env,其余字段不受影响", () => {
+    process.env.PREFETCH_INTEGRITY_DELTA_SEC = "30";
+    sqlite
+      .prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,?)")
+      .run(PREFETCH_SETTINGS_KEY, JSON.stringify({ lookahead: 2, integrityDeltaSec: "abc" }), new Date().toISOString());
+    _resetSettingsCacheForTest();
+    const s = getPrefetchSettings();
+    expect(s.integrityDeltaSec).toBe(30); // 坏值 ⇒ env 兜底(不是 NaN、不是默认)
+    expect(s.lookahead).toBe(2);          // 同包里别的字段照常生效
+  });
+
+  it("⑪ env 值非有限数 ⇒ 回落模块默认(不让 NaN 漏进配置)", () => {
+    process.env.PREFETCH_INTEGRITY_DELTA_SEC = "abc";
+    process.env.PREFETCH_INTEGRITY_DELTA_SEC_BITRATE = "not-a-number";
+    const s = getPrefetchSettings();
+    expect(s.integrityDeltaSec).toBe(15);
+    expect(s.integrityBitrateDeltaSec).toBe(80);
+  });
+
+  it("⑫ settings 值为空字符串 ⇒ 视为未设置,继续走 env/默认", () => {
+    process.env.PREFETCH_INTEGRITY_DELTA_SEC = "30";
+    sqlite
+      .prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,?)")
+      .run(PREFETCH_SETTINGS_KEY, JSON.stringify({ integrityDeltaSec: "" }), new Date().toISOString());
+    _resetSettingsCacheForTest();
+    expect(getPrefetchSettings().integrityDeltaSec).toBe(30);
+  });
+
+  it("⑬ setPrefetchSettings(null/undefined/非对象) ⇒ 当作空 patch,现值一个字段都不改", () => {
+    setPrefetchSettings({ lookahead: 3, stallSec: 90 });
+    for (const bad of [null, undefined, 42, "x", [] as any]) {
+      const s = setPrefetchSettings(bad as any);
+      expect(s.lookahead).toBe(3);
+      expect(s.stallSec).toBe(90);
+    }
+  });
+
+  it("⑭ 非整数字段不做四舍五入(budgetRatio 保留原小数,只 clamp 不取整)", () => {
+    expect(setPrefetchSettings({ budgetRatio: 0.37 }).budgetRatio).toBe(0.37);
+    // 越界仍 clamp,且 clamp 结果同样不取整(不是 0.37→0 / 1.5→2)。
+    expect(setPrefetchSettings({ budgetRatio: 1.5 }).budgetRatio).toBe(1);
+    expect(setPrefetchSettings({ budgetRatio: 0.05 }).budgetRatio).toBe(0.1);
+  });
 });
