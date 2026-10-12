@@ -59,6 +59,7 @@ import {
   disposeOriginalFile,
   isBelowUpgradeBar,
   migrateUpgradedSong,
+  pruneEmptyDirs,
 } from "./upgrade.js";
 import { canWriteDir, ensureWritableDir } from "./writable.js";
 import { scanLocalFiles } from "../source/scanner.js";
@@ -752,6 +753,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           : opts.originalDisposal.allowedRoots,
       });
       if (disp.warnings.length > 0) warnings.push(...disp.warnings);
+      // 删原件成功后，递归清理遗留的空目录（专辑/歌手目录可能整条链都空了）。
+      if (disp.deleted) {
+        const pruned = pruneEmptyDirs(origFs, opts.originalDisposal.allowedRoots[0] || path.dirname(origFs));
+        if (pruned.warnings.length > 0) warnings.push(...pruned.warnings);
+      }
       p.item.replaced = {
         originalPath: origFs,
         newPath: p.finalPath,

@@ -266,22 +266,17 @@
               <el-form-item :label="t('admin.fetch.upgrade.batchLimit')">
                 <el-input-number v-model="upgradeConfig.batchLimit" :min="1" :max="500" controls-position="right" />
               </el-form-item>
-              <el-form-item :label="t('admin.fetch.upgrade.originalAction')">
-                <el-select v-model="upgradeConfig.originalAction">
-                  <el-option :label="t('admin.fetch.upgrade.actionKeep')" value="keep" />
-                  <el-option :label="t('admin.fetch.upgrade.actionMove')" value="move" />
-                  <el-option :label="t('admin.fetch.upgrade.actionDelete')" value="delete" />
-                </el-select>
-              </el-form-item>
               <el-form-item :label="t('admin.fetch.upgrade.losslessRoot')">
                 <el-input v-model="upgradeConfig.losslessRoot" :placeholder="t('admin.fetch.upgrade.losslessRootPlaceholder')" />
                 <div class="hint">{{ t('admin.fetch.upgrade.losslessRootHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.upgrade.compressedMinKbps')">
                 <el-input-number v-model="upgradeConfig.compressedMinKbps" :min="0" :step="50" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.upgrade.compressedMinKbpsHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.upgrade.uncompressedMinKbps')">
                 <el-input-number v-model="upgradeConfig.uncompressedMinKbps" :min="0" :step="100" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.upgrade.uncompressedMinKbpsHint') }}</div>
               </el-form-item>
               <el-form-item :label="t('admin.fetch.upgrade.upgradeCooldownDays')">
                 <el-input-number v-model="upgradeConfig.upgradeCooldownDays" :min="1" :max="365" :step="1" controls-position="right" />
@@ -304,13 +299,6 @@
                 <div class="hint">{{ t('admin.fetch.upgrade.upgradeAutoContinueHint') }}</div>
               </el-form-item>
             </div>
-            <el-alert
-              v-if="upgradeConfig.originalAction === 'delete'"
-              type="error"
-              :closable="false"
-              show-icon
-              class="upgrade-warn"
-            >{{ t('admin.fetch.upgrade.deleteWarn') }}</el-alert>
             <div class="config-actions">
               <el-button :loading="upgradeSaving" @click="saveUpgradeConfig">{{ t('admin.fetch.upgrade.save') }}</el-button>
             </div>
@@ -676,7 +664,6 @@ function defaultUpgradeConfig(): Required<UpgradeConfig> {
   return {
     sourceIds: [],
     batchLimit: 20,
-    originalAction: "delete",
     losslessRoot: "",
     compressedMinKbps: 700,
     uncompressedMinKbps: 1400,
@@ -701,8 +688,6 @@ async function loadUpgradeConfig() {
     const remote = await getUpgradeConfig();
     const merged = defaultUpgradeConfig();
     Object.assign(merged, remote);
-    const a = merged.originalAction;
-    if (a !== "keep" && a !== "move" && a !== "delete") merged.originalAction = "delete";
     if (!Array.isArray(merged.sourceIds)) merged.sourceIds = [];
     // 冷却/定时四件套钳制(与后端 PUT 校验同口径):整数 1-365 + HH:mm 格式。
     merged.upgradeCooldownDays = Math.min(365, Math.max(1, Math.floor(Number(merged.upgradeCooldownDays) || 30)));
@@ -742,51 +727,7 @@ async function loadUpgradeStats() {
   }
 }
 
-async function confirmDelete(paths: string[]): Promise<boolean> {
-  const list = (paths || []).filter(Boolean);
-  const lines = list.slice(0, 10).map(escapeHtml);
-  const more = list.length > 10
-    ? `<br>${escapeHtml(t("admin.fetch.upgrade.deleteMore", { count: list.length - 10 }))}`
-    : "";
-  const listHtml = lines.length ? `<br><br>${lines.join("<br>")}${more}` : "";
-  try {
-    await ElMessageBox.confirm(
-      escapeHtml(t("admin.fetch.upgrade.deleteWarn")) + listHtml,
-      t("admin.fetch.upgrade.deleteTitle"),
-      { type: "warning", dangerouslyUseHTMLString: true },
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function doStartUpgrade() {
-  const action = upgradeConfig.originalAction;
-  if (action === "delete") {
-    // 预览已下线：确认框列不出勾选清单，改为拉一批计划取前若干个待删路径（拉取失败只出文字警告，不阻断）。
-    let paths: string[] = [];
-    try {
-      const plan = await getUpgradePlan({ limit: upgradeConfig.batchLimit });
-      paths = (plan.items || []).map((i) => i.path).filter(Boolean) as string[];
-    } catch {
-      /* 拉不到清单不阻断确认 */
-    }
-    if (!(await confirmDelete(paths))) return;
-  } else if (action === "move") {
-    try {
-      await ElMessageBox.confirm(t("admin.fetch.upgrade.moveConfirm"), t("admin.fetch.upgrade.start"), { type: "warning" });
-    } catch {
-      return;
-    }
-  } else {
-    try {
-      await ElMessageBox.confirm(t("admin.fetch.upgrade.keepConfirm"), t("admin.fetch.upgrade.start"), { type: "info" });
-    } catch {
-      return;
-    }
-  }
-
   upgradeStarting.value = true;
   try {
     // 全库范围触发（不带 songIds）：一批终态后自动续下一批，重启容器也会接上。
@@ -889,12 +830,6 @@ function formatDuration(sec?: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-// 仅在「删除原件」二次确认里拼 HTML（路径来自服务端，必须转义）。
-function escapeHtml(s: string): string {
-  const map: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-  return String(s).replace(/[&<>"']/g, (c) => map[c]);
 }
 
 onMounted(() => {

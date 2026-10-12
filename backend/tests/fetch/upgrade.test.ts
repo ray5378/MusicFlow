@@ -43,6 +43,7 @@ import {
   disposeOriginalFile,
   migrateUpgradedSong,
   upgradeBaselineKbps,
+  pruneEmptyDirs,
 } from "../../src/services/fetch/upgrade.js";
 
 // 批量子进程运行器整体替换成桩，避免真 fork（仅路由组用到）。
@@ -286,7 +287,7 @@ describe("isFakeLossless — 洗版档按容器分档", () => {
 
 // ==================== 4) buildUpgradePlan / buildUpgradeTargets ====================
 
-describe("buildUpgradePlan — 只列低于门槛的行", () => {
+describe("buildUpgradePlan — 目标目录全量入选（不按码率门槛筛选）", () => {
   const cfg = () => resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
 
   function seedThree() {
@@ -302,26 +303,26 @@ describe("buildUpgradePlan — 只列低于门槛的行", () => {
     seedSong({ id: "s-other", path: "l:s-other:/dl/x.mp3", suffix: "mp3", bitRate: 128, size: 3_200_000, duration: 200 });
   }
 
-  it("只列低于门槛的行，且限定在给定源内", () => {
+  it("目标目录全量入选（含「看似达标」者），且限定在给定源内", () => {
     seedThree();
     const plan = buildUpgradePlan(["s-up"], cfg());
     expect(plan.total).toBe(4);
-    expect(plan.belowBar).toBe(3);
+    expect(plan.belowBar).toBe(4);
     expect(plan.truncated).toBe(false);
-    expect(plan.items.map((i) => i.songId).sort()).toEqual(["s-lo1", "s-lo2", "s-lo3"]);
-    expect(plan.items.some((i) => i.songId === "s-hi")).toBe(false);
+    // 不再按有效码率门槛筛选：s-hi（900kbps flac，原判「已达标不洗」）同样入选。
+    expect(plan.items.map((i) => i.songId).sort()).toEqual(["s-hi", "s-lo1", "s-lo2", "s-lo3"]);
     expect(plan.items.some((i) => i.songId === "s-other")).toBe(false);
   });
 
   it("limit 截断 → truncated:true，items 只给前 N", () => {
     seedThree();
     const plan = buildUpgradePlan(["s-up"], cfg(), { limit: 2 });
-    expect(plan.belowBar).toBe(3);
+    expect(plan.belowBar).toBe(4);
     expect(plan.items).toHaveLength(2);
     expect(plan.truncated).toBe(true);
   });
 
-  it("songIds 显式点名 → 只保留点名的行（可含已达标者）", () => {
+  it("songIds 显式点名 → 只保留点名的行", () => {
     seedThree();
     const plan = buildUpgradePlan(["s-up"], cfg(), { songIds: ["s-hi"] });
     expect(plan.items.map((i) => i.songId)).toEqual(["s-hi"]);
@@ -585,7 +586,7 @@ describe("fetch 路由：洗版端点", () => {
     expect(cfg.quality.fakeLosslessMinEffBitrate).toBe(700);
     expect(cfg.quality.uncompressedMinKbps).toBe(1400);
     expect(cfg.__upgrade.downloadRootOverride).toBe(DEFAULT_LOSSLESS_ROOT);
-    expect(cfg.__upgrade.originalDisposal.action).toBe("delete"); // 产品定调 2026-10-10：洗版默认删除原版;
+    expect(cfg.__upgrade.originalDisposal.action).toBe("delete"); // 产品定调 2026-10-12：原件处置固定删除
     expect(Array.isArray(cfg.__upgrade.originalDisposal.allowedRoots)).toBe(true);
 
     // 有可洗目标 → 起了批量子进程（runBatchJob 是任务创建后的异步触发，
@@ -611,11 +612,10 @@ describe("fetch 路由：洗版端点", () => {
     expect(r.body.config.losslessRoot).toBe(DEFAULT_LOSSLESS_ROOT);
   });
 
-  it("PUT /v1/fetch/upgrade/config 增量写覆盖项（originalAction / batchLimit）", async () => {
-    const r = await call("PUT", "/v1/fetch/upgrade/config", { originalAction: "delete", batchLimit: 5 });
+  it("PUT /v1/fetch/upgrade/config 增量写覆盖项（batchLimit）", async () => {
+    const r = await call("PUT", "/v1/fetch/upgrade/config", { batchLimit: 5 });
     expect(r.status).toBe(200);
     expect(r.body.success).toBe(true);
-    expect(r.body.config.originalAction).toBe("delete");
     expect(r.body.config.batchLimit).toBe(5);
   });
 });
@@ -850,5 +850,49 @@ describe("buildUpgradeContinuation — 自动续批链", () => {
     expect(ids).toHaveLength(1);
     expect(typeof ids[0]).toBe("string");
     expect(ids[0].length).toBeGreaterThan(0);
+  });
+});
+
+
+// ==================== 6) pruneEmptyDirs（洗版后递归清空目录） ====================
+
+describe("pruneEmptyDirs — 递归清理空目录", () => {
+  it("整条链空了逐级删到 stopRoot 之下；非空即停；stopRoot 本身永不删", () => {
+    const base = mkdtempSync(join(tmpdir(), "mf-prune-"));
+    const root = join(base, "DOWNLOAD");
+    const deep = join(root, "artist", "album");
+    mkdirSync(deep, { recursive: true });
+    const f = join(deep, "a.flac");
+    writeFileSync(f, "x");
+    rmSync(f);
+
+    // 删文件后清理：album / artist 整条链都空了 → 逐级删除，root 保留。
+    const r1 = pruneEmptyDirs(f, root);
+    expect(r1.warnings).toEqual([]);
+    expect(r1.removed).toEqual([deep, join(root, "artist")]);
+    expect(existsSync(root)).toBe(true); // stopRoot 本身永不删
+    expect(existsSync(deep)).toBe(false);
+
+    // 非空守卫：album 里还有别的文件 → 一个都不删。
+    mkdirSync(deep, { recursive: true });
+    writeFileSync(join(deep, "keep.flac"), "y");
+    const f2 = join(deep, "b.flac");
+    writeFileSync(f2, "x");
+    rmSync(f2);
+    const r2 = pruneEmptyDirs(f2, root);
+    expect(r2.removed).toEqual([]);
+    expect(existsSync(deep)).toBe(true);
+
+    // 越界守卫：文件在 stopRoot 之外 → 一律不碰。
+    const outside = join(base, "outside");
+    mkdirSync(outside, { recursive: true });
+    const f3 = join(outside, "c.flac");
+    writeFileSync(f3, "x");
+    rmSync(f3);
+    const r3 = pruneEmptyDirs(f3, root);
+    expect(r3.removed).toEqual([]);
+    expect(existsSync(outside)).toBe(true);
+
+    rmSync(base, { recursive: true, force: true });
   });
 });

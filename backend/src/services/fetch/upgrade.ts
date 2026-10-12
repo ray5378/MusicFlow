@@ -18,7 +18,7 @@
 //
 // 无 IO 的部分（门槛判定 / 计划派生）是纯函数，便于单测；有副作用的部分
 // （迁移库行 / 处置文件）各自 try/catch，失败只返回 warning，**绝不抛**。
-import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import * as path from "node:path";
 import { eq, and, like } from "drizzle-orm";
 import { db, sqlite } from "../../db/index.js";
@@ -41,7 +41,15 @@ const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus",
 ]);
 
-/** 洗版档的两条硬编码门槛（压缩 / 未压缩）。 */
+/**
+ * 洗版**目标门槛**（压缩 / 未压缩无损）——洗版要达成的音质标准，**不是筛选条件**。
+ *   压缩无损（flac / alac / ape）：目标 ≥700kbps；
+ *   未压缩无损（wav / aiff）    ：目标 ≥1400kbps（≈ CD 级 1411kbps）。
+ * 它同时驱动两处：
+ *   ① 洗版任务取链的质量档（buildUpgradeJobConfig → quality = buildUpgradeQuality(...)）；
+ *   ② 下载按品质分流（orchestrator：达标 → 无损目录，未达标 → 下载目录）。
+ * ⚠️ 它**不**决定「哪些歌进洗版队列」——洗版候选 = 目标目录全量（见 buildUpgradePlan）。
+ */
 const UPGRADE_COMPRESSED_MIN_KBPS = 700;
 const UPGRADE_UNCOMPRESSED_MIN_KBPS = 1400;
 
@@ -202,10 +210,19 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
 
 /**
  * 出洗版计划（只读，不下载）。
- * - `songIds` 给了 → 只保留这些 id 的行；否则只保留 `isBelowUpgradeBar` 命中的行。
- * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、`belowBar` = 未截断前低于门槛数、
- *   `cooled` = 因冷却期跳过的低于门槛数（cooldownDays 天内已尝试过洗版，无论成败）、
+ *
+ * 候选口径（产品定调 2026-10-12）：**目标目录下的每一首歌都是待洗版对象**。
+ * 下载目录（`upgradeSourceIds`，默认 /MUSIC/DOWNLOAD）天然就是「没达到洗版目标门槛」的落地区；
+ * 且下载时把有损源转码成 flac 容器会让体积膨胀到 700~1000kbps（看起来像真无损），
+ * 用「有效码率」二次筛选会把大量假无损漏掉（240 实测：14107 首里 10484 首被误判达标、永不入选）。
+ * 因此这里**不再**用 `isBelowUpgradeBar` 筛候选，只保留冷却过滤。
+ *
+ * - `songIds` 给了 → 只保留这些 id 的行（点名重试，绕过冷却）；否则取目标目录全部。
+ * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、
+ *   `belowBar` = **待洗版数**（目标目录中未在冷却期的行数；字段名沿用历史接口）、
+ *   `cooled` = 因冷却期跳过的行数（cooldownDays 天内已尝试过洗版，无论成败）、
  *   `attempted` = 范围内任何时间在册的已尝试数（对齐全库下载统计口径，供设置页展示）。
+ * - `items[].reason` 仍带 `isBelowUpgradeBar` 的**目标门槛**判定文案，仅作展示。
  */
 export function buildUpgradePlan(
   sourceIds: string[],
@@ -221,8 +238,9 @@ export function buildUpgradePlan(
   const attemptedAt = collectUpgradeAttemptedAt();
   const nowMs = Date.now();
   let cooled = 0;
+  // 候选 = 目标目录全部（不再按「有效码率 < 洗版目标门槛」筛选，见函数头注释）；
+  // 唯一的排除项是冷却期：N 天内尝试过（无论成败）的歌本轮跳过。
   const belowAll = rows.filter((r) => {
-    if (!isBelowUpgradeBar(r, upQ).below) return false;
     const at = attemptedAt.get(r.id);
     if (at) {
       const t = Date.parse(at);
@@ -503,6 +521,48 @@ export function disposeOriginalFile(args: {
   }
 }
 
+/**
+ * 递归清理空目录（洗版成功后，原文件所在的专辑/歌手目录可能整条链都空了）。
+ *
+ * 从 `filePath` 所在目录开始**向上**逐级删除空目录，停止条件（任一命中即止）：
+ *   - 该目录**非空**（还有别的文件）→ 停（不动它及其任何祖先）；
+ *   - 走到了 `stopRoot` 本身 → 停（**根目录永不删除**，否则后续写入要重建）；
+ *   - 越过 `stopRoot` 继续向上 → 停（越界一律不碰）。
+ *
+ * 安全闸：只删**空目录**（readdirSync 长度为 0）；每步 try/catch，失败只记 warning，**绝不抛**
+ * （清理失败不该把已成功的洗版判成失败）。
+ */
+export function pruneEmptyDirs(filePath: string, stopRoot: string): { removed: string[]; warnings: string[] } {
+  const removed: string[] = [];
+  const warnings: string[] = [];
+  try {
+    const root = path.resolve(stopRoot);
+    let dir = path.dirname(path.resolve(filePath));
+    for (let i = 0; i < 64; i++) {
+      // 必须严格位于 root 之下（root 本身不删，越界不碰）。
+      if (path.resolve(dir) === root || !isUnderRoot(dir, root)) break;
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        break; // 目录不存在 / 无权限 → 停
+      }
+      if (entries.length > 0) break; // 非空 → 停
+      try {
+        rmdirSync(dir);
+        removed.push(dir);
+      } catch (e) {
+        warnings.push(`删除空目录失败: ${dir}: ${msgOf(e)}`);
+        break;
+      }
+      dir = path.dirname(dir);
+    }
+  } catch (e) {
+    warnings.push(`清理空目录失败: ${msgOf(e)}`);
+  }
+  return { removed, warnings };
+}
+
 // ==================== 洗版任务 config_json 快照（自 routes 迁入，供调度器复用） ====================
 
 /** 洗版任务的 config_json 快照（含 __upgrade 供批量子进程还原）。 */
@@ -517,14 +577,17 @@ export function buildUpgradeJobConfig(
     // 「候选有效码率是否高于原件」，不预探就只能信信源虚标的声明值，误判率极高。
     // 这里硬钉 true，避免历史遗留的 `inspectCandidates:false` 覆盖项把它静默关掉。
     inspectCandidates: true,
+    // 洗版档 = 洗版**目标**：压缩无损 ≥700kbps / 未压缩无损 ≥1400kbps（见 buildUpgradeQuality）。
+    // 它决定「取链时要求候选达到什么音质」，与「哪些歌进洗版队列」（目标目录全量）是两件事。
     quality: buildUpgradeQuality(cfg.quality),
     __upgrade: {
       downloadRootOverride: cfg.losslessRoot || DEFAULT_LOSSLESS_ROOT,
       // 点名批次（手动指定 songIds）不接续：语义是「洗完点名的这几首」。
       ...(opts?.noAutoContinue ? { noAutoContinue: true } : {}),
+      // 原件处置固定「删除」（产品定调 2026-10-12：UI 已摘除处置选项，恒为删原件）。
+      // 🔴 删除前置条件由 orchestrator 硬保证：**新文件已落盘 + 库行迁移成功**，否则保留原件。
       originalDisposal: {
-        action: cfg.upgradeOriginalAction,
-        backupDir: path.join(cfg.downloadRoot, cfg.upgradeBackupDir),
+        action: "delete",
         allowedRoots: [cfg.downloadRoot],
       },
     },

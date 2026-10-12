@@ -204,8 +204,9 @@ export interface UpgradePlan {
   total: number;
   /** 范围内任何时间在册的已尝试数（对齐全库下载 attempted 口径）。 */
   attempted: number;
+  /** 待洗版数(目标目录中未在冷却期的行数)。 */
   belowBar: number;
-  /** 因冷却期跳过的低于门槛数(N 天内已尝试过洗版,无论成败)。 */
+  /** 因冷却期跳过的行数(N 天内已尝试过洗版,无论成败)。 */
   cooled: number;
   truncated: boolean;
   items: UpgradePlanItem[];
@@ -214,9 +215,10 @@ export interface UpgradePlan {
 export interface UpgradeConfig {
   sourceIds?: string[];
   batchLimit?: number;
-  originalAction?: "keep" | "move" | "delete";
   losslessRoot?: string;
+  /** 洗版**目标门槛**(只读,取自后端洗版档):压缩无损 ≥700 / 未压缩无损 ≥1400。 */
   compressedMinKbps?: number;
+  /** 洗版**目标门槛**(只读,取自后端洗版档)。 */
   uncompressedMinKbps?: number;
   /** 洗版冷却天数(1-365,默认 30):N 天内尝试过(无论成败)就跳过。 */
   upgradeCooldownDays?: number;

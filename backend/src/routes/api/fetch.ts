@@ -420,13 +420,17 @@ export function registerFetch(app: Hono): void {
     return out;
   }
 
-  /** GET/PUT /upgrade/config 的对外视图（压缩/未压缩下限直接取自洗版档，避免重复硬编码）。 */
+  /**
+   * GET/PUT /upgrade/config 的对外视图。
+   * `compressedMinKbps` / `uncompressedMinKbps` 是**洗版目标门槛**（取自 buildUpgradeQuality 硬钉的
+   * 700 / 1400）——它决定洗版取链要求什么音质，**不是**「哪些歌要洗」的筛选条件。
+   * 前端这两个值目前仅为展示（PUT 不接收，改了不落库）。
+   */
   function upgradeConfigView(cfg: FetchConfig): Record<string, unknown> {
     const upQ = buildUpgradeQuality(cfg.quality);
     return {
       sourceIds: cfg.upgradeSourceIds,
       batchLimit: cfg.upgradeBatchLimit,
-      originalAction: cfg.upgradeOriginalAction,
       losslessRoot: cfg.losslessRoot,
       compressedMinKbps: upQ.fakeLosslessMinEffBitrate,
       uncompressedMinKbps: upQ.uncompressedMinKbps,
@@ -498,9 +502,6 @@ export function registerFetch(app: Hono): void {
     if (Array.isArray(body?.sourceIds)) patch.upgradeSourceIds = (body.sourceIds as unknown[]).map((v) => String(v));
     if (typeof body?.batchLimit === "number" && Number.isFinite(body.batchLimit) && body.batchLimit > 0) {
       patch.upgradeBatchLimit = Math.floor(body.batchLimit);
-    }
-    if (body?.originalAction === "keep" || body?.originalAction === "move" || body?.originalAction === "delete") {
-      patch.upgradeOriginalAction = body.originalAction;
     }
     if (typeof body?.losslessRoot === "string" && body.losslessRoot.trim()) {
       patch.losslessRoot = body.losslessRoot.trim();
