@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
@@ -21,6 +21,11 @@ const FLAC = join(DIR, "tone.flac");
 // 扩展名必须是 .bin:music-metadata 会按扩展名挑解析器,给随机字节套 .mp3 会走
 // MPEG 解析器并"成功"解析出垃圾结果(伪同步字),拿它当"解析失败"样本会假绿。
 const JUNK = join(DIR, "junk.bin");
+// 信源虚标容器的现场复刻（2026-10-12 240 产线）：候选声明 flac、临时文件命名 .flac，
+// 但上游实际回 MP3 —— 旧的 probeFile 按扩展名走 FLAC 解析器，抛
+// `FourCC contains invalid characters: ff fb 90 64`，整首歌被误判 INTEGRITY_FAILED。
+const MP3_NAMED_FLAC = join(DIR, "liar.flac");
+const FLAC_NAMED_MP3 = join(DIR, "liar.mp3");
 const TIMEOUT = { timeout: 60_000 };
 
 function ff(args: string[]): void {
@@ -33,6 +38,9 @@ beforeAll(() => {
   // 真·不可解析:随机二进制(纯文本会被 music-metadata 当成有 tag 的文件解析成功,
   // 拿它当"解析失败"样本会假绿 —— 已踩过一次)。
   writeFileSync(JUNK, randomBytes(4096));
+  // 内容与文件名故意错配（同字节、只换名字）。
+  copyFileSync(MP3, MP3_NAMED_FLAC);
+  copyFileSync(FLAC, FLAC_NAMED_MP3);
 }, TIMEOUT.timeout);
 
 afterAll(() => {
@@ -113,6 +121,31 @@ describe("toCandidateQuality / probeLocalFile", () => {
     expect(q.container).toBe("mp3");
     expect(q.durationSec).toBeGreaterThan(2.9);
     expect(q.bytes).toBeGreaterThan(0);
+  }, TIMEOUT.timeout);
+});
+
+describe("probeFile — 容器以内容为准（扩展名/信源声明只是线索）", () => {
+  it("mp3 内容装进 .flac 名字 → 判 mp3，不再抛 FourCC 解析错", async () => {
+    const m = await probeFile(MP3_NAMED_FLAC);
+    expect(m.container).toBe("mp3");
+    expect(m.codec).toMatch(/MPEG/i);
+    expect(m.durationSec).toBeGreaterThan(2.9);
+    expect(m.durationSec).toBeLessThan(3.2);
+    // 有损：拿不到位深 —— 这是「假无损」判定的前提，按内容判容器后依旧成立。
+    expect(m.bitDepth).toBeUndefined();
+  }, TIMEOUT.timeout);
+
+  it("flac 内容装进 .mp3 名字 → 判 flac（位深 16、lossless）", async () => {
+    const m = await probeFile(FLAC_NAMED_MP3);
+    expect(m.container).toBe("flac");
+    expect(m.bitDepth).toBe(16);
+    expect(m.lossless).toBe(true);
+  }, TIMEOUT.timeout);
+
+  it("扩展名与内容同族（.flac 装 flac）→ 走原路径，结果不变", async () => {
+    const m = await probeFile(FLAC);
+    expect(m.container).toBe("flac");
+    expect(m.bitDepth).toBe(16);
   }, TIMEOUT.timeout);
 });
 

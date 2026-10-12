@@ -52,21 +52,26 @@ describe("verifyIntegrity — length 档", () => {
 });
 
 describe("verifyIntegrity — magic 档(挡服务端假成功)", () => {
-  it("HTML 错误页被拒(200 但内容是网页)", async () => {
+  it("HTML 错误页被拒(200 但内容是网页) → SOURCE_INVALID", async () => {
     const f = join(DIR, "err.html");
     writeFileSync(f, "<html><body>502 Bad Gateway</body></html>");
     const r = await verifyIntegrity(f, "magic");
     expect(r.ok).toBe(false);
-    expect(r.code).toBe("INTEGRITY_FAILED");
+    // 非音频响应体是**源侧**问题（错误页/失败文本），不是「文件坏了」：
+    // 用 INTEGRITY_FAILED 会被 attempts.ts 的永久失效白名单收进去 → 源站偶发挂掉
+    // 被算成「这首歌死了」，连续两次就被 deadSongPurge 移出曲库。
+    expect(r.code).toBe("SOURCE_INVALID");
+    expect(r.code).not.toBe("INTEGRITY_FAILED");
     expect(r.detail.sniff).toBe("text");
     expect(r.warnings.join("|")).toContain("错误页");
   });
 
-  it("JSON 错误响应被拒", async () => {
+  it("JSON 错误响应被拒 → SOURCE_INVALID", async () => {
     const f = join(DIR, "err.json");
     writeFileSync(f, '{"error":"file not found","code":404}');
     const r = await verifyIntegrity(f, "magic");
     expect(r.ok).toBe(false);
+    expect(r.code).toBe("SOURCE_INVALID");
     expect(r.detail.sniff).toBe("text");
   });
 

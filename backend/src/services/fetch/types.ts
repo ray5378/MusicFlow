@@ -91,6 +91,15 @@ export type FetchErrorCode =
   | "TOO_LARGE"
   | "SSRF_BLOCKED"
   | "INTEGRITY_FAILED"
+  // SOURCE_INVALID：下载回来的**根本不是音频**（HTML/JSON 错误页、十几字节的
+  //   `Failed to ...` 文本）。这是**源侧**问题，不是「文件坏了」—— 换链/重试就能好，
+  //   故**绝不进** PERMANENT_FAILURE_CODES（详见 attempts.ts；240 实测：插件端点在
+  //   大量歌上直接回 404/短文本，历史上一律被记成 INTEGRITY_FAILED → 永久失效计数）。
+  // DURATION_UNKNOWN：解析得出音频流、但**读不出时长**（部分 Ogg/Opus 容器不写时长）
+  //   —— 只能说明「无法证明是完整曲目」，同样**不是**文件损坏，同样不进永久失效白名单。
+  //   必须与 INTEGRITY_FAILED（字节残缺 / 头对中间坏 / 根本解析不了）严格分开。
+  | "SOURCE_INVALID"
+  | "DURATION_UNKNOWN"
   | "FAKE_LOSSLESS"
   | "TAG_FAILED"
   | "DISK_FULL"

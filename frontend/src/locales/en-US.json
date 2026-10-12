@@ -1626,6 +1626,8 @@
         "fakeLossless": "Detected as fake lossless, rejected",
         "integrityFailed": "File is incomplete",
         "durationMismatch": "Different version (duration mismatch)",
+        "sourceInvalid": "Source did not return audio (likely an error page)",
+        "durationUnknown": "Cannot read duration (completeness unverified)",
         "http403": "Source site denied access (referer header may be required)",
         "timeout": "Timed out",
         "stall": "Transfer stalled",

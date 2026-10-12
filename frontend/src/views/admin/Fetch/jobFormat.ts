@@ -44,6 +44,8 @@ export const ERROR_CODE_KEY: Record<string, string> = {
   DUPLICATE_TARGET: "duplicateTarget",
   FAKE_LOSSLESS: "fakeLossless",
   INTEGRITY_FAILED: "integrityFailed",
+  SOURCE_INVALID: "sourceInvalid",
+  DURATION_UNKNOWN: "durationUnknown",
   DURATION_MISMATCH: "durationMismatch",
   HTTP_403: "http403",
   TIMEOUT: "timeout",

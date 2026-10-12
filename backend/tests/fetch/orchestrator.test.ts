@@ -1167,3 +1167,63 @@ describe("runFetchPipeline", () => {
     expect(skip).not.toHaveBeenCalled(); // 洗版不走下载冷却
   });
 });
+
+// ==================== 失败语义归正（2026-10-12 · A+C 修复） ====================
+//
+// `INTEGRITY_FAILED` 在 attempts.ts 的 PERMANENT_FAILURE_CODES 白名单里 —— 命中即累计
+// 「永久失效」计数，连续两次就让 deadSongPurge 把这首歌移出曲库（用户侧表现为「歌莫名
+// 消失」）。所以**只有真·文件坏**才配用它：源侧返错误页 → SOURCE_INVALID，
+// 容器读不出时长 → DURATION_UNKNOWN，两者都是可恢复的。
+
+describe("runFetchPipeline — 失败语义归正", () => {
+  it("30. 探针拿不到时长 → DURATION_UNKNOWN（不得冒充 INTEGRITY_FAILED）", async () => {
+    const finalize = vi.fn(() => ({ action: "write" as const, finalPath: join(DL, "out.flac"), warnings: [] }));
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "f1", url: "http://h/ok.flac", container: "flac", bitrateKbps: 900, bitDepth: 16 }),
+      ],
+      probeFile: (async (file: string) => ({
+        path: file,
+        bytes: 22_500_000,
+        container: "flac",
+        bitDepth: 16,
+        bitrateKbps: 900,
+        sampleRateHz: 44100,
+        // durationSec 故意缺失：部分 Ogg/Opus 容器根本不写时长 → 只能证明「读不出」，
+        // 不能证明「文件坏」。
+        hasCover: false,
+      })) as any,
+      finalizeFile: finalize as any,
+    });
+    const r = await run({ targets: [tgt({ id: "t1", title: "Song", durationSec: 200 })], sourceId: "src-1", deps });
+    expect(r.items[0].status).toBe("failed");
+    expect(r.items[0].errorCode).toBe("DURATION_UNKNOWN");
+    expect(r.items[0].errorCode).not.toBe("INTEGRITY_FAILED");
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("31. 源侧返回非音频（SOURCE_INVALID）→ 换候选重试，不当成文件坏", async () => {
+    const dl = vi.fn(defaultDownload);
+    const verify = vi.fn(async () => ({
+      ok: false,
+      level: "magic",
+      code: "SOURCE_INVALID",
+      detail: { bytes: 17, sniff: "text" },
+      warnings: ["文件头不是音频(sniff=text)，源站返回的疑似错误页/非音频内容"],
+    }));
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({ id: "bad", url: "http://h/bad.flac", container: "flac", bitrateKbps: 900, bitDepth: 16 }),
+        cand({ id: "good", url: "http://h/good.flac", container: "flac", bitrateKbps: 900, bitDepth: 16 }),
+      ],
+      downloadToFile: dl,
+      verifyIntegrity: verify as any,
+    });
+    const r = await run({ targets: [tgt({ id: "t1", title: "Song", durationSec: 200 })], sourceId: "src-1", deps });
+    // 两个候选都「非音频」→ 最终错误码如实反映源侧问题（非 INTEGRITY_FAILED），
+    // 且两个候选都被逐一试过（没有第一个失败就整首放弃）。
+    expect(r.items[0].status).toBe("failed");
+    expect(r.items[0].errorCode).toBe("SOURCE_INVALID");
+    expect(dl).toHaveBeenCalledTimes(2);
+  });
+});

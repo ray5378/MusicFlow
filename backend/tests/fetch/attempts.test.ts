@@ -115,9 +115,13 @@ describe("fetch 下载尝试台账（PATCH17）", () => {
     }
     // 尤其 BELOW_BAR / FAKE_LOSSLESS：歌是存在的，只是不满足下载质量门槛 ——
     // 误判成永久会把「还能在线播放」的歌删掉。
+    // SOURCE_INVALID / DURATION_UNKNOWN（2026-10-12 新增）：源侧返错误页、容器读不出
+    // 时长 —— 都是可恢复/非文件损坏，同样绝不能进永久失效白名单。
     for (const c of [
       "BELOW_BAR",
       "FAKE_LOSSLESS",
+      "SOURCE_INVALID",
+      "DURATION_UNKNOWN",
       "TIMEOUT",
       "STALL",
       "HTTP_5XX",

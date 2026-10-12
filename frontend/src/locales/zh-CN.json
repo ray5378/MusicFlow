@@ -1626,6 +1626,8 @@
         "fakeLossless": "判为假无损,已拒绝",
         "integrityFailed": "文件不完整",
         "durationMismatch": "拿到的是另一个版本(时长对不上)",
+        "sourceInvalid": "源站返回的不是音频(疑似错误页)",
+        "durationUnknown": "读不出时长(无法确认是完整曲目)",
         "http403": "源站拒绝访问(可能需要防盗链头)",
         "timeout": "超时",
         "stall": "传输卡死",

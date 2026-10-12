@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.4] - 2026-10-12
+
+### Fix
+
+- **容器判定改为「以内容为准」（修洗版 96% 失败的真凶）**：上游聚合源会给候选虚标容器（kugou 的 `sq_hash` → 声明 `flac`），下载侧据此把临时文件命名成 `.flac`，而插件实际回的是 MP3；`music-metadata` 的 `parseFile()` 是**按扩展名挑解析器**的，于是 FLAC 解析器读 MP3 字节抛 `FourCC contains invalid characters: ff fb 90 64`，整首歌被误判成 `INTEGRITY_FAILED`（240 实测 11883 首）。现在探针先做**内容嗅探**：嗅探结果与扩展名不同族时，改用嗅探对应的 MIME 类型显式指定解析器（绕开扩展名），`container` 也以内容为准；同族或嗅探不出时走原路径（零回归），按内容解析失败再回退按扩展名解析。修好后「声明 flac、实为 mp3」会按真实档位走质量闸（`BELOW_BAR`）或直接采用，而不再是一个假的「文件损坏」。
+- **失败语义归正（不再把源侧问题算成死链）**：新增 `SOURCE_INVALID`（源站返回的根本不是音频：HTML/JSON 错误页、十几字节的失败文本）与 `DURATION_UNKNOWN`（能解析出音频流但读不出时长 —— 部分 Ogg/Opus 容器不写时长）。两者都**不进** `PERMANENT_FAILURE_CODES`：此前它们一律记 `INTEGRITY_FAILED`，而后者在永久失效白名单里，连续两次就让 `deadSongPurge` 把「歌还在、还能在线播放」的条目移出曲库（用户侧表现为「歌莫名消失」）。
+
+### Internal
+
+- `sniffMagic` / `readHead` / `SNIFF_BYTES` 下沉到 `services/fetch/sniff.ts`：`probe.ts` 也要用它，若反向 import `integrity.ts` 会形成循环依赖；`integrity.ts` 原样再导出，对外函数面不变（取流侧 `prefetchCache.ts` 无需改动）。
+- 前端 `ERROR_CODE_KEY` 与 zh-CN / en-US 文案同步新增两个错误码（列表页绝不裸显码）。
+- 新增单测：探针「内容与扩展名错配」三例（`tests/fetch/probe.test.ts`）、错误码专测（`tests/fetch/integrityCodes.test.ts`）、编排层 `DURATION_UNKNOWN` / `SOURCE_INVALID` 换候选两例。
+
 ## [4.6.3] - 2026-10-12
 
 ### Fix

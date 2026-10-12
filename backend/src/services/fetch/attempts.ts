@@ -97,12 +97,17 @@ export function downloadAttemptKeyOf(t: FetchTarget): string {
  * 判定依据：资源在源站确实不存在，或源站持续返回残缺内容，重试/换链都无法解决。
  *   - NO_CANDIDATE    所有源都搜不到候选（连续多次才是证据，见 orchestrator 的源故障保护）
  *   - HTTP_404/410/451 不存在 / 已下架 / 法律原因不可用
- *   - INTEGRITY_FAILED 字节残缺 / 文件头不对 / 拿不到时长（用户明确要求一并处理）
+ *   - INTEGRITY_FAILED 字节残缺 / 文件头对但中间坏 / 根本解析不了（真·文件坏）
+ *
+ * ⚠️ 注意与 INTEGRITY_FAILED 的区别（2026-10-12 修正）：**源侧**返回非音频内容报
+ * `SOURCE_INVALID`、容器读不出时长报 `DURATION_UNKNOWN` —— 这两类都是可恢复的，
+ * 不在白名单里。加白名单前先问一句：「这首歌在源站真的不存在吗？」
  *
  * **绝不加入**：BELOW_BAR / FAKE_LOSSLESS（歌存在，只是不满足下载质量门槛，删了就
- * 连在线播放都没了）、TIMEOUT / STALL / HTTP_5XX / FETCH_FAILED / TOO_LARGE /
- * SSRF_BLOCKED / DISK_FULL / MOVE_FAILED / TAG_FAILED / TRANSCODE_FAILED /
- * SCAN_FAILED / UNKNOWN（全部可恢复，且多为环境/配置问题）。
+ * 连在线播放都没了）、SOURCE_INVALID / DURATION_UNKNOWN（源侧返错误页、或容器没写时长
+ * —— 都是**可恢复/非文件损坏**，换链重试就可能成功）、TIMEOUT / STALL / HTTP_5XX /
+ * FETCH_FAILED / TOO_LARGE / SSRF_BLOCKED / DISK_FULL / MOVE_FAILED / TAG_FAILED /
+ * TRANSCODE_FAILED / SCAN_FAILED / UNKNOWN（全部可恢复，且多为环境/配置问题）。
  */
 export const PERMANENT_FAILURE_CODES: readonly FetchErrorCode[] = [
   "NO_CANDIDATE",

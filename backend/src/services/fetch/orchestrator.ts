@@ -1396,7 +1396,10 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     const pd = probed.durationSec;
     if (!(typeof pd === "number" && pd > 0)) {
       cleanup();
-      return { kind: "fail", code: "INTEGRITY_FAILED", detail: "探针拿不到时长，疑为试听片段" };
+      // 拿不到时长 = **无法证明是完整曲目**（部分 Ogg/Opus 容器根本不写时长），
+      // 用 DURATION_UNKNOWN（非永久）：既有的 INTEGRITY_FAILED 在永久失效白名单里，
+      // 会把这种「歌还在、只是元数据缺时长」的条目算成死链（同 DURATION_MISMATCH 的坑）。
+      return { kind: "fail", code: "DURATION_UNKNOWN", detail: "探针拿不到时长，无法确认是完整曲目（可能是片段）" };
     }
     if (t.durationSec && t.durationSec > 0 && Math.abs(pd - t.durationSec) > cfg.quality.durationToleranceSec) {
       cleanup();

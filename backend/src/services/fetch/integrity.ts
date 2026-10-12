@@ -11,15 +11,27 @@
 // 档位是**累加**的：选 decodable 会先跑完 length/magic/probe 三档，任一层失败即返回，
 // 避免把明显是 HTML 的文件丢给 ffmpeg 白跑一遍。
 //
-// 所有失败都带 FetchErrorCode，`INTEGRITY_FAILED` 为主；超时单独报 `TIMEOUT`
-// —— 超时与「文件坏」是两种处置（超时可重试，坏了要换候选）。
+// 所有失败都带 FetchErrorCode：
+//   - `SOURCE_INVALID`   源站返回的**根本不是音频**（HTML/JSON 错误页、十几字节的
+//                        `Failed to ...` 文本）—— 这是**源侧**问题，换链/重试可解，
+//                        **不进永久失效白名单**（见 attempts.ts）；
+//   - `DURATION_UNKNOWN` 能解析出音频流，但**拿不到时长**（有些 Ogg/Opus 容器就没写
+//                        时长），无法证明是完整曲目 —— 同样**不算**文件损坏；
+//   - `INTEGRITY_FAILED` 真·文件残缺 / 头对中间坏 / 完全解析不了（**永久失效类**）；
+//   - `TIMEOUT`          超时（可重试，与「文件坏」是两种处置）。
 import { createHash } from "node:crypto";
-import { closeSync, createReadStream, openSync, readSync, statSync } from "node:fs";
+import { createReadStream, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createLogger } from "../../utils/logger.js";
 import { resolveFfmpeg } from "../transcode.js";
 import { probeFile } from "./probe.js";
+import { SNIFF_BYTES, readHead, sniffMagic } from "./sniff.js";
 import { DEFAULT_QUALITY_CONFIG, type FetchErrorCode } from "./types.js";
+
+// `sniffMagic` 的历史出口在本模块（取流侧 prefetchCache.ts 与 integrity.test.ts 都从这里
+// import）。实现已下沉到 `sniff.ts`（免得与 probe.ts 形成循环依赖），此处原样再导出，
+// **对外函数面不变**。
+export { sniffMagic } from "./sniff.js";
 
 const log = createLogger("FETCH_INTEGRITY");
 
@@ -62,51 +74,9 @@ export interface IntegrityResult {
 }
 
 /** 嗅探缓冲区大小：足以覆盖 ID3 头后的同步字 / ftyp / fLaC / RIFF。 */
-const SNIFF_BYTES = 512;
+export { SNIFF_BYTES } from "./sniff.js";
 /** 默认全解码超时（毫秒）。 */
 const DEFAULT_DECODE_TIMEOUT_MS = 120_000;
-
-/** 按文件头判断是不是音频；返回 kind 与是否音频。 */
-export function sniffMagic(buf: Buffer): { kind: string; audio: boolean } {
-  if (!buf || buf.length === 0) return { kind: "empty", audio: false };
-  const head = buf.subarray(0, 4).toString("latin1");
-  const head12 = buf.subarray(0, 12).toString("latin1");
-  if (head === "fLaC") return { kind: "flac", audio: true };
-  if (head === "OggS") return { kind: "ogg", audio: true };
-  // ⚠️ ID3v2 头是 "ID3" + 版本号(0x03 或 0x04),必须按前 3 字节判断 —— 拿 4 字节
-  // 和 "ID3" 比会永远不相等,导致所有带 ID3 的 mp3 被误判成非音频(踩过一次)。
-  if (head.startsWith("ID3")) return { kind: "mp3", audio: true };
-  if (head === "MAC ") return { kind: "ape", audio: true };
-  if (head === "RIFF" && buf.subarray(8, 12).toString("latin1") === "WAVE") return { kind: "wav", audio: true };
-  if (head === "FORM" && buf.subarray(8, 12).toString("latin1") === "AIFF") return { kind: "aiff", audio: true };
-  if (buf.subarray(4, 8).toString("latin1") === "ftyp") return { kind: "mp4", audio: true };
-  // MPEG 裸帧同步字（无 ID3 头的 mp3）：11 位 1。允许在头部若干字节内搜索 ——
-  // 有些编码器先写一个 "Info"/Xing 头再跟帧同步字。
-  for (let i = 0; i + 1 < Math.min(buf.length, 64); i++) {
-    if (buf[i] === 0xff && (buf[i + 1] & 0xe0) === 0xe0) return { kind: "mp3", audio: true };
-  }
-
-  // 「假成功」识别：服务端把 HTML / JSON / XML 错误页当 200 返回。
-  const text = buf.subarray(0, Math.min(buf.length, 64)).toString("utf8").trim();
-  if (text.startsWith("<") || text.startsWith("{") || text.startsWith("[")) {
-    return { kind: "text", audio: false };
-  }
-  return { kind: "unknown", audio: false };
-}
-
-/** 只读头部若干字节（不加载整个文件）。 */
-function readHead(file: string, n: number): Buffer {
-  const fd = openSync(file, "r");
-  try {
-    const size = statSync(file).size;
-    const want = Math.min(n, Math.max(size, 0));
-    const buf = Buffer.alloc(want);
-    if (want > 0) readSync(fd, buf, 0, want, 0);
-    return buf;
-  } finally {
-    closeSync(fd);
-  }
-}
 
 /** 计算 sha256（流式，避免把整首歌读进内存）。 */
 export function sha256Of(file: string): Promise<string> {
@@ -225,9 +195,13 @@ export async function verifyIntegrity(
   const sniff = sniffMagic(head);
   detail.sniff = sniff.kind;
   if (!sniff.audio) {
+    // 非音频响应体是**源侧**问题（错误页 / 十几字节的失败文本），换链或重试就可能好，
+    // 与「文件残缺」是两回事：用 INTEGRITY_FAILED 会被 attempts.ts 的永久失效白名单
+    // 收进去，于是「源站偶发挂掉」被算成「这首歌死了」，连续两次就被 deadSongPurge
+    // 移出曲库（就是 2026-10-11 那类「歌莫名消失」）。故单开 SOURCE_INVALID。
     return {
-      ok: false, level: "magic", code: "INTEGRITY_FAILED",
-      detail, warnings: [...warnings, `文件头不是音频(sniff=${sniff.kind})，疑似服务端错误页`],
+      ok: false, level: "magic", code: "SOURCE_INVALID",
+      detail, warnings: [...warnings, `文件头不是音频(sniff=${sniff.kind})，源站返回的疑似错误页/非音频内容`],
     };
   }
   if (level === "magic") return { ok: true, level, detail, warnings };
@@ -248,7 +222,11 @@ export async function verifyIntegrity(
       ? expect.durationToleranceSec
       : DEFAULT_QUALITY_CONFIG.durationToleranceSec;
     if (media.durationSec === undefined) {
-      return { ok: false, level: "probe", code: "INTEGRITY_FAILED", detail, warnings: [...warnings, "拿不到时长"] };
+      // 「解析得到音频流但读不出时长」≠ 文件坏：Ogg/Opus 之类容器可以不写时长，
+      // 拿不到时长只说明**无法证明是完整曲目**（可能被截断，也可能是元数据缺失）。
+      // 必须用 DURATION_UNKNOWN（非永久）：用 INTEGRITY_FAILED 会让这种歌被判死链
+      // 移出曲库（同 DURATION_MISMATCH 的历史坑，2026-10-11 生产实测）。
+      return { ok: false, level: "probe", code: "DURATION_UNKNOWN", detail, warnings: [...warnings, "拿不到时长（容器未写时长或元数据缺失）"] };
     }
     if (Math.abs(media.durationSec - expect.durationSec) > tol) {
       return {
