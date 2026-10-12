@@ -20,7 +20,7 @@ import {
   resetRetryLoopsForTest,
   retryLoopKeysForTest,
 } from "../../src/services/source/bufferedFetch.js";
-import { resolveTranscodeInput } from "../../src/routes/rest/index.js";
+import { resolveTranscodeInput, STREAM_BUFFER_HEAD_WAIT_MS } from "../../src/routes/rest/index.js";
 
 // 与 prefetchCache.test.ts 同款 hoisted mock:探活/播放优选可确定性触发,不摸真实
 // 文件系统 / 不发 HEAD。⚠ localSourceProbe 只**部分** mock —— 保留真实的 parseSongPath,
@@ -169,5 +169,25 @@ describe("batch44-R:整曲缓冲有界等待(首字节优先)", () => {
     const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
     expect(src?.source).toBe(hit); // 预取命中 ⇒ 直接内存回环,零上游往返
     expect(calls.length).toBe(1);
+  });
+});
+
+// ==================== 跨仓契约:首字节等待 ↔ 客户端看门狗判死上界 ====================
+//
+// 客户端「平台未接管音源(idle)」一档的判死上界必须**严格大于**本服务的整曲缓冲
+// 首字节等待,否则服务端仍在合法缓冲窗口内、客户端已抢先判死 → 无谓 reload/跳歌
+// (还会拆掉在途请求、让服务端重开重试窗口)。客户端权威常量:
+//   MusicFlow-client/lib/providers/player/player_watchdog_policy.dart
+//     kStreamLoadIdleCeilingMs = 10000
+//     kStreamLoadHeadWaitAlignmentMarginMs = 1500
+// 对应客户端侧守卫:b50g_watchdog_queue_policy_test.dart「六、跨仓契约」组。
+describe("跨仓契约:整曲缓冲首字节等待 ↔ 客户端 idle 判死上界", () => {
+  it("默认 head-wait 须严格低于客户端 idle 判死上界,且留 ≥1500ms 余量", () => {
+    const CLIENT_IDLE_STUCK_CEILING_MS = 10_000; // = 客户端 kStreamLoadIdleCeilingMs
+    const MARGIN_MS = 1_500; // = 客户端 kStreamLoadHeadWaitAlignmentMarginMs
+    expect(STREAM_BUFFER_HEAD_WAIT_MS).toBeLessThan(CLIENT_IDLE_STUCK_CEILING_MS);
+    expect(STREAM_BUFFER_HEAD_WAIT_MS + MARGIN_MS).toBeLessThanOrEqual(
+      CLIENT_IDLE_STUCK_CEILING_MS,
+    );
   });
 });

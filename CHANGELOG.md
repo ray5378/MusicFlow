@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.6] - 2026-10-13
+
+### Fix
+
+- **整曲缓冲「首字节等待」跨仓契约显式化**：`STREAM_BUFFER_HEAD_WAIT_MS`(默认 6000ms) 由模块内常量改为 `export`，并在注释中写明跨仓不变式 —— 本值必须**严格小于**客户端「平台未接管音源(idle)」档的判死上界（客户端默认 10s），并留 >=1.5s 余量；否则服务端仍在合法缓冲窗口内、客户端已抢先判死，造成无谓 reload/跳歌并拆掉在途请求、让服务端重开重试窗口。本值同时须低于反向代理首字节超时(10s)以免 502。两侧各有一处守卫用例钉死该不变式。配套客户端 v5.8.2。
+
+### Feature
+
+- **封面渲染压力信号（端到端背压）**：新增 `getCoverPressure()` 与 `buildCoverPressureHeaders()`；`/rest/getCoverArt` 的成功响应现在回传 `X-MusicFlow-Cover-Concurrency` / `-Active` / `-Queued`，管线饱和（有排队或渲染槽位占满）时追加 `Retry-After: 1` 与 `X-MusicFlow-Cover-Saturated: 1`，供具备请求头能力的调用方（Web XHR/fetch）对齐自身封面并发并退避。抽成纯函数便于确定性单测。
+
+### Internal
+
+- 新增/扩充单测：`tests/services/coverImage.test.ts`(压力快照与饱和/未饱和两条分支)、`tests/routes/coverBackpressure.test.ts`(端到端:成功取图回传并发上限头)、`tests/source/bufferHeadWait.test.ts`(跨仓契约用例)。
 ## [4.6.5] - 2026-10-12
 
 ### Fix

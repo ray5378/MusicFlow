@@ -262,3 +262,46 @@ export function getActiveRenderCount(): number {
 export function getQueuedRenderCount(): number {
   return renderWaiters.length;
 }
+
+/** 封面渲染管线压力快照(端到端背压信号,供 /rest/getCoverArt 回传,见 ADR-4)。 */
+export interface CoverPressure {
+  /** 在途 sharp 渲染数。 */
+  active: number;
+  /** 排队等待渲染槽位的请求数。 */
+  queued: number;
+  /** 渲染并发上限(COVER_RENDER_CONCURRENCY)。 */
+  limit: number;
+  /** 是否已达/超护栏(有排队或槽位占满)——客户端据此退避。 */
+  saturated: boolean;
+}
+
+/** 读取当前封面渲染管线压力。 */
+export function getCoverPressure(): CoverPressure {
+  return {
+    active: activeRenders,
+    queued: renderWaiters.length,
+    limit: RENDER_CONCURRENCY,
+    saturated: renderWaiters.length > 0 || activeRenders >= RENDER_CONCURRENCY,
+  };
+}
+
+/**
+ * 把压力快照转成响应头:始终回传并发上限(供具备请求头能力的调用方对齐自身并发),
+ * 并在管线饱和时给出 `Retry-After` 退避提示。
+ *
+ * 抽成纯函数是为了可确定性单测——无需真的把渲染管线压饱和即可断言两条分支。
+ * 说明:客户端 `<img>` / Flutter `Image.network` 读不到响应头,故该信号主要服务
+ * Web 前端(XHR/fetch)与未来经 dio 拉取封面字节的端侧实现。
+ */
+export function buildCoverPressureHeaders(p: CoverPressure): Record<string, string> {
+  const headers: Record<string, string> = {
+    "X-MusicFlow-Cover-Concurrency": String(p.limit),
+    "X-MusicFlow-Cover-Active": String(p.active),
+    "X-MusicFlow-Cover-Queued": String(p.queued),
+  };
+  if (p.saturated) {
+    headers["Retry-After"] = "1";
+    headers["X-MusicFlow-Cover-Saturated"] = "1";
+  }
+  return headers;
+}

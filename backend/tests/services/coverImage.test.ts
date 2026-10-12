@@ -15,6 +15,8 @@ import {
   getRenderedCoverBytes,
   getActiveRenderCount,
   getQueuedRenderCount,
+  getCoverPressure,
+  buildCoverPressureHeaders,
   RENDER_CONCURRENCY,
 } from "../../src/services/coverImage.js";
 
@@ -230,5 +232,53 @@ describe("loadAndRenderCover: 单飞与并发护栏", () => {
     expect(getQueuedRenderCount()).toBe(0);
     const good = await loadAndRenderCover(pngPath, 321, false);
     expect(good).not.toBeNull();
+  });
+});
+
+// 端到端背压(ADR-4):封面渲染管线压力快照 + 响应头映射。
+// 服务端把渲染并发上限回传给调用方,并在管线饱和时给出 Retry-After 退避提示;
+// 抽成纯函数以便确定性断言两条分支(不依赖真实渲染时序)。
+describe("封面端到端背压:压力快照与响应头映射", () => {
+  it("空闲时快照:无排队、未饱和,limit 为渲染并发上限", () => {
+    const p = getCoverPressure();
+    expect(p.queued).toBe(0);
+    expect(p.limit).toBe(RENDER_CONCURRENCY);
+    expect(p.saturated).toBe(false);
+  });
+
+  it("未饱和:只回传并发上限,不给 Retry-After", () => {
+    const h = buildCoverPressureHeaders({
+      active: 1,
+      queued: 0,
+      limit: 4,
+      saturated: false,
+    });
+    expect(h["X-MusicFlow-Cover-Concurrency"]).toBe("4");
+    expect(h["X-MusicFlow-Cover-Active"]).toBe("1");
+    expect(h["X-MusicFlow-Cover-Queued"]).toBe("0");
+    expect(h["Retry-After"]).toBeUndefined();
+    expect(h["X-MusicFlow-Cover-Saturated"]).toBeUndefined();
+  });
+
+  it("饱和(有排队):回传 Retry-After 供调用方退避", () => {
+    const h = buildCoverPressureHeaders({
+      active: 4,
+      queued: 3,
+      limit: 4,
+      saturated: true,
+    });
+    expect(h["Retry-After"]).toBe("1");
+    expect(h["X-MusicFlow-Cover-Saturated"]).toBe("1");
+    expect(h["X-MusicFlow-Cover-Queued"]).toBe("3");
+  });
+
+  it("饱和(槽位占满但暂无排队):同样给出退避提示", () => {
+    const h = buildCoverPressureHeaders({
+      active: 4,
+      queued: 0,
+      limit: 4,
+      saturated: true,
+    });
+    expect(h["Retry-After"]).toBe("1");
   });
 });

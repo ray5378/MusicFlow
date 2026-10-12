@@ -19,7 +19,7 @@ import { getSetting } from "../../services/settings.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
-import { loadAndRenderCover } from "../../services/coverImage.js";
+import { loadAndRenderCover, getCoverPressure, buildCoverPressureHeaders } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken, resolveCastSession, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
@@ -2008,8 +2008,16 @@ export async function resolveTranscodeInput(
  * loading);等待超过此值即走 bufferNetworkSource 既有的「回退直通」路径,不新造
  * 回退通道。single-flight 共享循环继续在后台跑,缓冲落地后下一个请求可命中。
  * env `STREAM_BUFFER_HEAD_WAIT_MS` 可覆盖;非法/非正值回退此默认。
+ *
+ * 跨仓契约(与客户端看门狗对齐,ADR-4 相邻项):本值必须**严格小于**客户端
+ * 「平台未接管音源(idle)」一档的判死上界(客户端默认 10s,权威定义见
+ * MusicFlow-client/lib/providers/player/player_watchdog_policy.dart 的
+ * kStreamLoadIdleCeilingMs),并留 >=1.5s 余量(kStreamLoadHeadWaitAlignmentMarginMs);
+ * 否则服务端仍在合法缓冲窗口内、客户端已抢先判死 -> 无谓 reload/跳歌
+ * (还会拆掉在途请求、让服务端重开重试窗口)。同时本值须低于反向代理首字节
+ * 超时(10s),避免 502(见上文 batch44-R)。两侧各有一处守卫用例。
  */
-const STREAM_BUFFER_HEAD_WAIT_MS = 6000;
+export const STREAM_BUFFER_HEAD_WAIT_MS = 6000;
 
 /** 读 env `STREAM_BUFFER_HEAD_WAIT_MS`(parseInt;非法/非正值回退默认)。 */
 function streamBufferHeadWaitMs(): number {
@@ -2630,6 +2638,9 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
         "ETag": out.etag,
         "Vary": "Accept",
       };
+      // 端到端背压(ADR-4):回传渲染并发上限,饱和时附 Retry-After 退避提示,
+      // 供具备请求头能力的调用方(Web XHR/fetch)对齐自身封面并发。
+      Object.assign(headers, buildCoverPressureHeaders(getCoverPressure()));
       if (inm && inm === out.etag) {
         return new Response(null, { status: 304, headers });
       }
