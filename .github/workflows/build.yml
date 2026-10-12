@@ -3,21 +3,30 @@ name: build-and-push
 # MusicFlow 镜像发布(GHCR + Docker Hub 双推送)。
 #
 # 触发:
-#   - push 到 main:自动构建 :latest(版本号由 git describe 自动生成,去 v 前缀),
-#     并附 :main 便于回溯;提交即出新镜像,无需手动指定版本。
-#   - 打 v* tag:发布 <版本> + :latest(版本锁定的发版语义——加载项钉具体版本号)。
-#   - workflow_dispatch:手动构建 :latest + :main(与 main push 相同)。
+#   - push 到 main:自动构建 :latest / :main(版本号由 git describe 自动生成,去 v 前缀)。
+#   - 打 v* tag:发布 <版本> + :latest(版本锁定的发版语义)。
+#   - workflow_dispatch:手动构建 :latest + :main。
 #
-# 打 v* tag 时除构建镜像外,还会自动创建 GitHub 正式版 Release(模板 + 变更列表,
-# 已存在则跳过);形成「打 tag → 出镜像 + 正式版」的完整发布闭环。
+# 方案 A(非阻塞发版 + 失败自动回滚):
+#   镜像构建与推送「不阻塞」——push 即出镜像、tag 即出正式版 Release,发版最快。
+#   全量测试门禁(vitest + tsc)与构建「并行」跑;若测试失败,rollback job 将
+#   :latest / :main / :<version> 回滚到本次推送前的 digest(manifest 复制,秒级,
+#   不重拉层),并删除刚创建的 GitHub Release(仅 tag),实现「测试不过则自动撤回发版」。
+#   ⚠️ 因此测试必须稳定:任何环境偶发(如硬编码端口 EADDRINUSE)会被误判为失败并触发回滚,
+#      上线前务必修掉 flaky 用例(改用 listen(0) 拿临时端口)。
+#
+#   纯文档提交(**/*.md、docs/**)不触发本流程,避免无意义重建(CHANGELOG 改动即典型场景)。
 #
 # 前置条件(仓库 Secrets,已配置):
-#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN —— Docker Hub 登录凭据,缺失时自动跳过
-#   Docker Hub 推送(镜像仍会推到 GHCR,不影响发版)。
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN —— 缺失时自动跳过 Docker Hub 推送。
+
 on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch:
 
 env:
@@ -31,14 +40,13 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
-  # 阻塞发版的全量测试门禁:vitest(含导入门禁契约用例 importGate/match/streamFallback,
-  # 见 SPEC §1.6.2)全绿才允许构建镜像与发版。ci.yml 的 test 只覆盖 push main/PR,
-  # tag 触发的 build.yml 不经过它——此处独立重跑,保证「测试不过就发不了版」。
+  # 全量测试门禁(vitest + tsc):「非阻塞」——与 build 并行跑,失败由 rollback 撤回发版。
+  # tag 推送不经过 ci.yml,此处独立重跑保证「测试不过则撤回」;main 推送时与 ci.yml
+  # 的 test 并行(不增加墙钟)。ci.yml 的 test 只覆盖 push main/PR,二者互不影响。
   test:
-    name: 全量测试门禁 (vitest, 阻塞发版)
+    name: 全量测试门禁 (vitest, 非阻塞/失败回滚)
     runs-on: ubuntu-latest
-    # vitest 已切 singleFork 单进程串行(规避 forks 多 worker 派发死锁),故不存在挂死,
-    # 只需为串行跑全集留足裕量(含 QuickJS 沙箱数十秒级用例),给 20 分钟。
+    # vitest 已切 singleFork 单进程串行(规避 forks 多 worker 派发死锁),给 20 分钟裕量。
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -66,14 +74,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  # Single-arch (amd64) build. No QEMU, no multi-arch manifest — the image is
-  # pushed directly to <version> / :latest. ARM devices cannot run this image
-  # (账号没有 ARM runner,与 V1 一致)。
+  # 非阻塞构建:push 即出镜像、tag 即出正式版,不等测试门禁。
   build:
-    needs: test
+    name: 构建并推送镜像 (非阻塞)
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      old_digest: ${{ steps.capture.outputs.digest }}
     permissions:
       contents: write
       packages: write
@@ -104,6 +111,20 @@ jobs:
           username: ${{ env.DH_USER }}
           password: ${{ env.DH_TOKEN }}
 
+      # 捕获「本次推送前」的 :latest digest,供 test 失败时回滚。
+      # 首次构建(无 :latest)时 inspect 失败属正常,置空 digest 即不回滚。
+      - name: 捕获回滚基线 digest
+        id: capture
+        run: |
+          GHCR=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          if DIGEST=$(docker buildx imagetools inspect "$GHCR:latest" --format '{{index .Manifest.Digest}}' 2>/dev/null) && [ -n "$DIGEST" ]; then
+            echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+            echo "captured baseline: $DIGEST"
+          else
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            echo "no previous :latest, nothing to roll back to"
+          fi
+
       - name: Compute tags
         id: meta
         run: |
@@ -115,9 +136,6 @@ jobs:
             VERSION="$V"
             TAGS="$GHCR:$V,$GHCR:latest,$DH:$V,$DH:latest"
           else
-            # main push / 手动构建:版本号由 git describe 自动生成,不需要用户指定。
-            # 去掉 v 前缀(git tag 是 v1.5.0,describe 输出 v1.5.0-8-g595a0d8),
-            # APP_VERSION 必须是纯版本号,否则插件 minAppVersion 比较会把 v1 解析成 0 而误跳过。
             # 直接推 :latest(提交即更新"最新镜像"),附 :main 便于回溯。
             VERSION=$(git describe --tags --abbrev=7 2>/dev/null | sed 's/^v//' || echo "main-$SHORT_SHA")
             TAGS="$GHCR:latest,$GHCR:main,$DH:latest,$DH:main"
@@ -127,7 +145,7 @@ jobs:
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "resolved: version=$VERSION tags=$TAGS"
 
-      - name: Build and push (amd64 only)
+      - name: Build and push (amd64 only, 非阻塞)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -153,8 +171,7 @@ jobs:
             echo "Release $TAG already exists, skipping"
             exit 0
           fi
-          # 模板正文 + 自动生成的变更日志(按类型分组,见 scripts/gen-changelog.sh)
-          # + 涉及文件统计(中文,列具体修改点,符合 SPEC 提交/发版规范)。
+          # 模板正文 + 自动生成的变更日志 + 涉及文件统计。
           PREV=$(git tag --sort=-version:refname | sed -n '2p')
           {
             echo "## ${TAG#v} 发布说明"
@@ -180,10 +197,69 @@ jobs:
           } > /tmp/release-body.md
           gh release create "$TAG" --title "${TAG#v}" --notes-file /tmp/release-body.md
 
-  # 容器镜像漏洞扫描(发版前最后一关):Trivy 对「构建产物镜像」做层扫描,捕获
-  # 源码扫描(security.yml 的 trivy-fs)看不到的 OS 包 / base 镜像引入漏洞
-  # (apt-get 装系统依赖、FROM 的运行时库等)。依赖 build 的 version 输出拿到
-  # 实际镜像 tag;扫描仅针对 GHCR 镜像,结果上报 Security tab 不阻塞发布。
+  # 回滚:test 失败且 build 成功时,将 :latest / :main / :<version> 回滚到本次推送前的
+  # baseline digest(manifest 复制,秒级,不重拉层);tag 推送额外删除刚创建的 Release。
+  # 仅在 test 真正 failure 时触发(always() 允许其越过失败的 needs 运行)。
+  rollback:
+    name: 回滚发版 (test 失败时)
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: always() && needs.test.result == 'failure' && needs.build.result == 'success'
+    permissions:
+      contents: write
+      packages: write
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: env.DH_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DH_USER }}
+          password: ${{ env.DH_TOKEN }}
+
+      - name: 回滚镜像 tag 到基线 digest
+        if: ${{ needs.build.outputs.old_digest != '' }}
+        run: |
+          GHCR=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          DH=${{ env.DH_NAMESPACE }}/${{ env.IMAGE_NAME }}
+          SRC="$GHCR@${{ needs.build.outputs.old_digest }}"
+          echo "rolling back to baseline $SRC"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ needs.build.outputs.version }}"
+            docker buildx imagetools create "$SRC" --tag "$GHCR:latest" --tag "$GHCR:$V"
+            if [ -n "${{ env.DH_TOKEN }}" ]; then
+              docker buildx imagetools create "$SRC" --tag "$DH:latest" --tag "$DH:$V"
+            fi
+          else
+            docker buildx imagetools create "$SRC" --tag "$GHCR:latest" --tag "$GHCR:main"
+            if [ -n "${{ env.DH_TOKEN }}" ]; then
+              docker buildx imagetools create "$SRC" --tag "$DH:latest" --tag "$DH:main"
+            fi
+          fi
+
+      - name: 删除刚创建的 Release (tag only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release delete "$TAG" --yes || true
+          echo "rolled back release $TAG"
+
+  # 容器镜像漏洞扫描(发版后最后一关,非阻塞):Trivy 对「构建产物镜像」做层扫描,
+  # 结果上报 Security tab 不阻塞发布。依赖 build 的 version 输出拿到实际镜像 tag。
   image-scan:
     name: 容器镜像漏洞扫描 (Trivy image)
     runs-on: ubuntu-latest
@@ -199,8 +275,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 镜像 tag 解析:tag 触发时 build 会推送 <version>(即打的 v* 号);main push /
-      # 手动构建只推送 :latest + :main,不产生版本 tag,此时扫 :main 即可拿到同一产物。
+      # 镜像 tag 解析:tag 触发时 build 会推送 <version>;main push / 手动构建只推送
+      # :latest + :main,此时扫 :main 即可拿到同一产物。
       - name: Resolve image tag
         id: resolve
         run: |
