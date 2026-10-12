@@ -257,7 +257,10 @@ export class SendspinServer {
       wss.once("error", (e) => reject(e));
     });
     this.wss = wss;
-    this.log("info", `sendspin listening ws://0.0.0.0:${port}${WS_PATH} (server_id=${this.serverId})`);
+    // 记录真实绑定的端口(listen(0) 时为系统分配的临时端口),供拨号去重键与测试读取。
+    const _addr = this.wss.address();
+    if (_addr && typeof _addr === "object") this.port = _addr.port;
+    this.log("info", `sendspin listening ws://0.0.0.0:${this.port}${WS_PATH} (server_id=${this.serverId})`);
   }
 
   private onClientConnect(ws: WebSocket, remoteHost?: string): void {

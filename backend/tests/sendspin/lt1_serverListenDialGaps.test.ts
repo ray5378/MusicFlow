@@ -7,7 +7,8 @@
 //   3) dialPlayer 对端**接受了 TCP 但从不激活** → 必须在超时后 terminate + 抛
 //      "activation timeout",否则重拨状态机永远卡在一个假在飞的连接上。
 //
-// 端口固定选高位(39xxx),并在 afterEach 关掉,避免与其它套件抢端口。
+// 端口一律用 listen(0) 拿系统分配的临时端口,再读 srv.port 使用,避免硬编码高位端口
+// (如 39272)在 CI 运行器上偶发被占用导致无关的 EADDRINUSE flake。
 import "../plugins/_env.js";
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -36,13 +37,15 @@ describe("server.listen 网络失败收口", () => {
   it("端口被占用 → reject 且 listening 复位(端口释放后可以重试)", async () => {
     const a = makeServer();
     LIVE.push(a.srv);
-    await a.srv.listen(39271);
+    // 用临时端口,避免 CI 上硬编码端口被占用造成无关 flake;拿到 a 的真实端口给 b 复用。
+    await a.srv.listen(0);
+    const pa = (a.srv as any).port;
     expect(logsContain(a.logs, "listening ws://")).toBe(true);
 
     const b = makeServer();
     LIVE.push(b.srv);
     // 契约:同一端口二次绑定必须失败得干净(EADDRINUSE 不能变成未处理异常)。
-    await expect(b.srv.listen(39271)).rejects.toBeTruthy();
+    await expect(b.srv.listen(pa)).rejects.toBeTruthy();
     // 契约:失败后 listening 必须复位 —— 否则"重试"只会拿到同一个已 reject 的 promise。
     expect((b.srv as any).listening).toBeNull();
   });
@@ -51,7 +54,8 @@ describe("server.listen 网络失败收口", () => {
     const a = makeServer();
     LIVE.push(a.srv);
     // 契约:flac 不可用必须明说;静默降级会让"选了 flac 却全程无声"无从排障。
-    await a.srv.listen(39272);
+    // 临时端口,不依赖任何硬编码端口。
+    await a.srv.listen(0);
     expect(logsContain(a.logs, "libFLAC 预热超时")).toBe(true);
     expect(logsContain(a.logs, "listening ws://")).toBe(true);
   });
@@ -61,13 +65,14 @@ describe("server.dialPlayer 激活超时", () => {
   it("对端接受连接但从不激活 → 超时 terminate + 抛 activation timeout", async () => {
     const a = makeServer();
     LIVE.push(a.srv);
-    await a.srv.listen(39273);
+    await a.srv.listen(0);
+    const pa = (a.srv as any).port;
 
     const b = makeServer();
     LIVE.push(b.srv);
     // 150ms 超时:短到不拖慢套件,又足够让 TCP 建连成功(触发"在但不应答"这一支)。
     await expect(
-      b.srv.dialPlayer("ws://127.0.0.1:39273/sendspin", 150),
+      b.srv.dialPlayer(`ws://127.0.0.1:${pa}/sendspin`, 150),
     ).rejects.toThrow("activation timeout");
     // 契约:超时后单飞表必须被清理(否则同目标后续重拨会被当成"已有在飞")。
     expect((b.srv as any).pendingDials.size).toBe(0);
