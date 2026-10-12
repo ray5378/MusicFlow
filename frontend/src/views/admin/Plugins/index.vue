@@ -322,6 +322,80 @@
           </div>
         </el-card>
 
+        <el-card class="mf-card" shadow="never">
+          <template #header>
+            <div class="card-head">
+              <span class="card-title">{{ t('admin.plugins.prefetchSettings') }}</span>
+            </div>
+          </template>
+          <div class="mf-media">
+            <div class="mf-media-row">
+              <span class="field-hint">{{ t('admin.plugins.prefetchSettingsHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchSectionPrefetch') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchLookahead') }}</span>
+              <el-input-number v-model="prefetchSettings.lookahead" v-bind="specRange('lookahead')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchLookaheadHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchConcurrency') }}</span>
+              <el-input-number v-model="prefetchSettings.concurrency" v-bind="specRange('concurrency')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchConcurrencyHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchBudgetRatio') }}</span>
+              <el-input-number v-model="prefetchSettings.budgetRatio" v-bind="specRange('budgetRatio')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchBudgetRatioHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchDeadlineSec') }}</span>
+              <el-input-number v-model="prefetchSettings.deadlineSec" v-bind="specRange('deadlineSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchDeadlineSecHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchStallSec') }}</span>
+              <el-input-number v-model="prefetchSettings.stallSec" v-bind="specRange('stallSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchStallSecHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchEntryTtlSec') }}</span>
+              <el-input-number v-model="prefetchSettings.entryTtlSec" v-bind="specRange('entryTtlSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchEntryTtlSecHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchMaxAltSources') }}</span>
+              <el-input-number v-model="prefetchSettings.maxAltSources" v-bind="specRange('maxAltSources')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchMaxAltSourcesHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchSectionJudge') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchIntegrityEnabled') }}</span>
+              <el-switch v-model="prefetchSettings.integrityEnabled" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchIntegrityEnabledHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchIntegrityDeltaSec') }}</span>
+              <el-input-number v-model="prefetchSettings.integrityDeltaSec" v-bind="specRange('integrityDeltaSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchIntegrityDeltaSecHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchIntegrityBitrateDeltaSec') }}</span>
+              <el-input-number v-model="prefetchSettings.integrityBitrateDeltaSec" v-bind="specRange('integrityBitrateDeltaSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchIntegrityBitrateDeltaSecHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.prefetchMinAudioKB') }}</span>
+              <el-input-number v-model="prefetchSettings.minAudioKB" v-bind="specRange('minAudioKB')" size="small" controls-position="right" @change="savePrefetchSettings" />
+              <span class="field-hint">{{ t('admin.plugins.prefetchMinAudioKBHint') }}</span>
+            </div>
+          </div>
+        </el-card>
+
         <div class="mf-actions">
           <el-button type="primary" :loading="savingMedia" @click="saveAllMedia">{{ t('admin.plugins.saveSettings') }}</el-button>
           <span class="field-hint">{{ t('admin.plugins.saveSettingsHint') }}</span>
@@ -682,6 +756,31 @@ const savingMedia = ref(false);
 const streamSourcePriority = ref<string[]>([]);
 const availableStreamSources = ref<Array<{ value: string; label: string }>>([]);
 const savingStreamPriority = ref(false);
+
+// ---- 预取与判定参数(下一首内存预取 + 试听片段完整性判定;settings 存储,即存即生效) ----
+const prefetchSettings = reactive({
+  lookahead: 1,
+  concurrency: 1,
+  budgetRatio: 0.5,
+  deadlineSec: 120,
+  stallSec: 30,
+  entryTtlSec: 600,
+  maxAltSources: 3,
+  integrityEnabled: true,
+  integrityDeltaSec: 15,
+  integrityBitrateDeltaSec: 80,
+  minAudioKB: 64,
+});
+/** 后端下发的取值范围(min/max/int),输入框按同一把尺子钳制 —— 前后端不各写一套。 */
+const prefetchSpecs = ref<Record<string, { min: number; max: number; def: number; int?: boolean }>>({});
+const savingPrefetch = ref(false);
+
+/** el-input-number 的 min/max/step(整数步长 1,小数 0.1);specs 未就绪时放宽不拦。 */
+function specRange(k: string): { min: number; max: number; step: number } {
+  const s = prefetchSpecs.value[k];
+  if (!s) return { min: 0, max: 9999, step: 1 };
+  return { min: s.min, max: s.max, step: s.int ? 1 : 0.1 };
+}
 
 // ---- health ----
 const healthMap = ref<Record<string, any>>({});
@@ -1500,6 +1599,13 @@ async function loadMediaSettings() {
     const p = await api.get("/rest/api/v1/playback-sources/settings");
     if (Array.isArray(p.data?.priority)) streamSourcePriority.value = p.data.priority;
     if (Array.isArray(p.data?.available)) availableStreamSources.value = p.data.available;
+    // 预取与判定参数:与歌词/封面同一批次加载(specs 供输入框按同范围钳制)。
+    const pf = await api.get("/rest/api/v1/playback-sources/prefetch-settings");
+    if (pf.data) {
+      const { specs, ...rest } = pf.data;
+      Object.assign(prefetchSettings, rest);
+      if (specs) prefetchSpecs.value = specs;
+    }
   } catch { /* 后端旧版本无此端点时保持默认 */ }
 }
 
@@ -1533,16 +1639,31 @@ async function saveStreamSourcePriority(): Promise<boolean> {
   }
 }
 
-/** 一次性保存「歌词获取」+「封面获取」+「播放来源优先级」(开关/列表虽即时保存,给显式确认入口)。 */
+/** 预取/判官参数:改动即存(与开关/列表同一即时保存范式),后端按 specs 钳制。 */
+async function savePrefetchSettings(): Promise<boolean> {
+  savingPrefetch.value = true;
+  try {
+    await api.put("/rest/api/v1/playback-sources/prefetch-settings", { ...prefetchSettings });
+    return true;
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t('admin.plugins.prefetchSaveFailed'));
+    return false;
+  } finally {
+    savingPrefetch.value = false;
+  }
+}
+
+/** 一次性保存「歌词获取」+「封面获取」+「播放来源优先级」+「预取与判定参数」。 */
 async function saveAllMedia() {
   savingMedia.value = true;
-  const [a, b, c] = await Promise.all([
+  const [a, b, c, d] = await Promise.all([
     saveMediaSettings("lyrics"),
     saveMediaSettings("covers"),
     saveStreamSourcePriority(),
+    savePrefetchSettings(),
   ]);
   savingMedia.value = false;
-  if (a && b && c) ElMessage.success(t('admin.plugins.mediaSaved'));
+  if (a && b && c && d) ElMessage.success(t('admin.plugins.mediaSaved'));
 }
 
 async function startBackfill(kind: "lyrics" | "covers") {

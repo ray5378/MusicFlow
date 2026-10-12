@@ -5,13 +5,20 @@
 //   ② 正在播的 membuf 条目不会被预取顶掉(驱逐策略双向变异);
 //   ③ 预取与播放不共用 single-flight(红线:播放请求不得继承预取的 cfg);
 //   ④ 五道闸门各自生效(不做无意义的预取);
-//   ⑤ 失败全静默(不抛、不写 streamFallback 可播性缓存);
-//   ⑥ 出流与预取对同一首歌推导出完全相同的 url + headers。
+//   ⑤ 取流失败全静默(不抛、不写 streamFallback 可播性缓存);
+//   ⑥ 出流与预取对同一首歌推导出完全相同的 url + headers;
+//   ⑦ 完整性判官:试听片段(实际时长比曲库基准短 >15s)/假成功(HTML 错误页)/过小文件
+//      ⇒ 不登记预取 + 记无源负缓存;无基准/差值 ≤15s/开关关闭 ⇒ 一律放过。
+//      码率推算路径(duration 缺失,ogg 等)判死线单独放宽到 80s(推算是近似值,防误杀)。
+//   ⑧ 判官组内换源:首选行判死 ⇒ 试同组其他网络源(双写索引),全部判死才把队列行
+//      也标负缓存(judgePlayable 按队列行 id 判跳);有候选没评估 ⇒ 不标队列行。
+//   ⑨ 配置走 settings(UI「媒体获取」页保存即生效):enabled/lookahead/maxAltSources/delta。
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { sqlite } from "../../src/db/index.js";
 import {
   PREFETCH_LOOKAHEAD,
   bindLoopbackBase,
+  judgePrefetchedBuffer,
   prefetchAliasesForTest,
   prefetchHit,
   prefetchSong,
@@ -30,7 +37,8 @@ import {
   retryLoopKeysForTest,
 } from "../../src/services/source/bufferedFetch.js";
 import { resolveNetworkInput } from "../../src/services/source/networkInput.js";
-import { getCachedPlayability } from "../../src/services/source/online/streamFallback.js";
+import { getCachedPlayability, markUnplayable, clearStreamFallbackCache } from "../../src/services/source/online/streamFallback.js";
+import { getPrefetchSettings, resetPrefetchSettings, setPrefetchSettings } from "../../src/services/source/prefetchConfig.js";
 // 出流侧的解析函数(已 export 供本文件做一致性断言):它内部走的就是与预取同一份
 // networkInput 推导,这里用「真实调用 + 抓 fetch 入参」证明两边没有漂移。
 import { resolveTranscodeInput } from "../../src/routes/rest/index.js";
@@ -60,6 +68,19 @@ vi.mock("../../src/services/plugin/core/playPreference.js", async (importOrigina
   };
 });
 
+// music-metadata 的 parseBuffer 由本文件控制返回时长/码率（判官档 3/4 的输入）。
+// fail=true 模拟「magic 认音频但 metadata 解析失败」——判官须保守放过。
+// duration=0 且 bitrate>0 ⇒ 模拟 ogg 等「duration 缺失、只有码率」的容器（规则 6 兜底路径）。
+// queue 非空 ⇒ 按调用序逐次返回（换源测试用：第一个候选判死、第二个放过）。
+const mm = vi.hoisted(() => ({ duration: 200, fail: false, bitrate: 0, queue: [] as number[] }));
+vi.mock("music-metadata", () => ({
+  parseBuffer: async () => {
+    if (mm.fail) throw new Error("mock parse failure");
+    const d = mm.queue.length > 0 ? (mm.queue.shift() as number) : mm.duration;
+    return { format: { duration: d, bitrate: mm.bitrate, container: "flac" }, common: {} };
+  },
+}));
+
 const MB = 1024 * 1024;
 const DAV_ORIGIN = "http://127.0.0.1:18777";
 
@@ -68,6 +89,8 @@ const ROW_W = { id: "pf-w", type: "local", path: "w:davsrc:/dav/a.flac", size: 5
 const ROW_L = { id: "pf-l", type: "local", path: "l:localdisk:/MUSIC/a.flac", size: 5 * MB, url: null, streamHeaders: null, cachePath: null };
 const ROW_BIG = { id: "pf-big", type: "local", path: "w:davsrc:/dav/big.flac", size: 200 * MB, url: null, streamHeaders: null, cachePath: null };
 const ROW_WEB = { id: "pf-web", type: "web", path: "web:plugin:x", url: "http://up.example/1.mp3", streamHeaders: null, cachePath: null, size: 0 };
+/** 无时长基准行（曲库 duration=0）—— 判官应保守放过。 */
+const ROW_NODUR = { id: "pf-nodur", type: "local", path: "w:davsrc:/dav/nodur.flac", size: 5 * MB };
 
 // ---- 同曲多源组(队列 web 行 + 组内 WebDAV 兄弟行) ----
 // 复刻 240 实测:队列里是 web 行(type=web),组内兄弟是「核心曲库源」行 —— 这里用
@@ -76,11 +99,15 @@ const ROW_WEB = { id: "pf-web", type: "web", path: "web:plugin:x", url: "http://
 const GRP = "pf-grp";
 const ROW_G_WEB = { id: "pf-gweb", type: "web", path: "web:plugin:x", url: "http://up.example/g.mp3", streamHeaders: null, cachePath: null, size: 0 };
 const ROW_G_DAV = { id: "pf-gdav", type: "local", path: "w:davsrc:/dav/g.flac", size: 5 * MB };
+/** 组内本地磁盘行(l:)—— 换源测试复刻「队列行是本地行、出流回退组内 web」的形态。 */
+const ROW_G_LOCAL = { id: "pf-gloc", type: "local", path: "l:localdisk:/MUSIC/g.flac", size: 5 * MB };
 
 // ---------------- 假上游 ----------------
-type Mode = "ok" | "500";
+type Mode = "ok" | "500" | "html" | "tiny";
 let mode: Mode = "ok";
 let calls: Array<{ url: string; headers: any }> = [];
+/** 第 N 次调用(1-based)返回 500;0=不启用(换源测试:制造「首个候选判死、次候选取流失败」)。 */
+let failCall = 0;
 /** 第一路取流是否卡住(用于「并发闸门」:证明第二路没有提前起飞)。 */
 let blockFirst = false;
 let releaseFirst: () => void = () => {};
@@ -91,11 +118,17 @@ function installFetchStub(): void {
     if (blockFirst && calls.length === 1) {
       await new Promise<void>((r) => { releaseFirst = r; });
     }
-    if (mode === "500") {
+    if (mode === "500" || (failCall > 0 && calls.length === failCall)) {
       return { status: 500, headers: { get: () => null }, body: { cancel: async () => {} } };
     }
     let i = 0;
-    const chunks = [Buffer.alloc(4096, 7)];
+    // 判官专用假数据：html = 上游把错误页当 200 返回；tiny = 合法音频头但小得可怜。
+    const chunks: Buffer[] =
+      mode === "html"
+        ? [Buffer.concat([Buffer.from('<html><body>403 Forbidden</body></html>', "utf8"), Buffer.alloc(80 * 1024, 0x20)])]
+        : mode === "tiny"
+          ? [Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(1024, 0)])]
+          : [Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(128 * 1024, 0)])];
     return {
       status: 200,
       headers: { get: (_: string) => null },
@@ -120,21 +153,28 @@ beforeAll(() => {
       .prepare("INSERT INTO songs (id, title, path, type, size, duration, suffix) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING")
       .run(r.id, "t-" + r.id, r.path, r.type, r.size, 200, "flac");
   }
+  // 无基准行：duration=0（其余同 ROW_W）。
+  sqlite
+    .prepare("INSERT INTO songs (id, title, path, type, size, duration, suffix) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING")
+    .run(ROW_NODUR.id, "t-" + ROW_NODUR.id, ROW_NODUR.path, ROW_NODUR.type, ROW_NODUR.size, 0, "flac");
   // 同曲多源组两行(带 group_id;web 行带 url)。
   const seedGrouped = sqlite.prepare(
     "INSERT INTO songs (id, title, path, type, size, duration, suffix, group_id, url) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
   );
   seedGrouped.run(ROW_G_WEB.id, "t-" + ROW_G_WEB.id, ROW_G_WEB.path, ROW_G_WEB.type, 0, 200, "flac", GRP, ROW_G_WEB.url);
   seedGrouped.run(ROW_G_DAV.id, "t-" + ROW_G_DAV.id, ROW_G_DAV.path, ROW_G_DAV.type, ROW_G_DAV.size, 200, "flac", GRP, null);
+  seedGrouped.run(ROW_G_LOCAL.id, "t-" + ROW_G_LOCAL.id, ROW_G_LOCAL.path, ROW_G_LOCAL.type, ROW_G_LOCAL.size, 200, "flac", GRP, null);
 });
 
 beforeEach(() => {
   resetPrefetchForTest();
   resetMemStreamsForTest();
   resetRetryLoopsForTest();
+  clearStreamFallbackCache(); // 判官写的负缓存跨用例会污染
   installFetchStub();
   calls = [];
   mode = "ok";
+  failCall = 0;
   blockFirst = false;
   releaseFirst = () => {};
   ph.probeOk.mockReset();
@@ -142,12 +182,19 @@ beforeEach(() => {
   ph.active = true;
   ph.preferLocal = true;
   ph.fallbackToWeb = true;
+  mm.duration = 200;
+  mm.fail = false;
+  mm.bitrate = 0;
+  mm.queue = [];
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.MEMBUF_MAX_ENTRIES;
   delete process.env.STREAM_BUFFER_BUDGET_MB;
+  delete process.env.PREFETCH_INTEGRITY_DELTA_SEC;
+  delete process.env.PREFETCH_INTEGRITY_DELTA_SEC_BITRATE;
+  delete process.env.PREFETCH_INTEGRITY_OFF;
 });
 
 /** 轮询等待条件成立(不用 vi.waitUntil,避免版本差异;超时即失败)。 */
@@ -419,5 +466,275 @@ describe("⑦ 预取按解析后的优选源 id 登记(同曲多源组 id 错位
     await prefetchSong(ROW_G_WEB.id); // 无悬空别名 ⇒ 正确重新预取
     expect(calls.length).toBe(2);
     expect(prefetchAliasesForTest()).toEqual([[ROW_G_WEB.id, ROW_G_DAV.id]]);
+  });
+});
+
+// ==================== ⑦ 完整性判官（试听片段 / 假成功 / 过小文件） ====================
+describe("⑦ 完整性判官", () => {
+  it("(a) 试听片段:实际 30s vs 曲库 200s ⇒ 判死:不登记预取 + 记无源负缓存", async () => {
+    mm.duration = 30; // 平台只给 30 秒
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(calls.length).toBe(1); // 取流照常发生(判官在取流之后)
+    expect(prefetchHit(ROW_W.id)).toBeNull(); // 不登记
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable"); // 负缓存已写
+  });
+
+  it("(b) 差值 ≤15s 放过(190 vs 200):正常登记", async () => {
+    mm.duration = 190;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unknown");
+  });
+
+  it("(c) 无基准(曲库 duration=0):再短也不杀", async () => {
+    mm.duration = 30;
+    await prefetchSong(ROW_NODUR.id);
+    await quiesce();
+    expect(prefetchHit(ROW_NODUR.id)).not.toBeNull();
+    expect(getCachedPlayability(ROW_NODUR.id)).toBe("unknown");
+  });
+
+  it("(d) 假成功:上游把 HTML 错误页当 200 ⇒ magic 档判死", async () => {
+    mode = "html";
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+  });
+
+  it("(e) 过小文件(<64KB):判死", async () => {
+    mode = "tiny";
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+  });
+
+  it("(f) env PREFETCH_INTEGRITY_OFF=1:整体关闭判官,试听片段也正常登记(一键回退)", async () => {
+    process.env.PREFETCH_INTEGRITY_OFF = "1";
+    mm.duration = 30;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+  });
+
+  it("(g) 判死线可调:delta=300 时 30s 片段不再判死", async () => {
+    process.env.PREFETCH_INTEGRITY_DELTA_SEC = "300";
+    mm.duration = 30;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+  });
+
+  it("(h) markUnplayable 负缓存带 TTL:写入后 unplayable,推进 5 分钟后自动复活", async () => {
+    vi.useFakeTimers();
+    try {
+      markUnplayable("pf-w");
+      expect(getCachedPlayability("pf-w")).toBe("unplayable");
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1000); // 越过 MARK_UNPLAYABLE_TTL_MS
+      expect(getCachedPlayability("pf-w")).toBe("unknown");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("(i) parseBuffer 解析失败(magic 是音频但 metadata 认不出):保守放过", async () => {
+    mm.fail = true;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unknown");
+  });
+});
+
+// ==================== ⑦-K 判官单元:两条判死线(metadata 15s / 码率推算 80s) ====================
+describe("⑦-K 判官单元:两条判死线", () => {
+  // 与 fetch stub 的 ok 模式同款假数据(合法 flac 头 + 128KB);parseBuffer 被 mock,内容不参与判定。
+  const buf = Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(128 * 1024, 0)]);
+  const BYTES = buf.length; // 131076
+
+  it("metadata 真值路径:差 16s 判死 / 差 14s 放过(线=15s)", async () => {
+    mm.duration = 184; mm.bitrate = 0;
+    const dead = await judgePrefetchedBuffer(buf, 200);
+    expect(dead.dead).toBe(true);
+    expect(dead.reason).toBe("preview");
+    expect(dead.via).toBe("metadata");
+    mm.duration = 186;
+    const ok = await judgePrefetchedBuffer(buf, 200);
+    expect(ok.dead).toBe(false);
+  });
+
+  it("码率推算路径:差 79s 放过 / 差 81s 判死(线=80s,比 metadata 宽一档)", async () => {
+    // actual ≈ BYTES*8/bitrate:bitrate=BYTES*8/121 ⇒ actual≈121s,差 79s(<80) ⇒ 放过。
+    mm.duration = 0; mm.bitrate = Math.round((BYTES * 8) / 121);
+    const ok = await judgePrefetchedBuffer(buf, 200);
+    expect(ok.dead).toBe(false);
+    expect(ok.via).toBe("bitrate");
+    // bitrate=BYTES*8/119 ⇒ actual≈119s,差 81s(>80) ⇒ 判死。
+    mm.bitrate = Math.round((BYTES * 8) / 119);
+    const dead = await judgePrefetchedBuffer(buf, 200);
+    expect(dead.dead).toBe(true);
+    expect(dead.reason).toBe("preview");
+    expect(dead.via).toBe("bitrate");
+    expect(dead.actualSec).toBeGreaterThan(100);
+  });
+
+  it("码率线 env 可调:PREFETCH_INTEGRITY_DELTA_SEC_BITRATE=10 ⇒ 差 30s 也判死", async () => {
+    process.env.PREFETCH_INTEGRITY_DELTA_SEC_BITRATE = "10";
+    mm.duration = 0; mm.bitrate = Math.round((BYTES * 8) / 170); // actual≈170s,差 30s
+    const v = await judgePrefetchedBuffer(buf, 200);
+    expect(v.dead).toBe(true);
+    expect(v.via).toBe("bitrate");
+  });
+
+  it("同一条数据两条线互不干扰:差 30s 时 metadata 判死、码率推算放过", async () => {
+    mm.duration = 170; mm.bitrate = 0; // metadata:差 30s > 15s ⇒ 判死
+    expect((await judgePrefetchedBuffer(buf, 200)).dead).toBe(true);
+    mm.duration = 0; mm.bitrate = Math.round((BYTES * 8) / 170); // 码率:actual≈170s,差 30s < 80s ⇒ 放过
+    expect((await judgePrefetchedBuffer(buf, 200)).dead).toBe(false);
+  });
+});
+
+// ==================== ⑦-L 码率推算路径的端到端(预取入口) ====================
+describe("⑦-L 码率推算路径端到端", () => {
+  it("(j) duration 缺失 + 码率推算出 30s(差 170s > 80s):判死 + 负缓存", async () => {
+    mm.duration = 0;
+    mm.bitrate = Math.round((131076 * 8) / 30); // actual≈30s
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(calls.length).toBe(1);
+    expect(prefetchHit(ROW_W.id)).toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+  });
+
+  it("(k) 码率推算差 30s(>15s 但 <80s):不判死,正常登记(放宽档的核心回归)", async () => {
+    mm.duration = 0;
+    mm.bitrate = Math.round((131076 * 8) / 170); // actual≈170s,差 30s
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unknown");
+  });
+});
+
+// ==================== ⑧ 判官组内换源(先换源、全死才跳) ====================
+describe("⑧ 判官组内换源", () => {
+  it("(a) 首选行判死 ⇒ 换组内候选源:第二个候选抓取+登记,双写索引", async () => {
+    mm.queue = [30, 200]; // 第 1 个候选(解析后 pf-gdav)判死;第 2 个(pf-gweb)放过
+    await prefetchSong(ROW_G_WEB.id);
+    await quiesce();
+    expect(calls.length).toBe(2);
+    expect(calls[0].url).toBe(DAV_ORIGIN + "/dav/g.flac"); // 首选(解析后)先试
+    expect(calls[1].url).toBe("http://up.example/g.mp3"); // 判死 ⇒ 换组内 web 兄弟
+
+    // 双写:出流侧解析到 pf-gdav 命中;候选 id 本身也可命中。
+    expect(prefetchHit(ROW_G_DAV.id)).toContain("/rest/membuf/");
+    expect(prefetchHit(ROW_G_WEB.id)).toContain("/rest/membuf/");
+    // 判死的候选逐个记负缓存;队列行/存活候选不标。
+    expect(getCachedPlayability(ROW_G_DAV.id)).toBe("unplayable");
+    expect(getCachedPlayability(ROW_G_WEB.id)).toBe("unknown");
+
+    // 出流真实入口(拿的是解析后的行)命中 ⇒ 零上游。
+    const src = await resolveTranscodeInput({}, { ...ROW_G_DAV }, { buffering: true });
+    expect(src?.source).toBe(prefetchHit(ROW_G_DAV.id));
+    expect(calls.length).toBe(2);
+  });
+
+  it("(b) 全部候选判死 ⇒ 逐个标负缓存,队列行也标(judgePlayable 才能跳)", async () => {
+    mm.queue = [30, 30]; // 两个网络候选都判死
+    await prefetchSong(ROW_G_WEB.id);
+    await quiesce();
+    expect(calls.length).toBe(2);
+    expect(prefetchHit(ROW_G_DAV.id)).toBeNull();
+    expect(getCachedPlayability(ROW_G_DAV.id)).toBe("unplayable"); // 候选逐个标
+    expect(getCachedPlayability(ROW_G_WEB.id)).toBe("unplayable"); // 队列行=最后一个候选,同样被标
+  });
+
+  it("(c) 队列行是本地行(非候选)时,全判死也要标队列行 —— 否则播 30s 试听而不是跳歌", async () => {
+    // 本地行 probe 失败 ⇒ resolvePreferredSong 方向 2 回退组内 web 行(pf-gweb)。
+    ph.probeOk.mockImplementation(async (s: any) => s?.id !== ROW_G_LOCAL.id);
+    mm.queue = [30, 30]; // pf-gweb、pf-gdav 两个网络候选都判死
+    await prefetchSong(ROW_G_LOCAL.id);
+    await quiesce();
+    expect(calls.length).toBe(2); // 本地行不抓,只抓两个网络候选
+    expect(getCachedPlayability(ROW_G_WEB.id)).toBe("unplayable");
+    expect(getCachedPlayability(ROW_G_DAV.id)).toBe("unplayable");
+    // 关键:队列行(本地行,不在候选链里)也必须标 —— judgePlayable 按队列行 id 判跳。
+    expect(getCachedPlayability(ROW_G_LOCAL.id)).toBe("unplayable");
+    expect(prefetchHit(ROW_G_WEB.id)).toBeNull();
+  });
+
+  it("(d) 有候选没被评估(次候选取流失败)⇒ 只标判死的候选,不标队列行(未知不当死)", async () => {
+    ph.probeOk.mockImplementation(async (s: any) => s?.id !== ROW_G_LOCAL.id);
+    mm.queue = [30]; // 只有第一个候选走得到判官
+    failCall = 2; // 第二个候选(pf-gdav)取流 500
+    await prefetchSong(ROW_G_LOCAL.id);
+    await quiesce();
+    expect(calls.length).toBe(2);
+    expect(getCachedPlayability(ROW_G_WEB.id)).toBe("unplayable"); // 判死的候选照标
+    expect(getCachedPlayability(ROW_G_LOCAL.id)).toBe("unknown"); // 队列行不标:pf-gdav 还没评估
+  });
+
+  it("(e) 无组单行:判死后直接负缓存,无换源行为(与旧版一致)", async () => {
+    mm.duration = 30;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(calls.length).toBe(1);
+    expect(prefetchHit(ROW_W.id)).toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+  });
+});
+
+// ==================== ⑨ 配置走 settings(UI 保存即生效,不靠 env) ====================
+describe("⑨ 配置走 settings", () => {
+  it("(a) settings integrityEnabled=false ⇒ 判官关闭(试听片段也登记)", async () => {
+    setPrefetchSettings({ integrityEnabled: false });
+    mm.duration = 30;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unknown");
+    resetPrefetchSettings();
+  });
+
+  it("(b) settings lookahead=2 ⇒ prefetchUpcoming(不传 n)预取前两首", async () => {
+    const second = { id: "pf-w2", type: "local", path: "w:davsrc:/dav/b.flac", size: 5 * MB };
+    sqlite
+      .prepare("INSERT INTO songs (id, title, path, type, size, duration, suffix) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING")
+      .run(second.id, "t", second.path, second.type, second.size, 200, "flac");
+    setPrefetchSettings({ lookahead: 2 });
+    // currentIndex=0 ⇒ order 模式窗口 = 下标 1、2(ROW_W + second);ROW_L(本地行)不取。
+    prefetchUpcoming({
+      items: [{ songId: ROW_L.id }, { songId: ROW_W.id }, { songId: second.id }],
+      currentIndex: 0,
+      playMode: "order",
+    });
+    await quiesce();
+    expect(calls.length).toBe(2); // 前两首各取一次(本地行被源类型闸门拦下)
+    expect(calls[0].url).toBe(DAV_ORIGIN + "/dav/a.flac");
+    expect(calls[1].url).toBe(DAV_ORIGIN + "/dav/b.flac");
+    resetPrefetchSettings();
+  });
+
+  it("(c) settings maxAltSources=0 ⇒ 关闭换源:组内首个判死即停", async () => {
+    setPrefetchSettings({ maxAltSources: 0 });
+    mm.queue = [30, 200]; // 即使第二个候选能过,也不该去抓
+    await prefetchSong(ROW_G_WEB.id);
+    await quiesce();
+    expect(calls.length).toBe(1); // 不换源
+    expect(getCachedPlayability(ROW_G_DAV.id)).toBe("unplayable");
+    expect(prefetchHit(ROW_G_WEB.id)).toBeNull();
+    resetPrefetchSettings();
+  });
+
+  it("(d) settings 判死线即时生效:integrityDeltaSec=300 ⇒ 30s 片段不判死", async () => {
+    setPrefetchSettings({ integrityDeltaSec: 300 });
+    mm.duration = 30;
+    await prefetchSong(ROW_W.id);
+    await quiesce();
+    expect(prefetchHit(ROW_W.id)).not.toBeNull();
+    resetPrefetchSettings();
   });
 });

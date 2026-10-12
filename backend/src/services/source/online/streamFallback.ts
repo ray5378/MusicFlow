@@ -58,6 +58,8 @@ const PLAYABLE_CACHE_MAX = 5000;
 const PLAYABLE_TTL_DEFAULT_MS = 60 * 60 * 1000;
 const NEGATIVE_TTL_DEFAULT_MS = 45 * 1000;
 const TRANSIENT_BACKOFF_DEFAULT_MS = 5 * 1000;
+/** 内容型判死（markUnplayable）的负缓存有效期：比网络型负缓存长，理由见函数注释。 */
+const MARK_UNPLAYABLE_TTL_MS = 5 * 60 * 1000;
 
 /** 单曲探测超时默认值(毫秒)。预探测路径可传更短的值(不阻塞播放)。 */
 export const PROBE_TIMEOUT_DEFAULT_MS = 12 * 1000;
@@ -523,6 +525,19 @@ export async function recheckOnlineDirect(
 export function clearFallbackCache(songId?: string) {
   if (songId) fallbackCache.delete(songId);
   else fallbackCache.clear();
+}
+
+/**
+ * 内容型判死（预取完整性判官专用）：把「整首字节已抓到、但内容是试听片段/假成功」
+ * 记为负结果。与探测路径的负缓存**同一份数据**（`getCachedPlayability` 直接读），
+ * 但 TTL 默认 5 分钟（探测路径的负 TTL 只有 45s，面向网络抖动）——
+ * 判据是完整字节跑出来的硬结论，不是一次抖动；又不锁死太久：平台版权/试听策略
+ * 会变，过期后自动复活重探。
+ */
+export function markUnplayable(songId: string, opts?: { ttlMs?: number }): void {
+  if (!songId) return;
+  const ttlMs = opts?.ttlMs && opts.ttlMs > 0 ? opts.ttlMs : MARK_UNPLAYABLE_TTL_MS;
+  setFallback(songId, null, { transient: false, ttlMs });
 }
 
 /**

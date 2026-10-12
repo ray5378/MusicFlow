@@ -20,6 +20,7 @@ import {
   getSetting,
   getSettingBool,
   getProviderPriority,
+  getPrefetchSettings,
   getStreamSourcePriority,
   isBatchBusy,
   isIdle,
@@ -27,11 +28,13 @@ import {
   listAvailableStreamSources,
   log,
   logLevelSnapshot,
+  PREFETCH_NUM_SPECS,
   plugins,
   preferLocalEnabled,
   reclaimNow,
   saveLogLevel,
   setLyricsCoversSettings,
+  setPrefetchSettings,
   setSetting,
   setStreamSourcePriority,
   songs,
@@ -198,6 +201,28 @@ app.put("/v1/playback-sources/settings", adminMiddleware, async (c) => {
   // 用的是同文件的 evictStreamFallbackCache;这里改的是全局顺序,故清全部而非单曲)。
   clearStreamFallbackCache();
   return c.json({ success: true, priority });
+});
+
+// ==================== 预取与判官参数(内存预取 + 完整性判官) ====================
+// 「下一首预缓冲」各档参数 + 判官两条判死线存 settings 表(`prefetch.settings`),
+// 「插件管理 → 媒体获取」页即存即生效(下一首预取就按新值跑,无需重启)。
+// 读优先级 settings>env>默认见 services/source/prefetchConfig.ts;PUT 为**合并**
+// 语义(只改带上来的字段);非法/越界值由后端按 specs 钳制(前端同范围校验)。
+// 路径沿用 playback-sources 命名空间(与 /v1/stream 前缀的流播权限门禁解耦,
+// 理由见上方 playback-sources 注释)。
+
+app.get("/v1/playback-sources/prefetch-settings", adminMiddleware, (c) => c.json({
+  success: true,
+  ...getPrefetchSettings(),
+  specs: PREFETCH_NUM_SPECS,
+}));
+
+app.put("/v1/playback-sources/prefetch-settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const next = setPrefetchSettings(body);
+  // 一次「人主动做的运维动作」,任何时候都该看得见(含改动后的全量生效值)。
+  createLogger("ADMIN").info(`[prefetch] 预取/判官参数已更新 ${JSON.stringify(next)}`);
+  return c.json({ success: true, ...next });
 });
 
 // 手动批量补全(节流执行,后台运行;同种任务在跑则返回 running=true)

@@ -149,6 +149,15 @@ export {
   listAvailableStreamSources,
 } from "../../services/source/online/streamSourcePriority.js";
 
+// 预取与判官运行时配置(settings 表,媒体获取页读写):下一首内存预取各档参数 +
+// 完整性判官两条判死线。读优先级 settings>env>默认,PUT 合并语义,即存即生效。
+export {
+  getPrefetchSettings,
+  setPrefetchSettings,
+  resetPrefetchSettings,
+  PREFETCH_NUM_SPECS,
+} from "../../services/source/prefetchConfig.js";
+
 // 歌词/封面来源优先级(读权限:settings 路由 GET 用 getProviderPriority;写经
 // setLyricsCoversSettings 内的 normalizeProviderPriority)。按优先级列表排序/筛选
 // 的取源逻辑在 providers.ts 的 filterProvidersByPreference。

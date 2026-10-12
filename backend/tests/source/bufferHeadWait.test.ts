@@ -70,7 +70,9 @@ function installFetchStub(): void {
       return { status: 500, headers: { get: () => null }, body: { cancel: async () => {} } };
     }
     let i = 0;
-    const chunks = [Buffer.alloc(4096, 7)];
+    // 合法 FLAC 头 + 128KB 填充：预取完整性判官会检查它（4KB 垃圾会被判死），
+    // 真实 parseBuffer 对假头解析失败 => 判官保守放过，本文件语义不变。
+    const chunks = [Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(128 * 1024, 0)])];
     return {
       status: 200,
       headers: { get: (_: string) => null },

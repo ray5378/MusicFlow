@@ -15,7 +15,7 @@ import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
-import { prefetchUpcoming, PREFETCH_LOOKAHEAD } from "../source/prefetchCache.js";
+import { prefetchUpcoming } from "../source/prefetchCache.js";
 import { createGroupProtocolPlayer, getGroupStatus, hasOnlineMember } from "../group/protocolPlayer.js";
 import { checkPlayTarget } from "../playTarget.js";
 import { getGroupManager } from "../group/index.js";
@@ -147,7 +147,7 @@ export class QueueController extends EventEmitter {
    * 只读不改队列状态),这里不自己推算。
    */
   private schedulePrefetch(playerId: string): void {
-    prefetchUpcoming(this.queues.get(playerId), PREFETCH_LOOKAHEAD);
+    prefetchUpcoming(this.queues.get(playerId));
   }
 
   registerPlayer(playerId: string, player: UniversalPlayer, ctrl: PlayerControllerLike): void {

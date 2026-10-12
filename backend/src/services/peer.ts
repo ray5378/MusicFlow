@@ -51,7 +51,7 @@ import { getGroupManager } from "./group/index.js";
 import { createLogger } from "../utils/logger.js";
 import { getAirPlayDevices, onAirPlayEvent } from "./airplay/discovery.js";
 import { getPreProbeScheduler, type QueuePeekSource } from "./player/preProbeScheduler.js";
-import { prefetchUpcoming, PREFETCH_LOOKAHEAD } from "./source/prefetchCache.js";
+import { prefetchUpcoming } from "./source/prefetchCache.js";
 import { getSetting } from "./settings.js";
 // Sendspin 持久设备档案:断连补占位 peer / 判定「这台设备存在过」(见 markSendspinUnavailable)。
 import { getDeviceDisabled, listKnownDeviceIds } from "./sendspin/deviceState.js";
@@ -900,7 +900,7 @@ export class PeerManager extends EventEmitter {
       .run();
     this.scheduleLocalPreProbe(peerId);
     // 下一首预缓冲(后台 fire-and-forget,失败全静默)。
-    void prefetchUpcoming(this.localPeekSource(peerId), PREFETCH_LOOKAHEAD);
+    void prefetchUpcoming(this.localPeekSource(peerId));
     // 起始位置只随**这一次**广播带出:先落 pending → 取快照(快照里带上它)
     // → 广播 → 立刻清掉。顺序不能颠倒,否则后续轮询会反复把它交给客户端,
     // 表现为「每次轮询都被拉回同一个位置」。
@@ -1020,7 +1020,7 @@ export class PeerManager extends EventEmitter {
     // 播放模式变化 → 预探测窗口位置整体重算(已探过的曲复用缓存,只补缺口)。
     this.scheduleLocalPreProbe(peerId);
     // 播放模式变了 ⇒ 「下一首是谁」整体重算,旧预取窗口作废(预取器自己去重,不重复取)。
-    void prefetchUpcoming(this.localPeekSource(peerId), PREFETCH_LOOKAHEAD);
+    void prefetchUpcoming(this.localPeekSource(peerId));
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 
@@ -1038,7 +1038,7 @@ export class PeerManager extends EventEmitter {
     }
     this.scheduleLocalPreProbe(peerId);
     // ★ 切歌事件 = 最准的预取时机:游标刚动,立刻把下一首取进内存。
-    void prefetchUpcoming(this.localPeekSource(peerId), PREFETCH_LOOKAHEAD);
+    void prefetchUpcoming(this.localPeekSource(peerId));
     this.emit("peer_queue_changed", peerId, this.getQueueSnapshot(peerId));
   }
 

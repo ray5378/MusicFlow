@@ -14,8 +14,32 @@
 //      改短 / 后台任务被挂 30 分钟）。故这里只用 `fetchWholeSongBuffered`，去重**自己维护**。
 //   2. **绝不动播放路径的超时**。放宽（deadline 120s / stall 30s）只发生在后台预取；
 //      `STREAM_BUFFER_TOTAL_TIMEOUT_MS=18s` / `STREAM_BUFFER_STALL_MS=10s` 一个字都不改。
-//   3. **失败全静默**。不 warn、不重试、不抛给调用方、不写 streamFallback 的可播性缓存
-//      （那是 PreProbe 的地盘，混进去会把「慢」误判成「无源」）。
+//   3. **取流失败全静默**（不 warn、不重试、不抛给调用方、不写任何可播性缓存 —— 那是 PreProbe 的
+//      地盘，把「慢」误判成「无源」会冤枉好歌）。
+//      ⚠ 唯一例外 = 下面的**完整性判官**：它依据是「整首歌的字节已经抓下来了」这个硬事实，比
+//      PreProbe 的在线探测结论更强 —— 文件头是 HTML/JSON 错误页（假成功）、或实际时长比曲库
+//      基准短 15s 以上（平台试听片段/截断）。这种歌登记进预取缓存只会害播放器，故判死后写
+//      streamFallback 负缓存（复用「无可用源」语义，PreProbe 与播放路径都读它）。
+//
+// ### 完整性判官（2026-10-12 用户拍板：差值兜底判「试听/截断片段」）
+//   网络平台大量歌曲整首只放几十秒试听。判官在 `registerMemStream` **之前**跑，判死即放弃登记：
+//     档 1 too-small ：buf < 64KB —— 音频不可能这么小；
+//     档 2 magic     ：`sniffMagic` 判非音频 —— 上游把 HTML/JSON 错误页当 200 返回（最常见假成功）；
+//     档 3 duration  ：`parseBuffer` 拿实际时长，与曲库基准（`songs.duration`，队列 item 同源）
+//                      比，**实际比期望短超过 15s ⇒ 判死**（覆盖 4 分钟给 30 秒、也覆盖给 3 分钟）；
+//     档 4 bitrate   ：duration 缺失（ogg 等）时码率×字节推算实际时长，判死线**单独放宽到 80s**
+//                      （推算是近似值，VBR/封面/tag 都会偏 —— 宁可漏杀不可误杀）。
+//   保守原则：无基准（曲库 duration=0）不杀；magic 认音频但 metadata 解析失败不杀（防冷门容器误杀）。
+//   ffmpeg 全解码档（decodable）**不做**：它抓「头对中间坏」，抓不到完整的短文件，还每首几秒 CPU。
+//
+// ### 组内换源（2026-10-12 用户拍板：判死先换源，全死才跳下一首）
+//   判官判死**不直接跳下一首**：候选链 = 解析后首选行 + 同组其他网络源行（WebDAV 行优先
+//   于平台 web 行 —— 自己的曲库文件没有「试听片段」问题；上限 PREFETCH_MAX_ALT_SOURCES=3）。
+//   逐个抓取 + 判官；通过即登记并**双写索引**（候选 id + 解析后 id —— membuf 存的是**内容**，
+//   ffmpeg 不关心字节来自组内哪一行，出流侧解析到哪行都能命中）。
+//   每个判死的候选都逐个记无源负缓存；**全部**候选都判死时才把**队列行 id**也标上
+//   （judgePlayable/客户端「无可用源」按队列行 id 判跳 —— 不标就变成播 30s 试听片段）。
+//   有候选没被评估（取流失败 / 闸门拦下）时不标队列行：知识不完整，不能把未知当死。
 //
 // ### 五道闸门（进预取前全查）
 //   1. 同曲去重（已缓存 / 在途）；
@@ -31,6 +55,8 @@ import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { createLogger } from "../../utils/logger.js";
 import { isNetworkSong, resolveNetworkInput } from "./networkInput.js";
+import { sniffMagic } from "../fetch/integrity.js";
+import { parseBuffer } from "music-metadata";
 import {
   bufferedInFlightBytes,
   fetchWholeSongBuffered,
@@ -40,12 +66,16 @@ import {
   STREAM_BUFFER_MAX_FILE_MB,
 } from "./bufferedFetch.js";
 import { peekUpcomingPositions, type QueuePeekSource } from "../player/preProbeScheduler.js";
+import { getPrefetchSettings } from "./prefetchConfig.js";
 
 const log = createLogger("PREFETCH");
 
 const MB = 1024 * 1024;
 
-// ---------------- 配置（模块常量；先不接外部 env） ----------------
+// ---------------- 配置（模块常量 = **文档默认值**；运行时一律读 settings 表） ----------------
+// 2026-10-12 起全部可调项搬到 settings 表（`prefetch.settings`，前端「插件管理 →
+// 媒体获取」页即存即生效，见 prefetchConfig.ts）。下面的常量只作默认值与文档，
+// 热路径读 getPrefetchSettings()（getSetting 5s 缓存，成本可忽略）。
 
 /** 向前预取几首。1 = 只预取下一首（用户痛点集中在「切到下一首卡」）。 */
 export const PREFETCH_LOOKAHEAD = 1;
@@ -59,10 +89,121 @@ export const PREFETCH_CONCURRENCY = 1;
 export const PREFETCH_BUDGET_RATIO = 0.5;
 /** 无 size 信息（web 行常为 0）时的预估字节数 —— 取 240 曲库 `w:` 行实测均值 29.3MB。 */
 export const PREFETCH_ASSUMED_BYTES = 30 * MB;
+/**
+ * 组内换源的候选源上限：首选行（解析后）判死后，最多再试几个同组其他网络源。
+ * 用户 2026-10-12 拍板「先换源、全不可用才跳下一首」；0 = 关闭换源（旧行为）。
+ */
+export const PREFETCH_MAX_ALT_SOURCES = 3;
 /** 索引条目有效期（与 membuf 未消费条目的 TTL 10min 对齐）。 */
 export const PREFETCH_ENTRY_TTL_MS = 10 * 60_000;
 /** AbortController 兜底计时器在 deadline 之外的宽限（ms）。 */
 const PREFETCH_GUARD_GRACE_MS = 5_000;
+
+// ---------------- 完整性判官配置 ----------------
+
+/**
+ * 判死线（秒）：实际时长比曲库基准**短超过这么多** ⇒ 判「试听/截断片段」。
+ * 用户 2026-10-12 拍板用差值兜底（不用比例）：既覆盖「4 分钟给 30 秒」，也覆盖
+ * 「4 分钟给 3 分钟」这种截一半的。env `PREFETCH_INTEGRITY_DELTA_SEC` 可调。
+ */
+export const PREFETCH_INTEGRITY_DELTA_SEC = 15;
+/** 音频文件的最小合理字节数（低于此高度可疑：真音频不可能这么小）。 */
+export const PREFETCH_MIN_AUDIO_BYTES = 64 * 1024;
+/**
+ * **码率推算路径**的判死线（秒），默认 80 —— 比 metadata 真值路径（15s）宽松得多。
+ * 用户 2026-10-12 拍板：推算 `actual ≈ bytes*8/bitrate` 是近似值（VBR 文件平均码率
+ * ≠ 瞬时码率、大封面/冗余地 tag 也占字节，可超可不足），只在 duration 缺失
+ * （ogg 等容器）时兜底 —— 判据松一档，宁可漏过一个截断片段，也不可误杀正常歌。
+ * env `PREFETCH_INTEGRITY_DELTA_SEC_BITRATE` 可调。
+ */
+export const PREFETCH_INTEGRITY_DELTA_SEC_BITRATE = 80;
+
+/**
+ * 判官总开关 + 两条判死线。真源在 settings 表(`prefetch.settings`,前端「媒体获取」
+ * 页可调,即存即生效);UI 从没保存过时回落 env / 模块默认(见 prefetchConfig.ts)。
+ * 本函数保留为兼容导出(tests 与旧调用方沿用)。
+ */
+export function prefetchIntegrityConfig(): { enabled: boolean; deltaSec: number; bitrateDeltaSec: number } {
+  const s = getPrefetchSettings();
+  return {
+    enabled: s.integrityEnabled,
+    deltaSec: s.integrityDeltaSec,
+    bitrateDeltaSec: s.integrityBitrateDeltaSec,
+  };
+}
+
+export interface PrefetchVerdict {
+  dead: boolean;
+  /** 判死原因（too-small / not-audio / preview）；放过时为 undefined。 */
+  reason?: string;
+  /** probe 档拿到的实际时长（秒，能解析出才有）。 */
+  actualSec?: number;
+  /** 曲库基准时长（秒，>0 才有时长对比档）。 */
+  expectedSec?: number;
+  /** 实际时长来源：metadata 真值 / 码率推算（两条路径判死线不同，日志可辨）。 */
+  via?: "metadata" | "bitrate";
+}
+
+/**
+ * 对预取到的完整 Buffer 做完整性判定（纯判定，不碰任何缓存/索引，便于测试）。
+ *
+ * 规则（保守优先 —— 宁可放过一个片段，不可误杀一首冷门格式的好歌）：
+ *   1. `buf.length < PREFETCH_MIN_AUDIO_BYTES` → dead: too-small；
+ *   2. `sniffMagic(buf)` 判非音频 → dead: not-audio（HTML/JSON 错误页假成功）；
+ *      240 实测：平台试听文件是 **M4A/mp4**（fLaC 之外的各种容器 sniffMagic 都认）；
+ *   3. 基准 <= 0（曲库无 duration）→ 放过（没有参考答案，只靠绝对阈值会误杀真短歌）；
+ *   4. `parseBuffer` 解析失败 → 放过（magic 已认它是音频容器；冷门容器/怪 metadata 不杀）；
+ *   5. 能解析出时长且 `expected - actual > deltaSec` → dead: preview；
+ *   6. **解析不出时长但有码率** → 码率推算兜底 `actual ≈ bytes*8/bitrate`（240 实测：
+ *      ogg Buffer 模式 duration=undefined，但 640kbps×20.31MB ⇒ 253s 成功抓出截断；
+ *      mp3 128kbps×5.04MB=330s 与 music-metadata 真值完全吻合 —— 推算可信）。
+ *      ⚠ 推算是近似值（VBR/封面/tag 都会让字节≠时长×码率）⇒ 该路径判死线**单独放宽
+ *      到 80s**（`PREFETCH_INTEGRITY_DELTA_SEC_BITRATE`，用户 2026-10-12 拍板），
+ *      宁可漏杀不可误杀。
+ *      240 实测样例（泪海-许茹芸，基准 298s）：汽水音乐源 = 0.89MB M4A，
+ *      duration=29.0017s、256kbps —— 差值 269s ⇒ 必判死。
+ */
+export async function judgePrefetchedBuffer(buf: Buffer, expectedSec: number): Promise<PrefetchVerdict> {
+  const base: PrefetchVerdict = dead0(expectedSec);
+  if (buf.length < prefetchMinAudioBytes()) {
+    return { ...base, dead: true, reason: "too-small" };
+  }
+  const sniff = sniffMagic(buf);
+  if (!sniff.audio) {
+    return { ...base, dead: true, reason: "not-audio" };
+  }
+  if (!(expectedSec > 0)) return base;
+  let actualSec: number | undefined;
+  let via: "metadata" | "bitrate" | undefined;
+  try {
+    const meta = await parseBuffer(buf, { duration: true } as any);
+    const f: any = meta?.format;
+    const d = f?.duration;
+    if (typeof d === "number" && Number.isFinite(d) && d > 0) {
+      actualSec = d;
+      via = "metadata";
+    } else if (typeof f?.bitrate === "number" && f.bitrate > 0) {
+      // 规则 6：duration 缺失（ogg 等）时用码率×字节推算（单位：bit → 秒）。
+      actualSec = (buf.length * 8) / f.bitrate;
+      via = "bitrate";
+    }
+  } catch {
+    // magic 说是音频但 metadata 解析不出：冷门容器/怪 tag，保守放过（见规则 4）。
+    return base;
+  }
+  if (actualSec === undefined) return base;
+  const icfg = prefetchIntegrityConfig();
+  // 码率推算是近似值 ⇒ 判死线放宽到 80s（防误杀）；metadata 真值路径仍 15s。
+  const deltaSec = via === "bitrate" ? icfg.bitrateDeltaSec : icfg.deltaSec;
+  if (expectedSec - actualSec > deltaSec) {
+    return { ...base, dead: true, reason: "preview", actualSec, via };
+  }
+  return via ? { ...base, via } : base;
+}
+
+function dead0(expectedSec: number): PrefetchVerdict {
+  return expectedSec > 0 ? { dead: false, expectedSec } : { dead: false };
+}
 
 /**
  * 全局并发缓冲预算(字节)。优先读 env `STREAM_BUFFER_BUDGET_MB`(与 bufferedFetch 同一把尺子),
@@ -77,6 +218,35 @@ function prefetchBudgetBytes(): number {
 function prefetchMaxFileBytes(): number {
   const n = Number(process.env.STREAM_BUFFER_MAX_MB);
   return (Number.isFinite(n) && n > 0 ? Math.floor(n) : STREAM_BUFFER_MAX_FILE_MB) * MB;
+}
+
+// ---------------- 运行时配置(settings 表,前端「媒体获取」页可调,即存即生效) ----------------
+// 真源在 prefetchConfig.ts;下面的 getter 只是把秒/KB 换算成本模块使用的毫秒/字节。
+// 模块常量(如 PREFETCH_DEADLINE_MS)降级为**文档默认值**,运行时一律读 settings。
+
+function prefetchDeadlineMs(): number {
+  return getPrefetchSettings().deadlineSec * 1000;
+}
+function prefetchStallMs(): number {
+  return getPrefetchSettings().stallSec * 1000;
+}
+function prefetchBudgetRatio(): number {
+  return getPrefetchSettings().budgetRatio;
+}
+function prefetchConcurrency(): number {
+  return getPrefetchSettings().concurrency;
+}
+function prefetchEntryTtlMs(): number {
+  return getPrefetchSettings().entryTtlSec * 1000;
+}
+function prefetchLookahead(): number {
+  return getPrefetchSettings().lookahead;
+}
+function prefetchMaxAltSources(): number {
+  return getPrefetchSettings().maxAltSources;
+}
+function prefetchMinAudioBytes(): number {
+  return getPrefetchSettings().minAudioKB * 1024;
 }
 
 // ---------------- 索引 ----------------
@@ -129,7 +299,7 @@ export function prefetchToken(songId: string): string | null {
   if (!songId) return null;
   const e = bySong.get(songId);
   if (!e) return null;
-  if (Date.now() - e.at > PREFETCH_ENTRY_TTL_MS) {
+  if (Date.now() - e.at > prefetchEntryTtlMs()) {
     bySong.delete(songId);
     dropAliasesFor(songId);
     return null;
@@ -175,7 +345,7 @@ export function prefetchSong(songId: string): Promise<void> {
   if (aliasLive(songId)) return Promise.resolve(); // 闸门 1（已缓存）
   const pending = inflight.get(songId);
   if (pending) return pending; // 闸门 1（在途）
-  if (running >= PREFETCH_CONCURRENCY) {
+  if (running >= prefetchConcurrency()) {
     // 闸门 2：串行排队（不并发）。
     if (!queued.includes(songId)) queued.push(songId);
     return Promise.resolve();
@@ -188,12 +358,15 @@ export function prefetchSong(songId: string): Promise<void> {
 /**
  * 队列变动后预取前方 N 首（fire-and-forget）。
  * **「下一首是谁」一律由 `peekUpcomingPositions` 算**（四种 playMode 全覆盖、只读不改状态）。
+ * `n` 省略时取运行时配置（settings `lookahead`，前端「媒体获取」页可调）。
  */
-export function prefetchUpcoming(peek: QueuePeekSource | undefined, n: number = PREFETCH_LOOKAHEAD): void {
-  if (!peek || n <= 0) return;
+export function prefetchUpcoming(peek: QueuePeekSource | undefined, n?: number): void {
+  if (!peek) return;
+  const count = n ?? prefetchLookahead();
+  if (count <= 0) return;
   try {
-    const { positions } = peekUpcomingPositions(peek, n);
-    for (const p of positions.slice(0, n)) {
+    const { positions } = peekUpcomingPositions(peek, count);
+    for (const p of positions.slice(0, count)) {
       const songId = peek.items?.[p]?.songId;
       if (songId) void prefetchSong(songId);
     }
@@ -217,7 +390,7 @@ async function runOne(songId: string): Promise<void> {
 }
 
 function drain(): void {
-  while (running < PREFETCH_CONCURRENCY && queued.length > 0) {
+  while (running < prefetchConcurrency() && queued.length > 0) {
     const next = queued.shift();
     if (!next) break;
     if (aliasLive(next) || inflight.has(next)) continue;
@@ -249,59 +422,154 @@ async function doPrefetch(songId: string): Promise<void> {
   // 闸门 5：只预取网络源（`l:` 本地磁盘行不走 membuf，预取纯浪费）—— 用**解析后**的行判。
   if (!(await isNetworkSong(resolved))) return;
 
-  // 闸门 4：超单文件上限必然 too-big，白取一趟。
-  const size = typeof resolved.size === "number" && resolved.size > 0 ? resolved.size : 0;
-  if (size > prefetchMaxFileBytes()) return;
+  // ---- 候选源链（组内换源，2026-10-12 用户拍板）----
+  // 首选行判死后**不直接跳下一首**：同曲多源组里其他网络源可能完整可播（平台 A 只给
+  // 30s 试听、平台 B 给全曲是常态 —— 240 实测泪海-许茹芸：汽水 29s 片段、酷狗 404）。
+  // 候选链 = 解析后的首选行 + 同组其他网络源行（WebDAV 行优先于平台 web 行：
+  // 自己的曲库文件没有「试听片段」问题），逐个抓取 + 判官，通过即登记。
+  const candidates = await listPrefetchCandidates(resolved, resolvedId);
 
   // 闸门 3：预算 —— 给正在播的那条留一半（在途字节是**全局**记账，预取也占）。
-  const estimate = size > 0 ? size : PREFETCH_ASSUMED_BYTES;
   const budgetBytes = prefetchBudgetBytes();
-  if (bufferedInFlightBytes() + estimate > budgetBytes * PREFETCH_BUDGET_RATIO) {
-    log.debug(`[prefetch] ${songId} → ${resolvedId} 预算闸门拦下 inFlight=${bufferedInFlightBytes()} est=${estimate}`);
-    return;
-  }
-
-  // 与出流**共用同一份** URL 推导（见 networkInput.ts）—— 同样喂**解析后**的行。
-  const net = await resolveNetworkInput(resolved);
-  if (!net) return;
+  const icfg = prefetchIntegrityConfig();
+  // 判官开时才惰性 import streamFallback（会拉进 registry/plugins，静态引入有环风险；
+  // networkInput 对同一模块也是惰性 import，模式已验证）。
+  // ⚠ 相对基准是本文件（src/services/source/）—— online 在 source **下面**，是 ./ 不是 ../
+  const sf = icfg.enabled ? await import("./online/streamFallback.js") : null;
   await ensureLoopbackBase();
 
   // 自带 AbortController + 兜底计时器：预取没人会 abort 它，不能泄漏。
   const ctrl = new AbortController();
-  const guard = setTimeout(() => ctrl.abort(), PREFETCH_DEADLINE_MS + PREFETCH_GUARD_GRACE_MS);
+  const guard = setTimeout(() => ctrl.abort(), prefetchDeadlineMs() + PREFETCH_GUARD_GRACE_MS);
+  let evaluated = 0; // 真拿到完整字节并过了判官的候选数
+  let dead = 0; // 其中判死的数量
   try {
-    const r = await fetchWholeSongBuffered(net.url, net.headers, {
-      signal: ctrl.signal,
-      retries: 0,
-      deadlineMs: PREFETCH_DEADLINE_MS,
-      stallMs: PREFETCH_STALL_MS,
-    });
-    if (!r.ok) {
-      // 静默：kind 不写任何可播性缓存（那是 PreProbe 的地盘）。
-      log.debug(`[prefetch] ${songId} → ${resolvedId} 未成 kind=${r.kind}${r.err ? ` err=${r.err}` : ""}`);
+    for (const cand of candidates) {
+      // 闸门 4：超单文件上限必然 too-big，白取一趟（每个候选各判一次）。
+      const csize = typeof cand.size === "number" && cand.size > 0 ? cand.size : 0;
+      if (csize > prefetchMaxFileBytes()) continue;
+      // 闸门 3（候选循环内复判：在途字节会随抓取增长）。
+      const estimate = csize > 0 ? csize : PREFETCH_ASSUMED_BYTES;
+      if (bufferedInFlightBytes() + estimate > budgetBytes * prefetchBudgetRatio()) {
+        log.debug(`[prefetch] ${songId} 预算闸门拦下 cand=${cand.id} inFlight=${bufferedInFlightBytes()} est=${estimate}`);
+        continue;
+      }
+      // 与出流**共用同一份** URL 推导（见 networkInput.ts）—— 喂候选行。
+      const net = await resolveNetworkInput(cand);
+      if (!net) continue;
+      const r = await fetchWholeSongBuffered(net.url, net.headers, {
+        signal: ctrl.signal,
+        retries: 0,
+        deadlineMs: prefetchDeadlineMs(),
+        stallMs: prefetchStallMs(),
+      });
+      if (!r.ok) {
+        // 静默：kind 不写任何可播性缓存（那是 PreProbe 的地盘）。
+        log.debug(`[prefetch] ${songId} cand=${cand.id} 未成 kind=${r.kind}${r.err ? ` err=${r.err}` : ""}`);
+        continue;
+      }
+      // ---- 完整性判官（红线 3 的唯一例外，理由见文件头）----
+      // 依据是「整首字节已在手里」这个硬事实：判死 ⇒ 不登记 + 记无源负缓存 + 换下一个候选。
+      if (icfg.enabled) {
+        const expectedSec = candidateDurationSec(cand, row);
+        const verdict = await judgePrefetchedBuffer(r.buf, expectedSec);
+        if (verdict.dead) {
+          evaluated++;
+          dead++;
+          sf?.markUnplayable(cand.id); // 逐个记：出流侧换源/探测/判跳都读这份负缓存
+          const act = verdict.actualSec !== undefined ? ` 实际${Math.round(verdict.actualSec)}s` : "";
+          const exp = verdict.expectedSec !== undefined ? ` 期望${Math.round(verdict.expectedSec)}s` : "";
+          log.info(
+            `[prefetch] ${songId} cand=${cand.id} 完整性判死 reason=${verdict.reason}${act}${exp}` +
+              ` ⇒ 记无源负缓存（不登记预取）`,
+          );
+          continue; // 换源：试候选链里的下一个
+        }
+        evaluated++;
+      }
+      const token = registerMemStream(r.buf, undefined, { songId: resolvedId, prefetched: true });
+      // 驱逐不掉（全是正在消费的在用条目）→ 放弃登记，绝不踢正在播的那条。
+      if (!token) {
+        log.debug(`[prefetch] ${songId} cand=${cand.id} 注册表无空位，放弃登记（不驱逐在用条目）`);
+        return;
+      }
+      if (!loopbackBaseRef) {
+        log.debug(`[prefetch] ${songId} cand=${cand.id} 取不到 loopbackBase，放弃索引`);
+        return;
+      }
+      const entry: PrefetchEntry = {
+        token,
+        url: `${loopbackBaseRef()}/rest/membuf/${token}`,
+        bytes: r.bytes,
+        at: Date.now(),
+      };
+      // 双写：候选 id + 解析后 id。出流侧 resolvePreferredSong 永远解析到 resolvedId，
+      // 而 membuf 里存的是**内容**（ffmpeg 不关心字节来自组内哪一行）⇒ 两个 key 同指一条。
+      bySong.set(cand.id, entry);
+      if (cand.id !== resolvedId) {
+        bySong.set(resolvedId, entry);
+        log.info(`[prefetch] ${songId} 换源成功：首选 ${resolvedId} 不可用，改用组内候选 ${cand.id}`);
+      }
+      alias.set(songId, resolvedId);
+      log.info(`[prefetch] ${songId} → ${resolvedId} 预取完成 ${r.bytes}B/${Math.round(r.ms)}ms → 切过去即零上游`);
       return;
     }
-    const token = registerMemStream(r.buf, undefined, { songId: resolvedId, prefetched: true });
-    // 驱逐不掉（全是正在消费的在用条目）→ 放弃登记，绝不踢正在播的那条。
-    if (!token) {
-      log.debug(`[prefetch] ${songId} → ${resolvedId} 注册表无空位，放弃登记（不驱逐在用条目）`);
-      return;
+    // 全候选都判死（evaluated>0 且 dead===evaluated===candidates.length：每个候选都
+    // 真拿到了完整字节且都判死）⇒ 把**队列行 id** 也标上。judgePlayable/客户端
+    // 「无可用源」判定按**队列行 id** 查（QueueController.judgePlayable），不标这一条
+    // 的后果是播 30s 试听片段而不是跳下一首。有候选没被评估（取流失败/闸门拦下）时
+    // 不标 —— 知识不完整，不能把「未知」当「死」（红线同 streamFallback 2026-09-11）。
+    if (dead > 0 && dead === evaluated && evaluated === candidates.length && songId !== resolvedId) {
+      sf?.markUnplayable(songId);
+      log.info(`[prefetch] ${songId} 全部 ${candidates.length} 个候选源均判死 ⇒ 记队列行负缓存（跳下一首）`);
     }
-    if (!loopbackBaseRef) {
-      log.debug(`[prefetch] ${songId} → ${resolvedId} 取不到 loopbackBase，放弃索引`);
-      return;
-    }
-    bySong.set(resolvedId, {
-      token,
-      url: `${loopbackBaseRef()}/rest/membuf/${token}`,
-      bytes: r.bytes,
-      at: Date.now(),
-    });
-    alias.set(songId, resolvedId);
-    log.info(`[prefetch] ${songId} → ${resolvedId} 预取完成 ${r.bytes}B/${Math.round(r.ms)}ms → 切过去即零上游`);
   } finally {
     clearTimeout(guard);
   }
+}
+
+/**
+ * 组内换源的候选链：首选行（解析后）打头，随后是同 groupId 的其他行。
+ * 排序：WebDAV 行（path `w:`）优先于平台 web 行（自己的曲库文件没有试听片段问题）；
+ * 只收**网络源**（本地直读行不走 membuf，且它真能播时出流侧自己会优选到它）。
+ * 无 groupId / 查询失败 / 上限为 0 ⇒ 只有首选行（行为与换源前完全一致）。
+ */
+async function listPrefetchCandidates(resolved: any, resolvedId: string): Promise<any[]> {
+  const out: any[] = [resolved];
+  const gid = resolved?.groupId;
+  if (!gid || prefetchMaxAltSources() <= 0) return out;
+  try {
+    const sibs = db.select().from(songs).where(eq(songs.groupId, gid)).all() as any[];
+    const seen = new Set<string>([resolvedId]);
+    const ranked = sibs
+      .filter((s) => !!s?.id && !seen.has(s.id))
+      .sort((a, b) => webdavRank(a) - webdavRank(b));
+    let added = 0;
+    for (const s of ranked) {
+      if (added >= prefetchMaxAltSources()) break;
+      seen.add(s.id);
+      if (!(await isNetworkSong(s))) continue;
+      out.push(s);
+      added++;
+    }
+  } catch {
+    /* 查询失败 ⇒ 只用首选行,行为安全 */
+  }
+  return out;
+}
+
+/** WebDAV 行排在前（0），平台 web 行排后（1）。 */
+function webdavRank(s: any): number {
+  return String(s?.path || "").startsWith("w:") ? 0 : 1;
+}
+
+/** 候选行的时长基准：候选自身 duration 优先，缺省回退队列行（同曲多源组两行时长应一致）。 */
+function candidateDurationSec(cand: any, queueRow: any): number {
+  for (const r of [cand, queueRow]) {
+    const d = typeof r?.duration === "number" && r.duration > 0 ? r.duration : 0;
+    if (d > 0) return d;
+  }
+  return 0;
 }
 
 // ---------------- 测试用 ----------------
