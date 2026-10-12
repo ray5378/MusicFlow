@@ -28,6 +28,7 @@ import {
   collectAttemptedSongIds,
   collectLibrarySongs,
   ensureLibraryAttemptsTable,
+  libraryBatchProgressed,
   recordLibraryAttempts,
   resetLibraryAttempts,
 } from "../../src/services/fetch/library.js";
@@ -326,5 +327,35 @@ describe("buildLibraryContinuation 自动续批", () => {
     const r = buildLibraryContinuation(cfg);
     expect(r.job).toBeNull();
     expect(r.remaining).toBe(0);
+  });
+});
+
+// ==================== libraryBatchProgressed — 自动续批无进展保护 ====================
+// 2026-10-12 修 240「下载任务列表一直循环重复最后 26 首」:全部 skipped(下载冷却期
+// COOLDOWN_SKIPPED 且不记账)→ 未尝试集不收缩 → 必须中止自动续批,否则无限重选同一批。
+describe("libraryBatchProgressed — 无进展即中止自动续批", () => {
+  it("有 done → 有进展(迁移成 l: 离开曲库池),应继续", () => {
+    expect(libraryBatchProgressed({ done: 1, failed: 0, skipped: 25 })).toBe(true);
+  });
+
+  it("有 failed → 有进展(记账进冷却),应继续", () => {
+    expect(libraryBatchProgressed({ done: 0, failed: 3, skipped: 0 })).toBe(true);
+  });
+
+  it("done=0 且 failed=0(全部 skipped/冷却秒跳)→ 无进展,必须中止续批", () => {
+    expect(libraryBatchProgressed({ done: 0, failed: 0, skipped: 26 })).toBe(false);
+  });
+
+  it("空批次(全 0)也视为无进展", () => {
+    expect(libraryBatchProgressed({ done: 0, failed: 0, skipped: 0 })).toBe(false);
+  });
+
+  it("counts 缺失/为 null 视为无进展(保守中止,绝不无限续批)", () => {
+    expect(libraryBatchProgressed(undefined)).toBe(false);
+    expect(libraryBatchProgressed(null)).toBe(false);
+  });
+
+  it("字符串数字也正确 coerced(done 为字符串 '2' → 有进展)", () => {
+    expect(libraryBatchProgressed({ done: "2" as unknown as number, failed: 0, skipped: 0 })).toBe(true);
   });
 });

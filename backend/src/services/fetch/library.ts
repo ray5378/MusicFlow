@@ -245,6 +245,25 @@ export function buildLibraryContinuation(
 }
 
 /**
+ * 上一批全库下载是否「有进展」——值得继续自动续批才算有(供 jobRunner 的
+ * libraryAutoContinue 钩子消费,决定任务终态后要不要开下一批)。
+ *
+ * 2026-10-12 修 240 无限续批循环:一批歌若 done=0 且 failed=0(全部 skipped),
+ * 典型是**全部处于下载冷却期被 COOLDOWN_SKIPPED**(attempts.ts shouldSkipByCooldown),
+ * 而 COOLDOWN_SKIPPED 按设计**不写** fetch_library_attempts(batch/jobs.ts) —— 于是
+ * buildLibraryPlan 下一批仍选中**同一批**未尝试歌 → 无限重选同一批、每批都秒跳。
+ * 有任一 done(迁移成 l: 离开曲库池)或 failed(记账进冷却)才会让未尝试集收缩,
+ * 续批才有推进意义;全跳过=集不收缩=必然死循环,必须中止,交由后续定时调度/手动重试。
+ */
+export function libraryBatchProgressed(
+  counts: { done?: number; failed?: number; skipped?: number } | null | undefined,
+): boolean {
+  const done = Number(counts?.done) || 0;
+  const failed = Number(counts?.failed) || 0;
+  return done > 0 || failed > 0;
+}
+
+/**
  * 全库下载任务的 config_json：只加 `__library` 开关，其余沿用普通下载配置。
  *
  * `noAutoContinue`：**导入触发**的批次必须带上——否则任务终态后 jobRunner 会顺手开

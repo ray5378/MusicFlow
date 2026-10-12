@@ -10,7 +10,7 @@ import { sqlite } from "../../db/index.js";
 import { getFetchJob, updateFetchJobStatus, collectInterruptedFetchJobIds } from "./jobStore.js";
 import { currentFetchConfig } from "./configStore.js";
 import { ensureWritableDir } from "./writable.js";
-import { buildLibraryContinuation } from "./library.js";
+import { buildLibraryContinuation, libraryBatchProgressed } from "./library.js";
 import { enqueueTagRepairs } from "./tagRepair.js";
 
 const log = createLogger("fetch-runner");
@@ -98,6 +98,16 @@ function maybeContinueLibraryJob(jobId: string): void {
     // 导入触发批次（__library.noAutoContinue）**不参与全库自动续批**：它的语义是
     // 「把这批刚入库的歌下完」，不是「开始全库下载」，续批会把范围放大到全库。
     if (cfgj.__library.noAutoContinue === true) return;
+    // 无进展保护(2026-10-12,修 240 无限续批循环):本批若 done=0 且 failed=0(全部 skipped,
+    // 典型=全部下载冷却期 COOLDOWN_SKIPPED 且按设计不记账),未尝试集不收缩 → 续批只会
+    // 无限重选同一批歌。见 libraryBatchProgressed 注释。必须中止自动续批链。
+    if (!libraryBatchProgressed(job.counts)) {
+      const cc = job.counts;
+      log.info(
+        `[LIBRARY-AUTO] 停止续批:本批无进展(done=${Number(cc?.done) || 0} failed=${Number(cc?.failed) || 0} skipped=${Number(cc?.skipped) || 0}),均为跳过/冷却秒跳,中止自动续批链,交由后续定时调度或手动重试`,
+      );
+      return;
+    }
     const cfg = currentFetchConfig();
     if (!cfg.libraryAutoContinue) return;
     if (hasAnyActiveJob()) return;
