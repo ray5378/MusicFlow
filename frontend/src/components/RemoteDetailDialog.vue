@@ -11,7 +11,7 @@
     <!-- 头部:封面 + 名称 + 元信息 + 操作 -->
     <div v-if="item" class="rd-header">
       <div class="rd-cover">
-        <img v-if="item.cover || item.avatar" :src="item.cover || item.avatar" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+        <img v-if="item.cover || item.avatar" :src="item.cover || item.avatar" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
         <div v-else class="rd-cover-ph"><MfIcon name="Disc3" :size="36" /></div>
       </div>
       <div class="rd-meta">

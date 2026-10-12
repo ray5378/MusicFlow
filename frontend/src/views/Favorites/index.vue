@@ -43,7 +43,7 @@
             v-longpress="() => openActionSheet(plActions(g.item), g.item.name, playlistMeta(g.item))"
           >
             <div class="playlist-cover mf-coverwrap" @click="openPl(g.item)">
-              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" fetchpriority="low" />
               <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
               <CoverPlay size="md" :label="t('favorites.play', { name: g.item.name })" :action="() => playPl(g.item)" />
               <button
@@ -86,7 +86,7 @@
             v-longpress="() => openActionSheet(albumActions(g.item), g.item.name, albumMeta(g.item))"
           >
             <div class="album-cover mf-coverwrap" @click="openAlbum(g.item)">
-              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" fetchpriority="low" />
               <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
               <CoverPlay size="md" :label="t('favorites.play', { name: g.item.name })" :action="() => playAl(g.item)" />
               <button
@@ -125,7 +125,7 @@
             v-longpress="() => openActionSheet(artistActions(g.item), g.item.name, formatAlbumCount(g.item.albumCount))"
           >
             <div class="artist-avatar mf-coverwrap" @click="openArtist(g.item)">
-              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+              <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" fetchpriority="low" />
               <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
               <CoverPlay size="md" :label="t('favorites.playArtist', { name: g.item.name })" :action="() => playAr(g.item)" />
               <button

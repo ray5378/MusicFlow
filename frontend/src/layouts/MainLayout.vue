@@ -182,7 +182,7 @@
     <!-- ===== Mobile player bar (compact) ===== -->
     <footer class="player-bar-mobile" v-if="isMobile" :class="{ 'mc-hidden': playerStore.playModeVisible }">
       <div class="mp-cover" @click="playerStore.togglePlayMode">
-        <img v-if="coverUrl" :src="coverUrl" loading="lazy" decoding="async" />
+        <img v-if="coverUrl" :src="coverUrl" loading="eager" decoding="async" fetchpriority="high" />
         <div v-else class="mp-cover-ph"><MfIcon name="Headphones" :size="20"  /></div>
       </div>
       <div class="mp-info" @click="playerStore.togglePlayMode">
@@ -208,7 +208,7 @@
     <footer class="player-bar" v-if="!isMobile">
       <div class="player-left" v-if="playerStore.currentSong">
         <div class="np-main" @click="playerStore.togglePlayMode">
-          <img v-if="coverUrl" :src="coverUrl" class="player-cover" loading="lazy" decoding="async" />
+          <img v-if="coverUrl" :src="coverUrl" class="player-cover" loading="eager" decoding="async" fetchpriority="high" />
           <div v-else class="player-cover-placeholder"><MfIcon name="Headphones" :size="24"  /></div>
           <div class="player-song-info">
             <div class="player-title">{{ playerStore.currentSong.title }}</div>
@@ -375,7 +375,7 @@
             @click="playFromQueue(idx)"
           >
             <div class="queue-cover">
-              <img v-if="song.coverArt && queueCoversReady" :src="coverArtUrl(song.coverArt, 80)" loading="lazy" decoding="async" />
+              <img v-if="song.coverArt && queueCoversReady" :src="coverArtUrl(song.coverArt, 80)" loading="lazy" decoding="async" fetchpriority="low" />
               <div v-else class="queue-cover-ph"><MfIcon name="Headphones" /></div>
               <span v-if="idx === playerStore.currentIndex" class="playing-indicator" :class="{ paused: !playerStore.isPlaying }"></span>
             </div>
@@ -406,7 +406,7 @@
           <!-- Left: rotating disc -->
           <div class="pm-left">
             <div class="pm-disc" :class="{ spinning: playerStore.isPlaying }">
-              <img v-if="coverUrl" :src="coverUrl" class="pm-disc-img" loading="lazy" decoding="async" />
+              <img v-if="coverUrl" :src="coverUrl" class="pm-disc-img" loading="eager" decoding="async" fetchpriority="high" />
               <div v-else class="pm-disc-ph"><MfIcon name="Headphones" :size="80"  /></div>
               <div class="pm-disc-hole"></div>
             </div>

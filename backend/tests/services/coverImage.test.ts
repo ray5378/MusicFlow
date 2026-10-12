@@ -13,6 +13,9 @@ import {
   loadAndRenderCover,
   clearRenderedCovers,
   getRenderedCoverBytes,
+  getActiveRenderCount,
+  getQueuedRenderCount,
+  RENDER_CONCURRENCY,
 } from "../../src/services/coverImage.js";
 
 const TMP = path.join(os.tmpdir(), `cover-image-test-${Date.now()}`);
@@ -128,7 +131,7 @@ describe("loadAndRenderCover: 缓存与内存预算", () => {
   });
 
   it(
-    "连续渲染 520 个不同尺寸:内存预算生效(持有字节不突破 32MB),且不报错",
+    "连续渲染 520 个不同尺寸:内存预算生效(持有字节不突破 48MB),且不报错",
     async () => {
       clearRenderedCovers();
       for (let i = 0; i < 520; i++) {
@@ -137,11 +140,95 @@ describe("loadAndRenderCover: 缓存与内存预算", () => {
         expect(out).not.toBeNull();
       }
       const held = getRenderedCoverBytes();
-      expect(held).toBeLessThanOrEqual(32 * 1024 * 1024);
+      // 预算默认 48MB(COVER_RENDER_CACHE_MB)。evict 在每次写入后跑到预算以内。
+      expect(held).toBeLessThanOrEqual(48 * 1024 * 1024);
       // 若没有 evict,520 张 300px 级 png 会远超一条 512KB 的中位大小 × 520。
       expect(held).toBeLessThan(520 * 512 * 1024);
       clearRenderedCovers();
     },
     120_000,
   );
+});
+
+// 2026-10-12 封面慢请求治理(B)新增面:单飞去重 + 并发护栏。
+// 这两条是"冷缓存一屏封面并发"场景的直接防线,必须有回归锁:
+//   - 单飞失效 → 同一张图被渲染多次,白占 sharp 吞吐(约 130 张/秒的天花板);
+//   - 并发护栏失效 → 上百个 sharp 渲染同时在途,瞬时 native 内存可达数百 MB。
+describe("loadAndRenderCover: 单飞与并发护栏", () => {
+  it("同参数并发请求单飞:共享同一次渲染(同一对象、字节只登记一次)", async () => {
+    clearRenderedCovers();
+    const [a, b, c, d] = await Promise.all([
+      loadAndRenderCover(pngPath, 233, false),
+      loadAndRenderCover(pngPath, 233, false),
+      loadAndRenderCover(pngPath, 233, false),
+      loadAndRenderCover(pngPath, 233, false),
+    ]);
+    expect(a).not.toBeNull();
+    // 单飞的具体表征:四个调用方拿到同一个结果对象(而不是四份各渲染一次的结果)。
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    expect(d).toBe(a);
+    // 只登记了一份字节。
+    expect(getRenderedCoverBytes()).toBe(a!.data.byteLength);
+  });
+
+  it("单飞不串图:同一批并发里不同 size 仍各渲染各的(etag 互不相同)", async () => {
+    clearRenderedCovers();
+    const outs = await Promise.all(
+      [101, 102, 103, 104, 105].map((s) => loadAndRenderCover(pngPath, s, false)),
+    );
+    expect(outs.every((o) => o !== null)).toBe(true);
+    expect(new Set(outs.map((o) => o!.etag)).size).toBe(5);
+  });
+
+  it("不同格式(wantWebp)不共用单飞槽位", async () => {
+    clearRenderedCovers();
+    const [jpeg, webp] = await Promise.all([
+      loadAndRenderCover(pngPath, 244, false),
+      loadAndRenderCover(pngPath, 244, true),
+    ]);
+    expect(jpeg!.contentType).toBe("image/png");
+    expect(webp!.contentType).toBe("image/webp");
+    expect(jpeg!.etag).not.toBe(webp!.etag);
+  });
+
+  it("在途渲染数始终不超过 RENDER_CONCURRENCY,且一批并发全部完成", async () => {
+    clearRenderedCovers();
+    let peak = 0;
+    let done = false;
+    const sampler = (async () => {
+      while (!done) {
+        peak = Math.max(peak, getActiveRenderCount());
+        await new Promise((r) => setTimeout(r, 1));
+      }
+    })();
+
+    const outs = await Promise.all(
+      Array.from({ length: 12 }, (_, i) => loadAndRenderCover(pngPath, 300 + i, false)),
+    );
+    done = true;
+    await sampler;
+
+    expect(outs.every((o) => o !== null)).toBe(true);
+    // 上界是护栏本身的不变式:去掉信号量时这里会摸到 12。
+    expect(peak).toBeLessThanOrEqual(RENDER_CONCURRENCY);
+    // 下界证明采样确实观察到并发渲染(否则上界断言会退化成永真)。
+    expect(peak).toBeGreaterThan(0);
+    // 队列在结算后必须清空,不能泄漏等待者。
+    expect(getQueuedRenderCount()).toBe(0);
+    expect(getActiveRenderCount()).toBe(0);
+    clearRenderedCovers();
+  });
+
+  it("渲染抛错也不会泄漏槽位(损坏图走降级分支后仍能继续渲染)", async () => {
+    clearRenderedCovers();
+    // 损坏图:sharp 会抛,走 catch 降级返回原始字节;槽位必须被 finally 归还,
+    // 否则后续请求会永远排在队列上(表现为"封面全挂")。
+    const bad = await loadAndRenderCover(corruptPath, 300, true);
+    expect(bad).not.toBeNull();
+    expect(getActiveRenderCount()).toBe(0);
+    expect(getQueuedRenderCount()).toBe(0);
+    const good = await loadAndRenderCover(pngPath, 321, false);
+    expect(good).not.toBeNull();
+  });
 });

@@ -79,7 +79,7 @@
       >
         <div class="playlist-cover mf-coverwrap" @click.stop="open(g.item)">
           <PlatformBadge :source="g.item.sourcePlatform" />
-          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" fetchpriority="low" />
           <div v-else class="cover-placeholder"><MfIcon name="List" :size="48"  /></div>
           <CoverPlay size="md" :label="t('playlists.play', { name: g.item.name })" :action="() => playAll(g.item)" />
         </div>
@@ -133,7 +133,7 @@
         <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="i">
           <div class="playlist-cover mf-coverwrap" @click="openRemote(rp)">
             <span class="remote-source-tag">{{ rp.providerName ? rp.providerName + "·" : "" }}{{ rp.platformLabel }}</span>
-            <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
             <CoverPlay size="md" :label="t('playlists.play', { name: rp.name })" :action="() => playRemotePl(rp)" />
           </div>
@@ -179,7 +179,7 @@
         <div class="playlist-card" v-for="(rp, i) in remoteResults" :key="rp.providerId + ':' + rp.source + ':' + rp.id">
           <div class="playlist-cover mf-coverwrap" @click="openRemote(rp)">
             <span class="remote-source-tag">{{ rp.providerName ? rp.providerName + "·" : "" }}{{ rp.platformLabel }}</span>
-            <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <img v-if="rp.cover" :src="rp.cover" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="List" :size="48" /></div>
             <CoverPlay size="md" :label="t('playlists.play', { name: rp.name })" :action="() => playRemotePl(rp)" />
           </div>

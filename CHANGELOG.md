@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.5] - 2026-10-12
+
+### Fix
+
+- **封面慢请求三件套（A/B/C）**：240 容器日志 24 小时内共 104 条 `慢请求 route=/rest/getCoverArt`（ms 1035~3068）。用「到达时刻 = 完成时刻 − 耗时」反推，这 104 个请求挤在 **约 170ms 的窗口**内同时到达（14:25:42.46~42.63），随后约 2s 排空 —— 是**一次性冷缓存并发突发**，不是周期性劣化、也不是缓存泄漏。三处同时对治：
+  - **A（别把设计内的慢当告警）**：慢请求阈值从全局硬编码 1s 改为**按路由分级**，默认值全部可用 env 覆盖 —— 全局 `HTTP_SLOW_MS=1000`；`/rest/getCoverArt`（含 `.view` 与 POST 兼容别名）走 `HTTP_SLOW_MS_COVER=5000`；`/rest/stream` 族与 `/rest/dlna/stream/:token` 走 `HTTP_SLOW_MS_STREAM=7000`（**必须**大于出流侧默认 6s 的有界首字节等待，否则每次缓冲超时都刷一条告警）。**未列出的路由一律保持全局底线** —— 分级是"豁免已知的慢"，不是"抬高全局底线"。慢请求日志新增 `budget`（本次适用的预算）与 `client`（`x-mf-client-id` 优先，回落 UA 片段），下次噪音复现能直接钉到来源设备。
+  - **B（让渲染链路扛得住突发）**：① **同 ETag 在途单飞** —— 同一张封面常被网格 / 播放器 / 队列同时请求，此前会重复渲染 N 遍，白占 sharp 吞吐（实测天花板约 130 张/秒）；② **渲染并发信号量**（`COVER_RENDER_CONCURRENCY`，默认 4）—— 这不是性能旋钮（实测吞吐与并发基本无关），而是**内存护栏**：每个在途渲染都攥着一张全尺寸解码位图（1200×1200 ≈ 5.8MB 原生内存），上百并发就是数百 MB 的瞬时 native 峰值；③ **缓存上限 env 可调并放宽**：`COVER_RENDER_CACHE_MB` 32→48、`COVER_RENDER_MAX_ENTRIES` 500→1500（原图字节缓存不变：`COVER_CACHE_BUDGET_MB` 64、`COVER_CACHE_IDLE_MINUTES` 5）；④ **编码参数调优**：JPEG 去掉 mozjpeg（体积 +约 25%，吞吐 106→153 张/秒）、webp `effort` 4→1（116→150 张/秒）。冷缓存突发的排空时间从约 2s 降到 1s 以内。
+  - **C（前端别让缩略图抢带宽）**：26 处封面 `<img>` 做**取图优先级分级** —— 23 处网格 / 列表 / 队列缩略图加 `fetchpriority="low"`，把带宽让给应用自身资源；只属于"当前播放歌曲"的 3 张单图（桌面播放条 / 移动端播放条 / 全屏播放页唱片）改为 `loading="eager" fetchpriority="high"`（lazy 图上挂 high 会被浏览器直接忽略，故必须同时去掉 lazy）。骨架早已在位（`loading="lazy" decoding="async"` 全量覆盖、`useCardGrid` / `SongTable` 虚拟化、队列封面 `queueCoversReady` 延载、移动端 `coverUrl` 自动降到 150px），本次只补"谁优先"这一层。
+
+### Internal
+
+- `metrics.ts` 新增导出 `slowThresholdMs()` / `clientTag()` 与 `SLOW_MS_COVER` / `SLOW_MS_STREAM`，便于单测与运维核对；`.view` 与 POST 变体是同一条链路的同一入口，预算表一并登记，避免换个写法就漏告警或乱告警。
+- `coverImage.ts` 渲染主体抽成 `renderAndCache()`，对外保证**永不抛异常**（失败降级为"原样回传字节"或 `null`），以免单飞 promise 把异常带给多个调用方中的一个；新增导出 `RENDER_CONCURRENCY` / `getActiveRenderCount()` / `getQueuedRenderCount()` 作为并发护栏的可观测面。
+- 新增/扩充单测：分级预算表（含 `.view`/POST 别名、方法大小写敏感）、封面 1500ms 不告警与 5000ms 告警、流端点 3000/7000ms 边界、日志 `budget`/`client` 断言、`clientTag` 截断边界；单飞去重（同参数并发返回同一对象、不同 size/格式不串图）、并发护栏不变式（在途数 ≤ 上限、队列结算后归零、损坏图抛错也不泄漏槽位）。
+- 新增环境变量：`HTTP_SLOW_MS` / `HTTP_SLOW_MS_COVER` / `HTTP_SLOW_MS_STREAM` / `COVER_RENDER_CACHE_MB` / `COVER_RENDER_MAX_ENTRIES` / `COVER_RENDER_CONCURRENCY`。
+
 ## [4.6.4] - 2026-10-12
 
 ### Fix

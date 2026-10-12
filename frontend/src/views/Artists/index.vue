@@ -51,7 +51,7 @@
         v-longpress="() => openActionSheet(artistActions(g.item), g.item.name, formatAlbumCount(g.item.albumCount))"
       >
         <div class="artist-avatar mf-coverwrap" @click="open(g.item)">
-          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" fetchpriority="low" />
           <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48"  /></div>
           <el-tooltip v-if="g.item.scrapeMissing" :content="t('artists.missingTooltip')" placement="top">
             <el-tag size="small" type="warning" class="missing-tag">{{ t('artists.missingInfo') }}</el-tag>
@@ -91,7 +91,7 @@
         <div class="artist-grid" v-loading="aggregateSearching">
           <div class="artist-card" v-for="(item, i) in aggregateItems" :key="item.providerId + ':' + item.source + ':' + item.id">
             <div class="artist-avatar mf-coverwrap" @click="openRemote(item)">
-              <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+              <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
               <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
               <span class="remote-source-tag">{{ item.providerName ? item.providerName + "·" : "" }}{{ item.platformLabel }}</span>
               <CoverPlay size="md" :label="t('artists.play', { name: item.name })" :action="() => playRemoteAr(item)" />
@@ -120,7 +120,7 @@
       <div v-else class="artist-grid">
         <div class="artist-card" v-for="(item, i) in remoteItems" :key="i">
           <div class="artist-avatar mf-coverwrap" @click="openRemote(item)">
-            <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <img v-if="item.avatar" :src="item.avatar" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
             <div v-else class="avatar-placeholder"><MfIcon name="User" :size="48" /></div>
             <span class="remote-source-tag">{{ item.platformLabel }}</span>
             <CoverPlay size="md" :label="t('artists.play', { name: item.name })" :action="() => playRemoteAr(item)" />

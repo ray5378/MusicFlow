@@ -2,7 +2,7 @@
   <div class="playlist-detail" v-loading="loading">
     <div class="playlist-header" v-if="playlist">
       <div class="playlist-cover">
-        <img v-if="playlist.coverArt" :src="coverUrl(playlist.coverArt, 300)" loading="lazy" decoding="async" />
+        <img v-if="playlist.coverArt" :src="coverUrl(playlist.coverArt, 300)" loading="lazy" decoding="async" fetchpriority="low" />
         <div v-else class="cover-placeholder"><MfIcon name="List" :size="64"  /></div>
       </div>
       <div class="playlist-meta">

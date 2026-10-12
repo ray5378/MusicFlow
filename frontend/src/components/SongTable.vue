@@ -50,7 +50,7 @@
             :src="coverSrc(row.song)"
             class="song-cover"
             loading="lazy"
-            decoding="async"
+            decoding="async" fetchpriority="low"
             referrerpolicy="no-referrer"
             @error="markCoverError(row.song.id)"
           />

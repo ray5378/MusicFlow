@@ -30,7 +30,7 @@
         v-longpress="() => openActionSheet(albumActions(g.item), g.item.name, albumMeta(g.item))"
       >
         <div class="album-cover mf-coverwrap" @click="open(g.item)">
-          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" />
+          <img v-if="g.item.coverArt" :src="coverUrl(g.item.coverArt)" loading="lazy" decoding="async" fetchpriority="low" />
           <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48"  /></div>
           <CoverPlay size="md" :label="t('albums.play', { name: g.item.name })" :action="() => playAl(g.item)" />
           <button
@@ -69,7 +69,7 @@
         <div class="album-grid" v-loading="aggregateSearching">
           <div class="album-card fnos-card-sheen" v-for="(item, i) in aggregateItems" :key="item.providerId + ':' + item.source + ':' + item.id">
             <div class="album-cover mf-coverwrap" @click="openRemote(item)">
-              <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+              <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
               <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
               <span class="remote-source-tag">{{ item.providerName ? item.providerName + "·" : "" }}{{ item.platformLabel }}</span>
               <CoverPlay size="md" :label="t('albums.play', { name: item.name })" :action="() => playRemoteAl(item)" />
@@ -110,7 +110,7 @@
       <div v-else class="album-grid">
         <div class="album-card fnos-card-sheen" v-for="(item, i) in remoteItems" :key="i">
           <div class="album-cover mf-coverwrap" @click="openRemote(item)">
-            <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <img v-if="item.cover" :src="item.cover" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
             <div v-else class="cover-placeholder"><MfIcon name="Disc3" :size="48" /></div>
             <span class="remote-source-tag">{{ item.platformLabel }}</span>
             <CoverPlay size="md" :label="t('albums.play', { name: item.name })" :action="() => playRemoteAl(item)" />
