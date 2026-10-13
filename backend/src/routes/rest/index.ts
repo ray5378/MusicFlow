@@ -29,7 +29,7 @@ import { resolvePreferredSong } from "../../services/source/preferredSource.js";
 // 出流与后台预取**共用同一份**源解析推导(见 services/source/networkInput.ts 文件头)。
 import { resolveLocalFilePath, resolveNetworkInput, getWebDAVUrl } from "../../services/source/networkInput.js";
 import { parseSongPath } from "../../utils/localSourceProbe.js";
-import { prefetchHit, bindLoopbackBase } from "../../services/source/prefetchCache.js";
+import { prefetchHit, prefetchInFlight, bindLoopbackBase } from "../../services/source/prefetchCache.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
@@ -2003,26 +2003,40 @@ export async function resolveTranscodeInput(
 }
 
 /**
- * batch44-R(首字节优先):整曲缓冲的**有界等待**上限(ms)。冷启动时客户端要的是
- * 尽快出声,而不是等整曲缓冲完成(实测 10~26s,撞反代 10s 超时 502,客户端永久卡
- * loading);等待超过此值即走 bufferNetworkSource 既有的「回退直通」路径,不新造
- * 回退通道。single-flight 共享循环继续在后台跑,缓冲落地后下一个请求可命中。
- * env `STREAM_BUFFER_HEAD_WAIT_MS` 可覆盖;非法/非正值回退此默认。
+ * batch44-R(首字节优先):整曲缓冲的**有界等待**上限(ms),2026-10-13 起分两档:
+ *   - 总大小已知(上游 Content-Length 有值)⇒ **8000**:慢源(在线源实测
+ *     0.85~2.3MB/s)也能多攒 2s 冗余再直通,起播缓冲更厚(用户拍板「要有足够的
+ *     冗余,不是所有网盘都这么快」);
+ *   - 总大小未知(chunked,拿不到 Content-Length)⇒ **6000**:没有投影依据,
+ *     不随已知档一起放大(维持 batch44-R 原值)。
+ * 等待过程中进度上报一拿到 Content-Length,上界即从「未知档」单调放宽到「已知档」
+ * (见 boundedBufferWait)。env `STREAM_BUFFER_HEAD_WAIT_MS` 可覆盖,钳 ≤ 8000
+ * —— 无论怎么配都不得逼近反向代理首字节超时(~10s,见上文 batch44-R 502 事故);
+ * 非法/非正值回退对应档位默认。
  *
- * 跨仓契约(与客户端看门狗对齐,ADR-4 相邻项):本值必须**严格小于**客户端
+ * 跨仓契约(与客户端看门狗对齐,ADR-4 相邻项):两档都必须**严格小于**客户端
  * 「平台未接管音源(idle)」一档的判死上界(客户端默认 10s,权威定义见
  * MusicFlow-client/lib/providers/player/player_watchdog_policy.dart 的
  * kStreamLoadIdleCeilingMs),并留 >=1.5s 余量(kStreamLoadHeadWaitAlignmentMarginMs);
  * 否则服务端仍在合法缓冲窗口内、客户端已抢先判死 -> 无谓 reload/跳歌
- * (还会拆掉在途请求、让服务端重开重试窗口)。同时本值须低于反向代理首字节
+ * (还会拆掉在途请求、让服务端重开重试窗口)。同时两档须低于反向代理首字节
  * 超时(10s),避免 502(见上文 batch44-R)。两侧各有一处守卫用例。
  */
-export const STREAM_BUFFER_HEAD_WAIT_MS = 6000;
+export const STREAM_BUFFER_HEAD_WAIT_MS = 8000;
+/** 总大小未知(chunked)时的有界等待上限(ms)。无投影依据,不随已知档放大。 */
+export const STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS = 6000;
+/** env 覆写硬钳(ms):超过即按本值 —— 反代 ~10s 超时线前的服务端安全余量。 */
+const STREAM_BUFFER_HEAD_WAIT_ENV_MAX_MS = 8000;
 
-/** 读 env `STREAM_BUFFER_HEAD_WAIT_MS`(parseInt;非法/非正值回退默认)。 */
-function streamBufferHeadWaitMs(): number {
+/**
+ * 本次等待的生效上界(ms)。`sizeKnown` = 是否已从上游拿到 Content-Length
+ * (进度上报里带)。env 设置时两档统一按 env(钳 ≤ 8000);未设置时按档位取默认。
+ * 导出供契约守卫测试断言两档与钳位。
+ */
+export function headWaitCeilingMs(sizeKnown: boolean): number {
   const n = parseInt(process.env.STREAM_BUFFER_HEAD_WAIT_MS || "", 10);
-  return Number.isFinite(n) && n > 0 ? n : STREAM_BUFFER_HEAD_WAIT_MS;
+  if (Number.isFinite(n) && n > 0) return Math.min(n, STREAM_BUFFER_HEAD_WAIT_ENV_MAX_MS);
+  return sizeKnown ? STREAM_BUFFER_HEAD_WAIT_MS : STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS;
 }
 
 /**
@@ -2030,12 +2044,19 @@ function streamBufferHeadWaitMs(): number {
  * batch44(D):取流失败不走「快速失败」,而是**挂起本请求**进入长窗口自动重试
  * (前 1 分钟每 10s → 之后每 60s → 总窗口 30min,常量化可配;同曲并发请求
  * single-flight 共享同一循环;窗口内恢复 ⇒ 立即整曲缓冲正常供流,耗尽 ⇒ 显式失败)。
- * batch44(R · 首字节优先):本请求对上述循环只做**有界等待**
- * (`STREAM_BUFFER_HEAD_WAIT_MS`,默认 6s):超时回退 undefined 直通(既有通道,
- * 不新造回退),循环继续后台跑,缓冲落地后下一个请求 join 在途循环即可命中。
+ * batch44(R · 首字节优先):本请求对上述循环只做**有界等待**(head-wait,分档见
+ * `STREAM_BUFFER_HEAD_WAIT_MS` 注释):超时回退 undefined 直通(既有通道,不新造
+ * 回退),循环继续后台跑,缓冲落地后下一个请求 join 在途循环即可命中。
+ * 2026-10-13(投影早退 + 冷播放搭车)两条增强都在「有界等待」内部,对外语义不变:
+ *   a. **投影早退**:等待期间读 single-flight 循环的取流进度(bufferedFetch 的
+ *      progress sink),按 100ms tick 推算「照此速率整曲还要多久」—— 超上界立即
+ *      回退直通,慢源(在线源 0.85~2.3MB/s)不必傻等到上界(白等 + 逼近反代 10s);
+ *   b. **冷播放搭车**:同一首(解析后 id)有预取正在飞时,不起第二份下载,等这一份
+ *      落地(有界)—— 带宽是共享资源,双跑只会两边都变慢,还双倍占 membuf。
  *   - 成功  → { source: membuf 回环 URL };
  *   - 明确失败(dead/stalled/error)→ null ⇒ 调用方显式失败;
- *   - 回退类(too-big/budget/timeout)→ undefined ⇒ 调用方落回 loopbackRawStreamUrl 直通。
+ *   - 回退类(too-big/budget/timeout/上界到期/投影早退)→ undefined ⇒ 调用方落回
+ *     loopbackRawStreamUrl 直通。
  */
 async function bufferNetworkSource(
   songId: string,
@@ -2049,30 +2070,48 @@ async function bufferNetworkSource(
   // fetchWholeSongBuffered 真正开始取流那一刻按在途字节记账)。窗口内任一次成功
   // ⇒ 立即整曲缓冲正常供流(用户只感觉起播晚几秒);耗尽 ⇒ 显式失败。
   // 「15~20s 硬顶」是**单次取流尝试**的上限(即上方 18s deadline),与长窗口不冲突。
-  // batch44(R):但**本请求不再挂满整个窗口** —— 只做有界等待(见下 race),超时回退
+  // batch44(R):但**本请求不再挂满整个窗口** —— 只做有界等待(见下),超时回退
   // 直通(首字节优先);长窗口重试由共享循环在后台继续,缓冲落地后下一个请求命中。
   const { fetchSongWithRetryWindow, registerMemStream, isBufferedDeadKind } =
     await import("../../services/source/bufferedFetch.js");
-  // batch44-R(首字节优先):缓冲 promise vs head-wait 计时器 race。计时器赢 ⇒
-  // return undefined 走本函数既有的「回退直通」路径(见上),**不等、不取消**:
-  // fetchSongWithRetryWindow 是同曲 single-flight 共享循环(key `song:${songId}` 跨
-  // 调用共享、与单个调用方生命周期解耦),超时后循环继续后台跑,缓冲落地后下一个
-  // 请求 join 在途循环即可命中(abort 语义见 bufferedFetch.ts single-flight 段落)。
-  const fetchP = fetchSongWithRetryWindow(`song:${songId}`, url, headers, { signal: c?.req?.raw?.signal });
-  const headWaitMs = streamBufferHeadWaitMs();
-  let headTimer: ReturnType<typeof setTimeout> | undefined;
-  const headWait = new Promise<undefined>((resolve) => {
-    headTimer = setTimeout(() => resolve(undefined), headWaitMs);
-  });
-  let r: Awaited<typeof fetchP> | undefined;
-  try {
-    r = await Promise.race([fetchP, headWait]);
-  } finally {
-    // 计时器必清:缓冲先完成则 head-wait 不再触发;超时分支也只触发这一次。
-    if (headTimer !== undefined) clearTimeout(headTimer);
+
+  // ---- b. 冷播放搭车(2026-10-13):同一首有预取正在飞 ⇒ 不起第二份下载 ----
+  // 语义边界(与 prefetchCache 红线 1 对齐):只**等待**在途预取,绝不把预取拉进
+  // 播放路径的 single-flight(`song:${songId}` 重试表保持为空,既有守卫不变)。
+  // 三种结局:落地 ⇒ 内存回环(零额外上游);未落地(失败/判死)⇒ 落冷路径(此时判官
+  // 负缓存已写好,选源/跳过行为与今天一致);有界窗口内没落地 ⇒ 回退直通 —— 不起
+  // 第二份(那正是本特性要避免的),后台预取继续跑,下一个请求可命中。
+  const joinP = prefetchInFlight(songId);
+  if (joinP) {
+    const joinCeiling = headWaitCeilingMs(true);
+    const settled = await raceJoin(joinP, joinCeiling);
+    if (settled) {
+      const hit = prefetchHit(songId);
+      if (hit) {
+        log.info(`[membuf] ${songId} 冷播放搭车在途预取 → 内存回环供流(未起第二份下载)`);
+        return { source: hit };
+      }
+      log.info(`[membuf] ${songId} 在途预取未落地(失败/判死)⇒ 落冷路径`);
+    } else {
+      log.warn(`[membuf] ${songId} 在途预取 ${joinCeiling}ms 内未落地 ⇒ 回退直通(不起第二份)`);
+      return undefined;
+    }
   }
+
+  // ---- a. 冷路径:single-flight 共享循环 + 投影感知的有界等待 ----
+  // batch44-R(首字节优先):缓冲 promise vs 有界等待 race。等待赢 ⇒ return undefined
+  // 走本函数既有的「回退直通」路径(见上),**不等、不取消**:fetchSongWithRetryWindow
+  // 是同曲 single-flight 共享循环(key `song:${songId}` 跨调用共享、与单个调用方
+  // 生命周期解耦),超时后循环继续后台跑,缓冲落地后下一个请求 join 在途循环即可
+  // 命中(abort 语义见 bufferedFetch.ts single-flight 段落)。2026-10-13 起等待
+  // 由 boundedBufferWait 驱动:固定上界(分档)+ 投影早退双判据。
+  const key = `song:${songId}`;
+  const fetchP = fetchSongWithRetryWindow(key, url, headers, { signal: c?.req?.raw?.signal });
+  const outcome = await boundedBufferWait(key, fetchP, Date.now());
+  let r: Awaited<typeof fetchP> | undefined;
+  if (outcome.kind === "result") r = outcome.r;
   if (r === undefined) {
-    log.warn(`[membuf] ${songId} 整曲缓冲等待超 ${headWaitMs}ms ⇒ 回退直通(首字节优先)`);
+    log.warn(`[membuf] ${songId} 整曲缓冲有界等待未落地(上界到期/投影早退)⇒ 回退直通(首字节优先)`);
     return undefined;
   }
   if (r.ok) {
@@ -2094,6 +2133,86 @@ async function bufferNetworkSource(
   });
   if (isBufferedDeadKind(r.kind)) return null;
   return undefined;
+}
+
+/**
+ * 等在途预取落地,有界。true = 预取已结束(成败不论,由调用方查 prefetchHit);
+ * false = 窗口到期。joinP 由 runOne 的 catch 兜底,理论上不 reject;保险起见
+ * reject 也按「已结束」算(落冷路径)。
+ */
+function raceJoin(joinP: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (!done) {
+        done = true;
+        resolve(false);
+      }
+    }, ms);
+    joinP.then(
+      () => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(true);
+      },
+      () => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(true);
+      },
+    );
+  });
+}
+
+/**
+ * 冷路径的**投影感知有界等待**(2026-10-13),对外只有两种结局:
+ *   - result  : 缓冲 promise 先落地 ⇒ 照常走缓冲结果(membuf / 显式失败 / 回退);
+ *   - timeout : 有界等待赢 ⇒ 回退直通(既有 head-wait 语义,后台循环不取消)。
+ * 判据(每 PROJECTION_TICK_MS 一次):
+ *   ① 固定上界:`headWaitCeilingMs(sizeKnown)`—— 进度里一拿到 Content-Length,
+ *      上界即从「未知档 6000」单调放宽到「已知档 8000」(env 覆写时两档统一);
+ *   ② 投影早退:`shouldBailEarly`—— 观测 ≥1.2s 且 ≥256KB,推算整曲总时长超上界
+ *      ⇒ 立即退出,慢源不必傻等到上界(白等 + 逼近反代 ~10s 超时线)。
+ * 两条退出都走「回退直通」这条既有通道,不新造回退路径;缓冲 promise 先完成时经
+ * 微任务立即返回,不等 tick。
+ */
+async function boundedBufferWait<T>(
+  key: string,
+  fetchP: Promise<T>,
+  startedAt: number,
+): Promise<{ kind: "result"; r: T } | { kind: "timeout" }> {
+  const { retryLoopProgress, shouldBailEarly, PROJECTION_TICK_MS } =
+    await import("../../services/source/bufferedFetch.js");
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: { kind: "result"; r: T } | { kind: "timeout" }) => {
+      if (done) return;
+      done = true;
+      clearInterval(tick);
+      resolve(v);
+    };
+    const tick = setInterval(() => {
+      const prog = retryLoopProgress(key);
+      const ceiling = headWaitCeilingMs(!!prog?.sizeBytes);
+      if (Date.now() - startedAt >= ceiling) {
+        finish({ kind: "timeout" });
+        return;
+      }
+      if (prog && shouldBailEarly(prog, ceiling)) {
+        log.info(
+          `[membuf] ${key} 投影早退:已下 ${prog.downloaded}B/${prog.elapsedMs}ms(size=${prog.sizeBytes})` +
+            ` 推算整曲超 ${ceiling}ms ⇒ 立即回退直通`,
+        );
+        finish({ kind: "timeout" });
+      }
+    }, PROJECTION_TICK_MS);
+    fetchP.then(
+      (r) => finish({ kind: "result", r }),
+      () => finish({ kind: "timeout" }), // 理论上不 reject;保险按超时算(回退直通)
+    );
+  });
 }
 
 // 播放优选 + 回退(web 行切组内 local/webdav;local/webdav 不可用回 web)已抽到

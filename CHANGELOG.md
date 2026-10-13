@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.8] - 2026-10-13
+
+### Feature
+
+- **起播缓冲阈值自适应（投影早退 + 冷播放搭车）**：整曲内存缓冲的起播有界等待从固定 6s 改为**分档 + 投影感知** —— 总大小已知（上游 Content-Length 有值）时上界 8000ms，给慢源（在线源实测 0.85~2.3MB/s）多 2s 冗余；大小未知（chunked）维持 6000ms。等待期间读 single-flight 循环的取流进度（新增 progress sink，100ms 节流上报），观测 >=1.2s 且 >=256KB 后按「已下字节/耗时」推算整曲总时长，超上界**立即**回退直通 —— 慢源不必傻等到上界（白等 + 逼近反代 ~10s 超时线 502），后台 single-flight 循环照常跑、缓冲落地后下一个请求命中；快源行为不变（上界内落地即 membuf 回环供流，实测 4ms）。另：同一首（解析后 id）有预取正在飞时，冷播放**搭车**等这一份落地（有界），不起第二份下载 —— 带宽是共享资源，双跑只会两边都变慢、还双倍占 membuf；预取失败/判死则落冷路径（此时判官负缓存已写好，选源/跳过行为与今天一致）。env `STREAM_BUFFER_HEAD_WAIT_MS` 覆写钳 <=8000（反代 10s 超时线前的安全余量）。不影响预取完整性判官与「非完整歌曲自动跳过」判定（判官只跑在后台预取的完整 Buffer 上，本改动零触碰）。
+
+### Internal
+
+- `bufferedFetch.ts`：读循环新增 progress sink（`{downloaded, elapsedMs, sizeBytes}`，跨 attempt 重置、100ms 节流上报，纯观测零行为改变）；新增纯函数 `projectedTotalMs()` / `shouldBailEarly()`（最少观察 1200ms + 最少采样 256KB，观测不足一律不早退）与 `retryLoopProgress(key)`；single-flight 循环条目挂 progress 对象。
+- `prefetchCache.ts`：新增 `inflightByResolved` 在途登记表与 `prefetchInFlight()` 搭车入口（只在预取真正开跑后登记，排队中/被闸门拦下不算）；判官、五道闸门、候选链、负缓存、双写索引逻辑零改动。
+- `routes/rest/index.ts`：`STREAM_BUFFER_HEAD_WAIT_MS` 6000->8000，新增 `STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS=6000` 与 `headWaitCeilingMs(sizeKnown)`（env 覆写两档统一、钳 <=8000；进度里一拿到 Content-Length 上界即单调放宽到已知档）；`bufferNetworkSource` 的等待改为 `boundedBufferWait`（固定上界分档 + 投影早退双判据）+ 搭车分支，对外语义不变（成功/显式失败/回退直通三态不动）。
+- 新增/扩充单测：`tests/source/bufferProjection.test.ts`（纯函数 13 例 + 集成 4 例：快源上界内落地 / 慢源投影早退且后台循环不取消 / 搭车零第二份上游 / 未在途走冷路径）；`tests/source/bufferHeadWait.test.ts` 跨仓契约守卫扩充（分档两档、env 钳位、投影护栏值）。配套客户端 v5.8.4（镜像常量 6000->8000 + `AudioLoadConfiguration` 单一常量源）。
 ## [4.6.7] - 2026-10-13
 
 ### Fix

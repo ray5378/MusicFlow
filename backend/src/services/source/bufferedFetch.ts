@@ -29,6 +29,13 @@
 // 本层在 rawStreamCache **上游**:缓冲成功时整条 rawStreamCache 被绕过(零上游往返);
 // 缓冲回退直通时,行为与改动前完全一致(rawStreamCache 照常工作)。不重复建设、
 // 不破坏其形态红线(首响应不等数据的性质由「回退直通」路径保住)。
+//
+// ### 取流进度上报(2026-10-13,投影早退的输入)
+// 读循环把 `{downloaded, elapsedMs, sizeBytes}` 写进调用方给的 progress 对象
+// (节流:两次写入间隔 >= PROJECTION_TICK_MS)。唯一消费者是 routes/rest/index.ts
+// 的 bufferNetworkSource:它用 `retryLoopProgress(key)` 读 single-flight 循环的
+// 最新进度,推算「照此速率整曲还要多久」,慢源不必傻等到上界就回退直通(首字节优先)。
+// **纯观测,零行为改变**:不传 progress 的调用方(后台预取/测试)字节级行为与以前一致。
 
 import { randomBytes } from "node:crypto";
 import { createLogger } from "../../utils/logger.js";
@@ -57,6 +64,61 @@ export const STREAM_BUFFER_TOTAL_TIMEOUT_MS = 18_000;
 export const STREAM_BUFFER_RETRIES = 2;
 /** 重试退避基数(ms),实际 = 基数 × 第几次重试。env `STREAM_BUFFER_BACKOFF_MS`。 */
 export const STREAM_BUFFER_BACKOFF_MS = 400;
+
+// ---------------- 投影早退(慢源起播保护,2026-10-13) ----------------
+// 动机:起播等待上界从 6s 提到 8s(size 已知)后,更需要「不等死」—— 慢源(在线源
+// 0.85~2.3MB/s 实测)照旧等满上界只会白等 + 逼近反代 10s 超时线。做法:读循环
+// 上报进度,消费端(index.ts bufferNetworkSource)按 100ms tick 推算整曲总时长,
+// 超上界立即回退直通(后台 single-flight 循环照常跑,缓冲落地后下一个请求命中)。
+
+/** 最少观察时长(ms):少于此不做投影判定 —— 刚下一点算出的速率没有意义。 */
+export const PROJECTION_MIN_OBSERVE_MS = 1_200;
+/** 最少采样字节:少于此不做投影判定 —— 样本不足,速率不可信。 */
+export const PROJECTION_MIN_SAMPLE_BYTES = 256 * 1024;
+/** 进度上报节流周期(ms),也是消费端轮询周期。env 不可调(内部机制常量)。 */
+export const PROJECTION_TICK_MS = 100;
+
+/** 单次取流尝试的进度快照(由 attemptOnce 写、消费端轮询读;跨 attempt 重置)。 */
+export interface BufferProgress {
+  /** 本次 attempt 已下载字节。 */
+  downloaded: number;
+  /** 本次 attempt 已耗时(ms)。 */
+  elapsedMs: number;
+  /** 上游 Content-Length(拿不到 = null ⇒ 无法投影,维持固定上界)。 */
+  sizeBytes: number | null;
+}
+
+/**
+ * 推算「照当前速率整曲取完还要多久」(纯函数,单测直调)。
+ * 观测不充分(elapsed < 1200ms 或 downloaded < 256KB)或 size 未知 ⇒ 返回 null
+ * (调用方不得据此早退,继续等到上界 —— 宁可多等,不可误判)。
+ */
+export function projectedTotalMs(
+  downloaded: number,
+  elapsedMs: number,
+  sizeBytes: number | null,
+): number | null {
+  if (sizeBytes === null || !(sizeBytes > 0)) return null;
+  if (!Number.isFinite(downloaded) || !Number.isFinite(elapsedMs)) return null;
+  if (elapsedMs < PROJECTION_MIN_OBSERVE_MS) return null;
+  if (downloaded < PROJECTION_MIN_SAMPLE_BYTES) return null;
+  if (downloaded >= sizeBytes) return elapsedMs; // 已下完(理论上 tick 不会再跑到)
+  const rate = downloaded / elapsedMs; // B/ms;downloaded >= 256KB 保证 rate > 0
+  return elapsedMs + (sizeBytes - downloaded) / rate;
+}
+
+/**
+ * 投影早退判定(纯函数):观测充分且推算总时长超过 ceiling ⇒ true(立即回退直通)。
+ * 任何观测不足/size 未知的情形一律 false —— 没有把握就按固定上界等,不赌。
+ */
+export function shouldBailEarly(
+  progress: { downloaded: number; elapsedMs: number; sizeBytes: number | null } | null,
+  ceilingMs: number,
+): boolean {
+  if (!progress) return false;
+  const total = projectedTotalMs(progress.downloaded, progress.elapsedMs, progress.sizeBytes);
+  return total !== null && total > ceilingMs;
+}
 
 interface BufferCfg {
   maxFileBytes: number;
@@ -132,8 +194,15 @@ async function attemptOnce(
   cfg: BufferCfg,
   deadlineLeftMs: number,
   outer?: { signal?: AbortSignal },
+  progress?: BufferProgress,
 ): Promise<BufferedFetchResult> {
   const t0 = Date.now();
+  // 每次 attempt 重置进度快照:重试间隔里消费端读到的是 {0,0}(投影返回 null,
+  // 不会拿上一次 attempt 的陈旧速率误判早退)。
+  if (progress) {
+    progress.downloaded = 0;
+    progress.elapsedMs = 0;
+  }
   const ctrl = new AbortController();
   const onOuterAbort = () => ctrl.abort(new DeadlineAbort());
   if (outer?.signal) {
@@ -174,6 +243,9 @@ async function attemptOnce(
       return { ok: false, kind: "dead", status: res.status, attempts: 1, ms: Date.now() - t0, err: `non-audio content-type ${ct}` };
     }
     const cl = Number(res.headers.get("content-length") || "");
+    // 总大小一知道就上报(不等第一个 chunk):消费端可立即把起播上界从「未知档」
+    // 提到「已知档」。206/分片响应不经过本层(无 Range 请求),cl 即整曲大小。
+    if (progress) progress.sizeBytes = Number.isFinite(cl) && cl > 0 ? cl : null;
     if (Number.isFinite(cl) && cl > 0 && cl > cfg.maxFileBytes) {
       await res.body?.cancel().catch(() => {});
       return { ok: false, kind: "too-big", status: res.status, attempts: 1, ms: Date.now() - t0 };
@@ -184,6 +256,7 @@ async function attemptOnce(
     armStall();
     const reader = res.body.getReader();
     const chunks: Buffer[] = [];
+    let lastProgressAt = 0; // 进度写入节流:距上次写入 < TICK 则跳过(纯观测,不阻流)
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -196,6 +269,14 @@ async function attemptOnce(
         return { ok: false, kind: "too-big", status: res.status, attempts: 1, ms: Date.now() - t0 };
       }
       chunks.push(chunk);
+      if (progress) {
+        const now = Date.now();
+        if (now - lastProgressAt >= PROJECTION_TICK_MS) {
+          lastProgressAt = now;
+          progress.downloaded = downloaded;
+          progress.elapsedMs = now - t0;
+        }
+      }
     }
     if (downloaded === 0) {
       return { ok: false, kind: "dead", status: res.status, attempts: 1, ms: Date.now() - t0, err: "empty body" };
@@ -227,7 +308,7 @@ async function attemptOnce(
 export async function fetchWholeSongBuffered(
   url: string,
   headers: Record<string, string> = {},
-  opts?: { signal?: AbortSignal } & Partial<BufferCfg>,
+  opts?: { signal?: AbortSignal; progress?: BufferProgress } & Partial<BufferCfg>,
 ): Promise<BufferedFetchResult> {
   const cfg = resolveCfg(opts);
   const t0 = Date.now();
@@ -249,7 +330,7 @@ export async function fetchWholeSongBuffered(
     if (left <= 0) {
       return { ok: false, kind: "timeout", attempts, ms: Date.now() - t0, err: "deadline before attempt" };
     }
-    const r = await attemptOnce(url, headers, cfg, left, { signal: opts?.signal });
+    const r = await attemptOnce(url, headers, cfg, left, { signal: opts?.signal }, opts?.progress);
     const transient = r.ok === false && (r.kind === "stalled" || r.kind === "error");
     if (r.ok || !transient || attempts > cfg.retries) {
       return r.ok ? r : { ...r, attempts, ms: Date.now() - t0 };
@@ -500,7 +581,7 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<boolean> {
 async function runRetryWindowLoop(
   url: string,
   headers: Record<string, string>,
-  opts: { signal?: AbortSignal } & Partial<BufferCfg> & Partial<RetryCfg>,
+  opts: { signal?: AbortSignal; progress?: BufferProgress } & Partial<BufferCfg> & Partial<RetryCfg>,
 ): Promise<BufferedFetchResult> {
   const rc = resolveRetryCfg(opts);
   const t0 = Date.now();
@@ -535,6 +616,8 @@ interface SharedRetryLoop {
   promise: Promise<BufferedFetchResult>;
   /** 循环独立的 abort 通道(传给循环当 outer signal);调用方断开不触发(batch44-R)。 */
   ctrl: AbortController;
+  /** 取流进度快照(attemptOnce 每 tick 写;消费端经 retryLoopProgress 读,投影早退用)。 */
+  progress: BufferProgress;
 }
 const retryLoops = new Map<string, SharedRetryLoop>();
 
@@ -555,8 +638,13 @@ export async function fetchSongWithRetryWindow(
   let shared = retryLoops.get(key);
   if (!shared) {
     const ctrl = new AbortController();
-    const entry: SharedRetryLoop = { refs: 0, promise: null as unknown as Promise<BufferedFetchResult>, ctrl };
-    entry.promise = runRetryWindowLoop(url, headers, { ...opts, signal: ctrl.signal }).finally(() => {
+    const entry: SharedRetryLoop = {
+      refs: 0,
+      promise: null as unknown as Promise<BufferedFetchResult>,
+      ctrl,
+      progress: { downloaded: 0, elapsedMs: 0, sizeBytes: null },
+    };
+    entry.promise = runRetryWindowLoop(url, headers, { ...opts, signal: ctrl.signal, progress: entry.progress }).finally(() => {
       retryLoops.delete(key);
     });
     shared = entry;
@@ -596,4 +684,13 @@ export function resetRetryLoopsForTest(): void {
  */
 export function retryLoopKeysForTest(): string[] {
   return [...retryLoops.keys()];
+}
+
+/**
+ * 读某 single-flight 循环的最新取流进度(投影早退的输入;拷贝返回,防外部改写)。
+ * 无活跃循环(还没建 / 已结束)⇒ null —— 消费端不得据此早退,按固定上界等。
+ */
+export function retryLoopProgress(key: string): BufferProgress | null {
+  const e = retryLoops.get(key);
+  return e ? { downloaded: e.progress.downloaded, elapsedMs: e.progress.elapsedMs, sizeBytes: e.progress.sizeBytes } : null;
 }

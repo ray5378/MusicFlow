@@ -16,11 +16,19 @@ import {
 } from "../../src/services/source/prefetchCache.js";
 import {
   fetchSongWithRetryWindow,
+  PROJECTION_MIN_OBSERVE_MS,
+  PROJECTION_MIN_SAMPLE_BYTES,
+  PROJECTION_TICK_MS,
   resetMemStreamsForTest,
   resetRetryLoopsForTest,
   retryLoopKeysForTest,
 } from "../../src/services/source/bufferedFetch.js";
-import { resolveTranscodeInput, STREAM_BUFFER_HEAD_WAIT_MS } from "../../src/routes/rest/index.js";
+import {
+  resolveTranscodeInput,
+  STREAM_BUFFER_HEAD_WAIT_MS,
+  STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS,
+  headWaitCeilingMs,
+} from "../../src/routes/rest/index.js";
 
 // 与 prefetchCache.test.ts 同款 hoisted mock:探活/播放优选可确定性触发,不摸真实
 // 文件系统 / 不发 HEAD。⚠ localSourceProbe 只**部分** mock —— 保留真实的 parseSongPath,
@@ -189,5 +197,35 @@ describe("跨仓契约:整曲缓冲首字节等待 ↔ 客户端 idle 判死上�
     expect(STREAM_BUFFER_HEAD_WAIT_MS + MARGIN_MS).toBeLessThanOrEqual(
       CLIENT_IDLE_STUCK_CEILING_MS,
     );
+  });
+
+  it("2026-10-13 分档:已知 8s / 未知 6s,两档都满足跨仓契约", () => {
+    // 客户端镜像 kServerStreamBufferHeadWaitMs 必须等于已知档 8000 —— v5.8.4 起
+    // 对齐;客户端侧等值守卫在 b50g_watchdog_queue_policy_test.dart「六、跨仓契约」组。
+    expect(STREAM_BUFFER_HEAD_WAIT_MS).toBe(8_000);
+    expect(STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS).toBe(6_000);
+    expect(headWaitCeilingMs(true)).toBe(8_000);
+    expect(headWaitCeilingMs(false)).toBe(6_000);
+    const CLIENT_IDLE_STUCK_CEILING_MS = 10_000;
+    const MARGIN_MS = 1_500;
+    for (const ceiling of [STREAM_BUFFER_HEAD_WAIT_MS, STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS]) {
+      expect(ceiling).toBeLessThan(CLIENT_IDLE_STUCK_CEILING_MS);
+      expect(ceiling + MARGIN_MS).toBeLessThanOrEqual(CLIENT_IDLE_STUCK_CEILING_MS);
+    }
+  });
+
+  it("env 覆写被钳 ≤8000(反代 ~10s 超时线前的安全余量),且两档统一", () => {
+    process.env.STREAM_BUFFER_HEAD_WAIT_MS = "99999";
+    expect(headWaitCeilingMs(true)).toBe(8_000);
+    expect(headWaitCeilingMs(false)).toBe(8_000);
+    process.env.STREAM_BUFFER_HEAD_WAIT_MS = "3000"; // 调低允许(测试/运维注入)
+    expect(headWaitCeilingMs(true)).toBe(3_000);
+    expect(headWaitCeilingMs(false)).toBe(3_000);
+  });
+
+  it("投影判据护栏值(最小观测窗 / 最小采样 / tick)", () => {
+    expect(PROJECTION_MIN_OBSERVE_MS).toBe(1_200);
+    expect(PROJECTION_MIN_SAMPLE_BYTES).toBe(256 * 1024);
+    expect(PROJECTION_TICK_MS).toBe(100);
   });
 });

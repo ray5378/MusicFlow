@@ -269,6 +269,10 @@ const bySong = new Map<string, PrefetchEntry>();
 const alias = new Map<string, string>();
 /** 同曲去重（自己维护，不与播放共用 —— 见文件头红线 1）。 */
 const inflight = new Map<string, Promise<void>>();
+/** 解析后 songId → 在途预取的落地 promise（冷播放搭车用，2026-10-13）。
+ *  与 inflight（按队列行 id）分开记：播放路径 bufferNetworkSource 拿到的是
+ *  **解析后** id（resolvePreferredSong 之后），两边才能对上。 */
+const inflightByResolved = new Map<string, Promise<void>>();
 /** 并发闸门后的等待队列（FIFO）。 */
 const queued: string[] = [];
 let running = 0;
@@ -438,6 +442,16 @@ async function doPrefetch(songId: string): Promise<void> {
   const sf = icfg.enabled ? await import("./online/streamFallback.js") : null;
   await ensureLoopbackBase();
 
+  // ---- 冷播放搭车登记（2026-10-13）----
+  // 播放路径（bufferNetworkSource）发现同一首有预取正在飞时，不起第二份下载，
+  // 等这一份落地（有界，见 index.ts）。只在**确定要下了**之后登记（五道闸门全过、
+  // 候选链已算出）—— 排队中 / 被闸门拦下的场景等它没有意义，那些走冷路径。
+  // 判官判死（试听片段）时本 promise 照常 settle，播放侧拿到「没落地」落冷路径，
+  // 此时负缓存已被判官写上，冷路径选源/跳过行为与今天一致（且不双份下载）。
+  let settleJoin: () => void = () => {};
+  const joinP = new Promise<void>((r) => { settleJoin = r; });
+  inflightByResolved.set(resolvedId, joinP);
+
   // 自带 AbortController + 兜底计时器：预取没人会 abort 它，不能泄漏。
   const ctrl = new AbortController();
   const guard = setTimeout(() => ctrl.abort(), prefetchDeadlineMs() + PREFETCH_GUARD_GRACE_MS);
@@ -525,6 +539,8 @@ async function doPrefetch(songId: string): Promise<void> {
     }
   } finally {
     clearTimeout(guard);
+    inflightByResolved.delete(resolvedId);
+    settleJoin();
   }
 }
 
@@ -579,6 +595,7 @@ export function resetPrefetchForTest(): void {
   bySong.clear();
   alias.clear();
   inflight.clear();
+  inflightByResolved.clear();
   queued.length = 0;
   running = 0;
 }
@@ -591,4 +608,19 @@ export function prefetchStats(): { cached: number; inflight: number; queued: num
 /** 观测用：别名表（队列行 id → 解析后 id）快照。用于断言「条目回收后别名不悬空」。 */
 export function prefetchAliasesForTest(): Array<[string, string]> {
   return [...alias.entries()];
+}
+
+/**
+ * 冷播放搭车入口（routes/rest/index.ts 的 bufferNetworkSource 用）：该**解析后
+ * songId** 是否有**正在下载**的预取。返回其落地 promise（landed-or-failed，
+ * 不 reject；落地后 `prefetchHit` 即可命中）；没有（未触发 / 排队中 / 已结束 /
+ * 闸门拦下）⇒ null，调用方走既有冷路径。
+ *
+ * 语义边界（与文件头红线 1 对齐）：本函数只让播放**等待同一份在途下载**，
+ * 绝不把预取拉进播放路径的 single-flight（`song:${songId}` 重试表保持为空，
+ * 既有守卫 retryLoopKeysForTest 不变）。
+ */
+export function prefetchInFlight(songId: string): Promise<void> | null {
+  if (!songId) return null;
+  return inflightByResolved.get(songId) ?? null;
 }
