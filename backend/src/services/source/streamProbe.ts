@@ -258,10 +258,12 @@ export async function runProbeOnce(nowMs = Date.now()): Promise<ProbeOutcome> {
       if (!res.body) return recordFail("no-body", Date.now());
       const reader = res.body.getReader();
       const first = await reader.read();
+      // 先定格 TTFB 再取消连接:reader.cancel() 的断连耗时若计进来,量的就变成
+      // 「首字节 + 断连」而不是首字节(断连偶发很慢,指标会被系统性抬高)。
+      const ttfbMs = Date.now() - started;
       await reader.cancel().catch(() => {
         /* 取消失败无所谓:连接终将超时关闭,不影响已测到的 TTFB */
       });
-      const ttfbMs = Date.now() - started;
       if (first.done || !first.value || first.value.byteLength === 0) {
         return recordFail("empty-body", Date.now());
       }
