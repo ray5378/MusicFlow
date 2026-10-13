@@ -39,6 +39,11 @@ import { setSetting } from "../../src/services/settings.js";
 //      所以 X 头从"只定义一次"改成"只在两个管道出口各定义一次"，并且
 //      flow 只能由开关把关、只作为回退链的一环出现 —— 不许出现"第三条"出流。
 //
+//   ⑤ 行为锁：客户端带 Range 头请求 /rest/stream —— 实时管道流没有字节总量可供
+//      续传，一律忽略 Range 走全流 200（绝不 206/416，也绝不按 Range 截断 body），
+//      seek 只能走 timeOffset 重拉（P2-3，0.1s 粒度）。见文件尾部
+//      「P2-1 Range 契约」describe。
+//
 // ⚠️ DLNA 路由里**保留**的回环 `raw` 分支（`resolveRawStreamToken`）是喂给 ffmpeg 的
 // 取源通道（SPEC §1.8 第三个坑的落库注册表），**不是**面向用户的直透 —— 结构锁因此
 // 只从 **cast token 分支之后**开始断言干净，不整段扫。
@@ -339,5 +344,67 @@ describe("P2-6 换源行后增益变化（测量键是 row.id）", () => {
       deleteAnalysis("pw");
       deleteAnalysis("pl");
     }
+  });
+});
+
+// ==================== P2-1 Range 契约锁（行为版） ====================
+// 上面的结构锁 ③ 证明出流代码里没有任何 Range 旁路（无 Accept-Ranges /
+// createReadStream / raw 直出）；本块把 P2-1 的**行为语义**钉成契约：
+// 实时管道流没有字节总量可供续传，客户端带不带 Range 头都一样 ——
+// 一律全流 200，绝不 206/416，也绝不按 Range 截断 body；seek 只能走
+// timeOffset 重拉（P2-3）。
+// ⚠️ 这条锁防的是「未来有人给管道流补 Range 支持」：Web 端 Howler /
+// Flutter just_audio 都按标准 HTTP Range 语义解析，一旦服务端对管道流
+// 返回 206，两端会把"从某字节起的音频碎片"当"整曲"解码 → 播放位置错乱。
+describe("P2-1 Range 契约:带 Range 头请求 /rest/stream 一律全流 200", () => {
+  const streamUrl = (extra = "") => `/rest/stream?id=pw&${authQS()}${extra}`;
+
+  it("Range: bytes=0- → 200（非 206）、无 Content-Range、实时流无 Content-Length", async () => {
+    const res = await authedApp.request(streamUrl(), { headers: { Range: "bytes=0-" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-range")).toBeNull();
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(res.headers.get("accept-ranges")).toBeNull();
+    const buf = Buffer.from(await res.arrayBuffer());
+    expect(buf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+    expect(buf.length).toBeGreaterThan(1024);
+  }, 30000);
+
+  it("中段 Range: bytes=100-200 → 仍 200 全流（不从第 100 字节起、不截断）", async () => {
+    const res = await authedApp.request(streamUrl(), { headers: { Range: "bytes=100-200" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-range")).toBeNull();
+    const buf = Buffer.from(await res.arrayBuffer());
+    // body 从流头开始（fLaC 魔数在首位），不是"第 100 字节起"的碎片。
+    expect(buf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+    expect(buf.length).toBeGreaterThan(1024);
+  }, 30000);
+
+  it("后缀 Range: bytes=-500 → 仍 200 全流", async () => {
+    const res = await authedApp.request(streamUrl(), { headers: { Range: "bytes=-500" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-range")).toBeNull();
+    const buf = Buffer.from(await res.arrayBuffer());
+    expect(buf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+  }, 30000);
+
+  it("Range + timeOffset 组合:Range 被忽略不影响 timeOffset 定位语义（仍 200 全流）", async () => {
+    const res = await authedApp.request(streamUrl("&timeOffset=1"), {
+      headers: { Range: "bytes=0-" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-musicflow-transcoded")).toBe("1");
+    const buf = Buffer.from(await res.arrayBuffer());
+    expect(buf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+    expect(buf.length).toBeGreaterThan(1024);
+  }, 30000);
+
+  it("结构锁:/stream handler 段不得出现任何 Range 头解析（防未来旁支）", () => {
+    const restSrc = readSrc("routes/rest/index.ts");
+    const seg = sliceBetween(restSrc, 'restRoutes.get("/stream",', 'restRoutes.get("/stream-remote"');
+    expect(seg).not.toMatch(/c\.req\.header\(\s*["']range["']\s*\)/i);
+    expect(seg).not.toMatch(/headers\.get\(\s*["']range["']\s*\)/i);
+    expect(seg).not.toContain("parseRange");
+    expect(seg).not.toContain("Accept-Ranges");
   });
 });
