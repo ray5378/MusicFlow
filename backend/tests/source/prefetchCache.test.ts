@@ -13,10 +13,17 @@
 //   ⑧ 判官组内换源:首选行判死 ⇒ 试同组其他网络源(双写索引),全部判死才把队列行
 //      也标负缓存(judgePlayable 按队列行 id 判跳);有候选没评估 ⇒ 不标队列行。
 //   ⑨ 配置走 settings(UI「媒体获取」页保存即生效):enabled/lookahead/maxAltSources/delta。
+//   ⑩ 适应度函数:预取/播放路径边界——红线 2「绝不动播放路径的超时」的源码/常量/方向锁
+//      + 单次覆写行为锁(③ 是红线 1 的行为锁,本组补红线 2;报告 §7「路径隔离」行)。
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { sqlite } from "../../src/db/index.js";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  PREFETCH_DEADLINE_MS,
   PREFETCH_LOOKAHEAD,
+  PREFETCH_STALL_MS,
   bindLoopbackBase,
   judgePrefetchedBuffer,
   prefetchAliasesForTest,
@@ -27,6 +34,7 @@ import {
   prefetchUpcoming,
   resetPrefetchForTest,
 } from "../../src/services/source/prefetchCache.js";
+import { resetPrefetchSettings } from "../../src/services/source/prefetchConfig.js";
 import {
   bufferedInFlightBytes,
   fetchSongWithRetryWindow,
@@ -35,6 +43,8 @@ import {
   resetRetryLoopsForTest,
   resolveMemStream,
   retryLoopKeysForTest,
+  STREAM_BUFFER_STALL_MS,
+  STREAM_BUFFER_TOTAL_TIMEOUT_MS,
 } from "../../src/services/source/bufferedFetch.js";
 import { resolveNetworkInput } from "../../src/services/source/networkInput.js";
 import { getCachedPlayability, markUnplayable, clearStreamFallbackCache } from "../../src/services/source/online/streamFallback.js";
@@ -874,5 +884,69 @@ describe("⑧-F 换源链路边界", () => {
     expect(tokCand).toBeTruthy();
     expect(tokResolved).toBe(tokCand); // 同一个 token,不是两份拷贝
     expect(prefetchHit(ROW_G_WEB.id)).toBe(prefetchHit(ROW_G_DAV.id));
+  });
+});
+
+// ==================== ⑩ 适应度函数:预取/播放路径边界(报告 §7「路径隔离」行) ====================
+//
+// ③ 已用行为锁钉死红线 1「绝不共用播放路径的 single-flight」(预取后 retryLoops 为空)。
+// 本组补红线 2「绝不动播放路径的超时」的可执行面——四把静态/常量锁 + 一把行为锁:
+//   (a) 源码锁:预取模块非注释代码不出现播放路径 single-flight 入口(③ 的双保险);
+//   (b) 源码锁:预取模块非注释代码不写播放路径超时的 env/常量——写
+//       STREAM_BUFFER_STALL_MS / STREAM_BUFFER_TIMEOUT_MS env = 全局放宽播放路径,
+//       是红线 2 唯一真实的违背姿势;预取要更耐心只能传单次覆写(见 (e));
+//   (c) 常量锁:播放路径默认 stall/deadline 保持 10s/18s(改常量即红);
+//   (d) 方向锁:预取默认(120s/30s)严格宽于播放路径——后台可以更耐心,播放保持紧;
+//   (e) 行为锁:spyOn fetchWholeSongBuffered,断言预取以单次覆写传自己的
+//       deadline/stall(而非播放默认),且共享循环表保持为空。
+const SRC_DIR = fileURLToPath(new URL("../../src", import.meta.url));
+
+describe("⑩ 适应度函数:预取/播放路径边界", () => {
+  /** 去掉整行注释后的代码行(文件头红线注释大量提到被禁符号,不能算代码)。 */
+  function codeLines(src: string): string[] {
+    return src.split("\n").filter((l) => !l.trimStart().startsWith("//"));
+  }
+
+  it("(a) 源码锁:预取不引用播放路径 single-flight 入口 fetchSongWithRetryWindow", () => {
+    const code = codeLines(fs.readFileSync(path.join(SRC_DIR, "services/source/prefetchCache.ts"), "utf8")).join("\n");
+    expect(code).not.toContain("fetchSongWithRetryWindow");
+    // 正向:预取确实只走 fetchWholeSongBuffered(去重自己维护,见 prefetchCache 文件头红线 1)。
+    expect(code).toContain("fetchWholeSongBuffered");
+  });
+
+  it("(b) 源码锁:预取不写播放路径超时的 env/常量", () => {
+    const code = codeLines(fs.readFileSync(path.join(SRC_DIR, "services/source/prefetchCache.ts"), "utf8")).join("\n");
+    expect(code).not.toMatch(/process\.env\.STREAM_BUFFER_[A-Z_]+\s*=/);
+    expect(code).not.toMatch(/STREAM_BUFFER_(STALL_MS|TIMEOUT_MS|TOTAL_TIMEOUT_MS)\s*=[^=]/);
+  });
+
+  it("(c) 常量锁:播放路径默认 stall/deadline 保持 10s/18s", () => {
+    expect(STREAM_BUFFER_STALL_MS).toBe(10_000);
+    expect(STREAM_BUFFER_TOTAL_TIMEOUT_MS).toBe(18_000);
+  });
+
+  it("(d) 方向锁:预取默认超时严格宽于播放路径", () => {
+    expect(PREFETCH_DEADLINE_MS).toBeGreaterThan(STREAM_BUFFER_TOTAL_TIMEOUT_MS);
+    expect(PREFETCH_STALL_MS).toBeGreaterThan(STREAM_BUFFER_STALL_MS);
+  });
+
+  it("(e) 行为锁:预取以单次覆写传自己的 deadline/stall,共享循环表保持为空", async () => {
+    const bf = await import("../../src/services/source/bufferedFetch.js");
+    const spy = vi.spyOn(bf, "fetchWholeSongBuffered").mockResolvedValue({
+      ok: false, kind: "error", attempts: 0, ms: 0, err: "fitness-stub",
+    });
+    try {
+      resetPrefetchSettings(); // 按默认 120s/30s,不吃 UI 存过的值
+      await prefetchSong(ROW_W.id);
+      await quiesce();
+      expect(spy).toHaveBeenCalledTimes(1);
+      const opts = spy.mock.calls[0]?.[2] as { deadlineMs?: number; stallMs?: number; retries?: number } | undefined;
+      expect(opts?.deadlineMs).toBe(PREFETCH_DEADLINE_MS); // 120s 覆写,不是播放默认 18s
+      expect(opts?.stallMs).toBe(PREFETCH_STALL_MS); // 30s 覆写,不是播放默认 10s
+      expect(opts?.retries).toBe(0); // 后台预取不走瞬时重试(同 ③)
+      expect(retryLoopKeysForTest()).toEqual([]); // 红线 1 复验:共享表仍空
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
