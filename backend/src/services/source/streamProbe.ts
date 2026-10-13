@@ -254,7 +254,11 @@ export async function runProbeOnce(nowMs = Date.now()): Promise<ProbeOutcome> {
         headers: net.headers,
         signal: AbortSignal.timeout(TIMEOUT_MS()),
       });
-      if (!res.ok) return recordFail(`http-${res.status}`, Date.now());
+      // 非 2xx:不读也要显式丢弃响应体,否则 undici 不回收该连接(留到超时才关)。
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        return recordFail(`http-${res.status}`, Date.now());
+      }
       if (!res.body) return recordFail("no-body", Date.now());
       const reader = res.body.getReader();
       const first = await reader.read();
