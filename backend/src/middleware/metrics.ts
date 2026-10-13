@@ -55,7 +55,9 @@ const SLOW_MS_BY_ROUTE: Record<string, number> = {
 
 /**
  * 出流族请求判定(**URL 路径级**,中间件入口即判,不等路由模板):
- * 起播/切歌的真正入口一被调用,金丝雀探针就安静 QUIET_MS(绝不与播放抢上行带宽)。
+ * 起播/切歌的真正入口一被调用,金丝雀探针就安静 QUIET_MS(默认 60s,让开起播/切歌
+ * 这段最敏感的上行窗口)。窗口按「最近一次出流请求进入时刻」算,故长于 60s 的曲目
+ * 在播放中仍可能被探一次(单次代价 ≤ 一个 chunk),此处只保证「起播前后不抢」。
  * 封面渲染不算——它不是「播放活动」。
  * 为什么不能像慢请求预算那样用 routePath 模板:模板要等 next() 跑完路由才定型,
  * 而避让登记必须在请求**进入时**就生效(出流请求会挂住整个播放时长)。
@@ -102,8 +104,8 @@ export interface RequestMetrics {
 /** 慢请求 + 端点计数中间件。在 index.ts 挂 app.use("*")。 */
 export const metricsMiddleware = createMiddleware(async (c, next) => {
   const start = Date.now();
-  // 出流族请求 = 用户正在起播/切歌:进请求就登记给探针避让闸(它绝不与播放抢上行
-  // 带宽)。必须用 URL 路径判(路由模板此刻还没定型),且不能动下方计数用的 route。
+  // 出流族请求 = 用户正在起播/切歌:进请求就登记给探针避让闸(让它安静 QUIET_MS)。
+  // 必须用 URL 路径判(路由模板此刻还没定型),且不能动下方计数用的 route。
   if (isStreamRequest(c.req.method, c.req.url)) noteStreamActivity();
   await next();
   const ms = Date.now() - start;
