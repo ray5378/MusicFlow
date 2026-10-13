@@ -529,6 +529,7 @@ export class SandboxedPlugin {
     if (implResult.error !== undefined) {
       const e = this.ctx.dump(implResult.error);
       implResult.error.dispose();
+      pluginHandle.dispose(); // create() 失败路径同样先释放 pluginHandle:残句柄会把对象钉在 gc_obj_list 上,runtime.dispose() 必触发 JS_FreeRuntime 断言(与其余 init 失败分支对齐)。
       this.dispose();
       const msg = e && typeof e === "object" ? (e.message || e.name || JSON.stringify(e)) : String(e);
       throw new Error(`插件 ${this.id} create() 失败: ${msg}`);

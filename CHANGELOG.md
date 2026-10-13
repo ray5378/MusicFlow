@@ -2,6 +2,11 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.7] - 2026-10-13
+
+### Fix
+
+- **插件 create() 失败路径遗留 QuickJS 句柄**：`SandboxHost.init()` 的 create(host) 抛错分支未先释放 `pluginHandle` 就同步 dispose，残留句柄把对象钉在 `rt->gc_obj_list` 上，`runtime.dispose()` 命中 `list_empty` 断言（日志刷 `Aborted(...)` 并毒化共享 WASM module）。补齐该分支句柄释放，与其余 init 失败分支对齐。回归验证：create 失败用例断言数 1→0，沙箱三件套聚焦跑 4→2（余下 2 处均为设计内灵敏度校准用例）；全量 vitest 回归 500 文件全绿。
 ## [4.6.6] - 2026-10-13
 
 ### Fix
