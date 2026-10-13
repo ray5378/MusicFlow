@@ -399,6 +399,17 @@ export const usePlayerStore = defineStore("player", () => {
   });
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let peerWs: WebSocket | null = null;
+  // peer WS 健壮化在途状态:心跳(保活 + 提供存活证据)、半开看门狗、指数退避重连。
+  // 半开连接(TCP 被中间设备丢弃、本端收不到 FIN)不触发 onclose,只靠事件发现不了
+  // —— 必须用「多久没收到帧」判死并主动重连,否则遥控会「看着在线、按不动」。
+  const PEER_WS_RECONNECT_MIN = 3000;
+  const PEER_WS_RECONNECT_MAX = 30000;
+  const PEER_WS_PING_INTERVAL_MS = 25_000;
+  const PEER_WS_LIVENESS_TIMEOUT_MS = 75_000;
+  let peerWsPingTimer: ReturnType<typeof setInterval> | null = null;
+  let peerWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let peerWsLastMsgAt = 0;
+  let peerWsReconnectDelay = PEER_WS_RECONNECT_MIN;
 
   // ==================== UI-routed computed properties ====================
   // These pick the active state machine based on currentPeerId. For remote
@@ -2060,6 +2071,7 @@ export const usePlayerStore = defineStore("player", () => {
       peerWs = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(authStore.token)}&clientId=${encodeURIComponent(getClientId())}`);
     } catch { return; }
     peerWs.onmessage = (ev) => {
+      peerWsLastMsgAt = Date.now();
       let msg: any;
       try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
@@ -2194,12 +2206,44 @@ export const usePlayerStore = defineStore("player", () => {
         }
       }
     };
+    peerWs.onopen = () => {
+      // 连接成功复位退避,并开始心跳/看门狗。
+      peerWsReconnectDelay = PEER_WS_RECONNECT_MIN;
+      peerWsLastMsgAt = Date.now();
+      startPeerWsPing();
+    };
     peerWs.onclose = () => {
-      setTimeout(() => { if (currentPeerId.value) connectPeerWs(); }, 3000);
+      stopPeerWsPing();
+      if (peerWsReconnectTimer) clearTimeout(peerWsReconnectTimer);
+      const delay = peerWsReconnectDelay;
+      peerWsReconnectDelay = Math.min(peerWsReconnectDelay * 2, PEER_WS_RECONNECT_MAX);
+      peerWsReconnectTimer = setTimeout(() => {
+        peerWsReconnectTimer = null;
+        if (currentPeerId.value) connectPeerWs();
+      }, delay);
     };
     peerWs.onerror = () => { try { peerWs?.close(); } catch {} };
   }
+  // 心跳:空闲时也保持「有来有回」;看门狗:超阈值无帧即判半开,主动关闭触发重连。
+  function startPeerWsPing(): void {
+    stopPeerWsPing();
+    peerWsPingTimer = setInterval(() => {
+      const ws = peerWs;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - peerWsLastMsgAt > PEER_WS_LIVENESS_TIMEOUT_MS) {
+        console.warn("[player] peer WS liveness timeout → force reconnect");
+        try { ws.close(); } catch {}
+        return;
+      }
+      try { ws.send(JSON.stringify({ type: "ping" })); } catch {}
+    }, PEER_WS_PING_INTERVAL_MS);
+  }
+  function stopPeerWsPing(): void {
+    if (peerWsPingTimer) { clearInterval(peerWsPingTimer); peerWsPingTimer = null; }
+  }
   function disconnectPeerWs(): void {
+    stopPeerWsPing();
+    if (peerWsReconnectTimer) { clearTimeout(peerWsReconnectTimer); peerWsReconnectTimer = null; }
     if (peerWs) {
       peerWs.onclose = null;
       try { peerWs.close(); } catch {}

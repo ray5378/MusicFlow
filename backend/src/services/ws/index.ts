@@ -62,9 +62,33 @@ const log = createLogger("ws");
 
 let wss: WebSocketServer | null = null;
 
+// 服务端主动 keepalive(协议层 ping/pong 探活)。浏览器 / web_socket_channel /
+// aiohttp 都会自动回 pong。两轮周期(60s)内没回 pong 即判为**半开连接**并
+// terminate —— 触发 close 回调 → 该实例连接数归零 / 标离线,同时释放它占着的
+// clientId 定向投递坑位。没有它时,半开连接会永远留在 wss.clients 里:
+// sendToLocalPeer 看到 readyState===OPEN 以为投递成功,实际对端早收不到,
+// 表现为「能看状态、按钮无反应」。客户端自身也有心跳,这里是不依赖客户端配合的兜底。
+const WS_PING_INTERVAL_MS = 30_000;
+let wsKeepaliveTimer: ReturnType<typeof setInterval> | null = null;
+
 export function initWebSocketServer(server: import("http").Server): void {
   if (wss) return;
   wss = new WebSocketServer({ noServer: true });
+
+  // 周期扫描:先置活跃位 false,收到 pong 的会被置回;下一轮仍是 false = 半开。
+  wsKeepaliveTimer = setInterval(() => {
+    for (const ws of wss!.clients as Iterable<WebSocket>) {
+      const sock = ws as any;
+      if (sock.__isAlive === false) {
+        log.info(`ws keepalive terminate (no pong) clientId=${sock.__clientId ?? "-"}`);
+        try { ws.terminate(); } catch { /* already gone */ }
+        continue;
+      }
+      sock.__isAlive = false;
+      try { ws.ping(); } catch { /* CONNECTING / CLOSED:略过 */ }
+    }
+  }, WS_PING_INTERVAL_MS);
+  wsKeepaliveTimer.unref?.();
 
   // 「随机歌曲」歌单变动广播:插件(后台定时 / 惰性刷新)重建歌单后 emit,
   // 此处转发给所有已连接客户端,客户端收到后按需重拉歌单,不再轮询。
@@ -98,6 +122,10 @@ export function initWebSocketServer(server: import("http").Server): void {
   });
 
   wss.on("connection", (ws) => {
+    // 活跃位:交给上面的 keepalive 周期扫描判定半开。收到 pong 即刷新。
+    const sock = ws as any;
+    sock.__isAlive = true;
+    ws.on("pong", () => { sock.__isAlive = true; });
     // 连接身份快照:遥控本机实例靠 (userId, clientId) 定向投递,新连接没带上
     // clientId 就永远收不到指令 —— 出现「能看状态、按钮无反应」时先看这行。
     log.info(`ws open user=${(ws as any).__user?.id ?? "-"} clientId=${(ws as any).__clientId ?? "-"} total=${wss!.clients.size}`);

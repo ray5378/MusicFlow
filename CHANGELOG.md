@@ -2,6 +2,13 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.10] - 2026-10-13
+
+### Internal
+
+- **服务端 WS 增加协议层 keepalive（ping/pong 半开清理）**：`backend/src/services/ws/index.ts` 每 30s 对所有连接 `ws.ping()` 并置活跃位，收到 pong 复位；连续两轮（60s）未回 pong 判为半开并 `terminate()`——触发 close 回调（连接计数归零、标记实例离线、释放 clientId 定向投递坑位）。此前服务端只被动响应客户端应用层 ping，若客户端不发（如 Flutter 客户端）又不回协议 pong，半开连接会一直留在 `wss.clients` 里：`sendToLocalPeer` 看到 `readyState===OPEN` 误判投递成功，实际对端收不到，表现为「能看状态、按不动」。浏览器 / `web_socket_channel` / aiohttp 都会自动回协议 pong，不依赖客户端配合。
+- **Web 前端 peer WS 健壮化**：`frontend/src/stores/player.ts` 的 `peerWs` 补齐——每 25s 发 `{"type":"ping"}`、75s 无帧看门狗（半开主动关闭重连）、重连退避由固定 3s 改为 3s→30s 指数退避（连接成功复位），并新增 `onopen` 复位逻辑与重连定时器清理。此前只有「onclose → 固定 3s 重连」，无心跳、无半开检测——与客户端同源的「看得见、按不动」隐患。
+
 ## [4.6.9] - 2026-10-13
 
 ### Feature
