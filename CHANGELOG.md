@@ -2,6 +2,12 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.11] - 2026-10-14
+
+### Internal
+
+- **起播 TTFB 探针逐项复核修复（S1/S3/S4/S5/S6/S7）**：① TTFB 定格**提前到 `reader.cancel()` 之前**（原先把断连耗时也计入，指标被系统性抬高）；② 非 2xx 分支显式 `res.body.cancel()` 丢弃响应体（原先不读不弃，undici 连接只能等超时回收）；③ `middleware/metrics.ts` 的 `isStreamRequest` 去掉死的 `method` 形参；④ 删除死代码 `streamProbeSchedulerRunning()`（全仓无引用）；⑤ 收敛「绝不与播放抢上行带宽」的措辞——避让窗是「起播后 `STREAM_PROBE_QUIET_MS`（默认 60s）」，长于 60s 的曲目播放中仍可能被探一次（单次 ≤ 一个 chunk）；⑥ 补 `STREAM_PROBE_SONG_ID` 的 env 说明（原先只在代码里兜底）。经复核**不改**：「skip 不推进探测间隔闸」（见 4.6.9）是「开关/选歌静默生效」的机制本身，改为按间隔收敛会让用户改配置后最长等 1h 才生效。
+
 ## [4.6.10] - 2026-10-13
 
 ### Internal
