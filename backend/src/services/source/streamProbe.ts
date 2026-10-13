@@ -317,11 +317,6 @@ export function stopStreamProbeScheduler(): void {
   }
 }
 
-/** 调度器是否在跑(快照给 UI 展示「自动探测中/未挂载」)。 */
-export function streamProbeSchedulerRunning(): boolean {
-  return timer !== null;
-}
-
 // ==================== 快照 ====================
 
 export interface StreamProbeSnapshot {
