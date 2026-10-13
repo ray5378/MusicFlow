@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +36,10 @@ beforeAll(() => {
   ff(["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:a", "flac", FLAC]);
   // 真·不可解析:随机二进制(纯文本会被 music-metadata 当成有 tag 的文件解析成功,
   // 拿它当"解析失败"样本会假绿 —— 已踩过一次)。
-  writeFileSync(JUNK, randomBytes(4096));
+  // 全零确定性样本:随机字节(randomBytes)偶发被 music-metadata 伪解析成功
+  // (2026-10-13 CI 实证 resolved sr=8000),「必解析失败」前提不再成立;
+  // 全零实测 30/30 稳定抛错。
+  writeFileSync(JUNK, Buffer.alloc(4096));
   // 内容与文件名故意错配（同字节、只换名字）。
   copyFileSync(MP3, MP3_NAMED_FLAC);
   copyFileSync(FLAC, FLAC_NAMED_MP3);
