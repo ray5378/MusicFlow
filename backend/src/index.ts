@@ -347,6 +347,7 @@ import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
 import { registerFetchImportTrigger } from "./services/fetch/importTrigger.js";
 import { startTagRepairScheduler } from "./services/fetch/tagRepair.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
+import { startStreamProbeScheduler } from "./services/source/streamProbe.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
 import { resumeInterruptedFetchJobs } from "./services/fetch/jobRunner.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
@@ -387,6 +388,10 @@ wireSsdpRealtime();
 startUpgradeScheduler();
 startLibraryScheduler();
 startScanScheduler();
+// 起播 TTFB 金丝雀探针调度(默认关;用户在「媒体获取」页开启后才按间隔探,
+// 见 services/source/streamProbe.ts 头部)。tick 本身极轻(一次 settings 读),
+// 未开启时零开销。
+startStreamProbeScheduler();
 // 标签缺失修复调度（2026-10-11）：事件队列（下载终态入队、退避重试）+ 每周全量兜底扫。
 startTagRepairScheduler();
 // 入库即入队（产品定调 2026-10-11，最根本的一条）：**任何**入库的网络歌曲都必须过一轮

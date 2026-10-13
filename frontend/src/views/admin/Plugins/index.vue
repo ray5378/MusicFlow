@@ -396,6 +396,71 @@
           </div>
         </el-card>
 
+        <!-- 起播 TTFB 金丝雀探针(默认关;开不开用户定,开启需先钉死一首网络源歌曲) -->
+        <el-card class="mf-card" shadow="never">
+          <template #header>
+            <div class="card-head">
+              <span class="card-title">{{ t('admin.plugins.probeSettings') }}</span>
+            </div>
+          </template>
+          <div class="mf-media">
+            <div class="mf-media-row">
+              <span class="field-hint">{{ t('admin.plugins.probeSettingsHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.probeEnabled') }}</span>
+              <el-switch v-model="probeSettings.enabled" :loading="savingProbe" @change="onProbeToggle" />
+              <span class="field-hint">{{ t('admin.plugins.probeEnabledHint') }}</span>
+            </div>
+            <div class="mf-media-row">
+              <span class="mf-media-label">{{ t('admin.plugins.probeSong') }}</span>
+              <el-button size="small" @click="openProbeSongPicker">{{ t('admin.plugins.probePickSong') }}</el-button>
+              <span class="field-hint">{{ probeSongText }}</span>
+            </div>
+            <div class="mf-media-row" v-if="probeSnapshot">
+              <span class="mf-media-label">{{ t('admin.plugins.probeStatus') }}</span>
+              <el-tag size="small" :type="probeHealthType" effect="dark">{{ t('admin.plugins.probeHealth.' + (probeSnapshot.health || 'unknown')) }}</el-tag>
+              <span class="field-hint">{{ probeStatusText }}</span>
+            </div>
+            <div class="mf-media-row" v-if="probeSnapshot && (probeSnapshot.lastTtfbMs != null || probeSnapshot.samples)">
+              <span class="mf-media-label">{{ t('admin.plugins.probeTtfb') }}</span>
+              <span class="field-hint">
+                {{ t('admin.plugins.probeTtfbRecent') }} {{ probeSnapshot.lastTtfbMs == null ? '-' : probeSnapshot.lastTtfbMs + 'ms' }}
+                · p50 {{ probeSnapshot.p50Ms == null ? '-' : probeSnapshot.p50Ms + 'ms' }}
+                · p95 {{ probeSnapshot.p95Ms == null ? '-' : probeSnapshot.p95Ms + 'ms' }}
+                · {{ t('admin.plugins.probeSamples') }} {{ probeSnapshot.samples }}
+              </span>
+            </div>
+            <div class="mf-media-row" v-if="probeSnapshot && probeSnapshot.lastSkipReason">
+              <span class="mf-media-label">{{ t('admin.plugins.probeSkip') }}</span>
+              <span class="field-hint">{{ t('admin.plugins.probeSkipReason.' + probeSnapshot.lastSkipReason) }}</span>
+            </div>
+            <div class="mf-media-row" v-if="probeSnapshot && probeSnapshot.enabled">
+              <span class="mf-media-label">{{ t('admin.plugins.probeCounts') }}</span>
+              <span class="field-hint">
+                ok {{ probeSnapshot.counts.ok }} · fail {{ probeSnapshot.counts.fail }} · skip {{ probeSnapshot.counts.skip }}
+                · {{ t('admin.plugins.probeInterval') }} {{ Math.round(probeSnapshot.intervalMs / 60000) }}min
+              </span>
+            </div>
+          </div>
+        </el-card>
+
+        <!-- 探测歌曲选择:搜索 + 分页(库有多大都不必一次拉全) -->
+        <el-dialog v-model="probeSongDialog" :title="t('admin.plugins.probePickSong')" width="640px" destroy-on-close>
+          <div class="mf-media-row">
+            <el-input v-model="probeSongQuery" :placeholder="t('admin.plugins.probeSearchHint')" clearable size="small" style="max-width: 300px" @keyup.enter="loadProbeSongs" />
+            <el-button size="small" @click="loadProbeSongs">{{ t('admin.plugins.probeSearch') }}</el-button>
+          </div>
+          <el-table :data="probeSongs" size="small" stripe highlight-current-row @row-click="onPickProbeSong">
+            <el-table-column prop="title" :label="t('admin.plugins.colName')" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="artist" :label="t('admin.plugins.probeColArtist')" min-width="120" show-overflow-tooltip />
+            <el-table-column prop="album" :label="t('admin.plugins.probeColAlbum')" min-width="140" show-overflow-tooltip />
+          </el-table>
+          <div class="mf-media-row" style="margin-top: 8px; justify-content: flex-end">
+            <el-pagination layout="prev, pager, next" :total="probeSongsTotal" :page-size="20" :current-page="probeSongPage" small background @current-change="onProbeSongPage" />
+          </div>
+        </el-dialog>
+
         <div class="mf-actions">
           <el-button type="primary" :loading="savingMedia" @click="saveAllMedia">{{ t('admin.plugins.saveSettings') }}</el-button>
           <span class="field-hint">{{ t('admin.plugins.saveSettingsHint') }}</span>
@@ -774,6 +839,42 @@ const prefetchSettings = reactive({
 /** 后端下发的取值范围(min/max/int),输入框按同一把尺子钳制 —— 前后端不各写一套。 */
 const prefetchSpecs = ref<Record<string, { min: number; max: number; def: number; int?: boolean }>>({});
 const savingPrefetch = ref(false);
+
+// ---- 起播 TTFB 金丝雀探针(默认关;settings 存储,即存即切;开启需先钉死一首网络源歌曲) ----
+const probeSettings = reactive({ enabled: false, songId: "" });
+const probeSnapshot = ref<any>(null);
+const savingProbe = ref(false);
+const probeSongDialog = ref(false);
+const probeSongQuery = ref("");
+const probeSongs = ref<any[]>([]);
+const probeSongsTotal = ref(0);
+const probeSongPage = ref(1);
+
+/** 探测歌曲行文本:库内在 → 标题·艺人;id 在行不在 → 提示换歌;都没选 → 提示必选。 */
+const probeSongText = computed(() => {
+  const s = probeSnapshot.value?.song;
+  if (s?.title) return `${s.title}${s.artist ? " · " + s.artist : ""}`;
+  if (probeSettings.songId) return t('admin.plugins.probeSongMissing');
+  return t('admin.plugins.probeNoSong');
+});
+
+const probeHealthType = computed(() => {
+  const h = probeSnapshot.value?.health;
+  return h === "healthy" ? "success" : h === "failing" ? "danger" : "info";
+});
+
+/** 状态行补充说明:关闭/上次错误/上次 TTFB(超告警线加警示)/暂无数据。 */
+const probeStatusText = computed(() => {
+  const s = probeSnapshot.value;
+  if (!s) return "";
+  if (!s.enabled) return t('admin.plugins.probeStatusOff');
+  if (s.lastError) return `${t('admin.plugins.probeLastError')}: ${s.lastError}`;
+  if (s.lastTtfbMs != null) {
+    const slow = s.lastTtfbMs > s.ttfbWarnMs;
+    return `${t('admin.plugins.probeLastTtfb')}: ${s.lastTtfbMs}ms${slow ? " ⚠ " + t('admin.plugins.probeOverWarn') : ""}`;
+  }
+  return t('admin.plugins.probeNoData');
+});
 
 /** el-input-number 的 min/max/step(整数步长 1,小数 0.1);specs 未就绪时放宽不拦。 */
 function specRange(k: string): { min: number; max: number; step: number } {
@@ -1606,6 +1707,8 @@ async function loadMediaSettings() {
       Object.assign(prefetchSettings, rest);
       if (specs) prefetchSpecs.value = specs;
     }
+    // 起播 TTFB 探针开关(默认关):与预取参数同一批次加载,附带运行快照。
+    await loadProbeSettings();
   } catch { /* 后端旧版本无此端点时保持默认 */ }
 }
 
@@ -1651,6 +1754,81 @@ async function savePrefetchSettings(): Promise<boolean> {
   } finally {
     savingPrefetch.value = false;
   }
+}
+
+/** 探针设置加载(自带 try/catch:后端旧版本无此端点时保持默认「关」)。 */
+async function loadProbeSettings(): Promise<void> {
+  try {
+    const r = await api.get("/rest/api/v1/playback-sources/probe-settings");
+    if (r.data) {
+      probeSettings.enabled = !!r.data.enabled;
+      probeSettings.songId = r.data.songId || "";
+      probeSnapshot.value = r.data.snapshot || null;
+    }
+  } catch { /* 旧版本无此端点:保持默认(关、无歌) */ }
+}
+
+/** 探针设置保存(PUT 合并语义;返回体带最新快照,直接刷新状态行)。 */
+async function saveProbeSettings(): Promise<boolean> {
+  savingProbe.value = true;
+  try {
+    const r = await api.put("/rest/api/v1/playback-sources/probe-settings", { ...probeSettings });
+    if (r.data) {
+      probeSettings.enabled = !!r.data.enabled;
+      probeSettings.songId = r.data.songId || "";
+      probeSnapshot.value = r.data.snapshot || null;
+    }
+    return true;
+  } catch (e: any) {
+    ElMessage.error(formatApiError(e, t('admin.plugins.probeSaveFailed')));
+    return false;
+  } finally {
+    savingProbe.value = false;
+  }
+}
+
+/** 开关切换:开启前必须已钉死歌曲(后端同样拒绝,双保险;失败回弹开关)。 */
+async function onProbeToggle(val: boolean | string | number): Promise<void> {
+  const on = val === true; // el-switch 的 change 入参类型是 string|number|boolean
+  if (on && !probeSettings.songId) {
+    ElMessage.warning(t('admin.plugins.probeSongRequired'));
+    probeSettings.enabled = false;
+    return;
+  }
+  const ok = await saveProbeSettings();
+  if (!ok) probeSettings.enabled = !on; // 保存失败 ⇒ 回弹,UI 与后端一致
+}
+
+function openProbeSongPicker(): void {
+  probeSongDialog.value = true;
+  probeSongPage.value = 1;
+  void loadProbeSongs();
+}
+
+async function loadProbeSongs(): Promise<void> {
+  try {
+    const r = await api.get("/rest/api/v1/songs", {
+      params: { page: probeSongPage.value, pageSize: 20, query: probeSongQuery.value },
+    });
+    probeSongs.value = r.data?.items || [];
+    probeSongsTotal.value = r.data?.total || 0;
+  } catch {
+    probeSongs.value = [];
+    probeSongsTotal.value = 0;
+  }
+}
+
+function onProbeSongPage(p: number): void {
+  probeSongPage.value = p;
+  void loadProbeSongs();
+}
+
+/** 点行即选:带歌保存。开启态下后端会立即探一次(不必等下一个整点 tick)。 */
+async function onPickProbeSong(row: any): Promise<void> {
+  if (!row?.id) return;
+  probeSettings.songId = row.id;
+  probeSongDialog.value = false;
+  await saveProbeSettings();
 }
 
 /** 一次性保存「歌词获取」+「封面获取」+「播放来源优先级」+「预取与判定参数」。 */

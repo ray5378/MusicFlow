@@ -19,6 +19,7 @@
 // 纪律:未列出的路由一律用全局默认 —— 分级是"豁免已知的慢",不是"抬高全局底线"。
 import { createMiddleware } from "hono/factory";
 import { createLogger } from "../utils/logger.js";
+import { noteStreamActivity } from "../services/source/streamProbe.js";
 
 const log = createLogger("HTTP");
 
@@ -51,6 +52,20 @@ const SLOW_MS_BY_ROUTE: Record<string, number> = {
   "POST /rest/stream.view": SLOW_MS_STREAM,
   "GET /rest/dlna/stream/:token": SLOW_MS_STREAM,
 };
+
+/**
+ * 出流族请求判定(**URL 路径级**,中间件入口即判,不等路由模板):
+ * 起播/切歌的真正入口一被调用,金丝雀探针就安静 QUIET_MS(绝不与播放抢上行带宽)。
+ * 封面渲染不算——它不是「播放活动」。
+ * 为什么不能像慢请求预算那样用 routePath 模板:模板要等 next() 跑完路由才定型,
+ * 而避让登记必须在请求**进入时**就生效(出流请求会挂住整个播放时长)。
+ */
+export function isStreamRequest(method: string, url: string): boolean {
+  const p = new URL(url).pathname;
+  if (p === "/rest/stream" || p === "/rest/stream.view") return true;
+  if (p.startsWith("/rest/dlna/stream/")) return true;
+  return false;
+}
 
 /** 该请求适用的慢请求预算(ms)。未列出的路由回落全局默认 SLOW_MS。 */
 export function slowThresholdMs(method: string, route: string): number {
@@ -87,6 +102,9 @@ export interface RequestMetrics {
 /** 慢请求 + 端点计数中间件。在 index.ts 挂 app.use("*")。 */
 export const metricsMiddleware = createMiddleware(async (c, next) => {
   const start = Date.now();
+  // 出流族请求 = 用户正在起播/切歌:进请求就登记给探针避让闸(它绝不与播放抢上行
+  // 带宽)。必须用 URL 路径判(路由模板此刻还没定型),且不能动下方计数用的 route。
+  if (isStreamRequest(c.req.method, c.req.url)) noteStreamActivity();
   await next();
   const ms = Date.now() - start;
   total++;

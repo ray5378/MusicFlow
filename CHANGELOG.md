@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.9] - 2026-10-13
+
+### Feature
+
+- **起播 TTFB 金丝雀探针（设置页开关，默认关闭）**：新增「插件管理 → 媒体获取 → 起播 TTFB 探针」卡片，用户可随时开关。开启后立即探一次，之后每小时一次：直接打上游 URL（与出流/预取共用同一份 `resolveNetworkInput` 推导，只读首字节即取消，≤64KB/次），量「上游+网络」腿的 TTFB，补真实流量覆盖不到的两块信号 —— 空闲时段心跳（个人实例一天 20h+ 空闲，这是那段时间唯一的连续信号）与源配置静默腐烂检测（WebDAV 密码轮换/插件登录态过期，提前几小时暴露，不用等用户播不了才发现）。三条卫生条件：① 开启必须钉死具体歌曲（UI 选歌对话框，后端 400 双保险 —— 自动选歌会悄悄换测量对象、源死了天天误报）；② 播放中避让（出流族请求进 middleware 即登记，起播后 60s 内不探，绝不与播放抢上行带宽）；③ 失败仅在健康状态翻转时 warn（healthy→failing / failing→healthy，中间态转 debug，防每小时一条噪音）。TTFB 超 `STREAM_PROBE_TTFB_WARN_MS`（默认 10s）即使成功也 warn。卡片状态行展示 health / 上次 TTFB / p50 / p95 / 样本数 / 跳过原因；快照同时挂 `GET /v1/admin/metrics`（运维面板与 UI 同一份真源）。env 旋钮：`STREAM_PROBE_INTERVAL_MS` / `STREAM_PROBE_TTFB_WARN_MS` / `STREAM_PROBE_TIMEOUT_MS` / `STREAM_PROBE_QUIET_MS` / `STREAM_PROBE_SAMPLES` / `STREAM_PROBE_SUMMARY_EVERY`；`STREAM_PROBE_ENABLED=1` 仅在 UI 从没保存过时兜底（与 prefetchConfig 同纪律）。与字面 `/rest/stream?timeOffset=1` 方案的有意偏差：那条路要 Subsonic 鉴权，且会穿过整条缓冲机制（注册 membuf、等头窗、可能顶掉正在播的条目）—— 探针反而可能干扰它要观测的对象；贴近播放体感的全链路分位留待真实流量 tap（独立任务）。
+
+### Internal
+
+- 新增 `services/source/streamProbeConfig.ts`（settings 键 `stream.probe.settings`，读序 settings>env>默认，PUT 合并语义，开启无歌返回 i18n 键 `errors.streamProbe.songRequired`）与 `services/source/streamProbe.ts`（环形缓冲 + nearest-rank 分位、single-flight、30s tick 调度使开关/歌曲改动静默生效、状态机仅翻转告警、skip 不推进探测间隔闸）；`middleware/metrics.ts` 新增 URL 路径级 `isStreamRequest()`（中间件入口即判，不等路由模板 —— 模板要等 next() 跑完才定型，避让登记必须在请求进入时生效）并登记播放活动；`routes/api/settings.ts` 新增 `GET/PUT /v1/playback-sources/probe-settings`（开启即探一次）+ admin/metrics 快照挂载；`i18n.ts` 补 zh/en 双语文案。
+- 新增单测：`tests/source/streamProbe.test.ts`（31 例：skip 优先级 / 失败归因 / nearest-rank / 环形缓冲封顶 / 调度与间隔闸 / single-flight / 配置层合并校验与 env 兜底）；`tests/routes/streamProbeSettingsRoute.qa.test.ts`（7 例路由合同：默认关 / 开启无歌 400 / 合并语义 / 落库键隔离 / admin 三态 / metrics 快照，beforeEach 复位保证 shuffle 下自足）。`scripts/pull-240-monitor.sh` 新增 `pull_probe()`（独立游标拉 `[STREAM-PROBE]` 行 → `logs/monitor-240/probe.log`，与 deadlink 游标互不推进）。
+
 ## [4.6.8] - 2026-10-13
 
 ### Feature

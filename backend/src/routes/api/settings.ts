@@ -21,6 +21,8 @@ import {
   getSettingBool,
   getProviderPriority,
   getPrefetchSettings,
+  getStreamProbeSettings,
+  getStreamProbeSnapshot,
   getStreamSourcePriority,
   isBatchBusy,
   isIdle,
@@ -36,9 +38,11 @@ import {
   setLyricsCoversSettings,
   setPrefetchSettings,
   setSetting,
+  setStreamProbeSettings,
   setStreamSourcePriority,
   songs,
   startBackfill,
+  runProbeOnce,
 } from "./shared.js";
 
 export function registerSettings(app: Hono): void {
@@ -95,7 +99,8 @@ app.put("/v1/admin/memory-settings", adminMiddleware, async (c) => {
 // 请求指标:总请求数 / 慢请求数 / 端点调用计数(内存态,重启清零)。
 
 app.get("/v1/admin/metrics", adminMiddleware, (c) => {
-  return c.json({ success: true, ...getRequestMetrics() });
+  // streamProbe 快照随 metrics 一起出:运维面板与「媒体获取」页状态行同一份真源。
+  return c.json({ success: true, ...getRequestMetrics(), streamProbe: getStreamProbeSnapshot() });
 });
 
 // ==================== 日志等级(运行时可调) ====================
@@ -223,6 +228,29 @@ app.put("/v1/playback-sources/prefetch-settings", adminMiddleware, async (c) => 
   // 一次「人主动做的运维动作」,任何时候都该看得见(含改动后的全量生效值)。
   createLogger("ADMIN").info(`[prefetch] 预取/判官参数已更新 ${JSON.stringify(next)}`);
   return c.json({ success: true, ...next });
+});
+
+// ==================== 起播 TTFB 探针开关(默认关,「媒体获取」页可随时开关) ====================
+// 金丝雀定位(空闲心跳 + 源配置静默腐烂检测)与三条卫生条件(钉死歌曲/播放避让/
+// 状态翻转才 warn)见 services/source/streamProbe.ts 头部,此处不重复。
+// 开启必须已有选定歌曲(setStreamProbeSettings 校验,否则 400 + i18n 键);
+// 开启即探一次,不必等下一个整点 tick;关闭/改歌不补跑,下一轮 tick 自然按新配置来。
+
+app.get("/v1/playback-sources/probe-settings", adminMiddleware, (c) => c.json({
+  success: true,
+  ...getStreamProbeSettings(),
+  snapshot: getStreamProbeSnapshot(),
+}));
+
+app.put("/v1/playback-sources/probe-settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const r = setStreamProbeSettings(body);
+  if (!r.ok) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, r.error), 400);
+  }
+  createLogger("ADMIN").info(`[probe] TTFB 探针设置已更新 ${JSON.stringify(r.settings)}`);
+  if (r.settings.enabled) void runProbeOnce();
+  return c.json({ success: true, ...r.settings, snapshot: getStreamProbeSnapshot() });
 });
 
 // 手动批量补全(节流执行,后台运行;同种任务在跑则返回 running=true)

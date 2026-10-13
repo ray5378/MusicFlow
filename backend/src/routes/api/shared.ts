@@ -158,6 +158,20 @@ export {
   PREFETCH_NUM_SPECS,
 } from "../../services/source/prefetchConfig.js";
 
+// 起播 TTFB 金丝雀探针(settings 表,媒体获取页开关,默认关):配置读写 + 运行快照
+// + 「开启即探一次」。金丝雀定位/三条卫生条件见 services/source/streamProbe.ts 头部。
+export {
+  getStreamProbeSettings,
+  setStreamProbeSettings,
+  resetStreamProbeSettings,
+  STREAM_PROBE_SETTINGS_KEY,
+} from "../../services/source/streamProbeConfig.js";
+export {
+  getStreamProbeSnapshot,
+  runProbeOnce,
+  noteStreamActivity,
+} from "../../services/source/streamProbe.js";
+
 // 歌词/封面来源优先级(读权限:settings 路由 GET 用 getProviderPriority;写经
 // setLyricsCoversSettings 内的 normalizeProviderPriority)。按优先级列表排序/筛选
 // 的取源逻辑在 providers.ts 的 filterProvidersByPreference。

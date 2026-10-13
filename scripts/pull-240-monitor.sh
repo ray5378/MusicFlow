@@ -5,6 +5,8 @@
 #   1) 卡顿监控:monitor.csv 新增行 + events.log 新增行
 #   2) 死链跳过:容器新鲜日志里的 JUDGE_DEAD/SKIP/PUMP_DEADFAIL、
 #      PreProbe deadRun>0、SLOWRESOLVE,按次 append,附拉取时间
+#   3) TTFB 探针:容器新鲜日志里的 [STREAM-PROBE] 行(失败/超线/恢复/汇总;
+#      健康时默认 0 行,探针默认关闭,开了才可能有输出)
 #
 # 用法:
 #   ./scripts/pull-240-monitor.sh --once     # 拉一次(默认拉最近30分钟死链证据)
@@ -18,8 +20,11 @@ INTERVAL="${INTERVAL:-120}"
 STATE="$LOCAL_DIR/.cursor"
 
 mkdir -p "$LOCAL_DIR"
-touch "$LOCAL_DIR/monitor.csv" "$LOCAL_DIR/events.log" "$LOCAL_DIR/deadlink.log"
+touch "$LOCAL_DIR/monitor.csv" "$LOCAL_DIR/events.log" "$LOCAL_DIR/deadlink.log" "$LOCAL_DIR/probe.log"
 [ -f "$STATE" ] || echo "0" > "$STATE"
+# 探针游标独立于 deadlink:两者拉同一份容器日志但推进互不依赖(调用顺序无关)
+PSTATE="$LOCAL_DIR/.cursor.probe"
+[ -f "$PSTATE" ] || echo "0" > "$PSTATE"
 
 remote() { $SSH "$@" 2>/dev/null; }
 
@@ -84,6 +89,33 @@ pull_deadlink() {
   echo "$now" > "$STATE"
 }
 
+pull_probe() {
+  # TTFB 探针证据:自上次拉取以来的容器日志里的 [STREAM-PROBE] 行。
+  # 探针默认关闭;开启后健康时只有 debug 行(默认日志级别下不输出),
+  # 所以这里非空基本就等于「有事发生」:失败/超告警线/恢复/周期性汇总。
+  local since now ev
+  since=$(cat "$PSTATE")
+  if [ "$since" = "0" ]; then
+    since=$(($(date +%s) - 1800))
+  fi
+  now=$(date +%s)
+  ev=$(remote "docker logs --since $since musicflow 2>&1 | grep -a '\[STREAM-PROBE\]' | tail -40")
+  {
+    echo "===== pull $(date '+%F %T') (since epoch $since) ====="
+    if [ -z "$ev" ]; then
+      echo "(本轮无探针事件:未开启或一切健康)"
+    else
+      echo "$ev"
+      local fail slow rec
+      fail=$(echo "$ev" | grep -ac "探测失败\|仍 failing" || true)
+      slow=$(echo "$ev" | grep -ac "超告警线" || true)
+      rec=$(echo "$ev" | grep -ac "恢复健康\|汇总" || true)
+      echo "--- 小结: 失败=$fail 超告警线=$slow 恢复/汇总=$rec"
+    fi
+  } >> "$LOCAL_DIR/probe.log"
+  echo "$now" > "$PSTATE"
+}
+
 pull_summary() {
   # 卡顿事件小结(本轮远端 events 新增)
   local n
@@ -94,8 +126,9 @@ pull_summary() {
 do_pull() {
   pull_csv
   pull_events
+  pull_probe
   pull_deadlink
-  echo "[$(date '+%F %T')] 拉取完成: csv=$(wc -l < "$LOCAL_DIR/monitor.csv")行 events=$(wc -l < "$LOCAL_DIR/events.log")行 deadlink=$(wc -l < "$LOCAL_DIR/deadlink.log")行"
+  echo "[$(date '+%F %T')] 拉取完成: csv=$(wc -l < "$LOCAL_DIR/monitor.csv")行 events=$(wc -l < "$LOCAL_DIR/events.log")行 probe=$(wc -l < "$LOCAL_DIR/probe.log")行 deadlink=$(wc -l < "$LOCAL_DIR/deadlink.log")行"
   pull_summary
 }
 
