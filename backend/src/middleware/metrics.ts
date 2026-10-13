@@ -62,7 +62,7 @@ const SLOW_MS_BY_ROUTE: Record<string, number> = {
  * 为什么不能像慢请求预算那样用 routePath 模板:模板要等 next() 跑完路由才定型,
  * 而避让登记必须在请求**进入时**就生效(出流请求会挂住整个播放时长)。
  */
-export function isStreamRequest(method: string, url: string): boolean {
+export function isStreamRequest(url: string): boolean {
   const p = new URL(url).pathname;
   if (p === "/rest/stream" || p === "/rest/stream.view") return true;
   if (p.startsWith("/rest/dlna/stream/")) return true;
@@ -106,7 +106,7 @@ export const metricsMiddleware = createMiddleware(async (c, next) => {
   const start = Date.now();
   // 出流族请求 = 用户正在起播/切歌:进请求就登记给探针避让闸(让它安静 QUIET_MS)。
   // 必须用 URL 路径判(路由模板此刻还没定型),且不能动下方计数用的 route。
-  if (isStreamRequest(c.req.method, c.req.url)) noteStreamActivity();
+  if (isStreamRequest(c.req.url)) noteStreamActivity();
   await next();
   const ms = Date.now() - start;
   total++;
