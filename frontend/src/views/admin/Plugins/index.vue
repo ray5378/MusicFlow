@@ -446,7 +446,7 @@
         </el-card>
 
         <!-- 探测歌曲选择:搜索 + 分页(库有多大都不必一次拉全) -->
-        <el-dialog v-model="probeSongDialog" :title="t('admin.plugins.probePickSong')" width="640px" destroy-on-close>
+        <el-dialog v-model="probeSongDialog" :title="t('admin.plugins.probePickSong')" width="640px" destroy-on-close :append-to-body="true">
           <div class="mf-media-row">
             <el-input v-model="probeSongQuery" :placeholder="t('admin.plugins.probeSearchHint')" clearable size="small" style="max-width: 300px" @keyup.enter="loadProbeSongs" />
             <el-button size="small" @click="loadProbeSongs">{{ t('admin.plugins.probeSearch') }}</el-button>
