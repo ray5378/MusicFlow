@@ -5,6 +5,17 @@ export default defineConfig({
     include: ["tests/**/*.test.ts", "src/services/sendspin/**/*.test.ts"],
     environment: "node",
     globals: false,
+    // 【CI 稳定性】Sendspin Guard 作业(见 .github/workflows/sendspin-guard.yml)置位
+    // MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT=1 时关闭 console 截获。原因:sendspin 测试文件
+    // 在 afterAll 停服务后仍有异步收尾**迟到**输出 —— 推流主循环(GroupPump.pushLoop 是
+    // fire-and-forget,要等下一个 await 边界才退出)、ws 关闭回调触发的 group 收尾、FLAC
+    // 编码退避(encoding.ts 的 console.warn)等自有通道,以及 bonjour-service 的名称冲突
+    // 探测(registry.js:32)这条**第三方**通道。Vitest 5 的 onUserConsoleLog 是
+    // worker→主进程 RPC,worker teardown 时若仍有 pending 就抛 EnvironmentTeardownError
+    // 并被记为 1 个 unhandled error —— 于是「98/98 全过」也 exit 1。迟到输出横跨自有代码
+    // 与第三方,无法逐一静音;关掉截获后日志直接走进程 stdout(仍完整落在 CI 日志与失败
+    // artifact 里),不经 RPC,竞态从结构上消除。仅本作业置位,其它作业保持原行为。
+    disableConsoleIntercept: process.env.MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT === "1",
     // 覆盖率报告: npm run test:coverage。阈值仅提示不阻断(存量代码未全覆盖)。
     coverage: {
       provider: "v8",

@@ -56,6 +56,12 @@ jobs:
 
       - name: Run sendspin guard tests
         shell: bash
+        # 关闭 vitest console 截获(同位置注释见 backend/vitest.config.ts):本作业的
+        # sendspin 测试文件在停服务后仍有异步收尾 console 输出(自有 pushLoop / ws 关闭
+        # 回调 + 第三方 bonjour 名称冲突探测),会迟到到 worker teardown 之后;经 Vitest 5
+        # 的 onUserConsoleLog RPC 派发时被判为 unhandled error,导致「98/98 全过」却 exit 1。
+        env:
+          MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT: "1"
         run: |
           set -o pipefail
           cd backend
