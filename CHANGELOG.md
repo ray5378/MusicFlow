@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.13] - 2026-10-14
+
+### Fix
+
+- **Web 管理端「关代理」即时生效**（`frontend/src/views/Settings/index.vue`）：代理开关此前只有 `v-model`、没有 `@change`，且 URL/测试/保存整行包在 `v-if="proxyEnabled"` 里——开关拨到关闭的瞬间保存按钮随整行一起消失，于是「关不掉、刷新又看到它自动回到开」。现在：①开关补 `@change="onProxyToggle"`，切换即 `PUT /rest/api/v1/proxy {enabled,url}`（loading 期禁点，成功以服务端返回 `{enabled,url}` 回写，失败回滚并报错），后端 `setSetting` 写库即刷缓存，故**关闭立即生效**、无滞后；②URL/测试/保存行移出 `v-if`，任何状态都有明确的保存按钮。
+- **「音乐下载」页打开卡加载（治本 + 治标）**：根因是该页初始化一次性发 8 个请求，其中「洗版计划」「入库计划」两个接口会同步全表扫描（`better-sqlite3` 阻塞事件循环），把整页拖成「卡加载」，切标签还会重复触发。治本——后端 plan 端点新增「只要计数」SQL COUNT 快路径：`buildLibraryPlan` 在 `limit<=0` 且无 songIds 点名时走新增的 `countLibraryPlanStats`（两条 COUNT 出 total/attempted/cooled/pending），`buildUpgradePlan` 新增 `statsOnly`，`GET /v1/fetch/upgrade/plan` 未带 `limit` 时启用（`countUpgradePlanStats`）；两条路都不再把全库/目标目录行 materialize 成 JS 对象。建任务的 `POST /tasks` 仍走明细路径，条目选择与截断语义零改动。治标——前端两个全库统计移出 `onMounted`，改为**首次切到对应标签才拉**（之后由标签内「刷新」按钮手动重拉），两个任务列表面板加 `el-tab-pane lazy` 懒挂载；首屏（默认停在「配置」标签）不再触发任何全库扫描。
+
+### Internal
+
+- 实测（230 开发库 23,719 行）：库池慢路径（8 列 + `ORDER BY rowid` + map，命中 23,717 行）174.5ms → 新 COUNT 21.3ms（约 8×）；240 生产 134,500 行线性外推约 1.0s → 0.12s。`songs(path)` 索引（`idx_songs_path`）本已存在故未新增；短 TTL 缓存未引入（COUNT 后单次已约 0.12s 且不再首屏触发，避免新增失效耦合）。
+- 新增等价性用例 5 条：`tests/fetch/library.test.ts` 2 例（`limit=0` 快路径 ↔ `limit=10` 明细路径的 total/attempted/cooled/pending 四项一致 + 冷却窗口外只计 attempted）、`tests/fetch/upgrade.test.ts` 3 例（`statsOnly` 四项与明细一致且 `items=[]`、冷却期外恢复、songIds 点名不吃快路径）。验证：`tsc --noEmit` / `vue-tsc --noEmit` 干净；`tests/fetch` 31 文件 79 用例全绿；全量后端 6817 用例 → 6816 过 + 1 例满负载 flake（`tests/plugins/sandbox.test.ts` 内存自愈用例，隔离复跑 28/28 全绿，与本次改动无关，CI 单进程串行不复现）。
+- 按用户 2026-10-14 拍板：**不做**服务端按域名分流（Gitee 直连是期望、现状已直连；GitHub 走代理的现状保持），故本次服务端网络路径零改动。
+
 ## [4.6.12] - 2026-10-14
 
 ### Feature
