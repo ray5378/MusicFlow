@@ -67,30 +67,22 @@ function getProxyDispatcher(url: string): ProxyAgent | Socks5ProxyAgent {
   return a;
 }
 
-/** 代理请求扩展参数：`proxy` 覆盖系统设置（true=强制走代理 / false=强制直连 /
- *  缺省=跟随系统开关）。供插件 host.http 按插件配置逐请求控制。 */
-export type ProxyFetchInit = RequestInit & { proxy?: boolean };
-
-/** 按代理配置发起 fetch：启用代理 → undici 的 fetch + 同实例 dispatcher（dispatcher
- *  必须与 fetch 来自同一份 undici，否则报 invalid onRequestStart method）；否则走
- *  全局 fetch（保持可被测试桩替换、且与其它后端代码一致）。
- *  `init.proxy` 可覆盖系统开关：false 强制直连；true 强制走代理（系统未配置代理
- *  地址时降级直连）。用于插件市场拉取与插件沙箱 host.http 外呼。 */
-export async function proxyFetch(url: string, init?: ProxyFetchInit): Promise<Response> {
+/** 按**系统设置**的代理配置发起 fetch：启用且地址合法 → undici 的 fetch + 同实例
+ *  dispatcher（dispatcher 必须与 fetch 来自同一份 undici，否则报 invalid
+ *  onRequestStart method）；否则走全局 fetch（保持可被测试桩替换、且与其它后端代码
+ *  一致）。用于插件市场拉取与插件沙箱 host.http 外呼。
+ *
+ *  历史备注（2026-10-15，T02）：此前还有一个 per-request `proxy` 覆盖开关
+ *  （`ProxyFetchInit.proxy`：true 强制走代理 / false 强制直连），但全仓三个调用方
+ *  （插件市场拉取、插件沙箱 host.http、插件发现）都不传它，属零调用点的悬空 API，
+ *  已整体删除；代理走不走一律由系统设置决定。 */
+export async function proxyFetch(url: string, init?: RequestInit): Promise<Response> {
   const { enabled, url: proxyUrl } = getProxyConfig();
-  const override = init?.proxy;
-  const useProxy =
-    override === undefined
-      ? enabled && !!proxyUrl
-      : override === true
-        ? !!proxyUrl
-        : false;
-  const { proxy: _proxy, ...rest } = init || {};
-  if (useProxy) {
+  if (enabled && proxyUrl) {
     // 必须与 ProxyAgent/Socks5ProxyAgent 同一 undici 实例（即本模块导入的 fetch）。
-    return (fetch as any)(url, { ...rest, dispatcher: getProxyDispatcher(proxyUrl) });
+    return (fetch as any)(url, { ...(init || {}), dispatcher: getProxyDispatcher(proxyUrl) });
   }
-  return (globalThis.fetch as any)(url, rest);
+  return (globalThis.fetch as any)(url, init);
 }
 
 // ==================== 代理连通性测试 ====================

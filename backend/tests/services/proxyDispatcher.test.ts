@@ -1,9 +1,10 @@
 // ==================== 代理分发器与连通性探测契约 ====================
 //
 // 为什么补这一层:`services/proxy.ts` 的 `getProxyDispatcher`(agent 缓存/FIFO 淘汰)、
-// `proxyFetch` 的 proxy 覆盖三态、以及 `testProxyConnection` 的四种结论分支,决定的是
-// 「插件市场拉了没拉 / 外呼走没走代理 / 代理坏了怎么报错」。这些分支真跑需要真实代理
-// 服务器与真实外网,只能靠替换 undici 假体在离线环境精确驱动。
+// `proxyFetch` 按系统设置的转发/直连两态、以及 `testProxyConnection` 的四种结论分支,
+// 决定的是「插件市场拉了没拉 / 外呼走没走代理 / 代理坏了怎么报错」。这些分支真跑需要
+// 真实代理服务器与真实外网,只能靠替换 undici 假体在离线环境精确驱动。
+// (2026-10-15 T02:per-request `proxy` 覆盖开关无任何调用方,已删除;转发与否只看系统设置。)
 //
 // 手法:vi.mock("undici") 提供可控 fetch 与可观测的 ProxyAgent/Socks5ProxyAgent 存根,
 // 设置项仍走真实 settings(内存缓存),从而只隔离「网络出口」这一个变量。
@@ -84,20 +85,18 @@ describe("normalizeProxyUrl:非法地址必须判为未配置(宁可直连,不�
   });
 });
 
-describe("proxyFetch:proxy 覆盖三态", () => {
-  it("系统开启 + 覆盖 true → 经 undici fetch + ProxyAgent 转发", async () => {
+describe("proxyFetch:按系统设置转发 / 直连两态", () => {
+  it("系统开启 → 经 undici fetch + ProxyAgent 转发,不落全局 fetch", async () => {
     const url = uniqProxy();
     setSetting("proxy_enabled", "true");
     setSetting("proxy_url", url);
     H.fetchMock.mockResolvedValue({ status: 200, ok: true });
-    const r = await proxyFetch("https://target.example/x", { proxy: true });
+    const r = await proxyFetch("https://target.example/x");
     expect(r.status).toBe(200);
     expect(H.fetchMock).toHaveBeenCalledTimes(1);
     const init = H.fetchMock.mock.calls[0][1];
     expect(init.dispatcher).toBeTruthy();
     expect(H.netFetch).not.toHaveBeenCalled();
-    // proxy 字段不得泄漏给底层 fetch(undici 不认识会报错)
-    expect(init).not.toHaveProperty("proxy");
     const created = H.agents.filter((a) => a.url === url);
     expect(created.length).toBe(1);
     expect(created[0].kind).toBe("http");
@@ -108,30 +107,28 @@ describe("proxyFetch:proxy 覆盖三态", () => {
     setSetting("proxy_enabled", "true");
     setSetting("proxy_url", url);
     H.fetchMock.mockResolvedValue({ status: 200, ok: true });
-    await proxyFetch("https://target.example/x", { proxy: true });
+    await proxyFetch("https://target.example/x");
     expect(H.agents.find((a) => a.url === url)!.kind).toBe("socks");
   });
 
-  it("覆盖 false → 即使系统开着也强制直连(插件级关闭代理)", async () => {
-    setSetting("proxy_enabled", "true");
-    setSetting("proxy_url", uniqProxy());
-    H.netFetch.mockResolvedValue({ status: 200, ok: true });
-    await proxyFetch("https://target.example/x", { proxy: false });
-    expect(H.netFetch).toHaveBeenCalledTimes(1);
-    expect(H.fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("覆盖 true 但系统未配地址 → 降级直连(不构造空 dispatcher)", async () => {
-    H.netFetch.mockResolvedValue({ status: 200, ok: true });
-    await proxyFetch("https://target.example/x", { proxy: true });
-    expect(H.netFetch).toHaveBeenCalledTimes(1);
-    expect(H.fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("未指定覆盖且系统关闭 → 直连", async () => {
+  it("系统关闭 → 直连(即使是 socks5 地址也不构造 dispatcher)", async () => {
+    setSetting("proxy_enabled", "false");
+    setSetting("proxy_url", uniqProxy("socks5"));
     H.netFetch.mockResolvedValue({ status: 200, ok: true });
     await proxyFetch("https://target.example/x");
     expect(H.netFetch).toHaveBeenCalledTimes(1);
+    expect(H.fetchMock).not.toHaveBeenCalled();
+    expect(H.agents.length).toBe(0);
+  });
+
+  it("系统开着但地址非法/为空 → 降级直连(不构造空 dispatcher)", async () => {
+    setSetting("proxy_enabled", "true");
+    setSetting("proxy_url", "not-a-url"); // normalizeProxyUrl → "",视为未配置
+    H.netFetch.mockResolvedValue({ status: 200, ok: true });
+    await proxyFetch("https://target.example/x");
+    expect(H.netFetch).toHaveBeenCalledTimes(1);
+    expect(H.fetchMock).not.toHaveBeenCalled();
+    expect(H.agents.length).toBe(0);
   });
 
   it("同地址复用同一个 agent(连接池复用,不每次新建)", async () => {
@@ -139,8 +136,8 @@ describe("proxyFetch:proxy 覆盖三态", () => {
     setSetting("proxy_enabled", "true");
     setSetting("proxy_url", url);
     H.fetchMock.mockResolvedValue({ status: 200, ok: true });
-    await proxyFetch("https://a/1", { proxy: true });
-    await proxyFetch("https://a/2", { proxy: true });
+    await proxyFetch("https://a/1");
+    await proxyFetch("https://a/2");
     expect(H.agents.filter((a) => a.url === url).length).toBe(1);
   });
 
@@ -152,7 +149,7 @@ describe("proxyFetch:proxy 覆盖三态", () => {
       const u = uniqProxy();
       urls.push(u);
       setSetting("proxy_url", u);
-      await proxyFetch("https://a/x", { proxy: true });
+      await proxyFetch("https://a/x");
     }
     const inFile = H.agents.filter((a) => urls.includes(a.url));
     expect(inFile.length).toBe(40);
