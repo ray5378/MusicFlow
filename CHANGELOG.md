@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.12] - 2026-10-14
+
+### Feature
+
+- **fetch 转码总闸（设置页「同时转码数上限」，默认 4）**：下载进缓存后立即转码，但转码步骤此前没有任何进程数上限——同时推进几首歌就同时起几个 ffmpeg（响度归一化两遍法时单首 2 次），与洗版任务叠加时更甚；转码是 CPU 重活，全部堆起来会打满机器挤占播放/流转。新增 `maxConcurrentTranscodes`（1..16，默认 4）：同一时刻最多 N 首歌在跑 ffmpeg 转码，超出 FIFO 排队；下载任务与洗版任务走同一条 orchestrator 流水线，一个闸两类都覆盖。`finally` 保证成功/失败/取消三条路都释放闸位；排队等待超 2s 记日志便于调参。config 归一化夹值 + PATCH 路由 clamp + 前端设置页加输入框（zh/en 文案）。
+
+### Internal
+
+- orchestrator 复用 `limiter.Semaphore` 建转码闸（PATCH22）；新增 `tests/fetch/transcodeGate.test.ts`（并发峰值 ≤ 上限且非串行、失败经 finally 释放、配置归一化缺省 4 夹值）；fetch 域回归 31 文件 535 用例全绿、frontend vue-tsc 干净。
+- `playerGroup.test.ts` afterAll 停服后排空残留异步日志（setImmediate ×5 + 50ms）：满负载（CI 803s 全量）下 in-proc Sendspin 停止后 pump/ws/编码器最后一拍 console 输出仍在飞，worker 关闭时 `onUserConsoleLog` RPC 未送达 → EnvironmentTeardownError 计为 unhandled error → 门禁 6811 用例全绿仍 exit 1 并触发回滚（2026-10-14 CI 实测）。产品码零改动。
+
 ## [4.6.11] - 2026-10-14
 
 ### Internal
