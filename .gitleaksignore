@@ -28,6 +28,41 @@
 # —— 豁免一条、冒出另一条。指纹豁免是纯减法:不动规则、不动默认豁免,只屏蔽
 # 这两个历史位置;将来新出现的真实凭据 fingerprint 不同,照样会被拦住。
 #
-# 以下两行为唯一有效内容:
+# 以下各行为唯一有效内容:
 e93716473d708ade584975930d84c56d04094151:refs/music-assistant-server/music_assistant/providers/filesystem_cloud/base.py:generic-api-key:103
 0748dd9b87d02c756812b708bcd47dfa8cf7147d:.gitleaksignore:generic-api-key:10
+#
+# ── 豁免 3:测试夹具中的占位值 / 公开标准值(2026-10-14 定时扫描补录) ─────────
+#   根因:push 触发只扫本次 push 的提交区间(gitleaks-action 按 push 生成
+#   --log-opts),而 schedule / workflow_dispatch 是**全历史**扫描。历史里的测试
+#   夹具不会被后来的提交"洗掉",于是每日定时扫描持续红:17 处 generic-api-key
+#   命中全部落在测试文件(pluginCrypto.test.ts 15 处、qrcode.test.ts 2 处),
+#   分属 3 个历史提交(90d1d98 / 1b0ad08 / bcf9e037)。
+#
+#   落地前逐条核验结论(均为非凭据):
+#     · pluginCrypto.test.ts —— AES 用例的固定占位密钥(十六进制重复模式),
+#       官方 AES-128 标准测试向量(公开标准值,非本仓秘密),以及 PEM 公钥
+#       测试块(公钥非私钥);
+#     · qrcode.test.ts —— 二维码用例里构造的假登录 URL 订阅码常量(同为十六
+#       进制重复模式),仅用于渲染与解码断言。
+#
+#   上述值均可公开推导,不构成任何环境凭据;按指纹精确豁免,不放宽规则本身
+#   (避免降低整仓扫描灵敏度)。
+#
+1b0ad085b34b87b80b3da8c9999e97441df9d199:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:201
+1b0ad085b34b87b80b3da8c9999e97441df9d199:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:202
+1b0ad085b34b87b80b3da8c9999e97441df9d199:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:203
+1b0ad085b34b87b80b3da8c9999e97441df9d199:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:207
+1b0ad085b34b87b80b3da8c9999e97441df9d199:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:209
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:129
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:131
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:151
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:154
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:193
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:197
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:198
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:200
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:49
+90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:67
+bcf9e037043542c94b2b392fdb5016b08382706b:backend/tests/utils/qrcode.test.ts:generic-api-key:42
+bcf9e037043542c94b2b392fdb5016b08382706b:backend/tests/utils/qrcode.test.ts:generic-api-key:48
