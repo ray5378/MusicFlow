@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.15] - 2026-10-14
+
+### Perf
+
+- **Web 管理端剩余优化全部落地（把 4.6.14 评估后延后的 4 项一并做完）**：①「插件管理」页由单文件 2086 行拆为 `InstalledTab / MarketTab / MediaTab` 三个子组件（父级 `installedCtx / marketCtx / mediaCtx` 共享状态与动作，首屏仅挂「已安装」页签），`index.vue` 净减 516 行；②「群组」页群组列表补首载 `el-skeleton` 骨架屏（`v-loading` 改为有数据才显示）；③`main.ts` 用 54 个 `element-plus/theme-chalk/el-*.css` **静态按需引入**替换 EP 全量 `dist/index.css`（体积约 357,679B → 213,912B，约 −40%），全部按序排在 `global.scss` 之前以保住主题覆盖顺序，`vite` 双 resolver 设 `importStyle:false` 杜绝运行期动态注入；④「歌单」页 `playlist-search/providers` 增加 60s 模块级缓存（切走再回不重拉）。
+
+### Fix
+
+- **`admin/Fetch`「新建」页签独立 loading**：切到新建页签时才拉入库计划，并以独立 `createLoading` 遮罩包住该面板，不再与整页共用 loading、也不阻塞其它页签。
+- **插件能力列表 60s 缓存陈旧窗**：`useEntitySearch` 新增并导出 `invalidateProvidersCache()`，插件启用 / 停用 / 安装 / 卸载成功回调里主动清缓存（3 处调用点），消除 60s TTL 内的陈旧读取。
+
+### Test
+
+- 新增 Playwright 用例 `frontend/e2e/first-paint-requests.spec.ts`：断言「音乐下载」页首屏**不触发** `fetch/upgrade/plan`、`fetch/library/plan` 两个全库扫描端点，切到对应页签才触发，且首屏 REST 请求数 ≤ 20；已接入 `frontend-responsive.yml` 门禁。
+
+### Internal
+
+- 因构建主机网络故障，本轮改为在本地 worktree 完成并验证：`vue-tsc --noEmit` EXIT=0、`npm run build` EXIT=0；构建产物 `index-*.css` 实测含 `.el-overlay / .el-loading-mask / .el-table / .el-tag / .el-dialog / .el-popper / .el-switch / .el-empty` 等关键选择器，未发现未套样式组件。
+- 首屏实测（本地 preview）：`/playlists` DCL 362.9 / 378.8ms、load 389.1 / 407.1ms；`/admin/fetch` DCL 372.6 / 381.5ms、load 401.5 / 410.0ms。
+- 遗留（不阻塞）：`InstalledTab.vue` 含少量自 `MarketTab` 复制的死 CSS（`.registry-*`），后续清理。后端零改动。按既定约定本轮**不部署生产 240**。
+
 ## [4.6.14] - 2026-10-14
 
 ### Perf
