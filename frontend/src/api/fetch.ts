@@ -91,6 +91,8 @@ export interface FetchConfig {
   maxConcurrentJobs?: number;
   /** 单任务内同时推进的歌曲数（目标级并行）。全库下载/洗版都是单任务，此值就是它们真正的并发上限。 */
   maxConcurrentTargets?: number;
+  /** PATCH22 转码总闸：同一时刻最多 N 首歌在跑 ffmpeg 转码（1..16，默认 4），超出排队。 */
+  maxConcurrentTranscodes?: number;
   maxConcurrentPerHost?: number;
   perHostMinIntervalMs?: number;
   rateLimitKBps?: number;

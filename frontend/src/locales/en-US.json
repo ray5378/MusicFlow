@@ -1591,6 +1591,8 @@
         "maxConcurrentJobs": "Parallel jobs",
         "maxConcurrentJobsHint": "How many download/upgrade jobs advance at the same time (up to 16; each job still processes chunks sequentially, with parallel targets within a chunk). Downloads, upgrades and full-library runs share this gate; changes take effect immediately.",
         "maxConcurrentTargets": "Songs per job",
+        "maxConcurrentTranscodes": "Max concurrent transcodes",
+        "maxConcurrentTranscodesHint": "How many songs may run ffmpeg transcoding at the same time (loudness normalization included, up to 16, default 4). Downloads and upgrades share this gate; extra songs queue up. Transcoding is CPU-heavy — check machine load before raising it.",
         "maxConcurrentTargetsHint": "How many songs advance in parallel inside one job (up to 64). Full-library downloads and upgrades are single jobs, so this is their real concurrency ceiling — if it is lower than \"Max concurrent downloads\", that gate can never be saturated. The default of 3 is conservative; raise it to roughly match \"Max concurrent downloads\" to use your full bandwidth.",
         "maxConcurrentPerHost": "Max concurrent per host",
         "perHostMinIntervalMs": "Min interval per host (ms)",

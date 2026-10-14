@@ -157,6 +157,13 @@ export function registerFetch(app: Hono): void {
         ? Math.min(64, Math.max(1, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentTargets;
     }
+    // PATCH22 转码总闸：1..16。同时跑 ffmpeg 转码的歌数上限，下载/洗版共用。
+    if ("maxConcurrentTranscodes" in override) {
+      const n = Number((override as Record<string, unknown>).maxConcurrentTranscodes);
+      (override as Record<string, unknown>).maxConcurrentTranscodes = Number.isFinite(n)
+        ? Math.min(16, Math.max(1, Math.floor(n)))
+        : DEFAULT_FETCH_CONFIG.maxConcurrentTranscodes;
+    }
     if (
       "libraryAutoEnabled" in override &&
       typeof (override as Record<string, unknown>).libraryAutoEnabled !== "boolean"

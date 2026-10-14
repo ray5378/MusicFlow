@@ -103,6 +103,8 @@ export interface FetchConfig {
   maxConcurrentTargets: number;
   /** 同时推进多少个 fetch 任务（任务级并行，PATCH19）。每个任务内仍按片串行、片内按目标并行 */
   maxConcurrentJobs: number;
+  /** PATCH22 转码总闸：同一时刻最多 N 首歌在跑 ffmpeg 转码（1..16，默认 4），超出 FIFO 排队 */
+  maxConcurrentTranscodes: number;
   maxConcurrentPerHost: number;
   perHostMinIntervalMs: number;
   /** 0 = 不限速（单位 KB/s） */
@@ -181,6 +183,9 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   /** PATCH19 任务级并行：全局批量闸的 fetch 保底下限（1=串行排队旧行为，上限 16）。
    *  下载 / 洗版 / 全库下载 / 重试**共用**这一个闸（都走 startFetchJob）。默认 2 */
   maxConcurrentJobs: 2,
+  /** PATCH22 转码总闸：同一时刻最多 N 首歌在跑 ffmpeg 转码（含响度归一化），超出排队。
+   *  下载与洗版走同一条流水线，一个闸两类都覆盖。默认 4（1..16）。 */
+  maxConcurrentTranscodes: 4,
   maxConcurrentPerHost: 1,
   perHostMinIntervalMs: 500,
   rateLimitKBps: 0,
@@ -233,6 +238,11 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
       typeof p.maxConcurrentTargets === "number" && Number.isFinite(p.maxConcurrentTargets)
         ? Math.min(64, Math.max(1, Math.floor(p.maxConcurrentTargets)))
         : DEFAULT_FETCH_CONFIG.maxConcurrentTargets,
+    // PATCH22 转码总闸：1..16，默认 4。
+    maxConcurrentTranscodes:
+      typeof p.maxConcurrentTranscodes === "number" && Number.isFinite(p.maxConcurrentTranscodes)
+        ? Math.min(16, Math.max(1, Math.floor(p.maxConcurrentTranscodes)))
+        : DEFAULT_FETCH_CONFIG.maxConcurrentTranscodes,
     // PATCH21 死链清理阈值：0（关闭）..20，非有限数回落默认 3。
     deadSongPurgeThreshold:
       typeof p.deadSongPurgeThreshold === "number" && Number.isFinite(p.deadSongPurgeThreshold)

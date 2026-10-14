@@ -793,6 +793,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   // 语义定调：目标级并发 ≥ 下载总闸，否则总闸形同虚设。
   const par = Math.max(1, Math.min(64, Math.floor(Number(cfg.maxConcurrentTargets) || 1)));
   const targetSem = new Semaphore(par);
+  // PATCH22 转码总闸：同一时刻最多 N 首歌在跑 ffmpeg 转码（默认 4，1..16），超出 FIFO 排队。
+  // 转码是 CPU 重活，目标级并行只放大「流水线重叠度」却会放大 ffmpeg 进程数 —— 单独钳住。
+  const transcodeSem = new Semaphore(
+    Math.max(1, Math.min(16, Math.floor(Number(cfg.maxConcurrentTranscodes) || 4))),
+  );
   const batchId = randomUUID();
   let flushChain: Promise<void> = Promise.resolve();
   const scheduleFlush = (): void => {
@@ -1457,6 +1462,15 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     //    绝不能 skip（内容要变），两遍实测失败降级单遍也绝不让整首歌失败。
     //    响度归一化（-14 LUFS）也在此透传，缺省开（见 FetchConfig）。
     if (cfg.transcodeEnabled) {
+      // PATCH22 转码总闸（maxConcurrentTranscodes）：拿到闸位才开始转码，超出的歌 FIFO
+      // 排队。下载任务与洗版任务走同一条流水线，一个闸两类都覆盖。等待超 2s 记日志，
+      // 便于判断是否要调大上限。finally 保证成功/失败/取消三条路都释放闸位。
+      const transcodeWaitStart = Date.now();
+      const releaseTranscode = await transcodeSem.acquire(signal);
+      const transcodeWaitMs = Date.now() - transcodeWaitStart;
+      if (transcodeWaitMs > 2000) {
+        log.info("转码闸排队等待", { waitMs: transcodeWaitMs, limit: cfg.maxConcurrentTranscodes });
+      }
       try {
         const tr = await deps.transcodeFile(cachePath, {
           target: cfg.transcodeTarget,
@@ -1483,6 +1497,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         // 继续落盘」，而是本候选判失败（换下一候选），绝不把未转码成品放进最终目录。
         cleanup();
         return { kind: "fail", code: "TRANSCODE_FAILED", detail: msgOf(e) };
+      } finally {
+        releaseTranscode();
       }
     }
 

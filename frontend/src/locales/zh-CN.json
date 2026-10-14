@@ -1591,6 +1591,8 @@
         "maxConcurrentJobs": "任务并行数",
         "maxConcurrentJobsHint": "同时推进多少个下载/洗版任务（上限 16；每个任务内部仍按片推进、片内多首并行）；下载、洗版、全库下载共用此闸，改动即时生效。",
         "maxConcurrentTargets": "单任务并发歌曲数",
+        "maxConcurrentTranscodes": "同时转码数上限",
+        "maxConcurrentTranscodesHint": "同一时刻最多多少首歌在跑 ffmpeg 转码（含响度归一化，上限 16，默认 4）。下载与洗版共用此闸，超出的歌排队等待；转码是 CPU 重活，调大前先看机器负载。",
         "maxConcurrentTargetsHint": "一个任务内同时推进多少首歌（上限 64）。全库下载 / 洗版都是单个任务，所以这个值才是它们真正的并发上限——若它比「最大并发下载数」小，后者永远吃不满。默认 3 偏保守，想跑满带宽请调到与「最大并发下载数」相当。",
         "maxConcurrentPerHost": "单站点最大并发",
         "perHostMinIntervalMs": "同站点最小间隔 (ms)",

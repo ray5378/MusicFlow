@@ -162,6 +162,10 @@
                 <el-input-number v-model="config.maxConcurrentTargets" :min="1" :max="64" controls-position="right" />
                 <div class="hint">{{ t('admin.fetch.config.maxConcurrentTargetsHint') }}</div>
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.config.maxConcurrentTranscodes')">
+                <el-input-number v-model="config.maxConcurrentTranscodes" :min="1" :max="16" controls-position="right" />
+                <div class="hint">{{ t('admin.fetch.config.maxConcurrentTranscodesHint') }}</div>
+              </el-form-item>
               <el-form-item :label="t('admin.fetch.config.maxConcurrentDownloads')">
                 <el-input-number v-model="config.maxConcurrentDownloads" :min="1" :max="32" controls-position="right" />
               </el-form-item>
@@ -406,6 +410,7 @@ function defaultConfig(): ConfigForm {
     maxConcurrentDownloads: 2,
     maxConcurrentJobs: 2,
     maxConcurrentTargets: 3,
+    maxConcurrentTranscodes: 4,
     maxConcurrentPerHost: 1,
     perHostMinIntervalMs: 500,
     rateLimitKBps: 0,
@@ -534,6 +539,7 @@ async function loadConfig() {
     if (merged.jobRetentionDays == null) merged.jobRetentionDays = 30;
     if (merged.maxConcurrentJobs == null) merged.maxConcurrentJobs = 2;
     if (merged.maxConcurrentTargets == null) merged.maxConcurrentTargets = 3;
+    if (merged.maxConcurrentTranscodes == null) merged.maxConcurrentTranscodes = 4;
     if (merged.libraryAutoContinue == null) merged.libraryAutoContinue = true;
     if (merged.downloadCooldownDays == null) merged.downloadCooldownDays = 7;
     if (merged.deadSongPurgeThreshold == null) merged.deadSongPurgeThreshold = 2;
