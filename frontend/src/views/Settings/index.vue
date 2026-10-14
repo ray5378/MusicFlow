@@ -1,5 +1,5 @@
 <template>
-  <div class="settings-page">
+  <div class="settings-page" ref="pageEl">
     <div class="page-header"><h2>{{ t('settings.title') }}</h2></div>
 
     <!-- ===== 外观 ===== -->
@@ -26,7 +26,7 @@
 
     <!-- ===== 系统（仅管理员） ===== -->
     <template v-if="authStore.isAdmin">
-      <el-card class="mt-card">
+      <el-card class="mt-card" data-settings-load="version">
         <h3>{{ t('settings.systemInfo') }}</h3>
         <el-descriptions :column="1" border size="small">
           <el-descriptions-item :label="t('settings.serverVersion')">{{ serverVersion }}</el-descriptions-item>
@@ -37,7 +37,7 @@
         </el-descriptions>
       </el-card>
 
-      <el-card class="mt-card">
+      <el-card class="mt-card" data-settings-load="proxy">
         <h3>{{ t('settings.proxy') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
@@ -56,7 +56,7 @@
         </div>
       </el-card>
 
-      <el-card class="mt-card">
+      <el-card class="mt-card" data-settings-load="batchPace">
         <h3>{{ t('settings.batchPace.title') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
@@ -74,7 +74,7 @@
         </div>
       </el-card>
 
-      <el-card class="mt-card">
+      <el-card class="mt-card" data-settings-load="daily">
         <h3>{{ t('settings.scheduled') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
@@ -101,7 +101,7 @@
         </div>
       </el-card>
 
-      <el-card class="mt-card">
+      <el-card class="mt-card" data-settings-load="memory">
         <h3>{{ t('settings.memoryReclaim.title') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
@@ -125,7 +125,7 @@
         </div>
       </el-card>
 
-      <el-card class="mt-card">
+      <el-card class="mt-card" data-settings-load="logLevel">
         <h3>{{ t('settings.logLevel.title') }}</h3>
         <div class="setting-item">
           <div class="setting-label">
@@ -166,7 +166,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
@@ -421,11 +421,49 @@ function clearCache() {
   setTimeout(() => location.reload(), 800);
 }
 
+// ---- 打开速度:配置卡「进视口才拉」(2026-10-14) ----
+// 原先一进页面并发 6 个 GET(版本 / 代理 / 档位 / 内存 / 定时 + 管理员日志等级)。
+// 这些卡纵向排列,屏幕外的卡没必要在首屏就请求 → 按卡片进视口(rootMargin 200px)才拉,
+// 每张卡只自动拉一次;不支持 IntersectionObserver 时兜底全量立即拉(功能不回退)。
+const pageEl = ref<HTMLElement | null>(null);
+const settingCardLoaders: Record<string, () => void> = {
+  version: () => { void loadVersion(); },
+  proxy: () => { void loadProxy(); },
+  batchPace: () => { void loadBatchPace(); },
+  daily: () => { void loadDailyConfig(); },
+  memory: () => { void loadMemorySettings(); },
+  // 日志等级卡只在管理员可见(模板里 v-if="authStore.isAdmin"):非管理员没有这张卡,
+  // 也就没有元素被观察 → 天然不发请求(与原先 if (authStore.isAdmin) 等效)。
+  logLevel: () => { void loadLogLevel(); },
+};
+let settingsObserver: IntersectionObserver | null = null;
+
 onMounted(() => {
-  loadVersion(); loadProxy(); loadBatchPace(); loadMemorySettings(); loadDailyConfig();
-  // 日志等级卡只在管理员可见(模板里 v-if="authStore.isAdmin"),非管理员请求会 403 → 静默忽略。
-  if (authStore.isAdmin) loadLogLevel();
+  const root = pageEl.value;
+  const load = (key?: string) => {
+    const fn = key ? settingCardLoaders[key] : undefined;
+    if (!fn) return;
+    delete settingCardLoaders[key as string]; // 每张卡只自动拉一次
+    fn();
+  };
+  if (!root || typeof IntersectionObserver === "undefined") {
+    Object.keys(settingCardLoaders).forEach((k) => load(k));
+    return;
+  }
+  settingsObserver = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        settingsObserver?.unobserve(e.target);
+        load((e.target as HTMLElement).dataset.settingsLoad);
+      }
+    },
+    { rootMargin: "200px 0px" },
+  );
+  root.querySelectorAll<HTMLElement>("[data-settings-load]").forEach((el) => settingsObserver?.observe(el));
 });
+
+onUnmounted(() => { settingsObserver?.disconnect(); settingsObserver = null; });
 </script>
 
 <style lang="scss" scoped>

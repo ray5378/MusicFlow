@@ -1,5 +1,5 @@
 <template>
-  <div class="groups-page">
+  <div class="groups-page" ref="pageEl">
     <div class="page-header">
       <h2>{{ t('groups.title') }}</h2>
       <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
@@ -13,7 +13,7 @@
          此处**不判本机**(不置顶、不打「本机」角标)—— 谁是本机只在「能播放的选择器」
          界面里判定;这一页只按设备名片显示,同一个实例在客户端上显示机型名、在网页上
          显示「浏览器 · 系统」。 -->
-    <div class="devices-section">
+    <div class="devices-section" data-lazy-section="local">
       <div class="section-head">
         <h3>{{ t('groups.clientPlayers') }}</h3>
         <el-button size="small" :loading="loadingClients" @click="loadLocalPlayers()"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
@@ -48,7 +48,7 @@
     </div>
 
     <!-- DLNA 设备管理:在线 + 离线全部展示,可重命名 / 删除离线设备 -->
-    <div class="devices-section" style="margin-top: 28px">
+    <div class="devices-section" style="margin-top: 28px" data-lazy-section="dlna">
       <div class="section-head">
         <h3>{{ t('groups.dlnaDevices') }}</h3>
         <el-button v-if="canUse" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
@@ -123,7 +123,7 @@
     </div>
 
     <!-- AirPlay 设备管理(mDNS 自动发现;可像 DLNA 设备一样重命名 / 禁用 / 删除) -->
-    <div class="devices-section" style="margin-top: 28px">
+    <div class="devices-section" style="margin-top: 28px" data-lazy-section="airplay">
       <div class="section-head">
         <h3>{{ t('groups.airplayDevices') }}</h3>
         <el-button v-if="canUse" size="small" :loading="scanningAirPlay" @click="scanAirPlayDevices"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
@@ -197,7 +197,7 @@
     <!-- Sendspin 设备管理:行结构与 DLNA **完全同构**(在线高亮/离线变暗 + 禁用/重命名)。
          列表 = 在线客户端 ＋ 已记住但当前离线的拨号目标(合并为一列,不再单列「已记住的播放器」)。
          删除语义 = `解绑`(常显):解绑后本行保留、标签回落「未配对」、按钮回落「配对」。 -->
-    <div class="devices-section" style="margin-top: 28px">
+    <div class="devices-section" style="margin-top: 28px" data-lazy-section="sendspin">
       <div class="section-head">
         <h3>{{ t('groups.sendspinDevices') }}</h3>
         <el-button size="small" :loading="loadingSendspin" @click="loadSendspinClients()"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
@@ -678,7 +678,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import { usePlayerStore } from "@/stores/player";
@@ -711,7 +711,7 @@ const playerStore = usePlayerStore();
 const groups = ref<any[]>([]);
 const dlnaDevices = ref<any[]>([]);
 const airplayDevices = ref<any[]>([]);
-const loadingAirPlay = ref(false);
+const loadingAirPlay = ref(true); // 懒加载分区:进视口前保持加载态,避免首帧闪一下空文案
 /** 「扫描」进行中(后端正在重发 mDNS 查询,约 2.5s) —— 与 loadingAirPlay(拉列表)分开。 */
 const scanningAirPlay = ref(false);
 const loading = ref(false);
@@ -727,7 +727,7 @@ const renameGroup = ref<any>(null);
 const renameName = ref("");
 
 // DLNA 设备管理(在线 + 离线)
-const loadingDevices = ref(false);
+const loadingDevices = ref(true); // 懒加载分区(见上)
 const scanning = ref(false);
 const showRenameDeviceDialog = ref(false);
 const renameDeviceTarget = ref<any>(null);
@@ -774,7 +774,7 @@ function isDeviceRenamed(dev: any, peerId: string): boolean {
 // 界面里判定(MainLayout 的切换器)。此处名字一律取「用户改名 → 设备名片 → 上报名的
 // 兜底」,所以同一个实例在客户端上显示机型名、在网页上显示「浏览器 · 系统」。
 const playerInstances = ref<any[]>([]);
-const loadingClients = ref(false);
+const loadingClients = ref(true); // 懒加载分区(见上)
 
 /** 本机实例的**偏好键**(隐藏 / 改名都按它存):一律按「实例」而非「账号」。
  *  自己那条的对外 peerId 是账号级的 local:<uid>,拿它当偏好键会串味 ——
@@ -1016,7 +1016,7 @@ function openRenameAirPlayDevice(dev: any) {
 
 // ---- Sendspin 设备管理(在线客户端;拨入为主,也可手动拨号添加) ----
 const sendspinClients = ref<any[]>([]);
-const loadingSendspin = ref(false);
+const loadingSendspin = ref(true); // 懒加载分区(见上)
 const sendspinPort = ref(38927);
 const dialTargets = ref<any[]>([]);
 const showDialDialog = ref(false);
@@ -1672,15 +1672,59 @@ function controlGroup(g: any) {
 watch(() => playerStore.groupVersion, () => { loadGroups(); });
 
 onMounted(() => {
-  loadGroups(); loadDlnaDevices(); loadAirPlayDevices(); loadSendspinClients();
+  loadGroups();
   // 隐藏/改名的偏好是本机实例(「客户端」模块)开关回位与名字回显的依据,先加载。
   playerStore.loadHiddenPrefs(); playerStore.loadNamePrefs();
-  // 本机实例列表:与 DLNA 设备一样走页面本地加载(includeHidden=1,隐藏行不剪),
-  // 行因此恒在、开关可反复切换。
-  loadLocalPlayers();
-  // 6053 连接状态条要与实际情况对齐 → 页面可见时静默轮询(离开页面即停,不留定时器)。
+  // 设备发现类分区(本机实例 / DLNA / AirPlay / Sendspin)按视口懒加载,见上。
+  bindLazySections();
+  // 6053 连接状态条要与实际情况对齐 → 页面激活期间静默轮询(切走即停,见下)。
   startSendspinPolling();
 });
+
+// ---- 首屏打开速度:设备发现类分区「进视口才拉」(2026-10-14) ----
+// 原先一进页面就并发发出 7 个 GET(群组 / 本机实例 / DLNA / AirPlay / Sendspin + 两份偏好),
+// 其中网络发现类(尤其 AirPlay / Sendspin)较慢,会拖住首屏。现在只拉「看得见」的分区:
+// 分区滚动到视口附近(提前 200px)时才发它自己那一份请求,每个分区只自动拉一次;
+// 位置靠上的分区在挂载时就已进入视口 → 与改动前行为一致。
+const pageEl = ref<HTMLElement | null>(null);
+const lazySectionLoaders: Record<string, () => void> = {
+  local: () => { void loadLocalPlayers(); },
+  dlna: () => { void loadDlnaDevices(); },
+  airplay: () => { void loadAirPlayDevices(); },
+  sendspin: () => { void loadSendspinClients(); },
+};
+
+function bindLazySections(): void {
+  const root = pageEl.value;
+  if (!root) return;
+  const load = (key?: string) => {
+    const fn = key ? lazySectionLoaders[key] : undefined;
+    if (!fn) return;
+    delete lazySectionLoaders[key as string]; // 每个分区只自动拉一次
+    fn();
+  };
+  // 兜底:无 IntersectionObserver 时按原行为一次性全拉,功能不回退。
+  if (typeof IntersectionObserver === "undefined") {
+    Object.keys(lazySectionLoaders).forEach((k) => load(k));
+    return;
+  }
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        io.unobserve(e.target);
+        load((e.target as HTMLElement).dataset.lazySection);
+      }
+    },
+    { rootMargin: "200px 0px" },
+  );
+  root.querySelectorAll<HTMLElement>("[data-lazy-section]").forEach((el) => io.observe(el));
+}
+
+// keep-alive 下组件被缓存,onBeforeUnmount 不会触发 —— 切走页面必须靠这两个钩子停表,
+// 否则 20s 轮询会一直打到会话结束(原注释「离开页面即停」在缓存下不成立)。
+onActivated(() => { startSendspinPolling(); });
+onDeactivated(() => { stopSendspinPolling(); });
 
 onBeforeUnmount(() => { stopSendspinPolling(); });
 </script>

@@ -59,7 +59,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import api from "@/api";
@@ -118,9 +118,11 @@ async function load() {
 
 function beginPair(row: any, method: string) {
   pairing.value[row.clientId] = { mode: "code", method, code: "", token: "", busy: false, started: false };
+  startPoll();
 }
 function beginToken(row: any) {
   pairing.value[row.clientId] = { mode: "token", method: "pairing_psk", code: "", token: "", busy: false, started: false };
+  startPoll();
 }
 
 async function submitCode(row: any) {
@@ -191,8 +193,14 @@ async function unpair(row: any) {
   }
 }
 
-onMounted(() => {
-  load();
+// 轮询只在「有配对进行中」时跑(2026-10-14 打开速度优化):配对发起点就在本组件
+// (beginPair / beginToken),既没有打开的配对表单、服务端也没有 pending attempt 时,
+// 没有任何东西需要被刷新 → 停表,别拿 5s 一次的请求常驻打后端。
+function shouldPoll(): boolean {
+  return Object.keys(pairing.value).length > 0 || attempts.value.length > 0;
+}
+function startPoll(): void {
+  if (pollTimer || !shouldPoll()) return;
   pollTimer = setInterval(async () => {
     try {
       const a = await api.get("/rest/api/v1/sendspin/pairing/attempts");
@@ -202,11 +210,21 @@ onMounted(() => {
         clients.value = res.data?.clients || [];
       }
     } catch { /* 静默 */ }
+    if (!shouldPoll()) stopPoll(); // 配对完成 / 取消即停表
   }, 5000);
+}
+function stopPoll(): void {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+onMounted(async () => {
+  await load();
+  startPoll();
 });
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer);
-});
+// keep-alive 下切走页面 onUnmounted 不触发:用 onDeactivated 停表,回到本页再按需复表。
+onActivated(() => { startPoll(); });
+onDeactivated(() => { stopPoll(); });
+onUnmounted(() => { stopPoll(); });
 </script>
 
 <style lang="scss" scoped>

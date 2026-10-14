@@ -2,7 +2,7 @@
   <div class="admin-plugins">
     <el-tabs v-model="activeTab" @tab-change="onTabChange">
       <!-- ============ Installed plugins ============ -->
-      <el-tab-pane :label="t('admin.plugins.tabInstalled')" name="installed">
+      <el-tab-pane :label="t('admin.plugins.tabInstalled')" name="installed" lazy>
         <div class="page-header">
           <h2>{{ t('admin.plugins.title') }}</h2>
           <el-button type="primary" @click="showAddDialog = true">{{ t('admin.plugins.addPlugin') }}</el-button>
@@ -90,7 +90,7 @@
       </el-tab-pane>
 
       <!-- ============ Plugin marketplace ============ -->
-      <el-tab-pane :label="t('admin.plugins.tabMarket')" name="market">
+      <el-tab-pane :label="t('admin.plugins.tabMarket')" name="market" lazy>
         <div class="page-header">
           <h2>{{ t('admin.plugins.marketTitle') }}</h2>
           <el-button type="primary" plain @click="loadMarketplace" :loading="marketLoading">{{ t('common.refresh') }}</el-button>
@@ -232,7 +232,7 @@
       </el-tab-pane>
 
       <!-- ============ Media fetch (lyrics / covers) — 能力级全局设置,独立于任何单个插件 ============ -->
-      <el-tab-pane :label="t('admin.plugins.tabMedia')" name="media">
+      <el-tab-pane :label="t('admin.plugins.tabMedia')" name="media" lazy>
         <div class="page-header">
           <h2>{{ t('admin.plugins.mediaTitle') }}</h2>
           <span class="page-sub">{{ t('admin.plugins.mediaSub') }}</span>
@@ -1958,7 +1958,9 @@ function onTabChange(name: string | number) {
 onMounted(() => {
   loadPlugins();
   loadHealth();
-  loadMediaSettings();
+  // 三个页签均为 el-tab-pane `lazy`:非当前页签的内容不挂载。默认页签是「已安装」,
+  // 故首屏只拉它需要的 plugins + health(健康列);「插件市场」「媒体获取」的数据
+  // 分别由 onTabChange 在切到该页签时再拉(媒体设置较重,原先在首屏就一并请求)。
 });
 </script>
 

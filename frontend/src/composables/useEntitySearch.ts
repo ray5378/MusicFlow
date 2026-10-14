@@ -94,6 +94,13 @@ export async function playRemoteCollection(
   return songs.length;
 }
 
+/** 跨页面共享的「已启用插件能力列表」短缓存:key = 能力基础路径(/song-search 等)。
+ *  打开速度优化(2026-10-14):音乐 / 艺术家 / 专辑三个页面各自 mount 时都要这份列表,
+ *  原先每页各拉一次(3 次 RTT)。用 60s TTL 短缓存兜住:同一分钟内切页不再重复请求,
+ *  又不会让「插件被启用/停用」在会话里长期不回显(过期后自动重拉)。 */
+const PROVIDERS_TTL_MS = 60_000;
+const providersCache = new Map<string, { at: number; list: EntitySearchProvider[] }>();
+
 export function useEntitySearch(kind: EntitySearchKind) {
   const base = `/rest/api/v1/${kind}-search`;
 
@@ -130,11 +137,18 @@ export function useEntitySearch(kind: EntitySearchKind) {
     afterRemoteImport = fn;
   }
 
-  /** 已启用且声明对应能力的插件列表(前端下拉数据源,动态)。 */
-  async function loadSearchProviders() {
+  /** 已启用且声明对应能力的插件列表(前端下拉数据源,动态)。force 时跳过短缓存。 */
+  async function loadSearchProviders(force = false) {
+    const cached = providersCache.get(base);
+    if (!force && cached && Date.now() - cached.at < PROVIDERS_TTL_MS) {
+      searchProviders.value = cached.list;
+      return;
+    }
     try {
       const res = await api.get(`${base}/providers`);
-      searchProviders.value = res.data.providers || [];
+      const list: EntitySearchProvider[] = res.data.providers || [];
+      providersCache.set(base, { at: Date.now(), list });
+      searchProviders.value = list;
     } catch {
       searchProviders.value = [];
     }

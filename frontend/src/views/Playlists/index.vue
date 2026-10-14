@@ -260,7 +260,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import CoverPlay from "@/components/CoverPlay.vue";
@@ -1133,7 +1133,12 @@ async function deletePlaylist(pl: any) {
 // 后端 busy 感知:批量任务(每日推荐/自动匹配/插件任务/异步导入同步)运行中显示横幅,
 // 替代「前端假死」的无反馈表现。
 const systemBusy = ref(false);
-let busyTimer: ReturnType<typeof setInterval> | null = null;
+// 轮询节奏(2026-10-14 打开速度优化):原先固定 4s 常驻 —— 页面开着就一直在打后端,
+// 且 keep-alive 下切走也不停。现在两级:忙时 4s 紧跟(横幅要及时消失),闲时 15s 心跳
+// (仍能发现别处新起的任务,不丢「有任务就提示」的能力)。
+const BUSY_POLL_ACTIVE_MS = 4000;
+const BUSY_POLL_IDLE_MS = 15000;
+let busyTimer: ReturnType<typeof setTimeout> | null = null;
 async function pollBusy() {
   try {
     const res = await api.get("/rest/api/v1/system/busy");
@@ -1141,7 +1146,26 @@ async function pollBusy() {
   } catch { /* 网络抖动忽略,维持上一次状态 */ }
 }
 
-onMounted(() => { detectDailySource(); loadImportPlatforms(); loadSearchProviders(); pollBusy(); busyTimer = setInterval(pollBusy, 4000); nextTick(() => cardGrid.bindGrid()); });
+function scheduleBusyPoll(delayMs: number): void {
+  if (busyTimer) clearTimeout(busyTimer);
+  busyTimer = setTimeout(async () => {
+    await pollBusy();
+    scheduleBusyPoll(systemBusy.value ? BUSY_POLL_ACTIVE_MS : BUSY_POLL_IDLE_MS);
+  }, delayMs);
+}
+function startBusyPoll(): void {
+  if (busyTimer) return;
+  scheduleBusyPoll(0); // 首次立即查一次(与改动前 mount 时立刻 pollBusy 的行为一致)
+}
+function stopBusyPoll(): void {
+  if (busyTimer) { clearTimeout(busyTimer); busyTimer = null; }
+}
+
+// 首屏只拉「本页立刻要用」的两项:已启用插件列表(搜索来源下拉)与 busy 状态。
+// 原先还并发 detectDailySource() + loadImportPlatforms() —— 二者都是打同一个较重的
+// /rest/api/v1/plugins,且各自在真正用到时都会自补(见 syncDailyAll / 打开导入弹窗处),
+// 故从首屏移出,进页少 2 个请求。
+onMounted(() => { loadSearchProviders(); startBusyPoll(); nextTick(() => cardGrid.bindGrid()); });
 
 // 首页「查看收藏的歌单 / 查看网易云歌单」等入口通过 ?filter= 深链到本页。
 // keep-alive 下组件复用,onMounted 不重跑,故用 watch 监听路由 query 每次生效。
@@ -1158,8 +1182,11 @@ watch(
 
 // 首块拉到总数后需要据此重算一次可见窗口;之后由滚动驱动。
 watch(cardGrid.total, (t) => { if (t > 0) cardGrid.recomputeGrid(); });
+// keep-alive 下切走页面 onUnmounted 不触发 → 必须用 onDeactivated 停表,否则轮询不停。
+onDeactivated(() => { stopBusyPoll(); });
+onActivated(() => { startBusyPoll(); });
 onUnmounted(() => {
-  if (busyTimer) clearInterval(busyTimer);
+  stopBusyPoll();
   if (syncAllTimer.value) clearTimeout(syncAllTimer.value);
   if (gmdlRefreshTimer.value) clearTimeout(gmdlRefreshTimer.value);
   if (matchAllTimer.value) clearTimeout(matchAllTimer.value);
