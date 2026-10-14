@@ -101,6 +101,12 @@ export async function playRemoteCollection(
 const PROVIDERS_TTL_MS = 60_000;
 const providersCache = new Map<string, { at: number; list: EntitySearchProvider[] }>();
 
+/** 主动失效短缓存:插件安装/启用/停用/卸载等会改变「已启用插件能力」的操作成功后调用,
+ *  使下一次 mount/切页立即重拉,消除 60s TTL 内的陈旧窗(T15)。 */
+export function invalidateProvidersCache(): void {
+  providersCache.clear();
+}
+
 export function useEntitySearch(kind: EntitySearchKind) {
   const base = `/rest/api/v1/${kind}-search`;
 

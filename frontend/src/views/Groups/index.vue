@@ -410,7 +410,11 @@
       {{ t('groups.tip3') }}
     </div>
 
-    <div class="group-list" v-loading="loading">
+    <div class="group-list" v-loading="loading && groups.length > 0">
+      <!-- 首载骨架屏(T11):仅当「正在加载且尚无数据」时显示,避免首帧空白闪烁;
+           已有数据时的刷新仍走 v-loading 遮罩,末尾 el-empty 保持不变。 -->
+      <el-skeleton v-if="loading && groups.length === 0" :rows="4" animated />
+      <template v-else>
       <div v-for="g in groups" :key="g.id" class="group-card">
         <div class="group-card-head">
           <div class="group-name">
@@ -478,6 +482,7 @@
       <el-empty v-if="!loading && groups.length === 0" :description="t('groups.noGroups')">
         <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
       </el-empty>
+      </template>
     </div>
 
     <!-- 音频输出（采样率 + 位深）：整页共用一个弹窗；群组走「整组一键设置」。 -->

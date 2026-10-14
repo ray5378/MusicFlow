@@ -232,6 +232,7 @@
 
       <!-- ===== 2. 下载：新建任务 + 全库 ===== -->
       <el-tab-pane :label="t('admin.fetch.tabCreate')" name="create">
+        <div v-loading="createLoading" class="create-wrap">
         <el-form label-position="top" class="create-form">
           <el-form-item :label="t('admin.fetch.create.inputLabel')">
             <div class="hint">{{ t('admin.fetch.create.inputHint') }}</div>
@@ -258,6 +259,7 @@
             <el-button :loading="libraryPlanLoading" @click="loadLibraryPlan"><MfIcon name="RefreshCw" />{{ t('admin.fetch.library.reload') }}</el-button>
           </div>
           <div class="hint library-hint">{{ t('admin.fetch.library.hint') }}</div>
+        </div>
         </div>
       </el-tab-pane>
 
@@ -604,6 +606,9 @@ function movePriority(i: number, delta: number) {
 // ---------- 新建任务 ----------
 const targetsText = ref("");
 const startLoading = ref(false);
+// 「新建任务」页签的独立 loading(T14):仅覆盖首次进入该页签时触发的全库计划拉取,
+// 避免此前该页签完全没有自身加载态;日常手动刷新仍由 libraryPlanLoading 承担。
+const createLoading = ref(false);
 
 function parseTargets(text: string): FetchTargetInput[] {
   const out: FetchTargetInput[] = [];
@@ -855,7 +860,8 @@ const upgradeStatsLoaded = ref(false);
 watch(activeTab, (v) => {
   if (v === "create" && !libraryPlanLoaded.value) {
     libraryPlanLoaded.value = true;
-    loadLibraryPlan();
+    createLoading.value = true;
+    loadLibraryPlan().finally(() => { createLoading.value = false; });
   }
   if (v === "upgrade" && !upgradeStatsLoaded.value) {
     upgradeStatsLoaded.value = true;

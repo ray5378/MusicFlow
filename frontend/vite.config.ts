@@ -10,12 +10,14 @@ export default defineConfig({
     vue(),
     AutoImport({
       imports: ["vue"],
-      resolvers: [ElementPlusResolver()],
+      // Element Plus API(如 ElMessage)自动导入 JS 即可；样式不在此动态注入(T12)——统一由
+      // main.ts 静态按需引入 theme-chalk 的 el-*.css,保证与 global.scss 的先后顺序可控。
+      resolvers: [ElementPlusResolver({ importStyle: false })],
       dts: "src/auto-imports.d.ts",
     }),
     Components({
       resolvers: [
-        // Element Plus 组件 JS 按需导入；组件样式不按需注入（走全局 index.css），
+        // Element Plus 组件 JS 按需导入；组件样式不按需注入（统一由 main.ts 静态按需引入），
         // 避免运行时动态 <style> 晚于 global.scss 加载而覆盖自定义主题底色。
         ElementPlusResolver({ importStyle: false }),
       ],

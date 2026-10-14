@@ -3,468 +3,17 @@
     <el-tabs v-model="activeTab" @tab-change="onTabChange">
       <!-- ============ Installed plugins ============ -->
       <el-tab-pane :label="t('admin.plugins.tabInstalled')" name="installed" lazy>
-        <div class="page-header">
-          <h2>{{ t('admin.plugins.title') }}</h2>
-          <el-button type="primary" @click="showAddDialog = true">{{ t('admin.plugins.addPlugin') }}</el-button>
-        </div>
-
-        <template v-if="plugins.length > 0">
-          <div v-for="sec in installedSections" :key="sec.key" class="installed-section">
-            <div class="section-header">
-              <span class="section-title">{{ sec.title }}</span>
-              <el-tag size="small" effect="plain" round>{{ sec.items.length }}</el-tag>
-              <span class="section-hint">{{ sec.hint }}</span>
-            </div>
-            <el-table v-if="!isMobile" :data="sec.items" stripe v-loading="loading">
-            <el-table-column :label="t('admin.plugins.colName')" min-width="200">
-              <template #default="{ row }">
-                <div class="plugin-name">{{ displayName(row) }}</div>
-                <div class="plugin-id">{{ row.name }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('common.type')" width="110">
-              <template #default="{ row }">
-                <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="version" :label="t('admin.plugins.colVersion')" width="90" />
-            <el-table-column :label="t('admin.plugins.colDesc')" min-width="220" show-overflow-tooltip>
-              <template #default="{ row }">{{ displayDesc(row) || "—" }}</template>
-            </el-table-column>
-            <el-table-column :label="t('admin.plugins.colHealth')" width="96">
-              <template #default="{ row }">
-                <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('common.status')" width="104">
-              <template #default="{ row }">
-                <!-- core 内置行为插件(多源组/播放优选):列表开关 = 总开关(整体启停),功能子开关在「配置」弹窗 -->
-                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('common.actions')" width="210">
-              <template #default="{ row }">
-                <el-button size="small" type="primary" plain @click="editPlugin(row)">
-                  {{ hasConfig(row) ? t('common.config') : t('common.detail') }}
-                </el-button>
-                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">{{ t('common.delete') }}</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <!-- 移动端卡片列表:保留配置/详情/删除/启停,避免 el-table 横向滚动 -->
-          <div v-else class="plugin-cards">
-            <div v-for="row in sec.items" :key="row.name" class="plugin-card">
-              <div class="pc-row">
-                <div class="pc-id">
-                  <div class="plugin-name">{{ displayName(row) }}</div>
-                  <div class="plugin-id">{{ row.name }}</div>
-                </div>
-                <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-              </div>
-              <div class="pc-meta">
-                <span class="pc-ver">v{{ row.version }}</span>
-                <el-tag size="small" :type="healthType(row.name)" effect="dark">{{ healthLabel(row.name) }}</el-tag>
-              </div>
-              <div class="pc-desc m-sub">{{ displayDesc(row) || "—" }}</div>
-              <div class="pc-actions">
-                <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                <el-button size="small" type="primary" plain @click="editPlugin(row)">
-                  {{ hasConfig(row) ? t('common.config') : t('common.detail') }}
-                </el-button>
-                <el-button v-if="!row.builtin" size="small" type="danger" plain @click="confirmDelete(row)">{{ t('common.delete') }}</el-button>
-              </div>
-            </div>
-          </div>
-          <!-- 外置插件模块为空:引导去插件市场 -->
-          <div v-if="sec.key === 'external' && sec.items.length === 0 && !loading" class="section-empty">
-            <span>{{ t('admin.plugins.sectionExternalEmpty') }}</span>
-            <el-button size="small" type="primary" plain @click="activeTab = 'market'">{{ t('admin.plugins.tabMarket') }}</el-button>
-          </div>
-        </div>
-        </template>
-        <EmptyState v-else icon="cable" :title="t('admin.plugins.emptyTitle')" :description="t('admin.plugins.emptyDesc')">
-          <template #action>
-            <el-button type="primary" @click="showAddDialog = true">{{ t('admin.plugins.addPlugin') }}</el-button>
-          </template>
-        </EmptyState>
+        <InstalledTab v-bind="installedCtx" />
       </el-tab-pane>
 
       <!-- ============ Plugin marketplace ============ -->
       <el-tab-pane :label="t('admin.plugins.tabMarket')" name="market" lazy>
-        <div class="page-header">
-          <h2>{{ t('admin.plugins.marketTitle') }}</h2>
-          <el-button type="primary" plain @click="loadMarketplace" :loading="marketLoading">{{ t('common.refresh') }}</el-button>
-        </div>
-
-        <el-card class="market-card" shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span>{{ t('admin.plugins.registrySource') }}</span>
-              <el-button size="small" type="primary" plain @click="showRegDialog = true">{{ t('admin.plugins.addRegistry') }}</el-button>
-            </div>
-          </template>
-          <template v-if="registries.length > 0">
-            <el-table v-if="!isMobile" :data="registries" stripe size="small">
-              <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
-              <el-table-column :label="t('common.status')" width="120">
-                <template #default="{ row }">
-                  <el-tag v-if="row.error" size="small" type="danger" effect="light">{{ t('admin.plugins.loadFailed') }}</el-tag>
-                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? t('common.enable') : t('common.disable') }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column :label="t('common.actions')" width="90">
-                <template #default="{ row }">
-                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">{{ t('common.delete') }}</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-            <div v-else class="registry-cards">
-              <div v-for="row in registries" :key="row.id" class="registry-card">
-                <div class="rc-url">{{ row.url }}</div>
-                <div class="rc-meta">
-                  <el-tag v-if="row.error" size="small" type="danger" effect="light">{{ t('admin.plugins.loadFailed') }}</el-tag>
-                  <el-tag v-else size="small" :type="row.enabled ? 'success' : 'info'" effect="light">{{ row.enabled ? t('common.enable') : t('common.disable') }}</el-tag>
-                  <el-button size="small" type="danger" plain @click="removeRegistry(row)">{{ t('common.delete') }}</el-button>
-                </div>
-              </div>
-            </div>
-          </template>
-          <el-empty v-else :description="t('admin.plugins.noRegistry')" :image-size="60" />
-        </el-card>
-
-        <el-card class="market-card" shadow="never">
-          <template #header><span>{{ t('admin.plugins.marketGrouped') }}</span></template>
-          <div v-for="group in groupedMarket" :key="group.key" class="market-group">
-            <div class="group-head">
-              <span class="group-title">{{ group.title }}</span>
-              <el-tag v-if="group.sourceLabel" size="small" type="primary" effect="plain">{{ group.sourceLabel }}</el-tag>
-              <el-tag v-if="group.error" size="small" type="danger" effect="plain">{{ t('admin.plugins.loadFailed') }}</el-tag>
-            </div>
-            <el-alert
-              v-if="group.error && group.items.length === 0"
-              type="warning"
-              :closable="false"
-              show-icon
-              class="market-group-err"
-              :title="t('admin.plugins.registryLoadFailedTitle')"
-              :description="t('admin.plugins.registryLoadFailedDesc', { error: group.error })"
-            />
-            <template v-if="group.items.length > 0">
-              <el-table v-if="!isMobile" :data="group.items" stripe v-loading="marketLoading">
-                <el-table-column :label="t('admin.plugins.colName')" min-width="200">
-                  <template #default="{ row }">
-                    <div class="plugin-name">
-                      {{ row.name }}
-                      <el-tag v-if="row.builtin" size="small" type="warning" effect="light">{{ t('admin.plugins.builtin') }}</el-tag>
-                    </div>
-                    <div class="plugin-id">{{ row.id }}</div>
-                  </template>
-                </el-table-column>
-                <el-table-column :label="t('admin.plugins.colTypeCap')" min-width="200">
-                  <template #default="{ row }">
-                    <div class="cap-row">
-                      <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-                      <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
-                    </div>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="version" :label="t('admin.plugins.colVersion')" width="86" />
-                <el-table-column prop="description" :label="t('admin.plugins.colDesc')" min-width="200" show-overflow-tooltip />
-                <el-table-column :label="t('common.status')" width="104">
-                  <template #default="{ row }">
-                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                    <el-tag v-else size="small" type="info" effect="light">{{ t('admin.plugins.notInstalled') }}</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column :label="t('common.actions')" width="190">
-                  <template #default="{ row }">
-                    <template v-if="!row.builtin">
-                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.install') }}</el-button>
-                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.update') }}</el-button>
-                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.reinstall') }}</el-button>
-                    </template>
-                    <el-button size="small" plain @click="editPlugin(row)">{{ t('common.detail') }}</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <!-- 移动端卡片列表 -->
-              <div v-else class="plugin-cards">
-                <div v-for="row in group.items" :key="row.id" class="plugin-card">
-                  <div class="pc-row">
-                    <div class="pc-id">
-                      <div class="plugin-name">
-                        {{ displayName(row) }}
-                        <el-tag v-if="row.builtin" size="small" type="warning" effect="light">{{ t('admin.plugins.builtin') }}</el-tag>
-                      </div>
-                      <div class="plugin-id">{{ row.id }}</div>
-                    </div>
-                    <el-tag size="small" :type="typeTagColor(row)" effect="light">{{ typeLabel(row) }}</el-tag>
-                  </div>
-                  <div class="cap-row">
-                    <el-tag v-for="cap in capabilityList(row).slice(0, 5)" :key="cap" size="small" effect="plain">{{ capLabel(cap) }}</el-tag>
-                  </div>
-                  <div class="pc-desc m-sub">{{ displayDesc(row) || "—" }}</div>
-                  <div class="pc-meta">
-                    <span class="pc-ver">v{{ row.version }}</span>
-                    <el-switch v-if="row.installed" v-model="row.enabled" :active-value="1" :inactive-value="0" @change="togglePlugin(row)" />
-                    <el-tag v-else size="small" type="info" effect="light">{{ t('admin.plugins.notInstalled') }}</el-tag>
-                  </div>
-                  <div class="pc-actions">
-                    <template v-if="!row.builtin">
-                      <el-button v-if="!row.installed" size="small" type="success" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.install') }}</el-button>
-                      <el-button v-else-if="isUpdatable(row)" size="small" type="primary" :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.update') }}</el-button>
-                      <el-button v-else size="small" plain :loading="installing === installKey(row)" @click="installPlugin(row)">{{ t('admin.plugins.reinstall') }}</el-button>
-                    </template>
-                    <el-button size="small" plain @click="editPlugin(row)">{{ t('common.detail') }}</el-button>
-                  </div>
-                </div>
-              </div>
-            </template>
-            <el-empty v-else :description="t('admin.plugins.noPluginsInRegistry')" :image-size="50" />
-          </div>
-          <p v-if="groupedMarket.length > 0" class="market-note">{{ t('admin.plugins.marketNote') }}</p>
-          <el-empty v-else :description="t('admin.plugins.noRegistry')" :image-size="60" />
-        </el-card>
-        <el-alert type="info" :closable="false" show-icon class="market-warn"
-          :title="t('admin.plugins.securityTitle')"
-          :description="t('admin.plugins.securityDesc')"
-        />
+        <MarketTab v-bind="marketCtx" />
       </el-tab-pane>
 
       <!-- ============ Media fetch (lyrics / covers) — 能力级全局设置,独立于任何单个插件 ============ -->
       <el-tab-pane :label="t('admin.plugins.tabMedia')" name="media" lazy>
-        <div class="page-header">
-          <h2>{{ t('admin.plugins.mediaTitle') }}</h2>
-          <span class="page-sub">{{ t('admin.plugins.mediaSub') }}</span>
-        </div>
-
-        <el-card class="mf-card" shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span class="card-title">{{ t('admin.plugins.lyricsFetch') }}</span>
-              <el-tag v-if="lyricProviderPlugins.length === 0" size="small" type="warning" effect="plain">{{ t('admin.plugins.noLyricProvider') }}</el-tag>
-            </div>
-          </template>
-          <div v-if="lyricProviderPlugins.length === 0" class="mf-empty">
-            <el-empty :description="t('admin.plugins.noLyricProviderDesc')" :image-size="60">
-              <el-button size="small" type="primary" @click="activeTab = 'market'">{{ t('admin.plugins.goMarket') }}</el-button>
-            </el-empty>
-          </div>
-          <div v-else class="mf-media">
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.sourcePlugin') }}</span>
-              <span class="field-hint">{{ t('admin.plugins.lyricsProviderPriorityHint') }}</span>
-            </div>
-            <SourcePriorityList :model-value="lyricsSettings.providerPriority" :options="lyricProviderOptions" :available-values="lyricProviderAvailable" @update:model-value="onLyricsPriorityChange" />
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.onDemand') }}</span>
-              <el-switch v-model="lyricsSettings.onDemand" @change="saveMediaSettings('lyrics')" />
-              <span class="field-hint">{{ t('admin.plugins.onDemandHintLyrics') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.persist') }}</span>
-              <el-switch v-model="lyricsSettings.persist" @change="saveMediaSettings('lyrics')" />
-              <span class="field-hint">{{ t('admin.plugins.persistHintLyrics') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <el-button size="small" type="primary" plain :loading="lyricsBackfill.running" @click="startBackfill('lyrics')">{{ t('admin.plugins.batchBackfill') }}</el-button>
-              <span v-if="lyricsBackfill.total > 0" class="field-hint">{{ backfillText('lyrics') }}</span>
-            </div>
-          </div>
-        </el-card>
-
-        <el-card class="mf-card" shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span class="card-title">{{ t('admin.plugins.coverFetch') }}</span>
-              <el-tag v-if="coverProviderPlugins.length === 0" size="small" type="warning" effect="plain">{{ t('admin.plugins.noCoverProvider') }}</el-tag>
-            </div>
-          </template>
-          <div v-if="coverProviderPlugins.length === 0" class="mf-empty">
-            <el-empty :description="t('admin.plugins.noCoverProviderDesc')" :image-size="60">
-              <el-button size="small" type="primary" @click="activeTab = 'market'">{{ t('admin.plugins.goMarket') }}</el-button>
-            </el-empty>
-          </div>
-          <div v-else class="mf-media">
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.sourcePlugin') }}</span>
-              <span class="field-hint">{{ t('admin.plugins.coversProviderPriorityHint') }}</span>
-            </div>
-            <SourcePriorityList :model-value="coversSettings.providerPriority" :options="coverProviderOptions" :available-values="coverProviderAvailable" @update:model-value="onCoversPriorityChange" />
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.onDemand') }}</span>
-              <el-switch v-model="coversSettings.onDemand" @change="saveMediaSettings('covers')" />
-              <span class="field-hint">{{ t('admin.plugins.onDemandHintCovers') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.persist') }}</span>
-              <el-switch v-model="coversSettings.persist" @change="saveMediaSettings('covers')" />
-              <span class="field-hint">{{ t('admin.plugins.persistHintCovers') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <el-button size="small" type="primary" plain :loading="coversBackfill.running" @click="startBackfill('covers')">{{ t('admin.plugins.batchBackfill') }}</el-button>
-              <span v-if="coversBackfill.total > 0" class="field-hint">{{ backfillText('covers') }}</span>
-            </div>
-          </div>
-        </el-card>
-
-        <el-card class="mf-card" shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span class="card-title">{{ t('admin.plugins.streamSourcePriority') }}</span>
-            </div>
-          </template>
-          <div class="mf-media">
-            <div class="mf-media-row">
-              <span class="field-hint">{{ t('admin.plugins.streamSourcePriorityHint') }}</span>
-            </div>
-            <SourcePriorityList :model-value="streamSourcePriority" :options="availableStreamSources" @update:model-value="onStreamPriorityChange" />
-          </div>
-        </el-card>
-
-        <el-card class="mf-card" shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span class="card-title">{{ t('admin.plugins.prefetchSettings') }}</span>
-            </div>
-          </template>
-          <div class="mf-media">
-            <div class="mf-media-row">
-              <span class="field-hint">{{ t('admin.plugins.prefetchSettingsHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchSectionPrefetch') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchLookahead') }}</span>
-              <el-input-number v-model="prefetchSettings.lookahead" v-bind="specRange('lookahead')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchLookaheadHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchConcurrency') }}</span>
-              <el-input-number v-model="prefetchSettings.concurrency" v-bind="specRange('concurrency')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchConcurrencyHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchBudgetRatio') }}</span>
-              <el-input-number v-model="prefetchSettings.budgetRatio" v-bind="specRange('budgetRatio')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchBudgetRatioHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchDeadlineSec') }}</span>
-              <el-input-number v-model="prefetchSettings.deadlineSec" v-bind="specRange('deadlineSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchDeadlineSecHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchStallSec') }}</span>
-              <el-input-number v-model="prefetchSettings.stallSec" v-bind="specRange('stallSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchStallSecHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchEntryTtlSec') }}</span>
-              <el-input-number v-model="prefetchSettings.entryTtlSec" v-bind="specRange('entryTtlSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchEntryTtlSecHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchMaxAltSources') }}</span>
-              <el-input-number v-model="prefetchSettings.maxAltSources" v-bind="specRange('maxAltSources')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchMaxAltSourcesHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchSectionJudge') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchIntegrityEnabled') }}</span>
-              <el-switch v-model="prefetchSettings.integrityEnabled" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchIntegrityEnabledHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchIntegrityDeltaSec') }}</span>
-              <el-input-number v-model="prefetchSettings.integrityDeltaSec" v-bind="specRange('integrityDeltaSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchIntegrityDeltaSecHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchIntegrityBitrateDeltaSec') }}</span>
-              <el-input-number v-model="prefetchSettings.integrityBitrateDeltaSec" v-bind="specRange('integrityBitrateDeltaSec')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchIntegrityBitrateDeltaSecHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.prefetchMinAudioKB') }}</span>
-              <el-input-number v-model="prefetchSettings.minAudioKB" v-bind="specRange('minAudioKB')" size="small" controls-position="right" @change="savePrefetchSettings" />
-              <span class="field-hint">{{ t('admin.plugins.prefetchMinAudioKBHint') }}</span>
-            </div>
-          </div>
-        </el-card>
-
-        <!-- 起播 TTFB 金丝雀探针(默认关;开不开用户定,开启需先钉死一首网络源歌曲) -->
-        <el-card class="mf-card" shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span class="card-title">{{ t('admin.plugins.probeSettings') }}</span>
-            </div>
-          </template>
-          <div class="mf-media">
-            <div class="mf-media-row">
-              <span class="field-hint">{{ t('admin.plugins.probeSettingsHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.probeEnabled') }}</span>
-              <el-switch v-model="probeSettings.enabled" :loading="savingProbe" @change="onProbeToggle" />
-              <span class="field-hint">{{ t('admin.plugins.probeEnabledHint') }}</span>
-            </div>
-            <div class="mf-media-row">
-              <span class="mf-media-label">{{ t('admin.plugins.probeSong') }}</span>
-              <el-button size="small" @click="openProbeSongPicker">{{ t('admin.plugins.probePickSong') }}</el-button>
-              <span class="field-hint">{{ probeSongText }}</span>
-            </div>
-            <div class="mf-media-row" v-if="probeSnapshot">
-              <span class="mf-media-label">{{ t('admin.plugins.probeStatus') }}</span>
-              <el-tag size="small" :type="probeHealthType" effect="dark">{{ t('admin.plugins.probeHealth.' + (probeSnapshot.health || 'unknown')) }}</el-tag>
-              <span class="field-hint">{{ probeStatusText }}</span>
-            </div>
-            <div class="mf-media-row" v-if="probeSnapshot && (probeSnapshot.lastTtfbMs != null || probeSnapshot.samples)">
-              <span class="mf-media-label">{{ t('admin.plugins.probeTtfb') }}</span>
-              <span class="field-hint">
-                {{ t('admin.plugins.probeTtfbRecent') }} {{ probeSnapshot.lastTtfbMs == null ? '-' : probeSnapshot.lastTtfbMs + 'ms' }}
-                · p50 {{ probeSnapshot.p50Ms == null ? '-' : probeSnapshot.p50Ms + 'ms' }}
-                · p95 {{ probeSnapshot.p95Ms == null ? '-' : probeSnapshot.p95Ms + 'ms' }}
-                · {{ t('admin.plugins.probeSamples') }} {{ probeSnapshot.samples }}
-              </span>
-            </div>
-            <div class="mf-media-row" v-if="probeSnapshot && probeSnapshot.lastSkipReason">
-              <span class="mf-media-label">{{ t('admin.plugins.probeSkip') }}</span>
-              <span class="field-hint">{{ t('admin.plugins.probeSkipReason.' + probeSnapshot.lastSkipReason) }}</span>
-            </div>
-            <div class="mf-media-row" v-if="probeSnapshot && probeSnapshot.enabled">
-              <span class="mf-media-label">{{ t('admin.plugins.probeCounts') }}</span>
-              <span class="field-hint">
-                ok {{ probeSnapshot.counts.ok }} · fail {{ probeSnapshot.counts.fail }} · skip {{ probeSnapshot.counts.skip }}
-                · {{ t('admin.plugins.probeInterval') }} {{ Math.round(probeSnapshot.intervalMs / 60000) }}min
-              </span>
-            </div>
-          </div>
-        </el-card>
-
-        <!-- 探测歌曲选择:搜索 + 分页(库有多大都不必一次拉全) -->
-        <el-dialog v-model="probeSongDialog" :title="t('admin.plugins.probePickSong')" width="640px" destroy-on-close :append-to-body="true">
-          <div class="mf-media-row">
-            <el-input v-model="probeSongQuery" :placeholder="t('admin.plugins.probeSearchHint')" clearable size="small" style="max-width: 300px" @keyup.enter="loadProbeSongs" />
-            <el-button size="small" @click="loadProbeSongs">{{ t('admin.plugins.probeSearch') }}</el-button>
-          </div>
-          <el-table :data="probeSongs" size="small" stripe highlight-current-row @row-click="onPickProbeSong">
-            <el-table-column prop="title" :label="t('admin.plugins.colName')" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="artist" :label="t('admin.plugins.probeColArtist')" min-width="120" show-overflow-tooltip />
-            <el-table-column prop="album" :label="t('admin.plugins.probeColAlbum')" min-width="140" show-overflow-tooltip />
-          </el-table>
-          <div class="mf-media-row" style="margin-top: 8px; justify-content: flex-end">
-            <el-pagination layout="prev, pager, next" :total="probeSongsTotal" :page-size="20" :current-page="probeSongPage" small background @current-change="onProbeSongPage" />
-          </div>
-        </el-dialog>
-
-        <div class="mf-actions">
-          <el-button type="primary" :loading="savingMedia" @click="saveAllMedia">{{ t('admin.plugins.saveSettings') }}</el-button>
-          <span class="field-hint">{{ t('admin.plugins.saveSettingsHint') }}</span>
-        </div>
+        <MediaTab v-bind="mediaCtx" />
       </el-tab-pane>
     </el-tabs>
 
@@ -740,6 +289,22 @@
       :platforms="qrPlatformOptions"
       @success="() => { loadPlugins(); loadQrStatus(); }"
     />
+
+    <!-- 探测歌曲选择:搜索 + 分页(库有多大都不必一次拉全) -->
+    <el-dialog v-model="probeSongDialog" :title="t('admin.plugins.probePickSong')" width="640px" destroy-on-close :append-to-body="true">
+      <div class="mf-media-row">
+        <el-input v-model="probeSongQuery" :placeholder="t('admin.plugins.probeSearchHint')" clearable size="small" style="max-width: 300px" @keyup.enter="loadProbeSongs" />
+        <el-button size="small" @click="loadProbeSongs">{{ t('admin.plugins.probeSearch') }}</el-button>
+      </div>
+      <el-table :data="probeSongs" size="small" stripe highlight-current-row @row-click="onPickProbeSong">
+        <el-table-column prop="title" :label="t('admin.plugins.colName')" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="artist" :label="t('admin.plugins.probeColArtist')" min-width="120" show-overflow-tooltip />
+        <el-table-column prop="album" :label="t('admin.plugins.probeColAlbum')" min-width="140" show-overflow-tooltip />
+      </el-table>
+      <div class="mf-media-row" style="margin-top: 8px; justify-content: flex-end">
+        <el-pagination layout="prev, pager, next" :total="probeSongsTotal" :page-size="20" :current-page="probeSongPage" small background @current-change="onProbeSongPage" />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -747,11 +312,13 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
-import EmptyState from "@/components/EmptyState.vue";
 import QrLoginDialog from "@/components/QrLoginDialog.vue";
-import SourcePriorityList from "@/components/SourcePriorityList.vue";
+import InstalledTab from "./InstalledTab.vue";
+import MarketTab from "./MarketTab.vue";
+import MediaTab from "./MediaTab.vue";
 import api, { formatApiError } from "@/api";
 import { useIsMobile } from "@/composables/useIsMobile";
+import { invalidateProvidersCache } from "@/composables/useEntitySearch";
 import { parseManifest, parseConfig } from "@/utils/plugin";
 import { resolveField, localName, localDesc, localDoc, resolvePluginI18n } from "@/utils/pluginI18n";
 
@@ -1409,6 +976,7 @@ async function togglePlugin(plugin: any) {
   await api.put(`/rest/api/v1/plugins/${plugin.id}/toggle`);
   ElMessage.success(t('common.updated'));
   loadHealth();
+  invalidateProvidersCache();
 }
 
 /** 简单 semver 比较:<0 表示 a<b,=0 相等,>0 表示 a>b。 */
@@ -1463,6 +1031,7 @@ async function confirmDelete(row: any) {
     loadPlugins();
     loadHealth();
     loadMarketplace();
+    invalidateProvidersCache();
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || t('common.deleteFailed'));
   }
@@ -1942,6 +1511,7 @@ async function installPlugin(row: any) {
     loadMarketplace();
     loadPlugins();
     loadHealth();
+    invalidateProvidersCache();
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || t('admin.plugins.installFailed'));
   } finally {
@@ -1955,6 +1525,93 @@ function onTabChange(name: string | number) {
   else if (name === "media") loadMediaSettings();
 }
 
+// 子组件只读父级状态,凡「写父级状态」的交互都收敛为这几个回调。
+function openAddDialog() { showAddDialog.value = true; }
+function openRegDialog() { showRegDialog.value = true; }
+function goMarket() { activeTab.value = "market"; }
+
+// 三个页签的渲染上下文:把各自模板里出现的绑定汇总成对象,经 v-bind 透传给子组件。
+// 用 computed 求值 —— 模板里 v-bind="ctx" 取的是计算值,ref 在此展开为当前值,
+// 依赖变化时重算并驱动子组件重渲染(子组件只读;写操作一律走上面的回调 props)。
+const installedCtx = computed(() => ({
+  t,
+  plugins: plugins.value,
+  installedSections: installedSections.value,
+  isMobile: isMobile.value,
+  loading: loading.value,
+  displayName,
+  typeTagColor,
+  typeLabel,
+  displayDesc,
+  healthType,
+  healthLabel,
+  togglePlugin,
+  hasConfig,
+  editPlugin,
+  confirmDelete,
+  openAddDialog,
+  goMarket,
+}));
+
+const marketCtx = computed(() => ({
+  t,
+  marketLoading: marketLoading.value,
+  loadMarketplace,
+  openRegDialog,
+  isMobile: isMobile.value,
+  registries: registries.value,
+  removeRegistry,
+  groupedMarket: groupedMarket.value,
+  typeTagColor,
+  typeLabel,
+  capabilityList,
+  capLabel,
+  togglePlugin,
+  installing: installing.value,
+  installKey,
+  installPlugin,
+  isUpdatable,
+  editPlugin,
+  displayName,
+  displayDesc,
+}));
+
+const mediaCtx = computed(() => ({
+  t,
+  lyricProviderPlugins: lyricProviderPlugins.value,
+  coverProviderPlugins: coverProviderPlugins.value,
+  goMarket,
+  lyricsSettings,
+  coversSettings,
+  lyricProviderOptions: lyricProviderOptions.value,
+  coverProviderOptions: coverProviderOptions.value,
+  lyricProviderAvailable: lyricProviderAvailable.value,
+  coverProviderAvailable: coverProviderAvailable.value,
+  onLyricsPriorityChange,
+  onCoversPriorityChange,
+  saveMediaSettings,
+  lyricsBackfill,
+  coversBackfill,
+  startBackfill,
+  backfillText,
+  streamSourcePriority: streamSourcePriority.value,
+  availableStreamSources: availableStreamSources.value,
+  onStreamPriorityChange,
+  prefetchSettings,
+  specRange,
+  savePrefetchSettings,
+  probeSettings,
+  savingProbe: savingProbe.value,
+  onProbeToggle,
+  openProbeSongPicker,
+  probeSongText: probeSongText.value,
+  probeSnapshot: probeSnapshot.value,
+  probeHealthType: probeHealthType.value,
+  probeStatusText: probeStatusText.value,
+  savingMedia: savingMedia.value,
+  saveAllMedia,
+}));
+
 onMounted(() => {
   loadPlugins();
   loadHealth();
@@ -1966,15 +1623,7 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .admin-plugins { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
-.page-sub { font-size: 13px; color: var(--el-text-color-secondary); }
-.mf-card { margin-bottom: 20px; }
-.mf-actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
-.mf-card .card-title { font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); }
-.mf-empty { padding: 8px 0; }
 .test-result { margin-left: 12px; font-size: 13px; color: var(--el-color-danger); &.ok { color: var(--el-color-success); } }
-.plugin-name { font-weight: 600; line-height: 1.35; }
-.plugin-id { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.35; }
 .cap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cap-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 2px; }
 .field-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; display: inline-block; max-width: 360px; }
@@ -1994,17 +1643,8 @@ onMounted(() => {
 .candidate-list { display: flex; flex-direction: column; gap: 8px; max-width: 640px; }
 .candidate-row { display: flex; align-items: center; gap: 8px; }
 .candidate-row .el-input { margin: 0; }
-.mf-media { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+/* 探测歌曲选择弹窗(已随模板搬至共享弹窗区)的行布局 */
 .mf-media-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.mf-media-label { flex: 0 0 64px; font-size: 13px; color: var(--el-text-color-primary); }
-.mf-media .field-hint { margin-left: 0; max-width: 340px; }
-.market-card { margin-bottom: 20px; }
-.market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
-.market-warn { margin-top: 4px; }
-.market-note { margin: 12px 4px 0; font-size: 12px; color: var(--el-text-color-secondary); }
-.market-group { margin-bottom: 18px; }
-.market-group .group-head { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
-.market-group .group-title { font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); word-break: break-all; }
 .src-host { font-size: 13px; font-weight: 600; line-height: 1.4; }
 .src-url { font-size: 11px; color: var(--el-text-color-secondary); line-height: 1.4; word-break: break-all; }
 .src-builtin { font-size: 13px; color: var(--el-text-color-secondary); }
@@ -2025,48 +1665,15 @@ onMounted(() => {
 .pd-capdocs { margin: 0; padding-left: 20px; }
 .pd-capdocs li { font-size: 13px; line-height: 1.8; color: var(--el-text-color-regular); }
 .pd-hint { margin: 8px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
-/* 移动端卡片列表(替代 el-table) */
-.plugin-cards, .registry-cards { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
-.plugin-card, .registry-card {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--fnos-radius-lg);
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.pc-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-.pc-id { min-width: 0; }
-.pc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.pc-ver { font-size: 12px; color: var(--fnos-text-tertiary); }
-.pc-desc { line-height: 1.5; word-break: break-word; }
-.pc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* 已安装列表 内置/外置 两模块 */
-.installed-section { margin-bottom: 24px; }
-.section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.section-title { font-size: 16px; font-weight: 600; }
-.section-hint { font-size: 12px; color: var(--fnos-text-tertiary); }
-.section-empty {
-  display: flex; align-items: center; gap: 12px; padding: 18px 16px;
-  border: 1px dashed var(--fnos-border-color, rgba(255, 255, 255, 0.12));
-  border-radius: var(--fnos-radius-lg);
-  font-size: 13px; color: var(--fnos-text-secondary);
-}
-.rc-url { font-size: 13px; color: var(--fnos-text-primary); word-break: break-all; line-height: 1.5; }
-.rc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 @media (max-width: 768px) {
   .admin-plugins { padding: 20px 16px; }
-  .page-header h2 { font-size: 24px; }
   :deep(.el-table) { font-size: 13px; }
   /* 候选榜单行在窄屏换行,每个输入占满一行 */
   .candidate-row { flex-wrap: wrap; }
   .candidate-row .el-input,
   .candidate-row .el-select { flex: 1 1 100% !important; width: 100% !important; }
   .candidate-row .el-button { flex: 0 0 auto; }
-  /* 媒体获取行的固定宽控件在窄屏占满 */
-  .mf-media-row .el-select { width: 100% !important; }
 }
 </style>
 

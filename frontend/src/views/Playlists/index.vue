@@ -259,6 +259,13 @@
   </div>
 </template>
 
+<script lang="ts">
+// 模块级短缓存(T13):playlist-search/providers 列表(搜索来源下拉)跨实例共享。
+// 放在独立 <script> 块里以获得真正的模块作用域,而非 keep-alive 实例作用域。
+const PLAYLIST_PROVIDERS_TTL_MS = 60_000;
+let playlistProvidersCache: { at: number; list: any[] } | null = null;
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
@@ -757,10 +764,18 @@ function onSearchSourceCommand(cmd: string) {
 }
 
 // 已启用的 playlistSearch 插件列表(前端切换器数据源,动态)
-async function loadSearchProviders() {
+// 模块级短 TTL 缓存(T13):同 useEntitySearch 的 providersCache 思路 —— 兜住「非 keep-alive
+// 重进页」的重复请求,同时 60s 过期后自动重拉,保证插件启用/停用在会话内能回显。
+async function loadSearchProviders(force = false) {
+  if (!force && playlistProvidersCache && Date.now() - playlistProvidersCache.at < PLAYLIST_PROVIDERS_TTL_MS) {
+    searchProviders.value = playlistProvidersCache.list;
+    return;
+  }
   try {
     const res = await api.get("/rest/api/v1/playlist-search/providers");
-    searchProviders.value = res.data.providers || [];
+    const list = res.data.providers || [];
+    playlistProvidersCache = { at: Date.now(), list };
+    searchProviders.value = list;
   } catch {
     searchProviders.value = [];
   }
