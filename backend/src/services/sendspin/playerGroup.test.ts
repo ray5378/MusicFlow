@@ -78,6 +78,13 @@ describe("sendspin 用户组多房间", () => {
 
   afterAll(async () => {
     await stopSendspinService();
+    // vitest worker 收尾前排空被测服务的残留异步日志:in-proc Sendspin 停止后,
+    // pump/ws/编码器等长跑源的最后一拍 console 输出仍可能在路上(满负载时序),
+    // worker 若立即关闭,`onUserConsoleLog` RPC 未送达 → EnvironmentTeardownError
+    // 计为 unhandled error,全量门禁 exit 1(2026-10-14 CI 803s 满负载实测)。
+    // setImmediate × 5 + 50ms 只在 teardown 走一次,不拖慢用例。
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setTimeout(r, 50));
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
