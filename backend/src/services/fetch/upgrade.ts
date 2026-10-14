@@ -209,6 +209,55 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
 }
 
 /**
+ * 只出统计的 SQL 快路径（不 materialize 明细），口径与 `buildUpgradePlan` 明细路径逐项等价：
+ *   total     = 各源 `type='local' AND path LIKE 'l:<sid>:%'` 的行数之和（逐源相加，
+ *               重复源重复计入——与 `collectUpgradeSongs` 的循环语义保持一致）；
+ *   attempted = 这些行中在 `fetch_upgrade_attempts` 有记录的行数（与冷却窗口无关）；
+ *   cooled    = 这些行中尝试时间仍在冷却窗口内的行数；
+ *   belowBar  = total - cooled（待洗版数）。
+ *
+ * ⚠️ 前提：`sourceIds` 内无重复项（`resolveUpgradeSourceIds` 与配置侧均按此使用）。
+ */
+export function countUpgradePlanStats(
+  sourceIds: string[],
+  cfg: FetchConfig,
+): { total: number; attempted: number; cooled: number; belowBar: number } {
+  const ids = Array.isArray(sourceIds) ? sourceIds.filter((s) => typeof s === "string" && s) : [];
+  ensureUpgradeAttemptsTable();
+  if (ids.length === 0) return { total: 0, attempted: 0, cooled: 0, belowBar: 0 };
+
+  let total = 0;
+  const cnt = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE type = 'local' AND path LIKE ?");
+  for (const sid of ids) {
+    try {
+      total += Number((cnt.get(`l:${sid}:%`) as any)?.n ?? 0);
+    } catch {
+      continue; // 单源查询失败不影响其它源（对齐 collectUpgradeSongs 的容错层级）
+    }
+  }
+
+  const cooldownDays = Math.min(
+    365,
+    Math.max(1, Math.floor(cfg.upgradeCooldownDays > 0 ? cfg.upgradeCooldownDays : 30)),
+  );
+  // attempted_at 统一是 new Date().toISOString()（定宽 UTC），字符串比较等价于时间比较。
+  const cutoff = new Date(Date.now() - cooldownDays * 86_400_000).toISOString();
+  const where = ids.map(() => "(s.type = 'local' AND s.path LIKE ?)").join(" OR ");
+  const row = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS attempted,
+              COALESCE(SUM(CASE WHEN a.attempted_at > ? THEN 1 ELSE 0 END), 0) AS cooled
+         FROM fetch_upgrade_attempts a
+         JOIN songs s ON s.id = a.song_id
+        WHERE ${where}`,
+    )
+    .get(cutoff, ...ids.map((sid) => `l:${sid}:%`)) as any;
+  const attempted = Number(row?.attempted ?? 0);
+  const cooled = Number(row?.cooled ?? 0);
+  return { total, attempted, cooled, belowBar: Math.max(0, total - cooled) };
+}
+
+/**
  * 出洗版计划（只读，不下载）。
  *
  * 候选口径（产品定调 2026-10-12）：**目标目录下的每一首歌都是待洗版对象**。
@@ -227,8 +276,28 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
 export function buildUpgradePlan(
   sourceIds: string[],
   cfg: FetchConfig,
-  opts?: { limit?: number; offset?: number; songIds?: string[] },
+  opts?: { limit?: number; offset?: number; songIds?: string[]; statsOnly?: boolean },
 ): { sourceIds: string[]; total: number; attempted: number; belowBar: number; cooled: number; truncated: boolean; items: UpgradePlanItem[] } {
+  const sidList: string[] = opts && Array.isArray(opts.songIds) ? opts.songIds : [];
+  const wanted = sidList.length > 0 ? new Set(sidList.map((v) => String(v))) : null;
+
+  // 快路径（UI「只看统计」，洗版预览已下线）：JSON 无 songIds 点名时用 SQL COUNT 出
+  // total/attempted/belowBar/cooled，不把目标目录全部行 materialize 成 JS 对象。
+  // 只有 GET /upgrade/plan（未带 limit）走这里；建任务的 POST /tasks 仍走明细路径，
+  // 条目选择与截断语义**零改动**。
+  if (opts?.statsOnly && !wanted) {
+    const s = countUpgradePlanStats(sourceIds, cfg);
+    return {
+      sourceIds,
+      total: s.total,
+      attempted: s.attempted,
+      belowBar: s.belowBar,
+      cooled: s.cooled,
+      truncated: false,
+      items: [],
+    };
+  }
+
   const rows = collectUpgradeSongs(sourceIds);
   const total = rows.length;
   const upQ = buildUpgradeQuality(cfg.quality);
@@ -255,8 +324,6 @@ export function buildUpgradePlan(
   // 已尝试（任何时间在册，不受冷却窗口限制）——供设置页「已尝试 N 首」统计。
   const attempted = rows.reduce((n, r) => n + (attemptedAt.has(r.id) ? 1 : 0), 0);
 
-  const sidList: string[] = opts && Array.isArray(opts.songIds) ? opts.songIds : [];
-  const wanted = sidList.length > 0 ? new Set(sidList.map((v) => String(v))) : null;
   const pool = wanted ? rows.filter((r) => wanted.has(r.id)) : belowAll;
 
   const offRaw = opts?.offset;

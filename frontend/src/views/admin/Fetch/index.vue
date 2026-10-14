@@ -324,12 +324,12 @@
       </el-tab-pane>
 
       <!-- ===== 4. 下载任务列表（全部非洗版：搜索导入 / 全库 / 重试） ===== -->
-      <el-tab-pane :label="t('admin.fetch.tabJobs')" name="jobs">
+      <el-tab-pane :label="t('admin.fetch.tabJobs')" name="jobs" lazy>
         <JobListPanel ref="downloadJobsRef" :kinds="DOWNLOAD_JOB_KINDS" />
       </el-tab-pane>
 
       <!-- ===== 5. 洗版任务列表（独立模块，与下载任务完全分开） ===== -->
-      <el-tab-pane :label="t('admin.fetch.tabUpgradeJobs')" name="upgradeJobs">
+      <el-tab-pane :label="t('admin.fetch.tabUpgradeJobs')" name="upgradeJobs" lazy>
         <JobListPanel ref="upgradeJobsRef" :kinds="UPGRADE_JOB_KINDS" />
       </el-tab-pane>
     </el-tabs>
@@ -842,15 +842,25 @@ onMounted(() => {
   loadConfig();
   loadSources();
   loadUpgradeConfig();
-  loadUpgradeStats();
-  loadLibraryPlan();
   loadTagRepairStatus();
-  // 两个任务面板各自 onMounted 自拉；不在这里重复请求。
+  // 两个任务面板用 el-tab-pane `lazy` 懒挂载：切到对应页签才 mount 并自拉，不在这里重复请求。
 });
-// 切到「下载/洗版任务」页签时刷新一次对应面板；切到「下载(创建)」时刷新全库统计。
+
+// 全库统计（洗版 / 全库下载）各是一次全表扫描，**首次切到对应页签才拉**：
+// 打开页面默认停在「配置」页签 → 首屏不再触发扫描，避免同步 SQLite 长扫描阻塞事件循环
+// 把整页拖成「卡加载」；之后由页签内的「刷新」按钮手动重拉（loadUpgradeStats / loadLibraryPlan）。
+const libraryPlanLoaded = ref(false);
+const upgradeStatsLoaded = ref(false);
+
 watch(activeTab, (v) => {
-  if (v === "create") loadLibraryPlan();
-  if (v === "upgrade") loadUpgradeStats();
+  if (v === "create" && !libraryPlanLoaded.value) {
+    libraryPlanLoaded.value = true;
+    loadLibraryPlan();
+  }
+  if (v === "upgrade" && !upgradeStatsLoaded.value) {
+    upgradeStatsLoaded.value = true;
+    loadUpgradeStats();
+  }
   if (v === "jobs") downloadJobsRef.value?.refresh();
   if (v === "upgradeJobs") upgradeJobsRef.value?.refresh();
 });

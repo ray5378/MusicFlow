@@ -150,6 +150,53 @@ export function resetLibraryAttempts(): number {
 }
 
 /**
+ * 只出统计的 SQL 快路径（不 materialize 明细）。
+ *
+ * 与 `collectLibrarySongs` + 冷却过滤的统计口径**逐项等价**：
+ *   total     = 库里「本地无实体文件」的行数（`path` 既非 `l:` 也非 `w:`）；
+ *   attempted = 这些行中在 `fetch_library_attempts` 有记录的行数（与冷却窗口无关）；
+ *   cooled    = 这些行中尝试时间仍落在冷却窗口内的行数；
+ *   pending   = total - cooled。
+ *
+ * 用途：UI 只看统计（`limit<=0` 且无 songIds 点名）时省掉「把全库行读出来再映射成 JS 对象」
+ * 的开销——240 生产该池约 8.2 万行，`better-sqlite3` 同步执行时这段 materialize 会阻塞
+ * 整个事件循环，是「音乐下载」页打开卡加载的主因之一。
+ */
+export function countLibraryPlanStats(cfg: FetchConfig): {
+  total: number;
+  attempted: number;
+  cooled: number;
+  pending: number;
+} {
+  ensureLibraryAttemptsTable();
+  const total = Number(
+    (
+      sqlite
+        .prepare("SELECT COUNT(*) AS n FROM songs WHERE path NOT LIKE 'l:%' AND path NOT LIKE 'w:%'")
+        .get() as any
+    )?.n ?? 0,
+  );
+  const cooldownDays = Math.min(
+    365,
+    Math.max(1, Math.floor(cfg.libraryCooldownDays > 0 ? cfg.libraryCooldownDays : 30)),
+  );
+  // attempted_at 统一是 new Date().toISOString()（定宽 UTC），字符串比较等价于时间比较。
+  const cutoff = new Date(Date.now() - cooldownDays * 86_400_000).toISOString();
+  const row = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS attempted,
+              COALESCE(SUM(CASE WHEN a.attempted_at > ? THEN 1 ELSE 0 END), 0) AS cooled
+         FROM fetch_library_attempts a
+         JOIN songs s ON s.id = a.song_id
+        WHERE s.path NOT LIKE 'l:%' AND s.path NOT LIKE 'w:%'`,
+    )
+    .get(cutoff) as any;
+  const attempted = Number(row?.attempted ?? 0);
+  const cooled = Number(row?.cooled ?? 0);
+  return { total, attempted, cooled, pending: Math.max(0, total - cooled) };
+}
+
+/**
  * 生成计划：全量 → 剔除已尝试 → （可选）按 songIds 白名单收窄 → 按 limit 截断。
  * `limit` 缺省 / 0 → 只回统计、`items` 为空。
  */
@@ -157,13 +204,30 @@ export function buildLibraryPlan(
   cfg: FetchConfig,
   opts?: { limit?: number; songIds?: string[] },
 ): LibraryPlan {
-  const all = collectLibrarySongs();
-  const total = all.length;
-
   const wanted =
     Array.isArray(opts?.songIds) && opts!.songIds!.length > 0
       ? new Set(opts!.songIds!.map((v) => String(v)))
       : null;
+  const capRaw =
+    typeof opts?.limit === "number" && Number.isFinite(opts.limit) ? Math.floor(opts.limit) : 0;
+
+  // 快路径：UI「只看统计」（无 limit、无 songIds 点名）→ 走 SQL COUNT，不拉明细。
+  if (capRaw <= 0 && !wanted) {
+    const s = countLibraryPlanStats(cfg);
+    return {
+      total: s.total,
+      attempted: s.attempted,
+      pending: s.pending,
+      cooled: s.cooled,
+      willEnqueue: 0,
+      truncated: false,
+      items: [],
+    };
+  }
+
+  const all = collectLibrarySongs();
+  const total = all.length;
+
   // 冷却过滤（产品定调 2026-10-10，对齐洗版）：失败尝试 N 天内不再自动选中；
   // 成功的歌已迁移成本地行（path l:）天然不进 pool；显式 songIds 点名绕过冷却（用户重试语义）。
   const cooldownDays = Math.min(365, Math.max(1, Math.floor(cfg.libraryCooldownDays > 0 ? cfg.libraryCooldownDays : 30)));
@@ -184,8 +248,6 @@ export function buildLibraryPlan(
   });
   const attemptedCount = all.reduce((n, r) => n + (attemptedAt.has(r.songId) ? 1 : 0), 0);
 
-  const capRaw =
-    typeof opts?.limit === "number" && Number.isFinite(opts.limit) ? Math.floor(opts.limit) : 0;
   const items = capRaw > 0 ? pool.slice(0, capRaw) : [];
   return {
     total,

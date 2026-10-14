@@ -454,9 +454,13 @@ export function registerFetch(app: Hono): void {
     const sourceIds = resolveUpgradeSourceIds(c.req.query("sourceId"));
     const limitRaw = Number(c.req.query("limit"));
     const offsetRaw = Number(c.req.query("offset"));
+    const hasLimit = Number.isFinite(limitRaw) && limitRaw > 0;
     const plan = buildUpgradePlan(sourceIds, cfg, {
-      ...(Number.isFinite(limitRaw) && limitRaw > 0 ? { limit: Math.floor(limitRaw) } : {}),
+      ...(hasLimit ? { limit: Math.floor(limitRaw) } : {}),
       ...(Number.isFinite(offsetRaw) && offsetRaw > 0 ? { offset: Math.floor(offsetRaw) } : {}),
+      // UI 只读统计（洗版预览已下线）→ 未带 limit 时走 COUNT 快路径，
+      // 不把目标目录全部行 materialize 成 JS 对象（同步 SQLite 会阻塞整个事件循环）。
+      ...(hasLimit ? {} : { statsOnly: true }),
     });
     return c.json({
       success: true,

@@ -44,9 +44,9 @@
             <div class="title">{{ t('settings.proxyEnable.title') }}</div>
             <div class="desc">{{ t('settings.proxyEnable.desc') }}</div>
           </div>
-          <div class="setting-value"><el-switch v-model="proxyEnabled" /></div>
+          <div class="setting-value"><el-switch v-model="proxyEnabled" :loading="proxySaving" @change="onProxyToggle" /></div>
         </div>
-        <div v-if="proxyEnabled" class="setting-item">
+        <div class="setting-item">
           <div class="setting-label"><div class="title">{{ t('settings.proxyUrl.title') }}</div><div class="desc">{{ t('settings.proxyUrl.desc') }}</div></div>
           <div class="setting-value proxy-actions">
             <el-input v-model="proxyUrl" :placeholder="t('settings.proxyPlaceholder')" class="proxy-input" clearable />
@@ -210,6 +210,26 @@ async function loadProxy() {
     proxyEnabled.value = !!res.data.enabled;
     proxyUrl.value = res.data.url || "";
   } catch { /* 静默 */ }
+}
+
+// 开关切换**即时落盘**：后端 setSetting 写库即刷新缓存，无需等「保存」按钮。
+// 关闭时同样立即生效（此前 v-model 无 @change + 保存按钮被 v-if 一起藏掉 → 关不掉）。
+async function onProxyToggle(val: string | number | boolean) {
+  const next = Boolean(val);
+  const prev = !next;
+  proxySaving.value = true;
+  try {
+    const res = await api.put("/rest/api/v1/proxy", { enabled: next, url: proxyUrl.value });
+    // 以服务端返回为准回写（enabled 且 url 非法时后端 400，不会走到这里）。
+    if (res.data && typeof res.data.enabled === "boolean") proxyEnabled.value = res.data.enabled;
+    if (typeof res.data?.url === "string") proxyUrl.value = res.data.url;
+    ElMessage.success(t("settings.saved"));
+  } catch (e: any) {
+    proxyEnabled.value = prev; // 失败回滚，避免界面与后端状态不一致
+    ElMessage.error(apiErrorText(e, t("settings.saveFailed")));
+  } finally {
+    proxySaving.value = false;
+  }
 }
 
 async function saveProxy() {

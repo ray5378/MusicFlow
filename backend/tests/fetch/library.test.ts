@@ -16,7 +16,7 @@ import "../plugins/_env.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { db } from "../../src/db/index.js";
+import { db, sqlite } from "../../src/db/index.js";
 import { songs } from "../../src/db/schema.js";
 import { resolveFetchConfig } from "../../src/services/fetch/config.js";
 import {
@@ -135,6 +135,57 @@ describe("buildLibraryPlan — attempted 排除与 pending 推进", () => {
     const plan = buildLibraryPlan(resolveFetchConfig(), { limit: 10, songIds: ["c2", "c3"] });
     expect(plan.items.map((i) => i.songId).sort()).toEqual(["c2", "c3"]);
     expect(plan.pending).toBe(2);
+  });
+});
+
+// ==================== 2b) 统计快路径（SQL COUNT）与明细口径必须等价 ====================
+// UI「只读统计」走 limit=0 → 命中 countLibraryPlanStats 快路径。这里锁死它与明细路径的四项统计一致，
+// 防止今后改动让两条路径悄悄分叉（快路径省掉全库 materialize，是下载页不卡加载的关键）。
+
+describe("buildLibraryPlan — limit=0 快路径与明细路径统计等价", () => {
+  it("四项统计完全一致，且绝对口径正确", () => {
+    seedSong({ id: "q1", path: "web:q:1", type: "web" });
+    seedSong({ id: "q2", path: "web:q:2", type: "web" });
+    seedSong({ id: "q3", path: "web:q:3", type: "web" });
+    // 迁移成 l: / w: 的行不进池
+    seedSong({ id: "q-local", path: "l:src-a:/dl/a.mp3", type: "local" });
+    seedSong({ id: "q-webdav", path: "w:src-b:/b.flac", type: "local" });
+    recordLibraryAttempts("batch-q", ["q1"]);
+
+    const fast = buildLibraryPlan(resolveFetchConfig(), { limit: 0 });
+    const slow = buildLibraryPlan(resolveFetchConfig(), { limit: 10 });
+
+    expect(fast.items).toEqual([]);
+    expect(fast.total).toBe(slow.total);
+    expect(fast.attempted).toBe(slow.attempted);
+    expect(fast.cooled).toBe(slow.cooled);
+    expect(fast.pending).toBe(slow.pending);
+    // 池 = 3（l:/w: 排除）；1 首在冷却期内 → attempted=1、cooled=1、pending=2
+    expect(fast.total).toBe(3);
+    expect(fast.attempted).toBe(1);
+    expect(fast.cooled).toBe(1);
+    expect(fast.pending).toBe(2);
+  });
+
+  it("冷却窗口外只计 attempted、不计 cooled", () => {
+    seedSong({ id: "q-old", path: "web:q:old", type: "web" });
+    seedSong({ id: "q-new", path: "web:q:new", type: "web" });
+    recordLibraryAttempts("b-old", ["q-old"]);
+    recordLibraryAttempts("b-new", ["q-new"]);
+    sqlite
+      .prepare("UPDATE fetch_library_attempts SET attempted_at = ? WHERE song_id = 'q-old'")
+      .run(new Date(Date.now() - 400 * 86_400_000).toISOString());
+
+    const fast = buildLibraryPlan(resolveFetchConfig(), { limit: 0 });
+    const slow = buildLibraryPlan(resolveFetchConfig(), { limit: 10 });
+
+    // 400 天前远超冷却窗口（默认 30 天）→ 只有 q-new 仍冷却
+    expect(fast.cooled).toBe(1);
+    expect(fast.cooled).toBe(slow.cooled);
+    expect(fast.attempted).toBe(2);
+    expect(fast.attempted).toBe(slow.attempted);
+    expect(fast.pending).toBe(1);
+    expect(fast.pending).toBe(slow.pending);
   });
 });
 

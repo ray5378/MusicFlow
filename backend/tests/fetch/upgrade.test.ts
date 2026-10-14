@@ -728,6 +728,64 @@ describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
   });
 });
 
+// ==================== 6) 统计快路径（statsOnly） ====================
+// GET /v1/fetch/upgrade/plan 不带 limit 时走 statsOnly → countUpgradePlanStats 快路径，
+// 省掉目标目录全量 materialize。这里锁死它「不带明细、四项统计与明细路径一致」。
+
+describe("buildUpgradePlan — statsOnly 快路径与明细口径等价", () => {
+  const cfg = () => resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
+  const wipe = () => {
+    sqlite.prepare("DELETE FROM fetch_upgrade_attempts").run();
+    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:s-up:%'").run();
+  };
+  beforeEach(wipe);
+  afterEach(wipe);
+
+  it("只出统计、不带明细，四项与明细路径一致", () => {
+    seedSong({ id: "s-hi", path: "l:s-up:/dl/hi.flac", suffix: "flac", bitRate: 900, size: 22_500_000, duration: 200 });
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.wav", suffix: "wav", bitRate: 900, size: 22_500_000, duration: 200 });
+    // 其它源的行不该被 s-up 命中
+    seedSong({ id: "s-other", path: "l:s-other:/dl/x.mp3", suffix: "mp3", bitRate: 128, size: 3_200_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1"]);
+
+    const fast = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true });
+    const slow = buildUpgradePlan(["s-up"], cfg());
+
+    expect(fast.items).toEqual([]);
+    expect(fast.truncated).toBe(false);
+    expect(fast.sourceIds).toEqual(["s-up"]);
+    expect(fast.total).toBe(slow.total);
+    expect(fast.attempted).toBe(slow.attempted);
+    expect(fast.cooled).toBe(slow.cooled);
+    expect(fast.belowBar).toBe(slow.belowBar);
+    // s-up 命中 3 首（s-other 不算），其中 1 首在冷却期内
+    expect(fast.total).toBe(3);
+    expect(fast.attempted).toBe(1);
+    expect(fast.cooled).toBe(1);
+    expect(fast.belowBar).toBe(2);
+  });
+
+  it("冷却期外恢复：cooled 归零、belowBar 回到全量，attempted 仍记在册", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1"]);
+    sqlite
+      .prepare("UPDATE fetch_upgrade_attempts SET attempted_at = ? WHERE song_id = 's-lo1'")
+      .run(new Date(Date.now() - 31 * 86_400_000).toISOString());
+
+    const fast = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true });
+    expect(fast.cooled).toBe(0);
+    expect(fast.belowBar).toBe(1);
+    expect(fast.attempted).toBe(1);
+  });
+
+  it("songIds 点名时不吃快路径（保留点名重试语义、仍出明细）", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    const plan = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true, songIds: ["s-lo1"] });
+    expect(plan.items.map((i) => i.songId)).toEqual(["s-lo1"]);
+  });
+});
+
 // ==================== 自动续批（2026-10-12，对齐全库下载 libraryAutoContinue） ====================
 
 describe("buildUpgradePlan — attempted 统计（设置页「已尝试」口径）", () => {
