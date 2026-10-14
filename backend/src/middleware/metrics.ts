@@ -19,7 +19,7 @@
 // 纪律:未列出的路由一律用全局默认 —— 分级是"豁免已知的慢",不是"抬高全局底线"。
 import { createMiddleware } from "hono/factory";
 import { createLogger } from "../utils/logger.js";
-import { noteStreamActivity } from "../services/source/streamProbe.js";
+import { noteStreamActivity, percentileOf } from "../services/source/streamProbe.js";
 
 const log = createLogger("HTTP");
 
@@ -35,6 +35,85 @@ export const SLOW_MS = envMs("HTTP_SLOW_MS", 1000);
 export const SLOW_MS_COVER = envMs("HTTP_SLOW_MS_COVER", 5000);
 /** 音频出流预算(ms):必须大于出流侧的有界首字节等待(默认 6s),否则每次超时都告警。 */
 export const SLOW_MS_STREAM = envMs("HTTP_SLOW_MS_STREAM", 7000);
+
+// ==================== 首字节时延(TTFB)真实流量采样与 p95 告警(T03 / T21) ====================
+// 补的空白:此前只有**上游金丝雀探针**(streamProbe)在量「上游→服务端」一段,且它默认
+// 关闭、只在空闲时段跑;真实流量的服务端侧首字节分位一直没有落点。
+//   · 出流族(/rest/stream,T03):本中间件测的是「请求进入到响应可发」这段。出流路径
+//     的 serveFfmpegPipe 在回话前会**等 ffmpeg 首个输出字节**(启动裁决),故该值即
+//     「服务端侧端到端首字节」—— 客户端网络那段服务端量不到,只能到此为止。
+//   · 封面族(/rest/getCoverArt,T21):适应度函数为「封面时延 ≤2s」(测量源:服务端指标)。
+// 采样点复用既有中间件(不碰出流热路径),样本进环形缓冲;告警按 **p95 状态翻转**
+// (在阈值内 → 越线 / 越线 → 回落)打一条,而不是每个慢样本都打 —— 冷缓存下封面
+// 排队 1~3s 是既有水位,逐样本告警只会把真信号淹掉(与慢请求分级同一哲学)。
+// 样本数不足 TTFB_MIN_SAMPLES 时**不判定**:小样本的 p95 本身就是噪声。
+
+/** 封面首字节告警线(ms),默认取适应度函数上界 2s。 */
+export const COVER_TTFB_WARN_MS = envMs("HTTP_COVER_TTFB_WARN_MS", 2000);
+/** 出流首字节告警线(ms),默认沿用既有出流慢请求预算(7000)。 */
+export const STREAM_TTFB_WARN_MS = envMs("HTTP_STREAM_TTFB_WARN_MS", SLOW_MS_STREAM);
+/** TTFB 环形缓冲样本上限(两族各一份,内存有界)。 */
+const TTFB_SAMPLES_MAX = envMs("HTTP_TTFB_SAMPLES", 200);
+/** 低于该样本数不做 p95 判定(小样本分位不可信)。 */
+const TTFB_MIN_SAMPLES = envMs("HTTP_TTFB_MIN_SAMPLES", 20);
+
+interface TtfbTap {
+  samples: number[];
+  /** 上一次 p95 判定是否越线(状态翻转告警用)。 */
+  over: boolean;
+}
+
+const coverTtfb: TtfbTap = { samples: [], over: false };
+const streamTtfb: TtfbTap = { samples: [], over: false };
+
+export interface TtfbSnapshot {
+  samples: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  maxMs: number | null;
+  warnMs: number;
+  /** p95 当前是否越线(样本不足时沿用上一次判定)。 */
+  over: boolean;
+}
+
+/** 采样 + 评估告警线(只在状态翻转时打日志)。 */
+function noteTtfb(tap: TtfbTap, ms: number, warnMs: number, label: string): void {
+  tap.samples.push(ms);
+  while (tap.samples.length > TTFB_SAMPLES_MAX) tap.samples.shift();
+  if (tap.samples.length < TTFB_MIN_SAMPLES) return;
+  const p95 = percentileOf(tap.samples, 95);
+  if (p95 === null) return;
+  const over = p95 > warnMs;
+  if (over && !tap.over) {
+    log.warn(`${label}首字节 p95 越告警线`, { p95Ms: p95, warnMs, samples: tap.samples.length });
+  } else if (!over && tap.over) {
+    log.info(`${label}首字节 p95 回落至告警线内`, { p95Ms: p95, warnMs, samples: tap.samples.length });
+  }
+  tap.over = over;
+}
+
+/** 只给「真产出了媒体字节的成功响应」计时。
+ *  排除三类非首字节样本:Subsonic failed 信封(HTTP 200 + application/json)、
+ *  304 未改(无渲染)、499/中止。否则 ffmpeg 首字节失败(最长等 15s 才回错)与
+ *  各种错误信封会把 p95 顶起来,制造与在线播放无关的误告警。 */
+function isMediaResponse(res: Response): boolean {
+  if (res.status !== 200) return false;
+  const ct = res.headers.get("content-type") || "";
+  return ct.length > 0 && !ct.includes("json");
+}
+
+/** 切片一份快照(供 GET /v1/admin/metrics 展示;含内部样本时不返回数组本体)。 */
+function ttfbSnapshot(tap: TtfbTap, warnMs: number): TtfbSnapshot {
+  const v = tap.samples;
+  return {
+    samples: v.length,
+    p50Ms: percentileOf(v, 50),
+    p95Ms: percentileOf(v, 95),
+    maxMs: v.length ? Math.max(...v) : null,
+    warnMs,
+    over: tap.over,
+  };
+}
 
 /**
  * 路由 → 预算覆盖表。key 与调用计数的 key 同一命名空间("METHOD 路由模板")。
@@ -74,6 +153,12 @@ export function slowThresholdMs(method: string, route: string): number {
   return SLOW_MS_BY_ROUTE[`${method} ${route}`] ?? SLOW_MS;
 }
 
+/** 封面族请求判定(**路由模板级**)。模板要等 next() 跑完才定型,故只能在此处判、
+ *  用于 TTFB 采样;出流族另有入口级的 isStreamRequest(见上)。 */
+function isCoverRoute(route: string): boolean {
+  return route.includes("/getCoverArt");
+}
+
 /**
  * 由请求头推导慢请求的调用方标识(纯函数,便于单测):
  * x-mf-client-id(客户端/网页端自报的实例 ID)优先,回落 UA 片段,都没有给 "-"。
@@ -99,6 +184,8 @@ export interface RequestMetrics {
   slowCount: number;
   /** 端点调用计数(Method + 路由模板)。 */
   byEndpoint: Record<string, number>;
+  /** 真实流量首字节时延分位(T03 出流 / T21 封面)。 */
+  ttfb: { cover: TtfbSnapshot; stream: TtfbSnapshot };
 }
 
 /** 慢请求 + 端点计数中间件。在 index.ts 挂 app.use("*")。 */
@@ -106,13 +193,19 @@ export const metricsMiddleware = createMiddleware(async (c, next) => {
   const start = Date.now();
   // 出流族请求 = 用户正在起播/切歌:进请求就登记给探针避让闸(让它安静 QUIET_MS)。
   // 必须用 URL 路径判(路由模板此刻还没定型),且不能动下方计数用的 route。
-  if (isStreamRequest(c.req.url)) noteStreamActivity();
+  const streamReq = isStreamRequest(c.req.url);
+  if (streamReq) noteStreamActivity();
   await next();
   const ms = Date.now() - start;
   total++;
   const route = c.req.routePath || new URL(c.req.url).pathname; // 路由模板,防动态路径无界
   const key = `${c.req.method} ${route}`;
   counter.set(key, (counter.get(key) || 0) + 1);
+  // T03/T21:把真实流量的首字节时延采下来(出流用入口级标志,封面用路由模板);
+  // 仅计「真产出媒体字节」的 200 —— 失败信封/304/中止不算首字节时延。
+  const media = isMediaResponse(c.res);
+  if (streamReq && media) noteTtfb(streamTtfb, ms, STREAM_TTFB_WARN_MS, "出流");
+  if (isCoverRoute(route) && media) noteTtfb(coverTtfb, ms, COVER_TTFB_WARN_MS, "封面");
   const budget = slowThresholdMs(c.req.method, route);
   if (ms >= budget) {
     slowCount++;
@@ -130,5 +223,13 @@ export const metricsMiddleware = createMiddleware(async (c, next) => {
 export function getRequestMetrics(): RequestMetrics {
   const byEndpoint: Record<string, number> = {};
   for (const [k, v] of counter) byEndpoint[k] = v;
-  return { total, slowCount, byEndpoint };
+  return {
+    total,
+    slowCount,
+    byEndpoint,
+    ttfb: {
+      cover: ttfbSnapshot(coverTtfb, COVER_TTFB_WARN_MS),
+      stream: ttfbSnapshot(streamTtfb, STREAM_TTFB_WARN_MS),
+    },
+  };
 }

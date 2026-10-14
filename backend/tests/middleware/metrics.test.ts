@@ -7,7 +7,11 @@
 //   ② `c.req.routePath` 为空时的兜底(未命中任何路由 → 404 时 routePath 是空串),
 //      必须回落到 `new URL(c.req.url).pathname`,否则这些请求会共用一个空 key;
 //   ③ **按路由分级预算**(2026-10-12 起):封面走封面档、音频流走流档、其余走全局
-//      默认;日志必须带上"预算"与"调用方",否则下次噪音复现时又无从下手。
+//      默认;日志必须带上"预算"与"调用方",否则下次噪音复现时又无从下手;
+//   ④ **真实流量首字节(TTFB)采样 + p95 告警**(2026-10-15 T03/T21 起):出流族与
+//      封面族各留一份环形样本,p95 只在**状态翻转**时打一条(样本不足不判定)。
+//      注意本文件 `sequence.shuffle: true` —— 断言必须对用例顺序免疫:tap 是模块级
+//      状态,故这里的断言一律写成"相对/至少"形式,不假设它是本用例独占的。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // 慢请求日志的入参断言需要观察 log.warn;vi.mock 工厂会被提升,故用 vi.hoisted 承载 spy。
@@ -30,6 +34,8 @@ import {
   SLOW_MS,
   SLOW_MS_COVER,
   SLOW_MS_STREAM,
+  COVER_TTFB_WARN_MS,
+  STREAM_TTFB_WARN_MS,
 } from "../../src/middleware/metrics.js";
 
 beforeEach(() => {
@@ -266,5 +272,87 @@ describe("慢请求阈值分级(A: 按路由豁免降噪)", () => {
     expect(clientTag("", "")).toBe("-");
     expect(clientTag("x".repeat(100), undefined)).toHaveLength(40);
     expect(clientTag(undefined, "y".repeat(100))).toBe("ua:" + "y".repeat(40));
+  });
+});
+
+describe("真实流量首字节采样与 p95 告警(T03 出流 / T21 封面)", () => {
+  it("告警线默认值:封面取适应度函数上界 2s、出流沿用出流慢预算", () => {
+    expect(COVER_TTFB_WARN_MS).toBe(2000);
+    expect(STREAM_TTFB_WARN_MS).toBe(SLOW_MS_STREAM);
+  });
+
+  it("快照始终带两族字段,空样本时分为 null(不假装有数据)", () => {
+    const snap = getRequestMetrics().ttfb;
+    expect(snap.cover.warnMs).toBe(COVER_TTFB_WARN_MS);
+    expect(snap.stream.warnMs).toBe(STREAM_TTFB_WARN_MS);
+    expect(typeof snap.cover.samples).toBe("number");
+    expect(typeof snap.stream.samples).toBe("number");
+    if (snap.cover.samples === 0) {
+      expect(snap.cover.p50Ms).toBeNull();
+      expect(snap.cover.maxMs).toBeNull();
+    }
+  });
+
+  it("封面族:样本攒到判定阈值后,p95 越 2s 线,且只在翻转时打一条告警", async () => {
+    let t = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => t);
+
+    const app = new Hono();
+    app.use("*", metricsMiddleware);
+    app.get("/rest/getCoverArt", (c) => {
+      t += 3000; // 冷缓存并发渲染的典型水位,越过 2s 适应度上界但不越 5s 慢预算
+      // 必须是"真产出媒体字节"的响应才计时(JSON 信封会被排除,见下一条用例)。
+      return c.body("JPEGDATA", 200, { "content-type": "image/jpeg" });
+    });
+
+    for (let i = 0; i < 20; i++) await app.request("/rest/getCoverArt");
+
+    const snap = getRequestMetrics().ttfb.cover;
+    expect(snap.samples).toBeGreaterThanOrEqual(20);
+    expect(snap.p95Ms).toBe(3000);
+    expect(snap.maxMs).toBeGreaterThanOrEqual(3000);
+    expect(snap.over).toBe(true);
+    // 逐样本刷屏是设计上要避免的:同一水位只留一条翻转告警。
+    const alerts = H.warn.mock.calls.filter((c) => (c[1] as any)?.p95Ms === 3000);
+    expect(alerts.length).toBe(1);
+    expect(String(alerts[0][0])).toContain("封面");
+  });
+
+  it("出流族:真实请求被采进快照,p95 有值且默认(3s)不越 7s 线", async () => {
+    let t = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => t);
+
+    const app = new Hono();
+    app.use("*", metricsMiddleware);
+    app.get("/rest/stream", (c) => {
+      t += 3000;
+      return c.body("AUDIO", 200, { "content-type": "audio/mpeg" });
+    });
+
+    const before = getRequestMetrics().ttfb.stream;
+    await app.request("/rest/stream");
+    const after = getRequestMetrics().ttfb.stream;
+
+    expect(after.samples).toBe(before.samples + 1);
+    expect(after.maxMs).toBeGreaterThanOrEqual(3000);
+    expect(after.p50Ms).toBeGreaterThan(0);
+    expect(after.over).toBe(false);
+  });
+
+  it("失败信封(HTTP 200 + application/json)不计入 TTFB —— 否则启动失败会把 p95 顶高", async () => {
+    let t = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => t);
+
+    const app = new Hono();
+    app.use("*", metricsMiddleware);
+    // 出流路径启动失败(ffmpeg 首字节超时,最长等 15s)回的就是这种 200 + JSON 信封。
+    app.get("/rest/stream", (c) => {
+      t += 15000;
+      return c.json({ "subsonic-response": { status: "failed" } });
+    });
+
+    const before = getRequestMetrics().ttfb.stream.samples;
+    await app.request("/rest/stream");
+    expect(getRequestMetrics().ttfb.stream.samples).toBe(before);
   });
 });
