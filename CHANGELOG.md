@@ -2,6 +2,28 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.16] - 2026-10-15
+
+### Refactor
+
+- **删除 `proxyFetch` 的 per-request `proxy` 覆盖开关（未完成事项 T02）**：`services/proxy.ts` 的 `ProxyFetchInit.proxy`（true 强制走代理 / false 强制直连）在全仓三个调用方（插件市场拉取、插件沙箱 `host.http`、插件发现）**均未传参**，属零调用点的悬空 API。本次整体删除该类型与三态判定，`proxyFetch(url, init?: RequestInit)` 只按**系统设置**决定走代理或直连，对外语义不变；同步把 `tests/services/proxyDispatcher.test.ts` 的三态用例改为「系统设置两态」覆盖（开启转发 / 关闭直连 / 地址非法降级直连 / 同地址复用 agent / FIFO 淘汰并 close），并更正 `docs/sandbox-limits-and-plan.md` D2 的过时描述。
+
+### Feat
+
+- **HTTP 指标补「真实流量首字节时延」（未完成事项 T03 + T21）**：`middleware/metrics.ts` 新增出流族与封面族的 TTFB 采样与 p95 告警，补齐此前只有「上游→服务端」金丝雀探针（`streamProbe`，只量上游网络那一段）的空白。
+  - 出流族 `/rest/stream`（T03）：中间件量的是「请求进入 → 响应可发」，而出流路径 `serveFfmpegPipe` 在回话前会等 ffmpeg 首个输出字节（启动裁决），故该值即**服务端侧端到端首字节**（客户端网络那段服务端量不到，只能到此为止）。
+  - 封面族 `/rest/getCoverArt`（T21）：适应度函数「封面时延 ≤2s」此前无落点，现按该上界判定（env `HTTP_COVER_TTFB_WARN_MS`，默认 2000）。
+  - 两族各留一份环形样本（env `HTTP_TTFB_SAMPLES`，默认 200），快照 `ttfb.cover / ttfb.stream`（样本数 / p50 / p95 / max / 告警线 / 是否越线）随 `GET /v1/admin/metrics` 一并暴露；告警按 **p95 状态翻转**只在越线、回落各打一条（冷缓存下封面排队 1~3s 是既有水位，逐样本告警只会把真信号淹掉），样本数不足（`HTTP_TTFB_MIN_SAMPLES`，默认 20）不判定。
+  - 只对**真产出媒体字节的 200** 计时：Subsonic failed 信封（HTTP 200 + `application/json`）、304 未改、499/中止一律排除 —— 否则 ffmpeg 首字节失败（最长等 15s 才回错）会把 p95 顶起来，制造与在线播放无关的误告警。
+  - 采样点复用既有中间件，**不碰出流热路径**（出流响应体仍是原来的 `PassThrough` 直通）。
+
+### Internal
+
+- **T04（第三方 `bonjour-service` 日志噪声）复核结论：不改代码，记为已知可接受噪声**。噪声源是第三方库的名称冲突探测（`registry.js:32`），仅在测试进程收尾的**迟到 console 输出**上触发；生产侧不改，测试侧已由 `backend/vitest.config.ts` 的 `disableConsoleIntercept`（仅 Sendspin Guard 作业置位）从结构上消除竞态。升级 / 替换该依赖风险高于收益（mDNS 发布是 AirPlay / Sendspin 发现的核心链路），故整体不做，理由见本轮报告。
+- 验证方式：本轮执行环境无 Node 工具链（node / npm 均不在 PATH，本机未安装），本地**无法执行** `npx tsc --noEmit` 与 `npx vitest run`；改动由 CI 全量门禁把关（`ci.yml` / `build.yml` 的「类型检查 + 全量测试」），且 `build.yml` 在测试失败时自动回滚 :latest/:version 并删除刚建的 Release（发版自愈）。
+- 新增 / 改写用例覆盖：`tests/middleware/metrics.test.ts` 的「TTFB 告警线默认值」「快照空样本为 null」「封面 p95 越线只告警一次」「出流采样入快照」「失败信封不计入」；`tests/services/proxyDispatcher.test.ts` 的「系统设置两态」。
+- 因构建主机网络故障，本轮 GitHub 推送仍由本地经 `musicflow` 远端直连完成（偏离「经 230 中转」约定，如实记录）。按既定约定本轮**不部署生产 240**。
+
 ## [4.6.15] - 2026-10-14
 
 ### Perf
