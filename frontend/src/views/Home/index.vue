@@ -139,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onDeactivated } from "vue";
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import api, { formatApiError } from "@/api";
