@@ -12,11 +12,15 @@
 ### Fix
 
 - **延后恢复窗口的重复起批风险（复查发现）**：`collectInterruptedFetchJobIds()` 取的是**所有** pending/running 行，而 `startFetchJob()` 注册 AbortController 时**不检查是否已在跑**。原逻辑下 resume 在启动瞬间同步执行（此时尚无任何新任务，安全）；延后 60s 后窗口内其它调度器可能已起了新任务（如 `upgradeScheduler` 的 boot tick 在 15s 恢复洗版链），这些行会被误判为「中断任务」再 `startFetchJob` 一次 —— 同一个 job 被两个批次循环并行推进，并残留两个 AbortController（取消时只 abort 后一个）。现于恢复时跳过本进程已在推进的 job id（`controllers.has(id)` 判定，controller 在 job 终态的 finally 中移除）。
+- **首页「本地随机（按平台）」分区偶发卡死根治**：生产实测 `/rest/api/v1/local-recommend` 偶发耗时 **1579–21109ms**（budget 1000ms），最坏远超前端 axios 15s 超时 → 请求被 abort → 前端 `catch` 清空数据且**不再重试**，该分区永久空白直到整页刷新（另经生产日志确认 `/rest/api/v1/recommend` 从未进慢请求榜、插件拉取推荐歌单链路正常，故本次故障点不在该链路）。三处收口：(1) 后端为该路由各 provider 新增**在途调用单飞表**（`providerInvokeInflight` + `kickProviderInvoke`，冷启动竞速与 SWR 后台刷新共用同一张表），杜绝前端 8s 轮询与多客户端并发把同一慢 provider 反复并发外呼；(2) 冷启动（声明了 `recommendCacheTtlSeconds` 且无缓存）由「同步阻塞等待」改为 **2500ms 软截止竞速**，超时不阻塞、返回 `pending:true`，真值由后台同一条在途 promise 回填，provider 本轮失败亦置 `pending`（避免前端当成稳态空而停止重试）；(3) 前端 `Home` 本地随机纳入 **8s×≤6 次轮询自愈**（`pending` 或请求失败均重试，失败不再清空已渲染内容、保留 last-good），补 `onDeactivated/onActivated` 修正 keep-alive（`MainLayout` max=10）下 `onUnmounted` 不触发导致的定时器后台空跑与在途回填续期，并加请求防重入。
+- **下载 / 洗版任务「取消」语义修正，并新增「完全停止」**：原「取消」= 立即彻底终止整个任务流程，导致已在下载中与缓存中待转码的歌曲被硬停、目录落地不完整。现拆分两种语义：**取消** = 停止查找新歌曲、不开启新任务，但已在下载中/待转码的歌曲**完整走完**下载 → 转码 → 落地对应目录的全流程（排空式）；新增**完全停止** = 彻底终止整个任务流程（即原「取消」行为）。两个按钮均配置**二次确认弹窗**，完整说明确认后将产生的后果。
 
 ### Internal
 
 - 只动后端启动路径与 `entrypoint.sh`，不含前端；在 230 主线落地前完成本地门禁自检（`tsc --noEmit`、`sh -n entrypoint.sh`、定向 `vitest tests/fetch` 31 文件 / 540 用例全通过、diff 无 CR 行尾）。
+- 首页卡死修复与下载/洗版语义改造在 230 主线落地前完成本地门禁自检：backend `tsc --noEmit` 0 error；定向 `vitest`（`providerCache` / `recommendRoutesContract` / `chartLocalPlatRoute`）3 文件 54 用例、`tests/fetch` 域 35 文件 600 用例全通过（含新增「冷启动超软截止 → `pending:true`」回归用例）；frontend `vue-tsc --noEmit` 0 error、全部 `check-*.mjs` 守卫通过；diff 无 CR 行尾；并完成落地前后两轮独立审查。
 - 宿主资源超卖、容器内单点 DNS 与候选源 15s 超时兜底属外部/后续评估项，不在本版范围；按约定不在本版部署生产环境。
+- 已识别但**本版不落地**的残留项：内置 `local-random-recommend` 未声明 `recommendCacheTtlSeconds`，其候选池 `getPool()` 冷时仍走**同步** `buildPool`，而 `setTimeout` 软截止无法抢占同步阻塞；根治需把 `invalidatePlatformPool()` 由「置 null」改为「置脏标记 + 后台重建」（会改变「导入后立即可见」的既有 QA 语义，待评审后另行处理）。
 
 ## [4.6.19] - 2026-10-15
 
