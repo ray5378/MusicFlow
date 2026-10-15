@@ -67,21 +67,23 @@ function readAggCacheDb(cacheKey: string): { ts: number; channels: any[] } | nul
   }
 }
 
-/** write-through:内存为主,同时落 DB;顺手清理超龄旧 key(换插件集后旧 key 不再命中)。 */
+/** write-through:内存为主,同时落 DB;顺手清理超龄旧 key(换插件集后旧 key 不再命中)。
+ *  走 shared.sqlite(全仓 DB 访问的统一注入点,测试在此替换为假库)。
+ *  列名必须是 settings 表的真实列 `updated_at` —— 写成 drizzle 属性名 updatedAt 会在
+ *  prepare 阶段抛 no such column,被下方 catch 静默吞掉,表现为「看似落库成功、
+ *  实则从未写入」(2026-10-15 复查发现的缺陷)。 */
 function writeAggCache(cacheKey: string, entry: { ts: number; channels: any[] }): void {
   recommendCache.set(cacheKey, entry);
   try {
-    const nowIso = new Date().toISOString();
     sqlite
       .prepare(
-        `INSERT INTO settings(key, value, updatedAt) VALUES(?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
+        `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
-      .run(AGG_CACHE_PREFIX + cacheKey, JSON.stringify(entry), nowIso);
+      .run(AGG_CACHE_PREFIX + cacheKey, JSON.stringify(entry), new Date().toISOString());
+    // 超龄行清理:updated_at 为 ISO 串(字典序即时间序)。
     sqlite
-      .prepare(
-        `DELETE FROM settings WHERE key LIKE ? AND updatedAt != '' AND updatedAt < ?`,
-      )
+      .prepare(`DELETE FROM settings WHERE key LIKE ? AND updated_at < ?`)
       .run(AGG_CACHE_PREFIX + "%", new Date(Date.now() - AGG_CACHE_MAX_AGE_MS).toISOString());
   } catch (e: any) {
     console.warn("[RECOMMEND] 聚合缓存落库失败:", e?.message || e);

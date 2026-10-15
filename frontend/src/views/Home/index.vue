@@ -365,13 +365,15 @@ async function loadHomeConfig() {
 }
 
 // 平台精选冷启动轮询:后端无缓存时立即返回空频道 + pending:true(不再阻塞),
-// 后台 single-flight 拉取。前端每 8s 重试一次(≤12 次 ≈96s,覆盖最慢聚合),
-// 数据到位自动填充;轮询期间模板显示占位提示(recommendPending)。
+// 后台 single-flight 拉取。前端每 8s 重试一次(≤18 次 ≈144s,与改造前的 150s 超时
+// 窗口对齐,避免上游聚合偏慢时内容永不出现),数据到位自动填充;轮询期间模板显示
+// 占位提示(recommendPending)。重试耗尽仍无内容 → 置 recommendError 给出诊断提示
+// (改造前后端会因 15s/150s 超时进入 catch 显示该提示,不能让这条路径静默消失)。
 const recommendPending = ref(false);
 let recommendRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let recommendRetryCount = 0;
 const RECOMMEND_RETRY_MS = 8000;
-const RECOMMEND_RETRY_MAX = 12;
+const RECOMMEND_RETRY_MAX = 18;
 
 async function loadRecommend() {
   try {
@@ -388,7 +390,9 @@ async function loadRecommend() {
         if (recommendRetryTimer) clearTimeout(recommendRetryTimer);
         recommendRetryTimer = setTimeout(loadRecommend, RECOMMEND_RETRY_MS);
       } else {
-        recommendPending.value = false; // 超过重试上限:停止轮询,静默保留空态
+        // 重试耗尽仍无内容:停止轮询,并给出诊断提示(而非静默留空区块)。
+        recommendPending.value = false;
+        recommendError.value = true;
       }
     } else {
       recommendRetryCount = 0;

@@ -2,6 +2,14 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.18] - 2026-10-15
+
+### Fix
+
+- **修正 v4.6.17 聚合缓存落库的静默失效（复查发现）**：`routes/api/recommend.ts` 的 write-through 裸 SQL 把列名写成 drizzle 属性名 `updatedAt`，而 `settings` 表的真实列名是 `updated_at`（见 `services/settings.ts`）——INSERT 在 `prepare` 阶段即抛 `no such column`，被同一 `try/catch` 吞掉，表现为「看似落库成功、实则从未写入」，**v4.6.17 的「重启后不再冷」实际未生效**（冷启动非阻塞、单飞、池 SWR 三项不受影响）。现已改用正确列名并加注释警示；同批清理语句同步修正。
+- **恢复冷启动失败后的前端诊断提示**：v4.6.17 起冷启动不再阻塞，前端轮询上限（12×8s≈96s）耗尽即静默留空，丢掉了改造前 150s 超时会给出的「请检查 go-music-dl 插件…」提示。现将上限提至 18 次（≈144s，与旧 150s 超时窗口对齐），耗尽仍无内容时置 `recommendError` 给出提示。
+- 复查其余改动（三态路由语义、single-flight + 60s 退避、池 SWR、测试 mock 缝适配）未发现新问题；`/v1/recommend/refresh` 不写聚合缓存，无需同步退避表。
+
 ## [4.6.17] - 2026-10-15
 
 ### Perf
