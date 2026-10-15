@@ -4,7 +4,9 @@
 //   - 配置读写（GET/PUT /v1/fetch/config）：覆盖项落 settings 表 `fetch.config`（JSON 串）
 //   - 可用音源列表（GET /v1/fetch/sources）
 //   - 建任务（POST /v1/fetch/tasks）：登记 fetch_jobs 行 + 后台分片跑批量子进程
-//   - 任务查询/取消/重试（GET jobs / GET jobs/:id / POST cancel / POST retry）
+//   - 任务查询/取消/完全停止/重试（GET jobs / GET jobs/:id / POST cancel / POST force-stop / POST retry）
+//     · POST cancel      = 排空式取消（停止准入，在途 + 缓存待转码走完并落地）
+//     · POST force-stop  = 完全停止（硬终止，立刻中断在途下载与转码）
 //
 // 分片循环的关键：每一片都是一次**独立**的 runBatchJob（不在一片里循环所有片），
 // 这样每片结束即释放全局批量闸，不会把 scan/backfill/每日推荐堵住几十分钟。
@@ -16,7 +18,7 @@ import {
   apiErrorStatus,
   log,
 } from "./shared.js";
-import { startFetchJob, abortFetchJob } from "../../services/fetch/jobRunner.js";
+import { startFetchJob, abortFetchJob, drainFetchJob } from "../../services/fetch/jobRunner.js";
 import { setSetting } from "../../services/settings.js";
 import {
   FETCH_CONFIG_KEY,
@@ -54,9 +56,9 @@ import {
   createFetchJob,
   deleteFetchJobRow,
   getFetchJob,
-  listFetchJobs,
+  listFetchJobSummaries,
   updateFetchJobStatus,
-  type FetchJobRecord,
+  type FetchJobSummaryRecord,
 } from "../../services/fetch/jobStore.js";
 import { ensureBaseBatchLimit } from "../../services/plugin/batchPacer.js";
 import type { TaskStatus } from "../../services/fetch/types.js";
@@ -93,7 +95,7 @@ function normalizeTargets(input: unknown): FetchTarget[] {
 }
 
 /** 任务列表页需要的摘要（**不含 items**）。 */
-function summarize(job: FetchJobRecord): Record<string, unknown> {
+function summarize(job: FetchJobSummaryRecord): Record<string, unknown> {
   return {
     id: job.id,
     kind: job.kind,
@@ -278,7 +280,8 @@ export function registerFetch(app: Hono): void {
     if (status) opts.status = status;
     if (kinds.length > 0) opts.kinds = kinds;
     else if (kind) opts.kind = kind;
-    const jobs = listFetchJobs(opts);
+    // 列表页只取摘要列（不解析 items/targets/imports/config 大 JSON），显著降低列表接口同步开销。
+    const jobs = listFetchJobSummaries(opts);
     return c.json({ success: true, jobs: jobs.map(summarize) });
   });
 
@@ -314,7 +317,36 @@ export function registerFetch(app: Hono): void {
     else if (kind === "upgrade") setAutoSession("upgrade", false);
   }
 
-  // ---------------- 取消 ----------------
+  /**
+   * 取消 / 完全停止共用的收尾：把「停止函数」与「僵尸行兜底」收敛到一处。
+   *
+   * `stop` 返回 false 表示进程内没有该 job 的 controller（跑批循环是进程内的，服务重启即
+   * 消亡）——此时若行仍处 pending/running，就是重启遗留的僵尸行，直接落 cancelled 终态，
+   * 否则 UI 的取消/完全停止永远无效；僵尸行没有终态钩子，这里补清自动续批会话（停链）。
+   * `stop` 返回 true（有在跑 controller）：终态钩子（maybeContinue*Job）也会清会话，这里
+   * 兜底同清（幂等）。
+   */
+  function finishStop(
+    id: string,
+    kind: string,
+    status: TaskStatus,
+    stop: (jobId: string) => boolean,
+  ): Record<string, unknown> {
+    if (!stop(id)) {
+      if (status === "pending" || status === "running") {
+        updateFetchJobStatus(id, "cancelled", { error: "手动取消（无运行中的进程内任务）" });
+        stopAutoSessionForJob(kind);
+        return { success: true, cancelled: "zombie" };
+      }
+      return { success: true, message: "任务未在运行" };
+    }
+    stopAutoSessionForJob(kind);
+    return { success: true };
+  }
+
+  // ---------------- 取消（排空式停止） ----------------
+  // 停止准入新条目、不再开新片/新任务；在途下载与缓存中待转码的歌走完并落地；
+  // 未开始的条目落 cancelled；任务终态 cancelled；自动续批链终止。
   app.post("/v1/fetch/jobs/:id/cancel", adminMiddleware, (c) => {
     const id = c.req.param("id")!;
     const job = getFetchJob(id);
@@ -322,20 +354,19 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.NOT_FOUND;
       return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    if (!abortFetchJob(id)) {
-      // 无在跑 controller：可能是重启遗留的僵尸 running 行（或已终态）。
-      // 僵尸行直接落取消终态，否则 UI 的取消永远无效。
-      if (job.status === "pending" || job.status === "running") {
-        updateFetchJobStatus(id, "cancelled", { error: "手动取消（无运行中的进程内任务）" });
-        // 僵尸行没有终态钩子 → 这里补清续批会话（取消即停链）。
-        stopAutoSessionForJob(job.kind);
-        return c.json({ success: true, cancelled: "zombie" });
-      }
-      return c.json({ success: true, message: "任务未在运行" });
+    return c.json(finishStop(id, job.kind, job.status, drainFetchJob));
+  });
+
+  // ---------------- 完全停止（硬终止，等价于原 abort 行为） ----------------
+  // 立刻中断在途下载与转码（含排队中的）；30s 宽限后 SIGKILL；终态 cancelled。
+  app.post("/v1/fetch/jobs/:id/force-stop", adminMiddleware, (c) => {
+    const id = c.req.param("id")!;
+    const job = getFetchJob(id);
+    if (!job) {
+      const code = BusinessErrorCode.NOT_FOUND;
+      return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    // 在跑任务：终态钩子（maybeContinue*Job）也会清，这里兜底同清（幂等）。
-    stopAutoSessionForJob(job.kind);
-    return c.json({ success: true });
+    return c.json(finishStop(id, job.kind, job.status, abortFetchJob));
   });
 
   // ---------------- 删除 / 清空任务记录（只动终态任务） ----------------

@@ -39,6 +39,8 @@ heartbeat.unref?.();
 let jobId: string | null = null;
 let running = false;
 const abortController = new AbortController();
+// 排空信号：与 abortController **并列**（绝不复用）—— abort 硬停、drain 只停「开始新工作」。
+const drainController = new AbortController();
 
 process.on("message", async (raw: ParentToChildMessage) => {
   if (!raw || typeof raw !== "object") return;
@@ -48,6 +50,10 @@ process.on("message", async (raw: ParentToChildMessage) => {
   }
   if (raw.type === "abort") {
     abortController.abort();
+    return;
+  }
+  if (raw.type === "drain") {
+    drainController.abort();
     return;
   }
   if (raw.type !== "run" || running) return;
@@ -63,6 +69,7 @@ process.on("message", async (raw: ParentToChildMessage) => {
     const result = await handler(raw.args || {}, {
       onProgress: (payload) => send({ type: "progress", jobId: raw.jobId, payload }),
       signal: abortController.signal,
+      drainSignal: drainController.signal,
     });
     sendAndExit({ type: "result", jobId: raw.jobId, result: result ?? null, rss: process.memoryUsage().rss }, 0);
   } catch (e: any) {

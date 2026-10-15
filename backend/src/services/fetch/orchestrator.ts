@@ -237,6 +237,12 @@ export interface RunFetchPipelineOptions {
    */
   onItem?: (o: FetchItemOutcome) => void;
   signal?: AbortSignal;
+  /**
+   * 排空信号（drain）：「不再开始新工作、走完在途工作」用。**只**在准入处（runOne 拿到
+   * targetSem 闸位后）参与判定：未开始的条目直接落 cancelled；在途下载、缓存中待转码、
+   * flush 点名入库与洗版迁移/原件处置**一律只认硬 signal**，故会自然走完。
+   */
+  drainSignal?: AbortSignal;
   deps?: Partial<FetchDeps>;
   /** 覆盖成品落盘根（洗版用 /MUSIC/LOSSLESS）；同时决定 ensureDownloadSource 建哪个源。 */
   downloadRootOverride?: string;
@@ -612,6 +618,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
   const deps: FetchDeps = { ...DEFAULT_DEPS, ...(opts.deps ?? {}) };
   const signal = opts.signal;
+  const drainSignal = opts.drainSignal;
   // 洗版模式（config_json.__upgrade 必带 originalDisposal）：启用「假无损原地替换」分支。
   const upgradeMode = !!opts.originalDisposal;
 
@@ -821,7 +828,9 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         return;
       }
       try {
-        if (signal?.aborted) {
+        // 准入闸：拿到 targetSem 闸位即「将被开始」。硬 abort 或 drain 命中 → 直接
+        // cancelled（drain 未开始的条目不启动；已在途的条目此前已越过这道闸，不受影响）。
+        if (signal?.aborted || drainSignal?.aborted) {
           items[i] = cancelledOutcome(t, i);
           emitProgress(opts.onProgress, items[i]!, i, targets.length);
           return;

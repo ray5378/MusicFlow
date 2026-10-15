@@ -192,16 +192,8 @@ export function getFetchJob(id: string): FetchJobRecord | null {
   return row ? rowToRecord(row) : null;
 }
 
-/** 列出任务，默认按 created_at DESC（最新在前），默认最多 100 条。 */
-export function listFetchJobs(opts?: {
-  limit?: number;
-  status?: TaskStatus;
-  /** 精确匹配单个 kind。 */
-  kind?: string;
-  /** kind 白名单（IN 过滤）；与 `kind` 二选一，`kinds` 优先。前端「下载任务」面板用它一次拉全部非洗版 kind。 */
-  kinds?: string[];
-}): FetchJobRecord[] {
-  const limit = opts?.limit ?? 100;
+/** listFetchJobs / listFetchJobSummaries 共用的 WHERE 构造（kind(s) × status 组合过滤）。 */
+function buildJobsWhere(opts?: { status?: TaskStatus; kind?: string; kinds?: string[] }) {
   // 任务类型（kind）与状态可组合过滤：前端「下载任务 / 洗版任务」分栏就是靠 kind。
   // kind 取值：search（搜索导入）/ library（全库下载）/ upgrade（洗版）/ retry（重试）/ manual（历史行）。
   const kinds =
@@ -212,17 +204,90 @@ export function listFetchJobs(opts?: {
       : opts?.kind
         ? eq(fetchJobs.kind, opts.kind)
         : undefined;
-  const where =
-    opts?.status && kindCond
-      ? and(eq(fetchJobs.status, opts.status), kindCond)
-      : opts?.status
-        ? eq(fetchJobs.status, opts.status)
-        : kindCond;
+  return opts?.status && kindCond
+    ? and(eq(fetchJobs.status, opts.status), kindCond)
+    : opts?.status
+      ? eq(fetchJobs.status, opts.status)
+      : kindCond;
+}
+
+/** 列出任务，默认按 created_at DESC（最新在前），默认最多 100 条。 */
+export function listFetchJobs(opts?: {
+  limit?: number;
+  status?: TaskStatus;
+  /** 精确匹配单个 kind。 */
+  kind?: string;
+  /** kind 白名单（IN 过滤）；与 `kind` 二选一，`kinds` 优先。前端「下载任务」面板用它一次拉全部非洗版 kind。 */
+  kinds?: string[];
+}): FetchJobRecord[] {
+  const limit = opts?.limit ?? 100;
+  const where = buildJobsWhere(opts);
   const rows = (where ? db.select().from(fetchJobs).where(where) : db.select().from(fetchJobs))
     .orderBy(desc(fetchJobs.createdAt))
     .limit(limit)
     .all();
   return rows.map(rowToRecord);
+}
+
+/**
+ * 列表页摘要记录：**不含** items / targets / imports / config —— 列表页只用 counts + 元信息。
+ * items_json 实测可达数百 KB（一个全库批次 500 首的取链/探针明细），targets_json 同样不小；
+ * `listFetchJobs` 会把它们整列读出来 JSON.parse，白烧 CPU 且同步阻塞事件循环（better-sqlite3 同步执行）。
+ */
+export interface FetchJobSummaryRecord {
+  id: string;
+  kind: string;
+  status: TaskStatus;
+  sourceId: string | null;
+  counts: FetchJobCounts;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+}
+
+/**
+ * 列表页专用：与 `listFetchJobs` **同样的过滤 / 排序 / limit 语义**，但只 SELECT/解析 UI 需要的
+ * 列（含 counts_json），完全不碰 items / targets / imports / config 四个大 JSON 列。
+ * 列表接口（GET /v1/fetch/jobs）走这里，返回内容与路由层 `summarize` 逐字段一致。
+ */
+export function listFetchJobSummaries(opts?: {
+  limit?: number;
+  status?: TaskStatus;
+  kind?: string;
+  kinds?: string[];
+}): FetchJobSummaryRecord[] {
+  const limit = opts?.limit ?? 100;
+  const where = buildJobsWhere(opts);
+  const cols = {
+    id: fetchJobs.id,
+    kind: fetchJobs.kind,
+    status: fetchJobs.status,
+    sourceId: fetchJobs.sourceId,
+    countsJson: fetchJobs.countsJson,
+    error: fetchJobs.error,
+    createdAt: fetchJobs.createdAt,
+    startedAt: fetchJobs.startedAt,
+    finishedAt: fetchJobs.finishedAt,
+    updatedAt: fetchJobs.updatedAt,
+  };
+  const rows = (where ? db.select(cols).from(fetchJobs).where(where) : db.select(cols).from(fetchJobs))
+    .orderBy(desc(fetchJobs.createdAt))
+    .limit(limit)
+    .all();
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    status: r.status as TaskStatus,
+    sourceId: r.sourceId ?? null,
+    counts: readCounts(r.countsJson),
+    error: r.error ?? null,
+    createdAt: r.createdAt ?? "",
+    startedAt: r.startedAt ?? null,
+    finishedAt: r.finishedAt ?? null,
+    updatedAt: r.updatedAt ?? "",
+  }));
 }
 
 /**

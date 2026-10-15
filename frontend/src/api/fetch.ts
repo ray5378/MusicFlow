@@ -157,8 +157,14 @@ export async function getFetchJob(id: string): Promise<FetchJobDetail | null> {
   return (res.data?.job ?? null) as FetchJobDetail | null;
 }
 
-export async function cancelFetchJob(id: string): Promise<void> {
+/** 取消（排空式停止）：停止准入新条目，在途下载与缓存待转码的歌走完并落地，未开始条目落 cancelled。 */
+export async function drainJob(id: string): Promise<void> {
   await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/cancel`);
+}
+
+/** 完全停止（硬终止）：立刻中断在途下载与转码（含排队中的），未完成条目不落地。 */
+export async function forceStopJob(id: string): Promise<void> {
+  await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/force-stop`);
 }
 
 /** 删除单条任务记录（仅终态任务，运行中会被后端拒绝）。 */

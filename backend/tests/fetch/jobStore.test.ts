@@ -14,6 +14,7 @@ import {
   createFetchJob,
   deleteFetchJob,
   getFetchJob,
+  listFetchJobSummaries,
   listFetchJobs,
   pruneFetchJobs,
   saveFetchJobImports,
@@ -256,6 +257,35 @@ describe("listFetchJobs", () => {
     // 空数组 / 全空串 → 视作「不过滤」，不能把列表清空
     expect(listFetchJobs({ kinds: [] })).toHaveLength(5);
     expect(listFetchJobs({ kinds: ["", " "] })).toHaveLength(5);
+  });
+});
+
+// 列表接口专用摘要查询：语义必须与 listFetchJobs 逐字一致，但不解析 items/targets/imports/config。
+describe("listFetchJobSummaries", () => {
+  it("过滤 / 排序 / limit 与 listFetchJobs 一致，且只返回摘要字段", () => {
+    for (let i = 1; i <= 3; i++) {
+      createFetchJob({ id: `s-${i}`, kind: "library", targets: { n: i } });
+      stampCreatedAt(`s-${i}`, `2026-03-0${i}T00:00:00.000Z`);
+    }
+    updateFetchJobStatus("s-2", "done");
+    saveFetchJobItems("s-1", [item()]);
+
+    const full = listFetchJobs({ limit: 2, kinds: ["library"] });
+    const slim = listFetchJobSummaries({ limit: 2, kinds: ["library"] });
+    expect(slim.map((r) => r.id)).toEqual(full.map((r) => r.id));
+    expect(slim.map((r) => r.id)).toEqual(["s-3", "s-2"]);
+    expect(slim.map((r) => r.status)).toEqual(full.map((r) => r.status));
+    expect(slim[0].counts).toEqual(full[0].counts);
+
+    // 摘要不应带 items / targets / imports / config（列表页用不到，且这些列很大）
+    expect(slim[0]).not.toHaveProperty("items");
+    expect(slim[0]).not.toHaveProperty("targets");
+    expect(slim[0]).not.toHaveProperty("imports");
+    expect(slim[0]).not.toHaveProperty("config");
+
+    // kind 白名单 / status 组合过滤同样生效
+    expect(listFetchJobSummaries({ kinds: ["upgrade"] })).toHaveLength(0);
+    expect(listFetchJobSummaries({ kinds: ["library"], status: "done" }).map((r) => r.id)).toEqual(["s-2"]);
   });
 });
 

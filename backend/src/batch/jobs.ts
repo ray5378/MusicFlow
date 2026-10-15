@@ -46,6 +46,8 @@ export interface BatchJobContext {
   onProgress: (payload: any) => void;
   /** 主进程 abort(扫描停止)时触发。 */
   signal: AbortSignal;
+  /** 主进程 drain(排空式取消)时触发：不再开始新工作，但走完在途工作。 */
+  drainSignal?: AbortSignal;
 }
 
 export type BatchJobHandler = (args: Record<string, any>, ctx: BatchJobContext) => Promise<any>;
@@ -676,7 +678,9 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
       const anyFailed = c.failed > 0;
       const anyOk = c.done > 0 || c.skipped > 0;
       let status: TaskStatus;
-      if (ctx.signal.aborted) status = "cancelled";
+      // 排空式取消的终态必须是 cancelled：否则 maybeContinue*Job 会按 counts 续批复活新任务，
+      // 直接违背「不再开启新任务」。
+      if (ctx.signal.aborted || ctx.drainSignal?.aborted) status = "cancelled";
       else if (anyFailed && anyOk) status = "partial";
       else if (anyFailed) status = "failed";
       else status = "done";
@@ -690,6 +694,7 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     config: cfg,
     sourceId: sourceId || undefined,
     signal: ctx.signal,
+    drainSignal: ctx.drainSignal,
     downloadRootOverride,
     originalDisposal,
     migrateRowOnly,
@@ -740,7 +745,8 @@ async function fetchHandler(args: Record<string, any>, ctx: BatchJobContext): Pr
     let status: TaskStatus;
     const anyFailed = mergedCounts.failed > 0;
     const anyOk = mergedCounts.done > 0 || mergedCounts.skipped > 0;
-    if (ctx.signal.aborted) status = "cancelled";
+    // 排空式取消的终态必须是 cancelled（否则续批链会把任务复活，见上）。
+    if (ctx.signal.aborted || ctx.drainSignal?.aborted) status = "cancelled";
     else if (anyFailed && anyOk) status = "partial";
     else if (anyFailed) status = "failed";
     else status = "done";

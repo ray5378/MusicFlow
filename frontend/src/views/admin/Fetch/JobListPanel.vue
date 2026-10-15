@@ -19,6 +19,7 @@
           <el-option v-for="s in jobStatusOptions" :key="s" :label="statusText(s)" :value="s" />
         </el-select>
         <el-select v-model="limit" size="small" class="limit-select" @change="refresh">
+          <el-option label="10" :value="10" />
           <el-option label="20" :value="20" />
           <el-option label="50" :value="50" />
           <el-option label="100" :value="100" />
@@ -57,10 +58,11 @@
       <el-table-column :label="t('admin.fetch.jobs.colCreatedAt')" width="150">
         <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
       </el-table-column>
-      <el-table-column :label="t('admin.fetch.jobs.colActions')" width="160" fixed="right">
+      <el-table-column :label="t('admin.fetch.jobs.colActions')" width="250" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="openDetail(row)">{{ t('admin.fetch.jobs.view') }}</el-button>
-          <el-button v-if="isActiveStatus(row.status)" size="small" type="danger" plain @click="doCancel(row)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
+          <el-button v-if="isActiveStatus(row.status)" size="small" plain @click="doCancel(row)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
+          <el-button v-if="isActiveStatus(row.status)" size="small" type="danger" plain @click="doForceStop(row)">{{ t('admin.fetch.jobs.forceStop') }}</el-button>
           <el-button v-if="!isActiveStatus(row.status)" size="small" type="danger" plain @click="doDeleteJob(row)">{{ t('admin.fetch.jobs.delete') }}</el-button>
         </template>
       </el-table-column>
@@ -100,7 +102,8 @@
           <el-button size="small" type="warning" :disabled="!(detail.counts?.failed ?? 0)" @click="doRetryAll">
             <MfIcon name="RotateCcw" />{{ t('admin.fetch.jobs.retryAll') }}
           </el-button>
-          <el-button v-if="isActiveStatus(detail.status)" size="small" type="danger" plain @click="doCancel(detail)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
+          <el-button v-if="isActiveStatus(detail.status)" size="small" plain @click="doCancel(detail)">{{ t('admin.fetch.jobs.cancel') }}</el-button>
+          <el-button v-if="isActiveStatus(detail.status)" size="small" type="danger" plain @click="doForceStop(detail)">{{ t('admin.fetch.jobs.forceStop') }}</el-button>
         </div>
         <el-table v-if="detail.items && detail.items.length" :data="detail.items" stripe size="small" class="detail-table">
           <el-table-column :label="t('admin.fetch.jobs.detailColSong')" min-width="170">
@@ -161,7 +164,8 @@ import { apiErrorText } from "@/utils/apiError";
 import {
   listFetchJobs,
   getFetchJob,
-  cancelFetchJob,
+  drainJob,
+  forceStopJob,
   clearFetchJobs,
   deleteFetchJob,
   retryFetchJob,
@@ -205,7 +209,8 @@ const jobs = ref<FetchJobSummary[]>([]);
 const jobsLoading = ref(false);
 const jobsError = ref("");
 const statusFilter = ref("");
-const limit = ref(50);
+// 默认只显示最近 10 条历史；下拉可切 20/50/100 查看更多。
+const limit = ref(10);
 const jobStatusOptions = ["pending", "running", "done", "partial", "cancelled", "failed"];
 
 async function fetchJobList(): Promise<FetchJobSummary[]> {
@@ -216,17 +221,29 @@ async function fetchJobList(): Promise<FetchJobSummary[]> {
   });
 }
 
+// 单飞（single-flight）：挂载时的首次拉取、父组件切 tab / 新建任务后的 `refresh()` 可能在
+// 同一时刻被触发两次，这里让**参数相同**的并发调用复用同一个在途请求，避免重复打接口；
+// 参数不同（用户改了筛选/条数）的刷新各自独立，不会被合并吞掉。
+let inflight: { key: string; promise: Promise<void> } | null = null;
+
 async function refresh() {
+  const key = `${statusFilter.value}\u0000${limit.value}\u0000${props.kinds.join(",")}`;
+  if (inflight && inflight.key === key) return inflight.promise;
   jobsLoading.value = true;
   jobsError.value = "";
-  try {
-    jobs.value = await fetchJobList();
-    ensurePolling();
-  } catch (e: any) {
-    jobsError.value = apiErrorText(e, t("admin.fetch.jobs.loadFailed"));
-  } finally {
-    jobsLoading.value = false;
-  }
+  const promise = (async () => {
+    try {
+      jobs.value = await fetchJobList();
+      ensurePolling();
+    } catch (e: any) {
+      jobsError.value = apiErrorText(e, t("admin.fetch.jobs.loadFailed"));
+    } finally {
+      jobsLoading.value = false;
+      if (inflight?.key === key) inflight = null;
+    }
+  })();
+  inflight = { key, promise };
+  return promise;
 }
 
 // 进行中的任务每 2 秒轮询一次；全部结束/取消后自动停止。
@@ -321,18 +338,31 @@ async function doClearJobs() {
   }
 }
 
+// 二次确认弹窗文案：主句 + 后果清单（列表）两段结构，别糊成一坨。
+function confirmHtml(intro: string, items: string[]): string {
+  const lis = items.map((s) => `<li style="margin:2px 0;">${s}</li>`).join("");
+  return `<div><p style="margin:0 0 8px;">${intro}</p><ul style="margin:0;padding-left:18px;">${lis}</ul></div>`;
+}
+
+// 取消（排空式停止）：确认后把在途 + 缓存待转码的歌跑完并落地，未开始条目落取消。
 async function doCancel(job: any) {
   try {
     await ElMessageBox.confirm(
-      t("admin.fetch.jobs.cancelConfirm", { id: shortId(job.id) }),
+      confirmHtml(t("admin.fetch.jobs.cancelConfirm", { id: shortId(job.id) }), [
+        t("admin.fetch.jobs.cancelConsequence1"),
+        t("admin.fetch.jobs.cancelConsequence2"),
+        t("admin.fetch.jobs.cancelConsequence3"),
+        t("admin.fetch.jobs.cancelConsequence4"),
+        t("admin.fetch.jobs.cancelConsequence5"),
+      ]),
       t("admin.fetch.jobs.cancel"),
-      { type: "warning" },
+      { type: "warning", dangerouslyUseHTMLString: true },
     );
   } catch {
     return;
   }
   try {
-    await cancelFetchJob(job.id);
+    await drainJob(job.id);
     ElMessage.success(t("admin.fetch.jobs.cancelled"));
     await refresh();
     if (detailVisible.value && detailId.value === job.id && detail.value) {
@@ -341,6 +371,35 @@ async function doCancel(job: any) {
     }
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.cancelFailed")));
+  }
+}
+
+// 完全停止（硬终止）：确认后立刻中断在途下载与转码，未完成条目不落地。
+async function doForceStop(job: any) {
+  try {
+    await ElMessageBox.confirm(
+      confirmHtml(t("admin.fetch.jobs.forceStopConfirm", { id: shortId(job.id) }), [
+        t("admin.fetch.jobs.forceStopConsequence1"),
+        t("admin.fetch.jobs.forceStopConsequence2"),
+        t("admin.fetch.jobs.forceStopConsequence3"),
+        t("admin.fetch.jobs.forceStopConsequence4"),
+      ]),
+      t("admin.fetch.jobs.forceStop"),
+      { type: "error", dangerouslyUseHTMLString: true },
+    );
+  } catch {
+    return;
+  }
+  try {
+    await forceStopJob(job.id);
+    ElMessage.success(t("admin.fetch.jobs.forceStopRequested"));
+    await refresh();
+    if (detailVisible.value && detailId.value === job.id && detail.value) {
+      const d = await getFetchJob(job.id);
+      if (d) detail.value = d;
+    }
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.forceStopFailed")));
   }
 }
 

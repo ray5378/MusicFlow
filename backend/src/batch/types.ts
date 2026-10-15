@@ -7,9 +7,12 @@
 // 内存不再被批量任务拉高。
 //
 // 本文件定义任务契约与 IPC 协议(JSON 安全):
-//   父 → 子   run{jobId,kind,args} / abort{jobId} / pace{active}
+//   父 → 子   run{jobId,kind,args} / abort{jobId} / drain{jobId} / pace{active}
 //   子 → 父   ready / heartbeat / progress{jobId,payload} /
 //             result{jobId,result,rss} / error{jobId,error,sandboxCode,hint}
+//
+// drain 与 abort 是**两条并行通道**：abort = 硬停(立即弃掉在途工作)，drain = 排空
+// (不再开始新工作，但把已开始/已缓存的工作走完)。drain 绝不改写既有 abort 语义。
 //
 // 约束:
 //   - args 必须 JSON 可序列化(子进程从自己的注册表/DB 重建 provider/config/plugin)。
@@ -68,6 +71,7 @@ export interface BatchJobRequest {
 export type ParentToChildMessage =
   | { type: "run"; jobId: string; kind: BatchJobKind; args: Record<string, any> }
   | { type: "abort"; jobId: string }
+  | { type: "drain"; jobId: string }
   | { type: "pace"; active: boolean };
 
 /** 子 → 父 消息。 */

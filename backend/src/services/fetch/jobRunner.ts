@@ -7,7 +7,8 @@ import { runBatchJob } from "../../batch/runner.js";
 import { sleepBetweenBatch, ensureBaseBatchLimit } from "../plugin/batchPacer.js";
 import { createLogger } from "../../utils/logger.js";
 import { sqlite } from "../../db/index.js";
-import { getFetchJob, updateFetchJobStatus, collectInterruptedFetchJobIds } from "./jobStore.js";
+import { getFetchJob, updateFetchJobStatus, saveFetchJobItems, collectInterruptedFetchJobIds } from "./jobStore.js";
+import type { FetchJobItem } from "./jobStore.js";
 import { currentFetchConfig } from "./configStore.js";
 import { ensureWritableDir } from "./writable.js";
 import { buildLibraryContinuation, libraryBatchProgressed } from "./library.js";
@@ -17,8 +18,12 @@ import { enqueueTagRepairs } from "./tagRepair.js";
 
 const log = createLogger("fetch-runner");
 
-/** 运行中任务的 AbortController（jobId → controller），任务结束即移除。 */
-const controllers = new Map<string, AbortController>();
+/**
+ * 运行中任务的控制器（jobId → {hard, drain}），任务结束即移除。
+ * 两个 AbortController 并行：hard = 硬停（abortFetchJob，行为一字不改）；
+ * drain = 排空（drainFetchJob，只让子进程不再开始新工作、走完在途）。
+ */
+const controllers = new Map<string, { hard: AbortController; drain: AbortController }>();
 
 /**
  * 后台分片循环：逐片 runBatchJob("fetch")，片间 sleepBetweenBatch 让位；
@@ -40,30 +45,84 @@ export function startFetchJob(jobId: string): void {
     log.error("fetch 任务启动预检失败", { jobId, err: msg });
     return;
   }
-  const controller = new AbortController();
-  controllers.set(jobId, controller);
+  const hard = new AbortController();
+  const drain = new AbortController();
+  controllers.set(jobId, { hard, drain });
   void (async () => {
+    // drain 被请求后必须在循环退出处补全终态与未开始条目（详见 finalizeDrainedFetchJob）。
+    let drained = false;
     try {
       let chunk = 0;
       for (;;) {
-        if (controller.signal.aborted) break;
-        const r = await runBatchJob("fetch", { jobId, chunk }, { signal: controller.signal });
+        if (hard.signal.aborted) break;
+        // drain 已请求：不再开启新片；本片若已跑完则直接进收尾。
+        if (drain.signal.aborted) { drained = true; break; }
+        const r = await runBatchJob("fetch", { jobId, chunk }, {
+          signal: hard.signal,
+          drainSignal: drain.signal,
+        });
+        // 子进程按 drain 语义收尾（在途走完、未开始的不再开始）后返回；此时必须停链。
+        if (drain.signal.aborted) { drained = true; break; }
         if (!r?.result?.hasMore) break;
         chunk++;
         await sleepBetweenBatch();
       }
     } catch (e: any) {
-      updateFetchJobStatus(jobId, controller.signal.aborted ? "cancelled" : "failed", {
+      const cancelled = hard.signal.aborted || drain.signal.aborted;
+      drained = drain.signal.aborted;
+      updateFetchJobStatus(jobId, cancelled ? "cancelled" : "failed", {
         error: String(e?.message || e),
       });
       log.error("fetch 任务失败", { jobId, err: String(e?.message || e) });
     } finally {
+      // 排空收尾：任务记录补全（未开始项补写 cancelled）+ 落 cancelled 终态。
+      // 必须在 maybeContinue*/autoScanAfterJob 之前完成，让它们看到正确的终态。
+      if (drained) finalizeDrainedFetchJob(jobId);
       controllers.delete(jobId);
       maybeContinueLibraryJob(jobId);
       maybeContinueUpgradeJob(jobId);
       autoScanAfterJob(jobId);
     }
   })();
+}
+
+/**
+ * 排空收尾：`hasMore` 为 true 时 fetchHandler 不会落终态，故这道终态必须由 jobRunner 补。
+ * 把本任务 targets.targets 里**尚未出现在 items** 的 targetId 补写成 cancelled 条目
+ * （沿用已有条目、按 targetId 去重）—— 任何情况下都要让任务记录完整、UI「重试」可恢复。
+ *
+ * 终态写 cancelled **有守卫**：取消不能把一个已完成的作业改写成未完成。存在一个窄但真实
+ * 的竞态 —— 用户在最后一片已真正跑完并落终态（done/partial/failed）之后的一瞬间点取消，
+ * drain 已被 abort 但子进程早已把该片结果与终态算完；此时若无条件写 cancelled，就会把
+ * done 降级成 cancelled 并挂上不实的「用户取消（排空收尾）」。故仅在当前 status 仍属于
+ * pending/running/cancelled（即确未跑完）时才落 cancelled，done/partial/failed 一律保持不动
+ * （保持 done 时 maybeContinue* 与 autoScanAfterJob 的续批/补扫行为与改动前一致）。
+ */
+function finalizeDrainedFetchJob(jobId: string): void {
+  try {
+    const job = getFetchJob(jobId);
+    if (!job) return;
+    // 未开始条目补写：与终态守卫无关，任何情况下都要补全记录。
+    const all: any[] = Array.isArray(job.targets?.targets) ? job.targets.targets : [];
+    const seen = new Set(job.items.map((i) => String(i.targetId)));
+    const missing: FetchJobItem[] = all
+      .filter((t) => t && t.id != null && !seen.has(String(t.id)))
+      .map((t) => ({
+        id: String(t.id),
+        targetId: String(t.id),
+        status: "cancelled" as const,
+        attempts: 0,
+        rejected: [],
+        errorMsg: "任务已取消（未开始）",
+      }));
+    if (missing.length > 0) saveFetchJobItems(jobId, [...job.items, ...missing]);
+    // 只在「确未跑完」的终态上落 cancelled，避免把已完成的作业降级。
+    if (job.status === "pending" || job.status === "running" || job.status === "cancelled") {
+      updateFetchJobStatus(jobId, "cancelled", { error: "用户取消（排空收尾）" });
+    }
+  } catch (e: any) {
+    log.error("fetch 排空收尾失败", { jobId, err: String(e?.message || e) });
+  }
 }
 
 /**
@@ -191,14 +250,21 @@ function maybeContinueUpgradeJob(jobId: string): void {
 }
 
 /**
- * 任务成功终态后自动增量扫描对应源（产品定调 2026-10-10「立刻添加进媒体库」）：
+ * 任务终态后自动增量扫描对应源（产品定调 2026-10-10「立刻添加进媒体库」）：
  * fetch 流程只落盘 + 迁移行，songs 行靠扫描器 upsertSong 建立——不扫就不进媒体库。
- * 防抖：只扫 done 且 added>0；__library 续批链中批（hasAnyActiveJob=true）跳过，链尾扫一次。
+ * 防抖：扫 done 或（排空取消后）added>0 的任务；__library 续批链中批
+ * （hasAnyActiveJob=true）跳过，链尾扫一次。
  */
 function autoScanAfterJob(jobId: string): void {
   try {
     const job = getFetchJob(jobId);
-    if (!job || job.status !== "done" || !job.sourceId) return;
+    if (!job || !job.sourceId) return;
+    const counts = (job as any)?.counts ?? {};
+    // 守卫只覆盖两类：正常 done；以及被取消（drain 或硬停止）但本批**真落盘**的歌
+    // （added>0）—— 否则这些歌进了文件系统却永远不进媒体库。
+    // 刻意不放开 partial/failed：它们的漏扫是本次改动之前就存在的既有行为，不在范围内。
+    // `added` 为 0 时下面那道闸照旧直接返回（什么都不做）。
+    if (!(job.status === "done" || (job.status === "cancelled" && Number(counts.added) > 0))) return;
     // 标签缺失修复入队（方案 B 事件主路径，2026-10-11）：本次任务成功落盘入库的
     // 歌曲（imports 带 songId）都过一轮「探缺 → 拿得到才写」。enrich 阶段封面/
     // 歌词失败只告警不上抛（DNS 风暴等瞬时故障），这里兜住。入队自带 10min 初始
@@ -211,15 +277,6 @@ function autoScanAfterJob(jobId: string): void {
     } catch (e: any) {
       log.warn("标签修复入队失败(不影响任务)", { jobId, err: String(e?.message || e) });
     }
-    let cfgj: any = (job as any)?.config;
-    if (typeof cfgj === "string") {
-      try {
-        cfgj = JSON.parse(cfgj);
-      } catch {
-        cfgj = {};
-      }
-    }
-    const counts = (job as any)?.counts ?? {};
     if (!Number(counts.added)) return;
     void runBatchJob("scan", { sourceId: job.sourceId, mode: "incremental" })
       .then((r) => {
@@ -232,11 +289,19 @@ function autoScanAfterJob(jobId: string): void {
   }
 }
 
-/** 取消运行中任务；任务不在跑返回 false。 */
+/** 硬停止运行中任务（abort 语义，一字不改）；任务不在跑返回 false。 */
 export function abortFetchJob(jobId: string): boolean {
   const ctrl = controllers.get(jobId);
   if (!ctrl) return false;
-  ctrl.abort();
+  ctrl.hard.abort();
+  return true;
+}
+
+/** 排空式取消运行中任务（只停「开始新工作」，在途/已缓存工作走完）；任务不在跑返回 false。 */
+export function drainFetchJob(jobId: string): boolean {
+  const ctrl = controllers.get(jobId);
+  if (!ctrl) return false;
+  ctrl.drain.abort();
   return true;
 }
 

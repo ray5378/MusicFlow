@@ -47,6 +47,8 @@ export class BatchJobError extends Error {
 export interface RunBatchJobOptions {
   onProgress?: (payload: any) => void;
   signal?: AbortSignal;
+  /** 排空信号：触发时只把 drain 转发给子进程（不再开始新工作、走完在途），绝不挂 killTimer。 */
+  drainSignal?: AbortSignal;
 }
 
 export interface RunBatchJobResult {
@@ -87,11 +89,16 @@ export async function runBatchJob(
       let watchdog: NodeJS.Timeout | null = null;
       let killTimer: NodeJS.Timeout | null = null;
       let unsubscribePace: (() => void) | null = null;
+      let drainListener: (() => void) | null = null;
 
       const cleanup = () => {
         if (watchdog) { clearInterval(watchdog); watchdog = null; }
         if (killTimer) { clearTimeout(killTimer); killTimer = null; }
         if (unsubscribePace) { unsubscribePace(); unsubscribePace = null; }
+        if (drainListener && opts?.drainSignal) {
+          opts.drainSignal.removeEventListener("abort", drainListener);
+          drainListener = null;
+        }
         if (child) runningChildren.delete(child);
       };
 
@@ -162,6 +169,15 @@ export async function runBatchJob(
       if (opts?.signal) {
         if (opts.signal.aborted) abortNow();
         else opts.signal.addEventListener("abort", abortNow, { once: true });
+      }
+
+      // drain:排空信号触发时**只**把 drain 转发给子进程 —— 不挂 killTimer、不标 aborted。
+      // 与 abort 完全并行：子进程据此停止开始新工作，但走完已开始/已缓存的工作。
+      if (opts?.drainSignal) {
+        const drainNow = () => sendToChild({ type: "drain", jobId });
+        drainListener = drainNow;
+        if (opts.drainSignal.aborted) drainNow();
+        else opts.drainSignal.addEventListener("abort", drainNow, { once: true });
       }
 
       child.on("error", (e) => settleError(new BatchJobError(`批量任务子进程异常: ${e?.message || e}`)));
