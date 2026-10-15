@@ -31,7 +31,8 @@ const f = vi.hoisted(() => ({
   startAsyncTask: vi.fn(() => ({ started: true, taskId: "task-1" }) as any),
   touch: vi.fn(),
   // 首页固定卡要查歌单行;换成可控的假 sqlite(本文件不测 home-cards)。
-  sqlite: { prepare: vi.fn(() => ({ get: () => undefined as any })) },
+  // run 供聚合缓存 write-through 落 settings 表(无状态 → 等价于落库失败被吞掉)。
+  sqlite: { prepare: vi.fn(() => ({ get: () => undefined as any, run: () => undefined as any })) },
 }));
 
 vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
@@ -41,7 +42,7 @@ vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
 });
 
 import { recommendCache } from "../../src/routes/api/shared.js";
-import { registerRecommend } from "../../src/routes/api/recommend.js";
+import { registerRecommend, __resetRecommendRefreshStateForTest } from "../../src/routes/api/recommend.js";
 
 type Any = any;
 
@@ -60,6 +61,8 @@ const post = (p: string, body?: Any) =>
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 const json = async (r: Response) => (await r.json()) as Any;
+/** 让后台首拉(纯微任务链)跑完:setTimeout 宏任务前微任务队列必清空。 */
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 /** 造一个「能力插件」形状。 */
 const cap = (id: string, impl?: Any, capabilities: string[] = []) => ({
@@ -69,6 +72,7 @@ const cap = (id: string, impl?: Any, capabilities: string[] = []) => ({
 
 beforeEach(() => {
   recommendCache.clear();
+  __resetRecommendRefreshStateForTest(); // 清失败退避/在途刷新表,用例间隔离
   f.firstEnabledByCapability.mockReset().mockReturnValue(undefined);
   f.getEnabledByCapability.mockReset().mockReturnValue([]);
   f.getPlugin.mockReset().mockReturnValue(undefined);
@@ -82,7 +86,7 @@ beforeEach(() => {
   f.runPluginJob.mockReset().mockReturnValue({ started: true, alreadyRunning: false });
   f.startAsyncTask.mockReset().mockReturnValue({ started: true, taskId: "task-1" });
   f.touch.mockReset();
-  f.sqlite.prepare.mockReset().mockReturnValue({ get: () => undefined });
+  f.sqlite.prepare.mockReset().mockReturnValue({ get: () => undefined, run: () => undefined });
 });
 
 // ==================== GET /v1/recommend:主推荐插件的返回值兜底 ====================
@@ -96,15 +100,19 @@ describe("GET /v1/recommend —— 主插件返回值兜底", () => {
       recommend: async () => ({ channels: [{ source: "qq", playlists: [] }] }),
     }));
 
-    const r = await get("/v1/recommend");
-    expect(r.status).toBe(200);
-    const b = await json(r);
+    // 冷启动:先回 pending 空频道,后台首拉后二次 GET 才有聚合结果
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true);
+    await settle();
+    const b = await json(await get("/v1/recommend"));
     expect(b.channels).toEqual([{ source: "qq", name: "qq", count: 0, sortOrder: 99, _pluginId: "gmdl", playlists: [] }]);
     // 无 baseUrl 时相对封面退化成站点相对路径(而不是 "undefined/img/a.jpg")
-    recommendCache.clear(); // 换插件返回值前必须清缓存,否则命中的是上一次的聚合结果
+    // 清内存缓存(模拟回收;假 sqlite 无状态 → DB 也没有)→ 再走一次冷启动
+    recommendCache.clear();
     f.firstEnabledByCapability.mockReturnValue(cap("gmdl", {
       recommend: async () => ({ channels: [{ source: "qq", playlists: [{ id: "p", cover: "img/a.jpg" }] }] }),
     }));
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true);
+    await settle();
     expect((await json(await get("/v1/recommend"))).channels[0].playlists[0].cover).toBe("/img/a.jpg");
   });
 
@@ -131,6 +139,8 @@ describe("GET /v1/recommend —— 主插件返回值兜底", () => {
       }),
     }));
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const chs = (await json(await get("/v1/recommend"))).channels;
     expect(chs[0]).toMatchObject({ source: "", name: "有名字" });
     expect(chs[1]).toMatchObject({ source: "kugou", name: "kugou" });
@@ -150,6 +160,8 @@ describe("GET /v1/recommend —— 主插件返回值兜底", () => {
       return undefined;
     });
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const pls = (await json(await get("/v1/recommend"))).channels[0].playlists;
     expect(pls[0].source).toBe("qq");                 // 缺 pl.source → 用频道 source
     expect(seen[0]).toEqual(["a", "qq", ""]);         // 传给本地匹配的是**真实字符串**而非 undefined
@@ -162,6 +174,8 @@ describe("GET /v1/recommend —— 主插件返回值兜底", () => {
     f.firstEnabledByCapability.mockReturnValue(cap("gmdl", {
       recommend: async () => ({ channels: [{ playlists: [{ id: "c" }] }] }),
     }));
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true);
+    await settle();
     expect((await json(await get("/v1/recommend"))).channels[0].playlists[0].source).toBe("");
   });
 
@@ -173,25 +187,35 @@ describe("GET /v1/recommend —— 主插件返回值兜底", () => {
     }));
     f.findLocalRemotePlaylist.mockReturnValue({ id: "local-1", name: "已入库" }); // 没有 songCount 字段
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const pl = (await json(await get("/v1/recommend"))).channels[0].playlists[0];
     expect(pl.trackCount).toBe("");
     expect(pl.imported).toBe(true);
   });
 
-  it("主插件抛的**不是 Error**(字符串 / 纯对象)→ 错误原因照样回传,且不 500", async () => {
+  it("主插件抛的**不是 Error**(字符串 / 纯对象)→ 不 500,响应仍 success 空频道(错误只记日志 + 60s 退避)", async () => {
     // 契约:插件里 `throw "上游 502"` 这种裸抛出很常见。`e?.message || e` 就是为它准备的。
+    // 2026-10-15 起冷启动不阻塞:错误不再回传响应字段,改为后台记 60s 失败退避。
     for (const thrown of ["上游 502", { code: 502 }, 42]) {
       recommendCache.clear();
-      f.firstEnabledByCapability.mockReturnValue(cap("gmdl", {
-        recommend: async () => { throw thrown; },
-      }));
+      __resetRecommendRefreshStateForTest(); // 每轮清退避,让本轮真正发起一次后台拉取
+      const recommend = vi.fn(async () => { throw thrown; });
+      f.firstEnabledByCapability.mockReturnValue(cap("gmdl", { recommend }));
       const r = await get("/v1/recommend");
       expect(r.status).toBe(200);
       const b = await json(r);
       expect(b.success).toBe(true);
-      expect(typeof b.error).toBe("string");
-      expect(b.error.length).toBeGreaterThan(0);
+      expect(b.pending).toBe(true);
+      expect(b.error).toBeUndefined(); // 错误不再回传响应(旧行为),只记日志
       expect(b.channels).toEqual([]);
+      await settle(); // 后台首拉失败 → 记退避
+      expect(recommend).toHaveBeenCalledTimes(1);
+      // 退避内:下一个请求仍 pending 空频道,且不再重 kick
+      const b2 = await json(await get("/v1/recommend"));
+      expect(b2.pending).toBe(true);
+      expect(b2.channels).toEqual([]);
+      expect(recommend).toHaveBeenCalledTimes(1);
     }
   });
 });
@@ -205,6 +229,8 @@ describe("GET /v1/recommend —— 榜单插件返回值兜底", () => {
       cap("qq", { recommend: async () => ({ channels: [{ source: "qq-rank", playlists: [] }] }) }),
     ]);
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const r = await get("/v1/recommend");
     expect(r.status).toBe(200);
     expect((await json(r)).channels).toEqual([
@@ -220,6 +246,8 @@ describe("GET /v1/recommend —— 榜单插件返回值兜底", () => {
       cap("good", { recommend: async () => ({ channels: [{ source: "ok", playlists: [{ id: "g1" }] }] }) }),
     ]);
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const b = await json(await get("/v1/recommend"));
     // 前三个插件各自产出 0 个频道;bad3 的频道会被产出,但 playlists 兜底成空数组
     const bySource = Object.fromEntries(b.channels.map((c: Any) => [c.source, c]));
@@ -240,6 +268,8 @@ describe("GET /v1/recommend —— 榜单插件返回值兜底", () => {
       }),
     ]);
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const chs = (await json(await get("/v1/recommend"))).channels;
     expect(chs[0]).toMatchObject({ source: "", name: "" });
     expect(chs[0].playlists[0]).toMatchObject({ id: "x", source: "", name: "", creator: "", link: "", imported: false, trackCount: "" });
@@ -255,10 +285,13 @@ describe("GET /v1/recommend —— 榜单插件返回值兜底", () => {
       cap("qq", { recommend: async () => ({ channels: [{ source: "qq", playlists: [] }] }) }),
     ]);
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const r = await get("/v1/recommend");
     expect(r.status).toBe(200);
     const b = await json(r);
-    // 只有**主**插件失败才回传 error;榜单插件失败静默跳过(避免前端弹一堆无关报错)
+    // 只有**主**插件失败才在旧阻塞路径回传 error;榜单插件失败静默跳过。
+    // 冷启动 pending 路径不携带 error 字段(错误只记日志)。
     expect(b.error).toBeUndefined();
     expect(b.channels.map((c: Any) => c.source)).toEqual(["main", "qq"]);
   });
@@ -275,6 +308,8 @@ describe("GET /v1/recommend —— 榜单插件返回值兜底", () => {
       cap("c", { recommend: async () => ({ channels: [{ source: "null-order", sortOrder: null, playlists: [] }] }) }),
     ]);
 
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const srcs = (await json(await get("/v1/recommend"))).channels.map((c: Any) => c.source);
     expect(srcs[0]).toBe("pinned");                                  // 唯一有数字 sortOrder 的排最前
     expect(srcs.slice(1).sort()).toEqual(["bool-order", "null-order", "str-order"]); // 其余都是 99

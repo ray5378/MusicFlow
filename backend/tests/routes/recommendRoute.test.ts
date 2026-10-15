@@ -5,11 +5,12 @@ import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
-import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
+import { db, sqlite, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, plugins, playlists } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes, clearRecommendCache } from "../../src/routes/api/index.js";
+import { __resetRecommendRefreshStateForTest } from "../../src/routes/api/recommend.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
 
 // 能力路由测试:GET /rest/api/v1/recommend 经 capability("recommend") 查插件、
@@ -73,6 +74,9 @@ beforeAll(() => {
 beforeEach(() => {
   fakeCalls = 0;
   clearRecommendCache(); // 路由缓存跨用例残留会导致后续用例命中旧数据
+  // 聚合缓存 write-through 的 settings 行跨用例残留会被 DB 回灌命中 → 必须一并清
+  sqlite.prepare("DELETE FROM settings WHERE key LIKE 'recommend.aggCache.%'").run();
+  __resetRecommendRefreshStateForTest(); // 清失败退避/在途刷新表,用例间隔离
   db.delete(plugins).where(eq(plugins.name, FAKE_ID)).run();
   unregisterPlugin(FAKE_ID);
   registerPlugin(fakeManifest as any, fakeImpl as any);
@@ -82,6 +86,9 @@ async function getRecommend() {
   const res = await app.request(`/rest/api/v1/recommend?${authQS()}`);
   return { res, body: await res.json().catch(() => null) };
 }
+
+/** 让后台首拉(纯微任务链)跑完:setTimeout 宏任务前微任务队列必清空。 */
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe("GET /rest/api/v1/recommend (capability-driven)", () => {
   it("returns empty channels when no enabled recommend plugin", async () => {
@@ -96,6 +103,9 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
     db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080", homeCount: 3 }) }).run();
     // 已入库本地歌单(与插件返回的 pl-1 通过 sourceUrl 前缀匹配),songCount 即数据库中真实数量
     db.insert(playlists).values({ id: "local-pl-1", name: "歌单一", ownerId: "u1", sourceUrl: "gmdl://pl-1", songCount: 58 }).run();
+    const first = await getRecommend();
+    expect(first.body).toMatchObject({ success: true, pending: true, channels: [] }); // 冷启动
+    await settle(); // 后台首拉写缓存
     const { body } = await getRecommend();
     expect(body.success).toBe(true);
     expect(body.providerId).toBe(FAKE_ID);
@@ -130,6 +140,9 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
     };
     unregisterPlugin(FAKE_ID);
     registerPlugin(fakeManifest as any, custom as any);
+    const first = await getRecommend();
+    expect(first.body?.pending).toBe(true); // 冷启动
+    await settle();
     const { body } = await getRecommend();
     const pl = body.channels[0].playlists[0];
     expect(pl.imported).toBe(true);
@@ -152,6 +165,9 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
     };
     unregisterPlugin(FAKE_ID);
     registerPlugin(fakeManifest as any, custom as any);
+    const first = await getRecommend();
+    expect(first.body?.pending).toBe(true); // 冷启动
+    await settle();
     const { body } = await getRecommend();
     const pl = body.channels[0].playlists[0];
     expect(pl.imported).toBe(true);
@@ -160,7 +176,9 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
 
   it("caches the result for 5min (second call does not hit the plugin again)", async () => {
     db.insert(plugins).values({ name: FAKE_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://gmdl:8080" }) }).run();
-    await getRecommend();
+    const first = await getRecommend();
+    expect(first.body?.pending).toBe(true); // 冷启动:先回 pending,后台首拉
+    await settle();
     expect(fakeCalls).toBe(1);
     const { body } = await getRecommend();
     expect(fakeCalls).toBe(1); // cache hit
@@ -172,10 +190,14 @@ describe("GET /rest/api/v1/recommend (capability-driven)", () => {
     const throwing = { manifest: fakeManifest, async recommend() { throw new Error("boom"); } };
     unregisterPlugin(FAKE_ID);
     registerPlugin(fakeManifest as any, throwing as any);
+    // 冷启动:不阻塞,立即 pending 空频道(错误不再回传 error 字段,只记日志 + 60s 退避)
+    const first = await getRecommend();
+    expect(first.body).toMatchObject({ success: true, channels: [], providerId: FAKE_ID, pending: true });
+    await settle(); // 后台首拉失败 → 记入退避表
     const { body } = await getRecommend();
     expect(body.success).toBe(true);
     expect(body.channels).toEqual([]);
-    expect(body.providerId).toBe(FAKE_ID);
-    expect(body.error).toContain("boom");
+    expect(body.pending).toBe(true); // 退避内重试仍是 pending 空频道
+    expect(body.error).toBeUndefined();
   });
 });

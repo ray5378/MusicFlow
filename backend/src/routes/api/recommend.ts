@@ -35,11 +35,58 @@ import {
 
 // ==================== stale-while-revalidate(SWR) ====================
 // 原状:TTL(5min)过期后下一个请求阻塞式重调所有外网插件(冷 900ms+,插件慢时更久)。
-// 现策略:
+// 现策略(2026-10-15 起冷启动也不阻塞):
 //   有缓存(无论新旧) → 立即返回缓存;
 //   缓存已过期       → 触发后台刷新(single-flight 去重,成功后原子更新缓存);
-//   无任何缓存       → 保持现状阻塞拉取(冷启动仍走全量聚合)。
+//   无任何缓存       → 立即返回空频道 + pending:true,后台 single-flight 拉取
+//                      (60s 失败退避,防前端重试打爆上游);前端轮询重试自动填充。
 // 后台刷新与请求路径共用同一聚合函数 fetchRecommendChannels,保证两条路径产物一致。
+// 聚合结果 write-through 落 settings 表(见下方 B1),进程重启/内存回收后不再冷。
+
+// ==================== B1:聚合缓存落库持久化 ====================
+// 内存 recommendCache 会被 reclaim cleaner 清空、进程重启归零——之后下一个请求原本
+// 都要吃「冷启动全量外呼」。现把聚合结果 write-through 到 settings 表(key = 前缀 +
+// cacheKey),内存 miss 时从 DB 回灌;DB 行超 7 天视为陈旧清理。channels 为纯 JSON
+// 可序列化数据,settings(TEXT)足够;落库失败仅告警,不影响请求路径。
+const AGG_CACHE_PREFIX = "recommend.aggCache.";
+const AGG_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 内存 miss → 读 DB 回灌(不回写内存:PK 点查微秒级,避免旧值长驻)。 */
+function readAggCacheDb(cacheKey: string): { ts: number; channels: any[] } | null {
+  try {
+    const row = sqlite
+      .prepare("SELECT value FROM settings WHERE key = ?")
+      .get(AGG_CACHE_PREFIX + cacheKey) as any;
+    if (!row?.value) return null;
+    const parsed = JSON.parse(String(row.value));
+    if (!parsed || typeof parsed.ts !== "number" || !Array.isArray(parsed.channels)) return null;
+    return { ts: parsed.ts, channels: parsed.channels };
+  } catch (e: any) {
+    console.warn("[RECOMMEND] 聚合缓存 DB 回灌失败:", e?.message || e);
+    return null;
+  }
+}
+
+/** write-through:内存为主,同时落 DB;顺手清理超龄旧 key(换插件集后旧 key 不再命中)。 */
+function writeAggCache(cacheKey: string, entry: { ts: number; channels: any[] }): void {
+  recommendCache.set(cacheKey, entry);
+  try {
+    const nowIso = new Date().toISOString();
+    sqlite
+      .prepare(
+        `INSERT INTO settings(key, value, updatedAt) VALUES(?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
+      )
+      .run(AGG_CACHE_PREFIX + cacheKey, JSON.stringify(entry), nowIso);
+    sqlite
+      .prepare(
+        `DELETE FROM settings WHERE key LIKE ? AND updatedAt != '' AND updatedAt < ?`,
+      )
+      .run(AGG_CACHE_PREFIX + "%", new Date(Date.now() - AGG_CACHE_MAX_AGE_MS).toISOString());
+  } catch (e: any) {
+    console.warn("[RECOMMEND] 聚合缓存落库失败:", e?.message || e);
+  }
+}
 
 /** 聚合所有推荐插件频道(请求路径与后台刷新共用)。 */
 async function fetchRecommendChannels(
@@ -146,10 +193,15 @@ async function fetchRecommendChannels(
 /** 后台刷新 single-flight 表:key = 缓存 key。同一缓存在途刷新至多一个。 */
 const recommendRefreshInflight = new Map<string, Promise<void>>();
 
-/** 过期缓存的后台刷新(不 await):single-flight 去重;成功后原子更新缓存。
- *  聚合层面插件失败会被吞进 primaryError 并返回空 channels —— 此时**不覆盖**旧缓存
- *  (保留 last-good,下次请求继续 stale 返回并再试);阻塞冷路径保持原有
- *  「失败也写空缓存」的语义不变,避免扩大改动面。 */
+/** 冷启动/刷新失败退避表:key → 上次失败时刻。60s 内不再重复发起后台拉取,
+ *  防止前端轮询重试把故障中的上游打爆(2026-10-15 B2)。 */
+const recommendColdFailAt = new Map<string, number>();
+const RECOMMEND_REFRESH_BACKOFF_MS = 60 * 1000;
+
+/** 缓存的后台刷新(SWR 过期续命 + 冷启动首拉共用,不 await):single-flight 去重;
+ *  成功后原子更新缓存并 write-through 落 DB(B1)。聚合层面插件失败会被吞进
+ *  primaryError 并返回空 channels —— 有旧缓存时**不覆盖**(保留 last-good,下次
+ *  请求继续 stale 返回并再试);冷启动(无旧缓存)则记入失败退避表,60s 内不再 kick。 */
 function refreshRecommendCacheInBackground(
   cacheKey: string,
   providerId: string,
@@ -157,17 +209,21 @@ function refreshRecommendCacheInBackground(
   rpList: any[],
 ): void {
   if (recommendRefreshInflight.has(cacheKey)) return;
+  const failedAt = recommendColdFailAt.get(cacheKey);
+  if (failedAt && Date.now() - failedAt < RECOMMEND_REFRESH_BACKOFF_MS) return;
   const task = (async () => {
     const { channels, primaryError } = await fetchRecommendChannels(providerId, rp, rpList);
     if (primaryError && channels.length === 0) {
-      console.warn(`[RECOMMEND] SWR 后台刷新失败(保留旧缓存): ${primaryError}`);
+      recommendColdFailAt.set(cacheKey, Date.now());
+      console.warn(`[RECOMMEND] 后台拉取失败(60s 退避): ${primaryError}`);
       return;
     }
-    recommendCache.set(cacheKey, { ts: Date.now(), channels });
-    log.info(`[RECOMMEND] SWR 后台刷新完成: ${cacheKey}`);
+    recommendColdFailAt.delete(cacheKey);
+    writeAggCache(cacheKey, { ts: Date.now(), channels });
+    log.info(`[RECOMMEND] 后台拉取完成: ${cacheKey}`);
   })().catch((e: any) => {
-    // 聚合函数自身抛错:保留旧缓存(下次请求继续 stale 返回并再次尝试刷新)。
-    console.warn("[RECOMMEND] SWR 后台刷新失败:", e?.message || e);
+    recommendColdFailAt.set(cacheKey, Date.now());
+    console.warn("[RECOMMEND] 后台拉取失败(60s 退避):", e?.message || e);
   }).finally(() => {
     recommendRefreshInflight.delete(cacheKey);
   });
@@ -190,7 +246,10 @@ export function startRecommendCacheWarmer(): void {
         const providerId = rp?.manifest.id || "";
         const rpSigs = getEnabledByCapability("recommendPlaylist").map((p: any) => p.manifest.id).sort().join(",");
         const cacheKey = providerId + "|" + rpSigs;
-        const entry = recommendCache.get(cacheKey);
+        // B3(2026-10-15):内存 miss 时回退读 DB 落库缓存——进程重启后若首页曾被用过,
+        // DB 里有 last-good,照常预热刷新,重启不再冷。DB 里也没有(从未访问过)则跳过,
+        // 保留「冷启动不做无谓外呼」的既有哲学;用户首次访问时由请求路径 kick 冷启动。
+        const entry = recommendCache.get(cacheKey) ?? readAggCacheDb(cacheKey);
         if (entry && Date.now() - entry.ts >= RECOMMEND_CACHE_TTL_MS) {
           refreshRecommendCacheInBackground(cacheKey, providerId, rp, getEnabledByCapability("recommendPlaylist"));
         }
@@ -203,6 +262,12 @@ export function startRecommendCacheWarmer(): void {
     recommendWarmerTimer?.unref?.();
   };
   tick();
+}
+
+/** 测试钩子:清空失败退避表与在途刷新表(vitest 用例间隔离)。 */
+export function __resetRecommendRefreshStateForTest(): void {
+  recommendColdFailAt.clear();
+  recommendRefreshInflight.clear();
 }
 
 export function registerRecommend(app: Hono): void {
@@ -226,7 +291,7 @@ app.get("/v1/recommend", async (c) => {
   const rpList = getEnabledByCapability("recommendPlaylist");
   const rpSigs = rpList.map((p: any) => p.manifest.id).sort().join(",");
   const cacheKey = providerId + "|" + rpSigs;
-  const cached = recommendCache.get(cacheKey);
+  const cached = recommendCache.get(cacheKey) ?? readAggCacheDb(cacheKey);
   if (cached && Date.now() - cached.ts < RECOMMEND_CACHE_TTL_MS) {
     return c.json({ success: true, channels: cached.channels, providerId });
   }
@@ -236,12 +301,11 @@ app.get("/v1/recommend", async (c) => {
     return c.json({ success: true, channels: cached.channels, providerId });
   }
 
-  // 无任何缓存(冷启动):保持阻塞拉取。
-  const { channels, primaryError } = await fetchRecommendChannels(providerId, rp, rpList);
-  recommendCache.set(cacheKey, { ts: Date.now(), channels });
-  const resp: any = { success: true, channels, providerId };
-  if (primaryError) resp.error = primaryError;
-  return c.json(resp);
+  // 无任何缓存(冷启动,2026-10-15 B2 起不再阻塞):立即返回空频道 + pending:true,
+  // 后台 single-flight 拉取(成功 write-through 落 DB,失败 60s 退避)。前端收到
+  // pending 后轮询重试,数据到位自动填充——首页打开路径从此零阻塞外呼。
+  refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList);
+  return c.json({ success: true, channels: [], providerId, pending: true });
 });
 
 // 启动周期预热(SWR 的一部分;幂等,重复注册不会叠加定时器)。

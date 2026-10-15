@@ -5,18 +5,20 @@ import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
-import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
+import { db, sqlite, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, plugins } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes, clearRecommendCache } from "../../src/routes/api/index.js";
 import { recommendCache, RECOMMEND_CACHE_TTL_MS } from "../../src/routes/api/shared.js";
+import { __resetRecommendRefreshStateForTest } from "../../src/routes/api/recommend.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
 
 // /v1/recommend stale-while-revalidate 行为:
-//   1) 无任何缓存 → 阻塞拉取(冷启动语义不变);
+//   1) 无任何缓存 → 立即返回 pending 空频道,后台 single-flight 首拉(冷启动不再阻塞);
 //   2) 新鲜缓存 → 立即返回,不触发插件调用;
-//   3) 过期缓存 → 立即返回 stale,后台刷新被 single-flight 去重,成功后更新缓存。
+//   3) 过期缓存 → 立即返回 stale,后台刷新被 single-flight 去重,成功后更新缓存;
+//   4) 刷新失败 → 记 60s 失败退避,退避内不再重 kick(测试钩子可清)。
 // 假插件返回的频道名带调用序号(ch-1/ch-2...),用于区分 stale 与刷新后的数据。
 
 const app = new Hono();
@@ -72,6 +74,9 @@ async function getRecommend() {
   return await res.json();
 }
 
+/** 让后台首拉/后台刷新(纯微任务链)跑完:setTimeout 宏任务前微任务队列必清空。 */
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
   initDatabase();
@@ -83,6 +88,10 @@ beforeEach(() => {
   gate = null;
   failNext = false;
   clearRecommendCache();
+  // 聚合缓存 write-through 的 settings 行跨用例残留会被 DB 回灌命中(DB 回灌不回写内存,
+  // recommendCache 会是空的)→ 必须连同 DB 一起清,否则 soleCacheKey/冷启动语义被破坏。
+  sqlite.prepare("DELETE FROM settings WHERE key LIKE 'recommend.aggCache.%'").run();
+  __resetRecommendRefreshStateForTest(); // 清失败退避/在途刷新表,用例间隔离
   db.delete(plugins).where(eq(plugins.name, FAKE_ID)).run();
   unregisterPlugin(FAKE_ID);
   registerPlugin(fakeManifest as any, fakeImpl as any);
@@ -91,22 +100,34 @@ beforeEach(() => {
 });
 
 describe("GET /v1/recommend stale-while-revalidate", () => {
-  it("无任何缓存:阻塞拉取并写缓存(冷启动语义不变)", async () => {
+  it("无任何缓存:先回 pending 空频道,后台首拉写缓存(冷启动不再阻塞)", async () => {
+    const first = await getRecommend();
+    expect(first.success).toBe(true);
+    expect(first.pending).toBe(true);
+    expect(first.channels).toEqual([]);
+    await settle(); // 后台首拉 settle
+    expect(fakeCalls).toBe(1);
+    // 第二次请求命中首拉结果
     const body = await getRecommend();
-    expect(body.success).toBe(true);
     expect(body.channels[0].name).toBe("ch-1");
     expect(fakeCalls).toBe(1);
   });
 
   it("新鲜缓存:立即返回,不再触发插件调用", async () => {
-    await getRecommend();
+    await getRecommend(); // 冷启动 pending
+    await settle();       // 后台首拉写缓存
     const body = await getRecommend();
     expect(body.channels[0].name).toBe("ch-1");
+    expect(fakeCalls).toBe(1);
+    const body2 = await getRecommend();
+    expect(body2.channels[0].name).toBe("ch-1");
     expect(fakeCalls).toBe(1);
   });
 
   it("过期缓存:立即返回 stale,后台刷新成功后更新缓存", async () => {
-    await getRecommend(); // 冷启动,缓存 ch-1
+    const first = await getRecommend(); // 冷启动 pending
+    expect(first.pending).toBe(true);
+    await settle(); // 后台首拉写缓存 ch-1
     const key = soleCacheKey();
     recommendCache.set(key, { ts: Date.now() - RECOMMEND_CACHE_TTL_MS - 1, channels: recommendCache.get(key)!.channels });
     // 让下一次(后台)插件调用挂住,证明响应不等它
@@ -134,8 +155,10 @@ describe("GET /v1/recommend stale-while-revalidate", () => {
     expect(fakeCalls).toBe(2);
   });
 
-  it("过期缓存 + 后台刷新失败:保留旧缓存,后续请求仍可用", async () => {
-    await getRecommend();
+  it("过期缓存 + 后台刷新失败:保留旧缓存;60s 退避内不重 kick,清退避后恢复重试", async () => {
+    const first = await getRecommend(); // 冷启动 pending
+    expect(first.pending).toBe(true);
+    await settle(); // 后台首拉写缓存
     const key = soleCacheKey();
     const oldChannels = recommendCache.get(key)!.channels;
     recommendCache.set(key, { ts: Date.now() - RECOMMEND_CACHE_TTL_MS - 1, channels: oldChannels });
@@ -143,12 +166,17 @@ describe("GET /v1/recommend stale-while-revalidate", () => {
     const body = await getRecommend();
     expect(body.channels).toEqual(oldChannels);
     await vi.waitFor(() => {
-      // 刷新失败后 single-flight 槽位被释放(内部可观测:再次请求会再次尝试)
+      // 刷新失败后 single-flight 槽位被释放(内部可观测:失败已记入退避表)
       expect(fakeCalls).toBe(2);
     }, { timeout: 2000, interval: 20 });
-    // 缓存仍是旧数据(ts 未更新),且请求继续返回旧数据
+    // 失败退避:下一个请求仍返回旧数据,但不再重 kick(60s 内)
     const body2 = await getRecommend();
     expect(body2.channels).toEqual(oldChannels);
-    expect(fakeCalls).toBe(3); // 失败后再请求会再触发一次后台刷新
+    expect(fakeCalls).toBe(2);
+    // 清退避(测试钩子)→ 恢复旧行为:再请求会再次触发后台刷新
+    __resetRecommendRefreshStateForTest();
+    const body3 = await getRecommend();
+    expect(body3.channels).toEqual(oldChannels);
+    expect(fakeCalls).toBe(3); // 退避清空后再请求会再次触发一次后台刷新
   });
 });

@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.17] - 2026-10-15
+
+### Perf
+
+- **首页「各平台精选」全链路零阻塞（冷启动卡顿根治）**：此前 `GET /v1/recommend` 无任何缓存时会**阻塞式**逐个外呼 go-music-dl + 全部榜单插件（前端为此把超时放宽到 150s），且冷启动路径没有 single-flight——并发打开首页会各自外呼一遍；预热器又只预热「已有缓存」的 key，服务端重启后第一炉必然冷。本轮四项把「打开页面时等」改成「后台慢慢搬、搬好自动出现」，**各平台精选区块保留**：
+  - **聚合缓存落库持久化**：`routes/api/recommend.ts` 新增 write-through（内存 + `settings` 表 key `recommend.aggCache.<cacheKey>`），内存 miss（reclaim 回收 / 进程重启）从 DB 回灌，DB 行超 7 天清理——重启后不再冷；
+  - **冷启动改非阻塞 + 单飞**：无任何缓存时立即返回空频道 + `pending:true`，后台 single-flight 拉取（成功落库，失败 60s 退避，防前端重试打爆故障中的上游）；
+  - **预热器补 DB 回灌判断**：内存 miss 回退读 DB——首页被用过就照常预热刷新，从未访问过的 key 仍不做无谓外呼（既有哲学保留）；
+  - **本地随机候选池 SWR 化**（`services/plugin/localPlatformRecommend.ts`）：120s 池过期不再同步重建（旧池继续供本轮洗牌 + 后台单飞重建），消除每 2 分钟一次的同步 DB/封面探测慢脚；`invalidatePlatformPool` 显式失效仍同步重建（新歌单立即可见）。
+- **前端配套**（`views/Home/index.vue`）：收到 `pending` 显示中性色占位提示（i18n `home.recommendPending`），每 8s 轮询重试（≤12 次 ≈96s），数据到位自动填充；超时从 150s 降回默认（后端已不阻塞）；卸载时清理轮询定时器。渐进渲染分区结构不变，快区块不受影响。
+
+### Test
+
+- 更新 `/v1/recommend` 冷启动相关契约用例为「先 pending 空 → flush 后台拉取 → 二次请求拿数据」时序；新增聚合缓存落库回灌、失败 60s 退避不重复 kick、候选池过期 SWR 三类用例；导出测试钩子 `__resetRecommendRefreshStateForTest()` 供用例间清退避/在途表。
+
+### Internal
+
+- **T01（客户端优先透传 + 排队深度指标）经分析后拍板不做**，设计决策已写入 `services/transcode.ts` 文件头与并发池段注释（自用项目转码量小；透传会绕过网络源试听片段预提取闸门并丢失响度归一）。
+- 验证方式：本机无 Node 工具链，类型检查与全量测试由 CI 门禁把关（`build.yml` 失败自动回滚镜像并删除 Release）。
+- 按既定约定本轮**不部署生产 240**。
+
 ## [4.6.16] - 2026-10-15
 
 ### Refactor

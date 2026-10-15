@@ -1,10 +1,17 @@
 // ==================== 服务器端转码服务（OpenSubsonic /rest/stream 语义） ====================
 //
 // 客户端按 Subsonic 标准在 /rest/stream 上携带 format / maxBitRate / timeOffset：
-//   - 未指定 format 或 format=raw → 服务端原样返回原始文件（无损直连不受影响）；
+//   - 未要求白名单格式（未指定 / raw / 其它）→ 不进转码池，但仍走服务端实时管道
+//     （解码→响度归一→按源族编码；D9 已删除「原样直出原始文件」分支）；
 //   - format=mp3/aac → 实时转码到目标格式；maxBitRate 低于源码率时同时压码率；
 //   - 转码流无法按字节 Range 断点续传，客户端改用 timeOffset 重新拉流 seek
 //     （对应服务器已对外宣告的 transcodeOffset OpenSubsonic 扩展）。
+//
+// 【设计决策 2026-10-15，用户拍板】「客户端优先原始格式 / 透传」明确不做：
+// 本项目自用、转码任务量小，避免转码的优化不值得投入；且透传（客户端直解
+// 原文件 / 直连上游）会绕过网络源的试听片段预提取闸门（prefetchCache 的
+// ±15s 时长比对，30s 试听会被当整曲播）并丢失服务端响度归一（-14 LUFS）。
+// 出流一律经服务端管道；流转（Sendspin / DLNA / AirPlay）同理，不经手透传。
 //
 // 转码二进制：优先 FFMPEG_PATH 环境变量（便于运维注入与测试隔离），其次 ffmpeg-static（AirPlay 投屏已用），最后 PATH。
 import { spawn, type ChildProcessByStdio } from "node:child_process";
@@ -35,7 +42,7 @@ export function normalizeBitRateKbps(br: number | null | undefined): number {
   return br >= 10000 ? Math.round(br / 1000) : Math.round(br);
 }
 
-/** 规范化目标格式；空 / raw / 非白名单 → null（表示不转码、原样返回）。 */
+/** 规范化目标格式；空 / raw / 非白名单 → null（表示不转码，仍走服务端实时管道）。 */
 export function normalizeTargetFormat(format: string | null | undefined): "mp3" | "aac" | null {
   const f = (format || "").trim().toLowerCase().replace(/^\./, "");
   if (f === "" || f === "raw") return null;
@@ -65,7 +72,7 @@ export interface TranscodeDecision {
  * 与 Navidrome / 客户端 shouldUseServerTimeOffsetSeek 的判定保持一致：
  *   - 请求了白名单格式且源格式不同，或源码率高于 maxBitRate → 转码；
  *   - 仅 maxBitRate（未指定格式）且源码率高于它 → 压码率（默认转 mp3）；
- *   - 否则原样返回原始文件。
+ *   - 否则不转码（should=false），仍走服务端实时管道，非原样直出（见文件头设计决策）。
  */
 export function decideTranscode(input: {
   requestedFormat?: string | null;
@@ -163,6 +170,10 @@ export function spawnTranscoder(opts: TranscodeSpawnOptions): ChildProcessByStdi
 // 上限默认值照 MA 的派生方式按 CPU 核数算（constants.py:211
 // `_default_background_scan_concurrency` 同为「按核数派生 + 封顶」），
 // 并允许环境变量覆盖（容器编排里固定值时用）。
+//
+// 【设计决策 2026-10-15，同文件头】「排队深度暴露到 /v1/admin/metrics」明确不做：
+// 本项目自用、转码任务量小，排队可观测性收益有限；排队事件本身已有
+// 「转码槽排队等待」info 日志（见 acquireTranscodeSlot），排障够用。
 
 export type TranscodeSlotKind = "quality" | "pipeline" | "flow";
 

@@ -91,7 +91,9 @@ export interface LocalPlatformChannel {
 //   - 每个歌单的最终 coverArt 惰性解析并 memo 到 coverMemo(避免重复探测);
 //   - TTL(PLATFORM_POOL_TTL_MS)内**直接复用候选集合与封面**,但**每次请求仍重新洗牌**
 //     (随机性 100% 保留 —— 这是与「整体缓存」的本质区别);
-//   - TTL 过期 / 显式失效(invalidatePlatformPool) → 重建一次(走一次慢路径)。
+//   - 显式失效(invalidatePlatformPool) → 置空,下一个请求同步重建(新歌单立即可见);
+//   - TTL 过期 → SWR(2026-10-15 B4):旧池继续供本轮洗牌(不阻塞请求),后台单飞
+//     重建一次 —— 消除「每 120s 一次的同步 DB+封面探测慢脚」。下一轮请求拿到新池。
 // 内存占用 ≈ 平台歌单行数,可忽略。空闲内存回收时经 registerCacheCleaner 一并清空。
 const PLATFORM_POOL_TTL_MS = 120_000; // 120 秒
 
@@ -138,12 +140,11 @@ function resolveRowCover(r: PlatformPoolRow): string | null {
   return null;
 }
 
-/** 取候选池:TTL 内复用,过期/不存在则重建(走一次主 SQL 慢路径)。 */
-function getPool(): PlatformPool {
-  const now = Date.now();
-  if (platformPoolCache && now - platformPoolCache.ts < PLATFORM_POOL_TTL_MS) {
-    return platformPoolCache;
-  }
+/** 后台重建 single-flight 标志:防止过期窗口内并发请求重复重建。 */
+let poolRebuildInflight = false;
+
+/** 全量重建候选池(主 SQL + 新 coverMemo;不做增量合并,保持产物确定性)。 */
+function buildPool(now: number): PlatformPool {
   const rows = sqlite
     .prepare(
       `SELECT id, name, source_platform, song_count, cover_art
@@ -159,7 +160,32 @@ function getPool(): PlatformPool {
     list.push(r);
     bySource.set(src, list);
   }
-  platformPoolCache = { ts: now, bySource, coverMemo: new Map() };
+  return { ts: now, bySource, coverMemo: new Map() };
+}
+
+/** 取候选池:TTL 内复用;TTL 过期 → SWR(旧池继续用 + 后台单飞重建);
+ *  池不存在(首次/显式失效) → 同步重建(走一次慢路径,保新鲜度语义)。 */
+function getPool(): PlatformPool {
+  const now = Date.now();
+  if (platformPoolCache) {
+    if (now - platformPoolCache.ts < PLATFORM_POOL_TTL_MS) return platformPoolCache;
+    // B4:过期不阻塞 —— 本轮请求继续用旧池洗牌,后台重建供下一轮。
+    if (!poolRebuildInflight) {
+      poolRebuildInflight = true;
+      queueMicrotask(() => {
+        try {
+          platformPoolCache = buildPool(Date.now());
+          log.info("本地随机候选池后台重建完成");
+        } catch (e: any) {
+          log.warn("本地随机候选池后台重建失败(下轮请求重试)", { err: e?.message || e });
+        } finally {
+          poolRebuildInflight = false;
+        }
+      });
+    }
+    return platformPoolCache;
+  }
+  platformPoolCache = buildPool(now);
   return platformPoolCache;
 }
 

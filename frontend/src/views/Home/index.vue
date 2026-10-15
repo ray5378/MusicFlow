@@ -73,6 +73,11 @@
       <MfIcon name="TriangleAlert" :size="16" /> {{ t('home.recommendError') }}
     </div>
 
+    <!-- 平台精选冷启动占位(后端后台拉取中;数据到位自动填充,不阻塞其它分区) -->
+    <div v-if="recommendPending && platformGroups.length === 0" class="recommend-error recommend-pending">
+      <MfIcon name="RefreshCw" :size="16" class="spinning" /> {{ t('home.recommendPending') }}
+    </div>
+
     <!-- ===== 首页推荐分区（按 sortOrder 排序，go-music-dl 推荐 + 本地随机混合排列） ===== -->
     <section class="section" v-for="group in sortedAllGroups" :key="group.type + '-' + group.source + '-' + (group._pluginId || '')">
       <template v-if="group.type === 'recommend'">
@@ -134,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import api, { formatApiError } from "@/api";
@@ -359,27 +364,59 @@ async function loadHomeConfig() {
   }
 }
 
+// 平台精选冷启动轮询:后端无缓存时立即返回空频道 + pending:true(不再阻塞),
+// 后台 single-flight 拉取。前端每 8s 重试一次(≤12 次 ≈96s,覆盖最慢聚合),
+// 数据到位自动填充;轮询期间模板显示占位提示(recommendPending)。
+const recommendPending = ref(false);
+let recommendRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let recommendRetryCount = 0;
+const RECOMMEND_RETRY_MS = 8000;
+const RECOMMEND_RETRY_MAX = 12;
+
 async function loadRecommend() {
   try {
-    // 聚合请求包含 go-music-dl + 全部榜单插件频道,冷缓存下可能较慢(榜单插件首页需
-    // 拉取歌单明细)。超时放宽到 150s,避免请求被 15s 默认超时整单中止导致首页精选
-    // (含 go-music-dl)一起消失;第二次命中后端缓存即秒开。
-    const res = await api.get("/rest/api/v1/recommend", { timeout: 150000 });
+    // 后端已非阻塞(冷启动返回 pending 空频道,SWR/热路径秒回),默认超时足够。
+    const res = await api.get("/rest/api/v1/recommend");
     recommendChannels.value = res.data.channels || [];
     recommendProviderId.value = res.data.providerId || "";
     recommendError.value = false;
+    const pending = !!res.data?.pending && recommendChannels.value.length === 0;
+    recommendPending.value = pending;
+    if (pending) {
+      if (recommendRetryCount < RECOMMEND_RETRY_MAX) {
+        recommendRetryCount += 1;
+        if (recommendRetryTimer) clearTimeout(recommendRetryTimer);
+        recommendRetryTimer = setTimeout(loadRecommend, RECOMMEND_RETRY_MS);
+      } else {
+        recommendPending.value = false; // 超过重试上限:停止轮询,静默保留空态
+      }
+    } else {
+      recommendRetryCount = 0;
+      if (recommendRetryTimer) {
+        clearTimeout(recommendRetryTimer);
+        recommendRetryTimer = null;
+      }
+    }
   } catch {
     recommendChannels.value = [];
     recommendProviderId.value = "";
     recommendError.value = true;
+    recommendPending.value = false;
   }
 }
+
+onUnmounted(() => {
+  if (recommendRetryTimer) {
+    clearTimeout(recommendRetryTimer);
+    recommendRetryTimer = null;
+  }
+});
 
 onMounted(async () => {
   // P1-3 渐进渲染:各分区基于各自响应式 ref 独立渲染(模板未整页骨架门控 loading)。
   // 快加载器(歌单/本地随机/配置/固定卡)决定首屏 loading 复位;loadRecommend 聚合
-  // 含 go-music-dl + 全部榜单频道,冷缓存下可能很慢(前端超时已放宽到 150s),故让它
-  // 独立进行、不阻塞其它分区与 loading 复位。
+  // 自 2026-10-15 起后端非阻塞(冷启动返回 pending + 后台拉取,前端轮询自动填充),
+  // 依旧独立进行、不阻塞其它分区与 loading 复位。
   loading.value = true;
   const fast = Promise.all([loadPlaylists(), loadLocalRandom(), loadHomeConfig(), loadHomeCards()]);
   const slow = loadRecommend();
@@ -402,6 +439,13 @@ onMounted(async () => {
   font-size: 13px; color: var(--fnos-orange);
   background: rgba(255, 165, 0, 0.08); border: 1px solid rgba(255, 165, 0, 0.25);
   border-radius: 8px;
+}
+/* 冷启动占位:复用 recommend-error 版式但用中性色(它不是错误,是"后台搬运中") */
+.recommend-pending {
+  color: var(--fnos-text-tertiary);
+  background: rgba(128, 128, 128, 0.08);
+  border-color: rgba(128, 128, 128, 0.2);
+  .spinning { animation: mf-spin 0.9s linear infinite; }
 }
 .section-title {
   display: flex; align-items: baseline; gap: 12px;

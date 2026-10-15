@@ -5,11 +5,12 @@ import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
-import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
+import { db, sqlite, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, plugins } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes, clearRecommendCache } from "../../src/routes/api/index.js";
+import { __resetRecommendRefreshStateForTest } from "../../src/routes/api/recommend.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
 
 // 复现用户场景:go-music-dl(recommend + recommendPlaylist)与 榜单插件(recommendPlaylist)
@@ -81,6 +82,9 @@ beforeAll(() => {
 beforeEach(() => {
   gmdlCalls = 0;
   clearRecommendCache();
+  // 聚合缓存 write-through 的 settings 行跨用例残留会被 DB 回灌命中 → 必须一并清
+  sqlite.prepare("DELETE FROM settings WHERE key LIKE 'recommend.aggCache.%'").run();
+  __resetRecommendRefreshStateForTest(); // 清失败退避/在途刷新表,用例间隔离
   db.delete(plugins).where(eq(plugins.name, GMDL_ID)).run();
   db.delete(plugins).where(eq(plugins.name, QQ_ID)).run();
   unregisterPlugin(GMDL_ID);
@@ -92,6 +96,9 @@ async function getRecommend() {
   return { res, body: await res.json().catch(() => null) };
 }
 
+/** 让后台首拉(纯微任务链)跑完:setTimeout 宏任务前微任务队列必清空。 */
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
 describe("GET /v1/recommend (go-music-dl recommend + chart recommendPlaylist coexist)", () => {
   it("returns BOTH go-music-dl channels and chart channels", async () => {
     db.insert(plugins).values({ name: GMDL_ID, enabled: 1, config: JSON.stringify({ baseUrl: "http://g:8080", sortOrder: 10 }) }).run();
@@ -99,6 +106,10 @@ describe("GET /v1/recommend (go-music-dl recommend + chart recommendPlaylist coe
     registerPlugin(gmdlManifest, gmdlImpl);
     registerPlugin(qqManifest, qqImpl);
 
+    // 冷启动:先回 pending 空频道,后台首拉后二次 GET 才有聚合结果
+    const first = await getRecommend();
+    expect(first.body).toMatchObject({ success: true, pending: true, channels: [] });
+    await settle();
     const { body } = await getRecommend();
     const sources = body.channels.map((c: any) => `${c.source}@${c._pluginId}@${c.sortOrder}`);
     console.log("CHANNELS:", JSON.stringify(body.channels));
@@ -118,6 +129,10 @@ describe("GET /v1/recommend (go-music-dl recommend + chart recommendPlaylist coe
     // qq-chart not enabled
     registerPlugin(qqManifest, qqImpl);
 
+    // 冷启动:先回 pending 空频道,后台首拉后二次 GET 才有聚合结果
+    const first = await getRecommend();
+    expect(first.body).toMatchObject({ success: true, pending: true, channels: [] });
+    await settle();
     const { body } = await getRecommend();
     const sources = body.channels.map((c: any) => c.source);
     console.log("ONLY-GMDL CHANNELS:", JSON.stringify(body.channels));

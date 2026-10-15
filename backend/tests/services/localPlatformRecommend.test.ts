@@ -353,4 +353,47 @@ describe("P0-2/P0-3:封面语义等价 + 候选池缓存 + 显式失效", () => 
     const ids = recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
     expect(new Set(ids)).toEqual(new Set(["p-old", "p-new"]));
   });
+
+  it("池 TTL(120s)过期 → SWR:本轮仍用旧池立即返回,后台微任务重建供下一轮", async () => {
+    seedPlaylist("p-old", "netease");
+    let fake = Date.now();
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => fake);
+    try {
+      // 首次调用:池不存在 → 同步建池
+      expect(recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id)).toEqual(["p-old"]);
+      // 推进 >120s 并新增歌单:只有池重建后才可见
+      seedPlaylist("p-new", "netease");
+      fake += 121_000;
+      // 过期后第一次调用:不阻塞、不同步重建 —— 仍返回旧池(新歌单不可见)
+      expect(recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id)).toEqual(["p-old"]);
+      // 后台重建走 queueMicrotask(单飞标志防并发重复)—— 让微任务跑完
+      await new Promise((r) => setTimeout(r, 0));
+      // 下一轮:拿到重建后的新池(TTL 重新起算,新旧歌单都在)
+      const ids = recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
+      expect(new Set(ids)).toEqual(new Set(["p-old", "p-new"]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("池过期窗口内并发调用:后台重建 single-flight,只重建一次", async () => {
+    seedPlaylist("p-n1", "netease");
+    seedPlaylist("p-n2", "qq");
+    let fake = Date.now();
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => fake);
+    try {
+      recommendLocalPlatforms(); // 建池
+      fake += 121_000;
+      const prepareSpy = vi.spyOn(sqlite, "prepare");
+      recommendLocalPlatforms(); // 过期 → kick 后台重建(入队微任务)
+      recommendLocalPlatforms(); // 在途标志已置位 → 不重复 kick
+      await new Promise((r) => setTimeout(r, 0)); // 后台重建 settle
+      recommendLocalPlatforms(); // 新池,TTL 内
+      const poolQueries = prepareSpy.mock.calls
+        .filter((a: any) => /FROM playlists/i.test(String(a[0]))).length;
+      expect(poolQueries).toBe(1); // 过期窗口内多次调用只触发一次重建查库
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

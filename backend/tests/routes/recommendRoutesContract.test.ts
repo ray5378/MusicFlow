@@ -21,7 +21,8 @@ const f = vi.hoisted(() => ({
   startAsyncTask: vi.fn(() => ({ started: true, taskId: "task-1" }) as any),
   touch: vi.fn(),
   // 首页固定卡要查歌单行;换成可控的假 sqlite,两个分支(有行/无行)都能精确构造。
-  sqlite: { prepare: vi.fn(() => ({ get: () => undefined as any })) },
+  // run 供聚合缓存 write-through 落 settings 表(无状态 → 等价于落库失败被吞掉)。
+  sqlite: { prepare: vi.fn(() => ({ get: () => undefined as any, run: () => undefined as any })) },
 }));
 
 vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
@@ -31,7 +32,7 @@ vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
 });
 
 import { recommendCache, clearProviderRecommendCache } from "../../src/routes/api/shared.js";
-import { registerRecommend } from "../../src/routes/api/recommend.js";
+import { registerRecommend, __resetRecommendRefreshStateForTest } from "../../src/routes/api/recommend.js";
 
 type Any = any;
 
@@ -50,6 +51,8 @@ const post = (p: string, body?: Any) =>
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 const json = async (r: Response) => (await r.json()) as Any;
+/** 让后台首拉/后台刷新(纯微任务链)跑完:setTimeout 宏任务前微任务队列必清空。 */
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 /** 造一个「能力插件」形状。 */
 const cap = (id: string, impl?: Any, capabilities: string[] = []) => ({
@@ -59,6 +62,7 @@ const cap = (id: string, impl?: Any, capabilities: string[] = []) => ({
 beforeEach(() => {
   recommendCache.clear();
   clearProviderRecommendCache();
+  __resetRecommendRefreshStateForTest(); // 清失败退避/在途刷新表,用例间隔离
   f.firstEnabledByCapability.mockReset().mockReturnValue(undefined);
   f.getEnabledByCapability.mockReset().mockReturnValue([]);
   f.getPlugin.mockReset().mockReturnValue(undefined);
@@ -71,15 +75,15 @@ beforeEach(() => {
   f.comboApi.mockReset().mockReturnValue({ generateComboPlaylist: () => undefined });
   f.runPluginJob.mockReset().mockReturnValue({ started: true, alreadyRunning: false });
   f.startAsyncTask.mockReset().mockReturnValue({ started: true, taskId: "task-1" });
-  f.sqlite.prepare.mockReset().mockReturnValue({ get: () => undefined });
+  f.sqlite.prepare.mockReset().mockReturnValue({ get: () => undefined, run: () => undefined });
 });
 
 // ==================== GET /v1/recommend ====================
 
 describe("GET /v1/recommend", () => {
-  it("无任何推荐插件 → 200 空频道,providerId 为空串", async () => {
+  it("无任何推荐插件 → 冷启动返回 pending 空频道,providerId 为空串", async () => {
     const b = await json(await get("/v1/recommend"));
-    expect(b).toEqual({ success: true, channels: [], providerId: "" });
+    expect(b).toEqual({ success: true, channels: [], providerId: "", pending: true });
   });
 
   it("主插件频道映射:字段兜底、sortOrder 缺省 99、imported 由已入库歌单决定", async () => {
@@ -90,6 +94,11 @@ describe("GET /v1/recommend", () => {
     f.findLocalRemotePlaylist.mockImplementation((id: string) =>
       id === "p1" ? { songCount: 42 } : undefined);
 
+    // 冷启动:第一次 GET 立即返回 pending 空频道(不等外网插件)
+    const first = await json(await get("/v1/recommend"));
+    expect(first.pending).toBe(true);
+    expect(first.channels).toEqual([]);
+    await settle(); // 后台首拉 settle 后缓存就位
     const b = await json(await get("/v1/recommend"));
     const ch = b.channels[0];
     expect(ch.source).toBe("qq");
@@ -112,6 +121,9 @@ describe("GET /v1/recommend", () => {
     }));
     f.getPluginConfig.mockReturnValue({ baseUrl: "http://127.0.0.1:8080/" });
 
+    const first = await json(await get("/v1/recommend"));
+    expect(first.pending).toBe(true); // 冷启动先回 pending
+    await settle();
     const b = await json(await get("/v1/recommend"));
     const pls = b.channels[0].playlists;
     expect(pls[0].cover).toBe("http://127.0.0.1:8080/img/a.jpg");
@@ -120,15 +132,20 @@ describe("GET /v1/recommend", () => {
     expect(pls[2].cover).toBe("https://cdn/c.jpg");
   });
 
-  it("主插件抛错:不阻断其它插件,错误原因回传到响应 error 字段", async () => {
+  it("主插件抛错:不阻断其它插件(错误不再回传响应,后台聚合后其它插件频道照常返回)", async () => {
     f.firstEnabledByCapability.mockReturnValue(cap("gmdl", {
       recommend: async () => { throw new Error("上游 502"); },
     }));
     f.getEnabledByCapability.mockReturnValue([
       cap("bili", { recommend: async () => ({ channels: [{ source: "bili", playlists: [] }] }) }),
     ]);
+    const first = await json(await get("/v1/recommend"));
+    expect(first.pending).toBe(true); // 冷启动先回 pending 空频道
+    expect(first.channels).toEqual([]);
+    await settle();
     const b = await json(await get("/v1/recommend"));
-    expect(b.error).toBe("上游 502");
+    // 主插件失败只记日志(响应不再携带 error 字段);其它插件频道不受影响
+    expect(b.error).toBeUndefined();
     expect(b.channels.map((c: Any) => c.source)).toEqual(["bili"]);
   });
 
@@ -146,6 +163,8 @@ describe("GET /v1/recommend", () => {
       cap("qq", { recommend: async () => ({ channels: [{ source: "qq-rank", playlists: [{ id: "x" }] }] }) }),
       cap("kugou", { recommend: async () => { throw new Error("酷狗挂了"); } }),
     ]);
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const b = await json(await get("/v1/recommend"));
     expect(b.channels.map((c: Any) => c.source)).toEqual(["qq-rank"]);
     expect(b.channels[0]._pluginId).toBe("qq");
@@ -165,16 +184,20 @@ describe("GET /v1/recommend", () => {
       cap("a", { recommend: async () => ({ channels: [{ source: "first", sortOrder: 1, playlists: [] }] }) }),
       cap("b", { recommend: async () => ({ channels: [{ source: "default", playlists: [] }] }) }),
     ]);
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const b = await json(await get("/v1/recommend"));
     expect(b.channels.map((c: Any) => c.source)).toEqual(["first", "late", "default"]);
   });
 
-  it("首次聚合写缓存,第二次直接命中(不再调用插件)", async () => {
+  it("冷启动首拉写缓存:第一次 pending 空频道,后台拉取后第二次直接命中(不再调用插件)", async () => {
     const recommend = vi.fn(async () => ({ channels: [{ source: "cached", playlists: [] }] }));
     f.firstEnabledByCapability.mockReturnValue(cap("gmdl", { recommend }));
 
     const b1 = await json(await get("/v1/recommend"));
-    expect(b1.channels[0].source).toBe("cached");
+    expect(b1.pending).toBe(true);
+    expect(b1.channels).toEqual([]);
+    await settle(); // 后台首拉完成并写缓存
     expect(recommend).toHaveBeenCalledTimes(1);
 
     const b2 = await json(await get("/v1/recommend"));
@@ -213,8 +236,65 @@ describe("GET /v1/recommend", () => {
     f.firstEnabledByCapability.mockReturnValue(cap("gmdl", {
       recommend: async () => ({ channels: [{ source: "s", playlists: "nope" }] }),
     }));
+    expect((await json(await get("/v1/recommend"))).pending).toBe(true); // 冷启动
+    await settle();
     const b = await json(await get("/v1/recommend"));
     expect(b.channels[0].playlists).toEqual([]);
+  });
+
+  it("冷启动首拉 write-through 落 settings 表;内存被清后从 DB 回灌(不再冷)", async () => {
+    // 有状态的假 settings 表:INSERT 记入 store,SELECT 从 store 读
+    const store = new Map<string, string>();
+    f.sqlite.prepare.mockImplementation((sql: string) => {
+      const isUpsert = /INSERT INTO settings/i.test(sql);
+      return {
+        get: (key: string) => (isUpsert ? undefined : { value: store.get(String(key)) }),
+        run: (...args: any[]) => {
+          if (isUpsert) store.set(String(args[0]), String(args[1]));
+          return { changes: 1 };
+        },
+      };
+    });
+    const recommend = vi.fn(async () => ({ channels: [{ source: "db", playlists: [] }] }));
+    f.firstEnabledByCapability.mockReturnValue(cap("gmdl", { recommend }));
+
+    const b1 = await json(await get("/v1/recommend"));
+    expect(b1.pending).toBe(true);
+    await settle(); // 后台首拉 write-through
+    expect(recommend).toHaveBeenCalledTimes(1);
+    // settings 表存在 recommend.aggCache.<cacheKey> 行(cacheKey = "gmdl|")
+    const row = store.get("recommend.aggCache.gmdl|");
+    expect(row).toBeTruthy();
+    expect(JSON.parse(row!).channels[0].source).toBe("db");
+
+    // 模拟内存被清(reclaim cleaner / 进程重启):再次 GET 从 DB 回灌,TTL 内不再冷
+    recommendCache.clear();
+    const b2 = await json(await get("/v1/recommend"));
+    expect(b2.success).toBe(true);
+    expect(b2.pending).toBeUndefined();
+    expect(b2.channels[0].source).toBe("db");
+    expect(recommend).toHaveBeenCalledTimes(1); // 未再外呼
+  });
+
+  it("冷启动首拉失败 → 60s 退避:后续请求仍 pending 且不再 kick;清退避后恢复", async () => {
+    const recommend = vi.fn(async () => { throw new Error("上游 502"); });
+    f.firstEnabledByCapability.mockReturnValue(cap("gmdl", { recommend }));
+
+    const b1 = await json(await get("/v1/recommend"));
+    expect(b1.pending).toBe(true);
+    await settle(); // 后台首拉失败 → 记入退避表
+    expect(recommend).toHaveBeenCalledTimes(1);
+
+    // 60s 退避内:下一个请求不再重 kick(防前端轮询打爆故障上游)
+    const b2 = await json(await get("/v1/recommend"));
+    expect(b2.pending).toBe(true);
+    expect(b2.channels).toEqual([]);
+    expect(recommend).toHaveBeenCalledTimes(1);
+
+    // 测试钩子清退避表 → 下一个请求恢复 kick
+    __resetRecommendRefreshStateForTest();
+    await json(await get("/v1/recommend"));
+    expect(recommend).toHaveBeenCalledTimes(2);
   });
 });
 

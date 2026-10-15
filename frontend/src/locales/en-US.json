@@ -376,6 +376,7 @@
     "refreshRoamTitle": "Refresh manually (regenerate daily/local recommendations and rebuild today's roam)",
     "trackCount": "{count} tracks",
     "recommendError": "Failed to load platform picks. Please check whether the go-music-dl plugin is enabled and its service address is configured",
+    "recommendPending": "Platform picks are being prepared in the background and will appear automatically",
     "featured": "Picks",
     "forYouSub": "Curated for you on {name}",
     "viewGroupPlaylists": "View {name} playlists",

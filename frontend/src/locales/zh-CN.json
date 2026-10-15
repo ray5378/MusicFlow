@@ -376,6 +376,7 @@
     "refreshRoamTitle": "手动刷新(重新随机生成每日推荐/本地推荐并重组今日漫游)",
     "trackCount": "{count} 首",
     "recommendError": "平台精选加载失败，请检查 go-music-dl 插件是否已启用并配置服务地址",
+    "recommendPending": "平台精选后台准备中，内容就绪后自动展示",
     "featured": "精选",
     "forYouSub": "为你精选的 {name} 歌单",
     "viewGroupPlaylists": "查看{name}歌单",

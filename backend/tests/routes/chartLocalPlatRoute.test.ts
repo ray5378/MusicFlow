@@ -13,6 +13,7 @@ import { users, plugins } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { apiRoutes, clearRecommendCache } from "../../src/routes/api/index.js";
+import { __resetRecommendRefreshStateForTest } from "../../src/routes/api/recommend.js";
 import {
   discoverExternalPlugins,
 } from "../../src/plugins/discovery.js";
@@ -95,6 +96,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
   clearRecommendCache();
+  // /v1/recommend 聚合缓存 write-through 的 settings 行跨用例残留会被 DB 回灌命中 → 一并清
+  sqlite.prepare("DELETE FROM settings WHERE key LIKE 'recommend.aggCache.%'").run();
+  __resetRecommendRefreshStateForTest(); // 清失败退避/在途刷新表,用例间隔离
   clearPlaylists();
   disableAll();
 });
@@ -179,6 +183,10 @@ describe("三个榜单插件(改动后)声明 localPlatformRecommend 并走本�
     db.insert(plugins).values({ name: "go-music-dl", enabled: 1, config: JSON.stringify({ baseUrl: "http://gm:8080", sortOrder: 10 }) }).run();
     for (const s of SEEDED) seedPlaylist(s.pid, s.name, s.songCount, s.cover);
 
+    // 冷启动:先回 pending 空频道,后台首拉后二次 GET 才有聚合结果
+    const first = await get("v1/recommend");
+    expect(first.body).toMatchObject({ success: true, pending: true, channels: [] });
+    await new Promise((r) => setTimeout(r, 0)); // flush 后台首拉
     const { body } = await get("v1/recommend");
     expect(body.success).toBe(true);
     // go-music-dl 频道仍在
