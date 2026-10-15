@@ -211,6 +211,13 @@ jobs:
       # rest/transcodeStream.test.ts 用真实 ffmpeg 端到端验证 /rest/stream 转码。
       - name: 全量测试(含转码链路契约)
         shell: bash
+        # 关闭 vitest console 截获(与 backend/vitest.config.ts、sendspin-guard.yml 同源):
+        # sendspin 测试文件停服务后仍有迟到 console 输出(自有 pushLoop / ws 关闭回调 +
+        # 第三方 bonjour 名称冲突探测),经 Vitest 5 的 onUserConsoleLog worker→主进程 RPC
+        # 在 worker teardown 时被判为 unhandled error,导致「全量用例全过」却 exit 1 —— 在
+        # build.yml 会误触发回滚发版。关掉截获后日志仍完整落在 CI 日志与失败 artifact。
+        env:
+          MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT: "1"
         run: |
           set -o pipefail
           cd backend
