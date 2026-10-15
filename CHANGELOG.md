@@ -18,6 +18,8 @@
 - 同步既有 QA 语义：`tests/services/localPlatformRecommend.test.ts`、`tests/qa_perf/randomness.test.ts`、`tests/qa_perf/coverEquivalence.test.ts` —— 「失效后**立即**重建」断言改为 SWR 语义（失效本轮不阻塞、排空微任务后下一轮即见新数据），跨用例重置改用 `dropPlatformPool()` 保证确定性；新增回归用例「`invalidatePlatformPool()` 本轮**不同步查库**」（断言失效后本轮 `FROM playlists` 查询次数为 0）。
 - 230 落地前后门禁自检：backend `tsc --noEmit` 0 error；定向 `vitest` 7 文件 / 94 用例全通过；diff 无 CR 行尾（`grep -c` 计数全为 0）；落地前（方案方向 + 语义影响面）与落地后（diff 逐行复核 + 语义等价性）两轮独立审查。按约定不在本版部署生产环境。
 
+- CI 发版门禁误判修复（连带复查发现）：`build.yml` 的全量测试作业在 `7fe604a` 上 **505/505 文件、6832 用例全过**，仅因 `EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending`（sendspin 测试停服务后的迟到 console 输出经 Vitest 5 的 worker→主进程 RPC 派发）被判 1 个 unhandled error → exit 1 → **误触发 rollback**（`:latest`/`:main` 被回滚到旧 digest）；同一条 `npx vitest run` 本轮在 `ci.yml` 通过，属 `sequence.shuffle` 下的顺序相关偶发。沿用 `backend/vitest.config.ts` 与 `sendspin-guard.yml` 已有的结构性缓解开关 `MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT=1`，把 console 截获关断覆盖到 `build.yml` / `ci.yml` 两个全量测试作业（`playback-chain-guard.yml` 只跑非 sendspin 子集，不受该竞态影响）；日志仍完整落在 CI 日志与失败 artifact（不走 RPC，竞态从结构上消除）。修复后 `f491b20` 的 8 个 workflow 全绿。
+
 ## [4.6.20] - 2026-10-15
 
 ### Perf
