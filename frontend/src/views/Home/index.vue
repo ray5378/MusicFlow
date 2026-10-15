@@ -139,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, onDeactivated } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import api, { formatApiError } from "@/api";
@@ -291,12 +291,40 @@ const sortedAllGroups = computed(() => {
     .filter((g) => g.playlists.length > 0);
   return [...recommend, ...localRandomGroups.value].sort((a, b) => a.sortOrder - b.sortOrder);
 });
+/** 安排下一轮本地随机重试。needRetry=true 且未耗尽次数 → 8s 后再拉;否则复位并停表。
+ *  轮询自愈的两类触发:后端 pending(冷启动未产出)+ 请求失败(超时/网络)。 */
+function scheduleLocalRecommendRetry(needRetry: boolean) {
+  // localRecommendPaused:keep-alive 切走后为 true —— 在途请求 settle 回来时不得再起表。
+  if (needRetry && !localRecommendPaused && localRecommendRetryCount < LOCAL_RECOMMEND_RETRY_MAX) {
+    localRecommendRetryCount += 1;
+    if (localRecommendRetryTimer) clearTimeout(localRecommendRetryTimer);
+    localRecommendRetryTimer = setTimeout(loadLocalRandom, RECOMMEND_RETRY_MS);
+  } else {
+    localRecommendRetryCount = 0;
+    if (localRecommendRetryTimer) {
+      clearTimeout(localRecommendRetryTimer);
+      localRecommendRetryTimer = null;
+    }
+  }
+}
+
 async function loadLocalRandom() {
+  if (localRecommendInFlight) return; // 防重入:避免定时器/onActivated 触发并发请求
+  localRecommendInFlight = true;
   try {
     const res = await api.get("/rest/api/v1/local-recommend");
     localRandomChannels.value = res.data.channels || [];
+    // pending 可与「部分 provider 已返回」并存,故只看 pending 标志本身:只要后端本轮
+    // 有 provider 未产出(冷启动),就继续轮询让其自愈。
+    scheduleLocalRecommendRetry(!!res.data?.pending);
   } catch {
-    localRandomChannels.value = [];
+    // 请求失败(最典型:服务端偶发阻塞 > axios 15s 超时)。**必须继续轮询自愈**,否则
+    // 该分区会永久空白直到整页刷新 —— 这正是 2026-10-15「首页偶发卡死」的形态:
+    // 改造后 /v1/recommend 有轮询兜底,但本地随机仅在 pending 时轮询,超时落 catch
+    // 后不再重试。此处不清空已渲染内容(保留 last-good),交由下一轮覆盖。
+    scheduleLocalRecommendRetry(true);
+  } finally {
+    localRecommendInFlight = false;
   }
 }
 
@@ -375,6 +403,14 @@ let recommendRetryCount = 0;
 const RECOMMEND_RETRY_MS = 8000;
 const RECOMMEND_RETRY_MAX = 18;
 
+// 本地随机(按平台)冷启动/失败轮询:后端 pending(冷启动未产出)或请求失败(超时)时,
+// 前端每 8s 重试(≤6 次 ≈48s),数据到位自动填充;与 /v1/recommend 同策略。
+let localRecommendRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let localRecommendRetryCount = 0;
+let localRecommendInFlight = false;
+let localRecommendPaused = false;
+const LOCAL_RECOMMEND_RETRY_MAX = 6;
+
 async function loadRecommend() {
   try {
     // 后端已非阻塞(冷启动返回 pending 空频道,SWR/热路径秒回),默认超时足够。
@@ -414,6 +450,30 @@ onUnmounted(() => {
     clearTimeout(recommendRetryTimer);
     recommendRetryTimer = null;
   }
+  if (localRecommendRetryTimer) {
+    clearTimeout(localRecommendRetryTimer);
+    localRecommendRetryTimer = null;
+  }
+});
+
+// Home 位于 MainLayout 的 keep-alive(max=10)内:切走后 onUnmounted 不触发,轮询定时器
+// 会继续在后台空跑(每 8s 重洗本地随机卡片、且计数耗尽后无法复位)。故 deactivated 时
+// 停掉本地随机轮询、复位计数并**暂停续期**(在途请求 settle 后不得再起表);返回页面时
+// 解除暂停并按需重新拉取(见 onActivated)。
+onDeactivated(() => {
+  localRecommendPaused = true;
+  if (localRecommendRetryTimer) {
+    clearTimeout(localRecommendRetryTimer);
+    localRecommendRetryTimer = null;
+  }
+  localRecommendRetryCount = 0;
+});
+
+// 返回 cached 页面时:若上次离开前本地随机仍在等后端回填(pending),重新拉取一次让
+// 分区自愈(keep-alive 命中的是旧实例,onMounted 不会重跑)。
+onActivated(() => {
+  localRecommendPaused = false;
+  if (localRandomChannels.value.length === 0) void loadLocalRandom();
 });
 
 onMounted(async () => {

@@ -195,6 +195,16 @@ async function fetchRecommendChannels(
 /** 后台刷新 single-flight 表:key = 缓存 key。同一缓存在途刷新至多一个。 */
 const recommendRefreshInflight = new Map<string, Promise<void>>();
 
+/**
+ * /v1/local-recommend 各 provider 的**在途调用**单飞表:key = 插件 id → 正在进行的
+ * recommendLocal() 调用 promise(解析为 provider 原始结果)。冷启动竞速与 SWR 后台刷新
+ * **共用同一张表**:同一 provider 任意时刻至多发起一次沙箱调用;settle 时写缓存并自清。
+ * (2026-10-15 复审发现的缺陷:此前只对「后台写缓存」去重,不挡调用本身 —— 前端 8s 轮询
+ *  与多客户端并发会把同一慢 provider 反复并发外呼,正是本次要消除的负载。)
+ * 置于模块作用域:与 recommendRefreshInflight 同惯例,且便于测试钩子统一清空。
+ */
+const providerInvokeInflight = new Map<string, Promise<any>>();
+
 /** 冷启动/刷新失败退避表:key → 上次失败时刻。60s 内不再重复发起后台拉取,
  *  防止前端轮询重试把故障中的上游打爆(2026-10-15 B2)。 */
 const recommendColdFailAt = new Map<string, number>();
@@ -266,10 +276,11 @@ export function startRecommendCacheWarmer(): void {
   tick();
 }
 
-/** 测试钩子:清空失败退避表与在途刷新表(vitest 用例间隔离)。 */
+/** 测试钩子:清空失败退避表、在途刷新表与 provider 在途调用表(vitest 用例间隔离)。 */
 export function __resetRecommendRefreshStateForTest(): void {
   recommendColdFailAt.clear();
   recommendRefreshInflight.clear();
+  providerInvokeInflight.clear();
 }
 
 export function registerRecommend(app: Hono): void {
@@ -318,8 +329,42 @@ startRecommendCacheWarmer();
 // 从本地库按平台分组随机取已入库歌单,供三端(Web/客户端/HA)统一展示动态刷新的
 // 平台歌单——不依赖上游固定精选。核心只按能力遍历调用并透传数据。
 
-/** /v1/local-recommend 各 provider 的后台刷新 single-flight 表:key = 插件 id。 */
-const providerRefreshInflight = new Map<string, Promise<void>>();
+/** 取(或发起)某 provider 的单飞调用。返回**原始结果 promise**:成功时先写入
+ *  providerRecommendCache 再 resolve 该结果(冷启动路径依赖此返回值当作本轮真值),
+ *  失败原样 reject,由调用方各自处理(冷启动交 raceDeadline 竞速;SWR 后台自行 catch)。
+ *  在途表 providerInvokeInflight 见模块顶部。 */
+function kickProviderInvoke(pluginId: string, p: any): Promise<any> {
+  const existing = providerInvokeInflight.get(pluginId);
+  if (existing) return existing;
+  const tracked: Promise<any> = p.impl
+    .recommendLocal(getPluginConfig(pluginId) || {})
+    .then((fresh: any) => {
+      providerRecommendCache.set(pluginId, { ts: Date.now(), result: fresh });
+      return fresh;
+    })
+    .finally(() => {
+      providerInvokeInflight.delete(pluginId);
+    });
+  providerInvokeInflight.set(pluginId, tracked);
+  return tracked;
+}
+
+/** 冷启动 provider 软截止(ms):超过则本轮不再阻塞等待,转后台单飞拉取。 */
+const LOCAL_PROVIDER_DEADLINE_MS = 2500;
+
+/** 与截止时间竞速:超时返回 {ok:false};provider 自身报错则原样抛出(交外层 try/catch
+ *  记录,与改动前「recommendLocal() failed」的告警语义一致)。两个分支都给 `p` 挂了
+ *  处理函数,杜绝迟到 settle 造成的 unhandled rejection。 */
+function raceDeadline<T>(p: Promise<T>, ms: number): Promise<{ ok: true; value: T } | { ok: false }> {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; resolve({ ok: false }); } }, ms);
+    p.then(
+      (value) => { if (!done) { done = true; clearTimeout(t); resolve({ ok: true, value }); } },
+      (err) => { if (!done) { done = true; clearTimeout(t); reject(err); } },
+    );
+  });
+}
 
 app.get("/v1/local-recommend", async (c) => {
   // 遍历所有具备该能力的插件,合并多插件的 channels(支持多提供方共存)。
@@ -328,6 +373,7 @@ app.get("/v1/local-recommend", async (c) => {
   // try/catch,单个失败只记 warn、不影响其它;合并结果最后统一按 sortOrder 排序。
   const providers = getEnabledByCapability("localPlatformRecommend");
   const allChannels: any[] = [];
+  let pendingAny = false;
   await Promise.all(
     providers.map(async (p) => {
       if (typeof p.impl?.recommendLocal !== "function") return;
@@ -344,22 +390,26 @@ app.get("/v1/local-recommend", async (c) => {
           result = cached.result;
         } else if (cached) {
           // SWR:过期缓存立即返回 stale,后台单飞刷新(与 /v1/recommend 同策略)。
-          // 冷=慢插件不再阻塞首页;无缓存的冷启动仍阻塞拉取(保持现状)。
-          if (!providerRefreshInflight.has(pluginId)) {
-            const task = (async () => {
-              const fresh = await p.impl.recommendLocal(getPluginConfig(pluginId) || {});
-              providerRecommendCache.set(pluginId, { ts: Date.now(), result: fresh });
-            })().catch((e: any) => {
-              console.warn(`[LOCAL-RECOMMEND] ${pluginId} SWR 后台刷新失败:`, e?.message || e);
-            }).finally(() => {
-              providerRefreshInflight.delete(pluginId);
-            });
-            providerRefreshInflight.set(pluginId, task);
-          }
+          // kickProviderInvoke 与冷分支共用单飞表 → 已有在途调用时直接复用它。
+          // 后台刷新为 fire-and-forget:失败仅告警,勿让 rejection 逃逸成未处理拒绝。
+          kickProviderInvoke(pluginId, p).catch((e: any) => {
+            console.warn(`[LOCAL-RECOMMEND] ${pluginId} 拉取失败:`, e?.message || e);
+          });
           result = cached.result;
+        } else if (cacheable) {
+          // 冷启动无缓存:不再同步阻塞(2026-10-15 首页偶发卡死修复)。沙箱 provider 调用
+          // 实测 1.6–16.6s(最坏超过前端 15s 超时),会拖住首页打开。用软截止竞速**单飞调用**:
+          // 截止内返回就用其真值(缓存已由 kickProviderInvoke 写入);超时则本轮该 provider 不产出
+          // 频道并置 pending,后台同一条 promise 仍在跑,settle 后写缓存,下一轮请求即命中秒回。
+          const raced = await raceDeadline(kickProviderInvoke(pluginId, p), LOCAL_PROVIDER_DEADLINE_MS);
+          if (!raced.ok) {
+            pendingAny = true;
+            return; // 本轮跳过该 provider
+          }
+          result = raced.value;
         } else {
+          // 未声明 TTL 的 provider(内置本地随机,纯进程内洗牌):保持同步调用。
           result = await p.impl.recommendLocal(getPluginConfig(pluginId) || {});
-          if (cacheable) providerRecommendCache.set(pluginId, { ts: Date.now(), result });
         }
         const channels = Array.isArray(result?.channels) ? result.channels : [];
         for (const ch of channels) {
@@ -384,6 +434,9 @@ app.get("/v1/local-recommend", async (c) => {
           });
         }
       } catch (e: any) {
+        // provider 本轮未产出(调起失败/拒绝):置 pending,前端据此继续轮询自愈 ——
+        // 否则返回 200 + 空频道 + 无 pending,前端会当作「稳态空」而停止重试,分区永久空白。
+        pendingAny = true;
         console.warn(`[LOCAL-RECOMMEND] ${p.manifest.id} recommendLocal() failed:`, e?.message || e);
       }
     }),
@@ -394,7 +447,11 @@ app.get("/v1/local-recommend", async (c) => {
     const sb = typeof b.sortOrder === "number" ? b.sortOrder : 99;
     return sa - sb;
   });
-  return c.json({ success: true, channels: allChannels });
+  return c.json(
+    pendingAny
+      ? { success: true, channels: allChannels, pending: true }
+      : { success: true, channels: allChannels },
+  );
 });
 
 // 首页顶部「每日推荐 + 本地推荐 + 随机歌单」展示张数(含两张固定推荐)。

@@ -117,4 +117,32 @@ describe("P1-1 provider 结果缓存边界(核心 manifest 驱动)", () => {
     expect(b2.channels[0].playlists[0].id).toBe("p1"); // 命中缓存 → 同一结果
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  // 首页偶发卡死修复(2026-10-15):冷启动无缓存时不再同步阻塞在慢 provider 上,
+  // 而是软截止(2500ms)竞速;超时返回 pending:true 空频道,由后台单飞回填。
+  // 契约:同一 provider 全程只被调 1 次(单飞),超时首轮不产出,回填后下一轮秒回真值。
+  it("冷启动超软截止:不阻塞返回 pending:true,后台单飞回填后下一轮命中", async () => {
+    vi.useFakeTimers();
+    try {
+      const fn = vi.fn(
+        () =>
+          new Promise((res) =>
+            setTimeout(() => res({ channels: [{ source: "slow", sortOrder: 1, playlists: [] }] }), 9000),
+          ),
+      );
+      f.getEnabledByCapability.mockReturnValue([prov("slow-z", 300, fn)]);
+      const firstResp = get("/v1/local-recommend").then((r) => r.json());
+      await vi.advanceTimersByTimeAsync(2600); // 越过 2500ms 软截止
+      const b1 = await firstResp;
+      expect(b1.pending).toBe(true);
+      expect(b1.channels).toEqual([]);
+      await vi.advanceTimersByTimeAsync(9000); // 后台单飞 provider settle → 写缓存
+      const b2 = await json(await get("/v1/local-recommend"));
+      expect(b2.pending).toBeUndefined();
+      expect(b2.channels.length).toBe(1);
+      expect(fn).toHaveBeenCalledTimes(1); // 单飞:全程只发起一次沙箱调用
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
