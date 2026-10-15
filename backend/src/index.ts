@@ -349,7 +349,7 @@ import { startTagRepairScheduler } from "./services/fetch/tagRepair.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { startStreamProbeScheduler } from "./services/source/streamProbe.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
-import { resumeInterruptedFetchJobs } from "./services/fetch/jobRunner.js";
+import { resumeInterruptedFetchJobs, BOOT_RESUME_DELAY_MS } from "./services/fetch/jobRunner.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
 import { cleanCacheRootContents, ensureWritableDir } from "./services/fetch/writable.js";
 
@@ -409,12 +409,20 @@ try {
 
 // 启动恢复（PATCH19）：上一进程遗留的 pending/running fetch 任务**自动续跑**（不再落
 // failed 作废）。断点续跑让重跑只处理未完成项；全终态任务首片自然落终态。
-try {
-  const resumed = resumeInterruptedFetchJobs();
-  if (resumed > 0) log.info(`[FETCH] boot 恢复：${resumed} 个中断任务已重新入队续跑`);
-} catch (e: any) {
-  log.error(`[FETCH] boot 恢复失败: ${e?.message || e}`);
-}
+//
+// 但**不在启动瞬间**跑（2026-10-15 起）：容器刚起来时 entrypoint 收尾、外置插件装配、
+// 首批请求都在抢宿主 CPU，而一次续批会立刻拉起批量子进程 + 4 路 ffmpeg 转码（生产实测
+// 容器 CPU 419%~534%、宿主 8 核 load 15，转码闸排队最长 64.7s），表现为「刚启动就卡」。
+// 延后 BOOT_RESUME_DELAY_MS 让启动路径先走完；期间遗留任务行保持 pending/running 不动，
+// libraryScheduler 的 busy 判定会照常跳过，不会重复起批。
+setTimeout(() => {
+  try {
+    const resumed = resumeInterruptedFetchJobs();
+    if (resumed > 0) log.info(`[FETCH] boot 恢复：${resumed} 个中断任务已重新入队续跑`);
+  } catch (e: any) {
+    log.error(`[FETCH] boot 恢复失败: ${e?.message || e}`);
+  }
+}, BOOT_RESUME_DELAY_MS);
 
 // 写目录启动探针 + 缓存清空：挂载权限配错第一时间在日志给出修复指引；
 // 缓存目录内容（上次进程遗留的下载子目录 / .part 半成品）整目录清空（不碰成品目录）。

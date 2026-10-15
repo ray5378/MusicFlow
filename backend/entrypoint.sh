@@ -1,10 +1,27 @@
 #!/bin/sh
 set -e
 
-# Bind-mounted data dirs come from the host with arbitrary ownership.
-# Ensure the runtime user can write before dropping privileges.
+# Bind-mounted data dirs come from the host with arbitrary ownership. Ensure the
+# runtime user can write before dropping privileges —— 但只在**确实有错属主条目**时
+# 才做全量递归 chown。
+#
+# 为什么要改：`chown -R` 会走完整棵树（生产实测 20GB / 87895 个条目，其中 covers
+# 一个目录就占 17.8GB / 87855 项），每次容器重建要花 ~29s，是容器起来后 ~45s 内
+# 完全无法服务的头号原因（2026-10-15 实测）。data 目录里的内容都是运行时用户自己
+# 写的，属主不会漂移，所以只探 data 根 + 一级子项就足以发现「绑定挂载属主配错」；
+# 更深层的文件即便属主不对也只影响读权限位，不影响启动。
+# 探测失败（stat 不可用 / musicflow 用户查不到等）会退化为 old 行为（仍做全量
+# chown），不会漏修——探测本身不做任何「跳过 chown」之外的事。
 if [ -d /app/backend/data ]; then
-  chown -R musicflow:musicflow /app/backend/data
+  want_uid=$(id -u musicflow 2>/dev/null || echo -1)
+  misowned=0
+  for p in /app/backend/data /app/backend/data/*; do
+    [ -e "$p" ] || continue
+    [ "$(stat -c %u "$p" 2>/dev/null || echo -1)" = "$want_uid" ] || { misowned=1; break; }
+  done
+  if [ "$misowned" = 1 ]; then
+    chown -R musicflow:musicflow /app/backend/data
+  fi
 fi
 
 # ---------- 预装外置插件(镜像内置种子) ----------

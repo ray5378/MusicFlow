@@ -16,7 +16,7 @@ import {
   buildLibraryTargets,
 } from "./library.js";
 import { createFetchJob, updateFetchJobStatus } from "./jobStore.js";
-import { startFetchJob } from "./jobRunner.js";
+import { startFetchJob, BOOT_RESUME_DELAY_MS } from "./jobRunner.js";
 import { isAutoSessionActive, setAutoSession } from "./autoSession.js";
 import { todayTriggerMs } from "./upgradeScheduler.js";
 
@@ -24,7 +24,9 @@ const log = createLogger("library-scheduler");
 
 const LAST_RUN_KEY = "fetch.library.auto.lastRunAt";
 const POLL_MS = 60_000;
-const BOOT_DELAY_MS = 20_000;
+// boot 后首次 tick 的延迟：与入库任务的启动恢复（resumeInterruptedFetchJobs）保持
+// 同一个常量，让两条重启续跑路径同步延后，避免「容器刚起来就满速开批」（2026-10-15）。
+const BOOT_DELAY_MS = BOOT_RESUME_DELAY_MS;
 
 let started = false;
 let ticking = false;

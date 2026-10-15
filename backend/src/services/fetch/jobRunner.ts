@@ -241,6 +241,17 @@ export function abortFetchJob(jobId: string): boolean {
 }
 
 /**
+ * boot 恢复的延迟（2026-10-15）：容器起来后**不立刻**续跑遗留的批量任务，等 60s。
+ *
+ * 为什么要延后：启动瞬间宿主同时在跑 entrypoint 收尾、外置插件沙箱装配与首批用户
+ * 请求，而一次续批会立刻拉起批量子进程 + 4 路 ffmpeg 转码。生产实测（2026-10-15）
+ * 容器 CPU 419%~534%、宿主 8 核 load 15，转码闸排队最长 waitMs=64.7s，表现为
+ * 「容器刚起来就卡」——所有依赖转码/入库/插件的操作都排在队列后面。
+ * 延后 60s 让启动路径与首批交互先走完，随后按原逻辑续跑。
+ */
+export const BOOT_RESUME_DELAY_MS = 60_000;
+
+/**
  * boot 恢复（PATCH19）：上一进程遗留的 pending/running fetch 任务**重新入队续跑**，
  * 不再落 failed 终态。PATCH17 断点续跑已让 chunk 重跑对已有终态项秒跳，续跑成本
  * ≈ 只跑未完成项；全部终态的任务会在首片走「todo.length===0」分支直接落终态。
@@ -249,6 +260,13 @@ export function abortFetchJob(jobId: string): boolean {
 export function resumeInterruptedFetchJobs(): number {
   let resumed = 0;
   for (const id of collectInterruptedFetchJobIds()) {
+    // 本进程内已经在推进的任务**不算中断任务**，必须跳过：boot 恢复自 2026-10-15 起被
+    // 延后 BOOT_RESUME_DELAY_MS，而这个窗口里别的调度器可能已经起了新任务（如
+    // upgradeScheduler 的 boot tick 在 15s 恢复洗版链、libraryScheduler 在 60s 接续），
+    // 那些行的状态同样是 pending/running，会被 collectInterruptedFetchJobIds 误收。
+    // 而 startFetchJob 注册 AbortController 时不做「是否已在跑」判断，重复调用会让同一个
+    // job 被两个批次循环并行推进，并残留两个 AbortController（取消时只 abort 后一个）。
+    if (controllers.has(id)) continue;
     try {
       startFetchJob(id);
       resumed++;

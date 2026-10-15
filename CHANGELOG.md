@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.20] - 2026-10-15
+
+### Perf
+
+- **容器重建后「长时间不可用」根治（entrypoint 按需 chown）**：`entrypoint.sh` 原本**无条件**对绑定挂载的 `data` 目录执行 `chown -R`，而该目录实为 20GB / 87895 个条目（其中封面缓存 `covers` 一个目录就占 17.8GB / 87855 项），每次容器重建都要走完整棵树、耗时 **~29s**，是「容器起来后 ~45s 内完全无法服务」的头号原因（docker 创建 12s + entrypoint 29s + 建表与插件沙箱装配 3.5s，2026-10-15 实测）。现改为**按需**：只探 `data` 根与一级子项属主，确有不属于运行时用户（uid 100）的条目时才做全量递归 chown —— 稳态（实测顶层全为 100:101）直接跳过，省掉整段 29s；绑定挂载属主若真配错仍会被探测到并修复。探测失败（`stat` 不可用 / 用户查不到）退化为原行为，不会漏修。
+- **重启续跑入库任务延后 60s，避免「刚起来就卡」**：容器启动后原本**立即**续跑上一进程遗留的批量入库任务（`resumeInterruptedFetchJobs` + `libraryScheduler` 的 boot tick），会瞬间拉起批量子进程与 4 路 ffmpeg 转码——生产实测容器 CPU 长期 400%+、宿主负载明显超核、转码闸排队最长 `waitMs=64.7s`，所有依赖转码/入库/插件的操作都排在 2.4 万首待入库队列之后。现将启动恢复统一延后 **60s**（新增 `BOOT_RESUME_DELAY_MS`，`index.ts` 与 `libraryScheduler` 共用同一常量），让 entrypoint 收尾、外置插件装配与首批交互先走完；期间遗留任务行保持 pending/running，调度器的 busy 判定与终态续批语义不变（被推迟的只是「何时开始」，不是「是否续跑」）。
+
+### Fix
+
+- **延后恢复窗口的重复起批风险（复查发现）**：`collectInterruptedFetchJobIds()` 取的是**所有** pending/running 行，而 `startFetchJob()` 注册 AbortController 时**不检查是否已在跑**。原逻辑下 resume 在启动瞬间同步执行（此时尚无任何新任务，安全）；延后 60s 后窗口内其它调度器可能已起了新任务（如 `upgradeScheduler` 的 boot tick 在 15s 恢复洗版链），这些行会被误判为「中断任务」再 `startFetchJob` 一次 —— 同一个 job 被两个批次循环并行推进，并残留两个 AbortController（取消时只 abort 后一个）。现于恢复时跳过本进程已在推进的 job id（`controllers.has(id)` 判定，controller 在 job 终态的 finally 中移除）。
+
+### Internal
+
+- 只动后端启动路径与 `entrypoint.sh`，不含前端；在 230 主线落地前完成本地门禁自检（`tsc --noEmit`、`sh -n entrypoint.sh`、定向 `vitest tests/fetch` 31 文件 / 540 用例全通过、diff 无 CR 行尾）。
+- 宿主资源超卖、容器内单点 DNS 与候选源 15s 超时兜底属外部/后续评估项，不在本版范围；按约定不在本版部署生产环境。
+
 ## [4.6.19] - 2026-10-15
 
 ### Fix
