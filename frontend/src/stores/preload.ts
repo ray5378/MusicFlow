@@ -15,18 +15,17 @@ export const usePreloadStore = defineStore("preload", () => {
     if (!authStore.isLoggedIn || loaded.value) return;
     loading.value = true;
     try {
-      // 1. Favorites (used by the star state on every song row)
       const favStore = useFavoritesStore();
-      if (!favStore.loaded) await favStore.loadFavorites();
-
-      // 2. Warm up the songs/albums/artists endpoints (page 1) so later visits hit the HTTP cache
-      const tasks = [
+      // 收藏状态与各列表页(page 1)预热互不依赖:原先先 await 收藏再发 4 个列表请求,
+      // 让整个预热至少多等一个收藏 RTT。这里全部并发,收藏只是其中一路。
+      // loadFavorites 内部 catch 自身错误、不会 reject;列表请求同样 catch 成 null。
+      await Promise.all([
+        favStore.loaded ? Promise.resolve() : favStore.loadFavorites(),
         api.get("/rest/api/v1/songs", { params: { page: 1, pageSize: 25 } }).catch(() => null),
         api.get("/rest/api/v1/albums", { params: { page: 1, pageSize: 20 } }).catch(() => null),
         api.get("/rest/api/v1/artists", { params: { page: 1, pageSize: 20 } }).catch(() => null),
         api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 20 } }).catch(() => null),
-      ];
-      await Promise.all(tasks);
+      ]);
       loaded.value = true;
     } finally {
       loading.value = false;

@@ -107,7 +107,7 @@ describe("P0-3 候选池缓存不吞随机性", () => {
     expect(poolQueries).toBe(1);
   });
 
-  it("TTL 过期(120s)后自动重建:新歌单无需 invalidate 即出现", () => {
+  it("TTL 过期(120s)后走 SWR:本轮仍供旧池,后台重建后下一轮无需 invalidate 即见新歌单", async () => {
     seedPlaylist("p-old", "netease");
     setPluginConfig({ homeCount: 50 });
     expect(ids()).toEqual(["p-old"]);
@@ -118,10 +118,14 @@ describe("P0-3 候选池缓存不吞随机性", () => {
     const spy = vi.spyOn(Date, "now").mockImplementation(() => fake);
     try {
       fake += 121_000; // 越过 120s TTL
+      // B4 SWR:过期首轮不阻塞 —— 继续用旧池供本轮洗牌(集合仍恒为 p-old)。
+      expect(ids()).toEqual(["p-old"]);
+      // 后台重建挂在 queueMicrotask 上,排空微任务后新池就位 → 下一轮请求即见新歌单。
+      await Promise.resolve();
       const after = ids();
       expect(new Set(after)).toEqual(new Set(["p-old", "p-new"]));
       // eslint-disable-next-line no-console
-      console.log(`[P0-3] TTL 过期后重建 → ${JSON.stringify(after)}`);
+      console.log(`[P0-3] TTL 过期后 SWR 重建 → ${JSON.stringify(after)}`);
     } finally {
       spy.mockRestore();
     }

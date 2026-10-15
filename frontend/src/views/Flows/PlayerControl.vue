@@ -176,33 +176,30 @@ async function removeToken(t: any) {
 }
 
 async function loadCtlTargets() {
+  // 四类控制目标(DLNA / 分组 / AirPlay / Sendspin)互不依赖,原先串行 4 连发 →
+  // 选择器要等 4 个 RTT 才有内容。改为并发一波拉取,合并顺序与原先完全一致。
+  // 任一接口失败只丢该类目标(单接口 catch 成 null),不影响其余三类。
+  const [d, g, a, s] = await Promise.all([
+    api.get("/rest/api/v1/dlna/devices").catch(() => null),
+    api.get("/rest/api/v1/groups").catch(() => null),
+    api.get("/rest/api/v1/airplay/devices").catch(() => null),
+    api.get("/rest/api/v1/sendspin/clients").catch(() => null),
+  ]);
   const out: any[] = [];
-  try {
-    const d = await api.get("/rest/api/v1/dlna/devices");
-    // 禁用设备不作为控制目标(后端 peer 已过滤,这里兜底排除)。
-    for (const it of d.data?.devices || []) {
-      if (it.disabled) continue;
-      out.push({ peerId: `dlna:${it.id}`, name: it.name || it.id, kind: "dlna", available: it.available });
-    }
-  } catch {}
-  try {
-    const g = await api.get("/rest/api/v1/groups");
-    for (const it of g.data?.groups || []) out.push({ peerId: `group:${it.id}`, name: it.name || it.id, kind: "group", available: true });
-  } catch {}
-  try {
-    const a = await api.get("/rest/api/v1/airplay/devices");
-    for (const it of a.data?.devices || []) {
-      out.push({ peerId: `airplay:${it.id}`, name: it.name || it.id, kind: "airplay", available: it.available });
-    }
-  } catch {}
-  try {
-    const s = await api.get("/rest/api/v1/sendspin/clients");
-    for (const it of s.data?.clients || []) {
-      // available 取后端真实态(/v1/sendspin/clients 对离线补回的行带 available:false /
-      // offline:true),不再硬编码 true —— 否则离线 ESP32 在这被错标为在线。
-      out.push({ peerId: `sendspin:${it.clientId}`, name: it.name || it.clientId, kind: "sendspin", available: typeof it.available === "boolean" ? it.available : !it.offline });
-    }
-  } catch {}
+  // 禁用设备不作为控制目标(后端 peer 已过滤,这里兜底排除)。
+  for (const it of d?.data?.devices || []) {
+    if (it.disabled) continue;
+    out.push({ peerId: `dlna:${it.id}`, name: it.name || it.id, kind: "dlna", available: it.available });
+  }
+  for (const it of g?.data?.groups || []) out.push({ peerId: `group:${it.id}`, name: it.name || it.id, kind: "group", available: true });
+  for (const it of a?.data?.devices || []) {
+    out.push({ peerId: `airplay:${it.id}`, name: it.name || it.id, kind: "airplay", available: it.available });
+  }
+  for (const it of s?.data?.clients || []) {
+    // available 取后端真实态(/v1/sendspin/clients 对离线补回的行带 available:false /
+    // offline:true),不再硬编码 true —— 否则离线 ESP32 在这被错标为在线。
+    out.push({ peerId: `sendspin:${it.clientId}`, name: it.name || it.clientId, kind: "sendspin", available: typeof it.available === "boolean" ? it.available : !it.offline });
+  }
   ctlTargets.value = out;
 }
 

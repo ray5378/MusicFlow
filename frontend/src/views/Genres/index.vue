@@ -70,6 +70,7 @@ import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
+import { runBatched } from "@/utils/asyncTask";
 const playerStore = usePlayerStore();
 const { t } = useI18n();
 const genres = ref<any[]>([]);
@@ -88,6 +89,9 @@ const showPlaylistDialog = ref(false);
 const selectedSongs = ref<Song[]>([]);
 const playlists = ref<any[]>([]);
 const playlistsLoading = ref(false);
+// 歌单列表在本次页面停留期间缓存一次:再次打开「加入歌单」弹窗不必重拉。
+// 仅「新建歌单」会改变该列表,故在 createAndAdd 成功后把新歌单追加进缓存。
+let playlistsCache: any[] | null = null;
 const addingPlaylistId = ref("");
 const newPlaylistName = ref("");
 
@@ -138,10 +142,14 @@ function onPageChange(page: number, size?: number) {
 async function openAddToPlaylistDialog() {
   showPlaylistDialog.value = true;
   newPlaylistName.value = "";
+  // 已缓存 → 直接复用,不再每次打开都重拉一份歌单列表(打开弹窗立刻可用)。
+  if (playlistsCache) { playlists.value = playlistsCache; return; }
   playlistsLoading.value = true;
   try {
     const res = await api.get("/rest/getPlaylists?f=json");
-    playlists.value = res.data["subsonic-response"]?.playlists?.playlist || [];
+    const list = res.data["subsonic-response"]?.playlists?.playlist || [];
+    playlistsCache = list;
+    playlists.value = list;
   } catch { playlists.value = []; }
   finally { playlistsLoading.value = false; }
 }
@@ -150,9 +158,10 @@ async function addToPlaylist(pl: any) {
   if (selectedSongs.value.length === 0 || addingPlaylistId.value) return;
   addingPlaylistId.value = pl.id;
   try {
-    for (const s of selectedSongs.value) {
-      await api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: s.id });
-    }
+    // 逐首 updatePlaylist 是串行 N 个 RTT → 改分批并发(每批 6 个),批量加歌显著变快。
+    await runBatched(selectedSongs.value, (s) =>
+      api.post("/rest/updatePlaylist", { playlistId: pl.id, songIdToAdd: s.id }),
+    );
     ElMessage.success(t("genres.added", { count: selectedSongs.value.length, name: pl.name }));
     showPlaylistDialog.value = false;
   } catch (e: any) {
@@ -170,9 +179,11 @@ async function createAndAdd() {
     const res = await api.post("/rest/createPlaylist", { name: newPlaylistName.value });
     const plId = res.data["subsonic-response"]?.playlist?.id;
     if (plId) {
-      for (const s of selectedSongs.value) {
-        await api.post("/rest/updatePlaylist", { playlistId: plId, songIdToAdd: s.id });
-      }
+      await runBatched(selectedSongs.value, (s) =>
+        api.post("/rest/updatePlaylist", { playlistId: plId, songIdToAdd: s.id }),
+      );
+      // 新建的歌单并入缓存,避免下次打开弹窗因缓存里没有它而显示不全。
+      if (playlistsCache) playlistsCache = [...playlistsCache, { id: plId, name: newPlaylistName.value, songCount: selectedSongs.value.length }];
     }
     ElMessage.success(t("genres.createdAndAdded", { count: selectedSongs.value.length }));
     showPlaylistDialog.value = false;

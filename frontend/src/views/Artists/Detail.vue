@@ -10,7 +10,7 @@
         <h1>{{ artist.name }}</h1>
         <div class="info">{{ formatAlbumCount(artist.albumCount) }}</div>
         <div class="actions">
-          <el-button type="primary" @click="playAllSongs">{{ t('artists.playAllSongs') }}</el-button>
+          <el-button type="primary" :loading="playAllLoading" :disabled="albums.length === 0" @click="playAllSongs">{{ t('artists.playAllSongs') }}</el-button>
           <el-button
             class="detail-fav-btn"
             :class="{ active: fav.isArtistFavorite(artist.id) }"
@@ -66,6 +66,7 @@ import { usePlayContent } from "@/composables/usePlayContent";
 import { useFavoritesStore } from "@/stores/favorites";
 import api from "@/api";
 import { coverUrl } from "@/utils/cover";
+import { runBatched } from "@/utils/asyncTask";
 
 const route = useRoute();
 const router = useRouter();
@@ -77,6 +78,7 @@ const fav = useFavoritesStore();
 const artist = ref<any>(null);
 const albums = ref<any[]>([]);
 const loading = ref(false);
+const playAllLoading = ref(false);
 
 function open(album: any) {
   if (menuGuard()) return;
@@ -121,14 +123,26 @@ async function loadArtist() {
   finally { loading.value = false; }
 }
 
+// 「播放全部」需逐专辑取曲目。原实现串行 await N 次 getAlbum → N 个专辑时要等 N 个 RTT。
+// 改为分批并发拉取(每批 6 个),按下标回填以保留「专辑顺序 + 专辑内曲目顺序」不变;
+// 拉取期间按钮进入 loading 且禁用,避免重复点击发起第二轮。
 async function playAllSongs() {
-  const allSongs: any[] = [];
-  for (const album of albums.value) {
-    const res = await api.get(`/rest/getAlbum?id=${album.id}&f=json`);
-    const songs = res.data["subsonic-response"]?.album?.song || [];
-    allSongs.push(...songs);
+  if (playAllLoading.value || albums.value.length === 0) return;
+  playAllLoading.value = true;
+  try {
+    const groups: any[][] = new Array(albums.value.length);
+    await runBatched(albums.value, async (album, idx) => {
+      try {
+        const res = await api.get(`/rest/getAlbum?id=${album.id}&f=json`);
+        groups[idx] = res.data["subsonic-response"]?.album?.song || [];
+      } catch { groups[idx] = []; }
+    });
+    const allSongs = groups.reduce((acc, cur) => acc.concat(cur || []), [] as any[]);
+    if (allSongs.length > 0) playerStore.playQueue(allSongs);
+    else ElMessage.warning(t('albums.noPlayable'));
+  } finally {
+    playAllLoading.value = false;
   }
-  if (allSongs.length > 0) playerStore.playQueue(allSongs);
 }
 
 function formatAlbumCount(n: number) {

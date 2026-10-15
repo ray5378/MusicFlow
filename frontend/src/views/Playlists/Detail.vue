@@ -51,7 +51,7 @@
     </SongTable>
     <div class="batch-bar" v-if="selectedSongs.length > 0">
       <span>{{ t('playlists.selectedCount', { count: selectedSongs.length }) }}</span>
-      <el-button size="small" type="danger" plain @click="removeSelected">{{ t('playlists.batchRemove') }}</el-button>
+      <el-button size="small" type="danger" plain :loading="removingSelected" @click="removeSelected">{{ t('playlists.batchRemove') }}</el-button>
       <el-button size="small" @click="playSelected">{{ t('playlists.playSelected') }}</el-button>
     </div>
 
@@ -87,7 +87,7 @@ import { useRoute, useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
-import { waitAsyncTask } from "@/utils/asyncTask";
+import { waitAsyncTask, runBatched } from "@/utils/asyncTask";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
 import { useInfiniteList } from "@/composables/useInfiniteList";
@@ -109,6 +109,8 @@ const syncing = ref(false);
 const showRenameDialog = ref(false);
 const newName = ref("");
 const selectedSongs = ref<any[]>([]);
+// 批量移除进行中:按钮 loading + 防重复点击(原实现无任何进行态反馈)。
+const removingSelected = ref(false);
 const onlineSourceId = ref("");
 const matchingAll = ref(false);
 const showMatchDialog = ref(false);
@@ -286,20 +288,22 @@ async function matchAndPlay(song: any) {
 }
 
 // Auto-match a batch of unmatched tracks before queueing them for playback.
+// 逐首 match-track 原为串行(每首一个 RTT)→ 改分批并发(每批 6 个),按下标回填
+// 以保留「未匹配曲目原顺序」不变(结果集与串行版逐字一致)。
 async function matchBeforePlay(unmatched: any[]) {
   const pid = onlineSourceId.value;
   if (!pid) return [];
-  const ok: any[] = [];
-  for (const song of unmatched) {
-    if (!song.entryId) continue;
+  const slots: (any | null)[] = new Array(unmatched.length).fill(null);
+  await runBatched(unmatched, async (song, idx) => {
+    if (!song.entryId) return;
     try {
       const res = await api.post(`/rest/api/v1/online/${pid}/match-track`, { entryId: song.entryId });
       if (res.data?.success && res.data.songId) {
-        const updated = list.value.find(s => s && s.id === res.data.songId) || { ...song, id: res.data.songId, playable: true, isMatched: true };
-        ok.push(updated);
+        slots[idx] = list.value.find(s => s && s.id === res.data.songId) || { ...song, id: res.data.songId, playable: true, isMatched: true };
       }
     } catch {}
-  }
+  });
+  const ok = slots.filter(Boolean) as any[];
   if (ok.length > 0) await reloadTracks();
   return ok;
 }
@@ -565,13 +569,17 @@ async function removeSong(row: any) {
 }
 
 async function removeSelected() {
+  if (removingSelected.value || selectedSongs.value.length === 0) return;
+  removingSelected.value = true;
   try {
-    for (const s of selectedSongs.value) {
-      await api.post("/rest/updatePlaylist", { playlistId: route.params.id, songIdToRemove: s.id });
-    }
+    // 逐首 updatePlaylist 原为串行 → 改分批并发(每批 6 个),批量移除不再等 N 个 RTT。
+    await runBatched(selectedSongs.value, (s) =>
+      api.post("/rest/updatePlaylist", { playlistId: route.params.id, songIdToRemove: s.id }),
+    );
     ElMessage.success(t("playlists.removedCount", { count: selectedSongs.value.length }));
     loadPlaylist();
   } catch (e: any) { ElMessage.error(e.response?.data?.error || t("playlists.removeFailed")); }
+  finally { removingSelected.value = false; }
 }
 
 async function renamePlaylist() {

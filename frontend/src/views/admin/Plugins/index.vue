@@ -524,21 +524,46 @@ function orderedPlaylistOptions(key: string) {
 const PLAYLIST_OPTION_PAGE_SIZE = 200;
 // 兜底页数:后端实际每页最少 100 条,50 页可覆盖 5000 个歌单。
 const PLAYLIST_OPTION_MAX_PAGES = 50;
+// 每批并发页数:762 个歌单 = 8 页 × 100 条。原实现逐页串行 → 8 个 RTT 顺序等待;
+// 改为每批并发 5 页,整个拉取压到 2 个 RTT 级别,同时不至于把后端连接打满。
+const PLAYLIST_OPTION_BATCH = 5;
+
+function fetchPlaylistOptionPage(page: number) {
+  return api
+    .get("/rest/api/v1/playlists", { params: { page, pageSize: PLAYLIST_OPTION_PAGE_SIZE } })
+    .then((res: any) => ({
+      items: (res.data?.items || []) as any[],
+      total: typeof res.data?.total === "number" ? (res.data.total as number) : null,
+    }));
+}
 
 async function loadPlaylistOptions() {
   if (allPlaylists.value.length) return;
   const byId = new Map<string, any>();
+  const absorb = (items: any[]) => {
+    for (const p of items) if (p?.id) byId.set(p.id, p);
+  };
   try {
     let total = Number.POSITIVE_INFINITY;
-    for (let page = 1; page <= PLAYLIST_OPTION_MAX_PAGES; page++) {
-      const res = await api.get("/rest/api/v1/playlists", {
-        params: { page, pageSize: PLAYLIST_OPTION_PAGE_SIZE },
-      });
-      const items = res.data?.items || [];
-      if (typeof res.data?.total === "number") total = res.data.total;
-      if (!items.length) break;
-      for (const p of items) if (p?.id) byId.set(p.id, p);
-      if (byId.size >= total) break;
+    let nextPage = 1;
+    // 分批并发翻页,批间串行。终止条件沿用原语义:集齐 total 条或某批一页未返回即停。
+    while (nextPage <= PLAYLIST_OPTION_MAX_PAGES) {
+      const last = Math.min(nextPage + PLAYLIST_OPTION_BATCH - 1, PLAYLIST_OPTION_MAX_PAGES);
+      const pages: number[] = [];
+      for (let p = nextPage; p <= last; p++) pages.push(p);
+      // 单页失败不拖垮整批(该页记为 null,保留其余页与已拿到的部分)。
+      const results = await Promise.all(
+        pages.map((p) => fetchPlaylistOptionPage(p).catch(() => null)),
+      );
+      let gotAny = false;
+      for (const r of results) {
+        if (!r) continue;
+        if (r.total !== null) total = r.total;
+        if (r.items.length > 0) gotAny = true;
+        absorb(r.items);
+      }
+      if (!gotAny || byId.size >= total) break;
+      nextPage = last + 1;
     }
   } catch {
     // 中途失败也保留已拿到的部分,总比空列表好。
