@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.21] - 2026-10-16
+
+### Perf
+
+- **内置「本地随机」候选池冷池加固（消除歌单增删 / 导入 / 同步后首页请求的同步全量扫描）**：v4.6.20 已收口 provider 在途调用单飞与冷启动软截止，但其 Internal 记录的残留项 —— 内置 `local-random-recommend` 候选池的同步慢脚 —— 仍存在：`invalidatePlatformPool()`（歌单增删改 / 导入 / 同步后调用）语义为「置 `null`」，于是**下一个首页请求在请求线程上**同步执行 `getPool()` 冷启动全量 `buildPool`（`playlists` 表扫描 + 封面 memo 重建）。本次把 `invalidatePlatformPool()` 由「置 null」改为**置脏 + 后台单飞重建**：保留旧 warm 池继续服务在途请求，`queueMicrotask` 后台重建后原子替换，**请求路径不再触发同步全量扫描**；新数据在后台重建落地后的下一轮请求即可见（微任务级延迟，等价于原「立即重建」）。多次失效由 `poolRebuildInflight` + `poolDirty` 合并为一次重建；重建失败保持旧池与脏标记、下一轮请求再 kick（不在微任务内自旋重试）。TTL（120s）过期与显式失效两条路径统一收敛到同一 `schedulePoolRebuild()`。
+
+### Fix
+
+- **空闲内存回收不得把刚清掉的候选池又热回来（本次改造连带复查发现）**：`registerCacheCleaner` 中原本调用 `invalidatePlatformPool()`，其语义改变后会**在空闲回收时立刻触发一次后台重建**、把刚释放的内存重新填回。新增 `dropPlatformPool()`（硬清空、不做后台重建）专供回收使用，回收后行为与 v4.6.20 之前一致（下一次请求走冷启动同步建池一次）。
+
+### Internal
+
+- 仅后端，无前端改动：`backend/src/services/plugin/localPlatformRecommend.ts`（新增 `dropPlatformPool()` 与 `schedulePoolRebuild()`；`invalidatePlatformPool()` 语义改为 SWR；`getPool()` 合并「TTL 过期」与「显式失效」两条 SWR 路径）、`backend/src/routes/api/shared.ts`（回收 cleaner 改走 `dropPlatformPool()`）。
+- 同步既有 QA 语义：`tests/services/localPlatformRecommend.test.ts`、`tests/qa_perf/randomness.test.ts`、`tests/qa_perf/coverEquivalence.test.ts` —— 「失效后**立即**重建」断言改为 SWR 语义（失效本轮不阻塞、排空微任务后下一轮即见新数据），跨用例重置改用 `dropPlatformPool()` 保证确定性；新增回归用例「`invalidatePlatformPool()` 本轮**不同步查库**」（断言失效后本轮 `FROM playlists` 查询次数为 0）。
+- 230 落地前后门禁自检：backend `tsc --noEmit` 0 error；定向 `vitest` 7 文件 / 94 用例全通过；diff 无 CR 行尾（`grep -c` 计数全为 0）；落地前（方案方向 + 语义影响面）与落地后（diff 逐行复核 + 语义等价性）两轮独立审查。按约定不在本版部署生产环境。
+
 ## [4.6.20] - 2026-10-15
 
 ### Perf

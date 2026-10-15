@@ -23,6 +23,7 @@ import {
   localPlatformRecommendPlugin,
   localPlatformRecommendManifest,
   invalidatePlatformPool,
+  dropPlatformPool,
   LOCAL_PLATFORM_REC_PLUGIN_ID,
 } from "../../src/services/plugin/localPlatformRecommend.js";
 import { getPlaylistCover } from "../../src/services/playlistCover.js";
@@ -116,7 +117,8 @@ beforeEach(() => {
   sqlite.prepare("DELETE FROM songs").run();
   clearCoverResolveCache();
   // P0-3:候选池是进程内缓存,跨用例必须清空,否则前一用例的候选集合会串味。
-  invalidatePlatformPool();
+  // 用例隔离用「硬清空」(dropPlatformPool)保证确定性:下一次请求走冷启动同步建池。
+  dropPlatformPool();
   setPluginConfig({}, 1);
 });
 
@@ -341,17 +343,32 @@ describe("P0-2/P0-3:封面语义等价 + 候选池缓存 + 显式失效", () => 
     expect(poolQueries).toBe(1);
   });
 
-  it("invalidatePlatformPool() 后立即重建(新导入歌单立即可见)", () => {
+  it("invalidatePlatformPool() → 保留旧池不阻塞本轮,后台重建后下一轮即见新歌单", async () => {
     seedPlaylist("p-old", "netease");
     setPluginConfig({ homeCount: 50 });
-    expect(recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id)).toEqual(["p-old"]);
+    const idsOf = () => recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
+    expect(idsOf()).toEqual(["p-old"]);
     // 新增歌单但在 TTL 内 → 缓存未失效,仍只看到旧的
     seedPlaylist("p-new", "netease");
-    expect(recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id)).toEqual(["p-old"]);
-    // 显式失效 → 立即重建,新歌单可见
+    expect(idsOf()).toEqual(["p-old"]);
+    // 冷池加固:显式失效不再同步重建 —— 本轮仍供旧池,新歌单要等后台重建落地
     invalidatePlatformPool();
-    const ids = recommendLocalPlatforms().channels[0].playlists.map((p: any) => p.id);
-    expect(new Set(ids)).toEqual(new Set(["p-old", "p-new"]));
+    expect(idsOf()).toEqual(["p-old"]);
+    await new Promise((r) => setTimeout(r, 0)); // 排空微任务 → 后台重建落地
+    const after = idsOf();
+    expect(new Set(after)).toEqual(new Set(["p-old", "p-new"]));
+  });
+
+  it("invalidatePlatformPool() 本轮不同步查库(慢路径下沉到后台,请求线程零阻塞)", () => {
+    seedPlaylist("p-n1", "netease");
+    recommendLocalPlatforms(); // 冷启动建池
+    const spy = vi.spyOn(sqlite, "prepare");
+    invalidatePlatformPool();
+    recommendLocalPlatforms();
+    const poolQueries = spy.mock.calls
+      .filter((a: any) => /FROM playlists/i.test(String(a[0]))).length;
+    expect(poolQueries).toBe(0); // 失效后本轮不再同步全量扫描(重建在后台微任务)
+    spy.mockRestore();
   });
 
   it("池 TTL(120s)过期 → SWR:本轮仍用旧池立即返回,后台微任务重建供下一轮", async () => {

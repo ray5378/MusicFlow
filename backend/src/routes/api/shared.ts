@@ -55,7 +55,7 @@ import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.j
 import { songSourceInfo, serializeSongRow, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
 import { getArtistList, setArtistList, invalidateArtistList } from "../../utils/artistListCache.js";
 import { clearPlaylistCoverCache } from "../../services/playlistCover.js";
-import { invalidatePlatformPool } from "../../services/plugin/localPlatformRecommend.js";
+import { dropPlatformPool } from "../../services/plugin/localPlatformRecommend.js";
 import { getSetting, setSetting, getSettingBool } from "../../services/settings.js";
 import { logLevelSnapshot, saveLogLevel } from "../../services/logSettings.js";
 import { isLogLevel } from "../../utils/logger.js";
@@ -226,8 +226,9 @@ export function clearProviderRecommendCache(): void {
 registerCacheCleaner(() => { providerRecommendCache.clear(); });
 
 // P0-3:内置「本地随机」候选池缓存的回收(在该插件模块内自注册会因 load 期模块环
-// 触发 TDZ,故在本中枢统一注册;invalidatePlatformPool 只是置空一个模块级变量)。
-registerCacheCleaner(() => { invalidatePlatformPool(); });
+// 触发 TDZ,故在本中枢统一注册;回收走 dropPlatformPool 硬清空 —— 回收要真正释放内存,
+// 不能走 invalidatePlatformPool 的「置脏 + 后台重建」,否则刚清掉就被后台重建热回来)。
+registerCacheCleaner(() => { dropPlatformPool(); });
 
 /** 归一化歌名供兜底比对:去空白、去尾部省略号、小写。 */
 

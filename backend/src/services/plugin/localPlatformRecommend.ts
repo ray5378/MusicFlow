@@ -91,10 +91,15 @@ export interface LocalPlatformChannel {
 //   - 每个歌单的最终 coverArt 惰性解析并 memo 到 coverMemo(避免重复探测);
 //   - TTL(PLATFORM_POOL_TTL_MS)内**直接复用候选集合与封面**,但**每次请求仍重新洗牌**
 //     (随机性 100% 保留 —— 这是与「整体缓存」的本质区别);
-//   - 显式失效(invalidatePlatformPool) → 置空,下一个请求同步重建(新歌单立即可见);
+//   - 显式失效(invalidatePlatformPool,冷池加固 2026-10-16):由「置 null」改为
+//     **置脏 + 后台单飞重建** —— 保留旧 warm 池继续服务在途请求,后台重建后原子替换,
+//     使「歌单增删/导入」后的首页请求**不再触发同步全量扫描**(偶发卡死的残留慢脚);
+//     新数据在后台重建落地后的下一轮请求即可见(微任务级延迟,等价于原「立即重建」)。
 //   - TTL 过期 → SWR(2026-10-15 B4):旧池继续供本轮洗牌(不阻塞请求),后台单飞
 //     重建一次 —— 消除「每 120s 一次的同步 DB+封面探测慢脚」。下一轮请求拿到新池。
-// 内存占用 ≈ 平台歌单行数,可忽略。空闲内存回收时经 registerCacheCleaner 一并清空。
+//   - 冷启动(进程内首次、无任何 warm 池)仍须同步建一次(否则首页无数据);
+//     空闲回收经 registerCacheCleaner 走 dropPlatformPool 硬清空(不做后台重建)。
+// 内存占用 ≈ 平台歌单行数,可忽略。
 const PLATFORM_POOL_TTL_MS = 120_000; // 120 秒
 
 interface PlatformPoolRow {
@@ -113,9 +118,19 @@ interface PlatformPool {
 
 let platformPoolCache: PlatformPool | null = null;
 
-/** 置空候选池缓存(歌单增删改/导入后调用,让新歌单立即可见)。 */
+/** 置脏候选池缓存(歌单增删改/导入后调用):保留旧 warm 池继续服务在途请求,
+ *  后台单飞重建后原子替换 —— 请求路径不再因显式失效而同步全量扫描。
+ *  新数据在后台重建落地后的下一轮请求即可见。 */
 export function invalidatePlatformPool(): void {
+  poolDirty = true;
+  if (platformPoolCache) schedulePoolRebuild();
+}
+
+/** 硬清空候选池缓存(空闲内存回收专用):回收要真正释放内存,不做后台重建;
+ *  下一次请求走冷启动同步建池。 */
+export function dropPlatformPool(): void {
   platformPoolCache = null;
+  poolDirty = false;
 }
 
 // 注:空闲内存回收时清空该缓存,由 routes/api/shared.ts 经 registerCacheCleaner 注册。
@@ -140,8 +155,11 @@ function resolveRowCover(r: PlatformPoolRow): string | null {
   return null;
 }
 
-/** 后台重建 single-flight 标志:防止过期窗口内并发请求重复重建。 */
+/** 后台重建 single-flight 标志:防止过期/失效窗口内并发请求重复重建。 */
 let poolRebuildInflight = false;
+
+/** 显式失效标记(冷池加固 2026-10-16):为 true 时保留旧池服务本轮请求、后台重建。 */
+let poolDirty = false;
 
 /** 全量重建候选池(主 SQL + 新 coverMemo;不做增量合并,保持产物确定性)。 */
 function buildPool(now: number): PlatformPool {
@@ -163,29 +181,38 @@ function buildPool(now: number): PlatformPool {
   return { ts: now, bySource, coverMemo: new Map() };
 }
 
-/** 取候选池:TTL 内复用;TTL 过期 → SWR(旧池继续用 + 后台单飞重建);
- *  池不存在(首次/显式失效) → 同步重建(走一次慢路径,保新鲜度语义)。 */
+/** 后台单飞重建候选池(不阻塞调用方):重建成功原子替换并清脏;
+ *  失败保持旧池与脏标记、下一轮请求再 kick(不在微任务里自旋重试)。
+ *  注:buildPool 为同步操作,微任务内不会与其它失效交错,故成功即可清脏。 */
+function schedulePoolRebuild(): void {
+  if (poolRebuildInflight) return; // single-flight:并发/多次失效合并为一次重建
+  poolRebuildInflight = true;
+  queueMicrotask(() => {
+    try {
+      platformPoolCache = buildPool(Date.now());
+      poolDirty = false;
+      log.info("本地随机候选池后台重建完成");
+    } catch (e: any) {
+      log.warn("本地随机候选池后台重建失败(保持旧池,下轮重试)", { err: e?.message || e });
+    } finally {
+      poolRebuildInflight = false;
+    }
+  });
+}
+
+/** 取候选池:TTL 内复用;TTL 过期 / 显式失效 → SWR(旧池继续用 + 后台单飞重建);
+ *  池不存在(仅冷启动 / 空闲回收后) → 同步重建(必须有一次,否则首页无数据)。 */
 function getPool(): PlatformPool {
   const now = Date.now();
   if (platformPoolCache) {
-    if (now - platformPoolCache.ts < PLATFORM_POOL_TTL_MS) return platformPoolCache;
-    // B4:过期不阻塞 —— 本轮请求继续用旧池洗牌,后台重建供下一轮。
-    if (!poolRebuildInflight) {
-      poolRebuildInflight = true;
-      queueMicrotask(() => {
-        try {
-          platformPoolCache = buildPool(Date.now());
-          log.info("本地随机候选池后台重建完成");
-        } catch (e: any) {
-          log.warn("本地随机候选池后台重建失败(下轮请求重试)", { err: e?.message || e });
-        } finally {
-          poolRebuildInflight = false;
-        }
-      });
+    if (poolDirty || now - platformPoolCache.ts >= PLATFORM_POOL_TTL_MS) {
+      // 不阻塞本轮:继续用旧池洗牌,后台重建供下一轮。
+      schedulePoolRebuild();
     }
     return platformPoolCache;
   }
   platformPoolCache = buildPool(now);
+  poolDirty = false;
   return platformPoolCache;
 }
 

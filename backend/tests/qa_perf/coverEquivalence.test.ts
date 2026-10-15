@@ -23,7 +23,7 @@ import {
 } from "../../src/services/playlistCover.js";
 import {
   recommendLocalPlatforms,
-  invalidatePlatformPool,
+  dropPlatformPool,
   LOCAL_PLATFORM_REC_PLUGIN_ID,
 } from "../../src/services/plugin/localPlatformRecommend.js";
 
@@ -107,7 +107,7 @@ beforeEach(() => {
   sqlite.prepare("DELETE FROM playlists").run();
   sqlite.prepare("DELETE FROM songs").run();
   clearCoverResolveCache();
-  invalidatePlatformPool();
+  dropPlatformPool(); // 用例隔离:硬清空(下次请求走冷启动同步建池,结果确定)
   setPluginConfig({ homeCount: 50 }, 1);
 });
 
