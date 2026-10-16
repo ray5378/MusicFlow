@@ -10,11 +10,14 @@
 //      下载目录（downloadRoot + losslessRoot，即 songs.path 前缀 `l:` 且落在两根内），
 //      文件头精探（music-metadata）内嵌封面/歌词/专辑标签，只修真缺的。
 //
-// 修复目标与取值来源（产品定调 2026-10-11）：
+// 修复目标与取值来源（产品定调 2026-10-11；2026-10-16 范围扩到「补齐**全部**缺失标签」）：
 //   - 封面 / 歌词：**先探测、拿得到才写**——searchCover/searchLyrics 拿不到就不碰
 //     文件（绝不写空值/占位图）。
 //   - 专辑：文件内嵌 album 为空而 DB 行有声明值（下载时 provider 元数据入库）→
-//     直接用 DB 值回写，无需网络。
+//     直接用 DB 值回写，无需网络；DB 也为空才回落 searchMetadata。
+//   - 其余标签（title/artist/albumArtist/track/disc/year/genre）：一次 searchMetadata
+//     拿到全部，**只补缺失项**、只写真拿到值的字段；失败只告警不抛。title/artist 仅在
+//     内嵌缺失时补（避免覆盖文件里已有的值）。
 //   写入复用 tagWriter 的 tagtmp+rename 原子语义，失败不破坏原文件。
 //   范围硬锁定两个下载目录，绝不碰 WebDAV 云盘库。
 //
@@ -27,10 +30,10 @@ import { parseFile } from "music-metadata";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import { getSetting, setSetting } from "../settings.js";
-import { searchCover, searchLyrics } from "../../plugins/providers.js";
+import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
 import { withCoverLimit } from "../covers.js";
-import { FetchTagError, writeTags } from "./tagWriter.js";
+import { FetchTagError, writeTags, type SongTags } from "./tagWriter.js";
 import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig } from "./config.js";
 
@@ -39,6 +42,7 @@ const log = createLogger("FETCH_TAG_REPAIR");
 const QUEUE_KEY = "fetch.tagrepair.queue";
 const LAST_RUN_KEY = "fetch.tagrepair.lastRunAt";
 const LAST_RESULT_KEY = "fetch.tagrepair.lastResult";
+const LAST_RESULTS_KEY = "fetch.tagrepair.lastResults";
 
 /** 事件队列重试退避（第 1/2/3 次失败的下次重试间隔）。 */
 const BACKOFF_MS = [3_600_000, 6 * 3_600_000, 24 * 3_600_000] as const;
@@ -64,12 +68,17 @@ interface QueueEntry {
 
 type QueueMap = Record<string, QueueEntry>;
 
+/** 触发挡位：queue=只清到期队列；media=第一档常规(仅 DB 预筛)；all=第二档全量(逐首精探文件头)。 */
+export type TagRepairMode = "queue" | "media" | "all";
+
 export interface TagRepairResult {
   checked: number;
-  /** 修复动作统计：一轮内实际写进文件的封面/歌词/专辑次数（一首可能多项）。 */
+  /** 修复动作统计：一轮内实际写进文件的封面/歌词/专辑/元数据次数（一首可能多项）。 */
   coverFixed: number;
   lyricFixed: number;
   albumFixed: number;
+  /** 元数据补全命中次数（本次有 title/artist/albumArtist/track/disc/year/genre 被写入）。 */
+  metaFixed: number;
   /** 探测过但 provider 拿不到（真没有）——不动文件。 */
   unobtainable: number;
   /** 无需修复（标签其实齐）或文件不存在/不可解析。 */
@@ -108,8 +117,25 @@ export function getTagRepairLastResult(): (TagRepairResult & { at: number; mode:
   }
 }
 
-function saveLastResult(mode: string, r: TagRepairResult): void {
+/** 分挡位的上次结果（供前端两块卡片各显各的；读不到/JSON 异常返回 {}）。 */
+export function getTagRepairLastResults(): Partial<
+  Record<TagRepairMode, TagRepairResult & { at: number; mode: string }>
+> {
+  try {
+    const raw = getSetting(LAST_RESULTS_KEY, "");
+    if (!raw) return {};
+    const parsed = JSON.parse(String(raw));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLastResult(mode: TagRepairMode, r: TagRepairResult): void {
   setSetting(LAST_RESULT_KEY, JSON.stringify({ ...r, at: Date.now(), mode }));
+  const all = getTagRepairLastResults();
+  all[mode] = { ...r, at: Date.now(), mode };
+  setSetting(LAST_RESULTS_KEY, JSON.stringify(all));
 }
 
 /** 队列规模（供 API/UI 展示）。 */
@@ -118,17 +144,39 @@ export function getTagRepairQueueSize(): number {
 }
 
 // ---------------------------------------------------------------------------
-// 探针：文件头内嵌封面/歌词/专辑（music-metadata 统一处理 flac/mp3/m4a/ogg）
+// 探针：文件头内嵌标签（music-metadata 统一处理 flac/mp3/m4a/ogg）
 // ---------------------------------------------------------------------------
 
+/** 内嵌标签存在性（各维度 true = 文件里已有值，无需补）。 */
+interface EmbeddedTags {
+  cover: boolean;
+  lyric: boolean;
+  album: boolean;
+  title: boolean;
+  artist: boolean;
+  albumArtist: boolean;
+  track: boolean;
+  disc: boolean;
+  year: boolean;
+  genre: boolean;
+}
+
 /** 返回 null = 文件不可解析（不确定，保守跳过不写）。 */
-async function probeEmbedded(fsPath: string): Promise<{ cover: boolean; lyric: boolean; album: boolean } | null> {
+async function probeEmbedded(fsPath: string): Promise<EmbeddedTags | null> {
   try {
     const mm = await parseFile(fsPath, { duration: false });
+    const c = mm.common;
     return {
-      cover: Array.isArray(mm.common.picture) && mm.common.picture.length > 0,
-      lyric: Array.isArray(mm.common.lyrics) && mm.common.lyrics.some((l) => String(l || "").trim()),
-      album: Boolean(String(mm.common.album ?? "").trim()),
+      cover: Array.isArray(c.picture) && c.picture.length > 0,
+      lyric: Array.isArray(c.lyrics) && c.lyrics.some((l) => String(l || "").trim()),
+      album: Boolean(String(c.album ?? "").trim()),
+      title: Boolean(String(c.title ?? "").trim()),
+      artist: Boolean(String(c.artist ?? "").trim()),
+      albumArtist: Boolean(String(c.albumartist ?? "").trim()),
+      track: Number(c.track?.no ?? 0) > 0,
+      disc: Number(c.disk?.no ?? 0) > 0,
+      year: Number(c.year ?? 0) > 0,
+      genre: Array.isArray(c.genre) && c.genre.some((g) => String(g || "").trim()),
     };
   } catch {
     return null;
@@ -180,6 +228,8 @@ export interface RepairSongOutcome {
   cover: boolean;
   lyric: boolean;
   album: boolean;
+  /** 本次是否有 title/artist/albumArtist/track/disc/year/genre 被写入。 */
+  meta: boolean;
 }
 
 /**
@@ -187,8 +237,14 @@ export interface RepairSongOutcome {
  * skip = 标签其实齐/文件不可用（不重试）；unobtainable = 真缺但拿不到（进退避）。
  */
 export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<RepairSongOutcome> {
-  const none: RepairSongOutcome = { outcome: "skip", cover: false, lyric: false, album: false };
-  const unobtainable: RepairSongOutcome = { outcome: "unobtainable", cover: false, lyric: false, album: false };
+  const none: RepairSongOutcome = { outcome: "skip", cover: false, lyric: false, album: false, meta: false };
+  const unobtainable: RepairSongOutcome = {
+    outcome: "unobtainable",
+    cover: false,
+    lyric: false,
+    album: false,
+    meta: false,
+  };
   const row = loadRow(songId);
   if (!row || !row.path) return none;
   const fsPath = fsPathOf(row.path);
@@ -197,10 +253,19 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   const embedded = await probeEmbedded(fsPath);
   if (!embedded) return none; // 不可解析的文件不动（保守）
 
+  const dbAlbum = String(row.album ?? "").trim();
   const needCover = !embedded.cover;
   const needLyric = !embedded.lyric && !row.has_lyrics;
-  const needAlbum = !embedded.album && Boolean(String(row.album ?? "").trim());
-  if (!needCover && !needLyric && !needAlbum) {
+  const needAlbum = !embedded.album && Boolean(dbAlbum); // DB 声明值兜底，无需网络
+  // 元数据可补的缺失维度：专辑（DB 也为空时才需网络）/ 专辑艺术家 / 轨 / 碟 / 年 / 流派。
+  const needMeta =
+    (!embedded.album && !dbAlbum) ||
+    !embedded.albumArtist ||
+    !embedded.track ||
+    !embedded.disc ||
+    !embedded.year ||
+    !embedded.genre;
+  if (!needCover && !needLyric && !needAlbum && !needMeta) {
     // 文件其实齐了、DB 滞后（如 repair 前刚被重扫过）→ 只对齐 DB，不重写文件。
     if (!row.has_lyrics && embedded.lyric) {
       sqlite.prepare("UPDATE songs SET has_lyrics = 1, updated_at = ? WHERE id = ?").run(
@@ -228,11 +293,12 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
     source: sd.source ?? sd.provider ?? null,
   };
 
-  const tags: { cover?: string; lyric?: string; album?: string } = {};
+  const tags: SongTags = {};
+  let metaWrote = false;
 
   if (needAlbum) {
     // 专辑：DB 声明值即权威（下载时 provider 元数据），直接写，无需网络。
-    tags.album = String(row.album).trim();
+    tags.album = dbAlbum;
   }
 
   if (needCover) {
@@ -264,10 +330,53 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
     }
   }
 
+  // 元数据补全：一次调用拿全部（title/artist/albumArtist/track/disc/year/genre）。
+  // 专辑仅在 DB 也为空时才用元数据值（DB 优先）；title/artist 仅在内嵌缺失时补，避免覆盖。
+  // 整体 try/catch：拿不到/报错只告警，不让整首失败，也不改动文件。
+  if (needMeta) {
+    try {
+      const meta = await searchMetadata(songInput);
+      if (meta) {
+        if (!embedded.album && !dbAlbum && meta.album) tags.album = meta.album;
+        if (meta.albumArtist) {
+          tags.albumArtist = meta.albumArtist;
+          metaWrote = true;
+        }
+        if (meta.track) {
+          tags.track = meta.track;
+          metaWrote = true;
+        }
+        if (meta.disc) {
+          tags.disc = meta.disc;
+          metaWrote = true;
+        }
+        if (meta.year !== undefined && meta.year !== null) {
+          tags.year = meta.year;
+          metaWrote = true;
+        }
+        if (meta.genre) {
+          tags.genre = meta.genre;
+          metaWrote = true;
+        }
+        if (!embedded.title && meta.title) {
+          tags.title = meta.title;
+          metaWrote = true;
+        }
+        if (!embedded.artist && meta.artist) {
+          tags.artist = meta.artist;
+          metaWrote = true;
+        }
+      }
+    } catch (e) {
+      log.warn(`元数据补全失败(不计入，进退避重试): song=${songId} err=${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   const gotCover = Boolean(tags.cover);
   const gotLyric = Boolean(tags.lyric);
   const gotAlbum = Boolean(tags.album);
-  if (!gotCover && !gotLyric && !gotAlbum) return unobtainable;
+  const gotMeta = metaWrote;
+  if (!gotCover && !gotLyric && !gotAlbum && !gotMeta) return unobtainable;
 
   // 只在真拿到值时才写 —— tagWriter 原子写（tagtmp+rename），失败抛 FetchTagError。
   // TAG_FAILED 短延迟重试 1 次，吸收 NAS 存储层瞬时抖动；原文件保证未被破坏，重试安全。
@@ -289,9 +398,11 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   }
   log.info(
     `标签修复完成 song=${songId} file=${fsPath} ` +
-      [gotCover ? "+封面" : "", gotLyric ? "+歌词" : "", gotAlbum ? "+专辑" : ""].filter(Boolean).join(""),
+      [gotCover ? "+封面" : "", gotLyric ? "+歌词" : "", gotAlbum ? "+专辑" : "", gotMeta ? "+元数据" : ""]
+        .filter(Boolean)
+        .join(""),
   );
-  return { outcome: "fixed", cover: gotCover, lyric: gotLyric, album: gotAlbum };
+  return { outcome: "fixed", cover: gotCover, lyric: gotLyric, album: gotAlbum, meta: gotMeta };
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +425,16 @@ export function enqueueTagRepairs(songIds: string[]): number {
 }
 
 function emptyResult(): TagRepairResult {
-  return { checked: 0, coverFixed: 0, lyricFixed: 0, albumFixed: 0, unobtainable: 0, skipped: 0, fixed: 0 };
+  return {
+    checked: 0,
+    coverFixed: 0,
+    lyricFixed: 0,
+    albumFixed: 0,
+    metaFixed: 0,
+    unobtainable: 0,
+    skipped: 0,
+    fixed: 0,
+  };
 }
 
 function accumulate(result: TagRepairResult, o: RepairSongOutcome): void {
@@ -323,6 +443,7 @@ function accumulate(result: TagRepairResult, o: RepairSongOutcome): void {
     if (o.cover) result.coverFixed++;
     if (o.lyric) result.lyricFixed++;
     if (o.album) result.albumFixed++;
+    if (o.meta) result.metaFixed++;
   } else if (o.outcome === "skip") {
     result.skipped++;
   } else {
@@ -344,7 +465,7 @@ export async function processTagRepairQueue(cfg: FetchConfig, nowMs = Date.now()
       o = await repairSongTags(songId, cfg);
     } catch (e) {
       log.warn(`队列修复异常 song=${songId}: ${e instanceof Error ? e.message : e}`);
-      o = { outcome: "unobtainable", cover: false, lyric: false, album: false };
+      o = { outcome: "unobtainable", cover: false, lyric: false, album: false, meta: false };
     }
     accumulate(result, o);
     if (o.outcome === "fixed" || o.outcome === "skip") {
@@ -365,31 +486,82 @@ export async function processTagRepairQueue(cfg: FetchConfig, nowMs = Date.now()
 }
 
 // ---------------------------------------------------------------------------
-// 全量兜底扫
+// 全量兜底扫 + 第一档常规扫
 // ---------------------------------------------------------------------------
 
-/** 全量扫两个下载目录：文件头精探内嵌封面/歌词/专辑，只修真缺的。 */
-export async function sweepTagRepair(cfg: FetchConfig): Promise<TagRepairResult> {
-  const rows = sqlite
-    .prepare("SELECT id, path, has_lyrics, album FROM songs WHERE path LIKE 'l:%'")
-    .all() as Array<{ id: string; path: string; has_lyrics: number | null; album: string | null }>;
-  const result = emptyResult();
+/** 第一档候选：数据库明示缺「歌词 / 封面 / 专辑」的行（纯 SQL，不读文件头）。
+ *  封面缺失的判定必须 LEFT JOIN albums 取 albums.cover_art —— 本地/下载歌曲的封面只落在
+ *  albums 行，songs.cover_art 恒为空，单看它会把整库都算成缺封面。 */
+export function selectMediaMissingRows(): Array<{ id: string; path: string }> {
+  return sqlite
+    .prepare(
+      `SELECT s.id AS id, s.path AS path
+         FROM songs s
+         LEFT JOIN albums a ON a.id = s.album_id
+        WHERE s.path LIKE 'l:%'
+          AND (
+            COALESCE(s.has_lyrics, 0) = 0
+            OR TRIM(COALESCE(s.album, '')) = ''
+            OR (
+              TRIM(COALESCE(s.cover_art, '')) = ''
+              AND (s.album_id IS NULL OR TRIM(COALESCE(a.cover_art, '')) = '')
+            )
+          )`,
+    )
+    .all() as Array<{ id: string; path: string }>;
+}
 
-  // ① 文件头精探（只读）：三个维度都齐的快速跳过； album 有 DB 值兜底、无需探测即可修。
+/**
+ * 扫两个下载目录并逐首修复。
+ * scope "media"=第一档常规：纯 DB 预筛（selectMediaMissingRows），不读文件头，成本远低于全量。
+ * scope "all"=第二档全量：文件头精探内嵌标签，任一维度缺失即修真缺的。
+ */
+export async function sweepTagRepair(
+  cfg: FetchConfig,
+  scope: "media" | "all" = "all",
+): Promise<TagRepairResult> {
+  const result = emptyResult();
   const candidates: Array<{ id: string; fsPath: string }> = [];
-  let probed = 0;
-  for (const r of rows) {
-    const fsPath = fsPathOf(r.path);
-    if (!fsPath || !inDownloadRoots(fsPath, cfg)) continue;
-    probed++;
-    const embedded = await probeEmbedded(fsPath);
-    const needAlbum = !embedded?.album && Boolean(String(r.album ?? "").trim());
-    if (embedded && (!embedded.cover || !embedded.lyric || needAlbum)) {
+
+  if (scope === "media") {
+    // 第一档·常规，纯 DB 判定，不读文件头，成本远低于全量。
+    const rows = selectMediaMissingRows();
+    for (const r of rows) {
+      const fsPath = fsPathOf(r.path);
+      if (!fsPath || !inDownloadRoots(fsPath, cfg)) continue;
       candidates.push({ id: r.id, fsPath });
     }
-    if (probed % 1000 === 0) log.info(`[TAG-REPAIR] 全量探针进度 ${probed}/${rows.length}，候选 ${candidates.length}`);
+    log.info(`[TAG-REPAIR] 常规扫描完成：候选中 DB 缺歌词/封面/专辑 ${candidates.length} 首`);
+  } else {
+    const rows = sqlite
+      .prepare("SELECT id, path, has_lyrics, album FROM songs WHERE path LIKE 'l:%'")
+      .all() as Array<{ id: string; path: string; has_lyrics: number | null; album: string | null }>;
+
+    // ① 文件头精探（只读）：封面/歌词/专辑/专辑艺术家/轨/碟/年/流派任一缺失即候选
+    //    （album 有 DB 值兜底、无需网络也能修；其余缺失回落 searchMetadata）。
+    let probed = 0;
+    for (const r of rows) {
+      const fsPath = fsPathOf(r.path);
+      if (!fsPath || !inDownloadRoots(fsPath, cfg)) continue;
+      probed++;
+      const embedded = await probeEmbedded(fsPath);
+      if (
+        embedded &&
+        (!embedded.cover ||
+          !embedded.lyric ||
+          !embedded.album ||
+          !embedded.albumArtist ||
+          !embedded.track ||
+          !embedded.disc ||
+          !embedded.year ||
+          !embedded.genre)
+      ) {
+        candidates.push({ id: r.id, fsPath });
+      }
+      if (probed % 1000 === 0) log.info(`[TAG-REPAIR] 全量探针进度 ${probed}/${rows.length}，候选 ${candidates.length}`);
+    }
+    log.info(`[TAG-REPAIR] 全量扫描完成：范围 ${probed} 首，待修复候选 ${candidates.length} 首`);
   }
-  log.info(`[TAG-REPAIR] 全量扫描完成：范围 ${probed} 首，待修复候选 ${candidates.length} 首`);
 
   // ② 逐首修复（repairSongTags 内部再探一次拿得到才写）。
   for (const { id } of candidates) {
@@ -399,7 +571,7 @@ export async function sweepTagRepair(cfg: FetchConfig): Promise<TagRepairResult>
       o = await repairSongTags(id, cfg);
     } catch (e) {
       log.warn(`全量修复异常 song=${id}: ${e instanceof Error ? e.message : e}`);
-      o = { outcome: "unobtainable", cover: false, lyric: false, album: false };
+      o = { outcome: "unobtainable", cover: false, lyric: false, album: false, meta: false };
     }
     accumulate(result, o);
   }
@@ -414,11 +586,12 @@ let repairing = false;
 
 /**
  * 跑一轮修复（手动触发按钮与调度共用）。
- * mode "queue"=只处理到期队列项；"full"=先全量兜底扫、再清队列。
+ * mode "queue"=只处理到期队列项；"media"=第一档常规（仅 DB 预筛，不读文件头）；
+ * "all"=第二档全量（先全量兜底扫、再清队列）。
  * 单飞：进行中返回 { busy: true }。
  */
 export async function runTagRepairOnce(
-  mode: "queue" | "full",
+  mode: TagRepairMode,
   cfgOver?: FetchConfig,
 ): Promise<{ busy: boolean; result?: TagRepairResult }> {
   if (repairing) return { busy: true };
@@ -426,8 +599,8 @@ export async function runTagRepairOnce(
   try {
     const cfg = cfgOver ?? currentFetchConfig();
     let result: TagRepairResult;
-    if (mode === "full") {
-      result = await sweepTagRepair(cfg);
+    if (mode === "all") {
+      result = await sweepTagRepair(cfg, "all");
       // 全量后队列里遗留的到期项一并清一轮（3 败弃权的不再重试）。
       const qr = await processTagRepairQueue(cfg);
       result.checked += qr.checked;
@@ -435,16 +608,23 @@ export async function runTagRepairOnce(
       result.coverFixed += qr.coverFixed;
       result.lyricFixed += qr.lyricFixed;
       result.albumFixed += qr.albumFixed;
+      result.metaFixed += qr.metaFixed;
       result.unobtainable += qr.unobtainable;
       result.skipped += qr.skipped;
+    } else if (mode === "media") {
+      // 第一档常规：仅 DB 预筛，不清队列。
+      result = await sweepTagRepair(cfg, "media");
     } else {
       result = await processTagRepairQueue(cfg);
     }
-    setSetting(LAST_RUN_KEY, String(Date.now()));
+    // lastRunAt 只由「第二档全量」推进：它是定时全量兜底扫的到点标记。
+    // 常规/队列挡位手动触发都是非穷尽操作，若也推进该标记，用户每次点「常规修复」
+    // 都会把到期的全量兜底扫往后推一个间隔，等于让兜底扫永远不跑。
+    if (mode === "all") setSetting(LAST_RUN_KEY, String(Date.now()));
     saveLastResult(mode, result);
     log.info(
       `[TAG-REPAIR] ${mode} 一轮完成：检查 ${result.checked}，修复 ${result.fixed} 首` +
-        `（封面 ${result.coverFixed} / 歌词 ${result.lyricFixed} / 专辑 ${result.albumFixed}），` +
+        `（封面 ${result.coverFixed} / 歌词 ${result.lyricFixed} / 专辑 ${result.albumFixed} / 元数据 ${result.metaFixed}），` +
         `拿不到 ${result.unobtainable}，无需修 ${result.skipped}`,
     );
     return { busy: false, result };
@@ -477,7 +657,7 @@ export function startTagRepairScheduler(): void {
         const last = Number(getSetting(LAST_RUN_KEY, "0")) || 0;
         const intervalMs = Math.max(1, Math.floor(cfg.tagRepairIntervalHours || 168)) * 3_600_000;
         if (Date.now() - last >= intervalMs) {
-          await runTagRepairOnce("full", cfg);
+          await runTagRepairOnce("all", cfg);
         }
       } catch (e) {
         log.warn("[TAG-REPAIR] tick 失败: " + (e instanceof Error ? e.message : String(e)));
@@ -495,6 +675,7 @@ export function _resetTagRepairForTest(): void {
   saveQueue({});
   setSetting(LAST_RUN_KEY, "0");
   setSetting(LAST_RESULT_KEY, "");
+  setSetting(LAST_RESULTS_KEY, "");
   repairing = false;
   ticking = false;
 }

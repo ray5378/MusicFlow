@@ -18,6 +18,7 @@ export type PluginType =
   | "sync"        // re-syncs imported playlists
   | "lyrics"      // supplies lyrics (lyricProvider)
   | "cover"       // supplies cover art (coverProvider)
+  | "metadata"    // supplies full tag metadata (metadataProvider)
   | "renderer"    // casts audio to a device (DLNA / Chromecast / ...)
   | "scrobbler"   // reports plays to an external service (Last.fm / ListenBrainz)
   | "artist"      // fetches artist info (bio / avatar) from a data source
@@ -56,6 +57,7 @@ export type PluginCapability =
   // ---- provider plugins ----
   | "lyricProvider" // supplies lyrics via searchLyrics()
   | "coverProvider" // supplies cover art via searchCover()
+  | "metadataProvider" // supplies full tag metadata via searchMetadata()
   | "renderer" // casts audio to a device via discover/cast/control
   | "scrobbler" // reports playback events via onPlay/onScrobble
   // ---- artist plugins ----
@@ -452,6 +454,34 @@ export interface CoverProviderPlugin {
   manifest: PluginManifest;
   /** Return a cover URL for a song, or null if this provider can't. */
   searchCover(host: PluginHost, song: LyricSongInput): Promise<{ url?: string } | null>;
+}
+
+/** A song's full tag metadata as returned by a `metadataProvider` plugin.
+ *  Every field is optional — the plugin returns only what it could match, and
+ *  the core fills only the tags that are still missing downstream. */
+export interface SongMetadata {
+  title?: string;
+  artist?: string;
+  albumArtist?: string;
+  album?: string;
+  track?: number;
+  trackTotal?: number;
+  disc?: number;
+  discTotal?: number;
+  year?: number | string;
+  genre?: string;
+  /** 平台声明时长(秒),供核心做时长一致性校验。 */
+  duration?: number;
+  /** 命中的平台 slug(仅用于日志/观测,核心不据此分支)。 */
+  platform?: string;
+}
+
+/** Implemented by `metadata` plugins that declare "metadataProvider".
+ *  First-match-wins across all enabled metadata providers. */
+export interface MetadataProviderPlugin {
+  manifest: PluginManifest;
+  /** Return the matched tag metadata for a song, or null if this provider can't. */
+  searchMetadata(host: PluginHost, song: LyricSongInput): Promise<SongMetadata | null>;
 }
 
 /** A discovered / controllable playback device (renderer). */

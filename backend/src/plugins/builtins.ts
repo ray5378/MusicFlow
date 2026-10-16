@@ -39,6 +39,9 @@ import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/pla
 // ---- lyrics / cover providers ----
 // NOTE: go-music-dl 的歌词 / 封面能力随该外置 source 插件分发(capabilities 含
 // lyricProvider/coverProvider),由核心按能力遍历调用,不再单独内置。
+// 内置「在线标签补全」(tag-provider):独立插件,聚合 QQ音乐/网易云/酷我/酷狗 的
+// 标签(metadataProvider)+封面(coverProvider)+歌词(lyricProvider)能力,平台顺序用户可配。
+import { tagProviderManifest, tagProviderPlugin } from "../services/plugin/tagProvider.js";
 // ---- renderer (device casting) ----
 import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";
 import { airplayRendererManifest, airplayRendererPlugin } from "../services/plugin/renderers/airplay.js";
@@ -85,6 +88,10 @@ export const BUILTIN_SYNC_PLUGINS: BuiltinPlugin[] = [
 
 export const BUILTIN_LYRIC_PLUGINS: BuiltinPlugin[] = [];
 export const BUILTIN_COVER_PLUGINS: BuiltinPlugin[] = [];
+// 标签元数据 provider(metadataProvider):在线补全 轨号/碟号/年份/风格/专辑艺人 等标签。
+export const BUILTIN_METADATA_PLUGINS: BuiltinPlugin[] = [
+  { manifest: tagProviderManifest, impl: tagProviderPlugin },
+];
 
 export const BUILTIN_RENDERER_PLUGINS: BuiltinPlugin[] = [
   { manifest: dlnaRendererManifest, impl: dlnaRendererPlugin },
@@ -118,6 +125,7 @@ export const BUILTIN_PLUGINS: BuiltinPlugin[] = [
   ...BUILTIN_SYNC_PLUGINS,
   ...BUILTIN_LYRIC_PLUGINS,
   ...BUILTIN_COVER_PLUGINS,
+  ...BUILTIN_METADATA_PLUGINS,
   ...BUILTIN_RENDERER_PLUGINS,
   ...BUILTIN_ARTIST_PLUGINS,
   ...BUILTIN_CORE_PLUGINS,

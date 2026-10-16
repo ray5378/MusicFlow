@@ -348,6 +348,7 @@ export interface TagRepairResult {
   coverFixed: number;
   lyricFixed: number;
   albumFixed: number;
+  metaFixed: number;
   unobtainable: number;
   skipped: number;
   fixed: number;
@@ -355,21 +356,26 @@ export interface TagRepairResult {
   mode?: string;
 }
 
+/** 修复挡位：queue=只清到期待修队列；media=常规（只查缺标签的歌并补齐全部缺失标签）；all=全量（逐首精探文件头）。 */
+export type TagRepairMode = "queue" | "media" | "all";
+
 export interface TagRepairStatus {
   enabled: boolean;
   intervalHours: number;
   queueSize: number;
   running: boolean;
   lastResult: TagRepairResult | null;
+  /** 分挡位的上次结果（queue/media/all）。 */
+  lastResults: Partial<Record<TagRepairMode, TagRepairResult>>;
 }
 
 export async function getTagRepairStatus(): Promise<TagRepairStatus> {
   const res = await api.get(`${BASE}/tag-repair`);
-  return (res.data ?? { enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null }) as TagRepairStatus;
+  return (res.data ?? { enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null, lastResults: {} }) as TagRepairStatus;
 }
 
-/** 触发一轮修复：full=true 全量兜底扫（数分钟），否则只清到期队列。异步执行，结果轮询状态。 */
-export async function runTagRepair(full: boolean): Promise<{ success: boolean; busy?: boolean; mode?: string }> {
-  const res = await api.post(`${BASE}/tag-repair/run`, { full });
+/** 触发一轮修复：mode=queue 只清到期待修队列，media=常规（补缺标签歌的全部缺失标签，快），all=全量（逐首精探文件头，慢，可能数分钟）。异步执行，结果轮询状态。已有修复在跑时后端返回 409。 */
+export async function runTagRepair(mode: TagRepairMode): Promise<{ success: boolean; busy?: boolean; mode?: string }> {
+  const res = await api.post(`${BASE}/tag-repair/run`, { mode });
   return res.data ?? { success: false };
 }

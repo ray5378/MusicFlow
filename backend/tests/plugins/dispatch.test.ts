@@ -65,8 +65,12 @@ beforeAll(() => {
   initDatabase();
   // Disable the built-in renderer so the in-memory mock is the only enabled
   // renderer (keeps first-match-wins deterministic). Lyric/cover built-ins were
-  // externalized to the marketplace, so they no longer seed rows here.
+  // externalized to the marketplace, so they no longer seed rows here, but the
+  // built-in tag-provider (metadataProvider/coverProvider/lyricProvider,
+  // default-enabled) would otherwise win first-match ahead of the mocks and hit
+  // the real network — disable it so the mocks are the only enabled providers.
   setEnabled("dlna-renderer", 0);
+  setEnabled("tag-provider", 0);
   for (const m of [failLyric, okLyric, okCover, okRenderer, okScrobbler]) {
     registerPlugin(m, (m === failLyric && failLyricImpl) || (m === okLyric && okLyricImpl) || (m === okCover && okCoverImpl) || (m === okRenderer && okRendererImpl) || okScrobblerImpl);
     upsertRow(m.id, 1);
@@ -77,6 +81,7 @@ afterAll(() => {
   for (const id of MOCK_IDS) sqlite.prepare("DELETE FROM plugins WHERE name = ?").run(id);
   // restore built-in defaults
   setEnabled("dlna-renderer", 1);
+  setEnabled("tag-provider", 1);
   try { fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true }); } catch {}
 });
 

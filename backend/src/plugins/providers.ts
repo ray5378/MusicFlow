@@ -15,10 +15,13 @@ import type { RegisteredPlugin } from "./registry.js";
 import { createPluginHost } from "./host.js";
 import { recordSuccess, recordFailure } from "./health.js";
 import { getSetting } from "../services/settings.js";
-import type { LyricSongInput } from "./types.js";
+import type { LyricSongInput, SongMetadata } from "./types.js";
 import { createLogger } from "../utils/logger.js";
 
 const APP_VERSION = process.env.APP_VERSION || "dev";
+
+/** 来源优先级设置的键前缀("lyrics" | "cover" | "metadata")。 */
+export type ProviderPrefPrefix = "lyrics" | "cover" | "metadata";
 
 /** Whether any enabled lyric provider exists (lets the core decide whether to
  *  take the plugin path at all — mirrors songloft's HasLyricProvider()). */
@@ -30,6 +33,11 @@ export function hasLyricProvider(): boolean {
 /** Whether any enabled cover provider exists. */
 export function hasCoverProvider(): boolean {
   return getEnabledByCapability("coverProvider").length > 0;
+}
+
+/** Whether any enabled metadata provider exists (标签补全链路的启用判定)。 */
+export function hasMetadataProvider(): boolean {
+  return getEnabledByCapability("metadataProvider").length > 0;
 }
 
 /**
@@ -56,7 +64,7 @@ export function normalizeProviderPriority(list: unknown): string[] {
  *   - 两者都空 → [](= 自动:全部启用 provider,注册顺序)。
  * @param prefix "lyrics" | "cover"
  */
-export function getProviderPriority(prefix: "lyrics" | "cover"): string[] {
+export function getProviderPriority(prefix: ProviderPrefPrefix): string[] {
   const raw = getSetting(`${prefix}.providerPriority`, "");
   if (raw) {
     try {
@@ -81,7 +89,7 @@ export function getProviderPriority(prefix: "lyrics" | "cover"): string[] {
  */
 export function filterProvidersByPreference(
   all: RegisteredPlugin[],
-  prefix: "lyrics" | "cover",
+  prefix: ProviderPrefPrefix,
 ): RegisteredPlugin[] {
   if (all.length === 0) return all;
 
@@ -153,6 +161,33 @@ export async function searchCover(song: LyricSongInput): Promise<string | null> 
         recordSuccess(manifest.id);
         return r.url;
       }
+    } catch (e: any) {
+      recordFailure(manifest.id, e?.message || String(e));
+      log.error(`provider ${manifest.id} failed`, { err: e?.message || e });
+    }
+  }
+  return null;
+}
+
+/**
+ * Search full tag metadata across enabled metadata providers (first-match-wins),
+ * honoring the user's `metadata.providerPriority` order (falls back to legacy
+ * `metadata.providerId`).
+ * @returns the matched SongMetadata, or null if no provider could supply it.
+ */
+export async function searchMetadata(song: LyricSongInput): Promise<SongMetadata | null> {
+  const providers = filterProvidersByPreference(getEnabledByCapability("metadataProvider"), "metadata");
+  for (const { manifest, impl } of providers) {
+    if (typeof impl?.searchMetadata !== "function") continue;
+    const cfg = getPluginConfig(manifest.id) || {};
+    const host = createPluginHost(manifest, cfg, APP_VERSION);
+    try {
+      const r = await impl.searchMetadata(host, song);
+      if (r && typeof r === "object" && Object.keys(r).length > 0) {
+        recordSuccess(manifest.id);
+        return r as SongMetadata;
+      }
+      // Provider responded but had nothing for this song — keep trying others.
     } catch (e: any) {
       recordFailure(manifest.id, e?.message || String(e));
       log.error(`provider ${manifest.id} failed`, { err: e?.message || e });

@@ -64,9 +64,11 @@ import { ensureBaseBatchLimit } from "../../services/plugin/batchPacer.js";
 import type { TaskStatus } from "../../services/fetch/types.js";
 import {
   getTagRepairLastResult,
+  getTagRepairLastResults,
   getTagRepairQueueSize,
   isTagRepairRunning,
   runTagRepairOnce,
+  type TagRepairMode,
 } from "../../services/fetch/tagRepair.js";
 
 /** 客户端入参 → FetchTarget[]（宽容归一化：缺 id 补位、缺 title 置空）。 */
@@ -673,7 +675,7 @@ export function registerFetch(app: Hono): void {
   );
 
   // ==================== 标签缺失修复（歌词/封面/专辑，方案 B 2026-10-11） ====================
-  // 状态查询：开关 / 队列规模 / 上次结果（供前端按钮展示）。
+  // 状态查询：开关 / 队列规模 / 上次结果（供前端按钮展示）+ 分挡位上次结果（两块卡片各显各的）。
   app.get("/v1/fetch/tag-repair", adminMiddleware, (c) => {
     const cfg = currentFetchConfig();
     return c.json({
@@ -682,18 +684,23 @@ export function registerFetch(app: Hono): void {
       queueSize: getTagRepairQueueSize(),
       running: isTagRepairRunning(),
       lastResult: getTagRepairLastResult(),
+      lastResults: getTagRepairLastResults(),
     });
   });
-  // 手动触发一轮：body { full?: boolean }（默认 queue=只清到期队列；full=全量兜底扫）。
-  // 异步执行（全量可能数分钟），立即返回 busy/started；结果经 GET 轮询 lastResult。
-  app.post("/v1/fetch/tag-repair/run", adminMiddleware, (c) => {
-    let body: { full?: boolean } = {};
-    try {
-      body = (c.req.json() as { full?: boolean }) ?? {};
-    } catch {
-      /* 空 body 合法 */
-    }
-    const mode = body?.full ? "full" : "queue";
+  // 手动触发一轮：body { mode?: TagRepairMode; full?: boolean }。
+  //   mode="queue"=只清到期队列；"media"=第一档常规（仅 DB 预筛，不读文件头，便宜）；
+  //   "all"=第二档全量（逐首精探文件头，跑完再清一轮队列）。
+  //   兼容旧入参：full=true → "all"，full=false/缺省 → "queue"；非法值一律回落 "queue"（宽容归一化）。
+  // 异步执行（全量可能数分钟），立即返回 busy/started；结果经 GET 轮询 lastResult/lastResults。
+  app.post("/v1/fetch/tag-repair/run", adminMiddleware, async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { mode?: TagRepairMode; full?: boolean };
+    const requested = body.mode;
+    const mode: TagRepairMode =
+      requested === "queue" || requested === "media" || requested === "all"
+        ? requested
+        : body.full === true
+          ? "all"
+          : "queue";
     if (isTagRepairRunning()) return c.json({ success: false, busy: true }, 409);
     // 不 await：后台跑，前端轮询状态。
     void runTagRepairOnce(mode);

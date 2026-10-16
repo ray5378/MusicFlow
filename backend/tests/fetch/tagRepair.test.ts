@@ -46,9 +46,11 @@ vi.mock("music-metadata", () => ({ parseFile: parseFileMock }));
 
 const searchCoverMock = vi.hoisted(() => vi.fn());
 const searchLyricsMock = vi.hoisted(() => vi.fn());
+const searchMetadataMock = vi.hoisted(() => vi.fn());
 vi.mock("../../src/plugins/providers.js", () => ({
   searchCover: searchCoverMock,
   searchLyrics: searchLyricsMock,
+  searchMetadata: searchMetadataMock,
 }));
 
 const writeTagsMock = vi.hoisted(() => vi.fn());
@@ -115,15 +117,36 @@ function queueState(): Record<string, { count: number; nextAt: number }> {
   return JSON.parse(getSetting("fetch.tagrepair.queue", "{}")) as Record<string, { count: number; nextAt: number }>;
 }
 
-/** 构造 parseFile 返回的 common 形状（探针读 picture/lyrics/album 三个原始字段）。 */
-function probe(over: Partial<{ cover: boolean; lyric: boolean; album: boolean }> = {}): {
-  common: { picture: unknown[]; lyrics: string[]; album: string };
+/** 构造 parseFile 返回的 common 形状。
+ *  探针读的维度：picture/lyrics/album + 专辑艺术家/轨/碟/年/流派（元数据维度）。
+ *  默认全部「已存在」，用 over 开关模拟缺失。 */
+function probe(over: Partial<{ cover: boolean; lyric: boolean; album: boolean; meta: boolean }> = {}): {
+  common: {
+    picture: unknown[];
+    lyrics: string[];
+    album: string;
+    title: string;
+    artist: string;
+    albumartist: string;
+    track: { no: number; of: number };
+    disk: { no: number; of: number };
+    year: number | null;
+    genre: string[];
+  };
 } {
+  const metaMissing = over.meta === false;
   return {
     common: {
       picture: over.cover === false ? [] : [{}],
       lyrics: over.lyric === false ? [] : ["[00:01]x"],
       album: over.album === false ? "" : "专辑",
+      title: "测试歌",
+      artist: "测试歌手",
+      albumartist: metaMissing ? "" : "测试专辑艺术家",
+      track: { no: metaMissing ? 0 : 3, of: 12 },
+      disk: { no: metaMissing ? 0 : 1, of: 2 },
+      year: metaMissing ? null : 2024,
+      genre: metaMissing ? [] : ["Pop"],
     },
   };
 }
@@ -137,6 +160,7 @@ beforeEach(() => {
   writeFileSync(join(tmpDir, "cover.jpg"), "fake-jpeg-bytes");
   searchCoverMock.mockResolvedValue(null);
   searchLyricsMock.mockResolvedValue(null);
+  searchMetadataMock.mockResolvedValue(null);
   writeTagsMock.mockResolvedValue({ ok: true, file: "/x.flac", bytes: 1, mtimeMs: 1, warnings: [] });
   cacheRemoteCoverMock.mockResolvedValue(null);
   resolveCoverFileMock.mockReturnValue(null);
@@ -327,16 +351,16 @@ describe("tagRepair queue", () => {
     // 让全量扫描卡住：parseFile 挂起直到放行（所有调用共享同一个 pending promise，
     // 否则第二次调用会重挂 release 导致第一处永不 resolve）。
     let release!: () => void;
-    let shared!: Promise<{ common: { picture: unknown[]; lyrics: string[]; album: string } }>;
+    let shared!: Promise<ReturnType<typeof probe>>;
     parseFileMock.mockImplementation(() => {
       if (!shared) {
         shared = new Promise((res) => (release = () => res(probe({ cover: false }))));
       }
       return shared;
     });
-    const first = runTagRepairOnce("full", cfg());
+    const first = runTagRepairOnce("all", cfg());
     await vi.waitFor(() => expect(parseFileMock).toHaveBeenCalled());
-    const second = await runTagRepairOnce("full", cfg());
+    const second = await runTagRepairOnce("all", cfg());
     expect(second.busy).toBe(true);
     release();
     const done = await first;

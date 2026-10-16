@@ -44,7 +44,7 @@ import { createLogger } from "../utils/logger.js";
 
 const VALID_TYPES: PluginType[] = [
   "source", "importer", "recommender", "sync",
-  "lyrics", "cover", "renderer", "scrobbler", "artist",
+  "lyrics", "cover", "metadata", "renderer", "scrobbler", "artist",
 ];
 const VALID_CAPS: PluginCapability[] = [
   "search", "playlistSearch", "songSearch", "artistSearch", "albumSearch", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
@@ -52,7 +52,7 @@ const VALID_CAPS: PluginCapability[] = [
   "recommendPlaylist", "localPlatformRecommend",
   "playlistSync", "autoMatch",
   "playlistCleanup",
-  "lyricProvider", "coverProvider", "renderer", "scrobbler",
+  "lyricProvider", "coverProvider", "metadataProvider", "renderer", "scrobbler",
   "artistInfo",
   // 交互能力(T05 §14):扫码登录三方法 startBind/pollBind/cancelBind,
   // 经 POST /v1/plugins/:id/action 门面调用(sandbox.ts CAP_METHODS.qrLogin)。

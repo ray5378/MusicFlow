@@ -24,7 +24,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { downloadToFile, probeRemoteSize, type DownloadResult } from "../../utils/httpDownload.js";
-import { searchCover, searchLyrics } from "../../plugins/providers.js";
+import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import type { LyricSongInput } from "../../plugins/types.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
 import {
@@ -190,6 +190,8 @@ export interface FetchDeps {
   searchLyrics: typeof searchLyrics;
   /** 封面 provider（同上；优先用 Candidate.coverUrl，缺了才调它）。 */
   searchCover: typeof searchCover;
+  /** 元数据 provider（价值增值项：一次调用补齐缺失的轨/碟/年/流派/专辑，拿不到只告警）。 */
+  searchMetadata: typeof searchMetadata;
   /** 下载尝试台账（PATCH17 / 2026-10-11 定调 B）：窗口内试过即跳过，**永久失效类除外**
    *  （否则 fail_count 永远停在 1，死链清理永不生效）；终态时记录（可轮转）。 */
   shouldSkipByCooldown: typeof shouldSkipByCooldown;
@@ -217,6 +219,7 @@ const DEFAULT_DEPS: FetchDeps = {
   rankCandidates,
   searchLyrics,
   searchCover,
+  searchMetadata,
   shouldSkipByCooldown,
   lastDownloadAttempt,
   recordDownloadAttempt,
@@ -973,11 +976,12 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
   // ==================== 单曲流水线（闭包） ====================
 
   /**
-   * 采集「增值标签」：风格（信源声明） / 歌词 / 封面。
+   * 采集「增值标签」：风格（信源声明） / 歌词 / 封面 / 元数据补全。
    *
-   * 纪律：**三项都是价值增值项，任一失败只 push warning，绝不上抛**（否则一首歌的
-   * 歌词服务抖动就会毁掉整次下载）。风格拿不到不写（不臆造）；封面优先用候选自带的
-   * `coverUrl`，缺了才回落 `searchCover` provider。
+   * 纪律：**这些都是价值增值项，任一失败只 push warning，绝不上抛**（否则一首歌的
+   * 歌词服务抖动就会毁掉整次下载）。风格只认信源声明值（不臆造）；封面优先用候选自带的
+   * `coverUrl`，缺了才回落 `searchCover` provider；最后用 `searchMetadata` **只补缺失项**
+   * （轨/碟/年/流派/专辑），信源声明值优先。
    */
   async function collectExtraTags(
     t: FetchTarget,
@@ -1026,6 +1030,22 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (!extra.cover) {
         warnings.push("封面未获取到(不影响入库，已入修复队列待重试)");
       }
+    }
+
+    // 元数据补全：一次调用补齐缺失的轨/碟/年/流派/专辑；只补缺失项，信源声明值优先。
+    try {
+      const meta = await withTimeout(deps.searchMetadata(songInput), ENRICH_TIMEOUT_MS);
+      if (meta) {
+        if (!cand.track && meta.track) extra.track = meta.track;
+        if (meta.trackTotal) extra.trackTotal = meta.trackTotal;
+        if (!cand.disc && meta.disc) extra.disc = meta.disc;
+        if (meta.discTotal) extra.discTotal = meta.discTotal;
+        if (!cand.year && meta.year !== undefined && meta.year !== null) extra.year = meta.year;
+        if (!cand.genre && meta.genre) extra.genre = meta.genre;
+        if (!base.album && meta.album) extra.album = meta.album;
+      }
+    } catch (e) {
+      warnings.push(`标签补全失败(忽略，不影响入库): ${msgOf(e)}`);
     }
 
     return extra;

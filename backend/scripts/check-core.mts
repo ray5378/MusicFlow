@@ -30,7 +30,7 @@ const VALID_CAPS = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
-  "lyricProvider", "coverProvider", "renderer", "scrobbler",
+  "lyricProvider", "coverProvider", "metadataProvider", "renderer", "scrobbler",
   "artistInfo",
   // core 内置行为插件能力(2026-09-11 补齐:此前与 types.ts 不同步)
   "songGroup", "importGate", "streamFallback", "playPreference", "preProbe",

@@ -97,22 +97,6 @@
                 <el-input v-model="config.libraryAutoTimeOfDay" placeholder="03:00" class="time-input" :disabled="!config.libraryAutoEnabled" />
                 <div class="hint">{{ t('admin.fetch.config.libraryAutoTimeOfDayHint') }}</div>
               </el-form-item>
-              <el-form-item :label="t('admin.fetch.config.tagRepairEnabled')">
-                <el-switch v-model="config.tagRepairEnabled" />
-                <div class="hint">{{ t('admin.fetch.config.tagRepairEnabledHint') }}</div>
-              </el-form-item>
-              <el-form-item :label="t('admin.fetch.config.tagRepairIntervalHours')">
-                <el-input-number v-model="config.tagRepairIntervalHours" :min="1" :max="8760" controls-position="right" :disabled="!config.tagRepairEnabled" />
-                <div class="hint">{{ t('admin.fetch.config.tagRepairIntervalHoursHint') }}</div>
-              </el-form-item>
-              <el-form-item :label="t('admin.fetch.config.tagRepairRun')">
-                <div class="tag-repair-actions">
-                  <el-button size="small" :loading="tagRepairBusyQueue" :disabled="tagRepairStatus.running" @click="onTagRepairQueue">{{ t('admin.fetch.config.tagRepairQueueBtn') }}</el-button>
-                  <el-button size="small" type="primary" plain :loading="tagRepairBusyFull" :disabled="tagRepairStatus.running" @click="onTagRepairFull">{{ t('admin.fetch.config.tagRepairFullBtn') }}</el-button>
-                </div>
-                <div class="hint" v-if="tagRepairStatusMessage">{{ tagRepairStatusMessage }}</div>
-                <div class="hint">{{ t('admin.fetch.config.tagRepairHint') }}</div>
-              </el-form-item>
             </div>
 
             <el-divider content-position="left">{{ t('admin.fetch.config.transcode') }}</el-divider>
@@ -325,12 +309,65 @@
         </div>
       </el-tab-pane>
 
-      <!-- ===== 4. 下载任务列表（全部非洗版：搜索导入 / 全库 / 重试） ===== -->
+      <!-- ===== 4. 标签修复（独立子页：双挡位 + 待修队列） ===== -->
+      <el-tab-pane :label="t('admin.fetch.tabTagRepair')" name="tagRepair">
+        <div class="tag-repair-wrap">
+          <div class="tag-repair-status">
+            <el-tag :type="tagRepairStatus.running ? 'warning' : 'info'">
+              {{ tagRepairStatus.running ? t('admin.fetch.tagRepair.running') : t('admin.fetch.tagRepair.idle') }}
+            </el-tag>
+            <span class="hint">{{ t('admin.fetch.tagRepair.queueLine', { n: tagRepairStatus.queueSize }) }}</span>
+            <el-button size="small" @click="loadTagRepairStatus"><MfIcon name="RefreshCw" />{{ t('admin.fetch.tagRepair.reload') }}</el-button>
+          </div>
+
+          <el-form label-position="top" class="tag-repair-form">
+            <el-divider content-position="left">{{ t('admin.fetch.tagRepair.settings') }}</el-divider>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.settingsHint') }}</div>
+            <div class="config-grid">
+              <el-form-item :label="t('admin.fetch.tagRepair.enabled')">
+                <el-switch v-model="config.tagRepairEnabled" />
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.tagRepair.intervalHours')">
+                <el-input-number v-model="config.tagRepairIntervalHours" :min="1" :max="8760" controls-position="right" :disabled="!config.tagRepairEnabled" />
+              </el-form-item>
+            </div>
+            <div class="config-actions">
+              <el-button type="primary" :loading="tagRepairSaving" @click="saveTagRepairSettings">{{ t('admin.fetch.tagRepair.save') }}</el-button>
+            </div>
+
+            <el-divider content-position="left">{{ t('admin.fetch.tagRepair.mediaTitle') }}</el-divider>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.mediaDesc') }}</div>
+            <div class="tag-repair-actions">
+              <el-button type="primary" :loading="tagRepairBusyMedia" :disabled="tagRepairStatus.running" @click="onTagRepairMedia">{{ t('admin.fetch.tagRepair.mediaBtn') }}</el-button>
+              <span class="hint">{{ formatTagRepairResultAt('media') || t('admin.fetch.tagRepair.noResult') }}</span>
+            </div>
+
+            <el-divider content-position="left">{{ t('admin.fetch.tagRepair.allTitle') }}</el-divider>
+            <el-alert class="tag-repair-alert" type="warning" :closable="false" show-icon>{{ t('admin.fetch.tagRepair.allWarn') }}</el-alert>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.allDesc') }}</div>
+            <div class="tag-repair-actions">
+              <el-button type="primary" :loading="tagRepairBusyAll" :disabled="tagRepairStatus.running" @click="onTagRepairAll">{{ t('admin.fetch.tagRepair.allBtn') }}</el-button>
+              <span class="hint">{{ formatTagRepairResultAt('all') || t('admin.fetch.tagRepair.noResult') }}</span>
+            </div>
+
+            <el-divider content-position="left">{{ t('admin.fetch.tagRepair.queueTitle') }}</el-divider>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.queueDesc') }}</div>
+            <div class="tag-repair-actions">
+              <el-button :loading="tagRepairBusyQueue" :disabled="tagRepairStatus.running" @click="onTagRepairQueue">{{ t('admin.fetch.tagRepair.queueBtn') }}</el-button>
+              <span class="hint">{{ formatTagRepairResultAt('queue') || t('admin.fetch.tagRepair.noResult') }}</span>
+            </div>
+
+            <div class="hint tag-repair-write-hint">{{ t('admin.fetch.tagRepair.writeHint') }}</div>
+          </el-form>
+        </div>
+      </el-tab-pane>
+
+      <!-- ===== 5. 下载任务列表（全部非洗版：搜索导入 / 全库 / 重试） ===== -->
       <el-tab-pane :label="t('admin.fetch.tabJobs')" name="jobs" lazy>
         <JobListPanel ref="downloadJobsRef" :kinds="DOWNLOAD_JOB_KINDS" />
       </el-tab-pane>
 
-      <!-- ===== 5. 洗版任务列表（独立模块，与下载任务完全分开） ===== -->
+      <!-- ===== 6. 洗版任务列表（独立模块，与下载任务完全分开） ===== -->
       <el-tab-pane :label="t('admin.fetch.tabUpgradeJobs')" name="upgradeJobs" lazy>
         <JobListPanel ref="upgradeJobsRef" :kinds="UPGRADE_JOB_KINDS" />
       </el-tab-pane>
@@ -340,7 +377,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import JobListPanel from "./JobListPanel.vue";
@@ -373,6 +410,7 @@ import type {
   UpgradePlan,
   UpgradeConfig,
   LibraryPlan,
+  TagRepairMode,
   TagRepairStatus,
 } from "@/api/fetch";
 
@@ -434,34 +472,44 @@ const config = reactive<ConfigForm>(defaultConfig());
 const configLoading = ref(false);
 const configSaving = ref(false);
 
-// ==================== 标签缺失修复（2026-10-11） ====================
-const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null });
+// ==================== 标签缺失修复（2026-10-11；2026-10-16 独立页签 + 双挡位） ====================
+const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null, lastResults: {} });
+const tagRepairSaving = ref(false);
 const tagRepairBusyQueue = ref(false);
-const tagRepairBusyFull = ref(false);
+const tagRepairBusyMedia = ref(false);
+const tagRepairBusyAll = ref(false);
 let tagRepairPoll: ReturnType<typeof setInterval> | null = null;
 // 组件是否已卸载：卸载瞬间仍在途的 loadTagRepairStatus 落地后不得再写状态或重建轮询定时器
 // （2026-10-16 修正：否则会产生一个无人清理的 5s 定时器）。
 let tagRepairDisposed = false;
 
+// 挡位显示名：兼容历史值 "full"（旧版全量挡位）映射到「全量」文案；未知/缺省归到队列。
+function tagRepairModeLabel(mode?: string): string {
+  if (mode === "all" || mode === "full") return t("admin.fetch.tagRepair.modeAll");
+  if (mode === "media") return t("admin.fetch.tagRepair.modeMedia");
+  return t("admin.fetch.tagRepair.modeQueue");
+}
+
 function formatTagRepairResult(r: NonNullable<TagRepairStatus["lastResult"]>): string {
-  const mode = r.mode === "full" ? t("admin.fetch.config.tagRepairModeFull") : t("admin.fetch.config.tagRepairModeQueue");
-  return t("admin.fetch.config.tagRepairResultLine", {
-    mode,
+  return t("admin.fetch.tagRepair.resultLine", {
+    mode: tagRepairModeLabel(r.mode),
     fixed: r.fixed ?? 0,
     cover: r.coverFixed ?? 0,
     lyric: r.lyricFixed ?? 0,
     album: r.albumFixed ?? 0,
+    meta: r.metaFixed ?? 0,
     miss: r.unobtainable ?? 0,
   });
 }
 
-const tagRepairStatusMessage = computed(() => {
-  const s = tagRepairStatus.value;
-  if (s.running) return t("admin.fetch.config.tagRepairRunning");
-  const parts: string[] = [t("admin.fetch.config.tagRepairQueueLine", { n: s.queueSize })];
-  if (s.lastResult) parts.push(formatTagRepairResult(s.lastResult));
-  return parts.join(" · ");
-});
+// 分挡位上次结果：无记录返回 ""（模板里 `|| noResult` 兜底），有记录则前缀运行时间。
+function formatTagRepairResultAt(mode: TagRepairMode): string {
+  const r = tagRepairStatus.value.lastResults?.[mode];
+  if (!r) return "";
+  const line = formatTagRepairResult(r);
+  if (!r.at) return line;
+  return `${t("admin.fetch.tagRepair.resultAt", { time: new Date(r.at).toLocaleString() })} · ${line}`;
+}
 
 async function loadTagRepairStatus() {
   try {
@@ -484,36 +532,44 @@ async function loadTagRepairStatus() {
   }
 }
 
-async function onTagRepairQueue() {
-  tagRepairBusyQueue.value = true;
+// 三个入口共用：统一的 loading 管理 + 409「忙」识别（避免三份重复处理）。
+async function runTagRepairMode(mode: TagRepairMode, busy: Ref<boolean>): Promise<void> {
+  busy.value = true;
   try {
-    const r = await runTagRepair(false);
-    if (r.busy) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
-    else ElMessage.success(t("admin.fetch.config.tagRepairStarted"));
+    await runTagRepair(mode);
+    if (mode === "media") ElMessage.success(t("admin.fetch.tagRepair.mediaStarted"));
+    else if (mode === "all") ElMessage.success(t("admin.fetch.tagRepair.allStarted"));
+    else ElMessage.success(t("admin.fetch.tagRepair.queueStarted"));
   } catch (e: any) {
-    // 后端「已有修复在跑」时返回 HTTP 409（{busy:true}），axios 会把它抛成异常
-    // → 以前一律误弹“保存失败”、上面的 r.busy 分支永不命中。识别 409 走「正在运行」提示。
-    if (e?.response?.status === 409) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
-    else ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
+    // 后端「已有修复在跑」时返回 HTTP 409（{busy:true}），axios 会把它抛成异常 → 识别 409 走「正在运行」提示。
+    if (e?.response?.status === 409) ElMessage.warning(t("admin.fetch.tagRepair.running"));
+    else ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.saveFailed")));
   } finally {
-    tagRepairBusyQueue.value = false;
+    busy.value = false;
     loadTagRepairStatus();
   }
 }
 
-async function onTagRepairFull() {
-  tagRepairBusyFull.value = true;
+function onTagRepairMedia(): void {
+  void runTagRepairMode("media", tagRepairBusyMedia);
+}
+function onTagRepairAll(): void {
+  void runTagRepairMode("all", tagRepairBusyAll);
+}
+function onTagRepairQueue(): void {
+  void runTagRepairMode("queue", tagRepairBusyQueue);
+}
+
+// 「保存设置」只提交这两个字段，避免与配置页签的整体保存互相干扰。
+async function saveTagRepairSettings(): Promise<void> {
+  tagRepairSaving.value = true;
   try {
-    const r = await runTagRepair(true);
-    if (r.busy) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
-    else ElMessage.success(t("admin.fetch.config.tagRepairStartedFull"));
+    await updateFetchConfig({ tagRepairEnabled: config.tagRepairEnabled, tagRepairIntervalHours: config.tagRepairIntervalHours });
+    ElMessage.success(t("admin.fetch.tagRepair.saved"));
   } catch (e: any) {
-    // 同 onTagRepairQueue：后端忙返回 409 → 走「正在运行」提示而非“保存失败”。
-    if (e?.response?.status === 409) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
-    else ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
+    ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.saveFailed")));
   } finally {
-    tagRepairBusyFull.value = false;
-    loadTagRepairStatus();
+    tagRepairSaving.value = false;
   }
 }
 const priorityInput = ref("");
@@ -965,6 +1021,15 @@ watch(activeTab, (v) => {
 .upgrade-stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .upgrade-hint { padding: 20px 0; }
 .upgrade-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+
+/* 标签修复 */
+.tag-repair-wrap { max-width: 900px; }
+.tag-repair-status { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.tag-repair-form :deep(.el-form-item) { margin-bottom: 16px; }
+.tag-repair-hint { margin: 0 0 12px; }
+.tag-repair-alert { margin: 4px 0 12px; }
+.tag-repair-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 16px; }
+.tag-repair-write-hint { margin-top: 8px; }
 
 @media (max-width: 768px) {
   .admin-fetch { padding: 20px 16px; }

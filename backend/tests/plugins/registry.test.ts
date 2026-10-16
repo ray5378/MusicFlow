@@ -72,9 +72,10 @@ describe("plugin registry", () => {
     // 内置插件:go-music-dl 三合一(源/歌词/封面)已改回**外置**插件
     // (MusicFlow-plugins 仓库分发),因此内置插件已不再有 source 类型——
     // source 类型由外置插件在市场/官方注册表安装后提供。其余内置为
-    // importer/recommender/sync/renderer/artist + core(多源组/播放优选行为插件)。
+    // importer/recommender/sync/renderer/artist + metadata(在线标签补全 tag-provider)
+    // + core(多源组/播放优选行为插件)。
     expect([...types].sort()).toEqual([
-      "artist", "core", "importer", "recommender", "renderer", "sync",
+      "artist", "core", "importer", "metadata", "recommender", "renderer", "sync",
     ]);
   });
 

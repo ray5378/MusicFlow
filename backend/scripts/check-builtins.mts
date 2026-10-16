@@ -29,14 +29,14 @@ import path from "path";
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mf-check-builtins-"));
 
 // ---- 与 backend/src/plugins/discovery.ts 保持一致 ----
-const VALID_TYPES = ["source", "importer", "recommender", "sync", "lyrics", "cover", "renderer", "scrobbler", "artist", "core"];
+const VALID_TYPES = ["source", "importer", "recommender", "sync", "lyrics", "cover", "metadata", "renderer", "scrobbler", "artist", "core"];
 const VALID_CAPS = [
   "search", "recommend", "playlistSongs", "stream", "lyrics", "webRotation",
   "playlistImport", "playlistFile", "dailyPlaylist", "localPlaylist",
   "playlistSync", "autoMatch",
   // 组合/通用推荐与清理能力(types.ts 有、sandbox.ts CAP_METHODS 亦有,此前漏列)
   "comboPlaylist", "recommendPlaylist", "localPlatformRecommend", "playlistCleanup",
-  "lyricProvider", "coverProvider", "renderer", "scrobbler",
+  "lyricProvider", "coverProvider", "metadataProvider", "renderer", "scrobbler",
   "artistInfo",
   // core 内置行为插件(配置面在插件、逻辑在核心)
   "songGroup", "importGate", "streamFallback", "playPreference", "preProbe",
@@ -61,6 +61,7 @@ const CAP_METHODS: Record<string, string[]> = {
   lyrics: ["lyricUrl"],
   lyricProvider: ["searchLyrics"],
   coverProvider: ["searchCover"],
+  metadataProvider: ["searchMetadata"],
   renderer: ["discover"],
   autoMatch: ["search"],
   scrobbler: ["onPlay", "onScrobble"],
@@ -119,6 +120,8 @@ const BUILTINS: Array<{ id: string; file: string; exportName: string }> = [
   { id: "airplay-renderer", file: "../src/services/plugin/renderers/airplay.js", exportName: "airplayRendererManifest" },
   { id: "sendspin-renderer", file: "../src/services/plugin/renderers/sendspin.js", exportName: "sendspinRendererManifest" },
   { id: "artist-info", file: "../src/services/plugin/artistInfo.js", exportName: "artistInfoManifest" },
+  // 在线标签补全(metadataProvider + coverProvider + lyricProvider 三合一内置 provider)
+  { id: "tag-provider", file: "../src/services/plugin/tagProvider.js", exportName: "tagProviderManifest" },
   // ---- core 内置行为插件(2026-09-11 起纳入校验；此前完全没被校验过) ----
   { id: "core-song-group", file: "../src/services/plugin/core/songGroup.js", exportName: "songGroupManifest" },
   { id: "core-play-preference", file: "../src/services/plugin/core/playPreference.js", exportName: "playPreferenceManifest" },
