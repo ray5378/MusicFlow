@@ -7,18 +7,34 @@
 //      旧实现只读 track_info，故恒判「QQ 无风格名」而省略 genre（已在生产实测发现）。
 //   2. 碟号 disc **不再返回**：成品音频不留 DISCNUMBER/DISCTOTAL（见 tagWriter【碟号纪律】）。
 //   3. 时长闸门按**秒**比对（旧实现误当毫秒，恒失败 → 元数据补全恒空）。
+//   4. **换真搜索接口**（2026-10-17 命中率修复）：候选来自 `client_search_cp` 的
+//      `data.song.list[]`，归一化字段 `mid/title/singer[]/interval`（秒）；搜索阶段先跑
+//      时长预筛，不通过则**不调用详情接口**；`Unknown Artist` 等 scanner 占位当空歌手。
 import { describe, expect, it } from "vitest";
 import { tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
 import type { LyricSongInput } from "../../src/plugins/types.js";
 
-/** 真实抓取的 QQ smartbox 搜索响应（素材：告白气球 / 周杰伦；裁剪为单条命中）。 */
-const SMARTSBOX = {
+/** 真实抓取的 QQ client_search_cp 搜索响应（素材：告白气球 / 周杰伦；裁剪为两条候选）。
+ *  `new_json=1` 时 `singer` 是对象数组（取 `.name`），`interval` 为平台声明时长（秒）。 */
+const SEARCH = {
   code: 0,
   data: {
     song: {
-      count: 4,
-      itemlist: [
-        { docid: "107192078", id: "107192078", mid: "003OUlho2HcRHC", name: "告白气球", singer: "周杰伦" },
+      list: [
+        {
+          mid: "003OUlho2HcRHC",
+          title: "告白气球",
+          singer: [{ mid: "0025NhlN2yWrP4", name: "周杰伦" }],
+          album: { mid: "000MkMni19ClKG", name: "周杰伦的床边故事" },
+          interval: 215,
+        },
+        {
+          mid: "003other000001",
+          title: "告白气球",
+          singer: [{ mid: "000other00001", name: "群星" }],
+          album: { mid: "000otheralbum1", name: "大合辑" },
+          interval: 180,
+        },
       ],
     },
   },
@@ -59,22 +75,94 @@ function detailJson(opts: { withInfoGenre: boolean }): unknown {
 
 const LYRIC_JSON = { code: 0, lyric: "[ti:告白气球]\n[ar:周杰伦]\n[00:00.00]告白气球" };
 
-/** 假 host：按 URL 分派 canned JSON（与插件实际调用的三个端点一一对应）。 */
-function makeHost(opts: { withInfoGenre?: boolean } = {}): any {
-  return {
-    http: async (url: string) => ({
-      ok: true,
-      text: async () => {
-        if (url.includes("smartbox_new.fcg")) return JSON.stringify(SMARTSBOX);
-        if (url.includes("musicu.fcg")) {
-          return JSON.stringify(detailJson({ withInfoGenre: opts.withInfoGenre !== false }));
-        }
-        if (url.includes("lyric")) return JSON.stringify(LYRIC_JSON);
-        return JSON.stringify({});
+// ---------- 网易云音乐（QQ 拿不到时的兜底链路）真实响应样本 ----------
+// 素材：2026-10-17 在 240 生产容器内经系统代理真机探测（POST /api/search/get）。
+// 关键事实：`duration` 是**毫秒**（215666 → 216s）；搜索响应的 `album` **只有 picId、
+// 没有 picUrl**，故封面必须二次调 /api/song/detail/ 取 album.picUrl。
+const NS_SEARCH = {
+  code: 200,
+  result: {
+    songs: [
+      {
+        id: 2716020167,
+        name: "告白气球",
+        artists: [{ id: 6452, name: "周杰伦" }],
+        album: {
+          id: 275301855,
+          name: "周杰伦的床边故事",
+          picId: 109951174108738240,
+          publishTime: 1451606400000, // 2016-01-01T00:00:00Z
+        },
+        duration: 215666,
       },
-    }),
+    ],
+  },
+};
+
+/** 网易云歌曲详情响应：封面直链在 songs[0].album.picUrl（搜索响应里拿不到）。 */
+const NS_DETAIL = {
+  code: 200,
+  songs: [
+    {
+      id: 2716020167,
+      name: "告白气球",
+      artists: [{ name: "周杰伦" }],
+      album: {
+        id: 275301855,
+        name: "周杰伦的床边故事",
+        picUrl: "https://p1.music.126.net/abc==/109951174108738240.jpg",
+      },
+      duration: 215666,
+    },
+  ],
+};
+
+/** 网易云歌词响应：歌词在 lrc.lyric（与 QQ 的 `{lyric}` 不同）。 */
+const NS_LYRIC = { code: 200, lrc: { lyric: "[00:00.000]告白气球\n[00:01.000]塞纳河畔" } };
+
+/** QQ 搜索“零结果”（data.song.list 为空）→ 触发网易云兜底。 */
+const SEARCH_EMPTY = { code: 0, data: { song: { list: [] } } };
+
+/** 假 host：按 URL 分派 canned JSON（与插件实际调用的各端点一一对应），并记录全部请求 URL。
+ *  `qqEmpty`：让 QQ 搜索回空列表，用于验证「QQ 拿不到 → 网易云兜底」的两段式。 */
+function makeHost(opts: { withInfoGenre?: boolean; search?: unknown; qqEmpty?: boolean } = {}): any {
+  const calls: string[] = [];
+  return {
+    calls,
+    http: async (url: string) => {
+      calls.push(url);
+      return {
+        ok: true,
+        text: async () => {
+          // 网易云端点必须先于 QQ 的 `lyric` 泛匹配判定（`api/song/lyric` 也含 "lyric"）。
+          if (url.includes("music.163.com/api/search/get")) return JSON.stringify(NS_SEARCH);
+          if (url.includes("music.163.com/api/song/detail")) return JSON.stringify(NS_DETAIL);
+          if (url.includes("music.163.com/api/song/lyric")) return JSON.stringify(NS_LYRIC);
+          if (url.includes("client_search_cp")) {
+            return JSON.stringify(opts.qqEmpty ? SEARCH_EMPTY : (opts.search ?? SEARCH));
+          }
+          if (url.includes("musicu.fcg")) {
+            return JSON.stringify(detailJson({ withInfoGenre: opts.withInfoGenre !== false }));
+          }
+          if (url.includes("lyric")) return JSON.stringify(LYRIC_JSON);
+          return JSON.stringify({});
+        },
+      };
+    },
   };
 }
+
+/** 旧结构搜索响应：`singer` 是字符串（非 new_json）—— 归一化须兼容。 */
+const SEARCH_LEGACY = {
+  code: 0,
+  data: {
+    song: {
+      list: [{ mid: "003OUlho2HcRHC", songname: "告白气球", singername: "周杰伦", interval: 215 }],
+    },
+  },
+};
+
+const detailCalls = (host: any): number => host.calls.filter((u: string) => u.includes("musicu.fcg")).length;
 
 const SONG: LyricSongInput = { title: "告白气球", artist: "周杰伦", duration: 215 };
 
@@ -106,6 +194,42 @@ describe("tag-provider — searchMetadata", () => {
     });
     expect(meta).toBeNull();
   });
+
+  it("时长预筛在**搜索阶段**生效：候选时长不合格时**不调用详情接口**", async () => {
+    const host = makeHost();
+    const meta = await tagProviderPlugin.searchMetadata(host, {
+      title: "告白气球",
+      artist: "周杰伦",
+      duration: 100, // 与候选 215 差 115s → 预筛拦下
+    });
+    expect(meta).toBeNull();
+    // 关键断言：一次详情请求都没发（省一次网络往返，且旧实现只有详情后才判）
+    expect(detailCalls(host)).toBe(0);
+    // 搜索接口确被调用，且用真搜索端点
+    expect(host.calls[0]).toContain("client_search_cp");
+  });
+
+  it("artist 为 scanner 占位值(Unknown Artist)→ 视同空歌手：关键词只用 title,仍能命中", async () => {
+    const host = makeHost();
+    const meta = await tagProviderPlugin.searchMetadata(host, {
+      title: "告白气球",
+      artist: "Unknown Artist",
+      duration: 215,
+    });
+    // 占位值绝不能拼进搜索关键词（否则恒 0 结果）
+    expect(host.calls[0]).not.toContain("Unknown");
+    expect(host.calls[0]).not.toContain("Artist");
+    // 只用 title 也能命中（标题闸门 + 时长闸门通过 → 详情成功）
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.artist).toBe("周杰伦");
+  });
+
+  it("兼容旧搜索结构(singer 为字符串, songname/singername)", async () => {
+    const host = makeHost({ search: SEARCH_LEGACY });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.artist).toBe("周杰伦");
+    expect(meta?.album).toBe("周杰伦的床边故事");
+  });
 });
 
 describe("tag-provider — searchCover / searchLyrics", () => {
@@ -117,5 +241,74 @@ describe("tag-provider — searchCover / searchLyrics", () => {
   it("歌词返回 LRC 文本", async () => {
     const r = await tagProviderPlugin.searchLyrics(makeHost(), SONG);
     expect(r?.lrc).toContain("[ti:告白气球]");
+  });
+});
+
+// ---------- 两平台：QQ 默认优先，网易云仅在 QQ 拿不到时兜底（产品定调 2026-10-17） ----------
+describe("tag-provider — 网易云音乐兜底链路", () => {
+  const nsCalled = (host: any): boolean => host.calls.some((u: string) => u.includes("music.163.com"));
+
+  it("QQ 有命中时**不调用**网易云（QQ 是默认来源）", async () => {
+    const host = makeHost();
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    // QQ 专有字段（网易云无名可读风格、也不给轨号）
+    expect(meta?.genre).toBe("R&B");
+    expect(meta?.track).toBe(8);
+    expect(meta?.platform).not.toBe("netease");
+    expect(nsCalled(host)).toBe(false);
+  });
+
+  it("QQ 零候选 → 网易云兜底命中元数据，且**毫秒时长被换算成秒**", async () => {
+    const host = makeHost({ qqEmpty: true });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG); // 本地 215s，网易 215666ms→216s，差 1s 通过
+    expect(meta?.platform).toBe("netease");
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.artist).toBe("周杰伦");
+    expect(meta?.album).toBe("周杰伦的床边故事");
+    expect(meta?.duration).toBe(216); // 关键：毫秒 215666 → 秒 216
+    expect(meta?.year).toBe(2016); // publishTime(ms) → 年份
+    expect(meta?.genre).toBeUndefined(); // 网易云无可读风格名 → 绝不臆造
+    // 先 QQ 搜索后网易云搜索，顺序即「默认优先 + 兜底」
+    expect(host.calls[0]).toContain("client_search_cp");
+    expect(host.calls[1]).toContain("music.163.com/api/search/get");
+  });
+
+  it("QQ 零候选 → 网易云兜底取封面：必须**二次调详情接口**拿 album.picUrl", async () => {
+    const host = makeHost({ qqEmpty: true });
+    const r = await tagProviderPlugin.searchCover(host, SONG);
+    expect(r?.url).toBe(NS_DETAIL.songs[0].album.picUrl);
+    // 搜索响应只有 picId，封面直链只能来自详情接口
+    expect(host.calls.some((u: string) => u.includes("api/song/detail"))).toBe(true);
+  });
+
+  it("QQ 零候选 → 网易云兜底取歌词：取自 lrc.lyric", async () => {
+    const host = makeHost({ qqEmpty: true });
+    const r = await tagProviderPlugin.searchLyrics(host, SONG);
+    expect(r?.lrc).toContain("[00:00.000]告白气球");
+    expect(r?.lrc).toContain("塞纳河畔");
+  });
+
+  it("网易云候选时长(毫秒换算后)超出 ±5s → 不命中，且不调详情接口", async () => {
+    const host = makeHost({ qqEmpty: true });
+    const meta = await tagProviderPlugin.searchMetadata(host, {
+      title: "告白气球",
+      artist: "周杰伦",
+      duration: 100, // 与网易 216s 差 116s → 预筛拦下
+    });
+    expect(meta).toBeNull();
+    expect(host.calls.some((u: string) => u.includes("api/song/detail"))).toBe(false);
+  });
+
+  it("artist 为占位值(Unknown Artist)时，网易云关键词也只用 title（占位值不拼进关键词）", async () => {
+    const host = makeHost({ qqEmpty: true });
+    const meta = await tagProviderPlugin.searchMetadata(host, {
+      title: "告白气球",
+      artist: "Unknown Artist",
+      duration: 215,
+    });
+    const nsUrl = host.calls.find((u: string) => u.includes("music.163.com/api/search/get"))!;
+    expect(nsUrl).not.toContain("Unknown");
+    expect(nsUrl).not.toContain("Artist");
+    expect(meta?.platform).toBe("netease");
   });
 });

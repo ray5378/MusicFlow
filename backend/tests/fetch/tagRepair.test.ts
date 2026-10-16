@@ -18,12 +18,13 @@
 import "../plugins/_env.js";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { db, sqlite } from "../../src/db/index.js";
-import { songs } from "../../src/db/schema.js";
+import { albums, songs } from "../../src/db/schema.js";
+import { getDataDir } from "../../src/utils/env.js";
 import { _resetSettingsCacheForTest, getSetting } from "../../src/services/settings.js";
 import {
   currentFetchConfig,
@@ -95,7 +96,11 @@ vi.mock("../../src/services/playlistCover.js", () => ({
 let tmpDir: string;
 let root: string;
 
-function insertSong(id: string, fsPath: string, opts: { album?: string; hasLyrics?: number | null } = {}): void {
+function insertSong(
+  id: string,
+  fsPath: string,
+  opts: { album?: string; albumId?: string; hasLyrics?: number | null } = {},
+): void {
   mkdirSync(dirname(fsPath), { recursive: true });
   writeFileSync(fsPath, "fLaC-fake-audio-bytes");
   db.insert(songs)
@@ -104,6 +109,7 @@ function insertSong(id: string, fsPath: string, opts: { album?: string; hasLyric
       title: "测试歌",
       artist: "测试歌手",
       album: opts.album ?? "测试专辑",
+      albumId: opts.albumId ?? null,
       path: `l:dl-testsrc:${fsPath}`,
       suffix: "flac",
       bitRate: 900,
@@ -183,6 +189,7 @@ afterEach(() => {
     /* 忽略 */
   }
   db.delete(songs).run();
+  db.delete(albums).run();
   _resetTagRepairForTest();
 });
 
@@ -286,6 +293,89 @@ describe("repairSongTags", () => {
     expect(searchLyricsMock).not.toHaveBeenCalled();
     const tags = writeTagsMock.mock.calls[0][1];
     expect(tags.album).toBe("DB 里的专辑名");
+  });
+
+  // ---- 修正3（2026-10-17）：scanner 占位专辑值不写进文件 ----
+  it("修正3：DB 专辑为占位值(Unknown Album) 而文件专辑为空 → 绝不写占位；网络也拿不到时 unobtainable", async () => {
+    const p = join(root, "ph1.flac");
+    insertSong("s-ph1", p, { album: "Unknown Album" });
+    parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+    searchMetadataMock.mockResolvedValueOnce(null);
+
+    const r = await repairSongTags("s-ph1", cfg());
+    // 占位值视同空 → needAlbum=false（不兜底写入）；needMeta=true 故走网络，但拿不到 → 无写入。
+    expect(r.outcome).toBe("unobtainable");
+    expect(writeTagsMock).not.toHaveBeenCalled();
+  });
+
+  it("修正3：占位专辑不作为兜底，但网络拿到真专辑名时照常写入（不臆造、也不丢失）", async () => {
+    const p = join(root, "ph2.flac");
+    insertSong("s-ph2", p, { album: "未知专辑" });
+    parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+    searchMetadataMock.mockResolvedValueOnce({ title: "x", artist: "y", album: "真专辑" });
+
+    const r = await repairSongTags("s-ph2", cfg());
+    expect(r.outcome).toBe("fixed");
+    expect(r.album).toBe(true);
+    const tags = writeTagsMock.mock.calls[0][1];
+    expect(tags.album).toBe("真专辑");
+  });
+
+  // ---- 修正2（2026-10-17）：文件已内嵌封面而 albums.cover_art 为空 → 落盘并回写 ----
+  it("修正2：文件已内嵌封面、专辑行无封面 → 落盘 data/covers/<albumId>.jpg 并回写 albums.cover_art", async () => {
+    const p = join(root, "alb.flac");
+    // 先建专辑行（songs.album_id 有外键约束），再建歌曲行。
+    db.insert(albums).values({ id: "alb1", name: "专辑", coverArt: null, updatedAt: "" }).run();
+    insertSong("s-alb", p, { albumId: "alb1", album: "专辑" });
+    // 封面/歌词/元数据全齐 → 走「其实齐了」分支，只做对账与专辑封面回写；不重写文件。
+    parseFileMock.mockResolvedValue({
+      common: {
+        picture: [{ format: "image/jpeg", data: Buffer.from("fake-jpeg-bytes") }],
+        lyrics: ["[00:01]x"],
+        album: "专辑",
+        title: "测试歌",
+        artist: "测试歌手",
+        albumartist: "测试专辑艺术家",
+        track: { no: 3, of: 12 },
+        year: 2024,
+        genre: ["Pop"],
+      },
+    });
+
+    const r = await repairSongTags("s-alb", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(writeTagsMock).not.toHaveBeenCalled();
+    const alb = sqlite.prepare("SELECT cover_art FROM albums WHERE id='alb1'").get() as { cover_art: string };
+    expect(alb.cover_art).toBe("alb1.jpg");
+    expect(existsSync(join(getDataDir(), "covers", "alb1.jpg"))).toBe(true);
+  });
+
+  it("修正1：真写入后登记完成标记（src=命中的 provider id），下轮扫描可直接跳过", async () => {
+    const p = join(root, "mark-after.flac");
+    insertSong("s-ma", p, { hasLyrics: 0 });
+    parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
+    searchLyricsMock.mockResolvedValueOnce("[00:01.00]测试歌词");
+
+    const r = await repairSongTags("s-ma", cfg());
+    expect(r.outcome).toBe("fixed");
+    // 真写入 → 标记登记（此前只在下载期标记，修复后无标记导致 tag_repair_done 恒 0 行）
+    expect(isTagRepairMarked(p)).toBe(true);
+    // 同一进程再跑一次（文件未变）→ 命中标记直接 skip、不探针
+    parseFileMock.mockClear();
+    const r2 = await repairSongTags("s-ma", cfg());
+    expect(r2.outcome).toBe("skip");
+    expect(parseFileMock).not.toHaveBeenCalled();
+  });
+
+  it("修正1：unobtainable（真缺但拿不到）**不**打标记，保留重试机会", async () => {
+    const p = join(root, "mark-none.flac");
+    insertSong("s-mn", p, { hasLyrics: 0 });
+    parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
+    searchLyricsMock.mockResolvedValueOnce(null);
+
+    const r = await repairSongTags("s-mn", cfg());
+    expect(r.outcome).toBe("unobtainable");
+    expect(isTagRepairMarked(p)).toBe(false);
   });
 
   it("TAG_FAILED → 2s 后重试一次，第二次成功即修复（吸收 NAS 存储层瞬时抖动）", async () => {
@@ -483,11 +573,15 @@ describe("tagRepair scope", () => {
     const rBoth = await runTagRepairOnce("media", c); // 缺省 → cfg.tagRepairScope=both
     expect(rBoth.result?.checked).toBe(2);
 
+    // 修正1（2026-10-17）：第一轮真写入修复后会打「标签修复完成标记」，同一测试内后续轮次
+    // 命中标记即跳过（不探针/不联网）→ 计入 skipped 而非 checked。故范围断言改用
+    // checked + skipped（= 本轮纳入扫描的歌数），仍能证明 scope 过滤生效：
+    // download 只纳入下载根那 1 首、lossless 只纳入无损根那 1 首。
     const rDl = await runTagRepairOnce("media", c, "download");
-    expect(rDl.result?.checked).toBe(1);
+    expect((rDl.result?.checked ?? 0) + (rDl.result?.skipped ?? 0)).toBe(1);
 
     const rLl = await runTagRepairOnce("media", c, "lossless");
-    expect(rLl.result?.checked).toBe(1);
+    expect((rLl.result?.checked ?? 0) + (rLl.result?.skipped ?? 0)).toBe(1);
   });
 });
 

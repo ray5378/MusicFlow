@@ -39,8 +39,9 @@ import { playlistSyncManifest, playlistSyncPlugin } from "../services/plugin/pla
 // ---- lyrics / cover providers ----
 // NOTE: go-music-dl 的歌词 / 封面能力随该外置 source 插件分发(capabilities 含
 // lyricProvider/coverProvider),由核心按能力遍历调用,不再单独内置。
-// 内置「在线标签补全」(tag-provider):独立插件,聚合 QQ音乐/网易云/酷我/酷狗 的
-// 标签(metadataProvider)+封面(coverProvider)+歌词(lyricProvider)能力,平台顺序用户可配。
+// 内置「在线标签补全」(tag-provider):独立插件,聚合 QQ音乐(默认来源) + 网易云音乐
+// (QQ 拿不到时的兜底链路) 的标签(metadataProvider)+封面(coverProvider)+歌词
+// (lyricProvider)能力;每个能力方法两段式:先 QQ,QQ 全部候选都没命中再走网易云。
 import { tagProviderManifest, tagProviderPlugin } from "../services/plugin/tagProvider.js";
 // ---- renderer (device casting) ----
 import { dlnaRendererManifest, dlnaRendererPlugin } from "../services/plugin/renderers/dlna.js";

@@ -29,14 +29,32 @@
 //   （outcome=skip，计入「已修复」）。设计意图=下载已用同一 provider 打过一轮，
 //   网络波动漏打的不写标记 → 修复仍会补。**其他（外置）插件不标记**。
 //
+// 【2026-10-17 修正 1·修复后补标记】此前 `markTagRepairDone` 只在**下载期**被调用，标签修复
+//   真正改写文件后**不写标记** → 生产库 `tag_repair_done` 实测 0 行，用户触发的常规修复修了
+//   50 首却全部无标记、下轮仍被当候选重扫。现改为：一次修复**真正写入**（outcome=fixed）后
+//   登记标记（src=命中的来源 provider id，无 provider 命中时回落 "tag-repair"）。
+//   注意 `unobtainable` 一律**不标记**（真缺但拿不到，须保留重试机会，避免断网把整库永久标记）。
+//
+// 【2026-10-17 修正 2·专辑封面回写】第一档 DB 预筛按 `songs.cover_art 空 且 albums.cover_art 空`
+//   判定缺封面，而修复只回写 `songs.has_lyrics`、**不刷新 `albums.cover_art`** → 实测 19 首
+//   「文件已内嵌封面但专辑行仍无封面」的歌每轮都被当候选重扫（pending 恒高）。现改为：任何一次
+//   修复/对账后，若文件有内嵌封面而 `albums.cover_art` 为空，则把内嵌封面落盘到
+//   `data/covers/<albumId>.<ext>`（与 scanner.saveCoverArt 同款命名）并回写该列，让待修数真实下降。
+//
+// 【2026-10-17 修正 3·占位专辑不写】DB 的 `album='Unknown Album'`（scanner 对「无专辑标签文件」
+//   的占位值）此前被当有效值写进文件，把「无专辑」变成假专辑名。现把 `Unknown Album`/`未知专辑`
+//   视同空值：不参与 needAlbum 兜底，也不作为 needMeta 的「DB 已有值」依据（转为走网络补全）。
+//
 // fingerprint 安全性（已核实）：scanner.upsertSong 按 **path** 匹配（非 fingerprint），
 // tagWriter 重写容器后重扫只会 UPDATE 该行并从文件头刷新 hasLyrics/album picture，
 // 不会产生重复条目——本模块写完顺带自更新 DB has_lyrics，让 UI 立即生效。
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { parseFile } from "music-metadata";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
+import { getDataDir } from "../../utils/env.js";
 import { getSetting, setSetting } from "../settings.js";
 import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
@@ -44,7 +62,11 @@ import { withCoverLimit } from "../covers.js";
 import { FetchTagError, writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig, TagRepairScope } from "./config.js";
-import { isTagRepairMarked, _resetTagRepairMarkersForTest } from "./tagRepairMarker.js";
+import {
+  isTagRepairMarked,
+  markTagRepairDone,
+  _resetTagRepairMarkersForTest,
+} from "./tagRepairMarker.js";
 
 const log = createLogger("FETCH_TAG_REPAIR");
 
@@ -339,6 +361,7 @@ interface RepairRow {
   duration: number | null;
   path: string;
   has_lyrics: number | null;
+  album_id: string | null;
   source_data: string | null;
   url: string | null;
 }
@@ -347,10 +370,72 @@ function loadRow(songId: string): RepairRow | null {
   return (
     (sqlite
       .prepare(
-        "SELECT id, title, artist, album, duration, path, has_lyrics, source_data, url FROM songs WHERE id = ?",
+        "SELECT id, title, artist, album, duration, path, has_lyrics, album_id, source_data, url FROM songs WHERE id = ?",
       )
       .get(songId) as RepairRow | undefined) ?? null
   );
+}
+
+/** scanner 对「文件无专辑标签」写入的占位值；视同「无专辑」，绝不写进成品文件
+ *  （否则把「无专辑」变成假专辑名）。只精确匹配这两种；其它值一律当合法专辑名。 */
+const ALBUM_PLACEHOLDERS = new Set(["unknown album", "未知专辑"]);
+function isAlbumPlaceholder(s: string): boolean {
+  return ALBUM_PLACEHOLDERS.has(s.trim().toLowerCase());
+}
+
+/** 读取文件内嵌封面（首图）原始字节；无封面或不可解析返回 null。 */
+async function readEmbeddedCover(fsPath: string): Promise<{ format: string; data: Buffer } | null> {
+  try {
+    const mm = await parseFile(fsPath, { duration: false });
+    const pics = mm.common.picture;
+    const p = Array.isArray(pics) && pics.length ? pics[0] : null;
+    if (!p?.data || !p.data.length) return null;
+    return { format: String(p.format || "image/jpeg"), data: Buffer.from(p.data) };
+  } catch {
+    return null;
+  }
+}
+
+/** 把内嵌封面落盘到 `data/covers/<albumId>.<ext>` 并返回文件引用
+ *  （与 scanner.saveCoverArt 同款命名，故与刮削路径产出的专辑封面口径一致）。 */
+function saveEmbeddedAlbumCover(albumId: string, pic: { format: string; data: Buffer }): string | null {
+  try {
+    const ext = pic.format === "image/png" ? "png" : pic.format === "image/gif" ? "gif" : "jpg";
+    const dir = join(getDataDir(), "covers");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${albumId}.${ext}`), pic.data);
+    return `${albumId}.${ext}`;
+  } catch (e) {
+    log.warn(`专辑封面落盘失败 album=${albumId}: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+}
+
+/**
+ * 专辑行原封面为空时，用文件内嵌封面落盘并回写 `albums.cover_art`（幂等）。
+ * 为什么必须做：第一档 DB 预筛按 `songs.cover_art 空 && albums.cover_art 空` 判定缺封面，
+ * 只看文件头而不回写专辑行 → 「已内嵌封面但专辑行无封面」的歌每轮都被当候选重扫
+ * （实测 19 首、pending 恒高）。已有封面则不动（绝不覆盖既有值）。
+ */
+async function syncAlbumCoverFromEmbedded(fsPath: string, albumId: string | null): Promise<void> {
+  if (!albumId) return;
+  try {
+    const cur = sqlite.prepare("SELECT cover_art FROM albums WHERE id = ?").get(albumId) as
+      | { cover_art: string | null }
+      | undefined;
+    if (!cur) return; // 专辑行不存在（未建）→ 不臆造
+    if (String(cur.cover_art ?? "").trim()) return; // 已有封面 → 不动
+    const pic = await readEmbeddedCover(fsPath);
+    if (!pic) return;
+    const ref = saveEmbeddedAlbumCover(albumId, pic);
+    if (!ref) return;
+    sqlite
+      .prepare("UPDATE albums SET cover_art = ?, updated_at = ? WHERE id = ?")
+      .run(ref, new Date().toISOString(), albumId);
+    log.info(`专辑封面回写 album=${albumId} ref=${ref}（文件已内嵌封面，专辑行原为空）`);
+  } catch (e) {
+    log.warn(`专辑封面回写失败 album=${albumId}: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 export interface RepairSongOutcome {
@@ -386,7 +471,10 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   const embedded = await probeEmbedded(fsPath);
   if (!embedded) return none; // 不可解析的文件不动（保守）
 
-  const dbAlbum = String(row.album ?? "").trim();
+  const dbAlbumRaw = String(row.album ?? "").trim();
+  // scanner 对「无专辑标签文件」写入的占位值（Unknown Album）视同空：既不作为兜底写进文件
+  // （否则把「无专辑」变成假专辑名），也不作为 needMeta 的「DB 已有值」依据（转为走网络补全）。
+  const dbAlbum = isAlbumPlaceholder(dbAlbumRaw) ? "" : dbAlbumRaw;
   const needCover = !embedded.cover;
   const needLyric = !embedded.lyric && !row.has_lyrics;
   const needAlbum = !embedded.album && Boolean(dbAlbum); // DB 声明值兜底，无需网络
@@ -406,6 +494,9 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
         songId,
       );
     }
+    // 文件已内嵌封面、专辑行却无封面 → 落盘内嵌封面并回写 albums.cover_art，否则第一档
+    // DB 预筛每轮都按「缺封面」把这首歌选中重扫（实测 19 首、pending 恒高）。
+    if (embedded.cover) await syncAlbumCoverFromEmbedded(fsPath, row.album_id);
     return none;
   }
 
@@ -428,6 +519,16 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
 
   const tags: SongTags = {};
   let metaWrote = false;
+  // 「谁给的值」：记录命中的 provider id，供修复成功后写完成标记的 src 用（首个内置来源优先，
+  // 其次任一命中来源；无 provider 命中时回落 "tag-repair"）。与下载期 orchestrator.collectExtraTags 同款纪律。
+  let srcId: string | null = null;
+  let srcBuiltin = false;
+  const onMatch = (providerId: string, builtin: boolean): void => {
+    if (!srcId || (builtin && !srcBuiltin)) {
+      srcId = providerId;
+      srcBuiltin = builtin;
+    }
+  };
 
   if (needAlbum) {
     // 专辑：DB 声明值即权威（下载时 provider 元数据），直接写，无需网络。
@@ -436,7 +537,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
 
   if (needCover) {
     try {
-      const url = await withCoverLimit(() => searchCover(songInput));
+      const url = await withCoverLimit(() => searchCover(songInput, { onMatch }));
       if (url) {
         // cacheRemoteCover：复用封面下载全局限流 + SSRF 防护 + 本地缓存目录。
         const ref = await cacheRemoteCover(url, `tagfix-${songId}`);
@@ -454,7 +555,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
 
   if (needLyric) {
     try {
-      const text = await searchLyrics(songInput);
+      const text = await searchLyrics(songInput, { onMatch });
       if (text && text.trim()) {
         tags.lyric = text;
       }
@@ -469,7 +570,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   // 整体 try/catch：拿不到/报错只告警，不让整首失败，也不改动文件。
   if (needMeta) {
     try {
-      const meta = await searchMetadata(songInput);
+      const meta = await searchMetadata(songInput, { onMatch });
       if (meta) {
         if (!embedded.album && !dbAlbum && meta.album) tags.album = meta.album;
         if (meta.albumArtist) {
@@ -533,11 +634,19 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   } else {
     sqlite.prepare("UPDATE songs SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), songId);
   }
+  // 专辑行缺封面（而文件已有内嵌封面）→ 落盘内嵌封面并回写 albums.cover_art，让第一档
+  // DB 预筛不再把这首歌当「缺封面」重复选中（见文件头【修正 2·专辑封面回写】）。
+  await syncAlbumCoverFromEmbedded(fsPath, row.album_id);
+  // 修复**真正写入**后登记「标签修复完成标记」：后续扫描命中且文件未变即跳过（不再探针/联网）。
+  // 此前只在下载期标记 → 实测 tag_repair_done 0 行，修过的歌下轮仍被当候选重扫。
+  // src 取命中的来源 provider id，无 provider 命中（仅 DB 专辑兜底）时回落 "tag-repair"。
+  markTagRepairDone(fsPath, srcId ?? "tag-repair");
   log.info(
     `标签修复完成 song=${songId} file=${fsPath} ` +
       [gotCover ? "+封面" : "", gotLyric ? "+歌词" : "", gotAlbum ? "+专辑" : "", gotMeta ? "+元数据" : ""]
         .filter(Boolean)
-        .join(""),
+        .join("") +
+      ` [src=${srcId ?? "tag-repair"}]`,
   );
   return { outcome: "fixed", cover: gotCover, lyric: gotLyric, album: gotAlbum, meta: gotMeta };
 }
