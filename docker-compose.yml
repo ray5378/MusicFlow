@@ -35,6 +35,20 @@ services:
       # 在「媒体源管理 → 添加媒体源 → 类型选本地目录」时,
       # 本地路径填 /local/music(容器内路径),必须与本挂载保持一致,否则读取不到。
       - ./local/music:/local/music
+
+      # 下载 / 洗版目录(在线音源下载 + 洗版成品落盘;三个容器内路径均为服务端默认值,
+      # 启动时自动注册为媒体源并做可写性预检,配错会在启动日志给出修复指引):
+      #   /MUSIC/DOWNLOAD      —— 下载成品目录 → 媒体源「已下载流媒体音质」
+      #   /MUSIC/DOWNLOADCACHE —— 下载缓存/半成品(下载中的临时文件、待转码文件);
+      #                           容器每次启动会自动清空其内容,请单独放一个可随时重建的目录,
+      #                           且必须与 /MUSIC/DOWNLOAD 互不为祖先(否则半成品会被扫描器当成品入库)
+      #   /MUSIC/LOSSLESS      —— 洗版成品目录(无损替换后的曲目) → 媒体源「已下载无损音质」
+      # 宿主机侧路径按需替换,容器内挂载点必须保持上述默认路径;若在「下载配置」里改过
+      # downloadRoot / cacheRoot / losslessRoot,挂载点要跟着一起改。
+      - ./download:/MUSIC/DOWNLOAD
+      - ./downloadcache:/MUSIC/DOWNLOADCACHE
+      - ./lossless:/MUSIC/LOSSLESS
+
       # 可选:平台/在线封面缓存(online-covers)独立挂到宿主机大磁盘。
       # 默认它在上面的 ./data 卷内,无需配置;想单独存放/单独清缓存时,
       # 取消注释并把宿主机路径换成你的目录(优先级高于 ./data 内的同名子目录):
