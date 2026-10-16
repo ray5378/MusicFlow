@@ -21,6 +21,12 @@
 //   写入复用 tagWriter 的 tagtmp+rename 原子语义，失败不破坏原文件。
 //   范围硬锁定两个下载目录，绝不碰 WebDAV 云盘库。
 //
+// 完成标记（2026-10-16，产品定调）：下载期由**内置标签来源插件**（manifest.
+//   builtinTagSource，如内置 tag-provider）打上标签的成品，落盘后在 tag_repair_done
+//   登记（见 tagRepairMarker.ts）。修复扫描命中标记且文件未变 → 不探针、不联网直接跳过
+//   （outcome=skip，计入「已修复」）。设计意图=下载已用同一 provider 打过一轮，
+//   网络波动漏打的不写标记 → 修复仍会补。**其他（外置）插件不标记**。
+//
 // fingerprint 安全性（已核实）：scanner.upsertSong 按 **path** 匹配（非 fingerprint），
 // tagWriter 重写容器后重扫只会 UPDATE 该行并从文件头刷新 hasLyrics/album picture，
 // 不会产生重复条目——本模块写完顺带自更新 DB has_lyrics，让 UI 立即生效。
@@ -33,9 +39,10 @@ import { getSetting, setSetting } from "../settings.js";
 import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
 import { withCoverLimit } from "../covers.js";
-import { FetchTagError, writeTags, type SongTags } from "./tagWriter.js";
+import { FetchTagError, writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { currentFetchConfig } from "./configStore.js";
-import type { FetchConfig } from "./config.js";
+import type { FetchConfig, TagRepairScope } from "./config.js";
+import { isTagRepairMarked, _resetTagRepairMarkersForTest } from "./tagRepairMarker.js";
 
 const log = createLogger("FETCH_TAG_REPAIR");
 
@@ -43,6 +50,8 @@ const QUEUE_KEY = "fetch.tagrepair.queue";
 const LAST_RUN_KEY = "fetch.tagrepair.lastRunAt";
 const LAST_RESULT_KEY = "fetch.tagrepair.lastResult";
 const LAST_RESULTS_KEY = "fetch.tagrepair.lastResults";
+/** 累计已修复歌数（跨重启累加，供「已修复」统计展示）。 */
+const REPAIRED_TOTAL_KEY = "fetch.tagrepair.repairedTotal";
 
 /** 事件队列重试退避（第 1/2/3 次失败的下次重试间隔）。 */
 const BACKOFF_MS = [3_600_000, 6 * 3_600_000, 24 * 3_600_000] as const;
@@ -144,6 +153,111 @@ export function getTagRepairQueueSize(): number {
 }
 
 // ---------------------------------------------------------------------------
+// 实时统计（已修复 / 待修复 / 全部）+ 运行中进度
+// ---------------------------------------------------------------------------
+
+/** 稳态统计（GET 轮询展示）：
+ *  - total：两个下载目录内本地歌总数（songs.path 前缀 `l:` 且落在两根内）；
+ *  - pending：当前 DB 预筛「缺歌词/封面/专辑」的待修候选数（同第一档口径）；
+ *  - repaired：累计已修复歌数（跨重启累加）。 */
+export interface TagRepairStats {
+  total: number;
+  pending: number;
+  repaired: number;
+}
+
+/** 运行中进度（仅 running 时非 null）：scan=全量精探阶段 / repair=逐首修复阶段。 */
+export interface TagRepairProgress {
+  mode: TagRepairMode;
+  phase: "scan" | "repair";
+  /** 当前阶段总数（scan=待探范围 / repair=候选数）。 */
+  total: number;
+  /** 当前阶段已处理数。 */
+  checked: number;
+  /** 本轮实际写文件的歌数。 */
+  fixed: number;
+  /** 本轮跳过（无需修 / 命中完成标记）的歌数；「已修复」= fixed + skipped。 */
+  skipped: number;
+  startedAt: number;
+}
+
+let progress: TagRepairProgress | null = null;
+
+/** 运行中进度（供 API/UI 展示）；空闲返回 null。 */
+export function getTagRepairProgress(): TagRepairProgress | null {
+  return progress;
+}
+
+/** 累计已修复歌数（持久化，跨重启保留）。 */
+export function getTagRepairRepairedTotal(): number {
+  return Number(getSetting(REPAIRED_TOTAL_KEY, "0")) || 0;
+}
+
+function addRepairedTotal(n: number): void {
+  if (!Number.isFinite(n) || n <= 0) return;
+  setSetting(REPAIRED_TOTAL_KEY, String(getTagRepairRepairedTotal() + Math.floor(n)));
+}
+
+/** DB 派生统计（total/pending）带 5s 短缓存：轮询 5s 一次，避免重复整表扫描。 */
+let statsCache: { at: number; total: number; pending: number } | null = null;
+
+function dbStats(): { total: number; pending: number } {
+  const now = Date.now();
+  if (statsCache && now - statsCache.at < 5_000) return statsCache;
+  const cfg = currentFetchConfig();
+  let total = 0;
+  const rows = sqlite.prepare("SELECT path FROM songs WHERE path LIKE 'l:%'").all() as Array<{ path: string }>;
+  for (const r of rows) {
+    const fsPath = fsPathOf(r.path);
+    if (fsPath && inDownloadRoots(fsPath, cfg)) total++;
+  }
+  const pending = selectMediaMissingRows().filter((r) => {
+    const fsPath = fsPathOf(r.path);
+    return Boolean(fsPath && inDownloadRoots(fsPath, cfg));
+  }).length;
+  statsCache = { at: now, total, pending };
+  return statsCache;
+}
+
+/** 实时统计（供 API/UI 展示）。 */
+export function getTagRepairStats(): TagRepairStats {
+  const { total, pending } = dbStats();
+  return { total, pending, repaired: getTagRepairRepairedTotal() };
+}
+
+// —— 进度写入（仅在一轮运行期间由 sweep/queue 调用；progress 为 null 时全部为 no-op）——
+
+function progressStart(mode: TagRepairMode): void {
+  progress = { mode, phase: "scan", total: 0, checked: 0, fixed: 0, skipped: 0, startedAt: Date.now() };
+}
+
+/** 切换/重置当前阶段（进入修复阶段或切挡位时重置计数）。 */
+function progressPhase(phase: "scan" | "repair", total: number): void {
+  if (!progress) return;
+  progress.phase = phase;
+  progress.total = total;
+  progress.checked = 0;
+  progress.fixed = 0;
+  progress.skipped = 0;
+}
+
+/** 推进已处理数（fixedInc=本次是否真写文件；skipInc=本次是否跳过）。 */
+function progressTick(fixedInc: number, skipInc = 0): void {
+  if (!progress) return;
+  progress.checked++;
+  progress.fixed += fixedInc;
+  progress.skipped += skipInc;
+}
+
+function progressSetChecked(checked: number): void {
+  if (progress) progress.checked = checked;
+}
+
+function progressEnd(): void {
+  progress = null;
+}
+
+// ---------------------------------------------------------------------------
 // 探针：文件头内嵌标签（music-metadata 统一处理 flac/mp3/m4a/ogg）
 // ---------------------------------------------------------------------------
 
@@ -195,6 +309,22 @@ export function fsPathOf(songPath: string): string | null {
 function inDownloadRoots(fsPath: string, cfg: FetchConfig): boolean {
   const roots = [cfg.downloadRoot, cfg.losslessRoot].filter(Boolean) as string[];
   return roots.some((root) => fsPath === root || fsPath.startsWith(root.endsWith("/") ? root : root + "/"));
+}
+
+/** 按用户选择的范围取要扫描的下载目录（download=仅下载根 / lossless=仅无损根 / both=两者）。 */
+function rootsForScope(cfg: FetchConfig, scope: TagRepairScope): string[] {
+  const dl = cfg.downloadRoot ? [cfg.downloadRoot] : [];
+  const ll = cfg.losslessRoot ? [cfg.losslessRoot] : [];
+  if (scope === "download") return dl;
+  if (scope === "lossless") return ll;
+  return [...dl, ...ll];
+}
+
+/** 该歌的 fsPath 是否落在指定范围内的下载目录（范围硬门禁）。 */
+function inScopeRoots(fsPath: string, cfg: FetchConfig, scope: TagRepairScope): boolean {
+  return rootsForScope(cfg, scope).some(
+    (root) => fsPath === root || fsPath.startsWith(root.endsWith("/") ? root : root + "/"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +379,9 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   if (!row || !row.path) return none;
   const fsPath = fsPathOf(row.path);
   if (!fsPath || !inDownloadRoots(fsPath, cfg) || !existsSync(fsPath)) return none;
+
+  // 下载期已由内置标签来源插件打过标签、且文件位置/大小/mtime 未变 → 不探针、不联网直接跳过。
+  if (isTagRepairMarked(fsPath)) return none;
 
   const embedded = await probeEmbedded(fsPath);
   if (!embedded) return none; // 不可解析的文件不动（保守）
@@ -378,6 +511,11 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   const gotMeta = metaWrote;
   if (!gotCover && !gotLyric && !gotAlbum && !gotMeta) return unobtainable;
 
+  // 中文字形（产品定调 2026-10-16）：写盘前把 provider 文本按用户所选字形转换（默认简体）。
+  // 放在这里（而非各取值分支）是为了让「哪些字段要转」与下载期共用同一实现
+  // （tagWriter.applyTagsVariant），两条写入路径口径一致。
+  applyTagsVariant(tags, currentFetchConfig().chineseVariant);
+
   // 只在真拿到值时才写 —— tagWriter 原子写（tagtmp+rename），失败抛 FetchTagError。
   // TAG_FAILED 短延迟重试 1 次，吸收 NAS 存储层瞬时抖动；原文件保证未被破坏，重试安全。
   try {
@@ -457,8 +595,10 @@ export async function processTagRepairQueue(cfg: FetchConfig, nowMs = Date.now()
   const due = Object.entries(q).filter(([, e]) => Number(e?.nextAt ?? 0) <= nowMs);
   const result = emptyResult();
   if (due.length === 0) return result;
+  const batch = due.slice(0, QUEUE_BATCH);
+  progressPhase("repair", batch.length);
 
-  for (const [songId, entry] of due.slice(0, QUEUE_BATCH)) {
+  for (const [songId, entry] of batch) {
     result.checked++;
     let o: RepairSongOutcome;
     try {
@@ -468,6 +608,7 @@ export async function processTagRepairQueue(cfg: FetchConfig, nowMs = Date.now()
       o = { outcome: "unobtainable", cover: false, lyric: false, album: false, meta: false };
     }
     accumulate(result, o);
+    progressTick(o.outcome === "fixed" ? 1 : 0, o.outcome === "skip" ? 1 : 0);
     if (o.outcome === "fixed" || o.outcome === "skip") {
       delete q[songId];
     } else {
@@ -512,38 +653,57 @@ export function selectMediaMissingRows(): Array<{ id: string; path: string }> {
 }
 
 /**
- * 扫两个下载目录并逐首修复。
+ * 扫指定范围（cfg.tagRepairScope 或请求覆盖）的下载目录并逐首修复。
  * scope "media"=第一档常规：纯 DB 预筛（selectMediaMissingRows），不读文件头，成本远低于全量。
  * scope "all"=第二档全量：文件头精探内嵌标签，任一维度缺失即修真缺的。
+ * dirScope=扫描目录范围（download/lossless/both）。
  */
 export async function sweepTagRepair(
   cfg: FetchConfig,
   scope: "media" | "all" = "all",
+  dirScope: TagRepairScope = cfg.tagRepairScope ?? "both",
 ): Promise<TagRepairResult> {
   const result = emptyResult();
   const candidates: Array<{ id: string; fsPath: string }> = [];
+  // 命中「下载期内置插件已打好且文件未变」标记而跳过的歌数：计入「已修复·跳过」。
+  let markedSkipped = 0;
 
   if (scope === "media") {
     // 第一档·常规，纯 DB 判定，不读文件头，成本远低于全量。
     const rows = selectMediaMissingRows();
     for (const r of rows) {
       const fsPath = fsPathOf(r.path);
-      if (!fsPath || !inDownloadRoots(fsPath, cfg)) continue;
+      if (!fsPath || !inScopeRoots(fsPath, cfg, dirScope)) continue;
+      if (isTagRepairMarked(fsPath)) {
+        markedSkipped++;
+        continue;
+      }
       candidates.push({ id: r.id, fsPath });
     }
-    log.info(`[TAG-REPAIR] 常规扫描完成：候选中 DB 缺歌词/封面/专辑 ${candidates.length} 首`);
+    log.info(`[TAG-REPAIR] 常规扫描完成（范围 ${dirScope}）：候选中 DB 缺歌词/封面/专辑 ${candidates.length} 首`);
   } else {
     const rows = sqlite
       .prepare("SELECT id, path, has_lyrics, album FROM songs WHERE path LIKE 'l:%'")
       .all() as Array<{ id: string; path: string; has_lyrics: number | null; album: string | null }>;
+    // 先按范围（用户选择的下载根）过滤，scan 阶段进度百分比才准确（分母=范围内歌数）。
+    const inRoot: Array<{ id: string; fsPath: string }> = [];
+    for (const r of rows) {
+      const fsPath = fsPathOf(r.path);
+      if (fsPath && inScopeRoots(fsPath, cfg, dirScope)) inRoot.push({ id: r.id, fsPath });
+    }
 
     // ① 文件头精探（只读）：封面/歌词/专辑/专辑艺术家/轨/碟/年/流派任一缺失即候选
     //    （album 有 DB 值兜底、无需网络也能修；其余缺失回落 searchMetadata）。
+    progressPhase("scan", inRoot.length);
     let probed = 0;
-    for (const r of rows) {
-      const fsPath = fsPathOf(r.path);
-      if (!fsPath || !inDownloadRoots(fsPath, cfg)) continue;
+    for (const { id, fsPath } of inRoot) {
       probed++;
+      progressSetChecked(probed);
+      // 下载期已由内置标签来源插件打好、且文件未变 → 不探针直接跳过（算「已修复·跳过」）。
+      if (isTagRepairMarked(fsPath)) {
+        markedSkipped++;
+        continue;
+      }
       const embedded = await probeEmbedded(fsPath);
       if (
         embedded &&
@@ -556,14 +716,19 @@ export async function sweepTagRepair(
           !embedded.year ||
           !embedded.genre)
       ) {
-        candidates.push({ id: r.id, fsPath });
+        candidates.push({ id, fsPath });
       }
-      if (probed % 1000 === 0) log.info(`[TAG-REPAIR] 全量探针进度 ${probed}/${rows.length}，候选 ${candidates.length}`);
+      if (probed % 1000 === 0) log.info(`[TAG-REPAIR] 全量探针进度 ${probed}/${inRoot.length}，候选 ${candidates.length}`);
     }
-    log.info(`[TAG-REPAIR] 全量扫描完成：范围 ${probed} 首，待修复候选 ${candidates.length} 首`);
+    log.info(
+      `[TAG-REPAIR] 全量扫描完成（范围 ${dirScope}）：范围 ${probed} 首，` +
+        `标记跳过 ${markedSkipped} 首，待修复候选 ${candidates.length} 首`,
+    );
   }
+  result.skipped += markedSkipped;
 
   // ② 逐首修复（repairSongTags 内部再探一次拿得到才写）。
+  progressPhase("repair", candidates.length);
   for (const { id } of candidates) {
     result.checked++;
     let o: RepairSongOutcome;
@@ -574,6 +739,7 @@ export async function sweepTagRepair(
       o = { outcome: "unobtainable", cover: false, lyric: false, album: false, meta: false };
     }
     accumulate(result, o);
+    progressTick(o.outcome === "fixed" ? 1 : 0, o.outcome === "skip" ? 1 : 0);
   }
   return result;
 }
@@ -588,19 +754,30 @@ let repairing = false;
  * 跑一轮修复（手动触发按钮与调度共用）。
  * mode "queue"=只处理到期队列项；"media"=第一档常规（仅 DB 预筛，不读文件头）；
  * "all"=第二档全量（先全量兜底扫、再清队列）。
+ * dirScope 为本次扫描的目录范围（download/lossless/both），缺省取 cfg.tagRepairScope。
  * 单飞：进行中返回 { busy: true }。
  */
 export async function runTagRepairOnce(
   mode: TagRepairMode,
   cfgOver?: FetchConfig,
+  dirScopeOver?: TagRepairScope,
 ): Promise<{ busy: boolean; result?: TagRepairResult }> {
   if (repairing) return { busy: true };
   repairing = true;
+  progressStart(mode);
   try {
     const cfg = cfgOver ?? currentFetchConfig();
+    const dirScope: TagRepairScope = dirScopeOver ?? cfg.tagRepairScope ?? "both";
     let result: TagRepairResult;
+    /** 本轮「已修复」累计增量（口径 = 真写入修复的 + 无需修/命中标记跳过的）。 */
+    let doneThisRun: number;
     if (mode === "all") {
-      result = await sweepTagRepair(cfg, "all");
+      const sweep = await sweepTagRepair(cfg, "all", dirScope);
+      // 累计口径取**扫描段**的结果：全量扫已把「标签齐/命中完成标记」的歌计进它自己的
+      // skipped，随后清队列时又会在同一批歌上再记一次 skipped —— 直接相加会让累计
+      // 「已修复」虚高（同一首歌被计两次）。队列在此只作收尾清账，不重复计入累计。
+      doneThisRun = sweep.fixed + sweep.skipped;
+      result = sweep;
       // 全量后队列里遗留的到期项一并清一轮（3 败弃权的不再重试）。
       const qr = await processTagRepairQueue(cfg);
       result.checked += qr.checked;
@@ -613,23 +790,29 @@ export async function runTagRepairOnce(
       result.skipped += qr.skipped;
     } else if (mode === "media") {
       // 第一档常规：仅 DB 预筛，不清队列。
-      result = await sweepTagRepair(cfg, "media");
+      result = await sweepTagRepair(cfg, "media", dirScope);
+      doneThisRun = result.fixed + result.skipped;
     } else {
       result = await processTagRepairQueue(cfg);
+      doneThisRun = result.fixed + result.skipped;
     }
     // lastRunAt 只由「第二档全量」推进：它是定时全量兜底扫的到点标记。
     // 常规/队列挡位手动触发都是非穷尽操作，若也推进该标记，用户每次点「常规修复」
     // 都会把到期的全量兜底扫往后推一个间隔，等于让兜底扫永远不跑。
     if (mode === "all") setSetting(LAST_RUN_KEY, String(Date.now()));
+    // 累计「已修复」计数（持久化）：口径 = 真写入修复的 + 无需修/命中标记跳过的。
+    addRepairedTotal(doneThisRun);
+    statsCache = null; // 待修候选数变了，下次查询重算
     saveLastResult(mode, result);
     log.info(
-      `[TAG-REPAIR] ${mode} 一轮完成：检查 ${result.checked}，修复 ${result.fixed} 首` +
+      `[TAG-REPAIR] ${mode} 一轮完成（范围 ${dirScope}）：检查 ${result.checked}，修复 ${result.fixed} 首` +
         `（封面 ${result.coverFixed} / 歌词 ${result.lyricFixed} / 专辑 ${result.albumFixed} / 元数据 ${result.metaFixed}），` +
-        `拿不到 ${result.unobtainable}，无需修 ${result.skipped}`,
+        `拿不到 ${result.unobtainable}，无需修/跳过 ${result.skipped}`,
     );
     return { busy: false, result };
   } finally {
     repairing = false;
+    progressEnd();
   }
 }
 
@@ -676,8 +859,12 @@ export function _resetTagRepairForTest(): void {
   setSetting(LAST_RUN_KEY, "0");
   setSetting(LAST_RESULT_KEY, "");
   setSetting(LAST_RESULTS_KEY, "");
+  setSetting(REPAIRED_TOTAL_KEY, "");
   repairing = false;
   ticking = false;
+  progress = null;
+  statsCache = null;
+  _resetTagRepairMarkersForTest();
 }
 
 // statSync 引用保留给未来「跳过在途文件（mtime 新鲜度）」用；当前探针+原子写已足够安全。

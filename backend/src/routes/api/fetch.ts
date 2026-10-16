@@ -33,6 +33,7 @@ import {
   resolveFetchConfig,
   validateFetchPaths,
   type FetchConfig,
+  type TagRepairScope,
 } from "../../services/fetch/config.js";
 import { listCandidateSources, type FetchTarget } from "../../services/fetch/candidates.js";
 import { ensureDownloadSource } from "../../services/fetch/source.js";
@@ -65,7 +66,9 @@ import type { TaskStatus } from "../../services/fetch/types.js";
 import {
   getTagRepairLastResult,
   getTagRepairLastResults,
+  getTagRepairProgress,
   getTagRepairQueueSize,
+  getTagRepairStats,
   isTagRepairRunning,
   runTagRepairOnce,
   type TagRepairMode,
@@ -212,6 +215,15 @@ export function registerFetch(app: Hono): void {
       (override as Record<string, unknown>).jobRetentionDays = Number.isFinite(n)
         ? Math.min(3650, Math.max(0, Math.floor(n)))
         : DEFAULT_FETCH_CONFIG.jobRetentionDays;
+    }
+    // 中文文本字形（产品定调 2026-10-16）：只接受 simplified / traditional 两个白名单值，
+    // 其余一律丢弃（回落默认 simplified，见 resolveFetchConfig 的同名校验）。
+    if (
+      "chineseVariant" in override &&
+      (override as Record<string, unknown>).chineseVariant !== "simplified" &&
+      (override as Record<string, unknown>).chineseVariant !== "traditional"
+    ) {
+      delete (override as Record<string, unknown>).chineseVariant;
     }
     const merged = resolveFetchConfig(override as Partial<FetchConfig>);
     const v = validateFetchPaths(merged);
@@ -681,19 +693,30 @@ export function registerFetch(app: Hono): void {
     return c.json({
       enabled: cfg.tagRepairEnabled,
       intervalHours: cfg.tagRepairIntervalHours,
+      // 扫描目录范围：download=仅下载根 / lossless=仅无损根 / both=两者。
+      scope: cfg.tagRepairScope,
       queueSize: getTagRepairQueueSize(),
       running: isTagRepairRunning(),
       lastResult: getTagRepairLastResult(),
       lastResults: getTagRepairLastResults(),
+      // 实时统计（已修复/待修复/全部）与运行中进度（空闲时 progress=null）。
+      stats: getTagRepairStats(),
+      progress: getTagRepairProgress(),
     });
   });
-  // 手动触发一轮：body { mode?: TagRepairMode; full?: boolean }。
+  // 手动触发一轮：body { mode?: TagRepairMode; full?: boolean; scope?: TagRepairScope }。
   //   mode="queue"=只清到期队列；"media"=第一档常规（仅 DB 预筛，不读文件头，便宜）；
   //   "all"=第二档全量（逐首精探文件头，跑完再清一轮队列）。
+  //   scope=本次扫描目录范围（download/lossless/both），缺省沿用已保存的 cfg.tagRepairScope；
+  //   非法值回落 "both"（宽容归一化）。
   //   兼容旧入参：full=true → "all"，full=false/缺省 → "queue"；非法值一律回落 "queue"（宽容归一化）。
   // 异步执行（全量可能数分钟），立即返回 busy/started；结果经 GET 轮询 lastResult/lastResults。
   app.post("/v1/fetch/tag-repair/run", adminMiddleware, async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { mode?: TagRepairMode; full?: boolean };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      mode?: TagRepairMode;
+      full?: boolean;
+      scope?: TagRepairScope;
+    };
     const requested = body.mode;
     const mode: TagRepairMode =
       requested === "queue" || requested === "media" || requested === "all"
@@ -701,10 +724,12 @@ export function registerFetch(app: Hono): void {
         : body.full === true
           ? "all"
           : "queue";
+    const scope: TagRepairScope =
+      body.scope === "download" || body.scope === "lossless" || body.scope === "both" ? body.scope : "both";
     if (isTagRepairRunning()) return c.json({ success: false, busy: true }, 409);
     // 不 await：后台跑，前端轮询状态。
-    void runTagRepairOnce(mode);
-    return c.json({ success: true, started: true, mode });
+    void runTagRepairOnce(mode, undefined, scope);
+    return c.json({ success: true, started: true, mode, scope });
   });
 }
 

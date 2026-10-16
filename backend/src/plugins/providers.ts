@@ -119,11 +119,19 @@ export function filterProvidersByPreference(
 }
 
 /**
+ * 命中回调(可选):某 provider 胜出时上报来源,供调用方判定「谁打上了标签」。
+ * `builtin` = 该 provider 的 manifest 声明了 `builtinTagSource`(内置标签来源)。
+ */
+export interface ProviderMatchOptions {
+  onMatch?: (providerId: string, builtin: boolean) => void;
+}
+
+/**
  * Search lyrics across enabled lyric providers (first-match-wins), honoring the
  * user's `lyrics.providerPriority` order (falls back to legacy `lyrics.providerId`).
  * @returns LRC/plain lyric text, or null if no provider could supply it.
  */
-export async function searchLyrics(song: LyricSongInput): Promise<string | null> {
+export async function searchLyrics(song: LyricSongInput, opts?: ProviderMatchOptions): Promise<string | null> {
   const providers = filterProvidersByPreference(getEnabledByCapability("lyricProvider"), "lyrics");
   for (const { manifest, impl } of providers) {
     if (typeof impl?.searchLyrics !== "function") continue;
@@ -133,6 +141,7 @@ export async function searchLyrics(song: LyricSongInput): Promise<string | null>
       const r = await impl.searchLyrics(host, song);
       if (r && (r.lrc || r.text)) {
         recordSuccess(manifest.id);
+        opts?.onMatch?.(manifest.id, manifest.builtinTagSource === true);
         return r.lrc || r.text || null;
       }
       // Provider responded but had nothing for this song — keep trying others.
@@ -149,7 +158,7 @@ export async function searchLyrics(song: LyricSongInput): Promise<string | null>
  * user's `cover.providerPriority` order (falls back to legacy `cover.providerId`).
  * @returns a cover URL, or null if no provider could supply it.
  */
-export async function searchCover(song: LyricSongInput): Promise<string | null> {
+export async function searchCover(song: LyricSongInput, opts?: ProviderMatchOptions): Promise<string | null> {
   const providers = filterProvidersByPreference(getEnabledByCapability("coverProvider"), "cover");
   for (const { manifest, impl } of providers) {
     if (typeof impl?.searchCover !== "function") continue;
@@ -159,6 +168,7 @@ export async function searchCover(song: LyricSongInput): Promise<string | null> 
       const r = await impl.searchCover(host, song);
       if (r && r.url) {
         recordSuccess(manifest.id);
+        opts?.onMatch?.(manifest.id, manifest.builtinTagSource === true);
         return r.url;
       }
     } catch (e: any) {
@@ -175,7 +185,7 @@ export async function searchCover(song: LyricSongInput): Promise<string | null> 
  * `metadata.providerId`).
  * @returns the matched SongMetadata, or null if no provider could supply it.
  */
-export async function searchMetadata(song: LyricSongInput): Promise<SongMetadata | null> {
+export async function searchMetadata(song: LyricSongInput, opts?: ProviderMatchOptions): Promise<SongMetadata | null> {
   const providers = filterProvidersByPreference(getEnabledByCapability("metadataProvider"), "metadata");
   for (const { manifest, impl } of providers) {
     if (typeof impl?.searchMetadata !== "function") continue;
@@ -185,6 +195,7 @@ export async function searchMetadata(song: LyricSongInput): Promise<SongMetadata
       const r = await impl.searchMetadata(host, song);
       if (r && typeof r === "object" && Object.keys(r).length > 0) {
         recordSuccess(manifest.id);
+        opts?.onMatch?.(manifest.id, manifest.builtinTagSource === true);
         return r as SongMetadata;
       }
       // Provider responded but had nothing for this song — keep trying others.

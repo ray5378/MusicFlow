@@ -230,6 +230,19 @@ export const fetchJobs = sqliteTable("fetch_jobs", {
   updatedAt: text("updated_at").default(""),
 });
 
+// 标签修复完成标记(2026-10-16):凡「由内置标签来源插件(builtinTagSource)」在下载期
+// 打上标签的成品文件,落盘后在此登记一行。标签修复扫描命中标记且文件未变
+// (fs_path 相同 + size/mtime_ms 一致)→ 不探针、不联网,直接跳过。
+// 用 fsPath 做主键(下载落盘时即知,无需等扫描建 songs 行);文件被移动 → 新路径不命中。
+export const tagRepairDone = sqliteTable("tag_repair_done", {
+  fsPath: text("fs_path").primaryKey(),
+  size: integer("size").notNull().default(0),
+  mtimeMs: integer("mtime_ms").notNull().default(0),
+  /** 打上标签的来源 provider id(如内置 tag-provider);审计用。 */
+  src: text("src").notNull().default(""),
+  at: text("at").notNull().default(""),
+});
+
 export const plugins = sqliteTable("plugins", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),

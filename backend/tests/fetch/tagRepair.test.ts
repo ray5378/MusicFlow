@@ -36,7 +36,11 @@ import {
   processTagRepairQueue,
   runTagRepairOnce,
   _resetTagRepairForTest,
+  getTagRepairStats,
+  getTagRepairProgress,
+  getTagRepairRepairedTotal,
 } from "../../src/services/fetch/tagRepair.js";
+import { markTagRepairDone, isTagRepairMarked } from "../../src/services/fetch/tagRepairMarker.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
 
 // ---- mocks（Vitest5：工厂必须带出被依赖方用到的每个导出） --------------------
@@ -68,8 +72,12 @@ const MockFetchTagError = vi.hoisted(
       }
     },
 );
+const applyVariantMock = vi.hoisted(() => vi.fn());
 vi.mock("../../src/services/fetch/tagWriter.js", () => ({
   writeTags: writeTagsMock,
+  // tagRepair 在写盘前调用 applyTagsVariant 做中文字形转换；此处透传（no-op），
+  // 让断言看到 provider 原文（字形转换本身由 chineseConv 单测覆盖）。
+  applyTagsVariant: applyVariantMock,
   FetchTagError: MockFetchTagError,
 }));
 
@@ -295,10 +303,43 @@ describe("repairSongTags", () => {
     const p = join(root, "timeout.flac");
     insertSong("s-timeout", p);
     parseFileMock.mockResolvedValueOnce(probe({ album: false }));
-    writeTagsMock.mockRejectedValue(new MockFetchTagError("TIMEOUT", "slow", p));
+    writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TIMEOUT", "slow", p));
 
     await expect(repairSongTags("s-timeout", cfg())).rejects.toThrow();
     expect(writeTagsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("命中下载期完成标记（文件未变）→ 不探针、不联网直接 skip", async () => {
+    const p = join(root, "marked.flac");
+    insertSong("s-mark", p, { hasLyrics: 0 });
+    // 模拟「下载期内置标签来源插件已打好标签并登记标记」。
+    expect(markTagRepairDone(p, "tag-provider")).toBe(true);
+    // 不额外排 once 假值：用 beforeEach 的默认桩验证「根本没被调用」，避免 once 队列跨用例泄漏。
+    const r = await repairSongTags("s-mark", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(parseFileMock).not.toHaveBeenCalled();
+    expect(searchCoverMock).not.toHaveBeenCalled();
+    expect(searchLyricsMock).not.toHaveBeenCalled();
+    expect(writeTagsMock).not.toHaveBeenCalled();
+  });
+
+  it("标记失效：size/mtime 变了 → 自动清标记并正常走修复", async () => {
+    const p = join(root, "stale.flac");
+    insertSong("s-stale", p);
+    markTagRepairDone(p, "tag-provider");
+    // 把标记的 size 改掉模拟文件被改写；命中检查应清掉该行、返回未命中。
+    sqlite.prepare("UPDATE tag_repair_done SET size = size + 999 WHERE fs_path = ?").run(p);
+    expect(isTagRepairMarked(p)).toBe(false);
+    expect(
+      (sqlite.prepare("SELECT COUNT(*) AS n FROM tag_repair_done WHERE fs_path = ?").get(p) as { n: number }).n,
+    ).toBe(0);
+
+    parseFileMock.mockResolvedValueOnce(probe({ cover: false }));
+    searchCoverMock.mockResolvedValueOnce("http://x/c.jpg");
+    cacheRemoteCoverMock.mockResolvedValueOnce("tagfix.jpg");
+    resolveCoverFileMock.mockReturnValueOnce(join(tmpDir, "cover.jpg"));
+    const r = await repairSongTags("s-stale", cfg());
+    expect(r.outcome).toBe("fixed");
   });
 });
 
@@ -367,6 +408,86 @@ describe("tagRepair queue", () => {
     expect(done.busy).toBe(false);
     // 放行后 provider 拿不到封面 → unobtainable（此处只验单飞机制本身）
     expect(done.result?.unobtainable).toBe(1);
+  });
+});
+
+// ---- 11. 实时统计(已修复/待修复/全部) + 运行中进度 --------------------------------
+
+describe("tagRepair stats/progress", () => {
+  it("getTagRepairStats：total=两根内本地歌数，pending=DB 缺标签候选数，repaired=累计修复数", async () => {
+    insertSong("t1", join(root, "a.flac"), { hasLyrics: 0 });
+    insertSong("t2", join(root, "b.flac"), { hasLyrics: 1, album: "专辑" });
+    // t2 补上内嵌封面声明，使其不再计入待修候选（封面判定走 songs.cover_art / albums.cover_art）。
+    db.update(songs).set({ coverArt: "x.jpg" }).where(eqId("t2")).run();
+    cfg(); // 先把 downloadRoot 覆盖成测试根，统计才落在两根内。
+    const s1 = getTagRepairStats();
+    expect(s1.total).toBe(2);
+    expect(s1.pending).toBe(1);
+    expect(s1.repaired).toBe(0);
+
+    // 跑一轮常规修复：t1 缺歌词、provider 给词 → 修复 1 首，累计 repaired +1。
+    parseFileMock.mockResolvedValue(probe({ lyric: false }));
+    searchLyricsMock.mockResolvedValue("[00:01]词");
+    const { busy } = await runTagRepairOnce("media", cfg());
+    expect(busy).toBe(false);
+    expect(getTagRepairRepairedTotal()).toBe(1);
+    expect(getTagRepairStats().repaired).toBe(1); // 运行结束已清缓存，重算拿到新值
+  });
+
+  it("progress：运行中非空（phase=repair），结束后归 null", async () => {
+    insertSong("p1", join(root, "c.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchCoverMock.mockImplementation(async () => {
+      await gate;
+      return null;
+    });
+    const p = runTagRepairOnce("media", cfg());
+    await vi.waitFor(() => expect(getTagRepairProgress()).not.toBeNull());
+    const live = getTagRepairProgress()!;
+    expect(live.mode).toBe("media");
+    expect(live.phase).toBe("repair");
+    expect(live.total).toBe(1);
+    release();
+    await p;
+    expect(getTagRepairProgress()).toBeNull();
+  });
+
+  it("「已修复」口径 = 真写入 + 无需修跳过（repaired 累加 fixed+skipped）", async () => {
+    // DB 声明缺歌词，但文件实际有歌词 → 走 skip（只对齐 DB），不计 fixed。
+    insertSong("pj1", join(root, "k.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe());
+    const { busy, result } = await runTagRepairOnce("media", cfg());
+    expect(busy).toBe(false);
+    expect(result?.fixed).toBe(0);
+    expect(result?.skipped).toBeGreaterThanOrEqual(1);
+    expect(getTagRepairRepairedTotal()).toBe((result?.fixed ?? 0) + (result?.skipped ?? 0));
+    expect(getTagRepairStats().repaired).toBe((result?.fixed ?? 0) + (result?.skipped ?? 0));
+  });
+});
+
+// ---- 12. 扫描范围(download / lossless / both) ------------------------------------
+
+describe("tagRepair scope", () => {
+  it("download 只扫下载根；lossless 只扫无损根；缺省用已保存 scope(both)", async () => {
+    const dl = join(tmpDir, "dl-root");
+    const ll = join(tmpDir, "ll-root");
+    insertSong("sc-dl", join(dl, "a.flac"), { hasLyrics: 0 });
+    insertSong("sc-ll", join(ll, "b.flac"), { hasLyrics: 0 });
+    saveFetchConfigOverride({ downloadRoot: dl, losslessRoot: ll } as Partial<FetchConfig>);
+    const c = currentFetchConfig();
+    parseFileMock.mockResolvedValue(probe({ lyric: false, cover: false }));
+    searchLyricsMock.mockResolvedValue("[00:01]词");
+
+    const rBoth = await runTagRepairOnce("media", c); // 缺省 → cfg.tagRepairScope=both
+    expect(rBoth.result?.checked).toBe(2);
+
+    const rDl = await runTagRepairOnce("media", c, "download");
+    expect(rDl.result?.checked).toBe(1);
+
+    const rLl = await runTagRepairOnce("media", c, "lossless");
+    expect(rLl.result?.checked).toBe(1);
   });
 });
 

@@ -24,6 +24,8 @@ import { createLogger } from "../../utils/logger.js";
 import { resolveFfmpeg } from "../transcode.js";
 import { normalizeContainer } from "./probe.js";
 import type { FetchErrorCode } from "./types.js";
+// 中文简繁字形转换（200KB+ 的词表在 utils/chineseConv.ts，见其头部说明）。
+import { applyVariant, type ChineseVariant } from "../../utils/chineseConv.js";
 
 const log = createLogger("FETCH_TAG");
 
@@ -48,6 +50,26 @@ export interface SongTags {
   lyric?: string;
   /** 封面：内存 Buffer 或本地图片路径（jpg/png） */
   cover?: Buffer | string;
+}
+
+/**
+ * 中文简繁字形（产品定调 2026-10-16）：就地把 tags 里**由 provider 提供**的文本字段
+ * 按所选字形转换（默认简体）。覆盖 标题 / 歌手 / 专辑 / 专辑艺术家 / 风格 / 歌词 ——
+ * 即写入文件的全部文本标签。`comment` 是核心自造文本（来源/音质/取链时间），不参与转换。
+ *
+ * 为什么要这一层封装：下载期（orchestrator）与标签修复（tagRepair）是两条独立写入路径，
+ * 把「哪些字段要转」收敛到唯一一处，避免两边漂移。同一方向重复调用是幂等的
+ * （转换表的键只覆盖异形一侧），故读侧再转换也不会漂移。
+ */
+export function applyTagsVariant(tags: SongTags, variant: ChineseVariant | undefined): void {
+  if (!variant) return;
+  const conv = (s: string | undefined): string | undefined => (s ? applyVariant(s, variant) : s);
+  tags.title = conv(tags.title);
+  tags.artist = conv(tags.artist);
+  tags.album = conv(tags.album);
+  tags.albumArtist = conv(tags.albumArtist);
+  tags.genre = conv(tags.genre);
+  tags.lyric = conv(tags.lyric);
 }
 
 /** 写入结果。warnings 非空表示「写成功了但有些诉求没满足」，不算失败。 */

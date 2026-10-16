@@ -107,9 +107,10 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
       ancestorSourceId: null,
     })) as any,
     rankCandidates: ((c: Candidate[]) => c) as any,
-    // 增值项（歌词/封面 provider）：默认关闭，避免单测触达真实插件沙箱。
+    // 增值项（歌词/封面/元数据 provider）：默认关闭，避免单测触达真实插件沙箱。
     searchLyrics: (async () => null) as any,
     searchCover: (async () => null) as any,
+    searchMetadata: (async () => null) as any,
     // PATCH17 下载尝试台账：默认桩掉（真实实现是 DB 单例，跨用例污染 —— 用例 A 记过的
     // 键会让用例 B 的同键 target 被冷却秒跳）。台账行为由 attempts.test.ts 专测；
     // 2026-10-11 定调 B 后冷却入口是 shouldSkipByCooldown（永久失效类不冷却）。

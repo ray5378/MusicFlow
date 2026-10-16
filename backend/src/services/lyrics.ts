@@ -6,6 +6,8 @@ import { hasLyricProvider, searchLyrics } from "../plugins/providers.js";
 import { getSettingBool } from "./settings.js";
 import { saveLyricFile, resolveLyricContent } from "./lyricsStore.js";
 import { createLogger } from "../utils/logger.js";
+import { applyVariant } from "../utils/chineseConv.js";
+import { currentFetchConfig } from "./fetch/configStore.js";
 
 const log = createLogger("lyrics");
 
@@ -186,8 +188,15 @@ async function readSidecarLrc(song: SongRow): Promise<string | null> {
 //   ③ 在线按需(A 开关,默认开):lyricProvider 插件,命中且 B(persist) 开则落库为文件
 //   ④ web 歌曲 legacy 源插件 lyricUrl
 export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
+  // 中文字形（产品定调 2026-10-16）：**所有 provider 提供的文本**按用户所选字形输出，
+  // 歌词是其中量最大的一类。转换点在**出口**（下面两处 return）—— 这样连「本功能上线前
+  // 就已落库 / 内嵌的繁体歌词」也会按当前设置显示；同方向重复转换是幂等的，故生产侧
+  // （③ 命中时）转换与出口转换不会互相干扰。
+  const variant = currentFetchConfig().chineseVariant;
   const cached = lrcCache.get(song.id);
-  if (cached && Date.now() - cached.at < CACHE_TTL) return cached.content;
+  if (cached && Date.now() - cached.at < CACHE_TTL) {
+    return cached.content ? applyVariant(cached.content, variant) : cached.content;
+  }
 
   let content: string | null = null;
 
@@ -217,7 +226,9 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
       extra: sourceData?.extra || null,
     });
     if (fromProviders) {
-      content = fromProviders;
+      // 生产侧先转一次：B 落库会把这个字符串写成 online-lyrics/<id>.lrc 文件，
+      // 让**落盘产物**也随设置字形（否则文件里是繁体、界面显示简体，两处不一致）。
+      content = applyVariant(fromProviders, variant);
       // B 落库(默认关):命中即写 online-lyrics/<id>.lrc 文件 + songs.lyrics 存引用,
       // 拉一次永存、离线也能显示(与封面 online-covers 同构,可单独挂卷/清空)。
       if (getSettingBool("lyrics.persist", false)) {
@@ -267,7 +278,7 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   }
 
   lrcCache.set(song.id, { content, at: Date.now() });
-  return content;
+  return content ? applyVariant(content, variant) : content;
 }
 
 // Get parsed lyrics for a song id (null if none)

@@ -15,6 +15,8 @@ import * as path from "node:path";
 import { DEFAULT_NAMING_CONFIG, type ConflictPolicy, type NamingConfig } from "./naming.js";
 import { DEFAULT_QUALITY_CONFIG, type QualityConfig } from "./types.js";
 import type { IntegrityLevel } from "./integrity.js";
+// 仅取类型（type-only import：编译后擦除，不会把 200KB+ 的转换表拖进本「零 IO」模块）。
+import type { ChineseVariant } from "../../utils/chineseConv.js";
 
 /** 默认下载根目录（落盘成品）。 */
 export const DEFAULT_DOWNLOAD_ROOT = "/MUSIC/DOWNLOAD";
@@ -22,6 +24,9 @@ export const DEFAULT_DOWNLOAD_ROOT = "/MUSIC/DOWNLOAD";
 export const DEFAULT_CACHE_ROOT = "/MUSIC/DOWNLOADCACHE";
 /** 洗版成品根目录（容器内英文目录；宿主机挂载自 …/无损音乐）。 */
 export const DEFAULT_LOSSLESS_ROOT = "/MUSIC/LOSSLESS";
+
+/** 标签修复扫描范围(2026-10-16):download=仅流媒体下载目录 / lossless=仅无损目录 / both=两者。 */
+export type TagRepairScope = "download" | "lossless" | "both";
 
 /** 一次下载任务生效的完整配置。 */
 export interface FetchConfig {
@@ -142,6 +147,14 @@ export interface FetchConfig {
   tagRepairEnabled: boolean;
   /** 全量兜底扫描间隔（小时，1-8760）。默认 168 = 每周一次；事件队列不受它限制。 */
   tagRepairIntervalHours: number;
+  /** 标签修复扫描范围(手动触发可在请求里覆盖):两个下载目录之一或两者。默认 both。 */
+  tagRepairScope: TagRepairScope;
+  /**
+   * 中文文本字形(产品定调 2026-10-16):**所有由 provider 提供的文本**(歌词 + 写入文件的
+   * 全部标签:标题/歌手/专辑/专辑艺术家/风格)按所选字形输出,默认 simplified(简体中文)。
+   * 平台(如 QQ 音乐)返回曲目存储字形且无简繁开关,故在写入边界统一转换。
+   */
+  chineseVariant: ChineseVariant;
 }
 
 /** 默认配置（所有旋钮的缺省取值见各字段注释）。 */
@@ -209,6 +222,8 @@ export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   upgradeAutoContinue: true,
   tagRepairEnabled: true,
   tagRepairIntervalHours: 168,
+  tagRepairScope: "both",
+  chineseVariant: "simplified",
 };
 
 /**
@@ -260,6 +275,16 @@ export function resolveFetchConfig(partial?: Partial<FetchConfig>): FetchConfig 
       typeof p.tagRepairIntervalHours === "number" && Number.isFinite(p.tagRepairIntervalHours)
         ? Math.min(8760, Math.max(1, Math.floor(p.tagRepairIntervalHours)))
         : DEFAULT_FETCH_CONFIG.tagRepairIntervalHours,
+    // 标签修复扫描范围（2026-10-16）：只接受三个白名单值，其余回落默认 both。
+    tagRepairScope:
+      p.tagRepairScope === "download" || p.tagRepairScope === "lossless" || p.tagRepairScope === "both"
+        ? p.tagRepairScope
+        : DEFAULT_FETCH_CONFIG.tagRepairScope,
+    // 中文文本字形（2026-10-16）：只接受两个白名单值，其余回落默认 simplified。
+    chineseVariant:
+      p.chineseVariant === "simplified" || p.chineseVariant === "traditional"
+        ? p.chineseVariant
+        : DEFAULT_FETCH_CONFIG.chineseVariant,
   };
 }
 

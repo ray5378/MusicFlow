@@ -113,6 +113,13 @@ export interface FetchConfig {
   tagRepairEnabled?: boolean;
   /** 标签全量兜底扫描间隔（小时）。默认 168 */
   tagRepairIntervalHours?: number;
+  /** 标签修复扫描目录范围：download=仅流媒体下载目录 / lossless=仅无损目录 / both=两者。默认 both */
+  tagRepairScope?: TagRepairScope;
+  /**
+   * 中文文本字形：**所有由 provider 提供的文本**（歌词 + 写入文件的全部标签：标题/歌手/
+   * 专辑/专辑艺术家/风格）按该字形输出。simplified=简体中文（默认）/ traditional=繁體中文。
+   */
+  chineseVariant?: ChineseTextVariant;
 }
 
 const BASE = "/rest/api/v1/fetch";
@@ -359,23 +366,70 @@ export interface TagRepairResult {
 /** 修复挡位：queue=只清到期待修队列；media=常规（只查缺标签的歌并补齐全部缺失标签）；all=全量（逐首精探文件头）。 */
 export type TagRepairMode = "queue" | "media" | "all";
 
+/** 修复扫描目录范围：download=仅流媒体下载目录；lossless=仅无损目录；both=两者。 */
+export type TagRepairScope = "download" | "lossless" | "both";
+
+/** 中文文本字形：简体中文（默认）/ 繁體中文。 */
+export type ChineseTextVariant = "simplified" | "traditional";
+
+/** 实时统计：repaired=累计已修复歌数；pending=当前待修候选数；total=两根内本地歌总数。 */
+export interface TagRepairStats {
+  total: number;
+  pending: number;
+  repaired: number;
+}
+
+/** 运行中进度（空闲为 null）：phase=scan 精探阶段 / repair 修复阶段。 */
+export interface TagRepairProgress {
+  mode: TagRepairMode;
+  phase: "scan" | "repair";
+  total: number;
+  checked: number;
+  /** 本轮实际写文件的歌数。 */
+  fixed: number;
+  /** 本轮跳过（无需修 / 命中下载期完成标记）的歌数；「已修复」= fixed + skipped。 */
+  skipped: number;
+  startedAt: number;
+}
+
 export interface TagRepairStatus {
   enabled: boolean;
   intervalHours: number;
+  /** 扫描目录范围。 */
+  scope: TagRepairScope;
   queueSize: number;
   running: boolean;
   lastResult: TagRepairResult | null;
   /** 分挡位的上次结果（queue/media/all）。 */
   lastResults: Partial<Record<TagRepairMode, TagRepairResult>>;
+  /** 实时统计（已修复/待修复/全部）。 */
+  stats: TagRepairStats;
+  /** 运行中进度；空闲为 null。 */
+  progress: TagRepairProgress | null;
 }
+
+const EMPTY_TAG_REPAIR_STATUS: TagRepairStatus = {
+  enabled: false,
+  intervalHours: 168,
+  scope: "both",
+  queueSize: 0,
+  running: false,
+  lastResult: null,
+  lastResults: {},
+  stats: { total: 0, pending: 0, repaired: 0 },
+  progress: null,
+};
 
 export async function getTagRepairStatus(): Promise<TagRepairStatus> {
   const res = await api.get(`${BASE}/tag-repair`);
-  return (res.data ?? { enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null, lastResults: {} }) as TagRepairStatus;
+  return (res.data ?? EMPTY_TAG_REPAIR_STATUS) as TagRepairStatus;
 }
 
-/** 触发一轮修复：mode=queue 只清到期待修队列，media=常规（补缺标签歌的全部缺失标签，快），all=全量（逐首精探文件头，慢，可能数分钟）。异步执行，结果轮询状态。已有修复在跑时后端返回 409。 */
-export async function runTagRepair(mode: TagRepairMode): Promise<{ success: boolean; busy?: boolean; mode?: string }> {
-  const res = await api.post(`${BASE}/tag-repair/run`, { mode });
+/** 触发一轮修复：mode=queue 只清到期待修队列，media=常规（补缺标签歌的全部缺失标签，快），all=全量（逐首精探文件头，慢，可能数分钟）。scope=本次扫描目录范围（缺省沿用已保存的设置）。异步执行，结果轮询状态。已有修复在跑时后端返回 409。 */
+export async function runTagRepair(
+  mode: TagRepairMode,
+  scope?: TagRepairScope,
+): Promise<{ success: boolean; busy?: boolean; mode?: string; scope?: TagRepairScope }> {
+  const res = await api.post(`${BASE}/tag-repair/run`, scope ? { mode, scope } : { mode });
   return res.data ?? { success: false };
 }

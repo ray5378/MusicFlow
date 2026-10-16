@@ -26,6 +26,7 @@ import { songs } from "../../db/schema.js";
 import { downloadToFile, probeRemoteSize, type DownloadResult } from "../../utils/httpDownload.js";
 import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import type { LyricSongInput } from "../../plugins/types.js";
+import { markTagRepairDone } from "./tagRepairMarker.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
 import {
   classifyTier,
@@ -38,7 +39,7 @@ import {
 } from "./quality.js";
 import { probeFile, toCandidateQuality } from "./probe.js";
 import { verifyIntegrity } from "./integrity.js";
-import { writeTags, type SongTags } from "./tagWriter.js";
+import { writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
 import { findExistingPlayable } from "./existing.js";
@@ -982,13 +983,22 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
    * 歌词服务抖动就会毁掉整次下载）。风格只认信源声明值（不臆造）；封面优先用候选自带的
    * `coverUrl`，缺了才回落 `searchCover` provider；最后用 `searchMetadata` **只补缺失项**
    * （轨/碟/年/流派/专辑），信源声明值优先。
+   * 另返回 `builtinSrc`：若上述增值标签来自**内置标签来源插件**（manifest.
+   * builtinTagSource），记录该 provider id，供落盘后写「标签修复完成标记」。
    */
   async function collectExtraTags(
     t: FetchTarget,
     cand: Candidate,
     base: { title: string; artist?: string; album?: string },
-  ): Promise<Partial<SongTags>> {
+  ): Promise<{ extra: Partial<SongTags>; builtinSrc: string | null }> {
     const extra: Partial<SongTags> = {};
+
+    // 记录「谁打上的标签」：只有**内置标签来源插件**（manifest.builtinTagSource）命中才记，
+    // 供落盘后写「标签修复完成标记」用；外置插件命中一律不记（产品定调 2026-10-16）。
+    let builtinSrc: string | null = null;
+    const onMatch = (providerId: string, builtin: boolean): void => {
+      if (builtin && !builtinSrc) builtinSrc = providerId;
+    };
 
     // 风格：只认信源声明值（candidates.ts 从 OnlineSongResult.extra 抽取）。
     if (cand.genre) extra.genre = cand.genre;
@@ -1004,7 +1014,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
     // 歌词：provider 可能并发多插件，套短超时护栏。
     try {
-      const lyric = await withTimeout(deps.searchLyrics(songInput), ENRICH_TIMEOUT_MS);
+      const lyric = await withTimeout(deps.searchLyrics(songInput, { onMatch }), ENRICH_TIMEOUT_MS);
       if (lyric && lyric.trim()) extra.lyric = lyric;
     } catch (e) {
       warnings.push(`歌词获取失败(忽略，不影响入库): ${msgOf(e)}`);
@@ -1015,7 +1025,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       try {
         let coverUrl = cand.coverUrl;
         if (!coverUrl) {
-          const u = await withTimeout(deps.searchCover(songInput), ENRICH_TIMEOUT_MS);
+          const u = await withTimeout(deps.searchCover(songInput, { onMatch }), ENRICH_TIMEOUT_MS);
           if (u) coverUrl = u;
         }
         if (coverUrl) {
@@ -1034,7 +1044,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
 
     // 元数据补全：一次调用补齐缺失的轨/碟/年/流派/专辑；只补缺失项，信源声明值优先。
     try {
-      const meta = await withTimeout(deps.searchMetadata(songInput), ENRICH_TIMEOUT_MS);
+      const meta = await withTimeout(deps.searchMetadata(songInput, { onMatch }), ENRICH_TIMEOUT_MS);
       if (meta) {
         if (!cand.track && meta.track) extra.track = meta.track;
         if (meta.trackTotal) extra.trackTotal = meta.trackTotal;
@@ -1048,7 +1058,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       warnings.push(`标签补全失败(忽略，不影响入库): ${msgOf(e)}`);
     }
 
-    return extra;
+    return { extra, builtinSrc };
   }
 
   /** 把封面 URL 下载成内存 Buffer（限 8 MiB）；任何失败返回 undefined 且只记 warning。 */
@@ -1481,9 +1491,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     const losslessGrade = losslessRoutable && isLosslessGradeSource(probed, cfg.quality);
 
     // h) 写标签（含增值项：风格 / 歌词 / 封面）。
-    const title = t.title || cand.title || "Unknown Title";
-    const artist = t.artist || cand.artist;
-    const album = t.album || cand.album;
+    //    title/artist/album 用 let：下方中文字形转换会回写它们，保证**文件名与内嵌标签
+    //    一致**（否则会出现「文件名是繁体、标签已转简体」的割裂）。
+    let title = t.title || cand.title || "Unknown Title";
+    let artist = t.artist || cand.artist;
+    let album = t.album || cand.album;
     const tags: SongTags = {
       title,
       artist,
@@ -1497,11 +1509,21 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       tags.comment = `来源:${cand.platform || cand.pluginId} 声明音质:${describeQuality(cand.declared)} 取链时间:${new Date().toISOString()}`;
     }
     // 增值项采集：风格 / 歌词 / 封面。整体 try 兜底，异常只告警（绝不让整首歌失败）。
+    let builtinTagSrc: string | null = null;
     try {
-      Object.assign(tags, await collectExtraTags(t, cand, { title, artist, album }));
+      const extra = await collectExtraTags(t, cand, { title, artist, album });
+      Object.assign(tags, extra.extra);
+      builtinTagSrc = extra.builtinSrc;
     } catch (e) {
       warnings.push(`增值标签采集异常(忽略): ${msgOf(e)}`);
     }
+    // h.1) 中文字形（产品定调 2026-10-16）：**所有 provider 提供的文本**（含上面采到的
+    //      歌词/风格/专辑）一律按用户所选字形输出，默认简体。命中匹配已在上一步完成，
+    //      故这里转换不影响「用源文本去平台比对」。转换后就地回写命名变量。
+    applyTagsVariant(tags, cfg.chineseVariant);
+    title = tags.title ?? title;
+    artist = tags.artist ?? artist;
+    album = tags.album ?? album;
     try {
       const tr = await deps.writeTags(cachePath, tags);
       if (tr.warnings && tr.warnings.length > 0) warnings.push(...tr.warnings);
@@ -1642,6 +1664,9 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     }
     // 成品已被 finalize 搬出缓存：兜底清掉本候选专属的空目录（成功路径不会走 cleanup）。
     pruneCacheDir();
+    // 下载期由**内置标签来源插件**打上过标签 → 落盘后登记「标签修复完成标记」：
+    // 后续标签修复命中且文件位置/大小/mtime 未变即直接跳过（外置插件不标记）。
+    if (builtinTagSrc) markTagRepairDone(fr.finalPath, builtinTagSrc);
     return {
       kind: "success",
       cachePath,

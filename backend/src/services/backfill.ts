@@ -13,6 +13,8 @@ import { searchLyrics } from "../plugins/providers.js";
 import { fetchCoverForSong, runCoverBackfill } from "./covers.js";
 import { saveLyricFile } from "./lyricsStore.js";
 import { runBatchJob } from "../batch/runner.js";
+import { applyVariant } from "../utils/chineseConv.js";
+import { currentFetchConfig } from "./fetch/configStore.js";
 
 export type BackfillKind = "lyrics" | "covers" | "covers-batch";
 
@@ -162,7 +164,9 @@ export async function runBackfillLoop(
         if (lrc) {
           // C 批量补全总是落库:写 online-lyrics/<id>.lrc 文件 + songs.lyrics 存引用
           // (与封面同构;其目的就是建离线歌词库)。
-          const ref = saveLyricFile(song.id, lrc);
+          // 中文字形(产品定调 2026-10-16):落库前按用户所选字形转换(默认简体),
+          // 让离线歌词库本身即为目标字形(读侧 fetchLrcForSong 出口也会再转一次,幂等)。
+          const ref = saveLyricFile(song.id, applyVariant(lrc, currentFetchConfig().chineseVariant));
           // has_lyrics=1 与 lyrics 引用同步写入:此后再跑批量回填,该曲会被
           // whereClause 直接排除,不会重复在线搜索。
           if (ref) sqlite.prepare("UPDATE songs SET lyrics = ?, has_lyrics = 1 WHERE id = ?").run(ref, song.id);

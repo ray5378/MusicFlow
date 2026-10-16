@@ -147,12 +147,20 @@ function artistMatches(candSinger: any, wantArtist: string): boolean {
   return want.some((w) => have.includes(w));
 }
 
-/** 时长校验:本地/平台任一时长缺失则不校验;都有一致到 ±5s 内才通过。 */
-function durationOk(songDurationMs: number | null | undefined, intervalSec: any): boolean {
-  const local = Number(songDurationMs) || 0;
+/**
+ * 时长校验:本地/平台任一时长缺失则不校验;都有一致到 ±5s 内才通过。
+ *
+ * 单位纪律(core 契约,2026-10-16 修正):`song.duration` 由核心按 **秒** 传入
+ * (LyricSongInput 的调用方一律给 `songs.duration` / `durationSec`,见
+ * orchestrator.collectExtraTags、tagRepair.repairSongTags、covers.ts、lyrics.ts);
+ * `detail.interval` 也是秒。旧实现把本地值当毫秒除以 1000 → 与平台秒值差两个数量级,
+ * 恒判 false,导致 QQ 的 searchMetadata/searchCover **恒被时长闸门拒**(元数据补全恒空)。
+ */
+function durationOk(songDurationSec: number | null | undefined, intervalSec: any): boolean {
+  const local = Number(songDurationSec) || 0;
   const plat = Number(intervalSec) || 0;
   if (local <= 0 || plat <= 0) return true;
-  return Math.abs(local / 1000 - plat) <= DURATION_TOLERANCE_SEC;
+  return Math.abs(local - plat) <= DURATION_TOLERANCE_SEC;
 }
 
 /** 从 track_info 组装 SongMetadata(只填真的拿到的字段)。 */
@@ -214,6 +222,9 @@ export const tagProviderManifest: PluginManifest = {
   platformLabels: { qq: "QQ音乐" },
   permissions: ["net", "log"],
   defaultEnabled: true,
+  // 内置标签来源:下载期由本插件打上的标签,核心会在落盘后写「标签修复完成标记」,
+  // 后续标签修复命中标记即跳过(外置插件不声明本字段,故其标签不标记)。
+  builtinTagSource: true,
   configSchema: [],
   // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
   i18n: {
@@ -226,7 +237,7 @@ Enriches a song's tags, cover art and lyrics from QQ Music. It declares three ca
 ### How it works
 1. The core walks enabled plugins by capability and calls \`searchMetadata(host, song)\` / \`searchCover(host, song)\` / \`searchLyrics(host, song)\`; first-match-wins;
 2. This plugin searches QQ Music by \`title + artist\` (title only when no artist) via the smartbox suggest endpoint to get candidate songmids;
-3. Candidates are scored by normalized title equality (case/space/punctuation ignored, decorations like \`(Live)\`/\`【】\`/\`feat.\` stripped) plus normalized artist intersection; when \`song.duration\` is provided (in ms) and the platform declares a length, \`|Δ| ≤ 5s\` is required;
+3. Candidates are scored by normalized title equality (case/space/punctuation ignored, decorations like \`(Live)\`/\`【】\`/\`feat.\` stripped) plus normalized artist intersection; when \`song.duration\` is provided (in seconds) and the platform declares a length, \`|Δ| ≤ 5s\` is required;
 4. Track details (track no. / release year / duration / album mid) come from the musicu song-detail endpoint; every missing field is simply left empty — nothing is ever fabricated (e.g. QQ only returns a numeric genre code, so \`genre\` is omitted);
 5. Cover is built from the album mid; lyrics come from the QQ lyric endpoint.
 
@@ -245,7 +256,7 @@ Enriches a song's tags, cover art and lyrics from QQ Music. It declares three ca
    \`searchCover(host, song)\` / \`searchLyrics(host, song)\`,首个可用结果胜出;
 2. 本插件用 \`title + artist\` 搜索 QQ 音乐联想接口(artist 为空时只用 title),拿到候选 songmid;
 3. 候选按「标题归一化相等(忽略大小写/空格/标点,去掉 \`(Live)\`/\`【】\`/\`feat.\` 等装饰)+
-   歌手归一化后交集」判定;若 \`song.duration\` 给了(毫秒)且平台声明了时长,还要求 \`|Δ| ≤ 5s\`;
+   歌手归一化后交集」判定;若 \`song.duration\` 给了(秒)且平台声明了时长,还要求 \`|Δ| ≤ 5s\`;
 4. 轨号 / 年份 / 时长 / 专辑 mid 取自 musicu 歌曲详情接口;拿不到的字段一律不填,
    绝不臆造(如 QQ 的 genre 只给数字码,无风格名,故省略);
 5. 封面由 album mid 拼 CDN;歌词走 QQ 歌词接口。

@@ -126,6 +126,7 @@ function makeDeps(over: AnyDeps = {}): FetchDeps {
     rankCandidates: ((c: Candidate[]) => c) as any,
     searchLyrics: (async () => null) as any,
     searchCover: (async () => null) as any,
+    searchMetadata: (async () => null) as any,
     shouldSkipByCooldown: (() => false) as any,
     lastDownloadAttempt: (() => null) as any,
     recordDownloadAttempt: (() => undefined) as any,

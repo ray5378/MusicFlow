@@ -187,6 +187,11 @@ export interface PluginManifest {
   /** Markdown 文档:功能介绍 + 处理逻辑。内置插件随服务端编写;外置插件在
    *  plugin.json 里可选携带。前端插件详情页渲染(无则按能力自动生成说明)。 */
   documentation?: string;
+  /** 声明「内置标签来源」的 provider(metadataProvider/coverProvider/lyricProvider)。
+   *  核心只认本字段,绝不写死插件名:下载期由它(们)打上的标签会在落盘后写入
+   *  「标签修复完成标记」,后续标签修复命中标记即跳过(文件位置/大小/mtime 未变时)。
+   *  外置插件默认不声明 → 其提供的标签一律不标记(产品定调 2026-10-16)。 */
+  builtinTagSource?: boolean;
   /** Whether the plugin is enabled the first time its row is seeded.
    *
    *  Source plugins default to OFF (they need a baseUrl before they do anything

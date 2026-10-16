@@ -694,6 +694,19 @@ export function initDatabase() {
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
     CREATE INDEX IF NOT EXISTS idx_fetch_jobs_status_created ON fetch_jobs(status, created_at DESC);
+
+    -- 标签修复完成标记(2026-10-16):由内置标签来源插件在下载期打上标签的成品文件,
+    -- 落盘后登记一行;标签修复命中标记且文件未变(fs_path 相同 + size/mtime 一致)
+    -- 即不探针、不联网直接跳过。drizzle 侧镜像见 db/schema.ts 的 tagRepairDone。
+    -- fs_path 主键:下载落盘时即知路径,无需等扫描建 songs 行;文件移动 → 新路径不命中。
+    CREATE TABLE IF NOT EXISTS tag_repair_done (
+      fs_path TEXT PRIMARY KEY,
+      size INTEGER NOT NULL DEFAULT 0,
+      mtime_ms INTEGER NOT NULL DEFAULT 0,
+      src TEXT NOT NULL DEFAULT '',
+      at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
   `);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

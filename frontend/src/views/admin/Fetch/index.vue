@@ -320,6 +320,35 @@
             <el-button size="small" @click="loadTagRepairStatus"><MfIcon name="RefreshCw" />{{ t('admin.fetch.tagRepair.reload') }}</el-button>
           </div>
 
+          <!-- 实时统计：已修复 / 待修复 / 全部 -->
+          <div class="tag-repair-stats">
+            <div class="stat-card">
+              <div class="stat-value">{{ tagRepairStatRepaired }}</div>
+              <div class="stat-label">{{ t('admin.fetch.tagRepair.statRepaired') }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">{{ tagRepairStatPending }}</div>
+              <div class="stat-label">{{ t('admin.fetch.tagRepair.statPending') }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">{{ tagRepairStatTotal }}</div>
+              <div class="stat-label">{{ t('admin.fetch.tagRepair.statTotal') }}</div>
+            </div>
+          </div>
+
+          <!-- 运行中进度条 -->
+          <div v-if="tagRepairStatus.running && tagRepairStatus.progress" class="tag-repair-progress">
+            <div class="progress-head">
+              <span>{{ tagRepairProgressLabel }}</span>
+              <span>{{ tagRepairProgressText }}</span>
+            </div>
+            <el-progress
+              :percentage="tagRepairProgressPercent"
+              :indeterminate="tagRepairProgressIndeterminate"
+              :stroke-width="10"
+            />
+          </div>
+
           <el-form label-position="top" class="tag-repair-form">
             <el-divider content-position="left">{{ t('admin.fetch.tagRepair.settings') }}</el-divider>
             <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.settingsHint') }}</div>
@@ -330,7 +359,21 @@
               <el-form-item :label="t('admin.fetch.tagRepair.intervalHours')">
                 <el-input-number v-model="config.tagRepairIntervalHours" :min="1" :max="8760" controls-position="right" :disabled="!config.tagRepairEnabled" />
               </el-form-item>
+              <el-form-item :label="t('admin.fetch.tagRepair.scopeLabel')">
+                <el-select v-model="config.tagRepairScope" style="width: 100%">
+                  <el-option :label="t('admin.fetch.tagRepair.scopeDownload')" value="download" />
+                  <el-option :label="t('admin.fetch.tagRepair.scopeLossless')" value="lossless" />
+                  <el-option :label="t('admin.fetch.tagRepair.scopeBoth')" value="both" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('admin.fetch.tagRepair.textVariantLabel')">
+                <el-select v-model="config.chineseVariant" style="width: 100%">
+                  <el-option :label="t('admin.fetch.tagRepair.textVariantSimplified')" value="simplified" />
+                  <el-option :label="t('admin.fetch.tagRepair.textVariantTraditional')" value="traditional" />
+                </el-select>
+              </el-form-item>
             </div>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.textVariantHint') }}</div>
             <div class="config-actions">
               <el-button type="primary" :loading="tagRepairSaving" @click="saveTagRepairSettings">{{ t('admin.fetch.tagRepair.save') }}</el-button>
             </div>
@@ -465,6 +508,8 @@ function defaultConfig(): ConfigForm {
     libraryAutoTimeOfDay: "03:00",
     tagRepairEnabled: true,
     tagRepairIntervalHours: 168,
+    tagRepairScope: "both",
+    chineseVariant: "simplified",
   };
 }
 
@@ -473,7 +518,7 @@ const configLoading = ref(false);
 const configSaving = ref(false);
 
 // ==================== 标签缺失修复（2026-10-11；2026-10-16 独立页签 + 双挡位） ====================
-const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, queueSize: 0, running: false, lastResult: null, lastResults: {} });
+const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, scope: "both", queueSize: 0, running: false, lastResult: null, lastResults: {}, stats: { total: 0, pending: 0, repaired: 0 }, progress: null });
 const tagRepairSaving = ref(false);
 const tagRepairBusyQueue = ref(false);
 const tagRepairBusyMedia = ref(false);
@@ -489,6 +534,46 @@ function tagRepairModeLabel(mode?: string): string {
   if (mode === "media") return t("admin.fetch.tagRepair.modeMedia");
   return t("admin.fetch.tagRepair.modeQueue");
 }
+
+// ---------- 实时统计（已修复 / 待修复 / 全部） ----------
+// 已修复口径 = 真正写入修复的 + 无需修/命中下载期完成标记跳过的（两类都算「已完成」）。
+// 累计数 + 本轮进行中的 (fixed + skipped)；运行结束后 progress 归零、stats 已并入，不会重复计。
+const tagRepairStatRepaired = computed(() => {
+  const base = tagRepairStatus.value.stats?.repaired ?? 0;
+  const p = tagRepairStatus.value.progress;
+  return base + (p ? (p.fixed ?? 0) + (p.skipped ?? 0) : 0);
+});
+// 待修复：运行中取「本阶段剩余」（总数 - 已处理）；空闲取 DB 待修候选数。
+const tagRepairStatPending = computed(() => {
+  const p = tagRepairStatus.value.progress;
+  if (tagRepairStatus.value.running && p && p.total > 0) return Math.max(0, p.total - p.checked);
+  return tagRepairStatus.value.stats?.pending ?? 0;
+});
+const tagRepairStatTotal = computed(() => tagRepairStatus.value.stats?.total ?? 0);
+
+// 运行中进度条：scan 阶段为不定长（indeterminate），repair 阶段按 checked/total 显示百分比。
+const tagRepairProgressIndeterminate = computed(() => tagRepairStatus.value.progress?.phase === "scan");
+const tagRepairProgressPercent = computed(() => {
+  const p = tagRepairStatus.value.progress;
+  if (!p || p.total <= 0) return 0;
+  return Math.min(100, Math.round((p.checked / p.total) * 100));
+});
+const tagRepairProgressLabel = computed(() => {
+  const p = tagRepairStatus.value.progress;
+  if (!p) return "";
+  const phase = p.phase === "scan" ? t("admin.fetch.tagRepair.phaseScan") : t("admin.fetch.tagRepair.phaseRepair");
+  return `${tagRepairModeLabel(p.mode)} · ${phase}`;
+});
+const tagRepairProgressText = computed(() => {
+  const p = tagRepairStatus.value.progress;
+  if (!p) return "";
+  return t("admin.fetch.tagRepair.progressText", {
+    checked: p.checked,
+    total: p.total,
+    fixed: p.fixed,
+    skipped: p.skipped ?? 0,
+  });
+});
 
 function formatTagRepairResult(r: NonNullable<TagRepairStatus["lastResult"]>): string {
   return t("admin.fetch.tagRepair.resultLine", {
@@ -536,7 +621,8 @@ async function loadTagRepairStatus() {
 async function runTagRepairMode(mode: TagRepairMode, busy: Ref<boolean>): Promise<void> {
   busy.value = true;
   try {
-    await runTagRepair(mode);
+    // 本次扫描范围沿用当前选择（未保存也即时生效）；保存设置则持久化给定时兜底扫用。
+    await runTagRepair(mode, config.tagRepairScope);
     if (mode === "media") ElMessage.success(t("admin.fetch.tagRepair.mediaStarted"));
     else if (mode === "all") ElMessage.success(t("admin.fetch.tagRepair.allStarted"));
     else ElMessage.success(t("admin.fetch.tagRepair.queueStarted"));
@@ -560,11 +646,13 @@ function onTagRepairQueue(): void {
   void runTagRepairMode("queue", tagRepairBusyQueue);
 }
 
-// 「保存设置」只提交这两个字段，避免与配置页签的整体保存互相干扰。
+// 「保存设置」与配置页签共用同一份覆盖项存储，后端 PUT /config 为**整体替换**语义，
+// 故这里必须提交完整配置字段（含 chineseVariant），否则会把其它覆盖项（如字形、全库下载开关）
+// 一并清空回默认值（2026-10-16 修正）。
 async function saveTagRepairSettings(): Promise<void> {
   tagRepairSaving.value = true;
   try {
-    await updateFetchConfig({ tagRepairEnabled: config.tagRepairEnabled, tagRepairIntervalHours: config.tagRepairIntervalHours });
+    await updateFetchConfig(buildConfigPayload());
     ElMessage.success(t("admin.fetch.tagRepair.saved"));
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.saveFailed")));
@@ -617,6 +705,8 @@ async function loadConfig() {
     if (!merged.libraryAutoTimeOfDay) merged.libraryAutoTimeOfDay = "03:00";
     if (merged.tagRepairEnabled == null) merged.tagRepairEnabled = true;
     if (merged.tagRepairIntervalHours == null) merged.tagRepairIntervalHours = 168;
+    if (merged.tagRepairScope !== "download" && merged.tagRepairScope !== "lossless" && merged.tagRepairScope !== "both") merged.tagRepairScope = "both";
+    if (merged.chineseVariant !== "traditional") merged.chineseVariant = "simplified";
     Object.assign(config, merged);
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
@@ -633,14 +723,19 @@ async function loadSources() {
   }
 }
 
+// 组装提交给 PUT /config 的完整覆盖项：转码「跟随源」= 省略该键（不传 null / 空串）。
+// 后端为整体替换语义，两个保存入口（配置页签 / 标签修复设置）都必须提交完整字段集。
+function buildConfigPayload(): Record<string, unknown> {
+  const payload: Record<string, unknown> = { ...config };
+  if (payload.transcodeSampleRateHz === "follow") delete payload.transcodeSampleRateHz;
+  if (payload.transcodeBitDepth === "follow") delete payload.transcodeBitDepth;
+  return payload;
+}
+
 async function saveConfig() {
   configSaving.value = true;
   try {
-    const payload: any = { ...config };
-    // 「跟随源」= 省略该键(不传 null / 空串)
-    if (payload.transcodeSampleRateHz === "follow") delete payload.transcodeSampleRateHz;
-    if (payload.transcodeBitDepth === "follow") delete payload.transcodeBitDepth;
-    await updateFetchConfig(payload);
+    await updateFetchConfig(buildConfigPayload());
     ElMessage.success(t("admin.fetch.config.saved"));
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
@@ -1030,11 +1125,18 @@ watch(activeTab, (v) => {
 .tag-repair-alert { margin: 4px 0 12px; }
 .tag-repair-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 16px; }
 .tag-repair-write-hint { margin-top: 8px; }
+.tag-repair-stats { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 12px; margin: 4px 0 16px; max-width: 560px; }
+.stat-card { background: var(--fnos-bg-elevated, rgba(255, 255, 255, 0.04)); border: 1px solid var(--fnos-border, rgba(255, 255, 255, 0.1)); border-radius: 8px; padding: 12px 16px; text-align: center; }
+.stat-value { font-size: 26px; font-weight: 700; line-height: 1.2; }
+.stat-label { margin-top: 4px; font-size: 12px; color: var(--fnos-text-tertiary); }
+.tag-repair-progress { margin: 0 0 16px; max-width: 560px; }
+.progress-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 12px; color: var(--fnos-text-tertiary); }
 
 @media (max-width: 768px) {
   .admin-fetch { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
   .config-grid { grid-template-columns: 1fr; }
+  .tag-repair-stats { grid-template-columns: repeat(3, 1fr); max-width: 100%; }
   .jobs-filters { width: 100%; }
   /* 详情弹窗手机端:统计行距收紧、路径等长文本可断行,防压叠 */
   .detail-head { flex-direction: column; align-items: flex-start; }
