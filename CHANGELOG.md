@@ -2,6 +2,33 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.24] - 2026-10-17
+
+### Feat
+
+- **内置在线标签补全插件（`tag-provider`，QQ 音乐）**：新增内置插件，提供 `metadataProvider` / `coverProvider` / `lyricProvider` 三类能力，默认启用。下载 / 洗版写标签时**只补缺失字段**（标题 / 歌手 / 专辑 / 专辑艺术家 / 轨号 / 年份 / 风格 / 封面 / 歌词），已有值一律不覆盖。`providers` 新增 `searchMetadata` 首匹配分发；Plugins 页同步展示 metadata 类型与能力标签。
+- **标签修复升级为三挡位 + 独立子页**：`queue`（事件队列，下载终态入队按退避重试）/ `media`（第一挡·按 DB 预筛缺歌词/封面/专辑）/ `all`（第二挡·逐首精探文件头，**补齐全部缺失标签**）。前端 admin/Fetch 独立出「标签修复」子页（自动修复设置 + 两挡位卡片 + 待修队列）；`POST /v1/fetch/tag-repair/run` 收 `{mode, scope}`，`GET` 返回分挡位 `lastResults`。
+- **中文简繁字形统一**：新增 `utils/chineseConv`（OpenCC 派生 T2S/S2T 字符 + 词组表）。所有**由 provider 提供的文本**（写入文件的 标题 / 歌手 / 专辑 / 专辑艺术家 / 风格 / 歌词，含在线歌词与批量回填）按 `chineseVariant`（默认 `simplified` 简体）输出，并同步回写成品文件名以保持一致；设置项落在 admin/Fetch，zh/en i18n 同步补齐。
+
+### Fix
+
+- **时长单位错配（核心 bug）**：内置 `tag-provider` 的 `durationOk` 把核心传入的**秒**当**毫秒**除以 1000，与平台秒值差两个数量级 → QQ 的 `searchMetadata` / `searchCover` 恒判不匹配，「元数据全部写不进去」（仅歌词正常）。统一为秒（±5s 容差）。
+- **碟号纪律（产品定调）**：成品文件**不写也不留** `DISCNUMBER` / `DISCTOTAL`。ffmpeg 缺省继承源文件全部 metadata，不少源自带碟号甚至垃圾值（实测成品曾出现 `DISCNUMBER="18439392929"`），故 `buildTagArgs` 不但不写 `disc`，还追加 `-metadata disc=` 显式清空（同时删掉 Vorbis 的 DISCNUMBER/DISCTOTAL 与 ID3v2.3 的 TPOS，且不影响其余标签继承；不可改用 `-map_metadata -1`，会破坏修复依赖的继承语义）。同步移除下载期 / 修复期的碟号采集；「内嵌无碟号」不计为缺失、绝不触发修复。
+- **风格 / 流派补全**：`tagProvider` 新增 `pickGenre()`，从 QQ `req.data.info.genre.content[].value` 取可读风格名（同级的 `track_info.genre` 只是数字码，不可用），多值以 `/` 连接后写入。
+- **标签重写会静默丢弃已有内嵌封面（真实链路实测暴露）**：`buildTagArgs` 恒用 `-map 0:a` 只取音频流，重写标签时把源文件已有封面（FLAC 的 vorbis 图片块 / MP3 的 ID3 APIC）一并丢掉。危险性：库内大量老文件缺 `genre`（本轮之前从不写 genre），一旦跑修复扫描会**批量丢封面**。修复：新增 `keepSourceCover` 开关，无新封面时用 `-map 0:v?` 保留源图 —— 修复路径恒 `true`，下载路径按 `embedCover !== false`（`embedCover=false` 仍明确不保留）。补 2 例单测（含真实 ffmpeg 造「带封面 flac」的回归用例）。
+- **标签修复范围与统计口径**：新增 `tagRepairScope`（download / lossless / both，默认 both；手动 run 可按请求覆盖；`inScopeRoots` 硬门禁只碰两个下载目录，绝不碰 WebDAV 云盘库）；统计口径补 `skipped`（已修复·跳过）；`mode=all` 去重计数。
+- **标签修复完成标记**：新增 `tag_repair_done` 表 + `tagRepairMarker`。下载期由声明 `manifest.builtinTagSource` 的内置标签来源插件打标的成品，落盘后登记（fs_path + size + mtime）；修复扫描命中且文件未变 → 不探针、不联网直接跳过。外置插件不标记 → 其标签一律仍会被修复补齐。
+- **前端配置保存丢字段**：`PUT /v1/fetch/config` 为整体替换语义，原只提交 3 个字段会把字形 / 范围等覆盖项清空回默认；改为提交**完整**配置对象。
+
+### 实测（真实数据 · 真实链路 · 240 生产容器 musicflow）
+
+- **下载自动打标签三条分支 + 洛雪音源（`lx-source`）全覆盖**：分支 A（`go-music-dl` 搜索 + 取链）落 `genre=R&B、track=8、year=2016`；分支 B（纯 stream 源按平台原生 ID 直取，`lx-source`）落 `genre=Pop、track=2、year=2015`；分支 C（桥接 `lx-source` → 兜底 `go-music-dl`）落 `genre=Folk、track=5、year=2013`。全部 `disc=null`、封面 1、歌词 1。
+- **洛雪音源探针**：`netease`（wy）脚本链路可用（真实下载成功）；`kugou`（kg，hash）/ `kuwo`（kw，rid）返回 `HTTP_404`，为上游脚本可用性问题（非本项目缺陷）。
+- **简繁字形**：简体 / 繁体两条链路成品文件名与内嵌标签同步转换（「后来」/「後來」、「收获」/「收穫」）。
+- **标签修复 `mode=all scope=both`**：命中完成标记 6 首跳过（不探针、不联网）、未标记 1 首精确补齐 `genre/track/year` 且**封面保留**（该用例即本轮封面保留修复的回归点）；修复后不新增、不清空碟号。
+- **边界语义**：`tag-provider` 关闭时下载的成品无完成标记（仍可被修复补齐）；`embedCover=false` 时成品封面 0（符合用户关闭意图）。
+- 落地前后各做一次审查（方向正确性 + 改动覆盖性）：三处 `writeTags` 调用点全部覆盖，无遗漏、无过度改动。
+
 ## [4.6.23] - 2026-10-16
 
 ### Fix

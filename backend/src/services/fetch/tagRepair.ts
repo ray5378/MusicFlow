@@ -15,9 +15,11 @@
 //     文件（绝不写空值/占位图）。
 //   - 专辑：文件内嵌 album 为空而 DB 行有声明值（下载时 provider 元数据入库）→
 //     直接用 DB 值回写，无需网络；DB 也为空才回落 searchMetadata。
-//   - 其余标签（title/artist/albumArtist/track/disc/year/genre）：一次 searchMetadata
+//   - 其余标签（title/artist/albumArtist/track/year/genre）：一次 searchMetadata
 //     拿到全部，**只补缺失项**、只写真拿到值的字段；失败只告警不抛。title/artist 仅在
-//     内嵌缺失时补（避免覆盖文件里已有的值）。
+//     内嵌缺失时补（避免覆盖文件里已有的值）。**碟号（disc）不在此列**：成品文件既不写
+//     也不留 DISCNUMBER/DISCTOTAL（产品定调 2026-10-17，见 tagWriter 文件头【碟号纪律】），
+//     故「内嵌无碟号」不算缺失、绝不触发修复。
 //   写入复用 tagWriter 的 tagtmp+rename 原子语义，失败不破坏原文件。
 //   范围硬锁定两个下载目录，绝不碰 WebDAV 云盘库。
 //
@@ -86,7 +88,7 @@ export interface TagRepairResult {
   coverFixed: number;
   lyricFixed: number;
   albumFixed: number;
-  /** 元数据补全命中次数（本次有 title/artist/albumArtist/track/disc/year/genre 被写入）。 */
+  /** 元数据补全命中次数（本次有 title/artist/albumArtist/track/year/genre 被写入）。 */
   metaFixed: number;
   /** 探测过但 provider 拿不到（真没有）——不动文件。 */
   unobtainable: number;
@@ -270,7 +272,6 @@ interface EmbeddedTags {
   artist: boolean;
   albumArtist: boolean;
   track: boolean;
-  disc: boolean;
   year: boolean;
   genre: boolean;
 }
@@ -288,7 +289,6 @@ async function probeEmbedded(fsPath: string): Promise<EmbeddedTags | null> {
       artist: Boolean(String(c.artist ?? "").trim()),
       albumArtist: Boolean(String(c.albumartist ?? "").trim()),
       track: Number(c.track?.no ?? 0) > 0,
-      disc: Number(c.disk?.no ?? 0) > 0,
       year: Number(c.year ?? 0) > 0,
       genre: Array.isArray(c.genre) && c.genre.some((g) => String(g || "").trim()),
     };
@@ -358,7 +358,7 @@ export interface RepairSongOutcome {
   cover: boolean;
   lyric: boolean;
   album: boolean;
-  /** 本次是否有 title/artist/albumArtist/track/disc/year/genre 被写入。 */
+  /** 本次是否有 title/artist/albumArtist/track/year/genre 被写入。 */
   meta: boolean;
 }
 
@@ -390,12 +390,12 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   const needCover = !embedded.cover;
   const needLyric = !embedded.lyric && !row.has_lyrics;
   const needAlbum = !embedded.album && Boolean(dbAlbum); // DB 声明值兜底，无需网络
-  // 元数据可补的缺失维度：专辑（DB 也为空时才需网络）/ 专辑艺术家 / 轨 / 碟 / 年 / 流派。
+  // 元数据可补的缺失维度：专辑（DB 也为空时才需网络）/ 专辑艺术家 / 轨 / 年 / 流派。
+  // （碟号不参与缺失判定：成品本就不带碟号，见文件头说明。）
   const needMeta =
     (!embedded.album && !dbAlbum) ||
     !embedded.albumArtist ||
     !embedded.track ||
-    !embedded.disc ||
     !embedded.year ||
     !embedded.genre;
   if (!needCover && !needLyric && !needAlbum && !needMeta) {
@@ -463,7 +463,8 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
     }
   }
 
-  // 元数据补全：一次调用拿全部（title/artist/albumArtist/track/disc/year/genre）。
+  // 元数据补全：一次调用拿全部（title/artist/albumArtist/track/year/genre）。碟号不采集不写
+  // （见文件头【碟号纪律】）。
   // 专辑仅在 DB 也为空时才用元数据值（DB 优先）；title/artist 仅在内嵌缺失时补，避免覆盖。
   // 整体 try/catch：拿不到/报错只告警，不让整首失败，也不改动文件。
   if (needMeta) {
@@ -477,10 +478,6 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
         }
         if (meta.track) {
           tags.track = meta.track;
-          metaWrote = true;
-        }
-        if (meta.disc) {
-          tags.disc = meta.disc;
           metaWrote = true;
         }
         if (meta.year !== undefined && meta.year !== null) {
@@ -519,12 +516,14 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   // 只在真拿到值时才写 —— tagWriter 原子写（tagtmp+rename），失败抛 FetchTagError。
   // TAG_FAILED 短延迟重试 1 次，吸收 NAS 存储层瞬时抖动；原文件保证未被破坏，重试安全。
   try {
-    await writeTags(fsPath, tags);
+    // keepSourceCover：本次不换封面（needCover=false）时必须保留源文件已有封面，
+    // 否则「补 genre/track 等缺失标签」的重写会把已有封面一并丢掉（2026-10-17 实测）。
+    await writeTags(fsPath, tags, { keepSourceCover: true });
   } catch (e) {
     if (!(e instanceof FetchTagError) || e.code !== "TAG_FAILED") throw e;
     log.warn(`写标签失败，${TAG_WRITE_RETRY_DELAY_MS}ms 后重试一次: song=${songId}`);
     await new Promise((resolve) => setTimeout(resolve, TAG_WRITE_RETRY_DELAY_MS));
-    await writeTags(fsPath, tags);
+    await writeTags(fsPath, tags, { keepSourceCover: true });
   }
 
   if (gotLyric) {
@@ -692,8 +691,9 @@ export async function sweepTagRepair(
       if (fsPath && inScopeRoots(fsPath, cfg, dirScope)) inRoot.push({ id: r.id, fsPath });
     }
 
-    // ① 文件头精探（只读）：封面/歌词/专辑/专辑艺术家/轨/碟/年/流派任一缺失即候选
+    // ① 文件头精探（只读）：封面/歌词/专辑/专辑艺术家/轨/年/流派任一缺失即候选
     //    （album 有 DB 值兜底、无需网络也能修；其余缺失回落 searchMetadata）。
+    //    碟号不参与缺失判定（成品本就不带碟号）。
     progressPhase("scan", inRoot.length);
     let probed = 0;
     for (const { id, fsPath } of inRoot) {
@@ -712,7 +712,6 @@ export async function sweepTagRepair(
           !embedded.album ||
           !embedded.albumArtist ||
           !embedded.track ||
-          !embedded.disc ||
           !embedded.year ||
           !embedded.genre)
       ) {

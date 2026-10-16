@@ -471,6 +471,9 @@ export interface SongMetadata {
   album?: string;
   track?: number;
   trackTotal?: number;
+  /** 碟号 / 总碟数：核心**已不再写入成品**（成品文件不留 DISCNUMBER/DISCTOTAL，
+   *  产品定调 2026-10-17，见 services/fetch/tagWriter.ts 文件头【碟号纪律】）；
+   *  字段保留仅作 provider 契约兼容，核心会忽略返回值。 */
   disc?: number;
   discTotal?: number;
   year?: number | string;

@@ -12,10 +12,17 @@
 //      flac 不能加这个参数（它是 Vorbis Comment，不是 ID3）。
 //
 // 实测回读能力（230，music-metadata 11.14.0 读回，见本轮实测记录）：
-//   - mp3：title/artist/album/albumartist/track(no,of)/disc(no,of)/genre/year/封面 可回读；
+//   - mp3：title/artist/album/albumartist/track(no,of)/genre/year/封面 可回读；
 //          **comment 与 lyrics 回读不到**（ID3v2.3 下 ffmpeg 写入但 music-metadata 未映射）
 //          ⇒ 仍然写入（文件里有），但只进 warnings，不作为成功依据。
 //   - flac：以上全部可回读，**外加 lyrics**（`-metadata lyrics=` → common.lyrics）。
+//
+// 【碟号纪律（产品定调 2026-10-17）】成品文件**不写也不留** DISCNUMBER/DISCTOTAL：
+// ffmpeg 缺省继承源文件的全部 metadata，而不少源文件自带碟号（实测 240 成品曾出现
+// `DISCNUMBER="18439392929"` 这类垃圾值），故本模块不但不写 disc，还要**显式清空**它
+// ——`-metadata disc=`（空值）实测可同时删除 Vorbis 的 DISCNUMBER/DISCTOTAL 与
+// ID3v2.3 的 TPOS（不留空帧），且不影响其余标签的继承。注意：不能改用
+// `-map_metadata -1`（会破坏 tagRepair 依赖的「继承保留既有标签」语义）。
 import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,10 +46,6 @@ export interface SongTags {
   track?: number;
   /** 总轨数（与 track 一起写成 `n/total`） */
   trackTotal?: number;
-  /** 碟号 */
-  disc?: number;
-  /** 总碟数 */
-  discTotal?: number;
   year?: number | string;
   genre?: string;
   comment?: string;
@@ -128,6 +131,8 @@ export function buildTagArgs(opts: {
   container?: string;
   tags: SongTags;
   coverPath?: string;
+  /** 未提供新封面时是否保留源文件里已有的封面（默认 false=丢弃，见下方映射注释）。 */
+  keepSourceCover?: boolean;
 }): string[] {
   const args: string[] = [
     "-y", "-hide_banner", "-loglevel", "error",
@@ -136,7 +141,15 @@ export function buildTagArgs(opts: {
   if (opts.coverPath) args.push("-i", opts.coverPath);
   // 只取源文件的音频流（源里若已有封面，不重复带过去，避免双封面）。
   args.push("-map", "0:a");
-  if (opts.coverPath) args.push("-map", "1:v");
+  if (opts.coverPath) {
+    args.push("-map", "1:v");
+  } else if (opts.keepSourceCover) {
+    // 不给新封面但要求保留源图：带上源的图像流（`?` = 可选映射，源无图像流也不报错）。
+    // 🔴 2026-10-17 240 真实链路实测教训：只映射 `0:a` 会让**已有的内嵌封面被静默丢弃**
+    // （音乐库里的成品文件因缺 genre 被修复重写时封面一并丢失）。故修复/下载两条写入路径
+    // 在「本次不换封面」时必须显式保留源封面。
+    args.push("-map", "0:v?");
+  }
   args.push("-c", "copy");
   // mp3 专属：写 ID3v2.3（车机/DLNA 兼容）。flac 是 Vorbis Comment，不加。
   if (opts.container === "mp3") args.push("-id3v2_version", "3");
@@ -153,9 +166,8 @@ export function buildTagArgs(opts: {
   if (t.track !== undefined && t.track > 0) {
     put("track", t.trackTotal && t.trackTotal > 0 ? `${t.track}/${t.trackTotal}` : String(t.track));
   }
-  if (t.disc !== undefined && t.disc > 0) {
-    put("disc", t.discTotal && t.discTotal > 0 ? `${t.disc}/${t.discTotal}` : String(t.disc));
-  }
+  // 碟号纪律：**永不写**，且显式清空继承来的碟号（见文件头【碟号纪律】）。
+  args.push("-metadata", "disc=");
   // ffmpeg 认 `date`（ID3v2.3 下自动落成 TYER/TDAT，music-metadata 回读为 common.year）。
   put("date", t.year === undefined || t.year === null ? undefined : String(t.year));
   put("genre", t.genre);
@@ -233,7 +245,7 @@ function materializeCover(cover: Buffer | string | undefined, tag: string): stri
 export async function writeTags(
   srcPath: string,
   tags: SongTags,
-  opts: { dstPath?: string; timeoutMs?: number } = {},
+  opts: { dstPath?: string; timeoutMs?: number; keepSourceCover?: boolean } = {},
 ): Promise<WriteTagsResult> {
   const target = opts.dstPath || srcPath;
   const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
@@ -267,7 +279,7 @@ export async function writeTags(
   if (coverPath && coverPath.includes("mf-tag-")) coverDir = join(coverPath, "..");
 
   try {
-    const args = buildTagArgs({ src: srcPath, out: tmp, container, tags, coverPath });
+    const args = buildTagArgs({ src: srcPath, out: tmp, container, tags, coverPath, keepSourceCover: opts.keepSourceCover });
     log.info("写标签", { srcPath, target, container, hasCover: !!coverPath });
     const r = await runFfmpeg(args, timeoutMs);
     if (r.timedOut) {

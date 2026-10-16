@@ -5,11 +5,17 @@
 // 首个返回可用匹配的 provider 胜出。本插件一次性覆盖「标签 + 封面 + 歌词」三类能力。
 //
 // 数据源:**仅 QQ 音乐**。用 smartbox 联想搜索拿 songmid → 命中标题/歌手候选,
-// 再用 musicu 详情取轨号/年份/时长/专辑,封面由 album.mid 拼 CDN,歌词走 lyric 接口。
+// 再用 musicu 详情取轨号/年份/时长/专辑/风格,封面由 album.mid 拼 CDN,歌词走 lyric 接口。
 //   - 所有 HTTP 均走 host.http(尊重系统代理),带 UA + 平台 Referer;
 //   - 每个请求 try/catch + AbortController 超时(10s),单次尝试、绝不重试循环;
 //   - 任何情况都不抛异常,拿不到就返回 null;
-//   - 拿不到的字段一律不填(绝不臆造 —— 尤其 genre:QQ 只给数字码、无风格名,故省略)。
+//   - 拿不到的字段一律不填(绝不臆造 —— 例如风格只在详情接口的**同级 info 块**
+//     `info.genre.content[].value` 给出可读名时才用;`track_info.genre` 只是数字码、
+//     与分类 id 对不上,不可靠,一律忽略)。
+//
+// 【2026-10-17 修正】原先只读 `req.data.track_info`，于是误判「QQ 无风格名」而省略 genre；
+// 实测 `req.data.info.genre.content[].value` 直接给可读风格（如「告白气球」= "R&B"、
+// 「晴天」= "Pop"），故本插件改为从 info 块取风格并写入。
 
 import type {
   CoverProviderPlugin,
@@ -64,8 +70,13 @@ async function qqSearch(host: PluginHost, title: string, artist: string): Promis
   return Array.isArray(list) ? list : [];
 }
 
-/** 歌曲详情(musicu.fcg):返回 track_info(含 album.mid / index_album / time_public / interval)。 */
-async function qqSongDetail(host: PluginHost, mid: string): Promise<any> {
+/**
+ * 歌曲详情(musicu.fcg)：返回 `{ track, info }`。
+ *   - `track` = `req.data.track_info`：专辑 mid / 时长 / 轨号 / 年份等；
+ *   - `info`  = `req.data.info`：**与 track_info 同级的分类信息块**，其中
+ *     `info.genre.content[].value` 是**可读风格名**（如 "R&B"、"Pop"、"民谣"）。
+ */
+async function qqSongDetail(host: PluginHost, mid: string): Promise<{ track: any; info: any } | null> {
   const body = JSON.stringify({
     comm: { ct: 24, cv: 0 },
     req: {
@@ -79,7 +90,19 @@ async function qqSongDetail(host: PluginHost, mid: string): Promise<any> {
     headers: { Referer: "https://y.qq.com/", "Content-Type": "application/json" },
     body,
   });
-  return data?.req?.data?.track_info || null;
+  const d = data?.req?.data;
+  if (!d?.track_info) return null;
+  return { track: d.track_info, info: d.info || {} };
+}
+
+/** 从 `req.data.info.genre.content[].value` 取**可读**风格名（多个用 `/` 连接）；取不到返回 undefined。 */
+function pickGenre(info: any): string | undefined {
+  const arr = info?.genre?.content;
+  if (!Array.isArray(arr)) return undefined;
+  const names = arr
+    .map((x: any) => (typeof x?.value === "string" ? x.value.trim() : ""))
+    .filter(Boolean);
+  return names.length ? names.join("/") : undefined;
 }
 
 /** 歌词:返回 LRC 文本(某些情况下可能仍是 base64,做一次解码兜底)。 */
@@ -163,8 +186,9 @@ function durationOk(songDurationSec: number | null | undefined, intervalSec: any
   return Math.abs(local - plat) <= DURATION_TOLERANCE_SEC;
 }
 
-/** 从 track_info 组装 SongMetadata(只填真的拿到的字段)。 */
-function buildMetadata(t: any): SongMetadata | null {
+/** 从 `{track,info}` 组装 SongMetadata(只填真的拿到的字段)。 */
+function buildMetadata(detail: { track: any; info: any }): SongMetadata | null {
+  const t: any = detail?.track;
   const meta: SongMetadata = {};
   const name = t?.name || t?.title;
   if (name) meta.title = String(name);
@@ -179,10 +203,6 @@ function buildMetadata(t: any): SongMetadata | null {
   const track = Number(t?.index_album);
   if (Number.isFinite(track) && track > 0) meta.track = track;
 
-  // 碟号:QQ 只给 index_cd(0 基)。拿不到明确的多碟信息时保守省略,绝不臆造。
-  const cd = Number(t?.index_cd);
-  if (Number.isFinite(cd) && cd > 0) meta.disc = cd + 1;
-
   // 年份:优先 track_info.time_public,兜底 album.time_public(形如 "2017-02-22")
   if (t?.time_public) {
     const y = parseYear(t.time_public);
@@ -196,7 +216,12 @@ function buildMetadata(t: any): SongMetadata | null {
   const dur = Number(t?.interval);
   if (Number.isFinite(dur) && dur > 0) meta.duration = dur;
 
-  // genre 省略:QQ 返回的是数字码(如 1),非风格名,映射未知 → 不填。
+  // 风格:取自**同级 info 块**的可读名(info.genre.content[].value);track_info.genre
+  // 只是数字码,与分类 id 对不上,不用。取不到即不填(绝不臆造)。
+  const genre = pickGenre(detail?.info);
+  if (genre) meta.genre = genre;
+
+  // 碟号不返回:成品文件不留 DISCNUMBER/DISCTOTAL(产品定调 2026-10-17)。
   meta.platform = "qq";
   // 除 platform 外没有任何有效字段时不返回空壳。
   return Object.keys(meta).length > 1 ? meta : null;
@@ -216,7 +241,7 @@ export const tagProviderManifest: PluginManifest = {
   name: "在线标签补全",
   version: "1.0.0",
   type: "metadata",
-  description: "从 QQ 音乐补全歌曲标签(轨号/年份/时长/专辑等)、封面与歌词",
+  description: "从 QQ 音乐补全歌曲标签(轨号/年份/时长/专辑/风格等)、封面与歌词",
   capabilities: ["metadataProvider", "coverProvider", "lyricProvider"],
   platforms: ["qq"],
   platformLabels: { qq: "QQ音乐" },
@@ -230,7 +255,7 @@ export const tagProviderManifest: PluginManifest = {
   i18n: {
     en: {
       name: "Online Tag Filler",
-      description: "Enrich song tags (track/year/duration/album...), cover art and lyrics from QQ Music",
+      description: "Enrich song tags (track/year/duration/album/genre...), cover art and lyrics from QQ Music",
       documentation: `### Features
 Enriches a song's tags, cover art and lyrics from QQ Music. It declares three capabilities at once — \`metadataProvider\`, \`coverProvider\` and \`lyricProvider\` — so the core's tag-repair / cover / lyrics pipelines all use this plugin.
 
@@ -238,7 +263,7 @@ Enriches a song's tags, cover art and lyrics from QQ Music. It declares three ca
 1. The core walks enabled plugins by capability and calls \`searchMetadata(host, song)\` / \`searchCover(host, song)\` / \`searchLyrics(host, song)\`; first-match-wins;
 2. This plugin searches QQ Music by \`title + artist\` (title only when no artist) via the smartbox suggest endpoint to get candidate songmids;
 3. Candidates are scored by normalized title equality (case/space/punctuation ignored, decorations like \`(Live)\`/\`【】\`/\`feat.\` stripped) plus normalized artist intersection; when \`song.duration\` is provided (in seconds) and the platform declares a length, \`|Δ| ≤ 5s\` is required;
-4. Track details (track no. / release year / duration / album mid) come from the musicu song-detail endpoint; every missing field is simply left empty — nothing is ever fabricated (e.g. QQ only returns a numeric genre code, so \`genre\` is omitted);
+4. Track details (track no. / release year / duration / album mid) come from the musicu song-detail endpoint; the **genre** name is read from the sibling \`info.genre.content[].value\` block (a human-readable name such as "R&B"/"Pop"), while \`track_info.genre\` is only a numeric code and is ignored; every missing field is simply left empty — nothing is ever fabricated;
 5. Cover is built from the album mid; lyrics come from the QQ lyric endpoint.
 
 ### Notes
@@ -257,8 +282,9 @@ Enriches a song's tags, cover art and lyrics from QQ Music. It declares three ca
 2. 本插件用 \`title + artist\` 搜索 QQ 音乐联想接口(artist 为空时只用 title),拿到候选 songmid;
 3. 候选按「标题归一化相等(忽略大小写/空格/标点,去掉 \`(Live)\`/\`【】\`/\`feat.\` 等装饰)+
    歌手归一化后交集」判定;若 \`song.duration\` 给了(秒)且平台声明了时长,还要求 \`|Δ| ≤ 5s\`;
-4. 轨号 / 年份 / 时长 / 专辑 mid 取自 musicu 歌曲详情接口;拿不到的字段一律不填,
-   绝不臆造(如 QQ 的 genre 只给数字码,无风格名,故省略);
+4. 轨号 / 年份 / 时长 / 专辑 mid 取自 musicu 歌曲详情接口;**风格**取自与 track_info
+   同级的 \`info.genre.content[].value\`(可读名,如 "R&B"/"Pop"),而 track_info.genre
+   只是数字码、一律忽略;拿不到的字段一律不填,绝不臆造;
 5. 封面由 album mid 拼 CDN;歌词走 QQ 歌词接口。
 
 ### 说明
@@ -287,7 +313,7 @@ export const tagProviderPlugin: MetadataProviderPlugin & CoverProviderPlugin & L
         if (!artistMatches(c?.singer || c?.singername, artist)) continue;
         const detail = await qqSongDetail(host, mid);
         if (!detail) continue;
-        if (!durationOk(song?.duration, detail.interval)) continue;
+        if (!durationOk(song?.duration, detail.track?.interval)) continue;
         const meta = buildMetadata(detail);
         if (meta) return meta;
       }
@@ -312,8 +338,8 @@ export const tagProviderPlugin: MetadataProviderPlugin & CoverProviderPlugin & L
         if (!artistMatches(c?.singer || c?.singername, artist)) continue;
         const detail = await qqSongDetail(host, mid);
         if (!detail) continue;
-        if (!durationOk(song?.duration, detail.interval)) continue;
-        const albumMid = detail?.album?.mid;
+        if (!durationOk(song?.duration, detail.track?.interval)) continue;
+        const albumMid = detail.track?.album?.mid;
         if (!albumMid) continue;
         return { url: `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` };
       }

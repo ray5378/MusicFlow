@@ -36,7 +36,7 @@ beforeAll(() => {
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));
 
 describe("writeTags — mp3", () => {
-  it("写入后可被 music-metadata 读回(含中文/轨号/碟号/年份)", async () => {
+  it("写入后可被 music-metadata 读回(含中文/轨号/年份),碟号须为空", async () => {
     const r = await writeTags(MP3, {
       title: "中文标题",
       artist: "歌手A",
@@ -44,8 +44,6 @@ describe("writeTags — mp3", () => {
       albumArtist: "AA",
       track: 3,
       trackTotal: 12,
-      disc: 1,
-      discTotal: 2,
       year: 2024,
       genre: "Pop",
       comment: "备注C",
@@ -58,8 +56,9 @@ describe("writeTags — mp3", () => {
     expect(m.common.albumartist).toBe("AA");
     expect(m.common.track.no).toBe(3);
     expect(m.common.track.of).toBe(12);
-    expect(m.common.disk.no).toBe(1);
-    expect(m.common.disk.of).toBe(2);
+    // 碟号纪律(2026-10-17)：成品不写也不留 DISCNUMBER/DISCTOTAL，故这里必须为空
+    expect(m.common.disk?.no ?? null).toBeNull();
+    expect(m.common.disk?.of ?? null).toBeNull();
     expect(m.common.year).toBe(2024);
     expect(m.common.genre).toContain("Pop");
   }, TMO.timeout);
@@ -70,7 +69,44 @@ describe("writeTags — mp3", () => {
     expect(args[args.indexOf("-id3v2_version") + 1]).toBe("3");
     const flacArgs = buildTagArgs({ src: "in.flac", out: "out.flac", container: "flac", tags: { title: "x" } });
     expect(flacArgs).not.toContain("-id3v2_version");
+    // 碟号纪律：无论 mp3/flac 都必须显式清空 disc(空值)，永不写具体碟号
+    expect(args).toContain("disc=");
+    expect(flacArgs).toContain("disc=");
   });
+
+  it("封面映射:有新区封面只取新图,无新封面时由 keepSourceCover 决定是否保留源图", () => {
+    const withCover = buildTagArgs({ src: "in.flac", out: "o.flac", container: "flac", tags: {}, coverPath: "/tmp/c.jpg" });
+    expect(withCover).toContain("1:v");
+    expect(withCover).not.toContain("0:v?");
+    const keep = buildTagArgs({ src: "in.flac", out: "o.flac", container: "flac", tags: {}, keepSourceCover: true });
+    expect(keep).toContain("0:v?");
+    expect(keep).not.toContain("1:v");
+    const drop = buildTagArgs({ src: "in.flac", out: "o.flac", container: "flac", tags: {} });
+    expect(drop).not.toContain("0:v?");
+    expect(drop).not.toContain("1:v");
+  });
+
+  it("源文件自带封面 → keepSourceCover 保留,否则丢弃(2026-10-17 实测缺陷回归)", async () => {
+    const f = join(DIR, "keepcover.flac");
+    const cov = join(DIR, "keep.jpg");
+    ff(["-y", "-f", "lavfi", "-i", "color=c=green:s=64x64:d=1", "-frames:v", "1", cov]);
+    // 造「有封面但缺 genre」的成品：纯音频 + 附加图
+    ff([
+      "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-i", cov, "-map", "0:a", "-map", "1:v", "-c:a", "flac", "-c:v", "mjpeg",
+      "-disposition:v:0", "attached_pic", "-metadata", "title=A", f,
+    ]);
+    expect((((await parseFile(f)).common.picture) || []).length).toBe(1);
+    // 修复路径语义：补缺失标签时必须保住已有封面
+    await writeTags(f, { genre: "Pop", track: 3 }, { keepSourceCover: true });
+    const after = await parseFile(f);
+    expect((after.common.picture || []).length).toBe(1);
+    expect(after.common.genre).toContain("Pop");
+    expect(after.common.track.no).toBe(3);
+    // 反向：不保留时封面被丢弃(与 embedCover=false 语义一致)
+    await writeTags(f, { comment: "x" });
+    expect((((await parseFile(f)).common.picture) || []).length).toBe(0);
+  }, TMO.timeout);
 
   it("封面写入后探针 hasCover === true", async () => {
     const f = join(DIR, "cov.mp3");
@@ -112,6 +148,19 @@ describe("writeTags — flac", () => {
     copyFileSync(MP3, f);
     const r = await writeTags(f, { title: "x", lyric: "第一行" });
     expect(r.warnings.join("|")).toContain("歌词");
+  }, TMO.timeout);
+
+  it("源文件自带碟号 → 写入后被清空(DISCNUMBER/DISCTOTAL 不残留)", async () => {
+    const f = join(DIR, "purge-disc.flac");
+    ff([
+      "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-metadata", "disc=1/2", "-metadata", "title=A", "-c:a", "flac", f,
+    ]);
+    expect((await parseFile(f)).common.disk?.no).toBe(1);
+    await writeTags(f, { title: "B" });
+    const after = await parseFile(f);
+    expect(after.common.disk?.no ?? null).toBeNull();
+    expect(after.common.disk?.of ?? null).toBeNull();
   }, TMO.timeout);
 });
 

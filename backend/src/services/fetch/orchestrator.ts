@@ -1042,14 +1042,13 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       }
     }
 
-    // 元数据补全：一次调用补齐缺失的轨/碟/年/流派/专辑；只补缺失项，信源声明值优先。
+    // 元数据补全：一次调用补齐缺失的轨/年/流派/专辑；只补缺失项，信源声明值优先。
+    // 碟号（disc）**一律不采集不写入**：成品文件不留 DISCNUMBER/DISCTOTAL（见 tagWriter 文件头【碟号纪律】）。
     try {
       const meta = await withTimeout(deps.searchMetadata(songInput, { onMatch }), ENRICH_TIMEOUT_MS);
       if (meta) {
         if (!cand.track && meta.track) extra.track = meta.track;
         if (meta.trackTotal) extra.trackTotal = meta.trackTotal;
-        if (!cand.disc && meta.disc) extra.disc = meta.disc;
-        if (meta.discTotal) extra.discTotal = meta.discTotal;
         if (!cand.year && meta.year !== undefined && meta.year !== null) extra.year = meta.year;
         if (!cand.genre && meta.genre) extra.genre = meta.genre;
         if (!base.album && meta.album) extra.album = meta.album;
@@ -1502,7 +1501,6 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       album,
       albumArtist: artist,
       track: cand.track,
-      disc: cand.disc,
       year: cand.year,
     };
     if (cfg.writeSourceComment) {
@@ -1525,7 +1523,10 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     artist = tags.artist ?? artist;
     album = tags.album ?? album;
     try {
-      const tr = await deps.writeTags(cachePath, tags);
+      // keepSourceCover：本次没采到新封面时，若用户要求内嵌封面（embedCover=true）则保留
+      // 源文件已有封面（避免「源里有图、provider 取图失败 → 成品反而没图」）；
+      // embedCover=false 明确不保留（尊重用户关闭意图）。
+      const tr = await deps.writeTags(cachePath, tags, { keepSourceCover: cfg.embedCover !== false });
       if (tr.warnings && tr.warnings.length > 0) warnings.push(...tr.warnings);
       if (tr.file) cachePath = tr.file;
     } catch (e) {
