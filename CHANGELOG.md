@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.22] - 2026-10-16
+
+### Fix
+
+- **转码成功后源文件永久残留在下载缓存目录（240 生产实测 13.9G / 3002 个 mp3）**：`orchestrator.tryCandidate` 转码换封装（`dstPath` 与源不同）后把 `cachePath` 指向产物，源文件却从未删除 —— 每首歌都在 cacheRoot 留下一份残留。修复：转码成功且产物换了路径后即时 `rmSync(源, { force: true })`；`skipped` 与原地转码（`dstPath === 源`，此时 dstPath 就是产物本身）以及 `transcodeKeepOriginal = true` 时**一律不删**。
+- **候选未被采纳（`finalize` 返回 `skip` / `keep`）时不清理产物**：原来直接 `return { kind: "keep" }`，跳过了 `cleanup()`，产物同样残留。修复：`skip` / `keep` 分支补 `cleanup()`。
+- **缓存目录只删文件、不删目录**：`cleanup()` 此前只 `rmSync` 文件，在 cacheRoot 留下大量空目录（240 实测 7319 个目录中 4238 个空）。修复：文件清光后兜底 `rmdirSync(dir)`（目录非空或已不存在时忽略，不影响主流程）。
+- **`transcodeKeepOriginal` 此前是死配置**：orchestrator 从未读取该开关（仅前端有 UI、后端不消费），打开也不生效。本次真正接上（true = 源文件保留在缓存目录、不删除、也不进入音乐库），并修正前端 hint 文案（旧文案「转码后同时保留原文件」语义含糊）。
+
+### Internal
+
+- 新增回归守卫 `backend/tests/fetch/cacheResidue.test.ts`（R1–R6）：覆盖下载与洗版两条流水线的「转码成功删源 / `transcodeKeepOriginal` 保留 / `skipped` 不误删 / `finalize` keep 清产物 / 缓存目录 rmdir」。
+- 230 主机本地门禁自检：backend `tsc --noEmit` 0 error、`vitest tests/fetch` 全绿、frontend `vue-tsc --noEmit` 0 error、diff CR 检查通过。
+
 ## [4.6.21] - 2026-10-16
 
 ### Perf

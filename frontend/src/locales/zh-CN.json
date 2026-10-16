@@ -1586,7 +1586,7 @@
         "transcodeSampleRateHz": "转码采样率 (Hz)",
         "transcodeBitDepth": "转码位深",
         "transcodeKeepOriginal": "保留原始文件",
-        "transcodeKeepOriginalHint": "转码后同时保留原文件",
+        "transcodeKeepOriginalHint": "转码后不删除源文件（保留在缓存目录，不进入音乐库）",
         "concurrency": "并发",
         "maxConcurrentDownloads": "最大并发下载数",
         "maxConcurrentJobs": "任务并行数",

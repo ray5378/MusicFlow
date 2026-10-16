@@ -1586,7 +1586,7 @@
         "transcodeSampleRateHz": "Target sample rate (Hz)",
         "transcodeBitDepth": "Bit depth",
         "transcodeKeepOriginal": "Keep original file",
-        "transcodeKeepOriginalHint": "Keep the original file alongside the transcoded one",
+        "transcodeKeepOriginalHint": "Keep the original downloaded file (retained in cache, not moved into the library)",
         "concurrency": "Concurrency",
         "maxConcurrentDownloads": "Max concurrent downloads",
         "maxConcurrentJobs": "Parallel jobs",

@@ -16,7 +16,7 @@
 // `onProgress` 是防 15 分钟看门狗的唯一心跳（SPEC §1.3）。
 //
 // 全部外部依赖通过 `deps` 注入（默认用真实实现），单测整体替换即可零网络零 ffmpeg。
-import { mkdtempSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -1261,6 +1261,16 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     const dir = path.join(cfg.cacheRoot, safeSegment(t.id, shortHash(t.title)));
     let cachePath = path.join(dir, `${safeSegment(t.title, "track")}-${shortHash(cand.id)}.${ext}`);
     const partPath = `${cachePath}.part`;
+    /** 兜底 rmdir 本候选专属缓存目录（仅当已空）：避免在 cacheRoot 留下成千上万个空目录
+     *  （240 实测 7319 个目录中 4238 个空）。目录非空（如 transcodeKeepOriginal 保留源）或
+     *  已不存在时 rmdir 抛错，忽略即可。 */
+    const pruneCacheDir = (): void => {
+      try {
+        rmdirSync(dir);
+      } catch {
+        /* 目录非空或已不存在：忽略 */
+      }
+    };
     const cleanup = (): void => {
       for (const p of [partPath, cachePath]) {
         try {
@@ -1269,6 +1279,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           /* 清理失败不影响主流程 */
         }
       }
+      pruneCacheDir();
     };
 
     // a/b) 限流下载（先落 .part，成功后 rename 成正确扩展名 —— 不能把 .part 喂给 ffmpeg）。
@@ -1471,6 +1482,9 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     //    绝不能 skip（内容要变），两遍实测失败降级单遍也绝不让整首歌失败。
     //    响度归一化（-14 LUFS）也在此透传，缺省开（见 FetchConfig）。
     if (cfg.transcodeEnabled) {
+      // 转码前源路径快照：产物换路径后，源文件若留在 cacheRoot 会永久泄漏（240 实测
+      // 13.9G / 3002 个 mp3 残留）。见下方 dstPath 变化处的清理逻辑。
+      const srcPreTranscode = cachePath;
       // PATCH22 转码总闸（maxConcurrentTranscodes）：拿到闸位才开始转码，超出的歌 FIFO
       // 排队。下载任务与洗版任务走同一条流水线，一个闸两类都覆盖。等待超 2s 记日志，
       // 便于判断是否要调大上限。finally 保证成功/失败/取消三条路都释放闸位。
@@ -1491,6 +1505,18 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           loudnessTwoPass: cfg.transcodeLoudnessTwoPass,
         });
         if (tr.dstPath && tr.dstPath !== cachePath) cachePath = tr.dstPath;
+        // 转码成功 → 清理缓存中的源文件：产物已替代源（dstPath ≠ 源路径 = 真发生了换封装），
+        // 源若留在 cacheRoot 将永久泄漏（每首一个残留，240 实测 13.9G / 3002 个 mp3）。
+        // 两种情形**不得删**：① skipped 或原地转码 —— 此时 dstPath 恒等于源路径（见
+        // transcode.ts 的 skip 分支），那 dstPath 就是产物本身；② transcodeKeepOriginal
+        // —— 该开关语义即「保留源文件在缓存目录」（不删除、也不进入音乐库）。
+        if (tr.dstPath !== srcPreTranscode && !cfg.transcodeKeepOriginal) {
+          try {
+            rmSync(srcPreTranscode, { force: true });
+          } catch {
+            /* 清理失败不影响主流程（转码产物已就绪） */
+          }
+        }
         // 转码改变了容器/位深/采样率/码率：重探针刷新 probed。否则 finalize 用
         // 转码前旧探针命名（flac 成品落 .mp3 名 → 扫描器走 mp3 路径，duration/
         // bit_rate 入库垃圾值），shouldUpgrade 也用旧码率（2026-10-10 240 实测教训）。
@@ -1548,10 +1574,17 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       // 落盘失败：不删缓存（便于排障），换候选。
       return { kind: "fail", code: codeOf(e, "MOVE_FAILED"), detail: msgOf(e) };
     }
-    if (fr.action === "skip" || fr.action === "keep") return { kind: "keep" };
+    if (fr.action === "skip" || fr.action === "keep") {
+      // 本次产物未被采纳（skip：已有同款/更好；keep：按策略保留现状）→ 缓存里的产物必须
+      // 清掉（此时 cachePath 就是转码产物），否则同样在 cacheRoot 残留。
+      cleanup();
+      return { kind: "keep" };
+    }
     if (!fr.finalPath) {
       return { kind: "fail", code: "MOVE_FAILED", detail: "finalize 未返回 finalPath" };
     }
+    // 成品已被 finalize 搬出缓存：兜底清掉本候选专属的空目录（成功路径不会走 cleanup）。
+    pruneCacheDir();
     return {
       kind: "success",
       cachePath,

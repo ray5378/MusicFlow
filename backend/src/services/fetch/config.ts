@@ -71,6 +71,10 @@ export interface FetchConfig {
   transcodeSampleRateHz?: number;
   /** 目标位深；**缺省 "auto" = 跟随源位深**（16bit 源→16、24bit 源→24；16/24 = 强制）。 */
   transcodeBitDepth?: 16 | 24 | "auto";
+  /**
+   * 转码成功后是否**保留缓存目录里的源文件**。true = 源文件留在 cacheRoot（不删除、
+   * 也不进入最终音乐库）；false（默认）= 转码产物替代源，源文件即刻清理，避免缓存残留。
+   */
   transcodeKeepOriginal: boolean;
   /** 转码时是否把响度归一化到目标 LUFS（-14）。默认开。 */
   /**
