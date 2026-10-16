@@ -185,12 +185,16 @@ export interface FetchRetryOptions {
   targetIds?: string[];
 }
 
+/**
+ * 重试失败/指定项：后端新建一个续跑任务并返回其 id；**无可重试条目时返回 null**
+ * （2026-10-16 修正返回类型，调用方需判空，别把 null 当成功）。
+ */
 export async function retryFetchJob(
   id: string,
   opts: FetchRetryOptions = { onlyFailed: true },
-): Promise<string> {
+): Promise<string | null> {
   const res = await api.post(`${BASE}/jobs/${encodeURIComponent(id)}/retry`, opts);
-  return res.data?.jobId as string;
+  return (res.data?.jobId as string | undefined) ?? null;
 }
 
 // ---------- 洗版(无损替换低码率) ----------
@@ -212,9 +216,12 @@ export interface UpgradePlan {
   total: number;
   /** 范围内任何时间在册的已尝试数（对齐全库下载 attempted 口径）。 */
   attempted: number;
-  /** 待洗版数(目标目录中未在冷却期的行数)。 */
+  /**
+   * 待洗版数 = 目标目录**全量**（口径与后端 belowBar 一致，2026-10-16 修正）。
+   * 成功洗版的歌会迁出目标目录 → 单调递减、永不回升；冷却（cooled）只决定「本轮先洗谁」。
+   */
   belowBar: number;
-  /** 因冷却期跳过的行数(N 天内已尝试过洗版,无论成败)。 */
+  /** 因冷却期跳过的行数(N 天内已尝试过洗版,无论成败；仅作参考,不参与 belowBar)。 */
   cooled: number;
   truncated: boolean;
   items: UpgradePlanItem[];

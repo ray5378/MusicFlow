@@ -140,4 +140,10 @@ describe("resumeUpgradeSession — 重启/让渡恢复（2026-10-12）", () => {
     // 标记保持，等终态钩子或下一次 tick 接续
     expect(isAutoSessionActive("upgrade")).toBe(true);
   });
+
+  it("B3：关闭 upgradeAutoContinue → 不接管并清标记（关掉续批后链必须停）", () => {
+    setAutoSession("upgrade", true);
+    expect(resumeUpgradeSession(cfgOf({ upgradeAutoContinue: false }))).toBe(false);
+    expect(isAutoSessionActive("upgrade")).toBe(false);
+  });
 });

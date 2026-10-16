@@ -531,6 +531,7 @@ type AttemptOutcome =
       destRoot?: string;
     }
   | { kind: "keep" }
+  | { kind: "cancel"; detail?: string }
   | { kind: "fail"; code: FetchErrorCode; detail?: string };
 
 function emitProgress(
@@ -1234,6 +1235,13 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           item.errorMsg = "落盘目标已存在且更优，保留既有文件";
           return item;
         }
+        if (outcome.kind === "cancel") {
+          // 单个候选在处理途中被取消（典型：排队等转码闸时 hard abort）。整曲落 cancelled
+          // 终态，不再换下一候选、不记为失败。
+          item.status = "cancelled";
+          item.errorMsg = outcome.detail ?? "任务已取消";
+          return item;
+        }
         item.rejected.push({ candidateId: cand.id, reason: outcome.code, detail: outcome.detail });
         lastFail = { code: outcome.code, detail: outcome.detail };
       }
@@ -1324,7 +1332,15 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       const ir = await deps.verifyIntegrity(
         {
           file: cachePath,
-          expect: { bytes: dl.bytes, sha256: dl.sha256, durationSec: t.durationSec },
+          // 断点续传（dl.partial）时 `dl.sha256` 只覆盖**本次新收的字节**（pumpToFile 每片新建
+          // hash，见 httpDownload.ts），拿它去比对整文件哈希必然不符 → INTEGRITY_FAILED（永久失效，
+          // 连败还会触发 deadSongPurge 删歌）。故 partial 时**不传 sha256**，让完整性校验跳过哈希、
+          // 只比字节数/时长（integrity.ts 对缺省 sha256 已支持）。2026-10-16 修正。
+          expect: {
+            bytes: dl.bytes,
+            sha256: dl.partial ? undefined : dl.sha256,
+            durationSec: t.durationSec,
+          },
         },
         effIntegrityLevel,
       );
@@ -1489,7 +1505,18 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       // 排队。下载任务与洗版任务走同一条流水线，一个闸两类都覆盖。等待超 2s 记日志，
       // 便于判断是否要调大上限。finally 保证成功/失败/取消三条路都释放闸位。
       const transcodeWaitStart = Date.now();
-      const releaseTranscode = await transcodeSem.acquire(signal);
+      let releaseTranscode: () => void;
+      try {
+        releaseTranscode = await transcodeSem.acquire(signal);
+      } catch (e) {
+        // 排队等转码闸时任务被取消 / 完全停止（acquire 以 AbortError reject）。
+        // 原实现把 acquire 放在 try/finally 之外，该 reject 会冒到 processTarget 的整曲兜底
+        // → 本项被误记 failed、且 **cleanup()/pruneCacheDir 未跑** → 已下载/已打标的缓存产物
+        // 永久残留在 cacheRoot（v4.6.22 刚要消灭的残留复现）+ 误记冷却。此处归约为「取消」：
+        // 清掉本候选缓存目录、让上层落 cancelled 终态，不误记失败。2026-10-16 修正。
+        cleanup();
+        return { kind: "cancel", detail: msgOf(e) };
+      }
       const transcodeWaitMs = Date.now() - transcodeWaitStart;
       if (transcodeWaitMs > 2000) {
         log.info("转码闸排队等待", { waitMs: transcodeWaitMs, limit: cfg.maxConcurrentTranscodes });
@@ -1540,10 +1567,20 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     // j) 原子落盘。
     let newIsBetter = false;
     if (existing) {
+      // 既有侧的有效码率必须按 `size/duration` 现场换算（effectiveBitrateKbps），**不能**直接用
+      // 库内 `bit_rate` 列 —— 240 实测库内 flac 的 bit_rate 基本是垃圾（≈真值/202），直接信它
+      // 会把「已有好无损」误判成 unknown/低档，导致新的（更差的）lossless 跨档通过、即便
+      // fileConflictPolicy=keepBetter 也照样 write → 用更差新文件覆盖/顶替已有更好文件且旧文件被删
+      // （音质回退 + 数据丢失）。bit_rate 仅作换算不出时的回落。2026-10-16 修正。
+      const effBitrate = effectiveBitrateKbps(
+        Number(existing.size ?? 0),
+        Number(existing.durationSec ?? 0),
+      );
+      const existingKbps = effBitrate > 0 ? effBitrate : existing.bitRate || 0;
       newIsBetter = shouldUpgrade(
         {
-          tier: classifyTier({ container: existing.suffix, bitrateKbps: existing.bitRate }),
-          bitrateKbps: existing.bitRate || undefined,
+          tier: classifyTier({ container: existing.suffix, bitrateKbps: existingKbps || undefined }),
+          bitrateKbps: existingKbps || undefined,
         },
         { tier: tierOf(enriched), bitrateKbps: probed.bitrateKbps },
         { upgradeCrossTierOnly: true, upgradeMinStepKbps: 64 },

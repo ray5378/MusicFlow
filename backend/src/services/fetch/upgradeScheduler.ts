@@ -93,6 +93,12 @@ export function runAutoUpgradeOnce(
  */
 export function resumeUpgradeSession(cfg: FetchConfig): boolean {
   if (!isAutoSessionActive("upgrade")) return false;
+  // 尊重「自动续批」闸（2026-10-16 修正）：关掉 upgradeAutoContinue 后，让渡空窗里残留的链
+  // 不得被调度器接续（旧逻辑只在 AutoEnabled=false 时清标记 → 关掉续批仍停不下来）。
+  if (!cfg.upgradeAutoContinue) {
+    setAutoSession("upgrade", false);
+    return false;
+  }
   if (hasActiveFetchJobs()) return false; // 有任务在跑 → 终态钩子会续
   const next = buildUpgradeContinuation(cfg);
   if (!next.job) {

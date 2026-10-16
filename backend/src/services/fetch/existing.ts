@@ -14,6 +14,7 @@ import { and, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { DEFAULT_QUALITY_CONFIG } from "./types.js";
+import { effectiveBitrateKbps } from "./quality.js";
 
 export type ExistingKind = "local" | "webdav";
 
@@ -26,6 +27,8 @@ export interface ExistingHit {
   album: string;
   durationSec: number;
   bitRate?: number;
+  /** 文件字节数（对齐 songs.size）——用于 `size/duration` 现场换算有效码率（bit_rate 列对 flac 不可信）。 */
+  size?: number;
   suffix?: string;
 }
 
@@ -47,6 +50,8 @@ export interface ExistingRow {
   duration?: number | null;
   /** 比特率（kbps，对齐 songs.bit_rate） */
   bitRate?: number | null;
+  /** 文件字节数（对齐 songs.size） */
+  size?: number | null;
   suffix?: string | null;
   type?: string | null;
 }
@@ -155,6 +160,7 @@ const SELECT_COLUMNS = {
   album: songs.album,
   duration: songs.duration,
   bitRate: songs.bitRate,
+  size: songs.size,
   suffix: songs.suffix,
   type: songs.type,
 };
@@ -230,16 +236,29 @@ function matchRow(q: ExistingQuery, row: ExistingRow, toleranceSec: number): Exi
     album: row.album ?? "",
     durationSec: rd,
     bitRate: typeof row.bitRate === "number" ? row.bitRate : undefined,
+    size: typeof row.size === "number" ? row.size : undefined,
     suffix: row.suffix ?? undefined,
   };
 }
 
-/** a 是否优于 b：local > webdav，再比 bitRate 大。 */
+/**
+ * 既有行有效码率（kbps）：`size/duration` 现场换算优先，`bit_rate` 列只作回落。
+ * 与 `upgrade.ts:upgradeBaselineKbps` 同一条不变量（240 实测库内 flac 的 bit_rate
+ * 基本是垃圾，≈真值/202；直接信它会把好无损误判为低档）。2026-10-16 修正 better()/orchestrator 既有侧。
+ */
+function effectiveKbpsOf(h: { size?: number; durationSec?: number; bitRate?: number }): number {
+  const eff = effectiveBitrateKbps(Number(h.size ?? 0), Number(h.durationSec ?? 0));
+  if (eff > 0) return eff;
+  const br = Number(h.bitRate ?? 0);
+  return br > 0 ? br : 0;
+}
+
+/** a 是否优于 b：local > webdav，再比有效码率大（size/duration 换算优先，bit_rate 回落）。 */
 function better(a: ExistingHit, b: ExistingHit): boolean {
   const ka = a.kind === "local" ? 0 : 1;
   const kb = b.kind === "local" ? 0 : 1;
   if (ka !== kb) return ka < kb;
-  return (a.bitRate ?? 0) > (b.bitRate ?? 0);
+  return effectiveKbpsOf(a) > effectiveKbpsOf(b);
 }
 
 function pickBestOne(q: ExistingQuery, cands: ExistingRow[], toleranceSec: number): ExistingHit | null {

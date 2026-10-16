@@ -167,7 +167,9 @@ export function upgradeBaselineKbps(row: {
  * sourceIds 为空 → 返回空数组（回落逻辑由调用方负责）。
  */
 export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
-  const ids = Array.isArray(sourceIds) ? sourceIds.filter((s) => typeof s === "string" && s) : [];
+  const ids = Array.isArray(sourceIds)
+    ? [...new Set(sourceIds.filter((s) => typeof s === "string" && s))] // 去重：重复源不得重复计行
+    : [];
   if (ids.length === 0) return [];
   const out: UpgradeSongRow[] = [];
   for (const sid of ids) {
@@ -210,19 +212,24 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
 
 /**
  * 只出统计的 SQL 快路径（不 materialize 明细），口径与 `buildUpgradePlan` 明细路径逐项等价：
- *   total     = 各源 `type='local' AND path LIKE 'l:<sid>:%'` 的行数之和（逐源相加，
- *               重复源重复计入——与 `collectUpgradeSongs` 的循环语义保持一致）；
+ *   total     = 各源 `type='local' AND path LIKE 'l:<sid>:%'` 的行数之和（源已去重）；
  *   attempted = 这些行中在 `fetch_upgrade_attempts` 有记录的行数（与冷却窗口无关）；
- *   cooled    = 这些行中尝试时间仍在冷却窗口内的行数；
- *   belowBar  = total - cooled（待洗版数）。
+ *   cooled    = 这些行中尝试时间仍在冷却窗口内的行数（仅作参考信息）；
+ *   belowBar  = total（**待洗版数 = 目标目录全量**，与冷却窗口解耦）。
  *
- * ⚠️ 前提：`sourceIds` 内无重复项（`resolveUpgradeSourceIds` 与配置侧均按此使用）。
+ * ⚠️ 「待洗版数」口径（2026-10-16 修正）：目标目录里的每一首歌都是待洗版对象，
+ * 成功洗版的歌会迁出目标目录 → total 天然单调递减、永不回升。此前口径
+ * `total - cooled` 有两个致命问题：①冷却窗口随时间单向衰减会让旧 attempted 过期，
+ * belowBar 反而回升；②成功洗版后 total 与 cooled 同时 -1，belowBar 原地不动（洗了半天数字不降）。
+ * 冷却只决定「本轮先洗谁」，不决定「还有多少要洗」。
  */
 export function countUpgradePlanStats(
   sourceIds: string[],
   cfg: FetchConfig,
 ): { total: number; attempted: number; cooled: number; belowBar: number } {
-  const ids = Array.isArray(sourceIds) ? sourceIds.filter((s) => typeof s === "string" && s) : [];
+  const ids = Array.isArray(sourceIds)
+    ? [...new Set(sourceIds.filter((s) => typeof s === "string" && s))] // 去重：重复源不得重复计数
+    : [];
   ensureUpgradeAttemptsTable();
   if (ids.length === 0) return { total: 0, attempted: 0, cooled: 0, belowBar: 0 };
 
@@ -254,7 +261,8 @@ export function countUpgradePlanStats(
     .get(cutoff, ...ids.map((sid) => `l:${sid}:%`)) as any;
   const attempted = Number(row?.attempted ?? 0);
   const cooled = Number(row?.cooled ?? 0);
-  return { total, attempted, cooled, belowBar: Math.max(0, total - cooled) };
+  // belowBar = total（待洗版数 = 目标目录全量）；cooled 仅供设置页参考，不参与 belowBar 计算。
+  return { total, attempted, cooled, belowBar: total };
 }
 
 /**
@@ -268,8 +276,8 @@ export function countUpgradePlanStats(
  *
  * - `songIds` 给了 → 只保留这些 id 的行（点名重试，绕过冷却）；否则取目标目录全部。
  * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、
- *   `belowBar` = **待洗版数**（目标目录中未在冷却期的行数；字段名沿用历史接口）、
- *   `cooled` = 因冷却期跳过的行数（cooldownDays 天内已尝试过洗版，无论成败）、
+ *   `belowBar` = **待洗版数 = total**（目标目录全量；字段名沿用历史接口，口径与快路径一致）、
+ *   `cooled` = 因冷却期跳过的行数（cooldownDays 天内已尝试过洗版，无论成败；仅作参考）、
  *   `attempted` = 范围内任何时间在册的已尝试数（对齐全库下载统计口径，供设置页展示）。
  * - `items[].reason` 仍带 `isBelowUpgradeBar` 的**目标门槛**判定文案，仅作展示。
  */
@@ -320,7 +328,7 @@ export function buildUpgradePlan(
     }
     return true;
   });
-  const belowBar = belowAll.length;
+  const belowBar = total;
   // 已尝试（任何时间在册，不受冷却窗口限制）——供设置页「已尝试 N 首」统计。
   const attempted = rows.reduce((n, r) => n + (attemptedAt.has(r.id) ? 1 : 0), 0);
 
@@ -665,7 +673,7 @@ export function buildUpgradeJobConfig(
  * 洗版范围解析（与路由 / 调度器同口径）：显式 upgradeSourceIds > 回落「/MUSIC/DOWNLOAD 对应的源」。
  */
 export function resolveUpgradeSourceIds(cfg: FetchConfig): string[] {
-  if (Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0) return [...cfg.upgradeSourceIds];
+  if (Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0) return [...new Set(cfg.upgradeSourceIds)];
   return [ensureDownloadSource(DEFAULT_DOWNLOAD_ROOT).sourceId];
 }
 
@@ -683,7 +691,9 @@ export function buildUpgradeContinuation(
   const sourceIds = resolveUpgradeSourceIds(cfg);
   const limit = Math.max(1, Math.floor(cfg.upgradeBatchLimit || 500));
   const plan = buildUpgradePlan(sourceIds, cfg, { limit });
-  if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: plan.belowBar };
+  // remaining = 「下一批仍可参与洗版的歌曲数」（= 目标目录全量 - 已在冷却期的 - 本批带入的）。
+  // belowBar 已改为 total（目标目录全量），故此处需再减去 cooled 才能等价于历史的「未尝试集」口径。
+  if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: Math.max(0, plan.belowBar - plan.cooled) };
   const job = createFetchJob({
     kind: "upgrade",
     targets: { targets: buildUpgradeTargets(plan.items) },
@@ -692,14 +702,14 @@ export function buildUpgradeContinuation(
   });
   // 落冷却记录（失败也记——产品定调 2026-10-10：失败短期内也好不了，不该天天白扫）。
   recordUpgradeAttempts(job.id, plan.items.map((i) => i.songId));
-  return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.belowBar - plan.items.length) };
+  return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.belowBar - plan.cooled - plan.items.length) };
 }
 
 // ==================== 洗版冷却（fetch_upgrade_attempts 表） ====================
 //
 // 产品语义（2026-10-10 确认）：同一首歌 N 天内（默认 30）只要**尝试过**洗版
 // ——无论成败——下次触发就自动跳过（「失败的短时间内也可能好不了」，不该天天白扫）。
-// 与 fetch_library_attempts 同构但独立：song_id 主键 + INSERT OR IGNORE 天然幂等；
+// 与 fetch_library_attempts 同构但独立：song_id 主键 + UPSERT（刷新 attempted_at）天然幂等；
 // resetUpgradeAttempts() 供「清空洗版记录」按钮用（下一次全量可触发）。
 
 let upgradeAttemptsEnsured = false;
@@ -720,13 +730,29 @@ export function ensureUpgradeAttemptsTable(): void {
   upgradeAttemptsEnsured = true;
 }
 
-/** 记录「这一批已尝试洗版」（失败也记，INSERT OR IGNORE 幂等）。 */
+/**
+ * 记录「这一批已尝试洗版」（失败也记）。
+ *
+ * ⚠️ 必须 UPSERT 刷新 `attempted_at`（2026-10-16 修正，原为 INSERT OR IGNORE）：
+ * 同一首歌可能被重复尝试（冷却期过后重进候选池、点名重试、换源再试）。若沿用 OR IGNORE，
+ * `attempted_at` 会**冻结在首次尝试时刻**，带来两个后果：
+ *   ① 冷却判定（`attempted_at > now - N天`）随时间单向衰减 → 早已过期的歌重新「解冻」，
+ *      前端「待洗版数」看起来回升；
+ *   ② 一批歌冷却过期后重新入选、又被 OR IGNORE 静默跳过刷新 → 下一批仍选同一批歌 → 无限空转
+ *      （每次尝试都不刷新时间戳，永远停在「刚过期」边界）。
+ * 改为冲突时刷新时间戳/批次/状态，幂等语义不变（重复调用只更新时间，不产生新行）。
+ */
 export function recordUpgradeAttempts(batchId: string, songIds: string[]): void {
   if (!batchId || songIds.length === 0) return;
   ensureUpgradeAttemptsTable();
   const now = new Date().toISOString();
   const stmt = sqlite.prepare(
-    "INSERT OR IGNORE INTO fetch_upgrade_attempts (song_id, attempted_at, batch_id, status) VALUES (?, ?, ?, 'attempted')",
+    `INSERT INTO fetch_upgrade_attempts (song_id, attempted_at, batch_id, status)
+     VALUES (?, ?, ?, 'attempted')
+     ON CONFLICT(song_id) DO UPDATE SET
+       attempted_at = excluded.attempted_at,
+       batch_id     = excluded.batch_id,
+       status       = excluded.status`,
   );
   const tx = sqlite.transaction((ids: string[]) => {
     for (const id of ids) if (id) stmt.run(id, now, batchId);

@@ -174,6 +174,9 @@ export function registerFetch(app: Hono): void {
     }
     // 关闭全库下载自动总开关 = 停链：清续批会话标记，防调度器把链复活。
     if ((override as Record<string, unknown>).libraryAutoEnabled === false) setAutoSession("library", false);
+    // 关闭全库下载「自动续批」总闸 = 停链：清续批会话标记，防调度器在让渡空窗期把链复活
+    // （2026-10-16 修正：此前只清 libraryAutoEnabled===false，把续批总闸关掉后链仍会被接续）。
+    if ((override as Record<string, unknown>).libraryAutoContinue === false) setAutoSession("library", false);
     if ("libraryAutoIntervalDays" in override) {
       const n = Number((override as Record<string, unknown>).libraryAutoIntervalDays);
       (override as Record<string, unknown>).libraryAutoIntervalDays = Number.isFinite(n)
@@ -311,10 +314,16 @@ export function registerFetch(app: Hono): void {
     return c.json({ success: true, job: { ...job, items } });
   });
 
-  /** 取消即停自动续批链：清对应流的会话标记（在跑任务的终态钩子也会清，幂等）。 */
-  function stopAutoSessionForJob(kind: string): void {
-    if (kind === "library") setAutoSession("library", false);
-    else if (kind === "upgrade") setAutoSession("upgrade", false);
+  /**
+   * 取消即停自动续批链：清对应流的会话标记（在跑任务的终态钩子也会清，幂等）。
+   * ⚠️ 点名批次（`__upgrade.noAutoContinue` / `__library.noAutoContinue`）不参与续批链，
+   * 取消它**不得**误清全库链的会话标记——否则用户点名重试后取消，会把正在跑的全库/洗版链一起掐断。
+   */
+  function stopAutoSessionForJob(job: { kind: string; config?: Record<string, any> }): void {
+    const noAuto = !!job?.config?.__upgrade?.noAutoContinue || !!job?.config?.__library?.noAutoContinue;
+    if (noAuto) return;
+    if (job?.kind === "library") setAutoSession("library", false);
+    else if (job?.kind === "upgrade") setAutoSession("upgrade", false);
   }
 
   /**
@@ -328,19 +337,18 @@ export function registerFetch(app: Hono): void {
    */
   function finishStop(
     id: string,
-    kind: string,
-    status: TaskStatus,
+    job: { kind: string; status: TaskStatus; config?: Record<string, any> },
     stop: (jobId: string) => boolean,
   ): Record<string, unknown> {
     if (!stop(id)) {
-      if (status === "pending" || status === "running") {
+      if (job.status === "pending" || job.status === "running") {
         updateFetchJobStatus(id, "cancelled", { error: "手动取消（无运行中的进程内任务）" });
-        stopAutoSessionForJob(kind);
+        stopAutoSessionForJob(job);
         return { success: true, cancelled: "zombie" };
       }
       return { success: true, message: "任务未在运行" };
     }
-    stopAutoSessionForJob(kind);
+    stopAutoSessionForJob(job);
     return { success: true };
   }
 
@@ -354,7 +362,7 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.NOT_FOUND;
       return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    return c.json(finishStop(id, job.kind, job.status, drainFetchJob));
+    return c.json(finishStop(id, job, drainFetchJob));
   });
 
   // ---------------- 完全停止（硬终止，等价于原 abort 行为） ----------------
@@ -366,7 +374,7 @@ export function registerFetch(app: Hono): void {
       const code = BusinessErrorCode.NOT_FOUND;
       return c.json(apiError(code, "errors.fetch.jobNotFound"), apiErrorStatus(code));
     }
-    return c.json(finishStop(id, job.kind, job.status, abortFetchJob));
+    return c.json(finishStop(id, job, abortFetchJob));
   });
 
   // ---------------- 删除 / 清空任务记录（只动终态任务） ----------------
@@ -440,7 +448,7 @@ export function registerFetch(app: Hono): void {
     if (explicit && String(explicit).trim()) return [String(explicit).trim()];
     const cfg = currentFetchConfig();
     if (Array.isArray(cfg.upgradeSourceIds) && cfg.upgradeSourceIds.length > 0) {
-      return [...cfg.upgradeSourceIds];
+      return [...new Set(cfg.upgradeSourceIds)];
     }
     return [ensureDownloadSource(DEFAULT_DOWNLOAD_ROOT).sourceId];
   }
@@ -505,15 +513,19 @@ export function registerFetch(app: Hono): void {
     const sourceIds = resolveUpgradeSourceIds(typeof body?.sourceId === "string" ? body.sourceId : null);
     const songIds = Array.isArray(body?.songIds) ? (body.songIds as unknown[]).map((v) => String(v)) : undefined;
     const limitRaw = Number(body?.limit);
-
-    const plan = buildUpgradePlan(sourceIds, cfg, {
-      ...(songIds && songIds.length > 0 ? { songIds } : {}),
-      ...(Number.isFinite(limitRaw) && limitRaw > 0 ? { limit: Math.floor(limitRaw) } : {}),
-    });
-    const targets = normalizeTargets(buildUpgradeTargets(plan.items));
-
     // 点名 songIds = 一次性批次（不接续）；全库范围触发才进自动续批链。
     const namedOnly = Array.isArray(songIds) && songIds.length > 0;
+
+    // 点名批次不按 upgradeBatchLimit 截断（用户明确点名要洗这些歌）：未显式给 limit 时
+    // 取 songIds.length；显式给 limit 则尊重之（2026-10-16 修正此前静默截断到默认 20）。
+    const limitForPlan = Number.isFinite(limitRaw) && limitRaw > 0
+      ? Math.floor(limitRaw)
+      : (namedOnly ? songIds!.length : 0);
+    const plan = buildUpgradePlan(sourceIds, cfg, {
+      ...(namedOnly ? { songIds } : {}),
+      ...(limitForPlan > 0 ? { limit: limitForPlan } : {}),
+    });
+    const targets = normalizeTargets(buildUpgradeTargets(plan.items));
     const job = createFetchJob({
       kind: "upgrade",
       targets: { targets },
@@ -541,7 +553,10 @@ export function registerFetch(app: Hono): void {
     const body = await c.req.json().catch(() => ({}));
     const patch: Partial<FetchConfig> = {};
     const deleteKeys: string[] = []; // 非布尔归一失败 → 删键回默认（对齐 libraryAutoContinue 纪律）
-    if (Array.isArray(body?.sourceIds)) patch.upgradeSourceIds = (body.sourceIds as unknown[]).map((v) => String(v));
+    // 源去重：重复 sourceId 会让「逐源相加」的统计口径把同一目录重复计数（2026-10-16 修正）。
+    if (Array.isArray(body?.sourceIds)) {
+      patch.upgradeSourceIds = [...new Set((body.sourceIds as unknown[]).map((v) => String(v)).filter(Boolean))];
+    }
     if (typeof body?.batchLimit === "number" && Number.isFinite(body.batchLimit) && body.batchLimit > 0) {
       patch.upgradeBatchLimit = Math.floor(body.batchLimit);
     }
@@ -567,8 +582,12 @@ export function registerFetch(app: Hono): void {
     } else if ("upgradeAutoContinue" in body) {
       deleteKeys.push("upgradeAutoContinue");
     }
-    // 关闭定时自动洗版 = 停链：清续批会话标记，防调度器把链复活。
-    if (patch.upgradeAutoEnabled === false) setAutoSession("upgrade", false);
+    // 关闭定时自动洗版 / 关闭自动续批 = 停链：清续批会话标记，防调度器把链复活
+    // （2026-10-16 修正：此前只清 `upgradeAutoEnabled===false`，把总闸关掉但链已在空窗期
+    //  仍会被 resumeUpgradeSession 接续 → 停不下来）。
+    if (patch.upgradeAutoEnabled === false || patch.upgradeAutoContinue === false) {
+      setAutoSession("upgrade", false);
+    }
 
     // 只增量写覆盖项（与 PUT /config 同一套「逐项提交」纪律）。
     const mergedOverride = { ...readFetchConfigOverride(), ...patch } as Record<string, unknown>;
@@ -603,21 +622,27 @@ export function registerFetch(app: Hono): void {
     const songIds = Array.isArray(body?.songIds)
       ? (body.songIds as unknown[]).map((v) => String(v))
       : undefined;
-    // 硬上限 libraryBatchLimit（产品定 500/次，防误点把平台接口打爆），请求只能往下调。
+    const namedOnly = Array.isArray(songIds) && songIds.length > 0;
+    // 硬上限 libraryBatchLimit（产品定 500/次，防误点把平台接口打爆）：**全库范围**请求只能往下调。
+    // 点名批次（songIds）不截断——用户明确点名要下这些歌，未显式给 limit 时取 songIds.length
+    // （2026-10-16 修正此前与洗版 A4 同根的静默截断）。
     const cap = Math.max(1, Math.floor(cfg.libraryBatchLimit || 500));
     const reqRaw = Number(body?.limit);
-    const reqLimit = Number.isFinite(reqRaw) && reqRaw > 0 ? Math.floor(reqRaw) : cap;
-    const limit = Math.min(reqLimit, cap);
+    const explicit = Number.isFinite(reqRaw) && reqRaw > 0 ? Math.floor(reqRaw) : 0;
+    const limit = namedOnly
+      ? (explicit > 0 ? Math.min(explicit, songIds!.length) : songIds!.length)
+      : Math.min(explicit > 0 ? explicit : cap, cap);
 
     const plan = buildLibraryPlan(cfg, {
       limit,
-      ...(songIds && songIds.length > 0 ? { songIds } : {}),
+      ...(namedOnly ? { songIds } : {}),
     });
     const targets = normalizeTargets(buildLibraryTargets(plan.items));
     const job = createFetchJob({
       kind: "library",
       targets: { targets },
-      config: buildLibraryJobConfig(cfg),
+      // 点名批次 = 一次性（不接续），对齐洗版 namedOnly 语义。
+      config: buildLibraryJobConfig(cfg, namedOnly ? { noAutoContinue: true } : undefined),
     });
     if (targets.length === 0) {
       // 没有可下的 → 立刻终态，避免 0 目标任务卡 pending。
@@ -633,7 +658,8 @@ export function registerFetch(app: Hono): void {
     // 否则中断后未处理的歌被冷却锁死。
     startFetchJob(job.id);
     // 标记续批会话：一批完自动开下一批，重启容器也会接上（对齐洗版 upgradeAutoContinue）。
-    setAutoSession("library", true);
+    // 点名批次不接续（一次性）。
+    if (!namedOnly) setAutoSession("library", true);
     return c.json({
       success: true,
       job: summarize(getFetchJob(job.id)!),

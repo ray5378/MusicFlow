@@ -340,7 +340,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import JobListPanel from "./JobListPanel.vue";
@@ -439,6 +439,9 @@ const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 16
 const tagRepairBusyQueue = ref(false);
 const tagRepairBusyFull = ref(false);
 let tagRepairPoll: ReturnType<typeof setInterval> | null = null;
+// 组件是否已卸载：卸载瞬间仍在途的 loadTagRepairStatus 落地后不得再写状态或重建轮询定时器
+// （2026-10-16 修正：否则会产生一个无人清理的 5s 定时器）。
+let tagRepairDisposed = false;
 
 function formatTagRepairResult(r: NonNullable<TagRepairStatus["lastResult"]>): string {
   const mode = r.mode === "full" ? t("admin.fetch.config.tagRepairModeFull") : t("admin.fetch.config.tagRepairModeQueue");
@@ -463,7 +466,9 @@ const tagRepairStatusMessage = computed(() => {
 async function loadTagRepairStatus() {
   try {
     const wasRunning = tagRepairStatus.value.running;
-    tagRepairStatus.value = await getTagRepairStatus();
+    const next = await getTagRepairStatus();
+    if (tagRepairDisposed) return; // 已卸载：丢弃在途响应，不得重建轮询定时器
+    tagRepairStatus.value = next;
     // 运行中每 5s 轮询一次；到终态停表并提示。
     if (tagRepairStatus.value.running && !tagRepairPoll) {
       tagRepairPoll = setInterval(loadTagRepairStatus, 5000);
@@ -486,7 +491,10 @@ async function onTagRepairQueue() {
     if (r.busy) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
     else ElMessage.success(t("admin.fetch.config.tagRepairStarted"));
   } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
+    // 后端「已有修复在跑」时返回 HTTP 409（{busy:true}），axios 会把它抛成异常
+    // → 以前一律误弹“保存失败”、上面的 r.busy 分支永不命中。识别 409 走「正在运行」提示。
+    if (e?.response?.status === 409) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
+    else ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
   } finally {
     tagRepairBusyQueue.value = false;
     loadTagRepairStatus();
@@ -500,7 +508,9 @@ async function onTagRepairFull() {
     if (r.busy) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
     else ElMessage.success(t("admin.fetch.config.tagRepairStartedFull"));
   } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
+    // 同 onTagRepairQueue：后端忙返回 409 → 走「正在运行」提示而非“保存失败”。
+    if (e?.response?.status === 409) ElMessage.warning(t("admin.fetch.config.tagRepairRunning"));
+    else ElMessage.error(apiErrorText(e, t("admin.fetch.config.saveFailed")));
   } finally {
     tagRepairBusyFull.value = false;
     loadTagRepairStatus();
@@ -849,6 +859,16 @@ onMounted(() => {
   loadUpgradeConfig();
   loadTagRepairStatus();
   // 两个任务面板用 el-tab-pane `lazy` 懒挂载：切到对应页签才 mount 并自拉，不在这里重复请求。
+});
+
+// 离开页面必须清掉标签修复轮询定时器（2026-10-16 修正）：否则切走后定时器仍在后台
+// 每 5s 空转发请求，白耗资源（且可能对着已卸载组件 set 状态）。
+onUnmounted(() => {
+  tagRepairDisposed = true;
+  if (tagRepairPoll) {
+    clearInterval(tagRepairPoll);
+    tagRepairPoll = null;
+  }
 });
 
 // 全库统计（洗版 / 全库下载）各是一次全表扫描，**首次切到对应页签才拉**：

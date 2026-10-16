@@ -73,6 +73,12 @@ export function runAutoLibraryOnce(
  */
 export function resumeLibrarySession(cfg: FetchConfig): boolean {
   if (!isAutoSessionActive("library")) return false;
+  // 尊重「自动续批」闸（2026-10-16 修正）：用户关掉 libraryAutoContinue 后，让渡空窗里
+  // 残留的链不得被调度器接续 —— 否则永远停不下来（旧逻辑只在 AutoEnabled=false 时清标记）。
+  if (!cfg.libraryAutoContinue) {
+    setAutoSession("library", false);
+    return false;
+  }
   const busy = sqlite
     .prepare("SELECT COUNT(*) AS n FROM fetch_jobs WHERE status IN ('pending','running')")
     .get() as { n?: number };

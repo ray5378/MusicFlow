@@ -150,7 +150,9 @@
         </el-table>
         <div v-else class="hint empty-items">{{ t('admin.fetch.jobs.noItems') }}</div>
       </div>
-      <div v-else v-loading="detailLoading" class="detail-empty"></div>
+      <div v-else v-loading="detailLoading" class="detail-empty">
+        <span v-if="detailError" class="hint">{{ detailError }}</span>
+      </div>
     </el-dialog>
   </div>
 </template>
@@ -221,29 +223,38 @@ async function fetchJobList(): Promise<FetchJobSummary[]> {
   });
 }
 
-// 单飞（single-flight）：挂载时的首次拉取、父组件切 tab / 新建任务后的 `refresh()` 可能在
-// 同一时刻被触发两次，这里让**参数相同**的并发调用复用同一个在途请求，避免重复打接口；
-// 参数不同（用户改了筛选/条数）的刷新各自独立，不会被合并吞掉。
-let inflight: { key: string; promise: Promise<void> } | null = null;
+function listKey(): string {
+  return `${statusFilter.value}\u0000${limit.value}\u0000${props.kinds.join(",")}`;
+}
 
-async function refresh() {
-  const key = `${statusFilter.value}\u0000${limit.value}\u0000${props.kinds.join(",")}`;
+// 单飞（single-flight）：挂载时的首次拉取、父组件切 tab / 新建任务后的 `refresh()`、以及
+// 2s 轮询 `pollTick()` 都走 `fetchListOnce()` —— **参数相同**的并发调用复用同一个在途请求，
+// 避免重复打接口、也避免同 key 的两个请求互相覆盖（旧响应盖新）。参数不同（用户改了筛选/
+// 条数）的刷新各自独立，不会被合并吞掉。
+let inflight: { key: string; promise: Promise<FetchJobSummary[]> } | null = null;
+
+/** 带单飞的列表拉取（手动刷新 + 轮询共用）。 */
+function fetchListOnce(): Promise<FetchJobSummary[]> {
+  const key = listKey();
   if (inflight && inflight.key === key) return inflight.promise;
-  jobsLoading.value = true;
-  jobsError.value = "";
-  const promise = (async () => {
-    try {
-      jobs.value = await fetchJobList();
-      ensurePolling();
-    } catch (e: any) {
-      jobsError.value = apiErrorText(e, t("admin.fetch.jobs.loadFailed"));
-    } finally {
-      jobsLoading.value = false;
-      if (inflight?.key === key) inflight = null;
-    }
-  })();
+  const promise = fetchJobList().finally(() => {
+    if (inflight?.key === key) inflight = null;
+  });
   inflight = { key, promise };
   return promise;
+}
+
+async function refresh() {
+  jobsLoading.value = true;
+  jobsError.value = "";
+  try {
+    jobs.value = await fetchListOnce();
+    ensurePolling();
+  } catch (e: any) {
+    jobsError.value = apiErrorText(e, t("admin.fetch.jobs.loadFailed"));
+  } finally {
+    jobsLoading.value = false;
+  }
 }
 
 // 进行中的任务每 2 秒轮询一次；全部结束/取消后自动停止。
@@ -267,7 +278,9 @@ function stopPolling() {
 }
 async function pollTick() {
   try {
-    jobs.value = await fetchJobList();
+    // 走 fetchListOnce（而非直接 fetchJobList）：与手动刷新共用单飞，避免同 key 并发的两个
+    // 请求互相覆盖（旧响应盖新）。2026-10-16 修正。
+    jobs.value = await fetchListOnce();
     if (detailVisible.value && detailId.value) {
       const d = await getFetchJob(detailId.value);
       if (d) detail.value = d;
@@ -283,17 +296,21 @@ const detailVisible = ref(false);
 const detailId = ref("");
 const detail = ref<FetchJobDetail | null>(null);
 const detailLoading = ref(false);
+// 详情拉取失败时的占位文案（2026-10-16 修正）：以前失败只弹一个瞬时 toast、弹窗正文空白。
+const detailError = ref("");
 
 async function openDetail(job: any) {
   detailId.value = job.id;
   detailVisible.value = true;
   detailLoading.value = true;
+  detailError.value = "";
   try {
     detail.value = await getFetchJob(job.id);
     ensurePolling();
   } catch (e: any) {
     detail.value = null;
-    ElMessage.error(apiErrorText(e, t("admin.fetch.jobs.detailFailed")));
+    detailError.value = apiErrorText(e, t("admin.fetch.jobs.detailFailed"));
+    ElMessage.error(detailError.value);
   } finally {
     detailLoading.value = false;
   }
@@ -408,6 +425,11 @@ async function doRetryAll() {
   if (!detail.value) return;
   try {
     const newId = await retryFetchJob(detail.value.id, { onlyFailed: true });
+    // 后端无可重试条目时返回 jobId:null（2026-10-16 修正：以前直接把 null 当成功弹「重试已开始 -」）。
+    if (!newId) {
+      ElMessage.warning(t("admin.fetch.jobs.retryNone"));
+      return;
+    }
     ElMessage.success(t("admin.fetch.jobs.retryStarted", { id: shortId(newId) }));
     detailVisible.value = false;
     emit("created", { id: newId });
@@ -427,6 +449,10 @@ async function retryItem(item: any) {
       ? { targetIds: [item.targetId as string] }
       : { onlyFailed: true };
     const newId = await retryFetchJob(detailId.value, opts);
+    if (!newId) {
+      ElMessage.warning(t("admin.fetch.jobs.retryNone"));
+      return;
+    }
     ElMessage.success(t("admin.fetch.jobs.retryStarted", { id: shortId(newId) }));
     detailVisible.value = false;
     emit("created", { id: newId });

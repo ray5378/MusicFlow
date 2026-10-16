@@ -181,4 +181,10 @@ describe("resumeLibrarySession — 重启/让渡恢复（2026-10-12）", () => {
     expect(resumeLibrarySession(cfgOf())).toBe(false);
     expect(isAutoSessionActive("library")).toBe(true);
   });
+
+  it("B3：关闭 libraryAutoContinue → 不接管并清标记（关掉续批后链必须停）", () => {
+    setAutoSession("library", true);
+    expect(resumeLibrarySession(cfgOf({ libraryAutoContinue: false }))).toBe(false);
+    expect(isAutoSessionActive("library")).toBe(false);
+  });
 });

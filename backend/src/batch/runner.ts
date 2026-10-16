@@ -90,6 +90,7 @@ export async function runBatchJob(
       let killTimer: NodeJS.Timeout | null = null;
       let unsubscribePace: (() => void) | null = null;
       let drainListener: (() => void) | null = null;
+      let abortListener: (() => void) | null = null;
 
       const cleanup = () => {
         if (watchdog) { clearInterval(watchdog); watchdog = null; }
@@ -98,6 +99,12 @@ export async function runBatchJob(
         if (drainListener && opts?.drainSignal) {
           opts.drainSignal.removeEventListener("abort", drainListener);
           drainListener = null;
+        }
+        // 正常完成时若 signal 从未 abort，{once:true} 的监听不会被触发/移除，会挂在
+        // 同一个 signal 上跨片累积（MaxListeners 告警、abort 时重复回调）—— 必须显式摘除。
+        if (abortListener && opts?.signal) {
+          opts.signal.removeEventListener("abort", abortListener);
+          abortListener = null;
         }
         if (child) runningChildren.delete(child);
       };
@@ -168,7 +175,10 @@ export async function runBatchJob(
       // abort:父进程信号触发时转发给子进程。
       if (opts?.signal) {
         if (opts.signal.aborted) abortNow();
-        else opts.signal.addEventListener("abort", abortNow, { once: true });
+        else {
+          abortListener = abortNow;
+          opts.signal.addEventListener("abort", abortNow, { once: true });
+        }
       }
 
       // drain:排空信号触发时**只**把 drain 转发给子进程 —— 不挂 killTimer、不标 aborted。

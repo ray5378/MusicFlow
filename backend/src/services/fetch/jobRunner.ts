@@ -30,6 +30,9 @@ const controllers = new Map<string, { hard: AbortController; drain: AbortControl
  * handler 每片结束返回 hasMore，据此决定是否继续。整批失败/取消在 catch 里落终态。
  */
 export function startFetchJob(jobId: string): void {
+  // 重入守卫（2026-10-16 修正）：同一 jobId 的循环已在跑时不得再起一条——否则
+  // 同一任务被两个循环并发推进（`controllers.set` 会互相覆盖，进度/终态互相打架）。
+  if (controllers.has(jobId)) return;
   // 写目录预检：挂载属主/权限配错时整个任务快速失败（带修复指引），
   // 而不是跑到一半每个下载项都报 EACCES（2026-10-10 240 生产实测教训）。
   try {
@@ -75,12 +78,22 @@ export function startFetchJob(jobId: string): void {
       });
       log.error("fetch 任务失败", { jobId, err: String(e?.message || e) });
     } finally {
-      // 排空收尾：任务记录补全（未开始项补写 cancelled）+ 落 cancelled 终态。
+      // 排空收尾 / 完全停止收尾：任务记录补全（未开始项补写 cancelled）+ 落 cancelled 终态。
       // 必须在 maybeContinue*/autoScanAfterJob 之前完成，让它们看到正确的终态。
-      if (drained) finalizeDrainedFetchJob(jobId);
+      // 完全停止（hard abort）优先于排空（两者同时 abort 时按「用户完全停止」记终态说明）：
+      // 非末片 / 循环入参阶段被硬停时子进程不会写终态（只有 `!hasMore` 的末片才落），任务行会
+      // **永久停在 running** → UI 永远「运行中」、hasAnyActiveJob 永久为真（续批链全断）、
+      // 重启时 collectInterruptedFetchJobIds 还会把用户明确「完全停止」的任务复活。
+      // 故在循环退出后补写 cancelled 终态（与排空收尾同款守卫，不会把已完成作业降级）。
+      if (hard.signal.aborted) finalizeDrainedFetchJob(jobId, "用户完全停止");
+      else if (drained) finalizeDrainedFetchJob(jobId);
       controllers.delete(jobId);
-      maybeContinueLibraryJob(jobId);
-      maybeContinueUpgradeJob(jobId);
+      // 完全停止 = 彻底终止整个流程（含自动续批链），语义等同「取消」：即便本任务恰在点击
+      // 前一刻已落 done（末片跑完），也必须掐断续批链——否则 maybeContinue* 会在
+      // `*AutoContinue` 默认开启下再开下一批（2026-10-16 修正）。
+      const hardStopped = hard.signal.aborted;
+      maybeContinueLibraryJob(jobId, hardStopped);
+      maybeContinueUpgradeJob(jobId, hardStopped);
       autoScanAfterJob(jobId);
     }
   })();
@@ -97,8 +110,10 @@ export function startFetchJob(jobId: string): void {
  * done 降级成 cancelled 并挂上不实的「用户取消（排空收尾）」。故仅在当前 status 仍属于
  * pending/running/cancelled（即确未跑完）时才落 cancelled，done/partial/failed 一律保持不动
  * （保持 done 时 maybeContinue* 与 autoScanAfterJob 的续批/补扫行为与改动前一致）。
+ *
+ * `terminalError` 区分收尾原因（排空取消 vs 完全停止），供 UI 展示不同的终态说明。
  */
-function finalizeDrainedFetchJob(jobId: string): void {
+function finalizeDrainedFetchJob(jobId: string, terminalError = "用户取消（排空收尾）"): void {
   try {
     const job = getFetchJob(jobId);
     if (!job) return;
@@ -115,10 +130,14 @@ function finalizeDrainedFetchJob(jobId: string): void {
         rejected: [],
         errorMsg: "任务已取消（未开始）",
       }));
-    if (missing.length > 0) saveFetchJobItems(jobId, [...job.items, ...missing]);
+    if (missing.length > 0) {
+      // 同步 `counts.total` 与补全后的 items 对齐（2026-10-16 修正）：pending 阶段取消时
+      // items 被补成 N 条 cancelled，但 counts.total 仍停在 0 → 列表「总数」与条目数不一致。
+      saveFetchJobItems(jobId, [...job.items, ...missing], { total: all.length });
+    }
     // 只在「确未跑完」的终态上落 cancelled，避免把已完成的作业降级。
     if (job.status === "pending" || job.status === "running" || job.status === "cancelled") {
-      updateFetchJobStatus(jobId, "cancelled", { error: "用户取消（排空收尾）" });
+      updateFetchJobStatus(jobId, "cancelled", { error: terminalError });
     }
   } catch (e: any) {
     log.error("fetch 排空收尾失败", { jobId, err: String(e?.message || e) });
@@ -144,39 +163,48 @@ function hasAnyActiveJob(): boolean {
   }
 }
 
-function maybeContinueLibraryJob(jobId: string): void {
+function maybeContinueLibraryJob(jobId: string, hardStopped = false): void {
   try {
     const job = getFetchJob(jobId);
     if (!job) return;
-    if (job.status === "cancelled") {
-      // 用户取消 → 续批链终止：清会话标记，否则调度器会把链复活（重启/让渡恢复）。
-      if (job.kind === "library") setAutoSession("library", false);
-      return;
-    }
     let cfgj: any = (job as any)?.config;
     if (typeof cfgj === "string") {
       try {
         cfgj = JSON.parse(cfgj);
       } catch {
-        return;
+        cfgj = {};
       }
+    }
+    // 点名/导入触发批次（`__library.noAutoContinue`）不参与续批链：它是一次性的
+    // （「把这批刚入库的歌下完」），**取消它不得误清全库链的会话标记**（2026-10-16 修正）。
+    const noAutoContinue = !!cfgj && typeof cfgj === "object" && cfgj.__library?.noAutoContinue === true;
+    if (job.status === "cancelled" || hardStopped) {
+      // 用户取消 / 完全停止 → 续批链终止：清会话标记，否则调度器会把链复活（重启/让渡恢复）。
+      if (job.kind === "library" && !noAutoContinue) setAutoSession("library", false);
+      return;
     }
     if (!cfgj || typeof cfgj !== "object" || !cfgj.__library) return;
     // 导入触发批次（__library.noAutoContinue）**不参与全库自动续批**：它的语义是
     // 「把这批刚入库的歌下完」，不是「开始全库下载」，续批会把范围放大到全库。
-    if (cfgj.__library.noAutoContinue === true) return;
+    if (noAutoContinue) return;
     // 无进展保护(2026-10-12,修 240 无限续批循环):本批若 done=0 且 failed=0(全部 skipped,
     // 典型=全部下载冷却期 COOLDOWN_SKIPPED 且按设计不记账),未尝试集不收缩 → 续批只会
     // 无限重选同一批歌。见 libraryBatchProgressed 注释。必须中止自动续批链。
+    // ⚠️ 中止必须**同时清会话标记**（2026-10-16 修正）：仅 return 会让 libraryScheduler
+    // 每个 tick 都认为「库里仍有待下且无活动任务」→ 反复建批 → 无限续批。
     if (!libraryBatchProgressed(job.counts)) {
       const cc = job.counts;
+      setAutoSession("library", false);
       log.info(
         `[LIBRARY-AUTO] 停止续批:本批无进展(done=${Number(cc?.done) || 0} failed=${Number(cc?.failed) || 0} skipped=${Number(cc?.skipped) || 0}),均为跳过/冷却秒跳,中止自动续批链,交由后续定时调度或手动重试`,
       );
       return;
     }
     const cfg = currentFetchConfig();
-    if (!cfg.libraryAutoContinue) return;
+    if (!cfg.libraryAutoContinue) {
+      setAutoSession("library", false);
+      return;
+    }
     if (hasAnyActiveJob()) return;
     const next = buildLibraryContinuation(cfg);
     if (!next.job) {
@@ -200,25 +228,27 @@ function maybeContinueLibraryJob(jobId: string): void {
  * 每批必收缩，链条天然终止；另加一道「零尝试」闸——本批一条都没跑上（典型=启动
  * 预检失败）时直接停链，避免系统性故障把整池歌无谓地扫进冷却。
  */
-function maybeContinueUpgradeJob(jobId: string): void {
+function maybeContinueUpgradeJob(jobId: string, hardStopped = false): void {
   try {
     const job = getFetchJob(jobId);
     if (!job) return;
-    if (job.status === "cancelled") {
-      if (job.kind === "upgrade") setAutoSession("upgrade", false);
-      return;
-    }
     let cfgj: any = (job as any)?.config;
     if (typeof cfgj === "string") {
       try {
         cfgj = JSON.parse(cfgj);
       } catch {
-        return;
+        cfgj = {};
       }
+    }
+    // 点名批次（`__upgrade.noAutoContinue`）不参与续批链：取消它不得误清全库洗版链的会话标记。
+    const noAutoContinue = !!cfgj && typeof cfgj === "object" && cfgj.__upgrade?.noAutoContinue === true;
+    if (job.status === "cancelled" || hardStopped) {
+      if (job.kind === "upgrade" && !noAutoContinue) setAutoSession("upgrade", false);
+      return;
     }
     if (!cfgj || typeof cfgj !== "object" || !cfgj.__upgrade) return;
     // 点名批次（__upgrade.noAutoContinue）**不参与自动续批**：语义是「洗完点名的这几首」。
-    if (cfgj.__upgrade.noAutoContinue === true) return;
+    if (noAutoContinue) return;
     const cc = (job as any)?.counts ?? {};
     // 零尝试闸：total>0 但 done/failed/skipped 全 0 = 启动预检失败之类的一条没跑上，
     // 续批只会把整池歌无谓扫进冷却，直接停链交回定时调度/手动。

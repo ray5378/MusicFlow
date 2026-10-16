@@ -334,6 +334,17 @@ describe("buildUpgradePlan — 目标目录全量入选（不按码率门槛筛�
     expect(buildUpgradePlan(["s-up"], cfg()).total).toBe(0);
   });
 
+  it("A3：重复源 id 去重，total/items 与单源一致（快慢两路径皆然）", () => {
+    seedThree();
+    const single = buildUpgradePlan(["s-up"], cfg());
+    const dup = buildUpgradePlan(["s-up", "s-up"], cfg());
+    expect(dup.total).toBe(single.total);
+    expect(dup.total).toBe(4);
+    expect(dup.items.map((i) => i.songId).sort()).toEqual(single.items.map((i) => i.songId).sort());
+    // 统计快路径（countUpgradePlanStats）也须去重，否则前端「待洗版数」翻倍。
+    expect(buildUpgradePlan(["s-up", "s-up"], cfg(), { statsOnly: true }).total).toBe(4);
+  });
+
   it("buildUpgradeTargets：id 带 upgrade: 前缀，sourceData 把信息包在 upgrade 键下（不触发分支 B 取链）", () => {
     const targets = buildUpgradeTargets([
       { songId: "s-lo1", title: "歌", artist: "歌手", album: "专辑", suffix: "flac", bitrateKbps: 600, durationSec: 200, path: "l:s-up:/dl/lo1.flac", reason: "x" },
@@ -694,7 +705,8 @@ describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
     seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
     recordUpgradeAttempts("b1", ["s-lo1"]);
     const plan = buildUpgradePlan(["s-up"], cfg());
-    expect(plan.belowBar).toBe(1);
+    // belowBar = total（目标目录全量 = 待洗版数）；冷却只决定「本轮先洗谁」，不决定「还有多少要洗」。
+    expect(plan.belowBar).toBe(2);
     expect(plan.cooled).toBe(1);
     expect(plan.items.map((i) => i.songId)).toEqual(["s-lo2"]);
   });
@@ -708,6 +720,26 @@ describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
     const plan = buildUpgradePlan(["s-up"], cfg());
     expect(plan.cooled).toBe(0);
     expect(plan.items.map((i) => i.songId)).toEqual(["s-lo1"]);
+  });
+
+  it("A1：重复尝试同一首 → UPSERT 刷新 attempted_at，冷却窗口重新计时", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    recordUpgradeAttempts("b1", ["s-lo1"]);
+    // 把首次尝试推到冷却窗口外（模拟 attempted_at 已过期）。
+    sqlite
+      .prepare("UPDATE fetch_upgrade_attempts SET attempted_at = ? WHERE song_id = 's-lo1'")
+      .run(new Date(Date.now() - 31 * 86_400_000).toISOString());
+    expect(buildUpgradePlan(["s-up"], cfg()).cooled).toBe(0);
+
+    // 再次尝试同一首 → 必须刷新 attempted_at（修复前 INSERT OR IGNORE 不刷新 → 这里仍 0，
+    // 导致每批重选同一批歌 → 无限空转 + 冷却统计单向衰减）。
+    recordUpgradeAttempts("b2", ["s-lo1"]);
+    const plan = buildUpgradePlan(["s-up"], cfg());
+    expect(plan.cooled).toBe(1);
+    expect(plan.items).toEqual([]);
+    // UPSERT 不得新增行：同一 song_id 恒只有一条记录。
+    const n = sqlite.prepare("SELECT COUNT(*) AS n FROM fetch_upgrade_attempts WHERE song_id = 's-lo1'").get() as any;
+    expect(n.n).toBe(1);
   });
 
   it("显式 songIds 点名重试绕过冷却", () => {
@@ -763,7 +795,7 @@ describe("buildUpgradePlan — statsOnly 快路径与明细口径等价", () => 
     expect(fast.total).toBe(3);
     expect(fast.attempted).toBe(1);
     expect(fast.cooled).toBe(1);
-    expect(fast.belowBar).toBe(2);
+    expect(fast.belowBar).toBe(3);
   });
 
   it("冷却期外恢复：cooled 归零、belowBar 回到全量，attempted 仍记在册", () => {
@@ -818,7 +850,7 @@ describe("buildUpgradePlan — attempted 统计（设置页「已尝试」口径
     );
     expect(plan.total).toBe(2);
     expect(plan.attempted).toBe(1);
-    expect(plan.belowBar).toBe(2); // 400 天前 → 双双回池
+    expect(plan.belowBar).toBe(2); // belowBar = total（目标目录全量），与冷却无关
     expect(plan.cooled).toBe(0);
   });
 
@@ -836,7 +868,8 @@ describe("buildUpgradePlan — attempted 统计（设置页「已尝试」口径
     );
     expect(plan.attempted).toBe(1);
     expect(plan.cooled).toBe(1);
-    expect(plan.belowBar).toBe(0);
+    // belowBar = total（与 cooled 解耦）；att-3 仍在目标目录 = 待洗 1 首。
+    expect(plan.belowBar).toBe(1);
   });
 });
 

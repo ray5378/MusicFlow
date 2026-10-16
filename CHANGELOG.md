@@ -2,6 +2,51 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.23] - 2026-10-16
+
+### Fix
+
+- **下载 / 洗版（无损替换）域一次性缺陷修复（全量审计 20 项）**：对下载与洗版两条流水线做全量审计（5 路并行子代理 + 逐条核验），修复「洗版统计回退 / 无限空转」「任务僵尸 / 续批链断」「下载音质回退 / 缓存残留」「前端轮询与提示」四类确认缺陷。落地前、落地后各经独立子代理审查（方向正确、无过度 / 漏改）。
+
+#### 洗版统计与冷却（用户核心诉求：待洗版数不再回退）
+
+- **`recordUpgradeAttempts` 用 `INSERT OR IGNORE` → `attempted_at` 永不刷新**：已尝试歌的时间戳冻结在首次尝试时刻，冷却判定（`attempted_at > now - N 天`）随时间单向衰减 → 旧 attempted 过期「解冻」，前端「待洗版数」看似回升；且到期歌重入候选池后仍被 `OR IGNORE` 静默跳过刷新 → 每批重选同一批 → **无限空转**（注释承诺的「未尝试集每批必收缩」不成立）。改为 UPSERT（`ON CONFLICT(song_id) DO UPDATE SET attempted_at / batch_id / status`），重复调用只更新时间、不产生新行，幂等语义不变。
+- **「待洗版数」口径与冷却窗口解耦**：原 `belowBar = total - cooled`，成功洗版的歌迁出目标目录后 `total` / `cooled` 同时 -1 → 数字原地不动（洗了半天不降），叠加时间戳衰减还会回升。新口径 **`belowBar = total`**（目标目录全量即待洗版；成功即迁出，天然单调递减、永不回升），冷却只决定「本轮先洗谁」。同步修正 `buildUpgradeContinuation` 的 `remaining`（再减 `cooled`，等价于历史「未尝试集」口径）与前端 `UpgradePlan.belowBar` 注释。
+- **重复 `sourceId` 造成快 / 明细两口径不一致（同一目录重复计数）**：`resolveUpgradeSourceIds`（含 API 侧两处入口）与 `collectUpgradeSongs` / `countUpgradePlanStats` 统一去重（`[...new Set()]`）。
+- **点名批次（`songIds`）超批量上限被静默截断**：点名路径 `limit = songIds.length`（点名意图明确，不截断）。
+
+#### 任务生命周期（僵尸任务 / 续批链）
+
+- **完全停止（hard abort）非末片 / 未启动时不写终态 → 永久 `running` 僵尸**：循环退出后补写 `cancelled` 终态；并让完全停止**等同取消**地掐断自动续批链（否则任务恰在点击前一刻已落 `done` 时，`maybeContinue*` 仍会在默认开启下再开下一批），同时避免重启时 `collectInterruptedFetchJobIds` 把用户明确「完全停止」的任务复活。
+- **全库「无进展停链」不清 autoSession 标记 → 调度器每分钟复活无限续批**：`maybeContinueLibraryJob` 无进展分支补 `setAutoSession("library", false)`（洗版同款分支原本已有，全库漏了）。
+- **续批恢复不尊重 `autoContinue` 闸 → 关掉后停不下来**：`resumeUpgradeSession` / `resumeLibrarySession` 开头加 `if (!cfg.*AutoContinue) { 清标记; return false; }`；PUT 关闭 `libraryAutoContinue` / `upgradeAutoContinue` 时同步清续批标记（此前只清 `*AutoEnabled===false`，总闸关掉后让渡空窗里的链仍会被接续）。
+- **取消「点名批次」误清整条链的会话标记**：`stopAutoSessionForJob` 与 `maybeContinue*` 清标记前解析 `__upgrade` / `__library.noAutoContinue`，true 则跳过（否则点名重试后取消会把正在跑的全库 / 洗版链一起掐断）。
+- **点名 `library` 批次未标记 `noAutoContinue`**：点名批次改 `buildLibraryJobConfig(cfg, { noAutoContinue: true })` 且不置 `setAutoSession("library", true)`，对齐洗版 namedOnly 语义（否则点名批次会被续批链放大到全库）。
+- **`startFetchJob` 无重入守卫**：同 `jobId` 并发启动会双循环（`controllers.set` 互相覆盖、进度 / 终态打架）→ 开头 `if (controllers.has(jobId)) return;`。
+- **排空收尾 `counts.total` 与 items 不一致**：pending 阶段取消时 items 被补成 N 条 cancelled、但 `counts.total` 仍为 0 → `finalizeDrainedFetchJob` 补写时同步 `{ total: all.length }`。
+- **`batch/runner.ts` cleanup 不移除 signal 的 abort 监听**：`{ once: true }` 的监听在 signal 未 abort 时不会被移除，跨片累积（MaxListeners 告警 / abort 时重复回调）→ cleanup 里显式 `removeEventListener`。
+
+#### 下载流水线（音质回退 / 缓存残留 / 完整性）
+
+- **转码闸 `transcodeSem.acquire(signal)` 在 try/finally 之外 → 取消时缓存残留复现**：排队等转码闸时 hard abort，`acquire` 以 AbortError reject → 异常冒到整曲兜底 → 本项被误记 `failed` 且 `cleanup()` / `pruneCacheDir` 未跑 → 已下载 / 已打标的缓存产物永久残留在 cacheRoot（v4.6.22 刚要消灭的残留复现）+ 误记冷却。修复：把 acquire 纳入保护，reject 时 `cleanup()` 并返回新增的 `{ kind: "cancel" }` 结果 → 整曲落 `cancelled`，不换候选、不记失败。
+- **断点续传时 sha256 只覆盖新收字节 → 整文件哈希必不符（`INTEGRITY_FAILED`）**：resume 时 `dl.partial = true`，返回的 sha256 仅是本次新增分片，拿它比对整文件哈希必然失败（永久失效，连败还可能触发 `deadSongPurge` 删歌）。修复：`expect.sha256 = dl.partial ? undefined : dl.sha256`（integrity 对缺省 sha256 支持跳过哈希，只比字节数 / 时长）。
+- **「已有文件是否更优」只读库内 `bit_rate` 列 → 用更差新文件顶替已有更好文件**：库内 flac 的 `bit_rate` 基本是垃圾值（≈真值 / 202）→ 好无损被误判 unknown / 低档，新的（更差）lossless 跨档通过，即便 `fileConflictPolicy=keepBetter` 也照样 write → **音质回退 + 旧文件被删**。修复：`existing.ts` 的 `ExistingHit` / `ExistingRow` / `SELECT_COLUMNS` / `matchRow` 补 `size` 字段，`better()` 与 orchestrator 既有侧统一改按 `effectiveBitrateKbps(size, durationSec)` 现场换算择优，`bit_rate` 仅作换算不出时的回落。
+
+#### 前端 admin/Fetch
+
+- **标签修复轮询定时器离开页面不清理**：新增 `onUnmounted` 清定时器 + `tagRepairDisposed` 守卫（在途响应落地后不再写状态 / 重建定时器），消除切走后每 5s 一次的后台空转请求。
+- **「完全停止」toast 与异步终态不符**：改为「已请求完全停止，数秒内终止」，避免用户因列表仍显示运行中而反复点击。
+- **`runTagRepair` 的 busy 分支永不命中**：后端「已有修复在跑」返回 HTTP 409，axios 抛异常被 catch 一律误弹「保存失败」→ 识别 409 走「正在运行」提示。
+- **无可重试条目仍弹「重试已开始 -」**：`retryFetchJob` 返回类型收紧为 `string | null`，`null` 时提示「没有可重试的条目」。
+- **列表轮询 `pollTick` 绕过 single-flight**：轮询与手动刷新并发同 key 请求、旧响应覆盖新 → 轮询改走 `fetchListOnce()`，与手动刷新共用单飞（`listKey()`）。
+- **详情接口失败弹窗空白无提示**：新增 `detailError` 占位文案。
+
+### Internal
+
+- 回归守卫：`upgrade.test.ts`（A1 UPSERT / A3 去重 + `belowBar = total` 口径断言）、`drain-cancel.test.ts`（完全停止终态 / `counts` 对齐）、`existing.test.ts`（有效码率择优）、`upgradeScheduler.test.ts` / `libraryAuto.test.ts`（续批闸）。
+- 审计前提勘误（**不做改动**）：原疑似缺陷「Content-Length 未校验导致截断被静默接受」经 Node HTTP 客户端探针实测**不成立** —— 声明 `Content-Length` 却提前断流的响应一律以 `ECONNRESET` 抛错（永不「干净短结束」），本已被解析器拒为 `FETCH_FAILED`，故不新增断言。
+- 230 主机本地门禁自检：backend `tsc --noEmit` 0 error、`vitest tests/fetch` 全绿、frontend `vue-tsc --noEmit` 0 error。
+
 ## [4.6.22] - 2026-10-16
 
 ### Fix

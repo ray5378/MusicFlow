@@ -370,6 +370,8 @@ describe("drain 排空收尾（jobRunner）", () => {
     expect(done.items.map((i) => i.targetId).sort()).toEqual(["t0", "t1", "t2"]);
     expect(done.items.every((i) => i.status === "cancelled")).toBe(true);
     expect(done.items.every((i) => i.errorMsg?.includes("未开始"))).toBe(true);
+    // B6：排空收尾补写条目时 counts.total 必须同步（否则 UI「总数」与明细行数不一致）。
+    expect(done.counts.total).toBe(3);
 
     // 任务已结束，控制器被移除：再次 drain/abort 均返回 false。
     expect(drainFetchJob(job.id)).toBe(false);
@@ -421,5 +423,50 @@ describe("drain 排空收尾（jobRunner）", () => {
     // 未开始条目补写照旧（与终态守卫无关）：任务记录依旧完整、可重试。
     expect(fin.items.map((i) => i.targetId).sort()).toEqual(["t0", "t1", "t2"]);
     expect(fin.items.every((i) => i.status === "cancelled")).toBe(true);
+  });
+
+  it("B1. 完全停止（硬 abort）后终态写 cancelled，不残留 running 僵尸", async () => {
+    saveFetchConfigOverride({ downloadRoot: DL, cacheRoot: CA } as any);
+
+    const job = createFetchJob({
+      kind: "manual",
+      targets: { targets: [tgt("t0", "S0"), tgt("t1", "S1")] },
+      config: { chunkSize: 2 },
+    });
+
+    // 假子进程：收到 run 后待命（不主动返回）；收到 abort（硬停）后按 runner 契约返回一片
+    // 结果，让父进程循环得以退出到 finally（否则要等 30s abort 宽限期强杀）。
+    const fake = new FakeChild((msg, f) => {
+      if (msg.type === "abort") {
+        setTimeout(() => {
+          f.emit("message", { type: "result", jobId: msg.jobId, result: { hasMore: false, counts: {} }, rss: 1 });
+        }, 0);
+      }
+    });
+    _setForkImplForTest((() => fake) as any);
+    setImmediate(() => fake.emit("message", { type: "ready", pid: fake.pid }));
+
+    startFetchJob(job.id);
+    for (let i = 0; i < 400 && !fake.sent.some((m) => m.type === "run"); i++) await tick();
+    expect(fake.sent.some((m) => m.type === "run")).toBe(true);
+
+    // 完全停止：硬 abort → 子进程应收到 abort（而非 drain）。
+    expect(abortFetchJob(job.id)).toBe(true);
+    expect(fake.sent.some((m) => m.type === "abort")).toBe(true);
+    expect(fake.sent.some((m) => m.type === "drain")).toBe(false);
+
+    // 等终态落库：必须是 cancelled（修复前此处会永久停在 running → UI 永远「运行中」、
+    // hasAnyActiveJob 永久为真、重启还会被 collectInterruptedFetchJobIds 复活）。
+    let status = "";
+    for (let i = 0; i < 400; i++) {
+      const j = getFetchJob(job.id);
+      status = j?.status ?? "";
+      if (["done", "partial", "failed", "cancelled"].includes(status)) break;
+      await tick();
+    }
+    expect(status).toBe("cancelled");
+    expect(getFetchJob(job.id)!.error).toContain("完全停止");
+    // 控制器已移除 → 无僵尸控制器残留。
+    expect(abortFetchJob(job.id)).toBe(false);
   });
 });

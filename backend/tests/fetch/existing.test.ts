@@ -117,6 +117,17 @@ describe("findExistingPlayable（注入行）", () => {
     expect(findExistingPlayable({ title: "Q2" }, 3, rows2)?.songId).toBe("l-320");
   });
 
+  it("C3：同曲多 local 行按有效码率(size/duration)择优，而非库内垃圾 bit_rate", () => {
+    // A：flac，库内 bit_rate 列是垃圾（=6），但 size/duration = 15MB/200s → 有效 600kbps。
+    // B：mp3，库内 bit_rate 列 320，size/duration = 8MB/200s → 有效 320kbps。
+    // 修复前只比 bit_rate → 误选 B；修复后比有效码率 → 选 A（真正的更优文件）。
+    const rows = [
+      R({ id: "l-a", title: "Q3", path: "l:s:/q3a.flac", suffix: "flac", bitRate: 6, size: 15_000_000, duration: 200 }),
+      R({ id: "l-b", title: "Q3", path: "l:s:/q3b.mp3", suffix: "mp3", bitRate: 320, size: 8_000_000, duration: 200 }),
+    ];
+    expect(findExistingPlayable({ title: "Q3" }, 3, rows)?.songId).toBe("l-a");
+  });
+
   it("批量版（注入行）：多首一次给出结果映射", () => {
     const rows = [
       R({ id: "b1", title: "A", path: "l:s:/1.mp3" }),
