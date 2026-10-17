@@ -537,12 +537,9 @@ function tagRepairModeLabel(mode?: string): string {
 
 // ---------- 实时统计（已修复 / 待修复 / 全部） ----------
 // 已修复口径 = 真正写入修复的 + 无需修/命中下载期完成标记跳过的（两类都算「已完成」）。
-// 累计数 + 本轮进行中的 (fixed + skipped)；运行结束后 progress 归零、stats 已并入，不会重复计。
-const tagRepairStatRepaired = computed(() => {
-  const base = tagRepairStatus.value.stats?.repaired ?? 0;
-  const p = tagRepairStatus.value.progress;
-  return base + (p ? (p.fixed ?? 0) + (p.skipped ?? 0) : 0);
-});
+// 【2026-10-17 修正 4】stats.repaired 后端已改为**完成标记行数**（每首修复即写标记），
+// 因此直接取用即可实时反映进度；不再叠加本轮 progress（否则同一首歌会被计两次）。
+const tagRepairStatRepaired = computed(() => tagRepairStatus.value.stats?.repaired ?? 0);
 // 待修复：运行中取「本阶段剩余」（总数 - 已处理）；空闲取 DB 待修候选数。
 const tagRepairStatPending = computed(() => {
   const p = tagRepairStatus.value.progress;

@@ -11,6 +11,8 @@
   - 网易云 `POST /api/search/get` 的 `duration` 是**毫秒**，统一换算成**秒**后进时长闸门（否则恒不匹配）；搜索响应的 `album` 只有 `picId`、**无 `picUrl`**，封面须**二次调** `/api/song/detail/?ids=[id]` 取 `album.picUrl` 直链；歌词取 `/api/song/lyric` 的 `lrc.lyric`。
   - 网易云不提供可读风格名，`genre` 一律**不填**（绝不臆造）；manifest 的 `platforms` 增补 `netease`、`platformLabels` 与中文 / 英文名称描述同步更新。
 
+- **QQ 音乐 API 访问限流（防封 IP，产品定调 2026-10-17）**：内置插件 `tag-provider` 的全部 QQ 请求（搜索 / 详情 / 歌词）共用**同一条全局串行队列**，相邻请求发起间隔 ≥ **1.2s**，再叠加 **300~800ms** 随机抖动（实际间隔约 1.5~2.0s），防止同一出口 IP 高频访问被风控封禁；网易云链路不受此限。最小间隔可用环境变量 `MF_QQ_MIN_GAP_MS` 覆盖（测试置 0）。
+
 ### Fix
 
 - **搜索命中率过低（换真搜索接口）**：原用 QQ 联想接口（`smartbox_new.fcg`），它只回热门联想词 —— 生产库抽样 30 首有 22 首**零候选**（整体命中率仅约 11.6%）。改用 QQ **真搜索** `client_search_cp`（`data.song.list[]` 自带秒级时长）后候选齐全，且**时长预筛前移**到搜索阶段（不合格者不再调用详情接口，省一次网络往返）。
@@ -19,11 +21,15 @@
 - **专辑封面不回写导致待修数恒高**：第一档 DB 预筛按 `songs.cover_art 空 && albums.cover_art 空` 判定缺封面，而修复只刷新 `songs.has_lyrics`、**不刷新 `albums.cover_art`** → 实测 19 首「文件已内嵌封面但专辑行无封面」的歌每轮被重扫。现任何一次修复 / 对账后，若文件有内嵌封面而专辑行为空，则落盘 `data/covers/<albumId>.<ext>`（与 `scanner.saveCoverArt` 同款命名）并回写该列；已有封面不动（幂等）。
 - **占位专辑名被写进文件**：DB 的 `album='Unknown Album'`（scanner 对「无专辑标签文件」的占位）此前被当有效值写进文件，把「无专辑」变成假专辑名。现 `Unknown Album` / `未知专辑` 视同空值：既不作 DB 兜底写入，也不作 `needMeta` 的「DB 已有值」依据（转为走网络补全）。
 
+- **「已修复」统计取错数据源（前端一直停在旧值）**：前端「已修复」此前读 settings 的 `repairedTotal`，它只在**一轮跑完**时累加「本轮 fixed+skipped」——全量扫动辄数千首、单轮可跑数小时，期间计数恒定不动；一旦中途容器重启 / 任务被杀，本轮已真实修复的数百首的计数**全部丢失**（实测 `tag_repair_done` 已 **184** 行，前端仍显示 **20**）。现改为直读完成标记行数（`getTagRepairMarkedCount()`）：每首真正修复 / 探针确认齐备即写标记，计数**实时**上升且跨重启保留；并让「探针确认标签齐备」的歌也登记标记（与下载期标记同义），前端不再叠加本轮 progress（避免同一首被计两次）。
+
 ### 测试
 
 - `tagProvider.test.ts` 新增网易云兜底用例：QQ 有命中时**不调用**网易云；QQ 零候选时网易云兜底且**毫秒时长换算成秒**；封面走二次详情接口；歌词取 `lrc.lyric`。
 - `tagRepair.test.ts` 新增修正 1 / 2 / 3 回归用例：真写入补标记、`unobtainable` 不标记、占位专辑不写（网络也拿不到时 `unobtainable` 且无写入）、专辑封面落盘并回写。
-- 门禁：`npx tsc --noEmit` = 0；全量 `npx vitest run` **507 文件 / 6867 用例（+1 expected fail）全绿**。
+- 门禁：`npx tsc --noEmit`（backend）= 0、`npx vue-tsc --noEmit`（frontend）= 0；`tests/fetch/tagRepair.test.ts`（26 例）、`tests/plugins/tagProvider.test.ts`（16 例）全绿；全量门禁由 CI 复核。
+- `tagProvider.test.ts` 新增 QQ 限流用例：相邻两次 QQ 请求间隔 ≥1.5s（跨调用的全局串行队列同样生效）、网易云链路不受限（紧随发起无需再等 1.2s）。
+- `tagRepair.test.ts` 新增修正 4 回归用例：`repaired` 直读完成标记表 —— 未跑任何一轮修复也能实时反映已标记歌数（锁定「一直停旧值」不再复现）。
 
 ### 实测（真实数据 · 真实链路 · 240 生产容器 musicflow）
 
@@ -34,6 +40,8 @@
 - **专辑封面回写（修正 2）**：3 首「文件已内嵌封面、专辑行无封面」的歌落盘 `data/covers/<uuid>.jpg` 并回写 `albums.cover_art`（落盘文件已核验存在），待修数随之下降（3731 → 3728）。
 - **占位专辑（修正 3）**：真库现存 60 首 DB `album` 为占位值的歌，其文件内嵌 `album` 已是修复前遗留的占位值（真库中无「文件专辑为空」的样本可做端到端验证），故该项以单测锁定口径：DB 占位值是**不写**的、且会被当作空值走网络补全而非兜底。
 - 落地前、落地后各做一次审查（方向正确性 + 改动覆盖性）。
+- **QQ 限流真机实测（240 生产容器 · 真实网络）**：一次 `searchMetadata` 内的相邻两次 QQ 往返实测间隔 **3071ms**（≥ 1.2s + 抖动下限；因串行队列在「上一请求完成」后才放行，实际间隔会更长），限流生效；同一次调用命中 `platform=qq`、`genre=R&B`、`track=8`、`year=2016`。
+- **「已修复」计数实测（修正 4）**：修正前 DB `tag_repair_done` = **184** 行而前端计数恒为 **20**；修正后 `getTagRepairStats().repaired` 直读标记表 = **184**，并自建一条临时标记后立刻 +1、删除后回退（活性验证通过，全程未触碰任何音乐文件）。
 
 ## [4.6.24] - 2026-10-17
 

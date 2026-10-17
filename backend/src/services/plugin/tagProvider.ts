@@ -16,6 +16,10 @@
 //     的 lrc.lyric；该平台不提供可读风格名，故 genre 一律不填（绝不臆造）。
 //   - 所有 HTTP 均走 host.http(尊重系统代理),带 UA + 平台 Referer;
 //   - 每个请求 try/catch + AbortController 超时(10s),单次尝试、绝不重试循环;
+//   - **QQ 侧全局限流**（2026-10-17 产品要求）：相邻两次 QQ 请求至少间隔 1.2s，再叠加
+//     300~800ms 随机抖动（实际间隔 1.5~2.0s），防止同一出口 IP 高频访问被风控封禁；
+//     三处 QQ 调用（搜索/详情/歌词）共用同一条串行队列，故一次修复内的多次 QQ 往返也按序限速。
+//     网易云链路不受此限（产品只要求限制 QQ）。
 //   - 任何情况都不抛异常,拿不到就返回 null;
 //   - 拿不到的字段一律不填(绝不臆造 —— 例如风格只在详情接口的**同级 info 块**
 //     `info.genre.content[].value` 给出可读名时才用;`track_info.genre` 只是数字码、
@@ -71,6 +75,43 @@ async function requestJson(host: PluginHost, url: string, init: any = {}): Promi
   }
 }
 
+// ---------- QQ 音乐请求节流（防封 IP）----------
+//
+// 【2026-10-17 产品要求】访问 QQ 音乐 API 的频率必须限流：相邻两次请求的**发起时刻**
+// 至少间隔 QQ_MIN_GAP_MS(默认 1.2s)，再叠加 300~800ms 随机抖动（取不到抖动则退化为固定间隔），
+// 使实际间隔落在约 1.5~2.0s。所有 QQ 请求共用**同一条串行队列**（全局单实例），因此
+// 「搜索 → 详情 → 歌词」这类一次修复内的多次往返也按序限速，避免同一出口 IP 被风控封禁。
+// 环境变量 MF_QQ_MIN_GAP_MS 可覆盖最小间隔（测试置 0 时抖动一并归零，以免拖慢用例）。
+function qqGapMs(): { min: number; jitter: number } {
+  const min = Math.max(0, Number(process.env.MF_QQ_MIN_GAP_MS ?? 1200) || 0);
+  return { min, jitter: min > 0 ? 300 + Math.random() * 500 : 0 };
+}
+
+let qqNextAt = 0;
+let qqTail: Promise<unknown> = Promise.resolve();
+
+/** 把一次 QQ 请求串进全局节流队列：等足「上次请求之后的最小间隔 + 随机抖动」再发起。 */
+function qqThrottled<T>(fn: () => Promise<T>): Promise<T> {
+  const run = qqTail.then(async () => {
+    const wait = qqNextAt - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    const g = qqGapMs();
+    qqNextAt = Date.now() + g.min + g.jitter;
+    return fn();
+  });
+  // 队列不许被单次失败掐断（requestJson 本身不抛，这里只是兜底）。
+  qqTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/** QQ 侧 JSON 请求：与 requestJson 同语义，但受全局节流约束。 */
+function qqRequestJson(host: PluginHost, url: string, init: any = {}): Promise<any> {
+  return qqThrottled(() => requestJson(host, url, init));
+}
+
 // ---------- 平台请求 ----------
 
 /** 搜索候选(归一化后的统一形状)。 */
@@ -95,7 +136,7 @@ async function qqSearch(host: PluginHost, title: string, artist: string): Promis
   const kw = artist ? `${title} ${artist}` : title;
   const url = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=" + encodeURIComponent(kw)
     + "&format=json&p=1&n=10&cr=1&new_json=1";
-  const data = await requestJson(host, url, { headers: { Referer: "https://y.qq.com/" } });
+  const data = await qqRequestJson(host, url, { headers: { Referer: "https://y.qq.com/" } });
   const list = data?.data?.song?.list;
   if (!Array.isArray(list)) return [];
   const out: QqCandidate[] = [];
@@ -134,7 +175,7 @@ async function qqSongDetail(host: PluginHost, mid: string): Promise<{ track: any
       param: { song_type: 0, song_mid: mid },
     },
   });
-  const data = await requestJson(host, "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json", {
+  const data = await qqRequestJson(host, "https://u.y.qq.com/cgi-bin/musicu.fcg?format=json", {
     method: "POST",
     headers: { Referer: "https://y.qq.com/", "Content-Type": "application/json" },
     body,
@@ -158,7 +199,7 @@ function pickGenre(info: any): string | undefined {
 async function qqLyric(host: PluginHost, mid: string): Promise<string | null> {
   const url = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid="
     + encodeURIComponent(mid) + "&format=json&nobase64=1";
-  const data = await requestJson(host, url, {
+  const data = await qqRequestJson(host, url, {
     headers: { Referer: "https://y.qq.com/portal/player.html" },
   });
   const raw = data?.lyric;

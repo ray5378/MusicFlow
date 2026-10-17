@@ -14,6 +14,10 @@ import { describe, expect, it } from "vitest";
 import { tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
 import type { LyricSongInput } from "../../src/plugins/types.js";
 
+// QQ 侧默认限流为「1.2s + 300~800ms 抖动」；测试置 0，避免 14 个用例被逐次拖延
+// （限流本身单独用一个用例断言，见文末「QQ 侧请求限流」）。
+process.env.MF_QQ_MIN_GAP_MS = "0";
+
 /** 真实抓取的 QQ client_search_cp 搜索响应（素材：告白气球 / 周杰伦；裁剪为两条候选）。
  *  `new_json=1` 时 `singer` 是对象数组（取 `.name`），`interval` 为平台声明时长（秒）。 */
 const SEARCH = {
@@ -127,10 +131,13 @@ const SEARCH_EMPTY = { code: 0, data: { song: { list: [] } } };
  *  `qqEmpty`：让 QQ 搜索回空列表，用于验证「QQ 拿不到 → 网易云兜底」的两段式。 */
 function makeHost(opts: { withInfoGenre?: boolean; search?: unknown; qqEmpty?: boolean } = {}): any {
   const calls: string[] = [];
+  const times: number[] = [];
   return {
     calls,
+    times,
     http: async (url: string) => {
       calls.push(url);
+      times.push(Date.now());
       return {
         ok: true,
         text: async () => {
@@ -311,4 +318,41 @@ describe("tag-provider — 网易云音乐兜底链路", () => {
     expect(nsUrl).not.toContain("Artist");
     expect(meta?.platform).toBe("netease");
   });
+});
+
+// ---------- QQ 侧请求限流（防封 IP，2026-10-17 产品要求）----------
+describe("tag-provider — QQ 侧请求限流", () => {
+  it("相邻两次 QQ 请求间隔 ≥1.2s（+300~800ms 抖动），跨调用（全局队列）同样生效", async () => {
+    const saved = process.env.MF_QQ_MIN_GAP_MS;
+    delete process.env.MF_QQ_MIN_GAP_MS; // 恢复默认 1200ms
+    try {
+      const host = makeHost();
+      await tagProviderPlugin.searchMetadata(host, SONG);
+      await tagProviderPlugin.searchMetadata(host, SONG); // 第二次调用：跨调用仍须限速
+      const qqTimes = host.times.filter((_: number, i: number) => host.calls[i].includes("qq.com"));
+      expect(qqTimes.length).toBeGreaterThanOrEqual(4);
+      for (let i = 1; i < qqTimes.length; i++) {
+        // 1200ms 最小间隔 + 抖动下限 300ms
+        expect(qqTimes[i] - qqTimes[i - 1]).toBeGreaterThanOrEqual(1500);
+      }
+    } finally {
+      process.env.MF_QQ_MIN_GAP_MS = saved ?? "0";
+    }
+  }, 60000);
+
+  it("网易云链路不受 QQ 限流约束（QQ 拿不到后网易云紧随发起，不需再等 1.2s）", async () => {
+    const saved = process.env.MF_QQ_MIN_GAP_MS;
+    delete process.env.MF_QQ_MIN_GAP_MS;
+    try {
+      const host = makeHost({ qqEmpty: true });
+      await tagProviderPlugin.searchMetadata(host, SONG);
+      const qqIdx = host.calls.findIndex((u: string) => u.includes("client_search_cp"));
+      const nsIdx = host.calls.findIndex((u: string) => u.includes("music.163.com/api/search/get"));
+      expect(qqIdx).toBe(0);
+      expect(nsIdx).toBeGreaterThan(0);
+      expect(host.times[nsIdx] - host.times[qqIdx]).toBeLessThan(1200);
+    } finally {
+      process.env.MF_QQ_MIN_GAP_MS = saved ?? "0";
+    }
+  }, 30000);
 });

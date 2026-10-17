@@ -45,6 +45,13 @@
 //   的占位值）此前被当有效值写进文件，把「无专辑」变成假专辑名。现把 `Unknown Album`/`未知专辑`
 //   视同空值：不参与 needAlbum 兜底，也不作为 needMeta 的「DB 已有值」依据（转为走网络补全）。
 //
+// 【2026-10-17 修正 4·「已修复」数据源】前端「已修复」此前读 settings 的 `repairedTotal`，
+//   它只在**一轮跑完**时 `+= 本轮 fixed+skipped`：全量扫动辄数千首、单轮可跑数小时，期间
+//   计数恒定不动；一旦中途容器重启/任务被杀，本轮已真实修复的数百首的计数**全部丢失**
+//   （实测：DB `tag_repair_done` 已 184 行，前端仍显示 20）。现改为**直接数完成标记行数**
+//   （`getTagRepairRepairedTotal()` → `getTagRepairMarkedCount()`）：每首真正修复/达标即写
+//   标记，计数随之实时上升，且天然跨重启保留。相应地，前端不再叠加本轮 progress。
+//
 // fingerprint 安全性（已核实）：scanner.upsertSong 按 **path** 匹配（非 fingerprint），
 // tagWriter 重写容器后重扫只会 UPDATE 该行并从文件头刷新 hasLyrics/album picture，
 // 不会产生重复条目——本模块写完顺带自更新 DB has_lyrics，让 UI 立即生效。
@@ -63,6 +70,7 @@ import { FetchTagError, writeTags, applyTagsVariant, type SongTags } from "./tag
 import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig, TagRepairScope } from "./config.js";
 import {
+  getTagRepairMarkedCount,
   isTagRepairMarked,
   markTagRepairDone,
   _resetTagRepairMarkersForTest,
@@ -74,8 +82,6 @@ const QUEUE_KEY = "fetch.tagrepair.queue";
 const LAST_RUN_KEY = "fetch.tagrepair.lastRunAt";
 const LAST_RESULT_KEY = "fetch.tagrepair.lastResult";
 const LAST_RESULTS_KEY = "fetch.tagrepair.lastResults";
-/** 累计已修复歌数（跨重启累加，供「已修复」统计展示）。 */
-const REPAIRED_TOTAL_KEY = "fetch.tagrepair.repairedTotal";
 
 /** 事件队列重试退避（第 1/2/3 次失败的下次重试间隔）。 */
 const BACKOFF_MS = [3_600_000, 6 * 3_600_000, 24 * 3_600_000] as const;
@@ -183,7 +189,7 @@ export function getTagRepairQueueSize(): number {
 /** 稳态统计（GET 轮询展示）：
  *  - total：两个下载目录内本地歌总数（songs.path 前缀 `l:` 且落在两根内）；
  *  - pending：当前 DB 预筛「缺歌词/封面/专辑」的待修候选数（同第一档口径）；
- *  - repaired：累计已修复歌数（跨重启累加）。 */
+ *  - repaired：已修复（= `tag_repair_done` 完成标记行数，含真写入修复与「无需修/下载期已达标」两类）。 */
 export interface TagRepairStats {
   total: number;
   pending: number;
@@ -200,7 +206,7 @@ export interface TagRepairProgress {
   checked: number;
   /** 本轮实际写文件的歌数。 */
   fixed: number;
-  /** 本轮跳过（无需修 / 命中完成标记）的歌数；「已修复」= fixed + skipped。 */
+  /** 本轮跳过（无需修 / 命中完成标记）的歌数；仅用于本轮进度文案，不参与「已修复」计数。 */
   skipped: number;
   startedAt: number;
 }
@@ -212,14 +218,14 @@ export function getTagRepairProgress(): TagRepairProgress | null {
   return progress;
 }
 
-/** 累计已修复歌数（持久化，跨重启保留）。 */
+/** 累计已修复歌数（= 完成标记表行数，实时派生，跨重启保留）。
+ *  【2026-10-17 修正 4·已修复数据源】此前为 settings 里的 `repairedTotal` 计数器，
+ *  只在**一轮跑完**时才 `+= 本轮 fixed+skipped` —— 全量扫描动辄数千首、单轮可跑数小时，
+ *  期间前端「已修复」恒定不动；若中途容器重启/任务被杀，本轮已真实修复的数百首的计数
+ *  全部丢失，用户看到的就是「已修复一直停在旧值」。现改为直接数 `tag_repair_done` 行数：
+ *  每首真正修复/达标的歌落盘即写标记，计数随即上升，且不受进程重启影响。 */
 export function getTagRepairRepairedTotal(): number {
-  return Number(getSetting(REPAIRED_TOTAL_KEY, "0")) || 0;
-}
-
-function addRepairedTotal(n: number): void {
-  if (!Number.isFinite(n) || n <= 0) return;
-  setSetting(REPAIRED_TOTAL_KEY, String(getTagRepairRepairedTotal() + Math.floor(n)));
+  return getTagRepairMarkedCount();
 }
 
 /** DB 派生统计（total/pending）带 5s 短缓存：轮询 5s 一次，避免重复整表扫描。 */
@@ -497,6 +503,10 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
     // 文件已内嵌封面、专辑行却无封面 → 落盘内嵌封面并回写 albums.cover_art，否则第一档
     // DB 预筛每轮都按「缺封面」把这首歌选中重扫（实测 19 首、pending 恒高）。
     if (embedded.cover) await syncAlbumCoverFromEmbedded(fsPath, row.album_id);
+    // 【2026-10-17 修正 4】文件内嵌标签已齐（各维度都在）→ 登记完成标记：与下载期标记同义
+    // （「这首歌已达标」），既让「已修复」统计把它计入、又让后续扫描直接跳过不探针。
+    // 注意只在**探针确认齐备**时才会走到这里；文件缺失/不可解析的路径在前面已 return，绝不打标记。
+    markTagRepairDone(fsPath, "tag-repair");
     return none;
   }
 
@@ -877,14 +887,8 @@ export async function runTagRepairOnce(
     const cfg = cfgOver ?? currentFetchConfig();
     const dirScope: TagRepairScope = dirScopeOver ?? cfg.tagRepairScope ?? "both";
     let result: TagRepairResult;
-    /** 本轮「已修复」累计增量（口径 = 真写入修复的 + 无需修/命中标记跳过的）。 */
-    let doneThisRun: number;
     if (mode === "all") {
       const sweep = await sweepTagRepair(cfg, "all", dirScope);
-      // 累计口径取**扫描段**的结果：全量扫已把「标签齐/命中完成标记」的歌计进它自己的
-      // skipped，随后清队列时又会在同一批歌上再记一次 skipped —— 直接相加会让累计
-      // 「已修复」虚高（同一首歌被计两次）。队列在此只作收尾清账，不重复计入累计。
-      doneThisRun = sweep.fixed + sweep.skipped;
       result = sweep;
       // 全量后队列里遗留的到期项一并清一轮（3 败弃权的不再重试）。
       const qr = await processTagRepairQueue(cfg);
@@ -899,17 +903,13 @@ export async function runTagRepairOnce(
     } else if (mode === "media") {
       // 第一档常规：仅 DB 预筛，不清队列。
       result = await sweepTagRepair(cfg, "media", dirScope);
-      doneThisRun = result.fixed + result.skipped;
     } else {
       result = await processTagRepairQueue(cfg);
-      doneThisRun = result.fixed + result.skipped;
     }
     // lastRunAt 只由「第二档全量」推进：它是定时全量兜底扫的到点标记。
     // 常规/队列挡位手动触发都是非穷尽操作，若也推进该标记，用户每次点「常规修复」
     // 都会把到期的全量兜底扫往后推一个间隔，等于让兜底扫永远不跑。
     if (mode === "all") setSetting(LAST_RUN_KEY, String(Date.now()));
-    // 累计「已修复」计数（持久化）：口径 = 真写入修复的 + 无需修/命中标记跳过的。
-    addRepairedTotal(doneThisRun);
     statsCache = null; // 待修候选数变了，下次查询重算
     saveLastResult(mode, result);
     log.info(
@@ -967,7 +967,6 @@ export function _resetTagRepairForTest(): void {
   setSetting(LAST_RUN_KEY, "0");
   setSetting(LAST_RESULT_KEY, "");
   setSetting(LAST_RESULTS_KEY, "");
-  setSetting(REPAIRED_TOTAL_KEY, "");
   repairing = false;
   ticking = false;
   progress = null;

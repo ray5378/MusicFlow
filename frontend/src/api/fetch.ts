@@ -372,7 +372,7 @@ export type TagRepairScope = "download" | "lossless" | "both";
 /** 中文文本字形：简体中文（默认）/ 繁體中文。 */
 export type ChineseTextVariant = "simplified" | "traditional";
 
-/** 实时统计：repaired=累计已修复歌数；pending=当前待修候选数；total=两根内本地歌总数。 */
+/** 实时统计：repaired=已修复歌数（= 后端完成标记行数，实时、跨重启保留）；pending=当前待修候选数；total=两根内本地歌总数。 */
 export interface TagRepairStats {
   total: number;
   pending: number;
@@ -387,7 +387,7 @@ export interface TagRepairProgress {
   checked: number;
   /** 本轮实际写文件的歌数。 */
   fixed: number;
-  /** 本轮跳过（无需修 / 命中下载期完成标记）的歌数；「已修复」= fixed + skipped。 */
+  /** 本轮跳过（无需修 / 命中下载期完成标记）的歌数；仅用于本轮进度文案，不参与「已修复」计数。 */
   skipped: number;
   startedAt: number;
 }

@@ -504,7 +504,7 @@ describe("tagRepair queue", () => {
 // ---- 11. 实时统计(已修复/待修复/全部) + 运行中进度 --------------------------------
 
 describe("tagRepair stats/progress", () => {
-  it("getTagRepairStats：total=两根内本地歌数，pending=DB 缺标签候选数，repaired=累计修复数", async () => {
+  it("getTagRepairStats：total=两根内本地歌数，pending=DB 缺标签候选数，repaired=完成标记数", async () => {
     insertSong("t1", join(root, "a.flac"), { hasLyrics: 0 });
     insertSong("t2", join(root, "b.flac"), { hasLyrics: 1, album: "专辑" });
     // t2 补上内嵌封面声明，使其不再计入待修候选（封面判定走 songs.cover_art / albums.cover_art）。
@@ -515,7 +515,7 @@ describe("tagRepair stats/progress", () => {
     expect(s1.pending).toBe(1);
     expect(s1.repaired).toBe(0);
 
-    // 跑一轮常规修复：t1 缺歌词、provider 给词 → 修复 1 首，累计 repaired +1。
+    // 跑一轮常规修复：t1 缺歌词、provider 给词 → 修复 1 首，真写入即打完成标记 → repaired +1。
     parseFileMock.mockResolvedValue(probe({ lyric: false }));
     searchLyricsMock.mockResolvedValue("[00:01]词");
     const { busy } = await runTagRepairOnce("media", cfg());
@@ -544,7 +544,7 @@ describe("tagRepair stats/progress", () => {
     expect(getTagRepairProgress()).toBeNull();
   });
 
-  it("「已修复」口径 = 真写入 + 无需修跳过（repaired 累加 fixed+skipped）", async () => {
+  it("「已修复」口径 = 完成标记数（真写入与探针确认齐备都打标记）", async () => {
     // DB 声明缺歌词，但文件实际有歌词 → 走 skip（只对齐 DB），不计 fixed。
     insertSong("pj1", join(root, "k.flac"), { hasLyrics: 0 });
     parseFileMock.mockResolvedValue(probe());
@@ -552,8 +552,21 @@ describe("tagRepair stats/progress", () => {
     expect(busy).toBe(false);
     expect(result?.fixed).toBe(0);
     expect(result?.skipped).toBeGreaterThanOrEqual(1);
+    // 【2026-10-17 修正 4】「已修复」改为直读完成标记数：探针确认齐备的歌也会登记标记，
+    // 故 skipped 的歌同样计入，口径与旧的 fixed+skipped 一致，但**不再依赖整轮跑完**。
     expect(getTagRepairRepairedTotal()).toBe((result?.fixed ?? 0) + (result?.skipped ?? 0));
     expect(getTagRepairStats().repaired).toBe((result?.fixed ?? 0) + (result?.skipped ?? 0));
+  });
+
+  it("修正4：repaired 直读标记表 —— 未跑任何一轮修复也实时反映已标记歌数（不复现「一直停旧值」）", async () => {
+    insertSong("m1", join(root, "m1.flac"), { hasLyrics: 0 });
+    insertSong("m2", join(root, "m2.flac"), { hasLyrics: 0 });
+    // 模拟「修复进程中途被杀 / 容器重启」的历史遗留：两首已真实修复并落标记，但没有任何一轮跑完。
+    expect(markTagRepairDone(join(root, "m1.flac"), "tag-provider")).toBe(true);
+    expect(markTagRepairDone(join(root, "m2.flac"), "tag-repair")).toBe(true);
+    // 不调用 runTagRepairOnce：统计仍应立刻给出 2（旧实现此时恒为 0/旧值）。
+    expect(getTagRepairRepairedTotal()).toBe(2);
+    expect(getTagRepairStats().repaired).toBe(2);
   });
 });
 
