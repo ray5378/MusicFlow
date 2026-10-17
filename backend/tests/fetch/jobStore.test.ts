@@ -11,8 +11,12 @@ import { fetchJobs } from "../../src/db/schema.js";
 import {
   FETCH_JOBS_KEEP_MAX,
   _resetFetchJobsForTest,
+  cleanExpiredFetchJobs,
+  clearFetchJobRows,
+  collectInterruptedFetchJobIds,
   createFetchJob,
   deleteFetchJob,
+  deleteFetchJobRow,
   getFetchJob,
   listFetchJobSummaries,
   listFetchJobs,
@@ -21,7 +25,7 @@ import {
   saveFetchJobItems,
   updateFetchJobStatus,
 } from "../../src/services/fetch/jobStore.js";
-import type { FetchJobItem } from "../../src/services/fetch/jobStore.js";
+import type { FetchJobImport, FetchJobItem } from "../../src/services/fetch/jobStore.js";
 
 /** 直接改 created_at，供保洁排序用例构造确定的时间序（同毫秒创建会并列）。 */
 function stampCreatedAt(id: string, iso: string): void {
@@ -347,5 +351,106 @@ describe("deleteFetchJob", () => {
     createFetchJob({ id: "j", targets: {} });
     deleteFetchJob("j");
     expect(getFetchJob("j")).toBeNull();
+  });
+});
+
+// 补充：单行删除 / 清空终态 / 过期清理 / 中断收集 / 非数组写回等未覆盖函数与分支。
+describe("deleteFetchJobRow / clearFetchJobRows / cleanExpiredFetchJobs / collectInterrupted", () => {
+  it("deleteFetchJobRow：存在→true 且删除；不存在→false", () => {
+    createFetchJob({ id: "dr-1", targets: {} });
+    expect(deleteFetchJobRow("dr-1")).toBe(true);
+    expect(getFetchJob("dr-1")).toBeNull();
+    expect(deleteFetchJobRow("dr-1")).toBe(false);
+  });
+
+  it("clearFetchJobRows：只清终态并返回删除数；无终态时返回 0", () => {
+    createFetchJob({ id: "c-done", targets: {} });
+    updateFetchJobStatus("c-done", "done");
+    createFetchJob({ id: "c-failed", targets: {} });
+    updateFetchJobStatus("c-failed", "failed");
+    createFetchJob({ id: "c-pend", targets: {} });
+    createFetchJob({ id: "c-run", targets: {} });
+    updateFetchJobStatus("c-run", "running");
+
+    expect(clearFetchJobRows()).toBe(2);
+    expect(getFetchJob("c-done")).toBeNull();
+    expect(getFetchJob("c-failed")).toBeNull();
+    expect(getFetchJob("c-pend")).not.toBeNull();
+    expect(getFetchJob("c-run")).not.toBeNull();
+
+    expect(clearFetchJobRows()).toBe(0);
+  });
+
+  it("cleanExpiredFetchJobs：retention<=0 关闭；无过期→0；过期终态删除、非终态保留", () => {
+    expect(cleanExpiredFetchJobs(0)).toBe(0);
+    expect(cleanExpiredFetchJobs(-5)).toBe(0);
+
+    createFetchJob({ id: "fresh-done", targets: {} });
+    updateFetchJobStatus("fresh-done", "done");
+    expect(cleanExpiredFetchJobs(30)).toBe(0); // 刚终态，未过期
+
+    db.insert(fetchJobs)
+      .values({
+        id: "old-done",
+        status: "done",
+        targetsJson: "{}",
+        itemsJson: "[]",
+        importsJson: "[]",
+        configJson: "{}",
+        countsJson: "{}",
+        createdAt: "2000-01-01T00:00:00.000Z",
+        updatedAt: "2000-01-01T00:00:00.000Z",
+      })
+      .run();
+    db.insert(fetchJobs)
+      .values({
+        id: "old-running",
+        status: "running",
+        targetsJson: "{}",
+        itemsJson: "[]",
+        importsJson: "[]",
+        configJson: "{}",
+        countsJson: "{}",
+        createdAt: "2000-01-01T00:00:00.000Z",
+        updatedAt: "2000-01-01T00:00:00.000Z",
+      })
+      .run();
+
+    expect(cleanExpiredFetchJobs(30)).toBe(1);
+    expect(getFetchJob("old-done")).toBeNull();
+    expect(getFetchJob("old-running")).not.toBeNull();
+  });
+
+  it("collectInterruptedFetchJobIds：收集 pending/running，忽略终态", () => {
+    createFetchJob({ id: "i-pend", targets: {} });
+    createFetchJob({ id: "i-run", targets: {} });
+    updateFetchJobStatus("i-run", "running");
+    createFetchJob({ id: "i-done", targets: {} });
+    updateFetchJobStatus("i-done", "done");
+
+    expect(collectInterruptedFetchJobIds().sort()).toEqual(["i-pend", "i-run"]);
+  });
+
+  it("saveFetchJobItems/Imports 非数组输入 → 归一化为空数组", () => {
+    createFetchJob({ id: "j-na", targets: {} });
+    saveFetchJobItems("j-na", null as unknown as FetchJobItem[]);
+    saveFetchJobImports("j-na", "bad" as unknown as FetchJobImport[]);
+
+    const rec = getFetchJob("j-na")!;
+    expect(rec.items).toEqual([]);
+    expect(rec.imports).toEqual([]);
+  });
+
+  it("listFetchJobs 单 kind 过滤；summaries 仅 status 过滤；kinds 含空值视作不过滤", () => {
+    createFetchJob({ id: "f-lib", kind: "library", targets: {} });
+    createFetchJob({ id: "f-upg", kind: "upgrade", targets: {} });
+    updateFetchJobStatus("f-upg", "done");
+
+    expect(listFetchJobs({ kind: "library" }).map((r) => r.id)).toEqual(["f-lib"]);
+    expect(listFetchJobSummaries({ status: "done" }).map((r) => r.id)).toEqual(["f-upg"]);
+    // kinds 里只有空串/空值 → 过滤后为空数组，应视作「不过滤」，不能把列表清空
+    expect(
+      listFetchJobs({ kinds: [undefined as unknown as string, "  "] }),
+    ).toHaveLength(2);
   });
 });

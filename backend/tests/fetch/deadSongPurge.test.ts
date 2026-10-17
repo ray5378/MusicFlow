@@ -23,7 +23,7 @@ import {
   recordDownloadAttempt,
 } from "../../src/services/fetch/attempts.js";
 import { DEFAULT_FETCH_CONFIG } from "../../src/services/fetch/config.js";
-import { purgeDeadSongs } from "../../src/services/fetch/deadSongPurge.js";
+import { MAX_PURGE_PER_RUN, purgeDeadSongs } from "../../src/services/fetch/deadSongPurge.js";
 
 let seq = 0;
 const uid = (p: string) => `${p}-${++seq}`;
@@ -254,4 +254,75 @@ describe("PATCH21 死链清理", () => {
     expect(songExists(a)).toBe(false);
     expect(songExists(b)).toBe(false);
   });
+});
+
+// 补充：边界 / 早退 / 异常处置分支（原有用例只覆盖了主路径）。
+describe("PATCH21 死链清理 — 边界与早退分支", () => {
+  beforeEach(() => {
+    ensureDownloadAttemptsTable();
+    sqlite.prepare(`DELETE FROM fetch_download_attempts`).run();
+  });
+
+  /** 直接落一条台账行（绕过 recordDownloadAttempt，以构造特殊键/空 errorCode）。 */
+  function rawAttempt(songKey: string, failCount: number, errorCode: string | null = "HTTP_404"): void {
+    sqlite
+      .prepare(
+        `INSERT INTO fetch_download_attempts (song_key, attempted_at, batch_id, status, error_code, fail_count)
+         VALUES (?,?,?,?,?,?)`,
+      )
+      .run(songKey, new Date().toISOString(), "b", "failed", errorCode, failCount);
+  }
+
+  it("9. 空 songKey 候选：命中早退 continue，不误删任何歌曲", () => {
+    const s = uid("real");
+    seedSong(s);
+    rawAttempt("", 1); // 台账里混入一个空键（防御性早退分支）
+    rawAttempt(s, 1);
+
+    const r = purgeDeadSongs(cfgWith(1));
+    expect(r.candidates).toBe(2);
+    expect(r.purged).toBe(1);
+    expect(songExists(s)).toBe(false);
+  });
+
+  it("10. 台账键没有对应 songs 行：清掉台账后跳过，不新增删除", () => {
+    rawAttempt("ghost-key", 1);
+
+    const r = purgeDeadSongs(cfgWith(1));
+    expect(r.candidates).toBe(1);
+    expect(r.purged).toBe(0);
+    expect(downloadFailCount("ghost-key")).toBe(0);
+  });
+
+  it("11. errorCode 为 NULL：原因文案退回无码版本", () => {
+    const u = uid("u");
+    const pl = uid("pl");
+    seedUser(u);
+    seedPlaylist(pl, u);
+    const s = uid("nocode");
+    seedSong(s, { title: "无码歌" });
+    const eid = seedEntry(pl, s, { playable: 1 });
+    rawAttempt(s, 1, null);
+
+    const r = purgeDeadSongs(cfgWith(1));
+    expect(r.purged).toBe(1);
+    expect(r.details[0]?.errorCode).toBeNull();
+
+    const e = entryOf(eid);
+    expect(e.unavailable_reason).toBe("下载永久失败，已从曲库移除");
+  });
+
+  it("12. 单轮上限：超过 MAX_PURGE_PER_RUN 的候选被推迟到下一轮", () => {
+    const total = MAX_PURGE_PER_RUN + 1;
+    for (let i = 0; i < total; i++) {
+      const s = uid("many");
+      seedSong(s);
+      failTimes(s, 1);
+    }
+
+    const r = purgeDeadSongs(cfgWith(1));
+    expect(r.candidates).toBe(total);
+    expect(r.purged).toBe(MAX_PURGE_PER_RUN);
+    expect(r.deferred).toBe(1);
+  }, 120_000);
 });

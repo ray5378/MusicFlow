@@ -30,6 +30,21 @@ name: ci
 #      的网络歌移出曲库时:白名单不得混入可恢复码(否则误删还能在线播的歌)、
 #      「转未匹配」必须先于删 songs 行(否则快照丢失再也拉不回来)、只删 web 行、
 #      源整体故障保护不得丢(否则插件停用一次清空曲库)。破坏全是静默且不可逆的。
+#  13. 下载任务取消/停止链路守卫(scripts/check-fetch-download.mjs)——「取消(排空:不开启新
+#      条目,但已在下载/缓存待转码的歌必须走完落地)」与「完全停止(硬终止整个流程,含掐断
+#      自动续批链)」两套语义、终态守卫(只能在 pending/running/cancelled 上落 cancelled,
+#      绝不把 done 降级)、未开始条目补写、boot 恢复延迟与重入守卫、续批链无进展/零尝试
+#      保护、/cancel 与 /force-stop 接线、前端取消/完全停止二次确认弹窗。破坏全是静默的:
+#      任务行永久卡 running、已完成被降级成已取消、自动续批链无限复活。
+#  14. 标签写入/修复链路守卫(scripts/check-tag-repair.mjs)——碟号纪律(不写也不留
+#      DISCNUMBER/DISCTOTAL)、修复期保留内嵌封面(keepSourceCover 恒 true)、中文字形统一、
+#      终态不可得标记(30 天 TTL 自愈)、待修口径=预筛−已标记、原子写、QQ 搜索端点
+#      (search_for_qq_cp,client_search_cp 生产恒 500)与限流(1.2s+300~800ms 抖动)、
+#      风格来源(info.genre.content 非 track_info.genre 数字码)、时长单位统一为秒。
+#      破坏全是静默的:产出脏碟号、静默丢封面、候选池永不收敛、时长闸恒失败拿不到元数据。
+#  15. 下载+标签修复独立覆盖率门禁(job fetch-coverage-gate,配置 vitest.coverage.config.ts)
+#      ——只跑本链路测试,对 src/services/fetch/** 与内置标签来源(tagProvider/artistInfo)设
+#      **硬阈值**,破了即 CI 红。与主配置的「阈值仅提示不阻断」互补。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -188,6 +203,54 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验白名单/转未匹配顺序/web 边界/快照回填/源故障保护/单轮上限/配置同步
         run: node backend/scripts/check-dead-song-purge.mjs
+
+  # 下载任务取消/停止 + 标签写入/修复链路的静态钉子(详见文件头 13/14 条)。这两条链的破坏
+  # 共同点是**静默失效**:断了不报错、不会让任何既有动态用例变红,只会让任务行永久卡 running、
+  # 把已完成降级成已取消、让自动续批链无限复活,或产出脏碟号 / 静默丢内嵌封面 / 候选池永不
+  # 收敛。零依赖 node 脚本,秒级完成;每条断言都做过双向变异验证(改坏必红)。
+  fetch-download-tag-repair-guard:
+    name: 下载取消/停止 + 标签写入修复守卫(静默失效契约)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验下载任务双控制器/取消/完全停止/终态守卫/续批链/前端二次确认
+        run: node backend/scripts/check-fetch-download.mjs
+      - name: 校验碟号纪律/保留内嵌封面/简繁统一/终态不可得/待修口径/QQ 端点与限流/时长单位
+        run: node backend/scripts/check-tag-repair.mjs
+
+  # 下载 + 标签修复链路的**独立覆盖率门禁**。主配置 vitest.config.ts 的阈值仅提示不阻断
+  # (存量代码未全覆盖,一刀切会把无关模块的红算到本链路);本作业只跑本链路测试,对
+  # src/services/fetch/** 与内置标签来源设硬阈值,破了即红。独立配置的另一个原因:主配置被
+  # sendspin-guard / playback-chain-guard 等**子集**作业复用,glob 阈值会对空集合判 0 而假红。
+  fetch-coverage-gate:
+    name: 下载 + 标签修复覆盖率门禁(硬阈值)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: cd backend && npm ci
+      - name: 跑本链路测试并校验覆盖率阈值(不足即失败)
+        shell: bash
+        env:
+          MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT: "1"
+        run: |
+          set -o pipefail
+          cd backend
+          npx vitest run --config vitest.coverage.config.ts 2>&1 | tee /tmp/fetch-coverage.log
+      - name: 上传失败日志
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetch-coverage-log
+          path: /tmp/fetch-coverage.log
+          if-no-files-found: ignore
+          retention-days: 3
 
   test:
     name: 类型检查 + 全量测试

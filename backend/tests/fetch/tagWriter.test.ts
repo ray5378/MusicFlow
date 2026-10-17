@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { parseFile } from "music-metadata";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
 import { probeFile } from "../../src/services/fetch/probe.js";
-import { FetchTagError, buildTagArgs, writeTags, writeTagsTo } from "../../src/services/fetch/tagWriter.js";
+import {
+  FetchTagError,
+  applyTagsVariant,
+  buildTagArgs,
+  containerOf,
+  tmpPathFor,
+  writeTags,
+  writeTagsTo,
+} from "../../src/services/fetch/tagWriter.js";
 
 const DIR = mkdtempSync(join(tmpdir(), "mf-tag-"));
 const FF = resolveFfmpeg();
@@ -20,6 +28,7 @@ let MP3 = "";
 let FLAC = "";
 let WAV = "";
 let COVER: Buffer;
+let PNG: Buffer;
 
 beforeAll(() => {
   MP3 = join(DIR, "a.mp3");
@@ -31,6 +40,9 @@ beforeAll(() => {
   const coverPath = join(DIR, "cover.jpg");
   ff(["-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1", "-frames:v", "1", coverPath]);
   COVER = Buffer.from(execFileSync("cat", [coverPath]) as unknown as Buffer);
+  const pngPath = join(DIR, "cover.png");
+  ff(["-y", "-f", "lavfi", "-i", "color=c=green:s=64x64:d=1", "-frames:v", "1", pngPath]);
+  PNG = Buffer.from(execFileSync("cat", [pngPath]) as unknown as Buffer);
 }, TMO.timeout);
 
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));
@@ -200,5 +212,109 @@ describe("writeTags — 失败与跳过路径", () => {
     const m = await parseFile(dst, { duration: true });
     expect(m.common.title).toBe("另存标题");
     expect(m.common.artist).toBe("歌手Z");
+  }, TMO.timeout);
+});
+
+// ---- 补充：纯函数边界 + materializeCover/路径分支 + 容器回落 ----
+describe("tagWriter 补充分支", () => {
+  it("applyTagsVariant：variant 为空原样返回；指定字形时就地转换 provider 文本（comment 不转）", () => {
+    // \u4e50(乐) ↔ \u6a02(樂)：用码点字面量避免依赖源文件编码
+    const tags = { title: "\u4e50", comment: "x", track: 3 };
+    applyTagsVariant(tags, undefined);
+    expect(tags.title).toBe("\u4e50"); // 未传字形 → 原样
+    applyTagsVariant(tags, "traditional");
+    expect(tags.title).toBe("\u6a02"); // 乐 → 樂
+    expect(tags.comment).toBe("x"); // comment 是自造文本，不参与字形转换
+    expect(tags.track).toBe(3); // 非文本字段不动
+    applyTagsVariant(tags, "simplified");
+    expect(tags.title).toBe("\u4e50"); // 樂 → 乐（幂等回转）
+  });
+
+  it("tmpPathFor：标记插在扩展名之前；无扩展名时直接后缀", () => {
+    expect(tmpPathFor("/a/b/c.mp3", "tagtmp")).toBe(join("/a/b", "c.tagtmp.mp3"));
+    expect(tmpPathFor("/a/b/noext", "tagtmp")).toBe(join("/a/b", "noext.tagtmp"));
+  });
+
+  it("containerOf：按扩展名归一化容器名", () => {
+    expect(containerOf("a.flac")).toBe("flac");
+    expect(containerOf("a.mp3")).toBe("mp3");
+    expect(containerOf("a.unknown-ext")).toBeUndefined();
+  });
+
+  it("buildTagArgs：track 单独/带总数分别成型，且任何形态都显式清空碟号", () => {
+    const solo = buildTagArgs({ src: "i.mp3", out: "o.mp3", container: "mp3", tags: { track: 3 } });
+    expect(solo.join(" ")).toContain("track=3");
+    expect(solo.join(" ")).not.toContain("track=3/");
+    expect(solo).toContain("disc=");
+    const withTotal = buildTagArgs({
+      src: "i.mp3",
+      out: "o.mp3",
+      container: "mp3",
+      tags: { track: 3, trackTotal: 12 },
+    });
+    expect(withTotal.join(" ")).toContain("track=3/12");
+    // 即使给了新封面并要求保留源封面，也只映射新图（不重复带源图）
+    const both = buildTagArgs({
+      src: "i.flac",
+      out: "o.flac",
+      container: "flac",
+      tags: {},
+      coverPath: "/c.jpg",
+      keepSourceCover: true,
+    });
+    expect(both).toContain("1:v");
+    expect(both).not.toContain("0:v?");
+    // 不给新封面+保留源封面 → 只带源图
+    const keepOnly = buildTagArgs({
+      src: "i.flac",
+      out: "o.flac",
+      container: "flac",
+      tags: {},
+      keepSourceCover: true,
+    });
+    expect(keepOnly).toContain("0:v?");
+  });
+
+  it("源文件不存在 → 抛 TAG_FAILED", async () => {
+    await expect(writeTags(join(DIR, "not-here.flac"), { title: "x" })).rejects.toMatchObject({
+      code: "TAG_FAILED",
+    });
+  });
+
+  it("字符串封面：存在的路径内嵌成功；不存在的路径当无封面处理", async () => {
+    const f = join(DIR, "str-cover.flac");
+    copyFileSync(FLAC, f);
+    // 不存在的封面路径 → materializeCover 返回 undefined → 正常写入但不带封面
+    const r1 = await writeTags(f, { title: "无封面", cover: join(DIR, "missing.jpg") });
+    expect(r1.ok).toBe(true);
+    expect((await probeFile(f)).hasCover).toBe(false);
+    // 存在的封面路径 → 内嵌。注意：封面必须放在**独立**临时目录（路径不含 "mf-tag-"），
+    // 否则 tagWriter 的临时封面清理会把测试目录 DIR 一并删掉。
+    const cdir = mkdtempSync(join(tmpdir(), "mf-strcov-"));
+    const cov = join(cdir, "cover.jpg");
+    copyFileSync(join(DIR, "cover.jpg"), cov);
+    try {
+      const r2 = await writeTags(f, { title: "有封面", cover: cov });
+      expect(r2.ok).toBe(true);
+      expect((await probeFile(f)).hasCover).toBe(true);
+    } finally {
+      rmSync(cdir, { recursive: true, force: true });
+    }
+  }, TMO.timeout);
+
+  it("空 Buffer 封面 → 视为无封面（不落盘、不内嵌）", async () => {
+    const f = join(DIR, "empty-cover.flac");
+    copyFileSync(FLAC, f);
+    const r = await writeTags(f, { title: "空封面", cover: Buffer.alloc(0) });
+    expect(r.ok).toBe(true);
+    expect((await probeFile(f)).hasCover).toBe(false);
+  }, TMO.timeout);
+
+  it("PNG Buffer 封面 → 按 PNG 落盘并成功内嵌", async () => {
+    const f = join(DIR, "png-cover.flac");
+    copyFileSync(FLAC, f);
+    const r = await writeTags(f, { title: "PNG封面", cover: PNG });
+    expect(r.ok).toBe(true);
+    expect((await probeFile(f)).hasCover).toBe(true);
   }, TMO.timeout);
 });

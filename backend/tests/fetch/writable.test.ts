@@ -108,4 +108,34 @@ describe("ensureWritableDir 写目录预检", () => {
     expect(canWriteDir(path.join(base, "cand-ok"))).toBe(true);
     expect(canWriteDir("")).toBe(false);
   });
+
+  it("canWriteDir：路径异常（父级是普通文件）→ false（覆盖 catch 分支）", () => {
+    const file = path.join(base, "cw-file");
+    writeFileSync(file, "x");
+    expect(canWriteDir(path.join(file, "child"))).toBe(false);
+  });
+
+  it("cleanCacheRootContents：浅层路径（不足两段）拒绝清理", async () => {
+    const { cleanCacheRootContents } = await import("../../src/services/fetch/writable.js");
+    expect(cleanCacheRootContents("/tmp", "/")).toBe(0);
+  });
+
+  it("cleanCacheRootContents：downloadRoot 为空时不做祖先校验照常清理；目录不存在时静默返回 0", async () => {
+    const { cleanCacheRootContents } = await import("../../src/services/fetch/writable.js");
+    const cache = path.join(base, "cache-nodr", "inner");
+    fs.mkdirSync(cache, { recursive: true });
+    fs.writeFileSync(path.join(cache, "x.part"), "x");
+    // downloadRoot 为空 → 跳过祖先/同目录校验，直接清空
+    expect(cleanCacheRootContents(cache, "")).toBe(1);
+    // 目录不存在 → readdirSync 抛错被吞 → 返回 0
+    expect(cleanCacheRootContents(path.join(base, "no", "such"), "/")).toBe(0);
+  });
+
+  it("自适应修复（PATCH14）：探针目标是已存在目录 → 触发 chown 修复后仍写失败，抛带指引的统一错误", () => {
+    const dir = path.join(base, "heal-fail");
+    fs.mkdirSync(dir, { recursive: true });
+    // 让探针路径本身是个目录：writeFileSync 必抛 EISDIR → 进入自适应修复分支
+    fs.mkdirSync(path.join(dir, `.mf_write_probe_${process.pid}`));
+    expect(() => ensureWritableDir(dir, { fresh: true })).toThrow(/目录不可写/);
+  });
 });

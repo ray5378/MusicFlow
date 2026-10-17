@@ -5,7 +5,12 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
-import { sniffMagic, verifyIntegrity } from "../../src/services/fetch/integrity.js";
+import {
+  isDecodable,
+  sha256Of,
+  sniffMagic,
+  verifyIntegrity,
+} from "../../src/services/fetch/integrity.js";
 
 const DIR = mkdtempSync(join(tmpdir(), "mf-integrity-"));
 const TMO = { timeout: 90_000 };
@@ -165,4 +170,72 @@ describe("verifyIntegrity — decodable 档", () => {
     expect(r.level).toBe("magic");
     expect(r.detail.decodable).toBeUndefined();
   });
+});
+
+// 补充：IO 失败 / 解析异常 / 默认容差等早退与异常分支。
+describe("verifyIntegrity — IO 与解析异常分支", () => {
+  it("文件不存在(statSync 失败) → INTEGRITY_FAILED，bytes 归零", async () => {
+    const r = await verifyIntegrity(join(DIR, "definitely-missing.mp3"), "length");
+    expect(r.ok).toBe(false);
+    expect(r.level).toBe("length");
+    expect(r.code).toBe("INTEGRITY_FAILED");
+    expect(r.detail.bytes).toBe(0);
+  });
+
+  it("期望字节数为负 → 跳过长度校验（边界早退）", async () => {
+    const r = await verifyIntegrity({ file: MP3, expect: { bytes: -1 } }, "length");
+    expect(r.ok).toBe(true);
+    expect(r.detail.bytes).toBe(statSync(MP3).size);
+  }, TMO.timeout);
+
+  it("sha256 计算失败(传目录) → INTEGRITY_FAILED，带失败 warning", async () => {
+    const r = await verifyIntegrity({ file: DIR, expect: { sha256: "00".repeat(32) } }, "length");
+    expect(r.ok).toBe(false);
+    expect(r.level).toBe("length");
+    expect(r.code).toBe("INTEGRITY_FAILED");
+    expect(r.warnings.join("|")).toContain("sha256 计算失败");
+  });
+
+  it("读取文件头失败(传目录) → magic 档失败，带失败 warning", async () => {
+    const r = await verifyIntegrity(DIR, "magic");
+    expect(r.ok).toBe(false);
+    expect(r.level).toBe("magic");
+    expect(r.code).toBe("INTEGRITY_FAILED");
+    expect(r.warnings.join("|")).toContain("读取文件头失败");
+  });
+
+  it("头部合法(嗅探 flac)但内容不可解析 → probe 抛错被捕获(回带解析错误码)", async () => {
+    const f = join(DIR, "bogus-magic");
+    writeFileSync(f, Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(2048, 7)]));
+    const r = await verifyIntegrity(f, "probe");
+    expect(r.ok).toBe(false);
+    expect(r.level).toBe("probe");
+    expect(r.code).toBe("INTEGRITY_FAILED");
+    expect(r.warnings.length).toBeGreaterThan(0);
+  }, TMO.timeout);
+
+  it("给了期望时长但未给容差 → 采用默认容差并通过", async () => {
+    const r = await verifyIntegrity({ file: MP3, expect: { durationSec: 3 } }, "probe");
+    expect(r.ok).toBe(true);
+    expect(r.detail.durationSec).toBeGreaterThan(2.9);
+  }, TMO.timeout);
+});
+
+describe("sha256Of / isDecodable 单元", () => {
+  it("sha256Of 的结果与 node:crypto 一致", async () => {
+    const sha = await sha256Of(MP3);
+    expect(sha).toBe(createHash("sha256").update(readFileSync(MP3)).digest("hex"));
+  }, TMO.timeout);
+
+  it("isDecodable 正常文件 → ok 且未超时", async () => {
+    const r = await isDecodable(MP3, 30_000);
+    expect(r.ok).toBe(true);
+    expect(r.timedOut).toBe(false);
+  }, TMO.timeout);
+
+  it("isDecodable 超时(timeout=0) → timedOut=true 且 ok=false", async () => {
+    const r = await isDecodable(MP3, 0);
+    expect(r.ok).toBe(false);
+    expect(r.timedOut).toBe(true);
+  }, TMO.timeout);
 });

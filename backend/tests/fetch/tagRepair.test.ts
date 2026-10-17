@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { db, sqlite } from "../../src/db/index.js";
 import { albums, songs } from "../../src/db/schema.js";
 import { getDataDir } from "../../src/utils/env.js";
-import { _resetSettingsCacheForTest, getSetting } from "../../src/services/settings.js";
+import { _resetSettingsCacheForTest, getSetting, setSetting } from "../../src/services/settings.js";
 import {
   currentFetchConfig,
   saveFetchConfigOverride,
@@ -43,6 +43,11 @@ import {
   getTagRepairStats,
   getTagRepairProgress,
   getTagRepairRepairedTotal,
+  getTagRepairLastResult,
+  getTagRepairLastResults,
+  getTagRepairQueueSize,
+  isTagRepairRunning,
+  startTagRepairScheduler,
 } from "../../src/services/fetch/tagRepair.js";
 import { markTagRepairDone, isTagRepairMarked, getTagRepairPlatformCounts } from "../../src/services/fetch/tagRepairMarker.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
@@ -779,6 +784,374 @@ describe("tagRepair scope", () => {
 
     const rLl = await runTagRepairOnce("media", c, "lossless");
     expect((rLl.result?.checked ?? 0) + (rLl.result?.skipped ?? 0)).toBe(1);
+  });
+});
+
+// ---- 13. 状态存取 / 容错分支 -----------------------------------------------------
+
+describe("tagRepair 状态存取与容错", () => {
+  it("getTagRepairQueueSize：队列为空串/坏 JSON 均安全回落 0", () => {
+    setSetting("fetch.tagrepair.queue", "");
+    expect(getTagRepairQueueSize()).toBe(0);
+    setSetting("fetch.tagrepair.queue", "{不是合法 JSON");
+    expect(getTagRepairQueueSize()).toBe(0);
+  });
+
+  it("getTagRepairLastResult/LastResults：未存/坏 JSON 返回空；跑一轮 queue 后可读回", async () => {
+    // 未存 → null
+    expect(getTagRepairLastResult()).toBeNull();
+    // 坏 JSON → catch 回落 null
+    setSetting("fetch.tagrepair.lastResult", "{坏");
+    expect(getTagRepairLastResult()).toBeNull();
+    // 分挡位结果坏 JSON → {}
+    setSetting("fetch.tagrepair.lastResults", "{坏");
+    expect(getTagRepairLastResults()).toEqual({});
+
+    // 空队列跑一轮 queue → 写入 lastResult/lastResults（覆盖 queue 挡位分支）
+    const { busy, result } = await runTagRepairOnce("queue", cfg());
+    expect(busy).toBe(false);
+    expect(result?.checked).toBe(0);
+    const last = getTagRepairLastResult();
+    expect(last?.mode).toBe("queue");
+    expect(getTagRepairLastResults().queue?.mode).toBe("queue");
+  });
+
+  it("enqueueTagRepairs：非数组/空数组返回 0；空 id 跳过、重复 id 不重复入队", () => {
+    expect(enqueueTagRepairs([])).toBe(0);
+    expect(enqueueTagRepairs(undefined as unknown as string[])).toBe(0);
+    // 空串 id 被跳过，合法 id 入队
+    expect(enqueueTagRepairs(["", "s-a"])).toBe(1);
+    expect(getTagRepairQueueSize()).toBe(1);
+    // 已存在 → 不再入队
+    expect(enqueueTagRepairs(["s-a"])).toBe(0);
+    expect(enqueueTagRepairs(["s-b", "s-c", "s-a"])).toBe(2);
+    expect(getTagRepairQueueSize()).toBe(3);
+  });
+
+  it("dbStats 5s 短缓存：连续两次 getTagRepairStats 复用同一次整表扫描", () => {
+    insertSong("cache1", join(root, "cache.flac"), { hasLyrics: 0 });
+    cfg();
+    const s1 = getTagRepairStats();
+    const s2 = getTagRepairStats(); // 5s 内 → 命中缓存分支
+    expect(s2).toEqual(s1);
+  });
+});
+
+// ---- 14. repairSongTags 探缺异常/补写缺口 ----------------------------------------
+
+describe("repairSongTags 异常与补写缺口", () => {
+  it("songId 不存在 → skip（loadRow 为 null，不探针）", async () => {
+    const r = await repairSongTags("no-such-id", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(parseFileMock).not.toHaveBeenCalled();
+  });
+
+  it("封面探测抛错 → 只告警，退回 unobtainable（不写文件）", async () => {
+    const p = join(root, "cov-err.flac");
+    insertSong("s-cerr", p);
+    parseFileMock.mockResolvedValueOnce(probe({ cover: false }));
+    searchCoverMock.mockRejectedValueOnce(new Error("net down"));
+    const r = await repairSongTags("s-cerr", cfg());
+    expect(r.outcome).toBe("unobtainable");
+    expect(writeTagsMock).not.toHaveBeenCalled();
+  });
+
+  it("歌词探测抛错 → 只告警，退回 unobtainable", async () => {
+    const p = join(root, "lyr-err.flac");
+    insertSong("s-lerr", p);
+    parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
+    searchLyricsMock.mockRejectedValueOnce(new Error("net down"));
+    const r = await repairSongTags("s-lerr", cfg());
+    expect(r.outcome).toBe("unobtainable");
+    expect(writeTagsMock).not.toHaveBeenCalled();
+  });
+
+  it("元数据补全抛错 → 只告警，退回 unobtainable", async () => {
+    const p = join(root, "meta-err.flac");
+    insertSong("s-merr", p);
+    parseFileMock.mockResolvedValueOnce(probe({ meta: false }));
+    searchMetadataMock.mockRejectedValueOnce(new Error("net down"));
+    const r = await repairSongTags("s-merr", cfg());
+    expect(r.outcome).toBe("unobtainable");
+    expect(writeTagsMock).not.toHaveBeenCalled();
+  });
+
+  it("内嵌缺 title/artist 时用元数据补写（不覆盖已有值）", async () => {
+    const p = join(root, "ta.flac");
+    insertSong("s-ta", p);
+    parseFileMock.mockResolvedValueOnce({
+      common: {
+        picture: [{}],
+        lyrics: ["[00:01]x"],
+        album: "专辑",
+        title: "",
+        artist: "",
+        albumartist: "",
+        track: { no: 0, of: 0 },
+        year: null,
+        genre: [],
+      },
+    });
+    searchMetadataMock.mockResolvedValueOnce({
+      title: "标题T",
+      artist: "歌手A",
+      albumArtist: "AA",
+      track: 3,
+      year: 2024,
+      genre: "Pop",
+    });
+    const r = await repairSongTags("s-ta", cfg());
+    expect(r.outcome).toBe("fixed");
+    const tags = writeTagsMock.mock.calls[0][1];
+    expect(tags.title).toBe("标题T");
+    expect(tags.artist).toBe("歌手A");
+  });
+
+  it("默认退避档（未设 MF_TAG_RETRY_DELAYS_MS）：TAG_FAILED 后按默认 3s 重试并成功", async () => {
+    const saved = process.env.MF_TAG_RETRY_DELAYS_MS;
+    delete process.env.MF_TAG_RETRY_DELAYS_MS;
+    try {
+      const p = join(root, "retry-default.flac");
+      insertSong("s-rd", p);
+      parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+      writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TAG_FAILED", "transient", p));
+      const r = await repairSongTags("s-rd", cfg());
+      expect(r.outcome).toBe("fixed");
+      expect(writeTagsMock).toHaveBeenCalledTimes(2);
+    } finally {
+      process.env.MF_TAG_RETRY_DELAYS_MS = saved;
+    }
+  }, 20_000);
+});
+
+// ---- 15. 专辑封面回写（内嵌封面 → albums.cover_art）各早退分支 ---------------------
+
+describe("syncAlbumCoverFromEmbedded 各早退分支", () => {
+  it("专辑行已有封面 → 不动（不读文件内嵌封面）", async () => {
+    db.insert(albums).values({ id: "alb-has", name: "A", coverArt: "x.jpg", updatedAt: "" }).run();
+    insertSong("s-albhas", join(root, "alb-has.flac"), { albumId: "alb-has", album: "A" });
+    parseFileMock.mockResolvedValue(probe());
+    const r = await repairSongTags("s-albhas", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(
+      (sqlite.prepare("SELECT cover_art FROM albums WHERE id='alb-has'").get() as { cover_art: string })
+        .cover_art,
+    ).toBe("x.jpg");
+  });
+
+  it("songs.album_id 指向不存在的专辑行 → 不臆造（提前返回）", async () => {
+    // songs.album_id 有外键约束，无法直接插入悬空引用；临时关闭外键写入后再恢复。
+    insertSong("s-ghost", join(root, "alb-ghost.flac"), { album: "A" });
+    sqlite.pragma("foreign_keys = OFF");
+    try {
+      sqlite.prepare("UPDATE songs SET album_id = ? WHERE id = ?").run("ghost-alb", "s-ghost");
+    } finally {
+      sqlite.pragma("foreign_keys = ON");
+    }
+    parseFileMock.mockResolvedValue(probe());
+    const r = await repairSongTags("s-ghost", cfg());
+    expect(r.outcome).toBe("skip");
+  });
+
+  it("专辑行无封面且文件内嵌封面为空 → 不回写（返回 null 不臆造）", async () => {
+    db.insert(albums).values({ id: "alb-none", name: "A", coverArt: null, updatedAt: "" }).run();
+    insertSong("s-albnone", join(root, "alb-none.flac"), { albumId: "alb-none", album: "A" });
+    // 探针（第 1 次 parseFile）全齐 → 走 skip 路径；readEmbeddedCover（第 2 次）返回无封面
+    parseFileMock.mockResolvedValueOnce(probe());
+    parseFileMock.mockResolvedValueOnce({ common: { picture: [] } });
+    const r = await repairSongTags("s-albnone", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(
+      (sqlite.prepare("SELECT cover_art FROM albums WHERE id='alb-none'").get() as {
+        cover_art: string | null;
+      }).cover_art,
+    ).toBeNull();
+  });
+
+  it("readEmbeddedCover 解析抛错 → 静默返回，不回写专辑封面", async () => {
+    db.insert(albums).values({ id: "alb-err", name: "A", coverArt: null, updatedAt: "" }).run();
+    insertSong("s-alberr", join(root, "alb-err.flac"), { albumId: "alb-err", album: "A" });
+    parseFileMock.mockResolvedValueOnce(probe());
+    parseFileMock.mockRejectedValueOnce(new Error("bad file"));
+    const r = await repairSongTags("s-alberr", cfg());
+    expect(r.outcome).toBe("skip");
+  });
+
+  it("内嵌封面落盘失败（albumId 含路径分隔）→ 静默跳过，不改专辑列（PNG 分支）", async () => {
+    db.insert(albums).values({ id: "bad/dir", name: "A", coverArt: null, updatedAt: "" }).run();
+    insertSong("s-badpath", join(root, "alb-badpath.flac"), { albumId: "bad/dir", album: "A" });
+    parseFileMock.mockResolvedValue({
+      common: {
+        picture: [{ format: "image/png", data: Buffer.from("png-bytes") }],
+        lyrics: ["[00:01]x"],
+        album: "专辑",
+        title: "测试歌",
+        artist: "测试歌手",
+        albumartist: "AA",
+        track: { no: 3, of: 12 },
+        year: 2024,
+        genre: ["Pop"],
+      },
+    });
+    const r = await repairSongTags("s-badpath", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(
+      (sqlite.prepare("SELECT cover_art FROM albums WHERE id='bad/dir'").get() as {
+        cover_art: string | null;
+      }).cover_art,
+    ).toBeNull();
+  });
+
+  it("专辑封面回写遇到 DB 异常 → 只告警不抛（外层 catch，GIF 分支）", async () => {
+    db.insert(albums).values({ id: "alb-db", name: "A", coverArt: null, updatedAt: "" }).run();
+    insertSong("s-albdb", join(root, "alb-db.flac"), { albumId: "alb-db", album: "A" });
+    parseFileMock.mockResolvedValue({
+      common: {
+        picture: [{ format: "image/gif", data: Buffer.from("gif-bytes") }],
+        lyrics: ["[00:01]x"],
+        album: "专辑",
+        title: "测试歌",
+        artist: "测试歌手",
+        albumartist: "AA",
+        track: { no: 3, of: 12 },
+        year: 2024,
+        genre: ["Pop"],
+      },
+    });
+    const orig = sqlite.prepare.bind(sqlite);
+    const spy = vi
+      .spyOn(sqlite as unknown as { prepare: (sql: string) => unknown }, "prepare")
+      .mockImplementation(((sql: string) => {
+        if (String(sql).includes("SELECT cover_art FROM albums")) throw new Error("db boom");
+        return orig(sql);
+      }) as unknown as typeof sqlite.prepare);
+    try {
+      const r = await repairSongTags("s-albdb", cfg());
+      expect(r.outcome).toBe("skip");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// ---- 16. 队列/全量扫异常与弃权分支 ------------------------------------------------
+
+describe("tagRepair 队列与全量扫的异常分支", () => {
+  it("队列修复中 repairSongTags 抛错 → 记 unobtainable 并按退避重排", async () => {
+    const p = join(root, "q-throw.flac");
+    insertSong("s-qth", p);
+    parseFileMock.mockResolvedValue(probe({ lyric: false }));
+    searchLyricsMock.mockResolvedValue("[00:01]词");
+    // 非 TAG_FAILED（TIMEOUT）→ 直接上抛 → 被队列 catch 兜住
+    writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TIMEOUT", "slow", p));
+    enqueueTagRepairs(["s-qth"]);
+    const r = await processTagRepairQueue(cfg(), Date.now() + 11 * 60_000);
+    expect(r.checked).toBe(1);
+    expect(r.unobtainable).toBe(1);
+    expect(queueState()["s-qth"].count).toBe(1);
+  });
+
+  it("连续 3 次拿不到（每次文件变更使标记失效）→ 弃权移出队列", async () => {
+    const p = join(root, "q-abandon.flac");
+    insertSong("s-qab", p, { hasLyrics: 0 });
+    db.update(songs).set({ album: "" }).where(eqId("s-qab")).run();
+    parseFileMock.mockResolvedValue(probe({ cover: false, lyric: false, album: false, meta: false }));
+    searchCoverMock.mockResolvedValue(null);
+    searchLyricsMock.mockResolvedValue(null);
+    searchMetadataMock.mockResolvedValue(null);
+    enqueueTagRepairs(["s-qab"]);
+    await processTagRepairQueue(cfg(), Date.now() + 11 * 60_000); // 败1 → +1h
+    writeFileSync(p, "changed-1-longer-bytes"); // 文件变更 → 失效标记，下轮重探
+    await processTagRepairQueue(cfg(), Date.now() + 2 * 3_600_000); // 败2 → +6h
+    writeFileSync(p, "changed-2-even-longer-bytes"); // 再失效
+    await processTagRepairQueue(cfg(), Date.now() + 8 * 3_600_000); // 败3 → 弃权
+    expect(queueState()["s-qab"]).toBeUndefined();
+  });
+
+  it("全量扫：命中完成标记 → 计入 skipped，不探针", async () => {
+    const p = join(root, "all-marked.flac");
+    insertSong("s-allmk", p, { hasLyrics: 0 });
+    cfg();
+    markTagRepairDone(p, "tag-provider");
+    parseFileMock.mockClear();
+    const { result } = await runTagRepairOnce("all", cfg());
+    expect(parseFileMock).not.toHaveBeenCalled();
+    expect(result?.skipped).toBeGreaterThanOrEqual(1);
+  });
+
+  it("全量扫：修复阶段 repairSongTags 抛错 → 记 unobtainable（异常兜底）", async () => {
+    const p = join(root, "all-throw.flac");
+    insertSong("s-allth", p);
+    parseFileMock.mockResolvedValue(probe({ lyric: false }));
+    searchLyricsMock.mockResolvedValue("[00:01]词");
+    writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TIMEOUT", "slow", p));
+    const { result } = await runTagRepairOnce("all", cfg());
+    expect(result?.unobtainable).toBe(1);
+  });
+
+  it("全量扫：探针进度每 1000 首打点（probed%1000 分支）", async () => {
+    cfg();
+    db.transaction((tx) => {
+      for (let i = 0; i < 1000; i++) {
+        tx.insert(songs)
+          .values({
+            id: `bulk${i}`,
+            title: "t",
+            artist: "a",
+            album: "专辑",
+            albumId: null,
+            path: `l:dl-testsrc:${join(root, `bulk${i}.flac`)}`,
+            suffix: "flac",
+            bitRate: 900,
+            size: 1,
+            duration: 200,
+            type: "local",
+            contentType: "audio/flac",
+            hasLyrics: 1,
+          })
+          .run();
+      }
+    });
+    parseFileMock.mockResolvedValue(probe()); // 全齐 → 无候选
+    const { result } = await runTagRepairOnce("all", cfg());
+    expect(result?.checked).toBe(0);
+  }, 30_000);
+});
+
+// ---- 17. 运行中标志与调度器 ------------------------------------------------------
+
+describe("tagRepair 运行中标志与调度器", () => {
+  it("isTagRepairRunning：运行中 true，结束后 false", async () => {
+    insertSong("s-run", join(root, "run.flac"), { hasLyrics: 0 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    parseFileMock.mockImplementation(async () => {
+      await gate;
+      return probe({ cover: false });
+    });
+    expect(isTagRepairRunning()).toBe(false);
+    const p = runTagRepairOnce("media", cfg());
+    await vi.waitFor(() => expect(getTagRepairProgress()).not.toBeNull());
+    expect(isTagRepairRunning()).toBe(true);
+    release();
+    await p;
+    expect(isTagRepairRunning()).toBe(false);
+  });
+
+  it("startTagRepairScheduler：boot tick 处理队列并推进到点常规扫（lastRunAt 被刷新）", async () => {
+    vi.useFakeTimers();
+    insertSong("s-sched", join(root, "sched.flac"), { hasLyrics: 0 });
+    saveFetchConfigOverride({
+      downloadRoot: root,
+      losslessRoot: "",
+      tagRepairEnabled: true,
+      tagRepairIntervalHours: 1,
+    } as Partial<FetchConfig>);
+    _resetTagRepairForTest(); // lastRunAt 归 0 → tick 会到点跑常规扫
+    parseFileMock.mockResolvedValue(probe());
+    startTagRepairScheduler();
+    await vi.advanceTimersByTimeAsync(15_000); // BOOT_DELAY_MS
+    expect(Number(getSetting("fetch.tagrepair.lastRunAt", "0"))).toBeGreaterThan(0);
   });
 });
 

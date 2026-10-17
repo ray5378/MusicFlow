@@ -244,3 +244,89 @@ describe("finalizeFile", () => {
     ).toThrow(/扩展名/);
   });
 });
+
+// 补充：扩展名回退、根覆盖、覆盖策略等未覆盖分支。
+describe("finalizeFile — 边界分支", () => {
+  /** 落盘后返回最终文件名，供扩展名推导断言。 */
+  function finalName(cacheName: string): string {
+    const cache = makeCache(cacheName, "X");
+    const r = finalizeFile({ cachePath: cache, target: TARGET, config: cfg() });
+    return r.finalPath as string;
+  }
+
+  it("缓存路径的中间后缀(.part/.tmp/.download/.trtmp/.tag)都能推导出真实扩展名", () => {
+    expect(finalName("a.mp3.part")).toBe(join(DL, "A/Al/T - A.mp3"));
+    expect(finalName("b.mp3.tmp")).toBe(join(DL, "A/Al/T - A.mp3"));
+    expect(finalName("c.ogg.download")).toBe(join(DL, "A/Al/T - A.ogg"));
+    expect(finalName("d.m4a.trtmp")).toBe(join(DL, "A/Al/T - A.m4a"));
+    expect(finalName("e.wav.tag")).toBe(join(DL, "A/Al/T - A.wav"));
+    expect(finalName("f.flac")).toBe(join(DL, "A/Al/T - A.flac"));
+  });
+
+  it("probed.container/hint 归一化：去点、转小写；空字符串回退到 hint", () => {
+    const cache = makeCache("g.bin", "X");
+    const r = finalizeFile({
+      cachePath: cache,
+      target: TARGET,
+      probed: { container: ".FLAC" },
+      config: cfg(),
+    });
+    expect(r.finalPath).toBe(join(DL, "A/Al/T - A.flac"));
+
+    const cache2 = makeCache("h.bin", "X");
+    const r2 = finalizeFile({
+      cachePath: cache2,
+      target: TARGET,
+      probed: { container: "" },
+      containerHint: ".WAV",
+      config: cfg(),
+    });
+    expect(r2.finalPath).toBe(join(DL, "A/Al/T - A.wav"));
+  });
+
+  it("destRootOverride：保留命名模板的相对目录结构，只换落盘根", () => {
+    const lossless = join(DL, "lossless");
+    const r = finalizeFile({
+      cachePath: makeCache("i.flac", "L"),
+      target: TARGET,
+      probed: { container: "flac" },
+      config: cfg(),
+      destRootOverride: lossless,
+    });
+    expect(r.action).toBe("write");
+    expect(r.finalPath).toBe(join(lossless, "A/Al/T - A.flac"));
+    expect(r.relativePath).toBe("A/Al/T - A.flac");
+    expect(existsSync(r.finalPath as string)).toBe(true);
+  });
+
+  it("destDirOverride 优先于 destRootOverride", () => {
+    const dest = join(DL, "orig/A/Al");
+    mkdirSync(dest, { recursive: true });
+    const r = finalizeFile({
+      cachePath: makeCache("j.flac", "P"),
+      target: TARGET,
+      probed: { container: "flac" },
+      config: cfg(),
+      destDirOverride: dest,
+      destRootOverride: join(DL, "lossless"),
+    });
+    expect(dirname(r.finalPath as string)).toBe(dest);
+    expect(r.finalPath?.endsWith(".flac")).toBe(true);
+  });
+
+  it("overwriteExisting=true：即便 fileConflictPolicy=skip 也覆盖写入", () => {
+    const target = join(DL, REL);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, "OLD");
+
+    const r = finalizeFile({
+      cachePath: makeCache("k.mp3", "NEW"),
+      target: TARGET,
+      probed: { container: "mp3" },
+      config: cfg({ overwriteExisting: true, fileConflictPolicy: "skip" }),
+    });
+    expect(r.action).toBe("write");
+    expect(r.reusedExisting).toBeUndefined();
+    expect(readFileSync(target, "utf8")).toBe("NEW");
+  });
+});
