@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.27] - 2026-10-18
+
+### Feat
+
+- **标签来源分布（管理端可见统计）**：新增「已修复歌曲用的是哪个来源平台」的管理端可见统计。后端为 `tag_repair_done` 新增 `platform` 列（`ALTER TABLE ADD COLUMN` **幂等**补列，`CREATE TABLE IF NOT EXISTS` 对既有表不补列，故显式补；**旧库既有行保持 `NULL`，不做回填**），`markTagRepairDone()` 增第三参 `platform`：标签修复**真正写入**（`outcome=fixed`）时，把 `searchMetadata()` 命中的来源平台（`qq` / `netease`）透传落库；仅走封面 / 歌词或 DB 兜底（拿不到平台）时落 `NULL`。stats 端点新增 `platforms` 聚合字段（`SELECT platform, COUNT(*) FROM tag_repair_done GROUP BY platform`），**纯 DB 聚合、无任何实时探测**（实时探测会打爆平台 API 并触发限流）。前端「标签修复」区新增「标签来源分布」区块（水平条形：QQ音乐 / 网易云音乐 / 历史（未记录来源），含数量与占比），按 `count` 降序、`NULL` 归一为「历史（未记录来源）」；i18n（zh / en）同增 5 键。
+
+### 测试
+
+- `tagRepair.test.ts` 新增 5 例：QQ 命中 → 完成标记 `platform=qq`、网易云兜底 → `platform=netease`、仅封面修复（无元数据链路）→ `platform=NULL`、来源分布三桶聚合（qq / netease / 空=历史未记录）。
+- 门禁：`npx tsc --noEmit`（backend）= 0；`tests/fetch/tagRepair.test.ts` **32 例全绿**；`npx vue-tsc --noEmit`（frontend）= 0；`backend/scripts/check-*.mjs` 全部 **14** 个守卫通过（含 i18n 键对称校验）。
+
 ## [4.6.26] - 2026-10-17
 
 ### Fix

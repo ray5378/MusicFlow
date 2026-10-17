@@ -71,6 +71,7 @@ import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig, TagRepairScope } from "./config.js";
 import {
   getTagRepairMarkedCount,
+  getTagRepairPlatformCounts,
   isTagRepairMarked,
   markTagRepairDone,
   _resetTagRepairMarkersForTest,
@@ -202,6 +203,10 @@ export interface TagRepairStats {
   total: number;
   pending: number;
   repaired: number;
+  /** 标签来源分布（按完成标记行的 platform 分组聚合，DB 聚合、无实时探测）：
+   *  platform="qq"/"netease"，空串 "" = 历史（未记录来源，旧行 platform 为 NULL）。
+   *  只在管理端展示，反映「已修复的歌用的是哪个平台」。 */
+  platforms: Array<{ platform: string; count: number }>;
 }
 
 /** 运行中进度（仅 running 时非 null）：scan=全量精探阶段 / repair=逐首修复阶段。 */
@@ -262,7 +267,7 @@ function dbStats(): { total: number; pending: number } {
 /** 实时统计（供 API/UI 展示）。 */
 export function getTagRepairStats(): TagRepairStats {
   const { total, pending } = dbStats();
-  return { total, pending, repaired: getTagRepairRepairedTotal() };
+  return { total, pending, repaired: getTagRepairRepairedTotal(), platforms: getTagRepairPlatformCounts() };
 }
 
 // —— 进度写入（仅在一轮运行期间由 sweep/queue 调用；progress 为 null 时全部为 no-op）——
@@ -557,6 +562,9 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   // 其次任一命中来源；无 provider 命中时回落 "tag-repair"）。与下载期 orchestrator.collectExtraTags 同款纪律。
   let srcId: string | null = null;
   let srcBuiltin = false;
+  // 命中的来源平台（"qq" / "netease"）：取自 searchMetadata() 返回值，供完成标记落 platform、
+  // 管理端「标签来源分布」聚合。仅元数据链路能拿到；仅走封面/歌词或 DB 兜底时为 null → 落 NULL。
+  let platformId: string | null = null;
   const onMatch = (providerId: string, builtin: boolean): void => {
     if (!srcId || (builtin && !srcBuiltin)) {
       srcId = providerId;
@@ -606,6 +614,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
     try {
       const meta = await searchMetadata(songInput, { onMatch });
       if (meta) {
+        if (typeof meta.platform === "string" && meta.platform) platformId = meta.platform;
         if (!embedded.album && !dbAlbum && meta.album) tags.album = meta.album;
         if (meta.albumArtist) {
           tags.albumArtist = meta.albumArtist;
@@ -689,13 +698,14 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   // 修复**真正写入**后登记「标签修复完成标记」：后续扫描命中且文件未变即跳过（不再探针/联网）。
   // 此前只在下载期标记 → 实测 tag_repair_done 0 行，修过的歌下轮仍被当候选重扫。
   // src 取命中的来源 provider id，无 provider 命中（仅 DB 专辑兜底）时回落 "tag-repair"。
-  markTagRepairDone(fsPath, srcId ?? "tag-repair");
+  // platform 取 searchMetadata 命中的平台（qq/netease），透传给完成标记供「标签来源分布」聚合。
+  markTagRepairDone(fsPath, srcId ?? "tag-repair", platformId);
   log.info(
     `标签修复完成 song=${songId} file=${fsPath} ` +
       [gotCover ? "+封面" : "", gotLyric ? "+歌词" : "", gotAlbum ? "+专辑" : "", gotMeta ? "+元数据" : ""]
         .filter(Boolean)
         .join("") +
-      ` [src=${srcId ?? "tag-repair"}]`,
+      ` [src=${srcId ?? "tag-repair"} platform=${platformId ?? "-"}]`,
   );
   return { outcome: "fixed", cover: gotCover, lyric: gotLyric, album: gotAlbum, meta: gotMeta };
 }

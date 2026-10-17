@@ -340,6 +340,23 @@
             </div>
           </div>
 
+          <!-- 标签来源分布：按完成标记行的 platform 聚合（QQ音乐 / 网易云音乐 / 历史未记录） -->
+          <div v-if="tagRepairPlatformRows.length" class="tag-repair-source">
+            <div class="source-head">
+              <span class="source-title">{{ t('admin.fetch.tagRepair.sourceTitle') }}</span>
+              <span class="hint">{{ t('admin.fetch.tagRepair.sourceHint') }}</span>
+            </div>
+            <div class="source-rows">
+              <div v-for="row in tagRepairPlatformRows" :key="row.key" class="source-row">
+                <span class="source-name">{{ row.label }}</span>
+                <div class="source-bar">
+                  <div class="source-bar-fill" :style="{ width: row.percent + '%' }" />
+                </div>
+                <span class="source-count">{{ row.count }} · {{ row.percent }}%</span>
+              </div>
+            </div>
+          </div>
+
           <!-- 运行中进度条 -->
           <div v-if="tagRepairStatus.running && tagRepairStatus.progress" class="tag-repair-progress">
             <div class="progress-head">
@@ -522,7 +539,7 @@ const configLoading = ref(false);
 const configSaving = ref(false);
 
 // ==================== 标签缺失修复（2026-10-11；2026-10-16 独立页签 + 双挡位） ====================
-const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, scope: "both", queueSize: 0, running: false, lastResult: null, lastResults: {}, stats: { total: 0, pending: 0, repaired: 0 }, progress: null });
+const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, scope: "both", queueSize: 0, running: false, lastResult: null, lastResults: {}, stats: { total: 0, pending: 0, repaired: 0, platforms: [] }, progress: null });
 const tagRepairSaving = ref(false);
 const tagRepairBusyQueue = ref(false);
 const tagRepairBusyMedia = ref(false);
@@ -558,6 +575,33 @@ const tagRepairStatUnobtainable = computed(() => {
   const p = tagRepairStatus.value.progress;
   if (tagRepairStatus.value.running && p) return p.unobtainable ?? 0;
   return tagRepairStatus.value.lastResult?.unobtainable ?? 0;
+});
+
+// 标签来源分布（按完成标记行的 platform 聚合，后端 DB 聚合、无实时探测）：
+// 把 platform 码映射为可读名并算占比；"" = 历史（未记录来源，旧行 platform 为 NULL）。
+// 只在有数据时展示，且按 count 降序排（QQ 优先命中 → 通常居首）。
+const tagRepairPlatformRows = computed(() => {
+  const list = tagRepairStatus.value.stats?.platforms ?? [];
+  const total = list.reduce((s, r) => s + (r.count ?? 0), 0);
+  return list
+    .filter((r) => (r.count ?? 0) > 0)
+    .map((r) => {
+      const label =
+        r.platform === "qq"
+          ? t("admin.fetch.tagRepair.platformQq")
+          : r.platform === "netease"
+            ? t("admin.fetch.tagRepair.platformNetease")
+            : r.platform
+              ? r.platform
+              : t("admin.fetch.tagRepair.platformUnknown");
+      return {
+        key: r.platform || "__unknown__",
+        label,
+        count: r.count ?? 0,
+        percent: total > 0 ? Math.round(((r.count ?? 0) / total) * 100) : 0,
+      };
+    })
+    .sort((a, b) => b.count - a.count);
 });
 
 // 运行中进度条：scan 阶段为不定长（indeterminate），repair 阶段按 checked/total 显示百分比。
@@ -1147,6 +1191,16 @@ watch(activeTab, (v) => {
 .stat-label { margin-top: 4px; font-size: 12px; color: var(--fnos-text-tertiary); }
 .tag-repair-progress { margin: 0 0 16px; max-width: 720px; }
 .progress-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 12px; color: var(--fnos-text-tertiary); }
+/* 标签来源分布：来源名 + 占比条 + 数量/占比 */
+.tag-repair-source { margin: 0 0 16px; max-width: 720px; }
+.source-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.source-title { font-size: 13px; font-weight: 600; }
+.source-rows { display: flex; flex-direction: column; gap: 8px; }
+.source-row { display: grid; grid-template-columns: 96px 1fr 96px; align-items: center; gap: 10px; }
+.source-name { font-size: 13px; color: var(--fnos-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.source-bar { height: 10px; border-radius: 5px; background: var(--fnos-bg-elevated, rgba(255, 255, 255, 0.06)); overflow: hidden; }
+.source-bar-fill { height: 100%; border-radius: 5px; background: var(--fnos-primary, #409eff); transition: width 0.3s ease; }
+.source-count { font-size: 12px; color: var(--fnos-text-tertiary); text-align: right; white-space: nowrap; }
 
 @media (max-width: 768px) {
   .admin-fetch { padding: 20px 16px; }

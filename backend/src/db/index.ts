@@ -704,10 +704,26 @@ export function initDatabase() {
       size INTEGER NOT NULL DEFAULT 0,
       mtime_ms INTEGER NOT NULL DEFAULT 0,
       src TEXT NOT NULL DEFAULT '',
+      platform TEXT,
       at TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
   `);
+
+  // 结构升级(2026-10-18):tag_repair_done 新增 platform 列(标签来源平台,qq/netease)。
+  // CREATE TABLE IF NOT EXISTS 不会给既有表补列,故显式幂等补列(ALTER TABLE ADD COLUMN)。
+  // 旧库既有行该列为 NULL → 管理端「标签来源分布」归入「历史(未记录来源)」,不回填。
+  try {
+    const cols = (sqlite.prepare("PRAGMA table_info(tag_repair_done)").all() as { name?: unknown }[]).map((c) =>
+      String(c?.name ?? ""),
+    );
+    if (!cols.includes("platform")) {
+      sqlite.exec("ALTER TABLE tag_repair_done ADD COLUMN platform TEXT");
+      log.info("tag_repair_done 新增 platform 列(标签来源平台)");
+    }
+  } catch (e) {
+    log.warn(`tag_repair_done 补 platform 列失败: ${e instanceof Error ? e.message : e}`);
+  }
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.

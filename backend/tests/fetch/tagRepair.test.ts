@@ -41,7 +41,7 @@ import {
   getTagRepairProgress,
   getTagRepairRepairedTotal,
 } from "../../src/services/fetch/tagRepair.js";
-import { markTagRepairDone, isTagRepairMarked } from "../../src/services/fetch/tagRepairMarker.js";
+import { markTagRepairDone, isTagRepairMarked, getTagRepairPlatformCounts } from "../../src/services/fetch/tagRepairMarker.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
 
 // 退避重试测试加速：单元测试无需真等 3s / 6s / 12s（见 tagRepair.ts 的 tagRetryDelaysMs）。
@@ -380,6 +380,75 @@ describe("repairSongTags", () => {
     const r = await repairSongTags("s-mn", cfg());
     expect(r.outcome).toBe("unobtainable");
     expect(isTagRepairMarked(p)).toBe(false);
+  });
+
+  it("来源平台透传：searchMetadata 命中 QQ → 完成标记 platform=qq（供来源分布聚合）", async () => {
+    const p = join(root, "plat-qq.flac");
+    insertSong("s-pq", p);
+    parseFileMock.mockResolvedValueOnce(probe({ meta: false }));
+    // 模拟真实 providers.searchMetadata：拿到 meta 前先回调 onMatch（providerId=tag-provider）。
+    searchMetadataMock.mockImplementationOnce(async (_song: unknown, opts?: { onMatch?: (id: string, b: boolean) => void }) => {
+      opts?.onMatch?.("tag-provider", true);
+      return { albumArtist: "测试专辑艺术家", track: 3, year: 2024, genre: "Pop", platform: "qq" };
+    });
+
+    const r = await repairSongTags("s-pq", cfg());
+    expect(r.outcome).toBe("fixed");
+    const row = sqlite
+      .prepare("SELECT src, platform FROM tag_repair_done WHERE fs_path = ?")
+      .get(p) as { src: string; platform: string | null };
+    expect(row.src).toBe("tag-provider");
+    expect(row.platform).toBe("qq");
+  });
+
+  it("来源平台透传：QQ 落空、网易云兜底命中 → 完成标记 platform=netease", async () => {
+    const p = join(root, "plat-ns.flac");
+    insertSong("s-pns", p);
+    parseFileMock.mockResolvedValueOnce(probe({ meta: false }));
+    searchMetadataMock.mockImplementationOnce(async (_song: unknown, opts?: { onMatch?: (id: string, b: boolean) => void }) => {
+      opts?.onMatch?.("tag-provider", true);
+      return { albumArtist: "测试专辑艺术家", platform: "netease" };
+    });
+
+    const r = await repairSongTags("s-pns", cfg());
+    expect(r.outcome).toBe("fixed");
+    const row = sqlite
+      .prepare("SELECT platform FROM tag_repair_done WHERE fs_path = ?")
+      .get(p) as { platform: string | null };
+    expect(row.platform).toBe("netease");
+  });
+
+  it("来源平台透传：仅封面修复（无元数据链路）→ platform 为 NULL，归入「历史/未记录来源」", async () => {
+    const p = join(root, "plat-null.flac");
+    insertSong("s-pn", p);
+    parseFileMock.mockResolvedValueOnce(probe({ cover: false }));
+    searchCoverMock.mockResolvedValueOnce("http://x/c.jpg");
+    cacheRemoteCoverMock.mockResolvedValueOnce("tagfix.jpg");
+    resolveCoverFileMock.mockReturnValueOnce(join(tmpDir, "cover.jpg"));
+
+    const r = await repairSongTags("s-pn", cfg());
+    expect(r.outcome).toBe("fixed");
+    const row = sqlite
+      .prepare("SELECT platform FROM tag_repair_done WHERE fs_path = ?")
+      .get(p) as { platform: string | null };
+    expect(row.platform).toBeNull();
+  });
+
+  it("来源平台分布聚合：platform 分 qq/netease/空（历史未记录）三桶", () => {
+    const f1 = join(root, "c1.flac");
+    const f2 = join(root, "c2.flac");
+    const f3 = join(root, "c3.flac");
+    for (const f of [f1, f2, f3]) {
+      mkdirSync(dirname(f), { recursive: true });
+      writeFileSync(f, "x");
+    }
+    markTagRepairDone(f1, "tag-provider", "qq");
+    markTagRepairDone(f2, "tag-provider", "netease");
+    markTagRepairDone(f3, "tag-repair"); // 无平台 → NULL
+    const map = Object.fromEntries(getTagRepairPlatformCounts().map((c) => [c.platform, c.count]));
+    expect(map["qq"]).toBe(1);
+    expect(map["netease"]).toBe(1);
+    expect(map[""]).toBe(1);
   });
 
   it("TAG_FAILED → 指数退避重试，第 2 次成功即修复（吸收 NAS 存储层瞬时抖动）", async () => {

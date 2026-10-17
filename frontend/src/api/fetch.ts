@@ -377,6 +377,9 @@ export interface TagRepairStats {
   total: number;
   pending: number;
   repaired: number;
+  /** 标签来源分布（按完成标记行的 platform 分组聚合）：platform="qq"/"netease"，
+   *  空串 "" 表示历史（未记录来源）。后端 DB 聚合，不含实时探测。 */
+  platforms: Array<{ platform: string; count: number }>;
 }
 
 /** 运行中进度（空闲为 null）：phase=scan 精探阶段 / repair 修复阶段。 */
@@ -419,7 +422,7 @@ const EMPTY_TAG_REPAIR_STATUS: TagRepairStatus = {
   running: false,
   lastResult: null,
   lastResults: {},
-  stats: { total: 0, pending: 0, repaired: 0 },
+  stats: { total: 0, pending: 0, repaired: 0, platforms: [] },
   progress: null,
 };
 

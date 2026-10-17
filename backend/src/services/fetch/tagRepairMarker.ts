@@ -25,6 +25,7 @@ interface MarkerRow {
   size: number;
   mtime_ms: number;
   src: string;
+  platform: string | null;
   at: string;
 }
 
@@ -32,7 +33,7 @@ interface MarkerRow {
 function loadMarker(fsPath: string): MarkerRow | null {
   return (
     (sqlite
-      .prepare("SELECT fs_path, size, mtime_ms, src, at FROM tag_repair_done WHERE fs_path = ?")
+      .prepare("SELECT fs_path, size, mtime_ms, src, platform, at FROM tag_repair_done WHERE fs_path = ?")
       .get(fsPath) as MarkerRow | undefined) ?? null
   );
 }
@@ -48,8 +49,11 @@ function deleteMarker(fsPath: string): void {
 /**
  * 登记「下载期已由内置标签来源打好标签」。仅当文件确实存在时写入。
  * 幂等:同一路径重复落盘(如原地替换/洗版)以最新一次 size/mtime 为准。
+ *
+ * platform:本次命中的来源平台("qq" / "netease"),供管理端「标签来源分布」聚合展示;
+ * 拿不到平台(如仅走封面/歌词或 DB 兜底)时传 undefined → 落 NULL,归入「历史/未记录来源」。
  */
-export function markTagRepairDone(fsPath: string, src: string): boolean {
+export function markTagRepairDone(fsPath: string, src: string, platform?: string | null): boolean {
   if (!fsPath) return false;
   let st;
   try {
@@ -61,12 +65,19 @@ export function markTagRepairDone(fsPath: string, src: string): boolean {
   try {
     sqlite
       .prepare(
-        `INSERT INTO tag_repair_done (fs_path, size, mtime_ms, src, at)
-           VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO tag_repair_done (fs_path, size, mtime_ms, src, platform, at)
+           VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(fs_path) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms,
-                                            src = excluded.src, at = excluded.at`,
+                                            src = excluded.src, platform = excluded.platform, at = excluded.at`,
       )
-      .run(fsPath, Number(st.size) || 0, Math.floor(Number(st.mtimeMs) || 0), src || "", new Date().toISOString());
+      .run(
+        fsPath,
+        Number(st.size) || 0,
+        Math.floor(Number(st.mtimeMs) || 0),
+        src || "",
+        platform ? String(platform) : null,
+        new Date().toISOString(),
+      );
     return true;
   } catch (e) {
     log.warn(`标记写入失败 fs=${fsPath}: ${e instanceof Error ? e.message : e}`);
@@ -114,6 +125,22 @@ export function getTagRepairMarkedCount(): number {
     return Number((sqlite.prepare("SELECT COUNT(*) AS n FROM tag_repair_done").get() as { n: number })?.n) || 0;
   } catch {
     return 0;
+  }
+}
+
+/**
+ * 按 source platform 分组统计完成标记行数(供管理端「标签来源分布」)。
+ * DB 聚合,不做任何实时探测(实时探测会打爆平台 API 并触发限流)。
+ * platform 为 NULL 的历史行归一为空串 "",前端据此归入「历史(未记录来源)」。
+ */
+export function getTagRepairPlatformCounts(): Array<{ platform: string; count: number }> {
+  try {
+    const rows = sqlite
+      .prepare("SELECT platform, COUNT(*) AS n FROM tag_repair_done GROUP BY platform")
+      .all() as Array<{ platform: string | null; n: number }>;
+    return rows.map((r) => ({ platform: r.platform == null ? "" : String(r.platform), count: Number(r.n) || 0 }));
+  } catch {
+    return [];
   }
 }
 

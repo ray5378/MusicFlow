@@ -240,6 +240,8 @@ export const tagRepairDone = sqliteTable("tag_repair_done", {
   mtimeMs: integer("mtime_ms").notNull().default(0),
   /** 打上标签的来源 provider id(如内置 tag-provider);审计用。 */
   src: text("src").notNull().default(""),
+  /** 标签来源平台("qq" / "netease");旧行为 NULL → 管理端归入「历史(未记录来源)」。 */
+  platform: text("platform"),
   at: text("at").notNull().default(""),
 });
 
