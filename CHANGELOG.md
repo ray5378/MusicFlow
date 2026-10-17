@@ -10,7 +10,7 @@
 
 ### Docs
 
-- **补齐随仓库分发的运行身份开关（`PUID` / `PGID`）**：`entrypoint.sh` 自 α 方案起已支持 `PUID` / `PGID`（默认镜像内 `musicflow` 用户 `uid=100` / `gid=101`，传 `0` 以 root 运行，不传则与历史完全一致），但 `docker-compose.yml` 与 `README.md` 内嵌的 compose 示例**均未列出这两个变量**，用户无从得知该开关存在。现于两处 `environment:` 段补齐 `- PUID=${PUID:-}` / `- PGID=${PGID:-}`（附成因注释），并新增 README「运行身份（PUID / PGID）」小节：说明默认身份、触发场景（多身份共享写入的库 + 写标签需目录写权限 → `ffmpeg 写标签失败(exit=243) Permission denied`）、为何 chown / ACL 只是治标（btrfs `trimacl` 挂载使 ACL 只存 xattr、不参与权限判定），以及 `PUID=0 / PGID=0` 解法。
+- **补齐随仓库分发的运行身份开关（`PUID` / `PGID`）**：`entrypoint.sh` 自 α 方案起已支持 `PUID` / `PGID`（不传时默认镜像内 `musicflow` 用户 `uid=100` / `gid=101`，传 `0` 以 root 运行），但 `docker-compose.yml` 与 `README.md` 内嵌的 compose 示例**均未列出这两个变量**，用户无从得知该开关存在。现于两处 `environment:` 段补齐 `- PUID=${PUID:-0}` / `- PGID=${PGID:-0}`（附成因注释）——**默认 `0:0`（root）与生产环境一致**，从根上消除「库内条目属主不是应用 uid → 写标签报 `ffmpeg 写标签失败(exit=243) Permission denied`」的结构性矛盾；仍可由宿主 `PUID` / `PGID` 环境变量覆盖（设 `100` / `101` 即改用镜像内 `musicflow` 用户、最小权限运行）。并新增 README「运行身份（PUID / PGID）」小节：说明默认 root 的原因、触发场景（多身份共享写入的库 + 写标签需目录写权限）、为何 chown / ACL 只是治标（btrfs `trimacl` 挂载使 ACL 只存 xattr、不参与权限判定），以及如何改回非 root 运行。
 
 ### 测试
 
