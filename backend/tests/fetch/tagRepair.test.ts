@@ -560,6 +560,53 @@ describe("tagRepair stats/progress", () => {
     expect(getTagRepairProgress()).toBeNull();
   });
 
+  it("修正5：progress 三档完整拆分 —— 已处理 == 已修复 + 跳过 + 未获取到", async () => {
+    // 三首分别对应三条结果路径（按插入顺序被常规扫遍历）：
+    //   u1 缺封面且 provider 拿不到 → unobtainable
+    //   u2 文件其实齐 → skip
+    //   u3 缺歌词且拿到 → fixed（在取词处卡住，以便观察运行中的进度快照）
+    const f1 = join(root, "u1.flac");
+    const f2 = join(root, "u2.flac");
+    const f3 = join(root, "u3.flac");
+    insertSong("u1", f1, { hasLyrics: 0 });
+    insertSong("u2", f2, { hasLyrics: 0 });
+    insertSong("u3", f3, { hasLyrics: 0 });
+    parseFileMock.mockImplementation(async (p: string) => {
+      if (String(p).includes("u1.flac")) return probe({ cover: false, lyric: true });
+      if (String(p).includes("u2.flac")) return probe();
+      return probe({ cover: true, lyric: false });
+    });
+    searchCoverMock.mockResolvedValue(null); // u1 拿不到封面 → unobtainable
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchLyricsMock.mockImplementation(async () => {
+      await gate;
+      return "[00:01]词";
+    });
+
+    const p = runTagRepairOnce("media", cfg());
+    await vi.waitFor(() => expect(getTagRepairProgress()).not.toBeNull());
+    // 等前两首处理完、第三首在途：三档必须已完整归属，且之和 == 已处理。
+    // （旧实现只传 fixed/skipped 两个增量，unobtainable 无归属 → 此处 checked(2) ≠ fixed+skipped(1)。）
+    await vi.waitFor(() => expect(getTagRepairProgress()!.checked).toBe(2));
+    const live = getTagRepairProgress()!;
+    expect(live.phase).toBe("repair");
+    expect(live.unobtainable).toBe(1);
+    expect(live.skipped).toBe(1);
+    expect(live.fixed).toBe(0);
+    expect(live.checked).toBe(live.fixed + live.skipped + live.unobtainable);
+    release();
+    const { busy, result } = await p;
+    expect(busy).toBe(false);
+    // 终态：分项之和 == 已处理，且三条路径各 1 首。
+    expect(result?.checked).toBe(
+      (result?.fixed ?? 0) + (result?.skipped ?? 0) + (result?.unobtainable ?? 0),
+    );
+    expect(result?.unobtainable).toBe(1);
+    expect(result?.fixed).toBe(1);
+    expect(result?.skipped).toBe(1);
+  });
+
   it("「已修复」口径 = 完成标记数（真写入与探针确认齐备都打标记）", async () => {
     // DB 声明缺歌词，但文件实际有歌词 → 走 skip（只对齐 DB），不计 fixed。
     insertSong("pj1", join(root, "k.flac"), { hasLyrics: 0 });

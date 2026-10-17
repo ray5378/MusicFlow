@@ -320,7 +320,7 @@
             <el-button size="small" @click="loadTagRepairStatus"><MfIcon name="RefreshCw" />{{ t('admin.fetch.tagRepair.reload') }}</el-button>
           </div>
 
-          <!-- 实时统计：已修复 / 待修复 / 全部 -->
+          <!-- 实时统计：已修复 / 待修复 / 全部 / 未获取到 -->
           <div class="tag-repair-stats">
             <div class="stat-card">
               <div class="stat-value">{{ tagRepairStatRepaired }}</div>
@@ -333,6 +333,10 @@
             <div class="stat-card">
               <div class="stat-value">{{ tagRepairStatTotal }}</div>
               <div class="stat-label">{{ t('admin.fetch.tagRepair.statTotal') }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">{{ tagRepairStatUnobtainable }}</div>
+              <div class="stat-label">{{ t('admin.fetch.tagRepair.statUnobtainable') }}</div>
             </div>
           </div>
 
@@ -547,6 +551,14 @@ const tagRepairStatPending = computed(() => {
   return tagRepairStatus.value.stats?.pending ?? 0;
 });
 const tagRepairStatTotal = computed(() => tagRepairStatus.value.stats?.total ?? 0);
+// 未获取到（本轮）：运行中取本轮实时值；空闲取上一轮结果（后端 lastResult.unobtainable），两处口径一致。
+// 【2026-10-17 修正 5】此前界面只展示「已修复 / 跳过」，本轮「真缺但拿不到」的量无处可见，
+// 导致「已修复 + 跳过」与「已处理」对不上；补齐该维度后 repair 阶段三项之和恒等于已处理。
+const tagRepairStatUnobtainable = computed(() => {
+  const p = tagRepairStatus.value.progress;
+  if (tagRepairStatus.value.running && p) return p.unobtainable ?? 0;
+  return tagRepairStatus.value.lastResult?.unobtainable ?? 0;
+});
 
 // 运行中进度条：scan 阶段为不定长（indeterminate），repair 阶段按 checked/total 显示百分比。
 const tagRepairProgressIndeterminate = computed(() => tagRepairStatus.value.progress?.phase === "scan");
@@ -564,11 +576,18 @@ const tagRepairProgressLabel = computed(() => {
 const tagRepairProgressText = computed(() => {
   const p = tagRepairStatus.value.progress;
   if (!p) return "";
+  // scan 阶段只精探文件头、不产生修复结果，故只报精探进度（此阶段 fixed/skipped/unobtainable 恒为 0，
+  // 若与「已处理」并列展示会造成「三项之和 ≠ 已处理」的假不一致）。
+  if (p.phase === "scan") {
+    return t("admin.fetch.tagRepair.progressTextScan", { checked: p.checked, total: p.total });
+  }
+  // repair 阶段给出完整拆分：已修复 + 跳过 + 未获取到 == 已处理。
   return t("admin.fetch.tagRepair.progressText", {
     checked: p.checked,
     total: p.total,
     fixed: p.fixed,
     skipped: p.skipped ?? 0,
+    unobtainable: p.unobtainable ?? 0,
   });
 });
 
@@ -1122,18 +1141,18 @@ watch(activeTab, (v) => {
 .tag-repair-alert { margin: 4px 0 12px; }
 .tag-repair-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 16px; }
 .tag-repair-write-hint { margin-top: 8px; }
-.tag-repair-stats { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 12px; margin: 4px 0 16px; max-width: 560px; }
+.tag-repair-stats { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px; margin: 4px 0 16px; max-width: 720px; }
 .stat-card { background: var(--fnos-bg-elevated, rgba(255, 255, 255, 0.04)); border: 1px solid var(--fnos-border, rgba(255, 255, 255, 0.1)); border-radius: 8px; padding: 12px 16px; text-align: center; }
 .stat-value { font-size: 26px; font-weight: 700; line-height: 1.2; }
 .stat-label { margin-top: 4px; font-size: 12px; color: var(--fnos-text-tertiary); }
-.tag-repair-progress { margin: 0 0 16px; max-width: 560px; }
+.tag-repair-progress { margin: 0 0 16px; max-width: 720px; }
 .progress-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 12px; color: var(--fnos-text-tertiary); }
 
 @media (max-width: 768px) {
   .admin-fetch { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
   .config-grid { grid-template-columns: 1fr; }
-  .tag-repair-stats { grid-template-columns: repeat(3, 1fr); max-width: 100%; }
+  .tag-repair-stats { grid-template-columns: repeat(2, 1fr); max-width: 100%; }
   .jobs-filters { width: 100%; }
   /* 详情弹窗手机端:统计行距收紧、路径等长文本可断行,防压叠 */
   .detail-head { flex-direction: column; align-items: flex-start; }

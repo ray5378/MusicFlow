@@ -384,11 +384,14 @@ export interface TagRepairProgress {
   mode: TagRepairMode;
   phase: "scan" | "repair";
   total: number;
+  /** 当前阶段已处理数；repair 阶段恒等于 fixed + skipped + unobtainable。 */
   checked: number;
   /** 本轮实际写文件的歌数。 */
   fixed: number;
   /** 本轮跳过（无需修 / 命中下载期完成标记）的歌数；仅用于本轮进度文案，不参与「已修复」计数。 */
   skipped: number;
+  /** 本轮真缺标签但**拿不到**（含探测/写入异常）的歌数；仅用于本轮进度文案。 */
+  unobtainable: number;
   startedAt: number;
 }
 

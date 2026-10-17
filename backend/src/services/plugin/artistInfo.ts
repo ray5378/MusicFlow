@@ -33,10 +33,14 @@ export interface ArtistInfoResult {
 }
 
 // ---- QQ 音乐:搜歌找 singer mid → 拼 CDN 头像 URL ----
+// 【2026-10-17 换接口】原 `soso/fcgi-bin/client_search_cp` 在 240 生产实测**恒 HTTP 500、
+// 响应体 0 字节**(代理/直连/Referer/Cookie 四种变体全 500),导致 QQ 歌手头像恒抓不到、
+// 只能退网易云。同家族的 `soso/fcgi-bin/search_for_qq_cp` 200,且 **`singer[].mid` 仍然存在**
+// (实测「周杰伦」→ mid=0025NhlN2yWrP4),故此处同样换用该端点。返回结构一致(仍读 singer[])。
 async function scrapeFromQQ(name: string): Promise<ArtistInfoResult | null> {
   const q = encodeURIComponent(name);
   const data = await fetchJson(
-    `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=5&w=${q}&format=json`,
+    `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?p=1&n=5&w=${q}&format=json`,
     { Referer: "https://y.qq.com/" },
   );
   const songList = data?.data?.song?.list || [];

@@ -1780,9 +1780,11 @@
         "statRepaired": "Repaired",
         "statPending": "Pending",
         "statTotal": "Total",
+        "statUnobtainable": "Unobtainable (latest)",
         "phaseScan": "Scanning tags",
         "phaseRepair": "Repairing",
-        "progressText": "Processed {checked}/{total}, repaired {fixed}, skipped {skipped}",
+        "progressText": "Processed {checked}/{total}, repaired {fixed}, skipped {skipped}, unobtainable {unobtainable}",
+        "progressTextScan": "Scanned {checked}/{total}",
         "writeHint": "Tags are written into the audio file (atomic write; the original file is never corrupted). Cover/lyrics are only written when actually obtained."
       },
       "upgrade": {

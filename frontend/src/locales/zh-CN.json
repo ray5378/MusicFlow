@@ -1780,9 +1780,11 @@
         "statRepaired": "已修复",
         "statPending": "待修复",
         "statTotal": "全部",
+        "statUnobtainable": "未获取到（本轮）",
         "phaseScan": "精探文件头",
         "phaseRepair": "修复中",
-        "progressText": "已处理 {checked}/{total}，已修复 {fixed}，跳过 {skipped}",
+        "progressText": "已处理 {checked}/{total}，已修复 {fixed}，跳过 {skipped}，未获取到 {unobtainable}",
+        "progressTextScan": "已精探 {checked}/{total}",
         "writeHint": "修复直接写入音频文件(原子写,失败不破坏原文件);封面/歌词先探测拿得到才写。"
       },
       "upgrade": {

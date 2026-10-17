@@ -7,7 +7,7 @@
 // 数据源:**QQ 音乐(默认) + 网易云音乐(兜底)**。每个能力方法（searchMetadata/searchCover/
 // searchLyrics）内部都是「先跑 QQ 循环，QQ 拿不到再跑网易云循环」的两段式——产品定调
 //   2026-10-17：QQ 音乐是默认获取标签的选择，网易云音乐只作 QQ 拿不到的**补充链路**。
-//   - QQ：用**真搜索接口** client_search_cp(关键词 = 标题 [+空格+歌手])拿候选(自带秒级时长)
+//   - QQ：用**真搜索接口** search_for_qq_cp(关键词 = 标题 [+空格+歌手])拿候选(自带秒级时长)
 //     → 过标题/歌手/时长三闸门 → 再用 musicu 详情取轨号/年份/专辑/风格，封面由 album.mid
 //     拼 CDN，歌词走 lyric 接口；
 //   - 网易云：POST /api/search/get 拿候选（时长字段是**毫秒**，必须换算成秒才能过 ±5s 闸门）
@@ -20,6 +20,11 @@
 //     300~800ms 随机抖动（实际间隔 1.5~2.0s），防止同一出口 IP 高频访问被风控封禁；
 //     三处 QQ 调用（搜索/详情/歌词）共用同一条串行队列，故一次修复内的多次 QQ 往返也按序限速。
 //     网易云链路不受此限（产品只要求限制 QQ）。
+//   - **同曲多能力往返去重**（2026-10-17 提速·修正 6）：核心对同一首歌是**分别**调用
+//     searchMetadata / searchCover / searchLyrics 的；若三个能力各自独立跑「搜索 → 详情」，
+//     同一首要打 6 次 QQ 往返。实测 240 生产单首稳定 10.6~10.9s ≈ 6 × 1.8s，本地耗时≈0
+//     —— 瓶颈是**重复往返**，而不是限速值本身（限速并未被逼近）。故对纯查询结果加短 TTL
+//     内存 memo，收敛为 1×搜索 + 1×详情 + 1×歌词：请求数与耗时都近乎减半，且不增加 CPU/网络。
 //   - 任何情况都不抛异常,拿不到就返回 null;
 //   - 拿不到的字段一律不填(绝不臆造 —— 例如风格只在详情接口的**同级 info 块**
 //     `info.genre.content[].value` 给出可读名时才用;`track_info.genre` 只是数字码、
@@ -27,8 +32,24 @@
 //
 // 【2026-10-17 修正·命中率】原先打 smartbox 联想接口(splcloud/fcgi-bin/smartbox_new.fcg),
 // 它只回热门联想词 —— 实测 240 生产库抽样 30 首有 22 首零候选(整体命中率仅约 11.6%);
-// 换真搜索接口 client_search_cp 后 12/12 都找到目标曲、9/12 时长吻合。另:scanner 对「无
+// 换真搜索接口后 12/12 都找到目标曲、9/12 时长吻合。另:scanner 对「无
 // 歌手标签文件」写入的占位值(Unknown Artist 等)会被拼进关键词导致恒 0 结果,故占位值一律当空歌手。
+//
+// 【2026-10-17 修正·端点被挡（本文件本轮改动主线）】240 生产实测:同关键词、同 proxyFetch
+// 出网通道、同样带 y.qq.com Referer 下，`soso/fcgi-bin/client_search_cp` **恒返回 HTTP 500、
+// 响应体 0 字节(text/html)**（代理/直连、带/不带 Referer、带/不带 Cookie 四种变体全部 500），
+// 而同家族的 `soso/fcgi-bin/search_for_qq_cp` **HTTP 200、10 条候选、字段同构**
+// （`data.song.list[]` 的 `mid/title/singer[].name/interval` 完全一致）。
+// 后果：QQ 侧恒 0 候选 → 所有歌被迫压到网易云兜底 → 网易云对中文冷门/长标题覆盖差 →
+// 「未获取到」占比虚高（实测抽样 6 首里 4 首三个能力全 null，而换端点后 6/6 都能拿到候选）。
+// 故本插件换用 search_for_qq_cp。**这不是元数据解析问题**——详情/歌词接口仍 200，解析口径未变。
+//
+// 【2026-10-17 修正·闸门误杀】上述端点恢复后，抽样 40 首仍有两类恒被拒的真同一首：
+//   1. DB 标题带「主标题 - 歌手」后缀(scanner 落库形态，全库 391/3506=11%)，
+//      旧闸门要求归一化后**精确相等** → 恒拒；本轮加「去尾部 ` - xxx`」的标题变体(仍精确相等，不模糊匹配)；
+//   2. 平台常用繁体登记、DB 简体（或反之），字形差异导致标题/歌手恒不匹配（实测 `純白P`↔`纯白P`、
+//      `緋色の雪`↔`绯色の雪`）；本轮在**匹配比较**侧统一折算到简体（`applyVariant(t,"simplified")`），
+//      写入侧仍按用户所选字形由 applyTagsVariant 输出，不影响成品字形。
 //
 // 【2026-10-17 修正】原先只读 `req.data.track_info`，于是误判「QQ 无风格名」而省略 genre；
 // 实测 `req.data.info.genre.content[].value` 直接给可读风格（如「告白气球」= "R&B"、
@@ -43,6 +64,10 @@ import type {
   SongMetadata,
 } from "../../plugins/types.js";
 import type { PluginHost } from "../../plugins/host.js";
+// 中文简繁字形表(200KB+ 词表，与 tagWriter 写入侧共用同一份)：仅用于**匹配比较**把两侧
+// 折算到简体，避免「平台繁体登记 vs DB 简体」造成的恒不匹配。**不参与写入**——成品字形
+// 仍由 applyTagsVariant 按用户所选字形输出。
+import { applyVariant } from "../../utils/chineseConv.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 /** 单次请求超时(毫秒),落在任务要求的 8–12s 区间。 */
@@ -112,6 +137,47 @@ function qqRequestJson(host: PluginHost, url: string, init: any = {}): Promise<a
   return qqThrottled(() => requestJson(host, url, init));
 }
 
+// ---------- 同一首歌多能力调用的往返去重（memo）----------
+//
+// 【2026-10-17 提速·修正 6】核心对**同一首歌**是分别调用 searchMetadata / searchCover /
+// searchLyrics 的，而这三个能力此前各自独立跑一遍「搜索 →（详情 / 歌词）」：同一首歌要打
+// 6 次 QQ 往返（2×搜索 + 2×详情 + 1×歌词 + 视需要再 1 次详情）。
+// 实测 240 生产：`+歌词+元数据` 的歌耗时稳定落在 10.6~10.9s ≈ 6 × 1.8s
+//（QQ 全局限流 1.2s + 300~800ms 抖动），而本地耗时≈0 —— 时间**全部花在重复往返**上，
+// 并非被「API 限速」本身卡住（限速值并未被逼近）。
+//
+// 这里给「纯查询」结果加一层**短 TTL + 有容量上限**的内存 memo，把同一首歌的三次能力调用
+// 收敛为 1×搜索 + 1×详情 + 1×歌词：QQ 往返 6 → 3、单首 10.8s → ~5.4s（≈2x），
+// 且**请求数与 CPU 消耗只减不增**（少两轮限速等待、少解析两次 JSON）。
+//
+// 安全性（标签必须求稳）：
+//   - 键 = 归一化后的搜索关键词（标题 [+空格+歌手]）或曲 mid → 同一键必指同一批候选 / 同一首曲；
+//   - 时长 ±5s 闸门、标题/歌手闸门全部由**调用方**在拿到候选后自行判定，本层只缓存平台的
+//     原始响应，不参与任何匹配决策，故不会改变命中判定；
+//   - **只缓存成功响应**：HTTP 失败 / 超时 / 非 JSON（requestJson 返回 null）一律不写缓存，
+//     瞬时网络抖动不会被固化，后续调用仍会重新请求，命中率与改动前完全一致；
+//   - TTL 仅 180s：只覆盖同一首歌相邻的几次能力调用，绝不跨修复轮次复用；
+//   - 容量上限 2000 条，超出即整体清空 → 内存有界。
+const MEMO_TTL_MS = 180_000;
+const MEMO_MAX = 2000;
+const memo = new Map<string, { at: number; val: unknown }>();
+
+function memoGet<T>(key: string): T | undefined {
+  const hit = memo.get(key);
+  if (hit && Date.now() - hit.at < MEMO_TTL_MS) return hit.val as T;
+  return undefined;
+}
+
+function memoSet(key: string, val: unknown): void {
+  if (memo.size >= MEMO_MAX) memo.clear();
+  memo.set(key, { at: Date.now(), val });
+}
+
+/** 仅供测试：清空 memo，避免用例之间串味。 */
+export function __resetTagProviderMemo(): void {
+  memo.clear();
+}
+
 // ---------- 平台请求 ----------
 
 /** 搜索候选(归一化后的统一形状)。 */
@@ -128,24 +194,36 @@ interface QqCandidate {
  * 搜索:关键词(标题 [+ 空格 + 歌手])→ 候选。
  *
  * 【2026-10-17 换接口】原打 smartbox 联想接口,它只回热门联想词,实测生产库抽样 73% 的歌
- * 零候选(整体命中率仅 11.6%);改用**真搜索** client_search_cp 后 100% 有候选。候选归一化
- * 为 `{mid,name,singerName,interval}`;搜索结果自带 interval(秒),故时长预筛在搜索阶段即可
- * 完成,只有通过者才进详情调用(省一次网络往返)。
+ * 零候选(整体命中率仅 11.6%);后改用**真搜索** client_search_cp。但 2026-10-17 生产实测发现
+ * `client_search_cp` **恒 HTTP 500、响应体 0 字节**（代理/直连/Referer/Cookie 四种变体全 500），
+ * 导致 QQ 侧恒 0 候选、所有歌被压到网易云兜底；同家族的 `search_for_qq_cp` 则 **200、10 条候选、
+ * 字段同构**（实测 40 首零候选 0 首）。故本函数固定使用 `search_for_qq_cp`。
+ * 候选归一化为 `{mid,name,singerName,interval}`;搜索结果自带 interval(秒),故时长预筛在搜索阶段
+ * 即可完成,只有通过者才进详情调用(省一次网络往返)。
  */
 async function qqSearch(host: PluginHost, title: string, artist: string): Promise<QqCandidate[]> {
   const kw = artist ? `${title} ${artist}` : title;
-  const url = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=" + encodeURIComponent(kw)
+  // 去重：同一首歌的三个能力都走同一个关键词 → 三次搜索收敛成一次。
+  const memoKey = `qq:s:${kw}`;
+  const cached = memoGet<QqCandidate[]>(memoKey);
+  if (cached) return cached;
+
+  const url = "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?w=" + encodeURIComponent(kw)
     + "&format=json&p=1&n=10&cr=1&new_json=1";
   const data = await qqRequestJson(host, url, { headers: { Referer: "https://y.qq.com/" } });
+  // 请求失败（null）不写缓存：宁可下次多打一次，也不把瞬时抖动固化成「无候选」。
+  if (data === null) return [];
   const list = data?.data?.song?.list;
-  if (!Array.isArray(list)) return [];
   const out: QqCandidate[] = [];
-  for (const s of list) {
-    const mid = String(s?.mid ?? s?.songmid ?? "");
-    const name = String(s?.title ?? s?.songname ?? "");
-    if (!mid || !name) continue;
-    out.push({ mid, name, singerName: pickSingerName(s), interval: Number(s?.interval) || 0 });
+  if (Array.isArray(list)) {
+    for (const s of list) {
+      const mid = String(s?.mid ?? s?.songmid ?? "");
+      const name = String(s?.title ?? s?.songname ?? "");
+      if (!mid || !name) continue;
+      out.push({ mid, name, singerName: pickSingerName(s), interval: Number(s?.interval) || 0 });
+    }
   }
+  memoSet(memoKey, out);
   return out;
 }
 
@@ -167,6 +245,11 @@ function pickSingerName(s: any): string {
  *     `info.genre.content[].value` 是**可读风格名**（如 "R&B"、"Pop"、"民谣"）。
  */
 async function qqSongDetail(host: PluginHost, mid: string): Promise<{ track: any; info: any } | null> {
+  // 去重：封面与元数据两个能力都会对同一个 mid 取详情 → 收敛成一次。
+  const memoKey = `qq:d:${mid}`;
+  const cached = memoGet<{ track: any; info: any }>(memoKey);
+  if (cached) return cached;
+
   const body = JSON.stringify({
     comm: { ct: 24, cv: 0 },
     req: {
@@ -181,8 +264,10 @@ async function qqSongDetail(host: PluginHost, mid: string): Promise<{ track: any
     body,
   });
   const d = data?.req?.data;
-  if (!d?.track_info) return null;
-  return { track: d.track_info, info: d.info || {} };
+  if (!d?.track_info) return null; // 未命中 / 失败：不写缓存
+  const out = { track: d.track_info, info: d.info || {} };
+  memoSet(memoKey, out);
+  return out;
 }
 
 /** 从 `req.data.info.genre.content[].value` 取**可读**风格名（多个用 `/` 连接）；取不到返回 undefined。 */
@@ -250,45 +335,60 @@ interface NsCandidate {
 /** 搜索（关键词 = 标题 [+空格+歌手]）→ 候选。 */
 async function nsSearch(host: PluginHost, title: string, artist: string): Promise<NsCandidate[]> {
   const kw = artist ? `${title} ${artist}` : title;
+  // 去重：QQ 未命中时是**逐个能力**走兜底链路 → 同一首歌会搜三次网易云，这里收敛成一次。
+  const memoKey = `ns:s:${kw}`;
+  const cached = memoGet<NsCandidate[]>(memoKey);
+  if (cached) return cached;
+
   const data = await requestJson(host, "https://music.163.com/api/search/get", {
     method: "POST",
     headers: { Referer: "https://music.163.com/", "Content-Type": "application/x-www-form-urlencoded" },
     body: "s=" + encodeURIComponent(kw) + "&type=1&limit=10&offset=0",
   });
+  if (data === null) return []; // 请求失败：不缓存
   const list = data?.result?.songs;
-  if (!Array.isArray(list)) return [];
   const out: NsCandidate[] = [];
-  for (const s of list) {
-    const id = String(s?.id ?? "");
-    const name = String(s?.name ?? "");
-    if (!id || !name) continue;
-    out.push({
-      id,
-      name,
-      singerName: Array.isArray(s?.artists)
-        ? s.artists
-            .map((x: any) => (typeof x?.name === "string" ? x.name.trim() : ""))
-            .filter(Boolean)
-            .join("/")
-        : "",
-      // 单位纪律：网易云给**毫秒**，这里换算成秒，与核心契约（秒）对齐。
-      interval: Math.round((Number(s?.duration) || 0) / 1000),
-      albumName: String(s?.album?.name ?? ""),
-      publishTimeMs: Number(s?.album?.publishTime) || 0,
-    });
+  if (Array.isArray(list)) {
+    for (const s of list) {
+      const id = String(s?.id ?? "");
+      const name = String(s?.name ?? "");
+      if (!id || !name) continue;
+      out.push({
+        id,
+        name,
+        singerName: Array.isArray(s?.artists)
+          ? s.artists
+              .map((x: any) => (typeof x?.name === "string" ? x.name.trim() : ""))
+              .filter(Boolean)
+              .join("/")
+          : "",
+        // 单位纪律：网易云给**毫秒**，这里换算成秒，与核心契约（秒）对齐。
+        interval: Math.round((Number(s?.duration) || 0) / 1000),
+        albumName: String(s?.album?.name ?? ""),
+        publishTimeMs: Number(s?.album?.publishTime) || 0,
+      });
+    }
   }
+  memoSet(memoKey, out);
   return out;
 }
 
 /** 封面直链：搜索响应只有 picId，故二次调详情接口取 album.picUrl。 */
 async function nsCoverUrl(host: PluginHost, id: string): Promise<string | null> {
+  // 去重：同一位歌手若同时需封面与元数据，兜底链路会重复取同一条详情。
+  const memoKey = `ns:c:${id}`;
+  const cached = memoGet<string>(memoKey);
+  if (cached) return cached;
+
   const data = await requestJson(
     host,
     "https://music.163.com/api/song/detail/?ids=[" + encodeURIComponent(id) + "]",
     { headers: { Referer: "https://music.163.com/" } },
   );
   const pic = data?.songs?.[0]?.album?.picUrl;
-  return typeof pic === "string" && pic ? pic : null;
+  if (!(typeof pic === "string" && pic)) return null; // 未命中 / 失败：不写缓存
+  memoSet(memoKey, pic);
+  return pic;
 }
 
 /** 歌词：取 lrc.lyric（与 QQ 的 `{lyric}` 不同）。 */
@@ -324,10 +424,16 @@ function buildNsMetadata(c: NsCandidate): SongMetadata | null {
 
 // ---------- 归一化与匹配 ----------
 
-/** 标题/歌手归一化:去大小写、去括号装饰段((Live)/【】/《》)与 feat.、去标点空白。 */
+/**
+ * 标题/歌手归一化:去大小写、**简繁字形归一到简体**、去括号装饰段((Live)/【】/《》)与 feat.、
+ * 去标点空白。简繁归一仅用于匹配比较(见文件头【闸门误杀】第 2 条),不改写任何写入内容。
+ */
 function normalizeText(s: any): string {
   if (s === undefined || s === null) return "";
   let t = String(s).toLowerCase();
+  // 简繁字形归一到简体:平台常用繁体登记、DB 简体(或反之),不归一则「純白P」与「纯白P」
+  // 恒不相等。applyVariant 幂等,且词表只覆盖异形一侧,不会反向漂移。
+  t = applyVariant(t, "simplified");
   // 去掉成对的括号装饰段(中英文括号、方/书名号、全角括号),反复直至稳定
   for (let i = 0; i < 3; i++) {
     t = t.replace(/[(\[【《〈「『（〔｛][^)\]】》〉」』）〕｝]*[)\]】》〉」』）〕｝]/g, " ");
@@ -357,10 +463,26 @@ function isArtistPlaceholder(s: any): boolean {
   return ARTIST_PLACEHOLDERS.has(String(s ?? "").trim().toLowerCase());
 }
 
+/**
+ * 标题变体:完整标题 + 「去掉尾部 ` - xxx`」的主标题。
+ *
+ * scanner 会把「文件无标题标签」的落库标题写成「主标题 - 歌手」(全库 391/3506≈11%),若只按
+ * 完整标题做精确相等,这类歌恒被闸门拒掉(实测「Fire Is Dead - SCARECROW」即为此形态,
+ * 平台登记是「Fire Is Dead」)。变体仍是**精确相等**语义(不做前缀/包含等模糊匹配),只是多给
+ * 一个合法形态;时长/歌手闸门不变,故不会放大错配风险。
+ */
+function titleForms(wantTitle: string): string[] {
+  const forms = [wantTitle];
+  const m = String(wantTitle).match(/^(.*?)\s+-\s+(.+)$/);
+  const head = m?.[1]?.trim();
+  if (head) forms.push(head);
+  return forms;
+}
+
 function titleMatches(candName: any, wantTitle: string): boolean {
   const a = normalizeText(candName);
-  const b = normalizeText(wantTitle);
-  return !!a && a === b;
+  if (!a) return false;
+  return titleForms(wantTitle).some((f) => normalizeText(f) === a);
 }
 
 function artistMatches(candSinger: any, wantArtist: string): boolean {
@@ -482,8 +604,8 @@ Enriches a song's tags, cover art and lyrics from QQ Music, falling back to NetE
 ### How it works
 1. The core walks enabled plugins by capability and calls \`searchMetadata(host, song)\` / \`searchCover(host, song)\` / \`searchLyrics(host, song)\`; first-match-wins;
 2. Every capability method runs a **two-stage** lookup: the QQ Music loop first; only when that yields nothing does the NetEase Cloud Music loop run. QQ Music is the default source, NetEase Cloud Music is strictly a fallback;
-3. Both stages search by \`title + artist\` (title only when there is no artist, or when the artist is a scanner placeholder such as \`Unknown Artist\`), then apply the same three gates: normalized title equality (case/space/punctuation ignored, decorations like \`(Live)\`/\`【】\`/\`feat.\` stripped), normalized artist intersection, and — when \`song.duration\` is provided (in seconds) — the \`|Δ| ≤ 5s\` length check, which runs **against the candidate's own length first**, so a rejected candidate never triggers a detail request;
-4. **QQ Music stage**: \`client_search_cp\` gives candidates carrying their declared length in seconds; track details (track no. / release year / duration / album mid) come from the musicu song-detail endpoint, and the **genre** name is read from the sibling \`info.genre.content[].value\` block (a human-readable name such as "R&B"/"Pop"), while \`track_info.genre\` is only a numeric code and is ignored; the cover is built from the album mid, lyrics come from the QQ lyric endpoint;
+3. Both stages search by \`title + artist\` (title only when there is no artist, or when the artist is a scanner placeholder such as \`Unknown Artist\`), then apply the same three gates: normalized title equality (case/space/punctuation ignored, decorations like \`(Live)\`/\`【】\`/\`feat.\` stripped, Simplified/Traditional variants folded together, and a trailing \` - artist\` suffix also accepted as a title form), normalized artist intersection, and — when \`song.duration\` is provided (in seconds) — the \`|Δ| ≤ 5s\` length check, which runs **against the candidate's own length first**, so a rejected candidate never triggers a detail request;
+4. **QQ Music stage**: \`search_for_qq_cp\` gives candidates carrying their declared length in seconds; track details (track no. / release year / duration / album mid) come from the musicu song-detail endpoint, and the **genre** name is read from the sibling \`info.genre.content[].value\` block (a human-readable name such as "R&B"/"Pop"), while \`track_info.genre\` is only a numeric code and is ignored; the cover is built from the album mid, lyrics come from the QQ lyric endpoint;
 5. **NetEase Cloud Music stage** (fallback only): \`POST /api/search/get\` gives candidates whose \`duration\` is in **milliseconds** (converted to seconds here); the search response's \`album\` carries only a \`picId\` and no \`picUrl\`, so the cover requires a second call to \`/api/song/detail/?ids=[id]\` to read \`album.picUrl\` (a direct URL); lyrics come from \`/api/song/lyric\` → \`lrc.lyric\`. This platform exposes no human-readable genre, so \`genre\` is always left empty. Every missing field is simply left empty — nothing is ever fabricated.
 
 ### Notes
@@ -503,9 +625,10 @@ Enriches a song's tags, cover art and lyrics from QQ Music, falling back to NetE
    跑网易云音乐循环(QQ 是默认获取标签的选择,网易云只是补充链路);
 3. 两个平台共用同一套三闸门:关键词都是 \`title + artist\`(artist 为空、或为 scanner 写入的
    占位值如 \`Unknown Artist\` 时只用 title);候选按「标题归一化相等(忽略大小写/空格/标点,
-   去掉 \`(Live)\`/\`【】\`/\`feat.\` 等装饰)+ 歌手归一化后交集」判定;若 \`song.duration\` 给了
-   (秒),**先用候选自带时长做时长预筛**(\`|Δ| ≤ 5s\`),不通过就不再调详情接口;
-4. **QQ 音乐段**:候选来自 \`client_search_cp\`(自带秒级时长);轨号 / 年份 / 时长 / 专辑 mid
+   去掉 \`(Live)\`/\`【】\`/\`feat.\` 等装饰,简繁字形折叠到简体,且尾部 \` - 歌手\` 后缀也作为一个
+   合法标题形态)+ 歌手归一化后交集」判定;若 \`song.duration\` 给了(秒),**先用候选自带时长
+   做时长预筛**(\`|Δ| ≤ 5s\`),不通过就不再调详情接口;
+4. **QQ 音乐段**:候选来自 \`search_for_qq_cp\`(自带秒级时长);轨号 / 年份 / 时长 / 专辑 mid
    取自 musicu 歌曲详情接口;**风格**取自与 track_info 同级的 \`info.genre.content[].value\`
    (可读名,如 "R&B"/"Pop"),而 track_info.genre 只是数字码、一律忽略;封面由 album mid
    拼 CDN;歌词走 QQ 歌词接口;

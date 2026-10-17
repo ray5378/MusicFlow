@@ -210,12 +210,14 @@ export interface TagRepairProgress {
   phase: "scan" | "repair";
   /** 当前阶段总数（scan=待探范围 / repair=候选数）。 */
   total: number;
-  /** 当前阶段已处理数。 */
+  /** 当前阶段已处理数；repair 阶段恒等于 fixed + skipped + unobtainable（界面三项拆分之和）。 */
   checked: number;
   /** 本轮实际写文件的歌数。 */
   fixed: number;
   /** 本轮跳过（无需修 / 命中完成标记）的歌数；仅用于本轮进度文案，不参与「已修复」计数。 */
   skipped: number;
+  /** 本轮真缺标签但**拿不到**（含探测/写入异常）的歌数；仅用于本轮进度文案。 */
+  unobtainable: number;
   startedAt: number;
 }
 
@@ -266,7 +268,16 @@ export function getTagRepairStats(): TagRepairStats {
 // —— 进度写入（仅在一轮运行期间由 sweep/queue 调用；progress 为 null 时全部为 no-op）——
 
 function progressStart(mode: TagRepairMode): void {
-  progress = { mode, phase: "scan", total: 0, checked: 0, fixed: 0, skipped: 0, startedAt: Date.now() };
+  progress = {
+    mode,
+    phase: "scan",
+    total: 0,
+    checked: 0,
+    fixed: 0,
+    skipped: 0,
+    unobtainable: 0,
+    startedAt: Date.now(),
+  };
 }
 
 /** 切换/重置当前阶段（进入修复阶段或切挡位时重置计数）。 */
@@ -277,14 +288,19 @@ function progressPhase(phase: "scan" | "repair", total: number): void {
   progress.checked = 0;
   progress.fixed = 0;
   progress.skipped = 0;
+  progress.unobtainable = 0;
 }
 
-/** 推进已处理数（fixedInc=本次是否真写文件；skipInc=本次是否跳过）。 */
-function progressTick(fixedInc: number, skipInc = 0): void {
+/** 推进已处理数：按本首结果把 checked 完整拆到 fixed / skipped / unobtainable 三档。
+ *  【2026-10-17 修正 5】此前只传 (fixedInc, skipInc) 两个增量，unobtainable 的量被计进
+ *  checked 却不归属任何一档 —— 界面「已修复 + 跳过」与「已处理」永远对不上（实测
+ *  checked=49 / fixed=7 / skipped=0，42 首无归属）。现按结果直接归位，三档之和恒等 checked。 */
+function progressTick(outcome: "fixed" | "unobtainable" | "skip"): void {
   if (!progress) return;
   progress.checked++;
-  progress.fixed += fixedInc;
-  progress.skipped += skipInc;
+  if (outcome === "fixed") progress.fixed++;
+  else if (outcome === "skip") progress.skipped++;
+  else progress.unobtainable++;
 }
 
 function progressSetChecked(checked: number): void {
@@ -749,7 +765,7 @@ export async function processTagRepairQueue(cfg: FetchConfig, nowMs = Date.now()
       o = { outcome: "unobtainable", cover: false, lyric: false, album: false, meta: false };
     }
     accumulate(result, o);
-    progressTick(o.outcome === "fixed" ? 1 : 0, o.outcome === "skip" ? 1 : 0);
+    progressTick(o.outcome);
     if (o.outcome === "fixed" || o.outcome === "skip") {
       delete q[songId];
     } else {
@@ -880,7 +896,7 @@ export async function sweepTagRepair(
       o = { outcome: "unobtainable", cover: false, lyric: false, album: false, meta: false };
     }
     accumulate(result, o);
-    progressTick(o.outcome === "fixed" ? 1 : 0, o.outcome === "skip" ? 1 : 0);
+    progressTick(o.outcome);
   }
   return result;
 }
