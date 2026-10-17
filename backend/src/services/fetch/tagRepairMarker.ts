@@ -163,7 +163,19 @@ export function getTagRepairMarkedCount(): number {
   }
 }
 
-/** 终态不可得标记行数:供「终态不可得」统计(已被标记跳过、池子不再重扫的歌数;带 30 天 TTL)。 */
+/** 全部已落标记的 fs_path 列表（供「待修复」口径剔除已不再重扫的歌）。
+ * 纯 DB 读取、不 stat：失效判定（size/mtime 变化）由扫描阶段的 isTagRepairMarked 负责，
+ * 此处只反映「有标记 = 不再重扫」的稳定口径（含 outcome='fixed' 与 'unobtainable' 两类）。 */
+export function getTagRepairMarkedPaths(): string[] {
+  try {
+    const rows = sqlite.prepare("SELECT fs_path FROM tag_repair_done").all() as Array<{ fs_path: string }>;
+    return rows.map((r) => String(r.fs_path));
+  } catch {
+    return [];
+  }
+}
+
+/** 终态不可得标记行数：供「终态不可得」统计(已被标记跳过、池子不再重扫的歌数;带 30 天 TTL)。 */
 export function getTagRepairUnobtainableCount(): number {
   try {
     return (

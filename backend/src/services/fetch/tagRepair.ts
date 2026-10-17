@@ -40,6 +40,12 @@
 //   下轮扫描命中该标记即跳过（池子一轮收敛）；安全阀 30 天 TTL —— 超期后允许重探（防断网/
 //   平台抽风把整库永久标记，且可自愈）。unobtainable 行**不计入**「已修复」，也**不参与**来源分布聚合。
 //
+// 【2026-10-17 修正 7·「待修复」口径剔除已落标记】GET stats 的 pending 取 `selectMediaMissingRows()`
+//   （纯 DB 预筛）**不剔除已落标记的歌** → 界面「待修复」随修复/标记推进长期停在原位（生产实测
+//   3447 不动、与「已修复 2765 / 终态不可得 N」并列时数字自相矛盾）。现改为 pending = 预筛集合
+//   减去「已落完成标记的 fs_path」集合（`getTagRepairMarkedPaths()`，纯 DB 不 stat）——与扫描阶段
+//   `isTagRepairMarked` 的跳过口径对齐，待修数随池子收敛同步下降（失效判定仍由扫描阶段负责）。
+//
 // 【2026-10-17 修正 2·专辑封面回写】第一档 DB 预筛按 `songs.cover_art 空 且 albums.cover_art 空`
 //   判定缺封面，而修复只回写 `songs.has_lyrics`、**不刷新 `albums.cover_art`** → 实测 19 首
 //   「文件已内嵌封面但专辑行仍无封面」的歌每轮都被当候选重扫（pending 恒高）。现改为：任何一次
@@ -76,6 +82,7 @@ import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig, TagRepairScope } from "./config.js";
 import {
   getTagRepairMarkedCount,
+  getTagRepairMarkedPaths,
   getTagRepairPlatformCounts,
   getTagRepairUnobtainableCount,
   isTagRepairMarked,
@@ -203,7 +210,7 @@ export function getTagRepairQueueSize(): number {
 
 /** 稳态统计（GET 轮询展示）：
  *  - total：两个下载目录内本地歌总数（songs.path 前缀 `l:` 且落在两根内）；
- *  - pending：当前 DB 预筛「缺歌词/封面/专辑」的待修候选数（同第一档口径）；
+ *  - pending：当前 DB 预筛「缺歌词/封面/专辑」**且未落完成标记**的待修候选数（同第一档口径）；
  *  - repaired：已修复（= `tag_repair_done` 中 outcome≠'unobtainable' 的标记行数，含真写入修复
  *    与「无需修/下载期已达标」两类）；
  *  - unobtainableTotal：终态不可得（= outcome='unobtainable' 的标记行数，已被标记跳过、不再重扫）。 */
@@ -267,9 +274,16 @@ function dbStats(): { total: number; pending: number } {
     const fsPath = fsPathOf(r.path);
     if (fsPath && inDownloadRoots(fsPath, cfg)) total++;
   }
+  // 待修口径（2026-10-17 修正 7）：DB 预筛「缺歌词/封面/专辑」**且未落完成标记**的歌。
+  // 已落标记（outcome='fixed' 已达标 / 'unobtainable' 终态不可得）的歌在扫描阶段被
+  // isTagRepairMarked 跳过、不再重扫；若仍计入 pending，界面「待修复」会随修复/标记推进长期停在
+  // 原位，与「已修复 / 终态不可得」并列时数字对不上（用户实测反馈）。此处纯 DB 判定（不 stat）：
+  // 标记行按 fs_path 取集合，逐个候选查；失效判定（size/mtime 变）仍由扫描阶段的
+  // isTagRepairMarked 负责，故本口径只反映「有标记 = 不再重扫」的稳定值，且随扫描自愈。
+  const markedPaths = new Set(getTagRepairMarkedPaths());
   const pending = selectMediaMissingRows().filter((r) => {
     const fsPath = fsPathOf(r.path);
-    return Boolean(fsPath && inDownloadRoots(fsPath, cfg));
+    return Boolean(fsPath && inDownloadRoots(fsPath, cfg) && !markedPaths.has(fsPath));
   }).length;
   statsCache = { at: now, total, pending };
   return statsCache;

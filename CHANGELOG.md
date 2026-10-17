@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.29] - 2026-10-18
+
+### Fix
+
+- **管理端「待修复」数字随池子收敛（口径剔除已落标记）**：`GET /v1/fetch/tag-repair` 的 `stats.pending` 取 `selectMediaMissingRows()`（纯 DB 预筛），**不剔除已落完成标记的歌** → 池子实际在收敛（扫描阶段 `isTagRepairMarked` 会跳过已标记的歌），但界面「待修复」随修复 / 标记推进长期停在原位（240 生产实测：`待修复` 恒 3447 不动，而 `终态不可得` 随标记写入上升，两张卡并列时数字自相矛盾）。现改为 `pending` = 预筛集合 **减去**「已落完成标记的 `fs_path`」集合（新增 `getTagRepairMarkedPaths()`，纯 DB 读取、**不 stat**；含 `outcome='fixed'` 与 `'unobtainable'` 两类，与扫描阶段的跳过口径对齐）。失效判定（size / mtime 变化）仍由扫描阶段 `isTagRepairMarked` 负责，故本次**只改展示口径、不动修复行为与写盘逻辑**。
+
+### 测试
+
+- `tagRepair.test.ts`（34 例）新增 1 例：某歌 DB 缺歌词 / 封面但已登记完成标记 → `stats.pending` 不计入（`total=1` / `pending=0` / `unobtainableTotal=1`）。
+- 门禁：`npx tsc --noEmit`（backend）= 0；`tests/fetch/tagRepair.test.ts` **34 例全绿**；`npx vue-tsc --noEmit`（frontend）= 0；`backend/scripts/check-*.mjs` 全部 14 个守卫通过。
+
 ## [4.6.28] - 2026-10-18
 
 ### Feat

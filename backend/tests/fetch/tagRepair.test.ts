@@ -13,6 +13,7 @@
 //  10. 单飞：repairing 中再触发返回 busy。
 //  11. 修正6（选项 C）：unobtainable → 登记 outcome='unobtainable' 标记（带 30 天 TTL），池子一轮收敛；
 //      终态不可得行不计入「已修复」、不参与来源分布聚合。
+//  12. 修正7：pending 口径剔除已落完成标记的歌（有标记 = 不再重扫 = 不计入「待修复」）。
 //
 // music-metadata / providers / tagWriter / playlistCover 全部 mock（不碰 ffmpeg、
 // 不发网络）；settings 与 songs 行用隔离 DATA_DIR 的真实 DB。
@@ -641,6 +642,23 @@ describe("tagRepair stats/progress", () => {
     expect(busy).toBe(false);
     expect(getTagRepairRepairedTotal()).toBe(1);
     expect(getTagRepairStats().repaired).toBe(1); // 运行结束已清缓存，重算拿到新值
+  });
+
+  it("修正7：pending 口径剔除已落完成标记的歌（不再重扫 → 不再计入待修复）", () => {
+    const p = join(root, "pend-mk.flac");
+    insertSong("s-pmk", p, { hasLyrics: 0, albumId: null });
+    cfg();
+    // 直接登记一行完成标记：stats 口径为纯 DB 判定，不要求文件真实存在、不 stat。
+    sqlite
+      .prepare(
+        "INSERT INTO tag_repair_done (fs_path, size, mtime_ms, src, platform, outcome, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(p, 1, 1, "tag-repair", "qq", "unobtainable", new Date().toISOString());
+    // beforeEach 已清 statsCache → 首次计算即为最新值（无缓存干扰）。
+    const s = getTagRepairStats();
+    expect(s.total).toBe(1);
+    expect(s.pending).toBe(0); // 该歌 DB 缺歌词/封面，但已落标记 → 不计入待修
+    expect(s.unobtainableTotal).toBe(1);
   });
 
   it("progress：运行中非空（phase=repair），结束后归 null", async () => {
