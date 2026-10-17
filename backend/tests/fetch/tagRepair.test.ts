@@ -11,6 +11,8 @@
 //   8. 缺专辑 + DB 行有声明值 → 不发任何网络请求，writeTags 直接收 album；
 //   9. 队列：入队初始延迟（10min）、失败退避（1h/6h/24h）、3 败弃权、成功出队；
 //  10. 单飞：repairing 中再触发返回 busy。
+//  11. 修正6（选项 C）：unobtainable → 登记 outcome='unobtainable' 标记（带 30 天 TTL），池子一轮收敛；
+//      终态不可得行不计入「已修复」、不参与来源分布聚合。
 //
 // music-metadata / providers / tagWriter / playlistCover 全部 mock（不碰 ffmpeg、
 // 不发网络）；settings 与 songs 行用隔离 DATA_DIR 的真实 DB。
@@ -371,7 +373,7 @@ describe("repairSongTags", () => {
     expect(parseFileMock).not.toHaveBeenCalled();
   });
 
-  it("修正1：unobtainable（真缺但拿不到）**不**打标记，保留重试机会", async () => {
+  it("修正6（选项C）：unobtainable（真缺但拿不到）→ 登记 outcome='unobtainable' 标记，池子一轮收敛", async () => {
     const p = join(root, "mark-none.flac");
     insertSong("s-mn", p, { hasLyrics: 0 });
     parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
@@ -379,6 +381,32 @@ describe("repairSongTags", () => {
 
     const r = await repairSongTags("s-mn", cfg());
     expect(r.outcome).toBe("unobtainable");
+    const row = sqlite
+      .prepare("SELECT outcome, src FROM tag_repair_done WHERE fs_path = ?")
+      .get(p) as { outcome: string; src: string };
+    expect(row.outcome).toBe("unobtainable");
+    // 已登记 → 命中标记：下轮扫描直接跳过（不再无限重探/重扫，池子收敛）
+    expect(isTagRepairMarked(p)).toBe(true);
+    expect(getTagRepairStats().unobtainableTotal).toBe(1);
+    // 该行不计入「已修复」
+    expect(getTagRepairRepairedTotal()).toBe(0);
+    parseFileMock.mockClear();
+    const r2 = await repairSongTags("s-mn", cfg());
+    expect(r2.outcome).toBe("skip");
+    expect(parseFileMock).not.toHaveBeenCalled();
+  });
+
+  it("修正6：unobtainable 标记带 30 天 TTL —— 超期后允许重探（自愈窗口；防断网把整库永久标记）", async () => {
+    const p = join(root, "ttl.flac");
+    insertSong("s-ttl", p, { hasLyrics: 0 });
+    parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
+    searchLyricsMock.mockResolvedValueOnce(null);
+    await repairSongTags("s-ttl", cfg());
+    expect(isTagRepairMarked(p)).toBe(true);
+    // 把标记时间回拨 31 天 → 超期，命中检查返回 false，允许重新进入候选
+    sqlite
+      .prepare("UPDATE tag_repair_done SET at = ? WHERE fs_path = ?")
+      .run(new Date(Date.now() - 31 * 24 * 3_600_000).toISOString(), p);
     expect(isTagRepairMarked(p)).toBe(false);
   });
 
@@ -449,6 +477,12 @@ describe("repairSongTags", () => {
     expect(map["qq"]).toBe(1);
     expect(map["netease"]).toBe(1);
     expect(map[""]).toBe(1);
+    // 修正6：终态不可得（outcome='unobtainable'）不参与来源分布聚合，qq 桶仍为 1。
+    const f4 = join(root, "c4.flac");
+    writeFileSync(f4, "x");
+    markTagRepairDone(f4, "tag-provider", "qq", "unobtainable");
+    const map2 = Object.fromEntries(getTagRepairPlatformCounts().map((c) => [c.platform, c.count]));
+    expect(map2["qq"]).toBe(1);
   });
 
   it("TAG_FAILED → 指数退避重试，第 2 次成功即修复（吸收 NAS 存储层瞬时抖动）", async () => {

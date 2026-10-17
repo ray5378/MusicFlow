@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.28] - 2026-10-18
+
+### Feat
+
+- **标签「终态不可得」标记（选项 C·候选池收敛）**：真缺标签但各来源都拿不到的歌（`unobtainable`）此前**一律不写标记** → 每轮扫描都把它当候选重探、重扫（生产实测失败率约 96%、候选池永不收敛）。现改为：返回 `unobtainable` 前在 `tag_repair_done` 登记一行，新增 `outcome` 列（`'fixed'` 已达标 / `'unobtainable'` 终态不可得；`ALTER TABLE ADD COLUMN` **幂等**补列，旧库既有行 **回填 `'fixed'`**，`CREATE TABLE IF NOT EXISTS` 对既有表不补列故显式补；drizzle 镜像 `db/schema.ts` 同步加列）。下轮扫描命中该标记即跳过（池子一轮收敛）。**安全阀**：`unobtainable` 标记带 **30 天 TTL**，超期后 `isTagRepairMarked()` 返回 `false` 允许重探（防断网 / 平台抽风把整库永久标记，且可自愈；超期**不删行**，仅在命中判定上放行）。口径同步收紧：`unobtainable` 行**不计入**「已修复」（`getTagRepairMarkedCount()` 排除之），也**不参与**「标签来源分布」聚合（`getTagRepairPlatformCounts()` 排除之）；`TagRepairStats` 新增 `unobtainableTotal`（= `outcome='unobtainable'` 行数），前端标签修复第 4 张卡片由「未获取到（本轮）」改为「**终态不可得**（累计）」。
+
+### Fix
+
+- **定时兜底扫改为触发「第一档·常规修复」**：调度到点原来跑「第二档·全量」（逐首精探文件头，数万首、成本极高），现改为跑「第一档·常规」（仅 DB 预筛、成本低），第二档全量修复改为**仅手动触发**。`lastRunAt` 到点标记的推进条件由 `mode === "all"` 扩展为 `mode === "all" || mode === "media"`（否则到点每分钟 tick 会重复触发常规扫描）。设置项字段名 `tagRepairIntervalHours` **保持不变**（DB 既有键，向后兼容），仅改管理端文案：「全量兜底扫描间隔(小时)」→「常规修复扫描间隔(小时)」，`settingsHint` 同步改口径。
+- **管理端标签修复子页移除冗余 / 失真展示**：删除「待修队列」区块（`queueTitle/queueDesc/queueBtn` 与「处理待修队列」按钮，与「开始常规修复」功能重复）及状态栏「待修队列 N 首」文案（取值不实、下方统计卡已覆盖）；删除「上次统计」行（`formatTagRepairResultAt` 与 `resultAt/noResult` 键，展示的 `lastResult` 与实际不符）；`runTagRepairMode` 收敛为双挡位（常规 / 全量），死代码 `queueStarted` 一并清理。
+
+### 测试
+
+- `tagRepair.test.ts`（33 例）改写 / 新增：`unobtainable` → 登记 `outcome='unobtainable'` 且下轮命中标记直接跳过（池子收敛）、`unobtainable` 不计入「已修复」与来源分布聚合、30 天 TTL 超期后允许重探。
+- 门禁：`npx tsc --noEmit`（backend）= 0；`tests/fetch/tagRepair.test.ts` **33 例全绿**；`npx vue-tsc --noEmit`（frontend）= 0；`backend/scripts/check-*.mjs` 全部 14 个守卫通过（含 i18n 键对称校验）。
+
 ## [4.6.27] - 2026-10-18
 
 ### Feat

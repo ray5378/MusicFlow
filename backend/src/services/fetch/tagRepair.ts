@@ -33,7 +33,12 @@
 //   真正改写文件后**不写标记** → 生产库 `tag_repair_done` 实测 0 行，用户触发的常规修复修了
 //   50 首却全部无标记、下轮仍被当候选重扫。现改为：一次修复**真正写入**（outcome=fixed）后
 //   登记标记（src=命中的来源 provider id，无 provider 命中时回落 "tag-repair"）。
-//   注意 `unobtainable` 一律**不标记**（真缺但拿不到，须保留重试机会，避免断网把整库永久标记）。
+//
+// 【2026-10-17 修正 6·终态不可得（选项 C）】真缺标签但各来源都拿不到的歌（unobtainable）此前
+//   **一律不标记** → 每轮全量扫都把它当候选重探/重扫，实测 96% 失败、任务池永不收敛。现改为：
+//   返回 unobtainable 前登记 outcome='unobtainable' 标记（同样记 size/mtime，文件一变即失效）。
+//   下轮扫描命中该标记即跳过（池子一轮收敛）；安全阀 30 天 TTL —— 超期后允许重探（防断网/
+//   平台抽风把整库永久标记，且可自愈）。unobtainable 行**不计入**「已修复」，也**不参与**来源分布聚合。
 //
 // 【2026-10-17 修正 2·专辑封面回写】第一档 DB 预筛按 `songs.cover_art 空 且 albums.cover_art 空`
 //   判定缺封面，而修复只回写 `songs.has_lyrics`、**不刷新 `albums.cover_art`** → 实测 19 首
@@ -72,6 +77,7 @@ import type { FetchConfig, TagRepairScope } from "./config.js";
 import {
   getTagRepairMarkedCount,
   getTagRepairPlatformCounts,
+  getTagRepairUnobtainableCount,
   isTagRepairMarked,
   markTagRepairDone,
   _resetTagRepairMarkersForTest,
@@ -198,14 +204,18 @@ export function getTagRepairQueueSize(): number {
 /** 稳态统计（GET 轮询展示）：
  *  - total：两个下载目录内本地歌总数（songs.path 前缀 `l:` 且落在两根内）；
  *  - pending：当前 DB 预筛「缺歌词/封面/专辑」的待修候选数（同第一档口径）；
- *  - repaired：已修复（= `tag_repair_done` 完成标记行数，含真写入修复与「无需修/下载期已达标」两类）。 */
+ *  - repaired：已修复（= `tag_repair_done` 中 outcome≠'unobtainable' 的标记行数，含真写入修复
+ *    与「无需修/下载期已达标」两类）；
+ *  - unobtainableTotal：终态不可得（= outcome='unobtainable' 的标记行数，已被标记跳过、不再重扫）。 */
 export interface TagRepairStats {
   total: number;
   pending: number;
   repaired: number;
+  /** 终态不可得总数（真缺标签但各来源都拿不到、已标记跳过不再重扫的歌数；带 30 天 TTL）。 */
+  unobtainableTotal: number;
   /** 标签来源分布（按完成标记行的 platform 分组聚合，DB 聚合、无实时探测）：
    *  platform="qq"/"netease"，空串 "" = 历史（未记录来源，旧行 platform 为 NULL）。
-   *  只在管理端展示，反映「已修复的歌用的是哪个平台」。 */
+   *  只在管理端展示，反映「已修复的歌用的是哪个平台」；**排除**终态不可得行。 */
   platforms: Array<{ platform: string; count: number }>;
 }
 
@@ -233,12 +243,13 @@ export function getTagRepairProgress(): TagRepairProgress | null {
   return progress;
 }
 
-/** 累计已修复歌数（= 完成标记表行数，实时派生，跨重启保留）。
+/** 累计已修复歌数（= 完成标记表中 outcome≠'unobtainable' 的行数，实时派生，跨重启保留）。
  *  【2026-10-17 修正 4·已修复数据源】此前为 settings 里的 `repairedTotal` 计数器，
  *  只在**一轮跑完**时才 `+= 本轮 fixed+skipped` —— 全量扫描动辄数千首、单轮可跑数小时，
  *  期间前端「已修复」恒定不动；若中途容器重启/任务被杀，本轮已真实修复的数百首的计数
  *  全部丢失，用户看到的就是「已修复一直停在旧值」。现改为直接数 `tag_repair_done` 行数：
- *  每首真正修复/达标的歌落盘即写标记，计数随即上升，且不受进程重启影响。 */
+ *  每首真正修复/达标的歌落盘即写标记，计数随即上升，且不受进程重启影响。
+ *  【修正 6】口径排除 outcome='unobtainable' 的终态不可得行（那些不是「已修复」）。 */
 export function getTagRepairRepairedTotal(): number {
   return getTagRepairMarkedCount();
 }
@@ -267,7 +278,13 @@ function dbStats(): { total: number; pending: number } {
 /** 实时统计（供 API/UI 展示）。 */
 export function getTagRepairStats(): TagRepairStats {
   const { total, pending } = dbStats();
-  return { total, pending, repaired: getTagRepairRepairedTotal(), platforms: getTagRepairPlatformCounts() };
+  return {
+    total,
+    pending,
+    repaired: getTagRepairRepairedTotal(),
+    unobtainableTotal: getTagRepairUnobtainableCount(),
+    platforms: getTagRepairPlatformCounts(),
+  };
 }
 
 // —— 进度写入（仅在一轮运行期间由 sweep/queue 调用；progress 为 null 时全部为 no-op）——
@@ -650,7 +667,13 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   const gotLyric = Boolean(tags.lyric);
   const gotAlbum = Boolean(tags.album);
   const gotMeta = metaWrote;
-  if (!gotCover && !gotLyric && !gotAlbum && !gotMeta) return unobtainable;
+  if (!gotCover && !gotLyric && !gotAlbum && !gotMeta) {
+    // 【修正 6·选项 C】真缺但各来源都拿不到 → 登记「终态不可得」标记（带 30 天 TTL）。
+    // 让候选池收敛：下轮扫描命中该标记即跳过，不再对同一首歌无限重探/重扫。
+    markTagRepairDone(fsPath, srcId ?? "tag-repair", platformId, "unobtainable");
+    log.info(`标签终态不可得（已标记跳过）song=${songId} file=${fsPath}`);
+    return unobtainable;
+  }
 
   // 中文字形（产品定调 2026-10-16）：写盘前把 provider 文本按用户所选字形转换（默认简体）。
   // 放在这里（而非各取值分支）是为了让「哪些字段要转」与下载期共用同一实现
@@ -781,8 +804,8 @@ export async function processTagRepairQueue(cfg: FetchConfig, nowMs = Date.now()
     } else {
       const count = Number(entry?.count ?? 0) + 1;
       if (count >= BACKOFF_MS.length) {
-        // 3 败弃权（1h/6h 两轮退避都错过）：移出队列，等全量兜底扫。
-        log.info(`[TAG-REPAIR] song=${songId} 连续 ${count} 次拿不到，移出队列（等全量兜底扫）`);
+        // 3 败弃权（1h/6h 两轮退避都错过）：移出队列，等定时兜底（常规修复）扫。
+        log.info(`[TAG-REPAIR] song=${songId} 连续 ${count} 次拿不到，移出队列（等定时兜底扫）`);
         delete q[songId];
       } else {
         q[songId] = { count, nextAt: nowMs + BACKOFF_MS[count - 1] };
@@ -955,10 +978,10 @@ export async function runTagRepairOnce(
     } else {
       result = await processTagRepairQueue(cfg);
     }
-    // lastRunAt 只由「第二档全量」推进：它是定时全量兜底扫的到点标记。
-    // 常规/队列挡位手动触发都是非穷尽操作，若也推进该标记，用户每次点「常规修复」
-    // 都会把到期的全量兜底扫往后推一个间隔，等于让兜底扫永远不跑。
-    if (mode === "all") setSetting(LAST_RUN_KEY, String(Date.now()));
+    // lastRunAt 是定时兜底扫的到点标记：定时兜底现在跑「第一档·常规修复」（见
+    // startTagRepairScheduler），故由 all / media 两个挡位推进 —— 手动点这两个按钮同样推进，
+    // 避免刚手动跑完又被定时立刻重跑同一轮。队列挡位是非穷尽操作，不推进。
+    if (mode === "all" || mode === "media") setSetting(LAST_RUN_KEY, String(Date.now()));
     statsCache = null; // 待修候选数变了，下次查询重算
     saveLastResult(mode, result);
     log.info(
@@ -980,7 +1003,7 @@ export function isTagRepairRunning(): boolean {
 let started = false;
 let ticking = false;
 
-/** 挂载调度循环（幂等）：每分钟 tick —— ① 处理到期队列项；② 到期全量兜底扫。 */
+/** 挂载调度循环（幂等）：每分钟 tick —— ① 处理到期队列项；② 到期定时常规修复扫（第一档）。 */
 export function startTagRepairScheduler(): void {
   if (started) return;
   started = true;
@@ -993,11 +1016,12 @@ export function startTagRepairScheduler(): void {
         if (!cfg.tagRepairEnabled) return;
         // ① 事件队列：始终处理（主路径，治 DNS 风暴类瞬时故障）。
         await processTagRepairQueue(cfg);
-        // ② 全量兜底：到点才跑（lastRunAt 持久化，重启不重复触发）。
+        // ② 定时兜底：到点才跑「第一档·常规修复」(media，仅 DB 预筛、成本低)，给下载期因网络
+        //    波动漏打标签的歌补标签（lastRunAt 持久化，重启不重复触发）。第二档全量修复改为仅手动触发。
         const last = Number(getSetting(LAST_RUN_KEY, "0")) || 0;
         const intervalMs = Math.max(1, Math.floor(cfg.tagRepairIntervalHours || 168)) * 3_600_000;
         if (Date.now() - last >= intervalMs) {
-          await runTagRepairOnce("all", cfg);
+          await runTagRepairOnce("media", cfg);
         }
       } catch (e) {
         log.warn("[TAG-REPAIR] tick 失败: " + (e instanceof Error ? e.message : String(e)));

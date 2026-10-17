@@ -309,18 +309,17 @@
         </div>
       </el-tab-pane>
 
-      <!-- ===== 4. 标签修复（独立子页：双挡位 + 待修队列） ===== -->
+      <!-- ===== 4. 标签修复（独立子页：双挡位） ===== -->
       <el-tab-pane :label="t('admin.fetch.tabTagRepair')" name="tagRepair">
         <div class="tag-repair-wrap">
           <div class="tag-repair-status">
             <el-tag :type="tagRepairStatus.running ? 'warning' : 'info'">
               {{ tagRepairStatus.running ? t('admin.fetch.tagRepair.running') : t('admin.fetch.tagRepair.idle') }}
             </el-tag>
-            <span class="hint">{{ t('admin.fetch.tagRepair.queueLine', { n: tagRepairStatus.queueSize }) }}</span>
             <el-button size="small" @click="loadTagRepairStatus"><MfIcon name="RefreshCw" />{{ t('admin.fetch.tagRepair.reload') }}</el-button>
           </div>
 
-          <!-- 实时统计：已修复 / 待修复 / 全部 / 未获取到 -->
+          <!-- 实时统计：已修复 / 待修复 / 全部 / 终态不可得 -->
           <div class="tag-repair-stats">
             <div class="stat-card">
               <div class="stat-value">{{ tagRepairStatRepaired }}</div>
@@ -403,7 +402,6 @@
             <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.mediaDesc') }}</div>
             <div class="tag-repair-actions">
               <el-button type="primary" :loading="tagRepairBusyMedia" :disabled="tagRepairStatus.running" @click="onTagRepairMedia">{{ t('admin.fetch.tagRepair.mediaBtn') }}</el-button>
-              <span class="hint">{{ formatTagRepairResultAt('media') || t('admin.fetch.tagRepair.noResult') }}</span>
             </div>
 
             <el-divider content-position="left">{{ t('admin.fetch.tagRepair.allTitle') }}</el-divider>
@@ -411,14 +409,6 @@
             <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.allDesc') }}</div>
             <div class="tag-repair-actions">
               <el-button type="primary" :loading="tagRepairBusyAll" :disabled="tagRepairStatus.running" @click="onTagRepairAll">{{ t('admin.fetch.tagRepair.allBtn') }}</el-button>
-              <span class="hint">{{ formatTagRepairResultAt('all') || t('admin.fetch.tagRepair.noResult') }}</span>
-            </div>
-
-            <el-divider content-position="left">{{ t('admin.fetch.tagRepair.queueTitle') }}</el-divider>
-            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.queueDesc') }}</div>
-            <div class="tag-repair-actions">
-              <el-button :loading="tagRepairBusyQueue" :disabled="tagRepairStatus.running" @click="onTagRepairQueue">{{ t('admin.fetch.tagRepair.queueBtn') }}</el-button>
-              <span class="hint">{{ formatTagRepairResultAt('queue') || t('admin.fetch.tagRepair.noResult') }}</span>
             </div>
 
             <div class="hint tag-repair-write-hint">{{ t('admin.fetch.tagRepair.writeHint') }}</div>
@@ -539,9 +529,8 @@ const configLoading = ref(false);
 const configSaving = ref(false);
 
 // ==================== 标签缺失修复（2026-10-11；2026-10-16 独立页签 + 双挡位） ====================
-const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, scope: "both", queueSize: 0, running: false, lastResult: null, lastResults: {}, stats: { total: 0, pending: 0, repaired: 0, platforms: [] }, progress: null });
+const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 168, scope: "both", queueSize: 0, running: false, lastResult: null, lastResults: {}, stats: { total: 0, pending: 0, repaired: 0, unobtainableTotal: 0, platforms: [] }, progress: null });
 const tagRepairSaving = ref(false);
-const tagRepairBusyQueue = ref(false);
 const tagRepairBusyMedia = ref(false);
 const tagRepairBusyAll = ref(false);
 let tagRepairPoll: ReturnType<typeof setInterval> | null = null;
@@ -568,14 +557,9 @@ const tagRepairStatPending = computed(() => {
   return tagRepairStatus.value.stats?.pending ?? 0;
 });
 const tagRepairStatTotal = computed(() => tagRepairStatus.value.stats?.total ?? 0);
-// 未获取到（本轮）：运行中取本轮实时值；空闲取上一轮结果（后端 lastResult.unobtainable），两处口径一致。
-// 【2026-10-17 修正 5】此前界面只展示「已修复 / 跳过」，本轮「真缺但拿不到」的量无处可见，
-// 导致「已修复 + 跳过」与「已处理」对不上；补齐该维度后 repair 阶段三项之和恒等于已处理。
-const tagRepairStatUnobtainable = computed(() => {
-  const p = tagRepairStatus.value.progress;
-  if (tagRepairStatus.value.running && p) return p.unobtainable ?? 0;
-  return tagRepairStatus.value.lastResult?.unobtainable ?? 0;
-});
+// 终态不可得（累计）：真缺标签但各来源都拿不到、已被标记跳过不再重扫的歌数（= 后端统计
+// stats.unobtainableTotal，即 outcome='unobtainable' 的完成标记行数；带 30 天 TTL）。
+const tagRepairStatUnobtainable = computed(() => tagRepairStatus.value.stats?.unobtainableTotal ?? 0);
 
 // 标签来源分布（按完成标记行的 platform 聚合，后端 DB 聚合、无实时探测）：
 // 把 platform 码映射为可读名并算占比；"" = 历史（未记录来源，旧行 platform 为 NULL）。
@@ -647,15 +631,6 @@ function formatTagRepairResult(r: NonNullable<TagRepairStatus["lastResult"]>): s
   });
 }
 
-// 分挡位上次结果：无记录返回 ""（模板里 `|| noResult` 兜底），有记录则前缀运行时间。
-function formatTagRepairResultAt(mode: TagRepairMode): string {
-  const r = tagRepairStatus.value.lastResults?.[mode];
-  if (!r) return "";
-  const line = formatTagRepairResult(r);
-  if (!r.at) return line;
-  return `${t("admin.fetch.tagRepair.resultAt", { time: new Date(r.at).toLocaleString() })} · ${line}`;
-}
-
 async function loadTagRepairStatus() {
   try {
     const wasRunning = tagRepairStatus.value.running;
@@ -677,15 +652,14 @@ async function loadTagRepairStatus() {
   }
 }
 
-// 三个入口共用：统一的 loading 管理 + 409「忙」识别（避免三份重复处理）。
+// 两个入口共用：统一的 loading 管理 + 409「忙」识别（避免重复处理）。
 async function runTagRepairMode(mode: TagRepairMode, busy: Ref<boolean>): Promise<void> {
   busy.value = true;
   try {
-    // 本次扫描范围沿用当前选择（未保存也即时生效）；保存设置则持久化给定时兜底扫用。
+    // 本次扫描范围沿用当前选择（未保存也即时生效）；保存设置则持久化给定时常规扫用。
     await runTagRepair(mode, config.tagRepairScope);
     if (mode === "media") ElMessage.success(t("admin.fetch.tagRepair.mediaStarted"));
-    else if (mode === "all") ElMessage.success(t("admin.fetch.tagRepair.allStarted"));
-    else ElMessage.success(t("admin.fetch.tagRepair.queueStarted"));
+    else ElMessage.success(t("admin.fetch.tagRepair.allStarted"));
   } catch (e: any) {
     // 后端「已有修复在跑」时返回 HTTP 409（{busy:true}），axios 会把它抛成异常 → 识别 409 走「正在运行」提示。
     if (e?.response?.status === 409) ElMessage.warning(t("admin.fetch.tagRepair.running"));
@@ -701,9 +675,6 @@ function onTagRepairMedia(): void {
 }
 function onTagRepairAll(): void {
   void runTagRepairMode("all", tagRepairBusyAll);
-}
-function onTagRepairQueue(): void {
-  void runTagRepairMode("queue", tagRepairBusyQueue);
 }
 
 // 「保存设置」与配置页签共用同一份覆盖项存储，后端 PUT /config 为**整体替换**语义，

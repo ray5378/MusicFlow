@@ -111,7 +111,7 @@ export interface FetchConfig {
   libraryAutoTimeOfDay?: string;
   /** 标签缺失修复（歌词/封面/专辑）开关。默认 true */
   tagRepairEnabled?: boolean;
-  /** 标签全量兜底扫描间隔（小时）。默认 168 */
+  /** 标签常规修复扫描间隔（小时）。默认 168 */
   tagRepairIntervalHours?: number;
   /** 标签修复扫描目录范围：download=仅流媒体下载目录 / lossless=仅无损目录 / both=两者。默认 both */
   tagRepairScope?: TagRepairScope;
@@ -372,13 +372,15 @@ export type TagRepairScope = "download" | "lossless" | "both";
 /** 中文文本字形：简体中文（默认）/ 繁體中文。 */
 export type ChineseTextVariant = "simplified" | "traditional";
 
-/** 实时统计：repaired=已修复歌数（= 后端完成标记行数，实时、跨重启保留）；pending=当前待修候选数；total=两根内本地歌总数。 */
+/** 实时统计：repaired=已修复歌数（= 后端完成标记行数，实时、跨重启保留）；pending=当前待修候选数；total=两根内本地歌总数；unobtainableTotal=终态不可得（已标记跳过、不再重扫）。 */
 export interface TagRepairStats {
   total: number;
   pending: number;
   repaired: number;
+  /** 终态不可得总数（真缺标签但各来源都拿不到、已标记跳过不再重扫的歌数；带 30 天 TTL）。 */
+  unobtainableTotal: number;
   /** 标签来源分布（按完成标记行的 platform 分组聚合）：platform="qq"/"netease"，
-   *  空串 "" 表示历史（未记录来源）。后端 DB 聚合，不含实时探测。 */
+   *  空串 "" 表示历史（未记录来源）。后端 DB 聚合，不含实时探测；排除终态不可得行。 */
   platforms: Array<{ platform: string; count: number }>;
 }
 
@@ -422,7 +424,7 @@ const EMPTY_TAG_REPAIR_STATUS: TagRepairStatus = {
   running: false,
   lastResult: null,
   lastResults: {},
-  stats: { total: 0, pending: 0, repaired: 0, platforms: [] },
+  stats: { total: 0, pending: 0, repaired: 0, unobtainableTotal: 0, platforms: [] },
   progress: null,
 };
 

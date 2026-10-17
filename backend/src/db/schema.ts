@@ -242,6 +242,8 @@ export const tagRepairDone = sqliteTable("tag_repair_done", {
   src: text("src").notNull().default(""),
   /** 标签来源平台("qq" / "netease");旧行为 NULL → 管理端归入「历史(未记录来源)」。 */
   platform: text("platform"),
+  /** 修复结果:'fixed'(已达标) / 'unobtainable'(终态不可得,带 30 天 TTL);旧行迁移回填 'fixed'。 */
+  outcome: text("outcome"),
   at: text("at").notNull().default(""),
 });
 

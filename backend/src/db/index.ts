@@ -705,14 +705,17 @@ export function initDatabase() {
       mtime_ms INTEGER NOT NULL DEFAULT 0,
       src TEXT NOT NULL DEFAULT '',
       platform TEXT,
+      outcome TEXT,
       at TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
   `);
 
   // 结构升级(2026-10-18):tag_repair_done 新增 platform 列(标签来源平台,qq/netease)。
+  // 结构升级(2026-10-17 修正6):新增 outcome 列('fixed' 已达标 / 'unobtainable' 终态不可得)。
   // CREATE TABLE IF NOT EXISTS 不会给既有表补列,故显式幂等补列(ALTER TABLE ADD COLUMN)。
-  // 旧库既有行该列为 NULL → 管理端「标签来源分布」归入「历史(未记录来源)」,不回填。
+  // 旧库既有行 platform 为 NULL → 管理端「标签来源分布」归入「历史(未记录来源)」,不回填;
+  // 旧库既有行语义全为「已达标」→ outcome 回填 'fixed',让「已修复」计数口径与旧库一致。
   try {
     const cols = (sqlite.prepare("PRAGMA table_info(tag_repair_done)").all() as { name?: unknown }[]).map((c) =>
       String(c?.name ?? ""),
@@ -721,8 +724,13 @@ export function initDatabase() {
       sqlite.exec("ALTER TABLE tag_repair_done ADD COLUMN platform TEXT");
       log.info("tag_repair_done 新增 platform 列(标签来源平台)");
     }
+    if (!cols.includes("outcome")) {
+      sqlite.exec("ALTER TABLE tag_repair_done ADD COLUMN outcome TEXT");
+      sqlite.exec("UPDATE tag_repair_done SET outcome = 'fixed' WHERE outcome IS NULL");
+      log.info("tag_repair_done 新增 outcome 列(修复结果)并回填旧行为 fixed");
+    }
   } catch (e) {
-    log.warn(`tag_repair_done 补 platform 列失败: ${e instanceof Error ? e.message : e}`);
+    log.warn(`tag_repair_done 补列失败: ${e instanceof Error ? e.message : e}`);
   }
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
